@@ -365,6 +365,7 @@
     <ClCompile Include="SdrToneShapeWtwTests.cpp" />
     <ClCompile Include="BugHunt20261017CaptureTests.cpp" />
     <ClCompile Include="BugHunt2GuiTests.cpp" />
+    <ClCompile Include="BugHunt3ShutdownTests.cpp" />
     <ClCompile Include="BugHunt2CaptureTests.cpp" />
     <ClCompile Include="Integration20261017Tests.cpp" />
     <ClCompile Include="Hunt2MotionTests.cpp" />

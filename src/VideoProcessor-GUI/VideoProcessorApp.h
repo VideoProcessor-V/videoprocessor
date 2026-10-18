@@ -9,6 +9,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 
@@ -20,6 +21,14 @@ public:
 	virtual int ExitInstance();
 	BOOL PreTranslateMessage(MSG* message) override;
 	bool RestoreDisplayTopology(const char* reason);
+	// Bug hunt 3 (SH4): the forced exit and the session end must not block on
+	// the restore mutex while another thread (the UI thread) is stuck inside
+	// SetDisplayConfig: wait at most lockTimeoutMs, then skip the step (the
+	// pending record stays for the next start). skipped reports that case.
+	bool RestoreDisplayTopologyBounded(const char* reason, uint32_t lockTimeoutMs, bool* skipped = nullptr);
+private:
+	bool RestoreDisplayTopologyLocked(const char* reason);
+public:
 	// Bug hunt 2 (2026-10-17, L10): (re-)enters the target-only display
 	// session when fullscreen_monitor_session_mode asks for it and none is
 	// active (startup, and fullscreen on again after a fullscreen-off restore).

@@ -89,22 +89,22 @@ namespace VideoProcessorTest
 				recorder.SetValue("build", "test build");
 				Assert::IsTrue(recorder.Start(folder, [] { return DebugLog::RecentLines(5000, 300); }, 100));
 				Sleep(350);
-				const std::string text = Read(folder + "\\crash-state.txt");
+				const std::string text = Read(recorder.LivePath());
 				Assert::IsTrue(text.find("build: test build") != std::string::npos, L"the state values are written");
 				Assert::IsTrue(text.find("crash state test marker 42") != std::string::npos,
 					L"the recent log lines are written (kept even with file logging off)");
 				Assert::IsTrue(text.find("uptime:") != std::string::npos);
 				recorder.Stop(true);
-				Assert::IsFalse(Exists(folder + "\\crash-state.txt"), L"a clean exit deletes it");
-				Assert::IsFalse(Exists(folder + "\\crash-state.txt.tmp"), L"no temporary file is left");
+				Assert::IsFalse(Exists(recorder.LivePath()), L"a clean exit deletes it");
+				Assert::IsFalse(Exists(recorder.LivePath() + ".tmp"), L"no temporary file is left");
 			}
 			{
 				CrashState::Recorder recorder;
 				recorder.Start(folder, {}, 100);
 				recorder.Stop(false);
-				Assert::IsTrue(Exists(folder + "\\crash-state.txt"), L"an unclean exit leaves it");
+				Assert::IsTrue(Exists(recorder.LivePath()), L"an unclean exit leaves it");
 				// audit 2026-10-16: the final snapshot is written atomically too.
-				Assert::IsFalse(Exists(folder + "\\crash-state.txt.tmp"), L"no temporary file is left");
+				Assert::IsFalse(Exists(recorder.LivePath() + ".tmp"), L"no temporary file is left");
 			}
 			const auto kept = CrashState::PreserveLeftover(folder);
 			Assert::AreEqual(size_t(1), kept.size());
@@ -149,11 +149,11 @@ namespace VideoProcessorTest
 				if (!written) Sleep(10);
 			}
 			Assert::IsTrue(written, L"a free writer lock is written");
-			const std::string text = Read(folder + "\\crash-state.txt");
+			const std::string text = Read(recorder.LivePath());
 			Assert::IsTrue(text.find("crash: test crash") != std::string::npos, L"the crash value is written");
 			Assert::IsTrue(text.find("handler test recent line") != std::string::npos,
 				L"the recent lines of the last periodic write are kept");
-			Assert::IsFalse(Exists(folder + "\\crash-state.txt.tmp"), L"no temporary file is left");
+			Assert::IsFalse(Exists(recorder.LivePath() + ".tmp"), L"no temporary file is left");
 			recorder.Stop(true);
 		}
 
@@ -164,10 +164,10 @@ namespace VideoProcessorTest
 			recorder.Start(folder, {}, 1000);
 			Assert::IsTrue(recorder.WriteMinidump(nullptr), L"MiniDumpWriteDump succeeded");
 			WIN32_FILE_ATTRIBUTE_DATA data{};
-			Assert::IsTrue(GetFileAttributesExA((folder + "\\crash-state.dmp").c_str(), GetFileExInfoStandard, &data) != 0);
+			Assert::IsTrue(GetFileAttributesExA(recorder.LiveDumpPath().c_str(), GetFileExInfoStandard, &data) != 0);
 			Assert::IsTrue(data.nFileSizeLow > 1000 || data.nFileSizeHigh > 0, L"the dump has content");
 			recorder.Stop(true);
-			Assert::IsFalse(Exists(folder + "\\crash-state.dmp"), L"a clean exit removes the dump too");
+			Assert::IsFalse(Exists(recorder.LiveDumpPath()), L"a clean exit removes the dump too");
 		}
 	};
 }

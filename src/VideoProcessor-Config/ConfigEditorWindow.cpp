@@ -1138,7 +1138,11 @@ const FixedShortcutField kCaptureShortcutFields[] = {
     { "DeckLink input 4", "capture_4", ShortcutDefaultChord("capture_4") },
     { "Video conversion off", "video_conversion_off", ShortcutDefaultChord("video_conversion_off") },
     { "V210 to P010 conversion", "video_conversion_p010", ShortcutDefaultChord("video_conversion_p010") },
-    { "Raw capture recording (needs VP_RAW_CAPTURE_PATH)", "raw_capture", ShortcutDefaultChord("raw_capture") }
+    { "Raw capture recording (needs VP_RAW_CAPTURE_PATH)", "raw_capture", ShortcutDefaultChord("raw_capture") },
+    // Bug hunt 3 (SH8): it had no field. VP reads it from this file's
+    // [shortcuts] (the separate renderer file stays the legacy fallback) and
+    // uses it only for a configuration that is not unified.
+    { "Automatic display rule (legacy layout only)", "display_rules_auto", ShortcutDefaultChord("display_rules_auto") }
 };
 
 struct ShortcutIssue
@@ -1219,9 +1223,14 @@ std::vector<ShortcutIssue> shortcutIssues(const ConfigEditorCore::ConfigDocument
     };
     auto useFixedFields = [&](const FixedShortcutField* fields, size_t count)
     {
+        const bool unified = documentUsesUnifiedRendererConfig(document);
         for (size_t index = 0; index < count; ++index)
         {
             const FixedShortcutField& field = fields[index];
+            // display_rules_auto acts only for a configuration that is not
+            // unified, so only then does it take its chord.
+            if (unified && std::strcmp(field.key, "display_rules_auto") == 0)
+                continue;
             const auto entry = configured.find(field.key);
             useFixed(QString::fromLatin1(field.label), QString::fromLatin1(field.key),
                 entry != configured.end() ? entry->second : std::string(field.defaultValue));
@@ -1229,15 +1238,8 @@ std::vector<ShortcutIssue> shortcutIssues(const ConfigEditorCore::ConfigDocument
     };
     useFixedFields(kApplicationShortcutFields, std::size(kApplicationShortcutFields));
     useFixedFields(kCaptureShortcutFields, std::size(kCaptureShortcutFields));
-    // display_rules_auto (F4 by default): VP reads it, from the separate
-    // renderer file, only for a configuration that is not unified - so it
-    // takes F4 only then. It has no field here (second pass, audit 2026-10-16).
-    if (!documentUsesUnifiedRendererConfig(document))
-    {
-        std::string canonical;
-        if (RendererProfileConfig::CanonicalizeKeyChord("F4", canonical) && !used.count(canonical))
-            used.emplace(canonical, std::make_pair(QStringLiteral("Automatic display rules (F4)"), QString()));
-    }
+    // display_rules_auto is a field of kCaptureShortcutFields now (bug hunt
+    // 3, SH8), checked above only for a configuration that is not unified.
     for (const auto& entry : configured)
     {
         unsigned int index = 0;
@@ -1559,20 +1561,16 @@ ConfigEditorWindow::ConfigEditorWindow(QString configPath, quintptr ownerHandle,
 			reveal();
 		});
 	}
-    const QKeySequence configToggle(value(QStringLiteral("shortcuts"),
-        QStringLiteral("config_editor"), QStringLiteral("Ctrl+Shift+S")));
-    if (!configToggle.isEmpty())
+    configToggleShortcut_ = new QShortcut(this);
+    configToggleShortcut_->setContext(Qt::ApplicationShortcut);
+    connect(configToggleShortcut_, &QShortcut::activated, this, [this]
     {
-        auto* toggleShortcut = new QShortcut(configToggle, this);
-        toggleShortcut->setContext(Qt::ApplicationShortcut);
-        connect(toggleShortcut, &QShortcut::activated, this, [this]
-        {
-            // The Config shortcut is a reveal command everywhere, including
-            // when Qt itself owns the keyboard focus. It must not toggle the
-            // editor back into the tray.
-            reveal();
-        });
-    }
+        // The Config shortcut is a reveal command everywhere, including
+        // when Qt itself owns the keyboard focus. It must not toggle the
+        // editor back into the tray.
+        reveal();
+    });
+    refreshConfigToggleShortcut();
 
     const HWINEVENTHOOK foregroundHook = SetWinEventHook(
         EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr,
@@ -2276,6 +2274,7 @@ void ConfigEditorWindow::loadConfiguration()
 	hasPendingMigrations_ = false;
 	savedSnapshot_ = configurationLoaded_ ? captureDocumentSnapshot(*document_) :
 		DocumentSnapshot{};
+	refreshConfigToggleShortcut();   // bug hunt 3 (SH9)
 	// Hunt 3 (CFG7): the same fold a remote Discard runs.
 	const bool migratedLegacyInputPolicy = configurationLoaded_ && foldLegacyInputPolicy();
 	dirty_ = configurationLoaded_ && (!document_->existedAtLoad ||
@@ -4790,7 +4789,9 @@ bool ConfigEditorWindow::saveChanges(std::function<void()> afterRemoteApply)
                         ConfigFile::NormalizeName(setting.first) !=
                             "foreground_only" &&
                         ConfigFile::NormalizeName(setting.first) !=
-                            "global_hotkeys") ||
+                            "global_hotkeys" &&
+                        ConfigFile::NormalizeName(setting.first) !=
+                            "global_actions") ||
                     ConfigFile::NormalizeName(setting.first) == "shortcut" ||
                     // audit 2026-10-16: cycle shortcuts too.
                     ConfigFile::NormalizeName(setting.first) == "cycle_shortcut";
@@ -4990,6 +4991,7 @@ bool ConfigEditorWindow::saveChanges(std::function<void()> afterRemoteApply)
 			updateEffectSummary();
 			showDraftedActions(drafted);
 			showCanonicalShortcutSpelling(this);
+			refreshConfigToggleShortcut();
 			QString message;
 			if (outcome->confirmedAfterTimeout)
 				message = QStringLiteral("Saved on target: VP answered slowly, and its configuration now matches your edits.");
@@ -5031,6 +5033,7 @@ bool ConfigEditorWindow::saveChanges(std::function<void()> afterRemoteApply)
     savedSnapshot_ = captureDocumentSnapshot(*document_);
     updateEffectSummary();
     showCanonicalShortcutSpelling(this);
+    refreshConfigToggleShortcut();
 
     // Say where a replaced file was kept (hunt 2, L2/L8).
     QString kept;
@@ -15641,6 +15644,18 @@ QWidget* ConfigEditorWindow::createShortcutsPage()
     fixedShortcuts->addCard(applicationCard);
     fixedShortcuts->addCard(captureCard);
     layout->addWidget(fixedShortcuts);
+    // Bug hunt 3 (SH8): a unified configuration may not hold the legacy
+    // display_rules_auto key (RendererProfileConfig rejects it), and VP does
+    // not use it there; the field is shown but locked.
+    if (document_ && documentUsesUnifiedRendererConfig(*document_))
+        if (auto* displayRulesAuto = captureCard->findChild<QLineEdit*>(
+            controlName(QStringLiteral("shortcuts"), QStringLiteral("display_rules_auto"))))
+        {
+            displayRulesAuto->setEnabled(false);
+            displayRulesAuto->setToolTip(QStringLiteral(
+                "Used only by the legacy layout (renderer settings in VideoProcessorRenderer.cfg). "
+                "This configuration uses unified profiles, which select display settings themselves."));
+        }
 
     const QStringList& renderers = allRenderers_;
     if (!renderers.isEmpty())
@@ -15669,6 +15684,28 @@ QWidget* ConfigEditorWindow::createShortcutsPage()
     return createPage(QStringLiteral("Shortcuts"),
         QStringLiteral("Configure keyboard shortcuts. Defaults are shown; clear a field and save to disable it. A running VP applies saved shortcuts immediately."),
         content);
+}
+
+void ConfigEditorWindow::refreshConfigToggleShortcut()
+{
+    if (!configToggleShortcut_) return;
+    // An absent key keeps VP's compiled default, an empty value disables it,
+    // and the chord is read with the grammar VP uses (CanonicalizeKeyChord).
+    std::string chord = ShortcutDefaultChord("config_editor");
+    if (configurationLoaded_ && document_)
+        for (const auto& setting : document_->SectionSettings("shortcuts"))
+            if (ConfigFile::NormalizeName(setting.first) == "config_editor")
+                chord = setting.second;
+    std::string canonical;
+    const std::string trimmed = ConfigFile::Trim(chord);
+    if (trimmed.empty() || !RendererProfileConfig::CanonicalizeKeyChord(trimmed, canonical))
+    {
+        configToggleShortcut_->setKey(QKeySequence());
+        configToggleShortcut_->setEnabled(false);
+        return;
+    }
+    configToggleShortcut_->setKey(QKeySequence(QString::fromStdString(canonical)));
+    configToggleShortcut_->setEnabled(true);
 }
 
 bool ConfigEditorWindow::savedForegroundOnlyEnabled() const
@@ -15734,13 +15771,44 @@ QWidget* ConfigEditorWindow::createShortcutsSetupPage()
     help->setObjectName(QStringLiteral("fieldHelp"));
     handlingLayout->addWidget(help);
     auto* globalHotkeys = bindCheckField(
-        QStringLiteral("Single keys work while another application has focus"),
+        QStringLiteral("Every shortcut works while another application has focus"),
         QStringLiteral("shortcuts"), QStringLiteral("global_hotkeys"), false);
     globalHotkeys->setToolTip(QStringLiteral(
-        "Off (recommended): keys without Ctrl or Alt, and Shift+letter, act only while VideoProcessor "
-        "has focus, so typing in another application never changes VideoProcessor. Ctrl, Alt and "
-        "function-key shortcuts stay global for a remote keyboard. On: every shortcut is global."));
+        "Off (recommended): shortcuts act only while VideoProcessor (its window or its fullscreen "
+        "picture) has focus, except the actions listed below; keys pressed in another application "
+        "(MPC-HC, a browser) are left to that application. On: every shortcut also acts, and the "
+        "Config and video-only keys are taken, while another application has focus."));
     handlingLayout->addWidget(globalHotkeys);
+    // Bug hunt 3 (SH6): the actions that stay global with global_hotkeys off.
+    {
+        auto* globalActionsRow = new QWidget;
+        auto* globalActionsLayout = new QHBoxLayout(globalActionsRow);
+        globalActionsLayout->setContentsMargins(0, 0, 0, 0);
+        auto* globalActionsLabel = new QLabel(QStringLiteral("Global actions"));
+        auto* globalActions = new QLineEdit(value(QStringLiteral("shortcuts"),
+            QStringLiteral("global_actions"), QString()));
+        globalActions->setObjectName(controlName(QStringLiteral("shortcuts"), QStringLiteral("global_actions")));
+        globalActions->setAccessibleName(QStringLiteral("Global actions"));
+        globalActions->setPlaceholderText(QStringLiteral("none (for example: config_editor, toggle_noui)"));
+        globalActions->setToolTip(QStringLiteral(
+            "Comma-separated [shortcuts] actions that act while another application has focus, such as "
+            "config_editor or toggle_noui. Empty (the default): none. For MPC-HC file playback leave "
+            "out actions whose keys MPC uses itself (Alt+Enter, Ctrl+1..4, Ctrl+I)."));
+        connect(globalActions, &QLineEdit::textChanged, this, [this](const QString& text)
+        {
+            if (!document_) return;
+            const std::string valueText = text.trimmed().toLocal8Bit().constData();
+            if (!document_->SetKnown("shortcuts", "global_actions", valueText))
+            {
+                document_->AddSection("shortcuts");
+                document_->SetKnown("shortcuts", "global_actions", valueText);
+            }
+            markDirty();
+        });
+        globalActionsLayout->addWidget(globalActionsLabel);
+        globalActionsLayout->addWidget(globalActions, 1);
+        handlingLayout->addWidget(globalActionsRow);
+    }
     auto* abHelp = new QLabel(QStringLiteral(
         "Settings are the primary control; shortcuts are a backup for A/B comparison. A key's change "
         "lasts until restart, a profile change, or applying that setting here, and the statistics "

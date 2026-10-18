@@ -180,19 +180,99 @@ namespace CrashState
 		return numbers;
 	}
 
+	std::string InstanceFileName(unsigned long instanceId, const char* extension)
+	{
+		return "crash-state-" + std::to_string(instanceId) + extension;
+	}
+
+	namespace
+	{
+		// SH12: an instance runs while its lock file is held open (exclusively).
+		bool InstanceRunning(const std::string& directory, unsigned long instanceId)
+		{
+			const std::string lock = Join(directory, InstanceFileName(instanceId, ".lock"));
+			if (!Exists(lock))
+				return false;
+			const HANDLE probe = CreateFileA(lock.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+				FILE_ATTRIBUTE_NORMAL, nullptr);
+			if (probe == INVALID_HANDLE_VALUE)
+				return GetLastError() == ERROR_SHARING_VIOLATION;
+			CloseHandle(probe);
+			DeleteFileA(lock.c_str());   // a stale lock (cannot normally remain)
+			return false;
+		}
+
+		unsigned long long WriteTime(const std::string& path)
+		{
+			WIN32_FILE_ATTRIBUTE_DATA data{};
+			if (!GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &data))
+				return 0;
+			return (static_cast<unsigned long long>(data.ftLastWriteTime.dwHighDateTime) << 32) |
+				data.ftLastWriteTime.dwLowDateTime;
+		}
+
+		struct Leftover
+		{
+			std::string text;   // full paths ("" when absent)
+			std::string dump;
+			unsigned long long time = 0;
+		};
+	}
+
 	std::vector<std::string> PreserveLeftover(const std::string& directory, int keep)
 	{
 		std::vector<std::string> created;
-		const std::string live = Join(directory, kLiveName);
-		const std::string liveDump = Join(directory, kLiveDumpName);
-		const bool haveText = Exists(live), haveDump = Exists(liveDump);
-		if (haveText || haveDump)
+		std::vector<Leftover> leftovers;
+		const auto addLeftover = [&leftovers](const std::string& text, const std::string& dump)
+		{
+			Leftover leftover;
+			if (Exists(text)) leftover.text = text;
+			if (Exists(dump)) leftover.dump = dump;
+			if (leftover.text.empty() && leftover.dump.empty())
+				return;
+			leftover.time = (std::max)(WriteTime(text), WriteTime(dump));
+			leftovers.push_back(leftover);
+		};
+		// Earlier versions' single live name.
+		addLeftover(Join(directory, kLiveName), Join(directory, kLiveDumpName));
+		// Per-instance live files whose instance is gone (SH12).
+		{
+			std::vector<unsigned long> instances;
+			WIN32_FIND_DATAA found{};
+			const HANDLE search = FindFirstFileA(Join(directory, "crash-state-*").c_str(), &found);
+			if (search != INVALID_HANDLE_VALUE)
+			{
+				static const std::regex pattern(R"(^crash-state-(\d+)\.(txt|dmp|txt\.tmp)$)", std::regex::icase);
+				do
+				{
+					std::cmatch match;
+					if (std::regex_match(found.cFileName, match, pattern))
+					{
+						const unsigned long id = std::stoul(match[1].str());
+						if (std::find(instances.begin(), instances.end(), id) == instances.end())
+							instances.push_back(id);
+					}
+				} while (FindNextFileA(search, &found));
+				FindClose(search);
+			}
+			for (const unsigned long id : instances)
+			{
+				if (InstanceRunning(directory, id))
+					continue;
+				DeleteFileA(Join(directory, InstanceFileName(id, ".txt.tmp")).c_str());
+				addLeftover(Join(directory, InstanceFileName(id, ".txt")), Join(directory, InstanceFileName(id, ".dmp")));
+			}
+		}
+		std::sort(leftovers.begin(), leftovers.end(),
+			[](const Leftover& a, const Leftover& b) { return a.time < b.time; });
+		for (const Leftover& leftover : leftovers)
 		{
 			const std::vector<int> kept = KeptNumbers(directory);
 			const int next = kept.empty() ? 1 : kept.back() + 1;
-			if (haveText && MoveFileExA(live.c_str(), Join(directory, KeptName(next, ".txt")).c_str(), MOVEFILE_REPLACE_EXISTING))
+			const bool haveText = !leftover.text.empty(), haveDump = !leftover.dump.empty();
+			if (haveText && MoveFileExA(leftover.text.c_str(), Join(directory, KeptName(next, ".txt")).c_str(), MOVEFILE_REPLACE_EXISTING))
 				created.push_back(KeptName(next, ".txt"));
-			if (haveDump && MoveFileExA(liveDump.c_str(), Join(directory, KeptName(next, ".dmp")).c_str(), MOVEFILE_REPLACE_EXISTING))
+			if (haveDump && MoveFileExA(leftover.dump.c_str(), Join(directory, KeptName(next, ".dmp")).c_str(), MOVEFILE_REPLACE_EXISTING))
 				created.push_back(KeptName(next, ".dmp"));
 			// A dump without its text (the text write failed): give it an empty
 			// companion so the pair keeps one number.
@@ -216,15 +296,24 @@ namespace CrashState
 		Stop(false);
 	}
 
-	bool Recorder::Start(const std::string& directoryIn, LinesSource recentIn, int periodMsIn)
+	bool Recorder::Start(const std::string& directoryIn, LinesSource recentIn, int periodMsIn,
+		unsigned long instanceIdIn)
 	{
 		if (running.load()) return true;
 		directory = directoryIn;
+		instanceId = instanceIdIn ? instanceIdIn : GetCurrentProcessId();
 		recent = std::move(recentIn);
 		periodMs = (std::max)(100, periodMsIn);
 		startedTick = GetTickCount64();
 		startedAt = Now();
 		CreateDirectoryA(directory.c_str(), nullptr);
+		// SH12: held for the life of the instance (the OS deletes it when the
+		// handle closes, also when the process is killed), so another start
+		// never takes this instance's live file for a crash leftover.
+		const HANDLE lock = CreateFileA(Join(directory, InstanceFileName(instanceId, ".lock")).c_str(),
+			GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+			FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+		instanceLock = lock == INVALID_HANDLE_VALUE ? nullptr : lock;
 		stopping = false;
 		running = true;
 		WriteNow();
@@ -240,7 +329,12 @@ namespace CrashState
 
 	std::string Recorder::LivePath() const
 	{
-		return Join(directory, kLiveName);
+		return Join(directory, InstanceFileName(instanceId, ".txt"));
+	}
+
+	std::string Recorder::LiveDumpPath() const
+	{
+		return Join(directory, InstanceFileName(instanceId, ".dmp"));
 	}
 
 	std::string Recorder::Text() const
@@ -385,13 +479,19 @@ namespace CrashState
 		if (clean)
 		{
 			DeleteFileA(LivePath().c_str());
-			DeleteFileA(Join(directory, kLiveDumpName).c_str());
+			DeleteFileA(LiveDumpPath().c_str());
 		}
 		else
 		{
 			// Leave a final snapshot for the next start. audit 2026-10-16:
 			// written atomically (temporary + replace), like WriteNow.
 			WriteAtomically(Text());
+		}
+		// SH12: the instance is over; its leftover (if any) may now be kept.
+		if (instanceLock)
+		{
+			CloseHandle(static_cast<HANDLE>(instanceLock));
+			instanceLock = nullptr;
 		}
 		stopping = false;
 	}
@@ -421,7 +521,7 @@ namespace CrashState
 		bool ok = false;
 		if (write)
 		{
-			const HANDLE file = CreateFileA(Join(directory, kLiveDumpName).c_str(), GENERIC_WRITE, 0, nullptr,
+			const HANDLE file = CreateFileA(LiveDumpPath().c_str(), GENERIC_WRITE, 0, nullptr,
 				CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
 			if (file != INVALID_HANDLE_VALUE)
 			{

@@ -38,6 +38,7 @@
 #include <RendererResetCoordinator.h>
 #include <RendererResetPolicy.h>
 #include <GuiLifecyclePolicy.h>
+#include <SessionEndShutdown.h>
 #include <RendererRetirementService.h>
 #include <RendererTransitionModel.h>
 #include <EotfTransitionStabilizer.h>
@@ -188,11 +189,22 @@ public:
 	// Bug hunt 2 (2026-10-17, H1/M1/L5): after DoModal returns, bounded wait
 	// for the renderer retirement worker and the reset coordinator. False =
 	// one of them is still blocked; the caller then forces the exit.
+	// Bug hunt 3 (SH3, 2026-10-18): now also the liveness watchdog, the
+	// unified action workers and a running RS-232 test (cancelled, light put
+	// back) - every join the destructor used to do without a bound.
 	bool WaitForShutdownWorkers(DWORD timeoutMs);
 	// Forced exit (thread-safe, first caller wins): bounded LED restore on
 	// every reachable renderer, target-only topology restore, crash state
 	// kept, log flushed, then the process is terminated. Never returns.
 	[[noreturn]] void ForceExitProcess(const char* reason, const char* blocking);
+	// Bug hunt 3 (SH1/SH5): bounded LED drive stop on every reachable
+	// renderer (full light, LDMM 0, CNTR 50), shared by the forced exit and
+	// the Windows session end. Returns the renderers it reached, which the
+	// caller leaks (their backends may be blocked).
+	std::vector<std::shared_ptr<IVideoRenderer>> RestoreLedForExit(const char* site, bool uiThread);
+	// SH5: cancels a running RS-232 test and waits (bounded) for it to put
+	// the light back. True when no test runs or it finished in time.
+	bool CancelProjectorTestForExit(DWORD timeoutMs, const char* site);
 	void WindowedFullScreenMode(bool enabled = true);
 	void FullscreenMonitorName(const CString& name);
 	CString FullscreenMonitorName() const { return m_fullscreenMonitorName; }
@@ -563,9 +575,12 @@ protected:
 	HACCEL m_accelerator = nullptr;
 	std::vector<ACCEL> m_configuredAccelerators;
 	bool m_shortcutsForegroundOnly = false;
-	// Delta 6: [shortcuts] global_hotkeys (default off: only Ctrl/Alt/F-key
-	// shortcuts act while another application has focus).
+	// Delta 6: [shortcuts] global_hotkeys. Bug hunt 3 (SH6): on marks every
+	// binding global; off (the default) - only the actions listed in
+	// [shortcuts] global_actions (none by default) act while another
+	// application has focus.
 	bool m_shortcutsGlobalHotkeys = false;
+	std::set<std::string> m_shortcutsGlobalActions;
 	// Delta 6: saved startup state for the stats overlay and the two queue
 	// checks ([general] stats_overlay, use_frame_queue, queue_auto_reset).
 	bool m_statsOverlayConfigured = false;
@@ -608,6 +623,7 @@ protected:
 	{
 		bool shortcutsForegroundOnly = false;
 		bool shortcutsGlobalHotkeys = false;
+		std::set<std::string> shortcutsGlobalActions;
 		bool statsOverlay = false;
 		bool useFrameQueue = true;
 		bool queueAutoReset = true;
@@ -1382,6 +1398,16 @@ protected:
 	afx_msg void OnMove(int x, int y);
 	afx_msg void OnSetFocus(CWnd* pOldWnd);
 	afx_msg void OnClose();
+	// Bug hunt 3 (SH2): IDCANCEL goes through OnClose, never EndDialog.
+	void OnCancel() override;
+	// Bug hunt 3 (SH1): Windows shutdown / logoff (SessionEndShutdown.h).
+	afx_msg BOOL OnQueryEndSession();
+	afx_msg void OnEndSession(BOOL ending);
+	bool m_sessionEndRan = false;
+	// SH7: fullscreen is on and a VP window (the fullscreen output, a
+	// renderer window in it, or VP's own window) is the foreground window. A
+	// bare-key fullscreen_exit (Esc) acts only then.
+	bool FullscreenOutputHasFocus() const;
 	afx_msg void OnSysCommand(UINT command, LPARAM lParam);
 	afx_msg void OnTimer(UINT_PTR nIDEvent);
 	afx_msg LRESULT OnConfigurationEditorHotkey(WPARAM wParam, LPARAM lParam);
@@ -1404,6 +1430,11 @@ protected:
 	{
 		std::mutex mutex;
 		ConfigurationRpcProtocol::Frame response;
+		// Bug hunt 3 (SH5): the close paths cancel the test (the hold ends,
+		// the light goes back up) and wait for `done`.
+		std::shared_ptr<std::atomic<bool>> cancel = std::make_shared<std::atomic<bool>>(false);
+		std::condition_variable doneChanged;
+		bool done = false;
 	};
 	std::shared_ptr<ProjectorTestShared> m_projectorTestShared;
 	bool m_projectorTestSuspendedRenderer = false;

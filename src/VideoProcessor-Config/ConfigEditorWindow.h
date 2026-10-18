@@ -148,6 +148,11 @@ private:
     void publishNativeAssociation();
     void positionForReveal();
     bool savedForegroundOnlyEnabled() const;
+    // Bug hunt 3 (SH9): Config's own config_editor shortcut follows the
+    // saved [shortcuts] config_editor (it was read once at start-up and
+    // parsed by QKeySequence instead of the shared chord grammar).
+    void refreshConfigToggleShortcut();
+    class QShortcut* configToggleShortcut_ = nullptr;
     void returnFocusToPresentationTarget(const char* reason);
     void applyScopedTopmost();
     void repairOrderAboveVideoProcessor(bool requireOwnerForeground);

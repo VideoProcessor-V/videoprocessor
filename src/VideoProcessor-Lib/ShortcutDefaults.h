@@ -14,6 +14,26 @@
 // Chords use Config's text form (CanonicalizeKeyChord): one key (A-Z, 0-9,
 // F1-F24, Esc, Enter) with optional Ctrl, Alt, Shift. An empty chord means
 // "no compiled default".
+//
+// Bug hunt 3 (SH7, owner rule "modifier combinations only", 2026-10-18):
+// every compiled default is a Ctrl and/or Alt combination. The bare and
+// Shift-only defaults (R, Shift+R, V, Shift+V, F4) moved to modifier
+// combinations; a user's explicit [shortcuts] binding is kept as written.
+// The one exception is fullscreen_exit = Esc, marked fullscreenFocusOnly: it
+// acts only while fullscreen is on and VP itself has the keyboard (its
+// fullscreen output, a renderer window in it, or VP's own window - Windows
+// can raise the topmost output without moving the foreground to it). That is
+// the existing behaviour: keys reach VP only while a VP window is in front.
+// In VP's window without fullscreen VP consumes Esc and does nothing, so the
+// dialog manager cannot turn it into a close; the background observer never
+// sees it unless the user marks it global.
+//
+// Bug hunt 3 (SH6): no default is global. While another application (MPC-HC,
+// a browser) has focus VP acts on - and swallows - no key, unless the user
+// lists the action in [shortcuts] global_actions (or turns global_hotkeys on,
+// which marks every binding global). For MPC file playback, keep VP's keys off
+// MPC's own (Alt+Enter, Ctrl+1..4 and Ctrl+I are MPC keys too) or leave
+// them non-global.
 #include <array>
 #include <cstddef>
 #include <cstring>
@@ -23,11 +43,12 @@ struct ShortcutDefault
 	const char* key;            // [shortcuts] key
 	const char* chord;          // compiled default ("" = none)
 	bool rendererSpecific;      // read from the separate renderer file (legacy layout)
+	bool fullscreenFocusOnly = false; // SH7: a bare default allowed only while fullscreen and VP has focus
 };
 
 constexpr ShortcutDefault kShortcutDefaults[] = {
 	{ "auto_set",                "Ctrl+Shift+A", false },
-	{ "fullscreen_exit",         "Esc",          false },
+	{ "fullscreen_exit",         "Esc",          false, true },   // only while fullscreen and VP has focus
 	{ "fullscreen_toggle",       "Alt+Enter",    false },   // ConfigurationLiveApply::ViewToggleDefault*
 	{ "toggle_stats_overlay",    "Ctrl+I",       false },
 	{ "capture_rendered_output", "Ctrl+Alt+S",   false },
@@ -42,17 +63,19 @@ constexpr ShortcutDefault kShortcutDefaults[] = {
 	{ "room_lights",             "",             false },
 	{ "show_profiles",           "Ctrl+Alt+I",   false },
 	{ "pq_set",                  "Ctrl+Shift+P", false },
-	{ "renderer_restart",        "Shift+R",      false },
-	{ "renderer_reset",          "R",            false },
+	{ "renderer_restart",        "Ctrl+Alt+Shift+R", false },   // was Shift+R (SH7)
+	{ "renderer_reset",          "Ctrl+Shift+R", false },       // was R (SH7)
 	{ "capture_1",               "Ctrl+1",       false },
 	{ "capture_2",               "Ctrl+2",       false },
 	{ "capture_3",               "Ctrl+3",       false },
 	{ "capture_4",               "Ctrl+4",       false },
-	{ "video_conversion_off",    "V",            false },
-	{ "video_conversion_p010",   "Shift+V",      false },
+	{ "video_conversion_off",    "Ctrl+Alt+V",   false },       // was V (SH7)
+	{ "video_conversion_p010",   "Ctrl+Shift+V", false },       // was Shift+V (SH7)
 	{ "config_editor",           "Ctrl+Shift+S", false },
 	{ "toggle_noui",             "Ctrl+Shift+U", false },   // ConfigurationLiveApply::VideoOnlyToggleDefault*
-	{ "display_rules_auto",      "F4",           true },
+	// SH8: Config shows it; VP reads it from the main file's [shortcuts]
+	// first (the separate renderer file is the legacy fallback).
+	{ "display_rules_auto",      "Ctrl+Shift+F4", true },       // was F4 (SH7)
 };
 
 // Chords other branches already use for compiled defaults that are not on
@@ -87,4 +110,12 @@ inline constexpr const char* ShortcutDefaultChord(const char* key)
 {
 	const ShortcutDefault* entry = FindShortcutDefault(key);
 	return entry ? entry->chord : "";
+}
+
+// SH7: a default that needs no Ctrl or Alt. Only fullscreenFocusOnly
+// entries may (ShortcutDefaultsTests).
+inline bool ShortcutChordHasCtrlOrAlt(const char* chord)
+{
+	// Canonical form: modifiers first, each followed by '+'.
+	return std::strstr(chord, "Ctrl+") != nullptr || std::strstr(chord, "Alt+") != nullptr;
 }

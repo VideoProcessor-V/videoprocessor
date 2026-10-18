@@ -17,15 +17,30 @@
 // replace), so a crash in the middle of a write never leaves a torn file. On
 // an unhandled exception the handler writes once more and adds a small
 // Windows minidump ("crash state (N).dmp" after the next start).
+//
+// Bug hunt 3 (SH12, 2026-10-18): the live files are per instance -
+// "crash-state-<pid>.txt" / ".tmp" / ".dmp" - and each running instance holds
+// "crash-state-<pid>.lock" open exclusively (deleted on close, also when the
+// process is killed). Two VPs started together used to share one live file:
+// the second start renamed the first's live state to "crash state (N)" (a
+// crash that never happened, counted against the ten kept) and both then
+// overwrote one file. Now a start keeps only the leftovers whose owner is
+// gone, so the kept files are real unclean exits.
 namespace CrashState
 {
+	// The single live name of earlier versions (still kept as a leftover).
 	constexpr const char* kLiveName = "crash-state.txt";
 	constexpr const char* kLiveDumpName = "crash-state.dmp";
 	constexpr int kDefaultKeep = 10;
 
-	// Keeps a leftover live file (and dump) from a run that did not exit
-	// cleanly as "crash state (N).txt" / ".dmp", N one above the highest kept,
-	// then removes the oldest beyond `keep`. Returns the names it created.
+	// "crash-state-<instance>" + extension (".txt", ".dmp", ".lock").
+	std::string InstanceFileName(unsigned long instanceId, const char* extension);
+
+	// Keeps every leftover live file (and dump) whose instance is no longer
+	// running - plus the single-name leftover of earlier versions - as
+	// "crash state (N).txt" / ".dmp", N one above the highest kept (oldest
+	// leftover first), then removes the oldest beyond `keep`. A running
+	// instance's live files are never touched. Returns the names it created.
 	std::vector<std::string> PreserveLeftover(const std::string& directory, int keep = kDefaultKeep);
 
 	// The numbers of the kept "crash state (N).txt" files, ascending.
@@ -43,7 +58,10 @@ namespace CrashState
 
 		// Starts writing `directory`\crash-state.txt every `periodMs`; `recent`
 		// supplies the recent log lines (it is called on the writer thread).
-		bool Start(const std::string& directory, LinesSource recent, int periodMs = 1000);
+		// instanceId names the live files (0 = this process's ID); tests run
+		// two "instances" in one process with distinct IDs.
+		bool Start(const std::string& directory, LinesSource recent, int periodMs = 1000,
+			unsigned long instanceId = 0);
 		// A named value shown in the state section (replaces an earlier value).
 		void SetValue(const std::string& key, const std::string& value);
 		// Writes the file now (atomically). False when not started or the write failed.
@@ -53,6 +71,8 @@ namespace CrashState
 		void Stop(bool clean);
 		bool Running() const { return running.load(); }
 		std::string LivePath() const;
+		std::string LiveDumpPath() const;
+		unsigned long InstanceId() const { return instanceId; }
 		std::string Text() const;   // what the next write would contain (tests)
 
 		// Unhandled exceptions and std::terminate: a final write and a minidump
@@ -71,6 +91,8 @@ namespace CrashState
 		bool WriteAtomically(const std::string& content);
 
 		std::string directory;
+		unsigned long instanceId = 0;
+		void* instanceLock = nullptr;   // HANDLE of crash-state-<id>.lock
 		LinesSource recent;
 		int periodMs = 1000;
 		unsigned long long startedTick = 0;

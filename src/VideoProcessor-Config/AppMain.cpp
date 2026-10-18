@@ -9,6 +9,7 @@
 #include "Resource.h"
 #include "VpTheme.h"
 #include <ConfigurationRpcProtocol.h>
+#include <ConfigurationLiveApply.h>
 
 #include <QApplication>
 #include <QCryptographicHash>
@@ -274,9 +275,31 @@ bool ownerBelongsToProcess(quintptr owner, DWORD expectedProcessId)
     return actualProcessId == expectedProcessId;
 }
 
+// Bug hunt 3 (SH9): an editor connected to a remote VP is titled
+// "VideoProcessor Configuration <middle dot> <target>"; FindWindowW on the
+// plain title missed it.
+HWND findExistingConfigurationWindow()
+{
+    struct Search { HWND found = nullptr; } search;
+    EnumWindows([](HWND window, LPARAM parameter) -> BOOL
+    {
+        DWORD processId = 0;
+        GetWindowThreadProcessId(window, &processId);
+        if (processId == GetCurrentProcessId() || GetAncestor(window, GA_ROOT) != window)
+            return TRUE;
+        wchar_t title[512] = {};
+        if (GetWindowTextW(window, title, ARRAYSIZE(title)) <= 0 ||
+            !ConfigurationLiveApply::IsConfigurationEditorTitle(title))
+            return TRUE;
+        reinterpret_cast<Search*>(parameter)->found = window;
+        return FALSE;
+    }, reinterpret_cast<LPARAM>(&search));
+    return search.found;
+}
+
 bool activateExistingWindow(quintptr owner, DWORD ownerProcessId)
 {
-    if (HWND existing = FindWindowW(nullptr, L"VideoProcessor Configuration"))
+    if (HWND existing = findExistingConfigurationWindow())
     {
         DWORD processId = 0;
         GetWindowThreadProcessId(existing, &processId);

@@ -515,8 +515,16 @@ namespace RendererProfileConfig
 		else if (normalized == "enter" || normalized == "return") canonicalKey = "Enter";
 		else if (normalized.size() >= 2 && normalized[0] == 'f')
 		{
-			int number = 0;
-			if (!ParseInteger(normalized.substr(1), 1, 24, number)) return false;
+			// Bug hunt 3 (SH10): exactly the player's grammar - F, then one or
+			// two digits, 1-24. ParseInteger also took "F004", "F 4" and "F+4"
+			// forms the player rejected (silently keeping its default).
+			const std::string digits = normalized.substr(1);
+			if (digits.empty() || digits.size() > 2 ||
+				!std::all_of(digits.begin(), digits.end(),
+					[](unsigned char c) { return std::isdigit(c) != 0; }))
+				return false;
+			const int number = std::stoi(digits);
+			if (number < 1 || number > 24) return false;
 			canonicalKey = "F" + std::to_string(number);
 		}
 		else if (key.size() == 1 &&

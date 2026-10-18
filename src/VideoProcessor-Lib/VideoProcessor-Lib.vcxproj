@@ -417,6 +417,8 @@
     <ClInclude Include="HdrInferenceSignalBuilder.h" />
     <ClInclude Include="DolbyVisionTunnelHandoff.h" />
     <ClInclude Include="ShortcutDefaults.h" />
+    <ClInclude Include="ShortcutChord.h" />
+    <ClInclude Include="SessionEndShutdown.h" />
     <ClInclude Include="LldvStaticMetadata.h" />
     <ClInclude Include="RawCaptureRecorder.h" />
     <ClInclude Include="RawCaptureCorpus.h" />
