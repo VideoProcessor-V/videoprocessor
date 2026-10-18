@@ -8,6 +8,9 @@
 #include <vprenderer/DetailPulse.h>
 #include <vprenderer/TextureRestore.h>
 
+#include "DetailPulseModel.h"
+#include "TextureRestoreModel.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -313,6 +316,100 @@ namespace DetailRestoreConfigTestsNs
 			}
 		}
 
+		// The real stages (their CPU reference models, DetailPulseModel / TextureRestoreModel, which
+		// mirror the shaders) at their maximum caps, in the renderer's order, on a coded 1080-in-4K
+		// sequence whose B-frames lost fine detail (so both stages engage): even if the detector
+		// read their output instead of the original, every frame would still read 1080. (The
+		// renderer never shows it their output: ...InputUnchanged and ...InputOrderInTheRenderer.)
+		TEST_METHOD(DetailRestoreSourceResolutionInputRealStagesStillDecide1080)
+		{
+			std::vector<std::vector<float>> tiles;
+			for (unsigned seed = 1; seed <= 4; ++seed) tiles.push_back(UpscaledTile(seed));
+			const SourceResolution::FrameReading base = Read(tiles);
+			Assert::IsTrue(std::fabs(base.ratio - 0.5) < 0.02, L"the synthetic 1080-in-4K frame reads 1080");
+			// The four tiles as one 2x2 picture (codes), and back.
+			const int W = 2 * kTile;
+			auto compose = [&](const std::vector<std::vector<float>>& t) {
+				GrainModel::Image img(W, W);
+				for (int q = 0; q < 4; ++q)
+					for (int y = 0; y < kTile; ++y)
+						for (int x = 0; x < kTile; ++x)
+							img.at((q % 2) * kTile + x, (q / 2) * kTile + y) = 1023.0 * t[q][static_cast<size_t>(y) * kTile + x];
+				return img;
+			};
+			auto split = [&](const std::vector<double>& v) {
+				std::vector<std::vector<float>> t(4, std::vector<float>(static_cast<size_t>(kTile) * kTile));
+				for (int q = 0; q < 4; ++q)
+					for (int y = 0; y < kTile; ++y)
+						for (int x = 0; x < kTile; ++x)
+						{
+							const double c = v[static_cast<size_t>((q / 2) * kTile + y) * W + (q % 2) * kTile + x];
+							t[q][static_cast<size_t>(y) * kTile + x] = static_cast<float>(std::round((std::min)(1023.0, (std::max)(0.0, c))) / 1023.0);
+						}
+				return t;
+			};
+			const GrainModel::Image original = compose(tiles);
+			// A coded stand-in: I-frames as mastered, the other frames with part of the fine band
+			// gone (a mix towards a 0.8 px blur), as a starved encode's B-frames.
+			std::vector<double> blurred;
+			{
+				std::vector<double> y(original.v.begin(), original.v.end());
+				// Gaussian() works on kTile squares: blur each quadrant.
+				blurred.assign(y.size(), 0.0);
+				for (int q = 0; q < 4; ++q)
+				{
+					std::vector<double> quad(static_cast<size_t>(kTile) * kTile);
+					for (int yy = 0; yy < kTile; ++yy)
+						for (int xx = 0; xx < kTile; ++xx)
+							quad[static_cast<size_t>(yy) * kTile + xx] = y[static_cast<size_t>((q / 2) * kTile + yy) * W + (q % 2) * kTile + xx];
+					const std::vector<double> b = Gaussian(quad, 0.8);
+					for (int yy = 0; yy < kTile; ++yy)
+						for (int xx = 0; xx < kTile; ++xx)
+							blurred[static_cast<size_t>((q / 2) * kTile + yy) * W + (q % 2) * kTile + xx] = b[static_cast<size_t>(yy) * kTile + xx];
+				}
+			}
+			DetailPulseModel::Model pulse;
+			DetailPulseModel::Settings ps;
+			ps.cap = DetailPulse::kCapMax;
+			ps.planeLines = 2160.0;
+			ps.sourceHz = 23.976;
+			TextureRestoreModel::Model restore;
+			TextureRestore::Params tp;
+			tp.cap = TextureRestore::kCapMax;
+			tp.planeLines = 2160.0;
+			tp.sourceHz = 23.976;
+			double maxPulse = 1.0, maxChange = 0.0, worstShift = 0.0;
+			for (int f = 0; f < 12; ++f)
+			{
+				const bool iFrame = f % 6 == 0;
+				GrainModel::Image coded(W, W);
+				for (size_t i = 0; i < coded.v.size(); ++i)
+					coded.v[i] = std::round(iFrame ? original.v[i] : 0.4 * original.v[i] + 0.6 * blurred[i]);
+				const DetailPulseModel::Frame stabilised = pulse.Process(coded, static_cast<uint64_t>(f + 1), ps);
+				maxPulse = (std::max)(maxPulse, (std::max)(stabilised.g1, stabilised.g2));
+				TextureRestoreModel::Image in(W, W);
+				in.v.assign(stabilised.out.v.begin(), stabilised.out.v.end());
+				tp.sequence = static_cast<uint64_t>(f + 1);
+				const TextureRestoreModel::Image out = restore.Frame(in, tp);
+				for (size_t i = 0; i < out.v.size(); ++i) maxChange = (std::max)(maxChange, std::fabs(out.v[i] - coded.v[i]));
+				const SourceResolution::FrameReading codedReading = Read(split(coded.v));
+				const SourceResolution::FrameReading staged = Read(split(out.v));
+				char line[200];
+				snprintf(line, sizeof(line), "frame %d (%s): coded ratio %.4f, after both stages %.4f, pulse gains %.3f / %.3f
+",
+					f, iFrame ? "I" : "B", codedReading.ratio, staged.ratio, stabilised.g1, stabilised.g2);
+				Logger::WriteMessage(line);
+				worstShift = (std::max)(worstShift, std::fabs(staged.ratio - codedReading.ratio));
+				Assert::IsTrue(std::fabs(codedReading.ratio - 0.5) < 0.02, L"the coded frame reads 1080");
+				Assert::IsTrue(std::fabs(staged.ratio - 0.5) < 0.02, L"the real stages' output would still read 1080");
+			}
+			char line[160];
+			snprintf(line, sizeof(line), "max pulse gain %.3f, max code change %.2f, worst ratio shift %.4f
+", maxPulse, maxChange, worstShift);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(maxPulse > 1.05, L"the detail pulse engaged (the check exercised the stage)");
+		}
+
 		// The renderer's own order, pinned in the source: the monitor reads renderImage before the
 		// hook, and neither stage is ever given renderImage.
 		TEST_METHOD(DetailRestoreSourceResolutionInputOrderInTheRenderer)
@@ -320,9 +417,11 @@ namespace DetailRestoreConfigTestsNs
 			const std::string text = ReadText(RepositoryRoot() + "\\src\\VideoProcessor-Lib\\vprenderer\\LibplaceboVideoRenderer.cpp");
 			Assert::IsFalse(text.empty(), L"the renderer source");
 			const size_t monitor = text.find("sourceMonitor.Frame(d3d11->gpu, rebaseDispatch, renderImage,");
-			const size_t pulse = text.find("detailPulse.Apply(");
-			const size_t restore = text.find("textureRestore.Apply(");
 			const size_t debander = text.find("debander.Apply(d3d11->gpu, rebaseDispatch, frame,");
+			// In the render hook (after its debander); the de-judder extras (another function)
+			// apply the frame's decision to their pictures as repeats.
+			const size_t pulse = debander == std::string::npos ? std::string::npos : text.find("detailPulse.Apply(", debander);
+			const size_t restore = pulse == std::string::npos ? std::string::npos : text.find("textureRestore.Apply(", pulse);
 			Assert::IsTrue(monitor != std::string::npos && pulse != std::string::npos && restore != std::string::npos && debander != std::string::npos, L"the calls");
 			Assert::IsTrue(monitor < debander && debander < pulse && pulse < restore, L"monitor, then debander, then detail pulse, then texture restore");
 			int calls = 0;
@@ -333,7 +432,9 @@ namespace DetailRestoreConfigTestsNs
 					Assert::IsTrue(statement.find("renderImage") == std::string::npos, (L"never given renderImage: " + Wide(statement)).c_str());
 					++calls;
 				}
-			Assert::AreEqual(3, calls, L"Apply, MeasureAhead and texture restore's Apply are each called once");
+			// Each stage's Apply in the hook (on the drawn picture, and on A before a Stage B picture)
+			// and on a de-judder extra; MeasureAhead once.
+			Assert::AreEqual(7, calls, L"three Apply calls per stage and one MeasureAhead");
 		}
 	};
 }

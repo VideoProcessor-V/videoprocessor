@@ -15250,6 +15250,26 @@ struct LibplaceboVideoRenderer::Impl
 					if (debander.Apply(d3d11->gpu, rebaseDispatch, image, extra, debanded, 1))
 						image = debanded;
 				}
+				// detail_pulse_stabilise / texture_restore: an extra shows its source frame's
+				// decision (a repeat of the sequence the history advanced on with A), so the
+				// detail level does not change from refresh to refresh. Never advances: skipped
+				// when A's own frame was not processed (another sequence).
+				if (detailPulseRuns && detailPulseParams.sequence == f.sourceSequence &&
+					detailPulse.HistorySequence() == f.sourceSequence && f.sourceSequence != 0)
+				{
+					if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
+					pl_frame pulsed{};
+					if (detailPulse.Apply(d3d11->gpu, rebaseDispatch, image, detailPulseParams, pulsed))
+						image = pulsed;
+				}
+				if (textureRestoreRuns && textureRestoreParams.sequence == f.sourceSequence &&
+					textureRestore.HistorySequence() == f.sourceSequence && f.sourceSequence != 0)
+				{
+					if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
+					pl_frame restored{};
+					if (textureRestore.Apply(d3d11->gpu, rebaseDispatch, image, textureRestoreParams, restored))
+						image = restored;
+				}
 			}
 			// Delta 8 R1: the sigma-delta takes the motion since the previous
 			// present (A or the last extra: the shift step) from the de-judder's
@@ -22063,9 +22083,36 @@ struct LibplaceboVideoRenderer::Impl
                 // runs (those flags are false then), never on renderImage: the source-resolution
                 // monitor read the original frame above. A cadence repeat passes the same sequence
                 // (the modules reuse the frame's decision and never advance their history).
-                if ((detailPulseRuns || textureRestoreRuns) && !phasePicture)
+                if (detailPulseRuns || textureRestoreRuns)
                 {
                     if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
+                    // A Stage B picture between frames takes its frame's decision as a repeat (no
+                    // refresh-to-refresh detail flicker). The history advances once per source frame
+                    // on A itself (re-based as drawn), as the debander's hold: A's first draw.
+                    if (phasePicture && !cadenceRepeat &&
+                        ((detailPulseRuns && detailPulse.HistorySequence() != sourceSequence) ||
+                         (textureRestoreRuns && textureRestore.HistorySequence() != sourceSequence)))
+                    {
+                        pl_frame aFrame = source;
+                        bool aReady = true;
+                        if (rebaseFactor < 1.0 || rebaseFactorX < 1.0)
+                        {
+                            pl_frame rebasedA{};
+                            aReady = sourceRebase.Apply(d3d11->gpu, rebaseDispatch, source, rebaseFactorX, rebaseFactor, rebasedA, 1);
+                            if (aReady) aFrame = rebasedA;
+                        }
+                        if (aReady && detailPulseRuns)
+                        {
+                            pl_frame pulsedA{};
+                            if (detailPulse.Apply(d3d11->gpu, rebaseDispatch, aFrame, detailPulseParams, pulsedA))
+                                aFrame = pulsedA;
+                        }
+                        if (aReady && textureRestoreRuns)
+                        {
+                            pl_frame restoredA{};
+                            (void)textureRestore.Apply(d3d11->gpu, rebaseDispatch, aFrame, textureRestoreParams, restoredA);
+                        }
+                    }
                     if (detailPulseRuns)
                     {
                         // Look-ahead (optional): the next source frame's band energies when it is

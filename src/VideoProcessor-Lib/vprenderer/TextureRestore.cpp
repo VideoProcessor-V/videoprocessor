@@ -556,6 +556,8 @@ if (p.x < sz.x && p.y < sz.y) {
 		if (impl) impl->forget = true;
 	}
 
+	uint64_t Module::HistorySequence() const { return impl && impl->have && !impl->forget ? impl->sequence : 0; }
+
 	void Module::Release(pl_gpu gpu)
 	{
 		if (impl && gpu)

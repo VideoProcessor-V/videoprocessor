@@ -163,6 +163,10 @@ namespace TextureRestore
 		const std::string& LastError() const { return error; }
 		unsigned long long Failures() const { return failures; }
 		unsigned long long Frames() const { return frames; }
+		// The source frame the references last advanced on (0 = none or a restart pending): a
+		// caller may apply this frame's decision to another picture of it (a de-judder extra)
+		// as a repeat, without advancing.
+		uint64_t HistorySequence() const;
 
 	private:
 		struct Impl;
