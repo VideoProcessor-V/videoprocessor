@@ -14,6 +14,12 @@
 // burst_pause_ms after every burst_commands (Barco's timing rules: 500 ms,
 // 5 s after 20). read_back: on also waits for each reply (ack_timeout_ms,
 // then 2 s before the next command when none came); off only sends.
+// Since feat/dd-projector-profiles every Barco-specific byte and constant
+// (command templates, framings, reply grammar, the 2 s, ranges) comes from
+// ProjectorConfig::device (DeviceProfile.h); the default is the FL35 profile,
+// so the class drives any projector a valid device profile describes. The
+// worker, coalescing, generations, gap/burst timing, write-failure reopen,
+// resync and bounded exit stay in code.
 namespace LedDrive
 {
 	class BarcoAsciiDriver : public IProjectorDriver
@@ -47,13 +53,25 @@ namespace LedDrive
 	private:
 		struct Framing
 		{
-			const char* name;
-			bool lowercase;
-			const char* suffix;
-			bool acknowledged;
+			std::string name = "cr";
+			std::string letterCase = "as_written";
+			std::string suffix = "\r";
+			bool acknowledged = false;
 		};
 
-		std::string Format(const char* mnemonic, const std::string& argument) const;
+		// Device profiles (feat/dd-projector-profiles): a set command by VP id
+		// (LPW1, CNTR, LDMM, LDCR/G/B, ECHO) and VP value, rendered from the
+		// profile's template in the current framing; `reply` = the name its
+		// replies carry. False (nothing to send) when the profile refuses it.
+		bool RenderSet(const std::string& name, int value, std::string& bytes, std::string& reply) const;
+		// command: DeviceCommandId, which: DeviceQuery.
+		bool RenderQuery(int command, int which, std::string& bytes, std::string& reply) const;
+		int ToVp(int command, int deviceValue) const;
+		// RenderSet + Transact (budgetMs >= 0: BoundedTransactLocked); a
+		// confirmed reply value comes back in VP units. Caller holds portMutex.
+		bool TransactSet(const std::string& name, int value, int* confirmed, int timeoutMs,
+			int maxGapWaitMs, int sentLight = -1, bool abortable = false, int sentContrast = -1,
+			const int* generation = nullptr, int expectedGeneration = 0, bool* wrote = nullptr, int budgetMs = -1);
 		// Sends one command and waits for the matching reply. Caller holds
 		// portMutex.
 		// maxGapWaitMs < 0 waits the full gap or pause; sentLight >= 0 records
@@ -76,7 +94,8 @@ namespace LedDrive
 		// the reply. Caller holds portMutex.
 		bool BoundedTransactLocked(const std::string& command, const char* mnemonic, int* value,
 			int budgetMs, int sentLight, int sentContrast);
-		bool QueryLocked(const char* mnemonic, const std::string& argument, int& value);
+		// command: DeviceCommandId, which: DeviceQuery; value in VP units.
+		bool QueryLocked(int command, int which, int& value);
 		// audit 2026-10-16: reopens a port closed after repeated write
 		// failures (or a failed read), with a back-off of 2 s doubling to
 		// 30 s. True when the port is open. Caller holds portMutex.

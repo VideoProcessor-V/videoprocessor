@@ -1,0 +1,160 @@
+# Dynamic Drive device profile: Barco F35 / FL35 (LED, RS-232 ASCII protocol)
+#
+# This is VP's built-in profile written out as a file. VP uses exactly these
+# values when [projector.Default] names no device_profile, and the test
+# DeviceProfileTests checks that this file loads to the compiled-in values and
+# drives byte-identical commands. Copy it as the starting point for another
+# projector; see docs\dynamic-drive\PROFILE-AUTHORING-FOR-AI-AGENTS.md.
+#
+# Units: every value below is in the projector's own units. VP's internal
+# light scale is 0-255 and its contrast scale 50-100 (50 = neutral); [light]
+# and [contrast] min/max map those scales onto the device's values (identity
+# here). Settings in [projector.Default] of VideoProcessor.cfg (baud,
+# min_command_gap_ms, led_latency_ms, ...) still override these values.
+
+[profile]
+schema = 1
+maker = Barco
+model = F35 / FL35
+version = 1
+source = Barco 601-0381-00 RS232 ASCII protocol; VP FL35 driver as of 2026-10-17
+
+[transport]
+type = serial
+baud = 19200
+data_bits = 8
+parity = none
+stop_bits = 1
+flow_control = none
+# The owner's rule: send only, never wait for or ask the projector anything,
+# unless read-back is truly needed. The FL35 can answer (ECHO 1), so the
+# Connection test and read_back = yes in the cfg may use it.
+read_back = no
+read_back_supported = yes
+reply_line_end = cr
+
+# A command is: prefix + template (with the value) + the framing's suffix.
+# With read_back on and terminator auto, VP tries the probe_order framings
+# (handshake, then a light query) and falls back to the send-only framing if
+# none answers. With read_back off (the default) and terminator auto, it uses
+# send_only: the old script's exact bytes, e.g. ":lpw1255cr" CR LF.
+[framing]
+prefix = :
+probe_order = cr, literal_cr
+fallback = script
+send_only = script
+
+[framing.cr]
+suffix = \r
+case = as_written
+probe = yes
+
+[framing.literal_cr]
+suffix = cr\r
+case = as_written
+probe = yes
+
+[framing.script]
+suffix = cr\r\n
+case = lower
+probe = no
+
+# Replies while ECHO is on: "%001 LPW1 000255". Group 1 = command name,
+# group 2 = value.
+[reply]
+pattern = ^\s*%\d{3}\s+([A-Za-z0-9]{4})\s+(\d{1,9})\s*$
+name_group = 1
+value_group = 2
+
+[command.light]
+set = LPW1{v}
+query = LPW1?
+query_min = LPW1 ?N
+query_max = LPW1 ?M
+reply = LPW1
+
+[command.contrast]
+set = CNTR{v}
+query = CNTR?
+reply = CNTR
+
+[command.handshake]
+send = ECHO1
+reply = ECHO
+
+[command.dim_mode]
+set = LDMM{v}
+standard = 0
+custom = 1
+reply = LDMM
+
+[command.custom_red]
+set = LDCR{v}
+min = 0
+max = 40
+reply = LDCR
+
+[command.custom_green]
+set = LDCG{v}
+min = 0
+max = 40
+reply = LDCG
+
+[command.custom_blue]
+set = LDCB{v}
+min = 0
+max = 40
+reply = LDCB
+
+[light]
+# LPW1 0-255. With read-back the projector's own reported range (LPW1 ?N/?M)
+# narrows this further.
+min = 0
+max = 255
+# Lowest LED level with look-ahead covering latency + settle, without it, and
+# for true black.
+floor = 100
+floor_reactive = 100
+floor_black = 60
+# Drive-to-light map (drive:relative light). Not measured yet on the FL35:
+# empty = light proportional to LPW1.
+curve =
+
+[contrast]
+# CNTR: 50 is the projector's normal contrast and VP's neutral.
+min = 50
+max = 100
+# The highest CNTR that still adds light (light-meter step).
+max_usable = 74
+# The CNTR at which code 235 reaches the DMD's maximum at full LED (59 until
+# the fixed-LED white sweep measures it).
+dmd_clip = 59
+
+[timing]
+# Command to the LED reaching its new level (dead time), then a first-order
+# settle with this time constant. Camera-measured estimates.
+latency_ms = 80
+settle_ms = 300
+contrast_latency_ms = 80
+contrast_settle_ms = 0
+# Read-back only: how long to wait for a reply, and Barco's rule of at least
+# 2 s before the next command when a reply is missing.
+ack_timeout_ms = 300
+no_reply_backoff_ms = 2000
+
+[limits]
+# Largest LPW1 drop in one command (a cut jump is sent whole); 0 = no limit.
+max_step = 12
+# Never two commands closer than this. Barco documents 500 ms; the old script
+# ran 200 ms gaps for years without a lost command.
+min_command_gap_ms = 200
+# Optional pause after every burst_commands commands (Barco: 5 s after 20);
+# 0 = no pause.
+burst_commands = 0
+burst_pause_ms = 5000
+
+[restore]
+# Sent on exit, disable, idle and after a crash restart: light back to the
+# ceiling (led_ceiling, 255 = full light by default) and CNTR back to 50.
+light = ceiling
+contrast = 50

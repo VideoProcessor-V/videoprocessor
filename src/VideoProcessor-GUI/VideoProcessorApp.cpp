@@ -282,6 +282,10 @@ Diagnostics (log and exit before capture, renderer, or display recovery):
       is disabled. Catch illegal instruction and log UNSUPPORTED (exit 2).
       PASS exits 0; incorrect arithmetic exits 3. Forces logging for this run.
       These switches do not change configuration or enable AVX2 dispatch.
+  VideoProcessor.exe /validate_dd_profile <file.vpprojector>
+      Validate a Dynamic Drive device profile offline; nothing is sent to a
+      projector. Prints OK with a summary or INVALID with the reason; exit
+      code 0 = valid, 1 = invalid, 2 = no file given.
 
 Recovery:
   VideoProcessor.exe /fix_display
@@ -1301,7 +1305,7 @@ void ValidateCommandLineArguments(const std::vector<const wchar_t*>& arguments)
 	}
 }
 
-void PrintCommandLineHelp()
+void WriteParentConsole(const wchar_t* text)
 {
 	// This is a Windows-subsystem GUI executable. Attach to the invoking shell
 	// so /help behaves like a normal CLI command without opening any dialog.
@@ -1326,23 +1330,48 @@ void PrintCommandLineHelp()
 	if (GetConsoleMode(output, &consoleMode))
 	{
 		const bool shellPromptAlreadyShown = ClearCurrentConsoleLine(output);
-		WriteConsoleW(output, COMMAND_LINE_HELP, static_cast<DWORD>(wcslen(COMMAND_LINE_HELP)), &ignored, nullptr);
+		WriteConsoleW(output, text, static_cast<DWORD>(wcslen(text)), &ignored, nullptr);
 		if (shellPromptAlreadyShown)
 			SendConsoleEnter();
 	}
 	else
 	{
-		const int bytesRequired = WideCharToMultiByte(CP_UTF8, 0, COMMAND_LINE_HELP, -1, nullptr, 0, nullptr, nullptr);
+		const int bytesRequired = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
 		if (bytesRequired > 1)
 		{
 			std::vector<char> utf8(static_cast<size_t>(bytesRequired));
-			WideCharToMultiByte(CP_UTF8, 0, COMMAND_LINE_HELP, -1, utf8.data(), bytesRequired, nullptr, nullptr);
+			WideCharToMultiByte(CP_UTF8, 0, text, -1, utf8.data(), bytesRequired, nullptr, nullptr);
 			WriteFile(output, utf8.data(), static_cast<DWORD>(bytesRequired - 1), &ignored, nullptr);
 		}
 	}
 
 	if (closeOutput)
 		CloseHandle(output);
+}
+
+void PrintCommandLineHelp()
+{
+	WriteParentConsole(COMMAND_LINE_HELP);
+}
+
+// /validate_dd_profile <file> (feat/dd-projector-profiles): validates a Dynamic
+// Drive device profile offline - no projector, port, capture or renderer -
+// prints the report to the invoking console (or redirected stdout) and
+// returns 0 when valid, 1 when not (2 for a missing argument).
+int ValidateDynamicDriveProfileCommand(const wchar_t* path)
+{
+	std::string report;
+	int code = 2;
+	if (!path || !*path)
+		report = "usage: VideoProcessor.exe /validate_dd_profile <file.vpprojector>\n";
+	else
+	{
+		const std::string narrow = CStringA(CStringW(path)).GetString();
+		code = LedDrive::ValidateDeviceProfileReport(narrow, report) ? 0 : 1;
+		report += "\n";
+	}
+	WriteParentConsole(CStringW(CStringA(report.c_str())).GetString());
+	return code;
 }
 }
 
@@ -1364,6 +1393,19 @@ BOOL CVideoProcessorApp::InitInstance()
 	bool fixDisplayRequested = false;
 	bool cpuCheckRequested = false;
 	bool avx2ProbeRequested = false;
+	// /validate_dd_profile <file>: offline Dynamic Drive device profile check;
+	// nothing else starts (feat/dd-projector-profiles).
+	for (int i = 1; i < argumentCount; ++i)
+	{
+		if (IsCommandLineOption(arguments[i], L"/validate_dd_profile") ||
+			IsCommandLineOption(arguments[i], L"--validate_dd_profile") ||
+			IsCommandLineOption(arguments[i], L"-validate_dd_profile"))
+		{
+			m_startupExitCode = ValidateDynamicDriveProfileCommand(i + 1 < argumentCount ? arguments[i + 1] : nullptr);
+			LocalFree(arguments);
+			return FALSE;
+		}
+	}
 	for (int i = 1; i < argumentCount; ++i)
 	{
 		if (IsHelpArgument(arguments[i]))

@@ -38,18 +38,19 @@ namespace LedDrive
 			return false;
 		}
 		dcb.BaudRate = static_cast<DWORD>(baud);
-		dcb.ByteSize = 8;
-		dcb.Parity = NOPARITY;
-		dcb.StopBits = ONESTOPBIT;
+		// The device profile's frame format (8N1 unless it says otherwise).
+		dcb.ByteSize = static_cast<BYTE>(dataBits == 7 ? 7 : 8);
+		dcb.Parity = parity == "even" ? EVENPARITY : parity == "odd" ? ODDPARITY : NOPARITY;
+		dcb.StopBits = stopBits == 2 ? TWOSTOPBITS : ONESTOPBIT;
 		dcb.fBinary = TRUE;
-		dcb.fParity = FALSE;
-		dcb.fOutxCtsFlow = FALSE;
+		dcb.fParity = dcb.Parity != NOPARITY ? TRUE : FALSE;
+		dcb.fOutxCtsFlow = flow == "rts_cts" ? TRUE : FALSE;
 		dcb.fOutxDsrFlow = FALSE;
 		dcb.fDsrSensitivity = FALSE;
-		dcb.fOutX = FALSE;
-		dcb.fInX = FALSE;
+		dcb.fOutX = flow == "xon_xoff" ? TRUE : FALSE;
+		dcb.fInX = flow == "xon_xoff" ? TRUE : FALSE;
 		dcb.fDtrControl = DTR_CONTROL_ENABLE;
-		dcb.fRtsControl = RTS_CONTROL_ENABLE;
+		dcb.fRtsControl = flow == "rts_cts" ? RTS_CONTROL_HANDSHAKE : RTS_CONTROL_ENABLE;
 		// audit 2026-10-16: a line error must not abort every later read
 		// (ReadFile failing now closes the port).
 		dcb.fAbortOnError = FALSE;
@@ -62,7 +63,7 @@ namespace LedDrive
 		timeouts.WriteTotalTimeoutConstant = 500;
 		if (!SetCommState(opened, &dcb) || !SetCommTimeouts(opened, &timeouts))
 		{
-			error = "cannot configure " + port + " (" + std::to_string(baud) + " 8N1)";
+			error = "cannot configure " + port + " (" + std::to_string(baud) + " baud, " + std::to_string(dataBits) + " data bits, parity " + parity + ", " + std::to_string(stopBits) + " stop bit(s), flow " + flow + ")";
 			CloseHandle(opened);
 			return false;
 		}
@@ -70,6 +71,14 @@ namespace LedDrive
 		handle = opened;
 		pending.clear();
 		return true;
+	}
+
+	void Win32SerialPort::SetFormat(int dataBitsIn, const std::string& parityIn, int stopBitsIn, const std::string& flowIn)
+	{
+		dataBits = dataBitsIn;
+		parity = parityIn;
+		stopBits = stopBitsIn;
+		flow = flowIn;
 	}
 
 	void Win32SerialPort::Close()

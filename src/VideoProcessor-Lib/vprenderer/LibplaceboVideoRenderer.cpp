@@ -23809,6 +23809,14 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 		signature += "profile=" + std::string((std::istreambuf_iterator<char>(profile)),
 			std::istreambuf_iterator<char>());
 	}
+	// The Dynamic Drive device profile too (feat/dd-projector-profiles).
+	const std::string deviceProfilePath = LedDrive::DeviceProfilePath(configuration);
+	if (!deviceProfilePath.empty())
+	{
+		std::ifstream device(deviceProfilePath, std::ios::binary);
+		signature += "device=" + std::string((std::istreambuf_iterator<char>(device)),
+			std::istreambuf_iterator<char>());
+	}
 	std::string validationError;
 	const bool valid = LedDrive::Validate(configuration, validationError);
 	// The gamma boost applies even with the module off or in log_only.
@@ -23848,6 +23856,11 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 	if (!LedDrive::ValidateLedProfile(configuration, profileProblem))
 		DebugLog::Log("Dynamic Drive: WARNING LED profile ignored (%s); using the built-in values",
 			profileProblem.c_str());
+	// A refused device profile: no Dynamic Drive (the module runs as a dry run).
+	const std::string deviceProblem = LedDrive::DeviceProfileProblem(configuration);
+	if (!deviceProblem.empty())
+		DebugLog::Log("Dynamic Drive: WARNING device profile refused (%s); no Dynamic Drive - nothing is sent to the projector",
+			deviceProblem.c_str());
 	// Tuning and script/compensate switches go to the running module, so the
 	// LED carries on from its level instead of restoring full light.
 	if (valid && m_ledDrive && m_ledDrive->Reconfigure(LedDrive::ReadProjectorConfig(configuration),

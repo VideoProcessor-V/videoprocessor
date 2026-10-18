@@ -3,6 +3,7 @@
 #include "../ConfigFile.h"
 #include "../ConfigSchema.h"
 #include "../DisplayRuleExpression.h"
+#include "DeviceProfile.h"
 
 #include <algorithm>
 #include <cmath>
@@ -172,6 +173,37 @@ namespace LedDrive
 		int dmdClipCntr = 59;
 		// lpw : relative flux, ascending lpw; empty = flux proportional to lpw.
 		std::vector<std::pair<double, double>> fluxTable;
+		// Dynamic Drive device profile (feat/dd-projector-profiles): the
+		// projector's command set, framing, reply grammar, ranges and restore
+		// values. The default is the compiled-in Barco F35/FL35 profile, whose
+		// timing, pacing and limits are the defaults above
+		// (ApplyDeviceProfile(DeviceProfile(), ProjectorConfig()) changes
+		// nothing). device_profile in [projector.Default] selects a file.
+		DeviceProfile device;
+		// Set when the named device_profile could not be used: VP then runs no
+		// Dynamic Drive (protocol none) and says why.
+		std::string deviceProfileError;
+		// terminator as a framing name ("auto" or a [framing.<name>] of the
+		// profile); "" = from `terminator` above (tests set the enum only).
+		std::string terminatorName;
+		// The framing name the terminator selects ("auto" for Auto).
+		std::string TerminatorName() const
+		{
+			if (!terminatorName.empty()) return terminatorName;
+			switch (terminator)
+			{
+			case Terminator::Cr: return "cr";
+			case Terminator::LiteralCr: return "literal_cr";
+			case Terminator::Script: return "script";
+			default: return "auto";
+			}
+		}
+		// The restore-on-exit light in VP levels for a ceiling of ledCeiling.
+		int RestoreLight(int ledCeiling) const
+		{
+			return device.restoreLight < 0 ? ledCeiling :
+				std::max(0, std::min(255, device.LightFromDeviceRounded(device.restoreLight)));
+		}
 	};
 
 	// Experimental deeper fade to black with the projector's custom LED dim
@@ -648,7 +680,16 @@ namespace LedDrive
 			Integer("burst_pause_ms", 0, 60000),
 			Boolean("read_back"),
 			Boolean("echo"),
-			Choice("terminator", { "auto", "cr", "literal_cr", "script" }),
+			// auto or a framing name: cr, literal_cr, script for the built-in FL35
+			// profile, or a [framing.<name>] of the selected device profile
+			// (checked against it when the profile is read).
+			Custom("terminator", [](const std::string& value)
+				{ return DeviceProfileDetail::ValidName(ConfigFile::NormalizeName(value)); },
+				"auto, cr, literal_cr, script or a framing name of the device profile"),
+			// Dynamic Drive device profile file (absolute, or relative to this
+			// configuration's folder); empty = the built-in Barco F35/FL35 profile.
+			Custom("device_profile", [](const std::string& value) { return DeviceProfileDetail::Unquote(value).size() < 1024; },
+				"the path of a Dynamic Drive device profile (.vpprojector), or empty for the built-in Barco F35/FL35"),
 			Integer("led_latency_ms", 0, 2000),
 			Integer("led_settle_ms", 0, 5000),
 			Integer("cntr_latency_ms", 0, 2000),
@@ -971,11 +1012,70 @@ namespace LedDrive
 
 	// Reads [projector.default]; absent keys keep their defaults. Call Validate
 	// first: this reader assumes valid values.
+	// A device profile's timing, pacing, limits and calibration as the
+	// ProjectorConfig defaults (VP units). The built-in FL35 profile changes
+	// nothing (DeviceProfileTests).
+	inline void ApplyDeviceProfile(const DeviceProfile& device, ProjectorConfig& result)
+	{
+		result.device = device;
+		result.baud = device.baud;
+		result.readBack = device.readBack && device.readBackSupported;
+		result.ackTimeoutMs = device.ackTimeoutMs;
+		result.minCommandGapMs = device.minCommandGapMs;
+		result.maxLevelsPerCommand = device.StepToVp(device.maxStep);
+		result.burstCommands = device.burstCommands;
+		result.burstPauseMs = device.burstPauseMs;
+		result.ledLatencyMs = device.latencyMs;
+		result.ledSettleMs = device.settleMs;
+		result.cntrLatencyMs = device.contrastLatencyMs;
+		result.cntrSettleMs = device.contrastSettleMs;
+		result.cntrMaxUsable = std::max(50, std::min(100, device.ContrastFromDevice(device.contrastMaxUsable)));
+		result.dmdClipCntr = device.dmdClip < 0 ? -1 :
+			std::max(50, std::min(100, device.ContrastFromDevice(device.dmdClip)));
+		result.fluxTable.clear();
+		for (const auto& point : device.lightCurve)
+			result.fluxTable.push_back({ device.LightFromDevice(point.first), point.second });
+	}
+
+	// The device_profile path [projector.Default] names, resolved ("" = the
+	// built-in FL35 profile).
+	inline std::string DeviceProfilePath(const ConfigFile& config)
+	{
+		std::string value;
+		if (!config.TryGetString(PROJECTOR_SECTION, "device_profile", value)) return {};
+		return ResolveDeviceProfilePath(value, config.GetLoadedPath());
+	}
+
+	// The device profile the configuration selects. False with `error` when
+	// the named file cannot be used (VP then runs no Dynamic Drive); the
+	// built-in FL35 profile when none is named.
+	inline bool ReadDeviceProfile(const ConfigFile& config, DeviceProfile& device, std::string& error)
+	{
+		error.clear();
+		const std::string path = DeviceProfilePath(config);
+		if (path.empty())
+		{
+			device = DeviceProfile();
+			return true;
+		}
+		return LoadDeviceProfile(path, device, error);
+	}
+
 	inline ProjectorConfig ReadProjectorConfig(const ConfigFile& config)
 	{
 		ProjectorConfig result;
 		std::string value;
 		const std::string section = PROJECTOR_SECTION;
+		// Precedence: the built-in defaults, then the device profile, then the
+		// keys [projector.Default] itself names.
+		{
+			DeviceProfile device;
+			std::string deviceError;
+			if (ReadDeviceProfile(config, device, deviceError))
+				ApplyDeviceProfile(device, result);
+			else
+				result.deviceProfileError = deviceError;
+		}
 		if (config.TryGetString(section, "protocol", value)) result.protocol = ConfigFile::NormalizeName(value);
 		if (config.TryGetString(section, "port", value)) result.port = ConfigFile::Trim(value);
 		if (config.TryGetString(section, "baud", value)) Detail::ParseInt(value, 1200, 921600, result.baud);
@@ -990,7 +1090,11 @@ namespace LedDrive
 		if (config.TryGetString(section, "burst_pause_ms", value)) Detail::ParseInt(value, 0, 60000, result.burstPauseMs);
 		config.TryGetBool(section, "read_back", result.readBack);
 		config.TryGetBool(section, "echo", result.echo);
-		if (config.TryGetString(section, "terminator", value)) result.terminator = ParseTerminator(value);
+		if (config.TryGetString(section, "terminator", value))
+		{
+			result.terminator = ParseTerminator(value);
+			result.terminatorName = ConfigFile::NormalizeName(value);
+		}
 		if (config.TryGetString(section, "led_latency_ms", value)) Detail::ParseInt(value, 0, 2000, result.ledLatencyMs);
 		if (config.TryGetString(section, "cntr_latency_ms", value)) Detail::ParseInt(value, 0, 2000, result.cntrLatencyMs);
 		if (config.TryGetString(section, "led_settle_ms", value)) Detail::ParseInt(value, 0, 5000, result.ledSettleMs);
@@ -998,7 +1102,28 @@ namespace LedDrive
 		if (config.TryGetString(section, "cntr_max_usable", value)) Detail::ParseInt(value, 50, 100, result.cntrMaxUsable);
 		if (config.TryGetString(section, "dmd_clip_cntr", value)) ParseDmdClipCntr(value, result.dmdClipCntr);
 		if (config.TryGetString(section, "flux_table", value)) ParseFluxTable(value, result.fluxTable);
+		// The configuration and the profile together.
+		if (result.deviceProfileError.empty())
+		{
+			const std::string framing = result.TerminatorName();
+			if (framing != "auto" && !result.device.Framing(framing))
+				result.deviceProfileError = "terminator " + framing + " is not a framing of the device profile " +
+					result.device.DisplayName();
+			else if (result.readBack && !result.device.readBackSupported)
+				result.deviceProfileError = "read_back is on, but the device profile " + result.device.DisplayName() +
+					" has no read-back (read_back_supported = no)";
+		}
+		// Never send commands from a profile that failed: no Dynamic Drive.
+		if (!result.deviceProfileError.empty())
+			result.protocol = "none";
 		return result;
+	}
+
+	// The device profile problem the configuration has ("" when none): for the
+	// renderer's log and the Config app.
+	inline std::string DeviceProfileProblem(const ConfigFile& config)
+	{
+		return ReadProjectorConfig(config).deviceProfileError;
 	}
 
 	// Reads [led_drive.default]; absent keys keep their defaults.
@@ -1192,6 +1317,19 @@ namespace LedDrive
 	inline LedDriveConfig ReadLedDriveConfigWith(const ConfigFile& config, bool useProfile)
 	{
 		LedDriveConfig result;
+		// The device profile's floors (device units -> VP levels) replace the
+		// built-in ones; the LED profile and [led_drive.Default] still win. The
+		// built-in FL35 profile keeps 100 / 100 / 60.
+		{
+			DeviceProfile device;
+			std::string deviceError;
+			if (ReadDeviceProfile(config, device, deviceError) && !device.BuiltIn())
+			{
+				result.ledFloor = device.LightFromDeviceRounded(device.floor);
+				result.ledFloorReactive = device.LightFromDeviceRounded(device.floorReactive);
+				result.ledFloorBlack = device.LightFromDeviceRounded(device.floorBlack);
+			}
+		}
 		const std::string profilePath = useProfile ? LedProfilePath(config) : std::string();
 		if (!profilePath.empty())
 		{
@@ -1204,6 +1342,17 @@ namespace LedDrive
 		}
 		ApplyLedDriveSection(config, ResolveLedDriveSection(config), result);
 		ApplyCommandSource(result);
+		// What the device cannot do is off, whatever the settings say: no CNTR
+		// assist without a contrast command, no custom dim without its commands.
+		{
+			DeviceProfile device;
+			std::string deviceError;
+			if (ReadDeviceProfile(config, device, deviceError))
+			{
+				if (!device.Has(DeviceCommandId::Contrast)) result.cntrAssist = false;
+				if (!device.Has(DeviceCommandId::CustomRed)) result.ftbCustomDim = FtbCustomDim::Off;
+			}
+		}
 		return result;
 	}
 

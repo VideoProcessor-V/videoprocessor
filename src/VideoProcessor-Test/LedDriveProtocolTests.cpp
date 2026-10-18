@@ -710,16 +710,17 @@ namespace VideoProcessorTest
 			std::this_thread::sleep_for(std::chrono::milliseconds(150));
 			Assert::IsTrue(driver->Status().contrastBusy, L"The resync CNTR (55) is waiting");
 			projector->silent = false;
-			Assert::IsTrue(driver->SendScript("CNTR", 47), L"The script's newer value");
+			// 52, not 47: since device profiles a CNTR below the FL35's 50 is refused, never sent.
+			Assert::IsTrue(driver->SendScript("CNTR", 52), L"The script's newer value");
 			std::this_thread::sleep_for(std::chrono::milliseconds(400));
 			const auto writes = projector->Writes();
-			const size_t newest = LastIndexOf(writes, ":CNTR47\r");
+			const size_t newest = LastIndexOf(writes, ":CNTR52\r");
 			Assert::AreNotEqual(std::string::npos, newest);
 			for (size_t i = newest + 1; i < writes.size(); ++i)
 				Assert::IsTrue(writes[i].rfind(":CNTR", 0) != 0, L"No CNTR after the script's newer one");
 			Assert::IsTrue(std::find(writes.begin(), writes.end(), std::string(":CNTR55\r")) == writes.end(),
 				L"The superseded resync value was never sent");
-			Assert::AreEqual(47, projector->contrast);
+			Assert::AreEqual(52, projector->contrast);
 			Assert::IsFalse(driver->Status().contrastBusy);
 			driver->Close();
 		}

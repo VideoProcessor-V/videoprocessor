@@ -70,6 +70,21 @@ namespace LedDrive
 		projector.protocol = "barco_ascii";
 		projector.readBack = true;
 		ConnectionTestResult result;
+		// Device profiles: never test with a refused profile, and a device without
+		// read-back cannot confirm anything (the user confirms visually).
+		if (!projector.deviceProfileError.empty())
+		{
+			result.summary = "FAIL: device profile refused: " + projector.deviceProfileError;
+			result.lines.push_back(result.summary);
+			return result;
+		}
+		if (!projector.device.readBackSupported)
+		{
+			result.summary = "UNVERIFIED: the device profile " + projector.device.DisplayName() +
+				" has no read-back, so the projector cannot confirm commands and nothing was sent; check the light changes by eye with Dynamic Drive running";
+			result.lines.push_back(result.summary);
+			return result;
+		}
 		std::unique_ptr<IProjectorDriver> driver = CreateProjectorDriver("barco_ascii", projector, portFactory);
 		std::string error;
 		if (!driver || !driver->Open(error))

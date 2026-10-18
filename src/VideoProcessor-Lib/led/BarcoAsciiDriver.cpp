@@ -41,9 +41,15 @@ namespace LedDrive
 	BarcoAsciiDriver::BarcoAsciiDriver(const ProjectorConfig& configIn,
 		std::unique_ptr<ISerialPort> portIn)
 		: config(configIn), port(std::move(portIn)),
-		framing{ "cr", false, "\r", configIn.readBack },
 		nextSendAllowed(std::chrono::steady_clock::now())
 	{
+		// Before Open: the first probe framing (the FL35's "cr"), acknowledged
+		// with read_back on - as before profiles.
+		const DeviceProfile& device = config.device;
+		const DeviceFraming* first = device.Framing(device.probeOrder.empty() ? device.sendOnly : device.probeOrder.front());
+		if (!first && !device.framings.empty()) first = &device.framings.front();
+		if (first) framing = { first->name, first->letterCase, first->suffix, configIn.readBack };
+		if (port) port->SetFormat(device.dataBits, device.parity, device.stopBits, device.flowControl);
 	}
 
 	BarcoAsciiDriver::~BarcoAsciiDriver()
@@ -69,13 +75,48 @@ namespace LedDrive
 		return true;
 	}
 
-	std::string BarcoAsciiDriver::Format(const char* mnemonic, const std::string& argument) const
+	// Device profiles (feat/dd-projector-profiles): every byte comes from the
+	// profile's templates in the current framing. A value outside the declared
+	// device range, or a command the profile does not have, renders nothing and
+	// is never sent.
+	bool BarcoAsciiDriver::RenderSet(const std::string& name, int value, std::string& bytes, std::string& reply) const
 	{
-		std::string name(mnemonic);
-		if (framing.lowercase)
-			std::transform(name.begin(), name.end(), name.begin(),
-				[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-		return ":" + name + argument + framing.suffix;
+		const DeviceProfile& device = config.device;
+		DeviceCommandId id = DeviceCommandId::Light;
+		if (!DeviceCommandFromId(name, id))
+		{
+			DebugLog::Log("Dynamic Drive: unknown command %s %d not sent", name.c_str(), value);
+			return false;
+		}
+		int deviceValue = value;
+		if (id == DeviceCommandId::Light) deviceValue = device.LightToDevice(value);
+		else if (id == DeviceCommandId::Contrast) deviceValue = device.ContrastToDevice(value);
+		else if (id == DeviceCommandId::DimMode)
+		{
+			// VP's 0 = standard, 1 = custom dim mode.
+			const DeviceCommand& dim = device.Command(id);
+			deviceValue = value == 0 ? dim.standard : value == 1 ? dim.custom : dim.max + 1;
+		}
+		const DeviceFraming format{ framing.name, framing.suffix, framing.letterCase, framing.acknowledged };
+		std::string error;
+		if (!RenderDeviceSet(device, format, id, deviceValue, bytes, error))
+		{
+			DebugLog::Log("Dynamic Drive: %s %d not sent (%s): %s", name.c_str(), value, device.DisplayName().c_str(),
+				error.c_str());
+			return false;
+		}
+		reply = device.Command(id).reply;
+		return true;
+	}
+
+	bool BarcoAsciiDriver::RenderQuery(int command, int which, std::string& bytes, std::string& reply) const
+	{
+		const DeviceProfile& device = config.device;
+		const DeviceCommandId id = static_cast<DeviceCommandId>(command);
+		const DeviceFraming format{ framing.name, framing.suffix, framing.letterCase, framing.acknowledged };
+		if (!RenderDeviceQuery(device, format, id, static_cast<DeviceQuery>(which), bytes)) return false;
+		reply = device.Command(id).reply;
+		return !reply.empty();
 	}
 
 	bool BarcoAsciiDriver::Transact(const std::string& command, const char* mnemonic,
@@ -158,7 +199,9 @@ namespace LedDrive
 				}
 			}
 		}
-		bool ok = written && !framing.acknowledged;
+		// A command whose profile entry names no reply is never waited on.
+		const bool awaitReply = framing.acknowledged && mnemonic && *mnemonic;
+		bool ok = written && !awaitReply;
 		if (!written)
 		{
 			// audit 2026-10-16: an unplugged port fails every command; log the
@@ -198,7 +241,7 @@ namespace LedDrive
 			// audit 2026-10-16: the reopen back-off resets below, once the
 			// reply wait has not closed the port.
 		}
-		if (written && framing.acknowledged)
+		if (written && awaitReply)
 		{
 			const auto deadline = steady_clock::now() + milliseconds(timeoutMs);
 			std::string line;
@@ -220,7 +263,8 @@ namespace LedDrive
 				}
 				std::string name;
 				int parsed = 0;
-				if (ParseReply(line, name, parsed) && SameMnemonic(name, mnemonic))
+				// The profile's reply grammar ([reply]; the FL35's is ParseReply's).
+				if (MatchDeviceReply(config.device, line, name, parsed) && SameMnemonic(name, mnemonic))
 				{
 					if (value) *value = parsed;
 					ok = true;
@@ -258,16 +302,18 @@ namespace LedDrive
 			}
 		}
 		int gap = config.minCommandGapMs;
-		// Barco: at least 2 s before sending again when no reply came.
-		const bool noReply = written && framing.acknowledged && !ok;
-		if (noReply) gap = std::max(gap, 2000);
+		// Barco: at least 2 s before sending again when no reply came (the
+		// profile's no_reply_backoff_ms).
+		const int backoffMs = std::max(0, config.device.noReplyBackoffMs);
+		const bool noReply = written && awaitReply && !ok;
+		if (noReply) gap = std::max(gap, backoffMs);
 		// audit 2026-10-16: a failed write is retried; never in a tight loop,
 		// even with min_command_gap_ms 0.
 		if (!written) gap = std::max(gap, 200);
 		std::lock_guard<std::mutex> guard(stateMutex);
 		// audit 2026-10-16: kept apart, so the script and sequence sends (no
 		// command gap) still keep it.
-		if (noReply) replyBackoffUntil = steady_clock::now() + milliseconds(2000);
+		if (noReply) replyBackoffUntil = steady_clock::now() + milliseconds(backoffMs);
 		if (config.burstCommands > 0 && sinceBurst >= config.burstCommands)
 		{
 			gap = std::max(gap, config.burstPauseMs);
@@ -277,10 +323,51 @@ namespace LedDrive
 		return ok;
 	}
 
-	bool BarcoAsciiDriver::QueryLocked(const char* mnemonic, const std::string& argument, int& value)
+	// A query's answer in VP units (light 0-255, contrast 50-100).
+	bool BarcoAsciiDriver::QueryLocked(int command, int which, int& value)
 	{
-		return framing.acknowledged &&
-			Transact(Format(mnemonic, argument), mnemonic, &value, config.ackTimeoutMs, -1);
+		std::string bytes, reply;
+		if (!framing.acknowledged || !RenderQuery(command, which, bytes, reply)) return false;
+		int answer = 0;
+		if (!Transact(bytes, reply.c_str(), &answer, config.ackTimeoutMs, -1)) return false;
+		value = ToVp(command, answer);
+		return true;
+	}
+
+	int BarcoAsciiDriver::ToVp(int command, int deviceValue) const
+	{
+		const DeviceCommandId id = static_cast<DeviceCommandId>(command);
+		if (id == DeviceCommandId::Light) return config.device.LightFromDeviceRounded(deviceValue);
+		if (id == DeviceCommandId::Contrast) return config.device.ContrastFromDevice(deviceValue);
+		return deviceValue;
+	}
+
+	// One set command by VP id and VP value: rendered from the profile, then
+	// Transact (whose reply value comes back in VP units). A value the profile
+	// refuses is not sent and is not a failed write (never retried).
+	bool BarcoAsciiDriver::TransactSet(const std::string& name, int value, int* confirmed, int timeoutMs,
+		int maxGapWaitMs, int sentLight, bool abortable, int sentContrast, const int* generation,
+		int expectedGeneration, bool* wrote, int budgetMs)
+	{
+		if (wrote) *wrote = false;
+		std::string bytes, reply;
+		if (!RenderSet(name, value, bytes, reply))
+		{
+			lastWriteOk = true;
+			return false;
+		}
+		int answer = -1;
+		const bool ok = budgetMs >= 0 ?
+			BoundedTransactLocked(bytes, reply.c_str(), confirmed ? &answer : nullptr, budgetMs, sentLight, sentContrast) :
+			Transact(bytes, reply.c_str(), confirmed ? &answer : nullptr, timeoutMs, maxGapWaitMs, sentLight, abortable,
+				sentContrast, generation, expectedGeneration, wrote);
+		if (confirmed)
+		{
+			DeviceCommandId id = DeviceCommandId::Light;
+			DeviceCommandFromId(name, id);
+			*confirmed = answer >= 0 ? ToVp(static_cast<int>(id), answer) : -1;
+		}
+		return ok;
 	}
 
 	bool BarcoAsciiDriver::EnsurePortLocked(std::string& error)
@@ -343,57 +430,68 @@ namespace LedDrive
 	// bytes (lower case, literal "cr", then echo's CR LF) are the
 	// unacknowledged fallback: what the projector accepted for years without
 	// anyone reading its replies.
+	// Device profiles: the framings, their order and the send-only fallback
+	// come from [framing] (the FL35's: cr, literal_cr, then script).
 	void BarcoAsciiDriver::SelectFraming()
 	{
-		const Framing cr{ "cr", false, "\r", true };
-		const Framing literalCr{ "literal_cr", false, "cr\r", true };
-		const Framing script{ "script", true, "cr\r\n", false };
-		if (!config.readBack)
+		const DeviceProfile& device = config.device;
+		auto make = [](const DeviceFraming& f, bool acknowledged) { return Framing{ f.name, f.letterCase, f.suffix, acknowledged }; };
+		const std::string wanted = config.TerminatorName();
+		const DeviceFraming* sendOnly = device.Framing(device.sendOnly);
+		const DeviceFraming* fallback = device.Framing(device.fallback.empty() ? device.sendOnly : device.fallback);
+		if (!config.readBack || !device.readBackSupported)
 		{
-			// Send-only: no probing, no ECHO, no queries.
-			switch (config.terminator)
-			{
-			case Terminator::Cr: framing = { "cr", false, "\r", false }; break;
-			case Terminator::LiteralCr: framing = { "literal_cr", false, "cr\r", false }; break;
-			default: framing = script; break;
-			}
+			// Send-only: no probing, no handshake, no queries.
+			const DeviceFraming* chosen = wanted == "auto" ? sendOnly : device.Framing(wanted);
+			if (!chosen) chosen = sendOnly;
+			if (chosen) framing = make(*chosen, false);
 			DebugLog::Log("Dynamic Drive: read_back off; sending with framing \"%s\" without waiting for replies",
-				framing.name);
+				framing.name.c_str());
 			return;
 		}
-		std::vector<Framing> candidates;
-		switch (config.terminator)
+		std::vector<const DeviceFraming*> candidates;
+		if (wanted == "auto")
 		{
-		case Terminator::Cr: candidates = { cr }; break;
-		case Terminator::LiteralCr: candidates = { literalCr }; break;
-		case Terminator::Script: framing = script; return;
-		default: candidates = { cr, literalCr }; break;
+			for (const std::string& name : device.probeOrder)
+				if (const DeviceFraming* f = device.Framing(name)) candidates.push_back(f);
 		}
-		for (const Framing& candidate : candidates)
+		else if (const DeviceFraming* f = device.Framing(wanted))
 		{
-			framing = candidate;
-			if (config.echo)
-				Transact(Format("ECHO", "1"), "ECHO", nullptr, config.ackTimeoutMs, -1);
+			// A configured send-only framing is used as it is (the old script's bytes).
+			if (!f->probe) { framing = make(*f, false); return; }
+			candidates.push_back(f);
+		}
+		const bool handshake = config.echo && device.Has(DeviceCommandId::Handshake);
+		for (const DeviceFraming* candidate : candidates)
+		{
+			framing = make(*candidate, true);
+			if (handshake)
+			{
+				std::string bytes, reply;
+				if (RenderSet("ECHO", 0, bytes, reply))
+					Transact(bytes, reply.c_str(), nullptr, config.ackTimeoutMs, -1);
+			}
 			int light = 0;
-			if (QueryLocked("LPW1", "?", light))
+			if (QueryLocked(static_cast<int>(DeviceCommandId::Light), static_cast<int>(DeviceQuery::Value), light))
 			{
 				std::lock_guard<std::mutex> guard(stateMutex);
 				state.lightKnown = true;
 				state.light = light;
 				DebugLog::Log("Dynamic Drive: projector answers with framing \"%s\" (LPW1=%d)",
-					framing.name, light);
+					framing.name.c_str(), light);
 				return;
 			}
 		}
-		if (config.terminator == Terminator::Auto)
+		if (wanted == "auto")
 		{
-			framing = script;
+			if (fallback) framing = make(*fallback, false);
 			DebugLog::Log(
-				"Dynamic Drive: projector did not answer with \\r or cr\\r framing; sending the old script's exact bytes without waiting for replies");
+				"Dynamic Drive: projector did not answer with the %s framings; sending framing \"%s\" (for the FL35 the old script's exact bytes) without waiting for replies",
+				device.DisplayName().c_str(), framing.name.c_str());
 		}
 		else
 			DebugLog::Log("Dynamic Drive: projector did not answer with configured framing \"%s\"",
-				framing.name);
+				framing.name.c_str());
 	}
 
 	bool BarcoAsciiDriver::Open(std::string& error)
@@ -415,10 +513,12 @@ namespace LedDrive
 			int minimum = 0, maximum = 0;
 			if (framing.acknowledged)
 			{
-				const bool haveMin = config.lightMin >= 0 || QueryLocked("LPW1", " ?N", minimum);
-				const bool haveMax = config.lightMax >= 0 || QueryLocked("LPW1", " ?M", maximum);
+				const int light = static_cast<int>(DeviceCommandId::Light);
+				const bool haveMin = config.lightMin >= 0 || QueryLocked(light, static_cast<int>(DeviceQuery::Minimum), minimum);
+				const bool haveMax = config.lightMax >= 0 || QueryLocked(light, static_cast<int>(DeviceQuery::Maximum), maximum);
 				int contrast = 0;
-				const bool haveContrast = QueryLocked("CNTR", "?", contrast);
+				const bool haveContrast = QueryLocked(static_cast<int>(DeviceCommandId::Contrast),
+					static_cast<int>(DeviceQuery::Value), contrast);
 				std::lock_guard<std::mutex> stateGuard(stateMutex);
 				if (haveMin && haveMax)
 				{
@@ -442,10 +542,10 @@ namespace LedDrive
 		}
 		worker = std::thread(&BarcoAsciiDriver::Worker, this);
 		const LightRange reported = QueryLightRange();
-		DebugLog::Log("Dynamic Drive: barco_ascii on %s %d baud, framing=%s acknowledged=%d range=%s",
-			config.port.c_str(), config.baud, framing.name, framing.acknowledged ? 1 : 0,
+		DebugLog::Log("Dynamic Drive: barco_ascii on %s %d baud, framing=%s acknowledged=%d range=%s device=%s",
+			config.port.c_str(), config.baud, framing.name.c_str(), framing.acknowledged ? 1 : 0,
 			reported.known ? (std::to_string(reported.minimum) + "-" +
-				std::to_string(reported.maximum)).c_str() : "unknown");
+				std::to_string(reported.maximum)).c_str() : "unknown", config.device.DisplayName().c_str());
 		return true;
 	}
 
@@ -468,8 +568,9 @@ namespace LedDrive
 		{
 			std::lock_guard<std::timed_mutex> guard(portMutex);
 			int light = 0, contrast = 0;
-			const bool haveLight = QueryLocked("LPW1", "?", light);
-			const bool haveContrast = QueryLocked("CNTR", "?", contrast);
+			const int value = static_cast<int>(DeviceQuery::Value);
+			const bool haveLight = QueryLocked(static_cast<int>(DeviceCommandId::Light), value, light);
+			const bool haveContrast = QueryLocked(static_cast<int>(DeviceCommandId::Contrast), value, contrast);
 			std::lock_guard<std::mutex> stateGuard(stateMutex);
 			if (haveLight) { state.lightKnown = true; state.light = light; }
 			if (haveContrast) { state.contrastKnown = true; state.contrast = contrast; }
@@ -566,6 +667,15 @@ namespace LedDrive
 			std::lock_guard<std::mutex> guard(stateMutex);
 			if (!opened) return false;
 		}
+		// A command the device profile does not have (e.g. no dim mode) has
+		// nothing to set or restore: nothing is sent.
+		DeviceCommandId id = DeviceCommandId::Light;
+		if (DeviceCommandFromId(mnemonic, id) && !config.device.Has(id))
+		{
+			DebugLog::Log("Dynamic Drive: %s not sent: the device profile %s has no such command", mnemonic.c_str(),
+				config.device.DisplayName().c_str());
+			return true;
+		}
 		std::unique_lock<std::timed_mutex> lock(portMutex, std::defer_lock);
 		const auto start = steady_clock::now();
 		if (timeoutMs > 0)
@@ -578,11 +688,9 @@ namespace LedDrive
 			static_cast<int>(duration_cast<milliseconds>(steady_clock::now() - start).count())) : 0;
 		const bool light = mnemonic == "LPW1";
 		const bool contrast = mnemonic == "CNTR";
-		const bool ok = timeoutMs > 0 ?
-			BoundedTransactLocked(Format(mnemonic.c_str(), std::to_string(value)), mnemonic.c_str(), nullptr,
-				left, light ? value : -1, contrast ? value : -1) :
-			Transact(Format(mnemonic.c_str(), std::to_string(value)), mnemonic.c_str(), nullptr,
-				config.ackTimeoutMs, -1);
+		const bool ok = TransactSet(mnemonic, value, nullptr, config.ackTimeoutMs, -1,
+			timeoutMs > 0 && light ? value : -1, false, timeoutMs > 0 && contrast ? value : -1, nullptr, 0, nullptr,
+			timeoutMs > 0 ? left : -1);
 		if (ok && contrast)
 		{
 			std::lock_guard<std::mutex> stateGuard(stateMutex);
@@ -662,7 +770,7 @@ namespace LedDrive
 			}
 		}
 		int confirmed = -1;
-		const bool ok = Transact(Format(mnemonic.c_str(), std::to_string(sent)), mnemonic.c_str(), &confirmed,
+		const bool ok = TransactSet(mnemonic, sent, &confirmed,
 			config.ackTimeoutMs, -1, light ? sent : -1, true, contrast ? sent : -1, nullptr, 0, written);
 		std::lock_guard<std::mutex> guard(stateMutex);
 		if (ok && light) lastLight = confirmed >= 0 ? confirmed : sent;
@@ -721,10 +829,8 @@ namespace LedDrive
 		int confirmed = -1;
 		const int left = timeoutMs > 0 ? std::max(0, timeoutMs -
 			static_cast<int>(duration_cast<milliseconds>(steady_clock::now() - start).count())) : 0;
-		const bool ok = timeoutMs > 0 ?
-			BoundedTransactLocked(Format("LPW1", std::to_string(clamped)), "LPW1", &confirmed, left, clamped, -1) :
-			Transact(Format("LPW1", std::to_string(clamped)), "LPW1", &confirmed,
-				config.ackTimeoutMs, -1, clamped);
+		const bool ok = TransactSet("LPW1", clamped, &confirmed, config.ackTimeoutMs, -1, clamped, false, -1,
+			nullptr, 0, nullptr, timeoutMs > 0 ? left : -1);
 		std::lock_guard<std::mutex> stateGuard(stateMutex);
 		if (ok) lastLight = confirmed >= 0 ? confirmed : clamped;
 		return ok;
@@ -733,13 +839,15 @@ namespace LedDrive
 	bool BarcoAsciiDriver::SetContrast(int value)
 	{
 		if (!opened) return false;
+		// A device profile without contrast: nothing to set.
+		if (!config.device.Has(DeviceCommandId::Contrast)) return true;
 		{
 			std::lock_guard<std::mutex> stateGuard(stateMutex);
 			scriptContrast = -1;   // audit 2026-10-16
 		}
 		std::lock_guard<std::timed_mutex> guard(portMutex);
 		int confirmed = -1;
-		const bool ok = Transact(Format("CNTR", std::to_string(value)), "CNTR", &confirmed,
+		const bool ok = TransactSet("CNTR", value, &confirmed,
 			config.ackTimeoutMs, -1, -1, false, value);
 		std::lock_guard<std::mutex> stateGuard(stateMutex);
 		if (ok)
@@ -783,8 +891,7 @@ namespace LedDrive
 							skip = shuttingDown;
 						}
 						if (!skip)
-							Transact(Format(command.first.c_str(), std::to_string(command.second)),
-								command.first.c_str(), nullptr, config.ackTimeoutMs, -1, -1, true);
+							TransactSet(command.first, command.second, nullptr, config.ackTimeoutMs, -1, -1, true);
 					}
 					lock.lock();
 					sequenceInFlight = false;
@@ -824,8 +931,8 @@ namespace LedDrive
 							std::lock_guard<std::mutex> stateGuard(stateMutex);
 							skip = shuttingDown;
 						}
-						if (!skip && framing.acknowledged && config.echo)
-							Transact(Format("ECHO", "1"), "ECHO", nullptr, config.ackTimeoutMs, -1, -1, true);
+						if (!skip && framing.acknowledged && config.echo && config.device.Has(DeviceCommandId::Handshake))
+							TransactSet("ECHO", 0, nullptr, config.ackTimeoutMs, -1, -1, true);
 					}
 					lock.lock();
 					transmitting = false;
@@ -841,7 +948,8 @@ namespace LedDrive
 							scriptContrast >= 0 ? scriptContrast : lastSentContrast >= 0 ? lastSentContrast : 50;
 						DebugLog::Log("Dynamic Drive: %s reopened; re-sending LPW1 %d and CNTR %d",
 							config.port.c_str(), lightTarget, contrastTarget);
-						pendingContrast = contrastTarget;
+						if (config.device.Has(DeviceCommandId::Contrast))
+							pendingContrast = contrastTarget;
 						if (pendingLight < 0 && lightTarget >= 0)
 						{
 							pendingLight = lightTarget;
@@ -871,7 +979,7 @@ namespace LedDrive
 						}
 						int confirmed = -1;
 						if (!skip &&
-							Transact(Format("CNTR", std::to_string(contrast)), "CNTR", &confirmed,
+							TransactSet("CNTR", contrast, &confirmed,
 								config.ackTimeoutMs, -1, -1, true, contrast, &contrastGeneration, generation))
 						{
 							std::lock_guard<std::mutex> stateGuard(stateMutex);
@@ -923,7 +1031,7 @@ namespace LedDrive
 				}
 			}
 			int confirmed = -1;
-			const bool ok = Transact(Format("LPW1", std::to_string(target)), "LPW1", &confirmed,
+			const bool ok = TransactSet("LPW1", target, &confirmed,
 				config.ackTimeoutMs, -1, target, true, -1, &lightGeneration, lightTargetGeneration);
 			std::lock_guard<std::mutex> stateGuard(stateMutex);
 			transmitting = false;

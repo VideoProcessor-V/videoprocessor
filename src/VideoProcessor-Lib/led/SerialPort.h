@@ -24,6 +24,13 @@ namespace LedDrive
 		// with line empty: a partial line is kept for the next call (audit
 		// 2026-10-16). A failed read closes the port (IsOpen() false).
 		virtual bool ReadLine(int timeoutMs, std::string& line) = 0;
+		// Device profiles: the frame format for the next Open (data bits 7|8,
+		// parity none|even|odd, stop bits 1|2, flow none|rts_cts|xon_xoff). The
+		// default is 8N1 without flow control.
+		virtual void SetFormat(int dataBits, const std::string& parity, int stopBits, const std::string& flow)
+		{
+			(void)dataBits; (void)parity; (void)stopBits; (void)flow;
+		}
 	};
 
 	// Win32 implementation: CreateFile on \\.\COMn, SetCommState,
@@ -39,10 +46,15 @@ namespace LedDrive
 		void DiscardInput() override;
 		bool Write(const std::string& bytes, std::string& error) override;
 		bool ReadLine(int timeoutMs, std::string& line) override;
+		void SetFormat(int dataBits, const std::string& parity, int stopBits, const std::string& flow) override;
 
 	private:
 		void* handle;
 		std::string pending;
+		int dataBits = 8;
+		std::string parity = "none";
+		int stopBits = 1;
+		std::string flow = "none";
 	};
 
 	std::unique_ptr<ISerialPort> CreateWin32SerialPort();

@@ -13320,6 +13320,123 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         { QStringLiteral("none"), QStringLiteral("barco_ascii") },
         { QStringLiteral("No projector (never open a port)"), QStringLiteral("Barco serial (RS232)") });
     connectionForm->addRow(QStringLiteral("Protocol"), protocolChoice);
+    // Dynamic Drive device profile (feat/dd-projector-profiles): which
+    // projector's command set, ranges, timing and restore values VP uses.
+    // Built-ins: the compiled-in FL35 plus every *.vpprojector shipped in
+    // profiles\dynamic-drive; Browse... picks any other file. Empty =
+    // the built-in Barco F35/FL35.
+    {
+        auto* deviceBox = new QWidget;
+        auto* deviceLayout = new QVBoxLayout(deviceBox);
+        deviceLayout->setContentsMargins(0, 0, 0, 0);
+        deviceLayout->setSpacing(6);
+        auto* deviceRow = new QHBoxLayout;
+        auto* deviceChoice = new QComboBox;
+        deviceChoice->setObjectName(QStringLiteral("config.projector.default.device_profile_choice"));
+        deviceChoice->setAccessibleName(QStringLiteral("Device profile"));
+        auto* devicePath = bindTextField(projector, QStringLiteral("device_profile"));
+        devicePath->setPlaceholderText(QStringLiteral("Built-in: Barco F35 / FL35"));
+        auto* deviceBrowse = new QPushButton(QStringLiteral("Browse…"));
+        deviceBrowse->setObjectName(QStringLiteral("config.projector.default.device_profile_browse"));
+        const QString deviceTip = QStringLiteral(
+            "The projector's Dynamic Drive profile: its RS-232 commands, light and contrast ranges, response time, "
+            "step limits, floors and the values restored on exit. Barco F35 / FL35 is built in. For another projector, "
+            "pick a profile from profiles\\dynamic-drive or Browse for one (see "
+            "docs\\dynamic-drive\\PROFILE-AUTHORING-FOR-AI-AGENTS.md; check it first with tools\\validate_dd_profile.ps1). "
+            "A profile that fails validation is never used: VP then runs no Dynamic Drive and sends nothing.");
+        deviceChoice->setToolTip(deviceTip);
+        devicePath->setToolTip(deviceTip);
+        deviceBrowse->setToolTip(deviceTip);
+        const QString configFolder = QFileInfo(configPath_).absolutePath();
+        deviceChoice->addItem(QStringLiteral("Barco F35 / FL35 (built-in)"), QString());
+        {
+            // The VP folder: next to the configuration, and the Config app's own
+            // folder or its parent (config\VideoProcessorConfig.exe).
+            QStringList folders;
+            for (const QString& root : { configFolder, QCoreApplication::applicationDirPath(),
+                QDir(QCoreApplication::applicationDirPath()).absoluteFilePath(QStringLiteral("..")) })
+            {
+                const QString folder = QDir::cleanPath(QDir(root).filePath(QStringLiteral("profiles/dynamic-drive")));
+                if (!folders.contains(folder, Qt::CaseInsensitive)) folders << folder;
+            }
+            for (const QString& folder : folders)
+                for (const QString& name : QDir(folder).entryList({ QStringLiteral("*.vpprojector") }, QDir::Files, QDir::Name))
+                {
+                    const QString full = QDir(folder).filePath(name);
+                    const QString relative = QDir(configFolder).relativeFilePath(full);
+                    const QString stored = QDir::toNativeSeparators(relative.startsWith(QStringLiteral("..")) ? full : relative);
+                    if (deviceChoice->findData(stored) >= 0) continue;
+                    LedDrive::DeviceProfile loaded;
+                    std::string problem;
+                    const QString label = LedDrive::LoadDeviceProfile(
+                        QDir::toNativeSeparators(full).toLocal8Bit().toStdString(), loaded, problem) ?
+                        QStringLiteral("%1 %2 (%3)").arg(QString::fromStdString(loaded.maker),
+                            QString::fromStdString(loaded.model), name) :
+                        QStringLiteral("%1 (invalid)").arg(name);
+                    deviceChoice->addItem(label, stored);
+                }
+        }
+        deviceChoice->addItem(QStringLiteral("Custom file (path below)"), QStringLiteral("<custom>"));
+        const auto syncChoice = [deviceChoice](const QString& text)
+        {
+            const QSignalBlocker block(deviceChoice);
+            const int found = deviceChoice->findData(QDir::toNativeSeparators(text.trimmed()));
+            deviceChoice->setCurrentIndex(found >= 0 ? found : deviceChoice->count() - 1);
+        };
+        syncChoice(devicePath->text());
+        connect(deviceChoice, qOverload<int>(&QComboBox::currentIndexChanged), this, [deviceChoice, devicePath](int index)
+        {
+            const QString data = deviceChoice->itemData(index).toString();
+            if (data != QStringLiteral("<custom>")) devicePath->setText(data);
+        });
+        connect(deviceBrowse, &QPushButton::clicked, this, [this, devicePath, configFolder]
+        {
+            const QString chosen = QFileDialog::getOpenFileName(this, QStringLiteral("Dynamic Drive device profile"),
+                configFolder, QStringLiteral("Device profiles (*.vpprojector);;All files (*)"));
+            if (chosen.isEmpty()) return;
+            const QString relative = QDir(configFolder).relativeFilePath(chosen);
+            devicePath->setText(QDir::toNativeSeparators(relative.startsWith(QStringLiteral("..")) ? chosen : relative));
+        });
+        deviceRow->addWidget(deviceChoice, 1);
+        deviceRow->addWidget(deviceBrowse);
+        deviceLayout->addLayout(deviceRow);
+        deviceLayout->addWidget(devicePath);
+        auto* deviceStatus = helpLabel(QString());
+        deviceStatus->setObjectName(QStringLiteral("config.projector.default.device_profile_status"));
+        deviceLayout->addWidget(deviceStatus);
+        const auto checkDevice = [this, deviceStatus, configFolder, syncChoice](const QString& text)
+        {
+            syncChoice(text);
+            const QString name = text.trimmed();
+            if (remoteClient_)
+            {
+                deviceStatus->setVisible(false);
+                return;
+            }
+            if (name.isEmpty())
+            {
+                deviceStatus->setText(QStringLiteral("Built-in Barco F35 / FL35 profile."));
+                deviceStatus->setVisible(true);
+                return;
+            }
+            const QString full = QFileInfo(name).isAbsolute() ? name : QDir(configFolder).filePath(name);
+            LedDrive::DeviceProfile loaded;
+            std::string problem;
+            const bool ok = LedDrive::LoadDeviceProfile(
+                QDir::toNativeSeparators(full).toLocal8Bit().toStdString(), loaded, problem);
+            deviceStatus->setText(ok ?
+                QStringLiteral("Profile OK: %1.").arg(QString::fromStdString(loaded.DisplayName())) :
+                QStringLiteral("VP will refuse this profile and run no Dynamic Drive: %1")
+                    .arg(QString::fromLocal8Bit(problem.c_str())));
+            deviceStatus->setVisible(true);
+        };
+        connect(devicePath, &QLineEdit::textChanged, this, checkDevice);
+        checkDevice(devicePath->text());
+        deviceBrowse->setEnabled(!remoteClient_);
+        if (remoteClient_)
+            deviceBrowse->setToolTip(QStringLiteral("The device profile must be on the VP computer; type its path."));
+        connectionForm->addRow(QStringLiteral("Device profile"), deviceBox);
+    }
     auto* port = bindTextField(projector, QStringLiteral("port"), QStringLiteral("COM1"));
     port->setMaximumWidth(140);
     connectionForm->addRow(QStringLiteral("COM port"), port);

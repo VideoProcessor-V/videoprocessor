@@ -245,7 +245,11 @@ namespace LedDrive
 				a.lightMin == b.lightMin && a.lightMax == b.lightMax && a.ackTimeoutMs == b.ackTimeoutMs &&
 				a.minCommandGapMs == b.minCommandGapMs && a.maxLevelsPerCommand == b.maxLevelsPerCommand &&
 				a.burstCommands == b.burstCommands && a.burstPauseMs == b.burstPauseMs &&
-				a.readBack == b.readBack && a.echo == b.echo && a.terminator == b.terminator;
+				a.readBack == b.readBack && a.echo == b.echo && a.terminator == b.terminator &&
+				// Device profiles: another profile (or the same file edited) is a new
+				// connection - the old one restores and closes first.
+				a.TerminatorName() == b.TerminatorName() && a.device.path == b.device.path &&
+				a.deviceProfileError == b.deviceProfileError && DeviceProfileDifference(a.device, b.device).empty();
 		}
 	}
 
@@ -1111,7 +1115,23 @@ namespace LedDrive
 			startLed = led;
 		}
 		const FluxModel startFlux(startProjector.fluxTable);
-		const std::string protocol = EffectiveProtocol(startProjector, startLed);
+		std::string protocol = EffectiveProtocol(startProjector, startLed);
+		// Device profiles: a refused profile never drives the projector
+		// (ReadProjectorConfig already set protocol none); say so plainly.
+		if (!startProjector.deviceProfileError.empty())
+			DebugLog::Log("Dynamic Drive: WARNING device profile refused (%s); no Dynamic Drive - nothing is sent to the projector",
+				startProjector.deviceProfileError.c_str());
+		else if (protocol != "none")
+			DebugLog::Log("Dynamic Drive: device profile %s%s%s", startProjector.device.DisplayName().c_str(),
+				startProjector.device.BuiltIn() ? "" : " from ", startProjector.device.path.c_str());
+		// VP's copy of the script drives CNTR: it needs a contrast command.
+		if (protocol != "none" && startLed.mode == Mode::Script && !startProjector.device.Has(DeviceCommandId::Contrast))
+		{
+			DebugLog::Log("Dynamic Drive: WARNING command_source internal_script needs a contrast command, which the device "
+				"profile %s does not have; no Dynamic Drive - nothing is sent to the projector (use compensate)",
+				startProjector.device.DisplayName().c_str());
+			protocol = "none";
+		}
 		// Retired source (owner 2026-10-15): an older file naming it runs
 		// VP's own copy of the script.
 		if (startLed.pythonSourceRetired)
@@ -1765,7 +1785,7 @@ namespace LedDrive
 		if (driving)
 		{
 			RestoreOutcome restored;
-			RestoreFullLight(*driver, current.ledCeiling,
+			RestoreFullLight(*driver, startProjector.RestoreLight(current.ledCeiling),
 				current.ftbCustomDim != FtbCustomDim::Off || fadeToBlack != FadeToBlack::Normal, contrastDriven, &restored);
 			std::lock_guard<std::mutex> guard(mutex);
 			restoreConfirmed = restored.Confirmed();   // bug hunt 2: reported by Stop()

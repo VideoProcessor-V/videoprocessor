@@ -1,0 +1,53 @@
+# SYNTHETIC test projector (not a real device): DeviceProfileTests uses it to
+# check that a second profile drives VP with its own syntax, ranges, latency,
+# settle time and step limits. Light is a percentage 0-100 sent zero-padded,
+# there is no contrast, dim mode or read-back.
+
+[profile]
+schema = 1
+maker = Example
+model = Synthetic Percent Projector
+version = 3
+source = synthetic test fixture
+
+[transport]
+type = serial
+baud = 9600
+data_bits = 8
+parity = even
+stop_bits = 1
+flow_control = none
+read_back = no
+read_back_supported = no
+
+[framing]
+prefix = *
+send_only = plain
+
+[framing.plain]
+suffix = \r
+case = as_written
+probe = no
+
+[command.light]
+set = LIGHT={v:03d}
+
+[light]
+min = 0
+max = 100
+floor = 40
+floor_reactive = 50
+floor_black = 20
+
+[timing]
+latency_ms = 250
+settle_ms = 600
+
+[limits]
+max_step = 4
+min_command_gap_ms = 350
+burst_commands = 10
+burst_pause_ms = 2000
+
+[restore]
+light = 90
