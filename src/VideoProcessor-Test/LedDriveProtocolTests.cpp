@@ -541,8 +541,9 @@ namespace VideoProcessorTest
 			Assert::IsTrue(driver->SendScript("CNTR", 66));
 			Assert::IsTrue(RestoreFullLight(*driver, 255, false, true));
 			const auto writes = projector->Writes();
-			Assert::AreEqual(std::string(":LPW1255\r"), writes[writes.size() - 2], L"Light first");
-			Assert::AreEqual(std::string(":CNTR50\r"), writes.back(), L"then contrast back to 50");
+			// Hunt 3 (LED3): the bright-cut order, CNTR before LPW1.
+			Assert::AreEqual(std::string(":CNTR50\r"), writes[writes.size() - 2], L"Contrast back to 50 first");
+			Assert::AreEqual(std::string(":LPW1255\r"), writes.back(), L"then light");
 			Assert::AreEqual(50, projector->contrast);
 			driver->Close();
 		}
@@ -736,7 +737,23 @@ namespace VideoProcessorTest
 			// wait out Barco's 2 s after it.
 			projector->silent = true;
 			Assert::IsFalse(driver->SendScript("LPW1", 200), L"Reopened; no reply");
-			Assert::IsTrue(clock.RunUntil([&] { return echoes() > echoesBefore; }, 4000, 10.0, 0), L"The resync's ECHO");
+			// Hunt 3: the clock moves only while the driver thread is parked on it (it
+			// waits out Barco's 2 s there); otherwise the resync is being written in
+			// real time. Moving it without that check let 4 s of clock pass before a
+			// loaded machine ran the driver thread at all (flaky under load).
+			{
+				const double end = clock.Ms() + 4000.0;
+				const auto realDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+				while (echoes() <= echoesBefore && clock.Ms() < end &&
+					std::chrono::steady_clock::now() < realDeadline)
+				{
+					if (clock.clock->SettledCount() >= 1)
+						clock.To(clock.Ms() + 10.0);
+					else
+						std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				}
+			}
+			Assert::IsTrue(echoes() > echoesBefore, L"The resync's ECHO");
 			Assert::IsTrue(clock.Run(150, 10.0, 0));
 			Assert::IsTrue(driver->Status().contrastBusy, L"The resync CNTR (55) is waiting");
 			projector->silent = false;
@@ -822,8 +839,8 @@ namespace VideoProcessorTest
 			Assert::IsTrue(writes.size() >= 3);
 			const size_t n = writes.size();
 			Assert::AreEqual(std::string(":LDMM0\r"), writes[n - 3]);
-			Assert::AreEqual(std::string(":LPW1255\r"), writes[n - 2]);
-			Assert::AreEqual(std::string(":CNTR50\r"), writes[n - 1]);
+			Assert::AreEqual(std::string(":CNTR50\r"), writes[n - 2], L"Hunt 3 (LED3): CNTR before LPW1");
+			Assert::AreEqual(std::string(":LPW1255\r"), writes[n - 1]);
 			for (size_t i = n - 2; i < n; ++i)
 			{
 				const double gap = std::chrono::duration<double, std::milli>(times[i] - times[i - 1]).count();

@@ -260,6 +260,17 @@ namespace LedDrive
 			builderGeneration = generation;
 			transfer.reset();
 		}
+		// Hunt 3 (LED2): a new stream (a hold-over drive adopted by the next
+		// file, a sequence restart): the last stream's sequence, windows and
+		// clock are dropped, so the new one is measured from its first frame.
+		const uint64_t epoch = module.LookaheadEpoch();
+		if (epoch != streamEpoch)
+		{
+			streamEpoch = epoch;
+			builder = StatsBuilder(module.Config());
+			lastSequence = 0;
+			haveStreamTime = false;
+		}
 		// Each frame once, in source order; a jump backwards is a new stream.
 		if (sourceSequence != 0 && sourceSequence <= lastSequence &&
 			lastSequence - sourceSequence < 1000)
@@ -284,9 +295,27 @@ namespace LedDrive
 		if (!config.pictureOnly) options.maskCount = 0;
 		RawMeasurement raw;
 		if (!MeasureRawFrame(luma, activePicture, boosted, raw, module.SourceRange(), &options)) return;
-		lastSequence = sourceSequence;
 		// The builder's windows are in real time: one source frame apart.
-		const FrameStats stats = builder.Build(raw, sourceSequence * module.SourceFramePeriodMs());
+		// Hunt 3 (LED1): a monotonic clock - the frames since the last measured
+		// one at the current period (bounded, so a gap cannot run away); a jump
+		// backwards (a new stream the epoch did not announce) restarts the
+		// windows and advances one frame.
+		const double periodMs = module.SourceFramePeriodMs();
+		if (!haveStreamTime)
+		{
+			streamTimeMs = 0.0;
+			haveStreamTime = true;
+		}
+		else if (sourceSequence > lastSequence && lastSequence != 0)
+			streamTimeMs += static_cast<double>(std::min<uint64_t>(sourceSequence - lastSequence, 1000)) * periodMs;
+		else
+		{
+			if (sourceSequence != 0 && sourceSequence < lastSequence)
+				builder = StatsBuilder(module.Config());
+			streamTimeMs += periodMs;
+		}
+		lastSequence = sourceSequence;
+		const FrameStats stats = builder.Build(raw, streamTimeMs);
 		module.SubmitPrediction(sourceSequence, stats);
 	}
 }

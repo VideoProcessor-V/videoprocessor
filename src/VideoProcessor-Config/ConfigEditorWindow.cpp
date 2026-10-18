@@ -670,6 +670,19 @@ QString effectiveChoiceValue(const QComboBox* combo)
     return (selected.isEmpty() ? combo->property("effectiveValue").toString() : selected).trimmed().toLower();
 }
 
+// Hunt 3 (CFG3): a retired choice value the renderer still reads, and the
+// current value it maps to (empty when `value` is not a retired one). The
+// renderer's own mapping: LibplaceboVideoRenderer's dejudder_even_rates read.
+QString retiredChoiceTarget(const QString& key, const QString& value)
+{
+    if (key == QStringLiteral("dejudder_even_rates"))
+    {
+        if (value.compare(QStringLiteral("30"), Qt::CaseInsensitive) == 0) return QStringLiteral("whole");
+        if (value.compare(QStringLiteral("30_and_29.97"), Qt::CaseInsensitive) == 0) return QStringLiteral("whole_and_1001");
+    }
+    return {};
+}
+
 // Audit 2026-10-16: exclusive buttons over a hidden drop-down. The buttons show the effective
 // value (inherited from the default profile, or the built-in default), marked as such; a
 // "Not set" button returns the profile to the drop-down's unspecified item (the key removed).
@@ -2263,48 +2276,8 @@ void ConfigEditorWindow::loadConfiguration()
 	hasPendingMigrations_ = false;
 	savedSnapshot_ = configurationLoaded_ ? captureDocumentSnapshot(*document_) :
 		DocumentSnapshot{};
-	bool migratedLegacyInputPolicy = false;
-	if (configurationLoaded_)
-	{
-		for (const char* inputKey : { "video_conversion", "container_colorspace",
-			"hdr_colorspace", "hdr_luminance" })
-		{
-			const std::string vpRendererInput =
-				document_->Get("vprenderer.input_processing", inputKey);
-			const std::string interimVpRendererInput =
-				document_->Get("vprenderer.input", inputKey);
-			const std::string legacyVpRenderer =
-				document_->Get("vprenderer", inputKey);
-			if (!interimVpRendererInput.empty())
-			{
-				if (vpRendererInput.empty())
-				{
-					document_->AddSection("vprenderer.input_processing");
-					document_->SetKnown("vprenderer.input_processing", inputKey,
-						interimVpRendererInput);
-				}
-				document_->RemoveKnown("vprenderer.input", inputKey);
-				migratedLegacyInputPolicy = true;
-			}
-			if (!legacyVpRenderer.empty())
-			{
-				if (vpRendererInput.empty() && interimVpRendererInput.empty())
-				{
-					document_->AddSection("vprenderer.input_processing");
-					document_->SetKnown("vprenderer.input_processing", inputKey,
-						legacyVpRenderer);
-				}
-				document_->RemoveKnown("vprenderer", inputKey);
-				migratedLegacyInputPolicy = true;
-			}
-		}
-		// Removing an empty header is a visible migration (hunt 2, L9): the
-		// presence of [vprenderer] alone selects the [general] validation.
-		for (const char* emptied : { "vprenderer.input", "vprenderer" })
-			if (document_->SectionSettings(emptied).empty() &&
-				document_->RemoveSection(emptied))
-				migratedLegacyInputPolicy = true;
-	}
+	// Hunt 3 (CFG7): the same fold a remote Discard runs.
+	const bool migratedLegacyInputPolicy = configurationLoaded_ && foldLegacyInputPolicy();
 	dirty_ = configurationLoaded_ && (!document_->existedAtLoad ||
 		migratedLegacyInputPolicy);
 	hasPendingMigrations_ = migratedLegacyInputPolicy;
@@ -2316,6 +2289,53 @@ void ConfigEditorWindow::loadConfiguration()
         seedCalibratedProfile(QStringLiteral("vprenderer"), QStringLiteral("vprenderer.Default"));
         seedCalibratedProfile(QStringLiteral("vprenderer.color"), QStringLiteral("vprenderer.color.Default"));
     }
+}
+
+bool ConfigEditorWindow::foldLegacyInputPolicy()
+{
+	// The input policy keys move from [vprenderer.input] / [vprenderer] to
+	// [vprenderer.input_processing], and the emptied headers are removed. Run
+	// by every load path (hunt 3, CFG7: a remote Discard skipped it).
+	bool migratedLegacyInputPolicy = false;
+	for (const char* inputKey : { "video_conversion", "container_colorspace",
+		"hdr_colorspace", "hdr_luminance" })
+	{
+		const std::string vpRendererInput =
+			document_->Get("vprenderer.input_processing", inputKey);
+		const std::string interimVpRendererInput =
+			document_->Get("vprenderer.input", inputKey);
+		const std::string legacyVpRenderer =
+			document_->Get("vprenderer", inputKey);
+		if (!interimVpRendererInput.empty())
+		{
+			if (vpRendererInput.empty())
+			{
+				document_->AddSection("vprenderer.input_processing");
+				document_->SetKnown("vprenderer.input_processing", inputKey,
+					interimVpRendererInput);
+			}
+			document_->RemoveKnown("vprenderer.input", inputKey);
+			migratedLegacyInputPolicy = true;
+		}
+		if (!legacyVpRenderer.empty())
+		{
+			if (vpRendererInput.empty() && interimVpRendererInput.empty())
+			{
+				document_->AddSection("vprenderer.input_processing");
+				document_->SetKnown("vprenderer.input_processing", inputKey,
+					legacyVpRenderer);
+			}
+			document_->RemoveKnown("vprenderer", inputKey);
+			migratedLegacyInputPolicy = true;
+		}
+	}
+	// Removing an empty header is a visible migration (hunt 2, L9): the
+	// presence of [vprenderer] alone selects the [general] validation.
+	for (const char* emptied : { "vprenderer.input", "vprenderer" })
+		if (document_->SectionSettings(emptied).empty() &&
+			document_->RemoveSection(emptied))
+			migratedLegacyInputPolicy = true;
+	return migratedLegacyInputPolicy;
 }
 
 void ConfigEditorWindow::runLoadMigrations()
@@ -2349,8 +2369,12 @@ void ConfigEditorWindow::discardEdits()
         const std::string baseline = document_->loadedBytes;
         document_->LoadBytes(configPath_.toStdWString(), baseline);
         savedSnapshot_ = captureDocumentSnapshot(*document_);
-        hasPendingMigrations_ = false;
         seededMotionDefault_ = false;
+        // Hunt 3 (CFG7): the fold and empty-header removal a fresh load runs.
+        const bool migrated = configurationLoaded_ && foldLegacyInputPolicy();
+        dirty_ = migrated;
+        hasPendingMigrations_ = migrated;
+        if (migrated) document_->requiresMigrationBackup = document_->existedAtLoad;
     }
     else loadConfiguration();
     runLoadMigrations();
@@ -2983,7 +3007,16 @@ void ConfigEditorWindow::migrateLegacyQueueOwnership()
     if (!configurationLoaded_ || !document_) return;
     const QStringList queues = profileSections(QStringLiteral("queue"));
     if (queues.isEmpty()) return;
-    const QString baseline = queues.front();
+    // Hunt 3 (CFG6): the section VP reads the start-up queue values from
+    // (QueueConfiguration::ResolveDefaultSection): [queue] when present, else
+    // the first named queue profile - not simply the first in the file.
+    QString baseline = queues.front();
+    for (const QString& queueSection : queues)
+        if (queueSection.compare(QStringLiteral("queue"), Qt::CaseInsensitive) == 0)
+        {
+            baseline = queueSection;
+            break;
+        }
     bool migrated = false;
     auto migrate = [this, &baseline, &migrated](const QString& oldSection,
         const QString& oldKey, const QString& newKey)
@@ -3007,6 +3040,9 @@ void ConfigEditorWindow::migrateLegacyQueueOwnership()
         QStringLiteral("presentation_lead_frames"),
         QStringLiteral("lead_frames"));
     migrate(QStringLiteral("command_line"),
+        QStringLiteral("queue_size"), QStringLiteral("queue_size"));
+    // Hunt 3 (CFG9): VP reads [general] queue_size too (after [command_line]).
+    migrate(QStringLiteral("general"),
         QStringLiteral("queue_size"), QStringLiteral("queue_size"));
     for (const QString& queueSection : queues)
     {
@@ -6121,18 +6157,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QStringList ordered = before;
             ordered[ordered.indexOf(sectionPrefix, 0, Qt::CaseInsensitive)] = renamed;
             const QString newDefault = ordered.front();
+            // Hunt 3 (CFG6): the root was the default (VP reads the root when
+            // present, else the first named profile); once renamed it moves to
+            // the front so it stays the default, with the legacy values Config
+            // folded into it at load.
             if (newDefault != renamed)
-            {
-                QStringList defaultOnlyKeys;
-                for (const QString& key : defaultOnlyKeys)
-                {
-                    const QString configured = value(renamed, key);
-                    if (configured.isEmpty()) continue;
-                    const std::string keyText = key.toStdString();
-                    document_->RemoveKnown(renamed.toStdString(), keyText.c_str());
-                    document_->SetKnown(newDefault.toStdString(), keyText.c_str(), configured.toLocal8Bit().constData());
-                }
-            }
+                document_->MoveSectionBefore(renamed.toStdString(), newDefault.toStdString());
             dirty_ = true;
             hasPendingMigrations_ = true;
             // A real migration: keep the original file (audit 2026-10-17).
@@ -7735,6 +7765,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             auto raw = [texts, choices](int i) {
                 QString value = texts[i] ? texts[i]->text().trimmed() : choices[i]->currentData().toString().trimmed();
                 if (value.compare(QStringLiteral("Auto"), Qt::CaseInsensitive) == 0) value.clear();   // the default profile's unset field
+                // Hunt 3 (CFG3): a retired value counts as the value it maps to.
+                const QString retired = retiredChoiceTarget(QString::fromLatin1(kKeys[i]), value);
+                if (!retired.isEmpty()) value = retired;
                 return value;
             };
             auto matches = [raw](int p) {
@@ -8793,7 +8826,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         interpolationGrain->setItemText(interpolationGrain->findData(QStringLiteral("blend")), QStringLiteral("Blend (the earlier output)"));
         interpolationGrain->setToolTip(QStringLiteral(
             "Preserve (default): an interpolated picture keeps the grain of the nearer source frame instead of "
-            "averaging two frames' grain away. Blend: the earlier output (grain softened between frames)."));
+            "averaging two frames' grain away. Blend: the earlier output (grain softened between frames). "
+            "Also used by Fill dropped frames (hiccup repair), with motion smoothing on or off."));
         auto* warpFilter = addChoice(QStringLiteral("De-judder source warp filter"),
             QStringLiteral("dejudder_source_warp_filter"), { QStringLiteral("catmull"), QStringLiteral("bilinear") });
         warpFilter->setItemText(warpFilter->findData(QStringLiteral("catmull")), QStringLiteral("Catmull-Rom (default, keeps grain)"));
@@ -8845,7 +8879,8 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             auto syncGreyed = [grey, opticalFlow, opticalFlowGlobal, opticalFlowFallback, opticalFlowCost,
                 opticalFlowFb, renderAhead, dejudderGate, renderAheadUtilisation, renderAheadCredit,
                 sourceResolution, autoConfidence, evidenceSeconds, evidenceShots, interpolation,
-                interpolationGrain, debandVp, debandGrainGuard, debandVpExclusive]()
+                interpolationGrain, debandVp, debandGrainGuard, debandVpExclusive, latchFixes, engageWait,
+                crossfade, releaseFade, fillGaps]()
             {
                 // The engine's extras do nothing with VP's matcher only; the search
                 // fallback also needs the engine's camera motion.
@@ -8866,14 +8901,23 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 for (QWidget* widget : { static_cast<QWidget*>(autoConfidence), static_cast<QWidget*>(evidenceSeconds),
                     static_cast<QWidget*>(evidenceShots) })
                     grey(widget, !sourceAuto);
+                // Hunt 3 (CFG2): the latch timings need Auto and the latch fixes.
+                const bool latchOff = !sourceAuto || effectiveChoiceValue(latchFixes) == QStringLiteral("off");
+                for (QWidget* widget : { static_cast<QWidget*>(engageWait), static_cast<QWidget*>(crossfade),
+                    static_cast<QWidget*>(releaseFade) })
+                    grey(widget, latchOff);
+                // Hunt 3 (CFG4): the grain choice also shapes hiccup repair's gap fill
+                // (interpolation_fill_gaps), which presents interpolated pictures with
+                // motion smoothing off.
                 const QString interpolationMode = effectiveChoiceValue(interpolation);
                 grey(interpolationGrain, interpolationMode != QStringLiteral("auto") &&
-                    interpolationMode != QStringLiteral("always"));
+                    interpolationMode != QStringLiteral("always") &&
+                    effectiveChoiceValue(fillGaps) != QStringLiteral("on"));
                 grey(debandGrainGuard, effectiveChoiceValue(debandVp) == QStringLiteral("off"));
                 grey(debandVpExclusive, effectiveChoiceValue(debandVp) == QStringLiteral("off"));
             };
             for (QComboBox* driver : { opticalFlow, opticalFlowGlobal, renderAhead, dejudderGate, sourceResolution,
-                interpolation, debandVp })
+                interpolation, debandVp, latchFixes, fillGaps })
                 connect(driver, qOverload<int>(&QComboBox::currentIndexChanged), this, [syncGreyed](int) { syncGreyed(); });
             auto* greyedRefresh = new QAction(debandGrainGuard);
             greyedRefresh->setObjectName(controlName(sectionPrefix, QStringLiteral("greyed_state_refresh")));
@@ -10777,6 +10821,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                         key == QStringLiteral("ssim_bitrate_floor") || key == QStringLiteral("render_ahead_utilisation") ||
                         key.startsWith(QStringLiteral("source_resolution_auto_")) ||
                         key.startsWith(QStringLiteral("source_resolution_evidence_")) ||
+                        // Hunt 3 (CFG2): the latch timing fields show 20 / 1.5 / 0.25.
+                        key == QStringLiteral("source_resolution_engage_max_wait_s") ||
+                        key == QStringLiteral("source_resolution_crossfade_s") ||
+                        key == QStringLiteral("source_resolution_release_fade_s") ||
                         key == QStringLiteral("intent_content_hold_seconds") ||
                         key == QStringLiteral("detail_pulse_cap") || key == QStringLiteral("texture_restore_cap") ||
                         key.startsWith(QStringLiteral("intent_motion_")) || key == QStringLiteral("intent_ease_s") ||
@@ -11094,8 +11142,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 				if (index < 0)
                 {
                     const bool legacyAuto = configured.compare(QStringLiteral("auto"), Qt::CaseInsensitive) == 0;
+                    // Hunt 3 (CFG3): a retired value says what it maps to.
+                    const QString retiredTarget = retiredChoiceTarget(field.key, configured);
+                    const int retiredTargetIndex = retiredTarget.isEmpty() ? -1 : combo->findData(retiredTarget);
                     combo->addItem(legacyAuto ? (field.key == QStringLiteral("sdr_input_transfer") ? QStringLiteral("SDR reference: 2.4") : QStringLiteral("Saved automatic policy")) :
-                        calibrationLutSlot ? QStringLiteral("Missing: %1").arg(configured) : friendlyChoiceLabel(configured), configured);
+                        calibrationLutSlot ? QStringLiteral("Missing: %1").arg(configured) :
+                        retiredTargetIndex >= 0 ? QStringLiteral("%1 (retired -> maps to %2)").arg(configured, combo->itemText(retiredTargetIndex)) :
+                        friendlyChoiceLabel(configured), configured);
                     if (calibrationLutSlot)
                         combo->setItemData(combo->count() - 1, true, Qt::UserRole + 1);
                     if (legacyAuto)
@@ -11151,8 +11204,22 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 		}
 		// The motion slider follows the loaded fields (loading blocks their own
 		// change signals).
+		static const QStringList kContentGateKeys = { QStringLiteral("intent_content"),
+			QStringLiteral("intent_content.check"), QStringLiteral("source_class"),
+			QStringLiteral("dejudder_pulldown"), QStringLiteral("cadence_class_fixes") };
 		if (sectionPrefix == QStringLiteral("vprenderer"))
 		{
+			// Hunt 3 (CFG5): undo the previous profile's content-gate greying first,
+			// so the refreshes below set the state they own.
+			for (const QString& key : kContentGateKeys)
+				if (QWidget* widget = profileFields->findChild<QWidget*>(controlName(sectionPrefix, key)))
+					if (widget->property("contentGateIgnored").toBool())
+					{
+						widget->setProperty("contentGateIgnored", false);
+						widget->setProperty("greyedOff", false);
+						widget->setEnabled(true);
+						widget->setToolTip(widget->property("contentGateTooltip").toString());
+					}
 			if (auto* refresh = profileFields->findChild<QAction*>(
 				controlName(sectionPrefix, QStringLiteral("motion_preset_refresh"))))
 				refresh->trigger();
@@ -11183,6 +11250,34 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 			if (auto* refresh = profileFields->findChild<QAction*>(
 				controlName(sectionPrefix, QStringLiteral("greyed_state_refresh"))))
 				refresh->trigger();
+			// Hunt 3 (CFG5): in a profile whose when: rule reads $content, the
+			// renderer ignores the classifier's own inputs (with the film / video
+			// classification fixes on): they are greyed and say why.
+			{
+				bool contentGated = false;
+				const std::string when = value(section, QStringLiteral("when")).trimmed().toStdString();
+				if (!when.empty())
+				{
+					DisplayRuleExpression::Expression expression;
+					std::string error;
+					contentGated = expression.Compile(when, error, true) && expression.Variables().count("content") != 0;
+				}
+				const QString cadenceFixes = effectiveChoiceValue(profileFields->findChild<QComboBox*>(
+					controlName(sectionPrefix, QStringLiteral("cadence_class_fixes"))));
+				const bool ignored = contentGated && cadenceFixes != QStringLiteral("off");
+				for (const QString& key : kContentGateKeys)
+				{
+					QWidget* widget = profileFields->findChild<QWidget*>(controlName(sectionPrefix, key));
+					if (!widget || !ignored) continue;
+					widget->setProperty("contentGateTooltip", widget->toolTip());
+					widget->setProperty("contentGateIgnored", true);
+					widget->setProperty("greyedOff", true);
+					widget->setEnabled(false);
+					widget->setToolTip(widget->toolTip() + QStringLiteral(
+						"\n\nIgnored in this profile: its when: rule reads $content, which this setting changes, "
+						"so the renderer keeps the value from outside this profile (cadence_class_fixes)."));
+				}
+			}
 		}
         updateToneControls();
         updateDvModeControls();

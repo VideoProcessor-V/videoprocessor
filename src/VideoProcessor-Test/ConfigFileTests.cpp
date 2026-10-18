@@ -18,6 +18,8 @@
 #include <AmbientConfig.h>
 #include <AmbientSensor.h>
 #include <QueueConfiguration.h>
+#include <ConfigBoolSwitches.h>
+#include <HdrInference.h>
 #include <QueueLatency.h>
 #include <QueueProfileRestartPolicy.h>
 #include <ProfileChangeOverlay.h>
@@ -8236,6 +8238,97 @@ namespace VideoProcessorTest
 				  "[shaders]" })
 				Assert::IsTrue(html.find(excluded) == std::string::npos,
 					std::wstring(excluded, excluded + strlen(excluded)).c_str());
+		}
+
+		// Bug hunt 3 (CFG1): a configured false reaches VP for every default-on
+		// boolean the configuration turns into a command-line switch; true still
+		// emits the bare switch, and a default-off key's false adds nothing.
+		TEST_METHOD(Hunt3DefaultOnBooleansCanBeTurnedOff)
+		{
+			size_t defaultOn = 0;
+			for (const ConfigBoolSwitches::Option& option : ConfigBoolSwitches::Options())
+			{
+				const std::string key = option.keys[0];
+				const std::wstring label(key.begin(), key.end());
+				char directory[MAX_PATH] = {};
+				Assert::IsTrue(GetTempPathA(ARRAYSIZE(directory), directory) > 0);
+				const std::string path = std::string(directory) + "VideoProcessor-hunt3-bool-" + key + ".cfg";
+				for (const bool configuredValue : { false, true })
+				{
+					{
+						std::ofstream file(path, std::ios::out | std::ios::trunc);
+						file << "[general]\n" << key << ": " << (configuredValue ? "true" : "false") << "\n";
+					}
+					ConfigFile config;
+					Assert::IsTrue(config.Load(path), label.c_str());
+					std::string error;
+					Assert::IsTrue(MainConfigSchema::Validate(config, error), label.c_str());
+					bool value = !configuredValue;
+					Assert::IsTrue(config.TryGetBool("general", key, value), label.c_str());
+					const std::vector<std::wstring> tokens = ConfigBoolSwitches::Tokens(option, true, value);
+					if (configuredValue)
+					{
+						Assert::AreEqual(static_cast<size_t>(1), tokens.size(), label.c_str());
+						Assert::AreEqual(std::wstring(option.commandLineSwitch), tokens[0], label.c_str());
+					}
+					else if (option.defaultOn)
+					{
+						Assert::AreEqual(static_cast<size_t>(2), tokens.size(), (label + L": false must reach VP").c_str());
+						Assert::AreEqual(std::wstring(option.commandLineSwitch), tokens[0], label.c_str());
+						Assert::AreEqual(std::wstring(L"false"), tokens[1], label.c_str());
+					}
+					else
+						Assert::IsTrue(tokens.empty(), (label + L": a default-off false adds nothing").c_str());
+				}
+				DeleteFileA(path.c_str());
+				if (option.defaultOn) ++defaultOn;
+				Assert::IsTrue(ConfigBoolSwitches::Tokens(option, false, true).empty(), label.c_str());
+			}
+			// The audit: newlldv_sdr_veto is the default-on key (VP's own default).
+			const ConfigBoolSwitches::Option* veto = ConfigBoolSwitches::Find("newlldv_sdr_veto");
+			Assert::IsNotNull(veto);
+			Assert::IsTrue(veto->defaultOn);
+			Assert::AreEqual(HdrInferenceOptions().sdrVeto, veto->defaultOn, L"the switch table follows VP's default");
+			// dv_tunnel_handoff (DV input fixes, default on; merged in integration round 5).
+			const ConfigBoolSwitches::Option* handoff = ConfigBoolSwitches::Find("dv_tunnel_handoff");
+			Assert::IsNotNull(handoff);
+			Assert::IsTrue(handoff->defaultOn, L"dv_tunnel_handoff is default on");
+			Assert::IsTrue(defaultOn >= 2);
+			// Aliases resolve to their option.
+			Assert::IsTrue(ConfigBoolSwitches::Find("start_minimized") == ConfigBoolSwitches::Find("startminimized"));
+			Assert::IsNull(ConfigBoolSwitches::Find("not_a_switch"));
+		}
+
+		// Bug hunt 3 (CFG9): [general] queue_size is read (after the default queue
+		// profile and [command_line]), not validated and ignored.
+		TEST_METHOD(Hunt3GeneralQueueSizeIsRead)
+		{
+			char directory[MAX_PATH] = {};
+			Assert::IsTrue(GetTempPathA(ARRAYSIZE(directory), directory) > 0);
+			const std::string path = std::string(directory) + "VideoProcessor-hunt3-queue-size.cfg";
+			auto resolve = [&](const char* contents, std::string& value, std::string& source)
+			{
+				{
+					std::ofstream file(path, std::ios::out | std::ios::trunc);
+					file << contents;
+				}
+				ConfigFile config;
+				Assert::IsTrue(config.Load(path));
+				std::string error;
+				Assert::IsTrue(MainConfigSchema::Validate(config, error), std::wstring(error.begin(), error.end()).c_str());
+				return QueueConfiguration::TryGetHardCapacityString(config, value, source);
+			};
+			std::string value, source;
+			Assert::IsTrue(resolve("[general]\nqueue_size: 24\n", value, source));
+			Assert::AreEqual(std::string("24"), value);
+			Assert::AreEqual(std::string("general"), source);
+			Assert::IsTrue(resolve("[general]\nqueue_size: 24\n[command_line]\nqueue_size: 12\n", value, source));
+			Assert::AreEqual(std::string("12"), value, L"[command_line] before [general]");
+			Assert::IsTrue(resolve("[general]\nqueue_size: 24\n[queue]\nqueue_size: 8\n", value, source));
+			Assert::AreEqual(std::string("8"), value, L"the default queue profile first");
+			Assert::AreEqual(std::string("queue"), source);
+			Assert::IsFalse(resolve("[general]\nfullscreen: false\n", value, source));
+			DeleteFileA(path.c_str());
 		}
 	};
 }

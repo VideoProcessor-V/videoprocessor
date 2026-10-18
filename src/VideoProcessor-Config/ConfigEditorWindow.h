@@ -180,6 +180,8 @@ private:
     // Every load-time migration, in order: construction, target switch,
     // Cancel / Discard and reloads all run the same sequence.
     void runLoadMigrations();
+    // Hunt 3 (CFG7): the input-policy fold and empty-header removal of a load.
+    bool foldLegacyInputPolicy();
     // Discards the working copy and reloads the target (Cancel / Discard).
     void discardEdits();
     // Reloads a clean editor whose file changed on disk since it was loaded.

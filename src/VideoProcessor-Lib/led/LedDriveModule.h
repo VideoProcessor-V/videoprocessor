@@ -94,6 +94,19 @@ namespace LedDrive
 		void SetSourceRange(int range) { sourceRange.store(range, std::memory_order_relaxed); }
 		int SourceRange() const { return sourceRange.load(std::memory_order_relaxed); }
 		void SubmitPrediction(uint64_t sequence, const FrameStats& predicted);
+		// Hunt 3 (LED2): a new stream starts on this module (a hold-over drive
+		// adopted by the next file, whose source sequence restarts): the
+		// predictions by sequence are dropped and the look-ahead observer
+		// starts over (sequence, persistence windows, clock) at its next frame,
+		// so the new file is looked ahead from its first frame. Called by the
+		// adopting renderer; BeginFrame also calls it when the source sequence
+		// goes backwards. Any thread.
+		void ResetLookahead();
+		uint64_t LookaheadEpoch() const { return lookaheadEpoch.load(std::memory_order_acquire); }
+		// Tests: the stored prediction for a source sequence (uncorrected).
+		bool PredictionFor(uint64_t sequence, FrameStats& out) const;
+		// Hunt 3: the most predictions kept (sequence 0 never prunes them).
+		static constexpr size_t MAX_PREDICTIONS = 4096;
 
 		// Diagnostics and tests.
 		// True while the experimental custom-dim fade to black is engaged.
@@ -246,8 +259,10 @@ namespace LedDrive
 		int ticks = 0;
 
 		const std::chrono::steady_clock::time_point created;
-		bool compensating = false;
-		bool applyGain = false;
+		// Hunt 3 (LED5): written under the mutex, but also read without it on the
+		// LED thread (smoothing, the dry-run logs): atomic, so no read races a write.
+		std::atomic<bool> compensating{ false };
+		std::atomic<bool> applyGain{ false };
 		CompensateController compensator;
 		ControllerOutput policy;
 		bool holding = false;
@@ -321,6 +336,8 @@ namespace LedDrive
 		LookaheadObserver lookahead;
 		std::shared_ptr<const RawTransfer> rawTransfer;
 		std::map<uint64_t, FrameStats> predictions;
+		std::atomic<uint64_t> lookaheadEpoch{ 0 };
+		void ResetLookaheadLocked();
 		std::atomic<int> sourceRange{ -1 };
 		size_t lookaheadDepth = 0;
 		// Review 2026-10-17: NowMs() of the last walk (SetLookaheadDepth; -1

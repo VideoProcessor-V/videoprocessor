@@ -220,6 +220,11 @@ namespace LedDrive
 		// Mean absolute difference of block luma against the previous frame,
 		// in codes (the cut metric); 0 before there is a previous frame.
 		double LastDifference() const { return lastDifference; }
+		// Hunt 3 (LED1, tests): the highlight persistence window's samples.
+		size_t HighlightHistorySize() const { return highlightHistory.size(); }
+		// Hunt 3 (LED1): the most samples a persistence window keeps (a time
+		// base that stalls cannot grow it without limit).
+		static constexpr size_t MAX_WINDOW_SAMPLES = 4096;
 
 		// (time, value) over a persistence window.
 		struct Sample { double time; double value; };

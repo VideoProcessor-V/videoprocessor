@@ -452,8 +452,14 @@ namespace LedDrive
 		// and the newest one from before the window began.
 		double WindowMinimum(std::deque<StatsBuilder::Sample>& history, double timeMs, double value, int windowMs)
 		{
+			// Hunt 3 (LED1): time going backwards is a new time base (the old
+			// samples would never expire): the window restarts. Bounded too.
+			if (!history.empty() && timeMs < history.back().time)
+				history.clear();
 			history.push_back({ timeMs, value });
 			while (history.size() > 1 && history[1].time <= timeMs - windowMs)
+				history.pop_front();
+			while (history.size() > StatsBuilder::MAX_WINDOW_SAMPLES)
 				history.pop_front();
 			double minimum = value;
 			for (const StatsBuilder::Sample& sample : history)
@@ -511,8 +517,10 @@ namespace LedDrive
 		// Fade (in time, any frame rate): APL fell between every pair of
 		// frames over at least the last fade_ms, each step at no less than
 		// fade_min_slope per second, with no cut among them.
-		if (stats.cut) aplHistory.clear();
+		if (stats.cut || (!aplHistory.empty() && timeMs < aplHistory.back().time)) aplHistory.clear();
 		aplHistory.push_back({ timeMs, stats.apl });
+		while (aplHistory.size() > MAX_WINDOW_SAMPLES)
+			aplHistory.pop_front();
 		// Keep the newest sample at or before the window's start, so the
 		// samples kept span the whole window.
 		while (aplHistory.size() > 2 && aplHistory[1].time <= timeMs - config.fadeMs + 1e-6)

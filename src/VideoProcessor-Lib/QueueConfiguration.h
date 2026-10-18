@@ -48,6 +48,28 @@ namespace QueueConfiguration
 		return true;
 	}
 
+	// Hunt 3 (CFG9): the renderer queue's hard capacity at start-up - the
+	// default queue profile's queue_size, else the legacy application keys
+	// ([command_line], then [general]; both validated by MainConfigSchema,
+	// [general] was never read before). `source` names where it came from.
+	inline bool TryGetHardCapacityString(const ConfigFile& config,
+		std::string& value, std::string& source)
+	{
+		std::string section;
+		if (TryGetDefaultString(config, "queue_size", value, &section))
+		{
+			source = section;
+			return true;
+		}
+		for (const char* legacy : { "command_line", "general" })
+			if (config.TryGetString(legacy, "queue_size", value))
+			{
+				source = legacy;
+				return true;
+			}
+		return false;
+	}
+
 	// [queue_recovery] remains a read-compatible legacy source.  Callers rely
 	// on MainConfigSchema to reject a same-key canonical/legacy duplicate
 	// before startup; canonical queue values deliberately win here as a safe

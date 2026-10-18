@@ -157,8 +157,8 @@ namespace LedDrive
 		RestoreOutcome result;
 		using namespace std::chrono;
 		driver.BeginShutdown();
-		// Standard dim mode first, then full light, then (after mode: script
-		// or the CNTR assist) contrast back to 50 - only the commands needed.
+		// Standard dim mode first, then (after mode: script or the CNTR
+		// assist) contrast back to 50, then full light - only the commands needed.
 		// audit 2026-10-16: CNTR is skipped when 50 was the last value sent
 		// and none is waiting or in flight.
 		if (restoreContrast)
@@ -189,14 +189,18 @@ namespace LedDrive
 			result.dimMode = driver.SendNow("LDMM", 0, budget());
 			DebugLog::Log("Dynamic Drive: LED dim mode restored to standard%s", result.dimMode ? "" : " (not confirmed)");
 		}
-		const bool ok = driver.SetLightNow(ledCeiling, budget());
-		result.light = ok;
-		DebugLog::Log("Dynamic Drive: light restored to %d%s", ledCeiling, ok ? "" : " (not confirmed)");
+		// Hunt 3 (LED3): CNTR before LPW1, the bright-cut order, so CNTR is
+		// never the command left at the end of the bounded budget (the one
+		// an overrun drops). The budget still reserves the gap plus its reply
+		// for every later command, so LPW1 keeps its own share.
 		if (restoreContrast)
 		{
 			result.contrast = driver.SendNow("CNTR", 50, budget());
 			DebugLog::Log("Dynamic Drive: contrast restored to 50%s", result.contrast ? "" : " (not confirmed)");
 		}
+		const bool ok = driver.SetLightNow(ledCeiling, budget());
+		result.light = ok;
+		DebugLog::Log("Dynamic Drive: light restored to %d%s", ledCeiling, ok ? "" : " (not confirmed)");
 		if (outcome) *outcome = result;
 		return ok;
 	}

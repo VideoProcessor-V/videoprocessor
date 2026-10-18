@@ -342,3 +342,13 @@ vprenderer.motion.deinterlace_cadence	field
 vprenderer.motion.deinterlace_cadence	frame
 vprenderer.motion.deinterlace_skip_spatial	false
 vprenderer.motion.deinterlace_skip_spatial	true
+vprenderer.capture_path	gpu
+vprenderer.capture_path	standard
+vprenderer.capture_upload	auto
+vprenderer.capture_upload	early
+vprenderer.capture_upload	render
+vprenderer.interpolation_grain	preserve
+vprenderer.interpolation_grain	blend
+vprenderer.dejudder_gate	auto
+vprenderer.dejudder_gate	period
+vprenderer.dejudder_gate	refresh
