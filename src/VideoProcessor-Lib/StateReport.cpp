@@ -565,9 +565,37 @@ namespace StateReport
 		return names;
 	}
 
-	std::vector<std::wstring> ApplyRetention(const std::wstring& directory, int keep)
+	std::vector<std::wstring> RemoveStalePartials(const std::wstring& directory, uint64_t olderThanMs)
 	{
 		std::vector<std::wstring> removed;
+		WIN32_FIND_DATAW data;
+		HANDLE find = FindFirstFileW(Join(directory, L"vp-report-*.zip.partial").c_str(), &data);
+		if (find == INVALID_HANDLE_VALUE)
+			return removed;
+		FILETIME nowFileTime = {};
+		GetSystemTimeAsFileTime(&nowFileTime);
+		const uint64_t now = (static_cast<uint64_t>(nowFileTime.dwHighDateTime) << 32) | nowFileTime.dwLowDateTime;
+		std::vector<std::wstring> stale;
+		do
+		{
+			if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+				continue;
+			const uint64_t written = (static_cast<uint64_t>(data.ftLastWriteTime.dwHighDateTime) << 32) |
+				data.ftLastWriteTime.dwLowDateTime;
+			// FILETIME is in 100 ns units.
+			if (now > written && (now - written) / 10000ull >= olderThanMs)
+				stale.push_back(data.cFileName);
+		} while (FindNextFileW(find, &data));
+		FindClose(find);
+		for (const std::wstring& name : stale)
+			if (DeleteFileW(Join(directory, name).c_str()))
+				removed.push_back(name);
+		return removed;
+	}
+
+	std::vector<std::wstring> ApplyRetention(const std::wstring& directory, int keep)
+	{
+		std::vector<std::wstring> removed = RemoveStalePartials(directory);
 		if (keep < 1)
 			keep = 1;
 		const std::vector<std::wstring> names = ListReports(directory);

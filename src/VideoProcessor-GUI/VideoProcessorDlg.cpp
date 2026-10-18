@@ -8614,7 +8614,14 @@ void CVideoProcessorDlg::MaybeAutoReport(const char* reason)
 {
 	if (!m_stateReportSettings.autoReport)
 		return;
-	if (!m_autoReportLimiter.Allow(GetTickCount64()))
+	// Bug hunt 3 (SH11): a report already being written spends no slot.
+	if (m_stateReportBusy.load())
+	{
+		DebugLog::Log("Automatic problem report skipped (a report is being saved): reason=%s "
+			"saved_this_run=%d", reason, m_autoReportLimiter.Count());
+		return;
+	}
+	if (!m_autoReportLimiter.Allow(GetTickCount64(), m_stateReportBusy.load()))
 	{
 		DebugLog::Log("Automatic problem report skipped (rate limit): reason=%s saved_this_run=%d",
 			reason, m_autoReportLimiter.Count());
@@ -8827,9 +8834,11 @@ void CVideoProcessorDlg::SaveStateReport(const char* trigger)
 
 	ShowStateReportToast("saving...");
 	const HWND window = GetSafeHwnd();
+	auto worker = std::make_shared<StateReportWorkerState>();
+	std::atomic_store_explicit(&m_stateReportWorker, worker, std::memory_order_release);
 	try
 	{
-		std::thread([inputs, window, logPath, recentLog, thumbnailRequested, requestTime, screenshotFolder]()
+		std::thread([inputs, window, logPath, recentLog, thumbnailRequested, requestTime, screenshotFolder, worker]()
 		{
 			const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 			auto* result = new StateReport::Result();
@@ -8840,7 +8849,7 @@ void CVideoProcessorDlg::SaveStateReport(const char* trigger)
 				if (thumbnailRequested)
 				{
 					std::wstring shot;
-					for (int attempt = 0; attempt < 40 && shot.empty(); ++attempt)
+					for (int attempt = 0; attempt < 40 && shot.empty() && !worker->cancel.load(); ++attempt)
 					{
 						Sleep(100);
 						shot = NewestScreenshotSince(screenshotFolder, requestTime);
@@ -8867,6 +8876,11 @@ void CVideoProcessorDlg::SaveStateReport(const char* trigger)
 			if (!::IsWindow(window) || !::PostMessageW(window, WM_MESSAGE_STATE_REPORT_DONE, 0,
 				reinterpret_cast<LPARAM>(result)))
 				delete result;
+			{
+				std::lock_guard<std::mutex> lock(worker->mutex);
+				worker->done = true;
+			}
+			worker->doneChanged.notify_all();
 		}).detach();
 	}
 	catch (const std::exception& exception)
@@ -10079,13 +10093,27 @@ bool CVideoProcessorDlg::WaitForShutdownWorkers(DWORD timeoutMs)
 		resetDone = waitBounded(static_cast<HANDLE>(
 			m_rendererResetCoordinator->NativeThreadHandle()));
 	}
-	if (!retirementDone || !resetDone)
+	// Bug hunt 3 (SH11): a problem report being written is finished (its
+	// thumbnail wait cut short), not killed mid-write.
+	bool reportDone = true;
+	if (const auto worker = std::atomic_load_explicit(&m_stateReportWorker, std::memory_order_acquire))
+	{
+		worker->cancel.store(true);
+		const ULONGLONG now = GetTickCount64();
+		const DWORD remaining = now >= deadline ? 0 : static_cast<DWORD>(deadline - now);
+		std::unique_lock<std::mutex> lock(worker->mutex);
+		reportDone = worker->doneChanged.wait_for(lock, std::chrono::milliseconds(remaining),
+			[&worker] { return worker->done; });
+		if (!reportDone)
+			DebugLog::Log("Problem report still being written at exit (timeout_ms=%lu)", timeoutMs);
+	}
+	if (!retirementDone || !resetDone || !reportDone)
 	{
 		DebugLog::Log(
 			"Application shutdown workers did not finish: retirement_worker=%s "
-			"reset_coordinator=%s timeout_ms=%lu",
+			"reset_coordinator=%s state_report=%s timeout_ms=%lu",
 			retirementDone ? "done" : "blocked", resetDone ? "done" : "blocked",
-			timeoutMs);
+			reportDone ? "done" : "blocked", timeoutMs);
 		return false;
 	}
 	return true;

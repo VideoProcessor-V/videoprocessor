@@ -521,6 +521,52 @@ namespace VideoProcessorTest
 			Assert::AreEqual(5, limiter.Count());
 		}
 
+		// Bug hunt 3 (SH11): an automatic report refused because one is being
+		// saved spends no slot of the limiter.
+		TEST_METHOD(AutoReportLimiterBusySpendsNoSlot)
+		{
+			StateReport::AutoReportLimiter limiter(600000, 5);
+			Assert::IsFalse(limiter.Allow(1000, true), L"busy: not written");
+			Assert::AreEqual(0, limiter.Count(), L"busy: no slot spent");
+			Assert::IsTrue(limiter.Allow(1500), L"the next trigger still writes at once");
+			Assert::AreEqual(1, limiter.Count());
+			for (int i = 0; i < 10; ++i)
+				Assert::IsFalse(limiter.Allow(700000 + i, true));
+			Assert::AreEqual(1, limiter.Count());
+		}
+
+		// Bug hunt 3 (SH11): a write that never finished leaves a .partial;
+		// retention removes it once it is stale (a younger one may be a write in
+		// progress, perhaps another instance's).
+		TEST_METHOD(RetentionRemovesStalePartialWrites)
+		{
+			const std::string folder = TempFolder("partial");
+			WriteFileText(folder + "\\vp-report-20261017-120000-000.zip.partial", "x");
+			WriteFileText(folder + "\\vp-report-20261017-130000-000.zip.partial", "y");
+			// Age the first one by ten minutes.
+			{
+				const std::string stalePath = folder + "\\vp-report-20261017-120000-000.zip.partial";
+				HANDLE file = CreateFileA(stalePath.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
+					nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+				Assert::IsTrue(file != INVALID_HANDLE_VALUE);
+				FILETIME now = {};
+				GetSystemTimeAsFileTime(&now);
+				ULARGE_INTEGER old;
+				old.LowPart = now.dwLowDateTime;
+				old.HighPart = now.dwHighDateTime;
+				old.QuadPart -= 10ull * 60 * 10000000ull;
+				FILETIME aged = { old.LowPart, old.HighPart };
+				Assert::IsTrue(SetFileTime(file, nullptr, nullptr, &aged) != FALSE);
+				CloseHandle(file);
+			}
+			const std::vector<std::wstring> removed = StateReport::ApplyRetention(Widen(folder), 20);
+			Assert::AreEqual(static_cast<size_t>(1), removed.size());
+			Assert::IsTrue(GetFileAttributesA((folder + "\\vp-report-20261017-120000-000.zip.partial").c_str()) ==
+				INVALID_FILE_ATTRIBUTES, L"the stale partial write is removed");
+			Assert::IsTrue(GetFileAttributesA((folder + "\\vp-report-20261017-130000-000.zip.partial").c_str()) !=
+				INVALID_FILE_ATTRIBUTES, L"a fresh one (a write in progress) stays");
+		}
+
 		TEST_METHOD(CollectSystemJsonHasNoIdentity)
 		{
 			const std::string json = StateReport::CollectSystemJson();
