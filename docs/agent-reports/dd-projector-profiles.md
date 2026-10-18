@@ -65,7 +65,34 @@ generations, gap/burst timing, write-failure reopen, resync, bounded exit, the 2
   fixture `test-fixtures\dynamic-drive\synthetic-percent.vpprojector`.
 
 ## Tests
-RESULTS_PLACEHOLDER
+New `DeviceProfileTests` (8):
+- Fl35FileEqualsTheBuiltInProfileAndConfiguration: profile, ProjectorConfig and LED floors are
+  field-identical with and without user overrides.
+- Fl35ReplyPatternMatchesTheBuiltInParser: 21-line corpus.
+- Fl35ProfileCommandStreamIsByteIdenticalToTheBuiltInDriver: the FL35 file against a frozen copy
+  of the pre-profile driver, in 8 framing/read-back variants. Covers startup, the internal_script
+  stream (240 ticks), every LPW1 0-255 and CNTR 50-100, custom dim, a split drop, a jump, a CNTR
+  crossing and the exit restore.
+- BuiltInProfilePathIsByteIdenticalToTheBuiltInDriver.
+- BadProfilesAreRefusedWithClearMessages: 25 bad profiles, each with its expected message, plus
+  the offline report.
+- RefusedProfileNeverReachesTheProjector: port never opened, connection test refuses,
+  out-of-range values not written.
+- ExitRestoresTheProfilesValues: FL35 bytes, and the synthetic projector's 90 % through the module.
+- SyntheticProfileDrivesTheDriverAndPlanner: syntax, percent mapping, 10-level steps, latency and
+  settle in the script planner, coverage.
+
+Local results, single-threaded, x64 Release, TRX:
+- Led|Config|BugHunt|DeviceProfile filter: 608/608 passed.
+- Config tests (`run_config_tests.ps1 -Shards 1`, off screen): 143 passed, 1 skipped (needs a
+  real window), gate passed.
+- `validate_dd_profile.ps1`: OK for the FL35 file, the synthetic fixture and the guide's
+  hypothetical example; INVALID (exit 1) for a broken file.
+- Builds: VideoProcessor-Test, GUI, Config, ConfigTests, VPRenderer (+Beta).
+
+One existing test changed. LedDriveProtocolTests ResyncNeverOvertakesANewerScriptSend sent
+CNTR 47, which is now refused as outside the FL35's 50-100; it uses 52. This is the only
+intended FL35 difference: values VP never generates are no longer sent.
 
 ## Owner checks on the real FL35
 - Run with no device_profile, then with `device_profile: profiles\dynamic-drive\barco-fl35.vpprojector`:
