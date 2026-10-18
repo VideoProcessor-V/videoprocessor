@@ -190,6 +190,8 @@
     <ClCompile Include="DvIncomingHdrModeTests.cpp" />
     <ClCompile Include="DvRawCorpusTests.cpp" />
     <ClCompile Include="DvRpuAnchorTests.cpp" />
+    <ClCompile Include="DvTunnelHandoffTests.cpp" />
+    <ClCompile Include="ShortcutDefaultsTests.cpp" />
     <ClCompile Include="MovingPictureTransitionTests.cpp" />
     <ClCompile Include="SubtitleBoxDetectorTests.cpp" />
     <ClCompile Include="SubtitleOpaqueCardRefinementTests.cpp" />

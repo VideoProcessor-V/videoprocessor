@@ -669,24 +669,160 @@ namespace Tests
 			Assert::IsTrue(r.Logged("metadata transport recovered"), L"the recovery is logged");
 		}
 
-		// A frame cut short (lower part zero, e.g. a truncated DMA) with intact
-		// metadata at the top is decoded as a picture: VP has no completeness
-		// check. Zero IPT is not black (Ct = Cp = 0 is extreme chroma), so such
-		// a frame would show coloured garbage. Documented finding; DeckLink
-		// delivers complete frames, so this is not reachable on today's cards.
-		TEST_METHOD(FindingTruncatedFrameWithIntactMetadataIsDecodedAsPicture)
+		// DV input fix 3 (2026-10-18; was FINDING C): a frame cut short (the
+		// lower part never written, e.g. a truncated DMA) with intact metadata
+		// at the top used to be decoded as a picture: zero IPT is extreme
+		// chroma, so it would show coloured garbage. Now it is rejected (the
+		// renderer keeps the previous picture) and logged, the CRC-valid
+		// metadata it carried is kept, and valid frames - including black and
+		// letterboxed tunnel pictures, whose bottom rows are I near 0 with
+		// chroma near 2048 - are never thrown away. dv_tunnel_fixes off
+		// reproduces the old behaviour.
+		TEST_METHOD(TruncatedFrameWithIntactMetadataIsRejectedNotDecoded)
 		{
 			const uint32_t w = 256, h = 108;
 			PacketHeader hdr; hdr.currentId = hdr.affectedId = 1;
-			LoopFrame f = DvFrame(0, SmoothPicture(w, h, 0), RichDm(), hdr);
-			for (size_t k = f.rgb8.size() / 2; k < f.rgb8.size(); ++k)
-				f.rgb8[k] = 0;
-			const LoopReport r = RunFrames({ f }, w, h, LoopFaults());
-			Note("FINDING (documented, not changed): " + r.Summary());
-			Assert::AreEqual<uint64_t>(1, r.captured);
-			// The stamp lives in the zeroed rows, so the frame is unidentified;
-			// what matters is the presentation decision.
-			Assert::AreEqual<uint64_t>(1, r.pictures, L"decoded as a picture (no completeness check)");
+			const DmFields dm = RichDm();
+			// Black picture with letterbox bars: tunnel black, not zero words.
+			IptPicture black;
+			black.Resize(w, h);
+			for (size_t i = 0; i < static_cast<size_t>(w) * h; ++i)
+			{
+				black.i[i] = 0;
+				black.Chroma(i) = 2048;
+			}
+			for (const bool fixes : { false, true })
+			{
+				std::vector<LoopFrame> frames;
+				frames.push_back(DvFrame(0, SmoothPicture(w, h, 0), dm, hdr));
+				LoopFrame cut = DvFrame(1, SmoothPicture(w, h, 1), dm, hdr);
+				for (size_t k = cut.rgb8.size() / 2; k < cut.rgb8.size(); ++k)
+					cut.rgb8[k] = 0;
+				frames.push_back(cut);
+				// A truncated frame cut only in its last row is caught too.
+				LoopFrame lastRow = DvFrame(2, SmoothPicture(w, h, 2), dm, hdr);
+				for (size_t k = lastRow.rgb8.size() - static_cast<size_t>(w) * 3; k < lastRow.rgb8.size(); ++k)
+					lastRow.rgb8[k] = 0;
+				frames.push_back(lastRow);
+				frames.push_back(DvFrame(3, black, dm, hdr));
+				frames.push_back(DvFrame(4, SmoothPicture(w, h, 4), dm, hdr));
+				AnalyzerOptions options;
+				options.bugHuntFixes = fixes;
+				const LoopReport r = RunFrames(frames, w, h, LoopFaults(), 24000, 1001, options);
+				Note(std::string("truncated frames, dv_tunnel_fixes ") + (fixes ? "on: " : "off: ") + r.Summary());
+				Assert::AreEqual<uint64_t>(5, r.captured);
+				if (!fixes)
+				{
+					Assert::AreEqual<uint64_t>(5, r.pictures, L"fixes off: the truncated frames are decoded (the old behaviour)");
+					continue;
+				}
+				Assert::AreEqual<uint64_t>(2, r.rejected, L"both truncated frames rejected");
+				Assert::AreEqual<uint64_t>(3, r.pictures, L"the valid frames (black included) are decoded");
+				Assert::AreEqual<uint64_t>(0, r.metadataMismatchFrames);
+				Assert::AreEqual<uint64_t>(0, r.pixelMismatchFrames, L"the valid frames are bit-exact");
+				Assert::IsTrue(r.Logged("incomplete frame (last row blank"), L"the rejection is logged");
+				auto shownOf = [&r](uint32_t index) {
+					for (const FrameRecord& f : r.frames) if (f.identified && f.sentIndex == index) return f.shown;
+					return Shown::Rejected; };
+				Assert::IsTrue(shownOf(3) == Shown::Picture, L"a black tunnel picture is never thrown away");
+				Assert::IsTrue(shownOf(4) == Shown::Picture, L"the next frame decodes with the metadata kept");
+			}
+		}
+
+		// The hand-off never takes a tunnel (DV input fixes 2026-10-18): a
+		// healthy tunnel, a tunnel whose metadata is garbage for longer than
+		// the hand-off window (black, never packed pixels), and a tunnel a card
+		// range-converted (10-bit values, no CRC: tunnel-like content keeps it
+		// with the tunnel path) all stay with the tunnel formatter.
+		TEST_METHOD(HandoffNeverTakesATunnel)
+		{
+			const uint32_t w = 256, h = 108;
+			HarnessConfig config;
+			config.sequence.width = w;
+			config.sequence.height = h;
+			config.frames = 96;
+			config.faults.cardColorspace = ColorSpace::BT_2020;   // even with BT.2020 reported
+			LoopReport healthy = RunSimulatedLoop(config);
+			Note("healthy tunnel: " + healthy.Summary());
+			Assert::AreEqual<uint64_t>(0, healthy.handoffs);
+			Assert::AreEqual<uint64_t>(0, healthy.wrongKindFrames);
+			Assert::IsTrue(healthy.pictures > 80);
+
+			HarnessConfig converted = config;
+			converted.faults.container.rangeConvert = true;
+			LoopReport rc = RunSimulatedLoop(converted);
+			Note("range-converted tunnel: " + rc.Summary());
+			Assert::AreEqual<uint64_t>(0, rc.handoffs, L"a converted tunnel is never handed to the normal path");
+			Assert::AreEqual<uint64_t>(0, rc.handedOff);
+			Assert::AreEqual<uint64_t>(0, rc.sdr, L"never packed pixels as RGB");
+
+			// Garbage metadata for 48 pictures (twice the window) after lock.
+			PacketHeader hdr; hdr.currentId = hdr.affectedId = 3;
+			std::vector<LoopFrame> frames;
+			uint32_t n = 0;
+			for (; n < 4; ++n) frames.push_back(DvFrame(n, SmoothPicture(w, h, n), RichDm(), hdr));
+			for (uint32_t k = 0; k < 48; ++k, ++n)
+			{
+				LoopFrame f = DvFrame(n, SmoothPicture(w, h, n), RichDm(), hdr);
+				uint64_t s = n * 7919ULL;
+				for (size_t p = 0; p < 3072 * 2; ++p)
+				{
+					s = s * 6364136223846793005ULL + 1;
+					f.embedded.Chroma(p) = static_cast<uint16_t>((f.embedded.Chroma(p) & 0xFFE) | ((s >> 60) & 1));
+				}
+				PackRgb8(f.embedded, f.rgb8);
+				frames.push_back(f);
+			}
+			for (uint32_t k = 0; k < 3; ++k, ++n) frames.push_back(DvFrame(n, SmoothPicture(w, h, n), RichDm(), hdr));
+			LoopFaults bt2020;
+			bt2020.cardColorspace = ColorSpace::BT_2020;
+			const LoopReport damaged = RunFrames(frames, w, h, bt2020);
+			Note("damaged tunnel: " + damaged.Summary());
+			Assert::AreEqual<uint64_t>(0, damaged.handoffs, L"a damaged tunnel stays with the tunnel path (black)");
+			Assert::AreEqual<uint64_t>(0, damaged.wrongKindFrames);
+		}
+
+		// A tunnel arriving after a hand-off (the source switched from LLDV
+		// RGB to the tunnel without a capture-state change) takes the signal
+		// back at its first CRC-valid header; the formatter starts fresh and
+		// the DV pictures decode bit-exact.
+		TEST_METHOD(TunnelTakesAHandedOffSignalBack)
+		{
+			const uint32_t w = 256, h = 108;
+			PacketHeader hdr; hdr.currentId = hdr.affectedId = 2;
+			std::vector<LoopFrame> frames;
+			uint32_t n = 0;
+			for (; n < 40; ++n)
+			{
+				LoopFrame f;
+				f.index = n;
+				f.sdr = true;
+				f.rgb8.resize(static_cast<size_t>(w) * h * 3);
+				for (size_t p = 0; p < static_cast<size_t>(w) * h; ++p)
+				{
+					const uint8_t v = static_cast<uint8_t>(40 + ((p % w) * 120) / w + (n % 3));
+					f.rgb8[p * 3] = static_cast<uint8_t>(v + 10); f.rgb8[p * 3 + 1] = v; f.rgb8[p * 3 + 2] = static_cast<uint8_t>(v - 5);
+				}
+				WriteStamp(w, h, 0x5A, n, nullptr, &f.rgb8);
+				frames.push_back(f);
+			}
+			for (uint32_t k = 0; k < 20; ++k, ++n)
+				frames.push_back(DvFrame(n, SmoothPicture(w, h, n), RichDm(), hdr));
+			LoopFaults faults;
+			faults.cardColorspace = ColorSpace::BT_2020;
+			faults.container.high8 = true;
+			const LoopReport r = RunFrames(frames, w, h, faults);
+			Note("LLDV RGB then tunnel: " + r.Summary());
+			Assert::AreEqual<uint64_t>(1, r.handoffs);
+			Assert::AreEqual<uint64_t>(1, r.takeBacks);
+			Assert::IsTrue(r.Logged("taken back by the tunnel"));
+			// The picture with the first header is held back (never shown through
+			// the normal path); the rest decode.
+			Assert::AreEqual<uint64_t>(1, r.rejected);
+			Assert::AreEqual<uint64_t>(19, r.pictures);
+			Assert::AreEqual<uint64_t>(0, r.wrongKindFrames, L"no tunnel picture through the normal path");
+			Assert::AreEqual<uint64_t>(0, r.pixelMismatchFrames);
+			Assert::AreEqual<uint64_t>(0, r.metadataMismatchFrames);
 		}
 
 		// Single-field metadata perturbations: exactly the named decoded field

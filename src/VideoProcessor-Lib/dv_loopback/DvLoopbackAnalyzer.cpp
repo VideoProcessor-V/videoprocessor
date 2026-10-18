@@ -43,6 +43,7 @@ namespace DvLoopback
 		case Shown::Black: return "black";
 		case Shown::Rejected: return "rejected";
 		case Shown::TunnelOff: return "tunnel off";
+		case Shown::Handoff: return "normal path (handed off)";
 		}
 		return "?";
 	}
@@ -59,13 +60,14 @@ namespace DvLoopback
 	{
 		char text[1024];
 		snprintf(text, sizeof(text),
-			"captured=%llu identified=%llu unidentified=%llu | shown: DV=%llu SDR=%llu black=%llu rejected=%llu tunnel_off=%llu | "
+			"captured=%llu identified=%llu unidentified=%llu | shown: DV=%llu SDR=%llu black=%llu rejected=%llu tunnel_off=%llu handed_off=%llu (handoffs=%llu take_backs=%llu) | "
 			"dropped=%llu repeated=%llu out_of_order=%llu | offset=%lld frames latency=%.2f ms (%.2f frames; min %.2f max %.2f) | "
 			"pixel_mismatch=%llu frames/%llu samples transport_errors=%llu frames/%llu bytes metadata_mismatch=%llu "
 			"reference_mismatch=%llu wrong_kind=%llu black_for_DV=%llu black_for_SDR=%llu | %s",
 			(unsigned long long)captured, (unsigned long long)identified, (unsigned long long)unidentified,
 			(unsigned long long)pictures, (unsigned long long)sdr, (unsigned long long)black,
 			(unsigned long long)rejected, (unsigned long long)tunnelOff,
+			(unsigned long long)handedOff, (unsigned long long)handoffs, (unsigned long long)takeBacks,
 			(unsigned long long)dropped, (unsigned long long)repeated, (unsigned long long)outOfOrder,
 			(long long)frameOffset, latencyMsMedian, latencyFrames, latencyMsMin, latencyMsMax,
 			(unsigned long long)pixelMismatchFrames, (unsigned long long)pixelMismatchSamples,
@@ -111,6 +113,14 @@ namespace DvLoopback
 		m_state = state;
 		if (!state || !state->valid || !state->dolbyVisionTunnel)
 			return;
+		// The GUI's hand-off probe restarts with every capture state.
+		DolbyVisionTunnelHandoffSignal signal;
+		signal.colorspace = state->colorspace;
+		signal.hdrInfoFrame = state->hdrData != nullptr;
+		signal.vsif = state->dolbyVisionVsif;
+		if (state->displayMode)
+			signal.frameRate = state->displayMode->RefreshRateHz();
+		m_handoff.Reset(signal);
 		if (!m_formatter)
 			m_formatter.reset(new CR210DolbyVisionTunnelFormatter());
 		m_formatter->SetBugHuntFixes(m_options.bugHuntFixes);
@@ -168,10 +178,48 @@ namespace DvLoopback
 
 		// 2. VP's decode and the renderer's presentation decision.
 		DolbyVisionTunnelFrameMetadata md;
+		CR210DolbyVisionTunnelFormatter::RasterView raster;
+		raster.data = data;
+		raster.width = width;
+		raster.height = height;
+		raster.stride = stride;
+		raster.encoding = encoding;
+		const bool probeHandoff = m_options.handoff && m_state->dolbyVisionTunnel && m_formatter != nullptr;
+		// While handed off, the GUI probes before the renderer: the picture
+		// with the first CRC-valid header is held back (never shown through the
+		// normal path) and the tunnel formatter starts fresh.
+		bool probedEarly = false, heldBack = false;
+		if (probeHandoff && m_handoff.HandedOff())
+		{
+			probedEarly = true;
+			if (m_handoff.OnFrame(raster, rec.counter) == DolbyVisionTunnelHandoffEvent::TakeBack)
+			{
+				heldBack = true;
+				++m_report.takeBacks;
+				DebugLog::Log("Dolby Vision RGB tunnel hand-off: signal taken back by the tunnel at picture %llu: %s",
+					static_cast<unsigned long long>(rec.counter), m_handoff.Reason());
+				VideoStateComPtr copy = m_state;
+				try { m_formatter->OnVideoState(copy); }
+				catch (const std::exception& e) { Issue(std::string("formatter refused the video state: ") + e.what()); }
+			}
+		}
 		if (!m_state->dolbyVisionTunnel || !m_formatter)
 		{
 			rec.shown = Shown::TunnelOff;
 			++m_report.tunnelOff;
+		}
+		else if (heldBack)
+		{
+			rec.shown = Shown::Rejected;
+			++m_report.rejected;
+		}
+		else if (m_options.handoff && m_handoff.HandedOff())
+		{
+			// The GUI closed the gate for this signal: the normal r210 path
+			// shows it (and newlldv may infer PQ). The probe keeps watching
+			// for a CRC-valid header that takes the signal back.
+			rec.shown = Shown::Handoff;
+			++m_report.handedOff;
 		}
 		else if (!m_formatter->FormatVideoFrame(frame, m_output.data()))
 		{
@@ -200,6 +248,15 @@ namespace DvLoopback
 		}
 		m_lastMetadata = md;
 		m_lastShown = rec.shown;
+		// The GUI runs the probe after the renderer has the frame; its decision
+		// applies from the next picture (DolbyVisionTunnelHandoff.h).
+		if (probeHandoff && !probedEarly &&
+			m_handoff.OnFrame(raster, rec.counter) == DolbyVisionTunnelHandoffEvent::HandOff)
+		{
+			++m_report.handoffs;
+			DebugLog::Log("Dolby Vision RGB tunnel hand-off: signal handed to the normal path at picture %llu: %s",
+				static_cast<unsigned long long>(rec.counter), m_handoff.Reason());
+		}
 
 		// 3. Compare with what was sent.
 		LoopFrame sent;
@@ -243,10 +300,11 @@ namespace DvLoopback
 				}
 				else
 				{
-					if (rec.shown == Shown::Sdr)
+					if (rec.shown == Shown::Sdr || rec.shown == Shown::Handoff)
 					{
 						rec.wrongKind = true;
-						snprintf(line, sizeof(line), "frame %u: DV tunnel frame shown as SDR passthrough (packed pixels)", rec.sentIndex);
+						snprintf(line, sizeof(line), "frame %u: DV tunnel frame shown %s (packed pixels)", rec.sentIndex,
+							rec.shown == Shown::Sdr ? "as SDR passthrough" : "through the normal path (handed off)");
 						Issue(line);
 					}
 					else if (rec.shown == Shown::Black)

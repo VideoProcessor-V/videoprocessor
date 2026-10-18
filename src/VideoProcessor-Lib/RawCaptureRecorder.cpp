@@ -124,7 +124,7 @@ RawCaptureRecorder::RawCaptureRecorder(const RawCaptureOptions& options) : m_opt
 		return;
 	CreateDirectories(m_options.root);
 	m_thread = std::thread(&RawCaptureRecorder::WriterThread, this);
-	DebugLog::Log("Raw capture: armed, folder=%s burst=%u every=%u max=%.0f s min_free=%.0f GB (toggle: raw_capture_toggle / RECORD file)",
+	DebugLog::Log("Raw capture: armed, folder=%s burst=%u every=%u max=%.0f s min_free=%.0f GB (toggle: raw_capture / RECORD file)",
 		m_options.root.c_str(), m_options.burstFrames, m_options.every, m_options.maxSeconds, m_options.minFreeGb);
 }
 
@@ -447,7 +447,7 @@ std::string RawCaptureRecorder::Start(const char* reason)
 		m_startedByFile = std::string(reason) == "RECORD file";
 	}
 	char text[512];
-	snprintf(text, sizeof(text), "Raw capture: recording started (%s) -> %s; every %u frame(s); stops after %.0f s, or press the raw_capture_toggle key",
+	snprintf(text, sizeof(text), "Raw capture: recording started (%s) -> %s; every %u frame(s); stops after %.0f s, or press the raw_capture key",
 		reason, folder.c_str(), m_options.every, m_options.maxSeconds);
 	DebugLog::Log("%s", text);
 	return text;

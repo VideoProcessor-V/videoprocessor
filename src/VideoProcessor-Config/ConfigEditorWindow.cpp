@@ -24,6 +24,7 @@
 #include <ConfigEditorCore.h>
 #include <ConfigurationRpcClient.h>
 #include <RendererProfileConfig.h>
+#include <ShortcutDefaults.h>
 #include <QueueLatency.h>
 #include <led/LedDriveConfig.h>
 
@@ -1072,7 +1073,8 @@ QString controlName(const QString& section, const QString& key)
 }
 
 // The fixed [shortcuts] commands and VP's compiled defaults, shown on the
-// Shortcuts page and validated before Apply (audit 2026-10-16).
+// Shortcuts page and validated before Apply (audit 2026-10-16). The defaults
+// come from ShortcutDefaults.h, the table VP itself uses (2026-10-18).
 struct FixedShortcutField
 {
     const char* label;
@@ -1080,28 +1082,28 @@ struct FixedShortcutField
     const char* defaultValue;
 };
 const FixedShortcutField kApplicationShortcutFields[] = {
-    { "Open configuration", "config_editor", "Ctrl+Shift+S" },
-    { "Toggle video-only UI", "toggle_noui", "Ctrl+Shift+U" },
-    { "Toggle fullscreen", "fullscreen_toggle", "Alt+Enter" },
-    { "Exit fullscreen", "fullscreen_exit", "Esc" },
-    { "Toggle statistics", "toggle_stats_overlay", "Ctrl+I" },
-    { "Screenshot", "capture_rendered_output", "Ctrl+Alt+S" },
-    { "Re-apply rules", "reapply_rules", "" },
-    { "Room lights (dark / lit)", "room_lights", "" },
-    { "Show profiles", "show_profiles", "Ctrl+Alt+I" },
-    { "Automatic transfer (DirectShow only)", "auto_set", "Ctrl+Shift+A" },
-    { "PQ transfer (DirectShow only)", "pq_set", "Ctrl+Shift+P" }
+    { "Open configuration", "config_editor", ShortcutDefaultChord("config_editor") },
+    { "Toggle video-only UI", "toggle_noui", ShortcutDefaultChord("toggle_noui") },
+    { "Toggle fullscreen", "fullscreen_toggle", ShortcutDefaultChord("fullscreen_toggle") },
+    { "Exit fullscreen", "fullscreen_exit", ShortcutDefaultChord("fullscreen_exit") },
+    { "Toggle statistics", "toggle_stats_overlay", ShortcutDefaultChord("toggle_stats_overlay") },
+    { "Screenshot", "capture_rendered_output", ShortcutDefaultChord("capture_rendered_output") },
+    { "Re-apply rules", "reapply_rules", ShortcutDefaultChord("reapply_rules") },
+    { "Room lights (dark / lit)", "room_lights", ShortcutDefaultChord("room_lights") },
+    { "Show profiles", "show_profiles", ShortcutDefaultChord("show_profiles") },
+    { "Automatic transfer (DirectShow only)", "auto_set", ShortcutDefaultChord("auto_set") },
+    { "PQ transfer (DirectShow only)", "pq_set", ShortcutDefaultChord("pq_set") }
 };
 const FixedShortcutField kCaptureShortcutFields[] = {
-    { "Restart renderer", "renderer_restart", "Shift+R" },
-    { "Reset renderer", "renderer_reset", "R" },
-    { "DeckLink input 1", "capture_1", "Ctrl+1" },
-    { "DeckLink input 2", "capture_2", "Ctrl+2" },
-    { "DeckLink input 3", "capture_3", "Ctrl+3" },
-    { "DeckLink input 4", "capture_4", "Ctrl+4" },
-    { "Video conversion off", "video_conversion_off", "V" },
-    { "V210 to P010 conversion", "video_conversion_p010", "Shift+V" },
-    { "Raw capture recording (needs VP_RAW_CAPTURE_PATH)", "raw_capture_toggle", "Ctrl+Alt+D" }
+    { "Restart renderer", "renderer_restart", ShortcutDefaultChord("renderer_restart") },
+    { "Reset renderer", "renderer_reset", ShortcutDefaultChord("renderer_reset") },
+    { "DeckLink input 1", "capture_1", ShortcutDefaultChord("capture_1") },
+    { "DeckLink input 2", "capture_2", ShortcutDefaultChord("capture_2") },
+    { "DeckLink input 3", "capture_3", ShortcutDefaultChord("capture_3") },
+    { "DeckLink input 4", "capture_4", ShortcutDefaultChord("capture_4") },
+    { "Video conversion off", "video_conversion_off", ShortcutDefaultChord("video_conversion_off") },
+    { "V210 to P010 conversion", "video_conversion_p010", ShortcutDefaultChord("video_conversion_p010") },
+    { "Raw capture recording (needs VP_RAW_CAPTURE_PATH)", "raw_capture", ShortcutDefaultChord("raw_capture") }
 };
 
 struct ShortcutIssue
@@ -10028,6 +10030,18 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* summary = helpLabel(QStringLiteral(
             "DV Tunneling uses VP Renderer and needs no additional input settings."));
         modeLayout->addWidget(summary);
+        // DV input fixes 2026-10-18: signals that are not a tunnel leave the
+        // tunnel path (10-bit RGB, BT.2020 RGB without tunnel metadata).
+        auto* handoffCheck = bindCheckField(
+            QStringLiteral("Hand LLDV / HDR10 sent as RGB to the normal path"),
+            QStringLiteral("general"), QStringLiteral("dv_tunnel_handoff"), true);
+        handoffCheck->setToolTip(QStringLiteral(
+            "With DV Tunneling, a signal that carries no tunnel metadata for about a second and is either 10-bit RGB "
+            "or BT.2020 RGB without an HDR flag (LLDV or HDR10 converted to RGB, for example by an HDFury) leaves the "
+            "tunnel path: it is shown normally and treated as PQ HDR (8-bit LLDV included) instead of staying black or "
+            "being shown as SDR. A tunnel arriving later takes the signal back. Default on. Restart VideoProcessor after "
+            "changing it. Key: dv_tunnel_handoff."));
+        modeLayout->addWidget(handoffCheck);
         detailLayout->insertWidget(2, dvModeControls);
         fields->push_back({ QStringLiteral("dolby_vision_tunnel"), tunneling, Field::DvMode });
 
@@ -10058,10 +10072,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "These apply to all LLDV profiles and to HDR10 without an HDR flag. Restart VideoProcessor after changing them.")));
         lldvLayout->addWidget(profileFields);
         detailLayout->addWidget(lldvSettings);
-        updateDvModeControls = [tunneling, lldvSettings, summary]()
+        updateDvModeControls = [tunneling, lldvSettings, summary, handoffCheck]()
         {
             lldvSettings->setVisible(!tunneling->isChecked());
             summary->setVisible(tunneling->isChecked());
+            handoffCheck->setVisible(tunneling->isChecked());
         };
         connect(tunneling, &QRadioButton::toggled, this,
             [this, state, updateDvModeControls](bool enabled)

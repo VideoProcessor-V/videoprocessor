@@ -97,12 +97,15 @@ tracker, and LLDV static metadata resolution in VideoProcessorDlg's order:
 | HDR10 with InfoFrame | PQ from the InfoFrame | never inferred, tunnel never engaged |
 | HDR10 without InfoFrame (Integral 2 HDR toggle off) | same as LLDV (indistinguishable to a capture card) | inferred like LLDV |
 | SDR BT.709 | SDR | never inferred |
+| LLDV / HDR10 as 10-bit RGB in r210, tunnel switch on | tunnel formatter for ~1 s (black), then handed off: normal path, newlldv PQ | `TenBitRgbLldvWithTheTunnelSwitchOnIsHandedOffAndInferredPq` |
+| LLDV as 8-bit RGB, BT.2020, tunnel switch on | SDR passthrough for ~1 s, then handed off: normal path, PQ (8-bit decision below) | `EightBitRgbLldvWithTheTunnelSwitchOnIsHandedOffAsPq` |
+| 8-bit RGB BT.709 (SDR menu), tunnel switch on | tunnel SDR passthrough (never handed off) | `OnlyNonTunnelSignalsAreHandedOff` |
 
 Transitions LLDV -> tunnel -> HDR10 -> SDR -> LLDV -> HDR10 without InfoFrame -> tunnel
 -> LLDV follow the tracker's epochs (the tunnel ends a PQ epoch; LLDV -> HDR10 without
 InfoFrame at the same raster keeps it). The LLDV Dolby VSIF is not reported by capture
-cards, so VP cannot tell LLDV from HDR10 without InfoFrame. Findings A and B (section 4)
-are the two RGB-LLDV cases. How the owner selects LLDV or the tunnel (Integral 2 EDID:
+cards, so VP cannot tell LLDV from HDR10 without InfoFrame. The two RGB-LLDV cases (section 4,
+fixes 1 and 2, 2026-10-18) are handed off by the tunnel to the normal path: How the owner selects LLDV or the tunnel (Integral 2 EDID:
 low-latency-only DV block vs TV-led DV block) and which is better for the projector:
 `docs/dv/LLDV-vs-tunnel-check.md`.
 
@@ -137,7 +140,8 @@ low-latency-only DV block vs TV-led DV block) and which is better for the projec
 ### Tier 3 - real-capture corpus (built: recorder + replay)
 
 - `VP_RAW_CAPTURE_PATH` (a folder on a large drive) arms `RawCaptureRecorder`;
-  `raw_capture_toggle` (default **Ctrl+Alt+D**, Config > Shortcuts) or a `RECORD`
+  `[shortcuts] raw_capture` (default **Ctrl+Alt+W**, Config > Shortcuts; Ctrl+Alt+D is the
+  report-a-problem shortcut) or a `RECORD`
   file in that folder starts recording, the key again / deleting `RECORD` / a `STOP`
   file stops it; start and stop are logged and shown on screen. `VP_RAW_CAPTURE_BURST=N`
   instead records N frames after each new capture state (the regression corpus).
@@ -189,21 +193,44 @@ laptop; `--send` changes the display's HDR mode and is for owner-present runs on
 - **Precision note (not changed):** VP converts the 32-bit offset to float before
   scaling; changes below ~2^-24 relative (e.g. +1 at 2^27) are invisible. This is
   far below a 12-bit code step and libplacebo takes a float anyway.
-- **Finding A (documented, not fixed): 10-bit RGB LLDV/HDR10 with the tunnel switch
-  on stays black.** The tunnel gate opens for any r210 capture reported as SDR; a
-  10-bit RGB 4:4:4 signal (an HDFury converting LLDV to RGB) never resolves the RGB8
-  placement, so the picture stays black and the newlldv inference is suppressed. A
-  bit-depth condition would break 8-bit tunnels padded to 10 bits on the link
-  ("high8"). Proposal for the owner: keep the tunnel switch per profile, or add a
-  "10-bit content seen, no CRC for N seconds -> hand the signal to the normal path"
-  rule (needs a renderer formatter switch). Test: `FindingTenBitRgbLldvWithTheTunnelSwitchOnStaysBlack`.
-- **Finding B (documented, not fixed): 8-bit RGB LLDV with the tunnel switch on is
-  shown as SDR.** No false DV lock (CRC), but the SDR passthrough shows the PQ
-  picture as BT.709/BT.1886 and newlldv is suppressed. Test:
-  `FindingEightBitRgbLldvWithTheTunnelSwitchOnIsShownAsSdr`.
-- **Finding C (documented): a truncated frame with intact metadata is decoded.** VP
-  has no frame-completeness check; zero IPT is extreme chroma (not black). DeckLink
-  delivers whole frames, so this is not reachable today; a new card's driver could.
+- **Fix 1 (2026-10-18; was Finding A): 10-bit RGB LLDV/HDR10 with the tunnel switch on
+  no longer stays black.** The gate still opens for any r210 capture reported as SDR (a
+  bit-depth condition would break 8-bit tunnels padded to 10 bits, "high8"). Instead the
+  GUI's hand-off probe (`DolbyVisionTunnelHandoff.h`, `[general] dv_tunnel_handoff`,
+  default on, Config > DV > DV Tunneling) watches the captured pictures with the
+  formatter's own rules: a CRC-valid header or tunnel-like content is tunnel evidence;
+  with none for about one second (counted in source pictures, derived from the measured
+  rate) and 10-bit content (both ends of the 10-bit fields in use - never RGB8 stored
+  untouched), the signal is handed to the normal r210 path and the tunnel stops owning it,
+  so newlldv infers PQ after its 1.5 s. A CRC-valid header later takes the signal back
+  (that picture and the following ones are held back from the renderer until the tunnel
+  state is in place, so no packed pixels are shown). Tests:
+  `TenBitRgbLldvWithTheTunnelSwitchOnIsHandedOffAndInferredPq`, `DvTunnelHandoffTests`,
+  `HandoffNeverTakesATunnel`, `TunnelTakesAHandedOffSignalBack`.
+- **Fix 2 (2026-10-18; was Finding B): 8-bit RGB LLDV with the tunnel switch on is no
+  longer shown as SDR.** Decision: capture cards report neither the Dolby VSIF (DeckLink)
+  nor anything else that separates 8-bit LLDV from 8-bit SDR sent as BT.2020. What is
+  known: RGB 8-bit, BT.2020 AVI colorimetry, no HDR InfoFrame, and - proven by the probe -
+  no tunnel. A TV-led tunnel has CRC-protected metadata in every picture and RGB-default
+  (not BT.2020) colorimetry, so on an input where the DV tunnel is enabled, BT.2020 RGB
+  without a tunnel is player-led DV (LLDV) or HDR10 without its InfoFrame: PQ either way.
+  It is handed off, and newlldv's 10-bit floor is waived for exactly this signal. The
+  explicit indication wins: `VideoState::dolbyVisionVsif` (filled by a capture device that
+  reports the VSIF; DeckLink cannot) set to LowLatency makes an 8-bit BT.2020 signal PQ
+  with or without the tunnel switch and hands it off at the first picture; TvLed never
+  hands off. Real 8-bit SDR sent as BT.2020 stays protected by newlldv's SDR veto; 8-bit
+  BT.709 RGB (SDR menus) stays on the tunnel's SDR passthrough; with the tunnel switch off
+  nothing changes. Tests: `EightBitRgbLldvWithTheTunnelSwitchOnIsHandedOffAsPq`,
+  `DolbyVsifDecidesEightBitLldvExplicitly`.
+- **Fix 3 (2026-10-18; was Finding C): a truncated frame with intact metadata is rejected,
+  not decoded.** A frame whose tail was never written leaves the last row all zero, which
+  valid tunnel content never is (an all-zero word is I = 0 with the most negative chroma;
+  tunnel black is I near 0, chroma near 2048). A picture that would be decoded (CRC-valid
+  header, valid DM) with an all-zero last row is rejected (the renderer keeps the previous
+  picture), logged ("incomplete frame (last row blank, truncated transfer)"), and its
+  CRC-verified metadata kept. Under `dv_tunnel_fixes` (default on). Not detectable: a
+  truncation that leaves the previous frame's bytes in the tail. Test:
+  `TruncatedFrameWithIntactMetadataIsRejectedNotDecoded`.
 
 ## 5. Tier 4: the hardware loop
 
@@ -218,7 +245,7 @@ laptop; `--send` changes the display's HDR mode and is for owner-present runs on
    -> capture input (UltraStudio 4K Mini on the laptop, or the DeckLink Quad HDMI
       Recorder in the cinema PC), RGB 4:4:4 8-bit, captured as r210 (VP) or ARGB
       (StreamRecorder)
-   -> VP records (VP_RAW_CAPTURE_PATH + Ctrl+Alt+D) or StreamRecorder --raw N
+   -> VP records (VP_RAW_CAPTURE_PATH + Ctrl+Alt+W) or StreamRecorder --raw N
    -> HardwareLoopbackRecordingAnalyses: regenerate the pattern from sent.csv,
       identify, compare bit for bit, latency from QPC (same PC) or frame offsets
 ```
@@ -283,10 +310,10 @@ RGB 8-bit 4:4:4 unchanged (most do; avoid adapters that force YCbCr).
 3. `VideoProcessorDvLoopback --probe` - the 3090 HDMI display must show "driven by
    NVIDIA" and `DolbyVision=1`.
 4. Start VP with `VP_RAW_CAPTURE_PATH=D:\dvloop\run1` and the DV tunnel switch on;
-   press Ctrl+Alt+D (recording started line on screen).
+   press Ctrl+Alt+W (recording started line on screen).
 5. `VideoProcessorDvLoopback --send --display \\.\DISPLAYn --out D:\dvloop\run1 --seconds 20 --i-am-present`
    (the screen on that output shows the pattern; Ctrl+C stops and restores).
-6. Ctrl+Alt+D in VP to stop. Repeat with `--mode hdr10` and `--mode sdr` into run2/run3.
+6. Ctrl+Alt+W in VP to stop. Repeat with `--mode hdr10` and `--mode sdr` into run2/run3.
 7. Claude: `VP_TEST_DV_LOOPBACK_DIR=D:\dvloop\run1` and run `HardwareLoopbackRecordingAnalyses`.
 
 ## 6. Owner steps: the Tier-3 recording in the cinema session
@@ -294,8 +321,9 @@ RGB 8-bit 4:4:4 unchanged (most do; avoid adapters that force YCbCr).
 1. Before starting VP (PowerShell): `$env:VP_RAW_CAPTURE_PATH = "E:\vp-capture"`
    (a drive with 100+ GB free; never a source checkout), optionally
    `$env:VP_RAW_CAPTURE_NOTE = "Vertex2 TV-led DV EDID"`, then start VP from that window.
-2. Play a DV title; after the picture settles press **Ctrl+Alt+D**; let it run 10-20 s
-   (stops by itself after 30 s); press Ctrl+Alt+D again to stop early.
+2. Play a DV title; after the picture settles press **Ctrl+Alt+W**; let it run 10-20 s
+   (stops by itself after 30 s); press Ctrl+Alt+W again to stop early. (The key is
+   `[shortcuts] raw_capture`, Config > Shortcuts; Ctrl+Alt+D saves a problem report.)
 3. Repeat for: an Apple TV DV title, a UHD profile 7 and 8.1 title if available, an
    HDR10 title, an SDR menu, and one "stop to the SDR menu" transition.
 4. Send Claude the folder path and the vp.log. Nothing is committed; the folder becomes
@@ -329,7 +357,7 @@ differences in highlights near the target peak; the report says where VP departs
 CPU (single-threaded, TRX):
 
 ```
-vstest.console.exe x64\Release\VideoProcessor-Test.dll /TestCaseFilter:"FullyQualifiedName~DvTunnelLoopbackTests|FullyQualifiedName~DvIncomingHdrModeTests|FullyQualifiedName~DvRawCorpusTests|FullyQualifiedName~DvRpuAnchorTests" /Logger:trx;LogFileName=dv.trx
+vstest.console.exe x64\Release\VideoProcessor-Test.dll /TestCaseFilter:"FullyQualifiedName~DvTunnelLoopbackTests|FullyQualifiedName~DvIncomingHdrModeTests|FullyQualifiedName~DvRawCorpusTests|FullyQualifiedName~DvRpuAnchorTests|FullyQualifiedName~DvTunnelHandoffTests|FullyQualifiedName~ShortcutDefaultsTests" /Logger:trx;LogFileName=dv.trx
 ```
 
 GPU (Claude only; `VP_TEST_GPU=hardware`, optionally `VP_TEST_REQUIRE_GPU=1`):

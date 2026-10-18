@@ -23,7 +23,7 @@
 //                              2 EDID: LLDV 1000 nits" or "TV-led DV EDID")
 //
 // Continuous recording ("record until stopped") is toggled with the
-// raw_capture_toggle shortcut (default Ctrl+Alt+D) or by creating the file
+// [shortcuts] raw_capture shortcut (default Ctrl+Alt+W) or by creating the file
 // RECORD in the root folder (deleting it, or a file STOP, stops it). Start and
 // stop are logged ("Raw capture: recording started ...") and shown on screen.
 //

@@ -15,8 +15,9 @@ VP compare its mapping with Dolby's. About 20 minutes plus copying time.
   ```
 - Apple TV: Match Dynamic Range **on**, Match Frame Rate **on**, menus in SDR.
 - Integral 2: scaling off; no HDR injection; no colour, range or chroma conversion
-  (keep YCbCr 4:2:2 as YCbCr 4:2:2 - an RGB conversion of LLDV turns VP's picture black
-  while the tunnel switch is on).
+  (keep YCbCr 4:2:2 as YCbCr 4:2:2: it keeps the Apple TV's 12 bits. An RGB conversion of
+  LLDV no longer turns VP's picture black - VP hands it off after about a second - but it
+  is not what this check compares).
 - Pick a title and a scene (1-2 minutes in, ideally with bright and dark shots). Note
   the chapter and the time.
 
@@ -26,9 +27,10 @@ VP compare its mapping with Dolby's. About 20 minutes plus copying time.
    interface only, and the target luminance set to your screen (write down the
    maximum and minimum nits it declares, e.g. 100 and 0.005).
 2. Start the title; skip to about 5 seconds before your scene.
-3. When the picture is on, press **Ctrl+Alt+D** in VP. The screen shows
+3. When the picture is on, press **Ctrl+Alt+W** in VP (the raw-capture key, Config >
+   Shortcuts > raw_capture; Ctrl+Alt+D saves a problem report instead). The screen shows
    "Raw capture: recording started ...".
-4. Let it play **20 seconds** (it stops by itself after 30 s), or press Ctrl+Alt+D to stop
+4. Let it play **20 seconds** (it stops by itself after 30 s), or press Ctrl+Alt+W to stop
    ("recording stopped ..." appears).
 
 ## Run 2 - tunnel
@@ -36,7 +38,7 @@ VP compare its mapping with Dolby's. About 20 minutes plus copying time.
 1. Integral 2: load the **TV-led DV EDID** (the Vertex2's working DV EDID).
 2. In VP the DV tunnel switch must be on (DV page: Input mode "DV Tunneling").
 3. Play the same title from the same point; the DV card should show **DM**.
-4. Ctrl+Alt+D, 20 seconds, Ctrl+Alt+D - as in run 1. Small differences in where you
+4. Ctrl+Alt+W, 20 seconds, Ctrl+Alt+W - as in run 1. Small differences in where you
    start or a pause do not matter: VP lines the two runs up by picture content and
    compares only what both contain.
 

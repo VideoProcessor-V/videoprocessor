@@ -22,7 +22,8 @@ owner steps: `docs/VP-dv-tunnel-autotest.md`; owner page for the Apple TV check:
 - **Tier 2**: dovi_tool 2.3.4 (`D:\tools\dovi_tool`), 37 MIT RPUs (`D:\testclips\dv\`,
   README), converter `tools/dv_rpu_to_dm.py`, fixtures `test-fixtures/dv-rpu/`; anchors:
   dovi_tool's reading through the loop, RPU CRC-32.
-- **Tier 3**: `RawCaptureRecorder` (env `VP_RAW_CAPTURE_PATH`, shortcut Ctrl+Alt+D or
+- **Tier 3**: `RawCaptureRecorder` (env `VP_RAW_CAPTURE_PATH`, shortcut `[shortcuts] raw_capture`
+  (Ctrl+Alt+W since 2026-10-18; it was Ctrl+Alt+D, the report-a-problem key) or
   RECORD/STOP files, burst mode), corpus reader (VP and StreamRecorder formats), replay
   test with regression digests and an optional dovi_tool anchor.
 - **Apple TV reference**: `tools/dv_lldv_vs_tunnel.ps1` (CPU replay -> GPU render at the
@@ -34,7 +35,7 @@ owner steps: `docs/VP-dv-tunnel-autotest.md`; owner page for the Apple TV check:
 `DolbyVisionTunnelGate.h` (Dlg x2), `DolbyVisionTunnelPresentation.h` (renderer),
 `HdrInferenceSignalBuilder.h` (Dlg), `LldvStaticMetadata.h` (Dlg). New GUI hooks only for
 the opt-in recorder (no effect unless `VP_RAW_CAPTURE_PATH` is set) and the
-`raw_capture_toggle` shortcut (Config > Shortcuts).
+`raw_capture` shortcut (Config > Shortcuts; renamed from `raw_capture_toggle` 2026-10-18).
 
 ## Results
 
@@ -62,6 +63,7 @@ the opt-in recorder (no effect unless `VP_RAW_CAPTURE_PATH` is set) and the
   defaults would be offset 4x. To settle with the first real capture's DM.
 - Precision note: offsets go through float (changes below ~2^-24 relative vanish) - far
   below a 12-bit step.
+- Findings A, B and C were fixed on 2026-10-18 (`fix/dv-input-1018`, docs/agent-reports/dv-input-fixes.md).
 - Finding A: 10-bit RGB LLDV/HDR10 captured as r210 with the tunnel switch on stays black
   and suppresses newlldv. Not fixed (a bit-depth gate would break padded 8-bit tunnels).
 - Finding B: 8-bit RGB LLDV with the switch on is shown through the SDR passthrough.

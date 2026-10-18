@@ -63,6 +63,10 @@ inline HdrInferenceSignal BuildHdrInferenceSignalFromState(const VideoState* sta
 	tunnel.encoding = state->videoFrameEncoding;
 	tunnel.eotf = state->eotf;
 	signal.dolbyVisionTunnel = DolbyVisionTunnelOwnsSignal(tunnel);
+	// DV input fixes 2026-10-18: the explicit LLDV indications (8-bit may
+	// then qualify): the Dolby VSIF, or the tunnel hand-off on a DV input.
+	signal.lldvIndicated = state->dolbyVisionVsif == DolbyVisionVsif::LowLatency;
+	signal.dvTunnelHandedOff = tunnel.handedOff;
 	signal.explicitSettingsForbid = explicitSettingsForbid;
 	const DisplayModeSharedPtr& mode = state->displayMode;
 	uint64_t key = static_cast<uint64_t>(state->videoFrameEncoding) & 0xff;

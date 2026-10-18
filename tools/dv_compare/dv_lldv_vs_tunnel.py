@@ -4,7 +4,7 @@
 """LLDV-vs-tunnel check (DV autotest, 2026-10-17).
 
 The same title segment is played twice from the Apple TV while VP records the
-raw capture (VP_RAW_CAPTURE_PATH + the raw_capture_toggle key):
+raw capture (VP_RAW_CAPTURE_PATH + the raw_capture key):
   (a) LLDV: the Apple TV's certified Dolby display management maps the title
       to the target the EDID declares; VP receives PQ BT.2020 (usually YCbCr
       4:2:2, captured as V210).

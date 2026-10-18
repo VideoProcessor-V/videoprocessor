@@ -18,6 +18,7 @@
 #include <VideoFrame.h>
 #include <VideoState.h>
 #include <video_frame_formatter/CR210DolbyVisionTunnelFormatter.h>
+#include <DolbyVisionTunnelHandoff.h>
 #include <functional>
 #include <memory>
 #include <string>
@@ -35,7 +36,9 @@ namespace DvLoopback
 		virtual void OnFrame(const VideoFrame& frame, int64_t arrivalQpc) = 0;
 	};
 
-	enum class Shown { Picture, Sdr, Black, Rejected, TunnelOff };
+	// Handoff: the GUI's hand-off probe gave the signal to the normal path
+	// (DolbyVisionTunnelHandoff.h, DV input fixes 2026-10-18).
+	enum class Shown { Picture, Sdr, Black, Rejected, TunnelOff, Handoff };
 	const char* ToString(Shown shown);
 
 	struct FrameRecord
@@ -58,6 +61,7 @@ namespace DvLoopback
 	{
 		uint64_t captured = 0, identified = 0, unidentified = 0;
 		uint64_t pictures = 0, sdr = 0, black = 0, rejected = 0, tunnelOff = 0;
+		uint64_t handedOff = 0, handoffs = 0, takeBacks = 0;   // DV input fixes 2026-10-18
 		uint64_t dropped = 0, repeated = 0, outOfOrder = 0;
 		uint64_t pixelMismatchFrames = 0, pixelMismatchSamples = 0;
 		uint64_t transportErrorFrames = 0, transportErrorBytes = 0;
@@ -99,6 +103,9 @@ namespace DvLoopback
 		bool keepFrames = true;
 		bool bugHuntFixes = true;            // dv_tunnel_fixes
 		bool scalarUnpack = false;           // force the scalar CPU unpack
+		// [general] dv_tunnel_handoff: run the GUI's hand-off probe on every
+		// picture while the tunnel gate is open (DV input fixes 2026-10-18).
+		bool handoff = true;
 	};
 
 	class DvLoopbackAnalyzer : public IDvCaptureSink
@@ -114,6 +121,8 @@ namespace DvLoopback
 		const std::vector<uint16_t>& LastPlanes() const { return m_planes; }
 		const DolbyVisionTunnelFrameMetadata& LastMetadata() const { return m_lastMetadata; }
 		Shown LastShown() const { return m_lastShown; }
+		bool HandedOff() const { return m_handoff.HandedOff(); }
+		const DolbyVisionTunnelHandoffProbe& Handoff() const { return m_handoff; }
 
 	private:
 		void Issue(const std::string& text);
@@ -128,5 +137,6 @@ namespace DvLoopback
 		LoopReport m_report;
 		uint64_t m_ordinal = 0;
 		bool m_logHooked = false;
+		DolbyVisionTunnelHandoffProbe m_handoff;
 	};
 }

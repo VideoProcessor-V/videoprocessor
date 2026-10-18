@@ -474,6 +474,10 @@ namespace Tests
             const auto dm = Deliver(formatter, picture, 14);
             Assert::IsFalse(dm.valid);
             Assert::IsTrue(dm.allowSdrFallback);
+            // DV resumes with a real picture (tunnel near-black): an all-zero
+            // picture under valid metadata is a truncated frame and is
+            // rejected (DV input fixes 2026-10-18).
+            picture.SetFlat(64, 2048);
             picture.Embed(Packetize(DmBody(2048)));
             AssertPeak(Deliver(formatter, picture, 15), 2048);
         }
@@ -516,6 +520,10 @@ namespace Tests
             std::fill(picture.input.begin(), picture.input.end(), 0);
             for (uint64_t counter = 2; counter <= 25; ++counter)
                 Assert::IsTrue(Deliver(formatter, picture, counter).requiresBlackFrame);
+            // DV resumes with a real picture (tunnel near-black): an all-zero
+            // picture under valid metadata is a truncated frame and is
+            // rejected (DV input fixes 2026-10-18).
+            picture.SetFlat(64, 2048);
             picture.Embed(Packetize({}, 3, 3, true));
             const auto noDm = Deliver(formatter, picture, 26);
             Assert::IsFalse(noDm.valid);
@@ -1772,9 +1780,11 @@ namespace Tests
         TEST_METHOD(AnalyzeFrameReadsOnlyThePacketPixels)
         {
             // 4K: everything after the DM packets (and the 4096-pixel alignment
-            // probe) is PAGE_NOACCESS. AnalyzeFrame locks, keeps DM and handles
-            // CRC loss without touching it, so with the GPU unpack the CPU never
-            // reads the picture. Timing against FormatVideoFrame logged.
+            // probe) up to the last row is PAGE_NOACCESS. AnalyzeFrame locks,
+            // keeps DM and handles CRC loss without touching it, so with the GPU
+            // unpack the CPU never reads the picture. The last row stays
+            // readable: the truncated-frame check (DV input fixes 2026-10-18)
+            // reads it. Timing against FormatVideoFrame logged.
             for (const bool high8 : { true, false })
             {
                 SenderPicture picture(high8, 3840, 2160);
@@ -1790,11 +1800,13 @@ namespace Tests
                 const size_t page = info.dwPageSize;
                 const size_t readablePages = (readableBytes + page - 1) / page * page;
                 const size_t total = (bytes + page - 1) / page * page;
+                const size_t lastRowPage = (bytes - rowBytes) / page * page;
+                const size_t guardedBytes = lastRowPage - readablePages;
                 BYTE* guarded = static_cast<BYTE*>(VirtualAlloc(nullptr, total, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
                 Assert::IsNotNull(guarded);
                 std::memcpy(guarded, picture.input.data(), bytes);
                 DWORD old = 0;
-                Assert::IsTrue(VirtualProtect(guarded + readablePages, total - readablePages, PAGE_NOACCESS, &old) != 0);
+                Assert::IsTrue(VirtualProtect(guarded + readablePages, guardedBytes, PAGE_NOACCESS, &old) != 0);
                 Formatter formatter;
                 formatter.OnVideoState(picture.state);
                 Formatter::FrameResult result = Formatter::FrameResult::REJECTED;
@@ -1813,7 +1825,7 @@ namespace Tests
                 // first packet: an RGB8 bit in either placement): the picture is
                 // black. Here the SDR-exit check samples about 16K sparse pixels
                 // of the picture (LooksLikeTunnel), so the guard is lifted.
-                VirtualProtect(guarded + readablePages, total - readablePages, PAGE_READWRITE, &old);
+                VirtualProtect(guarded + readablePages, guardedBytes, PAGE_READWRITE, &old);
                 for (size_t copy = 0; copy < 3; ++copy)
                     guarded[(copy * 1024 + 17) * 4 + 1] ^= 0x40;
                 const VideoFrame damaged(guarded, 9, 0, nullptr);

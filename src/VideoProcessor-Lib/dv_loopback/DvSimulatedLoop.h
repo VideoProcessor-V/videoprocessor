@@ -59,6 +59,9 @@ namespace DvLoopback
 		EOTF cardEotf = EOTF::SDR;
 		ColorSpace cardColorspace = ColorSpace::REC_709;
 		bool cardHdrInfoFrame = false;
+		// What a capture device that reports the Dolby VSIF would say
+		// (DeckLink: Unknown). DV input fixes 2026-10-18.
+		DolbyVisionVsif cardVsif = DolbyVisionVsif::Unknown;
 	};
 
 	class DvSimulatedLoop : public IDvLoopOutput
@@ -78,6 +81,7 @@ namespace DvLoopback
 			m_state->colorspace = m_faults.cardColorspace;
 			if (m_faults.cardHdrInfoFrame)
 				m_state->hdrData = std::make_shared<HDRData>();
+			m_state->dolbyVisionVsif = m_faults.cardVsif;
 			DolbyVisionTunnelGateInput gate;
 			gate.tunnelSwitch = m_faults.tunnelSwitch;
 			gate.libplaceboRenderer = true;

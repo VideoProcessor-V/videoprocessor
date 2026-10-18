@@ -484,6 +484,221 @@ namespace
 		}
 		return text;
 	}
+
+	// DV input fixes 2026-10-18: the word reader, the packet reader, the
+	// placement votes and the tunnel-content cue moved out of the members
+	// unchanged, so the static probes (HasTunnelHeader, ClassifyRgbContent,
+	// LooksLikeTunnelContent, LastRowBlank; the GUI's tunnel hand-off) apply
+	// the formatter's own rules to a raster without formatter state.
+	enum class TunnelWordLayout { R210, R10_BIG_ENDIAN, R10_LITTLE_ENDIAN };
+
+	TunnelWordLayout LayoutOf(VideoFrameEncoding encoding)
+	{
+		return encoding == VideoFrameEncoding::R10b ? TunnelWordLayout::R10_BIG_ENDIAN :
+			encoding == VideoFrameEncoding::R10l ? TunnelWordLayout::R10_LITTLE_ENDIAN :
+			TunnelWordLayout::R210;
+	}
+
+	struct TunnelWordReader
+	{
+		const uint8_t* source = nullptr;
+		uint32_t width = 0;
+		uint32_t stride = 0;
+		TunnelWordLayout layout = TunnelWordLayout::R210;
+
+		// audit 2026-10-16: returns the r210 layout [00 R10 G10 B10] for every
+		// supported container (R10 words carry two padding bits at the bottom).
+		uint32_t operator()(size_t pixel) const
+		{
+			const size_t y = pixel / width;
+			const size_t x = pixel % width;
+			const uint8_t* bytes = source + y * stride + x * 4;
+			if (layout == TunnelWordLayout::R10_BIG_ENDIAN)
+				return ReadBigEndian32(bytes) >> 2;
+			if (layout == TunnelWordLayout::R10_LITTLE_ENDIAN)
+				return ReadLittleEndian32(bytes) >> 2;
+			return ReadBigEndian32(bytes);
+		}
+	};
+
+	struct PacketReadCounters
+	{
+		uint32_t crcFailedCopies = 0;
+		uint32_t recovered = 0;
+		uint32_t majority = 0;
+	};
+
+	bool ReadPacketCopiesWith(const TunnelWordReader& readWord, size_t index,
+		bool leftAligned, uint8_t* packet, PacketReadCounters& counters)
+	{
+		uint8_t copies[kRepeats][kPacketBytes];
+		for (size_t copy = 0; copy < kRepeats; ++copy)
+		{
+			uint8_t* bytes = copies[copy];
+			memset(bytes, 0, kPacketBytes);
+			for (size_t bit = 0; bit < kPacketBits; ++bit)
+			{
+				const Rgb8 rgb = DecodeRgb(readWord(
+					(index * kRepeats + copy) * kPacketBits + bit), leftAligned);
+				bytes[bit / 8] |= static_cast<uint8_t>(Parity(
+					(static_cast<uint32_t>(rgb.r) << 16) |
+					(static_cast<uint32_t>(rgb.g) << 8) | rgb.b) << (7 - bit % 8));
+			}
+			if (PacketCrc(bytes) == 0)
+			{
+				if (copy != 0)
+					++counters.recovered;
+				memcpy(packet, bytes, kPacketBytes);
+				return true;
+			}
+			++counters.crcFailedCopies;
+		}
+		// audit 2026-10-16: when every copy has (different) bit errors, a
+		// bitwise 2-of-3 vote can still rebuild the packet. The CRC remains the
+		// only authority, so this never accepts an unverified packet.
+		for (size_t i = 0; i < kPacketBytes; ++i)
+		{
+			const uint8_t a = copies[0][i], b = copies[1][i], c = copies[2][i];
+			packet[i] = static_cast<uint8_t>((a & b) | (a & c) | (b & c));
+		}
+		if (PacketCrc(packet) == 0)
+		{
+			++counters.majority;
+			return true;
+		}
+		return false;
+	}
+
+	// Bug hunt 2026-10-17 placement grid (dv_tunnel_fixes): a grid over the
+	// whole raster; high8 never sets the low two bits of a 10-bit field, low8
+	// never the high two; dark pixels vote for neither, and a pixel using
+	// both is contradictory (10-bit content).
+	struct PlacementVotes
+	{
+		size_t left = 0, right = 0, contradictory = 0;
+		size_t NonDark() const { return left + right + contradictory; }
+	};
+
+	PlacementVotes CountPlacementVotes(const TunnelWordReader& readWord,
+		uint32_t width, uint32_t height)
+	{
+		PlacementVotes votes;
+		const uint32_t rows = (std::min)(height, 64U);
+		const uint32_t columns = (std::min)(width, 256U);
+		for (uint32_t r = 0; r < rows; ++r)
+		{
+			const size_t y = (static_cast<size_t>(r) * 2 + 1) * height / (rows * 2);
+			for (uint32_t c = 0; c < columns; ++c)
+			{
+				const size_t x = (static_cast<size_t>(c) * 2 + 1) * width / (columns * 2);
+				const uint32_t word = readWord(y * width + x);
+				const uint32_t bits = ((word >> 20) | (word >> 10) | word) & 0x3FFU;
+				const bool lowBits = (bits & 3U) != 0;     // impossible for high8
+				const bool highBits = (bits & 0x300U) != 0; // impossible for low8
+				if (highBits && !lowBits)
+					++votes.left;
+				else if (lowBits && !highBits)
+					++votes.right;
+				else if (lowBits && highBits)
+					++votes.contradictory;
+			}
+		}
+		return votes;
+	}
+
+	constexpr size_t kMinPlacementVotes = 16;
+
+	bool LooksLikeTunnelWith(const TunnelWordReader& readWord, uint32_t width,
+		uint32_t height, bool bugHuntFixes)
+	{
+		// audit 2026-10-16: cheap content check, evaluated only while a locked
+		// tunnel has no CRC-valid header. In the RGB8 tunnel G = I[11:4] (smooth,
+		// like luma), R = C[11:4] (near neutral 128 for most content) and
+		// B = C[3:0]<<4 | I[3:0] (low nibbles: close to random between
+		// neighbours; Cb/Cr alternate per pixel). Ordinary RGB has B about as
+		// smooth as G, and R follows brightness. Black (all-zero) RGB fails both.
+		// Conservative by design: a false "still tunnel" only prolongs black,
+		// a false "not tunnel" would show packed pixels. Both byte placements are
+		// evaluated (flat tunnel content can CRC-validate in either placement),
+		// and either cue in either placement counts as tunnel content.
+		if (width < 2 || height == 0)
+			return true;
+		const uint32_t rows = (std::min)(height, 64U);
+		const uint32_t pairsPerRow = (std::min)(width / 2, 128U);
+		uint64_t roughB[2] = {}, roughG[2] = {}, neutral[2] = {}, pairs = 0;
+		uint64_t rDistanceFromG[2] = {}; // Bug hunt 2026-10-17: sum of |R - G|
+		for (uint32_t r = 0; r < rows; ++r)
+		{
+			const size_t y = (static_cast<size_t>(r) * 2 + 1) * height / (rows * 2);
+			for (uint32_t c = 0; c < pairsPerRow; ++c)
+			{
+				const size_t x = ((static_cast<size_t>(c) * 2 + 1) * (width / 2) /
+					(pairsPerRow * 2)) * 2;
+				const uint32_t words[2] = {
+					readWord(y * width + x),
+					readWord(y * width + x + 1) };
+				++pairs;
+				for (size_t placement = 0; placement < 2; ++placement)
+				{
+					const bool leftAligned = placement == 1;
+					const Rgb8 first = DecodeRgb(words[0], leftAligned);
+					const Rgb8 second = DecodeRgb(words[1], leftAligned);
+					roughB[placement] += static_cast<uint64_t>(std::abs(
+						static_cast<int>(first.b) - static_cast<int>(second.b)));
+					roughG[placement] += static_cast<uint64_t>(std::abs(
+						static_cast<int>(first.g) - static_cast<int>(second.g)));
+					neutral[placement] +=
+						(std::abs(static_cast<int>(first.r) - 128) <= 32 ? 1U : 0U) +
+						(std::abs(static_cast<int>(second.r) - 128) <= 32 ? 1U : 0U);
+					rDistanceFromG[placement] += static_cast<uint64_t>(
+						std::abs(static_cast<int>(first.r) - static_cast<int>(first.g)) +
+						std::abs(static_cast<int>(second.r) - static_cast<int>(second.g)));
+				}
+			}
+		}
+		if (pairs == 0)
+			return true;
+		for (size_t placement = 0; placement < 2; ++placement)
+		{
+			// Noisy low nibbles in B while G stays comparatively smooth.
+			if (roughB[placement] >= 16 * pairs &&
+				roughB[placement] >= 3 * roughG[placement] + pairs)
+				return true;
+			// Near-neutral R (tunnel chroma high byte) on most samples, at any
+			// brightness. Bug hunt 2026-10-17: only when R does not follow G
+			// (mean |R - G| > 32). Grey SDR (a menu after the tunnel stops) has
+			// R = G and used to hold the SDR exit off indefinitely; tunnel black
+			// has G near 0 with R near 128. Mid-grey tunnel content relies on the
+			// noisy-B cue above.
+			if (neutral[placement] * 10 >= pairs * 2 * 8 &&
+				(!bugHuntFixes || rDistanceFromG[placement] > 32 * pairs * 2))
+				return true;
+		}
+		return false;
+	}
+
+	// DV input fixes 2026-10-18 (dv_tunnel_fixes): a frame cut short (the
+	// tail of the buffer never written: a truncated transfer) leaves the last
+	// row all zero. Valid tunnel content cannot: an all-zero word is I = 0
+	// with a chroma sample of 0 (the most negative opponent value), outside
+	// every real picture - tunnel black is I near 0 with chroma near 2048
+	// (R near 128). The whole last row is checked, so one plausible pixel
+	// keeps the frame.
+	bool LastRowAllZero(const TunnelWordReader& readWord, uint32_t width, uint32_t height)
+	{
+		if (width == 0 || height == 0)
+			return false;
+		const size_t first = static_cast<size_t>(height - 1) * width;
+		for (size_t x = 0; x < width; ++x)
+			if ((readWord(first + x) & 0x3FFFFFFFU) != 0)
+				return false;
+		return true;
+	}
+
+	TunnelWordLayout ToLayout(int wordLayout)
+	{
+		return static_cast<TunnelWordLayout>(wordLayout);
+	}
 }
 
 CR210DolbyVisionTunnelFormatter::CR210DolbyVisionTunnelFormatter()
@@ -595,125 +810,119 @@ void CR210DolbyVisionTunnelFormatter::OnVideoState(VideoStateComPtr& state)
 uint32_t CR210DolbyVisionTunnelFormatter::ReadTunnelWord(
 	const uint8_t* source, size_t pixel) const
 {
-	// audit 2026-10-16: returns the r210 layout [00 R10 G10 B10] for every
-	// supported container (R10 words carry two padding bits at the bottom).
-	const size_t y = pixel / m_width;
-	const size_t x = pixel % m_width;
-	const uint8_t* bytes = source + y * m_stride + x * 4;
-	if (m_wordLayout == WordLayout::R10_BIG_ENDIAN)
-		return ReadBigEndian32(bytes) >> 2;
-	if (m_wordLayout == WordLayout::R10_LITTLE_ENDIAN)
-		return ReadLittleEndian32(bytes) >> 2;
-	return ReadBigEndian32(bytes);
+	TunnelWordReader reader;
+	reader.source = source;
+	reader.width = m_width;
+	reader.stride = m_stride;
+	reader.layout = ToLayout(static_cast<int>(m_wordLayout));
+	return reader(pixel);
 }
 
 bool CR210DolbyVisionTunnelFormatter::ReadPacketCopies(const uint8_t* source,
 	size_t index, bool leftAligned, uint8_t* packet)
 {
-	uint8_t copies[kRepeats][kPacketBytes];
-	for (size_t copy = 0; copy < kRepeats; ++copy)
-	{
-		uint8_t* bytes = copies[copy];
-		memset(bytes, 0, kPacketBytes);
-		for (size_t bit = 0; bit < kPacketBits; ++bit)
-		{
-			const Rgb8 rgb = DecodeRgb(ReadTunnelWord(source,
-				(index * kRepeats + copy) * kPacketBits + bit), leftAligned);
-			bytes[bit / 8] |= static_cast<uint8_t>(Parity(
-				(static_cast<uint32_t>(rgb.r) << 16) |
-				(static_cast<uint32_t>(rgb.g) << 8) | rgb.b) << (7 - bit % 8));
-		}
-		if (PacketCrc(bytes) == 0)
-		{
-			if (copy != 0)
-				++m_recoveredPackets;
-			memcpy(packet, bytes, kPacketBytes);
-			return true;
-		}
-		++m_crcFailedCopies;
-	}
-	// audit 2026-10-16: when every copy has (different) bit errors, a
-	// bitwise 2-of-3 vote can still rebuild the packet. The CRC remains the
-	// only authority, so this never accepts an unverified packet.
-	for (size_t i = 0; i < kPacketBytes; ++i)
-	{
-		const uint8_t a = copies[0][i], b = copies[1][i], c = copies[2][i];
-		packet[i] = static_cast<uint8_t>((a & b) | (a & c) | (b & c));
-	}
-	if (PacketCrc(packet) == 0)
-	{
-		++m_majorityRecoveries;
-		return true;
-	}
-	return false;
+	TunnelWordReader reader;
+	reader.source = source;
+	reader.width = m_width;
+	reader.stride = m_stride;
+	reader.layout = ToLayout(static_cast<int>(m_wordLayout));
+	PacketReadCounters counters;
+	const bool ok = ReadPacketCopiesWith(reader, index, leftAligned, packet, counters);
+	m_crcFailedCopies += counters.crcFailedCopies;
+	m_recoveredPackets += counters.recovered;
+	m_majorityRecoveries += counters.majority;
+	return ok;
 }
 
 bool CR210DolbyVisionTunnelFormatter::LooksLikeTunnel(const uint8_t* source) const
 {
-	// audit 2026-10-16: cheap content check, evaluated only while a locked
-	// tunnel has no CRC-valid header. In the RGB8 tunnel G = I[11:4] (smooth,
-	// like luma), R = C[11:4] (near neutral 128 for most content) and
-	// B = C[3:0]<<4 | I[3:0] (low nibbles: close to random between
-	// neighbours; Cb/Cr alternate per pixel). Ordinary RGB has B about as
-	// smooth as G, and R follows brightness. Black (all-zero) RGB fails both.
-	// Conservative by design: a false "still tunnel" only prolongs black,
-	// a false "not tunnel" would show packed pixels. Both byte placements are
-	// evaluated (flat tunnel content can CRC-validate in either placement),
-	// and either cue in either placement counts as tunnel content.
-	if (m_width < 2 || m_height == 0)
-		return true;
-	const uint32_t rows = (std::min)(m_height, 64U);
-	const uint32_t pairsPerRow = (std::min)(m_width / 2, 128U);
-	uint64_t roughB[2] = {}, roughG[2] = {}, neutral[2] = {}, pairs = 0;
-	uint64_t rDistanceFromG[2] = {}; // Bug hunt 2026-10-17: sum of |R - G|
-	for (uint32_t r = 0; r < rows; ++r)
+	TunnelWordReader reader;
+	reader.source = source;
+	reader.width = m_width;
+	reader.stride = m_stride;
+	reader.layout = ToLayout(static_cast<int>(m_wordLayout));
+	return LooksLikeTunnelWith(reader, m_width, m_height, m_bugHuntFixes);
+}
+
+namespace
+{
+	bool ReaderFor(const CR210DolbyVisionTunnelFormatter::RasterView& raster, TunnelWordReader& reader)
 	{
-		const size_t y = (static_cast<size_t>(r) * 2 + 1) * m_height / (rows * 2);
-		for (uint32_t c = 0; c < pairsPerRow; ++c)
+		if (!raster.data || raster.width == 0 || raster.height == 0 ||
+			raster.stride < raster.width * 4U ||
+			(raster.encoding != VideoFrameEncoding::R210 &&
+				raster.encoding != VideoFrameEncoding::R10b &&
+				raster.encoding != VideoFrameEncoding::R10l))
+			return false;
+		reader.source = static_cast<const uint8_t*>(raster.data);
+		reader.width = raster.width;
+		reader.stride = raster.stride;
+		reader.layout = LayoutOf(raster.encoding);
+		return true;
+	}
+}
+
+bool CR210DolbyVisionTunnelFormatter::HasTunnelHeader(const RasterView& raster, bool* highAligned)
+{
+	TunnelWordReader reader;
+	if (!ReaderFor(raster, reader) ||
+		static_cast<size_t>(raster.width) * raster.height < kPacketBits * kRepeats)
+		return false;
+	for (const bool left : { true, false })
+	{
+		std::array<uint8_t, kPacketBytes> packet{};
+		PacketReadCounters counters;
+		ParsedPacket parsed;
+		if (ReadPacketCopiesWith(reader, 0, left, packet.data(), counters) &&
+			(packet[0] >> 6) <= 1 && ParseHeader(packet.data(), parsed))
 		{
-			const size_t x = ((static_cast<size_t>(c) * 2 + 1) * (m_width / 2) /
-				(pairsPerRow * 2)) * 2;
-			const uint32_t words[2] = {
-				ReadTunnelWord(source, y * m_width + x),
-				ReadTunnelWord(source, y * m_width + x + 1) };
-			++pairs;
-			for (size_t placement = 0; placement < 2; ++placement)
-			{
-				const bool leftAligned = placement == 1;
-				const Rgb8 first = DecodeRgb(words[0], leftAligned);
-				const Rgb8 second = DecodeRgb(words[1], leftAligned);
-				roughB[placement] += static_cast<uint64_t>(std::abs(
-					static_cast<int>(first.b) - static_cast<int>(second.b)));
-				roughG[placement] += static_cast<uint64_t>(std::abs(
-					static_cast<int>(first.g) - static_cast<int>(second.g)));
-				neutral[placement] +=
-					(std::abs(static_cast<int>(first.r) - 128) <= 32 ? 1U : 0U) +
-					(std::abs(static_cast<int>(second.r) - 128) <= 32 ? 1U : 0U);
-				rDistanceFromG[placement] += static_cast<uint64_t>(
-					std::abs(static_cast<int>(first.r) - static_cast<int>(first.g)) +
-					std::abs(static_cast<int>(second.r) - static_cast<int>(second.g)));
-			}
+			if (highAligned)
+				*highAligned = left;
+			return true;
 		}
 	}
-	if (pairs == 0)
-		return true;
-	for (size_t placement = 0; placement < 2; ++placement)
-	{
-		// Noisy low nibbles in B while G stays comparatively smooth.
-		if (roughB[placement] >= 16 * pairs &&
-			roughB[placement] >= 3 * roughG[placement] + pairs)
-			return true;
-		// Near-neutral R (tunnel chroma high byte) on most samples, at any
-		// brightness. Bug hunt 2026-10-17: only when R does not follow G
-		// (mean |R - G| > 32). Grey SDR (a menu after the tunnel stops) has
-		// R = G and used to hold the SDR exit off indefinitely; tunnel black
-		// has G near 0 with R near 128. Mid-grey tunnel content relies on the
-		// noisy-B cue above.
-		if (neutral[placement] * 10 >= pairs * 2 * 8 &&
-			(!m_bugHuntFixes || rDistanceFromG[placement] > 32 * pairs * 2))
-			return true;
-	}
 	return false;
+}
+
+CR210DolbyVisionTunnelFormatter::RgbContent
+CR210DolbyVisionTunnelFormatter::ClassifyRgbContent(const RasterView& raster)
+{
+	TunnelWordReader reader;
+	if (!ReaderFor(raster, reader))
+		return RgbContent::UNKNOWN;
+	const PlacementVotes votes = CountPlacementVotes(reader, raster.width, raster.height);
+	const size_t nonDark = votes.NonDark();
+	// The formatter's own placement decision (AnalyzeFrame) first.
+	if (votes.left >= kMinPlacementVotes &&
+		(votes.right + votes.contradictory) * 100 <= nonDark * 2)
+		return RgbContent::HIGH8;
+	if (votes.right >= kMinPlacementVotes &&
+		(votes.left + votes.contradictory) * 100 <= nonDark * 2)
+		return RgbContent::LOW8;
+	// 10-bit content: the low and the high two bits of the same fields in
+	// use on at least a quarter of the non-dark samples. RGB8 in either
+	// placement never does that (an 8-bit tunnel padded to 10 bits on the
+	// link is "high8": its low two bits are zero), so this is not a tunnel
+	// stored untouched.
+	if (votes.contradictory >= kMinPlacementVotes && votes.contradictory * 4 >= nonDark)
+		return RgbContent::TEN_BIT;
+	return RgbContent::UNKNOWN;
+}
+
+bool CR210DolbyVisionTunnelFormatter::LooksLikeTunnelContent(const RasterView& raster)
+{
+	TunnelWordReader reader;
+	if (!ReaderFor(raster, reader))
+		return false;
+	return LooksLikeTunnelWith(reader, raster.width, raster.height, true);
+}
+
+bool CR210DolbyVisionTunnelFormatter::LastRowBlank(const RasterView& raster)
+{
+	TunnelWordReader reader;
+	if (!ReaderFor(raster, reader))
+		return false;
+	return LastRowAllZero(reader, raster.width, raster.height);
 }
 
 void CR210DolbyVisionTunnelFormatter::BeginTitle()
@@ -1179,28 +1388,14 @@ CR210DolbyVisionTunnelFormatter::AnalyzeFrame(const VideoFrame& frame)
 		// high8 never sets the low two bits, low8 never sets the high two.
 		// Dark pixels count for neither; a decision needs kMinVotes votes and
 		// at most 2% of the non-dark samples contradicting it.
-		constexpr size_t kMinVotes = 16;
-		const uint32_t rows = (std::min)(m_height, 64U);
-		const uint32_t columns = (std::min)(m_width, 256U);
-		size_t leftVotes = 0, rightVotes = 0, contradictory = 0;
-		for (uint32_t r = 0; r < rows; ++r)
-		{
-			const size_t y = (static_cast<size_t>(r) * 2 + 1) * m_height / (rows * 2);
-			for (uint32_t c = 0; c < columns; ++c)
-			{
-				const size_t x = (static_cast<size_t>(c) * 2 + 1) * m_width / (columns * 2);
-				const uint32_t word = readWord(y * m_width + x);
-				const uint32_t bits = ((word >> 20) | (word >> 10) | word) & 0x3FFU;
-				const bool lowBits = (bits & 3U) != 0;     // impossible for high8
-				const bool highBits = (bits & 0x300U) != 0; // impossible for low8
-				if (highBits && !lowBits)
-					++leftVotes;
-				else if (lowBits && !highBits)
-					++rightVotes;
-				else if (lowBits && highBits)
-					++contradictory;
-			}
-		}
+		constexpr size_t kMinVotes = kMinPlacementVotes;
+		TunnelWordReader reader;
+		reader.source = source;
+		reader.width = m_width;
+		reader.stride = m_stride;
+		reader.layout = ToLayout(static_cast<int>(m_wordLayout));
+		const PlacementVotes votes = CountPlacementVotes(reader, m_width, m_height);
+		const size_t leftVotes = votes.left, rightVotes = votes.right, contradictory = votes.contradictory;
 		const size_t nonDark = leftVotes + rightVotes + contradictory;
 		if (leftVotes >= kMinVotes &&
 			(rightVotes + contradictory) * 100 <= nonDark * 2)
@@ -1215,8 +1410,35 @@ CR210DolbyVisionTunnelFormatter::AnalyzeFrame(const VideoFrame& frame)
 			m_alignment == ByteAlignment::RIGHT ? 2 : 0;
 	// The renderer may use SDR only before DV lock or after explicit EOS.
 	// Invalid metadata after DV lock must not expose the packed RGB pixels.
-	return m_alignment == ByteAlignment::UNKNOWN || !m_metadata.valid ?
+	const FrameResult result = m_alignment == ByteAlignment::UNKNOWN || !m_metadata.valid ?
 		FrameResult::BLACK : FrameResult::PICTURE;
+	// DV input fixes 2026-10-18 (dv_tunnel_fixes): a picture whose metadata
+	// area arrived intact but whose tail was never written (a truncated
+	// transfer: the last row is all zero, which valid tunnel content never
+	// is - see LastRowAllZero) is rejected rather than decoded; zero IPT is
+	// extreme chroma, not black. The metadata it carried is CRC-verified and
+	// kept; only this picture is dropped (the renderer keeps the previous one).
+	// Only a picture that would be shown is checked: one without a CRC-valid
+	// header of its own is presented black anyway (requiresBlackFrame). The
+	// check reads the last row only, besides the packet pixels.
+	if (result == FrameResult::PICTURE && m_currentPictureHasValidHeader && m_bugHuntFixes)
+	{
+		TunnelWordReader reader;
+		reader.source = source;
+		reader.width = m_width;
+		reader.stride = m_stride;
+		reader.layout = ToLayout(static_cast<int>(m_wordLayout));
+		if (LastRowAllZero(reader, m_width, m_height))
+		{
+			++m_truncatedFrames;
+			if ((m_truncatedFrames & (m_truncatedFrames - 1)) == 0)
+				DebugLog::Log("Dolby Vision RGB tunnel: picture %llu rejected: incomplete frame (last row blank, truncated transfer); metadata kept; %llu truncated so far",
+					static_cast<unsigned long long>(counter),
+					static_cast<unsigned long long>(m_truncatedFrames));
+			return FrameResult::REJECTED;
+		}
+	}
+	return result;
 }
 
 bool CR210DolbyVisionTunnelFormatter::FormatVideoFrame(

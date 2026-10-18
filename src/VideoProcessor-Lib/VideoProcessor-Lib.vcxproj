@@ -362,6 +362,8 @@
     <ClInclude Include="DolbyVisionTunnelGate.h" />
     <ClInclude Include="DolbyVisionTunnelPresentation.h" />
     <ClInclude Include="HdrInferenceSignalBuilder.h" />
+    <ClInclude Include="DolbyVisionTunnelHandoff.h" />
+    <ClInclude Include="ShortcutDefaults.h" />
     <ClInclude Include="LldvStaticMetadata.h" />
     <ClInclude Include="RawCaptureRecorder.h" />
     <ClInclude Include="RawCaptureCorpus.h" />

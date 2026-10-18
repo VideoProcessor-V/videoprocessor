@@ -16,7 +16,7 @@
 //   --restore-sdr    recovery: sets NV_HDR_MODE_OFF on one display (the public
 //                    report of a TV stuck black in DV mode).
 //
-// VP records the capture side (VP_RAW_CAPTURE_PATH + raw_capture_toggle, or
+// VP records the capture side (VP_RAW_CAPTURE_PATH + raw_capture, or
 // VideoProcessorStreamRecorder --raw N); the CPU test
 // HardwareLoopbackRecordingAnalyses then compares bit for bit
 // (docs/VP-dv-tunnel-autotest.md). The output is never labelled Dolby Vision.

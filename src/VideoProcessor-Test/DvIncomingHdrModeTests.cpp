@@ -19,6 +19,7 @@
 #include <HdrInferenceSignalBuilder.h>
 #include <LldvStaticMetadata.h>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -237,94 +238,214 @@ namespace Tests
 			Assert::AreEqual(static_cast<int>(Mode::InferredPq), static_cast<int>(d.Apply(kLldv, 2000)));
 		}
 
-		// FINDING (documented, not changed): LLDV / HDR10 sent as 10-bit RGB
-		// 4:4:4 (e.g. an HDFury converting to RGB) is captured as r210 and
-		// reported SDR, so with the tunnel switch on it enters the tunnel
-		// formatter: the placement probe never resolves on 10-bit content, the
-		// picture stays black, and the newlldv inference is suppressed. A
-		// wire-bit-depth condition is not a safe fix (an 8-bit tunnel padded to
-		// 10 bits arrives "high8" and is valid).
-		TEST_METHOD(FindingTenBitRgbLldvWithTheTunnelSwitchOnStaysBlack)
+		// DV input fix 1 (2026-10-18; was FINDING A): LLDV / HDR10 sent as
+		// 10-bit RGB 4:4:4 (an HDFury converting LLDV to RGB) is captured as
+		// r210 and reported SDR, so with the tunnel switch on it enters the
+		// tunnel formatter. It used to stay black for good (the RGB8 placement
+		// never resolves on 10-bit content) with newlldv suppressed. Now the
+		// hand-off probe sees 10-bit content and no tunnel header for about a
+		// second, hands the signal to the normal path, and newlldv infers PQ.
+		// dv_tunnel_handoff off reproduces the old behaviour.
+		TEST_METHOD(TenBitRgbLldvWithTheTunnelSwitchOnIsHandedOffAndInferredPq)
 		{
 			const uint32_t w = 256, h = 108;
-			VideoStateComPtr state = StateOf({ "LLDV 10-bit RGB", VideoFrameEncoding::R210, EOTF::SDR, ColorSpace::BT_2020, false,
-				BitDepth::BITDEPTH_10BIT }, w, h);
-			DolbyVisionTunnelGateInput gate = Gate(true);
-			gate.captureStateValid = true;
-			gate.encoding = state->videoFrameEncoding;
-			gate.eotf = state->eotf;
-			state->dolbyVisionTunnel = DolbyVisionTunnelGateOpen(gate);
-			Assert::IsTrue(state->dolbyVisionTunnel, L"the gate opens (r210, SDR)");
-			AnalyzerOptions options;
-			DvLoopbackAnalyzer analyzer(options);
-			analyzer.OnState(state);
-			std::vector<uint8_t> bytes(state->BytesPerFrame());
-			for (uint32_t n = 0; n < 120; ++n)
+			const IncomingSignal lldvRgb{ "LLDV 10-bit RGB", VideoFrameEncoding::R210, EOTF::SDR, ColorSpace::BT_2020, false,
+				BitDepth::BITDEPTH_10BIT };
+			for (const bool handoff : { false, true })
 			{
-				for (uint32_t y = 0; y < h; ++y)
-					for (uint32_t x = 0; x < w; ++x)
-					{
-						// 10-bit PQ-like RGB: every bit of each field in use.
-						const uint32_t v = (64 + (x * 3 + y * 5 + n) % 877) & 0x3FF;
-						const uint32_t word = (v << 20) | (((v * 7) & 0x3FF) << 10) | ((v * 13 + 1) & 0x3FF);
-						uint8_t* at = bytes.data() + static_cast<size_t>(y) * state->BytesPerRow() + x * 4;
-						at[0] = static_cast<uint8_t>(word >> 24); at[1] = static_cast<uint8_t>(word >> 16);
-						at[2] = static_cast<uint8_t>(word >> 8); at[3] = static_cast<uint8_t>(word);
-					}
-				VideoFrame frame(bytes.data(), n + 1, n + 1, nullptr, n + 1);
-				analyzer.OnFrame(frame, 0);
+				VideoStateComPtr state = StateOf(lldvRgb, w, h);
+				DolbyVisionTunnelGateInput gate = Gate(true);
+				gate.captureStateValid = true;
+				gate.encoding = state->videoFrameEncoding;
+				gate.eotf = state->eotf;
+				state->dolbyVisionTunnel = DolbyVisionTunnelGateOpen(gate);
+				Assert::IsTrue(state->dolbyVisionTunnel, L"the gate opens (r210, SDR)");
+				AnalyzerOptions options;
+				options.handoff = handoff;
+				DvLoopbackAnalyzer analyzer(options);
+				analyzer.OnState(state);
+				std::vector<uint8_t> bytes;
+				for (uint32_t n = 0; n < 120; ++n)
+				{
+					TenBitRgbPicture(w, h, n, state->BytesPerRow(), bytes);
+					VideoFrame frame(bytes.data(), n + 1, n + 1, nullptr, n + 1);
+					analyzer.OnFrame(frame, 0);
+				}
+				const LoopReport r = analyzer.Finish();
+				Logger::WriteMessage((std::string("10-bit RGB LLDV, dv_tunnel_handoff ") + (handoff ? "on: " : "off: ") +
+					r.Summary() + "\n").c_str());
+				Assert::AreEqual<uint64_t>(0, r.pictures, L"no false DV lock");
+				gate.handedOff = analyzer.HandedOff();
+				const HdrInferenceSignal signal = BuildHdrInferenceSignalFromState(state.p, true, BitDepth::BITDEPTH_10BIT, gate, false);
+				if (!handoff)
+				{
+					Assert::AreEqual<uint64_t>(120, r.black, L"switch off: black for the whole run (the old behaviour)");
+					Assert::IsTrue(signal.dolbyVisionTunnel, L"switch off: the inference stays suppressed");
+					continue;
+				}
+				// About one second (24 pictures at 23.976 Hz) of black, then the normal path.
+				const uint64_t window = analyzer.Handoff().WindowPictures();
+				Assert::AreEqual<uint64_t>(24, window, L"the window is derived from the rate");
+				Assert::AreEqual<uint64_t>(1, r.handoffs);
+				Assert::AreEqual<uint64_t>(0, r.takeBacks);
+				Assert::AreEqual<uint64_t>(window, r.black, L"black only until the hand-off");
+				Assert::AreEqual<uint64_t>(120 - window, r.handedOff, L"the normal path shows the rest");
+				Assert::IsTrue(r.Logged("10-bit RGB content"), L"the hand-off is logged with its reason");
+				Assert::IsFalse(signal.dolbyVisionTunnel, L"the tunnel no longer owns the signal");
+				Assert::IsTrue(EvaluateHdrInferenceEligibility(signal).eligible, L"newlldv may infer PQ");
+				gate.captureStateValid = true;
+				Assert::IsFalse(DolbyVisionTunnelGateOpen(gate), L"the gate is closed for the handed-off signal");
+				// newlldv: PQ after its stabilisation time.
+				HdrInferenceTracker tracker;
+				for (uint64_t t = 0; t <= 2000; t += 100)
+					tracker.OnSignal(signal, t);
+				Assert::IsTrue(tracker.IsInferredPq(), L"PQ inferred after 1.5 s");
 			}
-			const LoopReport r = analyzer.Finish();
-			Logger::WriteMessage(("FINDING: 10-bit RGB LLDV with the tunnel switch on: " + r.Summary() + "\n").c_str());
-			Assert::AreEqual<uint64_t>(120, r.black, L"black for the whole run (current behaviour)");
-			Assert::AreEqual<uint64_t>(0, r.pictures, L"no false DV lock");
-			const HdrInferenceSignal signal = BuildHdrInferenceSignalFromState(state.p, true, BitDepth::BITDEPTH_10BIT, Gate(true), false);
-			Assert::IsTrue(signal.dolbyVisionTunnel, L"the inference is suppressed (current behaviour)");
 		}
 
-		// FINDING (documented, not changed): LLDV sent as 8-bit RGB (some
-		// sources dither LLDV to RGB 8-bit) with the tunnel switch on: no
-		// false DV lock (no CRC), but VP shows it through the SDR RGB
-		// passthrough (BT.709 / BT.1886), and the newlldv inference is
-		// suppressed, so a PQ picture is shown as SDR.
-		TEST_METHOD(FindingEightBitRgbLldvWithTheTunnelSwitchOnIsShownAsSdr)
+		// DV input fix 2 (2026-10-18; was FINDING B): LLDV sent as 8-bit RGB
+		// with the tunnel switch on used to be shown through the tunnel's SDR
+		// passthrough (BT.709 / BT.1886) with newlldv suppressed: PQ shown as
+		// SDR. 8-bit LLDV decision (DolbyVisionTunnelHandoff.h): BT.2020 RGB
+		// without an HDR InfoFrame and without a tunnel, on a DV input, is
+		// player-led DV (LLDV) or HDR10 without its InfoFrame: PQ. It is
+		// handed off, and newlldv's 10-bit floor is waived for exactly it.
+		// Both RGB8 placements (DeckLink stores 8-bit sources MSB-aligned).
+		TEST_METHOD(EightBitRgbLldvWithTheTunnelSwitchOnIsHandedOffAsPq)
 		{
 			const uint32_t w = 256, h = 108;
-			std::vector<LoopFrame> frames;
-			for (uint32_t n = 0; n < 60; ++n)
-			{
-				LoopFrame f;
-				f.index = n;
-				f.sdr = true;
-				f.rgb8.resize(static_cast<size_t>(w) * h * 3);
-				for (size_t p = 0; p < static_cast<size_t>(w) * h; ++p)
+			for (const bool high8 : { false, true })
+				for (const bool handoff : { false, true })
 				{
-					const uint8_t v = static_cast<uint8_t>(40 + ((p % w) * 120) / w + (n % 3));
-					f.rgb8[p * 3] = static_cast<uint8_t>(v + 10); f.rgb8[p * 3 + 1] = v; f.rgb8[p * 3 + 2] = static_cast<uint8_t>(v - 5);
+					std::vector<LoopFrame> frames;
+					for (uint32_t n = 0; n < 60; ++n)
+					{
+						LoopFrame f;
+						f.index = n;
+						f.sdr = true;
+						EightBitRgbPicture(w, h, n, f.rgb8);
+						WriteStamp(w, h, 0x5A, n, nullptr, &f.rgb8);
+						frames.push_back(f);
+					}
+					AnalyzerOptions options;
+					options.sequenceId = 0x5A;
+					options.handoff = handoff;
+					options.expected = [&frames](uint32_t i, LoopFrame& f) { if (i >= frames.size()) return false; f = frames[i]; return true; };
+					DvLoopbackAnalyzer analyzer(options);
+					LoopFaults faults;
+					faults.cardColorspace = ColorSpace::BT_2020;
+					faults.container.high8 = high8;
+					DvSimulatedLoop loop(analyzer, faults);
+					loop.Begin(w, h, 24000, 1001);
+					for (const LoopFrame& f : frames)
+						loop.Send(f, 0);
+					loop.End();
+					const LoopReport r = analyzer.Finish();
+					Logger::WriteMessage((std::string("8-bit RGB LLDV ") + (high8 ? "high8" : "low8") + ", dv_tunnel_handoff " +
+						(handoff ? "on: " : "off: ") + r.Summary() + "\n").c_str());
+					Assert::AreEqual<uint64_t>(0, r.pictures, L"no false DV lock");
+					DolbyVisionTunnelGateInput gate = Gate(true);
+					gate.handedOff = analyzer.HandedOff();
+					const HdrInferenceSignal signal = BuildHdrInferenceSignalFromState(loop.State().p, true, BitDepth::BITDEPTH_8BIT, gate, false);
+					const HdrInferenceEligibility eligibility = EvaluateHdrInferenceEligibility(signal);
+					if (!handoff)
+					{
+						Assert::IsTrue(r.sdr > 50, L"switch off: shown through the SDR passthrough (the old behaviour)");
+						Assert::IsFalse(eligibility.eligible, L"switch off: newlldv suppressed");
+						continue;
+					}
+					Assert::AreEqual<uint64_t>(1, r.handoffs);
+					Assert::AreEqual<uint64_t>(24, r.sdr, L"SDR passthrough only until the hand-off");
+					Assert::AreEqual<uint64_t>(36, r.handedOff);
+					Assert::AreEqual<uint64_t>(0, r.wrongKindFrames);
+					Assert::IsTrue(r.Logged("BT.2020 RGB without an HDR InfoFrame"));
+					Assert::IsTrue(eligibility.eligible, L"8-bit BT.2020 handed off: PQ, never SDR");
+					Assert::AreEqual(std::string("BT.2020, 8-bit, no HDR InfoFrame, not a DV tunnel on a DV input (handed off)"),
+						std::string(eligibility.reason));
+					// The newlldv floor stays for the same 8-bit signal with the tunnel switch off.
+					const HdrInferenceSignal off = BuildHdrInferenceSignalFromState(loop.State().p, true, BitDepth::BITDEPTH_8BIT, Gate(false), false);
+					Assert::AreEqual(std::string("source is below 10-bit"), std::string(EvaluateHdrInferenceEligibility(off).reason));
 				}
-				WriteStamp(w, h, 0x5A, n, nullptr, &f.rgb8);
-				frames.push_back(f);
+		}
+
+		// The explicit indication wins: a Dolby VSIF that says LLDV makes an
+		// 8-bit BT.2020 signal PQ with or without the tunnel switch, and the
+		// probe hands it off at the first picture; one that says TV-led keeps
+		// the tunnel (never handed off).
+		TEST_METHOD(DolbyVsifDecidesEightBitLldvExplicitly)
+		{
+			const uint32_t w = 256, h = 108;
+			for (const DolbyVisionVsif vsif : { DolbyVisionVsif::LowLatency, DolbyVisionVsif::TvLed })
+			{
+				AnalyzerOptions options;
+				DvLoopbackAnalyzer analyzer(options);
+				LoopFaults faults;
+				faults.cardColorspace = ColorSpace::BT_2020;
+				faults.cardVsif = vsif;
+				DvSimulatedLoop loop(analyzer, faults);
+				loop.Begin(w, h, 24000, 1001);
+				for (uint32_t n = 0; n < 30; ++n)
+				{
+					LoopFrame f;
+					f.index = n;
+					f.sdr = true;
+					EightBitRgbPicture(w, h, n, f.rgb8);
+					loop.Send(f, 0);
+				}
+				loop.End();
+				const LoopReport r = analyzer.Finish();
+				const HdrInferenceSignal noSwitch = BuildHdrInferenceSignalFromState(loop.State().p, true, BitDepth::BITDEPTH_8BIT, Gate(false), false);
+				if (vsif == DolbyVisionVsif::LowLatency)
+				{
+					Assert::AreEqual<uint64_t>(1, r.handoffs);
+					Assert::AreEqual<uint64_t>(1, r.sdr, L"handed off at the first picture");
+					Assert::IsTrue(EvaluateHdrInferenceEligibility(noSwitch).eligible, L"the VSIF makes 8-bit LLDV PQ");
+					Assert::AreEqual(std::string("BT.2020, 8-bit, no HDR InfoFrame, Dolby VSIF says LLDV"),
+						std::string(EvaluateHdrInferenceEligibility(noSwitch).reason));
+				}
+				else
+				{
+					Assert::AreEqual<uint64_t>(0, r.handoffs, L"TV-led VSIF: the tunnel keeps the signal");
+					Assert::IsFalse(EvaluateHdrInferenceEligibility(noSwitch).eligible);
+				}
 			}
-			AnalyzerOptions options;
-			options.sequenceId = 0x5A;
-			options.expected = [&frames](uint32_t i, LoopFrame& f) { if (i >= frames.size()) return false; f = frames[i]; return true; };
-			DvLoopbackAnalyzer analyzer(options);
-			LoopFaults faults;
-			faults.cardColorspace = ColorSpace::BT_2020;
-			DvSimulatedLoop loop(analyzer, faults);
-			loop.Begin(w, h, 24000, 1001);
-			for (const LoopFrame& f : frames)
-				loop.Send(f, 0);
-			loop.End();
-			const LoopReport r = analyzer.Finish();
-			Logger::WriteMessage(("FINDING: 8-bit RGB LLDV with the tunnel switch on: " + r.Summary() + "\n").c_str());
-			Assert::AreEqual<uint64_t>(0, r.pictures, L"no false DV lock");
-			Assert::IsTrue(r.sdr > 50, L"shown through the SDR passthrough (current behaviour)");
-			const HdrInferenceSignal signal = BuildHdrInferenceSignalFromState(loop.State().p, true, BitDepth::BITDEPTH_8BIT, Gate(true), false);
-			Assert::IsFalse(EvaluateHdrInferenceEligibility(signal).eligible, L"newlldv suppressed");
 		}
 
 	private:
 		static std::wstring Wide(const std::string& s) { return std::wstring(s.begin(), s.end()); }
+
+		// A natural-looking 10-bit RGB picture in r210 (big-endian [00 R G B]),
+		// limited range: smooth gradients with sensor-like noise, so every bit
+		// of the 10-bit fields is in use.
+		static void TenBitRgbPicture(uint32_t w, uint32_t h, uint32_t n, uint32_t rowBytes, std::vector<uint8_t>& bytes)
+		{
+			bytes.assign(static_cast<size_t>(rowBytes) * h, 0);
+			uint64_t s = 0x9E3779B97F4A7C15ULL ^ n;
+			for (uint32_t y = 0; y < h; ++y)
+				for (uint32_t x = 0; x < w; ++x)
+				{
+					s = s * 6364136223846793005ULL + 1442695040888963407ULL;
+					const int noise = static_cast<int>((s >> 59) & 7) - 3;
+					const int base = 120 + static_cast<int>((x * 640) / w) + static_cast<int>((y * 120) / h) + static_cast<int>(n % 5);
+					const uint32_t r = static_cast<uint32_t>((std::min)(940, (std::max)(64, base + 30 + noise)));
+					const uint32_t g = static_cast<uint32_t>((std::min)(940, (std::max)(64, base + noise / 2)));
+					const uint32_t b = static_cast<uint32_t>((std::min)(940, (std::max)(64, base - 40 - noise)));
+					const uint32_t word = (r << 20) | (g << 10) | b;
+					uint8_t* at = bytes.data() + static_cast<size_t>(y) * rowBytes + static_cast<size_t>(x) * 4;
+					at[0] = static_cast<uint8_t>(word >> 24); at[1] = static_cast<uint8_t>(word >> 16);
+					at[2] = static_cast<uint8_t>(word >> 8); at[3] = static_cast<uint8_t>(word);
+				}
+		}
+
+		// An 8-bit RGB picture (R, G, B per pixel): smooth, slightly warm.
+		static void EightBitRgbPicture(uint32_t w, uint32_t h, uint32_t n, std::vector<uint8_t>& rgb)
+		{
+			rgb.resize(static_cast<size_t>(w) * h * 3);
+			for (size_t p = 0; p < static_cast<size_t>(w) * h; ++p)
+			{
+				const uint8_t v = static_cast<uint8_t>(40 + ((p % w) * 120) / w + (n % 3));
+				rgb[p * 3] = static_cast<uint8_t>(v + 10); rgb[p * 3 + 1] = v; rgb[p * 3 + 2] = static_cast<uint8_t>(v - 5);
+			}
+		}
 	};
 }
