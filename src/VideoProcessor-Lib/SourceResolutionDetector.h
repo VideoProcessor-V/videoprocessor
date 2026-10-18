@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <deque>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -287,6 +289,10 @@ namespace SourceResolution
 		// tiles (not compared): the shape the cut test correlates.
 		std::vector<double> pattern;
 		std::vector<char> patternFlat;
+		// h3-latch (source_resolution_cut_fixes): the same tiles' luma distribution (kDistributionBins
+		// bins of the code range, summing to 1; empty = unknown). Position-free: a pan, a scroll or a
+		// camera move keeps it; a cut to another shot changes it.
+		std::vector<double> distribution;
 		double blackLevel = 64.0 / 1023.0;
 		double noiseLevel = 2.0 / 1023.0;   // the rounding floor of a level (flatSpreadCodes)
 		// A real black: every tile flat at or near black (not only uninformative - a dark scene is).
@@ -299,6 +305,11 @@ namespace SourceResolution
 		double contrast = 0.0;
 		bool informative() const { return informativeTiles > 0; }
 	};
+
+	constexpr int kDistributionBins = 32;
+	// h3-latch: how much of a luma distribution moved between two frames (half the L1 distance,
+	// 0..1); -1 when either is unknown.
+	double DistributionChange(const std::vector<double>& a, const std::vector<double>& b);
 
 	// One frame from its tiles: the informative tiles' coherence curves
 	// averaged per axis; a lower ratio only when both axes were resampled.
@@ -383,6 +394,15 @@ namespace SourceResolution
 	// more, or no frame size / tile, comes back unchanged.
 	constexpr double kSnapBins = 0.75;
 	double SnapRatio(double ratio, int frameSize, int tile);
+	// h3-latch: what the look-ahead saw between two analysed frames (source sequences (from, to]).
+	struct FrameEvidence
+	{
+		bool covered = false;      // every frame of the step was judged (consecutive frames)
+		bool cut = false;          // a cut between two consecutive frames, not (yet) found to be a flash
+		bool unresolved = false;   // ... and every such cut is still inside its flash window
+		double maximumDecorrelation = 0.0;   // diagnostic
+	};
+	using EvidenceSource = std::function<FrameEvidence(uint64_t from, uint64_t to)>;
 
 	// The declared reading over time.
 	class Tracker
@@ -453,7 +473,65 @@ namespace SourceResolution
 			// shot) until its own frames bring the level down (cutMotionSeconds).
 			double cutMotionAfterCut = 0.5;
 			double renditionStreakSeconds = 2.5;   // 6 analysed frames at the 0.5 s interval
+			// h3-latch 2026-10-18: [vprenderer] source_resolution_cut_fixes (default on, needs latchFixes;
+			// false = the latch-fixes cut judge alone). Measured on the clip library (D:\testclips) and the
+			// gate-verify films (docs/agent-reports/h3-latch.md):
+			//   - a dark frame (the pattern's mean less than darkLevel of the range above black) is not
+			//     compared, as a black one: a camera passing through a dark occluder, whose level jump
+			//     relative to a near-zero level is meaningless, is judged across it;
+			//   - a step whose luma distribution moved less than distributionMinimum is no cut: a pan, a
+			//     scroll or a camera move inside one lighting keeps it (credits scrolls 0.03-0.06, real
+			//     cuts >= 0.14);
+			//   - flashes: a cut candidate is confirmed only when the picture does not return to the
+			//     pre-cut shape (the same judge against the pattern before it) - at the next analysed
+			//     frame (0.5 s), or within frameFlashSeconds of the look-ahead's frames when they cover
+			//     the step (FrameEvidence);
+			//   - shot / reverse-shot (same level): decorrelation of at least max(nearDecorrelation,
+			//     motion + cutMotionMargin) below cutDecorrelationAlone is a cut when the next analysed
+			//     frame confirms the new shape persists (decorrelation against it at most
+			//     max(nearStable, motion + cutMotionMargin - 0.1)) and does not return; its level jump is
+			//     under cutJump and its distribution moved at least nearDistributionMinimum;
+			//   - when the look-ahead saw every frame of the step (FrameEvidence::covered) the cut also
+			//     needs a cut between two consecutive frames: a camera move or a scroll changes the
+			//     tiles over 0.5 s but never between two frames. The tile test is then the shape alone
+			//     (coveredAlone, or cutDecorrelation with cutJump), without the 0.5 s motion margin;
+			//   - a lower reading declared on shots also needs shotEvidenceShare of minimumSeconds of
+			//     evidence (R3-2: fast action read three shots in about a second on native trims).
+			// Every confirmed cut keeps its own moment (LastCutSeconds); a deferred confirmation is never
+			// a switch moment (CutMoments counts the immediate ones).
+			bool cutFixes = true;
+			double darkLevel = 0.01;
+			double distributionMinimum = 0.1;
+			double nearDecorrelation = 0.7;
+			double nearStable = 0.5;
+			// ... and its luma distribution moved at least this much (real shot / reverse-shot cuts on the
+			// gate-verify films 0.31-0.63; an in-shot jump inside an exposure ramp 0.19).
+			double nearDistributionMinimum = 0.25;
+			double coveredAlone = 0.7;
+			double shotEvidenceShare = 0.5;
+			// The look-ahead's per-frame judge (FrameCutJudge): the shape-and-level path from
+			// frameDecorrelation (an exposure ramp or a jump inside one shot decorrelates consecutive frames
+			// less; real cuts measured >= 0.72), the alone path at max(frameAlone, motion + frameAloneMargin),
+			// and the flash window.
+			double frameDecorrelation = 0.6;
+			double frameAlone = 0.8;
+			double frameAloneMargin = 0.5;
+			double frameFlashSeconds = 0.25;
 		};
+
+		// The rule both judges share: decorrelation against the shot's motion level.
+		static bool CutRule(double decorrelation, double jump, double motion, const Settings& s)
+		{
+			const double needed = motion + s.cutMotionMargin;
+			return (decorrelation >= (std::max)(s.cutDecorrelation, needed) && jump >= s.cutJump) ||
+				decorrelation >= (std::max)(s.cutDecorrelationAlone, needed);
+		}
+		// Cut fixes: the near-miss path (shot / reverse-shot): the same level (a level jump is a fade, a
+		// flash or an exposure change, for the rule above).
+		static bool NearRule(double decorrelation, double jump, double motion, const Settings& s)
+		{
+			return s.nearDecorrelation > 0.0 && jump < s.cutJump && decorrelation >= (std::max)(s.nearDecorrelation, motion + s.cutMotionMargin);
+		}
 
 		// The shape-aware cut decision with the motion level it keeps (Tracker, look-ahead).
 		struct CutJudge
@@ -482,6 +560,9 @@ namespace SourceResolution
 		// `repeated` frame (or one identical to the last) adds no evidence and
 		// no time, so a paused or frozen picture never builds a reading.
 		void Update(const FrameReading& frame, double seconds, bool repeated = false);
+		// ... with the frame's source sequence and the look-ahead's evidence (cut fixes; either may be
+		// absent: sequence 0 or a null source = the tiles alone).
+		void Update(const FrameReading& frame, double seconds, bool repeated, uint64_t sequence, const EvidenceSource* evidence);
 		// Seek / skip, source or format change, signal loss, resync, drops:
 		// back to native and start the evidence again.
 		void Discontinuity(const char* reason);
@@ -494,6 +575,17 @@ namespace SourceResolution
 		// The Picture slider's evidence (takes effect at the next frame).
 		void SetEvidence(int shots, double seconds) { settings.minimumShots = shots; settings.minimumSeconds = seconds; }
 		void SetLatchFixes(bool on) { settings.latchFixes = on; }
+		void SetCutFixes(bool on) { settings.cutFixes = on; }
+		bool CutFixesActive() const { return settings.latchFixes && settings.cutFixes; }
+		// Cut fixes: the moments a switch may use (a cut judged at once; a deferred confirmation is
+		// not one), with the span of the last; without the cut fixes the same as Cuts / LastCutSpan.
+		unsigned long long CutMoments() const { return moments; }
+		double LastMomentSpan() const { return lastMomentSpan; }
+		// The first analysed frame after the last confirmed cut (seconds; -1 = none).
+		double LastCutSeconds() const { return lastCutSeconds; }
+		// Cut candidates dropped as a flash / not confirmed (diagnostic).
+		unsigned long long Flashes() const { return flashes; }
+		unsigned long long CoveredSteps() const { return coveredSteps; }
 		// Native readings left out as within the rounding floor (latchFixes).
 		unsigned long long FloorStarved() const { return floorStarved; }
 		double Candidate() const;                                // the window's evidence so far
@@ -529,6 +621,23 @@ namespace SourceResolution
 		std::vector<char> lastPatternFlat;
 		double lastPatternSeconds = -1.0, lastCutSpan = 0.0;
 		CutJudge cutJudge;
+		// Cut fixes.
+		std::vector<double> lastDistribution;
+		uint64_t lastPatternSequence = 0;
+		struct Pending
+		{
+			bool active = false, nearMiss = false;
+			std::vector<double> before, candidate;
+			std::vector<char> beforeFlat, candidateFlat;
+			double seconds = 0.0, span = 0.0, motionBefore = 0.0;
+			uint64_t from = 0, to = 0;   // the step's sequences (look-ahead re-check)
+		} pending;
+		unsigned long long moments = 0, flashes = 0, coveredSteps = 0;
+		double lastMomentSpan = 0.0, lastCutSeconds = -1.0;
+		void ConfirmCut(double cutSeconds, double span);
+		void CutFixesStep(const FrameReading& frame, double seconds, uint64_t sequence, const EvidenceSource* look);
+		void KeepPattern(const FrameReading& frame, double seconds, uint64_t sequence);
+		bool Dark(const FrameReading& frame) const;
 		// F12: the same shot's last native frame (its spectra), and the run of lower readings.
 		FrameReading lastNative;
 		bool haveLastNative = false;
@@ -540,6 +649,54 @@ namespace SourceResolution
 		bool renditionMode = false, declaredByRendition = false;
 		unsigned long long renditionChanges = 0;
 		std::string lastReason;
+	};
+
+	// h3-latch: the look-ahead's per-frame cut judge (source_resolution_cut_fixes). Every queued frame's
+	// pattern (consecutive frames, oldest first) is judged against the last one with a shape, at the
+	// per-frame motion level: dark frames are skipped (Settings::darkLevel; across them only the alone path
+	// counts - a camera passing through a dark occluder changes the level, not the shot; a candidate whose flash
+	// window runs into darkness is cancelled and judged across it), a candidate stays pending
+	// for frameFlashSeconds and is cancelled as a flash when a frame inside that window would not be a
+	// cut against the pattern before it (the frames since are then not compared with the flash).
+	// Evidence(from, to) tells the tracker what happened between two analysed frames. Not thread-safe.
+	class FrameCutJudge
+	{
+	public:
+		struct Candidate
+		{
+			uint64_t sequence = 0;
+			uint64_t deadline = 0;     // last sequence of the flash window
+			bool cancelled = false, confirmed = false;
+			double decorrelation = 0.0;
+			std::vector<double> before;
+			double motionBefore = 0.0;
+		};
+		// One frame. `secondsPerFrame` (measured; <= 0: 1/24) turns the flash window into frames.
+		// Returns true when this frame is a (pending) cut candidate.
+		bool Frame(uint64_t sequence, const std::vector<double>& pattern, double blackLevel, double noise,
+			double secondsPerFrame, const Tracker::Settings& s);
+		FrameEvidence Evidence(uint64_t from, uint64_t to) const;
+		// The candidate at `sequence` was cancelled as a flash (false when unknown or a cut).
+		bool Cancelled(uint64_t sequence) const;
+		void Reset();
+		// Consecutive frames: a gap of more sequence numbers than this (cadence repeats are not shown
+		// to the look-ahead) breaks the coverage.
+		static constexpr uint64_t kMaximumSequenceGap = 3;
+		const std::deque<Candidate>& Candidates() const { return candidates; }
+		double Motion() const { return motion; }
+
+	private:
+		std::vector<double> last;
+		double motion = 0.0;
+		bool started = false;
+		// A dark frame was skipped since `last`: the level changed through darkness (an occluder, a fade),
+		// so only the shape alone can make a cut across it (the alone path at the motion level).
+		bool darkSinceLast = false;
+		std::deque<Candidate> candidates;
+		// Runs of consecutively judged frames (first, last sequence), newest last.
+		std::deque<std::pair<uint64_t, uint64_t>> runs;
+		std::deque<std::pair<uint64_t, double>> decorrelations;   // per frame (diagnostic evidence)
+		void Seen(uint64_t sequence);
 	};
 
 	// "native" / "~1080 (0.50)" for the stats line.

@@ -8482,6 +8482,25 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "(not two minutes later); dark or low-contrast frames, player-added bars and fades no longer block or "
             "fake a change; the switch waits for a cut, a real black, a fast pan or a low-detail moment, else crossfades "
             "(times below); a return to native stays immediate with a short fade. Off: the earlier behaviour."));
+        // h3-latch 2026-10-18 (fix under test, default on).
+        auto* cutFixes = addChoice(QStringLiteral("Source resolution: auto cut judge fixes"), QStringLiteral("source_resolution_cut_fixes"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        cutFixes->setToolTip(QStringLiteral(
+            "Under test (default on, with the latch fixes). How auto tells a cut from movement: camera moves, credit "
+            "scrolls and a camera passing through a dark object no longer count as cuts (the queued frames show no jump "
+            "between two frames), lightning and other short flashes that return to the same picture are not cuts, and "
+            "cuts between two similar shots at the same brightness are found. A lower source is also declared only "
+            "after part of the evidence time, so a burst of fast cuts on native footage never declares one. Off: the "
+            "latch fixes' cut judge."));
+        // h3-latch 2026-10-18 (K3, fix under test, default on).
+        auto* startupHold = addChoice(QStringLiteral("Black bars: hold the start-up picture until cropped"), QStringLiteral("active_picture_startup_hold"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        startupHold->setToolTip(QStringLiteral(
+            "Under test (default on). At start-up and after a renderer or queue reset the first crop decision takes "
+            "about a second; meanwhile the uncropped picture (bars, subtitles and edges placed for it) used to show. On: "
+            "the picture stays black until the first crop decision (at most 2.5 s), or shows the remembered crop at once "
+            "when the source is unchanged. Black-bar detection, subtitle placement, A-lens and edge blanking decide as "
+            "before; only the output waits. Off: the uncropped picture shows until the crop lands."));
         // Owner 2026-10-16: the engine's options on the motion (de-judder) section, not here.
         QFormLayout* fixesForm = form;
         form = dejudderTasteForm;
@@ -10806,7 +10825,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "auto" }, { "adaptive_grain_map", "on" },
                     { "adaptive_upscale", "off" }, { "adaptive_upscale_superres_scale", "on" }, { "upscale_light", "linear" },
                     { "downscale_light", "linear" }, { "preserve_extended_range", "on" }, { "extended_range_more_cases", "on" }, { "sdr_tone_shape", "off" },
-                    { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "source_resolution_latch_fixes", "on" }, { "pulldown_fixes", "on" }, { "timing_continuity_fixes", "on" }, { "cadence_class_fixes", "on" }, { "motion_history_fixes", "on" }, { "queue_timing_fixes", "on" }, { "general_rate_fixes", "on" }, { "efficiency_fixes", "on" },
+                    { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "source_resolution_latch_fixes", "on" }, { "source_resolution_cut_fixes", "on" }, { "active_picture_startup_hold", "on" }, { "pulldown_fixes", "on" }, { "timing_continuity_fixes", "on" }, { "cadence_class_fixes", "on" }, { "motion_history_fixes", "on" }, { "queue_timing_fixes", "on" }, { "general_rate_fixes", "on" }, { "efficiency_fixes", "on" },
                     // Render-ahead (docs/VP-render-ahead-design.md).
                     { "render_ahead", "off" }, { "dejudder_gate", "auto" }, { "render_ahead_queue_credit", "off" },
                     // 2026-10-17: the engine's extras, the grain switches, the DV tunnel restore switch.

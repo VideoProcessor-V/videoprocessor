@@ -80,7 +80,14 @@ if (tile < int(tiles) && g.y < ts) {
 	void Monitor::AnalyseTilesForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight,
 		const std::vector<float>& tileX, const std::vector<float>& tileY, int baseTiles, int tileSize, double blackLevel)
 	{
+		AnalyseTilesForTest(tiles, count, seconds, nativeWidth, nativeHeight, tileX, tileY, baseTiles, tileSize, blackLevel, 0);
+	}
+
+	void Monitor::AnalyseTilesForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight,
+		const std::vector<float>& tileX, const std::vector<float>& tileY, int baseTiles, int tileSize, double blackLevel, uint64_t sequence)
+	{
 		Job j;
+		j.sequence = sequence;
 		j.values = tiles;
 		j.tiles = count;
 		j.codeMaximum = 1023;
@@ -124,6 +131,12 @@ if (tile < int(tiles) && g.y < ts) {
 		j.nativeWidth = nativeWidth;
 		j.nativeHeight = nativeHeight;
 		Analyse(j);
+	}
+
+	SourceResolution::FrameEvidence Monitor::LookAheadEvidence(uint64_t from, uint64_t to) const
+	{
+		std::lock_guard<std::mutex> lock(frameJudgeMutex);
+		return frameJudge.Evidence(from, to);
 	}
 
 	Monitor::AheadState Monitor::Ahead() const
@@ -190,7 +203,14 @@ if (tile < int(tiles) && g.y < ts) {
 			const std::vector<char> none(pattern.size(), 0);
 			const double noise = th.flatSpreadCodes / 1023.0;
 			double decorrelation = 0.0, share = 0.0, jump = 0.0;
-			if (SourceResolution::PatternChange(aheadLastPattern, none, pattern, none, blackLevelSeen, noise, decorrelation, share, &jump))
+			if (CutFixes())
+			{
+				// Cut fixes: the per-frame judge with the dark and flash rules; its candidates are the
+				// look-ahead's cut events, and a candidate found to be a flash cancels its event below.
+				std::lock_guard<std::mutex> lock(frameJudgeMutex);
+				cut = frameJudge.Frame(sequence, pattern, blackLevelSeen, noise, secondsPerFrame, ts);
+			}
+			else if (SourceResolution::PatternChange(aheadLastPattern, none, pattern, none, blackLevelSeen, noise, decorrelation, share, &jump))
 			{
 				// Consecutive frames ahead: the motion level per frame interval (the frame rate measured).
 				static GeneralRate::FallbackNotice fallback;   // fixed-constant batch B7 2026-10-18: logged
@@ -213,6 +233,16 @@ if (tile < int(tiles) && g.y < ts) {
 		{
 			std::lock_guard<std::mutex> lock(aheadMutex);
 			if (!pending) { ahead.eventSequence = 0; aheadAwaitTarget = false; return; }
+			if (fixes && CutFixes() && ahead.eventSequence != 0)
+			{
+				// A flash (back to the shape before within the flash window): no switch at it.
+				bool flash = false;
+				{
+					std::lock_guard<std::mutex> judgeLock(frameJudgeMutex);
+					flash = frameJudge.Cancelled(ahead.eventSequence);
+				}
+				if (flash) { ahead.eventSequence = 0; ahead.ready = false; aheadAwaitTarget = false; }
+			}
 			if (ahead.eventSequence == 0 && (cut || blank))
 			{
 				ahead = AheadState{ sequence, 0, false, false, 1.0, ahead.verified, ahead.cancelled };
@@ -568,6 +598,7 @@ if (tile < int(tiles) && g.y < ts) {
 		meta.blackLevel = source.repr.levels == PL_COLOR_LEVELS_FULL ? 0.0 : 16.0 * (meta.codeMaximum + 1) / 256.0 / meta.codeMaximum;
 		blackLevelSeen = meta.blackLevel;
 		meta.seconds = seconds;
+		meta.sequence = sourceSequence;
 		meta.nativeWidth = luma->params.w;
 		meta.nativeHeight = luma->params.h;
 		busy[slot] = true;
@@ -677,6 +708,10 @@ if (tile < int(tiles) && g.y < ts) {
 			trackerV.SetEvidence(2 * shots, 2.0 * seconds);
 			trackerH.SetEvidence(2 * shots, 2.0 * seconds);
 			tracker.SetLatchFixes(fixes);
+			const bool cut = CutFixes();
+			tracker.SetCutFixes(cut);
+			trackerV.SetCutFixes(cut);
+			trackerH.SetCutFixes(cut);
 			trackerV.SetLatchFixes(fixes);
 			trackerH.SetLatchFixes(fixes);
 		}
@@ -698,9 +733,12 @@ if (tile < int(tiles) && g.y < ts) {
 		}
 		lastAnalysedSeconds = j.seconds;
 		const unsigned long long trackerResets = tracker.Discontinuities();
-		tracker.Update(frame, j.seconds);
-		trackerV.Update(SourceResolution::AxisFrame(frame, true), j.seconds);
-		trackerH.Update(SourceResolution::AxisFrame(frame, false), j.seconds);
+		// Cut fixes: what the look-ahead saw between the tracker's analysed frames.
+		const SourceResolution::EvidenceSource look = [this](uint64_t from, uint64_t to) { return LookAheadEvidence(from, to); };
+		const SourceResolution::EvidenceSource* lookAhead = fixes && CutFixes() && j.sequence != 0 ? &look : nullptr;
+		tracker.Update(frame, j.seconds, false, j.sequence, lookAhead);
+		trackerV.Update(SourceResolution::AxisFrame(frame, true), j.seconds, false, j.sequence, lookAhead);
+		trackerH.Update(SourceResolution::AxisFrame(frame, false), j.seconds, false, j.sequence, lookAhead);
 		// Latch fixes: the tracker reset itself for a cause the check above did not see: the rest too.
 		if (fixes && tracker.Discontinuities() != trackerResets)
 		{
@@ -849,6 +887,13 @@ if (tile < int(tiles) && g.y < ts) {
 		snapshot.coherenceH = frame.horizontal.coherence;
 		snapshot.cuts = tracker.Cuts();
 		snapshot.cutSpan = tracker.LastCutSpan();
+		snapshot.moments = tracker.CutMoments();
+		snapshot.momentSpan = tracker.LastMomentSpan();
+		snapshot.lastCutSeconds = tracker.LastCutSeconds();
+		snapshot.shots = tracker.Shots();
+		snapshot.evidenceSeconds = tracker.EvidenceSeconds();
+		snapshot.flashes = tracker.Flashes();
+		snapshot.coveredSteps = tracker.CoveredSteps();
 		snapshot.discontinuities = tracker.Discontinuities();
 		++snapshot.frames;
 		snapshot.analyseMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
@@ -924,13 +969,13 @@ if (tile < int(tiles) && g.y < ts) {
 			{
 				disengagePending = true;
 				disengageSince = now;
-				disengageCuts = s.cuts;
+				disengageCuts = s.moments;
 				disengageFrames = s.frames;
 				why = "confidence fell: native at the next cut or black (within 5 s)";
 			}
-			else if (s.cuts != disengageCuts || (s.frameBlank && s.frames != disengageFrames) || now - disengageSince >= kDisengageWaitSeconds)
+			else if (s.moments != disengageCuts || (s.frameBlank && s.frames != disengageFrames) || now - disengageSince >= kDisengageWaitSeconds)
 			{
-				why = s.cuts != disengageCuts ? "native at a cut (confidence fell)" :
+				why = s.moments != disengageCuts ? "native at a cut (confidence fell)" :
 					s.frameBlank && s.frames != disengageFrames ? "native during a black or flat frame (confidence fell)" :
 					"native after 5 s without a cut (confidence fell)";
 				autoApplied = autoPending = wanted;
@@ -954,7 +999,7 @@ if (tile < int(tiles) && g.y < ts) {
 			if (std::fabs(wanted - autoPending) > tolerance)
 			{
 				autoPending = wanted;
-				autoPendingCuts = s.cuts;
+				autoPendingCuts = s.moments;
 				autoPendingFrames = s.frames;
 				autoPendingSince = now;
 				why = fixes ? "confirmed: waiting for a cut, a black, a fast pan or a low-detail moment (else a crossfade)" :
@@ -975,7 +1020,7 @@ if (tile < int(tiles) && g.y < ts) {
 				else
 				{
 					autoPending = autoApplied;
-					autoNotBeforeCuts = s.cuts + 1;   // the event's cut, when the monitor sees it, is not used
+					autoNotBeforeCuts = s.moments + 1;   // the event's cut, when the monitor sees it, is not used
 					++ahead.cancelled;
 					why = "look-ahead: the next shot disagrees - staying";
 				}
@@ -986,7 +1031,7 @@ if (tile < int(tiles) && g.y < ts) {
 			{
 				// Latch fixes (owner 2026-10-17): switch at the first cut, real black, fast pan or
 				// low-detail moment; after the longest wait, a crossfade.
-				const bool cutAllowed = !(s.cuts <= autoNotBeforeCuts && autoNotBeforeCuts != 0);
+				const bool cutAllowed = !(s.moments <= autoNotBeforeCuts && autoNotBeforeCuts != 0);
 				const int trigger = EngageTrigger(s, autoPendingCuts, autoPendingFrames, autoPendingSince, now, renderSequence, cutAllowed, why);
 				if (trigger != 0)
 				{
@@ -994,11 +1039,11 @@ if (tile < int(tiles) && g.y < ts) {
 					nextFadeSeconds = trigger == 2 ? CrossfadeSeconds() : 0.0;
 				}
 			}
-			else if (s.cuts <= autoNotBeforeCuts && autoNotBeforeCuts != 0)
+			else if (s.moments <= autoNotBeforeCuts && autoNotBeforeCuts != 0)
 			{
 				// After a look-ahead cancel: wait for a later cut.
 			}
-			else if (s.cuts != autoPendingCuts)
+			else if (s.moments != autoPendingCuts)
 			{
 				autoApplied = wanted;
 				why = "engaged at a cut";
@@ -1077,7 +1122,7 @@ if (tile < int(tiles) && g.y < ts) {
 			{
 				axisPending[0] = wanted[0];
 				axisPending[1] = wanted[1];
-				axisPendingCuts = s.cuts;
+				axisPendingCuts = s.moments;
 				axisPendingFrames = s.frames;
 				axisPendingSince = now;
 				axisWhy = "per axis: waiting for the next cut or black";
@@ -1094,11 +1139,11 @@ if (tile < int(tiles) && g.y < ts) {
 					axisWhy = "per axis: " + triggerWhy;
 				}
 			}
-			else if (s.cuts != axisPendingCuts || (s.frameBlank && s.frames != axisPendingFrames))
+			else if (s.moments != axisPendingCuts || (s.frameBlank && s.frames != axisPendingFrames))
 			{
 				axisApplied[0] = wanted[0];
 				axisApplied[1] = wanted[1];
-				axisWhy = s.cuts != axisPendingCuts ? "per axis: engaged at a cut" : "per axis: engaged during a black or flat frame";
+				axisWhy = s.moments != axisPendingCuts ? "per axis: engaged at a cut" : "per axis: engaged during a black or flat frame";
 			}
 		}
 		if (!axisWhy.empty())
@@ -1125,10 +1170,10 @@ if (tile < int(tiles) && g.y < ts) {
 		const bool newFrame = s.frames != pendingFrames;
 		// A cut found across a lost tile copy happened somewhere in a longer span: switching on it could
 		// land mid-shot, so it waits for the next moment.
-		if (cutAllowed && !aheadLive && s.cuts != pendingCuts && s.cuts != cutsNotUsable)
+		if (cutAllowed && !aheadLive && s.moments != pendingCuts && s.moments != cutsNotUsable)
 		{
-			if (s.cutSpan <= 1.5 * intervalSeconds + 1e-6) { why = "engaged at a cut"; return 1; }
-			cutsNotUsable = s.cuts;
+			if (s.momentSpan <= 1.5 * intervalSeconds + 1e-6) { why = "engaged at a cut"; return 1; }
+			cutsNotUsable = s.moments;
 		}
 		if (s.frameBlack && newFrame) { why = "engaged during a real black"; return 1; }
 		// A fast pan: motion blur hides the change (MotionValidity's pair, at most two frames old).

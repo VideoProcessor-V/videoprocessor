@@ -57,6 +57,16 @@ namespace SourceResolutionMonitor
 		double coherenceV = 0.0, coherenceH = 0.0;
 		unsigned long long frames = 0, cuts = 0, discontinuities = 0;
 		double cutSpan = 0.0;          // seconds between the frames the last cut was found between
+		// h3-latch (source_resolution_cut_fixes): the cuts a switch may use (judged at once; the same as
+		// `cuts` without the cut fixes) and the span of the last; the last confirmed cut's first frame
+		// (seconds, -1 = none); the evidence behind the declared value; candidates dropped (flashes,
+		// unconfirmed near misses); tracker steps the look-ahead covered.
+		unsigned long long moments = 0;
+		double momentSpan = 0.0;
+		double lastCutSeconds = -1.0;
+		int shots = 0;
+		double evidenceSeconds = 0.0;
+		unsigned long long flashes = 0, coveredSteps = 0;
 		std::string lastDiscontinuity;
 		double analyseMs = 0.0;        // worker time for the last frame
 		int tiles = 0;                 // tiles in the last analysed frame (8 = base grid, 16 = dense)
@@ -153,6 +163,15 @@ namespace SourceResolutionMonitor
 		// picture height, tracker gaps routed as discontinuities. false: the behaviour before.
 		void SetLatchFixes(bool on) { latchFixes.store(on, std::memory_order_release); }
 		bool LatchFixes() const { return latchFixes.load(std::memory_order_acquire); }
+		// [vprenderer] source_resolution_cut_fixes (h3-latch 2026-10-18, default on; needs the latch fixes):
+		// the cut judge tells camera moves, scrolls, dark passes and flashes from cuts (the look-ahead's
+		// per-frame judge with the flash window, the luma distribution, the next analysed frame), finds
+		// same-level shot / reverse-shot cuts, and the shots need part of the time. false: the latch
+		// fixes' judge alone.
+		void SetCutFixes(bool on) { cutFixes.store(on, std::memory_order_release); }
+		bool CutFixes() const { return cutFixes.load(std::memory_order_acquire); }
+		// The look-ahead's per-frame evidence for the source frames (from, to] (tests, diagnostics).
+		SourceResolution::FrameEvidence LookAheadEvidence(uint64_t from, uint64_t to) const;
 		// source_resolution_evidence_shots / _seconds (the Picture slider): the shots and time
 		// of agreeing evidence before auto declares a lower source; the per-axis trackers
 		// need twice both.
@@ -219,6 +238,9 @@ namespace SourceResolutionMonitor
 		// ... with tiles of `tileSize` px (TileFor) and the signal's black (normalised).
 		void AnalyseTilesForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight,
 			const std::vector<float>& tileX, const std::vector<float>& tileY, int baseTiles, int tileSize, double blackLevel = 64.0 / 1023.0);
+		// ... and the frame's source sequence (the look-ahead's evidence for the step; 0 = none).
+		void AnalyseTilesForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight,
+			const std::vector<float>& tileX, const std::vector<float>& tileY, int baseTiles, int tileSize, double blackLevel, uint64_t sequence);
 
 	private:
 		struct Job
@@ -235,6 +257,7 @@ namespace SourceResolutionMonitor
 			int baseTiles = 0;
 			int tileSize = kTile;
 			double blackLevel = 64.0 / 1023.0;
+			uint64_t sequence = 0;       // the source frame copied (h3-latch: look-ahead evidence)
 		};
 		void Worker();
 		void Fail(const char* what, double seconds);
@@ -288,6 +311,9 @@ namespace SourceResolutionMonitor
 		double aheadLastMean = -1.0;
 		std::vector<double> aheadLastPattern;   // latch fixes: the last ahead frame with a shape
 		SourceResolution::Tracker::CutJudge aheadCutJudge;
+		// Cut fixes: the per-frame judge (render thread writes, worker reads Evidence) under its mutex.
+		SourceResolution::FrameCutJudge frameJudge;
+		mutable std::mutex frameJudgeMutex;
 		double blackLevelSeen = 64.0 / 1023.0;  // the source's black (Frame), for the look-ahead
 		bool aheadAwaitTarget = false;   // the event frame was black: analyse the next frame with picture
 		unsigned long long autoNotBeforeCuts = 0;   // after a cancel: the cut at the event is not used
@@ -319,6 +345,7 @@ namespace SourceResolutionMonitor
 		std::atomic<bool> mixedGuard{ true };
 		std::atomic<bool> codingFixes{ true };
 		std::atomic<bool> latchFixes{ true };
+		std::atomic<bool> cutFixes{ true };
 		// Worker sets, render thread reads: sample the dense grid (a lower reading declared or
 		// being gathered by any of the trackers).
 		std::atomic<bool> denseGrid{ false };
