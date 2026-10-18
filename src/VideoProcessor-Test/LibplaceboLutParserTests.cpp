@@ -10319,6 +10319,20 @@ namespace VideoProcessorTest
 			uint32_t seed = 0x9e3779b9u;
 			auto next = [&seed]() { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; return seed; };
 			auto readable = [&](pl_tex src) {
+				// Gate r3 (2026-10-18, on the GeForce): a plane the GPU unpack wrote with imageStore and
+				// then blitted into a host-readable copy read back stale texels (wrong for both
+				// unpacks, differently); downloaded directly it is exact (GpuCaptureUnpackMatchesTheCpu-
+				// Formatters reads the same way). So the unpack's planes are made host-readable
+				// (SetHostReadableForTest) and downloaded directly; the CPU route's uploads keep the copy.
+				if (src->params.host_readable)
+				{
+					std::vector<uint8_t> direct(static_cast<size_t>(src->params.w) * src->params.h * src->params.format->texel_size);
+					pl_tex_transfer_params dd{};
+					dd.tex = src;
+					dd.ptr = direct.data();
+					Assert::IsTrue(pl_tex_download(gpu, &dd), L"download");
+					return direct;
+				}
 				pl_tex_params p{};
 				p.w = src->params.w;
 				p.h = src->params.h;
@@ -10346,7 +10360,20 @@ namespace VideoProcessorTest
 					Assert::IsTrue(x[plane]->params.format == y[plane]->params.format &&
 						x[plane]->params.w == y[plane]->params.w && x[plane]->params.h == y[plane]->params.h,
 						(std::wstring(what) + L": the same format and size").c_str());
-					Assert::IsTrue(readable(x[plane]) == readable(y[plane]), (std::wstring(what) + L": the same bytes").c_str());
+					const std::vector<uint8_t> bx = readable(x[plane]), by = readable(y[plane]);
+					if (bx != by)
+					{
+						size_t differ = 0, first = bx.size(), last = 0;
+						for (size_t i = 0; i < bx.size() && i < by.size(); ++i)
+							if (bx[i] != by[i]) { ++differ; first = (std::min)(first, i); last = i; }
+						const size_t rowBytes = static_cast<size_t>(x[plane]->params.w) * x[plane]->params.format->texel_size;
+						char text[256];
+						snprintf(text, sizeof(text), "plane %d (%dx%d %s): %zu bytes differ, first at row %zu col byte %zu, last at row %zu col byte %zu",
+							plane, x[plane]->params.w, x[plane]->params.h, x[plane]->params.format->name, differ,
+							first / rowBytes, first % rowBytes, last / rowBytes, last % rowBytes);
+						Logger::WriteMessage(text);
+					}
+					Assert::IsTrue(bx == by, (std::wstring(what) + L": the same bytes").c_str());
 				}
 			};
 			// A pair that held something else before (another size and format): recreated alike.
@@ -10415,6 +10442,8 @@ namespace VideoProcessorTest
 				std::vector<uint8_t> raw(rowBytes * height);
 				for (uint8_t& b : raw) b = static_cast<uint8_t>(next());
 				GpuCaptureUnpack shownUnpack(fixture.Log(), gpu), nextUnpack(fixture.Log(), gpu);
+				shownUnpack.SetHostReadableForTest(true);
+				nextUnpack.SetHostReadableForTest(true);
 				pl_tex shown[2] = {}, next2[2] = {};
 				stale(next2);
 				Assert::IsTrue(shownUnpack.Unpack(encoding, raw.data(), rowBytes, width, height, shown), L"unpack (shown)");

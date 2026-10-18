@@ -14307,7 +14307,7 @@ struct LibplaceboVideoRenderer::Impl
 		LogDejudderAhead();
 		// B: the same plane layout as A's upload above.
 		dejudderNextUploadedSequence = 0;
-		if (!UploadDejudderPlanes(next, dejudderNextTextures, &dejudderNextUpload))
+		if (!UploadDejudderPlanes(next, dejudderNextTextures, &dejudderNextUpload, nextSourceSequence))
 		{
 			if (++dejudderFailures == 1 || dejudderFailures % 2400 == 0)
 				DebugLog::Log("De-judder: uploading the next frame failed; off for this frame (%llu failures)",
@@ -14384,7 +14384,7 @@ struct LibplaceboVideoRenderer::Impl
 	// upload (efficiency_fixes): filled with how the planes were made, for the reuse when this
 	// frame is shown; cleared first (a failed or luma-only upload is never reused).
 	bool UploadDejudderPlanes(const std::shared_ptr<const QueuedFrame::ConvertedPayload>& payloadPtr, pl_tex (&dst)[2],
-		DejudderPlaneUpload* upload = nullptr)
+		DejudderPlaneUpload* upload = nullptr, uint64_t sequence = 0)
 	{
 		if (upload)
 			upload->Clear();
@@ -14400,6 +14400,9 @@ struct LibplaceboVideoRenderer::Impl
 				return;
 			upload->record.valid = true;
 			upload->record.payload = payloadPtr.get();
+			// Gate r3 (2026-10-18, measured on the GeForce): the payload's source frame. It was never
+			// recorded, so CanReuse (r.sequence == q.sequence) refused every reuse as "layout differs".
+			upload->record.sequence = sequence;
 			upload->record.width = l.width;
 			upload->record.height = l.height;
 			upload->record.chromaHeight = l.chromaHeight;
@@ -14752,7 +14755,8 @@ struct LibplaceboVideoRenderer::Impl
 			if (timing) timing->EndStage();
 			return done;
 		};
-		steps.uploadAfter = [this]() { return UploadDejudderPlanes(dejudderAheadPayload, dejudderAheadTextures, &dejudderAheadUpload); };
+		steps.uploadAfter = [this]() { return UploadDejudderPlanes(dejudderAheadPayload, dejudderAheadTextures, &dejudderAheadUpload,
+			dejudderAheadPayloadSequence); };
 		steps.estimate = [this, timing](uint64_t bSequence, uint64_t cSequence)
 		{
 			Dejudder::Planes b, c;

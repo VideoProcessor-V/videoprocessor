@@ -1565,7 +1565,12 @@ namespace Tests
 			plan.step = [](int n) { return FrameStep{ true, n / 48, 0 }; };
 			struct Outcome { std::string hash; bool reused = false; bool estimated = false; std::string missed; };
 			auto run = [&](const char* capturePath, bool fixes, const wchar_t* name) {
-				const std::string extra = std::string("dejudder_strength: 1.0\nefficiency_fixes: ") + (fixes ? "on" : "off") +
+				// Gate r3 (2026-10-18, on the GeForce): with dejudder_strength 1.0 the capture landed on a
+				// main present or on a de-judder extra (the warped rendered picture) depending on timing,
+				// so the same still picture gave one of two codes in either mode (off and on swapped them
+				// run to run). The occlusion mask alone keeps the estimate on film (B uploaded, the reuse
+				// path exercised) without extras: every present is a main one.
+				const std::string extra = std::string("dejudder_strength: 0\nocclusion_mask: on\nefficiency_fixes: ") + (fixes ? "on" : "off") +
 					"\n[vprenderer.Default]\ndithering: off\ndeband: off\n";
 				const RunResult r = Run(VideoFrameEncoding::V210, capturePath, 4.5, true, extra, false, &plan);
 				Assert::IsFalse(r.captureMetadata.empty(), (std::wstring(name) + L": capture written\n" + r.Tail()).c_str());
