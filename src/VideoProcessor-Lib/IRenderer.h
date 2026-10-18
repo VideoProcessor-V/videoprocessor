@@ -20,6 +20,7 @@
 #include <RendererResetRequest.h>
 #include <RendererOutputContractStatus.h>
 #include <SubtitleRepositionMode.h>
+#include <DiagnosticHistory.h>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -628,6 +629,19 @@ public:
 	virtual bool GetContentIntentStatus(ContentIntentStatus& status) const
 	{
 		status = {};
+		return false;
+	}
+
+	// Report-a-problem (2026-10-17): the renderer DLL writes its own
+	// DiagnosticHistory rings (DiagnosticHistory.h; one Global() per module)
+	// into `sink` as JSONL rows tagged src "renderer", times relative to
+	// referenceQpc. Never throws; false when the renderer has no history.
+	virtual bool WriteDiagnosticHistory(VpDiagnosticHistorySink sink, void* context,
+		int64_t referenceQpc) const
+	{
+		(void)sink;
+		(void)context;
+		(void)referenceQpc;
 		return false;
 	}
 

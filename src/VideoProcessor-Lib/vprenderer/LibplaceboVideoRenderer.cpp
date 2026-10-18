@@ -61,6 +61,7 @@
 #include <vprenderer/InterpolationTimeline.h>
 #include <vprenderer/RenderAheadPolicy.h>
 #include <vprenderer/OpenLoopDisplayRate.h>
+#include <vprenderer/RendererDiagnosticCodes.h>
 #include <vprenderer/FrameInterpolator.h>
 #include <vprenderer/GrainPreserve.h>
 #include <vprenderer/OcclusionMaskHook.h>
@@ -3689,6 +3690,9 @@ namespace
 			activeRule = selectedRule.name;
 			DebugLog::Log("display: selected %s rule '%s' (priority %d)",
 				manualRule.empty() ? "automatic" : "manual", activeRule.c_str(), selectedRule.priority);
+			// Report-a-problem: the rule's name (configuration, not a path); a = 1 manual.
+			DiagnosticHistory::Global().RecordDecision("display-rule", activeRule.c_str(),
+				manualRule.empty() ? 0 : 1, selectedRule.priority);
 		}
 
         // Discard legacy subtitle settings from renderer, Screen and Zoom profiles.
@@ -3891,6 +3895,7 @@ namespace
 		{
 			activeRule = activeProfiles;
 			DebugLog::Log("profiles: automatic selections: %s", activeProfiles.c_str());
+			DiagnosticHistory::Global().RecordDecision("profiles", activeProfiles.c_str());
 		}
 
 		const auto* refreshCommands = config.GetSectionValues("refresh_rate_commands");
@@ -5286,6 +5291,8 @@ struct LibplaceboVideoRenderer::Impl
 	unsigned long long dejudderFailures = 0;
 	ULONGLONG dejudderReasonLogTick = 0;
 	unsigned long long dejudderReasonChangesNotLogged = 0;
+	ULONGLONG diagDejudderModeTick = 0;          // report-a-problem: <= 4 mode rows per second
+	unsigned long long diagDejudderModeSkipped = 0;
 	// 6b-2 extra presents: phase state, the vsync output and the counters.
 	struct DejudderExtraStats
 	{
@@ -5382,6 +5389,11 @@ struct LibplaceboVideoRenderer::Impl
 	unsigned long long renderAheadOpenLoopFrames = 0, renderAheadLateByPresent = 0;
 	unsigned long long renderAheadFlushReanchors = 0;   // new anchors after a backlog flush
 	bool renderAheadOpenLoopLate = false;   // seen on the last frame's extras: the gate's lateness for this one
+	// Report-a-problem (DiagnosticHistory, 2026-10-17): render-loop thread only.
+	uint32_t diagRendererGeneration = 0;     // the renderer generation (set by the owner)
+	uint32_t diagLastHoldCode = 0;           // last de-judder hold code recorded as a decision
+	uint64_t diagExtrasCounter = 0;          // capture counter of the frame whose extras run
+	uint64_t diagExtrasSequence = 0;         // its accepted source sequence
 
 	// The chain ends (a frame not queued by the plan): the next present is not
 	// predicted. The queue credit is latched (bug hunt 05 M4): a single break keeps it;
@@ -5412,6 +5424,7 @@ struct LibplaceboVideoRenderer::Impl
 		++renderAheadGateResets;
 		DebugLog::Log("Render-ahead gate: reset (%s; was %s)", why,
 			level == 0 ? "full" : "degraded");
+		DiagnosticHistory::Global().RecordDecision("ra-gate-reset", why, level);
 	}
 
 	// The display rate the de-judder extras plan with. The statistics' measured rate
@@ -5478,6 +5491,9 @@ struct LibplaceboVideoRenderer::Impl
 			else
 				DebugLog::Log("Render-ahead: no display rate from any source (statistics, display config, DWM, "
 					"application, mode, vblank cadence)");
+			// a = 1 open loop / 0 closed (or none), x = display Hz.
+			DiagnosticHistory::Global().RecordDecision(choice.openLoop ? "ra-open-loop" : "ra-closed-loop",
+				OpenLoopDisplayRate::Name(choice.source), choice.openLoop ? 1 : 0, 0, choice.hz);
 			dejudderDisplayRateLogged = choice;
 		}
 		return choice;
@@ -5590,6 +5606,10 @@ struct LibplaceboVideoRenderer::Impl
 					change.why, probing && change.to < change.from ? ", probing: the extra's cost not measured yet" : "",
 					g.costs.newFrameMs, g.costs.extraMs, g.costs.extraCheaperMs, g.costs.estimateMs,
 					RenderAhead::FrameCostMs(g, change.to), 1000.0 * sourcePeriod, g.utilisation, g.queueDepth);
+			// a = from level, b = to level, x = p95 new frame ms, y = extra ms.
+			if (change.changed)
+				DiagnosticHistory::Global().RecordDecision("ra-gate", change.why, change.from, change.to,
+					g.costs.newFrameMs, g.costs.extraMs);
 		}
 		const int level = renderAheadGate.Level();
 		renderAheadL1 = g.l1Available && level >= 1 && level < RenderAhead::HoldLevel(maxExtras);
@@ -9381,6 +9401,15 @@ struct LibplaceboVideoRenderer::Impl
 		}
 
 		actualOutput = Finalize(outputPlan, evidence);
+		{
+			// Report-a-problem: a = DXGI encoding, b = presentation model, x = swapchain format.
+			char diagDetail[56];
+			std::snprintf(diagDetail, sizeof(diagDetail), "%s (%s)", ToString(actualOutput.encoding),
+				trigger ? trigger : "");
+			DiagnosticHistory::Global().RecordDecision("output-mode", diagDetail,
+				static_cast<int64_t>(actualOutput.encoding), static_cast<int64_t>(actualOutput.presentationModel),
+				static_cast<double>(negotiatedSwapchainFormat));
+		}
 		// A DXGI failure falls back to Full/Rec.709 in policy. Replace the
 		// original requested hint immediately so future frames cannot inherit
 		// an unaccepted BT.2020/limited target contract.
@@ -14060,6 +14089,18 @@ struct LibplaceboVideoRenderer::Impl
 		{
 			++dejudderReasonChangesNotLogged;
 			dejudderReason = reason;
+			// Report-a-problem: a = reason code, b = changes skipped by the 250 ms limit,
+			// x = source Hz, y = display Hz.
+			const ULONGLONG diagNow = GetTickCount64();
+			if (diagDejudderModeTick == 0 || diagNow - diagDejudderModeTick >= 250)
+			{
+				DiagnosticHistory::Global().RecordDecision("dejudder-mode", DejudderPolicy::Name(reason),
+					static_cast<int64_t>(reason), static_cast<int64_t>(diagDejudderModeSkipped), in.sourceHz, in.displayHz);
+				diagDejudderModeTick = diagNow;
+				diagDejudderModeSkipped = 0;
+			}
+			else
+				++diagDejudderModeSkipped;
 		}
 		if (dejudderReasonChangesNotLogged > 0)
 		{
@@ -14513,6 +14554,27 @@ struct LibplaceboVideoRenderer::Impl
 
 	void DejudderHold(const char* why)
 	{
+		// Report-a-problem: one repeated-stage frame row per hold (code in
+		// RendererDiagnosticCodes.h), and a decision when the reason changes.
+		{
+			const uint32_t code = RendererDiagnostics::ClassifyDejudderHold(why);
+			DiagnosticHistory::FrameRecord record;
+			record.stage = DiagnosticHistory::StageRepeated;
+			record.counter = diagExtrasCounter;
+			record.holdReason = code;
+			record.flags = activeSettings.renderAhead ? DiagnosticHistory::FlagRenderAhead : 0u;
+			if (activeSettings.renderAhead && dejudderDisplayRate.openLoop)
+				record.flags |= DiagnosticHistory::FlagOpenLoop;
+			record.rendererGeneration = diagRendererGeneration;
+			record.repeatedTotal = dejudderExtraStats.holds + 1;
+			DiagnosticHistory::Global().RecordFrame(record);
+			if (code != diagLastHoldCode)
+			{
+				diagLastHoldCode = code;
+				DiagnosticHistory::Global().RecordDecision("dejudder-hold", why, code,
+					static_cast<int64_t>(diagExtrasSequence));
+			}
+		}
 		++dejudderExtraStats.holds;
 		dejudderExtraStats.lastHold = why;
 		++dejudderHoldsNotLogged;
@@ -14737,6 +14799,8 @@ struct LibplaceboVideoRenderer::Impl
 			{
 				renderAheadSchedule.Break();
 				++renderAheadFlushReanchors;
+				DiagnosticHistory::Global().RecordDecision("ra-reanchor", "after a backlog flush",
+					static_cast<int64_t>(f.sourceSequence));
 			}
 			// Closed loop on DXGI's statistics, without waiting: the latest present on
 			// screen and the vsync it showed at (none on some internal panels: open loop).
@@ -14815,6 +14879,9 @@ struct LibplaceboVideoRenderer::Impl
 			{
 				DebugLog::Log("Render-ahead: anchor latency %.2f ms too late (this frame's %.2f ms): re-anchored on its own refresh",
 					renderAheadSchedule.AnchorLatency(false, plannedFirstVsync, callbackA) * 1000.0,
+					(plannedFirstVsync - callbackA) * 1000.0);
+				DiagnosticHistory::Global().RecordDecision("ra-reanchor", "anchor latency too late",
+					static_cast<int64_t>(f.sourceSequence), 0,
 					(plannedFirstVsync - callbackA) * 1000.0);
 				renderAheadSchedule.Break();
 				restart = true;
@@ -15534,6 +15601,9 @@ struct LibplaceboVideoRenderer::Impl
 				renderAheadCredit.Commit(renderAheadLead, sourcePeriod, ratio) : 0, std::memory_order_release);
 			LogRenderAhead(ratio, gateLevel);
 		}
+		// Report-a-problem: a frame with extras ends the hold; the next hold is a new decision.
+		if (extras > 0 && !failure)
+			diagLastHoldCode = 0;
 		// After a second of frames, so the latency floor (and phi0) is settled.
 		if (dejudderPhaseLogPending && haveFirstVsync && dejudderLatencyFloor.Count() >= 24)
 		{
@@ -20398,7 +20468,12 @@ struct LibplaceboVideoRenderer::Impl
 			// plane-sized: they start over (no motion invalidation, so this frame's
 			// estimate and its consumers are unchanged).
 			if (previousRebase != rebaseFactor || previousRebaseX != rebaseFactorX)
+			{
 				debander.ForgetHold();
+				// Report-a-problem: a = native height, b = source sequence, x/y = factor X/Y.
+				DiagnosticHistory::Global().RecordDecision("srcres-factor", activeSettings.sourceResolution.c_str(),
+					nativeHeight, static_cast<int64_t>(sourceSequence), rebaseFactorX, rebaseFactor);
+			}
 			std::string state;
 			if ((wanted < 1.0 || wantedX < 1.0) && rebasePaused)
 				state = "Re-base: paused " + std::to_string(rebasePauseSeconds) + " s after a failure (" + sourceRebase.LastError() +
@@ -22442,6 +22517,49 @@ struct LibplaceboVideoRenderer::Impl
 					presentationTargetTimingKnown = true;
 				}
 			}
+			// Report-a-problem (DiagnosticHistory): one presented row per frame from
+			// values already at hand. No locks, allocation, strings or GPU queries.
+			{
+				DiagnosticHistory::FrameRecord diag;
+				diag.qpc = swapEndQpc;
+				diag.stage = DiagnosticHistory::StagePresented;
+				diag.counter = record.sourceFrameNumber;
+				diag.sourceTimestamp = record.captureTimestamp;
+				diag.captureTimestamp = videoFrame.GetCaptureTimingTimestamp();
+				const double qpcPerMs = static_cast<double>(qpcFrequency.QuadPart) / 1000.0;
+				if (presentationTargetTimingKnown && qpcPerMs > 0.0)
+				{
+					diag.presentQpc = swapEndQpc + static_cast<int64_t>(presentationTargetLeadMs * qpcPerMs);
+					diag.leadMs = static_cast<float>(presentationTargetLeadMs);
+				}
+				diag.queueDepth = static_cast<uint32_t>(queueDepthAfterDequeue);
+				diag.renderMs = static_cast<float>(renderMs);
+				diag.uploadMs = static_cast<float>(sourceUploadCpuLastMs);
+				diag.waitMs = static_cast<float>(swapBlockMs);
+				diag.intervalMs = static_cast<float>(submitGapMs);
+				if (qpcPerMs > 0.0 && callbackQpc > 0 && swapEndQpc > callbackQpc)
+					diag.latencyMs = static_cast<float>(static_cast<double>(swapEndQpc - callbackQpc) / qpcPerMs);
+				uint32_t flags = 0;
+				if (temporalRenderer.Active()) flags |= DiagnosticHistory::FlagInterpolated;
+				if (activeSettings.renderAhead)
+				{
+					flags |= DiagnosticHistory::FlagRenderAhead;
+					if (dejudderDisplayRate.openLoop) flags |= DiagnosticHistory::FlagOpenLoop;
+					diag.phase = renderAheadPendingMainInterval;   // the main present's SyncInterval
+				}
+				if (dejudder && sourceSequence != 0 && dejudderEstimatedSequence == sourceSequence &&
+					motionValidity.Current(dejudderEstimatedEpoch))
+					flags |= DiagnosticHistory::FlagVectorsValid;
+				if (pl_color_space_is_hdr(&image.color)) flags |= DiagnosticHistory::FlagHdr;
+				if (videoFrame.IsSourceDiscontinuity()) flags |= DiagnosticHistory::FlagDiscontinuity;
+				diag.flags = flags;
+				diag.repeatCount = cadenceRepeat ? 1 : 0;
+				diag.width = width > 0 ? static_cast<uint32_t>(width) : 0u;
+				diag.height = height > 0 ? static_cast<uint32_t>(height) : 0u;
+				diag.repeatedTotal = dejudderExtraStats.holds;
+				diag.rendererGeneration = diagRendererGeneration;
+				DiagnosticHistory::Global().RecordFrame(diag);
+			}
 
 			const uint64_t nowTick = GetTickCount64();
 			PostStallResetObservation resetObservation;
@@ -22732,6 +22850,8 @@ struct LibplaceboVideoRenderer::Impl
 			extrasFrame.nextFrameArrived = &dejudderNextFrameArrived;
 			extrasFrame.swapEndQpc = swapEndQpc;
 			renderAheadCommitted = false;
+			diagExtrasCounter = videoFrame.GetCounter();   // DejudderHold's frame rows
+			diagExtrasSequence = sourceSequence;
 			dejudderExtrasSpentTime = PresentDejudderExtras(extrasFrame);
 			// Render-ahead: a frame whose plan was not queued ends the chain (B then shows
 			// at its own time, as without render-ahead); a queued one moves A's
@@ -23008,6 +23128,28 @@ bool LibplaceboVideoRenderer::OnVideoState(VideoStateComPtr& videoState)
 }
 
 
+namespace
+{
+	// Report-a-problem (DiagnosticHistory): a renderer frame row outside
+	// RenderLocked (ingest, drops). Lock-free, no allocation.
+	void RecordRendererFrame(uint32_t stage, uint64_t counter, int64_t sourceTimestamp,
+		size_t queueDepth, uint32_t reason, uint64_t droppedTotal, uint32_t rendererGeneration,
+		uint32_t flags = 0, int64_t qpc = 0) noexcept
+	{
+		DiagnosticHistory::FrameRecord record;
+		record.qpc = qpc;
+		record.stage = stage;
+		record.counter = counter;
+		record.sourceTimestamp = sourceTimestamp;
+		record.queueDepth = static_cast<uint32_t>(queueDepth);
+		record.holdReason = reason;
+		record.droppedTotal = droppedTotal;
+		record.rendererGeneration = rendererGeneration;
+		record.flags = flags;
+		DiagnosticHistory::Global().RecordFrame(record);
+	}
+}
+
 void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 {
 	const int64_t callbackQpc = PerformanceCounterNow();
@@ -23087,6 +23229,9 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 		const uint64_t reasonTotal =
 			m_missingFrameStateDrops.fetch_add(
 				1, std::memory_order_relaxed) + 1;
+		RecordRendererFrame(DiagnosticHistory::StageDropped, videoFrame.GetCounter(),
+			videoFrame.GetTimingTimestamp(), 0, RendererDiagnostics::DropNoVideoState,
+			droppedTotal, m_callbackGeneration);
 		// Log the first occurrence and powers of two. This remains useful for a
 		// sustained failure without becoming a per-frame log.
 		if ((reasonTotal & (reasonTotal - 1)) == 0)
@@ -23251,8 +23396,10 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 					queueLimit,
 					static_cast<unsigned long long>(
 						m_frameQueue.front().cadenceActionId));
-				m_droppedFrames.fetch_add(
-					1, std::memory_order_relaxed);
+				RecordRendererFrame(DiagnosticHistory::StageDropped, videoFrame.GetCounter(),
+					videoFrame.GetTimingTimestamp(), m_frameQueue.size(),
+					RendererDiagnostics::DropQueueFullOfRepeats,
+					m_droppedFrames.fetch_add(1, std::memory_order_relaxed) + 1, m_callbackGeneration);
 				return;
 			}
 			if (m_overflowLoggedGeneration != m_queueGeneration)
@@ -23267,6 +23414,10 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 			m_activePictureTimeline.MarkDiscarded(
 				dropCandidate->activePictureIdentity,
 				dropCandidate->frame.GetCounter());
+			RecordRendererFrame(DiagnosticHistory::StageDropped, dropCandidate->frame.GetCounter(),
+				dropCandidate->frame.GetTimingTimestamp(), m_frameQueue.size(),
+				RendererDiagnostics::DropQueueOverflow,
+				m_droppedFrames.load(std::memory_order_relaxed) + 1, m_callbackGeneration);
 			dropCandidate->frame.SourceBufferRelease();
 			const auto afterDropped = m_frameQueue.erase(dropCandidate);
 			if (afterDropped != m_frameQueue.end())
@@ -23307,7 +23458,10 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 				activePictureIdentity))
 			{
 				videoFrame.SourceBufferRelease();
-				m_droppedFrames.fetch_add(1, std::memory_order_relaxed);
+				RecordRendererFrame(DiagnosticHistory::StageDropped, videoFrame.GetCounter(),
+					videoFrame.GetTimingTimestamp(), m_frameQueue.size(),
+					RendererDiagnostics::DropIdentityRejected,
+					m_droppedFrames.fetch_add(1, std::memory_order_relaxed) + 1, m_callbackGeneration);
 				DebugLog::Log(
 					"Alpha active-picture identity rejected: generation=%llu source=%llu counter=%llu",
 					static_cast<unsigned long long>(enqueueGeneration),
@@ -23329,12 +23483,21 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 			queuedFrame.filmHz = filmHz;
 			queuedFrame.filmUpdate = filmUpdate;
 			queuedFrame.enqueueQpc = PerformanceCounterNow();
+			const int64_t diagEnqueueQpc = queuedFrame.enqueueQpc;
 			m_frameQueue.push_back(std::move(queuedFrame));
+			// Report-a-problem: the frame queued for rendering (queue depth after it).
+			RecordRendererFrame(DiagnosticHistory::StageRendererIngest, videoFrame.GetCounter(),
+				videoFrame.GetTimingTimestamp(), m_frameQueue.size(), 0,
+				0, m_callbackGeneration,
+				gapBefore ? static_cast<uint32_t>(DiagnosticHistory::FlagDiscontinuity) : 0u, diagEnqueueQpc);
 		}
 		catch (const std::exception& e)
 		{
 			videoFrame.SourceBufferRelease();
-			m_droppedFrames.fetch_add(1, std::memory_order_relaxed);
+			RecordRendererFrame(DiagnosticHistory::StageDropped, videoFrame.GetCounter(),
+				videoFrame.GetTimingTimestamp(), m_frameQueue.size(),
+				RendererDiagnostics::DropEnqueueFailed,
+				m_droppedFrames.fetch_add(1, std::memory_order_relaxed) + 1, m_callbackGeneration);
 			DebugLog::Log("libplacebo frame enqueue failed: %s", e.what());
 			return;
 		}
@@ -23510,6 +23673,9 @@ void LibplaceboVideoRenderer::Build()
 	// driver for seconds. Build only captures an immutable construction request;
 	// RenderLoop performs the actual initialization on its own thread.
 	m_impl.reset(new Impl());
+	m_impl->diagRendererGeneration = m_callbackGeneration;   // report-a-problem rows
+	DiagnosticHistory::Global().RecordDecision("renderer-build", "renderer constructed",
+		static_cast<int64_t>(m_callbackGeneration));
 	// The queue path as last applied (the snapshot may have been applied before this Build).
 	m_impl->lowLatencyQueueActive.store(lowLatencyQueue, std::memory_order_release);
 	std::atomic_store(&m_impl->ledDrive, m_ledDrive);
@@ -24618,6 +24784,9 @@ void LibplaceboVideoRenderer::SetFrameQueueMaxSize(size_t size)
 			m_activePictureTimeline.MarkDiscarded(
 				m_frameQueue.front().activePictureIdentity,
 				m_frameQueue.front().frame.GetCounter());
+			RecordRendererFrame(DiagnosticHistory::StageDropped, m_frameQueue.front().frame.GetCounter(),
+				m_frameQueue.front().frame.GetTimingTimestamp(), m_frameQueue.size(),
+				RendererDiagnostics::DropQueueResize, 0, m_callbackGeneration);
 			m_frameQueue.front().frame.SourceBufferRelease();
 			m_frameQueue.pop_front();
 			++purgedFrames;
@@ -27439,7 +27608,9 @@ void LibplaceboVideoRenderer::RenderLoop()
 		if (conversionFailed)
 		{
 			frame.SourceBufferRelease();
-			m_droppedFrames.fetch_add(1, std::memory_order_relaxed);
+			RecordRendererFrame(DiagnosticHistory::StageDropped, frame.GetCounter(),
+				frame.GetTimingTimestamp(), 0, RendererDiagnostics::DropConversionFailed,
+				m_droppedFrames.fetch_add(1, std::memory_order_relaxed) + 1, m_callbackGeneration);
 			if (++consecutiveFailures >= 300)
 			{
 				DebugLog::Log("Alpha conversion failed for 300 consecutive frames; marking renderer failed");
@@ -27564,6 +27735,8 @@ void LibplaceboVideoRenderer::RenderLoop()
                         m_impl->motionEngineLogged=true;
                         DebugLog::Log("Motion engine: %s (motion_engine=%s)",smooth?"libplacebo smooth motion; VP's de-judder off":
                             "VP (de-judder); smooth motion off",motionSettings.engine.c_str());
+                        DiagnosticHistory::Global().RecordDecision("motion-engine",
+                            smooth?"libplacebo smooth motion":"VP de-judder",smooth?1:0);
                     }
                 }
                 m_impl->temporalRenderer.Begin(motionSettings,captureRateHz,
@@ -27731,6 +27904,10 @@ void LibplaceboVideoRenderer::RenderLoop()
 								m_activePictureTimeline.MarkDiscarded(
 									m_frameQueue.front().activePictureIdentity,
 									m_frameQueue.front().frame.GetCounter());
+								RecordRendererFrame(DiagnosticHistory::StageDropped,
+									m_frameQueue.front().frame.GetCounter(),
+									m_frameQueue.front().frame.GetTimingTimestamp(), m_frameQueue.size(),
+									RendererDiagnostics::DropBacklogFlush, 0, m_callbackGeneration);
 								m_frameQueue.front().frame.SourceBufferRelease();
 								m_frameQueue.pop_front();
 								++droppedFrames;
@@ -27762,6 +27939,10 @@ void LibplaceboVideoRenderer::RenderLoop()
 							m_droppedFrames.fetch_add(
 								droppedFrames, std::memory_order_relaxed) +
 							droppedFrames;
+						// a = frames dropped, b = dropped total, x/y = oldest queued age before/after ms.
+						DiagnosticHistory::Global().RecordDecision("backlog-flush", "queued latency shed",
+							static_cast<int64_t>(droppedFrames), static_cast<int64_t>(droppedTotal),
+							oldestBeforeMs, oldestAfterMs);
 						m_impl->ResetTimingAfterBacklogRecovery(frameGeneration);
 						m_presentationTargetTimingKnown.store(
 							false, std::memory_order_release);
@@ -27981,6 +28162,9 @@ void LibplaceboVideoRenderer::RenderLoop()
 			const uint64_t reasonTotal =
 				m_renderFailureDrops.fetch_add(
 					1, std::memory_order_relaxed) + 1;
+			RecordRendererFrame(DiagnosticHistory::StageDropped, frame.GetCounter(),
+				frame.GetTimingTimestamp(), queueDepthAfterDequeue,
+				RendererDiagnostics::DropRenderFailed, droppedTotal, m_callbackGeneration);
 			const bool gpuFailed = m_impl->IsGpuFailed();
 			const bool windowVisible = IsWindowVisible(m_videoHwnd);
 			const bool windowIconic = IsIconic(m_videoHwnd);
@@ -28047,8 +28231,10 @@ void LibplaceboVideoRenderer::RenderLoop()
 			const uint64_t dropCount =
 				m_sceneCorrectionDropCount.fetch_add(
 					1, std::memory_order_relaxed) + 1;
-			m_droppedFrames.fetch_add(
-				1, std::memory_order_relaxed);
+			RecordRendererFrame(DiagnosticHistory::StageDropped, frame.GetCounter(),
+				frame.GetTimingTimestamp(), queueDepthAfterDequeue,
+				RendererDiagnostics::DropDriftCorrection,
+				m_droppedFrames.fetch_add(1, std::memory_order_relaxed) + 1, m_callbackGeneration);
 			m_sceneLastCorrectionAction.store(-1, std::memory_order_release);
 			m_sceneLastCorrectionSecondsFromDeadline.store(
 				correctionDecision.secondsUntilCorrection,
@@ -28139,6 +28325,18 @@ void LibplaceboVideoRenderer::RenderLoop()
 				const uint64_t repeatCount =
 					m_sceneCorrectionRepeatCount.load(
 						std::memory_order_relaxed);
+				// Report-a-problem: a drift-correction repeat queued (shown twice).
+				{
+					DiagnosticHistory::FrameRecord diag;
+					diag.stage = DiagnosticHistory::StageRepeated;
+					diag.counter = frame.GetCounter();
+					diag.sourceTimestamp = frame.GetTimingTimestamp();
+					diag.queueDepth = static_cast<uint32_t>(repeatQueueDepth);
+					diag.holdReason = RendererDiagnostics::RepeatCadenceCorrection;
+					diag.repeatedTotal = repeatCount;
+					diag.rendererGeneration = m_callbackGeneration;
+					DiagnosticHistory::Global().RecordFrame(diag);
+				}
 				{
 					std::lock_guard<std::mutex> renderGuard(
 						m_impl->renderMutex);
@@ -28335,6 +28533,16 @@ bool LibplaceboVideoRenderer::CanDequeueLocked() const
 void LibplaceboVideoRenderer::SetState(RendererState state)
 {
 	m_state.store(state, std::memory_order_release);
+	{
+		// Report-a-problem: a = RendererState, b = renderer generation. FAILED is the
+		// renderer's reset request to the executable.
+		static const char* const names[] = { "ready", "rendering", "stopped", "unknown",
+			"stopping", "starting", "failed (reset requested)" };
+		const unsigned index = static_cast<unsigned>(state);
+		DiagnosticHistory::Global().RecordDecision("renderer-state",
+			index < sizeof(names) / sizeof(names[0]) ? names[index] : "?",
+			static_cast<int64_t>(state), static_cast<int64_t>(m_callbackGeneration));
+	}
 	m_callback.OnRendererState(state, m_callbackGeneration);
 }
 
@@ -28496,6 +28704,22 @@ bool LibplaceboVideoRenderer::GetContentIntentStatus(ContentIntentStatus& status
 		return false;
 	status = m_impl->contentIntent->Status();
 	return status.enabled;
+}
+
+bool LibplaceboVideoRenderer::WriteDiagnosticHistory(
+	VpDiagnosticHistorySink sink, void* context, int64_t referenceQpc) const
+{
+	// Report-a-problem: this module's rings, tagged "renderer". Nothing may
+	// cross the plugin boundary as an exception.
+	try
+	{
+		return DiagnosticHistory::WriteJsonlToSink(
+			DiagnosticHistory::Global(), "renderer", referenceQpc, sink, context);
+	}
+	catch (...)
+	{
+		return false;
+	}
 }
 
 bool LibplaceboVideoRenderer::GetSceneDescriptor(

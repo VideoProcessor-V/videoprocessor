@@ -726,3 +726,11 @@ bool LibplaceboPluginVideoRenderer::GetContentIntentStatus(
 	status = {};
 	return m_renderer && m_renderer->GetContentIntentStatus(status);
 }
+
+bool LibplaceboPluginVideoRenderer::WriteDiagnosticHistory(
+	VpDiagnosticHistorySink sink, void* context, int64_t referenceQpc) const
+{
+	// The DLL catches internally; it records into its own module's rings.
+	return m_renderer && sink &&
+		m_renderer->WriteDiagnosticHistory(sink, context, referenceQpc);
+}

@@ -39,6 +39,9 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <thread>
 #include <led/ConnectionTest.h>
 #include <CrashState.h>
+#include <DiagnosticHistory.h>
+#include <StateReport.h>
+#include <StateReportSettings.h>
 #include <AmbientConfig.h>
 #include <led/LedDriveConfig.h>
 #include <led/SerialPort.h>
@@ -84,6 +87,9 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <MainConfigSchema.h>
 #include <led/LedShutdownRestore.h>
 #include <UnifiedProfileRuntime.h>
+#include <VpBuildIdentity.h>
+#include <vprenderer/LibplaceboRendererPluginApi.h>
+#include <vprenderer/OptionalRendererLayout.h>
 
 
 #include "VideoProcessorDlg.h"
@@ -116,6 +122,8 @@ double SnapshotSourceRateHz(const UnifiedProfileRuntime::Snapshot& snapshot)
 
 constexpr UINT CaptureAnalysisDiagnosticsMenuCommand = 0x1ef0;
 constexpr UINT CaptureAnalysisDiagnosticsWithFramesMenuCommand = 0x1f00;
+// Report-a-problem (StateReport.h): the same action as the state_report shortcut.
+constexpr UINT SaveStateReportMenuCommand = 0x1f10;
 
 constexpr wchar_t ConfigurationEditorRelativePath[] =
 	L"config\\VideoProcessorConfig.exe";
@@ -623,6 +631,9 @@ const ShortcutDefinition SHORTCUT_DEFINITIONS[] =
 		ConfigurationLiveApply::ViewToggleDefaultModifiers },
 	{ "toggle_stats_overlay",  ID_COMMAND_TOGGLE_STATS_OVERLAY,   'I',       FCONTROL },
 	{ "capture_rendered_output", ID_COMMAND_CAPTURE_RENDERED_OUTPUT, 'S',     FCONTROL | FALT },
+	{ "state_report",          ID_COMMAND_STATE_REPORT,
+		StateReportSettings::kShortcutDefaultKey,
+		StateReportSettings::kShortcutDefaultModifiers },
 	{ "reapply_rules",         ID_COMMAND_REAPPLY_RULES,            0,         0 },
 	{ "room_lights",           ID_COMMAND_ROOM_LIGHTS,              0,         0 },
 	{ "show_profiles",         ID_COMMAND_SHOW_PROFILES,           'I',       FCONTROL | FALT },
@@ -655,64 +666,9 @@ static bool IsRepeatableShortcutCommand(WORD command)
 
 bool TryParseShortcut(const std::string& value, ACCEL& accelerator)
 {
-	BYTE modifiers = FVIRTKEY;
-	std::string keyToken;
-	size_t start = 0;
-	while (start <= value.size())
-	{
-		const size_t end = value.find('+', start);
-		const std::string token = ConfigFile::Trim(value.substr(start, end - start));
-		if (token.empty())
-			return false;
-
-		const std::string normalizedToken = ConfigFile::NormalizeName(token);
-		if (normalizedToken == "ctrl" || normalizedToken == "control")
-			modifiers |= FCONTROL;
-		else if (normalizedToken == "alt")
-			modifiers |= FALT;
-		else if (normalizedToken == "shift")
-			modifiers |= FSHIFT;
-		else if (keyToken.empty())
-			keyToken = token;
-		else
-			return false;
-
-		if (end == std::string::npos)
-			break;
-		start = end + 1;
-	}
-
-	if (keyToken.empty())
-		return false;
-
-	const std::string normalizedKey = ConfigFile::NormalizeName(keyToken);
-	WORD key = 0;
-	if (normalizedKey == "escape" || normalizedKey == "esc")
-		key = VK_ESCAPE;
-	else if (normalizedKey == "enter" || normalizedKey == "return")
-		key = VK_RETURN;
-	else if (normalizedKey.size() >= 2 && normalizedKey[0] == 'f')
-	{
-		const std::string numberToken = normalizedKey.substr(1);
-		if (numberToken.empty() || numberToken.size() > 2 ||
-			!std::all_of(numberToken.begin(), numberToken.end(),
-				[](unsigned char character) { return std::isdigit(character) != 0; }))
-			return false;
-
-		const int functionNumber = std::stoi(numberToken);
-		if (functionNumber < 1 || functionNumber > 24)
-			return false;
-		key = static_cast<WORD>(VK_F1 + functionNumber - 1);
-	}
-	else if (keyToken.size() == 1 && std::isalnum(static_cast<unsigned char>(keyToken[0])))
-	{
-		key = static_cast<WORD>(std::toupper(static_cast<unsigned char>(keyToken[0])));
-	}
-	else
-		return false;
-
-	accelerator = { modifiers, key, 0 };
-	return true;
+	// The grammar moved to StateReportSettings.h (report-a-problem, 2026-10-17)
+	// so tests and the Config app share it; behaviour is unchanged.
+	return StateReportSettings::TryParseChord(value, accelerator);
 }
 
 std::vector<std::string> SplitConfiguredList(const std::string& value)
@@ -2199,6 +2155,7 @@ BEGIN_MESSAGE_MAP(CVideoProcessorDlg, CDialog)
 	ON_MESSAGE(WM_MESSAGE_RENDERER_QUEUE_CONTRACT_CHANGED, &CVideoProcessorDlg::OnMessageRendererQueueContractChanged)
 	ON_MESSAGE(WM_MESSAGE_CONFIGURATION_RPC_REQUEST, &CVideoProcessorDlg::OnConfigurationRpcRequest)
 	ON_MESSAGE(WM_MESSAGE_PROJECTOR_TEST_DONE, &CVideoProcessorDlg::OnProjectorTestDone)
+	ON_MESSAGE(WM_MESSAGE_STATE_REPORT_DONE, &CVideoProcessorDlg::OnStateReportDone)
 	ON_MESSAGE(WM_MESSAGE_HDR_INFERENCE_PICTURE, &CVideoProcessorDlg::OnMessageHdrInferencePicture)
 	ON_MESSAGE(WM_MODERN_OPERATOR_ACTION, &CVideoProcessorDlg::OnMessageModernOperatorAction)
 
@@ -2218,6 +2175,7 @@ BEGIN_MESSAGE_MAP(CVideoProcessorDlg, CDialog)
 	ON_COMMAND(ID_COMMAND_VC_P010, &CVideoProcessorDlg::SetVideoConversionP010)
 	ON_COMMAND(ID_COMMAND_TOGGLE_STATS_OVERLAY, &CVideoProcessorDlg::OnCommandToggleStatsOverlay)
 	ON_COMMAND(ID_COMMAND_CAPTURE_RENDERED_OUTPUT, &CVideoProcessorDlg::OnCommandCaptureRenderedOutput)
+	ON_COMMAND(ID_COMMAND_STATE_REPORT, &CVideoProcessorDlg::OnCommandStateReport)
 	ON_COMMAND(ID_COMMAND_DISPLAY_RULE_AUTO, &CVideoProcessorDlg::OnCommandDisplayRuleAuto)
 	ON_COMMAND(ID_COMMAND_CONFIG_EDITOR, &CVideoProcessorDlg::OnCommandConfigEditor)
 	ON_COMMAND(ID_COMMAND_TOGGLE_NO_UI, &CVideoProcessorDlg::OnCommandToggleNoUi)
@@ -2384,6 +2342,9 @@ CVideoProcessorDlg::CVideoProcessorDlg():
 			DebugLog::Log("Profile change display retained default: %s",
 				profileDisplayError.c_str());
 		}
+		std::string stateReportError;
+		if (!StateReportSettings::Read(profileConfig, m_stateReportSettings, stateReportError))
+			DebugLog::Log("Problem report settings retained defaults: %s", stateReportError.c_str());
 		std::string shortcutPolicyError;
 		if (!ReadShortcutsForegroundOnly(profileConfig,
 			m_shortcutsForegroundOnly, shortcutPolicyError))
@@ -4585,6 +4546,8 @@ bool CVideoProcessorDlg::StageRuntimeSettings(
 	if (!ReadShortcutsForegroundOnly(config,
 		m_stagedRuntimeSettings.shortcutsForegroundOnly, error))
 		return false;
+	if (!StateReportSettings::Read(config, m_stagedRuntimeSettings.stateReport, error))
+		return false;
 	if (!ReadShortcutsGlobalHotkeys(config,
 		m_stagedRuntimeSettings.shortcutsGlobalHotkeys, error))
 		return false;
@@ -4952,6 +4915,12 @@ void CVideoProcessorDlg::PublishStagedRuntimeSettings()
 		m_stagedRuntimeSettings.profileChangeDisplaySeconds;
 	if (m_profileChangeDisplaySeconds == 0)
 		ClearProfileChangeOverlay();
+	if (m_stateReportSettings.autoReport != m_stagedRuntimeSettings.stateReport.autoReport ||
+		m_stateReportSettings.thumbnail != m_stagedRuntimeSettings.stateReport.thumbnail)
+		DebugLog::Log("Problem report settings applied live: auto_report=%d report_thumbnail=%d",
+			m_stagedRuntimeSettings.stateReport.autoReport ? 1 : 0,
+			m_stagedRuntimeSettings.stateReport.thumbnail ? 1 : 0);
+	m_stateReportSettings = m_stagedRuntimeSettings.stateReport;
 	if (previousProfileDisplaySeconds != m_profileChangeDisplaySeconds)
 		DebugLog::Log(
 			"Profile change display setting applied live: previous_seconds=%u current_seconds=%u enabled=%d",
@@ -8612,6 +8581,324 @@ void CVideoProcessorDlg::OnCommandCaptureRenderedOutput()
 		status, m_rendererGeneration.load(std::memory_order_acquire));
 }
 
+// Report-a-problem (owner 2026-10-17, StateReport.h). The state_report
+// shortcut (default Ctrl+Alt+D) and the system-menu item save a report of the
+// last few seconds of VP's state to logs\reports for problems that do not
+// crash VP. The UI thread takes the snapshots (rings, renderer rings, live
+// settings, crash-state text) so they describe the moment of the key press;
+// a worker hashes the binaries, reads the log and config, writes the zip and
+// posts WM_MESSAGE_STATE_REPORT_DONE.
+void CVideoProcessorDlg::OnCommandStateReport()
+{
+	SaveStateReport("hotkey");
+}
+
+void CVideoProcessorDlg::ShowStateReportToast(const std::string& value)
+{
+	DebugLog::Log("Problem report: %s", value.c_str());
+	if (m_profileChangeDisplaySeconds == 0)
+	{
+		// The overlay is switched off: say it on the status line instead.
+		OnRendererDetailString(CString(CStringA(("Problem report: " + value).c_str())),
+			m_rendererGeneration.load(std::memory_order_acquire));
+		return;
+	}
+	ProfileChangeOverlay::Item item;
+	item.group = "report";
+	item.label = "Problem report";
+	item.value = value;
+	ShowProfileOverlayItems({ item }, false, "state-report");
+}
+
+void CVideoProcessorDlg::MaybeAutoReport(const char* reason)
+{
+	if (!m_stateReportSettings.autoReport)
+		return;
+	if (!m_autoReportLimiter.Allow(GetTickCount64()))
+	{
+		DebugLog::Log("Automatic problem report skipped (rate limit): reason=%s saved_this_run=%d",
+			reason, m_autoReportLimiter.Count());
+		return;
+	}
+	SaveStateReport((std::string("auto:") + reason).c_str());
+}
+
+void CVideoProcessorDlg::RecordDiagnosticStats(double sourceHz, double displayHz)
+{
+	const ULONGLONG now = GetTickCount64();
+	if (m_diagnosticLastStatsTick != 0 && now - m_diagnosticLastStatsTick < 900)
+		return;
+	const double seconds = m_diagnosticLastStatsTick != 0 ?
+		static_cast<double>(now - m_diagnosticLastStatsTick) / 1000.0 : 0.0;
+	m_diagnosticLastStatsTick = now;
+	DiagnosticHistory::StatsRecord record;
+	record.values[0] = sourceHz;
+	record.values[1] = displayHz;
+	if (m_videoRenderer)
+	{
+		record.values[2] = static_cast<double>(m_videoRenderer->GetFrameQueueSize());
+		record.values[3] = m_videoRenderer->EntryLatencyMs();
+		record.values[4] = m_videoRenderer->ExitLatencyMs();
+		record.values[5] = static_cast<double>(m_videoRenderer->DroppedFrameCount());
+		record.values[6] = static_cast<double>(m_videoRenderer->SceneAwareCorrectionRepeatCount());
+		RendererRenderLoad load;
+		if (m_videoRenderer->GetRenderLoad(load) && load.gpuValid && load.framePeriodMs > 0.0)
+			record.values[8] = load.gpu.average * 100.0 / load.framePeriodMs;
+	}
+	record.values[7] = m_processCpuUsage.CurrentPercent();
+	const uint64_t captured = m_diagnosticCapturedFrames.load(std::memory_order_relaxed);
+	if (seconds > 0.0)
+		record.values[10] = static_cast<double>(captured - m_diagnosticLastCapturedFrames) / seconds;
+	m_diagnosticLastCapturedFrames = captured;
+	record.values[11] = static_cast<double>(m_diagnosticRejectedFrames.load(std::memory_order_relaxed));
+	record.values[12] = static_cast<double>(m_rendererGeneration.load(std::memory_order_acquire));
+	record.values[13] = m_captureDeviceVideoState && m_captureDeviceVideoState->valid ? 1.0 : 0.0;
+	DiagnosticHistory::Global().RecordStats(record);
+}
+
+namespace
+{
+	std::wstring ExecutableFolder()
+	{
+		std::vector<wchar_t> buffer(32768);
+		const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+		if (length == 0 || length >= buffer.size())
+			return std::wstring();
+		std::wstring path(buffer.data(), length);
+		const size_t separator = path.find_last_of(L"\\/");
+		return separator == std::wstring::npos ? std::wstring() : path.substr(0, separator);
+	}
+
+	std::wstring WidenAnsi(const std::string& text)
+	{
+		return std::wstring(CStringW(CStringA(text.c_str())).GetString());
+	}
+
+	// The newest .png in `folder` written at or after `since`, empty if none.
+	std::wstring NewestScreenshotSince(const std::wstring& folder, const FILETIME& since)
+	{
+		WIN32_FIND_DATAW data;
+		HANDLE find = FindFirstFileW((folder + L"\\*.png").c_str(), &data);
+		if (find == INVALID_HANDLE_VALUE)
+			return std::wstring();
+		std::wstring best;
+		FILETIME bestTime = since;
+		do
+		{
+			if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
+				CompareFileTime(&data.ftLastWriteTime, &bestTime) >= 0)
+			{
+				bestTime = data.ftLastWriteTime;
+				best = folder + L"\\" + data.cFileName;
+			}
+		} while (FindNextFileW(find, &data));
+		FindClose(find);
+		return best;
+	}
+}
+
+void CVideoProcessorDlg::SaveStateReport(const char* trigger)
+{
+	if (m_stateReportBusy.exchange(true))
+	{
+		ShowStateReportToast("already saving");
+		return;
+	}
+	const int64_t referenceQpc = DiagnosticHistory::NowQpc();
+	DiagnosticHistory::Global().RecordDecision("state-report", trigger);
+
+	auto inputs = std::make_shared<StateReport::Inputs>();
+	inputs->trigger = trigger;
+	inputs->vpRoot = ExecutableFolder();
+	inputs->reportsDirectory = inputs->vpRoot + L"\\logs\\reports";
+	inputs->buildId = VpBuildIdentity::Id();
+	inputs->commit = VpBuildIdentity::Commit();
+	inputs->version = std::string(CStringA(VERSION_DESCRIBE).GetString()) + " (" +
+		std::string(CStringA(VERSION_BRANCH).GetString()) + (VERSION_DIRTY ? ", dirty)" : ")");
+	inputs->pluginApi = VP_LIBPLACEBO_PLUGIN_API_VERSION;
+	inputs->rendererName = !m_videoRenderer ? "none" :
+		(m_activeRendererIsDirectShow ? "DirectShow" : "VP Renderer");
+	inputs->binaries.push_back({ "VideoProcessor.exe", inputs->vpRoot + L"\\VideoProcessor.exe" });
+	for (const bool beta : { false, true })
+	{
+		const std::wstring plugin = OptionalRendererLayout::PluginPath(inputs->vpRoot, beta);
+		if (GetFileAttributesW(plugin.c_str()) == INVALID_FILE_ATTRIBUTES)
+			continue;
+		std::wstring relative = plugin.size() > inputs->vpRoot.size() + 1 ?
+			plugin.substr(inputs->vpRoot.size() + 1) : plugin;
+		std::replace(relative.begin(), relative.end(), L'\\', L'/');
+		inputs->binaries.push_back({ std::string(CStringA(relative.c_str()).GetString()), plugin });
+	}
+
+	// The rings, at the moment of the key press.
+	inputs->historyExe = DiagnosticHistory::ToJsonl(DiagnosticHistory::Global(), "exe", referenceQpc);
+	if (m_videoRenderer)
+		inputs->rendererContributed = m_videoRenderer->WriteDiagnosticHistory(
+			&DiagnosticHistory::AppendToStringSink, &inputs->historyRenderer, referenceQpc);
+
+	CrashState::Recorder& crashState = CrashState::Global();
+	inputs->crashStateLive = crashState.Text();
+	{
+		std::string live = crashState.LivePath();
+		const size_t separator = live.find_last_of("\\/");
+		if (separator != std::string::npos)
+			inputs->crashStateDirectory = WidenAnsi(live.substr(0, separator));
+	}
+
+	// Live settings: the effective choices now (values are redacted on write).
+	auto& settings = inputs->liveSettings;
+	settings.emplace_back("renderer", inputs->rendererName);
+	settings.emplace_back("renderer_generation", std::to_string(m_rendererGeneration.load(std::memory_order_acquire)));
+	settings.emplace_back("renderer_state", std::to_string(static_cast<int>(m_rendererState)));
+	settings.emplace_back("window", m_fullScreenVideoWindow && ::IsWindow(m_fullScreenVideoWindow->GetHWND()) ?
+		"fullscreen" : "windowed");
+	settings.emplace_back("video_only_ui", m_hideUI ? "true" : "false");
+	settings.emplace_back("stats_overlay", m_statsOverlay ? "true" : "false");
+	settings.emplace_back("profile_change_display_seconds", std::to_string(m_profileChangeDisplaySeconds));
+	settings.emplace_back("shortcuts.foreground_only", m_shortcutsForegroundOnly ? "true" : "false");
+	settings.emplace_back("shortcuts.global_hotkeys", m_shortcutsGlobalHotkeys ? "true" : "false");
+	settings.emplace_back("logging.auto_report", m_stateReportSettings.autoReport ? "true" : "false");
+	settings.emplace_back("logging.report_thumbnail", m_stateReportSettings.thumbnail ? "true" : "false");
+	settings.emplace_back("logging.enhanced", DebugLog::IsEnhancedLoggingEnabled() ? "true" : "false");
+	if (m_captureDeviceVideoState && m_captureDeviceVideoState->valid && m_captureDeviceVideoState->displayMode)
+	{
+		const auto& mode = *m_captureDeviceVideoState->displayMode;
+		char source[160];
+		snprintf(source, sizeof(source), "%ux%u%s %.3f Hz, %s, %s", mode.FrameWidth(), mode.FrameHeight(),
+			mode.IsInterlaced() ? "i" : "p", mode.RefreshRateHz(),
+			CStringA(ToString(m_captureDeviceVideoState->eotf)).GetString(),
+			CStringA(ToString(m_captureDeviceVideoState->colorspace)).GetString());
+		settings.emplace_back("source", source);
+	}
+	else
+		settings.emplace_back("source", "no signal");
+	if (const auto snapshot = m_profileRuntime.GetSnapshot())
+		for (const auto& selection : RendererProfileConfig::FormatSelections(snapshot->effectiveSelections))
+			settings.emplace_back("profile." + selection.first, selection.second);
+	if (m_videoRenderer)
+	{
+		CString text;
+		if (m_videoRenderer->GetPresentationTimingStatus(text))
+			settings.emplace_back("presentation", std::string(CStringA(text).GetString()));
+		if (m_videoRenderer->GetDejudderStatus(text))
+			settings.emplace_back("dejudder", std::string(CStringA(text).GetString()));
+		if (m_videoRenderer->GetRenderStallStatus(text))
+			settings.emplace_back("render_stall", std::string(CStringA(text).GetString()));
+		if (m_videoRenderer->GetOutputModeInfo(text))
+			settings.emplace_back("output_mode", std::string(CStringA(text).GetString()));
+	}
+
+	// Configuration files VP reads (full paths stay local; the bundle gets names).
+	{
+		ConfigFile main;
+		if (main.Load())
+			inputs->configFiles.push_back(WidenAnsi(main.GetLoadedPath()));
+		ConfigFile renderer;
+		if (renderer.Load(ConfigFile::RENDERER_FILENAME) && !renderer.GetLoadedPath().empty() &&
+			(inputs->configFiles.empty() || WidenAnsi(renderer.GetLoadedPath()) != inputs->configFiles.front()))
+			inputs->configFiles.push_back(WidenAnsi(renderer.GetLoadedPath()));
+	}
+	const std::wstring logPath = WidenAnsi(DebugLog::GetLogFilePath());
+	std::string recentLog;
+	for (const std::string& line : DebugLog::RecentLines(~0ull, 600))
+		recentLog += line + "\n";
+
+	// Optional picture (off by default): the next rendered frame via the
+	// existing screenshot path, scaled down by the worker.
+	bool thumbnailRequested = false;
+	FILETIME requestTime = {};
+	GetSystemTimeAsFileTime(&requestTime);
+	inputs->thumbnailEnabled = m_stateReportSettings.thumbnail;
+	if (inputs->thumbnailEnabled)
+	{
+		CString status;
+		thumbnailRequested = m_videoRenderer && m_videoRenderer->RequestRenderedOutputCapture(status);
+		if (!thumbnailRequested)
+			inputs->thumbnailNote = status.IsEmpty() ? std::string("no active VP Renderer") :
+				std::string(CStringA(status).GetString());
+	}
+	std::wstring screenshotFolder = inputs->vpRoot + L"\\screenshots";
+	{
+		wchar_t overrideDir[1024] = {};
+		const DWORD overrideLength = GetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", overrideDir, 1024);
+		if (overrideLength > 0 && overrideLength < 1024)
+			screenshotFolder.assign(overrideDir, overrideLength);
+	}
+
+	ShowStateReportToast("saving...");
+	const HWND window = GetSafeHwnd();
+	try
+	{
+		std::thread([inputs, window, logPath, recentLog, thumbnailRequested, requestTime, screenshotFolder]()
+		{
+			const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+			auto* result = new StateReport::Result();
+			try
+			{
+				std::string log = StateReport::ReadFileTail(logPath, 512 * 1024);
+				inputs->logExcerpt = log.empty() ? recentLog : log;
+				if (thumbnailRequested)
+				{
+					std::wstring shot;
+					for (int attempt = 0; attempt < 40 && shot.empty(); ++attempt)
+					{
+						Sleep(100);
+						shot = NewestScreenshotSince(screenshotFolder, requestTime);
+					}
+					std::string error;
+					if (shot.empty())
+						inputs->thumbnailNote = "the rendered frame did not arrive within 4 s";
+					else
+					{
+						Sleep(200);   // let the screenshot writer finish the file
+						if (!StateReport::MakeThumbnailPng(shot, 480, inputs->thumbnailPng, &error))
+							inputs->thumbnailNote = error;
+					}
+				}
+				*result = StateReport::Write(*inputs);
+			}
+			catch (const std::exception& exception)
+			{
+				result->ok = false;
+				result->error = exception.what();
+			}
+			if (SUCCEEDED(com))
+				CoUninitialize();
+			if (!::IsWindow(window) || !::PostMessageW(window, WM_MESSAGE_STATE_REPORT_DONE, 0,
+				reinterpret_cast<LPARAM>(result)))
+				delete result;
+		}).detach();
+	}
+	catch (const std::exception& exception)
+	{
+		m_stateReportBusy.store(false);
+		DebugLog::Log("Problem report could not start: %s", exception.what());
+		ShowStateReportToast("failed");
+	}
+}
+
+LRESULT CVideoProcessorDlg::OnStateReportDone(WPARAM, LPARAM lParam)
+{
+	std::unique_ptr<StateReport::Result> result(reinterpret_cast<StateReport::Result*>(lParam));
+	m_stateReportBusy.store(false);
+	if (!result)
+		return 0;
+	if (result->ok)
+	{
+		DebugLog::Log("Problem report saved: logs\\reports\\%s bytes=%zu files=%zu removed_old=%zu",
+			result->fileName.c_str(), result->bytes, result->entries.size(), result->removed.size());
+		DiagnosticHistory::Global().RecordDecision("state-report-saved", result->fileName.c_str(),
+			static_cast<int64_t>(result->bytes));
+		ShowStateReportToast("saved " + result->fileName);
+	}
+	else
+	{
+		DebugLog::Log("Problem report failed: %s", result->error.c_str());
+		ShowStateReportToast("failed (" + result->error + ")");
+	}
+	return 0;
+}
+
 void CVideoProcessorDlg::OnCommandCaptureAnalysisDiagnostics(bool includeFrames)
 {
 	auto& trace = AnalysisDiagnosticTrace::Instance();
@@ -8752,6 +9039,7 @@ void CVideoProcessorDlg::OnCaptureDeviceLost(ACaptureDeviceComPtr& captureDevice
 	// WARNING: Most likely to be called from some internal capture card thread!
 
 	assert(captureDevice);
+	DiagnosticHistory::Global().RecordCapture("device-lost");
 
 	PostMessage(
 		WM_MESSAGE_CAPTURE_DEVICE_LOST,
@@ -8767,6 +9055,7 @@ void CVideoProcessorDlg::OnCaptureDeviceLost(ACaptureDeviceComPtr& captureDevice
 void CVideoProcessorDlg::OnCaptureDeviceState(CaptureDeviceState state)
 {
 	// WARNING: Often, but not always, called from some internal capture card thread!
+	DiagnosticHistory::Global().RecordCapture("device-state", nullptr, static_cast<int64_t>(state));
 
 	PostMessage(
 		WM_MESSAGE_CAPTURE_DEVICE_STATE_CHANGE,
@@ -8864,6 +9153,9 @@ void CVideoProcessorDlg::OnCaptureDeviceVideoStateChange(
 			static_cast<unsigned long long>(ingressPublicationUs),
 			materialStateAcknowledgementPending ? 1 : 0);
 	}
+	DiagnosticHistory::Global().RecordCapture("video-state", ToString(changeClass),
+		static_cast<int64_t>(notificationSequence),
+		static_cast<int64_t>(notification->captureFrameCounter));
 	if (!PostMessage(
 		WM_MESSAGE_CAPTURE_DEVICE_VIDEO_STATE_CHANGE,
 		reinterpret_cast<WPARAM>(notification.get()),
@@ -8936,6 +9228,16 @@ void CVideoProcessorDlg::OnCaptureDeviceVideoFrame(
 	}
 	if (!ingressLease)
 	{
+		{
+			DiagnosticHistory::FrameRecord record;
+			record.counter = videoFrame.GetCounter();
+			record.sourceTimestamp = videoFrame.GetTimingTimestamp();
+			record.captureTimestamp = videoFrame.GetCaptureTimingTimestamp();
+			record.stage = DiagnosticHistory::StageCaptureRejected;
+			record.repeatCount = static_cast<int32_t>(rejectedSinceRecovery);
+			DiagnosticHistory::Global().RecordFrame(record);
+			m_diagnosticRejectedFrames.fetch_add(1, std::memory_order_relaxed);
+		}
 		// Keep diagnostics sparse on this timing-sensitive callback: log the
 		// first rejection and powers of two, then summarize when delivery resumes.
 		const bool shouldLogRejectedFrame =
@@ -8986,6 +9288,18 @@ void CVideoProcessorDlg::OnCaptureDeviceVideoFrame(
 	assert(m_captureDeviceState == CaptureDeviceState::CAPTUREDEVICESTATE_CAPTURING);
 	assert(m_rendererState == RendererState::RENDERSTATE_RENDERING);
 
+	{
+		// Report-a-problem history: one record per accepted frame (tens of
+		// nanoseconds, no lock, no allocation).
+		DiagnosticHistory::FrameRecord record;
+		record.counter = videoFrame.GetCounter();
+		record.sourceTimestamp = videoFrame.GetTimingTimestamp();
+		record.captureTimestamp = videoFrame.GetCaptureTimingTimestamp();
+		record.stage = DiagnosticHistory::StageCaptureIngress;
+		record.rendererGeneration = m_rendererGeneration.load(std::memory_order_relaxed);
+		DiagnosticHistory::Global().RecordFrame(record);
+		m_diagnosticCapturedFrames.fetch_add(1, std::memory_order_relaxed);
+	}
 	renderer->OnVideoFrame(videoFrame);
 	// newlldv SDR veto: picture statistics after the renderer has the frame.
 	if (measureHdrVeto)
@@ -9007,6 +9321,11 @@ void CVideoProcessorDlg::OnCaptureDeviceError(const CString& error)
 {
 	// WARNING: Most likely to be called from some internal capture card thread!
 
+	{
+		// The report redacts this text again before it is written.
+		const CStringA errorText(error);
+		DiagnosticHistory::Global().RecordCapture("device-error", errorText.GetString());
+	}
 	CString* postedError = new CString(error);
 
 	PostMessage(
@@ -11199,6 +11518,19 @@ void CVideoProcessorDlg::PumpRendererResetMailbox()
 			ResetScopeName(completion.request.scope),
 			completion.failure.empty() ? "" : " failure=",
 			completion.failure.empty() ? "" : completion.failure.c_str());
+		DiagnosticHistory::Global().RecordDecision(
+			currentSuccess ? "reset-completed" : expectedLifecycleCancellation ? "reset-cancelled" : "reset-failed",
+			CStringA(ToString(completion.request.reason)).GetString(),
+			static_cast<int64_t>(completion.request.reason),
+			static_cast<int64_t>(completion.rendererGeneration));
+		// auto_report: recovery resets mean VP saw a stall or a source gap; a
+		// failed reset is a problem in itself.
+		if (completion.request.reason == RendererResetReason::LivenessRecovery)
+			MaybeAutoReport("liveness-recovery");
+		else if (completion.request.reason == RendererResetReason::SourceGapRecovery)
+			MaybeAutoReport("source-gap-recovery");
+		else if (!currentSuccess && !expectedLifecycleCancellation)
+			MaybeAutoReport("reset-failed");
 		if (completion.request.reason == RendererResetReason::HostTransition ||
 			completion.request.reason == RendererResetReason::RendererSwitch)
 		{
@@ -13565,6 +13897,10 @@ void CVideoProcessorDlg::ShowProfileOverlayItems(
 		return;
 	}
 
+	if (reason == nullptr || std::strcmp(reason, "state-report") != 0)
+		for (const auto& item : items)
+			DiagnosticHistory::Global().RecordDecision("profile-shown",
+				(item.label + "=" + item.value).c_str());
 	if (replaceExisting)
 		m_profileChangeOverlayItems = items;
 	else
@@ -15177,6 +15513,8 @@ BOOL CVideoProcessorDlg::OnInitDialog()
         systemMenu->AppendMenu(MF_STRING,
             CaptureAnalysisDiagnosticsWithFramesMenuCommand,
             L"Capture analysis diagnostics with input frames...");
+        systemMenu->AppendMenu(MF_STRING, SaveStateReportMenuCommand,
+            L"Save problem report");
     }
     SetTimer(UpdateLauncher::StartupTimer, 30000, nullptr);
 	SetTimer(TIMER_ID_1SECOND, 1000, nullptr);
@@ -16304,6 +16642,11 @@ void CVideoProcessorDlg::OnSysCommand(UINT command, LPARAM lParam)
 {
     if ((command & 0xfff0) == UpdateLauncher::MenuCommand)
     { UpdateLauncher::Launch(false, GetSafeHwnd()); return; }
+	if ((command & 0xfff0) == SaveStateReportMenuCommand)
+	{
+		SaveStateReport("menu");
+		return;
+	}
 	if ((command & 0xfff0) == CaptureAnalysisDiagnosticsMenuCommand)
 	{
 		OnCommandCaptureAnalysisDiagnostics(false);
@@ -17955,6 +18298,8 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 		char display[64];
 		snprintf(display, sizeof(display), "%.3f Hz", activeTargetRefreshRate);
 		crashState.SetValue("display refresh", display);
+		RecordDiagnosticStats(m_captureDeviceVideoState && m_captureDeviceVideoState->displayMode ?
+			m_captureDeviceVideoState->displayMode->RefreshRateHz() : 0.0, activeTargetRefreshRate);
 		crashState.SetValue("renderer", !m_videoRenderer ? "none" :
 			(m_activeRendererIsDirectShow ? "DirectShow" : "VP Renderer"));
 		if (const auto snapshot = m_profileRuntime.GetSnapshot())

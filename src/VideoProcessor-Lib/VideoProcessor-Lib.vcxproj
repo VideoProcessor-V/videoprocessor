@@ -210,6 +210,10 @@
     <ClInclude Include="ConfigSchema.h" />
     <ClInclude Include="DebugLog.h" />
     <ClInclude Include="CrashState.h" />
+    <ClInclude Include="DiagnosticHistory.h" />
+    <ClInclude Include="StateReport.h" />
+    <ClInclude Include="StateReportSettings.h" />
+    <ClInclude Include="StoreZipWriter.h" />
     <ClInclude Include="VpBuildIdentity.h" />
     <ClInclude Include="DebugLogRetention.h" />
     <ClInclude Include="DisplayMode.h" />
@@ -378,6 +382,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="CrashState.cpp" />
+    <ClCompile Include="StateReport.cpp" />
     <ClCompile Include="VpBuildIdentity.cpp" />
     <ClCompile Include="WindowsDisplayDiagnostics.cpp" />
     <ClCompile Include="ACaptureDevice.cpp" />
