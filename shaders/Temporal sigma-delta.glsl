@@ -862,7 +862,6 @@ void hook()
     float code_unit = exp2(code_bits - 8.0);
     float code_min = limited ? code_unit : 0.0;
     float code_max = limited ? 255.0 * code_unit - 1.0 : exp2(code_bits) - 1.0;
-    // 8-bit codes: 0.13 (one rgba16f step near white is 1/8 code).
 
     vec4 src = HOOKED_mul * texelFetch(HOOKED_raw, pos, 0);
     vec3 x = src.rgb * in_scale;
@@ -870,23 +869,32 @@ void hook()
     // 8-bit code, and a GPU may round or truncate into it, so an exact code
     // (white 235) can arrive up to 0.125 low and the carried residual would
     // dip it to 234 every few refreshes (seen on WARP: 940 940 940 940 936).
-    // A value within 0.13 code of a whole code is that code. Real 10-bit
-    // detail comes in steps of 0.25 code and stays further away.
+    // A value that close to a whole code is that code (the window below).
     vec3 whole = floor(x + 0.5);
     // At 10 bits one rgba16f step is half a code near white (a quarter below
-    // mid grey, and so on down): within one step of a whole code there is no
-    // finer information to carry, so the snap follows the step at the value's
-    // own brightness (WARP truncates libplacebo's 940 to 939.55 when storing).
-    vec3 snap = vec3(0.13);
-    if (ten)
-        snap = max(vec3(0.13), exp2(floor(log2(max(src.rgb, vec3(1e-6)))) - 10.0) * in_scale * 1.04);
+    // mid grey, and so on down) (WARP truncates libplacebo's 940 to 939.55
+    // when storing).
+    // Gate verify 2026-10-17: the snap is an exact code's arrival window and
+    // nothing wider. A store into rgba16f moves a value by at most half a step
+    // when it rounds (up or down) and by up to one step down when it truncates
+    // (WARP), at the step of the value's own octave, so a whole code is taken
+    // as that code only from one step below it to half a step above it. The
+    // old window (0.13 code at every brightness in 8-bit codes, at least 0.13
+    // in 10-bit codes) was several steps wide below mid grey: every level that
+    // close to a code came out as the code, a value-dependent bias of up to
+    // 0.13 code (half a 10-bit code at 8 bits) that a 0.25-code 10-bit level
+    // also fell into once a truncating store took it a step down.
+    // 1e-3 code covers colour-math error (a few float32 ulps).
+    vec3 step16 = exp2(floor(log2(max(src.rgb, vec3(6.103515625e-05)))) - 10.0) * in_scale;
+    vec3 below = max(vec3(1e-3), step16 * 1.04), above = max(vec3(1e-3), step16 * 0.52);
     // Audit 2026-10-16: an rgba32f OUTPUT texture (output_float32) carries
     // the sub-code detail the rgba16f snap above discards; only colour-math
     // error (a few float32 ulps, ~1e-4 code near white) is snapped away.
     bool f32 = output_float32 > 0.5;
     if (f32)
-        snap = vec3(1e-3);
-    x = mix(x, whole, vec3(lessThan(abs(x - whole), snap)));
+        below = above = vec3(1e-3);
+    vec3 offset = x - whole;
+    x = mix(x, whole, vec3(lessThan(offset, above)) * vec3(greaterThan(offset, -below)));
 
     if (test_ramp > 0.5) {
         // 10-bit horizontal ramp across the legal range, in 8-bit code units.

@@ -14,6 +14,7 @@
 #include "../VideoProcessor-Lib/vprenderer/HookInstanceTag.h"
 #include "../VideoProcessor-Test/ExtendedRangeGpuProbe.h"
 #include "../VideoProcessor-Test/ChainGpuProbe.h"
+#include "../VideoProcessor-Test/SigmaDeltaBiasProbe.h"
 
 #include <algorithm>
 #include <fstream>
@@ -5564,4 +5565,43 @@ void RunBetaChainBiasRegression()
 	Check(means[0] <= -0.2 && means[0] >= -0.7, "bias A/B: without the patch the bias should return (0.25-0.6 low): " +
 		std::to_string(means[0]));
 	Check(std::fabs(means[1]) < 0.1, "bias A/B: with the patch the bias should be gone: " + std::to_string(means[1]));
+}
+
+// Gate verify 2026-10-17 (VP_BETA_SIGMA_BIAS=1): the sigma-delta flat-field bias probe on the
+// Beta (the deployed renderer): output pass in rgba32f as the renderer sets it (output_float32 1),
+// and without it (rgba16f, as 7.360), the sigma-delta alone and after the LED hook (no repair: the
+// Beta encodes after PRE_OUTPUT hooks). VP_BETA_SIGMA_BIAS_OUT writes the report to a file.
+void RunBetaSigmaBias()
+{
+	// VP_TEST_SIGMA_SHADER_DIR: the shaders from another tree (A/B against a base build).
+	std::string dir;
+	{
+		char* value = nullptr;
+		size_t valueLength = 0;
+		if (_dupenv_s(&value, &valueLength, "VP_TEST_SIGMA_SHADER_DIR") == 0 && value) dir = value;
+		std::free(value);
+	}
+	const ChainGpuProbe::ShaderSource source = [dir](const char* file) -> std::string
+	{
+		if (dir.empty()) return LoadRepoShader(file);
+		std::ifstream input(dir + "\\" + file, std::ios::binary);
+		return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+	};
+	std::string report = "Beta sigma-delta flat-field bias (shaders: " + (dir.empty() ? std::string("repository") : dir) + ")\n";
+	for (const SigmaDeltaBiasProbe::Mode& mode : SigmaDeltaBiasProbe::Modes())
+		for (const bool f32 : { true, false })
+			for (const bool chain : { false, true })
+			{
+				Gpu g;
+				const SigmaDeltaBiasProbe::Report rep = SigmaDeltaBiasProbe::Run(g.GpuHandle(), g.RendererHandle(),
+					source, mode, f32, chain, false);
+				report += SigmaDeltaBiasProbe::Summarise(std::string(mode.name) + (f32 ? ", output rgba32f" : ", output rgba16f") +
+					(chain ? ", LED hook + sigma-delta" : ", sigma-delta alone"), rep, 0.02);
+			}
+	std::cout << report;
+	char* out = nullptr;
+	size_t length = 0;
+	if (_dupenv_s(&out, &length, "VP_BETA_SIGMA_BIAS_OUT") == 0 && out)
+		std::ofstream(out, std::ios::binary) << report;
+	std::free(out);
 }

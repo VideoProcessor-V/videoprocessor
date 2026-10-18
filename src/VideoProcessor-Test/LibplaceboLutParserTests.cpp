@@ -47,6 +47,7 @@
 #include <vprenderer/AdaptiveDownscale.h>
 #include "ExtendedRangeGpuProbe.h"
 #include "ChainGpuProbe.h"
+#include "SigmaDeltaBiasProbe.h"
 #include "GrainReferenceModel.h"
 #include <memory>
 #include <vprenderer/NlsMaskMapping.h>
@@ -6113,6 +6114,78 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0.0, SigmaDeltaDomain::QuantiseStep(0.0, rf, 0.0, full, 0.15));
 			rf = 0.0;
 			Assert::AreEqual(255.0, SigmaDeltaDomain::QuantiseStep(255.0, rf, 0.0, full, 0.15));
+		}
+
+		// Gate verify 2026-10-17: the sigma-delta on the GPU is unbiased. Flat patches at every
+		// 10-bit level and at off-grid levels (every 1/32 code around chosen codes, exactly
+		// representable in the rgba16f OUTPUT texture) go through the shader for 192 static
+		// refreshes in each output mode (8-in-10 limited = the FL35 link, 8-in-10 full, true 10-bit
+		// limited and full), on 7.360's rgba16f output pass. Asserted for the sigma-delta alone:
+		// (1) off-grid levels a quarter code or more (and more than one rgba16f step) from a code
+		// (near 10-bit white the store holds only half codes): each patch's spatio-temporal mean
+		// equals the value the hook receives within the first-order loop's deterministic bound
+		// (2 x 0.65 / 192 code) plus float slack, 0.02 code; (2) every level: the mean is within
+		// one rgba16f step (x1.05) of the level - the exact-code snap may move a value by no more
+		// than the store's own uncertainty (one step below a code with a truncating store, half a
+		// step above). The old fixed 0.13-code window moved levels by up to 0.13 code (half a 10-bit
+		// code at 8 bits), eight steps near black. The CPU model
+		// (SigmaDeltaMeanIsUnbiasedAtAnyDitherAmplitude) does not run the snap; this does.
+		// VP_TEST_SIGMA_SHADER_DIR loads the shaders from another tree (A/B against a base build);
+		// VP_TEST_SIGMA_BIAS_OUT writes the report to a file. The LED hook + encoding repair chain (as
+		// the renderer assembles it on 7.360) is reported, not asserted: its offset is the repair's
+		// and the rgba16f stores', not the quantiser's (the Beta's rgba32f output pass removes it).
+		TEST_METHOD(SigmaDeltaFlatFieldMeanIsUnbiasedOnTheGpu)
+		{
+			std::string dir;
+			{
+				char* value = nullptr;
+				size_t length = 0;
+				if (_dupenv_s(&value, &length, "VP_TEST_SIGMA_SHADER_DIR") == 0 && value) dir = value;
+				std::free(value);
+			}
+			const ChainGpuProbe::ShaderSource source = [dir](const char* file) -> std::string
+			{
+				if (dir.empty()) return LoadBundledShader(file);
+				std::ifstream input(dir + "\\" + file, std::ios::binary);
+				return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+			};
+			const double significant = 0.02;
+			std::string report = "sigma-delta flat-field bias (shaders: " + (dir.empty() ? std::string("bundled") : dir) + ")\n";
+			double worstLoop = 0.0, worstStore = 0.0;
+			for (const SigmaDeltaBiasProbe::Mode& mode : SigmaDeltaBiasProbe::Modes())
+				for (const bool chain : { false, true })
+				{
+					TargetLutGpuFixture fixture;
+					Assert::IsTrue(fixture.Create());
+					const SigmaDeltaBiasProbe::Report rep = SigmaDeltaBiasProbe::Run(fixture.Gpu(), fixture.Renderer(), source, mode,
+						false, chain, true);
+					report += SigmaDeltaBiasProbe::Summarise(std::string(mode.name) + (chain ? ", LED hook + repair + sigma-delta" :
+						", sigma-delta alone"), rep, significant);
+					Assert::IsTrue(rep.ok, ExtendedRangeGpuProbe::ToWide(report).c_str());
+					if (chain) continue;
+					worstStore = (std::max)(worstStore, SigmaDeltaBiasProbe::WorstAgainstStore(rep, significant));
+					for (size_t i = 0; i < rep.levels.size(); ++i)
+						if (rep.levels[i].family == 1 && std::fabs(rep.levels[i].offset) >= 0.25 &&
+							std::fabs(rep.levels[i].xExact - std::round(rep.levels[i].xExact)) > 1.05 * rep.results[i].storeStep &&
+							rep.levels[i].xExact >= rep.codeMin && rep.levels[i].xExact <= rep.codeMax)
+							worstLoop = (std::max)(worstLoop, std::fabs(rep.results[i].errHook));
+				}
+			{
+				char* value = nullptr;
+				size_t length = 0;
+				if (_dupenv_s(&value, &length, "VP_TEST_SIGMA_BIAS_OUT") == 0 && value)
+					std::ofstream(value, std::ios::binary) << report;
+				std::free(value);
+			}
+			Logger::WriteMessage(report.c_str());
+			char verdict[200];
+			std::snprintf(verdict, sizeof(verdict), "sigma-delta alone: loop worst %.4f code (limit %.2f); worst against the rgba16f step %.2f (limit 1)\n",
+				worstLoop, significant, worstStore);
+			Logger::WriteMessage(verdict);
+			Assert::IsTrue(worstLoop <= significant, ExtendedRangeGpuProbe::ToWide(
+				std::string("the sigma-delta's mean misses its input away from a code (a loop bias)\n") + verdict + report).c_str());
+			Assert::IsTrue(worstStore <= 1.0, ExtendedRangeGpuProbe::ToWide(
+				std::string("the exact-code snap moves a level by more than the rgba16f store's step (a snap bias)\n") + verdict + report).c_str());
 		}
 
 		// Stage 10: when preserve_extended_range is active, and why not.

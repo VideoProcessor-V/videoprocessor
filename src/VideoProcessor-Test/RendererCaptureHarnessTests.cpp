@@ -2933,6 +2933,162 @@ namespace Tests
 			}
 		}
 
+		// Gate verify 2026-10-17 (opt-in, VP_TEST_GATE_VERIFY=1): hiccup repair early and in steady
+		// state, with the persistent harness shader cache warm. Interpolation auto and standalone
+		// (interpolation off, the owner's set-up), gaps early (frames 90 and 150-151 at 5/6 of the
+		// display rate: the gate's old positions, 1.8 s and 3.1 s) and late (5.0 s and 6.5 s), each
+		// twice. Reports the gap pairs made of the two gaps; asserts that the late gaps are repaired.
+		TEST_METHOD(GateVerifyGapFillEarlyAndSteady)
+		{
+			const HarnessScope harnessScope;
+			char* opt = nullptr;
+			size_t optLength = 0;
+			const bool optIn = _dupenv_s(&opt, &optLength, "VP_TEST_GATE_VERIFY") == 0 && opt && std::string(opt) == "1";
+			std::free(opt);
+			if (!optIn) { Logger::WriteMessage("GateVerifyGapFillEarlyAndSteady: VP_TEST_GATE_VERIFY not set: skipped\n"); return; }
+			if (!RequireHardwareOrSkip("GateVerifyGapFillEarlyAndSteady")) return;
+			const double source = HarnessMonitorHz() * 5.0 / 6.0;
+			struct Case { const char* name; const char* extra; bool early; };
+			const Case cases[] = {
+				{ "auto, early gaps", "interpolation: auto\ninterpolation_fill_gaps: on\n", true },
+				{ "auto, late gaps", "interpolation: auto\ninterpolation_fill_gaps: on\n", false },
+				{ "standalone (interpolation off), early gaps", "interpolation: off\ninterpolation_fill_gaps: on\n", true },
+				{ "standalone (interpolation off), late gaps", "interpolation: off\ninterpolation_fill_gaps: on\n", false } };
+			int lateMissing = 0;
+			std::string summary = "GATE-VERIFY gap fill (source " + std::to_string(source) + " Hz):\n";
+			for (int repeat = 0; repeat < 2; ++repeat)
+				for (const Case& c : cases)
+				{
+					const int gapA = c.early ? 90 : static_cast<int>(source * 5.0), gapB = c.early ? 150 : static_cast<int>(source * 6.5);
+					FramePlan plan = RatePlan(source);
+					plan.step = [gapA, gapB](int n) { FrameStep f; f.content = n; f.send = !(n == gapA || (n >= gapB && n <= gapB + 1)); return f; };
+					const RunResult r = Run(VideoFrameEncoding::V210, "gpu", c.early ? 5.0 : 8.5, false, c.extra, false, &plan);
+					ReportInterpolation(c.name, r);
+					int pairs = 0, missed = 0, flushes = 0, compiles = 0;
+					for (const std::string& line : r.log)
+					{
+						if (line.find("gap pair across") != std::string::npos) ++pairs;
+						if (line.find("capture missed") != std::string::npos) ++missed;
+						if (line.find("flush") != std::string::npos || line.find("backlog") != std::string::npos) ++flushes;
+						if (line.find("HLSL") != std::string::npos || line.find("compil") != std::string::npos) ++compiles;
+					}
+					char line[300];
+					snprintf(line, sizeof(line), "  run %d %-45s gaps at frames %d and %d-%d: gap pairs %d of 2, capture-missed lines %d, flush/backlog lines %d, compile lines %d, presented %d\n",
+						repeat + 1, c.name, gapA, gapB, gapB + 1, pairs, missed, flushes, compiles, r.presented ? 1 : 0);
+					summary += line;
+					Logger::WriteMessage(line);
+					if (!c.early && pairs < 2) ++lateMissing;
+				}
+			Logger::WriteMessage(summary.c_str());
+			Assert::AreEqual(0, lateMissing, HarnessWide("steady-state gaps repaired\n" + summary).c_str());
+		}
+
+		// Gate verify 2026-10-17 (opt-in, VP_TEST_GATE_VERIFY=1): the letterboxed 2.39 source with the
+		// automatic crop on the scope screen, source_resolution native and 1080, captured at several
+		// times after start: the picture's extent on the screen, the source frame captured and the
+		// crop's first application. A layout other than the settled one before the crop arrives is
+		// what a viewer sees at start-up.
+		TEST_METHOD(GateVerifyCropLayoutAtStartUp)
+		{
+			const HarnessScope harnessScope;
+			char* opt = nullptr;
+			size_t optLength = 0;
+			const bool optIn = _dupenv_s(&opt, &optLength, "VP_TEST_GATE_VERIFY") == 0 && opt && std::string(opt) == "1";
+			std::free(opt);
+			if (!optIn) { Logger::WriteMessage("GateVerifyCropLayoutAtStartUp: VP_TEST_GATE_VERIFY not set: skipped\n"); return; }
+			if (!RequireHardwareOrSkip("GateVerifyCropLayoutAtStartUp")) return;
+			g_harnessWidth = 3840;
+			g_harnessHeight = 2160;
+			g_harnessWindowWidth = 3840;
+			g_harnessWindowHeight = 2160;
+			g_harnessBarRows = 276;
+			const std::wstring shots = HarnessTempFolder(L"vp-gate-verify-crop");
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			const std::string here = Here();
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", here.substr(0, here.size() - 1).c_str());
+			auto firstNumber = [](const RunResult& r, const std::string& marker, const char* need) -> long long {
+				for (const std::string& line : r.log)
+				{
+					const size_t at = line.find(marker);
+					if (at != std::string::npos && (!need || line.find(need) != std::string::npos))
+						return std::atoll(line.c_str() + at + marker.size());
+				}
+				return -1;
+			};
+			auto load = [](const std::string& json, int& w, int& h) {
+				std::vector<int> codes;
+				std::string png = json.substr(0, json.size() - 5) + ".png";
+				CComPtr<IWICImagingFactory> factory;
+				if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)))) return codes;
+				CComPtr<IWICBitmapDecoder> decoder;
+				const std::wstring wpng(png.begin(), png.end());
+				if (FAILED(factory->CreateDecoderFromFilename(wpng.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder))) return codes;
+				CComPtr<IWICBitmapFrameDecode> frame;
+				decoder->GetFrame(0, &frame);
+				CComPtr<IWICFormatConverter> converter;
+				factory->CreateFormatConverter(&converter);
+				converter->Initialize(frame, GUID_WICPixelFormat64bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom);
+				UINT uw = 0, uh = 0;
+				converter->GetSize(&uw, &uh);
+				w = static_cast<int>(uw); h = static_cast<int>(uh);
+				std::vector<uint16_t> rgba(static_cast<size_t>(w) * h * 4);
+				converter->CopyPixels(nullptr, static_cast<UINT>(w * 8), static_cast<UINT>(rgba.size() * 2), reinterpret_cast<BYTE*>(rgba.data()));
+				codes.resize(static_cast<size_t>(w) * h);
+				for (size_t i = 0; i < codes.size(); ++i) codes[i] = rgba[i * 4 + 1] >> 6;
+				return codes;
+			};
+			auto extent = [](const std::vector<int>& c, int w, int h, int& x0, int& x1, int& y0, int& y1) {
+				std::vector<double> across(w, 0.0), down(h, 0.0);
+				for (int y = 0; y < h; ++y)
+					for (int x = 0; x < w; ++x) { across[x] += c[static_cast<size_t>(y) * w + x]; down[y] += c[static_cast<size_t>(y) * w + x]; }
+				for (double& v : across) v /= h;
+				for (double& v : down) v /= w;
+				auto span = [](const std::vector<double>& p, int& first, int& last) {
+					const double black = (std::min)(p.front(), p.back());
+					first = last = -1;
+					for (int i = 0; i < static_cast<int>(p.size()); ++i)
+						if (p[static_cast<size_t>(i)] > black + 20.0) { if (first < 0) first = i; last = i; }
+				};
+				span(across, x0, x1);
+				span(down, y0, y1);
+			};
+			CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+			std::string summary = "GATE-VERIFY crop layout at start-up (letterboxed 2.39 in 16:9, scope screen 2.35, automatic crop, 59.94 Hz source):\n";
+			const char* resolutions[2] = { "source_resolution: native\n", "source_resolution: 1080\n" };
+			for (int i = 0; i < 2; ++i)
+				for (const double at : { 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 5.0 })
+				{
+					FramePlan plan;
+					plan.captureAtSeconds = at;
+					plan.step = [](int) { return FrameStep{ true, 0, 0 }; };
+					const std::string extra = std::string(resolutions[i]) + "[vprenderer.Default]\ndithering: off\ndeband: off\n"
+						"[vprenderer.viewport]\nscreen_aspect: 2.35:1\nautomatic_crop: true\n";
+					const RunResult r = Run(VideoFrameEncoding::V210, "gpu", at + 1.0, false, extra, false, &plan);
+					int w = 0, h = 0, x0 = -1, x1 = -1, y0 = -1, y1 = -1;
+					if (!r.captureMetadata.empty())
+					{
+						const std::vector<int> shot = load(r.captureMetadata, w, h);
+						if (!shot.empty()) extent(shot, w, h, x0, x1, y0, y1);
+					}
+					const long long captured = firstNumber(r, "Rendered-output capture complete: source=", nullptr);
+					const long long cropped = firstNumber(r, "Alpha source crop: sequence=", " applied=1 ");
+					const long long firstLine = firstNumber(r, "Alpha source crop: sequence=", nullptr);
+					char line[300];
+					snprintf(line, sizeof(line), "  %-6s capture at %.1f s: source frame %lld; crop first applied at frame %lld (first crop line at %lld); picture x %d-%d y %d-%d of %dx%d\n",
+						i == 0 ? "native" : "1080", at, captured, cropped, firstLine, x0, x1, y0, y1, w, h);
+					summary += line;
+					Logger::WriteMessage(line);
+					int shown = 0;
+					for (const std::string& l : r.log)
+						if ((l.find("Re-base:") != std::string::npos || l.find("stall") != std::string::npos || l.find("flush") != std::string::npos) && shown < 6)
+						{
+							Logger::WriteMessage(("     " + l + "\n").c_str());
+							++shown;
+						}
+				}
+			Logger::WriteMessage(summary.c_str());
+		}
+
 		BEGIN_TEST_METHOD_ATTRIBUTE(InterpolationOnScreenFillsTheRepeatRefreshes)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuOnScreen")
 		END_TEST_METHOD_ATTRIBUTE()

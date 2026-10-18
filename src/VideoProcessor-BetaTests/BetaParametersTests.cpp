@@ -16,6 +16,7 @@ void RunBetaTimingGate(); // BetaGpuTests.cpp
 void RunBetaMotionCorpus(); // BetaGpuTests.cpp
 void RunBetaRealFootage(); // BetaGpuTests.cpp
 void RunBetaChainBiasRegression(); // BetaGpuTests.cpp
+void RunBetaSigmaBias(); // BetaGpuTests.cpp
 void RunBetaFeatureGpuTests(); // BetaGpuTests.cpp
 void RunBetaDitherVectorsTests(); // BetaGpuTests.cpp
 void RunBetaExtendedRangeGpuTests(); // BetaGpuTests.cpp
@@ -52,6 +53,18 @@ int main() {
             {
                 RunBetaMatcherTiming();
                 return BetaReportMode("VP_TEST_MATCHER_TIMING");
+            }
+        }
+        {
+            // Gate verify 2026-10-17: the sigma-delta bias probe alone (VP_BETA_SIGMA_BIAS=1).
+            char* sb = nullptr;
+            size_t sbLength = 0;
+            const bool sigmaOnly = _dupenv_s(&sb, &sbLength, "VP_BETA_SIGMA_BIAS") == 0 && sb && std::string(sb) == "1";
+            std::free(sb);
+            if (sigmaOnly)
+            {
+                RunBetaSigmaBias();
+                return BetaReportMode("VP_BETA_SIGMA_BIAS");
             }
         }
         Settings settings; Projection p; std::string error;
