@@ -1,0 +1,13 @@
+{
+  "comment": "Regression limits for the default chain (alias_suite.py gate). Baselines: round 4 (3164dda2) and round 5 (c940e705), 3840x2160 -> 2560x1600, NVIDIA, sigma-delta 8-bit; limits = baseline + margin (1.5 dB aliasing, 0.05 MTF, 2 points ringing, 1.5 dB pan error). Other pairs get limits after their first full run.",
+  "control_margin_db": 3.0,
+  "pairs": {
+    "s3840x2160_o2560x1600": {
+      "alias_db_max": -14.6,
+      "alias_chroma_db_max": -22.9,
+      "mtf_0.6_min": 0.57,
+      "ringing_max": 2.1,
+      "motion_err_db_max": 0.7
+    }
+  }
+}
