@@ -633,7 +633,9 @@ namespace SourceResolution
 
 	// h3-latch: the look-ahead's per-frame cut judge (source_resolution_cut_fixes). Every queued frame's
 	// pattern (consecutive frames, oldest first) is judged against the last one with a shape, at the
-	// per-frame motion level: dark frames are skipped (Settings::darkLevel), a candidate stays pending
+	// per-frame motion level: dark frames are skipped (Settings::darkLevel; across them only the alone path
+	// counts - a camera passing through a dark occluder changes the level, not the shot; a candidate whose flash
+	// window runs into darkness is cancelled and judged across it), a candidate stays pending
 	// for frameFlashSeconds and is cancelled as a flash when a frame inside that window would not be a
 	// cut against the pattern before it (the frames since are then not compared with the flash).
 	// Evidence(from, to) tells the tracker what happened between two analysed frames. Not thread-safe.
@@ -667,6 +669,9 @@ namespace SourceResolution
 		std::vector<double> last;
 		double motion = 0.0;
 		bool started = false;
+		// A dark frame was skipped since `last`: the level changed through darkness (an occluder, a fade),
+		// so only the shape alone can make a cut across it (the alone path at the motion level).
+		bool darkSinceLast = false;
 		std::deque<Candidate> candidates;
 		// Runs of consecutively judged frames (first, last sequence), newest last.
 		std::deque<std::pair<uint64_t, uint64_t>> runs;

@@ -1813,6 +1813,7 @@ namespace SourceResolution
 		last.clear();
 		motion = 0.0;
 		started = false;
+		darkSinceLast = false;
 		candidates.clear();
 		runs.clear();
 		decorrelations.clear();
@@ -1841,7 +1842,22 @@ namespace SourceResolution
 		double sum = 0.0;
 		for (double v : pattern) sum += v;
 		// A dark frame is not compared (as the tracker's Dark).
-		if (s.darkLevel > 0.0 && sum / pattern.size() - blackLevel < s.darkLevel * (1.0 - blackLevel)) return false;
+		if (s.darkLevel > 0.0 && sum / pattern.size() - blackLevel < s.darkLevel * (1.0 - blackLevel))
+		{
+			if (!last.empty()) darkSinceLast = true;
+			// A candidate whose flash window runs into darkness was the picture going dark (a fade, an
+			// occluder): not a cut there - the frame after the darkness is judged against the shape before it.
+			// (The oldest such candidate restores the shape and the motion level from before them all.)
+			bool restored = false;
+			for (Candidate& c : candidates)
+			{
+				if (c.cancelled || c.confirmed) continue;
+				c.cancelled = true;
+				if (!restored) { motion = c.motionBefore; last = c.before; restored = true; }
+				c.before.clear();
+			}
+			return false;
+		}
 		const std::vector<char> none(pattern.size(), 0);
 		// Pending candidates: past the window = a cut; back to the shape before = a flash.
 		bool returned = false;
@@ -1854,20 +1870,25 @@ namespace SourceResolution
 			{
 				c.cancelled = true;
 				c.before.clear();
-				motion = c.motionBefore;
+				if (!returned) motion = c.motionBefore;   // the oldest returned candidate's level
 				returned = true;
 			}
 		}
 		if (returned)
 		{
 			last = pattern;   // the flash's frames are not compared with what follows
+			darkSinceLast = false;
 			return false;
 		}
 		double decorrelation = 0.0, share = 0.0, jump = 0.0;
 		if (!last.empty() && PatternChange(last, none, pattern, none, blackLevel, noise, decorrelation, share, &jump))
 		{
 			decorrelations.push_back({ sequence, decorrelation });
-			if (FrameRule(decorrelation, jump, motion, s))
+			const bool acrossDark = darkSinceLast;
+			darkSinceLast = false;
+			const bool cut = acrossDark ? decorrelation >= (std::max)(s.frameAlone, motion + s.frameAloneMargin) :
+				FrameRule(decorrelation, jump, motion, s);
+			if (cut)
 			{
 				Candidate c;
 				c.sequence = sequence;
@@ -1889,7 +1910,7 @@ namespace SourceResolution
 			return false;
 		}
 		double d = 0.0, sh = 0.0;
-		if (PatternChange(pattern, none, pattern, none, blackLevel, noise, d, sh)) { last = pattern; started = true; }
+		if (PatternChange(pattern, none, pattern, none, blackLevel, noise, d, sh)) { last = pattern; started = true; darkSinceLast = false; }
 		return false;
 	}
 

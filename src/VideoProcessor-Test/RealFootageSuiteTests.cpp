@@ -2492,6 +2492,30 @@ namespace RealFootage
 			Assert::IsFalse(judge.Evidence(seq, seq + 10).covered);
 		}
 
+		// A camera passing through a dark occluder: half the picture darkens (a candidate), then the
+		// whole picture is dark for a few frames, then the shot again. Not a cut: the candidate ran into
+		// darkness and the shot after it is judged against the shape before.
+		TEST_METHOD(FrameJudgeDarkOccluderIsNotACut)
+		{
+			const SourceResolution::Tracker::Settings s = Fixes(true);
+			SourceResolution::FrameCutJudge judge;
+			const double black = 64.0 / 1023.0, noise = 2.0 / 1023.0, per = 1.0 / 24.0;
+			const std::vector<double> a = Pattern(30);
+			std::vector<double> half = a, dark = a;
+			for (size_t i = 0; i < 16; ++i) half[i] = black + (half[i] - black) * 0.2;
+			for (double& v : dark) v = black + (v - black) * 0.01;
+			uint64_t seq = 0;
+			for (unsigned i = 0; i < 24; ++i) judge.Frame(++seq, Jitter(a, i), black, noise, per, s);
+			const uint64_t start = seq;
+			const bool candidate = judge.Frame(++seq, half, black, noise, per, s);
+			for (int i = 0; i < 6; ++i) judge.Frame(++seq, dark, black, noise, per, s);
+			for (unsigned i = 0; i < 24; ++i) judge.Frame(++seq, Jitter(a, 400 + i), black, noise, per, s);
+			Assert::IsTrue(candidate, L"the darkening is a candidate at first");
+			const SourceResolution::FrameEvidence e = judge.Evidence(start, seq);
+			Assert::IsTrue(e.covered);
+			Assert::IsFalse(e.cut, L"through darkness back to the same shot: no cut");
+		}
+
 		// A camera move: the shape changes completely over 0.5 s but little between two frames. The
 		// look-ahead sees no cut, so the tracker counts none; with the cut fixes off the same tiles are a cut.
 		TEST_METHOD(CameraMoveWithLookAheadIsNotACut)
