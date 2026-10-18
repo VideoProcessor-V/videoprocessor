@@ -32,6 +32,10 @@ struct StatsData
 	CString keyOverrides;      // delta 6: what a key changed against the saved settings
 	CString room;              // Stage 9: room lights (empty when off)
 	CString content;           // content intent: class and source (empty when off)
+	CString motionIntent;      // intent interpreter items 2-5 (empty when off)
+	CString ambientIntent;
+	CString blackIntent;
+	CString displayIntent;
 	CString rendererName;      // selected presentation backend
 	CString surfaceMode;       // actual presentation host: fullscreen or windowed
 

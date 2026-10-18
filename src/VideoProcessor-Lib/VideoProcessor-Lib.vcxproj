@@ -248,6 +248,9 @@
     <ClInclude Include="IntentDescriptor.h" />
     <ClInclude Include="ContentClassifier.h" />
     <ClInclude Include="ContentIntentObserver.h" />
+    <ClInclude Include="MotionIntent.h" />
+    <ClInclude Include="IntentInterpreterObserver.h" />
+    <ClInclude Include="IntentInterpreterSupport.h" />
     <ClInclude Include="AmbientAdaptation.h" />
     <ClInclude Include="BlackIntent.h" />
     <ClInclude Include="DisplayIntent.h" />

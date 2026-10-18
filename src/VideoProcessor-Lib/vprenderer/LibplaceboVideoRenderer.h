@@ -127,6 +127,9 @@ public:
 	bool GetVideoIngressInfo(CString& details) const override;
 	bool GetDolbyVisionLuminanceStatus(DolbyVisionLuminanceStatus& status) const override;
 	bool GetContentIntentStatus(ContentIntentStatus& status) const override;
+	// Intent interpreter items 2-5 (2026-10-17): motion / ambient / black / display.
+	bool GetIntentStatus(IntentStatus& status) const override;
+	void SetAmbientLux(double lux, bool valid, double nowSeconds) override;
 	// DV next step (f): the last rendered frame's format-neutral scene
 	// descriptor and display profile (SceneDescriptor.h / DisplayProfile.h),
 	// for future consumers (LED look-ahead, stats). False until a frame was rendered.
