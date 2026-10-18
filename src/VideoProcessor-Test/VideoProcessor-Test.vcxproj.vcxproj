@@ -183,8 +183,13 @@
     <ClCompile Include="VideoFrameFormatterTests.cpp" />
     <ClCompile Include="DolbyVisionLuminancePolicyTests.cpp" />
     <ClCompile Include="DolbyVisionTrimsTests.cpp" />
+    <ClCompile Include="FileSideDataTests.cpp" />
     <ClCompile Include="SceneDescriptorTests.cpp" />
     <ClCompile Include="ContentIntentTests.cpp" />
+    <ClCompile Include="FileSourceRuleVariableTests.cpp" />
+    <ClCompile Include="FileHostTests.cpp" />
+    <ClCompile Include="LedDriveArbiterTests.cpp" />
+    <ClCompile Include="LedDriveHoldoverTests.cpp" />
     <ClCompile Include="DolbyVisionTunnelFormatterTests.cpp" />
     <ClCompile Include="MovingPictureTransitionTests.cpp" />
     <ClCompile Include="SubtitleBoxDetectorTests.cpp" />
@@ -305,6 +310,23 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="VPRendererFilterTests.cpp" />
+    <ClCompile Include="VPRendererFilterGraphTests.cpp" />
+    <ClCompile Include="..\VideoProcessor-VPRendererFilter\FilterTimingGlue.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VideoProcessor-VPRendererFilter\VPRendererFilterMediaTypes.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VideoProcessor-VPRendererFilter\VPRendererFilterRepack.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VideoProcessor-VPRendererFilter\VPRendererFilterPluginCheck.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VideoProcessor-VPRendererFilter\VPRendererFilterRegistration.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="SceneDetectorTests.cpp" />
     <ClCompile Include="HdrInferenceTests.cpp" />
     <ClCompile Include="SourceResolutionDetectorTests.cpp" />
@@ -385,6 +407,7 @@
     <ClCompile Include="ActivePictureDecisionTimelineTests.cpp" />
     <ClCompile Include="FullRasterLookaheadTests.cpp" />
     <ClCompile Include="LibplaceboPluginProxyTests.cpp" />
+    <ClCompile Include="FileFrameTests.cpp" />
     <ClCompile Include="ActivePictureTransitionModelTests.cpp" />
 	<ClCompile Include="ActivePictureAnalyzerTests.cpp" />
     <ClCompile Include="ActivePictureEvidenceTests.cpp" />
@@ -419,6 +442,7 @@
 	<ClCompile Include="DirectShowFrameDelivererTests.cpp" />
 	<ClCompile Include="DirectShowDeliveryOutcomeTests.cpp" />
 	<ClCompile Include="DirectShowSegmentTransitionTests.cpp" />
+	<ClCompile Include="FileSourceHelpersTests.cpp" />
 	<ClCompile Include="CaptureResyncHardeningTests.cpp" />
 	<ClCompile Include="DirectShowGraphExecutorTests.cpp" />
 	<ClCompile Include="DirectShowQueueConstructionContractTests.cpp" />

@@ -11,6 +11,7 @@
 #include <SubtitlePreviewMode.h>
 #include <DolbyVisionLuminanceStatus.h>
 #include <IntentDescriptor.h>
+#include <FileFrameTiming.h>
 
 
 #include <VideoFrame.h>
@@ -644,5 +645,26 @@ public:
 		(void)referenceQpc;
 		return false;
 	}
+
+	// ABI 37 (VP Renderer DirectShow filter; claimed 35 on its branch, after
+	// 36's WriteDiagnosticHistory in the vtable): frames from a file source.
+	// The frame carries its own presentation time and exact source rate, so the
+	// renderer skips capture timing (rate/PPM measurement, pulldown detection)
+	// and fills its film clock directly. Capture frames keep OnVideoFrame and
+	// are unchanged. The default forwards to OnVideoFrame (capture semantics).
+	virtual bool SupportsTimedFileFrames() const { return false; }
+	virtual void OnTimedVideoFrame(VideoFrame& videoFrame,
+		const FileFrameTiming&)
+	{
+		OnVideoFrame(videoFrame);
+	}
+	// A file source never drops: the filter's Receive waits here until the
+	// queue has room. True when a frame can be queued without a drop; false on
+	// timeout or after CancelFileFrameWait (flush, stop), in which case the
+	// caller retries or abandons the sample. Must not hold locks the render
+	// thread needs.
+	virtual bool WaitForFileFrameSlot(uint32_t /*timeoutMs*/) { return true; }
+	// Wakes every WaitForFileFrameSlot with false until the next timed frame.
+	virtual void CancelFileFrameWait() {}
 
 };

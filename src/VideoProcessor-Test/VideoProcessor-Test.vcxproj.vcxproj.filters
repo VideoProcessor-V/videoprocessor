@@ -4,6 +4,9 @@
     <ClCompile Include="CpuFeaturesTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="FileSourceHelpersTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="SubtitleCutPasteTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -13,10 +16,25 @@
     <ClCompile Include="DolbyVisionTrimsTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="FileSideDataTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="SceneDescriptorTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="ContentIntentTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="FileSourceRuleVariableTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="FileHostTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="LedDriveArbiterTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="LedDriveHoldoverTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="DolbyVisionTunnelFormatterTests.cpp">

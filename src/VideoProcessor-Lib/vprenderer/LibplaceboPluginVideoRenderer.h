@@ -30,6 +30,12 @@ public:
 	bool OnVideoState(VideoStateComPtr& videoState) override;
 	bool SupportsDynamicVideoState() const override;
 	void OnVideoFrame(VideoFrame& videoFrame) override;
+	// ABI 37 (VP Renderer DirectShow filter): forwarded to the plugin.
+	bool SupportsTimedFileFrames() const override;
+	void OnTimedVideoFrame(VideoFrame& videoFrame,
+		const FileFrameTiming& timing) override;
+	bool WaitForFileFrameSlot(uint32_t timeoutMs) override;
+	void CancelFileFrameWait() override;
 	bool HasPresentedLiveFrame() const override;
 	const char* PresentedLiveFrameEvidence() const override;
 	HRESULT OnWindowsEvent(LONG_PTR param1, LONG_PTR param2) override;

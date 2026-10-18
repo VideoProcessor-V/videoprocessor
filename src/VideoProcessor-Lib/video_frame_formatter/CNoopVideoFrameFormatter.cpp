@@ -69,6 +69,13 @@ CNoopVideoFrameFormatter::GetOutputContract() const
 	case VideoFrameEncoding::R12B:
 	case VideoFrameEncoding::R12L:
 		return { VideoFrameSampleRange::FULL, 12, 0 };
+	// ABI 37 file encodings (copied as they are; video levels).
+	case VideoFrameEncoding::NV12:
+		return { VideoFrameSampleRange::LIMITED, 8, 0 };
+	case VideoFrameEncoding::P010:
+		return { VideoFrameSampleRange::LIMITED, 10, 6 };
+	case VideoFrameEncoding::P016:
+		return { VideoFrameSampleRange::LIMITED, 16, 0 };
 	default:
 		return {};
 	}

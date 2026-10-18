@@ -46,6 +46,7 @@
 #include <vprenderer/EdgeBlanking.h>
 #include <vprenderer/NlsHookRecovery.h>
 #include <vprenderer/CaptureTimestampGap.h>
+#include <vprenderer/FileFrameClock.h>
 #include <vprenderer/DisplayRateHold.h>
 #include <vprenderer/CustomHookChain.h>
 #include <vprenderer/OutputEncodingRepair.h>
@@ -76,6 +77,9 @@
 #include <vprenderer/AdaptiveDownscale.h>
 #include <vprenderer/NlsMaskMapping.h>
 #include <led/LedDriveModule.h>
+#include <led/LedDriveArbiter.h>
+#include <led/LedDriveHoldover.h>
+#include <filesource/FileHostSettings.h>
 #include <led/LedMeasurementHook.h>
 #include <led/LedRawTransfer.h>
 #include <QueuedFrameStatistics.h>
@@ -103,6 +107,7 @@
 #include <video_frame_formatter/CUYVYtoP210VideoFrameFormatter.h>
 #include <video_frame_formatter/CV210toP010VideoFrameFormatter.h>
 #include <video_frame_formatter/CV210toP210VideoFrameFormatter.h>
+#include <video_frame_formatter/CTwoPlane420VideoFrameFormatter.h>
 
 #pragma warning(push)
 #pragma warning(disable: 4244) // conversion warning in an upstream inline helper
@@ -882,6 +887,12 @@ namespace
 		case VideoFrameEncoding::R12B:
 		case VideoFrameEncoding::R12L:
 			return std::unique_ptr<IVideoFrameFormatter>(new CDeckLinkRGBToP010VideoFrameFormatter());
+		case VideoFrameEncoding::NV12:
+		case VideoFrameEncoding::P010:
+		case VideoFrameEncoding::P016:
+			// ABI 37 (file frames): already two-plane 4:2:0; copied (P010 / P016)
+			// or widened (NV12) into the renderer's 16-bit planes, values unchanged.
+			return std::unique_ptr<IVideoFrameFormatter>(new CTwoPlane420VideoFrameFormatter());
 		default:
 			throw std::runtime_error(
 				"libplacebo does not support this capture format");
@@ -10138,7 +10149,8 @@ struct LibplaceboVideoRenderer::Impl
 			overridden ? "P010 (forced, CPU)" :
 			rgbUnpack ? "native RGB 4:4:4 (GPU unpack)" :
 			IsNativeRgbUpload(e, videoConversionOverride) ? "native RGB (libplacebo upload)" :
-			yuv422 ? (settings.capturePath == "gpu" ? "lossless P210 (GPU unpack)" : "lossless P210 (CPU)") : "P010 (CPU)";
+			yuv422 ? (settings.capturePath == "gpu" ? "lossless P210 (GPU unpack)" : "lossless P210 (CPU)") :
+			VideoFrameEncodingIsTwoPlane420(e) ? "file 4:2:0 two-plane (NV12/P010/P016 as 16-bit planes, CPU copy)" : "P010 (CPU)";
 		if ((dvGpu || (!state->dolbyVisionTunnel && (rgbUnpack || (yuv422 && settings.capturePath == "gpu" && !overridden)))) &&
 			EarlyActive())
 			route += ", uploaded early";
@@ -11587,6 +11599,9 @@ struct LibplaceboVideoRenderer::Impl
 	// Pulldown (owner 2026-10-14): the film rate of the frame being rendered
 	// (0 = none), its cadence and the repeats skipped, set by the render loop.
 	double pulldownFilmHz = 0.0;
+	// ABI 37: the frame being rendered is a file frame (render thread): it is
+	// paced by its own due times, so no capture drift correction (drop/repeat).
+	bool fileFrameSource = false;
 	int pulldownCadence = 0;   // (cycle << 16) | new frames per cycle
 	// Black bars: the latest trusted active picture, for the matcher.
 	HdrPeakAnalysisCrop::TrustedPicture dejudderPicture;
@@ -16424,7 +16439,7 @@ struct LibplaceboVideoRenderer::Impl
 			AlphaCadenceCorrectionInput correctionInput;
 			// Not while the interpolation timeline presents: it schedules every refresh and
 			// steers the queue itself (the rate trim); a drop or repeat would break its phases.
-			correctionInput.enabled = sceneDetectionEnabled && analysisSource.IsValid() && !vpTimelineActive;
+			correctionInput.enabled = sceneDetectionEnabled && analysisSource.IsValid() && !vpTimelineActive && !fileFrameSource;
 			// Queue replacement and detector/source replacement are independent
 			// reset boundaries. Fold both into the policy epoch so neither can
 			// inherit a pending action or retained phase from the other.
@@ -16946,6 +16961,10 @@ struct LibplaceboVideoRenderer::Impl
 					break;
 				}
 			}
+			else if (VideoFrameEncodingIsTwoPlane420(state.videoFrameEncoding))
+				setIngressStatus(state.videoFrameEncoding == VideoFrameEncoding::NV12 ? "File NV12 (4:2:0 8-bit)" :
+					state.videoFrameEncoding == VideoFrameEncoding::P010 ? "File P010 (4:2:0 10-bit)" :
+					"File P016 (4:2:0 16-bit)");
 			else
 				setIngressStatus(videoConversionOverride ==
 					VideoConversionOverride::VIDEOCONVERSION_V210_TO_P010 ?
@@ -22989,6 +23008,17 @@ LibplaceboVideoRenderer::~LibplaceboVideoRenderer()
 	if (m_conversionThread.joinable())
 		m_conversionThread.join();
 	ClearQueue("renderer destruction");
+	// VP Renderer filter (2026-10-17): in the filter process (source=file) the
+	// running LED drive is held for the next graph instead of returning the
+	// projector to full light; the capture app never gets here with a hold-over.
+	if (m_ledHoldoverMs > 0 && m_ledDrive && !m_ledDriveSuspended)
+	{
+		std::shared_ptr<LedDrive::LedDriveModule> held = m_ledDrive;
+		m_ledDrive.reset();
+		if (m_impl)
+			std::atomic_store(&m_impl->ledDrive, std::shared_ptr<LedDrive::LedDriveModule>());
+		LedDrive::ProcessLedDriveHoldover().Park(held, m_ledDriveSignature, m_ledHoldoverMs);
+	}
 	m_impl.reset();
 }
 
@@ -23370,6 +23400,16 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 		gapFrames = 0;
 	}
 
+	EnqueueFrame(videoFrame, frameState, enqueueGeneration, callbackQpc, arrivalQpc,
+		gapBefore, gapCause, gapFrames, filmHz, filmUpdate, nullptr);
+}
+
+
+void LibplaceboVideoRenderer::EnqueueFrame(VideoFrame& videoFrame,
+	const VideoStateComPtr& frameState, uint64_t enqueueGeneration,
+	int64_t callbackQpc, int64_t arrivalQpc, bool gapBefore, const char* gapCause,
+	uint32_t gapFrames, double filmHz, bool filmUpdate, const FileQueueFields* file)
+{
 	{
 		std::lock_guard<std::mutex> guard(m_queueMutex);
 		// A callback that began before a reset must not populate the new
@@ -23482,6 +23522,14 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 			queuedFrame.gapFrames = gapFrames;
 			queuedFrame.filmHz = filmHz;
 			queuedFrame.filmUpdate = filmUpdate;
+			if (file)
+			{
+				queuedFrame.fileFrame = true;
+				queuedFrame.filePresentationQpc = file->presentationQpc;
+				queuedFrame.filePaused = file->paused;
+				queuedFrame.fileMotionOff = file->motionOff;
+				queuedFrame.fileDiscontinuity = file->discontinuity;
+			}
 			queuedFrame.enqueueQpc = PerformanceCounterNow();
 			const int64_t diagEnqueueQpc = queuedFrame.enqueueQpc;
 			m_frameQueue.push_back(std::move(queuedFrame));
@@ -23503,6 +23551,165 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 		}
 	}
 	m_queueChanged.notify_all();
+}
+
+
+// ABI 37 (VP Renderer DirectShow filter): a file frame. Capture timing is not
+// used (no UpdateFrameRateAndPPM, no pulldown detection or cadence): the film
+// clock is filled from the frame's own timing - the source rate (exact
+// rational, else measured) times the playback rate, on the frame's due time.
+void LibplaceboVideoRenderer::OnTimedVideoFrame(VideoFrame& videoFrame,
+	const FileFrameTiming& timing)
+{
+	// Any timed frame re-arms the slot wait (CancelFileFrameWait is sticky
+	// until here).
+	m_fileSlotGate.Arm();
+	const int64_t callbackQpc = PerformanceCounterNow();
+	if (m_state.load(std::memory_order_acquire) != RendererState::RENDERSTATE_RENDERING)
+		return;
+	if (!FileFrameClock::TimingUsable(timing))
+	{
+		const uint64_t total = m_fileTimingRejected.fetch_add(1, std::memory_order_relaxed) + 1;
+		m_droppedFrames.fetch_add(1, std::memory_order_relaxed);
+		if ((total & (total - 1)) == 0)
+			DebugLog::Log("File frame refused: timing block of %u bytes, this renderer needs %u (total %llu)",
+				static_cast<unsigned>(timing.structSize), static_cast<unsigned>(sizeof(FileFrameTiming)),
+				static_cast<unsigned long long>(total));
+		return;
+	}
+
+	uint64_t enqueueGeneration = 0;
+	{
+		std::lock_guard<std::mutex> guard(m_queueMutex);
+		if (m_stopRequested)
+			return;
+		enqueueGeneration = m_queueGeneration;
+	}
+	m_frameCounter.fetch_add(1, std::memory_order_relaxed);
+
+	VideoStateComPtr frameState;
+	{
+		std::lock_guard<std::mutex> guard(m_stateMutex);
+		frameState = m_videoState;
+	}
+	if (!frameState)
+	{
+		const uint64_t droppedTotal =
+			m_droppedFrames.fetch_add(1, std::memory_order_relaxed) + 1;
+		const uint64_t reasonTotal =
+			m_missingFrameStateDrops.fetch_add(1, std::memory_order_relaxed) + 1;
+		if ((reasonTotal & (reasonTotal - 1)) == 0)
+		{
+			DebugLog::Log(
+				"Alpha dropped file frame: reason=video_state_unavailable reason_total=%llu dropped_total=%llu",
+				static_cast<unsigned long long>(reasonTotal),
+				static_cast<unsigned long long>(droppedTotal));
+		}
+		return;
+	}
+
+	const double filmHz = FileFrameClock::FilmHz(timing);
+	const bool motionOff = !FileFrameClock::MotionAllowed(timing);
+	if (filmHz != m_fileLoggedFilmHz || motionOff != m_fileLoggedMotionOff)
+	{
+		// On a change only (a seek, a rate change, pause / run).
+		m_fileLoggedFilmHz = filmHz;
+		m_fileLoggedMotionOff = motionOff;
+		DebugLog::Log("File frames: film clock %.6f Hz (source %u/%u = %.6f Hz, measured %.6f Hz, playback rate %.3f)%s, motion %s%s",
+			filmHz, timing.sourceRateNumerator, timing.sourceRateDenominator,
+			FileFrameClock::SourceRateHz(timing), timing.sourceRateHz, timing.playbackRate,
+			filmHz > 0.0 ? "" : " (rate unknown: the signal's nominal rate)",
+			motionOff ? "off" : "allowed",
+			timing.paused ? " (paused: shown and held)" : "");
+	}
+
+	FileQueueFields file;
+	file.presentationQpc = timing.presentationQpc;
+	file.paused = timing.paused;
+	file.motionOff = motionOff;
+	file.discontinuity = timing.discontinuity;
+	// A discontinuity is a source discontinuity at this frame (continuity of the
+	// active-picture timeline, smooth motion and the timeline break here; the
+	// render thread invalidates the vectors-valid state when it dequeues it).
+	if (timing.discontinuity)
+		videoFrame.SetSourceDiscontinuity(true);
+	EnqueueFrame(videoFrame, frameState, enqueueGeneration, callbackQpc,
+		FileFrameClock::ArrivalQpc(timing, callbackQpc),
+		timing.discontinuity, timing.discontinuity ? "file discontinuity (seek, step or rate change)" : nullptr,
+		0, filmHz, false, &file);
+}
+
+
+bool LibplaceboVideoRenderer::FileFrameSlotFreeLocked() const
+{
+	if (m_stopRequested ||
+		m_state.load(std::memory_order_acquire) != RendererState::RENDERSTATE_RENDERING)
+		return false;
+	const size_t queueLimit = m_useFrameQueue ? m_frameQueueMaxSize : 1;
+	return m_frameQueue.size() < queueLimit;
+}
+
+
+bool LibplaceboVideoRenderer::WaitForFileFrameSlot(uint32_t timeoutMs)
+{
+	// The gate sleeps on its own mutex; the queue mutex is taken only to read
+	// the queue's depth, so the render thread is never blocked by a waiter.
+	return m_fileSlotGate.Wait(timeoutMs, [this]()
+		{
+			std::lock_guard<std::mutex> guard(m_queueMutex);
+			return FileFrameSlotFreeLocked();
+		});
+}
+
+
+void LibplaceboVideoRenderer::CancelFileFrameWait()
+{
+	m_fileSlotGate.Cancel();
+}
+
+
+int64_t LibplaceboVideoRenderer::FileHeadTicksUntilDueLocked() const
+{
+	if (m_frameQueue.empty() || !m_frameQueue.front().fileFrame)
+		return 0;
+	const QueuedFrame& head = m_frameQueue.front();
+	LARGE_INTEGER frequency{};
+	if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0)
+		return 0;
+	// The measured lead from submission to the display's target refresh: the
+	// frame is submitted that much before it is due on screen.
+	int64_t leadQpc = 0;
+	if (m_presentationTargetTimingKnown.load(std::memory_order_acquire))
+	{
+		const double leadMs = m_presentationTargetLeadMs.load(std::memory_order_relaxed);
+		if (std::isfinite(leadMs) && leadMs > 0.0 && leadMs < 1000.0)
+			leadQpc = static_cast<int64_t>(leadMs * static_cast<double>(frequency.QuadPart) / 1000.0);
+	}
+	return FileFrameClock::TicksUntilDue(PerformanceCounterNow(), head.filePresentationQpc,
+		leadQpc, head.filePaused);
+}
+
+
+void LibplaceboVideoRenderer::WaitForDequeueLocked(std::unique_lock<std::mutex>& lock)
+{
+	for (;;)
+	{
+		m_queueChanged.wait(lock, [this]() { return m_stopRequested || CanDequeueLocked(); });
+		if (m_stopRequested)
+			return;
+		// Capture heads: 0 at once, the wait above unchanged.
+		const int64_t ticks = FileHeadTicksUntilDueLocked();
+		if (ticks <= 0)
+			return;
+		LARGE_INTEGER frequency{};
+		QueryPerformanceFrequency(&frequency);
+		const int64_t micros = frequency.QuadPart > 0 ?
+			static_cast<int64_t>(static_cast<double>(ticks) * 1000000.0 / static_cast<double>(frequency.QuadPart)) : 1000;
+		// Woken early by any queue change (a reset, a stop, a new head); re-checked
+		// at least every 100 ms so a changed presentation lead is followed.
+		m_queueChanged.wait_for(lock, std::chrono::microseconds(
+			(std::max)(int64_t{ 1 }, (std::min)(micros, int64_t{ 100000 }))));
+	}
 }
 
 
@@ -24047,9 +24254,17 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 		if (previous) DebugLog::Log("Dynamic Drive: disabled");
 		return;
 	}
-	m_ledDrive = std::make_shared<LedDrive::LedDriveModule>(
-		LedDrive::ReadProjectorConfig(configuration), led);
-	m_ledDrive->Start();
+	// VP Renderer filter (2026-10-17): a drive the previous file's renderer
+	// held (same LED settings) carries on; nothing is held in the capture app.
+	m_ledDrive = LedDrive::ProcessLedDriveHoldover().Adopt(signature);
+	if (!m_ledDrive)
+	{
+		// The serial port goes through the LED drive arbiter: VideoProcessor.exe
+		// and the filter never drive the projector at the same time.
+		m_ledDrive = std::make_shared<LedDrive::LedDriveModule>(
+			LedDrive::ReadProjectorConfig(configuration), led, LedDrive::ArbitratedSerialPortFactory());
+		m_ledDrive->Start();
+	}
 	if (m_impl)
 	{
 		std::atomic_store(&m_impl->ledDrive, m_ledDrive);
@@ -24134,6 +24349,10 @@ bool LibplaceboVideoRenderer::ApplyApplicationState(
 	};
 	if (snapshot.configuration)
 	{
+		// VP Renderer filter (2026-10-17): the LED hold-over is for file playback only.
+		std::string sourceKind;
+		m_ledHoldoverMs = snapshot.LookupVariable("source", sourceKind) && sourceKind == "file" ?
+			FileSource::ReadFileHostSettings(*snapshot.configuration).ledHoldoverMs : 0;
 		m_ledDriveConfiguration = snapshot.configuration;
 		if (!m_ledDriveSuspended)
 			UpdateLedDrive(*snapshot.configuration);
@@ -24355,6 +24574,7 @@ void LibplaceboVideoRenderer::StopWithIngressDrain(
 		m_stopRequested = true;
 	}
 	m_queueChanged.notify_all();
+	m_fileSlotGate.Cancel();   // ABI 37: a waiting file source returns false
 	try
 	{
 		m_stopWorker = std::thread([this, drainAfterGraphStop]()
@@ -24378,6 +24598,7 @@ void LibplaceboVideoRenderer::StopInternal(
 		m_stopRequested = true;
 	}
 	m_queueChanged.notify_all();
+	m_fileSlotGate.Cancel();   // ABI 37: a waiting file source returns false
 	if (m_renderThread.joinable())
 		m_renderThread.join();
 	if (m_conversionThread.joinable())
@@ -24400,6 +24621,7 @@ void LibplaceboVideoRenderer::Retire() noexcept
 			m_stopRequested = true;
 		}
 		m_queueChanged.notify_all();
+		m_fileSlotGate.Cancel();   // ABI 37: a waiting file source returns false
 		// Do not call Stop(): this can run after the GUI has already processed
 		// the stopped-state notification, and a second callback could be applied
 		// to the replacement renderer. Join directly before releasing the
@@ -24813,6 +25035,7 @@ void LibplaceboVideoRenderer::SetFrameQueueMaxSize(size_t size)
 	// A target reduction can satisfy an already pending startup prefill.
 	// A target increase after release deliberately does not re-arm it.
 	m_queueChanged.notify_all();
+	m_fileSlotGate.Notify();   // ABI 37: the slot limit changed
 }
 
 void LibplaceboVideoRenderer::SetQueueFramePolicy(
@@ -27032,6 +27255,10 @@ void LibplaceboVideoRenderer::RenderLoop()
 		int64_t callbackQpc = 0;
 		int64_t arrivalQpc = 0;
 		double frameFilmHz = 0.0;
+		// ABI 37: the dequeued frame came from a file source (OnTimedVideoFrame);
+		// motion off: no B is offered for it (playback rate != 1, paused).
+		bool currentFileFrame = false;
+		bool currentFileMotionOff = false;
 		int64_t dequeueQpc = 0;
 		size_t queueDepthAfterDequeue = 0;
 		size_t desiredQueueDepth = 1;
@@ -27083,7 +27310,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 		{
 			const auto waitStarted = SteadyClock::now();
 			std::unique_lock<std::mutex> previewLock(m_queueMutex);
-			m_queueChanged.wait(previewLock, [this]() { return m_stopRequested || CanDequeueLocked(); });
+			WaitForDequeueLocked(previewLock);   // ABI 37: file heads at their due time
 			if (m_stopRequested) break;
 			previewWaitMs = std::chrono::duration<double, std::milli>(
 				SteadyClock::now() - waitStarted).count();
@@ -27301,10 +27528,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 		{
 			const auto waitStarted = SteadyClock::now();
 			std::unique_lock<std::mutex> lock(m_queueMutex);
-			m_queueChanged.wait(lock, [this]()
-			{
-				return m_stopRequested || CanDequeueLocked();
-			});
+			// ABI 37: a file head also waits for its due time (capture: the same wait).
+			WaitForDequeueLocked(lock);
 			if (m_stopRequested)
 				break;
 			dequeueWaitMs = std::chrono::duration<double, std::milli>(
@@ -27349,6 +27574,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 				m_frameQueue.front().cadencePresentId;
 			cadenceDeadlineSeconds =
 				m_frameQueue.front().cadenceDeadlineSeconds;
+			currentFileFrame = m_frameQueue.front().fileFrame;
+			currentFileMotionOff = m_frameQueue.front().fileMotionOff;
 			const auto& dequeued = m_frameQueue.front();
 			if (dequeued.state && dequeued.state->dolbyVisionTunnel)
 			{
@@ -27378,6 +27605,14 @@ void LibplaceboVideoRenderer::RenderLoop()
 				m_impl->motionGapDetail.store(dequeued.gapCause, std::memory_order_relaxed);   // why, for the log
 				m_impl->RequestMotionInvalidate(MotionValidity::Cause::Gap);
 			}
+			// ABI 37: a file discontinuity (seek, frame step, rate change) is a source
+			// discontinuity at this frame: the one vectors-valid state and the resolution
+			// evidence start over, as on a capture resync.
+			if (dequeued.fileDiscontinuity && m_impl)
+			{
+				m_impl->RequestMotionInvalidate(MotionValidity::Cause::Seek);
+				m_impl->sourceMonitor.Discontinuity("file discontinuity (seek, step or rate change)");
+			}
 			// A format change without a reset (normally a Reset comes first: then this is
 			// a harmless second invalidation). Releases the de-judder's resources.
 			if (m_impl && m_impl->motionLastStateReset.exchange(false, std::memory_order_acq_rel))
@@ -27393,7 +27628,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 			nextPts = 0.0;
 			if (m_impl) m_impl->vpFillNextSequence = 0;
 			if (m_impl) m_impl->vpGapFillStandalone = false;
-			if (!m_frameQueue.empty())
+			// ABI 37: no pair into or out of a file frame shown without motion.
+			if (!m_frameQueue.empty() && !currentFileMotionOff && !m_frameQueue.front().fileMotionOff)
 			{
 				// A frame's time as the timeline reads it: the film clock when pulldown is locked,
 				// else the capture timestamp (0 = not known).
@@ -27535,6 +27771,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 		// Popping the head can expose a not-yet-converted frame inside the
 		// bounded preparation window even when no new capture has arrived.
 		m_queueChanged.notify_all();
+		m_fileSlotGate.Notify();   // ABI 37: a file source may queue its next frame
 
 		if (prefillReleased)
 		{
@@ -27590,6 +27827,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 			m_impl->contentIntent->Configure(m_impl->activeSettings.intentContent,
 				m_impl->activeSettings.intentContentHoldSeconds);
 			m_impl->pulldownFilmHz = frameFilmHz;
+			m_impl->fileFrameSource = currentFileFrame;
 			m_impl->pulldownCadence = m_pulldownCadence.load(std::memory_order_relaxed);
 			m_impl->pulldownSkipped = m_pulldownSkipped.load(std::memory_order_relaxed);
 		}
@@ -27715,7 +27953,12 @@ void LibplaceboVideoRenderer::RenderLoop()
 			}
 			if (!staleGeneration)
 			{
-                const double sourcePts=m_timingClock&&m_timingClock->TimingClockTicksPerSecond()>0?
+                // ABI 37: a file frame's time is its film clock (its due time on QPC).
+                LARGE_INTEGER qpcFrequencyFile{};
+                const bool fileClock=currentFileFrame&&arrivalQpc>0&&QueryPerformanceFrequency(&qpcFrequencyFile)&&
+                    qpcFrequencyFile.QuadPart>0;
+                const double sourcePts=fileClock?static_cast<double>(arrivalQpc)/static_cast<double>(qpcFrequencyFile.QuadPart):
+                    m_timingClock&&m_timingClock->TimingClockTicksPerSecond()>0?
                     static_cast<double>(frame.GetTimingTimestamp())/m_timingClock->TimingClockTicksPerSecond():
                     static_cast<double>(sourceSequence)/captureRateHz;
                 // One motion engine (owner 2026-10-15, motion_engine): VP's motion
@@ -27739,6 +27982,9 @@ void LibplaceboVideoRenderer::RenderLoop()
                             smooth?"libplacebo smooth motion":"VP de-judder",smooth?1:0);
                     }
                 }
+                // ABI 37: a file frame shown without motion (playback rate != 1, paused)
+                // is not mixed by smooth motion either.
+                if(currentFileMotionOff)motionSettings.smoothMotion="off";
                 m_impl->temporalRenderer.Begin(motionSettings,captureRateHz,
                     m_impl->renderLoadDisplayRefreshHz.load(std::memory_order_acquire),
                     state&&state->displayMode&&state->displayMode->IsInterlaced(),
@@ -27772,7 +28018,10 @@ void LibplaceboVideoRenderer::RenderLoop()
                         m_impl->vpQueueError=0.0;
                         m_impl->vpQueueGeneration=frameGeneration;
                     }
-                    m_impl->vpQueueError=0.95*m_impl->vpQueueError+0.05*(static_cast<double>(queueDepthAfterDequeue)-
+                    // ABI 37: a file source is paced by its due times and keeps the queue
+                    // full by design: no steering on its depth.
+                    if(currentFileFrame)m_impl->vpQueueError=0.0;
+                    else m_impl->vpQueueError=0.95*m_impl->vpQueueError+0.05*(static_cast<double>(queueDepthAfterDequeue)-
                         static_cast<double>(desiredQueueDepth));
                     m_impl->vpTimeline.SetRateTrim(1.0+(std::max)(-0.003,(std::min)(0.003,0.0005*m_impl->vpQueueError)));
                     const auto& planned=m_impl->vpTimeline.Plan(frameGeneration,sourceSequence,ptsA,nextSourceSequence?nextPts:0.0,
@@ -27837,6 +28086,11 @@ void LibplaceboVideoRenderer::RenderLoop()
 					[this, frameGeneration]()
 					{
 						std::lock_guard<std::mutex> queueGuard(m_queueMutex);
+						// ABI 37: a file source's queue is full by design; its B ends
+						// the extras when B is due.
+						if (!m_frameQueue.empty() && m_frameQueue.front().fileFrame)
+							return m_stopRequested || m_frameQueue.front().generation != frameGeneration ||
+								FileHeadTicksUntilDueLocked() <= 0;
 						return m_stopRequested || m_frameQueue.size() >= PrefillTargetLocked() ||
 							(!m_frameQueue.empty() && m_frameQueue.front().generation != frameGeneration);
 					},
@@ -27889,7 +28143,10 @@ void LibplaceboVideoRenderer::RenderLoop()
 						};
 						if (!m_frameQueue.empty())
 							oldestBeforeMs = queuedAgeMs(m_frameQueue.front());
-						recoveredBacklog = AlphaQueuePolicy::ShouldRecoverBacklog(
+						// ABI 37: never for a file source - its queue is full and old by
+						// design (paced by due times), and it must not drop.
+						recoveredBacklog = !currentFileFrame && !(!m_frameQueue.empty() && m_frameQueue.front().fileFrame) &&
+							AlphaQueuePolicy::ShouldRecoverBacklog(
 							queueBefore,
 							recoveryTarget,
 							oldestBeforeMs,
@@ -28462,6 +28719,7 @@ void LibplaceboVideoRenderer::BeginQueueGeneration(
 		target,
 		capacity);
 	m_queueChanged.notify_all();
+	m_fileSlotGate.Notify();   // ABI 37: the queue is empty (reset, flush, start)
 }
 
 
@@ -28520,6 +28778,13 @@ size_t LibplaceboVideoRenderer::PrefillTargetLocked() const
 
 bool LibplaceboVideoRenderer::CanDequeueLocked() const
 {
+	// ABI 37: a file head is paced by its due time (WaitForDequeueLocked), not by
+	// queue depth: no prefill or low-water mark, so the last frames before the end
+	// of the stream and a paused (held) frame are shown. It still waits for its
+	// conversion.
+	if (!m_frameQueue.empty() && m_frameQueue.front().fileFrame)
+		return !(m_impl && m_impl->formatter != nullptr) ||
+			m_frameQueue.front().converted != nullptr || m_frameQueue.front().conversionFailed;
 	return AlphaQueuePolicy::CanDequeuePrepared(
 		m_frameQueue.size(),
 		PrefillTargetLocked(),
@@ -28543,6 +28808,7 @@ void LibplaceboVideoRenderer::SetState(RendererState state)
 			index < sizeof(names) / sizeof(names[0]) ? names[index] : "?",
 			static_cast<int64_t>(state), static_cast<int64_t>(m_callbackGeneration));
 	}
+	m_fileSlotGate.Notify();   // ABI 37: slots open only while rendering
 	m_callback.OnRendererState(state, m_callbackGeneration);
 }
 

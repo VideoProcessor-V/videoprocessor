@@ -58,8 +58,26 @@ enum class VideoFrameEncoding
 	R12L,
 
 	H265,
-	DNxHR
+	DNxHR,
+
+	// ABI 37 (VP Renderer filter, file sources). Two-plane 4:2:0 in system
+	// memory: a full-resolution luma plane followed immediately by an
+	// interleaved CbCr plane of ceil(height / 2) rows, both with the stride
+	// VideoState::BytesPerRow() (tightly packed: even width * bytes per sample).
+	// NV12: 8-bit samples. P010: 16-bit little-endian samples carrying 10
+	// significant bits in the high bits. P016: 16 significant bits.
+	// Appended so every earlier value keeps its number.
+	NV12,
+	P010,
+	P016
 };
+
+// True for the two-plane 4:2:0 encodings (NV12, P010, P016).
+inline bool VideoFrameEncodingIsTwoPlane420(VideoFrameEncoding e)
+{
+	return e == VideoFrameEncoding::NV12 || e == VideoFrameEncoding::P010 ||
+		e == VideoFrameEncoding::P016;
+}
 
 
 // Return the VideoFrameEncoding as a human-readable string

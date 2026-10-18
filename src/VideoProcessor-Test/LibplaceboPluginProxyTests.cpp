@@ -452,6 +452,25 @@ namespace VideoProcessorTest
 				ExpectedMethod>));
 		}
 
+		TEST_METHOD(TimedFileFramesHaveExplicitProxyOverrides)
+		{
+			// ABI 37 (claimed 35 on the filter branch): every file-frame virtual is forwarded to the plugin (a
+			// missing override would silently fall back to capture semantics).
+			Assert::IsTrue((std::is_same_v<
+				decltype(&LibplaceboPluginVideoRenderer::SupportsTimedFileFrames),
+				bool (LibplaceboPluginVideoRenderer::*)() const>));
+			Assert::IsTrue((std::is_same_v<
+				decltype(&LibplaceboPluginVideoRenderer::OnTimedVideoFrame),
+				void (LibplaceboPluginVideoRenderer::*)(VideoFrame&, const FileFrameTiming&)>));
+			Assert::IsTrue((std::is_same_v<
+				decltype(&LibplaceboPluginVideoRenderer::WaitForFileFrameSlot),
+				bool (LibplaceboPluginVideoRenderer::*)(uint32_t)>));
+			Assert::IsTrue((std::is_same_v<
+				decltype(&LibplaceboPluginVideoRenderer::CancelFileFrameWait),
+				void (LibplaceboPluginVideoRenderer::*)()>));
+			Assert::AreEqual(static_cast<uint32_t>(37), VP_LIBPLACEBO_PLUGIN_API_VERSION);
+		}
+
 		TEST_METHOD(ShutdownFinalizationHasExplicitProxyOverride)
 		{
 #if defined(__cpp_noexcept_function_type)
