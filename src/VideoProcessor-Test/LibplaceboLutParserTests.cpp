@@ -9639,6 +9639,10 @@ namespace VideoProcessorTest
 				// made once the picture holds no detail.
 				const std::vector<double> last = held;
 				bool sawCut = false;
+				// h3-latch (cut fixes, integration round 5): a candidate from the held shot's own cut
+				// can be confirmed at the first fade frame (deferred, keeping its own moment before the
+				// fade). A cut by the fade is a switch moment, or a confirmed cut whose moment is in it.
+				const double fadeStart = t;
 				for (int step = 1; step <= 80 && fadedFactor != 0.5; ++step)
 				{
 					std::vector<double> dim(last);
@@ -9646,13 +9650,20 @@ namespace VideoProcessorTest
 					for (double& v : dim) v = 0.0625 + (v - 0.0625) * keep;
 					pl_tex tex = upload(dim);
 					frame.planes[0].texture = tex;
-					const unsigned long long cutsBefore = faded.Read().cuts;
-					const unsigned long long before = faded.Read().frames;
+					const auto stateBefore = faded.Read();
+					const unsigned long long cutsBefore = stateBefore.cuts, momentsBefore = stateBefore.moments;
+					const unsigned long long before = stateBefore.frames;
 					faded.Frame(gpu, dispatch, frame, ++sequence, t);
 					pl_gpu_finish(gpu);
 					faded.Frame(gpu, dispatch, frame, sequence, t);
 					for (int k = 0; k < 400 && faded.Read().frames == before; ++k) std::this_thread::sleep_for(std::chrono::milliseconds(5));
-					sawCut = sawCut || faded.Read().cuts != cutsBefore;
+					const auto stateAfter = faded.Read();
+					if (stateAfter.cuts != cutsBefore || stateAfter.moments != momentsBefore)
+						Logger::WriteMessage(("fade step " + std::to_string(step) + ": cuts " + std::to_string(stateAfter.cuts) +
+							" moments " + std::to_string(stateAfter.moments) + " last cut at " + std::to_string(stateAfter.lastCutSeconds) +
+							" s (fade from " + std::to_string(fadeStart) + " s)\n").c_str());
+					sawCut = sawCut || stateAfter.moments != momentsBefore ||
+						(stateAfter.cuts != cutsBefore && stateAfter.lastCutSeconds >= fadeStart - 1e-9);
 					t += 0.5;
 					fadedFactor = faded.AutoFactor(H, 0.8, fadedWhy, t);
 					pl_tex_destroy(gpu, &tex);
