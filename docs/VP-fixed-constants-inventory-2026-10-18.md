@@ -149,3 +149,12 @@ gap span, timeline and bounds at 23.976, 24, 25, 29.97, 30, 47.952, 48, 50, 59.9
 119.88, 120, 144 and 240 Hz plus odd rates, on displays 24-360 Hz, with the switch on and off; the
 height-relative helpers at 720, 1080, 1440, 2160, DCI 4096x2160 and 4096x1716, 3996x2160 and the
 anamorphic 1440x1080 / 720x576 / 720x480 rasters. Totals in docs/agent-reports/no-fixed-constants.md.
+
+## B3-B7 status (2026-10-18, branch feat/no-fixed-constants-2)
+
+Done behind `general_rate_fixes`: #6 queue time-target ceiling, #7 motion-ahead depth, #14/#15
+DirectShow startup buffering and delivery hold, #16 convergence evidence, #9/#10/#11 de-judder geometry,
+#18 debander hold, #22 one refresh-key convention with migration, #25 fallback logging, the frame-count
+log throttles. Not done: #5 (proposal only: GUI switch + owner OK), #17 guard workgroup, #21, #24
+(reasons in the report). Shared rules: src/VideoProcessor-Lib/GeneralRate.h, RefreshKey.h. Report:
+docs/agent-reports/no-fixed-constants-2.md.

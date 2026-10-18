@@ -134,8 +134,13 @@ namespace MotionAheadTest
 			Assert::IsTrue(Decide(4, false, true, 6, true, false).reason == Reason::NoConsumer);
 			Assert::AreEqual(0, Decide(4, false, true, 6, true, false).depth);
 			Assert::IsTrue(Decide(4, true, true, 6, true, false).reason == Reason::LowLatency, L"low latency named first");
-			// Clamped to 0..4.
-			Assert::AreEqual(4, Decide(9, false, true, 9).depth);
+			// Clamped to 0..kMaxGeneralDepth (fixed-constant batch B3 2026-10-18: the caller passes
+			// DepthAt(motion_ahead_frames, rate), which clamps the setting to 0..4 and keeps the 60 Hz
+			// time above 60 Hz).
+			Assert::AreEqual(9, Decide(9, false, true, 9).depth);
+			Assert::AreEqual(kMaxGeneralDepth, Decide(99, false, true, 99).depth);
+			Assert::AreEqual(4, Decide(DepthAt(9, 24.0), false, true, 9).depth);
+			Assert::AreEqual(4, Decide(DepthAt(9, 60.0), false, true, 9).depth);
 			Assert::AreEqual(0, Decide(-3, false, true, 9).depth);
 			// The queue that holds the default depth: the current frame plus 4.
 			Assert::AreEqual(size_t{ 5 }, QueueFramesFor(kDefaultDepth));

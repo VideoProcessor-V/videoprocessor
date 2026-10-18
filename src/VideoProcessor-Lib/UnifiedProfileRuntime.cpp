@@ -130,7 +130,8 @@ namespace
 			// Audit 2026-10-16: the low-latency path and the look-ahead minimum are state too.
 			left.queue.hasLowLatencyPath != right.queue.hasLowLatencyPath ||
 			left.queue.lowLatencyPath != right.queue.lowLatencyPath ||
-			left.lookAheadQueueFrames != right.lookAheadQueueFrames)
+			left.lookAheadQueueFrames != right.lookAheadQueueFrames ||
+			left.generalRateFixes != right.generalRateFixes)
 			return false;
 		if (left.lldv.hasDolbyVisionTunnel != right.lldv.hasDolbyVisionTunnel ||
 			left.lldv.dolbyVisionTunnel != right.lldv.dolbyVisionTunnel ||
@@ -1201,6 +1202,7 @@ namespace UnifiedProfileRuntime
 
 		// The optical-flow look-ahead (owner 2026-10-16): on or off; on needs 4 frames ahead.
 		size_t lookAheadQueueFrames = 0;
+		bool generalRateFixes = true;
 		{
 			auto setting = [&](const char* key, const std::string& fallback) {
 				std::string value = fallback;
@@ -1221,9 +1223,19 @@ namespace UnifiedProfileRuntime
 				std::atof(setting("dejudder_strength_even", "0").c_str()) > 0.0;
 			// The interpolator takes its pairs from the producer too (plan step 5).
 			const bool interpolation = setting("interpolation", "off") != "off";
+			// Fixed-constant batch B3 (2026-10-18, general_rate_fixes): the depth at the source rate
+			// (MotionAhead::DepthAt: 4 at 60 Hz and below, the same time above).
+			generalRateFixes = setting("general_rate_fixes", "on") != "off";
+			double sourceHz = 0.0;
+			{
+				std::string cadence;
+				if (values("cadence", cadence) && !cadence.empty())
+					DisplayRuleExpression::ParseNumber(cadence, sourceHz);
+			}
 			if (flow && ahead && (dejudder || interpolation))
 				// audit 2026-10-16: derived from the engine depth, not a literal 5 (4 ahead + the frame shown).
-				lookAheadQueueFrames = MotionAhead::QueueFramesFor(MotionAhead::kDefaultDepth);
+				lookAheadQueueFrames = MotionAhead::QueueFramesFor(
+					MotionAhead::DepthAt(MotionAhead::kDefaultDepth, sourceHz, generalRateFixes));
 		}
 		std::map<std::string, StateVariables::Value> variables;
 		PublishSourceVariables(values, variables);
@@ -1333,6 +1345,7 @@ namespace UnifiedProfileRuntime
 		next->queue = queue;
 		next->lldv = lldv;
 		next->lookAheadQueueFrames = lookAheadQueueFrames;
+		next->generalRateFixes = generalRateFixes;
 		next->variables = StateVariables::Snapshot(
 			generation, variables);
 		snapshot = next;

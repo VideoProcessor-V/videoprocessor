@@ -1,6 +1,7 @@
 #include <pch.h>
 
 #include "ActivePictureTransitionModel.h"
+#include "GeneralRateLog.h"
 
 #include <algorithm>
 #include <atomic>
@@ -139,7 +140,9 @@ double ActivePictureTransitionModel::GetRuntimeStableGeometryDeadbandPercent()
 uint64_t ActivePictureTransitionModel::AnalysisIntervalFrames(
 	double framesPerSecond)
 {
-	if (!std::isfinite(framesPerSecond) || framesPerSecond <= 0.0)
+	static GeneralRate::FallbackNotice fallback;   // fixed-constant batch B7 2026-10-18: logged
+	if (!GeneralRate::NoteFallback(fallback, std::isfinite(framesPerSecond) && framesPerSecond > 0.0,
+		"active-picture analysis interval", 60.0))
 		framesPerSecond = 60.0;
 	const uint64_t interval = static_cast<uint64_t>(
 		std::llround(framesPerSecond * ANALYSIS_PERIOD_SECONDS));

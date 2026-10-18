@@ -346,6 +346,18 @@ namespace DejudderPolicy
 		const int h = (std::max)(0, (std::min)(searchHalvings, 8));
 		return (std::max)(6.0f, 4.0f * static_cast<float>(1 << h));
 	}
+	// Fixed-constant batch B4 (2026-10-18, sweep #9, general_rate_fixes): the window continuous in
+	// the picture height instead of a step where the search starts halving (about 1527 lines):
+	// 8 px at 2160 lines, as a share of the height, never under 6 px. Equal to the stepped window at
+	// 1080 (6), 1440 (6), 2160 (8) and 4320 (16) lines; always wider than half the global's step
+	// (the search runs on 764-1527 lines, so the step is at most height / 191 px: half of it is
+	// under height / 382, the window height / 270). Off or no height: the stepped window.
+	inline float CameraWindowPixels(int searchHalvings, int height, bool general)
+	{
+		if (!general || height <= 0)
+			return CameraWindowPixels(searchHalvings);
+		return (std::max)(6.0f, static_cast<float>(8.0 * height / 2160.0));
+	}
 
 	// Integration 2026-10-17: the optical-flow producer's break before a frame (no pair
 	// with the previous submission), by the same rules as the dequeue's pair: a gap or

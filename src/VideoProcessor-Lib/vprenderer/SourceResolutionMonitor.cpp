@@ -3,6 +3,7 @@
 #include <KernelInverse.h>
 
 #include "../DebugLog.h"
+#include "../GeneralRateLog.h"
 
 #include <libplacebo/dispatch.h>
 
@@ -192,7 +193,9 @@ if (tile < int(tiles) && g.y < ts) {
 			if (SourceResolution::PatternChange(aheadLastPattern, none, pattern, none, blackLevelSeen, noise, decorrelation, share, &jump))
 			{
 				// Consecutive frames ahead: the motion level per frame interval (the frame rate measured).
-				cut = aheadCutJudge.Judge(decorrelation, jump, secondsPerFrame > 0.0 ? secondsPerFrame : 1.0 / 24.0, ts);
+				static GeneralRate::FallbackNotice fallback;   // fixed-constant batch B7 2026-10-18: logged
+				const bool measured = GeneralRate::NoteFallback(fallback, secondsPerFrame > 0.0, "source-resolution cut judge", 24.0);
+				cut = aheadCutJudge.Judge(decorrelation, jump, measured ? secondsPerFrame : 1.0 / 24.0, ts);
 				aheadLastPattern = pattern;
 			}
 			else if (SourceResolution::PatternChange(pattern, none, pattern, none, blackLevelSeen, noise, decorrelation, share))

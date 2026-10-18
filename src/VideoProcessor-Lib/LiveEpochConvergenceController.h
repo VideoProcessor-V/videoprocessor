@@ -83,6 +83,11 @@ struct LiveEpochConvergenceInput
 	// Monotonic milliseconds (GetTickCount64 domain).  Zero means timing-based
 	// fallbacks are unavailable; the policy then remains conservative.
 	uint64_t observationTickMs = 0;
+	// Fixed-constant batch B3 (2026-10-18, sweep #16, general_rate_fixes): the paced-plateau
+	// evidence (warm-up and consecutive paced deliveries) as a time with a frame floor - the
+	// counts at and below 60 Hz, the same time above (PacedWarmupDeliveries / RequiredPaced-
+	// Deliveries). The priming depth stays in frames: it is the downstream queue's depth.
+	bool generalRates = true;
 };
 
 struct LiveEpochConvergenceDecision
@@ -133,6 +138,9 @@ public:
 	static constexpr size_t kMinimumPacedPrimingDepth = 8;
 	static constexpr uint64_t kBlockObservationTimeoutMs = 3000;
 	static constexpr uint64_t kArmedConvergenceWindowMs = 2000;
+	// The evidence counts at the input's nominal rate (GeneralRate::FramesWithFloor).
+	static uint32_t PacedWarmupDeliveries(uint64_t nominalFrameDurationUs, bool general);
+	static uint32_t RequiredPacedDeliveries(uint64_t nominalFrameDurationUs, bool general);
 
 	LiveEpochConvergenceDecision Observe(
 		const LiveEpochConvergenceInput& input);

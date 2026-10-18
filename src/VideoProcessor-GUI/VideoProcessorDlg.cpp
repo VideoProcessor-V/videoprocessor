@@ -2458,10 +2458,10 @@ void CVideoProcessorDlg::LoadDisplayRefreshRateOverrides()
 	{
 		try
 		{
-			size_t keyLength = 0;
-			const int nominalRate = std::stoi(setting.first, &keyLength);
-			if (keyLength != setting.first.length() ||
-				nominalRate <= 0 || nominalRate > 1000)
+			// Fixed-constant batch B7 (2026-10-18): one refresh-key convention (RefreshKey) - an
+			// integer, decimal (59.94) or ratio key; saved band keys (59) were migrated at load.
+			double nominalRate = 0.0;
+			if (!RefreshKey::Parse(setting.first, nominalRate) || nominalRate > 1000.0)
 			{
 				throw std::runtime_error("out of range");
 			}
@@ -2472,8 +2472,8 @@ void CVideoProcessorDlg::LoadDisplayRefreshRateOverrides()
 				// measurement for this nominal rate rather than an override.
 				m_displayRefreshRateOverridesHz[nominalRate] = 0.0;
 				DebugLog::Log(
-					"Display timing override loaded: nominal %d Hz = AUTO (measurement enabled)",
-					nominalRate);
+					"Display timing override loaded: nominal %s Hz = AUTO (measurement enabled)",
+					setting.first.c_str());
 				continue;
 			}
 
@@ -2488,14 +2488,14 @@ void CVideoProcessorDlg::LoadDisplayRefreshRateOverrides()
 
 			m_displayRefreshRateOverridesHz[nominalRate] = overrideRate;
 			DebugLog::Log(
-				"Display timing override loaded: nominal %d Hz = %.6f Hz",
-				nominalRate, overrideRate);
+				"Display timing override loaded: nominal %s Hz = %.6f Hz",
+				setting.first.c_str(), overrideRate);
 		}
 		catch (const std::exception&)
 		{
 			DebugLog::Log(
 				"Display timing override ignored: invalid entry %s=%s "
-				"(expected nominal integer 1-1000 = rate %.1f-%.1f or AUTO)",
+				"(expected a nominal rate up to 1000 (60, 59.94, 60000/1001) = rate %.1f-%.1f or AUTO)",
 				setting.first.c_str(), setting.second.c_str(),
 				DisplayRefreshBounds::kMinimumHz, DisplayRefreshBounds::kMaximumHz);
 		}
@@ -5385,28 +5385,18 @@ bool CVideoProcessorDlg::TryGetDisplayRefreshRateOverride(
 	if (m_displayRefreshRateOverridesHz.empty())
 		return false;
 
-	const int truncatedRate = static_cast<int>(nominalRateHz);
-	auto overrideIt = m_displayRefreshRateOverridesHz.find(truncatedRate);
-	if (overrideIt == m_displayRefreshRateOverridesHz.end())
-	{
-		constexpr double kRefreshRateToleranceHz = 0.5;
-		double bestDistance = kRefreshRateToleranceHz + 1.0;
-		for (auto candidate = m_displayRefreshRateOverridesHz.begin();
-			candidate != m_displayRefreshRateOverridesHz.end(); ++candidate)
-		{
-			const double distance = fabs(nominalRateHz - candidate->first);
-			if (distance <= kRefreshRateToleranceHz && distance < bestDistance)
-			{
-				overrideIt = candidate;
-				bestDistance = distance;
-			}
-		}
-		if (bestDistance > kRefreshRateToleranceHz)
-			return false;
-	}
+	// Fixed-constant batch B7 (2026-10-18): the shared refresh-key lookup (RefreshKey::Find:
+	// exact, then the integer band, then the nearest within 0.5 Hz; off = truncate, then nearest).
+	std::vector<double> keys;
+	for (const auto& entry : m_displayRefreshRateOverridesHz)
+		keys.push_back(entry.first);
+	const int index = RefreshKey::Find(keys, nominalRateHz, GeneralRate::ProcessEnabled());
+	if (index < 0)
+		return false;
+	const auto overrideIt = m_displayRefreshRateOverridesHz.find(keys[static_cast<size_t>(index)]);
 
 	overrideRateHz = overrideIt->second;
-	matchedNominalRate = overrideIt->first;
+	matchedNominalRate = RefreshKey::LegacyKey(overrideIt->first);
 	return overrideRateHz > 0.0;
 }
 
@@ -14523,6 +14513,9 @@ void CVideoProcessorDlg::ApplyUnifiedProfileSnapshot(
 
 	bool queuePolicyChanged = false;
 	bool queueCapacityChanged = false;
+	// Fixed-constant batch B3 (2026-10-18): general_rate_fixes for the code with no renderer
+	// profile (the queue target's ceiling below, the DirectShow pin's preroll and priming).
+	GeneralRate::SetProcessEnabled(snapshot->generalRateFixes);
 	if (!snapshot->queue.profile.empty())
 	{
 		if (!m_profileQueueDefaultsCaptured)
@@ -14571,7 +14564,7 @@ void CVideoProcessorDlg::ApplyUnifiedProfileSnapshot(
 			snapshot->queue.hasTargetLatencyMs, snapshot->queue.targetLatencyMs,
 			snapshot->queue.hasTargetFrames, snapshot->queue.targetFrames,
 			m_profileBaseTargetLatencyMs, m_profileBaseTargetFrames,
-			SnapshotSourceRateHz(*snapshot));
+			SnapshotSourceRateHz(*snapshot), snapshot->generalRateFixes);
 		// Owner 2026-10-16: the optical-flow look-ahead is on or off; on, the queue holds at least
 		// 4 frames ahead (5), whether its target is set by time or in frames. Off, or the low-latency
 		// queue profile: no minimum.

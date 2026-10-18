@@ -15,6 +15,7 @@
 #endif
 #include "ColorOutputProfileMigration.h"
 #include "CalibrationProfileMigration.h"
+#include "RefreshKey.h"
 
 #include <algorithm>
 #include <cctype>
@@ -397,6 +398,7 @@ bool ConfigFile::Load(const std::string& filename, ReadPolicy policy)
 		return false;
 	}
 	ColorOutputProfileMigration::Apply(m_sections, m_sectionOrder);
+	RefreshKey::Apply(m_sections);   // fixed-constant batch B7 2026-10-18: one refresh-key convention
     CalibrationProfileMigration::Apply(m_sections, m_sectionOrder);
 	m_loaded = true;
 	FileRevision after{};

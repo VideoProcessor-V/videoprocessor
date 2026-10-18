@@ -2,6 +2,7 @@
 #include <DisplayRefreshRatePolicy.h>
 
 #include "AlphaCadenceCorrectionPolicy.h"
+#include <GeneralRateLog.h>
 
 #include <algorithm>
 #include <cmath>
@@ -15,7 +16,9 @@ void AlphaArrivalRateEstimator::Add(double arrivalSeconds, double rateHintHz)
 {
 	if (!(arrivalSeconds > 0.0) || !std::isfinite(arrivalSeconds))
 		return;
-	const bool hinted = CaptureRateBounds::Accepts(rateHintHz);
+	static GeneralRate::FallbackNotice fallback;   // fixed-constant batch B7 2026-10-18: logged
+	const bool hinted = GeneralRate::NoteFallback(fallback, CaptureRateBounds::Accepts(rateHintHz),
+		"arrival-rate estimator (no capture rate hint)", 60.0);
 	const double rate = hinted ? rateHintHz : 60.0;
 	if (m_started && arrivalSeconds == m_last)
 		return;    // the same frame again (a film frame's update): no new period

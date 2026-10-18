@@ -1,6 +1,7 @@
 #include <pch.h>
 
 #include "BufferedPictureExpansion.h"
+#include <GeneralRateLog.h>
 
 #include <algorithm>
 #include <cmath>
@@ -230,7 +231,9 @@ namespace AlphaSourceCrop
         }
         else
             ++state.quietSamples;
-        const double fps = std::isfinite(current.framesPerSecond) && current.framesPerSecond > 0
+        static GeneralRate::FallbackNotice fallback;   // fixed-constant batch B7 2026-10-18: logged
+        const double fps = GeneralRate::NoteFallback(fallback,
+            std::isfinite(current.framesPerSecond) && current.framesPerSecond > 0, "buffered picture expansion", 60.0)
             ? current.framesPerSecond : 60.0;
         const auto required = static_cast<uint32_t>((std::max)(2.0, std::ceil(fps * 0.250) + 1));
         if (state.quietSamples >= required)

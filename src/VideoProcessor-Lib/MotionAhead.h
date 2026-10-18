@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstddef>
 
+#include "GeneralRate.h"
+
 // How far ahead the optical-flow engine works (docs/VP-nvof-ahead.md; owner
 // 2026-10-16: "by default accumulate the optical flow vectors to 4 frame max
 // depth. Low latency disables. Would ensure baseline queue defaults allow for
@@ -17,6 +19,19 @@ namespace MotionAhead
 {
 	constexpr int kMaxDepth = 4;
 	constexpr int kDefaultDepth = 4;
+	// Fixed-constant batch B3 (2026-10-18, sweep #7, general_rate_fixes): the depth is a time with
+	// a frame floor. motion_ahead_frames (0..4) is the depth at and below 60 Hz, unchanged (4 frames:
+	// 167 ms at 24p, 67 ms at 60p); above 60 Hz the depth keeps the 60 Hz time (4 frames at 60 Hz =
+	// 66.7 ms: 8 at 120 Hz, 16 at 240 Hz) instead of shrinking to 33 / 17 ms. kMaxGeneralDepth bounds
+	// it (the 60 Hz time at 240 Hz); the queue still bounds what is really used (ShallowQueue).
+	constexpr int kMaxGeneralDepth = 16;
+	inline int DepthAt(int configured, double sourceHz, bool general = true)
+	{
+		const int base = (std::max)(0, (std::min)(kMaxDepth, configured));
+		if (base == 0)
+			return 0;
+		return (std::min)(kMaxGeneralDepth, GeneralRate::FramesWithFloor(base, sourceHz, general));
+	}
 
 	enum class Reason
 	{
@@ -47,7 +62,8 @@ namespace MotionAhead
 		bool consumer = true)
 	{
 		Decision d;
-		d.configured = (std::max)(0, (std::min)(kMaxDepth, configured));
+		// `configured`: DepthAt(motion_ahead_frames, rate) - motion_ahead_frames itself at 60 Hz and below.
+		d.configured = (std::max)(0, (std::min)(kMaxGeneralDepth, configured));
 		d.available = static_cast<int>((std::min)(availableFutureFrames, static_cast<size_t>(1000)));
 		if (!opticalFlow) d.reason = Reason::Disabled;
 		else if (d.configured == 0) d.reason = Reason::Off;
@@ -81,4 +97,7 @@ namespace MotionAhead
 
 	// The queue (current frame plus the frames after it) that holds `depth` ahead.
 	inline size_t QueueFramesFor(int depth) { return static_cast<size_t>((std::max)(0, depth)) + 1; }
+	// The producer's pending submissions before the oldest is dropped: 6 at the default depth
+	// (unchanged), the depth plus the current frame plus one above it.
+	inline size_t PendingJobsFor(int depth) { return (std::max)(size_t{ 6 }, QueueFramesFor(depth) + 1); }
 }

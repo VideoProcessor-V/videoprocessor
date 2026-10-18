@@ -1,6 +1,7 @@
 #include <pch.h>
 
 #include "AlphaSourceCropPolicy.h"
+#include <GeneralRateLog.h>
 
 #include <cmath>
 
@@ -176,7 +177,9 @@ namespace AlphaSourceCrop
 
 		uint32_t NearBlackCropRevalidationSamples(double framesPerSecond)
 		{
-			if (!std::isfinite(framesPerSecond) || framesPerSecond <= 0.0)
+			static GeneralRate::FallbackNotice fallback;   // fixed-constant batch B7 2026-10-18: logged
+			if (!GeneralRate::NoteFallback(fallback, std::isfinite(framesPerSecond) && framesPerSecond > 0.0,
+				"near-black crop revalidation", 60.0))
 				framesPerSecond = 60.0;
 			return static_cast<uint32_t>(std::max(2.0,
 				std::ceil(framesPerSecond * 0.250) + 1.0));
@@ -184,7 +187,9 @@ namespace AlphaSourceCrop
 
 		uint32_t NearBlackBootstrapSamples(double framesPerSecond)
 		{
-			if (!std::isfinite(framesPerSecond) || framesPerSecond <= 0.0)
+			static GeneralRate::FallbackNotice fallback;   // fixed-constant batch B7 2026-10-18: logged
+			if (!GeneralRate::NoteFallback(fallback, std::isfinite(framesPerSecond) && framesPerSecond > 0.0,
+				"near-black crop bootstrap", 60.0))
 				framesPerSecond = 60.0;
 			// Bootstrap only reopens the independently verified normal acquisition
 			// path. Keep enough time for the second gate while keeping their combined

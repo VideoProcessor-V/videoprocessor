@@ -1,5 +1,7 @@
 #include <pch.h>
 #include <MotionAhead.h>
+#include <GeneralRateLog.h>
+#include <RefreshKey.h>
 #include <MotionValidity.h>
 #include <KernelInverse.h>
 #include <vprenderer/MotionAheadProducer.h>
@@ -4266,7 +4268,7 @@ namespace
 
 		// Match the established VP refresh-key convention: 23.976 -> 23 and
 		// 59.94 -> 59. An exact key takes precedence over a wider range.
-		const int refreshKey = static_cast<int>(std::floor(refreshRate + 0.000001));
+		const int refreshKey = RefreshKey::LegacyKey(refreshRate);   // fixed-constant batch B7 2026-10-18: the shared band key
 		const RefreshRateCommandRule* selected = nullptr;
 		for (const RefreshRateCommandRule& rule : settings.refreshRateCommandRules)
 		{
@@ -6126,7 +6128,8 @@ struct LibplaceboVideoRenderer::Impl
 		++vpPhasePictures;
 		if (!vectors)
 			++vpHeldPictures;
-		if (vpPhasePictures == 1 || vpPhasePictures % 2400 == 0)
+		static GeneralRate::LogInterval picturesLog = GeneralRate::LogInterval::ForFrames(2400);   // fixed-constant batch B7 2026-10-18: seconds, not frames
+		if (picturesLog.DueOr(vpPhasePictures == 1))
 			LogVpTimeline("pictures");
 	}
 	// A picture between frames is drawn for this image: Stage B's picture is ready and the
@@ -11347,7 +11350,8 @@ struct LibplaceboVideoRenderer::Impl
         if(subtitleMeasurementWorker.TryTake(key,ready) &&
             SubtitleBoxLookahead::CanReuseMeasurement(ready,key.identity,key.width,key.height,
                 policy,continuity,discontinuity,prior,scriptHint))return ready;
-        const double fps=state.displayMode->FrameDuration()>0?double(state.displayMode->TimeScale())/state.displayMode->FrameDuration():60.0;
+        static GeneralRate::FallbackNotice fpsFallback;   // fixed-constant batch B7 2026-10-18: logged
+        const double fps=GeneralRate::NoteFallback(fpsFallback,state.displayMode->FrameDuration()>0,"renderer active-picture rate",60.0)?double(state.displayMode->TimeScale())/state.displayMode->FrameDuration():60.0;
         subtitleMeasurementWorker.Submit(key,[prepared,key,prior,fps,nativeEvidence](SubtitleMeasurementSampler& scanner,const SubtitleBarTrackingReference& previous) {
             const auto& reference=previous.IsImmediatePredecessor(key.identity,key.width,key.height,
                 key.policyGeneration,key.continuityGeneration,key.scriptHint)?previous:prior;
@@ -12209,7 +12213,9 @@ struct LibplaceboVideoRenderer::Impl
 	// last resort is a film frame).
 	float AdaptiveFallbackFramePeriod() const
 	{
-		return customHookRefreshHz > 0.0 ? static_cast<float>(1.0 / customHookRefreshHz) : 1.0f / 24.0f;
+		static GeneralRate::FallbackNotice fallback;   // fixed-constant batch B7 2026-10-18: logged
+		return GeneralRate::NoteFallback(fallback, customHookRefreshHz > 0.0, "custom hook frame time", 24.0) ?
+			static_cast<float>(1.0 / customHookRefreshHz) : 1.0f / 24.0f;
 	}
 	// The rendered warp's matcher settings: the scaled ones, with the feather
 	// (output pixels there) scaled by the output height (general).
@@ -13127,7 +13133,8 @@ struct LibplaceboVideoRenderer::Impl
             // keeps the raw global-dark guard; it cannot supply this certificate.
             auto arDarkness = EvaluateActivePictureArDarkness(
                 analysisSource, latestRawPictureEvidence, globalNearBlack);
-            if (globalNearBlack.nearBlack && frameNumber % 120 == 0)
+            static GeneralRate::LogInterval arDarknessLog = GeneralRate::LogInterval::ForFrames(120);   // fixed-constant batch B7 2026-10-18: seconds, not frames
+            if (globalNearBlack.nearBlack && arDarknessLog.Due())
                 DebugLog::Log("Alpha AR darkness: sequence=%llu generation=%llu raw_near_black=%d ar_near_black=%d p90=%.1f distributed_picture=%d textured_tiles=%d quadrants=%d bar_floor=%.1f picture_median=%.1f median_spread=%.1f samples=%zu",
                     static_cast<unsigned long long>(frameNumber),
                     static_cast<unsigned long long>(analysisSource.generation),
@@ -13476,9 +13483,10 @@ struct LibplaceboVideoRenderer::Impl
                     latestActivePictureEvidenceWasStartupHypothesis = !hadCompatiblePresentation;
                 }
             }
+            static GeneralRate::LogInterval subtitleArProofLog = GeneralRate::LogInterval::ForFrames(120);   // fixed-constant batch B7 2026-10-18: seconds, not frames
             if (currentSubtitlePreview && currentSubtitlePreview->current.analyzed &&
                 SameAnalysisFrameIdentity(currentSubtitlePreview->current.identity,currentIdentity) &&
-                frameNumber % 120 == 0) {
+                subtitleArProofLog.Due()) {
                 const auto& proof=currentSubtitlePreview->current.subtitleArProof;
                 DebugLog::Log("Alpha subtitle AR proof: generation=%llu sequence=%llu current=%d accepted=%d candidate=%d,%d-%d,%d flank_support=%d/%d unknown=%llu samples=%llu backing=%d reason=%s",
                     static_cast<unsigned long long>(analysisSource.generation),
@@ -15214,6 +15222,7 @@ struct LibplaceboVideoRenderer::Impl
 		{
 			Dejudder::Settings result = DejudderMatcherSettings(activeSettings, settings);
 			result.sourceHz = dejudderSourceHz;   // the content rate (the film rate with pulldown)
+			result.generalRates = activeSettings.generalRateFixes;   // fixed-constant batch B4 2026-10-18
 			return result;
 		};
 		if (activeSettings.dejudderOcclusionFill && activeSettings.dejudderWarpRendered && !dejudderFillIgnoredLogged)
@@ -15251,6 +15260,7 @@ struct LibplaceboVideoRenderer::Impl
 				current.landingCheck != next.landingCheck || current.pictureArea != next.pictureArea ||
 				current.sourceWarpCatmull != next.sourceWarpCatmull ||
 				current.referenceHeight != next.referenceHeight ||
+				current.generalRates != next.generalRates ||   // fixed-constant batch B4 2026-10-18
 				// The optical-flow engine and its camera estimate (audit 2026-10-16: never reached a live matcher).
 				current.opticalFlow != next.opticalFlow || current.opticalFlowGlobal != next.opticalFlowGlobal ||
 				current.opticalFlowGlobalFallback != next.opticalFlowGlobalFallback ||
@@ -15364,7 +15374,8 @@ struct LibplaceboVideoRenderer::Impl
 					DebugLog::Log("De-judder motion: %s", source);
 			}
 		}
-		if (motionProducer && ((dejudderEstimates + 1) == 24 || (dejudderEstimates + 1) % 2400 == 0))   // as the other periodic logs (audit 2026-10-16)
+		static GeneralRate::LogInterval motionAheadStatsLog = GeneralRate::LogInterval::ForFrames(2400);   // fixed-constant batch B7 2026-10-18: seconds, not frames
+		if (motionProducer && dejudderEstimates + 1 >= 24 && motionAheadStatsLog.DueOr((dejudderEstimates + 1) == 24))   // as the other periodic logs (audit 2026-10-16)
 		{
 			std::string counts;
 			for (size_t n = 0; n < queuedAheadCounts.size(); ++n)
@@ -15381,7 +15392,8 @@ struct LibplaceboVideoRenderer::Impl
 			DebugLog::Log("Motion ahead extras: %.2f ms per pair on the worker; engine trust weights %s; camera from the search when unclear %llu times",
 				ps.extrasMs, dejudder->EngineWeightsUsed() ? "applied" : "not applied", dejudder->GlobalFallbacks());
 		}
-		if (++dejudderEstimates == 1 || dejudderEstimates % 2400 == 0)
+		static GeneralRate::LogInterval estimatesLog = GeneralRate::LogInterval::ForFrames(2400);   // fixed-constant batch B7 2026-10-18: seconds, not frames
+		if (estimatesLog.DueOr(++dejudderEstimates == 1))
 			DebugLog::Log("De-judder: motion estimated for %llu source frames (%dx%d, %s)",
 				dejudderEstimates, dejudderLayout.width, dejudderLayout.height,
 				dejudderLayout.rgb ? "RGB, luma from the unpack" : dejudderLayout.lossless422 ? "4:2:2" : "4:2:0");
@@ -16454,7 +16466,8 @@ struct LibplaceboVideoRenderer::Impl
 			dejudderExtraIds.push_back(presentId);
 			if (dejudderExtraIds.size() > 256)
 				dejudderExtraIds.pop_front();
-			if (dejudderExtraStats.extras <= 200 || dejudderExtraStats.extras % 240 == 0)
+			static GeneralRate::LogInterval extrasLog = GeneralRate::LogInterval::ForFrames(240);   // fixed-constant batch B7 2026-10-18: seconds, not frames
+			if (dejudderExtraStats.extras <= 200 || extrasLog.Due())
 				DebugLog::Log("De-judder extra: source=%llu k=%d phi0=%.3f delta=%.3f shift=%.3f ms=%.2f block_ms=%.2f latency_floor_ms=%.2f extras=%llu%s%s",
 					static_cast<unsigned long long>(f.sourceSequence), extras, phi0, decision.delta, shift,
 					dejudderExtraStats.lastMs, blockMs, loggedFloor * 1000.0, dejudderExtraStats.extras,
@@ -17534,7 +17547,8 @@ struct LibplaceboVideoRenderer::Impl
             AlphaSourceCrop::HasCurrentMovingPictureTransition(movingPictureTransition,
                 frameGeneration, sourceSequence));
         const bool recoveredSubtitleInspection = recoveredSubtitleBars.rasterWidth != 0;
-        if (recoveredSubtitleInspection && (sourceSequence % 120 == 0))
+        static GeneralRate::LogInterval subtitleRecoveryLog = GeneralRate::LogInterval::ForFrames(120);   // fixed-constant batch B7 2026-10-18: seconds, not frames
+        if (recoveredSubtitleInspection && subtitleRecoveryLog.Due())
             DebugLog::Log("SUBTITLE SHARED RECOVERY: sequence=%llu bars=%d-%d prior=%d-%d inspection_only=1",
                 static_cast<unsigned long long>(sourceSequence), recoveredSubtitleBars.top,
                 recoveredSubtitleBars.bottom, nlsGeometry.top, nlsGeometry.bottom);
@@ -18517,7 +18531,9 @@ struct LibplaceboVideoRenderer::Impl
             }
             const bool barAuthority = subtitlePreview->current.barAuthority;
             const auto boxStart = SteadyClock::now();
-            const double subtitleFrameMs=state.displayMode && state.displayMode->TimeScale()>0
+            static GeneralRate::FallbackNotice subtitleRateFallback;   // fixed-constant batch B7 2026-10-18: logged
+            const double subtitleFrameMs=GeneralRate::NoteFallback(subtitleRateFallback,
+                state.displayMode && state.displayMode->TimeScale()>0, "subtitle frame time", 60.0)
                 ? 1000.0*state.displayMode->FrameDuration()/state.displayMode->TimeScale() : 1000.0/60.0;
             auto currentSubtitlePreview=*subtitlePreview;
             for(unsigned i=0;i<currentSubtitlePreview.followingCount;++i)
@@ -18793,7 +18809,8 @@ struct LibplaceboVideoRenderer::Impl
             // Capture rejection changes even when a cue is never admitted. A
             // short missed cue otherwise produces no visibility transition.
             const bool logAnalysisChange=analysisChanged && analysisLogNow-subtitleAnalysisLogTick>=250;
-            if (subtitleBoxResult.cue != subtitleBoxLoggedCue || subtitleBoxResult.revised || sourceSequence % 120 == 0 || logAnalysisChange)
+            static GeneralRate::LogInterval subtitleBoxLog = GeneralRate::LogInterval::ForFrames(120);   // fixed-constant batch B7 2026-10-18: seconds, not frames
+            if (subtitleBoxResult.cue != subtitleBoxLoggedCue || subtitleBoxResult.revised || subtitleBoxLog.Due() || logAnalysisChange)
             {
                 if (activeSettings.motion.smoothMotion != "off" || temporalRenderer.Active())
                     DebugLog::Log("SUBTITLE MOTION: generation=%llu sequence=%llu repeat=%d mode=%d requested=%s active=%d mixing=%d history=%zu source_pts=%.6f output_pts=%.6f preview_available=%d analysis_valid=%d cue=%llu detected=%d held=%d composed=%d status=\"%s\"",
@@ -20136,7 +20153,8 @@ struct LibplaceboVideoRenderer::Impl
 
             const auto sharedSubtitleCrop = cropDecision.sourceBounds;
             cropDecision.sourceBounds = SubtitlePresentationBounds(cropDecision, subtitlePreviewMode);
-            if(sourceSequence % 120 == 0 && scopeSubtitleFit)
+            static GeneralRate::LogInterval subtitleAspectLog = GeneralRate::LogInterval::ForFrames(120);   // fixed-constant batch B7 2026-10-18: seconds, not frames
+            if(scopeSubtitleFit && subtitleAspectLog.Due())
                 DebugLog::Log("SUBTITLE ASPECT POLICY: frame=%llu style=%d shared_policy=1 composed=%d owner=%s shared=%d,%d-%d,%d display=%d,%d-%d,%d requested_translation=%d",
                     sourceSequence,static_cast<int>(subtitlePreviewMode),subtitleCompositionSucceeded?1:0,
                     AlphaSourceCrop::DecisionOwnerName(cropDecision.owner),
@@ -21348,10 +21366,17 @@ struct LibplaceboVideoRenderer::Impl
 			// the interpolator); otherwise the producer stays alive, idle.
 			const bool motionConsumer = dejudder && (dejudderReason == DejudderPolicy::Reason::Active ||
 				dejudderReason == DejudderPolicy::Reason::NoNextFrame || dejudderReason == DejudderPolicy::Reason::NextFrameDiffers);
-			const MotionAhead::Decision ahead = MotionAhead::Decide(activeSettings.motionAheadFrames,
+			// Fixed-constant batch B3 2026-10-18 (general_rate_fixes): the depth as a time with a frame floor.
+			const MotionAhead::Decision ahead = MotionAhead::Decide(
+				MotionAhead::DepthAt(activeSettings.motionAheadFrames, dejudderSourceHz, activeSettings.generalRateFixes),
 				lowLatency, motionProducer && motionProducer->Running(),
 				queuedFutureFrames.load(std::memory_order_acquire), activeSettings.opticalFlow, motionConsumer);
 			motionAheadDepth.store(motionProducer && motionProducer->Running() ? ahead.depth : 0, std::memory_order_release);
+			if (motionProducer)   // fixed-constant batch B3/B4 2026-10-18
+			{
+				motionProducer->SetDepth(ahead.configured);
+				motionProducer->SetGeneralRates(activeSettings.generalRateFixes);
+			}
 			if (!(motionProducer && motionProducer->Running()) || ahead.depth == 0)
 				motionAheadEngaged = false;   // no frames collected below: no stale engagement (audit 2026-10-16)
 			char text[200];
@@ -21528,6 +21553,10 @@ struct LibplaceboVideoRenderer::Impl
 				vpDebandParams.thresholdCodes = debandThreshold;
 				vpDebandParams.colorDepth = depth;
 				vpDebandParams.radiusScale = nativeHeight * rebaseFactor / 1080.0;
+				// Fixed-constant batch B6 (2026-10-18, sweep #18, general_rate_fixes): the hold's
+				// per-frame weight keeps its time constant above 60 Hz (unchanged at and below).
+				vpDebandParams.holdAlpha = GeneralRate::PerFrameWeight(vpDebandParams.holdAlpha, dejudderSourceHz,
+					activeSettings.generalRateFixes);
 				if (DejudderLiveFieldFor(sourceSequence))
 				{
 					vpDebandParams.field = dejudder->Field();
@@ -22810,7 +22839,8 @@ struct LibplaceboVideoRenderer::Impl
                 dejudderMaskSequence[maskSlot] = 0;   // used: not again for a repeat
                 dejudderMaskUsedTick = GetTickCount64();
                 dejudderMaskState.clear();
-                if (++dejudderMaskFrames == 1 || dejudderMaskFrames % 2400 == 0)
+                static GeneralRate::LogInterval maskLog = GeneralRate::LogInterval::ForFrames(2400);   // fixed-constant batch B7 2026-10-18: seconds, not frames
+                if (maskLog.DueOr(++dejudderMaskFrames == 1))
                     DebugLog::Log("De-judder occlusion mask: used on %llu source frames (hook applied %llu, failed %llu)",
                         dejudderMaskFrames, occlusionMaskHook.Applied(), occlusionMaskHook.Failed());
             }
@@ -24531,6 +24561,8 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 		const int previousCycle = m_pulldown.Cycle(), previousUnique = m_pulldown.Unique();
 		// D4: the counted misses keep the lock (verified over the next cycle).
 		const uint64_t missed = m_captureMissedFrames.load(std::memory_order_relaxed) - missedBefore;
+		static GeneralRate::FallbackNotice pulldownRateFallback;   // fixed-constant batch B7 2026-10-18: logged (PulldownDetector assumes 60)
+		GeneralRate::NoteFallback(pulldownRateFallback, signalHz > 0.0, "pulldown contradiction window", 60.0);
 		const Pulldown::Decision decision = m_pulldown.Next(repeat, gapBefore, signalHz,
 			gapBefore && fixes ? static_cast<int>((std::min)(missed, uint64_t{ 1000 })) : -1);
 		if (decision.locked != wasLocked || decision.relocked)
@@ -29847,6 +29879,9 @@ void LibplaceboVideoRenderer::RenderLoop()
 							false, std::memory_order_release);
 						presentationTargetTimingKnown = false;
 						correctionDecision = {};
+						static GeneralRate::FallbackNotice stallRateFallback;   // fixed-constant batch B7 2026-10-18: logged
+						GeneralRate::NoteFallback(stallRateFallback, CaptureRateBounds::Accepts(captureRateHz),
+							"render-stall threshold (AlphaQueuePolicy)", AlphaQueuePolicy::DEFAULT_FRAME_RATE_HZ);
 						const bool renderStall = renderCycleMs >=
 							AlphaQueuePolicy::RenderStallThresholdMs(captureRateHz);
 						const std::string shaderName =
