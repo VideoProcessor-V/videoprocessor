@@ -626,8 +626,26 @@ namespace
 		return result;
 	}
 
+	// Tests only (gate fix 2026-10-17): VP_TEST_SHADER_CACHE_DIR stands in for the executable's
+	// folder, so the in-process capture harness (whose test host lives in a read-only folder)
+	// keeps a persistent shader cache like a deployed VP. Without it every harness renderer
+	// compiled every shader again and stalled its first frames for up to ~3 s. Unset: beside
+	// the exe, as always.
+	bool ShaderCacheTestFolder(const char* relative, std::string& path)
+	{
+		char overrideDir[1024] = {};
+		const DWORD overrideLength = GetEnvironmentVariableA("VP_TEST_SHADER_CACHE_DIR", overrideDir, 1024);
+		if (overrideLength == 0 || overrideLength >= 1024)
+			return false;
+		path = std::string(overrideDir, overrideLength) + "\\" + relative;
+		return true;
+	}
+
 	std::string ShaderCachePath()
 	{
+		std::string testPath;
+		if (ShaderCacheTestFolder(SHADER_CACHE_RELATIVE_PATH, testPath))
+			return testPath;
 		char modulePath[MAX_PATH] = {};
 		const DWORD length =
 			GetModuleFileNameA(nullptr, modulePath, ARRAYSIZE(modulePath));
@@ -645,6 +663,9 @@ namespace
 
 	std::string ShaderCacheClearRequestPath()
 	{
+		std::string testPath;
+		if (ShaderCacheTestFolder(SHADER_CACHE_CLEAR_RELATIVE_PATH, testPath))
+			return testPath;
 		char modulePath[MAX_PATH] = {};
 		const DWORD length =
 			GetModuleFileNameA(nullptr, modulePath, ARRAYSIZE(modulePath));

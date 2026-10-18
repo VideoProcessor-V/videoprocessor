@@ -1031,6 +1031,136 @@ namespace VideoProcessorTest
 				Assert::IsTrue(s < 5.0 * target, L"far over the time target");
 			}
 		}
+
+		// Latch precision (2026-10-17): renditions upscaled exactly from a synthetic source, each
+		// axis at its own rate, read at either tile size (no footage needed). The integration found
+		// 128-px tiles at 1080 re-basing a 540-line source to 542 lines.
+		namespace SrcExact
+		{
+			struct Wave { double fx, fy, px, py, amplitude; };
+			// A source picture: 1/f waves up to the source's own Nyquist (cycles per source pixel).
+			std::vector<Wave> Scene(unsigned seed)
+			{
+				std::mt19937 rng(seed);
+				std::uniform_real_distribution<double> u(0.0, 1.0);
+				std::vector<Wave> waves;
+				for (int i = 0; i < 200; ++i)
+				{
+					const double f = 0.004 * std::pow(0.49 / 0.004, u(rng));
+					const double angle = u(rng) * SrcLatch::kPi;
+					waves.push_back({ f * std::cos(angle), f * std::sin(angle), u(rng) * 2 * SrcLatch::kPi, u(rng) * 2 * SrcLatch::kPi, 0.012 / std::sqrt(f) });
+				}
+				return waves;
+			}
+
+			// One n x n tile at (ox, oy) of the output frame: the scene sampled on the source grid and
+			// upscaled with Lanczos-3, separable and centre-aligned (output X samples source
+			// (X + 0.5) r - 0.5; r = source / output size, 1 = native on that axis). Unquantised.
+			std::vector<double> Tile(const std::vector<Wave>& scene, double rx, double ry, int ox, int oy, int n, double level)
+			{
+				const int radius = 3;
+				auto kernel = [](double x) { return std::fabs(x) < 3.0 ? SrcLatch::Sinc(x) * SrcLatch::Sinc(x / 3.0) : 0.0; };
+				const int sx0 = static_cast<int>(std::floor((ox + 0.5) * rx - 0.5)) - radius - 1;
+				const int sx1 = static_cast<int>(std::ceil((ox + n - 0.5) * rx - 0.5)) + radius + 1;
+				const int sy0 = static_cast<int>(std::floor((oy + 0.5) * ry - 0.5)) - radius - 1;
+				const int sy1 = static_cast<int>(std::ceil((oy + n - 0.5) * ry - 0.5)) + radius + 1;
+				const int sw = sx1 - sx0 + 1, sh = sy1 - sy0 + 1;
+				std::vector<double> src(static_cast<size_t>(sw) * sh, level);
+				std::vector<double> cx(sw), sx(sw), cy(sh), sy(sh);
+				for (const Wave& v : scene)
+				{
+					for (int x = 0; x < sw; ++x) { const double a = 2 * SrcLatch::kPi * v.fx * (sx0 + x) + v.px; cx[x] = std::cos(a); sx[x] = std::sin(a); }
+					for (int y = 0; y < sh; ++y) { const double b = 2 * SrcLatch::kPi * v.fy * (sy0 + y) + v.py; cy[y] = v.amplitude * std::cos(b); sy[y] = v.amplitude * std::sin(b); }
+					for (int y = 0; y < sh; ++y)
+					{
+						double* row = &src[static_cast<size_t>(y) * sw];
+						for (int x = 0; x < sw; ++x) row[x] += cx[x] * cy[y] - sx[x] * sy[y];
+					}
+				}
+				auto taps = [&](int X, int origin, double r, int s0) {
+					std::vector<std::pair<int, double>> t;
+					const double u = (origin + X + 0.5) * r - 0.5;
+					const int c = static_cast<int>(std::floor(u));
+					double ws = 0.0;
+					for (int k = c - radius + 1; k <= c + radius; ++k)
+					{
+						const double w = kernel(u - k);
+						if (w != 0.0) { t.push_back({ k - s0, w }); ws += w; }
+					}
+					for (auto& p : t) p.second /= ws;
+					return t;
+				};
+				std::vector<double> rows(static_cast<size_t>(sh) * n), out(static_cast<size_t>(n) * n);
+				for (int x = 0; x < n; ++x)
+				{
+					const auto t = taps(x, ox, rx, sx0);
+					for (int y = 0; y < sh; ++y)
+					{
+						double s = 0.0;
+						for (const auto& p : t) s += p.second * src[static_cast<size_t>(y) * sw + p.first];
+						rows[static_cast<size_t>(y) * n + x] = s;
+					}
+				}
+				for (int y = 0; y < n; ++y)
+				{
+					const auto t = taps(y, oy, ry, sy0);
+					for (int x = 0; x < n; ++x)
+					{
+						double s = 0.0;
+						for (const auto& p : t) s += p.second * rows[static_cast<size_t>(p.first) * n + x];
+						out[static_cast<size_t>(y) * n + x] = s;
+					}
+				}
+				return out;
+			}
+
+			// 10-bit codes, normalised (the monitor's samples).
+			void Quantise(const std::vector<double>& in, double offset, float* out)
+			{
+				for (size_t i = 0; i < in.size(); ++i)
+					out[i] = static_cast<float>(std::round((std::min)(1.0, (std::max)(0.0, in[i] + offset)) * 1023.0) / 1023.0);
+			}
+
+			// A rendition: the output frame, the source's lines and columns (0 columns = the same
+			// scale as the lines, uniform), and the picture inside the frame (0 = the whole frame;
+			// letterbox / pillarbox bars outside it). Expected: the exact declared ratio - uniform
+			// (lines / H, the larger axis of an anamorphic source) or, with native lines, the
+			// horizontal axis alone (columns / W).
+			struct Rendition
+			{
+				const char* name;
+				int W, H, lines, columns, pictureW, pictureH;
+				double ry() const { return static_cast<double>(lines) / H; }
+				double rx() const { return columns > 0 ? static_cast<double>(columns) / W : ry(); }
+				bool perAxis() const { return lines >= H; }
+				double expected() const { return perAxis() ? rx() : (std::max)(rx(), ry()); }
+				int frameSize() const { return perAxis() ? W : H; }
+				int pw() const { return pictureW > 0 ? pictureW : W; }
+				int ph() const { return pictureH > 0 ? pictureH : H; }
+			};
+			const std::vector<Rendition>& Renditions()
+			{
+				static const std::vector<Rendition> list = {
+					{ "540 in 2160", 3840, 2160, 540, 0, 0, 0 },
+					{ "720 in 2160", 3840, 2160, 720, 0, 0, 0 },
+					{ "810 in 2160", 3840, 2160, 810, 0, 0, 0 },
+					{ "900 in 2160", 3840, 2160, 900, 0, 0, 0 },
+					{ "1080 in 2160", 3840, 2160, 1080, 0, 0, 0 },
+					{ "360 in 1080", 1920, 1080, 360, 0, 0, 0 },
+					{ "480 in 1080", 1920, 1080, 480, 0, 0, 0 },
+					{ "540 in 1080", 1920, 1080, 540, 0, 0, 0 },
+					{ "576 in 1080", 1920, 1080, 576, 0, 0, 0 },
+					{ "720 in 1080", 1920, 1080, 720, 0, 0, 0 },
+					{ "1080 2.39:1 letterboxed in 2160", 3840, 2160, 1080, 0, 0, 1608 },
+					{ "720 2.39:1 letterboxed in 1080", 1920, 1080, 720, 0, 0, 804 },
+					{ "1080 4:3 pillarboxed in 2160", 3840, 2160, 1080, 0, 2880, 0 },
+					{ "720x480 anamorphic in 1080", 1920, 1080, 480, 720, 0, 0 },
+					{ "720x576 anamorphic in 1080", 1920, 1080, 576, 720, 0, 0 },
+					{ "1440x1080 anamorphic in 1080", 1920, 1080, 1080, 1440, 0, 0 },
+				};
+				return list;
+			}
+		}
 	}
 
 	TEST_CLASS(SourceResolutionLatchTests)
@@ -2080,8 +2210,25 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0, rn.engages, L"native 1080 never engages");
 			Assert::AreEqual(1.0, rn.declaredMin, 1e-9);
 			Assert::IsNotNull(e, L"the 720 upscale engages");
-			Assert::AreEqual(720.0 / 1080, e->toY, 0.006, L"its class");
-			Budget("Source1080UsesHeightRelativeTiles", started, 30);
+			// Latch precision (2026-10-17): the class exactly - 720 lines, not the reading rounded.
+			Assert::AreEqual(720.0 / 1080, e->toY, 0.0, L"its class, exactly");
+			// The integration's case: 540 lines in a 1080 frame read through 128-px tiles re-based to
+			// 542 (0.4 % off); exactly 0.5000 now.
+			std::vector<Segment> halves;
+			for (int i = 0; i < 6; ++i)
+			{
+				const int id = AddUpscale(st, shots[static_cast<size_t>(i)].clip, shots[static_cast<size_t>(i)].frame0, 0.5, kLanczos3, 2.0, 0.0, " 540 in a 1080 frame");
+				st.contents[static_cast<size_t>(id)].outScale = 0.5;
+				halves.push_back({ id, 3.0 });
+			}
+			const RunResult rh = Run(st, halves, o, "540 upscaled in a 1080 source, 128-px tiles");
+			const Change* h = FirstEngage(rh);
+			snprintf(line, sizeof(line), "RESULT 1080 source: 540 upscale engaged %.2f s (%s), class %.6f (%.2f lines)\n",
+				h ? h->t : -1.0, h ? h->why.c_str() : "never", h ? h->toY : 1.0, h ? h->toY * 1080 : 1080.0);
+			Logger::WriteMessage(line);
+			Assert::IsNotNull(h, L"the 540 upscale engages");
+			Assert::AreEqual(0.5, h->toY, 0.0, L"540 of 1080 exactly (was 542)");
+			Budget("Source1080UsesHeightRelativeTiles", started, 45);
 		}
 
 		// The level-aware native test and the shape-aware cut test on single frames: the readings
@@ -2365,6 +2512,158 @@ namespace VideoProcessorTest
 				if (fixes) Assert::IsTrue(declaredAgain <= 10.5, L"fixes on: the standard again (10 s or 3 shots) after the native evidence");
 				else Assert::IsTrue(declaredAgain >= 100.0, L"fixes off: the 120 s window as before");
 			}
+		}
+
+		// Latch precision (2026-10-17): each rendition's reading on single frames at both tile sizes,
+		// latch fixes on and off - within the snap reach of the truth, declared exactly (SnapRatio).
+		// The log shows the raw reading and the even size the re-base rounded it to before.
+		TEST_METHOD(RenditionsReadAndSnapToTheirExactSize)
+		{
+			const auto started = std::chrono::steady_clock::now();
+			char line[400];
+			std::wstring failures;
+			int index = 0;
+			for (const SrcExact::Rendition& r : SrcExact::Renditions())
+			{
+				++index;
+				for (int tile : { 128, 256 })
+				{
+					const int x0 = (r.W - r.pw()) / 2, y0 = (r.H - r.ph()) / 2;
+					int base = 0;
+					const std::vector<SourceResolution::TilePlace> places = SourceResolution::PlaceTiles(x0, y0, r.pw(), r.ph(), tile, false, &base);
+					Assert::IsTrue(places.size() >= 4, L"tiles inside the picture");
+					std::vector<SourceResolution::Spectrum> spectra(places.size());
+					std::vector<float> codes(static_cast<size_t>(tile) * tile);
+					for (size_t i = 0; i < places.size(); ++i)
+					{
+						const std::vector<double> v = SrcExact::Tile(SrcExact::Scene(100u * index + static_cast<unsigned>(i)), r.rx(), r.ry(),
+							places[i].x0, places[i].y0, tile, i % 2 ? 0.55 : 0.35);
+						SrcExact::Quantise(v, 0.0, codes.data());
+						Assert::IsTrue(SourceResolution::Analyse(codes.data(), tile, tile, spectra[i], 1023));
+					}
+					for (bool fixes : { false, true })
+					{
+						SourceResolution::Thresholds t;
+						t.latchFixes = fixes;
+						// Every synthetic tile is its own independent scene: their coherence spreads more
+						// than a real picture's, and at 128 px the mixed-screen guard took some for native UI
+						// (measured; MixedScreenSourceResolutionTests cover the guard). Off: the rate alone.
+						t.mixedGuard = false;
+						for (const SourceResolution::TilePlace& p : places) { t.tileX.push_back(p.centreX); t.tileY.push_back(p.centreY); }
+						t.signatureTiles = base;
+						const SourceResolution::FrameReading f = SourceResolution::ReadFrame(spectra, t);
+						const double reading = r.perAxis() ? f.ratioH : f.ratio;
+						// The tile the monitor uses for this picture (TileSize with the fixes, else 256) must
+						// read the rendition; the other size is checked whenever it reads one.
+						const bool production = tile == (fixes ? SourceResolution::TileSize(r.ph()) : 256);
+						const double snapped = SourceResolution::SnapRatio(reading, r.frameSize(), tile);
+						const int before = 2 * static_cast<int>(std::lround(reading * r.frameSize() * 0.5));
+						snprintf(line, sizeof(line), "RESULT %-32s tile %3d fixes %-3s: reading %.5f (%+.3f bin, %.2f px; re-based to %d before) -> %.6f = %.2f px (truth %d)\n",
+							r.name, tile, fixes ? "on" : "off", reading, (reading - r.expected()) * tile, reading * r.frameSize(), before,
+							snapped, snapped * r.frameSize(), static_cast<int>(std::lround(r.expected() * r.frameSize())));
+						Logger::WriteMessage(line);
+						const std::string text(line);
+						const std::wstring message(text.begin(), text.end());
+						if (r.perAxis() && f.ratio != 1.0) failures += L"uniform not native: " + message;
+						if (reading >= 1.0)
+						{
+							if (production) failures += L"not read at the monitor's tile: " + message;
+							continue;
+						}
+						// Within the snap reach (a wrong peak - 128-px tiles at 1/3 read 0.3455 before the
+						// candidates' harmonic fallback - is not).
+						if (std::fabs(reading - r.expected()) > SourceResolution::kSnapBins / tile) failures += L"not within the snap reach: " + message;
+						if (snapped != r.expected()) failures += L"not exact: " + message;
+					}
+				}
+			}
+			SrcLatch::Budget("RenditionsReadAndSnapToTheirExactSize", started, 30);
+			Assert::IsTrue(failures.empty(), failures.c_str());
+		}
+
+		// Latch precision (2026-10-17): the same renditions through SourceResolutionMonitor over time -
+		// shots of 2 s, a tile copy every 0.5 s, AutoFactors on every copy - at both tile sizes with
+		// the latch fixes on and off: the declared ratio and the applied re-base factors are exact
+		// (540 in 1080 is 0.5000, not 542 / 1080).
+		TEST_METHOD(RenditionsReBaseToTheirExactSize)
+		{
+			const auto started = std::chrono::steady_clock::now();
+			char line[400];
+			std::wstring failures;
+			int index = 0;
+			for (const SrcExact::Rendition& r : SrcExact::Renditions())
+			{
+				++index;
+				for (int tile : { 128, 256 })
+				{
+					const int x0 = (r.W - r.pw()) / 2, y0 = (r.H - r.ph()) / 2;
+					int base = 0;
+					const std::vector<SourceResolution::TilePlace> places = SourceResolution::PlaceTiles(x0, y0, r.pw(), r.ph(), tile, false, &base);
+					const int count = static_cast<int>(places.size());
+					std::vector<float> tx, ty;
+					for (const SourceResolution::TilePlace& p : places) { tx.push_back(p.centreX); ty.push_back(p.centreY); }
+					// The shots' tiles (each shot its own scenes and level), shared by both fixes settings.
+					const int shots = 16, framesPerShot = 4;
+					std::vector<std::vector<std::vector<double>>> shotTiles(shots);
+					for (int s = 0; s < shots; ++s)
+						for (int i = 0; i < count; ++i)
+							shotTiles[static_cast<size_t>(s)].push_back(SrcExact::Tile(SrcExact::Scene(10000u * index + 100u * s + static_cast<unsigned>(i)), r.rx(), r.ry(),
+								places[static_cast<size_t>(i)].x0, places[static_cast<size_t>(i)].y0, tile, s % 2 ? 0.55 : 0.30));
+					for (bool fixes : { false, true })
+					{
+						SourceResolutionMonitor::Monitor m;
+						m.SetLatchFixes(fixes);
+						m.SetMixedGuard(false);   // as above: the synthetic tiles' spread, not the rate under test
+						const bool production = tile == m.TileFor(r.ph());
+						std::vector<float> values(static_cast<size_t>(count) * tile * tile);
+						double t = 0.0, fx = 1.0, fy = 1.0, engagedAt = -1.0;
+						uint64_t sequence = 0;
+						std::string why, lastWhy;
+						int nativeFrames = 0, lowerFrames = 0;
+						double lowMin = 1.0, lowMax = 0.0, confidenceMax = 0.0;
+						for (int s = 0; s < shots && (engagedAt < 0.0 || t < engagedAt + 2.5); ++s)
+							for (int k = 0; k < framesPerShot; ++k)
+							{
+								for (int i = 0; i < count; ++i)
+									SrcExact::Quantise(shotTiles[static_cast<size_t>(s)][static_cast<size_t>(i)], 0.0008 * k, values.data() + static_cast<size_t>(i) * tile * tile);
+								m.AnalyseTilesForTest(values, count, t, r.W, r.H, tx, ty, base, tile);
+								// Confidence 0: the synthetic content's coherence sits below a real upscale's
+								// (clarity under 0.8 measured); the gate is not under test, the sizes are.
+								m.AutoFactors(r.W, r.H, 0.0, why, fx, fy, t, ++sequence);
+								{
+									const SourceResolutionMonitor::Snapshot d = m.Read();
+									const double fr = r.perAxis() ? 1.0 : d.frameRatio;
+									if (fr >= 1.0) ++nativeFrames; else { ++lowerFrames; lowMin = (std::min)(lowMin, fr); lowMax = (std::max)(lowMax, fr); }
+									confidenceMax = (std::max)(confidenceMax, r.perAxis() ? d.axisConfidence : d.confidence);
+									if (!why.empty()) lastWhy = why;
+								}
+								if (engagedAt < 0.0 && (fx < 1.0 || fy < 1.0)) engagedAt = t;
+								t += 0.5;
+							}
+						const SourceResolutionMonitor::Snapshot snap = m.Read();
+						const double declared = r.perAxis() ? snap.axisRatioX : snap.declaredRatio;
+						snprintf(line, sizeof(line), "RESULT %-32s tile %3d fixes %-3s: declared %.6f (%.2f px), engaged %.1f s, factors %.6f x %.6f (truth %.6f); frames native %d lower %d (%.4f-%.4f), confidence max %.2f, cuts %llu, last: %s\n",
+							r.name, tile, fixes ? "on" : "off", declared, declared * r.frameSize(), engagedAt, fx, fy, r.expected(),
+							nativeFrames, lowerFrames, lowMin, lowMax, confidenceMax, snap.cuts, lastWhy.c_str());
+						Logger::WriteMessage(line);
+						const std::string text(line);
+						const std::wstring message(text.begin(), text.end());
+						// The monitor's own tile for this picture must engage; the other size, whenever it
+						// declares or engages, exactly too.
+						if (engagedAt < 0.0)
+						{
+							if (production) failures += L"never engaged at the monitor's tile: " + message;
+							if (declared < 1.0 && declared != r.expected()) failures += L"declared not exact: " + message;
+							continue;
+						}
+						if (declared != r.expected()) failures += L"declared not exact: " + message;
+						if (r.perAxis() ? (fx != r.expected() || fy != 1.0) : (fx != r.expected() || fy != r.expected()))
+							failures += L"factors not exact: " + message;
+					}
+				}
+			}
+			SrcLatch::Budget("RenditionsReBaseToTheirExactSize", started, 240);
+			Assert::IsTrue(failures.empty(), failures.c_str());
 		}
 	};
 }
