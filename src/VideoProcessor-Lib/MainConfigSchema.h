@@ -4,6 +4,7 @@
 #include "AmbientConfig.h"
 #include "QueueConfiguration.h"
 #include "led/LedDriveConfig.h"
+#include "ShortcutDefaults.h"
 
 #include <algorithm>
 #include <cctype>
@@ -192,6 +193,27 @@ namespace MainConfigSchema
 		};
 	}
 
+	// Bug hunt 3 (SH6): every item of [shortcuts] global_actions names an
+	// action of ShortcutDefaults.h. `unknown` receives the first that does not.
+	inline bool ShortcutGlobalActionsValid(const std::string& list, std::string& unknown)
+	{
+		size_t start = 0;
+		while (start <= list.size())
+		{
+			const size_t end = list.find(',', start);
+			const std::string item = ConfigFile::NormalizeName(ConfigFile::Trim(
+				list.substr(start, end == std::string::npos ? std::string::npos : end - start)));
+			if (!item.empty() && !FindShortcutDefault(item.c_str()))
+			{
+				unknown = item;
+				return false;
+			}
+			if (end == std::string::npos) break;
+			start = end + 1;
+		}
+		return true;
+	}
+
 	// [shortcuts] Boolean switches (the shortcut bindings themselves are free-form).
 	inline std::vector<ConfigSchema::KeyRule> ShortcutSwitchRules()
 	{
@@ -361,6 +383,19 @@ namespace MainConfigSchema
 		{
 			error = "[shortcuts] key 'global_hotkeys' must be a Boolean";
 			return false;
+		}
+		// Bug hunt 3 (SH6): the actions that act while another application
+		// has focus - a comma-separated list of [shortcuts] action keys.
+		std::string globalActions;
+		if (config.TryGetString("shortcuts", "global_actions", globalActions))
+		{
+			std::string unknown;
+			if (!ShortcutGlobalActionsValid(globalActions, unknown))
+			{
+				error = "[shortcuts] global_actions: '" + unknown +
+					"' is not a shortcut action (use keys such as config_editor, toggle_noui)";
+				return false;
+			}
 		}
 		const std::vector<ConfigSchema::KeyRule> conversionRules = ConversionRules();
 		if (!ConfigSchema::ValidateSection(

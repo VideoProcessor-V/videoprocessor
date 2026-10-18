@@ -2,7 +2,9 @@
 
 #include <led/ProjectorDriver.h>
 
+#include <atomic>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -28,7 +30,16 @@ namespace LedDrive
 		int highLevel = 255;
 		int holdMs = 5000;
 		int commandTimeoutMs = 3000;
+		// Bug hunt 3 (SH5): set by VP's close paths. The 5 s hold ends at once
+		// and the light is put back (the high step always runs); a test that
+		// has not started its low step yet sends nothing.
+		std::shared_ptr<std::atomic<bool>> cancel;
 	};
+
+	inline bool ConnectionTestCancelled(const ConnectionTestPlan& plan)
+	{
+		return plan.cancel && plan.cancel->load();
+	}
 
 	// The steps on an open driver. sleepMs waits (tests pass a stub).
 	ConnectionTestResult RunConnectionTest(IProjectorDriver& driver,

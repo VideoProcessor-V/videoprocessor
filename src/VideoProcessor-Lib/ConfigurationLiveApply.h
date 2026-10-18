@@ -240,6 +240,77 @@ namespace ConfigurationLiveApply
 				expectedShift == shift);
 	}
 
+	// Bug hunt 3 (SH6): AltGr (Right Alt on layouts that have it) reaches
+	// Windows as Ctrl+Alt (a synthetic Left Ctrl plus Right Alt). It is not a
+	// Ctrl+Alt chord: AltGr+letter types a character (AltGr+W, AltGr+V, ...),
+	// so a Ctrl+Alt shortcut must never fire from it. Detected as Right Alt
+	// held with Ctrl and without Left Alt; a real Ctrl+Alt chord therefore
+	// uses Left Alt. The one documented relaxation, AltGr+Enter for the
+	// fullscreen toggle, stays in FullscreenShortcutModifiersMatch.
+	inline bool IsAltGr(bool control, bool leftAlt, bool rightAlt)
+	{
+		return rightAlt && control && !leftAlt;
+	}
+
+	// Exact chord match from the physical key state, AltGr excluded.
+	inline bool KeyboardShortcutMatches(bool expectedControl, bool expectedAlt,
+		bool expectedShift, bool control, bool leftAlt, bool rightAlt, bool shift)
+	{
+		if (IsAltGr(control, leftAlt, rightAlt))
+			return false;
+		return ShortcutModifiersMatch(expectedControl, expectedAlt, expectedShift,
+			control, leftAlt || rightAlt, shift);
+	}
+
+	// Bug hunt 3 (SH6): what the background (low-level) keyboard observer
+	// does with a key press. VP acts only while its own window or its
+	// fullscreen output has focus - those keys reach it through the dialog
+	// and the fullscreen host, not through the observer - unless the
+	// matched shortcut is explicitly global ([shortcuts] global_actions, or
+	// global_hotkeys on). A key VP does not act on is never swallowed.
+	enum class BackgroundShortcutAction
+	{
+		PassThrough,         // not VP's: the foreground application gets it untouched
+		DispatchAndPass,     // VP acts; the foreground application still gets the key
+		DispatchAndConsume   // VP acts and takes the key
+	};
+
+	struct BackgroundShortcutContext
+	{
+		bool matched = false;             // the key matched an observed binding (AltGr excluded)
+		bool vpForeground = false;        // a VP window (main or fullscreen) is foreground
+		bool configurationForeground = false; // VP's Config owns the foreground
+		bool explicitlyGlobal = false;    // the user marked this action global
+		bool sameProcessConfigRoute = false; // foreground_only: the Config chord from VP's fullscreen
+		bool consumeWhenActing = false;   // the command owns its key (config_editor, toggle_noui)
+	};
+
+	inline BackgroundShortcutAction DecideBackgroundShortcut(const BackgroundShortcutContext& c)
+	{
+		if (!c.matched || c.configurationForeground)
+			return BackgroundShortcutAction::PassThrough;
+		if (c.vpForeground)
+			return c.sameProcessConfigRoute ? BackgroundShortcutAction::DispatchAndConsume :
+				BackgroundShortcutAction::PassThrough;   // the dialog / fullscreen host handles it
+		if (!c.explicitlyGlobal)
+			return BackgroundShortcutAction::PassThrough;
+		return c.consumeWhenActing ? BackgroundShortcutAction::DispatchAndConsume :
+			BackgroundShortcutAction::DispatchAndPass;
+	}
+
+	// Bug hunt 3 (SH9): Config's window title is "VideoProcessor
+	// Configuration", or "VideoProcessor Configuration <U+00B7> <target>" while it
+	// edits a remote VP. VP's focus checks used to accept only the first.
+	inline bool IsConfigurationEditorTitle(const std::wstring& title)
+	{
+		static const std::wstring base = L"VideoProcessor Configuration";
+		if (title == base)
+			return true;
+		static const std::wstring remotePrefix = base + L" " + std::wstring(1, static_cast<wchar_t>(0x00B7)) + L" ";
+		return title.size() > remotePrefix.size() &&
+			title.compare(0, remotePrefix.size(), remotePrefix) == 0;
+	}
+
 	inline bool ShouldConsumeUnmatchedModifiedEnter(bool keyDown,
 		uint16_t virtualKey, bool control, bool alt, bool shift)
 	{

@@ -38,6 +38,7 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <sstream>
 #include <thread>
 #include <led/ConnectionTest.h>
+#include <ShortcutChord.h>
 #include <CrashState.h>
 #include <AmbientConfig.h>
 #include <led/LedDriveConfig.h>
@@ -225,6 +226,32 @@ bool ReadShortcutsGlobalHotkeys(const ConfigFile& config, bool& enabled,
 	return false;
 }
 
+// Bug hunt 3 (SH6): [shortcuts] global_actions - the [shortcuts] action keys
+// that act while another application has focus. Empty (none) by default.
+bool ReadShortcutsGlobalActions(const ConfigFile& config, std::set<std::string>& actions,
+	std::string& error)
+{
+	actions.clear();
+	std::string raw;
+	if (!config.TryGetString("shortcuts", "global_actions", raw))
+		return true;
+	std::string unknown;
+	if (!MainConfigSchema::ShortcutGlobalActionsValid(raw, unknown))
+	{
+		error = "unsupported action in shortcuts.global_actions: " + unknown;
+		return false;
+	}
+	std::istringstream stream(raw);
+	std::string item;
+	while (std::getline(stream, item, ','))
+	{
+		item = ConfigFile::NormalizeName(ConfigFile::Trim(item));
+		if (!item.empty())
+			actions.insert(item);
+	}
+	return true;
+}
+
 // Delta 6: a [general] Boolean with a default; an invalid value keeps the
 // default (logged by the caller through error).
 bool ReadGeneralBoolean(const ConfigFile& config, const char* key, bool fallback,
@@ -409,11 +436,13 @@ bool IsConfigurationEditorTopLevel(HWND window, DWORD expectedProcessId,
 	if (!processId || (expectedProcessId && processId != expectedProcessId))
 		return false;
 	wchar_t className[128] = {};
-	wchar_t title[128] = {};
+	wchar_t title[512] = {};
+	// Bug hunt 3 (SH9): a remote-editing Config is titled
+	// "VideoProcessor Configuration <middle dot> <target>"; it is still VP's editor.
 	if (::GetClassNameW(window, className, ARRAYSIZE(className)) <= 0 ||
 		_wcsnicmp(className, L"Qt", 2) != 0 ||
 		::GetWindowTextW(window, title, ARRAYSIZE(title)) <= 0 ||
-		wcscmp(title, L"VideoProcessor Configuration") != 0)
+		!ConfigurationLiveApply::IsConfigurationEditorTitle(title))
 		return false;
 	return true;
 }
@@ -655,65 +684,17 @@ static bool IsRepeatableShortcutCommand(WORD command)
 	return false;
 }
 
+// Bug hunt 3 (SH10): Config's grammar (ShortcutChord.h), not a second copy.
 bool TryParseShortcut(const std::string& value, ACCEL& accelerator)
 {
+	ParsedShortcutChord parsed;
+	if (!ParseShortcutChord(value, parsed))
+		return false;
 	BYTE modifiers = FVIRTKEY;
-	std::string keyToken;
-	size_t start = 0;
-	while (start <= value.size())
-	{
-		const size_t end = value.find('+', start);
-		const std::string token = ConfigFile::Trim(value.substr(start, end - start));
-		if (token.empty())
-			return false;
-
-		const std::string normalizedToken = ConfigFile::NormalizeName(token);
-		if (normalizedToken == "ctrl" || normalizedToken == "control")
-			modifiers |= FCONTROL;
-		else if (normalizedToken == "alt")
-			modifiers |= FALT;
-		else if (normalizedToken == "shift")
-			modifiers |= FSHIFT;
-		else if (keyToken.empty())
-			keyToken = token;
-		else
-			return false;
-
-		if (end == std::string::npos)
-			break;
-		start = end + 1;
-	}
-
-	if (keyToken.empty())
-		return false;
-
-	const std::string normalizedKey = ConfigFile::NormalizeName(keyToken);
-	WORD key = 0;
-	if (normalizedKey == "escape" || normalizedKey == "esc")
-		key = VK_ESCAPE;
-	else if (normalizedKey == "enter" || normalizedKey == "return")
-		key = VK_RETURN;
-	else if (normalizedKey.size() >= 2 && normalizedKey[0] == 'f')
-	{
-		const std::string numberToken = normalizedKey.substr(1);
-		if (numberToken.empty() || numberToken.size() > 2 ||
-			!std::all_of(numberToken.begin(), numberToken.end(),
-				[](unsigned char character) { return std::isdigit(character) != 0; }))
-			return false;
-
-		const int functionNumber = std::stoi(numberToken);
-		if (functionNumber < 1 || functionNumber > 24)
-			return false;
-		key = static_cast<WORD>(VK_F1 + functionNumber - 1);
-	}
-	else if (keyToken.size() == 1 && std::isalnum(static_cast<unsigned char>(keyToken[0])))
-	{
-		key = static_cast<WORD>(std::toupper(static_cast<unsigned char>(keyToken[0])));
-	}
-	else
-		return false;
-
-	accelerator = { modifiers, key, 0 };
+	if (parsed.control) modifiers |= FCONTROL;
+	if (parsed.alt) modifiers |= FALT;
+	if (parsed.shift) modifiers |= FSHIFT;
+	accelerator = { modifiers, parsed.virtualKey, 0 };
 	return true;
 }
 
@@ -886,10 +867,17 @@ HACCEL CreateConfiguredAccelerators(
 		ACCEL accelerator = defaultAccelerator;
 		bool hasBinding = hasDefault;
 		std::string configuredValue;
+		// Bug hunt 3 (SH8): Config edits the main file, so a renderer-specific
+		// key (display_rules_auto) set there wins; the separate renderer file
+		// stays the legacy fallback.
+		std::string mainValueProbe;
+		const bool mainOverridesRenderer = rendererSpecific && hasMainConfig &&
+			mainConfig.TryGetString("shortcuts", definition.configKey, mainValueProbe);
+		const bool useRendererFile = rendererSpecific && !mainOverridesRenderer;
 		const ConfigFile& config =
-			rendererSpecific ? rendererConfig : mainConfig;
+			useRendererFile ? rendererConfig : mainConfig;
 		const bool hasConfig =
-			rendererSpecific ? hasRendererConfig : hasMainConfig;
+			useRendererFile ? hasRendererConfig : hasMainConfig;
 		if (hasConfig &&
 			config.TryGetString("shortcuts", definition.configKey, configuredValue))
 		{
@@ -911,6 +899,14 @@ HACCEL CreateConfiguredAccelerators(
 				failBinding(std::string("invalid [shortcuts] ") +
 					definition.configKey);
 				return nullptr;
+			}
+			else
+			{
+				// Bug hunt 3 (SH10): this used to keep the default silently.
+				DebugLog::Log("Shortcut ignored: [shortcuts] %s = '%s' is not a valid shortcut "
+					"(one key A-Z, 0-9, F1-F24, Esc or Enter with optional Ctrl, Alt, Shift); %s",
+					definition.configKey, configuredValue.c_str(),
+					hasDefault ? "using the compiled default" : "command left unbound");
 			}
 		}
 		if (!hasBinding)
@@ -1463,41 +1459,28 @@ private:
 		DWORD foregroundProcessId = 0;
 		if (foreground)
 			::GetWindowThreadProcessId(foreground, &foregroundProcessId);
-		const HWND configurationEditor =
-			FindConfigurationEditorForCurrentInstallation();
-		DWORD configurationEditorProcessId = 0;
-		if (configurationEditor)
-			::GetWindowThreadProcessId(configurationEditor,
-				&configurationEditorProcessId);
-		const bool configurationModal =
-			configurationEditorProcessId != 0 &&
-			foregroundProcessId == configurationEditorProcessId;
-		// When foreground-only shortcuts are configured, retain only the Config
-		// chord here and accept it only while a VP-owned presentation window is
-		// foreground. Fullscreen video does not route keyboard input through the
-		// main dialog, so without this narrow observer Ctrl+Shift+S is lost.
-		const bool mayDispatch = s_sameProcessOnly ?
-			!configurationModal && foregroundProcessId == ::GetCurrentProcessId() :
-			ConfigurationLiveApply::MayDispatchGlobalShortcut(
-				::GetCurrentProcessId(), foregroundProcessId, configurationModal);
-		if (!mayDispatch)
-		{
-			return ::CallNextHookEx(s_hook, code, message, parameter);
-		}
-
+		// Bug hunt 3 (SH6): the observer holds only explicitly global
+		// bindings ([shortcuts] global_actions / global_hotkeys), or - with
+		// foreground_only - the Config chord for VP's own fullscreen output.
+		// ConfigurationLiveApply::DecideBackgroundShortcut: VP acts while
+		// another application has focus only on an explicitly global
+		// binding, and never swallows a key it does not act on. AltGr (Right
+		// Alt reported as Ctrl+Alt) is not a Ctrl+Alt chord.
 		const bool control = (::GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-		const bool alt = (::GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
-		const bool shift = (::GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+		const bool leftAlt = (::GetAsyncKeyState(VK_LMENU) & 0x8000) != 0;
 		const bool rightAlt = (::GetAsyncKeyState(VK_RMENU) & 0x8000) != 0;
+		const bool alt = leftAlt || rightAlt ||
+			(::GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+		const bool shift = (::GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
 		const ACCEL* matchedAccelerator = nullptr;
 		for (const ACCEL& accelerator : s_accelerators)
 		{
 			if (accelerator.key == virtualKey &&
-				ConfigurationLiveApply::ShortcutModifiersMatch(
+				ConfigurationLiveApply::KeyboardShortcutMatches(
 					(accelerator.fVirt & FCONTROL) != 0,
 					(accelerator.fVirt & FALT) != 0,
 					(accelerator.fVirt & FSHIFT) != 0,
-					control, alt, shift))
+					control, leftAlt || (alt && !rightAlt), rightAlt, shift))
 			{
 				matchedAccelerator = &accelerator;
 				break;
@@ -1520,46 +1503,45 @@ private:
 				}
 			}
 		}
-		if (matchedAccelerator)
-		{
-			const ACCEL& accelerator = *matchedAccelerator;
-			if (!ConfigurationLiveApply::MayDispatchBackgroundAccelerator(
-				(accelerator.fVirt & FCONTROL) != 0,
-				(accelerator.fVirt & FALT) != 0,
-				(accelerator.fVirt & FSHIFT) != 0))
-			{
-				return ::CallNextHookEx(s_hook, code, message, parameter);
-			}
-			if (accelerator.cmd == ID_COMMAND_CONFIG_EDITOR)
-			{
-				// The configuration editor owns this key while it has focus so
-				// its normal close-to-tray behavior handles the hide operation.
-				// VP remains responsible for the global reveal when Config is hidden.
-				if (foreground == FindConfigurationEditorForCurrentInstallation())
-					return ::CallNextHookEx(s_hook, code, message, parameter);
-				const BOOL posted = ::PostMessageW(s_target, WM_COMMAND,
-					MAKEWPARAM(accelerator.cmd, 0), 0);
-				DebugLog::Log(
-					"Background shortcut dispatch: command=%u foreground_pid=%lu posted=%d consume=1",
-					static_cast<unsigned>(accelerator.cmd), foregroundProcessId,
-					posted ? 1 : 0);
-				if (posted)
-					return 1;
-				return ::CallNextHookEx(s_hook, code, message, parameter);
-			}
-			const bool consumeOriginal =
-				accelerator.cmd == ID_COMMAND_TOGGLE_NO_UI;
-			const BOOL posted = ::PostMessageW(s_target, WM_COMMAND,
-				MAKEWPARAM(accelerator.cmd, 0), 0);
-			DebugLog::Log(
-				"Background shortcut dispatch: command=%u foreground_pid=%lu posted=%d consume=%d",
-				static_cast<unsigned>(accelerator.cmd), foregroundProcessId,
-				posted ? 1 : 0, consumeOriginal ? 1 : 0);
-			if (consumeOriginal && posted)
-				return 1;
-		}
-		// Except for the VP-owned runtime UI toggle, do not consume the original.
-		// madVR/the foreground application receives its normal keyboard event.
+		if (!matchedAccelerator)
+			return ::CallNextHookEx(s_hook, code, message, parameter);
+
+		// Looked up only for a matched key (it enumerates windows).
+		const HWND configurationEditor =
+			FindConfigurationEditorForCurrentInstallation();
+		DWORD configurationEditorProcessId = 0;
+		if (configurationEditor)
+			::GetWindowThreadProcessId(configurationEditor,
+				&configurationEditorProcessId);
+		const bool configurationModal =
+			configurationEditorProcessId != 0 &&
+			foregroundProcessId == configurationEditorProcessId;
+		const ACCEL& accelerator = *matchedAccelerator;
+		ConfigurationLiveApply::BackgroundShortcutContext context;
+		context.matched = true;
+		context.vpForeground = foregroundProcessId == ::GetCurrentProcessId();
+		context.configurationForeground = configurationModal ||
+			(accelerator.cmd == ID_COMMAND_CONFIG_EDITOR && foreground &&
+				foreground == configurationEditor);
+		context.explicitlyGlobal = !s_sameProcessOnly;   // only global bindings are observed
+		context.sameProcessConfigRoute = s_sameProcessOnly &&
+			accelerator.cmd == ID_COMMAND_CONFIG_EDITOR;
+		context.consumeWhenActing = accelerator.cmd == ID_COMMAND_CONFIG_EDITOR ||
+			accelerator.cmd == ID_COMMAND_TOGGLE_NO_UI;
+		const ConfigurationLiveApply::BackgroundShortcutAction action =
+			ConfigurationLiveApply::DecideBackgroundShortcut(context);
+		if (action == ConfigurationLiveApply::BackgroundShortcutAction::PassThrough)
+			return ::CallNextHookEx(s_hook, code, message, parameter);
+		const BOOL posted = ::PostMessageW(s_target, WM_COMMAND,
+			MAKEWPARAM(accelerator.cmd, 0), 0);
+		const bool consume = posted &&
+			action == ConfigurationLiveApply::BackgroundShortcutAction::DispatchAndConsume;
+		DebugLog::Log(
+			"Background shortcut dispatch: command=%u foreground_pid=%lu global=%d posted=%d consume=%d",
+			static_cast<unsigned>(accelerator.cmd), foregroundProcessId,
+			context.explicitlyGlobal ? 1 : 0, posted ? 1 : 0, consume ? 1 : 0);
+		if (consume)
+			return 1;
 		return ::CallNextHookEx(s_hook, code, message, parameter);
 	}
 
@@ -2154,6 +2136,8 @@ BEGIN_MESSAGE_MAP(CVideoProcessorDlg, CDialog)
 	ON_WM_GETMINMAXINFO()
 	ON_WM_SETFOCUS()
 	ON_WM_CLOSE()
+	ON_WM_QUERYENDSESSION()
+	ON_WM_ENDSESSION()
 	ON_WM_SYSCOMMAND()
 	ON_WM_TIMER()
 	ON_WM_DISPLAYCHANGE()
@@ -2406,6 +2390,9 @@ CVideoProcessorDlg::CVideoProcessorDlg():
 		std::string delta6Error;
 		if (!ReadShortcutsGlobalHotkeys(profileConfig, m_shortcutsGlobalHotkeys, delta6Error))
 			DebugLog::Log("Shortcut global policy retained default: %s", delta6Error.c_str());
+		delta6Error.clear();
+		if (!ReadShortcutsGlobalActions(profileConfig, m_shortcutsGlobalActions, delta6Error))
+			DebugLog::Log("Shortcut global actions retained default (none): %s", delta6Error.c_str());
 		for (const auto& entry : { std::make_tuple("stats_overlay", false, &m_statsOverlayConfigured),
 			std::make_tuple("use_frame_queue", true, &m_useFrameQueueConfigured),
 			std::make_tuple("queue_auto_reset", true, &m_queueAutoResetConfigured) })
@@ -2564,46 +2551,42 @@ void CVideoProcessorDlg::StartGlobalShortcutObserver()
 		ConfigurationLiveApply::ShouldEnableBackgroundShortcuts(
 		m_interfaceMode == ApplicationInterface::Mode::Modern, m_hideUI,
 		m_shortcutsForegroundOnly);
-	std::vector<ACCEL> observedAccelerators = m_configuredAccelerators;
-	if (!m_shortcutsGlobalHotkeys)
-	{
-		const size_t before = observedAccelerators.size();
-		observedAccelerators.erase(std::remove_if(observedAccelerators.begin(),
-			observedAccelerators.end(), [](const ACCEL& accelerator)
-			{
-				return !ConfigurationLiveApply::IsGlobalSafeShortcut(
-					(accelerator.fVirt & FCONTROL) != 0, (accelerator.fVirt & FALT) != 0,
-					(accelerator.fVirt & FSHIFT) != 0, accelerator.key);
-			}), observedAccelerators.end());
-		if (observedAccelerators.size() != before)
-			DebugLog::Log("Background shortcuts: %zu bare or Shift-only keys act only while VP has focus (global_hotkeys off)",
-				before - observedAccelerators.size());
-	}
+	// Bug hunt 3 (SH6): only explicitly global bindings act while another
+	// application has focus: the actions listed in [shortcuts]
+	// global_actions (none by default), or every binding with global_hotkeys
+	// on. Everything else acts only while VP's window or fullscreen output
+	// has focus, through the dialog and the fullscreen host - never through
+	// this low-level hook, which therefore is not installed at all by
+	// default.
+	std::set<WORD> globalCommands;
+	for (const ShortcutDefinition& definition : SHORTCUT_DEFINITIONS)
+		if (m_shortcutsGlobalActions.count(definition.configKey))
+			globalCommands.insert(definition.command);
+	std::vector<ACCEL> observedAccelerators;
 	const bool sameProcessOnly = !enableAllBackgroundShortcuts &&
 		m_shortcutsForegroundOnly;
-	if (sameProcessOnly)
+	for (const ACCEL& accelerator : m_configuredAccelerators)
 	{
-		observedAccelerators.erase(std::remove_if(observedAccelerators.begin(),
-			observedAccelerators.end(), [](const ACCEL& accelerator)
-			{
-				return accelerator.cmd != ID_COMMAND_CONFIG_EDITOR;
-			}), observedAccelerators.end());
+		if (sameProcessOnly ? accelerator.cmd == ID_COMMAND_CONFIG_EDITOR :
+			(enableAllBackgroundShortcuts &&
+				(m_shortcutsGlobalHotkeys || globalCommands.count(accelerator.cmd))))
+			observedAccelerators.push_back(accelerator);
 	}
-	if ((!enableAllBackgroundShortcuts && !sameProcessOnly) ||
-		!GetSafeHwnd() || observedAccelerators.empty())
+	if (!GetSafeHwnd() || observedAccelerators.empty())
 	{
 		DebugLog::Log(
-			"Background shortcut observer suppressed: modern=%d noui=%d foreground_only=%d config_only=%d",
+			"Background shortcut observer not installed: modern=%d noui=%d foreground_only=%d "
+			"global_hotkeys=%d global_actions=%zu (no shortcut acts while another application has focus)",
 			m_interfaceMode == ApplicationInterface::Mode::Modern ? 1 : 0,
 			m_hideUI ? 1 : 0, m_shortcutsForegroundOnly ? 1 : 0,
-			sameProcessOnly ? 1 : 0);
+			m_shortcutsGlobalHotkeys ? 1 : 0, m_shortcutsGlobalActions.size());
 		return;
 	}
 
 	const bool observerStarted = GlobalShortcutObserver::Start(GetSafeHwnd(),
 		observedAccelerators, sameProcessOnly);
 	DebugLog::Log(
-		"Background shortcut observer %s (%zu bindings, config_only=%d)",
+		"Background shortcut observer %s (%zu global bindings, config_only=%d)",
 		observerStarted ? "started" : "unavailable",
 		observedAccelerators.size(), sameProcessOnly ? 1 : 0);
 }
@@ -3272,7 +3255,11 @@ void CVideoProcessorDlg::StartProjectorTest(
 	// The result goes through a shared object, never through `this`, so VP
 	// closing during the test cannot leave the worker writing a destroyed window.
 	auto shared = std::make_shared<ProjectorTestShared>();
-	m_projectorTestShared = shared;
+	std::atomic_store_explicit(&m_projectorTestShared, shared, std::memory_order_release);
+	// Bug hunt 3 (SH5): the worker stays detached (it never touches `this`),
+	// but VP's close paths cancel it through shared->cancel - the 5 s hold
+	// ends and the light goes back up - and wait (bounded) for shared->done.
+	// It used to be killed at exit mid-hold, leaving the LED at 60.
 	std::thread([shared, window]()
 	{
 		ConfigFile config;
@@ -3280,8 +3267,12 @@ void CVideoProcessorDlg::StartProjectorTest(
 		if (!config.Load(ConfigFile::DEFAULT_FILENAME, ConfigFile::ReadPolicy::Fresh))
 			result.summary = "FAIL: VideoProcessor could not read its configuration";
 		else
+		{
+			LedDrive::ConnectionTestPlan plan;
+			plan.cancel = shared->cancel;
 			result = LedDrive::RunConnectionTestOnNewConnection(LedDrive::ReadProjectorConfig(config),
-				[] { return LedDrive::CreateWin32SerialPort(); });
+				[] { return LedDrive::CreateWin32SerialPort(); }, plan);
+		}
 		std::string details;
 		for (const std::string& line : result.lines)
 			details += line + "\n";
@@ -3289,7 +3280,9 @@ void CVideoProcessorDlg::StartProjectorTest(
 		{
 			std::lock_guard<std::mutex> guard(shared->mutex);
 			shared->response = ProjectorTestResponse(result.pass, false, result.summary, details);
+			shared->done = true;
 		}
+		shared->doneChanged.notify_all();
 		::PostMessageW(window, WM_MESSAGE_PROJECTOR_TEST_DONE, 0, 0);
 	}).detach();
 }
@@ -3298,12 +3291,15 @@ LRESULT CVideoProcessorDlg::OnProjectorTestDone(WPARAM, LPARAM)
 {
 	// Also when the renderer was created during the test (audit stage8-rs232
 	// item 1): its LED drive could not open the port the test held.
-	if (m_videoRenderer)
+	// Bug hunt 3 (SH5): not while closing - the close path cancelled the test
+	// so the light stays restored; resuming would start the drive again.
+	if (m_videoRenderer && !m_wantToTerminate)
 		m_videoRenderer->ResumeLedDriveAfterTest();
 	m_projectorTestSuspendedRenderer = false;
 	const auto pending = std::move(m_projectorTestPending);
 	m_projectorTestPending.reset();
-	const auto shared = std::move(m_projectorTestShared);
+	const auto shared = std::atomic_exchange_explicit(&m_projectorTestShared,
+		std::shared_ptr<ProjectorTestShared>(), std::memory_order_acq_rel);
 	if (pending && shared)
 	{
 		std::lock_guard<std::mutex> guard(shared->mutex);
@@ -4600,6 +4596,9 @@ bool CVideoProcessorDlg::StageRuntimeSettings(
 	if (!ReadShortcutsGlobalHotkeys(config,
 		m_stagedRuntimeSettings.shortcutsGlobalHotkeys, error))
 		return false;
+	if (!ReadShortcutsGlobalActions(config,
+		m_stagedRuntimeSettings.shortcutsGlobalActions, error))
+		return false;
 	if (!ReadGeneralBoolean(config, "stats_overlay", false, m_stagedRuntimeSettings.statsOverlay, error) ||
 		!ReadGeneralBoolean(config, "use_frame_queue", true, m_stagedRuntimeSettings.useFrameQueue, error) ||
 		!ReadGeneralBoolean(config, "queue_auto_reset", true, m_stagedRuntimeSettings.queueAutoReset, error) ||
@@ -5186,6 +5185,8 @@ bool CVideoProcessorDlg::ReplaceStagedAccelerators()
 		m_stagedRuntimeSettings.shortcutsForegroundOnly;
 	m_shortcutsGlobalHotkeys =
 		m_stagedRuntimeSettings.shortcutsGlobalHotkeys;
+	m_shortcutsGlobalActions =
+		m_stagedRuntimeSettings.shortcutsGlobalActions;
 	if (previous)
 		DestroyAcceleratorTable(previous);
 	StartGlobalShortcutObserver();
@@ -7825,10 +7826,14 @@ LRESULT CVideoProcessorDlg::OnMessageExternalShortcut(WPARAM wParam,
 		return 1;
 	}
 	const bool rightAlt = (::GetKeyState(VK_RMENU) & 0x8000) != 0;
+	// Bug hunt 3 (SH6): AltGr (Right Alt reported as Ctrl+Alt) never matches a
+	// Ctrl+Alt chord; only the fullscreen-toggle relaxation below applies.
+	const bool altGr = ConfigurationLiveApply::IsAltGr(control,
+		(::GetKeyState(VK_LMENU) & 0x8000) != 0, rightAlt);
 	const ACCEL* matchedAccelerator = nullptr;
 	for (const ACCEL& accelerator : m_configuredAccelerators)
 	{
-		if (accelerator.key != key ||
+		if (altGr || accelerator.key != key ||
 			(accelerator.fVirt & supportedModifiers) != modifiers)
 			continue;
 		matchedAccelerator = &accelerator;
@@ -7857,6 +7862,15 @@ LRESULT CVideoProcessorDlg::OnMessageExternalShortcut(WPARAM wParam,
 		// non-repeatable commands are consumed without dispatch or logging.
 		if (repeat && !IsRepeatableShortcutCommand(matchedAccelerator->cmd))
 			return 1;
+		// Bug hunt 3 (SH7): a bare fullscreen_exit (Esc) acts only while VP's
+		// fullscreen output has focus.
+		if (matchedAccelerator->cmd == ID_COMMAND_FULLSCREEN_EXIT &&
+			(matchedAccelerator->fVirt & (FCONTROL | FALT)) == 0 &&
+			!FullscreenOutputHasFocus())
+		{
+			DebugLog::Log("External shortcut ignored: bare fullscreen_exit outside the focused fullscreen output");
+			return 1;
+		}
 		const BOOL posted = PostMessage(WM_COMMAND,
 			MAKEWPARAM(matchedAccelerator->cmd, 1), 0);
 		DebugLog::Log(
@@ -8044,6 +8058,25 @@ void CVideoProcessorDlg::OnCommandFullScreenToggle()
 				"exit" : "enter",
 		m_rendererFullscreenCheck.GetCheck() == BST_CHECKED ? 1 : 0);
 	OnBnClickedRendererFullScreenCheck();
+}
+
+
+bool CVideoProcessorDlg::FullscreenOutputHasFocus() const
+{
+	// Fullscreen is on and VP itself has the keyboard: its fullscreen host, a
+	// renderer window in it, or VP's own window (Windows may raise the
+	// topmost host without moving the foreground to it). Never another
+	// application.
+	if (!m_rendererFullscreenCheck.GetSafeHwnd() || !m_rendererFullscreenCheck.GetCheck() ||
+		!m_fullScreenVideoWindow)
+		return false;
+	const HWND host = m_fullScreenVideoWindow->GetHWND();
+	const HWND foreground = ::GetForegroundWindow();
+	if (!host || !::IsWindow(host) || !foreground)
+		return false;
+	DWORD foregroundProcessId = 0;
+	::GetWindowThreadProcessId(foreground, &foregroundProcessId);
+	return foregroundProcessId == ::GetCurrentProcessId();
 }
 
 
@@ -9799,37 +9832,16 @@ void CVideoProcessorDlg::ForceExitProcess(const char* reason, const char* blocki
 	}
 	catch (...) {}
 
+	// 0. Bug hunt 3 (SH5): a running RS-232 test is cancelled; it puts the
+	//    light back itself (bounded).
+	CancelProjectorTestForExit(ShutdownDeadline::ProjectorTestCancelTimeoutMs, "forced-shutdown");
+
 	// 1. LED (Dynamic Drive) restore on every renderer that may hold the
-	//    drive: the current one, the one in (or blocked in) the retirement
-	//    worker, and a retained failed retirement. Each stop runs on its own
-	//    thread with a bound; a renderer that holds its locks times out.
+	//    drive (RestoreLedForExit).
 	if (plan.restoreLed)
 	{
-		std::vector<std::shared_ptr<IVideoRenderer>> renderers;
-		const auto add = [&renderers](std::shared_ptr<IVideoRenderer> renderer)
-		{
-			if (renderer && std::find(renderers.begin(), renderers.end(),
-				renderer) == renderers.end())
-				renderers.push_back(std::move(renderer));
-		};
-		add(std::atomic_load_explicit(&m_videoRenderer, std::memory_order_acquire));
-		{
-			std::lock_guard<std::mutex> lock(m_shutdownRetiringRendererMutex);
-			add(m_shutdownRetiringRenderer.lock());
-		}
-		if (uiThread)
-			add(m_failedRendererRetirement);
-		if (renderers.empty())
-			DebugLog::Log("Forced shutdown LED restore: no renderer reachable "
-				"(an exited renderer restored its drive when it stopped)");
-		for (const std::shared_ptr<IVideoRenderer>& renderer : renderers)
-		{
-			const LedDrive::BoundedRestoreResult restore = LedDrive::RunBoundedRestore(
-				[renderer]() { return renderer->StopLedDriveForShutdown(); },
-				ShutdownLedRestoreTimeoutMs);
-			DebugLog::Log("Forced shutdown LED restore: %s (timeout_ms=%u)",
-				LedDrive::Name(restore), ShutdownLedRestoreTimeoutMs);
-		}
+		std::vector<std::shared_ptr<IVideoRenderer>> renderers =
+			RestoreLedForExit("Forced shutdown", uiThread);
 		// Deliberately leaked: their backends may be blocked, and no destructor
 		// may re-enter them. Process termination reclaims them.
 		for (std::shared_ptr<IVideoRenderer>& renderer : renderers)
@@ -9837,12 +9849,16 @@ void CVideoProcessorDlg::ForceExitProcess(const char* reason, const char* blocki
 	}
 
 	// 2. Target-only display topology restore (no-op without a session).
+	//    Bug hunt 3 (SH4): bounded - the UI thread may be the one stuck in
+	//    SetDisplayConfig holding the restore mutex; then the step is skipped.
 	if (plan.restoreTopology)
 	{
-		const bool restored =
-			videoProcessorApp.RestoreDisplayTopology("forced-shutdown");
+		bool skipped = false;
+		const bool restored = videoProcessorApp.RestoreDisplayTopologyBounded(
+			"forced-shutdown", ShutdownDeadline::TopologyLockTimeoutMs, &skipped);
 		DebugLog::Log("Forced shutdown topology restore: %s",
-			restored ? "done-or-not-needed" : "pending (kept for the next start)");
+			restored ? "done-or-not-needed" : skipped ? "skipped (restore mutex busy; kept for the next start)" :
+			"pending (kept for the next start)");
 	}
 
 	// 3. Crash state kept: a forced exit is not a clean exit.
@@ -9854,6 +9870,126 @@ void CVideoProcessorDlg::ForceExitProcess(const char* reason, const char* blocki
 	TerminateProcess(GetCurrentProcess(), ShutdownDeadline::ForcedExitCode);
 	for (;;)
 		Sleep(INFINITE);
+}
+
+
+std::vector<std::shared_ptr<IVideoRenderer>> CVideoProcessorDlg::RestoreLedForExit(
+	const char* site, bool uiThread)
+{
+	// The LED (Dynamic Drive) restore on every renderer that may hold the
+	// drive: the current one, the one in (or blocked in) the retirement
+	// worker, and a retained failed retirement. Each stop runs on its own
+	// thread with a bound; a renderer that holds its locks times out.
+	std::vector<std::shared_ptr<IVideoRenderer>> renderers;
+	const auto add = [&renderers](std::shared_ptr<IVideoRenderer> renderer)
+	{
+		if (renderer && std::find(renderers.begin(), renderers.end(),
+			renderer) == renderers.end())
+			renderers.push_back(std::move(renderer));
+	};
+	add(std::atomic_load_explicit(&m_videoRenderer, std::memory_order_acquire));
+	{
+		std::lock_guard<std::mutex> lock(m_shutdownRetiringRendererMutex);
+		add(m_shutdownRetiringRenderer.lock());
+	}
+	if (uiThread)
+		add(m_failedRendererRetirement);
+	if (renderers.empty())
+		DebugLog::Log("%s LED restore: no renderer reachable "
+			"(an exited renderer restored its drive when it stopped)", site);
+	for (const std::shared_ptr<IVideoRenderer>& renderer : renderers)
+	{
+		const LedDrive::BoundedRestoreResult restore = LedDrive::RunBoundedRestore(
+			[renderer]() { return renderer->StopLedDriveForShutdown(); },
+			ShutdownLedRestoreTimeoutMs);
+		DebugLog::Log("%s LED restore: %s (timeout_ms=%u)", site,
+			LedDrive::Name(restore), ShutdownLedRestoreTimeoutMs);
+	}
+	return renderers;
+}
+
+
+bool CVideoProcessorDlg::CancelProjectorTestForExit(DWORD timeoutMs, const char* site)
+{
+	std::shared_ptr<ProjectorTestShared> shared;
+	{
+		// m_projectorTestShared is a UI-thread member; the watchdog thread
+		// reads the pointer once (the shared object itself is thread-safe).
+		shared = std::atomic_load_explicit(&m_projectorTestShared, std::memory_order_acquire);
+	}
+	if (!shared)
+		return true;
+	shared->cancel->store(true);
+	std::unique_lock<std::mutex> lock(shared->mutex);
+	const bool done = shared->doneChanged.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+		[&shared]() { return shared->done; });
+	DebugLog::Log("RS-232 connection test cancelled at %s: %s (timeout_ms=%lu)", site,
+		done ? "finished, light put back" : "still running", timeoutMs);
+	return done;
+}
+
+
+// Bug hunt 3 (SH2): the dialog manager turns Esc (Shift+Esc, or Esc while
+// fullscreen_exit is unbound) into IDCANCEL; CDialog::OnCancel would end the
+// dialog straight away, skipping OnClose's deadline, watchdog, LED and
+// topology restore. Route it through OnClose instead.
+void CVideoProcessorDlg::OnCancel()
+{
+	if (ApplicationShutdownPolicy::RoutesCancelThroughClose(IDCANCEL))
+	{
+		DebugLog::Log("Dialog cancel (IDCANCEL) routed through the close path");
+		OnClose();
+	}
+}
+
+
+// Bug hunt 3 (SH1): Windows shutdown / logoff (SessionEndShutdown.h).
+BOOL CVideoProcessorDlg::OnQueryEndSession()
+{
+	SessionEnd::Steps steps;
+	steps.log = [](const char* phase) { DebugLog::Log("Windows %s", phase); };
+	const SessionEnd::Outcome outcome = SessionEnd::Handle(WM_QUERYENDSESSION, 0, 0, steps, m_sessionEndRan);
+	return static_cast<BOOL>(outcome.result);
+}
+
+
+void CVideoProcessorDlg::OnEndSession(BOOL ending)
+{
+	SessionEnd::Steps steps;
+	steps.log = [](const char* phase) { DebugLog::Log("Windows %s", phase); };
+	const bool uiThread = ::GetCurrentThreadId() == m_uiThreadId;
+	steps.cancelProjectorTest = [this]()
+	{
+		CancelProjectorTestForExit(ShutdownDeadline::ProjectorTestCancelTimeoutMs, "session-end");
+	};
+	steps.restoreLed = [this, uiThread]()
+	{
+		// Full light, LDMM 0, CNTR 50 on every reachable renderer, each
+		// bounded. The renderers are leaked: the process ends below.
+		for (std::shared_ptr<IVideoRenderer>& renderer : RestoreLedForExit("Session end", uiThread))
+			new std::shared_ptr<IVideoRenderer>(std::move(renderer));
+	};
+	steps.restoreTopology = []()
+	{
+		return videoProcessorApp.RestoreDisplayTopologyBounded("session-end",
+			ShutdownDeadline::TopologyLockTimeoutMs);
+	};
+	steps.markCrashState = [](bool clean)
+	{
+		try { CrashState::Global().SetValue("exit", "Windows session end"); } catch (...) {}
+		CrashState::Global().Stop(clean);
+	};
+	steps.finish = [this]()
+	{
+		// Windows may end the process at any moment once this returns; end
+		// it here, so no renderer or destructor runs on into a half-ended
+		// session (LED, topology and crash state are already done).
+		m_forcedShutdownStarted.store(true);
+		DebugLog::Log("Windows session end: process exits (exit_code=0)");
+		DEBUGLOG_SHUTDOWN();
+		TerminateProcess(GetCurrentProcess(), 0);
+	};
+	SessionEnd::Handle(WM_ENDSESSION, ending ? TRUE : FALSE, 0, steps, m_sessionEndRan);
 }
 
 
@@ -9889,13 +10025,51 @@ bool CVideoProcessorDlg::WaitForShutdownWorkers(DWORD timeoutMs)
 		resetDone = waitBounded(static_cast<HANDLE>(
 			m_rendererResetCoordinator->NativeThreadHandle()));
 	}
-	if (!retirementDone || !resetDone)
+	// Bug hunt 3 (SH3): the destructor's other joins, under the same bound.
+	// A thread that ended here is joined now, so the destructor's own joins
+	// return at once; a blocked one fails the wait and the exit is forced
+	// (crash state kept) instead of the destructor hanging after the crash
+	// state was already marked clean.
+	if (m_livenessWatchdogStopEvent)
+		SetEvent(m_livenessWatchdogStopEvent);
+	bool livenessDone = true;
+	if (m_livenessWatchdogThread.joinable())
+	{
+		livenessDone = waitBounded(static_cast<HANDLE>(m_livenessWatchdogThread.native_handle()));
+		if (livenessDone)
+			m_livenessWatchdogThread.join();
+	}
+	if (m_unifiedActionCancelEvent)
+		SetEvent(m_unifiedActionCancelEvent);
+	m_unifiedActionCoalescer.CancelAll();
+	bool unifiedDone = true;
+	for (UnifiedActionWorker& worker : m_unifiedActionWorkers)
+	{
+		if (!worker.thread.joinable())
+			continue;
+		if (waitBounded(static_cast<HANDLE>(worker.thread.native_handle())))
+			worker.thread.join();
+		else
+			unifiedDone = false;
+	}
+	// SH5: a running RS-232 test was cancelled in OnClose; wait for it to put
+	// the light back.
+	bool projectorTestDone = true;
+	{
+		const ULONGLONG now = GetTickCount64();
+		const DWORD remaining = now >= deadline ? 0 : static_cast<DWORD>(deadline - now);
+		projectorTestDone = CancelProjectorTestForExit(
+			(std::max<DWORD>)(remaining, ShutdownDeadline::ProjectorTestCancelTimeoutMs), "exit");
+	}
+	if (!retirementDone || !resetDone || !livenessDone || !unifiedDone || !projectorTestDone)
 	{
 		DebugLog::Log(
 			"Application shutdown workers did not finish: retirement_worker=%s "
-			"reset_coordinator=%s timeout_ms=%lu",
+			"reset_coordinator=%s liveness_watchdog=%s unified_actions=%s "
+			"projector_test=%s timeout_ms=%lu",
 			retirementDone ? "done" : "blocked", resetDone ? "done" : "blocked",
-			timeoutMs);
+			livenessDone ? "done" : "blocked", unifiedDone ? "done" : "blocked",
+			projectorTestDone ? "done" : "blocked", timeoutMs);
 		return false;
 	}
 	return true;
@@ -15590,16 +15764,19 @@ BOOL CVideoProcessorDlg::TranslateConfiguredAccelerator(MSG* message)
 		const bool alt = (::GetKeyState(VK_MENU) & 0x8000) != 0;
 		const bool shift = (::GetKeyState(VK_SHIFT) & 0x8000) != 0;
 		const bool rightAlt = (::GetKeyState(VK_RMENU) & 0x8000) != 0;
+		const bool leftAlt = (::GetKeyState(VK_LMENU) & 0x8000) != 0 ||
+			(alt && !rightAlt);
+		// Bug hunt 3 (SH6): AltGr is not Ctrl+Alt (KeyboardShortcutMatches).
 		const ACCEL* matchedAccelerator = nullptr;
 		bool rightAltFallback = false;
 		for (const ACCEL& accelerator : m_configuredAccelerators)
 		{
 			if (accelerator.key == virtualKey &&
-				ConfigurationLiveApply::ShortcutModifiersMatch(
+				ConfigurationLiveApply::KeyboardShortcutMatches(
 					(accelerator.fVirt & FCONTROL) != 0,
 					(accelerator.fVirt & FALT) != 0,
 					(accelerator.fVirt & FSHIFT) != 0,
-					control, alt, shift))
+					control, leftAlt, rightAlt, shift))
 			{
 				matchedAccelerator = &accelerator;
 				break;
@@ -15660,6 +15837,14 @@ BOOL CVideoProcessorDlg::TranslateConfiguredAccelerator(MSG* message)
 				ToggleConfigurationEditor();
 				return TRUE;
 			}
+			// Bug hunt 3 (SH7): a bare fullscreen_exit (Esc by default) acts
+			// only while VP's fullscreen output has focus. Elsewhere it is
+			// consumed and does nothing, so the dialog manager cannot turn it
+			// into IDCANCEL.
+			if (accelerator.cmd == ID_COMMAND_FULLSCREEN_EXIT &&
+				(accelerator.fVirt & (FCONTROL | FALT)) == 0 &&
+				!FullscreenOutputHasFocus())
+				return TRUE;
 			if (rightAltFallback)
 			{
 				DebugLog::Log(
@@ -15672,6 +15857,12 @@ BOOL CVideoProcessorDlg::TranslateConfiguredAccelerator(MSG* message)
 		}
 	}
 
+	// Bug hunt 3 (SH6): ::TranslateAccelerator reads AltGr as Ctrl+Alt; an
+	// AltGr press that matched nothing above is not a shortcut.
+	if ((message->message == WM_KEYDOWN || message->message == WM_SYSKEYDOWN) &&
+		ConfigurationLiveApply::IsAltGr((::GetKeyState(VK_CONTROL) & 0x8000) != 0,
+			(::GetKeyState(VK_LMENU) & 0x8000) != 0, (::GetKeyState(VK_RMENU) & 0x8000) != 0))
+		return FALSE;
 	return ::TranslateAccelerator(m_hWnd, m_accelerator, message);
 }
 void CVideoProcessorDlg::OnOK()
@@ -16446,6 +16637,14 @@ void CVideoProcessorDlg::OnClose()
 	m_wantToTerminate = true;
 	// Bug hunt 2 (H1): the exit is bounded from the first close request.
 	ArmShutdownDeadline("close");
+	// Bug hunt 3 (SH5): end a running RS-232 test's hold now; it puts the
+	// light back, and WaitForShutdownWorkers waits for it (bounded).
+	if (const auto projectorTest = std::atomic_load_explicit(&m_projectorTestShared,
+		std::memory_order_acquire))
+	{
+		projectorTest->cancel->store(true);
+		DebugLog::Log("RS-232 connection test cancel requested: application closing");
+	}
 	m_configurationRpcServer.Stop();
 	KillTimer(FULLSCREEN_FOCUS_TIMER_ID);
 	if (m_fullscreenRetargetPending)

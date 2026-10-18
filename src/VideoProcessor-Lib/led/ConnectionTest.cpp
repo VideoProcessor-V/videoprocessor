@@ -45,15 +45,30 @@ namespace LedDrive
 		const ConnectionTestPlan& plan)
 	{
 		ConnectionTestResult result;
+		if (ConnectionTestCancelled(plan))
+		{
+			result.summary = "FAIL: cancelled (VideoProcessor is closing)";
+			result.lines.push_back(result.summary);
+			return result;
+		}
 		const LightRange range = driver.QueryLightRange();
 		const int high = range.known && range.maximum < plan.highLevel ? range.maximum : plan.highLevel;
 		const int low = range.known ? std::max(range.minimum, plan.lowLevel) : plan.lowLevel;
 		const bool lowOk = Step(driver, low, plan.commandTimeoutMs, result);
-		if (lowOk && sleepMs)
+		if (lowOk && sleepMs && !ConnectionTestCancelled(plan))
 			sleepMs(plan.holdMs);
-		// Always try to put the light back, even after a failed first step.
+		// Always try to put the light back, even after a failed first step or
+		// a cancel during the hold (bug hunt 3, SH5).
 		const bool highOk = Step(driver, high, plan.commandTimeoutMs, result);
-		result.pass = lowOk && highOk;
+		const bool cancelled = ConnectionTestCancelled(plan);
+		if (cancelled)
+			result.lines.push_back(Line("cancelled during the hold (VideoProcessor is closing); LED put back to %d", high));
+		result.pass = lowOk && highOk && !cancelled;
+		if (cancelled)
+		{
+			result.summary = "FAIL: cancelled (VideoProcessor is closing)";
+			return result;
+		}
 		if (result.pass)
 			result.summary = Line("PASS: the projector confirmed LED %d and LED %d", low, high);
 		else
@@ -87,8 +102,15 @@ namespace LedDrive
 			driver->Close();
 			return result;
 		}
+		// The hold wakes early on a cancel (bug hunt 3, SH5).
+		const auto cancel = plan.cancel;
 		result = RunConnectionTest(*driver,
-			[](int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }, plan);
+			[cancel](int ms)
+			{
+				const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+				while (std::chrono::steady_clock::now() < until && !(cancel && cancel->load()))
+					std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			}, plan);
 		driver->Close();
 		return result;
 	}

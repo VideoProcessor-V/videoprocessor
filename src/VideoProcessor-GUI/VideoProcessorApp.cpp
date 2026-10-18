@@ -1466,8 +1466,9 @@ BOOL CVideoProcessorApp::InitInstance()
 	}
 
 	// Crash state (owner 2026-10-15): a run that ended without a clean exit
-	// left logs\crash-state.txt; keep it as "crash state (N).txt" (newest 10),
-	// then keep a rolling state of this run until it exits cleanly.
+	// left logs\crash-state-<pid>.txt (bug hunt 3, SH12: one per instance; a
+	// running instance's file is never taken); keep it as "crash state (N).txt"
+	// (newest 10), then keep a rolling state of this run until it exits cleanly.
 	bool crashStateClean = false;
 	{
 		char fullLog[MAX_PATH] = {};
@@ -1485,7 +1486,12 @@ BOOL CVideoProcessorApp::InitInstance()
 		recorder.InstallCrashHandler();
 	}
 
-	CVideoProcessorDlg dlg;
+	// Bug hunt 3 (SH3, 2026-10-18): the dialog is destroyed explicitly, under
+	// a bound, before the crash state is marked clean. As a local it used to
+	// be destroyed after CrashState::Stop(clean) and DEBUGLOG_SHUTDOWN, so a
+	// hang in its destructor left no crash state and no log.
+	std::unique_ptr<CVideoProcessorDlg> dialogOwner = std::make_unique<CVideoProcessorDlg>();
+	CVideoProcessorDlg& dlg = *dialogOwner;
 	m_pMainWnd = &dlg;
 
 	try
@@ -2213,6 +2219,9 @@ BOOL CVideoProcessorApp::InitInstance()
 		// capture card and GPU memory, with the crash state deleted as clean.
 		// Bound the wait; if a worker is still blocked, force the exit (LED
 		// and topology restore, crash state kept, process terminated).
+		// Bug hunt 3 (SH3): this now covers every join the destructor did
+		// without a bound (liveness watchdog, unified action workers, a
+		// running RS-232 test as well).
 		if (!dlg.WaitForShutdownWorkers(ShutdownDeadline::WorkerQuiesceTimeoutMs))
 			dlg.ForceExitProcess("shutdown-workers-did-not-finish", "worker-join");
 		// audit 2026-10-16: only a genuine clean exit deletes the crash state.
@@ -2245,10 +2254,35 @@ BOOL CVideoProcessorApp::InitInstance()
 		delete[] wtext;
 	}
 
+	// Bug hunt 3 (SH3): destroy the dialog (capture release, member
+	// destructors) before the crash state is decided, under a guard: if the
+	// destruction does not finish in time the process ends with the crash
+	// state kept and the topology restored (bounded), like a forced exit.
+	{
+		ShutdownDeadline::ExitGuard guard(ShutdownDeadline::DialogDestroyTimeoutMs, [this]()
+		{
+			DebugLog::Log("Forced shutdown: reason=dialog-destroy-timeout blocking=dialog-destructor "
+				"timeout_ms=%u", ShutdownDeadline::DialogDestroyTimeoutMs);
+			try { CrashState::Global().SetValue("exit", "forced shutdown: dialog destructor did not finish"); }
+			catch (...) {}
+			RestoreDisplayTopologyBounded("forced-shutdown", ShutdownDeadline::TopologyLockTimeoutMs);
+			DebugLog::Log("Forced shutdown: terminating process exit_code=%u crash_state=kept",
+				ShutdownDeadline::ForcedExitCode);
+			CrashState::Global().Stop(false);
+			DEBUGLOG_SHUTDOWN();
+			TerminateProcess(GetCurrentProcess(), ShutdownDeadline::ForcedExitCode);
+		});
+		m_pMainWnd = nullptr;
+		dialogOwner.reset();
+		guard.Cancel();
+	}
+
 	CoUninitialize();
 
 	// A normal exit deletes the rolling state; a fatal error keeps it for the
-	// next start.
+	// next start. Bug hunt 3 (SH3): only now, after the teardown finished.
+	if (crashStateClean)
+		DebugLog::Log("Application teardown complete: crash state marked clean");
 	CrashState::Global().Stop(crashStateClean);
 
 	// Shutdown async debug logger
@@ -2323,12 +2357,40 @@ bool CVideoProcessorApp::BeginTargetOnlyDisplaySession(const CString& target,
 }
 
 
+namespace
+{
+	// Bug hunt 2 (2026-10-17): the forced-exit watchdog may restore from its
+	// own thread. Bug hunt 3 (SH4): a timed mutex, so that path can give up.
+	std::timed_mutex& DisplayTopologyRestoreMutex()
+	{
+		static std::timed_mutex restoreMutex;
+		return restoreMutex;
+	}
+}
+
 bool CVideoProcessorApp::RestoreDisplayTopology(const char* reason)
 {
-	// Bug hunt 2 (2026-10-17): the forced-exit watchdog may call this from its
-	// own thread.
-	static std::mutex restoreMutex;
-	std::lock_guard<std::mutex> lock(restoreMutex);
+	std::lock_guard<std::timed_mutex> lock(DisplayTopologyRestoreMutex());
+	return RestoreDisplayTopologyLocked(reason);
+}
+
+bool CVideoProcessorApp::RestoreDisplayTopologyBounded(const char* reason,
+	uint32_t lockTimeoutMs, bool* skipped)
+{
+	bool wasSkipped = false;
+	const bool restored = ShutdownDeadline::RunWithTimedLock(
+		DisplayTopologyRestoreMutex(), lockTimeoutMs,
+		[this, reason]() { return RestoreDisplayTopologyLocked(reason); }, wasSkipped);
+	if (wasSkipped)
+		DebugLog::Log("Display topology restore skipped: reason=%s another thread holds the restore "
+			"(timeout_ms=%u); the pending record stays for the next start", reason, lockTimeoutMs);
+	if (skipped)
+		*skipped = wasSkipped;
+	return restored;
+}
+
+bool CVideoProcessorApp::RestoreDisplayTopologyLocked(const char* reason)
+{
 	if (!m_targetOnlyDisplaySessionActive &&
 		!DisplayTopologySession::HasPendingRecovery(m_displayRecoveryStatePath))
 		return true;

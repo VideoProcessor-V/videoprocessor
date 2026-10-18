@@ -99,6 +99,41 @@ namespace Tests
 					Assert::AreNotEqual(Canonical("Ctrl+Alt+R"), Canonical(entry.chord), Wide(entry.key).c_str());
 		}
 
+		// Bug hunt 3 (SH7, owner rule "modifier combinations only"): every
+		// compiled default is a Ctrl and/or Alt combination - no bare key, no
+		// Shift-only chord. The one exception, fullscreen_exit = Esc, is
+		// marked fullscreenFocusOnly (it acts only while fullscreen is on and
+		// VP has focus).
+		TEST_METHOD(DefaultsUseModifierCombinations)
+		{
+			size_t checked = 0;
+			for (const ShortcutDefault& entry : kShortcutDefaults)
+			{
+				if (entry.chord[0] == '\0')
+					continue;
+				++checked;
+				const std::string chord = Canonical(entry.chord);
+				const bool modified = chord.rfind("Ctrl+", 0) == 0 || chord.rfind("Alt+", 0) == 0;
+				Assert::AreEqual(modified, ShortcutChordHasCtrlOrAlt(chord.c_str()), Wide(chord).c_str());
+				if (entry.fullscreenFocusOnly)
+				{
+					Assert::AreEqual(std::string("fullscreen_exit"), std::string(entry.key),
+						L"only fullscreen_exit may keep a bare default");
+					Assert::AreEqual(std::string("Esc"), chord);
+					continue;
+				}
+				Assert::IsTrue(modified, Wide(std::string(entry.key) + " defaults to " + chord +
+					", which has no Ctrl or Alt").c_str());
+			}
+			Assert::IsTrue(checked > 15);
+			// The moved defaults.
+			Assert::AreEqual(std::string("Ctrl+Shift+R"), Canonical(ShortcutDefaultChord("renderer_reset")));
+			Assert::AreEqual(std::string("Ctrl+Alt+Shift+R"), Canonical(ShortcutDefaultChord("renderer_restart")));
+			Assert::AreEqual(std::string("Ctrl+Alt+V"), Canonical(ShortcutDefaultChord("video_conversion_off")));
+			Assert::AreEqual(std::string("Ctrl+Shift+V"), Canonical(ShortcutDefaultChord("video_conversion_p010")));
+			Assert::AreEqual(std::string("Ctrl+Shift+F4"), Canonical(ShortcutDefaultChord("display_rules_auto")));
+		}
+
 		// The two defaults ConfigurationLiveApply spells as virtual keys agree
 		// with the table.
 		TEST_METHOD(LiveApplyDefaultsMatchTheTable)
@@ -129,7 +164,7 @@ namespace Tests
 				{
 					const std::string key = ConfigFile::NormalizeName(kv.first);
 					const bool shortcutSection = ConfigFile::NormalizeName(section) == "shortcuts";
-					if (!(key == "shortcut" || key == "cycle_shortcut" || (shortcutSection && key != "foreground_only")))
+					if (!(key == "shortcut" || key == "cycle_shortcut" || (shortcutSection && key != "foreground_only" && key != "global_hotkeys" && key != "global_actions")))
 						continue;
 					const std::string value = ConfigFile::Trim(kv.second);
 					std::string canonical;
