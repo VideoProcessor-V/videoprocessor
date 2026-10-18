@@ -71,7 +71,7 @@ Results (single-threaded, TRX):
   client opens its sole discovered VP": the remote connection timed out while other agents' test
   runs loaded the machine) and both passed when rerun alone (3/3 with `-Match remote`). The
   schema coverage test covers the 12 new keys.
-- Full VideoProcessor-Test: FULL_RESULTS_PLACEHOLDER
+- Full VideoProcessor-Test (single-threaded, TRX): 3397/3397 passed in 1.3 h (gated GPU / meter / projector tests log their SKIP and pass).
 
 ## Gated tests (for Claude)
 
