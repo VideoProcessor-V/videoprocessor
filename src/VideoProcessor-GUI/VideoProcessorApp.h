@@ -56,6 +56,10 @@ public:
 	{
 		m_activePictureLookaheadFrames = value > 8 ? 8 : value;
 	}
+	// The default queue section (or command line) set active_picture_lookahead_frames
+	// explicitly (owner 2026-10-17: absent = it follows the queue, QueueLookahead.h).
+	bool IsActivePictureLookaheadConfigured() const { return m_activePictureLookaheadConfigured; }
+	void SetActivePictureLookaheadConfigured(bool value) { m_activePictureLookaheadConfigured = value; }
 
 private:
 	size_t m_queueStartupPrerollFrames = 0;
@@ -64,6 +68,7 @@ private:
 	size_t m_presentationLeadFrames = 1;
 	bool m_hasPresentationLeadFrames = true;
 	size_t m_activePictureLookaheadFrames = 0;
+	bool m_activePictureLookaheadConfigured = false;
 	int m_queueTargetLatencyMs = 0;
 	std::string m_displayRecoveryStatePath;
 	bool m_targetOnlyDisplaySessionActive = false;
