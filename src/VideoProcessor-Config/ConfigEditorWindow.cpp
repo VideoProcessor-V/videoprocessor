@@ -13610,6 +13610,16 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         "and CNTR to 50 (and leaves the custom dim). VP's copy of your script stops acting on the last frame "
         "until video returns. 0 keeps the projector where it was, as before."));
     driveForm->addRow(QStringLiteral("Full light after no video (0 = off)"), idleRestore);
+    // Bug hunt 3 (C3, new switch, default on): led_handover.
+    auto* handover = bindCheckField(QStringLiteral("Hand the projector to whichever VideoProcessor is playing"),
+        led, QStringLiteral("led_handover"), true);
+    handover->setToolTip(QStringLiteral(
+        "On (default): VideoProcessor and the VP Renderer filter in MPC never drive the projector at the same "
+        "time, and whichever starts playing gets it. The one that had it puts CNTR back to 50 and the LED to the "
+        "LED ceiling, lets go of the port and waits; it takes the projector back (starting from full light) once "
+        "the other lets go while it is still playing. Off: the first to open the port keeps it and the other runs "
+        "as a dry run until it is restarted, as before."));
+    driveForm->addRow(QString(), handover);
     auto syncExperiment = [experimentEnabled, method, stepMs, turnStep, customStart, customFloor]
     {
         const bool on = experimentEnabled->isChecked();

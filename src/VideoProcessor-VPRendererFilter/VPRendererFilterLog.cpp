@@ -69,7 +69,9 @@ namespace VPRendererFilterLog
 				if (size > kRotateBytes)
 					MoveFileExW(path.c_str(), (path + L".1").c_str(), MOVEFILE_REPLACE_EXISTING);
 			}
-			File() = _wfsopen(path.c_str(), L"ab", _SH_DENYWR);
+			// Bug hunt 3 (C11): shared for writing, so a second player (or a second
+			// graph in another process) can log too instead of logging nowhere.
+			File() = _wfsopen(path.c_str(), L"ab", _SH_DENYNO);
 			if (File())
 				Path() = path;
 		}

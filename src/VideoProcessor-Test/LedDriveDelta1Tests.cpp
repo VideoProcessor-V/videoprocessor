@@ -1821,6 +1821,22 @@ namespace VideoProcessorTest
 			Assert::IsFalse(Validates("[led_drive.Default]\nled_btb_passthrough: maybe\n", error));
 		}
 
+		// Bug hunt 3 (C3): led_handover, a new switch, on by default.
+		TEST_METHOD(HandoverSwitchIsReadAndOnByDefault)
+		{
+			Assert::IsTrue(LedDriveConfig().handover, L"led_handover on by default");
+			std::string error;
+			const std::string text = "[led_drive.Default]\nled_handover: false\n";
+			Assert::IsTrue(Validates(text, error), std::wstring(error.begin(), error.end()).c_str());
+			const std::string file = Write(text);
+			ConfigFile config;
+			Assert::IsTrue(config.Load(file.c_str()));
+			const LedDriveConfig led = ReadLedDriveConfig(config);
+			DeleteFileA(file.c_str());
+			Assert::IsFalse(led.handover);
+			Assert::IsFalse(Validates("[led_drive.Default]\nled_handover: maybe\n", error));
+		}
+
 		// ---- Bug hunt 2 2026-10-17: "Dynamic Drive" - [dynamic_drive*] is an alias ----
 
 		TEST_METHOD(DynamicDriveSectionIsAnAliasOfLedDrive)

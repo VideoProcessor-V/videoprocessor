@@ -404,6 +404,13 @@ namespace LedDrive
 		// (only a command that tick does not send itself). Off = the pure script
 		// stream: a failed write is not repeated.
 		bool scriptResendFailedWrites = true;
+		// Bug hunt 3 (C3, new switch, default on): led_handover - whoever is playing
+		// owns the projector port. A side that starts playing while VideoProcessor.exe
+		// or the VP Renderer filter holds the drive asks it to hand over; the holder
+		// puts CNTR back to 50 and the light to the ceiling, releases the port and
+		// waits as a dry run, and takes the drive back once it is free while it still
+		// plays. Off = as before: the side that finds the drive held stays a dry run.
+		bool handover = true;
 		// Post-merge audit 2026-10-17 (owner rule: CNTR above need is a defect):
 		// cntr_pair_predict - compensate's CNTR pairs against the LED where it will be
 		// when the CNTR lands (cntr_latency_ms ahead: the LPW1s in flight and the
@@ -739,6 +746,7 @@ namespace LedDrive
 			Boolean("led_peak_full_coverage"),        // restore switch, hunt 2 2026-10-17
 			Boolean("led_picture_only"),              // restore switch, hunt 2 2026-10-17
 			Boolean("script_resend_failed_writes"),   // restore switch 2026-10-17
+			Boolean("led_handover"),                  // bug hunt 3 C3, default on
 			Boolean("cntr_pair_predict"),             // post-merge audit 2026-10-17
 			Number("recovery_rate_gain", 0.0, 100.0),
 			Number("recovery_rate_min", 0.0, 10000.0),
@@ -1093,6 +1101,7 @@ namespace LedDrive
 		config.TryGetBool(section, "led_peak_full_coverage", result.peakFullCoverage);
 		config.TryGetBool(section, "led_picture_only", result.pictureOnly);
 		config.TryGetBool(section, "script_resend_failed_writes", result.scriptResendFailedWrites);
+		config.TryGetBool(section, "led_handover", result.handover);   // bug hunt 3 C3
 		config.TryGetBool(section, "cntr_pair_predict", result.cntrPairPredict);
 		readNumber("recovery_rate_gain", result.recoveryRateGain);
 		readNumber("recovery_rate_min", result.recoveryRateMin);

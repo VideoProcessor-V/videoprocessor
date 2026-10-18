@@ -198,6 +198,10 @@ namespace VPRendererFilter
 		using RendererPtr = std::shared_ptr<IVideoRenderer>;
 		RendererPtr Renderer() const;
 		HRESULT CreateRenderer(std::string& reason);
+		// CreateRenderer's two halves: a new renderer object (not built), and
+		// its Build + Start (+ FileHost). A restart sends the state between them.
+		HRESULT CreateRendererObject(std::string& reason);
+		bool StartRendererObject(std::string& reason);
 		void DestroyRenderer();
 		// Sends the current format at `rate` (with the latest static HDR10
 		// metadata) when the format, the rate or that metadata changed.
@@ -226,11 +230,11 @@ namespace VPRendererFilter
 		mutable std::mutex m_rendererMutex;
 		RendererPtr m_renderer;
 		uint32_t m_rendererGeneration = 0;
-		uint64_t m_sentFormatGeneration = 0;   // format of the last OnVideoState
-		bool m_videoStateSent = false;
-		RationalRate m_sourceRate;
-		bool m_sentHdrValid = false;           // m_sentHdr went with the last state
-		HDRData m_sentHdr;
+		// What the current renderer was given (format generation, rate, static
+		// HDR10), and the restart when it refuses a change (bug hunt 3 C1).
+		FileVideoStateTracker m_stateTracker;
+		bool m_creatingRenderer = false;       // inside CreateRenderer: no restart
+		std::string m_rendererConfigPath;
 		QpcTimingClock m_timingClock;
 		// Graph state, reference clock -> QPC, PTS-verified rate (FilterTimingGlue.h).
 		FileTimingModel m_timing;

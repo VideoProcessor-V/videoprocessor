@@ -1,5 +1,6 @@
 #include <pch.h>
 #include "LedDriveModule.h"
+#include "LedDriveArbiter.h"
 
 #include <fstream>
 
@@ -1089,6 +1090,37 @@ namespace LedDrive
 		pendingCut = pendingFade = false;
 	}
 
+	// led_handover (bug hunt 3 C3): the projector is at the ceiling and CNTR 50
+	// after a handover in either direction; the models and controllers start
+	// again from there, waiting for a fresh measurement. No command is sent.
+	void LedDriveModule::ResetModelsToCeilingLocked()
+	{
+		fadeToBlack = FadeToBlack::Normal;
+		blackSinceMs = -1.0;
+		compensator.Reset(led.ledCeiling);
+		pairing.Reset(50);
+		pairing.SetCeiling(-1);
+		pairing.SetBias(0.0);
+		pairing.SetHold(-1);
+		recovery.Stop();
+		pendingRecovery = false;
+		recoveryLimit = 1e9;
+		policy = ControllerOutput();
+		holding = false;
+		modelledLevel = led.ledCeiling;
+		commands.clear();
+		queuedLight = -1;
+		ledModel.Reset(LedFractionLocked(modelledLevel));
+		contrastCommands.clear();
+		contrastModel.Reset(1.0);
+		assistContrastDriven = false;
+		awaitingContrastReset = false;
+		haveStats = false;
+		pendingCut = pendingFade = false;
+		gain.active = false;
+		gain.gain = 1.0;
+	}
+
 	bool LedDriveModule::CustomDimEngaged() const
 	{
 		std::lock_guard<std::mutex> guard(mutex);
@@ -1122,6 +1154,30 @@ namespace LedDrive
 	{
 		std::lock_guard<std::mutex> guard(mutex);
 		return live;
+	}
+
+	void LedDriveModule::SetHandover(std::shared_ptr<DriveHandoverChannel> channel)
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		handover = std::move(channel);
+	}
+
+	bool LedDriveModule::HandoverStandby() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return handoverStandby;
+	}
+
+	int LedDriveModule::HandoversGiven() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return handoversGiven;
+	}
+
+	int LedDriveModule::HandoversTaken() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return handoversTaken;
 	}
 
 	DriverStatus LedDriveModule::ProjectorStatus() const
@@ -1173,12 +1229,31 @@ namespace LedDrive
 		std::unique_ptr<IProjectorDriver> opened = CreateProjectorDriver(protocol, startProjector, portFactory);
 		std::string error;
 		bool driving = protocol != "none";
+		// led_handover (bug hunt 3 C3): the channel, when this module may hand
+		// the drive over and take it.
+		std::shared_ptr<DriveHandoverChannel> channel;
+		{
+			std::lock_guard<std::mutex> guard(mutex);
+			if (handover && handover->Usable() && startLed.handover && protocol != "none")
+				channel = handover;
+		}
+		bool standby = false;
 		if (!opened->Open(error))
 		{
-			DebugLog::Log("Dynamic Drive: %s; continuing as a dry run", error.c_str());
+			// Another owner has the drive: wait for it as a dry run (and ask for
+			// it while playing) instead of staying a dry run for good.
+			standby = channel && IsDriveHeldError(error);
+			DebugLog::Log("Dynamic Drive: %s; continuing as a dry run%s", error.c_str(),
+				standby ? " until the other owner hands the projector over (led_handover)" : "");
 			opened = CreateProjectorDriver("none", startProjector, portFactory);
 			opened->Open(error);
 			driving = false;
+		}
+		else if (channel)
+			channel->ClearRequests();   // requests made before this owner took the drive
+		{
+			std::lock_guard<std::mutex> guard(mutex);
+			handoverStandby = standby;
 		}
 		// audit 2026-10-16: LDMM 0 at every start on a driven projector (one
 		// command), not only while the custom dim is configured: a crash during
@@ -1285,11 +1360,156 @@ namespace LedDrive
 				current.adaptiveGamma;
 		};
 		setSmoothing(smoothingWanted(), 50);
+
+		// led_handover (bug hunt 3 C3): whoever is playing owns the port.
+		// Playing = a video frame within kHandoverPlayingMs; a side that handed
+		// the drive over leaves the one that asked kHandoverGraceMs to take it.
+		const auto kHandoverPlayingMs = 2000.0;
+		const auto kHandoverGrace = std::chrono::milliseconds(2000);
+		bool handoverYielded = false;           // handed over; take it back only once free
+		bool handoverRequested = false;         // asked once for this playing spell
+		bool handoverWasPlaying = false;
+		std::chrono::steady_clock::time_point handoverYieldedAt{};
+		auto serviceHandover = [&]()
+		{
+			if (!channel)
+				return;
+			bool playing = false;
+			bool enabled = false;
+			{
+				std::lock_guard<std::mutex> guard(mutex);
+				playing = lastFrameWallMs >= 0.0 && MsSinceLastFrameLocked() < kHandoverPlayingMs;
+				enabled = led.handover;
+			}
+			if (driving)
+			{
+				if (!enabled || !channel->TakeRequest())
+					return;
+				// Another side started playing: hand over. The picture is left
+				// alone from now on; CNTR goes back to 50 first (never left above
+				// the need), then full light, then the port is released.
+				{
+					std::lock_guard<std::mutex> guard(mutex);
+					live = false;
+					applyGain = false;
+					gain.active = false;
+					gain.gain = 1.0;
+				}
+				setSmoothing(false, 50);
+				const DriverStatus status = driver->Status();
+				bool contrastAway = contrastDriven || status.contrastBusy ||
+					(status.lastSentContrast >= 0 && status.lastSentContrast != 50);
+				bool dimEngaged = false;
+				ProjectorConfig projectorNow;
+				{
+					std::lock_guard<std::mutex> guard(mutex);
+					contrastAway = contrastAway || assistContrastDriven;
+					dimEngaged = fadeToBlack != FadeToBlack::Normal;
+					projectorNow = projector;
+				}
+				driver->BeginShutdown();
+				bool contrastOk = true;
+				if (contrastAway)
+					contrastOk = driver->SendNow("CNTR", 50, 0);
+				RestoreOutcome restored;
+				RestoreFullLight(*driver, current.ledCeiling,
+					current.ftbCustomDim != FtbCustomDim::Off || dimEngaged, false, &restored);
+				std::unique_ptr<IProjectorDriver> dry = CreateProjectorDriver("none", projectorNow, portFactory);
+				std::string ignored;
+				dry->Open(ignored);
+				std::unique_ptr<IProjectorDriver> previous;
+				{
+					std::lock_guard<std::mutex> guard(mutex);
+					previous = std::move(driver);
+					driver = std::move(dry);
+					seenSends = driver->Status().lightSends;
+					ResetModelsToCeilingLocked();
+					handoverStandby = true;
+					++handoversGiven;
+				}
+				previous->Close();   // releases the drive
+				driving = false;
+				contrastDriven = false;
+				restoreAssist = false;
+				resendLight = resendContrast = completeContrast = -1;
+				cutShort = false;
+				controller.Reset(current.ledCeiling, 50);
+				handoverYielded = true;
+				handoverRequested = false;
+				handoverYieldedAt = std::chrono::steady_clock::now();
+				DebugLog::Log("Dynamic Drive: another VideoProcessor started playing; projector handed over "
+					"(CNTR 50%s, light %d%s; led_handover)", contrastAway ? (contrastOk ? "" : " not confirmed") :
+					" already", current.ledCeiling, restored.light ? "" : " not confirmed");
+				return;
+			}
+			bool standbyNow = false;
+			{
+				std::lock_guard<std::mutex> guard(mutex);
+				standbyNow = handoverStandby;
+			}
+			if (!standbyNow || !enabled)
+				return;
+			if (playing && !handoverWasPlaying)
+				handoverRequested = false;   // a new playing spell may ask again
+			handoverWasPlaying = playing;
+			if (!playing)
+				return;   // only a side that plays takes the projector
+			if (handoverYielded)
+			{
+				if (std::chrono::steady_clock::now() - handoverYieldedAt < kHandoverGrace)
+					return;
+			}
+			else if (!handoverRequested)
+			{
+				handoverRequested = true;
+				channel->Request();
+				DebugLog::Log("Dynamic Drive: playing while another VideoProcessor has the projector; asked it to "
+					"hand over (led_handover)");
+			}
+			if (!channel->DriveFree())
+				return;
+			ProjectorConfig projectorNow;
+			{
+				std::lock_guard<std::mutex> guard(mutex);
+				projectorNow = projector;
+			}
+			std::unique_ptr<IProjectorDriver> taken = CreateProjectorDriver(protocol, projectorNow, portFactory);
+			std::string why;
+			if (!taken->Open(why))
+				return;   // taken by someone else first, or the port failed: try again later
+			channel->ClearRequests();
+			BringToKnownState(*taken, current.ledCeiling, true, current.mode == Mode::Script);
+			std::unique_ptr<IProjectorDriver> previous;
+			{
+				std::lock_guard<std::mutex> guard(mutex);
+				previous = std::move(driver);
+				driver = std::move(taken);
+				seenSends = driver->Status().lightSends;
+				ResetModelsToCeilingLocked();
+				live = true;
+				compensating = led.mode == Mode::Compensate;
+				applyGain = led.mode != Mode::LogOnly && led.mode != Mode::PictureOnly;
+				handoverStandby = false;
+				++handoversTaken;
+			}
+			previous->Close();
+			driving = true;
+			contrastDriven = false;
+			resendLight = resendContrast = completeContrast = -1;
+			controller.Reset(current.ledCeiling, 50);
+			setSmoothing(smoothingWanted(), 50);
+			DebugLog::Log("Dynamic Drive: %s the projector (light %d, CNTR 50; led_handover)",
+				handoverYielded ? "took back" : "took over", current.ledCeiling);
+			handoverYielded = false;
+			handoverRequested = false;
+		};
+
 		std::string lastLog;
 		auto lastLogTime = std::chrono::steady_clock::now();
 		for (;;)
 		{
 			const auto tickStart = std::chrono::steady_clock::now();
+			serviceHandover();
 			FrameStats stats;
 			bool have = false;
 			bool restoreScriptIdle = false;   // audit 2026-10-16

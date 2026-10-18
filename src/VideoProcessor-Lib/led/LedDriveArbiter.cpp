@@ -42,7 +42,8 @@ namespace LedDrive
 			{
 				const DWORD error = GetLastError();
 				Finish(State::Refused, error == ERROR_ACCESS_DENIED ?
-					"the LED drive is held by another owner (" + Narrow(name) + ": access denied)" :
+					"the LED drive is held by another owner (" + Narrow(name) + ": access denied) " +
+						kDriveHeldMarker :
 					"cannot create " + Narrow(name) + " (error " + std::to_string(error) + ")");
 				return;
 			}
@@ -52,18 +53,25 @@ namespace LedDrive
 				CloseHandle(handle);
 				Finish(State::Refused, wait == WAIT_TIMEOUT ?
 					"another VideoProcessor (VideoProcessor.exe or the VP Renderer filter) is driving the projector (" +
-						Narrow(name) + " is held)" :
+						Narrow(name) + " is held) " + kDriveHeldMarker :
 					"cannot take " + Narrow(name) + " (error " + std::to_string(GetLastError()) + ")");
 				return;
 			}
 			Finish(wait == WAIT_ABANDONED ? State::Abandoned : State::Held, std::string());
+			bool crash = false;
 			{
 				std::unique_lock<std::mutex> guard(mutex);
 				changed.wait(guard, [this] { return release; });
+				crash = simulateCrash;
 			}
-			ReleaseMutex(handle);
+			// Tests: the thread ends still owning the mutex, as a process that
+			// crashed does (the next owner finds it abandoned).
+			if (!crash)
+				ReleaseMutex(handle);
 			CloseHandle(handle);
 		}
+
+		bool simulateCrash = false;
 
 		void Finish(State result, const std::string& why)
 		{
@@ -121,6 +129,26 @@ namespace LedDrive
 	}
 
 	DriveOwnership::~DriveOwnership() = default;
+
+	void DriveOwnership::SimulateCrashForTest()
+	{
+		if (!holder)
+			return;
+		{
+			std::lock_guard<std::mutex> guard(holder->mutex);
+			holder->simulateCrash = true;
+		}
+		holder.reset();   // the thread ends without releasing the mutex
+	}
+
+	void ArbitratedSerialPort::SimulateCrashForTest()
+	{
+		if (ownership)
+			ownership->SimulateCrashForTest();
+		ownership.reset();
+		if (inner)
+			inner->Close();
+	}
 
 
 	ArbitratedSerialPort::ArbitratedSerialPort(std::unique_ptr<ISerialPort> innerIn, const std::wstring& name)
@@ -198,6 +226,60 @@ namespace LedDrive
 			return false;
 		}
 		return inner->ReadLine(timeoutMs, line);
+	}
+
+	DriveHandoverChannel::DriveHandoverChannel(const std::wstring& mutexNameIn)
+		: mutexName(mutexNameIn)
+	{
+		const std::wstring eventName = mutexName + L".HandoverRequest";
+		// Auto-reset: one request is taken by one holder.
+		HANDLE handle = CreateEventW(nullptr, FALSE, FALSE, eventName.c_str());
+		if (!handle)
+			handle = OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, FALSE, eventName.c_str());
+		if (!handle)
+			DebugLog::Log("LED drive: handover unavailable (%s: error %lu); the drive is not handed over",
+				Narrow(eventName).c_str(), GetLastError());
+		event = handle;
+	}
+
+	DriveHandoverChannel::~DriveHandoverChannel()
+	{
+		if (event)
+			CloseHandle(static_cast<HANDLE>(event));
+	}
+
+	void DriveHandoverChannel::Request()
+	{
+		if (event)
+			SetEvent(static_cast<HANDLE>(event));
+	}
+
+	bool DriveHandoverChannel::TakeRequest()
+	{
+		return event && WaitForSingleObject(static_cast<HANDLE>(event), 0) == WAIT_OBJECT_0;
+	}
+
+	void DriveHandoverChannel::ClearRequests()
+	{
+		if (event)
+			ResetEvent(static_cast<HANDLE>(event));
+	}
+
+	bool DriveHandoverChannel::DriveFree() const
+	{
+		HANDLE handle = OpenMutexW(SYNCHRONIZE, FALSE, mutexName.c_str());
+		if (!handle)
+			return GetLastError() == ERROR_FILE_NOT_FOUND;   // never made, or every owner gone
+		// Taken and given straight back on this thread: free (an abandoned
+		// mutex - an owner that crashed - is free too). A mutex this thread
+		// already owns would read free; the module's own ownership lives on the
+		// arbiter's holder thread, never on the thread that probes.
+		const DWORD wait = WaitForSingleObject(handle, 0);
+		const bool free = wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED;
+		if (free)
+			ReleaseMutex(handle);
+		CloseHandle(handle);
+		return free;
 	}
 
 	SerialPortFactory ArbitratedSerialPortFactory(SerialPortFactory innerFactory, const std::wstring& mutexName)

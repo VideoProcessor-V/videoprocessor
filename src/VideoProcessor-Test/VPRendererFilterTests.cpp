@@ -20,6 +20,8 @@
 #include <dvdmedia.h>
 #include <IMediaSideData.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -854,6 +856,356 @@ namespace Tests
 			tracker.Reset();
 			Assert::IsFalse(tracker.HasStaticHdr());
 			Assert::AreEqual<uint64_t>(0, tracker.DolbyVisionFrames());
+		}
+	};
+
+
+	// Bug hunt 3 (C1): the filter stalled for good after a media-type change,
+	// a rate change or a seek. A stand-in renderer refuses a state in place
+	// exactly as LibplaceboVideoRenderer::OnVideoState does (another display
+	// mode - size, interlacing or rate - or pixel format; optionally any EOTF
+	// change, as an effective profile change does); the filter model below
+	// runs the steps of DeliverSample (ObserveSample, the state tracker's
+	// Ensure, BuildTiming) for each sample.
+	namespace
+	{
+		class StandInRenderer final : public IFileVideoStateSink
+		{
+		public:
+			bool SendVideoState(VideoStateComPtr& state) override
+			{
+				++offered;
+				if (accepted && (!state->displayMode || !accepted->displayMode ||
+					*state->displayMode != *accepted->displayMode ||
+					state->videoFrameEncoding != accepted->videoFrameEncoding ||
+					(refuseEotfChange && state->eotf != accepted->eotf)))
+					return false;
+				accepted = state;
+				return true;
+			}
+			bool RestartRenderer(std::string& reason) override
+			{
+				if (restartFails)
+				{
+					reason = "no renderer";
+					return false;
+				}
+				++generation;
+				accepted = nullptr;
+				started = false;
+				return true;
+			}
+			void StartRestartedRenderer() override { started = true; }
+
+			VideoStateComPtr accepted;
+			int generation = 1;
+			int offered = 0;
+			bool started = true;
+			bool refuseEotfChange = false;
+			bool restartFails = false;
+		};
+
+		// The filter's per-sample path over a stream with Matroska-style 1 ms
+		// timestamps, rate-adjusted by the source as DirectShow sources do.
+		struct FilterModel
+		{
+			FileTimingModel timing;
+			FileVideoStateTracker tracker;
+			StandInRenderer renderer;
+			VideoFormat format;
+			uint64_t generation = 1;
+			RationalRate exact;
+			double rate = 1.0;
+			int64_t segmentStartFrame = 0;
+			int64_t frame = 0;
+			bool paused = false;
+			int delivered = 0;
+			int refused = 0;
+			FileFrameTiming last;
+			bool haveHdr = false;
+			HDRData hdr;
+
+			FilterModel()
+			{
+				exact.numerator = 24000;
+				exact.denominator = 1001;
+				format.encoding = VideoFrameEncoding::P010;
+				format.width = 1920;
+				format.height = 1080;
+				format.avgTimePerFrame = 417083;
+				timing.Run(0);
+			}
+
+			// Stream time of a frame in ms (rounded as Matroska stores it),
+			// relative to the segment start and divided by the playback rate.
+			int64_t SampleStart(int64_t n) const
+			{
+				const double ms = std::floor((double)n * 1000.0 * exact.denominator / exact.numerator + 0.5);
+				const double segmentMs = std::floor((double)segmentStartFrame * 1000.0 * exact.denominator /
+					exact.numerator + 0.5);
+				return static_cast<int64_t>(std::llround((ms - segmentMs) * 10000.0 / rate));
+			}
+
+			bool Sample()
+			{
+				const int64_t start = SampleStart(frame++);
+				const RationalRate observed = timing.ObserveSample(!paused, start, false,
+					format.avgTimePerFrame, tracker.SentRate());
+				std::string reason;
+				const FileStateOutcome outcome = tracker.Ensure(format, generation, observed,
+					haveHdr ? &hdr : nullptr, renderer, reason);
+				if (outcome == FileStateOutcome::Deferred || outcome == FileStateOutcome::Failed ||
+					!renderer.accepted || !renderer.started)
+				{
+					++refused;
+					return false;
+				}
+				last = timing.BuildTiming(Times(start, 417083), tracker.SentRate());
+				++delivered;
+				return true;
+			}
+
+			// n samples; true when every one of the last `tail` was delivered.
+			bool Play(int n, int tail = 10)
+			{
+				int run = 0;
+				for (int i = 0; i < n; ++i)
+					run = Sample() ? run + 1 : 0;
+				return run >= tail;
+			}
+
+			// Seek: flush, then the new segment from the target frame.
+			void Seek(int64_t toFrame)
+			{
+				timing.BeginFlush();
+				timing.EndFlush();
+				segmentStartFrame = frame = toFrame;
+				timing.NewSegment(0, -1, rate);
+			}
+
+			// A rate change: the source flushes and starts a segment at the new rate.
+			void SetRate(double newRate)
+			{
+				timing.BeginFlush();
+				timing.EndFlush();
+				rate = newRate;
+				segmentStartFrame = frame;
+				timing.NewSegment(0, -1, rate);
+			}
+
+			// A dynamic media-type change (SetMediaType on a sample).
+			void ChangeFormat(uint32_t width, uint32_t height, VideoFrameEncoding encoding)
+			{
+				format.width = width;
+				format.height = height;
+				format.encoding = encoding;
+				++generation;
+				timing.MarkDiscontinuity();
+			}
+
+			void Pause() { paused = true; timing.Pause(); }
+			void Resume() { paused = false; timing.Run(0); }
+		};
+	}
+
+	TEST_CLASS(VPRendererFilterStreamChangeTests)
+	{
+	public:
+		// The rate verifier: 1 ms container timestamps of a 23.976 stream are
+		// 41 or 42 ms apart, yet agree with the 417083 header.
+		TEST_METHOD(QuantizedTimestampsAgreeWithTheHeaderRate)
+		{
+			FilterModel m;
+			RationalRate r;
+			for (int i = 0; i < 60; ++i)
+				r = m.timing.ObserveSample(true, m.SampleStart(i), false, 417083);
+			Assert::AreEqual<uint32_t>(24000, r.numerator, L"the header rate stands");
+			Assert::AreEqual<uint32_t>(1001, r.denominator);
+
+			// Without a header the mean period over the 1 ms stamps finds 23.976.
+			filesource::PtsRateVerifier v;
+			for (int i = 0; i < 240; ++i)
+				v.AddSampleStart(m.SampleStart(i));
+			const RationalRate measured = v.MeasuredRate();
+			Assert::AreEqual<uint32_t>(24000, measured.numerator);
+			Assert::AreEqual<uint32_t>(1001, measured.denominator);
+			// A 25 fps claim still disagrees.
+			Assert::IsTrue(v.Check(filesource::SnapAvgTimePerFrame(400000)) ==
+				filesource::PtsRateVerifier::Verdict::Disagrees);
+		}
+
+		TEST_METHOD(PlaybackRateChangesKeepTheSourceRateAndNeverRestart)
+		{
+			FilterModel m;
+			Assert::IsTrue(m.Play(40), L"plays at 1x");
+			for (const double rate : { 2.0, 1.0, 0.5, 1.0, 4.0, 1.0 })
+			{
+				m.SetRate(rate);
+				Assert::IsTrue(m.Play(40), L"plays after the rate change");
+				Assert::AreEqual(rate, m.last.playbackRate, L"the speed goes to VP");
+				Assert::AreEqual<uint32_t>(24000, m.tracker.SentRate().numerator, L"the source rate is unchanged");
+				Assert::AreEqual<uint32_t>(1001, m.tracker.SentRate().denominator);
+			}
+			Assert::AreEqual<uint32_t>(0, m.tracker.Restarts(), L"no renderer restart for a speed change");
+			Assert::AreEqual(0, m.refused);
+		}
+
+		TEST_METHOD(MediaTypeChangesRestartTheRendererOnceAndKeepDelivering)
+		{
+			FilterModel m;
+			Assert::IsTrue(m.Play(20));
+			// A new size: refused in place, so one restart; frames flow again at once.
+			m.ChangeFormat(3840, 2160, VideoFrameEncoding::P010);
+			Assert::IsTrue(m.Sample(), L"the first sample after the change is delivered");
+			Assert::AreEqual<uint32_t>(1, m.tracker.Restarts());
+			Assert::AreEqual(2, m.renderer.generation);
+			Assert::AreEqual(3840u, m.renderer.accepted->displayMode->FrameWidth());
+			Assert::IsTrue(m.Play(20));
+			// A new pixel format (P010 -> NV12): another restart.
+			m.ChangeFormat(3840, 2160, VideoFrameEncoding::NV12);
+			Assert::IsTrue(m.Play(20));
+			Assert::AreEqual<uint32_t>(2, m.tracker.Restarts());
+			Assert::IsTrue(m.renderer.accepted->videoFrameEncoding == VideoFrameEncoding::NV12);
+			// A change the renderer takes in place (same mode and format): no restart.
+			m.ChangeFormat(3840, 2160, VideoFrameEncoding::NV12);
+			Assert::IsTrue(m.Play(20));
+			Assert::AreEqual<uint32_t>(2, m.tracker.Restarts());
+			Assert::AreEqual(0, m.refused);
+		}
+
+		TEST_METHOD(StaticHdrArrivingLaterIsSentAndAProfileChangeRestarts)
+		{
+			FilterModel m;
+			m.renderer.refuseEotfChange = true;   // the effective profile differs for PQ
+			Assert::IsTrue(m.Play(10));
+			Assert::IsTrue(m.renderer.accepted->eotf == EOTF::SDR);
+			m.haveHdr = true;
+			m.hdr.masteringDisplayMaxLuminance = 1000;
+			m.hdr.maxCll = 1000;
+			Assert::IsTrue(m.Play(10));
+			// No transfer signalled + HDR10 static metadata: PQ (C7), via a restart.
+			Assert::IsTrue(m.renderer.accepted->eotf == EOTF::PQ);
+			Assert::AreEqual<uint32_t>(1, m.tracker.Restarts());
+			Assert::AreEqual(1000.0, m.renderer.accepted->hdrData->maxCll);
+		}
+
+		TEST_METHOD(SeeksAndFlushesInAnyOrderKeepDelivering)
+		{
+			FilterModel m;
+			Assert::IsTrue(m.Play(30));
+			// Seek forward, back, to the start and far ahead.
+			for (const int64_t target : { 5000LL, 120LL, 0LL, 99999LL })
+			{
+				m.Seek(target);
+				Assert::IsTrue(m.Sample(), L"the first sample after a seek is delivered");
+				Assert::IsTrue(m.last.discontinuity, L"a seek is a discontinuity for VP");
+				Assert::IsTrue(m.Play(30));
+			}
+			// NewSegment before the flush, and two segments in a row.
+			m.timing.NewSegment(0, -1, 1.0);
+			m.timing.BeginFlush();
+			m.timing.EndFlush();
+			Assert::IsTrue(m.Play(10));
+			m.timing.NewSegment(0, -1, 1.0);
+			m.timing.NewSegment(0, -1, 1.0);
+			Assert::IsTrue(m.Play(10));
+			Assert::AreEqual<uint32_t>(0, m.tracker.Restarts());
+			Assert::AreEqual(0, m.refused);
+		}
+
+		TEST_METHOD(PauseAndResumeHoldThenPlayWithoutRestart)
+		{
+			FilterModel m;
+			Assert::IsTrue(m.Play(20));
+			m.Pause();
+			Assert::IsTrue(m.Sample());
+			Assert::IsTrue(m.last.paused, L"held while paused");
+			Assert::AreEqual<int64_t>(0, m.last.presentationQpc);
+			m.Resume();
+			Assert::IsTrue(m.Play(20));
+			Assert::IsFalse(m.last.paused);
+			// Pause, seek while paused, resume.
+			m.Pause();
+			m.Seek(300);
+			Assert::IsTrue(m.Sample());
+			m.Resume();
+			Assert::IsTrue(m.Play(20));
+			Assert::AreEqual<uint32_t>(0, m.tracker.Restarts());
+		}
+
+		// Every order of the four events, twice over: never a permanent stall.
+		TEST_METHOD(EveryOrderOfFormatRateSeekAndPauseKeepsDelivering)
+		{
+			int events[4] = { 0, 1, 2, 3 };
+			int orders = 0;
+			do
+			{
+				FilterModel m;
+				Assert::IsTrue(m.Play(20));
+				bool big = false;
+				for (int round = 0; round < 2; ++round)
+					for (const int e : events)
+					{
+						switch (e)
+						{
+						case 0:
+							big = !big;
+							m.ChangeFormat(big ? 3840 : 1920, big ? 2160 : 1080, VideoFrameEncoding::P010);
+							break;
+						case 1: m.SetRate(m.rate == 1.0 ? 2.0 : 1.0); break;
+						case 2: m.Seek(m.frame / 2); break;
+						case 3: m.Pause(); m.Sample(); m.Resume(); break;
+						}
+						Assert::IsTrue(m.Play(25), (L"stalled after event " + std::to_wstring(e) +
+							L" in order " + std::to_wstring(orders)).c_str());
+					}
+				Assert::AreEqual<uint32_t>(2, m.tracker.Restarts(), L"restarts only for the size changes");
+				Assert::AreEqual(0, m.refused);
+				++orders;
+			} while (std::next_permutation(events, events + 4));
+			Assert::AreEqual(24, orders);
+		}
+
+		TEST_METHOD(HeaderlessStreamMeasuresOnceAndKeepsItsRate)
+		{
+			FilterModel m;
+			m.format.avgTimePerFrame = 0;
+			Assert::IsFalse(m.Sample(), L"no rate yet: deferred");
+			Assert::IsTrue(m.Play(200));
+			Assert::AreEqual<uint32_t>(24000, m.tracker.SentRate().numerator);
+			Assert::AreEqual<uint32_t>(1001, m.tracker.SentRate().denominator);
+			const uint32_t restarts = m.tracker.Restarts();
+			Assert::IsTrue(restarts <= 1, L"at most one refinement of the first measurement");
+			// A seek (no rate measured yet afterwards) keeps the sent rate.
+			m.Seek(1000);
+			Assert::IsTrue(m.Sample(), L"delivered at once after the seek");
+			Assert::IsTrue(m.Play(100));
+			Assert::AreEqual(restarts, m.tracker.Restarts());
+		}
+
+		TEST_METHOD(AFailedRestartRecoversOnALaterSample)
+		{
+			FilterModel m;
+			Assert::IsTrue(m.Play(10));
+			m.renderer.restartFails = true;
+			m.ChangeFormat(1280, 720, VideoFrameEncoding::P010);
+			Assert::IsFalse(m.Sample(), L"no renderer could be made");
+			Assert::IsFalse(m.Sample());
+			m.renderer.restartFails = false;
+			Assert::IsTrue(m.Play(10), L"the next sample that can restart does");
+			Assert::AreEqual(720u, m.renderer.accepted->displayMode->FrameHeight());
+		}
+
+		TEST_METHOD(UnsignalledTransferWithHdr10MetadataIsPq)
+		{
+			VideoFormat f;
+			f.encoding = VideoFrameEncoding::P010;
+			f.width = 3840;
+			f.height = 2160;
+			Assert::IsTrue(DecideColor(f).eotf == EOTF::SDR, L"no metadata: SDR (assumed)");
+			const FileColorDecision d = DecideColor(f, true);
+			Assert::IsTrue(d.eotf == EOTF::PQ, L"HDR10 static metadata: PQ");
+			Assert::IsTrue(d.eotfAssumed);
 		}
 	};
 }

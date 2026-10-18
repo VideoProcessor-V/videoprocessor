@@ -5,6 +5,7 @@
 #include <DisplayMode.h>
 #include <filesource/FileMediaTypeAdapter.h>
 
+#include <cmath>
 #include <exception>
 #include <memory>
 
@@ -40,7 +41,7 @@ namespace VPRendererFilter
 	// Format -> VideoState
 	//
 
-	FileColorDecision DecideColor(const VideoFormat& format)
+	FileColorDecision DecideColor(const VideoFormat& format, bool hasStaticHdr)
 	{
 		// The pin parsed dwControlFlags into fields; FileMediaTypeAdapter decodes
 		// the packed DXVA_ExtendedFormat, so re-pack them (lossless).
@@ -56,7 +57,10 @@ namespace VPRendererFilter
 		d.colorSpaceFromHeight = c.colorSpaceFromHeight;
 		if (d.eotf == EOTF::UNKNOWN)
 		{
-			d.eotf = EOTF::SDR;
+			// Bug hunt 3 (C7): an unsignalled transfer that carries HDR10 static
+			// metadata (mastering display / content light level side data) is
+			// PQ, not SDR - only HDR10 carries that metadata.
+			d.eotf = hasStaticHdr ? EOTF::PQ : EOTF::SDR;
 			d.eotfAssumed = true;
 		}
 		if (d.colorSpace == ColorSpace::UNKNOWN)
@@ -84,7 +88,7 @@ namespace VPRendererFilter
 			auto displayMode = std::make_shared<DisplayMode>(format.width, format.height,
 				format.interlaced, rate.numerator, rate.denominator, order);
 
-			const FileColorDecision color = DecideColor(format);
+			const FileColorDecision color = DecideColor(format, hdr != nullptr);
 			VideoStateComPtr result(new VideoState());
 			result->valid = true;
 			result->displayMode = displayMode;
@@ -180,13 +184,28 @@ namespace VPRendererFilter
 	}
 
 	RationalRate FileTimingModel::ObserveSample(bool hasStart, int64_t start,
-		bool discontinuity, int64_t avgTimePerFrame)
+		bool discontinuity, int64_t avgTimePerFrame, const RationalRate& current)
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
 		if (discontinuity)
 			m_verifier.OnDiscontinuity();
 		if (hasStart)
-			m_verifier.AddSampleStart(start);
+		{
+			// Source time: the rate-adjusted timestamp times the playback rate
+			// (a new segment resets the verifier, so one rate per history).
+			const double rate = m_playback.PlaybackRate();
+			m_verifier.AddSampleStart(rate > 0.0 && std::isfinite(rate) ?
+				static_cast<int64_t>(std::llround(static_cast<double>(start) * rate)) : start);
+		}
+		if (current.IsValid() &&
+			m_verifier.Check(current) != filesource::PtsRateVerifier::Verdict::Disagrees)
+		{
+			// Nothing measured yet (a new segment) keeps the current rate unless
+			// the header names another; a measurement keeps it while it agrees.
+			const RationalRate header = filesource::SnapAvgTimePerFrame(avgTimePerFrame);
+			if (m_verifier.HasMeasurement() || !header.IsValid() || header == current)
+				return current;
+		}
 		return m_verifier.EffectiveRate(avgTimePerFrame);
 	}
 
@@ -214,6 +233,84 @@ namespace VPRendererFilter
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
 		return m_playback.MotionAllowed();
+	}
+
+
+	//
+	// Renderer state across stream changes
+	//
+
+	const char* ToString(FileStateOutcome outcome)
+	{
+		switch (outcome)
+		{
+		case FileStateOutcome::Unchanged: return "unchanged";
+		case FileStateOutcome::Sent: return "sent";
+		case FileStateOutcome::SentAfterRestart: return "sent after a renderer restart";
+		case FileStateOutcome::Deferred: return "deferred";
+		case FileStateOutcome::Failed: return "failed";
+		}
+		return "?";
+	}
+
+	void FileVideoStateTracker::Reset()
+	{
+		m_sent = false;
+		m_generation = 0;
+		m_rate = RationalRate();
+		m_hdrValid = false;
+		m_hdr = HDRData();
+	}
+
+	FileStateOutcome FileVideoStateTracker::Ensure(const VideoFormat& format, uint64_t generation,
+		const RationalRate& rate, const HDRData* hdr, IFileVideoStateSink& sink, std::string& reason)
+	{
+		const bool hasHdr = hdr != nullptr;
+		const bool hdrChanged = hasHdr != m_hdrValid || (hasHdr && *hdr != m_hdr);
+		if (m_sent && generation == m_generation && (!rate.IsValid() || rate == m_rate) && !hdrChanged)
+			return FileStateOutcome::Unchanged;
+		// No rate from this sample (a new segment of a header-less stream): the
+		// rate already sent stays; a format or HDR change still goes out.
+		const RationalRate sendRate = rate.IsValid() ? rate : m_rate;
+		if (!sendRate.IsValid())
+		{
+			reason = "frame rate unknown (no AvgTimePerFrame and too few timestamps yet)";
+			return FileStateOutcome::Deferred;
+		}
+
+		VideoStateComPtr state;
+		if (!BuildFileVideoState(format, sendRate, hdr, state, reason))
+			return FileStateOutcome::Failed;
+		FileStateOutcome outcome = FileStateOutcome::Sent;
+		if (!sink.SendVideoState(state))
+		{
+			// Refused in place: a fresh renderer takes it as its first state.
+			Reset();
+			if (!sink.RestartRenderer(reason))
+			{
+				if (reason.empty())
+					reason = "the renderer refused the video state and could not be restarted";
+				return FileStateOutcome::Failed;
+			}
+			++m_restarts;
+			VideoStateComPtr fresh;
+			const bool built = BuildFileVideoState(format, sendRate, hdr, fresh, reason);
+			const bool accepted = built && sink.SendVideoState(fresh);
+			sink.StartRestartedRenderer();
+			if (!accepted)
+			{
+				if (built)
+					reason = "the restarted renderer refused the video state";
+				return FileStateOutcome::Failed;
+			}
+			outcome = FileStateOutcome::SentAfterRestart;
+		}
+		m_sent = true;
+		m_generation = generation;
+		m_rate = sendRate;
+		m_hdrValid = hasHdr;
+		m_hdr = hasHdr ? *hdr : HDRData();
+		return outcome;
 	}
 
 

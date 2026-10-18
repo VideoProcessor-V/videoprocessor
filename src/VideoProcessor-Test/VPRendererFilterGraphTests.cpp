@@ -297,5 +297,129 @@ namespace VideoProcessorTest
 			if (SUCCEEDED(com))
 				CoUninitialize();
 		}
+
+		// Bug hunt 3 (C1): rate changes (1.0 <-> other rates), seeks, flushes
+		// and pause/resume in several orders. After every event frames must
+		// reach VP again (the filter once stalled for good after the first
+		// rate change or a seek), the graph must never abort, and nothing is
+		// dropped. A media-type change cannot be forced from a file graph; the
+		// CPU tests (VPRendererFilterStreamChangeTests) cover it, and the
+		// renderer restart it triggers is logged as "restarting it" in
+		// vprfilter.log.
+		BEGIN_TEST_METHOD_ATTRIBUTE(FileSourceVpRendererSurvivesRateSeekAndPauseOrders)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(FileSourceVpRendererSurvivesRateSeekAndPauseOrders)
+		{
+			std::wstring clip;
+			if (!GateOrSkip("FileSourceVpRendererSurvivesRateSeekAndPauseOrders", clip))
+				return;
+			const std::string secondsText = Env("VP_TEST_FILTER_SECONDS");
+			const DWORD phaseMs = static_cast<DWORD>(
+				(secondsText.empty() ? 3 : (std::max)(1, std::atoi(secondsText.c_str()))) * 1000);
+
+			const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+			{
+				CComPtr<IGraphBuilder> graph;
+				Assert::IsTrue(SUCCEEDED(graph.CoCreateInstance(CLSID_FilterGraph)), L"FilterGraph");
+				CComPtr<IBaseFilter> renderer;
+				std::wstring detail;
+				Assert::IsTrue(SUCCEEDED(CreateVPRenderer(&renderer, detail)), (L"VP Renderer: " + detail).c_str());
+				Assert::IsTrue(SUCCEEDED(graph->AddFilter(renderer, L"VP Renderer")));
+				CComPtr<IBaseFilter> source;
+				Assert::IsTrue(SUCCEEDED(graph->AddSourceFilter(clip.c_str(), L"Source", &source)));
+				CComPtr<IBaseFilter> lav;
+				const bool haveLav = SUCCEEDED(lav.CoCreateInstance(kClsidLavVideo)) &&
+					SUCCEEDED(graph->AddFilter(lav, L"LAV Video Decoder"));
+				CComPtr<ICaptureGraphBuilder2> builder;
+				Assert::IsTrue(SUCCEEDED(builder.CoCreateInstance(CLSID_CaptureGraphBuilder2)));
+				Assert::IsTrue(SUCCEEDED(builder->SetFiltergraph(graph)));
+				Assert::IsTrue(SUCCEEDED(builder->RenderStream(nullptr, &MEDIATYPE_Video, source,
+					haveLav ? lav.p : nullptr, renderer)), L"source -> decoder -> VP Renderer did not connect");
+
+				HWND owner = CreateOwnerWindow();
+				CComQIPtr<IVideoWindow> window(renderer);
+				Assert::IsTrue(window != nullptr, L"IVideoWindow");
+				window->put_Owner(reinterpret_cast<OAHWND>(owner));
+				window->put_WindowStyle(WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN);
+				RECT rc = {};
+				GetClientRect(owner, &rc);
+				window->SetWindowPosition(0, 0, rc.right, rc.bottom);
+				window->put_Visible(OATRUE);
+
+				CComQIPtr<IMediaControl> control(graph);
+				CComQIPtr<IMediaEventEx> events(graph);
+				CComQIPtr<IMediaSeeking> seeking(graph);
+				CComQIPtr<IQualProp, &IID_IQualProp> quality(renderer);
+				Assert::IsTrue(control && events && quality);
+				long abortCode = 0;
+				int drawn = 0;
+
+				// Frames must reach VP again after `what` (FramesDrawn grows).
+				auto expectFrames = [&](const char* what, DWORD ms)
+				{
+					PumpFor(ms, events, &abortCode);
+					int now = 0;
+					quality->get_FramesDrawn(&now);
+					Logger::WriteMessage((std::string(what) + ": drawn " + std::to_string(now) + "\n").c_str());
+					Assert::AreEqual(0L, abortCode, (L"the graph aborted after " + Wide(what)).c_str());
+					Assert::IsTrue(now > drawn, (L"no frames reached VP after " + Wide(what)).c_str());
+					drawn = now;
+				};
+				auto seekTo = [&](LONGLONG position)
+				{
+					if (seeking)
+						seeking->SetPositions(&position, AM_SEEKING_AbsolutePositioning, nullptr,
+							AM_SEEKING_NoPositioning);
+				};
+				auto setRate = [&](double rate) { return seeking && SUCCEEDED(seeking->SetRate(rate)); };
+
+				Assert::IsTrue(SUCCEEDED(control->Run()));
+				expectFrames("play", phaseMs);
+				// Order 1: rate up, back to 1.0, seek, pause/resume.
+				if (setRate(2.0)) expectFrames("rate 2.0", phaseMs);
+				if (setRate(1.0)) expectFrames("rate 1.0 again", phaseMs);
+				seekTo(0);
+				expectFrames("seek to the start", phaseMs);
+				control->Pause();
+				PumpFor(500, events, &abortCode);
+				control->Run();
+				expectFrames("resume", phaseMs);
+				// Order 2: seek, rate down, pause, seek while paused, resume, rate 1.0.
+				seekTo(30000000);
+				expectFrames("seek to 3 s", phaseMs);
+				if (setRate(0.5)) expectFrames("rate 0.5", phaseMs);
+				control->Pause();
+				PumpFor(300, events, &abortCode);
+				seekTo(10000000);
+				PumpFor(500, events, &abortCode);
+				control->Run();
+				expectFrames("resume after a paused seek", phaseMs);
+				if (setRate(1.0)) expectFrames("rate 1.0 from 0.5", phaseMs);
+				// Order 3: pause, rate change while paused, resume, seek at speed.
+				control->Pause();
+				PumpFor(300, events, &abortCode);
+				const bool fast = setRate(2.0);
+				control->Run();
+				expectFrames("resume at a rate set while paused", phaseMs);
+				seekTo(0);
+				expectFrames("seek at speed", phaseMs);
+				if (fast && setRate(1.0)) expectFrames("final rate 1.0", phaseMs);
+				// Stop and play again (a fresh stream on the same graph).
+				Assert::IsTrue(SUCCEEDED(control->Stop()));
+				Assert::IsTrue(SUCCEEDED(control->Run()));
+				expectFrames("play after stop", phaseMs);
+
+				Assert::IsTrue(SUCCEEDED(control->Stop()));
+				int dropped = 0;
+				quality->get_FramesDroppedInRenderer(&dropped);
+				Assert::AreEqual(0, dropped, L"the VP renderer dropped file frames");
+				window->put_Visible(OAFALSE);
+				window->put_Owner(0);
+				DestroyWindow(owner);
+			}
+			if (SUCCEEDED(com))
+				CoUninitialize();
+		}
 	};
 }

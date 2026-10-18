@@ -25140,6 +25140,8 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 		// and the filter never drive the projector at the same time.
 		m_ledDrive = std::make_shared<LedDrive::LedDriveModule>(
 			LedDrive::ReadProjectorConfig(configuration), led, LedDrive::ArbitratedSerialPortFactory());
+		// Bug hunt 3 (C3, led_handover): whoever is playing owns the port.
+		m_ledDrive->SetHandover(std::make_shared<LedDrive::DriveHandoverChannel>());
 		m_ledDrive->Start();
 	}
 	if (m_impl)

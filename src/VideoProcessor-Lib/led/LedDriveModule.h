@@ -26,6 +26,7 @@
 // the driver's own thread.
 namespace LedDrive
 {
+	class DriveHandoverChannel;
 	struct CompensationGain
 	{
 		// False: the compensation hook leaves the picture untouched.
@@ -97,6 +98,16 @@ namespace LedDrive
 		// True while the experimental custom-dim fade to black is engaged.
 		bool CustomDimEngaged() const;
 		bool DrivingProjector() const;
+		// Bug hunt 3 (C3, led_handover): the drive's handover channel (the
+		// arbiter's request event beside the drive mutex). Set before Start();
+		// without one the module never hands over (the old behaviour).
+		void SetHandover(std::shared_ptr<DriveHandoverChannel> channel);
+		// True while another owner has the drive and this module waits for it
+		// as a dry run (it was refused at start, or it handed the drive over).
+		bool HandoverStandby() const;
+		// How many times this module handed the drive over / took it (back).
+		int HandoversGiven() const;
+		int HandoversTaken() const;
 		// Milliseconds since the last BeginFrame (a video frame), on the
 		// module's own clock; very large before the first. The RS-232 test is
 		// refused while video plays; led_idle_restore_s acts on it.
@@ -207,6 +218,7 @@ namespace LedDrive
 		// audit 2026-10-16: led_idle_restore_s.
 		double MsSinceLastFrameLocked() const;
 		void RestoreIdleCompensateLocked();
+		void ResetModelsToCeilingLocked();
 
 		ProjectorConfig projector;
 		LedDriveConfig led;
@@ -237,6 +249,11 @@ namespace LedDrive
 
 		std::unique_ptr<IProjectorDriver> driver;
 		bool live = false;
+		// led_handover (bug hunt 3 C3).
+		std::shared_ptr<DriveHandoverChannel> handover;
+		bool handoverStandby = false;
+		int handoversGiven = 0;
+		int handoversTaken = 0;
 		CompensationGain gain;
 		int ticks = 0;
 

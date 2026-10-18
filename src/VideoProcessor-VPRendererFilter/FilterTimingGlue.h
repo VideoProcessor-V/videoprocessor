@@ -56,7 +56,9 @@ namespace VPRendererFilter
 		bool eotfAssumed = false;
 		bool colorSpaceFromHeight = false;
 	};
-	FileColorDecision DecideColor(const VideoFormat& format);
+	// hasStaticHdr: HDR10 static metadata came with the stream; an unsignalled
+	// transfer is then PQ (assumed) rather than SDR (bug hunt 3 C7).
+	FileColorDecision DecideColor(const VideoFormat& format, bool hasStaticHdr = false);
 
 	// A valid VideoState for a parsed format at an exact rate. hdr: the static
 	// HDR10 metadata from side data (null: none seen; an empty HDRData is sent).
@@ -91,8 +93,14 @@ namespace VPRendererFilter
 		// Feeds the PTS verifier. Returns the rate to use for this stream (the
 		// snapped AvgTimePerFrame, or the measured rate when the header is 0 or
 		// disagrees with the timestamps); invalid while still unknown.
+		// Bug hunt 3 (C1): DirectShow sources rate-adjust their timestamps, so
+		// the deltas are scaled back by the playback rate: the source rate is
+		// the same at 0.5x, 1x and 2x (FileFrameTiming carries the speed).
+		// `current` (the rate the renderer already has) is kept while the
+		// timestamps still agree with it, so a refinement of the measurement
+		// never changes the renderer's mode.
 		RationalRate ObserveSample(bool hasStart, int64_t start, bool discontinuity,
-			int64_t avgTimePerFrame);
+			int64_t avgTimePerFrame, const RationalRate& current = RationalRate());
 
 		// Timing for the next delivered sample (consumes a pending
 		// discontinuity). DirectShow sources rate-adjust their timestamps, so the
@@ -110,6 +118,57 @@ namespace VPRendererFilter
 		filesource::PtsRateVerifier m_verifier;
 		bool m_extraDiscontinuity = false;
 		int32_t m_avOffsetMs = 0;
+	};
+
+
+	// Bug hunt 3 (C1): what the filter needs from its renderer to keep it
+	// showing frames across media-type, rate, seek and pause changes. The
+	// renderer may refuse a new state in place (a different display mode,
+	// pixel format or effective profile); the filter then replaces it with a
+	// fresh renderer that takes the state as its first one. Graph-free so the
+	// CPU tests drive every event order against a stand-in renderer.
+	class IFileVideoStateSink
+	{
+	public:
+		virtual ~IFileVideoStateSink() = default;
+		// The current renderer's OnVideoState: false = refused in place.
+		virtual bool SendVideoState(VideoStateComPtr& state) = 0;
+		// Destroys the current renderer and creates a fresh one (not yet built).
+		// False (with reason) when no renderer could be made.
+		virtual bool RestartRenderer(std::string& reason) = 0;
+		// Builds and starts the fresh renderer once its first state was offered.
+		virtual void StartRestartedRenderer() = 0;
+	};
+
+	enum class FileStateOutcome { Unchanged, Sent, SentAfterRestart, Deferred, Failed };
+	const char* ToString(FileStateOutcome outcome);
+
+	// The state the current renderer was given, and the send / restart rule.
+	class FileVideoStateTracker
+	{
+	public:
+		// Sends `format` at `rate` (with static HDR10 metadata when hdr is not
+		// null) when the format generation, the rate or that metadata changed
+		// since the last accepted state. An invalid rate keeps the rate already
+		// sent (a format or HDR change is still sent); with none sent yet the
+		// state is deferred. A refusal restarts the renderer once and offers
+		// the state to the fresh one.
+		FileStateOutcome Ensure(const VideoFormat& format, uint64_t generation, const RationalRate& rate,
+			const HDRData* hdr, IFileVideoStateSink& sink, std::string& reason);
+		// A new renderer that has been given nothing yet.
+		void Reset();
+		bool Sent() const { return m_sent; }
+		const RationalRate& SentRate() const { return m_rate; }
+		uint64_t SentGeneration() const { return m_generation; }
+		uint32_t Restarts() const { return m_restarts; }
+
+	private:
+		bool m_sent = false;
+		uint64_t m_generation = 0;
+		RationalRate m_rate;
+		bool m_hdrValid = false;
+		HDRData m_hdr;
+		uint32_t m_restarts = 0;
 	};
 
 

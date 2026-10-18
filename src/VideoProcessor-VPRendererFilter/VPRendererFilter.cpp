@@ -339,6 +339,67 @@ namespace VPRendererFilter
 	{
 		if (Renderer())
 			return S_OK;
+		const HRESULT hr = CreateRendererObject(reason);
+		if (FAILED(hr))
+			return hr;
+		// The executable's order: video state (when known), Build, Start. A
+		// stream without AvgTimePerFrame sends its state once the sample
+		// timestamps give the rate.
+		std::string stateReason;
+		VideoFormat format;
+		RationalRate initialRate;
+		if (CurrentFormat(format))
+			initialRate = filesource::SnapAvgTimePerFrame(format.avgTimePerFrame);
+		m_creatingRenderer = true;   // a refusal here is not answered with a restart
+		const bool sent = EnsureVideoState(initialRate, stateReason);
+		m_creatingRenderer = false;
+		if (!sent)
+			DebugLog::Log("VP Renderer filter: video state deferred to the first samples: %s",
+				stateReason.c_str());
+		if (!StartRendererObject(reason))
+		{
+			DestroyRenderer();
+			return E_FAIL;
+		}
+		return S_OK;
+	}
+
+
+	bool CVPRendererFilter::StartRendererObject(std::string& reason)
+	{
+		RendererPtr renderer = Renderer();
+		if (!renderer)
+		{
+			reason = "no renderer";
+			return false;
+		}
+		try
+		{
+			renderer->Build();
+			renderer->Start();
+			DebugLog::Log("VP Renderer filter: renderer generation %u started (plugin %ls, "
+				"renderer config '%s')", m_rendererGeneration, GetVPRendererPlugin().path.c_str(),
+				m_rendererConfigPath.c_str());
+			// The profile snapshot (rules see source=file), applied the way the
+			// executable applies it; OnHostApplied takes the queue size.
+			if (m_host)
+				m_host->SetRenderer(renderer.get());
+			return true;
+		}
+		catch (const std::exception& e)
+		{
+			reason = std::string("renderer start failed: ") + e.what();
+		}
+		catch (...)
+		{
+			reason = "renderer start failed";
+		}
+		return false;
+	}
+
+
+	HRESULT CVPRendererFilter::CreateRendererObject(std::string& reason)
+	{
 		const LoadedPlugin& plugin = GetVPRendererPlugin();
 		if (!plugin.IsLoaded())
 		{
@@ -399,31 +460,10 @@ namespace VPRendererFilter
 			{
 				std::lock_guard<std::mutex> lock(m_rendererMutex);
 				m_renderer = renderer;
-				m_videoStateSent = false;
-				m_sentHdrValid = false;
+				m_stateTracker.Reset();
 				m_appliedQueueSize = 0;
 			}
-
-			// The executable's order: video state (when known), Build, Start. A
-			// stream without AvgTimePerFrame sends its state once the sample
-			// timestamps give the rate.
-			std::string stateReason;
-			VideoFormat format;
-			RationalRate initialRate;
-			if (CurrentFormat(format))
-				initialRate = filesource::SnapAvgTimePerFrame(format.avgTimePerFrame);
-			if (!EnsureVideoState(initialRate, stateReason))
-				DebugLog::Log("VP Renderer filter: video state deferred to the first samples: %s",
-					stateReason.c_str());
-			renderer->Build();
-			renderer->Start();
-			DebugLog::Log("VP Renderer filter: renderer generation %u started (plugin %ls, "
-				"renderer config '%s')", generation, plugin.path.c_str(),
-				rendererConfigPath.c_str());
-			// The profile snapshot (rules see source=file), applied the way the
-			// executable applies it; OnHostApplied takes the queue size.
-			if (m_host)
-				m_host->SetRenderer(renderer.get());
+			m_rendererConfigPath = rendererConfigPath;
 			return S_OK;
 		}
 		catch (const std::exception& e)
@@ -445,7 +485,7 @@ namespace VPRendererFilter
 		{
 			std::lock_guard<std::mutex> lock(m_rendererMutex);
 			renderer.swap(m_renderer);
-			m_videoStateSent = false;
+			m_stateTracker.Reset();
 		}
 		if (!renderer)
 			return;
@@ -602,38 +642,68 @@ namespace VPRendererFilter
 			return false;
 		}
 		const bool hasHdr = m_sideData.HasStaticHdr();
-		const bool hdrChanged = hasHdr != m_sentHdrValid ||
-			(hasHdr && m_sideData.StaticHdr() != m_sentHdr);
-		if (m_videoStateSent && generation == m_sentFormatGeneration &&
-			(!rate.IsValid() || rate == m_sourceRate) && !hdrChanged)
-			return true;
-		if (!rate.IsValid() && m_videoStateSent)
-			return true;   // keep the sent rate until the timestamps give one
 
-		VideoStateComPtr state;
-		if (!BuildFileVideoState(format, rate, hasHdr ? &m_sideData.StaticHdr() : nullptr,
-			state, reason))
-			return false;
-		if (!renderer->OnVideoState(state))
+		// Bug hunt 3 (C1): a refused state (new display mode, pixel format or
+		// effective profile after a media-type change, a measured rate, a seek)
+		// used to leave every later frame undelivered. The renderer is now
+		// replaced and the state becomes the fresh renderer's first.
+		class Sink final : public IFileVideoStateSink
 		{
-			// The renderer could not take the change in place (pixel format or
-			// mode); it reports the restart through its callback. Logged here.
-			reason = "the renderer rejected the video state";
+		public:
+			explicit Sink(CVPRendererFilter& filterIn) : filter(filterIn) {}
+			bool SendVideoState(VideoStateComPtr& state) override
+			{
+				RendererPtr current = filter.Renderer();
+				if (!current || !current->OnVideoState(state))
+					return false;
+				sent = state;
+				return true;
+			}
+			bool RestartRenderer(std::string& why) override
+			{
+				if (filter.m_creatingRenderer)
+				{
+					why = "the new renderer refused its first video state";
+					return false;
+				}
+				DebugLog::Log("VP Renderer filter: the renderer cannot take the new video state in "
+					"place; restarting it (generation %u)", filter.m_rendererGeneration);
+				filter.DestroyRenderer();
+				return SUCCEEDED(filter.CreateRendererObject(why));
+			}
+			void StartRestartedRenderer() override
+			{
+				std::string why;
+				if (!filter.StartRendererObject(why))
+				{
+					DebugLog::Log("VP Renderer filter: restarted renderer did not start: %s", why.c_str());
+					filter.DestroyRenderer();
+				}
+			}
+			VideoStateComPtr sent;
+		private:
+			CVPRendererFilter& filter;
+		};
+
+		Sink sink(*this);
+		const FileStateOutcome outcome = m_stateTracker.Ensure(format, generation, rate,
+			hasHdr ? &m_sideData.StaticHdr() : nullptr, sink, reason);
+		if (outcome == FileStateOutcome::Unchanged)
+			return true;
+		if (outcome == FileStateOutcome::Deferred || outcome == FileStateOutcome::Failed)
+		{
+			if (outcome == FileStateOutcome::Failed)
+				DebugLog::Log("VP Renderer filter: video state %s: %s", ToString(outcome), reason.c_str());
 			return false;
 		}
-		const FileColorDecision color = DecideColor(format);
-		m_sourceRate = rate;
-		m_sentHdrValid = hasHdr;
-		if (hasHdr)
-			m_sentHdr = m_sideData.StaticHdr();
-		m_videoStateSent = true;
-		m_sentFormatGeneration = generation;
+		const FileColorDecision color = DecideColor(format, hasHdr);
+		const RationalRate sentRate = m_stateTracker.SentRate();
 		m_timing.MarkDiscontinuity();
-		if (m_host)
-			m_host->UpdateVideoState(state);
-		DebugLog::Log("VP Renderer filter: video state sent: %ux%u %ls rate %u/%u eotf %ls%s "
-			"colorspace %ls%s hdr10 %s", format.width, format.height, ::ToString(format.encoding),
-			rate.numerator, rate.denominator, ::ToString(color.eotf),
+		if (m_host && sink.sent)
+			m_host->UpdateVideoState(sink.sent);
+		DebugLog::Log("VP Renderer filter: video state %s: %ux%u %ls rate %u/%u eotf %ls%s "
+			"colorspace %ls%s hdr10 %s", ToString(outcome), format.width, format.height,
+			::ToString(format.encoding), sentRate.numerator, sentRate.denominator, ::ToString(color.eotf),
 			color.eotfAssumed ? " (assumed)" : "", ::ToString(color.colorSpace),
 			color.colorSpaceFromHeight ? " (from height)" : "", hasHdr ? "yes" : "no");
 		return true;
@@ -760,7 +830,7 @@ namespace VPRendererFilter
 			// (a header of 0 or one that disagrees: the measured rate). Held and
 			// stepped pictures are not a cadence.
 			const RationalRate rate = m_timing.ObserveSample(hasStart && !pausedHold,
-				start, sampleDiscontinuity, avgTimePerFrame);
+				start, sampleDiscontinuity, avgTimePerFrame, m_stateTracker.SentRate());
 
 			std::string reason;
 			if (!EnsureVideoState(rate, reason))
@@ -768,6 +838,23 @@ namespace VPRendererFilter
 				if (ShouldLog(g_frameErrorLogs))
 					DebugLog::Log("VP Renderer filter: frame not delivered: %s", reason.c_str());
 				return E_FAIL;
+			}
+			// A refused state may have replaced the renderer: deliver to the
+			// current one, once it renders (a frame offered before then is not
+			// queued, and a paused pre-roll would stay black).
+			{
+				RendererPtr current = Renderer();
+				if (!current)
+					return E_UNEXPECTED;
+				if (current != renderer)
+				{
+					renderer = current;
+					// A cancel left from an earlier flush or stop belongs to the
+					// old renderer; a new one re-cancels this wait.
+					m_waitCancelled = false;
+					if (!WaitForQueueSlot(renderer))
+						return S_FALSE;
+				}
 			}
 			VideoFormat format;
 			if (!CurrentFormat(format))
@@ -825,7 +912,7 @@ namespace VPRendererFilter
 			times.discontinuityFlag = sampleDiscontinuity;
 			// Present at tStart + rtStart (+ file_av_offset_ms) on the QPC clock
 			// while running; held pictures (pre-roll, pause, step) at once.
-			FileFrameTiming timing = m_timing.BuildTiming(times, m_sourceRate);
+			FileFrameTiming timing = m_timing.BuildTiming(times, m_stateTracker.SentRate());
 			if (pausedHold || stepping > 0 || m_State != State_Running)
 			{
 				timing.presentationQpc = 0;

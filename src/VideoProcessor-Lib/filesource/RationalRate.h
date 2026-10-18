@@ -234,6 +234,10 @@ namespace filesource
 			m_haveLast = false;
 			m_last = 0;
 			m_next = 0;
+			m_spanSum = 0;
+			m_periodSum = 0;
+			m_jitter = 0;
+			m_accumulating = false;
 		}
 
 		// Call on flush, seek, step, rate change or a sample discontinuity flag.
@@ -249,18 +253,49 @@ namespace filesource
 					// Out of order / jump backwards: treat as a discontinuity.
 					Reset();
 				}
-				else if (m_deltas.size() < m_window)
-				{
-					m_deltas.push_back(delta);
-				}
 				else
 				{
-					m_deltas[m_next] = delta;
-					m_next = (m_next + 1) % m_window;
+					if (m_deltas.size() < m_window)
+						m_deltas.push_back(delta);
+					else
+					{
+						m_deltas[m_next] = delta;
+						m_next = (m_next + 1) % m_window;
+					}
+					Accumulate(delta);
 				}
 			}
 			m_last = rtStart;
 			m_haveLast = true;
+		}
+
+		// Bug hunt 3 (C1): container timestamps are often quantized (Matroska's
+		// 1 ms, a 90 kHz clock), so a single delta of a 23.976 stream is 41 or
+		// 42 ms and never within one 100 ns unit of 417083. The mean period over
+		// every frame since the last discontinuity (a gap counts as the whole
+		// periods it spans) converges on the exact period; its uncertainty is
+		// the timestamps' own quantization spread over that many periods.
+		// 0 without a measurement.
+		double MeanPeriod100ns() const
+		{
+			return (m_accumulating && m_periodSum > 0) ? (double)m_spanSum / (double)m_periodSum : 0.0;
+		}
+
+		// Half-width of the interval the mean period is known to lie in (100 ns
+		// units; never below one unit, the REFERENCE_TIME resolution).
+		double MeanTolerance100ns() const
+		{
+			if (!m_accumulating || m_periodSum <= 0)
+				return 0.0;
+			return (std::max)(1.0, (double)m_jitter / (double)m_periodSum);
+		}
+
+		// True when the rate's exact period lies inside the mean's interval.
+		bool MeanMatchesRate(const RationalRate& rate) const
+		{
+			if (!rate.IsValid() || !m_accumulating || m_periodSum <= 0)
+				return false;
+			return std::fabs(rate.Period100ns() - MeanPeriod100ns()) <= MeanTolerance100ns() + 1e-9;
 		}
 
 		size_t DeltaCount() const { return m_deltas.size(); }
@@ -276,17 +311,66 @@ namespace filesource
 			return sorted[(sorted.size() - 1) / 2];
 		}
 
-		// Rational snapped from the median delta. Invalid without measurement.
+		// The measured rational. Invalid without measurement. Bug hunt 3 (C1):
+		// from the mean period and its interval (quantized timestamps), the
+		// integer or k*1000/1001 rate inside the interval that lies closest to
+		// the mean, else the simplest rational inside it; the median delta's
+		// snap when the interval holds none.
 		RationalRate MeasuredRate() const
 		{
+			if (!HasMeasurement())
+				return RationalRate();
+			const double mean = MeanPeriod100ns();
+			const double tolerance = MeanTolerance100ns();
+			if (mean > 1.0 && tolerance > 0.0 && tolerance < mean / 2.0)
+			{
+				const double rateHz = (double)kUnitsPerSecond / mean;
+				bool have = false;
+				RationalRate best;
+				double bestError = 0.0;
+				const auto consider = [&](int64_t num, int64_t den)
+				{
+					if (num <= 0)
+						return;
+					const RationalRate candidate = detail::MakeReduced(num, den);
+					if (!candidate.IsValid())
+						return;
+					const double error = std::fabs(candidate.Period100ns() - mean);
+					if (error <= tolerance + 1e-9 && (!have || error < bestError))
+					{
+						have = true;
+						best = candidate;
+						bestError = error;
+					}
+				};
+				consider(std::llround(rateHz), 1);
+				consider(std::llround(rateHz * 1001.0 / 1000.0) * 1000, 1001);
+				if (have)
+					return best;
+				// Simplest rational with its period inside (mean - tol, mean + tol):
+				// rate in (1e7 / (mean + tol), 1e7 / (mean - tol)), on a 1/1000 grid.
+				const int64_t scale = 1000;
+				int64_t num = 0, den = 0;
+				if (detail::SimplestBetween(kUnitsPerSecond * scale, std::llround((mean + tolerance) * scale),
+					kUnitsPerSecond * scale, std::llround((mean - tolerance) * scale), num, den) && num > 0 && den > 0)
+				{
+					const RationalRate simplest = detail::MakeReduced(num, den);
+					if (simplest.IsValid())
+						return simplest;
+				}
+			}
 			return SnapPeriodToRational(MedianDelta100ns());
 		}
 
+		// Agrees when the median delta is a rounding of the rate's period, or
+		// the rate's period lies inside the mean period's interval (quantized
+		// timestamps, bug hunt 3 C1).
 		Verdict Check(const RationalRate& snapped) const
 		{
 			if (!HasMeasurement())
 				return Verdict::Insufficient;
-			return PeriodMatchesRate(MedianDelta100ns(), snapped) ? Verdict::Agrees : Verdict::Disagrees;
+			return (PeriodMatchesRate(MedianDelta100ns(), snapped) || MeanMatchesRate(snapped)) ?
+				Verdict::Agrees : Verdict::Disagrees;
 		}
 
 		// The rate to report: the snapped AvgTimePerFrame when it agrees with the
@@ -304,11 +388,52 @@ namespace filesource
 		}
 
 	private:
+		// A delta longer than this many periods is a gap the mean skips.
+		static const int64_t kMaxGapPeriods = 8;
+
+		// The mean starts once the window has a median (its first deltas are
+		// folded in then) and then takes every delta as the whole periods it
+		// spans against the current median.
+		void Accumulate(int64_t delta)
+		{
+			if (!HasMeasurement())
+				return;
+			const int64_t median = MedianDelta100ns();
+			if (median <= 0)
+				return;
+			if (!m_accumulating)
+			{
+				m_accumulating = true;
+				for (int64_t d : m_deltas)
+					AddToMean(d, median);
+				return;
+			}
+			AddToMean(delta, median);
+		}
+
+		void AddToMean(int64_t delta, int64_t median)
+		{
+			const int64_t periods = (delta + median / 2) / median;
+			if (periods < 1 || periods > kMaxGapPeriods)
+				return;
+			m_spanSum += delta;
+			m_periodSum += periods;
+			// The quantization spread: how far a single (gap-normalised) delta
+			// strays from the median, in either direction.
+			const int64_t deviation = std::llabs(delta - periods * median);
+			if (deviation < median / 4 && deviation > m_jitter)
+				m_jitter = deviation;
+		}
+
 		size_t m_window;
 		size_t m_minDeltas;
 		std::vector<int64_t> m_deltas;
 		size_t m_next = 0;
 		bool m_haveLast = false;
 		int64_t m_last = 0;
+		bool m_accumulating = false;
+		int64_t m_spanSum = 0;
+		int64_t m_periodSum = 0;
+		int64_t m_jitter = 0;
 	};
 }
