@@ -275,6 +275,26 @@ namespace VideoProcessorTest
 			Assert::AreEqual(static_cast<size_t>(0), std::strlen(entries[2].record.name));
 		}
 
+		// Bug hunt 3 (C8): a cut never splits a UTF-8 character.
+		TEST_METHOD(TruncationNeverSplitsAUtf8Character)
+		{
+			char out[8];
+			// 6 ASCII + a 2-byte character: only 7 bytes fit; the character goes whole.
+			DH::CopyText(out, sizeof(out), "abcdef\xC3\xA9xyz");
+			Assert::AreEqual("abcdef", out);
+			// A 3-byte character cut after one or two of its bytes.
+			DH::CopyText(out, sizeof(out), "abcde\xE2\x82\xAC!");
+			Assert::AreEqual("abcde", out);
+			DH::CopyText(out, sizeof(out), "abcd\xE2\x82\xAC!");
+			Assert::AreEqual("abcd\xE2\x82\xAC", out, L"a whole character that fits is kept");
+			// A 4-byte character cut.
+			DH::CopyText(out, sizeof(out), "abcd\xF0\x9F\x8E\xA5");
+			Assert::AreEqual("abcd", out);
+			// No cut: unchanged.
+			DH::CopyText(out, sizeof(out), "ab\xC3\xA9");
+			Assert::AreEqual("ab\xC3\xA9", out);
+		}
+
 		TEST_METHOD(FrameKeepsAGivenQpcAndStampsZero)
 		{
 			AlignedPtr<DH::Recorder> recorder = MakeAligned<DH::Recorder>();

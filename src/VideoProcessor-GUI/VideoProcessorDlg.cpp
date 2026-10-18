@@ -8811,11 +8811,16 @@ namespace
 
 void CVideoProcessorDlg::SaveStateReport(const char* trigger)
 {
-	if (m_stateReportBusy.exchange(true))
+	// Bug hunt 3 (C10): a report whose completion never came back (its post
+	// failed) frees the flag after two minutes; a real report takes seconds.
+	const ULONGLONG busyNow = GetTickCount64();
+	if (m_stateReportBusy.exchange(true) &&
+		!(m_stateReportBusySince != 0 && busyNow - m_stateReportBusySince > 120000))
 	{
 		ShowStateReportToast("already saving");
 		return;
 	}
+	m_stateReportBusySince = busyNow;
 	const int64_t referenceQpc = DiagnosticHistory::NowQpc();
 	DiagnosticHistory::Global().RecordDecision("state-report", trigger);
 
@@ -8976,8 +8981,18 @@ void CVideoProcessorDlg::SaveStateReport(const char* trigger)
 			}
 			if (SUCCEEDED(com))
 				CoUninitialize();
-			if (!::IsWindow(window) || !::PostMessageW(window, WM_MESSAGE_STATE_REPORT_DONE, 0,
-				reinterpret_cast<LPARAM>(result)))
+			// Bug hunt 3 (C10): a failed post (a full message queue) used to leave
+			// the busy flag set for good, refusing every later report. The post is
+			// retried while the window lives; only a closed window drops it.
+			bool posted = false;
+			for (int attempt = 0; attempt < 100 && !posted && ::IsWindow(window); ++attempt)
+			{
+				posted = ::PostMessageW(window, WM_MESSAGE_STATE_REPORT_DONE, 0,
+					reinterpret_cast<LPARAM>(result)) != FALSE;
+				if (!posted)
+					Sleep(50);
+			}
+			if (!posted)
 				delete result;
 		}).detach();
 	}
@@ -9494,10 +9509,27 @@ void CVideoProcessorDlg::OnCaptureDeviceVideoFrame(
 		else
 			return;
 	}
+	// newlldv SDR veto. Bug hunt 3 (C2): while the veto is armed (waiting for a
+	// cut) every frame is measured before the renderer has it, and the cut
+	// frame is the first queued with the SDR state; otherwise the statistics
+	// (shot evidence) are taken after the renderer has the frame, as before.
+	const uint64_t hdrVetoGeneration = measureHdrVeto ?
+		m_hdrVetoGeneration.load(std::memory_order_acquire) : 0;
+	const bool hdrVetoBefore = measureHdrVeto && m_hdrVetoGate.Armed(hdrVetoGeneration);
+	if (hdrVetoBefore)
+	{
+		VideoStateComPtr sdrState = MeasureHdrVetoPicture(hdrVetoState, videoFrame, hdrVetoGeneration);
+		if (sdrState)
+		{
+			const bool accepted = renderer->OnVideoState(sdrState);
+			DebugLog::Log("newlldv SDR veto: cut on frame %llu; it and every later frame are queued as SDR%s",
+				static_cast<unsigned long long>(videoFrame.GetCounter()),
+				accepted ? "" : " (refused in place: the UI restarts the renderer)");
+		}
+	}
 	renderer->OnVideoFrame(videoFrame);
-	// newlldv SDR veto: picture statistics after the renderer has the frame.
-	if (measureHdrVeto)
-		MeasureHdrVetoPicture(hdrVetoState, videoFrame);
+	if (measureHdrVeto && !hdrVetoBefore)
+		MeasureHdrVetoPicture(hdrVetoState, videoFrame, hdrVetoGeneration);
 	// DV tunnel hand-off probe: after the renderer has the frame too.
 	if (probeDvTunnelHandoff)
 	{
@@ -13020,12 +13052,15 @@ bool CVideoProcessorDlg::HdrModesPermitInference()
 	// Owner decision 2026-10-17: newlldv no longer requires both "Follow input
 	// (LLDV)" modes. Every follow mode lets the inference supply what it
 	// follows; explicit primaries/luminance still win for the fields they set.
-	// Only an explicit Rec.709 hdr_colorspace contradicts a BT.2020 HDR reading.
-	if (m_hdrColorspaceCombo.GetCurSel() < 0)
-		return true;
-	return static_cast<HdrColorspaceOptions>(m_hdrColorspaceCombo.GetItemData(
-		m_hdrColorspaceCombo.GetCurSel())) !=
-		HdrColorspaceOptions::HDR_COLORSPACE_REC709;
+	// An explicit Rec.709 hdr_colorspace contradicts a BT.2020 HDR reading, and
+	// (bug hunt 3 C6) so does a container override to a non-BT.2020 colorspace.
+	const bool hdrRec709 = m_hdrColorspaceCombo.GetCurSel() >= 0 &&
+		static_cast<HdrColorspaceOptions>(m_hdrColorspaceCombo.GetItemData(
+			m_hdrColorspaceCombo.GetCurSel())) == HdrColorspaceOptions::HDR_COLORSPACE_REC709;
+	const ColorSpace container = m_colorspaceContainerCombo.GetCurSel() >= 0 ?
+		static_cast<ColorSpace>(m_colorspaceContainerCombo.GetItemData(
+			m_colorspaceContainerCombo.GetCurSel())) : ColorSpace::UNKNOWN;
+	return HdrSettingsPermitInference(hdrRec709, container);
 }
 
 HdrInferenceSignal CVideoProcessorDlg::BuildHdrInferenceSignal()
@@ -13114,6 +13149,8 @@ void CVideoProcessorDlg::UpdateHdrVetoMeasurement()
 	const bool measure = m_hdrInference.WantsPictureStatistics() &&
 		!ProfileTunnelClaimsSignal() && HdrModesPermitInference();
 	const bool previous = m_hdrVetoMeasure.load(std::memory_order_acquire);
+	if (!measure || !m_hdrInference.VetoArmed())
+		m_hdrVetoGate.Disarm();   // bug hunt 3 C2: no switch outside an armed veto
 	if (measure == previous)
 		return;
 	if (measure)
@@ -13137,28 +13174,25 @@ namespace
 		float gridDifference = 0.0f;
 		float histogramDistance = 0.0f;
 		uint32_t measureUs = 0;
+		// Bug hunt 3 (C2): the capture thread queued this (cut) frame as SDR.
+		bool switchedAtCut = false;
 	};
 }
 
-void CVideoProcessorDlg::MeasureHdrVetoPicture(const VideoStateComPtr& state,
-	const VideoFrame& frame)
+VideoStateComPtr CVideoProcessorDlg::MeasureHdrVetoPicture(const VideoStateComPtr& state,
+	const VideoFrame& frame, uint64_t generation)
 {
-	// WARNING: capture thread. Runs after the frame was handed to the renderer
-	// (no added latency to it), at most every 50 ms, only while the veto is
-	// measuring. 160 x 90 samples per picture.
+	// WARNING: capture thread, only while the veto is measuring. 160 x 90
+	// samples per picture. Not armed: after the frame was handed to the
+	// renderer (no added latency to it), at most every 50 ms. Armed (bug hunt 3
+	// C2): every frame, before the renderer has it, so the cut frame itself
+	// can be queued as SDR.
 	const ULONGLONG now = GetTickCount64();
-	const uint64_t generation = m_hdrVetoGeneration.load(std::memory_order_acquire);
-	if (generation != m_hdrVetoCaptureGeneration)
-	{
-		m_hdrVetoCaptureGeneration = generation;
-		m_hdrVetoCutDetector.Reset();
-		m_hdrVetoLastSampleTick = 0;
-	}
-	if (m_hdrVetoLastSampleTick != 0 && now - m_hdrVetoLastSampleTick < 50)
-		return;
-	m_hdrVetoLastSampleTick = now;
+	if (!m_hdrVetoGate.WantsSample(generation, now))
+		return nullptr;
 	if (!state || !state->valid || !state->displayMode || !frame.GetData())
-		return;
+		return nullptr;
+	VideoStateComPtr switchState;
 
 	const auto start = std::chrono::steady_clock::now();
 	std::unique_ptr<HdrVetoPictureMessage> message(new HdrVetoPictureMessage());
@@ -13189,9 +13223,12 @@ void CVideoProcessorDlg::MeasureHdrVetoPicture(const VideoStateComPtr& state,
 		message->observation.sdrEvidence = stats.sdrEvidence;
 		message->observation.fractionAt880 = stats.fractionAtHigh;
 		message->observation.p999 = stats.p999;
-		message->observation.cut = m_hdrVetoCutDetector.Observe(stats);
-		message->gridDifference = m_hdrVetoCutDetector.LastGridDifference();
-		message->histogramDistance = m_hdrVetoCutDetector.LastHistogramDistance();
+		const HdrVetoCaptureGate::Observation observed = m_hdrVetoGate.Observe(generation, stats);
+		message->observation.cut = observed.cut;
+		message->gridDifference = m_hdrVetoGate.LastGridDifference();
+		message->histogramDistance = m_hdrVetoGate.LastHistogramDistance();
+		switchState = observed.switchState;
+		message->switchedAtCut = switchState != nullptr;
 	}
 	message->measureUs = static_cast<uint32_t>(
 		std::chrono::duration_cast<std::chrono::microseconds>(
@@ -13199,6 +13236,45 @@ void CVideoProcessorDlg::MeasureHdrVetoPicture(const VideoStateComPtr& state,
 	if (PostMessage(WM_MESSAGE_HDR_INFERENCE_PICTURE,
 		reinterpret_cast<WPARAM>(message.get()), 0))
 		message.release();
+	return switchState;
+}
+
+VideoStateComPtr CVideoProcessorDlg::BuildHdrVetoSdrState()
+{
+	if (!m_captureDeviceVideoState || !m_captureDeviceVideoState->valid)
+		return nullptr;
+	// The state BuildPushVideoState builds once the veto ends the inference:
+	// the same alterations with the inferred PQ taken away. Nothing is pushed,
+	// published or logged as applied.
+	const bool confirmed = m_newLldvCandidateConfirmed;
+	m_newLldvCandidateConfirmed = false;
+	m_hdrVetoPreviewing = true;
+	m_hdrVetoPreview = nullptr;
+	try
+	{
+		BuildPushVideoStateCore();
+	}
+	catch (const std::exception& e)
+	{
+		DebugLog::Log("newlldv SDR veto: the SDR state could not be prepared: %s", e.what());
+		m_hdrVetoPreview = nullptr;
+	}
+	m_hdrVetoPreviewing = false;
+	m_newLldvCandidateConfirmed = confirmed;
+	VideoStateComPtr result = m_hdrVetoPreview;
+	m_hdrVetoPreview = nullptr;
+	return result;
+}
+
+void CVideoProcessorDlg::RefreshHdrVetoGate()
+{
+	if (!m_hdrVetoMeasure.load(std::memory_order_acquire) || !m_hdrInference.VetoArmed() ||
+		!m_hdrInference.IsInferredPq())
+	{
+		m_hdrVetoGate.Disarm();
+		return;
+	}
+	m_hdrVetoGate.Arm(m_hdrVetoGeneration.load(std::memory_order_acquire), BuildHdrVetoSdrState());
 }
 
 LRESULT CVideoProcessorDlg::OnMessageHdrInferencePicture(WPARAM wParam, LPARAM)
@@ -13208,7 +13284,14 @@ LRESULT CVideoProcessorDlg::OnMessageHdrInferencePicture(WPARAM wParam, LPARAM)
 	if (!message ||
 		message->generation != m_hdrVetoGeneration.load(std::memory_order_acquire) ||
 		!m_hdrVetoMeasure.load(std::memory_order_acquire))
+	{
+		// Bug hunt 3 (C2): the capture thread queued SDR for a veto this thread
+		// no longer commits (the measuring period ended meanwhile): the renderer
+		// gets the effective state again.
+		if (message && message->switchedAtCut)
+			BuildPushVideoState();
 		return 0;
+	}
 	if (!message->supported)
 	{
 		if (m_hdrVetoUnsupportedLoggedGeneration != message->generation)
@@ -13245,12 +13328,21 @@ LRESULT CVideoProcessorDlg::OnMessageHdrInferencePicture(WPARAM wParam, LPARAM)
 			m_hdrInference.ShotsWithEvidence(), picture.fractionAt880 * 100.0,
 			static_cast<unsigned>(picture.p999),
 			m_hdrInference.Options().noCutFallbackMs / 1000);
+		// Bug hunt 3 (C2): from now on the capture thread switches on the cut frame.
+		RefreshHdrVetoGate();
 		break;
 	case HdrInferenceEvent::VetoAtCut:
 	case HdrInferenceEvent::VetoWithoutCut:
 		ApplyHdrInferenceVeto(update, "picture");
 		break;
 	default:
+		if (message->switchedAtCut)
+		{
+			// The capture thread switched but the tracker did not flip (it can
+			// only disagree if the veto was disarmed meanwhile): resynchronise.
+			DebugLog::Log("newlldv SDR veto: capture-side switch not confirmed; renderer state rebuilt");
+			BuildPushVideoState();
+		}
 		break;
 	}
 	return 0;
@@ -13393,6 +13485,15 @@ void CVideoProcessorDlg::ApplyHdrInferenceVeto(const HdrInferenceUpdate& update,
 
 bool CVideoProcessorDlg::BuildPushVideoState()
 {
+	const bool accepted = BuildPushVideoStateCore();
+	// Bug hunt 3 (C2): settings, profiles or the capture state may have moved
+	// on since the veto armed; the capture thread's SDR state follows.
+	RefreshHdrVetoGate();
+	return accepted;
+}
+
+bool CVideoProcessorDlg::BuildPushVideoStateCore()
+{
 	const bool hadPreviousEffectiveState =
 		m_builtVideoState && m_builtVideoState->valid;
 	const EOTF previousEffectiveEotf = hadPreviousEffectiveState
@@ -13427,6 +13528,7 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 		m_captureDeviceVideoState->colorspace == ColorSpace::BT_2020 &&
 		m_captureDeviceVideoState->eotf == EOTF::PQ &&
 		(!rawHdrData || hasVertex2CustomHdrSignature);
+	if (!m_hdrVetoPreviewing)
 	DebugLog::Log(
 		"LLDV state trace: raw_eotf=%s raw_colorspace=%s raw_hdr=%d raw_values=%g/%g/%g/%g vertex2_signature=%d hdr_modes_permit=%d newlldv=%d legacy_match=%d",
 		CStringA(ToString(m_captureDeviceVideoState->eotf)).GetString(),
@@ -13509,19 +13611,23 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 		" newlldv=" + (m_useNewLldvHeuristic ? "1" : "0") +
 		" hdr_modes_permit=" + (HdrModesPermitInference() ? "1" : "0") +
 		" inference=" + ToString(m_hdrInference.State());
-	RawCaptureRecorder::Instance().SetProcessingNote(lldvDecisionDiagnostic +
-		" dolby_vision_tunnel_switch=" + (enableDolbyVisionTunnel ? "1" : "0"));
-	if (lldvDecisionDiagnostic != m_lastLldvDecisionDiagnostic)
+	// A veto preview (BuildHdrVetoSdrState) logs and records nothing.
+	if (!m_hdrVetoPreviewing)
 	{
-		DebugLog::Log("%s", lldvDecisionDiagnostic.c_str());
-		m_lastLldvDecisionDiagnostic = lldvDecisionDiagnostic;
+		RawCaptureRecorder::Instance().SetProcessingNote(lldvDecisionDiagnostic +
+			" dolby_vision_tunnel_switch=" + (enableDolbyVisionTunnel ? "1" : "0"));
+		if (lldvDecisionDiagnostic != m_lastLldvDecisionDiagnostic)
+		{
+			DebugLog::Log("%s", lldvDecisionDiagnostic.c_str());
+			m_lastLldvDecisionDiagnostic = lldvDecisionDiagnostic;
+		}
+		if (!isHDFuryLLDV && m_lldvDiagnosticWasApplied)
+		{
+			DebugLog::Log("LLDV ended: reason=%s raw_eotf=%s raw_colorspace=%s",
+				lldvDecisionReason.c_str(), rawEotf.c_str(), rawColorspace.c_str());
+		}
+		m_lldvDiagnosticWasApplied = isHDFuryLLDV;
 	}
-	if (!isHDFuryLLDV && m_lldvDiagnosticWasApplied)
-	{
-		DebugLog::Log("LLDV ended: reason=%s raw_eotf=%s raw_colorspace=%s",
-			lldvDecisionReason.c_str(), rawEotf.c_str(), rawColorspace.c_str());
-	}
-	m_lldvDiagnosticWasApplied = isHDFuryLLDV;
 
 	if (hdrInferred)
 	{
@@ -13751,6 +13857,12 @@ bool CVideoProcessorDlg::BuildPushVideoState()
 	else if (enableDolbyVisionTunnel && !tunnelGate.handedOff)
 		DebugLog::Log("Dolby Vision RGB tunnel: waiting for R210 SDR capture state");
 
+	if (m_hdrVetoPreviewing)
+	{
+		// BuildHdrVetoSdrState: the state only (bug hunt 3 C2).
+		m_hdrVetoPreview = videoState;
+		return true;
+	}
 	m_builtVideoState = videoState;
 	m_lastEffectiveEotf = m_builtVideoState->eotf;
 	if (hdrInferred != m_hdrInferredApplied)

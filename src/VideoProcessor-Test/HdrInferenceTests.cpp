@@ -12,7 +12,9 @@
 
 #include <AviInfoFrameColorimetry.h>
 #include <HdrInference.h>
+#include <HdrVetoCaptureGate.h>
 #include <RendererProfileConfig.h>
+#include <VideoState.h>
 
 #include <algorithm>
 #include <cmath>
@@ -537,6 +539,113 @@ namespace Tests
 			Assert::AreEqual(static_cast<uint16_t>(300), grid[0]);
 			Assert::AreEqual(static_cast<uint16_t>(940), grid[COLUMNS - 1]);
 			Assert::IsTrue(Measure(grid).sdrEvidence);
+		}
+
+		// Bug hunt 3 (C2): with the veto armed, the cut frame itself is the
+		// first one queued as SDR - at every source rate, never 1-5 frames
+		// after it. The capture path asks the gate for each frame before the
+		// renderer has it (WantsSample, Observe); a returned state is pushed
+		// before that frame is queued.
+		TEST_METHOD(ArmedVetoSwitchesOnTheCutFrameAtEveryRate)
+		{
+			const double rates[] = { 24000.0 / 1001.0, 24.0, 25.0, 30000.0 / 1001.0, 50.0, 60000.0 / 1001.0, 120.0 };
+			for (const double rate : rates)
+				for (const int cutFrame : { 1, 2, 3, 7, 13 })
+				{
+					HdrVetoCaptureGate gate;
+					VideoStateComPtr sdr(new VideoState());
+					sdr->valid = true;
+					sdr->eotf = EOTF::SDR;
+					const uint64_t generation = 7;
+					// Shot A with a slow pan before the veto arms (measured at 20 Hz).
+					int frame = 0;
+					auto nowMs = [&](int n) { return static_cast<uint64_t>(std::floor(1000.0 + n * 1000.0 / rate)); };
+					for (; frame < 30; ++frame)
+						if (gate.WantsSample(generation, nowMs(frame)))
+							Assert::IsFalse(gate.Observe(generation, Measure(SdrGrid(SceneLinear(3, 1.0, 0.01, frame / 3)))).cut);
+					gate.Arm(generation, sdr);
+					int switched = -1;
+					for (int n = 0; n < 40; ++n, ++frame)
+					{
+						if (switched < 0)
+							Assert::IsTrue(gate.WantsSample(generation, nowMs(frame)), L"armed: every frame is measured");
+						else if (!gate.WantsSample(generation, nowMs(frame)))
+							continue;   // spent: back to the 20 Hz cadence
+						const std::vector<double> scene = n < cutFrame ? SceneLinear(3, 1.0, 0.01, frame / 3) :
+							SceneLinear(29, 2.0, 0.01, (n - cutFrame) / 3);
+						const HdrVetoCaptureGate::Observation observed =
+							gate.Observe(generation, Measure(SdrGrid(scene)));
+						if (observed.switchState)
+						{
+							Assert::AreEqual(-1, switched, L"one switch per arming");
+							Assert::IsTrue(observed.cut);
+							Assert::IsTrue(observed.switchState->eotf == EOTF::SDR);
+							switched = n;
+						}
+					}
+					Assert::AreEqual(cutFrame, switched, (L"switch frame at " + std::to_wstring(rate) + L" Hz").c_str());
+					Assert::IsFalse(gate.Armed(generation), L"spent");
+				}
+		}
+
+		TEST_METHOD(VetoGateNeverSwitchesUnarmedDisarmedOrForAnotherGeneration)
+		{
+			const auto cutBetween = [](HdrVetoCaptureGate& gate, uint64_t generation)
+			{
+				gate.WantsSample(generation, 1000);
+				gate.Observe(generation, Measure(SdrGrid(SceneLinear(3, 1.0, 0.01))));
+				gate.WantsSample(generation, 2000);
+				return gate.Observe(generation, Measure(SdrGrid(SceneLinear(29, 2.0, 0.01))));
+			};
+			VideoStateComPtr sdr(new VideoState());
+			{
+				HdrVetoCaptureGate gate;   // never armed
+				const HdrVetoCaptureGate::Observation o = cutBetween(gate, 1);
+				Assert::IsTrue(o.cut);
+				Assert::IsFalse(o.switchState != nullptr);
+			}
+			{
+				HdrVetoCaptureGate gate;
+				gate.Arm(1, sdr);
+				gate.Disarm();
+				Assert::IsFalse(cutBetween(gate, 1).switchState != nullptr, L"disarmed");
+			}
+			{
+				HdrVetoCaptureGate gate;
+				gate.Arm(1, sdr);
+				Assert::IsFalse(cutBetween(gate, 2).switchState != nullptr, L"another measuring period");
+				Assert::IsFalse(gate.Armed(2));
+			}
+			{
+				HdrVetoCaptureGate gate;
+				gate.Arm(1, nullptr);
+				Assert::IsFalse(gate.Armed(1), L"no state: not armed");
+			}
+			// Not armed: the 20 Hz cadence for the shot evidence, as before.
+			HdrVetoCaptureGate gate;
+			Assert::IsTrue(gate.WantsSample(3, 1000));
+			Assert::IsFalse(gate.WantsSample(3, 1016));
+			Assert::IsFalse(gate.WantsSample(3, 1033));
+			Assert::IsTrue(gate.WantsSample(3, 1050));
+		}
+
+		// Bug hunt 3 (C6): a container override to a non-BT.2020 colorspace
+		// stops the inference, as an explicit Rec.709 hdr_colorspace does.
+		TEST_METHOD(ContainerOverrideToRec709ForbidsTheInference)
+		{
+			Assert::IsTrue(HdrSettingsPermitInference(false, ColorSpace::UNKNOWN), L"follow input");
+			Assert::IsTrue(HdrSettingsPermitInference(false, ColorSpace::BT_2020));
+			Assert::IsFalse(HdrSettingsPermitInference(false, ColorSpace::REC_709), L"container Rec.709");
+			Assert::IsFalse(HdrSettingsPermitInference(false, ColorSpace::P3_D65));
+			Assert::IsFalse(HdrSettingsPermitInference(true, ColorSpace::UNKNOWN), L"hdr_colorspace Rec.709");
+			HdrInferenceSignal signal = LldvSignal();
+			signal.explicitSettingsForbid = !HdrSettingsPermitInference(false, ColorSpace::REC_709);
+			HdrInferenceTracker tracker;
+			uint64_t now = 0;
+			tracker.OnSignal(signal, now);
+			now += 5000;
+			tracker.OnSignal(signal, now);
+			Assert::IsFalse(tracker.IsInferredPq(), L"never PQ under a Rec.709 container");
 		}
 
 		TEST_METHOD(AviInfoFrameBytesDecodeBt2020)
