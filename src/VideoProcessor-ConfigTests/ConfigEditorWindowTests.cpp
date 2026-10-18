@@ -655,8 +655,7 @@ void testEveryNewRendererControlReachesVp()
         { "dejudder_cut_histogram", "0.4", false }, { "dejudder_regional_hold", "off", true },
         { "dejudder_pixel_trust_lo", "2", false }, { "dejudder_pixel_trust_hi", "7", false },
         { "dejudder_landing_check", "off", true }, { "dejudder_pixel_trust", "off", true },
-        { "dejudder_picture_area", "off", true }, { "dejudder_pulldown", "on", true },
-        { "fix_scene_cooldown", "off", true }, { "dither_vectors_new_frame", "off", true },
+        { "dejudder_pulldown", "on", true },
         { "dv_tunnel_gpu_unpack", "on", true }, { "dv_trims", "on", true },
         { "dejudder_verify_share", "0.3", false },
         { "dejudder_verify", "on", true }, { "dejudder_low_res", "search", true },
@@ -763,7 +762,7 @@ void testConfigKeysActivateTheRendererAndMatcherSettings()
         "dejudder_trust_scale: 0.5\ndejudder_est_lambda: 1\ndejudder_est_candidates: off\ndejudder_est_qpel: off\n"
         "dejudder_est_split_sad: 6\ndejudder_est_split: on\ndejudder_search_range: 6\ndejudder_global_two: off\n"
         "dejudder_texture_tolerance: 0.5\ndejudder_consistency_px: 3\ndejudder_cut_histogram: 0.4\n"
-        "dejudder_regional_hold: off\ndejudder_pixel_trust_lo: 2\ndejudder_pixel_trust_hi: 7\ndejudder_pixel_trust: off\ndejudder_landing_check: off\ndejudder_picture_area: off\ndejudder_pulldown: on\nfix_scene_cooldown: off\ndither_vectors_new_frame: off\n"
+        "dejudder_regional_hold: off\ndejudder_pixel_trust_lo: 2\ndejudder_pixel_trust_hi: 7\ndejudder_pixel_trust: off\ndejudder_landing_check: off\ndejudder_pulldown: on\n"
         "dejudder_verify_share: 0.3\ndejudder_verify: on\ndejudder_low_res: search\ndejudder_estimate_ahead: off\n"
         "dejudder_hold_feather_px: 3\ndejudder_hold_hysteresis: 3\ndejudder_taper_sad: 9\ndejudder_block_taper: on\n"
         "dejudder_warp_stage: source\ndejudder_occlusion_fill: on\nocclusion_mask: on\n"
@@ -787,7 +786,7 @@ void testConfigKeysActivateTheRendererAndMatcherSettings()
         { "matcher.cutHistogram", "0.4" }, { "matcher.coarseRange", "6" }, { "matcher.consistencyPixels", "3" },
         { "matcher.fadeMatch", "0" }, { "matcher.fadeFloor", "0.2" }, { "matcher.verifyPixels", "1" },
         { "matcher.verifyShare", "0.3" }, { "matcher.pixelTrust", "0" }, { "matcher.pixelTrustLo", "2" },
-        { "matcher.pixelTrustHi", "7" }, { "matcher.landingCheck", "0" }, { "matcher.pictureArea", "0" }, { "dejudder_pulldown", "1" }, { "fix_scene_cooldown", "0" }, { "dither_vectors_new_frame", "0" }, { "matcher.lowRes", "1" }, { "matcher.lowResAll", "0" },
+        { "matcher.pixelTrustHi", "7" }, { "matcher.landingCheck", "0" }, { "dejudder_pulldown", "1" }, { "matcher.lowRes", "1" }, { "matcher.lowResAll", "0" },
         { "matcher.holdFeatherPx", "3" }, { "matcher.holdHysteresis", "3" }, { "matcher.blockTaper", "1" },
         { "matcher.taperSad", "9" } };
     for (const auto& entry : expected)
@@ -801,7 +800,7 @@ void testConfigKeysActivateTheRendererAndMatcherSettings()
     const std::map<std::string, std::string> unset = read("");
     const std::pair<const char*, const char*> defaults[] = {
         { "capture_path", "gpu" }, { "source_range", "auto" }, { "source_resolution", "auto" }, { "dejudder_warp_rendered", "1" }, { "matcher.fadeMatch", "1" },
-        { "matcher.pixelTrust", "1" }, { "matcher.landingCheck", "1.5" }, { "matcher.pictureArea", "1" }, { "dejudder_pulldown", "0" }, { "fix_scene_cooldown", "1" }, { "dither_vectors_new_frame", "1" }, { "matcher.estSplit", "0" }, { "matcher.lowResAll", "1" },
+        { "matcher.pixelTrust", "1" }, { "matcher.landingCheck", "1.5" }, { "matcher.pictureArea", "1" }, { "dejudder_pulldown", "0" }, { "matcher.estSplit", "0" }, { "matcher.lowResAll", "1" },
         { "matcher.matchTolerance", "4.5" }, { "matcher.textureTolerance", "0.25" }, { "matcher.globalTwo", "1" },
         { "matcher.regionalHold", "1" }, { "matcher.verifyPixels", "0" }, { "matcher.motionRolloff", "0" },
         { "sdr_knee", "0" }, { "adaptive_downscale", "0" }, { "occlusion_mask", "0" } };
@@ -847,6 +846,35 @@ void testSubtitleDiagnosticSurvivesConfigSaveAndReopen()
         }
         require(!found, "Legacy subtitle controls still affect renderer profiles");
     }
+}
+
+// Pruning 2026-10-17 (RetiredSettings.h): a file holding retired keys and values opens,
+// saves and still loads in VP; Config keeps them as written (configuration is user data).
+void testRetiredRendererSettingsSurviveConfigSaveAndReopen()
+{
+    QTemporaryDir directory;
+    const QString path = directory.filePath("VideoProcessor.cfg");
+    {
+        QFile file(path);
+        require(file.open(QIODevice::WriteOnly), "Cannot create retired-settings fixture");
+        file.write("[vprenderer]\nsdr_target_nits: 100\nfix_scene_cooldown: off\n"
+            "[vprenderer.Cinema]\nquality: high\ndejudder_picture_area: off\ndither_vectors_new_frame: off\n"
+            "adaptive_faithful: polar\ndejudder_even_rates: 30_and_29.97\n");
+    }
+    {
+        ConfigEditorWindow window(path, 0, true);
+        requireControl<QLineEdit>(window, "config.vprenderer.sdr_target_nits")->setText(QStringLiteral("120"));
+        save(window);
+    }
+    ConfigFile config;
+    require(config.Load(path.toStdString()), "Saved retired-settings config failed to reload");
+    RendererProfileConfig::Model model;
+    std::string error;
+    require(RendererProfileConfig::Read(config, model, error), ("VP rejects retired settings after a save: " + error).c_str());
+    const QByteArray saved = readBytes(path);
+    for (const char* kept : { "fix_scene_cooldown: off", "dejudder_picture_area: off", "dither_vectors_new_frame: off",
+            "adaptive_faithful: polar", "dejudder_even_rates: 30_and_29.97" })
+        require(saved.contains(kept), (std::string("Config dropped or changed ") + kept).c_str());
 }
 
 void testSubtitleCutPasteSurvivesConfigSaveAndReopen()
@@ -1704,7 +1732,10 @@ void testInheritedButtonsAndReorganisedSections()
     require(inSection("config.vprenderer.picture_preset_box", QStringLiteral("sourceRebase")), "Picture not under Source resolution & re-base");
     require(inSection("config.vprenderer.deband_vp", QStringLiteral("sourceRebase")), "VP deband not under Source resolution & re-base");
     require(inSection("config.vprenderer.ssim_residual_stabilise", QStringLiteral("adaptiveDownscale")), "SSIM steadiness not with the downscale blend");
-    require(inSection("config.vprenderer.dither_vectors_new_frame", QStringLiteral("fixesUnderTest")), "dither motion fix left Fixes under test");
+    // Pruning 2026-10-17: the retired switches have no control any more.
+    for (const char* retired : { "config.vprenderer.dither_vectors_new_frame", "config.vprenderer.fix_scene_cooldown",
+            "config.vprenderer.dejudder_picture_area" })
+        require(!window.findChild<QWidget*>(QString::fromLatin1(retired)), "a retired switch still has a control");
     require(inSection("config.vprenderer.native_rgb_ingest", QStringLiteral("fixesUnderTest")), "native RGB left Fixes under test");
     require(inSection("config.vprenderer.dv_tunnel_gpu_unpack", QStringLiteral("fixesUnderTest")), "DV GPU unpack left Fixes under test");
     require(inSection("config.vprenderer.dv_trims", QStringLiteral("fixesUnderTest")), "DV trims left Fixes under test");
@@ -9684,6 +9715,7 @@ int main(int argc, char** argv)
     failures += run("subtitle diagnostic survives Config save and reopen",
         testSubtitleDiagnosticSurvivesConfigSaveAndReopen);
     failures += run("Subtitle cut paste survives config save and reopen", testSubtitleCutPasteSurvivesConfigSaveAndReopen);
+    failures += run("retired renderer settings survive config save and reopen", testRetiredRendererSettingsSurviveConfigSaveAndReopen);
     failures += run("audited Boolean aliases and inherited Auto status", testAuditedBooleanAliasesAndInheritedAutoStatus);
     failures += run("invalid audited values remain actionable", testInvalidAuditedValuesRemainActionable);
     failures += run("diagnostic preset describes flags and retention default", testDiagnosticPresetDescribesFlagsAndRetentionUsesDefault);

@@ -1047,18 +1047,10 @@ namespace
 		bool dejudderPixelTrust = true;
 		// The landing check (owner 2026-10-14, on: damage to a third).
 		bool dejudderLandingCheck = true;
-		// Black bars (owner 2026-10-14, on): matcher statistics over the
-		// picture only; bar blocks untrusted.
-		bool dejudderPictureArea = true;
-		// Fixes under test (owner 2026-10-14; each on, off = the old
-		// behaviour). The scene detector's cut cooldown: 2 s as written (its
-		// frame duration in 100 ns units at the content rate); off = the old
-		// display-mode units, which always hit the 300-frame cap (12.5 s at
-		// 24p, 5 s at 60p).
-		bool fixSceneCooldown = true;
-		// Efficiency under test (owner 2026-10-14): B's own first present
-		// takes the sigma-delta vectors from A's field (own search skipped).
-		bool ditherVectorsNewFrame = true;
+		// Pruning 2026-10-17 (RetiredSettings.h): dejudder_picture_area, fix_scene_cooldown and
+		// dither_vectors_new_frame are retired - black bars are always left out of the matcher's
+		// statistics, the scene-cut cooldown is always 2 s at the content rate, and a new frame's
+		// dither always takes the de-judder's motion when it is valid.
 		// Roadmap item 2 (owner 2026-10-15, on): DeckLink R12B/R12L/r210 as
 		// native RGB (GpuRgbUnpack) instead of the CPU's 10-bit 4:2:0 P010.
 		bool nativeRgbIngest = true;
@@ -1417,7 +1409,7 @@ namespace
 			<< settings.dejudderVerify << '|' << settings.dejudderVerifyShare << '|'
 			<< settings.dejudderPixelTrust << '|' << settings.dejudderPixelTrustLo << '|' << settings.dejudderPixelTrustHi << '|'
 			<< settings.dejudderLandingCheck << '|'
-			<< settings.dejudderPulldown << '|' << settings.dejudderPictureArea << '|' << settings.fixSceneCooldown << '|' << settings.ditherVectorsNewFrame << '|' << settings.nativeRgbIngest << '|' << settings.dvTunnelGpuUnpack << '|' << settings.dvTrims << '|' << settings.dvTunnelFixes << '|'
+			<< settings.dejudderPulldown << '|' << settings.nativeRgbIngest << '|' << settings.dvTunnelGpuUnpack << '|' << settings.dvTrims << '|' << settings.dvTunnelFixes << '|'
 			<< settings.dejudderHoldFeatherPx << '|' << settings.dejudderHoldHysteresis << '|'
 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
@@ -2183,6 +2175,27 @@ namespace
 			settings.sdrBlackNits);
 	}
 
+	// Pruning 2026-10-17: one log line per retired key or value a profile section still holds
+	// (once per section and key for the process); the file loads and the setting is ignored or
+	// migrated (RetiredSettings.h).
+	void LogRetiredSettings(const std::string& section, const std::map<std::string, std::string>& values)
+	{
+		static std::mutex lock;
+		static std::set<std::string> logged;
+		for (const auto& value : values)
+		{
+			std::string note;
+			if (const RetiredSettings::Key* key = RetiredSettings::FindKey(value.first))
+				note = RetiredSettings::KeyNote(section, *key);
+			else if (const RetiredSettings::Value* retired = RetiredSettings::FindValue(value.first, value.second))
+				note = RetiredSettings::ValueNote(section, *retired);
+			if (note.empty()) continue;
+			std::lock_guard<std::mutex> guard(lock);
+			if (logged.insert(note).second)
+				DebugLog::Log("profile settings: %s", note.c_str());
+		}
+	}
+
 	void ApplyDisplayRuleOverrides(
 		const ConfigFile& config,
 		const DisplayRule& rule,
@@ -2221,6 +2234,7 @@ namespace
 			}
 		if (const auto* values = config.GetSectionValues(rule.section))
 		{
+			LogRetiredSettings(rule.section, *values);
 			settings.profileValues += rule.section + "{";
 			for (const auto& value : *values)
 				settings.profileValues += value.first + "=" + value.second + ";";
@@ -2505,10 +2519,11 @@ namespace
 		if (tryChoice("dejudder_even_rates", raw))
 		{
 			// General (owner 2026-10-14): whole-number source rates, or also the
-			// 1000/1001 rates; "30" / "30_and_29.97" are the earlier names.
-			if (raw == "whole" || raw == "30")
+			// 1000/1001 rates; "30" / "30_and_29.97" are retired names (RetiredSettings).
+			raw = RetiredSettings::Migrate("dejudder_even_rates", raw);
+			if (raw == "whole")
 				settings.dejudderEvenIncludes1001 = false;
-			else if (raw == "whole_and_1001" || raw == "30_and_29.97")
+			else if (raw == "whole_and_1001")
 				settings.dejudderEvenIncludes1001 = true;
 			else
 				DebugLog::Log("profile '%s': invalid dejudder_even_rates '%s'; keeping %s", rule.section.c_str(),
@@ -2601,9 +2616,6 @@ namespace
 			std::make_pair("dejudder_pixel_trust", &settings.dejudderPixelTrust),
 			std::make_pair("dejudder_landing_check", &settings.dejudderLandingCheck),
 			std::make_pair("dejudder_pulldown", &settings.dejudderPulldown),
-			std::make_pair("dejudder_picture_area", &settings.dejudderPictureArea),
-			std::make_pair("fix_scene_cooldown", &settings.fixSceneCooldown),
-			std::make_pair("dither_vectors_new_frame", &settings.ditherVectorsNewFrame),
 			std::make_pair("native_rgb_ingest", &settings.nativeRgbIngest),
 			std::make_pair("dv_tunnel_gpu_unpack", &settings.dvTunnelGpuUnpack),
 			std::make_pair("dv_trims", &settings.dvTrims),
@@ -2652,7 +2664,9 @@ namespace
 			settings.adaptive.grainHi = settings.adaptive.grainLo + 0.5f;
 		if (tryChoice("adaptive_faithful", raw))
 		{
-			if (raw == "polar" || raw == "ortho" || raw == "auto")
+			// "polar" retired 2026-10-17 (owner: Auto or 1D): runs as auto (RetiredSettings).
+			raw = RetiredSettings::Migrate("adaptive_faithful", raw);
+			if (raw == "ortho" || raw == "auto")
 			{
 				settings.adaptive.faithfulOrtho = raw == "ortho";
 				settings.adaptive.faithfulAuto = raw == "auto";
@@ -3283,7 +3297,7 @@ namespace
 		settings.pixelTrustHi = static_cast<float>(profile.dejudderPixelTrustHi);
 		settings.landingCheck = profile.dejudderLandingCheck ? 1.5f : 0.0f;
 		settings.sourceWarpCatmull = profile.dejudderSourceWarpCatmull;
-		settings.pictureArea = profile.dejudderPictureArea;
+		settings.pictureArea = true;   // dejudder_picture_area retired 2026-10-17: always the picture only
 		// General (owner 2026-10-14): pixel values for a 2160-line picture,
 		// per-frame values at 23.976p; the matcher scales them to the source.
 		settings.referenceHeight = 2160.0f;
@@ -10654,9 +10668,6 @@ struct LibplaceboVideoRenderer::Impl
 			current.dejudderLandingCheck != next.dejudderLandingCheck,
 			"dejudder_motion_fixes");
 		changed(current.dejudderPulldown != next.dejudderPulldown, "dejudder_pulldown");
-		changed(current.dejudderPictureArea != next.dejudderPictureArea, "dejudder_picture_area");
-		changed(current.fixSceneCooldown != next.fixSceneCooldown, "fix_scene_cooldown");
-		changed(current.ditherVectorsNewFrame != next.ditherVectorsNewFrame, "dither_vectors_new_frame");
 		changed(current.nativeRgbIngest != next.nativeRgbIngest, "native_rgb_ingest");
 		changed(current.dvTunnelGpuUnpack != next.dvTunnelGpuUnpack, "dv_tunnel_gpu_unpack");
 		changed(current.dvTrims != next.dvTrims, "dv_trims");
@@ -15673,7 +15684,7 @@ struct LibplaceboVideoRenderer::Impl
 		// Hunt 2 09-L4: not after a failed extra. The fallback showed A at shift 0 (or
 		// nothing was presented), so vectors from previousShift would carry from the
 		// wrong place; the sigma-delta's own search covers B (vector validity rule).
-		if (!failure && activeSettings.ditherVectorsNewFrame && !activeSettings.ditherVectorsOwn && SigmaDeltaVectorsSupported() &&
+		if (!failure && !activeSettings.ditherVectorsOwn && SigmaDeltaVectorsSupported() &&
 			warpField && warpTrust &&
 			dejudderGeometryValid && f.nextSourceSequence != 0)
 		{
@@ -16214,13 +16225,13 @@ struct LibplaceboVideoRenderer::Impl
 				static_cast<size_t>(width), static_cast<size_t>(height), p010RowBytes,
 				sourceSequence, videoFrame.GetTimingTimestamp(),
 				sceneDetectorGeneration,
-				// Fix under test: the frame duration in the 100 ns units the
-				// detector's 2 s cooldown is written in, at the content rate.
-				activeSettings.fixSceneCooldown && SourceRateHz(state) > 0.0 ?
+				// The frame duration in the 100 ns units the detector's 2 s cooldown is
+				// written in, at the content rate (fix_scene_cooldown, retired 2026-10-17:
+				// always on). Rate unknown: TimeScale ticks -> 100 ns; no time scale: the
+				// display mode's frame duration as given.
+				SourceRateHz(state) > 0.0 ?
 					static_cast<uint64_t>(std::llround(1.0e7 / SourceRateHz(state))) :
-					// audit 2026-10-16: with the fix on and the rate unknown, TimeScale ticks -> 100 ns;
-					// with the fix off, the earlier value exactly (the switch restores old behaviour).
-					(activeSettings.fixSceneCooldown && state.displayMode->TimeScale() > 0 ?
+					(state.displayMode->TimeScale() > 0 ?
 						static_cast<uint64_t>(std::llround(1.0e7 * state.displayMode->FrameDuration() / state.displayMode->TimeScale())) :
 						static_cast<uint64_t>(state.displayMode->FrameDuration())),
 				sceneDetectionEnabled || automaticSourceCrop, &analysisSource });
@@ -28836,8 +28847,6 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "dejudder_warp_rendered=" << s.dejudderWarpRendered << "\n"
 		<< "dejudder_estimate_ahead=" << s.dejudderEstimateAhead << "\n"
 		<< "dejudder_pulldown=" << s.dejudderPulldown << "\n"
-		<< "fix_scene_cooldown=" << s.fixSceneCooldown << "\n"
-		<< "dither_vectors_new_frame=" << s.ditherVectorsNewFrame << "\n"
 		<< "native_rgb_ingest=" << s.nativeRgbIngest << "\n"
 		<< "dv_tunnel_gpu_unpack=" << s.dvTunnelGpuUnpack << "\n"
 		<< "dv_trims=" << s.dvTrims << "\n"

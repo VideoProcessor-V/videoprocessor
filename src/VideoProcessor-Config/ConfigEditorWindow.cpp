@@ -7899,21 +7899,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         form = addCollapsibleSection(QStringLiteral("fixesUnderTest"), QStringLiteral("Fixes under test"),
             QStringLiteral("Recent fixes, on by default. Switch one off to get the old behaviour back if something "
                 "looks wrong."), false);
-        auto* pictureArea = addChoice(QStringLiteral("Ignore black bars when matching"),
-            QStringLiteral("dejudder_picture_area"), { QStringLiteral("on"), QStringLiteral("off") });
-        pictureArea->setToolTip(QStringLiteral(
-            "De-judder: letterbox and pillarbox bars are left out of the motion statistics (cut detection, fades) "
-            "and stay still. Off = the bars count as picture (cuts in letterboxed film can be missed)."));
-        auto* sceneCooldown = addChoice(QStringLiteral("Scene-cut cooldown 2 s"),
-            QStringLiteral("fix_scene_cooldown"), { QStringLiteral("on"), QStringLiteral("off") });
-        sceneCooldown->setToolTip(QStringLiteral(
-            "After a cut, the next cut that may change the crop or NLS counts again after 2 seconds, as intended. "
-            "Off = the old behaviour: 12.5 s on 24p film, 5 s at 60p."));
-        auto* ditherNext = addChoice(QStringLiteral("Dither reuses de-judder motion on new frames"),
-            QStringLiteral("dither_vectors_new_frame"), { QStringLiteral("on"), QStringLiteral("off") });
-        ditherNext->setToolTip(QStringLiteral(
-            "With the de-judder running, each new film frame's temporal dither takes the motion the de-judder already "
-            "measured instead of searching again (about 5 ms less per new frame on the laptop). Off = its own search."));
+        // Pruning 2026-10-17: "Ignore black bars when matching" (dejudder_picture_area), "Scene-cut
+        // cooldown 2 s" (fix_scene_cooldown) and "Dither reuses de-judder motion on new frames"
+        // (dither_vectors_new_frame) were retired - always on; old files keep loading
+        // (RetiredSettings.h).
         auto* capturePath = addChoice(QStringLiteral("Capture unpack on the GPU (v210 / UYVY)"), QStringLiteral("capture_path"),
             { QStringLiteral("gpu"), QStringLiteral("standard") });
         capturePath->setItemText(capturePath->findData(QStringLiteral("gpu")), QStringLiteral("GPU (default)"));
@@ -9080,8 +9069,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Off (recommended): chroma stays faithful; SSIM on chroma can fringe colour at edges."));
         auto* adaptiveFaithful = addChoice(QStringLiteral("Grain-true downscale filter"),
             QStringLiteral("adaptive_faithful"), { QStringLiteral("polar"), QStringLiteral("ortho"), QStringLiteral("auto") });
+        // "polar" is retired (runs as Auto, RetiredSettings.h); the hidden value holder keeps it
+        // only so a file that still says polar round-trips unchanged.
         adaptiveFaithful->setItemText(adaptiveFaithful->findData(QStringLiteral("polar")),
-            QStringLiteral("Polar EWA Lanczos sharp (most accurate when both axes shrink alike)"));
+            QStringLiteral("Polar (retired: runs as Auto)"));
         adaptiveFaithful->setItemText(adaptiveFaithful->findData(QStringLiteral("auto")),
             QStringLiteral("Auto (polar; separable when only one axis shrinks)"));
         adaptiveFaithful->setItemText(adaptiveFaithful->findData(QStringLiteral("ortho")),
@@ -10300,7 +10291,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },
                     { "dejudder_est_split", "off" }, { "dejudder_motion_rolloff", "off" }, { "dejudder_global_two", "on" },
                     { "dejudder_regional_hold", "on" }, { "dejudder_pixel_trust", "on" }, { "dejudder_verify", "off" },
-                    { "dejudder_landing_check", "on" }, { "dejudder_picture_area", "on" }, { "fix_scene_cooldown", "on" }, { "dither_vectors_new_frame", "on" }, { "native_rgb_ingest", "on" }, { "dv_tunnel_gpu_unpack", "off" }, { "dv_trims", "off" }, { "dejudder_pulldown", "off" },
+                    { "dejudder_landing_check", "on" }, { "native_rgb_ingest", "on" }, { "dv_tunnel_gpu_unpack", "off" }, { "dv_trims", "off" }, { "dejudder_pulldown", "off" },
                     { "dejudder_fade_match", "on" }, { "dejudder_low_res", "all" }, { "dejudder_estimate_ahead", "on" },
                     { "dejudder_block_taper", "off" }, { "dither_vectors", "auto" }, { "adaptive_downscale", "off" },
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "auto" }, { "adaptive_grain_map", "on" },
