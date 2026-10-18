@@ -9405,6 +9405,10 @@ namespace VideoProcessorTest
 			frame.crop = { 0.0f, 0.0f, static_cast<float>(W), static_cast<float>(H) };
 
 			SourceResolutionMonitor::Monitor monitor;
+			// Integration 2026-10-17: the behaviour before the latch fixes, as the latch branch pinned
+			// its other pre-fix monitor tests (its wait text, 128-px tiles at 1080 reading 540 lines as
+			// ~542, and its switch triggers differ; SourceResolutionLatchTests cover the fixes).
+			monitor.SetLatchFixes(false);
 			// Owner 2026-10-16: the auto history, one file per session, the newest 5 kept.
 			char tempPath[MAX_PATH] = {};
 			GetTempPathA(MAX_PATH, tempPath);
@@ -9472,6 +9476,7 @@ namespace VideoProcessorTest
 			// the change cannot be seen - a second monitor waiting to engage, then one black frame.
 			{
 				SourceResolutionMonitor::Monitor faded;
+				faded.SetLatchFixes(false);   // integration 2026-10-17: as the main monitor above
 				double t = 0.0;
 				std::string fadedWhy;
 				double fadedFactor = 1.0;

@@ -29,6 +29,7 @@
 #include <vprenderer/HookInstanceTag.h>
 #include <vprenderer/OcclusionMaskHook.h>
 #include <vprenderer/OutputEncodingRepair.h>
+#include <vprenderer/SigmaDeltaDomain.h>
 #include <SubtitleCutPasteShader.h>
 
 #include <libplacebo/shaders/custom.h>
@@ -45,6 +46,16 @@
 
 namespace ChainGpuProbe
 {
+	// Integration 2026-10-17 (hunt 2 picture C, 09 L2): the chain's temporal sigma-delta
+	// clamps k to the permissible codes, so it never emits the reserved timing codes
+	// (10-bit 0-3 and 1020-1023) while the hook-only reference can. Chain-vs-reference
+	// comparisons therefore bring the reference into those codes first; BTB/WTW stay.
+	inline int PermissibleReference(int code)
+	{
+		const SigmaDeltaDomain::CodeLimits limits = SigmaDeltaDomain::Limits(10, false);
+		return (std::min)((std::max)(code, static_cast<int>(limits.min)), static_cast<int>(limits.max));
+	}
+
 	using ShaderSource = std::function<std::string(const char*)>;
 
 	struct Outcome
@@ -587,7 +598,7 @@ namespace ChainGpuProbe
 			for (int y = 2; y < 26; ++y)
 				for (int x = 6; x < ow - 6; ++x)
 				{
-					const int d = std::abs(chain.Channel(x, y, 1) - ref.Channel(x, y, 1));
+					const int d = std::abs(chain.Channel(x, y, 1) - PermissibleReference(ref.Channel(x, y, 1)));
 					if (d > maxDiff)
 					{
 						maxX = x; maxY = y;
@@ -837,7 +848,7 @@ namespace ChainGpuProbe
 				for (int y = outY(g.textureFirst); y <= outY(g.textureLast); ++y)
 					for (int x = outX(12.0); x < outX(sw - 12.0); ++x)
 					{
-						const int d = std::abs(r.Channel(x, y, 1) - ref.Channel(x, y, 1));
+						const int d = std::abs(r.Channel(x, y, 1) - PermissibleReference(ref.Channel(x, y, 1)));
 						maxDiff = d > maxDiff ? d : maxDiff;
 						sum += d;
 						++count;
@@ -958,7 +969,7 @@ namespace ChainGpuProbe
 				for (int y = outY(44.0); y <= outY(move.destination.top - 12.0); ++y)   // and 12 rows below the ramp
 					for (int x = outX(12.0); x < outX(sw - 12.0); ++x)
 					{
-						const int d = std::abs(r.Channel(x, y, 1) - ref.Channel(x, y, 1));
+						const int d = std::abs(r.Channel(x, y, 1) - PermissibleReference(ref.Channel(x, y, 1)));
 						if (d > maxDiff) { maxDiff = d; worstX = x; worstY = y; }
 						over2 += d > 2 ? 1 : 0;
 						++pixels;
@@ -1032,7 +1043,7 @@ namespace ChainGpuProbe
 				for (int y = 2; y < 26; ++y)
 					for (int x = 6; x < ow - 6; ++x)
 					{
-						const int d = std::abs(r.Channel(x, y, 1) - ref.Channel(x, y, 1));
+						const int d = std::abs(r.Channel(x, y, 1) - PermissibleReference(ref.Channel(x, y, 1)));
 						maxDiff = d > maxDiff ? d : maxDiff;
 						sum += d;
 						++count;
@@ -1117,7 +1128,7 @@ namespace ChainGpuProbe
 					for (int x = 6; x < ow - 6; ++x)
 						for (int ch = 0; ch < 3; ++ch)
 						{
-							maxDiff = (std::max)(maxDiff, std::abs(r.Channel(x, y, ch) - ref.Channel(x, y, ch)));
+							maxDiff = (std::max)(maxDiff, std::abs(r.Channel(x, y, ch) - PermissibleReference(ref.Channel(x, y, ch))));
 							satEffect = (std::max)(satEffect, std::abs(ref.Channel(x, y, ch) - unsaturated.Channel(x, y, ch)));
 						}
 				std::string line = "saturation +5 frame " + std::to_string(f) + ": chain vs shaping hooks max " +
@@ -1269,7 +1280,7 @@ namespace ChainGpuProbe
 				for (int x = 24; x < ow - 24; ++x)
 					for (int ch = 0; ch < 3; ++ch)
 					{
-						const int d = std::abs(r.Channel(x, y, ch) - ref.Channel(x, y, ch));
+						const int d = std::abs(r.Channel(x, y, ch) - PermissibleReference(ref.Channel(x, y, ch)));
 						if (d > maxDiff) { wx = x; wy = y; wch = ch; }
 						maxDiff = d > maxDiff ? d : maxDiff;
 						sum += d;
