@@ -282,6 +282,10 @@ namespace
 		std::string sourceStatus;   // the crash state's source resolution line (Stage 12)
 		std::string captureMetadata;   // the rendered-output capture's JSON sidecar (plan->captureAtSeconds)
 		std::vector<std::string> captureMetadatas;   // every completed capture's sidecar, in order (plan->captureTimes)
+		// GPU cost (D3D11 timestamp queries, not wall clock): the renderer's render-load window at the end.
+		bool gpuValid = false;
+		double gpuFrameMsAvg = 0.0, gpuFrameMsPeak = 0.0, gpuCoreMsAvg = 0.0, gpuCoreMsPeak = 0.0;
+		size_t gpuFrames = 0;
 		// Sampled once per sent frame through the second half of the run: the renderer's queue depth
 		// (GetFrameQueueSize) and its capture-to-output delay (ExitLatencyMs).
 		std::vector<size_t> queueDepths;
@@ -856,6 +860,18 @@ namespace
 			if (renderer->GetDejudderStatus(status)) result.dejudderStatus = CStringA(status).GetString();
 			if (renderer->GetLedDriveStatus(status)) result.ledStatus = CStringA(status).GetString();
 			if (renderer->GetSourceResolutionStatus(status)) result.sourceStatus = CStringA(status).GetString();
+			{
+				RendererRenderLoad load;
+				if (renderer->GetRenderLoad(load) && load.gpuValid)
+				{
+					result.gpuValid = true;
+					result.gpuFrameMsAvg = load.gpu.average;
+					result.gpuFrameMsPeak = load.gpu.peak;
+					result.gpuCoreMsAvg = load.coreGpuValid ? load.coreGpu.average : 0.0;
+					result.gpuCoreMsPeak = load.coreGpuValid ? load.coreGpu.peak : 0.0;
+					result.gpuFrames = load.gpuFrames;
+				}
+			}
 			status.Empty();
 			if (renderer->GetPresentationTimingStatus(status)) result.presentationStatus = CStringA(status).GetString();
 			resources.ReleaseRenderer();
@@ -4357,10 +4373,14 @@ namespace Tests
 				std::ofstream log(captures + "\\" + name + ".log", std::ios::trunc);
 				static const char* keys[] = { "resolved render options", "igma", "exture", "ulse", "eband",
 					"ource resolution", "apture", "bit depth", "ither", "wapchain", "De-judder", "nterpolation",
-					"daptive", "disabled", "error", "failed", "Rebase", "rebase" };
+					"daptive", "disabled", "error", "failed", "Rebase", "rebase", "DXGI adapter", "VP_TEST_ADAPTER", "hader", "SSim", "FSRCNNX", "CNN" };
 				for (const std::string& l : r.log)
 					for (const char* k : keys)
 						if (l.find(k) != std::string::npos) { log << l << "\n"; break; }
+				log << "shader_profiles_selected=" << (g_harnessShadersSelected ? 1 : 0) << " requested=" << f[11] << "\n";
+				log << "gpu_timing: valid=" << (r.gpuValid ? 1 : 0) << " frame_ms_avg=" << r.gpuFrameMsAvg << " frame_ms_peak=" <<
+					r.gpuFrameMsPeak << " core_ms_avg=" << r.gpuCoreMsAvg << " core_ms_peak=" << r.gpuCoreMsPeak << " frames=" <<
+					r.gpuFrames << "\n";
 				log << "dejudder status: " << r.dejudderStatus << "\npresentation: " << r.presentationStatus <<
 					"\nsource: " << r.sourceStatus << "\n";
 				int copied = 0;
@@ -4386,7 +4406,7 @@ namespace Tests
 				Logger::WriteMessage((name + ": " + std::to_string(copied) + " of " + std::to_string(plan.captureTimes.size()) +
 					" captures, presented " + (r.presented ? "yes" : "no") + ", " + std::to_string(took) + " s\n").c_str());
 				++ran;
-				if (copied == 0 || !r.presented) { ++failed; continue; }
+				if ((copied == 0 && !plan.captureTimes.empty()) || !r.presented) { ++failed; continue; }
 				std::ofstream(done) << copied << "\n";
 			}
 			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
