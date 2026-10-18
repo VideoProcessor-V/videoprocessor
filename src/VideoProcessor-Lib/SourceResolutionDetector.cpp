@@ -1452,6 +1452,13 @@ namespace SourceResolution
 					double d = 0.0, sh = 0.0;
 					if (PatternChange(frame.pattern, frame.patternFlat, frame.pattern, frame.patternFlat, frame.blackLevel, frame.noiseLevel, d, sh))
 					{
+						// Real-footage suite 2026-10-18: the first shape of a stream (its start, or after a
+						// discontinuity) begins a shot whose motion is not known yet - as after a cut, it is
+						// taken as at least cutMotionAfterCut until its own frames bring the level down. From
+						// zero, the opening seconds of any moving shot read as cuts (a long take counted
+						// three shots by 1.5 s, which met minimumShots and declared a reading at once).
+						if (lastPattern.empty())
+							cutJudge.motion = (std::max)(cutJudge.motion, settings.cutMotionAfterCut);
 						lastPattern = frame.pattern;
 						lastPatternFlat = frame.patternFlat;
 						lastPatternSeconds = seconds;

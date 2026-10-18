@@ -24896,6 +24896,8 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 			// Hunt 2 (cadence_class_fixes): the exclusive film floor (H1), lateness while the
 			// phase is uncertain (M1) and a retry that needs the locked phase to fail (L3).
 			settings.exclusiveFilmFloor = settings.trackingLatenessMax = settings.retryNeedsFailure = classFixes;
+			// Real-footage suite 2026-10-18: a lock needs a maximally even pattern (no mixed-cadence lock).
+			settings.maximallyEvenPattern = classFixes;
 			m_pulldown.SetSettings(settings);
 			// Bug hunt 2026-10-17: the clock's form changes with the switch (cadence-aware
 			// or not): start it over, and no pair across the change.

@@ -9,8 +9,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <sstream>
 #include <utility>
 #include <vector>
+
+#include <windows.h>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -916,8 +919,8 @@ namespace VideoProcessorTest
 		{
 			const std::string folder = EnvValue("VP_TEST_REAL_FOOTAGE");
 			if (folder.empty()) { Logger::WriteMessage("VP_TEST_REAL_FOOTAGE not set: skipped\n"); return; }
-			struct Clip { const char* file; bool y4m; int frames; int decimate; Rate film; };
-			const Clip clips[] = {
+			struct Clip { std::string file; bool y4m; int frames; int decimate; Rate film; int W = 3840, H = 2160; };
+			std::vector<Clip> clips = {
 				{ "Bosphorus_3840x2160_120fps_420_10bit_YUV.yuv", false, 600, 5, { 24, 1 } },
 				{ "Jockey_3840x2160_120fps_420_10bit_YUV.yuv", false, 600, 5, { 24, 1 } },
 				{ "ReadySetGo_3840x2160_120fps_420_10bit_YUV.yuv", false, 600, 5, { 24, 1 } },
@@ -925,10 +928,58 @@ namespace VideoProcessorTest
 				{ "ShakeNDry_3840x2160_120fps_420_10bit_YUV.yuv", false, 300, 5, { 24, 1 } },
 				{ "park_joy_2160p50.y4m", true, 500, 2, { 25, 1 } },
 				{ "crowd_run_2160p50.y4m", true, 500, 2, { 25, 1 } } };
-			const int W = 3840, H = 2160;
+			// Real-footage suite 2026-10-18: any other 8-bit 4:2:0 y4m in the folder (the clip
+			// library's film clips, D:/testclips/film) at its own size and rate - read from its
+			// header, nothing fixed: up to 30 fps its frames are the film, faster ones are decimated
+			// by the whole number that brings them to 30 fps or less.
+			{
+				WIN32_FIND_DATAA data{};
+				const HANDLE find = FindFirstFileA((folder + "\\*.y4m").c_str(), &data);
+				if (find != INVALID_HANDLE_VALUE)
+				{
+					do
+					{
+						const std::string name = data.cFileName;
+						bool listed = false;
+						for (const Clip& c : clips)
+							listed = listed || c.file == name;
+						if (listed)
+							continue;
+						FILE* f = nullptr;
+						if (fopen_s(&f, (folder + "\\" + name).c_str(), "rb") != 0 || !f)
+							continue;
+						char header[512] = {};
+						if (!fgets(header, sizeof(header), f)) { fclose(f); continue; }
+						fclose(f);
+						int w = 0, h = 0;
+						long long fn = 0, fd = 1;
+						bool plain420 = true;
+						std::istringstream tokens(header);
+						std::string token;
+						while (tokens >> token)
+						{
+							if (token[0] == 'W') w = std::atoi(token.c_str() + 1);
+							else if (token[0] == 'H') h = std::atoi(token.c_str() + 1);
+							else if (token[0] == 'F') sscanf_s(token.c_str() + 1, "%lld:%lld", &fn, &fd);
+							else if (token[0] == 'C') plain420 = token == "C420" || token == "C420jpeg" || token == "C420paldv" || token == "C420mpeg2";   // 8-bit 4:2:0 only
+						}
+						if (w <= 0 || h <= 0 || fn <= 0 || fd <= 0 || !plain420)
+							continue;
+						const long long frameBytes = static_cast<long long>(w) * h * 3 / 2 + 6;
+						const long long frames = static_cast<long long>(data.nFileSizeHigh) << 32 | data.nFileSizeLow;
+						const int decimate = static_cast<int>((std::max)(1LL, (fn + 30 * fd - 1) / (30 * fd)));
+						Clip c{ name, true, static_cast<int>(frames / frameBytes), decimate, { fn, fd * decimate } };
+						c.W = w;
+						c.H = h;
+						clips.push_back(c);
+					} while (FindNextFileA(find, &data));
+					FindClose(find);
+				}
+			}
 			int clipsRead = 0;
 			for (const Clip& clip : clips)
 			{
+				const int W = clip.W, H = clip.H;
 				FILE* f = nullptr;
 				if (fopen_s(&f, (folder + "\\" + clip.file).c_str(), "rb") != 0 || !f) continue;
 				++clipsRead;
@@ -987,7 +1038,7 @@ namespace VideoProcessorTest
 					}
 					char text[200];
 					std::snprintf(text, sizeof(text), "%s %d film frames in %s: lock@%lld (need %d) unlocks %d\n",
-						clip.file, static_cast<int>(film.size()), RateText(signal).c_str(), lockAt, Pulldown::Detector::FramesToLock(cycle, signal.Hz()), unlocks);
+						clip.file.c_str(), static_cast<int>(film.size()), RateText(signal).c_str(), lockAt, Pulldown::Detector::FramesToLock(cycle, signal.Hz()), unlocks);
 					Logger::WriteMessage(text);
 					const std::wstring w = Wide(std::string(clip.file) + " in " + RateText(signal));
 					Assert::AreEqual(0, newDropped, (w + L": no new picture dropped").c_str());
