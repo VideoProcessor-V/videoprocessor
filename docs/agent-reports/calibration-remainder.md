@@ -40,8 +40,11 @@ docs/calibration/AUTO-CALIBRATION.md.
   %TEMP%\vp-spotread-transcript.txt). GPU (VP_TEST_GPU=hardware):
   `RendererCaptureHarnessTests::CalibrationPatternsAreExactCodesInTheBackbuffer`,
   `RendererCaptureHarnessTests::CalibrationDryRunThroughTheRenderer`. Not run here (no GPU, no meter).
-- Results: calibration filter 95/95 passed (TRX); the full suite and the Config tests are listed in the
-  commit message of this report's commit.
+- Results (single-threaded, TRX): calibration filter 95/95 passed (gated tests log SKIP-NO-GPU /
+  SKIP-NO-METER). Full VideoProcessor-Test 3364 tests: 3362 passed; the two failures passed on rerun
+  (DeckLink converter p95 timing under load; a renderer build-ID check run against a DLL from before the
+  last Lib rebuild). Config tests: 142/143 passed, 1 skipped (needs a real window); the one failure was the
+  page-count assertion (now 24 with Calibration), which passes with the schema coverage test after the fix.
 
 ## Not built / open
 

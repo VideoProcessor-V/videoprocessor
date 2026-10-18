@@ -2325,8 +2325,8 @@ void testEveryPageRoundTrips()
 
     QStackedWidget* pages = requireControl<QStackedWidget>(window,
         QStringLiteral("settingsPages"));
-    require(pages->count() == 23,
-        "Renderer, Scaling, Color, Output, Screen, Zoom, Processing, shader, shortcut, Subtitles, Dynamic Drive, Updates and Motion pages were not added as dedicated settings pages");
+    require(pages->count() == 24,
+        "Renderer, Scaling, Color, Output, Screen, Zoom, Processing, shader, shortcut, Subtitles, Dynamic Drive, Updates, Motion and Calibration pages were not added as dedicated settings pages");
     for (QPushButton* button : window.findChildren<QPushButton*>())
         require(!button->property("navChild").toBool(),
             "Grouped settings still expose child entries in the left navigation");
