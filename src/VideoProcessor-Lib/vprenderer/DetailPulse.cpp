@@ -51,7 +51,7 @@ shared float rd[1024];
 // the source's codes.
 float code_at(ivec2 p)
 {
-#ifdef RGB
+#ifdef DP_RGB
     vec4 t = texelFetch(src, p, 0);
     return luma_mul * dot(t.rgb, luma_w) + luma_add;
 #else
@@ -396,7 +396,7 @@ for (int q = 0; q < 4; q++) {
         float w = top * (1.0 - tf.y) + bottom * tf.y;
         float delta = w * (gm.x * d1 + gm.y * d2);
         // Added to the source sample itself: a gain of 1 gives it back exactly.
-#ifdef RGB
+#ifdef DP_RGB
         // The same delta on R, G and B: the luma moves by it, Cb and Cr stay.
         vec4 t = texelFetch(src, p, 0);
         imageStore(dst, p, vec4(t.rgb + vec3(delta / luma_mul), t.a));
@@ -623,7 +623,7 @@ for (int q = 0; q < 4; q++) {
 
 		std::string Defines(const Constants& c)
 		{
-			return c.rgb ? "#define RGB 1\n" : "";
+			return c.rgb ? "#define DP_RGB 1\n" : "";
 		}
 
 		// The plane-reading variables (code_scale, or the RGB luma's).
