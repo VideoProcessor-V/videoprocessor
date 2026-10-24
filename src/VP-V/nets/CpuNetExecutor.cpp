@@ -218,8 +218,16 @@ namespace VpNets
 				break;
 			}
 			case Glsl::ExternKind::Mul:
-				v = Glsl::Value::Float(1.0f);
+			{
+				// The input's declared factor (NetTexture::mul); intermediates are 1.
+				float mul = 1.0f;
+				const std::string b = x.binding == "HOOKED" ? (pkg.contract.site == RunSite::PostKernelHook && pass.hook == "SCALER_SRC" ? "SCALER_SRC" :
+					pkg.contract.site == RunSite::PostKernelHook ? "SCALER_OUT" : "HOOKED") : x.binding;
+				const auto it = in.textures.find(b);
+				if (!saved.count(x.binding) && it != in.textures.end()) mul = it->second.mul;
+				v = Glsl::Value::Float(mul);
 				break;
+			}
 			case Glsl::ExternKind::Pos:
 				if (!Lookup(x.binding, pass.hook)) return fail("texture " + x.binding + " not bound");
 				perPixelPos.push_back(e);

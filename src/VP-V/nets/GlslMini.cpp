@@ -157,6 +157,7 @@ namespace VpNets
 				std::string op;            // operator text (Unary/Binary/Assign/Inc)
 				int slot = -1;             // Local/Global slot, Ext index, Call function, Builtin id, TexSample binding ext
 				int slot2 = -1;            // TexOff: the Pt extern; Assign: the target's declared type index
+				int mulExt = -1;           // TexSample/TexOff: the NAME_mul extern (mpv's NAME_tex includes it)
 				Type type;                 // Construct/ArrayConstruct target
 				uint8_t swz[4] = {};       // Swizzle indices
 				uint8_t swzN = 0;
@@ -669,6 +670,7 @@ namespace VpNets
 						nodes[n].slot2 = ExternFor(name + "_pt");
 						nodes[n].kids = { args[0] };
 						nodes[n].lit = Value::Int(ExternFor(name + "_pos"));
+						nodes[n].mulExt = ExternFor(name + "_mul");
 						return n;
 					}
 					if (EndsWith(t.text, "_tex"))
@@ -678,6 +680,7 @@ namespace VpNets
 						const int n = NewNode(NK::TexSample);
 						nodes[n].slot = ExternFor(name + "_raw");
 						nodes[n].kids = { args[0] };
+						nodes[n].mulExt = ExternFor(name + "_mul");
 						return n;
 					}
 					Fail("unknown function '" + t.text + "'");
@@ -1586,7 +1589,10 @@ namespace VpNets
 					if (!ctx.error.empty()) return Value();
 					const TexView* tv = Texture(ctx.externs[nd.slot], ctx, nd);
 					if (!tv) return Value();
-					return Bilinear(*tv, pos.F(0), pos.F(1));
+					Value r = Bilinear(*tv, pos.F(0), pos.F(1));
+					const float mul = ctx.externs[nd.mulExt].F(0);
+					for (int k = 0; k < 4; ++k) r.f[k] *= mul;
+					return r;
 				}
 				case NK::TexOff:
 				{
@@ -1596,7 +1602,10 @@ namespace VpNets
 					if (!tv) return Value();
 					const Value& pos = ctx.externs[nd.lit.i[0]];
 					const Value& pt = ctx.externs[nd.slot2];
-					return Bilinear(*tv, pos.F(0) + pt.F(0) * Comp(off, 0), pos.F(1) + pt.F(1) * Comp(off, 1));
+					Value r = Bilinear(*tv, pos.F(0) + pt.F(0) * Comp(off, 0), pos.F(1) + pt.F(1) * Comp(off, 1));
+					const float mul = ctx.externs[nd.mulExt].F(0);
+					for (int k = 0; k < 4; ++k) r.f[k] *= mul;
+					return r;
 				}
 				case NK::Comma:
 					break;

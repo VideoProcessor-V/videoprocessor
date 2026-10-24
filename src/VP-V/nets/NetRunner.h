@@ -31,6 +31,9 @@ namespace VpNets
 		int width = 0, height = 0;
 		int components = 1;
 		TexFormat format = TexFormat::Unknown;
+		// NAME_mul: the factor that turns a sampled value into the net's normalised value (1 for
+		// float and full-range textures; for a 10-bit value MSB-aligned in r16, 65535 / 65472).
+		float mul = 1.0f;
 		bool Valid() const { return handle && width > 0 && height > 0; }
 	};
 

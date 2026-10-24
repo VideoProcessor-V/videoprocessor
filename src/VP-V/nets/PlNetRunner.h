@@ -1,67 +1,81 @@
 #pragma once
 
+#include "NetFusion.h"
 #include "NetRunner.h"
 
+#include <map>
+#include <memory>
 #include <string>
+#include <vector>
 
-// PlNetRunner: the pl_dispatch implementation of INetRunner. A STUB until the skeleton lead wires
-// it (barrier B1 groundwork, 2026-10-24): Prepare() refuses with a plain reason, so a caller that
-// tries to use it bypasses the net visibly ("Fallbacks engaged: nets: bypassed (...)").
+struct pl_hook_params;
+
+// PlNetRunner: INetRunner on libplacebo (barrier B1). Runs an exported net's passes itself, with
+// the CALL SITE's pl_gpu + pl_dispatch, on caller-provided pl_tex inputs and VP-owned
+// intermediates; never as a libplacebo hook (those only run inside pl_render, in the wrong place).
 //
-// It is header-only and includes no libplacebo, so it compiles everywhere. The wired version
-// moves into a .cpp in the renderer project. Its shim mirrors libplacebo's custom_mpv.c
-// (hook_hook / bind_pass_tex), which VP cannot use directly because those hooks only run inside
-// pl_render (B1):
+// The shim mirrors libplacebo's custom_mpv.c (hook_hook / bind_pass_tex), through the public
+// pl_shader_custom API, per pass:
+//   - each //!BIND name N (HOOKED = the hooked stage) is a SAMPLED_TEX descriptor "N_raw" (LINEAR,
+//     CLAMP) plus the macros N_pos, N_size (textureSize), N_pt, N_mul, N_tex(pos), N_texOff(off);
+//   - each //!PARAM is a shader variable (int or float) from NetRunInputs::params;
+//   - fragment pass: "color = hook();" + pl_dispatch_finish into the pass texture; compute pass:
+//     out_image as a STORAGE_IMG descriptor, "hook();", pl_dispatch_compute(ceil(size / block));
+//   - out size = roundf(RPN) (EvalSizeExpr); a pass without SAVE replaces the hooked stage.
+// Intermediates use the format the capability check picked (fp16 where the fingerprint allows,
+// else rgba32f), sized by component count (r / rg / rgba), pooled across frames (recreated only
+// when the size or format changes). Cost: one pl_timer per pass; the sum of the latest results is
+// recorded into SlotTiming at each Run.
 //
-//   Prepare: for each NetPass keep the body; choose the intermediate format from
-//     CheckCapabilities (rgba16f where the fingerprint allows, else rgba32f); create the SAVE
-//     textures lazily per size (renderable; storable for compute passes; sampleable LINEAR).
-//   Run, per pass, with the call site's pl_dispatch (front end: the renderer's; D: the dispatch in
-//     pl_hook_params):
-//     1. sh = pl_dispatch_begin(dispatch);
-//     2. for each //!BIND name (HOOKED = the hooked stage): id = sh_bind(sh, tex, CLAMP, LINEAR,
-//        "hook_tex", &rect, &pos, &pt) and the macros NAME_raw, NAME_pos, NAME_size
-//        (vec2(textureSize(id, 0))), NAME_pt, NAME_mul (1.0 for float textures; the plane's
-//        normalisation for UNORM), NAME_tex(pos), NAME_texOff(off); the HOOKED_* aliases;
-//     3. each //!PARAM as a shader variable (labels from NetRunInputs::params; ints as int);
-//     4. append the body; out size = roundf(RPN WIDTH/HEIGHT) (EvalSizeExpr);
-//     5. fragment: GLSL("vec4 color = hook();") + pl_dispatch_finish(target = the pass texture);
-//        compute: sh_try_compute(block), out_image as a STORAGE_IMG desc, "hook();",
-//        pl_dispatch_compute(dispatch_size = ceil(out / block));
-//     6. a pass without SAVE replaces the hooked stage; the last one is the net output.
-//   Cost: a pl_timer per Run (or per pass) -> RecordTiming() -> SlotTiming for the net's slot.
-//   Oracle: CpuNetExecutor on the same inputs (GPU test, VP_TEST_ADAPTER=NVIDIA, mains only).
-//   Note: NAME_tex() on the GPU filters with reduced fractional precision (NVIDIA: 8-bit lerp
-//   weights); D's source-feature passes and A's/repair's VPNNQ_tex use it. Compare with a code
-//   tolerance, or switch those reads to texelFetch-based bilinear in the exporter.
+// Entry modes (same object, same Run):
+//   - front end: NetDeviceContext{renderer gpu, VP's dispatch}, inputs = VP-owned textures;
+//   - the hybrid scaler's POST_KERNEL (PL_HOOK_SIG_TEX): DeviceFromHook(params) and
+//     RunInPostKernelHook(params, scalerSrc, out): SCALER_OUT = params->tex.
+// The output texture is owned by the runner and valid until its next Run or Release.
 namespace VpNets
 {
 	class PlNetRunner : public INetRunner
 	{
 	public:
-		const char* Name() const override { return "pl_dispatch (not wired)"; }
+		PlNetRunner();
+		~PlNetRunner() override;
 
-		NetCapabilities Capabilities(const NetDeviceContext&) const override
+		const char* Name() const override { return "pl_dispatch"; }
+		NetCapabilities Capabilities(const NetDeviceContext& device) const override;
+		bool Prepare(const NetDeviceContext& device, const NetPackage& pkg, const NetPrepareParams& params, std::string* error) override;
+		bool Run(const NetDeviceContext& device, const NetRunInputs& in, NetTexture& output, std::string* error) override;
+		void Release() override;
+
+		// POST_KERNEL entry: SCALER_OUT is the hook's texture; SCALER_SRC is the scaler's source,
+		// which the hybrid module holds. `mulOut`/`mulSrc`: NetTexture::mul of the two.
+		bool RunInPostKernelHook(const pl_hook_params* params, void* scalerSrcTex, NetTexture& output, std::string* error,
+			float mulOut = 1.0f, float mulSrc = 1.0f);
+		static NetDeviceContext DeviceFromHook(const pl_hook_params* params);
+
+		// Fused compute layers (NetFusion.h): replaces each run of exported conv-group passes with
+		// one compute pass per layer, same weights and maths. Set before Prepare. fp16Storage keeps
+		// the layer outputs and the shared tile in fp16 (a side option; the default keeps fp32).
+		void SetFusion(bool enabled, FusedKind kind = FusedKind::Direct, bool fp16Storage = false)
 		{
-			// Wired version: from pl_gpu (glsl.compute, pl_find_fmt(... PL_FMT_CAP_RENDERABLE /
-			// STORABLE / LINEAR) for rgba16f and rgba32f, limits.max_tex_2d_dim).
-			NetCapabilities c;
-			c.fragment = false;
-			return c;
+			fusion = enabled;
+			fusedKind = kind;
+			fusedFp16 = fp16Storage;
 		}
+		size_t FusedLayers() const;   // layers running fused (after Prepare)
 
-		bool Prepare(const NetDeviceContext&, const NetPackage& pkg, const NetPrepareParams&, std::string* error) override
-		{
-			if (error) *error = pkg.name + ": the pl_dispatch net runner is not wired yet (B1 groundwork)";
-			return false;
-		}
+		// Test knob: pretend a format is unavailable (the visible-bypass path).
+		void DisableFormat(TexFormat f) { disabled.push_back(f); }
 
-		bool Run(const NetDeviceContext&, const NetRunInputs&, NetTexture&, std::string* error) override
-		{
-			if (error) *error = "the pl_dispatch net runner is not wired yet (B1 groundwork)";
-			return false;
-		}
+		// Test access: a pass texture by SAVE name ("" = the net output); a pl_tex or null.
+		void* Intermediate(const std::string& name) const;
 
-		void Release() override {}
+	private:
+		struct Impl;
+		std::unique_ptr<Impl> impl;
+		int RunFusedLayer(const ConvLayer& layer, const FusedShader& shader, void* dispatch, void* timer, std::string* error);
+		std::vector<TexFormat> disabled;
+		bool fusion = false;
+		FusedKind fusedKind = FusedKind::Direct;
+		bool fusedFp16 = false;
 	};
 }

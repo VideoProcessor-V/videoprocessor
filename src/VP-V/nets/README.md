@@ -1,7 +1,7 @@
 # VP-V nets: the VP-side net runner
 
 The groundwork for running the TrainKit's exported nets inside VP (barrier B1, owner
-2026-10-24). It is self-contained and NOT wired into the renderer yet: the skeleton lead wires it
+2026-10-24). It is self-contained and NOT wired into the renderer yet (only the call sites remain): the skeleton lead wires it
 once the baseline is verified (see "How to wire it" below).
 
 ## Why VP runs the passes itself
@@ -36,7 +36,8 @@ So VP parses the package and runs each pass itself on VP-owned textures, through
 | `../../../tools/net_stamp.py` (+ `test_net_stamp.py`) | The stamp tool: derives the fields round-1/2 exports lack (upstream key, typed pass order/formats, label schema, `delivered_bound`) ONLY from the kit's records, into `<export stem>.vpstamp.json`; refuses with a reason otherwise |
 | `GlslMini.h/.cpp` | A small interpreter for the exporter's GLSL subset (CPU reference only) |
 | `CpuNetExecutor.h/.cpp` | `INetRunner` on the CPU in 32-bit float: the reference the GPU runner is checked against. Emulates rgba16f intermediates |
-| `PlNetRunner.h` | The `pl_dispatch` runner: a STUB that refuses visibly; its header lists the exact shim to write |
+| `PlNetRunner.h/.cpp` | The libplacebo runner: each pass through `pl_shader_custom` + `pl_dispatch_finish` / `pl_dispatch_compute`, with the mpv macros, PARAM variables, pooled VP-owned intermediates (fp16/fp32 per fingerprint), the net output kept at r32f (or r16 on request), and one `pl_timer` per pass into SlotTiming. Has a front-end entry and a POST_KERNEL entry (`RunInPostKernelHook`) |
+| `tests/PlNetRunnerGpuTests.cpp`, `tests/NetTestSupport.h` | GPU tests: headless D3D11, WARP by default, `VP_TEST_GPU=hardware` + `VP_TEST_ADAPTER=NVIDIA` for the GPU. Shared test helpers |
 | `RgbLumaDelta.h` | RGB capture: add (repaired luma - luma) to R, G and B. A CPU helper and the GPU pass text, tested to agree |
 | `tests/NetRunnerTests.cpp` | The unit tests (compiled by `VideoProcessor-Test`, filter "VP-V") |
 | `tests/make_reference.py` | Writes `tests/data/<set>/<case>` from the kit's PyTorch forward pass (read-only on the kit) |
@@ -131,33 +132,85 @@ Estimates, to be confirmed on the first GPU run (`VP_TEST_ADAPTER=NVIDIA`, mains
 - **Gate decisions** must agree exactly. Any tile whose decision flips counts as a failure: a
   flipped tile is a different code path, not a tolerance.
 
-## How to wire it (for the skeleton lead)
+## Fused compute path (optional, `PlNetRunner::SetFusion`)
 
-1. **Implement `PlNetRunner`.** Follow the shim steps in its header (`sh_bind` per BIND, the
-   NAME_* macros, PARAM variables, `pl_dispatch_finish`/`pl_dispatch_compute`, and a pl_timer
-   into `RecordTiming`). Move it into a `.cpp` in the renderer project.
-2. **Compile the parser in the renderer project.** Add `NetPackage.cpp`. The interpreter and the
-   CPU executor stay test-only.
-3. **Front end (A, C, B).** Register a stage in the entrance stage list:
-   - A at `repair.encoding`, C inside `scaling.rebase` after each 1-D pass, and so on;
-   - per source frame: `NetSlot::Run(device{gpu, dispatch}, {HOOKED: the plane}, out)`; on false,
-     keep the input;
-   - RGB capture: run A on the matcher's r16 luma, then run `kRgbLumaDeltaPass` with
-     `LUMA_BEFORE` / `LUMA_AFTER`.
-4. **D.** Inside AdaptiveDownscale's `POST_KERNEL` hook, build a `NetDeviceContext` from
-   `pl_hook_params` (gpu, dispatch) and run D on `SCALER_SRC` / `SCALER_OUT`. Add its luma delta to
-   R, G and B.
+The exporter writes one fragment pass per group of 4 output channels, and each pass re-reads every
+input group at 9 taps. One D layer (24 -> 24 channels) is therefore 6 passes x 6 inputs x 9 taps =
+324 texture fetches per pixel. `NetFusion.h` regroups those passes into layers, keeping the
+package's own weights, and runs each layer as ONE compute pass:
+
+- **Shared tile.** The workgroup loads its input tile plus a 1-pixel halo into shared memory
+  once, mirrored at the picture edges exactly like the exporter's `mi()`.
+- **Direct.** Each thread computes all output groups of its pixel. Each tap is read once per
+  input group (54 shared reads per pixel for D, instead of 324 texture fetches).
+- **Winograd F(2x2,3x3).** Each thread computes a 2x2 block from a 4x4 patch,
+  `Y = A^T [(G g G^T) . (B^T d B)] A`. The weight transform `U = G g G^T` is done when the shader
+  is generated, so 4 outputs take 16 multiplies instead of 36 (2.25x fewer for the 3x3 convs).
+- **Precision.** Accumulation is always fp32. `fp16Storage` stores the layer outputs and the
+  shared tile in fp16; it is a side check only, kept only if it saves meaningfully within
+  tolerance (owner 2026-10-24).
+- **Kept as exported:** the bias, ReLU, identity skip and tile gate; and the feature, pooling,
+  regroup and bounded-output passes, plus A's conditioned first layer.
+- **Stays exported:** a layer whose tile exceeds the shared-memory limit (32 KB on D3D11), whose
+  output count exceeds D3D11's 8 compute UAV slots, or whose input sizes differ.
+
+Results: see the efficiency report (laptop timings; projected 3090 gain).
+
+### Tensor cores (investigation only)
+
+- **VP's backend.** VP creates its libplacebo device with `pl_d3d11_create` (D3D11, FL 11.x).
+  D3D11 has no cooperative-matrix / wave-matrix access: HLSL WaveMatrix was a D3D12 SM 6.8
+  preview and was dropped; the D3D12 "cooperative vector" preview is D3D12-only. So VP's nets
+  cannot reach the 3090's tensor cores through the current backend.
+- **The route that exists.** libplacebo's Vulkan backend (`pl_vulkan_create`) accepts
+  `opt_extensions` and an extra `features` chain:
+  - enable `VK_KHR_cooperative_matrix`, which NVIDIA Ampere drivers expose with fp16 inputs and
+    fp16/fp32 accumulators;
+  - its feature struct;
+  - and `#extension GL_KHR_cooperative_matrix` in a `pl_custom_shader` prelude.
+
+  That would mean running VP (or at least the nets) on a Vulkan pl_gpu: a renderer-wide backend
+  change, or Vulkan-D3D11 interop for the net textures. It is also fp16-input maths, which the
+  owner keeps out unless it is proven within tolerance.
+
+## How to wire it (for the skeleton lead): only the call sites remain
+
+`PlNetRunner` is implemented: libplacebo dispatch on caller textures, pooled intermediates,
+pl_timer -> SlotTiming, capability checks with visible bypass, and both entry modes. It is
+tested on a headless D3D11 device against the CPU reference.
+
+1. **Build.** Add `NetPackage.cpp` and `PlNetRunner.cpp` (they need only `<libplacebo/...>`) to
+   the renderer project. The interpreter and the CPU executor stay test-only.
+2. **Load (settings change, not per frame).**
+   - `LoadExport(json, "", pkgs, &err, {stampDir})`;
+   - per package: `PlNetRunner runner; NetSlot slot(runner, bypassSet);`
+     `slot.Load({gpu, dispatch}, pkg, ctx)`.
+
+   `ctx` is filled as in step 5. `bypassSet` sits on the renderer's `FallbackStatus::Registry`,
+   which already feeds Ctrl+I, the Config status and Ctrl+Alt+D.
+3. **Front-end call site (A, B).** In the entrance stage list, per source frame:
+   - `NetRunInputs in; in.textures["HOOKED"] = {plane, w, h, 1, fmt, mul};`
+     `in.params = ParamsFromLabelsV1(labels); in.state = {vectorsValid, lowLatency};`
+   - then `slot.Run({gpu, vpDispatch}, in, out)`. On false, keep the input;
+   - `out.handle` is the runner's `pl_tex` (r32f; valid until the next Run);
+   - r16 planes holding 10-bit MSB-aligned codes: `mul = 65535.0f / 65472.0f`;
+   - RGB capture: run A on the matcher's r16 luma, then run the `kRgbLumaDeltaPass` package
+     with `LUMA_BEFORE` / `LUMA_AFTER`;
+   - choose A_motion or A_single with `ChooseRepairVariant`.
+   - C is dropped from the design; leave it bypassed.
+4. **POST_KERNEL call site (D).** In AdaptiveDownscale's blend hook:
+   - `runner.RunInPostKernelHook(params, scalerSrcTex, out, &err)`, with
+     `SCALER_OUT = params->tex`;
+   - return `out.handle` as the hook's texture. Add the luma delta to R, G and B for RGB
+     content;
+   - use `NetSlot::Load` with `PlNetRunner::DeviceFromHook(params)` at the first hook call.
 5. **Fingerprint context.**
    - `upstreamKey` = `registry.UpstreamKey(SlotOf(pkg.role))`;
    - `labelSchema` = what the identification supplies;
-   - `settingsHashes` = `SettingsHashes(rebase, grain, stageOrderText, renderSettings, bounds)`
-     from what VP runs (`NetSettingsHash.h`). Mapping VP's live config onto those fields is the
-     wiring work; the defaults are the kit's planned values;
-   - `stageContract`: the contract text VP implements for the slot;
-   - call `NetSlot::Load` again whenever any of these change.
-6. **Show the entries.** Put `NetBypassSet` on the renderer's `FallbackStatus::Registry`, so it
-   reaches Ctrl+I, the Config status and Ctrl+Alt+D.
-7. **Cost.** `runner.SetTiming(&accumulator, SlotOf(pkg.role))`.
+   - `settingsHashes` = `SettingsHashes(...)` from VP's live settings (`NetSettingsHash.h`);
+   - `stageContract`;
+   - call `Load` again whenever any of these change.
+6. **Cost.** `runner.SetTiming(&slotTiming, SlotOf(pkg.role))` before `Load`.
 
 ## Open items
 
