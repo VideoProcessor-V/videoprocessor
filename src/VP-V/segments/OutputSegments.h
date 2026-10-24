@@ -89,6 +89,8 @@ namespace OutputSegments
 		// host's TagSlotHooks) and records them as this frame's S2 members.
 		ColourCounts Collect(const ColourFrame& frame, std::vector<const pl_hook*>& hooks, const TagFn& tag);
 		bool Member(const pl_hook* hook) const;
+		// The slot a member hook belongs to (Id::Count = not a member), for per-slot timing.
+		PipelineSlots::Id SlotOf(const pl_hook* hook) const;
 		SegmentRunner::Segment& Segment() { return segment; }
 
 	private:
@@ -98,6 +100,7 @@ namespace OutputSegments
 		CustomHookChain::Chain& compensation;
 		CalibrationLutStage::Hook& lut;
 		std::vector<const pl_hook*> members;
+		std::vector<PipelineSlots::Id> memberSlots;   // parallel to members
 		SegmentRunner::Segment segment;
 	};
 
