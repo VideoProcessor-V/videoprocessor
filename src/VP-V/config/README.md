@@ -10,7 +10,7 @@ contains:
   implemented") and the unit's stages with their fallback text.
 
 It is **self-contained** (owner 2026-10-24): it can be plugged into a fresh copy of upstream's
-`ConfigEditorWindow` at the M2 rebuild. ADR: `docs/decisions/ADR-0022-vpv-config-section.md`.
+`ConfigEditorWindow` at the M2 rebuild. ADR: `docs/decisions/ADR-0023-vpv-config-section.md`.
 
 ## Files
 

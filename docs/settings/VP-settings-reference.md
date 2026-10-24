@@ -52,7 +52,7 @@ Config now has one **VP-V** page that holds everything VP adds.
 - The renderer reads `[vpv]` first. The same keys in `[vprenderer]`, where the skeleton first
   put them, still work.
 - These keys keep their names: they have no `vpv_` prefix, because the section is the namespace.
-- The tier keys are the existing per-profile keys, so their names are unchanged. ADR-0022 lists
+- The tier keys are the existing per-profile keys, so their names are unchanged. ADR-0023 lists
   how they would map into `[vpv.*]` later.
 
 **What the tiers mean.**

@@ -436,7 +436,7 @@ can move a module to another position.
 
 ## 4. Decisions and open items
 
-Decisions: see `docs/decisions/` (ADR-0001 .. ADR-0022).
+Decisions: see `docs/decisions/` (ADR-0001 .. ADR-0023).
 
 | Open item | Decided by | Affects |
 |---|---|---|
@@ -479,7 +479,7 @@ a few clearly commented `#include <VP-V/...>` hooks. Read `src/VP-V/README.md` f
   - `RunMainEntrance` reuses a cadence repeat's entrance result.
   - `TagSlotHooks` + `OrderFrameSlotHooks` put the output slot hooks in registry order.
   - `CalibrationLutStage` is the VP calibration LUT (`calibration_lut_stage = vp`).
-  - **Settings** (global `[vprenderer]`):
+  - **Settings** (global, in `[vpv]`; `[vprenderer]` is still read as a fallback, ADR-0023):
     - `pipeline_original_pathway`;
     - `pipeline_order`;
     - `pipeline_slots_off`;

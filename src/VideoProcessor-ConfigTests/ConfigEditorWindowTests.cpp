@@ -1646,7 +1646,7 @@ void testInterpolationButtons()
     require(hold->isChecked() && !blend->isChecked(), "hold (the default) is not shown");
     require(!sourceClass->isEnabled() && !fallback->isEnabled(), "the options are not greyed with interpolation off");
     // Owner 2026-10-17: hiccup repair is separate from motion smoothing - never greyed by it.
-    // VP-V (ADR-0022): a control the VP-V page manages is greyed "Managed by VP-V", not by interpolation.
+    // VP-V (ADR-0023): a control the VP-V page manages is greyed "Managed by VP-V", not by interpolation.
     require((fillGaps->isEnabled() || fillGaps->property("vpvManaged").toBool()) && fillGaps->property("greyedOff").toBool() == false,
         "hiccup repair is greyed with interpolation off");
     profiles->setCurrentRow(1);
@@ -2630,7 +2630,7 @@ void testEveryPageRoundTrips()
 
     QStackedWidget* pages = requireControl<QStackedWidget>(window,
         QStringLiteral("settingsPages"));
-    require(pages->count() == 25,   // 24 + the VP-V section (ADR-0022)
+    require(pages->count() == 25,   // 24 + the VP-V section (ADR-0023)
         "Renderer, Scaling, Color, Output, Screen, Zoom, Processing, shader, shortcut, Subtitles, Dynamic Drive, Updates, Motion and Calibration pages were not added as dedicated settings pages");
     for (QPushButton* button : window.findChildren<QPushButton*>())
         require(!button->property("navChild").toBool(),
@@ -9377,10 +9377,10 @@ void testEverySchemaKeyHasAConfigControl()
         { "renderer:subtitle_padding_pixels", "legacy subtitle key" },
         { "renderer:subtitle_fit", "retired Screen setting (ignored)" },
         { "renderer:temporal_fill", "alias: legacy Subtitles switch for cleanup_fill temporal (cleanup_fill has the control)" },
-        { "renderer:pipeline_original_pathway", "VP-V section (ADR-0022): stored in [vpv] by the VP-V page (vpv.pathway); also read from [vprenderer]" },
-        { "renderer:pipeline_order", "VP-V section (ADR-0022): stored in [vpv] by the VP-V page (vpv.expert.pipeline_order); also read from [vprenderer]" },
-        { "renderer:pipeline_slots_off", "VP-V section (ADR-0022): stored in [vpv] by the VP-V page (vpv.expert.pipeline_slots_off); also read from [vprenderer]" },
-        { "renderer:calibration_lut_stage", "VP-V section (ADR-0022): stored in [vpv] by the VP-V page (vpv.expert.calibration_lut_stage); also read from [vprenderer]" },
+        { "renderer:pipeline_original_pathway", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.pathway); also read from [vprenderer]" },
+        { "renderer:pipeline_order", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.pipeline_order); also read from [vprenderer]" },
+        { "renderer:pipeline_slots_off", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.pipeline_slots_off); also read from [vprenderer]" },
+        { "renderer:calibration_lut_stage", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.calibration_lut_stage); also read from [vprenderer]" },
     };
     std::set<std::string> usedAllowList;
     std::vector<std::string> missing;

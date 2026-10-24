@@ -69,7 +69,7 @@ namespace RendererProfileConfig
 			section.rfind("event_actions.", 0) == 0 ||
 			section.rfind("actions.", 0) == 0 ||
 			section.rfind("display_rules.", 0) == 0 ||
-			// The VP-V section (ADR-0022): [vpv] / [vpv.*] hold VP-V's own namespaced keys.
+			// The VP-V section (ADR-0023): [vpv] / [vpv.*] hold VP-V's own namespaced keys.
 			section == "vpv" || section.rfind("vpv.", 0) == 0;
 	}
 
@@ -2100,7 +2100,7 @@ namespace RendererProfileConfig
 			model.actions.push_back(std::move(action));
 		}
 
-		// The VP-V section (ADR-0022): [vpv] holds the global VP-V keys that are not per renderer
+		// The VP-V section (ADR-0023): [vpv] holds the global VP-V keys that are not per renderer
 		// profile, so Config's profile migrations never move them. Each key is validated like the
 		// same key in [vprenderer]; anything else there is an error, as in every owned section.
 		if (const auto* vpvValues = config.GetSectionValues("vpv"))
@@ -2129,7 +2129,7 @@ namespace RendererProfileConfig
                 !CalibrationProfileMigration::IsArchive(section) &&
 				section.rfind("actions.", 0) != 0 &&
 				section.rfind("shader.", 0) != 0 &&
-				// The VP-V section (settings agent 2026-10-24, ADR-0022): [vpv] / [vpv.*] are VP-V's own
+				// The VP-V section (settings agent 2026-10-24, ADR-0023): [vpv] / [vpv.*] are VP-V's own
 				// namespaced keys (validated above).
 				section != "vpv" && section.rfind("vpv.", 0) != 0)
 			{

@@ -20,7 +20,8 @@ Header-only and pure: no libplacebo, no Windows, C++14. The renderer and the CPU
 
 ## How a frame runs through the skeleton
 
-1. **Settings apply.** `UpdatePipelineSlots` in the renderer builds a `Registry`:
+1. **Settings apply.** `UpdatePipelineSlots` in the renderer builds a `Registry` from the
+   `[vpv]` keys (ADR-0023):
    - the Original pathway, if `pipeline_original_pathway = on`;
    - slot switches from `pipeline_slots_off`;
    - the order from `pipeline_order`, which is validated. An invalid order keeps the designed

@@ -3510,7 +3510,9 @@ namespace
 	// pathway (the overrides mirror docs/design/slots.json "original_pathway").
 	static void ApplyOriginalPathwaySettings(RendererSettings& settings)
 	{
+		// Verified against bill-v1.4.02 (docs/design/original-pathway-verified.md).
 		settings.capturePath = "standard";            // input.capture: the CPU formatters
+		settings.captureUpload = "render";            // upstream uploads on the render thread
 		settings.nativeRgbIngest = false;
 		settings.dvTunnelGpuUnpack = false;           // input.signal
 		settings.dvTunnelFixes = false;
@@ -3530,7 +3532,9 @@ namespace
 		settings.interpolationFillGaps = false;
 		settings.occlusionMask = false;
 		settings.opticalFlow = false;
+		settings.motionAheadFrames = 0;               // no motion look-ahead (the matcher stops at strength 0)
 		settings.adaptiveDownscale = false;           // scaling.output: libplacebo's scalers
+		settings.downscaleLight = "linear";           // libplacebo's default light
 		settings.adaptiveUpscale = false;
 		settings.preserveExtendedRange = false;       // colour.extended_range
 		settings.extendedRangeMoreCases = false;
@@ -3541,11 +3545,11 @@ namespace
 		settings.pipelineOrder.clear();
 	}
 
-	// Pipeline skeleton settings (global, [vprenderer]); see RendererSettings.
+	// Pipeline skeleton settings (global: [vpv] first, then [vprenderer]); see RendererSettings.
 	void ReadPipelineSettings(const ConfigFile& config, RendererSettings& settings)
 	{
 		std::string raw;
-		// ADR-0022: the VP-V Config section stores these global keys in [vpv] (renderer profiles are
+		// ADR-0023: the VP-V Config section stores these global keys in [vpv] (renderer profiles are
 		// renamed and reordered by Config, the [vpv] section never is); [vprenderer] stays readable.
 		const auto TryGetPipelineString = [](const ConfigFile& file, const char* key, std::string& value)
 		{

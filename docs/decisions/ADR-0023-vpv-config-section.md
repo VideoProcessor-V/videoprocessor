@@ -1,4 +1,4 @@
-# ADR-0022: One self-contained VP-V Config section, namespaced keys, managed upstream controls
+# ADR-0023: One self-contained VP-V Config section, namespaced keys, managed upstream controls
 
 - Status: Accepted
 - Date: 2026-10-24 (owner decision, relayed by the coordinator; recorded by the settings agent)

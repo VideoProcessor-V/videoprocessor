@@ -13,7 +13,8 @@
     "Barrier-scan rules (docs/design/VP-barriers-2026-10-24.md): input-side slots run ONCE per source frame into the entrance cache (B3); one slot registry, hooks registered only when active (R2); nets run in the VP NetRunner on VP-owned textures, fp16 default (B1/R3).",
     "origin/original_pathway (ADR-0019): the ORIGINAL PATHWAY baseline turns every 'vp' slot off and runs every 'mixed' slot in its upstream form with the listed settings; it must reproduce Bill's original pathway (golden comparison, documented exceptions in VP-pipeline-final.md 3.7).",
     "zone/movable (ADR-0021): a custom order (setting pipeline_order) moves slots only within their zone; SlotContracts.h ContractOf / OrderValidator.h Validate hold the needs/gives contracts and reject invalid orders with a plain reason.",
-    "Code location (ADR-0022): all VP-V code under src/VP-V (core/ skeleton headers, modules/<unit>/<slot>/, nets/, config/, tests/). The slot table mirror is src/VP-V/core/PipelineSlots.h."
+    "Code location (ADR-0022): all VP-V code under src/VP-V (core/ skeleton headers, modules/<unit>/<slot>/, nets/, config/, tests/). The slot table mirror is src/VP-V/core/PipelineSlots.h.",
+    "original_pathway settings verified against bill-v1.4.02 (docs/design/original-pathway-verified.md, settings agent 2026-10-24)."
   ],
   "tiers": [
     "Classic",
@@ -78,7 +79,7 @@
         "settings": {
           "capture_path": "standard",
           "native_rgb_ingest": "off",
-          "capture_upload": "verify (upstream upload path)"
+          "capture_upload": "render"
         }
       },
       "zone": "host",
@@ -209,9 +210,9 @@
         "mode": "upstream form",
         "settings": {
           "queue_timing_fixes": "off",
-          "pulldown_fixes": "off",
-          "target_latency_ms": "upstream default (verify)"
-        }
+          "pulldown_fixes": "off"
+        },
+        "note": "upstream has no target_latency_ms; the queue follows target_frames"
       },
       "zone": "host",
       "movable": false
@@ -348,7 +349,9 @@
       "original_pathway": {
         "mode": "off",
         "settings": {
-          "motion_engine": "off"
+          "optical_flow": "off",
+          "motion_ahead_frames": "0",
+          "dejudder_strength": "0"
         }
       },
       "zone": "front_end",
@@ -902,9 +905,10 @@
       "original_pathway": {
         "mode": "off",
         "settings": {
+          "dejudder_strength": "0",
+          "dejudder_strength_even": "0",
           "interpolation": "off",
-          "dejudder_strength": "0 (verify key)",
-          "dither_vectors": "off"
+          "interpolation_fill_gaps": "off"
         }
       },
       "zone": "front_end",
@@ -1031,7 +1035,7 @@
         "settings": {
           "adaptive_downscale": "off",
           "adaptive_upscale": "off",
-          "downscale_light": "upstream default (verify)"
+          "downscale_light": "linear"
         }
       },
       "zone": "libplacebo",
@@ -1326,7 +1330,7 @@
       "original_pathway": {
         "mode": "off",
         "settings": {
-          "led_compensation": "off"
+          "[led_drive.*] enabled": "false (host LED config; the renderer also drops the hook)"
         }
       },
       "zone": "output_hooks",
@@ -1381,7 +1385,7 @@
       "original_pathway": {
         "mode": "off",
         "settings": {
-          "led_compensation": "off"
+          "[led_drive.*] enabled": "false (host LED config; the renderer also drops the hook)"
         }
       },
       "zone": "output_hooks",
@@ -1553,8 +1557,7 @@
       "original_pathway": {
         "mode": "upstream form",
         "settings": {
-          "sigma_delta": "off",
-          "dithering": "upstream default (verify)"
+          "temporal_dither": "libplacebo"
         }
       },
       "zone": "quantise",
@@ -1662,7 +1665,7 @@
       "original_pathway": {
         "mode": "off",
         "settings": {
-          "led_compensation": "off"
+          "[led_drive.*] enabled": "false (or command_source: none)"
         }
       },
       "zone": "host",
