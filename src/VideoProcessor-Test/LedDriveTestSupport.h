@@ -4,7 +4,7 @@
 // serial port.
 
 #include <VP-V/modules/drive/projector_control/LedClock.h>
-#include <led/LedDriveModule.h>
+#include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
 #include <VP-V/modules/drive/projector_control/SerialPort.h>
 
 #include <cctype>

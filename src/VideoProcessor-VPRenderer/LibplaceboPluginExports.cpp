@@ -8,7 +8,7 @@
 #include <vprenderer/LibplaceboRendererPluginApi.h>
 #include <vprenderer/LibplaceboVideoRenderer.h>
 #include <VpBuildIdentity.h>
-#include <led/LedDriveHoldover.h>
+#include <VP-V/modules/drive/led_compensation/LedDriveHoldover.h>
 
 #include <type_traits>
 

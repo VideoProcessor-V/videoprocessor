@@ -2,7 +2,7 @@
 #include "CppUnitTest.h"
 
 #include <AnalysisLumaSource.h>
-#include <led/LedDriveModule.h>
+#include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
 #include <VP-V/modules/drive/led_measure/LedLookahead.h>
 #include <VP-V/modules/drive/led_measure/LedMeasurement.h>
 

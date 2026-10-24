@@ -5,7 +5,7 @@
 #include <AnalysisLumaSource.h>
 #include <ContentIntentObserver.h>
 #include <QueuedFrameStatistics.h>
-#include <led/LedDriveModule.h>
+#include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
 #include <VP-V/modules/drive/led_measure/LedLookahead.h>
 #include <vprenderer/AlphaQueuePolicy.h>
 #include <vprenderer/UploadReuse.h>

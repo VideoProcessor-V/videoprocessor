@@ -52,11 +52,23 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **partly migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
+- `src/VP-V/modules/drive/led_compensation/LedDriveModule.cpp`
+- `src/VP-V/modules/drive/led_compensation/LedDriveArbiter.cpp`
+- `src/VP-V/modules/drive/led_compensation/LedDriveModule.h`
+- `src/VP-V/modules/drive/led_compensation/LedDriveArbiter.h`
+- `src/VP-V/modules/drive/led_compensation/LedDriveHoldover.cpp`
+- `src/VP-V/modules/drive/led_compensation/LedDriveHoldover.h`
 - `shaders/LED compensation.glsl`
-- `src/VideoProcessor-Lib/led/LedDriveModule.cpp`
-- `src/VideoProcessor-Lib/led/LedDriveArbiter.cpp`
+
+Forwarding headers at the legacy path (early migration, removed in M2; they only keep files on active branches building, new code includes the `<VP-V/...>` path):
+
+- `src/VideoProcessor-Lib/led/LedDriveArbiter.h`
+- `src/VideoProcessor-Lib/led/LedDriveHoldover.h`
+- `src/VideoProcessor-Lib/led/LedDriveModule.h`
+
+`LedRawTransfer.*` stays at the legacy path for now (`VideoProcessor-Test.vcxproj`, changed by active branches, compiles its `.cpp`); `shaders/LED compensation.glsl` stays in the runtime shader folder.
 
 ## Migration directive
 

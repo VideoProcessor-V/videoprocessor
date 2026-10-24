@@ -3,7 +3,7 @@
 
 #include <fstream>
 
-#include "../DebugLog.h"
+#include <DebugLog.h>
 
 #include <algorithm>
 #include <array>

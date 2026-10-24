@@ -23,6 +23,7 @@ The tree mirrors `docs/design/slots.json`. The master component list is
   - `control/diagnostics`: crash state ring (`CrashState.*`) and state report (`StateReport*`).
   - `drive/projector_control`: LED controller, Barco ASCII + projector drivers, RS-232 serial port, connection test, clock seam, shutdown restore (forwarders: `led/SerialPort.h`, `led/ConnectionTest.h`).
   - `drive/led_measure`: LED picture measurement and look-ahead (`LedMeasurement.*`, `LedLookahead.*`); `LedMeasurementHook.*` stays (the test project compiles it).
+  - `drive/led_compensation`: Dynamic Drive core (`LedDriveModule.*`), COM-port arbiter, hold-over (forwarders for all three headers: the renderer includes them); `LedRawTransfer.*` stays (the test project compiles it).
 - **Order and moves:** see `src/VP-V/core/README.md`. A module moves only within its zone
   (ADR-0021).
 
