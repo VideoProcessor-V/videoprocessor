@@ -1,4 +1,6 @@
 #include "NetPackage.h"
+#include "NetSettingsHash.h"
+#include "NetSha256.h"
 
 #include <algorithm>
 #include <cctype>
@@ -65,6 +67,7 @@ namespace VpNets
 		{
 			fp.id = fp.Field("fingerprint");
 			fp.labelSchema = fp.Field("label_schema");
+			if (fp.labelSchema == "none") fp.labelSchema.clear();   // a stamp's "no labels"
 			const std::string tf = fp.Field("texture_formats");
 			fp.intermediate = IntermediateFrom(tf);
 			fp.handoff = HandoffFrom(tf);
@@ -373,6 +376,7 @@ namespace VpNets
 			}
 			fp.fields[kv.first] = value;
 		}
+		fp.idVerified = FingerprintIntact(fj);
 		const Json& f16 = exportJson["fp16_check"];
 		fp.fp16Allowed = f16.IsObject() && f16["fp16_within_1_lsb"].kind == Json::Kind::Bool && f16["fp16_within_1_lsb"].boolean;
 		DeriveFingerprint(fp);
@@ -381,8 +385,36 @@ namespace VpNets
 		return true;
 	}
 
+	bool MergeStampSidecar(NetPackage& package, const Json& sc, const std::string& shaderSha256, std::string* error)
+	{
+		auto fail = [&](const std::string& why) { if (error) *error = package.name + ": stamp sidecar: " + why; return false; };
+		if (sc["schema"].text != "vp-net-stamp/1") return fail("unknown schema '" + sc["schema"].text + "'");
+		NetFingerprint& fp = package.fingerprint;
+		if (sc["export_fingerprint"].text != fp.id) return fail("made for fingerprint " + sc["export_fingerprint"].text + ", the export is " + fp.id);
+		bool shaderListed = false;
+		for (const auto& kv : sc["shaders"].fields)
+			if (kv.second.text == shaderSha256) shaderListed = true;
+		if (!shaderListed) return fail("does not list this shader's sha256 (a different export)");
+		const Json& f = sc["fields"];
+		if (!f.IsObject()) return fail("no fields");
+		for (const auto& kv : f.fields)
+		{
+			const std::string value = Compact(kv.second);
+			if (fp.Has(kv.first))
+			{
+				if (Trim(fp.Field(kv.first)) != Trim(value))
+					return fail("field '" + kv.first + "' disagrees with the export");
+				continue;
+			}
+			fp.fields[kv.first] = value;
+			fp.stamped.push_back(kv.first);
+		}
+		DeriveFingerprint(fp);
+		return true;
+	}
+
 	bool LoadExport(const std::string& exportJsonPath, const std::string& shaderDir,
-		std::vector<NetPackage>& out, std::string* error)
+		std::vector<NetPackage>& out, std::string* error, const std::vector<std::string>& sidecarDirs)
 	{
 		std::string text;
 		if (!ReadTextFile(exportJsonPath, text))
@@ -402,6 +434,28 @@ namespace VpNets
 		{
 			const size_t slash = exportJsonPath.find_last_of("/\\");
 			dir = (slash == std::string::npos ? std::string(".") : exportJsonPath.substr(0, slash)) + "/shaders";
+		}
+		// The stamp sidecar, if any.
+		const size_t slash2 = exportJsonPath.find_last_of("/\\");
+		std::string jsonStem = slash2 == std::string::npos ? exportJsonPath : exportJsonPath.substr(slash2 + 1);
+		if (jsonStem.size() > 5 && jsonStem.compare(jsonStem.size() - 5, 5, ".json") == 0) jsonStem = jsonStem.substr(0, jsonStem.size() - 5);
+		std::vector<std::string> sidecarCandidates;
+		for (const std::string& d : sidecarDirs) sidecarCandidates.push_back(d + "/" + jsonStem + ".vpstamp.json");
+		sidecarCandidates.push_back((slash2 == std::string::npos ? std::string(".") : exportJsonPath.substr(0, slash2)) + "/" + jsonStem + ".vpstamp.json");
+		Json sidecar;
+		bool haveSidecar = false;
+		for (const std::string& c : sidecarCandidates)
+		{
+			std::string st;
+			if (!ReadTextFile(c, st)) continue;
+			std::string serr;
+			if (!ParseJson(st, sidecar, &serr))
+			{
+				if (error) *error = c + ": " + serr;
+				return false;
+			}
+			haveSidecar = true;
+			break;
 		}
 		const Json& shaders = j["shaders"];
 		if (shaders.kind != Json::Kind::Array || shaders.items.empty())
@@ -428,6 +482,8 @@ namespace VpNets
 				return false;
 			}
 			if (!MergeExportFingerprint(pr.package, j, error))
+				return false;
+			if (haveSidecar && !MergeStampSidecar(pr.package, sidecar, Sha256Hex(body), error))
 				return false;
 			out.push_back(std::move(pr.package));
 		}

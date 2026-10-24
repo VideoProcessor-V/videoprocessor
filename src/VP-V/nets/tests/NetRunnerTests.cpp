@@ -6,7 +6,11 @@
 #include <VP-V/nets/NetSlot.h>
 #include <VP-V/nets/PlNetRunner.h>
 #include <VP-V/nets/RgbLumaDelta.h>
+#include <VP-V/nets/NetSha256.h>
+#include <VP-V/nets/NetSettingsHash.h>
+#include <VP-V/core/SlotRegistry.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -73,50 +77,6 @@ namespace NetRunnerTestsNs
 		return v;
 	}
 
-	// SHA-256 (FIPS 180-4), to tie a reference case to the exact shader it was made from.
-	inline std::string Sha256Hex(const std::string& data)
-	{
-		static const uint32_t k[64] = {
-			0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-			0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-			0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-			0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-			0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-			0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2 };
-		uint32_t h[8] = { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 };
-		std::string m = data;
-		const uint64_t bits = static_cast<uint64_t>(data.size()) * 8;
-		m += static_cast<char>(0x80);
-		while (m.size() % 64 != 56) m += static_cast<char>(0);
-		for (int i = 7; i >= 0; --i) m += static_cast<char>((bits >> (i * 8)) & 0xff);
-		auto rotr = [](uint32_t x, int n) { return (x >> n) | (x << (32 - n)); };
-		for (size_t off = 0; off < m.size(); off += 64)
-		{
-			uint32_t w[64];
-			for (int i = 0; i < 16; ++i)
-				w[i] = (static_cast<uint32_t>(static_cast<unsigned char>(m[off + i * 4])) << 24) | (static_cast<uint32_t>(static_cast<unsigned char>(m[off + i * 4 + 1])) << 16) |
-				(static_cast<uint32_t>(static_cast<unsigned char>(m[off + i * 4 + 2])) << 8) | static_cast<uint32_t>(static_cast<unsigned char>(m[off + i * 4 + 3]));
-			for (int i = 16; i < 64; ++i)
-			{
-				const uint32_t s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
-				const uint32_t s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
-				w[i] = w[i - 16] + s0 + w[i - 7] + s1;
-			}
-			uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
-			for (int i = 0; i < 64; ++i)
-			{
-				const uint32_t t1 = hh + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + k[i] + w[i];
-				const uint32_t t2 = (rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
-				hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
-			}
-			h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
-		}
-		static const char* hex = "0123456789abcdef";
-		std::string out;
-		for (uint32_t v : h)
-			for (int i = 7; i >= 0; --i) out += hex[(v >> (i * 4)) & 0xf];
-		return out;
-	}
 
 	// ------------------------------------------------------------------ the synthetic package
 	// Exporter format, three passes: features (fragment), a ceil-half-size 2x2 average (compute,
@@ -903,6 +863,186 @@ namespace NetRunnerTestsNs
 				for (int x = 0; x < w; ++x)
 					for (int ch = 0; ch < 4; ++ch)
 						Assert::AreEqual(rgba[(static_cast<size_t>(y) * w + x) * 4 + ch], ex.Output().At(x, y, ch), 1e-7f);
+		}
+	};
+
+	// The kit-compatible settings hashes (U3) and the VP stamp sidecar (tools/net_stamp.py).
+	inline std::string StampDir(const std::string& set) { return DataDir() + "stamps/" + set; }
+	const char* const kSmokeStaging = "D:/nn-corpus/VP-NN-TrainKit/smoke/staging";
+	const char* const kKitScalingManifest = "D:/nn-corpus/VP-NN-TrainKit/data/scaling/scaling_manifest.json";
+
+	// A sidecar for the synthetic package, as net_stamp.py writes it.
+	inline std::string SyntheticSidecar(const std::string& id, const std::string& sha, const std::string& stageContract)
+	{
+		return "{\"schema\": \"vp-net-stamp/1\", \"export_fingerprint\": \"" + id + "\", \"shaders\": {\"T_tiny.glsl\": \"" + sha + "\"},"
+			" \"fields\": {\"upstream_key\": \"\", \"pass_order\": \"H>V\", \"intermediate_format\": \"rgba32f\", \"handoff_format\": \"n/a\","
+			" \"stage_contract\": \"" + stageContract + "\", \"label_schema\": \"vpnn-labels-v1\", \"delivered_bound\": {\"c0\": 1.5, \"c1\": 0.35, \"cmax\": 32.0}}}";
+	}
+
+	TEST_CLASS(NetFingerprintToolsTests)
+	{
+	public:
+		TEST_METHOD(PythonJsonTextIsReproduced)
+		{
+			using KitHash::PyFloat;
+			Assert::AreEqual(std::string("6.0"), PyFloat(6.0));
+			Assert::AreEqual(std::string("0.35"), PyFloat(0.35));
+			Assert::AreEqual(std::string("0.1"), PyFloat(0.1));
+			Assert::AreEqual(std::string("1e-05"), PyFloat(1e-5));
+			Assert::AreEqual(std::string("0.0001"), PyFloat(1e-4));
+			Assert::AreEqual(std::string("1e+16"), PyFloat(1e16));
+			Assert::AreEqual(std::string("1.2345678901234568e+17"), PyFloat(123456789012345678.0));
+			Assert::AreEqual(std::string("123.456"), PyFloat(123.456));
+			Assert::AreEqual(std::string("-2.5"), PyFloat(-2.5));
+			// python: json.dumps({'a': 1.0, 'b': [1e-05, 0.35, 2, True, None], 'c': 'x\x0by\xe9'}, sort_keys=True)
+			KitHash::Value arr;
+			arr.kind = KitHash::Value::Kind::Array;
+			arr.items = { KitHash::Value::Float(1e-5), KitHash::Value::Float(0.35), KitHash::Value::Int(2), KitHash::Value::Bool(true), KitHash::Value() };
+			KitHash::Value o = KitHash::Value::Obj();
+			o.Set("c", KitHash::Value::Str("x\vy\xC3\xA9")).Set("b", arr).Set("a", KitHash::Value::Float(1.0));
+			Assert::AreEqual(std::string("{\"a\": 1.0, \"b\": [1e-05, 0.35, 2, true, null], \"c\": \"x\\u000by\\u00e9\"}"), KitHash::Dumps(o));
+		}
+
+		TEST_METHOD(SettingsHashesEqualTheKitsRecordedValues)
+		{
+			// Recorded in every round-1 export (trainkit/main.py fingerprint(), round-1 config).
+			Assert::AreEqual(std::string("99f8db95d09e0db0"), RebaseSettingsHash(RebaseHashSettings()));
+			Assert::AreEqual(std::string("f3ffb88c0e71ffaf"), GrainSplitHash(GrainSplitHashSettings()));
+			Assert::AreEqual(std::string("543b07659e0523c9"), StageOrderHash(kKitStageOrderR1));
+			Assert::AreEqual(std::string("f9c6aaffcf97088e"), BoundsHash(BoundsHashSettings()));
+			Assert::AreEqual(std::string("44136fa355b3678a"), ScalerBlendHash(Json()), L"no render settings hash as {}");
+			// A change in any setting changes its hash; int vs float matters as in Python.
+			GrainSplitHashSettings g;
+			g.epsCodes = 6.5;
+			Assert::AreNotEqual(std::string("f3ffb88c0e71ffaf"), GrainSplitHash(g));
+			RebaseHashSettings r;
+			r.perAxisInverse = false;
+			Assert::AreNotEqual(std::string("99f8db95d09e0db0"), RebaseSettingsHash(r));
+			// The kit's render settings (when this machine has the kit data).
+			std::string text, err;
+			if (ReadTextFile(kKitScalingManifest, text))
+			{
+				Json m;
+				Assert::IsTrue(ParseJson(text, m, &err), W(err).c_str());
+				Assert::AreEqual(std::string("353a5d2176c1b714"), ScalerBlendHash(m["settings"]), L"the round-1 scaling manifest's recorded hash");
+			}
+			else Log("SKIPPED scaler_blend golden: no kit scaling manifest here");
+			const std::map<std::string, std::string> all = SettingsHashes(RebaseHashSettings(), GrainSplitHashSettings(), kKitStageOrderR1, Json(), BoundsHashSettings());
+			Assert::AreEqual(size_t(5), all.size());
+			Assert::AreEqual(std::string("543b07659e0523c9"), all.at("stage_order"));
+		}
+
+		TEST_METHOD(FingerprintIdsRecomputeFromTheRecordedFields)
+		{
+			int checked = 0;
+			for (const std::string& dir : ExportDirs())
+				for (const char* net : { "A_single_small", "A_motion_small", "C_rebase_refine", "D_hybrid_refine", "B_x2" })
+				{
+					std::string text, err, id;
+					if (!ReadTextFile(dir + "/export_" + net + ".json", text)) continue;
+					Json j;
+					Assert::IsTrue(ParseJson(text, j, &err), W(err).c_str());
+					Assert::IsTrue(FingerprintIntact(j["fingerprint"], &id), W(dir + "/" + net + ": recomputed " + id).c_str());
+					Json tampered = j["fingerprint"];
+					tampered.fields["stage_contract"].text += " (edited)";
+					Assert::IsFalse(FingerprintIntact(tampered), L"an edited field no longer hashes to the id");
+					++checked;
+				}
+			if (!checked) Log("SKIPPED: no export directory present");
+		}
+
+		TEST_METHOD(UpstreamKeysCompareOnlyPictureChangingSlots)
+		{
+			Assert::AreEqual(std::string("repair.encoding"), NormaliseUpstreamKey("motion.estimation>repair.encoding"));
+			Assert::AreEqual(std::string(""), NormaliseUpstreamKey("motion.estimation"));
+			Assert::AreEqual(std::string("repair.encoding>scaling.rebase"), NormaliseUpstreamKey("repair.encoding>scaling.rebase>scaling.geometry"));
+			Assert::AreEqual(std::string("unknown.slot"), NormaliseUpstreamKey("unknown.slot"), L"unknown names stay (they can only mismatch)");
+			// The registry's real key, with A running first (ADR-0005) and deband / texture restore off.
+			PipelineSlots::Registry reg;
+			reg.SetComponent(PipelineSlots::Id::RepairEncoding, true);
+			reg.SetEnabled(PipelineSlots::Id::RepairEncoding, true);
+			reg.SetRebaseFirst(false);
+			reg.SetEnabled(PipelineSlots::Id::RepairDeband, false);
+			reg.SetEnabled(PipelineSlots::Id::RepairTextureRestore, false);
+			Assert::AreEqual(std::string(""), NormaliseUpstreamKey(reg.UpstreamKey(PipelineSlots::Id::RepairEncoding)));
+			Assert::AreEqual(std::string("repair.encoding"), NormaliseUpstreamKey(reg.UpstreamKey(PipelineSlots::Id::ScalingRebase)));
+			reg.SetEnabled(PipelineSlots::Id::RepairDeband, true);
+			reg.SetComponent(PipelineSlots::Id::ScalingRoute4k, true);
+			reg.SetEnabled(PipelineSlots::Id::ScalingRoute4k, true);
+			Assert::AreEqual(std::string("repair.encoding>scaling.rebase>repair.deband"), NormaliseUpstreamKey(reg.UpstreamKey(PipelineSlots::Id::ScalingRoute4k)),
+				L"deband on in front of B shows in the key");
+		}
+
+		TEST_METHOD(StampSidecarFillsOnlyMissingFields)
+		{
+			NetPackage pkg = SyntheticPackage();
+			const std::string sha = Sha256Hex(SyntheticShader());
+			const std::string contract = pkg.fingerprint.Field("stage_contract");
+			Json sc;
+			std::string err;
+			Assert::IsTrue(ParseJson(SyntheticSidecar(pkg.fingerprint.id, sha, contract), sc, &err), W(err).c_str());
+			NetRuntimeContext ctx = ContextMatching(pkg);
+			ctx.upstreamKey = "motion.estimation";   // SlotRegistry lists it; it does not change pixels
+			Assert::IsFalse(CheckFingerprint(pkg, ctx).match, L"no upstream key yet");
+			NetPackage stamped = pkg;
+			Assert::IsTrue(MergeStampSidecar(stamped, sc, sha, &err), W(err).c_str());
+			Assert::IsTrue(stamped.fingerprint.Has("upstream_key"));
+			Assert::AreEqual(std::string(""), stamped.fingerprint.Field("upstream_key"), L"A on the original frame: an empty, declared key");
+			Assert::IsTrue(std::find(stamped.fingerprint.stamped.begin(), stamped.fingerprint.stamped.end(), "upstream_key") != stamped.fingerprint.stamped.end());
+			Assert::IsTrue(std::find(stamped.fingerprint.stamped.begin(), stamped.fingerprint.stamped.end(), "stage_contract") == stamped.fingerprint.stamped.end(),
+				L"the export's own field is kept");
+			Assert::AreEqual(std::string("{c0:1.5,c1:0.35,cmax:32.0}"), stamped.fingerprint.Field("delivered_bound"));
+			Assert::IsTrue(CheckFingerprint(stamped, ctx).match, W(CheckFingerprint(stamped, ctx).Summary()).c_str());
+			ctx.upstreamKey = "scaling.rebase";
+			Assert::IsTrue(CheckFingerprint(stamped, ctx).Summary().find("upstream key 'scaling.rebase' != trained ''") == 0);
+
+			NetPackage bad = pkg;
+			Assert::IsFalse(MergeStampSidecar(bad, sc, "0000", &err), L"another shader");
+			Json other;
+			Assert::IsTrue(ParseJson(SyntheticSidecar("ffffffffffffffff", sha, contract), other, &err));
+			Assert::IsFalse(MergeStampSidecar(bad, other, sha, &err), L"another export");
+			Assert::IsTrue(ParseJson(SyntheticSidecar(pkg.fingerprint.id, sha, "a different contract"), other, &err));
+			Assert::IsFalse(MergeStampSidecar(bad, other, sha, &err), L"a sidecar may not contradict the export");
+			Assert::IsTrue(err.find("stage_contract") != std::string::npos, W(err).c_str());
+		}
+
+		TEST_METHOD(StampedRealExportsMatchAMatchingPipeline)
+		{
+			std::string probe;
+			if (!ReadTextFile(std::string(kSmokeStaging) + "/export_C_rebase_refine.json", probe)) { Log("SKIPPED: no smoke export here"); return; }
+			std::string manifestText, err;
+			Json render;
+			if (ReadTextFile(kKitScalingManifest, manifestText)) Assert::IsTrue(ParseJson(manifestText, render, &err));
+			const std::map<std::string, std::string> hashes = SettingsHashes(RebaseHashSettings(), GrainSplitHashSettings(), kKitStageOrderR1,
+				render["settings"], BoundsHashSettings());
+			struct Want { const char* net; const char* key; };
+			const Want wants[] = { { "A_single_small", "motion.estimation" }, { "C_rebase_refine", "motion.estimation>repair.encoding" },
+				{ "B_x2", "repair.encoding>scaling.rebase" }, { "D_hybrid_refine", "repair.encoding>scaling.rebase>scaling.route_4k>scaling.geometry" } };
+			for (const Want& w : wants)
+			{
+				std::vector<NetPackage> pkgs;
+				Assert::IsTrue(LoadExport(std::string(kSmokeStaging) + "/export_" + w.net + ".json", std::string(), pkgs, &err, { StampDir("smoke") }), W(err).c_str());
+				for (const NetPackage& p : pkgs)
+				{
+					Assert::IsTrue(p.fingerprint.idVerified, W(p.name).c_str());
+					Assert::IsTrue(p.fingerprint.Has("upstream_key"), W(p.name + ": the stamp gives the upstream key").c_str());
+					NetRuntimeContext ctx;
+					ctx.labelSchema = kLabelSchemaV1;
+					ctx.intermediate = TexFormat::Rgba32f;
+					ctx.stageContract = p.fingerprint.Field("stage_contract");
+					ctx.upstreamKey = w.key;
+					ctx.settingsHashes = hashes;
+					const FingerprintResult r = CheckFingerprint(p, ctx);
+					if (render.IsObject())
+						Assert::IsTrue(r.match, W(p.name + ": " + r.Summary()).c_str());
+					else
+						Assert::IsTrue(r.reasons.size() == 1 && r.reasons[0].find("scaler_blend_settings") == 0, W(r.Summary()).c_str());
+					Log(p.name + ": stamped " + std::to_string(p.fingerprint.stamped.size()) + " fields; upstream '" + p.fingerprint.Field("upstream_key") +
+						"'; vs VP: " + (r.match ? std::string("MATCH") : r.Summary()));
+					ctx.upstreamKey = "repair.deband";
+					Assert::IsFalse(CheckFingerprint(p, ctx).match, L"a different upstream bypasses");
+				}
+			}
 		}
 	};
 }

@@ -3,6 +3,7 @@
 #include "NetPackage.h"
 
 #include <VP-V/core/FallbackStatus.h>
+#include <VP-V/core/SlotContracts.h>
 
 #include <algorithm>
 #include <map>
@@ -100,6 +101,28 @@ namespace VpNets
 		}
 	}
 
+	// The upstream key as the nets see it: only slots that CHANGE the picture. SlotRegistry's key
+	// also lists running non-modifying front-end slots (motion.estimation computes vectors only); a
+	// net's training is unaffected by those, so both sides are compared without them. Unknown names
+	// are kept (they can only cause a mismatch, never hide one).
+	inline std::string NormaliseUpstreamKey(const std::string& key)
+	{
+		std::string out;
+		size_t a = 0;
+		while (a <= key.size() && !key.empty())
+		{
+			const size_t b = key.find('>', a);
+			const std::string name = key.substr(a, b == std::string::npos ? std::string::npos : b - a);
+			bool keep = true;
+			for (const PipelineSlots::Info& info : PipelineSlots::Slots())
+				if (name == info.name) keep = PipelineSlots::ContractOf(info.id).modifies;
+			if (keep && !name.empty()) out += (out.empty() ? "" : ">") + name;
+			if (b == std::string::npos) break;
+			a = b + 1;
+		}
+		return out;
+	}
+
 	// MATCH / MISMATCH(reasons) for one package against what VP runs.
 	inline FingerprintResult CheckFingerprint(const NetPackage& pkg, const NetRuntimeContext& ctx)
 	{
@@ -135,7 +158,20 @@ namespace VpNets
 		}
 
 		Field(r, pol.stageContract, "stage contract", fp.Field("stage_contract"), ctx.stageContract);
-		Field(r, pol.upstreamKey, "upstream key", fp.Field("upstream_key"), ctx.upstreamKey);
+		// The upstream key may legitimately be empty (A on the original frame): declared != non-empty.
+		if (pol.upstreamKey != Requirement::Ignore)
+		{
+			if (!fp.Has("upstream_key"))
+			{
+				if (pol.upstreamKey == Requirement::Must) r.reasons.push_back("export has no upstream key");
+			}
+			else
+			{
+				const std::string want = NormaliseUpstreamKey(fp.Field("upstream_key")), have = NormaliseUpstreamKey(ctx.upstreamKey);
+				if (want != have)
+					r.reasons.push_back("upstream key '" + have + "' != trained '" + want + "'");
+			}
+		}
 		for (const std::string& key : SettingsHashKeys())
 		{
 			const auto it = ctx.settingsHashes.find(key);

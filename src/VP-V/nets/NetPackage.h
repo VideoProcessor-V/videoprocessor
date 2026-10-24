@@ -114,6 +114,9 @@ namespace VpNets
 			const auto it = fields.find(key);
 			return it == fields.end() ? std::string() : it->second;
 		}
+		bool Has(const std::string& key) const { return fields.count(key) != 0; }   // declared (maybe empty)
+		std::vector<std::string> stamped;        // fields that came from a VP stamp sidecar, not the export
+		bool idVerified = false;                 // the id recomputes from the recorded fields (kit h())
 	};
 
 	struct NetPackage
@@ -149,10 +152,17 @@ namespace VpNets
 	// header field that disagrees with the json makes the package invalid (returns false + reason).
 	bool MergeExportFingerprint(NetPackage& package, const Json& exportJson, std::string* error);
 
+	// Merges a VP stamp sidecar (tools/net_stamp.py, schema vp-net-stamp/1) into a package: only
+	// fields the export lacks are taken; a field the export has must agree. The sidecar must name the
+	// package's fingerprint id and the sha256 of its shader text. False + reason otherwise.
+	bool MergeStampSidecar(NetPackage& package, const Json& sidecar, const std::string& shaderSha256, std::string* error);
+
 	// Loads export_<net>.json and every shader it lists (from `shaderDir`, or <dir of json>/shaders).
-	// One package per shader (C has C_h and C_v). On any failure returns false and *error.
+	// One package per shader (C has C_h and C_v). A stamp sidecar <json stem>.vpstamp.json is looked
+	// for in `sidecarDirs`, then next to the json; when found it is merged (a bad one fails the load).
+	// On any failure returns false and *error.
 	bool LoadExport(const std::string& exportJsonPath, const std::string& shaderDir,
-		std::vector<NetPackage>& out, std::string* error);
+		std::vector<NetPackage>& out, std::string* error, const std::vector<std::string>& sidecarDirs = std::vector<std::string>());
 
 	// File helpers (binary read; false when the file is missing).
 	bool ReadTextFile(const std::string& path, std::string& out);

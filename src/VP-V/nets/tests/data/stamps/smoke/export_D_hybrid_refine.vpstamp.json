@@ -1,0 +1,31 @@
+{
+ "derived_from": {
+  "config": "bounds and grain_split hashes match the recorded fingerprint",
+  "pass_order": "'H->V' / 'H then V' in texture_formats / b_structure / c_structure",
+  "upstream_key": "stage_order_text tokens before scaling.output; render settings (hash-verified) show deband, deband_vp, texture_restore, detail_pulse_stabilise off"
+ },
+ "export": "export_D_hybrid_refine.json",
+ "export_fingerprint": "2e18eb22cbdd90db",
+ "fields": {
+  "delivered_bound": "n/a",
+  "handoff_format": "n/a",
+  "intermediate_format": "rgba32f",
+  "label_schema": "none",
+  "pass_order": "H>V",
+  "stage_contract": "planned pipeline (vp-neural-bounded), libplacebo 7.377 VP fork, rgba32f net intermediates; nothing retired by the plan (polar, hermite, VP deband, detail pulse, texture restore, source-resolution crossfade, today's stage order) in front of a net | D: in = the 4K processed frame (after B) and the planned hybrid output at the output size (separable Lanczos base + SSimDownscaler, linear light, w_base 0.2, grain map, faithful ortho); outputs 2560x1600 / 1920x1200 / 1920x1080",
+  "upstream_key": "repair.encoding>scaling.rebase>scaling.route_4k"
+ },
+ "kind": "D",
+ "kit": {
+  "config_sha256": "50c7145f2dfd37e2dca89c44f503ecb6fd45d586665b351bf7e8d5c4ba8eaaec",
+  "scaling_manifest_sha256": "be7df31ddfd2833cb738f5260a9224f26598ae5da56192f1187d3ff9611d814b",
+  "trainkit/export_glsl.py": "7af77f683d42e05554938700c096386a8de016baaa3d2a08e9bac4054e07bf60",
+  "trainkit/main.py": "3e2b9ac91f62450d816cf7fd9fa779090a426847ff2201136e019a8de24ad6b7"
+ },
+ "schema": "vp-net-stamp/1",
+ "shaders": {
+  "D_hybrid_refine.glsl": "2781c978e567ef75006398a6d5a70d7ea1613bc0ebb7fd3e6f84824f9240be12"
+ },
+ "slot": "scaling.output",
+ "stamped_by": "tools/net_stamp.py"
+}

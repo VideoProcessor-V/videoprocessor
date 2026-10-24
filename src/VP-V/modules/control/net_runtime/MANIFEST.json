@@ -21,7 +21,12 @@
     "src/VP-V/nets/CpuNetExecutor.h",
     "src/VP-V/nets/CpuNetExecutor.cpp",
     "src/VP-V/nets/tests/NetRunnerTests.cpp",
-    "src/VP-V/nets/tests/make_reference.py"
+    "src/VP-V/nets/tests/make_reference.py",
+    "src/VP-V/nets/NetSha256.h",
+    "src/VP-V/nets/NetSettingsHash.h",
+    "tools/net_stamp.py",
+    "tools/test_net_stamp.py",
+    "docs/design/net-export-fingerprint.md"
   ],
   "components": {
     "files": {
