@@ -342,7 +342,10 @@ namespace Tests
 			s = DvTrimSelection::Select(dm, 48.0);
 			Assert::IsTrue(s.level == DvTrimSelection::Level::L8 && !s.l8CoveredWorse, L"48 nits: both one-sided at 100 nits: L8");
 			s = DvTrimSelection::Select(dm, 100.0);
-			Assert::IsTrue(s.level == DvTrimSelection::Level::L2, L"100 nits (PQ code just above 2081): L2 brackets it, L8 is one-sided");
+			// PQ(100 nits) x 4095 is just below 2081: every target is at or above it for both levels,
+			// the nearest is 2081 for both - a tie, and ties go to L8.
+			Assert::IsTrue(DolbyVisionTrims::PqFromNits(100.0) * 4095.0 <= 2081.0);
+			Assert::IsTrue(s.level == DvTrimSelection::Level::L8, L"100 nits: equal coverage, L8");
 			// With the second L8 target known (L10 at 600 nits), L8 brackets 300 nits as L2 does: L8.
 			AddL10(dm, 28, Pq(600.0));
 			s = DvTrimSelection::Select(dm, 300.0);
