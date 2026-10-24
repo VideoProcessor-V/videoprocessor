@@ -1117,5 +1117,17 @@ namespace VideoProcessorTest
 			Assert::AreEqual(original, ReadFile(path));
 			controller.Shutdown();
 		}
+
+		// Module findings 2026-10-24 item 7: the .ccss refusal ignores letter case.
+		TEST_METHOD(SpectralSampleFileIsRecognisedInAnyCase)
+		{
+			using Calibration::IsSpectralSampleFile;
+			Assert::IsTrue(IsSpectralSampleFile("C:/x/laser.ccss"));
+			Assert::IsTrue(IsSpectralSampleFile("C:/x/laser.CCSS"));
+			Assert::IsTrue(IsSpectralSampleFile("C:/x/laser.Ccss"));
+			Assert::IsFalse(IsSpectralSampleFile("C:/x/laser.ccmx"));
+			Assert::IsFalse(IsSpectralSampleFile("ccss"));
+			Assert::IsFalse(IsSpectralSampleFile(""));
+		}
 	};
 }

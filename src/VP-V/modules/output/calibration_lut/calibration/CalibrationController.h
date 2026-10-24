@@ -55,6 +55,10 @@ namespace Calibration
 		PatternOutputInfo format;
 	};
 
+	// True for an ArgyllCMS spectral sample set (.ccss, any letter case): meters that take only a
+	// .ccmx correction matrix refuse it (module findings 2026-10-24 item 7: ".Ccss" got through).
+	bool IsSpectralSampleFile(const std::string& path);
+
 	class CalibrationController
 	{
 	public:

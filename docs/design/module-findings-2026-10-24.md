@@ -94,3 +94,36 @@ Test: `CrashStateTests::UnlockedInstanceIsNeverKeptAsAFalseCrash`.
 **Optional GUI follow-up (VideoProcessorDlg.cpp, on dv-l8's change list):** show
 `CrashState::Global().InstanceLocked() == false` as a state line, e.g.
 `crash state: unlocked (not kept after a crash)`.
+
+## 6. `diagnostic_allow_full_g22` had no effect (note for Bill; no change)
+
+**Finding.** `MakePlan` never reads `Request::allowFullG22Experiment` and never sets
+`Plan::strictContract`, so every strict-contract branch in `Finalize` was dead. History: the strict
+Full/pure-2.2 experiment (e8d5d077) was superseded upstream by Bill in 9941b80c. A Full-range
+gamma 2.2 display is now an ordinary display target (`TargetTransfer::GAMMA22` under the standard
+Full/sRGB declaration), and the flag was left behind.
+
+**Not changed: LibplaceboOutputPolicy is Bill's code** (owner principle: Bill's code stays where he
+has it). A fix was drafted, removing the dead branches and adding a test, then withdrawn. This is a
+note for Bill: the flag and `Plan::strictContract` can go, together with the key's retirement
+below.
+
+**Hand-off (retire the key):**
+
+- `LibplaceboVideoRenderer.cpp`: stop reading `diagnostic_allow_full_g22` (settings struct, the
+  `readBoolean` / `TryGetDisplayBool` sites, the settings hash) and stop setting
+  `outputRequest.allowFullG22Experiment` / `requestedTransport.allowFullG22Experiment`. Drop
+  `status.strictContract` and the `outputPlan.strictContract` log field.
+- `RendererOutputContractStatus.h`: remove `strictContract`.
+- `ConfigEditorWindow.cpp`: remove the "Full-range 2.2 transport experiment (Bill, diagnostic)"
+  control and the key from its lists.
+- `VideoProcessorDlg.cpp`: remove its `SetKnown(section, "diagnostic_allow_full_g22", ...)`.
+- `RendererConfigView.h` and `ConfigurationApplyPolicy.h`: move the key to the retired-keys list,
+  so old files load silently and Config drops it on save.
+- Then remove `allowFullG22Experiment` and `strictContract` from LibplaceboOutputPolicy.h (Bill).
+
+## 7. Smaller items
+
+- **`.ccss` letter case (done).** `CalibrationController::CreateMeter` matched only ".ccss" and
+  ".CCSS", so ".Ccss" got past the "takes only .ccmx" refusal. Now `IsSpectralSampleFile`, which
+  ignores case. Test: `SpectralSampleFileIsRecognisedInAnyCase`.
