@@ -1,0 +1,83 @@
+# Efficiency fixes: host call sites (2026-10-24)
+
+`LibplaceboVideoRenderer.cpp` is Bill's file (present on `origin/v1.4.02-beta`), so the branch
+does **not** edit it (vp-host-call-sites-only). Its changes are patches here, checked with
+`git apply --check --cached` against d0212534:
+
+| Patch | Applies to | Kind | Contents |
+|---|---|---|---|
+| `efficiency-callsites.patch` | d0212534 (`feat/skeleton`) | **VP-only** call sites | #3, #7 visibility, #8b (ER), timers |
+| `efficiency-upstreamable-churn.patch` | d0212534 | **Upstreamable** | #10 change keys |
+| `efficiency-upstreamable-churn.bill-v1.4.02.patch` | `origin/v1.4.02-beta` | **Upstreamable** (for a PR to Bill) | the same #10 hunks against Bill's tree |
+
+The two d0212534 patches touch different hunks and apply in either order. The logic they call
+lives in VP files committed on the branch: `vprenderer/EarlyUploadPolicy.h`,
+`vprenderer/FeatureTextureIdle.h`, `vprenderer/PassTimerHook.h`, `VP-V/core/PassTimers.h`,
+`ExtendedRange.h` (`HoldsTextures`, `CarryPasses`), and for #10 `src/VideoProcessor-Lib/ChangeKey.h`
+(a new generic header with no VP-V dependency, so it can go to Bill with the patch, with
+`ChangeKeyTests.cpp`).
+
+**Not compiled yet as a whole renderer**: the patches were checked to apply; the renderer DLL with
+them applied still needs one x64 Release build (queued behind the other agents' verification
+builds; see the report). The VP files they call compile in the test project.
+
+## Upstreamable vs VP-only
+
+- **Upstreamable**: #10 (change keys in Bill's render-thread logging; `ChangeKey.h` + tests).
+  Byte-identical text, so the same log lines. A PR to Bill = the `.bill-v1.4.02.patch` plus
+  `ChangeKey.h` and `ChangeKeyTests.cpp` (add the test to his test project).
+- **VP-only**: everything else. #3 (EarlyUpload is VP's), #7 (ExtendedRange), #8a (VP shader and
+  CustomHookChain), #8b (VP features), the source-resolution monitor (VP), timers (VP-V core),
+  #9 (B3 ring, VP).
+- DebugLog: `DebugLog::Log` (Bill's header) formats every call because every call is written
+  (no level or rate state inside it to check first). The render-thread sites the audit lists
+  already rate-limit before calling; the per-refresh string work was the change-signature
+  ostringstreams, which #10 removes. No change to Bill's logger.
+
+## efficiency-callsites.patch, hunk by hunk
+
+1. Includes: `EarlyUploadPolicy.h`, `FeatureTextureIdle.h`, `PassTimerHook.h`.
+2. **#3 early upload in every mode.** `EarlyActive()` = requested (`early` or `auto`) and not
+   blocked by the guard; the low-latency condition is gone. `SyncEarlyUpload(frameBytes)` asks
+   `EarlyUploadPolicy::Decide` (slots by need x one raw frame vs DXGI budget - usage - a 25 %
+   / 256 MB reserve; an open pool's bytes are not counted against itself) before opening, at most
+   every 5 s while closed. A refusal or an `Open` failure engages **"early upload"** under
+   "Fallbacks engaged" with the reason (vp-no-silent-fallbacks); `render` is never a fallback.
+   An open pool is not closed for memory (MotionEngineIdle handles pressure) so it cannot flap.
+   The three raw unpack sites pass `payload.rawBytes`.
+3. **Timers.** `passTimerHook` and `extendedRangeIdle` members beside the fallback registry.
+   RenderLocked: `BeginFrame()` (1 refresh in 8 timed) and `CpuBegin()` at entry; `CpuMark`
+   before the libplacebo render prep (analysis, crop, subtitles, overlays), before the swap
+   chain submit (hook assembly + libplacebo render CPU), after the swap (`CpuWait`: present may
+   block); `Install(renderParams)` after the PR75 callback is set (chained, so PR75 sampling still
+   works); `Install(timedParams)` on each de-judder extra (chains the R1 sigma-delta callback);
+   each extra's `WaitForVBlank` timed as `CpuWait`; the raw unpack sites add
+   "upload: CPU copy + unpack submit (render thread)" or "(early slot)". The readout is logged
+   every 30 s while frames are timed (Ctrl+Alt+D's `log-excerpt.txt` carries it). A dedicated
+   status line would need a plugin API number, assigned at integration only.
+4. **#8b** after `ExtendedRange::Prepare`: `extendedRangeIdle.Note(active, HoldsTextures(), now)`
+   releases ER's textures after 10 s idle (backing off when it thrashes).
+5. **#7 visibility**: if the one-pass carry is not in use (no storage images, not storable, the
+   one-pass shader failed), "extended range one-pass carry (two passes ...)" is listed under
+   "Fallbacks engaged" (same picture, one extra pass).
+
+## Designed, not built today (WIP)
+
+- **#9 B3 ring handover** (`CopyEntrance`, `StoreEntranceOwned`). Design: each entrance module
+  (re-base, debander, texture restore, detail pulse) gets `bool SwapOutput(pl_tex& ringTex)`
+  that exchanges its output texture with the ring entry's (same size/format, else false -> the
+  copy). A module whose output is also its next frame's history (detail pulse) must refuse
+  (`false`) or keep a separate history texture; the ring then holds the module's picture and the
+  module renders the next frame into the ring's old texture, which every pass fully overwrites.
+  Saves one plane copy per plane per source frame (~0.35 ms on the laptop at 4K). B3 is off by
+  default; medium risk (texture lifetime), so it waits for G9.
+- **#10 remainder**: `ExtendedRange::Describe` per frame (one string) and the per-frame hook
+  vectors (`frameHooks`, rebuilt per extra) are VP code in the host; reserve-once members in
+  `Impl` are a follow-up call-site change.
+- **Timers still to wire**: entrance S1 per stage (pl_timer per stage on `rebaseDispatch`, polled
+  with `pl_timer_query` two frames later, never drained) in `RunMainEntrance`/`RunEntrance`;
+  DejudderWarp's existing per-pass pl_timers (2585-2640) sampled without `passDrain`, split
+  matcher / NVOF consume / warp; the conversion thread's early-upload copy (QPC inside
+  `EarlyUpload::Upload`, atomics in `Stats`); a pl_timer around the GPU unpack.
+- **#8b follow-ups**: AdaptiveDownscale, CrossfadeMix, re-base, debander, texture restore (the
+  entrance ones must invalidate `entranceCache` and bump `entranceGeneration`), each after G8b.
