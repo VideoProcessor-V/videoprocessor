@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Drift check for the module folder tree (ADR-0017).
 
-Checks that docs/design/slots.json, every src/modules/<unit>/<slot>/MANIFEST.json and the
+Checks that docs/design/slots.json, every src/VP-V/modules/<unit>/<slot>/MANIFEST.json and the
 master component list docs/design/components-master.json agree, that every live file exists,
-and that no source file exists both inside src/modules and in a legacy location (no duplicate
+and that no source file exists both inside src/VP-V/modules and in a legacy location (no duplicate
 source during the migration).
 
   python tools/check_module_manifests.py          # check; exit 1 on any mismatch
@@ -19,7 +19,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SLOTS = os.path.join(ROOT, "docs", "design", "slots.json")
 MASTER = os.path.join(ROOT, "docs", "design", "components-master.json")
-MODULES = os.path.join(ROOT, "src", "modules")
+MODULES = os.path.join(ROOT, "src", "VP-V", "modules")
 SOURCE_EXT = {".cpp", ".h", ".hpp", ".c", ".glsl", ".hlsl"}
 
 
@@ -64,7 +64,7 @@ def check(write):
         errors.append("slots.json: duplicate order values")
 
     # The renderer's slot table (PipelineSlots.h) mirrors slots.json: same ids, order, status, origin.
-    header = os.path.join(ROOT, "src", "VideoProcessor-Lib", "vprenderer", "PipelineSlots.h")
+    header = os.path.join(ROOT, "src", "VP-V", "core", "PipelineSlots.h")
     if os.path.exists(header):
         pattern = re.compile(r'\{\s*Id::\w+,\s*"([\w.]+)",\s*Side::\w+,\s*(\d+),\s*HookPoint::\w+,\s*Status::(\w+),\s*Origin::(\w+)\s*\}')
         with open(header, encoding="utf-8") as f:
@@ -75,6 +75,17 @@ def check(write):
             for sid in sorted(set(table) | set(want)):
                 if table.get(sid) != want.get(sid):
                     errors.append(f"PipelineSlots.h vs slots.json: {sid}: {table.get(sid)} != {want.get(sid)}")
+
+    # Zones (ADR-0021) must agree with the header's hook points.
+    zone_of = {"Capture": "host", "Host": "host", "Prepass": "front_end", "Libplacebo": "libplacebo",
+               "PreOutput": "output_hooks", "Output": "quantise", "Present": "present"}
+    if os.path.exists(header):
+        hp = re.compile(r'\{\s*Id::\w+,\s*"([\w.]+)",\s*Side::\w+,\s*\d+,\s*HookPoint::(\w+),')
+        with open(header, encoding="utf-8") as f:
+            header_zone = {m.group(1): zone_of[m.group(2)] for m in hp.finditer(f.read())}
+        for s in slots:
+            if "zone" in s and header_zone.get(s["id"]) != s["zone"]:
+                errors.append(f"{s['id']}: zone {s['zone']} in slots.json, {header_zone.get(s['id'])} in PipelineSlots.h")
 
     manifests = []
     for s in slots:
@@ -111,9 +122,9 @@ def check(write):
                 continue
             for slot in os.listdir(unit_dir):
                 if os.path.isdir(os.path.join(unit_dir, slot)) and f"{unit}.{slot}" not in ids:
-                    errors.append(f"src/modules/{unit}/{slot}: no slot in slots.json")
+                    errors.append(f"src/VP-V/modules/{unit}/{slot}: no slot in slots.json")
 
-    # No duplicate source: a source file name inside src/modules must not also exist elsewhere.
+    # No duplicate source: a source file name inside src/VP-V/modules must not also exist elsewhere.
     moved = {}
     for dirpath, _, files in os.walk(MODULES):
         for name in files:

@@ -91,7 +91,7 @@
       "status": "built",
       "code_location": "legacy",
       "live_files": [
-        "src/VideoProcessor-Lib/DelayBudget.h",
+        "src/VP-V/core/DelayBudget.h",
         "src/VideoProcessor-Lib/QueueLatency.h",
         "src/VideoProcessor-Lib/QueueConfiguration.h",
         "src/VideoProcessor-Lib/QueueLookahead.h",
@@ -439,7 +439,7 @@
       "status": "partial",
       "code_location": "legacy",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/VectorScale.h",
+        "src/VP-V/core/VectorScale.h",
         "src/VideoProcessor-Lib/vprenderer/DejudderPolicy.h",
         "src/VideoProcessor-Lib/vprenderer/DejudderWarp.h"
       ],
@@ -809,8 +809,10 @@
       "slot": "output.calibration_lut",
       "order": 250,
       "status": "partial",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
+        "src/VP-V/modules/output/calibration_lut/CalibrationLutStage.h",
+        "src/VP-V/modules/output/calibration_lut/CalibrationLutStage.cpp",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.cpp",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.h",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboCalibrationLutPolicy.h",
@@ -972,7 +974,8 @@
       "status": "partial",
       "code_location": "legacy",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/SlotTiming.h",
+        "src/VP-V/core/SlotTiming.h",
+        "src/VP-V/core/FallbackStatus.h",
         "src/VideoProcessor-Lib/StateReport.cpp",
         "src/VideoProcessor-Lib/CrashState.cpp",
         "src/VideoProcessor-GUI/StatsOverlayWindow.cpp",
@@ -999,10 +1002,13 @@
       "status": "partial",
       "code_location": "legacy",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/PipelineSlots.h",
-        "src/VideoProcessor-Lib/vprenderer/EntranceStages.h",
-        "src/VideoProcessor-Lib/vprenderer/OutputHookOrder.h",
-        "src/VideoProcessor-Test/PipelineSkeletonTests.cpp",
+        "src/VP-V/core/PipelineSlots.h",
+        "src/VP-V/core/SlotContracts.h",
+        "src/VP-V/core/OrderValidator.h",
+        "src/VP-V/core/SlotRegistry.h",
+        "src/VP-V/core/EntranceStages.h",
+        "src/VP-V/core/OutputHookOrder.h",
+        "src/VP-V/tests/PipelineSkeletonTests.cpp",
         "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
         "src/VideoProcessor-Lib/ConfigFile.cpp",
         "src/VideoProcessor-Lib/ConfigSchema.h",

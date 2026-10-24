@@ -16,6 +16,14 @@
     <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)tools\generate_build_identity.ps1&quot; -RepositoryRoot &quot;$(MSBuildThisFileDirectory).&quot; -OutputFile &quot;$(VpBuildIdentityDir)\VpBuildIdentity.generated.h&quot; -BuildInputs &quot;Configuration=$(Configuration);Platform=$(Platform);PlatformToolset=$(PlatformToolset);VCToolsVersion=$(VCToolsVersion);VpCiNoMagewell=$(VpCiNoMagewell)&quot;" />
   </Target>
 
+  <!-- VP-V (owner 2026-10-24): all VP-V code lives under src/VP-V and is included from the src
+       root as <VP-V/...>, so every project can reach it without per-project include paths. -->
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>%(AdditionalIncludeDirectories);$(MSBuildThisFileDirectory)src</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
+
   <!-- Preserve the actual toolset and binary identity for release prerequisite checks.
        The record also carries the binary's embedded build ID (schema 2). -->
   <Target Name="RecordVpRuntimeRequirement" AfterTargets="Build"

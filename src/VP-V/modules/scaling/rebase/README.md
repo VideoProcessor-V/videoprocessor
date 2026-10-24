@@ -1,0 +1,72 @@
+# Re-base (entrance stage 2a) (`scaling.rebase`)
+
+Unit: **scaling** | side: input | order: 60 | status: **built** | hook point: prepass
+
+## Purpose / why
+
+Undo the player's upscale per axis: a 1-D kernel-matched inverse (or Lanczos) H then V back to the ENCODED grid, so later stages work on the real picture, not on scaler artifacts. Proposed FIRST, on the untouched delivered frame (the kernel inverse needs an exact kernel upscale as its input).
+
+## Contract
+
+- Input: delivered planes (P210/P010/RGB) at delivered size, untouched
+- Output: planes at the encoded size per axis (x and y factors may differ); r16 intermediate; pass order H then V
+- Geometry: per-axis factor sx, sy <= 1; crop/active area mapped by the same factors
+- Delay share: 0 frames; GPU time only
+- Look-ahead: none
+
+## Settings
+
+- Existing keys: `source_resolution`, `rebase_kernel_match`
+- Planned keys: `entrance_rebase`
+- Tiers: Classic off; Low off; Mid/Upper on
+
+## Fallbacks
+
+- "Fallbacks engaged" entry: Re-base: off (<reason>)
+- Behaviour: A failed pass renders the native frame (already in code); unknown kernel -> Lanczos; off -> straight to output scaling.
+
+## Net fingerprint / upstream
+
+- Fingerprint: 1-D shader identity (kernel-matched inverse / Lanczos, H->V, r16) is part of every downstream net fingerprint
+- Upstream modules: `input.source_analysis`
+
+## How to build / test
+
+Build the solution via the shared build-slot runner (see AGENTS.md); tests single-threaded; GPU tests only on mains with `VP_TEST_ADAPTER=NVIDIA`.
+
+Placeholder tests:
+- (none yet)
+
+Isolation tests:
+- KernelInverse tests
+- SourceRebase port vs kit (within 1 LSB)
+
+Contract tests:
+- per-axis factors; crossfade on latch changes
+
+Chain tests:
+- re-base x A-lens/NLS x vectors (high-risk combo)
+
+## Known issues / open items
+
+- ORDER vs repair.encoding PENDING the round-2 A diagnostic (both orders measured)
+
+## Where the code lives (live file list)
+
+Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+
+- `src/VideoProcessor-Lib/vprenderer/SourceRebase.cpp`
+- `src/VideoProcessor-Lib/vprenderer/SourceRebase.h`
+- `src/VideoProcessor-Lib/KernelInverse.cpp`
+- `src/VideoProcessor-Lib/KernelInverse.h`
+- `src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp`
+
+## Migration directive
+
+Code moves into this folder only when this slot is touched (opportunistic until M1, a dedicated phase after M1, finished by M2). A move = `git mv` + project/include updates + this module's `live_files` + `docs/design/components-master.json` (regenerate with `python tools/check_module_manifests.py --write`) in the SAME commit, with the build, this module's tests and the chain-gate subset passing. Never leave a copy behind; one module per change; never during a release/deploy window. Update this README in the same commit as any slot change.
+
+## Links
+
+- Design: [VP-pipeline-final.md](../../../../../docs/design/VP-pipeline-final.md)
+- Slot data: [slots.json](../../../../../docs/design/slots.json)
+- Decisions: ADR-0005, ADR-0007 in [docs/decisions](../../../../../docs/decisions/README.md)

@@ -1,0 +1,72 @@
+# Presentation (`output.presentation`)
+
+Unit: **output** | side: output | order: 270 | status: **built** | hook point: present
+
+## Purpose / why
+
+Swapchain, refresh, render-ahead (inside the delay budget), subtitle placement, transient confirmations (no always-on OSD).
+
+## Contract
+
+- Input: final frame
+- Output: display
+- Geometry: display mode
+- Delay share: render-ahead counted inside the fixed delay
+- Look-ahead: render-ahead
+
+## Settings
+
+- Existing keys: `render_ahead`, `render_ahead_queue_credit`, `render_ahead_utilisation`
+- Planned keys: (none)
+- Tiers: not tiered
+
+## Fallbacks
+
+- "Fallbacks engaged" entry: Presentation: open loop (no display statistics)
+- Behaviour: Window / iGPU panel -> open loop.
+
+## Net fingerprint / upstream
+
+- Fingerprint: (none)
+- Upstream modules: `output.dither`
+
+## How to build / test
+
+Build the solution via the shared build-slot runner (see AGENTS.md); tests single-threaded; GPU tests only on mains with `VP_TEST_ADAPTER=NVIDIA`.
+
+Placeholder tests:
+- (none yet)
+
+Isolation tests:
+- RenderAheadPolicy tests
+- AlphaPresentationTelemetry tests
+
+Contract tests:
+- render-ahead at 24p fits 200 ms
+
+Chain tests:
+- delay gate
+
+## Known issues / open items
+
+- (none yet)
+
+## Where the code lives (live file list)
+
+Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+
+- `src/VideoProcessor-Lib/vprenderer/RenderAheadPolicy.h`
+- `src/VideoProcessor-Lib/vprenderer/AlphaPresentationTelemetry.cpp`
+- `src/VideoProcessor-Lib/vprenderer/OpenLoopDisplayRate.h`
+- `src/VideoProcessor-Lib/DisplayRefreshRatePolicy.cpp`
+- `src/VideoProcessor-Lib/vprenderer/NativeStatsOverlayBitmap.h`
+
+## Migration directive
+
+Code moves into this folder only when this slot is touched (opportunistic until M1, a dedicated phase after M1, finished by M2). A move = `git mv` + project/include updates + this module's `live_files` + `docs/design/components-master.json` (regenerate with `python tools/check_module_manifests.py --write`) in the SAME commit, with the build, this module's tests and the chain-gate subset passing. Never leave a copy behind; one module per change; never during a release/deploy window. Update this README in the same commit as any slot change.
+
+## Links
+
+- Design: [VP-pipeline-final.md](../../../../../docs/design/VP-pipeline-final.md)
+- Slot data: [slots.json](../../../../../docs/design/slots.json)
+- Decisions: ADR-0003 in [docs/decisions](../../../../../docs/decisions/README.md)

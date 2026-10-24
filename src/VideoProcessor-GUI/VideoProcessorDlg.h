@@ -61,7 +61,7 @@
 #include <StatsOverlayWindow.h>
 #include <AspectRatioOsd.h>
 #include <CadenceIntervalEstimate.h>
-#include <FallbackStatus.h>
+#include <VP-V/core/FallbackStatus.h>   // VP-V (src/VP-V/core)
 #include <ApplicationInterface.h>
 #include <ConfigurationApplyPolicy.h>
 #include <CaptureVideoStatePolicy.h>

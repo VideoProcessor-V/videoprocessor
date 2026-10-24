@@ -1,6 +1,6 @@
 #include <pch.h>
 #include <MotionAhead.h>
-#include <FallbackStatus.h>
+#include <VP-V/core/FallbackStatus.h>   // VP-V: "Fallbacks engaged" (src/VP-V/core)
 #include <GeneralRateLog.h>
 #include <RefreshKey.h>
 #include <MotionValidity.h>
@@ -74,6 +74,12 @@
 #include <vprenderer/ExtendedRange.h>
 #include <vprenderer/SdrToneShape.h>
 #include <vprenderer/RenderedWarp.h>
+// VP-V pipeline skeleton (src/VP-V; see src/VP-V/README.md): the slot registry, the entrance
+// stage list, the output-hook order and the VP calibration-LUT stage.
+#include <VP-V/core/SlotRegistry.h>
+#include <VP-V/core/EntranceStages.h>
+#include <VP-V/core/OutputHookOrder.h>
+#include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
 #include <vprenderer/DownscaleLight.h>
 #include <vprenderer/SourceRebase.h>
 #include <vprenderer/SourceResolutionMonitor.h>
@@ -1236,6 +1242,16 @@ namespace
 		// method below), or VP's temporal sigma-delta (loaded by the renderer itself, whatever the
 		// shader list says). auto (unset): as before - the shader list and the dithering setting.
 		std::string temporalDither = "auto";
+		// Pipeline skeleton (design freeze 2026-10-24; docs/design/VP-pipeline-final.md):
+		// pipeline_original_pathway on = every VP addition off, mixed slots in their upstream
+		// form (ADR-0019); pipeline_order = slots moved within their zone (ADR-0021, validated;
+		// empty = the designed order); pipeline_slots_off = slots switched off at slot level;
+		// calibration_lut_stage = where the projector calibration LUT runs (libplacebo = its
+		// target LUT, before VP's output hooks, as before; vp = VP's last colour hook, R1).
+		bool pipelineOriginalPathway = false;
+		std::string pipelineOrder;
+		std::string pipelineSlotsOff;
+		std::string calibrationLutStage = "libplacebo";
 		// Kernel-matched re-base (docs/VP-stage12-build-plan.md; owner 2026-10-16: optimise
 		// 1080p): the identified player kernel's inverse for an exact 2:1 luma re-base.
 		bool rebaseKernelMatch = true;
@@ -1498,6 +1514,8 @@ namespace
 			<< settings.captureUpload << '|' << settings.sourceRange << '|' << settings.sourceResolution << '|'
 			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.sourceResolutionEvidenceShots << '|'
 			<< settings.sourceResolutionEvidenceSeconds << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
+			<< settings.pipelineOriginalPathway << '|' << settings.pipelineOrder << '|' << settings.pipelineSlotsOff << '|'
+			<< settings.calibrationLutStage << '|'
 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
 			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.opticalFlowGlobal << '|'
 			<< settings.opticalFlowGlobalFallback << '|' << settings.opticalFlowCostTrust << '|' << settings.opticalFlowFbCheck << '|'
@@ -3487,6 +3505,72 @@ namespace
 		return settings;
 	}
 
+	// ADR-0019: the Original pathway baseline. Every VP addition is switched off and every slot
+	// that exists upstream runs in its upstream form, so the renderer reproduces Bill's original
+	// pathway (the overrides mirror docs/design/slots.json "original_pathway").
+	static void ApplyOriginalPathwaySettings(RendererSettings& settings)
+	{
+		settings.capturePath = "standard";            // input.capture: the CPU formatters
+		settings.nativeRgbIngest = false;
+		settings.dvTunnelGpuUnpack = false;           // input.signal
+		settings.dvTunnelFixes = false;
+		settings.dvTrims = false;
+		settings.queueTimingFixes = false;            // input.queue_timing
+		settings.pulldownFixes = false;
+		settings.sourceResolution = "native";         // input.source_analysis + scaling.rebase
+		settings.rebaseKernelMatch = false;
+		settings.sourceCodingFixes = false;
+		settings.debandVp = "off";                    // repair.deband
+		settings.debandVpExclusive = false;
+		settings.detailPulseStabilise = false;        // repair.texture_restore
+		settings.textureRestore = false;
+		settings.dejudderStrength = 0.0;              // motion.*
+		settings.dejudderStrengthEven = 0.0;
+		settings.interpolation = InterpolationPolicy::Mode::Off;
+		settings.interpolationFillGaps = false;
+		settings.occlusionMask = false;
+		settings.opticalFlow = false;
+		settings.adaptiveDownscale = false;           // scaling.output: libplacebo's scalers
+		settings.adaptiveUpscale = false;
+		settings.preserveExtendedRange = false;       // colour.extended_range
+		settings.extendedRangeMoreCases = false;
+		settings.sdrTone.knee = false;                // colour.sdr_tone_shape
+		settings.temporalDither = "libplacebo";       // output.dither
+		settings.renderAhead = false;                 // output.presentation
+		settings.calibrationLutStage = "libplacebo";  // output.calibration_lut: as upstream
+		settings.pipelineOrder.clear();
+	}
+
+	// Pipeline skeleton settings (global, [vprenderer]); see RendererSettings.
+	void ReadPipelineSettings(const ConfigFile& config, RendererSettings& settings)
+	{
+		std::string raw;
+		if (TryGetDisplayString(config, "pipeline_original_pathway", raw))
+		{
+			const std::string value = ConfigFile::NormalizeName(raw);
+			if (value == "on" || value == "off")
+				settings.pipelineOriginalPathway = value == "on";
+			else
+				DebugLog::Log("pipeline_original_pathway '%s' must be on or off; keeping %s", raw.c_str(),
+					settings.pipelineOriginalPathway ? "on" : "off");
+		}
+		if (TryGetDisplayString(config, "pipeline_order", raw))
+			settings.pipelineOrder = ConfigFile::Trim(raw);
+		if (TryGetDisplayString(config, "pipeline_slots_off", raw))
+			settings.pipelineSlotsOff = ConfigFile::Trim(raw);
+		if (TryGetDisplayString(config, "calibration_lut_stage", raw))
+		{
+			const std::string value = ConfigFile::NormalizeName(raw);
+			if (value == "libplacebo" || value == "vp")
+				settings.calibrationLutStage = value;
+			else
+				DebugLog::Log("calibration_lut_stage '%s' must be libplacebo or vp; keeping %s", raw.c_str(),
+					settings.calibrationLutStage.c_str());
+		}
+		if (settings.pipelineOriginalPathway)
+			ApplyOriginalPathwaySettings(settings);
+	}
+
 	RendererSettings LoadRendererSettings(const ConfigFile& config,
 		const VideoState& state, std::string& activeRule,
 		const std::string& manualRule = "",
@@ -4268,6 +4352,7 @@ namespace
 		// dependency once all profiles have been applied, so it never reaches the
 		// output path in an invalid state.
 		NormalizeSdrBlackLevel(settings);
+		ReadPipelineSettings(config, settings);
 		return settings;
 	}
 
@@ -5445,41 +5530,356 @@ struct LibplaceboVideoRenderer::Impl
 	bool dejudderRgbBt2020 = false;
 	pl_tex dejudderRgbScratch = nullptr;
 	bool rgbGpuLogged = false;
-	// Hunt 3 (crossfade lead): the crossfade's path being left carries the stages the path
-	// being entered has - VP's debander (per picture, its crossfade slot), the detail pulse's and
-	// texture restore's decision of this source frame on the picture's own bands (ApplyForeign:
-	// another geometry, never advancing) - so none of them drops out in one step when a fade
-	// starts. `from` is re-based already; fromY is its factor (the stages' sizes follow it).
-	void CrossfadeFromStages(pl_frame& from, double fromY, uint64_t sequence)
+	// Pipeline skeleton (design freeze 2026-10-24; barrier B3/R2): the input side as ONE stage
+	// list. Every call site that processes a picture through the entrance stages - the main draw,
+	// a de-judder extra, and the crossfade's path being left - runs RunEntrance, which walks the
+	// slot registry's active entrance stages in their (data-driven, validated) order. Each call
+	// site keeps its own module slots and rules (the EntranceRun path), exactly as before; a
+	// placeholder slot has no case here and never runs (zero cost).
+	enum class EntrancePath { Main, Extra, CrossfadeFrom };
+	struct EntranceRun
+	{
+		EntrancePath path = EntrancePath::Main;
+		double factorX = 1.0, factorY = 1.0;   // the re-base factors this picture takes
+		uint64_t sequence = 0;                  // its source frame
+		// Main only: A's own planes (the debander's hold and the detail history advance once per
+		// source frame on A, processed by the stages before them), this draw's situation, and
+		// the picture the look-ahead reads.
+		const pl_frame* source = nullptr;
+		bool phasePicture = false;
+		bool cadenceRepeat = false;
+		uint64_t nextSequence = 0;
+		const pl_frame* image = nullptr;
+		bool aNeeded = false;      // A goes through the stages alongside (hold / history)
+		bool aReady = true;
+		pl_frame aFrame{};
+		bool ready = true;         // CrossfadeFrom: false when its re-base failed (no fade)
+	};
+	// The entrance result of a picture drawn as itself, by source frame (barrier B3): a cadence
+	// repeat of the same source frame reuses it instead of re-running every stage. The epoch
+	// covers everything the result depends on; any other use of the modules' output textures (an
+	// extra, the crossfade, the hold) moves entranceGeneration, so a stale texture is never shown.
+	EntranceStages::Cache<pl_frame> entranceCache;
+	uint64_t entranceGeneration = 1;
+	unsigned long long entranceRuns = 0, entranceReuses = 0;
+
+	static uint64_t EntranceMix(uint64_t h, uint64_t v) { return (h ^ v) * 0x100000001B3ull; }
+	static uint64_t EntranceBits(double v) { uint64_t b = 0; std::memcpy(&b, &v, sizeof(b)); return b; }
+	uint64_t EntranceEpoch(const pl_frame& source) const
+	{
+		uint64_t h = 0xCBF29CE484222325ull;
+		h = EntranceMix(h, entranceGeneration);
+		h = EntranceMix(h, static_cast<uint64_t>(source.num_planes));
+		for (int i = 0; i < source.num_planes && i < PL_MAX_PLANES; ++i)
+			h = EntranceMix(h, reinterpret_cast<uintptr_t>(source.planes[i].texture));
+		h = EntranceMix(h, EntranceBits(rebaseFactor));
+		h = EntranceMix(h, EntranceBits(rebaseFactorX));
+		h = EntranceMix(h, EntranceBits(debandThreshold));
+		h = EntranceMix(h, EntranceBits(vpDebandParams.thresholdCodes));
+		h = EntranceMix(h, EntranceBits(vpDebandParams.radiusScale));
+		h = EntranceMix(h, reinterpret_cast<uintptr_t>(vpDebandParams.field));
+		h = EntranceMix(h, reinterpret_cast<uintptr_t>(vpDebandParams.grainError));
+		h = EntranceMix(h, vpDebandParams.sequence);
+		h = EntranceMix(h, (detailPulseRuns ? 1u : 0u) | (textureRestoreRuns ? 2u : 0u));
+		h = EntranceMix(h, detailPulseParams.sequence);
+		h = EntranceMix(h, textureRestoreParams.sequence);
+		return h;
+	}
+
+	void EnsureRebaseDispatch()
 	{
 		if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
-		const double ratio = rebaseFactor > 0.0 ? fromY / rebaseFactor : 1.0;
-		if (debandThreshold > 0.0)
+	}
+
+	// Runs the active entrance stages on `frame` for one call site.
+	void RunEntrance(EntranceRun& run, pl_frame& frame)
+	{
+		if (run.path != EntrancePath::Main || run.phasePicture)
+			++entranceGeneration;   // the modules' output textures are about to change
+		for (PipelineSlots::Id id : pipelineSlots.ActiveEntrance())
 		{
-			VpDebander::Params p = vpDebandParams;
-			p.field = nullptr;
-			p.grainError = nullptr;
-			p.radiusScale = vpDebandParams.radiusScale * ratio;
+			switch (id)
+			{
+			case PipelineSlots::Id::ScalingRebase: EntranceRebase(run, frame); break;
+			case PipelineSlots::Id::RepairDeband: EntranceDeband(run, frame); break;
+			case PipelineSlots::Id::RepairTextureRestore: EntranceDetail(run, frame); break;
+			default: break;   // slots without a component yet: never active (zero cost)
+			}
+			if (!run.ready)
+				return;
+		}
+	}
+
+	// The main draw: the cached entrance result for a picture drawn as itself, else the stages.
+	void RunMainEntrance(EntranceRun& run, pl_frame& frame)
+	{
+		const bool cacheable = !run.phasePicture && run.sequence != 0;
+		const uint64_t epoch = cacheable ? EntranceEpoch(frame) : 0;
+		if (cacheable)
+			if (const pl_frame* hit = entranceCache.Find(run.sequence, epoch))
+			{
+				frame = *hit;
+				++entranceReuses;
+				EntranceDetailLookAhead(run);
+				return;
+			}
+		RunEntrance(run, frame);
+		++entranceRuns;
+		if (cacheable)
+			entranceCache.Store(run.sequence, epoch, frame);
+		else
+			entranceCache.Invalidate();
+		static GeneralRate::LogInterval entranceLog = GeneralRate::LogInterval::ForFrames(2400);
+		if (entranceLog.DueOr(entranceRuns == 1))
+			DebugLog::Log("Entrance stages: %llu runs, %llu repeats reused (once per source frame)", entranceRuns, entranceReuses);
+	}
+
+	// scaling.rebase
+	void EntranceRebase(EntranceRun& run, pl_frame& frame)
+	{
+		if (run.path == EntrancePath::Main)
+		{
+			if (rebaseFactor < 1.0 || rebaseFactorX < 1.0)
+			{
+				EnsureRebaseDispatch();
+				pl_frame rebased{};
+				// The picture being drawn (a Stage B picture between frames, or A).
+				if (sourceRebase.Apply(d3d11->gpu, rebaseDispatch, frame, rebaseFactorX, rebaseFactor, rebased, 0))
+				{
+					frame = rebased;
+					if (sourceRebase.FormatNote() != rebaseFormatNoteLogged)
+					{
+						rebaseFormatNoteLogged = sourceRebase.FormatNote();
+						DebugLog::Log("Re-base: %s", rebaseFormatNoteLogged.c_str());
+					}
+				}
+				else if (sourceRebase.Failures() == 1)
+					DebugLog::Log("Re-base failed (%s); the native frame is rendered", sourceRebase.LastError().c_str());
+				// A itself, for the hold and the history (its own slot).
+				if (run.aNeeded && run.aReady)
+				{
+					pl_frame rebasedA{};
+					run.aReady = sourceRebase.Apply(d3d11->gpu, rebaseDispatch, run.aFrame, rebaseFactorX, rebaseFactor, rebasedA, 1);
+					if (run.aReady) run.aFrame = rebasedA;
+				}
+			}
+			return;
+		}
+		if (run.path == EntrancePath::Extra)
+		{
+			// Stage 12: an extra shows the same re-based source as the main frame.
+			if (rebaseFactor < 1.0 || rebaseFactorX < 1.0)
+			{
+				EnsureRebaseDispatch();
+				pl_frame rebased{};
+				if (sourceRebase.Apply(d3d11->gpu, rebaseDispatch, frame, rebaseFactorX, rebaseFactor, rebased, 1))
+					frame = rebased;
+			}
+			return;
+		}
+		// The crossfade's path being left, at the factors faded from.
+		if (run.factorY < 1.0 || run.factorX < 1.0)
+		{
+			EnsureRebaseDispatch();
+			pl_frame rebasedFrom{};
+			run.ready = sourceRebase.Apply(d3d11->gpu, rebaseDispatch, frame, run.factorX, run.factorY, rebasedFrom,
+				SourceRebase::Module::kSlotCrossfade);
+			if (run.ready) frame = rebasedFrom;
+		}
+	}
+
+	// repair.deband (Stage 12 §2b/§2d: VP's debander at source resolution)
+	void EntranceDeband(EntranceRun& run, pl_frame& frame)
+	{
+		if (!(debandThreshold > 0.0))
+			return;
+		EnsureRebaseDispatch();
+		if (run.path == EntrancePath::Main)
+		{
+			// (6) The hold (slot 0) advances once per source frame on A itself, even when every
+			// refresh of the frame shows a picture between frames: A's first draw. Hunt 3 F5: A's
+			// debanded picture (the hold's draw) is also the picture the detail stages' history
+			// advances on, so the history has one domain (debanded).
+			if (run.phasePicture && !run.cadenceRepeat && run.aNeeded && run.aReady)
+			{
+				pl_frame heldA{};
+				if (debander.Apply(d3d11->gpu, rebaseDispatch, run.aFrame, vpDebandParams, heldA, 0))
+					run.aFrame = heldA;
+			}
+			// A picture between frames decides per picture (slot 1, no hold along A's field).
+			VpDebander::Params phaseParams = vpDebandParams;
+			if (run.phasePicture) { phaseParams.field = nullptr; phaseParams.grainError = nullptr; }
 			pl_frame debanded{};
-			if (debander.Apply(d3d11->gpu, rebaseDispatch, from, p, debanded, VpDebander::Module::kSlotCrossfade))
-				from = debanded;
+			if (debander.Apply(d3d11->gpu, rebaseDispatch, frame, run.phasePicture ? phaseParams : vpDebandParams, debanded,
+				run.phasePicture ? 1 : 0))
+				frame = debanded;
+			else if (debander.Failures() == 1)
+				DebugLog::Log("VP deband failed (%s); the frame is rendered without it", debander.LastError().c_str());
+			return;
 		}
-		if (detailPulseRuns && sequence != 0 && detailPulse.HistorySequence() == sequence)
+		VpDebander::Params p = vpDebandParams;
+		p.field = nullptr;
+		p.grainError = nullptr;
+		pl_frame debanded{};
+		if (run.path == EntrancePath::Extra)
 		{
-			DetailPulse::Params p = detailPulseParams;
-			p.planeLines = detailPulseParams.planeLines * ratio;
+			// The same debander per frame on an extra.
+			if (debander.Apply(d3d11->gpu, rebaseDispatch, frame, p, debanded, 1))
+				frame = debanded;
+			return;
+		}
+		// Hunt 3 (crossfade lead): the path being left keeps VP's debander (its crossfade slot),
+		// at its own geometry.
+		const double ratio = rebaseFactor > 0.0 ? run.factorY / rebaseFactor : 1.0;
+		p.radiusScale = vpDebandParams.radiusScale * ratio;
+		if (debander.Apply(d3d11->gpu, rebaseDispatch, frame, p, debanded, VpDebander::Module::kSlotCrossfade))
+			frame = debanded;
+	}
+
+	// repair.texture_restore: detail_pulse_stabilise, then texture_restore (docs/VP-detail-restore.md).
+	// Never while smooth motion / deinterlacing runs (those flags are false then).
+	void EntranceDetail(EntranceRun& run, pl_frame& frame)
+	{
+		if (!detailPulseRuns && !textureRestoreRuns)
+			return;
+		EnsureRebaseDispatch();
+		if (run.path == EntrancePath::CrossfadeFrom)
+		{
+			// The decision of this source frame on the picture's own bands (ApplyForeign: another
+			// geometry, never advancing), so neither drops out in one step when a fade starts.
+			const double ratio = rebaseFactor > 0.0 ? run.factorY / rebaseFactor : 1.0;
+			if (detailPulseRuns && run.sequence != 0 && detailPulse.HistorySequence() == run.sequence)
+			{
+				DetailPulse::Params p = detailPulseParams;
+				p.planeLines = detailPulseParams.planeLines * ratio;
+				pl_frame pulsed{};
+				if (detailPulse.ApplyForeign(d3d11->gpu, rebaseDispatch, frame, p, pulsed))
+					frame = pulsed;
+			}
+			if (textureRestoreRuns && run.sequence != 0 && textureRestore.HistorySequence() == run.sequence)
+			{
+				TextureRestore::Params p = textureRestoreParams;
+				p.planeLines = textureRestoreParams.planeLines * ratio;
+				pl_frame restored{};
+				if (textureRestore.ApplyForeign(d3d11->gpu, rebaseDispatch, frame, p, restored))
+					frame = restored;
+			}
+			return;
+		}
+		if (run.path == EntrancePath::Extra)
+		{
+			// An extra shows its source frame's decision (a repeat of the sequence the history
+			// advanced on with A), so the detail level does not change from refresh to refresh.
+			// Never advances: skipped when A's own frame was not processed (another sequence).
+			if (detailPulseRuns && detailPulseParams.sequence == run.sequence &&
+				detailPulse.HistorySequence() == run.sequence && run.sequence != 0)
+			{
+				pl_frame pulsed{};
+				if (detailPulse.Apply(d3d11->gpu, rebaseDispatch, frame, detailPulseParams, pulsed))
+					frame = pulsed;
+			}
+			if (textureRestoreRuns && textureRestoreParams.sequence == run.sequence &&
+				textureRestore.HistorySequence() == run.sequence && run.sequence != 0)
+			{
+				pl_frame restored{};
+				if (textureRestore.Apply(d3d11->gpu, rebaseDispatch, frame, textureRestoreParams, restored))
+					frame = restored;
+			}
+			return;
+		}
+		// Main. A Stage B picture between frames takes its frame's decision as a repeat (no
+		// refresh-to-refresh detail flicker). The history advances once per source frame on A
+		// itself (processed by the stages before this one, as drawn): A's first draw.
+		if (run.phasePicture && !run.cadenceRepeat && run.aNeeded && run.aReady &&
+			((detailPulseRuns && detailPulse.HistorySequence() != run.sequence) ||
+			 (textureRestoreRuns && textureRestore.HistorySequence() != run.sequence)))
+		{
+			pl_frame aFrame = run.aFrame;
+			if (detailPulseRuns)
+			{
+				pl_frame pulsedA{};
+				if (detailPulse.Apply(d3d11->gpu, rebaseDispatch, aFrame, detailPulseParams, pulsedA))
+					aFrame = pulsedA;
+			}
+			if (textureRestoreRuns)
+			{
+				pl_frame restoredA{};
+				(void)textureRestore.Apply(d3d11->gpu, rebaseDispatch, aFrame, textureRestoreParams, restoredA);
+			}
+		}
+		if (detailPulseRuns)
+		{
+			EntranceDetailLookAhead(run);
 			pl_frame pulsed{};
-			if (detailPulse.ApplyForeign(d3d11->gpu, rebaseDispatch, from, p, pulsed))
-				from = pulsed;
+			if (detailPulse.Apply(d3d11->gpu, rebaseDispatch, frame, detailPulseParams, pulsed))
+			{
+				frame = pulsed;
+				detailPulseInactive.clear();
+			}
+			else
+			{
+				// Hunt 3 F8: counted and reported ("inactive (...)" in the status), logged
+				// whenever the reason changes.
+				if (detailPulse.LastError() != detailPulseFailLogged)
+					DebugLog::Log("Detail pulse stabilise: not applied (%s; %llu frames so far); the frame is rendered without it",
+						detailPulse.LastError().c_str(), detailPulse.Failures());
+				detailPulseFailLogged = detailPulse.LastError();
+				detailPulseInactive = detailPulse.LastError();
+			}
 		}
-		if (textureRestoreRuns && sequence != 0 && textureRestore.HistorySequence() == sequence)
+		if (textureRestoreRuns)
 		{
-			TextureRestore::Params p = textureRestoreParams;
-			p.planeLines = textureRestoreParams.planeLines * ratio;
 			pl_frame restored{};
-			if (textureRestore.ApplyForeign(d3d11->gpu, rebaseDispatch, from, p, restored))
-				from = restored;
+			if (textureRestore.Apply(d3d11->gpu, rebaseDispatch, frame, textureRestoreParams, restored))
+			{
+				frame = restored;
+				textureRestoreInactive.clear();
+			}
+			else
+			{
+				if (textureRestore.LastError() != textureRestoreFailLogged)
+					DebugLog::Log("Texture restore: not applied (%s; %llu frames so far); the frame is rendered without it",
+						textureRestore.LastError().c_str(), textureRestore.Failures());
+				textureRestoreFailLogged = textureRestore.LastError();
+				textureRestoreInactive = textureRestore.LastError();
+			}
 		}
+	}
+
+	// detail_pulse_stabilise's look-ahead (optional): the next source frame's band energies when
+	// it is already uploaded (the de-judder's B) and no re-base is engaged; once per new source
+	// frame. Hunt 3 F4: in Apply's domain - B through VP's debander (per picture, its look-ahead
+	// slot) when the debander runs on this frame. Also checked on a reused entrance result.
+	void EntranceDetailLookAhead(const EntranceRun& run)
+	{
+		if (!detailPulseRuns || !pipelineSlots.Runs(PipelineSlots::Id::RepairTextureRestore))
+			return;
+		if (!run.cadenceRepeat && run.nextSequence != 0 && detailPulseAheadSequence != run.nextSequence &&
+			dejudderNextUploadedSequence == run.nextSequence && dejudderNextTextures[0] && dejudderNextTextures[1] &&
+			!dejudderRgbLuma && run.image && run.image->num_planes == 2 && rebaseFactor == 1.0 && rebaseFactorX == 1.0)
+		{
+			EnsureRebaseDispatch();
+			detailPulseAheadSequence = run.nextSequence;
+			pl_frame next = *run.image;
+			next.planes[0].texture = dejudderNextTextures[0];
+			next.planes[1].texture = dejudderNextTextures[1];
+			(void)detailPulse.MeasureAhead(d3d11->gpu, rebaseDispatch, next, dejudderNextUploadedSequence, detailPulseParams,
+				debandThreshold > 0.0 && pipelineSlots.Runs(PipelineSlots::Id::RepairDeband) ? &debander : nullptr, &vpDebandParams);
+		}
+	}
+
+	// Hunt 3 (crossfade lead): the crossfade's path being left carries the stages the path being
+	// entered has, from its own (un-re-based) picture at the factors faded from. False: its
+	// re-base failed and there is no fade on this present.
+	bool EntranceCrossfadeFrom(pl_frame& from, uint64_t sequence)
+	{
+		EntranceRun run;
+		run.path = EntrancePath::CrossfadeFrom;
+		run.factorX = rebaseFromFactorX;
+		run.factorY = rebaseFromFactor;
+		run.sequence = sequence;
+		RunEntrance(run, from);
+		return run.ready;
 	}
 
 	// Hunt 3 F1: the crossfade mixed in the output signal domain (CrossfadeMix.h): `from` (the
@@ -6784,6 +7184,40 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<bool> ledBtbPassthrough{ true };   // led_btb_passthrough ([led_drive], default on)
 	std::atomic<double> ledShadowLift{ 0.0 };
 	std::vector<const pl_hook*> frameHooks;
+	// Pipeline skeleton (R2): which of this frame's hooks belong to a pipeline slot (by pointer,
+	// since plumbing hooks are inserted in front later); OutputHookOrder::OrderSlotsInPlace
+	// puts them in the registry's order without moving any other hook.
+	std::vector<std::pair<const pl_hook*, PipelineSlots::Id>> frameSlotHooks;
+	void TagSlotHooks(size_t start, PipelineSlots::Id slot)
+	{
+		for (size_t i = start; i < frameHooks.size(); ++i)
+			frameSlotHooks.emplace_back(frameHooks[i], slot);
+	}
+	void OrderFrameSlotHooks()
+	{
+		if (frameSlotHooks.size() < 2)
+			return;
+		std::vector<OutputHookOrder::Tagged<const pl_hook*>> tagged;
+		tagged.reserve(frameHooks.size());
+		for (const pl_hook* hook : frameHooks)
+		{
+			OutputHookOrder::Tagged<const pl_hook*> t;
+			t.hook = hook;
+			for (const auto& entry : frameSlotHooks)
+				if (entry.first == hook)
+				{
+					t.kind = OutputHookOrder::Kind::Slot;
+					t.slot = entry.second;
+					break;
+				}
+			tagged.push_back(t);
+		}
+		frameHooks = OutputHookOrder::OrderSlotsInPlace(tagged,
+			[this](PipelineSlots::Id id) { return pipelineSlots.Order(id); });
+	}
+	// output.calibration_lut in VP's output hooks (calibration_lut_stage = vp; R1).
+	CalibrationLutStage::Hook calibrationLutStage;
+	bool calibrationLutStageLogged = false;
 	std::vector<std::string> activeCustomShaders;
 	std::atomic<bool> lowLatencyQueueActive{ false };
 	// docs/VP-nvof-ahead.md: source frames queued after the current one (the render
@@ -6813,6 +7247,58 @@ struct LibplaceboVideoRenderer::Impl
 	{
 		if (fallbacks.Release(id))
 			DebugLog::Log("%s", fallbacks.Heading().c_str());
+	}
+	// Pipeline skeleton (design freeze 2026-10-24): the ONE slot registry (VP-V/core/SlotRegistry.h). It
+	// decides which slots run and in which order: the entrance stage list (RunEntrance) and the
+	// output hooks follow it. Rebuilt from the settings on every settings apply.
+	PipelineSlots::Registry pipelineSlots;
+	std::string pipelineStateLogged;
+	void UpdatePipelineSlots(const RendererSettings& settings)
+	{
+		PipelineSlots::Registry next;
+		if (settings.pipelineOriginalPathway)
+			next.ApplyOriginalPathway();
+		std::string unknown;
+		std::string token;
+		auto flush = [&]()
+		{
+			if (token.empty())
+				return;
+			const PipelineSlots::Id id = PipelineSlots::FromName(token.c_str());
+			if (id == PipelineSlots::Id::Count)
+				unknown += (unknown.empty() ? "" : ", ") + token;
+			else
+				next.SetEnabled(id, false);
+			token.clear();
+		};
+		for (char ch : settings.pipelineSlotsOff)
+		{
+			if (ch == ',' || ch == ' ' || ch == ';' || ch == '\t')
+				flush();
+			else
+				token += ch;
+		}
+		flush();
+		if (!unknown.empty())
+			DebugLog::Log("pipeline_slots_off: unknown slot(s) %s ignored", unknown.c_str());
+		std::string reason;
+		if (!settings.pipelineOriginalPathway && !next.SetOrderByNames(settings.pipelineOrder, &reason))
+			EngageFallback("pipeline order", "designed order kept: " + reason);   // an invalid order never runs
+		else
+			ReleaseFallback("pipeline order");
+		pipelineSlots = next;
+		entranceCache.Invalidate();
+		std::string state = settings.pipelineOriginalPathway ? "Original pathway (every VP addition off)" :
+			pipelineSlots.IsDefaultOrder() ? "designed order" : "custom order";
+		std::string entrance;
+		for (PipelineSlots::Id id : pipelineSlots.ActiveEntrance())
+			entrance += (entrance.empty() ? "" : " > ") + std::string(PipelineSlots::Get(id).name);
+		state += "; entrance: " + (entrance.empty() ? std::string("none") : entrance);
+		if (state != pipelineStateLogged)
+		{
+			pipelineStateLogged = state;
+			DebugLog::Log("Pipeline: %s", state.c_str());
+		}
 	}
 	// r6 fix 4: render-ahead only inside the fixed delay budget (RenderAhead::FitDelayBudget).
 	// render_ahead on but its lead not given back by the queue: off for this source (the plain
@@ -7643,6 +8129,7 @@ struct LibplaceboVideoRenderer::Impl
 				crossfadeMixer.Release(d3d11->gpu); // hunt 3 F1: the crossfade's textures
 				if (rebaseDispatch) pl_dispatch_destroy(&rebaseDispatch);
 				extendedRangeHooks.Release();   // Stage 10: its textures
+				calibrationLutStage.Release();  // R1: the VP calibration stage's LUT texture
 				dejudderOutput.Release();
 				dejudderOutputSwapchain = nullptr;
 				dejudderExtraIds.clear();
@@ -10575,8 +11062,27 @@ struct LibplaceboVideoRenderer::Impl
 	{
 		target.lut = nullptr;
 		target.lut_type = PL_LUT_UNKNOWN;
+		calibrationLutStage.SetLut(nullptr);
 		if (!displayLutParsed || !displayLut)
 			return;
+
+		// R1 (calibration_lut_stage = vp): VP applies the LUT as its last colour hook, after the
+		// LED compensation, instead of libplacebo's target LUT (which runs before VP's hooks).
+		// The Original pathway keeps libplacebo's target LUT, as upstream did.
+		if (activeSettings.calibrationLutStage == "vp" && !pipelineSlots.OriginalPathway() &&
+			pipelineSlots.Runs(PipelineSlots::Id::OutputCalibrationLut))
+		{
+			calibrationLutStage.SetLut(displayLut);
+			displayLutStatus = "Active (VP stage): " + LutFileName(displayLutPath);
+			if (!calibrationLutStageLogged)
+				DebugLog::Log("display calibration LUT: applied by VP as its last colour hook (calibration_lut_stage vp; "
+					"after the LED compensation; BTB/WTW carried at slope 1)");
+			calibrationLutStageLogged = true;
+			return;
+		}
+		if (calibrationLutStageLogged)
+			DebugLog::Log("display calibration LUT: libplacebo target LUT (calibration_lut_stage libplacebo)");
+		calibrationLutStageLogged = false;
 
 		target.lut = displayLut;
 		// For a target-frame LUT in libplacebo 7.360.1, NORMALIZED is the
@@ -10622,6 +11128,7 @@ struct LibplaceboVideoRenderer::Impl
 		if (settings.renderAhead && !activeSettings.renderAhead)
 			renderAheadEpoch.Invalidate();   // render_ahead switched on: the gate starts again (bug hunt 05 H3)
 		activeSettings = settings;
+		UpdatePipelineSlots(settings);
 		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
 		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
 		dvGpuWanted.store(settings.dvTunnelGpuUnpack, std::memory_order_release);
@@ -11268,6 +11775,10 @@ struct LibplaceboVideoRenderer::Impl
 			current.sourceResolutionEvidenceShots != next.sourceResolutionEvidenceShots ||
 			current.sourceResolutionEvidenceSeconds != next.sourceResolutionEvidenceSeconds, "source_resolution");
 		changed(current.debandVp != next.debandVp || current.lowBitrateHandling != next.lowBitrateHandling, "deband_vp");
+		changed(current.pipelineOriginalPathway != next.pipelineOriginalPathway, "pipeline_original_pathway");
+		changed(current.pipelineOrder != next.pipelineOrder, "pipeline_order");
+		changed(current.pipelineSlotsOff != next.pipelineSlotsOff, "pipeline_slots_off");
+		changed(current.calibrationLutStage != next.calibrationLutStage, "calibration_lut_stage");
 		changed(current.adaptive.cnnResidualStabilise != next.adaptive.cnnResidualStabilise ||
 			current.adaptive.ssimResidualStabilise != next.adaptive.ssimResidualStabilise, "residual_stabilise");
 		changed(current.ssimBitrateAware != next.ssimBitrateAware || current.ssimBitrateFloor != next.ssimBitrateFloor, "ssim_bitrate_aware");
@@ -11772,6 +12283,7 @@ struct LibplaceboVideoRenderer::Impl
 		if (settings.renderAhead && !activeSettings.renderAhead)
 			renderAheadEpoch.Invalidate();   // render_ahead switched on: the gate starts again (bug hunt 05 H3)
 		activeSettings = settings;
+		UpdatePipelineSlots(settings);
 		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
 		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
 		dvGpuWanted.store(settings.dvTunnelGpuUnpack, std::memory_order_release);
@@ -16588,60 +17100,23 @@ struct LibplaceboVideoRenderer::Impl
 				// Hunt 3 F3: during a crossfade the extra is mixed like the main present (its own
 				// path being left from the native warped planes).
 				const pl_frame warpedNative = image;
-				// Stage 12: an extra shows the same re-based source as the main frame.
-				if (rebaseFactor < 1.0 || rebaseFactorX < 1.0)
+				// Pipeline skeleton (B3/R2): the extra runs the same entrance stage list as the main
+				// frame (re-base, VP deband per frame, the detail stages' decision of its source
+				// frame), with the extra's own module slots.
 				{
-					if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
-					pl_frame rebased{};
-					if (sourceRebase.Apply(d3d11->gpu, rebaseDispatch, image, rebaseFactorX, rebaseFactor, rebased, 1))
-						image = rebased;
-				}
-				// Stage 12 §2b/§2d: and the same debander (per frame on an extra).
-				if (debandThreshold > 0.0)
-				{
-					if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
-					VpDebander::Params extra = vpDebandParams;
-					extra.field = nullptr;
-					extra.grainError = nullptr;
-					pl_frame debanded{};
-					if (debander.Apply(d3d11->gpu, rebaseDispatch, image, extra, debanded, 1))
-						image = debanded;
-				}
-				// detail_pulse_stabilise / texture_restore: an extra shows its source frame's
-				// decision (a repeat of the sequence the history advanced on with A), so the
-				// detail level does not change from refresh to refresh. Never advances: skipped
-				// when A's own frame was not processed (another sequence).
-				if (detailPulseRuns && detailPulseParams.sequence == f.sourceSequence &&
-					detailPulse.HistorySequence() == f.sourceSequence && f.sourceSequence != 0)
-				{
-					if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
-					pl_frame pulsed{};
-					if (detailPulse.Apply(d3d11->gpu, rebaseDispatch, image, detailPulseParams, pulsed))
-						image = pulsed;
-				}
-				if (textureRestoreRuns && textureRestoreParams.sequence == f.sourceSequence &&
-					textureRestore.HistorySequence() == f.sourceSequence && f.sourceSequence != 0)
-				{
-					if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
-					pl_frame restored{};
-					if (textureRestore.Apply(d3d11->gpu, rebaseDispatch, image, textureRestoreParams, restored))
-						image = restored;
+					EntranceRun run;
+					run.path = EntrancePath::Extra;
+					run.factorX = rebaseFactorX;
+					run.factorY = rebaseFactor;
+					run.sequence = f.sourceSequence;
+					RunEntrance(run, image);
 				}
 				// Hunt 3 F3: the extra's path being left (the crossfade runs on every present of the
-				// fade, not only on A's), with the same stages (CrossfadeFromStages).
+				// fade, not only on A's), with the same stages (EntranceCrossfadeFrom).
 				if (rebaseFade < 1.0 && !temporalRenderer.Active())
 				{
 					extraFrom = warpedNative;
-					extraFade = true;
-					if (rebaseFromFactor < 1.0 || rebaseFromFactorX < 1.0)
-					{
-						pl_frame rebasedFrom{};
-						extraFade = sourceRebase.Apply(d3d11->gpu, rebaseDispatch, warpedNative, rebaseFromFactorX, rebaseFromFactor,
-							rebasedFrom, SourceRebase::Module::kSlotCrossfade);
-						if (extraFade) extraFrom = rebasedFrom;
-					}
-					if (extraFade)
-						CrossfadeFromStages(extraFrom, rebaseFromFactor, f.sourceSequence);
+					extraFade = EntranceCrossfadeFrom(extraFrom, f.sourceSequence);
 				}
 			}
 			// Delta 8 R1: the sigma-delta takes the motion since the previous
@@ -22657,12 +23132,14 @@ struct LibplaceboVideoRenderer::Impl
             PublishCustomShaderStatus();
         }
         frameHooks.clear();
+        frameSlotHooks.clear();
         // Delta 13: the SDR tone shape and headroom, first at PRE_OUTPUT
         // (before the LED measurement and compensation). SDR source and
         // output only; off installs nothing.
         {
             const bool sdr = !pl_color_space_is_hdr(&renderImage.color) && !pl_color_space_is_hdr(&target.color);
-            const bool wanted = SdrToneShape::Active(activeSettings.sdrTone);
+            const bool wanted = SdrToneShape::Active(activeSettings.sdrTone) &&
+                pipelineSlots.Runs(PipelineSlots::Id::ColourSdrToneShape);
             // audit 2026-10-16: not after a calibration 3D LUT (PRE_OUTPUT runs after the LUT; the shape
             // would bend the calibrated response with the LUT's input gamma).
             int state = !wanted ? 0 : !sdr ? 2 : target.lut ? 4 : 1;
@@ -22679,6 +23156,7 @@ struct LibplaceboVideoRenderer::Impl
                 sdrToneShape.Ensure(hookTemplates);
                 const size_t start = frameHooks.size();
                 sdrToneShape.Collect(false, frameHooks);
+                TagSlotHooks(start, PipelineSlots::Id::ColourSdrToneShape);
                 const pl_color_map_params* colorMap = renderParams.color_map_params ?
                     renderParams.color_map_params : &pl_color_map_default_params;
                 for (size_t i = start; i < frameHooks.size(); ++i)
@@ -22723,7 +23201,7 @@ struct LibplaceboVideoRenderer::Impl
                 trc == PL_COLOR_TRC_GAMMA28 || trc == PL_COLOR_TRC_BT_1886 || trc == PL_COLOR_TRC_SRGB;
             std::string params;
             DolbyVisionTrims::Selection selection;
-            if (!activeSettings.dvTrims)
+            if (!activeSettings.dvTrims || !pipelineSlots.Runs(PipelineSlots::Id::ColourSdrToneShape))
                 state = "off";
             else if (!dvPicture)
                 state = "idle (no Dolby Vision picture with DM)";
@@ -22967,10 +23445,16 @@ struct LibplaceboVideoRenderer::Impl
                     adaptiveDownscale.LastMapState() == AdaptiveDownscale::MapState::Used ?
                     adaptiveDownscale.GrainMap() : nullptr, static_cast<float>(activeSettings.adaptive.grainFloor),
                     renderImage.crop);
-                frameHooks.push_back(ledMeasurement.Hook());
+                if (pipelineSlots.Runs(PipelineSlots::Id::DriveLedMeasure))
+                {
+                    frameHooks.push_back(ledMeasurement.Hook());
+                    TagSlotHooks(frameHooks.size() - 1, PipelineSlots::Id::DriveLedMeasure);
+                }
             }
             const size_t compensationStart = frameHooks.size();
-            ledCompensation.Collect(false, frameHooks);
+            if (pipelineSlots.Runs(PipelineSlots::Id::DriveLedCompensation))
+                ledCompensation.Collect(false, frameHooks);
+            TagSlotHooks(compensationStart, PipelineSlots::Id::DriveLedCompensation);
             if (boostExponent != 1.0 && frameHooks.size() == compensationStart)
             {
                 if (!ledBoostMissingLogged)
@@ -23005,6 +23489,14 @@ struct LibplaceboVideoRenderer::Impl
             }
         }
         customHooks.Collect(lowLatencyQueue, frameHooks);
+        // output.calibration_lut with calibration_lut_stage = vp (R1): VP's last colour hook, after
+        // the LED compensation (and black level, when built) and the user's PRE_OUTPUT shaders; the
+        // de-judder rendered-picture cache, pushed later, keeps the LUT-mapped picture for the extras.
+        if (calibrationLutStage.Lut())
+        {
+            frameHooks.push_back(calibrationLutStage.Get());
+            TagSlotHooks(frameHooks.size() - 1, PipelineSlots::Id::OutputCalibrationLut);
+        }
         // A cadence repeat shows the previous picture again: the sigma-delta
         // skips its motion search (zero motion; owner 2026-10-13 efficiency).
         for (const pl_hook* hook : frameHooks)
@@ -23518,6 +24010,7 @@ struct LibplaceboVideoRenderer::Impl
                     logged == 1 ? "gamma chosen; linear on this frame (not downscaling)" : "linear");
             }
         }
+        OrderFrameSlotHooks();   // the registry's order for slot hooks (unchanged for the designed order)
         frameParams.hooks = frameHooks.empty() ? nullptr : frameHooks.data();
         frameParams.num_hooks = static_cast<int>(frameHooks.size());
         // Efficiency (owner 2026-10-14): B's own first present takes the
@@ -23620,153 +24113,31 @@ struct LibplaceboVideoRenderer::Impl
                     frame.planes[1].texture = vpPhasePlanes.chroma;
                 }
                 // Latch review 2026-10-17: during a crossfade the path being left, drawn with the
-                // other's weight (below); the frame before the re-base is kept for it.
+                // other's weight (below); the frame before the entrance stages is kept for it.
                 const pl_frame unrebased = frame;
-                if (rebaseFactor < 1.0 || rebaseFactorX < 1.0)
+                // Pipeline skeleton (B3/R2): the entrance stages in the registry's order - re-base,
+                // VP deband, detail pulse + texture restore (docs/VP-detail-restore.md), all before
+                // libplacebo's scaling and never on renderImage (the source-resolution monitor read
+                // the original frame above). A cadence repeat of a picture drawn as itself reuses
+                // its entrance result (the modules would recompute the same picture).
                 {
-                    if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
-                    pl_frame rebased{};
-                    // The picture being drawn (a Stage B picture between frames, or A).
-                    if (sourceRebase.Apply(d3d11->gpu, rebaseDispatch, frame, rebaseFactorX, rebaseFactor, rebased, 0))
-                    {
-                        frame = rebased;
-                        if (sourceRebase.FormatNote() != rebaseFormatNoteLogged)
-                        {
-                            rebaseFormatNoteLogged = sourceRebase.FormatNote();
-                            DebugLog::Log("Re-base: %s", rebaseFormatNoteLogged.c_str());
-                        }
-                    }
-                    else if (sourceRebase.Failures() == 1)
-                        DebugLog::Log("Re-base failed (%s); the native frame is rendered", sourceRebase.LastError().c_str());
-                }
-                // Stage 12 §2b/§2d: VP's debander at source resolution.
-                // Hunt 3 F5: A's debanded picture (the hold's draw) is also the picture the detail
-                // stages' history advances on below, so the history has one domain (debanded),
-                // as on every frame drawn as itself.
-                pl_frame stageBA{};
-                bool stageBAReady = false;
-                if (debandThreshold > 0.0)
-                {
-                    if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
-                    pl_frame debanded{};
-                    // (6) The hold (slot 0) advances once per source frame on A itself, even when
-                    // every refresh of the frame shows a picture between frames: A's first draw.
-                    if (phasePicture && !cadenceRepeat)
-                    {
-                        pl_frame aFrame = source;
-                        bool aReady = true;
-                        if (rebaseFactor < 1.0 || rebaseFactorX < 1.0)
-                        {
-                            pl_frame rebasedA{};
-                            aReady = sourceRebase.Apply(d3d11->gpu, rebaseDispatch, source, rebaseFactorX, rebaseFactor, rebasedA, 1);
-                            if (aReady) aFrame = rebasedA;
-                        }
-                        pl_frame heldA{};
-                        if (aReady && debander.Apply(d3d11->gpu, rebaseDispatch, aFrame, vpDebandParams, heldA, 0))
-                        {
-                            stageBA = heldA;
-                            stageBAReady = true;
-                        }
-                    }
-                    // A picture between frames decides per picture (slot 1, no hold along A's field).
-                    VpDebander::Params phaseParams = vpDebandParams;
-                    if (phasePicture) { phaseParams.field = nullptr; phaseParams.grainError = nullptr; }
-                    if (debander.Apply(d3d11->gpu, rebaseDispatch, frame, phasePicture ? phaseParams : vpDebandParams, debanded,
-                        phasePicture ? 1 : 0))
-                        frame = debanded;
-                    else if (debander.Failures() == 1)
-                        DebugLog::Log("VP deband failed (%s); the frame is rendered without it", debander.LastError().c_str());
-                }
-                // detail_pulse_stabilise, then texture_restore (docs/VP-detail-restore.md): re-base ->
-                // debander -> detail pulse -> texture restore, all before libplacebo's scaling. Never
-                // while smooth motion / deinterlacing runs (those flags are false then), never on
-                // renderImage: the source-resolution monitor read the original frame above. A
-                // cadence repeat passes the same sequence (the modules reuse the frame's decision
-                // with the bands of the picture drawn and never advance their history).
-                if (detailPulseRuns || textureRestoreRuns)
-                {
-                    if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
-                    // A Stage B picture between frames takes its frame's decision as a repeat (no
-                    // refresh-to-refresh detail flicker). The history advances once per source frame
-                    // on A itself (re-based and debanded as drawn), as the debander's hold: A's first
-                    // draw.
-                    if (phasePicture && !cadenceRepeat &&
-                        ((detailPulseRuns && detailPulse.HistorySequence() != sourceSequence) ||
-                         (textureRestoreRuns && textureRestore.HistorySequence() != sourceSequence)))
-                    {
-                        pl_frame aFrame = source;
-                        bool aReady = true;
-                        if (stageBAReady)
-                            aFrame = stageBA;   // hunt 3 F5: the debander's own draw of A
-                        else if (rebaseFactor < 1.0 || rebaseFactorX < 1.0)
-                        {
-                            pl_frame rebasedA{};
-                            aReady = sourceRebase.Apply(d3d11->gpu, rebaseDispatch, source, rebaseFactorX, rebaseFactor, rebasedA, 1);
-                            if (aReady) aFrame = rebasedA;
-                        }
-                        if (aReady && detailPulseRuns)
-                        {
-                            pl_frame pulsedA{};
-                            if (detailPulse.Apply(d3d11->gpu, rebaseDispatch, aFrame, detailPulseParams, pulsedA))
-                                aFrame = pulsedA;
-                        }
-                        if (aReady && textureRestoreRuns)
-                        {
-                            pl_frame restoredA{};
-                            (void)textureRestore.Apply(d3d11->gpu, rebaseDispatch, aFrame, textureRestoreParams, restoredA);
-                        }
-                    }
-                    if (detailPulseRuns)
-                    {
-                        // Look-ahead (optional): the next source frame's band energies when it is
-                        // already uploaded (the de-judder's B) and no re-base is engaged; once per new
-                        // source frame. Hunt 3 F4: in Apply's domain - B through VP's debander (per
-                        // picture, its look-ahead slot) when the debander runs on this frame.
-                        if (!cadenceRepeat && nextSourceSequence != 0 && detailPulseAheadSequence != nextSourceSequence &&
-                            dejudderNextUploadedSequence == nextSourceSequence && dejudderNextTextures[0] && dejudderNextTextures[1] &&
-                            !dejudderRgbLuma && image.num_planes == 2 && rebaseFactor == 1.0 && rebaseFactorX == 1.0)
-                        {
-                            detailPulseAheadSequence = nextSourceSequence;
-                            pl_frame next = image;
-                            next.planes[0].texture = dejudderNextTextures[0];
-                            next.planes[1].texture = dejudderNextTextures[1];
-                            (void)detailPulse.MeasureAhead(d3d11->gpu, rebaseDispatch, next, dejudderNextUploadedSequence, detailPulseParams,
-                                debandThreshold > 0.0 ? &debander : nullptr, &vpDebandParams);
-                        }
-                        pl_frame pulsed{};
-                        if (detailPulse.Apply(d3d11->gpu, rebaseDispatch, frame, detailPulseParams, pulsed))
-                        {
-                            frame = pulsed;
-                            detailPulseInactive.clear();
-                        }
-                        else
-                        {
-                            // Hunt 3 F8: counted and reported ("inactive (...)" in the status), logged
-                            // whenever the reason changes.
-                            if (detailPulse.LastError() != detailPulseFailLogged)
-                                DebugLog::Log("Detail pulse stabilise: not applied (%s; %llu frames so far); the frame is rendered without it",
-                                    detailPulse.LastError().c_str(), detailPulse.Failures());
-                            detailPulseFailLogged = detailPulse.LastError();
-                            detailPulseInactive = detailPulse.LastError();
-                        }
-                    }
-                    if (textureRestoreRuns)
-                    {
-                        pl_frame restored{};
-                        if (textureRestore.Apply(d3d11->gpu, rebaseDispatch, frame, textureRestoreParams, restored))
-                        {
-                            frame = restored;
-                            textureRestoreInactive.clear();
-                        }
-                        else
-                        {
-                            if (textureRestore.LastError() != textureRestoreFailLogged)
-                                DebugLog::Log("Texture restore: not applied (%s; %llu frames so far); the frame is rendered without it",
-                                    textureRestore.LastError().c_str(), textureRestore.Failures());
-                            textureRestoreFailLogged = textureRestore.LastError();
-                            textureRestoreInactive = textureRestore.LastError();
-                        }
-                    }
+                    EntranceRun run;
+                    run.path = EntrancePath::Main;
+                    run.factorX = rebaseFactorX;
+                    run.factorY = rebaseFactor;
+                    run.sequence = sourceSequence;
+                    run.source = &source;
+                    run.phasePicture = phasePicture;
+                    run.cadenceRepeat = cadenceRepeat;
+                    run.nextSequence = nextSourceSequence;
+                    run.image = &image;
+                    run.aFrame = source;
+                    const bool historyNeeded = (detailPulseRuns && detailPulse.HistorySequence() != sourceSequence) ||
+                        (textureRestoreRuns && textureRestore.HistorySequence() != sourceSequence);
+                    run.aNeeded = phasePicture && !cadenceRepeat &&
+                        ((debandThreshold > 0.0 && pipelineSlots.Runs(PipelineSlots::Id::RepairDeband)) ||
+                         (historyNeeded && pipelineSlots.Runs(PipelineSlots::Id::RepairTextureRestore)));
+                    RunMainEntrance(run, frame);
                 }
                 if (rebaseFade < 1.0 && !temporalRenderer.Active())
                 {
@@ -23775,17 +24146,9 @@ struct LibplaceboVideoRenderer::Impl
                     // picture, the detail pulse's and texture restore's decision of this frame on its
                     // own bands), so none drops out in one step when the fade starts.
                     pl_frame from = unrebased;
-                    bool fromReady = true;
-                    if (rebaseFromFactor < 1.0 || rebaseFromFactorX < 1.0)
-                    {
-                        pl_frame rebasedFrom{};
-                        fromReady = sourceRebase.Apply(d3d11->gpu, rebaseDispatch, unrebased, rebaseFromFactorX, rebaseFromFactor, rebasedFrom,
-                            SourceRebase::Module::kSlotCrossfade);
-                        if (fromReady) from = rebasedFrom;
-                    }
+                    const bool fromReady = EntranceCrossfadeFrom(from, sourceSequence);
                     if (fromReady)
                     {
-                        CrossfadeFromStages(from, rebaseFromFactor, sourceSequence);
                         // Hunt 3 F1: mixed in the output signal domain by VP's PRE_OUTPUT hooks
                         // (CrossfadeMix.h): BTB/WTW carried exactly, the extended-range late restore
                         // (calibration LUT, wide gamut) once per path before the mix.

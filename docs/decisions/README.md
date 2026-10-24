@@ -24,3 +24,5 @@ Short ADR-style records of the major VP design decisions, migrated from the plan
 | [ADR-0018](ADR-0018-general-not-fixed.md) | General, not fixed: derive rates and sizes from measurement | 2026-10-16 | Accepted |
 | [ADR-0019](ADR-0019-original-pathway-baseline.md) | An "Original pathway" baseline reproduces Bill's pathway with every VP addition off | 2026-10-24 | Accepted |
 | [ADR-0020](ADR-0020-one-total-delay.md) | One user-set total delay, the same at every frame rate; 4 frames recommended | 2026-10-24 | Accepted |
+| [ADR-0021](ADR-0021-reorderable-modules.md) | Reorderable modules, with declared contracts and a validator | 2026-10-24 | Accepted |
+| [ADR-0022](ADR-0022-vpv-source-folder.md) | All VP-V code under one source folder, src/VP-V | 2026-10-24 | Accepted |

@@ -4,7 +4,7 @@ Status: FROZEN for the skeleton restructure. The open items are listed in sectio
 is a measured decision, so none of them changes the slot order except the re-base/repair
 order (marked PENDING).
 Machine-readable slot list: [`slots.json`](slots.json). Decision records: [`../decisions/`](../decisions/).
-Module folders: `src/modules/<unit>/<slot>/`.
+Module folders: `src/VP-V/modules/<unit>/<slot>/`.
 
 ---
 
@@ -361,6 +361,7 @@ additions are modular add-ons and gives a known-good reference.
 | VP bug fixes in upstream code (queue/timing fixes, capture resync hardening, crash fixes) | Fixes that cannot be switched off without reintroducing crashes/stalls | timing only; listed per fix |
 | Config migration (retired/renamed keys) | Upstream configs are migrated on load | n/a (settings mapping test) |
 | "Fallbacks engaged" status / diagnostics | Status only, not in the pixel path | n/a |
+| LED drive (Dynamic Drive) | The LED module is created by the host, not the renderer. Original mode turns its hooks off (slot switches), but the projector commands follow the LED config, so the golden test runs with the LED drive off | test precondition |
 
 ### 3.8 How "once per source frame" (B3) preserves the pathway intent
 
@@ -404,11 +405,38 @@ the 3090:
   report.
 - The laptop timings also anchor the Low/Mid tiers (the laptop 4K30 goal).
 
+### 3.10 Reorderable modules (owner 2026-10-24, ADR-0021)
+
+The overarching control program places modules in the designed order. Because it is modular, it
+can move a module to another position.
+
+- **The order is data.** The setting `pipeline_order` lists slots that take each other's
+  positions, for example `repair.encoding, scaling.rebase`. An empty setting gives the designed
+  order.
+- **Each module declares a contract** (`src/VP-V/core/SlotContracts.h`):
+  - the resolution domain it needs and gives: delivered / encoded / processing / output;
+  - the light domain: source / target light / projector codes;
+  - the plane layout;
+  - vectors needed or produced;
+  - whether it must see the original frame;
+  - its zone: VP front end / libplacebo-internal (fixed) / VP output hooks.
+
+  On top of the contracts there are hard precede rules: LED measurement before compensation,
+  compensation before black level, SDR shape before Stage 13.
+- **The validator** (`OrderValidator.h`) rejects an invalid order with a plain reason, for
+  example "repair.deband needs the delivered or encoded resolution, but at that position it gets
+  the processing resolution (after scaling.route_4k)".
+  - An invalid order never runs: the designed order stays, under "Fallbacks engaged".
+- **Net fingerprints include `UpstreamKey`**: the running slots before the net, in order. A move
+  bypasses the dependent nets visibly.
+- **Uses:** the A-order experiment, deband position experiments, future modules, and order
+  variants in the pairwise test generator.
+
 ---
 
 ## 4. Decisions and open items
 
-Decisions: see `docs/decisions/` (ADR-0001 .. ADR-0020).
+Decisions: see `docs/decisions/` (ADR-0001 .. ADR-0022).
 
 | Open item | Decided by | Affects |
 |---|---|---|
@@ -428,46 +456,63 @@ Decisions: see `docs/decisions/` (ADR-0001 .. ADR-0020).
 
 ## 5. How the skeleton implements this
 
-- `src/VideoProcessor-Lib/vprenderer/PipelineSlots.h` holds the slot ids and order (mirroring
-  `slots.json`; a test checks the two agree) and a slot-level enable/disable. Its rule is "an off
-  or placeholder slot runs no pass and registers no hook" (byte-identical, zero cost).
-- `EntranceStages` (one stage list) runs the input-side slots in registry order on a `pl_frame`.
-  A placeholder returns the frame unchanged. The entrance cache keys the result by source
-  sequence (B3). It is migrated into the renderer in steps: main path first, then the extra and
-  crossfade copies.
-- The output-hook order is a single function that sorts the VP hooks into the corrected order,
-  so the LUT can later be appended as the last hook (R1).
-- Per-axis vector scaling is a small value type (`VectorScale`: sx, sy) used by vector delivery.
-- "Fallbacks engaged" reuses the fix/r6-baseline registry (R5).
-### 5.1 Skeleton integration steps (feat/skeleton)
+All VP-V code lives under **`src/VP-V/`** (owner 2026-10-24). Bill's code stays in place, with
+a few clearly commented `#include <VP-V/...>` hooks. Read `src/VP-V/README.md` first.
 
-1. **Done (library + tests, no renderer change).** `PipelineSlots.h`, `EntranceStages.h` (stage
-   list + entrance cache), `OutputHookOrder.h`, `VectorScale.h`, and the
-   `PipelineSkeletonTests` CPU tests. The drift check also compares `PipelineSlots.h` with
-   `slots.json`.
-2. **After rebasing on `fix/r6-baseline`** (it is editing `LibplaceboVideoRenderer.cpp` now, so
-   that file is not touched concurrently): the renderer's main source-stage lambda builds a
-   `StageList<pl_frame>` from the existing modules (SourceRebase, VpDebander, DetailPulse +
-   TextureRestore). It runs through `Cache::Get(sourceSequence, epoch)`. The epoch is bumped on
-   settings, re-base factor, processing size or format changes.
-   - Placeholder slots are not wired, so they cost nothing.
-   - Byte-identity check: the default chain on non-motion frames must render identically before
-     and after.
-3. **Make the de-judder phase picture, extras and crossfade read the cached entrance result.**
-   Vectors are delivered with `VectorScale` (source -> encoded/processing). Remove the extra and
-   crossfade copies of the chain.
-   - Expected and measured change: the phase picture is made from the processed picture instead
-     of the native one.
-   - The debander hold and the detail-history semantics (advance once per source frame on A) are
-     kept by the once-per-frame run.
-4. **Tag the collected output hooks and hand libplacebo `OutputHookOrder::Order(...)`.** Today's
-   chain is already in order (tested), so the output is unchanged. Then add the VP calibration-LUT
-   hook (R1) as the last PRE_OUTPUT hook. The de-judder rendered-picture cache sits before it, so
-   the extras must apply the LUT themselves; check this when building R1.
-5. **Slot-level enable/disable in Config** (settings agent, from `slots.json`).
-   - Each slot's fallback reports through the fix/r6-baseline `FallbackStatus` (`Engage(id,
-     reason)`), using the slot's `fallback.entry` text.
+- **`src/VP-V/core/`**: header-only, C++14, CPU-tested. One job per header:
+  - `PipelineSlots.h`: the slot table, mirroring `slots.json` (drift-checked).
+  - `SlotContracts.h` + `OrderValidator.h`: reorderable modules (ADR-0021).
+  - `SlotRegistry.h`: the ONE registry, covering the zero-cost rule, slot switches, the Original
+    pathway, the order and the fingerprint key.
+  - `EntranceStages.h`: the stage list and the per-source-frame cache.
+  - `OutputHookOrder.h`: the hook order.
+  - `VectorScale.h`, `DelayBudget.h`, `SlotTiming.h`, `FallbackStatus.h`.
+- **`src/VP-V/modules/<unit>/<slot>/`**: module docs, manifests and tests. Migrated code so far:
+  `output/calibration_lut/CalibrationLutStage.*`.
+- **`src/VP-V/nets/`, `config/`, `tests/`**: the net runner (planned); the VP-V Config section
+  (settings agent); the unit tests (`PipelineSkeletonTests`, compiled by `VideoProcessor-Test`
+  under the filter "VP-V").
+- **Renderer wiring** (`LibplaceboVideoRenderer.cpp`):
+  - `UpdatePipelineSlots` builds the registry on every settings apply.
+  - `RunEntrance` is the one entrance stage list, used by the main draw, the de-judder extras
+    and the crossfade's path being left. The three copied chains are gone.
+  - `RunMainEntrance` reuses a cadence repeat's entrance result.
+  - `TagSlotHooks` + `OrderFrameSlotHooks` put the output slot hooks in registry order.
+  - `CalibrationLutStage` is the VP calibration LUT (`calibration_lut_stage = vp`).
+  - **Settings** (global `[vprenderer]`):
+    - `pipeline_original_pathway`;
+    - `pipeline_order`;
+    - `pipeline_slots_off`;
+    - `calibration_lut_stage`.
 
-- Module folders under `src/modules/<unit>/<slot>/` hold the README, MANIFEST.json, tests/ and
-  the live file list. Code moves only when touched (migration directive, ADR-0017), and
-  `tools/check_module_manifests.py` guards drift against `docs/design/components-master.json`.
+### 5.1 Skeleton integration status (feat/skeleton)
+
+1. **Done:** the core library and its tests.
+   - Reorderable modules: valid reorders work, invalid ones are rejected with a reason, and a
+     move changes the downstream fingerprints.
+   - Original pathway tests.
+2. **Done:** the main, extra and crossfade copies replaced by one registry-driven stage list
+   (`RunEntrance`).
+   - Each path keeps its own module slots and rules, so the designed order renders as before.
+   - A cadence repeat of a picture drawn as itself reuses its entrance result: the only
+     redundant per-refresh repeats removed (3.8).
+   - The debander hold and the detail history still advance once per source frame on A, which
+     is processed by the stages before them, whatever the order.
+3. **Next: phase pictures and extras warp the cached processed picture** (the full B3 change).
+   This needs the warp/interpolator shaders to read vectors scaled per axis (`VectorScale`) at
+   the processed size.
+   - It is a visible, intended change to de-judder frames, so it goes behind a switch and is
+     checked on real clips before it becomes the default.
+4. **Done:** output slot hooks tagged and ordered by the registry (unchanged for the designed
+   order), and the VP calibration-LUT hook (R1) available.
+   - The LUT runs before the de-judder rendered-picture cache, so the extras show the LUT-mapped
+     picture too.
+   - The default stays `calibration_lut_stage = libplacebo` (byte-identical) until the owner's
+     measurement.
+   - BTB/WTW in the VP stage are carried at slope 1 in code space (libplacebo mode uses the LUT
+     edge slope): a documented difference.
+5. **Config UI** for the tiers, slot switches and order list: the settings agent, from
+   `slots.json` (`src/VP-V/config/`).
+   - Fallbacks report through `core/FallbackStatus.h`.
+   - The Original pathway also needs the LED drive off. The LED module is owned by the host,
+     not the renderer, so this is listed as an exception for the golden test.

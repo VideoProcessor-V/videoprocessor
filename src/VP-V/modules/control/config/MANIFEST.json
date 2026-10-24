@@ -1,0 +1,37 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "control.config",
+  "unit": "control",
+  "order": 930,
+  "status": "partial",
+  "code_location": "legacy",
+  "live_files": [
+    "src/VP-V/core/PipelineSlots.h",
+    "src/VP-V/core/SlotContracts.h",
+    "src/VP-V/core/OrderValidator.h",
+    "src/VP-V/core/SlotRegistry.h",
+    "src/VP-V/core/EntranceStages.h",
+    "src/VP-V/core/OutputHookOrder.h",
+    "src/VP-V/tests/PipelineSkeletonTests.cpp",
+    "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
+    "src/VideoProcessor-Lib/ConfigFile.cpp",
+    "src/VideoProcessor-Lib/ConfigSchema.h",
+    "src/VideoProcessor-Lib/MainConfigSchema.h",
+    "src/VideoProcessor-Lib/RendererProfileConfig.h"
+  ],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [],
+    "upstream_modules": []
+  },
+  "fallback_when_missing": "n/a",
+  "fallback_entry": null
+}

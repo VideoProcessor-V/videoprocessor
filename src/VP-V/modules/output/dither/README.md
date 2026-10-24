@@ -1,0 +1,70 @@
+# Dither / sigma-delta (`output.dither`)
+
+Unit: **output** | side: output | order: 260 | status: **built** | hook point: OUTPUT
+
+## Purpose / why
+
+Quantise last for the 8-bit FL35 link: temporal sigma-delta (with vectors) or libplacebo dither; 12-bit / DV output paths later.
+
+## Contract
+
+- Input: projector codes in float
+- Output: link bit depth codes
+- Geometry: output size
+- Delay share: 0 frames
+- Look-ahead: none
+
+## Settings
+
+- Existing keys: `sigma_delta`, `dithering`, `dither_vectors`, `dither_grain_tolerance_scale`
+- Planned keys: (none)
+- Tiers: Classic libplacebo dither; Low..Upper sigma-delta
+
+## Fallbacks
+
+- "Fallbacks engaged" entry: Dither: libplacebo (sigma-delta dropped: <reason>)
+- Behaviour: Unsupported code domain drops the sigma-delta (logged).
+
+## Net fingerprint / upstream
+
+- Fingerprint: (none)
+- Upstream modules: `output.calibration_lut`
+
+## How to build / test
+
+Build the solution via the shared build-slot runner (see AGENTS.md); tests single-threaded; GPU tests only on mains with `VP_TEST_ADAPTER=NVIDIA`.
+
+Placeholder tests:
+- (none yet)
+
+Isolation tests:
+- SigmaDeltaDomain tests
+
+Contract tests:
+- the quantiser is the last OUTPUT hook
+
+Chain tests:
+- (none yet)
+
+## Known issues / open items
+
+- (none yet)
+
+## Where the code lives (live file list)
+
+Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+
+- `src/VideoProcessor-Lib/vprenderer/SigmaDeltaDomain.h`
+- `shaders/Temporal sigma-delta.glsl`
+- `src/VideoProcessor-Lib/vprenderer/OutputEncodingRepair.cpp`
+- `src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp`
+
+## Migration directive
+
+Code moves into this folder only when this slot is touched (opportunistic until M1, a dedicated phase after M1, finished by M2). A move = `git mv` + project/include updates + this module's `live_files` + `docs/design/components-master.json` (regenerate with `python tools/check_module_manifests.py --write`) in the SAME commit, with the build, this module's tests and the chain-gate subset passing. Never leave a copy behind; one module per change; never during a release/deploy window. Update this README in the same commit as any slot change.
+
+## Links
+
+- Design: [VP-pipeline-final.md](../../../../../docs/design/VP-pipeline-final.md)
+- Slot data: [slots.json](../../../../../docs/design/slots.json)
+- Decisions: (none) in [docs/decisions](../../../../../docs/decisions/README.md)

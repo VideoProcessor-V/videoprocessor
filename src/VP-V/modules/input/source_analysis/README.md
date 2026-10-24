@@ -1,0 +1,79 @@
+# Source analysis (`input.source_analysis`)
+
+Unit: **input** | side: input | order: 40 | status: **partial** | hook point: host
+
+## Purpose / why
+
+Analyse the ORIGINAL delivered frame before anything changes it: source resolution + scaler kernel pre-analysis (per axis), active picture/crop, cut/fade/black, subtitle detection, and the labels net A needs (bit depth, ratio, kernel, bitrate tier, codec family).
+
+## Contract
+
+- Input: the delivered frame (untouched), luma at delivered size
+- Output: per-frame analysis: per-axis source ratio + kernel class + confidence, active area, scene events, subtitle boxes, A labels (label schema v1) + state flag (re-based / native / un-reversed)
+- Geometry: delivered size; reports active area in delivered coordinates
+- Delay share: 0 frames (past-only detectors); latch confirmation is time-based
+- Look-ahead: uses queued frames where available (subtitles, active picture), never waits
+
+## Settings
+
+- Existing keys: `source_resolution`, `rebase_kernel_match`, `subtitle_fit`, `subtitle_reposition`, `subtitle_type`, `source_coding_fixes`
+- Planned keys: `label_detector`
+- Tiers: not tiered; label-detector net optional
+
+## Fallbacks
+
+- "Fallbacks engaged" entry: Source analysis: labels unknown (<reason>)
+- Behaviour: Low confidence -> 'unknown' labels (A is trained with ~12% unknown); un-identified kernel -> Lanczos re-base or no re-base.
+
+## Net fingerprint / upstream
+
+- Fingerprint: label schema v1 (shared with repair.encoding)
+- Upstream modules: `input.capture`, `input.signal`
+
+## How to build / test
+
+Build the solution via the shared build-slot runner (see AGENTS.md); tests single-threaded; GPU tests only on mains with `VP_TEST_ADAPTER=NVIDIA`.
+
+Placeholder tests:
+- (none yet)
+
+Isolation tests:
+- SourceResolutionDetector tests
+- SceneDetector tests
+- subtitle corpus probes
+
+Contract tests:
+- analysis reads the original frame even when re-base/repair are on
+
+Chain tests:
+- srcres latch + crossfade checks
+
+## Known issues / open items
+
+- blind kernel estimation for the re-base (item 18)
+- label-detector / identification net (round 2; owner idea: identification net feeding the kernel-matched re-base)
+- estimator gap analysis vs ground truth (item 8)
+
+## Where the code lives (live file list)
+
+Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+
+- `src/VideoProcessor-Lib/SourceResolutionDetector.cpp`
+- `src/VideoProcessor-Lib/SourceResolutionDetector.h`
+- `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.cpp`
+- `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.h`
+- `src/VideoProcessor-Lib/KernelInverse.cpp`
+- `src/VideoProcessor-Lib/ActivePictureAnalyzer.cpp`
+- `src/VideoProcessor-Lib/SceneDetector.cpp`
+- `src/VideoProcessor-Lib/SubtitleBoxDetector.cpp`
+- `src/VideoProcessor-Lib/AnalysisFrame.cpp`
+
+## Migration directive
+
+Code moves into this folder only when this slot is touched (opportunistic until M1, a dedicated phase after M1, finished by M2). A move = `git mv` + project/include updates + this module's `live_files` + `docs/design/components-master.json` (regenerate with `python tools/check_module_manifests.py --write`) in the SAME commit, with the build, this module's tests and the chain-gate subset passing. Never leave a copy behind; one module per change; never during a release/deploy window. Update this README in the same commit as any slot change.
+
+## Links
+
+- Design: [VP-pipeline-final.md](../../../../../docs/design/VP-pipeline-final.md)
+- Slot data: [slots.json](../../../../../docs/design/slots.json)
+- Decisions: ADR-0004 in [docs/decisions](../../../../../docs/decisions/README.md)

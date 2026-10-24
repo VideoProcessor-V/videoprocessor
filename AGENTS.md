@@ -122,10 +122,14 @@
 
 ## Pipeline design and modules
 
+- All VP-V code lives under `src/VP-V/` (ADR-0022): `core/` (the pipeline skeleton), `modules/`,
+  `nets/`, `config/`, `tests/`. Bill's code stays in place with minimal, commented
+  `#include <VP-V/...>` hooks. Read `src/VP-V/README.md` first; shared headers stay C++14.
+
 - The frozen pipeline design is `docs/design/VP-pipeline-final.md`; the slot list as data is
   `docs/design/slots.json` (authoritative for slot ids, order, hook points and keys); decisions
   are in `docs/decisions/` (ADR style).
-- Every slot has a module folder `src/modules/<unit>/<slot>/` (README, MANIFEST.json with the
+- Every slot has a module folder `src/VP-V/modules/<unit>/<slot>/` (README, MANIFEST.json with the
   live file list, tests/). Run `python tools/check_module_manifests.py` after touching slots,
   manifests or moved files; `--write` regenerates `docs/design/components-master.json`.
 - Migration directive: code moves into its module folder only when that slot is touched until

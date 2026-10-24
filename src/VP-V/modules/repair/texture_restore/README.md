@@ -1,0 +1,73 @@
+# Texture restore + breathing add-on (`repair.texture_restore`)
+
+Unit: **repair** | side: input | order: 90 | status: **built** | hook point: prepass
+
+## Purpose / why
+
+Long-memory add-on on A's output: texture restore (~2 s peak-hold fine-band reference along vectors) and breathing reduction (detail_pulse_stabilise, the GOP pulse). Premium, needs an efficiency rebuild (9.8 ms at 4K on the 3050 Ti).
+
+## Contract
+
+- Input: planes after repair + deband; vectors (validity-gated)
+- Output: same size and format
+- Geometry: same as input
+- Delay share: 0 frames
+- Look-ahead: detail pulse may measure the next queued frame (optional)
+
+## Settings
+
+- Existing keys: `texture_restore`, `texture_restore_cap`, `detail_pulse_stabilise`, `detail_pulse_cap`, `detail_pulse_fast`
+- Planned keys: (none)
+- Tiers: Upper only (after the efficiency pass)
+
+## Fallbacks
+
+- "Fallbacks engaged" entry: Texture restore: inactive (<reason>)
+- Behaviour: Failure renders without it (already counted in the status).
+
+## Net fingerprint / upstream
+
+- Fingerprint: on/off is an unlabelled robustness input to the refine net
+- Upstream modules: `repair.encoding`, `repair.deband`, `motion.estimation`
+
+## How to build / test
+
+Build the solution via the shared build-slot runner (see AGENTS.md); tests single-threaded; GPU tests only on mains with `VP_TEST_ADAPTER=NVIDIA`.
+
+Placeholder tests:
+- (none yet)
+
+Isolation tests:
+- TextureRestoreGpuTiming
+- DetailPulse tests
+
+Contract tests:
+- never runs with libplacebo smooth motion / deinterlacing
+
+Chain tests:
+- stacked A -> texture restore (double-boost check)
+
+## Known issues / open items
+
+- efficiency rebuild (fused passes, shared-memory tile stats)
+- redesign to measure in the A-cleaned domain
+
+## Where the code lives (live file list)
+
+Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+
+- `src/VideoProcessor-Lib/vprenderer/TextureRestore.cpp`
+- `src/VideoProcessor-Lib/vprenderer/TextureRestore.h`
+- `src/VideoProcessor-Lib/vprenderer/DetailPulse.cpp`
+- `src/VideoProcessor-Lib/vprenderer/DetailPulse.h`
+- `docs/VP-detail-restore.md`
+
+## Migration directive
+
+Code moves into this folder only when this slot is touched (opportunistic until M1, a dedicated phase after M1, finished by M2). A move = `git mv` + project/include updates + this module's `live_files` + `docs/design/components-master.json` (regenerate with `python tools/check_module_manifests.py --write`) in the SAME commit, with the build, this module's tests and the chain-gate subset passing. Never leave a copy behind; one module per change; never during a release/deploy window. Update this README in the same commit as any slot change.
+
+## Links
+
+- Design: [VP-pipeline-final.md](../../../../../docs/design/VP-pipeline-final.md)
+- Slot data: [slots.json](../../../../../docs/design/slots.json)
+- Decisions: ADR-0009 in [docs/decisions](../../../../../docs/decisions/README.md)

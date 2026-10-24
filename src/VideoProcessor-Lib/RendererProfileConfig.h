@@ -1078,6 +1078,13 @@ namespace RendererProfileConfig
 		std::string ignored;
 		for (const char* group : { "input", "scaling", "motion", "display", "output", "viewport" })
 			if (ValidateProfileSetting(group, key, value, ignored)) return true;
+		// Pipeline skeleton (design freeze 2026-10-24): the Original pathway baseline (ADR-0019),
+		// the module order (ADR-0021; slot names, validated by the renderer's registry, an invalid
+		// order never runs), slot-level switches and where the calibration LUT runs (R1).
+		if (key == "pipeline_original_pathway") return IsChoice(value, { "on", "off" });
+		if (key == "pipeline_order" || key == "pipeline_slots_off")
+			return value.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_.,;> ") == std::string::npos;
+		if (key == "calibration_lut_stage") return IsChoice(value, { "libplacebo", "vp" });
 		if (key == "video_conversion")
 			return IsChoice(value, { "none", "off", "v210_to_p010", "uyvy_to_p010" });
 		if (key == "container_colorspace")

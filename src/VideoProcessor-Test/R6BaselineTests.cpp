@@ -6,7 +6,7 @@
 // [vprenderer.Default]-not-applied warning (fix 6) and the known-failure allow-list (fix 8).
 
 #include <ConfigFile.h>
-#include <FallbackStatus.h>
+#include <VP-V/core/FallbackStatus.h>
 #include <MotionAhead.h>
 #include <RendererProfileConfig.h>
 #include <vprenderer/RenderAheadPolicy.h>

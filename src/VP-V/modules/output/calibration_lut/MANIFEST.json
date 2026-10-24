@@ -1,0 +1,43 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "output.calibration_lut",
+  "unit": "output",
+  "order": 250,
+  "status": "partial",
+  "code_location": "partly migrated",
+  "live_files": [
+    "src/VP-V/modules/output/calibration_lut/CalibrationLutStage.h",
+    "src/VP-V/modules/output/calibration_lut/CalibrationLutStage.cpp",
+    "src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.cpp",
+    "src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.h",
+    "src/VideoProcessor-Lib/vprenderer/LibplaceboCalibrationLutPolicy.h",
+    "src/VideoProcessor-Lib/calibration"
+  ],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": [
+        "meter + ArgyllCMS to build the LUT"
+      ]
+    },
+    "tools": [
+      "ArgyllCMS (optional, building the LUT)"
+    ],
+    "config_keys": [
+      "calibration_lut",
+      "calibration_lut_enabled",
+      "calibration_lut_input_gamma",
+      "calibration_lut_input_transfer",
+      "calibration_lut_stage"
+    ],
+    "upstream_modules": [
+      "drive.black_level"
+    ]
+  },
+  "fallback_when_missing": "Until the VP stage exists, libplacebo's target LUT (current behaviour).",
+  "fallback_entry": "Calibration LUT: libplacebo target LUT (VP stage unavailable)"
+}
