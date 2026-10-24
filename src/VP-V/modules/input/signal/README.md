@@ -66,8 +66,9 @@ Chain tests:
   Captured film frames are never committed.
 - `DvTunnelPolicy.h` (WIP until its GPU check): no libplacebo plane deband on tunnel pictures (it
   ran on the 12-bit IPT planes before the decode and moved saturated near-zero channels by up to
-  3.6 codes). KNOWN GAP: no deband after the decode for DV (VP's deband_vp also works on the
-  source planes before the decode).
+  3.6 codes), and no VP deband there either (deband_vp also works on the source planes before
+  the decode; "Fallbacks engaged: VP deband" when it is on). KNOWN GAP / queued: a post-decode DV
+  deband (intensity in PQ before tone mapping).
 
 ## Known issues / open items
 

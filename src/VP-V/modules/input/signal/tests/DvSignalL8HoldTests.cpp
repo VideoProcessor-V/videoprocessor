@@ -117,7 +117,17 @@ namespace Tests
 		{
 			Assert::IsTrue(DvTunnelPolicy::SkipPlaneDeband(true));
 			Assert::IsFalse(DvTunnelPolicy::SkipPlaneDeband(false));
-			Assert::IsTrue(std::string(DvTunnelPolicy::DebandStatus()).find("plane deband off") != std::string::npos);
+			// VP's own deband: skipped on the tunnel only when the user has it on (then also a fallback entry).
+			Assert::IsTrue(DvTunnelPolicy::SkipVpDeband(true, true));
+			Assert::IsFalse(DvTunnelPolicy::SkipVpDeband(true, false));
+			Assert::IsFalse(DvTunnelPolicy::SkipVpDeband(false, true));
+			Assert::AreEqual(std::string(), DvTunnelPolicy::DebandStatus(false, false));
+			Assert::AreEqual(std::string("; libplacebo plane deband off on the tunnel (12-bit IPT; no deband after decode yet)"),
+				DvTunnelPolicy::DebandStatus(true, false));
+			Assert::AreEqual(std::string("; libplacebo and VP deband off on the tunnel (12-bit IPT; no deband after decode yet)"),
+				DvTunnelPolicy::DebandStatus(true, true));
+			Assert::AreEqual(std::string("; VP deband off on the tunnel (12-bit IPT; no deband after decode yet)"),
+				DvTunnelPolicy::DebandStatus(false, true));
 		}
 
 		TEST_METHOD(L10ParsesBothFormsAndRejectsBadBlocks)

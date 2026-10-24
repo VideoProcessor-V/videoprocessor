@@ -7736,6 +7736,7 @@ struct LibplaceboVideoRenderer::Impl
 	DvDolbyStyle::ReferenceConditions dvReferenceConditions;
 	bool dvTrimsShaderMissing = false;
 	bool dvDebandSkipped = false;        // DvTunnelPolicy: libplacebo deband dropped for this DV picture
+	bool dvVpDebandSkipped = false;      // DvTunnelPolicy: VP's deband skipped for this DV picture
 	bool dvDebandSkipLogged = false;   // the last trims attempt found shaders/DV trims.glsl missing
 	int dvToneL1Logged = -1;             // audit 7: L1 reaching libplacebo, logged on change
 	bool sdrToneShapeConfigured = false;
@@ -19525,7 +19526,7 @@ struct LibplaceboVideoRenderer::Impl
 				case VideoFrameEncoding::R10l:
 					setIngressStatus(std::string(convertedPayload->dvTunnelRaw ? "Dolby Vision RGB tunnel (12-bit 4:2:2, GPU unpack)" :
 						"Dolby Vision RGB tunnel (12-bit 4:2:2)") + "; " + dvTrimsStatus + "; " + dvToneStatus + DvMetadataHold::StatusSuffix(convertedPayload->dolby) +
-						(dvDebandSkipped ? DvTunnelPolicy::DebandStatus() : ""));
+						DvTunnelPolicy::DebandStatus(dvDebandSkipped, dvVpDebandSkipped));
 					break;
 				case VideoFrameEncoding::V210:
 					setIngressStatus(convertedPayload->Raw() ? "P210 (lossless v210 4:2:2, GPU unpack)" : "P210 (lossless v210 4:2:2)");
@@ -23235,7 +23236,17 @@ struct LibplaceboVideoRenderer::Impl
 			debandThreshold = 0.0;
 			vpDebandParams = VpDebander::Params();
 			std::string debandState;
-			if (activeSettings.debandVp != "off" && luma)
+			// feat/dv-l8 (owner 2026-10-24, DvTunnelPolicy.h): VP's debander works on the source planes, which for the
+			// DV tunnel are the 12-bit opponent planes before libplacebo's decode - skipped there, visibly.
+			dvVpDebandSkipped = DvTunnelPolicy::SkipVpDeband(renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION, activeSettings.debandVp != "off");
+			if (dvVpDebandSkipped)
+			{
+				debandState = "VP deband: off on Dolby Vision tunnel pictures (12-bit opponent planes before the decode)";
+				EngageFallback("VP deband", "off on the DV tunnel planes (no deband after decode yet)");
+			}
+			else
+				ReleaseFallback("VP deband");
+			if (activeSettings.debandVp != "off" && luma && !dvVpDebandSkipped)
 			{
 				const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
 				const int depth = renderImage.repr.bits.color_depth > 0 ? renderImage.repr.bits.color_depth : 10;
@@ -23274,7 +23285,7 @@ struct LibplaceboVideoRenderer::Impl
 						debandThreshold, activeSettings.debandVp.c_str(), bits, quality);
 				debandState = text;
 			}
-			else if (!debandLogged.empty())
+			else if (!dvVpDebandSkipped && !debandLogged.empty())
 				debandState = "VP deband: off";
 			if (!debandState.empty() && debandState != debandLogged)
 			{

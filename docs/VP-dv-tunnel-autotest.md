@@ -134,10 +134,11 @@ deband on DV tunnel pictures (`src/VP-V/modules/input/signal/DvTunnelPolicy.h`; 
 "libplacebo plane deband off on the tunnel (12-bit IPT; no deband after decode yet)" on the DV
 status line). To confirm on the GPU: the full_acc job with the fix (the patch within one code of
 the faithful result) and, on the current code, the same job with deband off only.
-KNOWN GAP: no deband acts on the DECODED tunnel picture. VP's own debander (deband_vp, default
-off) also runs on the source planes before the decode (all planes, IPT chroma included), so
-streamed DV's base-layer compression banding is not debanded after decode; a post-decode DV
-deband is future work.
+VP's own debander (deband_vp, default off) is a pass on the same source planes before the decode,
+so it is skipped on tunnel pictures too ("Fallbacks engaged: VP deband" when it is switched on;
+one DV status suffix covers both). KNOWN GAP / queued: no deband acts on the DECODED tunnel
+picture, so streamed DV's base-layer compression banding is not debanded; a post-decode DV
+deband (the intensity in PQ, before tone mapping) is a later queue item.
 
 dv_trims follows the tone-mapping target: the renderer hands libplacebo's target peak
 (sdr_target_nits for SDR outputs) to `DolbyVisionTrims::Select` every frame; below every

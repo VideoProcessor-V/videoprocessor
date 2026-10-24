@@ -1,4 +1,5 @@
 #pragma once
+#include <string>
 /*
  * Copyright(C) 2026 Victor McPherson
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -25,15 +26,16 @@
 // shift solves to I +0.36, Ct -0.6, Cp -0.7 codes (all sub-step). Nothing to deband exists in
 // a 12-bit tunnel picture, and debanding opponent planes is the wrong domain anyway.
 //
-// Policy: no libplacebo plane deband on DV tunnel pictures (the renderer drops deband_params for
-// those frames and says so once in the log and on the DV status line).
+// Policy: no libplacebo plane deband and no VP deband (deband_vp) on DV tunnel pictures (the
+// renderer drops deband_params / skips VpDebander for those frames; one DV status suffix covers
+// both; VP deband, being the user's explicit switch, is also listed under "Fallbacks engaged").
 //
 // KNOWN GAP (owner 2026-10-24: streamed DV still carries compression banding from its 10-bit base
 // layer): there is NO deband after the decode for the tunnel. VP's own debander (deband_vp,
 // VpDebander.h, default off) is also a pass on the SOURCE planes before libplacebo's decode
-// (every plane, the IPT chroma included), so it does not act on the decoded picture either; when
-// switched on it debands the opponent planes, the same wrong domain. A post-decode deband for DV
-// (e.g. on the intensity of the decoded, still-PQ picture) is future work, not built here.
+// (every plane, the IPT chroma included), so it would only deband the opponent planes - the same
+// wrong domain - and is skipped on the tunnel as well. A post-decode deband for DV (the intensity
+// of the decoded, still-PQ picture, before tone mapping) is a queued later item.
 // GPU check to run (queued): the full_acc job with this policy - the 2020 green patch within one
 // code of the faithful result, and patch_max_err_codes <= 1.
 namespace DvTunnelPolicy
@@ -41,8 +43,16 @@ namespace DvTunnelPolicy
 	// True when libplacebo's plane deband must not run for this picture.
 	inline bool SkipPlaneDeband(bool dolbyVisionTunnelPicture) { return dolbyVisionTunnelPicture; }
 
-	inline const char* DebandStatus()
+	// VP's own debander (deband_vp) on the tunnel planes: skipped too (owner 2026-10-24), and listed
+	// under "Fallbacks engaged: VP deband" because the user switched it on.
+	inline bool SkipVpDeband(bool dolbyVisionTunnelPicture, bool vpDebandOn) { return dolbyVisionTunnelPicture && vpDebandOn; }
+
+	// One status suffix for both: "" when neither was skipped.
+	inline std::string DebandStatus(bool libplaceboSkipped, bool vpSkipped)
 	{
-		return "; libplacebo plane deband off on the tunnel (12-bit IPT; no deband after decode yet)";
+		if (!libplaceboSkipped && !vpSkipped)
+			return std::string();
+		const char* which = libplaceboSkipped && vpSkipped ? "libplacebo and VP deband" : libplaceboSkipped ? "libplacebo plane deband" : "VP deband";
+		return std::string("; ") + which + " off on the tunnel (12-bit IPT; no deband after decode yet)";
 	}
 }
