@@ -46,6 +46,22 @@ namespace Vpv
             t.defaults.push_back({ "dv_tunnel_gpu_unpack", "off" });
             t.defaults.push_back({ "preserve_extended_range", "on" });
             t.defaults.push_back({ "sdr_tone_shape", "off" });
+            t.defaults.push_back({ "source_range", "auto" });
+            t.defaults.push_back({ "dv_trims", "off" });
+            t.defaults.push_back({ "intent_content", "off" });
+            t.defaults.push_back({ "interpolation_fallback", "hold" });
+            t.defaults.push_back({ "intent_motion", "off" });
+            t.defaults.push_back({ "low_bitrate_handling", "auto" });
+            t.defaults.push_back({ "source_resolution_text_guard", "on" });
+            t.defaults.push_back({ "source_resolution_mixed_guard", "on" });
+            t.defaults.push_back({ "adaptive_upscale", "off" });
+            t.defaults.push_back({ "adaptive_grain_map", "on" });
+            t.defaults.push_back({ "ssim_bitrate_aware", "on" });
+            t.defaults.push_back({ "ssim_residual_stabilise", "on" });
+            t.defaults.push_back({ "cnn_residual_stabilise", "on" });
+            t.defaults.push_back({ "fbo_float32", "auto" });
+            t.defaults.push_back({ "ambient_adapt", "off" });
+            t.defaults.push_back({ "occlusion_mask", "off" });
             t.slotList.push_back({ "input.capture", "Capture", "input", "built", 10, "Capture: CPU 4:2:0 (GPU unpack failed: <reason>)" });
             t.slotList.push_back({ "input.signal", "Signal", "input", "built", 20, "Signal: DV tunnel unpack on the CPU (<reason>)" });
             t.slotList.push_back({ "input.queue_timing", "Queue + timing", "input", "built", 30, "Queue: short look-ahead (<n> of 4 frames)" });
@@ -80,6 +96,7 @@ namespace Vpv
                 Unit u;
                 u.id = "input"; u.name = "Input"; u.summary = "Takes the picture from the capture card at full precision, works out the signal type and holds it for the fixed delay.";
                 u.untieredReason = "Always on: capture and timing have no quality steps, only paths (the toggles below).";
+                u.more = "Total delay and queue profiles: Queue page. Signal detection (DV tunnel hand-off, new LLDV): DV page. Capture card and packing: General page.";
                 u.slotIds.push_back("input.capture");
                 u.slotIds.push_back("input.signal");
                 u.slotIds.push_back("input.queue_timing");
@@ -88,6 +105,9 @@ namespace Vpv
                 u.toggles.push_back({ "capture_upload", "Upload frames as they arrive", { "auto", "render", "early" }, "input.capture" });
                 u.toggles.push_back({ "native_rgb_ingest", "Native 10/12-bit RGB capture", { "on", "off" }, "input.capture" });
                 u.toggles.push_back({ "dv_tunnel_gpu_unpack", "Dolby Vision tunnel: GPU unpack", { "on", "off" }, "input.signal" });
+                u.toggles.push_back({ "source_range", "Source range (when the source mislabels it)", { "auto", "full", "limited" }, "input.signal" });
+                u.toggles.push_back({ "dv_trims", "Dolby Vision trims for your display (under test)", { "on", "off" }, "input.signal" });
+                u.toggles.push_back({ "intent_content", "Content labels for profile rules (film / video / sports)", { "on", "off" }, "input.source_analysis" });
                 u.planned.push_back({ "label_detector", "Label-detector net (codec family, film grain)", "input.source_analysis" });
                 t.units.push_back(u);
             }
@@ -95,6 +115,7 @@ namespace Vpv
                 Unit u;
                 u.id = "motion"; u.name = "Motion"; u.summary = "Measures motion once on the untouched picture and feeds the de-judder, hiccup repair and dither.";
                 u.untieredReason = nullptr;
+                u.more = "Your motion taste (the slider) and motion profiles: Motion page. The motion estimator's measured internals ('measured, leave alone') and the fixes under test: Rendering page.";
                 u.slotIds.push_back("motion.estimation");
                 u.slotIds.push_back("motion.vector_delivery");
                 u.slotIds.push_back("motion.consumers");
@@ -137,6 +158,8 @@ namespace Vpv
                 u.toggles.push_back({ "dejudder_estimate_ahead", "Estimate motion ahead", { "on", "off" }, "motion.estimation" });
                 u.toggles.push_back({ "dither_vectors", "Dither reuses the de-judder's motion", { "auto", "own" }, "motion.consumers" });
                 u.toggles.push_back({ "render_ahead", "De-judder: render ahead (under test)", { "off", "on" }, "output.presentation" });
+                u.toggles.push_back({ "interpolation_fallback", "Where motion is not trusted: hold or blend", { "hold", "blend" }, "motion.consumers" });
+                u.toggles.push_back({ "intent_motion", "Ease the de-judder per shot (only ever lower)", { "on", "off" }, "motion.consumers" });
                 u.planned.push_back({ "motion_ahead_ms", "Motion look-ahead in milliseconds (time-based)", "motion.estimation" });
                 t.units.push_back(u);
             }
@@ -144,6 +167,7 @@ namespace Vpv
                 Unit u;
                 u.id = "repair"; u.name = "Repair"; u.summary = "Cleans streaming damage at the picture's real size: encoding repair (planned), deband, breathing and texture restore.";
                 u.untieredReason = nullptr;
+                u.more = "libplacebo's own debander (deband_strength) and the detail-pulse / texture-restore limits: Rendering page.";
                 u.slotIds.push_back("repair.encoding");
                 u.slotIds.push_back("repair.deband");
                 u.slotIds.push_back("repair.texture_restore");
@@ -178,6 +202,7 @@ namespace Vpv
                 u.toggles.push_back({ "deband_vp_grain_guard", "VP deband leaves grain alone", { "on", "veto", "off" }, "repair.deband" });
                 u.toggles.push_back({ "deband_vp_exclusive", "VP deband replaces libplacebo's", { "on", "off" }, "repair.deband" });
                 u.toggles.push_back({ "detail_pulse_fast", "Detail pulse: fast path", { "on", "off" }, "repair.texture_restore" });
+                u.toggles.push_back({ "low_bitrate_handling", "Deband reacts to compression", { "auto", "off", "on" }, "repair.deband" });
                 u.planned.push_back({ "encoding_repair", "Encoding repair (net A or VP restore)", "repair.encoding" });
                 t.units.push_back(u);
             }
@@ -185,6 +210,7 @@ namespace Vpv
                 Unit u;
                 u.id = "scaling"; u.name = "Scaling"; u.summary = "Undoes the player's upscale (re-base), brings the picture to 4K and scales it to the projector.";
                 u.untieredReason = nullptr;
+                u.more = "Upscaler, downscaler and chroma filters (libplacebo): Scaling page. The adaptive scaler's thresholds and weights: Rendering page.";
                 u.slotIds.push_back("scaling.rebase");
                 u.slotIds.push_back("scaling.route_4k");
                 u.slotIds.push_back("scaling.refine");
@@ -214,6 +240,13 @@ namespace Vpv
                 u.plannedTiers.push_back({ "Upper", "the 4K refine net and the D refine add-on (not yet implemented; Upper uses Mid)" });
                 u.toggles.push_back({ "rebase_kernel_match", "Re-base: undo the player's upscaler", { "on", "off" }, "scaling.rebase" });
                 u.toggles.push_back({ "adaptive_faithful", "Grain-true downscale filter", { "auto", "ortho" }, "scaling.output" });
+                u.toggles.push_back({ "source_resolution_text_guard", "Re-base ignores the player's own subtitles", { "on", "off" }, "scaling.rebase" });
+                u.toggles.push_back({ "source_resolution_mixed_guard", "Never re-base a mixed screen (menu, picture-in-picture)", { "on", "off" }, "scaling.rebase" });
+                u.toggles.push_back({ "adaptive_grain_map", "Grain map steers the downscale", { "on", "off" }, "scaling.output" });
+                u.toggles.push_back({ "ssim_bitrate_aware", "Gentler sharpening on poor streams", { "on", "off" }, "scaling.output" });
+                u.toggles.push_back({ "ssim_residual_stabilise", "Steady the SSIM scaler's detail along motion", { "on", "off" }, "scaling.output" });
+                u.toggles.push_back({ "cnn_residual_stabilise", "Steady the CNN scaler's detail along motion", { "on", "off" }, "scaling.output" });
+                u.toggles.push_back({ "adaptive_upscale", "Grain-aware upscale for small sources", { "on", "off" }, "scaling.output" });
                 u.planned.push_back({ "entrance_route_4k", "4K route (fixed 1-D steps to 4K)", "scaling.route_4k" });
                 u.planned.push_back({ "refine_net", "4K refine net", "scaling.refine" });
                 u.planned.push_back({ "chroma_upscale_vp", "VP chroma upscale", "scaling.chroma_upscale" });
@@ -224,12 +257,15 @@ namespace Vpv
                 Unit u;
                 u.id = "colour"; u.name = "Colour"; u.summary = "libplacebo tone and gamut mapping, below-black/above-white kept, SDR tone shape, Stage 13 appearance (planned).";
                 u.untieredReason = "libplacebo does the colour in every tier; the cheaper combined HDR->SDR LUT for Classic/Low is not yet implemented.";
+                u.more = "Tone mapping, gamut, output gamma and the calibration LUT file: Color / Output and Rendering pages. Room-light details: Rendering page (Ambient).";
                 u.slotIds.push_back("colour.tone_gamut");
                 u.slotIds.push_back("colour.extended_range");
                 u.slotIds.push_back("colour.sdr_tone_shape");
                 u.slotIds.push_back("colour.appearance");
                 u.toggles.push_back({ "preserve_extended_range", "Keep below-black and above-white (SDR)", { "on", "off" }, "colour.extended_range" });
                 u.toggles.push_back({ "sdr_tone_shape", "SDR tone shape", { "off", "knee" }, "colour.sdr_tone_shape" });
+                u.toggles.push_back({ "fbo_float32", "32-bit float processing (exact highlights)", { "auto", "on", "off" }, "colour.tone_gamut" });
+                u.toggles.push_back({ "ambient_adapt", "Room-light adaptation (experimental)", { "on", "off" }, "colour.appearance" });
                 u.planned.push_back({ "combined_hdr_lut", "Combined HDR->SDR LUT (low-end cards)", "colour.tone_gamut" });
                 u.planned.push_back({ "appearance_adaptation", "Stage 13 appearance (dim screen)", "colour.appearance" });
                 t.units.push_back(u);
@@ -238,6 +274,7 @@ namespace Vpv
                 Unit u;
                 u.id = "drive"; u.name = "Dynamic Drive"; u.summary = "Projector LED and contrast control from the picture: measurement, compensation, black level (planned).";
                 u.untieredReason = "Not a quality/cost choice: Dynamic Drive is set up on its own page (projector, script/compensate).";
+                u.more = "Everything Dynamic Drive does is set on the Dynamic Drive page: the projector connection, the command source (script / compensate / none), the LED and contrast tuning and its fixes under test.";
                 u.slotIds.push_back("drive.led_measure");
                 u.slotIds.push_back("drive.led_compensation");
                 u.slotIds.push_back("drive.black_level");
@@ -249,6 +286,7 @@ namespace Vpv
                 Unit u;
                 u.id = "output"; u.name = "Output"; u.summary = "The calibration LUT, the dither for the 8-bit link and the presentation.";
                 u.untieredReason = nullptr;
+                u.more = "Display bit depth and libplacebo's dithering: Rendering page. Where the calibration LUT runs: the Pipeline (expert) tab here.";
                 u.slotIds.push_back("output.calibration_lut");
                 u.slotIds.push_back("output.dither");
                 u.slotIds.push_back("output.presentation");
@@ -264,9 +302,55 @@ namespace Vpv
                 }
                 u.plannedTiers.push_back({ "Mid", "no extra output step yet (Mid uses Low)" });
                 u.plannedTiers.push_back({ "Upper", "no extra output step yet (Upper uses Low)" });
-                u.planned.push_back({ "calibration_lut_stage", "Calibration LUT applied by VP (last colour step)", "output.calibration_lut" });
+                u.toggles.push_back({ "occlusion_mask", "Dither: no smear where new picture appears", { "on", "off" }, "output.dither" });
                 t.units.push_back(u);
             }
+            t.retirementNote = "Guide section 12 (docs/settings/VP-settings-reference.md). A-C: proposed retirement; D: proposed hide as diagnostics. Shown on the VP-V page's 'Proposed retirement' tab and appended to each control's tooltip; nothing is removed until the owner approves. Retiring a key keeps its default behaviour and keeps reading old files.";
+            t.retirementGroups.push_back({ "A", "Fixes under test that are proven" });
+            t.retirementGroups.push_back({ "B", "Experiments that lost" });
+            t.retirementGroups.push_back({ "C", "Superseded by the new design" });
+            t.retirementGroups.push_back({ "D", "Keep, but hide as diagnostics" });
+            t.retirements.push_back({ "vprenderer", "pulldown_fixes", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "vprenderer", "timing_continuity_fixes", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "vprenderer", "cadence_class_fixes", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "vprenderer", "motion_history_fixes", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "vprenderer", "queue_timing_fixes", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "vprenderer", "general_rate_fixes", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "vprenderer", "efficiency_fixes", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "vprenderer", "source_coding_fixes", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "vprenderer", "source_resolution_latch_fixes", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "vprenderer", "source_resolution_cut_fixes", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "vprenderer", "active_picture_startup_hold", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "vprenderer", "extended_range_more_cases", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "vprenderer", "dv_tunnel_fixes", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "vprenderer", "residual_stabilise_grain_guard", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "general", "magewell_recover_faults", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "general", "capture_display_fixes", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "led_drive", "led_peak_full_coverage", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "led_drive", "led_picture_only", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "led_drive", "script_resend_failed_writes", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "led_drive", "correction_weight_by_time", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "led_drive", "preposition_black_only", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "led_drive", "led_landing_ms", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "led_drive", "led_wtw_passthrough", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "led_drive", "led_btb_passthrough", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "led_drive", "cntr_pair_predict", "A", "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate." });
+            t.retirements.push_back({ "vprenderer", "optical_flow_cost_trust", "B", "Experiment that lost: no measurable difference." });
+            t.retirements.push_back({ "vprenderer", "dejudder_warp_stage", "B", "Experiment that lost: the 'source' value is the old path, kept only for A/B." });
+            t.retirements.push_back({ "vprenderer", "dejudder_occlusion_fill", "B", "Experiment that lost: off and experimental." });
+            t.retirements.push_back({ "vprenderer", "dejudder_block_taper", "B", "Experiment that lost: off and experimental." });
+            t.retirements.push_back({ "vprenderer", "dejudder_taper_sad", "B", "Experiment that lost: off and experimental." });
+            t.retirements.push_back({ "vprenderer", "interpolation_grain", "B", "Experiment that lost: the 'blend' value loses grain." });
+            t.retirements.push_back({ "vprenderer", "dejudder_source_warp_filter", "B", "Experiment that lost: the 'bilinear' value loses grain." });
+            t.retirements.push_back({ "vprenderer", "nls_sampling", "B", "Experiment that lost: the 'bilinear' value loses grain." });
+            t.retirements.push_back({ "vprenderer", "deband_grain", "B", "Experiment that lost: VP's dither does that job." });
+            t.retirements.push_back({ "vprenderer", "render_ahead_queue_credit", "C", "Superseded: render-ahead now always counts inside the total delay." });
+            t.retirements.push_back({ "vprenderer", "motion_ahead_frames", "C", "Superseded: becomes time-based (planned motion_ahead_ms)." });
+            t.retirements.push_back({ "vprenderer", "detail_pulse_fast", "C", "Superseded: the picture is identical, so the fast path can always be on." });
+            t.retirements.push_back({ "vprenderer", "dither_vectors", "C", "Superseded: auto always does the right thing." });
+            t.retirements.push_back({ "queue", "target_frames", "C", "Superseded for normal profiles: one total delay (target_latency_ms) replaces it." });
+            t.retirements.push_back({ "vprenderer", "dejudder_verify", "D", "Keep, but hide as a diagnostic (testing only)." });
+            t.retirements.push_back({ "vprenderer", "dejudder_verify_share", "D", "Keep, but hide as a diagnostic (testing only)." });
             return t;
         }();
         return table;

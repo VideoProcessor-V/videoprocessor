@@ -35,6 +35,9 @@ Supported integration arguments are `--config <path>`, `--owner <HWND>`, and
 stable main window as its native transient owner; Config does not use global
 always-on-top placement.
 The `--page` and `--screenshot` arguments support automated visual review.
+`--sandbox` (with `--config <file>`) is the settings preview (`tools/build_settings_preview.ps1`):
+Config edits only that file and never searches the LAN, reads live status, sends commands or
+signals a running VP; it keeps its own preferences and has no tray icon.
 
 ## Distribution prerequisite
 

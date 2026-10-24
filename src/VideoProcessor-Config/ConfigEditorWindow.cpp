@@ -122,6 +122,14 @@
 #include <sstream>
 #include <VP-V/config/VpvSection.h>   // VP-V section hook (src/VP-V/config/README.md)
 
+// Settings preview (queue item 23): VideoProcessorConfig.exe --sandbox edits only its --config
+// file. It never signals, queries or commands a running VP (no live apply, no live status, no
+// profile/action/calibration/projector commands) and never searches the LAN for targets.
+static bool sandboxPreview()
+{
+    return qApp && qApp->property("vpSandboxPreview").toBool();
+}
+
 namespace
 {
 // RS-232 connection test: whether VideoProcessor.exe runs on this computer
@@ -1497,6 +1505,7 @@ ConfigEditorWindow::ConfigEditorWindow(QString configPath, quintptr ownerHandle,
     }
     setWindowTitle(remoteClient_ ?
 		QStringLiteral("VideoProcessor Configuration · %1").arg(remoteName_) :
+		sandboxPreview() ? QStringLiteral("VideoProcessor Configuration · Settings preview (sandbox file)") :
 		QStringLiteral("VideoProcessor Configuration"));
     setAccessibleName(QStringLiteral("VideoProcessor Configuration"));
     setObjectName(QStringLiteral("root"));
@@ -3263,6 +3272,11 @@ void ConfigEditorWindow::installActionContextMenu(QListWidget* list)
 void ConfigEditorWindow::runTargetCommand(const QString& group,
 	const QString& name, bool enabled, bool action)
 {
+	if (sandboxPreview())
+	{
+		setStatus(QStringLiteral("Settings preview: VP is not connected, so profiles and actions cannot be run."), true);
+		return;
+	}
 	if (noTarget_ || manualCommandThread_) return;
 	const QString host = remoteClient_ ? remoteHost_ : QStringLiteral("127.0.0.1");
 	const quint16 port = remoteClient_ ? remotePort_ : 41686;
@@ -3366,7 +3380,7 @@ void ConfigEditorWindow::refreshActiveProfileIndicators()
     const uint32_t expectedProcessId = nativeOwnerIsValid() ?
         ownerProcessId_ : 0;
     ActiveProfileStatus::Snapshot active;
-    const bool available = ActiveProfileStatus::Read(expectedProcessId, active);
+    const bool available = !sandboxPreview() && ActiveProfileStatus::Read(expectedProcessId, active);
     const QString renderer = available ? QString::fromLocal8Bit(active.renderer) : QString();
     const QString color = available ? QString::fromLocal8Bit(active.color) : QString();
     const QString scaling = available ? QString::fromLocal8Bit(active.scaling) : QString();
@@ -4608,7 +4622,7 @@ bool ConfigEditorWindow::hasActiveOwnedPopup() const
 
 bool ConfigEditorWindow::notifyVideoProcessor()
 {
-	if (remoteClient_) return false;
+	if (remoteClient_ || sandboxPreview()) return false;
     // Test-mode editors represent the normal VP-absent standalone case. This
     // also prevents a UI test from disturbing a developer's running VP.
     if (testMode_) return false;
@@ -14093,6 +14107,11 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         label = QPointer<QLabel>(testResult)]
     {
         if (noTarget_ || !button || !label) return;
+        if (sandboxPreview())
+        {
+            label->setText(QStringLiteral("Settings preview: VP is not connected, so the projector cannot be tested."));
+            return;
+        }
         if (projectorTestThread_)
         {
             label->setStyleSheet(QString());
@@ -15334,6 +15353,11 @@ QWidget* ConfigEditorWindow::createCalibrationPage()
 
 void ConfigEditorWindow::runCalibrationCommand(const QString& command, const QString& arguments)
 {
+    if (sandboxPreview())
+    {
+        applyCalibrationStatus(QString(), QStringLiteral("Settings preview: VP is not connected."), command);
+        return;
+    }
     if (noTarget_ || calibrationRpcThread_) return;
     const bool remote = remoteClient_ != nullptr;
     const QString host = remote ? remoteHost_ : QStringLiteral("127.0.0.1");
@@ -15914,7 +15938,8 @@ void ConfigEditorWindow::showUpdates()
 
 void ConfigEditorWindow::setupTray()
 {
-    if (!QSystemTrayIcon::isSystemTrayAvailable()) return;
+    // The settings preview has no tray icon: closing its window ends it.
+    if (sandboxPreview() || !QSystemTrayIcon::isSystemTrayAvailable()) return;
     tray_ = new QSystemTrayIcon(windowIcon(), this);
     tray_->setToolTip(QStringLiteral("VideoProcessor Configuration"));
     auto* menu = new QMenu(this);

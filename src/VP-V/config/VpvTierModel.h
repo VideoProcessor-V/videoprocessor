@@ -42,6 +42,9 @@ namespace Vpv
 	};
 	struct Planned { const char* key; const char* label; const char* slot; };
 	struct PlannedTier { const char* tier; const char* note; };
+	// A guide section-12 candidate (coverage audit 2026-10-24): shown as "proposed retirement" (A-C)
+	// or "proposed: hide as diagnostic" (D) until the owner approves; nothing is removed.
+	struct Retirement { const char* section; const char* key; const char* group; const char* reason; };
 	struct SlotInfo
 	{
 		const char* id;
@@ -57,6 +60,7 @@ namespace Vpv
 		const char* name = nullptr;
 		const char* summary = nullptr;
 		const char* untieredReason = nullptr;
+		const char* more = nullptr;         // where the rest of the unit's settings are (upstream pages)
 		std::vector<const char*> slotIds;
 		std::vector<Preset> presets;        // in tier order
 		std::vector<PlannedTier> plannedTiers;
@@ -78,7 +82,23 @@ namespace Vpv
 		std::vector<KeyValue> defaults;     // built-in value when a key is absent
 		std::vector<SlotInfo> slotList;
 		std::vector<Unit> units;
+		const char* retirementNote = nullptr;
+		std::vector<KeyValue> retirementGroups;   // group letter -> title
+		std::vector<Retirement> retirements;
 
+		// The proposed retirement of a key (any section when section is empty), or nullptr.
+		const Retirement* FindRetirement(const std::string& key, const std::string& section = std::string()) const
+		{
+			for (const Retirement& r : retirements)
+				if (key == r.key && (section.empty() || section == r.section)) return &r;
+			return nullptr;
+		}
+		const char* RetirementGroupTitle(const std::string& group) const
+		{
+			for (const KeyValue& g : retirementGroups)
+				if (group == g.key) return g.value;
+			return "";
+		}
 		const char* Default(const std::string& key) const
 		{
 			for (const KeyValue& kv : defaults)

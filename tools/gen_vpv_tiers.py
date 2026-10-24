@@ -69,6 +69,16 @@ def validate(tiers, slots):
     for s in slots["slots"]:
         if (s["order"] < 900 or s["unit"] == "drive") and s["id"] not in owner:
             errors.append(f"slot {s['id']} belongs to no VP-V unit")
+    retirement = tiers.get("proposed_retirement", {})
+    seen = set()
+    for r in retirement.get("keys", []):
+        if r["group"] not in retirement.get("groups", {}):
+            errors.append(f"retirement {r['key']}: unknown group {r['group']}")
+        if r["section"] not in ("vprenderer", "general", "led_drive", "projector", "queue"):
+            errors.append(f"retirement {r['key']}: unknown section {r['section']}")
+        if (r["section"], r["key"]) in seen:
+            errors.append(f"retirement {r['key']} listed twice")
+        seen.add((r["section"], r["key"]))
     return errors
 
 
@@ -104,6 +114,7 @@ def generate(tiers, slots):
         w("                Unit u;")
         w(f"                u.id = {c(u['id'])}; u.name = {c(u['name'])}; u.summary = {c(u['summary'])};")
         w(f"                u.untieredReason = {c(u.get('untiered_reason'))};")
+        w(f"                u.more = {c(u.get('more_settings'))};")
         for sid in u["slots"]:
             w(f"                u.slotIds.push_back({c(sid)});")
         for tier in u["tiers"]:
@@ -127,6 +138,13 @@ def generate(tiers, slots):
             w(f"                u.planned.push_back({{ {c(p['key'])}, {c(p['label'])}, {c(p['slot'])} }});")
         w("                t.units.push_back(u);")
         w("            }")
+    retirement = tiers.get("proposed_retirement", {})
+    if retirement:
+        w(f"            t.retirementNote = {c(retirement.get('note'))};")
+        for g, title in retirement.get("groups", {}).items():
+            w(f"            t.retirementGroups.push_back({{ {c(g)}, {c(title)} }});")
+        for r in retirement.get("keys", []):
+            w(f"            t.retirements.push_back({{ {c(r['section'])}, {c(r['key'])}, {c(r['group'])}, {c(r['reason'])} }});")
     w("            return t;")
     w("        }();")
     w("        return table;")

@@ -352,6 +352,60 @@ namespace
 	}
 }
 
+namespace
+{
+	// Coverage audit 2026-10-24 (docs/settings/coverage-audit.md): VP's own per-profile keys that
+	// had a control only on the Rendering page are now VP-V toggles (the upstream control greys as
+	// managed), each unit names where the rest of its settings are, the guide's retirement
+	// candidates are listed and marked on their controls (never removed), and the LUT stage is no
+	// longer shown as "not yet implemented" (the expert tab sets it).
+	void testCoverageAuditAdditions()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir);
+		{
+			ConfigEditorWindow window(path, 0, true);
+			for (const char* name : { "input.source_range", "input.dv_trims", "input.intent_content", "motion.interpolation_fallback",
+				"motion.intent_motion", "repair.low_bitrate_handling", "scaling.source_resolution_text_guard",
+				"scaling.source_resolution_mixed_guard", "scaling.adaptive_grain_map", "scaling.ssim_bitrate_aware",
+				"scaling.ssim_residual_stabilise", "scaling.cnn_residual_stabilise", "scaling.adaptive_upscale",
+				"colour.fbo_float32", "colour.ambient_adapt", "output.occlusion_mask" })
+			{
+				auto* combo = control<QComboBox>(window, Vpv::ObjectName(QString::fromLatin1(name)));
+				require(combo->currentIndex() == 0 && combo->currentText().startsWith(QStringLiteral("Not set (default: ")),
+					(std::string("a new toggle shows Not set with its default: ") + name).c_str());
+			}
+			auto* upstream = control<QWidget>(window, QStringLiteral("config.vprenderer.adaptive_upscale"));
+			require(!upstream->isEnabled() && upstream->toolTip().startsWith(QStringLiteral("Managed by VP-V")),
+				"the upstream control of a new toggle is managed by VP-V");
+			for (const char* unit : { "input", "motion", "repair", "scaling", "colour", "drive", "output" })
+				require(!control<QLabel>(window, Vpv::ObjectName(QString::fromLatin1(unit) + QStringLiteral(".more")))->text().isEmpty(),
+					(std::string("each unit names where the rest of its settings are: ") + unit).c_str());
+			require(!window.findChild<QCheckBox*>(Vpv::ObjectName("output.planned.calibration_lut_stage")),
+				"the LUT stage is not listed as not yet implemented (the expert tab sets it)");
+			const QString list = control<QLabel>(window, Vpv::ObjectName("retirement.list"))->text();
+			require(list.contains(QStringLiteral("pulldown_fixes")) && list.contains(QStringLiteral("Rendering page")) &&
+				list.contains(QStringLiteral("magewell_recover_faults")) && list.contains(QStringLiteral("dejudder_verify_share")),
+				"the Proposed retirement tab lists the candidates with their pages");
+			require(!list.contains(QStringLiteral("no control found")), "every retirement candidate's control is found");
+			require(control<QWidget>(window, QStringLiteral("config.vprenderer.pulldown_fixes"))->toolTip().contains(QStringLiteral("Proposed retirement")) &&
+				control<QWidget>(window, QStringLiteral("config.general.magewell_recover_faults"))->toolTip().contains(QStringLiteral("Proposed retirement")),
+				"retirement candidates are marked on their upstream controls");
+			require(control<QComboBox>(window, Vpv::ObjectName("repair.detail_pulse_fast"))->accessibleName().contains(QStringLiteral("(proposed retirement)")),
+				"a VP-V toggle that is a retirement candidate says so");
+			auto* upscale = control<QComboBox>(window, Vpv::ObjectName("scaling.adaptive_upscale"));
+			upscale->setCurrentIndex(upscale->findData(QStringLiteral("on")));
+			QCoreApplication::processEvents();
+			save(window);
+		}
+		ConfigFile config;
+		std::string v;
+		require(config.Load(path.toStdString()) && config.TryGetString(DefaultProfile(path), "adaptive_upscale", v) && v == "on",
+			"a new toggle writes its key");
+		requireVpReads(path);
+	}
+}
+
 int RunVpvConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
 	const std::function<void(bool, const char*)>& requireHelper, const std::function<void(ConfigEditorWindow&)>& saveHelper)
 {
@@ -365,5 +419,6 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: managed controls and Original pathway", testManagedControlsAndOriginalPathway);
 	failures += run("VP-V: unbuilt slots and toggles", testUnbuiltSlotsAndToggles);
 	failures += run("VP-V: expert pipeline keys validated and stored", testExpertPipelineKeys);
+	failures += run("VP-V: coverage audit toggles, pointers and retirement marks", testCoverageAuditAdditions);
 	return failures;
 }

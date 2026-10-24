@@ -356,6 +356,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 	QString remoteName;
 	quint16 remotePort = 41686;
 	bool offline = false;
+	bool sandbox = false;
 	bool explicitConfig = false;
     QString screenshotPath;
     int initialPage = 0;
@@ -387,6 +388,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 		}
 		else if (arguments[index] == QStringLiteral("--offline"))
 			offline = true;
+		else if (arguments[index] == QStringLiteral("--sandbox"))
+		{
+			// Settings preview (queue item 23): edit only the --config file; no LAN search, no
+			// running-VP status, commands or live apply (ConfigEditorWindow's sandboxPreview()).
+			sandbox = true;
+			offline = true;
+		}
 		else if (arguments[index] == QStringLiteral("--discover"))
 			continue; // Retained for existing VP launch arguments.
         else if (arguments[index] == QStringLiteral("--owner") && index + 1 < arguments.size())
@@ -418,6 +426,19 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
             if (pageOk) initialPage = parsedPage;
         }
     }
+    if (sandbox && configPath.isEmpty())
+    {
+        QMessageBox::warning(nullptr, QStringLiteral("Settings preview"),
+            QStringLiteral("--sandbox needs --config <file>: the preview edits only that file."));
+        return 2;
+    }
+    if (sandbox)
+    {
+        app.setProperty("vpSandboxPreview", true);
+        QApplication::setQuitOnLastWindowClosed(true);   // no tray icon in the preview
+        // Its own QSettings (window placement, target choice), apart from the real Config.
+        QApplication::setApplicationName(QStringLiteral("VideoProcessor Configuration (settings preview)"));
+    }
     if (configPath.isEmpty()) configPath = defaultConfigPath();
     if (!ownerBelongsToProcess(owner, ownerProcessId)) owner = 0;
 	if (remoteHost == QStringLiteral("127.0.0.1"))
@@ -425,11 +446,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 	const bool localAvailable = explicitConfig || offline || QFileInfo::exists(
 		QFileInfo(configPath).dir().filePath(QStringLiteral("VideoProcessor.exe")));
 	QSettings preferences;
-	QString rememberedTarget = preferences.value(
+	QString rememberedTarget = sandbox ? QStringLiteral("local") : preferences.value(
 		QStringLiteral("configRpc/selectedInstanceId")).toString();
-	QString rememberedLabel = preferences.value(
+	QString rememberedLabel = sandbox ? QStringLiteral("This computer") : preferences.value(
 		QStringLiteral("configRpc/selectedLabel")).toString();
-	if (localAvailable && rememberedTarget == localVpInstanceId(configPath))
+	if (!sandbox && localAvailable && rememberedTarget == localVpInstanceId(configPath))
 	{
 		rememberedTarget = QStringLiteral("local");
 		rememberedLabel = QStringLiteral("This computer");
@@ -477,7 +498,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 		false, {}, {}, remoteHost, remotePort, remoteName, noTarget,
 		localAvailable, rememberedTarget, rememberedLabel);
 	std::unique_ptr<LanTargetWatcher> watcher;
-	if (screenshotPath.isEmpty() || !offline)
+	if (!sandbox && (screenshotPath.isEmpty() || !offline))
 	{
 		watcher = std::make_unique<LanTargetWatcher>();
 		LanTargetWatcher* const watcherPtr = watcher.get();

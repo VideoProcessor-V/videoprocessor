@@ -9,11 +9,13 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QFrame>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QRegularExpression>
+#include <QScrollArea>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSlider>
@@ -49,6 +51,51 @@ namespace Vpv
 			font.setBold(true);
 			label->setFont(font);
 			return label;
+		}
+
+		// The upstream controls of a key: "config.<section>[.<group>...].<key>" (the Config naming;
+		// a control's helpers such as ".reset" end differently and are not matched).
+		QList<QWidget*> UpstreamControls(QWidget* root, const QString& section, const QString& key)
+		{
+			if (!root) return {};
+			const QRegularExpression name(QStringLiteral("^config\\.%1(\\.[^.]+)*\\.%2$")
+				.arg(QRegularExpression::escape(section), QRegularExpression::escape(key)));
+			return root->findChildren<QWidget*>(name);
+		}
+
+		// The Config page a widget is on (createPage's viewport is named "<title> settings").
+		QString PageOf(const QWidget* w)
+		{
+			for (const QWidget* p = w ? w->parentWidget() : nullptr; p; p = p->parentWidget())
+				if (p->objectName() == QStringLiteral("pageViewport") && qobject_cast<const QScrollArea*>(p))
+				{
+					QString page = p->accessibleName();
+					if (page.endsWith(QStringLiteral(" settings"))) page.chop(9);
+					return page;
+				}
+			return QString();
+		}
+
+		QString RetirementCaption(const Retirement& r)
+		{
+			return std::string(r.group) == "D" ? QStringLiteral("proposed: hide as diagnostic") : QStringLiteral("proposed retirement");
+		}
+
+		QString RetirementTip(const Table& table, const Retirement& r)
+		{
+			const QString caption = RetirementCaption(r);
+			return QStringLiteral("%1 (group %2, %3): %4 Nothing changes until the owner approves; see the VP-V page's "
+				"Proposed retirement tab and docs/settings/VP-settings-reference.md section 12.")
+				.arg(caption.left(1).toUpper() + caption.mid(1), Q(r.group), Q(table.RetirementGroupTitle(r.group)), Q(r.reason));
+		}
+
+		// A unit tab's page: a themed card (VpTheme styles QFrame[card="true"]), so the tab's text is
+		// on Config's dark surface instead of the platform style's white tab pane.
+		QWidget* NewTabPage()
+		{
+			auto* frame = new QFrame;
+			frame->setProperty("card", true);
+			return frame;
 		}
 
 		// Shared state of one VP-V page.
@@ -194,7 +241,7 @@ namespace Vpv
 		{
 			const Table& table = TierTable();
 			const QString unitId = Q(unit.id);
-			auto* page = new QWidget;
+			QWidget* page = NewTabPage();
 			page->setObjectName(ObjectName(unitId));
 			auto* layout = new QVBoxLayout(page);
 			layout->addWidget(Help(Q(unit.summary)));
@@ -282,13 +329,16 @@ namespace Vpv
 					auto* combo = new QComboBox;
 					const QString key = Q(toggle.key);
 					combo->setObjectName(ObjectName(unitId + QLatin1Char('.') + key));
-					combo->setAccessibleName(Q(toggle.label));
+					const Retirement* retiring = table.FindRetirement(toggle.key, "vprenderer");
+					const QString label = retiring ? QStringLiteral("%1 (%2)").arg(Q(toggle.label), RetirementCaption(*retiring)) : Q(toggle.label);
+					combo->setAccessibleName(label);
 					combo->addItem(QStringLiteral("Not set (default: %1)").arg(Q(table.Default(toggle.key))), QString());
 					for (const char* v : toggle.values) combo->addItem(Q(v), Q(v));
 					const SlotInfo* slot = table.Slot(toggle.slot);
 					combo->setToolTip(QStringLiteral("Key %1 (renderer profile). Slot: %2. See docs/settings/VP-settings-reference.md.")
-						.arg(key, slot ? Q(slot->name) : Q(toggle.slot)));
-					form->addRow(Q(toggle.label), combo);
+						.arg(key, slot ? Q(slot->name) : Q(toggle.slot)) +
+						(retiring ? QStringLiteral("\n\n") + RetirementTip(table, *retiring) : QString()));
+					form->addRow(label, combo);
 					QObject::connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), combo, [state, combo, key](int index)
 					{
 						if (state->refreshing || index < 0 || !state->host.setValue) return;
@@ -318,6 +368,14 @@ namespace Vpv
 				layout->addWidget(formHost);
 			}
 
+			if (unit.more && *unit.more)
+			{
+				auto* more = Help(QStringLiteral("<b>More settings of this unit</b> (on the other pages): ") + Q(unit.more).toHtmlEscaped());
+				more->setTextFormat(Qt::RichText);
+				more->setObjectName(ObjectName(unitId + QStringLiteral(".more")));
+				layout->addWidget(more);
+			}
+
 			auto* slotsHeading = Bold(ObjectName(unitId + QStringLiteral(".slots_heading")));
 			slotsHeading->setText(QStringLiteral("Stages in this unit (pipeline order)"));
 			layout->addWidget(slotsHeading);
@@ -338,7 +396,7 @@ namespace Vpv
 		QWidget* MakeExpertPage(const std::shared_ptr<State>& state)
 		{
 			const QString section = Q(TierTable().section);
-			auto* page = new QWidget;
+			QWidget* page = NewTabPage();
 			page->setObjectName(ObjectName(QStringLiteral("expert")));
 			auto* layout = new QVBoxLayout(page);
 			layout->addWidget(Help(QStringLiteral("For testing and measurement. Normal viewing never needs these: the tiers "
@@ -425,6 +483,78 @@ namespace Vpv
 			});
 			return page;
 		}
+	}
+
+	namespace
+	{
+		// The guide's section-12 candidates (coverage audit 2026-10-24): visible, never removed.
+		// Each line says where its control is and, for renderer-profile and [general] keys, the value
+		// in use; the same text is appended to the control's own tooltip (MarkRetirements).
+		QWidget* MakeRetirementPage(const std::shared_ptr<State>& state)
+		{
+			const Table& table = TierTable();
+			QWidget* page = NewTabPage();
+			page->setObjectName(ObjectName(QStringLiteral("retirement")));
+			auto* layout = new QVBoxLayout(page);
+			auto* intro = Help(Q(table.retirementNote));
+			intro->setObjectName(ObjectName(QStringLiteral("retirement.note")));
+			layout->addWidget(intro);
+			auto* list = Help(QString());
+			list->setObjectName(ObjectName(QStringLiteral("retirement.list")));
+			list->setTextFormat(Qt::RichText);
+			layout->addWidget(list);
+			layout->addStretch();
+			state->refreshers.push_back([state, list]()
+			{
+				const Table& t = TierTable();
+				QString html;
+				for (const KeyValue& g : t.retirementGroups)
+				{
+					QString rows;
+					for (const Retirement& r : t.retirements)
+					{
+						if (std::string(r.group) != g.key) continue;
+						const QList<QWidget*> controls = UpstreamControls(state->host.upstreamRoot, Q(r.section), Q(r.key));
+						const QString where = controls.isEmpty() ? QStringLiteral("no control found") :
+							QStringLiteral("%1 page").arg(PageOf(controls.front()));
+						QString value;
+						if (std::string(r.section) == "vprenderer")
+						{
+							const std::string v = state->Get(r.key);
+							value = v.empty() ? QStringLiteral("not set (default)") : QString::fromStdString(v);
+						}
+						else if (std::string(r.section) == "general" && state->host.value)
+						{
+							const QString v = state->host.value(QStringLiteral("general"), Q(r.key)).trimmed();
+							value = v.isEmpty() ? QStringLiteral("not set (default)") : v;
+						}
+						rows += QStringLiteral("<tr><td><code>%1</code></td><td>%2</td><td>%3</td><td>%4</td></tr>")
+							.arg(Q(r.key).toHtmlEscaped(), where.toHtmlEscaped(),
+								value.isEmpty() ? QStringLiteral("-") : value.toHtmlEscaped(), Q(r.reason).toHtmlEscaped());
+					}
+					if (rows.isEmpty()) continue;
+					html += QStringLiteral("<p><b>%1. %2</b> (%3)</p><table cellspacing=4><tr><th align=left>Key</th>"
+						"<th align=left>Control</th><th align=left>This profile</th><th align=left>Why</th></tr>%4</table>")
+						.arg(Q(g.key), Q(g.value).toHtmlEscaped(),
+							std::string(g.key) == "D" ? QStringLiteral("proposed: hide as diagnostics") : QStringLiteral("proposed retirement"),
+							rows);
+				}
+				list->setText(html);
+			});
+			return page;
+		}
+	}
+
+	void MarkRetirements(const Host& host)
+	{
+		const Table& table = TierTable();
+		for (const Retirement& r : table.retirements)
+			for (QWidget* w : UpstreamControls(host.upstreamRoot, Q(r.section), Q(r.key)))
+			{
+				if (w->property("vpvRetirementMarked").toBool()) continue;
+				w->setProperty("vpvRetirementMarked", true);
+				w->setToolTip((w->toolTip().isEmpty() ? QString() : w->toolTip() + QStringLiteral("\n\n")) + RetirementTip(table, r));
+			}
 	}
 
 	bool PathwayIsVpv(const Host& host)
@@ -576,9 +706,11 @@ namespace Vpv
 
 		auto* tabs = new QTabWidget;
 		tabs->setObjectName(ObjectName(QStringLiteral("units")));
+		tabs->setStyleSheet(QStringLiteral("QTabWidget::pane { border: 0; background: transparent; }"));
 		for (const Unit& u : table.units)
 			tabs->addTab(MakeUnitPage(state, u), Q(u.name));
 		tabs->addTab(MakeExpertPage(state), QStringLiteral("Pipeline (expert)"));
+		tabs->addTab(MakeRetirementPage(state), QStringLiteral("Proposed retirement"));
 		contentLayout->addWidget(tabs);
 
 		QObject::connect(profile, qOverload<int>(&QComboBox::currentIndexChanged), profile, [state, profile](int index)
@@ -607,6 +739,8 @@ namespace Vpv
 				value == Q(t.pathwayDefault) ? QString() : value);
 			applyPathway(value != QStringLiteral("on"));
 		});
+		// Before the managed greying, so the Original pathway restores tooltips that keep the mark.
+		MarkRetirements(host);
 		state->RefreshAll();
 		applyPathway(PathwayIsVpv(host));
 		return root;

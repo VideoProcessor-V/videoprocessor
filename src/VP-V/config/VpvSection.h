@@ -48,6 +48,10 @@ namespace Vpv
 	// calls it itself; the host calls it again after it rebuilds upstream pages.
 	void ApplyManagedState(const Host& host, bool vpvOn);
 
+	// Appends "proposed retirement" (or "proposed: hide as diagnostic") to the tooltip of every
+	// upstream control of a guide section-12 candidate (coverage audit 2026-10-24). Idempotent.
+	void MarkRetirements(const Host& host);
+
 	// The pathway stored in [vpv] (default VP-V when absent).
 	bool PathwayIsVpv(const Host& host);
 

@@ -44,6 +44,7 @@ Config now has one **VP-V** page that holds everything VP adds.
 | **Fallbacks engaged** | The running VP's list of automatic downgrades, for example "Fallbacks engaged: capture GPU unpack (CPU 4:2:0 ...)", or "none". It is the same line as Ctrl+I and Ctrl+Alt+D. |
 | **Unit tabs** | Each tab has the unit's tier slider, the settings listed under it, its planned settings (greyed, "not yet implemented"), and its stages in pipeline order with the text each one shows if it falls back. |
 | **Pipeline (expert)** | For testing only: where the calibration LUT runs (`calibration_lut_stage`: libplacebo today, or VP's last colour step after Dynamic Drive), the module order (`pipeline_order`, checked with the renderer's own rules; an order it would reject is shown with the reason and not saved), and stages switched off entirely (`pipeline_slots_off`). |
+| **Proposed retirement** | The section-12 candidates below, by group, with where each control is and the value in use. The same note is added to each control's tooltip. Nothing is removed until you approve. Each unit tab also ends with "More settings of this unit", naming the pages that hold the rest (coverage audit: `docs/settings/coverage-audit.md`). |
 
 **Where VP-V keys live.**
 - The global VP-V keys are in a `[vpv]` section: `pipeline_original_pathway`, `pipeline_order`,

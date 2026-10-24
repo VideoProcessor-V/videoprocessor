@@ -30,6 +30,8 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 #include <vector>
 #include <cstring>
 #include <RendererConfigView.h>
+#include <RetiredSettings.h>
+#include <ToneMappingTuning.h>
 
 #include <QApplication>
 #include <QAccessible>
@@ -70,6 +72,7 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 #include <QPushButton>
 #include <QRect>
 #include <QScrollArea>
+#include <QTabWidget>
 #include <QScrollBar>
 #include <QSettings>
 #include <QShortcut>
@@ -81,6 +84,7 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 #include <QTableWidget>
 #include <QTabBar>
 #include <QTemporaryDir>
+#include <QTextStream>
 #include <QDoubleSpinBox>
 #include <QThread>
 #include <QTimer>
@@ -9242,33 +9246,10 @@ static std::set<std::string> RendererValidatedKeys()
     return keys;
 }
 
-void testEverySchemaKeyHasAConfigControl()
+// The schema sources the coverage test (and the settings inventory, --inventory) walk.
+struct CoverageSource { const char* name; std::vector<std::string> sections; std::vector<std::string> keys; };
+static std::vector<CoverageSource> CoverageSources()
 {
-    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
-    writeFixture(path, "[general]\nfullscreen: false\n[vprenderer]\nquality: high\n"
-        "[led_drive.Default]\nenabled: true\ncommand_source: compensate\n"
-        "[projector.Default]\nprotocol: barco_ascii\nport: COM1\n");
-    ConfigEditorWindow window(path, 0, true);
-    // Hunt 2 (2026-10-17): coverage is per section. A control named
-    // "config.<section>.<key>" covers <key> only for the schema whose section it
-    // belongs to, so a same-named control elsewhere (a shader's "curve", the
-    // Actions page's "enabled") cannot hide a missing one.
-    std::map<std::string, std::set<std::string>> controlSections; // key -> sections
-    for (QObject* object : window.findChildren<QObject*>())
-    {
-        const QString name = object->objectName();
-        if (!name.startsWith(QStringLiteral("config."))) continue;
-        QStringList parts = name.mid(7).split(QLatin1Char('.'));
-        // A key edited through several widgets names them "<key>.auto" / "<key>.value";
-        // a combo's reset button is "<key>.unset", a unit label "<key>.unit".
-        if (parts.size() > 2 && QStringList({ QStringLiteral("auto"), QStringLiteral("value"),
-            QStringLiteral("unset"), QStringLiteral("unit") }).contains(parts.last()))
-            parts.removeLast();
-        if (parts.size() < 2) continue;
-        const QString key = parts.takeLast();
-        controlSections[key.toStdString()].insert(parts.join(QLatin1Char('.')).toStdString());
-    }
-    struct Source { const char* name; std::vector<std::string> sections; std::vector<std::string> keys; };
     auto keysOf = [](const std::vector<ConfigSchema::KeyRule>& rules)
     {
         std::vector<std::string> keys;
@@ -9276,8 +9257,13 @@ void testEverySchemaKeyHasAConfigControl()
         return keys;
     };
     const std::set<std::string> rendererKeySet = RendererValidatedKeys();
-    require(rendererKeySet.size() > 100, "the renderer validators' keys were not found");
-    std::vector<Source> sources = {
+    std::vector<std::string> toneKeys;
+    for (const auto& spec : ToneMappingTuning::Specs())
+        if (!rendererKeySet.count(spec.key)) toneKeys.push_back(spec.key);
+    std::vector<std::string> retiredKeys;
+    for (const char* key : { "fix_scene_cooldown", "dejudder_picture_area", "dither_vectors_new_frame" })
+        if (RetiredSettings::FindKey(key) && !rendererKeySet.count(key)) retiredKeys.push_back(key);
+    return {
         { "led_drive", { "led_drive" }, keysOf(LedDrive::LedDriveRules()) },
         { "projector", { "projector" }, keysOf(LedDrive::ProjectorRules()) },
         { "general", { "general", "command_line" }, keysOf(MainConfigSchema::GeneralRules()) },
@@ -9297,7 +9283,15 @@ void testEverySchemaKeyHasAConfigControl()
         { "logging", { "logging" }, keysOf(MainConfigSchema::LoggingRules()) },
         // RendererProfileConfig's validators also own the [queue.*] and [lldv.*] profile groups.
         { "renderer", { "vprenderer", "queue", "lldv" }, std::vector<std::string>(rendererKeySet.begin(), rendererKeySet.end()) },
+        // Coverage audit 2026-10-24: the renderer also accepts keys through tables that the
+        // `key == "x"` scan cannot see: the tone-mapping tuning table and the retired keys.
+        { "renderer", { "vprenderer" }, toneKeys },
+        { "renderer", { "vprenderer" }, retiredKeys },
     };
+}
+
+static const std::map<std::string, const char*>& CoverageAllowList()
+{
     // Keys that intentionally have no control of their own, "<source>:<key>" with the
     // reason. Only retired, alias, legacy-location and diagnostic-only keys; a live
     // key never belongs here (hunt 2: subtitle_hold_ms / subtitle_near_bar_px were
@@ -9348,6 +9342,10 @@ void testEverySchemaKeyHasAConfigControl()
             "but never read at runtime" },
         // Renderer keys.
         { "renderer:deband", "legacy toggle; deband_strength has the control" },
+        // RetiredSettings.h (pruning 2026-10-17): accepted with any value and ignored.
+        { "renderer:fix_scene_cooldown", "retired (RetiredSettings.h): accepted with any value, ignored" },
+        { "renderer:dejudder_picture_area", "retired (RetiredSettings.h): accepted with any value, ignored" },
+        { "renderer:dither_vectors_new_frame", "retired (RetiredSettings.h): accepted with any value, ignored" },
         { "renderer:sdr_target_primaries", "legacy spelling of target_primaries" },
         { "renderer:calibration_lut_input_gamma", "retired: accepted but no longer controls LUT / HDR encoding "
             "(hdr_tone_map_target_gamma has the control)" },
@@ -9382,9 +9380,42 @@ void testEverySchemaKeyHasAConfigControl()
         { "renderer:pipeline_slots_off", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.pipeline_slots_off); also read from [vprenderer]" },
         { "renderer:calibration_lut_stage", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.calibration_lut_stage); also read from [vprenderer]" },
     };
+    return allowList;
+}
+
+void testEverySchemaKeyHasAConfigControl()
+{
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[general]\nfullscreen: false\n[vprenderer]\nquality: high\n"
+        "[led_drive.Default]\nenabled: true\ncommand_source: compensate\n"
+        "[projector.Default]\nprotocol: barco_ascii\nport: COM1\n");
+    ConfigEditorWindow window(path, 0, true);
+    // Hunt 2 (2026-10-17): coverage is per section. A control named
+    // "config.<section>.<key>" covers <key> only for the schema whose section it
+    // belongs to, so a same-named control elsewhere (a shader's "curve", the
+    // Actions page's "enabled") cannot hide a missing one.
+    std::map<std::string, std::set<std::string>> controlSections; // key -> sections
+    for (QObject* object : window.findChildren<QObject*>())
+    {
+        const QString name = object->objectName();
+        if (!name.startsWith(QStringLiteral("config."))) continue;
+        QStringList parts = name.mid(7).split(QLatin1Char('.'));
+        // A key edited through several widgets names them "<key>.auto" / "<key>.value";
+        // a combo's reset button is "<key>.unset", a unit label "<key>.unit".
+        if (parts.size() > 2 && QStringList({ QStringLiteral("auto"), QStringLiteral("value"),
+            QStringLiteral("unset"), QStringLiteral("unit") }).contains(parts.last()))
+            parts.removeLast();
+        if (parts.size() < 2) continue;
+        const QString key = parts.takeLast();
+        controlSections[key.toStdString()].insert(parts.join(QLatin1Char('.')).toStdString());
+    }
+    const std::vector<CoverageSource> sources = CoverageSources();
+    require(RendererValidatedKeys().size() > 100, "the renderer validators' keys were not found");
+    const std::map<std::string, const char*>& allowList = CoverageAllowList();
+
     std::set<std::string> usedAllowList;
     std::vector<std::string> missing;
-    for (const Source& source : sources)
+    for (const CoverageSource& source : sources)
         for (const std::string& key : source.keys)
         {
             const auto found = controlSections.find(key);
@@ -9413,6 +9444,109 @@ void testEverySchemaKeyHasAConfigControl()
     for (const auto& entry : allowList)
         if (!usedAllowList.count(entry.first)) stale += " " + entry.first;
     require(stale.empty(), ("Allow-list entries for keys no schema validates (remove them):" + stale).c_str());
+}
+
+// Settings coverage audit (docs/settings/coverage-audit.md; tools/settings_coverage_audit.py).
+// `VideoProcessorConfigTests.exe --inventory <file>` writes, as tab-separated lines:
+//   K <source> <sections> <key> <allow-list reason>   every schema key the coverage test walks;
+//   C <object> <class> <shown> <tooltip?> <enabled> <tooltip>   every config. / vpv. control, with
+//     what it shows when its key is unset (the default Config presents);
+//   S <action> <chord>   the compiled shortcut defaults.
+// It is not a test: it only reads, and exits 0 once the file is written.
+static QString inventoryField(QString text)
+{
+    text.replace(QLatin1Char('\t'), QLatin1Char(' ')).replace(QLatin1Char('\r'), QLatin1Char(' '))
+        .replace(QLatin1Char('\n'), QLatin1Char(' '));
+    return text.trimmed();
+}
+
+int writeSettingsInventory(const QString& outPath)
+{
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[general]\nfullscreen: false\n[vprenderer]\nquality: high\n"
+        "[led_drive.Default]\nenabled: true\ncommand_source: compensate\n"
+        "[projector.Default]\nprotocol: barco_ascii\nport: COM1\n");
+    ConfigEditorWindow window(path, 0, true);
+    QFile out(outPath);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) return 1;
+    QTextStream stream(&out);
+    stream.setEncoding(QStringConverter::Utf8);
+    const auto& allowList = CoverageAllowList();
+    for (const CoverageSource& source : CoverageSources())
+    {
+        QStringList sections;
+        for (const std::string& s : source.sections) sections << QString::fromStdString(s);
+        for (const std::string& key : source.keys)
+        {
+            const auto reason = allowList.find(std::string(source.name) + ":" + key);
+            stream << "K\t" << source.name << '\t' << sections.join(QLatin1Char('|')) << '\t'
+                << QString::fromStdString(key) << '\t'
+                << (reason == allowList.end() ? QString() : inventoryField(QString::fromUtf8(reason->second))) << '\n';
+        }
+    }
+    for (const char* key : { "pipeline_original_pathway", "pipeline_order", "pipeline_slots_off", "calibration_lut_stage" })
+        stream << "K\tvpv\tvpv\t" << key << "\t\n";
+    for (QWidget* w : window.findChildren<QWidget*>())
+    {
+        const QString name = w->objectName();
+        if (!name.startsWith(QStringLiteral("config.")) && !name.startsWith(QStringLiteral("vpv."))) continue;
+        QString shown;
+        if (auto* combo = qobject_cast<QComboBox*>(w)) shown = combo->currentText();
+        else if (auto* line = qobject_cast<QLineEdit*>(w)) shown = line->text().isEmpty() ? line->placeholderText() : line->text();
+        else if (auto* spin = qobject_cast<QAbstractSpinBox*>(w)) shown = spin->text();
+        else if (auto* slider = qobject_cast<QSlider*>(w)) shown = QString::number(slider->value());
+        else if (auto* button = qobject_cast<QAbstractButton*>(w))
+            shown = button->isCheckable() ? (button->isChecked() ? QStringLiteral("checked") : QStringLiteral("unchecked")) : QString();
+        else if (auto* label = qobject_cast<QLabel*>(w)) shown = label->text().left(80);
+        // Where it is: the page (createPage's viewport, "<title> settings") and the nearest tab,
+        // else the nearest card (createCard: a "card" frame with a "cardTitle" label).
+        QString page, tab;
+        for (QWidget* parent = w->parentWidget(); parent; parent = parent->parentWidget())
+        {
+            if (tab.isEmpty())
+            {
+                if (auto* tabs = qobject_cast<QTabWidget*>(parent))
+                {
+                    for (int i = 0; i < tabs->count(); ++i)
+                        if (tabs->widget(i) == w || tabs->widget(i)->isAncestorOf(w)) tab = tabs->tabText(i);
+                }
+                else if (parent->property("card").toBool())
+                {
+                    for (QLabel* title : parent->findChildren<QLabel*>(QString(), Qt::FindDirectChildrenOnly))
+                        if (title->property("cardTitle").toBool()) { tab = title->text(); break; }
+                }
+            }
+            if (parent->objectName() == QStringLiteral("pageViewport") && qobject_cast<QScrollArea*>(parent))
+            {
+                page = parent->accessibleName();
+                if (page.endsWith(QStringLiteral(" settings"))) page.chop(9);
+                break;
+            }
+        }
+        stream << "C\t" << name << '\t' << w->metaObject()->className() << '\t' << inventoryField(shown) << '\t'
+            << (w->toolTip().trimmed().isEmpty() ? 0 : 1) << '\t' << (w->isEnabled() ? 1 : 0) << '\t'
+            << inventoryField(w->toolTip()).left(240) << '\t' << inventoryField(page) << '\t' << inventoryField(tab) << '\n';
+    }
+    for (const ShortcutDefault& d : kShortcutDefaults)
+        stream << "S\t" << d.key << '\t' << d.chord << '\n';
+    stream.flush();
+    return stream.status() == QTextStream::Ok ? 0 : 1;
+}
+
+// `VideoProcessorConfigTests.exe --resave <file>` (tools/build_settings_preview.ps1): opens the file
+// in a test-mode editor (no VP contact) and applies Config's own load-time migrations, so the
+// settings preview's sandbox opens clean. Exit 0 = saved (or nothing to migrate), 1 = not saved.
+int resaveConfiguration(const QString& path)
+{
+    ConfigEditorWindow window(path, 0, true);
+    auto* apply = window.findChild<QPushButton*>(QStringLiteral("applyConfiguration"));
+    if (!apply) return 1;
+    if (!apply->isEnabled()) return 0;
+    apply->click();
+    QCoreApplication::processEvents();
+    auto* status = window.findChild<QLabel*>(QStringLiteral("configurationStatus"));
+    std::cout << "resave: " << (status ? status->text().toStdString() : std::string()) << std::endl;
+    return apply->isEnabled() ? 1 : 0;
 }
 
 void testHunt2StartupControlsWriteParserSpellings()
@@ -10290,6 +10424,20 @@ int main(int argc, char** argv)
         }
     }
     QApplication application(argc, argv);
+    // Not tests: the settings coverage inventory (--inventory <file>) and the preview's re-save (--resave <file>).
+    for (int i = 1; i + 1 < argc; ++i)
+        if (QString::fromLocal8Bit(argv[i]) == QStringLiteral("--inventory"))
+        {
+            QApplication::setStyle(VpTheme::CreateStyle());
+            application.setStyleSheet(VpTheme::StyleSheet());
+            return writeSettingsInventory(QString::fromLocal8Bit(argv[i + 1]));
+        }
+        else if (QString::fromLocal8Bit(argv[i]) == QStringLiteral("--resave"))
+        {
+            QApplication::setStyle(VpTheme::CreateStyle());
+            application.setStyleSheet(VpTheme::StyleSheet());
+            return resaveConfiguration(QString::fromLocal8Bit(argv[i + 1]));
+        }
     if (!qEnvironmentVariable("VP_CONFIG_REVIEW_IMAGES").isEmpty())
         QFontDatabase::addApplicationFont(QStringLiteral("C:/Windows/Fonts/segoeui.ttf"));
     QApplication::setStyle(VpTheme::CreateStyle());

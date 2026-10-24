@@ -5,9 +5,11 @@ contains:
 - the pathway switch (VP-V or Original);
 - the global tier;
 - the "Fallbacks engaged" line;
+- a "Proposed retirement" tab (the settings guide's section-12 candidates from `vpv-tiers.json` `proposed_retirement`; the same note is appended to each upstream control's tooltip by `MarkRetirements`; nothing is removed);
 - one tab per unit (Input, Motion, Repair, Scaling, Colour, Dynamic Drive, Output). Each tab has
   the unit's tier slider, the settings listed under it, the planned settings ("not yet
-  implemented") and the unit's stages with their fallback text.
+  implemented"), a "More settings of this unit" pointer (`more_settings`) and the unit's stages with
+  their fallback text.
 
 It is **self-contained** (owner 2026-10-24): it can be plugged into a fresh copy of upstream's
 `ConfigEditorWindow` at the M2 rebuild. ADR: `docs/decisions/ADR-0023-vpv-config-section.md`.
