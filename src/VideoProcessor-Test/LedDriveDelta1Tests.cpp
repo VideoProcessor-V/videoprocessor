@@ -5,8 +5,8 @@
 #include <MainConfigSchema.h>
 #include <VP-V/modules/drive/projector_control/LedController.h>
 #include <led/LedDriveModule.h>
-#include <led/LedLookahead.h>
-#include <led/LedMeasurement.h>
+#include <VP-V/modules/drive/led_measure/LedLookahead.h>
+#include <VP-V/modules/drive/led_measure/LedMeasurement.h>
 #include <led/LedRawTransfer.h>
 #include <VP-V/modules/drive/projector_control/LedShutdownRestore.h>
 #include <vprenderer/AlphaQueuePolicy.h>

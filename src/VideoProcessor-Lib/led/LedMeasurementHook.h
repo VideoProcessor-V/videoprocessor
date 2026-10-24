@@ -1,6 +1,6 @@
 #pragma once
 
-#include "LedMeasurement.h"
+#include <VP-V/modules/drive/led_measure/LedMeasurement.h>
 
 #include <libplacebo/gpu.h>
 #include <libplacebo/shaders/custom.h>

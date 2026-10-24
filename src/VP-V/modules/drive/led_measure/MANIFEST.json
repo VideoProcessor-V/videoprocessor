@@ -4,11 +4,13 @@
   "unit": "drive",
   "order": 220,
   "status": "built",
-  "code_location": "legacy",
+  "code_location": "partly migrated",
   "live_files": [
-    "src/VideoProcessor-Lib/led/LedMeasurement.cpp",
-    "src/VideoProcessor-Lib/led/LedMeasurementHook.cpp",
-    "src/VideoProcessor-Lib/led/LedLookahead.cpp"
+    "src/VP-V/modules/drive/led_measure/LedMeasurement.cpp",
+    "src/VP-V/modules/drive/led_measure/LedLookahead.cpp",
+    "src/VP-V/modules/drive/led_measure/LedMeasurement.h",
+    "src/VP-V/modules/drive/led_measure/LedLookahead.h",
+    "src/VideoProcessor-Lib/led/LedMeasurementHook.cpp"
   ],
   "components": {
     "files": {

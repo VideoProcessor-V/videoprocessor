@@ -53,11 +53,15 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **partly migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
-- `src/VideoProcessor-Lib/led/LedMeasurement.cpp`
+- `src/VP-V/modules/drive/led_measure/LedMeasurement.cpp`
+- `src/VP-V/modules/drive/led_measure/LedLookahead.cpp`
+- `src/VP-V/modules/drive/led_measure/LedMeasurement.h`
+- `src/VP-V/modules/drive/led_measure/LedLookahead.h`
 - `src/VideoProcessor-Lib/led/LedMeasurementHook.cpp`
-- `src/VideoProcessor-Lib/led/LedLookahead.cpp`
+
+`LedMeasurementHook.*` stays at the legacy path for now: `VideoProcessor-Test.vcxproj` (changed by active branches) compiles its `.cpp`.
 
 ## Migration directive
 

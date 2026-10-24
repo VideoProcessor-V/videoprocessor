@@ -1,7 +1,7 @@
 #include <pch.h>
 #include "LedLookahead.h"
 
-#include "LedDriveModule.h"
+#include <led/LedDriveModule.h>
 
 #include <algorithm>
 #include <cmath>

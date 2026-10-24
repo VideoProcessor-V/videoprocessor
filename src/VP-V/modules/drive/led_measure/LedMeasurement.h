@@ -1,7 +1,7 @@
 #pragma once
 
 #include <VP-V/modules/drive/projector_control/LedController.h>
-#include "LedDriveConfig.h"
+#include <led/LedDriveConfig.h>
 
 #include <algorithm>
 #include <cmath>

@@ -4,8 +4,8 @@
 #include <VP-V/modules/drive/projector_control/LedController.h>
 #include <led/LedDriveConfig.h>
 #include <led/LedDriveModule.h>
-#include <led/LedLookahead.h>
-#include <led/LedMeasurement.h>
+#include <VP-V/modules/drive/led_measure/LedLookahead.h>
+#include <VP-V/modules/drive/led_measure/LedMeasurement.h>
 
 #include "LedDriveTestSupport.h"
 

@@ -5,8 +5,8 @@
 #include <VP-V/modules/drive/projector_control/LedClock.h>
 #include <VP-V/modules/drive/projector_control/LedController.h>
 #include "LedDriveConfig.h"
-#include "LedLookahead.h"
-#include "LedMeasurement.h"
+#include <VP-V/modules/drive/led_measure/LedLookahead.h>
+#include <VP-V/modules/drive/led_measure/LedMeasurement.h>
 #include <VP-V/modules/drive/projector_control/ProjectorDriver.h>
 
 #include <condition_variable>

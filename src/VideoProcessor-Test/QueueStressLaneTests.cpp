@@ -10,7 +10,7 @@
 #include "QueueStressHarness.h"
 
 #include <ContentIntentObserver.h>
-#include <led/LedMeasurement.h>
+#include <VP-V/modules/drive/led_measure/LedMeasurement.h>
 #include <vprenderer/SourceResolutionMonitor.h>
 #include <SourceResolutionDetector.h>
 
