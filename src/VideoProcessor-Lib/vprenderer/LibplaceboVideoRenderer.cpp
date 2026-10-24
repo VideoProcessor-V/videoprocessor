@@ -79,6 +79,7 @@
 #include <VP-V/core/SlotRegistry.h>
 #include <VP-V/core/DelayBudgetLadder.h>   // the delay budget's hold (ADR-0020)
 #include <VP-V/core/EntranceStages.h>
+#include <VP-V/core/EntranceEpoch.h>
 #include <VP-V/core/OutputHookOrder.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
 #include <vprenderer/DownscaleLight.h>
@@ -1253,6 +1254,7 @@ namespace
 		std::string pipelineOrder;
 		std::string pipelineSlotsOff;
 		std::string calibrationLutStage = "libplacebo";
+		std::string pipelineSettingsProblems;   // refused values, shown under "Fallbacks engaged" (audit item 4)
 		// Kernel-matched re-base (docs/VP-stage12-build-plan.md; owner 2026-10-16: optimise
 		// 1080p): the identified player kernel's inverse for an exact 2:1 luma re-base.
 		bool rebaseKernelMatch = true;
@@ -3508,42 +3510,58 @@ namespace
 
 	// ADR-0019: the Original pathway baseline. Every VP addition is switched off and every slot
 	// that exists upstream runs in its upstream form, so the renderer reproduces Bill's original
-	// pathway (the overrides mirror docs/design/slots.json "original_pathway").
+	// pathway. The list is src/VP-V/core/OriginalPathway.h (verified against bill-v1.4.02); each
+	// line here names its key, and the drift check fails when the two disagree.
 	static void ApplyOriginalPathwaySettings(RendererSettings& settings)
 	{
-		// Verified against bill-v1.4.02 (docs/design/original-pathway-verified.md).
-		settings.capturePath = "standard";            // input.capture: the CPU formatters
-		settings.captureUpload = "render";            // upstream uploads on the render thread
-		settings.nativeRgbIngest = false;
-		settings.dvTunnelGpuUnpack = false;           // input.signal
-		settings.dvTunnelFixes = false;
-		settings.dvTrims = false;
-		settings.queueTimingFixes = false;            // input.queue_timing
-		settings.pulldownFixes = false;
-		settings.sourceResolution = "native";         // input.source_analysis + scaling.rebase
-		settings.rebaseKernelMatch = false;
-		settings.sourceCodingFixes = false;
-		settings.debandVp = "off";                    // repair.deband
-		settings.debandVpExclusive = false;
-		settings.detailPulseStabilise = false;        // repair.texture_restore
-		settings.textureRestore = false;
-		settings.dejudderStrength = 0.0;              // motion.*
-		settings.dejudderStrengthEven = 0.0;
-		settings.interpolation = InterpolationPolicy::Mode::Off;
-		settings.interpolationFillGaps = false;
-		settings.occlusionMask = false;
-		settings.opticalFlow = false;
-		settings.motionAheadFrames = 0;               // no motion look-ahead (the matcher stops at strength 0)
-		settings.adaptiveDownscale = false;           // scaling.output: libplacebo's scalers
-		settings.downscaleLight = "linear";           // libplacebo's default light
-		settings.adaptiveUpscale = false;
-		settings.preserveExtendedRange = false;       // colour.extended_range
-		settings.extendedRangeMoreCases = false;
-		settings.sdrTone.knee = false;                // colour.sdr_tone_shape
-		settings.temporalDither = "libplacebo";       // output.dither
-		settings.renderAhead = false;                 // output.presentation
-		settings.calibrationLutStage = "libplacebo";  // output.calibration_lut: as upstream
-		settings.pipelineOrder.clear();
+		settings.capturePath = "standard";                 // key=capture_path
+		settings.captureUpload = "render";                 // key=capture_upload
+		settings.nativeRgbIngest = false;                  // key=native_rgb_ingest
+		settings.dvTunnelGpuUnpack = false;                // key=dv_tunnel_gpu_unpack
+		settings.dvTunnelFixes = false;                    // key=dv_tunnel_fixes
+		settings.dvTrims = false;                          // key=dv_trims
+		settings.queueTimingFixes = false;                 // key=queue_timing_fixes
+		settings.pulldownFixes = false;                    // key=pulldown_fixes
+		settings.timingContinuityFixes = false;            // key=timing_continuity_fixes
+		settings.cadenceClassFixes = false;                // key=cadence_class_fixes
+		settings.generalRateFixes = false;                 // key=general_rate_fixes
+		settings.efficiencyFixes = false;                  // key=efficiency_fixes
+		settings.sourceResolution = "native";              // key=source_resolution
+		settings.rebaseKernelMatch = false;                // key=rebase_kernel_match
+		settings.sourceCodingFixes = false;                // key=source_coding_fixes
+		settings.sourceResolutionLatchFixes = false;       // key=source_resolution_latch_fixes
+		settings.sourceResolutionCutFixes = false;         // key=source_resolution_cut_fixes
+		settings.debandVp = "off";                         // key=deband_vp
+		settings.debandVpExclusive = false;                // key=deband_vp_exclusive
+		settings.detailPulseStabilise = false;             // key=detail_pulse_stabilise
+		settings.textureRestore = false;                   // key=texture_restore
+		settings.dejudderStrength = 0.0;                   // key=dejudder_strength
+		settings.dejudderStrengthEven = 0.0;               // key=dejudder_strength_even
+		settings.interpolation = InterpolationPolicy::Mode::Off;   // key=interpolation
+		settings.interpolationFillGaps = false;            // key=interpolation_fill_gaps
+		settings.occlusionMask = false;                    // key=occlusion_mask
+		settings.opticalFlow = false;                      // key=optical_flow
+		settings.motionAheadFrames = 0;                    // key=motion_ahead_frames
+		settings.motionHistoryFixes = false;               // key=motion_history_fixes
+		settings.dejudderSourceWarpCatmull = false;        // key=dejudder_source_warp_filter
+		settings.nlsSamplingCatmull = false;               // key=nls_sampling
+		settings.adaptiveDownscale = false;                // key=adaptive_downscale
+		settings.adaptiveUpscale = false;                  // key=adaptive_upscale
+		settings.ssimBitrateAware = false;                 // key=ssim_bitrate_aware
+		settings.downscaleLight = "linear";                // key=downscale_light
+		settings.fboFloat32 = 0;                           // key=fbo_float32
+		settings.preserveExtendedRange = false;            // key=preserve_extended_range
+		settings.extendedRangeMoreCases = false;           // key=extended_range_more_cases
+		settings.sdrTone.knee = false;                     // key=sdr_tone_shape
+		settings.intentContent = false;                    // key=intent_content
+		settings.intentMotion = false;                     // key=intent_motion
+		settings.intentDisplay = false;                    // key=intent_display
+		settings.intentBlack = BlackIntentMode::Off;       // key=intent_black
+		settings.ambientAdapt = false;                     // key=ambient_adapt
+		settings.temporalDither = "libplacebo";            // key=temporal_dither
+		settings.renderAhead = false;                      // key=render_ahead
+		settings.calibrationLutStage = "libplacebo";       // key=calibration_lut_stage
+		settings.pipelineOrder.clear();                    // the designed order
 	}
 
 	// Pipeline skeleton settings (global: [vpv] first, then [vprenderer]); see RendererSettings.
@@ -3562,8 +3580,7 @@ namespace
 			if (value == "on" || value == "off")
 				settings.pipelineOriginalPathway = value == "on";
 			else
-				DebugLog::Log("pipeline_original_pathway '%s' must be on or off; keeping %s", raw.c_str(),
-					settings.pipelineOriginalPathway ? "on" : "off");
+				settings.pipelineSettingsProblems += "pipeline_original_pathway '" + raw + "' (on|off); ";
 		}
 		if (TryGetPipelineString(config, "pipeline_order", raw))
 			settings.pipelineOrder = ConfigFile::Trim(raw);
@@ -3575,8 +3592,7 @@ namespace
 			if (value == "libplacebo" || value == "vp")
 				settings.calibrationLutStage = value;
 			else
-				DebugLog::Log("calibration_lut_stage '%s' must be libplacebo or vp; keeping %s", raw.c_str(),
-					settings.calibrationLutStage.c_str());
+				settings.pipelineSettingsProblems += "calibration_lut_stage '" + raw + "' (libplacebo|vp); ";
 		}
 		if (settings.pipelineOriginalPathway)
 			ApplyOriginalPathwaySettings(settings);
@@ -5574,27 +5590,28 @@ struct LibplaceboVideoRenderer::Impl
 	uint64_t entranceGeneration = 1;
 	unsigned long long entranceRuns = 0, entranceReuses = 0;
 
-	static uint64_t EntranceMix(uint64_t h, uint64_t v) { return (h ^ v) * 0x100000001B3ull; }
-	static uint64_t EntranceBits(double v) { uint64_t b = 0; std::memcpy(&b, &v, sizeof(b)); return b; }
-	uint64_t EntranceEpoch(const pl_frame& source) const
+	// Everything a cached entrance result depends on (VP-V/core/EntranceEpoch.h; audit blocker 1):
+	// the frame itself (planes, crop, representation, colour), every stage's parameters, the
+	// detail stages' vector fields and bitrate quality, and the generation moved by any other use
+	// of the modules' output textures.
+	uint64_t EntranceEpochFor(const pl_frame& source) const
 	{
-		uint64_t h = 0xCBF29CE484222325ull;
-		h = EntranceMix(h, entranceGeneration);
-		h = EntranceMix(h, static_cast<uint64_t>(source.num_planes));
-		for (int i = 0; i < source.num_planes && i < PL_MAX_PLANES; ++i)
-			h = EntranceMix(h, reinterpret_cast<uintptr_t>(source.planes[i].texture));
-		h = EntranceMix(h, EntranceBits(rebaseFactor));
-		h = EntranceMix(h, EntranceBits(rebaseFactorX));
-		h = EntranceMix(h, EntranceBits(debandThreshold));
-		h = EntranceMix(h, EntranceBits(vpDebandParams.thresholdCodes));
-		h = EntranceMix(h, EntranceBits(vpDebandParams.radiusScale));
-		h = EntranceMix(h, reinterpret_cast<uintptr_t>(vpDebandParams.field));
-		h = EntranceMix(h, reinterpret_cast<uintptr_t>(vpDebandParams.grainError));
-		h = EntranceMix(h, vpDebandParams.sequence);
-		h = EntranceMix(h, (detailPulseRuns ? 1u : 0u) | (textureRestoreRuns ? 2u : 0u));
-		h = EntranceMix(h, detailPulseParams.sequence);
-		h = EntranceMix(h, textureRestoreParams.sequence);
-		return h;
+		EntranceEpoch::Key key;
+		key.Add(entranceGeneration);
+		EntranceEpoch::AddFrame(key, source);
+		key.Add(rebaseFactor).Add(rebaseFactorX);
+		key.Add(debandThreshold).Add(vpDebandParams.thresholdCodes).Add(vpDebandParams.radiusScale);
+		key.Add(static_cast<const void*>(vpDebandParams.field)).Add(static_cast<const void*>(vpDebandParams.grainError));
+		key.Add(vpDebandParams.fieldScale).Add(vpDebandParams.fieldScaleX).Add(vpDebandParams.sequence);
+		key.Add((detailPulseRuns ? 1 : 0) | (textureRestoreRuns ? 2 : 0));
+		key.Add(detailPulseParams.sequence).Add(static_cast<const void*>(detailPulseParams.field)).Add(detailPulseParams.bitrateQuality)
+			.Add(detailPulseParams.fieldScale).Add(detailPulseParams.fieldScaleX).Add(detailPulseParams.planeLines).Add(detailPulseParams.cap);
+		key.Add(textureRestoreParams.sequence).Add(static_cast<const void*>(textureRestoreParams.field)).Add(textureRestoreParams.bitrateQuality)
+			.Add(textureRestoreParams.fieldScale).Add(textureRestoreParams.fieldScaleX).Add(textureRestoreParams.planeLines).Add(textureRestoreParams.cap);
+		// The registry's entrance (slot switches, order) changes the result as well.
+		for (PipelineSlots::Id id : pipelineSlots.ActiveEntrance())
+			key.Add(static_cast<int>(id));
+		return key.Value();
 	}
 
 	void EnsureRebaseDispatch()
@@ -5625,7 +5642,7 @@ struct LibplaceboVideoRenderer::Impl
 	void RunMainEntrance(EntranceRun& run, pl_frame& frame)
 	{
 		const bool cacheable = !run.phasePicture && run.sequence != 0;
-		const uint64_t epoch = cacheable ? EntranceEpoch(frame) : 0;
+		const uint64_t epoch = cacheable ? EntranceEpochFor(frame) : 0;
 		if (cacheable)
 			if (const pl_frame* hit = entranceCache.Find(run.sequence, epoch))
 			{
@@ -5662,6 +5679,11 @@ struct LibplaceboVideoRenderer::Impl
 					{
 						rebaseFormatNoteLogged = sourceRebase.FormatNote();
 						DebugLog::Log("Re-base: %s", rebaseFormatNoteLogged.c_str());
+						// A float (fp16) intermediate instead of r16 keeps ~11 bits near white: visible.
+						if (rebaseFormatNoteLogged.empty())
+							ReleaseFallback("re-base precision");
+						else
+							EngageFallback("re-base precision", rebaseFormatNoteLogged);
 					}
 				}
 				else if (sourceRebase.Failures() == 1)
@@ -7229,6 +7251,7 @@ struct LibplaceboVideoRenderer::Impl
 	// output.calibration_lut in VP's output hooks (calibration_lut_stage = vp; R1).
 	CalibrationLutStage::Hook calibrationLutStage;
 	bool calibrationLutStageLogged = false;
+	bool calibrationLutStageFailed = false;   // the VP stage failed once: libplacebo's target LUT for the session
 	std::vector<std::string> activeCustomShaders;
 	std::atomic<bool> lowLatencyQueueActive{ false };
 	// docs/VP-nvof-ahead.md: source frames queued after the current one (the render
@@ -7269,7 +7292,8 @@ struct LibplaceboVideoRenderer::Impl
 		PipelineSlots::Registry next;
 		if (settings.pipelineOriginalPathway)
 			next.ApplyOriginalPathway();
-		std::string unknown;
+		// Every refused value is visible (owner rule: no silent fallbacks), never log-only.
+		std::string problems = settings.pipelineSettingsProblems;
 		std::string token;
 		auto flush = [&]()
 		{
@@ -7277,7 +7301,9 @@ struct LibplaceboVideoRenderer::Impl
 				return;
 			const PipelineSlots::Id id = PipelineSlots::FromName(token.c_str());
 			if (id == PipelineSlots::Id::Count)
-				unknown += (unknown.empty() ? "" : ", ") + token;
+				problems += "pipeline_slots_off: unknown slot '" + token + "'; ";
+			else if (!PipelineSlots::SwitchHonoured(id))
+				problems += "pipeline_slots_off: " + token + " has no slot switch yet; ";
 			else
 				next.SetEnabled(id, false);
 			token.clear();
@@ -7290,13 +7316,19 @@ struct LibplaceboVideoRenderer::Impl
 				token += ch;
 		}
 		flush();
-		if (!unknown.empty())
-			DebugLog::Log("pipeline_slots_off: unknown slot(s) %s ignored", unknown.c_str());
+		if (!problems.empty())
+		{
+			problems.resize(problems.size() - 2);   // the last "; "
+			EngageFallback("pipeline settings", "ignored: " + problems);
+		}
+		else
+			ReleaseFallback("pipeline settings");
 		std::string reason;
 		if (!settings.pipelineOriginalPathway && !next.SetOrderByNames(settings.pipelineOrder, &reason))
 			EngageFallback("pipeline order", "designed order kept: " + reason);   // an invalid order never runs
 		else
 			ReleaseFallback("pipeline order");
+		(void)next.ActiveEntrance();   // warm the kept list here, so the render thread only reads it
 		pipelineSlots = next;
 		entranceCache.Invalidate();
 		std::string state = settings.pipelineOriginalPathway ? "Original pathway (every VP addition off)" :
@@ -8137,6 +8169,8 @@ struct LibplaceboVideoRenderer::Impl
 				debander.Release(d3d11->gpu);       // and the debander's planes
 				detailPulse.Release(d3d11->gpu);    // detail pulse stabilisation's history
 				textureRestore.Release(d3d11->gpu); // and texture restore's
+				entranceCache.Invalidate();         // the cached entrance result pointed at those textures
+				++entranceGeneration;
 				crossfadeMixer.Release(d3d11->gpu); // hunt 3 F1: the crossfade's textures
 				if (rebaseDispatch) pl_dispatch_destroy(&rebaseDispatch);
 				extendedRangeHooks.Release();   // Stage 10: its textures
@@ -11081,7 +11115,7 @@ struct LibplaceboVideoRenderer::Impl
 		// LED compensation, instead of libplacebo's target LUT (which runs before VP's hooks).
 		// The Original pathway keeps libplacebo's target LUT, as upstream did.
 		if (activeSettings.calibrationLutStage == "vp" && !pipelineSlots.OriginalPathway() &&
-			pipelineSlots.Runs(PipelineSlots::Id::OutputCalibrationLut))
+			pipelineSlots.Runs(PipelineSlots::Id::OutputCalibrationLut) && !calibrationLutStageFailed)
 		{
 			calibrationLutStage.SetLut(displayLut);
 			displayLutStatus = "Active (VP stage): " + LutFileName(displayLutPath);
@@ -19059,8 +19093,14 @@ struct LibplaceboVideoRenderer::Impl
 		image.crop.y0 = 0.0f;
 		image.crop.x1 = static_cast<float>(width);
 		image.crop.y1 = static_cast<float>(height);
+		// Chroma siting (research/chroma 2026-10-24): the legacy CPU path that turns a capture's
+		// 4:2:2 or RGB into P010 keeps the EVEN chroma lines only, so its 4:2:0 chroma is TOP-LEFT
+		// sited; decoded file frames (NV12/P010/P016) and the 4:2:2 uploads are LEFT-sited.
+		const bool decodedFileFormat = state.videoFrameEncoding == VideoFrameEncoding::NV12 ||
+			state.videoFrameEncoding == VideoFrameEncoding::P010 || state.videoFrameEncoding == VideoFrameEncoding::P016;
 		if (!nativeRgbUpload && !rgbRawUpload)
-			pl_frame_set_chroma_location(&image, PL_CHROMA_LEFT);
+			pl_frame_set_chroma_location(&image, !lossless422Upload && !decodedFileFormat && !pipelineSlots.OriginalPathway() ?
+				PL_CHROMA_TOP_LEFT : PL_CHROMA_LEFT);   // the Original pathway keeps upstream's tag (ADR-0019)
 
         if(temporalRenderer.Active()) {
             if(!temporalRenderer.Capture(d3d11->gpu,image,sourceSequence))temporalRenderer.Bypass(temporalRenderer.status);
@@ -24218,6 +24258,19 @@ struct LibplaceboVideoRenderer::Impl
                     extendedRangeHookFailed = true;
                     DebugLog::Log("Extended range (BTB/WTW): WARNING libplacebo disabled its hook; off until VP restarts (today's path)");
                 }
+            // output.calibration_lut (VP stage, R1): a disabled or failing hook reverts to libplacebo's
+            // target LUT for the rest of the session, visibly (skeleton audit item 5).
+            if (!calibrationLutStageFailed && calibrationLutStage.Lut())
+            {
+                bool disabled = calibrationLutStage.Failures() > 0;
+                for (int i = 0; !disabled && i < hookErrors.num_disabled_hooks; ++i)
+                    disabled = hookErrors.disabled_hooks[i] == calibrationLutStage.Get()->signature;
+                if (disabled)
+                {
+                    calibrationLutStageFailed = true;
+                    EngageFallback("calibration LUT", "the VP stage failed; libplacebo's target LUT (before the LED compensation)");
+                }
+            }
             for (int i = 0; led && !ledMeasurementDisabledLogged && i < hookErrors.num_disabled_hooks; ++i)
                 if (hookErrors.disabled_hooks[i] == ledMeasurement.Hook()->signature)
                 {
@@ -26025,7 +26078,20 @@ void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz)
 			m_impl->ReleaseFallback("delay budget");
 		else
 			m_impl->EngageFallback("delay budget", "too short for 2 queued frames at this rate; frame-count queue");
+		// The frame fallback ladder (owner 2026-10-20/24): below the design depth every look-ahead
+		// consumer uses what is queued (shorter look-ahead, never waiting, never adding delay);
+		// visible, not silent.
+		if (active && plan.degraded)
+		{
+			char why[96] = {};
+			sprintf_s(why, "%d of %d queued frames (delay budget %d ms)", plan.queueFrames, DelayBudget::kDesignDepth, budgetMs);
+			m_impl->EngageFallback("look-ahead", why);
+		}
+		else
+			m_impl->ReleaseFallback("look-ahead");
 	}
+	else if (m_impl)
+		m_impl->ReleaseFallback("look-ahead");
 	char state[192] = {};
 	if (active)
 		sprintf_s(state, "%d ms at %.3f Hz: %d look-ahead frames, hold %.1f ms = target %zu + %.2f frames, padding %.1f ms",
@@ -26594,8 +26660,11 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 		m_impl->ledWtwPassthrough.store(m_ledWtwPassthrough, std::memory_order_release);
 		m_impl->ledBtbPassthrough.store(m_ledBtbPassthrough, std::memory_order_release);
 	}
+	// VP-V: slot drive.projector_control (off in the Original pathway, ADR-0019, or at slot level):
+	// the RS-232 LED/CNTR drive is not started.
+	const bool projectorAllowed = !m_impl || m_impl->pipelineSlots.Runs(PipelineSlots::Id::DriveProjectorControl);
 	if (signature == m_ledDriveSignature && (m_ledDrive != nullptr) ==
-		(valid && LedDrive::ReadLedDriveConfig(configuration).enabled))
+		(valid && projectorAllowed && LedDrive::ReadLedDriveConfig(configuration).enabled))
 		return;
 	// A broken LED profile never stops VP: it is left out (built-in values
 	// plus the main settings) and said once per change.
@@ -26631,9 +26700,10 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 		return;
 	}
 	const LedDrive::LedDriveConfig led = LedDrive::ReadLedDriveConfig(configuration);
-	if (!led.enabled)
+	if (!led.enabled || !projectorAllowed)
 	{
-		if (previous) DebugLog::Log("Dynamic Drive: disabled");
+		if (previous || (led.enabled && !projectorAllowed))
+			DebugLog::Log("Dynamic Drive: disabled%s", projectorAllowed ? "" : " (slot drive.projector_control off: Original pathway or pipeline_slots_off)");
 		return;
 	}
 	// VP Renderer filter (2026-10-17): a drive the previous file's renderer

@@ -43,26 +43,37 @@ namespace OutputHookOrder
 	};
 
 	// Rank of a tagged hook. Gaps leave the slot orders (200..250) meaningful.
+	// The ranks of the hooks that are not slots, around the slots' own orders (the PRE_OUTPUT
+	// slots use their table order, 200..240). Named so the order reads as the design's list.
+	namespace Ranks
+	{
+		constexpr int kOtherStages = 0;          // scaler / geometry hooks: their own libplacebo stages
+		constexpr int kEncodingRepair = 100;     // first, before any PRE_OUTPUT slot
+		constexpr int kUserPreOutput = 245;      // after the black level (240)
+		constexpr int kCalibrationLut = 247;     // the last colour op
+		constexpr int kDejudderCache = 248;      // keeps the LUT-mapped picture for the extras
+		constexpr int kOutputStage = 300;        // other OUTPUT-stage hooks
+		constexpr int kQuantiser = 400;          // the output quantiser, always last
+	}
+
 	template <class Hook>
 	int Rank(const Tagged<Hook>& t)
 	{
 		using PipelineSlots::Id;
 		switch (t.kind)
 		{
-		case Kind::Other: return 0;
-		case Kind::EncodingRepair: return 100;
+		case Kind::Other: return Ranks::kOtherStages;
+		case Kind::EncodingRepair: return Ranks::kEncodingRepair;
 		case Kind::Slot:
-		{
-			const int order = PipelineSlots::Get(t.slot).order;
-			// The calibration LUT is the last colour op: after the user shaders and the cache.
-			return t.slot == Id::OutputCalibrationLut ? 247 : order == 260 ? 400 : order;
+			if (t.slot == Id::OutputCalibrationLut) return Ranks::kCalibrationLut;
+			if (t.slot == Id::OutputDither) return Ranks::kQuantiser;
+			return PipelineSlots::Get(t.slot).order;
+		case Kind::UserPreOutput: return Ranks::kUserPreOutput;
+		case Kind::DejudderCache: return Ranks::kDejudderCache;
+		case Kind::OutputStage: return Ranks::kOutputStage;
+		case Kind::Quantiser: return Ranks::kQuantiser;
 		}
-		case Kind::UserPreOutput: return 245;
-		case Kind::DejudderCache: return 248;
-		case Kind::OutputStage: return 300;
-		case Kind::Quantiser: return 400;
-		}
-		return 0;
+		return Ranks::kOtherStages;
 	}
 
 	// The hooks in the corrected order (stable: equal ranks keep the collection order).

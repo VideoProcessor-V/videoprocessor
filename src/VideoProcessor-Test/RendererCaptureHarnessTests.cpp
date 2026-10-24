@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <VP-V/core/DelayBudgetLadder.h>   // VP-V delay budget (the ladder test)
 #include <FileFrameTiming.h>
 #include <wincodec.h>
 #include <atlbase.h>
@@ -297,6 +298,11 @@ namespace
 	// The queue target (0: 4 for film, 3 otherwise) and, as the app does, the profile snapshot
 	// applied before Build (the queue profile reaches the renderer that way).
 	size_t g_harnessQueueTarget = 0;
+	// VP-V delay budget (ADR-0020): the total delay the app sends (SetQueueDelayBudget); 0 = none.
+	int g_harnessDelayBudgetMs = 0;
+	// Another renderer DLL to run instead of this build's (the byte-identity test against the r6
+	// baseline build); empty = this build's.
+	std::string g_harnessRendererDll;
 	// Bug hunt 3 F7: the active-picture look-ahead given to the renderer after Build, as the
 	// app does (-1: not called; the renderer's own 0). g_harnessLookaheadAutomatic: told as automatic.
 	int g_harnessActivePictureLookahead = -1;
@@ -352,6 +358,8 @@ namespace
 		int width = 1920, height = 1080;
 		int windowWidth = 640, windowHeight = 360;
 		size_t queueTarget = 0;
+		int delayBudgetMs = 0;
+		std::string rendererDll;
 		int activePictureLookahead = -1;
 		bool lookaheadAutomatic = false;
 		bool applySnapshot = false;
@@ -375,6 +383,8 @@ namespace
 		g.windowWidth = g_harnessWindowWidth;
 		g.windowHeight = g_harnessWindowHeight;
 		g.queueTarget = g_harnessQueueTarget;
+		g.delayBudgetMs = g_harnessDelayBudgetMs;
+		g.rendererDll = g_harnessRendererDll;
 		g.activePictureLookahead = g_harnessActivePictureLookahead;
 		g.lookaheadAutomatic = g_harnessLookaheadAutomatic;
 		g.applySnapshot = g_harnessApplySnapshot;
@@ -398,6 +408,8 @@ namespace
 		g_harnessWindowWidth = g.windowWidth;
 		g_harnessWindowHeight = g.windowHeight;
 		g_harnessQueueTarget = g.queueTarget;
+		g_harnessDelayBudgetMs = g.delayBudgetMs;
+		g_harnessRendererDll = g.rendererDll;
 		g_harnessActivePictureLookahead = g.activePictureLookahead;
 		g_harnessLookaheadAutomatic = g.lookaheadAutomatic;
 		g_harnessApplySnapshot = g.applySnapshot;
@@ -635,8 +647,8 @@ namespace
 		// r6 fix 5: VP_TEST_HARNESS_BETA=1 runs the Beta flavour (libplacebo Beta) instead.
 		const bool betaFlavour = [] { char* v = nullptr; size_t n = 0; const bool on = _dupenv_s(&v, &n,
 			"VP_TEST_HARNESS_BETA") == 0 && v && v[0] == '1'; std::free(v); return on; }();
-		const std::string dllPath = folder + (betaFlavour ? "vprenderer-beta\\VideoProcessorVPRendererBeta.dll" :
-			"vprenderer\\VideoProcessorVPRenderer.dll");
+		const std::string dllPath = !g_harnessRendererDll.empty() ? g_harnessRendererDll :
+			folder + (betaFlavour ? "vprenderer-beta\\VideoProcessorVPRendererBeta.dll" : "vprenderer\\VideoProcessorVPRenderer.dll");
 		HMODULE dll = LoadLibraryExA(dllPath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
 		Assert::IsNotNull(dll, (L"cannot load " + std::wstring(dllPath.begin(), dllPath.end())).c_str());
 		using Create = IVideoRenderer* (__cdecl*)(IRendererCallback*, uint32_t, HWND, ITimingClock*, bool, size_t,
@@ -734,6 +746,8 @@ namespace
 					renderer->Build();
 			}
 			renderer->SetQueueFramePolicy(2, g_harnessQueueTarget ? g_harnessQueueTarget : (film ? 4 : 3), true);
+			if (g_harnessDelayBudgetMs > 0)   // VP-V delay budget (plugin API 42; never called on an older DLL)
+				renderer->SetQueueDelayBudget(g_harnessDelayBudgetMs);
 			if (g_harnessActivePictureLookahead >= 0)
 			{
 				renderer->SetActivePictureLookaheadAutomatic(g_harnessLookaheadAutomatic);
@@ -1212,6 +1226,159 @@ namespace Tests
 				Assert::IsTrue(r.presented, (wname + L": frames presented\n" + r.Tail()).c_str());
 			}
 			_putenv_s("VP_TEST_HARNESS_BETA", "");
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(ByteIdenticalToTheR6BaselineWithThePlaceholdersOff)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(ByteIdenticalToTheR6BaselineWithThePlaceholdersOff)
+		{
+			const HarnessScope harnessScope;
+			// The skeleton's promise (ADR-0015): with every placeholder slot off (the default) the
+			// rendered output is byte-identical to the build before the skeleton (fix/r6-baseline).
+			// VP_TEST_BASELINE_RENDERER_DLL names that build's VideoProcessorVPRenderer.dll; the same
+			// still picture is rendered by both DLLs and the rendered-output captures' raw R10 hashes
+			// compared (dither and deband off, so the picture is deterministic).
+			if (!RequireHardwareOrSkip("ByteIdenticalToTheR6BaselineWithThePlaceholdersOff")) return;
+			char* value = nullptr;
+			size_t length = 0;
+			const std::string baseline = _dupenv_s(&value, &length, "VP_TEST_BASELINE_RENDERER_DLL") == 0 && value ? value : "";
+			std::free(value);
+			if (baseline.empty() || GetFileAttributesA(baseline.c_str()) == INVALID_FILE_ATTRIBUTES)
+			{
+				Logger::WriteMessage("SKIP-NO-BASELINE ByteIdenticalToTheR6BaselineWithThePlaceholdersOff (set VP_TEST_BASELINE_RENDERER_DLL)\n");
+				return;
+			}
+			wchar_t tempPath[MAX_PATH] = {};
+			GetTempPathW(MAX_PATH, tempPath);
+			const std::wstring shots = std::wstring(tempPath) + L"vp-byte-identity";
+			CreateDirectoryW(shots.c_str(), nullptr);
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			FramePlan plan;
+			plan.captureAtSeconds = 2.5;
+			plan.step = [](int) { return FrameStep{ true, 0, 0 }; };
+			const std::string extra = "[vprenderer.Default]\ndithering: off\ndeband: off\n";
+			struct Case { const char* name; VideoFrameEncoding encoding; const char* path; bool film; };
+			const Case cases[] = { { "v210 gpu 23.976", VideoFrameEncoding::V210, "gpu", true },
+				{ "v210 standard 59.94", VideoFrameEncoding::V210, "standard", false } };
+			std::string failures;
+			for (const Case& c : cases)
+			{
+				g_harnessRendererDll.clear();
+				const RunResult ours = Run(c.encoding, c.path, 3.5, c.film, extra, false, &plan);
+				g_harnessRendererDll = baseline;
+				const RunResult theirs = Run(c.encoding, c.path, 3.5, c.film, extra, false, &plan);
+				g_harnessRendererDll.clear();
+				const std::string a = CaptureHash(ours), b = CaptureHash(theirs);
+				Logger::WriteMessage((std::string("== ") + c.name + ": skeleton " + a + ", r6 " + b + "\n").c_str());
+				if (a.empty() || b.empty())
+					failures += std::string(c.name) + ": a capture is missing; ";
+				else if (a != b)
+					failures += std::string(c.name) + ": the output differs from the r6 baseline; ";
+			}
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
+			Assert::IsTrue(failures.empty(), std::wstring(failures.begin(), failures.end()).c_str());
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(DelayBudgetFrameLadderHoldsTheTotalAtEveryRate)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DelayBudgetFrameLadderHoldsTheTotalAtEveryRate)
+		{
+			const HarnessScope harnessScope;
+			// The frame fallback ladder through the real renderer (owner 2026-10-20 item 41, 2026-10-24:
+			// ADR-0020). For the 4-, 3- and 2-frame budgets at 23.976/25/30/50/60p, with the motion
+			// engine, the de-judder, hiccup repair and the active-picture look-ahead on:
+			//   - the renderer plans the expected look-ahead frames, and below 4 says so under
+			//     "Fallbacks engaged: look-ahead (...)" (visible, not silent);
+			//   - frames are presented with no stall and no renderer failure;
+			//   - the capture-to-output delay (ExitLatencyMs, the queue hold plus the render) is the
+			//     SAME at every rate for one budget, within a refresh plus measurement jitter;
+			//   - recovery: after a one-second capture gap the delay returns to its level.
+			if (!RequireHardwareOrSkip("DelayBudgetFrameLadderHoldsTheTotalAtEveryRate")) return;
+			double refreshHz = 60.0;
+			{
+				DEVMODEW mode{};
+				mode.dmSize = sizeof(mode);
+				if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1)
+					refreshHz = static_cast<double>(mode.dmDisplayFrequency);
+			}
+			DelayBudget::Model model;
+			model.refreshHz = refreshHz;
+			struct Rate { int numerator, denominator; };
+			const Rate rates[] = { { 24000, 1001 }, { 25000, 1000 }, { 30000, 1000 }, { 50000, 1000 }, { 60000, 1000 } };
+			std::vector<double> rateList;
+			for (const Rate& r : rates) rateList.push_back(static_cast<double>(r.numerator) / r.denominator);
+			const double refreshMs = 1000.0 / refreshHz;
+			std::string failures;
+			for (int frames : { 4, 3, 2 })
+			{
+				const int budget = static_cast<int>(DelayBudget::BudgetForFrames(frames, rateList, model));
+				g_harnessDelayBudgetMs = budget;
+				double low = 1e9, high = 0.0;
+				for (const Rate& rate : rates)
+				{
+					const double fps = static_cast<double>(rate.numerator) / rate.denominator;
+					const DelayBudget::Plan plan = DelayBudget::Compute(DelayBudget::InputsFor(budget, fps, model));
+					FramePlan framePlan;
+					framePlan.rateNumerator = rate.numerator;
+					framePlan.rateDenominator = rate.denominator;
+					framePlan.step = [](int n) { FrameStep f; f.content = n; return f; };
+					const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, true, "dejudder_strength: 0.25\n", false, &framePlan);
+					char name[96];
+					snprintf(name, sizeof(name), "%d-frame %d ms @%.3f", frames, budget, fps);
+					const double median = Median(r.exitLatencyMs);
+					char expected[64];
+					snprintf(expected, sizeof(expected), "%d look-ahead frames", plan.queueFrames);
+					Logger::WriteMessage((std::string("== ") + name + ": presented " + (r.presented ? "yes" : "NO") +
+						", delay " + std::to_string(median) + " ms, planned hold " + std::to_string(plan.holdMs) + " ms; " +
+						r.fallbacksStatus + "\n").c_str());
+					if (!r.presented) failures += std::string(name) + ": not presented; ";
+					if (!r.Logged(expected)) failures += std::string(name) + ": no '" + expected + "' plan; ";
+					const bool ladderNote = r.fallbacksStatus.find("look-ahead") != std::string::npos;
+					if (ladderNote != (plan.queueFrames < DelayBudget::kDesignDepth))
+						failures += std::string(name) + ": look-ahead fallback note " + (ladderNote ? "shown" : "missing") + "; ";
+					if (r.Logged("marking renderer failed") || r.Logged("Render stall"))
+						failures += std::string(name) + ": stall/failure; ";
+					if (median > 0.0)
+					{
+						low = (std::min)(low, median);
+						high = (std::max)(high, median);
+					}
+				}
+				// The same total at every rate: the capture-to-output delay varies by at most a refresh
+				// plus 50% of one (render-time and vblank jitter on a desktop GPU).
+				char spread[160];
+				snprintf(spread, sizeof(spread), "%d-frame %d ms: delay %.1f .. %.1f ms across rates", frames, budget, low, high);
+				Logger::WriteMessage((std::string(spread) + "\n").c_str());
+				if (high - low > 1.5 * refreshMs)
+					failures += std::string(spread) + " (spread above 1.5 refreshes); ";
+			}
+			// Recovery: a one-second capture gap at 23.976 with the 3-frame budget; the delay of the
+			// last second is back at the level before the gap (within a refresh).
+			{
+				g_harnessDelayBudgetMs = static_cast<int>(DelayBudget::BudgetForFrames(3, rateList, model));
+				FramePlan framePlan;
+				framePlan.rateNumerator = 24000;
+				framePlan.rateDenominator = 1001;
+				const int gapStart = 72, gapEnd = 96;   // frames 3 s .. 4 s
+				framePlan.step = [gapStart, gapEnd](int n) { FrameStep f; f.content = n; f.send = n < gapStart || n >= gapEnd; return f; };
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 9.0, true, "dejudder_strength: 0.25\n", false, &framePlan);
+				std::vector<double> before, after;
+				for (const auto& t : r.trend)
+				{
+					if (t.seconds > 1.5 && t.seconds < 2.9) before.push_back(t.exitLatencyMs);
+					if (t.seconds > 7.5) after.push_back(t.exitLatencyMs);
+				}
+				const double b = Median(before), a = Median(after);
+				Logger::WriteMessage(("== recovery: delay before the gap " + std::to_string(b) + " ms, after " +
+					std::to_string(a) + " ms; " + r.fallbacksStatus + "\n").c_str());
+				if (!r.presented) failures += "recovery: not presented; ";
+				if (b > 0.0 && a > 0.0 && std::fabs(a - b) > refreshMs)
+					failures += "recovery: the delay did not return (" + std::to_string(b) + " -> " + std::to_string(a) + " ms); ";
+			}
+			g_harnessDelayBudgetMs = 0;
+			Assert::IsTrue(failures.empty(), std::wstring(failures.begin(), failures.end()).c_str());
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(StreamFaultsKeepTheDejudderSafeAndRecovering)

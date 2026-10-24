@@ -74,6 +74,16 @@ namespace PipelineSlots
 		for (const Precede& rule : HardRules())
 			if (position[static_cast<size_t>(rule.first)] > position[static_cast<size_t>(rule.second)])
 				return fail(std::string(Get(rule.first).name) + " must run before " + Get(rule.second).name + ": " + rule.why);
+		// 3b. The LED compensation compensates exactly the picture the LED measurement saw (skeleton
+		// audit 2026-10-24): nothing that changes the picture may sit between them.
+		{
+			const int from = position[static_cast<size_t>(Id::DriveLedMeasure)];
+			const int to = position[static_cast<size_t>(Id::DriveLedCompensation)];
+			for (int i = from + 1; i < to; ++i)
+				if (ContractOf(order[static_cast<size_t>(i)]).modifies)
+					return fail(std::string(Get(order[static_cast<size_t>(i)]).name) +
+						" cannot run between drive.led_measure and drive.led_compensation: the compensation must act on the measured picture");
+		}
 		// 4. The domain walk through each movable zone, with every slot assumed on, so the
 		// validity of an order never depends on which slots happen to be enabled.
 		struct State { uint8_t res, light, layout; bool vectors, modified; Id resBy, lightBy, modifiedBy; };

@@ -14,7 +14,7 @@
     "origin/original_pathway (ADR-0019): the ORIGINAL PATHWAY baseline turns every 'vp' slot off and runs every 'mixed' slot in its upstream form with the listed settings; it must reproduce Bill's original pathway (golden comparison, documented exceptions in VP-pipeline-final.md 3.7).",
     "zone/movable (ADR-0021): a custom order (setting pipeline_order) moves slots only within their zone; SlotContracts.h ContractOf / OrderValidator.h Validate hold the needs/gives contracts and reject invalid orders with a plain reason.",
     "Code location (ADR-0022): all VP-V code under src/VP-V (core/ skeleton headers, modules/<unit>/<slot>/, nets/, config/, tests/). The slot table mirror is src/VP-V/core/PipelineSlots.h.",
-    "original_pathway settings verified against bill-v1.4.02 (docs/design/original-pathway-verified.md, settings agent 2026-10-24)."
+    "original_pathway settings are generated from src/VP-V/core/OriginalPathway.h (verified against bill-v1.4.02; drift-checked)."
   ],
   "tiers": [
     "Classic",
@@ -78,8 +78,9 @@
         "mode": "upstream form",
         "settings": {
           "capture_path": "standard",
+          "capture_upload": "render",
           "native_rgb_ingest": "off",
-          "capture_upload": "render"
+          "efficiency_fixes": "off"
         }
       },
       "zone": "host",
@@ -138,8 +139,7 @@
         "mode": "upstream form",
         "settings": {
           "dv_tunnel_gpu_unpack": "off",
-          "dv_tunnel_fixes": "off",
-          "dv_trims": "off"
+          "dv_tunnel_fixes": "off"
         }
       },
       "zone": "host",
@@ -153,7 +153,7 @@
       "order": 30,
       "status": "built",
       "hook_point": "host",
-      "purpose": "Hold ONE user-set total delay (lip sync with the AVR's fixed audio delay), the SAME at every frame rate (padded); 4 queued frames recommended (~230-250 ms at 24p) with a graceful 4/3/2 ladder; cadence/pulldown detection and the film clock; stale-burst handling.",
+      "purpose": "Hold ONE user-set total delay (lip sync with the AVR's fixed audio delay), the SAME at every frame rate (padded); 4 queued frames recommended (about 267 ms at 23.976 on 60 Hz, measured) with a graceful 4/3/2 ladder; cadence/pulldown detection and the film clock; stale-burst handling.",
       "contract": {
         "input": "captured frames with timestamps",
         "output": "frames released at a constant end-to-end delay, with cadence/film-clock phase",
@@ -210,7 +210,10 @@
         "mode": "upstream form",
         "settings": {
           "queue_timing_fixes": "off",
-          "pulldown_fixes": "off"
+          "pulldown_fixes": "off",
+          "timing_continuity_fixes": "off",
+          "cadence_class_fixes": "off",
+          "general_rate_fixes": "off"
         },
         "note": "upstream has no target_latency_ms; the queue follows target_frames"
       },
@@ -281,8 +284,9 @@
         "mode": "upstream form",
         "settings": {
           "source_resolution": "native",
-          "rebase_kernel_match": "off",
-          "source_coding_fixes": "off"
+          "source_coding_fixes": "off",
+          "source_resolution_latch_fixes": "off",
+          "source_resolution_cut_fixes": "off"
         }
       },
       "zone": "host",
@@ -351,7 +355,7 @@
         "settings": {
           "optical_flow": "off",
           "motion_ahead_frames": "0",
-          "dejudder_strength": "0"
+          "motion_history_fixes": "off"
         }
       },
       "zone": "front_end",
@@ -414,7 +418,7 @@
       "original_pathway": {
         "mode": "off",
         "settings": {
-          "source_resolution": "native"
+          "rebase_kernel_match": "off"
         }
       },
       "zone": "front_end",
@@ -608,8 +612,8 @@
       "original_pathway": {
         "mode": "off",
         "settings": {
-          "texture_restore": "off",
-          "detail_pulse_stabilise": "off"
+          "detail_pulse_stabilise": "off",
+          "texture_restore": "off"
         }
       },
       "zone": "front_end",
@@ -897,9 +901,13 @@
           "24p in 60 at 200 ms, 4/3/2 frames"
         ]
       },
-      "open_items": [],
+      "open_items": [
+        "KNOWN GAP (audit item 3): today the consumers run BEFORE the entrance (they warp native planes, then the entrance re-runs); fixed, not reorderable, and outside UpstreamKey until B3 lands",
+        "B3 (ADR-0024): warp the cached PROCESSED frame; hard gate with 9 real-clip acceptance criteria; default ON once accepted"
+      ],
       "decisions": [
-        "ADR-0006"
+        "ADR-0006",
+        "ADR-0024"
       ],
       "origin": "vp",
       "original_pathway": {
@@ -908,7 +916,9 @@
           "dejudder_strength": "0",
           "dejudder_strength_even": "0",
           "interpolation": "off",
-          "interpolation_fill_gaps": "off"
+          "interpolation_fill_gaps": "off",
+          "occlusion_mask": "off",
+          "dejudder_source_warp_filter": "bilinear"
         }
       },
       "zone": "front_end",
@@ -966,7 +976,9 @@
       "origin": "mixed",
       "original_pathway": {
         "mode": "upstream form",
-        "settings": {}
+        "settings": {
+          "nls_sampling": "bilinear"
+        }
       },
       "zone": "libplacebo",
       "movable": false
@@ -1035,7 +1047,9 @@
         "settings": {
           "adaptive_downscale": "off",
           "adaptive_upscale": "off",
-          "downscale_light": "linear"
+          "ssim_bitrate_aware": "off",
+          "downscale_light": "linear",
+          "fbo_float32": "off"
         }
       },
       "zone": "libplacebo",
@@ -1209,8 +1223,8 @@
       "original_pathway": {
         "mode": "off",
         "settings": {
-          "sdr_tone_shape": "off",
-          "dv_trims": "off"
+          "dv_trims": "off",
+          "sdr_tone_shape": "off"
         }
       },
       "zone": "output_hooks",
@@ -1503,7 +1517,7 @@
       "original_pathway": {
         "mode": "upstream form",
         "settings": {
-          "calibration_lut_stage": "libplacebo (upstream: libplacebo target LUT)"
+          "calibration_lut_stage": "libplacebo"
         }
       },
       "zone": "output_hooks",
@@ -1815,7 +1829,13 @@
       "origin": "mixed",
       "original_pathway": {
         "mode": "upstream form",
-        "settings": {}
+        "settings": {
+          "intent_content": "off",
+          "intent_motion": "off",
+          "intent_display": "off",
+          "intent_black": "off",
+          "ambient_adapt": "off"
+        }
       },
       "zone": "host",
       "movable": false

@@ -35,7 +35,7 @@
       3,
       2
     ],
-    "note": "Owner 2026-10-24: ONE total delay, the same at every frame rate (padded); 4 queued frames recommended (about 250 ms at 24p); lower settings fall back to 3/2 frames with every feature still working."
+    "note": "Owner 2026-10-24: ONE total delay, the same at every frame rate (padded); 4 queued frames recommended (about 267 ms at 23.976 on 60 Hz, measured; the owner's estimate was 250); lower settings fall back to 3/2 frames with every feature still working."
   },
   "defaults": {
     "optical_flow": "on",

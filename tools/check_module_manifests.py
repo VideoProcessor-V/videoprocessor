@@ -87,6 +87,36 @@ def check(write):
             if "zone" in s and header_zone.get(s["id"]) != s["zone"]:
                 errors.append(f"{s['id']}: zone {s['zone']} in slots.json, {header_zone.get(s['id'])} in PipelineSlots.h")
 
+    # The Original pathway (ADR-0019): one list (core/OriginalPathway.h), the renderer sets exactly
+    # those keys ("// key=" comments in ApplyOriginalPathwaySettings), and slots.json names no other.
+    op_header = os.path.join(ROOT, "src", "VP-V", "core", "OriginalPathway.h")
+    renderer = os.path.join(ROOT, "src", "VideoProcessor-Lib", "vprenderer", "LibplaceboVideoRenderer.cpp")
+    if os.path.exists(op_header) and os.path.exists(renderer):
+        with open(op_header, encoding="utf-8") as f:
+            entries = re.findall(r'\{\s*"([\w.]+)",\s*"([^"]*)",\s*"([\w.]+)"\s*\}', f.read())
+        core_keys = {k for k, _, _ in entries}
+        for k, _, slot in entries:
+            if slot not in ids:
+                errors.append(f"OriginalPathway.h: {k} names unknown slot {slot}")
+        with open(renderer, encoding="utf-8") as f:
+            text = f.read()
+        start = text.find("static void ApplyOriginalPathwaySettings")
+        end = text.find("\n\t}\n", start)
+        body = text[start:end] if start >= 0 and end > start else ""
+        renderer_keys = set(re.findall(r"//\s*key=([\w.]+)", body))
+        if not body:
+            errors.append("ApplyOriginalPathwaySettings not found in the renderer")
+        for k in sorted(core_keys - renderer_keys):
+            errors.append(f"Original pathway: {k} is in OriginalPathway.h but the renderer does not set it")
+        for k in sorted(renderer_keys - core_keys):
+            errors.append(f"Original pathway: the renderer sets {k}, which OriginalPathway.h does not list")
+        for slot_entry in slots:
+            for k in slot_entry.get("original_pathway", {}).get("settings", {}):
+                if k.startswith("["):
+                    continue   # a non-renderer setting (the LED drive's own section)
+                if k not in core_keys:
+                    errors.append(f"slots.json {slot_entry['id']}: original_pathway key {k} is not in OriginalPathway.h")
+
     manifests = []
     for s in slots:
         folder = module_dir(s["id"])

@@ -7,7 +7,7 @@
 // END-TO-END DELAY GATE, CPU tier (settings agent, 2026-10-24; owner decision 2026-10-24).
 //
 // The owner sets ONE total delay, the same at every frame rate (padded). 4 queued frames is the
-// recommended setting (about 250 ms at 24p); shorter settings fall back to 3 and 2 frames with
+// recommended setting (about 267 ms at 24p on 60 Hz); shorter settings fall back to 3 and 2 frames with
 // every feature still working. This gate checks, at 23.976/24/25/29.97/30/50/59.94/60:
 //   1. the planner (DelayBudget.h): the 4/3/2-frame budgets give at least that many frames at
 //      every rate and the SAME total at every rate (the padding absorbs the rest);

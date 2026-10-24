@@ -20,9 +20,12 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+// VP (research/chroma 2026-10-24): VP's 4:2:x input is LEFT-sited (chroma at the even luma
+// columns), and VP passes no shader parameters, so the bundled default is -0.5 (synthetic edge
+// dE 2.17 -> 0.88). 0.0 would treat the chroma as centre-sited.
 //!PARAM chroma_offset_x
 //!TYPE float
-0.0
+-0.5
 
 //!PARAM chroma_offset_y
 //!TYPE float

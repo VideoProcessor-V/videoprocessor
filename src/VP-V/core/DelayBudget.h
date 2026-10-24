@@ -16,7 +16,7 @@
 //   depth (4) and walking the 4 / 3 / 2 ladder when less fits; below 2 the budget is infeasible.
 //
 // OWNER DECISION 2026-10-24 (ADR-0020): the user sets ONE total delay to match the AVR; 4 queued
-// frames is the RECOMMENDED setting (about 250 ms at 24p); the same total delay applies at EVERY
+// frames is the RECOMMENDED setting (about 267 ms at 24p on 60 Hz, measured); the same total delay applies at EVERY
 // frame rate (padded), so the AVR delay never changes between titles; every feature keeps working
 // at a lower margin (the 4 -> 3 -> 2 ladder).
 //

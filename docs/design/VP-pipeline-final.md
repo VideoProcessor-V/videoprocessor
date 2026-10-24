@@ -17,7 +17,7 @@ The picture travels through **eight units**. The pipeline runs top to bottom:
 
 | Side | Unit | What it does, in plain words | Status |
 |---|---|---|---|
-| **INPUT SIDE** | Input | Takes frames from the card without losing precision; works out the signal type (SDR/HDR10/LLDV/DV); holds the frames for ONE total delay you set to match your AVR (recommended: enough for 4 frames, about 250 ms at 24p), the same at every frame rate | built |
+| **INPUT SIDE** | Input | Takes frames from the card without losing precision; works out the signal type (SDR/HDR10/LLDV/DV); holds the frames for ONE total delay you set to match your AVR (recommended: enough for 4 frames, about 267 ms at 24p on a 60 Hz display, measured), the same at every frame rate | built |
 | | Input (analysis) | Studies the **untouched** frame: how the player scaled it, where the picture is, cuts/fades, subtitles | built |
 | | Motion | Measures motion on the untouched frame at its own size (cheap, accurate); one "vectors valid" switch every user obeys | built |
 | | Scaling: **re-base** | Undoes the player's upscale, axis by axis, so we work on the real picture | built (order pending) |
@@ -63,7 +63,7 @@ overlay, in Config and in Ctrl+Alt+D, plus a one-time notice.
 - **Fixed delay** (ADR-0003, timing decided in ADR-0020):
   - The user sets ONE total delay to match the AVR. It is identical at every frame rate (padded),
     so the AVR setting never changes between titles.
-  - The pipeline is built for 4 queued frames: this is the RECOMMENDED setting, about 250 ms at
+  - The pipeline is built for 4 queued frames: this is the RECOMMENDED setting, about 267 ms (measured) at
     24p.
   - A lower total walks the 4 -> 3 -> 2 ladder, and every feature keeps working at the lower
     margin.
@@ -107,7 +107,7 @@ unpacks the DV tunnel. Output: a signal descriptor on every frame. Fallback: DV 
 **input.queue_timing (30), built, host.** Holds ONE user-set total delay (`target_latency_ms`; ADR-0020) and runs cadence/pulldown
 detection, the film clock and stale-burst handling.
 - **Recommended total:** enough for 4 queued frames at the slowest source rate. At 24p that is
-  4 x 41.7 = 167 ms, plus the swapchain, render-ahead and processing: about 230-250 ms.
+  4 x 41.7 = 167 ms, plus the swapchain, render-ahead and processing: about 267 ms (measured, 23.976 on 60 Hz).
 - **The same total at every frame rate:** faster rates are padded, so the AVR delay never
   changes between titles.
 - **A lower total:** the queue depth = floor((total - fixed costs) / frame period). It walks the
@@ -185,6 +185,23 @@ active, libplacebo receives 4:4:4 and must not re-upsample. **Open:** verify wha
 with 4:2:2/4:2:0 chroma in our path; chroma siting vs crop/A-lens/NLS; BTB/WTW; DV tunnel;
 subtitles. Candidates: CfL-style luma-guided or separable Lanczos.
 
+**Chroma decision (research/chroma c7564afa, 2026-10-24).**
+
+- **The slot stays EMPTY for now.** libplacebo's chroma upscaler ('auto' = catmull_rom) is the
+  default for every tier.
+- **CfL is opt-in** (graphics/subtitles). Its bundled `chroma_offset_x` is now -0.5, matching
+  VP's LEFT-sited input (synthetic edge dE 2.17 -> 0.88).
+- **Siting fixes, applied:**
+  - the re-base scales each plane's shift with its factor (`VP-V/core/ChromaSiting.h`);
+  - the legacy CPU P010 path (even chroma lines only) is tagged TOP_LEFT.
+- **The contract for a future chroma slot:**
+  - 2 planes: luma plus full-size CbCr, >= 12-bit or float, shift 0;
+  - no clamp (BTB/WTW kept);
+  - the full frame including bars;
+  - DV tunnel handling defined;
+  - the `(w+1)/2` chroma-width maths audited for odd sizes;
+  - any VP stage that resamples chroma scales the plane shift (`ShiftAfterResample`).
+
 ### 3.2 PROCESSING
 
 **motion.vector_delivery (130), partial, host.** Hands source-size vectors to each consumer
@@ -223,7 +240,7 @@ hook runs at the **output size**. Order (ADR-0013):
 | # | Slot | Stage | Status today |
 |---|---|---|---|
 | 0 | (plumbing) | libplacebo output-encoding repair: first, when any PRE_OUTPUT hook runs | built |
-| 200 | colour.sdr_tone_shape | Delta 13 SDR tone shape + DV trims | built |
+| 200 | colour.sdr_tone_shape | Delta 13 SDR tone shape + DV trims (part of the Stage 13 design: the shape runs first) | built |
 | 210 | colour.appearance | **Stage 13 CAM16** (off by default) | placeholder |
 | 220 | drive.led_measure | LED measurement (pre-compensation content) | built |
 | 230 | drive.led_compensation | LED adaptive gamma / compensation (CNTR never above need) | built |
@@ -324,7 +341,7 @@ These rules change HOW the slots run, not their order.
     5 frames = 208 ms.
   - DECIDED (owner 2026-10-24, ADR-0020):
     - ONE user-set total delay. 4 frames is RECOMMENDED (`DelayBudget::RecommendedBudgetMs`:
-      4 frames at the slowest source rate, about 230-250 ms at 24p).
+      4 frames at the slowest source rate, about 267 ms (measured, 23.976 on 60 Hz) at 24p).
     - The SAME total at every frame rate: faster rates are padded (`Plan::paddingMs`).
     - The ladder is 4 -> 3 -> 2. Config shows the resulting frames, degraded state and margin.
     - The budget stays configurable.
@@ -360,6 +377,7 @@ additions are modular add-ons and gives a known-good reference.
 | OutputEncodingRepair | It runs only when a PRE_OUTPUT hook is present; original mode has none, so it is inactive | identical |
 | VP bug fixes in upstream code (queue/timing fixes, capture resync hardening, crash fixes) | Fixes that cannot be switched off without reintroducing crashes/stalls | timing only; listed per fix |
 | Config migration (retired/renamed keys) | Upstream configs are migrated on load | n/a (settings mapping test) |
+| Chroma siting fixes (2026-10-24) | Re-based frames scale the plane shift; the legacy CPU P010 path is tagged TOP_LEFT; VP corrections of upstream behaviour; the Original pathway keeps upstream's LEFT tag and has no re-base | none in the Original pathway |
 | "Fallbacks engaged" status / diagnostics | Status only, not in the pixel path | n/a |
 | LED drive (Dynamic Drive) | The LED module is created by the host, not the renderer. Original mode turns its hooks off (slot switches), but the projector commands follow the LED config, so the golden test runs with the LED drive off | test precondition |
 
@@ -389,6 +407,25 @@ redundant per-refresh repeats removed.
 - **Cache keys.** The cache is keyed by the source sequence + an epoch. The epoch is bumped on
   settings, re-base factors, processing size or format, so a stale picture is never reused.
   Sequence 0 (unknown) is never served from the cache.
+
+### 3.8b KNOWN GAP until B3 lands (skeleton audit item 3), and the hard gate (ADR-0024)
+
+**Today the motion consumers still run BEFORE the entrance.** The skeleton removed only the
+redundant repeats of the same picture (one stage list, a cadence repeat reuses its result).
+
+- De-judder phase pictures and extras are warped from the NATIVE planes and then sent through
+  the entrance again.
+- The debander hold and the detail history run A once more.
+- So `motion.consumers` stays fixed in the order (not reorderable) and outside `UpstreamKey`
+  until B3 lands.
+
+**B3** (the input side once per source frame; consumers warp the cached PROCESSED frame) is a
+HARD GATE. Its nine real-clip acceptance criteria are in ADR-0024.
+
+- Until it passes them there is no deploy, no motion training and no dependent net
+  integration. The net runner and net A come after it.
+- It is built to default-ON quality. The switch remains only as a diagnostic/fallback: OFF is
+  byte-identical to today's code, and the Original pathway is unchanged.
 
 ### 3.9 Real-time proof on the laptop (B4)
 
@@ -436,7 +473,7 @@ can move a module to another position.
 
 ## 4. Decisions and open items
 
-Decisions: see `docs/decisions/` (ADR-0001 .. ADR-0023).
+Decisions: see `docs/decisions/` (ADR-0001 .. ADR-0024).
 
 | Open item | Decided by | Affects |
 |---|---|---|

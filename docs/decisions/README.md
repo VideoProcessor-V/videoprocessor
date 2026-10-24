@@ -27,3 +27,4 @@ Short ADR-style records of the major VP design decisions, migrated from the plan
 | [ADR-0021](ADR-0021-reorderable-modules.md) | Reorderable modules, with declared contracts and a validator | 2026-10-24 | Accepted |
 | [ADR-0022](ADR-0022-vpv-source-folder.md) | All VP-V code under one source folder, src/VP-V | 2026-10-24 | Accepted |
 | [ADR-0023](ADR-0023-vpv-config-section.md) | One self-contained VP-V Config section, namespaced keys, managed upstream controls | 2026-10-24 | Accepted |
+| [ADR-0024](ADR-0024-b3-once-per-frame-default.md) | The input side runs once per source frame (B3); the default once accepted, a hard gate | 2026-10-24 | Accepted |

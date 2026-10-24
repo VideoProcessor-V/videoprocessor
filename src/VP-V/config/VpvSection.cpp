@@ -430,7 +430,9 @@ namespace Vpv
 	bool PathwayIsVpv(const Host& host)
 	{
 		const Table& table = TierTable();
+		// The renderer's precedence (skeleton audit item 6): [vpv] first, then [vprenderer].
 		QString v = host.value ? host.value(Q(table.section), Q(table.pathwayKey)).trimmed() : QString();
+		if (v.isEmpty() && host.value) v = host.value(QStringLiteral("vprenderer"), Q(table.pathwayKey)).trimmed();
 		if (v.isEmpty()) v = Q(table.pathwayDefault);
 		// pipeline_original_pathway on = the Original pathway (ADR-0019); off/absent = VP-V.
 		return v.compare(QStringLiteral("on"), Qt::CaseInsensitive) != 0;
@@ -602,9 +604,9 @@ namespace Vpv
 			if (index < 0 || !state->host.setValue) return;
 			const Table& t = TierTable();
 			const QString value = pathway->itemData(index).toString();
-			// The default (VP-V) is written as an absent key, so untouched configs stay unchanged.
-			state->host.setValue(Q(t.section), Q(t.pathwayKey),
-				value == Q(t.pathwayDefault) ? QString() : value);
+			// Written explicitly, 'off' included: an absent [vpv] key would let a [vprenderer] value win
+			// (the renderer reads [vpv] first, then [vprenderer]; skeleton audit item 6).
+			state->host.setValue(Q(t.section), Q(t.pathwayKey), value);
 			applyPathway(value != QStringLiteral("on"));
 		});
 		state->RefreshAll();

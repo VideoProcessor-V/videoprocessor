@@ -1,6 +1,10 @@
 #include "CppUnitTest.h"
 
+#include <VP-V/core/ChromaSiting.h>
 #include <VP-V/core/DelayBudget.h>
+#include <VP-V/core/EntranceEpoch.h>
+#include <VP-V/core/OriginalPathway.h>
+#include <RendererProfileConfig.h>
 #include <VP-V/core/EntranceStages.h>
 #include <VP-V/core/OutputHookOrder.h>
 #include <VP-V/core/SlotRegistry.h>
@@ -487,6 +491,92 @@ namespace PipelineSkeletonTestsNs
 			Assert::IsTrue(registry.SetOrderByNames("repair.encoding, scaling.rebase", &reason));
 			registry.ApplyOriginalPathway();
 			Assert::IsTrue(registry.IsDefaultOrder());
+		}
+
+		TEST_METHOD(EntranceEpochCoversCropRangeAndColour)
+		{
+			// Audit blocker 1: a cached entrance result must never come back for a frame with another
+			// crop, range, bit depth or colour (the renderer keys its cache with this function).
+			struct Plane { const void* texture; int components; int component_mapping[4]; };
+			struct Rect { float x0, y0, x1, y1; };
+			struct Bits { int sample_depth, color_depth, bit_shift; };
+			struct Repr { int sys, levels, alpha; Bits bits; };
+			struct Hdr { float min_luma, max_luma; };
+			struct Color { int primaries, transfer; Hdr hdr; };
+			struct FakeFrame { int num_planes; Plane planes[4]; Rect crop; Repr repr; Color color; };
+			int textureA = 0, textureB = 0;
+			FakeFrame base{};
+			base.num_planes = 2;
+			base.planes[0] = { &textureA, 1, { 0, -1, -1, -1 } };
+			base.planes[1] = { &textureB, 2, { 1, 2, -1, -1 } };
+			base.crop = { 0.0f, 0.0f, 1920.0f, 1080.0f };
+			base.repr = { 1, 1, 0, { 16, 10, 6 } };
+			base.color = { 1, 1, { 0.0f, 100.0f } };
+			auto key = [](const FakeFrame& f) { EntranceEpoch::Key k; EntranceEpoch::AddFrame(k, f); return k.Value(); };
+			const uint64_t same = key(base);
+			Assert::AreEqual(same, key(base));
+			FakeFrame crop = base; crop.crop.y0 = 132.0f;          // a start-up crop hold releasing
+			FakeFrame levels = base; levels.repr.levels = 2;       // range re-detection
+			FakeFrame depth = base; depth.repr.bits.color_depth = 12;
+			FakeFrame color = base; color.color.transfer = 2;
+			FakeFrame texture = base; texture.planes[1].texture = &textureA;
+			for (const FakeFrame* f : { &crop, &levels, &depth, &color, &texture })
+				Assert::AreNotEqual(same, key(*f));
+		}
+
+		TEST_METHOD(NothingThatChangesThePictureBetweenLedMeasureAndCompensation)
+		{
+			// Audit item 8: the compensation must act on exactly the measured picture.
+			PipelineSlots::Registry registry;
+			std::string reason;
+			// Moving Stage 13 between them (measure, appearance, compensation) is refused.
+			Assert::IsFalse(registry.SetOrderByNames("drive.led_measure, colour.appearance", &reason));
+			Assert::IsTrue(reason.find("between drive.led_measure and drive.led_compensation") != std::string::npos, W(reason).c_str());
+		}
+
+		TEST_METHOD(OnlyHonouredSlotSwitchesAreAccepted)
+		{
+			// Audit item 4: a switch for a slot the renderer never consults would be silently ignored.
+			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::RepairDeband));
+			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::DriveProjectorControl));
+			Assert::IsFalse(PipelineSlots::SwitchHonoured(Id::ScalingGeometry));
+			Assert::IsFalse(PipelineSlots::SwitchHonoured(Id::ColourToneGamut));
+		}
+
+		TEST_METHOD(OriginalPathwayOverridesAreRealKeysAndValues)
+		{
+			// Audit item 7: every override names a real renderer key with a value the configuration
+			// validator accepts, and belongs to a slot that is not upstream-only.
+			std::set<std::string> keys;
+			for (const OriginalPathway::Override& o : OriginalPathway::Overrides())
+			{
+				Assert::IsTrue(keys.insert(o.key).second, W(std::string("duplicate ") + o.key).c_str());
+				Assert::IsTrue(RendererProfileConfig::ValidateBaseSetting(o.key, o.value),
+					W(std::string(o.key) + ": " + o.value + " is not a valid renderer setting").c_str());
+				const Id slot = PipelineSlots::FromName(o.slot);
+				Assert::IsTrue(slot != Id::Count, W(std::string(o.key) + ": unknown slot " + o.slot).c_str());
+				Assert::IsTrue(PipelineSlots::Get(slot).origin != PipelineSlots::Origin::Upstream,
+					W(std::string(o.key) + ": an upstream-only slot has no VP additions to remove").c_str());
+			}
+		}
+
+		TEST_METHOD(UpstreamKeyLeavesTheMotionConsumersOutUntilB3)
+		{
+			// Audit item 3: the consumers still run before the entrance in the renderer.
+			PipelineSlots::Registry registry;
+			const std::string key = registry.UpstreamKey(Id::ScalingOutput);
+			Assert::IsTrue(key.find("motion.consumers") == std::string::npos, W(key).c_str());
+			Assert::IsTrue(key.find("repair.deband") != std::string::npos, W(key).c_str());
+		}
+
+		TEST_METHOD(ChromaShiftScalesWithAnEdgeAlignedResample)
+		{
+			// research/chroma 2026-10-24: a 2:1 re-base of LEFT-sited 4:2:x keeps the colour in place
+			// only when the plane shift scales with it (-0.5 -> -0.25); 1:1 leaves it unchanged.
+			Assert::AreEqual(-0.25f, ChromaSiting::ShiftAfterResample(-0.5f, 0.5));
+			Assert::AreEqual(-0.5f, ChromaSiting::ShiftAfterResample(-0.5f, 1.0));
+			Assert::AreEqual(0.0f, ChromaSiting::ShiftAfterResample(0.0f, 0.75));
+			Assert::AreEqual(-0.375f, ChromaSiting::ShiftAfterResample(-0.5f, 0.75));   // 1440 -> 1080 class
 		}
 	};
 }

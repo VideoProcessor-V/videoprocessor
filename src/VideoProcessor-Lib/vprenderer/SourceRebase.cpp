@@ -1,6 +1,8 @@
 #include <pch.h>
 #include "SourceRebase.h"
 
+#include <VP-V/core/ChromaSiting.h>   // VP-V: the plane shifts after the resample
+
 #include <KernelInverse.h>
 #include <libplacebo/shaders/custom.h>
 
@@ -329,6 +331,14 @@ if (p.x < size.x && p.y < size.y) {
 				return false;
 			}
 			result.planes[plane].texture = textures[slot][plane];
+		}
+		// Chroma siting (research/chroma 2026-10-24): the planes were resampled edge-aligned by the
+		// factors, so their shifts scale with them; the old -0.5 moved colour by 1/4 of a re-based
+		// luma pixel at 2:1.
+		for (int plane = 0; plane < result.num_planes; ++plane)
+		{
+			result.planes[plane].shift_x = ChromaSiting::ShiftAfterResample(source.planes[plane].shift_x, factorX);
+			result.planes[plane].shift_y = ChromaSiting::ShiftAfterResample(source.planes[plane].shift_y, factorY);
 		}
 		// The crop in the luma plane's (now re-based) pixels.
 		result.crop.x0 = static_cast<float>(source.crop.x0 * factorX);
