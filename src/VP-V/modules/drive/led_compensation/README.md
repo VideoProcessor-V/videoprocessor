@@ -92,6 +92,18 @@ The Dynamic Drive core (`LedDriveModule`) and the picture compensation it drives
 - Module tests use a fake port and `ManualClock` (LedDriveTestSupport.h); no projector needed.
 - Run one class: `vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /TestCaseFilter:"FullyQualifiedName~LedDriveCompensateTests" /Logger:"trx;LogFileName=x.trx"`. Tests run single-threaded; read the TRX.
 
+## Cost
+
+Efficiency review 2026-10-24 (code reading only, nothing measured). Ranked by estimated saving.
+
+1. **Identity compensation pass.** In log_only, dry run, script without smoothing, adaptive_gamma off, or any frame with gain 1, boost 1 and no lift, the hook still runs a full-screen PREOUTPUT pass that returns its input (the shader's own early-out). That is 2560x1600 x (8 B read + 8 B write) with an FP16 intermediate assumed, about 66 MB: roughly 0.07 ms on the 3090 and 0.35 ms on the 3050 Ti, double at a 4K output. Fix: do not push the hook when gain == 1, boost == 1 and shadow_lift x veil == 0. Byte-identical: yes while the measurement hook still runs (the PRE_OUTPUT intermediate stays); without it libplacebo may drop the FP16 intermediate, so not guaranteed. Risk low.
+2. **Hook parameters through strings.** 11 `SetHookParameter` calls per frame. Each does `snprintf` "%.9g", builds a `std::map` node, scans the 11 parameters, runs `strtod` and returns a `std::vector`. `Ensure` also rebuilds 6 built-in strings and scans the ~8 KB shader for each token. Estimated 15-35 µs per frame on the render thread, at about 1-2 µs per call. Fix: resolve the `pl_hook_par` pointers once per hook; record at read time that the shader uses no built-ins. Byte-identical: yes if the "%.9g" + `strtod` conversion is kept (a direct double-to-float cast could differ in the last bit). Risk low.
+3. **Compensate log built every step.** `StepCompensateLocked` builds an `ostringstream` (with `driver->Status()`) whenever a command goes out or no log is pending. The module thread prints it only when a command was sent or every 10 s. A few µs inside the module mutex. Fix: keep the fields; format them on the module thread when logged. Byte-identical: yes (picture; same log text). Risk low.
+4. **`Config()` copies.** `LedDriveModule::Config()` returns the whole `LedDriveConfig` under the mutex: the curve, 3 step tables and a string, about 5 allocations per copy. The renderer copies it 4 times per frame, the look-ahead twice per observed frame. About 5-8 µs per frame (estimated). Fix: one snapshot per frame, or accessors for the few fields. Byte-identical: yes. Risk low.
+5. **Small per-frame allocations.** `LedLandingsLocked` allocates a vector (`cntr_pair_predict`). `Corrected()` copies a 1 KB histogram and re-bins it twice per step (plus once per queued frame while the custom dim checks for light ahead). A few µs. Fix: reuse buffers. Byte-identical: yes. Risk low.
+
+When off: LED disabled, gamma_boost off and no shadow lift cost nothing (two atomic loads, `BoostExponent`). LED enabled but not compensating (log_only, dry run) costs the identity pass and the parameter writes above every frame.
+
 ## Settings
 
 - Existing keys: the `[led_drive.default]` and `[projector.default]` keys listed in "Config keys actually read", plus `[general] file_led_holdover_ms`. The listed `led_compensation` is not a config key.

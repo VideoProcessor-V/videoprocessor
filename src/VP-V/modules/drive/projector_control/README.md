@@ -79,6 +79,16 @@ No hardware needed: the tests use a fake serial port and `ManualClock`.
 - `BugHunt3ShutdownTests`: bounded restore, connection-test cancel.
 - Run one class: `vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /TestCaseFilter:"FullyQualifiedName~LedDriveProtocolTests" /Logger:"trx;LogFileName=x.trx"`. Tests run single-threaded; read the TRX.
 
+## Cost
+
+Efficiency review 2026-10-24 (code reading only, nothing measured). Ranked by estimated saving. This module is cheap: the controllers are a few µs, and the serial side is a handful of commands per second.
+
+1. **Compensate log string every output frame.** `CompensateController::Tick` (LedController.cpp) formats `out.log` with an `ostringstream` (about 12 fields, doubles included) on every frame. It runs on the render thread inside `LedDriveModule`'s mutex. The module thread prints it only when a command was sent or every 10 s. Estimated 3-8 µs per frame (one stream and about 12 formatted values), 0.2-0.5 ms/s at 60 Hz. Fix: return the numbers; format them only when the line is logged (module thread). Byte-identical: yes (picture; same text when formatted the same way). Risk low.
+2. **`FluxModel::LevelFor` linear scans.** Up to 255 candidates, each a linear walk of `flux_table`, called several times per `Tick`. The cut-dip floor (`dipFloor`) is recomputed each frame from constant settings. A few µs per frame at most. Fix: a 256-entry flux table built per configuration, and `dipFloor` cached per configuration. Byte-identical: yes (same arithmetic, precomputed). Risk low.
+3. **Serial side: nothing to gain.** Checked: the worker sleeps on a condition variable, `stateMutex` is released before port I/O and during gap waits (render-thread `Status()` and `Set*` never wait on I/O), `Status()` copies a small struct with a short (SSO) string, and `ReadLine` sets `SetCommTimeouts` once per read (a few per command, at most about 5 commands/s at `min_command_gap_ms` 200).
+
+When off: LED disabled creates no module, driver or thread (zero cost). log_only and picture_only use the dry-run `NoneDriver` (no port, no worker); the module thread wakes every `tick_ms` (400 ms).
+
 ## Settings
 
 - Existing keys: `[projector.default]` (all transport and latency keys) and the controller keys of `[led_drive.default]`; see "Config keys actually read". The listed `led_compensation` is not a config key.

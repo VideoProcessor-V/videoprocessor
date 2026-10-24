@@ -95,6 +95,21 @@ Run single-threaded:
 
 `vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /TestCaseFilter:"FullyQualifiedName~LibplaceboOutputPolicyTests" /Logger:"trx;LogFileName=tone_gamut.trx"`
 
+## Cost
+
+This slot's code is **Bill's** (upstream `v1.4.02-beta`). It stays at its path and VP does not change it
+(owner principle 2026-10-24). The notes below describe how VP drives it and what that costs. Changes
+inside Bill's files are suggestions for Bill, or for a VP-V adapter around them (M2 plan, option (d)).
+
+Efficiency review 2026-10-24 (code reading only; estimates from pixel counts x operations, not measured). Ranked by saving. The policy itself adds no GPU pass; the tone/gamut mapping cost is libplacebo's (peak detection off = no peak-detect compute) and is not costed here.
+
+1. **Rendered-output capture** (screenshot, or the problem report's thumbnail with `report_thumbnail` on; per event, render thread). `CaptureRenderedOutput` creates a full-size staging texture, then `CopyResource` + `Map`, which waits for the GPU to finish the frame. On the same thread it then runs `AnalyzePackedR10` at step 1 (2560 x 1600 = 4.1 M pixels x 3 channels: min, max, sum, buckets), an FNV-1a over all 16 MB byte by byte (16.4 M iterations) and SHA-256 of the same 16 MB. Only the PNG and JSON writes go to the capture worker. Estimated 30-80 ms render-thread hitch per capture at 2560 x 1600 (stats ~10 ms, FNV ~15-20 ms, SHA ~10-40 ms, plus the GPU wait), about 2x at 4K. Fix: move the stats, FNV, SHA and the JSON into the existing capture worker (the pixels are already moved there). Byte-identical files: yes. Risk: low. Removing the GPU wait as well (map the staging copy a frame later) is a further option, risk medium.
+2. **Per frame** (render thread): `ResolveCalibrationTransfers` with three `ParseGamma` string comparisons on settings strings, `reason` strings assigned from literals (heap allocations), the copy into `lastSdrGammaDecision`, and an `std::ostringstream` signature (11 fields, `.str()` twice) that only detects a change for the `SDR_GAMMA` log line. ~3-8 µs per frame, ~0.2-0.5 ms CPU per second at 60 Hz. Fix: parse the three gammas when settings apply (initialise already parses `output_gamma`), recompute the decision only when its inputs change, and compare a small POD key instead of the string. Byte-identical: yes. Risk: low.
+3. **Output diagnostic readback** (only with output diagnostics on): once per output initialise, after 30 frames, up to 10 attempts. Each creates a full-size staging texture, maps it synchronously (GPU wait plus a ~16 MB copy) and runs `AnalyzePackedR10` at step 8. Diagnostics only, per event; no change.
+4. **`MakeSdrOutputContract` / `MakePlan` / `Finalize` / `ShouldFallbackToComposed`**: per initialise and per negotiation retry (once a second while unsafe); a few branches. No cost. `GetOutputContractStatus` (`ParseGamma`, `DescribeLimitedTransfer`) runs only when the GUI asks.
+
+Cost when off: there is no off. Per frame the policy costs a few µs of CPU (item 2) and nothing on the GPU.
+
 ## Settings
 
 - Existing keys: `tone_mapping`, `gamut_mapping`, `peak_detection`, the tone tuning keys (logged as `tone_mapping_tuning`; see above), and the output-policy keys above

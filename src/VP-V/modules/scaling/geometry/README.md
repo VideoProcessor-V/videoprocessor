@@ -90,6 +90,20 @@ Run single-threaded:
 
 `vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /TestCaseFilter:"FullyQualifiedName~MadVRShaderRuntimeStateTests|FullyQualifiedName~AlphaSourceCropPolicyTests|FullyQualifiedName~PictureTransitionHandoffTests" /Logger:"trx;LogFileName=geometry.trx"`
 
+## Cost
+
+This slot's code is **Bill's** (upstream `v1.4.02-beta`). It stays at its path and VP does not change it
+(owner principle 2026-10-24). The notes below describe how VP drives it and what that costs. Changes
+inside Bill's files are suggestions for Bill, or for a VP-V adapter around them (M2 plan, option (d)).
+
+Efficiency review 2026-10-24 (code reading only; estimates from pixel counts x taps, not measured). Ranked by saving.
+
+1. **CPU per frame with NLS selected** (render thread). `EnsureNlsHook` copies the rule's parameter map (`FixedNlsParameters`), rebuilds the hook key with an `ostringstream`, rebuilds the float-parameter name list (`ReadNlsHookMapping`) and the binding signature (`LogNlsHookBinding`: `CenterScales` plus another `ostringstream`). `EvaluateNlsMapping` runs 3-5 times (presentation crop 1-2, candidate, final, detector), each with a heap-allocated reason (an `ostringstream` for `SAFE_FIT` and for the crop text). The final policy signature is one more `ostringstream` of ~25 fields plus both reason strings, compared only to log a change. ~15-40 µs per frame, ~1-2.5 ms CPU per second at 60 Hz. Fix: cache the parameter map and hook key per rule generation, recompute the decisions only when their numeric inputs change (aspects, rectangles, rule), and compare a POD key instead of strings. Byte-identical: yes (same decisions, same log lines). Risk: low.
+2. **GPU, NLS `ACTIVE`**: one full-resolution MAIN hook pass at the source size (after a re-base, if any). With `nls_sampling: catmull` each pixel reads 4 x slope taps on the warped axis (4-6 texels, at most 9) and evaluates `nls_map` three times (one `pow` each when `geometry` is 0); `bilinear` is one filtered read. At 3840 x 2160 that is ~40 M fetches: estimated ~0.2-0.4 ms on the 3090 and ~1-2 ms on the 3050 Ti. The hook also makes libplacebo keep MAIN as its own texture (one extra full-size write and read). Possible saving: precompute the 1-D map and slope per column / row (they depend only on the warped coordinate), removing ~3 `pow` per pixel, <=0.05 ms on the 3090. Byte-identical: no (a table or a different evaluation can differ in the last bit). Not recommended. Verified: no per-frame shader recompile (the parameters are DYNAMIC, and the hook is parsed again only when its key changes).
+3. **Hook failure recovery**: one redraw with the linear fit per failure, then latched (no retry cost per frame).
+
+Cost when off: with NLS not selected, the crop stage still runs one `EvaluateNlsMapping` per frame on the full raster (the candidate decision), with one reason string: <1 µs. No GPU pass.
+
 ## Settings
 
 - Existing keys: the `nls` selection group (`[shader.nls.<name>]` profiles; keys above) and `nls_sampling`. The listed `nls_active`, `nls_curve`, `nls_geometry`, `nls_protect`, `nls_scale` do not exist.

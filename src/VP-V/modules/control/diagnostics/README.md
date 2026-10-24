@@ -83,6 +83,22 @@ Classes in src/VideoProcessor-Test (VideoProcessor-Test.dll): `CrashStateTests`,
 
 Read the TRX for the result.
 
+## Cost
+
+Efficiency review 2026-10-24 (code reading only; estimates from loop bounds and file sizes x frequency, not measured). Ranked by saving.
+
+1. **Crash-state write, once per second** (writer thread, never the render or GUI thread). Each write composes the header, ~20 `[state]` values and up to 300 recent lines from the last 5 s (`DebugLog::RecentLines(5000, 300)`): about 2-60 KB depending on log volume. It writes `.tmp` through `std::ofstream`, reopens it with `CreateFileA` only to call `FlushFileBuffers`, then `MoveFileEx(... MOVEFILE_WRITE_THROUGH)`. That is two opens and two forced flushes per second, 86,400 rewrites a day (~0.2-5 GB/day written), and an antivirus scan of each closed `.tmp`.
+   - Fix a: write the `.tmp` through one `CreateFile` handle (`WriteFile`, then `FlushFileBuffers` on the same handle). Saves one open/close and one scan trigger per second. Byte-identical file: yes. Risk: low.
+   - Fix b: skip the rewrite when `[state]` and `[recent log]` are unchanged since the last write (paused, idle, no signal). Removes most writes when nothing happens. Byte-identical: no (the `written:` / `uptime:` header stays at the last change). Risk: low.
+   - Keep the flush and the write-through: they are the power-loss guarantee (audit 2026-10-16).
+2. **Problem report, GUI-thread part** (per report, `CVideoProcessorDlg::SaveStateReport`). Two `ConfigFile::Load` parses (only the paths are used), both DiagnosticHistory rings serialised, `CrashState::Text()`, and a 600-line `recentLog` string that is used only when the log tail cannot be read. Estimated a few ms to ~20 ms GUI hitch per report (not measured). Fix: pass the config paths without parsing them and build the fallback log text on the worker. Byte-identical report: yes (same inputs). Risk: low.
+3. **Report thumbnail** (`report_thumbnail` on): the rendered-output capture blocks the render thread for ~30-80 ms per capture. Costed and fixed under colour.tone_gamut (`AnalyzePackedR10` is there).
+4. **Problem report, worker part** (per report, off the GUI thread): SHA-256 of `VideoProcessor.exe` and each renderer DLL (BCrypt, ~0.5-2 GB/s: tens of ms for tens of MB), redaction line by line (four passes plus word replacement on each of ~4,000 lines of the 512 KiB log tail, a `substr` copy per line), the in-memory store ZIP, flush and write-through rename. Acceptable for an event; no change.
+5. **`WriteNow` copies the recent lines twice** (into `lines`, then into `lastRecent` under the state mutex): up to 300 string copies a second, ~30 µs/s. Fix: compose, then move `lines` into `lastRecent`. Byte-identical: yes. Risk: low.
+6. **GUI 1-second tick**: ~17 `SetValue` calls (map insert under the mutex, `CStringA` conversions), ~10-20 µs/s. No change. The 600-line ring that feeds the recent lines (`DebugLog::RememberRecent`, a timestamp and a copy per log line, kept even with file logging off) is logging's cost, not this slot's.
+
+Cost when off: the crash state has no switch, so item 1 always runs. The report costs nothing until triggered; `auto_report` off and `report_thumbnail` off cost nothing.
+
 ## Settings
 
 - Existing keys: `[shortcuts] state_report`, `[logging] auto_report`, `[logging] report_thumbnail`
