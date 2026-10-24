@@ -138,6 +138,7 @@ namespace Vpv
                     p.set.push_back({ "optical_flow", "on" });
                     p.set.push_back({ "motion_ahead_frames", "4" });
                     p.set.push_back({ "dejudder_est_split", "off" });
+                    p.set.push_back({ "dejudder_est_qpel", "on" });
                     u.presets.push_back(p);
                 }
                 {
@@ -145,6 +146,7 @@ namespace Vpv
                     p.set.push_back({ "optical_flow", "on" });
                     p.set.push_back({ "motion_ahead_frames", "4" });
                     p.set.push_back({ "dejudder_est_split", "on" });
+                    p.set.push_back({ "dejudder_est_qpel", "on" });
                     u.presets.push_back(p);
                 }
                 u.taste.push_back("dejudder_strength");

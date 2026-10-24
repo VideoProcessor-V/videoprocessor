@@ -17,6 +17,7 @@
 #include <QFile>
 #include <QFontDatabase>
 #include <QLabel>
+#include <QPushButton>
 #include <QSet>
 #include <QTabWidget>
 #include <QStackedWidget>
@@ -44,6 +45,7 @@ namespace
 	std::function<void(bool, const char*)> g_require;
 	std::function<void(ConfigEditorWindow&)> g_save;
 	void require(bool condition, const char* message) { g_require(condition, message); }
+	bool RowShown(QWidget* w);   // below (organisation tests)
 	void save(ConfigEditorWindow& window) { g_save(window); }
 }
 
@@ -126,21 +128,22 @@ namespace
 		Profile p;   // nothing set: VP's built-in defaults
 		require(UnitTier(p, "motion") == 2, "defaults are motion Mid (NVOF + matcher, 4 ahead)");
 		require(UnitTier(p, "repair") == 1, "defaults are repair Low (libplacebo deband + breathing reduction)");
-		require(UnitTier(p, "scaling") < 0, "defaults are scaling Custom (re-base auto, SSIM blend off)");
-		require(Vpv::MatchGlobal(t, p.Get()) < 0, "defaults are global Custom");
+		// Logic audit 2026-10-24 (HIGH 1): the shipped values are a tier of every unit.
+		require(UnitTier(p, "scaling") == 1, "defaults are scaling Low (re-base auto, no SSIM blend)");
+		require(UnitTier(p, "output") == 1, "defaults are output Low (temporal dither as shipped)");
+		require(Vpv::MatchGlobal(t, p.Get()) < 0, "defaults are global Custom (Motion Mid, the others Low)");
 
 		ApplyGlobal(p, 3);
 		require(Vpv::MatchGlobal(t, p.Get()) == 3, "global Upper reads back as Upper");
-		require(UnitTier(p, "scaling") == 2 && UnitTier(p, "output") == 1, "units without Upper use their nearest lower tier");
+		require(UnitTier(p, "scaling") == 2 && UnitTier(p, "output") == 2, "units without Upper use their nearest lower tier");
 		require(p.values["texture_restore"] == "statistical" && p.values["dejudder_est_split"] == "on", "Upper presets written");
 
 		ApplyGlobal(p, 0);
 		require(Vpv::MatchGlobal(t, p.Get()) == 0, "global Classic reads back as Classic");
-		require(Vpv::Effective(t, p.Get(), "dejudder_strength") == "0" && p.values["optical_flow"] == "off", "Classic switches motion off");
+		require(p.values["optical_flow"] == "off" && p.values["dejudder_est_qpel"] == "off", "Classic is the basic matcher");
+		require(p.values.find("dejudder_strength") == p.values.end(), "no tier writes the de-judder amount (audit HIGH 2)");
 
-		// Leaving Classic restores the default motion taste; a chosen taste is never overwritten.
-		p.Apply(Vpv::ApplyTier(t, *t.FindUnit("motion"), 2, p.Get()));
-		require(p.values["dejudder_strength"] == "0.25", "leaving Classic restores the default de-judder strength");
+		// A chosen taste is never overwritten by a tier change.
 		p.values["dejudder_strength"] = "0.4";
 		p.Apply(Vpv::ApplyTier(t, *t.FindUnit("motion"), 1, p.Get()));
 		require(p.values["dejudder_strength"] == "0.4", "a chosen motion taste survives a tier change");
@@ -626,7 +629,7 @@ namespace
 		auto* driveAdvanced = control<QWidget>(window, Vpv::ObjectName("drive.advanced"));
 		require(driveMain->isAncestorOf(control<QWidget>(window, QStringLiteral("config.led_drive.default.command_source"))) &&
 			driveMain->isAncestorOf(control<QWidget>(window, QStringLiteral("config.led_drive.default.rate_preset"))),
-			"the Dynamic Drive masters are on Main");
+			("the Dynamic Drive masters are on Main: " + [&]{ QString d; for (QWidget* w = control<QWidget>(window, QStringLiteral("config.led_drive.default.command_source")); w; w = w->parentWidget()) d += w->objectName() + QLatin1Char('<') + QString::fromLatin1(w->metaObject()->className()) + QStringLiteral("> "); return d; }().toStdString()).c_str());
 		auto* rateUp = control<QWidget>(window, QStringLiteral("config.led_drive.default.rate_gain_up"));
 		require(driveAdvanced->isAncestorOf(rateUp) && !rateUp->isEnabled(), "the LED speeds values are set by their preset (Advanced)");
 		control<QCheckBox>(window, Vpv::ObjectName("drive.card.speed_values.custom"))->setChecked(true);

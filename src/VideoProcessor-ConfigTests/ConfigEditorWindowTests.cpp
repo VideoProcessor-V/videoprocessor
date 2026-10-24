@@ -1518,7 +1518,8 @@ void testPictureSliderPresets()
     apply->click();
     QCoreApplication::processEvents();
     const QByteArray saved = readBytes(path);
-    for (const char* expected : { "source_resolution: auto", "source_resolution_auto_min_confidence: 0.7",
+    // source_resolution stays unset (auto is the shipped value; the Scaling tier owns it).
+    for (const char* expected : { "source_resolution_auto_min_confidence: 0.7",
         "source_resolution_evidence_seconds: 5", "source_resolution_evidence_shots: 2", "source_resolution: 1080" })
         require(saved.contains(expected), (QByteArray("Picture setting not saved: ") + expected).constData());
     ConfigEditorWindow reopened(path, 0, true);
@@ -1616,6 +1617,9 @@ void testTemporalDitherButtons()
     require(!off->isChecked() && !libplacebo->isChecked() && !sigma->isChecked() &&
         requireControl<QRadioButton>(window, "config.vprenderer.temporal_dither.auto")->isChecked(),
         "an unset profile does not show Auto");
+    // Organisation pass 2: temporal_dither is the Output tier's key, greyed until Custom.
+    requireControl<QCheckBox>(window, "vpv.output.card.tier_keys.custom")->setChecked(true);
+    QCoreApplication::processEvents();
     sigma->click();
     QCoreApplication::processEvents();
     require(value->currentData().toString() == "sigma_delta" && !libplacebo->isChecked(), "VP temporal did not set sigma_delta");
@@ -9132,6 +9136,9 @@ void testClearedChoiceShowsTheInheritedValue()
     profiles->setCurrentRow(1);
     QCoreApplication::processEvents();
     require(engine->isChecked(), "fixture: the profile's own engine choice");
+    // Organisation pass 2: optical_flow is the Motion tier's key, greyed until Custom.
+    requireControl<QCheckBox>(window, "vpv.motion.card.tier_keys.custom")->setChecked(true);
+    QCoreApplication::processEvents();
     unset->click();
     QCoreApplication::processEvents();
     require(matcher->isChecked() && !engine->isChecked(), "Not set still shows the profile's old value");
@@ -9154,6 +9161,8 @@ void testClearedChoiceShowsTheInheritedValue()
     writeFixture(path2, "[vprenderer.Cinema]\nquality: high\n[vprenderer.Other]\noptical_flow: off\n");
     ConfigEditorWindow second(path2, 0, true);
     requireControl<QListWidget>(second, "config.vprenderer.profiles")->setCurrentRow(1);
+    QCoreApplication::processEvents();
+    requireControl<QCheckBox>(second, "vpv.motion.card.tier_keys.custom")->setChecked(true);
     QCoreApplication::processEvents();
     requireControl<QToolButton>(second, "config.vprenderer.optical_flow.unset")->click();
     QCoreApplication::processEvents();

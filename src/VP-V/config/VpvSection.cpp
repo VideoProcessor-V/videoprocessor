@@ -12,6 +12,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QFrame>
+#include <QDoubleSpinBox>
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QHBoxLayout>

@@ -207,7 +207,8 @@
           "set": {
             "optical_flow": "on",
             "motion_ahead_frames": "4",
-            "dejudder_est_split": "off"
+            "dejudder_est_split": "off",
+            "dejudder_est_qpel": "on"
           }
         },
         "Upper": {
@@ -216,7 +217,8 @@
           "set": {
             "optical_flow": "on",
             "motion_ahead_frames": "4",
-            "dejudder_est_split": "on"
+            "dejudder_est_split": "on",
+            "dejudder_est_qpel": "on"
           }
         }
       },
