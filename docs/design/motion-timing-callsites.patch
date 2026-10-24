@@ -1,0 +1,738 @@
+diff --git a/src/VP-V/tests/PipelineSkeletonTests.cpp b/src/VP-V/tests/PipelineSkeletonTests.cpp
+index 4a5cc586..8dbd7d09 100644
+--- a/src/VP-V/tests/PipelineSkeletonTests.cpp
++++ b/src/VP-V/tests/PipelineSkeletonTests.cpp
+@@ -6,6 +6,7 @@
+ #include <VP-V/core/OriginalPathway.h>
+ #include <RendererProfileConfig.h>
+ #include <vprenderer/AlphaQueuePolicy.h>
++#include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
+ #include <VP-V/core/EntranceStages.h>
+ #include <VP-V/core/OutputHookOrder.h>
+ #include <VP-V/core/SlotRegistry.h>
+diff --git a/src/VideoProcessor-Lib/vprenderer/AlphaQueuePolicy.h b/src/VideoProcessor-Lib/vprenderer/AlphaQueuePolicy.h
+index 91dea47c..f3edb140 100644
+--- a/src/VideoProcessor-Lib/vprenderer/AlphaQueuePolicy.h
++++ b/src/VideoProcessor-Lib/vprenderer/AlphaQueuePolicy.h
+@@ -1,12 +1,8 @@
+ #pragma once
+ 
+-#include <DisplayRefreshRatePolicy.h>
+-
+ #include <algorithm>
+ #include <cerrno>
+-#include <cmath>
+ #include <cstddef>
+-#include <cstdint>
+ #include <cstdlib>
+ #include <limits>
+ #include <string>
+@@ -49,32 +45,6 @@ namespace AlphaQueuePolicy
+ 		return result;
+ 	}
+ 
+-	// led_lookahead_ms (2026-10-17): the queued-frame walk visits
+-	// max(active_picture_lookahead_frames, the LED's wanted depth) future frames,
+-	// bounded by what is queued. Only the first active-picture count (the current
+-	// frame and its configured look-ahead) goes to the active-picture decision; the
+-	// statistics observer (the LED) sees every frame walked. The walk runs for the
+-	// LED alone when the active-picture look-ahead is 0. With the LED wanting no
+-	// more than the active picture, this is exactly SelectActivePicturePreview.
+-	struct LookaheadWalk
+-	{
+-		ActivePicturePreviewWindow window;   // every frame walked (indices), current first
+-		size_t activePictureFrames = 0;      // the leading frames of window for the active picture
+-	};
+-
+-	template<typename Queue>
+-	LookaheadWalk SelectLookaheadWalk(const Queue& queue, size_t activePictureConfigured,
+-		size_t ledWanted, size_t maxActivePicture)
+-	{
+-		LookaheadWalk walk;
+-		const size_t activePicture = (std::min)(activePictureConfigured, maxActivePicture);
+-		const size_t depth = (std::max)(activePicture, ledWanted);
+-		walk.window = SelectActivePicturePreview(queue, depth, (std::max)(maxActivePicture, ledWanted));
+-		walk.activePictureFrames = activePicture == 0 ? 0 :
+-			(std::min)(walk.window.indices.size(), activePicture + 1);
+-		return walk;
+-	}
+-
+ 	inline size_t NormalizeDesiredDepth(size_t value)
+ 	{
+ 		return std::max<size_t>(1, value);
+@@ -114,19 +84,6 @@ namespace AlphaQueuePolicy
+ 		return desired;
+ 	}
+ 
+-	// The queue target the renderer steers to (PrefillTargetLocked; the stress harness uses the
+-	// same function, so the delay gate tests the real rule). desired = the delay budget's whole
+-	// hold frames when a budget is active (time-based already), else the (film-scaled) frame-count
+-	// target. render_ahead_queue_credit gives back frames, never below 2; with queue_timing_fixes the
+-	// credit never takes the target below the look-ahead floor - but never above `desired`, so a
+-	// short delay budget is never exceeded (the look-ahead uses what is queued).
+-	inline size_t CombineQueueTarget(size_t desired, size_t credit, size_t lookaheadFloor, bool queueTimingFixes)
+-	{
+-		const size_t target = credit > 0 && desired > 2 ? desired - (std::min)(credit, desired - 2) : desired;
+-		const size_t floor = queueTimingFixes ? (std::min)(desired, lookaheadFloor) : 0;
+-		return (std::max)(target, floor);
+-	}
+-
+ 	inline bool CanDequeue(size_t queueDepth, size_t desiredDepth,
+ 		bool startupPrefillPending)
+ 	{
+@@ -155,7 +112,7 @@ namespace AlphaQueuePolicy
+ 
+ 	inline double ValidFrameRateOrDefault(double frameRateHz)
+ 	{
+-		return CaptureRateBounds::Accepts(frameRateHz) ?
++		return frameRateHz >= 10.0 && frameRateHz <= 240.0 ?
+ 			frameRateHz : DEFAULT_FRAME_RATE_HZ;
+ 	}
+ 
+@@ -173,204 +130,13 @@ namespace AlphaQueuePolicy
+ 		return std::max(MINIMUM_STALE_BACKLOG_AGE_MS, framePeriodMs * 3.0);
+ 	}
+ 
+-	// Hunt 2 13-timing H1 (queue_timing_fixes): the front frame of a queue that
+-	// holds its target has already waited about target periods; that wait is the
+-	// queue doing its job, not staleness. With staleBeyondTarget the age is measured
+-	// beyond the target's own wait, so target+1 and target+2 (arrival jitter, the
+-	// timeline steering's margin, a ppm step) are left to the steering and the
+-	// cadence correction, and only a real backlog (about 3 periods or 100 ms more
+-	// than the target holds) is flushed. Off: the age from zero (the old rule, which
+-	// at 24-50 Hz flushed every depth above the target).
+-	inline double StaleBacklogExcessAgeMs(double oldestQueuedAgeMs,
+-		size_t desiredDepth, double frameRateHz)
+-	{
+-		const double framePeriodMs =
+-			1000.0 / ValidFrameRateOrDefault(frameRateHz);
+-		return oldestQueuedAgeMs -
+-			static_cast<double>(NormalizeDesiredDepth(desiredDepth)) * framePeriodMs;
+-	}
+-
+-	// The rate of the frames the queue holds (hunt 2 13-timing H1): while a pulldown
+-	// lock holds they are film frames (frontFilmHz, ~41.7 ms apart at 3:2 on a 60 Hz
+-	// signal); otherwise the signal's frames. Judging a film queue with the signal's
+-	// period would call target+1 stale again.
+-	inline double QueueFrameRateHz(double frontFilmHz, double signalRateHz)
+-	{
+-		return frontFilmHz > 0.0 && std::isfinite(frontFilmHz) ? frontFilmHz : signalRateHz;
+-	}
+-
+ 	inline bool ShouldRecoverBacklog(size_t queueDepth, size_t desiredDepth,
+-		double oldestQueuedAgeMs, double renderCycleMs, double frameRateHz,
+-		bool staleBeyondTarget = false)
++		double oldestQueuedAgeMs, double renderCycleMs, double frameRateHz)
+ 	{
+ 		if (queueDepth <= NormalizeDesiredDepth(desiredDepth))
+ 			return false;
+-		const double staleAgeMs = staleBeyondTarget ?
+-			StaleBacklogExcessAgeMs(oldestQueuedAgeMs, desiredDepth, frameRateHz) :
+-			oldestQueuedAgeMs;
+ 		return renderCycleMs >= RenderStallThresholdMs(frameRateHz) ||
+-			staleAgeMs >= StaleBacklogAgeThresholdMs(frameRateHz);
+-	}
+-
+-	// VP-V delay budget (gate 5, 2026-10-24): with a time hold the head waits holdMs by design, so
+-	// the stale-age rule above (100 ms beyond the frame-count target) left up to ~100 ms of backlog
+-	// in place after a start-up or render stall - the total delay stayed above the budget. With a
+-	// hold, a backlog is a head older than the hold by more than two frames; it is shed to target.
+-	inline bool ShouldShedHeldBacklog(size_t queueDepth, size_t desiredDepth, double headAgeMs, double holdMs,
+-		double frameRateHz)
+-	{
+-		if (!(holdMs > 0.0) || queueDepth <= NormalizeDesiredDepth(desiredDepth))
+-			return false;
+-		const double periodMs = 1000.0 / ValidFrameRateOrDefault(frameRateHz);
+-		return headAgeMs > holdMs + 2.0 * periodMs;
+-	}
+-
+-	// One frame behind for good (gate 7): when the source rate equals the display's (60p on 60 Hz)
+-	// a frame the queue gained (an early burst, a stall) never drains: the total stays a frame above
+-	// the budget. A head older than the hold by more than 1.25 frames for half a second in a row
+-	// (jitter never lasts) is that frame: shed it too. `run` counts the consecutive late heads.
+-	// Audit MED 6: also by depth - at a locked 60p on 60 Hz with a small vblank phase the head's age
+-	// cannot tell an extra frame (it is due at once); the queue then holds a frame more than the
+-	// hold's own frames (ceil(hold / period)) plus the one arriving.
+-	// queueHoldMs: the part of holdMs the frames wait IN the queue (after their transfer; < 0: all).
+-	inline bool ShouldShedHeldExcess(size_t queueDepth, size_t desiredDepth, double headAgeMs, double holdMs,
+-		double frameRateHz, unsigned& run, double queueHoldMs = -1.0)
+-	{
+-		const double periodMs = 1000.0 / ValidFrameRateOrDefault(frameRateHz);
+-		const double inQueueMs = queueHoldMs >= 0.0 ? queueHoldMs : holdMs;
+-		const size_t holdFrames = inQueueMs > 0.0 ? static_cast<size_t>(std::ceil(inQueueMs / periodMs - 1e-9)) : 0;
+-		const bool deep = holdMs > 0.0 && queueDepth > holdFrames + 1;
+-		const bool late = holdMs > 0.0 && queueDepth > NormalizeDesiredDepth(desiredDepth) &&
+-			(headAgeMs > holdMs + 1.25 * periodMs || deep);
+-		run = late ? run + 1 : 0;
+-		const unsigned needed = (std::max)(8u, static_cast<unsigned>(std::lround(0.5 * ValidFrameRateOrDefault(frameRateHz))));
+-		if (run < needed)
+-			return false;
+-		run = 0;
+-		return true;
+-	}
+-
+-	// How many frames a held shed drops (audit MED 6): the frames the head is late by (at least
+-	// one), never below the hold's whole frames - not the flush-to-target of a frame-count queue,
+-	// which would undershoot the budget and stutter.
+-	inline size_t HeldShedFrames(size_t queueDepth, size_t desiredDepth, double headAgeMs, double holdMs, double frameRateHz)
+-	{
+-		const double periodMs = 1000.0 / ValidFrameRateOrDefault(frameRateHz);
+-		const double lateFrames = (headAgeMs - holdMs) / periodMs;
+-		const size_t want = lateFrames >= 2.0 ? static_cast<size_t>(std::floor(lateFrames)) : 1;
+-		const size_t target = NormalizeDesiredDepth(desiredDepth);
+-		const size_t room = queueDepth > target ? queueDepth - target : 0;
+-		return (std::min)(want, room);
+-	}
+-
+-	// The VP timeline's queue steering (hunt 2 13-timing H2, L3). The refresh
+-	// spacing is trimmed by the smoothed distance of the queue (after the dequeue)
+-	// from its target, at most 0.3%. The target after the dequeue keeps one frame of
+-	// margin above the dequeue gate (HealthyLowWater), so arrival jitter never
+-	// reaches the gate; H1's beyond-target staleness keeps that margin from being
+-	// flushed. With timeConstant the smoothing is a time constant in seconds
+-	// converted with the source rate (the old weight, 0.05 per frame, was 0.8 s at
+-	// 24p and 0.17 s at 120p); off, the old per-frame weight.
+-	class TimelineQueueSteering
+-	{
+-	public:
+-		static constexpr double kSmoothingSeconds = 0.8;   // the old weight at 24p
+-		static constexpr double kLegacyWeight = 0.05;
+-		static constexpr double kGain = 0.0005;            // trim per frame of error
+-		static constexpr double kMaximumTrim = 0.003;
+-
+-		void Reset() { m_error = 0.0; }
+-
+-		static double Weight(double sourceRateHz, bool timeConstant)
+-		{
+-			if (!timeConstant || !CaptureRateBounds::Accepts(sourceRateHz))
+-				return kLegacyWeight;
+-			return 1.0 - std::exp(-1.0 / (sourceRateHz * kSmoothingSeconds));
+-		}
+-
+-		// targetFraction (VP-V delay budget, ADR-0020): the sub-frame part of the queue's time
+-		// hold (DelayBudget::Plan::holdFraction), so the queue settles at desired + fraction
+-		// frames on average and the total delay equals the budget at every rate. 0 = as before.
+-		double Update(size_t queueDepthAfterDequeue, size_t desiredDepth,
+-			double sourceRateHz, bool timeConstant, double targetFraction = 0.0)
+-		{
+-			const double sample = static_cast<double>(queueDepthAfterDequeue) -
+-				(static_cast<double>(NormalizeDesiredDepth(desiredDepth)) + targetFraction);
+-			m_error += Weight(sourceRateHz, timeConstant) * (sample - m_error);
+-			return m_error;
+-		}
+-
+-		double Error() const { return m_error; }
+-
+-		// Below 1: more refreshes per source frame, so the queue fills.
+-		double RateTrim() const
+-		{
+-			return 1.0 + (std::max)(-kMaximumTrim, (std::min)(kMaximumTrim, kGain * m_error));
+-		}
+-
+-	private:
+-		double m_error = 0.0;
+-	};
+-
+-	// A queue-overflow drop hands its gap to the next frame (hunt 2 13-timing L1).
+-	// gapFrames 0 with gapBefore is a no-fill gap (a timestamp break, a pulldown
+-	// lock change, a backlog flush): it must survive the drop, so no gap-fill pair
+-	// spans it. Otherwise the missed frames add up: the dropped frame's own missed
+-	// frames, the dropped frame itself and the successor's missed frames. Without
+-	// mergeDroppedGap: the old rule (only +1, the dropped frame's own state ignored).
+-	struct GapState
+-	{
+-		bool gapBefore = false;
+-		uint32_t gapFrames = 0;
+-	};
+-
+-	inline GapState MergeDroppedGap(const GapState& dropped, const GapState& next,
+-		bool mergeDroppedGap)
+-	{
+-		GapState merged = next;
+-		if (!mergeDroppedGap)
+-		{
+-			if (!next.gapBefore || next.gapFrames > 0)
+-				merged.gapFrames = next.gapFrames + 1;
+-			merged.gapBefore = true;
+-			return merged;
+-		}
+-		const bool noFill = (dropped.gapBefore && dropped.gapFrames == 0) ||
+-			(next.gapBefore && next.gapFrames == 0);
+-		merged.gapBefore = true;
+-		merged.gapFrames = noFill ? 0 :
+-			(dropped.gapBefore ? dropped.gapFrames : 0) + (next.gapBefore ? next.gapFrames : 0) + 1;
+-		return merged;
+-	}
+-
+-	// The early-upload pool's slots (hunt 2 13-timing L4): the frames in flight
+-	// follow the queue target (target_frames up to 16), not a fixed 8. In flight: the
+-	// queue at its target plus the backlog it tolerates before a flush (3), and next,
+-	// ahead and the frame being filled (3); a margin of 3 (owner 2026-10-15). At the
+-	// default target (5) this is the old 8 + 3. The pool stays capped by bytes.
+-	inline int EarlyUploadSlots(size_t desiredDepth)
+-	{
+-		const size_t inFlight = (std::max)(size_t{ 8 }, NormalizeDesiredDepth(desiredDepth) + 3);
+-		return static_cast<int>((std::min)(inFlight, size_t{ 64 })) + 3;
+-	}
+-
+-	// Consecutive failures that mark the renderer failed (hunt 2 13-timing L3): a
+-	// time, converted with the source rate (300 frames was 12.5 s at 24p and 2.5 s
+-	// at 120p); 300 without the fixes or without a valid rate.
+-	constexpr double RENDER_FAILURE_SECONDS = 5.0;
+-	inline uint32_t ConsecutiveFailureLimit(double frameRateHz, bool timeBased)
+-	{
+-		if (!timeBased || !CaptureRateBounds::Accepts(frameRateHz))
+-			return 300;
+-		return static_cast<uint32_t>((std::max)(1.0, std::ceil(RENDER_FAILURE_SECONDS * frameRateHz)));
+-	}
+-
+-	// Frames for a time at a source rate (at least 1); legacy when not time based.
+-	inline size_t FramesForSeconds(double seconds, double frameRateHz, size_t legacy, bool timeBased)
+-	{
+-		if (!timeBased || !CaptureRateBounds::Accepts(frameRateHz))
+-			return legacy;
+-		return static_cast<size_t>((std::max)(1.0, std::ceil(seconds * frameRateHz)));
++			oldestQueuedAgeMs >= StaleBacklogAgeThresholdMs(frameRateHz);
+ 	}
+ 
+ 	inline bool TryParsePositiveSize(const std::string& value, size_t& parsedValue)
+diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+index 5c24cd7c..719c5ca6 100644
+--- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+@@ -34,6 +34,8 @@
+ #include <microsoft_directshow/MadVRShaderLoader.h>
+ #include <vprenderer/AlphaCadenceCorrectionPolicy.h>
+ #include <vprenderer/AlphaQueuePolicy.h>
++#include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
++#include <vprenderer/QueueLookaheadWalk.h>
+ #include <vprenderer/LibplaceboDisplayLut.h>
+ #include <vprenderer/LibplaceboCalibrationLutPolicy.h>
+ #include <vprenderer/AlphaPresentationTelemetry.h>
+@@ -26864,73 +26866,42 @@ LibplaceboVideoRenderer::QueueHold LibplaceboVideoRenderer::CurrentQueueHold() c
+ 	return m_queueHold;
+ }
+ 
++const QueueTimingPolicy::IQueueTimingPolicy& LibplaceboVideoRenderer::QueuePolicy() const
++{
++	// Commit (a): VP's policy for both pathways, its options read from the same sources as before.
++	// Later (separate commit): queue_policy = upstream, and the Original pathway, select
++	// m_upstreamQueuePolicy (VpQueueTiming::Select).
++	const_cast<VpQueueTiming::VpFixedBudgetPolicy&>(m_vpQueuePolicy).SetOptions({
++		m_impl && m_impl->pipelineSlots.OriginalPathway(), m_queueTimingFixes.load(std::memory_order_relaxed) });
++	return m_vpQueuePolicy;
++}
++
+ void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz, double signalRateHz)
+ {
+-	int budgetMs = m_queueDelayBudgetMs.load(std::memory_order_acquire);
+-	// The Original pathway keeps upstream's frame-count queue (ADR-0019; audit B2).
+-	if (m_impl && m_impl->pipelineSlots.OriginalPathway())
+-		budgetMs = 0;
++	const int budgetMs = m_queueDelayBudgetMs.load(std::memory_order_acquire);
+ 	const bool lowLatency = m_impl && m_impl->lowLatencyQueueActive.load(std::memory_order_acquire);
+-	DelayBudget::Plan plan;
+-	double transferMs = 0.0;   // the plan's capture transfer (timestamps mark a frame's start)
+-	std::string budgetNote;   // why the budget is not exact (shown under "Fallbacks engaged")
+-	if (budgetMs > 0 && m_impl && sourceRateHz > 0.0 && !lowLatency)
+-	{
+-		DelayBudget::Model model;
+-		// The MEASURED display refresh (or the monitor's), never an assumed one (audit B2).
+-		const double displayHz = m_impl->TimelineDisplayHz();
+-		if (displayHz > 0.0)
+-		{
+-			model.refreshHz = displayHz;
+-			if (m_impl->RenderAheadActive())
+-			{
+-				// render-ahead presents its planned lead on top and the queue gives back the frames
+-				// FitDelayBudget granted (renderAheadCreditFrames, the one credit source); the rest
+-				// of the lead is a fixed cost. Its constant total across rates is not verified yet.
+-				const double ps = 1.0 / sourceRateHz;
+-				const double lead = RenderAhead::PlannedLead(ps, 1.0 / displayHz);
+-				const size_t credit = m_impl->renderAheadCreditFrames.load(std::memory_order_acquire);
+-				model.renderAheadMs = (std::max)(0.0, lead - static_cast<double>(credit) * ps) * 1000.0;
+-				budgetNote = "render-ahead on: the total across frame rates is not verified yet (PENDING-RA)";
+-			}
+-			const DelayBudget::Inputs budgetInputs = DelayBudget::InputsFor(budgetMs, sourceRateHz, model, signalRateHz);
+-			transferMs = budgetInputs.captureTransferMs;
+-			plan = DelayBudget::Compute(budgetInputs);
+-			if (!plan.feasible)
+-				budgetNote = "too short for 2 queued frames at this rate; frame-count queue";
+-			else
+-			{
+-				// The FIFO must hold the hold (gate 4, 2026-10-24): at 60p a 267 ms total holds ~12
+-				// frames. A queue_size below that would overflow and drop frames every cycle (an
+-				// unstable, far shorter delay), so the hold is cut to what the queue holds - visibly.
+-				size_t capacity = 0;
+-				{
+-					std::lock_guard<std::mutex> guard(m_queueMutex);
+-					capacity = m_useFrameQueue ? m_frameQueueMaxSize : 1;
+-				}
+-				const double periodMs = 1000.0 / sourceRateHz;
+-				const size_t needed = DelayBudget::QueueCapacityFor(plan.holdMs, periodMs);
+-				if (needed > capacity)
+-				{
+-					const double reachableMs = plan.fixedMs + DelayBudget::HoldForCapacity(capacity, periodMs);
+-					const DelayBudget::Plan cut = DelayBudget::Compute(DelayBudget::InputsFor(reachableMs, sourceRateHz, model, signalRateHz));
+-					char text[192] = {};
+-					sprintf_s(text, "queue_size %zu holds %.0f of %d ms at %.3f Hz (needs %zu); raise queue_size", capacity,
+-						cut.feasible ? cut.fixedMs + cut.holdMs : 0.0, budgetMs, sourceRateHz, needed);
+-					budgetNote = text;
+-					plan = cut;
+-				}
+-			}
+-		}
+-		else
+-			budgetNote = "display refresh not known yet; frame-count queue";
+-	}
+-	QueueHold next;
+-	next.active = plan.feasible;
+-	next.holdMs = next.active ? plan.holdMs : 0.0;
+-	next.transferMs = next.active ? transferMs : 0.0;
+-	next.fraction = next.active ? plan.holdFraction : 0.0;
+-	next.targetFrames = next.active ? plan.queueTargetFrames : 0;
++	// The decision is the policy's (VP fixed total delay, or upstream's frame-count queue); the host
++	// keeps the status, the log and the wake-up.
++	QueueTimingPolicy::HoldContext context;
++	context.budgetMs = m_impl ? budgetMs : 0;
++	context.sourceRateHz = sourceRateHz;
++	context.signalRateHz = signalRateHz;
++	context.lowLatency = lowLatency;
++	if (m_impl)
++	{
++		context.displayHz = m_impl->TimelineDisplayHz();
++		context.renderAheadActive = m_impl->RenderAheadActive();
++		if (context.renderAheadActive && context.displayHz > 0.0 && sourceRateHz > 0.0)
++			context.renderAheadLeadSeconds = RenderAhead::PlannedLead(1.0 / sourceRateHz, 1.0 / context.displayHz);
++		context.renderAheadCreditFrames = m_impl->renderAheadCreditFrames.load(std::memory_order_acquire);
++	}
++	{
++		std::lock_guard<std::mutex> guard(m_queueMutex);
++		context.queueCapacity = m_useFrameQueue ? m_frameQueueMaxSize : 1;
++	}
++	const QueueTimingPolicy::HoldPlan plan = QueuePolicy().PlanHold(context);
++	const std::string& budgetNote = plan.note;
++	QueueHold next = plan;
+ 	bool wasActive = false;
+ 	{
+ 		std::lock_guard<std::mutex> guard(m_queueHoldMutex);
+@@ -26958,7 +26929,7 @@ void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz, double s
+ 		char text[192] = {};
+ 		sprintf_s(text, "%d ms at %.3f Hz (signal %.3f Hz): %d look-ahead frames, hold %.1f ms = target %zu + %.2f frames, padding %.1f ms",
+ 			budgetMs, sourceRateHz, signalRateHz > 0.0 ? signalRateHz : sourceRateHz, plan.queueFrames, plan.holdMs,
+-			plan.queueTargetFrames, plan.holdFraction, plan.paddingMs);
++			plan.targetFrames, plan.fraction, plan.paddingMs);
+ 		state = text;
+ 	}
+ 	if (state != m_queueHoldLogged)
+@@ -26967,7 +26938,7 @@ void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz, double s
+ 		if (next.active)
+ 			DebugLog::Log("Delay budget: %s", state.c_str());
+ 		else if (wasActive)
+-			DebugLog::Log("Delay budget: hold off (%s)", budgetMs <= 0 ? "no budget" : lowLatency ? "low latency" : "not feasible");
++			DebugLog::Log("Delay budget: hold off (%s)", budgetMs <= 0 || (m_impl && m_impl->pipelineSlots.OriginalPathway()) ? "no budget" : lowLatency ? "low latency" : "not feasible");
+ 	}
+ 	if (next.active != wasActive)
+ 		m_queueChanged.notify_all();
+@@ -26978,22 +26949,21 @@ int64_t LibplaceboVideoRenderer::HoldTicksUntilDueLocked() const
+ 	// The plain per-refresh path only. The VP timeline realises the rest by its steering (target +
+ 	// holdFraction); an age gate there adds a frame its slow steering does not drain (delay-gate
+ 	// finding 2026-10-24).
+-	const QueueHold hold = CurrentQueueHold();
+-	if (!hold.active || m_frameQueue.empty() || !m_impl || m_impl->vpTimelineActive)
++	if (m_frameQueue.empty() || !m_impl)
+ 		return 0;
+ 	const QueuedFrame& head = m_frameQueue.front();
+-	// Measured from the capture hardware's arrival when known (audit B2), else the enqueue.
+-	const int64_t since = head.arrivalQpc != 0 ? head.arrivalQpc : head.enqueueQpc;
+-	if (head.fileFrame || since == 0)
+-		return 0;
++	QueueTimingPolicy::DueContext context;
++	context.hold = CurrentQueueHold();
++	if (!context.hold.active)
++		return 0;   // as before: no clock reads without a hold
++	context.timelineActive = m_impl->vpTimelineActive;
++	context.fileFrame = head.fileFrame;
++	context.arrivalQpc = head.arrivalQpc;   // the frame's START (DeckLink normalised, audit MED 7)
++	context.enqueueQpc = head.enqueueQpc;
+ 	LARGE_INTEGER frequency{};
+-	if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0)
+-		return 0;
+-	// The timestamp marks the frame's START (audit MED 7): it arrives after the transfer, then waits
+-	// the hold - the transfer counted once, as the plan counts it.
+-	const int64_t due = since + static_cast<int64_t>((hold.transferMs + hold.holdMs) * static_cast<double>(frequency.QuadPart) / 1000.0);
+-	const int64_t now = PerformanceCounterNow();
+-	return due > now ? due - now : 0;
++	context.qpcFrequency = QueryPerformanceFrequency(&frequency) ? frequency.QuadPart : 0;
++	context.nowQpc = PerformanceCounterNow();
++	return QueuePolicy().TicksUntilDue(context);
+ }
+ 
+ // A timed dequeue wait (a file head's due time, the delay budget's hold) re-checks at least this
+@@ -30967,10 +30937,13 @@ void LibplaceboVideoRenderer::RenderLoop()
+ 			previewWaitMs = std::chrono::duration<double, std::milli>(
+ 				SteadyClock::now() - waitStarted).count();
+             intentWantedLookahead = intentWalkActive ? IntentInterpreter::WantedWalkFrames(m_frameQueue.size()) : 0;
+-            const auto walk = AlphaQueuePolicy::SelectLookaheadWalk(
+-                m_frameQueue, m_activePictureLookaheadFrames.load(std::memory_order_acquire),
+-                (std::max)(statisticsWalkDepth, intentWantedLookahead),
+-                ActivePictureDecisionTimeline::MAX_LOOKAHEAD_FRAMES);
++            // ONE walk (QueueLookaheadWalk): active picture, LED/intent statistics and (after the
++            // upstream merge) the preparation walk's outward frames (outwardFutureFrames).
++            QueueLookaheadWalk::WalkRequest walkRequest;
++            walkRequest.activePictureConfigured = m_activePictureLookaheadFrames.load(std::memory_order_acquire);
++            walkRequest.maxActivePicture = ActivePictureDecisionTimeline::MAX_LOOKAHEAD_FRAMES;
++            walkRequest.statisticsDepth = (std::max)(statisticsWalkDepth, intentWantedLookahead);
++            const auto walk = QueueLookaheadWalk::SelectWalk(m_frameQueue, walkRequest);
+             const auto& window = walk.window;
+             activePictureWalkFrames = walk.activePictureFrames;
+             activePictureLookaheadPolicyGeneration =
+@@ -31874,47 +31847,36 @@ void LibplaceboVideoRenderer::RenderLoop()
+ 						// lock holds the queue holds film frames, so the front frame's film
+ 						// rate; otherwise the signal's rate (measured, else nominal), not the
+ 						// dequeued frame's film rate once the queue has left the lock.
+-						const bool queueFixes = m_queueTimingFixes.load(std::memory_order_relaxed);
+-						const double signalRateHz = measuredCaptureRateHz > 0.0 ? measuredCaptureRateHz :
++						// The policy decides (VP: stale beyond target + held shed; upstream: stale/stall
++						// flush); the host drops, logs and resets.
++						QueueTimingPolicy::BacklogContext backlog;
++						backlog.queueBefore = queueBefore;
++						backlog.target = recoveryTarget;
++						backlog.oldestQueuedAgeMs = oldestBeforeMs;
++						backlog.renderCycleMs = renderCycleMs;
++						backlog.captureRateHz = captureRateHz;
++						backlog.measuredSignalRateHz = measuredCaptureRateHz > 0.0 ? measuredCaptureRateHz :
+ 							(state && state->displayMode ? state->displayMode->RefreshRateHz() : captureRateHz);
+-						const double queueRateHz = queueFixes ? AlphaQueuePolicy::QueueFrameRateHz(
+-							m_frameQueue.empty() ? 0.0 : m_frameQueue.front().filmHz, signalRateHz) : captureRateHz;
+-						// ABI 37: never for a file source - its queue is full and old by
+-						// design (paced by due times), and it must not drop.
+-						recoveredBacklog = !currentFileFrame && !(!m_frameQueue.empty() && m_frameQueue.front().fileFrame) &&
+-							AlphaQueuePolicy::ShouldRecoverBacklog(
+-							queueBefore,
+-							recoveryTarget,
+-							oldestBeforeMs,
+-							renderCycleMs,
+-							queueRateHz,
+-							queueFixes);
+-						// VP-V delay budget: a held queue sheds a backlog beyond its hold (gate 5).
+-						const QueueHold heldQueue = CurrentQueueHold();
+-						size_t heldDrop = 0;   // a held shed: exactly the late frames (audit MED 6)
+-						const bool heldEvaluated = !recoveredBacklog && heldQueue.active && qpcAvailable && !currentFileFrame &&
+-							!m_frameQueue.empty() && !m_frameQueue.front().fileFrame;
+-						if (!heldEvaluated)
+-							m_heldExcessRun = 0;   // a skipped evaluation breaks the run
+-						if (heldEvaluated)
++						backlog.frontFilmHz = m_frameQueue.empty() ? 0.0 : m_frameQueue.front().filmHz;
++						// ABI 37: never for a file source - its queue is full and old by design.
++						backlog.fileSource = currentFileFrame || (!m_frameQueue.empty() && m_frameQueue.front().fileFrame);
++						backlog.qpcAvailable = qpcAvailable;
++						backlog.hold = CurrentQueueHold();
++						if (!m_frameQueue.empty() && qpcAvailable)
+ 						{
++							// The head's age counts from its START (arrival, audit MED 7), else its enqueue.
+ 							const QueuedFrame& head = m_frameQueue.front();
+ 							const int64_t since = head.arrivalQpc != 0 ? head.arrivalQpc : head.enqueueQpc;
+-							const double headAgeMs = since > 0 && nowQpc > since ?
++							backlog.headArrivalAgeMs = since > 0 && nowQpc > since ?
+ 								static_cast<double>(nowQpc - since) * 1000.0 / static_cast<double>(qpcFrequency.QuadPart) : 0.0;
+-							// The head's age counts from its start: the transfer, then the hold (audit MED 7).
+-							const double heldMs = heldQueue.transferMs + heldQueue.holdMs;
+-							heldBacklog = AlphaQueuePolicy::ShouldShedHeldBacklog(queueBefore, recoveryTarget, headAgeMs,
+-								heldMs, queueRateHz) ||
+-								AlphaQueuePolicy::ShouldShedHeldExcess(queueBefore, recoveryTarget, headAgeMs, heldMs,
+-									queueRateHz, m_heldExcessRun, heldQueue.holdMs);
+-							if (heldBacklog)
+-								heldDrop = AlphaQueuePolicy::HeldShedFrames(queueBefore, recoveryTarget, headAgeMs, heldMs, queueRateHz);
+-							recoveredBacklog = heldBacklog && heldDrop > 0;
+ 						}
++						const QueueTimingPolicy::BacklogDecision backlogDecision = QueuePolicy().EvaluateBacklog(backlog, m_backlogRun);
++						recoveredBacklog = backlogDecision.recover;
++						heldBacklog = backlogDecision.trigger == QueueTimingPolicy::Trigger::HeldBacklog;
++						const size_t heldDrop = backlogDecision.maxDrop;
+ 						if (recoveredBacklog)
+ 						{
+-							while (m_frameQueue.size() > recoveryTarget && (!heldBacklog || droppedFrames < heldDrop))
++							while (m_frameQueue.size() > recoveryTarget && droppedFrames < heldDrop)
+ 							{
+ 								if (m_frameQueue.front().cadenceRepeat)
+ 									++canceledRepeats;
+@@ -31936,7 +31898,7 @@ void LibplaceboVideoRenderer::RenderLoop()
+ 								m_frameQueue.front().gapFrames = 0;   // a flush: never a gap-fill pair
+ 								// A held shed of the late frames keeps the steering and render-ahead's anchor
+ 								// (the queue is back at its hold, not restarted).
+-								if (m_impl && !heldBacklog)
++								if (m_impl && backlogDecision.restartsTiming)
+ 								{
+ 									m_impl->vpQueueErrorReset.store(true, std::memory_order_release);
+ 									if (m_impl->RenderAheadActive())
+@@ -32538,16 +32500,20 @@ size_t LibplaceboVideoRenderer::PrefillTargetLocked() const
+ 		return 1;
+ 	// VP-V delay budget (ADR-0020): with a budget the queue target is the hold's whole frames at
+ 	// this rate (time-based already, so no film-lock scaling); otherwise the frame-count target.
+-	const QueueHold hold = CurrentQueueHold();
+-	const size_t desired = hold.active ?
+-		AlphaQueuePolicy::ClampDesiredDepthToCapacity(hold.targetFrames, m_frameQueueMaxSize) :
++	QueueTimingPolicy::TargetContext context;
++	context.useFrameQueue = m_useFrameQueue;
++	context.configuredDepth = m_frameQueueDesiredDepth;
++	context.capacity = m_frameQueueMaxSize;
++	context.hold = CurrentQueueHold();
++	// Host-side cadence scaling (hunt 2 06-interp M3); evaluated only when the hold does not decide.
++	context.cadenceScaledDepth = context.hold.active ? 0 :
+ 		LockedFilmQueueTarget(AlphaQueuePolicy::ClampDesiredDepthToCapacity(m_frameQueueDesiredDepth, m_frameQueueMaxSize));
+ 	// render_ahead_queue_credit (design step 7) and the look-ahead floor (hunt 2 13-timing M3), in
+ 	// the one rule the stress harness tests too (AlphaQueuePolicy::CombineQueueTarget): the floor
+ 	// never exceeds `desired`, so a delay budget's hold target wins (audit B2).
+-	const size_t credit = m_impl ? m_impl->renderAheadCreditFrames.load(std::memory_order_acquire) : 0;
+-	return AlphaQueuePolicy::CombineQueueTarget(desired, credit, m_queueTargetFloor.load(std::memory_order_relaxed),
+-		m_queueTimingFixes.load(std::memory_order_relaxed));
++	context.renderAheadCreditFrames = m_impl ? m_impl->renderAheadCreditFrames.load(std::memory_order_acquire) : 0;
++	context.lookaheadFloor = m_queueTargetFloor.load(std::memory_order_relaxed);
++	return QueuePolicy().QueueTarget(context);
+ }
+ 
+ 
+diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h
+index 8f63b095..f15cb6c3 100644
+--- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h
+@@ -13,6 +13,8 @@
+ #include <vprenderer/PulldownDetector.h>
+ #include <vprenderer/CaptureTimestampGap.h>
+ #include <vprenderer/FileFrameSlotGate.h>
++#include <vprenderer/QueueTimingPolicy.h>
++#include <VP-V/modules/input/queue_timing/VpFixedBudgetPolicy.h>
+ #include <video_frame_formatter/IVideoFrameFormatter.h>
+ 
+ #include <atomic>
+@@ -398,19 +400,19 @@ private:
+ 	std::atomic<int> m_queueDelayBudgetMs{0};
+ 	// One coherent hold (audit B2): written together by UpdateQueueDelayHold, read together under
+ 	// m_queueHoldMutex (lock order: m_queueMutex, then m_queueHoldMutex).
+-	struct QueueHold
+-	{
+-		bool active = false;
+-		double holdMs = 0.0;
+-		double transferMs = 0.0;   // the capture transfer before the hold (timestamps mark a frame's start)
+-		double fraction = 0.0;
+-		size_t targetFrames = 0;
+-	};
++	// The policy's hold plan (same fields as before: active, holdMs, transferMs, fraction, targetFrames).
++	using QueueHold = QueueTimingPolicy::HoldPlan;
+ 	mutable std::mutex m_queueHoldMutex;
+ 	QueueHold m_queueHold;
+ 	QueueHold CurrentQueueHold() const;
+ 	std::string m_queueHoldLogged;
+-	unsigned m_heldExcessRun = 0;   // consecutive held heads a frame late (AlphaQueuePolicy::ShouldShedHeldExcess)
++	// Queue/timing policy (either/or, owner 2026-10-24): VP's fixed total delay (default) or upstream's.
++	// Commit (a): the VP policy serves both pathways (its options mirror the Original pathway and
++	// queue_timing_fixes, refreshed before each call from the same sources as before the move).
++	VpQueueTiming::VpFixedBudgetPolicy m_vpQueuePolicy;
++	QueueTimingPolicy::BillQueuePolicy m_upstreamQueuePolicy;
++	const QueueTimingPolicy::IQueueTimingPolicy& QueuePolicy() const;
++	QueueTimingPolicy::BacklogRunState m_backlogRun;   // was m_heldExcessRun
+ 	std::atomic<uint64_t> m_droppedFrames{0};
+ 	std::atomic<uint64_t> m_conversionFailures{0};
+ 	std::atomic<size_t> m_activePictureLookaheadFrames{0};
+diff --git a/src/VideoProcessor-Test/EfficiencyTests.cpp b/src/VideoProcessor-Test/EfficiencyTests.cpp
+index a00e7d3b..1dd419e0 100644
+--- a/src/VideoProcessor-Test/EfficiencyTests.cpp
++++ b/src/VideoProcessor-Test/EfficiencyTests.cpp
+@@ -8,6 +8,7 @@
+ #include <led/LedDriveModule.h>
+ #include <led/LedLookahead.h>
+ #include <vprenderer/AlphaQueuePolicy.h>
++#include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
+ #include <vprenderer/UploadReuse.h>
+ 
+ #include <chrono>
+diff --git a/src/VideoProcessor-Test/IntentInterpreterTests.cpp b/src/VideoProcessor-Test/IntentInterpreterTests.cpp
+index e6f7cd50..74b6b543 100644
+--- a/src/VideoProcessor-Test/IntentInterpreterTests.cpp
++++ b/src/VideoProcessor-Test/IntentInterpreterTests.cpp
+@@ -17,6 +17,7 @@
+ #include <ConfigFile.h>
+ #include <RendererProfileConfig.h>
+ #include <vprenderer/AlphaQueuePolicy.h>
++#include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
+ #include <chrono>
+ #include <cstdlib>
+ #include <Windows.h>
+diff --git a/src/VideoProcessor-Test/LedScriptLookaheadTests.cpp b/src/VideoProcessor-Test/LedScriptLookaheadTests.cpp
+index 14bdd371..e14c223c 100644
+--- a/src/VideoProcessor-Test/LedScriptLookaheadTests.cpp
++++ b/src/VideoProcessor-Test/LedScriptLookaheadTests.cpp
+@@ -4,6 +4,7 @@
+ #include <led/LedController.h>
+ #include <led/LedDriveModule.h>
+ #include <vprenderer/AlphaQueuePolicy.h>
++#include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
+ 
+ #include <algorithm>
+ #include <cmath>
+diff --git a/src/VideoProcessor-Test/QueueStressHarness.h b/src/VideoProcessor-Test/QueueStressHarness.h
+index d436b3c2..735e9e36 100644
+--- a/src/VideoProcessor-Test/QueueStressHarness.h
++++ b/src/VideoProcessor-Test/QueueStressHarness.h
+@@ -30,6 +30,7 @@
+ #include <DisplayRefreshRatePolicy.h>
+ #include <MotionValidity.h>
+ #include <vprenderer/AlphaQueuePolicy.h>
++#include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
+ #include <vprenderer/CaptureTimestampGap.h>
+ #include <vprenderer/DejudderPolicy.h>
+ #include <vprenderer/InterpolationTimeline.h>
+diff --git a/src/VideoProcessor-Test/QueueTimingFixesTests.cpp b/src/VideoProcessor-Test/QueueTimingFixesTests.cpp
+index 20aebe7a..950567be 100644
+--- a/src/VideoProcessor-Test/QueueTimingFixesTests.cpp
++++ b/src/VideoProcessor-Test/QueueTimingFixesTests.cpp
+@@ -12,6 +12,7 @@
+ #include <TimingClock.h>
+ #include <vprenderer/AlphaCadenceCorrectionPolicy.h>
+ #include <vprenderer/AlphaQueuePolicy.h>
++#include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
+ #include <vprenderer/OpenLoopDisplayRate.h>
+ 
+ #include <algorithm>
+diff --git a/src/VideoProcessor-Test/RealFootageSuiteTests.cpp b/src/VideoProcessor-Test/RealFootageSuiteTests.cpp
+index 9c1e09e0..e0cecc14 100644
+--- a/src/VideoProcessor-Test/RealFootageSuiteTests.cpp
++++ b/src/VideoProcessor-Test/RealFootageSuiteTests.cpp
+@@ -52,6 +52,7 @@
+ #include <MotionValidity.h>
+ #include <SourceResolutionDetector.h>
+ #include <vprenderer/AlphaQueuePolicy.h>
++#include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
+ #include <vprenderer/CaptureTimestampGap.h>
+ #include <vprenderer/DejudderPolicy.h>
+ #include <vprenderer/InterpolationTimeline.h>
+diff --git a/src/VideoProcessor-Test/RenderAheadPolicyTests.cpp b/src/VideoProcessor-Test/RenderAheadPolicyTests.cpp
+index eee3986d..cdb11239 100644
+--- a/src/VideoProcessor-Test/RenderAheadPolicyTests.cpp
++++ b/src/VideoProcessor-Test/RenderAheadPolicyTests.cpp
+@@ -3,6 +3,7 @@
+ 
+ #include <led/LedDriveModule.h>
+ #include <vprenderer/AlphaQueuePolicy.h>
++#include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
+ #include <vprenderer/DejudderPolicy.h>
+ #include <vprenderer/InterpolationTimeline.h>
+ #include <vprenderer/RenderAheadPolicy.h>
+diff --git a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
+index 9a6c1588..1082a513 100644
+--- a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
++++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
+@@ -454,6 +454,12 @@
+     <ClCompile Include="..\VP-V\tests\CombinationRunnerTests.cpp">
+       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+     </ClCompile>
++    <ClCompile Include="..\VP-V\tests\QueueTimingPolicyTests.cpp">
++      <PrecompiledHeader>NotUsing</PrecompiledHeader>
++    </ClCompile>
++    <ClCompile Include="..\VP-V\tests\MotionSegmentTests.cpp">
++      <PrecompiledHeader>NotUsing</PrecompiledHeader>
++    </ClCompile>
+     <ClCompile Include="QueueStressLaneTests.cpp" />
+     <ClCompile Include="RendererPostStallResetAdvisorTests.cpp" />
+     <ClCompile Include="MadVRShaderRuntimeStateTests.cpp" />
