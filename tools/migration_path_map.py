@@ -223,9 +223,15 @@ def problems():
 UPSTREAM_BETA = os.environ.get("VP_UPSTREAM_BETA", "origin/v1.4.02-beta")
 
 
+_upstream_files = None
+
+
 def in_upstream(path):
-    return subprocess.run(["git", "-C", ROOT, "cat-file", "-e", f"{UPSTREAM_BETA}:{path}"],
-                          capture_output=True).returncode == 0
+    """Same answer as `git cat-file -e <beta>:<path>`, from one ls-tree of the beta (fast)."""
+    global _upstream_files
+    if _upstream_files is None:
+        _upstream_files = set(git("ls-tree", "-r", "--name-only", UPSTREAM_BETA).splitlines())
+    return path in _upstream_files
 
 
 def bill_owned_problems(moves):
