@@ -236,6 +236,12 @@ namespace Tests
 			Assert::AreEqual(std::string(), DvDolbyStyle::CannotRun(true, false, PL_COLOR_TRC_GAMMA24, true));
 			Assert::AreEqual(std::string("a calibration LUT is active"), DvDolbyStyle::CannotRun(true, true, PL_COLOR_TRC_PQ, true));
 			Assert::AreEqual(std::string("unsupported output transfer"), DvDolbyStyle::CannotRun(true, false, PL_COLOR_TRC_HLG, true));
+			Assert::AreEqual(std::string("shaders/DV trims.glsl did not load"), DvDolbyStyle::CannotRun(true, false, PL_COLOR_TRC_PQ, true, true));
+			Assert::AreEqual(std::string("bt2390"), DvDolbyStyle::FallbackName(false), L"no '+ trims' when dv_trims is off");
+			Assert::AreEqual(std::string("DV tone mapping: bt2390 (Dolby-style could not run: a calibration LUT is active)"),
+				DvDolbyStyle::StatusText(DvDolbyStyle::Mode::DolbyStyle, false, "spline", "a calibration LUT is active", false));
+			Assert::AreEqual(std::string("DV tone mapping: Dolby-style (approx.); L1 missing -> mid-range fallback"),
+				DvDolbyStyle::StatusText(DvDolbyStyle::Mode::DolbyStyle, true, "bt2390", "", true, true));
 			Assert::AreEqual(std::string("DV tone mapping: Dolby-style (approx.)"),
 				DvDolbyStyle::StatusText(DvDolbyStyle::Mode::DolbyStyle, true, "bt2390", ""));
 			Assert::IsTrue(DvDolbyStyle::StatusText(DvDolbyStyle::Mode::DolbyStyle, false, "spline", "a calibration LUT is active")
@@ -245,7 +251,13 @@ namespace Tests
 			const auto off = DvDolbyStyle::ShaderParameters(false, nullptr);
 			Assert::AreEqual<size_t>(1, off.size());
 			Assert::AreEqual(0.0, off[0].second);
-			Assert::AreEqual<size_t>(10, DvDolbyStyle::ShaderParameters(true, nullptr).size());
+			const auto on = DvDolbyStyle::ShaderParameters(true, nullptr);
+			Assert::AreEqual<size_t>(19, on.size(), L"dv_space + the matrix + its inverse");
+			double m[3][3], mi[3][3];
+			for (int k = 0; k < 9; ++k) { m[k / 3][k % 3] = on[1 + k].second; mi[k / 3][k % 3] = on[10 + k].second; }
+			for (int r = 0; r < 3; ++r)
+				for (int c = 0; c < 3; ++c)
+					Assert::AreEqual(r == c ? 1.0 : 0.0, m[r][0] * mi[0][c] + m[r][1] * mi[1][c] + m[r][2] * mi[2][c], 1e-12);
 		}
 
 		TEST_METHOD(ReferenceConditionsDescribeWhatTheGradeAssumed)

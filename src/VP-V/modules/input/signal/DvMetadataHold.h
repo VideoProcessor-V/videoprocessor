@@ -19,9 +19,13 @@
 //                  source range, L5/L6/L9/L10/L11 stay (they describe the title, not the
 //                  shot); L1 scene values and the L2/L8 trims are dropped, so tone mapping
 //                  falls back to the static source range and the trims to neutral;
-//   past the formatter's loss limit (~1 s) a picture whose header is still CRC-valid keeps
-//   decoding with the retained matrices and static metadata (owner 2026-10-24); only pictures
-//   without a valid header (not decodable as the tunnel) clear the DM: black until fresh DM.
+//   the static phase applies to TRANSPORT damage only (CRC / length / continuation failures,
+//   truncation: the body that arrived is the title's, damaged on the way) and is capped at
+//   StaticCapPictures() (the formatter passes its SDR-exit window, 2 s); a CRC-valid packet
+//   whose body is UNSUPPORTED / MALFORMED (e.g. a same-mode title change without EOS to a DM
+//   VP cannot decode) is undecodable once the hold expires: the DM is cleared, black until
+//   fresh DM (audit 2026-10-24: never the old title's matrices on the new title). Pictures
+//   without a valid header clear it at the formatter's loss limit (~1 s), as before.
 // Every rejected picture is counted (RejectedPictures, shown with the DV status); the
 // renderer lists "DV metadata" under "Fallbacks engaged" while Held or Static lasts (the
 // GUI's one-time notice comes with the first engagement).
@@ -64,14 +68,23 @@ namespace DvMetadataHold
 	class Tracker
 	{
 	public:
-		void SetRate(double hz)
+		// The caller's measured rate (the formatter's, after its own logged GeneralRate
+		// fallback); staticSeconds caps the static phase (the formatter's SDR-exit window).
+		// An invalid rate changes nothing (no fixed rate here).
+		void SetRate(double hz, double staticSeconds)
 		{
-			const double rate = std::isfinite(hz) && hz > 0.0 ? hz : 24000.0 / 1001.0;
-			m_holdPictures = static_cast<uint32_t>(std::floor(rate * kHoldSeconds + 0.5));
+			if (!(std::isfinite(hz) && hz > 0.0))
+				return;
+			m_holdPictures = static_cast<uint32_t>(std::floor(hz * kHoldSeconds + 0.5));
 			if (m_holdPictures < 1)
 				m_holdPictures = 1;
+			const double cap = std::ceil(hz * (staticSeconds > kHoldSeconds ? staticSeconds : kHoldSeconds) - 1e-9);
+			m_staticCapPictures = cap > m_holdPictures ? static_cast<uint32_t>(cap) : m_holdPictures + 1;
 		}
 		uint32_t HoldPictures() const { return m_holdPictures; }
+		uint32_t StaticCapPictures() const { return m_staticCapPictures; }
+		// Source pictures since this run of rejections began (0 = not in a run).
+		uint64_t RunSpan() const { return m_inRun ? m_lastSpan : 0; }
 
 		void Reset()
 		{
@@ -111,6 +124,7 @@ namespace DvMetadataHold
 				return m_phase;
 			}
 			const uint64_t span = counter - m_runStart + 1;
+			m_lastSpan = span;
 			const Phase previous = m_phase;
 			m_phase = span <= m_holdPictures ? Phase::Held : Phase::Static;
 			m_enteredStatic = m_phase == Phase::Static && previous != Phase::Static;
@@ -123,7 +137,9 @@ namespace DvMetadataHold
 		uint32_t Runs() const { return m_runs; }
 
 	private:
-		uint32_t m_holdPictures = 6;
+		uint32_t m_holdPictures = 1;          // until SetRate: the shortest hold
+		uint32_t m_staticCapPictures = 2;
+		uint64_t m_lastSpan = 0;
 		bool m_inRun = false;
 		uint64_t m_runStart = 0;
 		Phase m_phase = Phase::Own;

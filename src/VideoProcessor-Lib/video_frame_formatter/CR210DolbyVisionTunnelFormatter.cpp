@@ -800,7 +800,7 @@ void CR210DolbyVisionTunnelFormatter::OnVideoState(VideoStateComPtr& state)
 		std::floor(m_frameRate * kPacketLossSeconds + 0.5)));
 	m_sdrFallbackFrames = static_cast<uint64_t>((std::max)(2.0,
 		std::ceil(m_frameRate * kSdrFallbackSeconds - 1e-9)));
-	m_dmHold.SetRate(m_frameRate);   // feat/dv-l8: the hold is a time at the measured rate
+	m_dmHold.SetRate(m_frameRate, kSdrFallbackSeconds);   // feat/dv-l8: times at the measured rate
 	m_dmHold.Reset();
 	m_sdrSuspect = false;
 	m_sdrSuspectStartCounter = 0;
@@ -1013,6 +1013,7 @@ CR210DolbyVisionTunnelFormatter::AnalyzeFrame(const VideoFrame& frame)
 	bool acceptedMetadata = false;
 	bool supportedHeader = false;
 	const char* failureReason = "missing/CRC-invalid first packet";
+	bool bodyUnsupported = false;   // feat/dv-l8: a CRC-valid packet with a body VP cannot use
 	// Each packet occupies 3072 pixels: three independent CRC-protected
 	// copies. Never span pictures or include row padding in the raster.
 	const size_t availablePackets = static_cast<size_t>(m_width) * m_height /
@@ -1194,6 +1195,7 @@ CR210DolbyVisionTunnelFormatter::AnalyzeFrame(const VideoFrame& frame)
 			if (!ParseMetadata(body.data(), length, parsed, extensionLevels, rawTrims, m_bugHuntFixes))
 			{
 				failureReason = "unsupported/malformed metadata body";
+				bodyUnsupported = true;   // feat/dv-l8: not transport damage
 				break;
 			}
 		}
@@ -1381,9 +1383,22 @@ CR210DolbyVisionTunnelFormatter::AnalyzeFrame(const VideoFrame& frame)
 	// refers to it); only a SHOWN picture past the hold gets the static copy (getter).
 	if (m_bugHuntFixes && (m_tunnelConfirmed || acceptedMetadata) &&
 		m_dmHold.OnPicture(acceptedMetadata, m_metadata.valid, counter) == DvMetadataHold::Phase::Static &&
-		m_dmHold.EnteredStatic())
+		m_dmHold.EnteredStatic() && !bodyUnsupported)
 		DebugLog::Log("Dolby Vision RGB tunnel: DM rejected for longer than the %u-picture hold; shown pictures use static metadata only (scene L1 and trims dropped) until fresh DM; %u rejected pictures so far",
 			m_dmHold.HoldPictures(), m_dmHold.RejectedPictures());
+	// feat/dv-l8 (audit 2026-10-24): past the hold, an unsupported / malformed body (not transport
+	// damage) is undecodable, and transport damage keeps the static picture only up to the cap.
+	if (m_bugHuntFixes && m_tunnelConfirmed && !acceptedMetadata && m_metadata.valid &&
+		m_dmHold.CurrentPhase() == DvMetadataHold::Phase::Static &&
+		(bodyUnsupported || m_dmHold.RunSpan() > m_dmHold.StaticCapPictures()))
+	{
+		DebugLog::Log("Dolby Vision RGB tunnel: %s; DM cleared, black until fresh DM (%u rejected pictures so far)",
+			bodyUnsupported ? "metadata body unsupported/malformed beyond the hold (e.g. a title change VP cannot decode)" :
+			"transport damage beyond the static-metadata cap", m_dmHold.RejectedPictures());
+		m_metadata = {};
+		m_hasActiveMetadataId = false;
+		m_hasPendingMetadata = false;
+	}
 	// audit 2026-10-16: safe exit for a same-mode SDR switch without EOS.
 	// CRC loss alone still never authorizes SDR (a damaged tunnel looks the
 	// same). Only when, for kSdrFallbackSeconds of capture time (counted in

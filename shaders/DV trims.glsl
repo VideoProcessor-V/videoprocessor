@@ -27,6 +27,7 @@
  *   dv_space                  1: the trims in ICtCp (BT.2100) for the Dolby-style DV tone
  *                             mapping (DvDolbyStyle::ApplyPixelIctcp, kept identical)
  *   dv_lms00 .. dv_lms22      output linear RGB -> LMS (the output primaries to BT.2100 LMS)
+ *   dv_ilms00 .. dv_ilms22    its inverse (computed once on the CPU)
  * With L8 the reference is DvTrimSelection::ApplyPixel
  * (src/VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h).
  *
@@ -286,6 +287,69 @@
 //!MAXIMUM 4.0
 0.9004
 
+//!PARAM dv_ilms00
+//!DESC LMS -> output RGB row 0 col 0 (the inverse of dv_lms)
+//!TYPE float
+//!MINIMUM -8.0
+//!MAXIMUM 8.0
+3.0
+
+//!PARAM dv_ilms01
+//!DESC LMS -> output RGB row 0 col 1 (the inverse of dv_lms)
+//!TYPE float
+//!MINIMUM -8.0
+//!MAXIMUM 8.0
+-2.2
+
+//!PARAM dv_ilms02
+//!DESC LMS -> output RGB row 0 col 2 (the inverse of dv_lms)
+//!TYPE float
+//!MINIMUM -8.0
+//!MAXIMUM 8.0
+0.07
+
+//!PARAM dv_ilms10
+//!DESC LMS -> output RGB row 1 col 0 (the inverse of dv_lms)
+//!TYPE float
+//!MINIMUM -8.0
+//!MAXIMUM 8.0
+-0.69
+
+//!PARAM dv_ilms11
+//!DESC LMS -> output RGB row 1 col 1 (the inverse of dv_lms)
+//!TYPE float
+//!MINIMUM -8.0
+//!MAXIMUM 8.0
+1.72
+
+//!PARAM dv_ilms12
+//!DESC LMS -> output RGB row 1 col 2 (the inverse of dv_lms)
+//!TYPE float
+//!MINIMUM -8.0
+//!MAXIMUM 8.0
+-0.03
+
+//!PARAM dv_ilms20
+//!DESC LMS -> output RGB row 2 col 0 (the inverse of dv_lms)
+//!TYPE float
+//!MINIMUM -8.0
+//!MAXIMUM 8.0
+-0.02
+
+//!PARAM dv_ilms21
+//!DESC LMS -> output RGB row 2 col 1 (the inverse of dv_lms)
+//!TYPE float
+//!MINIMUM -8.0
+//!MAXIMUM 8.0
+-0.08
+
+//!PARAM dv_ilms22
+//!DESC LMS -> output RGB row 2 col 2 (the inverse of dv_lms)
+//!TYPE float
+//!MINIMUM -8.0
+//!MAXIMUM 8.0
+1.12
+
 //!HOOK PREOUTPUT
 //!BIND HOOKED
 //!DESC VideoProcessor Dolby Vision L2/L8 trims (non-certified)
@@ -451,7 +515,7 @@ vec3 dv_from_ictcp(vec3 ictcp, mat3 from_lms)
 vec4 dv_hook_ictcp(vec4 color)
 {
     mat3 to_lms = transpose(mat3(dv_lms00, dv_lms01, dv_lms02, dv_lms10, dv_lms11, dv_lms12, dv_lms20, dv_lms21, dv_lms22));
-    mat3 from_lms = inverse(to_lms);
+    mat3 from_lms = transpose(mat3(dv_ilms00, dv_ilms01, dv_ilms02, dv_ilms10, dv_ilms11, dv_ilms12, dv_ilms20, dv_ilms21, dv_ilms22));
     vec3 L = vec3(to_nits(color.r), to_nits(color.g), to_nits(color.b));
     vec3 pos = max(L, vec3(0.0));
     vec3 carry = L - pos;

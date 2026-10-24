@@ -32,9 +32,11 @@
 // for Dolby Vision pictures only; libplacebo's L1-derived scene values (input min / avg / max)
 // and the target (output min / max) arrive in its parameters, so its LUT cache follows scene
 // changes. The ICtCp trims run in shaders/DV trims.glsl (dv_space = 1). When the mode cannot
-// run (a calibration LUT, an output transfer the trims stage does not support, the trims shader
-// missing), the renderer lists "DV tone mapping" under "Fallbacks engaged" and uses bt2390 +
-// the luminance trims (the documented fallback). BTB / WTW: below-black residuals are carried
+// run (a calibration LUT, an output transfer the trims stage does not support, the slot off,
+// the trims shader missing), the renderer lists "DV tone mapping" under "Fallbacks engaged" and
+// uses bt2390 (+ the luminance trims when dv_trims is on). libplacebo's input_avg / input_max
+// come from the picture's hdr.avg_pq_y / max_pq_y (L1); when they are absent the renderer says
+// "L1 missing -> mid-range fallback" in the status (the curve then uses the range's middle). BTB / WTW: below-black residuals are carried
 // around the trims and the curve continues above the scene peak with its end slope.
 #include <VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h>
 
@@ -325,13 +327,18 @@ namespace DvDolbyStyle
 
 	inline Mode ParseMode(const std::string& value) { return value == "dolby_style" ? Mode::DolbyStyle : Mode::Libplacebo; }
 
-	// "DV tone mapping: Dolby-style (approx.)" / "... libplacebo (<curve>)" / "... bt2390 + trims (fallback: why)".
-	inline std::string StatusText(Mode requested, bool running, const std::string& libplaceboCurve, const std::string& fallbackReason)
+	// The fallback's own name: bt2390, with the luminance trims only when dv_trims is on.
+	inline std::string FallbackName(bool trimsOn) { return trimsOn ? "bt2390 + trims" : "bt2390"; }
+
+	// "DV tone mapping: Dolby-style (approx.)" [+ "; L1 missing -> mid-range fallback"] /
+	// "... libplacebo (<curve>)" / "... bt2390 [+ trims] (Dolby-style could not run: why)".
+	inline std::string StatusText(Mode requested, bool running, const std::string& libplaceboCurve, const std::string& fallbackReason,
+		bool trimsOn = true, bool l1Missing = false)
 	{
 		if (requested == Mode::DolbyStyle && running)
-			return "DV tone mapping: Dolby-style (approx.)";
+			return std::string("DV tone mapping: Dolby-style (approx.)") + (l1Missing ? "; L1 missing -> mid-range fallback" : "");
 		if (requested == Mode::DolbyStyle)
-			return "DV tone mapping: bt2390 + trims (Dolby-style could not run: " + fallbackReason + ")";
+			return "DV tone mapping: " + FallbackName(trimsOn) + " (Dolby-style could not run: " + fallbackReason + ")";
 		return "DV tone mapping: libplacebo (" + libplaceboCurve + ")";
 	}
 
@@ -442,7 +449,8 @@ namespace DvDolbyStyle
 	}
 
 	// Why the Dolby-style mode cannot run for this picture ("" = it can, or it was not asked for).
-	inline std::string CannotRun(bool wanted, bool calibrationLut, enum pl_color_transfer trc, bool colourStageRuns)
+	inline std::string CannotRun(bool wanted, bool calibrationLut, enum pl_color_transfer trc, bool colourStageRuns,
+		bool trimsShaderMissing = false)
 	{
 		if (!wanted)
 			return std::string();
@@ -452,6 +460,8 @@ namespace DvDolbyStyle
 			return "unsupported output transfer";
 		if (!colourStageRuns)
 			return "the colour tone-shape slot is off";
+		if (trimsShaderMissing)
+			return "shaders/DV trims.glsl did not load";
 		return std::string();
 	}
 
@@ -460,6 +470,8 @@ namespace DvDolbyStyle
 	{
 		static const char* const names[9] = { "dv_lms00", "dv_lms01", "dv_lms02", "dv_lms10", "dv_lms11", "dv_lms12",
 			"dv_lms20", "dv_lms21", "dv_lms22" };
+		static const char* const inverse[9] = { "dv_ilms00", "dv_ilms01", "dv_ilms02", "dv_ilms10", "dv_ilms11", "dv_ilms12",
+			"dv_ilms20", "dv_ilms21", "dv_ilms22" };
 		std::vector<std::pair<const char*, double>> out = { { "dv_space", ictcp ? 1.0 : 0.0 } };
 		if (!ictcp)
 			return out;
@@ -469,8 +481,12 @@ namespace DvDolbyStyle
 		const double b[2] = { prim ? prim->blue.x : 0.131, prim ? prim->blue.y : 0.046 };
 		const double w[2] = { prim ? prim->white.x : 0.3127, prim ? prim->white.y : 0.3290 };
 		OutputToLms(r, g, b, w, m);
+		double mi[3][3];
+		Invert(m, mi);   // passed in, not inverted per pixel (audit 2026-10-24)
 		for (int k = 0; k < 9; ++k)
 			out.emplace_back(names[k], m[k / 3][k % 3]);
+		for (int k = 0; k < 9; ++k)
+			out.emplace_back(inverse[k], mi[k / 3][k % 3]);
 		return out;
 	}
 

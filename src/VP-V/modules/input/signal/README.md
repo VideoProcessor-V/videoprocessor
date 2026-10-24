@@ -52,10 +52,12 @@ Chain tests:
 - `DvSignalLevels.h`: L9 (source primary index) and L10 (custom target displays) parsed into the
   DM, so L8 trims can be resolved (`colour/sdr_tone_shape/DvTrimSelection.h`).
 - `DvMetadataHold.h` (no silent fallbacks): a picture whose DM is rejected keeps the previous DM
-  only for a bounded hold (0.25 s at the measured rate), then static/base metadata (matrices,
-  source range, L5/L6/L9/L10/L11 kept; L1 and trims dropped). Past the ~1 s loss limit a picture
-  whose header is still CRC-valid keeps decoding with static metadata; black only when the
-  header is missing (the picture is not decodable as the tunnel). Every rejected picture is counted ("DV metadata: N rejected pictures" on the DV status
+  only for a bounded hold (0.25 s at the measured rate). After it: TRANSPORT damage (CRC / length
+  / continuation failures, truncation) shows static/base metadata (matrices, source range,
+  L5/L6/L9/L10/L11 kept; L1 and trims dropped), also past the ~1 s loss limit while headers stay
+  CRC-valid, capped at the SDR-exit window (2 s), then black; an UNSUPPORTED / MALFORMED body
+  (e.g. a same-mode title change VP cannot decode) is black once the hold expires - never the
+  old title's matrices; no valid header: black at the loss limit. Every rejected picture is counted ("DV metadata: N rejected pictures" on the DV status
   line); "Fallbacks engaged: DV metadata" while held or static; behind `dv_tunnel_fixes`.
 - `DvCompareCapture.h` (diagnostic, off unless `VP_DV_COMPARE_PATH`): a RECORD file in that folder
   records a short labelled clip (raw frames + dv-frames.jsonl: per-picture DM, hold phase, the

@@ -12,14 +12,17 @@
 // same stage - in PQ relative to the display peak, AFTER libplacebo's tone mapping
 // (PRE_OUTPUT, shaders/DV trims.glsl), following the tone-mapping target nits live.
 //
-// LEVEL ORDER: L8 when the DM carries at least one usable L8 trim whose target is known,
-// else L2, else none. A level is never mixed with the other inside one selection.
+// LEVEL ORDER: L8 when the DM carries usable L8 trims whose known targets cover the display
+// target at least as well as L2's (bracketed beats one-sided, else the nearer target), else L2,
+// else none. A level is never mixed with the other inside one selection.
 //
 // L8 TARGETS: an L8 block names a target_display_index, not a luminance. It is resolved from
 //   1. an L10 block with that index (custom target display: target_max_pq), else
-//   2. the predefined CM v4.0 target list - only index 1 (the 100-nit BT.709 target that
-//      Dolby's tools write by default) is built in; other predefined ids are not assumed
-//      (an unknown id is skipped and counted in the selection, and the status says so).
+//   2. the predefined CM v4.0 target list. libdovi (dovi_tool, level10.rs) names the preset
+//      ids that need no L10 - 1, 16, 18, 21, 27, 28, 37, 38, 42, 48, 49 - but publishes no
+//      luminance for them, so their values are UNVERIFIED from public sources; only index 1
+//      (the 100-nit BT.709 target Dolby's tools write by default) is built in. Other ids are
+//      skipped and counted (status + "Fallbacks engaged" when nothing else applies).
 // Selection and interpolation by target nits are exactly L2's (DolbyVisionTrims::Select):
 // a trim at the display peak as sent; two bracketing targets interpolated linearly in PQ;
 // BELOW EVERY TARGET THE LOWEST-TARGET TRIM IS USED UNCHANGED (e.g. a projector at ~48 nits
@@ -191,6 +194,7 @@ namespace DvTrimSelection
 		int l8Present = 0;           // valid L8 blocks in the DM
 		int l8Unresolved = 0;        // ... of which the target is unknown (skipped)
 		int firstUnresolvedIndex = -1;
+		bool l8CoveredWorse = false; // usable L8 present, but L2's targets cover the display better
 		const char* reason = "";
 	};
 
@@ -228,6 +232,22 @@ namespace DvTrimSelection
 			out.push_back(c);
 		}
 		return out;
+	}
+
+	// How well a level's targets cover the display (12-bit PQ codes): 0 when some target is at or
+	// below it and some at or above it (bracketed or exact), else the distance to the nearest.
+	inline double Coverage(const std::vector<Candidate>& cands, double displayPq)
+	{
+		bool below = false, above = false;
+		double nearest = 1e9;
+		for (const Candidate& c : cands)
+		{
+			below = below || c.targetPq <= displayPq;
+			above = above || c.targetPq >= displayPq;
+			const double d = std::fabs(c.targetPq - displayPq);
+			nearest = d < nearest ? d : nearest;
+		}
+		return below && above ? 0.0 : nearest;
 	}
 
 	// L2's rule over one level's candidates (identical to DolbyVisionTrims::Select for L2).
@@ -289,16 +309,21 @@ namespace DvTrimSelection
 		if (!(displayPeakNits > 0.0)) { s.reason = "no display peak"; return s; }
 		s.displayPq = DolbyVisionTrims::PqFromNits(displayPeakNits) * 4095.0;
 		const std::vector<Candidate> l8 = Candidates(dm, Level::L8, &s.l8Present, &s.l8Unresolved, &s.firstUnresolvedIndex);
-		if (!l8.empty())
+		const std::vector<Candidate> l2 = Candidates(dm, Level::L2);
+		// Audit 2026-10-24: L8 only when its known targets cover the display target at least as
+		// well as L2's (bracketed beats one-sided; else the nearer target in PQ). A stream with
+		// L8 at 100 nits (other L8 targets unknown) and L2 at 100/600/1000 on a 600-1000-nit
+		// target keeps the grader's L2 trims.
+		if (!l8.empty() && (l2.empty() || Coverage(l8, s.displayPq) <= Coverage(l2, s.displayPq)))
 		{
 			s.level = Level::L8;
 			SelectAmong(dm, l8, s);
 			return s;
 		}
-		const std::vector<Candidate> l2 = Candidates(dm, Level::L2);
 		if (!l2.empty())
 		{
 			s.level = Level::L2;
+			s.l8CoveredWorse = !l8.empty();
 			SelectAmong(dm, l2, s);
 			return s;
 		}
@@ -437,6 +462,8 @@ namespace DvTrimSelection
 		if (!enabled)
 			return "DV trims: off";
 		std::string text = std::string("DV trims: ") + (s.apply ? LevelName(s.level) : "none");
+		if (s.l8CoveredWorse)
+			text += " (L2 targets cover the display better than the known L8 targets)";
 		if (s.l8Unresolved)
 		{
 			char extra[96];

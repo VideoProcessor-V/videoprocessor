@@ -7730,6 +7730,8 @@ struct LibplaceboVideoRenderer::Impl
 	bool dvToneDolbyRunning = false;
 	std::string dvToneStatus = "DV tone mapping: libplacebo";
 	DvDolbyStyle::ReferenceConditions dvReferenceConditions;
+	bool dvTrimsShaderMissing = false;   // the last trims attempt found shaders/DV trims.glsl missing
+	int dvToneL1Logged = -1;             // audit 7: L1 reaching libplacebo, logged on change
 	bool sdrToneShapeConfigured = false;
 	int sdrToneShapeLogged = -1;
 	bool ledCompensationConfigured = false;
@@ -23902,12 +23904,20 @@ struct LibplaceboVideoRenderer::Impl
         const bool dvToneDolby = DvDolbyStyle::ParseMode(activeSettings.dvToneMapping) == DvDolbyStyle::Mode::DolbyStyle;
         const bool dvTonePicture = renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION && convertedPayload && convertedPayload->dolby.valid;
         const std::string dvToneFallback = DvDolbyStyle::CannotRun(dvToneDolby && dvTonePicture, target.lut != nullptr,
-            target.color.transfer, pipelineSlots.Runs(PipelineSlots::Id::ColourSdrToneShape));
+            target.color.transfer, pipelineSlots.Runs(PipelineSlots::Id::ColourSdrToneShape), activeSettings.dvTrims && dvTrimsShaderMissing);
         dvToneDolbyRunning = dvToneDolby && dvTonePicture && dvToneFallback.empty();
         dvToneSwitch.Apply(colorMapParams, dvToneDolbyRunning ? &DvDolbyStyle::Function() : !dvToneFallback.empty() ? &pl_tone_map_bt2390 : nullptr);
-        if (!dvToneFallback.empty()) EngageFallback("DV tone mapping", dvToneFallback + ": bt2390 + trims"); else ReleaseFallback("DV tone mapping");
+        if (!dvToneFallback.empty()) EngageFallback("DV tone mapping", dvToneFallback + ": " + DvDolbyStyle::FallbackName(activeSettings.dvTrims)); else ReleaseFallback("DV tone mapping");
+        // Audit 7: libplacebo's input_avg / input_max for the curve come from L1 via hdr.avg_pq_y / max_pq_y.
+        const bool dvToneL1Missing = dvToneDolbyRunning && !(renderImage.color.hdr.max_pq_y > 0.0f && renderImage.color.hdr.avg_pq_y > 0.0f);
+        if (dvToneDolbyRunning && static_cast<int>(dvToneL1Missing) != dvToneL1Logged)
+        {
+            dvToneL1Logged = dvToneL1Missing ? 1 : 0;
+            DebugLog::Log("DV tone mapping (Dolby-style): libplacebo %s the scene values (hdr.max_pq_y=%.4f avg_pq_y=%.4f)%s", dvToneL1Missing ? "does NOT receive" : "receives",
+                renderImage.color.hdr.max_pq_y, renderImage.color.hdr.avg_pq_y, dvToneL1Missing ? "; L1 missing -> mid-range fallback" : "");
+        }
         dvToneStatus = DvDolbyStyle::StatusText(dvToneDolby ? DvDolbyStyle::Mode::DolbyStyle : DvDolbyStyle::Mode::Libplacebo,
-            dvToneDolbyRunning, activeSettings.toneMapping, dvToneFallback);
+            dvToneDolbyRunning, activeSettings.toneMapping, dvToneFallback, activeSettings.dvTrims, dvToneL1Missing);
         if (activeSettings.dvTrims || !dvTrimsLogged.empty())
         {
             std::string state;
@@ -23987,9 +23997,13 @@ struct LibplaceboVideoRenderer::Impl
             dvTrimsStatus = DvTrimSelection::StatusText(activeSettings.dvTrims, selection);
             if (dvPicture)
                 dvReferenceConditions = DvDolbyStyle::Conditions(convertedPayload->dolby, selection, dvToneDolbyRunning, activeSettings.toneMapping);
+            dvTrimsShaderMissing = state.compare(0, 11, "NOT applied") == 0;
+            // Audit 5: L8 present but every L8 target unknown and no L2: nothing applies - listed too.
+            const bool dvTrimsUnknownTargets = dvPicture && selection.level == DvTrimSelection::Level::None && selection.l8Unresolved > 0;
             if (activeSettings.dvTrims && dvPicture &&
-                (target.lut || (!pq && !gammaSignal) || state.compare(0, 11, "NOT applied") == 0))
-                EngageFallback("Dolby Vision trims", state);
+                (target.lut || (!pq && !gammaSignal) || dvTrimsShaderMissing || dvTrimsUnknownTargets))
+                EngageFallback("Dolby Vision trims", dvTrimsUnknownTargets && !target.lut && (pq || gammaSignal) && !dvTrimsShaderMissing ?
+                    "L8 trims present but every L8 target is unknown (no L10, not a known preset) and no L2: none applied" : state);
             else
                 ReleaseFallback("Dolby Vision trims");
             // Review S5: the reason on change; the parameters (they follow the

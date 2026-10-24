@@ -325,6 +325,32 @@ namespace Tests
 			}
 		}
 
+		// Audit 2026-10-24: L8 wins only when its known targets cover the display target at least
+		// as well as L2's: L8 at 100 nits (index 1) + L8 at preset 28 (no L10: unknown) and L2 at
+		// 100 / 600 / 1000 nits.
+		TEST_METHOD(L8YieldsToL2WhenL2CoversTheTargetBetter)
+		{
+			using namespace DvL8Trims;
+			DolbyVisionTunnelFrameMetadata dm = Dm({ L8(1, 2300), L8(28, 2200), L2(Pq(100.0), 2400), L2(Pq(600.0), 2100),
+				L2(Pq(1000.0), 2000) }, Pq(4000.0));
+			DvTrimSelection::Selection s = DvTrimSelection::Select(dm, 800.0);
+			Assert::IsTrue(s.level == DvTrimSelection::Level::L2 && s.l8CoveredWorse, L"800 nits: L2 brackets it, L8 does not");
+			Assert::IsTrue(s.lowerIndex == 3 && s.upperIndex == 4);
+			Assert::IsTrue(DvTrimSelection::StatusText(true, s).find("L2 targets cover the display better") != std::string::npos);
+			s = DvTrimSelection::Select(dm, 600.0);
+			Assert::IsTrue(s.level == DvTrimSelection::Level::L2, L"600 nits: an exact L2 target");
+			s = DvTrimSelection::Select(dm, 48.0);
+			Assert::IsTrue(s.level == DvTrimSelection::Level::L8 && !s.l8CoveredWorse, L"48 nits: both one-sided at 100 nits: L8");
+			s = DvTrimSelection::Select(dm, 100.0);
+			Assert::IsTrue(s.level == DvTrimSelection::Level::L2, L"100 nits (PQ code just above 2081): L2 brackets it, L8 is one-sided");
+			// With the second L8 target known (L10 at 600 nits), L8 brackets 300 nits as L2 does: L8.
+			AddL10(dm, 28, Pq(600.0));
+			s = DvTrimSelection::Select(dm, 300.0);
+			Assert::IsTrue(s.level == DvTrimSelection::Level::L8);
+			Assert::IsTrue(DvTrimSelection::PredefinedTargetMaxPq(1) == 2081 && DvTrimSelection::PredefinedTargetMaxPq(28) < 0,
+				L"only index 1 is assumed (libdovi names presets 1,16,18,21,27,28,37,38,42,48,49 without luminances)");
+		}
+
 		TEST_METHOD(L8CodesDecodeLikeL2AndCorruptOnesAreRejected)
 		{
 			using namespace DvL8Trims;

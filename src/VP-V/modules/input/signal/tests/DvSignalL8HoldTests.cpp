@@ -138,12 +138,15 @@ namespace Tests
 		TEST_METHOD(HoldIsATimeAtTheMeasuredRateAndCountsSourcePictures)
 		{
 			DvMetadataHold::Tracker t;
-			t.SetRate(24000.0 / 1001.0);
+			t.SetRate(24000.0 / 1001.0, 2.0);
 			Assert::AreEqual<uint32_t>(6, t.HoldPictures());
-			t.SetRate(60000.0 / 1001.0);
+			Assert::AreEqual<uint32_t>(48, t.StaticCapPictures(), L"the static cap: 2 s at the measured rate");
+			t.SetRate(60000.0 / 1001.0, 2.0);
 			Assert::AreEqual<uint32_t>(15, t.HoldPictures());
-			t.SetRate(0.0);   // unknown: the 23.976 default, never zero
-			Assert::AreEqual<uint32_t>(6, t.HoldPictures());
+			Assert::AreEqual<uint32_t>(120, t.StaticCapPictures());
+			t.SetRate(0.0, 2.0);   // no valid rate: nothing changes (no fixed rate in the tracker)
+			Assert::AreEqual<uint32_t>(15, t.HoldPictures());
+			t.SetRate(24000.0 / 1001.0, 2.0);
 			t.Reset();
 			using P = DvMetadataHold::Phase;
 			Assert::IsTrue(t.OnPicture(true, true, 1) == P::Own);
@@ -190,8 +193,9 @@ namespace Tests
 		}
 
 		// End to end: the formatter parses L8 (all optional fields) and L10, the trim choice is
-		// L8; a run of rejected DMs (CRC-valid, unsupported body) is held, then static, counted,
-		// then black at the loss limit; fresh DM recovers everything.
+		// L8; transport damage is held, then static (past the loss limit) up to the cap, then
+		// black; an unsupported body (a title change) is held only, then black; no header: black
+		// at the loss limit; every rejected picture counted; fresh DM recovers everything.
 		TEST_METHOD(FormatterParsesL8AndL10AndHoldsThenStatics)
 		{
 			using namespace DvL8Signal;
@@ -227,52 +231,88 @@ namespace Tests
 			Assert::IsTrue(s.lowerIndex == 1 && s.upperIndex == 2, L"100-nit (predefined) and 600-nit (L10) L8 trims bracket 300 nits");
 			Assert::AreEqual<int>(0, md.dmHoldPhase);
 			Assert::AreEqual<uint32_t>(0, md.dmRejectedPictures);
-			// Rejected run: 6 held (0.25 s at 23.976), then static.
+			// Transport damage (the continuation packet lost in all three copies: CRC-valid header,
+			// the title's own body damaged on the way): 6 held (0.25 s at 23.976), then static up to
+			// the cap (the SDR-exit window, 2 s = 48 source pictures), then black.
+			std::vector<uint8_t> damaged = goodBytes;
+			const size_t rowBytes = ((kW + 63) / 64) * 256;
+			auto at = [&](size_t pixel) { return (pixel / kW) * rowBytes + (pixel % kW) * 4; };
+			for (size_t p = 3072; p < 2 * 3072; ++p)
+				std::copy(goodBytes.begin() + at(p + 500 * kW), goodBytes.begin() + at(p + 500 * kW) + 4, damaged.begin() + at(p));
+			uint32_t rejected = 0;
 			for (int k = 1; k <= 6; ++k)
 			{
-				md = feed(badBytes);
+				md = feed(damaged);
+				++rejected;
 				Assert::IsTrue(analyzer.LastShown() == Shown::Picture, L"held: the picture shows");
 				Assert::IsTrue(md.reusedPreviousDm && md.dmHoldPhase == 1 && md.hasSceneMetadata && md.trimCount == 3);
 			}
-			md = feed(badBytes);
+			md = feed(damaged);
+			++rejected;
 			Assert::IsTrue(analyzer.LastShown() == Shown::Picture, L"static: the picture still shows");
 			Assert::IsTrue(md.reusedPreviousDm && md.dmHoldPhase == 2);
 			Assert::IsFalse(md.hasSceneMetadata, L"static: no scene L1");
 			Assert::AreEqual<int>(0, md.trimCount, L"static: no trims");
 			Assert::AreEqual<int>(1, md.targetDisplayCount, L"static: L10 kept");
-			Assert::AreEqual<uint32_t>(7, md.dmRejectedPictures);
+			Assert::AreEqual(rejected, md.dmRejectedPictures);
 			std::string reason;
 			Assert::IsTrue(DvMetadataHold::FallbackReason(md, reason));
 			Assert::IsFalse(DvTrimSelection::Select(md, 300.0).apply, L"static: trims neutral");
-			// Recovery.
-			md = feed(goodBytes);
-			Assert::IsTrue(!md.reusedPreviousDm && md.dmHoldPhase == 0 && md.hasSceneMetadata && md.trimCount == 3);
-			Assert::AreEqual<uint32_t>(7, md.dmRejectedPictures, L"the count stays (since the signal started)");
-			// Beyond the loss limit (24 pictures at 23.976) with CRC-valid headers (owner 2026-10-24):
-			// the picture still decodes, so it stays on screen with static metadata, flagged + counted.
-			for (int k = 0; k < 40; ++k)
+			// Past the ~1 s loss limit the decodable picture stays (static, flagged, counted) ...
+			for (int span = 8; span <= 48; ++span)
 			{
-				md = feed(badBytes);
-				Assert::IsTrue(analyzer.LastShown() == Shown::Picture, L"decodable tunnel picture kept past the loss limit");
+				md = feed(damaged);
+				++rejected;
+				Assert::IsTrue(analyzer.LastShown() == Shown::Picture, L"transport damage: static picture up to the cap");
 			}
-			Assert::IsTrue(md.valid && md.reusedPreviousDm && md.dmHoldPhase == 2 && !md.hasSceneMetadata && md.trimCount == 0);
-			Assert::AreEqual<uint32_t>(47, md.dmRejectedPictures);
-			Assert::IsTrue(DvMetadataHold::FallbackReason(md, reason));
-			Assert::AreEqual(std::string("; DV metadata: 47 rejected pictures (static now)"), DvMetadataHold::StatusSuffix(md));
+			Assert::IsTrue(md.valid && md.reusedPreviousDm && md.dmHoldPhase == 2 && !md.hasSceneMetadata);
+			Assert::AreEqual("; DV metadata: " + std::to_string(rejected) + " rejected pictures (static now)", DvMetadataHold::StatusSuffix(md));
+			// ... and the cap ends it: black until fresh DM.
+			md = feed(damaged);
+			++rejected;
+			Assert::IsTrue(analyzer.LastShown() == Shown::Black, L"black past the static-metadata cap");
+			Assert::IsFalse(md.valid);
 			md = feed(goodBytes);
-			Assert::IsTrue(analyzer.LastShown() == Shown::Picture && md.hasSceneMetadata && md.trimCount == 3 && md.dmHoldPhase == 0);
-			// Pictures with no valid header (not decodable as the tunnel) past the loss limit: black
-			// until fresh DM (unchanged).
+			Assert::IsTrue(analyzer.LastShown() == Shown::Picture && !md.reusedPreviousDm && md.dmHoldPhase == 0 &&
+				md.hasSceneMetadata && md.trimCount == 3);
+			Assert::AreEqual(rejected, md.dmRejectedPictures, L"the count stays (since the signal started)");
+			// A same-mode title change without EOS to a DM VP cannot decode (signal_bit_depth != 12,
+			// other matrices): held for the hold only, then black - never the old title's matrices.
+			DmFields other = DmFields::Ipt();
+			other.signalBitDepth = 10;
+			other.yccToRgb[1] = 1000;
+			other.ext.push_back(Ext::L1(0, 2000, 900));
+			const std::vector<uint8_t> titleB = TunnelFrame(other, 0);
+			for (int k = 1; k <= 6; ++k)
+			{
+				md = feed(titleB);
+				++rejected;
+				Assert::IsTrue(analyzer.LastShown() == Shown::Picture && md.dmHoldPhase == 1, L"held briefly");
+			}
+			md = feed(titleB);
+			++rejected;
+			Assert::IsTrue(analyzer.LastShown() == Shown::Black, L"unsupported body past the hold: black, not the old matrices");
+			for (int k = 0; k < 60; ++k)
+			{
+				md = feed(titleB);
+				++rejected;
+				Assert::IsTrue(analyzer.LastShown() == Shown::Black && !md.valid);
+			}
+			md = feed(goodBytes);
+			Assert::IsTrue(analyzer.LastShown() == Shown::Picture && md.hasSceneMetadata && md.trimCount == 3);
+			// Pictures with no valid header past the loss limit: black until fresh DM (unchanged).
 			std::vector<uint8_t> noHeader = goodBytes;
-			const size_t rowBytes = ((kW + 63) / 64) * 256;
 			std::copy(goodBytes.begin() + 500 * rowBytes, goodBytes.begin() + 503 * rowBytes, noHeader.begin());
 			for (int k = 0; k < 30; ++k)
+			{
 				feed(noHeader);
+				++rejected;
+			}
 			Assert::IsTrue(analyzer.LastShown() == Shown::Black, L"black after the loss limit without a valid header");
 			Assert::IsFalse(analyzer.LastMetadata().valid);
 			md = feed(goodBytes);
 			Assert::IsTrue(analyzer.LastShown() == Shown::Picture && md.hasSceneMetadata && md.trimCount == 3);
-			Assert::AreEqual<uint32_t>(77, md.dmRejectedPictures);
+			Assert::AreEqual(rejected, md.dmRejectedPictures);
 		}
 
 		// The hold off with dv_tunnel_fixes off (the old behaviour, kept as the switch's meaning).

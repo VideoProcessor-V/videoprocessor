@@ -52,10 +52,14 @@ Chain tests:
 Both are NON-CERTIFIED APPROXIMATIONS (not Dolby display management); the certified reference is
 LLDV from the Apple TV, compared with `tools/dv_compare/dv_pair_compare.py`.
 
-- `DvTrimSelection.h` (behind `dv_trims`): the trim level is **L8** when the DM carries a usable L8
-  trim with a known target, else **L2**, else none ("DV trims: L8 / L2 / none" on the DV status
-  line). L8 targets come from L10 (custom targets, parsed in `input/signal/DvSignalLevels.h`) or
-  the predefined CM v4.0 list (only index 1 = 100 nits is assumed). Selection / interpolation by
+- `DvTrimSelection.h` (behind `dv_trims`): the trim level is **L8** when the DM carries usable L8
+  trims whose known targets cover the display target at least as well as L2's (bracketed beats
+  one-sided, else the nearer target), else **L2**, else none ("DV trims: L8 / L2 / none" on the DV
+  status line; "Fallbacks engaged: Dolby Vision trims" when L8 is present but every L8 target is
+  unknown and there is no L2). L8 targets come from L10 (custom targets, parsed in
+  `input/signal/DvSignalLevels.h`) or the predefined CM v4.0 list: libdovi names the preset ids
+  that carry no L10 (1, 16, 18, 21, 27, 28, 37, 38, 42, 48, 49) but publishes no luminance for
+  them, so only index 1 = 100 nits is assumed (unverified from public sources). Selection / interpolation by
   the tone-mapping target is exactly L2's; below every target the lowest-target trim is used
   unchanged. L8 extras: mid contrast and clip trim (bends on the trimmed PQ value: black and peak
   fixed, monotonic), per-hue saturation and hue vectors (R/Y/G/C/B/M centres). Neutral extras are
