@@ -1060,3 +1060,13 @@ Commit messages end with: Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com
 - `efficiency-fixes` → `docs/design/efficiency-callsites.patch`, `efficiency-upstreamable-churn*.patch`
   (drafts, uncommitted).
 - `motion-timing` → `docs/design/motion-timing-callsites.md` (draft; commits c33aaa41..c3e45812).
+
+## End state (owner, 2026-10-24)
+
+Bill's code becomes an UNMODIFIED, separately built component (a "vendor drop": take his new release, rebuild, done). Our framework attaches only through hook points and interfaces (segments, queue/timing policy, frame analysis store, net runner, status entry). Not a separate process: sharing GPU pictures across processes adds synchronisation, latency and complexity for no gain.
+Path: option (d) extraction (this batch) + offering the hook points to Bill as PRs (each approved by the owner). Until he accepts them, the only changes to his code are a small, documented patch set that adds the hook points. Every WP must leave that patch set smaller or no larger.
+
+D1 decided: the merged S2/S3 hooks become the default once the GPU fixture shows only removed-rounding differences (BTB/WTW unchanged).
+D3 decided: no A/B; use the correct downscaler, and the separable 1-D version wherever the polar one can't be used.
+D4 decided: D runs only with VP deband off for now; a D for the deband-on case goes on the round-3 list.
+D8 decided: the 3090 real-time check runs with the next training run, after the restructure is complete.
