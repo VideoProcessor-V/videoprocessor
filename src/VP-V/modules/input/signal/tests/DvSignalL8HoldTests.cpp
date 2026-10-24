@@ -12,6 +12,7 @@
 #include <VP-V/modules/input/signal/DvSignalLevels.h>
 #include <VP-V/modules/input/signal/DvMetadataHold.h>
 #include <VP-V/modules/input/signal/DvCompareCapture.h>
+#include <VP-V/modules/input/signal/DvTunnelPolicy.h>
 #include <VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h>
 #include <dv_loopback/DvLoopbackHarness.h>
 
@@ -110,6 +111,15 @@ namespace Tests
 	TEST_CLASS(DvSignalL8HoldTests)
 	{
 	public:
+		// The full-pipeline loose end (DvTunnelPolicy.h): libplacebo's plane deband never runs on the
+		// raw tunnel planes; other pictures keep it. (The GPU check of the 2020-green patch is queued.)
+		TEST_METHOD(NoPlaneDebandOnTheTunnel)
+		{
+			Assert::IsTrue(DvTunnelPolicy::SkipPlaneDeband(true));
+			Assert::IsFalse(DvTunnelPolicy::SkipPlaneDeband(false));
+			Assert::IsTrue(std::string(DvTunnelPolicy::DebandStatus()).find("deband off") != std::string::npos);
+		}
+
 		TEST_METHOD(L10ParsesBothFormsAndRejectsBadBlocks)
 		{
 			using namespace DvL8Signal;

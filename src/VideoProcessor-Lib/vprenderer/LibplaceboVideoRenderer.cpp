@@ -61,6 +61,7 @@
 #include <vprenderer/DolbyVisionTrims.h>
 #include <VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h>   // feat/dv-l8: the L8 / L2 trim choice
 #include <VP-V/modules/input/signal/DvCompareCapture.h>          // feat/dv-l8: DV comparison capture (diagnostic)
+#include <VP-V/modules/input/signal/DvTunnelPolicy.h>            // feat/dv-l8: no plane deband on the tunnel
 #include <vprenderer/EarlyUpload.h>
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/InterpolationPolicy.h>
@@ -7733,7 +7734,9 @@ struct LibplaceboVideoRenderer::Impl
 	bool dvToneDolbyRunning = false;
 	std::string dvToneStatus = "DV tone mapping: libplacebo";
 	DvDolbyStyle::ReferenceConditions dvReferenceConditions;
-	bool dvTrimsShaderMissing = false;   // the last trims attempt found shaders/DV trims.glsl missing
+	bool dvTrimsShaderMissing = false;
+	bool dvDebandSkipped = false;        // DvTunnelPolicy: libplacebo deband dropped for this DV picture
+	bool dvDebandSkipLogged = false;   // the last trims attempt found shaders/DV trims.glsl missing
 	int dvToneL1Logged = -1;             // audit 7: L1 reaching libplacebo, logged on change
 	bool sdrToneShapeConfigured = false;
 	int sdrToneShapeLogged = -1;
@@ -19521,7 +19524,8 @@ struct LibplaceboVideoRenderer::Impl
 				case VideoFrameEncoding::R10b:
 				case VideoFrameEncoding::R10l:
 					setIngressStatus(std::string(convertedPayload->dvTunnelRaw ? "Dolby Vision RGB tunnel (12-bit 4:2:2, GPU unpack)" :
-						"Dolby Vision RGB tunnel (12-bit 4:2:2)") + "; " + dvTrimsStatus + "; " + dvToneStatus + DvMetadataHold::StatusSuffix(convertedPayload->dolby));
+						"Dolby Vision RGB tunnel (12-bit 4:2:2)") + "; " + dvTrimsStatus + "; " + dvToneStatus + DvMetadataHold::StatusSuffix(convertedPayload->dolby) +
+						(dvDebandSkipped ? DvTunnelPolicy::DebandStatus() : ""));
 					break;
 				case VideoFrameEncoding::V210:
 					setIngressStatus(convertedPayload->Raw() ? "P210 (lossless v210 4:2:2, GPU unpack)" : "P210 (lossless v210 4:2:2)");
@@ -24747,6 +24751,17 @@ struct LibplaceboVideoRenderer::Impl
         }
         else
             yieldedDebandLogged = false;
+        // feat/dv-l8 WIP (DvTunnelPolicy.h): no libplacebo plane deband on the raw DV tunnel planes (opponent
+        // codes before the decode; its fp16 plane pass moved saturated near-zero channels by up to 3.6 codes).
+        dvDebandSkipped = DvTunnelPolicy::SkipPlaneDeband(renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION) &&
+            frameParams.deband_params != nullptr;
+        if (dvDebandSkipped)
+        {
+            frameParams.deband_params = nullptr;
+            if (!dvDebandSkipLogged)
+                DebugLog::Log("libplacebo deband: off on Dolby Vision tunnel pictures (12-bit opponent planes before the decode; DvTunnelPolicy.h)");
+            dvDebandSkipLogged = true;
+        }
         // Stage 8-1: a downscaling frame in gamma light when chosen (the de-
         // judder extras reuse these parameters).
         {

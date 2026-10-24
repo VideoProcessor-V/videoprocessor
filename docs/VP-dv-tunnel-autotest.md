@@ -121,6 +121,19 @@ dither off). Only the unpack, the DM extraction and libplacebo's DV decode / ton
 The full pipeline is reported separately (`full_*` jobs, `DvSynthGpuAlignmentAtCutsFullPipeline`;
 robustness runs with the full pipeline).
 
+Full-pipeline difference, investigated (feat/dv-l8, 2026-10-24; fix WIP until its GPU check):
+the "up to 3.6 codes" is one patch, `2020 green 20` in `full_acc_1080p24-p5-r210-low8` (want
+R 5.18 / B 1.37, got 2 / 5 in 10-bit gamma 2.2 at a 1000-nit BT.2020 target; dE ITP about 0.2,
+invisible); the faithful path gets 5 / 2. The only setting the two job logs differ in is
+libplacebo's deband (`deband=auto/on`, grain 0). libplacebo debands each SOURCE plane in an
+intermediate fp16 FBO before its Dolby Vision decode, i.e. on the 12-bit opponent planes, where
+an fp16 step is 1-2 codes at Ct ~0.31 / Cp ~0.69 and one Cp code moves a near-zero channel of a
+saturated primary by ~4-5 output codes (computed with the corpus' P5 matrices; fp16 truncation
+of the three planes reproduces the pattern: R 0-0.8, B 3.8-4.5). Fix: no libplacebo plane
+deband on DV tunnel pictures (`src/VP-V/modules/input/signal/DvTunnelPolicy.h`; logged once,
+"deband off on the tunnel planes" on the DV status line). To confirm on the GPU: the full_acc
+job with the fix, the patch within one code of the faithful result.
+
 dv_trims follows the tone-mapping target: the renderer hands libplacebo's target peak
 (sdr_target_nits for SDR outputs) to `DolbyVisionTrims::Select` every frame; below every
 authored target the lowest-target trim is used as sent (no extrapolation), between two

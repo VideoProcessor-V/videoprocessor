@@ -65,7 +65,8 @@
         "src/VideoProcessor-Lib/vprenderer/Bt2020SignalController.h",
         "src/VP-V/modules/input/signal/DvSignalLevels.h",
         "src/VP-V/modules/input/signal/DvMetadataHold.h",
-        "src/VP-V/modules/input/signal/DvCompareCapture.h"
+        "src/VP-V/modules/input/signal/DvCompareCapture.h",
+        "src/VP-V/modules/input/signal/DvTunnelPolicy.h"
       ],
       "components": {
         "files": {
