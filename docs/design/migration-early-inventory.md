@@ -39,8 +39,9 @@ A forwarder is a legacy-path header containing only `#pragma once` and
 `"forwarding_headers"`; `tools/check_module_manifests.py` accepts exactly those (marker, listed, pure
 forward to the moved file of the same name) and still fails on any other duplicate name. New code
 includes the `<VP-V/...>` path. Remove the forwarders in M2, after the listed includers
-(`LibplaceboVideoRenderer.cpp`, `ConfigEditorWindow.cpp`, `LibplaceboVideoRenderer.h`,
-`RendererCaptureHarnessTests.cpp`) switch to the new path.
+(`LibplaceboVideoRenderer.cpp`/`.h`, `ConfigEditorWindow.cpp`, `RendererCaptureHarnessTests.cpp`,
+`IRenderer.h`, `MainConfigSchema.h`, `SourceRebase.cpp`, `SourceResolutionMonitor.cpp`) switch to the
+new path. To find them all: `forwarding_headers` in the manifests.
 
 ## Inventory
 
@@ -50,12 +51,12 @@ includes the `<VP-V/...>` path. Remove the forwarders in M2, after the listed in
 | `drive.projector_control` | `led/LedController.*`, `BarcoAsciiDriver.*`, `ProjectorDriver.*`, `SerialPort.*` (RS-232), `ConnectionTest.*`, `LedClock.h`, `LedShutdownRestore.h` | **SAFE** | Lib + the Config / ConfigTests standalone projects (their `.vcxproj` on no list). Forwarders: `led/SerialPort.h`, `led/ConnectionTest.h` (included by `ConfigEditorWindow.cpp`). `led/LedDriveConfig.h` stays (included by Config GUI + `ConfigEditorWindowTests.cpp`) |
 | `drive.led_measure` | `led/LedMeasurement.*`, `led/LedLookahead.*` | **SAFE (partial)** | `LedMeasurementHook.*` stays: its `.cpp` is compiled by `VideoProcessor-Test.vcxproj` |
 | `drive.led_compensation` (adaptive gamma) | `led/LedDriveModule.*`, `LedDriveArbiter.*`, `LedDriveHoldover.*` | **SAFE (partial)** | Forwarders for all three headers (renderer includes them). `LedRawTransfer.*` stays (test project compiles it); `shaders/LED compensation.glsl` stays (runtime shader folder) |
-| `scaling.rebase` | `KernelInverse.*` (kernel inverse helper) | **SAFE (partial)** | Forwarder `KernelInverse.h` (renderer). `SourceRebase.*` is entrance code (B3): BLOCKED. Also listed by `input.source_analysis`; both manifests updated |
+| `scaling.rebase` | `KernelInverse.*` (kernel inverse helper) | **SAFE (partial)** | Forwarder `KernelInverse.h` (renderer; the entrance and source-resolution includers `SourceRebase.cpp` / `SourceResolutionMonitor.cpp` are left untouched and use it too). `SourceRebase.*` is entrance code (B3): BLOCKED. Also listed by `input.source_analysis`; both manifests updated |
 | `input.source_analysis` | subtitle detection: `SubtitleBoxDetector.*`, `SubtitleBarEvidence.h`, `SubtitleBoxLookahead.h`, `SubtitleOpaqueCardRefinement.h`, `SubtitleTemporalFill.h` | **SAFE (partial)** | Forwarders `SubtitleBoxDetector.h`, `SubtitleTemporalFill.h` (renderer `.cpp`), `SubtitleBoxLookahead.h` (`LibplaceboVideoRenderer.h`). Placement/renderer-side subtitle headers stay; `SubtitleDetectionOptimization.h` / `SubtitleGeneratedGrayStyle.h` stay (included by `RendererProfileConfig.h`, dv-l8) |
 | `input.source_analysis` (rest) | `SceneDetector`, `ActivePicture*`, `AnalysisFrame`, `SourceResolution*` | not this round | Cross-cutting crop analysis with many includers; `SourceResolution*` is the srcres latch work. Candidate for the M1-M2 phase |
 | `scaling.geometry` | `NlsGeometryPolicy.*` | **SAFE (partial)** | Lib-only; includers `MadVRShaderRuntimeState.h` + tests. `Nls*.h`, `AnamorphicPresentation.h`, `AlphaSourceCropPolicy.*` stay (renderer / crop pipeline includers) |
 | `colour.tone_gamut` | `LibplaceboOutputPolicy.*` | **SAFE (partial)** | Lib-only; forwarder for the header (renderer). `LibplaceboRenderParameters.cpp` is compiled by the test project: BLOCKED; `ToneMappingTuning.h` is included by `RendererProfileConfig.h`: BLOCKED |
-| `output.calibration_lut` | `calibration/` (45 files: meter, ArgyllCMS, session, patterns) | **SAFE (partial)** | Lib-only; forwarders for the four headers the renderer / `RendererCaptureHarnessTests.cpp` include. `LibplaceboDisplayLut.cpp` is compiled by the test project: BLOCKED |
+| `output.calibration_lut` | `calibration/` (45 files: meter, ArgyllCMS, session, patterns) | **SAFE (partial)** | Lib-only; moved as a sub-folder `calibration_lut/calibration/`. Forwarders for `CalibrationPattern.h`, `CalibrationController.h`, `CalibrationSimulation.h`, `PatternCodes.h` (renderer, `RendererCaptureHarnessTests.cpp`, `IRenderer.h`) and `CalibrationConfig.h` (`MainConfigSchema.h`, config code, left untouched). `LibplaceboDisplayLut.cpp` is compiled by the test project: BLOCKED |
 | `input.capture` | capture unpack, early upload, DeckLink/Magewell, formatters | BLOCKED | Renderer `.cpp`s compiled by the test project; `video_frame_formatter` changed by dv-l8 |
 | `input.signal` | HDR inference, DV gate/handoff, DV unpack | BLOCKED | DV code; dv-l8 changes this module |
 | `input.queue_timing` | queue, timing clock, `PulldownDetector.h` (cadence/pulldown) | BLOCKED | Timing/queue code (B3); `AlphaQueuePolicy.h` in the skeleton worktree |
