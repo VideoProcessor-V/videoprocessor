@@ -82,6 +82,7 @@ copy /Y "$(ProjectDir)..\VideoProcessor-ConfigDiscovery\x64\$(Configuration)\Vid
     <ClCompile Include="AppMain.cpp" />
     <ClCompile Include="ConfigEditorWindow.cpp" />
     <ClCompile Include="VpTheme.cpp" />
+    <ClCompile Include="..\VP-V\config\VpvSection.cpp" />
     <ClCompile Include="..\VideoProcessor-ConfigCore\ConfigEditorCore.cpp">
       <ObjectFileName>$(IntDir)ConfigEditorCore.obj</ObjectFileName>
     </ClCompile>

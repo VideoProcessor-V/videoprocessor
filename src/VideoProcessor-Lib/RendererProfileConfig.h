@@ -68,7 +68,9 @@ namespace RendererProfileConfig
 			section.rfind("profiles.", 0) == 0 ||
 			section.rfind("event_actions.", 0) == 0 ||
 			section.rfind("actions.", 0) == 0 ||
-			section.rfind("display_rules.", 0) == 0;
+			section.rfind("display_rules.", 0) == 0 ||
+			// The VP-V section (ADR-0022): [vpv] / [vpv.*] hold VP-V's own namespaced keys.
+			section == "vpv" || section.rfind("vpv.", 0) == 0;
 	}
 
     // Shared by application startup and Config Save/Apply. Keep this check in
@@ -2098,13 +2100,38 @@ namespace RendererProfileConfig
 			model.actions.push_back(std::move(action));
 		}
 
+		// The VP-V section (ADR-0022): [vpv] holds the global VP-V keys that are not per renderer
+		// profile, so Config's profile migrations never move them. Each key is validated like the
+		// same key in [vprenderer]; anything else there is an error, as in every owned section.
+		if (const auto* vpvValues = config.GetSectionValues("vpv"))
+			for (const auto& value : *vpvValues)
+			{
+				static const char* const vpvKeys[] = { "pipeline_original_pathway", "pipeline_order",
+					"pipeline_slots_off", "calibration_lut_stage" };
+				bool known = false;
+				for (const char* key : vpvKeys) known = known || value.first == key;
+				if (!known)
+				{
+					error = "[vpv] unknown key '" + value.first + "'";
+					return false;
+				}
+				if (!ValidateBaseSetting(value.first, value.second))
+				{
+					error = "[vpv] invalid " + value.first + " '" + value.second + "'";
+					return false;
+				}
+			}
+
 		for (const std::string& section : config.GetSectionNames())
 			if (!MainConfigSchema::OwnsSection(section) &&
 				!RendererConfigView::OwnsSection(section) &&
                 !ColorOutputProfileMigration::IsArchive(section) &&
                 !CalibrationProfileMigration::IsArchive(section) &&
 				section.rfind("actions.", 0) != 0 &&
-				section.rfind("shader.", 0) != 0)
+				section.rfind("shader.", 0) != 0 &&
+				// The VP-V section (settings agent 2026-10-24, ADR-0022): [vpv] / [vpv.*] are VP-V's own
+				// namespaced keys (validated above).
+				section != "vpv" && section.rfind("vpv.", 0) != 0)
 			{
 				error = "VP-0079 configuration has unknown section [" + section + "]";
 				return false;

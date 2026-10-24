@@ -1,0 +1,825 @@
+[
+ {
+  "id": "input.capture",
+  "order": 10,
+  "status": "built",
+  "hook_point": "capture",
+  "control": false,
+  "required": [
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "GpuCaptureUnpack byte checks (VideoProcessor-Test)",
+    "GpuRgbUnpack native RGB checks"
+   ],
+   "contract": [
+    "capture fallback appears under 'Fallbacks engaged'"
+   ],
+   "chain": [
+    "chain gate subset: capture formats x 24/50/60p"
+   ]
+  },
+  "fallback_entry": "Capture: CPU 4:2:0 (GPU unpack failed: <reason>)",
+  "missing": []
+ },
+ {
+  "id": "input.signal",
+  "order": 20,
+  "status": "built",
+  "hook_point": "host",
+  "control": false,
+  "required": [
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "DV tunnel unpack reference tests",
+    "HdrInference tests"
+   ],
+   "contract": [
+    "nets never run on raw DV IPT (net slots bypass on DV IPT input)"
+   ],
+   "chain": [
+    "chain gate: SDR / HDR10 / LLDV / tunnel"
+   ]
+  },
+  "fallback_entry": "Signal: DV tunnel unpack on the CPU (<reason>)",
+  "missing": []
+ },
+ {
+  "id": "input.queue_timing",
+  "order": 30,
+  "status": "built",
+  "hook_point": "host",
+  "control": false,
+  "required": [
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "QueueStressHarness",
+    "H3TimingTests",
+    "film clock tests"
+   ],
+   "contract": [
+    "queue minimum follows the configured/time depth (no forced 5-frame minimum)"
+   ],
+   "chain": [
+    "delay gate: the recommended total and lower totals (4/3/2 frames) at 23.976/24/25/30/50/60p; identical measured total across rates; no stalls; recovery when frames return"
+   ]
+  },
+  "fallback_entry": "Queue: short look-ahead (<n> of 4 frames)",
+  "missing": []
+ },
+ {
+  "id": "input.source_analysis",
+  "order": 40,
+  "status": "partial",
+  "hook_point": "host",
+  "control": false,
+  "required": [
+   "placeholder",
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "SourceResolutionDetector tests",
+    "SceneDetector tests",
+    "subtitle corpus probes"
+   ],
+   "contract": [
+    "analysis reads the original frame even when re-base/repair are on"
+   ],
+   "chain": [
+    "srcres latch + crossfade checks"
+   ]
+  },
+  "fallback_entry": "Source analysis: labels unknown (<reason>)",
+  "missing": [
+   "placeholder"
+  ]
+ },
+ {
+  "id": "motion.estimation",
+  "order": 50,
+  "status": "built",
+  "hook_point": "prepass",
+  "control": false,
+  "required": [
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "NvOpticalFlow tests",
+    "DejudderWarp estimator tests",
+    "MotionValidity tests"
+   ],
+   "contract": [
+    "vectors estimated at source size, never on repaired/re-based pictures"
+   ],
+   "chain": [
+    "vector validity across cuts/drops at 24/30/60p"
+   ]
+  },
+  "fallback_entry": "Motion: matcher only (NVOF unavailable: <reason>)",
+  "missing": []
+ },
+ {
+  "id": "scaling.rebase",
+  "order": 60,
+  "status": "built",
+  "hook_point": "prepass",
+  "control": false,
+  "required": [
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "KernelInverse tests",
+    "SourceRebase port vs kit (within 1 LSB)"
+   ],
+   "contract": [
+    "per-axis factors; crossfade on latch changes"
+   ],
+   "chain": [
+    "re-base x A-lens/NLS x vectors (high-risk combo)"
+   ]
+  },
+  "fallback_entry": "Re-base: off (<reason>)",
+  "missing": []
+ },
+ {
+  "id": "repair.encoding",
+  "order": 70,
+  "status": "placeholder",
+  "hook_point": "prepass (VP NetRunner, once per source frame)",
+  "control": false,
+  "required": [
+   "placeholder",
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [
+    "byte-identical with the slot off",
+    "zero GPU passes when off"
+   ],
+   "isolation": [
+    "A vs the clean frame at the encoded size; grain >= 90-95%"
+   ],
+   "contract": [
+    "luma-only; active-area mirror pad; bypass on DV IPT"
+   ],
+   "chain": [
+    "nets + low latency; DV tunnel + repair"
+   ]
+  },
+  "fallback_entry": "Repair: bypassed (net fingerprint mismatch / missing weights / DV IPT input)",
+  "missing": []
+ },
+ {
+  "id": "repair.deband",
+  "order": 80,
+  "status": "built",
+  "hook_point": "prepass",
+  "control": false,
+  "required": [
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "VpDebander GPU tests",
+    "real-pan shimmer x52 (queue item 1)"
+   ],
+   "contract": [
+    "source-resolution run"
+   ],
+   "chain": [
+    "deband + re-base + 4K route"
+   ]
+  },
+  "fallback_entry": "Deband: libplacebo deband (VP debander idle: <reason>)",
+  "missing": []
+ },
+ {
+  "id": "repair.texture_restore",
+  "order": 90,
+  "status": "built",
+  "hook_point": "prepass",
+  "control": false,
+  "required": [
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "TextureRestoreGpuTiming",
+    "DetailPulse tests"
+   ],
+   "contract": [
+    "never runs with libplacebo smooth motion / deinterlacing"
+   ],
+   "chain": [
+    "stacked A -> texture restore (double-boost check)"
+   ]
+  },
+  "fallback_entry": "Texture restore: inactive (<reason>)",
+  "missing": []
+ },
+ {
+  "id": "scaling.route_4k",
+  "order": 100,
+  "status": "placeholder",
+  "hook_point": "prepass",
+  "control": false,
+  "required": [
+   "placeholder",
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [
+    "byte-identical with the slot off",
+    "zero GPU passes when off"
+   ],
+   "isolation": [
+    "1-D x2 port vs kit within 1 LSB"
+   ],
+   "contract": [
+    "processing size rule recomputed on output-profile change (vectors invalidated)",
+    "8K placeholder unit tests"
+   ],
+   "chain": [
+    "4K60 load at the 1080p60 shadow leg"
+   ]
+  },
+  "fallback_entry": "4K route: off (<reason>)",
+  "missing": []
+ },
+ {
+  "id": "scaling.refine",
+  "order": 110,
+  "status": "placeholder",
+  "hook_point": "prepass (VP NetRunner, once per source frame)",
+  "control": false,
+  "required": [
+   "placeholder",
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [
+    "byte-identical with the slot off",
+    "zero GPU passes when off"
+   ],
+   "isolation": [
+    "per combination group quality + MTF/HF energy/grain kept; no ringing"
+   ],
+   "contract": [
+    "fingerprint bypass shows under 'Fallbacks engaged'"
+   ],
+   "chain": [
+    "Upper preset at 24p/200 ms on the 3090"
+   ]
+  },
+  "fallback_entry": "Refine: bypassed (fingerprint mismatch / group underperforms / low latency)",
+  "missing": []
+ },
+ {
+  "id": "scaling.chroma_upscale",
+  "order": 120,
+  "status": "placeholder",
+  "hook_point": "prepass",
+  "control": false,
+  "required": [
+   "placeholder",
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [
+    "byte-identical with the slot off",
+    "zero GPU passes when off"
+   ],
+   "isolation": [],
+   "contract": [
+    "libplacebo does not re-upsample when the slot outputs 4:4:4"
+   ],
+   "chain": []
+  },
+  "fallback_entry": "Chroma upscale: libplacebo (<reason>)",
+  "missing": [
+   "isolation",
+   "chain"
+  ]
+ },
+ {
+  "id": "motion.vector_delivery",
+  "order": 130,
+  "status": "partial",
+  "hook_point": "host",
+  "control": false,
+  "required": [
+   "placeholder",
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "per-axis scaling unit tests (VectorScale)"
+   ],
+   "contract": [
+    "sx != sy maps exactly; identity factors leave vectors unchanged"
+   ],
+   "chain": [
+    "single-axis re-base + de-judder"
+   ]
+  },
+  "fallback_entry": "Vectors: invalid (<reason>)",
+  "missing": [
+   "placeholder"
+  ]
+ },
+ {
+  "id": "motion.consumers",
+  "order": 140,
+  "status": "built",
+  "hook_point": "prepass",
+  "control": false,
+  "required": [
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "DejudderWarp tests",
+    "InterpolationTimeline tests",
+    "PulldownDetector tests"
+   ],
+   "contract": [
+    "exclusive with libplacebo smooth motion by profile rules"
+   ],
+   "chain": [
+    "24p in 60 at 200 ms, 4/3/2 frames"
+   ]
+  },
+  "fallback_entry": "Motion consumers: no-motion form (vectors invalid / short queue)",
+  "missing": []
+ },
+ {
+  "id": "scaling.geometry",
+  "order": 150,
+  "status": "built",
+  "hook_point": "libplacebo",
+  "control": false,
+  "required": [
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "NlsGeometryPolicy tests",
+    "AnamorphicPresentation tests"
+   ],
+   "contract": [
+    "active area propagated to every net slot"
+   ],
+   "chain": [
+    "A-lens/NLS + re-base + vectors"
+   ]
+  },
+  "fallback_entry": "Geometry: NLS safe fit (hook failure)",
+  "missing": []
+ },
+ {
+  "id": "scaling.output",
+  "order": 160,
+  "status": "partial",
+  "hook_point": "libplacebo",
+  "control": false,
+  "required": [
+   "placeholder",
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "AdaptiveDownscale tests",
+    "D cost measured in VP first"
+   ],
+   "contract": [
+    "D counts only without sharpness/detail/grain loss"
+   ],
+   "chain": [
+    "pan shimmer test"
+   ]
+  },
+  "fallback_entry": "Output scaling: Lanczos (hybrid unavailable: <reason>)",
+  "missing": [
+   "placeholder"
+  ]
+ },
+ {
+  "id": "colour.tone_gamut",
+  "order": 170,
+  "status": "built",
+  "hook_point": "libplacebo",
+  "control": false,
+  "required": [
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "libplacebo gamut probe"
+   ],
+   "contract": [
+    "combined LUT must output linear light or teach compensation the display response (ADR-0013)"
+   ],
+   "chain": [
+    "LED + Stage 13 + LUT + black level combo"
+   ]
+  },
+  "fallback_entry": "Tone map: libplacebo (combined LUT missing)",
+  "missing": []
+ },
+ {
+  "id": "colour.extended_range",
+  "order": 175,
+  "status": "built",
+  "hook_point": "libplacebo",
+  "control": false,
+  "required": [
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "ExtendedRange tests"
+   ],
+   "contract": [
+    "BTB/WTW probe codes identical with every output slot on and off"
+   ],
+   "chain": [
+    "chain gate BTB/WTW probes"
+   ]
+  },
+  "fallback_entry": "BTB/WTW: clipped (<reason>)",
+  "missing": []
+ },
+ {
+  "id": "colour.sdr_tone_shape",
+  "order": 200,
+  "status": "built",
+  "hook_point": "PRE_OUTPUT",
+  "control": false,
+  "required": [
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "SdrToneShape tests",
+    "DolbyVisionTrims tests"
+   ],
+   "contract": [
+    "output encoding repair present when a PRE_OUTPUT hook runs"
+   ],
+   "chain": []
+  },
+  "fallback_entry": "SDR tone shape: not applied (shader did not load)",
+  "missing": [
+   "chain"
+  ]
+ },
+ {
+  "id": "colour.appearance",
+  "order": 210,
+  "status": "placeholder",
+  "hook_point": "PRE_OUTPUT",
+  "control": false,
+  "required": [
+   "placeholder",
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [
+    "byte-identical with the slot off",
+    "zero hooks when off"
+   ],
+   "isolation": [
+    "identity at equal conditions; reference CAM16 grey ramp / primaries / skin; monotonic J; hue within 1 degree"
+   ],
+   "contract": [
+    "BTB/WTW probe codes identical on and off"
+   ],
+   "chain": [
+    "constant output across synthetic LED dimming with compensation on"
+   ]
+  },
+  "fallback_entry": "Appearance: off (shader failed)",
+  "missing": []
+ },
+ {
+  "id": "drive.led_measure",
+  "order": 220,
+  "status": "built",
+  "hook_point": "PRE_OUTPUT",
+  "control": false,
+  "required": [
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "LedMeasurement tests",
+    "LED correlation harness"
+   ],
+   "contract": [
+    "measures after Stage 13, before compensation"
+   ],
+   "chain": [
+    "LED + subtitles at a 2-frame queue"
+   ]
+  },
+  "fallback_entry": "LED: drive held (measurement unavailable)",
+  "missing": []
+ },
+ {
+  "id": "drive.led_compensation",
+  "order": 230,
+  "status": "built",
+  "hook_point": "PRE_OUTPUT",
+  "control": false,
+  "required": [
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "LED compensation shader tests"
+   ],
+   "contract": [
+    "CNTR never above need"
+   ],
+   "chain": [
+    "LED + Stage 13 + LUT + black level"
+   ]
+  },
+  "fallback_entry": "LED compensation: off (shader did not load)",
+  "missing": []
+ },
+ {
+  "id": "drive.black_level",
+  "order": 240,
+  "status": "placeholder",
+  "hook_point": "PRE_OUTPUT",
+  "control": false,
+  "required": [
+   "placeholder",
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [
+    "byte-identical with the slot off",
+    "zero hooks when off"
+   ],
+   "isolation": [],
+   "contract": [
+    "dark-hair scene check"
+   ],
+   "chain": []
+  },
+  "fallback_entry": "Black level: off (<reason>)",
+  "missing": [
+   "isolation",
+   "chain"
+  ]
+ },
+ {
+  "id": "output.calibration_lut",
+  "order": 250,
+  "status": "partial",
+  "hook_point": "PRE_OUTPUT",
+  "control": false,
+  "required": [
+   "placeholder",
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [
+    "byte-identical while the VP stage is off (libplacebo LUT path unchanged)"
+   ],
+   "isolation": [
+    "LibplaceboDisplayLut tests"
+   ],
+   "contract": [
+    "applied after LED compensation"
+   ],
+   "chain": [
+    "BTB/WTW probes with the LUT"
+   ]
+  },
+  "fallback_entry": "Calibration LUT: libplacebo target LUT (VP stage unavailable)",
+  "missing": []
+ },
+ {
+  "id": "output.dither",
+  "order": 260,
+  "status": "built",
+  "hook_point": "OUTPUT",
+  "control": false,
+  "required": [
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "SigmaDeltaDomain tests"
+   ],
+   "contract": [
+    "the quantiser is the last OUTPUT hook"
+   ],
+   "chain": []
+  },
+  "fallback_entry": "Dither: libplacebo (sigma-delta dropped: <reason>)",
+  "missing": [
+   "chain"
+  ]
+ },
+ {
+  "id": "output.presentation",
+  "order": 270,
+  "status": "built",
+  "hook_point": "present",
+  "control": false,
+  "required": [
+   "isolation",
+   "contract",
+   "chain"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "RenderAheadPolicy tests",
+    "AlphaPresentationTelemetry tests"
+   ],
+   "contract": [
+    "render-ahead at 24p fits 200 ms"
+   ],
+   "chain": [
+    "delay gate"
+   ]
+  },
+  "fallback_entry": "Presentation: open loop (no display statistics)",
+  "missing": []
+ },
+ {
+  "id": "drive.projector_control",
+  "order": 900,
+  "status": "built",
+  "hook_point": "host",
+  "control": true,
+  "required": [
+   "isolation",
+   "contract"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "BarcoAsciiDriver tests",
+    "LedController tests"
+   ],
+   "contract": [],
+   "chain": []
+  },
+  "fallback_entry": "Projector: not connected (LED drive off)",
+  "missing": [
+   "contract"
+  ]
+ },
+ {
+  "id": "control.net_runtime",
+  "order": 910,
+  "status": "placeholder",
+  "hook_point": "host",
+  "control": true,
+  "required": [
+   "isolation",
+   "contract"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "fingerprint match/mismatch unit tests"
+   ],
+   "contract": [],
+   "chain": []
+  },
+  "fallback_entry": "Nets: bypassed (<net>: <reason>)",
+  "missing": [
+   "contract"
+  ]
+ },
+ {
+  "id": "control.diagnostics",
+  "order": 920,
+  "status": "partial",
+  "hook_point": "host",
+  "control": true,
+  "required": [
+   "isolation",
+   "contract"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "FallbackRegistry unit tests"
+   ],
+   "contract": [
+    "every slot's fallback entry reaches the overlay, Config status and Ctrl+Alt+D"
+   ],
+   "chain": []
+  },
+  "fallback_entry": null,
+  "missing": []
+ },
+ {
+  "id": "control.config",
+  "order": 930,
+  "status": "partial",
+  "hook_point": "host",
+  "control": true,
+  "required": [
+   "isolation",
+   "contract"
+  ],
+  "tests": {
+   "placeholder": [],
+   "isolation": [
+    "ConfigFileTests",
+    "ConfigEditorWindowTests"
+   ],
+   "contract": [
+    "every planned key exists once the settings agent lands"
+   ],
+   "chain": []
+  },
+  "fallback_entry": null,
+  "missing": []
+ }
+]

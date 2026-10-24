@@ -3545,7 +3545,13 @@ namespace
 	void ReadPipelineSettings(const ConfigFile& config, RendererSettings& settings)
 	{
 		std::string raw;
-		if (TryGetDisplayString(config, "pipeline_original_pathway", raw))
+		// ADR-0022: the VP-V Config section stores these global keys in [vpv] (renderer profiles are
+		// renamed and reordered by Config, the [vpv] section never is); [vprenderer] stays readable.
+		const auto TryGetPipelineString = [](const ConfigFile& file, const char* key, std::string& value)
+		{
+			return file.TryGetString("vpv", key, value) || TryGetDisplayString(file, key, value);
+		};
+		if (TryGetPipelineString(config, "pipeline_original_pathway", raw))
 		{
 			const std::string value = ConfigFile::NormalizeName(raw);
 			if (value == "on" || value == "off")
@@ -3554,11 +3560,11 @@ namespace
 				DebugLog::Log("pipeline_original_pathway '%s' must be on or off; keeping %s", raw.c_str(),
 					settings.pipelineOriginalPathway ? "on" : "off");
 		}
-		if (TryGetDisplayString(config, "pipeline_order", raw))
+		if (TryGetPipelineString(config, "pipeline_order", raw))
 			settings.pipelineOrder = ConfigFile::Trim(raw);
-		if (TryGetDisplayString(config, "pipeline_slots_off", raw))
+		if (TryGetPipelineString(config, "pipeline_slots_off", raw))
 			settings.pipelineSlotsOff = ConfigFile::Trim(raw);
-		if (TryGetDisplayString(config, "calibration_lut_stage", raw))
+		if (TryGetPipelineString(config, "calibration_lut_stage", raw))
 		{
 			const std::string value = ConfigFile::NormalizeName(raw);
 			if (value == "libplacebo" || value == "vp")
