@@ -17,7 +17,7 @@ The picture travels through **eight units**. The pipeline runs top to bottom:
 
 | Side | Unit | What it does, in plain words | Status |
 |---|---|---|---|
-| **INPUT SIDE** | Input | Takes frames from the card without losing precision; works out the signal type (SDR/HDR10/LLDV/DV); holds the frames for a fixed 200 ms (250 ms margin) | built |
+| **INPUT SIDE** | Input | Takes frames from the card without losing precision; works out the signal type (SDR/HDR10/LLDV/DV); holds the frames for ONE total delay you set to match your AVR (recommended: enough for 4 frames, about 250 ms at 24p), the same at every frame rate | built |
 | | Input (analysis) | Studies the **untouched** frame: how the player scaled it, where the picture is, cuts/fades, subtitles | built |
 | | Motion | Measures motion on the untouched frame at its own size (cheap, accurate); one "vectors valid" switch every user obeys | built |
 | | Scaling: **re-base** | Undoes the player's upscale, axis by axis, so we work on the real picture | built (order pending) |
@@ -60,9 +60,14 @@ overlay, in Config and in Ctrl+Alt+D, plus a one-time notice.
   bit-identical to the modular one.
 - **Zero-cost placeholders** (ADR-0015): an off slot adds no pass and no copy, so its output is
   byte-identical. Timing and delay tests stay true.
-- **Fixed delay** (ADR-0003): 200 ms is the design target and 250 ms the margin. The pipeline is
-  built for 4 queued frames, with a graceful 2-3 frame fallback. Look-aheads share the queue
-  (they never add to it) and are time-based where possible.
+- **Fixed delay** (ADR-0003, timing decided in ADR-0020):
+  - The user sets ONE total delay to match the AVR. It is identical at every frame rate (padded),
+    so the AVR setting never changes between titles.
+  - The pipeline is built for 4 queued frames: this is the RECOMMENDED setting, about 250 ms at
+    24p.
+  - A lower total walks the 4 -> 3 -> 2 ladder, and every feature keeps working at the lower
+    margin.
+  - Look-aheads share the queue (they never add to it) and are time-based where possible.
 - **Analysis and motion on the original frame** (ADR-0004, ADR-0006). This is forced: A_motion
   needs vectors before it runs.
 - **BTB/WTW kept in all cases** (ADR-0002). **No silent fallbacks** (ADR-0001). **General, not
@@ -99,9 +104,15 @@ Open: the CPU fallback should keep 4:2:2; the RGB-capture luma path for A.
 unpacks the DV tunnel. Output: a signal descriptor on every frame. Fallback: DV unpack on the CPU
 (log-only today). Rule: nets never run on raw DV IPT.
 
-**input.queue_timing (30), built, host.** Holds the fixed delay (`target_latency_ms` 200/250) and
-runs cadence/pulldown detection, the film clock and stale-burst handling.
-**Delay budget at 24p: 4 queued frames (167 ms) + ~20-40 ms processing/present = 187-207 ms.**
+**input.queue_timing (30), built, host.** Holds ONE user-set total delay (`target_latency_ms`; ADR-0020) and runs cadence/pulldown
+detection, the film clock and stale-burst handling.
+- **Recommended total:** enough for 4 queued frames at the slowest source rate. At 24p that is
+  4 x 41.7 = 167 ms, plus the swapchain, render-ahead and processing: about 230-250 ms.
+- **The same total at every frame rate:** faster rates are padded, so the AVR delay never
+  changes between titles.
+- **A lower total:** the queue depth = floor((total - fixed costs) / frame period). It walks the
+  4 -> 3 -> 2 ladder, shown as a "Fallbacks engaged" entry. Config shows the resulting frames and
+  margin.
 The queue depth is the deepest single look-ahead plus the hiccup spare. On a short queue
 (2-3 frames) every consumer shortens its look-ahead or falls back, and the delay never changes.
 Fallback: "Queue: short look-ahead (n of 4 frames)". Being fixed on `fix/r6-baseline`: the forced
@@ -311,14 +322,93 @@ These rules change HOW the slots run, not their order.
     capture transfer time where the budget covers it.
   - The rounding is DOWN. Today `QueueLatency.h` rounds UP: 200 ms x 23.976 = 4.8, which becomes
     5 frames = 208 ms.
-  - Pending owner decisions O1 (what the 200 ms measures) and O3 (exactly fixed vs constant per
-    rate).
+  - DECIDED (owner 2026-10-24, ADR-0020):
+    - ONE user-set total delay. 4 frames is RECOMMENDED (`DelayBudget::RecommendedBudgetMs`:
+      4 frames at the slowest source rate, about 230-250 ms at 24p).
+    - The SAME total at every frame rate: faster rates are padded (`Plan::paddingMs`).
+    - The ladder is 4 -> 3 -> 2. Config shows the resulting frames, degraded state and margin.
+    - The budget stays configurable.
+
+### 3.7 The "Original pathway" baseline (owner 2026-10-24, ADR-0019)
+
+Switching every VP addition off must reproduce **Bill's original pathway**. This proves the VP
+additions are modular add-ons and gives a known-good reference.
+
+- Every slot has an `origin`: **upstream**, **mixed** (it exists upstream, with VP options
+  added) or **vp** (a VP addition).
+  - Upstream: tone/gamut.
+  - Mixed: capture, signal, queue/timing, source analysis, geometry, output scaling,
+    calibration LUT, dither, presentation, config, diagnostics.
+  - Everything else is vp.
+- `Registry::ApplyOriginalPathway()` (and later a Config profile "Original pathway") turns every
+  vp slot OFF. Every mixed slot runs in its upstream form via the overrides in `slots.json`
+  `original_pathway.settings`, for example `capture_path standard`, `source_resolution native`,
+  `adaptive_downscale off`, `sigma_delta off`, `render_ahead off`.
+  - In this mode the calibration LUT stays libplacebo's target LUT, as upstream does. The VP
+    LUT hook (R1) is a VP-mode change.
+- **Golden test (planned, gate item).** The renderer capture harness renders synthetic fixtures
+  (our own patterns; no film frames) in original mode. It compares them byte-for-byte with
+  goldens recorded from an upstream-equivalent build (the bill-v1.4.02 line, with the SAME
+  libplacebo build). A timing check compares frame order, repeats and drops for the same input
+  rate.
+
+**Documented exceptions.** Each is justified and gets a tolerance in the test:
+
+| Exception | Why it cannot be identical | Tolerance |
+|---|---|---|
+| libplacebo version / VP fork patches (Beta 377 + clamp patches) | VP needs the fork for its own stages; the goldens use the same libplacebo build to remove this difference, else +-1 code | byte-identical with the same libplacebo; +-1 code otherwise |
+| OutputEncodingRepair | It runs only when a PRE_OUTPUT hook is present; original mode has none, so it is inactive | identical |
+| VP bug fixes in upstream code (queue/timing fixes, capture resync hardening, crash fixes) | Fixes that cannot be switched off without reintroducing crashes/stalls | timing only; listed per fix |
+| Config migration (retired/renamed keys) | Upstream configs are migrated on load | n/a (settings mapping test) |
+| "Fallbacks engaged" status / diagnostics | Status only, not in the pixel path | n/a |
+
+### 3.8 How "once per source frame" (B3) preserves the pathway intent
+
+The owner approved B3 on condition that it keeps the same order and meaning, with only the
+redundant per-refresh repeats removed.
+
+- **Order unchanged.** The entrance stage list runs the input-side slots in the `slots.json`
+  order (re-base -> repair -> deband -> texture restore -> 4K route -> refine -> chroma). The
+  registry is the only source of order.
+- **Meaning unchanged.** Each stage still sees exactly one source frame and produces that
+  frame's processed picture.
+  - Today every refresh of a 24p frame at 60 Hz re-runs re-base + deband on the same input. The
+    duplicate runs produce the same picture, or a phase picture that the design says should be
+    made AFTER the input side. Removing them changes no stage's job.
+  - Stateful stages already advance once per source frame: the debander hold (slot 0) and the
+    detail pulse/texture restore history advance on A. They keep exactly that.
+- **Motion consumers move AFTER the input side**, as designed (processing order 130-140). They
+  warp/read the cached processed picture, with vectors delivered per axis (`VectorScale`).
+  - This is the one intended visible change: today the phase picture is built from native
+    planes, BEFORE re-base/deband.
+  - It is measured: a byte-identical check on non-motion frames, and a quality/shimmer check on
+    de-judder frames.
+- **Crossfade.** The crossfade reads the cached results of both paths: the path being left keeps
+  its cache entry for the fade.
+- **Cache keys.** The cache is keyed by the source sequence + an epoch. The epoch is bumped on
+  settings, re-base factors, processing size or format, so a stale picture is never reused.
+  Sequence 0 (unknown) is never served from the cache.
+
+### 3.9 Real-time proof on the laptop (B4)
+
+The 3090 trains this week. The real-time proof uses the **laptop RTX 3050 Ti**, projected to
+the 3090:
+
+- **Per-slot GPU timestamps.** D3D11 timestamp queries bracket each slot's passes/hooks, using
+  the existing `AlphaD3D11FrameGpuTimer` pattern. They feed `SlotTiming::Accumulator`.
+- **Every-frame mode.** The analysis mode processes every frame in order, with no dropping. It
+  is fine even at ~1 s/frame, so each slot's cost is measured on the real content.
+- **Projection.** `SlotTiming::Project` multiplies each slot's laptop mean by its measured
+  3090/laptop ratio (from BenchKit or paired runs), and compares the sum with the frame budget.
+  Slots without a measured ratio use a fallback ratio and are COUNTED as unmeasured in the
+  report.
+- The laptop timings also anchor the Low/Mid tiers (the laptop 4K30 goal).
 
 ---
 
 ## 4. Decisions and open items
 
-Decisions: see `docs/decisions/` (ADR-0001 .. ADR-0018).
+Decisions: see `docs/decisions/` (ADR-0001 .. ADR-0020).
 
 | Open item | Decided by | Affects |
 |---|---|---|
@@ -330,8 +420,8 @@ Decisions: see `docs/decisions/` (ADR-0001 .. ADR-0018).
 | Combined LUT vs LED compensation | when building the LUT option | `colour.tone_gamut` |
 | Chroma upscale need | libplacebo chroma verification | `scaling.chroma_upscale` |
 | Black level design | later spec | `drive.black_level` |
-| What 200 ms measures (O1); fixed vs per-rate constant (O3) | owner | `input.queue_timing` budget |
-| 3090 real-time window (O2) | owner | chain gate timing |
+| ~~O1/O3 timing~~ DECIDED: one user-set total, the same at every rate, 4 frames recommended (ADR-0020) | owner | `input.queue_timing` budget |
+| 3090 real-time check (O2): after the owner returns; laptop per-stage timings scaled meanwhile (3.9) | owner | chain gate timing |
 | Nets: rgba32f vs fp16 (O5); fp16 default proposed | owner + round 2 | `control.net_runtime` |
 
 ---
@@ -349,6 +439,35 @@ Decisions: see `docs/decisions/` (ADR-0001 .. ADR-0018).
   so the LUT can later be appended as the last hook (R1).
 - Per-axis vector scaling is a small value type (`VectorScale`: sx, sy) used by vector delivery.
 - "Fallbacks engaged" reuses the fix/r6-baseline registry (R5).
+### 5.1 Skeleton integration steps (feat/skeleton)
+
+1. **Done (library + tests, no renderer change).** `PipelineSlots.h`, `EntranceStages.h` (stage
+   list + entrance cache), `OutputHookOrder.h`, `VectorScale.h`, and the
+   `PipelineSkeletonTests` CPU tests. The drift check also compares `PipelineSlots.h` with
+   `slots.json`.
+2. **After rebasing on `fix/r6-baseline`** (it is editing `LibplaceboVideoRenderer.cpp` now, so
+   that file is not touched concurrently): the renderer's main source-stage lambda builds a
+   `StageList<pl_frame>` from the existing modules (SourceRebase, VpDebander, DetailPulse +
+   TextureRestore). It runs through `Cache::Get(sourceSequence, epoch)`. The epoch is bumped on
+   settings, re-base factor, processing size or format changes.
+   - Placeholder slots are not wired, so they cost nothing.
+   - Byte-identity check: the default chain on non-motion frames must render identically before
+     and after.
+3. **Make the de-judder phase picture, extras and crossfade read the cached entrance result.**
+   Vectors are delivered with `VectorScale` (source -> encoded/processing). Remove the extra and
+   crossfade copies of the chain.
+   - Expected and measured change: the phase picture is made from the processed picture instead
+     of the native one.
+   - The debander hold and the detail-history semantics (advance once per source frame on A) are
+     kept by the once-per-frame run.
+4. **Tag the collected output hooks and hand libplacebo `OutputHookOrder::Order(...)`.** Today's
+   chain is already in order (tested), so the output is unchanged. Then add the VP calibration-LUT
+   hook (R1) as the last PRE_OUTPUT hook. The de-judder rendered-picture cache sits before it, so
+   the extras must apply the LUT themselves; check this when building R1.
+5. **Slot-level enable/disable in Config** (settings agent, from `slots.json`).
+   - Each slot's fallback reports through the fix/r6-baseline `FallbackStatus` (`Engage(id,
+     reason)`), using the slot's `fallback.entry` text.
+
 - Module folders under `src/modules/<unit>/<slot>/` hold the README, MANIFEST.json, tests/ and
   the live file list. Code moves only when touched (migration directive, ADR-0017), and
   `tools/check_module_manifests.py` guards drift against `docs/design/components-master.json`.

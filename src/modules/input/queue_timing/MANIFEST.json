@@ -6,6 +6,7 @@
   "status": "built",
   "code_location": "legacy",
   "live_files": [
+    "src/VideoProcessor-Lib/DelayBudget.h",
     "src/VideoProcessor-Lib/QueueLatency.h",
     "src/VideoProcessor-Lib/QueueConfiguration.h",
     "src/VideoProcessor-Lib/QueueLookahead.h",

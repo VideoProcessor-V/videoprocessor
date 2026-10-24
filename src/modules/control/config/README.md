@@ -55,6 +55,10 @@ Chain tests:
 
 Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
+- `src/VideoProcessor-Lib/vprenderer/PipelineSlots.h`
+- `src/VideoProcessor-Lib/vprenderer/EntranceStages.h`
+- `src/VideoProcessor-Lib/vprenderer/OutputHookOrder.h`
+- `src/VideoProcessor-Test/PipelineSkeletonTests.cpp`
 - `src/VideoProcessor-Config/ConfigEditorWindow.cpp`
 - `src/VideoProcessor-Lib/ConfigFile.cpp`
 - `src/VideoProcessor-Lib/ConfigSchema.h`

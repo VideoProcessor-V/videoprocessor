@@ -6,6 +6,7 @@
   "status": "partial",
   "code_location": "legacy",
   "live_files": [
+    "src/VideoProcessor-Lib/vprenderer/SlotTiming.h",
     "src/VideoProcessor-Lib/StateReport.cpp",
     "src/VideoProcessor-Lib/CrashState.cpp",
     "src/VideoProcessor-GUI/StatsOverlayWindow.cpp",

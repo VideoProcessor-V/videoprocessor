@@ -4,21 +4,21 @@ Unit: **input** | side: input | order: 30 | status: **built** | hook point: host
 
 ## Purpose / why
 
-Hold a FIXED, known delay (lip sync with a fixed audio delay): 200 ms target, 250 ms margin; 4 queued frames with a graceful 2-3 frame fallback; cadence/pulldown detection and the film clock; stale-burst handling.
+Hold ONE user-set total delay (lip sync with the AVR's fixed audio delay), the SAME at every frame rate (padded); 4 queued frames recommended (~230-250 ms at 24p) with a graceful 4/3/2 ladder; cadence/pulldown detection and the film clock; stale-burst handling.
 
 ## Contract
 
 - Input: captured frames with timestamps
 - Output: frames released at a constant end-to-end delay, with cadence/film-clock phase
 - Geometry: n/a
-- Delay share: TOTAL-DELAY BUDGET: queue frames = floor((budget - fixed costs) / frame period), ladder 4/3/2; fixed costs = swapchain depth + render-ahead + processing (+ capture transfer if the budget covers it). Pending owner O1/O3.
+- Delay share: TOTAL-DELAY BUDGET (ADR-0020): queue frames = floor((total - fixed costs) / frame period), capped at 4, ladder 4/3/2; fixed costs = swapchain depth + render-ahead + processing (+ capture transfer where covered); padding makes the total identical at every rate. DelayBudget.h.
 - Look-ahead: provides the shared look-ahead window: queue depth = deepest single look-ahead + hiccup spare (features share, never add)
 
 ## Settings
 
 - Existing keys: `target_latency_ms`, `queue_size`, `queue_timing_fixes`, `queue_recovery`, `queue_auto_reset`, `pulldown_fixes`, `low_latency`, `low_latency_path`
 - Planned keys: (none)
-- Tiers: not tiered; 200 / 250 ms selectable
+- Tiers: not tiered; one user-set total delay (recommended = 4 frames at the slowest rate)
 
 ## Fallbacks
 
@@ -46,7 +46,7 @@ Contract tests:
 - queue minimum follows the configured/time depth (no forced 5-frame minimum)
 
 Chain tests:
-- delay gate: 24p at 200 and 250 ms with 4/3/2 frames; repeat at 25/30/50/60p; constant delay, no stalls, recovery when frames return
+- delay gate: the recommended total and lower totals (4/3/2 frames) at 23.976/24/25/30/50/60p; identical measured total across rates; no stalls; recovery when frames return
 
 ## Known issues / open items
 
@@ -59,6 +59,7 @@ Chain tests:
 
 Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
+- `src/VideoProcessor-Lib/DelayBudget.h`
 - `src/VideoProcessor-Lib/QueueLatency.h`
 - `src/VideoProcessor-Lib/QueueConfiguration.h`
 - `src/VideoProcessor-Lib/QueueLookahead.h`
@@ -78,4 +79,4 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 
 - Design: [VP-pipeline-final.md](../../../../docs/design/VP-pipeline-final.md)
 - Slot data: [slots.json](../../../../docs/design/slots.json)
-- Decisions: ADR-0003 in [docs/decisions](../../../../docs/decisions/README.md)
+- Decisions: ADR-0003, ADR-0020 in [docs/decisions](../../../../docs/decisions/README.md)

@@ -6,6 +6,7 @@
   "status": "partial",
   "code_location": "legacy",
   "live_files": [
+    "src/VideoProcessor-Lib/vprenderer/VectorScale.h",
     "src/VideoProcessor-Lib/vprenderer/DejudderPolicy.h",
     "src/VideoProcessor-Lib/vprenderer/DejudderWarp.h"
   ],

@@ -55,6 +55,7 @@ Chain tests:
 
 Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
+- `src/VideoProcessor-Lib/vprenderer/SlotTiming.h`
 - `src/VideoProcessor-Lib/StateReport.cpp`
 - `src/VideoProcessor-Lib/CrashState.cpp`
 - `src/VideoProcessor-GUI/StatsOverlayWindow.cpp`

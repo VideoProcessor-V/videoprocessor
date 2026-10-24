@@ -380,6 +380,7 @@
     <ClCompile Include="GrainPreservationTests.cpp" />
     <ClCompile Include="DetailPulseTests.cpp" />
     <ClCompile Include="CrossfadeMixTests.cpp" />
+    <ClCompile Include="PipelineSkeletonTests.cpp" />
     <ClCompile Include="TextureRestoreTests.cpp" />
     <ClCompile Include="DetailRestoreConfigTests.cpp" />
     <ClCompile Include="KernelInverseTests.cpp" />

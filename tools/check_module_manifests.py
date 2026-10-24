@@ -13,6 +13,7 @@ Stdlib only; run from anywhere.
 """
 import json
 import os
+import re
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -61,6 +62,19 @@ def check(write):
     orders = [s["order"] for s in slots]
     if len(orders) != len(set(orders)):
         errors.append("slots.json: duplicate order values")
+
+    # The renderer's slot table (PipelineSlots.h) mirrors slots.json: same ids, order, status, origin.
+    header = os.path.join(ROOT, "src", "VideoProcessor-Lib", "vprenderer", "PipelineSlots.h")
+    if os.path.exists(header):
+        pattern = re.compile(r'\{\s*Id::\w+,\s*"([\w.]+)",\s*Side::\w+,\s*(\d+),\s*HookPoint::\w+,\s*Status::(\w+),\s*Origin::(\w+)\s*\}')
+        with open(header, encoding="utf-8") as f:
+            table = {m.group(1): (int(m.group(2)), m.group(3).lower(), m.group(4).lower())
+                     for m in pattern.finditer(f.read())}
+        want = {s["id"]: (s["order"], s["status"], s.get("origin")) for s in slots}
+        if table != want:
+            for sid in sorted(set(table) | set(want)):
+                if table.get(sid) != want.get(sid):
+                    errors.append(f"PipelineSlots.h vs slots.json: {sid}: {table.get(sid)} != {want.get(sid)}")
 
     manifests = []
     for s in slots:

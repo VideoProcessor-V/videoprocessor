@@ -6,6 +6,10 @@
   "status": "partial",
   "code_location": "legacy",
   "live_files": [
+    "src/VideoProcessor-Lib/vprenderer/PipelineSlots.h",
+    "src/VideoProcessor-Lib/vprenderer/EntranceStages.h",
+    "src/VideoProcessor-Lib/vprenderer/OutputHookOrder.h",
+    "src/VideoProcessor-Test/PipelineSkeletonTests.cpp",
     "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
     "src/VideoProcessor-Lib/ConfigFile.cpp",
     "src/VideoProcessor-Lib/ConfigSchema.h",

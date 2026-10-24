@@ -54,6 +54,7 @@ Chain tests:
 
 Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
+- `src/VideoProcessor-Lib/vprenderer/VectorScale.h`
 - `src/VideoProcessor-Lib/vprenderer/DejudderPolicy.h`
 - `src/VideoProcessor-Lib/vprenderer/DejudderWarp.h`
 

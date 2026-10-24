@@ -10,7 +10,8 @@
     "tests: placeholder = byte-identity on/off + zero cost; isolation = fixed inputs -> expected outputs + cost; contract = formats/geometry/fallback entry; chain = end to end at 200/250 ms with 4/3/2 queued frames.",
     "settings_keys lists existing Config keys; keys in 'planned_keys' do not exist yet (the settings agent creates them).",
     "Order of scaling.rebase vs repair.encoding is PENDING the round-2 A diagnostic (ADR-0005); re-base first is the proposed order.",
-    "Barrier-scan rules (docs/design/VP-barriers-2026-10-24.md): input-side slots run ONCE per source frame into the entrance cache (B3); one slot registry, hooks registered only when active (R2); nets run in the VP NetRunner on VP-owned textures, fp16 default (B1/R3)."
+    "Barrier-scan rules (docs/design/VP-barriers-2026-10-24.md): input-side slots run ONCE per source frame into the entrance cache (B3); one slot registry, hooks registered only when active (R2); nets run in the VP NetRunner on VP-owned textures, fp16 default (B1/R3).",
+    "origin/original_pathway (ADR-0019): the ORIGINAL PATHWAY baseline turns every 'vp' slot off and runs every 'mixed' slot in its upstream form with the listed settings; it must reproduce Bill's original pathway (golden comparison, documented exceptions in VP-pipeline-final.md 3.7)."
   ],
   "tiers": [
     "Classic",
@@ -68,7 +69,16 @@
       ],
       "decisions": [
         "ADR-0010"
-      ]
+      ],
+      "origin": "mixed",
+      "original_pathway": {
+        "mode": "upstream form",
+        "settings": {
+          "capture_path": "standard",
+          "native_rgb_ingest": "off",
+          "capture_upload": "verify (upstream upload path)"
+        }
+      }
     },
     {
       "id": "input.signal",
@@ -117,7 +127,16 @@
       "open_items": [
         "internal software DV pathway for synthetic RPU tests (item 60)"
       ],
-      "decisions": []
+      "decisions": [],
+      "origin": "mixed",
+      "original_pathway": {
+        "mode": "upstream form",
+        "settings": {
+          "dv_tunnel_gpu_unpack": "off",
+          "dv_tunnel_fixes": "off",
+          "dv_trims": "off"
+        }
+      }
     },
     {
       "id": "input.queue_timing",
@@ -127,12 +146,12 @@
       "order": 30,
       "status": "built",
       "hook_point": "host",
-      "purpose": "Hold a FIXED, known delay (lip sync with a fixed audio delay): 200 ms target, 250 ms margin; 4 queued frames with a graceful 2-3 frame fallback; cadence/pulldown detection and the film clock; stale-burst handling.",
+      "purpose": "Hold ONE user-set total delay (lip sync with the AVR's fixed audio delay), the SAME at every frame rate (padded); 4 queued frames recommended (~230-250 ms at 24p) with a graceful 4/3/2 ladder; cadence/pulldown detection and the film clock; stale-burst handling.",
       "contract": {
         "input": "captured frames with timestamps",
         "output": "frames released at a constant end-to-end delay, with cadence/film-clock phase",
         "geometry": "n/a",
-        "delay_share": "TOTAL-DELAY BUDGET: queue frames = floor((budget - fixed costs) / frame period), ladder 4/3/2; fixed costs = swapchain depth + render-ahead + processing (+ capture transfer if the budget covers it). Pending owner O1/O3.",
+        "delay_share": "TOTAL-DELAY BUDGET (ADR-0020): queue frames = floor((total - fixed costs) / frame period), capped at 4, ladder 4/3/2; fixed costs = swapchain depth + render-ahead + processing (+ capture transfer where covered); padding makes the total identical at every rate. DelayBudget.h.",
         "lookahead": "provides the shared look-ahead window: queue depth = deepest single look-ahead + hiccup spare (features share, never add)"
       },
       "settings_keys": [
@@ -146,7 +165,7 @@
         "low_latency_path"
       ],
       "planned_keys": [],
-      "tiers": "not tiered; 200 / 250 ms selectable",
+      "tiers": "not tiered; one user-set total delay (recommended = 4 frames at the slowest rate)",
       "fallback": {
         "entry": "Queue: short look-ahead (<n> of 4 frames)",
         "behaviour": "With 2-3 frames available, every look-ahead consumer shortens its look-ahead or falls back; the delay never changes."
@@ -166,7 +185,7 @@
           "queue minimum follows the configured/time depth (no forced 5-frame minimum)"
         ],
         "chain": [
-          "delay gate: 24p at 200 and 250 ms with 4/3/2 frames; repeat at 25/30/50/60p; constant delay, no stalls, recovery when frames return"
+          "delay gate: the recommended total and lower totals (4/3/2 frames) at 23.976/24/25/30/50/60p; identical measured total across rates; no stalls; recovery when frames return"
         ]
       },
       "open_items": [
@@ -176,8 +195,18 @@
         "QueueLatency.h rounds UP (ceil) today: 200 ms at 23.976 = 5 frames (barrier B2)"
       ],
       "decisions": [
-        "ADR-0003"
-      ]
+        "ADR-0003",
+        "ADR-0020"
+      ],
+      "origin": "mixed",
+      "original_pathway": {
+        "mode": "upstream form",
+        "settings": {
+          "queue_timing_fixes": "off",
+          "pulldown_fixes": "off",
+          "target_latency_ms": "upstream default (verify)"
+        }
+      }
     },
     {
       "id": "input.source_analysis",
@@ -237,7 +266,16 @@
       ],
       "decisions": [
         "ADR-0004"
-      ]
+      ],
+      "origin": "mixed",
+      "original_pathway": {
+        "mode": "upstream form",
+        "settings": {
+          "source_resolution": "native",
+          "rebase_kernel_match": "off",
+          "source_coding_fixes": "off"
+        }
+      }
     },
     {
       "id": "motion.estimation",
@@ -295,7 +333,14 @@
       ],
       "decisions": [
         "ADR-0006"
-      ]
+      ],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {
+          "motion_engine": "off"
+        }
+      }
     },
     {
       "id": "scaling.rebase",
@@ -349,7 +394,14 @@
       "decisions": [
         "ADR-0005",
         "ADR-0007"
-      ]
+      ],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {
+          "source_resolution": "native"
+        }
+      }
     },
     {
       "id": "repair.encoding",
@@ -406,7 +458,12 @@
         "ADR-0005",
         "ADR-0008",
         "ADR-0009"
-      ]
+      ],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {}
+      }
     },
     {
       "id": "repair.deband",
@@ -461,7 +518,15 @@
       ],
       "decisions": [
         "ADR-0009"
-      ]
+      ],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {
+          "deband_vp": "off",
+          "deband_vp_exclusive": "off"
+        }
+      }
     },
     {
       "id": "repair.texture_restore",
@@ -517,7 +582,15 @@
       ],
       "decisions": [
         "ADR-0009"
-      ]
+      ],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {
+          "texture_restore": "off",
+          "detail_pulse_stabilise": "off"
+        }
+      }
     },
     {
       "id": "scaling.route_4k",
@@ -570,7 +643,12 @@
       ],
       "decisions": [
         "ADR-0007"
-      ]
+      ],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {}
+      }
     },
     {
       "id": "scaling.refine",
@@ -623,7 +701,12 @@
       ],
       "decisions": [
         "ADR-0008"
-      ]
+      ],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {}
+      }
     },
     {
       "id": "scaling.chroma_upscale",
@@ -673,7 +756,12 @@
       ],
       "decisions": [
         "ADR-0011"
-      ]
+      ],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {}
+      }
     },
     {
       "id": "motion.vector_delivery",
@@ -722,7 +810,12 @@
       ],
       "decisions": [
         "ADR-0006"
-      ]
+      ],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {}
+      }
     },
     {
       "id": "motion.consumers",
@@ -776,7 +869,16 @@
       "open_items": [],
       "decisions": [
         "ADR-0006"
-      ]
+      ],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {
+          "interpolation": "off",
+          "dejudder_strength": "0 (verify key)",
+          "dither_vectors": "off"
+        }
+      }
     },
     {
       "id": "scaling.geometry",
@@ -826,7 +928,12 @@
         ]
       },
       "open_items": [],
-      "decisions": []
+      "decisions": [],
+      "origin": "mixed",
+      "original_pathway": {
+        "mode": "upstream form",
+        "settings": {}
+      }
     },
     {
       "id": "scaling.output",
@@ -885,7 +992,16 @@
       ],
       "decisions": [
         "ADR-0012"
-      ]
+      ],
+      "origin": "mixed",
+      "original_pathway": {
+        "mode": "upstream form",
+        "settings": {
+          "adaptive_downscale": "off",
+          "adaptive_upscale": "off",
+          "downscale_light": "upstream default (verify)"
+        }
+      }
     },
     {
       "id": "colour.tone_gamut",
@@ -940,7 +1056,12 @@
         "ADR-0013",
         "ADR-0002",
         "ADR-0016"
-      ]
+      ],
+      "origin": "upstream",
+      "original_pathway": {
+        "mode": "as is",
+        "settings": {}
+      }
     },
     {
       "id": "colour.extended_range",
@@ -987,7 +1108,15 @@
       "open_items": [],
       "decisions": [
         "ADR-0002"
-      ]
+      ],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {
+          "preserve_extended_range": "off",
+          "extended_range_more_cases": "off"
+        }
+      }
     },
     {
       "id": "colour.sdr_tone_shape",
@@ -1033,7 +1162,15 @@
       "open_items": [],
       "decisions": [
         "ADR-0002"
-      ]
+      ],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {
+          "sdr_tone_shape": "off",
+          "dv_trims": "off"
+        }
+      }
     },
     {
       "id": "colour.appearance",
@@ -1089,7 +1226,12 @@
       ],
       "decisions": [
         "ADR-0014"
-      ]
+      ],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {}
+      }
     },
     {
       "id": "drive.led_measure",
@@ -1137,7 +1279,14 @@
       "open_items": [],
       "decisions": [
         "ADR-0013"
-      ]
+      ],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {
+          "led_compensation": "off"
+        }
+      }
     },
     {
       "id": "drive.led_compensation",
@@ -1183,7 +1332,14 @@
       "open_items": [],
       "decisions": [
         "ADR-0013"
-      ]
+      ],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {
+          "led_compensation": "off"
+        }
+      }
     },
     {
       "id": "drive.black_level",
@@ -1230,7 +1386,12 @@
       ],
       "decisions": [
         "ADR-0013"
-      ]
+      ],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {}
+      }
     },
     {
       "id": "output.calibration_lut",
@@ -1285,7 +1446,14 @@
       ],
       "decisions": [
         "ADR-0013"
-      ]
+      ],
+      "origin": "mixed",
+      "original_pathway": {
+        "mode": "upstream form",
+        "settings": {
+          "calibration_lut_stage": "libplacebo (upstream: libplacebo target LUT)"
+        }
+      }
     },
     {
       "id": "output.dither",
@@ -1330,7 +1498,15 @@
         "chain": []
       },
       "open_items": [],
-      "decisions": []
+      "decisions": [],
+      "origin": "mixed",
+      "original_pathway": {
+        "mode": "upstream form",
+        "settings": {
+          "sigma_delta": "off",
+          "dithering": "upstream default (verify)"
+        }
+      }
     },
     {
       "id": "output.presentation",
@@ -1379,7 +1555,14 @@
       "open_items": [],
       "decisions": [
         "ADR-0003"
-      ]
+      ],
+      "origin": "mixed",
+      "original_pathway": {
+        "mode": "upstream form",
+        "settings": {
+          "render_ahead": "off"
+        }
+      }
     },
     {
       "id": "drive.projector_control",
@@ -1420,7 +1603,14 @@
       "open_items": [
         "separate CNTR latency if measured different (phone slow-mo)"
       ],
-      "decisions": []
+      "decisions": [],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {
+          "led_compensation": "off"
+        }
+      }
     },
     {
       "id": "control.net_runtime",
@@ -1462,7 +1652,12 @@
       ],
       "decisions": [
         "ADR-0008"
-      ]
+      ],
+      "origin": "vp",
+      "original_pathway": {
+        "mode": "off",
+        "settings": {}
+      }
     },
     {
       "id": "control.diagnostics",
@@ -1505,7 +1700,12 @@
       ],
       "decisions": [
         "ADR-0001"
-      ]
+      ],
+      "origin": "mixed",
+      "original_pathway": {
+        "mode": "upstream form",
+        "settings": {}
+      }
     },
     {
       "id": "control.config",
@@ -1548,7 +1748,12 @@
       ],
       "decisions": [
         "ADR-0015"
-      ]
+      ],
+      "origin": "mixed",
+      "original_pathway": {
+        "mode": "upstream form",
+        "settings": {}
+      }
     }
   ]
 }
