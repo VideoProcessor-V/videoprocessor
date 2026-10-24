@@ -116,7 +116,7 @@ def patterns(rows):
     for old, new in rows:
         if not old.startswith(LIB_REL):
             continue
-        stem_old = os.path.splitext(old[len(LIB_REL):])[0]          # e.g. led/LedDriveModule
+        stem_old = os.path.splitext(old[len(LIB_REL):])[0]          # e.g. "led/<Name>"
         by_stem.setdefault(stem_old, os.path.splitext(new)[0])
     # Longest first so StateReportSettings wins over StateReport.
     for stem_old in sorted(by_stem, key=len, reverse=True):
