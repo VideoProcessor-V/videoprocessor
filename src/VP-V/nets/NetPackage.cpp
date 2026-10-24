@@ -71,20 +71,31 @@ namespace VpNets
 			const std::string tf = fp.Field("texture_formats");
 			fp.intermediate = IntermediateFrom(tf);
 			fp.handoff = HandoffFrom(tf);
-			// An explicit field (exporters after 2026-10-24) wins; round 1/2 state H then V in prose.
+			// An explicit field (exporters after 2026-10-24, or a stamp) wins. Round 1/2 state the pass
+			// order only for the separable nets, in b_structure / c_structure ("passes H then V"). The
+			// shared texture_formats wording ("x2 H->V hand-off") is about B and must not give A or D
+			// a pass order (audit 2026-10-24).
 			fp.passOrder = fp.Field("pass_order");
+			if (fp.passOrder == "n/a") fp.passOrder.clear();
 			if (fp.passOrder.empty())
 			{
-				for (const char* key : { "texture_formats", "c_structure", "stage_contract", "stage_order_text" })
+				for (const char* key : { "b_structure", "c_structure" })
 				{
 					const std::string v = fp.Field(key);
-					if (Contains(v, "H->V") || Contains(v, "H then V") || Contains(v, "H\xE2\x86\x92V"))
+					if (Contains(v, "H then V") || Contains(v, "H->V"))
 					{
 						fp.passOrder = "H>V";
 						break;
 					}
 				}
 			}
+			if (fp.Field("b_structure").empty() && fp.Field("c_structure").empty() && !fp.Has("handoff_format"))
+				fp.handoff = TexFormat::Unknown;   // the r16 hand-off belongs to the separable chain only
+			if (fp.Field("handoff_format") == "r16") fp.handoff = TexFormat::R16Unorm;
+			if (fp.Field("handoff_format") == "n/a") fp.handoff = TexFormat::Unknown;
+			// D's hybrid motion mode (round 2: "NO VECTORS: ..."): typed for the check.
+			const std::string hm = fp.Field("hybrid_motion_mode");
+			fp.hybridMotionMode = hm.empty() ? std::string() : Contains(hm, "NO VECTORS") ? "no_vectors" : Lower(hm);
 			const std::string explicitFormat = Lower(fp.Field("intermediate_format"));
 			if (explicitFormat == "rgba32f") fp.intermediate = TexFormat::Rgba32f;
 			else if (explicitFormat == "rgba16f") fp.intermediate = TexFormat::Rgba16f;
@@ -185,6 +196,7 @@ namespace VpNets
 		ParseResult r;
 		NetPackage& pkg = r.package;
 		pkg.name = name;
+		pkg.shaderSha256 = Sha256Hex(text);
 
 		std::vector<std::string> lines;
 		{
@@ -231,11 +243,14 @@ namespace VpNets
 							if (is != std::string::npos && !pkg.fingerprint.fields.count("input_stage"))
 								pkg.fingerprint.fields["input_stage"] = rest.substr(is + 12);
 						}
-						else if (StartsWith(c, "   ") && Contains(c, ": "))
+						else if (StartsWith(c, "   ") && Contains(c, ":"))
 						{
-							const std::string kv = Trim(c);
-							const size_t colon = kv.find(": ");
-							pkg.fingerprint.fields[kv.substr(0, colon)] = kv.substr(colon + 2);
+							// "//   key: value" (value may be empty: "//   upstream_nets: ")
+							const std::string kv = c.substr(3);
+							const size_t colon = kv.find(':');
+							std::string value = kv.substr(colon + 1);
+							if (!value.empty() && value[0] == ' ') value = value.substr(1);
+							pkg.fingerprint.fields[Trim(kv.substr(0, colon))] = value;
 						}
 					}
 					continue;
@@ -348,6 +363,20 @@ namespace VpNets
 		NetFingerprint& fp = pkg.fingerprint;
 		if (!fpHeaderId.empty()) fp.fields["fingerprint"] = fpHeaderId;
 		DeriveFingerprint(fp);
+		// The id must recompute from the header's own fields (the export json, when merged, re-checks
+		// it over its own, complete fields).
+		{
+			Json obj;
+			obj.kind = Json::Kind::Object;
+			for (const auto& kv : fp.fields)
+			{
+				Json v;
+				v.kind = Json::Kind::String;
+				v.text = kv.second;
+				obj.fields[kv.first] = v;
+			}
+			fp.idVerified = !fp.id.empty() && FingerprintIntact(obj);
+		}
 		pkg.role = RoleFromTitle(pkg.title, fp.Field("input_stage"));
 
 		r.ok = true;

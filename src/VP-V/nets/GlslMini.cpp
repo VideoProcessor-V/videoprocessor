@@ -1380,7 +1380,10 @@ namespace VpNets
 					if (a.size() < 2) { RtFail(ctx, nd, "texelFetch needs a sampler and a position"); return Value(); }
 					const TexView* tv = Texture(a[0], ctx, nd);
 					if (!tv) return Value();
-					return Fetch(*tv, a[1].I(0), a[1].I(1));
+					const int fx = a[1].I(0), fy = a[1].I(1);
+					if (fx < 0 || fy < 0 || fx >= tv->width || fy >= tv->height)
+						return Value::Vec(0, 0, 0, 0);   // D3D11 / robust access: out-of-bounds fetches read 0
+					return Fetch(*tv, fx, fy);
 				}
 				case BI::Texture:
 				{

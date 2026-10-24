@@ -24,7 +24,17 @@ namespace VpNets
 	struct RgbDeltaOptions
 	{
 		bool clampToUnit = false;
+		// The delta is computed in the net's (trained) luma range and added in the RGB's range:
+		// d_rgb = d_net * deltaScale. Full-range RGB with a limited-range-trained net: 1023 / 876.
+		float deltaScale = 1.0f;
 	};
+
+	// Full-range normalised luma -> the limited 10-bit range the nets were trained on (code / 1023):
+	// y_lim = (y_full * 876 + 64) / 1023. No clamp: below-black / above-white stay (BTB/WTW).
+	constexpr float kFullToLimitedScale = 876.0f / 1023.0f;
+	constexpr float kFullToLimitedOffset = 64.0f / 1023.0f;
+	constexpr float kLimitedToFullDeltaScale = 1023.0f / 876.0f;
+	inline float FullToLimited(float yFull) { return yFull * kFullToLimitedScale + kFullToLimitedOffset; }
 
 	// rgba: `channels` floats per pixel (3 or 4), rows `rgbaStride` floats apart. Luma planes: one
 	// float per pixel, rows `lumaStride` floats apart. Alpha is left as is.
@@ -38,7 +48,7 @@ namespace VpNets
 			float* px = rgba + static_cast<size_t>(y) * rgbaStride;
 			for (int x = 0; x < width; ++x, px += channels)
 			{
-				const float d = la[x] - lb[x];
+				const float d = (la[x] - lb[x]) * opt.deltaScale;
 				for (int c = 0; c < 3; ++c)
 				{
 					float v = px[c] + d;
@@ -58,6 +68,12 @@ namespace VpNets
 	// The GPU form, in the exporter's mpv pass format: hook the RGB plane, bind the luma before
 	// and after the net. Same-size planes; texel-exact reads (no filtering).
 	constexpr const char* kRgbLumaDeltaPass =
+		"//!PARAM vp_delta_scale\n"
+		"//!TYPE float\n"
+		"//!MINIMUM 0.0\n"
+		"//!MAXIMUM 4.0\n"
+		"1.0\n"
+		"\n"
 		"//!DESC VP RGB luma delta (repaired luma - luma, added to R, G and B)\n"
 		"//!HOOK RGB\n"
 		"//!BIND HOOKED\n"
@@ -68,7 +84,28 @@ namespace VpNets
 		"vec4 hook() {\n"
 		"    ivec2 p = ivec2(HOOKED_pos * HOOKED_size);\n"
 		"    vec4 c = texelFetch(HOOKED_raw, p, 0) * HOOKED_mul;\n"
-		"    float d = texelFetch(LUMA_AFTER_raw, p, 0).x * LUMA_AFTER_mul - texelFetch(LUMA_BEFORE_raw, p, 0).x * LUMA_BEFORE_mul;\n"
+		"    float d = (texelFetch(LUMA_AFTER_raw, p, 0).x * LUMA_AFTER_mul - texelFetch(LUMA_BEFORE_raw, p, 0).x * LUMA_BEFORE_mul) * vp_delta_scale;\n"
 		"    return vec4(c.x + d, c.y + d, c.z + d, c.w);\n"
+		"}\n";
+
+	// Luma from R'G'B' in the net's trained range: y = (kr R + kg G + kb B) * vp_range_scale +
+	// vp_range_offset (full -> limited: 876/1023, 64/1023; native: 1, 0). For D's RGB splice in the
+	// POST_KERNEL hook (and RGB front-end paths without a matcher luma). Same transfer domain as
+	// the RGB it reads (the caller's responsibility; D's light domain is barrier R8).
+	constexpr const char* kLumaFromRgbPass =
+		"//!PARAM vp_kr\n//!TYPE float\n//!MINIMUM 0.0\n//!MAXIMUM 1.0\n0.2126\n\n"
+		"//!PARAM vp_kb\n//!TYPE float\n//!MINIMUM 0.0\n//!MAXIMUM 1.0\n0.0722\n\n"
+		"//!PARAM vp_range_scale\n//!TYPE float\n//!MINIMUM 0.0\n//!MAXIMUM 2.0\n1.0\n\n"
+		"//!PARAM vp_range_offset\n//!TYPE float\n//!MINIMUM -1.0\n//!MAXIMUM 1.0\n0.0\n\n"
+		"//!DESC VP luma from RGB (the net's trained range)\n"
+		"//!HOOK RGB\n"
+		"//!BIND HOOKED\n"
+		"//!COMPONENTS 1\n"
+		"\n"
+		"vec4 hook() {\n"
+		"    ivec2 p = ivec2(HOOKED_pos * HOOKED_size);\n"
+		"    vec4 c = texelFetch(HOOKED_raw, p, 0) * HOOKED_mul;\n"
+		"    float y = vp_kr * c.x + (1.0 - vp_kr - vp_kb) * c.y + vp_kb * c.z;\n"
+		"    return vec4(y * vp_range_scale + vp_range_offset, 0.0, 0.0, 1.0);\n"
 		"}\n";
 }

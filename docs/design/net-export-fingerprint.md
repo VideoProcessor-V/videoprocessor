@@ -31,8 +31,10 @@ VP cannot check fields it has to guess, so the exporter must write them.
 | `fingerprint` | 16 hex | `h(all fields below except fingerprint and stage_order_text)`, `h(o) = sha256(json.dumps(o, sort_keys=True))[:16]`, as today |
 | `slot` | VP slot id | The slot the net serves: `repair.encoding` (A), `scaling.rebase` (C), `scaling.route_4k` (B), `scaling.refine` (4K refine), `scaling.output` (D) |
 | `upstream_key` | `>`-joined VP slot ids, may be `""` | Picture-changing VP slots in front of the net during training, in order (VP's `SlotRegistry::UpstreamKey`, without non-modifying slots such as `motion.estimation`). Use `""` for A on the original frame |
+| `upstream_nets` | `slot=identity\|...`, may be `""` | The NETS the training data went through, in order: `slot=<net file stem>@<sha256 of its exported shader, 16 hex>`, or `slot=bypassed` when the net slot ran without its net. The fingerprint id alone cannot name a net (A_single and A_motion share one). Record what was actually used, including the kit's fallbacks: a downstream net trained "with the fallback" must say so |
+| `hybrid_motion_mode` | `"no_vectors"` / `"vectors"` / `"both"` | D only: the hybrid scaler's motion mode in its training renders. VP bypasses D while the hybrid runs in a mode D was not validated for |
 | `front_end_states` | object | The VP front-end stages in the training renders, each `"on"`/`"off"`: `deband`, `deband_vp`, `texture_restore`, `detail_pulse_stabilise`, `source_resolution`, and the hybrid scaler's motion mode (for D) |
-| `pass_order` | `"H>V"` | The separable pass order the net assumes |
+| `pass_order` | `"H>V"` / `"n/a"` | The separable pass order the net assumes (B, C); `"n/a"` for A and D. The shared `texture_formats` wording is NOT read as a pass order |
 | `intermediate_format` | `"rgba32f"` / `"rgba16f"` | The net's intermediates in training/validation |
 | `handoff_format` | `"r16"` / `"n/a"` | The re-base / x2 hand-off between the axes |
 | `fp16_within_1_lsb` | bool | Copied from `fp16_check`, so the shader header carries it too |

@@ -58,9 +58,16 @@ So VP parses the package and runs each pass itself on VP-owned textures, through
 3. **Fingerprint.** `CheckFingerprint(pkg, ctx)` compares, with `ctx.intermediate` = the format
    just picked:
    - the label schema (for nets with labels);
-   - the pass order (`H>V`);
+   - the pass order (`H>V`), for the separable nets (B, C) only;
    - the intermediate format;
    - the stage contract;
+   - the id itself: it must recompute from the recorded fields (`idVerified`);
+   - the upstream NETS actually running (`UpstreamNetsKey`: each net slot's
+     `NetPackage::Identity()` = `stem@sha16`, or `bypassed`). It is also checked per frame
+     (`NetRunInputs::upstreamNets`; `NetSlot::State()` gives a net's entry for the nets
+     downstream). Round-1/2 exports record no upstream nets, so only A can be stamped; C, B and D
+     stay bypassed;
+   - D: the hybrid's motion mode (`hybrid_motion_mode`; round 2 records "no vectors");
    - the upstream key (`SlotRegistry::UpstreamKey(SlotOf(pkg.role))`), compared with
      `NormaliseUpstreamKey` on both sides: only picture-changing slots count
      (`motion.estimation` does not); an empty declared key (A) is valid;
@@ -79,7 +86,15 @@ So VP parses the package and runs each pass itself on VP-owned textures, through
    Then `runner.Run(device, inputs, output)`.
 6. **Visibility.** `NetSlot` does steps 2-5 and routes every refusal to `NetBypassSet`. It shows
    "Fallbacks engaged: nets: bypassed (A_single_small: label schema ...)" and clears the entry on
-   recovery.
+   recovery. A net that runs but not as trained shows
+   "nets: degraded (...)": missing labels (the export's defaults) or A_motion's single-frame
+   fallback.
+   - No silent downgrades in the GPU runner either: a pass that samples bilinearly from a
+     texture without linear filtering is refused; the capability check probes r / rg / rgba.
+   - The runner's real intermediate format (`EffectiveIntermediate`) is what the fingerprint is
+     checked against. Fused fp16 storage is refused unless the fingerprint allows fp16.
+   - Exported `tanh(x)` is clamped to `tanh(clamp(x, -15, 15))` on the GPU: HLSL tanh can return
+     NaN for large |x|; the value is unchanged in float.
 
 ### The binding contract (derived from the package)
 
@@ -194,16 +209,27 @@ tested on a headless D3D11 device against the CPU reference.
    - then `slot.Run({gpu, vpDispatch}, in, out)`. On false, keep the input;
    - `out.handle` is the runner's `pl_tex` (r32f; valid until the next Run);
    - r16 planes holding 10-bit MSB-aligned codes: `mul = 65535.0f / 65472.0f`;
-   - RGB capture: run A on the matcher's r16 luma, then run the `kRgbLumaDeltaPass` package
-     with `LUMA_BEFORE` / `LUMA_AFTER`;
+   - RGB capture: the matcher's luma of native RGB ingest is FULL range, but A was trained on
+     limited 10-bit luma:
+     - convert first (`FullToLimited`, or `kLumaFromRgbPass` with `vp_range_scale` 876/1023 and
+       `vp_range_offset` 64/1023);
+     - run A;
+     - add the delta with `kRgbLumaDeltaPass`, `vp_delta_scale` = 1023/876;
+     - no clamp anywhere (BTB/WTW kept);
    - choose A_motion or A_single with `ChooseRepairVariant`.
    - C is dropped from the design; leave it bypassed.
 4. **POST_KERNEL call site (D).** In AdaptiveDownscale's blend hook:
-   - `runner.RunInPostKernelHook(params, scalerSrcTex, out, &err)`, with
-     `SCALER_OUT = params->tex`;
-   - return `out.handle` as the hook's texture. Add the luma delta to R, G and B for RGB
-     content;
-   - use `NetSlot::Load` with `PlNetRunner::DeviceFromHook(params)` at the first hook call.
+   - call `runner.RunInPostKernelHook(params, scalerSrc, out, &err, options)`.
+     - SCALER_OUT is `params->tex` over `[0, dst_rect size)`; libplacebo may hand a larger
+       pooled texture, so the picture is copied to an exact texture first.
+     - `scalerSrc` is the hybrid's source with its `srcRect` in `NetTexture::rect`. It must be
+       texel-aligned; a fractional crop is refused visibly.
+   - The hook texture is RGB. The runner makes luma (`kLumaFromRgbPass`, kr/kb and the trained
+     range), runs D on luma and adds the delta to R, G and B (`kRgbLumaDeltaPass`). `out` is the
+     hook's RGB with D applied: return it as the hook texture.
+   - The hook's transfer domain (linear light with `downscale_light: linear`) is what D sees.
+     D's training domain is barrier R8, which only the stage contract checks today.
+   - Use `NetSlot::Load` with `PlNetRunner::DeviceFromHook(params)` at the first hook call.
 5. **Fingerprint context.**
    - `upstreamKey` = `registry.UpstreamKey(SlotOf(pkg.role))`;
    - `labelSchema` = what the identification supplies;

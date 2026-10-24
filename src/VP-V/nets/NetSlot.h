@@ -29,7 +29,8 @@ namespace VpNets
 			const CapabilityResult caps = CheckCapabilities(pkg, runner.Capabilities(device));
 			if (!caps.ok)
 				return Refuse(caps.reason);
-			ctx.intermediate = caps.intermediate;
+			ctx.intermediate = runner.EffectiveIntermediate(pkg, caps.intermediate);
+			loadedUpstreamNets = ctx.upstreamNets;
 			lastCheck = CheckFingerprint(pkg, ctx);
 			if (!lastCheck.match)
 				return Refuse(lastCheck.Summary());
@@ -50,17 +51,35 @@ namespace VpNets
 		// is shown too, so the operator knows the nets are not running).
 		bool Run(const NetDeviceContext& device, const NetRunInputs& in, NetTexture& out)
 		{
+			lastRunOk = false;
 			if (!ready) return false;
 			const ResolvedInputs r = ResolveInputs(pkg, in);
 			if (!r.ok) return Refuse(r.reason, false);
 			if (r.bypass) return Refuse(r.reason, false);
+			if (in.upstreamNetsKnown && in.upstreamNets != loadedUpstreamNets)
+				return Refuse("upstream nets this frame '" + (in.upstreamNets.empty() ? std::string("none") : in.upstreamNets) +
+					"' != loaded '" + (loadedUpstreamNets.empty() ? std::string("none") : loadedUpstreamNets) + "'", false);
 			std::string err;
 			if (!runner.Run(device, in, out, &err)) return Refuse(err, false);
+			lastRunOk = true;
 			bypass.Clear(pkg.name);
+			std::string degraded;
+			if (r.neighbourFallback) degraded = "no valid neighbours: single-frame fallback";
+			if (!r.missingLabels.empty())
+			{
+				std::string l;
+				for (const std::string& x : r.missingLabels) l += (l.empty() ? "" : " ") + x;
+				degraded += (degraded.empty() ? "" : "; ") + std::string("labels missing (export defaults): ") + l;
+			}
+			if (degraded.empty()) bypass.Restore(pkg.name);
+			else bypass.Degrade(pkg.name, degraded);
 			return true;
 		}
 
 		bool Ready() const { return ready; }
+		// This net's entry for a DOWNSTREAM net's upstream-net key (UpstreamNetsKey): its identity
+		// when it ran this frame, else "bypassed".
+		UpstreamNet State(const std::string& slot) const { return { slot, ready && lastRunOk ? pkg.Identity() : std::string("bypassed") }; }
 		TexFormat Intermediate() const { return intermediate; }
 		const FingerprintResult& LastFingerprint() const { return lastCheck; }
 		void SetOutputFormat(TexFormat f) { output = f; }   // R16Unorm: the r16 hand-off between re-base axes
@@ -79,6 +98,8 @@ namespace VpNets
 		FingerprintResult lastCheck;
 		TexFormat intermediate = TexFormat::Unknown;
 		TexFormat output = TexFormat::Unknown;
+		std::string loadedUpstreamNets;
+		bool lastRunOk = false;
 		bool ready = false;
 	};
 }

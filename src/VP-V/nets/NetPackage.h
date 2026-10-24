@@ -117,6 +117,8 @@ namespace VpNets
 		bool Has(const std::string& key) const { return fields.count(key) != 0; }   // declared (maybe empty)
 		std::vector<std::string> stamped;        // fields that came from a VP stamp sidecar, not the export
 		bool idVerified = false;                 // the id recomputes from the recorded fields (kit h())
+		std::string hybridMotionMode;            // D: "no_vectors" (round 2's record), "" = not recorded
+		std::string upstreamNets;                // "slot=fingerprint|..." of the nets the training data came through
 	};
 
 	struct NetPackage
@@ -130,6 +132,12 @@ namespace VpNets
 		BindingContract contract;
 		NetFingerprint fingerprint;
 		size_t weightLiterals = 0;               // float literals in the bodies (a size/cost hint)
+		std::string shaderSha256;                // of the exported shader text (the weights are in it)
+
+		// The net's identity for upstream-net records: the kit's fingerprint id is the PIPELINE's
+		// stamp and is shared by nets of one round (A_single and A_motion have the same id), so a
+		// specific net is named by its file stem and the sha256 of its shader text (16 hex).
+		std::string Identity() const { return name + "@" + shaderSha256.substr(0, 16); }
 
 		const NetParam* FindParam(const std::string& p) const
 		{

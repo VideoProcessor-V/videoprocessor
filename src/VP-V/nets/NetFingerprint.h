@@ -34,6 +34,9 @@ namespace VpNets
 		Requirement intermediate = Requirement::Must;
 		Requirement stageContract = Requirement::Must;
 		Requirement upstreamKey = Requirement::Must;      // the round-1/2 exports carry none -> bypass
+		Requirement upstreamNets = Requirement::Must;     // the fingerprints of the upstream NETS (bypass state included)
+		Requirement idIntegrity = Requirement::Must;      // the id must recompute from the recorded fields
+		Requirement hybridMotionMode = Requirement::Must; // D only: trained without vectors -> bypass while the hybrid uses them
 		Requirement settingsHashes = Requirement::Must;   // stage_order, rebase_settings, grain_split, ...
 		// The build stamp: a new VP commit must not bypass every net, so the commit and the
 		// renderer hash are recorded (shown in Ctrl+Alt+D) but do not gate unless asked (a bench
@@ -50,11 +53,27 @@ namespace VpNets
 		TexFormat intermediate = TexFormat::Rgba16f;      // the runner's intermediate format (fp16 by default)
 		std::string stageContract;                        // the contract VP implements for this net's slot
 		std::string upstreamKey;                          // SlotRegistry::UpstreamKey(SlotOf(role))
+		// The nets ACTUALLY running upstream, with their state (audit 2026-10-24): UpstreamNetsKey()
+		// of {slot, NetPackage::Identity() or "bypassed"}; "" = none. A downstream net trained on A's output
+		// must not match when A is bypassed, swapped (A_single vs A_motion) or retrained.
+		std::string upstreamNets;
+		std::string hybridMotionMode = "no_vectors";      // D: how the hybrid runs this frame ("vectors" when its vectors are used)
 		std::map<std::string, std::string> settingsHashes;
 		std::string vpCommit;
 		std::string rendererHash;
 		FingerprintPolicy policy;
 	};
+
+	// "repair.encoding=A_motion_small@52fd496d13224b7c|scaling.route_4k=bypassed", in pixel-path
+	// order. State: the running net's NetPackage::Identity(), or "bypassed".
+	struct UpstreamNet { std::string slot; std::string state; };
+	inline std::string UpstreamNetsKey(const std::vector<UpstreamNet>& nets)
+	{
+		std::string k;
+		for (const UpstreamNet& n : nets)
+			k += (k.empty() ? "" : "|") + n.slot + "=" + n.state;
+		return k;
+	}
 
 	// The settings-hash fields the kit writes (U3: VP must compute the same hashes before nets run).
 	inline const std::vector<std::string>& SettingsHashKeys()
@@ -101,7 +120,7 @@ namespace VpNets
 		}
 	}
 
-	// The upstream key as the nets see it: only slots that CHANGE the picture. SlotRegistry's key
+	// The upstream key as the nets see it: only slots that CHANGE the (luma) picture. SlotRegistry's key
 	// also lists running non-modifying front-end slots (motion.estimation computes vectors only); a
 	// net's training is unaffected by those, so both sides are compared without them. Unknown names
 	// are kept (they can only cause a mismatch, never hide one).
@@ -115,7 +134,9 @@ namespace VpNets
 			const std::string name = key.substr(a, b == std::string::npos ? std::string::npos : b - a);
 			bool keep = true;
 			for (const PipelineSlots::Info& info : PipelineSlots::Slots())
-				if (name == info.name) keep = PipelineSlots::ContractOf(info.id).modifies;
+				if (name == info.name)
+					// Every net is luma-only: a chroma-only slot does not change what it sees.
+					keep = PipelineSlots::ContractOf(info.id).modifies && info.id != PipelineSlots::Id::ScalingChromaUpscale;
 			if (keep && !name.empty()) out += (out.empty() ? "" : ">") + name;
 			if (b == std::string::npos) break;
 			a = b + 1;
@@ -133,6 +154,8 @@ namespace VpNets
 
 		if (fp.id.empty())
 			r.reasons.push_back("export has no fingerprint");
+		else if (pol.idIntegrity != Requirement::Ignore && !fp.idVerified)
+			r.reasons.push_back("fingerprint fields do not hash to the recorded id (edited or incomplete record)");
 
 		// Labels: a net with PARAM labels must say which schema they follow.
 		if (!pkg.contract.labels.empty())
@@ -140,7 +163,11 @@ namespace VpNets
 		else if (!fp.labelSchema.empty() && pol.labelSchema != Requirement::Ignore && fp.labelSchema != ctx.labelSchema)
 			r.reasons.push_back("label schema " + ctx.labelSchema + " != trained " + fp.labelSchema);
 
-		Field(r, pol.passOrder, "pass order", fp.passOrder, ctx.passOrder);
+		// The pass order matters for the separable chain's nets (B, C); others are checked only when
+		// they declare one.
+		const bool separable = pkg.role == NetRole::X2Restore || pkg.role == NetRole::RebaseRefine;
+		Field(r, separable ? pol.passOrder : (pol.passOrder == Requirement::Ignore ? Requirement::Ignore : Requirement::IfDeclared),
+			"pass order", fp.passOrder, ctx.passOrder);
 
 		// Intermediates: the trained format, or fp16 where the export proved fp16 within 1 LSB.
 		if (pol.intermediate != Requirement::Ignore)
@@ -158,6 +185,27 @@ namespace VpNets
 		}
 
 		Field(r, pol.stageContract, "stage contract", fp.Field("stage_contract"), ctx.stageContract);
+		// Upstream NETS: declared (maybe "" = none) and equal to what runs.
+		if (pol.upstreamNets != Requirement::Ignore)
+		{
+			if (!fp.Has("upstream_nets"))
+			{
+				if (pol.upstreamNets == Requirement::Must) r.reasons.push_back("export has no upstream-net record");
+			}
+			else if (fp.Field("upstream_nets") != ctx.upstreamNets)
+				r.reasons.push_back("upstream nets '" + (ctx.upstreamNets.empty() ? std::string("none") : ctx.upstreamNets) + "' != trained '" +
+					(fp.Field("upstream_nets").empty() ? std::string("none") : fp.Field("upstream_nets")) + "'");
+		}
+		// D: the hybrid's motion mode it was validated for.
+		if (pkg.role == NetRole::ScaleRefine && pol.hybridMotionMode != Requirement::Ignore)
+		{
+			if (fp.hybridMotionMode.empty())
+			{
+				if (pol.hybridMotionMode == Requirement::Must) r.reasons.push_back("export has no hybrid motion mode");
+			}
+			else if (fp.hybridMotionMode != ctx.hybridMotionMode)
+				r.reasons.push_back("hybrid motion mode " + ctx.hybridMotionMode + " != validated " + fp.hybridMotionMode);
+		}
 		// The upstream key may legitimately be empty (A on the original frame): declared != non-empty.
 		if (pol.upstreamKey != Requirement::Ignore)
 		{
@@ -195,6 +243,8 @@ namespace VpNets
 		c.intermediate = fp.intermediate == TexFormat::Unknown ? TexFormat::Rgba32f : fp.intermediate;
 		c.stageContract = fp.Field("stage_contract");
 		c.upstreamKey = fp.Field("upstream_key");
+		c.upstreamNets = fp.Field("upstream_nets");
+		if (!fp.hybridMotionMode.empty()) c.hybridMotionMode = fp.hybridMotionMode;
 		for (const std::string& key : SettingsHashKeys())
 			c.settingsHashes[key] = fp.Field(key);
 		c.vpCommit = fp.Field("vp_commit");
@@ -229,6 +279,24 @@ namespace VpNets
 		}
 		bool Bypassed(const std::string& net) const { return reasons.count(net) != 0; }
 
+		// A net that RUNS but not exactly as trained (missing labels -> the export's defaults, A_motion's
+		// single-frame fallback): "Fallbacks engaged: nets: degraded (A_motion_small: no valid vectors)".
+		static constexpr const char* kDegradedId = "nets: degraded";
+		bool Degrade(const std::string& net, const std::string& reason)
+		{
+			auto it = degraded.find(net);
+			if (it != degraded.end() && it->second == reason) return false;
+			if (it == degraded.end()) degradedOrder.push_back(net);
+			degraded[net] = reason;
+			return PublishDegraded();
+		}
+		bool Restore(const std::string& net)
+		{
+			if (!degraded.erase(net)) return false;
+			degradedOrder.erase(std::remove(degradedOrder.begin(), degradedOrder.end(), net), degradedOrder.end());
+			return PublishDegraded();
+		}
+
 		// Applies a fingerprint result: a mismatch bypasses, a match clears.
 		bool Apply(const std::string& net, const FingerprintResult& r)
 		{
@@ -236,6 +304,17 @@ namespace VpNets
 		}
 
 	private:
+		bool PublishDegraded()
+		{
+			if (degradedOrder.empty()) return registry.Release(kDegradedId);
+			std::string text;
+			for (const std::string& n : degradedOrder)
+			{
+				if (!text.empty()) text += ", ";
+				text += n + ": " + degraded[n];
+			}
+			return registry.Engage(kDegradedId, text);
+		}
 		bool Publish()
 		{
 			if (order.empty()) return registry.Release(kId);
@@ -251,5 +330,7 @@ namespace VpNets
 		FallbackStatus::Registry& registry;
 		std::map<std::string, std::string> reasons;
 		std::vector<std::string> order;
+		std::map<std::string, std::string> degraded;
+		std::vector<std::string> degradedOrder;
 	};
 }

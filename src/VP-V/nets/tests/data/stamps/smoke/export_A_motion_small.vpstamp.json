@@ -2,8 +2,8 @@
  "derived_from": {
   "config": "bounds and grain_split hashes match the recorded fingerprint",
   "delivered_bound": "config delivered_bound, equal to the constants in A's output pass",
-  "pass_order": "'H->V' / 'H then V' in texture_formats / b_structure / c_structure",
-  "upstream_key": "stage_order_text tokens before repair.encoding"
+  "upstream_key": "stage_order_text tokens before repair.encoding",
+  "upstream_nets": "no net slot upstream in the recorded order"
  },
  "export": "export_A_motion_small.json",
  "export_fingerprint": "179062b98b108209",
@@ -16,9 +16,10 @@
   "handoff_format": "n/a",
   "intermediate_format": "rgba32f",
   "label_schema": "vpnn-labels-v1",
-  "pass_order": "H>V",
+  "pass_order": "n/a",
   "stage_contract": "planned pipeline (vp-neural-bounded), libplacebo 7.377 VP fork, rgba32f net intermediates; nothing retired by the plan (polar, hermite, VP deband, detail pulse, texture restore, source-resolution crossfade, today's stage order) in front of a net | A: in = LUMA of the ORIGINAL delivered frame (active picture after crop; player-upscaled or native), delivered size, 10-bit; labels (schema v1) + player kernel from the recipe in training, from VP pre-analysis of the original frame at run time; motion: aligned prev/next + mask (0 = single-frame fallback); out = same size",
-  "upstream_key": ""
+  "upstream_key": "",
+  "upstream_nets": ""
  },
  "kind": "A",
  "kit": {

@@ -71,10 +71,18 @@ class StampTests(unittest.TestCase):
             json.dump({"settings": settings}, f)
         return ex, cp, mp
 
-    def test_c_stamps_from_the_records(self):
+    def test_c_without_an_upstream_net_record_refuses(self):
         fp = fingerprint("C", c_structure="single-axis refine; passes H then V, 16-bit UNORM pass outputs")
+        ex, cp, _ = self.write("C", fp, {"C_h.glsl": plain_shader(fp["fingerprint"], "C")})
+        with self.assertRaisesRegex(ns.Refuse, "upstream_nets"):
+            ns.stamp(ex, cp)
+
+    def test_c_stamps_from_the_records(self):
+        fp = fingerprint("C", c_structure="single-axis refine; passes H then V, 16-bit UNORM pass outputs",
+                         upstream_nets="repair.encoding=179062b98b108209")
         ex, cp, _ = self.write("C", fp, {"C_h.glsl": plain_shader(fp["fingerprint"], "C"), "C_v.glsl": plain_shader(fp["fingerprint"], "C")})
         s = ns.stamp(ex, cp)
+        self.assertEqual(s["fields"]["upstream_nets"], "repair.encoding=179062b98b108209")
         self.assertEqual(s["fields"]["upstream_key"], "repair.encoding")
         self.assertEqual(s["fields"]["pass_order"], "H>V")
         self.assertEqual(s["fields"]["intermediate_format"], "rgba32f")
@@ -89,6 +97,8 @@ class StampTests(unittest.TestCase):
         ex, cp, _ = self.write("A", fp, {"A.glsl": a_shader(fp["fingerprint"])})
         s = ns.stamp(ex, cp)
         self.assertEqual(s["fields"]["upstream_key"], "")
+        self.assertEqual(s["fields"]["upstream_nets"], "")
+        self.assertEqual(s["fields"]["pass_order"], "n/a", "A gets no pass order from B's hand-off wording")
         self.assertEqual(s["fields"]["delivered_bound"], {"c0": 1.5, "c1": 0.35, "cmax": 32.0})
         self.assertEqual(s["fields"]["label_schema"], "vpnn-labels-v1")
         ex, cp, _ = self.write("A", fp, {"A.glsl": a_shader(fp["fingerprint"], c1="0.25")})
@@ -128,15 +138,21 @@ class StampTests(unittest.TestCase):
             ns.stamp(ex, cp)
 
     def test_d_needs_the_render_settings(self):
-        fp = fingerprint("D")
+        fp0 = fingerprint("D")
+        ex, cp, mp = self.write("D", fp0, {"D.glsl": plain_shader(fp0["fingerprint"], "D")})
+        with self.assertRaisesRegex(ns.Refuse, "upstream_nets"):
+            ns.stamp(ex, cp, mp)   # D's data passed through A and B's slots: unproven without a record
+        up = "repair.encoding=bypassed|scaling.route_4k=bypassed"
+        fp = fingerprint("D", upstream_nets=up)
         ex, cp, mp = self.write("D", fp, {"D.glsl": plain_shader(fp["fingerprint"], "D")})
         with self.assertRaisesRegex(ns.Refuse, "--scaling-manifest"):
             ns.stamp(ex, cp)
         s = ns.stamp(ex, cp, mp)
         self.assertEqual(s["fields"]["upstream_key"], "repair.encoding>scaling.rebase>scaling.route_4k")
+        self.assertEqual(s["fields"]["upstream_nets"], up)
         on = copy.deepcopy(SETTINGS)
         on["common"]["deband"] = "on"
-        fp2 = fingerprint("D", settings=on)
+        fp2 = fingerprint("D", settings=on, upstream_nets=up)
         ex, cp, mp = self.write("D", fp2, {"D.glsl": plain_shader(fp2["fingerprint"], "D")}, settings=on)
         with self.assertRaisesRegex(ns.Refuse, "deband"):
             ns.stamp(ex, cp, mp)
@@ -151,14 +167,14 @@ class StampTests(unittest.TestCase):
         with self.assertRaisesRegex(ns.Refuse, "mystery_stage"):
             ns.stamp(ex, cp)
 
-    def test_missing_pass_order_refuses(self):
-        fp = fingerprint("A", label_schema="vpnn-labels-v1", texture_formats="all net intermediates rgba32f")
-        ex, cp, _ = self.write("A", fp, {"A.glsl": a_shader(fp["fingerprint"])})
+    def test_missing_pass_order_refuses_for_the_separable_nets(self):
+        fp = fingerprint("C", upstream_nets="")
+        ex, cp, _ = self.write("C", fp, {"C_h.glsl": plain_shader(fp["fingerprint"], "C")})
         with self.assertRaisesRegex(ns.Refuse, "pass order"):
             ns.stamp(ex, cp)
 
     def test_cli_writes_only_the_sidecar(self):
-        fp = fingerprint("C")
+        fp = fingerprint("C", c_structure="passes H then V", upstream_nets="repair.encoding=179062b98b108209")
         ex, cp, _ = self.write("C", fp, {"C_h.glsl": plain_shader(fp["fingerprint"], "C")})
         out = os.path.join(self.dir, "out")
         self.assertEqual(ns.main(["--export", ex, "--config", cp, "--out", out]), 0)
@@ -171,12 +187,15 @@ class StampTests(unittest.TestCase):
     @unittest.skipUnless(os.path.exists(os.path.join(SMOKE, "export_C_rebase_refine.json")), "no smoke export here")
     def test_real_smoke_exports(self):
         cfg = os.path.join(SMOKE, "config.json")
-        want = {"A_single_small": "", "A_motion_small": "", "C_rebase_refine": "repair.encoding"}
-        for net, key in want.items():
-            self.assertEqual(ns.stamp(os.path.join(SMOKE, f"export_{net}.json"), cfg)["fields"]["upstream_key"], key)
+        for net in ("A_single_small", "A_motion_small"):
+            s = ns.stamp(os.path.join(SMOKE, f"export_{net}.json"), cfg)
+            self.assertEqual((s["fields"]["upstream_key"], s["fields"]["upstream_nets"]), ("", ""))
+        # Round 1 records no upstream nets: C, B and D cannot be stamped (they stay bypassed).
+        with self.assertRaisesRegex(ns.Refuse, "upstream_nets"):
+            ns.stamp(os.path.join(SMOKE, "export_C_rebase_refine.json"), cfg)
         if os.path.exists(SMOKE_MANIFEST):
-            s = ns.stamp(os.path.join(SMOKE, "export_D_hybrid_refine.json"), cfg, SMOKE_MANIFEST)
-            self.assertEqual(s["fields"]["upstream_key"], "repair.encoding>scaling.rebase>scaling.route_4k")
+            with self.assertRaisesRegex(ns.Refuse, "upstream_nets"):
+                ns.stamp(os.path.join(SMOKE, "export_D_hybrid_refine.json"), cfg, SMOKE_MANIFEST)
 
 
 if __name__ == "__main__":

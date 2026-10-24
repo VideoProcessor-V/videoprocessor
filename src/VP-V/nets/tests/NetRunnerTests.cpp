@@ -50,6 +50,9 @@ namespace NetRunnerTestsNs
 			Assert::AreEqual(-1.5e-3, j["fp16_check"]["x"].number, 1e-12);
 			Assert::AreEqual(std::string("C:\\dev\v"), j["s"].text);
 			Assert::IsFalse(ParseJson("{\"a\": }", j, &err));
+			Assert::IsTrue(ParseJson("[-Infinity, Infinity, NaN, -2]", j, &err), W(err).c_str());
+			Assert::IsTrue(std::isinf(j.items[0].number) && j.items[0].number < 0);
+			Assert::AreEqual(-2.0, j.items[3].number, 0.0);
 		}
 
 		TEST_METHOD(ParsesTheSyntheticPackage)
@@ -75,12 +78,16 @@ namespace NetRunnerTestsNs
 			Assert::IsTrue(p.role == NetRole::RepairDelivered, L"input_stage 'A:' -> repair");
 			Assert::IsTrue(SlotOf(p.role) == PipelineSlots::Id::RepairEncoding);
 			const NetFingerprint& fp = p.fingerprint;
-			Assert::AreEqual(std::string("0123456789abcdef"), fp.id);
+			Assert::AreEqual(SyntheticId(), fp.id);
+			Assert::IsTrue(fp.idVerified, L"the header's id recomputes from its fields");
 			Assert::AreEqual(std::string("vpnn-labels-v1"), fp.labelSchema);
-			Assert::AreEqual(std::string("H>V"), fp.passOrder);
+			Assert::AreEqual(std::string(""), fp.passOrder, L"B's 'x2 H->V hand-off' wording gives A no pass order");
 			Assert::IsTrue(fp.intermediate == TexFormat::Rgba32f);
-			Assert::IsTrue(fp.handoff == TexFormat::R16Unorm);
+			Assert::IsTrue(fp.handoff == TexFormat::Unknown, L"the r16 hand-off belongs to the separable chain");
 			Assert::AreEqual(std::string("r1"), fp.Field("rebase_settings"));
+			Assert::IsTrue(fp.Has("upstream_nets") && fp.Field("upstream_nets").empty(), L"an empty, declared field");
+			Assert::AreEqual(size_t(64), p.shaderSha256.size());
+			Assert::AreEqual(std::string("T_tiny@") + p.shaderSha256.substr(0, 16), p.Identity());
 		}
 
 		TEST_METHOD(RejectsMalformedPackages)
@@ -142,6 +149,22 @@ namespace NetRunnerTestsNs
 			Assert::AreEqual(6.0f, r.f[1], L"twice(1) + (0 + 1 + 3)");
 			Assert::AreEqual(1.5f + 3.0f + 8.0f, r.f[2]);
 			Assert::AreEqual(10.0f, r.f[3], L"dot 11 clamped to 10");
+			// texelFetch outside the texture reads 0 (D3D11 robust access), not the clamped edge.
+			Glsl::Program fetch;
+			Assert::IsTrue(fetch.Parse("vec4 hook() { return texelFetch(T_raw, ivec2(-1, 0), 0) + texelFetch(T_raw, ivec2(0, 0), 0); }", &err), W(err).c_str());
+			Glsl::Context fc;
+			fc.externs.resize(fetch.Externs().size());
+			const float px[4] = { 0.5f, 0.0f, 0.0f, 1.0f };
+			Glsl::TexView tv;
+			tv.width = 1;
+			tv.height = 1;
+			tv.rgba = px;
+			fc.textures.push_back(tv);
+			fc.externs[0].base = Glsl::Base::Sampler;
+			fc.externs[0].n = 1;
+			fc.externs[0].i[0] = 0;
+			Assert::IsTrue(fetch.Call("hook", fc, r), W(fc.error).c_str());
+			Assert::AreEqual(0.5f, r.f[0], L"only the in-bounds fetch counts");
 		}
 
 		TEST_METHOD(CpuExecutorRunsTheSyntheticNetExactly)
@@ -225,9 +248,11 @@ namespace NetRunnerTestsNs
 						p.fingerprint.id + ", " + std::to_string(p.weightLiterals) + " float literals");
 					Assert::AreEqual(ej["fingerprint"]["fingerprint"].text, p.fingerprint.id, W(n).c_str());
 					Assert::AreEqual(fp16, p.fingerprint.fp16Allowed, W(n).c_str());
-					Assert::AreEqual(std::string("H>V"), p.fingerprint.passOrder, W(n).c_str());
+					const bool separable = n[0] == 'B' || n[0] == 'C';
+					Assert::AreEqual(std::string(separable ? "H>V" : ""), p.fingerprint.passOrder, W(n).c_str());
 					Assert::IsTrue(p.fingerprint.intermediate == TexFormat::Rgba32f, W(n).c_str());
-					Assert::IsTrue(p.fingerprint.handoff == TexFormat::R16Unorm, W(n).c_str());
+					Assert::IsTrue(p.fingerprint.handoff == (separable ? TexFormat::R16Unorm : TexFormat::Unknown), W(n).c_str());
+					Assert::IsTrue(p.fingerprint.idVerified, W(n + ": the id recomputes from the export's fields").c_str());
 					Assert::IsFalse(p.fingerprint.Field("stage_contract").empty(), W(n).c_str());
 					// The upstream key the design needs is not in the round-1 exports (U3).
 					Assert::IsTrue(p.fingerprint.Field("upstream_key").empty(), W(n).c_str());
@@ -389,7 +414,40 @@ namespace NetRunnerTestsNs
 
 			c2 = ctx;
 			c2.passOrder = "V>H";
-			Assert::IsFalse(CheckFingerprint(pkg, c2).match, L"pass order");
+			Assert::IsTrue(CheckFingerprint(pkg, c2).match, L"A declares no pass order: not applicable");
+			NetPackage sep = pkg;
+			sep.role = NetRole::RebaseRefine;
+			Assert::IsFalse(CheckFingerprint(sep, c2).match, L"a separable net must declare its pass order");
+			sep.fingerprint.passOrder = "H>V";
+			Assert::IsFalse(CheckFingerprint(sep, c2).match, L"pass order V>H != H>V");
+			c2.passOrder = "H>V";
+			Assert::IsTrue(CheckFingerprint(sep, c2).match);
+
+			// The id must recompute from the recorded fields.
+			NetPackage edited = pkg;
+			edited.fingerprint.idVerified = false;
+			Assert::IsTrue(CheckFingerprint(edited, ctx).Summary().find("do not hash to the recorded id") != std::string::npos);
+
+			// Upstream NETS: declared none, A running upstream -> mismatch (and per frame in NetSlot).
+			c2 = ctx;
+			c2.upstreamNets = UpstreamNetsKey({ { "repair.encoding", "A_motion_small@52fd496d13224b7c" } });
+			r = CheckFingerprint(pkg, c2);
+			Assert::IsFalse(r.match);
+			Assert::IsTrue(r.Summary().find("upstream nets 'repair.encoding=A_motion_small@52fd496d13224b7c' != trained 'none'") == 0, W(r.Summary()).c_str());
+			NetPackage noRecord = pkg;
+			noRecord.fingerprint.fields.erase("upstream_nets");
+			Assert::IsTrue(CheckFingerprint(noRecord, ctx).Summary().find("no upstream-net record") != std::string::npos);
+
+			// D: the hybrid motion mode it was validated for.
+			NetPackage d = pkg;
+			d.role = NetRole::ScaleRefine;
+			Assert::IsTrue(CheckFingerprint(d, ctx).Summary().find("no hybrid motion mode") != std::string::npos);
+			d.fingerprint.hybridMotionMode = "no_vectors";
+			c2 = ctx;
+			c2.hybridMotionMode = "vectors";
+			Assert::IsTrue(CheckFingerprint(d, c2).Summary().find("hybrid motion mode vectors != validated no_vectors") == 0);
+			c2.hybridMotionMode = "no_vectors";
+			Assert::IsTrue(CheckFingerprint(d, c2).match);
 
 			c2 = ctx;
 			c2.intermediate = TexFormat::Rgba16f;
@@ -418,7 +476,7 @@ namespace NetRunnerTestsNs
 
 			c2 = ctx;
 			c2.labelSchema = "x";
-			c2.passOrder = "y";
+			c2.stageContract = "y";
 			r = CheckFingerprint(pkg, c2);
 			Assert::AreEqual(size_t(2), r.reasons.size());
 			Assert::IsTrue(r.Summary().find("(+1 more)") != std::string::npos);
@@ -441,7 +499,9 @@ namespace NetRunnerTestsNs
 				Assert::IsFalse(r.match, L"round-1 exports carry no upstream key");
 				Log(dir + ": " + c.name + " vs the running pipeline: " + r.Summary());
 				ctx.policy.upstreamKey = Requirement::IfDeclared;
-				Assert::IsTrue(CheckFingerprint(c, ctx).match);
+				Assert::IsFalse(CheckFingerprint(c, ctx).match, L"nor an upstream-net record");
+				ctx.policy.upstreamNets = Requirement::IfDeclared;
+				Assert::IsTrue(CheckFingerprint(c, ctx).match, W(CheckFingerprint(c, ctx).Summary()).c_str());
 				ctx.intermediate = TexFormat::Rgba16f;
 				Assert::AreEqual(c.fingerprint.fp16Allowed, CheckFingerprint(c, ctx).match, L"fp16 only where the export proved it");
 				++checked;
@@ -490,8 +550,25 @@ namespace NetRunnerTestsNs
 			NetRunInputs inputs;
 			inputs.textures["HOOKED"] = in.Ref();
 			NetTexture out;
+			// A missing label: the net runs on the export's default, visibly degraded.
 			Assert::IsTrue(slot.Run(NetDeviceContext(), inputs, out));
 			Assert::AreEqual(6, out.width);
+			Assert::AreEqual(std::string("Fallbacks engaged: nets: degraded (T_tiny: labels missing (export defaults): vpnn_gain)"), registry.Heading());
+			inputs.params["vpnn_gain"] = 0.25;
+			Assert::IsTrue(slot.Run(NetDeviceContext(), inputs, out));
+			Assert::AreEqual(std::string("Fallbacks engaged: none"), registry.Heading(), L"labels back: the entry clears");
+			Assert::AreEqual(pkg.Identity(), slot.State("repair.encoding").state, L"the downstream key names this net");
+
+			// An upstream net that changes per frame (bypassed upstream) refuses this frame.
+			NetRunInputs changed = inputs;
+			changed.upstreamNetsKnown = true;
+			changed.upstreamNets = UpstreamNetsKey({ { "scaling.rebase", "bypassed" } });
+			Assert::IsFalse(slot.Run(NetDeviceContext(), changed, out));
+			Assert::IsTrue(registry.Heading().find("T_tiny: upstream nets this frame 'scaling.rebase=bypassed' != loaded 'none'") != std::string::npos,
+				W(registry.Heading()).c_str());
+			Assert::AreEqual(std::string("bypassed"), slot.State("repair.encoding").state);
+			changed.upstreamNets = "";
+			Assert::IsTrue(slot.Run(NetDeviceContext(), changed, out));
 
 			// The 8K rule: a designed bypass, still shown.
 			CpuTexture big(1, 1, 1);
@@ -515,7 +592,16 @@ namespace NetRunnerTestsNs
 			Assert::IsFalse(slot.Ready());
 			Assert::IsTrue(registry.Heading().find("stage contract") != std::string::npos, W(registry.Heading()).c_str());
 
-			// The pl_dispatch runner is a stub: it refuses, visibly.
+			// Fused fp16 storage on a net whose fingerprint does not allow fp16: the effective format
+			// is reported (Unknown) and the load is refused visibly.
+			PlNetRunner fused;
+			fused.SetFusion(true, FusedKind::Direct, true);
+			Assert::IsTrue(fused.EffectiveIntermediate(pkg, TexFormat::Rgba32f) == TexFormat::Unknown);
+			NetPackage allowed = pkg;
+			allowed.fingerprint.fp16Allowed = true;
+			Assert::IsTrue(fused.EffectiveIntermediate(allowed, TexFormat::Rgba32f) == TexFormat::Rgba16f);
+
+			// The pl_dispatch runner without a device refuses, visibly.
 			PlNetRunner gpu;
 			FallbackStatus::Registry reg2;
 			NetBypassSet bypass2(reg2);
@@ -630,7 +716,7 @@ namespace NetRunnerTestsNs
 	inline std::string SyntheticSidecar(const std::string& id, const std::string& sha, const std::string& stageContract)
 	{
 		return "{\"schema\": \"vp-net-stamp/1\", \"export_fingerprint\": \"" + id + "\", \"shaders\": {\"T_tiny.glsl\": \"" + sha + "\"},"
-			" \"fields\": {\"upstream_key\": \"\", \"pass_order\": \"H>V\", \"intermediate_format\": \"rgba32f\", \"handoff_format\": \"n/a\","
+			" \"fields\": {\"upstream_key\": \"\", \"pass_order\": \"n/a\", \"intermediate_format\": \"rgba32f\", \"handoff_format\": \"n/a\","
 			" \"stage_contract\": \"" + stageContract + "\", \"label_schema\": \"vpnn-labels-v1\", \"delivered_bound\": {\"c0\": 1.5, \"c1\": 0.35, \"cmax\": 32.0}}}";
 	}
 
@@ -710,7 +796,9 @@ namespace NetRunnerTestsNs
 		{
 			Assert::AreEqual(std::string("repair.encoding"), NormaliseUpstreamKey("motion.estimation>repair.encoding"));
 			Assert::AreEqual(std::string(""), NormaliseUpstreamKey("motion.estimation"));
-			Assert::AreEqual(std::string("repair.encoding>scaling.rebase"), NormaliseUpstreamKey("repair.encoding>scaling.rebase>scaling.geometry"));
+			Assert::AreEqual(std::string("repair.encoding>scaling.rebase>scaling.geometry"), NormaliseUpstreamKey("repair.encoding>scaling.rebase>scaling.geometry"),
+				L"fail safe: an unlisted slot (geometry) counts as changing the picture");
+			Assert::AreEqual(std::string("repair.encoding"), NormaliseUpstreamKey("repair.encoding>scaling.chroma_upscale"), L"chroma-only: not seen by a luma net");
 			Assert::AreEqual(std::string("unknown.slot"), NormaliseUpstreamKey("unknown.slot"), L"unknown names stay (they can only mismatch)");
 			// The registry's real key, with A running first (ADR-0005) and deband / texture restore off.
 			PipelineSlots::Registry reg;
@@ -770,32 +858,49 @@ namespace NetRunnerTestsNs
 			if (ReadTextFile(kKitScalingManifest, manifestText)) Assert::IsTrue(ParseJson(manifestText, render, &err));
 			const std::map<std::string, std::string> hashes = SettingsHashes(RebaseHashSettings(), GrainSplitHashSettings(), kKitStageOrderR1,
 				render["settings"], BoundsHashSettings());
-			struct Want { const char* net; const char* key; };
-			const Want wants[] = { { "A_single_small", "motion.estimation" }, { "C_rebase_refine", "motion.estimation>repair.encoding" },
-				{ "B_x2", "repair.encoding>scaling.rebase" }, { "D_hybrid_refine", "repair.encoding>scaling.rebase>scaling.route_4k>scaling.geometry" } };
-			for (const Want& w : wants)
+			// The running pipeline's keys come from the registry: A built and running first (ADR-0005),
+			// deband / texture restore off, as the kit trained.
+			PipelineSlots::Registry reg;
+			reg.SetComponent(PipelineSlots::Id::RepairEncoding, true);
+			reg.SetEnabled(PipelineSlots::Id::RepairEncoding, true);
+			reg.SetEnabled(PipelineSlots::Id::RepairDeband, false);
+			reg.SetEnabled(PipelineSlots::Id::RepairTextureRestore, false);
+			reg.SetRebaseFirst(false);
+			for (const char* net : { "A_single_small", "A_motion_small", "C_rebase_refine", "B_x2", "D_hybrid_refine" })
 			{
 				std::vector<NetPackage> pkgs;
-				Assert::IsTrue(LoadExport(std::string(kSmokeStaging) + "/export_" + w.net + ".json", std::string(), pkgs, &err, { StampDir("smoke") }), W(err).c_str());
+				Assert::IsTrue(LoadExport(std::string(kSmokeStaging) + "/export_" + net + ".json", std::string(), pkgs, &err, { StampDir("smoke") }), W(err).c_str());
 				for (const NetPackage& p : pkgs)
 				{
 					Assert::IsTrue(p.fingerprint.idVerified, W(p.name).c_str());
-					Assert::IsTrue(p.fingerprint.Has("upstream_key"), W(p.name + ": the stamp gives the upstream key").c_str());
 					NetRuntimeContext ctx;
 					ctx.labelSchema = kLabelSchemaV1;
 					ctx.intermediate = TexFormat::Rgba32f;
 					ctx.stageContract = p.fingerprint.Field("stage_contract");
-					ctx.upstreamKey = w.key;
+					ctx.upstreamKey = reg.UpstreamKey(SlotOf(p.role));
+					ctx.upstreamNets = "";
 					ctx.settingsHashes = hashes;
 					const FingerprintResult r = CheckFingerprint(p, ctx);
-					if (render.IsObject())
-						Assert::IsTrue(r.match, W(p.name + ": " + r.Summary()).c_str());
+					Log(p.name + ": stamped " + std::to_string(p.fingerprint.stamped.size()) + " fields; vs VP (key '" + ctx.upstreamKey + "'): " +
+						(r.match ? std::string("MATCH") : r.Summary()));
+					if (p.role == NetRole::RepairDelivered)
+					{
+						Assert::IsTrue(p.fingerprint.Has("upstream_key") && p.fingerprint.Has("upstream_nets"), W(p.name).c_str());
+						if (render.IsObject()) Assert::IsTrue(r.match, W(p.name + ": " + r.Summary()).c_str());
+						// The default order (re-base before A) is not what A was trained in.
+						PipelineSlots::Registry def;
+						def.SetComponent(PipelineSlots::Id::RepairEncoding, true);
+						def.SetEnabled(PipelineSlots::Id::RepairEncoding, true);
+						ctx.upstreamKey = def.UpstreamKey(PipelineSlots::Id::RepairEncoding);
+						Assert::IsFalse(CheckFingerprint(p, ctx).match, W(p.name + " in the default order (key '" + ctx.upstreamKey + "')").c_str());
+					}
 					else
-						Assert::IsTrue(r.reasons.size() == 1 && r.reasons[0].find("scaler_blend_settings") == 0, W(r.Summary()).c_str());
-					Log(p.name + ": stamped " + std::to_string(p.fingerprint.stamped.size()) + " fields; upstream '" + p.fingerprint.Field("upstream_key") +
-						"'; vs VP: " + (r.match ? std::string("MATCH") : r.Summary()));
-					ctx.upstreamKey = "repair.deband";
-					Assert::IsFalse(CheckFingerprint(p, ctx).match, L"a different upstream bypasses");
+					{
+						// Round 1 recorded no upstream nets: no stamp, so C, B and D stay bypassed.
+						Assert::IsFalse(p.fingerprint.Has("upstream_key"), W(p.name).c_str());
+						Assert::IsFalse(r.match, W(p.name).c_str());
+						Assert::IsTrue(std::find(r.reasons.begin(), r.reasons.end(), "export has no upstream key") != r.reasons.end(), W(r.Summary()).c_str());
+					}
 				}
 			}
 		}

@@ -52,6 +52,9 @@ NO_SLOT = [r"^dv_reconstruction", r"^detect_on_original", r"^crop$", r"^rest_of_
 # The slot each net kind serves (src/VP-V/nets/NetPackage.cpp SlotOf).
 KIND_SLOT = {"A": "repair.encoding", "C": "scaling.rebase", "B": "scaling.route_4k", "D": "scaling.output"}
 
+# Slots that hold a NET (their output depends on which net, and whether it ran).
+NET_SLOTS = {"repair.encoding", "scaling.rebase", "scaling.route_4k", "scaling.refine"}
+
 # VP front-end slots that modify the picture and sit between scaling.rebase and scaling.output in
 # VP's designed order; the render settings must show them off for a net after them.
 FRONT_END_SETTINGS_OFF = ["deband", "deband_vp", "texture_restore", "detail_pulse_stabilise"]
@@ -186,6 +189,19 @@ def stamp(export_path, config_path, scaling_manifest=None, kit_dir=None):
         raise Refuse("stage_order_text does not hash to the recorded stage_order")
     key = upstream_key(order, slot)
     derived["upstream_key"] = f"stage_order_text tokens before {slot}"
+    # upstream_nets: the NETS whose output the training data went through (audit 2026-10-24). The
+    # planned stage order cannot prove it: the kit trains a downstream net "with the fallback" when
+    # an upstream net is missing, under the same fingerprint. Only an explicit kit record can.
+    upstream_net_slots = [k for k in key.split(">") if k in NET_SLOTS] if key else []
+    if not upstream_net_slots:
+        upstream_nets = ""
+        derived["upstream_nets"] = "no net slot upstream in the recorded order"
+    elif fp.get("upstream_nets") is not None:
+        upstream_nets = fp["upstream_nets"]
+        derived["upstream_nets"] = "the export's own record"
+    else:
+        raise Refuse("the training data passed through net slot(s) " + ", ".join(upstream_net_slots) +
+                     ", but the kit recorded no upstream_nets (which net fingerprint, and whether it ran): cannot prove the upstream nets")
     if SLOT_ORDER[slot] > SLOT_ORDER["repair.deband"]:
         if not scaling_manifest:
             raise Refuse(f"{slot} comes after VP's deband/texture-restore slots: the render settings (--scaling-manifest) are needed to know they were off")
@@ -200,13 +216,17 @@ def stamp(export_path, config_path, scaling_manifest=None, kit_dir=None):
             raise Refuse("the render settings do not show these front-end stages off: " + ", ".join(on))
         derived["upstream_key"] += "; render settings (hash-verified) show " + ", ".join(FRONT_END_SETTINGS_OFF) + " off"
 
-    # pass order and formats: from the recorded prose, exact phrases only.
-    prose = " | ".join(str(fp.get(k, "")) for k in ("texture_formats", "b_structure", "c_structure"))
-    if "H->V" in prose or "H then V" in prose:
-        pass_order = "H>V"
-        derived["pass_order"] = "'H->V' / 'H then V' in texture_formats / b_structure / c_structure"
+    # pass order: only the separable nets' own structure records define it (b_structure /
+    # c_structure); the shared texture_formats wording ("x2 H->V hand-off") is B's, not A's or D's.
+    if kind in ("B", "C"):
+        prose = " | ".join(str(fp.get(k, "")) for k in ("b_structure", "c_structure"))
+        if "H->V" in prose or "H then V" in prose:
+            pass_order = "H>V"
+            derived["pass_order"] = "'H then V' in b_structure / c_structure"
+        else:
+            raise Refuse("no recorded pass order in b_structure / c_structure")
     else:
-        raise Refuse("no recorded pass order ('H->V' or 'H then V')")
+        pass_order = "n/a"
     m = re.search(r"intermediates (rgba32f|rgba16f)", fp.get("texture_formats", ""))
     if not m:
         raise Refuse("texture_formats does not name the net intermediates' format")
@@ -261,6 +281,7 @@ def stamp(export_path, config_path, scaling_manifest=None, kit_dir=None):
         "shaders": shas,
         "fields": {
             "upstream_key": key,
+            "upstream_nets": upstream_nets,
             "pass_order": pass_order,
             "intermediate_format": intermediate,
             "handoff_format": handoff,

@@ -5,8 +5,11 @@
 #include <libplacebo/shaders.h>
 #include <libplacebo/shaders/custom.h>
 
+#include "RgbLumaDelta.h"
+
 #include <algorithm>
 #include <cmath>
+#include <regex>
 #include <cstdio>
 #include <cstring>
 
@@ -87,7 +90,10 @@ namespace VpNets
 		// A pooled pass texture of the right size and format.
 		pl_tex Texture(const std::string& key, int w, int h, pl_fmt fmt, bool compute)
 		{
-			pl_tex& t = pool[key];
+			// The usage is part of the key: a fragment pass needs a renderable texture, a compute pass
+			// a storable one, and a fused layer falling back to its exported passes must not get the
+			// other kind (audit 2026-10-24).
+			pl_tex& t = pool[key + (compute ? "#storage" : "#render")];
 			if (t && t->params.w == w && t->params.h == h && t->params.format == fmt)
 				return t;
 			pl_tex_destroy(gpu, &t);
@@ -265,8 +271,20 @@ namespace VpNets
 			storable = fmt && (fmt->caps & PL_FMT_CAP_STORABLE);
 			linear = fmt && (fmt->caps & PL_FMT_CAP_LINEAR);
 		};
-		probe("rgba16f", TexFormat::Rgba16f, c.renderableRgba16f, c.storableRgba16f, c.linearRgba16f);
-		probe("rgba32f", TexFormat::Rgba32f, c.renderableRgba32f, c.storableRgba32f, c.linearRgba32f);
+		// A family counts only if every width the passes use (r, rg, rgba) has the capability; a
+		// compute pass falls back to rgba when r/rg is not storable, so storable is judged on rgba.
+		auto family = [&](const char* r, const char* rg, const char* rgba, TexFormat f, bool& ren, bool& sto, bool& lin)
+		{
+			bool r1, s1, l1, r2, s2, l2, r4, s4, l4;
+			probe(r, f, r1, s1, l1);
+			probe(rg, f, r2, s2, l2);
+			probe(rgba, f, r4, s4, l4);
+			ren = r1 && r2 && r4;
+			sto = s4;
+			lin = l1 && l2 && l4;
+		};
+		family("r16f", "rg16f", "rgba16f", TexFormat::Rgba16f, c.renderableRgba16f, c.storableRgba16f, c.linearRgba16f);
+		family("r32f", "rg32f", "rgba32f", TexFormat::Rgba32f, c.renderableRgba32f, c.storableRgba32f, c.linearRgba32f);
 		return c;
 	}
 
@@ -291,8 +309,21 @@ namespace VpNets
 			if (error) *error = "intermediates must be rgba16f or rgba32f";
 			return false;
 		}
+		// Fused fp16 storage lowers the intermediate format: only where the fingerprint allows it.
+		if (fusion && fusedFp16 && EffectiveIntermediate(pkg, params.intermediate) != TexFormat::Rgba16f)
+		{
+			if (error) *error = "fused fp16 storage refused: the fingerprint does not allow fp16 intermediates";
+			return false;
+		}
 		m.pkg = pkg;
 		m.params = params;
+		// HLSL tanh can return NaN for |x| above ~44; tanh(15) is already 1 in float, so clamping the
+		// argument changes nothing else (audit 2026-10-24).
+		{
+			static const std::regex kTanh(R"(tanh\(([^()]*)\))");
+			for (NetPass& p : m.pkg.passes)
+				p.body = std::regex_replace(p.body, kTanh, "tanh(clamp($1, -15.0, 15.0))");
+		}
 		m.layers.clear();
 		m.fused.clear();
 		m.layerAt.clear();
@@ -326,6 +357,14 @@ namespace VpNets
 
 	size_t PlNetRunner::FusedLayers() const { return impl->layers.size(); }
 
+	TexFormat PlNetRunner::EffectiveIntermediate(const NetPackage& pkg, TexFormat chosen) const
+	{
+		if (!fusion || !fusedFp16) return chosen;
+		const NetFingerprint& fp = pkg.fingerprint;
+		const bool fp16Ok = fp.intermediate == TexFormat::Rgba16f || (fp.intermediate == TexFormat::Rgba32f && fp.fp16Allowed);
+		return fp16Ok ? TexFormat::Rgba16f : TexFormat::Unknown;   // Unknown: never matches a fingerprint
+	}
+
 	void* PlNetRunner::Intermediate(const std::string& name) const
 	{
 		if (name.empty())
@@ -348,31 +387,90 @@ namespace VpNets
 		return d;
 	}
 
-	bool PlNetRunner::RunInPostKernelHook(const pl_hook_params* params, void* scalerSrcTex, NetTexture& output, std::string* error,
-		float mulOut, float mulSrc)
+	bool PlNetRunner::RunInPostKernelHook(const pl_hook_params* params, const NetTexture& scalerSrc, NetTexture& output, std::string* error,
+		const PostKernelOptions& opt)
 	{
-		if (!params || !params->tex || !scalerSrcTex)
+		if (!params || !params->tex || !scalerSrc.Valid())
 		{
 			if (error) *error = "POST_KERNEL: no hook texture or scaler source";
 			return false;
 		}
-		const pl_tex src = static_cast<pl_tex>(scalerSrcTex);
-		NetRunInputs in;
+		const NetDeviceContext device = DeviceFromHook(params);
+		// The picture is the destination rect's size at the texture origin (AdaptiveDownscale::Blending).
+		const int w = static_cast<int>(std::abs(params->dst_rect.x1 - params->dst_rect.x0));
+		const int h = static_cast<int>(std::abs(params->dst_rect.y1 - params->dst_rect.y0));
+		if (w <= 0 || h <= 0 || params->tex->params.w < w || params->tex->params.h < h)
+		{
+			if (error) *error = "POST_KERNEL: the hook texture is smaller than the destination rect";
+			return false;
+		}
 		NetTexture so;
 		so.handle = const_cast<pl_tex_t*>(params->tex);
 		so.width = params->tex->params.w;
 		so.height = params->tex->params.h;
 		so.components = params->tex->params.format->num_components;
-		so.mul = mulOut;
-		NetTexture ss;
-		ss.handle = scalerSrcTex;
-		ss.width = src->params.w;
-		ss.height = src->params.h;
-		ss.components = src->params.format->num_components;
-		ss.mul = mulSrc;
-		in.textures["SCALER_OUT"] = so;
-		in.textures["SCALER_SRC"] = ss;
-		return Run(DeviceFromHook(params), in, output, error);
+		so.mul = opt.mulOut;
+		so.rect[2] = static_cast<float>(w);
+		so.rect[3] = static_cast<float>(h);
+		NetTexture ss = scalerSrc;
+		ss.mul = opt.mulSrc;
+		if (so.components == 1 && ss.components == 1)
+		{
+			NetRunInputs in;
+			in.textures["SCALER_OUT"] = so;
+			in.textures["SCALER_SRC"] = ss;
+			return Run(device, in, output, error);
+		}
+		// RGB: luma of both (the trained range), D on luma, the luma delta onto R, G and B.
+		auto prepareHelper = [&](std::unique_ptr<PlNetRunner>& r, const char* text, const char* name) -> bool
+		{
+			if (r) return true;
+			ParseResult pr = ParseShaderText(text, name);
+			if (!pr.ok)
+			{
+				if (error) *error = pr.error;
+				return false;
+			}
+			r.reset(new PlNetRunner());
+			NetPrepareParams pp;
+			pp.intermediate = TexFormat::Rgba32f;
+			// The helpers carry no fingerprint: prepared directly (they are VP's own passes).
+			pr.package.fingerprint.intermediate = TexFormat::Rgba32f;
+			return r->Prepare(device, pr.package, pp, error);
+		};
+		if (!prepareHelper(lumaRunner, kLumaFromRgbPass, "vp_luma_from_rgb") || !prepareHelper(srcLumaRunner, kLumaFromRgbPass, "vp_luma_from_rgb_src") ||
+			!prepareHelper(deltaRunner, kRgbLumaDeltaPass, "vp_rgb_luma_delta"))
+			return false;
+		const std::map<std::string, double> lumaParams = { { "vp_kr", opt.kr }, { "vp_kb", opt.kb }, { "vp_range_scale", opt.rangeScale },
+			{ "vp_range_offset", opt.rangeOffset } };
+		NetTexture yOut, ySrc, yNet;
+		{
+			NetRunInputs in;
+			in.textures["HOOKED"] = so;
+			in.params = lumaParams;
+			if (!lumaRunner->Run(device, in, yOut, error)) return false;
+		}
+		if (ss.components == 1)
+			ySrc = ss;
+		else
+		{
+			NetRunInputs in;
+			in.textures["HOOKED"] = ss;
+			in.params = lumaParams;
+			if (!srcLumaRunner->Run(device, in, ySrc, error)) return false;
+		}
+		{
+			NetRunInputs in;
+			in.textures["SCALER_OUT"] = yOut;
+			in.textures["SCALER_SRC"] = ySrc;
+			if (!Run(device, in, yNet, error)) return false;
+		}
+		NetRunInputs in;
+		in.textures["HOOKED"] = so;
+		in.textures["LUMA_BEFORE"] = yOut;
+		in.textures["LUMA_AFTER"] = yNet;
+		in.params["vp_delta_scale"] = opt.rangeScale != 0.0f ? 1.0 / opt.rangeScale : 1.0;
+		return deltaRunner->Run(device, in, output, error);
 	}
 
 	bool PlNetRunner::Run(const NetDeviceContext& device, const NetRunInputs& in, NetTexture& output, std::string* error)
@@ -414,20 +512,80 @@ namespace VpNets
 		for (const auto& kv : in.textures)
 			if (kv.second.Valid())
 			{
-				m.current[kv.first] = static_cast<pl_tex>(kv.second.handle);
+				pl_tex t = static_cast<pl_tex>(kv.second.handle);
+				// A picture that occupies only part of its texture (a pooled hook texture, a crop): the
+				// exported passes mirror at the TEXTURE edge, so the picture is copied to an exact-size
+				// texture first. Fractional crops cannot be copied exactly: refused, visibly.
+				if (kv.second.HasRect())
+				{
+					const float* r = kv.second.rect;
+					const int x0 = static_cast<int>(std::lround(r[0])), y0 = static_cast<int>(std::lround(r[1]));
+					const int x1 = static_cast<int>(std::lround(r[2])), y1 = static_cast<int>(std::lround(r[3]));
+					if (std::fabs(r[0] - x0) > 1e-3f || std::fabs(r[1] - y0) > 1e-3f || std::fabs(r[2] - x1) > 1e-3f || std::fabs(r[3] - y1) > 1e-3f ||
+						x0 < 0 || y0 < 0 || x1 > t->params.w || y1 > t->params.h || x1 <= x0 || y1 <= y0)
+					{
+						if (error) *error = kv.first + ": a fractional or out-of-range picture rect is not supported (exact copy impossible)";
+						return false;
+					}
+					if (x0 != 0 || y0 != 0 || x1 != t->params.w || y1 != t->params.h)
+					{
+						if (!(t->params.format->caps & PL_FMT_CAP_BLITTABLE))
+						{
+							if (error) *error = kv.first + ": its format cannot be copied to crop the picture rect";
+							return false;
+						}
+						pl_tex& c = m.pool["@crop:" + kv.first];
+						if (!c || c->params.w != x1 - x0 || c->params.h != y1 - y0 || c->params.format != t->params.format)
+						{
+							pl_tex_destroy(m.gpu, &c);
+							pl_tex_params cp{};
+							cp.w = x1 - x0;
+							cp.h = y1 - y0;
+							cp.format = t->params.format;
+							cp.sampleable = true;
+							cp.blit_dst = true;
+							c = pl_tex_create(m.gpu, &cp);
+						}
+						if (!c)
+						{
+							if (error) *error = kv.first + ": crop texture creation failed";
+							return false;
+						}
+						pl_tex_blit_params bp{};
+						bp.src = t;
+						bp.dst = c;
+						bp.src_rc = { x0, y0, 0, x1, y1, 1 };
+						bp.dst_rc = { 0, 0, 0, x1 - x0, y1 - y0, 1 };
+						pl_tex_blit(m.gpu, &bp);
+						t = c;
+					}
+				}
+				m.current[kv.first] = t;
 				m.currentMul[kv.first] = kv.second.mul;
 			}
 		const std::string hookedName = postKernel ? "SCALER_OUT" : "HOOKED";
 		for (const NetPass& p : m.pkg.passes)
 		{
 			const std::string src = p.hook == "SCALER_SRC" ? "SCALER_SRC" : hookedName;
+			const auto it = in.textures.find(src);
+			if (it == in.textures.end() || !m.current.count(src))
+			{
+				if (error) *error = "no " + src + " texture for the hooked stage " + p.hook;
+				return false;
+			}
 			m.current["@stage:" + p.hook] = m.current[src];
-			m.currentMul["@stage:" + p.hook] = in.textures.at(src).mul;
+			m.currentMul["@stage:" + p.hook] = it->second.mul;
 		}
 		if (res.neighbourFallback)
 		{
 			const pl_tex hooked = m.current[hookedName];
-			const pl_fmt f = pl_find_named_fmt(m.gpu, FamilyName(m.params.intermediate, 2));
+			pl_fmt f = pl_find_named_fmt(m.gpu, FamilyName(m.params.intermediate, 2));
+			if (!f) f = pl_find_named_fmt(m.gpu, FamilyName(m.params.intermediate, 4));
+			if (!f)
+			{
+				if (error) *error = "no texture format for A_motion's zero mask";
+				return false;
+			}
 			if (!m.zeroMask || m.zeroMask->params.w != hooked->params.w || m.zeroMask->params.h != hooked->params.h)
 			{
 				pl_tex_destroy(m.gpu, &m.zeroMask);
@@ -439,6 +597,11 @@ namespace VpNets
 				p.sampleable = true;
 				p.initial_data = zeros.data();
 				m.zeroMask = pl_tex_create(m.gpu, &p);
+			}
+			if (!m.zeroMask)
+			{
+				if (error) *error = "A_motion's zero mask could not be created";
+				return false;
 			}
 			m.current["VPNN_PREV"] = hooked;
 			m.current["VPNN_NEXT"] = hooked;
@@ -507,7 +670,10 @@ namespace VpNets
 				d.desc.type = PL_DESC_SAMPLED_TEX;
 				d.binding.object = t;
 				d.binding.address_mode = PL_TEX_ADDRESS_CLAMP;
-				d.binding.sample_mode = (t->params.format->caps & PL_FMT_CAP_LINEAR) ? PL_TEX_SAMPLE_LINEAR : PL_TEX_SAMPLE_NEAREST;
+				const bool filterable = (t->params.format->caps & PL_FMT_CAP_LINEAR) != 0;
+				if (!filterable && pass.body.find(b + "_tex(") != std::string::npos)
+					return fail(b + " is sampled bilinearly (" + b + "_tex) but its format is not linear-filterable");
+				d.binding.sample_mode = filterable ? PL_TEX_SAMPLE_LINEAR : PL_TEX_SAMPLE_NEAREST;   // NEAREST only where unsampled
 				descs.push_back(d);
 				const float mul = m.MulOf(b, pass.hook);
 				header += "#define " + b + "_pos VPNN_POS\n";

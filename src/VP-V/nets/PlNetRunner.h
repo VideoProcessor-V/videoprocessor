@@ -46,10 +46,23 @@ namespace VpNets
 		bool Run(const NetDeviceContext& device, const NetRunInputs& in, NetTexture& output, std::string* error) override;
 		void Release() override;
 
-		// POST_KERNEL entry: SCALER_OUT is the hook's texture; SCALER_SRC is the scaler's source,
-		// which the hybrid module holds. `mulOut`/`mulSrc`: NetTexture::mul of the two.
-		bool RunInPostKernelHook(const pl_hook_params* params, void* scalerSrcTex, NetTexture& output, std::string* error,
-			float mulOut = 1.0f, float mulSrc = 1.0f);
+		// POST_KERNEL entry (AdaptiveDownscale's blend hook, PL_HOOK_SIG_TEX).
+		//   SCALER_OUT = params->tex over [0, dst_rect size) (libplacebo may hand a larger pooled
+		//   texture); SCALER_SRC = the scaler's source with its rect (the hybrid's srcRect; it must be
+		//   texel-aligned, else refused visibly: D was trained on whole pictures).
+		//   The hook texture is RGB: luma is made with kLumaFromRgbPass (kr/kb, the trained range),
+		//   D runs on luma, and the luma delta is added to R, G and B (kRgbLumaDeltaPass), so the
+		//   output is the hook's RGB with D applied. A one-component hook texture is used as luma.
+		//   The transfer domain is the hook's (linear light when downscale_light is linear): D's
+		//   light domain is barrier R8, checked by its stage contract only.
+		struct PostKernelOptions
+		{
+			float kr = 0.2126f, kb = 0.0722f;   // BT.709
+			float rangeScale = 1.0f, rangeOffset = 0.0f;   // hook luma -> the trained range
+			float mulOut = 1.0f, mulSrc = 1.0f;
+		};
+		bool RunInPostKernelHook(const pl_hook_params* params, const NetTexture& scalerSrc, NetTexture& output, std::string* error,
+			const PostKernelOptions& options = PostKernelOptions());
 		static NetDeviceContext DeviceFromHook(const pl_hook_params* params);
 
 		// Fused compute layers (NetFusion.h): replaces each run of exported conv-group passes with
@@ -62,6 +75,7 @@ namespace VpNets
 			fusedFp16 = fp16Storage;
 		}
 		size_t FusedLayers() const;   // layers running fused (after Prepare)
+		TexFormat EffectiveIntermediate(const NetPackage& pkg, TexFormat chosen) const override;
 
 		// Test knob: pretend a format is unavailable (the visible-bypass path).
 		void DisableFormat(TexFormat f) { disabled.push_back(f); }
@@ -74,6 +88,7 @@ namespace VpNets
 		std::unique_ptr<Impl> impl;
 		int RunFusedLayer(const ConvLayer& layer, const FusedShader& shader, void* dispatch, void* timer, std::string* error);
 		std::vector<TexFormat> disabled;
+		std::unique_ptr<PlNetRunner> lumaRunner, srcLumaRunner, deltaRunner;   // the POST_KERNEL RGB splice
 		bool fusion = false;
 		FusedKind fusedKind = FusedKind::Direct;
 		bool fusedFp16 = false;

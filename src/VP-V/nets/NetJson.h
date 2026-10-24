@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <cstdlib>
+#include <limits>
 #include <map>
 #include <memory>
 #include <string>
@@ -145,6 +146,7 @@ namespace VpNets
 				if (s.compare(i, 4, "true") == 0) { v.kind = Json::Kind::Bool; v.boolean = true; i += 4; return true; }
 				if (s.compare(i, 5, "false") == 0) { v.kind = Json::Kind::Bool; i += 5; return true; }
 				if (s.compare(i, 4, "null") == 0) { i += 4; return true; }
+				if (s.compare(i, 9, "-Infinity") == 0) { v.kind = Json::Kind::Number; v.text = "-Infinity"; v.number = -std::numeric_limits<double>::infinity(); i += 9; return true; }
 				if (c == '-' || (c >= '0' && c <= '9'))
 				{
 					const size_t start = i;
@@ -158,7 +160,8 @@ namespace VpNets
 				}
 				// Python's json.dump writes NaN/Infinity for non-finite floats.
 				if (s.compare(i, 3, "NaN") == 0) { v.kind = Json::Kind::Number; v.text = "NaN"; v.number = std::strtod("nan", nullptr); i += 3; return true; }
-				if (s.compare(i, 8, "Infinity") == 0) { v.kind = Json::Kind::Number; v.text = "Infinity"; v.number = 1e308 * 10; i += 8; return true; }
+				if (s.compare(i, 8, "Infinity") == 0) { v.kind = Json::Kind::Number; v.text = "Infinity"; v.number = std::numeric_limits<double>::infinity(); i += 8; return true; }
+				if (s.compare(i, 9, "-Infinity") == 0) { v.kind = Json::Kind::Number; v.text = "-Infinity"; v.number = -std::numeric_limits<double>::infinity(); i += 9; return true; }
 				return Fail("unexpected character");
 			}
 		};

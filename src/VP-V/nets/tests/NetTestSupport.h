@@ -6,6 +6,7 @@
 #include "CppUnitTest.h"
 
 #include <VP-V/nets/CpuNetExecutor.h>
+#include <VP-V/nets/NetSettingsHash.h>
 #include <VP-V/nets/NetSha256.h>
 
 #include <algorithm>
@@ -68,25 +69,37 @@ namespace NetRunnerTestsNs
 
 
 	// ------------------------------------------------------------------ the synthetic package
+	// The synthetic export's fingerprint fields; its id is computed like the kit's (h over them).
+	inline std::vector<std::pair<std::string, std::string>> SyntheticFields()
+	{
+		return {
+			{ "vp_commit", "462a95bc test" }, { "renderer_dll_sha256", "2e84598c7612762c" }, { "rebase_settings", "r1" },
+			{ "grain_split", "g1" }, { "stage_order", "s1" }, { "scaler_blend_settings", "b1" }, { "bounds", "n1" },
+			{ "label_schema", "vpnn-labels-v1" }, { "stage_contract", "test contract | A: in = luma" },
+			{ "texture_formats", "all net intermediates rgba32f (test); re-base pass outputs r16; x2 H->V hand-off r16" },
+			{ "upstream_nets", "" }, { "input_stage", "A: test input" },
+		};
+	}
+
+	inline std::string SyntheticId()
+	{
+		KitHash::Value o = KitHash::Value::Obj();
+		for (const auto& kv : SyntheticFields()) o.fields[kv.first] = KitHash::Value::Str(kv.second);
+		return KitHash::H(o);
+	}
+
 	// Exporter format, three passes: features (fragment), a ceil-half-size 2x2 average (compute,
 	// RPN size), the output (mirrored taps, a mat4, a PARAM, a swizzle compound assignment).
 	inline std::string SyntheticShader()
 	{
-		return
+		std::string header =
 			"// VP-NN T_tiny: test net in the exporter's format\n"
 			"// HOOK LUMA; out = HOOKED + gain * ((M * f).x - half)\n"
-			"// VPNN pipeline fingerprint: 0123456789abcdef input_stage=A: test input\n"
-			"// VP must compare it with the running pipeline's and bypass this net (log line) on a mismatch.\n"
-			"//   vp_commit: 462a95bc test\n"
-			"//   renderer_dll_sha256: 2e84598c7612762c\n"
-			"//   rebase_settings: r1\n"
-			"//   grain_split: g1\n"
-			"//   stage_order: s1\n"
-			"//   scaler_blend_settings: b1\n"
-			"//   bounds: n1\n"
-			"//   label_schema: vpnn-labels-v1\n"
-			"//   stage_contract: test contract | A: in = luma\n"
-			"//   texture_formats: all net intermediates rgba32f (test); re-base pass outputs r16; x2 H->V hand-off r16\n"
+			"// VPNN pipeline fingerprint: " + SyntheticId() + " input_stage=A: test input\n"
+			"// VP must compare it with the running pipeline's and bypass this net (log line) on a mismatch.\n";
+		for (const auto& kv : SyntheticFields())
+			if (kv.first != "input_stage") header += "//   " + kv.first + ": " + kv.second + "\n";
+		return header +
 			"//!PARAM vpnn_gain\n"
 			"//!TYPE float\n"
 			"//!MINIMUM 0.0\n"

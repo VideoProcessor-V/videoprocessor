@@ -34,6 +34,9 @@ namespace VpNets
 		// NAME_mul: the factor that turns a sampled value into the net's normalised value (1 for
 		// float and full-range textures; for a 10-bit value MSB-aligned in r16, 65535 / 65472).
 		float mul = 1.0f;
+		// The picture's rect inside the texture (x0, y0, x1, y1 in texels); all 0 = the whole texture.
+		float rect[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		bool HasRect() const { return rect[2] > rect[0] && rect[3] > rect[1]; }
 		bool Valid() const { return handle && width > 0 && height > 0; }
 	};
 
@@ -108,6 +111,10 @@ namespace VpNets
 		std::map<std::string, NetTexture> textures;   // contract input name -> texture (HOOKED, VPNN_PREV, SCALER_SRC, ...)
 		std::map<std::string, double> params;         // PARAM labels (NetLabels.h for schema v1)
 		NetState state;
+		// UpstreamNetsKey() of the nets that ran upstream THIS frame (a per-frame bypass upstream
+		// changes it): compared with the key the net was loaded for.
+		std::string upstreamNets;
+		bool upstreamNetsKnown = false;
 	};
 
 	struct NetPrepareParams
@@ -214,6 +221,10 @@ namespace VpNets
 		// Run/Release). Call ResolveInputs first: a bypass never reaches Run.
 		virtual bool Run(const NetDeviceContext& device, const NetRunInputs& in, NetTexture& output, std::string* error) = 0;
 		virtual void Release() = 0;
+
+		// The intermediate format the runner will really use for `chosen` (a runner option such as
+		// fused fp16 storage may lower it); the fingerprint is checked against this (audit 2026-10-24).
+		virtual TexFormat EffectiveIntermediate(const NetPackage&, TexFormat chosen) const { return chosen; }
 
 		// Cost hook: each Run's time is recorded against `slot` (SlotTiming, barrier B4). The CPU
 		// executor records wall-clock ms; the GPU runner records timestamp-query ms.

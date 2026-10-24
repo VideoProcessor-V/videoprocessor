@@ -292,22 +292,34 @@ namespace NetRunnerTestsNs
 				const std::string n = c.desc["bindings"].items[k]["name"].text;
 				(n == "SCALER_OUT" ? out : src) = g.Upload(c.textures[k]);
 			}
-			// What AdaptiveDownscale's POST_KERNEL hook receives (PL_HOOK_SIG_TEX).
+			// What AdaptiveDownscale's POST_KERNEL hook receives (PL_HOOK_SIG_TEX): the picture over the
+			// destination rect at the texture origin.
 			pl_hook_params hp{};
 			hp.gpu = g.gpu;
 			hp.dispatch = g.dispatch;
 			hp.tex = out;
+			hp.dst_rect = { 0, 0, out->params.w, out->params.h };
+			NetTexture srcTex;
+			srcTex.handle = const_cast<pl_tex_t*>(src);
+			srcTex.width = src->params.w;
+			srcTex.height = src->params.h;
+			srcTex.components = 1;
 			PlNetRunner gpu;
 			NetPrepareParams pp;
 			pp.intermediate = TexFormat::Rgba32f;
 			Assert::IsTrue(gpu.Prepare(PlNetRunner::DeviceFromHook(&hp), c.pkg, pp, &err), W(err).c_str());
 			NetTexture result;
-			Assert::IsTrue(gpu.RunInPostKernelHook(&hp, const_cast<pl_tex_t*>(src), result, &err), W(err).c_str());
+			Assert::IsTrue(gpu.RunInPostKernelHook(&hp, srcTex, result, &err), W(err).c_str());
 			CpuNetExecutor cpu;
 			Assert::IsTrue(RunCase(c, TexFormat::Rgba32f, cpu, &err), W(err).c_str());
 			const double d = MaxDiffCodes(g.Download(static_cast<pl_tex>(result.handle)), cpu.Output());
 			Log("D via the POST_KERNEL entry: max |gpu - cpu| " + std::to_string(d) + " codes");
 			Assert::IsTrue(d <= Tolerance(c.pkg, TexFormat::Rgba32f));
+			// A fractional source crop cannot be mapped exactly: refused, visibly.
+			NetTexture cropped = srcTex;
+			cropped.rect[0] = 0.5f; cropped.rect[1] = 0.0f; cropped.rect[2] = static_cast<float>(src->params.w); cropped.rect[3] = static_cast<float>(src->params.h);
+			Assert::IsFalse(gpu.RunInPostKernelHook(&hp, cropped, result, &err));
+			Assert::IsTrue(err.find("fractional") != std::string::npos, W(err).c_str());
 			gpu.Release();
 			pl_tex_destroy(g.gpu, &out);
 			pl_tex_destroy(g.gpu, &src);
@@ -392,18 +404,26 @@ namespace NetRunnerTestsNs
 					struct Variant { const char* label; FusedKind kind; bool fp16; };
 					const Variant variants[] = { { "direct", FusedKind::Direct, false }, { "winograd", FusedKind::Winograd, false },
 						{ "direct+fp16", FusedKind::Direct, true }, { "winograd+fp16", FusedKind::Winograd, true } };
+					CpuNetExecutor cpu16;
+					const bool fp16Ok = c.pkg.fingerprint.fp16Allowed;
+					if (fp16Ok) Assert::IsTrue(RunCase(c, TexFormat::Rgba16f, cpu16, &err), W(err).c_str());
 					for (const Variant& v : variants)
 					{
 						PlNetRunner gpu;
 						gpu.SetFusion(true, v.kind, v.fp16);
 						NetPrepareParams pp;
 						pp.intermediate = TexFormat::Rgba32f;
+						if (v.fp16 && !fp16Ok)
+						{
+							Assert::IsFalse(gpu.Prepare(g.Device(), c.pkg, pp, &err), W(name + ": fp16 storage must be refused").c_str());
+							continue;
+						}
 						Assert::IsTrue(gpu.Prepare(g.Device(), c.pkg, pp, &err), W(name + ": " + err).c_str());
 						Assert::AreEqual(layers.size(), gpu.FusedLayers(), W(name + ": every extracted layer fuses").c_str());
 						NetTexture out;
 						Assert::IsTrue(gpu.Run(g.Device(), gin, out, &err), W(name + " " + v.label + ": " + err).c_str());
-						const double d = MaxDiffCodes(g.Download(static_cast<pl_tex>(out.handle)), cpu.Output());
-						const double tol = v.fp16 ? 1e9 : Tolerance(c.pkg, TexFormat::Rgba32f);   // fp16: measured, not gated
+						const double d = MaxDiffCodes(g.Download(static_cast<pl_tex>(out.handle)), v.fp16 ? cpu16.Output() : cpu.Output());
+						const double tol = Tolerance(c.pkg, v.fp16 ? TexFormat::Rgba16f : TexFormat::Rgba32f);
 						char line[200];
 						snprintf(line, sizeof line, "%-27s fused %-14s (%zu layers): max |gpu - cpu| %.5f codes", name.c_str(), v.label, layers.size(), d);
 						Log(line);

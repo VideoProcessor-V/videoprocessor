@@ -237,7 +237,7 @@ namespace VpNets
 		{
 			std::string v = value;
 			if (!L.gate.empty())
-				v = "(texelFetch(NFG_raw, (" + P + ") / " + std::to_string(L.gateTile) + ", 0).x > 0.0 ? " + value + " : vec4(0.0))";
+				v = "(!(texelFetch(NFG_raw, (" + P + ") / " + std::to_string(L.gateTile) + ", 0).x <= 0.0) ? " + value + " : vec4(0.0))";   // NaN: open, as the exported passes
 			return "imageStore(NFO" + std::to_string(o) + ", " + P + ", " + v + ");";
 		};
 
