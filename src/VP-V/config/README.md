@@ -77,14 +77,20 @@ so Config reloads the moved rows.
   their Custom box is ticked (auto-ticked when the values differ; unticking puts the master's values
   back); Feature cards are greyed "Used only when <feature> is on". Per-key locks set Config's own
   `derivedSetting` property so a profile reload keeps them greyed.
-- **One live control per key:** rows of keys a VP-V toggle owns are hidden wherever they are while
-  the VP-V pathway is on; tier keys' rows live in "Set by the tier" (`vpvKeyHome`) and are their
-  one control. The Original pathway disables only VP-V's own tiers and toggles and unlocks the tier
-  keys.
+- **One live control per key:** rows of keys a VP-V toggle owns are hidden wherever they are, in
+  both pathways; tier keys' rows live in "Set by the tier" (`vpvKeyHome`) and are their one control.
+  The Original pathway disables the whole VP-V page (every VP addition is off) and shows a note;
+  none of Bill's keys is on it. The Rendering page's raw group shows only while it holds a control.
 - **One slider per unit:** the Classic Motion tier greys the de-judder amount; below Mid the picture
   slider is greyed and never offers its own Off on the VP-V pathway.
-- **Dynamic Drive:** the Advanced LED card is regrouped (`LedAdvancedGroups`) under "Advanced LED
-  values" (your script's values / Custom) and "LED fixes under test" (all on / Custom).
+- **Dynamic Drive:** the page becomes Main | Advanced (its two-column grid is replaced): masters
+  (drive, command source, LED profile, speeds preset, connection) on Main; the speeds' values (set by
+  the preset until Custom), Contrast and cuts, the Advanced LED groups (`LedAdvancedGroups`, one card
+  each, set by "Advanced LED values" until Custom), the projector's limits and Experimental on
+  Advanced. "LED fixes under test" masters the nine LED fix switches.
+- **De-judder:** the eight fields the de-judder amount sets are their own card (locked to the slider);
+  the de-judder's independent shaping is another. Config's `showIn` follows a row to the form that
+  holds it now (one commented change in ConfigEditorWindow.cpp).
 - **Fit:** `FitWidth` stacks wide radio rows, puts every form field under its label and lets tab rows
   scroll, so the page does not scroll sideways at 1040x700 (tested with the Windows fonts by a second
   pass of `tools/run_config_tests.ps1`).

@@ -9540,7 +9540,16 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             auto update = [=]()
             {
                 const bool active = number(dejudderStrength) > 0.0 || number(strengthEven) > 0.0;
-                auto showIn = [](QFormLayout* layout, QWidget* row, bool visible) { layout->setRowVisible(row, visible); };
+                // VP-V organisation pass 2 (2026-10-24, src/VP-V/config/VpvOrganisation.h): the VP-V page may
+                // move a row to a form of its own; show or hide it in the form that holds it now. The row's
+                // label, when VP-V stacked it above the field, goes with it (property vpvRowLabel).
+                auto showIn = [](QFormLayout* layout, QWidget* row, bool visible) {
+                    if (auto* current = row->parentWidget() ? qobject_cast<QFormLayout*>(row->parentWidget()->layout()) : nullptr)
+                        layout = current;
+                    layout->setRowVisible(row, visible);
+                    if (auto* label = qobject_cast<QWidget*>(row->property("vpvRowLabel").value<QObject*>()))
+                        layout->setRowVisible(label, visible);
+                };
                 showIn(dejudderTasteForm, evenRates, number(strengthEven) > 0.0);
                 for (QWidget* row : { static_cast<QWidget*>(rolloff), static_cast<QWidget*>(objectStrength),
                         static_cast<QWidget*>(fadeMatch) })

@@ -100,11 +100,14 @@ namespace Vpv
 				{ K::Hide, "motion_source_heading" }, { K::Hide, "hiccup_repair_heading" }, { K::Hide, "interpolation_heading" },
 				{ K::Hide, "interpolation_note" } },
 				{ L::Tier, "the Motion tier" } },
-			{ "motion", "taste_keys", "De-judder fields", "The fields the de-judder amount sets, and the de-judder's other shaping.", true, false, {
-				{ K::Section, "dejudder" } },
-				{ L::Slider, "the de-judder amount", "motion_preset_name", "motion_preset_reset", nullptr, nullptr,
-					{ "dejudder_strength", "dejudder_strength_even", "dejudder_even_rates", "dejudder_object_strength",
-						"dejudder_motion_rolloff", "dejudder_roll_floor", "dejudder_roll_lo", "dejudder_roll_hi" } } },
+			{ "motion", "taste_keys", "Set by the de-judder amount", "The eight fields the de-judder amount slider sets.", true, false, {
+				{ K::Row, "dejudder_strength" }, { K::Row, "dejudder_strength_even" }, { K::Row, "dejudder_even_rates" },
+				{ K::Row, "dejudder_object_strength" }, { K::Row, "dejudder_motion_rolloff" }, { K::Row, "dejudder_roll_floor" },
+				{ K::Row, "dejudder_roll_lo" }, { K::Row, "dejudder_roll_hi" } },
+				{ L::Slider, "the de-judder amount", "motion_preset_name", "motion_preset_reset" } },
+			{ "motion", "shaping", "De-judder shaping (yours; the slider does not set these)",
+				"Fade matching, pulldown handling and the motion-vector options: independent of the amount.", true, false, {
+				{ K::Section, "dejudder" } } },
 			{ "motion", "render_ahead_tuning", "Render ahead: tuning", nullptr, true, false, {
 				{ K::Row, "dejudder_gate" }, { K::Row, "render_ahead_utilisation" } },
 				{ L::Feature, "Render ahead", "render_ahead", nullptr, "off", "off" } },

@@ -1455,12 +1455,9 @@ void testPictureSliderPresets()
     auto* clarity = requireControl<QLineEdit>(window, "config.vprenderer.source_resolution_auto_min_confidence");
     auto* seconds = requireControl<QLineEdit>(window, "config.vprenderer.source_resolution_evidence_seconds");
     auto* shots = requireControl<QLineEdit>(window, "config.vprenderer.source_resolution_evidence_shots");
-    // Organisation pass 2: on the VP-V pathway the Scaling tier owns re-base on/off, so the slider has no
-    // Off; the Original pathway gives Bill's full slider back (tested below).
-    require(slider->minimum() == 1, "the picture slider offers its own Off on the VP-V pathway");
-    requireControl<QComboBox>(window, "vpv.pathway")->setCurrentIndex(1);
-    QCoreApplication::processEvents();
-    require(slider->minimum() == 0, "the Original pathway does not give the slider its Off back");
+    // Organisation pass 2: the Scaling tier owns re-base on/off (source_resolution native / auto), so the
+    // slider has no Off of its own; its positions set how much evidence re-base needs.
+    require(slider->minimum() == 1, "the picture slider offers its own Off (the Scaling tier owns it)");
     profiles->setCurrentRow(1);
     QCoreApplication::processEvents();
     require(name->text() == "Custom", (QByteArray("A fixed 1080 is not shown as Custom: ") + name->text().toUtf8()).constData());
@@ -1472,8 +1469,7 @@ void testPictureSliderPresets()
     const Row rows[] = {
         { 1, "auto", "0.9", "20", "4", "Cautious" },
         { 2, "auto", "0.8", "10", "3", "Standard" },
-        { 3, "auto", "0.7", "5", "2", "Fast" },
-        { 0, "native", "0.8", "10", "3", "Off" } };
+        { 3, "auto", "0.7", "5", "2", "Fast" } };
     for (const Row& r : rows)
     {
         slider->setValue(r.position);
@@ -1484,10 +1480,6 @@ void testPictureSliderPresets()
             (at + "evidence " + clarity->text().toUtf8() + " " + seconds->text().toUtf8() + " " + shots->text().toUtf8()).constData());
         require(name->text().startsWith(r.label), (at + "label " + name->text().toUtf8()).constData());
     }
-    // Off is the source size alone: an edited evidence field under native still reads Off.
-    seconds->setText("30");
-    QCoreApplication::processEvents();
-    require(name->text().startsWith("Off"), (QByteArray("Off with other evidence is not Off: ") + name->text().toUtf8()).constData());
     // Standard, then an edit: Custom without moving the slider; reset restores.
     slider->setValue(2);
     shots->setText("5");

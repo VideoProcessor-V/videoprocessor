@@ -11,8 +11,10 @@ every control still exists exactly once.
    **Advanced**, greyed with "Set by <master>". Tick **Custom** on that card to change them by hand;
    untick it and the master's values come back. A feature's tuning is greyed "Used only when
    <feature> is on" while the feature is off.
-2. **One live control per key.** A VP-V switch owns its key; the old control elsewhere is hidden
-   while the VP-V pathway is on (it reappears, with everything else, in the Original pathway).
+2. **One live control per key.** A VP-V switch owns its key; the old duplicate control elsewhere is
+   hidden in both pathways. In the **Original pathway** every VP addition is off, so the whole VP-V
+   page is disabled (with a note saying so); Bill's own settings stay live on his pages. None of
+   Bill's keys is on the VP-V page (checked against billslack2 v1.4.02-beta).
 3. **One slider per unit.** The tier is the unit's control. Where a unit also has a taste slider
    (Motion: the de-judder amount; Scaling: the picture slider), the tier decides whether it applies:
    at the Classic Motion tier the amount is greyed (no de-judder); below the Mid Scaling tier the
@@ -29,11 +31,11 @@ Fallbacks engaged; then one tab per unit, each with **Main | Advanced**.
 | Tab | Main | Advanced |
 |---|---|---|
 | Input | Capture; Signal and content; Total delay | Content labels: tuning; Readouts (diagnostics) |
-| Motion | **tier**; De-judder amount (your taste); Motion engine and hiccup repair; Render ahead; Per-shot easing | Set by the Motion tier; De-judder fields; Render ahead: tuning; Per-shot easing: tuning; Motion estimator (measured) |
+| Motion | **tier**; De-judder amount (your taste); Motion engine and hiccup repair; Render ahead; Per-shot easing | Set by the Motion tier; Set by the de-judder amount (the 8 slider fields); De-judder shaping (yours: fade matching, pulldown, vector options); Render ahead: tuning; Per-shot easing: tuning; Motion estimator (measured) |
 | Repair | **tier**; Deband | Set by the Repair tier; Texture restore and detail pulse: limits |
 | Scaling | **tier**; Re-base (your picture slider); Grain-aware scaling | Set by the Scaling tier; Re-base evidence; Re-base timing; Grain-aware scaler thresholds (measured) |
 | Colour | Range and precision; SDR tone shape; Room-light adaptation; Tone mapping and display (Bill's pages) | SDR tone shape: values; Room-light adaptation: values |
-| Dynamic Drive | where everything is on the Dynamic Drive page | - |
+| Dynamic Drive | where everything is on the Dynamic Drive page (below) | - |
 | Output | **tier**; Temporal dither; Presentation and delay | Set by the Output tier; Temporal dither: tuning |
 | Pipeline (expert) | LUT stage, module order, stages off | |
 | Proposed retirement | VP-V switches proposed for retirement; Proven fixes (master: all on); Experiments that lost; the list of all 41 | |
@@ -41,9 +43,17 @@ Fallbacks engaged; then one tab per unit, each with **Main | Advanced**.
 **Bill's pages:** General (Input processing now says "set these four here once"), Queue, DV,
 Shaders, Actions, Shortcuts, Calibration, Logs, Updates, DirectShow - unchanged. **VP Renderer >
 Rendering**: profile settings, Tone Mapping (General / Spline / Other curves / Peak detection /
-Highlight response), Processing, a line pointing to VP-V, then **All raw settings (expert)**
-(collapsed; empty in the VP-V pathway, it shows VP's old controls again in the Original pathway).
-**Dynamic Drive** (ours, its own page): unchanged cards, plus the regrouped Advanced LED card.
+Highlight response), Processing, and a line pointing to VP-V. The "All raw settings (expert)" group
+appears only while it holds a shown control; after this pass it holds none (every VP control has its
+home on VP-V), so it is not shown.
+
+**Dynamic Drive** (ours, its own page) now uses the same scheme, **Main | Advanced**:
+- Main: Dynamic Drive (on/off, the command source - your script, VP's compensate or none - adaptive
+  gamma, look-ahead, floors), LED profile, LED speeds (the preset), Projector connection.
+- Advanced: LED speeds: values (set by the preset until Custom); Contrast and cuts; Advanced LED (its
+  two masters); Light curve, steps and ramps; Highlights; Cuts and fades; Script mode only; Compensate
+  mode only (each its own small card, set by "Advanced LED values" until Custom); Projector response;
+  Advanced projector; Experimental. Cards the chosen source does not use stay hidden, as before.
 
 ## Master -> derived groups
 
@@ -66,21 +76,17 @@ Highlight response), Processing, a line pointing to VP-V, then **All raw setting
 | Dynamic Drive command source (Dynamic Drive page) | which cards and rows show (Contrast and cuts, LED speeds, Experimental, LED profile, pacing rows, ...) | unchanged show/hide |
 | Advanced LED values (Advanced LED card) | 5 groups: Light curve, steps and ramps; Highlights; Cuts and fades; Script mode only; Compensate mode only (28 keys) | greyed at your script's values until Custom; choosing the script's values again resets every field; a group the chosen source does not use stays greyed |
 | LED fixes under test (Advanced LED card) | the 9 LED fix switches (in Dynamic Drive, Contrast and cuts, Experimental) | greyed on until Custom; back to all on |
-| LED speeds preset (Dynamic Drive page) | rate_gain/min/max up and down, recovery rates | unchanged (the fields show "preset") |
+| LED speeds preset (Dynamic Drive > Main) | rate_gain/min/max up and down, recovery rates (Advanced > LED speeds: values) | greyed until Custom; unticking puts every field back to "preset" |
 | Queue policy (Queue page) | queue_size, lead_frames, target_frames, reset % | unchanged (Advanced shows the values) |
 | Total delay (Queue page target delay) | frames and padding per frame rate | shown on Input > Total delay |
 
 ## Still not final (for your review)
 
-- The VP-V page fits the default window (a test checks it with the Windows fonts); with large text
-  scaling it may still need scrolling.
-- The Dynamic Drive page keeps its existing master (the command source) and card layout; only its
-  Advanced LED card was regrouped, and the LED fixes got a master.
-- `sdr_input_transfer` exists in both Rendering and Color / Output profiles (Bill's; not changed).
-- In the Original pathway VP-V's tiers and switches are disabled and every tier key becomes a plain
-  control; the moved rows stay on the VP-V page (not moved back to the Rendering page).
-- The De-judder fields card also holds the de-judder's other shaping (fade matching, pulldown),
-  which the slider does not set; those stay editable.
+- The VP-V and Dynamic Drive pages fit the default window (a test checks it with the Windows fonts);
+  with large text scaling they may still need scrolling.
+- `sdr_input_transfer` exists in both Rendering and Color / Output profiles (Bill's; left alone).
+- The LED fix switches stay in their cards on the Dynamic Drive page (greyed by their master in the
+  Advanced LED card) rather than moving to the Proposed retirement tab, so their context stays.
 
 Source: `src/VP-V/config/VpvOrganisation.h` (the table: cards, masters, locks, LED groups),
 `src/VP-V/config/VpvSection.cpp` (cards, moves, locks, the raw group, the Dynamic Drive regrouping,

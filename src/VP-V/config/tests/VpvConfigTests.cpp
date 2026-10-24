@@ -278,12 +278,16 @@ namespace
 			auto* pathway = control<QComboBox>(window, Vpv::ObjectName("pathway"));
 			pathway->setCurrentIndex(1);
 			QCoreApplication::processEvents();
-			require(upstream->isEnabled(), "Original pathway gives the upstream control back");
-			require(!control<QWidget>(window, Vpv::ObjectName("global_tier"))->isEnabled() &&
-				!control<QWidget>(window, Vpv::ObjectName("repair.deband_vp_grain_guard"))->isEnabled(),
-				"Original pathway disables VP-V's tiers and switches");
-			require(control<QWidget>(window, Vpv::ObjectName("repair.card.limits.body"))->isEnabled(),
-				"Original pathway leaves the upstream rows hosted on the VP-V page usable");
+			// Organisation pass 2: the Original pathway switches every VP addition off, so the whole VP-V
+			// page (tiers, switches and the VP rows it hosts) is disabled; Bill's controls stay live.
+			require(!control<QWidget>(window, Vpv::ObjectName("content"))->isEnabled() &&
+				!control<QWidget>(window, QStringLiteral("config.vprenderer.texture_restore_cap"))->isEnabled(),
+				"Original pathway disables the VP-V page and the VP rows it hosts");
+			require(control<QWidget>(window, Vpv::ObjectName("original_note"))->isVisibleTo(control<QWidget>(window, Vpv::ObjectName("section"))),
+				"Original pathway says why the page is disabled");
+			require(control<QWidget>(window, QStringLiteral("config.vprenderer.deband_strength"))->isEnabled(),
+				"Bill's own controls stay live in the Original pathway");
+			require(!RowShown(upstream), "a VP-V switch's duplicate row stays hidden in the Original pathway");
 			save(window);
 		}
 		std::string v;
@@ -293,9 +297,9 @@ namespace
 		requireVpReads(path);
 		{
 			ConfigEditorWindow window(path, 0, true);
-			require(control<QWidget>(window, QStringLiteral("config.vprenderer.adaptive_upscale"))->isEnabled() &&
-				control<QWidget>(window, QStringLiteral("config.vprenderer.deband_vp"))->isEnabled(),
-				"reopened in Original pathway: upstream controls behave as upstream (tier keys unlocked too)");
+			require(!control<QWidget>(window, Vpv::ObjectName("content"))->isEnabled() &&
+				control<QWidget>(window, QStringLiteral("config.vprenderer.deband_strength"))->isEnabled(),
+				"reopened in Original pathway: the VP-V page disabled, Bill's controls live");
 			control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(0);
 			save(window);
 		}
@@ -521,7 +525,15 @@ namespace
 			control<QLabel>(window, Vpv::ObjectName(QString::fromLatin1(note)));
 		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);
 		QCoreApplication::processEvents();
-		require(RowShown(debandRow), "the Original pathway shows the managed row again");
+		require(!RowShown(debandRow), "the duplicate row stays hidden in the Original pathway (one control per key)");
+		// Bill's own Rendering keys are never on the VP-V page (checked against billslack2 v1.4.02-beta's
+		// RendererProfileConfig.h, 2026-10-24: none of the keys VP-V hosts is Bill's).
+		for (const char* key : { "quality", "deband_strength", "dithering", "display_bit_depth", "tone_mapping", "gamut_mapping",
+			"peak_detection", "contrast_recovery", "saturation", "sdr_target_nits", "sdr_black_nits" })
+		{
+			auto* w = window.findChild<QWidget*>(QStringLiteral("config.vprenderer.") + QString::fromLatin1(key));
+			require(w && !section->isAncestorOf(w), (std::string("Bill's key stays on the Rendering page: ") + key).c_str());
+		}
 		save(window);
 		requireVpReads(path);
 	}
@@ -580,6 +592,11 @@ namespace
 			"a Motion tier above Classic frees the de-judder amount");
 		require(control<QSlider>(window, QStringLiteral("config.vprenderer.picture_preset"))->minimum() == 1,
 			"the picture slider never offers its own Off (the Scaling tier owns re-base on/off)");
+		// The slider-set fields and the independent shaping are separate cards.
+		require(control<QWidget>(window, Vpv::ObjectName("motion.card.taste_keys.body"))->isAncestorOf(strength) &&
+			control<QWidget>(window, Vpv::ObjectName("motion.card.shaping.body"))->isAncestorOf(
+				control<QWidget>(window, QStringLiteral("config.vprenderer.dejudder_fade_match"))),
+			"the de-judder amount's fields and the shaping are separate cards");
 		// One live control per key: no shown upstream row for a key a VP-V toggle owns.
 		for (const std::string& key : Vpv::ManagedKeys(Vpv::TierTable()))
 		{
@@ -603,6 +620,19 @@ namespace
 		QCoreApplication::processEvents();
 		require(highlights->isEnabled() && !control<QWidget>(window, QStringLiteral("config.led_drive.default.tick_ms"))->isEnabled(),
 			"Custom frees the groups the chosen source uses (Script-only stays greyed in Compensate)");
+		// The Dynamic Drive page: masters on Main, what they set on Advanced (the speeds set by their preset).
+		auto* driveMain = control<QWidget>(window, Vpv::ObjectName("drive.main"));
+		auto* driveAdvanced = control<QWidget>(window, Vpv::ObjectName("drive.advanced"));
+		require(driveMain->isAncestorOf(control<QWidget>(window, QStringLiteral("config.led_drive.default.command_source"))) &&
+			driveMain->isAncestorOf(control<QWidget>(window, QStringLiteral("config.led_drive.default.rate_preset"))),
+			"the Dynamic Drive masters are on Main");
+		auto* rateUp = control<QWidget>(window, QStringLiteral("config.led_drive.default.rate_gain_up"));
+		require(driveAdvanced->isAncestorOf(rateUp) && !rateUp->isEnabled(), "the LED speeds values are set by their preset (Advanced)");
+		control<QCheckBox>(window, Vpv::ObjectName("drive.card.speed_values.custom"))->setChecked(true);
+		QCoreApplication::processEvents();
+		require(rateUp->isEnabled(), "Custom frees the LED speeds values");
+		require(driveAdvanced->isAncestorOf(control<QWidget>(window, Vpv::ObjectName("drive.group.highlights"))),
+			"each advanced LED group is a card of its own on Advanced");
 		auto* fixes = control<QComboBox>(window, Vpv::ObjectName("drive.led_fixes"));
 		require(fixes->currentIndex() == 0 && !control<QWidget>(window, QStringLiteral("config.led_drive.default.cntr_pair_predict"))->isEnabled(),
 			"the LED fixes are set by their master");
@@ -652,6 +682,20 @@ namespace
 					(QStringLiteral("the VP-V page scrolls sideways on %1 / %2 (%3 px)").arg(units->tabText(u),
 						sub ? sub->tabText(s2) : QString()).arg(scroll ? scroll->horizontalScrollBar()->maximum() : -1) + widest).toStdString().c_str());
 			}
+		}
+		// The Dynamic Drive page, in the same scheme (Main | Advanced), fits too.
+		auto* drivePages = control<QTabWidget>(window, Vpv::ObjectName("drive.pages"));
+		for (int i = 0; pages && i < pages->count(); ++i)
+			if (pages->widget(i)->isAncestorOf(drivePages)) window.selectPage(i);
+		QScrollArea* driveScroll = nullptr;
+		for (QWidget* p = drivePages; p && !driveScroll; p = p->parentWidget()) driveScroll = qobject_cast<QScrollArea*>(p);
+		for (int t = 0; t < drivePages->count(); ++t)
+		{
+			drivePages->setCurrentIndex(t);
+			QCoreApplication::processEvents();
+			require(driveScroll && driveScroll->horizontalScrollBar()->maximum() == 0,
+				(QStringLiteral("the Dynamic Drive page scrolls sideways on %1 (%2 px)").arg(drivePages->tabText(t))
+					.arg(driveScroll ? driveScroll->horizontalScrollBar()->maximum() : -1)).toStdString().c_str());
 		}
 		window.hide();
 		save(window);

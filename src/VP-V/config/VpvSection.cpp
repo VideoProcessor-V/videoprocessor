@@ -1122,14 +1122,35 @@ namespace Vpv
 		// VP-V toggle owns is hidden, wherever it is (the Rendering page's raw group or a VP-V card); so
 		// are the headings of hidden rows. The Original pathway shows them again (only the rows hidden
 		// here). A tier key's row in its "Set by the tier" card is its one control and stays.
-		void ApplyManagedRows(const std::shared_ptr<State>& state, bool vpvOn)
+		// Organisation pass 2 (coordinator 2026-10-24): in BOTH pathways - VP-V's own controls are the
+		// one place for VP's keys (disabled in the Original pathway, where every VP addition is off), so
+		// the duplicate rows never come back. The parameter stays for the pathway switch's symmetry.
+		void ApplyManagedRows(const std::shared_ptr<State>& state, bool /*vpvOn*/)
 		{
 			QStringList keys = state->hidden;
 			for (const std::string& key : ManagedKeys(TierTable())) keys << QString::fromStdString(key);
 			for (QWidget* root : { state->host.upstreamRoot, state->root })
 				for (const QString& key : keys)
 					for (QWidget* field : RowFields(root, key))
-						if (!InKeyHome(field)) SetRowShown(field, vpvOn);
+						if (!InKeyHome(field)) SetRowShown(field, true);
+			// The Rendering page's raw group shows only while it holds a shown control.
+			if (QWidget* group = state->host.upstreamRoot ? state->host.upstreamRoot->findChild<QWidget*>(
+					QStringLiteral("rendererSection.allRawGroup")) : nullptr)
+			{
+				bool any = false;
+				for (QFormLayout* form : group->findChildren<QFormLayout*>())
+					for (int r = 0; r < form->rowCount() && !any; ++r)
+					{
+						QLayoutItem* item = form->itemAt(r, QFormLayout::FieldRole);
+						if (!item) item = form->itemAt(r, QFormLayout::SpanningRole);
+						QWidget* field = item ? item->widget() : nullptr;
+						if (!field || !form->isRowVisible(r)) continue;
+						const bool named = field->objectName().startsWith(QStringLiteral("config.")) ||
+							!field->findChildren<QWidget*>(QRegularExpression(QStringLiteral("^config\."))).isEmpty();
+						any = named;
+					}
+				group->setVisible(any);
+			}
 		}
 
 		// The Rendering page after the moves: Bill's sections stay as his themed cards; every other
@@ -1258,76 +1279,167 @@ namespace Vpv
 			return fields;
 		}
 
-		void OrganiseDynamicDrive(const Host& host)
+		// The Config card frame titled `title` (createCard: a "card" frame with a "cardTitle" label).
+		QWidget* CardTitled(const QList<QWidget*>& cards, const QString& title)
+		{
+			for (QWidget* card : cards)
+				for (QLabel* label : card->findChildren<QLabel*>(QString(), Qt::FindDirectChildrenOnly))
+					if (label->property("cardTitle").toBool() && label->text() == title) return card;
+			return nullptr;
+		}
+
+		// The Dynamic Drive page in the same scheme as the VP-V units (organisation pass 2): Main holds the
+		// masters (the drive and its command source, the LED profile, the LED speeds preset, the projector
+		// connection); Advanced holds what they set or tune, greyed "Set by <master>" until Custom, and the
+		// projector's measured limits. The page's own show/hide by command source keeps working (it shows
+		// and hides the same card frames). Returns the new page body (for the width fit), or null.
+		QWidget* OrganiseDynamicDrive(const Host& host)
 		{
 			QWidget* root = host.upstreamRoot;
 			const QList<QToolButton*> toggles = root ? root->findChildren<QToolButton*>(
 				QRegularExpression(QStringLiteral("^config\\.led_drive\\.[^.]+\\.advanced_toggle$"))) : QList<QToolButton*>();
 			QToolButton* toggle = toggles.isEmpty() ? nullptr : toggles.front();
-			if (!toggle || root->findChild<QComboBox*>(ObjectName(QStringLiteral("drive.advanced_values")))) return;
+			if (!toggle || root->findChild<QComboBox*>(ObjectName(QStringLiteral("drive.advanced_values")))) return nullptr;
 			const QString prefix = toggle->objectName().chopped(QStringLiteral("advanced_toggle").size());
 			QWidget* holder = toggle->parentWidget();
 			QWidget* advanced = holder && holder->layout() && holder->layout()->count() > 1 ? holder->layout()->itemAt(1)->widget() : nullptr;
-			auto* form = advanced ? qobject_cast<QFormLayout*>(advanced->layout()) : nullptr;
+			auto* advancedForm = advanced ? qobject_cast<QFormLayout*>(advanced->layout()) : nullptr;
 			auto* source = root->findChild<QComboBox*>(prefix + QStringLiteral("command_source"));
-			if (!form) return;
+			auto* enabled = root->findChild<QCheckBox*>(prefix + QStringLiteral("enabled"));
+			// The page's card grid and the page column it sits in.
+			QWidget* grid = holder;
+			while (grid && !qobject_cast<QGridLayout*>(grid->layout())) grid = grid->parentWidget();
+			auto* column = grid && grid->parentWidget() ? qobject_cast<QBoxLayout*>(grid->parentWidget()->layout()) : nullptr;
+			if (!advancedForm || !grid || !column) return nullptr;
+			QList<QWidget*> cards;
+			for (int i = 0; i < grid->layout()->count(); ++i)
+				if (QWidget* w = grid->layout()->itemAt(i)->widget()) cards << w;
 
-			// The two masters, at the top of the card.
+			// Main | Advanced, replacing the two-column grid (which is deleted once its cards are taken out,
+			// so it can never take them back on a resize).
+			auto* pages = new QTabWidget;
+			pages->setObjectName(ObjectName(QStringLiteral("drive.pages")));
+			pages->setDocumentMode(true);
+			auto* mainPage = new QWidget;
+			mainPage->setObjectName(ObjectName(QStringLiteral("drive.main")));
+			auto* mainLayout = new QVBoxLayout(mainPage);
+			mainLayout->setContentsMargins(0, 8, 0, 0);
+			mainLayout->setSpacing(12);
+			auto* advancedPage = new QWidget;
+			advancedPage->setObjectName(ObjectName(QStringLiteral("drive.advanced")));
+			auto* advancedLayout = new QVBoxLayout(advancedPage);
+			advancedLayout->setContentsMargins(0, 8, 0, 0);
+			advancedLayout->setSpacing(12);
+			auto* intro = Help(QStringLiteral("Settings set by the controls on Main (greyed, \"Set by ...\", until you choose "
+				"Custom), the tuning of Compensate, and the projector's measured limits. Cards a command source does not "
+				"use are hidden."));
+			intro->setProperty("help", true);
+			advancedLayout->addWidget(intro);
+			pages->addTab(mainPage, QStringLiteral("Main"));
+			pages->addTab(advancedPage, QStringLiteral("Advanced"));
+			column->insertWidget(column->indexOf(grid), pages);
+			auto place = [&](const QString& title, QVBoxLayout* to)
+			{
+				if (QWidget* card = CardTitled(cards, title)) { to->addWidget(card); cards.removeAll(card); }
+			};
+			for (const char* title : { "Dynamic Drive", "LED profile", "LED speeds", "Projector connection" })
+				place(Q(title), mainLayout);
+
+			// LED speeds: the preset stays on Main; its nine values go to Advanced, set by it until Custom.
+			CardBox speedValues = MakeCard(ObjectName(QStringLiteral("drive.card.speed_values")), QStringLiteral("LED speeds: values"),
+				QStringLiteral("Levels per second (gain x distance, kept between min and max). \"preset\" = the LED speeds "
+					"preset on Main."), false);
+			auto* speedNote = Help(QString());
+			speedNote->setProperty("help", true);
+			speedValues.Add(speedNote);
+			auto* speedCustom = new QCheckBox(QStringLiteral("Custom (change these by hand)"));
+			speedCustom->setObjectName(ObjectName(QStringLiteral("drive.card.speed_values.custom")));
+			speedValues.Add(speedCustom);
+			auto* speedRows = new QWidget;
+			auto* speedForm = new QFormLayout(speedRows);
+			speedForm->setContentsMargins(0, 0, 0, 0);
+			speedValues.Add(speedRows);
+			static const char* kSpeedKeys[] = { "rate_gain_up", "rate_gain_down", "recovery_rate_gain" };
+			QList<QDoubleSpinBox*> speedSpins;
+			for (const char* key : kSpeedKeys)
+				for (QWidget* f : PrefixedRowFields(root, prefix, Q(key))) MoveRow(f, speedForm, false);
+			for (const char* key : { "rate_gain_up", "rate_min_up", "rate_max_up", "rate_gain_down", "rate_min_down", "rate_max_down",
+				"recovery_rate_gain", "recovery_rate_min", "recovery_rate_max" })
+				if (auto* spin = root->findChild<QDoubleSpinBox*>(prefix + Q(key))) speedSpins << spin;
+			advancedLayout->addWidget(speedValues.frame);
+
+			place(QStringLiteral("Contrast and cuts"), advancedLayout);
+
+			// Advanced LED: its card keeps the two masters; each group becomes a card of its own.
 			auto* values = new QComboBox;
 			values->setObjectName(ObjectName(QStringLiteral("drive.advanced_values")));
 			values->addItem(QStringLiteral("Your script's values (default)"), QStringLiteral("default"));
 			values->addItem(QStringLiteral("Custom (change them below)"), QStringLiteral("custom"));
-			values->setToolTip(QStringLiteral("The master of every setting in this card. Your script's values: each field shows the "
-				"built-in value (your dimming script's) and is greyed. Custom: edit them; choosing your script's values again "
-				"removes every change (each field's Reset)."));
+			values->setToolTip(QStringLiteral("The master of the advanced LED groups below. Your script's values: each field shows "
+				"the built-in value (your dimming script's) and is greyed. Custom: edit them; choosing your script's values "
+				"again removes every change (each field's Reset)."));
 			auto* fixes = new QComboBox;
 			fixes->setObjectName(ObjectName(QStringLiteral("drive.led_fixes")));
 			fixes->addItem(QStringLiteral("All on (default)"), QStringLiteral("default"));
 			fixes->addItem(QStringLiteral("Custom (switch them one by one)"), QStringLiteral("custom"));
 			fixes->setToolTip(QStringLiteral("The master of the nine LED fixes under test (Dynamic Drive, Contrast and cuts, "
 				"Experimental cards; proposed for retirement, which keeps them on). All on: greyed on. Custom: switch them one by one."));
-			form->insertRow(1, QStringLiteral("Advanced LED values"), values);
-			form->insertRow(2, QStringLiteral("LED fixes under test"), fixes);
+			advancedForm->insertRow(1, QStringLiteral("Advanced LED values"), values);
+			advancedForm->insertRow(2, QStringLiteral("LED fixes under test"), fixes);
+			toggle->setChecked(true);    // the card is on Advanced already: no second "show advanced" step
+			toggle->setVisible(false);
+			QWidget* advancedLedCard = CardTitled(cards, QStringLiteral("Advanced LED"));
+			place(QStringLiteral("Advanced LED"), advancedLayout);
 
-			struct Group { QPointer<QWidget> box; QPointer<QLabel> note; const char* mode; QStringList keys; };
+			struct Group { QPointer<QWidget> card; QPointer<QWidget> rows; QPointer<QLabel> note; const char* mode; QStringList keys; };
 			auto groups = std::make_shared<std::vector<Group>>();
 			for (const LedGroup& g : LedAdvancedGroups())
 			{
-				auto* box = new QWidget;
-				box->setObjectName(ObjectName(QStringLiteral("drive.group.") + Q(g.id)));
-				box->setProperty("vpvCardTitle", Q(g.title));
-				auto* boxLayout = new QVBoxLayout(box);
-				boxLayout->setContentsMargins(0, 6, 0, 0);
-				auto* title = new QLabel(Q(g.title));
-				title->setStyleSheet(QStringLiteral("font-weight: 650;"));
-				boxLayout->addWidget(title);
+				CardBox card = MakeCard(ObjectName(QStringLiteral("drive.group.") + Q(g.id)), Q(g.title), QString(), false);
 				auto* note = Help(QString());
 				note->setProperty("help", true);
-				boxLayout->addWidget(note);
-				auto* inner = new QWidget;
-				auto* innerForm = new QFormLayout(inner);
-				innerForm->setContentsMargins(0, 0, 0, 0);
-				innerForm->setRowWrapPolicy(QFormLayout::WrapLongRows);
-				boxLayout->addWidget(inner);
-				Group group{ inner, note, g.mode, {} };
+				card.Add(note);
+				auto* rows = new QWidget;
+				auto* rowsForm = new QFormLayout(rows);
+				rowsForm->setContentsMargins(0, 0, 0, 0);
+				card.Add(rows);
+				Group group{ card.frame, rows, note, g.mode, {} };
 				for (const char* key : g.keys)
 				{
 					group.keys << Q(key);
-					for (QWidget* f : PrefixedRowFields(advanced, prefix, Q(key))) MoveRow(f, innerForm, false);
+					for (QWidget* f : PrefixedRowFields(advanced, prefix, Q(key))) MoveRow(f, rowsForm, false);
 				}
-				form->addRow(box);
+				advancedLayout->addWidget(card.frame);
 				groups->push_back(group);
 			}
-			const QString fixPrefix = prefix;
-			auto apply = [groups, values, fixes, source, root, fixPrefix, prefix]()
+			for (const char* title : { "Projector response", "Advanced projector", "Experimental" })
+				place(Q(title), advancedLayout);
+			for (QWidget* card : cards) advancedLayout->addWidget(card);   // anything else, last (nothing is lost)
+			// Every card is out of the old grid now (a layout reparents its widgets and keeps a card the
+			// page hid hidden); delete the grid so it can never take them back on a resize.
+			delete grid;
+			mainLayout->addStretch();
+			advancedLayout->addStretch();
+
+			QWidget* speedsCard = nullptr;
+			if (QWidget* any = mainPage->findChild<QComboBox*>(prefix + QStringLiteral("rate_preset")))
+				for (QWidget* p = any; p && !speedsCard; p = p->parentWidget())
+					if (p->property("card").toBool()) speedsCard = p;
+			auto apply = [groups, values, fixes, source, enabled, root, prefix, advancedLedCard, speedsCard, speedValues, speedRows,
+				speedNote, speedCustom, speedSpins]()
 			{
+				const bool driveOn = !enabled || enabled->isChecked();
 				const bool custom = values->currentData().toString() == QStringLiteral("custom");
 				const QString chosen = source ? source->currentData().toString() : QString();
+				// The group cards follow the Advanced LED card (shown for VP's own sources, greyed with the drive off).
+				const bool groupsShown = !advancedLedCard || !advancedLedCard->isHidden();
 				for (Group& g : *groups)
 				{
-					if (!g.box) continue;
+					if (!g.card) continue;
+					g.card->setVisible(groupsShown);
+					g.card->setEnabled(driveOn);
 					const bool modeOk = !g.mode || chosen == Q(g.mode);
-					g.box->setEnabled(custom && modeOk);
+					g.rows->setEnabled(custom && modeOk);
 					g.note->setText(!modeOk ? QStringLiteral("Used only in %1 mode.").arg(std::string(g.mode) == "compensate" ?
 						QStringLiteral("Compensate") : QStringLiteral("Script")) :
 						!custom ? QStringLiteral("Set by Advanced LED values: your script's values. Choose Custom to change.") : QString());
@@ -1335,7 +1447,7 @@ namespace Vpv
 				}
 				const bool fixesCustom = fixes->currentData().toString() == QStringLiteral("custom");
 				for (const char* key : LedFixKeys())
-					if (auto* box = root->findChild<QCheckBox*>(fixPrefix + Q(key)))
+					if (auto* box = root->findChild<QCheckBox*>(prefix + Q(key)))
 					{
 						box->setEnabled(fixesCustom);
 						if (!box->property("vpvFixTip").isValid()) box->setProperty("vpvFixTip", box->toolTip());
@@ -1343,8 +1455,15 @@ namespace Vpv
 							QStringLiteral("Set by LED fixes under test: all on (Advanced LED card). Choose Custom there to switch "
 								"it.\n\n") + box->property("vpvFixTip").toString());
 					}
+				// LED speeds values follow their card on Main (Compensate only) and the preset until Custom.
+				speedValues.frame->setVisible(!speedsCard || !speedsCard->isHidden());
+				speedValues.frame->setEnabled(driveOn);
+				speedRows->setEnabled(speedCustom->isChecked());
+				speedNote->setText(speedCustom->isChecked() ? QString() :
+					QStringLiteral("Set by the LED speeds preset (Main). Tick Custom to change these by hand."));
+				speedNote->setVisible(!speedNote->text().isEmpty());
 			};
-			// Custom follows the saved values: any field set (its Reset is enabled) / any fix off.
+			// Custom follows the saved values: any field set (its Reset is enabled) / any fix off / any speed not "preset".
 			bool anySet = false;
 			for (const Group& g : *groups)
 				for (const QString& key : g.keys)
@@ -1353,8 +1472,11 @@ namespace Vpv
 			bool anyFixOff = false;
 			for (const char* key : LedFixKeys())
 				if (auto* box = root->findChild<QCheckBox*>(prefix + Q(key))) anyFixOff = anyFixOff || !box->isChecked();
+			bool anySpeed = false;
+			for (QDoubleSpinBox* spin : speedSpins) anySpeed = anySpeed || spin->value() > spin->minimum();
 			values->setCurrentIndex(anySet ? 1 : 0);
 			fixes->setCurrentIndex(anyFixOff ? 1 : 0);
+			speedCustom->setChecked(anySpeed);
 			apply();
 			QObject::connect(values, qOverload<int>(&QComboBox::currentIndexChanged), values, [groups, values, root, prefix, apply](int)
 			{
@@ -1362,7 +1484,7 @@ namespace Vpv
 					for (const Group& g : *groups)
 						for (const QString& key : g.keys)
 							if (auto* reset = root->findChild<QToolButton*>(prefix + key + QStringLiteral(".reset")))
-								if (reset->isEnabled()) { reset->setEnabled(true); reset->click(); }
+								if (reset->isEnabled()) reset->click();
 				apply();
 			});
 			QObject::connect(fixes, qOverload<int>(&QComboBox::currentIndexChanged), fixes, [fixes, root, prefix, apply](int)
@@ -1377,8 +1499,17 @@ namespace Vpv
 							}
 				apply();
 			});
+			QObject::connect(speedCustom, &QCheckBox::toggled, speedCustom, [speedSpins, apply](bool on)
+			{
+				if (!on)
+					for (QDoubleSpinBox* spin : speedSpins) spin->setValue(spin->minimum());   // "preset": the page removes the key
+				apply();
+			});
 			if (source)
 				QObject::connect(source, qOverload<int>(&QComboBox::currentIndexChanged), values, [apply](int) { apply(); });
+			if (enabled)
+				QObject::connect(enabled, &QCheckBox::toggled, values, [apply](bool) { apply(); });
+			return pages;
 		}
 
 		// The VP-V page fits the default window (no sideways scroll): drop-downs size to a short text
@@ -1538,6 +1669,13 @@ namespace Vpv
 		content->setObjectName(ObjectName(QStringLiteral("content")));
 		auto* contentLayout = new QVBoxLayout(content);
 		contentLayout->setContentsMargins(0, 0, 0, 0);
+		auto* originalNote = Help(QStringLiteral("<b>Original pathway:</b> every VP-V addition is off, so this page is "
+			"disabled. Bill's own settings are on his pages (VP Renderer, DirectShow, General); switch back to the VP-V "
+			"pathway to change VP's."));
+		originalNote->setTextFormat(Qt::RichText);
+		originalNote->setObjectName(ObjectName(QStringLiteral("original_note")));
+		originalNote->setVisible(false);
+		layout->addWidget(originalNote);
 		layout->addWidget(content);
 
 		// The renderer profile. It follows the Rendering page's profile list, whose selected profile
@@ -1665,7 +1803,7 @@ namespace Vpv
 		tabs->addTab(MakeExpertPage(state), QStringLiteral("Pipeline (expert)"));
 		tabs->addTab(MakeRetirementPage(state), QStringLiteral("Proposed retirement"));
 		OrganiseRendering(host);
-		OrganiseDynamicDrive(host);
+		QWidget* drivePage = OrganiseDynamicDrive(host);
 		NoteInputPolicy(host);
 		// One control per unit (organisation pass 2): the tier decides whether the unit's taste
 		// slider applies. At the Classic Motion tier there is no de-judder, so the amount is greyed;
@@ -1700,6 +1838,7 @@ namespace Vpv
 			}
 		});
 		FitWidth(root);
+		if (drivePage) FitWidth(drivePage);   // the Dynamic Drive page fits the default window too
 		root->setProperty("vpvMissing", state->missing.join(QStringLiteral("; ")));
 
 		QObject::connect(profile, qOverload<int>(&QComboBox::currentIndexChanged), profile, [state, profile](int index)
@@ -1740,10 +1879,13 @@ namespace Vpv
 		auto applyPathway = [state](bool vpvOn)
 		{
 			state->vpvOn = vpvOn;
-			// VP-V's own controls follow the pathway; the upstream rows and sections moved onto this
-			// page stay usable (in the Original pathway they behave exactly as on the Rendering page).
+			// The Original pathway switches every VP addition off in the renderer, so the whole VP-V page
+			// (its tiers, switches and the VP rows it hosts) is disabled; Bill's own settings are on his
+			// pages and none of them is on this page (organisation pass 2).
 			for (const QPointer<QWidget>& w : state->own)
 				if (w) w->setEnabled(vpvOn);
+			if (QWidget* content = state->root->findChild<QWidget*>(ObjectName(QStringLiteral("content")))) content->setEnabled(vpvOn);
+			if (QWidget* note = state->root->findChild<QWidget*>(ObjectName(QStringLiteral("original_note")))) note->setVisible(!vpvOn);
 			ApplyManagedState(state->host, vpvOn);
 			ApplyManagedIn(state->host, state->root, vpvOn);   // the managed rows moved onto this page
 			ApplyManagedRows(state, vpvOn);
