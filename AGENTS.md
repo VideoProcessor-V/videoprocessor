@@ -2,23 +2,25 @@
 
 ## Source and GitHub
 
-- There is no authoritative local source checkout. Preserve existing checkouts
-  and worktrees; do not use their branch or HEAD as the integration baseline.
-- At the start of source work, query `billslack2/videoprocessor` on GitHub,
-  discover and fetch the latest beta integration branch, and start at its current
-  remote tip in a clean worktree under `E:\codex\videoprocessor`. Use
-  `E:\codex\story-tracker` for tracker worktrees. Do not create new worktrees
-  on C: or inside an existing checkout. Use a different base only when requested.
-- `billslack2/videoprocessor` is the only GitHub repository of record. This is
-  a permanent independent fork; never create, retarget, or merge pull requests
-  against `enchywastaken/videoprocessor`.
-- Before branching, creating a PR, or merging, discover the current GitHub
-  default branch with:
-  `gh repo view billslack2/videoprocessor --json defaultBranchRef --jq .defaultBranchRef.name`
-  Verify it against the discovered current beta; do not substitute `main` or a
-  stale local branch for the beta integration baseline.
+- The GitHub repository of record for this fork is
+  `VideoProcessor-V/videoprocessor` (public), git remote `fork`. The default
+  branch is whatever `git remote show fork` reports as HEAD; verify it before
+  branching rather than assuming a name.
+- GitHub Actions are DISABLED on the fork and must never be re-enabled. All
+  builds and tests run locally; no cloud CI or cloud compute.
+- Push batched, meaningful branches only (per session or milestone). Do not
+  push agent scratch or sub-branches, run automated API polling, or create
+  bursts of pushes or parallel GitHub activity.
+- `billslack2/videoprocessor` (remote `origin`) is the upstream and is
+  read-only: fetch from it, never push, open PRs or issues against it.
+- GitLab (remote `gitlab`, private) is a quiet backup, pushed occasionally or
+  at milestones.
+- Create worktrees under `D:\codexideoprocessor\<name>` (tracker worktrees
+  under `D:\codex\story-tracker`). Do not create new worktrees on C: or inside
+  an existing checkout. Preserve existing checkouts and worktrees; do not use
+  their branch or HEAD as the baseline unless asked.
 - Verify the active checkout, branch, remote, and worktree status before Git
-  writes. Feature branches start from the current remote beta tip.
+  writes. Commits use the GitHub noreply address (repo-level git config).
 
 ## Stories
 
@@ -29,15 +31,16 @@
 
 ## Local x64 Release builds
 
-- The official MWCapture SDK headers are installed at
-  `E:\codex\tools\MagewellCaptureSDK-3.3.1.1596\SDKv3`. For builds from
-  isolated worktrees, pass `/p:MagewellSdkRoot=E:\codex\tools\MagewellCaptureSDK-3.3.1.1596\SDKv3`
+- On this laptop the official MWCapture SDK headers are installed at (the path
+  contains spaces, so quote the MSBuild property)
+  `C:\Program Files\MWCaptureSDK 3.3.1.1596\SDKv3`. For builds from
+  isolated worktrees, pass `"/p:MagewellSdkRoot=C:\Program Files\MWCaptureSDK 3.3.1.1596\SDKv3"`
   to MSBuild; the worktree-relative `3rdparty\magewell\SDKv3` path is not
-  populated on this workstation. Confirm
+  populated on this laptop. Confirm
   `Include\LibMWCapture\MWCapture.h` exists there before treating a build
   failure as a missing SDK. Keep the SDK outside source worktrees.
 - Standard compile command from a Visual Studio Developer PowerShell:
-  `MSBuild.exe VideoProcessor.sln /t:Build /m /p:Configuration=Release /p:Platform=x64 /p:MagewellSdkRoot=E:\codex\tools\MagewellCaptureSDK-3.3.1.1596\SDKv3 /v:minimal`.
+  `MSBuild.exe VideoProcessor.sln /t:Build /m /p:Configuration=Release /p:Platform=x64 "/p:MagewellSdkRoot=C:\Program Files\MWCaptureSDK 3.3.1.1596\SDKv3" /v:minimal`.
 
 ## Testing and diagnostics
 
