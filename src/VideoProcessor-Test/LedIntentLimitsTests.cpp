@@ -321,5 +321,118 @@ namespace VideoProcessorTest
                     (L"LPW1 " + std::to_wstring(levels[i])).c_str());
             Assert::AreEqual(255, levels.back(), L"exit restores full light");
         }
+
+        // Module findings 2026-10-24 item 1: no picture compensation -> compensate holds the LED at
+        // led_ceiling (slots.json "Failure -> drive held at full"), visibly, and lets go when it returns.
+        TEST_METHOD(CompensationUnavailableHoldsFullDriveAndShowsTheFallback)
+        {
+            auto projector = std::make_shared<FakeProjector>();
+            projector->contrast = 50;
+            LedDriveConfig config = CompensateDefaults();
+            config.cntrAssist = false;
+            config.rateGainUp = config.rateGainDown = 0.0;
+            config.maxCutDip = 0.0;
+            config.shapedRecovery = false;
+            config.blackPreliftMax = 255;
+            ProjectorConfig port;
+            port.protocol = "barco_ascii";
+            port.ackTimeoutMs = 60;
+            port.minCommandGapMs = 0;
+            port.readBack = true;
+            port.ledLatencyMs = 80;
+            port.ledSettleMs = 0;
+            LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); });
+            Assert::IsTrue(module.CompensationAvailable(), L"available by default");
+            Assert::IsTrue(module.FallbackEntries().empty());
+            module.SetCompensationAvailable(false, LedDriveModule::CompensationUnavailableReason(true, false, false));
+            Assert::IsTrue(module.HoldingFullForCompensation());
+            Assert::AreEqual(config.ledCeiling, module.IntentFloorLevel(), L"the hold is a floor at led_ceiling");
+            const auto entries = module.FallbackEntries();
+            Assert::AreEqual(size_t(1), entries.size());
+            Assert::AreEqual(std::string(LedDriveModule::kHoldFallbackId), entries[0].id);
+            Assert::IsTrue(entries[0].reason.find("shader did not load") != std::string::npos);
+            module.Start();
+            Assert::IsTrue(WaitUntilTrue([&] { return module.DrivingProjector() && projector->light == 255; }),
+                L"compensate started");
+            double time = 0.0;
+            for (int frame = 0; frame < 240; ++frame)   // dark frames: compensate would dim to the floor
+            {
+                module.SubmitMeasurement(IntentFrame(16.0));
+                time += 1000.0 / 60.0;
+                module.BeginFrameAt(0, time);
+                WaitUntilTrue([&] { return !module.ProjectorStatus().busy; }, 500);
+            }
+            for (int level : LightWrites(*projector))
+                Assert::AreEqual(255, level, L"never dimmed while the compensation is unavailable");
+            module.SetCompensationAvailable(true);
+            Assert::IsFalse(module.HoldingFullForCompensation());
+            Assert::IsTrue(module.FallbackEntries().empty(), L"released when available again");
+            Assert::AreEqual(0, module.IntentFloorLevel());
+            for (int frame = 0; frame < 240; ++frame)
+            {
+                module.SubmitMeasurement(IntentFrame(16.0));
+                time += 1000.0 / 60.0;
+                module.BeginFrameAt(0, time);
+                WaitUntilTrue([&] { return !module.ProjectorStatus().busy; }, 500);
+            }
+            Assert::IsTrue(WaitUntilTrue([&] { return projector->light < 255; }), L"dims again once compensated");
+            module.Stop();
+        }
+
+        TEST_METHOD(CompensationLostWhileDimmedJumpsToFullDrive)
+        {
+            auto projector = std::make_shared<FakeProjector>();
+            projector->contrast = 50;
+            LedDriveConfig config = CompensateDefaults();
+            config.cntrAssist = false;
+            config.rateGainUp = config.rateGainDown = 0.0;
+            config.maxCutDip = 0.0;
+            config.shapedRecovery = false;
+            config.blackPreliftMax = 255;
+            ProjectorConfig port;
+            port.protocol = "barco_ascii";
+            port.ackTimeoutMs = 60;
+            port.minCommandGapMs = 0;
+            port.readBack = true;
+            port.ledLatencyMs = 80;
+            port.ledSettleMs = 0;
+            LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); });
+            module.Start();
+            Assert::IsTrue(WaitUntilTrue([&] { return module.DrivingProjector() && projector->light == 255; }));
+            double time = 0.0;
+            for (int frame = 0; frame < 240; ++frame)
+            {
+                module.SubmitMeasurement(IntentFrame(16.0));
+                time += 1000.0 / 60.0;
+                module.BeginFrameAt(0, time);
+                WaitUntilTrue([&] { return !module.ProjectorStatus().busy; }, 500);
+            }
+            Assert::IsTrue(WaitUntilTrue([&] { return projector->light < 200; }), L"dimmed first");
+            module.SetCompensationAvailable(false, LedDriveModule::CompensationUnavailableReason(false, true, true));
+            Assert::IsTrue(WaitUntilTrue([&] { return projector->light == 255; }), L"straight back to full drive");
+            module.SubmitMeasurement(IntentFrame(16.0));
+            module.BeginFrameAt(0, time + 1000.0 / 60.0);
+            WaitUntilTrue([&] { return !module.ProjectorStatus().busy; }, 500);
+            Assert::AreEqual(255, projector->light, L"and held there");
+            module.Stop();
+        }
+
+        TEST_METHOD(CompensationHoldIsCompensateOnlyWithReasons)
+        {
+            Assert::AreEqual(std::string(), LedDriveModule::CompensationUnavailableReason(true, true, true));
+            Assert::IsTrue(LedDriveModule::CompensationUnavailableReason(false, true, true).find("slot") != std::string::npos);
+            Assert::IsTrue(LedDriveModule::CompensationUnavailableReason(true, true, false).find("disabled") != std::string::npos);
+            LedDriveConfig script = CompensateDefaults();
+            script.mode = Mode::Script;
+            ProjectorConfig none;
+            none.protocol = "none";
+            LedDriveModule module(none, script);
+            module.SetCompensationAvailable(false, "test");
+            Assert::IsFalse(module.HoldingFullForCompensation(), L"script dimming pairs with CNTR: not held");
+            Assert::IsTrue(module.FallbackEntries().empty());
+            LedDriveConfig compensate = CompensateDefaults();
+            Assert::IsTrue(module.Reconfigure(none, compensate), L"a mode change reconfigures in place");
+            Assert::IsTrue(module.HoldingFullForCompensation(), L"switching to compensate applies the hold");
+        }
     };
 }

@@ -162,7 +162,76 @@ namespace LedDrive
 		// The lowest whole level with at least that share of the ceiling's flux;
 		// never above led_ceiling (the peak drive is never raised).
 		intentFloorLevel = intentFloorShare > 0.0 ? flux.LevelFor(intentFloorShare, 0, led.ledCeiling) : 0;
+		// No picture compensation: compensate holds full drive (SetCompensationAvailable).
+		holdingFull = !compensationAvailable && led.mode == Mode::Compensate;
+		if (holdingFull)
+		{
+			intentFloorShare = 1.0;
+			intentFloorLevel = led.ledCeiling;
+		}
 		compensator.SetIntentFloor(intentFloorLevel);
+		UpdateHoldFallbackLocked();
+	}
+
+	void LedDriveModule::UpdateHoldFallbackLocked()
+	{
+		if (holdingFull)
+		{
+			if (fallbacks.Engage(kHoldFallbackId, "held at full: picture compensation unavailable (" +
+				(compensationUnavailableReason.empty() ? std::string("unknown") : compensationUnavailableReason) + ")"))
+				DebugLog::Log("Dynamic Drive: LED held at full drive; picture compensation unavailable (%s)",
+					compensationUnavailableReason.c_str());
+		}
+		else if (fallbacks.Release(kHoldFallbackId))
+			DebugLog::Log("Dynamic Drive: picture compensation available again; the LED hold at full drive ends");
+	}
+
+	void LedDriveModule::SetCompensationAvailable(bool available, const std::string& reason)
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		const std::string why = available ? std::string() : reason;
+		if (available == compensationAvailable && why == compensationUnavailableReason)
+			return;
+		const bool wasHolding = holdingFull;
+		compensationAvailable = available;
+		compensationUnavailableReason = why;
+		ApplyIntentLimitsLocked();
+		// The hold starts at once: straight to full drive (a jump), not up the ramp, so the
+		// uncompensated picture is dark for no longer than the LED's latency.
+		if (holdingFull && !wasHolding && started && driver && applyGain)
+		{
+			compensator.Reset(led.ledCeiling);
+			driver->SetLightJump(led.ledCeiling);
+			queuedLight = led.ledCeiling;
+		}
+	}
+
+	bool LedDriveModule::CompensationAvailable() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return compensationAvailable;
+	}
+
+	bool LedDriveModule::HoldingFullForCompensation() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return holdingFull;
+	}
+
+	std::string LedDriveModule::CompensationUnavailableReason(bool slotOn, bool shaderLoaded, bool shaderEnabled)
+	{
+		if (!slotOn)
+			return "slot drive.led_compensation is off";
+		if (!shaderLoaded)
+			return "the LED compensation shader did not load";
+		if (!shaderEnabled)
+			return "the LED compensation shader is disabled";
+		return std::string();
+	}
+
+	std::vector<FallbackStatus::Entry> LedDriveModule::FallbackEntries() const
+	{
+		return fallbacks.Entries();
 	}
 
 	void LedDriveModule::SetIntentLimits(double shadowMinimumShare, double ambientBlackNits)
@@ -1231,6 +1300,8 @@ namespace LedDrive
 		if (!opened->Open(error))
 		{
 			DebugLog::Log("Dynamic Drive: %s; continuing as a dry run", error.c_str());
+			// Visible, not log-only (ADR-0001): the LED is not driven and the picture not compensated.
+			fallbacks.Engage(kDryRunFallbackId, "not connected: " + error + "; LED drive off (dry run)");
 			opened = CreateProjectorDriver("none", startProjector, portFactory, clock);
 			opened->Open(error);
 			driving = false;

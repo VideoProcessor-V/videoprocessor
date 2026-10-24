@@ -8,13 +8,16 @@
 #include <VP-V/modules/drive/led_measure/LedLookahead.h>
 #include <VP-V/modules/drive/led_measure/LedMeasurement.h>
 #include <VP-V/modules/drive/projector_control/ProjectorDriver.h>
+#include <VP-V/core/FallbackStatus.h>
 
 #include <condition_variable>
 #include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 
 // The LED drive module at runtime: owns the projector driver and the
 // controllers. The renderer touches it at three points (plus the
@@ -195,9 +198,38 @@ namespace LedDrive
 		// less than one 1/6-stop step (ambient adaptation's own step) against
 		// the best possible black V. 0 when there is no floor.
 		static double IntentFloorShare(double shadowMinimumShare, double ambientBlackNits, double displayBlackNits);
-		// The floor as an LPW1 level (flux_table; 0 = none) and as a share.
+		// The floor as an LPW1 level (flux_table; 0 = none) and as a share. The level
+		// includes the hold at full drive below (led_ceiling while it holds).
 		int IntentFloorLevel() const;
 		double IntentFloorShareNow() const;
+
+		// Picture compensation availability (slots.json drive.led_compensation: "Failure ->
+		// drive held at full"; module findings 2026-10-24, item 1). mode: compensate dims the
+		// LED only because the compensation hook brightens the picture by the same amount.
+		// When that hook cannot run (the LED compensation shader failed to load or libplacebo
+		// disabled it, or the drive.led_compensation slot is switched off in
+		// pipeline_slots_off) the renderer reports it here, and compensate holds the LED at
+		// led_ceiling (full drive) until it is available again: the projector never dims a
+		// picture that nothing brightens. The hold is the intent floor at led_ceiling, so it
+		// reaches every controller target, the cut jumps and the custom-dim fade (which does
+		// not engage under a floor). mode: script is not held: its dimming is paired with
+		// the projector's own CNTR, and only its script_smoothing gain is lost. Engages the
+		// "LED drive" fallback entry while it holds. Any thread; available by default, so a
+		// renderer that never calls it behaves exactly as before.
+		void SetCompensationAvailable(bool available, const std::string& reason = std::string());
+		bool CompensationAvailable() const;
+		// True while compensate is holding the LED at full drive for that reason.
+		bool HoldingFullForCompensation() const;
+		// The reason for SetCompensationAvailable(false, ...) from the renderer's facts; empty
+		// when the compensation can run.
+		static std::string CompensationUnavailableReason(bool slotOn, bool shaderLoaded, bool shaderEnabled);
+		// The module's "Fallbacks engaged" entries (FallbackStatus): "LED drive" while the
+		// hold above is in force, "projector" while the port could not be opened and the
+		// module runs as a dry run (the LED is not driven, the picture is not compensated).
+		// The renderer adds them to the heading it publishes (GetFallbacksStatus).
+		std::vector<FallbackStatus::Entry> FallbackEntries() const;
+		static constexpr const char* kHoldFallbackId = "LED drive";
+		static constexpr const char* kDryRunFallbackId = "projector";
 
 	private:
 		std::atomic<double> displayGamma{ 2.2 };
@@ -389,5 +421,12 @@ namespace LedDrive
 		double intentDisplayBlackNits = 0.0;
 		double intentFloorShare = 0.0;
 		int intentFloorLevel = 0;
+
+		// SetCompensationAvailable: the hold at full drive and the module's fallback entries.
+		bool compensationAvailable = true;
+		std::string compensationUnavailableReason;
+		bool holdingFull = false;
+		FallbackStatus::Registry fallbacks;
+		void UpdateHoldFallbackLocked();
 	};
 }
