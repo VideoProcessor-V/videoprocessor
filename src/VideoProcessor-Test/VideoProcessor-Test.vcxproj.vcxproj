@@ -359,6 +359,7 @@
     <ClCompile Include="MixedScreenSourceResolutionTests.cpp" />
     <ClCompile Include="SourceResolutionLatchTests.cpp" />
     <ClCompile Include="ExtendedRangeCarryTests.cpp" />
+    <ClCompile Include="EfficiencyPolicyTests.cpp" />
     <ClCompile Include="CalibrationCoreTests.cpp" />
     <ClCompile Include="CalibrationRemainderTests.cpp" />
     <ClCompile Include="CalibrationMeterTests.cpp" />
