@@ -361,6 +361,9 @@
     <ClCompile Include="ExtendedRangeCarryTests.cpp" />
     <ClCompile Include="ChangeKeyTests.cpp" />
     <ClCompile Include="EfficiencyPolicyTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\PassTimersTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="CalibrationCoreTests.cpp" />
     <ClCompile Include="CalibrationRemainderTests.cpp" />
     <ClCompile Include="CalibrationMeterTests.cpp" />

@@ -249,13 +249,23 @@ EarlyUpload::SlotHandle EarlyUpload::Upload(const void* data, size_t rowBytes, i
 	// The copy and the signal on this thread's own device (no lock needed:
 	// the slot is ours until returned).
 	Entry& e = entries[static_cast<size_t>(index)];
+	// Efficiency timers T4 (audit 2026-10-24): the conversion thread's CPU copy, QPC (no GPU wait).
+	LARGE_INTEGER copyStart{}, copyEnd{}, qpcFrequency{};
+	QueryPerformanceCounter(&copyStart);
 	uploadContext->UpdateSubresource(e.uploadTex, 0, nullptr, data, static_cast<UINT>(rowBytes), 0);
 	const uint64_t value = ++nextUploadValue;
 	uploadContext->Signal(uploadedFence, value);
 	uploadContext->Flush();
+	QueryPerformanceCounter(&copyEnd);
+	QueryPerformanceFrequency(&qpcFrequency);
+	const double copyMs = qpcFrequency.QuadPart > 0 ?
+		static_cast<double>(copyEnd.QuadPart - copyStart.QuadPart) * 1000.0 / static_cast<double>(qpcFrequency.QuadPart) : 0.0;
 	{
 		std::lock_guard<std::mutex> guard(lock);
 		++stats.uploads;
+		stats.copyCpuMsTotal += copyMs;
+		if (copyMs > stats.copyCpuMsMax)
+			stats.copyCpuMsMax = copyMs;
 	}
 	std::shared_ptr<Control> c = control;
 	Slot* raw = new Slot{ this, poolId, index, value };
