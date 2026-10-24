@@ -280,7 +280,7 @@ or neutral, and an explicit **do-not-touch list** for Bill's code:
 0. **Merge Bill's v1.4.02-beta first** (queue item 144), after today's B3 audit fixes, and
    re-verify the baseline. Any extraction before that makes his 54 renderer commits harder to merge.
 1. **M1 deploy (~6-7 Nov)** as planned. No central extraction before M1 except the quick wins in
-   section 7 that are rules or new files (no host edits while feature branches are open).
+   section 8 that are rules or new files (no host edits while feature branches are open).
 2. **M2 freeze window: step 0** (include sweep, forwarders) and the **quick wins that edit the host**
    (b1 status/fallbacks, plugin API generic status). They are small and fit the freeze.
 3. **Pair each M2 module move with its glue extraction**, as a separate commit right after the
@@ -413,7 +413,134 @@ host-written call per stage or a separately registered libplacebo hook.
 Segments add about **22 agent hours** to (d), for **~80 agent hours in total** (about 4-5 working
 days elapsed with gates). Without s5, which waits for D, it is ~77 h.
 
-## 7. Question 5: quick wins (low risk, reduce conflicts now)
+## 7. Option (e): a VP-owned host path
+
+The owner's question: in the VP-V pathway, **our** framework owns the per-frame pipeline (queue ->
+analysis -> VP segments -> libplacebo render -> output -> presentation) and calls Bill's code as
+stages through adapters, bypassing his `RenderLocked`/`RenderLoop` flow. The Original pathway keeps
+running his host unchanged.
+
+Evidence base:
+- Bill's `origin/v1.4.02-beta`: 102 non-merge commits since our 10-14 merge base (83b7ffea).
+- His copy of the host file is 25,252 lines. In it, `RenderLocked` spans 12229-19948 and
+  `RenderLoop` runs from 23788 to the end of the file.
+
+### 7.1 Bill's pieces: separable components vs host-only logic
+
+**Already separate components, callable unmodified as stages** (lines at fd60b650):
+
+| Component | Files (~lines) | Notes |
+|---|---|---|
+| Subtitle detection + look-ahead + temporal fill + measurement worker + cut/paste | `SubtitleBoxDetector.*` (2,616), `SubtitleBoxLookahead.h` (2,263), `SubtitleTemporalFill.h`, `SubtitleMeasurementWorker.h` (344), `SubtitleCutPaste*.h` (752+), `SubtitleBackingLip.h` (new on his beta) | detection is separable; **placement/presentation is not** (below) |
+| Crop / active-picture analysis and policy | `AlphaSourceCropPolicy.*` (6,525), `ActivePictureEvidence.*` (3,389), `ActivePictureDecisionTimeline.*` (971), `BufferedPictureExpansion.*` (772), `RememberedEdgeReturn.*` (783), `SceneDetector.*` | policies are pure; the host owns their state machines and inputs |
+| NLS hook recovery | `NlsHookRecovery.h` (100) | the NLS mapping state is in the host (13168-13415) |
+| Refresh-rate policy | `DisplayRefreshRatePolicy.*` (593) | **the switching itself** (`ScopedDisplayRefreshRate`, DisplayConfig, DWM timing, about 790 lines) lives in the host's anonymous namespace: liftable without logic changes, but it is a move |
+| Capture | `magewell/`, `blackmagic_decklink/`, `video_frame_formatter/` | separate; the conversion loop (258 lines) is in the host |
+| Queue / cadence / presentation policy | `AlphaQueuePolicy.h` (376), `AlphaCadenceCorrectionPolicy.*` (698), `AlphaPresentationTelemetry.*` (382), `PulldownDetector.h` (948), `VideoTimingController.*` (460), `CaptureFrameQueue.h` | policies separate; the queue itself (`EnqueueFrame`, dequeue/wait, queue generations) is host code |
+| Output contract policy | `LibplaceboOutputPolicy.*` (920) | separate |
+
+**Logic only inside his host** (would have to be re-implemented or forked in our path):
+
+- `RenderLoop` (1,646 lines) and the conversion loop: dequeue, waits, stall/backlog recovery,
+  retirement.
+- Swapchain and output: `ConfigureSwapchainOutput` (413), the VP-owned swapchain, encodings, the
+  auto-limited fallback, BT.2020 signalling (about 940 lines in total).
+- Presentation crop/translation (603) and presentation-evidence bookkeeping (about 750).
+- The analysis/crop/subtitle draw function (1,620) and `AnalyzeActivePictureLookahead` (1,117).
+- **Inside `RenderLocked`:** subtitle + crop + caption presentation (about 2,800 lines), frame
+  setup/HDR/DV metadata (about 1,600) and present/telemetry/post-stall (about 800).
+- Settings and display rules: `ApplyDisplayRule`, `ReadRendererSettings`. These could be shared as
+  they are, by calling them.
+
+In total, about **9-11k lines of Bill's orchestration** sit only in his host. That is exactly where
+he is working now.
+
+### 7.2 What we would maintain, and how Bill's changes reach our path
+
+- **We would maintain** a second frame loop, a second swapchain/presentation path (unless shared,
+  see 7.4) and a fork of his subtitle/crop presentation orchestration.
+- **Component files** (the 7.1 table) reach our path automatically on every merge.
+- **His host changes have to be ported by hand.** Since 83b7ffea:
+  - Of his 102 commits, **54 touch the host**. Only 5 of those touch nothing else in `src`
+    (excluding tests). The other 49 pair a component change with **host wiring**.
+  - Of his +5,396 host lines, **+2,775 are inside `RenderLocked`**, +314 in `RenderLoop` and after
+    it, +730 in `Impl` helpers and +1,519 elsewhere (settings and similar). His component changes
+    elsewhere total +13,945.
+  - Most of his host commits came in five days (10-20..10-23: 8, 26, 7 and 11 per day).
+
+  So under (e), **about half of Bill's commits would need a selective port** into our loop. That is
+  several per day in his active periods, against near-automatic merges for component-only commits.
+  At his present pace, the port burden is roughly **4-8 agent hours per week**, each port needing
+  its own timing/presentation verification. Without the ports, his fixes (for example his VP-0205
+  and VP-0207 subtitle/look-ahead work) would never reach the VP-V pathway.
+
+### 7.3 Effort, risks, testing, upstream
+
+- **Effort:** about **150-200 agent hours** to stand up the VP host path. That covers the loop,
+  queue integration, presentation/swapchain (or the shared adapters of 7.4), forking the
+  subtitle/crop orchestration, settings, status/Ctrl+I parity and the harness for two hosts. It
+  includes about 8-12 timing-gate runs (2.5 h each on this laptop, serial). Option (d) with segments
+  is about 80 h. On top, (e) has the ongoing port cost of 7.2.
+- **Risks:**
+  - **Timing/presentation regressions:** the whole loop is new code. The B3 ladder, render-ahead,
+    cadence correction and stall recovery would all need re-proving, and the FL35 render-ahead
+    check repeating.
+  - **Duplicated host logic** that drifts.
+  - **Bill's fixes not flowing** unless ported.
+  - **Two Ctrl+I/status implementations.**
+  - An Original pathway that no longer exercises the code users actually run in VP-V.
+- **Testing:**
+  - Two hosts share the infrastructure (capture, settings, libplacebo, components).
+  - The Original pathway, Bill's loop, is the reference: VP-V with every VP slot off must match it
+    (byte identity vs r6 plus matching timing gate results).
+  - That reference is strong, but it doubles the harness matrix (every timing gate per host).
+- **Upstream-PR goal:**
+  - (e) makes our path effectively un-upstreamable: a parallel host is not a PR Bill can take.
+  - (d) leaves his host in charge and adds **registered hook points / segment adapters**. Those
+    hooks are small, generic and a realistic upstream PR. Once accepted, they cut our divergence
+    further.
+
+### 7.4 Hybrid (e'): share his infrastructure, replace only the middle
+
+Share capture, the queue, swapchain/presentation and refresh switching; replace only the middle of
+the frame pipeline (the `RenderLocked` draw) with ours.
+
+- **What it saves:** the riskiest timing code (the loop, presentation, swapchain) stays his and
+  keeps merging.
+- **The catch:** the middle **is** where his subtitle/crop presentation lives (about 2,800 lines
+  interleaved in `RenderLocked`, plus the 1,620-line draw function). These are `Impl` members, not
+  callable stages. So (e') either:
+  - **forks them**, which brings back most of the port burden in 7.2; or
+  - **refactors his file into callable stages**, which is the upstream-divergence cost of option (c)
+    unless Bill takes that refactor himself.
+- **Effort:** about 90-120 agent hours, plus porting his subtitle/crop presentation changes (most of
+  his current work).
+- **When it becomes good:** if Bill accepts an upstream PR that factors `RenderLocked`'s
+  subtitle/crop presentation into stage calls, both hosts can call the same stages. (e') then costs
+  little more than (d).
+
+### 7.5 Recommendation: (d) vs (e) vs (e')
+
+**Stay with (d) plus segments (section 6).** Treat (e') as a later option and (e) as not
+recommended while the fork merges Bill.
+
+- (d) gets most of what (e) promises:
+  - VP code is contained in tested segments, with one entry and one exit;
+  - Bill's code is called unmodified;
+  - his changes keep flowing.
+
+  It costs about 80 h against 150-200 h, with no permanent port tax.
+- (d)'s segment runner and adapters are also the groundwork for (e'): the middle would then be
+  "call the segments in a different order", not a rewrite.
+- **Revisit (e') when** any of these happens:
+  1. Bill accepts upstream hook points, or a stage refactor of `RenderLocked`.
+  2. A feature needs control of the loop that hooks cannot give: VPV/12-bit DV output, multi-projector
+     edge blending, or a VP-owned presentation clock.
+  3. The fork stops merging Bill's upstream.
+- **First step toward upstream:** offer Bill the generic hook-registration points as a small PR
+  after M2.
+
+## 8. Question 5: quick wins (low risk, reduce conflicts now)
 
 Ordered by value for risk. The first three need no host edit and can start before M1.
 
@@ -435,12 +562,12 @@ Ordered by value for risk. The first three need no host edit and can start befor
    logs, de-judder hold diagnostics, entrance counters) behind one diagnostics adapter. Bill's
    subtitle capture and local-boundary diagnostics stay.
 
-## 8. Summary
+## 9. Summary
 
-| | (a) leave | (b) VP glue out | (c) full split | (d) hybrid |
-|---|---|---|---|---|
-| Agent hours | 0 (ongoing conflict cost) | ~50 | ~110-140 | **~58; ~80 with segments (section 6)** |
-| Risk | rising | medium (timing clusters high) | high | medium |
-| Host size after | 32.7k and growing | ~23k | ~5k + components | ~23k |
-| Bill merges | as today, worsening | better | ends them | better |
-| Fits the owner's modular goal | no | mostly | yes | **yes, within the fork constraint** |
+| | (a) leave | (b) VP glue out | (c) full split | (d) hybrid | (e) VP host path | (e') shared infra, VP middle |
+|---|---|---|---|---|---|---|
+| Agent hours | 0 (ongoing conflict cost) | ~50 | ~110-140 | **~58; ~80 with segments (section 6)** | ~150-200 + 4-8 h/week porting | ~90-120 + subtitle/crop porting |
+| Risk | rising | medium (timing clusters high) | high | medium | high (new loop, presentation) | medium-high |
+| Host size after | 32.7k and growing | ~23k | ~5k + components | ~23k | Bill's 25k + our second host | Bill's + forked middle |
+| Bill merges | as today, worsening | better | ends them | better | components only; host changes ported by hand | loop merges; middle ported |
+| Fits the owner's modular goal | no | mostly | yes | **yes, within the fork constraint** | yes, at a permanent port cost | yes, if Bill takes a stage refactor upstream |
