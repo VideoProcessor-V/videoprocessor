@@ -168,7 +168,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Planned keys (not yet implemented): `label_detector`.
 - Tiers: not tiered; label-detector net optional.
 - VP-V page, Input tab: not tiered (Always on: capture and timing have no quality steps, only paths (the toggles below).).
-- Plain-language guide: [docs/settings/VP-settings-reference.md#2-input](../../../../docs/settings/VP-settings-reference.md#2-input).
+- Plain-language guide: [docs/settings/VP-settings-reference.md#2-input](../../../../../docs/settings/VP-settings-reference.md#2-input).
 - Fallback entry ("Fallbacks engaged"): `Source analysis: labels unknown (<reason>)`.
 
 ## Tests

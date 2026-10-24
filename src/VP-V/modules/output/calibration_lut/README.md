@@ -184,7 +184,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Planned keys (not yet implemented): `calibration_lut_stage`.
 - Tiers: not tiered.
 - VP-V page, Output tab: tiers Classic / Low; tier keys `temporal_dither`.
-- Plain-language guide: [docs/settings/VP-settings-reference.md#8-output](../../../../docs/settings/VP-settings-reference.md#8-output).
+- Plain-language guide: [docs/settings/VP-settings-reference.md#8-output](../../../../../docs/settings/VP-settings-reference.md#8-output).
 - Fallback entry ("Fallbacks engaged"): `Calibration LUT: libplacebo target LUT (VP stage unavailable)`.
 
 ## Tests

@@ -84,7 +84,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Tiers: not tiered.
 - VP-V page, Input tab: not tiered (Always on: capture and timing have no quality steps, only paths (the toggles below).).
 - Listed under the tier: `dv_tunnel_gpu_unpack`.
-- Plain-language guide: [docs/settings/VP-settings-reference.md#2-input](../../../../docs/settings/VP-settings-reference.md#2-input).
+- Plain-language guide: [docs/settings/VP-settings-reference.md#2-input](../../../../../docs/settings/VP-settings-reference.md#2-input).
 - Fallback entry ("Fallbacks engaged"): `Signal: DV tunnel unpack on the CPU (<reason>)`.
 
 ## Tests

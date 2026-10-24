@@ -157,7 +157,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Keys: `led_compensation`.
 - Tiers: not tiered.
 - VP-V page, Dynamic Drive tab: not tiered (Not a quality/cost choice: Dynamic Drive is set up on its own page (projector, script/compensate).).
-- Plain-language guide: [docs/settings/VP-settings-reference.md#7-dynamic-drive](../../../../docs/settings/VP-settings-reference.md#7-dynamic-drive).
+- Plain-language guide: [docs/settings/VP-settings-reference.md#7-dynamic-drive](../../../../../docs/settings/VP-settings-reference.md#7-dynamic-drive).
 - Fallback entry ("Fallbacks engaged"): `Projector: not connected (LED drive off)`.
 
 ## Tests

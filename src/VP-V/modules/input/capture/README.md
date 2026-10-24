@@ -89,7 +89,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Tiers: not tiered (always on); manual paths in Config.
 - VP-V page, Input tab: not tiered (Always on: capture and timing have no quality steps, only paths (the toggles below).).
 - Listed under the tier: `capture_path`, `capture_upload`, `native_rgb_ingest`.
-- Plain-language guide: [docs/settings/VP-settings-reference.md#2-input](../../../../docs/settings/VP-settings-reference.md#2-input).
+- Plain-language guide: [docs/settings/VP-settings-reference.md#2-input](../../../../../docs/settings/VP-settings-reference.md#2-input).
 - Fallback entry ("Fallbacks engaged"): `Capture: CPU 4:2:0 (GPU unpack failed: <reason>)`.
 
 ## Tests

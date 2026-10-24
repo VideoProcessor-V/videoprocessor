@@ -143,7 +143,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Tiers: Classic off; Low off; Mid/Upper on.
 - VP-V page, Scaling tab: tiers Classic / Low / Mid; tier keys `adaptive_downscale`, `adaptive_w_base`, `source_resolution`.
 - Listed under the tier: `rebase_kernel_match`.
-- Plain-language guide: [docs/settings/VP-settings-reference.md#5-scaling](../../../../docs/settings/VP-settings-reference.md#5-scaling).
+- Plain-language guide: [docs/settings/VP-settings-reference.md#5-scaling](../../../../../docs/settings/VP-settings-reference.md#5-scaling).
 - Fallback entry ("Fallbacks engaged"): `Re-base: off (<reason>)`.
 
 ## Tests
