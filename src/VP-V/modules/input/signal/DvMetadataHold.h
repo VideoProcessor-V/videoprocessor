@@ -19,8 +19,9 @@
 //                  source range, L5/L6/L9/L10/L11 stay (they describe the title, not the
 //                  shot); L1 scene values and the L2/L8 trims are dropped, so tone mapping
 //                  falls back to the static source range and the trims to neutral;
-//   then, at the formatter's own loss limit, the DM is cleared and the picture is black
-//   until fresh DM (unchanged behaviour).
+//   past the formatter's loss limit (~1 s) a picture whose header is still CRC-valid keeps
+//   decoding with the retained matrices and static metadata (owner 2026-10-24); only pictures
+//   without a valid header (not decodable as the tunnel) clear the DM: black until fresh DM.
 // Every rejected picture is counted (RejectedPictures, shown with the DV status); the
 // renderer lists "DV metadata" under "Fallbacks engaged" while Held or Static lasts (the
 // GUI's one-time notice comes with the first engagement).

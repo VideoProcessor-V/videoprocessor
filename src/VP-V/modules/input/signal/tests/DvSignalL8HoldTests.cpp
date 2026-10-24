@@ -15,6 +15,7 @@
 #include <VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h>
 #include <dv_loopback/DvLoopbackHarness.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <string>
@@ -247,13 +248,31 @@ namespace Tests
 			md = feed(goodBytes);
 			Assert::IsTrue(!md.reusedPreviousDm && md.dmHoldPhase == 0 && md.hasSceneMetadata && md.trimCount == 3);
 			Assert::AreEqual<uint32_t>(7, md.dmRejectedPictures, L"the count stays (since the signal started)");
-			// Beyond the loss limit (24 pictures at 23.976): black until fresh DM (unchanged).
+			// Beyond the loss limit (24 pictures at 23.976) with CRC-valid headers (owner 2026-10-24):
+			// the picture still decodes, so it stays on screen with static metadata, flagged + counted.
+			for (int k = 0; k < 40; ++k)
+			{
+				md = feed(badBytes);
+				Assert::IsTrue(analyzer.LastShown() == Shown::Picture, L"decodable tunnel picture kept past the loss limit");
+			}
+			Assert::IsTrue(md.valid && md.reusedPreviousDm && md.dmHoldPhase == 2 && !md.hasSceneMetadata && md.trimCount == 0);
+			Assert::AreEqual<uint32_t>(47, md.dmRejectedPictures);
+			Assert::IsTrue(DvMetadataHold::FallbackReason(md, reason));
+			Assert::AreEqual(std::string("; DV metadata: 47 rejected pictures (static now)"), DvMetadataHold::StatusSuffix(md));
+			md = feed(goodBytes);
+			Assert::IsTrue(analyzer.LastShown() == Shown::Picture && md.hasSceneMetadata && md.trimCount == 3 && md.dmHoldPhase == 0);
+			// Pictures with no valid header (not decodable as the tunnel) past the loss limit: black
+			// until fresh DM (unchanged).
+			std::vector<uint8_t> noHeader = goodBytes;
+			const size_t rowBytes = ((kW + 63) / 64) * 256;
+			std::copy(goodBytes.begin() + 500 * rowBytes, goodBytes.begin() + 503 * rowBytes, noHeader.begin());
 			for (int k = 0; k < 30; ++k)
-				feed(badBytes);
-			Assert::IsTrue(analyzer.LastShown() == Shown::Black, L"black after the loss limit");
+				feed(noHeader);
+			Assert::IsTrue(analyzer.LastShown() == Shown::Black, L"black after the loss limit without a valid header");
+			Assert::IsFalse(analyzer.LastMetadata().valid);
 			md = feed(goodBytes);
 			Assert::IsTrue(analyzer.LastShown() == Shown::Picture && md.hasSceneMetadata && md.trimCount == 3);
-			Assert::AreEqual<uint32_t>(37, md.dmRejectedPictures);
+			Assert::AreEqual<uint32_t>(77, md.dmRejectedPictures);
 		}
 
 		// The hold off with dv_tunnel_fixes off (the old behaviour, kept as the switch's meaning).

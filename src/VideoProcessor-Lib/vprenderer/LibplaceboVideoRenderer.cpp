@@ -3532,6 +3532,7 @@ namespace
 		settings.dvTunnelGpuUnpack = false;                // key=dv_tunnel_gpu_unpack
 		settings.dvTunnelFixes = false;                    // key=dv_tunnel_fixes
 		settings.dvTrims = false;                          // key=dv_trims
+		settings.dvToneMapping = "libplacebo";             // key=dv_tone_mapping
 		settings.queueTimingFixes = false;                 // key=queue_timing_fixes
 		settings.pulldownFixes = false;                    // key=pulldown_fixes
 		settings.timingContinuityFixes = false;            // key=timing_continuity_fixes

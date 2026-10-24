@@ -27,6 +27,7 @@
     },
     "tools": [],
     "config_keys": [
+      "dv_tone_mapping",
       "dv_trims",
       "sdr_tone_shape"
     ],

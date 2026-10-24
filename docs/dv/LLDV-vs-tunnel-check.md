@@ -55,6 +55,40 @@ VP compare its mapping with Dolby's. About 20 minutes plus copying time.
 - Delete the recordings when done (or keep one pair as a regression set). Nothing is
   uploaded or committed.
 
+## Alternative: the DV comparison capture (short labelled clips + VP's metadata)
+
+feat/dv-l8 (2026-10-24). The same two runs, but VP records from inside the renderer. Each clip also
+carries, per picture, the decoded DM (L1/L2/L8/L9/L10), the DM hold state, and the trim level and
+parameters VP chose, so the comparison can say which trims (L8 or L2) were in force. It is off unless
+the variable is set; a Config toggle and hotkey come later (after the skeleton merge).
+
+- Start VP from PowerShell with a folder on a large drive (never a source folder):
+  ```
+  $env:VP_DV_COMPARE_PATH = "E:\vp-dv-compare"
+  $env:VP_DV_COMPARE_SECONDS = "6"            # clip length (default 4 s)
+  $env:VP_DV_COMPARE_NOTE = "LLDV 100 nits"   # stored with the clip
+  cd C:\Videoprocessor\vp ; .\VideoProcessor.exe
+  ```
+  VP keeps the note it started with: restart VP with the other note for run 2, or rename the clip
+  folders afterwards.
+- **To record a clip:** create an empty file named `RECORD` in `E:\vp-dv-compare` (PowerShell:
+  `ni E:\vp-dv-compare\RECORD`). VP records VP_DV_COMPARE_SECONDS of capture time and stops by
+  itself. **Delete `RECORD` and create it again** for the next clip; a `STOP` file ends a clip
+  early. Each clip is a folder `<date-time>-rec` holding `seg01\` (raw frames, capture.txt,
+  frames.csv) and `dv-frames.jsonl`.
+- Frames are recorded on the default capture path (`capture_path: gpu`). On the CPU path only the
+  metadata lines are written, and the clip header says so.
+- Record run 1 (LLDV) and run 2 (tunnel) as above. Claude then runs the comparison on the CPU (renders
+  of the tunnel for the two DV tone-mapping modes come from the GPU harness):
+  ```
+  python tools\dv_compare\dv_pair_compare.py --lldv <LLDV clip> --tunnel <tunnel clip> --out <report>
+         [--render bt2390=<renders> --render dolby=<renders>]
+  ```
+  report.md gives PSNR, Delta E ITP and the brightness difference in stops per pair and per scene,
+  the trim level used, and which DV tone-mapping mode is closest to the certified LLDV.
+- Clear `VP_DV_COMPARE_PATH` for ordinary launches, and delete the clips when done. Captured film
+  frames are never committed.
+
 ## Which mode for the projector chain?
 
 - **Tunnel (recommended):** VP receives 12-bit IPT and the per-scene DM (L1, trims) and

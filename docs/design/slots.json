@@ -1192,7 +1192,8 @@
       },
       "settings_keys": [
         "sdr_tone_shape",
-        "dv_trims"
+        "dv_trims",
+        "dv_tone_mapping"
       ],
       "planned_keys": [],
       "tiers": "not tiered",
@@ -1224,6 +1225,7 @@
         "mode": "off",
         "settings": {
           "dv_trims": "off",
+          "dv_tone_mapping": "libplacebo",
           "sdr_tone_shape": "off"
         }
       },

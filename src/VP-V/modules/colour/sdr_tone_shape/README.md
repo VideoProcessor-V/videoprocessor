@@ -87,8 +87,10 @@ index 1, and the curve's mid adaptation constants are VP assumptions, to calibra
 
 ## Known issues / open items
 
-- The L8 / L10 container layout in the tunnel is assumed (16-bit containers, like L1/L2) until a
-  live packet is checked (the formatter logs the first L8 block per title).
+- KNOWN GAP (needs a live capture, after the deploy / with the DeckLink): the L8 / L9 / L10
+  container layout in the tunnel is assumed (16-bit containers, like L1/L2) and the predefined
+  CM v4.0 target ids beyond index 1 are not assumed; verify both on a real CM v4.0 title (the
+  formatter logs the first L8 block per title with its raw bytes; dv-frames.jsonl records L10).
 - GPU checks pending: shader vs C++ reference for the L8 and ICtCp paths; the Dolby-style
   function inside libplacebo's LUT path.
 

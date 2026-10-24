@@ -1357,11 +1357,18 @@ CR210DolbyVisionTunnelFormatter::AnalyzeFrame(const VideoFrame& frame)
 		{
 			DebugLog::Log("Dolby Vision RGB tunnel: %u pictures without usable metadata (last_header=%s reason=%s); %s",
 				m_missingPacketFrames, supportedHeader ? "CRC-valid" : "missing/CRC-invalid", failureReason,
+				!m_tunnelConfirmed ? "no DV lock; allowing SDR RGB8 when alignment is known" :
+				m_bugHuntFixes && supportedHeader && m_metadata.valid ? "header CRC-valid: pictures kept with static metadata until fresh DM" :
 				m_tunnelConfirmed ? "suspending DV until fresh DM; SDR fallback blocked" :
 				"no DV lock; allowing SDR RGB8 when alignment is known");
 			m_missingPacketReported = true;
 		}
-		if (m_tunnelConfirmed && m_missingPacketFrames >= m_packetLossLimit)
+		// feat/dv-l8 (owner 2026-10-24): a picture with a CRC-valid header is still a tunnel
+		// picture VP can decode with the retained matrices, so past the loss limit it is shown
+		// with static metadata (DvMetadataHold; "Fallbacks engaged: DV metadata" + the counter);
+		// only a picture without a valid header (not decodable as the tunnel) ends the DM.
+		if (m_tunnelConfirmed && m_missingPacketFrames >= m_packetLossLimit &&
+			!(m_bugHuntFixes && supportedHeader && m_metadata.valid))
 		{
 			m_metadata = {};
 			m_hasActiveMetadataId = false;
