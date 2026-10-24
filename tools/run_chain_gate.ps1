@@ -22,7 +22,9 @@ and every SKIP-* marker.
 #>
 param(
     [string]$Dll = (Join-Path $PSScriptRoot "..\x64\Release\VideoProcessor-Test.dll"),
-    [string]$Names = "ExtendedRange|SigmaDelta|Interpolator|DolbyVision",
+    [string]$Names = "ExtendedRange|SigmaDelta|Interpolator|DolbyVision|DelayGate|CombinationRunner",
+    [switch]$NoSettingsChecks,   # skip the VP-V data checks (settings agent 2026-10-24)
+    [switch]$AllowBattery,       # GPU runs need mains power (owner rule); this overrides the check
     [switch]$NoHarness,
     [switch]$OnScreen,
     [string]$Fullscreen = "",   # VP_TEST_HARNESS_FULLSCREEN for the on-screen tests: 0, 1 or both
@@ -30,6 +32,21 @@ param(
     [string]$OutDir = (Join-Path ([System.IO.Path]::GetTempPath()) "vp-chain-gate")
 )
 $ErrorActionPreference = "Stop"
+# GPU tests only on mains power (BatteryStatus 2 = on AC; no battery = a desktop).
+$battery = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue
+if ($battery -and $battery.BatteryStatus -ne 2 -and -not $AllowBattery) { throw "on battery: the GPU chain gate runs on mains only (-AllowBattery overrides)" }
+# VP-V data checks (docs/design/test-structure.md): the tier table, slot matrix, option model and
+# pairwise coverage must be current; CPU only, seconds.
+if (-not $NoSettingsChecks) {
+    $root = Join-Path $PSScriptRoot ".."
+    foreach ($check in @(@("tools/gen_vpv_tiers.py", "--check"), @("tools/vpv_tests/slot_matrix.py", "--check"),
+                         @("tools/vpv_tests/dimensions.py", "--check"), @("tools/vpv_tests/pairwise.py", "--verify", "tests/vpv/pairwise.txt"),
+                         @("tools/vpv_tests/seed_module_readmes.py", "--check"))) {
+        Push-Location $root
+        try { & python -I @check | ForEach-Object { "$_" } } finally { Pop-Location }
+        if ($LASTEXITCODE -ne 0) { throw "VP-V data check failed: $($check -join ' ')" }
+    }
+}
 if ($Fullscreen -and $Fullscreen -notin @("0", "1", "both")) { throw "-Fullscreen takes 0, 1 or both" }
 $Dll = (Resolve-Path $Dll).Path
 New-Item -ItemType Directory -Force $OutDir | Out-Null

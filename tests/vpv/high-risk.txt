@@ -1,0 +1,50 @@
+# High-risk combinations (owner's list). Lines name only the dimensions that matter; unnamed dimensions stay at their defaults.
+# Format: name=<id>;dim=value;...  Lines with planned=... are pending until those features exist (runner marks them pending).
+
+# (a) Nets under low latency: repair/refine nets must bypass visibly or fit the short queue, never stall the delay.
+name=hr-nets-lowlat-01;low_latency=on;repair.tier=Mid;scaling.tier=Mid;queue_frames=3;rate=24
+name=hr-nets-lowlat-02;low_latency=on;repair.tier=Mid;scaling.tier=Mid;queue_frames=2;rate=24
+name=hr-nets-lowlat-03;low_latency=on;repair.tier=Upper;scaling.tier=Mid;queue_frames=3;rate=24
+name=hr-nets-lowlat-04;low_latency=on;repair.tier=Upper;scaling.tier=Mid;queue_frames=2;rate=24
+
+# (b) DV tunnel: nets must bypass on raw DV IPT and re-base/repair must not corrupt the 12-bit RGB container.
+name=hr-dv-repair-01;signal=DV_tunnel;repair.tier=Mid;scaling.tier=Mid;dv_tunnel_gpu_unpack=on
+name=hr-dv-repair-02;signal=DV_tunnel;repair.tier=Mid;scaling.tier=Mid;dv_tunnel_gpu_unpack=off
+name=hr-dv-repair-03;signal=DV_tunnel;repair.tier=Upper;scaling.tier=Mid;dv_tunnel_gpu_unpack=on
+name=hr-dv-repair-04;signal=DV_tunnel;repair.tier=Upper;scaling.tier=Mid;dv_tunnel_gpu_unpack=off
+
+# (c) A-lens/NLS geometry with per-axis re-base: vector scaling and active-area propagation must stay exact (sx != sy).
+name=hr-geom-rebase-vec-01;geometry=A-lens;scaling.tier=Mid;motion.tier=Mid;rebase_kernel_match=on
+name=hr-geom-rebase-vec-02;geometry=A-lens;scaling.tier=Mid;motion.tier=Upper;rebase_kernel_match=on
+name=hr-geom-rebase-vec-03;geometry=NLS;scaling.tier=Mid;motion.tier=Mid;rebase_kernel_match=on
+name=hr-geom-rebase-vec-04;geometry=NLS;scaling.tier=Mid;motion.tier=Upper;rebase_kernel_match=on
+
+# (d) LED compensation + Stage 13 + LUT + black level: stacked PRE_OUTPUT stages must keep CNTR never above need (mostly planned).
+name=hr-led-stack-01;signal=SDR;output=2560x1600;planned=stage13+calibration_lut+black_level
+name=hr-led-stack-02;signal=HDR10;output=2560x1600;planned=stage13+calibration_lut+black_level
+
+# (e) Render-ahead at 24p: open-loop anchoring and the planner must hold constant delay at every queue depth.
+name=hr-ra-24p-01;render_ahead=on;rate=23.976;queue_frames=4
+name=hr-ra-24p-02;render_ahead=on;rate=23.976;queue_frames=3
+name=hr-ra-24p-03;render_ahead=on;rate=23.976;queue_frames=2
+name=hr-ra-24p-04;render_ahead=on;rate=24;queue_frames=4
+name=hr-ra-24p-05;render_ahead=on;rate=24;queue_frames=3
+name=hr-ra-24p-06;render_ahead=on;rate=24;queue_frames=2
+
+# (f) Short queue with every look-ahead consumer: vectors, gap fill, estimate-ahead and texture restore must degrade visibly, not silently.
+name=hr-shortq-lookahead-01;queue_frames=2;rate=23.976;motion.tier=Mid;interpolation_fill_gaps=on;dejudder_estimate_ahead=on;repair.tier=Upper
+name=hr-shortq-lookahead-02;queue_frames=2;rate=23.976;motion.tier=Upper;interpolation_fill_gaps=on;dejudder_estimate_ahead=on;repair.tier=Upper
+name=hr-shortq-lookahead-03;queue_frames=2;rate=25;motion.tier=Mid;interpolation_fill_gaps=on;dejudder_estimate_ahead=on;repair.tier=Upper
+name=hr-shortq-lookahead-04;queue_frames=2;rate=25;motion.tier=Upper;interpolation_fill_gaps=on;dejudder_estimate_ahead=on;repair.tier=Upper
+name=hr-shortq-lookahead-05;queue_frames=2;rate=30;motion.tier=Mid;interpolation_fill_gaps=on;dejudder_estimate_ahead=on;repair.tier=Upper
+name=hr-shortq-lookahead-06;queue_frames=2;rate=30;motion.tier=Upper;interpolation_fill_gaps=on;dejudder_estimate_ahead=on;repair.tier=Upper
+name=hr-shortq-lookahead-07;queue_frames=2;rate=60;motion.tier=Mid;interpolation_fill_gaps=on;dejudder_estimate_ahead=on;repair.tier=Upper
+name=hr-shortq-lookahead-08;queue_frames=2;rate=60;motion.tier=Upper;interpolation_fill_gaps=on;dejudder_estimate_ahead=on;repair.tier=Upper
+name=hr-shortq-lookahead-09;queue_frames=3;rate=23.976;motion.tier=Mid;interpolation_fill_gaps=on;dejudder_estimate_ahead=on;repair.tier=Upper
+name=hr-shortq-lookahead-10;queue_frames=3;rate=23.976;motion.tier=Upper;interpolation_fill_gaps=on;dejudder_estimate_ahead=on;repair.tier=Upper
+name=hr-shortq-lookahead-11;queue_frames=3;rate=25;motion.tier=Mid;interpolation_fill_gaps=on;dejudder_estimate_ahead=on;repair.tier=Upper
+name=hr-shortq-lookahead-12;queue_frames=3;rate=25;motion.tier=Upper;interpolation_fill_gaps=on;dejudder_estimate_ahead=on;repair.tier=Upper
+name=hr-shortq-lookahead-13;queue_frames=3;rate=30;motion.tier=Mid;interpolation_fill_gaps=on;dejudder_estimate_ahead=on;repair.tier=Upper
+name=hr-shortq-lookahead-14;queue_frames=3;rate=30;motion.tier=Upper;interpolation_fill_gaps=on;dejudder_estimate_ahead=on;repair.tier=Upper
+name=hr-shortq-lookahead-15;queue_frames=3;rate=60;motion.tier=Mid;interpolation_fill_gaps=on;dejudder_estimate_ahead=on;repair.tier=Upper
+name=hr-shortq-lookahead-16;queue_frames=3;rate=60;motion.tier=Upper;interpolation_fill_gaps=on;dejudder_estimate_ahead=on;repair.tier=Upper

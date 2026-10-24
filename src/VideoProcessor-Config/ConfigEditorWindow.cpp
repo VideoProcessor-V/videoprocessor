@@ -120,6 +120,7 @@
 #include <regex>
 #include <set>
 #include <sstream>
+#include <VP-V/config/VpvSection.h>   // VP-V section hook (src/VP-V/config/README.md)
 
 namespace
 {
@@ -5240,6 +5241,26 @@ QWidget* ConfigEditorWindow::createShell()
         QStringLiteral("vprenderer.motion")));
     // 23: automatic calibration (meter, patches, wizard).
     pages_->addWidget(createCalibrationPage());
+    // VP-V section hook (owner 2026-10-24; src/VP-V/config/README.md). The whole VP-V section lives in src/VP-V/config/;
+    // this block and the "VP-V" navigation leaf below are its only footprint in this file.
+    const int vpvPage = pages_->count();
+    {
+        Vpv::Host vpvHost;
+        vpvHost.value = [this](const QString& section, const QString& key) { return value(section, key); };
+        vpvHost.setValue = [this](const QString& section, const QString& key, const QString& text)
+        {
+            if (!document_) return;
+            if (text.isEmpty()) document_->RemoveKnown(section.toStdString(), key.toStdString().c_str());
+            else document_->SetKnown(section.toStdString(), key.toStdString().c_str(), text.toLocal8Bit().constData());
+            markDirty();
+        };
+        vpvHost.profileSections = [this](const QString& root) { return profileSections(root); };
+        vpvHost.upstreamControlName = [](const QString& key) { return controlName(QStringLiteral("vprenderer"), key); };
+        vpvHost.upstreamRoot = pages_;
+        pages_->addWidget(createPage(QStringLiteral("VP-V"),
+            QStringLiteral("Everything VP-V adds, by unit: one tier per unit plus a global tier, each unit's settings, and the fallbacks engaged."),
+            Vpv::CreateSection(vpvHost)));
+    }
     auto* navGroup = new QButtonGroup(root);
     navGroup->setExclusive(true);
     const auto addLeaf = [this, navLayout, navGroup](const QString& title, int page)
@@ -5258,6 +5279,7 @@ QWidget* ConfigEditorWindow::createShell()
     QPushButton* shortcutsNavigation = addLeaf(QStringLiteral("Shortcuts"), 15);
     addLeaf(QStringLiteral("Dynamic Drive"), 20);
     addLeaf(QStringLiteral("Calibration"), 23);
+    addLeaf(QStringLiteral("VP-V"), vpvPage)->setObjectName(QStringLiteral("config.openVpv"));
     addLeaf(QStringLiteral("Logs"), 10);
     navLayout->addSpacing(8);
     QPushButton* vpNavigation = addLeaf(QStringLiteral("VP Renderer"), 2);
@@ -6874,10 +6896,14 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             0, QueueLatency::MaxTargetLatencyMs, QStringLiteral("ms"));
         auto* latencySpin = qobject_cast<QSpinBox*>(fields->back().widget);
         latencySpin->setSpecialValueText(QStringLiteral("Off"));
+        // Settings guide audit 2026-10-24 (ADR-0020): one total delay, 4 frames recommended.
         latencySpin->setToolTip(QStringLiteral(
-            "Off uses Target frames. A delay in ms becomes whole source frames "
-            "for each frame rate; a longer delay gives Dynamic Drive and the crop "
-            "detector more frames to look ahead."));
+            "The total delay from capture to screen: ONE value, the same at every frame rate, so the AVR's "
+            "fixed audio delay always matches. Recommended: 250 ms (4 queued frames at 23.976p, the slowest "
+            "rate). Shorter still works: the look-ahead features (motion ahead, Dynamic Drive, crop and "
+            "subtitle look-ahead, hiccup repair) fall back to 3 or 2 frames. The VP-V page's Input tab shows "
+            "the frames and padding at every rate. Until the total-delay budget lands in the renderer this "
+            "value is the queue's time. Off uses Target frames."));
         auto* latencyNote = helpLabel(QString());
         latencyNote->setObjectName(QStringLiteral("config.queue.target_latency_note"));
         form->addRow(QString(), latencyNote);
@@ -7696,6 +7722,9 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QStringLiteral("dejudder_strength"));
         dejudderStrength->setValidator(new QDoubleValidator(0.0, 1.0, 3, dejudderStrength));
         dejudderStrength->setPlaceholderText(QStringLiteral("0 = off; the slider sets it"));
+        dejudderStrength->setToolTip(QStringLiteral(   // settings guide audit 2026-10-24
+            "How far the 3:2 hitch of film on a 60 Hz display is eased toward even motion: 0 = as shot, 1 = full "
+            "frame-rate conversion. Normally set by the Motion slider above (Cinema = 0.25)."));
         // Delta 10: even cadences (a whole number of refreshes per film frame).
         auto* strengthEven = addText(QStringLiteral("Strength (even cadences, e.g. 30p on 60 Hz)"),
             QStringLiteral("dejudder_strength_even"));
@@ -8557,15 +8586,16 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "takes over whenever the engine has no vectors."));
         auto* motionAhead = addChoice(QStringLiteral("Motion vectors computed ahead"), QStringLiteral("motion_ahead_frames"),
             { QStringLiteral("4"), QStringLiteral("0") });
-        motionAhead->setItemText(motionAhead->findData(QStringLiteral("4")), QStringLiteral("On (4 frames ahead; the queue holds at least 5)"));
+        motionAhead->setItemText(motionAhead->findData(QStringLiteral("4")), QStringLiteral("On (about 67 ms ahead)"));
         motionAhead->setItemText(motionAhead->findData(QStringLiteral("0")), QStringLiteral("Off"));
+        // Settings guide audit 2026-10-24: the forced 5-frame queue minimum is gone (r6 fix 2) and the
+        // look-ahead is a time (r6 fix 3), so the old "holds at least 5" text was wrong.
         motionAhead->setToolTip(QStringLiteral(
-            "NVIDIA GPUs: the optical-flow engine computes the motion 4 source frames ahead of the picture on its own "
-            "hardware, off the render path. It needs those 4 frames queued, so On makes the queue hold at least 5 frames "
-            "(whether it is set by time or in frames) while the de-judder runs. With no frames queued ahead the producer "
-            "stops after 2 s and the de-judder estimates at render time or holds. The low-latency queue switches it off. "
-            "Off, or other GPUs: VP's matcher at render time. A queue raised to 5 frames adds latency (5 frames are "
-            "about 210 ms at 24p), so re-check the audio offset (lip sync) after switching it."));   // audit 2026-10-16
+            "NVIDIA GPUs: the optical-flow engine computes the motion ahead of the picture on its own hardware, off "
+            "the render path, from frames already in the queue: about 67 ms ahead (2 frames at 24p, 4 at 50/60p). It "
+            "never lengthens the queue or the delay; on a short queue it looks less far ahead, and with no frames "
+            "ahead the de-judder estimates at render time or holds. The low-latency queue switches it off. Off, or "
+            "other GPUs: VP's matcher at render time."));
         {
             // The engine as mutually exclusive buttons (owner 2026-10-16); the drop-down holds the value.
             auto* sourceButtons = new QWidget;
@@ -9574,7 +9604,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "acts only when the picture is downscaled. Off keeps plain SSIM."));
         struct AdaptiveField { const char* label; const char* key; double lo, hi; const char* placeholder; const char* tip; };
         const AdaptiveField adaptiveFields[] = {
-            { "SSIM weight (0 to 1)", "adaptive_w_base", 0.0, 1.0, "1", "How much SSIM where nothing argues against it." },
+            { "SSIM weight (0 to 1)", "adaptive_w_base", 0.0, 1.0, "1", "How much SSIM where nothing argues against it. The hybrid scaler's design value is 0.2 (the VP-V Scaling tiers set it); 1 = plain SSIM." },
             { "Edge start (codes)", "adaptive_edge_lo", 0.0, 255.0, "8", "Gradient (8-bit codes) where hard edges start leaning faithful." },
             { "Edge full (codes)", "adaptive_edge_hi", 0.0, 255.0, "40", "Gradient where an edge is fully faithful (halo control)." },
             { "Grain start (codes)", "adaptive_grain_lo", 0.0, 64.0, "2", "Flat-area grain energy where the SSIM weight starts to drop." },
@@ -9854,6 +9884,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         QFormLayout* processingForm = form;
         auto* debanding = addChoice(QStringLiteral("Debanding"), QStringLiteral("deband_strength"), { QStringLiteral("AUTO"), QStringLiteral("default"), QStringLiteral("light"), QStringLiteral("off") });
         debanding->setItemText(debanding->findData(QStringLiteral("default")), QStringLiteral("Standard"));
+        debanding->setToolTip(QStringLiteral(   // settings guide audit 2026-10-24
+            "libplacebo's debander (smooths steps in skies and shadows). Auto lets libplacebo decide. While VP's own "
+            "grain-safe debander runs ('VP deband' Auto or On, with 'VP deband replaces libplacebo's'), libplacebo's "
+            "automatic deband is switched off because it thins fine grain; an explicit Standard or Light is kept."));
         addRendererAutoStatus(QStringLiteral("deband_strength"), debanding);
         // Film grain (owner 2026-10-17): libplacebo's deband adds no grain by default.
         auto* debandGrain = addChoice(QStringLiteral("Debanding adds grain (libplacebo)"),

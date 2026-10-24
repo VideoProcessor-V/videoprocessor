@@ -1,0 +1,241 @@
+{
+ "schema": "vpv-dimensions/1",
+ "dimensions": [
+  {
+   "name": "signal",
+   "values": [
+    "SDR",
+    "HDR10",
+    "LLDV",
+    "DV_tunnel"
+   ],
+   "source": "fixed"
+  },
+  {
+   "name": "rate",
+   "values": [
+    "23.976",
+    "24",
+    "25",
+    "29.97",
+    "30",
+    "50",
+    "59.94",
+    "60"
+   ],
+   "source": "fixed"
+  },
+  {
+   "name": "queue_frames",
+   "values": [
+    "4",
+    "3",
+    "2"
+   ],
+   "source": "fixed"
+  },
+  {
+   "name": "low_latency",
+   "values": [
+    "off",
+    "on"
+   ],
+   "source": "fixed"
+  },
+  {
+   "name": "source_size",
+   "values": [
+    "1080p",
+    "1440p",
+    "2160p"
+   ],
+   "source": "fixed"
+  },
+  {
+   "name": "output",
+   "values": [
+    "2560x1600",
+    "3840x2160"
+   ],
+   "source": "fixed"
+  },
+  {
+   "name": "geometry",
+   "values": [
+    "none",
+    "crop",
+    "A-lens",
+    "NLS"
+   ],
+   "source": "fixed"
+  },
+  {
+   "name": "capture_path",
+   "values": [
+    "gpu",
+    "standard"
+   ],
+   "source": "toggle:input"
+  },
+  {
+   "name": "capture_upload",
+   "values": [
+    "auto",
+    "render",
+    "early"
+   ],
+   "source": "toggle:input"
+  },
+  {
+   "name": "native_rgb_ingest",
+   "values": [
+    "on",
+    "off"
+   ],
+   "source": "toggle:input"
+  },
+  {
+   "name": "dv_tunnel_gpu_unpack",
+   "values": [
+    "on",
+    "off"
+   ],
+   "source": "toggle:input"
+  },
+  {
+   "name": "motion.tier",
+   "values": [
+    "Classic",
+    "Low",
+    "Mid",
+    "Upper"
+   ],
+   "source": "tiers"
+  },
+  {
+   "name": "interpolation_fill_gaps",
+   "values": [
+    "on",
+    "off"
+   ],
+   "source": "toggle:motion"
+  },
+  {
+   "name": "interpolation",
+   "values": [
+    "off",
+    "auto",
+    "always"
+   ],
+   "source": "toggle:motion"
+  },
+  {
+   "name": "dejudder_estimate_ahead",
+   "values": [
+    "on",
+    "off"
+   ],
+   "source": "toggle:motion"
+  },
+  {
+   "name": "dither_vectors",
+   "values": [
+    "auto",
+    "own"
+   ],
+   "source": "toggle:motion"
+  },
+  {
+   "name": "render_ahead",
+   "values": [
+    "off",
+    "on"
+   ],
+   "source": "toggle:motion"
+  },
+  {
+   "name": "repair.tier",
+   "values": [
+    "Classic",
+    "Low",
+    "Mid",
+    "Upper"
+   ],
+   "source": "tiers"
+  },
+  {
+   "name": "deband_vp_grain_guard",
+   "values": [
+    "on",
+    "veto",
+    "off"
+   ],
+   "source": "toggle:repair"
+  },
+  {
+   "name": "deband_vp_exclusive",
+   "values": [
+    "on",
+    "off"
+   ],
+   "source": "toggle:repair"
+  },
+  {
+   "name": "detail_pulse_fast",
+   "values": [
+    "on",
+    "off"
+   ],
+   "source": "toggle:repair"
+  },
+  {
+   "name": "scaling.tier",
+   "values": [
+    "Classic",
+    "Low",
+    "Mid"
+   ],
+   "source": "tiers"
+  },
+  {
+   "name": "rebase_kernel_match",
+   "values": [
+    "on",
+    "off"
+   ],
+   "source": "toggle:scaling"
+  },
+  {
+   "name": "adaptive_faithful",
+   "values": [
+    "auto",
+    "ortho"
+   ],
+   "source": "toggle:scaling"
+  },
+  {
+   "name": "preserve_extended_range",
+   "values": [
+    "on",
+    "off"
+   ],
+   "source": "toggle:colour"
+  },
+  {
+   "name": "sdr_tone_shape",
+   "values": [
+    "off",
+    "knee"
+   ],
+   "source": "toggle:colour"
+  },
+  {
+   "name": "output.tier",
+   "values": [
+    "Classic",
+    "Low"
+   ],
+   "source": "tiers"
+  }
+ ]
+}

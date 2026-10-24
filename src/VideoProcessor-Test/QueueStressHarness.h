@@ -1619,6 +1619,7 @@ namespace QueueStress
 		bool resizeMarksGap = false;   // the queue-resize purge fix (see docs/agent-reports/queue-stress.md)
 		Mutation mutation = Mutation::None;
 		bool legacyQ1 = false;         // the renderer before the Q1 fix (docs/agent-reports/q1-stale-burst.md)
+		PresentConfig present;         // queue capacity/target (the delay gate and the combination runner set it)
 	};
 
 	inline Result Run(const Scenario& s, const RunOptions& o = RunOptions())
@@ -1651,7 +1652,7 @@ namespace QueueStress
 			lane.jitterNow = inWindow;
 			lane.OnSignal(f);
 		}
-		Presentation p(s, r);
+		Presentation p(s, r, o.present);
 		// The resize purge marks the next frame's gap with queue_timing_fixes (fixed 2026-10-18,
 		// LibplaceboVideoRenderer::SetFrameQueueMaxSize); off, the renderer before.
 		p.resizeMarksGap = o.resizeMarksGap || s.sw.queueFixes;

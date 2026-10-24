@@ -1,0 +1,560 @@
+{
+  "schema": "vpv-tiers/1",
+  "updated": "2026-10-24",
+  "slots_file": "docs/design/slots.json",
+  "notes": [
+    "The VP-V Config section's data table (owner 2026-10-24: one VP-V master section, sub-pages per unit, global tier + 'Fallbacks engaged').",
+    "tools/gen_vpv_tiers.py turns this file + slots.json into src/VideoProcessor-Config/vpv/VpvTierTable.generated.h; '--check' fails when the header is stale or a slot/key reference is wrong.",
+    "Tier keys live in the RENDERER PROFILE section (vprenderer / vprenderer.<name>); no new renderer key stores a tier: the tier is read back from the key values (slider scheme: keep the underlying keys).",
+    "A unit lists only the tiers it can really distinguish today (owner: fewer tiers where a unit lacks the granularity). The global tier maps to each unit's highest listed tier at or below it; 'planned_tiers' are shown as 'not yet implemented'.",
+    "'set' keys define AND write a tier. 'on_enter' keys are written only when the current value equals 'from' (e.g. leaving Classic restores the default motion taste); they never decide which tier is shown.",
+    "'taste' keys (the motion slider) are never greyed in upstream pages; 'managed' keys are greyed there with 'managed by VP-V' while the VP-V pathway is on.",
+    "Defaults are the renderer's built-in values when the key is absent (LibplaceboVideoRenderer / RendererProfileConfig parsers, checked 2026-10-24)."
+  ],
+  "vpv_section": {
+    "section": "vpv",
+    "pathway_key": "pipeline_original_pathway",
+    "pathway_values": [
+      "off",
+      "on"
+    ],
+    "pathway_default": "off",
+    "expert_keys": [
+      "pipeline_order",
+      "pipeline_slots_off",
+      "calibration_lut_stage"
+    ],
+    "note": "[vpv] holds VP-V's global (not per-profile) keys; the renderer reads them there first (then [vprenderer], the skeleton's original place). pipeline_original_pathway on = the Original pathway (every VP addition off, ADR-0019); absent/off = the VP-V pathway."
+  },
+  "delay": {
+    "section": "queue",
+    "key": "target_latency_ms",
+    "recommended_frames": 4,
+    "ladder": [
+      4,
+      3,
+      2
+    ],
+    "note": "Owner 2026-10-24: ONE total delay, the same at every frame rate (padded); 4 queued frames recommended (about 250 ms at 24p); lower settings fall back to 3/2 frames with every feature still working."
+  },
+  "defaults": {
+    "optical_flow": "on",
+    "motion_ahead_frames": "4",
+    "interpolation": "off",
+    "interpolation_fill_gaps": "on",
+    "dejudder_est_split": "off",
+    "dejudder_est_qpel": "on",
+    "dejudder_estimate_ahead": "on",
+    "dejudder_strength": "0",
+    "dejudder_strength_even": "0",
+    "render_ahead": "off",
+    "dither_vectors": "auto",
+    "deband_vp": "off",
+    "deband_vp_grain_guard": "on",
+    "deband_vp_exclusive": "on",
+    "texture_restore": "off",
+    "detail_pulse_stabilise": "on",
+    "detail_pulse_fast": "on",
+    "source_resolution": "auto",
+    "rebase_kernel_match": "on",
+    "adaptive_downscale": "off",
+    "adaptive_w_base": "1.0",
+    "adaptive_faithful": "auto",
+    "temporal_dither": "auto",
+    "capture_path": "gpu",
+    "capture_upload": "auto",
+    "native_rgb_ingest": "on",
+    "dv_tunnel_gpu_unpack": "off",
+    "preserve_extended_range": "on",
+    "sdr_tone_shape": "off"
+  },
+  "units": [
+    {
+      "id": "input",
+      "name": "Input",
+      "summary": "Takes the picture from the capture card at full precision, works out the signal type and holds it for the fixed delay.",
+      "slots": [
+        "input.capture",
+        "input.signal",
+        "input.queue_timing",
+        "input.source_analysis"
+      ],
+      "tiers": [],
+      "untiered_reason": "Always on: capture and timing have no quality steps, only paths (the toggles below).",
+      "presets": {},
+      "toggles": [
+        {
+          "key": "capture_path",
+          "label": "Capture unpack on the GPU",
+          "values": [
+            "gpu",
+            "standard"
+          ],
+          "slot": "input.capture"
+        },
+        {
+          "key": "capture_upload",
+          "label": "Upload frames as they arrive",
+          "values": [
+            "auto",
+            "render",
+            "early"
+          ],
+          "slot": "input.capture"
+        },
+        {
+          "key": "native_rgb_ingest",
+          "label": "Native 10/12-bit RGB capture",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "input.capture"
+        },
+        {
+          "key": "dv_tunnel_gpu_unpack",
+          "label": "Dolby Vision tunnel: GPU unpack",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "input.signal"
+        }
+      ],
+      "planned": [
+        {
+          "key": "label_detector",
+          "label": "Label-detector net (codec family, film grain)",
+          "slot": "input.source_analysis"
+        }
+      ]
+    },
+    {
+      "id": "motion",
+      "name": "Motion",
+      "summary": "Measures motion once on the untouched picture and feeds the de-judder, hiccup repair and dither.",
+      "slots": [
+        "motion.estimation",
+        "motion.vector_delivery",
+        "motion.consumers"
+      ],
+      "tiers": [
+        "Classic",
+        "Low",
+        "Mid",
+        "Upper"
+      ],
+      "presets": {
+        "Classic": {
+          "description": "No motion processing: frames shown as delivered (VP's de-judder off, no motion search).",
+          "cost": "none",
+          "set": {
+            "dejudder_strength": "0",
+            "dejudder_strength_even": "0",
+            "optical_flow": "off",
+            "motion_ahead_frames": "0"
+          }
+        },
+        "Low": {
+          "description": "De-judder with VP's own motion search only (no NVIDIA engine, nothing computed ahead): cheapest working motion.",
+          "cost": "low",
+          "set": {
+            "optical_flow": "off",
+            "motion_ahead_frames": "0",
+            "dejudder_est_split": "off"
+          },
+          "on_enter": [
+            {
+              "key": "dejudder_strength",
+              "from": "0",
+              "to": "0.25"
+            }
+          ]
+        },
+        "Mid": {
+          "description": "NVIDIA optical-flow engine plus VP's matcher, vectors computed 4 frames ahead (the default motion engine).",
+          "cost": "medium",
+          "set": {
+            "optical_flow": "on",
+            "motion_ahead_frames": "4",
+            "dejudder_est_split": "off"
+          },
+          "on_enter": [
+            {
+              "key": "dejudder_strength",
+              "from": "0",
+              "to": "0.25"
+            }
+          ]
+        },
+        "Upper": {
+          "description": "As Mid, and poorly matched blocks are searched again as quarter blocks (small objects on moving backgrounds get their own motion).",
+          "cost": "medium-high",
+          "set": {
+            "optical_flow": "on",
+            "motion_ahead_frames": "4",
+            "dejudder_est_split": "on"
+          },
+          "on_enter": [
+            {
+              "key": "dejudder_strength",
+              "from": "0",
+              "to": "0.25"
+            }
+          ]
+        }
+      },
+      "taste": [
+        "dejudder_strength",
+        "dejudder_strength_even"
+      ],
+      "toggles": [
+        {
+          "key": "interpolation_fill_gaps",
+          "label": "Fill dropped frames (hiccup repair)",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "motion.consumers"
+        },
+        {
+          "key": "interpolation",
+          "label": "Frame interpolation (50/60p)",
+          "values": [
+            "off",
+            "auto",
+            "always"
+          ],
+          "slot": "motion.consumers"
+        },
+        {
+          "key": "dejudder_estimate_ahead",
+          "label": "Estimate motion ahead",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "motion.estimation"
+        },
+        {
+          "key": "dither_vectors",
+          "label": "Dither reuses the de-judder's motion",
+          "values": [
+            "auto",
+            "own"
+          ],
+          "slot": "motion.consumers"
+        },
+        {
+          "key": "render_ahead",
+          "label": "De-judder: render ahead (under test)",
+          "values": [
+            "off",
+            "on"
+          ],
+          "slot": "output.presentation"
+        }
+      ],
+      "planned": [
+        {
+          "key": "motion_ahead_ms",
+          "label": "Motion look-ahead in milliseconds (time-based)",
+          "slot": "motion.estimation"
+        }
+      ]
+    },
+    {
+      "id": "repair",
+      "name": "Repair",
+      "summary": "Cleans streaming damage at the picture's real size: encoding repair (planned), deband, breathing and texture restore.",
+      "slots": [
+        "repair.encoding",
+        "repair.deband",
+        "repair.texture_restore"
+      ],
+      "tiers": [
+        "Classic",
+        "Low",
+        "Mid",
+        "Upper"
+      ],
+      "presets": {
+        "Classic": {
+          "description": "No VP repair: libplacebo's own deband only, no breathing reduction, no texture restore.",
+          "cost": "none",
+          "set": {
+            "deband_vp": "off",
+            "detail_pulse_stabilise": "off",
+            "texture_restore": "off"
+          }
+        },
+        "Low": {
+          "description": "libplacebo deband plus the breathing reduction (detail pulse stabilise): today's defaults.",
+          "cost": "low",
+          "set": {
+            "deband_vp": "off",
+            "detail_pulse_stabilise": "on",
+            "texture_restore": "off"
+          }
+        },
+        "Mid": {
+          "description": "VP's grain-safe debander replaces libplacebo's, plus the breathing reduction.",
+          "cost": "low-medium",
+          "set": {
+            "deband_vp": "on",
+            "detail_pulse_stabilise": "on",
+            "texture_restore": "off"
+          }
+        },
+        "Upper": {
+          "description": "As Mid, plus texture restore (fine texture the stream smeared, held along the motion). Expensive until its efficiency pass.",
+          "cost": "high",
+          "set": {
+            "deband_vp": "on",
+            "detail_pulse_stabilise": "on",
+            "texture_restore": "statistical"
+          }
+        }
+      },
+      "toggles": [
+        {
+          "key": "deband_vp_grain_guard",
+          "label": "VP deband leaves grain alone",
+          "values": [
+            "on",
+            "veto",
+            "off"
+          ],
+          "slot": "repair.deband"
+        },
+        {
+          "key": "deband_vp_exclusive",
+          "label": "VP deband replaces libplacebo's",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "repair.deband"
+        },
+        {
+          "key": "detail_pulse_fast",
+          "label": "Detail pulse: fast path",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "repair.texture_restore"
+        }
+      ],
+      "planned": [
+        {
+          "key": "encoding_repair",
+          "label": "Encoding repair (net A or VP restore)",
+          "slot": "repair.encoding"
+        }
+      ]
+    },
+    {
+      "id": "scaling",
+      "name": "Scaling",
+      "summary": "Undoes the player's upscale (re-base), brings the picture to 4K and scales it to the projector.",
+      "slots": [
+        "scaling.rebase",
+        "scaling.route_4k",
+        "scaling.refine",
+        "scaling.chroma_upscale",
+        "scaling.geometry",
+        "scaling.output"
+      ],
+      "tiers": [
+        "Classic",
+        "Low",
+        "Mid"
+      ],
+      "planned_tiers": {
+        "Upper": "the 4K refine net and the D refine add-on (not yet implemented; Upper uses Mid)"
+      },
+      "presets": {
+        "Classic": {
+          "description": "Straight to the projector size with classical scaling: no re-base, no SSIM blend.",
+          "cost": "none",
+          "set": {
+            "source_resolution": "native",
+            "adaptive_downscale": "off"
+          }
+        },
+        "Low": {
+          "description": "No re-base; the hybrid SSIM/faithful downscale (weight 0.2) to the projector size.",
+          "cost": "low",
+          "set": {
+            "source_resolution": "native",
+            "adaptive_downscale": "on",
+            "adaptive_w_base": "0.2"
+          }
+        },
+        "Mid": {
+          "description": "Re-base first (the player's upscale undone, kernel-matched), then the hybrid downscale.",
+          "cost": "medium",
+          "set": {
+            "source_resolution": "auto",
+            "adaptive_downscale": "on",
+            "adaptive_w_base": "0.2"
+          }
+        }
+      },
+      "toggles": [
+        {
+          "key": "rebase_kernel_match",
+          "label": "Re-base: undo the player's upscaler",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "scaling.rebase"
+        },
+        {
+          "key": "adaptive_faithful",
+          "label": "Grain-true downscale filter",
+          "values": [
+            "auto",
+            "ortho"
+          ],
+          "slot": "scaling.output"
+        }
+      ],
+      "planned": [
+        {
+          "key": "entrance_route_4k",
+          "label": "4K route (fixed 1-D steps to 4K)",
+          "slot": "scaling.route_4k"
+        },
+        {
+          "key": "refine_net",
+          "label": "4K refine net",
+          "slot": "scaling.refine"
+        },
+        {
+          "key": "chroma_upscale_vp",
+          "label": "VP chroma upscale",
+          "slot": "scaling.chroma_upscale"
+        },
+        {
+          "key": "hybrid_refine_d",
+          "label": "D refine add-on under the hybrid scaler",
+          "slot": "scaling.output"
+        }
+      ]
+    },
+    {
+      "id": "colour",
+      "name": "Colour",
+      "summary": "libplacebo tone and gamut mapping, below-black/above-white kept, SDR tone shape, Stage 13 appearance (planned).",
+      "slots": [
+        "colour.tone_gamut",
+        "colour.extended_range",
+        "colour.sdr_tone_shape",
+        "colour.appearance"
+      ],
+      "tiers": [],
+      "untiered_reason": "libplacebo does the colour in every tier; the cheaper combined HDR->SDR LUT for Classic/Low is not yet implemented.",
+      "presets": {},
+      "toggles": [
+        {
+          "key": "preserve_extended_range",
+          "label": "Keep below-black and above-white (SDR)",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "colour.extended_range"
+        },
+        {
+          "key": "sdr_tone_shape",
+          "label": "SDR tone shape",
+          "values": [
+            "off",
+            "knee"
+          ],
+          "slot": "colour.sdr_tone_shape"
+        }
+      ],
+      "planned": [
+        {
+          "key": "combined_hdr_lut",
+          "label": "Combined HDR->SDR LUT (low-end cards)",
+          "slot": "colour.tone_gamut"
+        },
+        {
+          "key": "appearance_adaptation",
+          "label": "Stage 13 appearance (dim screen)",
+          "slot": "colour.appearance"
+        }
+      ]
+    },
+    {
+      "id": "drive",
+      "name": "Dynamic Drive",
+      "summary": "Projector LED and contrast control from the picture: measurement, compensation, black level (planned).",
+      "slots": [
+        "drive.led_measure",
+        "drive.led_compensation",
+        "drive.black_level",
+        "drive.projector_control"
+      ],
+      "tiers": [],
+      "untiered_reason": "Not a quality/cost choice: Dynamic Drive is set up on its own page (projector, script/compensate).",
+      "presets": {},
+      "toggles": [],
+      "planned": [
+        {
+          "key": "black_level_correction",
+          "label": "Black level correction",
+          "slot": "drive.black_level"
+        }
+      ]
+    },
+    {
+      "id": "output",
+      "name": "Output",
+      "summary": "The calibration LUT, the dither for the 8-bit link and the presentation.",
+      "slots": [
+        "output.calibration_lut",
+        "output.dither",
+        "output.presentation"
+      ],
+      "tiers": [
+        "Classic",
+        "Low"
+      ],
+      "planned_tiers": {
+        "Mid": "no extra output step yet (Mid uses Low)",
+        "Upper": "no extra output step yet (Upper uses Low)"
+      },
+      "presets": {
+        "Classic": {
+          "description": "libplacebo's own dither.",
+          "cost": "none",
+          "set": {
+            "temporal_dither": "libplacebo"
+          }
+        },
+        "Low": {
+          "description": "VP's sigma-delta temporal dither: the finest steps through the 8-bit projector link.",
+          "cost": "low",
+          "set": {
+            "temporal_dither": "sigma_delta"
+          }
+        }
+      },
+      "toggles": [],
+      "planned": [
+        {
+          "key": "calibration_lut_stage",
+          "label": "Calibration LUT applied by VP (last colour step)",
+          "slot": "output.calibration_lut"
+        }
+      ]
+    }
+  ]
+}

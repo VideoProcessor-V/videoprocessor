@@ -447,6 +447,12 @@
     <ClCompile Include="EfficiencyTests.cpp" />
     <ClCompile Include="RealFootageSuiteTests.cpp" />
     <ClCompile Include="QueueStressTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\DelayGateTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\tests\CombinationRunnerTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="QueueStressLaneTests.cpp" />
     <ClCompile Include="RendererPostStallResetAdvisorTests.cpp" />
     <ClCompile Include="MadVRShaderRuntimeStateTests.cpp" />
