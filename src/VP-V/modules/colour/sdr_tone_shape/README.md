@@ -95,8 +95,15 @@ index 1, and the curve's mid adaptation constants are VP assumptions, to calibra
   container layout in the tunnel is assumed (16-bit containers, like L1/L2) and the predefined
   CM v4.0 target ids beyond index 1 are not assumed; verify both on a real CM v4.0 title (the
   formatter logs the first L8 block per title with its raw bytes; dv-frames.jsonl records L10).
-- GPU checks pending: shader vs C++ reference for the L8 and ICtCp paths; the Dolby-style
-  function inside libplacebo's LUT path.
+- GPU 2026-10-24: the shader matches its C++ references on the NVIDIA GPU (L2, L8 and ICtCp
+  paths: DolbyVisionTrimShaderMatchesItsReference, DolbyVisionTrimShaderL8AndIctcpPathsMatchTheirReferences).
+- OPEN (WIP, dv_tone_mapping stays default libplacebo): on the synthetic policy scenes the
+  Dolby-style mode renders about one stop darker than the L1 intent model with crushed shadows
+  (wedge: 200 -> 98.5, 20 -> 9.7, 5 -> ~2, 1 -> 0.21 nits at a 100-nit target; bt2390: 100, 20,
+  5, 1). libplacebo's own LUT generation reproduces the curve exactly on the CPU
+  (LibplaceboGeneratesTheCurve), and changing the mid adaptation 0.7 -> 1.0 did not change the
+  render, so the inputs libplacebo hands the function in the renderer (scene min/avg/max, target)
+  or the swap itself are the suspects: log the effective tone parameters per frame next.
 
 ## Where the code lives (live file list)
 
