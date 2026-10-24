@@ -19,12 +19,12 @@
 //   motion vectors                   (fix/vpscalerender-motion: VP's motion estimate runs; see docs)
 //   capture per_frame|after_complete (default per_frame with motion vectors)
 //   settle <seconds>                 (default 3 with motion vectors)
-//   require_motion <share> [max_invalidations]   (exit 7 when the vectors were not continuous)
+//   require_motion <share> [max_invalidations] [max_missing]   (exit 7: vectors not continuous or frames missing)
 // Writes one line per capture:
-//   "<captured tag> <frame index> <png> <json> <source_seq> <requested tag> <ok|fail> <hybrid_motion_mode> <motion_estimates> <motion_invalidations>"
+//   "<captured tag> <frame index> <png> <json> <tool sequence> <requested tag> <ok|fail> <hybrid_motion_mode> <motion_estimates> <motion_invalidations>"
 // docs/VP-scale-render-motion.md: the modes, the summary line and how the TrainKit calls it.
-// Exit codes: 0 ok, 1 a capture failed, 2 bad job, 3/4 renderer not loaded, 6 adapter / hybrid
-// passes missing, 7 motion check failed.
+// Exit codes: 0 ok, 1 a capture failed / coverage incomplete, 2 bad job (e.g. no source rate), 3/4 renderer
+// not loaded, 6 adapter / hybrid passes missing, 7 motion check failed, 8 configuration rejected.
 
 #include "pch.h"
 

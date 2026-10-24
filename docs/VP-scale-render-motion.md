@@ -35,8 +35,11 @@ In round 1 VP's motion engine never ran during `picture_seq` renders:
 
 - **One session clock.** Frame n of the whole job carries sequence n + 1 and timestamp
   `start + n * period` (exact rational), across pictures; every step is a Normal step.
-  A stall of the tool pauses the capture clock (QPC less the stall) instead of sending a
-  burst or letting frames age.
+  Every wait of the tool (queue back-pressure, a capture request not yet taken, the loader)
+  PAUSES the capture clock: frozen at the start of the wait, the waited time added to its
+  offset on resume, so it never runs backwards. An untracked stall found only at the next send
+  moves the offset and the clock holds its value until real time catches up (counted:
+  `clock_untracked_stalls`, `clock_holds` in the summary).
 - **Back-pressure.** With `motion vectors` / `capture per_frame` the tool holds the next frame
   while the renderer's queue is at its target (4) and while the previous capture request has
   not been taken; the wait pauses the capture clock, so nothing is dropped or flushed and the
@@ -51,9 +54,20 @@ In round 1 VP's motion engine never ran during `picture_seq` renders:
 - **Streaming loader.** Consecutive `picture_seq` entries play as one continuous stream; a
   worker thread loads and packs frames a few ahead.
 - **`motion vectors`.** The tool writes `<shots>\vp-scale-render-motion.cfg`: the job's
-  config with, in every `[vprenderer*]` section, `occlusion_mask: on`,
-  `dejudder_strength: 0`, `dejudder_strength_even: 0`, `interpolation: off`,
-  `interpolation_fill_gaps: off`, `motion_engine: vp`, `smooth_motion: off` (other keys kept).
+  config with `occlusion_mask: on`, `dejudder_strength: 0`, `dejudder_strength_even: 0`,
+  `interpolation: off`, `interpolation_fill_gaps: off`, `motion_engine: vp`, `smooth_motion: off`
+  and `temporal_dither: off` (other keys kept). Placement (audit 2026-10-24): only the display group -
+  `[vprenderer]` and its display variants (`[vprenderer.<name>]`), or in a file without `[vprenderer]` the
+  display section the renderer reads (`[vpvr.display]` / `[display]` / `[libplacebo]`; a legacy file stays
+  legacy). The same keys are REMOVED from every child group (`[vprenderer.input*]`, `[vprenderer.motion*]`,
+  `[vprenderer.color*]`, `[vprenderer.viewport*]`, ...) and `[profiles.*]` section, where they are invalid
+  (the renderer would drop the whole unified model) or could switch them back. The tool validates both the
+  job's file and the motion file with the renderer's own `RendererProfileConfig::Read` before rendering,
+  and fails (exit 8) on a rejection - also if the renderer logs `unified renderer configuration ignored`,
+  `... exists but is not applied` or an `invalid` profile value during the run.
+  `temporal_dither: off`: the training renders are the input of nets that run inside the scaler, BEFORE
+  VP's output dither, so a render without dither is the right input whatever the shipped dither
+  setting is (and the occlusion mask then changes no pixel).
   The occlusion mask makes the estimate run alone on a film-like source with no de-judder
   extras: an A->B estimate for every source frame, no refresh ever warped, so every capture
   still shows exactly one source frame. The mask is only applied by a sigma-delta shader;
@@ -67,17 +81,25 @@ In round 1 VP's motion engine never ran during `picture_seq` renders:
   sequence play forwards and backwards (real motion, valid pairs) while the engine, its shaders
   and the queue start: at least `settle` s, then until 2 s pass with no render stall, no
   invalidation and no slow shader compile, with the estimate running (at most 30 s). It ends on
-  frame 0, so the measured frames follow continuously; nothing measured falls in it.
+  frame 1 coming down, so the first measured pair is a real one (1 -> 0, then 0 -> 1 ...), never a
+  repeated frame 0; a capture at its end records the invalidation count the motion check starts from.
+- **No silent drops (coverage).** In `per_frame` mode every frame of every picture must be
+  captured exactly once: missing, duplicate and unmapped captures and waits that gave up are
+  counted (`coverage=` in the summary) and make the exit code 1; `require_motion` also requires
+  full coverage (its optional third number allows that many). A `source` line without a rate is
+  an error (no silent 23.976).
 - **Proof.** Each capture sidecar now has (renderer, metadata only):
   `hybrid_motion_mode` (`vectors`: the grain map ran on this picture's vectors;
   `no-vectors`: its scalar fallback; `off`/`map-off`), `hybrid_stabilised_frames`,
   `motion_estimates`, `motion_invalidations` (session counts). The tool copies them to result
   columns 8-10 and logs/prints
   `VpScaleRender: motion summary: ... estimates_after_settle=E over_frames=F invalidations_after_settle=I ... vectors=V no_vectors=N`.
-- **Guard (`require_motion <share> [max_invalidations]`).** After the run the tool exits 7
+- **Guard (`require_motion <share> [max_invalidations] [max_missing]`).** After the run the tool exits 7
   (`VpScaleRender: MOTION CHECK FAILED: ...`) unless, after the settle, at least `share` of
   the captures were `vectors`, at most `max_invalidations` (default 0) invalidations
-  happened and the estimate ran for at least 80 % of the frames. A DLL without the new
+  happened (counted from the capture sidecars' `motion_invalidations`, the log only as a fallback),
+  the estimate ran for at least 80 % of the frames and at most `max_missing` (default 0) frames
+  were missing / duplicate / unmapped. A DLL without the new
   metadata fails the check (rebuild it from this branch).
 
 Legacy jobs (no `motion` line) keep their behaviour: `picture` captures once near the end,
@@ -131,7 +153,13 @@ picture_seq zp_h137 D:\...\zp_h137_seq.raw 16
 
 Result line: `<tag> <frame> <png> <json> <source_seq> <requested_tag> <ok|fail> <hybrid_motion_mode> <motion_estimates> <motion_invalidations>`
 (the first seven columns as before; with `per_frame` the requested tag is the captured
-frame's own picture, `settle`/`tail` captures are marked so and never `ok`).
+frame's own picture, `settle`/`tail` captures are marked so and never `ok`). CHANGED: column 5
+(`source_seq`) is now the TOOL's sequence of the captured frame (from the sidecar's
+`source_frame_counter`), no longer the renderer's own accepted-frame count (`source=`), which did not
+match the tool's numbering.
+
+Exit codes: 0 ok, 1 a capture failed / coverage incomplete, 2 bad job, 3/4 renderer not loaded, 6 adapter
+or hybrid passes missing, 7 motion check failed, 8 configuration rejected.
 
 The source rate must be film-like (below 49 Hz; the estimate never runs alone for video
 rates). Keep the declared rate the TrainKit used (12000/1001) unless measured otherwise:

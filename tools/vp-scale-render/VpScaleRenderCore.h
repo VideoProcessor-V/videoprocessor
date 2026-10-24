@@ -15,6 +15,8 @@
 #include <VideoFrame.h>
 #include <VideoState.h>
 #include <vprenderer/LibplaceboRendererPluginApi.h>
+#include <ConfigFile.h>
+#include <RendererProfileConfig.h>
 
 #include <atomic>
 #include <chrono>
@@ -22,7 +24,9 @@
 #include <cstdio>
 #include <deque>
 #include <fstream>
+#include <functional>
 #include <map>
+#include <set>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -66,16 +70,37 @@ namespace VpScaleRenderCore
 		ULONG STDMETHODCALLTYPE Release() override { return static_cast<ULONG>(--references); }
 	};
 
-	// The capture card's clock: QPC, less the time the tool itself stalled (loading, a slow
-	// disk). A stall pauses this clock, so the frames after it are neither "late" (a growing
-	// hardware age reads as a stale capture delivery: a gap) nor sent in a catch-up burst, and
-	// their timestamps stay one period apart (a jump would be a timestamp discontinuity).
+	// The capture card's clock: QPC, less the time the tool itself waited (back-pressure, a capture
+	// request not yet taken, the loader). A wait PAUSES this clock (audit 2026-10-24: frozen at the
+	// start of the wait, the waited time added to the offset on resume - it never runs backwards), so
+	// the frames after it are neither "late" (a growing hardware age reads as a stale capture
+	// delivery: a gap) nor sent in a catch-up burst, and their timestamps stay one period apart (a
+	// jump would be a timestamp discontinuity). An untracked stall found only at the next send cannot
+	// be paused after the fact: the offset grows and the clock holds its last value until real time
+	// catches up (monotonic by construction; such holds are counted and reported).
 	struct Clock : ITimingClock
 	{
-		std::atomic<long long> offset{ 0 };
-		timingclocktime_t TimingClockNow() override { LARGE_INTEGER n{}; QueryPerformanceCounter(&n); return n.QuadPart - offset.load(); }
+		static long long Qpc() { LARGE_INTEGER n{}; QueryPerformanceCounter(&n); return n.QuadPart; }
+		timingclocktime_t TimingClockNow() override
+		{
+			std::lock_guard<std::mutex> g(m);
+			long long v = (pausedAt ? pausedAt : Qpc()) - offset;
+			if (v < last) { v = last; ++holds; }   // never backwards
+			last = v;
+			return v;
+		}
 		timingclocktime_t TimingClockTicksPerSecond() const override { LARGE_INTEGER f{}; QueryPerformanceFrequency(&f); return f.QuadPart; }
-		const TCHAR* TimingClockDescription() override { return TEXT("VpScaleRender QPC (paused over tool stalls)"); }
+		const TCHAR* TimingClockDescription() override { return TEXT("VpScaleRender QPC (paused while the tool waits)"); }
+		void Pause() { std::lock_guard<std::mutex> g(m); if (!pausedAt) pausedAt = Qpc(); }
+		// Returns the paused time in QPC ticks (the schedule moves by the same amount).
+		long long Resume() { std::lock_guard<std::mutex> g(m); if (!pausedAt) return 0; const long long d = Qpc() - pausedAt; offset += d; pausedAt = 0; return d; }
+		void AddUntrackedStall(long long ticks) { std::lock_guard<std::mutex> g(m); offset += ticks; ++untracked; }
+		long long Offset() { std::lock_guard<std::mutex> g(m); return offset; }
+		long long Holds() { std::lock_guard<std::mutex> g(m); return holds; }
+		long long Untracked() { std::lock_guard<std::mutex> g(m); return untracked; }
+	private:
+		std::mutex m;
+		long long offset = 0, pausedAt = 0, last = 0, holds = 0, untracked = 0;
 	};
 
 	// V210 with the given luma (10-bit codes) and neutral chroma.
@@ -109,7 +134,7 @@ namespace VpScaleRenderCore
 	struct Job
 	{
 		std::string dllPath, configPath, shots, resultPath, logPath;
-		int sw = 0, sh = 0, rn = 24000, rd = 1001, ww = 0, wh = 0;
+		int sw = 0, sh = 0, rn = 0, rd = 0, ww = 0, wh = 0;   // the rate has no default: a source line without one is an error
 		double hold = 2.0;
 		bool noCapture = false;
 		std::vector<std::string> requireHooks, shaderProfiles;
@@ -120,8 +145,10 @@ namespace VpScaleRenderCore
 		bool perFrame = false;          // `capture per_frame` (default with motion): one request per source frame
 		bool captureModeSet = false;
 		double settle = -1.0;           // `settle <s>`: the first sequence frame repeated first (default 3 s with motion)
-		double requireMotion = -1.0;    // `require_motion <share> [max_invalidations]`
+		double requireMotion = -1.0;    // `require_motion <share> [max_invalidations] [max_missing]`
 		long long maxInvalidations = 0;
+		long long maxMissing = 0;       // missing / duplicate / unmapped / timed-out frames allowed (default none)
+		std::string error;
 
 		bool Parse(std::istream& job)
 		{
@@ -148,11 +175,17 @@ namespace VpScaleRenderCore
 				else if (k == "motion") { std::string v; s >> v; motion = v == "vectors" || v == "on"; }
 				else if (k == "capture") { std::string v; s >> v; perFrame = v == "per_frame"; captureModeSet = true; }
 				else if (k == "settle") s >> settle;
-				else if (k == "require_motion") { s >> requireMotion; if (!(s >> maxInvalidations)) maxInvalidations = 0; }
+				else if (k == "require_motion") { s >> requireMotion; if (!(s >> maxInvalidations)) maxInvalidations = 0; if (!(s >> maxMissing)) maxMissing = 0; }
 			}
 			if (!captureModeSet) perFrame = motion;
 			if (settle < 0.0) settle = motion ? 3.0 : 0.0;
-			return !(dllPath.empty() || configPath.empty() || shots.empty() || resultPath.empty() || !sw || !sh || !ww || !wh || pictures.empty());
+			if (rn <= 0 || rd <= 0) { error = "the source line needs a rate: source <w> <h> <rateNum> <rateDen>"; return false; }
+			if (dllPath.empty() || configPath.empty() || shots.empty() || resultPath.empty() || !sw || !sh || !ww || !wh || pictures.empty())
+			{
+				error = "incomplete job (dll, config, shots, result, source, window and at least one picture are required)";
+				return false;
+			}
+			return true;
 		}
 	};
 
@@ -239,6 +272,28 @@ namespace VpScaleRenderCore
 		return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 	}
 
+	// The renderer's own configuration validator on a file (audit 2026-10-24): a unified file whose
+	// profile model the renderer would drop ("unified renderer configuration ignored") is an error,
+	// never a render with other settings. A legacy (non-unified) file has no model to validate.
+	inline bool ValidateRendererConfig(const std::string& path, std::string& error)
+	{
+		ConfigFile config;
+		if (!config.Load(path))
+		{
+			error = "the configuration " + path + " cannot be loaded";
+			return false;
+		}
+		if (!RendererProfileConfig::IsUnified(config))
+			return true;
+		RendererProfileConfig::Model model;
+		if (!RendererProfileConfig::Read(config, model, error))
+		{
+			error = "the renderer would ignore " + path + ": " + error;
+			return false;
+		}
+		return true;
+	}
+
 	struct Outcome
 	{
 		int rc = 0;
@@ -263,13 +318,36 @@ namespace VpScaleRenderCore
 		CreateDirectoryA(job.shots.c_str(), nullptr);
 		SetEnvironmentVariableA("VP_TEST_SCREENSHOT_DIR", job.shots.c_str());
 		_putenv_s("VP_TEST_SCREENSHOT_DIR", job.shots.c_str());
+		{
+			std::string cfgError;
+			if (!ValidateRendererConfig(job.configPath, cfgError))
+			{
+				CaptureLog(("VpScaleRender: CONFIGURATION REJECTED (the job's own file): " + cfgError).c_str());
+				say("ASSERT: configuration rejected: " + cfgError);
+				outcome.rc = 8;
+				return outcome;
+			}
+		}
 		if (job.motion)
 		{
-			// The motion overrides in a configuration of the tool's own (the job's file is not changed).
+			// The motion overrides in a configuration of the tool's own (the job's file is not changed),
+			// validated with the renderer's own reader before anything renders.
 			const std::string motionConfig = job.shots + "\\vp-scale-render-motion.cfg";
-			std::ofstream(motionConfig, std::ios::binary | std::ios::trunc) << Seq::WithMotionOverrides(ReadText(job.configPath));
+			Seq::SectionPlan plan;
+			std::ofstream(motionConfig, std::ios::binary | std::ios::trunc) << Seq::WithMotionOverrides(ReadText(job.configPath), &plan);
 			job.configPath = motionConfig;
-			CaptureLog(("VpScaleRender: motion vectors: configuration with the motion overrides " + motionConfig).c_str());
+			std::string targets;
+			for (const std::string& t : plan.targets) targets += (targets.empty() ? "" : ", ") + ("[" + t + "]");
+			CaptureLog(("VpScaleRender: motion vectors: configuration with the motion overrides " + motionConfig + " (" +
+				(plan.unified ? "unified" : "legacy") + " form; overrides in " + targets + (plan.added.empty() ? "" : " (added)") + ")").c_str());
+			std::string cfgError;
+			if (!ValidateRendererConfig(motionConfig, cfgError))
+			{
+				CaptureLog(("VpScaleRender: CONFIGURATION REJECTED (with the motion overrides): " + cfgError).c_str());
+				say("ASSERT: configuration rejected: " + cfgError);
+				outcome.rc = 8;
+				return outcome;
+			}
 		}
 		{
 			// A persistent shader cache beside this tool (the renderer reads VP_TEST_SHADER_CACHE_DIR),
@@ -374,8 +452,27 @@ namespace VpScaleRenderCore
 		long long acceptedRequests = 0, completed = 0;
 
 		auto due = [&](long long frame) { return anchor + period * (frame - anchorN); };
-		// Sends frame n at its due time. A stall of the tool (more than half a period late) pauses the
-		// capture clock and moves the schedule instead of sending a burst (Clock).
+		const double ticksPerSecond = static_cast<double>(session.ticksPerSecond);
+		// A wait of the tool with the capture clock paused (frozen at its start, resumed with the waited
+		// time added to the offset) and the schedule moved by the same time. Returns done() at the end.
+		auto pausedWait = [&](const std::function<bool()>& done, std::chrono::milliseconds limit)
+		{
+			if (done()) return true;
+			clock.Pause();
+			const auto t0 = Steady::now();
+			bool ok = false;
+			while (!(ok = done()) && Steady::now() - t0 < limit)
+			{
+				Pump();
+				std::this_thread::sleep_for(std::chrono::milliseconds(2));
+			}
+			const long long paused = clock.Resume();
+			anchor += std::chrono::duration_cast<Steady::duration>(std::chrono::duration<double>(static_cast<double>(paused) / ticksPerSecond));
+			return ok;
+		};
+		long long backPressureTimeouts = 0, captureTimeouts = 0;
+		// Sends frame n at its due time. An untracked stall (more than half a period late) moves the
+		// schedule and the clock's offset instead of sending a burst; the clock holds (never rewinds).
 		// Back-pressure (motion / per-frame jobs): a GPU slower than the declared rate (a laptop at 4K
 		// with the motion estimate and a capture per frame) would let the queue grow until the
 		// renderer flushes it as stale - a backlog flush, which invalidates the vectors. The tool
@@ -389,11 +486,10 @@ namespace VpScaleRenderCore
 			if (backPressure && renderer->GetFrameQueueSize() >= 4)
 			{
 				++heldFrames;
-				const auto waitStart = Steady::now();
-				while (renderer->GetFrameQueueSize() >= 4 && Steady::now() - waitStart < std::chrono::seconds(3))
+				if (!pausedWait([&] { return renderer->GetFrameQueueSize() < 4; }, std::chrono::seconds(3)))
 				{
-					Pump();
-					std::this_thread::sleep_for(std::chrono::milliseconds(2));
+					++backPressureTimeouts;   // counted as a failure: the frame is sent into a full queue
+					CaptureLog("VpScaleRender: back-pressure wait timed out (the renderer's queue stayed full for 3 s)");
 				}
 			}
 			const auto now = Steady::now();
@@ -401,7 +497,7 @@ namespace VpScaleRenderCore
 			{
 				const auto late = now - due(n);
 				anchor += late;
-				clock.offset += static_cast<long long>(std::chrono::duration<double>(late).count() * static_cast<double>(session.ticksPerSecond));
+				clock.AddUntrackedStall(static_cast<long long>(std::chrono::duration<double>(late).count() * ticksPerSecond));
 			}
 			std::this_thread::sleep_until(due(n));
 			std::vector<BYTE>& buffer = ring[static_cast<size_t>(n) % ring.size()];
@@ -482,7 +578,23 @@ namespace VpScaleRenderCore
 				while (end < job.pictures.size() && job.pictures[end].seq) ++end;
 				Loader loader(job.pictures, pi, end, job.sw, job.sh, rowBytes, frameBytes);
 				Loader::Frame f;
-				bool have = loader.Next(f);
+				// a frame from the loader; waiting for it pauses the clock (a slow disk is not a gap)
+				auto loadNext = [&](Loader::Frame& out)
+				{
+					if (!loader.Ready())
+					{
+						clock.Pause();
+						const bool got = loader.Next(out);
+						const long long paused = clock.Resume();
+						anchor += std::chrono::duration_cast<Steady::duration>(std::chrono::duration<double>(static_cast<double>(paused) / ticksPerSecond));
+						return got;
+					}
+					return loader.Next(out);
+				};
+				std::vector<std::pair<std::string, int>> groupPictures;   // (tag, frames sent) for the coverage check
+				std::map<int, int> sentPerPicture;
+				const size_t capturesBefore = outcome.captures.size();
+				bool have = loadNext(f);
 				std::vector<BYTE> last;
 				std::vector<Seq::Capture> done;
 				auto emit = [&]()
@@ -503,7 +615,7 @@ namespace VpScaleRenderCore
 				{
 					const bool more = !f.data.empty() && !f.last && head.size() < 7;
 					head.push_back(std::move(f));
-					have = more && loader.Next(f);
+					have = more && loadNext(f);
 					if (!more) { have = false; break; }
 				}
 				const bool streamLeft = !head.empty() && !(head.back().last && head.back().picture + 1 == static_cast<int>(end));
@@ -531,6 +643,12 @@ namespace VpScaleRenderCore
 					for (;;)
 					{
 						send(head[pos].data, "settle", -1);
+						int next = pos, ndir = dir;   // where the ping-pong goes next
+						if (m > 1)
+						{
+							if (next + ndir < 0 || next + ndir >= m) ndir = -ndir;
+							next += ndir;
+						}
 						{
 							std::lock_guard<std::mutex> g(LogMutex());
 							const auto& lines = LogLines();
@@ -547,14 +665,18 @@ namespace VpScaleRenderCore
 						const auto now = Steady::now();
 						const bool quiet = now - started >= std::chrono::duration<double>(job.settle) &&
 							now - noisy >= std::chrono::seconds(2) && estimating;
-						if (pos == 0 && (quiet || now - started >= std::chrono::seconds(30)))
+						// It ends on the frame BEFORE frame 0 in the ping-pong (frame 1 coming down), so the
+						// measured frames start with a real pair (1 -> 0), never a repeated frame 0 (audit
+						// 2026-10-24). A one-frame picture can only repeat its frame.
+						if ((m == 1 || next == 0) && (quiet || now - started >= std::chrono::seconds(30)))
 							break;
-						if (m > 1)
-						{
-							if (pos + dir < 0 || pos + dir >= m) dir = -dir;
-							pos += dir;
-						}
+						pos = next;
+						dir = ndir;
 					}
+					// A capture at the settle's end: its sidecar holds the invalidation count the motion check
+					// starts from (the log is throttled after 50 lines; the sidecars are exact).
+					if (!job.noCapture)
+						pausedWait([&] { return request(); }, std::chrono::seconds(2));
 					char text[160];
 					snprintf(text, sizeof(text), "VpScaleRender: settled after %.1f s (%d lead frames played back and forth)",
 						std::chrono::duration<double>(Steady::now() - started).count(), m);
@@ -568,7 +690,7 @@ namespace VpScaleRenderCore
 				auto nextFrame = [&](Loader::Frame& out)
 				{
 					if (!head.empty()) { out = std::move(head.front()); head.pop_front(); return true; }
-					return streamLeft && loader.Next(out);
+					return streamLeft && loadNext(out);
 				};
 				while (nextFrame(f))
 				{
@@ -577,17 +699,17 @@ namespace VpScaleRenderCore
 						send(f.data, job.pictures[f.picture].tag, f.index);
 						last = f.data;
 						++frames;
+						++sentPerPicture[f.picture];
 						std::this_thread::sleep_until(due(n - 1) + period / 2);
 						// One capture per source frame: while the previous request has not been taken yet (a
 						// slow render), the stream waits for it (the clock pauses) instead of skipping a frame.
 						if (!job.noCapture && !request())
 						{
 							++heldForCapture;
-							const auto waitStart = Steady::now();
-							while (!request() && Steady::now() - waitStart < std::chrono::seconds(2))
+							if (!pausedWait([&] { return request(); }, std::chrono::seconds(2)))
 							{
-								Pump();
-								std::this_thread::sleep_for(std::chrono::milliseconds(2));
+								++captureTimeouts;   // this frame's capture is missing: counted, never silent
+								CaptureLog("VpScaleRender: capture request not taken within 2 s (the previous one is still queued)");
 							}
 						}
 						drain(done);
@@ -620,9 +742,36 @@ namespace VpScaleRenderCore
 						if ((reachedTail || job.noCapture) && completed >= acceptedRequests) break;
 					}
 				}
-				char text[200];
-				snprintf(text, sizeof(text), "VpScaleRender: per-frame sequence of %zu picture(s), %d frames, %lld captures so far",
-					end - pi, frames, completed);
+				// Coverage of this group (audit 2026-10-24): every frame captured exactly once, every capture mapped.
+				if (!job.noCapture)
+				{
+					for (size_t q = pi; q < end; ++q)
+						groupPictures.emplace_back(job.pictures[q].tag, sentPerPicture[static_cast<int>(q)]);
+					std::set<std::string> tags;
+					for (const auto& gp : groupPictures) tags.insert(gp.first);
+					std::vector<std::pair<std::string, int>> caps;
+					for (size_t q = capturesBefore; q < outcome.captures.size(); ++q)
+					{
+						const Seq::Capture& c = outcome.captures[q];
+						if (c.tag == "-" || tags.count(c.tag)) caps.emplace_back(c.tag, c.frame);
+					}
+					const Seq::Coverage cov = Seq::CoverageOf(groupPictures, caps, backPressureTimeouts + captureTimeouts);
+					backPressureTimeouts = captureTimeouts = 0;
+					Seq::Coverage& total = outcome.check.coverage;
+					total.expected += cov.expected;
+					total.captured += cov.captured;
+					total.missing += cov.missing;
+					total.duplicates += cov.duplicates;
+					total.unmapped += cov.unmapped;
+					total.timeouts += cov.timeouts;
+					for (const std::string& e : cov.examples) if (total.examples.size() < 6) total.examples.push_back(e);
+					failures += static_cast<int>(cov.Failures());
+				}
+				char text[260];
+				snprintf(text, sizeof(text), "VpScaleRender: per-frame sequence of %zu picture(s), %d frames, %lld captures so far; coverage %lld/%lld "
+					"(missing %lld, duplicate %lld, unmapped %lld, timed out %lld)", end - pi, frames, completed, outcome.check.coverage.captured,
+					outcome.check.coverage.expected, outcome.check.coverage.missing, outcome.check.coverage.duplicates, outcome.check.coverage.unmapped,
+					outcome.check.coverage.timeouts);
 				CaptureLog(text);
 				say(text);
 				pi = end;
@@ -719,6 +868,7 @@ namespace VpScaleRenderCore
 				std::to_string(capture.sourceSequence) + ") " + (capture.ok ? "ok" : "FAIL"));
 			++pi;
 		}
+		failures += static_cast<int>(backPressureTimeouts + captureTimeouts);   // legacy pictures' waits that gave up
 		CString status;
 		if (renderer->GetSourceResolutionStatus(status)) CaptureLog(("VpScaleRender: source resolution: " + std::string(CStringA(status).GetString())).c_str());
 		renderer->Stop();
@@ -744,6 +894,20 @@ namespace VpScaleRenderCore
 			outcome.check.invalidations = settled ? total - atSettle : 0;
 			for (const auto& c : causes) outcome.invalidationCauses += c.first + " x" + std::to_string(c.second) + "; ";
 		}
+		{
+			const Seq::Capture* base = nullptr;
+			const Seq::Capture* lastMeasured = nullptr;
+			for (const Seq::Capture& c : outcome.captures)
+			{
+				if (c.tag == "settle" && c.invalidations >= 0) base = &c;
+				else if (c.tag != "tail" && c.tag != "settle" && c.invalidations >= 0 && base) lastMeasured = &c;
+			}
+			if (base && lastMeasured)
+			{
+				outcome.check.invalidations = lastMeasured->invalidations - base->invalidations;
+				outcome.check.invalidationsFromSidecar = true;
+			}
+		}
 		const Seq::Capture* first = nullptr;
 		const Seq::Capture* lastCapture = nullptr;
 		for (const Seq::Capture& c : outcome.captures)
@@ -764,11 +928,15 @@ namespace VpScaleRenderCore
 		{
 			std::ostringstream s;
 			s << "VpScaleRender: motion summary: mode=" << (job.motion ? "vectors" : "off") << " capture=" << (job.perFrame ? "per_frame" : "after_complete")
-				<< " frames_sent=" << n << " held_for_queue=" << heldFrames << " held_for_capture=" << heldForCapture << " clock_paused_ms=" << clock.offset.load() * 1000 / (std::max)(1LL, session.ticksPerSecond) << " settle_end_sequence=" << settleEndSequence
+				<< " frames_sent=" << n << " held_for_queue=" << heldFrames << " held_for_capture=" << heldForCapture << " clock_paused_ms=" << clock.Offset() * 1000 / (std::max)(1LL, session.ticksPerSecond)
+				<< " clock_untracked_stalls=" << clock.Untracked() << " clock_holds=" << clock.Holds() << " settle_end_sequence=" << settleEndSequence
 				<< " estimates_after_settle=" << outcome.check.estimates << " over_frames=" << outcome.check.framesSent
 				<< " invalidations_total=" << outcome.invalidationsTotal << " invalidations_after_settle=" << outcome.check.invalidations
+				<< (outcome.check.invalidationsFromSidecar ? " (sidecars)" : " (log)")
 				<< " (" << outcome.invalidationCauses << ") captures_after_settle=" << outcome.check.captures
-				<< " vectors=" << outcome.check.vectors << " no_vectors=" << outcome.check.noVectors << " other=" << outcome.check.other;
+				<< " vectors=" << outcome.check.vectors << " no_vectors=" << outcome.check.noVectors << " other=" << outcome.check.other
+				<< " coverage=" << outcome.check.coverage.captured << "/" << outcome.check.coverage.expected << " missing=" << outcome.check.coverage.missing
+				<< " duplicate=" << outcome.check.coverage.duplicates << " unmapped=" << outcome.check.coverage.unmapped << " timed_out=" << outcome.check.coverage.timeouts;
 			outcome.summary = s.str();
 			CaptureLog(outcome.summary.c_str());
 			say(outcome.summary);
@@ -800,6 +968,19 @@ namespace VpScaleRenderCore
 				say("ASSERT: adaptive downscale without SSimDownscaler");
 				assertFail = 1;
 			}
+			for (const std::string& line : LogLines())
+				if (Seq::IsConfigRejectionLine(line))
+				{
+					say("ASSERT: the renderer did not apply the configuration: " + line);
+					assertFail = 8;
+					break;
+				}
+		}
+		if (assertFail == 8)
+		{
+			CaptureLog("VpScaleRender: CONFIGURATION REJECTED by the renderer (see the line above); captures invalid");
+			outcome.rc = 8;
+			return outcome;
 		}
 		if (assertFail)
 		{
@@ -811,7 +992,7 @@ namespace VpScaleRenderCore
 		if (job.requireMotion >= 0.0)
 		{
 			std::string why;
-			if (!outcome.check.Passes(job.requireMotion, job.maxInvalidations, why))
+			if (!outcome.check.Passes(job.requireMotion, job.maxInvalidations, why, job.maxMissing))
 			{
 				CaptureLog(("VpScaleRender: MOTION CHECK FAILED: " + why).c_str());
 				say("ASSERT: motion check failed: " + why);
@@ -830,7 +1011,7 @@ namespace VpScaleRenderCore
 		std::ifstream in(path);
 		if (!job.Parse(in))
 		{
-			if (console) console("incomplete job");
+			if (console) console("bad job: " + job.error);
 			Outcome o;
 			o.rc = 2;
 			return o;

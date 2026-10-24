@@ -14,6 +14,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
+#include <map>
 #include <set>
 #include <sstream>
 #include <string>
@@ -46,9 +47,13 @@ namespace VpScaleRenderSequence
 	// "alone" for the occlusion mask on a film-like source with no de-judder strength
 	// (DejudderPolicy::Decide: Active, no extras), so every source frame gets an A->B estimate
 	// while no refresh is ever warped: each capture still shows exactly one source frame. The
-	// occlusion mask itself is only applied by a sigma-delta shader; the training renders have
-	// none (temporal_dither off), so it changes no output pixel. Interpolation, hiccup repair
-	// and libplacebo's smooth motion stay off (they would mix or replace frames).
+	// occlusion mask itself is only applied by a sigma-delta shader; temporal_dither is forced off
+	// (audit 2026-10-24: its default is auto, which may add the sigma-delta) so the mask changes no
+	// output pixel. The training renders are the input of nets that run BEFORE VP's output dither
+	// (the scaler's sub-pass), so a render without dither is the right training input whatever the
+	// shipped dither setting is. Interpolation, hiccup repair and libplacebo's smooth motion stay
+	// off (they would mix or replace frames). Every key is valid in the display group ([vprenderer]
+	// and its variants: input / motion keys are accepted there, RendererProfileConfig).
 	struct Override { const char* key; const char* value; };
 	inline const std::vector<Override>& MotionOverrides()
 	{
@@ -60,6 +65,7 @@ namespace VpScaleRenderSequence
 			{ "interpolation_fill_gaps", "off" },
 			{ "motion_engine", "vp" },
 			{ "smooth_motion", "off" },
+			{ "temporal_dither", "off" },
 		};
 		return overrides;
 	}
@@ -72,55 +78,140 @@ namespace VpScaleRenderSequence
 		return s.substr(a, b - a);
 	}
 
-	// A renderer section is [vprenderer] or a profile [vprenderer.<name>] (not the shader
-	// sections). The input-rule sections ([vprenderer.input.*]) are profiles too.
-	inline bool IsRendererSection(const std::string& header)
+	inline std::string Lower(std::string s)
 	{
-		return header == "[vprenderer]" || header.rfind("[vprenderer.", 0) == 0;
+		for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		return s;
 	}
 
-	// The configuration text with the motion overrides: in every renderer section an override
-	// key's existing line is dropped and the overrides follow the section header. Everything
-	// else (comments, other keys, shader sections) is kept as it was. With no [vprenderer]
-	// section one is added. The job's own configuration file is never changed: the tool writes
-	// this text to a file of its own.
-	inline std::string WithMotionOverrides(const std::string& text)
+	// The renderer's child namespaces below [vprenderer] (RendererProfileConfig::IsRendererChildNamespace):
+	// independent profile groups with their own key sets, never display variants.
+	inline bool IsChildNamespace(const std::string& name)
+	{
+		for (const char* child : { "input", "input_processing", "scaling", "motion", "color", "output", "viewport", "zoom", "subtitles" })
+		{
+			const std::string root(child);
+			if (name == root || (name.size() > root.size() && name.compare(0, root.size(), root) == 0 && name[root.size()] == '.'))
+				return true;
+		}
+		return false;
+	}
+
+	// Where the motion overrides go, by the form of the file (audit 2026-10-24: never into the child
+	// groups, where the keys are invalid and the whole unified model is dropped):
+	// - unified form with [vprenderer]: [vprenderer] and its display variants [vprenderer.<name>];
+	// - a file without [vprenderer]: the display section the renderer reads (RendererConfigView:
+	//   [vpvr.display], else [display], else [libplacebo]); if there is none, one is added - [vprenderer]
+	//   when the file is unified (it has [general] / profile sections), else [display] (a legacy file
+	//   stays legacy).
+	// Override keys are stripped from every other renderer-owned section and profile section
+	// ([vprenderer.*] child groups, [profiles.*]), so no profile can switch them back.
+	struct SectionPlan
+	{
+		std::set<std::string> targets;   // lower-case section names that get the overrides
+		std::string added;               // a section the text did not have, added at the end ("" = none)
+		bool unified = false;
+	};
+
+	inline SectionPlan PlanMotionSections(const std::vector<std::string>& sectionsLower)
+	{
+		SectionPlan plan;
+		const std::set<std::string> all(sectionsLower.begin(), sectionsLower.end());
+		for (const std::string& s : sectionsLower)
+			if (s == "vprenderer" || s == "general" || s == "profile_groups" || s == "event_actions" ||
+				s.rfind("profiles.", 0) == 0 || s.rfind("profile_groups.", 0) == 0)
+				plan.unified = true;
+		if (all.count("vprenderer"))
+		{
+			plan.targets.insert("vprenderer");
+			for (const std::string& s : sectionsLower)
+				if (s.rfind("vprenderer.", 0) == 0)
+				{
+					const std::string name = s.substr(11);
+					if (!name.empty() && name.find('.') == std::string::npos && !IsChildNamespace(name))
+						plan.targets.insert(s);
+				}
+			return plan;
+		}
+		for (const char* legacy : { "vpvr.display", "display", "libplacebo" })
+			if (all.count(legacy))
+			{
+				plan.targets.insert(legacy);
+				return plan;
+			}
+		plan.added = plan.unified ? "vprenderer" : "display";
+		plan.targets.insert(plan.added);
+		return plan;
+	}
+
+	inline bool StripsOverrides(const std::string& sectionLower)
+	{
+		return sectionLower == "vprenderer" || sectionLower.rfind("vprenderer.", 0) == 0 || sectionLower == "vpvr.display" ||
+			sectionLower == "display" || sectionLower == "libplacebo" || sectionLower.rfind("profiles.", 0) == 0;
+	}
+
+	// The configuration text with the motion overrides (see PlanMotionSections). Everything else
+	// (comments, other keys, shader sections, the file's form) is kept. The job's own configuration
+	// file is never changed: the tool writes this text to a file of its own and validates it with
+	// the renderer's own RendererProfileConfig before rendering (VpScaleRenderCore).
+	inline std::string WithMotionOverrides(const std::string& text, SectionPlan* planOut = nullptr)
 	{
 		std::set<std::string> keys;
 		for (const Override& o : MotionOverrides()) keys.insert(o.key);
-		std::istringstream in(text);
-		std::ostringstream out;
-		std::string line;
-		bool inRenderer = false, sawGlobal = false;
-		while (std::getline(in, line))
+		std::vector<std::string> lines, sections;
 		{
-			if (!line.empty() && line.back() == '\r') line.pop_back();
-			const std::string t = Trim(line);
-			if (!t.empty() && t.front() == '[')
+			std::istringstream in(text);
+			std::string line;
+			while (std::getline(in, line))
 			{
-				inRenderer = IsRendererSection(t);
-				sawGlobal = sawGlobal || t == "[vprenderer]";
+				if (!line.empty() && line.back() == '\r') line.pop_back();
+				const std::string t = Trim(line);
+				if (t.size() >= 2 && t.front() == '[' && t.back() == ']')
+					sections.push_back(Lower(Trim(t.substr(1, t.size() - 2))));
+				lines.push_back(line);
+			}
+		}
+		const SectionPlan plan = PlanMotionSections(sections);
+		if (planOut) *planOut = plan;
+		std::ostringstream out;
+		std::string current;
+		for (const std::string& line : lines)
+		{
+			const std::string t = Trim(line);
+			if (t.size() >= 2 && t.front() == '[' && t.back() == ']')
+			{
+				current = Lower(Trim(t.substr(1, t.size() - 2)));
 				out << line << "\n";
-				if (inRenderer)
+				if (plan.targets.count(current))
 					for (const Override& o : MotionOverrides())
 						out << o.key << ": " << o.value << "\n";
 				continue;
 			}
-			if (inRenderer && !t.empty() && t[0] != '#' && t[0] != ';')
+			if (StripsOverrides(current) && !t.empty() && t[0] != '#' && t[0] != ';')
 			{
-				const size_t colon = t.find_first_of(":=");
-				if (colon != std::string::npos && keys.count(Trim(t.substr(0, colon))))
+				const size_t sep = t.find_first_of(":=");
+				if (sep != std::string::npos && keys.count(Lower(Trim(t.substr(0, sep)))))
 					continue;
 			}
 			out << line << "\n";
 		}
-		if (!sawGlobal)
+		if (!plan.added.empty())
 		{
-			out << "[vprenderer]\n";
+			out << "[" << plan.added << "]\n";
 			for (const Override& o : MotionOverrides())
 				out << o.key << ": " << o.value << "\n";
 		}
 		return out.str();
+	}
+
+	// Renderer log lines that mean the configuration (or a part of it) was NOT applied: a motion /
+	// training render must fail on them, never run with other settings than asked for.
+	inline bool IsConfigRejectionLine(const std::string& line)
+	{
+		if (line.find("unified renderer configuration ignored") != std::string::npos) return true;
+		if (line.find("exists but is not applied") != std::string::npos) return true;
+		if ((line.rfind("profile '", 0) == 0 || line.rfind("display rule '", 0) == 0) && line.find("': invalid ") != std::string::npos) return true;
+		return false;
 	}
 
 	// The value of a top-level "key": value in a capture sidecar (string or number), "" if absent.
@@ -182,16 +273,58 @@ namespace VpScaleRenderSequence
 	// The motion check (job key `require_motion <share>`): after the settle, at least `share` of
 	// the captures ran the grain map on vectors, no invalidation happened, and the estimate ran
 	// for most source frames sent.
+	// Per-frame coverage of a per_frame render (audit 2026-10-24: no silent drops): every frame of every
+	// picture captured exactly once; a capture the tool cannot map to a sent frame is "unmapped";
+	// waits that gave up (queue back-pressure, a capture request never taken) are counted too.
+	struct Coverage
+	{
+		long long expected = 0, captured = 0, missing = 0, duplicates = 0, unmapped = 0, timeouts = 0;
+		std::vector<std::string> examples;   // a few "tag:frame" of the missing / duplicate frames
+		long long Failures() const { return missing + duplicates + unmapped + timeouts; }
+	};
+
+	// pictures: (tag, frames) in play order; caps: (tag, frame) of every capture of the measured frames
+	// (settle / tail captures excluded by the caller; tag "-" = unmapped).
+	inline Coverage CoverageOf(const std::vector<std::pair<std::string, int>>& pictures,
+		const std::vector<std::pair<std::string, int>>& caps, long long timeouts)
+	{
+		Coverage c;
+		c.timeouts = timeouts;
+		std::map<std::pair<std::string, int>, int> count;
+		for (const auto& cap : caps)
+		{
+			if (cap.first == "-" || cap.second < 0) { ++c.unmapped; continue; }
+			++count[cap];
+		}
+		for (const auto& pic : pictures)
+			for (int k = 0; k < pic.second; ++k)
+			{
+				++c.expected;
+				const auto it = count.find(std::make_pair(pic.first, k));
+				const int n = it == count.end() ? 0 : it->second;
+				if (n >= 1) ++c.captured;
+				if (n == 0) { ++c.missing; if (c.examples.size() < 6) c.examples.push_back("missing " + pic.first + ":" + std::to_string(k)); }
+				if (n > 1) { c.duplicates += n - 1; if (c.examples.size() < 6) c.examples.push_back("duplicate " + pic.first + ":" + std::to_string(k)); }
+			}
+		return c;
+	}
+
+	// The motion check (job key `require_motion <share> [max_invalidations] [max_missing]`): after the
+	// settle, at least `share` of the captures ran the grain map on vectors, at most max_invalidations
+	// invalidations (from the capture sidecars), the estimate ran for most frames, and every measured
+	// frame was captured exactly once (at most max_missing missing / duplicate / unmapped / timed out).
 	struct MotionCheck
 	{
 		int captures = 0, vectors = 0, noVectors = 0, other = 0;
 		long long framesSent = 0;      // source frames sent after the settle
 		long long estimates = -1;      // estimates after the settle (-1 unknown)
 		long long invalidations = 0;   // invalidations after the settle
+		bool invalidationsFromSidecar = false;
 		bool metadataKnown = false;    // the DLL writes hybrid_motion_mode
+		Coverage coverage;
 
 		double VectorShare() const { return captures ? static_cast<double>(vectors) / captures : 0.0; }
-		bool Passes(double share, long long maxInvalidations, std::string& why) const
+		bool Passes(double share, long long maxInvalidations, std::string& why, long long maxMissing = 0) const
 		{
 			std::ostringstream s;
 			bool ok = true;
@@ -200,6 +333,14 @@ namespace VpScaleRenderSequence
 			else if (VectorShare() < share) { s << "vectors on " << vectors << " of " << captures << " captures (< " << share << "); "; ok = false; }
 			if (invalidations > maxInvalidations) { s << invalidations << " motion invalidations after the settle (> " << maxInvalidations << "); "; ok = false; }
 			if (estimates >= 0 && framesSent > 0 && estimates * 10 < framesSent * 8) { s << estimates << " estimates for " << framesSent << " frames; "; ok = false; }
+			if (coverage.Failures() > maxMissing)
+			{
+				s << "coverage: " << coverage.missing << " missing, " << coverage.duplicates << " duplicate, " << coverage.unmapped << " unmapped, "
+					<< coverage.timeouts << " timed-out of " << coverage.expected << " frames (> " << maxMissing << ")";
+				for (const std::string& e : coverage.examples) s << "; " << e;
+				s << "; ";
+				ok = false;
+			}
 			why = s.str();
 			return ok;
 		}

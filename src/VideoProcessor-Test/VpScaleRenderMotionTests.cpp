@@ -10,6 +10,8 @@
 #include "vprenderer/DejudderPolicy.h"
 
 #include <algorithm>
+#include <cstring>
+#include <set>
 #include <cmath>
 #include <fstream>
 #include <map>
@@ -78,6 +80,7 @@ namespace VpScaleRenderMotionTests
 			Assert::AreEqual(std::string("0"), o["dejudder_strength"]);
 			Assert::AreEqual(std::string("0"), o["dejudder_strength_even"]);
 			Assert::AreEqual(std::string("off"), o["interpolation"]);
+			Assert::AreEqual(std::string("off"), o["temporal_dither"], L"no sigma-delta: the occlusion mask changes no pixel");
 			for (const double source : { 11.988, 12.0, 23.976, 24.0, 25.0, 29.97, 47.952, 48.0 })
 				for (const double display : { 59.0, 60.0, 59.94, 120.0, 144.0, 24.0 })
 				{
@@ -104,26 +107,153 @@ namespace VpScaleRenderMotionTests
 			Assert::IsTrue(DejudderPolicy::Decide(video) == DejudderPolicy::Reason::VideoRateMaskOnly);
 		}
 
-		TEST_METHOD(MotionOverridesRewriteOnlyTheirKeysInEveryRendererSection)
+		static std::string Section(const std::string& text, const std::string& name)
 		{
+			const std::string head = "[" + name + "]\n";
+			const size_t a = text.find(head);
+			if (a == std::string::npos) return std::string("<absent>");
+			const size_t b = text.find("\n[", a + head.size());
+			return text.substr(a + head.size(), b == std::string::npos ? std::string::npos : b + 1 - a - head.size());
+		}
+
+		static std::string WriteTemp(const std::string& name, const std::string& text)
+		{
+			char temp[MAX_PATH] = {};
+			GetTempPathA(MAX_PATH, temp);
+			const std::string path = std::string(temp) + "vpsr-cfg-" + name;
+			std::ofstream(path, std::ios::binary | std::ios::trunc) << text;
+			return path;
+		}
+
+		static std::string RepoFile(const std::string& relative)
+		{
+			std::string path = __FILE__;
+			std::replace(path.begin(), path.end(), '/', '\\');
+			const size_t at = path.rfind("\\src\\VideoProcessor-Test\\");
+			Assert::IsTrue(at != std::string::npos);
+			return path.substr(0, at) + "\\" + relative;
+		}
+
+		TEST_METHOD(MotionOverridesGoOnlyToTheDisplayGroupAndKeepTheModelValid)
+		{
+			// Audit 2026-10-24 (HIGH): the overrides must never land in the child groups ([vprenderer.input.*],
+			// [vprenderer.motion.*], [vprenderer.color.*], ...), where the keys are invalid and the renderer drops the
+			// whole unified model ("unified renderer configuration ignored"). They go to [vprenderer] and its display
+			// variants; the same keys are removed from every child section so no profile can switch them back.
 			const std::string cfg =
 				"[general]\npersist_profile_selection: false\n"
-				"[vprenderer]\nquality: high\ndejudder_strength: 0.5\n# a comment\nadaptive_w_base: 0.2\nunknown_key: kept\n"
-				"[vprenderer.Default]\nquality: high\nocclusion_mask: off\ninterpolation: on\n"
+				"[vprenderer]\nquality: high\ndejudder_strength: 0.5\n# a comment\nadaptive_w_base: 0.2\n"
+				"[vprenderer.Default]\nquality: high\nocclusion_mask: off\ninterpolation: auto\n"
+				"[vprenderer.input]\nlabel: Input\n"
+				"[vprenderer.input.film]\nwhen: $source_rate < 30\ndejudder_strength: 0.7\n"
+				"[vprenderer.motion]\nlabel: Motion\n"
+				"[vprenderer.motion.smooth]\nsmooth_motion: always\n"
 				"[shader.standard.ssim_downscaler]\nshader_type: custom\nglsl_file: SSimDownscaler.glsl\ninterpolation: on\n";
-			const std::string out = Seq::WithMotionOverrides(cfg);
-			auto count = [&](const std::string& s) { size_t c = 0; for (size_t p = out.find(s); p != std::string::npos; p = out.find(s, p + 1)) ++c; return c; };
-			Assert::AreEqual(size_t(2), count("occlusion_mask: on"));
-			Assert::AreEqual(size_t(0), count("occlusion_mask: off"));
-			Assert::AreEqual(size_t(0), count("dejudder_strength: 0.5"));
-			Assert::AreEqual(size_t(2), count("dejudder_strength: 0\n"));
-			Assert::AreEqual(size_t(1), count("interpolation: on"), L"a shader section is not a renderer section");
-			Assert::AreEqual(size_t(1), count("# a comment"));
-			Assert::AreEqual(size_t(1), count("unknown_key: kept"));
-			Assert::AreEqual(size_t(1), count("adaptive_w_base: 0.2"));
-			Assert::AreEqual(size_t(1), count("glsl_file: SSimDownscaler.glsl"));
-			const std::string bare = Seq::WithMotionOverrides("[general]\nx: 1\n");
-			Assert::IsTrue(bare.find("[vprenderer]\nocclusion_mask: on") != std::string::npos, L"a missing [vprenderer] is added");
+			Seq::SectionPlan plan;
+			const std::string out = Seq::WithMotionOverrides(cfg, &plan);
+			Assert::IsTrue(plan.unified && plan.added.empty());
+			Assert::IsTrue(plan.targets == std::set<std::string>({ "vprenderer", "vprenderer.default" }), L"only [vprenderer] and its display variant");
+			for (const char* sec : { "vprenderer", "vprenderer.Default" })
+				for (const auto& o : Seq::MotionOverrides())
+				{
+					const std::string body = Section(out, sec);
+					const std::string kv = std::string(o.key) + ": " + o.value + "\n";
+					Assert::IsTrue(body.find(kv) != std::string::npos, (L"override in [" + std::wstring(sec, sec + strlen(sec)) + L"]").c_str());
+				}
+			Assert::AreEqual(std::string("when: $source_rate < 30\n"), Section(out, "vprenderer.input.film"), L"child group: key removed, nothing injected");
+			Assert::AreEqual(std::string(""), Section(out, "vprenderer.motion.smooth"), L"child group: smooth_motion removed, nothing injected");
+			Assert::AreEqual(std::string("label: Input\n"), Section(out, "vprenderer.input"));
+			Assert::IsTrue(out.find("dejudder_strength: 0.5") == std::string::npos && out.find("occlusion_mask: off") == std::string::npos);
+			Assert::IsTrue(Section(out, "shader.standard.ssim_downscaler").find("interpolation: on") != std::string::npos, L"shader sections untouched");
+			Assert::IsTrue(out.find("# a comment") != std::string::npos && out.find("adaptive_w_base: 0.2") != std::string::npos);
+		}
+
+		TEST_METHOD(MotionOverridesOnTheRepoSampleAndTheDeployedFixtureStayValid)
+		{
+			// The repo's sample configuration and the deployed-style fixture: the form is kept (unified stays unified),
+			// the renderer's own reader accepts the result whenever it accepts the original, and the keys sit in
+			// [vprenderer] (the tool refuses to render, rc 8, when this ever fails).
+			for (const char* rel : { "VideoProcessor.cfg", "test-fixtures\\deployed-VideoProcessor-20260807-current.cfg",
+				"docs\\examples\\VideoProcessorRenderer.unified.proposed.cfg" })
+			{
+				const std::string path = RepoFile(rel);
+				std::ifstream in(path, std::ios::binary);
+				if (!in) { Logger::WriteMessage((std::string("absent: ") + rel + "\n").c_str()); continue; }
+				const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+				std::string errOriginal, errMotion;
+				const bool okOriginal = VpScaleRenderCore::ValidateRendererConfig(path, errOriginal);
+				Seq::SectionPlan plan;
+				const std::string out = Seq::WithMotionOverrides(text, &plan);
+				const std::string tmp = WriteTemp("sample.cfg", out);
+				const bool okMotion = VpScaleRenderCore::ValidateRendererConfig(tmp, errMotion);
+				ConfigFile a, b;
+				a.Load(path);
+				b.Load(tmp);
+				Logger::WriteMessage((std::string(rel) + ": original " + (okOriginal ? "valid" : "rejected: " + errOriginal) + "; with overrides " +
+					(okMotion ? "valid" : "rejected: " + errMotion) + "\n").c_str());
+				Assert::AreEqual(RendererProfileConfig::IsUnified(a), RendererProfileConfig::IsUnified(b), L"the form is kept");
+				if (okOriginal)
+					Assert::IsTrue(okMotion, std::wstring(errMotion.begin(), errMotion.end()).c_str());
+				std::string v;
+				const char* displaySection = b.HasSection("vprenderer") ? "vprenderer" : "display";
+				Assert::IsTrue(b.TryGetString(displaySection, "occlusion_mask", v) && v == "on", L"the override is where the renderer reads it");
+			}
+		}
+
+		TEST_METHOD(MotionOverridesKeepALegacyFileLegacy)
+		{
+			const std::string legacy = "[display]\nquality: high\ndejudder_strength: 0.4\n[shortcuts]\nx: y\n";
+			Seq::SectionPlan plan;
+			const std::string out = Seq::WithMotionOverrides(legacy, &plan);
+			Assert::IsFalse(plan.unified);
+			Assert::IsTrue(plan.targets == std::set<std::string>({ "display" }) && plan.added.empty());
+			Assert::IsTrue(out.find("[vprenderer]") == std::string::npos, L"never flipped to the unified form");
+			Assert::IsTrue(Section(out, "display").find("occlusion_mask: on\n") != std::string::npos);
+			Assert::IsTrue(out.find("dejudder_strength: 0.4") == std::string::npos);
+			const std::string bare = Seq::WithMotionOverrides("[shortcuts]\nx: y\n", &plan);
+			Assert::IsTrue(plan.added == "display" && bare.find("[display]\nocclusion_mask: on") != std::string::npos, L"a legacy file gets a legacy display section");
+			const std::string unifiedBare = Seq::WithMotionOverrides("[general]\nx: 1\n", &plan);
+			Assert::IsTrue(plan.added == "vprenderer" && unifiedBare.find("[vprenderer]\nocclusion_mask: on") != std::string::npos);
+			const std::string legacyExample = RepoFile("docs\\examples\\VideoProcessorRenderer.legacy.cfg");
+			std::ifstream in(legacyExample, std::ios::binary);
+			if (in)
+			{
+				const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+				const std::string tmp = WriteTemp("legacy.cfg", Seq::WithMotionOverrides(text, &plan));
+				ConfigFile a, b;
+				a.Load(legacyExample);
+				b.Load(tmp);
+				Assert::AreEqual(RendererProfileConfig::IsUnified(a), RendererProfileConfig::IsUnified(b), L"the legacy example keeps its form");
+			}
+		}
+
+		TEST_METHOD(ConfigRejectionLinesAreRecognised)
+		{
+			Assert::IsTrue(Seq::IsConfigRejectionLine("unified renderer configuration ignored: [vprenderer.input.film] key 'x' is not a valid input setting"));
+			Assert::IsTrue(Seq::IsConfigRejectionLine("WARNING: [vprenderer.Default] exists but is not applied: this file is not read as a unified configuration"));
+			Assert::IsTrue(Seq::IsConfigRejectionLine("profile 'vprenderer.Default': invalid dejudder_search_range '99'; keeping 8"));
+			Assert::IsTrue(Seq::IsConfigRejectionLine("display rule 'x': invalid dithering value 'q'; retaining base setting"));
+			Assert::IsFalse(Seq::IsConfigRejectionLine("De-judder: motion invalidated (frame gap; 1 in total)"));
+		}
+
+		TEST_METHOD(CoverageCountsMissingDuplicateAndUnmappedFrames)
+		{
+			const std::vector<std::pair<std::string, int>> pics = { { "a", 4 }, { "b", 3 } };
+			Seq::Coverage full = Seq::CoverageOf(pics, { { "a", 0 }, { "a", 1 }, { "a", 2 }, { "a", 3 }, { "b", 0 }, { "b", 1 }, { "b", 2 } }, 0);
+			Assert::AreEqual(0LL, full.Failures());
+			Assert::AreEqual(7LL, full.captured);
+			Seq::Coverage gaps = Seq::CoverageOf(pics, { { "a", 0 }, { "a", 0 }, { "a", 2 }, { "a", 3 }, { "-", -1 }, { "b", 0 }, { "b", 2 } }, 1);
+			Assert::AreEqual(2LL, gaps.missing);
+			Assert::AreEqual(1LL, gaps.duplicates);
+			Assert::AreEqual(1LL, gaps.unmapped);
+			Assert::AreEqual(1LL, gaps.timeouts);
+			Assert::AreEqual(5LL, gaps.Failures());
+			Seq::MotionCheck c;
+			c.captures = 7; c.vectors = 7; c.metadataKnown = true; c.coverage = gaps;
+			std::string why;
+			Assert::IsFalse(c.Passes(0.9, 0, why), L"require_motion requires full coverage");
+			Assert::IsTrue(why.find("coverage") != std::string::npos);
+			Assert::IsTrue(c.Passes(0.9, 0, why, 5), L"unless max_missing allows it");
 		}
 
 		TEST_METHOD(ResultLineKeepsTheSevenColumnsTheTrainKitReads)
@@ -190,19 +320,24 @@ namespace VpScaleRenderMotionTests
 
 		TEST_METHOD(JobKeysAndDefaults)
 		{
+			std::istringstream norate("dll a\nconfig b\nshots c\nresult d\nsource 64 32\nwindow 32 16\npicture_seq p x 12 4\n");
+			VpScaleRenderCore::Job bad;
+			Assert::IsFalse(bad.Parse(norate), L"no silent 24000/1001: a source line without a rate is an error");
+			Assert::IsTrue(bad.error.find("rate") != std::string::npos);
 			std::istringstream legacy("dll a\nconfig b\nshots c\nresult d\nsource 64 32 12000 1001\nwindow 32 16\npicture_seq p x 12 4\n");
 			VpScaleRenderCore::Job j;
 			Assert::IsTrue(j.Parse(legacy));
 			Assert::IsFalse(j.motion);
 			Assert::IsFalse(j.perFrame, L"legacy jobs keep the after-complete captures");
 			Assert::AreEqual(0.0, j.settle);
-			std::istringstream motion("dll a\nconfig b\nshots c\nresult d\nsource 64 32 12000 1001\nwindow 32 16\nmotion vectors\nrequire_motion 0.9 1\npicture_seq p x 12\n");
+			std::istringstream motion("dll a\nconfig b\nshots c\nresult d\nsource 64 32 12000 1001\nwindow 32 16\nmotion vectors\nrequire_motion 0.9 1 2\npicture_seq p x 12\n");
 			VpScaleRenderCore::Job m;
 			Assert::IsTrue(m.Parse(motion));
 			Assert::IsTrue(m.motion && m.perFrame);
 			Assert::AreEqual(3.0, m.settle);
 			Assert::AreEqual(0.9, m.requireMotion);
 			Assert::AreEqual(1LL, m.maxInvalidations);
+			Assert::AreEqual(2LL, m.maxMissing);
 		}
 	};
 
@@ -230,34 +365,38 @@ namespace VpScaleRenderMotionTests
 		return folder;
 	}
 
-	// A grain-like picture: a smooth, gently varying base with fixed per-pixel detail of film-grain
-	// amplitude (about 3 8-bit codes rms: below the hybrid's edge threshold, above its grain ramp).
-	// Spatially it reads as grain to the scalar (per-frame) measure; temporally it is clean, which
-	// only the motion-compensated temporal error of the vectors can see - and on a pan only when
-	// the vectors follow the motion.
-	double Texture(double x, double y)
+	// A picture with fine detail of film-grain amplitude (about 3 8-bit codes rms: below the hybrid's edge
+	// threshold, above its grain ramp) FIXED in the picture (it moves with a pan), on a smooth base, plus REAL
+	// grain: independent in every frame. Spatially the fixed detail reads as grain to the scalar (per-frame)
+	// measure; temporally only the real grain is noise - which only the motion-compensated temporal error of
+	// the vectors can tell, and on a pan only when the vectors follow the motion. `seed` picks the detail.
+	double Texture(double x, double y, int seed = 0)
 	{
 		auto hash = [](int i, int j) { unsigned h = static_cast<unsigned>(i) * 374761393u + static_cast<unsigned>(j) * 668265263u; h = (h ^ (h >> 13)) * 1274126177u; return ((h ^ (h >> 16)) & 1023) / 1023.0; };
-		const double fine = hash(static_cast<int>(std::floor(x)) + 7919, static_cast<int>(std::floor(y)) - 104729) - 0.5;
-		return 0.45 + 0.12 * std::cos(x * 0.011 + y * 0.004) + 0.08 * std::cos(x * 0.003 - y * 0.017) + 0.048 * fine;
+		const double fine = hash(static_cast<int>(std::floor(x)) + 7919 + seed * 4099, static_cast<int>(std::floor(y)) - 104729 - seed * 811) - 0.5;
+		return 0.45 + 0.12 * std::cos(x * 0.011 + y * 0.004 + seed) + 0.08 * std::cos(x * 0.003 - y * 0.017) + 0.048 * fine;
 	}
 
-	// `frames` frames of a pan at (vx, vy) px per frame (0, 0: a still), w x h luma codes, to `path`,
-	// with film-like grain: independent in every frame (+-grain codes, triangular), so only a
-	// motion-compensated temporal error tells it from the moving texture.
-	void WritePan(const std::string& path, int w, int h, int frames, double vx, double vy, int grain = 0)
+	// `frames` frames, w x h luma codes, to `path`: a pan at (vx, vy) px per frame ((0, 0): a still) of
+	// Texture, with real grain of +-`grain` codes (triangular, new in every frame). alternate: odd frames show
+	// another picture (seed 1) - consecutive frames are unrelated, so whatever the estimate returns does not
+	// describe a motion (the negative control).
+	void WritePan(const std::string& path, int w, int h, int frames, double vx, double vy, int grain, bool alternate = false)
 	{
 		std::ofstream out(path, std::ios::binary | std::ios::trunc);
 		std::vector<uint16_t> row(static_cast<size_t>(w));
 		unsigned state = 12345u;
-		auto noise = [&]() { state = state * 1664525u + 1013904223u; const int a = static_cast<int>((state >> 8) % (2 * grain + 1));
-			state = state * 1664525u + 1013904223u; const int b = static_cast<int>((state >> 8) % (2 * grain + 1)); return (a + b) / 2 - grain; };
+		auto noise = [&]() {
+			if (grain <= 0) return 0;
+			state = state * 1664525u + 1013904223u; const int a = static_cast<int>((state >> 8) % (2 * grain + 1));
+			state = state * 1664525u + 1013904223u; const int b = static_cast<int>((state >> 8) % (2 * grain + 1));
+			return (a + b) / 2 - grain; };
 		for (int t = 0; t < frames; ++t)
 			for (int y = 0; y < h; ++y)
 			{
 				for (int x = 0; x < w; ++x)
 					row[x] = static_cast<uint16_t>((std::max)(4L, (std::min)(1019L, std::lround(64 + 876 * (std::min)(1.0, (std::max)(0.0,
-						Texture(x + 0.5 + t * vx, y + 0.5 + t * vy)))) + (grain > 0 ? noise() : 0))));
+						Texture(x + 0.5 + t * vx, y + 0.5 + t * vy, alternate ? (t & 1) : 0)))) + noise())));
 				out.write(reinterpret_cast<const char*>(row.data()), static_cast<std::streamsize>(row.size() * 2));
 			}
 	}
@@ -298,7 +437,10 @@ namespace VpScaleRenderMotionTests
 		std::map<int, std::string> pngByFrame;   // frame index -> the first capture of it
 	};
 
-	// One VpScaleRender job as the TrainKit writes it (the hybrid downscaler, w 0.2), 2:1 down.
+	// One VpScaleRender job as the TrainKit writes it (the hybrid downscaler, w 0.2), 2:1 down. Every motion
+	// override is already in the configuration (occlusion_mask off), so a run with `motion vectors` differs from
+	// one without in exactly one setting - occlusion_mask, the switch that starts the estimate (audit 2026-10-24:
+	// no confound from the other overrides).
 	Render RenderSequence(const std::string& name, const std::string& raw, int frames, bool motion, double requireMotion)
 	{
 		const std::string folder = TempFolder(name);
@@ -311,9 +453,11 @@ namespace VpScaleRenderMotionTests
 			CreateDirectoryA((cache + "\\vprenderer-beta").c_str(), nullptr);
 			SetEnvironmentVariableA("VP_TEST_SHADER_CACHE_DIR", cache.c_str());
 		}
-		const std::string kv = "quality: high\ndithering: off\ndeband: off\ndeband_vp: off\ntemporal_dither: off\nsource_resolution: native\n"
-			"adaptive_grain_map: on\nadaptive_chroma_ssim: off\ninterpolation: off\ninterpolation_fill_gaps: off\ndejudder_strength: 0\n"
-			"fbo_float32: on\ndownscaler: lanczos\ndownscale_light: linear\nadaptive_downscale: on\nadaptive_w_base: 0.2\nadaptive_faithful: ortho\n";
+		std::string kv = "quality: high\ndithering: off\ndeband: off\ndeband_vp: off\nsource_resolution: native\n"
+			"adaptive_grain_map: on\nadaptive_chroma_ssim: off\nfbo_float32: on\ndownscaler: lanczos\ndownscale_light: linear\n"
+			"adaptive_downscale: on\nadaptive_w_base: 0.2\nadaptive_faithful: ortho\n";
+		for (const auto& o : Seq::MotionOverrides())
+			kv += std::string(o.key) + ": " + (std::string(o.key) == "occlusion_mask" ? std::string("off") : std::string(o.value)) + "\n";
 		{
 			std::ofstream cfg(folder + "\\render.cfg", std::ios::trunc);
 			cfg << "[general]\npersist_profile_selection: false\n[vprenderer]\n" << kv << "[vprenderer.Default]\n" << kv
@@ -337,6 +481,35 @@ namespace VpScaleRenderMotionTests
 			if (c.tag == name && c.frame >= 0 && !c.png.empty() && !r.pngByFrame.count(c.frame))
 				r.pngByFrame[c.frame] = c.png;
 		return r;
+	}
+
+	// Absolute identity (audit 2026-10-24): a capture against the 2x2 box downscale of source frames k - 1, k,
+	// k + 1 of the raw it was rendered from (central window, source code domain); the index of the closest.
+	int ClosestSourceFrame(const std::string& png, const std::string& raw, int k, int frames)
+	{
+		int w = 0, h = 0;
+		const std::vector<int> cap = LoadCaptureLuma(png, w, h);
+		if (cap.empty() || w != 960 || h != 540) return -100;
+		std::ifstream in(raw, std::ios::binary);
+		std::vector<uint16_t> f(1920 * 1080);
+		double best = 1e30;
+		int bestK = -100;
+		for (int t = (std::max)(0, k - 1); t <= (std::min)(frames - 1, k + 1); ++t)
+		{
+			in.seekg(static_cast<std::streamoff>(t) * f.size() * 2);
+			in.read(reinterpret_cast<char*>(f.data()), static_cast<std::streamsize>(f.size() * 2));
+			double e = 0.0;
+			long long n = 0;
+			for (int y = 140; y < 400; ++y)
+				for (int x = 220; x < 740; ++x, ++n)
+				{
+					const double s = 0.25 * (f[(2 * y) * 1920 + 2 * x] + f[(2 * y) * 1920 + 2 * x + 1] + f[(2 * y + 1) * 1920 + 2 * x] + f[(2 * y + 1) * 1920 + 2 * x + 1]);
+					const double c = cap[static_cast<size_t>(y) * w + x] * 876.0 / 1023.0 + 64.0;
+					e += (s - c) * (s - c);
+				}
+			if (e / n < best) { best = e / n; bestK = t; }
+		}
+		return bestK;
 	}
 
 	// Mean absolute difference (codes) of capture a at (x, y) and capture b at (x + dx, y + dy), interior only.
@@ -364,92 +537,77 @@ namespace VpScaleRenderMotionTests
 			std::string reason;
 			if (!HardwarePrerequisites::RequireConditionOrSkip("PanRendersRunContinuousVectors",
 				HardwarePrerequisites::HardwareD3D11Renderer(reason), reason)) return;
-			const int frames = 36;
-			const std::string pan = TempFolder("sources") + "\\pan.raw", still = TempFolder("sources") + "\\still.raw";
-			WritePan(pan, 1920, 1080, frames, 4.0, 2.0);   // whole pixels: exact motion, 2 x 1 output px
-			WritePan(still, 1920, 1080, frames, 0.0, 0.0);
+			const int frames = 36, grain = 6;
+			const std::string pan = TempFolder("sources") + "\\pan.raw", still = TempFolder("sources") + "\\still.raw",
+				alt = TempFolder("sources") + "\\alternating.raw";
+			WritePan(pan, 1920, 1080, frames, 4.0, 2.0, grain);   // whole pixels: exact motion, (2, 1) output px per frame
+			WritePan(still, 1920, 1080, frames, 0.0, 0.0, grain);
+			WritePan(alt, 1920, 1080, frames, 4.0, 2.0, grain, true);
 
-			// 1. motion vectors: every capture after the settle ran the grain map on vectors, no
-			// invalidation, an estimate for (nearly) every source frame (the tool's own check, exit 7).
+			// 1. motion vectors: every capture after the settle ran the grain map on vectors, no invalidation (from
+			// the sidecars), an estimate for (nearly) every source frame, every frame captured exactly once.
 			const Render on = RenderSequence("pan_vectors", pan, frames, true, 0.9);
 			const auto& c = on.outcome.check;
 			Logger::WriteMessage((on.outcome.summary + "\n").c_str());
 			Assert::AreEqual(0, on.outcome.rc, (L"motion check / captures: " + std::wstring(on.outcome.summary.begin(), on.outcome.summary.end())).c_str());
 			Assert::IsTrue(c.metadataKnown, L"the renderer reports hybrid_motion_mode");
-			Assert::IsTrue(c.captures >= frames * 2 / 3, L"most frames captured in one pass");
+			Assert::AreEqual(0LL, c.coverage.Failures(), L"every frame captured exactly once");
+			Assert::AreEqual(static_cast<long long>(frames), c.coverage.captured);
 			Assert::IsTrue(c.VectorShare() >= 0.9, L"vectors on the captures");
+			Assert::IsTrue(c.invalidationsFromSidecar, L"invalidations counted from the capture sidecars");
 			Assert::AreEqual(0LL, c.invalidations, L"no motion invalidation after the settle");
 			Assert::IsTrue(c.estimates * 10 >= c.framesSent * 8, L"an estimate per source frame");
 
-			// 2. The same pan without the motion mode (round 1's settings): the grain map runs, but
-			// without vectors.
-			const Render off = RenderSequence("pan_novectors", pan, frames, false, -1.0);
+			// 2. Absolute identity: each capture shows the source frame it is named after (not a neighbour: an
+			// off-by-one in every label would pass a relative check).
+			int identified = 0, wrong = 0;
+			for (const auto& kv : on.pngByFrame)
+			{
+				const int k = ClosestSourceFrame(kv.second, pan, kv.first, frames);
+				if (k == kv.first) ++identified; else ++wrong;
+			}
+			Logger::WriteMessage(("absolute identity: " + std::to_string(identified) + " right, " + std::to_string(wrong) + " wrong\n").c_str());
+			Assert::AreEqual(0, wrong, L"every capture is the frame it is named after");
+			Assert::AreEqual(frames, identified);
+
+			// 3. The control: the same configuration with occlusion_mask off (the only difference), so the grain map
+			// runs without vectors; the vectors path is genuinely in the pixels.
+			const Render off = RenderSequence("pan_control", pan, frames, false, -1.0);
 			Logger::WriteMessage((off.outcome.summary + "\n").c_str());
-			Assert::IsTrue(off.outcome.check.captures > 0, L"captures without the motion mode");
-			Assert::AreEqual(0, off.outcome.check.vectors, L"without the motion mode no capture has vectors");
+			Assert::AreEqual(0, off.outcome.rc);
+			Assert::AreEqual(0, off.outcome.check.vectors, L"without the estimate no capture has vectors");
+			auto diffOf = [&](const Render& a, const Render& b) {
+				int n = 0;
+				double sum = 0.0;
+				for (const auto& kv : a.pngByFrame)
+				{
+					const auto other = b.pngByFrame.find(kv.first);
+					if (other == b.pngByFrame.end()) continue;
+					const double d = MeanAbsDiff(kv.second, other->second);
+					Assert::IsTrue(d >= 0.0, L"captures load");
+					sum += d;
+					++n;
+				}
+				Assert::IsTrue(n >= frames / 2, L"frames captured in both renders");
+				return sum / n; };
+			const double panDiff = diffOf(on, off);
 
-			// 3. The vectors path is genuinely in the pixels: the same source frame renders differently
-			// with and without vectors (the grain map's temporal term), and each capture is named after
-			// the frame it shows (frame-exact, checked by the motion between consecutive captures).
-			int compared = 0;
-			double diffSum = 0.0;
-			for (const auto& kv : on.pngByFrame)
-			{
-				const auto other = off.pngByFrame.find(kv.first);
-				if (other == off.pngByFrame.end()) continue;
-				const double d = MeanAbsDiff(kv.second, other->second);
-				Assert::IsTrue(d >= 0.0, L"captures load");
-				diffSum += d;
-				++compared;
-			}
-			Logger::WriteMessage(("pan: frames compared " + std::to_string(compared) + ", mean |vectors - no vectors| " +
-				std::to_string(compared ? diffSum / compared : 0.0) + " codes\n").c_str());
-			Assert::IsTrue(compared >= frames / 2, L"frames captured in both renders");
-			Assert::IsTrue(diffSum / compared > 0.05, L"the vector path changes the output (the grain map is driven by the vectors)");
-			// Frame-exact mapping: the pan moves the content by (4, 2) source px per frame, (2, 1) output
-			// px, so frame k + 1 at (x, y) is frame k at (x + 2, y + 1) when both captures are named right.
-			double aligned = 0.0, unaligned = 0.0;
-			int pairs = 0;
-			for (const auto& kv : on.pngByFrame)
-			{
-				const auto next = on.pngByFrame.find(kv.first + 1);
-				if (next == on.pngByFrame.end()) continue;
-				aligned += MeanAbsDiff(next->second, kv.second, 2, 1);
-				unaligned += MeanAbsDiff(next->second, kv.second, 0, 0);
-				++pairs;
-			}
-			Logger::WriteMessage(("pan: consecutive captures, shifted by the motion " + std::to_string(pairs ? aligned / pairs : -1.0) +
-				" codes, unshifted " + std::to_string(pairs ? unaligned / pairs : -1.0) + " over " + std::to_string(pairs) + " pairs\n").c_str());
-			Assert::IsTrue(pairs >= frames / 2, L"consecutive frames captured");
-			Assert::IsTrue(aligned * 4.0 < unaligned, L"every capture is named after the frame it shows");
-
-			// 4. A still sequence of the same picture: the vectors run there too (zero motion). The
-			// grain map responds to the motion only through the vectors: with them, the pan's map
-			// (motion-compensated temporal error: the grain) matches the still's, so the vectors
-			// change the pan's output about as much as the still's; without compensation the moving
-			// texture would read as grain.
+			// 4. A still of the same picture (correct vectors: zero motion) and the NEGATIVE control: unrelated
+			// consecutive frames (whatever the estimate returns describes no motion). The metric must separate them:
+			// on the pan the vectors' grain map matches the still's (it follows the motion); with meaningless vectors
+			// the difference collapses towards the control.
 			const Render st = RenderSequence("still_vectors", still, frames, true, 0.9);
-			Logger::WriteMessage((st.outcome.summary + "\n").c_str());
 			Assert::AreEqual(0, st.outcome.rc, L"the still render passes the motion check");
-			const Render stOff = RenderSequence("still_novectors", still, frames, false, -1.0);
-			int stillCompared = 0;
-			double stillDiff = 0.0;
-			for (const auto& kv : st.pngByFrame)
-			{
-				const auto other = stOff.pngByFrame.find(kv.first);
-				if (other == stOff.pngByFrame.end()) continue;
-				stillDiff += MeanAbsDiff(kv.second, other->second);
-				++stillCompared;
-			}
-			Logger::WriteMessage(("still: frames compared " + std::to_string(stillCompared) + ", mean |vectors - no vectors| " +
-				std::to_string(stillCompared ? stillDiff / stillCompared : 0.0) + " codes\n").c_str());
-			Assert::IsTrue(stillCompared >= frames / 2, L"still frames captured in both renders");
-			Assert::IsTrue(stillDiff / stillCompared > 0.05, L"the vector path changes the still's output too");
-			// Measured 2026-10-24 (RTX 3050 Ti): pan 0.118, still 0.122 codes. Vectors that did not follow
-			// the pan would leave the moving detail in the temporal error (read as grain, like the
-			// scalar): the pan's difference would collapse towards 0.
-			Assert::IsTrue(diffSum / compared >= 0.6 * (stillDiff / stillCompared),
-				L"on the pan the vectors' grain map matches the still's (it follows the motion)");
+			const Render stOff = RenderSequence("still_control", still, frames, false, -1.0);
+			const double stillDiff = diffOf(st, stOff);
+			const Render al = RenderSequence("alternating_vectors", alt, frames, true, -1.0);
+			const Render alOff = RenderSequence("alternating_control", alt, frames, false, -1.0);
+			const double altDiff = diffOf(al, alOff);
+			Logger::WriteMessage(("mean |vectors - control| codes: pan " + std::to_string(panDiff) + ", still " + std::to_string(stillDiff) +
+				", alternating (negative control) " + std::to_string(altDiff) + "\n").c_str());
+			Assert::IsTrue(stillDiff > 0.05, L"the vector path changes the still's output");
+			Assert::IsTrue(panDiff >= 0.6 * stillDiff, L"on the pan the vectors' grain map matches the still's (it follows the motion)");
+			Assert::IsTrue(panDiff >= 3.0 * altDiff, L"meaningless vectors do not reproduce it (the metric separates)");
 		}
 	};
 }
