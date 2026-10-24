@@ -15,7 +15,14 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QFile>
+#include <QFontDatabase>
 #include <QLabel>
+#include <QTabWidget>
+#include <QStackedWidget>
+#include <QScrollBar>
+#include <QScrollArea>
+#include <QRegularExpression>
+#include <QFormLayout>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QToolButton>
@@ -263,7 +270,7 @@ namespace
 		const QString path = WriteFixture(dir);
 		{
 			ConfigEditorWindow window(path, 0, true);
-			auto* upstream = control<QWidget>(window, QStringLiteral("config.vprenderer.deband_vp"));
+			auto* upstream = control<QWidget>(window, QStringLiteral("config.vprenderer.adaptive_upscale"));
 			require(!upstream->isEnabled() && upstream->toolTip().startsWith(QStringLiteral("Managed by VP-V")),
 				"an upstream control VP-V manages is greyed with 'Managed by VP-V'");
 			auto* taste = window.findChild<QWidget*>(QStringLiteral("config.vprenderer.dejudder_strength"));
@@ -275,7 +282,7 @@ namespace
 			require(!control<QWidget>(window, Vpv::ObjectName("global_tier"))->isEnabled() &&
 				!control<QWidget>(window, Vpv::ObjectName("repair.deband_vp_grain_guard"))->isEnabled(),
 				"Original pathway disables VP-V's tiers and switches");
-			require(control<QWidget>(window, Vpv::ObjectName("repair.card.texture.body"))->isEnabled(),
+			require(control<QWidget>(window, Vpv::ObjectName("repair.card.limits.body"))->isEnabled(),
 				"Original pathway leaves the upstream rows hosted on the VP-V page usable");
 			save(window);
 		}
@@ -286,8 +293,9 @@ namespace
 		requireVpReads(path);
 		{
 			ConfigEditorWindow window(path, 0, true);
-			require(control<QWidget>(window, QStringLiteral("config.vprenderer.deband_vp"))->isEnabled(),
-				"reopened in Original pathway: upstream controls behave as upstream");
+			require(control<QWidget>(window, QStringLiteral("config.vprenderer.adaptive_upscale"))->isEnabled() &&
+				control<QWidget>(window, QStringLiteral("config.vprenderer.deband_vp"))->isEnabled(),
+				"reopened in Original pathway: upstream controls behave as upstream (tier keys unlocked too)");
 			control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(0);
 			save(window);
 		}
@@ -417,6 +425,24 @@ namespace
 
 namespace
 {
+	// Is the form row holding w shown (its row's field not hidden by setRowVisible)?
+	bool RowShown(QWidget* w)
+	{
+		for (QWidget* f = w; f && f->parentWidget(); f = f->parentWidget())
+			if (auto* form = qobject_cast<QFormLayout*>(f->parentWidget()->layout()))
+			{
+				int row = -1;
+				QFormLayout::ItemRole role;
+				form->getWidgetPosition(f, &row, &role);
+				if (row >= 0) return form->isRowVisible(row);
+			}
+		return !w->isHidden();
+	}
+
+}
+
+namespace
+{
 	// Organisation pass (2026-10-24, VpvOrganisation.h, docs/settings/organisation.md): VP's own
 	// Rendering-page rows and sections live in labelled cards on the VP-V unit tabs (moved, never
 	// copied), the renderer-profile retirement candidates on the Proposed retirement tab, the rest
@@ -455,9 +481,8 @@ namespace
 		auto* raw = control<QWidget>(window, QStringLiteral("rendererSection.allRaw.content"));
 		auto* tone = control<QWidget>(window, QStringLiteral("rendererSection.toneMapping"));
 		require(!section->isAncestorOf(tone) && !raw->isAncestorOf(tone), "Bill's tone mapping stays in place on the Rendering page");
-		require(raw->isAncestorOf(control<QWidget>(window, QStringLiteral("config.vprenderer.capture_path"))) &&
-			raw->isAncestorOf(control<QWidget>(window, QStringLiteral("config.vprenderer.intent_black"))),
-			"the managed duplicates and diagnostics are in All raw settings");
+		require(raw->isAncestorOf(control<QWidget>(window, QStringLiteral("config.vprenderer.capture_path"))),
+			"the managed duplicates are in All raw settings");
 		require(!control<QToolButton>(window, QStringLiteral("rendererSection.allRaw"))->isChecked(), "All raw settings starts collapsed");
 		// Retirement candidates (renderer profile): only on the Proposed retirement tab, except the
 		// ones a tier or toggle manages (hidden there) and the diagnostics pair kept with the estimator.
@@ -471,9 +496,9 @@ namespace
 			require(w && retirement->isAncestorOf(w), (std::string("a retirement candidate on the retirement tab: ") + r.key).c_str());
 		}
 		// A managed row on the VP-V page is hidden (the VP-V control above is live); Original shows it.
-		auto* debandRow = control<QWidget>(window, QStringLiteral("config.vprenderer.deband_vp"));
-		auto* rebaseCard = control<QWidget>(window, Vpv::ObjectName("scaling.card.rebase.body"));
-		require(rebaseCard->isAncestorOf(debandRow) && !debandRow->isVisibleTo(rebaseCard), "a managed row moved onto VP-V is hidden");
+		// One live control per key: a VP-V toggle's upstream rows are hidden wherever they are.
+		auto* debandRow = control<QWidget>(window, QStringLiteral("config.vprenderer.low_bitrate_handling"));
+		require(!RowShown(debandRow), "a managed row is hidden while the VP-V pathway is on");
 		// The picker follows the Rendering list, and the moved rows edit the picked profile.
 		auto* list = control<QListWidget>(window, QStringLiteral("config.vprenderer.profiles"));
 		auto* picker = control<QComboBox>(window, Vpv::ObjectName("profile"));
@@ -496,7 +521,139 @@ namespace
 			control<QLabel>(window, Vpv::ObjectName(QString::fromLatin1(note)));
 		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);
 		QCoreApplication::processEvents();
-		require(debandRow->isVisibleTo(rebaseCard), "the Original pathway shows the managed row again");
+		require(RowShown(debandRow), "the Original pathway shows the managed row again");
+		save(window);
+		requireVpReads(path);
+	}
+}
+
+namespace
+{
+	// Organisation pass 2 (2026-10-24): masters and the settings they set; one control per unit; the
+	// VP-V page fits the default window; the Dynamic Drive Advanced LED card under its two masters.
+	void testMastersAndFit()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir,
+			"[vprenderer]\nquality: high\n"
+			"[vprenderer.Cinema]\nquality: high\n"
+			"[queue]\ntarget_latency_ms: 250\n"
+			"[led_drive.Default]\nenabled: true\ncommand_source: compensate\n"
+			"[projector.Default]\nprotocol: barco_ascii\nport: COM1\n");
+		ConfigEditorWindow window(path, 0, true);
+		// Tier keys: in Advanced > Set by the tier, greyed until Custom; Custom unlocks; unticking puts the tier back.
+		auto* debandVp = control<QComboBox>(window, QStringLiteral("config.vprenderer.deband_vp"));
+		auto* custom = control<QCheckBox>(window, Vpv::ObjectName("repair.card.tier_keys.custom"));
+		require(!custom->isChecked() && !debandVp->isEnabled(), "a tier key is greyed, set by the tier");
+		require(control<QLabel>(window, Vpv::ObjectName("repair.card.tier_keys.lock"))->text().startsWith(QStringLiteral("Set by the Repair tier")),
+			"the lock says which master sets it");
+		custom->setChecked(true);
+		QCoreApplication::processEvents();
+		require(debandVp->isEnabled(), "Custom unlocks the tier's keys");
+		debandVp->setCurrentIndex(debandVp->findData(QStringLiteral("on")));
+		QCoreApplication::processEvents();
+		auto* tierSlider = control<QSlider>(window, Vpv::ObjectName("repair.tier"));
+		const QString before = control<QLabel>(window, Vpv::ObjectName("repair.tier.name"))->text();
+		custom->setChecked(false);
+		QCoreApplication::processEvents();
+		require(!debandVp->isEnabled() && control<QLabel>(window, Vpv::ObjectName("repair.tier.name"))->text() != QStringLiteral("Custom"),
+			("unticking Custom puts the tier back: " + before.toStdString()).c_str());
+		(void)tierSlider;
+		// A feature's tuning is greyed while the feature is off.
+		auto* knee = control<QWidget>(window, QStringLiteral("config.vprenderer.sdr_knee_start"));
+		require(!knee->isEnabled(), "the SDR knee values are greyed while SDR tone shape is off");
+		auto* shape = control<QComboBox>(window, Vpv::ObjectName("colour.sdr_tone_shape"));
+		shape->setCurrentIndex(shape->findData(QStringLiteral("knee")));
+		QCoreApplication::processEvents();
+		require(knee->isEnabled(), "turning SDR tone shape on frees its values");
+		// The motion slider's fields are set by it (greyed) until Custom; at the Classic tier the amount is greyed.
+		auto* strength = control<QWidget>(window, QStringLiteral("config.vprenderer.dejudder_strength"));
+		require(!strength->isEnabled() || control<QCheckBox>(window, Vpv::ObjectName("motion.card.taste_keys.custom"))->isChecked(),
+			"the de-judder fields are set by the de-judder amount");
+		control<QSlider>(window, Vpv::ObjectName("motion.tier"))->setValue(0);
+		QCoreApplication::processEvents();
+		require(!control<QWidget>(window, QStringLiteral("config.vprenderer.motion_preset_box"))->isEnabled(),
+			"the Classic Motion tier greys the de-judder amount");
+		control<QSlider>(window, Vpv::ObjectName("motion.tier"))->setValue(2);
+		QCoreApplication::processEvents();
+		require(control<QWidget>(window, QStringLiteral("config.vprenderer.motion_preset_box"))->isEnabled(),
+			"a Motion tier above Classic frees the de-judder amount");
+		require(control<QSlider>(window, QStringLiteral("config.vprenderer.picture_preset"))->minimum() == 1,
+			"the picture slider never offers its own Off (the Scaling tier owns re-base on/off)");
+		// One live control per key: no shown upstream row for a key a VP-V toggle owns.
+		for (const std::string& key : Vpv::ManagedKeys(Vpv::TierTable()))
+		{
+			const QRegularExpression name(QStringLiteral("^config\\.vprenderer\\.%1(\\.[^.]+)?$").arg(QString::fromStdString(key)));
+			auto* home = window.findChild<QWidget*>(Vpv::ObjectName("section"));
+			for (QWidget* w : window.findChildren<QWidget*>(name))
+			{
+				bool keyHome = false;
+				for (QWidget* p = w; p; p = p->parentWidget()) keyHome = keyHome || p->property("vpvKeyHome").toBool();
+				if (keyHome) continue;
+				require(!RowShown(w) || !w->isEnabled(),
+					("a second live control: " + w->objectName().toStdString()).c_str());
+				(void)home;
+			}
+		}
+		// Dynamic Drive: the Advanced LED card's masters grey their groups.
+		auto* values = control<QComboBox>(window, Vpv::ObjectName("drive.advanced_values"));
+		auto* highlights = control<QWidget>(window, QStringLiteral("config.led_drive.default.highlight_percentile"));
+		require(values->currentIndex() == 0 && !highlights->isEnabled(), "the LED groups are set by your script's values");
+		values->setCurrentIndex(1);
+		QCoreApplication::processEvents();
+		require(highlights->isEnabled() && !control<QWidget>(window, QStringLiteral("config.led_drive.default.tick_ms"))->isEnabled(),
+			"Custom frees the groups the chosen source uses (Script-only stays greyed in Compensate)");
+		auto* fixes = control<QComboBox>(window, Vpv::ObjectName("drive.led_fixes"));
+		require(fixes->currentIndex() == 0 && !control<QWidget>(window, QStringLiteral("config.led_drive.default.cntr_pair_predict"))->isEnabled(),
+			"the LED fixes are set by their master");
+		// The VP-V page fits the default window: no sideways scroll on any unit sub-page. Measured only with
+		// real fonts (run_config_tests.ps1 reruns this test with QT_QPA_FONTDIR); off screen without
+		// fonts the text measures as placeholder boxes.
+		if (QFontDatabase::families().isEmpty())
+		{
+			save(window);
+			requireVpReads(path);
+			return;
+		}
+		// The VP-V page fits the default window: no sideways scroll on any unit sub-page.
+		window.resize(1040, 700);
+		window.show();
+		auto* pages = window.findChild<QStackedWidget*>(QStringLiteral("settingsPages"));
+		auto* section = control<QWidget>(window, Vpv::ObjectName("section"));
+		for (int i = 0; pages && i < pages->count(); ++i)
+			if (pages->widget(i)->isAncestorOf(section)) window.selectPage(i);
+		QScrollArea* scroll = nullptr;
+		for (QWidget* p = section; p && !scroll; p = p->parentWidget()) scroll = qobject_cast<QScrollArea*>(p);
+		auto* units = control<QTabWidget>(window, Vpv::ObjectName("units"));
+		for (int u = 0; u < units->count(); ++u)
+		{
+			units->setCurrentIndex(u);
+			QTabWidget* sub = units->widget(u)->findChild<QTabWidget*>();
+			for (int s2 = 0; s2 < (sub ? sub->count() : 1); ++s2)
+			{
+				if (sub) sub->setCurrentIndex(s2);
+				for (QToolButton* t : units->widget(u)->findChildren<QToolButton*>())
+					if (t->isCheckable() && t->objectName().endsWith(QStringLiteral(".toggle"))) t->setChecked(true);
+				QCoreApplication::processEvents();
+				QString widest;
+				if (scroll && scroll->horizontalScrollBar()->maximum() > 0)
+				{
+					const int limit = scroll->viewport()->width();
+					for (QWidget* w : section->findChildren<QWidget*>())
+					{
+						if (w->minimumSizeHint().width() <= limit - 40) continue;
+						bool childWide = false;
+						for (QWidget* c : w->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly))
+							childWide = childWide || c->minimumSizeHint().width() > limit - 40;
+						if (!childWide) widest += QStringLiteral(" %1[%2]=%3 under %4").arg(w->objectName(), QString::fromLatin1(w->metaObject()->className())).arg(w->minimumSizeHint().width()).arg(w->parentWidget() ? w->parentWidget()->objectName() + QLatin1Char('/') + (w->parentWidget()->parentWidget() ? w->parentWidget()->parentWidget()->objectName() : QString()) : QString());
+					}
+				}
+				require(scroll && scroll->horizontalScrollBar()->maximum() == 0,
+					(QStringLiteral("the VP-V page scrolls sideways on %1 / %2 (%3 px)").arg(units->tabText(u),
+						sub ? sub->tabText(s2) : QString()).arg(scroll ? scroll->horizontalScrollBar()->maximum() : -1) + widest).toStdString().c_str());
+			}
+		}
+		window.hide();
 		save(window);
 		requireVpReads(path);
 	}
@@ -517,5 +674,6 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: expert pipeline keys validated and stored", testExpertPipelineKeys);
 	failures += run("VP-V: coverage audit toggles, pointers and retirement marks", testCoverageAuditAdditions);
 	failures += run("VP-V: organisation cards, raw group, picker and reload", testOrganisation);
+	failures += run("VP-V: masters, derived settings, one control per key, fits the window", testMastersAndFit);
 	return failures;
 }

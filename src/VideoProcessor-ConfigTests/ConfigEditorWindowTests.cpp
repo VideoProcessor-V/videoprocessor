@@ -1455,6 +1455,12 @@ void testPictureSliderPresets()
     auto* clarity = requireControl<QLineEdit>(window, "config.vprenderer.source_resolution_auto_min_confidence");
     auto* seconds = requireControl<QLineEdit>(window, "config.vprenderer.source_resolution_evidence_seconds");
     auto* shots = requireControl<QLineEdit>(window, "config.vprenderer.source_resolution_evidence_shots");
+    // Organisation pass 2: on the VP-V pathway the Scaling tier owns re-base on/off, so the slider has no
+    // Off; the Original pathway gives Bill's full slider back (tested below).
+    require(slider->minimum() == 1, "the picture slider offers its own Off on the VP-V pathway");
+    requireControl<QComboBox>(window, "vpv.pathway")->setCurrentIndex(1);
+    QCoreApplication::processEvents();
+    require(slider->minimum() == 0, "the Original pathway does not give the slider its Off back");
     profiles->setCurrentRow(1);
     QCoreApplication::processEvents();
     require(name->text() == "Custom", (QByteArray("A fixed 1080 is not shown as Custom: ") + name->text().toUtf8()).constData());
@@ -1581,6 +1587,11 @@ void testExclusiveButtonsForLedSourceAndMotionSource()
     auto* matcher = requireControl<QRadioButton>(window, "config.vprenderer.optical_flow.matcher");
     auto* flow = requireControl<QComboBox>(window, "config.vprenderer.optical_flow");
     require(engine->isChecked() && !matcher->isChecked(), "the engine (default) is not shown selected");
+    // Organisation pass 2: optical_flow is a Motion tier key (VP-V > Motion > Advanced > Set by the Motion
+    // tier), greyed until Custom.
+    require(!matcher->isEnabled(), "the motion source is not set by the Motion tier");
+    requireControl<QCheckBox>(window, "vpv.motion.card.tier_keys.custom")->setChecked(true);
+    QCoreApplication::processEvents();
     matcher->click();
     QCoreApplication::processEvents();
     require(flow->currentData().toString() == "off" && !engine->isChecked(), "VP's matcher only did not set optical_flow off");
@@ -1735,13 +1746,16 @@ void testDetailRestoreControls()
     auto* restore = requireControl<QComboBox>(window, "config.vprenderer.texture_restore");
     auto* restoreCap = requireControl<QLineEdit>(window, "config.vprenderer.texture_restore_cap");
     auto* pulseFast = requireControl<QComboBox>(window, "config.vprenderer.detail_pulse_fast");   // 2026-10-18
-    // Organisation pass 2026-10-24: the caps moved to VP-V > Repair > Texture restore and detail
-    // pulse; the stage switches (managed by the Repair tier) stay in the content-adaptive group.
-    auto* texture = requireControl<QWidget>(window, "vpv.repair.card.texture.body");
+    // Organisation passes 2026-10-24: the caps are in VP-V > Repair > Advanced > Limits, the stage
+    // switches (the Repair tier's keys) in Advanced > Set by the Repair tier; the fast path (a VP-V
+    // toggle on the retirement tab) keeps its hidden row in the content-adaptive group.
+    auto* texture = requireControl<QWidget>(window, "vpv.repair.card.limits.body");
+    auto* tierKeys = requireControl<QWidget>(window, "vpv.repair.card.tier_keys.body");
     for (QWidget* control : std::initializer_list<QWidget*>{ pulse, pulseCap, pulseFast, restore, restoreCap })
     {
         const bool cap = control == pulseCap || control == restoreCap;
-        require((cap ? texture : content)->isAncestorOf(control), "a detail control is outside its group");
+        const bool stage = control == pulse || control == restore;
+        require((cap ? texture : stage ? tierKeys : content)->isAncestorOf(control), "a detail control is outside its group");
         require(!control->toolTip().trimmed().isEmpty(), "a detail control has no tooltip");
     }
     require(pulse->toolTip().contains("never averaged") || pulse->toolTip().contains("nothing is copied", Qt::CaseInsensitive),
@@ -1930,8 +1944,15 @@ void testInheritedButtonsAndReorganisedSections()
         return widget && content && content->isAncestorOf(widget);
     };
     require(inSection("config.vprenderer.capture_path", QStringLiteral("captureSource")), "capture_path not under Capture & source");
-    require(inSection("config.vprenderer.picture_preset_box", QStringLiteral("sourceRebase")), "Picture not under Source resolution & re-base");
-    require(inSection("config.vprenderer.deband_vp", QStringLiteral("sourceRebase")), "VP deband not under Source resolution & re-base");
+    // Organisation pass 2 (2026-10-24): the picture slider is the master on VP-V > Scaling > Main, VP
+    // deband a Repair tier key (VP-V > Repair > Advanced > Set by the Repair tier).
+    auto inCard = [&window](const char* control, const char* card) {
+        auto* widget = window.findChild<QWidget*>(QString::fromLatin1(control));
+        auto* body = window.findChild<QWidget*>(QString::fromLatin1(card));
+        return widget && body && body->isAncestorOf(widget);
+    };
+    require(inCard("config.vprenderer.picture_preset_box", "vpv.scaling.card.rebase.body"), "Picture not the Scaling master");
+    require(inCard("config.vprenderer.deband_vp", "vpv.repair.card.tier_keys.body"), "VP deband not set by the Repair tier");
     require(inSection("config.vprenderer.ssim_residual_stabilise", QStringLiteral("adaptiveDownscale")), "SSIM steadiness not with the downscale blend");
     // Pruning 2026-10-17: the retired switches have no control any more.
     for (const char* retired : { "config.vprenderer.dither_vectors_new_frame", "config.vprenderer.fix_scene_cooldown",
@@ -2295,6 +2316,10 @@ void testLedDrivePageAndLiveSwitches()
     auto* pictureOnly = requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.led_picture_only"));
     require(fullPeak->isChecked() && pictureOnly->isChecked(),
         "led_peak_full_coverage / led_picture_only are not on by default");
+    // Organisation pass 2: the LED fixes under test have one master (Advanced LED card), all on until Custom.
+    require(!fullPeak->isEnabled(), "the LED fixes are not set by their master");
+    requireControl<QComboBox>(window, "vpv.drive.led_fixes")->setCurrentIndex(1);
+    QCoreApplication::processEvents();
     require(fullPeak->isVisibleTo(&window) && pictureOnly->isVisibleTo(&window) && fullPeak->isEnabled() &&
         pictureOnly->isEnabled(), "The Dynamic Drive measurement switches are not offered");
     require(fullPeak->toolTip().contains(QStringLiteral("Dynamic Drive")) &&
@@ -10206,6 +10231,9 @@ void testHunt3ContentGatedProfileGreysClassifierInputs()
             (std::string(key) + " is not greyed with the reason in a content-gated profile").c_str());
     }
     profiles->setCurrentRow(0);
+    // Organisation pass 2: the proven fixes (cadence_class_fixes among them) are set by their master
+    // (Proposed retirement tab) until Custom.
+    requireControl<QCheckBox>(window, "vpv.retirement.card.fixes.custom")->setChecked(true);
     QCoreApplication::processEvents();
     for (const char* key : { "intent_content.check", "dejudder_pulldown", "cadence_class_fixes" })
     {

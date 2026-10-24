@@ -64,17 +64,30 @@ The hook has four parts.
 Outside Config, `RendererProfileConfig.h` accepts the namespaced `[vpv]` / `[vpv.*]` sections
 (`OwnsSection` and the model reader).
 
-## Organisation (first pass, 2026-10-24)
+## Organisation (passes 1 and 2, 2026-10-24)
 
-Each unit tab: summary, tier slider, the cards from `VpvOrganisation.h`, an "Other settings" card
-for any toggle the table does not place, planned settings and stages (collapsed). VP's own
-Rendering-page rows and sections MOVE into the cards (one live control per key); they stay bound
-to the Rendering page's selected profile, and the VP-V profile picker follows that list both ways.
-After a VP-V write the page re-emits the list's `currentItemChanged`, so Config reloads the moved
-rows (no stale values beside a tier). Rows of managed keys inside moved sections are hidden while
-the VP-V pathway is on. The renderer-profile retirement candidates move to the Proposed retirement
-tab. What is left of VP's on the Rendering page goes into a collapsed "All raw settings (expert)"
-group under Bill's sections. The Original pathway disables only VP-V's own tiers and toggles.
+Each unit tab has **Main** (summary, tier slider, taste master, switch cards) and **Advanced** (cards
+whose settings a master on Main sets, feature tuning, measured internals, planned, stages), from
+`VpvOrganisation.h`. VP's own Rendering-page rows and sections MOVE into the cards (one live control
+per key); they stay bound to the Rendering page's selected profile, and the VP-V profile picker
+follows that list both ways. After a VP-V write the page re-emits the list's `currentItemChanged`,
+so Config reloads the moved rows.
+
+- **Locks (master -> derived):** Tier / Slider / Defaults cards are greyed "Set by <master>" until
+  their Custom box is ticked (auto-ticked when the values differ; unticking puts the master's values
+  back); Feature cards are greyed "Used only when <feature> is on". Per-key locks set Config's own
+  `derivedSetting` property so a profile reload keeps them greyed.
+- **One live control per key:** rows of keys a VP-V toggle owns are hidden wherever they are while
+  the VP-V pathway is on; tier keys' rows live in "Set by the tier" (`vpvKeyHome`) and are their
+  one control. The Original pathway disables only VP-V's own tiers and toggles and unlocks the tier
+  keys.
+- **One slider per unit:** the Classic Motion tier greys the de-judder amount; below Mid the picture
+  slider is greyed and never offers its own Off on the VP-V pathway.
+- **Dynamic Drive:** the Advanced LED card is regrouped (`LedAdvancedGroups`) under "Advanced LED
+  values" (your script's values / Custom) and "LED fixes under test" (all on / Custom).
+- **Fit:** `FitWidth` stacks wide radio rows, puts every form field under its label and lets tab rows
+  scroll, so the page does not scroll sideways at 1040x700 (tested with the Windows fonts by a second
+  pass of `tools/run_config_tests.ps1`).
 
 Upstream footprint of the moves: in `ConfigEditorWindow.cpp`'s profile refresh, the lookups of the
 renderer's refresh actions and content-gate widgets also search the whole editor when they miss
