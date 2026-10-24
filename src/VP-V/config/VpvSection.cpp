@@ -360,22 +360,6 @@ namespace Vpv
 				state->host.setValue(section, QStringLiteral("calibration_lut_stage"), lutStage->itemData(i).toString());
 			});
 
-			// B3 (ADR-0024): the motion pictures from the processed A and B (the input side once per
-			// source frame). A diagnostic switch until it passes its acceptance criteria.
-			auto* entranceOnce = new QComboBox;
-			entranceOnce->setObjectName(ObjectName(QStringLiteral("expert.pipeline_entrance_once")));
-			entranceOnce->addItem(QStringLiteral("Off (default; the stages run on every picture)"), QString());
-			entranceOnce->addItem(QStringLiteral("On (stages once per source frame; under test)"), QStringLiteral("on"));
-			entranceOnce->setToolTip(QStringLiteral("Key pipeline_entrance_once. On: interpolated pictures, hiccup repairs and "
-				"warped extras are made from each frame's processed picture, so the input stages run once per source frame "
-				"(design B3). The Original pathway never uses it."));
-			form->addRow(QStringLiteral("Input stages once per frame"), entranceOnce);
-			QObject::connect(entranceOnce, qOverload<int>(&QComboBox::currentIndexChanged), entranceOnce, [state, entranceOnce, section](int i)
-			{
-				if (state->refreshing || i < 0 || !state->host.setValue) return;
-				state->host.setValue(section, QStringLiteral("pipeline_entrance_once"), entranceOnce->itemData(i).toString());
-			});
-
 			// The module order: slot names moved within their zone.
 			auto* order = new QLineEdit;
 			order->setObjectName(ObjectName(QStringLiteral("expert.pipeline_order")));
@@ -430,16 +414,12 @@ namespace Vpv
 			layout->addLayout(form);
 			layout->addStretch();
 
-			state->refreshers.push_back([state, lutStage, entranceOnce, order, slotsOff, section]()
+			state->refreshers.push_back([state, lutStage, order, slotsOff, section]()
 			{
 				const auto get = [&](const char* key) { return state->host.value ? state->host.value(section, QString::fromLatin1(key)).trimmed() : QString(); };
 				{
 					const QSignalBlocker blocker(lutStage);
 					lutStage->setCurrentIndex(get("calibration_lut_stage").compare(QStringLiteral("vp"), Qt::CaseInsensitive) == 0 ? 1 : 0);
-				}
-				{
-					const QSignalBlocker blocker(entranceOnce);
-					entranceOnce->setCurrentIndex(get("pipeline_entrance_once").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0 ? 1 : 0);
 				}
 				if (!order->hasFocus()) order->setText(get("pipeline_order"));
 				if (!slotsOff->hasFocus()) slotsOff->setText(get("pipeline_slots_off"));

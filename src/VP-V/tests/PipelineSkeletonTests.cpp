@@ -656,13 +656,20 @@ namespace PipelineSkeletonTestsNs
 				Assert::IsTrue(keys.count(key) == 1, W(std::string(key) + " is not in the Original pathway").c_str());
 		}
 
-		TEST_METHOD(UpstreamKeyLeavesTheMotionConsumersOutUntilB3)
+		TEST_METHOD(UpstreamKeyCountsTheMotionConsumersWithB3)
 		{
-			// Audit item 3: the consumers still run before the entrance in the renderer.
+			// ADR-0024 (B3 default since 2026-10-24): the consumers warp the processed frames, after the
+			// entrance - at their real position in a downstream net's fingerprint. With B3 off (the
+			// diagnostic path) they run before the entrance: left out.
 			PipelineSlots::Registry registry;
-			const std::string key = registry.UpstreamKey(Id::ScalingOutput);
-			Assert::IsTrue(key.find("motion.consumers") == std::string::npos, W(key).c_str());
-			Assert::IsTrue(key.find("repair.deband") != std::string::npos, W(key).c_str());
+			Assert::IsTrue(registry.EntranceOnce(), L"B3 is the default");
+			const std::string withB3 = registry.UpstreamKey(Id::ScalingOutput);
+			Assert::IsTrue(withB3.find("motion.consumers") != std::string::npos, W(withB3).c_str());
+			Assert::IsTrue(withB3.find("repair.deband") != std::string::npos, W(withB3).c_str());
+			registry.SetEntranceOnce(false);
+			const std::string without = registry.UpstreamKey(Id::ScalingOutput);
+			Assert::IsTrue(without.find("motion.consumers") == std::string::npos, W(without).c_str());
+			Assert::AreNotEqual(withB3, without);
 		}
 
 		TEST_METHOD(ChromaShiftScalesWithAnEdgeAlignedResample)

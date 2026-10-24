@@ -1256,9 +1256,10 @@ namespace
 		std::string calibrationLutStage = "libplacebo";
 		// pipeline_entrance_once (B3, ADR-0024): the motion consumers (interpolated pictures, hiccup
 		// gap pairs, source-warp extras) warp or blend the PROCESSED A and B - the entrance stages
-		// run once per source frame - instead of re-running the stages on every picture. Off until
-		// it passes its acceptance criteria (then the default); the Original pathway never uses it.
-		bool pipelineEntranceOnce = false;
+		// run once per source frame - instead of re-running the stages on every picture. The
+		// default (owner accepted 2026-10-24); off = the per-picture stages (a diagnostic). The
+		// Original pathway never uses it.
+		bool pipelineEntranceOnce = true;
 		std::string pipelineSettingsProblems;   // refused values, shown under "Fallbacks engaged" (audit item 4)
 		// Kernel-matched re-base (docs/VP-stage12-build-plan.md; owner 2026-10-16: optimise
 		// 1080p): the identified player kernel's inverse for an exact 2:1 luma re-base.
@@ -5814,9 +5815,9 @@ struct LibplaceboVideoRenderer::Impl
 	{
 		EntranceEpoch::Key key;
 		key.Add(0x5354415445ull);
-		// The planes' layout and the codes' meaning (what the stages read); the crop and the
-		// per-frame HDR metadata are applied from the drawn frame (EntranceOwnedFrame), so B made
-		// ahead with A's descriptor is found by B's own draw (audit MED 4).
+		// The planes' layout, the codes' meaning and the crop (what the stages read); the per-frame
+		// HDR metadata is applied from the drawn frame (EntranceOwnedFrame), so B made ahead with A's
+		// descriptor is found by B's own draw (audit MED 4).
 		key.Add(raw.num_planes);
 		for (int i = 0; i < raw.num_planes && i < 4; ++i)
 		{
@@ -5829,6 +5830,10 @@ struct LibplaceboVideoRenderer::Impl
 		key.Add(static_cast<int>(raw.repr.sys)).Add(static_cast<int>(raw.repr.levels)).Add(static_cast<int>(raw.repr.alpha));
 		key.Add(raw.repr.bits.sample_depth).Add(raw.repr.bits.color_depth).Add(raw.repr.bits.bit_shift);
 		key.Add(static_cast<int>(raw.color.primaries)).Add(static_cast<int>(raw.color.transfer));
+		// The crop IS in the key: the stages read it (re-base geometry, the active picture), and a
+		// start-up crop hold releasing must re-process a repeated frame (2026-10-24, still-frame
+		// identity with B3 on vs off). Only the per-frame HDR metadata stays out.
+		key.Add(raw.crop.x0).Add(raw.crop.y0).Add(raw.crop.x1).Add(raw.crop.y1);
 		key.Add(rebaseFactor).Add(rebaseFactorX);
 		for (PipelineSlots::Id id : pipelineSlots.ActiveEntrance())
 			key.Add(static_cast<int>(id));
@@ -7989,6 +7994,7 @@ struct LibplaceboVideoRenderer::Impl
 			EngageFallback("pipeline order", "designed order kept: " + reason);   // an invalid order never runs
 		else
 			ReleaseFallback("pipeline order");
+		next.SetEntranceOnce(settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway);   // B3: consumers after the entrance
 		(void)next.ActiveEntrance();   // warm the kept list here, so the render thread only reads it
 		pipelineSlots = next;
 		entranceCache.Invalidate();

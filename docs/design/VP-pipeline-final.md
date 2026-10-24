@@ -410,7 +410,8 @@ redundant per-refresh repeats removed.
 
 ### 3.8b B3 status and the hard gate (ADR-0024)
 
-**Built behind `pipeline_entrance_once` (default OFF until the acceptance passes).** With it on:
+**The default since 2026-10-24 (`pipeline_entrance_once`, owner accepted; `off` = the per-picture
+diagnostic path).** With it on:
 
 - **The ring.** `EntranceStages::Ring` keeps each source frame's processed picture as its own
   copy (a plain copy pass, exact for the 16-bit and float planes), keyed by the unique source
@@ -463,7 +464,7 @@ it. Until then `motion.consumers` stays fixed in the order and outside `Upstream
 
 | Gap | Where it shows | What closes it |
 |---|---|---|
-| B3 not yet the default | `pipeline_entrance_once` off; ADR-0024 | the nine criteria on real clips (owner A/B for pans) |
+| B3 criterion 3 (pans A/B) not run | owner waived it 2026-10-24 (B3 default on) | an owner A/B on real pans whenever convenient |
 | B3 crossfade keeps the old order | "Fallbacks engaged: entrance once (source-resolution crossfade)" | version 2: both paths' processed pictures in the ring |
 | render_ahead total across rates | "Fallbacks engaged: delay budget (render-ahead ... PENDING-RA)"; delay gate PENDING-RA | render-ahead's lead folded into the queue hold |
 | 120 Hz displays hold ~4 film frames more than planned | delay gate PENDING-HZ | investigate the 120 Hz harness case |
@@ -588,7 +589,7 @@ a few clearly commented `#include <VP-V/...>` hooks. Read `src/VP-V/README.md` f
      redundant per-refresh repeats removed (3.8).
    - The debander hold and the detail history still advance once per source frame on A, which
      is processed by the stages before them, whatever the order.
-3. **Built behind `pipeline_entrance_once` (3.8b):** phase pictures and extras warp the
+3. **Default since 2026-10-24 (`pipeline_entrance_once`, 3.8b):** phase pictures and extras warp the
    ring's processed pictures; the shaders map the field to the processed size; B is processed
    ahead as its own A with B's field estimated ahead. Default OFF until ADR-0024's acceptance
    passes on real clips (`EntranceOnceRealClipAcceptance`, and the existing harness tests with

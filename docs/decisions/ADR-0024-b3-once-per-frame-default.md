@@ -1,6 +1,8 @@
 # ADR-0024: The input side runs once per source frame (B3); the default once accepted, a hard gate
 
-- Status: Accepted (implementation in progress; the default is OFF until the acceptance below passes)
+- Status: Accepted and DEFAULT ON (owner accepted 2026-10-24 without the pans A/B, criterion 3
+  waived: "B3 is clearly the framework from which to proceed"; gate11 - every harness test with
+  B3 on - passed; the other criteria passed on tests, see the implementation note)
 - Date: 2026-10-24 (owner decisions)
 - Slots: the input-side slots (re-base, repair, deband, texture restore, 4K route, refine,
   chroma), motion.consumers, motion.vector_delivery
@@ -71,8 +73,11 @@ At 24p in 60, a net in the entrance would run 2-3 times per film frame (barrier 
 
 ## Implementation (2026-10-24, feat/skeleton)
 
-- Switch: `[vpv] pipeline_entrance_once` (on|off, default off; also read from `[vprenderer]`;
-  Config expert page). The Original pathway never uses it.
+- Switch: `[vpv] pipeline_entrance_once` (on|off, default ON since 2026-10-24; also read from
+  `[vprenderer]`). Owner 2026-10-24: the pre-B3 path is retired - no Config control; the key stays
+  only as a hidden diagnostic/test key (`off` = the pre-B3 per-picture path, byte-identical to the
+  code before B3, the r6 reference). Closing B3's remaining fallbacks so the pre-B3 code can be
+  deleted: docs/design/b3-fallback-closure.md. The Original pathway never uses B3.
 - Ring: `EntranceStages::Ring` (owned copies of A and B by sequence, structure key and role).
 - B ahead as its own A: with stateful stages, B's own field is estimated ahead (the de-judder's
   estimate ahead, A's pictures read the (A, B) snapshot), so B ahead is B drawn as A. Otherwise

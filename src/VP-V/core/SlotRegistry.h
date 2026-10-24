@@ -184,16 +184,21 @@ namespace PipelineSlots
 			{
 				if (other == id)
 					break;
-				// The motion consumers stay out until B3 lands: today they run BEFORE the entrance in
-				// the renderer (phase pictures and extras are made from native planes), so their
-				// position in the order does not describe what a net downstream sees.
-				if (ZoneOf(other) == Zone::Host || !Runs(other) || other == Id::MotionConsumers)
+				// The motion consumers count at their real position once B3 runs (the default since
+				// 2026-10-24: they warp the processed frames, after the entrance). With B3 off (the
+				// diagnostic per-picture path) they run BEFORE the entrance, so their position does not
+				// describe what a net downstream sees: left out.
+				if (ZoneOf(other) == Zone::Host || !Runs(other) || (other == Id::MotionConsumers && !entranceOnce))
 					continue;
 				if (!key.empty()) key += '>';
 				key += Get(other).name;
 			}
 			return key;
 		}
+
+		// B3 (pipeline_entrance_once, ADR-0024): the motion consumers run after the entrance.
+		void SetEntranceOnce(bool on) { entranceOnce = on; }
+		bool EntranceOnce() const { return entranceOnce; }
 
 		// Slots that run, in effective order (all of them, or those at one hook point).
 		std::vector<Id> Active() const { return Collect(false, HookPoint::Host); }
@@ -213,6 +218,7 @@ namespace PipelineSlots
 		}
 
 	private:
+		bool entranceOnce = true;   // B3 default (ADR-0024)
 		void SetFullOrder(const std::vector<Id>& full)
 		{
 			entranceDirty = true;

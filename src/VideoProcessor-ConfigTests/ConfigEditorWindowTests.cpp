@@ -9381,7 +9381,7 @@ void testEverySchemaKeyHasAConfigControl()
         { "renderer:pipeline_order", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.pipeline_order); also read from [vprenderer]" },
         { "renderer:pipeline_slots_off", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.pipeline_slots_off); also read from [vprenderer]" },
         { "renderer:calibration_lut_stage", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.calibration_lut_stage); also read from [vprenderer]" },
-        { "renderer:pipeline_entrance_once", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.pipeline_entrance_once); also read from [vprenderer]" },
+        { "renderer:pipeline_entrance_once", "hidden diagnostic/test key (ADR-0024): B3 is the default and the pre-B3 path is retired; no Config control" },
     };
     std::set<std::string> usedAllowList;
     std::vector<std::string> missing;

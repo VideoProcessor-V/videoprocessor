@@ -1364,7 +1364,9 @@ namespace Tests
 			FramePlan plan;
 			plan.captureAtSeconds = 2.5;
 			plan.step = [](int) { return FrameStep{ true, 0, 0 }; };
+			// The default (B3 on since 2026-10-24) and the explicit pre-B3 path (the r6 reference).
 			const std::string extra = "[vprenderer.Default]\ndithering: off\ndeband: off\n";
+			const std::string preB3 = extra + "[vpv]\npipeline_entrance_once: off\n";
 			struct Case { const char* name; VideoFrameEncoding encoding; const char* path; bool film; };
 			const Case cases[] = { { "v210 gpu 23.976", VideoFrameEncoding::V210, "gpu", true },
 				{ "v210 standard 59.94", VideoFrameEncoding::V210, "standard", false } };
@@ -1373,15 +1375,22 @@ namespace Tests
 			{
 				g_harnessRendererDll.clear();
 				const RunResult ours = Run(c.encoding, c.path, 3.5, c.film, extra, false, &plan);
+				const RunResult oursPreB3 = Run(c.encoding, c.path, 3.5, c.film, preB3, false, &plan);
 				g_harnessRendererDll = baseline;
 				const RunResult theirs = Run(c.encoding, c.path, 3.5, c.film, extra, false, &plan);
 				g_harnessRendererDll.clear();
-				const std::string a = CaptureHash(ours), b = CaptureHash(theirs);
-				Logger::WriteMessage((std::string("== ") + c.name + ": skeleton " + a + ", r6 " + b + "\n").c_str());
-				if (a.empty() || b.empty())
+				const std::string a = CaptureHash(ours), a0 = CaptureHash(oursPreB3), b = CaptureHash(theirs);
+				Logger::WriteMessage((std::string("== ") + c.name + ": skeleton (B3 default) " + a + ", skeleton (B3 off) " + a0 +
+					", r6 " + b + "\n").c_str());
+				if (a.empty() || a0.empty() || b.empty())
 					failures += std::string(c.name) + ": a capture is missing; ";
-				else if (a != b)
-					failures += std::string(c.name) + ": the output differs from the r6 baseline; ";
+				else
+				{
+					if (a != b)
+						failures += std::string(c.name) + ": the output (B3 default) differs from the r6 baseline; ";
+					if (a0 != b)
+						failures += std::string(c.name) + ": the output (B3 off) differs from the r6 baseline; ";
+				}
 			}
 			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
 			Assert::IsTrue(failures.empty(), std::wstring(failures.begin(), failures.end()).c_str());
@@ -4221,7 +4230,9 @@ namespace Tests
 				// DXGI statistics: the source-path extras run off screen too.
 				{ "source-warp extras, render-ahead", 24000.0 / 1001.0, true,
 					"dejudder_strength: 0.25\ndejudder_warp_stage: source\nrender_ahead: on\nrender_ahead_queue_credit: on\n" + stages + on, false, false, false, true },
-				{ "off (default)", display * 5.0 / 6.0, false, "interpolation: auto\n" + stages + "[vpv]\npipeline_entrance_once: off\n", true, false, false, false },
+				{ "off (explicit diagnostic)", display * 5.0 / 6.0, false, "interpolation: auto\n" + stages + "[vpv]\npipeline_entrance_once: off\n", true, false, false, false },
+				// The true default (no key): B3 on since 2026-10-24 (ADR-0024).
+				{ "default (no key): on", display * 5.0 / 6.0, false, "interpolation: auto\n" + stages, true, false, false, true },
 				// HIGH 2: without the estimate ahead every B is processed per picture - shown, not silent.
 				{ "estimate ahead off: B per picture, shown", display * 5.0 / 6.0, false,
 					"interpolation: auto\ndejudder_estimate_ahead: off\n" + stages + on, true, false, false, true, true, 0u },
