@@ -459,6 +459,12 @@ namespace SegmentRunnerTestsNs
 				Assert::IsFalse(s2.Member(h));
 			Assert::IsTrue(s2.Member(m.measure.Hook()));
 			Assert::IsTrue(s2.Member(m.lut.Get()));
+			// Per-slot timing attribution.
+			Assert::IsTrue(s2.SlotOf(m.measure.Hook()) == Id::DriveLedMeasure);
+			Assert::IsTrue(s2.SlotOf(m.lut.Get()) == Id::OutputCalibrationLut);
+			Assert::IsTrue(s2.SlotOf(hooks.front()) == Id::ColourSdrToneShape);
+			for (const pl_hook* h : user)
+				Assert::IsTrue(s2.SlotOf(h) == Id::Count);
 		}
 	};
 }

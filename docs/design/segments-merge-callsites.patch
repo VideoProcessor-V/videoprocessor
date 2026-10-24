@@ -1,5 +1,5 @@
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index 200587fb..8b1b1ed8 100644
+index 200587fb..fc244e60 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 @@ -83,6 +83,7 @@
@@ -52,7 +52,18 @@ index 200587fb..8b1b1ed8 100644
  				dejudderOutput.Release();
  				dejudderOutputSwapchain = nullptr;
  				dejudderExtraIds.clear();
-@@ -24893,6 +24899,11 @@ struct LibplaceboVideoRenderer::Impl
+@@ -17957,6 +17963,10 @@ struct LibplaceboVideoRenderer::Impl
+ 			timedParams.info_callback = DitherExtraPassCallback;
+ 			timedParams.info_priv = &ditherTotals;
+ 			extraParams = &timedParams;
++			// output_segments_merged: the extras draw through the same S2/S3 segment objects (merged
++			// for these draws only; the fallback draw of A keeps the separate list).
++			const pl_render_errors extraErrors = pl_renderer_get_errors(renderer);
++			OutputSegments::Merger::Scope mergedExtra(outputMerger.get(), timedParams, &extraErrors);
+ 			pl_frame target = *f.target;
+ 			if (renderedCrop)
+ 			{
+@@ -24893,6 +24903,11 @@ struct LibplaceboVideoRenderer::Impl
          // Bug hunt 2026-10-17: the retry withdraws the failed NLS hook from
          // frameHooks itself (a member), so frameParams - read again by the
          // de-judder extras - never points at a list local to the recovery.
@@ -64,16 +75,16 @@ index 200587fb..8b1b1ed8 100644
          const auto hookRender = NlsHookRecovery::RenderOwned(renderer, d3d11->gpu,
              renderImage, target, baseTarget, frameParams, frameHooks, submittedNls, [&]()
              {
-@@ -24917,6 +24928,8 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24917,6 +24932,8 @@ struct LibplaceboVideoRenderer::Impl
                  occlusionMaskHook.SetFrame(nullptr, renderImage.crop, linearFallbackCrop);
                  assembleOverlays();
              }, [&](const pl_frame& source, const pl_frame& destination, pl_render_params& parameters) {
 +                // output_segments_merged: S2/S3 as one hook each for this draw only (restored after).
-+                OutputSegments::Merger::Scope mergedOutput(*outputMerger, parameters, &renderErrors);
++                OutputSegments::Merger::Scope mergedOutput(outputMerger.get(), parameters, &renderErrors);
                  // Stage 12 step A: the planes libplacebo samples, re-based.
                  pl_frame frame = source;
                  // Stage B: the picture at this refresh's phase in place of A's planes (a
-@@ -25035,6 +25048,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25035,6 +25052,7 @@ struct LibplaceboVideoRenderer::Impl
                  return temporalRenderer.Render(renderer,frame,destination,parameters,
                      extendedRangeRelabelled ? &source.color : nullptr);
              });
