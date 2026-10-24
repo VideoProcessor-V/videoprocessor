@@ -1,0 +1,265 @@
+NOT APPLIED. Proposed renderer wiring for the VP-side net runner (feat/net-runner), drafted against
+feat/skeleton fd60b650. Read docs/design/net-runner-wiring.md first. Hunk line numbers are
+approximate; the context lines are exact at fd60b650.
+
+diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+--- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+@@ -40,6 +40,12 @@ (with the other VP-V includes)
+ #include <VP-V/core/SlotRegistry.h>
++// VP-V nets (src/VP-V/nets): the net runner, fingerprints and the kit-compatible settings hashes.
++#include <VP-V/nets/NetLabels.h>
++#include <VP-V/nets/NetSettingsHash.h>
++#include <VP-V/nets/NetSlot.h>
++#include <VP-V/nets/PlNetRunner.h>
++#include <VP-V/core/SlotTiming.h>
+@@ -1261,6 +1267,17 @@ struct RendererSettings
+ 		bool pipelineEntranceOnce = false;
+ 		std::string pipelineSettingsProblems;   // refused values, shown under "Fallbacks engaged" (audit item 4)
++		// VP-V nets ([vpv], global like the pipeline keys). nets_enabled = off|on; nets_export_dir =
++		// a LOCAL PRIVATE export folder (the kit's staging layout: export_<net>.json, shaders/,
++		// config.json) - shaders and weights are never in the repo or the deployment; nets_stamp_dir =
++		// the tools/net_stamp.py sidecars (default: next to the exports); nets_repair = auto|single|
++		// motion|off (auto = ChooseRepairVariant: A_single in low latency, else A_motion);
++		// nets_d = off|on (D inside the hybrid downscaler's POST_KERNEL).
++		bool netsEnabled = false;
++		std::string netsExportDir, netsStampDir;
++		std::string netsRepair = "auto";
++		bool netsD = false;
+@@ -3609,6 +3626,24 @@ void ReadPipelineSettings(const ConfigFile& config, RendererSettings& settings)
+ 				settings.pipelineSettingsProblems += "pipeline_entrance_once '" + raw + "' (on|off); ";
+ 		}
++		auto onOff = [&](const char* key, bool& out)
++		{
++			if (!TryGetPipelineString(config, key, raw)) return;
++			const std::string value = ConfigFile::NormalizeName(raw);
++			if (value == "on" || value == "off") out = value == "on";
++			else settings.pipelineSettingsProblems += std::string(key) + " '" + raw + "' (on|off); ";
++		};
++		onOff("nets_enabled", settings.netsEnabled);
++		onOff("nets_d", settings.netsD);
++		if (TryGetPipelineString(config, "nets_export_dir", raw)) settings.netsExportDir = ConfigFile::Trim(raw);
++		if (TryGetPipelineString(config, "nets_stamp_dir", raw)) settings.netsStampDir = ConfigFile::Trim(raw);
++		if (TryGetPipelineString(config, "nets_repair", raw))
++		{
++			const std::string value = ConfigFile::NormalizeName(raw);
++			if (value == "auto" || value == "single" || value == "motion" || value == "off") settings.netsRepair = value;
++			else settings.pipelineSettingsProblems += "nets_repair '" + raw + "' (auto|single|motion|off); ";
++		}
+ 		if (settings.pipelineOriginalPathway)
+ 			ApplyOriginalPathwaySettings(settings);
+@@ -7800,6 +7835,95 @@ FallbackStatus::Registry fallbacks;
+ 	FallbackStatus::Registry fallbacks;
++	// ---- VP-V nets (barrier B1) ----
++	// One NetSlot per net slot. Every refusal / degradation reaches "Fallbacks engaged" through
++	// netBypass ("nets: bypassed (...)", "nets: degraded (...)"), so GetFallbacksStatus (Ctrl+I,
++	// Config status, Ctrl+Alt+D) shows it with no further code.
++	VpNets::NetBypassSet netBypass{ fallbacks };
++	VpNets::PlNetRunner repairRunner, dRunner;
++	VpNets::NetSlot repairSlot{ repairRunner, netBypass }, dSlot{ dRunner, netBypass };
++	VpNets::NetPackage repairPkg, dPkg;
++	bool repairLoaded = false, dLoaded = false;
++	std::string netsStateLogged;
++	SlotTiming::Accumulator slotTiming;   // B4: per-slot GPU ms (nets now; the other slots as they land)
++
++	// The context the fingerprint is checked against: what THIS renderer runs.
++	VpNets::NetRuntimeContext NetContextFor(const VpNets::NetPackage& pkg) const
++	{
++		using namespace VpNets;
++		NetRuntimeContext c;
++		c.labelSchema = kLabelSchemaV1;                          // what the identification supplies (Stage 12)
++		c.passOrder = "H>V";                                     // SourceRebase: width then height
++		c.stageContract = pkg.fingerprint.Field("stage_contract"); // TODO(lead): VP's own contract text per slot (U3)
++		c.upstreamKey = pipelineSlots.UpstreamKey(SlotOf(pkg.role));
++		// The upstream NETS running: D sees A when A runs (repairSlot.State is "bypassed" otherwise,
++		// which UpstreamNetsKey leaves out).
++		std::vector<UpstreamNet> up;
++		if (SlotOf(pkg.role) == PipelineSlots::Id::ScalingOutput && repairLoaded)
++			up.push_back(repairSlot.State("repair.encoding"));
++		c.upstreamNets = UpstreamNetsKey(up);
++		c.hybridMotionMode = adaptiveDownscale.LastMapState() == AdaptiveDownscale::MapState::Used ? "vectors" : "no_vectors";
++		c.settingsHashes = NetSettingsHashesNow(pkg);
++		return c;
++	}
++
++	// The settings hashes from the REAL renderer state (NetSettingsHash.h defines the objects).
++	std::map<std::string, std::string> NetSettingsHashesNow(const VpNets::NetPackage& pkg) const
++	{
++		using namespace VpNets;
++		RebaseHashSettings r;
++		r.rebaseKernelMatch = activeSettings.rebaseKernelMatch ? "on" : "off";
++		r.latchFixes = activeSettings.sourceResolutionLatchFixes ? "on" : "off";   // TODO(lead): the field's real name
++		GrainSplitHashSettings g;                                 // VP's grain split constants (TODO(lead): from GrainScale)
++		BoundsHashSettings b;                                     // the bounds are the NET's (in its shader):
++		std::map<std::string, std::string> h = SettingsHashes(r, g, kKitStageOrderR1, ScalerBlendJson(), b);
++		h["bounds"] = pkg.fingerprint.Field("bounds");            // ... so the recorded value is VP's too
++		return h;
++	}
++
++	// activeSettings -> the kit's render-settings object (common / down / up / adapter keys of
++	// scaling_render.json), so scaler_blend_settings hashes what VP really runs.
++	VpNets::Json ScalerBlendJson() const;                      // TODO(lead): one table, key by key
++
++	void UpdateNets(const RendererSettings& s)
++	{
++		using namespace VpNets;
++		repairLoaded = dLoaded = false;
++		if (!s.netsEnabled || s.netsExportDir.empty())
++		{
++			netBypass.Clear(repairPkg.name);
++			netBypass.Clear(dPkg.name);
++			return;
++		}
++		const std::vector<std::string> stamps = { s.netsStampDir.empty() ? s.netsExportDir : s.netsStampDir };
++		auto load = [&](const char* net, NetPackage& pkg) -> bool
++		{
++			std::vector<NetPackage> pkgs;
++			std::string err;
++			if (!LoadExport(s.netsExportDir + "\\export_" + net + ".json", "", pkgs, &err, stamps))
++			{
++				netBypass.Bypass(net, "export not loaded: " + err);
++				return false;
++			}
++			pkg = pkgs.front();
++			return true;
++		};
++		const NetDeviceContext dev{ const_cast<pl_gpu_t*>(d3d11->gpu), rebaseDispatch };
++		const RepairChoice rc = s.netsRepair == "off" ? RepairChoice::Bypass :
++			s.netsRepair == "single" ? RepairChoice::Single : s.netsRepair == "motion" ? RepairChoice::Motion :
++			ChooseRepairVariant(lowLatencyQueueActive.load(), true, true);
++		if (rc != RepairChoice::Bypass && load(rc == RepairChoice::Motion ? "A_motion_small" : "A_single_small", repairPkg))
++		{
++			repairRunner.SetTiming(&slotTiming, PipelineSlots::Id::RepairEncoding);
++			repairSlot.SetOutputScale(65472.0f / 65535.0f);    // back into the r16 plane's MSB-aligned codes
++			repairLoaded = repairSlot.Load(dev, repairPkg, NetContextFor(repairPkg));
++		}
++		// D's dispatch is the hook's: it is loaded at its first POST_KERNEL call (dLoadPending).
++		dLoadPending = s.netsD && load("D_hybrid_refine", dPkg);
++	}
++	bool dLoadPending = false;
+@@ -7859,6 +7983,8 @@ void UpdatePipelineSlots(const RendererSettings& settings)
+ 		(void)next.ActiveEntrance();   // warm the kept list here, so the render thread only reads it
+ 		pipelineSlots = next;
++		pipelineSlots.SetComponent(PipelineSlots::Id::RepairEncoding, settings.netsEnabled && settings.netsRepair != "off");
++		EnsureRebaseDispatch();
++		UpdateNets(settings);                                      // after the registry: the upstream keys
+ 		entranceCache.Invalidate();
+ 		entranceRing.Invalidate();
+@@ -5674,6 +5800,7 @@ void RunEntrance(EntranceRun& run, pl_frame& frame)
+ 			{
+ 			case PipelineSlots::Id::ScalingRebase: EntranceRebase(run, frame); break;
++			case PipelineSlots::Id::RepairEncoding: EntranceNetRepair(run, frame); break;
+ 			case PipelineSlots::Id::RepairDeband: EntranceDeband(run, frame); break;
+ 			case PipelineSlots::Id::RepairTextureRestore: EntranceDetail(run, frame); break;
+@@ -6229,6 +6356,63 @@ (next to EntranceDeband)
++	// A (repair.encoding): the net on the luma plane, once per source frame (B3 caches the result).
++	// YCbCr: plane 0 (r16, 10-bit codes MSB-aligned) -> A -> r16 written back in the same encoding.
++	// RGB capture: the matcher luma (rgbIngestLuma, FULL range) -> trained range -> A -> the delta
++	// added to R, G and B (kLumaFromRgbPass / kRgbLumaDeltaPass; no clamp, BTB/WTW kept).
++	// Any refusal keeps the frame (the entry is shown by netBypass).
++	void EntranceNetRepair(EntranceRun& run, pl_frame& frame)
++	{
++		using namespace VpNets;
++		if (!repairLoaded || frame.num_planes < 1 || !frame.planes[0].texture)
++			return;
++		NetRunInputs in;
++		NetTexture y;
++		y.handle = const_cast<pl_tex_t*>(frame.planes[0].texture);
++		y.width = frame.planes[0].texture->params.w;
++		y.height = frame.planes[0].texture->params.h;
++		y.components = 1;
++		y.mul = frame.repr.bits.sample_depth == 16 && frame.repr.bits.color_depth == 10 ? 65535.0f / 65472.0f : 1.0f;
++		y.rect[0] = frame.crop.x0; y.rect[1] = frame.crop.y0; y.rect[2] = frame.crop.x1; y.rect[3] = frame.crop.y1;   // the active picture
++		in.textures["HOOKED"] = y;
++		in.params = ParamsFromLabelsV1(CurrentLabelsV1());     // TODO(lead): Stage 12 identification -> schema v1
++		in.state.neighboursValid = MotionVectorsValidForRepair(run);   // A_motion: aligned prev/next + mask (else its fallback)
++		in.state.lowLatency = lowLatencyQueueActive.load();
++		// A_motion's VPNN_PREV / VPNN_NEXT / VPNN_MASK: the motion-aligned neighbour luma (TODO(lead):
++		// from the B3 ring + the vector field; absent = the trained single-frame fallback, shown as degraded).
++		NetTexture out;
++		if (!repairSlot.Run({ const_cast<pl_gpu_t*>(d3d11->gpu), rebaseDispatch }, in, out))
++			return;
++		// The output covers the crop rect only: replace plane 0 with a plane-sized copy (TODO(lead):
++		// blit `out` into a pooled r16 texture at the crop offset, the rest copied from plane 0).
++		frame.planes[0].texture = PlaneWithRepairedCrop(frame, static_cast<pl_tex>(out.handle));
++	}
+@@ -13145,6 +13329,14 @@ (the Ctrl+I descriptions, after the adaptive downscale line)
+ 			descriptions.push_back(line);
+ 		}
++		// VP-V nets: which nets run and their GPU cost (the bypasses are under "Fallbacks engaged").
++		if (activeSettings.netsEnabled)
++		{
++			std::string nets = "Nets:";
++			if (repairLoaded) nets += " " + repairPkg.name + (repairSlot.Intermediate() == VpNets::TexFormat::Rgba16f ? " (fp16" : " (fp32") +
++				", " + std::to_string(slotTiming.MeanMs(PipelineSlots::Id::RepairEncoding)).substr(0, 4) + " ms)";
++			if (dLoaded) nets += " " + dPkg.name + " (" + std::to_string(slotTiming.MeanMs(PipelineSlots::Id::ScalingOutput)).substr(0, 4) + " ms)";
++			descriptions.push_back(nets == "Nets:" ? "Nets: none running" : nets);
++		}
+
+diff --git a/src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h b/src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h
+--- a/src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h
++++ b/src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h
+@@ (in class Module, public) @@
++		// VP-V D (net-runner wiring): called after the blend with the blended texture, the scaler's
++		// source copy (PRE_KERNEL, kept only while set) and its rect; returns the texture to hand
++		// back (the blended one when D does not run). Set by the renderer; empty = no D.
++		std::function<pl_tex(const pl_hook_params*, pl_tex blended, pl_tex source, const pl_rect2df& sourceRect)> postBlend;
+
+diff --git a/src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.cpp b/src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.cpp
+--- a/src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.cpp
++++ b/src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.cpp
+@@ -590,6 +590,14 @@ pl_hook_res Module::Measuring(const pl_hook_params* p)
+ 		pl_tex base = p->tex;
++		// VP-V D: keep the scaler's source for the POST_KERNEL net (libplacebo may reuse p->tex).
++		if (postBlend && Ensure(gpu, dSource, p->tex->params.w, p->tex->params.h, 4, 32, false, false))
++		{
++			pl_tex_blit_params bp{};
++			bp.src = p->tex;
++			bp.dst = dSource;
++			pl_tex_blit(gpu, &bp);
++			dSourceRect = { sx0, sy0, sx1, sy1 };
++		}
+@@ -996,6 +1004,9 @@ pl_hook_res Module::Blending(const pl_hook_params* p)
+ 		pl_hook_res res{};
+ 		res.output = PL_HOOK_SIG_TEX;
+ 		res.tex = out;
++		// VP-V D: the net refines the blended picture (or hands it back unchanged, visibly).
++		if (postBlend && dSource)
++			res.tex = postBlend(p, out, dSource, dSourceRect);
+ 		res.repr = p->repr;
+
+diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+@@ (renderer init, after the adaptive downscale module is set up) @@
++		// VP-V D: inside the hybrid's POST_KERNEL, on the hook's gpu/dispatch.
++		adaptiveDownscale.postBlend = [this](const pl_hook_params* p, pl_tex blended, pl_tex source, const pl_rect2df& rect) -> pl_tex
++		{
++			using namespace VpNets;
++			const NetDeviceContext dev = PlNetRunner::DeviceFromHook(p);
++			if (dLoadPending)
++			{
++				dRunner.SetTiming(&slotTiming, PipelineSlots::Id::ScalingOutput);
++				dLoaded = dSlot.Load(dev, dPkg, NetContextFor(dPkg));   // checks upstream nets (A) + motion mode
++				dLoadPending = false;
++			}
++			if (!dLoaded)
++				return blended;
++			pl_hook_params hp = *p;
++			hp.tex = blended;                                     // D refines the BLEND output
++			NetTexture src;
++			src.handle = const_cast<pl_tex_t*>(source);
++			src.width = source->params.w; src.height = source->params.h; src.components = 4;
++			src.rect[0] = rect.x0; src.rect[1] = rect.y0; src.rect[2] = rect.x1; src.rect[3] = rect.y1;   // fractional -> refused, visible
++			PlNetRunner::PostKernelOptions o;                     // BT.709 luma of the hook's (linear) RGB: R8 caveat
++			NetTexture out;
++			std::string err;
++			// Per frame: the upstream nets now (A may have bypassed this frame) and the motion mode.
++			const std::string upNow = UpstreamNetsKey({ repairSlot.State("repair.encoding") });
++			if (upNow != NetContextFor(dPkg).upstreamNets) { dLoadPending = true; return blended; }   // reload on the next frame
++			if (!dRunner.RunInPostKernelHook(&hp, src, out, &err, o))
++			{
++				netBypass.Bypass(dPkg.name, err);
++				return blended;
++			}
++			netBypass.Clear(dPkg.name);
++			return static_cast<pl_tex>(out.handle);
++		};
