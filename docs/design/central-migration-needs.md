@@ -280,7 +280,7 @@ or neutral, and an explicit **do-not-touch list** for Bill's code:
 0. **Merge Bill's v1.4.02-beta first** (queue item 144), after today's B3 audit fixes, and
    re-verify the baseline. Any extraction before that makes his 54 renderer commits harder to merge.
 1. **M1 deploy (~6-7 Nov)** as planned. No central extraction before M1 except the quick wins in
-   section 6 that are rules or new files (no host edits while feature branches are open).
+   section 7 that are rules or new files (no host edits while feature branches are open).
 2. **M2 freeze window: step 0** (include sweep, forwarders) and the **quick wins that edit the host**
    (b1 status/fallbacks, plugin API generic status). They are small and fit the freeze.
 3. **Pair each M2 module move with its glue extraction**, as a separate commit right after the
@@ -290,6 +290,9 @@ or neutral, and an explicit **do-not-touch list** for Bill's code:
    LED) go in right after the LED re-cut. Doing them together avoids touching each module twice and
    reuses each M2 GPU checkpoint.
 4. **Timing clusters last** (b8, b9, b10), each with its own timing gate run, never two at once.
+5. **As segments (section 6):** the extractions land as stages of contiguous VP segments (S1
+   entrance, S2/S3 output, motion). Each is a behaviour-free move first, then merged into one hook per
+   segment behind a tolerance gate (s0-s4; s5 with the net runner).
 
 **Gates required:** CPU suite per commit group; byte identity vs r6 (B3 on and off) after every
 extraction that touches the draw path; the skeleton timing gates after b8, b9 and b10; the DV
@@ -310,7 +313,107 @@ b9, to confirm his changes still merge.
   registered hook points. Revisit Bill's code only if the fork stops merging his upstream or he
   splits it himself.
 
-## 6. Question 5: quick wins (low risk, reduce conflicts now)
+## 6. Owner principle: contiguous VP segments
+
+> Owner (2026-10-24): "where possible our code hands to the next stage in our umbrella before being
+> passed back to the appropriate stage, so any linked input/output code stays contained in our
+> tested bed."
+
+Applied to option (d), the unit of extraction is not just the module but the **segment**: a run of
+adjacent VP-owned slots. Inside a segment, VP stages pass VP-owned textures directly from one stage
+to the next. The host (and libplacebo) sees **one entry and one exit** per segment.
+
+### 6.1 Segments today vs target
+
+Counts are from the fd60b650 code: `RunEntrance` 5667-5685, the stage functions 6170-6430,
+`RenderLocked`'s hook assembly 23790-24711 and `PresentDejudderExtras` 17036-18104. A "crossing"
+is one place where control and a texture pass between host code and VP code. It is either a
+host-written call per stage or a separately registered libplacebo hook.
+
+| Segment | Slots in order (built now; *planned*) | Crossings today | Target |
+|---|---|---|---|
+| **S0 Analysis + motion estimation** (original frame) | source analysis (crop, scene, subtitle detection: **Bill's**); NVOF/matcher estimate; vector store/validity | Estimation reads separately uploaded native planes (`DejudderPlaneUpload`, 7153) and hands the vectors back to the host. The host then passes them to each consumer (warp, texture restore, temporal dither, LED look-ahead). In total: **1 upload + 1 estimate call + ~4 vector hand-offs** | One motion segment: `motion.Estimate(frame)`. Consumers then fetch vectors directly through `motion.vector_delivery`. Analysis stays in Bill's host code (a hand-back by design) |
+| **S1 Entrance** (source size, once per source frame) | re-base -> *repair A* -> deband -> texture restore (+ detail pulse) -> *4K route* -> *refine* -> *chroma* | `RunEntrance` is already one host loop with VP-owned `pl_frame`s. But each stage has host glue (`EntranceRebase`/`Deband`/`Detail`, 50-110 lines each) with per-path branches for main, extras A/B, crossfade and B-as-A. That makes **3 host->VP calls per run, on up to 4 paths**; the ring/cache is held in `Impl` | One call: `entrance.Run(sourceFrame, path, vectors) -> pl_frame`. The ring, B3 cache, stage order and per-path rules live inside the segment |
+| **S2 Output colour + drive** (PRE_OUTPUT) | SDR tone shape -> DV trims -> *Stage 13 appearance* -> LED measure -> LED compensation (adaptive gamma) -> *black level* -> calibration LUT (VP) | **5-7 separate libplacebo hooks**: tone shape (1+), DV trims (1), LED measure (1), LED compensation (1-2), calibration LUT (1). Host code registers and tags each one (`TagSlotHooks` x5). Each is a libplacebo pass boundary with libplacebo-owned intermediates. User PRE_OUTPUT shaders follow the LUT | **One** PRE_OUTPUT hook that runs the segment on VP-owned textures via `pl_dispatch` |
+| **S3 Output finish** (OUTPUT) | adaptive downscale blend -> de-judder rendered-picture cache -> occlusion mask -> sigma-delta dither | **4-6 more hooks**: downscale blend (1-2), NLS, de-judder cache (1), sigma-delta (1-3), mask. Host logic also reorders them so the dither stays last (24435-24470) | **One** OUTPUT hook, with the dither last inside it. Together with S2: **2 crossings** for the whole output end, against ~10-13 today |
+| **S4 Scaling refine** (POST_KERNEL, planned) | libplacebo scaler -> *hybrid scaler blend* -> *D* -> *scaling.refine* | not built (net runner wiring pending) | **One** POST_KERNEL hook that runs the VP part as a segment (NetRunner passes on VP textures) |
+| De-judder extras / phase pictures | warp of S1's processed picture -> S2/S3 | `PresentDejudderExtras` re-assembles the hook list for every extra (17413-17467), so each extra repeats the same crossings | Extras call the same S1/S2/S3 segment objects; no second hook list |
+
+### 6.2 Where a hand-back is unavoidable
+
+- **libplacebo's main scaler** (`pl_render_image` kernel/EWA): the owner's libplacebo strategy is
+  to own the code around it, not replace it. So S1 ends before the scaler and S4 starts after it.
+- **Tone/gamut mapping, CMS, peak detection and the DV decode (libdovi):** the colour engine stays
+  in libplacebo, so S1 -> libplacebo -> S2 is a fixed boundary. DV tunnel pictures are decoded
+  inside libplacebo, so an S1 stage that needs the decoded DV picture cannot run before it (queue
+  items 132-133).
+- **libplacebo's output encoding between PRE_OUTPUT and OUTPUT:** this is why S2 and S3 are two
+  segments, not one. They can merge into a single OUTPUT segment only if VP owns the encoding step.
+  VP already repairs that step (`OutputEncodingRepair`, for the PRE_OUTPUT encoding bug). Decide
+  this when S3 is built, not now.
+- **User shaders (mpv format) placed between VP stages:** today each one is a libplacebo hook, so
+  each one splits a segment. Either restrict them to segment edges, or run them inside the segment
+  through the NetRunner's mpv-pass shim (B1/R3), which already executes mpv-format passes on VP
+  textures.
+- **Presentation, swapchain, subtitle/crop placement and overlays:** these are Bill's host code.
+  VP segments hand their result back before them.
+
+### 6.3 The segment runner and how it fits (d)
+
+- **Core type** (`src/VP-V/core/SegmentRunner.h`, header-only, C++14): a segment holds an ordered
+  list of stage objects taken from `SlotRegistry` for its zone. Each stage implements:
+  - `Contract In()/Out()`: size, format, colour domain, range (including BTB/WTW), field/vector
+    validity;
+  - `Run(ctx, in, out)` on VP-owned textures.
+
+  The runner checks `OrderValidator` and the contracts when settings change, not on every frame. It
+  owns the intermediate texture pool, records `SlotTiming` per stage, and reports downgrades
+  through `FallbackStatus`.
+- **Host adapter:** one object per segment in the host (`EntranceSegment`, `OutputColourSegment`,
+  `OutputFinishSegment`, `ScalingRefineSegment`). The host makes one call, or registers one hook
+  whose callback calls the segment. That is exactly the "one-line call at a registered hook point"
+  that (d)'s stopping rule asks for. Under (d), the glue extractions b3-b7 land **as stages of
+  S2/S3**, not as separate host adapters, and b8 becomes S1.
+- **Testing:** each segment is testable on its own:
+  - CPU tests cover order, contracts and fallbacks.
+  - A small GPU fixture feeds a synthetic or captured texture that matches the entry contract and
+    checks the exit (golden image within tolerance, BTB/WTW probes). It needs neither the renderer
+    nor the 2.5 h harness.
+  - The renderer harness then checks only the wiring: each segment is called once, with the right
+    inputs.
+- **Timing and cost:** each removed libplacebo hook removes a pass boundary, which costs at least one
+  full-frame read and write of an intermediate (a registered hook is never free, R2). Two changes
+  should save measurable GPU time per refresh:
+  - going from ~10-13 output hooks to 2;
+  - extras reusing the segments instead of re-assembling hooks.
+
+  Measure the saving with `SlotTiming` before and after; do not assume a number. Fusing adjacent
+  stages into fewer passes becomes possible only once a segment owns its intermediates; it is a
+  later step.
+- **Byte identity:** merging separate hooks into one segment changes the intermediate formats and
+  pass boundaries (libplacebo's FBO format vs the segment's pool). So the merge **cannot be assumed
+  byte-identical**. Do it in two commits:
+  1. A behaviour-free move: the segment object registers the same hooks, in the same order, from
+     one host call. This is byte-identical to r6.
+  2. The merge into one hook, checked against a tolerance gate and accepted by the owner. The gate:
+     at most 1 code value of difference at the output bit depth, BTB/WTW probes unchanged and
+     sigma-delta statistics unchanged.
+
+### 6.4 Effort and place in the sequence
+
+| Step | What | Est. h | When |
+|---|---|---:|---|
+| s0 | `SegmentRunner` core, contracts, CPU tests, GPU fixture | 5 | M2 freeze, after b1 (new files, no host risk) |
+| s1 | S2 + S3 behaviour-free: hooks registered by segment objects (carries b3-b7) | +3 over b3-b7 | with M2 steps 3-7 and 14 |
+| s2 | S2/S3 merged into one PRE_OUTPUT + one OUTPUT hook; extras reuse them | 6 | after s1, before the timing clusters; tolerance gate + chain gate + owner review |
+| s3 | S1 entrance segment (carries b8) | +3 over b8 | with M2 steps 11-13; timing gate |
+| s4 | Motion segment and direct vector delivery (carries part of b9) | +2 over b9 | with M2 steps 16-17; timing gates |
+| s5 | S4 scaling-refine segment | 3 | when the net runner / hybrid scaler wiring lands, not in M2 |
+
+Segments add about **22 agent hours** to (d), for **~80 agent hours in total** (about 4-5 working
+days elapsed with gates). Without s5, which waits for D, it is ~77 h.
+
+## 7. Question 5: quick wins (low risk, reduce conflicts now)
 
 Ordered by value for risk. The first three need no host edit and can start before M1.
 
@@ -332,11 +435,11 @@ Ordered by value for risk. The first three need no host edit and can start befor
    logs, de-judder hold diagnostics, entrance counters) behind one diagnostics adapter. Bill's
    subtitle capture and local-boundary diagnostics stay.
 
-## 7. Summary
+## 8. Summary
 
 | | (a) leave | (b) VP glue out | (c) full split | (d) hybrid |
 |---|---|---|---|---|
-| Agent hours | 0 (ongoing conflict cost) | ~50 | ~110-140 | **~58** |
+| Agent hours | 0 (ongoing conflict cost) | ~50 | ~110-140 | **~58; ~80 with segments (section 6)** |
 | Risk | rising | medium (timing clusters high) | high | medium |
 | Host size after | 32.7k and growing | ~23k | ~5k + components | ~23k |
 | Bill merges | as today, worsening | better | ends them | better |
