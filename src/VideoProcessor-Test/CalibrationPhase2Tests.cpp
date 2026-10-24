@@ -17,7 +17,7 @@
 #include <ConfigEditorCore.h>
 #include <ConfigFile.h>
 #include <led/LedDriveConfig.h>
-#include <led/SerialPort.h>
+#include <VP-V/modules/drive/projector_control/SerialPort.h>
 
 #include <algorithm>
 #include <cmath>

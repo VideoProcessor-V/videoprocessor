@@ -1,6 +1,6 @@
 #pragma once
 
-#include "LedController.h"
+#include <VP-V/modules/drive/projector_control/LedController.h>
 #include "LedDriveConfig.h"
 
 #include <algorithm>

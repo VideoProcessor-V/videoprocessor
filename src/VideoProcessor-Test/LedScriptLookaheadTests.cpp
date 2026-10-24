@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include <led/LedController.h>
+#include <VP-V/modules/drive/projector_control/LedController.h>
 #include <led/LedDriveModule.h>
 #include <vprenderer/AlphaQueuePolicy.h>
 

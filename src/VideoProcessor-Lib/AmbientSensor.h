@@ -1,6 +1,6 @@
 #pragma once
 
-#include "led/SerialPort.h"
+#include <VP-V/modules/drive/projector_control/SerialPort.h>
 
 #include <condition_variable>
 #include <cstdint>

@@ -95,16 +95,16 @@ copy /Y "$(ProjectDir)..\VideoProcessor-ConfigDiscovery\x64\$(Configuration)\Vid
     <ClCompile Include="..\VideoProcessor-Lib\ConfigFile.cpp">
       <ObjectFileName>$(IntDir)ConfigFileStandalone.obj</ObjectFileName>
     </ClCompile>
-    <ClCompile Include="..\VideoProcessor-Lib\led\SerialPort.cpp">
+    <ClCompile Include="..\VP-V\modules\drive\projector_control\SerialPort.cpp">
       <ObjectFileName>$(IntDir)LedSerialPortStandalone.obj</ObjectFileName>
     </ClCompile>
-    <ClCompile Include="..\VideoProcessor-Lib\led\BarcoAsciiDriver.cpp">
+    <ClCompile Include="..\VP-V\modules\drive\projector_control\BarcoAsciiDriver.cpp">
       <ObjectFileName>$(IntDir)LedBarcoAsciiDriverStandalone.obj</ObjectFileName>
     </ClCompile>
-    <ClCompile Include="..\VideoProcessor-Lib\led\ProjectorDriver.cpp">
+    <ClCompile Include="..\VP-V\modules\drive\projector_control\ProjectorDriver.cpp">
       <ObjectFileName>$(IntDir)LedProjectorDriverStandalone.obj</ObjectFileName>
     </ClCompile>
-    <ClCompile Include="..\VideoProcessor-Lib\led\ConnectionTest.cpp">
+    <ClCompile Include="..\VP-V\modules\drive\projector_control\ConnectionTest.cpp">
       <ObjectFileName>$(IntDir)LedConnectionTestStandalone.obj</ObjectFileName>
     </ClCompile>
   </ItemGroup>

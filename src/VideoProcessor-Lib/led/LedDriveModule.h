@@ -2,12 +2,12 @@
 
 #include <atomic>
 
-#include "LedClock.h"
-#include "LedController.h"
+#include <VP-V/modules/drive/projector_control/LedClock.h>
+#include <VP-V/modules/drive/projector_control/LedController.h>
 #include "LedDriveConfig.h"
 #include "LedLookahead.h"
 #include "LedMeasurement.h"
-#include "ProjectorDriver.h"
+#include <VP-V/modules/drive/projector_control/ProjectorDriver.h>
 
 #include <condition_variable>
 #include <deque>

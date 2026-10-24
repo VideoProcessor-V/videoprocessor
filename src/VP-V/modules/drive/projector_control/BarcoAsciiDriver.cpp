@@ -1,8 +1,8 @@
 #include <pch.h>
 #include "BarcoAsciiDriver.h"
 
-#include "../DebugLog.h"
-#include "../DiagnosticHistory.h"
+#include <DebugLog.h>
+#include <DiagnosticHistory.h>
 
 #include <algorithm>
 #include <cctype>

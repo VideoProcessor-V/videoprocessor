@@ -3,9 +3,9 @@
 // Test doubles shared by the LED drive tests: a stand-in FL35 behind a fake
 // serial port.
 
-#include <led/LedClock.h>
+#include <VP-V/modules/drive/projector_control/LedClock.h>
 #include <led/LedDriveModule.h>
-#include <led/SerialPort.h>
+#include <VP-V/modules/drive/projector_control/SerialPort.h>
 
 #include <cctype>
 #include <chrono>

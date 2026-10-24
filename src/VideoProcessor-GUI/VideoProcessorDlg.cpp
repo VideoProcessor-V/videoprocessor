@@ -37,7 +37,7 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <mutex>
 #include <sstream>
 #include <thread>
-#include <led/ConnectionTest.h>
+#include <VP-V/modules/drive/projector_control/ConnectionTest.h>
 #include <ShortcutChord.h>
 #include <VP-V/modules/control/diagnostics/CrashState.h>
 #include <DiagnosticHistory.h>
@@ -47,7 +47,7 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <IntentInterpreterSupport.h>
 #include <QueueLookahead.h>
 #include <led/LedDriveConfig.h>
-#include <led/SerialPort.h>
+#include <VP-V/modules/drive/projector_control/SerialPort.h>
 #include <vector>
 #include <regex>
 
@@ -88,7 +88,7 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <RendererQueueLaunchAudit.h>
 #include <RendererProfileConfig.h>
 #include <MainConfigSchema.h>
-#include <led/LedShutdownRestore.h>
+#include <VP-V/modules/drive/projector_control/LedShutdownRestore.h>
 #include <UnifiedProfileRuntime.h>
 #include <VpBuildIdentity.h>
 #include <vprenderer/LibplaceboRendererPluginApi.h>

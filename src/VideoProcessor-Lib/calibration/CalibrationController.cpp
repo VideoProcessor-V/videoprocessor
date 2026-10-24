@@ -7,7 +7,7 @@
 #include "TranscriptRecorder.h"
 
 #include "../AmbientConfig.h"
-#include "../led/SerialPort.h"
+#include <VP-V/modules/drive/projector_control/SerialPort.h>
 
 #include "../ConfigFile.h"
 #include "../IRenderer.h"

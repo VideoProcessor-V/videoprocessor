@@ -1,7 +1,7 @@
 #pragma once
 
-#include "ProjectorDriver.h"
-#include "SerialPort.h"
+#include <VP-V/modules/drive/projector_control/ProjectorDriver.h>
+#include <VP-V/modules/drive/projector_control/SerialPort.h>
 
 #include <memory>
 #include <string>

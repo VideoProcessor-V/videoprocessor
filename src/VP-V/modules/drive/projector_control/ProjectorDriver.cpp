@@ -2,7 +2,7 @@
 #include "ProjectorDriver.h"
 #include "BarcoAsciiDriver.h"
 
-#include "../DebugLog.h"
+#include <DebugLog.h>
 
 #include <algorithm>
 #include <chrono>

@@ -3,12 +3,12 @@
 
 #include <ConfigFile.h>
 #include <MainConfigSchema.h>
-#include <led/LedController.h>
+#include <VP-V/modules/drive/projector_control/LedController.h>
 #include <led/LedDriveModule.h>
 #include <led/LedLookahead.h>
 #include <led/LedMeasurement.h>
 #include <led/LedRawTransfer.h>
-#include <led/LedShutdownRestore.h>
+#include <VP-V/modules/drive/projector_control/LedShutdownRestore.h>
 #include <vprenderer/AlphaQueuePolicy.h>
 
 #include "LedDriveTestSupport.h"

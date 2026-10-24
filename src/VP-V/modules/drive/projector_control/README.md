@@ -53,12 +53,25 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **partly migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
-- `src/VideoProcessor-Lib/led/LedController.cpp`
-- `src/VideoProcessor-Lib/led/BarcoAsciiDriver.cpp`
-- `src/VideoProcessor-Lib/led/ProjectorDriver.cpp`
-- `src/VideoProcessor-Lib/led/SerialPort.cpp`
+- `src/VP-V/modules/drive/projector_control/LedController.cpp`
+- `src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.cpp`
+- `src/VP-V/modules/drive/projector_control/ProjectorDriver.cpp`
+- `src/VP-V/modules/drive/projector_control/SerialPort.cpp`
+- `src/VP-V/modules/drive/projector_control/LedController.h`
+- `src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.h`
+- `src/VP-V/modules/drive/projector_control/ProjectorDriver.h`
+- `src/VP-V/modules/drive/projector_control/SerialPort.h`
+- `src/VP-V/modules/drive/projector_control/ConnectionTest.cpp`
+- `src/VP-V/modules/drive/projector_control/ConnectionTest.h`
+- `src/VP-V/modules/drive/projector_control/LedClock.h`
+- `src/VP-V/modules/drive/projector_control/LedShutdownRestore.h`
+
+Forwarding headers at the legacy path (early migration, removed in M2; they only keep files on active branches building, new code includes the `<VP-V/...>` path):
+
+- `src/VideoProcessor-Lib/led/ConnectionTest.h`
+- `src/VideoProcessor-Lib/led/SerialPort.h`
 
 ## Migration directive
 
