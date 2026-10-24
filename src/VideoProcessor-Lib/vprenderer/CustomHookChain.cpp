@@ -33,6 +33,13 @@ namespace CustomHookChain
             return {
                 { "output_width", std::to_string(values.outputWidth), values.outputWidth > 0 },
                 { "output_height", std::to_string(values.outputHeight), values.outputHeight > 0 },
+                // Efficiency audit 2026-10-24 #8a: the sigma-delta's quarter-resolution and
+                // block grids (ceil((n + 1.5) / 4), ceil((n + 7.5) / 16)): never smaller than
+                // libplacebo's size of the matching (n + 1.5) / 4 and (n + 7.5) / 16 passes.
+                { "output_width_q4", std::to_string(QuarterGrid(values.outputWidth)), values.outputWidth > 0 },
+                { "output_height_q4", std::to_string(QuarterGrid(values.outputHeight)), values.outputHeight > 0 },
+                { "output_width_b16", std::to_string(BlockGrid(values.outputWidth)), values.outputWidth > 0 },
+                { "output_height_b16", std::to_string(BlockGrid(values.outputHeight)), values.outputHeight > 0 },
                 { "source_width", std::to_string(values.sourceWidth), values.sourceWidth > 0 },
                 { "source_height", std::to_string(values.sourceHeight), values.sourceHeight > 0 },
                 { "refresh_hz", FormatNumber(values.refreshHz), values.refreshHz > 0.0 },

@@ -302,7 +302,12 @@ namespace
 	{
 		std::string source = fixture ? LoadFixtureShader(file) : LoadRepoShader(file);
 		Check(!source.empty(), std::string("bundled shader not found: ") + file);
-		for (const auto& token : { std::make_pair("{{output_width}}", outputWidth), std::make_pair("{{output_height}}", outputHeight) })
+		// Efficiency audit 2026-10-24 #8a: the sigma-delta's grid templates, as CustomHookChain.
+		const int q4w = (2 * outputWidth + 10) / 8, q4h = (2 * outputHeight + 10) / 8;
+		const int b16w = (2 * outputWidth + 46) / 32, b16h = (2 * outputHeight + 46) / 32;
+		for (const auto& token : { std::make_pair("{{output_width}}", outputWidth), std::make_pair("{{output_height}}", outputHeight),
+			std::make_pair("{{output_width_q4}}", q4w), std::make_pair("{{output_height_q4}}", q4h),
+			std::make_pair("{{output_width_b16}}", b16w), std::make_pair("{{output_height_b16}}", b16h) })
 			for (size_t at; (at = source.find(token.first)) != std::string::npos;)
 				source.replace(at, std::string(token.first).size(), std::to_string(token.second));
 		auto shader = std::make_unique<Shader>();

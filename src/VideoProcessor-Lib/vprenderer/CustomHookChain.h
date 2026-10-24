@@ -35,6 +35,10 @@ namespace CustomHookChain
 
     // Replaces {{name}} with built-ins first, then rule parameters. Fails when a
     // {{identifier}} token remains or a used built-in is not yet known (zero).
+    // Efficiency audit 2026-10-24 #8a: ceil((n + 1.5) / 4) and ceil((n + 7.5) / 16) in integers.
+    inline int QuarterGrid(int n) { return n > 0 ? (2 * n + 10) / 8 : 0; }
+    inline int BlockGrid(int n) { return n > 0 ? (2 * n + 46) / 32 : 0; }
+
     bool ApplyTemplates(std::string& source, const TemplateValues& values,
         const std::map<std::string, std::string>& parameters, std::string& reason);
 
