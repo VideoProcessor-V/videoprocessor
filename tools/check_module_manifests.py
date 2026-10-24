@@ -4,7 +4,9 @@
 Checks that docs/design/slots.json, every src/VP-V/modules/<unit>/<slot>/MANIFEST.json and the
 master component list docs/design/components-master.json agree, that every live file exists,
 and that no source file exists both inside src/VP-V/modules and in a legacy location (no duplicate
-source during the migration).
+source during the migration). A moved header may leave a pure forwarding header at its legacy
+path while other active branches still include that path; it must be listed in its module's
+"forwarding_headers" and is removed in M2 (docs/design/migration-early-inventory.md).
 
   python tools/check_module_manifests.py          # check; exit 1 on any mismatch
   python tools/check_module_manifests.py --write  # regenerate the master list from the manifests
@@ -51,6 +53,28 @@ def build_master(manifests):
             for m in sorted(manifests, key=lambda m: m["order"])
         ],
     }
+
+
+FORWARDER_MARKER = "VP-V forwarding header"
+
+
+def forwarder_problem(path, target):
+    """Why a legacy-path forwarder is not a pure forwarder to the moved file (None when it is)."""
+    if target is None:
+        return "no moved file of that name under src/VP-V/modules"
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    if FORWARDER_MARKER not in text:
+        return f"missing the marker '{FORWARDER_MARKER}'"
+    want = os.path.relpath(target, os.path.join(ROOT, "src")).replace(os.sep, "/")
+    code = []
+    for line in text.splitlines():
+        s = line.strip()
+        if s and not s.startswith("//"):
+            code.append(s)
+    if code != ["#pragma once", f"#include <{want}>"]:
+        return f"must contain only '#pragma once' and '#include <{want}>' (plus comments)"
+    return None
 
 
 def check(write):
@@ -160,6 +184,23 @@ def check(write):
         for name in files:
             if os.path.splitext(name)[1].lower() in SOURCE_EXT:
                 moved[name.lower()] = os.path.join(dirpath, name)
+    # Forwarding headers (early migrations, docs/design/migration-early-inventory.md): a moved
+    # header may leave a one-line forwarder at its legacy path, so files on other active branches
+    # that still include the old path build unchanged. Each one is listed in its module's
+    # "forwarding_headers", carries FORWARDER_MARKER, contains nothing but #pragma once and one
+    # #include of the moved file, and is removed in M2. Anything else with a moved name is a copy.
+    forwarders = {}
+    for m in manifests:
+        for f in m.get("forwarding_headers", []):
+            forwarders[os.path.normcase(os.path.abspath(os.path.join(ROOT, f)))] = (m["slot"], f)
+    for path, (slot, rel) in sorted(forwarders.items()):
+        name = os.path.basename(path).lower()
+        if not os.path.exists(path):
+            errors.append(f"{slot}: forwarding header missing: {rel}")
+            continue
+        problem = forwarder_problem(path, moved.get(name))
+        if problem:
+            errors.append(f"{slot}: forwarding header {rel}: {problem}")
     if moved:
         for base in (os.path.join(ROOT, "src"), os.path.join(ROOT, "shaders")):
             for dirpath, dirnames, files in os.walk(base):
@@ -169,6 +210,9 @@ def check(write):
                 dirnames[:] = [d for d in dirnames if d not in ("x64", "Debug", "Release", ".vs")]
                 for name in files:
                     if name.lower() in moved:
+                        full = os.path.normcase(os.path.abspath(os.path.join(dirpath, name)))
+                        if full in forwarders:
+                            continue   # checked above
                         errors.append(f"duplicate source: {os.path.relpath(os.path.join(dirpath, name), ROOT)} "
                                       f"and {os.path.relpath(moved[name.lower()], ROOT)}")
 
