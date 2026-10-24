@@ -371,6 +371,29 @@ namespace RendererProfileConfig
 		return true;
 	}
 
+	inline bool IsUnified(const ConfigFile& config);
+
+	// r6 fix 6 (queue item 24, owner approved): a [vprenderer.Default] section that the renderer did
+	// not apply is a silent surprise (checked 2026-10-18: minimal files without [general] or
+	// [vprenderer] hit it - they are not read as a unified configuration, so every profile section
+	// is ignored). `appliedSections`: the normalised sections the renderer applied this load.
+	// Returns the warning to log, or "" when [vprenderer.Default] is absent or was applied.
+	inline std::string DefaultSectionNotAppliedWarning(const ConfigFile& config,
+		const std::set<std::string>& appliedSections, const std::string& activeProfiles = {})
+	{
+		const std::string section = ConfigFile::NormalizeName("vprenderer.Default");
+		if (!config.HasSection(section) || appliedSections.count(section) != 0)
+			return {};
+		// A unified configuration applies it as the display baseline or as a selectable profile;
+		// not selected is an operator choice, not a surprise. Only the non-unified file drops it.
+		(void)activeProfiles;
+		if (IsUnified(config))
+			return {};
+		const std::string why = "this file is not read as a unified configuration (no [vprenderer] or [general] section), "
+			"so profile sections are ignored; add [general] (or the [vprenderer] baseline) to use it";
+		return "WARNING: [vprenderer.Default] exists but is not applied: " + why;
+	}
+
 	inline bool IsUnified(const ConfigFile& config)
 	{
 		if (config.HasSection(RendererConfigView::VPRENDERER_SECTION))

@@ -139,7 +139,9 @@ namespace MotionAheadTest
 			// time above 60 Hz).
 			Assert::AreEqual(9, Decide(9, false, true, 9).depth);
 			Assert::AreEqual(kMaxGeneralDepth, Decide(99, false, true, 99).depth);
-			Assert::AreEqual(4, Decide(DepthAt(9, 24.0), false, true, 9).depth);
+			Assert::AreEqual(2, Decide(DepthAt(9, 24.0), false, true, 9).depth);   // r6: time-based, 2 at 24p
+			Assert::AreEqual(1, Decide(DepthAt(9, 24.0), false, true, 1).depth);   // a short queue: what is there
+			Assert::IsTrue(Decide(DepthAt(9, 24.0), false, true, 1).reason == Reason::ShallowQueue);
 			Assert::AreEqual(4, Decide(DepthAt(9, 60.0), false, true, 9).depth);
 			Assert::AreEqual(0, Decide(-3, false, true, 9).depth);
 			// The queue that holds the default depth: the current frame plus 4.

@@ -8988,6 +8988,9 @@ void CVideoProcessorDlg::SaveStateReport(const char* trigger)
 			settings.emplace_back("presentation", std::string(CStringA(text).GetString()));
 		if (m_videoRenderer->GetDejudderStatus(text))
 			settings.emplace_back("dejudder", std::string(CStringA(text).GetString()));
+		// r6 fix 7: "Fallbacks engaged: <list> / none".
+		if (m_videoRenderer->GetFallbacksStatus(text))
+			settings.emplace_back("fallbacks", std::string(CStringA(text).GetString()));
 		if (m_videoRenderer->GetRenderStallStatus(text))
 			settings.emplace_back("render_stall", std::string(CStringA(text).GetString()));
 		if (m_videoRenderer->GetOutputModeInfo(text))
@@ -14487,7 +14490,42 @@ void CVideoProcessorDlg::PublishActiveProfileStatus()
         outputAvailable && outputStatus.calibrationStatusAvailable,
         outputAvailable && outputStatus.calibrationLutAttached,
         outputAvailable ? outputStatus.calibrationConfigIdentity : 0,
-        outputAvailable ? outputStatus.calibrationConfigPath : std::string(), snapshot->configuration.get());
+        outputAvailable ? outputStatus.calibrationConfigPath : std::string(), snapshot->configuration.get(),
+        m_lastFallbacksHeading);
+}
+
+// r6 fix 7 (vp-no-silent-fallbacks): the renderer's "Fallbacks engaged" heading, polled with the
+// crash-state lines. A change re-publishes the Config status; each fallback id engaged for the
+// first time this session gets a brief transient notice (never an always-on OSD).
+void CVideoProcessorDlg::UpdateFallbacksStatus()
+{
+	CString text;
+	const std::string heading = m_videoRenderer && m_videoRenderer->GetFallbacksStatus(text) ?
+		std::string(CStringA(text).GetString()) : std::string();
+	if (heading == m_lastFallbacksHeading)
+		return;
+	m_lastFallbacksHeading = heading;
+	DiagnosticHistory::Global().RecordDecision("fallbacks", heading.empty() ? "-" : heading.c_str());
+	for (const std::string& id : m_fallbackNotices.Take(heading))
+		ShowFallbackNotice(id, heading);
+	PublishActiveProfileStatus();
+}
+
+void CVideoProcessorDlg::ShowFallbackNotice(const std::string& id, const std::string& heading)
+{
+	DebugLog::Log("Fallback notice: %s (%s)", id.c_str(), heading.c_str());
+	if (m_profileChangeDisplaySeconds == 0)
+	{
+		// The overlay is switched off: say it on the status line instead.
+		OnRendererDetailString(CString(CStringA(("Fallback engaged: " + id).c_str())),
+			m_rendererGeneration.load(std::memory_order_acquire));
+		return;
+	}
+	ProfileChangeOverlay::Item item;
+	item.group = "fallback";
+	item.label = "Fallback engaged";
+	item.value = id;
+	ShowProfileOverlayItems({ item }, false, "fallback");
 }
 
 std::map<std::string, std::string>
@@ -14929,28 +14967,23 @@ void CVideoProcessorDlg::ApplyUnifiedProfileSnapshot(
 			snapshot->queue.hasTargetFrames, snapshot->queue.targetFrames,
 			m_profileBaseTargetLatencyMs, m_profileBaseTargetFrames,
 			SnapshotSourceRateHz(*snapshot), snapshot->generalRateFixes);
-		// Owner 2026-10-16: the optical-flow look-ahead is on or off; on, the queue holds at least
-		// 4 frames ahead (5), whether its target is set by time or in frames. Off, or the low-latency
-		// queue profile: no minimum.
-		m_queueTargetDecision = QueueLatency::ApplyFrameMinimum(m_queueTargetDecision,
-			snapshot->queue.lowLatencyPath ? 0 : snapshot->lookAheadQueueFrames, true);
-		// audit 2026-10-16: the look-ahead minimum never asks for more frames
-		// than the queue holds; say so once per change.
+		// r6 fix 2 (2026-10-24, look-ahead inventory item 41): no forced queue minimum for the
+		// optical-flow look-ahead any more (it raised every de-judder/interpolation queue to 5 frames,
+		// 208 ms at 24p). The target follows the configured depth (target_latency_ms / target_frames);
+		// the look-ahead (time-based, 2 ahead at 24p) uses what is queued and the matcher covers the rest.
 		m_queueTargetDecision = QueueLatency::ClampToCapacity(
 			m_queueTargetDecision, desiredQueueSize);
 		{
-			static size_t s_loggedShortQueueSize = 0;
+			static size_t s_loggedShortTarget = 0;
 			const size_t lookAheadFrames = snapshot->queue.lowLatencyPath ? 0 : snapshot->lookAheadQueueFrames;
-			const size_t shortQueueSize =
-				lookAheadFrames > 0 && desiredQueueSize > 0 && desiredQueueSize < lookAheadFrames ?
-				desiredQueueSize : 0;
-			if (shortQueueSize != s_loggedShortQueueSize)
+			const size_t shortTarget = lookAheadFrames > 0 && m_queueTargetDecision.frames > 0 &&
+				m_queueTargetDecision.frames < lookAheadFrames ? m_queueTargetDecision.frames : 0;
+			if (shortTarget != s_loggedShortTarget)
 			{
-				s_loggedShortQueueSize = shortQueueSize;
-				if (shortQueueSize > 0)
-					DebugLog::Log("Queue: queue_size %zu < %zu: the motion look-ahead needs %zu "
-						"(target held at %zu)", shortQueueSize, lookAheadFrames, lookAheadFrames,
-						m_queueTargetDecision.frames);
+				s_loggedShortTarget = shortTarget;
+				if (shortTarget > 0)
+					DebugLog::Log("Queue: target %zu frames < the motion look-ahead's %zu; it uses what is queued "
+						"(no added delay; the matcher covers the rest)", shortTarget, lookAheadFrames);
 			}
 		}
 		const size_t desiredTargetFrames = m_queueTargetDecision.frames;
@@ -15030,8 +15063,7 @@ void CVideoProcessorDlg::ApplyUnifiedProfileSnapshot(
 				"Queue target from time: target_latency_ms=%d source_rate=%.3f "
 				"target_frames=%zu effective_delay_ms=%.1f%s",
 				m_queueTargetDecision.latencyMs, m_queueTargetDecision.rateHz,
-				m_queueTargetDecision.frames, m_queueTargetDecision.effectiveMs,
-				m_queueTargetDecision.raisedToMinimum ? " (raised to the motion look-ahead minimum)" : "");
+				m_queueTargetDecision.frames, m_queueTargetDecision.effectiveMs, "");
 	}
 
 	CString activeState;
@@ -19097,6 +19129,7 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 			// The de-judder line names the motion engine in use (smooth motion
 			// steps it aside with that reason).
 			rendererLine("de-judder", m_videoRenderer->GetDejudderStatus(text), text);
+			rendererLine("fallbacks", m_videoRenderer->GetFallbacksStatus(text), text);
 			rendererLine("presentation", m_videoRenderer->GetPresentationTimingStatus(text), text);
 			rendererLine("render stall", m_videoRenderer->GetRenderStallStatus(text), text);
 			rendererLine("Dynamic Drive", m_videoRenderer->GetLedDriveStatus(text), text);
@@ -19112,11 +19145,12 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 			// audit 2026-10-16: no renderer, so clear the renderer-owned keys
 			// instead of keeping a dead renderer's last values.
 			static const char* const kRendererKeys[] = {
-				"de-judder", "presentation", "render stall", "Dynamic Drive", "source resolution", "content",
+				"de-judder", "fallbacks", "presentation", "render stall", "Dynamic Drive", "source resolution", "content",
 				"motion intent", "ambient", "black intent", "display intent" };
 			for (const char* key : kRendererKeys)
 				crashState.SetValue(key, std::string("-"));
 		}
+		UpdateFallbacksStatus();   // r6 fix 7
 	}
 	// Preserve the requested visibility through renderer handoff. The next
 	// refresh submits to the native API once ready; never create a desktop OSD.
@@ -19297,6 +19331,7 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 				stats.presentationTimingStatus);
 			m_videoRenderer->GetDejudderStatus(stats.dejudderStatus);
 		}
+		m_videoRenderer->GetFallbacksStatus(stats.fallbacksStatus);   // r6 fix 7
 		RendererRenderLoad renderLoad;
 		if (m_videoRenderer->GetRenderLoad(renderLoad))
 		{

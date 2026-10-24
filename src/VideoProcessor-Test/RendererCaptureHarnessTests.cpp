@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <FileFrameTiming.h>
 #include <wincodec.h>
 #include <atlbase.h>
 #pragma comment(lib, "windowscodecs.lib")
@@ -258,6 +259,7 @@ namespace
 		std::vector<std::string> log;
 		std::string dejudderStatus, presentationStatus;   // the stats lines at the end
 		std::string ledStatus;   // the crash state's LED drive line (GetLedDriveStatus)
+		std::string fallbacksStatus;   // r6 fix 7: "Fallbacks engaged: ..." (GetFallbacksStatus)
 		std::string sourceStatus;   // the crash state's source resolution line (Stage 12)
 		std::string captureMetadata;   // the rendered-output capture's JSON sidecar (plan->captureAtSeconds)
 		// Sampled once per sent frame through the second half of the run: the renderer's queue depth
@@ -321,6 +323,11 @@ namespace
 		int rateNumerator = 0;           // the signal's rate (0 = the run's own)
 		int rateDenominator = 1001;
 		double paceScale = 1.0;          // < 1: the source clock runs fast (drift)
+		// r6 fix 5: > 0 sends timed file frames (OnTimedVideoFrame, as a file player or an offline
+		// render tool does) at this film rate (numerator / fileRateDenominator), the signal's mode
+		// unchanged; pace them with paceScale.
+		unsigned fileRateNumerator = 0;
+		unsigned fileRateDenominator = 1;
 		double resetAtSeconds = -1.0;    // an HDMI resync (renderer Reset) at this time
 		double captureAtSeconds = -1.0;  // a rendered-output capture (VP-0133) at this time
 		std::function<FrameStep(int)> step;
@@ -434,7 +441,7 @@ namespace
 		return holds;
 	}
 
-	const wchar_t* const kHarnessEnvironment[] = { L"VP_TEST_SCREENSHOT_DIR", L"VP_TEST_CAPTURE_UNPACK_FAIL",
+	const wchar_t* const kHarnessEnvironment[] = { L"VP_TEST_SCREENSHOT_DIR", L"VP_TEST_CAPTURE_UNPACK_FAIL", L"VP_TEST_HARNESS_BETA",
 		L"VP_TEST_DV_UNPACK_FAIL", L"VP_TEST_SHADER_DIR" };
 
 	// Both copies of the environment: the tests set these through the Win32 block
@@ -625,7 +632,11 @@ namespace
 			CreateDirectoryA((cache + "\\vprenderer-beta").c_str(), nullptr);
 			SetEnvironmentVariableA("VP_TEST_SHADER_CACHE_DIR", cache.c_str());
 		}
-		const std::string dllPath = folder + "vprenderer\\VideoProcessorVPRenderer.dll";
+		// r6 fix 5: VP_TEST_HARNESS_BETA=1 runs the Beta flavour (libplacebo Beta) instead.
+		const bool betaFlavour = [] { char* v = nullptr; size_t n = 0; const bool on = _dupenv_s(&v, &n,
+			"VP_TEST_HARNESS_BETA") == 0 && v && v[0] == '1'; std::free(v); return on; }();
+		const std::string dllPath = folder + (betaFlavour ? "vprenderer-beta\\VideoProcessorVPRendererBeta.dll" :
+			"vprenderer\\VideoProcessorVPRenderer.dll");
 		HMODULE dll = LoadLibraryExA(dllPath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
 		Assert::IsNotNull(dll, (L"cannot load " + std::wstring(dllPath.begin(), dllPath.end())).c_str());
 		using Create = IVideoRenderer* (__cdecl*)(IRendererCallback*, uint32_t, HWND, ITimingClock*, bool, size_t,
@@ -783,7 +794,19 @@ namespace
 						static_cast<timingclocktime_t>(static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(
 							period * n).count() + step.timestampOffsetUs) * ticksPerUs);
 					VideoFrame frame(buffer.data(), static_cast<uint64_t>(n + 1), stamp, &buffers[n % ring.size()], stamp);
-					renderer->OnVideoFrame(frame);
+					if (plan && plan->fileRateNumerator > 0)
+					{
+						FileFrameTiming timing;
+						timing.sourceRateNumerator = plan->fileRateNumerator;
+						timing.sourceRateDenominator = plan->fileRateDenominator;
+						timing.sourceRateHz = static_cast<double>(plan->fileRateNumerator) / plan->fileRateDenominator;
+						timing.sampleStart100ns = static_cast<int64_t>(n) * 10000000LL * plan->fileRateDenominator / plan->fileRateNumerator;
+						timing.sampleStop100ns = static_cast<int64_t>(n + 1) * 10000000LL * plan->fileRateDenominator / plan->fileRateNumerator;
+						timing.discontinuity = n == 0;
+						renderer->OnTimedVideoFrame(frame, timing);
+					}
+					else
+						renderer->OnVideoFrame(frame);
 				}
 				MSG msg;
 				while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
@@ -824,6 +847,7 @@ namespace
 			CString status;
 			if (renderer->GetDejudderStatus(status)) result.dejudderStatus = CStringA(status).GetString();
 			if (renderer->GetLedDriveStatus(status)) result.ledStatus = CStringA(status).GetString();
+			if (renderer->GetFallbacksStatus(status)) result.fallbacksStatus = CStringA(status).GetString();
 			if (renderer->GetSourceResolutionStatus(status)) result.sourceStatus = CStringA(status).GetString();
 			status.Empty();
 			if (renderer->GetPresentationTimingStatus(status)) result.presentationStatus = CStringA(status).GetString();
@@ -1116,6 +1140,78 @@ namespace Tests
 			}
 			if (ahead)
 				Assert::IsTrue(cameraFromEngine, (L"pairs computed ahead: the camera from the engine\n" + on.Tail()).c_str());
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(FallbacksEngagedIsPopulatedByTheCaptureUnpackFallback)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(FallbacksEngagedIsPopulatedByTheCaptureUnpackFallback)
+		{
+			const HarnessScope harnessScope;
+			// r6 fix 7 (vp-no-silent-fallbacks): the capture GPU unpack's automatic CPU fallback is
+			// listed under "Fallbacks engaged"; a clean run says "none".
+			if (!RequireHardwareOrSkip("FallbacksEngagedIsPopulatedByTheCaptureUnpackFallback")) return;
+			{
+				const RunResult clean = Run(VideoFrameEncoding::V210, "gpu", 2.0);
+				Assert::AreEqual(std::string("Fallbacks engaged: none"), clean.fallbacksStatus, (L"clean\n" + clean.Tail()).c_str());
+			}
+			_putenv_s("VP_TEST_CAPTURE_UNPACK_FAIL", "1");
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 2.0);
+			_putenv_s("VP_TEST_CAPTURE_UNPACK_FAIL", "");
+			Logger::WriteMessage(("fallbacks: " + r.fallbacksStatus + "\n").c_str());
+			Assert::IsTrue(r.fallbacksStatus.find("Fallbacks engaged: capture GPU unpack (CPU formatters") == 0,
+				(L"the fallback listed\n" + r.Tail()).c_str());
+			Assert::IsTrue(r.Logged("Fallbacks engaged: capture GPU unpack"), (L"logged once\n" + r.Tail()).c_str());
+			Assert::IsTrue(r.presented, (L"frames presented on the CPU path\n" + r.Tail()).c_str());
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(LowFrameRateSourcesDoNotCrash)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(LowFrameRateSourcesDoNotCrash)
+		{
+			const HarnessScope harnessScope;
+			// r6 fix 5 (queue item 25): a 6 fps source crashed the Beta renderer. Low rates (below
+			// CaptureRateBounds' 10 Hz floor too) run through the real renderer with the de-judder,
+			// interpolation and render-ahead on, on both capture paths, without a crash.
+			if (!RequireHardwareOrSkip("LowFrameRateSourcesDoNotCrash")) return;
+			// numerator/denominator: the frames' rate. The signal's mode stays at 24p (a DisplayMode
+			// below 10 Hz is refused upstream); file: timed file frames carrying the low film rate,
+			// else captured frames delivered at the low rate under the 24p mode.
+			struct Case { int numerator; int denominator; bool file; const char* path; const char* extra; };
+			const Case cases[] = {
+				{ 6000, 1000, true, "gpu", "dejudder_strength: 0.25\n" },
+				{ 6000, 1000, true, "standard", "dejudder_strength: 0.25\ninterpolation: auto\n" },
+				{ 6000, 1001, true, "gpu", "dejudder_strength: 0.25\nrender_ahead: on\nrender_ahead_queue_credit: on\n" },
+				{ 6000, 1000, false, "gpu", "dejudder_strength: 0.25\ninterpolation: auto\n" },
+				{ 8000, 1000, true, "gpu", "interpolation: always\n" },
+				{ 12000, 1000, false, "gpu", "dejudder_strength: 0.25\n" },
+				{ 3000, 1000, true, "gpu", "dejudder_strength: 0.25\n" } };
+			for (const bool beta : { false, true })
+			for (const Case& c : cases)
+			{
+				_putenv_s("VP_TEST_HARNESS_BETA", beta ? "1" : "");
+				FramePlan plan;
+				plan.rateNumerator = 24000;
+				plan.rateDenominator = 1001;
+				plan.paceScale = (24000.0 / 1001.0) / (static_cast<double>(c.numerator) / c.denominator);
+				if (c.file)
+				{
+					plan.fileRateNumerator = static_cast<unsigned>(c.numerator);
+					plan.fileRateDenominator = static_cast<unsigned>(c.denominator);
+				}
+				plan.step = [](int n) { FrameStep f; f.content = n; return f; };
+				const RunResult r = Run(VideoFrameEncoding::V210, c.path, 4.0, true, c.extra, false, &plan);
+				char name[160];
+				snprintf(name, sizeof(name), "%s %.3f fps %s %s [%s]", beta ? "Beta" : "Default",
+					static_cast<double>(c.numerator) / c.denominator, c.file ? "file" : "captured", c.path, c.extra);
+				Logger::WriteMessage((std::string("== ") + name + ": presented " + (r.presented ? "yes" : "NO") +
+					"; " + r.dejudderStatus + "; " + r.fallbacksStatus + "\n").c_str());
+				const std::wstring wname(name, name + strlen(name));
+				Assert::IsTrue(r.created, (wname + L": renderer created\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.presented, (wname + L": frames presented\n" + r.Tail()).c_str());
+			}
+			_putenv_s("VP_TEST_HARNESS_BETA", "");
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(StreamFaultsKeepTheDejudderSafeAndRecovering)
@@ -2220,10 +2316,10 @@ namespace Tests
 			g_harnessQueueTarget = 5;
 			const RunResult reset = Run(VideoFrameEncoding::V210, "gpu", 7.0, true, "dejudder_strength: 0.25\n", false, &plan);
 			g_harnessQueueTarget = 0;
-			Logger::WriteMessage(("reset at 3 s:\n" + lines(reset, "Motion ahead: engaged") + lines(reset, "waiting for 4")).c_str());
+			Logger::WriteMessage(("reset at 3 s:\n" + lines(reset, "Motion ahead: engaged") + lines(reset, "Motion ahead: waiting for")).c_str());
 			int engaged = 0;
 			for (const std::string& line : reset.log) engaged += line.find("Motion ahead: engaged") != std::string::npos ? 1 : 0;
-			Assert::IsTrue(engaged >= 2 && reset.Logged("waiting for 4"), (L"a reset disengages and it re-engages at 4\n" + reset.Tail()).c_str());
+			Assert::IsTrue(engaged >= 2 && reset.Logged("Motion ahead: waiting for 2"), (L"a reset disengages and it re-engages at the 24p time-based depth (r6)\n" + reset.Tail()).c_str());
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(LowLatencyQueueFromTheFirstFrame)
@@ -3684,12 +3780,12 @@ namespace Tests
 			const std::string vpOwned = "[vprenderer]\ndiagnostic_vp_owned_dxgi_presenter: true\n";
 			struct Case { const char* name; const char* path; std::string extra; bool renderAhead; };
 			const Case cases[] = {
-				{ "23.976p standard, render ahead, gate period", "standard", dejudder + "render_ahead: on\ndejudder_gate: period\n", true },
-				{ "23.976p gpu, render ahead, gate period", "gpu", dejudder + "render_ahead: on\ndejudder_gate: period\n", true },
-				{ "23.976p standard, render ahead, gate refresh", "standard", dejudder + "render_ahead: on\ndejudder_gate: refresh\n", true },
-				{ "23.976p gpu, render ahead, gate refresh", "gpu", dejudder + "render_ahead: on\ndejudder_gate: refresh\n", true },
+				{ "23.976p standard, render ahead, gate period", "standard", dejudder + "render_ahead: on\nrender_ahead_queue_credit: on\ndejudder_gate: period\n", true },
+				{ "23.976p gpu, render ahead, gate period", "gpu", dejudder + "render_ahead: on\nrender_ahead_queue_credit: on\ndejudder_gate: period\n", true },
+				{ "23.976p standard, render ahead, gate refresh", "standard", dejudder + "render_ahead: on\nrender_ahead_queue_credit: on\ndejudder_gate: refresh\n", true },
+				{ "23.976p gpu, render ahead, gate refresh", "gpu", dejudder + "render_ahead: on\nrender_ahead_queue_credit: on\ndejudder_gate: refresh\n", true },
 				{ "23.976p gpu, render ahead, gate auto, VP-owned presenter", "gpu",
-					dejudder + "render_ahead: on\ndejudder_gate: auto\n" + vpOwned, true },
+					dejudder + "render_ahead: on\nrender_ahead_queue_credit: on\ndejudder_gate: auto\n" + vpOwned, true },
 				{ "23.976p gpu, render ahead off (reference)", "gpu", dejudder + "render_ahead: off\n", false } };
 			// Strict (render-ahead follow-up 2026-10-17; the laptop's internal panel passed vacuously
 			// with every frame held "timing not known: display rate"). A render_ahead case FAILS unless:

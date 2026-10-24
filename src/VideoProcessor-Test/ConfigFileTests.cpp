@@ -21,6 +21,7 @@
 #include <ConfigBoolSwitches.h>
 #include <HdrInference.h>
 #include <QueueLatency.h>
+#include <MotionAhead.h>
 #include <QueueProfileRestartPolicy.h>
 #include <ProfileChangeOverlay.h>
 #include <blackmagic_decklink/BlackMagicDeckLinkTranslate.h>
@@ -118,6 +119,49 @@ namespace VideoProcessorTest
             Assert::AreEqual<size_t>(0, framesFor("[vprenderer.Cinema]\ndejudder_strength: 0.25\noptical_flow: off\n"), L"optical flow off");
             Assert::AreEqual<size_t>(0, framesFor("[vprenderer.Cinema]\nquality: high\n"), L"no de-judder: no look-ahead");
             Assert::AreEqual<size_t>(5, framesFor("[vprenderer.Cinema]\ndejudder_strength_even: 0.5\n"), L"even-cadence strength alone");
+        }
+
+        TEST_METHOD(LookAheadQueueFramesAreTimeBasedAndNeverForceTheQueue)
+        {
+            // r6 fixes 2+3 (2026-10-24): the look-ahead's frames follow its time (66.7 ms) at the
+            // source rate - 2 ahead (3 queued) at 23.976p, 4 ahead (5) at 60p - and the queue target
+            // follows the configured depth: 200 ms at 23.976p is 5 frames, not more.
+            auto framesAt = [](double rate) {
+                CachedConfigTestFile file;
+                std::ofstream(file.path) << "[general]\npersist_profile_selection: false\n[vprenderer.Cinema]\ndejudder_strength: 0.25\n";
+                ConfigFile config;
+                Assert::IsTrue(config.Load(file.path));
+                std::string error;
+                UnifiedProfileRuntime::Runtime runtime;
+                auto lookup = [rate](const std::string& variable, std::string& value) {
+                    if (variable != "cadence") return false;
+                    std::ostringstream text;
+                    text.imbue(std::locale::classic());
+                    text.precision(17);
+                    text << rate;
+                    value = text.str();
+                    return true;
+                };
+                Assert::IsTrue(runtime.Initialize(config, lookup, error), std::wstring(error.begin(), error.end()).c_str());
+                const auto snapshot = runtime.GetSnapshot();
+                Assert::IsTrue(snapshot != nullptr);
+                return snapshot->lookAheadQueueFrames;
+            };
+            const double film = 24000.0 / 1001.0;
+            Assert::AreEqual<size_t>(3, framesAt(film), L"23.976p: 2 ahead + the frame shown");
+            Assert::AreEqual<size_t>(3, framesAt(25.0), L"25p");
+            Assert::AreEqual<size_t>(5, framesAt(60.0), L"60p: 4 ahead");
+            Assert::AreEqual<size_t>(9, framesAt(120.0), L"120p keeps the time: 8 ahead");
+            // The queue target: the configured time, never raised by the look-ahead.
+            const auto target = QueueLatency::ClampToCapacity(QueueLatency::ResolveTargetFrames(true, 200, false, 0, 0, 3, film), 16);
+            Assert::AreEqual<size_t>(5, target.frames, L"200 ms at 23.976p: 5 frames (208.5 ms)");
+            Assert::IsTrue(target.effectiveMs <= 210.0);
+            const auto twoFrames = QueueLatency::ClampToCapacity(QueueLatency::ResolveTargetFrames(false, 0, true, 2, 0, 3, film), 16);
+            Assert::AreEqual<size_t>(2, twoFrames.frames, L"target_frames 2 with the look-ahead on: 2 (it degrades, the queue is not forced)");
+            // The look-ahead on a short queue: what is there, never waiting.
+            const auto shallow = MotionAhead::Decide(MotionAhead::DepthAt(4, film), false, true, 1);
+            Assert::AreEqual(1, shallow.depth);
+            Assert::IsTrue(shallow.reason == MotionAhead::Reason::ShallowQueue);
         }
 
         TEST_METHOD(InterpolationKeysValidateAndWantTheLookAhead)
@@ -767,24 +811,17 @@ namespace VideoProcessorTest
             Assert::AreEqual(125.125, QueueLatency::EffectiveLatencyMs(3, film), 1e-9);
 
             using QueueLatency::ResolveTargetFrames;
-            // Owner 2026-10-16: a time target holds at least the motion look-ahead minimum
-            // (5 queued); an explicit frame count and low latency (minimum 0) are not raised.
+            // r6 fix 2 (2026-10-24): no forced look-ahead minimum - the target is the configured
+            // depth (time or frames); the look-ahead uses what is queued.
             {
-                const auto shortTime = QueueLatency::ApplyFrameMinimum(ResolveTargetFrames(true, 80, false, 0, 0, 3, film), 5);
-                Assert::IsTrue(shortTime.raisedToMinimum);
-                Assert::AreEqual<size_t>(5, shortTime.frames);
-                Assert::AreEqual(QueueLatency::EffectiveLatencyMs(5, film), shortTime.effectiveMs, 1e-9);
-                const auto longTime = QueueLatency::ApplyFrameMinimum(ResolveTargetFrames(true, 400, false, 0, 0, 3, film), 5);
-                Assert::IsFalse(longTime.raisedToMinimum, L"a long time target is kept");
-                const auto frames = QueueLatency::ApplyFrameMinimum(ResolveTargetFrames(false, 0, true, 2, 0, 3, film), 5);
+                const auto shortTime = ResolveTargetFrames(true, 80, false, 0, 0, 3, film);
+                Assert::AreEqual<size_t>(2, shortTime.frames, L"80 ms at 23.976: 2 frames, not raised to 5");
+                Assert::AreEqual(QueueLatency::EffectiveLatencyMs(2, film), shortTime.effectiveMs, 1e-9);
+                const auto frames = ResolveTargetFrames(false, 0, true, 2, 0, 3, film);
                 Assert::AreEqual<size_t>(2, frames.frames, L"an explicit frame count is the operator's choice");
-                // Owner 2026-10-16 (later): with the look-ahead on, an explicit frame count is raised too.
-                const auto framesAhead = QueueLatency::ApplyFrameMinimum(ResolveTargetFrames(false, 0, true, 2, 0, 3, film), 5, true);
-                Assert::AreEqual<size_t>(5, framesAhead.frames, L"the look-ahead on: 4 ahead even with target_frames 2");
-                Assert::IsTrue(framesAhead.raisedToMinimum);
-                const auto lowLatency = QueueLatency::ApplyFrameMinimum(ResolveTargetFrames(true, 20, false, 0, 0, 3, film), 0);
-                Assert::IsFalse(lowLatency.raisedToMinimum, L"low latency is exempt");
-                // audit 2026-10-16: the raised target never exceeds the queue capacity.
+                const auto framesAhead = ResolveTargetFrames(false, 0, true, 5, 0, 3, film);
+                Assert::AreEqual<size_t>(5, framesAhead.frames);
+                // the target never exceeds the queue capacity.
                 bool clamped = false;
                 const auto smallQueue = QueueLatency::ClampToCapacity(framesAhead, 3, &clamped);
                 Assert::IsTrue(clamped, L"queue_size 3 < 5: clamped");

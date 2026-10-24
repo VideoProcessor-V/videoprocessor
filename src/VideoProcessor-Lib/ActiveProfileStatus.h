@@ -12,8 +12,8 @@
 
 namespace ActiveProfileStatus
 {
-    constexpr uint32_t Version = 10;
-    constexpr wchar_t MappingName[] = L"Local\\VideoProcessor.ActiveProfileStatus.v10";
+    constexpr uint32_t Version = 11;   // 11: fallbacks (r6 fix 7)
+    constexpr wchar_t MappingName[] = L"Local\\VideoProcessor.ActiveProfileStatus.v11";
     constexpr size_t MaximumActiveShaders = 16;
 
     struct Snapshot
@@ -41,6 +41,8 @@ namespace ActiveProfileStatus
         uint32_t calibrationLutAttached = 0;
         uint64_t calibrationConfigIdentity = 0;
         char calibrationConfigPath[1024]{};
+        // r6 fix 7: "Fallbacks engaged: <list> / none" (empty: no renderer status).
+        char fallbacks[1024]{};
     };
 
     inline void Copy(char* destination, size_t count, const std::string& value)
@@ -73,7 +75,8 @@ namespace ActiveProfileStatus
         bool calibrationStatusAvailable = false,
         bool calibrationLutAttached = false,
         uint64_t calibrationConfigIdentity = 0,
-        const std::string& calibrationConfigPath = {}, const ConfigFile* configuration = nullptr)
+        const std::string& calibrationConfigPath = {}, const ConfigFile* configuration = nullptr,
+        const std::string& fallbacks = {})
     {
         static HANDLE mapping = nullptr;
         static Snapshot* shared = nullptr;
@@ -131,6 +134,7 @@ namespace ActiveProfileStatus
         next.calibrationLutAttached = calibrationLutAttached ? 1u : 0u;
         next.calibrationConfigIdentity = calibrationConfigIdentity;
         Copy(next.calibrationConfigPath, sizeof(next.calibrationConfigPath), calibrationConfigPath);
+        Copy(next.fallbacks, sizeof(next.fallbacks), fallbacks);
         *shared = next;
         MemoryBarrier();
     }

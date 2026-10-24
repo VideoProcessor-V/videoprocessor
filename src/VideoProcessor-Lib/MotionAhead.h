@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 
 #include "GeneralRate.h"
@@ -25,12 +26,26 @@ namespace MotionAhead
 	// 66.7 ms: 8 at 120 Hz, 16 at 240 Hz) instead of shrinking to 33 / 17 ms. kMaxGeneralDepth bounds
 	// it (the 60 Hz time at 240 Hz); the queue still bounds what is really used (ShallowQueue).
 	constexpr int kMaxGeneralDepth = 16;
+	// r6 fix 3 (2026-10-24, look-ahead inventory item 41): the depth is a TIME at every rate. The
+	// configured depth is frames at the 60 Hz reference (4 = 66.7 ms); a source rate turns it into
+	// whole frames covering at least that time, at least one: 23.976/24/25/30p 2, 50p 4, 59.94/60p 4,
+	// 120p 8, 240p 16 (kMaxGeneralDepth). Before, 24p held 4 (167 ms) and pushed the queue past the
+	// 200 ms budget. An unmeasured rate keeps the configured frames, and general_rate_fixes off the
+	// legacy count; either way the queue bounds what is really used (Decide: ShallowQueue).
+	inline double AheadMs(int configured)
+	{
+		return static_cast<double>((std::max)(0, (std::min)(kMaxDepth, configured))) * 1000.0 / GeneralRate::kFrameCountReferenceHz;
+	}
 	inline int DepthAt(int configured, double sourceHz, bool general = true)
 	{
 		const int base = (std::max)(0, (std::min)(kMaxDepth, configured));
 		if (base == 0)
 			return 0;
-		return (std::min)(kMaxGeneralDepth, GeneralRate::FramesWithFloor(base, sourceHz, general));
+		if (!general || !GeneralRate::Measured(sourceHz))
+			return base;
+		const double exact = AheadMs(base) * sourceHz / 1000.0;
+		const double timed = std::ceil(exact * (1.0 - GeneralRate::kRateTolerance));
+		return static_cast<int>((std::max)(1.0, (std::min)(static_cast<double>(kMaxGeneralDepth), timed)));
 	}
 
 	enum class Reason

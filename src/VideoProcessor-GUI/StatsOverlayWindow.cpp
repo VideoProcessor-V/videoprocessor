@@ -779,6 +779,12 @@ void StatsOverlayWindow::DrawStats(HDC hdc)
 		DrawText(hdc, line, PADDING, y);
 		y += lineHeight;
 	}
+	// r6 fix 7 (vp-no-silent-fallbacks): one heading for every automatic fallback.
+	if (!m_stats.fallbacksStatus.IsEmpty())
+	{
+		DrawText(hdc, m_stats.fallbacksStatus, PADDING, y);
+		y += lineHeight;
+	}
 	
 	// Conversion Performance (show if available)
 	if (m_stats.hasConversionData)
@@ -1061,6 +1067,8 @@ int StatsOverlayWindow::CalculateRequiredHeight(const StatsData& stats) const
 		if (!intentLine->IsEmpty())
 			++lineCount;
 	if (!stats.dejudderStatus.IsEmpty())
+		++lineCount;
+	if (!stats.fallbacksStatus.IsEmpty())
 		++lineCount;
 	const int lineHeight =
 		stats.isAlphaRenderer ? ALPHA_LINE_HEIGHT : LINE_HEIGHT;

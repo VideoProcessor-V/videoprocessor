@@ -28,9 +28,10 @@ namespace UnifiedProfileRuntime
 		RendererProfileConfig::ResolvedViewport viewport;
 		RendererProfileConfig::ResolvedQueue queue;
 		RendererProfileConfig::ResolvedLldv lldv;
-		// Owner 2026-10-16: the optical-flow look-ahead needs 4 frames queued ahead - the frames
-		// the queue must hold (5) when the selected renderer / input profiles have it on (optical
-		// flow on, vectors ahead on, a de-judder strength set); 0 when off.
+		// The frames the optical-flow look-ahead would use (its time-based depth + the frame shown:
+		// 3 at 24p, 5 at 60p, r6 fix 3) when the selected renderer / input profiles have it on
+		// (optical flow on, vectors ahead on, a de-judder strength or interpolation); 0 when off.
+		// Advisory only since r6 fix 2: the queue target is never raised to it.
 		size_t lookAheadQueueFrames = 0;
 		// Fixed-constant batch B3 (2026-10-18): general_rate_fixes of the selected display / input
 		// profiles (on unless a profile says off) - for the GUI's queue target and the DirectShow pin

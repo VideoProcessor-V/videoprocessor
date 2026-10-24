@@ -53,7 +53,6 @@ namespace QueueLatency
 		int latencyMs = 0;          // the configured time target when derived
 		double rateHz = 0.0;        // the source rate it was derived for
 		double effectiveMs = 0.0;   // frames as time (0 when the rate is unknown)
-		bool raisedToMinimum = false;   // a time target below the frame minimum was raised to it
 	};
 
 	// Precedence, most specific first:
@@ -99,27 +98,10 @@ namespace QueueLatency
 		return decision;
 	}
 
-	// Owner 2026-10-16 ("make sure the queue by set time aligns at a minimum"): a
-	// queue set by time never holds fewer frames than `minimumFrames` - the motion
-	// vectors' look-ahead (docs/VP-nvof-ahead.md: 4 ahead = 5 queued). Low latency
-	// is exempt (the caller passes 0), and an explicit target_frames is the
-	// operator's choice: only time-derived targets are raised.
-	// Owner 2026-10-16 (later): the look-ahead is on or off, and on needs 4 frames ahead - so with
-	// `explicitToo` an explicit target_frames is raised as well.
-	inline TargetDecision ApplyFrameMinimum(TargetDecision decision, size_t minimumFrames, bool explicitToo = false)
-	{
-		if ((decision.fromLatency || explicitToo) && minimumFrames > 0 && decision.frames < minimumFrames)
-		{
-			decision.frames = minimumFrames;
-			decision.raisedToMinimum = true;
-			decision.effectiveMs = EffectiveLatencyMs(decision.frames, decision.rateHz);
-		}
-		return decision;
-	}
-
-	// audit 2026-10-16: the target can never exceed the queue capacity - a
-	// look-ahead minimum above queue_size would otherwise ask for frames the
-	// queue cannot hold. capacity 0 (unknown) leaves the target alone.
+	// r6 fix 2 (2026-10-24): ApplyFrameMinimum (the forced 5-frame look-ahead minimum) is gone;
+	// the target is the configured depth and the look-ahead degrades on a short queue.
+	// audit 2026-10-16: the target can never exceed the queue capacity. capacity 0 (unknown)
+	// leaves the target alone.
 	inline TargetDecision ClampToCapacity(TargetDecision decision, size_t capacity, bool* clamped = nullptr)
 	{
 		const bool over = capacity > 0 && decision.frames > capacity;

@@ -88,6 +88,7 @@ struct StatsData
 	bool presentationTargetTimingKnown = false;
 	CString presentationTimingStatus;
 	CString dejudderStatus;    // VP Renderer de-judder / occlusion mask line (empty = off)
+	CString fallbacksStatus;   // r6 fix 7: "Fallbacks engaged: <list> / none" (empty = renderer without it)
 	double presentationTargetLeadMs = 0.0;
 	double captureToPresentationTargetMs = 0.0;
 

@@ -61,6 +61,7 @@
 #include <StatsOverlayWindow.h>
 #include <AspectRatioOsd.h>
 #include <CadenceIntervalEstimate.h>
+#include <FallbackStatus.h>
 #include <ApplicationInterface.h>
 #include <ConfigurationApplyPolicy.h>
 #include <CaptureVideoStatePolicy.h>
@@ -730,6 +731,12 @@ protected:
 	// Intent interpreter items 2-5 (2026-10-17): the lux feed to the renderer and
 	// the status it publishes (motion / ambient / black / display), once a second.
 	IntentStatus m_intentStatus;
+	// r6 fix 7: "Fallbacks engaged" - the renderer's heading as last seen (Config status, report)
+	// and the ids already announced by a one-time notice this session.
+	std::string m_lastFallbacksHeading;
+	FallbackStatus::Notices m_fallbackNotices;
+	void UpdateFallbacksStatus();
+	void ShowFallbackNotice(const std::string& id, const std::string& heading);
 	std::string m_intentLogKeys[4];             // the last logged state per function
 	void UpdateIntentInterpreter();
 	// Owner 2026-10-17: active_picture_lookahead_frames follows the queue unless set.

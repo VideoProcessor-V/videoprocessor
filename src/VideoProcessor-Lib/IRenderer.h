@@ -717,4 +717,14 @@ public:
 		(void)automatic;
 	}
 
+	// r6 fix 7 (owner rule vp-no-silent-fallbacks, plugin API 41): the renderer's automatic
+	// fallbacks as one heading, "Fallbacks engaged: <id> (<reason>); ..." or "Fallbacks engaged:
+	// none" (FallbackStatus.h). Shown in the Ctrl+I overlay, the Config status and the Ctrl+Alt+D
+	// bundle; the GUI announces each id once (a brief transient notice). False: not supported.
+	virtual bool GetFallbacksStatus(CString& status) const
+	{
+		status.Empty();
+		return false;
+	}
+
 };

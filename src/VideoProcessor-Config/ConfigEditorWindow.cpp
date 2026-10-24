@@ -3400,6 +3400,12 @@ void ConfigEditorWindow::refreshActiveProfileIndicators()
         shaders, shaderAvailable, zoom, scaling, output, subtitles);
     refreshRendererAutoStatus();
     refreshCalibrationControls();
+    if (auto* label = findChild<QLabel*>(QStringLiteral("config.live.fallbacks")))
+    {
+        const QString fallbacks = available ? QString::fromLocal8Bit(active.fallbacks) : QString();
+        label->setText(fallbacks);
+        label->setVisible(!fallbacks.isEmpty());
+    }
     if (auto* label = findChild<QLabel*>(QStringLiteral("config.color_output.live_status")))
         label->setText(available && active.outputSummary[0] ?
             QStringLiteral("Live output — Color / Output: %1\n%2\nApplies to the running renderer, not unsaved edits. Windows/HDMI wire state is not measured here.")
@@ -5405,6 +5411,14 @@ QWidget* ConfigEditorWindow::createShell()
     footer->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
     auto* footerLayout = new QHBoxLayout(footer);
     footerLayout->setContentsMargins(16, 8, 16, 8);
+    // r6 fix 7 (vp-no-silent-fallbacks): the running renderer's "Fallbacks engaged" heading.
+    auto* fallbacksLabel = new QLabel;
+    fallbacksLabel->setObjectName(QStringLiteral("config.live.fallbacks"));
+    fallbacksLabel->setAccessibleName(QStringLiteral("Fallbacks engaged"));
+    fallbacksLabel->setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
+    fallbacksLabel->setWordWrap(true);
+    fallbacksLabel->setVisible(false);
+    footerLayout->addWidget(fallbacksLabel, 1);
     status_ = new QLabel;
     status_->setObjectName(QStringLiteral("configurationStatus"));
     status_->setAccessibleName(QStringLiteral("Configuration status"));

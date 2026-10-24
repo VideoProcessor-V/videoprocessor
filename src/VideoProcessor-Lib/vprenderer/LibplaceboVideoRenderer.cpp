@@ -1,5 +1,6 @@
 #include <pch.h>
 #include <MotionAhead.h>
+#include <FallbackStatus.h>
 #include <GeneralRateLog.h>
 #include <RefreshKey.h>
 #include <MotionValidity.h>
@@ -1629,6 +1630,10 @@ namespace
 	};
 	void ApplyDisplayRuleOverrides(const ConfigFile& config, const DisplayRule& rule,
 		RendererSettings& settings);
+	// r6 fix 6: the sections applied by the current LoadRendererSettings (normalised), for the
+	// [vprenderer.Default]-not-applied warning; the last warning logged (once per change).
+	std::set<std::string> appliedRuleSections;
+	std::string defaultSectionWarningLogged;
 
 	bool ParseRefreshRateRuleKey(const std::string& key, int& minimumRate, int& maximumRate);
 
@@ -2281,6 +2286,7 @@ namespace
 	{
 		if (rule.name.empty())
 			return;
+		appliedRuleSections.insert(ConfigFile::NormalizeName(rule.section));   // r6 fix 6
 		// Hunt 2 (cadence_class_fixes, 02-dv L6): a profile selected by `content` that set the
 		// classifier's own inputs (intent_content, source_class, dejudder_pulldown,
 		// cadence_class_fixes) would drop itself and loop with the hold time: those keys are
@@ -3488,6 +3494,7 @@ namespace
 	{
 		RendererSettings settings;
 		activeRule.clear();
+		appliedRuleSections.clear();   // r6 fix 6
 		if (!config.IsLoaded()) return settings;
         TryGetDisplayBool(config, "subtitle_bbox_test", settings.subtitleBoxTest);
         TryGetDisplayBool(config, "subtitle_cut_paste_test", settings.subtitleCutPasteTest);
@@ -3964,6 +3971,19 @@ namespace
 			(manualRule.empty() ? SelectDisplayRule(config, state) :
 				(FindProfile(config, manualRule).name.empty() ?
 					FindDisplayRule(config, manualRule) : FindProfile(config, manualRule)));
+		// r6 fix 6 (queue item 24): a [vprenderer.Default] the renderer does not apply is logged.
+		{
+			std::set<std::string> applied = appliedRuleSections;
+			if (!selectedRule.name.empty())
+				applied.insert(ConfigFile::NormalizeName(selectedRule.section));
+			const std::string warning = RendererProfileConfig::DefaultSectionNotAppliedWarning(config, applied, activeProfiles);
+			if (warning != defaultSectionWarningLogged)
+			{
+				if (!warning.empty())
+					DebugLog::Log("%s", warning.c_str());
+				defaultSectionWarningLogged = warning;
+			}
+		}
 		if (!selectedRule.name.empty())
 		{
 			ApplyDisplayRuleOverrides(config, selectedRule, settings);
@@ -5534,8 +5554,11 @@ struct LibplaceboVideoRenderer::Impl
 			return true;
 		}
 		if (!rgbGpuFailed.exchange(true))
+		{
 			DebugLog::Log("Native RGB ingest: the GPU unpack failed (%s); the CPU conversion for the rest of the session",
 				rgbUnpack->Error().c_str());
+			EngageFallback("native RGB GPU unpack", "CPU conversion to 10-bit 4:2:0 for the session: " + rgbUnpack->Error());
+		}
 		return false;
 	}
 	// dv_tunnel_gpu_unpack: the CPU unpack of a tunnel picture handed on raw
@@ -5606,8 +5629,11 @@ struct LibplaceboVideoRenderer::Impl
 			return false;
 		}
 		if (!dvGpuFailed.exchange(true))
+		{
 			DebugLog::Log("Dolby Vision RGB tunnel: the GPU unpack failed (%s); the CPU unpack for the rest of the session",
 				dvUnpack->Error().c_str());
+			EngageFallback("Dolby Vision GPU unpack", "CPU unpack for the session: " + dvUnpack->Error());
+		}
 		return false;
 	}
 	// The planes of a raw payload: the GPU unpack, or false (and the session
@@ -5649,8 +5675,11 @@ struct LibplaceboVideoRenderer::Impl
 			return false;
 		}
 		if (!captureGpuFailed.exchange(true))
+		{
 			DebugLog::Log("Capture path gpu: the GPU unpack failed (%s); the CPU formatters for the rest of the session",
 				captureUnpack->Error().c_str());
+			EngageFallback("capture GPU unpack", "CPU formatters (4:2:0) for the session: " + captureUnpack->Error());
+		}
 		return false;
 	}
 	// Owner 2026-10-13 (estimate ahead): C, the frame after B, when queued
@@ -5858,7 +5887,7 @@ struct LibplaceboVideoRenderer::Impl
 		OpenLoopDisplayRate::Candidates c;
 		int64_t dwmVblank = 0;
 		c.statisticsHz = presentationTelemetry.Snapshot().measuredDisplayHz;
-		if (activeSettings.renderAhead && !DisplayRefreshBounds::Accepts(c.statisticsHz))
+		if (RenderAheadActive() && !DisplayRefreshBounds::Accepts(c.statisticsHz))
 		{
 			const ULONGLONG now = GetTickCount64();
 			if (openLoopCandidatesTick == 0 || now - openLoopCandidatesTick >= 2000)
@@ -5900,7 +5929,7 @@ struct LibplaceboVideoRenderer::Impl
 			}
 			c.cadenceHz = openLoopCadence.Hz();
 		}
-		OpenLoopDisplayRate::Choice choice = OpenLoopDisplayRate::Select(c, activeSettings.renderAhead, activeSettings.queueTimingFixes);
+		OpenLoopDisplayRate::Choice choice = OpenLoopDisplayRate::Select(c, RenderAheadActive(), activeSettings.queueTimingFixes);
 		// Hunt 2 05-renderahead M5 (queue_timing_fixes): in open loop the planned rate is
 		// refined to the display's real refresh, measured from DWM's vblank times, so the
 		// chain does not drift into a lateness correction (a dropped extra) every few
@@ -5926,7 +5955,7 @@ struct LibplaceboVideoRenderer::Impl
 			openLoopGridRate.Reset();
 			openLoopGridRateLogged = false;
 		}
-		if (activeSettings.renderAhead && OpenLoopDisplayRate::Changed(dejudderDisplayRateLogged, choice))
+		if (RenderAheadActive() && OpenLoopDisplayRate::Changed(dejudderDisplayRateLogged, choice))
 		{
 			if (choice.openLoop)
 				DebugLog::Log("Render-ahead: open loop, display rate %.3f Hz from %s (no DXGI frame statistics; candidates: "
@@ -6081,7 +6110,7 @@ struct LibplaceboVideoRenderer::Impl
 			renderAheadFrames, renderAheadRestarts, renderAheadLate, renderAheadDropped, renderAheadHeld,
 			renderAheadIntervalPresents, renderAheadLead * 1000.0, renderAheadTargetLeadMs,
 			RenderAhead::LevelName(gateLevel, DejudderPolicy::MaxExtras(ratio)).c_str(),
-			RenderAhead::ResolveGate(activeSettings.dejudderGate, activeSettings.renderAhead) == RenderAhead::GateMode::Period ?
+			RenderAhead::ResolveGate(activeSettings.dejudderGate, RenderAheadActive()) == RenderAhead::GateMode::Period ?
 				"period" : "refresh",
 			dejudderLatencyFloor.Floor() * 1000.0, renderAheadNewFrameCost.P95(), renderAheadExtraCostOwn.P95(),
 			renderAheadExtraCostExternal.P95(), renderAheadEstimateCost.P95(),
@@ -6401,7 +6430,7 @@ struct LibplaceboVideoRenderer::Impl
 				text += ahead;
 			}
 			// Render-ahead: queued, its lead, late frames and the gate's level.
-			if (activeSettings.renderAhead && renderAheadFrames > 0)
+			if (RenderAheadActive() && renderAheadFrames > 0)
 			{
 				char ahead[160];
 				std::snprintf(ahead, sizeof(ahead), ", render-ahead lead %.1f ms, late %llu, dropped %llu, gate level %d",
@@ -6769,6 +6798,72 @@ struct LibplaceboVideoRenderer::Impl
 	std::string motionAheadLogged;
 	SteadyClock::time_point motionAheadLoggedAt{};
 	std::string motionSourceLogged;   // the de-judder's motion source, logged on change
+	// r6 fix 1: WarmIdleMotionEngine's dummy A -> A estimate. It loads the engine only: no
+	// estimate count, no "motion estimated"/motion-source logs, no vectors to the consumers.
+	bool motionEngineWarming = false;
+	// r6 fix 7 (owner rule vp-no-silent-fallbacks): the renderer's automatic fallbacks, published
+	// as "Fallbacks engaged: <list> / none" (GetFallbacksStatus: Ctrl+I, Config status, Ctrl+Alt+D).
+	FallbackStatus::Registry fallbacks;
+	void EngageFallback(const char* id, const std::string& reason)
+	{
+		if (fallbacks.Engage(id, reason))
+			DebugLog::Log("%s", fallbacks.Heading().c_str());
+	}
+	void ReleaseFallback(const char* id)
+	{
+		if (fallbacks.Release(id))
+			DebugLog::Log("%s", fallbacks.Heading().c_str());
+	}
+	// r6 fix 4: render-ahead only inside the fixed delay budget (RenderAhead::FitDelayBudget).
+	// render_ahead on but its lead not given back by the queue: off for this source (the plain
+	// per-refresh path, exactly as render_ahead off), listed under "Fallbacks engaged".
+	bool renderAheadBudgetVeto = false;
+	size_t renderAheadBudgetCredit = 0;   // the frames the budget lets the queue give back
+	bool RenderAheadActive() const { return activeSettings.renderAhead && !renderAheadBudgetVeto; }
+	void UpdateRenderAheadBudget(double captureRateHz)
+	{
+		if (!activeSettings.renderAhead)
+		{
+			renderAheadBudgetVeto = false;
+			renderAheadBudgetCredit = 0;
+			ReleaseFallback("render-ahead");
+			return;
+		}
+		double displayHz = renderLoadDisplayRefreshHz.load(std::memory_order_acquire);
+		if (!(displayHz > 0.0))
+			displayHz = presentationTelemetry.Snapshot().measuredDisplayHz;
+		if (!(captureRateHz > 0.0) || !(displayHz > 0.0))
+			return;   // rates not known yet: the last decision stands
+		const size_t queueFrames = earlyUploadQueueTarget.load(std::memory_order_acquire);
+		const RenderAhead::BudgetDecision d = RenderAhead::FitDelayBudget(1.0 / captureRateHz, 1.0 / displayHz,
+			queueFrames, activeSettings.renderAheadQueueCredit);
+		renderAheadBudgetCredit = d.fits ? d.creditFrames : 0;
+		const bool veto = !d.fits;
+		if (veto != renderAheadBudgetVeto)
+		{
+			DebugLog::Log("Render-ahead: %s - lead %.1f ms, queue %zu frames (%.1f ms budget), with render-ahead %.1f ms, "
+				"credit %zu frames (%s)", veto ? "OFF, outside the delay budget" : "on, inside the delay budget",
+				d.leadMs, queueFrames, d.budgetMs, d.totalMs, d.creditFrames, d.reason);
+			if (veto)
+			{
+				RenderAheadBreak();
+				renderAheadCredit.Reset();
+				renderAheadCreditFrames.store(0, std::memory_order_release);
+			}
+			else
+				renderAheadEpoch.Invalidate();   // as render_ahead switched on: the gate starts again
+			renderAheadBudgetVeto = veto;
+		}
+		if (veto)
+		{
+			char why[200];
+			snprintf(why, sizeof(why), "off: its %.0f ms lead does not fit the %.0f ms delay budget; %s",
+				d.leadMs, d.budgetMs, d.reason);
+			EngageFallback("render-ahead", why);
+		}
+		else
+			ReleaseFallback("render-ahead");
+	}
 	// Owner 2026-10-16: the look-ahead engages with 4 frames queued ahead and disengages when the
 	// queue holds none or the sequence breaks (a skip, seek or reset: a new motion generation);
 	// it re-engages only once 4 are queued again. Render-loop thread only.
@@ -6793,6 +6888,9 @@ struct LibplaceboVideoRenderer::Impl
 	MotionValidity::State motionValidity;
 	uint64_t motionValiditySeen = MotionValidity::State::kInitialEpoch;   // render thread
 	std::atomic<int> motionAheadDepth{ 0 };   // the frames ahead to submit (0 = none)
+	// r6 fix 3: the time-based depth at this source rate (MotionAhead::DepthAt; 2 at 24p, 4 at 60p):
+	// the look-ahead engages once that many are queued ahead (was always 4).
+	std::atomic<int> motionAheadConfigured{ MotionAhead::kDefaultDepth };
 	bool motionProducerFailedLogged = false;
 	// Audit 2026-10-16: since when the producer has been unwanted only because the de-judder was
 	// released (a resync or reset releases it): kept alive instead of a join on the render thread and
@@ -7521,6 +7619,7 @@ struct LibplaceboVideoRenderer::Impl
 				rgbUnpack.reset();       // the same for the RGB unpack, and its planes
 				dvUnpack.reset();        // and the Dolby Vision tunnel unpack
 				dvGpuFailed.store(false, std::memory_order_release);   // a new device may unpack again
+				ReleaseFallback("Dolby Vision GPU unpack");
 				dvGpuLogged = false;
 				pl_tex_destroy(d3d11->gpu, &rgbIngestLuma);
 				if (earlyUpload->IsOpen())
@@ -9605,7 +9704,7 @@ struct LibplaceboVideoRenderer::Impl
 			return;
 		}
 		const double ratio = RenderAheadChainRatio();
-		const RenderAhead::ChainDepth wanted = RenderAhead::ChainDepthFor(true,
+		const RenderAhead::ChainDepth wanted = RenderAhead::ChainDepthFor(RenderAheadActive(),
 			lowLatencyQueueActive.load(std::memory_order_acquire), ratio);
 		if (wanted == renderAheadChainDepth)
 		{
@@ -9675,7 +9774,7 @@ struct LibplaceboVideoRenderer::Impl
 		// low latency, no extras or a cadence not known yet keep today's 3 (bug hunt 05
 		// M6; CheckRenderAheadChainDepthLocked makes the chain again when that changes).
 		const double renderAheadRatio = RenderAheadChainRatio();
-		const RenderAhead::ChainDepth chainDepth = RenderAhead::ChainDepthFor(activeSettings.renderAhead && !blit,
+		const RenderAhead::ChainDepth chainDepth = RenderAhead::ChainDepthFor(RenderAheadActive() && !blit,
 			lowLatencyQueueActive.load(std::memory_order_acquire), renderAheadRatio);
 		desc.BufferCount = blit ? 1 : static_cast<UINT>(chainDepth.buffers);
 		desc.Scaling = DXGI_SCALING_STRETCH;
@@ -9707,11 +9806,11 @@ struct LibplaceboVideoRenderer::Impl
 			CComQIPtr<IDXGIDevice1> latencyDevice(d3d11->device);
 			const UINT latency = chainDepth.latency;
 			const HRESULT latencyResult = latencyDevice ? latencyDevice->SetMaximumFrameLatency(latency) : E_NOINTERFACE;
-			if (activeSettings.renderAhead || renderAheadSwapchainLogged)
+			if (RenderAheadActive() || renderAheadSwapchainLogged)
 			{
 				renderAheadSwapchainLogged = true;
 				DebugLog::Log("Render-ahead swapchain: render_ahead=%d buffers=%u maximum_frame_latency=%u result=0x%08lX (ratio %.3f)",
-					activeSettings.renderAhead ? 1 : 0, desc.BufferCount, latency, static_cast<unsigned long>(latencyResult),
+					RenderAheadActive() ? 1 : 0, desc.BufferCount, latency, static_cast<unsigned long>(latencyResult),
 					renderAheadRatio);
 			}
 		}
@@ -14929,7 +15028,7 @@ struct LibplaceboVideoRenderer::Impl
 		// Render-ahead without statistics: the extras' open-loop rate (the same one
 		// PresentDejudderExtras plans with), so the cadence ratio agrees.
 		in.displayHz = telemetry.measuredDisplayHz > 0.0 ? telemetry.measuredDisplayHz :
-			activeSettings.renderAhead && dejudderDisplayRate.openLoop ? dejudderDisplayRate.hz : customHookRefreshHz;
+			RenderAheadActive() && dejudderDisplayRate.openLoop ? dejudderDisplayRate.hz : customHookRefreshHz;
 		in.interlaced = interlaced;
 		in.nativeRgb = nativeRgb;
 		in.haveNext = next != nullptr;
@@ -15213,7 +15312,9 @@ struct LibplaceboVideoRenderer::Impl
 		a.chromaShiftY = lossless422 ? 0 : 1;
 		a.fullRange = contract.sampleRange == VideoFrameSampleRange::FULL;
 		const auto started = std::chrono::steady_clock::now();
+		motionEngineWarming = true;
 		const bool estimated = RunDejudderEstimate(a, a, 0, 0);
+		motionEngineWarming = false;
 		dejudderLiveFieldFrom = 0;
 		bool pictured = false;
 		if (estimated && dejudder)
@@ -15588,7 +15689,7 @@ struct LibplaceboVideoRenderer::Impl
 		Dejudder::Planes sa = a, sb = b;
 		sa.sequence = aSequence;
 		sb.sequence = bSequence;
-		if (motionProducer && motionProducer->Running())
+		if (motionProducer && motionProducer->Running() && !motionEngineWarming)
 		{
 			int engineW = 0, engineH = 0;
 			if (dejudder->EngineInputSize(engineW, engineH))
@@ -15635,6 +15736,8 @@ struct LibplaceboVideoRenderer::Impl
 			return false;
 		}
 		dejudderLiveFieldFrom = aSequence;
+		if (motionEngineWarming)
+			return true;   // r6 fix 1: warm-up only; nothing counted, logged or handed on
 		if (maskSlot >= 0)
 		{
 			dejudderMaskSequence[maskSlot] = bSequence;
@@ -15790,8 +15893,8 @@ struct LibplaceboVideoRenderer::Impl
 			record.stage = DiagnosticHistory::StageRepeated;
 			record.counter = diagExtrasCounter;
 			record.holdReason = code;
-			record.flags = activeSettings.renderAhead ? DiagnosticHistory::FlagRenderAhead : 0u;
-			if (activeSettings.renderAhead && dejudderDisplayRate.openLoop)
+			record.flags = RenderAheadActive() ? DiagnosticHistory::FlagRenderAhead : 0u;
+			if (RenderAheadActive() && dejudderDisplayRate.openLoop)
 				record.flags |= DiagnosticHistory::FlagOpenLoop;
 			record.rendererGeneration = diagRendererGeneration;
 			record.repeatedTotal = dejudderExtraStats.holds + 1;
@@ -15819,7 +15922,7 @@ struct LibplaceboVideoRenderer::Impl
 			dejudderHoldLogTick = now;
 		}
 		// Render-ahead: every hold also shows on the "Render-ahead:" line with the gate's level.
-		if (activeSettings.renderAhead)
+		if (RenderAheadActive())
 			LogRenderAhead(dejudderExtraStats.cadenceRatio, renderAheadGate.Level(), why);
 	}
 
@@ -15852,7 +15955,9 @@ struct LibplaceboVideoRenderer::Impl
 		// frame short by the lead and the next one long. Only real discontinuities (a
 		// generation change, missing rates or timing, no swapchain) break it.
 		// render_ahead off: every hold returns here at once, as before.
-		const bool renderAheadOn = activeSettings.renderAhead;
+		// r6 fix 4: render-ahead only inside the delay budget (decided per frame from the rates).
+		UpdateRenderAheadBudget(f.captureRateHz);
+		const bool renderAheadOn = RenderAheadActive();
 		const char* timedHold = nullptr;
 		auto holdKeepsTiming = [&](const char* why)
 		{
@@ -15922,7 +16027,7 @@ struct LibplaceboVideoRenderer::Impl
 		// Render-ahead (render_ahead): A's refreshes planned from the film clock and its
 		// extras queued back to back (no vblank waits); the gate per source period
 		// (dejudder_gate period, the default with render_ahead) or per refresh.
-		const bool queuedMode = activeSettings.renderAhead;
+		const bool queuedMode = RenderAheadActive();
 		const RenderAhead::GateMode gateMode = RenderAhead::ResolveGate(activeSettings.dejudderGate, queuedMode);
 		ResolveRenderAheadTimers();
 		if (queuedMode && !gpuFrameTimer.Snapshot().supported)
@@ -16887,7 +16992,7 @@ struct LibplaceboVideoRenderer::Impl
 			// render_ahead_queue_credit: floor(lead / P_s), latched while the cadence holds
 			// (bug hunt 05 M4).
 			renderAheadCreditFrames.store(activeSettings.renderAheadQueueCredit ?
-				renderAheadCredit.Commit(renderAheadLead, sourcePeriod, ratio) : 0, std::memory_order_release);
+				renderAheadCredit.CommitFrames(renderAheadBudgetCredit, ratio) : 0, std::memory_order_release);   // r6 fix 4
 			LogRenderAhead(ratio, gateLevel);
 		}
 		// Report-a-problem: a frame with extras ends the hold; the next hold is a new decision.
@@ -17979,7 +18084,7 @@ struct LibplaceboVideoRenderer::Impl
 						gpuSample.sourceSequence, gpuSample.submissionSerial,
 						gpuSample.milliseconds, gpuSample.lagFrames);
 					// Render-ahead gate: N, a new frame's whole GPU time.
-					if (activeSettings.renderAhead)
+					if (RenderAheadActive())
 						renderAheadNewFrameCost.Add(RenderAheadNow(), gpuSample.milliseconds);
 					if (matched)
 					{
@@ -21765,6 +21870,7 @@ struct LibplaceboVideoRenderer::Impl
 				lowLatency, motionProducer && motionProducer->Running(),
 				queuedFutureFrames.load(std::memory_order_acquire), activeSettings.opticalFlow, motionConsumer);
 			motionAheadDepth.store(motionProducer && motionProducer->Running() ? ahead.depth : 0, std::memory_order_release);
+			motionAheadConfigured.store((std::max)(1, ahead.configured), std::memory_order_release);
 			if (motionProducer)   // fixed-constant batch B3/B4 2026-10-18
 			{
 				motionProducer->SetDepth(ahead.configured);
@@ -22750,7 +22856,7 @@ struct LibplaceboVideoRenderer::Impl
                 // so the gain and the projector drive use the planned refresh it lands on
                 // (the chain's next refresh) instead of the wall clock.
                 double ledAheadMs = 0.0;
-                if (activeSettings.renderAhead && renderAheadSchedule.Active())
+                if (RenderAheadActive() && renderAheadSchedule.Active())
                 {
                     LARGE_INTEGER ledQpcFrequency{};
                     if (QueryPerformanceFrequency(&ledQpcFrequency) && ledQpcFrequency.QuadPart > 0)
@@ -24234,7 +24340,7 @@ struct LibplaceboVideoRenderer::Impl
 					diag.latencyMs = static_cast<float>(static_cast<double>(swapEndQpc - callbackQpc) / qpcPerMs);
 				uint32_t flags = 0;
 				if (temporalRenderer.Active()) flags |= DiagnosticHistory::FlagInterpolated;
-				if (activeSettings.renderAhead)
+				if (RenderAheadActive())
 				{
 					flags |= DiagnosticHistory::FlagRenderAhead;
 					if (dejudderDisplayRate.openLoop) flags |= DiagnosticHistory::FlagOpenLoop;
@@ -27648,6 +27754,15 @@ bool LibplaceboVideoRenderer::GetDejudderStatus(CString& status) const
 	return true;
 }
 
+bool LibplaceboVideoRenderer::GetFallbacksStatus(CString& status) const
+{
+	status.Empty();
+	if (!m_impl)
+		return false;
+	status = CString(m_impl->fallbacks.Heading().c_str());
+	return true;
+}
+
 bool LibplaceboVideoRenderer::GetLedDriveStatus(CString& status) const
 {
 	status.Empty();
@@ -29552,16 +29667,17 @@ void LibplaceboVideoRenderer::RenderLoop()
 				// generation: skip, seek, reset) and waits for 4 again; disengaged, the producer gets
 				// no work (no pair could be used before its frames are shown).
 				const size_t queuedAhead = m_impl->queuedFutureFrames.load(std::memory_order_acquire);
+				const size_t engageAhead = static_cast<size_t>((std::max)(1, m_impl->motionAheadConfigured.load(std::memory_order_acquire)));
 				// A break always disengages and the next pass must see 4 queued ahead again (a re-engage
 				// in the same pass would skip the refill wait: the reset test, 2026-10-16).
 				if (m_impl->motionAheadEngaged &&
 					(queuedAhead == 0 || generation != m_impl->motionAheadEngagedGeneration))
 				{
 					m_impl->motionAheadEngaged = false;
-					DebugLog::Log("Motion ahead: waiting for 4 frames queued ahead (%s)",
+					DebugLog::Log("Motion ahead: waiting for %zu frames queued ahead (%s)", engageAhead,
 						queuedAhead == 0 ? "the queue holds none" : "the sequence broke: skip, seek or reset");
 				}
-				else if (!m_impl->motionAheadEngaged && queuedAhead >= static_cast<size_t>(MotionAhead::kDefaultDepth))
+				else if (!m_impl->motionAheadEngaged && queuedAhead >= engageAhead)
 				{
 					m_impl->motionAheadEngaged = true;
 					m_impl->motionAheadEngagedGeneration = generation;
@@ -30013,8 +30129,10 @@ void LibplaceboVideoRenderer::RenderLoop()
 			m_queueTimingFixes.store(m_impl->activeSettings.queueTimingFixes, std::memory_order_relaxed);
 			// The look-ahead's frames while it is wanted (the producer's own condition):
 			// the floor of a credit-reduced queue target (hunt 2 13-timing M3).
+			// r6 fix 3: the time-based depth at this rate (3 queued at 24p, 5 at 60p), not 4 + 1 everywhere.
 			m_queueTargetFloor.store(m_impl->activeSettings.opticalFlow && m_impl->activeSettings.motionAheadFrames > 0 ?
-				MotionAhead::QueueFramesFor(m_impl->activeSettings.motionAheadFrames) : 0, std::memory_order_relaxed);
+				MotionAhead::QueueFramesFor(MotionAhead::DepthAt(m_impl->activeSettings.motionAheadFrames, captureRateHz,
+					m_impl->activeSettings.generalRateFixes)) : 0, std::memory_order_relaxed);
 			m_impl->contentIntent->Configure(m_impl->activeSettings.intentContent,
 				m_impl->activeSettings.intentContentHoldSeconds);
 			m_impl->ConfigureIntentInterpreter();
@@ -30389,7 +30507,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 								if (m_impl)
 								{
 									m_impl->vpQueueErrorReset.store(true, std::memory_order_release);
-									if (m_impl->activeSettings.renderAhead)
+									if (m_impl->RenderAheadActive())
 										m_impl->renderAheadFlushReanchor.store(true, std::memory_order_release);
 								}
 							}

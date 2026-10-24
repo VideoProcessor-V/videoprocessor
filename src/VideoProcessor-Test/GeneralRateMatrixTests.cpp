@@ -819,21 +819,30 @@ namespace GeneralRateMatrix
 	TEST_CLASS(MotionAheadMatrix)
 	{
 	public:
-		TEST_METHOD(DepthAtAndBelow60IsConfigured)
+		TEST_METHOD(DepthIsTimeBasedAtEveryRate)
 		{
+			// r6 fix 3: the look-ahead is a time (4 frames at 60 Hz = 66.7 ms) at every rate.
 			for (double r : AllMatrixRates())
 			{
-				if (AtOrBelow60(r))
-				{
-					Assert::AreEqual(4, MotionAhead::DepthAt(4, r, true), W(L"depth 4 at", r).c_str());
-					Assert::AreEqual(MotionAhead::DepthAt(4, r, false), MotionAhead::DepthAt(4, r, true), W(L"depth on/off at", r).c_str());
-					Assert::AreEqual(size_t{ 5 }, MotionAhead::QueueFramesFor(MotionAhead::DepthAt(4, r, true)), W(L"queue frames at", r).c_str());
-				}
+				const int depth = MotionAhead::DepthAt(4, r, true);
+				Assert::IsTrue(depth >= 1, W(L"at least one frame at", r).c_str());
+				Assert::IsTrue(depth * 1000.0 / r >= MotionAhead::AheadMs(4) * (1.0 - 2e-3), W(L"covers the time at", r).c_str());
+				Assert::IsTrue(depth == 1 || (depth - 1) * 1000.0 / r < MotionAhead::AheadMs(4), W(L"no extra frame at", r).c_str());
 				Assert::AreEqual(0, MotionAhead::DepthAt(0, r, true), W(L"depth 0 at", r).c_str());
-				Assert::AreEqual(4, MotionAhead::DepthAt(4, r, false), W(L"depth off at", r).c_str());
+				Assert::AreEqual(4, MotionAhead::DepthAt(4, r, false), W(L"legacy (general off) at", r).c_str());
 				Assert::AreEqual(0, MotionAhead::DepthAt(-2, r, true), W(L"negative configured at", r).c_str());
 			}
-			Assert::AreEqual(4, MotionAhead::DepthAt(9, 24.0, true), L"configured clamped to 4");
+			Assert::AreEqual(2, MotionAhead::DepthAt(4, 24000.0 / 1001.0, true), L"23.976p: 2 ahead");
+			Assert::AreEqual(2, MotionAhead::DepthAt(4, 24.0, true), L"24p: 2 ahead");
+			Assert::AreEqual(2, MotionAhead::DepthAt(4, 25.0, true), L"25p: 2 ahead");
+			Assert::AreEqual(2, MotionAhead::DepthAt(4, 30.0, true), L"30p: 2 ahead");
+			Assert::AreEqual(2, MotionAhead::DepthAt(4, 30000.0 / 1001.0, true), L"29.97p: 2 ahead");
+			Assert::AreEqual(4, MotionAhead::DepthAt(4, 50.0, true), L"50p: 4 ahead");
+			Assert::AreEqual(4, MotionAhead::DepthAt(4, 60000.0 / 1001.0, true), L"59.94p: 4 ahead");
+			Assert::AreEqual(4, MotionAhead::DepthAt(4, 60.0, true), L"60p: 4 ahead");
+			Assert::AreEqual(1, MotionAhead::DepthAt(4, 6.0, true), L"6 fps: 1 ahead");
+			Assert::AreEqual(4, MotionAhead::DepthAt(4, 0.0, true), L"unmeasured: the configured frames (the queue bounds it)");
+			Assert::AreEqual(4, MotionAhead::DepthAt(9, 60.0, true), L"configured clamped to 4");
 		}
 		TEST_METHOD(DepthKeepsTheTimeAbove60)
 		{
@@ -844,12 +853,12 @@ namespace GeneralRateMatrix
 			for (double r : AllMatrixRates())
 			{
 				const int depth = MotionAhead::DepthAt(4, r, true);
-				Assert::IsTrue(depth >= 4 && depth <= MotionAhead::kMaxGeneralDepth, W(L"depth within bounds at", r).c_str());
+				Assert::IsTrue(depth >= 1 && depth <= MotionAhead::kMaxGeneralDepth, W(L"depth within bounds at", r).c_str());
 			}
 		}
 		TEST_METHOD(QueueAndPendingJobs)
 		{
-			Assert::AreEqual(size_t{ 5 }, MotionAhead::QueueFramesFor(MotionAhead::DepthAt(4, 24.0)), L"queue at 24");
+			Assert::AreEqual(size_t{ 3 }, MotionAhead::QueueFramesFor(MotionAhead::DepthAt(4, 24.0)), L"queue at 24 (r6: time-based)");
 			Assert::AreEqual(size_t{ 5 }, MotionAhead::QueueFramesFor(MotionAhead::DepthAt(4, 60.0)), L"queue at 60");
 			Assert::AreEqual(size_t{ 6 }, MotionAhead::PendingJobsFor(4), L"pending at 4");
 			Assert::AreEqual(size_t{ 18 }, MotionAhead::PendingJobsFor(16), L"pending at 16");

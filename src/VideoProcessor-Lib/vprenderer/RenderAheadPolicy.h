@@ -84,6 +84,50 @@ namespace RenderAhead
 		return std::min(CreditFrames(lead, sourcePeriod), desiredDepth - 2);
 	}
 
+	// r6 fix 4 (2026-10-24, look-ahead inventory item 41): render-ahead must fit INSIDE the fixed
+	// delay budget - the queue target's own delay (target frames x P_s; target_latency_ms already
+	// sets that target). The queued extras add PlannedLead; it may run only when the queue gives
+	// that time back (render_ahead_queue_credit) without the queue dropping below kBudgetMinQueued
+	// frames (A shown, B queued and converted, one spare: as Pulldown::kLockedQueuePairFrames).
+	// The credit is the fewest whole frames covering the lead (ceil), so the total never exceeds
+	// render_ahead off's; a lead the queue cannot give back keeps render-ahead OFF for the source
+	// (shown under "Fallbacks engaged"). No lead (no extras: 50/60p on 60 Hz) always fits.
+	constexpr size_t kBudgetMinQueued = 3;
+	struct BudgetDecision
+	{
+		bool fits = true;
+		size_t creditFrames = 0;   // frames the queue gives back for the lead
+		double leadMs = 0.0;
+		double budgetMs = 0.0;     // render_ahead off's delay: the queue target
+		double totalMs = 0.0;      // with render-ahead: (target - credit) x P_s + lead
+		const char* reason = "no lead";
+	};
+	inline BudgetDecision FitDelayBudget(double sourcePeriod, double displayPeriod, size_t queueFrames, bool creditOn)
+	{
+		BudgetDecision d;
+		const double lead = PlannedLead(sourcePeriod, displayPeriod);
+		d.leadMs = lead * 1000.0;
+		d.budgetMs = sourcePeriod > 0.0 ? static_cast<double>(queueFrames) * sourcePeriod * 1000.0 : 0.0;
+		d.totalMs = d.budgetMs;
+		if (!(lead > 0.0) || !(sourcePeriod > 0.0) || !std::isfinite(lead / sourcePeriod))
+			return d;
+		constexpr double kSlackMs = 0.5;   // timestamp rounding
+		const size_t wanted = static_cast<size_t>(std::ceil(lead / sourcePeriod - 1e-9));
+		if (creditOn && queueFrames >= wanted + kBudgetMinQueued)
+		{
+			d.creditFrames = wanted;
+			d.totalMs = (static_cast<double>(queueFrames - wanted) * sourcePeriod + lead) * 1000.0;
+			d.fits = d.totalMs <= d.budgetMs + kSlackMs;
+			d.reason = d.fits ? "the queue gives the lead back" : "the lead exceeds the frames given back";
+			return d;
+		}
+		d.totalMs = d.budgetMs + d.leadMs;
+		d.fits = false;
+		d.reason = !creditOn ? "the lead would add delay (render_ahead_queue_credit off)" :
+			"the queue is too short to give the lead back";
+		return d;
+	}
+
 	// The queue credit, latched (bug hunt 05 M4): it stays while render-ahead runs at
 	// one cadence, so a single break (a hold, a scene cut) no longer raises the queue
 	// target by a frame (a repeat on screen) and lowers it again on the next plan (a
@@ -105,8 +149,12 @@ namespace RenderAhead
 		// A frame's plan was queued: the credit for its lead at this cadence.
 		size_t Commit(double lead, double sourcePeriod, double cadenceRatio)
 		{
+			return CommitFrames(CreditFrames(lead, sourcePeriod), cadenceRatio);
+		}
+		// r6 fix 4: the frames the delay budget decided (FitDelayBudget's ceil credit).
+		size_t CommitFrames(size_t wanted, double cadenceRatio)
+		{
 			brokenSince = -1.0;
-			const size_t wanted = CreditFrames(lead, sourcePeriod);
 			if (frames == 0 || std::abs(cadenceRatio - ratio) > kCadenceChange)
 			{
 				frames = wanted;
