@@ -700,6 +700,10 @@
       <Link>shaders\LED compensation.glsl</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="..\..\shaders\DV trims.glsl">
+      <Link>shaders\DV trims.glsl</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Include="..\..\shaders\SDR tone shape.glsl">
       <Link>shaders\SDR tone shape.glsl</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

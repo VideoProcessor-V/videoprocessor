@@ -37,6 +37,8 @@
 #include <dv_loopback/DvLoopbackPattern.h>
 #include <dv_loopback/DvCaptureContainer.h>
 #include <RawCaptureCorpus.h>
+#include <DolbyVisionTunnelSourceState.h>
+#include <HDRData.h>
 #include <calibration/CalibrationController.h>
 #include <calibration/CalibrationSimulation.h>
 #include <calibration/PatternCodes.h>
@@ -263,6 +265,8 @@ namespace
 		std::string fallbacksStatus;   // r6 fix 7: "Fallbacks engaged: ..." (GetFallbacksStatus)
 		std::string sourceStatus;   // the crash state's source resolution line (Stage 12)
 		std::string captureMetadata;   // the rendered-output capture's JSON sidecar (plan->captureAtSeconds)
+		// test/dv-synthetic 2026-10-24: every capture's sidecar, in completion order (plan->captureTimes).
+		std::vector<std::string> captureMetadataList;
 		// Sampled once per sent frame through the second half of the run: the renderer's queue depth
 		// (GetFrameQueueSize) and its capture-to-output delay (ExitLatencyMs).
 		std::vector<size_t> queueDepths;
@@ -290,6 +294,10 @@ namespace
 	// each exactly BytesPerFrame long.
 	bool g_harnessDolbyVision = false;
 	std::vector<std::vector<BYTE>> g_harnessDvFrames;
+	// test/dv-synthetic 2026-10-24: a PQ BT.2020 source that is not a tunnel (an LLDV-like
+	// V210 signal as VP sees it after newlldv's inference): mastering / MaxCLL nits, 0 = off
+	// (the harness's SDR / Rec.709 state).
+	double g_harnessPqSourceNits = 0.0;
 
 	// The harness's frame size (1080p unless a test sets it; the 4K stress run).
 	int g_harnessWidth = 1920, g_harnessHeight = 1080;
@@ -336,6 +344,9 @@ namespace
 		unsigned fileRateDenominator = 1;
 		double resetAtSeconds = -1.0;    // an HDMI resync (renderer Reset) at this time
 		double captureAtSeconds = -1.0;  // a rendered-output capture (VP-0133) at this time
+		// test/dv-synthetic 2026-10-24: more captures, one at each of these times (seconds); the
+		// sidecars come back in RunResult::captureMetadataList.
+		std::vector<double> captureTimes;
 		std::function<FrameStep(int)> step;
 		// Called once per loop iteration with the seconds since the start (automatic
 		// calibration: patterns shown through the running renderer).
@@ -355,6 +366,7 @@ namespace
 		int shotFrames = 0;
 		bool dolbyVision = false;
 		std::vector<std::vector<BYTE>> dvFrames;
+		double pqSourceNits = 0.0;
 		int width = 1920, height = 1080;
 		int windowWidth = 640, windowHeight = 360;
 		size_t queueTarget = 0;
@@ -378,6 +390,7 @@ namespace
 		g.shotFrames = g_harnessShotFrames;
 		g.dolbyVision = g_harnessDolbyVision;
 		g.dvFrames = g_harnessDvFrames;
+		g.pqSourceNits = g_harnessPqSourceNits;
 		g.width = g_harnessWidth;
 		g.height = g_harnessHeight;
 		g.windowWidth = g_harnessWindowWidth;
@@ -403,6 +416,7 @@ namespace
 		g_harnessShotFrames = g.shotFrames;
 		g_harnessDolbyVision = g.dolbyVision;
 		g_harnessDvFrames = g.dvFrames;
+		g_harnessPqSourceNits = g.pqSourceNits;
 		g_harnessWidth = g.width;
 		g_harnessHeight = g.height;
 		g_harnessWindowWidth = g.windowWidth;
@@ -711,6 +725,29 @@ namespace
 			state->colorspace = ColorSpace::REC_709;
 			state->eotf = EOTF::SDR;
 			state->dolbyVisionTunnel = g_harnessDolbyVision;
+			// test/dv-synthetic 2026-10-24: the tunnel's source state exactly as the app builds it
+			// (PQ / BT.2020 with static defaults; DolbyVisionTunnelSourceState.h). Before this the
+			// harness rendered the decoded tunnel as SDR / Rec.709 (gamma), unlike VP.
+			if (g_harnessDolbyVision)
+				ApplyDolbyVisionTunnelSourceState(*state);
+			else if (g_harnessPqSourceNits > 0.0)
+			{
+				state->eotf = EOTF::PQ;
+				state->colorspace = ColorSpace::BT_2020;
+				state->hdrData = std::make_shared<HDRData>();
+				state->hdrData->displayPrimaryRedX = ColorSpaceToCie1931RedX(ColorSpace::BT_2020);
+				state->hdrData->displayPrimaryRedY = ColorSpaceToCie1931RedY(ColorSpace::BT_2020);
+				state->hdrData->displayPrimaryGreenX = ColorSpaceToCie1931GreenX(ColorSpace::BT_2020);
+				state->hdrData->displayPrimaryGreenY = ColorSpaceToCie1931GreenY(ColorSpace::BT_2020);
+				state->hdrData->displayPrimaryBlueX = ColorSpaceToCie1931BlueX(ColorSpace::BT_2020);
+				state->hdrData->displayPrimaryBlueY = ColorSpaceToCie1931BlueY(ColorSpace::BT_2020);
+				state->hdrData->whitePointX = ColorSpaceToCie1931WpX(ColorSpace::BT_2020);
+				state->hdrData->whitePointY = ColorSpaceToCie1931WpY(ColorSpace::BT_2020);
+				state->hdrData->masteringDisplayMinLuminance = 0.0001;
+				state->hdrData->masteringDisplayMaxLuminance = g_harnessPqSourceNits;
+				state->hdrData->maxCll = g_harnessPqSourceNits;
+				state->hdrData->maxFall = g_harnessPqSourceNits / 4.0;
+			}
 			renderer->OnVideoState(state);
 			if (g_harnessApplySnapshot)
 			{
@@ -764,8 +801,24 @@ namespace
 				1e6 * rateDenominator / rateNumerator * (plan ? plan->paceScale : 1.0)));
 			const double ticksPerUs = static_cast<double>(clock.TimingClockTicksPerSecond()) / 1e6;
 			bool resetDone = false, captureRequested = false;
+			size_t capturesRequested = 0, nextCaptureTime = 0;
 			const timingclocktime_t startTicks = clock.TimingClockNow();
-			for (int n = 0; std::chrono::steady_clock::now() - start < std::chrono::duration<double>(seconds); ++n)
+			// test/dv-synthetic 2026-10-24: a capture is taken at the next MAIN render; a still picture
+			// (bit-exact repeats) may not render again before the run ends, so the stream continues
+			// (up to 6 s more) until every requested capture has completed.
+			auto capturesPending = [&]() {
+				const size_t wanted = capturesRequested + (captureRequested ? 1 : 0);
+				if (wanted == 0) return false;
+				size_t done = 0;
+				std::lock_guard<std::mutex> guard(g_logMutex);
+				for (const std::string& line : g_log)
+					done += line.find("Rendered-output capture complete") != std::string::npos ? 1 : 0;
+				return done < wanted; };
+			auto keepRunning = [&]() {
+				const auto elapsed = std::chrono::steady_clock::now() - start;
+				if (elapsed < std::chrono::duration<double>(seconds)) return true;
+				return elapsed < std::chrono::duration<double>(seconds + 6.0) && capturesPending(); };
+			for (int n = 0; keepRunning(); ++n)
 			{
 				const FrameStep step = plan && plan->step ? plan->step(n) : FrameStep{ true, n, 0 };
 				if (plan && !resetDone && plan->resetAtSeconds >= 0.0 &&
@@ -784,6 +837,17 @@ namespace
 					Logger::WriteMessage(("capture request: " + std::string(accepted ? "accepted - " : "refused - ") +
 						CStringA(captureStatus).GetString() + "\n").c_str());
 					captureRequested = true;
+				}
+				while (plan && nextCaptureTime < plan->captureTimes.size() &&
+					std::chrono::steady_clock::now() - start >= std::chrono::duration<double>(plan->captureTimes[nextCaptureTime]))
+				{
+					CString captureStatus;
+					if (renderer->RequestRenderedOutputCapture(captureStatus))
+						++capturesRequested;
+					else
+						Logger::WriteMessage(("capture request refused at " + std::to_string(plan->captureTimes[nextCaptureTime]) + " s: " +
+							CStringA(captureStatus).GetString() + "\n").c_str());
+					++nextCaptureTime;
 				}
 				if (plan && plan->tick)
 					plan->tick(*renderer, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
@@ -853,6 +917,35 @@ namespace
 								result.captureMetadata = line.substr(m + 9, end == std::string::npos ? std::string::npos : end - m - 9);
 							}
 						}
+					}
+					std::this_thread::sleep_for(std::chrono::milliseconds(20));
+				}
+			}
+			if (capturesRequested > 0)
+			{
+				const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+				for (;;)
+				{
+					MSG msg;
+					while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
+					std::vector<std::string> found;
+					{
+						std::lock_guard<std::mutex> guard(g_logMutex);
+						for (const std::string& line : g_log)
+						{
+							const size_t at = line.find("Rendered-output capture complete");
+							const size_t m = line.find("metadata=");
+							if (at != std::string::npos && m != std::string::npos)
+							{
+								const size_t end = line.find(" raw_bytes=", m);
+								found.push_back(line.substr(m + 9, end == std::string::npos ? std::string::npos : end - m - 9));
+							}
+						}
+					}
+					if (found.size() >= capturesRequested + (captureRequested ? 1 : 0) || std::chrono::steady_clock::now() >= until)
+					{
+						result.captureMetadataList = found;
+						break;
 					}
 					std::this_thread::sleep_for(std::chrono::milliseconds(20));
 				}
@@ -3298,6 +3391,11 @@ namespace Tests
 			Assert::IsTrue(LoadRawCorpusSegment(corpus, seg, error), HarnessWide(error).c_str());
 			g_harnessWidth = static_cast<int>(seg.width);
 			g_harnessHeight = static_cast<int>(seg.height);
+			// test/dv-synthetic 2026-10-24: rendered at the source raster (no output scaling in
+			// the comparison) and in the recording's own container (r210, R10b or R10l).
+			g_harnessWindowWidth = static_cast<int>(seg.width);
+			g_harnessWindowHeight = static_cast<int>(seg.height);
+			const VideoFrameEncoding replayEncoding = seg.ReplayEncoding(true);
 			g_harnessDolbyVision = true;
 			CreateDirectoryA(out.c_str(), nullptr);
 			wchar_t tempPath[MAX_PATH] = {};
@@ -3316,7 +3414,7 @@ namespace Tests
 				still.rateDenominator = static_cast<int>(seg.rateDenominator);
 				still.captureAtSeconds = 2.0;
 				still.step = [](int) { return FrameStep{ true, 0, 0 }; };
-				const RunResult r = Run(VideoFrameEncoding::R210, "standard", 3.0, true, extra, false, &still);
+				const RunResult r = Run(replayEncoding, "standard", 3.0, true, extra, false, &still);
 				if (r.captureMetadata.size() < 5) continue;
 				const std::string png = r.captureMetadata.substr(0, r.captureMetadata.size() - 5) + ".png";
 				char name[64];
@@ -3326,6 +3424,567 @@ namespace Tests
 			}
 			Logger::WriteMessage(("rendered " + std::to_string(rendered) + " tunnel frames to " + out + "\n").c_str());
 			Assert::IsTrue(rendered > 0, L"no frame rendered");
+		}
+
+		// ---- Synthetic DV tunnel validation (test/dv-synthetic, 2026-10-24) ----
+		// The corpus: tools/dv_synth/make_corpus.py (an independent Python implementation of the
+		// tunnel; VP_TEST_DV_SYNTH_CORPUS = its root). tools/dv_synth/run_dv_synth.ps1 runs it all.
+		static std::string DvSynthEnv(const char* name)
+		{
+			char* v = nullptr;
+			size_t n = 0;
+			std::string out;
+			if (_dupenv_s(&v, &n, name) == 0 && v) out = v;
+			std::free(v);
+			return out;
+		}
+
+		// A corpus segment's frames into the harness (each frame file once; content index = frame).
+		static bool DvSynthLoadSegment(const std::string& folder, RawCorpusSegment& seg, std::vector<size_t>& contentOfFrame,
+			size_t maxFrames = 100000)
+		{
+			std::string error;
+			if (!LoadRawCorpusSegment(folder, seg, error))
+				return false;
+			g_harnessDvFrames.clear();
+			contentOfFrame.clear();
+			std::map<std::string, size_t> byFile;
+			std::vector<uint8_t> bytes;
+			for (size_t i = 0; i < seg.frames.size() && i < maxFrames; ++i)
+			{
+				const auto it = byFile.find(seg.frames[i].file);
+				if (it != byFile.end())
+				{
+					contentOfFrame.push_back(it->second);
+					continue;
+				}
+				if (!seg.LoadFrame(i, bytes))
+					return false;
+				byFile[seg.frames[i].file] = g_harnessDvFrames.size();
+				contentOfFrame.push_back(g_harnessDvFrames.size());
+				g_harnessDvFrames.push_back(std::vector<BYTE>(bytes.begin(), bytes.end()));
+			}
+			g_harnessWidth = g_harnessWindowWidth = static_cast<int>(seg.width);
+			g_harnessHeight = g_harnessWindowHeight = static_cast<int>(seg.height);
+			return true;
+		}
+
+		// The generator's stamp read back from a rendered capture (R10 codes, the source raster):
+		// 32 cells across the stamp band; a cell is a one when brighter than the midpoint of the
+		// darkest and brightest cells. False unless the magic byte 0xA5 is there.
+		static bool DvSynthReadStamp(const std::vector<int>& codes, int w, int h, uint32_t& word)
+		{
+			const int y = static_cast<int>(72.0 * h / 1080.0);
+			int cell[32], lo = 4096, hi = -1;
+			for (int bit = 0; bit < 32; ++bit)
+			{
+				const int x = (bit * w / 32 + (bit + 1) * w / 32) / 2;
+				cell[bit] = codes[(static_cast<size_t>(y) * w + x) * 3 + 1];
+				lo = (std::min)(lo, cell[bit]);
+				hi = (std::max)(hi, cell[bit]);
+			}
+			word = 0;
+			for (int bit = 0; bit < 32; ++bit)
+				word = (word << 1) | (cell[bit] * 2 > lo + hi ? 1u : 0u);
+			return hi - lo > 40 && (word >> 24) == 0xA5;
+		}
+
+		// Owner direction 2026-10-24: the faithful DV path. Every VP stage off, so only the capture unpack,
+		// the DM extraction and libplacebo's Dolby Vision decode / tone mapping run (identical to FAITHFUL
+		// in tools/dv_synth/run_dv_synth.py).
+		static const char* DvSynthFaithfulSettings()
+		{
+			return			"source_resolution: native\nsource_resolution_crossfade_s: 0\ndeband: off\ndeband_vp: off\n"
+			"detail_pulse_stabilise: off\ntexture_restore: off\ndejudder_strength: 0\ninterpolation: off\n"
+			"interpolation_fill_gaps: off\nintent_motion: off\nintent_content: off\n"
+			"intent_black: off\nintent_display: off\ndithering: off\ntemporal_dither: off\n"
+			"adaptive_upscale: off\nadaptive_downscale: off\nadaptive_grain_map: off\nadaptive_chroma_ssim: off\n";
+		}
+
+		// The VP stages a faithful run must not show active, from the renderer's own log and status
+		// (empty when clean): motion engine / de-judder / interpolation / hiccup repair, re-base and its
+		// crossfade, VP deband, detail pulse, texture restore, sigma-delta / dither, adaptive scaling,
+		// the profile's libplacebo deband and dithering.
+		static std::string DvSynthFaithfulViolations(const RunResult& r)
+		{
+			std::string bad;
+			const char* const activeMarkers[] = { "Motion engine: loaded", "Motion engine: created", "De-judder: motion estimated",
+				"Interpolation: interpolating", "Interpolation: filling", "Detail pulse stabilise: on", "Texture restore: on",
+				"Texture restore: statistical", "Re-base: active", "Re-base: on", "Source resolution: re-base", "Source resolution: crossfade",
+				"VP deband: on", "VP deband: active", "Sigma-delta vectors", "Adaptive upscale: on", "Adaptive downscale: on" };
+			for (const char* m : activeMarkers)
+				if (r.Logged(m))
+					bad += std::string("[") + m + "] ";
+			bool settingsSeen = false;
+			for (const std::string& l : r.log)
+				if (l.find("libplacebo settings:") != std::string::npos)
+				{
+					settingsSeen = true;
+					if (l.find(" dithering=off") == std::string::npos) bad += "[libplacebo dithering not off] ";
+					if (l.find(" deband=off") == std::string::npos && l.find("deband=auto/off") == std::string::npos &&
+						l.find("deband=off/off") == std::string::npos) bad += "[libplacebo deband not off] ";
+				}
+			if (!settingsSeen) bad += "[no libplacebo settings line] ";
+			if (r.dejudderStatus.find("Motion: Off") == std::string::npos && !r.dejudderStatus.empty())
+				bad += "[motion status: " + r.dejudderStatus + "] ";
+			return bad;
+		}
+
+		// Mean green code over a rectangle of a capture.
+		static double DvSynthMean(const std::vector<int>& codes, int w, int x0, int y0, int x1, int y1, int channel = 1)
+		{
+			double sum = 0.0;
+			size_t n = 0;
+			for (int y = y0; y < y1; ++y)
+				for (int x = x0; x < x1; ++x)
+				{
+					sum += codes[(static_cast<size_t>(y) * w + x) * 3 + channel];
+					++n;
+				}
+			return n ? sum / n : -1.0;
+		}
+
+		// Renders the jobs a jobs file lists (written by tools/dv_synth/run_dv_synth.py) and copies
+		// each capture to VP_TEST_DV_SYNTH_OUT for the Python analysis (decode accuracy against
+		// the reference render, BTB/WTW, policy, LLDV vs tunnel). One line per job:
+		//   job id=<name> segment=<folder> frame=<k> seconds=<s> capture=<s> [pq=<nits>] [frames=a-b]
+		//       [captures=t1,t2,...] settings=<profile lines, "\n" for new lines>   (settings last)
+		BEGIN_TEST_METHOD_ATTRIBUTE(DvSynthGpuRendersJobs)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DvSynthGpuRendersJobs)
+		{
+			const HarnessScope harnessScope;
+			const std::string jobsPath = DvSynthEnv("VP_TEST_DV_SYNTH_JOBS"), out = DvSynthEnv("VP_TEST_DV_SYNTH_OUT");
+			if (jobsPath.empty() || out.empty())
+			{
+				Logger::WriteMessage("SKIP-NO-CORPUS DvSynthGpuRendersJobs (VP_TEST_DV_SYNTH_JOBS, VP_TEST_DV_SYNTH_OUT)\n");
+				return;
+			}
+			if (!RequireHardwareOrSkip("DvSynthGpuRendersJobs")) return;
+			CreateDirectoryA(out.c_str(), nullptr);
+			const std::wstring shots = HarnessTempFolder(L"vp-dv-synth");
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			// The shaders beside the test DLL (dv_trims' DV trims.glsl), as beside VP's exe.
+			{
+				const std::string here = Here();
+				SetEnvironmentVariableA("VP_TEST_SHADER_DIR", here.substr(0, here.size() - 1).c_str());
+			}
+			std::ifstream jobs(jobsPath);
+			Assert::IsTrue(static_cast<bool>(jobs), HarnessWide("cannot read " + jobsPath).c_str());
+			std::string line;
+			size_t done = 0, failed = 0, faithfulFailures = 0;
+			std::string loadedSegment;
+			RawCorpusSegment seg;
+			std::vector<size_t> contentOfFrame;
+			while (std::getline(jobs, line))
+			{
+				if (line.compare(0, 4, "job ") != 0)
+					continue;
+				std::map<std::string, std::string> key;
+				const size_t settingsAt = line.find(" settings=");
+				std::string settings = settingsAt == std::string::npos ? std::string() : line.substr(settingsAt + 10);
+				for (size_t at = settings.find("\\n"); at != std::string::npos; at = settings.find("\\n", at))
+					settings.replace(at, 2, "\n");
+				std::stringstream ss(line.substr(0, settingsAt));
+				std::string word;
+				while (ss >> word)
+				{
+					const size_t eq = word.find('=');
+					if (eq != std::string::npos)
+						key[word.substr(0, eq)] = word.substr(eq + 1);
+				}
+				const std::string id = key["id"];
+				if (key["segment"] != loadedSegment)
+				{
+					Assert::IsTrue(DvSynthLoadSegment(key["segment"], seg, contentOfFrame), HarnessWide("segment " + key["segment"]).c_str());
+					loadedSegment = key["segment"];
+				}
+				const bool lldv = key.count("pq") > 0;
+				g_harnessDolbyVision = !lldv;
+				g_harnessPqSourceNits = lldv ? std::atof(key["pq"].c_str()) : 0.0;
+				const double seconds = key.count("seconds") ? std::atof(key["seconds"].c_str()) : 3.0;
+				FramePlan plan;
+				plan.rateNumerator = static_cast<int>(seg.rateNumerator);
+				plan.rateDenominator = static_cast<int>(seg.rateDenominator);
+				const std::vector<size_t> content = contentOfFrame;
+				if (key.count("frames"))
+				{
+					// A stream: frames a..b in order, looping.
+					const size_t dash = key["frames"].find('-');
+					const int a = std::atoi(key["frames"].substr(0, dash).c_str());
+					const int b = std::atoi(key["frames"].substr(dash + 1).c_str());
+					plan.step = [content, a, b](int n) { return FrameStep{ true, static_cast<int>(content[static_cast<size_t>(a + n % (b - a + 1))]), 0 }; };
+					std::stringstream ts(key["captures"]);
+					std::string t;
+					while (std::getline(ts, t, ','))
+						plan.captureTimes.push_back(std::atof(t.c_str()));
+				}
+				else
+				{
+					const int frame = std::atoi(key["frame"].c_str());
+					plan.step = [content, frame](int) { return FrameStep{ true, static_cast<int>(content[static_cast<size_t>(frame)]), 0 }; };
+					plan.captureAtSeconds = key.count("capture") ? std::atof(key["capture"].c_str()) : seconds - 1.0;
+				}
+				RunResult r = Run(seg.ReplayEncoding(true), "standard", seconds, true, settings, false, &plan);
+				if (r.captureMetadataList.empty() && r.captureMetadata.empty())
+					r = Run(seg.ReplayEncoding(true), "standard", seconds + 1.0, true, settings, false, &plan);   // one retry
+				std::vector<std::string> captures = r.captureMetadataList;
+				if (captures.empty() && !r.captureMetadata.empty())
+					captures.push_back(r.captureMetadata);
+				for (size_t k = 0; k < captures.size(); ++k)
+				{
+					const std::string json = captures[k];
+					if (json.size() < 5) continue;
+					const std::string png = json.substr(0, json.size() - 5) + ".png";
+					const std::string stem = out + "\\" + id + (captures.size() > 1 || key.count("frames") ? "_" + std::to_string(k) : std::string());
+					CopyFileA(png.c_str(), (stem + ".png").c_str(), FALSE);
+					CopyFileA(json.c_str(), (stem + ".json").c_str(), FALSE);
+					// The R10 codes as raw little-endian uint16 (R, G, B per pixel) for the analysis.
+					int cw = 0, ch = 0;
+					const std::vector<int> codes = LoadCaptureRgb(json, cw, ch);
+					std::vector<uint16_t> packed(codes.begin(), codes.end());
+					std::ofstream raw(stem + ".r10", std::ios::binary | std::ios::trunc);
+					raw.write(reinterpret_cast<const char*>(packed.data()), static_cast<std::streamsize>(packed.size() * 2));
+				}
+				const bool faithful = key["faithful"] == "1";
+				const std::string violations = faithful ? DvSynthFaithfulViolations(r) : std::string();
+				if (!violations.empty())
+				{
+					++faithfulFailures;
+					Logger::WriteMessage(("FAITHFUL VIOLATION " + id + ": " + violations + "\n").c_str());
+				}
+				{
+					std::ofstream log(out + "\\" + id + ".log", std::ios::trunc);
+					log << "presented=" << (r.presented ? 1 : 0) << "\ncaptures=" << captures.size() << "\nfallbacks=" << r.fallbacksStatus << "\n";
+					log << "faithful=" << (faithful ? 1 : 0) << "\nfaithful_violations=" << violations << "\ndejudder_status=" << r.dejudderStatus <<
+						"\nsource_status=" << r.sourceStatus << "\npresentation_status=" << r.presentationStatus << "\n";
+					for (const std::string& l : r.log)
+						if (l.find("Dolby Vision") != std::string::npos || l.find("Fallbacks engaged") != std::string::npos ||
+							l.find("tone") != std::string::npos || l.find("SDR_GAMMA") != std::string::npos ||
+							l.find("failed") != std::string::npos || l.find("Rendered-output capture") != std::string::npos ||
+							l.find("output diagnostic") != std::string::npos || l.find("newlldv") != std::string::npos)
+							log << l << "\n";
+				}
+				++done;
+				failed += (r.presented && !captures.empty()) ? 0 : 1;
+				Logger::WriteMessage(("job " + id + ": presented " + (r.presented ? "yes" : "NO") + ", " + std::to_string(captures.size()) +
+					" capture(s); " + r.fallbacksStatus + "\n").c_str());
+			}
+			Logger::WriteMessage(("DvSynthGpuRendersJobs: " + std::to_string(done) + " jobs, " + std::to_string(failed) + " without a capture\n").c_str());
+			Assert::IsTrue(done > 0, L"no jobs");
+			Assert::AreEqual<size_t>(0, failed, L"every job presents and captures");
+			Assert::AreEqual<size_t>(0, faithfulFailures, L"a faithful job showed a VP stage active (FAITHFUL VIOLATION lines)");
+		}
+
+		// (c) RPU <-> frame alignment through the whole renderer: the cut segments streamed at their
+		// rate with captures through the run. Each capture's stamp names the frame (and scene) the
+		// output came from; its brightness must be its own scene's (from a still render of each
+		// scene), never the neighbouring scene's (a one-frame metadata misalignment = a flash at
+		// the cut). Cinema-like tone mapping (spline, peak_detection off: L1 drives the curve).
+		// Faithful (owner direction 2026-10-24): every VP stage off (kDvSynthFaithful), asserted inactive
+		// on every run. The full pipeline (VP's stages at their defaults) is the separate, labelled
+		// DvSynthGpuAlignmentAtCutsFullPipeline.
+		BEGIN_TEST_METHOD_ATTRIBUTE(DvSynthGpuAlignmentAtCuts)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DvSynthGpuAlignmentAtCuts)
+		{
+			DvSynthAlignment(true, "DvSynthGpuAlignmentAtCuts");
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(DvSynthGpuAlignmentAtCutsFullPipeline)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DvSynthGpuAlignmentAtCutsFullPipeline)
+		{
+			DvSynthAlignment(false, "DvSynthGpuAlignmentAtCutsFullPipeline");
+		}
+
+		static void DvSynthAlignment(bool faithful, const char* testName)
+		{
+			const HarnessScope harnessScope;
+			const std::string root = DvSynthEnv("VP_TEST_DV_SYNTH_CORPUS");
+			if (root.empty())
+			{
+				Logger::WriteMessage((std::string("SKIP-NO-CORPUS ") + testName + " (VP_TEST_DV_SYNTH_CORPUS)\n").c_str());
+				return;
+			}
+			if (!RequireHardwareOrSkip(testName)) return;
+			const std::wstring shots = HarnessTempFolder(L"vp-dv-synth-cuts");
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			const std::string settings = std::string("[vprenderer.Default]\n") + (faithful ? DvSynthFaithfulSettings() : "dithering: off\n") +
+				"tone_mapping: spline\npeak_detection: off\nsdr_target_nits: 100\ncontrast_recovery: 0\n" + DvSynthEnv("VP_TEST_DV_SYNTH_EXTRA");
+			auto checkFaithful = [faithful](const RunResult& r, const std::string& what)
+			{
+				if (!faithful) return;
+				const std::string bad = DvSynthFaithfulViolations(r);
+				Assert::IsTrue(bad.empty(), HarnessWide("faithful run with a VP stage active (" + what + "): " + bad).c_str());
+			};
+			Logger::WriteMessage(faithful ? "ALIGNMENT mode: FAITHFUL (every VP stage off, asserted)\n" :
+				"ALIGNMENT mode: FULL PIPELINE (VP's stages at their defaults)\n");
+			size_t totalMisaligned = 0, totalReadable = 0, totalCaptures = 0;
+			for (const std::string& folder : FindRawCorpusSegments(root))
+			{
+				if (folder.find("cuts-") == std::string::npos)
+					continue;
+				RawCorpusSegment seg;
+				std::vector<size_t> contentOfFrame;
+				Assert::IsTrue(DvSynthLoadSegment(folder, seg, contentOfFrame), HarnessWide(folder).c_str());
+				g_harnessDolbyVision = true;
+				// Scenes from truth.txt: frame -> scene.
+				std::vector<int> sceneOf;
+				{
+					std::ifstream truth(folder + "\\truth.txt");
+					std::string l;
+					while (std::getline(truth, l))
+					{
+						const size_t at = l.find(" scene=");
+						if (l.compare(0, 6, "frame ") == 0 && at != std::string::npos)
+							sceneOf.push_back(std::atoi(l.c_str() + at + 7));
+					}
+				}
+				Assert::AreEqual(seg.frames.size(), sceneOf.size(), L"truth frames");
+				const int w = static_cast<int>(seg.width), h = static_cast<int>(seg.height);
+				// The measurement area: below the stamp band, a centre rectangle.
+				const int x0 = w / 4, x1 = 3 * w / 4, y0 = static_cast<int>(0.40 * h), y1 = static_cast<int>(0.55 * h);
+				// 1. Each scene still (its first frame repeated): the scene's brightness. Advance-metadata
+				// frames are not self-contained (a cut frame says no_md; the frame before announces the
+				// next DM), so their stills come from the same-frame twin segment (identical pictures and
+				// per-scene DM); the stream below is the advance segment itself.
+				std::map<int, double> sceneMean;
+				const size_t advanceAt = folder.find("-advance");
+				if (advanceAt != std::string::npos)
+				{
+					RawCorpusSegment twin;
+					std::vector<size_t> twinContent;
+					Assert::IsTrue(DvSynthLoadSegment(folder.substr(0, advanceAt) + "-same", twin, twinContent), L"same-frame twin");
+					contentOfFrame = twinContent;
+				}
+				for (size_t f = 0; f < sceneOf.size(); ++f)
+				{
+					if (sceneMean.count(sceneOf[f]))
+						continue;
+					FramePlan still;
+					still.rateNumerator = static_cast<int>(seg.rateNumerator);
+					still.rateDenominator = static_cast<int>(seg.rateDenominator);
+					still.captureAtSeconds = 2.2;
+					const int content = static_cast<int>(contentOfFrame[f]);
+					still.step = [content](int) { return FrameStep{ true, content, 0 }; };
+					RunResult r = Run(seg.ReplayEncoding(true), "standard", 3.2, true, settings, false, &still);
+					if (r.captureMetadata.empty())   // one retry (a capture request can be refused while the queue warms up)
+						r = Run(seg.ReplayEncoding(true), "standard", 4.0, true, settings, false, &still);
+					int cw = 0, ch = 0;
+					const std::vector<int> codes = LoadCaptureRgb(r.captureMetadata, cw, ch);
+					if (codes.empty())
+					{
+						const std::string temp = DvSynthEnv("TEMP");
+						std::ofstream full((temp.empty() ? std::string(".") : temp) + "\\vp-dv-synth-cuts-still.log", std::ios::trunc);
+						for (const std::string& l : r.log)
+							full << l << "\n";
+					}
+					Assert::IsTrue(!codes.empty() && cw == w && ch == h, (HarnessWide("scene still capture: metadata '" + r.captureMetadata +
+						"' size " + std::to_string(cw) + "x" + std::to_string(ch) + " presented " + (r.presented ? "yes" : "no") + "\n") + r.Tail()).c_str());
+					checkFaithful(r, "scene still");
+					sceneMean[sceneOf[f]] = DvSynthMean(codes, w, x0, y0, x1, y1);
+				}
+				// 2. The stream with captures every ~0.07 s after a warm-up.
+				if (advanceAt != std::string::npos)
+					Assert::IsTrue(DvSynthLoadSegment(folder, seg, contentOfFrame), HarnessWide(folder).c_str());
+				FramePlan stream;
+				stream.rateNumerator = static_cast<int>(seg.rateNumerator);
+				stream.rateDenominator = static_cast<int>(seg.rateDenominator);
+				const std::vector<size_t> content = contentOfFrame;
+				stream.step = [content](int n) { return FrameStep{ true, static_cast<int>(content[static_cast<size_t>(n) % content.size()]), 0 }; };
+				const double loop = static_cast<double>(seg.frames.size()) * seg.rateDenominator / seg.rateNumerator;
+				const double seconds = 1.5 + 2.0 * loop;
+				for (double t = 1.5; t < seconds - 0.3; t += 0.07)
+					stream.captureTimes.push_back(t);
+				const RunResult r = Run(seg.ReplayEncoding(true), "standard", seconds, true, settings, false, &stream);
+				Assert::IsTrue(r.presented, (L"stream presented\n" + r.Tail()).c_str());
+				checkFaithful(r, "stream");
+				size_t readable = 0, misaligned = 0, nearCut = 0;
+				std::string first;
+				for (const std::string& json : r.captureMetadataList)
+				{
+					int cw = 0, ch = 0;
+					const std::vector<int> codes = LoadCaptureRgb(json, cw, ch);
+					uint32_t word = 0;
+					if (codes.empty() || cw != w || ch != h || !DvSynthReadStamp(codes, w, h, word))
+						continue;
+					const size_t frame = (word >> 8) & 0xFFFF;
+					const int scene = static_cast<int>(word & 0xFF);
+					if (frame >= sceneOf.size() || sceneOf[frame] != scene)
+						continue;
+					++readable;
+					const double m = DvSynthMean(codes, w, x0, y0, x1, y1);
+					const double own = sceneMean[scene];
+					double nearestOther = 1e9;
+					for (const auto& kv : sceneMean)
+						if (kv.first != scene && std::fabs(kv.second - own) > 2.0)
+							nearestOther = (std::min)(nearestOther, std::fabs(m - kv.second));
+					const bool atCut = (frame > 0 && sceneOf[frame - 1] != scene) || (frame + 1 < sceneOf.size() && sceneOf[frame + 1] != scene);
+					nearCut += atCut ? 1 : 0;
+					if (std::fabs(m - own) > 1.5 && std::fabs(m - own) > nearestOther * 0.5)
+					{
+						++misaligned;
+						if (first.empty())
+							first = "frame " + std::to_string(frame) + " scene " + std::to_string(scene) + (atCut ? " (at a cut)" : "") +
+							": mean " + std::to_string(m) + ", own scene " + std::to_string(own);
+					}
+				}
+				const std::string name = folder.substr(folder.find_last_of("\\/") + 1);
+				std::string means;
+				for (const auto& kv : sceneMean) means += std::to_string(kv.first) + ":" + std::to_string(static_cast<int>(kv.second + 0.5)) + " ";
+				Logger::WriteMessage(("GPU ALIGNMENT " + name + ": scene means " + means + "| captures " + std::to_string(r.captureMetadataList.size()) +
+					", stamped " + std::to_string(readable) + " (" + std::to_string(nearCut) + " next to a cut), misaligned " +
+					std::to_string(misaligned) + (first.empty() ? "" : "; first " + first) + "\n").c_str());
+				totalMisaligned += misaligned;
+				totalReadable += readable;
+				totalCaptures += r.captureMetadataList.size();
+			}
+			Assert::IsTrue(totalReadable > totalCaptures / 2, L"most captures carry a readable stamp");
+			Assert::AreEqual<size_t>(0, totalMisaligned, L"a capture showed another scene's tone mapping (metadata misaligned)");
+		}
+
+		// (b) Robustness through the whole renderer: the robustness segment (missing, damaged,
+		// truncated, malformed, extreme metadata; EOS -> SDR -> DV) streamed with the CPU unpack,
+		// the GPU unpack, and the GPU unpack forced to fail. Never a crash or a conversion failure;
+		// black on DM loss and the picture restored; every fallback under "Fallbacks engaged".
+		BEGIN_TEST_METHOD_ATTRIBUTE(DvSynthGpuRobustnessThroughTheRenderer)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DvSynthGpuRobustnessThroughTheRenderer)
+		{
+			const HarnessScope harnessScope;
+			const std::string root = DvSynthEnv("VP_TEST_DV_SYNTH_CORPUS");
+			if (root.empty())
+			{
+				Logger::WriteMessage("SKIP-NO-CORPUS DvSynthGpuRobustnessThroughTheRenderer (VP_TEST_DV_SYNTH_CORPUS)\n");
+				return;
+			}
+			if (!RequireHardwareOrSkip("DvSynthGpuRobustnessThroughTheRenderer")) return;
+			RawCorpusSegment seg;
+			std::vector<size_t> contentOfFrame;
+			Assert::IsTrue(DvSynthLoadSegment(root + "\\robust-1080p24", seg, contentOfFrame), L"robust-1080p24");
+			g_harnessDolbyVision = true;
+			g_harnessWindowWidth = 640;
+			g_harnessWindowHeight = 360;
+			const std::string settings = "[vprenderer.Default]\ndithering: off\ndeband: off\n";
+			FramePlan stream;
+			stream.rateNumerator = static_cast<int>(seg.rateNumerator);
+			stream.rateDenominator = static_cast<int>(seg.rateDenominator);
+			const std::vector<size_t> content = contentOfFrame;
+			stream.step = [content](int n) { return FrameStep{ true, static_cast<int>(content[(std::min)(static_cast<size_t>(n), content.size() - 1)]), 0 }; };
+			const double seconds = 1.0 + static_cast<double>(seg.frames.size()) * seg.rateDenominator / seg.rateNumerator;
+			for (int mode = 0; mode < 3; ++mode)
+			{
+				SetEnvironmentVariableW(L"VP_TEST_DV_UNPACK_FAIL", mode == 2 ? L"1" : nullptr);
+				const char* name = mode == 0 ? "CPU unpack" : mode == 1 ? "GPU unpack" : "GPU unpack failing";
+				const RunResult r = Run(seg.ReplayEncoding(true), "standard", seconds, true,
+					std::string(mode == 0 ? "dv_tunnel_gpu_unpack: off\n" : "dv_tunnel_gpu_unpack: on\n") + settings, false, &stream);
+				size_t blacks = 0, restores = 0, fallbackLines = 0;
+				std::string headings;
+				{
+					// The whole log, for the report (%TEMP%\vp-dv-synth-robust-<mode>.log).
+					const std::string temp = DvSynthEnv("TEMP");
+					std::ofstream full((temp.empty() ? std::string(".") : temp) + "\\vp-dv-synth-robust-" +
+						std::to_string(mode) + ".log", std::ios::trunc);
+					for (const std::string& l : r.log)
+						full << l << "\n";
+				}
+				for (const std::string& l : r.log)
+				{
+					blacks += l.find("Dolby Vision transition: presenting black") != std::string::npos ? 1 : 0;
+					restores += l.find("Dolby Vision transition: trusted") != std::string::npos ? 1 : 0;
+					if (l.find("Fallbacks engaged:") != std::string::npos)
+					{
+						++fallbackLines;
+						if (headings.size() < 600) headings += "\n   " + l;
+					}
+				}
+				Logger::WriteMessage((std::string("GPU ROBUST ") + name + ": presented " + (r.presented ? "yes" : "NO") + ", black episodes " +
+					std::to_string(blacks) + ", restores " + std::to_string(restores) + ", final status '" + r.fallbacksStatus + "'" + headings + "\n").c_str());
+				Assert::IsTrue(r.presented, HarnessWide(std::string(name) + ": presented\n").c_str());
+				Assert::IsTrue(blacks >= 3, (HarnessWide(std::string(name) + ": black on DM loss\n") + r.Tail()).c_str());
+				Assert::IsTrue(restores >= 3, (HarnessWide(std::string(name) + ": the picture restored\n") + r.Tail()).c_str());
+				// A truncated transfer is rejected by the formatter (the previous picture stays): that is
+				// the only conversion failure allowed. No libplacebo error anywhere (the SDR passthrough
+				// after EOS used to fail every picture: "Failed swapping endianness").
+				size_t conversionFailures = 0, truncated = 0, libplaceboErrors = 0;
+				for (const std::string& l : r.log)
+				{
+					conversionFailures += l.find("Alpha conversion failed") != std::string::npos ? 1 : 0;
+					truncated += l.find("incomplete frame (last row blank") != std::string::npos ? 1 : 0;
+					libplaceboErrors += l.find("libplacebo [error]") != std::string::npos ? 1 : 0;
+				}
+				Logger::WriteMessage(("   conversion failures " + std::to_string(conversionFailures) + " (truncated transfers rejected " +
+					std::to_string(truncated) + "), libplacebo errors " + std::to_string(libplaceboErrors) + "\n").c_str());
+				Assert::IsTrue(conversionFailures <= truncated, (HarnessWide(name) + L": conversion\n" + r.Tail()).c_str());
+				Assert::AreEqual<size_t>(0, libplaceboErrors, (HarnessWide(name) + L": libplacebo errors\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("could not be unpacked on the GPU or the CPU"), HarnessWide(name).c_str());
+				Assert::IsTrue(r.Logged("EOS boundary; allowing SDR RGB passthrough"), (HarnessWide(name) + L": EOS -> SDR\n" + r.Tail()).c_str());
+				// Owner rule (no silent fallbacks): the DM loss is listed while it lasts and released after.
+				Assert::IsTrue(r.Logged("Fallbacks engaged: ") && r.Logged("Dolby Vision metadata"),
+					(HarnessWide(name) + L": the DM loss under Fallbacks engaged\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.fallbacksStatus.find("Dolby Vision metadata") == std::string::npos,
+					HarnessWide(std::string(name) + ": released after recovery: " + r.fallbacksStatus).c_str());
+				if (mode == 2)
+					Assert::IsTrue(r.Logged("Dolby Vision GPU unpack"), (HarnessWide(name) + L": the unpack fallback listed\n" + r.Tail()).c_str());
+			}
+			SetEnvironmentVariableW(L"VP_TEST_DV_UNPACK_FAIL", nullptr);
+		}
+
+		// GPU vs CPU tunnel unpack at 4K: the 2160p corpus streamed at its rate (60p and 24p) with
+		// each route; frames dropped, queue and exit latency, and the presentation timing line.
+		BEGIN_TEST_METHOD_ATTRIBUTE(DvSynthGpuUnpackPerformance4K)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DvSynthGpuUnpackPerformance4K)
+		{
+			const HarnessScope harnessScope;
+			const std::string root = DvSynthEnv("VP_TEST_DV_SYNTH_CORPUS");
+			if (root.empty())
+			{
+				Logger::WriteMessage("SKIP-NO-CORPUS DvSynthGpuUnpackPerformance4K (VP_TEST_DV_SYNTH_CORPUS)\n");
+				return;
+			}
+			if (!RequireHardwareOrSkip("DvSynthGpuUnpackPerformance4K")) return;
+			const std::string extra = DvSynthEnv("VP_TEST_DV_SYNTH_EXTRA");
+			for (const char* name : { "acc-2160p60-p5-r210-high8", "acc-2160p24-p5-r210-low8" })
+			{
+				RawCorpusSegment seg;
+				std::vector<size_t> contentOfFrame;
+				Assert::IsTrue(DvSynthLoadSegment(root + "\\" + name, seg, contentOfFrame), HarnessWide(name).c_str());
+				g_harnessDolbyVision = true;
+				g_harnessWindowWidth = 1920;   // a 1080p window: the 4K picture scaled, as a projector chain might
+				g_harnessWindowHeight = 1080;
+				FramePlan stream;
+				stream.rateNumerator = static_cast<int>(seg.rateNumerator);
+				stream.rateDenominator = static_cast<int>(seg.rateDenominator);
+				const std::vector<size_t> content = contentOfFrame;
+				stream.step = [content](int n) { return FrameStep{ true, static_cast<int>(content[static_cast<size_t>(n) % content.size()]), 0 }; };
+				for (const bool gpu : { false, true })
+				{
+					const RunResult r = Run(seg.ReplayEncoding(true), "standard", 8.0, true,
+						std::string(gpu ? "dv_tunnel_gpu_unpack: on\n" : "dv_tunnel_gpu_unpack: off\n") +
+						"[vprenderer.Default]\ndithering: off\n" + extra, false, &stream);
+					const uint64_t dropped = r.trend.empty() ? 0 : r.trend.back().dropped;
+					const uint64_t droppedHalf = r.trend.empty() ? 0 : r.trend[r.trend.size() / 2].dropped;
+					char line[1024];
+					snprintf(line, sizeof(line), "GPU PERF %s %s unpack: presented %s, frames sent %zu, dropped %llu (second half %llu), median queue %.1f, median exit latency %.1f ms; %s\n",
+						name, gpu ? "GPU" : "CPU", r.presented ? "yes" : "NO", r.trend.size(), (unsigned long long)dropped,
+						(unsigned long long)(dropped - droppedHalf), Median(r.queueDepths), Median(r.exitLatencyMs), r.presentationStatus.c_str());
+					Logger::WriteMessage(line);
+					for (const std::string& l : r.log)
+						if (l.find("unpacked on the GPU") != std::string::npos || l.find("render time") != std::string::npos ||
+							l.find("Frame timing") != std::string::npos)
+							Logger::WriteMessage(("   " + l).c_str());
+					Assert::IsTrue(r.presented, HarnessWide(std::string(name) + ": presented").c_str());
+					if (gpu)
+						Assert::IsTrue(r.Logged("Dolby Vision RGB tunnel: picture unpacked on the GPU"), L"the GPU unpack ran");
+				}
+			}
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(CapturePathRunsThroughTheRendererWithFakeDeckLinkFrames)
