@@ -1,0 +1,12 @@
+#pragma once
+#define NOMINMAX
+#define VC_EXTRALEAN
+#define WIN32_LEAN_AND_MEAN
+#define _ATL_CSTRING_EXPLICIT_CONSTRUCTORS
+#include <set>
+#include <mutex>
+#include <stdexcept>
+#include <assert.h>
+#include <afxwin.h>
+#include <afxext.h>
+#include <atlbase.h>
