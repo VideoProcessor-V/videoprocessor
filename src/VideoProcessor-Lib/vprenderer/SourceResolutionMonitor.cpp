@@ -640,7 +640,7 @@ if (tile < int(tiles) && g.y < ts) {
 			// whose kernel fit runs with `mutex` released (tests analyse on their own thread).
 			if (cause)
 			{
-				std::lock_guard<std::mutex> evidence(evidenceMutex);
+				std::lock_guard<std::mutex> evidenceGuard(evidenceMutex);
 				std::lock_guard<std::mutex> lock(mutex);
 				ResetEvidence(cause);
 			}
@@ -680,7 +680,7 @@ if (tile < int(tiles) && g.y < ts) {
 
 	void Monitor::Analyse(Job& j)
 	{
-		std::lock_guard<std::mutex> evidence(evidenceMutex);   // efficiency 2026-10-24: order evidenceMutex -> mutex
+		std::lock_guard<std::mutex> evidenceGuard(evidenceMutex);   // efficiency 2026-10-24: order evidenceMutex -> mutex
 		const auto start = std::chrono::steady_clock::now();
 		std::vector<SourceResolution::Spectrum> spectra(static_cast<size_t>(j.tiles));
 		const int T = j.tileSize > 0 ? j.tileSize : kTile;
