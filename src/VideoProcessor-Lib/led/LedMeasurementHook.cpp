@@ -162,8 +162,14 @@ if (b.x < int(peak_boxes.x) && b.y < int(peak_boxes.y)) {
 		constexpr int READBACK_WORDS = static_cast<int>((sizeof(RawMeasurement) + 3) / 4);
 		const char* const COPY_BODY = R"GLSL(
 int i = int(gl_GlobalInvocationID.x);
-if (i < READBACK_WORDS)
-    imageStore(readback_img, ivec2(i, 0), uvec4(words[i], 0u, 0u, 0u));
+if (i < READBACK_WORDS) {
+    // libplacebo declares storage images as float image2D only, so each word goes out as its
+    // four bytes in an RGBA8 UNORM texel (k / 255 stores exactly k): the texel's bytes in memory
+    // are the word, little-endian, as the CPU reads it back.
+    uint w = words[i];
+    imageStore(readback_img, ivec2(i, 0),
+               vec4(float(w & 0xFFu), float((w >> 8) & 0xFFu), float((w >> 16) & 0xFFu), float(w >> 24)) / 255.0);
+}
 )GLSL";
 	}
 
@@ -447,7 +453,7 @@ if (i < READBACK_WORDS)
 		desc.Height = 1;
 		desc.MipLevels = 1;
 		desc.ArraySize = 1;
-		desc.Format = DXGI_FORMAT_R32_UINT;
+		desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;   // one 32-bit word per texel (see COPY_BODY)
 		desc.SampleDesc.Count = 1;
 		desc.Usage = D3D11_USAGE_DEFAULT;
 		desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;

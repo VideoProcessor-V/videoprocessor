@@ -26,7 +26,7 @@ struct ID3D11Texture2D;
 // poll always says "ready" and pl_buf_read is CopyResource + a blocking Map,
 // so the old Collect made the render thread wait for the whole GPU frame. On
 // D3D11 the results are now copied, right after the measurement pass, into a
-// VP-owned R32_UINT texture per slot (a small copy pass), then natively into a
+// VP-owned RGBA8 texture per slot (a small copy pass: one word per texel), then natively into a
 // staging texture with an event query; Collect reads a slot only once its
 // query reports done and maps it with DO_NOT_WAIT (ReadbackRing schedules).
 // Other backends keep pl_buf_poll / pl_buf_read, which do not block there.
