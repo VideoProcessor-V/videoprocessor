@@ -4,6 +4,8 @@
 #include <Windows.h>
 #include <Psapi.h>
 
+#include <DebugLog.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -310,10 +312,25 @@ namespace CrashState
 		// SH12: held for the life of the instance (the OS deletes it when the
 		// handle closes, also when the process is killed), so another start
 		// never takes this instance's live file for a crash leftover.
-		const HANDLE lock = CreateFileA(Join(directory, InstanceFileName(instanceId, ".lock")).c_str(),
-			GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-			FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+		// Module findings 2026-10-24 item 5: a lock that cannot be taken is not ignored.
+		// A short retry covers a transient hold (an antivirus scan, a probe by another
+		// instance's InstanceRunning); after that the live files take the ".unlocked"
+		// names, which PreserveLeftover never treats as a crash leftover.
+		HANDLE lock = INVALID_HANDLE_VALUE;
+		DWORD lockError = 0;
+		for (int attempt = 0; attempt < 3 && lock == INVALID_HANDLE_VALUE; ++attempt)
+		{
+			if (attempt) Sleep(50);
+			lock = CreateFileA(Join(directory, InstanceFileName(instanceId, ".lock")).c_str(),
+				GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+				FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+			if (lock == INVALID_HANDLE_VALUE) lockError = GetLastError();
+		}
 		instanceLock = lock == INVALID_HANDLE_VALUE ? nullptr : lock;
+		unlocked = !instanceLock;
+		if (unlocked)
+			DebugLog::Log("Crash state: the instance lock could not be taken (error %lu); live state kept as %s, "
+				"which is not kept as a crash state after an unclean exit", lockError, LivePath().c_str());
 		stopping = false;
 		running = true;
 		WriteNow();
@@ -329,12 +346,12 @@ namespace CrashState
 
 	std::string Recorder::LivePath() const
 	{
-		return Join(directory, InstanceFileName(instanceId, ".txt"));
+		return Join(directory, InstanceFileName(instanceId, unlocked ? ".unlocked.txt" : ".txt"));
 	}
 
 	std::string Recorder::LiveDumpPath() const
 	{
-		return Join(directory, InstanceFileName(instanceId, ".dmp"));
+		return Join(directory, InstanceFileName(instanceId, unlocked ? ".unlocked.dmp" : ".dmp"));
 	}
 
 	std::string Recorder::Text() const

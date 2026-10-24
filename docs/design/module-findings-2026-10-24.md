@@ -73,3 +73,24 @@ renderer reports the slot state as one of the three facts. No order rule is need
 
    (`EngageFallback` exists; add a `ReleaseFallback` that calls `fallbacks.Release(id)`.) The GUI's
    one-time notice then comes for free.
+
+## 5. Crash state: a lock failure must not create false crash states (done)
+
+**Problem.** If `CrashState::Recorder::Start` could not create its instance lock, it carried on
+as if it had. Another instance's `PreserveLeftover` then saw a live file with no held lock and
+filed the running instance's state as a fake "crash state (N)". The per-instance lock (SH12)
+exists to prevent exactly that.
+
+**Fix.** `Start` retries the lock three times, 50 ms apart. If it still fails, it logs the error and
+names the live files `crash-state-<id>.unlocked.txt` / `.dmp`, which `PreserveLeftover` never
+treats as leftovers. `InstanceLocked()` reports the failure. The trade-off, documented in the
+header: an unlocked instance's own crash is not kept as a numbered crash state.
+
+The header comments are also corrected: the live name is `crash-state-<id>.txt`, and
+`LinesSource` is also called on the caller's thread (`Text()`, `Stop`).
+
+Test: `CrashStateTests::UnlockedInstanceIsNeverKeptAsAFalseCrash`.
+
+**Optional GUI follow-up (VideoProcessorDlg.cpp, on dv-l8's change list):** show
+`CrashState::Global().InstanceLocked() == false` as a state line, e.g.
+`crash state: unlocked (not kept after a crash)`.

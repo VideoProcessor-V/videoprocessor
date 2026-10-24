@@ -111,6 +111,30 @@ namespace VideoProcessorTest
 			Assert::AreEqual(std::string("crash state (1).txt"), kept.front());
 		}
 
+		// Module findings 2026-10-24 item 5: an instance whose lock cannot be taken must not
+		// have its live state filed as a crash by another instance's start.
+		TEST_METHOD(UnlockedInstanceIsNeverKeptAsAFalseCrash)
+		{
+			const std::string folder = TempFolder("unlocked");
+			const unsigned long id = 4242;
+			// Something else holds the lock name exclusively: the recorder cannot take it.
+			const std::string lockPath = folder + "\\" + CrashState::InstanceFileName(id, ".lock");
+			const HANDLE blocker = CreateFileA(lockPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+				FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+			Assert::IsTrue(blocker != INVALID_HANDLE_VALUE);
+			CrashState::Recorder recorder;
+			Assert::IsTrue(recorder.Start(folder, {}, 100, id));
+			Assert::IsFalse(recorder.InstanceLocked(), L"the lock failure is reported");
+			Assert::IsTrue(recorder.LivePath().find(".unlocked.txt") != std::string::npos);
+			Assert::IsTrue(Exists(recorder.LivePath()), L"the state is still written");
+			CloseHandle(blocker);   // the lock name is now free: the running instance looks gone
+			Assert::IsTrue(CrashState::PreserveLeftover(folder).empty(),
+				L"another start does not take the running, unlocked instance's state for a crash");
+			Assert::IsTrue(CrashState::KeptNumbers(folder).empty());
+			recorder.Stop(true);
+			Assert::IsFalse(Exists(recorder.LivePath()), L"a clean exit deletes the unlocked state too");
+		}
+
 		// audit 2026-10-16: the crash handler's write never waits on a held
 		// lock - it gives up after a bounded wait - and otherwise writes the
 		// crash with the recent lines of the last periodic write.
