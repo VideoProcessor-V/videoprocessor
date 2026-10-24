@@ -33,12 +33,12 @@ NO_TM = ("[vprenderer.Default]\\ndithering: off\\ndeband: off\\ntone_mapping: sp
          "target_primaries: BT2020\\noutput_range: full\\n")
 
 
-def cinema(target):
+def cinema(target, tm="spline"):
     # docs/cinema/VideoProcessor-test.cfg: spline, peak_detection off, gamut auto, contrast
     # recovery 0.3, P3 D65 target, 2.2 power, 100 nits. Dither off for measurement.
-    return ("[vprenderer.Default]\\ndithering: off\\ndeband: off\\ntone_mapping: spline\\npeak_detection: off\\n"
+    return ("[vprenderer.Default]\\ndithering: off\\ndeband: off\\ntone_mapping: %s\\npeak_detection: off\\n"
             "gamut_mapping: auto\\ncontrast_recovery: 0.3\\nsdr_target_nits: %g\\nsdr_black_nits: 0\\n"
-            "output_gamma: 2.2\\ntarget_primaries: p3_d65\\noutput_range: full\\n" % target)
+            "output_gamma: 2.2\\ntarget_primaries: p3_d65\\noutput_range: full\\n" % (tm, target))
 
 
 def jobs(root):
@@ -59,14 +59,24 @@ def jobs(root):
                                          ("policy-1080p24-real", True, "blend"), ("policy-1080p24-neutral", True, "neutraltrims")):
             if target != 300 and label == "neutraltrims":
                 continue
-            for k, scene in enumerate(("bright", "mid", "dim")):
-                out.append(("pol_%d_%s_%s" % (target, label, scene), seg(segname), "frame=%d seconds=3.0 capture=2.2" % k,
-                            "dv_tunnel_gpu_unpack: on\\ndv_trims: %s\\n" % ("on" if trims_on else "off") + cinema(target)))
+            for tm in ("spline", "bt2390"):
+                if tm == "bt2390" and label not in ("L1only", "blend"):
+                    continue
+                for k, scene in enumerate(("bright", "mid", "dim")):
+                    out.append(("pol_%d_%s%s_%s" % (target, label, "" if tm == "spline" else "-bt2390", scene), seg(segname),
+                                "frame=%d seconds=3.0 capture=2.2" % k,
+                                "dv_tunnel_gpu_unpack: on\\ndv_trims: %s\\n" % ("on" if trims_on else "off") + cinema(target, tm)))
+    # The tunnel's SDR passthrough (plain RGB8 in r210 before any DV lock): it must be shown.
+    robust = load_truth(seg("robust-1080p24"))
+    sdr_frame = next(f["index"] for f in robust["frames"] if f["expect"] == "sdr")
+    out.append(("sdr_passthrough", seg("robust-1080p24"), "frame=%d seconds=3.0 capture=2.2" % sdr_frame,
+                "[vprenderer.Default]\\ndithering: off\\ndeband: off\\n"))
     out.append(("lldv_unmapped_notm", seg("lldv-1080p24-unmapped"), "frame=0 seconds=3.0 capture=2.2 pq=1000", NO_TM))
     out.append(("lldv_bright100_cinema100", seg("lldv-1080p24-bright-100"), "frame=0 seconds=3.0 capture=2.2 pq=100", cinema(100)))
     out.append(("lldv_bright1000_cinema100", seg("lldv-1080p24-bright-1000"), "frame=0 seconds=3.0 capture=2.2 pq=1000", cinema(100)))
     out.append(("lldv_bright100_cinema48", seg("lldv-1080p24-bright-100"), "frame=0 seconds=3.0 capture=2.2 pq=100", cinema(48)))
     out.append(("lldv_bright1000_cinema48", seg("lldv-1080p24-bright-1000"), "frame=0 seconds=3.0 capture=2.2 pq=1000", cinema(48)))
+    out.append(("lldv_bright1000_bt2390-100", seg("lldv-1080p24-bright-1000"), "frame=0 seconds=3.0 capture=2.2 pq=1000", cinema(100, "bt2390")))
     return out
 
 
@@ -213,11 +223,17 @@ def analyze(root, jobs_path, out, report_path):
             res_blend = analyze_policy(truth, codes, target, k, "blend", trims_of(real))
             res_l1 = analyze_policy(truth, codes, target, k, None, [])
             report["policy"][jid] = {"vs_intent_nearest_trim": res, "vs_intent_blend": res_blend, "vs_untrimmed_model": res_l1}
+        elif jid == "sdr_passthrough":
+            # The picture: R = B = 61, G alternating 181 / 61 by column (RGB8, full range).
+            g_even, g_odd = codes[100:900, 100:1800:2, 1].mean(), codes[100:900, 101:1800:2, 1].mean()
+            r = codes[100:900, 100:1800, 0].mean()
+            report["sdr_passthrough"] = {"mean_R": round(float(r), 1), "mean_G_even": round(float(g_even), 1),
+                                         "mean_G_odd": round(float(g_odd), 1), "shown": bool(g_even > r + 50)}
         elif jid.startswith("lldv_"):
             if "notm" in jid:
                 report["lldv"][jid] = analyze_accuracy(truth, meta, codes)
             else:
-                target = 100.0 if "cinema100" in jid else 48.0
+                target = 100.0 if ("cinema100" in jid or jid.endswith("-100")) else 48.0
                 real = load_truth(os.path.join(root, "policy-1080p24-real"))
                 tr = {"scenes": real["scenes"], "pictures": {"scene_bright": truth["pictures"]["lldv"]}}
                 report["lldv"][jid] = {"vs_intent_nearest_trim": analyze_policy(tr, codes, target, 0, "nearest", trims_of(real)),
@@ -252,6 +268,8 @@ def summarize(r):
             print("  %-32s intent(trimmed) %5.2f / %5.2f | untrimmed model %5.2f" %
                   (jid, p["vs_intent_nearest_trim"]["mean_dE_itp"], p["vs_intent_nearest_trim"]["max_dE_itp"],
                    p["vs_untrimmed_model"]["mean_dE_itp"]))
+    if "sdr_passthrough" in r:
+        print("== SDR passthrough on the tunnel input:", r["sdr_passthrough"])
     if r["missing"]:
         print("MISSING captures:", r["missing"])
 

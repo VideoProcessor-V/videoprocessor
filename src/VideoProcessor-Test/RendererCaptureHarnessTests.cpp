@@ -789,7 +789,22 @@ namespace
 			bool resetDone = false, captureRequested = false;
 			size_t capturesRequested = 0, nextCaptureTime = 0;
 			const timingclocktime_t startTicks = clock.TimingClockNow();
-			for (int n = 0; std::chrono::steady_clock::now() - start < std::chrono::duration<double>(seconds); ++n)
+			// test/dv-synthetic 2026-10-24: a capture is taken at the next MAIN render; a still picture
+			// (bit-exact repeats) may not render again before the run ends, so the stream continues
+			// (up to 6 s more) until every requested capture has completed.
+			auto capturesPending = [&]() {
+				const size_t wanted = capturesRequested + (captureRequested ? 1 : 0);
+				if (wanted == 0) return false;
+				size_t done = 0;
+				std::lock_guard<std::mutex> guard(g_logMutex);
+				for (const std::string& line : g_log)
+					done += line.find("Rendered-output capture complete") != std::string::npos ? 1 : 0;
+				return done < wanted; };
+			auto keepRunning = [&]() {
+				const auto elapsed = std::chrono::steady_clock::now() - start;
+				if (elapsed < std::chrono::duration<double>(seconds)) return true;
+				return elapsed < std::chrono::duration<double>(seconds + 6.0) && capturesPending(); };
+			for (int n = 0; keepRunning(); ++n)
 			{
 				const FrameStep step = plan && plan->step ? plan->step(n) : FrameStep{ true, n, 0 };
 				if (plan && !resetDone && plan->resetAtSeconds >= 0.0 &&
@@ -3342,6 +3357,11 @@ namespace Tests
 			CreateDirectoryA(out.c_str(), nullptr);
 			const std::wstring shots = HarnessTempFolder(L"vp-dv-synth");
 			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			// The shaders beside the test DLL (dv_trims' DV trims.glsl), as beside VP's exe.
+			{
+				const std::string here = Here();
+				SetEnvironmentVariableA("VP_TEST_SHADER_DIR", here.substr(0, here.size() - 1).c_str());
+			}
 			std::ifstream jobs(jobsPath);
 			Assert::IsTrue(static_cast<bool>(jobs), HarnessWide("cannot read " + jobsPath).c_str());
 			std::string line;
@@ -3398,7 +3418,9 @@ namespace Tests
 					plan.step = [content, frame](int) { return FrameStep{ true, static_cast<int>(content[static_cast<size_t>(frame)]), 0 }; };
 					plan.captureAtSeconds = key.count("capture") ? std::atof(key["capture"].c_str()) : seconds - 1.0;
 				}
-				const RunResult r = Run(seg.ReplayEncoding(true), "standard", seconds, true, settings, false, &plan);
+				RunResult r = Run(seg.ReplayEncoding(true), "standard", seconds, true, settings, false, &plan);
+				if (r.captureMetadataList.empty() && r.captureMetadata.empty())
+					r = Run(seg.ReplayEncoding(true), "standard", seconds + 1.0, true, settings, false, &plan);   // one retry
 				std::vector<std::string> captures = r.captureMetadataList;
 				if (captures.empty() && !r.captureMetadata.empty())
 					captures.push_back(r.captureMetadata);
@@ -3484,8 +3506,19 @@ namespace Tests
 				const int w = static_cast<int>(seg.width), h = static_cast<int>(seg.height);
 				// The measurement area: below the stamp band, a centre rectangle.
 				const int x0 = w / 4, x1 = 3 * w / 4, y0 = static_cast<int>(0.40 * h), y1 = static_cast<int>(0.55 * h);
-				// 1. Each scene still (its first frame repeated): the scene's brightness.
+				// 1. Each scene still (its first frame repeated): the scene's brightness. Advance-metadata
+				// frames are not self-contained (a cut frame says no_md; the frame before announces the
+				// next DM), so their stills come from the same-frame twin segment (identical pictures and
+				// per-scene DM); the stream below is the advance segment itself.
 				std::map<int, double> sceneMean;
+				const size_t advanceAt = folder.find("-advance");
+				if (advanceAt != std::string::npos)
+				{
+					RawCorpusSegment twin;
+					std::vector<size_t> twinContent;
+					Assert::IsTrue(DvSynthLoadSegment(folder.substr(0, advanceAt) + "-same", twin, twinContent), L"same-frame twin");
+					contentOfFrame = twinContent;
+				}
 				for (size_t f = 0; f < sceneOf.size(); ++f)
 				{
 					if (sceneMean.count(sceneOf[f]))
@@ -3493,16 +3526,28 @@ namespace Tests
 					FramePlan still;
 					still.rateNumerator = static_cast<int>(seg.rateNumerator);
 					still.rateDenominator = static_cast<int>(seg.rateDenominator);
-					still.captureAtSeconds = 2.0;
+					still.captureAtSeconds = 2.2;
 					const int content = static_cast<int>(contentOfFrame[f]);
 					still.step = [content](int) { return FrameStep{ true, content, 0 }; };
-					const RunResult r = Run(seg.ReplayEncoding(true), "standard", 2.8, true, settings, false, &still);
+					RunResult r = Run(seg.ReplayEncoding(true), "standard", 3.2, true, settings, false, &still);
+					if (r.captureMetadata.empty())   // one retry (a capture request can be refused while the queue warms up)
+						r = Run(seg.ReplayEncoding(true), "standard", 4.0, true, settings, false, &still);
 					int cw = 0, ch = 0;
 					const std::vector<int> codes = LoadCaptureRgb(r.captureMetadata, cw, ch);
-					Assert::IsTrue(!codes.empty() && cw == w && ch == h, (L"scene still capture\n" + r.Tail()).c_str());
+					if (codes.empty())
+					{
+						const std::string temp = DvSynthEnv("TEMP");
+						std::ofstream full((temp.empty() ? std::string(".") : temp) + "\\vp-dv-synth-cuts-still.log", std::ios::trunc);
+						for (const std::string& l : r.log)
+							full << l << "\n";
+					}
+					Assert::IsTrue(!codes.empty() && cw == w && ch == h, (HarnessWide("scene still capture: metadata '" + r.captureMetadata +
+						"' size " + std::to_string(cw) + "x" + std::to_string(ch) + " presented " + (r.presented ? "yes" : "no") + "\n") + r.Tail()).c_str());
 					sceneMean[sceneOf[f]] = DvSynthMean(codes, w, x0, y0, x1, y1);
 				}
 				// 2. The stream with captures every ~0.07 s after a warm-up.
+				if (advanceAt != std::string::npos)
+					Assert::IsTrue(DvSynthLoadSegment(folder, seg, contentOfFrame), HarnessWide(folder).c_str());
 				FramePlan stream;
 				stream.rateNumerator = static_cast<int>(seg.rateNumerator);
 				stream.rateDenominator = static_cast<int>(seg.rateDenominator);
@@ -3596,6 +3641,14 @@ namespace Tests
 					std::string(mode == 0 ? "dv_tunnel_gpu_unpack: off\n" : "dv_tunnel_gpu_unpack: on\n") + settings, false, &stream);
 				size_t blacks = 0, restores = 0, fallbackLines = 0;
 				std::string headings;
+				{
+					// The whole log, for the report (%TEMP%\vp-dv-synth-robust-<mode>.log).
+					const std::string temp = DvSynthEnv("TEMP");
+					std::ofstream full((temp.empty() ? std::string(".") : temp) + "\\vp-dv-synth-robust-" +
+						std::to_string(mode) + ".log", std::ios::trunc);
+					for (const std::string& l : r.log)
+						full << l << "\n";
+				}
 				for (const std::string& l : r.log)
 				{
 					blacks += l.find("Dolby Vision transition: presenting black") != std::string::npos ? 1 : 0;
@@ -3611,7 +3664,20 @@ namespace Tests
 				Assert::IsTrue(r.presented, HarnessWide(std::string(name) + ": presented\n").c_str());
 				Assert::IsTrue(blacks >= 3, (HarnessWide(std::string(name) + ": black on DM loss\n") + r.Tail()).c_str());
 				Assert::IsTrue(restores >= 3, (HarnessWide(std::string(name) + ": the picture restored\n") + r.Tail()).c_str());
-				Assert::IsFalse(r.Logged("Alpha conversion failed"), (HarnessWide(name) + L": conversion\n" + r.Tail()).c_str());
+				// A truncated transfer is rejected by the formatter (the previous picture stays): that is
+				// the only conversion failure allowed. No libplacebo error anywhere (the SDR passthrough
+				// after EOS used to fail every picture: "Failed swapping endianness").
+				size_t conversionFailures = 0, truncated = 0, libplaceboErrors = 0;
+				for (const std::string& l : r.log)
+				{
+					conversionFailures += l.find("Alpha conversion failed") != std::string::npos ? 1 : 0;
+					truncated += l.find("incomplete frame (last row blank") != std::string::npos ? 1 : 0;
+					libplaceboErrors += l.find("libplacebo [error]") != std::string::npos ? 1 : 0;
+				}
+				Logger::WriteMessage(("   conversion failures " + std::to_string(conversionFailures) + " (truncated transfers rejected " +
+					std::to_string(truncated) + "), libplacebo errors " + std::to_string(libplaceboErrors) + "\n").c_str());
+				Assert::IsTrue(conversionFailures <= truncated, (HarnessWide(name) + L": conversion\n" + r.Tail()).c_str());
+				Assert::AreEqual<size_t>(0, libplaceboErrors, (HarnessWide(name) + L": libplacebo errors\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("could not be unpacked on the GPU or the CPU"), HarnessWide(name).c_str());
 				Assert::IsTrue(r.Logged("EOS boundary; allowing SDR RGB passthrough"), (HarnessWide(name) + L": EOS -> SDR\n" + r.Tail()).c_str());
 				// Owner rule (no silent fallbacks): the DM loss is listed while it lasts and released after.

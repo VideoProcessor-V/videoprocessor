@@ -85,6 +85,42 @@ Files (all new unless noted):
   back at the same sample with the same value; inside the metadata area the chroma
   LSB toggles exactly when ETSI's scrambling parity changes.
 
+### Tier 1b - synthetic corpus through the whole renderer (built 2026-10-24, test/dv-synthetic)
+
+A third, independent implementation of the tunnel in Python (`tools/dv_synth/`,
+no shared code with VP's decoder, the VPV packer or the C++ reference encoder)
+writes a deterministic on-disk corpus in VP's raw-capture format: known pictures
+(wedge 0..1000 nits, colour patches, I and Ct ramps, BTB/WTW-like codes, 1-px
+detail, a frame/scene stamp) with authored DM, packed as a DeckLink delivers the
+RGB8 tunnel (r210 / R10b / R10l; low8, high8, high8 with replicated bits;
+1080p and 2160p; 24/30/60 Hz), plus the exact expected planes, an independent
+reference decode (IPT/YCbCr -> LMS -> BT.2020, HPE matrix derived, not copied)
+and a documented NON-Dolby display-management model (`dm_model.py`: BT.2390 on
+ICtCp intensity + the published L2 trim form) used only to compare policies.
+
+Run: `powershell -File tools\dv_synth\run_dv_synth.ps1 -Corpus D:\codex\dv-synth-corpus -Out D:\codex\dv-synth-out`
+(about 5.5 GB, 4 min to generate; CPU tests 1.5 min; GPU tests and jobs about
+15 min on the laptop, mains power, `VP_TEST_ADAPTER=NVIDIA`).
+
+| Test | What |
+|---|---|
+| `DvSyntheticCorpusTests` (CPU) | decode bit-exact (AVX2, scalar, the GPU shader's transcription); every authored DM field; robustness (missing / damaged / truncated / malformed / extreme DM, EOS -> SDR -> DV, id wrap, long loss); L1 alignment at cuts (same-frame and advance DM); 4K CPU cost; `FlatHeaderRowsDoNotLockTheWrongPlacement` (no corpus) |
+| `GpuDolbyVisionTunnelUnpackMatchesTheSyntheticCorpus` | the GPU unpack on the GPU vs the generator's planes, every container, 1080p/2160p |
+| `DvSynthGpuRendersJobs` | renders the jobs `run_dv_synth.py jobs` lists (accuracy, BTB/WTW, policy, LLDV-like, SDR passthrough); `run_dv_synth.py analyze` measures them |
+| `DvSynthGpuAlignmentAtCuts` | streamed cut segments with captures; each capture's stamp names its frame; its brightness must be its own scene's |
+| `DvSynthGpuRobustnessThroughTheRenderer` | the robustness segment streamed (CPU, GPU, GPU failing): no libplacebo error, black on DM loss, restored, listed under "Fallbacks engaged" |
+| `DvSynthGpuUnpackPerformance4K` | 2160p60/24 streamed with each unpack route |
+
+Fixed here (with tests): a low8 capture with flat header rows (black bars) locked
+the high8 placement (the header CRC is valid under both placements: correct DM,
+garbage picture); `DV trims.glsl` was missing from the build output and the
+release manifest (dv_trims never acted outside a source checkout); the tunnel's
+SDR passthrough (r210) failed every picture in libplacebo ("Failed swapping
+endianness"), now repacked to BGRA8; the harness rendered the tunnel as SDR/
+Rec.709 (now the app's PQ/BT.2020 state, `DolbyVisionTunnelSourceState.h`); DM
+loss, an invalid source range, missing L1 and dv_trims unable to act are listed
+under "Fallbacks engaged".
+
 ### Every incoming HDR mode (built)
 
 `DvIncomingHdrModeTests` drives VP's own tunnel gate, newlldv inference input and

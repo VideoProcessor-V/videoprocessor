@@ -387,8 +387,8 @@ def seg_robustness(root, name):
 
     def plain_rgb(data, ww=1920, hh=1080):
         return data
-    sdr_pic = np.full((1080, 1920, 3), 60, dtype=np.uint8)
-    sdr_pic[:, ::2, 1] = 180
+    sdr_pic = np.full((1080, 1920, 3), 61, dtype=np.uint8)
+    sdr_pic[:, ::2, 1] = 181
     sdr_bytes = dv.container(sdr_pic, "r210", "low8", row_pad_seed=7)
     for _ in range(6):
         add(None, expect="sdr", label="SDR after EOS", raw_bytes=lambda d: sdr_bytes)

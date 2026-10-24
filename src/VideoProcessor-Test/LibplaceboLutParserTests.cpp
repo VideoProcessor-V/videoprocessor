@@ -11889,7 +11889,7 @@ namespace VideoProcessorTest
 			size_t frames = 0;
 			for (const std::string& folder : FindRawCorpusSegments(root))
 			{
-				const std::string name = folder.substr(folder.find_last_of("\/") + 1);
+				const std::string name = folder.substr(folder.find_last_of("\\/") + 1);
 				if (name.compare(0, 4, "acc-") != 0)
 					continue;
 				RawCorpusSegment seg;
@@ -11897,7 +11897,7 @@ namespace VideoProcessorTest
 				Assert::IsTrue(LoadRawCorpusSegment(folder, seg, error), ExtendedRangeGpuProbe::ToWide(error).c_str());
 				if (!hardware && seg.width > 2000)
 					continue;   // WARP: 1080p only
-				std::ifstream truth(folder + "\truth.txt");
+				std::ifstream truth(folder + "\\truth.txt");
 				std::string line, placement;
 				std::map<std::string, std::string> planesOf;
 				std::vector<std::pair<size_t, std::string>> framePicture;

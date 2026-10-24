@@ -6804,6 +6804,8 @@ struct LibplaceboVideoRenderer::Impl
 	// r6 fix 7 (owner rule vp-no-silent-fallbacks): the renderer's automatic fallbacks, published
 	// as "Fallbacks engaged: <list> / none" (GetFallbacksStatus: Ctrl+I, Config status, Ctrl+Alt+D).
 	FallbackStatus::Registry fallbacks;
+	// test/dv-synthetic 2026-10-24: the DV tunnel's SDR passthrough repacked to BGRA8 (tunnelSdrRepack).
+	std::vector<uint32_t> tunnelSdrBgra;
 	void EngageFallback(const char* id, const std::string& reason)
 	{
 		if (fallbacks.Engage(id, reason))
@@ -17281,8 +17283,14 @@ struct LibplaceboVideoRenderer::Impl
 		// here to native RGB (rgba16) on the GPU (never on the Dolby Vision tunnel).
 		const bool rgbRawFrame = !state.dolbyVisionTunnel && convertedPayload && convertedPayload->Raw() &&
 			GpuRgbUnpack::Supports(convertedPayload->rawEncoding);
+		// test/dv-synthetic 2026-10-24: libplacebo cannot endian-swap packed 10-bit words (its swap
+		// needs 16- or 32-bit components; r210 failed every SDR passthrough picture with "Failed
+		// swapping endianness", so nothing was shown after EOS / before lock). The tunnel's SDR
+		// passthrough is RGB8 in the 10-bit fields: repacked on the CPU to BGRA8 and uploaded as 8-bit.
+		const bool tunnelSdrRepack = tunnelRgbFallback && (state.videoFrameEncoding == VideoFrameEncoding::R210 ||
+			state.videoFrameEncoding == VideoFrameEncoding::R10b || state.videoFrameEncoding == VideoFrameEncoding::R10l);
 		const bool nativeRgbUpload = tunnelRgbFallback ?
-			GetAlphaNativeRgbLayout(state.videoFrameEncoding, nativeRgbLayout) :
+			GetAlphaNativeRgbLayout(tunnelSdrRepack ? VideoFrameEncoding::BGRA_8BIT : state.videoFrameEncoding, nativeRgbLayout) :
 			(!rgbRawFrame && !state.dolbyVisionTunnel &&
 				videoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE &&
 				AlphaCanUseNativeRgbUpload(state.videoFrameEncoding) &&
@@ -18169,6 +18177,36 @@ struct LibplaceboVideoRenderer::Impl
 			plane.row_stride = state.BytesPerRow();
 			plane.pixels = videoFrame.GetData();
 			plane.swapped = nativeRgbLayout.swapped;
+			if (tunnelSdrRepack)
+			{
+				// RGB8 from each 10-bit field (high8: the top eight bits) into BGRA8 words.
+				const unsigned shift = convertedPayload && convertedPayload->dolby.rgbBitAlignment == 1 ? 2u : 0u;
+				const VideoFrameEncoding e = state.videoFrameEncoding;
+				const uint8_t* src = static_cast<const uint8_t*>(videoFrame.GetData());
+				const size_t srcStride = state.BytesPerRow();
+				tunnelSdrBgra.resize(static_cast<size_t>(width) * height);
+				for (int y = 0; y < height; ++y)
+				{
+					const uint8_t* row = src + static_cast<size_t>(y) * srcStride;
+					uint32_t* out = tunnelSdrBgra.data() + static_cast<size_t>(y) * width;
+					for (int x = 0; x < width; ++x)
+					{
+						const uint8_t* b = row + static_cast<size_t>(x) * 4;
+						uint32_t w = e == VideoFrameEncoding::R10l ?
+							(static_cast<uint32_t>(b[3]) << 24) | (static_cast<uint32_t>(b[2]) << 16) | (static_cast<uint32_t>(b[1]) << 8) | b[0] :
+							(static_cast<uint32_t>(b[0]) << 24) | (static_cast<uint32_t>(b[1]) << 16) | (static_cast<uint32_t>(b[2]) << 8) | b[3];
+						if (e != VideoFrameEncoding::R210)
+							w >>= 2;
+						const uint32_t r = (((w >> 20) & 0x3FFu) >> shift) & 0xFFu;
+						const uint32_t g = (((w >> 10) & 0x3FFu) >> shift) & 0xFFu;
+						const uint32_t bl = ((w & 0x3FFu) >> shift) & 0xFFu;
+						out[x] = 0xFF000000u | (r << 16) | (g << 8) | bl;   // bytes B G R A
+					}
+				}
+				plane.pixels = tunnelSdrBgra.data();
+				plane.row_stride = static_cast<size_t>(width) * 4;
+				plane.swapped = false;
+			}
 			pl_plane_data_from_mask(&plane, nativeRgbLayout.masks);
 			frameGpuTiming.BeginStage(
 				AlphaD3D11FrameGpuTimer::Stage::SourceUpload);
@@ -18404,7 +18442,7 @@ struct LibplaceboVideoRenderer::Impl
 			(tunnelRgbFallback || nativeRgb8Upload ? 8 : 10) :
 			formattedContract.colorDepth;
 		image.repr.bits.bit_shift = nativeRgbUpload ?
-			(tunnelRgbFallback && convertedPayload->dolby.rgbBitAlignment == 1 ?
+			(tunnelRgbFallback && !tunnelSdrRepack && convertedPayload->dolby.rgbBitAlignment == 1 ?
 				2 : 0) :
 			formattedContract.bitShift;
 		if (rgbRawUpload)
