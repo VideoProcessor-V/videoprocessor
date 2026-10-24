@@ -315,6 +315,12 @@ def prepare_ramp(a, plan):
 
 
 def run_or_print(a, cmd, out):
+    if cmd and os.path.basename(cmd[0]).lower().startswith("ffmpeg") and a.threads > 0:
+        cmd = cmd[:1] + ["-threads", str(a.threads)] + cmd[1:]
+        if "-c:v" in cmd:   # the encoder's own thread pools
+            i = cmd.index("-c:v") + 2
+            extra = ["-x265-params", f"pools={a.threads}:frame-threads=1"] if "libx265" in cmd else ["-threads", str(a.threads)]
+            cmd = cmd[:i] + extra + cmd[i:]
     if a.dry_run:
         print("   ", " ".join(f'"{c}"' if " " in c else c for c in cmd))
         return
@@ -476,6 +482,7 @@ def main(argv=None):
     ap.add_argument("--d-staging", default="", help="export staging holding weights/D_hybrid_refine.pt (round 1 on the kit drive)")
     ap.add_argument("--adapter", default="NVIDIA")
     ap.add_argument("--hold", type=float, default=1.0, help="seconds VP shows each still before its capture")
+    ap.add_argument("--threads", type=int, default=1, help="ffmpeg threads for prepare (1: the machine-wide single-thread rule; 0 = ffmpeg's default)")
     a = ap.parse_args(argv)
     for p in (a.work,):
         low = os.path.abspath(p).lower()
