@@ -31734,7 +31734,9 @@ void LibplaceboVideoRenderer::RenderLoop()
 							const double headAgeMs = since > 0 && nowQpc > since ?
 								static_cast<double>(nowQpc - since) * 1000.0 / static_cast<double>(qpcFrequency.QuadPart) : 0.0;
 							heldBacklog = AlphaQueuePolicy::ShouldShedHeldBacklog(queueBefore, recoveryTarget, headAgeMs,
-								heldQueue.holdMs, queueRateHz);
+								heldQueue.holdMs, queueRateHz) ||
+								AlphaQueuePolicy::ShouldShedHeldExcess(queueBefore, recoveryTarget, headAgeMs, heldQueue.holdMs,
+									queueRateHz, m_heldExcessRun);
 							recoveredBacklog = heldBacklog;
 						}
 						if (recoveredBacklog)

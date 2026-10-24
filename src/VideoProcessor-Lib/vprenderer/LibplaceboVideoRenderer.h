@@ -409,6 +409,7 @@ private:
 	QueueHold m_queueHold;
 	QueueHold CurrentQueueHold() const;
 	std::string m_queueHoldLogged;
+	unsigned m_heldExcessRun = 0;   // consecutive held heads a frame late (AlphaQueuePolicy::ShouldShedHeldExcess)
 	std::atomic<uint64_t> m_droppedFrames{0};
 	std::atomic<uint64_t> m_conversionFailures{0};
 	std::atomic<size_t> m_activePictureLookaheadFrames{0};

@@ -353,6 +353,14 @@ namespace PipelineSkeletonTestsNs
 			Assert::IsFalse(AlphaQueuePolicy::ShouldShedHeldBacklog(16, 11, hold + 400.0, 0.0, 60.0));    // no hold
 			Assert::IsFalse(AlphaQueuePolicy::ShouldShedHeldBacklog(8, 4, 167.0 + 80.0, 167.0, 23.976));  // < 2 film frames
 			Assert::IsTrue(AlphaQueuePolicy::ShouldShedHeldBacklog(8, 4, 167.0 + 90.0, 167.0, 23.976));
+			// One frame behind for good: shed after half a second of late heads, never on jitter.
+			unsigned run = 0;
+			for (int i = 0; i < 29; ++i)
+				Assert::IsFalse(AlphaQueuePolicy::ShouldShedHeldExcess(14, 11, hold + 22.0, hold, 60.0, run));
+			Assert::IsTrue(AlphaQueuePolicy::ShouldShedHeldExcess(14, 11, hold + 22.0, hold, 60.0, run));
+			Assert::AreEqual(0u, run);
+			for (int i = 0; i < 100; ++i)   // jitter: late every other frame
+				Assert::IsFalse(AlphaQueuePolicy::ShouldShedHeldExcess(14, 11, hold + (i % 2 ? 22.0 : 5.0), hold, 60.0, run));
 		}
 
 		TEST_METHOD(DelayBudgetQueueCapacityCoversTheHold)

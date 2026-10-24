@@ -225,6 +225,23 @@ namespace AlphaQueuePolicy
 		return headAgeMs > holdMs + 2.0 * periodMs;
 	}
 
+	// One frame behind for good (gate 7): when the source rate equals the display's (60p on 60 Hz)
+	// a frame the queue gained (an early burst, a stall) never drains: the total stays a frame above
+	// the budget. A head older than the hold by more than 1.25 frames for half a second in a row
+	// (jitter never lasts) is that frame: shed it too. `run` counts the consecutive late heads.
+	inline bool ShouldShedHeldExcess(size_t queueDepth, size_t desiredDepth, double headAgeMs, double holdMs,
+		double frameRateHz, unsigned& run)
+	{
+		const double periodMs = 1000.0 / ValidFrameRateOrDefault(frameRateHz);
+		const bool late = holdMs > 0.0 && queueDepth > NormalizeDesiredDepth(desiredDepth) && headAgeMs > holdMs + 1.25 * periodMs;
+		run = late ? run + 1 : 0;
+		const unsigned needed = (std::max)(8u, static_cast<unsigned>(std::lround(0.5 * ValidFrameRateOrDefault(frameRateHz))));
+		if (run < needed)
+			return false;
+		run = 0;
+		return true;
+	}
+
 	// The VP timeline's queue steering (hunt 2 13-timing H2, L3). The refresh
 	// spacing is trimmed by the smoothed distance of the queue (after the dequeue)
 	// from its target, at most 0.3%. The target after the dequeue keeps one frame of

@@ -1425,7 +1425,7 @@ namespace Tests
 			{
 				const int budget = static_cast<int>(DelayBudget::BudgetForFrames(frames, rateList, model));
 				g_harnessDelayBudgetMs = budget;
-				double low = 1e9, high = 0.0;
+				double low = 1e9, high = -1e9;
 				for (const Rate& rate : rates)
 				{
 					const double fps = static_cast<double>(rate.numerator) / rate.denominator;
@@ -1452,20 +1452,32 @@ namespace Tests
 						failures += std::string(name) + ": stall/failure; ";
 					if (median > 0.0)
 					{
-						low = (std::min)(low, median);
-						high = (std::max)(high, median);
-						// ABSOLUTE (audit B2): the capture-to-output delay is the planned hold plus the render,
-						// within the display phase (a refresh), one more refresh of jitter and the render.
+						// The TOTAL input-to-light delay (gate 6, owner 2026-10-24: the same at every rate, equal
+						// to the budget). The measured delay runs from the capture timestamp to the present
+						// (the hold + the render); the plan's other fixed costs lie outside it - the capture
+						// transfer of one SIGNAL frame (42 ms at 24p, 17 ms at 60p: the harness delivers a frame
+						// at its timestamp), the swapchain's 2 refreshes and the display phase. So
+						//   total = measured + (fixed - processing allowance)
+						// and the hold already made room for the transfer: the total equals the budget.
 						const double renderAllowanceMs = DelayBudget::kProcessingAllowanceMs;
-						if (median < plan.holdMs - refreshMs || median > plan.holdMs + 2.0 * refreshMs + renderAllowanceMs)
-							failures += std::string(name) + ": delay " + std::to_string(median) + " ms vs planned hold " +
-								std::to_string(plan.holdMs) + " ms; ";
+						const double total = median + plan.fixedMs - renderAllowanceMs;
+						low = (std::min)(low, total);
+						high = (std::max)(high, total);
+						char line[200];
+						snprintf(line, sizeof(line), "   %s: TOTAL %.1f ms (budget %d; measured %.1f + fixed outside it %.1f)\n",
+							name, total, budget, median, plan.fixedMs - renderAllowanceMs);
+						Logger::WriteMessage(line);
+						// ABSOLUTE: the total within half a refresh below the budget and one refresh plus the
+						// render allowance above it (vblank phase and render-time jitter).
+						if (total < budget - 0.5 * refreshMs || total > budget + refreshMs + renderAllowanceMs)
+							failures += std::string(name) + ": total " + std::to_string(total) + " ms vs budget " +
+								std::to_string(budget) + " ms; ";
 					}
 				}
-				// The same total at every rate: the capture-to-output delay varies by at most a refresh
-				// plus 50% of one (render-time and vblank jitter on a desktop GPU).
+				// The same TOTAL at every rate: it varies by at most a refresh plus 50% of one
+				// (render-time and vblank jitter on a desktop GPU).
 				char spread[160];
-				snprintf(spread, sizeof(spread), "%d-frame %d ms: delay %.1f .. %.1f ms across rates", frames, budget, low, high);
+				snprintf(spread, sizeof(spread), "%d-frame %d ms: TOTAL %.1f .. %.1f ms across rates", frames, budget, low, high);
 				Logger::WriteMessage((std::string(spread) + "\n").c_str());
 				if (high - low > 1.5 * refreshMs)
 					failures += std::string(spread) + " (spread above 1.5 refreshes); ";
@@ -4201,8 +4213,8 @@ namespace Tests
 				// Render-ahead plans the extras from the monitor's rate (open loop) when a window gets no
 				// DXGI statistics: the source-path extras run off screen too.
 				{ "source-warp extras, render-ahead", 24000.0 / 1001.0, true,
-					"dejudder_strength: 0.25\ndejudder_warp_stage: source\nrender_ahead: on\n" + stages + on, false, false, false, true },
-				{ "off (default)", display * 5.0 / 6.0, false, "interpolation: auto\n" + stages, true, false, false, false },
+					"dejudder_strength: 0.25\ndejudder_warp_stage: source\nrender_ahead: on\nrender_ahead_queue_credit: on\n" + stages + on, false, false, false, true },
+				{ "off (default)", display * 5.0 / 6.0, false, "interpolation: auto\n" + stages + "[vpv]\npipeline_entrance_once: off\n", true, false, false, false },
 			};
 			// B3's stateful path needs C (the frame after B) queued to estimate B's field ahead: the
 			// look-ahead queue the delay budget keeps (4 frames); the harness default (3) is too short.
@@ -4274,7 +4286,7 @@ namespace Tests
 							Logger::WriteMessage(("   " + logLine + "\n").c_str());
 				if (!c.interpolation)
 					Logger::WriteMessage(("   " + name + ": " + r.dejudderStatus + "\n").c_str());
-				if (!c.interpolation && k.found && k.pictures == 0)
+				if (!c.interpolation && (!k.found || k.pictures == 0))
 				{
 					// Extras need the display's measured rate, which an off-screen window does not get
 					// (DXGI statistics): strict on screen (VP_TEST_HARNESS_ONSCREEN=1), else reported.
@@ -4283,8 +4295,11 @@ namespace Tests
 					const bool strictExtras = _dupenv_s(&onScreen, &length, "VP_TEST_HARNESS_ONSCREEN") == 0 && onScreen &&
 						std::string(onScreen) == "1";
 					std::free(onScreen);
-					if (strictExtras)
-						failures += name + ": no extra from the processed A on screen; ";
+					// Render-ahead plans its extras open loop from the monitor's rate: strict everywhere. The
+					// closed-loop extras need DXGI statistics, which this laptop's panel never gives (an
+					// iGPU-driven panel: windowed or fullscreen) - strict only where they exist.
+					if (strictExtras || name.find("render-ahead") != std::string::npos)
+						failures += name + ": no extra from the processed A; ";
 					else
 						Logger::WriteMessage(("   PENDING-ONSCREEN " + name + ": no extra rendered off screen (" + r.dejudderStatus + ")\n").c_str());
 				}
@@ -4418,6 +4433,7 @@ namespace Tests
 			g_harnessWindowHeight = 1080;
 			const std::string stages = "source_resolution: 720\ndeband_vp: on\n[vprenderer.Default]\ndithering: off\ndeband: off\n";
 			const std::string on = "[vpv]\npipeline_entrance_once: on\n";
+			const std::string off = "[vpv]\npipeline_entrance_once: off\n";   // explicit: never overridden by VP_TEST_ENTRANCE_ONCE
 			std::string failures;
 			const int frames = static_cast<int>(clip.size());
 			g_harnessQueueTarget = 5;   // C queued for B's field ahead (the delay budget's look-ahead)
@@ -4437,7 +4453,7 @@ namespace Tests
 				FramePlan plan = motionPlan();
 				// film = false: interpolation's timeline at 23.976 (the de-judder profile would take the
 				// rendered warp instead: B3 has nothing to do there).
-				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 8.0, false, "interpolation: auto\ndejudder_strength: 0\n" + stages + (b3 ? on : ""), false, &plan);
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 8.0, false, "interpolation: auto\ndejudder_strength: 0\n" + stages + (b3 ? on : off), false, &plan);
 				double sum = 0.0;
 				int n = 0;
 				for (const std::string& json : r.captureMetadataList)
@@ -4522,11 +4538,11 @@ namespace Tests
 					std::string out;
 					for (const std::string& hsh : hashes) out += hsh.substr(0, 12) + " ";
 					return out.empty() ? std::string("none ") : out; };
-				const std::set<std::string> plainOff = hashesOf("interpolation: off\n" + stillStages);
+				const std::set<std::string> plainOff = hashesOf("interpolation: off\n" + stillStages + off);
 				const std::set<std::string> plainOn = hashesOf("interpolation: off\n" + stillStages + on);
 				const std::set<std::string> motionOn = hashesOf("interpolation: auto\n" + stillStages + on);
 				// Reference (reported): today's motion path (B3 off) on the same still.
-				const std::set<std::string> motionOff = hashesOf("interpolation: auto\n" + stillStages);
+				const std::set<std::string> motionOff = hashesOf("interpolation: auto\n" + stillStages + off);
 				Logger::WriteMessage(("== still real frame: interpolation B3 off " + list(motionOff) + "\n").c_str());
 				Logger::WriteMessage(("== still real frame: plain B3 off " + list(plainOff) + "| plain B3 on " + list(plainOn) +
 					"| interpolation B3 on " + list(motionOn) + "\n").c_str());
