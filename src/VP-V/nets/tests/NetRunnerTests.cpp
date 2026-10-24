@@ -195,6 +195,11 @@ namespace NetRunnerTestsNs
 			Assert::AreEqual(size_t(1), ResolveInputs(pkg, inputs).missingLabels.size());
 			Assert::IsTrue(ex.Run(NetDeviceContext(), inputs, out, &err), W(err).c_str());
 			Assert::AreEqual(SyntheticExpected(in, 3, 2, 0.25f), ex.Output().At(3, 2), 1e-6f);
+			// The output written back in the plane's encoding (outputScale).
+			pp.outputScale = 0.5f;
+			Assert::IsTrue(ex.Prepare(NetDeviceContext(), pkg, pp, &err), W(err).c_str());
+			Assert::IsTrue(ex.Run(NetDeviceContext(), inputs, out, &err), W(err).c_str());
+			Assert::AreEqual(0.5f * SyntheticExpected(in, 3, 2, 0.25f), ex.Output().At(3, 2), 1e-6f);
 		}
 
 		TEST_METHOD(HalfPrecisionEmulation)

@@ -37,6 +37,7 @@ namespace VpNets
 			NetPrepareParams pp;
 			pp.intermediate = caps.intermediate;
 			pp.output = output;
+			pp.outputScale = outputScale;
 			std::string err;
 			if (!runner.Prepare(device, pkg, pp, &err))
 				return Refuse(err);
@@ -83,6 +84,7 @@ namespace VpNets
 		TexFormat Intermediate() const { return intermediate; }
 		const FingerprintResult& LastFingerprint() const { return lastCheck; }
 		void SetOutputFormat(TexFormat f) { output = f; }   // R16Unorm: the r16 hand-off between re-base axes
+		void SetOutputScale(float s) { outputScale = s; }  // back into the plane's encoding (NetPrepareParams::outputScale)
 
 	private:
 		bool Refuse(const std::string& reason, bool unload = true)
@@ -98,6 +100,7 @@ namespace VpNets
 		FingerprintResult lastCheck;
 		TexFormat intermediate = TexFormat::Unknown;
 		TexFormat output = TexFormat::Unknown;
+		float outputScale = 1.0f;
 		std::string loadedUpstreamNets;
 		bool lastRunOk = false;
 		bool ready = false;

@@ -722,6 +722,9 @@ namespace VpNets
 				vars.push_back(v);
 			}
 			const std::string fullHeader = header + pass.body;
+			if (isLast && m.params.outputScale != 1.0f && pass.IsCompute())
+				return fail("an output scale needs a fragment output pass");
+			const std::string scaledBody = "color = hook() * " + FloatLiteral(m.params.outputScale) + ";";
 			pl_custom_shader cs{};
 			cs.header = fullHeader.c_str();
 			cs.description = pass.desc.c_str();
@@ -741,7 +744,7 @@ namespace VpNets
 			else
 			{
 				cs.output = PL_SHADER_SIG_COLOR;
-				cs.body = "color = hook();";
+				cs.body = (isLast && m.params.outputScale != 1.0f) ? scaledBody.c_str() : "color = hook();";
 			}
 			pl_shader sh = pl_dispatch_begin(dispatch);
 			if (!sh) return fail("pl_dispatch_begin failed");

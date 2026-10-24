@@ -121,6 +121,9 @@ namespace VpNets
 	{
 		TexFormat intermediate = TexFormat::Rgba16f;  // from CheckCapabilities
 		TexFormat output = TexFormat::Unknown;        // Unknown = the hooked input's format; R16Unorm quantises (r16 hand-off)
+		// The net output is multiplied by this before it is stored: writing back into the plane's
+		// own encoding (an r16 plane holding 10-bit codes MSB-aligned: 65472 / 65535 = 1 / NAME_mul).
+		float outputScale = 1.0f;
 	};
 
 	// The 8K rule (owner; every exported header): no neural stage for sources above 3840x2160 on

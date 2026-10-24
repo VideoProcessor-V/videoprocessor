@@ -297,6 +297,8 @@ namespace VpNets
 		const bool isLast = index + 1 == pkg.passes.size();
 		if (!isLast && params.intermediate == TexFormat::Rgba16f)
 			for (float& v : result.rgba) v = RoundToHalf(v);
+		if (isLast && params.outputScale != 1.0f)
+			for (float& v : result.rgba) v *= params.outputScale;
 		if (isLast && params.output == TexFormat::R16Unorm)
 			for (size_t i = 0; i < result.rgba.size(); i += 4)
 			{
