@@ -27,6 +27,7 @@ def main():
     ap.add_argument("--size", default="3840x2160")
     ap.add_argument("--out-size", default="2560x1440")
     ap.add_argument("--net", default="D_hybrid_refine")
+    ap.add_argument("--threads", type=int, default=1, help="CPU threads (1: the machine-wide single-thread rule)")
     a = ap.parse_args()
     sys.path.insert(0, a.kit)
     import torch
@@ -34,6 +35,7 @@ def main():
     from trainkit import common as C
     from trainkit import models as Mo
     torch.set_grad_enabled(False)
+    torch.set_num_threads(a.threads)
 
     w, h = (int(v) for v in a.size.split("x"))
     ow, oh = (int(v) for v in a.out_size.split("x"))
