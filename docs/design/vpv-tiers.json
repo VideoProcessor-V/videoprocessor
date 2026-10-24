@@ -433,7 +433,7 @@
           }
         },
         "Low": {
-          "description": "Re-base: a picture upscaled before VP is worked from its real size (kernel-matched); plain scaling to the projector size. The shipped default.",
+          "description": "Re-base: a picture upscaled before VP is worked from its real size; plain scaling to the projector size. The shipped default.",
           "cost": "low",
           "set": {
             "source_resolution": "auto",
@@ -441,7 +441,7 @@
           }
         },
         "Mid": {
-          "description": "Re-base, then the hybrid SSIM/faithful downscale (weight 0.2) to the projector size.",
+          "description": "Re-base, then VP's grain-true downscale blend (weight 0.2) to the projector size.",
           "cost": "medium",
           "set": {
             "source_resolution": "auto",
@@ -507,7 +507,7 @@
         },
         {
           "key": "ssim_residual_stabilise",
-          "label": "Steady the SSIM scaler's detail along motion",
+          "label": "Steady the downscaler's added detail along motion",
           "values": [
             "on",
             "off"
@@ -516,7 +516,7 @@
         },
         {
           "key": "cnn_residual_stabilise",
-          "label": "Steady the CNN scaler's detail along motion",
+          "label": "Steady the upscaler's added detail along motion",
           "values": [
             "on",
             "off"
@@ -681,14 +681,14 @@
           }
         },
         "Low": {
-          "description": "As shipped: the shader list decides the dither (the cinema list loads VP's sigma-delta).",
+          "description": "As shipped: the shader list decides the dither (the cinema list uses VP's own motion-aware dither).",
           "cost": "low",
           "set": {
             "temporal_dither": "auto"
           }
         },
         "Mid": {
-          "description": "Always VP's sigma-delta temporal dither: the finest steps through the 8-bit projector link.",
+          "description": "Always VP's own motion-aware dither: the finest steps through the 8-bit projector link.",
           "cost": "low",
           "set": {
             "temporal_dither": "sigma_delta"
@@ -711,7 +711,7 @@
     }
   ],
   "proposed_retirement": {
-    "note": "Guide section 12 (docs/settings/VP-settings-reference.md). A-C: proposed retirement; D: proposed hide as diagnostics. Shown on the VP-V page's 'Proposed retirement' tab and appended to each control's tooltip; nothing is removed until the owner approves. Retiring a key keeps its default behaviour and keeps reading old files.",
+    "note": "Switches proposed for retirement. Each still works as before until you decide; retiring one keeps today's default behaviour. Groups: A proven fixes (kept on), B experiments that lost, C superseded, D keep but hide as diagnostics.",
     "groups": {
       "A": "Fixes under test that are proven",
       "B": "Experiments that lost",

@@ -222,13 +222,13 @@ namespace Vpv
                     u.presets.push_back(p);
                 }
                 {
-                    Preset p; p.tier = "Low"; p.description = "Re-base: a picture upscaled before VP is worked from its real size (kernel-matched); plain scaling to the projector size. The shipped default."; p.cost = "low";
+                    Preset p; p.tier = "Low"; p.description = "Re-base: a picture upscaled before VP is worked from its real size; plain scaling to the projector size. The shipped default."; p.cost = "low";
                     p.set.push_back({ "source_resolution", "auto" });
                     p.set.push_back({ "adaptive_downscale", "off" });
                     u.presets.push_back(p);
                 }
                 {
-                    Preset p; p.tier = "Mid"; p.description = "Re-base, then the hybrid SSIM/faithful downscale (weight 0.2) to the projector size."; p.cost = "medium";
+                    Preset p; p.tier = "Mid"; p.description = "Re-base, then VP's grain-true downscale blend (weight 0.2) to the projector size."; p.cost = "medium";
                     p.set.push_back({ "source_resolution", "auto" });
                     p.set.push_back({ "adaptive_downscale", "on" });
                     p.set.push_back({ "adaptive_w_base", "0.2" });
@@ -241,8 +241,8 @@ namespace Vpv
                 u.toggles.push_back({ "source_resolution_mixed_guard", "Never re-base a mixed screen (menu, picture-in-picture)", { "on", "off" }, "scaling.rebase" });
                 u.toggles.push_back({ "adaptive_grain_map", "Grain map steers the downscale", { "on", "off" }, "scaling.output" });
                 u.toggles.push_back({ "ssim_bitrate_aware", "Gentler sharpening on poor streams", { "on", "off" }, "scaling.output" });
-                u.toggles.push_back({ "ssim_residual_stabilise", "Steady the SSIM scaler's detail along motion", { "on", "off" }, "scaling.output" });
-                u.toggles.push_back({ "cnn_residual_stabilise", "Steady the CNN scaler's detail along motion", { "on", "off" }, "scaling.output" });
+                u.toggles.push_back({ "ssim_residual_stabilise", "Steady the downscaler's added detail along motion", { "on", "off" }, "scaling.output" });
+                u.toggles.push_back({ "cnn_residual_stabilise", "Steady the upscaler's added detail along motion", { "on", "off" }, "scaling.output" });
                 u.toggles.push_back({ "adaptive_upscale", "Grain-aware upscale for small sources", { "on", "off" }, "scaling.output" });
                 u.planned.push_back({ "entrance_route_4k", "4K route (fixed 1-D steps to 4K)", "scaling.route_4k" });
                 u.planned.push_back({ "refine_net", "4K refine net", "scaling.refine" });
@@ -294,12 +294,12 @@ namespace Vpv
                     u.presets.push_back(p);
                 }
                 {
-                    Preset p; p.tier = "Low"; p.description = "As shipped: the shader list decides the dither (the cinema list loads VP's sigma-delta)."; p.cost = "low";
+                    Preset p; p.tier = "Low"; p.description = "As shipped: the shader list decides the dither (the cinema list uses VP's own motion-aware dither)."; p.cost = "low";
                     p.set.push_back({ "temporal_dither", "auto" });
                     u.presets.push_back(p);
                 }
                 {
-                    Preset p; p.tier = "Mid"; p.description = "Always VP's sigma-delta temporal dither: the finest steps through the 8-bit projector link."; p.cost = "low";
+                    Preset p; p.tier = "Mid"; p.description = "Always VP's own motion-aware dither: the finest steps through the 8-bit projector link."; p.cost = "low";
                     p.set.push_back({ "temporal_dither", "sigma_delta" });
                     u.presets.push_back(p);
                 }
@@ -307,7 +307,7 @@ namespace Vpv
                 u.toggles.push_back({ "occlusion_mask", "Dither: no smear where new picture appears", { "on", "off" }, "output.dither" });
                 t.units.push_back(u);
             }
-            t.retirementNote = "Guide section 12 (docs/settings/VP-settings-reference.md). A-C: proposed retirement; D: proposed hide as diagnostics. Shown on the VP-V page's 'Proposed retirement' tab and appended to each control's tooltip; nothing is removed until the owner approves. Retiring a key keeps its default behaviour and keeps reading old files.";
+            t.retirementNote = "Switches proposed for retirement. Each still works as before until you decide; retiring one keeps today's default behaviour. Groups: A proven fixes (kept on), B experiments that lost, C superseded, D keep but hide as diagnostics.";
             t.retirementGroups.push_back({ "A", "Fixes under test that are proven" });
             t.retirementGroups.push_back({ "B", "Experiments that lost" });
             t.retirementGroups.push_back({ "C", "Superseded by the new design" });

@@ -8781,7 +8781,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             // Render-ahead 2026-10-17: the renderer decides the fill independently of
             // interpolation, so hiccup repair works with motion smoothing off.
             form->addRow(QString(), helpLabel(QStringLiteral(
-                "Works with motion smoothing on or off (on by default; owner 2026-10-18).")));
+                "Works with motion smoothing on or off (on by default).")));
         }
         // Owner 2026-10-18: hiccup repair is on by default; motion smoothing (interpolation) stays off.
         auto* fillGaps = addChoice(QStringLiteral("Fill dropped frames"), QStringLiteral("interpolation_fill_gaps"),

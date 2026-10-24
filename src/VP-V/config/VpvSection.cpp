@@ -8,6 +8,7 @@
 
 #include <VP-V/core/DelayBudgetLadder.h>
 
+#include <QAbstractButton>
 #include <QAbstractItemModel>
 #include <QCheckBox>
 #include <QComboBox>
@@ -26,6 +27,7 @@
 #include <QRadioButton>
 #include <QSignalBlocker>
 #include <QSlider>
+#include <QTabBar>
 #include <QTabWidget>
 #include <QTimer>
 #include <QToolButton>
@@ -474,8 +476,17 @@ namespace Vpv
 			const QString label = retiring ? QStringLiteral("%1 (%2)").arg(Q(toggle.label), RetirementCaption(*retiring)) : Q(toggle.label);
 			combo->setAccessibleName(label);
 			const QString shownDefault = std::string(toggle.key) == "fbo_float32" ? QStringLiteral("on") : Q(table.Default(toggle.key));
-			combo->addItem(QStringLiteral("Not set (default: %1)").arg(shownDefault), QString());
-			for (const char* v : toggle.values) combo->addItem(Q(v), Q(v));
+			// One style for an empty value, as Config's own controls show it (usability audit 2026-10-24).
+			combo->addItem(QStringLiteral("Default: %1").arg(shownDefault.left(1).toUpper() + shownDefault.mid(1)), QString());
+			for (const char* v : toggle.values)
+			{
+				// Plain words where a value is jargon (usability audit 2026-10-24); the key's value stays.
+				QString shown = Q(v);
+				if (std::string(toggle.key) == "fbo_float32")
+					shown = std::string(v) == "auto" ? QStringLiteral("On (full precision)") : std::string(v) == "on" ?
+						QStringLiteral("On (always)") : QStringLiteral("Off (saves GPU time)");
+				combo->addItem(shown, Q(v));
+			}
 			const SlotInfo* slot = table.Slot(toggle.slot);
 			combo->setToolTip(QStringLiteral("Key %1 (renderer profile). Slot: %2. See docs/settings/VP-settings-reference.md.")
 				.arg(key, slot ? Q(slot->name) : Q(toggle.slot)) +
@@ -954,9 +965,40 @@ namespace Vpv
 			}
 			if (unit.more && *unit.more)
 			{
-				auto* more = Help(QStringLiteral("<b>More settings of this unit</b> (on the other pages): ") + Q(unit.more).toHtmlEscaped());
+				// Clickable: each link opens the page it names (usability audit 2026-10-24).
+				struct Link { const char* unit; const char* text; const char* nav; const char* tab; };
+				static const Link kLinks[] = {
+					{ "input", "Queue page (total delay)", "Queue", nullptr },
+					{ "input", "DV page", "DV", nullptr },
+					{ "motion", "VP Renderer > Motion", "VP Renderer", "Motion" },
+					{ "repair", "VP Renderer > Rendering", "VP Renderer", "Rendering" },
+					{ "scaling", "VP Renderer > Scaling (scaler filters and sharpness)", "VP Renderer", "Scaling" },
+					{ "colour", "VP Renderer > Rendering (tone mapping)", "VP Renderer", "Rendering" },
+					{ "colour", "VP Renderer > Color / Output", "VP Renderer", "Color / Output" },
+					{ "drive", "Dynamic Drive page", "Dynamic Drive", nullptr },
+					{ "output", "VP Renderer > Rendering (bit depth, libplacebo dither)", "VP Renderer", "Rendering" },
+				};
+				QStringList links;
+				for (const Link& l : kLinks)
+					if (unitId == Q(l.unit))
+						links << QStringLiteral("<a href=\"%1|%2\" style=\"color:#6fb6ff;\">%3</a>").arg(Q(l.nav), Q(l.tab), Q(l.text));
+				auto* more = Help(QStringLiteral("<b>More settings of this unit</b> (on the other pages): ") + Q(unit.more).toHtmlEscaped() +
+					(links.isEmpty() ? QString() : QStringLiteral("<br>Open: ") + links.join(QStringLiteral(" &middot; "))));
 				more->setTextFormat(Qt::RichText);
+				more->setTextInteractionFlags(Qt::TextBrowserInteraction);
 				more->setObjectName(ObjectName(unitId + QStringLiteral(".more")));
+				QObject::connect(more, &QLabel::linkActivated, more, [more](const QString& target)
+				{
+					const QString nav = target.section(QLatin1Char('|'), 0, 0), tab = target.section(QLatin1Char('|'), 1, 1);
+					QWidget* top = more->window();
+					if (QWidget* sidebar = top ? top->findChild<QWidget*>(QStringLiteral("sidebar")) : nullptr)
+						for (QAbstractButton* button : sidebar->findChildren<QAbstractButton*>())
+							if (button->text() == nav) { button->click(); break; }
+					if (!tab.isEmpty())
+						if (auto* tabs = top->findChild<QTabBar*>(QStringLiteral("settingsSectionTabs")))
+							for (int i = 0; i < tabs->count(); ++i)
+								if (tabs->tabText(i) == tab) { tabs->setCurrentIndex(i); break; }
+				});
 				layout->addWidget(more);
 			}
 			layout->addStretch();
@@ -1142,11 +1184,19 @@ namespace Vpv
 					for (const Retirement& r : t.retirements)
 					{
 						if (std::string(r.group) != g.key) continue;
-						QList<QWidget*> controls = UpstreamControls(state->host.upstreamRoot, Q(r.section), Q(r.key));
-						if (controls.isEmpty() && state->root)
-							controls = UpstreamControls(state->root, Q(r.section), Q(r.key));
+						// The one live control: a VP-V switch when there is one, else the shown upstream control
+						// (a hidden duplicate is never named as the place).
+						QList<QWidget*> controls;
+						if (state->root)
+							controls = state->root->findChildren<QWidget*>(QRegularExpression(
+								QStringLiteral("^vpv\.[a-z]+\.%1$").arg(QRegularExpression::escape(Q(r.key)))));
+						if (controls.isEmpty() && state->root) controls = UpstreamControls(state->root, Q(r.section), Q(r.key));
+						if (controls.isEmpty()) controls = UpstreamControls(state->host.upstreamRoot, Q(r.section), Q(r.key));
 						QString where = controls.isEmpty() ? QStringLiteral("no control found") : PageOf(controls.front());
 						if (!controls.isEmpty() && !where.startsWith(QStringLiteral("VP-V"))) where += QStringLiteral(" page");
+						// A plain name (the control's own label) before the key.
+						QString plain = controls.isEmpty() ? QString() : controls.front()->accessibleName().trimmed();
+						plain.remove(QStringLiteral(" (proposed retirement)")).remove(QStringLiteral(" (proposed: hide as diagnostic)"));
 						QString value;
 						if (std::string(r.section) == "vprenderer")
 						{
@@ -1158,8 +1208,8 @@ namespace Vpv
 							const QString v = state->host.value(QStringLiteral("general"), Q(r.key)).trimmed();
 							value = v.isEmpty() ? QStringLiteral("not set (default)") : v;
 						}
-						rows += QStringLiteral("<p><code>%1</code> &mdash; %2 &mdash; this profile: %3<br><i>%4</i></p>")
-							.arg(Q(r.key).toHtmlEscaped(), where.toHtmlEscaped(),
+						rows += QStringLiteral("<p><b>%1</b> &mdash; %2 &mdash; this profile: %3<br><i>%4</i></p>")
+							.arg((plain.isEmpty() ? Q(r.key) : plain + QStringLiteral(" <small>(") + Q(r.key) + QStringLiteral(")</small>")).toHtmlEscaped().replace(QStringLiteral("&lt;small&gt;"), QStringLiteral("<small>")).replace(QStringLiteral("&lt;/small&gt;"), QStringLiteral("</small>")), where.toHtmlEscaped(),
 								value.isEmpty() ? QStringLiteral("-") : value.toHtmlEscaped(), Q(r.reason).toHtmlEscaped());
 					}
 					if (rows.isEmpty()) continue;
@@ -1428,9 +1478,10 @@ namespace Vpv
 			pages->setTabToolTip(0, QStringLiteral("Whether Dynamic Drive runs, what drives it, its LED profile and speed preset, and the projector link."));
 			pages->setTabToolTip(1, QStringLiteral("What those choices set (greyed until Custom), Compensate's tuning and the projector's measured limits."));
 			column->insertWidget(column->indexOf(grid), pages);
-			auto* originalNote = Help(QStringLiteral("<b>Original pathway:</b> Dynamic Drive is a VP addition, so it is off and "
-				"this page is disabled. Switch the VP-V page back to the VP-V pathway to use it."));
+			auto* originalNote = Help(QStringLiteral("<b>Original pathway: Dynamic Drive is OFF</b> (it is a VP addition), and "
+				"so is its gamma boost. The values below are kept for when you switch the VP-V page back to the VP-V pathway."));
 			originalNote->setTextFormat(Qt::RichText);
+			originalNote->setStyleSheet(QStringLiteral("background: #3a2a10; color: #ffd58a; padding: 8px; border-radius: 5px;"));
 			originalNote->setObjectName(ObjectName(QStringLiteral("drivepage.original_note")));
 			originalNote->setVisible(false);
 			column->insertWidget(column->indexOf(pages), originalNote);
@@ -1483,6 +1534,10 @@ namespace Vpv
 			advancedForm->insertRow(1, QString(), values);
 			advancedForm->insertRow(2, QString(), fixes);
 			auto* profileFile = root->findChild<QLineEdit*>(prefix + QStringLiteral("profile_file"));
+			// Say why a control is greyed (usability audit 2026-10-24).
+			if (auto* adaptive = root->findChild<QCheckBox*>(prefix + QStringLiteral("adaptive_gamma")))
+				adaptive->setToolTip(adaptive->toolTip() + (adaptive->toolTip().isEmpty() ? QString() : QStringLiteral("\n\n")) +
+					QStringLiteral("Greyed while Dynamic Drive is off (the tick box at the top) or in the Original pathway."));
 			toggle->setChecked(true);    // the card is on Advanced already: no second "show advanced" step
 			toggle->setVisible(false);
 			QWidget* advancedLedCard = CardTitled(cards, QStringLiteral("Advanced LED"));
@@ -1798,10 +1853,11 @@ namespace Vpv
 		content->setObjectName(ObjectName(QStringLiteral("content")));
 		auto* contentLayout = new QVBoxLayout(content);
 		contentLayout->setContentsMargins(0, 0, 0, 0);
-		auto* originalNote = Help(QStringLiteral("<b>Original pathway:</b> every VP-V addition is off, so this page is "
-			"disabled. Bill's own settings are on his pages (VP Renderer, DirectShow, General); switch back to the VP-V "
-			"pathway to change VP's."));
+		auto* originalNote = Help(QStringLiteral("<b>Original pathway: every VP-V addition is OFF.</b> The values below are "
+			"kept for when you switch back, but none of them is used now. Bill's own settings are on his pages (VP "
+			"Renderer, DirectShow, General)."));
 		originalNote->setTextFormat(Qt::RichText);
+		originalNote->setStyleSheet(QStringLiteral("background: #3a2a10; color: #ffd58a; padding: 8px; border-radius: 5px;"));
 		originalNote->setObjectName(ObjectName(QStringLiteral("original_note")));
 		originalNote->setVisible(false);
 		layout->addWidget(originalNote);
@@ -1847,7 +1903,9 @@ namespace Vpv
 			profile->setCurrentIndex(index);
 		};
 		fillPicker();
-		strip->addWidget(new QLabel(QStringLiteral("Profile")));
+		auto* profileLabel = new QLabel(QStringLiteral("Profile"));
+		profileLabel->setToolTip(QStringLiteral("One renderer profile for both pages: choosing it here selects it in VP Renderer > Rendering, and the other way round."));
+		strip->addWidget(profileLabel);
 		strip->addWidget(profile, 1);
 		delete profileRow;
 

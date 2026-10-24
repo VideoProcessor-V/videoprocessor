@@ -200,7 +200,7 @@ namespace Vpv
 					"and \"LED fixes under test\" (all on, or Custom); their settings are greyed until Custom." } } },
 
 			// ---- Output ----
-			{ "output", "dither", "Temporal dither", "How the final picture is fitted to the projector link's bit depth.", false, false, {
+			{ "output", "dither", "Temporal dither", "The Output tier above is the dither choice: Classic = libplacebo's, Low = as shipped, Mid = always VP's motion-aware dither. This switch refines VP's.", false, false, {
 				{ K::Toggle, "occlusion_mask" } },
 				{ L::Feature, "VP's sigma-delta dither (the Output tier)", "temporal_dither", nullptr, "off,libplacebo", "auto" } },
 			{ "output", "presentation", "Presentation and delay", "Where the final output depth and the total delay are set.", false, false, {

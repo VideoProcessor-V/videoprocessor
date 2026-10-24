@@ -9624,6 +9624,7 @@ int writeSettingsScreens(const QString& configPath, const QString& outDir)
         {
             units->setCurrentIndex(u);
             const QString unit = units->tabText(u).toLower().replace(QLatin1Char(' '), QLatin1Char('-')).remove(QLatin1Char('(')).remove(QLatin1Char(')'));
+            auto clean = [](QString t) { return t.toLower().replace(QLatin1Char(' '), QLatin1Char('-')).remove(QLatin1Char('(')).remove(QLatin1Char(')')); };
             QTabWidget* sub = nullptr;
             for (QTabWidget* t : units->widget(u)->findChildren<QTabWidget*>())
                 if (t->objectName().endsWith(QStringLiteral(".pages")) || t->objectName().endsWith(QStringLiteral(".more"))) sub = t;
@@ -9631,7 +9632,7 @@ int writeSettingsScreens(const QString& configPath, const QString& outDir)
             for (int s2 = 0; s2 < sub->count(); ++s2)
             {
                 sub->setCurrentIndex(s2);
-                shoot(QStringLiteral("%1-%2-%3-%4").arg(tag).arg(u, 2, 10, QLatin1Char('0')).arg(unit, sub->tabText(s2).toLower()), units);
+                shoot(QStringLiteral("%1-%2-%3-%4").arg(tag).arg(u, 2, 10, QLatin1Char('0')).arg(unit, clean(sub->tabText(s2))), units);
             }
         }
         if (drive)

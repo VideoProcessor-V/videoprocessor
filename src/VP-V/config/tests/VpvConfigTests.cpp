@@ -397,7 +397,7 @@ namespace
 				"colour.fbo_float32", "colour.ambient_adapt", "output.occlusion_mask" })
 			{
 				auto* combo = control<QComboBox>(window, Vpv::ObjectName(QString::fromLatin1(name)));
-				require(combo->currentIndex() == 0 && combo->currentText().startsWith(QStringLiteral("Not set (default: ")),
+				require(combo->currentIndex() == 0 && combo->currentText().startsWith(QStringLiteral("Default: ")),
 					(std::string("a new toggle shows Not set with its default: ") + name).c_str());
 			}
 			auto* upstream = control<QWidget>(window, QStringLiteral("config.vprenderer.adaptive_upscale"));
