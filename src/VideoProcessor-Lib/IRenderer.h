@@ -727,4 +727,14 @@ public:
 		return false;
 	}
 
+	// VP-V delay budget (ADR-0020, barrier B2; plugin API 42): the ONE total delay the user set
+	// (target_latency_ms), the same at every frame rate. The renderer turns it into its queue
+	// hold with DelayBudget.h (src/VP-V/core): the whole frames through the queue target the
+	// executable sends, the sub-frame rest through the timeline's steering or the plain path's
+	// age gate. 0 = no budget (frame-count queue, as before).
+	virtual void SetQueueDelayBudget(int totalMs)
+	{
+		(void)totalMs;
+	}
+
 };

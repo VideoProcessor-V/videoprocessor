@@ -817,6 +817,7 @@ namespace QueueStress
 		size_t lowCapacity = 1, lowTarget = 1;
 		double profileResetDelay = 5.0;   // the queue policy reset after a profile switch
 		int motionAheadDepth = 4;         // NVOF look-ahead on by default (owner 2026-10-16)
+		double holdFraction = 0.0;        // VP-V delay budget: the sub-frame rest of the hold (DelayBudget::Plan)
 	};
 
 	class Presentation
@@ -1169,7 +1170,7 @@ namespace QueueStress
 					queue.pop_front();
 					++dequeues;
 					const double rate = a.k.filmHz > 0.0 ? a.k.filmHz : a.k.signalHz;
-					steering.Update(queue.size(), Target(), rate, sc.sw.queueFixes);
+					steering.Update(queue.size(), Target(), rate, sc.sw.queueFixes, lowLatency ? 0.0 : cfg.holdFraction);
 					if (!a.k.filmUpdate)   // an update has no time of its own (no refresh)
 						nextFrameAt += 1.0 / rate;
 					Dequeue(a, now);

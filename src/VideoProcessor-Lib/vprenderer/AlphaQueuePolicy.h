@@ -224,11 +224,14 @@ namespace AlphaQueuePolicy
 			return 1.0 - std::exp(-1.0 / (sourceRateHz * kSmoothingSeconds));
 		}
 
+		// targetFraction (VP-V delay budget, ADR-0020): the sub-frame part of the queue's time
+		// hold (DelayBudget::Plan::holdFraction), so the queue settles at desired + fraction
+		// frames on average and the total delay equals the budget at every rate. 0 = as before.
 		double Update(size_t queueDepthAfterDequeue, size_t desiredDepth,
-			double sourceRateHz, bool timeConstant)
+			double sourceRateHz, bool timeConstant, double targetFraction = 0.0)
 		{
 			const double sample = static_cast<double>(queueDepthAfterDequeue) -
-				static_cast<double>(NormalizeDesiredDepth(desiredDepth));
+				(static_cast<double>(NormalizeDesiredDepth(desiredDepth)) + targetFraction);
 			m_error += Weight(sourceRateHz, timeConstant) * (sample - m_error);
 			return m_error;
 		}

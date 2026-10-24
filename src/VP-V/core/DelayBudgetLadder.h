@@ -4,9 +4,10 @@
 // SHOW or GATE the delay: the VP-V Config delay card, the delay gate and the combination runner
 // (settings agent, 2026-10-24).
 //
-// The owner's figure "4 frames is about 250 ms at 24p" holds with these fixed costs: 2 swapchain
-// refreshes at 60 Hz + one source frame of capture transfer (frame-rate matched HDMI) + 8 ms of
-// processing. Whether the capture transfer belongs inside the budget is owner decision O1, so it
+// The owner's figure "4 frames is about 250 ms at 24p": with these fixed costs - 2 swapchain
+// refreshes at 60 Hz, one source frame of capture transfer (frame-rate matched HDMI), 8 ms of
+// processing and the display phase (one refresh, measured by the delay gate 2026-10-24) - the
+// recommended 4-frame value at 23.976 on 60 Hz is 267 ms. Whether the capture transfer belongs inside the budget is owner decision O1, so it
 // is a parameter here, not a constant in the rule.
 
 #include "DelayBudget.h"
@@ -53,10 +54,7 @@ namespace DelayBudget
 		for (double fps : rates)
 		{
 			if (!(fps > 0.0)) continue;
-			const Inputs in = InputsFor(0.0, fps, m);
-			const double fixed = (std::max)(0, in.swapchainFrames) * 1000.0 / in.refreshHz + in.renderAheadMs +
-				in.processingMs + in.captureTransferMs;
-			need = (std::max)(need, fixed + frames * 1000.0 / fps);
+			need = (std::max)(need, FixedCostsMs(InputsFor(0.0, fps, m)) + frames * 1000.0 / fps);
 		}
 		return std::ceil(need - 1e-9);
 	}

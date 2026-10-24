@@ -43,13 +43,15 @@
 // after GetCalibrationOutput / SetCalibrationPattern in the vtable.
 // 41: GetFallbacksStatus ("Fallbacks engaged", r6 fix 7, 2026-10-24), after
 // SetActivePictureLookaheadAutomatic in the vtable.
+// 42: SetQueueDelayBudget (VP-V delay budget, ADR-0020 / barrier B2, 2026-10-24), after
+// GetFallbacksStatus in the vtable.
 //
 // The counter is maintained by hand and can collide across branches or miss
 // a layout change. The build ID is the
 // mechanical check: the loader refuses any DLL whose
 // VP_LIBPLACEBO_BUILD_ID_EXPORT differs from the executable's own build ID
 // (VpBuildIdentity.h), so only a DLL from the same build loads.
-static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 41;
+static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 42;
 static constexpr const char* VP_LIBPLACEBO_BUILD_ID_EXPORT =
 	"VideoProcessorLibplaceboGetBuildId";
 // Returns the DLL's 32-hex-digit build ID (static storage); never throws.

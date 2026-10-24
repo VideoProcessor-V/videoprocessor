@@ -5467,8 +5467,9 @@ namespace VideoProcessorTest
 			// SetAmbientLux (intent interpreter items 2-5; claimed 36 on its branch);
 			// 39: GetCalibrationOutput / SetCalibrationPattern (automatic calibration;
 			// claimed 36 on its branch); 40: SetActivePictureLookaheadAutomatic (bug hunt 3
-			// F2, integration round 5).
-			Assert::AreEqual(static_cast<uint32_t>(40),
+			// F2, integration round 5); 41: GetFallbacksStatus (r6 fix 7); 42: SetQueueDelayBudget
+			// (VP-V delay budget, ADR-0020).
+			Assert::AreEqual(static_cast<uint32_t>(42),
 				VP_LIBPLACEBO_PLUGIN_API_VERSION);
 		}
 

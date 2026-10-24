@@ -146,7 +146,7 @@ namespace
 	{
 		const auto rates = DelayBudget::StandardRates();
 		const double recommended = DelayBudget::BudgetForFrames(4, rates);
-		require(std::abs(recommended - 250.0) < 1e-9, "4 frames at 23.976 on a 60 Hz display recommend 250 ms");
+		require(std::abs(recommended - 267.0) < 1e-9, "4 frames at 23.976 on a 60 Hz display recommend 267 ms (display phase included)");
 		for (int frames : { 4, 3, 2 })
 		{
 			const double budget = DelayBudget::BudgetForFrames(frames, rates);

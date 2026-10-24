@@ -77,6 +77,7 @@
 // VP-V pipeline skeleton (src/VP-V; see src/VP-V/README.md): the slot registry, the entrance
 // stage list, the output-hook order and the VP calibration-LUT stage.
 #include <VP-V/core/SlotRegistry.h>
+#include <VP-V/core/DelayBudgetLadder.h>   // the delay budget's hold (ADR-0020)
 #include <VP-V/core/EntranceStages.h>
 #include <VP-V/core/OutputHookOrder.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
@@ -25976,6 +25977,90 @@ int64_t LibplaceboVideoRenderer::FileHeadTicksUntilDueLocked() const
 }
 
 
+// VP-V delay budget (ADR-0020, barrier B2). The user sets ONE total delay, the same at every
+// frame rate. DelayBudget turns it into the time each frame waits in this queue (the hold):
+// fixed costs (swapchain, processing, capture transfer, render-ahead's residual lead) + hold =
+// the budget. The whole frames of the hold are the queue target (PrefillTargetLocked); the
+// sub-frame rest by the age gate below on the plain path, by the steering (target + holdFraction)
+// on the VP timeline. Not in low latency (no budget there).
+void LibplaceboVideoRenderer::SetQueueDelayBudget(int totalMs)
+{
+	const int previous = m_queueDelayBudgetMs.exchange(totalMs > 0 ? totalMs : 0, std::memory_order_acq_rel);
+	if (previous != totalMs)
+		DebugLog::Log("Delay budget: %d ms total (0 = frame-count queue)", totalMs > 0 ? totalMs : 0);
+	m_queueChanged.notify_all();
+}
+
+void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz)
+{
+	const int budgetMs = m_queueDelayBudgetMs.load(std::memory_order_acquire);
+	DelayBudget::Plan plan;
+	bool lowLatency = false;
+	if (budgetMs > 0 && m_impl && sourceRateHz > 0.0)
+	{
+		lowLatency = m_impl->lowLatencyQueueActive.load(std::memory_order_acquire);
+		DelayBudget::Model model;   // the libplacebo swapchain depth, processing and capture defaults
+		const double displayHz = m_impl->TimelineDisplayHz();
+		if (displayHz > 0.0)
+			model.refreshHz = displayHz;
+		if (m_impl->RenderAheadActive())
+		{
+			// render-ahead's planned lead is presented on top; the queue gives back its whole
+			// frames (the credit), the rest is a fixed cost of the budget.
+			const double ps = 1.0 / sourceRateHz;
+			const double lead = RenderAhead::PlannedLead(ps, 1.0 / model.refreshHz);
+			model.renderAheadMs = (lead - static_cast<double>(RenderAhead::CreditFrames(lead, ps)) * ps) * 1000.0;
+		}
+		if (!lowLatency)
+			plan = DelayBudget::Compute(DelayBudget::InputsFor(budgetMs, sourceRateHz, model));
+	}
+	const bool active = plan.feasible;
+	m_queueHoldMs.store(active ? plan.holdMs : 0.0, std::memory_order_release);
+	m_queueHoldFraction.store(active ? plan.holdFraction : 0.0, std::memory_order_release);
+	m_queueHoldTargetFrames.store(active ? plan.queueTargetFrames : 0, std::memory_order_release);
+	const bool wasActive = m_queueHoldActive.exchange(active, std::memory_order_acq_rel);
+	if (m_impl && budgetMs > 0 && !lowLatency && sourceRateHz > 0.0)
+	{
+		if (active)
+			m_impl->ReleaseFallback("delay budget");
+		else
+			m_impl->EngageFallback("delay budget", "too short for 2 queued frames at this rate; frame-count queue");
+	}
+	char state[192] = {};
+	if (active)
+		sprintf_s(state, "%d ms at %.3f Hz: %d look-ahead frames, hold %.1f ms = target %zu + %.2f frames, padding %.1f ms",
+			budgetMs, sourceRateHz, plan.queueFrames, plan.holdMs, plan.queueTargetFrames, plan.holdFraction, plan.paddingMs);
+	if (state != m_queueHoldLogged)
+	{
+		m_queueHoldLogged = state;
+		if (active)
+			DebugLog::Log("Delay budget: %s", state);
+		else if (wasActive)
+			DebugLog::Log("Delay budget: hold off (%s)", budgetMs <= 0 ? "no budget" : lowLatency ? "low latency" : "not feasible");
+	}
+	if (active != wasActive)
+		m_queueChanged.notify_all();
+}
+
+int64_t LibplaceboVideoRenderer::HoldTicksUntilDueLocked() const
+{
+	// The plain per-refresh path only. The VP timeline realises the rest by its steering (target +
+	// holdFraction); an age gate there adds a frame its slow steering does not drain (delay-gate
+	// finding 2026-10-24).
+	if (!m_queueHoldActive.load(std::memory_order_acquire) || m_frameQueue.empty() || !m_impl || m_impl->vpTimelineActive)
+		return 0;
+	const QueuedFrame& head = m_frameQueue.front();
+	if (head.fileFrame || head.enqueueQpc == 0)
+		return 0;
+	LARGE_INTEGER frequency{};
+	if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0)
+		return 0;
+	const double holdMs = m_queueHoldMs.load(std::memory_order_acquire);
+	const int64_t due = head.enqueueQpc + static_cast<int64_t>(holdMs * static_cast<double>(frequency.QuadPart) / 1000.0);
+	const int64_t now = PerformanceCounterNow();
+	return due > now ? due - now : 0;
+}
+
 void LibplaceboVideoRenderer::WaitForDequeueLocked(std::unique_lock<std::mutex>& lock,
 	bool wakeOnCalibrationPattern)
 {
@@ -25992,8 +26077,10 @@ void LibplaceboVideoRenderer::WaitForDequeueLocked(std::unique_lock<std::mutex>&
 			return m_stopRequested || CanDequeueLocked() || calibrationActive(); });
 		if (m_stopRequested || calibrationActive())
 			return;
-		// Capture heads: 0 at once, the wait above unchanged.
-		const int64_t ticks = FileHeadTicksUntilDueLocked();
+		// Capture heads: 0 at once (the wait above), unless the delay budget's hold applies
+		// (HoldTicksUntilDueLocked: the plain path's age gate).
+		const int64_t fileTicks = FileHeadTicksUntilDueLocked();
+		const int64_t ticks = fileTicks > 0 ? fileTicks : HoldTicksUntilDueLocked();
 		if (ticks <= 0)
 			return;
 		LARGE_INTEGER frequency{};
@@ -30506,6 +30593,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 			m_queueTargetFloor.store(m_impl->activeSettings.opticalFlow && m_impl->activeSettings.motionAheadFrames > 0 ?
 				MotionAhead::QueueFramesFor(MotionAhead::DepthAt(m_impl->activeSettings.motionAheadFrames, captureRateHz,
 					m_impl->activeSettings.generalRateFixes)) : 0, std::memory_order_relaxed);
+			UpdateQueueDelayHold(captureRateHz);   // VP-V delay budget (ADR-0020)
 			m_impl->contentIntent->Configure(m_impl->activeSettings.intentContent,
 				m_impl->activeSettings.intentContentHoldSeconds);
 			m_impl->ConfigureIntentInterpreter();
@@ -30712,7 +30800,8 @@ void LibplaceboVideoRenderer::RenderLoop()
                         m_impl->vpQueueSteering.Reset();
                     else
                         m_impl->vpQueueSteering.Update(queueDepthAfterDequeue,desiredQueueDepth,rateHz,
-                            m_queueTimingFixes.load(std::memory_order_relaxed));
+                            m_queueTimingFixes.load(std::memory_order_relaxed),
+                            m_queueHoldActive.load(std::memory_order_acquire) ? m_queueHoldFraction.load(std::memory_order_acquire) : 0.0);
                     m_impl->vpTimeline.SetRateTrim(currentFileFrame?1.0:m_impl->vpQueueSteering.RateTrim());
                     m_impl->vpTimeline.SetSpanInTime(m_impl->activeSettings.generalRateFixes);   // fixed-constant batch 2026-10-18
                     const unsigned long long updatesBefore=m_impl->vpTimeline.Updates();
@@ -31477,8 +31566,11 @@ size_t LibplaceboVideoRenderer::PrefillTargetLocked() const
 {
 	if (!m_useFrameQueue)
 		return 1;
-	const size_t desired = LockedFilmQueueTarget(AlphaQueuePolicy::ClampDesiredDepthToCapacity(
-		m_frameQueueDesiredDepth, m_frameQueueMaxSize));
+	// VP-V delay budget (ADR-0020): with a budget the queue target is the hold's whole frames at
+	// this rate (time-based already, so no film-lock scaling); otherwise the frame-count target.
+	const size_t desired = m_queueHoldActive.load(std::memory_order_acquire) ?
+		AlphaQueuePolicy::ClampDesiredDepthToCapacity(m_queueHoldTargetFrames.load(std::memory_order_acquire), m_frameQueueMaxSize) :
+		LockedFilmQueueTarget(AlphaQueuePolicy::ClampDesiredDepthToCapacity(m_frameQueueDesiredDepth, m_frameQueueMaxSize));
 	// render_ahead_queue_credit (design step 7): the queue gives back the frames the
 	// queued extras' lead adds to the latency (never below 2 queued frames). 0 unless on.
 	const size_t credit = m_impl ? m_impl->renderAheadCreditFrames.load(std::memory_order_acquire) : 0;

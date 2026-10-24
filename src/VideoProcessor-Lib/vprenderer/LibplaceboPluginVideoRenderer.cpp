@@ -697,6 +697,12 @@ bool LibplaceboPluginVideoRenderer::GetFallbacksStatus(CString& status) const
 	return m_renderer && m_renderer->GetFallbacksStatus(status);
 }
 
+void LibplaceboPluginVideoRenderer::SetQueueDelayBudget(int totalMs)
+{
+	if (m_renderer)
+		m_renderer->SetQueueDelayBudget(totalMs);
+}
+
 bool LibplaceboPluginVideoRenderer::GetSourceResolutionStatus(CString& status) const
 {
 	status.Empty();

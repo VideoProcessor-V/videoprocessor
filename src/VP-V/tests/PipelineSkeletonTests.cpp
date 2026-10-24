@@ -284,8 +284,8 @@ namespace PipelineSkeletonTestsNs
 
 		TEST_METHOD(DelayBudgetRoundsDownInsideTheBudget)
 		{
-			// 24p (23.976) at 200 ms on a 60 Hz output with libplacebo's 2-frame swapchain and a
-			// 20 ms processing allowance: 200 - 33.3 - 20 = 146.7 ms -> 3 frames (degraded), padding kept.
+			// 24p (23.976) at 200 ms on a 60 Hz output with libplacebo's 2-frame swapchain, the display
+			// phase and a 20 ms processing allowance: 200 - 50 - 20 = 130 ms -> 3 frames (degraded).
 			DelayBudget::Inputs in;
 			in.budgetMs = 200.0; in.sourceFps = 24000.0 / 1001.0; in.refreshHz = 60.0;
 			in.swapchainFrames = 2; in.processingMs = 20.0;
@@ -300,8 +300,9 @@ namespace PipelineSkeletonTestsNs
 			plan = DelayBudget::Compute(in);
 			Assert::AreEqual(4, plan.queueFrames);
 			Assert::IsFalse(plan.degraded);
-			// A 1-frame swapchain and 15 ms processing fit 4 frames at 200 ms.
-			in.budgetMs = 200.0; in.swapchainFrames = 1; in.processingMs = 15.0;
+			// A 1-frame swapchain, no display phase (an exact-present display) and 15 ms processing
+			// fit 4 frames at 200 ms.
+			in.budgetMs = 200.0; in.swapchainFrames = 1; in.displayPhaseRefreshes = 0; in.processingMs = 15.0;
 			Assert::AreEqual(4, DelayBudget::Compute(in).queueFrames);
 			// Never more than the design depth (60p).
 			in.sourceFps = 60.0;

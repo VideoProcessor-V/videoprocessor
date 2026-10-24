@@ -14973,6 +14973,18 @@ void CVideoProcessorDlg::ApplyUnifiedProfileSnapshot(
 		// the look-ahead (time-based, 2 ahead at 24p) uses what is queued and the matcher covers the rest.
 		m_queueTargetDecision = QueueLatency::ClampToCapacity(
 			m_queueTargetDecision, desiredQueueSize);
+		// VP-V delay budget (ADR-0020, barrier B2): a time target is ONE total delay, the same at
+		// every frame rate; the VP renderer realises it as its queue hold (DelayBudget.h, padding
+		// included) and overrides the frame count above. Same precedence as ResolveTargetFrames;
+		// none in the low-latency path. Renderers without a budget ignore it.
+		{
+			const bool ownLatency = snapshot->queue.hasTargetLatencyMs && snapshot->queue.targetLatencyMs > 0;
+			const bool inherited = !snapshot->queue.hasTargetLatencyMs && !snapshot->queue.hasTargetFrames &&
+				m_profileBaseTargetLatencyMs > 0;
+			const int delayBudgetMs = snapshot->queue.lowLatencyPath ? 0 :
+				ownLatency ? snapshot->queue.targetLatencyMs : inherited ? m_profileBaseTargetLatencyMs : 0;
+			m_videoRenderer->SetQueueDelayBudget(delayBudgetMs);
+		}
 		{
 			static size_t s_loggedShortTarget = 0;
 			const size_t lookAheadFrames = snapshot->queue.lowLatencyPath ? 0 : snapshot->lookAheadQueueFrames;

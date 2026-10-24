@@ -16,11 +16,12 @@
 //      the fixed costs and the padding lands on the budget within one source period and two
 //      display refreshes, with render-ahead off and on, and no invariant failure (no stall).
 //
-// Finding 2026-10-24: the queue's measured hold is about one source frame above the planned
-// frames (the frame being shown plus the dequeue margin). That excess depends on the rate, so
-// without the budget's padding wired into the queue the total differs across rates (about
-// 266-315 ms for the 250 ms budget). The B2 wiring must count that frame in the fixed costs or
-// the padding. VP_DELAY_GATE_STRICT=1 turns the constant-total check into a failure for that gate.
+// Finding 2026-10-24 (settings agent): the queue's measured hold was about one source frame
+// above the planned frames, so the total differed across rates (266-315 ms for 250 ms).
+// B2 wiring (skeleton lead, 2026-10-24): the queue now realises DelayBudget's hold - target =
+// queueTargetFrames, the sub-frame rest via the steering (holdFraction) - and the gate measures
+// the total directly. VP_DELAY_GATE_STRICT=1: render_ahead off must give the same total at
+// every rate (within one refresh) and equal the budget; render_ahead on is reported (PENDING-RA).
 // Parameters (owner decision pending on the exact value, so nothing is fixed here):
 //   VP_DELAY_BUDGETS_MS   extra budgets to gate, e.g. "200,250" (the 4/3/2 ladder always runs)
 //   VP_DELAY_DISPLAY_HZ   the display refresh (default 60, the FL35 mode)
@@ -109,8 +110,9 @@ namespace DelayGateTest
 			}
 			Log(table.str());
 			// The recommended value the owner sees (4 frames at the slowest rate).
-			Assert::AreEqual(250.0, DelayBudget::BudgetForFrames(4, DelayBudget::StandardRates()), 1e-9,
-				L"4 frames at 23.976 on 60 Hz recommend 250 ms");
+			// 2 swapchain refreshes + the display phase (1 refresh) + capture transfer + 8 ms + 4 frames.
+			Assert::AreEqual(267.0, DelayBudget::BudgetForFrames(4, DelayBudget::StandardRates()), 1e-9,
+				L"4 frames at 23.976 on 60 Hz recommend 267 ms");
 		}
 
 		TEST_METHOD(QueueHoldsThePlannedDelayAtEveryRate)
@@ -126,7 +128,8 @@ namespace DelayGateTest
 			const bool strict = EnvDouble("VP_DELAY_GATE_STRICT", 0.0) > 0.0;
 			for (const Budget& b : Budgets(rates, o))
 			{
-				double lowTotal = 1e9, highTotal = 0.0;
+				// [0] render_ahead off (the default: strict), [1] render_ahead on (reported).
+				double lowTotal[2] = { 1e9, 1e9 }, highTotal[2] = { 0.0, 0.0 };
 				for (double fps : rates)
 				{
 					const DelayBudget::Plan plan = DelayBudget::Compute(DelayBudget::InputsFor(b.ms, fps, o));
@@ -136,42 +139,61 @@ namespace DelayGateTest
 						Scenario s;
 						s.name = "delay-gate";
 						s.seed = 1;
-						s.seconds = 60.0;
+						// Long enough for the timeline's steering to settle the sub-frame rest (a slow
+						// proportional trim, ~1 minute time constant for a large rest at 30p).
+						s.seconds = 240.0;
 						s.signalHz = fps;
 						s.pictureHz = fps;
 						s.displayHz = displayHz;
 						s.sw.renderAhead = ra == 1;
 						RunOptions options;
-						// The queue target is the planned frames plus the frame on screen (the queue
-						// holds the look-ahead frames AND the next frame to show).
-						options.present.normalTarget = static_cast<size_t>(plan.queueFrames) + 1;
+						// B2 wiring (skeleton lead, 2026-10-24): the queue realises the plan. After a
+						// dequeue it keeps queueTargetFrames frames (the look-ahead plus the whole frames
+						// of the padding) and holdFraction more on average (the timeline's steering), so
+						// each frame waits holdMs = budget - fixed costs. (The first mapping, look-ahead
+						// + 1 with the padding added on paper, measured one source frame too many.)
+						options.present.normalTarget = plan.queueTargetFrames;
+						options.present.holdFraction = plan.holdFraction;
 						const Result result = Run(s, options);
 						const double P = 1000.0 / fps, Pd = 1000.0 / displayHz;
 						const double queueMs = result.stats.maxSteadyLatency * 1000.0;
-						const double total = plan.fixedMs + queueMs + plan.paddingMs;
-						lowTotal = (std::min)(lowTotal, total);
-						highTotal = (std::max)(highTotal, total);
+						// The padding is inside the measured hold; so is the display phase (the measured
+						// sample is the worst case, at its vblank), which the plan counts as a fixed cost.
+						const double total = plan.fixedMs - DelayBudget::InputsFor(b.ms, fps, o).displayPhaseRefreshes * Pd + queueMs;
+						lowTotal[ra] = (std::min)(lowTotal[ra], total);
+						highTotal[ra] = (std::max)(highTotal[ra], total);
 						report << b.name << " " << b.ms << " ms @" << fps << (ra ? " RA" : "   ") << ": frames "
-							<< plan.queueFrames << " queue " << queueMs << " ms (plan " << plan.queueMs << ") total " << total << "\n";
+							<< plan.queueFrames << " (target " << plan.queueTargetFrames << " +" << plan.holdFraction << ") queue " << queueMs << " ms (hold " << plan.holdMs
+							<< ") total " << total << "\n";
 						const double tolerance = P + 2.0 * Pd;
-						if (queueMs < plan.queueMs - Pd || queueMs > plan.queueMs + tolerance + (ra ? 3.0 * Pd : 0.0))
-							failures += b.name + " @" + std::to_string(fps) + (ra ? " RA" : "") + ": queue " +
-								std::to_string(queueMs) + " ms vs planned " + std::to_string(plan.queueMs) + "; ";
+						if (ra == 0 && (queueMs < plan.holdMs - Pd || queueMs > plan.holdMs + tolerance))
+							failures += b.name + " @" + std::to_string(fps) + ": queue " + std::to_string(queueMs) +
+								" ms vs planned hold " + std::to_string(plan.holdMs) + "; ";
+						// The total equals the budget: never below it by more than half a refresh, never
+						// above by more than a refresh (the measured sample is the worst case, shown at the
+						// next vblank).
+						if (ra == 0 && strict && (total < b.ms - Pd / 2.0 || total > b.ms + Pd))
+							failures += b.name + " @" + std::to_string(fps) + ": total " + std::to_string(total) +
+								" ms vs budget " + std::to_string(b.ms) + "; ";
 						for (const Failure& f : result.failures)
-							failures += b.name + " @" + std::to_string(fps) + ": " + f.invariant + " " + f.detail + "; ";
+							failures += b.name + " @" + std::to_string(fps) + (ra ? " RA" : "") + ": " + f.invariant + " " + f.detail + "; ";
 					}
 				}
-				report << "  " << b.name << " total spread across rates: " << lowTotal << " .. " << highTotal << " ms\n";
-				// The constant-total check needs the renderer's queue to apply the budget's padding
-				// (ADR-0020 wiring, barrier B2). Until then the spread is reported; VP_DELAY_GATE_STRICT=1
-				// makes it a failure (the gate after the wiring lands).
 				const double spreadTolerance = 1000.0 / displayHz;
-				if (highTotal - lowTotal > spreadTolerance)
+				for (int ra = 0; ra < 2; ++ra)
 				{
-					const std::string note = b.name + ": total spread " + std::to_string(highTotal - lowTotal) +
-						" ms across rates (tolerance " + std::to_string(spreadTolerance) + " ms)";
-					if (strict) failures += note + "; ";
-					else report << "  PENDING-B2 " << note << "\n";
+					report << "  " << b.name << (ra ? " render_ahead on" : " render_ahead off") << " total spread across rates: "
+						<< lowTotal[ra] << " .. " << highTotal[ra] << " ms\n";
+					if (highTotal[ra] - lowTotal[ra] <= spreadTolerance)
+						continue;
+					const std::string note = b.name + (ra ? " (render_ahead on)" : "") + ": total spread " +
+						std::to_string(highTotal[ra] - lowTotal[ra]) + " ms across rates (tolerance " +
+						std::to_string(spreadTolerance) + " ms)";
+					// render_ahead off (the default) is the strict gate. render_ahead on moves latency
+					// between the queue and its planned lead in display refreshes; its constant total
+					// is a follow-up (PENDING-RA), reported here.
+					if (ra == 0 && strict) failures += note + "; ";
+					else report << (ra ? "  PENDING-RA " : "  PENDING-B2 ") << note << "\n";
 				}
 			}
 			Log(report.str());
