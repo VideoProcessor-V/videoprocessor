@@ -806,6 +806,8 @@ namespace NetRunnerTestsNs
 			Assert::IsTrue(PipelineSlots::ContractOf(PipelineSlots::Id::ScalingGeometry).modifies, L"fail safe: an unlisted slot changes the picture");
 			Assert::AreEqual(std::string("repair.encoding"), NormaliseUpstreamKey("repair.encoding>scaling.chroma_upscale"), L"chroma-only: not seen by a luma net");
 			Assert::AreEqual(std::string("unknown.slot"), NormaliseUpstreamKey("unknown.slot"), L"unknown names stay (they can only mismatch)");
+			Assert::AreEqual(std::string("scaling.rebase>motion.consumers>repair.deband"), KeyWithout("motion.estimation>scaling.rebase>motion.consumers>repair.deband", "motion.estimation"));
+			Assert::AreEqual(std::string("scaling.rebase>repair.deband"), NormaliseUpstreamKey(KeyWithout("scaling.rebase>motion.consumers>repair.deband", "motion.consumers")));
 			// The registry's real key, with A running first (ADR-0005) and deband / texture restore off.
 			PipelineSlots::Registry reg;
 			reg.SetComponent(PipelineSlots::Id::RepairEncoding, true);
@@ -910,7 +912,15 @@ namespace NetRunnerTestsNs
 						noA.SetEnabled(PipelineSlots::Id::RepairDeband, false);
 						noA.SetEnabled(PipelineSlots::Id::RepairTextureRestore, false);
 						NetRuntimeContext dctx = ctx;
+						// B3 on (the default): the registry counts motion.consumers ahead of D. Active
+						// consumers (de-judder pictures) are not what D was trained on: bypassed.
+						Assert::IsTrue(noA.EntranceOnce());
 						dctx.upstreamKey = noA.UpstreamKey(PipelineSlots::Id::ScalingOutput);
+						dctx.upstreamNets = "";
+						Assert::IsTrue(dctx.upstreamKey.find("motion.consumers") != std::string::npos, W(dctx.upstreamKey).c_str());
+						Assert::IsFalse(CheckFingerprint(p, dctx).match, L"consumers active in front of D");
+						// Idle consumers (the renderer's state: no de-judder / interpolation) leave the key.
+						dctx.upstreamKey = KeyWithout(noA.UpstreamKey(PipelineSlots::Id::ScalingOutput), "motion.consumers");
 						dctx.upstreamNets = UpstreamNetsKey({ { "repair.encoding", "bypassed" } });
 						const FingerprintResult dr = CheckFingerprint(p, dctx);
 						Log(p.name + " with A off (key '" + dctx.upstreamKey + "'): " + (dr.match ? std::string("MATCH") : dr.Summary()));
@@ -929,7 +939,7 @@ namespace NetRunnerTestsNs
 						PipelineSlots::Registry deband = noA;
 						deband.SetEnabled(PipelineSlots::Id::RepairDeband, true);
 						NetRuntimeContext db = dctx;
-						db.upstreamKey = deband.UpstreamKey(PipelineSlots::Id::ScalingOutput);
+						db.upstreamKey = KeyWithout(deband.UpstreamKey(PipelineSlots::Id::ScalingOutput), "motion.consumers");
 						Assert::IsFalse(CheckFingerprint(p, db).match, W(db.upstreamKey).c_str());
 					}
 					else

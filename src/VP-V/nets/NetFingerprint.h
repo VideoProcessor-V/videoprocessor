@@ -150,6 +150,25 @@ namespace VpNets
 		return out;
 	}
 
+	// A slot taken out of a key. Since B3 (b76571c1) the registry counts motion.consumers at its real
+	// position; when the consumers are IDLE this frame (de-judder 0, no interpolation, no hiccup
+	// pictures: they show the processed frame itself) they change nothing a net downstream sees, so
+	// the renderer removes them from the runtime key. D was trained with them idle.
+	inline std::string KeyWithout(const std::string& key, const char* slot)
+	{
+		std::string out;
+		size_t a = 0;
+		while (a <= key.size() && !key.empty())
+		{
+			const size_t b = key.find('>', a);
+			const std::string name = key.substr(a, b == std::string::npos ? std::string::npos : b - a);
+			if (!name.empty() && name != slot) out += (out.empty() ? "" : ">") + name;
+			if (b == std::string::npos) break;
+			a = b + 1;
+		}
+		return out;
+	}
+
 	// MATCH / MISMATCH(reasons) for one package against what VP runs.
 	inline FingerprintResult CheckFingerprint(const NetPackage& pkg, const NetRuntimeContext& ctx)
 	{

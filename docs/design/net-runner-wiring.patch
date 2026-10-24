@@ -71,6 +71,9 @@ diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src
 +		c.passOrder = "H>V";                                     // SourceRebase: width then height
 +		c.stageContract = pkg.fingerprint.Field("stage_contract"); // TODO(lead): VP's own contract text per slot (U3)
 +		c.upstreamKey = pipelineSlots.UpstreamKey(SlotOf(pkg.role));
+		// B3 (b76571c1): the registry counts motion.consumers at their real position. When they are
+		// idle this frame (de-judder 0, interpolation off, no hiccup pictures) they change nothing:
+		if (MotionConsumersIdle()) c.upstreamKey = KeyWithout(c.upstreamKey, "motion.consumers");   // TODO(lead): the state
 +		// The upstream NETS running: D sees A when A runs (repairSlot.State is "bypassed" otherwise,
 +		// which UpstreamNetsKey leaves out).
 +		std::vector<UpstreamNet> up;
