@@ -4,7 +4,7 @@ Unit: **colour** | side: processing | order: 170 | status: **built** | hook poin
 
 ## Purpose / why
 
-libplacebo tone/gamut mapping (keeps all of its colour science) OR, for low-end cards, the combined static HDR->SDR 3D LUT in the same slot.
+libplacebo tone/gamut mapping (keeps all of its colour science) OR, for low-end cards, the combined static HDR->SDR 3D LUT in the same slot (planned, not built). The migrated file is the output-side policy: which target colour space, transfer and range the picture is mapped to, and how that target is declared to Windows (DXGI).
 
 ## Contract
 
@@ -14,16 +14,97 @@ libplacebo tone/gamut mapping (keeps all of its colour science) OR, for low-end 
 - Delay share: 0 frames
 - Look-ahead: peak detection (off keeps DTM off)
 
+## How the code works
+
+### Output policy (migrated: `LibplaceboOutputPolicy.h/.cpp`)
+
+Pure, renderer-independent C++. Despite the name it has no libplacebo or D3D dependency, so it is unit-testable. Namespace `LibplaceboOutput`:
+
+- Parsing: `ParsePresentation` (`auto` / `composed` / `direct`), `ParseRange` (`auto` / `full` / `limited`), `ParseGamma` (`auto`, `srgb`, `bt1886`, `1.8` ... `2.8`; anything else = `UNSUPPORTED`), `ParseSdrAdjustGamma` (`auto`, `passthrough` or empty = preserve codes, `off` / `no`, anything else = `on`).
+- `MakeSdrOutputContract(request, target, reportBt2020)`: separates the pixel target (`REC709` / `P3_D65` / `BT2020`) from the transport. The DXGI transport is always forced to P709; BT.2020 is signalled to the display only by the NVIDIA AVI InfoFrame when `report_bt2020_to_display` is on.
+- `MakePlan(request)` gives a `Plan`:
+  - presentation model: blit (composed) only for an explicit `composed`; otherwise flip;
+  - for `limited`: a studio DXGI colour space, G24 for `auto` / `2.4`, G22 only with the Limited/G22 experiment enabled; any other gamma makes the plan invalid;
+  - for full range: the standard Full G22/P709 swapchain, with the calibrated display transfer (BT.1886 or pure power) applied in the renderer as `targetTransfer`.
+- `ExecuteVerifiedTransition(check, set)`: the Check / Set / Check sequence for `SetColorSpace1`.
+- `Finalize(plan, evidence)` gives `Actual`: whether the requested encoding is active and whether it is safe to render (for example an unverified Full/sRGB restore, a missing `IDXGISwapChain3`, or BT.2020 without flip is unsafe).
+- `ShouldFallbackToComposed(plan, actual)`: AUTO + Limited whose encoding did not become active.
+- `ResolveSdrGamma`, `ResolveCalibrationTargetTransfer`, `ResolveRenderTargetTransfer`, `ResolveCalibrationTransfers`: per frame, the transfer the renderer targets (with a calibration LUT: `hdr_tone_map_target_gamma`, or `sdr_lut_input_gamma` for SDR input) and whether the SDR gamma is adjusted, suppressed, not applicable or blocked, with a reason.
+- Diagnostics: `AnalyzePackedR10` (R10G10B10A2 readback statistics, near-black buckets), `ExpandR10ToR16`, `ClassifyOneShotSignal` (NvAPI InfoFrame set / read-back), `DescribeLimitedTransfer` (status text for the Limited G22/G24 cases), `ToString` / `ToRangeString` / `ToGammaString`.
+
+Data flow (all in LibplaceboVideoRenderer.cpp, render thread / swapchain negotiation):
+
+1. On initialise, the output settings are parsed into a `Request`, passed through `MakeSdrOutputContract`, then `MakePlan`. The embedded preview window is forced to COMPOSED / FULL / SRGB / REC709.
+2. The swapchain is created per `Plan::useBlit`. `ExecuteVerifiedTransition` applies the DXGI colour space; `Finalize` records `actualOutput`.
+3. If `ShouldFallbackToComposed`, the swapchain is recreated as composed Full/sRGB (`EnsureAutoLimitedFallback`).
+4. While `actualOutput.safeToRender` is false, frames are not presented; the negotiation is retried every second and on a monitor change.
+5. Each frame, `ResolveCalibrationTransfers` decides the target transfer and the SDR gamma action.
+6. `GetOutputContractStatus` exposes the plan and the actual state to the GUI and Config.
+
+### Tone and gamut mapping itself (legacy, not migrated)
+
+libplacebo does it. `LibplaceboRenderParameters.cpp` maps the settings to `pl_render_params`:
+
+- `tone_mapping` to `pl_tone_map_*` (spline when `auto`);
+- `gamut_mapping` to `pl_gamut_map_*`;
+- `peak_detection` to the peak-detect parameters (`off` = none, `high_quality` = percentile below 100);
+- the tone tuning overrides (`ToneMappingTuning.h`).
+
+There is no combined HDR->SDR LUT code.
+
+### Config keys actually read
+
+Read per renderer profile (`[vprenderer.Default]` and the `[vprenderer.<name>]` / `[vprenderer.color.<name>]` profiles that apply) by LibplaceboVideoRenderer.cpp.
+
+Tone and gamut keys:
+
+- `tone_mapping`: `auto` / `spline` / `bt2390` / `st2094-40` / `reinhard`.
+- `gamut_mapping`: `auto` / `perceptual` / `softclip` / `relative` / `desaturate`.
+- `peak_detection`: `auto` / `default` (`on`) / `high_quality` / `off`.
+- Tone tuning keys (ToneMappingTuning.h): `knee_adaptation`, `knee_minimum`, `knee_maximum`, `knee_default`, `slope_tuning`, `slope_offset`, `spline_contrast`, `knee_offset`, `reinhard_contrast`, `percentile`, `smoothing_period`, `scene_threshold_low`, `scene_threshold_high`, `black_cutoff`, `film_strength`, `mastering_clip`.
+- `tone_mapping_tuning` is not a key: it is the name logged for this group.
+
+Output-policy keys (the migrated file's inputs):
+
+- `output_presentation`, `output_range`.
+- `output_gamma` (full range) or `output_transport_gamma` (limited range).
+- `target_primaries` / `sdr_target_primaries`, `report_bt2020_to_display`.
+- `sdr_adjust_gamma`, `sdr_input_transfer`, `hdr_tone_map_target_gamma`, `sdr_lut_input_gamma`.
+- `diagnostic_allow_limited_g22`, `diagnostic_allow_full_g22`, `diagnostic_vp_owned_dxgi_presenter`.
+
+`combined_hdr_lut` is not read anywhere (planned).
+
+### User-visible fallbacks / notices
+
+- The planned entry `Tone map: libplacebo (combined LUT missing)` is not implemented (there is no combined LUT to miss).
+- AUTO Limited that cannot be declared switches to the composed Full/sRGB swapchain. This is log-only ("AUTO Limited unavailable; recreating the stable composed Full/sRGB swapchain"), with no "Fallbacks engaged" entry.
+- An unsupported or rejected output request (for example Limited with gamma 2.2 while the experiment is off) renders on the standard Full/sRGB contract. Also log-only ("fallback_policy=Full/sRGB").
+- An unsafe output contract stops presentation until a retry succeeds. The reason is shown only through the output-contract status (`GetOutputContractStatus`) and the log.
+- `calibration LUT` (a separate slot) does register under "Fallbacks engaged".
+
+### Dependencies to lift it
+
+`LibplaceboOutputPolicy.*`: C++ standard library and `pch.h` only. It is compiled into VideoProcessor-Lib, x64 only. The forwarding header src/VideoProcessor-Lib/vprenderer/LibplaceboOutputPolicy.h keeps old includes building until M2. The DXGI / NvAPI side stays in the renderer.
+
+### Test it standalone
+
+- `LibplaceboOutputPolicyTests` (namespace `Tests`, LibplaceboOutputPolicyTests.cpp): CPU only. Set `VP_DISPLAY_SNAPSHOT_TEST_LOG` only to capture an optional display snapshot.
+- `LibplaceboLutParserTests` also uses the policy, but it runs D3D11 (WARP unless `VP_TEST_GPU=hardware`); run it only when GPU tests are allowed.
+
+Run single-threaded:
+
+`vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /TestCaseFilter:"FullyQualifiedName~LibplaceboOutputPolicyTests" /Logger:"trx;LogFileName=tone_gamut.trx"`
+
 ## Settings
 
-- Existing keys: `tone_mapping`, `tone_mapping_tuning`, `gamut_mapping`, `peak_detection`
+- Existing keys: `tone_mapping`, `gamut_mapping`, `peak_detection`, the tone tuning keys (logged as `tone_mapping_tuning`; see above), and the output-policy keys above
 - Planned keys: `combined_hdr_lut`
 - Tiers: Classic/Low may use the combined LUT; Mid/Upper libplacebo
 
 ## Fallbacks
 
-- "Fallbacks engaged" entry: Tone map: libplacebo (combined LUT missing)
-- Behaviour: Missing/invalid combined LUT -> libplacebo tone mapping.
+- "Fallbacks engaged" entry: Tone map: libplacebo (combined LUT missing) (planned; not implemented)
+- Behaviour: Missing/invalid combined LUT -> libplacebo tone mapping (planned). Today: AUTO Limited -> composed Full/sRGB swapchain, and a rejected output request -> Full/sRGB; both log only.
 
 ## Net fingerprint / upstream
 
@@ -32,13 +113,14 @@ libplacebo tone/gamut mapping (keeps all of its colour science) OR, for low-end 
 
 ## How to build / test
 
-Build the solution via the shared build-slot runner (see AGENTS.md); tests single-threaded; GPU tests only on mains with `VP_TEST_ADAPTER=NVIDIA`.
+Build the solution via the shared build-slot runner (see AGENTS.md); tests single-threaded; GPU tests only on mains with `VP_TEST_GPU=hardware` (`VP_TEST_ADAPTER=NVIDIA` picks the GeForce).
 
 Placeholder tests:
 - (none yet)
 
 Isolation tests:
-- libplacebo gamut probe
+- `LibplaceboOutputPolicyTests`
+- libplacebo gamut probe (the wide-gamut probe in `LibplaceboLutParserTests`; GPU)
 
 Contract tests:
 - combined LUT must output linear light or teach compensation the display response (ADR-0013)
