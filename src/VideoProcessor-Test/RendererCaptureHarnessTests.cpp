@@ -4514,7 +4514,7 @@ namespace Tests
 			auto unescape = [](std::string t) { size_t k; while ((k = t.find("\\n")) != std::string::npos) t.replace(k, 2, "\n"); return t; };
 			const std::string stages = "source_resolution: 720\ndeband_vp: off\ndetail_pulse_stabilise: off\n" + unescape(profile) +
 				"[vprenderer.Default]\ndithering: off\ndeband: off\ntemporal_dither: off\n" + unescape(defaults) +
-				"[vpv]\npipeline_entrance_once: off\n";
+				"[vpv]\npipeline_entrance_once: " + (RealClip::Env("VP_TEST_NEAR_BLACK_B3") == "on" ? "on" : "off") + "\n";
 			auto capturesOf = [&](const std::string& extra) {
 				FramePlan plan;
 				plan.rateNumerator = 24000;
