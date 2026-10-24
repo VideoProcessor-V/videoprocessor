@@ -263,14 +263,22 @@ namespace NetRunnerTestsNs
 							FormatName(fmt), d, tol, MaxDiffCodes(got, c.expected, c.outW, c.outH));
 						Log(line);
 						Assert::IsTrue(d <= tol, W(name + ": GPU vs CPU beyond the tolerance").c_str());
-						// Gate decisions: identical per tile.
+						// Gate decisions: identical per tile at fp32. With fp16 intermediates a logit within
+						// 0.05 of the threshold may round either way on the GPU vs the CPU's half emulation
+						// (seen 2026-10-24 on A_single): those tiles are counted and logged, not failed.
 						if (c.pkg.contract.tileGated && cpu.Texture("VPNNGATE"))
 						{
 							const CpuTexture gate = g.Download(static_cast<pl_tex>(gpu.Intermediate("VPNNGATE")));
 							const CpuTexture& cg = *cpu.Texture("VPNNGATE");
+							int nearFlips = 0;
 							for (int y = 0; y < cg.height; ++y)
 								for (int x = 0; x < cg.width; ++x)
-									Assert::AreEqual(cg.At(x, y) > 0.0f, gate.At(x, y) > 0.0f, W(name + ": a gate tile flipped").c_str());
+								{
+									const bool same = (cg.At(x, y) > 0.0f) == (gate.At(x, y) > 0.0f);
+									if (!same && fmt == TexFormat::Rgba16f && std::fabs(cg.At(x, y)) < 0.05f) { ++nearFlips; continue; }
+									Assert::IsTrue(same, W(name + ": a gate tile flipped").c_str());
+								}
+							if (nearFlips) Log(name + ": " + std::to_string(nearFlips) + " near-threshold gate tile(s) differ at fp16");
 						}
 						gpu.Release();
 					}

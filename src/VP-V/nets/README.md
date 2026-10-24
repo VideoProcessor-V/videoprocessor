@@ -169,7 +169,38 @@ package's own weights, and runs each layer as ONE compute pass:
 - **Stays exported:** a layer whose tile exceeds the shared-memory limit (32 KB on D3D11), whose
   output count exceeds D3D11's 8 compute UAV slots, or whose input sizes differ.
 
-Results: see the efficiency report (laptop timings; projected 3090 gain).
+Results (2026-10-24, RTX 3050 Ti laptop, the smoke D: 24 channels, 2160 source -> 2560x1600,
+rgba32f, pl_timer mean of 20 frames after warm-up, two runs):
+
+| path | ms | vs exported |
+|---|---|---|
+| exported passes | 101 / 99 | 1.0 |
+| fused direct | 43 / 50 | 2.0-2.4x faster |
+| fused Winograd F(2x2,3x3) | 99 / 113 | none |
+| fused direct, fp16 storage | 48 | 4 % better than fused fp32 |
+
+Accuracy:
+
+- Fused direct and Winograd are within 0.00006 code of the CPU reference on D, A_open and C, and
+  the gate tiles are identical (rgba32f).
+- With rgba16f intermediates, the GPU stays within 0.006 code of the CPU's half emulation (C, D,
+  A).
+
+What follows from the numbers:
+
+- **Fusion pays; Winograd does not.** In this form (shared tile, 16 vec4 accumulators per output
+  group) Winograd is register- and shared-memory-bound on the laptop. The arithmetic it saves
+  (2.25x fewer multiplies for the 3x3 convs) does not reach the clock, so it is not adopted.
+- **fp16 storage is dropped** (owner rule: keep it only if it saves meaningfully): 4 %.
+- **Expected 3090 gain:** the same ~2x on the trunk. D's 3.7 ms in VP should become about
+  1.6-1.9 ms, and D_small's 2.47 ms about 1.1-1.3 ms. These are estimates: confirm on the 3090
+  in VP.
+- **The tile gate for D** (tests/analyse_tile_gate.py, one real frame each, smoke D):
+  - grainy film (Chimera): no tile qualifies;
+  - clean animation (Sollevante): 19.5 % of tiles have a 3x3 range under 8 codes, and skipping
+    them loses at most 0.36 code;
+  - skipping keeps the hybrid's own output, so it cannot harm grain, but it saves nothing on
+    film. Re-check with the trained D.
 
 ### Tensor cores (investigation only)
 
