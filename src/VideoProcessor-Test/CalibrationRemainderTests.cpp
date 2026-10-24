@@ -3,17 +3,17 @@
 
 #include "CalibrationTestSupport.h"
 
-#include <calibration/ArgyllInstall.h>
-#include <calibration/CalibrationConfig.h>
-#include <calibration/CalibrationController.h>
-#include <calibration/CalibrationPattern.h>
-#include <calibration/CalibrationRun.h>
-#include <calibration/CalibrationSession.h>
-#include <calibration/CalibrationSimulation.h>
-#include <calibration/Meter.h>
-#include <calibration/MeterCatalog.h>
-#include <calibration/PatternCodes.h>
-#include <calibration/Spotread.h>
+#include <VP-V/modules/output/calibration_lut/calibration/ArgyllInstall.h>
+#include <VP-V/modules/output/calibration_lut/calibration/CalibrationConfig.h>
+#include <VP-V/modules/output/calibration_lut/calibration/CalibrationController.h>
+#include <VP-V/modules/output/calibration_lut/calibration/CalibrationPattern.h>
+#include <VP-V/modules/output/calibration_lut/calibration/CalibrationRun.h>
+#include <VP-V/modules/output/calibration_lut/calibration/CalibrationSession.h>
+#include <VP-V/modules/output/calibration_lut/calibration/CalibrationSimulation.h>
+#include <VP-V/modules/output/calibration_lut/calibration/Meter.h>
+#include <VP-V/modules/output/calibration_lut/calibration/MeterCatalog.h>
+#include <VP-V/modules/output/calibration_lut/calibration/PatternCodes.h>
+#include <VP-V/modules/output/calibration_lut/calibration/Spotread.h>
 #include <ConfigEditorCore.h>
 #include <ConfigFile.h>
 #include <MainConfigSchema.h>

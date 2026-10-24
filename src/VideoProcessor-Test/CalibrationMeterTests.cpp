@@ -3,11 +3,11 @@
 
 #include "CalibrationTestSupport.h"
 
-#include <calibration/ArgyllInstall.h>
-#include <calibration/Meter.h>
-#include <calibration/MeterCatalog.h>
-#include <calibration/Spotread.h>
-#include <calibration/Terminal.h>
+#include <VP-V/modules/output/calibration_lut/calibration/ArgyllInstall.h>
+#include <VP-V/modules/output/calibration_lut/calibration/Meter.h>
+#include <VP-V/modules/output/calibration_lut/calibration/MeterCatalog.h>
+#include <VP-V/modules/output/calibration_lut/calibration/Spotread.h>
+#include <VP-V/modules/output/calibration_lut/calibration/Terminal.h>
 
 #include <chrono>
 #include <cmath>

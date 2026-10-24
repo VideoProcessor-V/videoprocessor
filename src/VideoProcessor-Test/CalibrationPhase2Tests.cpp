@@ -3,17 +3,17 @@
 
 #include "CalibrationTestSupport.h"
 
-#include <calibration/AmbientCheck.h>
-#include <calibration/ArgyllInstall.h>
-#include <calibration/CalibrationConfig.h>
-#include <calibration/CalibrationController.h>
-#include <calibration/CalibrationRunBase.h>
-#include <calibration/CalibrationSimulation.h>
-#include <calibration/HdrVerify.h>
-#include <calibration/LedRun.h>
-#include <calibration/Meter.h>
-#include <calibration/PatternCodes.h>
-#include <calibration/TranscriptRecorder.h>
+#include <VP-V/modules/output/calibration_lut/calibration/AmbientCheck.h>
+#include <VP-V/modules/output/calibration_lut/calibration/ArgyllInstall.h>
+#include <VP-V/modules/output/calibration_lut/calibration/CalibrationConfig.h>
+#include <VP-V/modules/output/calibration_lut/calibration/CalibrationController.h>
+#include <VP-V/modules/output/calibration_lut/calibration/CalibrationRunBase.h>
+#include <VP-V/modules/output/calibration_lut/calibration/CalibrationSimulation.h>
+#include <VP-V/modules/output/calibration_lut/calibration/HdrVerify.h>
+#include <VP-V/modules/output/calibration_lut/calibration/LedRun.h>
+#include <VP-V/modules/output/calibration_lut/calibration/Meter.h>
+#include <VP-V/modules/output/calibration_lut/calibration/PatternCodes.h>
+#include <VP-V/modules/output/calibration_lut/calibration/TranscriptRecorder.h>
 #include <ConfigEditorCore.h>
 #include <ConfigFile.h>
 #include <led/LedDriveConfig.h>

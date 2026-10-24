@@ -2,7 +2,7 @@
 
 #include "CalibrationRunBase.h"
 
-#include "../../VideoProcessor-ConfigCore/ConfigEditorCore.h"
+#include <VideoProcessor-ConfigCore/ConfigEditorCore.h>
 
 #include <algorithm>
 #include <cmath>

@@ -70,7 +70,7 @@
 #include <HdrVetoCaptureGate.h>
 #include <ConfigEditorCore.h>
 #include "ConfigurationRpcServer.h"
-#include <calibration/CalibrationController.h>
+#include <VP-V/modules/output/calibration_lut/calibration/CalibrationController.h>
 #include "ModernOperatorView.h"
 
 #include "resource.h"

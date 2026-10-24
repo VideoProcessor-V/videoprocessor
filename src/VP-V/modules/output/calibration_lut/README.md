@@ -56,10 +56,20 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 
 - `src/VP-V/modules/output/calibration_lut/CalibrationLutStage.h`
 - `src/VP-V/modules/output/calibration_lut/CalibrationLutStage.cpp`
+- `src/VP-V/modules/output/calibration_lut/calibration`
 - `src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.cpp`
 - `src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.h`
 - `src/VideoProcessor-Lib/vprenderer/LibplaceboCalibrationLutPolicy.h`
-- `src/VideoProcessor-Lib/calibration`
+
+Forwarding headers at the legacy path (early migration, removed in M2; they only keep files on active branches building, new code includes the `<VP-V/...>` path):
+
+- `src/VideoProcessor-Lib/calibration/CalibrationConfig.h`
+- `src/VideoProcessor-Lib/calibration/CalibrationController.h`
+- `src/VideoProcessor-Lib/calibration/CalibrationPattern.h`
+- `src/VideoProcessor-Lib/calibration/CalibrationSimulation.h`
+- `src/VideoProcessor-Lib/calibration/PatternCodes.h`
+
+The automatic-calibration code (meter, ArgyllCMS, session, patterns; `calibration/`) moved here early. `LibplaceboDisplayLut.*` and `LibplaceboCalibrationLutPolicy.h` stay at their legacy paths for now (`VideoProcessor-Test.vcxproj`, changed by active branches, compiles `LibplaceboDisplayLut.cpp`; the renderer includes both).
 
 ## Migration directive
 

@@ -25,6 +25,7 @@ The tree mirrors `docs/design/slots.json`. The master component list is
   - `drive/led_measure`: LED picture measurement and look-ahead (`LedMeasurement.*`, `LedLookahead.*`); `LedMeasurementHook.*` stays (the test project compiles it).
   - `drive/led_compensation`: Dynamic Drive core (`LedDriveModule.*`), COM-port arbiter, hold-over (forwarders for all three headers: the renderer includes them); `LedRawTransfer.*` stays (the test project compiles it).
   - `scaling/rebase`: kernel inverse helper (`KernelInverse.*`; forwarder `KernelInverse.h` for the renderer and the entrance/srcres code, which keep the old include); `SourceRebase.*` stays (entrance code).
+  - `output/calibration_lut/calibration/`: the automatic-calibration code (meter, ArgyllCMS, sessions, patterns; forwarders for the five headers the renderer, `IRenderer.h`, `MainConfigSchema.h` and `RendererCaptureHarnessTests.cpp` include).
 - **Order and moves:** see `src/VP-V/core/README.md`. A module moves only within its zone
   (ADR-0021).
 

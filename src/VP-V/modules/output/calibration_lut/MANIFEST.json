@@ -8,10 +8,17 @@
   "live_files": [
     "src/VP-V/modules/output/calibration_lut/CalibrationLutStage.h",
     "src/VP-V/modules/output/calibration_lut/CalibrationLutStage.cpp",
+    "src/VP-V/modules/output/calibration_lut/calibration",
     "src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.cpp",
     "src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.h",
-    "src/VideoProcessor-Lib/vprenderer/LibplaceboCalibrationLutPolicy.h",
-    "src/VideoProcessor-Lib/calibration"
+    "src/VideoProcessor-Lib/vprenderer/LibplaceboCalibrationLutPolicy.h"
+  ],
+  "forwarding_headers": [
+    "src/VideoProcessor-Lib/calibration/CalibrationConfig.h",
+    "src/VideoProcessor-Lib/calibration/CalibrationController.h",
+    "src/VideoProcessor-Lib/calibration/CalibrationPattern.h",
+    "src/VideoProcessor-Lib/calibration/CalibrationSimulation.h",
+    "src/VideoProcessor-Lib/calibration/PatternCodes.h"
   ],
   "components": {
     "files": {
