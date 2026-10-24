@@ -15,7 +15,7 @@
 #include <ConfigurationLiveApply.h>
 #include <RendererProfileConfig.h>
 #include <ShortcutDefaults.h>
-#include <StateReportSettings.h>
+#include <VP-V/modules/control/diagnostics/StateReportSettings.h>
 
 #include <algorithm>
 #include <map>

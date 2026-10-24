@@ -239,10 +239,10 @@
     <ClInclude Include="ConfigurationDiscovery.h" />
     <ClInclude Include="ConfigSchema.h" />
     <ClInclude Include="DebugLog.h" />
-    <ClInclude Include="CrashState.h" />
+    <ClInclude Include="..\VP-V\modules\control\diagnostics\CrashState.h" />
     <ClInclude Include="DiagnosticHistory.h" />
-    <ClInclude Include="StateReport.h" />
-    <ClInclude Include="StateReportSettings.h" />
+    <ClInclude Include="..\VP-V\modules\control\diagnostics\StateReport.h" />
+    <ClInclude Include="..\VP-V\modules\control\diagnostics\StateReportSettings.h" />
     <ClInclude Include="StoreZipWriter.h" />
     <ClInclude Include="VpBuildIdentity.h" />
     <ClInclude Include="DebugLogRetention.h" />
@@ -450,8 +450,8 @@
     <ClCompile Include="ShaderConfigValidation.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="CrashState.cpp" />
-    <ClCompile Include="StateReport.cpp" />
+    <ClCompile Include="..\VP-V\modules\control\diagnostics\CrashState.cpp" />
+    <ClCompile Include="..\VP-V\modules\control\diagnostics\StateReport.cpp" />
     <ClCompile Include="VpBuildIdentity.cpp" />
     <ClCompile Include="WindowsDisplayDiagnostics.cpp" />
     <ClCompile Include="ACaptureDevice.cpp" />

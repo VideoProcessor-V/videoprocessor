@@ -7,7 +7,7 @@
  */
 
 #include <pch.h>
-#include <CrashState.h>
+#include <VP-V/modules/control/diagnostics/CrashState.h>
 #include <UpdateLauncher.h>
 #include <ApplicationShutdownPolicy.h>
 

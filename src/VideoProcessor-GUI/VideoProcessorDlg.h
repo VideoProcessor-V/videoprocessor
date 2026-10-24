@@ -29,8 +29,8 @@
 #include <PixelValueRange.h>
 #include <OutputReadinessController.h>
 #include <ShortcutRepeatGuard.h>
-#include <StateReport.h>
-#include <StateReportSettings.h>
+#include <VP-V/modules/control/diagnostics/StateReport.h>
+#include <VP-V/modules/control/diagnostics/StateReportSettings.h>
 #include <CCie1931Control.h>
 #include <IRenderer.h>
 #include <ProcessCpuUsageMeter.h>

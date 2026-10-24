@@ -2,8 +2,8 @@
 
 #include "StateReport.h"
 
-#include "DiagnosticHistory.h"
-#include "StoreZipWriter.h"
+#include <DiagnosticHistory.h>
+#include <StoreZipWriter.h>
 
 #include <algorithm>
 #include <bcrypt.h>

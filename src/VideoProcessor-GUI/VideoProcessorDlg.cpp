@@ -39,10 +39,10 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <thread>
 #include <led/ConnectionTest.h>
 #include <ShortcutChord.h>
-#include <CrashState.h>
+#include <VP-V/modules/control/diagnostics/CrashState.h>
 #include <DiagnosticHistory.h>
-#include <StateReport.h>
-#include <StateReportSettings.h>
+#include <VP-V/modules/control/diagnostics/StateReport.h>
+#include <VP-V/modules/control/diagnostics/StateReportSettings.h>
 #include <AmbientConfig.h>
 #include <IntentInterpreterSupport.h>
 #include <QueueLookahead.h>

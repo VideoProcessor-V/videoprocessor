@@ -10,7 +10,7 @@
 
 #include <ConfigFile.h>
 #include <ConfigurationLiveApply.h>
-#include <CrashState.h>
+#include <VP-V/modules/control/diagnostics/CrashState.h>
 #include <DebugLog.h>
 #include <MainConfigSchema.h>
 #include <RendererProfileConfig.h>

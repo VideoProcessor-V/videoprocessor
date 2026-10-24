@@ -53,12 +53,15 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **partly migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
+- `src/VP-V/modules/control/diagnostics/StateReport.cpp`
+- `src/VP-V/modules/control/diagnostics/CrashState.cpp`
+- `src/VP-V/modules/control/diagnostics/CrashState.h`
+- `src/VP-V/modules/control/diagnostics/StateReport.h`
+- `src/VP-V/modules/control/diagnostics/StateReportSettings.h`
 - `src/VP-V/core/SlotTiming.h`
 - `src/VP-V/core/FallbackStatus.h`
-- `src/VideoProcessor-Lib/StateReport.cpp`
-- `src/VideoProcessor-Lib/CrashState.cpp`
 - `src/VideoProcessor-GUI/StatsOverlayWindow.cpp`
 - `src/VideoProcessor-Lib/DebugLog.h`
 

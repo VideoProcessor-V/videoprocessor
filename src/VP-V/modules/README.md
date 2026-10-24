@@ -18,6 +18,9 @@ The tree mirrors `docs/design/slots.json`. The master component list is
   drift check enforces this).
 - **Migrated so far:** `output/calibration_lut/CalibrationLutStage.*`, the VP calibration-LUT
   hook compiled by both renderer projects.
+- **Early migrations** (2026-10-24, `docs/design/migration-early-inventory.md`; code no active
+  branch touches, one module per commit):
+  - `control/diagnostics`: crash state ring (`CrashState.*`) and state report (`StateReport*`).
 - **Order and moves:** see `src/VP-V/core/README.md`. A module moves only within its zone
   (ADR-0021).
 

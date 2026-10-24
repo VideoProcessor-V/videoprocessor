@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include <CrashState.h>
+#include <VP-V/modules/control/diagnostics/CrashState.h>
 #include <DebugLog.h>
 
 #include <atomic>
