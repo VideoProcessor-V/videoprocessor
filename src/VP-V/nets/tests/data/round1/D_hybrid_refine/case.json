@@ -1,0 +1,28 @@
+{
+ "case": "D_hybrid_refine",
+ "shader": "D_hybrid_refine.glsl",
+ "shader_sha256": "29c67fa6cd163b574fe7759ca30bae864f7d09bb1c9b7243c2646feaf1a85a5b",
+ "params": {},
+ "bindings": [
+  {
+   "name": "SCALER_OUT",
+   "width": 40,
+   "height": 30,
+   "components": 1,
+   "file": "SCALER_OUT.f32"
+  },
+  {
+   "name": "SCALER_SRC",
+   "width": 60,
+   "height": 45,
+   "components": 1,
+   "file": "SCALER_SRC.f32"
+  }
+ ],
+ "output": {
+  "width": 40,
+  "height": 30,
+  "file": "expected.f32"
+ },
+ "fingerprint": "b216f42ef5cb831c"
+}

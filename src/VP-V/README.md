@@ -8,7 +8,7 @@ each an `#include <VP-V/...>` with a comment naming the folder.
 |---|---|---|
 | [`core/`](core/README.md) | The pipeline skeleton: the slot table, module contracts and the order validator, the slot registry, the entrance stage list, the output-hook order, per-axis vector scaling, the delay budget, per-slot timing, and "Fallbacks engaged" | The renderer (`LibplaceboVideoRenderer.cpp`) includes `core/SlotRegistry.h`, `core/EntranceStages.h` and `core/OutputHookOrder.h`. The GUI and the renderer include `core/FallbackStatus.h` |
 | [`modules/`](modules/README.md) | One folder per pipeline slot (`<unit>/<slot>/`): module doc, `MANIFEST.json` with the live file list, `tests/`, and the slot's code once it has migrated | The renderer project compiles migrated module code (today `modules/output/calibration_lut/CalibrationLutStage.cpp`) |
-| [`nets/`](nets/README.md) | The VP-side net runner and fingerprints (not built yet) | Will serve `repair.encoding`, `scaling.refine` and the hybrid scaler's D |
+| [`nets/`](nets/README.md) | The VP-side net runner groundwork (B1): package parser, fingerprint check, runner interface, CPU reference executor, RGB luma delta. Not wired yet | Will serve `repair.encoding`, `scaling.rebase` (C), `scaling.refine` and the hybrid scaler's D; tests compiled by `VideoProcessor-Test` |
 | [`config/`](config/README.md) | The VP-V Config section (the settings agent builds it, self-contained) | Generated from `docs/design/slots.json` |
 | [`tests/`](tests/README.md) | VP-V unit tests | Compiled by `VideoProcessor-Test` (filter "VP-V") |
 

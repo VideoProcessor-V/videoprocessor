@@ -37,8 +37,10 @@ Build the solution via the shared build-slot runner (see AGENTS.md); tests singl
 Placeholder tests:
 - (none yet)
 
-Isolation tests:
-- fingerprint match/mismatch unit tests
+Isolation tests (`src/VP-V/nets/tests/NetRunnerTests.cpp`):
+- fingerprint match/mismatch, the "Fallbacks engaged" entry, capability/format choice
+- package parsing (synthetic + the real exports), the CPU reference executor vs the TrainKit's PyTorch outputs
+- the RGB luma delta (CPU helper = GPU pass text)
 
 Contract tests:
 - (none yet)
@@ -52,9 +54,10 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **none (placeholder)**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **`src/VP-V/nets`** (groundwork, not wired into the renderer; see its [README](../../../nets/README.md)). The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
-- (none yet)
+- `NetPackage.*`, `NetFingerprint.h`, `NetRunner.h`, `NetSlot.h`, `NetLabels.h`, `PlNetRunner.h` (stub), `RgbLumaDelta.h`
+- `GlslMini.*`, `CpuNetExecutor.*` (the CPU reference, test-only)
 
 ## Migration directive
 
@@ -78,8 +81,8 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 ## Tests
 
 - Placeholder (byte-identity on/off, zero cost): n/a.
-- Isolation (fixed inputs, expected outputs, cost): fingerprint match/mismatch unit tests.
-- Contract (formats, geometry, fallback entry): MISSING.
+- Isolation (fixed inputs, expected outputs, cost): `NetRunnerTests` (fingerprints, CPU executor vs PyTorch, timing hook).
+- Contract (formats, geometry, fallback entry): `NetRunnerTests` (binding contract, intermediate format, 8K rule, "nets: bypassed" entry).
 - Chain (total delay at the 4/3/2-frame budgets): n/a.
 - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
 

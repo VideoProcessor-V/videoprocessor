@@ -454,6 +454,18 @@
     <ClCompile Include="..\VP-V\tests\CombinationRunnerTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\VP-V\nets\tests\NetRunnerTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\nets\NetPackage.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\nets\GlslMini.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\nets\CpuNetExecutor.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="QueueStressLaneTests.cpp" />
     <ClCompile Include="RendererPostStallResetAdvisorTests.cpp" />
     <ClCompile Include="MadVRShaderRuntimeStateTests.cpp" />

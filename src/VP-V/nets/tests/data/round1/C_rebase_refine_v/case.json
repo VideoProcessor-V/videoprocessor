@@ -1,0 +1,21 @@
+{
+ "case": "C_rebase_refine_v",
+ "shader": "C_rebase_refine_v.glsl",
+ "shader_sha256": "5a9614e745e813c6809ed3d3e3f8411ca66d2596ad1cd1b0e8d98a2e78e46b2e",
+ "params": {},
+ "bindings": [
+  {
+   "name": "HOOKED",
+   "width": 48,
+   "height": 40,
+   "components": 1,
+   "file": "HOOKED.f32"
+  }
+ ],
+ "output": {
+  "width": 48,
+  "height": 40,
+  "file": "expected.f32"
+ },
+ "fingerprint": "3cf4428aa11a36b0"
+}

@@ -1,0 +1,37 @@
+{
+ "case": "A_single_small",
+ "shader": "A_single_small.glsl",
+ "shader_sha256": "52fd496d13224b7c0912956ca607b1ff4380d2260599b599ba7738e8bd97b212",
+ "params": {
+  "vpnn_ry": 0.5,
+  "vpnn_rx": 0.5,
+  "vpnn_kernel": 1,
+  "vpnn_codec": 1,
+  "vpnn_fgs": 0.0,
+  "vpnn_bpp_tier": 0.5,
+  "vpnn_bits10": 1.0
+ },
+ "bindings": [
+  {
+   "name": "HOOKED",
+   "width": 64,
+   "height": 48,
+   "components": 1,
+   "file": "HOOKED.f32"
+  }
+ ],
+ "output": {
+  "width": 64,
+  "height": 48,
+  "file": "expected.f32"
+ },
+ "fingerprint": "179062b98b108209",
+ "label_schema": "vpnn-labels-v1",
+ "bound": {
+  "c0": 1.5,
+  "c1": 0.35,
+  "cmax": 32.0
+ },
+ "gate_tiles_open": 0,
+ "gate_tiles": 12
+}

@@ -1,0 +1,58 @@
+{
+ "case": "A_motion_small",
+ "shader": "A_motion_small.glsl",
+ "shader_sha256": "d186139514363038954d00f6479e53b67a8e25fa5ac57f4e3cb0f98cca39a6ce",
+ "params": {
+  "vpnn_ry": 0.5,
+  "vpnn_rx": 0.5,
+  "vpnn_kernel": 1,
+  "vpnn_codec": 1,
+  "vpnn_fgs": 0.0,
+  "vpnn_bpp_tier": 0.5,
+  "vpnn_bits10": 1.0
+ },
+ "bindings": [
+  {
+   "name": "HOOKED",
+   "width": 64,
+   "height": 48,
+   "components": 1,
+   "file": "HOOKED.f32"
+  },
+  {
+   "name": "VPNN_PREV",
+   "width": 64,
+   "height": 48,
+   "components": 1,
+   "file": "VPNN_PREV.f32"
+  },
+  {
+   "name": "VPNN_NEXT",
+   "width": 64,
+   "height": 48,
+   "components": 1,
+   "file": "VPNN_NEXT.f32"
+  },
+  {
+   "name": "VPNN_MASK",
+   "width": 64,
+   "height": 48,
+   "components": 2,
+   "file": "VPNN_MASK.f32"
+  }
+ ],
+ "output": {
+  "width": 64,
+  "height": 48,
+  "file": "expected.f32"
+ },
+ "fingerprint": "179062b98b108209",
+ "label_schema": "vpnn-labels-v1",
+ "bound": {
+  "c0": 1.5,
+  "c1": 0.35,
+  "cmax": 32.0
+ },
+ "gate_tiles_open": 0,
+ "gate_tiles": 12
+}

@@ -1,0 +1,908 @@
+#include "CppUnitTest.h"
+
+#include <VP-V/nets/CpuNetExecutor.h>
+#include <VP-V/nets/NetFingerprint.h>
+#include <VP-V/nets/NetLabels.h>
+#include <VP-V/nets/NetSlot.h>
+#include <VP-V/nets/PlNetRunner.h>
+#include <VP-V/nets/RgbLumaDelta.h>
+
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <fstream>
+#include <string>
+#include <vector>
+
+using namespace Microsoft::VisualStudio::CppUnitTestFramework;
+
+// The VP-side net runner groundwork (barrier B1): package parsing, the fingerprint check and its
+// "Fallbacks engaged" entry, the runner contract, the CPU reference executor against the TrainKit's
+// PyTorch outputs, the RGB luma delta. CPU only.
+//
+// Real exports: read from %VP_NETS_EXPORT_DIR% (default E:\VP-NN-TrainKit\work\staging, read only).
+// The PyTorch reference cases (tests/data, written by tests/make_reference.py) record each
+// shader's sha256; a missing or different export logs SKIPPED for that case (the weights are not
+// committed). The synthetic package below always runs.
+namespace NetRunnerTestsNs
+{
+	using namespace VpNets;
+
+	inline std::wstring W(const std::string& s) { return std::wstring(s.begin(), s.end()); }
+	inline void Log(const std::string& s) { Logger::WriteMessage((s + "\n").c_str()); }
+
+	// ------------------------------------------------------------------ paths and files
+	inline std::string DataDir()
+	{
+		std::string f = __FILE__;
+		const size_t slash = f.find_last_of("/\\");
+		return f.substr(0, slash + 1) + "data/";
+	}
+
+	// Where exports may be: %VP_NETS_EXPORT_DIR% (';'-separated), the round-1 kit drive, the
+	// laptop's smoke export. Read only.
+	inline std::vector<std::string> ExportDirs()
+	{
+		std::vector<std::string> dirs;
+		char* v = nullptr;
+		size_t n = 0;
+		if (_dupenv_s(&v, &n, "VP_NETS_EXPORT_DIR") == 0 && v)
+		{
+			std::string list = v;
+			free(v);
+			size_t a = 0;
+			while (a <= list.size())
+			{
+				const size_t b = list.find(';', a);
+				const std::string d = list.substr(a, b == std::string::npos ? std::string::npos : b - a);
+				if (!d.empty()) dirs.push_back(d);
+				if (b == std::string::npos) break;
+				a = b + 1;
+			}
+		}
+		dirs.push_back("E:/VP-NN-TrainKit/work/staging");
+		dirs.push_back("D:/nn-corpus/VP-NN-TrainKit/smoke/staging");
+		return dirs;
+	}
+
+	inline std::vector<float> ReadF32(const std::string& path, size_t count)
+	{
+		std::vector<float> v(count, 0.0f);
+		std::ifstream f(path, std::ios::binary);
+		if (f) f.read(reinterpret_cast<char*>(v.data()), static_cast<std::streamsize>(count * sizeof(float)));
+		return v;
+	}
+
+	// SHA-256 (FIPS 180-4), to tie a reference case to the exact shader it was made from.
+	inline std::string Sha256Hex(const std::string& data)
+	{
+		static const uint32_t k[64] = {
+			0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+			0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+			0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+			0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+			0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+			0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2 };
+		uint32_t h[8] = { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 };
+		std::string m = data;
+		const uint64_t bits = static_cast<uint64_t>(data.size()) * 8;
+		m += static_cast<char>(0x80);
+		while (m.size() % 64 != 56) m += static_cast<char>(0);
+		for (int i = 7; i >= 0; --i) m += static_cast<char>((bits >> (i * 8)) & 0xff);
+		auto rotr = [](uint32_t x, int n) { return (x >> n) | (x << (32 - n)); };
+		for (size_t off = 0; off < m.size(); off += 64)
+		{
+			uint32_t w[64];
+			for (int i = 0; i < 16; ++i)
+				w[i] = (static_cast<uint32_t>(static_cast<unsigned char>(m[off + i * 4])) << 24) | (static_cast<uint32_t>(static_cast<unsigned char>(m[off + i * 4 + 1])) << 16) |
+				(static_cast<uint32_t>(static_cast<unsigned char>(m[off + i * 4 + 2])) << 8) | static_cast<uint32_t>(static_cast<unsigned char>(m[off + i * 4 + 3]));
+			for (int i = 16; i < 64; ++i)
+			{
+				const uint32_t s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+				const uint32_t s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+				w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+			}
+			uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
+			for (int i = 0; i < 64; ++i)
+			{
+				const uint32_t t1 = hh + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + k[i] + w[i];
+				const uint32_t t2 = (rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
+				hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+			}
+			h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+		}
+		static const char* hex = "0123456789abcdef";
+		std::string out;
+		for (uint32_t v : h)
+			for (int i = 7; i >= 0; --i) out += hex[(v >> (i * 4)) & 0xf];
+		return out;
+	}
+
+	// ------------------------------------------------------------------ the synthetic package
+	// Exporter format, three passes: features (fragment), a ceil-half-size 2x2 average (compute,
+	// RPN size), the output (mirrored taps, a mat4, a PARAM, a swizzle compound assignment).
+	inline std::string SyntheticShader()
+	{
+		return
+			"// VP-NN T_tiny: test net in the exporter's format\n"
+			"// HOOK LUMA; out = HOOKED + gain * ((M * f).x - half)\n"
+			"// VPNN pipeline fingerprint: 0123456789abcdef input_stage=A: test input\n"
+			"// VP must compare it with the running pipeline's and bypass this net (log line) on a mismatch.\n"
+			"//   vp_commit: 462a95bc test\n"
+			"//   renderer_dll_sha256: 2e84598c7612762c\n"
+			"//   rebase_settings: r1\n"
+			"//   grain_split: g1\n"
+			"//   stage_order: s1\n"
+			"//   scaler_blend_settings: b1\n"
+			"//   bounds: n1\n"
+			"//   label_schema: vpnn-labels-v1\n"
+			"//   stage_contract: test contract | A: in = luma\n"
+			"//   texture_formats: all net intermediates rgba32f (test); re-base pass outputs r16; x2 H->V hand-off r16\n"
+			"//!PARAM vpnn_gain\n"
+			"//!TYPE float\n"
+			"//!MINIMUM 0.0\n"
+			"//!MAXIMUM 1.0\n"
+			"0.25\n"
+			"\n"
+			"//!DESC T features\n"
+			"//!HOOK LUMA\n"
+			"//!BIND HOOKED\n"
+			"//!SAVE TF0\n"
+			"//!COMPONENTS 4\n"
+			"\n"
+			"vec4 hook() {\n"
+			"    float c = HOOKED_texOff(vec2(0.0)).x;\n"
+			"    return vec4(c, c * c, 0.0, 0.0);\n"
+			"}\n"
+			"\n"
+			"//!DESC T half-size average (tiles)\n"
+			"//!HOOK LUMA\n"
+			"//!BIND TF0\n"
+			"//!COMPUTE 16 16\n"
+			"//!SAVE TH\n"
+			"//!WIDTH HOOKED.w 2 / 0.25 +\n"
+			"//!HEIGHT HOOKED.h 2 / 0.25 +\n"
+			"//!COMPONENTS 1\n"
+			"\n"
+			"void hook() {\n"
+			"    ivec2 P = ivec2(gl_GlobalInvocationID.xy);\n"
+			"    if (any(greaterThanEqual(P, imageSize(out_image)))) return;\n"
+			"    float s = 0.0, n = 0.0;\n"
+			"    for (int dy = 0; dy < 2; dy++)\n"
+			"        for (int dx = 0; dx < 2; dx++) {\n"
+			"            ivec2 q = P * 2 + ivec2(dx, dy);\n"
+			"            if (q.x < int(TF0_size.x) && q.y < int(TF0_size.y)) { s += texelFetch(TF0_raw, q, 0).x * TF0_mul; n += 1.0; }\n"
+			"        }\n"
+			"    imageStore(out_image, P, vec4(s / max(n, 1.0), 0.0, 0.0, 0.0));\n"
+			"}\n"
+			"\n"
+			"//!DESC T output\n"
+			"//!HOOK LUMA\n"
+			"//!BIND HOOKED\n"
+			"//!BIND TF0\n"
+			"//!BIND TH\n"
+			"//!COMPONENTS 1\n"
+			"\n"
+			"ivec2 mi(ivec2 p, ivec2 s) { p = abs(p); return (s - 1) - abs((s - 1) - p); }\n"
+			"const float K[2] = float[2](1.0, 0.5);\n"
+			"vec4 hook() {\n"
+			"    ivec2 o = ivec2(gl_FragCoord.xy);\n"
+			"    const mat4 M = mat4(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0);\n"
+			"    vec4 f = texelFetch(TF0_raw, mi(o + ivec2(1, 0), ivec2(TF0_size)), 0) * TF0_mul;\n"
+			"    float h = texelFetch(TH_raw, o / 2, 0).x * TH_mul;\n"
+			"    vec4 c = HOOKED_texOff(vec2(0.0));\n"
+			"    c.x += vpnn_gain * ((M * f).x - h) * K[o.x % 2 == 0 ? 0 : 1];\n"
+			"    return c;\n"
+			"}\n";
+	}
+
+	inline NetPackage SyntheticPackage()
+	{
+		ParseResult r = ParseShaderText(SyntheticShader(), "T_tiny");
+		Assert::IsTrue(r.ok, W(r.error).c_str());
+		return r.package;
+	}
+
+	inline CpuTexture SyntheticPlane(int w, int h)
+	{
+		CpuTexture t(w, h, 1);
+		for (int y = 0; y < h; ++y)
+			for (int x = 0; x < w; ++x)
+				t.rgba[(static_cast<size_t>(y) * w + x) * 4] = 0.2f + 0.05f * ((x * 7 + y * 3) % 11);
+		return t;
+	}
+
+	// The synthetic net's maths written directly (the oracle for the interpreter).
+	inline float SyntheticExpected(const CpuTexture& in, int x, int y, float gain)
+	{
+		const int w = in.width, h = in.height;
+		auto mirror = [](int p, int s) { p = std::abs(p); return (s - 1) - std::abs((s - 1) - p); };
+		const float c1 = in.At(mirror(x + 1, w), y);
+		const float mf = 1.0f * c1 + 5.0f * c1 * c1;   // (M * f).x, column-major
+		const int hx = x / 2, hy = y / 2;
+		float s = 0.0f, n = 0.0f;
+		for (int dy = 0; dy < 2; ++dy)
+			for (int dx = 0; dx < 2; ++dx)
+			{
+				const int qx = hx * 2 + dx, qy = hy * 2 + dy;
+				if (qx < w && qy < h) { s += in.At(qx, qy); n += 1.0f; }
+			}
+		const float half = s / std::max(n, 1.0f);
+		return in.At(x, y) + gain * (mf - half) * (x % 2 == 0 ? 1.0f : 0.5f);
+	}
+
+	// ------------------------------------------------------------------ reference cases
+	struct RefCase
+	{
+		std::string name;
+		Json desc;
+		NetPackage pkg;
+		std::vector<CpuTexture> textures;
+		NetRunInputs inputs;
+		std::vector<float> expected;
+		int outW = 0, outH = 0;
+	};
+
+	// Loads tests/data/<name> and its export; false (with the reason in *skip) when the export is
+	// not available here or differs from the one the case was made from.
+	inline bool LoadCase(const std::string& name, RefCase& c, std::string* skip)
+	{
+		c = RefCase();
+		c.name = name;
+		std::string text, err;
+		Assert::IsTrue(ReadTextFile(DataDir() + name + "/case.json", text), W("missing reference case " + name).c_str());
+		Assert::IsTrue(ParseJson(text, c.desc, &err), W(err).c_str());
+		const std::string shaderFile = c.desc["shader"].text;
+		std::string shader;
+		bool found = false;
+		for (const std::string& dir : ExportDirs())
+		{
+			std::string candidate;
+			if (ReadTextFile(dir + "/shaders/" + shaderFile, candidate) && Sha256Hex(candidate) == c.desc["shader_sha256"].text)
+			{
+				shader = candidate;
+				found = true;
+				break;
+			}
+		}
+		if (!found)
+		{
+			*skip = "no export here matches the " + shaderFile + " this case was made from";
+			return false;
+		}
+		if (c.desc.Has("text_patch"))
+		{
+			const std::string from = c.desc["text_patch"]["from"].text, to = c.desc["text_patch"]["to"].text;
+			const size_t at = shader.find(from);
+			Assert::IsTrue(at != std::string::npos && shader.find(from, at + 1) == std::string::npos, W("patch target not unique: " + from).c_str());
+			shader.replace(at, from.size(), to);
+		}
+		ParseResult pr = ParseShaderText(shader, shaderFile.substr(0, shaderFile.size() - 5));
+		Assert::IsTrue(pr.ok, W(pr.error).c_str());
+		c.pkg = pr.package;
+		const Json& binds = c.desc["bindings"];
+		c.textures.reserve(binds.items.size());
+		for (const Json& b : binds.items)
+		{
+			const int w = static_cast<int>(b["width"].number), h = static_cast<int>(b["height"].number), comps = static_cast<int>(b["components"].number);
+			const std::vector<float> v = ReadF32(DataDir() + name + "/" + b["file"].text, static_cast<size_t>(w) * h * comps);
+			c.textures.push_back(CpuTexture::FromPlane(w, h, comps, v.data()));
+			c.inputs.textures[b["name"].text] = c.textures.back().Ref();
+		}
+		for (const auto& kv : c.desc["params"].fields) c.inputs.params[kv.first] = kv.second.number;
+		c.outW = static_cast<int>(c.desc["output"]["width"].number);
+		c.outH = static_cast<int>(c.desc["output"]["height"].number);
+		c.expected = ReadF32(DataDir() + name + "/expected.f32", static_cast<size_t>(c.outW) * c.outH);
+		return true;
+	}
+
+	inline double MaxDiffCodes(const CpuTexture& out, const std::vector<float>& ref, int w, int h)
+	{
+		double m = 0.0;
+		for (int y = 0; y < h; ++y)
+			for (int x = 0; x < w; ++x)
+				m = std::max(m, static_cast<double>(std::fabs(out.At(x, y) - ref[static_cast<size_t>(y) * w + x])));
+		return m * 1023.0;
+	}
+
+	inline bool RunCase(RefCase& c, TexFormat fmt, CpuNetExecutor& ex, std::string* err)
+	{
+		NetPrepareParams pp;
+		pp.intermediate = fmt;
+		if (!ex.Prepare(NetDeviceContext(), c.pkg, pp, err)) return false;
+		NetTexture out;
+		return ex.Run(NetDeviceContext(), c.inputs, out, err);
+	}
+
+	// data/<set>/<case>: round1 = the trained round-1 export (E:), smoke = the laptop's smoke export.
+	const char* const kSets[] = { "round1", "smoke" };
+	const char* const kCases[] = { "C_rebase_refine_h", "C_rebase_refine_v", "D_hybrid_refine", "A_single_small",
+		"A_single_small_open", "A_motion_small", "A_motion_small_open" };
+
+	TEST_CLASS(NetRunnerTests)
+	{
+	public:
+		// ------------------------------------------------------------ parsing
+		TEST_METHOD(JsonReadsExportShapes)
+		{
+			Json j;
+			std::string err;
+			Assert::IsTrue(ParseJson("{\"shaders\": [\"a.glsl\", \"b.glsl\"], \"fp16_check\": {\"fp16_within_1_lsb\": false, \"x\": -1.5e-3},"
+				" \"s\": \"C:\\\\dev\\u000b\", \"n\": null}", j, &err), W(err).c_str());
+			Assert::AreEqual(size_t(2), j["shaders"].items.size());
+			Assert::AreEqual(std::string("b.glsl"), j["shaders"].items[1].text);
+			Assert::IsFalse(j["fp16_check"]["fp16_within_1_lsb"].boolean);
+			Assert::AreEqual(-1.5e-3, j["fp16_check"]["x"].number, 1e-12);
+			Assert::AreEqual(std::string("C:\\dev\v"), j["s"].text);
+			Assert::IsFalse(ParseJson("{\"a\": }", j, &err));
+		}
+
+		TEST_METHOD(ParsesTheSyntheticPackage)
+		{
+			const NetPackage p = SyntheticPackage();
+			Assert::AreEqual(size_t(3), p.passes.size());
+			Assert::AreEqual(std::string("T features"), p.passes[0].desc);
+			Assert::AreEqual(std::string("TF0"), p.passes[0].save);
+			Assert::AreEqual(16, p.passes[1].computeX);
+			Assert::AreEqual(std::string("HOOKED.w 2 / 0.25 +"), p.passes[1].width);
+			Assert::AreEqual(1, p.passes[1].components);
+			Assert::IsTrue(p.passes[2].save.empty(), L"the last pass writes the hooked stage");
+			Assert::AreEqual(size_t(2), p.savedTextures.size());
+			Assert::AreEqual(size_t(1), p.contract.inputs.size());
+			Assert::AreEqual(std::string("HOOKED"), p.contract.inputs[0]);
+			Assert::AreEqual(std::string("LUMA"), p.contract.outputStage);
+			Assert::IsTrue(p.contract.site == RunSite::FrontEnd);
+			Assert::IsTrue(p.contract.tileGated, L"a compute pass counts as tile gated");
+			Assert::IsFalse(p.contract.neighbours);
+			Assert::AreEqual(size_t(1), p.params.size());
+			Assert::AreEqual(0.25, p.params[0].defaultValue, 1e-12);
+			Assert::AreEqual(std::string("vpnn_gain"), p.contract.labels[0]);
+			Assert::IsTrue(p.role == NetRole::RepairDelivered, L"input_stage 'A:' -> repair");
+			Assert::IsTrue(SlotOf(p.role) == PipelineSlots::Id::RepairEncoding);
+			const NetFingerprint& fp = p.fingerprint;
+			Assert::AreEqual(std::string("0123456789abcdef"), fp.id);
+			Assert::AreEqual(std::string("vpnn-labels-v1"), fp.labelSchema);
+			Assert::AreEqual(std::string("H>V"), fp.passOrder);
+			Assert::IsTrue(fp.intermediate == TexFormat::Rgba32f);
+			Assert::IsTrue(fp.handoff == TexFormat::R16Unorm);
+			Assert::AreEqual(std::string("r1"), fp.Field("rebase_settings"));
+		}
+
+		TEST_METHOD(RejectsMalformedPackages)
+		{
+			Assert::IsFalse(ParseShaderText("// nothing\n", "x").ok, L"no passes");
+			Assert::IsFalse(ParseShaderText("//!DESC a\n//!HOOK LUMA\n//!BIND HOOKED\n//!SAVE T\n//!COMPONENTS 1\n\nvec4 hook() { return vec4(0.0); }\n", "x").ok,
+				L"a net whose last pass saves has no output");
+			Assert::IsFalse(ParseShaderText("//!DESC a\n//!HOOK LUMA\n//!OFFSET 1 1\n//!COMPONENTS 1\n\nvec4 hook() { return vec4(0.0); }\n", "x").ok,
+				L"directives outside the exporter's subset are refused, not ignored");
+			Assert::IsFalse(ParseShaderText("//!DESC a\n//!HOOK LUMA\n//!WIDTH HOOKED.w\n//!COMPONENTS 1\n\nvec4 hook() { return vec4(0.0); }\n", "x").ok,
+				L"WIDTH without HEIGHT");
+		}
+
+		TEST_METHOD(SizeExpressionsRoundLikeLibplacebo)
+		{
+			auto lookup = [](const std::string& n, char wh, int& v) { if (n != "HOOKED") return false; v = wh == 'w' ? 25 : 24; return true; };
+			int r = 0;
+			std::string err;
+			Assert::IsTrue(EvalSizeExpr("HOOKED.w 8 / 0.4375 +", lookup, r, &err));
+			Assert::AreEqual(4, r, L"ceil(25 / 8) through roundf");
+			Assert::IsTrue(EvalSizeExpr("HOOKED.h 8 / 0.4375 +", lookup, r, &err));
+			Assert::AreEqual(3, r, L"ceil(24 / 8)");
+			Assert::IsTrue(EvalSizeExpr("HOOKED.w 2 *", lookup, r, &err));
+			Assert::AreEqual(50, r);
+			Assert::IsTrue(EvalSizeExpr("HOOKED.w 2 /", lookup, r, &err));
+			Assert::AreEqual(13, r, L"12.5 rounds half away from zero");
+			Assert::IsFalse(EvalSizeExpr("OTHER.w", lookup, r, &err));
+			Assert::IsFalse(EvalSizeExpr("HOOKED.w +", lookup, r, &err));
+		}
+
+		// ------------------------------------------------------------ interpreter + CPU executor
+		TEST_METHOD(GlslMiniEvaluatesTheExporterSubset)
+		{
+			Glsl::Program prog;
+			std::string err;
+			const char* src =
+				"const vec4 KV[3] = vec4[3](vec4(1.0), vec4(2.0, 3.0, 4.0, 5.0), vec4(0.0));\n"
+				"int twice(int v) { return v * 2; }\n"
+				"vec4 hook() {\n"
+				"    ivec2 a = ivec2(7, -7);\n"
+				"    ivec2 q = a / 2;\n"                      // integer division truncates
+				"    int m = 7 % 3;\n"
+				"    vec4 c = vec4(0.5);\n"
+				"    c.y += 1.0; c.zw = vec2(3.0, 4.0);\n"
+				"    float acc = 0.0;\n"
+				"    for (int i = 0; i < 4; i++) { if (i == 2) continue; acc += float(i); }\n"
+				"    mat4 M = mat4(2.0);\n"
+				"    vec4 mv = M * vec4(1.0, 2.0, 3.0, 4.0);\n"
+				"    bool b = acc > 3.0 && !(m == 0);\n"
+				"    float t = b ? KV[1].y : -1.0;\n"
+				"    return vec4(float(q.x * 10 + q.y), float(twice(m)) + acc, c.y + t + mv.w, clamp(tanh(0.0) + dot(vec2(1.0, 2.0), vec2(3.0, 4.0)), 0.0, 10.0));\n"
+				"}\n";
+			Assert::IsTrue(prog.Parse(src, &err), W(err).c_str());
+			Glsl::Context ctx;
+			ctx.externs.resize(prog.Externs().size());
+			Glsl::Value r;
+			Assert::IsTrue(prog.Call("hook", ctx, r), W(ctx.error).c_str());
+			Assert::AreEqual(27.0f, r.f[0], L"7/2 = 3, -7/2 = -3 -> 30 - 3");
+			Assert::AreEqual(6.0f, r.f[1], L"twice(1) + (0 + 1 + 3)");
+			Assert::AreEqual(1.5f + 3.0f + 8.0f, r.f[2]);
+			Assert::AreEqual(10.0f, r.f[3], L"dot 11 clamped to 10");
+		}
+
+		TEST_METHOD(CpuExecutorRunsTheSyntheticNetExactly)
+		{
+			const NetPackage pkg = SyntheticPackage();
+			CpuNetExecutor ex;
+			std::string err;
+			NetPrepareParams pp;
+			pp.intermediate = TexFormat::Rgba32f;
+			Assert::IsTrue(ex.Prepare(NetDeviceContext(), pkg, pp, &err), W(err).c_str());
+			CpuTexture in = SyntheticPlane(7, 5);   // odd sizes: the ceil-half pass and the mirror edge
+			NetRunInputs inputs;
+			inputs.textures["HOOKED"] = in.Ref();
+			inputs.params["vpnn_gain"] = 0.125;
+			NetTexture out;
+			Assert::IsTrue(ex.Run(NetDeviceContext(), inputs, out, &err), W(err).c_str());
+			Assert::AreEqual(7, out.width);
+			Assert::AreEqual(5, out.height);
+			const CpuTexture* half = ex.Texture("TH");
+			Assert::IsNotNull(half);
+			Assert::AreEqual(4, half->width, L"roundf(7 / 2 + 0.25)");
+			Assert::AreEqual(3, half->height);
+			for (int y = 0; y < 5; ++y)
+				for (int x = 0; x < 7; ++x)
+					Assert::AreEqual(SyntheticExpected(in, x, y, 0.125f), ex.Output().At(x, y), 1e-6f);
+			// A missing label uses the export's default (0.25), reported by ResolveInputs.
+			inputs.params.clear();
+			Assert::AreEqual(size_t(1), ResolveInputs(pkg, inputs).missingLabels.size());
+			Assert::IsTrue(ex.Run(NetDeviceContext(), inputs, out, &err), W(err).c_str());
+			Assert::AreEqual(SyntheticExpected(in, 3, 2, 0.25f), ex.Output().At(3, 2), 1e-6f);
+		}
+
+		TEST_METHOD(HalfPrecisionEmulation)
+		{
+			Assert::AreEqual(1.0f, RoundToHalf(1.0f));
+			Assert::AreEqual(1.0f, RoundToHalf(1.0f + 1.0f / 4096.0f), L"below half an fp16 ulp at 1.0");
+			Assert::AreEqual(1.0f + 1.0f / 1024.0f, RoundToHalf(1.0f + 3.0f / 4096.0f));
+			Assert::AreEqual(65504.0f, RoundToHalf(65504.0f));
+			Assert::IsTrue(std::isinf(RoundToHalf(70000.0f)));
+			Assert::AreEqual(0.0f, RoundToHalf(1e-9f));
+		}
+
+		TEST_METHOD(TimingHookRecordsAgainstTheSlot)
+		{
+			const NetPackage pkg = SyntheticPackage();
+			CpuNetExecutor ex;
+			SlotTiming::Accumulator acc;
+			ex.SetTiming(&acc, SlotOf(pkg.role));
+			std::string err;
+			Assert::IsTrue(ex.Prepare(NetDeviceContext(), pkg, NetPrepareParams(), &err), W(err).c_str());
+			CpuTexture in = SyntheticPlane(8, 4);
+			NetRunInputs inputs;
+			inputs.textures["HOOKED"] = in.Ref();
+			NetTexture out;
+			Assert::IsTrue(ex.Run(NetDeviceContext(), inputs, out, &err), W(err).c_str());
+			Assert::AreEqual(uint64_t(1), acc.Samples(PipelineSlots::Id::RepairEncoding));
+		}
+
+		// ------------------------------------------------------------ real exports
+		TEST_METHOD(ParsesTheRealExports)
+		{
+			const char* nets[] = { "A_single_small", "A_motion_small", "C_rebase_refine", "D_hybrid_refine", "B_x2" };
+			int parsed = 0;
+			for (const std::string& dir : ExportDirs())
+			for (const char* net : nets)
+			{
+				std::vector<NetPackage> pkgs;
+				std::string err, probe;
+				const std::string json = dir + "/export_" + net + ".json";
+				if (!ReadTextFile(json, probe)) continue;
+				Json ej;
+				Assert::IsTrue(ParseJson(probe, ej, &err), W(err).c_str());
+				const bool fp16 = ej["fp16_check"]["fp16_within_1_lsb"].boolean;
+				Assert::IsTrue(LoadExport(json, std::string(), pkgs, &err), W(err).c_str());
+				Assert::AreEqual(ej["shaders"].items.size(), pkgs.size());
+				for (const NetPackage& p : pkgs)
+				{
+					++parsed;
+					const std::string n = p.name;
+					Log(dir + ": " + n + ": " + std::to_string(p.passes.size()) + " passes, " + RoleName(p.role) + ", fingerprint " +
+						p.fingerprint.id + ", " + std::to_string(p.weightLiterals) + " float literals");
+					Assert::AreEqual(ej["fingerprint"]["fingerprint"].text, p.fingerprint.id, W(n).c_str());
+					Assert::AreEqual(fp16, p.fingerprint.fp16Allowed, W(n).c_str());
+					Assert::AreEqual(std::string("H>V"), p.fingerprint.passOrder, W(n).c_str());
+					Assert::IsTrue(p.fingerprint.intermediate == TexFormat::Rgba32f, W(n).c_str());
+					Assert::IsTrue(p.fingerprint.handoff == TexFormat::R16Unorm, W(n).c_str());
+					Assert::IsFalse(p.fingerprint.Field("stage_contract").empty(), W(n).c_str());
+					// The upstream key the design needs is not in the round-1 exports (U3).
+					Assert::IsTrue(p.fingerprint.Field("upstream_key").empty(), W(n).c_str());
+					// Every pass body is accepted by the CPU interpreter.
+					CpuNetExecutor ex;
+					Assert::IsTrue(ex.Prepare(NetDeviceContext(), p, NetPrepareParams(), &err), W(err).c_str());
+					if (n[0] == 'A')
+					{
+						Assert::IsTrue(p.role == NetRole::RepairDelivered, W(n).c_str());
+						Assert::AreEqual(std::string(kLabelSchemaV1), p.fingerprint.labelSchema);
+						Assert::AreEqual(size_t(7), p.contract.labels.size());
+						Assert::IsTrue(p.contract.tileGated);
+						Assert::AreEqual(n.find("motion") != std::string::npos, p.contract.neighbours);
+						Assert::IsTrue(p.contract.site == RunSite::FrontEnd);
+						Assert::IsTrue(SlotOf(p.role) == PipelineSlots::Id::RepairEncoding);
+						// The label tables match the export's PARAM ranges.
+						Assert::AreEqual(4.0, p.FindParam("vpnn_kernel")->maximum, 0.0, L"bicubic, lanczos, spline, bilinear + none");
+						Assert::AreEqual(4.0, p.FindParam("vpnn_codec")->maximum, 0.0, L"AVC, HEVC, AV1, VP9, unknown");
+						Assert::AreEqual(4.0, p.FindParam("vpnn_codec")->defaultValue, 0.0, L"default = unknown");
+						for (const auto& kv : ParamsFromLabelsV1(LabelsV1()))
+							Assert::IsNotNull(p.FindParam(kv.first), W(kv.first).c_str());
+					}
+					else if (n[0] == 'C')
+					{
+						Assert::IsTrue(p.role == NetRole::RebaseRefine, W(n).c_str());
+						Assert::AreEqual(size_t(1), p.contract.inputs.size());
+						Assert::IsTrue(SlotOf(p.role) == PipelineSlots::Id::ScalingRebase);
+					}
+					else if (n[0] == 'B')
+					{
+						Assert::IsTrue(p.role == NetRole::X2Restore, W(n).c_str());
+						Assert::AreEqual(n.back() == 'h' ? std::string("HOOKED.w 2 *") : std::string("HOOKED.w"), p.passes.back().width, W(n).c_str());
+					}
+					else
+					{
+						Assert::IsTrue(p.role == NetRole::ScaleRefine, W(n).c_str());
+						Assert::IsTrue(p.contract.site == RunSite::PostKernelHook);
+						Assert::IsTrue(p.contract.usesLinearSampling, L"D samples the source features bilinearly");
+						Assert::AreEqual(size_t(2), p.contract.inputs.size());
+						Assert::IsTrue(SlotOf(p.role) == PipelineSlots::Id::ScalingOutput);
+					}
+				}
+			}
+			Log("parsed " + std::to_string(parsed) + " real packages");
+			if (!parsed) Log("SKIPPED: no export directory present");
+		}
+
+		TEST_METHOD(CpuReferenceMatchesPyTorch)
+		{
+			int ran = 0;
+			for (const char* set : kSets)
+			for (const char* caseName : kCases)
+			{
+				const std::string name = std::string(set) + "/" + caseName;
+				RefCase c;
+				std::string skip, err;
+				if (!LoadCase(name, c, &skip)) { Log("SKIPPED " + name + ": " + skip); continue; }
+				CpuNetExecutor ex;
+				Assert::IsTrue(RunCase(c, TexFormat::Rgba32f, ex, &err), W(err).c_str());
+				Assert::AreEqual(c.outW, ex.Output().width, W(name).c_str());
+				Assert::AreEqual(c.outH, ex.Output().height, W(name).c_str());
+				const double d32 = MaxDiffCodes(ex.Output(), c.expected, c.outW, c.outH);
+				// How much the net changed the picture (0 for a closed gate: the exact-copy path).
+				const CpuTexture& base = c.textures[0];
+				double corr = 0.0;
+				for (int y = 0; y < c.outH; ++y)
+					for (int x = 0; x < c.outW; ++x)
+						corr = std::max(corr, static_cast<double>(std::fabs(c.expected[static_cast<size_t>(y) * c.outW + x] - base.At(x, y))));
+				corr *= 1023.0;
+				CpuNetExecutor ex16;
+				Assert::IsTrue(RunCase(c, TexFormat::Rgba16f, ex16, &err), W(err).c_str());
+				const double d16 = MaxDiffCodes(ex16.Output(), c.expected, c.outW, c.outH);
+				char line[256];
+				snprintf(line, sizeof line, "%-27s max |cpu - pytorch|: rgba32f %.5f codes, rgba16f %.4f codes; net correction up to %.3f codes",
+					name.c_str(), d32, d16, corr);
+				Log(line);
+				Assert::IsTrue(d32 < 0.01, W(name + ": the CPU executor disagrees with PyTorch").c_str());
+				const bool gateClosed = c.desc.Has("gate_tiles_open") && c.desc["gate_tiles_open"].number == 0;
+				if (gateClosed)
+					Assert::AreEqual(0.0, corr, 0.0, L"a closed gate copies the input exactly");
+				else
+					Assert::IsTrue(corr > 0.01, W(name + ": the case does not exercise the net").c_str());
+				if (c.pkg.fingerprint.fp16Allowed)
+					Assert::IsTrue(d16 < 0.05, W(name + ": fp16 allowed but drifts").c_str());
+				++ran;
+			}
+			Log("ran " + std::to_string(ran) + " PyTorch reference cases");
+		}
+
+		TEST_METHOD(LabelsReachTheNet)
+		{
+			RefCase c;
+			std::string skip, err;
+			if (!LoadCase("round1/A_single_small_open", c, &skip) && !LoadCase("smoke/A_single_small_open", c, &skip)) { Log("SKIPPED: " + skip); return; }
+			// The case's labels as schema v1 values give the same PARAMs the reference used.
+			LabelsV1 l;
+			l.ratioY = 0.5; l.ratioX = 0.5; l.kernel = "lanczos"; l.codec = "HEVC"; l.bppTier = 0.5; l.tenBit = true;
+			const std::map<std::string, double> params = ParamsFromLabelsV1(l);
+			for (const auto& kv : params)
+				Assert::AreEqual(c.inputs.params[kv.first], kv.second, 1e-9, W(kv.first).c_str());
+			CpuNetExecutor ex;
+			c.inputs.params = ParamsFromLabelsV1(LabelsV1());   // unknown codec, native, no kernel
+			Assert::IsTrue(RunCase(c, TexFormat::Rgba32f, ex, &err), W(err).c_str());
+			Assert::IsTrue(MaxDiffCodes(ex.Output(), c.expected, c.outW, c.outH) > 1e-4, L"different labels must change A's output");
+		}
+
+		TEST_METHOD(InvalidVectorsUseTheSingleFrameFallback)
+		{
+			RefCase c;
+			std::string skip, err;
+			if (!LoadCase("round1/A_motion_small_open", c, &skip) && !LoadCase("smoke/A_motion_small_open", c, &skip)) { Log("SKIPPED: " + skip); return; }
+			CpuNetExecutor viaState;
+			c.inputs.state.neighboursValid = false;
+			Assert::IsTrue(RunCase(c, TexFormat::Rgba32f, viaState, &err), W(err).c_str());
+			// The same as binding prev = next = the frame and an all-zero mask explicitly.
+			CpuTexture zero(c.textures[0].width, c.textures[0].height, 2);
+			for (size_t i = 0; i < zero.rgba.size(); i += 4) zero.rgba[i] = zero.rgba[i + 1] = 0.0f;
+			NetRunInputs explicitIn = c.inputs;
+			explicitIn.state.neighboursValid = true;
+			explicitIn.textures["VPNN_PREV"] = c.textures[0].Ref();
+			explicitIn.textures["VPNN_NEXT"] = c.textures[0].Ref();
+			explicitIn.textures["VPNN_MASK"] = zero.Ref();
+			CpuNetExecutor ex;
+			NetPrepareParams pp;
+			pp.intermediate = TexFormat::Rgba32f;
+			Assert::IsTrue(ex.Prepare(NetDeviceContext(), c.pkg, pp, &err), W(err).c_str());
+			NetTexture out;
+			Assert::IsTrue(ex.Run(NetDeviceContext(), explicitIn, out, &err), W(err).c_str());
+			for (int y = 0; y < c.outH; ++y)
+				for (int x = 0; x < c.outW; ++x)
+					Assert::AreEqual(ex.Output().At(x, y), viaState.Output().At(x, y));
+			// Missing neighbour textures are the same fallback, not an error.
+			NetRunInputs noNeighbours = c.inputs;
+			noNeighbours.state.neighboursValid = true;
+			noNeighbours.textures.erase("VPNN_PREV");
+			Assert::IsTrue(ResolveInputs(c.pkg, noNeighbours).neighbourFallback);
+		}
+
+		// ------------------------------------------------------------ fingerprints + fallbacks
+		TEST_METHOD(FingerprintMatchAndMismatch)
+		{
+			const NetPackage pkg = SyntheticPackage();
+			NetRuntimeContext ctx = ContextMatching(pkg);
+			ctx.policy.upstreamKey = Requirement::IfDeclared;   // the synthetic export has none, like round 1
+			Assert::IsTrue(CheckFingerprint(pkg, ctx).match, W(CheckFingerprint(pkg, ctx).Summary()).c_str());
+
+			// The design's default requires the upstream key: round-1/2 exports are bypassed until the kit writes it.
+			NetRuntimeContext strict = ContextMatching(pkg);
+			strict.upstreamKey = "scaling.rebase>repair.encoding";
+			FingerprintResult r = CheckFingerprint(pkg, strict);
+			Assert::IsFalse(r.match);
+			Assert::AreEqual(std::string("export has no upstream key"), r.reasons[0]);
+
+			NetRuntimeContext c2 = ctx;
+			c2.labelSchema = "vpnn-labels-v2";
+			r = CheckFingerprint(pkg, c2);
+			Assert::IsFalse(r.match);
+			Assert::IsTrue(r.Summary().find("label schema vpnn-labels-v2 != trained vpnn-labels-v1") == 0, W(r.Summary()).c_str());
+
+			c2 = ctx;
+			c2.passOrder = "V>H";
+			Assert::IsFalse(CheckFingerprint(pkg, c2).match, L"pass order");
+
+			c2 = ctx;
+			c2.intermediate = TexFormat::Rgba16f;
+			r = CheckFingerprint(pkg, c2);
+			Assert::IsFalse(r.match, L"fp16 not proven for this export");
+			Assert::IsTrue(r.reasons[0].find("intermediates rgba16f != trained rgba32f") == 0, W(r.reasons[0]).c_str());
+			NetPackage proven = pkg;
+			proven.fingerprint.fp16Allowed = true;
+			Assert::IsTrue(CheckFingerprint(proven, c2).match, L"fp16 allowed where the export proved it");
+
+			c2 = ctx;
+			c2.stageContract = "something else";
+			Assert::IsFalse(CheckFingerprint(pkg, c2).match, L"stage contract");
+
+			c2 = ctx;
+			c2.settingsHashes["rebase_settings"] = "r2";
+			r = CheckFingerprint(pkg, c2);
+			Assert::IsFalse(r.match, L"a changed upstream setting");
+			Assert::IsTrue(r.Summary().find("rebase_settings") == 0, W(r.Summary()).c_str());
+
+			c2 = ctx;
+			c2.vpCommit = "a newer commit";
+			Assert::IsTrue(CheckFingerprint(pkg, c2).match, L"the commit is recorded, not gating, by default");
+			c2.policy.vpCommit = Requirement::Must;
+			Assert::IsFalse(CheckFingerprint(pkg, c2).match, L"the bench can require the exact build");
+
+			c2 = ctx;
+			c2.labelSchema = "x";
+			c2.passOrder = "y";
+			r = CheckFingerprint(pkg, c2);
+			Assert::AreEqual(size_t(2), r.reasons.size());
+			Assert::IsTrue(r.Summary().find("(+1 more)") != std::string::npos);
+		}
+
+		TEST_METHOD(RealExportFingerprintsAgainstTheRunningPipeline)
+		{
+			int checked = 0;
+			for (const std::string& dir : ExportDirs())
+			{
+				std::vector<NetPackage> pkgs;
+				std::string err, probe;
+				const std::string json = dir + "/export_C_rebase_refine.json";
+				if (!ReadTextFile(json, probe)) continue;
+				Assert::IsTrue(LoadExport(json, std::string(), pkgs, &err), W(err).c_str());
+				const NetPackage& c = pkgs[0];
+				NetRuntimeContext ctx = ContextMatching(c);
+				ctx.upstreamKey = "scaling.rebase";
+				const FingerprintResult r = CheckFingerprint(c, ctx);
+				Assert::IsFalse(r.match, L"round-1 exports carry no upstream key");
+				Log(dir + ": " + c.name + " vs the running pipeline: " + r.Summary());
+				ctx.policy.upstreamKey = Requirement::IfDeclared;
+				Assert::IsTrue(CheckFingerprint(c, ctx).match);
+				ctx.intermediate = TexFormat::Rgba16f;
+				Assert::AreEqual(c.fingerprint.fp16Allowed, CheckFingerprint(c, ctx).match, L"fp16 only where the export proved it");
+				++checked;
+			}
+			if (!checked) Log("SKIPPED: no export directory present");
+		}
+
+		TEST_METHOD(MismatchEngagesTheFallbackEntry)
+		{
+			FallbackStatus::Registry registry;
+			NetBypassSet bypass(registry);
+			const NetPackage pkg = SyntheticPackage();
+			NetRuntimeContext ctx = ContextMatching(pkg);
+			ctx.policy.upstreamKey = Requirement::IfDeclared;
+			ctx.labelSchema = "vpnn-labels-v2";
+			Assert::IsTrue(bypass.Apply(pkg.name, CheckFingerprint(pkg, ctx)));
+			const std::string heading = registry.Heading();
+			Assert::AreEqual(std::string("Fallbacks engaged: nets: bypassed (T_tiny: label schema vpnn-labels-v2 != trained vpnn-labels-v1)"), heading);
+			const std::vector<std::string> ids = FallbackStatus::Ids(heading);
+			Assert::AreEqual(size_t(1), ids.size());
+			Assert::AreEqual(std::string("nets: bypassed"), ids[0]);
+			Assert::IsTrue(bypass.Bypass("C_rebase_refine_h", "export has no upstream key"));
+			Assert::IsTrue(registry.Heading().find("T_tiny: label schema") != std::string::npos);
+			Assert::IsTrue(registry.Heading().find(", C_rebase_refine_h: export has no upstream key)") != std::string::npos);
+			Assert::IsFalse(bypass.Bypass("C_rebase_refine_h", "export has no upstream key"), L"unchanged: no new log line");
+			ctx.labelSchema = "vpnn-labels-v1";
+			Assert::IsTrue(bypass.Apply(pkg.name, CheckFingerprint(pkg, ctx)), L"a match clears that net");
+			Assert::IsTrue(bypass.Clear("C_rebase_refine_h"));
+			Assert::AreEqual(std::string("Fallbacks engaged: none"), registry.Heading());
+		}
+
+		TEST_METHOD(NetSlotLoadsRunsAndBypassesVisibly)
+		{
+			FallbackStatus::Registry registry;
+			NetBypassSet bypass(registry);
+			CpuNetExecutor cpu;
+			NetSlot slot(cpu, bypass);
+			const NetPackage pkg = SyntheticPackage();
+			NetRuntimeContext ctx = ContextMatching(pkg);
+			ctx.policy.upstreamKey = Requirement::IfDeclared;
+			Assert::IsTrue(slot.Load(NetDeviceContext(), pkg, ctx));
+			Assert::IsTrue(slot.Intermediate() == TexFormat::Rgba32f, L"not fp16-proven -> rgba32f");
+			Assert::AreEqual(std::string("Fallbacks engaged: none"), registry.Heading());
+
+			CpuTexture in = SyntheticPlane(6, 4);
+			NetRunInputs inputs;
+			inputs.textures["HOOKED"] = in.Ref();
+			NetTexture out;
+			Assert::IsTrue(slot.Run(NetDeviceContext(), inputs, out));
+			Assert::AreEqual(6, out.width);
+
+			// The 8K rule: a designed bypass, still shown.
+			CpuTexture big(1, 1, 1);
+			NetRunInputs huge;
+			huge.textures["HOOKED"] = big.Ref();
+			huge.textures["HOOKED"].width = 7680;
+			huge.textures["HOOKED"].height = 4320;
+			Assert::IsTrue(ResolveInputs(pkg, huge).bypass);
+			Assert::IsFalse(slot.Run(NetDeviceContext(), huge, out));
+			Assert::IsTrue(registry.Heading().find("T_tiny: source above 3840x2160") != std::string::npos, W(registry.Heading()).c_str());
+			Assert::IsTrue(slot.Run(NetDeviceContext(), inputs, out), L"a normal frame recovers");
+			Assert::AreEqual(std::string("Fallbacks engaged: none"), registry.Heading());
+
+			// A missing contract input refuses the frame.
+			Assert::IsFalse(slot.Run(NetDeviceContext(), NetRunInputs(), out));
+			Assert::IsTrue(registry.Heading().find("no HOOKED texture") != std::string::npos);
+
+			// A fingerprint mismatch at load: not ready, entry shown.
+			ctx.stageContract = "changed";
+			Assert::IsFalse(slot.Load(NetDeviceContext(), pkg, ctx));
+			Assert::IsFalse(slot.Ready());
+			Assert::IsTrue(registry.Heading().find("stage contract") != std::string::npos, W(registry.Heading()).c_str());
+
+			// The pl_dispatch runner is a stub: it refuses, visibly.
+			PlNetRunner gpu;
+			FallbackStatus::Registry reg2;
+			NetBypassSet bypass2(reg2);
+			NetSlot gpuSlot(gpu, bypass2);
+			ctx.stageContract = pkg.fingerprint.Field("stage_contract");
+			Assert::IsFalse(gpuSlot.Load(NetDeviceContext(), pkg, ctx));
+			Assert::IsTrue(reg2.Heading().find("nets: bypassed (T_tiny: ") != std::string::npos, W(reg2.Heading()).c_str());
+		}
+
+		TEST_METHOD(CapabilityChecksPickTheFormat)
+		{
+			NetPackage pkg = SyntheticPackage();
+			NetCapabilities caps;
+			caps.compute = true;
+			caps.renderableRgba16f = caps.renderableRgba32f = caps.storableRgba16f = caps.storableRgba32f = true;
+			CapabilityResult r = CheckCapabilities(pkg, caps);
+			Assert::IsTrue(r.ok && r.intermediate == TexFormat::Rgba32f, L"trained rgba32f, fp16 not proven");
+			pkg.fingerprint.fp16Allowed = true;
+			r = CheckCapabilities(pkg, caps);
+			Assert::IsTrue(r.ok && r.intermediate == TexFormat::Rgba16f, L"fp16 by default where allowed");
+			caps.storableRgba16f = false;
+			r = CheckCapabilities(pkg, caps);
+			Assert::IsTrue(r.ok && r.intermediate == TexFormat::Rgba32f, L"falls back to rgba32f when fp16 is not storable");
+			caps.compute = false;
+			r = CheckCapabilities(pkg, caps);
+			Assert::IsFalse(r.ok, L"tile-gated compute passes need compute");
+			caps.compute = true;
+			pkg.contract.usesLinearSampling = true;
+			r = CheckCapabilities(pkg, caps);
+			Assert::IsFalse(r.ok, L"bilinear NAME_tex needs a linear-filterable format");
+			caps.linearRgba32f = true;
+			Assert::IsTrue(CheckCapabilities(pkg, caps).ok);
+		}
+
+		TEST_METHOD(RepairVariantFollowsTheLatencyRules)
+		{
+			Assert::IsTrue(ChooseRepairVariant(false, true, true) == RepairChoice::Motion);
+			Assert::IsTrue(ChooseRepairVariant(true, true, true) == RepairChoice::Single, L"queue 1: no A_motion");
+			Assert::IsTrue(ChooseRepairVariant(true, true, false) == RepairChoice::Bypass);
+			Assert::IsTrue(ChooseRepairVariant(false, false, true) == RepairChoice::Single);
+			Assert::IsTrue(ChooseRepairVariant(false, false, false) == RepairChoice::Bypass);
+			Assert::IsTrue(NeuralBypassForSize(3841, 2160));
+			Assert::IsTrue(NeuralBypassForSize(3840, 2161));
+			Assert::IsFalse(NeuralBypassForSize(3840, 2160));
+		}
+
+		// ------------------------------------------------------------ RGB
+		TEST_METHOD(RgbLumaDeltaKeepsChromaAndMatchesTheGpuPass)
+		{
+			const int w = 5, h = 3;
+			std::vector<float> rgba(static_cast<size_t>(w) * h * 4), before(static_cast<size_t>(w) * h), after(before.size());
+			for (int i = 0; i < w * h; ++i)
+			{
+				rgba[i * 4 + 0] = 0.1f + 0.05f * i;
+				rgba[i * 4 + 1] = 0.6f - 0.02f * i;
+				rgba[i * 4 + 2] = 0.3f;
+				rgba[i * 4 + 3] = 1.0f;
+				before[i] = LumaOf(rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], 0.2126f, 0.0722f);
+				after[i] = before[i] + 0.004f * ((i % 3) - 1);   // the repaired luma
+			}
+			const std::vector<float> original = rgba;
+			AddLumaDeltaToRgb(before.data(), after.data(), w, rgba.data(), w * 4, 4, w, h);
+			for (int i = 0; i < w * h; ++i)
+			{
+				const float y2 = LumaOf(rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], 0.2126f, 0.0722f);
+				Assert::AreEqual(after[i], y2, 1e-6f, L"the RGB luma becomes the repaired luma");
+				Assert::AreEqual(original[i * 4 + 2] - before[i], rgba[i * 4 + 2] - y2, 1e-6f, L"B - Y unchanged");
+				Assert::AreEqual(original[i * 4 + 0] - before[i], rgba[i * 4 + 0] - y2, 1e-6f, L"R - Y unchanged");
+				Assert::AreEqual(1.0f, rgba[i * 4 + 3]);
+			}
+			// Out of range is kept unless clamping is asked for (BTB/WTW preserved).
+			std::vector<float> px = { 0.99f, 0.5f, 0.01f, 1.0f };
+			const float lb = 0.5f, la = 0.53f;
+			AddLumaDeltaToRgb(&lb, &la, 1, px.data(), 4, 4, 1, 1);
+			Assert::IsTrue(px[0] > 1.0f);
+			std::vector<float> px2 = { 0.99f, 0.5f, 0.01f, 1.0f };
+			RgbDeltaOptions clamp;
+			clamp.clampToUnit = true;
+			AddLumaDeltaToRgb(&lb, &la, 1, px2.data(), 4, 4, 1, 1, clamp);
+			Assert::AreEqual(1.0f, px2[0]);
+
+			// The GPU pass text, run through the CPU executor, equals the helper.
+			ParseResult pr = ParseShaderText(kRgbLumaDeltaPass, "rgb_luma_delta");
+			Assert::IsTrue(pr.ok, W(pr.error).c_str());
+			CpuTexture rgb = CpuTexture::FromPlane(w, h, 4, original.data());
+			CpuTexture lb2 = CpuTexture::FromPlane(w, h, 1, before.data());
+			CpuTexture la2 = CpuTexture::FromPlane(w, h, 1, after.data());
+			CpuNetExecutor ex;
+			std::string err;
+			NetPrepareParams pp;
+			pp.intermediate = TexFormat::Rgba32f;
+			Assert::IsTrue(ex.Prepare(NetDeviceContext(), pr.package, pp, &err), W(err).c_str());
+			NetRunInputs in;
+			in.textures["HOOKED"] = rgb.Ref();
+			in.textures["LUMA_BEFORE"] = lb2.Ref();
+			in.textures["LUMA_AFTER"] = la2.Ref();
+			NetTexture out;
+			Assert::IsTrue(ex.Run(NetDeviceContext(), in, out, &err), W(err).c_str());
+			for (int y = 0; y < h; ++y)
+				for (int x = 0; x < w; ++x)
+					for (int ch = 0; ch < 4; ++ch)
+						Assert::AreEqual(rgba[(static_cast<size_t>(y) * w + x) * 4 + ch], ex.Output().At(x, y, ch), 1e-7f);
+		}
+	};
+}
