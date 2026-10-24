@@ -731,6 +731,7 @@ namespace RendererProfileConfig
 			if (key == "capture_path") return IsChoice(value, { "standard", "gpu" });
 			if (key == "capture_upload") return IsChoice(value, { "auto", "render", "early" });
 			if (key == "dv_tone_mapping") return IsChoice(value, { "libplacebo", "dolby_style" });   // feat/dv-l8
+			if (key == "dv_compare_capture_folder") return value.find('"') == std::string::npos;   // feat/dv-l8 WIP: a folder, "" = off
 			if (key == "source_range") return IsChoice(value, { "auto", "full", "limited" });
 			// native | auto | any height in lines (general: not a fixed list).
 			if (key == "source_resolution")

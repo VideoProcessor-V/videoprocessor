@@ -60,7 +60,9 @@ VP compare its mapping with Dolby's. About 20 minutes plus copying time.
 feat/dv-l8 (2026-10-24). The same two runs, but VP records from inside the renderer. Each clip also
 carries, per picture, the decoded DM (L1/L2/L8/L9/L10), the DM hold state, and the trim level and
 parameters VP chose, so the comparison can say which trims (L8 or L2) were in force. It is off unless
-the variable is set; a Config toggle and hotkey come later (after the skeleton merge).
+the variable is set. WIP (drafted, not yet verified): the Config Diagnostics folder
+`dv_compare_capture_folder` replaces the variable, and the `dv_compare_capture` shortcut
+(default Ctrl+Alt+C) starts a clip or stops it early, instead of the RECORD file.
 
 - Start VP from PowerShell with a folder on a large drive (never a source folder):
   ```

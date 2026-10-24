@@ -670,6 +670,7 @@ const ShortcutDefinition SHORTCUT_DEFINITIONS[] =
 	{ "state_report",          ID_COMMAND_STATE_REPORT },
 	// Raw capture recording (RawCaptureRecorder.h; needs VP_RAW_CAPTURE_PATH).
 	{ "raw_capture",           ID_COMMAND_RAW_CAPTURE_TOGGLE },
+	{ "dv_compare_capture",    ID_COMMAND_DV_COMPARE_CAPTURE },   // feat/dv-l8 WIP
 	{ "reapply_rules",         ID_COMMAND_REAPPLY_RULES },
 	{ "room_lights",           ID_COMMAND_ROOM_LIGHTS },
 	{ "show_profiles",         ID_COMMAND_SHOW_PROFILES },
@@ -2224,6 +2225,7 @@ BEGIN_MESSAGE_MAP(CVideoProcessorDlg, CDialog)
 	ON_COMMAND(ID_COMMAND_CAPTURE_RENDERED_OUTPUT, &CVideoProcessorDlg::OnCommandCaptureRenderedOutput)
 	ON_COMMAND(ID_COMMAND_STATE_REPORT, &CVideoProcessorDlg::OnCommandStateReport)
 	ON_COMMAND(ID_COMMAND_RAW_CAPTURE_TOGGLE, &CVideoProcessorDlg::OnCommandRawCaptureToggle)
+	ON_COMMAND(ID_COMMAND_DV_COMPARE_CAPTURE, &CVideoProcessorDlg::OnCommandDvCompareCapture)
 	ON_COMMAND(ID_COMMAND_DISPLAY_RULE_AUTO, &CVideoProcessorDlg::OnCommandDisplayRuleAuto)
 	ON_COMMAND(ID_COMMAND_CONFIG_EDITOR, &CVideoProcessorDlg::OnCommandConfigEditor)
 	ON_COMMAND(ID_COMMAND_TOGGLE_NO_UI, &CVideoProcessorDlg::OnCommandToggleNoUi)
@@ -9133,6 +9135,16 @@ void CVideoProcessorDlg::OnCommandRawCaptureToggle()
 	const std::string status = RawCaptureRecorder::Instance().Toggle();
 	OnRendererDetailString(CString(status.c_str()),
 		m_rendererGeneration.load(std::memory_order_acquire));
+}
+
+// feat/dv-l8 WIP: the dv_compare_capture shortcut - a DV comparison clip in the renderer
+// (DvCompareCapture.h); the status line is shown like the raw capture's.
+void CVideoProcessorDlg::OnCommandDvCompareCapture()
+{
+	CString status;
+	if (!m_videoRenderer || !m_videoRenderer->ToggleDvCompareCapture(status))
+		status = _T("DV comparison capture: needs the VP Renderer");
+	OnRendererDetailString(status, m_rendererGeneration.load(std::memory_order_acquire));
 }
 
 void CVideoProcessorDlg::OnCommandCaptureAnalysisDiagnostics(bool includeFrames)

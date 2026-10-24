@@ -1105,6 +1105,7 @@ namespace
 		// non-certified reimplementation, see DolbyVisionTrims.h).
 		bool dvTrims = true;             // default on (test/dv-synthetic verdict, 2026-10-24; not certified)
 		std::string dvToneMapping = "libplacebo";   // feat/dv-l8: libplacebo | dolby_style (DvDolbyStyle.h; approx.)
+		std::string dvCompareCaptureFolder;          // feat/dv-l8 WIP: DV comparison capture folder ("" = VP_DV_COMPARE_PATH / off)
 		// Restore switch (DV tunnel bug hunt 2026-10-17, default on): the whole-raster
 		// SDR alignment probe, the grey SDR exit, the loss limit in source pictures
 		// and L2 trims before L8 (CR210DolbyVisionTunnelFormatter). Off = before them.
@@ -1525,7 +1526,7 @@ namespace
 			<< settings.preserveExtendedRange << '|' << settings.extendedRangeMoreCases << '|' << settings.dejudderWarpRendered << '|'
 			// Settings applied live must change the fingerprint, or a profile edit
 			// touching only them is not applied until something else changes.
-			<< settings.captureUpload << '|' << settings.sourceRange << '|' << settings.sourceResolution << '|' << settings.dvToneMapping << '|'
+			<< settings.captureUpload << '|' << settings.sourceRange << '|' << settings.sourceResolution << '|' << settings.dvToneMapping << '|' << settings.dvCompareCaptureFolder << '|'
 			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.sourceResolutionEvidenceShots << '|'
 			<< settings.sourceResolutionEvidenceSeconds << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
 			<< settings.pipelineOriginalPathway << '|' << settings.pipelineOrder << '|' << settings.pipelineSlotsOff << '|'
@@ -2481,6 +2482,7 @@ namespace
 		readChoice("capture_path", settings.capturePath, { "standard", "gpu" });
 		readChoice("capture_upload", settings.captureUpload, { "auto", "render", "early" });
 		readChoice("dv_tone_mapping", settings.dvToneMapping, { "libplacebo", "dolby_style" });   // feat/dv-l8
+		config.TryGetString(rule.section, "dv_compare_capture_folder", settings.dvCompareCaptureFolder);   // feat/dv-l8 WIP
 		readChoice("source_range", settings.sourceRange, { "auto", "full", "limited" });
 		readChoice("deband_vp", settings.debandVp, { "off", "auto", "on" });
 		readChoice("low_bitrate_handling", settings.lowBitrateHandling, { "auto", "off", "on" });
@@ -12482,6 +12484,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.dvTunnelGpuUnpack != next.dvTunnelGpuUnpack, "dv_tunnel_gpu_unpack");
 		changed(current.dvTrims != next.dvTrims, "dv_trims");
 		changed(current.dvToneMapping != next.dvToneMapping, "dv_tone_mapping");
+		changed(current.dvCompareCaptureFolder != next.dvCompareCaptureFolder, "dv_compare_capture_folder");
 		changed(current.dvTunnelFixes != next.dvTunnelFixes, "dv_tunnel_fixes");
 		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
 			current.dejudderHoldHysteresis != next.dejudderHoldHysteresis ||
@@ -24023,6 +24026,7 @@ struct LibplaceboVideoRenderer::Impl
                 DebugLog::Log("Dolby Vision trims (non-certified): %s", params.c_str());
             }
         }
+        dvCompare.Configure(activeSettings.dvCompareCaptureFolder);   // feat/dv-l8 WIP: the Config folder
         if (dvCompare.Enabled())   // feat/dv-l8: DV comparison capture (diagnostic; VP_DV_COMPARE_PATH)
             dvCompare.OnRender(state, convertedPayload ? convertedPayload->rawFrame.get() : nullptr, videoFrame.GetCounter(),
                 convertedPayload && state.dolbyVisionTunnel ? &convertedPayload->dolby : nullptr, activeSettings.dvTrims,
@@ -29060,6 +29064,16 @@ bool LibplaceboVideoRenderer::GetFallbacksStatus(CString& status) const
 	return true;
 }
 
+// feat/dv-l8 WIP (plugin API 43): the dv_compare_capture shortcut (DvCompareCapture.h).
+bool LibplaceboVideoRenderer::ToggleDvCompareCapture(CString& status)
+{
+	status.Empty();
+	if (!m_impl)
+		return false;
+	status = CString(m_impl->dvCompare.Toggle().c_str());
+	return true;
+}
+
 bool LibplaceboVideoRenderer::GetLedDriveStatus(CString& status) const
 {
 	status.Empty();
@@ -32612,6 +32626,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "dv_tunnel_gpu_unpack=" << s.dvTunnelGpuUnpack << "\n"
 		<< "dv_trims=" << s.dvTrims << "\n"
 		<< "dv_tone_mapping=" << s.dvToneMapping << "\n"
+		<< "dv_compare_capture_folder=" << s.dvCompareCaptureFolder << "\n"
 		<< "dv_tunnel_fixes=" << (s.dvTunnelFixes ? "on" : "off") << "\n"
 		<< "occlusion_mask=" << s.occlusionMask << "\n"
 		<< "dither_vectors_own=" << s.ditherVectorsOwn << "\n"

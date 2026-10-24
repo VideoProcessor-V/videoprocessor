@@ -1140,6 +1140,7 @@ const FixedShortcutField kCaptureShortcutFields[] = {
     { "Video conversion off", "video_conversion_off", ShortcutDefaultChord("video_conversion_off") },
     { "V210 to P010 conversion", "video_conversion_p010", ShortcutDefaultChord("video_conversion_p010") },
     { "Raw capture recording (needs VP_RAW_CAPTURE_PATH)", "raw_capture", ShortcutDefaultChord("raw_capture") },
+    { "DV comparison capture (needs its Diagnostics folder)", "dv_compare_capture", ShortcutDefaultChord("dv_compare_capture") },
     // Bug hunt 3 (SH8): it had no field. VP reads it from this file's
     // [shortcuts] (the separate renderer file stays the legacy fallback) and
     // uses it only for a configuration that is not unified.
@@ -9016,6 +9017,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "scene metadata (L1) and your tone-mapping target, with the L2/L8 trims applied in ICtCp. An approximation of "
             "the published structure, not certified and not Dolby display management; to be judged against LLDV. "
             "When it cannot run (e.g. a calibration 3D LUT) VP uses bt2390 + trims and lists it under Fallbacks engaged."));
+        auto* dvCompare = addText(QStringLiteral("DV comparison capture folder (diagnostic; empty = off)"),
+            QStringLiteral("dv_compare_capture_folder"));
+        dvCompare->setToolTip(QStringLiteral(
+            "Diagnostic, off when empty. A folder on a large drive (never a source folder): the dv_compare_capture "
+            "shortcut (default Ctrl+Alt+C) or a RECORD file there records a short labelled clip (raw frames plus the "
+            "decoded Dolby Vision metadata and the trims VP chose) for the LLDV-vs-tunnel comparison "
+            "(docs/dv/LLDV-vs-tunnel-check.md). Clips are never uploaded or committed."));
         auto* dvGpu = addChoice(QStringLiteral("Dolby Vision tunnel: GPU unpack"),
             QStringLiteral("dv_tunnel_gpu_unpack"), { QStringLiteral("on"), QStringLiteral("off") });
         dvGpu->setToolTip(QStringLiteral(

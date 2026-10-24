@@ -243,25 +243,46 @@ namespace DvCompareCapture
 	class Recorder
 	{
 	public:
-		explicit Recorder(const Options& options) : m_options(options)
+		explicit Recorder(const Options& options) : m_options(options), m_environmentRoot(options.root)
 		{
-			if (m_options.root.empty())
-				return;
-			RawCaptureOptions raw;
-			raw.root = m_options.root;
-			raw.maxSeconds = m_options.seconds;
-			raw.minFreeGb = m_options.minFreeGb;
-			raw.note = "dv-compare" + (m_options.note.empty() ? std::string() : ": " + m_options.note);
-			raw.watchFiles = true;
-			m_raw.reset(new RawCaptureRecorder(raw));
+			Rebuild();
 		}
 
-		bool Enabled() const { return m_raw != nullptr; }
-		bool Recording() const { return m_raw && m_raw->Recording(); }
+		bool Enabled() const { std::lock_guard<std::mutex> guard(m_mutex); return m_raw != nullptr; }
+		bool Recording() const { std::lock_guard<std::mutex> guard(m_mutex); return m_raw && m_raw->Recording(); }
+
+		// WIP (feat/dv-l8 follow-up, unverified): the Config Diagnostics folder
+		// (dv_compare_capture_folder; empty = VP_DV_COMPARE_PATH, or off). Cheap when unchanged.
+		void Configure(const std::string& folder)
+		{
+			const std::string root = folder.empty() ? m_environmentRoot : folder;
+			std::lock_guard<std::mutex> guard(m_mutex);
+			if (root == m_options.root)
+				return;
+			m_options.root = root;
+			m_raw.reset();
+			m_session.clear();
+			m_stateSignature.clear();
+			RebuildLocked();
+		}
+
+		// WIP: the dv_compare_capture shortcut - start a clip (it stops by itself after the clip
+		// length), or stop one early. Returns the line to show on screen.
+		std::string Toggle()
+		{
+			std::lock_guard<std::mutex> guard(m_mutex);
+			if (!m_raw)
+				return "DV comparison capture: off - set Config > Diagnostics > DV comparison capture folder "
+					"(dv_compare_capture_folder) or VP_DV_COMPARE_PATH";
+			const std::string status = m_raw->Recording() ? m_raw->Stop("dv_compare_capture key") :
+				m_raw->Start("dv_compare_capture key");
+			return "DV comparison capture: " + status;
+		}
 
 		// Once per rendered picture (render thread). raw = the capture frame (may be null).
 		void OnFrame(const VideoState& state, const VideoFrame* raw, FrameInfo info)
 		{
+			std::lock_guard<std::mutex> guard(m_mutex);
 			if (!m_raw)
 				return;
 			const std::string signature = StateSignature(state);
@@ -302,8 +323,6 @@ namespace DvCompareCapture
 			const DolbyVisionTunnelFrameMetadata* dm, bool trimsEnabled, const DvTrimSelection::Selection* trims,
 			double targetNits)
 		{
-			if (!m_raw)
-				return;
 			FrameInfo info;
 			info.counter = counter;
 			info.mode = ModeOf(state, dm);
@@ -315,6 +334,20 @@ namespace DvCompareCapture
 		}
 
 	private:
+		void Rebuild() { std::lock_guard<std::mutex> guard(m_mutex); RebuildLocked(); }
+		void RebuildLocked()
+		{
+			if (m_options.root.empty())
+				return;
+			RawCaptureOptions raw;
+			raw.root = m_options.root;
+			raw.maxSeconds = m_options.seconds;
+			raw.minFreeGb = m_options.minFreeGb;
+			raw.note = "dv-compare" + (m_options.note.empty() ? std::string() : ": " + m_options.note);
+			raw.watchFiles = true;
+			m_raw.reset(new RawCaptureRecorder(raw));
+		}
+
 		static std::string StateSignature(const VideoState& s)
 		{
 			std::ostringstream o;
@@ -333,6 +366,8 @@ namespace DvCompareCapture
 		}
 
 		Options m_options;
+		std::string m_environmentRoot;
+		mutable std::mutex m_mutex;
 		std::unique_ptr<RawCaptureRecorder> m_raw;
 		std::string m_stateSignature;
 		std::string m_session;

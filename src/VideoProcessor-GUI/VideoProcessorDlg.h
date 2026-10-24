@@ -338,6 +338,7 @@ public:
 	void RecordDiagnosticStats(double sourceHz, double displayHz);
 	void ShowStateReportToast(const std::string& value);
 	void OnCommandRawCaptureToggle();
+	void OnCommandDvCompareCapture();   // feat/dv-l8 WIP
 	void OnCommandCaptureAnalysisDiagnostics(bool includeFrames);
 	void OnCommandConfigEditor();
 
