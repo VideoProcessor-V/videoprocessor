@@ -1,0 +1,66 @@
+diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+index 5c24cd7c..11011743 100644
+--- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+@@ -10,6 +10,7 @@
+ #include "SubtitleBarRecovery.h"
+ 
+ #include "LibplaceboVideoRenderer.h"
++#include "../ChangeKey.h"   // efficiency 2026-10-24 #10: change keys without ostringstream
+ #include <vprenderer/PresentationResetEpoch.h>
+ #include <vprenderer/ViewportIntentMailbox.h>
+ #include <vprenderer/NvidiaBt2020Reporter.h>
+@@ -19826,7 +19827,7 @@ struct LibplaceboVideoRenderer::Impl
+ 		const enum pl_color_primaries gammaTargetPrimaries = TargetPlPrimaries();
+ 		const bool gammaPrimariesConversion = image.color.primaries !=
+ 			PL_COLOR_PRIM_UNKNOWN && image.color.primaries != gammaTargetPrimaries;
+-		std::ostringstream gammaSignature;
++		ChangeKey gammaSignature;   // was std::ostringstream (same text)
+ 		gammaSignature << static_cast<int>(state.eotf) << '|' << inputIsSdr << '|'
+ 			<< static_cast<int>(lastSdrGammaDecision.requested) << '|'
+ 			<< static_cast<int>(lastSdrGammaDecision.action) << '|'
+@@ -20138,7 +20139,7 @@ struct LibplaceboVideoRenderer::Impl
+ 			intentDisplaySettings.displayBitDepth = activeSettings.displayBitDepth;
+ 			EvaluateIntentBlackDisplay(frameScene, DisplayProfiles::FromRendererSettings(intentDisplaySettings));
+ 		}
+-		std::ostringstream luminanceSignature;
++		ChangeKey luminanceSignature;   // was std::ostringstream (same text)
+ 		luminanceSignature << static_cast<int>(state.eotf) << '|' << inputIsSdr << '|'
+ 			<< image.color.transfer << '|' << image.color.hdr.min_luma << '|'
+ 			<< image.color.hdr.max_luma << '|' << baseTarget.color.transfer << '|'
+@@ -22396,7 +22397,7 @@ struct LibplaceboVideoRenderer::Impl
+ 			cropDiagnosticPreviousBounds = presentationCropBounds;
+ 			cropDiagnosticPreviousOwner = cropDecision.owner;
+ 
+-			std::ostringstream cropPolicy;
++			ChangeKey cropPolicy;   // was std::ostringstream (same text)
+ 			cropPolicy << automaticSourceCrop << '|'
+ 				<< cropDecision.applyCrop << '|'
+ 				<< cropDecision.outwardExpanded << '|'
+@@ -22737,7 +22738,7 @@ struct LibplaceboVideoRenderer::Impl
+ 			auto publishFinalLayout = [&](AlphaSourceCrop::UnusedSpaceAxis axis,
+ 				const char* mapping)
+ 			{
+-				std::ostringstream policy;
++				ChangeKey policy;   // was std::ostringstream (same text)
+ 				policy << width << 'x' << height << '|'
+ 					<< effectiveGeometry.left << ',' << effectiveGeometry.top << '-'
+ 					<< effectiveGeometry.right << ',' << effectiveGeometry.bottom << '|'
+@@ -22937,7 +22938,7 @@ struct LibplaceboVideoRenderer::Impl
+ 					(finalSourceGeometry.bottom - finalSourceGeometry.top -
+ 						(presentationSourceGeometry.bottom -
+ 						 presentationSourceGeometry.top)) / 2);
+-				std::ostringstream finalPresentationPolicy;
++				ChangeKey finalPresentationPolicy;   // was std::ostringstream (same text)
+ 				finalPresentationPolicy << requestedShaderSelector << '|'
+ 					<< static_cast<int>(finalNlsDecision.mode) << '|'
+ 					<< automaticSourceCrop << '|'
+@@ -25111,7 +25112,7 @@ struct LibplaceboVideoRenderer::Impl
+ 		frameGpuTiming.EndRender();
+         // Final submitted geometry, bounded to 4 changes/second and a 10s
+         // heartbeat for lens users. Sequence is correlation, never the key.
+-        std::ostringstream layoutKey;
++        ChangeKey layoutKey;   // was std::ostringstream (same text)
+         layoutKey << frameGeneration << '|' << viewportRequestSerial << '|' << width << 'x' << height
+             << '|' << configuredScreenActive << '|' << frameScreen.physicalAspect << '|' << anamorphicScale
+             << '|' << renderImage.crop.x0 << ',' << renderImage.crop.y0 << ',' << renderImage.crop.x1 << ',' << renderImage.crop.y1

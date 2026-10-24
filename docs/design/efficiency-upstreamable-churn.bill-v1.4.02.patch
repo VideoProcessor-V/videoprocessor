@@ -1,0 +1,66 @@
+diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+index 7b2f8b9..30ebc43 100644
+--- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+@@ -3,6 +3,7 @@
+ #include "SubtitleBarRecovery.h"
+ 
+ #include "LibplaceboVideoRenderer.h"
++#include "../ChangeKey.h"   // efficiency 2026-10-24 #10: change keys without ostringstream
+ #include "AnalysisPerformanceWindow.h"
+ #include "LookaheadPerformanceWindow.h"
+ #include <vprenderer/QueueNativeContinuity.h>
+@@ -13616,7 +13617,7 @@ struct LibplaceboVideoRenderer::Impl
+ 		const enum pl_color_primaries gammaTargetPrimaries = TargetPlPrimaries();
+ 		const bool gammaPrimariesConversion = image.color.primaries !=
+ 			PL_COLOR_PRIM_UNKNOWN && image.color.primaries != gammaTargetPrimaries;
+-		std::ostringstream gammaSignature;
++		ChangeKey gammaSignature;   // was std::ostringstream (same text)
+ 		gammaSignature << static_cast<int>(state.eotf) << '|'
+ 			<< static_cast<int>(lastSdrGammaDecision.requested) << '|'
+ 			<< static_cast<int>(lastSdrGammaDecision.action) << '|'
+@@ -14767,7 +14768,7 @@ struct LibplaceboVideoRenderer::Impl
+ 		LibplaceboRenderParameters::ApplyTargetLuminance(
+ 			state.eotf == EOTF::SDR, static_cast<float>(sdrTargetNits),
+ 			static_cast<float>(sdrBlackNits), baseTarget.color);
+-		std::ostringstream luminanceSignature;
++		ChangeKey luminanceSignature;   // was std::ostringstream (same text)
+ 		luminanceSignature << static_cast<int>(state.eotf) << '|'
+ 			<< image.color.transfer << '|' << image.color.hdr.min_luma << '|'
+ 			<< image.color.hdr.max_luma << '|' << baseTarget.color.transfer << '|'
+@@ -17408,7 +17409,7 @@ releaseDriftBaseRetention =
+ 			cropDiagnosticPreviousBounds = presentationCropBounds;
+ 			cropDiagnosticPreviousOwner = cropDecision.owner;
+ 
+-			std::ostringstream cropPolicy;
++			ChangeKey cropPolicy;   // was std::ostringstream (same text)
+ 			cropPolicy << automaticSourceCrop << '|'
+ 				<< cropDecision.applyCrop << '|'
+ 				<< cropDecision.outwardExpanded << '|'
+@@ -17763,7 +17764,7 @@ releaseDriftBaseRetention =
+ 			auto publishFinalLayout = [&](AlphaSourceCrop::UnusedSpaceAxis axis,
+ 				const char* mapping)
+ 			{
+-				std::ostringstream policy;
++				ChangeKey policy;   // was std::ostringstream (same text)
+ 				policy << width << 'x' << height << '|'
+ 					<< effectiveGeometry.left << ',' << effectiveGeometry.top << '-'
+ 					<< effectiveGeometry.right << ',' << effectiveGeometry.bottom << '|'
+@@ -17966,7 +17967,7 @@ releaseDriftBaseRetention =
+ 					(finalSourceGeometry.bottom - finalSourceGeometry.top -
+ 						(presentationSourceGeometry.bottom -
+ 						 presentationSourceGeometry.top)) / 2);
+-				std::ostringstream finalPresentationPolicy;
++				ChangeKey finalPresentationPolicy;   // was std::ostringstream (same text)
+ 				finalPresentationPolicy << requestedShaderSelector << '|'
+ 					<< static_cast<int>(finalNlsDecision.mode) << '|'
+ 					<< automaticSourceCrop << '|'
+@@ -18845,7 +18846,7 @@ releaseDriftBaseRetention =
+ 		frameGpuTiming.EndRender();
+         // Final submitted geometry, bounded to 4 changes/second and a 10s
+         // heartbeat for lens users. Sequence is correlation, never the key.
+-        std::ostringstream layoutKey;
++        ChangeKey layoutKey;   // was std::ostringstream (same text)
+         layoutKey << frameGeneration << '|' << viewportRequestSerial << '|' << width << 'x' << height
+             << '|' << configuredScreenActive << '|' << frameScreen.physicalAspect << '|' << anamorphicScale
+             << '|' << renderImage.crop.x0 << ',' << renderImage.crop.y0 << ',' << renderImage.crop.x1 << ',' << renderImage.crop.y1
