@@ -139,7 +139,7 @@ namespace Vpv
 			// ---- Scaling ----
 			{ "scaling", "rebase", "Re-base (your picture slider)",
 				"Finds a picture that was upscaled before VP (a 1080p film sent at 4K) and works from its real size. The tier "
-				"turns re-base on (Mid); the slider sets how much evidence it needs.", false, false, {
+				"turns re-base on (Low and above); the slider sets how much evidence it needs.", false, false, {
 				{ K::Row, "picture_preset_box" }, { K::Toggle, "rebase_kernel_match" }, { K::Toggle, "source_resolution_text_guard" },
 				{ K::Toggle, "source_resolution_mixed_guard" } },
 				{ L::Feature, "re-base (the Scaling tier, Low or above)", "source_resolution", nullptr, "!auto", "auto" } },

@@ -9626,7 +9626,7 @@ int writeSettingsScreens(const QString& configPath, const QString& outDir)
             const QString unit = units->tabText(u).toLower().replace(QLatin1Char(' '), QLatin1Char('-')).remove(QLatin1Char('(')).remove(QLatin1Char(')'));
             QTabWidget* sub = nullptr;
             for (QTabWidget* t : units->widget(u)->findChildren<QTabWidget*>())
-                if (t->objectName().endsWith(QStringLiteral(".pages"))) sub = t;
+                if (t->objectName().endsWith(QStringLiteral(".pages")) || t->objectName().endsWith(QStringLiteral(".more"))) sub = t;
             if (!sub) { shoot(QStringLiteral("%1-%2-%3").arg(tag).arg(u, 2, 10, QLatin1Char('0')).arg(unit), units); continue; }
             for (int s2 = 0; s2 < sub->count(); ++s2)
             {

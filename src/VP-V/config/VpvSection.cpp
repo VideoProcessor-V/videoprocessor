@@ -473,7 +473,8 @@ namespace Vpv
 			const Retirement* retiring = table.FindRetirement(toggle.key, "vprenderer");
 			const QString label = retiring ? QStringLiteral("%1 (%2)").arg(Q(toggle.label), RetirementCaption(*retiring)) : Q(toggle.label);
 			combo->setAccessibleName(label);
-			combo->addItem(QStringLiteral("Not set (default: %1)").arg(Q(table.Default(toggle.key))), QString());
+			const QString shownDefault = std::string(toggle.key) == "fbo_float32" ? QStringLiteral("on") : Q(table.Default(toggle.key));
+			combo->addItem(QStringLiteral("Not set (default: %1)").arg(shownDefault), QString());
 			for (const char* v : toggle.values) combo->addItem(Q(v), Q(v));
 			const SlotInfo* slot = table.Slot(toggle.slot);
 			combo->setToolTip(QStringLiteral("Key %1 (renderer profile). Slot: %2. See docs/settings/VP-settings-reference.md.")
@@ -507,6 +508,18 @@ namespace Vpv
 			return nullptr;
 		}
 
+		// Buttons drawn on Config's dark surface (usability audit: some were white with unreadable text); the
+		// collapsible-section style is repeated so a page-level sheet does not override it.
+		QString ReadableButtons()
+		{
+			return QStringLiteral(
+				"QToolButton { color: #dce8f2; background: #142334; border: 1px solid #2b4258; border-radius: 4px; padding: 3px 8px; } "
+				"QToolButton:hover { background: #1a2e42; } QToolButton:disabled { color: #6f8396; } "
+				"QToolButton[profileSection=\"true\"] { min-height: 30px; color: #d9e7f2; background: #111d29; border: 1px solid #2b4258; "
+				"border-radius: 5px; padding: 4px 9px; text-align: left; font-weight: 600; } "
+				"QToolButton[profileSection=\"true\"]:hover { background: #162839; }");
+		}
+
 		// ---- Masters and the settings they set (organisation pass 2) ----
 
 		// A card's lock: the derived controls are greyed with "Set by <master>" (or "Used only when
@@ -520,6 +533,7 @@ namespace Vpv
 			QPointer<QCheckBox> custom;      // Tier / Slider / Defaults
 			QPointer<QLabel> note;
 			QStringList keys;                // the card's row keys (Defaults: what Custom clears)
+			bool onMain = false;             // a Main card collapses to its one-line note while locked
 		};
 
 		bool EffectiveOff(const std::shared_ptr<State>& state, const Lock& lock)
@@ -563,10 +577,25 @@ namespace Vpv
 				// A tier exists only on the VP-V pathway; in the Original pathway its keys are plain controls.
 				locked = lock->custom && !lock->custom->isChecked() && (spec.kind != LockKind::Tier || state->vpvOn);
 				why = QStringLiteral("Set by %1. Tick Custom to change these by hand.").arg(Q(spec.master));
+				if (spec.kind == LockKind::Tier)
+					if (const Unit* unit = TierTable().FindUnit(lock->unitId.toStdString()))
+					{
+						// Name the tier and the values it sets (usability audit 2026-10-24).
+						const int t = MatchTier(TierTable(), *unit, state->MakeGetter());
+						if (t >= 0)
+						{
+							QStringList values;
+							for (const KeyValue& kv : unit->presets[static_cast<size_t>(t)].set)
+								values << QStringLiteral("%1 %2").arg(Q(kv.key).replace(QLatin1Char('_'), QLatin1Char(' ')), Q(kv.value));
+							why = QStringLiteral("Set by the %1 tier (%2): %3. Tick Custom to change these by hand.")
+								.arg(Q(unit->name), Q(unit->presets[static_cast<size_t>(t)].tier), values.join(QStringLiteral(", ")));
+						}
+					}
 				break;
 			case LockKind::Feature:
 				locked = EffectiveOff(state, spec);
-				why = QStringLiteral("Used only when %1 is on (Main).").arg(Q(spec.master));
+				why = lock->onMain ? QStringLiteral("Turns on with %1.").arg(Q(spec.master)) :
+					QStringLiteral("Used only when %1 is on (Main).").arg(Q(spec.master));
 				break;
 			}
 			if (lock->note) lock->note->setText(locked ? why : (spec.kind == LockKind::Feature ? QString() :
@@ -581,6 +610,8 @@ namespace Vpv
 						{
 							child->setEnabled(!locked);
 							child->setToolTip(locked ? why : QString());
+							// On Main a feature that is off collapses to its one line ("Turns on with ...").
+							if (lock->onMain && spec.kind == LockKind::Feature) child->setVisible(!locked);
 						}
 			}
 			else
@@ -671,6 +702,7 @@ namespace Vpv
 			auto lock = std::make_shared<LockState>();
 			lock->spec = spec.lock;
 			lock->unitId = unitId;
+			lock->onMain = !spec.advanced;
 			lock->body = card.body;
 			if (spec.lock.kind != LockKind::None)
 			{
@@ -1738,6 +1770,7 @@ namespace Vpv
 		state->root = root;
 		auto* layout = new QVBoxLayout(root);
 		layout->setContentsMargins(0, 0, 0, 0);
+		root->setStyleSheet(ReadableButtons());
 
 		// Pathway: VP-V (our units) or Original (upstream exactly as upstream).
 		auto* pathwayRow = new QFormLayout;
@@ -1751,8 +1784,15 @@ namespace Vpv
 			"(\"Managed by VP-V\"). Original: the tiers and VP-V switches are disabled and the other pages behave exactly "
 			"as upstream. In the renderer, Original switches every VP addition off and runs the mixed stages in their "
 			"upstream form (ADR-0019). Stored as [vpv] pipeline_original_pathway."));
-		pathwayRow->addRow(QStringLiteral("Pathway"), pathway);
-		layout->addLayout(pathwayRow);
+		// One compact strip (usability audit 2026-10-24): the pathway and the profile; the rest of the
+		// page-wide controls are on the Overview tab, so a unit's own controls start near the top.
+		auto* strip = new QHBoxLayout;
+		strip->setContentsMargins(0, 0, 0, 0);
+		strip->addWidget(new QLabel(QStringLiteral("Pathway")));
+		strip->addWidget(pathway, 1);
+		strip->addSpacing(14);
+		layout->addLayout(strip);
+		delete pathwayRow;
 
 		auto* content = new QWidget;
 		content->setObjectName(ObjectName(QStringLiteral("content")));
@@ -1807,8 +1847,23 @@ namespace Vpv
 			profile->setCurrentIndex(index);
 		};
 		fillPicker();
-		profileRow->addRow(QStringLiteral("Profile"), profile);
-		contentLayout->addLayout(profileRow);
+		strip->addWidget(new QLabel(QStringLiteral("Profile")));
+		strip->addWidget(profile, 1);
+		delete profileRow;
+
+		// The unit tabs; the first, Overview, holds the global tier, full precision, fallbacks, and the
+		// Proposed retirement and Pipeline (expert) pages (kept out of the unit tab row).
+		auto* tabs = new QTabWidget;
+		tabs->setObjectName(ObjectName(QStringLiteral("units")));
+		tabs->setStyleSheet(QStringLiteral("QTabWidget::pane { border: 0; background: transparent; } "
+			"QTabBar::tab { min-width: 0px; padding: 6px 10px; }"));
+		contentLayout->addWidget(tabs);   // first, so a card can find what an earlier card moved under root
+		QWidget* overview = NewTabPage(QStringLiteral("Overview"));
+		overview->setObjectName(ObjectName(QStringLiteral("overview")));
+		auto* overviewLayout = new QVBoxLayout(overview);
+		overviewLayout->setSpacing(8);
+		tabs->addTab(overview, QStringLiteral("Overview"));
+		tabs->setTabToolTip(0, QStringLiteral("Every unit at once (the global tier), full precision, fallbacks engaged, the proposed retirements and the expert pipeline settings."));
 
 		// The global tier.
 		QStringList globalTiers;
@@ -1819,10 +1874,14 @@ namespace Vpv
 				"can then be changed on its own tab (the global tier then shows Custom)."));
 		auto* globalHeading = Bold(ObjectName(QStringLiteral("global_tier.heading")));
 		globalHeading->setText(QStringLiteral("Global tier (every unit at once)"));
-		contentLayout->addWidget(globalHeading);
+		overviewLayout->addWidget(globalHeading);
 		global.reset->setText(QStringLiteral("Reset all units"));
 		global.defaults->setVisible(false);
-		contentLayout->addWidget(global.box);
+		overviewLayout->addWidget(global.box);
+		auto* chips = Help(QString());
+		chips->setObjectName(ObjectName(QStringLiteral("global_tier.chips")));
+		chips->setTextFormat(Qt::RichText);
+		overviewLayout->addWidget(chips);
 		// Full precision (owner 2026-10-24): one choice for every tier, on by default (fbo_float32 auto = on);
 		// off only by choice, e.g. on a laptop GPU. The renderer key is read as before.
 		for (const Unit& u : table.units)
@@ -1842,7 +1901,7 @@ namespace Vpv
 					precisionNote->setObjectName(ObjectName(QStringLiteral("full_precision.note")));
 					precisionNote->setStyleSheet(QStringLiteral("color: #e0a040;"));
 					precisionForm->addRow(precisionNote);
-					contentLayout->addWidget(precisionHost);
+					overviewLayout->addWidget(precisionHost);
 					state->refreshers.push_back([state, precisionNote]()
 					{
 						std::string v = state->Get("fbo_float32");
@@ -1879,9 +1938,22 @@ namespace Vpv
 		{
 			if (state->globalChosen >= 0) applyGlobal(state->globalChosen);
 		});
-		state->refreshers.push_back([state, global]()
+		state->refreshers.push_back([state, global, chips]()
 		{
 			const int g = MatchGlobal(TierTable(), state->MakeGetter());
+			// The units' own tiers, as chips (usability audit 2026-10-24).
+			QStringList parts;
+			for (const Unit& u : TierTable().units)
+				if (u.Tiered())
+				{
+					const int t = MatchTier(TierTable(), u, state->MakeGetter());
+					parts << QStringLiteral("<span style=\"background:#1a2c3e; border-radius:4px;\">&nbsp;%1: <b>%2</b>&nbsp;</span>")
+						.arg(Q(u.name), t >= 0 ? Q(u.presets[static_cast<size_t>(t)].tier) : QStringLiteral("Custom"));
+				}
+			chips->setText(parts.join(QStringLiteral("&nbsp; ")));
+			// A mixed state has no slider position: the thumb is hidden rather than parked on Classic.
+			global.slider->setStyleSheet(g >= 0 ? QString() :
+				QStringLiteral("QSlider::handle:horizontal { background: transparent; border: 0; width: 0px; margin: 0px; }"));
 			if (g >= 0) state->globalChosen = g;
 			global.reset->setEnabled(state->globalChosen >= 0);
 			if (g >= 0)
@@ -1899,10 +1971,10 @@ namespace Vpv
 					if (u.Tiered() && MatchTier(TierTable(), u, state->MakeGetter()) !=
 						MatchTier(TierTable(), u, [](const std::string&) { return std::string(); }))
 						shipped = false;
-				global.name->setText(shipped ? QStringLiteral("Default (the shipped values)") : QStringLiteral("Custom (per unit)"));
+				global.name->setText(shipped ? QStringLiteral("Mixed (shipped default)") : QStringLiteral("Mixed"));
 				global.description->setText(shipped ?
-					QStringLiteral("Each unit is on the tier VP ships with (Motion Mid, the others Low). Move the slider to put every unit on one step.") :
-					QStringLiteral("The units are on different tiers; each tab shows its own."));
+					QStringLiteral("Each unit is on the tier VP ships with (below). Click a step to put every unit on it.") :
+					QStringLiteral("The units are on different tiers (below); each tab shows its own. Click a step to put every unit on it."));
 			}
 		});
 
@@ -1911,7 +1983,7 @@ namespace Vpv
 		auto* fallbacks = Help(QString());
 		fallbacks->setObjectName(ObjectName(QStringLiteral("fallbacks")));
 		fallbacks->setAccessibleName(QStringLiteral("Fallbacks engaged"));
-		contentLayout->addWidget(fallbacks);
+		overviewLayout->addWidget(fallbacks);
 		auto mirror = [fallbacks]()
 		{
 			QWidget* top = fallbacks->window();
@@ -1931,19 +2003,22 @@ namespace Vpv
 		});
 		timer->start();
 
-		auto* tabs = new QTabWidget;
-		tabs->setObjectName(ObjectName(QStringLiteral("units")));
-		tabs->setStyleSheet(QStringLiteral("QTabWidget::pane { border: 0; background: transparent; }"));
-		contentLayout->addWidget(tabs);   // first, so a card can find what an earlier card moved under root
 		for (const Unit& u : table.units)
 		{
 			tabs->addTab(MakeUnitPage(state, u), Q(u.name));
 			tabs->setTabToolTip(tabs->count() - 1, Q(u.summary));
 		}
-		tabs->addTab(MakeExpertPage(state), QStringLiteral("Pipeline (expert)"));
-		tabs->addTab(MakeRetirementPage(state), QStringLiteral("Proposed retirement"));
-		tabs->setTabToolTip(tabs->count() - 2, QStringLiteral("For testing and measurement: where the calibration LUT runs, the stage order, stages switched off."));
-		tabs->setTabToolTip(tabs->count() - 1, QStringLiteral("Switches proposed for retirement (still working until you decide), with why and where each is."));
+		{
+			auto* more = new QTabWidget;
+			more->setObjectName(ObjectName(QStringLiteral("overview.more")));
+			more->setDocumentMode(true);
+			overviewLayout->addWidget(more);
+			more->addTab(MakeRetirementPage(state), QStringLiteral("Proposed retirement"));
+			more->addTab(MakeExpertPage(state), QStringLiteral("Pipeline (expert)"));
+			more->setTabToolTip(0, QStringLiteral("Switches proposed for retirement (still working until you decide), with why and where each is."));
+			more->setTabToolTip(1, QStringLiteral("For testing and measurement: where the calibration LUT runs, the stage order, stages switched off."));
+			overviewLayout->addStretch();
+		}
 		OrganiseRendering(host);
 		QWidget* drivePage = OrganiseDynamicDrive(host);
 		NoteInputPolicy(host);
@@ -1974,6 +2049,8 @@ namespace Vpv
 		});
 		FitWidth(root);
 		if (drivePage) FitWidth(drivePage);   // the Dynamic Drive page fits the default window too
+		if (drivePage) drivePage->setStyleSheet(ReadableButtons() +
+			QStringLiteral(" QTabWidget::pane { border: 0; background: transparent; }"));
 		root->setProperty("vpvMissing", state->missing.join(QStringLiteral("; ")));
 
 		QObject::connect(profile, qOverload<int>(&QComboBox::currentIndexChanged), profile, [state, profile](int index)
