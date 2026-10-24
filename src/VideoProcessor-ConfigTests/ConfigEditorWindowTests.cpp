@@ -9572,6 +9572,79 @@ int writeSettingsInventory(const QString& outPath)
 // `VideoProcessorConfigTests.exe --resave <file>` (tools/build_settings_preview.ps1): opens the file
 // in a test-mode editor (no VP contact) and applies Config's own load-time migrations, so the
 // settings preview's sandbox opens clean. Exit 0 = saved (or nothing to migrate), 1 = not saved.
+// `VideoProcessorConfigTests.exe --screens <config> <folder>` (tools/settings_preview_screens.ps1, for
+// the usability audit): opens a COPY of the configuration in a test-mode editor at the default window
+// size (1040x700) and saves a PNG of every VP-V unit tab's Main and Advanced page, the Pipeline
+// (expert) and Proposed retirement tabs, the Dynamic Drive page's Main and Advanced, and the
+// Rendering page, in the VP-V and the Original pathway. Each picture is the visible window and,
+// beside it ("-full"), the whole scrolled page at that width. Nothing is saved to any configuration.
+int writeSettingsScreens(const QString& configPath, const QString& outDir)
+{
+    QTemporaryDir dir;
+    const QString path = dir.filePath(QStringLiteral("VideoProcessor.cfg"));
+    if (!QFile::copy(configPath, path)) return 1;
+    QDir().mkpath(outDir);
+    ConfigEditorWindow window(path, 0, true);
+    window.resize(1040, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    auto* pages = window.findChild<QStackedWidget*>(QStringLiteral("settingsPages"));
+    if (!pages) return 1;
+    auto pageOf = [pages](QWidget* w) { for (int i = 0; i < pages->count(); ++i) if (pages->widget(i)->isAncestorOf(w)) return i; return -1; };
+    auto scrollOf = [](QWidget* w) { QScrollArea* s = nullptr; for (QWidget* p = w; p && !s; p = p->parentWidget()) s = qobject_cast<QScrollArea*>(p); return s; };
+    int count = 0;
+    auto shoot = [&](const QString& name, QWidget* inPage)
+    {
+        QCoreApplication::processEvents();
+        window.grab().save(QDir(outDir).filePath(name + QStringLiteral(".png")));
+        if (QScrollArea* scroll = scrollOf(inPage))
+            if (QWidget* content = scroll->widget()) content->grab().save(QDir(outDir).filePath(name + QStringLiteral("-full.png")));
+        ++count;
+    };
+    auto* pathway = window.findChild<QComboBox*>(QStringLiteral("vpv.pathway"));
+    auto* units = window.findChild<QTabWidget*>(QStringLiteral("vpv.units"));
+    auto* drive = window.findChild<QTabWidget*>(QStringLiteral("vpv.drive.pages"));
+    auto* rendering = window.findChild<QWidget*>(QStringLiteral("config.vprenderer.profiles"));
+    if (!pathway || !units) return 1;
+    for (int p = 0; p < 2; ++p)
+    {
+        pathway->setCurrentIndex(p);
+        const QString tag = p == 0 ? QStringLiteral("vpv") : QStringLiteral("original");
+        window.selectPage(pageOf(units));
+        for (int u = 0; u < units->count(); ++u)
+        {
+            units->setCurrentIndex(u);
+            const QString unit = units->tabText(u).toLower().replace(QLatin1Char(' '), QLatin1Char('-')).remove(QLatin1Char('(')).remove(QLatin1Char(')'));
+            QTabWidget* sub = nullptr;
+            for (QTabWidget* t : units->widget(u)->findChildren<QTabWidget*>())
+                if (t->objectName().endsWith(QStringLiteral(".pages"))) sub = t;
+            if (!sub) { shoot(QStringLiteral("%1-%2-%3").arg(tag).arg(u, 2, 10, QLatin1Char('0')).arg(unit), units); continue; }
+            for (int s2 = 0; s2 < sub->count(); ++s2)
+            {
+                sub->setCurrentIndex(s2);
+                shoot(QStringLiteral("%1-%2-%3-%4").arg(tag).arg(u, 2, 10, QLatin1Char('0')).arg(unit, sub->tabText(s2).toLower()), units);
+            }
+        }
+        if (drive)
+        {
+            window.selectPage(pageOf(drive));
+            for (int t = 0; t < drive->count(); ++t)
+            {
+                drive->setCurrentIndex(t);
+                shoot(QStringLiteral("%1-dynamic-drive-%2").arg(tag, drive->tabText(t).toLower()), drive);
+            }
+        }
+        if (rendering)
+        {
+            window.selectPage(pageOf(rendering));
+            shoot(QStringLiteral("%1-rendering").arg(tag), rendering);
+        }
+    }
+    window.hide();
+    std::cout << "screens: " << count << " pictures in " << outDir.toStdString() << std::endl;
+    return count > 0 ? 0 : 1;
+}
+
 int resaveConfiguration(const QString& path)
 {
     ConfigEditorWindow window(path, 0, true);
@@ -10470,6 +10543,12 @@ int main(int argc, char** argv)
             QApplication::setStyle(VpTheme::CreateStyle());
             application.setStyleSheet(VpTheme::StyleSheet());
             return writeSettingsInventory(QString::fromLocal8Bit(argv[i + 1]));
+        }
+        else if (QString::fromLocal8Bit(argv[i]) == QStringLiteral("--screens") && i + 2 < argc)
+        {
+            QApplication::setStyle(VpTheme::CreateStyle());
+            application.setStyleSheet(VpTheme::StyleSheet());
+            return writeSettingsScreens(QString::fromLocal8Bit(argv[i + 1]), QString::fromLocal8Bit(argv[i + 2]));
         }
         else if (QString::fromLocal8Bit(argv[i]) == QStringLiteral("--resave"))
         {
