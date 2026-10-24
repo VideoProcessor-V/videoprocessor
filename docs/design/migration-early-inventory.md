@@ -103,8 +103,20 @@ branch is kept locally as `backup/early-migrations-pre-bill-drop`.
 Verification plan (coordinator, 2026-10-24): an x64 Release build at every migration commit; the
 full CPU suite (single-threaded, TRX) at commit 5 and at commit 6 (the last move); one subtitle probe tool build;
 then the `fix:` commits (see `module-findings-2026-10-24.md`) built and tested at the branch tip.
-The status of each run is in the hand-off report. A commit is marked verified here only after its
-run is green.
+**Status at the 2026-10-24 wrap-up:**
+
+- x64 Release builds: OK at all six migration commits (259cfa50, 570b1ee8, 9bfb55d6, 9e055034,
+  648da813, d2517eb1) and at the branch tip 5349b394, which includes every `fix:` commit.
+- `tools/subtitle_bbox_probe.vcxproj`: builds OK.
+- The first tip build failed only because a test variable was named `small`, which collides with
+  the Windows `small` macro. Fixed in 5349b394.
+- CPU suite at 648da813: stopped by the coordinator at 15:57 after 1655 passed and 0 failed. It
+  had been started without the CPU exclusion filter, so it reached GPU/harness tests and held the GPU.
+- **Not yet run (WIP):** the CPU suite with the standard exclusion filter at 648da813, d2517eb1 and
+  the tip. Filter: `FullyQualifiedName!~RendererCaptureHarnessTests&Name!~NlsHookFailureRetry&
+  Name!~DvAutotestGpu&Name!~DolbyVisionGpuUnpack`, excluding the categories GpuHardware,
+  GpuOnScreen, MeterHardware and ProjectorHardware. The new tests in the `fix:` commits have
+  compiled but not run.
 
 ## Merge note
 
