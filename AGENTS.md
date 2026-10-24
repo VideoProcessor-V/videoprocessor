@@ -119,3 +119,20 @@
   `vp-update.json` for automatic updates. It is the only public JSON asset.
 - Do not upload SHA/checksum files, manifest sidecars, build receipts, or other
   JSON evidence. Keep hashes and qualification records internal.
+
+## Pipeline design and modules
+
+- The frozen pipeline design is `docs/design/VP-pipeline-final.md`; the slot list as data is
+  `docs/design/slots.json` (authoritative for slot ids, order, hook points and keys); decisions
+  are in `docs/decisions/` (ADR style).
+- Every slot has a module folder `src/modules/<unit>/<slot>/` (README, MANIFEST.json with the
+  live file list, tests/). Run `python tools/check_module_manifests.py` after touching slots,
+  manifests or moved files; `--write` regenerates `docs/design/components-master.json`.
+- Migration directive: code moves into its module folder only when that slot is touched until
+  M1, then in a dedicated phase finished by M2. One module per change: `git mv`, project/include
+  updates, the module's `live_files` and the master list in the same commit; build + module
+  tests + chain-gate subset must pass; never leave a duplicate copy; never during a deploy window.
+- Definition of done for a slot change includes updating that module's README in the same commit.
+- Module principles: liftable (small documented API, no hidden globals, injected dependencies,
+  own config schema, standalone tests) and readable (why-comments, small functions, no magic
+  numbers, the single "Fallbacks engaged" pattern).

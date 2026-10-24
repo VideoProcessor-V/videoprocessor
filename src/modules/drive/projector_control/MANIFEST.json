@@ -1,0 +1,33 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "drive.projector_control",
+  "unit": "drive",
+  "order": 900,
+  "status": "built",
+  "code_location": "legacy",
+  "live_files": [
+    "src/VideoProcessor-Lib/led/LedController.cpp",
+    "src/VideoProcessor-Lib/led/BarcoAsciiDriver.cpp",
+    "src/VideoProcessor-Lib/led/ProjectorDriver.cpp",
+    "src/VideoProcessor-Lib/led/SerialPort.cpp"
+  ],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [
+        "RS-232 projector (Barco ASCII)"
+      ],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [
+      "led_compensation"
+    ],
+    "upstream_modules": []
+  },
+  "fallback_when_missing": "No serial projector -> drive off.",
+  "fallback_entry": "Projector: not connected (LED drive off)"
+}

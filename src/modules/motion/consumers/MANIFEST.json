@@ -1,0 +1,43 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "motion.consumers",
+  "unit": "motion",
+  "order": 140,
+  "status": "built",
+  "code_location": "legacy",
+  "live_files": [
+    "src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp",
+    "src/VideoProcessor-Lib/vprenderer/DejudderAhead.h",
+    "src/VideoProcessor-Lib/vprenderer/RenderedWarp.cpp",
+    "src/VideoProcessor-Lib/vprenderer/FrameInterpolator.cpp",
+    "src/VideoProcessor-Lib/vprenderer/InterpolationTimeline.h",
+    "src/VideoProcessor-Lib/vprenderer/InterpolationPolicy.h",
+    "src/VideoProcessor-Lib/vprenderer/OcclusionMaskHook.cpp",
+    "src/VideoProcessor-Lib/vprenderer/TemporalRenderer.h"
+  ],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [
+      "dejudder_hold",
+      "dejudder_strength",
+      "dither_vectors",
+      "frame_mixer",
+      "interpolation",
+      "interpolation_fallback",
+      "smooth_motion"
+    ],
+    "upstream_modules": [
+      "motion.vector_delivery"
+    ]
+  },
+  "fallback_when_missing": "Each consumer falls back as the vector rules say.",
+  "fallback_entry": "Motion consumers: no-motion form (vectors invalid / short queue)"
+}

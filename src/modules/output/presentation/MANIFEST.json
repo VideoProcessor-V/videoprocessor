@@ -1,0 +1,36 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "output.presentation",
+  "unit": "output",
+  "order": 270,
+  "status": "built",
+  "code_location": "legacy",
+  "live_files": [
+    "src/VideoProcessor-Lib/vprenderer/RenderAheadPolicy.h",
+    "src/VideoProcessor-Lib/vprenderer/AlphaPresentationTelemetry.cpp",
+    "src/VideoProcessor-Lib/vprenderer/OpenLoopDisplayRate.h",
+    "src/VideoProcessor-Lib/DisplayRefreshRatePolicy.cpp",
+    "src/VideoProcessor-Lib/vprenderer/NativeStatsOverlayBitmap.h"
+  ],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [
+      "render_ahead",
+      "render_ahead_queue_credit",
+      "render_ahead_utilisation"
+    ],
+    "upstream_modules": [
+      "output.dither"
+    ]
+  },
+  "fallback_when_missing": "Window / iGPU panel -> open loop.",
+  "fallback_entry": "Presentation: open loop (no display statistics)"
+}

@@ -1,0 +1,67 @@
+# Net runtime + fingerprints (`control.net_runtime`)
+
+Unit: **control** | side: control | order: 910 | status: **placeholder** | hook point: host
+
+## Purpose / why
+
+VP-side NetRunner: executes the exporter's mpv-format passes on VP-owned textures via pl_dispatch (fp16 intermediates by default), in the front end and inside the hybrid scaler's POST_KERNEL hook; loads net packages, checks fingerprints (label schema, pass order, intermediate format, upstream versions/states, VP commit) and bypasses on mismatch with a visible entry.
+
+## Contract
+
+- Input: net packages (shader + parameters + fingerprint)
+- Output: hooks/passes for repair.encoding, scaling.refine, scaling.output D
+- Geometry: n/a
+- Delay share: n/a
+- Look-ahead: n/a
+
+## Settings
+
+- Existing keys: (none)
+- Planned keys: `nets_enabled`
+- Tiers: n/a
+
+## Fallbacks
+
+- "Fallbacks engaged" entry: Nets: bypassed (<net>: <reason>)
+- Behaviour: Mismatch/missing -> bypass that net only.
+
+## Net fingerprint / upstream
+
+- Fingerprint: defines the fingerprint format
+- Upstream modules: (none)
+
+## How to build / test
+
+Build the solution via the shared build-slot runner (see AGENTS.md); tests single-threaded; GPU tests only on mains with `VP_TEST_ADAPTER=NVIDIA`.
+
+Placeholder tests:
+- (none yet)
+
+Isolation tests:
+- fingerprint match/mismatch unit tests
+
+Contract tests:
+- (none yet)
+
+Chain tests:
+- (none yet)
+
+## Known issues / open items
+
+- rgba32f vs fp16 intermediates (fp16 preferred where quality allows)
+
+## Where the code lives (live file list)
+
+Code location: **none (placeholder)**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+
+- (none yet)
+
+## Migration directive
+
+Code moves into this folder only when this slot is touched (opportunistic until M1, a dedicated phase after M1, finished by M2). A move = `git mv` + project/include updates + this module's `live_files` + `docs/design/components-master.json` (regenerate with `python tools/check_module_manifests.py --write`) in the SAME commit, with the build, this module's tests and the chain-gate subset passing. Never leave a copy behind; one module per change; never during a release/deploy window. Update this README in the same commit as any slot change.
+
+## Links
+
+- Design: [VP-pipeline-final.md](../../../../docs/design/VP-pipeline-final.md)
+- Slot data: [slots.json](../../../../docs/design/slots.json)
+- Decisions: ADR-0008 in [docs/decisions](../../../../docs/decisions/README.md)

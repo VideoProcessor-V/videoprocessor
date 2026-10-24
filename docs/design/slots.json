@@ -1,0 +1,1554 @@
+{
+  "schema": "vp-slots/1",
+  "frozen": "2026-10-24",
+  "design_doc": "docs/design/VP-pipeline-final.md",
+  "notes": [
+    "The pixel-path order is the 'order' field (gaps of 10 leave room). Control slots (order >= 900) are outside the pixel path.",
+    "unit = the owner's eight units (vp-pipeline-units); side = the owner's grouping (input side / processing / output side / control).",
+    "status: built = a real component exists; partial = some of the slot exists; placeholder = pass-through slot only (zero cost when off).",
+    "hook_point names where the slot runs: 'capture' (CPU/GPU ingest), 'prepass' (VP's own GPU passes on the source planes before libplacebo samples them), 'libplacebo' (inside pl_render_image), 'PRE_OUTPUT'/'OUTPUT' (VP hooks handed to libplacebo, in this order), 'present', 'host' (CPU side).",
+    "tests: placeholder = byte-identity on/off + zero cost; isolation = fixed inputs -> expected outputs + cost; contract = formats/geometry/fallback entry; chain = end to end at 200/250 ms with 4/3/2 queued frames.",
+    "settings_keys lists existing Config keys; keys in 'planned_keys' do not exist yet (the settings agent creates them).",
+    "Order of scaling.rebase vs repair.encoding is PENDING the round-2 A diagnostic (ADR-0005); re-base first is the proposed order.",
+    "Barrier-scan rules (docs/design/VP-barriers-2026-10-24.md): input-side slots run ONCE per source frame into the entrance cache (B3); one slot registry, hooks registered only when active (R2); nets run in the VP NetRunner on VP-owned textures, fp16 default (B1/R3)."
+  ],
+  "tiers": [
+    "Classic",
+    "Low",
+    "Mid",
+    "Upper"
+  ],
+  "slots": [
+    {
+      "id": "input.capture",
+      "name": "Capture",
+      "unit": "input",
+      "side": "input",
+      "order": 10,
+      "status": "built",
+      "hook_point": "capture",
+      "purpose": "Bring frames in from DeckLink/Magewell (or a file source) without losing precision: GPU unpack of v210/UYVY to P210 4:2:2, native RGB ingest for r210/R12B/R12L, upload reuse and early upload.",
+      "contract": {
+        "input": "capture-card frames: v210, UYVY, r210, R12B, R12L, P010 (file source), DV tunnel (12-bit RGB container)",
+        "output": "GPU planes: P210 4:2:2 (YCbCr) or RGB 4:4:4 (native RGB); 10-16 bit",
+        "geometry": "delivered size (the HDMI signal size), no crop",
+        "delay_share": "0 frames; upload inside the frame period",
+        "lookahead": "none"
+      },
+      "settings_keys": [
+        "capture_path",
+        "capture_upload",
+        "native_rgb_ingest",
+        "dv_tunnel_gpu_unpack"
+      ],
+      "planned_keys": [],
+      "tiers": "not tiered (always on); manual paths in Config",
+      "fallback": {
+        "entry": "Capture: CPU 4:2:0 (GPU unpack failed: <reason>)",
+        "behaviour": "GPU unpack failure switches to the CPU formatters for the session (today log-only; must become visible, queue item 44/45)."
+      },
+      "upstream": [],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "GpuCaptureUnpack byte checks (VideoProcessor-Test)",
+          "GpuRgbUnpack native RGB checks"
+        ],
+        "contract": [
+          "capture fallback appears under 'Fallbacks engaged'"
+        ],
+        "chain": [
+          "chain gate subset: capture formats x 24/50/60p"
+        ]
+      },
+      "open_items": [
+        "CPU fallback keeps 4:2:2 (CV210toP210) instead of 4:2:0 (item 44, low priority)",
+        "RGB capture luma path for net A (item 49)"
+      ],
+      "decisions": [
+        "ADR-0010"
+      ]
+    },
+    {
+      "id": "input.signal",
+      "name": "Signal",
+      "unit": "input",
+      "side": "input",
+      "order": 20,
+      "status": "built",
+      "hook_point": "host",
+      "purpose": "Identify the signal (SDR / HDR10 / LLDV / DV tunnel), its metadata and its colorimetry, and unpack the DV tunnel, so every later stage knows what the pixels mean.",
+      "contract": {
+        "input": "capture state + InfoFrames / DV RPU",
+        "output": "signal descriptor (transfer, primaries, range, HDR metadata, DV state) attached to each frame",
+        "geometry": "n/a",
+        "delay_share": "0 frames",
+        "lookahead": "none"
+      },
+      "settings_keys": [
+        "dv_tunnel_handoff",
+        "dv_tunnel_fixes",
+        "dv_trims"
+      ],
+      "planned_keys": [],
+      "tiers": "not tiered",
+      "fallback": {
+        "entry": "Signal: DV tunnel unpack on the CPU (<reason>)",
+        "behaviour": "DV tunnel GPU unpack failure falls back to the CPU (today log-only)."
+      },
+      "upstream": [
+        "input.capture"
+      ],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "DV tunnel unpack reference tests",
+          "HdrInference tests"
+        ],
+        "contract": [
+          "nets never run on raw DV IPT (net slots bypass on DV IPT input)"
+        ],
+        "chain": [
+          "chain gate: SDR / HDR10 / LLDV / tunnel"
+        ]
+      },
+      "open_items": [
+        "internal software DV pathway for synthetic RPU tests (item 60)"
+      ],
+      "decisions": []
+    },
+    {
+      "id": "input.queue_timing",
+      "name": "Queue + timing",
+      "unit": "input",
+      "side": "input",
+      "order": 30,
+      "status": "built",
+      "hook_point": "host",
+      "purpose": "Hold a FIXED, known delay (lip sync with a fixed audio delay): 200 ms target, 250 ms margin; 4 queued frames with a graceful 2-3 frame fallback; cadence/pulldown detection and the film clock; stale-burst handling.",
+      "contract": {
+        "input": "captured frames with timestamps",
+        "output": "frames released at a constant end-to-end delay, with cadence/film-clock phase",
+        "geometry": "n/a",
+        "delay_share": "TOTAL-DELAY BUDGET: queue frames = floor((budget - fixed costs) / frame period), ladder 4/3/2; fixed costs = swapchain depth + render-ahead + processing (+ capture transfer if the budget covers it). Pending owner O1/O3.",
+        "lookahead": "provides the shared look-ahead window: queue depth = deepest single look-ahead + hiccup spare (features share, never add)"
+      },
+      "settings_keys": [
+        "target_latency_ms",
+        "queue_size",
+        "queue_timing_fixes",
+        "queue_recovery",
+        "queue_auto_reset",
+        "pulldown_fixes",
+        "low_latency",
+        "low_latency_path"
+      ],
+      "planned_keys": [],
+      "tiers": "not tiered; 200 / 250 ms selectable",
+      "fallback": {
+        "entry": "Queue: short look-ahead (<n> of 4 frames)",
+        "behaviour": "With 2-3 frames available, every look-ahead consumer shortens its look-ahead or falls back; the delay never changes."
+      },
+      "upstream": [
+        "input.capture"
+      ],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "QueueStressHarness",
+          "H3TimingTests",
+          "film clock tests"
+        ],
+        "contract": [
+          "queue minimum follows the configured/time depth (no forced 5-frame minimum)"
+        ],
+        "chain": [
+          "delay gate: 24p at 200 and 250 ms with 4/3/2 frames; repeat at 25/30/50/60p; constant delay, no stalls, recovery when frames return"
+        ]
+      },
+      "open_items": [
+        "remove the forced 5-frame minimum (fix/r6-baseline)",
+        "motion_ahead time-based (fix/r6-baseline)",
+        "render-ahead inside the delay budget (fix/r6-baseline)",
+        "QueueLatency.h rounds UP (ceil) today: 200 ms at 23.976 = 5 frames (barrier B2)"
+      ],
+      "decisions": [
+        "ADR-0003"
+      ]
+    },
+    {
+      "id": "input.source_analysis",
+      "name": "Source analysis",
+      "unit": "input",
+      "side": "input",
+      "order": 40,
+      "status": "partial",
+      "hook_point": "host",
+      "purpose": "Analyse the ORIGINAL delivered frame before anything changes it: source resolution + scaler kernel pre-analysis (per axis), active picture/crop, cut/fade/black, subtitle detection, and the labels net A needs (bit depth, ratio, kernel, bitrate tier, codec family).",
+      "contract": {
+        "input": "the delivered frame (untouched), luma at delivered size",
+        "output": "per-frame analysis: per-axis source ratio + kernel class + confidence, active area, scene events, subtitle boxes, A labels (label schema v1) + state flag (re-based / native / un-reversed)",
+        "geometry": "delivered size; reports active area in delivered coordinates",
+        "delay_share": "0 frames (past-only detectors); latch confirmation is time-based",
+        "lookahead": "uses queued frames where available (subtitles, active picture), never waits"
+      },
+      "settings_keys": [
+        "source_resolution",
+        "rebase_kernel_match",
+        "subtitle_fit",
+        "subtitle_reposition",
+        "subtitle_type",
+        "source_coding_fixes"
+      ],
+      "planned_keys": [
+        "label_detector"
+      ],
+      "tiers": "not tiered; label-detector net optional",
+      "fallback": {
+        "entry": "Source analysis: labels unknown (<reason>)",
+        "behaviour": "Low confidence -> 'unknown' labels (A is trained with ~12% unknown); un-identified kernel -> Lanczos re-base or no re-base."
+      },
+      "upstream": [
+        "input.capture",
+        "input.signal"
+      ],
+      "fingerprint": "label schema v1 (shared with repair.encoding)",
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "SourceResolutionDetector tests",
+          "SceneDetector tests",
+          "subtitle corpus probes"
+        ],
+        "contract": [
+          "analysis reads the original frame even when re-base/repair are on"
+        ],
+        "chain": [
+          "srcres latch + crossfade checks"
+        ]
+      },
+      "open_items": [
+        "blind kernel estimation for the re-base (item 18)",
+        "label-detector / identification net (round 2; owner idea: identification net feeding the kernel-matched re-base)",
+        "estimator gap analysis vs ground truth (item 8)"
+      ],
+      "decisions": [
+        "ADR-0004"
+      ]
+    },
+    {
+      "id": "motion.estimation",
+      "name": "Motion estimation + vector store",
+      "unit": "motion",
+      "side": "input",
+      "order": 50,
+      "status": "built",
+      "hook_point": "prepass",
+      "purpose": "Estimate motion on the ORIGINAL frame at SOURCE size (NVOF seed + VP matcher) with a time-based look-ahead, and keep ONE vectors-valid state that every consumer obeys (invalidated at cuts, drops, repeats, drift, resyncs).",
+      "contract": {
+        "input": "original frame luma at source (delivered) size; queued next frames",
+        "output": "vector fields at source size + validity state; forward/backward as configured",
+        "geometry": "source size; consumers map through motion.vector_delivery",
+        "delay_share": "0 extra frames: motion ahead is time-based inside the queue (~67 ms)",
+        "lookahead": "motion_ahead (time-based, falls back to the matcher on a short queue)"
+      },
+      "settings_keys": [
+        "motion_engine",
+        "motion_ahead_frames",
+        "motion_history_fixes",
+        "dejudder_est",
+        "dejudder_estimate_ahead",
+        "dejudder_search_range"
+      ],
+      "planned_keys": [
+        "motion_ahead_ms"
+      ],
+      "tiers": "Classic off .. Upper full (NVOF + matcher)",
+      "fallback": {
+        "entry": "Motion: matcher only (NVOF unavailable: <reason>)",
+        "behaviour": "NVOF rejected/absent -> VP's matcher; vectors invalid -> every consumer falls back to its no-motion form."
+      },
+      "upstream": [
+        "input.queue_timing",
+        "input.source_analysis"
+      ],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "NvOpticalFlow tests",
+          "DejudderWarp estimator tests",
+          "MotionValidity tests"
+        ],
+        "contract": [
+          "vectors estimated at source size, never on repaired/re-based pictures"
+        ],
+        "chain": [
+          "vector validity across cuts/drops at 24/30/60p"
+        ]
+      },
+      "open_items": [
+        "A_motion needs these vectors BEFORE it runs (forced order)"
+      ],
+      "decisions": [
+        "ADR-0006"
+      ]
+    },
+    {
+      "id": "scaling.rebase",
+      "name": "Re-base (entrance stage 2a)",
+      "unit": "scaling",
+      "side": "input",
+      "order": 60,
+      "order_alternative": 75,
+      "status": "built",
+      "hook_point": "prepass",
+      "purpose": "Undo the player's upscale per axis: a 1-D kernel-matched inverse (or Lanczos) H then V back to the ENCODED grid, so later stages work on the real picture, not on scaler artifacts. Proposed FIRST, on the untouched delivered frame (the kernel inverse needs an exact kernel upscale as its input).",
+      "contract": {
+        "input": "delivered planes (P210/P010/RGB) at delivered size, untouched",
+        "output": "planes at the encoded size per axis (x and y factors may differ); r16 intermediate; pass order H then V",
+        "geometry": "per-axis factor sx, sy <= 1; crop/active area mapped by the same factors",
+        "delay_share": "0 frames; GPU time only",
+        "lookahead": "none"
+      },
+      "settings_keys": [
+        "source_resolution",
+        "rebase_kernel_match"
+      ],
+      "planned_keys": [
+        "entrance_rebase"
+      ],
+      "tiers": "Classic off; Low off; Mid/Upper on",
+      "fallback": {
+        "entry": "Re-base: off (<reason>)",
+        "behaviour": "A failed pass renders the native frame (already in code); unknown kernel -> Lanczos; off -> straight to output scaling."
+      },
+      "upstream": [
+        "input.source_analysis"
+      ],
+      "fingerprint": "1-D shader identity (kernel-matched inverse / Lanczos, H->V, r16) is part of every downstream net fingerprint",
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "KernelInverse tests",
+          "SourceRebase port vs kit (within 1 LSB)"
+        ],
+        "contract": [
+          "per-axis factors; crossfade on latch changes"
+        ],
+        "chain": [
+          "re-base x A-lens/NLS x vectors (high-risk combo)"
+        ]
+      },
+      "open_items": [
+        "ORDER vs repair.encoding PENDING the round-2 A diagnostic (both orders measured)"
+      ],
+      "decisions": [
+        "ADR-0005",
+        "ADR-0007"
+      ]
+    },
+    {
+      "id": "repair.encoding",
+      "name": "Encoding repair (entrance stage 1)",
+      "unit": "repair",
+      "side": "input",
+      "order": 70,
+      "status": "placeholder",
+      "hook_point": "prepass (VP NetRunner, once per source frame)",
+      "purpose": "Remove codec damage (blocking, ringing, mosquito, smear) at the ENCODED resolution, where the damage lives. Choices: net A (A_motion / A_single) / VP restore module / off.",
+      "contract": {
+        "input": "luma at the encoded size (after re-base; or delivered size when native/un-reversed) + A labels + state flag; A_motion also takes neighbour frames and vectors; RGB capture: the r16 matcher luma is repaired and the luma delta added to R, G, B (barrier B1)",
+        "output": "same size and format; luma only (chroma untouched); bounded residual",
+        "geometry": "active area only, mirror padding (crop/A-lens/NLS safe)",
+        "delay_share": "0 extra frames (A_motion uses already-queued neighbours)",
+        "lookahead": "A_motion: neighbours in the queue; A_single: none (low latency)"
+      },
+      "settings_keys": [],
+      "planned_keys": [
+        "encoding_repair"
+      ],
+      "tiers": "Classic off; Low VP restore or small A; Mid A; Upper A_motion",
+      "fallback": {
+        "entry": "Repair: bypassed (net fingerprint mismatch / missing weights / DV IPT input)",
+        "behaviour": "Bypass = pass-through; shown under 'Fallbacks engaged'."
+      },
+      "upstream": [
+        "input.source_analysis",
+        "motion.estimation",
+        "scaling.rebase"
+      ],
+      "fingerprint": "label schema, pass order H->V, r16 intermediate, re-base shader identity, VP commit",
+      "tests": {
+        "placeholder": [
+          "byte-identical with the slot off",
+          "zero GPU passes when off"
+        ],
+        "isolation": [
+          "A vs the clean frame at the encoded size; grain >= 90-95%"
+        ],
+        "contract": [
+          "luma-only; active-area mirror pad; bypass on DV IPT"
+        ],
+        "chain": [
+          "nets + low latency; DV tunnel + repair"
+        ]
+      },
+      "open_items": [
+        "round-2 DIAGNOSTIC decides whether A is kept (>= ~0.5-1 dB on low-bitrate streams with grain kept), else VP restore",
+        "RGB-capture luma path",
+        "real Apple TV validation before default-on"
+      ],
+      "decisions": [
+        "ADR-0005",
+        "ADR-0008",
+        "ADR-0009"
+      ]
+    },
+    {
+      "id": "repair.deband",
+      "name": "Deband",
+      "unit": "repair",
+      "side": "input",
+      "order": 80,
+      "status": "built",
+      "hook_point": "prepass",
+      "purpose": "Remove banding at source resolution, after repair (cheaper and correct for source-resolution bands).",
+      "contract": {
+        "input": "planes at the processing-entry size (encoded or delivered)",
+        "output": "same size and format; grain guard keeps grain",
+        "geometry": "same as input",
+        "delay_share": "0 frames",
+        "lookahead": "slot hold uses the current frame only"
+      },
+      "settings_keys": [
+        "deband_vp",
+        "deband_vp_exclusive",
+        "deband_vp_grain_guard",
+        "deband",
+        "deband_strength",
+        "deband_grain"
+      ],
+      "planned_keys": [],
+      "tiers": "Classic libplacebo deband; Low..Upper VP deband",
+      "fallback": {
+        "entry": "Deband: libplacebo deband (VP debander idle: <reason>)",
+        "behaviour": "VP debander failure renders without it; temporal frames keep libplacebo's deband."
+      },
+      "upstream": [
+        "repair.encoding"
+      ],
+      "fingerprint": "deband on/off is an unlabelled robustness input to the refine net",
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "VpDebander GPU tests",
+          "real-pan shimmer x52 (queue item 1)"
+        ],
+        "contract": [
+          "source-resolution run"
+        ],
+        "chain": [
+          "deband + re-base + 4K route"
+        ]
+      },
+      "open_items": [
+        "NEED with A on (does A remove most banding?) - decide from the results",
+        "x52 pan shimmer on 1080->1600 (item 1)"
+      ],
+      "decisions": [
+        "ADR-0009"
+      ]
+    },
+    {
+      "id": "repair.texture_restore",
+      "name": "Texture restore + breathing add-on",
+      "unit": "repair",
+      "side": "input",
+      "order": 90,
+      "status": "built",
+      "hook_point": "prepass",
+      "purpose": "Long-memory add-on on A's output: texture restore (~2 s peak-hold fine-band reference along vectors) and breathing reduction (detail_pulse_stabilise, the GOP pulse). Premium, needs an efficiency rebuild (9.8 ms at 4K on the 3050 Ti).",
+      "contract": {
+        "input": "planes after repair + deband; vectors (validity-gated)",
+        "output": "same size and format",
+        "geometry": "same as input",
+        "delay_share": "0 frames",
+        "lookahead": "detail pulse may measure the next queued frame (optional)"
+      },
+      "settings_keys": [
+        "texture_restore",
+        "texture_restore_cap",
+        "detail_pulse_stabilise",
+        "detail_pulse_cap",
+        "detail_pulse_fast"
+      ],
+      "planned_keys": [],
+      "tiers": "Upper only (after the efficiency pass)",
+      "fallback": {
+        "entry": "Texture restore: inactive (<reason>)",
+        "behaviour": "Failure renders without it (already counted in the status)."
+      },
+      "upstream": [
+        "repair.encoding",
+        "repair.deband",
+        "motion.estimation"
+      ],
+      "fingerprint": "on/off is an unlabelled robustness input to the refine net",
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "TextureRestoreGpuTiming",
+          "DetailPulse tests"
+        ],
+        "contract": [
+          "never runs with libplacebo smooth motion / deinterlacing"
+        ],
+        "chain": [
+          "stacked A -> texture restore (double-boost check)"
+        ]
+      },
+      "open_items": [
+        "efficiency rebuild (fused passes, shared-memory tile stats)",
+        "redesign to measure in the A-cleaned domain"
+      ],
+      "decisions": [
+        "ADR-0009"
+      ]
+    },
+    {
+      "id": "scaling.route_4k",
+      "name": "4K route (entrance stage 2b)",
+      "unit": "scaling",
+      "side": "input",
+      "order": 100,
+      "status": "placeholder",
+      "hook_point": "prepass",
+      "purpose": "Bring the picture to the PROCESSING resolution = min(source, max(4K, effective output active size)) with fixed 1-D x2 shaders per needed axis (H then V); 8K placeholder rules. Off = straight to output scaling.",
+      "contract": {
+        "input": "planes at the encoded/repaired size",
+        "output": "planes at the processing size (normally 3840x2160 or the output active size if larger); r16",
+        "geometry": "per-axis scale; active area mapped",
+        "delay_share": "0 frames; ~4x pixel throughput for 1080 sources downstream",
+        "lookahead": "none"
+      },
+      "settings_keys": [],
+      "planned_keys": [
+        "entrance_route_4k"
+      ],
+      "tiers": "Classic/Low off (straight to output); Mid/Upper on",
+      "fallback": {
+        "entry": "4K route: off (<reason>)",
+        "behaviour": "Off or failed -> libplacebo scales straight to output."
+      },
+      "upstream": [
+        "scaling.rebase",
+        "repair.texture_restore"
+      ],
+      "fingerprint": "the fixed 1-D x2 shader identity is locked in the refine net fingerprint",
+      "tests": {
+        "placeholder": [
+          "byte-identical with the slot off",
+          "zero GPU passes when off"
+        ],
+        "isolation": [
+          "1-D x2 port vs kit within 1 LSB"
+        ],
+        "contract": [
+          "processing size rule recomputed on output-profile change (vectors invalidated)",
+          "8K placeholder unit tests"
+        ],
+        "chain": [
+          "4K60 load at the 1080p60 shadow leg"
+        ]
+      },
+      "open_items": [
+        "confirm the downstream engine runs at arbitrary processing sizes (off = output size)"
+      ],
+      "decisions": [
+        "ADR-0007"
+      ]
+    },
+    {
+      "id": "scaling.refine",
+      "name": "Refine net",
+      "unit": "scaling",
+      "side": "input",
+      "order": 110,
+      "status": "placeholder",
+      "hook_point": "prepass (VP NetRunner, once per source frame)",
+      "purpose": "ONE refine net at the end of the 4K route, trained to the truth: inputs = picture + continuous per-axis scale (sx, sy) + A-ran flag. Corrects the combined artifacts of the fixed 1-D chain. Per-axis C is dropped (harmful in round 1).",
+      "contract": {
+        "input": "planes at the processing size + sx, sy + A flag (+ path: re-based / native)",
+        "output": "same size and format; bounded residual",
+        "geometry": "active area, mirror pad",
+        "delay_share": "0 frames; target ~A-class 4K cost (~4 ms worst case before fp16/tile skip)",
+        "lookahead": "none"
+      },
+      "settings_keys": [],
+      "planned_keys": [
+        "refine_net"
+      ],
+      "tiers": "Upper only (Mid optional if cheap)",
+      "fallback": {
+        "entry": "Refine: bypassed (fingerprint mismatch / group underperforms / low latency)",
+        "behaviour": "Bypass per combination group; off in low latency unless a cheap variant exists."
+      },
+      "upstream": [
+        "scaling.route_4k",
+        "repair.encoding"
+      ],
+      "fingerprint": "A version + state, 1-D chain identity, texture restore/deband robustness, VP commit",
+      "tests": {
+        "placeholder": [
+          "byte-identical with the slot off",
+          "zero GPU passes when off"
+        ],
+        "isolation": [
+          "per combination group quality + MTF/HF energy/grain kept; no ringing"
+        ],
+        "contract": [
+          "fingerprint bypass shows under 'Fallbacks engaged'"
+        ],
+        "chain": [
+          "Upper preset at 24p/200 ms on the 3090"
+        ]
+      },
+      "open_items": [
+        "single net TOLD whether A ran vs two versions (owner: one told, if cost is identical) - decide from round 2",
+        "low-latency variant or rule"
+      ],
+      "decisions": [
+        "ADR-0008"
+      ]
+    },
+    {
+      "id": "scaling.chroma_upscale",
+      "name": "Chroma upscale (placeholder)",
+      "unit": "scaling",
+      "side": "input",
+      "order": 120,
+      "status": "placeholder",
+      "hook_point": "prepass",
+      "purpose": "Reserve a VP-owned chroma upscale right after the input stages, in case libplacebo's chroma upscaling (chroma_upscaler auto / CfL) proves a compromise. When active, libplacebo must receive 4:4:4 and not re-upsample.",
+      "contract": {
+        "input": "luma + subsampled chroma (4:2:2 / 4:2:0) at the processing size",
+        "output": "2 planes: luma + full-resolution CbCr (4:4:4 in a 2-plane layout; barrier R4), at the processing size",
+        "geometry": "chroma siting respected; active area",
+        "delay_share": "0 frames",
+        "lookahead": "none"
+      },
+      "settings_keys": [
+        "chroma_upscaler"
+      ],
+      "planned_keys": [
+        "chroma_upscale_vp"
+      ],
+      "tiers": "not tiered until a component exists",
+      "fallback": {
+        "entry": "Chroma upscale: libplacebo (<reason>)",
+        "behaviour": "Off = libplacebo's chroma upscaler (today's behaviour)."
+      },
+      "upstream": [
+        "scaling.refine"
+      ],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": [
+          "byte-identical with the slot off",
+          "zero GPU passes when off"
+        ],
+        "isolation": [],
+        "contract": [
+          "libplacebo does not re-upsample when the slot outputs 4:4:4"
+        ],
+        "chain": []
+      },
+      "open_items": [
+        "VERIFY what libplacebo does with 4:2:2/4:2:0 chroma in our path (item 61)",
+        "interference with crop/A-lens/NLS, BTB/WTW, DV tunnel, subtitles"
+      ],
+      "decisions": [
+        "ADR-0011"
+      ]
+    },
+    {
+      "id": "motion.vector_delivery",
+      "name": "Vector delivery",
+      "unit": "motion",
+      "side": "processing",
+      "order": 130,
+      "status": "partial",
+      "hook_point": "host",
+      "purpose": "Hand source-size vectors to consumers at the processing size: PER-AXIS scaling (re-base/4K route give different x/y factors), mapping through crop/A-lens/NLS, and an optional +-1 px local refinement for precision consumers.",
+      "contract": {
+        "input": "vectors at source size + per-axis factors + geometry",
+        "output": "vectors in the consumer's coordinate space (scale x, scale y separately)",
+        "geometry": "source -> processing -> output, per axis",
+        "delay_share": "0 frames",
+        "lookahead": "none"
+      },
+      "settings_keys": [],
+      "planned_keys": [],
+      "tiers": "follows motion.estimation",
+      "fallback": {
+        "entry": "Vectors: invalid (<reason>)",
+        "behaviour": "Invalid geometry map -> vectors invalid -> consumers fall back."
+      },
+      "upstream": [
+        "motion.estimation",
+        "scaling.rebase",
+        "scaling.route_4k",
+        "scaling.geometry"
+      ],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "per-axis scaling unit tests (VectorScale)"
+        ],
+        "contract": [
+          "sx != sy maps exactly; identity factors leave vectors unchanged"
+        ],
+        "chain": [
+          "single-axis re-base + de-judder"
+        ]
+      },
+      "open_items": [
+        "+-1 px refinement for temporal dither / scaler refinements / texture restore"
+      ],
+      "decisions": [
+        "ADR-0006"
+      ]
+    },
+    {
+      "id": "motion.consumers",
+      "name": "Motion consumers",
+      "unit": "motion",
+      "side": "processing",
+      "order": 140,
+      "status": "built",
+      "hook_point": "prepass",
+      "purpose": "De-judder, hiccup repair, optional interpolation (exclusive with libplacebo smooth motion), and the temporal consumers (dither vectors, scaler refinements).",
+      "contract": {
+        "input": "pictures at the processing size + delivered vectors + validity",
+        "output": "the picture for this refresh's phase",
+        "geometry": "processing size",
+        "delay_share": "0 extra frames; uses the shared queue",
+        "lookahead": "de-judder pair (1), estimate-ahead (2), hiccup spare (1) - all degrade on a short queue"
+      },
+      "settings_keys": [
+        "dejudder_strength",
+        "dejudder_hold",
+        "interpolation",
+        "interpolation_fallback",
+        "smooth_motion",
+        "frame_mixer",
+        "dither_vectors"
+      ],
+      "planned_keys": [],
+      "tiers": "Classic off .. Upper full",
+      "fallback": {
+        "entry": "Motion consumers: no-motion form (vectors invalid / short queue)",
+        "behaviour": "Each consumer falls back as the vector rules say."
+      },
+      "upstream": [
+        "motion.vector_delivery"
+      ],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "DejudderWarp tests",
+          "InterpolationTimeline tests",
+          "PulldownDetector tests"
+        ],
+        "contract": [
+          "exclusive with libplacebo smooth motion by profile rules"
+        ],
+        "chain": [
+          "24p in 60 at 200 ms, 4/3/2 frames"
+        ]
+      },
+      "open_items": [],
+      "decisions": [
+        "ADR-0006"
+      ]
+    },
+    {
+      "id": "scaling.geometry",
+      "name": "Geometry",
+      "unit": "scaling",
+      "side": "processing",
+      "order": 150,
+      "status": "built",
+      "hook_point": "libplacebo",
+      "purpose": "Crop/active picture, A-lens (anamorphic), NLS, zoom/viewport.",
+      "contract": {
+        "input": "processing-size picture + active area",
+        "output": "source and target rectangles for libplacebo; NLS hook",
+        "geometry": "defines output active size (feeds the processing-size rule)",
+        "delay_share": "0 frames",
+        "lookahead": "active-picture decisions use queued frames"
+      },
+      "settings_keys": [
+        "nls",
+        "nls_active",
+        "nls_curve",
+        "nls_geometry",
+        "nls_protect",
+        "nls_scale"
+      ],
+      "planned_keys": [],
+      "tiers": "not tiered",
+      "fallback": {
+        "entry": "Geometry: NLS safe fit (hook failure)",
+        "behaviour": "NLS failure redraws with the linear safe fit (already in code)."
+      },
+      "upstream": [
+        "input.source_analysis"
+      ],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "NlsGeometryPolicy tests",
+          "AnamorphicPresentation tests"
+        ],
+        "contract": [
+          "active area propagated to every net slot"
+        ],
+        "chain": [
+          "A-lens/NLS + re-base + vectors"
+        ]
+      },
+      "open_items": [],
+      "decisions": []
+    },
+    {
+      "id": "scaling.output",
+      "name": "Output scaling (hybrid SSIM + D)",
+      "unit": "scaling",
+      "side": "processing",
+      "order": 160,
+      "status": "partial",
+      "hook_point": "libplacebo",
+      "purpose": "Scale to the output active size inside libplacebo: hybrid SSIM downscale (adaptive_w_base 0.2) with the optional D refine add-on; Lanczos fallback; polar retired.",
+      "contract": {
+        "input": "processing-size picture; D runs in the VP NetRunner inside AdaptiveDownscale's POST_KERNEL hook (light domain locked in its fingerprint, barrier R8)",
+        "output": "output-size picture (linear or gamma light per downscale_light)",
+        "geometry": "output active area",
+        "delay_share": "0 frames",
+        "lookahead": "none"
+      },
+      "settings_keys": [
+        "adaptive_downscale",
+        "adaptive_w_base",
+        "adaptive_faithful",
+        "adaptive_upscale",
+        "downscale_light",
+        "upscale_light"
+      ],
+      "planned_keys": [
+        "hybrid_refine_d"
+      ],
+      "tiers": "Classic Lanczos; Low..Upper hybrid; Upper + D",
+      "fallback": {
+        "entry": "Output scaling: Lanczos (hybrid unavailable: <reason>)",
+        "behaviour": "SSIM shader missing -> Lanczos."
+      },
+      "upstream": [
+        "scaling.chroma_upscale",
+        "motion.consumers",
+        "scaling.geometry"
+      ],
+      "fingerprint": "D: hybrid shader identity + VP commit",
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "AdaptiveDownscale tests",
+          "D cost measured in VP first"
+        ],
+        "contract": [
+          "D counts only without sharpness/detail/grain loss"
+        ],
+        "chain": [
+          "pan shimmer test"
+        ]
+      },
+      "open_items": [
+        "D cost unknown in VP (PyTorch bound 35.8 ms at 4K)",
+        "D grain gate FAIL (0.75)"
+      ],
+      "decisions": [
+        "ADR-0012"
+      ]
+    },
+    {
+      "id": "colour.tone_gamut",
+      "name": "Tone + gamut map",
+      "unit": "colour",
+      "side": "processing",
+      "order": 170,
+      "status": "built",
+      "hook_point": "libplacebo",
+      "purpose": "libplacebo tone/gamut mapping (keeps all of its colour science) OR, for low-end cards, the combined static HDR->SDR 3D LUT in the same slot.",
+      "contract": {
+        "input": "output-size picture in the source colour space",
+        "output": "picture in the target colour space (linear target light needed by LED compensation)",
+        "geometry": "output size",
+        "delay_share": "0 frames",
+        "lookahead": "peak detection (off keeps DTM off)"
+      },
+      "settings_keys": [
+        "tone_mapping",
+        "tone_mapping_tuning",
+        "gamut_mapping",
+        "peak_detection"
+      ],
+      "planned_keys": [
+        "combined_hdr_lut"
+      ],
+      "tiers": "Classic/Low may use the combined LUT; Mid/Upper libplacebo",
+      "fallback": {
+        "entry": "Tone map: libplacebo (combined LUT missing)",
+        "behaviour": "Missing/invalid combined LUT -> libplacebo tone mapping."
+      },
+      "upstream": [
+        "scaling.output"
+      ],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "libplacebo gamut probe"
+        ],
+        "contract": [
+          "combined LUT must output linear light or teach compensation the display response (ADR-0013)"
+        ],
+        "chain": [
+          "LED + Stage 13 + LUT + black level combo"
+        ]
+      },
+      "open_items": [
+        "combined LUT vs LED compensation catch (decide when building the LUT option)"
+      ],
+      "decisions": [
+        "ADR-0013",
+        "ADR-0002",
+        "ADR-0016"
+      ]
+    },
+    {
+      "id": "colour.extended_range",
+      "name": "BTB/WTW preservation",
+      "unit": "colour",
+      "side": "processing",
+      "order": 175,
+      "status": "built",
+      "hook_point": "libplacebo",
+      "purpose": "Keep below-black and above-white codes through every conversion (owner rule: both kept in all cases). Cross-cutting: VP relabels the source and its hooks do the conversion.",
+      "contract": {
+        "input": "picture + source/target colour",
+        "output": "same, with BTB/WTW carried",
+        "geometry": "n/a",
+        "delay_share": "0 frames",
+        "lookahead": "none"
+      },
+      "settings_keys": [
+        "preserve_extended_range",
+        "extended_range_more_cases"
+      ],
+      "planned_keys": [],
+      "tiers": "always on",
+      "fallback": {
+        "entry": "BTB/WTW: clipped (<reason>)",
+        "behaviour": "Hook failure or libplacebo frame mixing clips BTB (today log-only)."
+      },
+      "upstream": [
+        "colour.tone_gamut"
+      ],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "ExtendedRange tests"
+        ],
+        "contract": [
+          "BTB/WTW probe codes identical with every output slot on and off"
+        ],
+        "chain": [
+          "chain gate BTB/WTW probes"
+        ]
+      },
+      "open_items": [],
+      "decisions": [
+        "ADR-0002"
+      ]
+    },
+    {
+      "id": "colour.sdr_tone_shape",
+      "name": "SDR tone shape + DV trims",
+      "unit": "colour",
+      "side": "output",
+      "order": 200,
+      "status": "built",
+      "hook_point": "PRE_OUTPUT",
+      "purpose": "Delta 13's SDR tone shape and headroom, and the (non-certified) DV trims; first at PRE_OUTPUT.",
+      "contract": {
+        "input": "target-light picture at output size",
+        "output": "same domain",
+        "geometry": "output size",
+        "delay_share": "0 frames",
+        "lookahead": "none"
+      },
+      "settings_keys": [
+        "sdr_tone_shape",
+        "dv_trims"
+      ],
+      "planned_keys": [],
+      "tiers": "not tiered",
+      "fallback": {
+        "entry": "SDR tone shape: not applied (shader did not load)",
+        "behaviour": "Shader failure skips it."
+      },
+      "upstream": [
+        "colour.tone_gamut"
+      ],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "SdrToneShape tests",
+          "DolbyVisionTrims tests"
+        ],
+        "contract": [
+          "output encoding repair present when a PRE_OUTPUT hook runs"
+        ],
+        "chain": []
+      },
+      "open_items": [],
+      "decisions": [
+        "ADR-0002"
+      ]
+    },
+    {
+      "id": "colour.appearance",
+      "name": "Stage 13 appearance (CAM16)",
+      "unit": "colour",
+      "side": "output",
+      "order": 210,
+      "status": "placeholder",
+      "hook_point": "PRE_OUTPUT",
+      "purpose": "CAM16 Stevens/Hunt appearance matching from reference to dim-screen conditions (static per viewing setup), replacing the manual gamma boost + saturation. Off by default; on after the i1Pro screen-white measurement.",
+      "contract": {
+        "input": "linear target RGB at output size",
+        "output": "same domain; BTB/WTW codes pass through unchanged",
+        "geometry": "output size",
+        "delay_share": "0 frames; a few dozen ALU ops per pixel",
+        "lookahead": "none"
+      },
+      "settings_keys": [],
+      "planned_keys": [
+        "appearance_adaptation",
+        "appearance_strength",
+        "appearance_reference_white_nits",
+        "appearance_reference_surround",
+        "appearance_screen_white_nits",
+        "appearance_screen_surround"
+      ],
+      "tiers": "every tier when on (cost ~0)",
+      "fallback": {
+        "entry": "Appearance: off (shader failed)",
+        "behaviour": "Failure -> off, previous gamma boost/saturation restored."
+      },
+      "upstream": [
+        "colour.sdr_tone_shape"
+      ],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": [
+          "byte-identical with the slot off",
+          "zero hooks when off"
+        ],
+        "isolation": [
+          "identity at equal conditions; reference CAM16 grey ramp / primaries / skin; monotonic J; hue within 1 degree"
+        ],
+        "contract": [
+          "BTB/WTW probe codes identical on and off"
+        ],
+        "chain": [
+          "constant output across synthetic LED dimming with compensation on"
+        ]
+      },
+      "open_items": [
+        "one owner per correction with the ambient light sensor (no double correction)"
+      ],
+      "decisions": [
+        "ADR-0014"
+      ]
+    },
+    {
+      "id": "drive.led_measure",
+      "name": "LED measurement",
+      "unit": "drive",
+      "side": "output",
+      "order": 220,
+      "status": "built",
+      "hook_point": "PRE_OUTPUT",
+      "purpose": "Measure the picture's light (pre-compensation content, after Stage 13) for the LED drive; peaks picture-only, full coverage.",
+      "contract": {
+        "input": "target-light picture at output size",
+        "output": "unchanged picture + measurement readback",
+        "geometry": "picture area only (bars excluded)",
+        "delay_share": "LED latency ~80 ms (time-based, inside the queue)",
+        "lookahead": "LED look-ahead (ms-based)"
+      },
+      "settings_keys": [
+        "led_compensation",
+        "led_protect"
+      ],
+      "planned_keys": [],
+      "tiers": "not tiered",
+      "fallback": {
+        "entry": "LED: drive held (measurement unavailable)",
+        "behaviour": "Holdover keeps the last drive."
+      },
+      "upstream": [
+        "colour.appearance"
+      ],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "LedMeasurement tests",
+          "LED correlation harness"
+        ],
+        "contract": [
+          "measures after Stage 13, before compensation"
+        ],
+        "chain": [
+          "LED + subtitles at a 2-frame queue"
+        ]
+      },
+      "open_items": [],
+      "decisions": [
+        "ADR-0013"
+      ]
+    },
+    {
+      "id": "drive.led_compensation",
+      "name": "LED compensation (adaptive gamma)",
+      "unit": "drive",
+      "side": "output",
+      "order": 230,
+      "status": "built",
+      "hook_point": "PRE_OUTPUT",
+      "purpose": "Compensate the picture for the LED drive change so content light stays constant; CNTR never above need.",
+      "contract": {
+        "input": "target-light picture",
+        "output": "compensated picture (BTB/WTW passthrough parameters)",
+        "geometry": "output size",
+        "delay_share": "aligned to the LED latency",
+        "lookahead": "LED look-ahead"
+      },
+      "settings_keys": [
+        "led_compensation"
+      ],
+      "planned_keys": [],
+      "tiers": "not tiered",
+      "fallback": {
+        "entry": "LED compensation: off (shader did not load)",
+        "behaviour": "Failure -> drive held at full, no compensation."
+      },
+      "upstream": [
+        "drive.led_measure"
+      ],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "LED compensation shader tests"
+        ],
+        "contract": [
+          "CNTR never above need"
+        ],
+        "chain": [
+          "LED + Stage 13 + LUT + black level"
+        ]
+      },
+      "open_items": [],
+      "decisions": [
+        "ADR-0013"
+      ]
+    },
+    {
+      "id": "drive.black_level",
+      "name": "Black level correction",
+      "unit": "drive",
+      "side": "output",
+      "order": 240,
+      "status": "placeholder",
+      "hook_point": "PRE_OUTPUT",
+      "purpose": "Compensate the projector black floor as LED/CNTR change (delta 11 toe / ANSI lift interplay), after compensation, before the calibration LUT.",
+      "contract": {
+        "input": "compensated target-light picture + current LED/CNTR state",
+        "output": "same domain",
+        "geometry": "output size",
+        "delay_share": "aligned to the LED latency",
+        "lookahead": "none"
+      },
+      "settings_keys": [],
+      "planned_keys": [
+        "black_level_correction"
+      ],
+      "tiers": "not tiered",
+      "fallback": {
+        "entry": "Black level: off (<reason>)",
+        "behaviour": "Off = pass-through."
+      },
+      "upstream": [
+        "drive.led_compensation"
+      ],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": [
+          "byte-identical with the slot off",
+          "zero hooks when off"
+        ],
+        "isolation": [],
+        "contract": [
+          "dark-hair scene check"
+        ],
+        "chain": []
+      },
+      "open_items": [
+        "design not yet specified beyond the position"
+      ],
+      "decisions": [
+        "ADR-0013"
+      ]
+    },
+    {
+      "id": "output.calibration_lut",
+      "name": "Projector calibration LUT",
+      "unit": "output",
+      "side": "output",
+      "order": 250,
+      "status": "partial",
+      "hook_point": "PRE_OUTPUT",
+      "purpose": "The LAST colour op: SDR target -> projector codes, applied BY VP at the end of its PRE_OUTPUT hooks, after LED compensation and black level. Today it is libplacebo's target LUT, which runs BEFORE VP's hooks (wrong order).",
+      "contract": {
+        "input": "final target-light picture",
+        "output": "projector codes",
+        "geometry": "output size",
+        "delay_share": "0 frames",
+        "lookahead": "none"
+      },
+      "settings_keys": [
+        "calibration_lut",
+        "calibration_lut_enabled",
+        "calibration_lut_input_gamma",
+        "calibration_lut_input_transfer"
+      ],
+      "planned_keys": [
+        "calibration_lut_stage"
+      ],
+      "tiers": "not tiered",
+      "fallback": {
+        "entry": "Calibration LUT: libplacebo target LUT (VP stage unavailable)",
+        "behaviour": "Until the VP stage exists, libplacebo's target LUT (current behaviour)."
+      },
+      "upstream": [
+        "drive.black_level"
+      ],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": [
+          "byte-identical while the VP stage is off (libplacebo LUT path unchanged)"
+        ],
+        "isolation": [
+          "LibplaceboDisplayLut tests"
+        ],
+        "contract": [
+          "applied after LED compensation"
+        ],
+        "chain": [
+          "BTB/WTW probes with the LUT"
+        ]
+      },
+      "open_items": [
+        "move into VP's LAST output hook via pl_shader_custom_lut + BTB/WTW late restore (barrier R1; owner agreed); LED measurement then sees target light, not projector codes; check OutputEncodingRepair"
+      ],
+      "decisions": [
+        "ADR-0013"
+      ]
+    },
+    {
+      "id": "output.dither",
+      "name": "Dither / sigma-delta",
+      "unit": "output",
+      "side": "output",
+      "order": 260,
+      "status": "built",
+      "hook_point": "OUTPUT",
+      "purpose": "Quantise last for the 8-bit FL35 link: temporal sigma-delta (with vectors) or libplacebo dither; 12-bit / DV output paths later.",
+      "contract": {
+        "input": "projector codes in float",
+        "output": "link bit depth codes",
+        "geometry": "output size",
+        "delay_share": "0 frames",
+        "lookahead": "none"
+      },
+      "settings_keys": [
+        "sigma_delta",
+        "dithering",
+        "dither_vectors",
+        "dither_grain_tolerance_scale"
+      ],
+      "planned_keys": [],
+      "tiers": "Classic libplacebo dither; Low..Upper sigma-delta",
+      "fallback": {
+        "entry": "Dither: libplacebo (sigma-delta dropped: <reason>)",
+        "behaviour": "Unsupported code domain drops the sigma-delta (logged)."
+      },
+      "upstream": [
+        "output.calibration_lut"
+      ],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "SigmaDeltaDomain tests"
+        ],
+        "contract": [
+          "the quantiser is the last OUTPUT hook"
+        ],
+        "chain": []
+      },
+      "open_items": [],
+      "decisions": []
+    },
+    {
+      "id": "output.presentation",
+      "name": "Presentation",
+      "unit": "output",
+      "side": "output",
+      "order": 270,
+      "status": "built",
+      "hook_point": "present",
+      "purpose": "Swapchain, refresh, render-ahead (inside the delay budget), subtitle placement, transient confirmations (no always-on OSD).",
+      "contract": {
+        "input": "final frame",
+        "output": "display",
+        "geometry": "display mode",
+        "delay_share": "render-ahead counted inside the fixed delay",
+        "lookahead": "render-ahead"
+      },
+      "settings_keys": [
+        "render_ahead",
+        "render_ahead_queue_credit",
+        "render_ahead_utilisation"
+      ],
+      "planned_keys": [],
+      "tiers": "not tiered",
+      "fallback": {
+        "entry": "Presentation: open loop (no display statistics)",
+        "behaviour": "Window / iGPU panel -> open loop."
+      },
+      "upstream": [
+        "output.dither"
+      ],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "RenderAheadPolicy tests",
+          "AlphaPresentationTelemetry tests"
+        ],
+        "contract": [
+          "render-ahead at 24p fits 200 ms"
+        ],
+        "chain": [
+          "delay gate"
+        ]
+      },
+      "open_items": [],
+      "decisions": [
+        "ADR-0003"
+      ]
+    },
+    {
+      "id": "drive.projector_control",
+      "name": "Projector control",
+      "unit": "drive",
+      "side": "control",
+      "order": 900,
+      "status": "built",
+      "hook_point": "host",
+      "purpose": "RS-232 projector driver: LED (LPW1) + CNTR commands, script intent / internal script / compensate modes, latency timing.",
+      "contract": {
+        "input": "LED drive decisions",
+        "output": "serial commands",
+        "geometry": "n/a",
+        "delay_share": "led_latency_ms aligns commands with the picture",
+        "lookahead": "LED look-ahead"
+      },
+      "settings_keys": [
+        "led_compensation"
+      ],
+      "planned_keys": [],
+      "tiers": "not tiered",
+      "fallback": {
+        "entry": "Projector: not connected (LED drive off)",
+        "behaviour": "No serial projector -> drive off."
+      },
+      "upstream": [],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "BarcoAsciiDriver tests",
+          "LedController tests"
+        ],
+        "contract": [],
+        "chain": []
+      },
+      "open_items": [
+        "separate CNTR latency if measured different (phone slow-mo)"
+      ],
+      "decisions": []
+    },
+    {
+      "id": "control.net_runtime",
+      "name": "Net runtime + fingerprints",
+      "unit": "control",
+      "side": "control",
+      "order": 910,
+      "status": "placeholder",
+      "hook_point": "host",
+      "purpose": "VP-side NetRunner: executes the exporter's mpv-format passes on VP-owned textures via pl_dispatch (fp16 intermediates by default), in the front end and inside the hybrid scaler's POST_KERNEL hook; loads net packages, checks fingerprints (label schema, pass order, intermediate format, upstream versions/states, VP commit) and bypasses on mismatch with a visible entry.",
+      "contract": {
+        "input": "net packages (shader + parameters + fingerprint)",
+        "output": "hooks/passes for repair.encoding, scaling.refine, scaling.output D",
+        "geometry": "n/a",
+        "delay_share": "n/a",
+        "lookahead": "n/a"
+      },
+      "settings_keys": [],
+      "planned_keys": [
+        "nets_enabled"
+      ],
+      "tiers": "n/a",
+      "fallback": {
+        "entry": "Nets: bypassed (<net>: <reason>)",
+        "behaviour": "Mismatch/missing -> bypass that net only."
+      },
+      "upstream": [],
+      "fingerprint": "defines the fingerprint format",
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "fingerprint match/mismatch unit tests"
+        ],
+        "contract": [],
+        "chain": []
+      },
+      "open_items": [
+        "rgba32f vs fp16 intermediates (fp16 preferred where quality allows)"
+      ],
+      "decisions": [
+        "ADR-0008"
+      ]
+    },
+    {
+      "id": "control.diagnostics",
+      "name": "Status, fallbacks + diagnostics",
+      "unit": "control",
+      "side": "control",
+      "order": 920,
+      "status": "partial",
+      "hook_point": "host",
+      "purpose": "One 'Fallbacks engaged: (list)' heading in the Ctrl+I overlay, Config status and the Ctrl+Alt+D bundle; crash state ring; logs.",
+      "contract": {
+        "input": "fallback events from every slot",
+        "output": "status lines + one-time transient notices",
+        "geometry": "n/a",
+        "delay_share": "n/a",
+        "lookahead": "n/a"
+      },
+      "settings_keys": [],
+      "planned_keys": [],
+      "tiers": "n/a",
+      "fallback": {
+        "entry": null,
+        "behaviour": "Owns the format: 'Fallbacks engaged: none' when clean."
+      },
+      "upstream": [],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "FallbackRegistry unit tests"
+        ],
+        "contract": [
+          "every slot's fallback entry reaches the overlay, Config status and Ctrl+Alt+D"
+        ],
+        "chain": []
+      },
+      "open_items": [
+        "audit all log-only fallbacks (item 45)",
+        "reuse the FallbackRegistry built on fix/r6-baseline (barrier R5); do not duplicate"
+      ],
+      "decisions": [
+        "ADR-0001"
+      ]
+    },
+    {
+      "id": "control.config",
+      "name": "Config + tiers",
+      "unit": "control",
+      "side": "control",
+      "order": 930,
+      "status": "partial",
+      "hook_point": "host",
+      "purpose": "Per-unit Classic/Low/Mid/Upper tier sliders + global, toggles listed beneath, unbuilt slots shown as 'not yet implemented'; settings preview exe.",
+      "contract": {
+        "input": "slots.json + config schema",
+        "output": "Config UI + validated settings",
+        "geometry": "n/a",
+        "delay_share": "n/a",
+        "lookahead": "n/a"
+      },
+      "settings_keys": [],
+      "planned_keys": [],
+      "tiers": "n/a",
+      "fallback": {
+        "entry": null,
+        "behaviour": "n/a"
+      },
+      "upstream": [],
+      "fingerprint": null,
+      "tests": {
+        "placeholder": null,
+        "isolation": [
+          "ConfigFileTests",
+          "ConfigEditorWindowTests"
+        ],
+        "contract": [
+          "every planned key exists once the settings agent lands"
+        ],
+        "chain": []
+      },
+      "open_items": [
+        "settings reference guide (item 54)"
+      ],
+      "decisions": [
+        "ADR-0015"
+      ]
+    }
+  ]
+}

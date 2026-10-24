@@ -1,0 +1,35 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "drive.led_measure",
+  "unit": "drive",
+  "order": 220,
+  "status": "built",
+  "code_location": "legacy",
+  "live_files": [
+    "src/VideoProcessor-Lib/led/LedMeasurement.cpp",
+    "src/VideoProcessor-Lib/led/LedMeasurementHook.cpp",
+    "src/VideoProcessor-Lib/led/LedLookahead.cpp"
+  ],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": [
+        "serial projector (LED drive off without one)"
+      ]
+    },
+    "tools": [],
+    "config_keys": [
+      "led_compensation",
+      "led_protect"
+    ],
+    "upstream_modules": [
+      "colour.appearance"
+    ]
+  },
+  "fallback_when_missing": "Holdover keeps the last drive.",
+  "fallback_entry": "LED: drive held (measurement unavailable)"
+}

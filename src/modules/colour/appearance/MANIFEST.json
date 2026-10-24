@@ -1,0 +1,36 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "colour.appearance",
+  "unit": "colour",
+  "order": 210,
+  "status": "placeholder",
+  "code_location": "none (placeholder)",
+  "live_files": [],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": [
+        "i1Pro screen-white measurement (placeholder value 48 nits until then)",
+        "ambient light sensor (surround)"
+      ]
+    },
+    "tools": [],
+    "config_keys": [
+      "appearance_adaptation",
+      "appearance_reference_surround",
+      "appearance_reference_white_nits",
+      "appearance_screen_surround",
+      "appearance_screen_white_nits",
+      "appearance_strength"
+    ],
+    "upstream_modules": [
+      "colour.sdr_tone_shape"
+    ]
+  },
+  "fallback_when_missing": "Failure -> off, previous gamma boost/saturation restored.",
+  "fallback_entry": "Appearance: off (shader failed)"
+}

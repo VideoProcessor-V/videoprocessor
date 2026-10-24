@@ -1,0 +1,73 @@
+# Output scaling (hybrid SSIM + D) (`scaling.output`)
+
+Unit: **scaling** | side: processing | order: 160 | status: **partial** | hook point: libplacebo
+
+## Purpose / why
+
+Scale to the output active size inside libplacebo: hybrid SSIM downscale (adaptive_w_base 0.2) with the optional D refine add-on; Lanczos fallback; polar retired.
+
+## Contract
+
+- Input: processing-size picture; D runs in the VP NetRunner inside AdaptiveDownscale's POST_KERNEL hook (light domain locked in its fingerprint, barrier R8)
+- Output: output-size picture (linear or gamma light per downscale_light)
+- Geometry: output active area
+- Delay share: 0 frames
+- Look-ahead: none
+
+## Settings
+
+- Existing keys: `adaptive_downscale`, `adaptive_w_base`, `adaptive_faithful`, `adaptive_upscale`, `downscale_light`, `upscale_light`
+- Planned keys: `hybrid_refine_d`
+- Tiers: Classic Lanczos; Low..Upper hybrid; Upper + D
+
+## Fallbacks
+
+- "Fallbacks engaged" entry: Output scaling: Lanczos (hybrid unavailable: <reason>)
+- Behaviour: SSIM shader missing -> Lanczos.
+
+## Net fingerprint / upstream
+
+- Fingerprint: D: hybrid shader identity + VP commit
+- Upstream modules: `scaling.chroma_upscale`, `motion.consumers`, `scaling.geometry`
+
+## How to build / test
+
+Build the solution via the shared build-slot runner (see AGENTS.md); tests single-threaded; GPU tests only on mains with `VP_TEST_ADAPTER=NVIDIA`.
+
+Placeholder tests:
+- (none yet)
+
+Isolation tests:
+- AdaptiveDownscale tests
+- D cost measured in VP first
+
+Contract tests:
+- D counts only without sharpness/detail/grain loss
+
+Chain tests:
+- pan shimmer test
+
+## Known issues / open items
+
+- D cost unknown in VP (PyTorch bound 35.8 ms at 4K)
+- D grain gate FAIL (0.75)
+
+## Where the code lives (live file list)
+
+Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+
+- `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.cpp`
+- `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h`
+- `src/VideoProcessor-Lib/vprenderer/DownscaleLight.h`
+- `shaders/SSimDownscaler.glsl`
+- `shaders/SSimSuperRes.glsl`
+
+## Migration directive
+
+Code moves into this folder only when this slot is touched (opportunistic until M1, a dedicated phase after M1, finished by M2). A move = `git mv` + project/include updates + this module's `live_files` + `docs/design/components-master.json` (regenerate with `python tools/check_module_manifests.py --write`) in the SAME commit, with the build, this module's tests and the chain-gate subset passing. Never leave a copy behind; one module per change; never during a release/deploy window. Update this README in the same commit as any slot change.
+
+## Links
+
+- Design: [VP-pipeline-final.md](../../../../docs/design/VP-pipeline-final.md)
+- Slot data: [slots.json](../../../../docs/design/slots.json)
+- Decisions: ADR-0012 in [docs/decisions](../../../../docs/decisions/README.md)

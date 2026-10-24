@@ -1,0 +1,28 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "drive.black_level",
+  "unit": "drive",
+  "order": 240,
+  "status": "placeholder",
+  "code_location": "none (placeholder)",
+  "live_files": [],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [
+      "black_level_correction"
+    ],
+    "upstream_modules": [
+      "drive.led_compensation"
+    ]
+  },
+  "fallback_when_missing": "Off = pass-through.",
+  "fallback_entry": "Black level: off (<reason>)"
+}

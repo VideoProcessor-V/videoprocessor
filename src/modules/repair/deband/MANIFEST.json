@@ -1,0 +1,37 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "repair.deband",
+  "unit": "repair",
+  "order": 80,
+  "status": "built",
+  "code_location": "legacy",
+  "live_files": [
+    "src/VideoProcessor-Lib/vprenderer/VpDebander.cpp",
+    "src/VideoProcessor-Lib/vprenderer/VpDebander.h",
+    "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
+  ],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [
+      "deband",
+      "deband_grain",
+      "deband_strength",
+      "deband_vp",
+      "deband_vp_exclusive",
+      "deband_vp_grain_guard"
+    ],
+    "upstream_modules": [
+      "repair.encoding"
+    ]
+  },
+  "fallback_when_missing": "VP debander failure renders without it; temporal frames keep libplacebo's deband.",
+  "fallback_entry": "Deband: libplacebo deband (VP debander idle: <reason>)"
+}

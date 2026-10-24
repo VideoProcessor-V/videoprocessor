@@ -1,0 +1,31 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "scaling.refine",
+  "unit": "scaling",
+  "order": 110,
+  "status": "placeholder",
+  "code_location": "none (placeholder)",
+  "live_files": [],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": [
+        "GPU able to run the net in budget (else bypass)"
+      ]
+    },
+    "tools": [],
+    "config_keys": [
+      "refine_net"
+    ],
+    "upstream_modules": [
+      "scaling.route_4k",
+      "repair.encoding"
+    ]
+  },
+  "fallback_when_missing": "Bypass per combination group; off in low latency unless a cheap variant exists.",
+  "fallback_entry": "Refine: bypassed (fingerprint mismatch / group underperforms / low latency)"
+}

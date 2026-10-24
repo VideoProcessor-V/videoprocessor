@@ -1,0 +1,33 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "scaling.chroma_upscale",
+  "unit": "scaling",
+  "order": 120,
+  "status": "placeholder",
+  "code_location": "legacy",
+  "live_files": [
+    "shaders/CfL_Prediction.glsl"
+  ],
+  "components": {
+    "files": {
+      "required": [
+        "shaders/CfL_Prediction.glsl"
+      ],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [
+      "chroma_upscale_vp",
+      "chroma_upscaler"
+    ],
+    "upstream_modules": [
+      "scaling.refine"
+    ]
+  },
+  "fallback_when_missing": "Off = libplacebo's chroma upscaler (today's behaviour).",
+  "fallback_entry": "Chroma upscale: libplacebo (<reason>)"
+}

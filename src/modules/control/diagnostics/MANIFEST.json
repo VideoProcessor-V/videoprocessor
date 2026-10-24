@@ -1,0 +1,29 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "control.diagnostics",
+  "unit": "control",
+  "order": 920,
+  "status": "partial",
+  "code_location": "legacy",
+  "live_files": [
+    "src/VideoProcessor-Lib/StateReport.cpp",
+    "src/VideoProcessor-Lib/CrashState.cpp",
+    "src/VideoProcessor-GUI/StatsOverlayWindow.cpp",
+    "src/VideoProcessor-Lib/DebugLog.h"
+  ],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [],
+    "upstream_modules": []
+  },
+  "fallback_when_missing": "Owns the format: 'Fallbacks engaged: none' when clean.",
+  "fallback_entry": null
+}

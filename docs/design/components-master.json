@@ -1,0 +1,1021 @@
+{
+  "schema": "vp-components-master/1",
+  "generated_by": "tools/check_module_manifests.py --write",
+  "modules": [
+    {
+      "slot": "input.capture",
+      "order": 10,
+      "status": "built",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.cpp",
+        "src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.h",
+        "src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.cpp",
+        "src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.h",
+        "src/VideoProcessor-Lib/vprenderer/AlphaNativeRgbIngress.h",
+        "src/VideoProcessor-Lib/vprenderer/UploadReuse.h",
+        "src/VideoProcessor-Lib/vprenderer/EarlyUpload.cpp",
+        "src/VideoProcessor-Lib/vprenderer/EarlyUpload.h",
+        "src/VideoProcessor-Lib/CaptureInput.cpp",
+        "src/VideoProcessor-Lib/CaptureInput.h",
+        "src/VideoProcessor-Lib/blackmagic_decklink",
+        "src/VideoProcessor-Lib/magewell",
+        "src/VideoProcessor-Lib/video_frame_formatter",
+        "src/VideoProcessor-Lib/VideoConversionOverride.cpp"
+      ],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [
+            "capture card (DeckLink or Magewell) or a file source"
+          ],
+          "optional": [
+            "GPU for capture unpack (falls back to CPU 4:2:0)"
+          ]
+        },
+        "tools": [],
+        "config_keys": [
+          "capture_path",
+          "capture_upload",
+          "dv_tunnel_gpu_unpack",
+          "native_rgb_ingest"
+        ],
+        "upstream_modules": []
+      },
+      "fallback_when_missing": "GPU unpack failure switches to the CPU formatters for the session (today log-only; must become visible, queue item 44/45)."
+    },
+    {
+      "slot": "input.signal",
+      "order": 20,
+      "status": "built",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Lib/HdrInference.cpp",
+        "src/VideoProcessor-Lib/HdrInference.h",
+        "src/VideoProcessor-Lib/HDRData.cpp",
+        "src/VideoProcessor-Lib/ColorSpace.cpp",
+        "src/VideoProcessor-Lib/EOTF.cpp",
+        "src/VideoProcessor-Lib/DolbyVisionTunnelGate.h",
+        "src/VideoProcessor-Lib/DolbyVisionTunnelHandoff.h",
+        "src/VideoProcessor-Lib/vprenderer/GpuDolbyVisionTunnelUnpack.cpp",
+        "src/VideoProcessor-Lib/vprenderer/GpuDolbyVisionTunnelUnpack.h",
+        "src/VideoProcessor-Lib/vprenderer/Bt2020SignalController.h"
+      ],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [
+          "dv_trims",
+          "dv_tunnel_fixes",
+          "dv_tunnel_handoff"
+        ],
+        "upstream_modules": [
+          "input.capture"
+        ]
+      },
+      "fallback_when_missing": "DV tunnel GPU unpack failure falls back to the CPU (today log-only)."
+    },
+    {
+      "slot": "input.queue_timing",
+      "order": 30,
+      "status": "built",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Lib/QueueLatency.h",
+        "src/VideoProcessor-Lib/QueueConfiguration.h",
+        "src/VideoProcessor-Lib/QueueLookahead.h",
+        "src/VideoProcessor-Lib/CaptureFrameQueue.h",
+        "src/VideoProcessor-Lib/VideoTimingController.cpp",
+        "src/VideoProcessor-Lib/TimingClock.cpp",
+        "src/VideoProcessor-Lib/UnifiedProfileRuntime.cpp",
+        "src/VideoProcessor-Lib/vprenderer/PulldownDetector.h",
+        "src/VideoProcessor-Lib/vprenderer/AlphaQueuePolicy.h",
+        "src/VideoProcessor-GUI/VideoProcessorDlg.cpp"
+      ],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [
+          "low_latency",
+          "low_latency_path",
+          "pulldown_fixes",
+          "queue_auto_reset",
+          "queue_recovery",
+          "queue_size",
+          "queue_timing_fixes",
+          "target_latency_ms"
+        ],
+        "upstream_modules": [
+          "input.capture"
+        ]
+      },
+      "fallback_when_missing": "With 2-3 frames available, every look-ahead consumer shortens its look-ahead or falls back; the delay never changes."
+    },
+    {
+      "slot": "input.source_analysis",
+      "order": 40,
+      "status": "partial",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Lib/SourceResolutionDetector.cpp",
+        "src/VideoProcessor-Lib/SourceResolutionDetector.h",
+        "src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.cpp",
+        "src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.h",
+        "src/VideoProcessor-Lib/KernelInverse.cpp",
+        "src/VideoProcessor-Lib/ActivePictureAnalyzer.cpp",
+        "src/VideoProcessor-Lib/SceneDetector.cpp",
+        "src/VideoProcessor-Lib/SubtitleBoxDetector.cpp",
+        "src/VideoProcessor-Lib/AnalysisFrame.cpp"
+      ],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [
+          "label_detector",
+          "rebase_kernel_match",
+          "source_coding_fixes",
+          "source_resolution",
+          "subtitle_fit",
+          "subtitle_reposition",
+          "subtitle_type"
+        ],
+        "upstream_modules": [
+          "input.capture",
+          "input.signal"
+        ]
+      },
+      "fallback_when_missing": "Low confidence -> 'unknown' labels (A is trained with ~12% unknown); un-identified kernel -> Lanczos re-base or no re-base."
+    },
+    {
+      "slot": "motion.estimation",
+      "order": 50,
+      "status": "built",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Lib/vprenderer/NvOpticalFlow.cpp",
+        "src/VideoProcessor-Lib/vprenderer/NvOpticalFlow.h",
+        "src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp",
+        "src/VideoProcessor-Lib/vprenderer/MotionAheadProducer.cpp",
+        "src/VideoProcessor-Lib/MotionAhead.h",
+        "src/VideoProcessor-Lib/VectorStore.h",
+        "src/VideoProcessor-Lib/MotionValidity.h",
+        "src/VideoProcessor-Lib/OpticalFlowTrust.h",
+        "src/VideoProcessor-Lib/MotionConfig.h",
+        "src/VideoProcessor-Lib/vprenderer/MotionEngineIdle.h"
+      ],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": [
+            "NVIDIA GPU with NVOF (falls back to VP's matcher)"
+          ]
+        },
+        "tools": [],
+        "config_keys": [
+          "dejudder_est",
+          "dejudder_estimate_ahead",
+          "dejudder_search_range",
+          "motion_ahead_frames",
+          "motion_ahead_ms",
+          "motion_engine",
+          "motion_history_fixes"
+        ],
+        "upstream_modules": [
+          "input.queue_timing",
+          "input.source_analysis"
+        ]
+      },
+      "fallback_when_missing": "NVOF rejected/absent -> VP's matcher; vectors invalid -> every consumer falls back to its no-motion form."
+    },
+    {
+      "slot": "scaling.rebase",
+      "order": 60,
+      "status": "built",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Lib/vprenderer/SourceRebase.cpp",
+        "src/VideoProcessor-Lib/vprenderer/SourceRebase.h",
+        "src/VideoProcessor-Lib/KernelInverse.cpp",
+        "src/VideoProcessor-Lib/KernelInverse.h",
+        "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
+      ],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [
+          "entrance_rebase",
+          "rebase_kernel_match",
+          "source_resolution"
+        ],
+        "upstream_modules": [
+          "input.source_analysis"
+        ]
+      },
+      "fallback_when_missing": "A failed pass renders the native frame (already in code); unknown kernel -> Lanczos; off -> straight to output scaling."
+    },
+    {
+      "slot": "repair.encoding",
+      "order": 70,
+      "status": "placeholder",
+      "code_location": "none (placeholder)",
+      "live_files": [],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": [
+            "GPU able to run the net in budget (else bypass)"
+          ]
+        },
+        "tools": [],
+        "config_keys": [
+          "encoding_repair"
+        ],
+        "upstream_modules": [
+          "input.source_analysis",
+          "motion.estimation",
+          "scaling.rebase"
+        ]
+      },
+      "fallback_when_missing": "Bypass = pass-through; shown under 'Fallbacks engaged'."
+    },
+    {
+      "slot": "repair.deband",
+      "order": 80,
+      "status": "built",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Lib/vprenderer/VpDebander.cpp",
+        "src/VideoProcessor-Lib/vprenderer/VpDebander.h",
+        "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
+      ],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [
+          "deband",
+          "deband_grain",
+          "deband_strength",
+          "deband_vp",
+          "deband_vp_exclusive",
+          "deband_vp_grain_guard"
+        ],
+        "upstream_modules": [
+          "repair.encoding"
+        ]
+      },
+      "fallback_when_missing": "VP debander failure renders without it; temporal frames keep libplacebo's deband."
+    },
+    {
+      "slot": "repair.texture_restore",
+      "order": 90,
+      "status": "built",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Lib/vprenderer/TextureRestore.cpp",
+        "src/VideoProcessor-Lib/vprenderer/TextureRestore.h",
+        "src/VideoProcessor-Lib/vprenderer/DetailPulse.cpp",
+        "src/VideoProcessor-Lib/vprenderer/DetailPulse.h",
+        "docs/VP-detail-restore.md"
+      ],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [
+          "detail_pulse_cap",
+          "detail_pulse_fast",
+          "detail_pulse_stabilise",
+          "texture_restore",
+          "texture_restore_cap"
+        ],
+        "upstream_modules": [
+          "repair.encoding",
+          "repair.deband",
+          "motion.estimation"
+        ]
+      },
+      "fallback_when_missing": "Failure renders without it (already counted in the status)."
+    },
+    {
+      "slot": "scaling.route_4k",
+      "order": 100,
+      "status": "placeholder",
+      "code_location": "none (placeholder)",
+      "live_files": [],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [
+          "entrance_route_4k"
+        ],
+        "upstream_modules": [
+          "scaling.rebase",
+          "repair.texture_restore"
+        ]
+      },
+      "fallback_when_missing": "Off or failed -> libplacebo scales straight to output."
+    },
+    {
+      "slot": "scaling.refine",
+      "order": 110,
+      "status": "placeholder",
+      "code_location": "none (placeholder)",
+      "live_files": [],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": [
+            "GPU able to run the net in budget (else bypass)"
+          ]
+        },
+        "tools": [],
+        "config_keys": [
+          "refine_net"
+        ],
+        "upstream_modules": [
+          "scaling.route_4k",
+          "repair.encoding"
+        ]
+      },
+      "fallback_when_missing": "Bypass per combination group; off in low latency unless a cheap variant exists."
+    },
+    {
+      "slot": "scaling.chroma_upscale",
+      "order": 120,
+      "status": "placeholder",
+      "code_location": "legacy",
+      "live_files": [
+        "shaders/CfL_Prediction.glsl"
+      ],
+      "components": {
+        "files": {
+          "required": [
+            "shaders/CfL_Prediction.glsl"
+          ],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [
+          "chroma_upscale_vp",
+          "chroma_upscaler"
+        ],
+        "upstream_modules": [
+          "scaling.refine"
+        ]
+      },
+      "fallback_when_missing": "Off = libplacebo's chroma upscaler (today's behaviour)."
+    },
+    {
+      "slot": "motion.vector_delivery",
+      "order": 130,
+      "status": "partial",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Lib/vprenderer/DejudderPolicy.h",
+        "src/VideoProcessor-Lib/vprenderer/DejudderWarp.h"
+      ],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [],
+        "upstream_modules": [
+          "motion.estimation",
+          "scaling.rebase",
+          "scaling.route_4k",
+          "scaling.geometry"
+        ]
+      },
+      "fallback_when_missing": "Invalid geometry map -> vectors invalid -> consumers fall back."
+    },
+    {
+      "slot": "motion.consumers",
+      "order": 140,
+      "status": "built",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp",
+        "src/VideoProcessor-Lib/vprenderer/DejudderAhead.h",
+        "src/VideoProcessor-Lib/vprenderer/RenderedWarp.cpp",
+        "src/VideoProcessor-Lib/vprenderer/FrameInterpolator.cpp",
+        "src/VideoProcessor-Lib/vprenderer/InterpolationTimeline.h",
+        "src/VideoProcessor-Lib/vprenderer/InterpolationPolicy.h",
+        "src/VideoProcessor-Lib/vprenderer/OcclusionMaskHook.cpp",
+        "src/VideoProcessor-Lib/vprenderer/TemporalRenderer.h"
+      ],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [
+          "dejudder_hold",
+          "dejudder_strength",
+          "dither_vectors",
+          "frame_mixer",
+          "interpolation",
+          "interpolation_fallback",
+          "smooth_motion"
+        ],
+        "upstream_modules": [
+          "motion.vector_delivery"
+        ]
+      },
+      "fallback_when_missing": "Each consumer falls back as the vector rules say."
+    },
+    {
+      "slot": "scaling.geometry",
+      "order": 150,
+      "status": "built",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Lib/NlsGeometryPolicy.cpp",
+        "src/VideoProcessor-Lib/vprenderer/NlsMaskMapping.h",
+        "src/VideoProcessor-Lib/vprenderer/NlsHookRecovery.h",
+        "src/VideoProcessor-Lib/vprenderer/AnamorphicPresentation.h",
+        "src/VideoProcessor-Lib/vprenderer/AlphaSourceCropPolicy.cpp",
+        "shaders/NLS.glsl",
+        "shaders/NLSPlus.glsl"
+      ],
+      "components": {
+        "files": {
+          "required": [
+            "shaders/NLS.glsl",
+            "shaders/NLSPlus.glsl"
+          ],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [
+          "nls",
+          "nls_active",
+          "nls_curve",
+          "nls_geometry",
+          "nls_protect",
+          "nls_scale"
+        ],
+        "upstream_modules": [
+          "input.source_analysis"
+        ]
+      },
+      "fallback_when_missing": "NLS failure redraws with the linear safe fit (already in code)."
+    },
+    {
+      "slot": "scaling.output",
+      "order": 160,
+      "status": "partial",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.cpp",
+        "src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h",
+        "src/VideoProcessor-Lib/vprenderer/DownscaleLight.h",
+        "shaders/SSimDownscaler.glsl",
+        "shaders/SSimSuperRes.glsl"
+      ],
+      "components": {
+        "files": {
+          "required": [
+            "shaders/SSimDownscaler.glsl",
+            "shaders/SSimSuperRes.glsl"
+          ],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [
+          "adaptive_downscale",
+          "adaptive_faithful",
+          "adaptive_upscale",
+          "adaptive_w_base",
+          "downscale_light",
+          "hybrid_refine_d",
+          "upscale_light"
+        ],
+        "upstream_modules": [
+          "scaling.chroma_upscale",
+          "motion.consumers",
+          "scaling.geometry"
+        ]
+      },
+      "fallback_when_missing": "SSIM shader missing -> Lanczos."
+    },
+    {
+      "slot": "colour.tone_gamut",
+      "order": 170,
+      "status": "built",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Lib/vprenderer/LibplaceboRenderParameters.cpp",
+        "src/VideoProcessor-Lib/vprenderer/LibplaceboOutputPolicy.cpp",
+        "src/VideoProcessor-Lib/ToneMappingTuning.h"
+      ],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [
+          "combined_hdr_lut",
+          "gamut_mapping",
+          "peak_detection",
+          "tone_mapping",
+          "tone_mapping_tuning"
+        ],
+        "upstream_modules": [
+          "scaling.output"
+        ]
+      },
+      "fallback_when_missing": "Missing/invalid combined LUT -> libplacebo tone mapping."
+    },
+    {
+      "slot": "colour.extended_range",
+      "order": 175,
+      "status": "built",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Lib/vprenderer/ExtendedRange.cpp",
+        "src/VideoProcessor-Lib/vprenderer/ExtendedRange.h"
+      ],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [
+          "extended_range_more_cases",
+          "preserve_extended_range"
+        ],
+        "upstream_modules": [
+          "colour.tone_gamut"
+        ]
+      },
+      "fallback_when_missing": "Hook failure or libplacebo frame mixing clips BTB (today log-only)."
+    },
+    {
+      "slot": "colour.sdr_tone_shape",
+      "order": 200,
+      "status": "built",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Lib/vprenderer/SdrToneShape.h",
+        "src/VideoProcessor-Lib/vprenderer/DolbyVisionTrims.h",
+        "shaders/SDR tone shape.glsl",
+        "shaders/DV trims.glsl"
+      ],
+      "components": {
+        "files": {
+          "required": [
+            "shaders/SDR tone shape.glsl",
+            "shaders/DV trims.glsl"
+          ],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [
+          "dv_trims",
+          "sdr_tone_shape"
+        ],
+        "upstream_modules": [
+          "colour.tone_gamut"
+        ]
+      },
+      "fallback_when_missing": "Shader failure skips it."
+    },
+    {
+      "slot": "colour.appearance",
+      "order": 210,
+      "status": "placeholder",
+      "code_location": "none (placeholder)",
+      "live_files": [],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": [
+            "i1Pro screen-white measurement (placeholder value 48 nits until then)",
+            "ambient light sensor (surround)"
+          ]
+        },
+        "tools": [],
+        "config_keys": [
+          "appearance_adaptation",
+          "appearance_reference_surround",
+          "appearance_reference_white_nits",
+          "appearance_screen_surround",
+          "appearance_screen_white_nits",
+          "appearance_strength"
+        ],
+        "upstream_modules": [
+          "colour.sdr_tone_shape"
+        ]
+      },
+      "fallback_when_missing": "Failure -> off, previous gamma boost/saturation restored."
+    },
+    {
+      "slot": "drive.led_measure",
+      "order": 220,
+      "status": "built",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Lib/led/LedMeasurement.cpp",
+        "src/VideoProcessor-Lib/led/LedMeasurementHook.cpp",
+        "src/VideoProcessor-Lib/led/LedLookahead.cpp"
+      ],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": [
+            "serial projector (LED drive off without one)"
+          ]
+        },
+        "tools": [],
+        "config_keys": [
+          "led_compensation",
+          "led_protect"
+        ],
+        "upstream_modules": [
+          "colour.appearance"
+        ]
+      },
+      "fallback_when_missing": "Holdover keeps the last drive."
+    },
+    {
+      "slot": "drive.led_compensation",
+      "order": 230,
+      "status": "built",
+      "code_location": "legacy",
+      "live_files": [
+        "shaders/LED compensation.glsl",
+        "src/VideoProcessor-Lib/led/LedDriveModule.cpp",
+        "src/VideoProcessor-Lib/led/LedDriveArbiter.cpp"
+      ],
+      "components": {
+        "files": {
+          "required": [
+            "shaders/LED compensation.glsl"
+          ],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": [
+            "serial projector"
+          ]
+        },
+        "tools": [],
+        "config_keys": [
+          "led_compensation"
+        ],
+        "upstream_modules": [
+          "drive.led_measure"
+        ]
+      },
+      "fallback_when_missing": "Failure -> drive held at full, no compensation."
+    },
+    {
+      "slot": "drive.black_level",
+      "order": 240,
+      "status": "placeholder",
+      "code_location": "none (placeholder)",
+      "live_files": [],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [
+          "black_level_correction"
+        ],
+        "upstream_modules": [
+          "drive.led_compensation"
+        ]
+      },
+      "fallback_when_missing": "Off = pass-through."
+    },
+    {
+      "slot": "output.calibration_lut",
+      "order": 250,
+      "status": "partial",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.cpp",
+        "src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.h",
+        "src/VideoProcessor-Lib/vprenderer/LibplaceboCalibrationLutPolicy.h",
+        "src/VideoProcessor-Lib/calibration"
+      ],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": [
+            "meter + ArgyllCMS to build the LUT"
+          ]
+        },
+        "tools": [
+          "ArgyllCMS (optional, building the LUT)"
+        ],
+        "config_keys": [
+          "calibration_lut",
+          "calibration_lut_enabled",
+          "calibration_lut_input_gamma",
+          "calibration_lut_input_transfer",
+          "calibration_lut_stage"
+        ],
+        "upstream_modules": [
+          "drive.black_level"
+        ]
+      },
+      "fallback_when_missing": "Until the VP stage exists, libplacebo's target LUT (current behaviour)."
+    },
+    {
+      "slot": "output.dither",
+      "order": 260,
+      "status": "built",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Lib/vprenderer/SigmaDeltaDomain.h",
+        "shaders/Temporal sigma-delta.glsl",
+        "src/VideoProcessor-Lib/vprenderer/OutputEncodingRepair.cpp",
+        "src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp"
+      ],
+      "components": {
+        "files": {
+          "required": [
+            "shaders/Temporal sigma-delta.glsl"
+          ],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [
+          "dither_grain_tolerance_scale",
+          "dither_vectors",
+          "dithering",
+          "sigma_delta"
+        ],
+        "upstream_modules": [
+          "output.calibration_lut"
+        ]
+      },
+      "fallback_when_missing": "Unsupported code domain drops the sigma-delta (logged)."
+    },
+    {
+      "slot": "output.presentation",
+      "order": 270,
+      "status": "built",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Lib/vprenderer/RenderAheadPolicy.h",
+        "src/VideoProcessor-Lib/vprenderer/AlphaPresentationTelemetry.cpp",
+        "src/VideoProcessor-Lib/vprenderer/OpenLoopDisplayRate.h",
+        "src/VideoProcessor-Lib/DisplayRefreshRatePolicy.cpp",
+        "src/VideoProcessor-Lib/vprenderer/NativeStatsOverlayBitmap.h"
+      ],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [
+          "render_ahead",
+          "render_ahead_queue_credit",
+          "render_ahead_utilisation"
+        ],
+        "upstream_modules": [
+          "output.dither"
+        ]
+      },
+      "fallback_when_missing": "Window / iGPU panel -> open loop."
+    },
+    {
+      "slot": "drive.projector_control",
+      "order": 900,
+      "status": "built",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Lib/led/LedController.cpp",
+        "src/VideoProcessor-Lib/led/BarcoAsciiDriver.cpp",
+        "src/VideoProcessor-Lib/led/ProjectorDriver.cpp",
+        "src/VideoProcessor-Lib/led/SerialPort.cpp"
+      ],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [
+            "RS-232 projector (Barco ASCII)"
+          ],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [
+          "led_compensation"
+        ],
+        "upstream_modules": []
+      },
+      "fallback_when_missing": "No serial projector -> drive off."
+    },
+    {
+      "slot": "control.net_runtime",
+      "order": 910,
+      "status": "placeholder",
+      "code_location": "none (placeholder)",
+      "live_files": [],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [
+          "TrainKit exporter (export_glsl.py) for net packages"
+        ],
+        "config_keys": [
+          "nets_enabled"
+        ],
+        "upstream_modules": []
+      },
+      "fallback_when_missing": "Mismatch/missing -> bypass that net only."
+    },
+    {
+      "slot": "control.diagnostics",
+      "order": 920,
+      "status": "partial",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Lib/StateReport.cpp",
+        "src/VideoProcessor-Lib/CrashState.cpp",
+        "src/VideoProcessor-GUI/StatsOverlayWindow.cpp",
+        "src/VideoProcessor-Lib/DebugLog.h"
+      ],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [],
+        "upstream_modules": []
+      },
+      "fallback_when_missing": "Owns the format: 'Fallbacks engaged: none' when clean."
+    },
+    {
+      "slot": "control.config",
+      "order": 930,
+      "status": "partial",
+      "code_location": "legacy",
+      "live_files": [
+        "src/VideoProcessor-Config/ConfigEditorWindow.cpp",
+        "src/VideoProcessor-Lib/ConfigFile.cpp",
+        "src/VideoProcessor-Lib/ConfigSchema.h",
+        "src/VideoProcessor-Lib/MainConfigSchema.h",
+        "src/VideoProcessor-Lib/RendererProfileConfig.h"
+      ],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [],
+        "upstream_modules": []
+      },
+      "fallback_when_missing": "n/a"
+    }
+  ]
+}

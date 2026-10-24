@@ -1,0 +1,48 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "input.capture",
+  "unit": "input",
+  "order": 10,
+  "status": "built",
+  "code_location": "legacy",
+  "live_files": [
+    "src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.cpp",
+    "src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.h",
+    "src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.cpp",
+    "src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.h",
+    "src/VideoProcessor-Lib/vprenderer/AlphaNativeRgbIngress.h",
+    "src/VideoProcessor-Lib/vprenderer/UploadReuse.h",
+    "src/VideoProcessor-Lib/vprenderer/EarlyUpload.cpp",
+    "src/VideoProcessor-Lib/vprenderer/EarlyUpload.h",
+    "src/VideoProcessor-Lib/CaptureInput.cpp",
+    "src/VideoProcessor-Lib/CaptureInput.h",
+    "src/VideoProcessor-Lib/blackmagic_decklink",
+    "src/VideoProcessor-Lib/magewell",
+    "src/VideoProcessor-Lib/video_frame_formatter",
+    "src/VideoProcessor-Lib/VideoConversionOverride.cpp"
+  ],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [
+        "capture card (DeckLink or Magewell) or a file source"
+      ],
+      "optional": [
+        "GPU for capture unpack (falls back to CPU 4:2:0)"
+      ]
+    },
+    "tools": [],
+    "config_keys": [
+      "capture_path",
+      "capture_upload",
+      "dv_tunnel_gpu_unpack",
+      "native_rgb_ingest"
+    ],
+    "upstream_modules": []
+  },
+  "fallback_when_missing": "GPU unpack failure switches to the CPU formatters for the session (today log-only; must become visible, queue item 44/45).",
+  "fallback_entry": "Capture: CPU 4:2:0 (GPU unpack failed: <reason>)"
+}

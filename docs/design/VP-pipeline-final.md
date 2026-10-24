@@ -1,0 +1,354 @@
+# VideoProcessor pipeline: final design (frozen 2026-10-24)
+
+Status: FROZEN for the skeleton restructure. The open items are listed in section 4. Each one
+is a measured decision, so none of them changes the slot order except the re-base/repair
+order (marked PENDING).
+Machine-readable slot list: [`slots.json`](slots.json). Decision records: [`../decisions/`](../decisions/).
+Module folders: `src/modules/<unit>/<slot>/`.
+
+---
+
+## 1. One-page overview (for the owner)
+
+VP takes the Apple TV picture from the capture card, cleans it, scales it, colours it for the
+projector and shows it **at a fixed, known delay**, so the AVR's fixed audio delay always matches.
+
+The picture travels through **eight units**. The pipeline runs top to bottom:
+
+| Side | Unit | What it does, in plain words | Status |
+|---|---|---|---|
+| **INPUT SIDE** | Input | Takes frames from the card without losing precision; works out the signal type (SDR/HDR10/LLDV/DV); holds the frames for a fixed 200 ms (250 ms margin) | built |
+| | Input (analysis) | Studies the **untouched** frame: how the player scaled it, where the picture is, cuts/fades, subtitles | built |
+| | Motion | Measures motion on the untouched frame at its own size (cheap, accurate); one "vectors valid" switch every user obeys | built |
+| | Scaling: **re-base** | Undoes the player's upscale, axis by axis, so we work on the real picture | built (order pending) |
+| | Repair | Removes codec damage (net A, or VP's own restore module, or off), then deband, then the texture-restore add-on | A = slot only |
+| | Scaling: **4K route + refine** | Brings the picture to 4K with fixed 1-D steps; one refine net polishes the result | slots only |
+| | Scaling: chroma | A reserved spot for VP's own colour-detail upscale | slot only |
+| **PROCESSING** | Motion consumers | De-judder, hiccup repair, optional interpolation | built |
+| | Scaling: output | The hybrid SSIM scaler to the projector size (+ the optional D net) | built (D = slot) |
+| | Colour | libplacebo tone/gamut mapping (or the combined LUT for low-end cards); below-black/above-white always kept | built |
+| **OUTPUT SIDE** | Colour | SDR tone shape → Stage 13 appearance (dim screen) | Stage 13 = slot |
+| | Dynamic Drive | LED measurement → LED compensation → black-level correction | black level = slot |
+| | Output | Projector calibration LUT (the last colour step) → dither for the 8-bit link → present | LUT moves to VP |
+| **CONTROL** | Control | Config tiers, "Fallbacks engaged" status, nets' fingerprints, diagnostics | partial |
+
+**What "slot" means.** The skeleton gives every stage a fixed place in the order now, even if
+its real component comes later. An empty slot costs **nothing**: VP skips it entirely, and the
+picture is byte-for-byte the same as without it. Components then drop into their slots one at a
+time, each tested alone and in the whole chain.
+
+**Tiers.** Each unit has a Classic / Low / Mid / Upper slider (fewer steps where a unit lacks the
+granularity) plus a global one. The unit's toggles are listed under its slider.
+
+**Nothing degrades silently.** If anything falls back (for example a net is bypassed or the GPU
+unpack fails), the status shows "Fallbacks engaged: ..." with the reason. It appears in the Ctrl+I
+overlay, in Config and in Ctrl+Alt+D, plus a one-time notice.
+
+**Still to decide (from measurements, not opinion):**
+1. Does the re-base run before or after repair? Re-base first is proposed. The round-2 "A diagnostic" measures both orders.
+2. Is net A worth keeping? It must gain at least ~0.5-1 dB on low-bitrate streams with the grain kept. Otherwise the repair stage becomes VP restore (an optimised texture restore + breathing).
+3. Is the deband still needed when A is on?
+4. Refine net: one net told whether A ran, or two versions? Your lean is one net told, if it costs the same.
+5. D net: real cost in VP, and the grain gate.
+
+---
+
+## 2. Principles that shape every slot
+
+- **Modularity** (ADR-0017): each slot has a clear input/output contract. It is measured in
+  isolation and can be improved without a teardown. Any fused or optimised version must be
+  bit-identical to the modular one.
+- **Zero-cost placeholders** (ADR-0015): an off slot adds no pass and no copy, so its output is
+  byte-identical. Timing and delay tests stay true.
+- **Fixed delay** (ADR-0003): 200 ms is the design target and 250 ms the margin. The pipeline is
+  built for 4 queued frames, with a graceful 2-3 frame fallback. Look-aheads share the queue
+  (they never add to it) and are time-based where possible.
+- **Analysis and motion on the original frame** (ADR-0004, ADR-0006). This is forced: A_motion
+  needs vectors before it runs.
+- **BTB/WTW kept in all cases** (ADR-0002). **No silent fallbacks** (ADR-0001). **General, not
+  fixed**: no hard-coded rates, cadences or resolutions (ADR-0018).
+- **libplacebo = the colour engine and GPU layer in the middle** (ADR-0016). VP owns the front
+  end (capture, re-base, repair, 4K route, nets) and the output end (Stage 13, dynamic drive,
+  black level, calibration LUT, dither) as VP passes/hooks.
+- **Net dependency rule** (ADR-0008): train upstream to downstream. Fingerprints carry the
+  upstream versions and states, and VP bypasses a net (visibly) on a mismatch.
+
+---
+
+## 3. The slots in detail
+
+Each slot lists purpose/why, contract (formats, geometry, delay share, look-ahead), settings/tier,
+fallback entry, fingerprint/upstream, and open items. `slots.json` holds the same data plus
+the tests. **slots.json is authoritative for ids, order and keys; this text explains them.**
+
+Hook-point legend: **capture** (ingest), **host** (CPU), **prepass** (VP's own GPU passes on the
+source planes before libplacebo samples them; today the source-stage lambda in
+`LibplaceboVideoRenderer.cpp`), **libplacebo** (inside `pl_render_image`), **PRE_OUTPUT / OUTPUT**
+(VP hooks handed to libplacebo, in order), **present**.
+
+### 3.1 INPUT SIDE
+
+**input.capture (10), built, capture.** Frames from DeckLink/Magewell come in at full precision.
+v210/UYVY go to P210 4:2:2 via the GPU unpack, and r210/R12B/R12L via native RGB ingest. Upload
+reuse and early upload apply. Output: GPU planes at the delivered size, no crop. Keys:
+`capture_path`, `capture_upload`, `native_rgb_ingest`, `dv_tunnel_gpu_unpack`. Fallback: "Capture:
+CPU 4:2:0 (GPU unpack failed: reason)". This is log-only today and must become visible (item 44).
+Open: the CPU fallback should keep 4:2:2; the RGB-capture luma path for A.
+
+**input.signal (20), built, host.** Detects SDR / HDR10 / LLDV / DV tunnel and their metadata, and
+unpacks the DV tunnel. Output: a signal descriptor on every frame. Fallback: DV unpack on the CPU
+(log-only today). Rule: nets never run on raw DV IPT.
+
+**input.queue_timing (30), built, host.** Holds the fixed delay (`target_latency_ms` 200/250) and
+runs cadence/pulldown detection, the film clock and stale-burst handling.
+**Delay budget at 24p: 4 queued frames (167 ms) + ~20-40 ms processing/present = 187-207 ms.**
+The queue depth is the deepest single look-ahead plus the hiccup spare. On a short queue
+(2-3 frames) every consumer shortens its look-ahead or falls back, and the delay never changes.
+Fallback: "Queue: short look-ahead (n of 4 frames)". Being fixed on `fix/r6-baseline`: the forced
+5-frame minimum, a time-based `motion_ahead`, and render-ahead inside the budget.
+
+**input.source_analysis (40), partial, host.** Runs on the **original delivered frame**: per-axis
+source resolution + kernel class, active picture/crop, cut/fade/black, subtitles, and A's labels
+(label schema v1: bit depth, per-axis ratio, kernel, bitrate tier, codec family + AV1 FGS, and a
+state flag re-based / native / un-reversed). Low confidence makes the labels "unknown" (A trains
+with ~12% unknown). Open: blind kernel estimation (item 18); the identification/label-detector net
+(round 2; the owner's idea is an identification net feeding the kernel-matched re-base).
+
+**motion.estimation (50), built, prepass.** NVOF seed + VP matcher on the original luma at
+**source size**, with a time-based look-ahead. ONE vectors-valid state, invalidated at
+cuts/drops/repeats/drift/resyncs. Output: source-size vectors + validity. Fallback: "Motion:
+matcher only (NVOF unavailable)". If the vectors are invalid, every consumer falls back.
+
+**scaling.rebase (60; alternative position 75), built, prepass. PENDING ORDER.** A 1-D per-axis
+re-base: the kernel-matched inverse, or Lanczos when the kernel is unknown, H then V, r16
+intermediate, back to the **encoded grid**. Output: planes at the encoded size, where x and y
+factors may differ.
+*Why first:* the kernel inverse relies on the delivered frame being an exact kernel upscale.
+Texture restore, breathing and deband add or move fine-band energy, which folds into aliasing on
+inversion. Repair at the encoded size is also ~3x cheaper (A 1080 1.4 ms vs 4K 4.4 ms).
+*Status:* code today already runs re-base -> deband -> detail pulse -> texture restore. Round 2
+measures BOTH orders. The skeleton keeps the order data-driven, so the swap is one line of data
+(ADR-0005).
+Fallback: a failed pass renders the native frame (in code); an unknown kernel uses Lanczos; off
+goes straight to output scaling. Keys: `source_resolution`, `rebase_kernel_match`; planned
+`entrance_rebase`.
+
+**repair.encoding (70), placeholder, prepass.** Encoding repair at the **encoded resolution**.
+Choices: net A (A_motion with neighbours + vectors / A_single for low latency) / **VP restore**
+(VP's own add-on module, not "classical") / off. Contract: luma only, active area with mirror pad,
+bounded residual; same size and format out. Tiers: Classic off; Low VP restore or a small A;
+Mid A; Upper A_motion. Fallback: "Repair: bypassed (fingerprint mismatch / missing weights / DV
+IPT input)". Fingerprint: label schema, pass order H->V, r16, re-base shader identity, VP commit.
+**Open:** round 1 showed GATE COLLAPSE (A learned to skip everything). The round-2 DIAGNOSTIC
+(gate off, re-based domain) is the upper bound: keep A only at >= ~0.5-1 dB on low-bitrate
+streams with grain kept. Breathing comes later as a fine-tune, only once A demonstrably repairs.
+
+**repair.deband (80), built, prepass.** VP's debander at source resolution, after repair, with a
+grain guard. Classic uses libplacebo's deband. Fallback: libplacebo deband on temporal frames.
+**Open:** is it still needed with A on (measure)? The x52 real-pan shimmer on 1080->1600
+(queue item 1).
+
+**repair.texture_restore (90), built, prepass.** The long-memory add-on on A's output: texture
+restore (~2 s peak-hold along vectors) + breathing reduction (`detail_pulse_stabilise`). Upper
+tier, after an **efficiency rebuild** (9.8 ms at 4K on the 3050 Ti vs a 1.2-1.4 ms estimate).
+It is never folded into A (net dependency rule).
+
+**scaling.route_4k (100), placeholder, prepass.** Processing resolution =
+`min(source, max(4K, effective output active size after display mode + A-lens + NLS))`, reached
+with fixed 1-D x2 shaders per needed axis (H then V, r16). It is recomputed on an output-profile
+change (clean reconfigure, vectors invalidated). The 8K placeholder: an 8K source to a <=4K
+display is downscaled to 4K first; only an 8K display keeps native 8K, with all nets bypassed and
+motion at 1/4 per axis. Off goes straight to output scaling (Classic/Low). There is no
+passthrough option otherwise, including 1080->1080.
+
+**scaling.refine (110), placeholder, prepass.** ONE refine net at the end of the 4K route,
+trained to the truth. Inputs: picture + continuous per-axis scale (sx, sy) + A-ran flag (+ path
+re-based/native). Texture restore and deband are unlabelled robustness augmentation. Per-axis C
+is DROPPED (round 1: harmful, ringing 0.22->0.8). Results are reported per combination group,
+and VP bypasses only an underperforming group (visibly). Upper tier; off in low latency unless a
+cheap variant exists. **Open:** one net told vs two versions (owner: one told, if the cost is
+identical).
+
+**scaling.chroma_upscale (120), placeholder, prepass.** A reserved VP-owned chroma upscale. When
+active, libplacebo receives 4:4:4 and must not re-upsample. **Open:** verify what libplacebo does
+with 4:2:2/4:2:0 chroma in our path; chroma siting vs crop/A-lens/NLS; BTB/WTW; DV tunnel;
+subtitles. Candidates: CfL-style luma-guided or separable Lanczos.
+
+### 3.2 PROCESSING
+
+**motion.vector_delivery (130), partial, host.** Hands source-size vectors to each consumer
+**per axis**: x scaled by the x factor and y by the y factor (re-base and the 4K route give
+different factors; the same mechanism as the 8K 1/4 plan). They are mapped through
+crop/A-lens/NLS. Precision consumers (temporal dither, scaler refinements, texture restore) get
+an optional cheap +-1 px refinement. If the geometry can't be mapped, the vectors become invalid.
+
+**motion.consumers (140), built, prepass.** De-judder, hiccup repair, optional interpolation
+(exclusive with libplacebo smooth motion by profile rules), dither vectors. All degrade on a
+short queue.
+
+**scaling.geometry (150), built, libplacebo.** Crop/active picture, A-lens, NLS,
+zoom/viewport. NLS falls back to the linear safe fit on a hook failure (in code).
+
+**scaling.output (160), partial, libplacebo.** Hybrid SSIM downscale (`adaptive_w_base` 0.2)
+inside libplacebo + the optional **D** refine add-on (its own switch under the hybrid scaler).
+Lanczos is the fallback; polar is retired (separable over polar). **Open:** D's real cost in VP
+(the PyTorch fp16 upper bound is 35.8 ms at 4K) and D's grain gate (0.75 vs >= 0.9). D counts
+only without sharpness/detail/grain loss (MTF, HF energy, grain, pan test).
+
+**colour.tone_gamut (170), built, libplacebo.** libplacebo tone/gamut mapping, OR the combined
+static HDR->SDR 3D LUT (an option for low-end cards, in the same slot; the owner decided it is
+not the default). Catch: the combined LUT outputs projector codes, but LED compensation needs
+linear target light. Decide when building the LUT option (ADR-0013).
+
+**colour.extended_range (175), built, cross-cutting.** BTB/WTW preservation: VP relabels the
+source and its hooks do the conversion. The probe codes must be identical with every output slot
+on and off.
+
+### 3.3 OUTPUT SIDE: the corrected hook order
+
+The hybrid scaler runs **inside libplacebo, before its PRE_OUTPUT hooks**, so every VP output
+hook runs at the **output size**. Order (ADR-0013):
+
+| # | Slot | Stage | Status today |
+|---|---|---|---|
+| 0 | (plumbing) | libplacebo output-encoding repair: first, when any PRE_OUTPUT hook runs | built |
+| 200 | colour.sdr_tone_shape | Delta 13 SDR tone shape + DV trims | built |
+| 210 | colour.appearance | **Stage 13 CAM16** (off by default) | placeholder |
+| 220 | drive.led_measure | LED measurement (pre-compensation content) | built |
+| 230 | drive.led_compensation | LED adaptive gamma / compensation (CNTR never above need) | built |
+| 240 | drive.black_level | **Black level correction** | placeholder |
+| 250 | output.calibration_lut | **Projector calibration LUT, applied by VP** (last colour op) | today libplacebo's target LUT, which libplacebo applies BEFORE PRE_OUTPUT (`renderer.c` colour mapping) = wrong order |
+| - | (plumbing) | user custom shaders; adaptive-downscale blend; de-judder rendered-picture cache (last PRE_OUTPUT) | built |
+| 260 | output.dither | Sigma-delta / libplacebo dither (OUTPUT stage, quantiser last) | built |
+| 270 | output.presentation | Swapchain, refresh, render-ahead inside the budget, subtitles | built |
+
+**Two LUTs.** (1) The projector calibration LUT is the default path: SDR target -> projector
+codes, applied last by VP. (2) The combined HDR->SDR LUT is the low-end option in libplacebo's
+tone-map slot.
+
+**colour.appearance (210), placeholder.** CAM16 forward under reference conditions, then inverse
+under screen conditions. It uses soft hue-preserving M compression and a strength blend, and is
+static per viewing setup. When on, it replaces the gamma boost + saturation. True BTB/WTW codes
+pass through. Keys (planned): `appearance_adaptation` (off), `appearance_strength` 1.0,
+`appearance_reference_white_nits` auto, `appearance_reference_surround` dim,
+`appearance_screen_white_nits` 48 (until the i1Pro measurement), `appearance_screen_surround` dark.
+Open: one owner per correction with the ambient light sensor.
+
+**drive.black_level (240), placeholder.** Compensates the projector black floor as LED/CNTR
+change (delta 11 toe / ANSI lift). It runs after compensation, before the calibration LUT. The
+design is not yet specified beyond its position.
+
+### 3.4 CONTROL (outside the pixel path)
+
+- **drive.projector_control (900)**: RS-232, LED + CNTR, script intent / internal script / compensate.
+- **control.net_runtime (910)**, placeholder: net packages (shader + parameters + fingerprint),
+  fingerprint check, per-net bypass with a visible entry. fp16 intermediates preferred.
+- **control.diagnostics (920)**: the single **"Fallbacks engaged: (list)"** heading ("none" when
+  clean) in Ctrl+I, Config status and Ctrl+Alt+D, plus a one-time transient notice; crash ring;
+  logs.
+- **control.config (930)**: per-unit tiers + global, toggles under sliders, unbuilt slots shown as
+  "not yet implemented"; it is generated from `slots.json` by the settings agent.
+
+### 3.5 Tier map (initial; the settings agent refines it)
+
+| Unit | Classic | Low | Mid | Upper |
+|---|---|---|---|---|
+| Repair | off | VP restore or small A | A | A_motion + texture restore |
+| Scaling (entrance) | off (straight to output) | off | re-base + 4K route | + refine |
+| Scaling (output) | Lanczos | hybrid | hybrid | hybrid + D |
+| Motion | off | de-judder (matcher) | NVOF + matcher | full |
+| Colour | libplacebo or combined LUT | libplacebo or combined LUT | libplacebo | libplacebo |
+| Output | libplacebo dither | sigma-delta | sigma-delta | sigma-delta |
+
+Stage 13 is available in every tier when on, because it costs about nothing.
+
+### 3.6 Structural rules from the barrier scan (docs/design/VP-barriers-2026-10-24.md)
+
+These rules change HOW the slots run, not their order.
+
+- **B3: the input side runs ONCE per source frame.** re-base -> repair -> deband -> texture
+  restore -> 4K route -> refine -> chroma run once per source sequence. The result is cached by
+  sequence (the "entrance cache").
+  - The motion consumers (de-judder phase pictures, extras, crossfade, hold) WARP or READ the
+    cached result. They do not re-run the front end.
+  - Vectors reach them per axis, through `motion.vector_delivery`.
+  - Today the stage chain is copied three times in `LibplaceboVideoRenderer.cpp`: main ~23505,
+    extra ~16491, crossfade ~5433. The skeleton replaces the copies with ONE stage list driven by
+    the slot registry.
+  - Consequence: the phase picture is made from the processed picture. Today it is made from the
+    native planes, before re-base.
+  - A net then runs once per source frame. In the current chain it would run ~2.5x at 24p-in-60.
+- **R2: one SlotRegistry** covers the front-end passes and the output hooks, in `slots.json`
+  order.
+  - A libplacebo hook is REGISTERED ONLY WHEN ITS SLOT IS ACTIVE. A registered no-op hook still
+    forces pass boundaries, so it is not zero-cost.
+  - A front-end placeholder returns the same `pl_frame`: no pass, no copy.
+- **B1/R3: VP-side NetRunner** (`control.net_runtime`). It executes the exporter's mpv-format
+  passes on VP-owned textures through `pl_dispatch`: a shim for DESC/HOOK/BIND/SAVE/WIDTH/HEIGHT/
+  COMPONENTS/COMPUTE and the HOOKED_* macros.
+  - It does not use libplacebo LUMA hooks. A LUMA hook would run after deband/texture restore,
+    and never on RGB.
+  - Intermediates are fp16 by default. The intermediate format is part of each net's
+    fingerprint.
+  - The same runner serves the front end (A, the refine net) and D inside `AdaptiveDownscale`'s
+    POST_KERNEL hook. `pl_hook_params` carries a dispatch.
+  - **RGB capture:** repair the existing r16 matcher luma, then add the luma delta to R, G and B.
+  - D's light domain (linear vs gamma at POST_KERNEL) must match the training domain or be locked
+    in the fingerprint (R8).
+- **R1: the calibration LUT becomes VP's LAST output hook.** It uses `pl_shader_custom_lut` plus
+  the BTB/WTW late restore. The owner agreed that VP applies it after LED compensation.
+  - Consequence: the LED measurement then sees target light, not projector codes. Today it
+    measures projector codes.
+  - Check the OutputEncodingRepair interplay.
+- **R4: the chroma slot output stays 2 planes:** luma + a full-resolution CbCr plane. libplacebo
+  then does not upsample, and the many `num_planes == 2` paths keep working.
+- **R5: "Fallbacks engaged"**: the bug-fix agent builds the initial registry mechanism on
+  `fix/r6-baseline`. The skeleton reuses it and does not build a second one.
+  - Each slot's `fallback.entry` in `slots.json` is the text it reports.
+- **B2: the queue is a TOTAL-DELAY BUDGET.**
+  `queue frames = floor((budget - fixed costs) / frame period)`, with a 4 / 3 / 2 ladder.
+  - Fixed costs = swapchain depth (`max_frame_latency`), render-ahead, processing, and the
+    capture transfer time where the budget covers it.
+  - The rounding is DOWN. Today `QueueLatency.h` rounds UP: 200 ms x 23.976 = 4.8, which becomes
+    5 frames = 208 ms.
+  - Pending owner decisions O1 (what the 200 ms measures) and O3 (exactly fixed vs constant per
+    rate).
+
+---
+
+## 4. Decisions and open items
+
+Decisions: see `docs/decisions/` (ADR-0001 .. ADR-0018).
+
+| Open item | Decided by | Affects |
+|---|---|---|
+| Re-base before or after repair (A order) | round-2 A diagnostic, both orders | `scaling.rebase` order 60 vs 75 |
+| Keep net A? | diagnostic: >= ~0.5-1 dB low-bitrate gain, grain kept | `repair.encoding` component |
+| Deband need with A on | round-2 results | `repair.deband` default |
+| Refine: one told vs two versions | round-2 cost/quality | `scaling.refine` package |
+| D cost and grain | VP measurement + harm checks | `scaling.output` D default |
+| Combined LUT vs LED compensation | when building the LUT option | `colour.tone_gamut` |
+| Chroma upscale need | libplacebo chroma verification | `scaling.chroma_upscale` |
+| Black level design | later spec | `drive.black_level` |
+| What 200 ms measures (O1); fixed vs per-rate constant (O3) | owner | `input.queue_timing` budget |
+| 3090 real-time window (O2) | owner | chain gate timing |
+| Nets: rgba32f vs fp16 (O5); fp16 default proposed | owner + round 2 | `control.net_runtime` |
+
+---
+
+## 5. How the skeleton implements this
+
+- `src/VideoProcessor-Lib/vprenderer/PipelineSlots.h` holds the slot ids and order (mirroring
+  `slots.json`; a test checks the two agree) and a slot-level enable/disable. Its rule is "an off
+  or placeholder slot runs no pass and registers no hook" (byte-identical, zero cost).
+- `EntranceStages` (one stage list) runs the input-side slots in registry order on a `pl_frame`.
+  A placeholder returns the frame unchanged. The entrance cache keys the result by source
+  sequence (B3). It is migrated into the renderer in steps: main path first, then the extra and
+  crossfade copies.
+- The output-hook order is a single function that sorts the VP hooks into the corrected order,
+  so the LUT can later be appended as the last hook (R1).
+- Per-axis vector scaling is a small value type (`VectorScale`: sx, sy) used by vector delivery.
+- "Fallbacks engaged" reuses the fix/r6-baseline registry (R5).
+- Module folders under `src/modules/<unit>/<slot>/` hold the README, MANIFEST.json, tests/ and
+  the live file list. Code moves only when touched (migration directive, ADR-0017), and
+  `tools/check_module_manifests.py` guards drift against `docs/design/components-master.json`.

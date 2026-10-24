@@ -1,0 +1,69 @@
+# Chroma upscale (placeholder) (`scaling.chroma_upscale`)
+
+Unit: **scaling** | side: input | order: 120 | status: **placeholder** | hook point: prepass
+
+## Purpose / why
+
+Reserve a VP-owned chroma upscale right after the input stages, in case libplacebo's chroma upscaling (chroma_upscaler auto / CfL) proves a compromise. When active, libplacebo must receive 4:4:4 and not re-upsample.
+
+## Contract
+
+- Input: luma + subsampled chroma (4:2:2 / 4:2:0) at the processing size
+- Output: 2 planes: luma + full-resolution CbCr (4:4:4 in a 2-plane layout; barrier R4), at the processing size
+- Geometry: chroma siting respected; active area
+- Delay share: 0 frames
+- Look-ahead: none
+
+## Settings
+
+- Existing keys: `chroma_upscaler`
+- Planned keys: `chroma_upscale_vp`
+- Tiers: not tiered until a component exists
+
+## Fallbacks
+
+- "Fallbacks engaged" entry: Chroma upscale: libplacebo (<reason>)
+- Behaviour: Off = libplacebo's chroma upscaler (today's behaviour).
+
+## Net fingerprint / upstream
+
+- Fingerprint: (none)
+- Upstream modules: `scaling.refine`
+
+## How to build / test
+
+Build the solution via the shared build-slot runner (see AGENTS.md); tests single-threaded; GPU tests only on mains with `VP_TEST_ADAPTER=NVIDIA`.
+
+Placeholder tests:
+- byte-identical with the slot off
+- zero GPU passes when off
+
+Isolation tests:
+- (none yet)
+
+Contract tests:
+- libplacebo does not re-upsample when the slot outputs 4:4:4
+
+Chain tests:
+- (none yet)
+
+## Known issues / open items
+
+- VERIFY what libplacebo does with 4:2:2/4:2:0 chroma in our path (item 61)
+- interference with crop/A-lens/NLS, BTB/WTW, DV tunnel, subtitles
+
+## Where the code lives (live file list)
+
+Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+
+- `shaders/CfL_Prediction.glsl`
+
+## Migration directive
+
+Code moves into this folder only when this slot is touched (opportunistic until M1, a dedicated phase after M1, finished by M2). A move = `git mv` + project/include updates + this module's `live_files` + `docs/design/components-master.json` (regenerate with `python tools/check_module_manifests.py --write`) in the SAME commit, with the build, this module's tests and the chain-gate subset passing. Never leave a copy behind; one module per change; never during a release/deploy window. Update this README in the same commit as any slot change.
+
+## Links
+
+- Design: [VP-pipeline-final.md](../../../../docs/design/VP-pipeline-final.md)
+- Slot data: [slots.json](../../../../docs/design/slots.json)
+- Decisions: ADR-0011 in [docs/decisions](../../../../docs/decisions/README.md)

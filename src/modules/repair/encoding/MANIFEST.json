@@ -1,0 +1,32 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "repair.encoding",
+  "unit": "repair",
+  "order": 70,
+  "status": "placeholder",
+  "code_location": "none (placeholder)",
+  "live_files": [],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": [
+        "GPU able to run the net in budget (else bypass)"
+      ]
+    },
+    "tools": [],
+    "config_keys": [
+      "encoding_repair"
+    ],
+    "upstream_modules": [
+      "input.source_analysis",
+      "motion.estimation",
+      "scaling.rebase"
+    ]
+  },
+  "fallback_when_missing": "Bypass = pass-through; shown under 'Fallbacks engaged'.",
+  "fallback_entry": "Repair: bypassed (net fingerprint mismatch / missing weights / DV IPT input)"
+}

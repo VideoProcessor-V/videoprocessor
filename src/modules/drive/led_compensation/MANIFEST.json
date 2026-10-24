@@ -1,0 +1,36 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "drive.led_compensation",
+  "unit": "drive",
+  "order": 230,
+  "status": "built",
+  "code_location": "legacy",
+  "live_files": [
+    "shaders/LED compensation.glsl",
+    "src/VideoProcessor-Lib/led/LedDriveModule.cpp",
+    "src/VideoProcessor-Lib/led/LedDriveArbiter.cpp"
+  ],
+  "components": {
+    "files": {
+      "required": [
+        "shaders/LED compensation.glsl"
+      ],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": [
+        "serial projector"
+      ]
+    },
+    "tools": [],
+    "config_keys": [
+      "led_compensation"
+    ],
+    "upstream_modules": [
+      "drive.led_measure"
+    ]
+  },
+  "fallback_when_missing": "Failure -> drive held at full, no compensation.",
+  "fallback_entry": "LED compensation: off (shader did not load)"
+}

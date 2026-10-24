@@ -1,0 +1,45 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "input.source_analysis",
+  "unit": "input",
+  "order": 40,
+  "status": "partial",
+  "code_location": "legacy",
+  "live_files": [
+    "src/VideoProcessor-Lib/SourceResolutionDetector.cpp",
+    "src/VideoProcessor-Lib/SourceResolutionDetector.h",
+    "src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.cpp",
+    "src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.h",
+    "src/VideoProcessor-Lib/KernelInverse.cpp",
+    "src/VideoProcessor-Lib/ActivePictureAnalyzer.cpp",
+    "src/VideoProcessor-Lib/SceneDetector.cpp",
+    "src/VideoProcessor-Lib/SubtitleBoxDetector.cpp",
+    "src/VideoProcessor-Lib/AnalysisFrame.cpp"
+  ],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [
+      "label_detector",
+      "rebase_kernel_match",
+      "source_coding_fixes",
+      "source_resolution",
+      "subtitle_fit",
+      "subtitle_reposition",
+      "subtitle_type"
+    ],
+    "upstream_modules": [
+      "input.capture",
+      "input.signal"
+    ]
+  },
+  "fallback_when_missing": "Low confidence -> 'unknown' labels (A is trained with ~12% unknown); un-identified kernel -> Lanczos re-base or no re-base.",
+  "fallback_entry": "Source analysis: labels unknown (<reason>)"
+}

@@ -1,0 +1,69 @@
+# 4K route (entrance stage 2b) (`scaling.route_4k`)
+
+Unit: **scaling** | side: input | order: 100 | status: **placeholder** | hook point: prepass
+
+## Purpose / why
+
+Bring the picture to the PROCESSING resolution = min(source, max(4K, effective output active size)) with fixed 1-D x2 shaders per needed axis (H then V); 8K placeholder rules. Off = straight to output scaling.
+
+## Contract
+
+- Input: planes at the encoded/repaired size
+- Output: planes at the processing size (normally 3840x2160 or the output active size if larger); r16
+- Geometry: per-axis scale; active area mapped
+- Delay share: 0 frames; ~4x pixel throughput for 1080 sources downstream
+- Look-ahead: none
+
+## Settings
+
+- Existing keys: (none)
+- Planned keys: `entrance_route_4k`
+- Tiers: Classic/Low off (straight to output); Mid/Upper on
+
+## Fallbacks
+
+- "Fallbacks engaged" entry: 4K route: off (<reason>)
+- Behaviour: Off or failed -> libplacebo scales straight to output.
+
+## Net fingerprint / upstream
+
+- Fingerprint: the fixed 1-D x2 shader identity is locked in the refine net fingerprint
+- Upstream modules: `scaling.rebase`, `repair.texture_restore`
+
+## How to build / test
+
+Build the solution via the shared build-slot runner (see AGENTS.md); tests single-threaded; GPU tests only on mains with `VP_TEST_ADAPTER=NVIDIA`.
+
+Placeholder tests:
+- byte-identical with the slot off
+- zero GPU passes when off
+
+Isolation tests:
+- 1-D x2 port vs kit within 1 LSB
+
+Contract tests:
+- processing size rule recomputed on output-profile change (vectors invalidated)
+- 8K placeholder unit tests
+
+Chain tests:
+- 4K60 load at the 1080p60 shadow leg
+
+## Known issues / open items
+
+- confirm the downstream engine runs at arbitrary processing sizes (off = output size)
+
+## Where the code lives (live file list)
+
+Code location: **none (placeholder)**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+
+- (none yet)
+
+## Migration directive
+
+Code moves into this folder only when this slot is touched (opportunistic until M1, a dedicated phase after M1, finished by M2). A move = `git mv` + project/include updates + this module's `live_files` + `docs/design/components-master.json` (regenerate with `python tools/check_module_manifests.py --write`) in the SAME commit, with the build, this module's tests and the chain-gate subset passing. Never leave a copy behind; one module per change; never during a release/deploy window. Update this README in the same commit as any slot change.
+
+## Links
+
+- Design: [VP-pipeline-final.md](../../../../docs/design/VP-pipeline-final.md)
+- Slot data: [slots.json](../../../../docs/design/slots.json)
+- Decisions: ADR-0007 in [docs/decisions](../../../../docs/decisions/README.md)

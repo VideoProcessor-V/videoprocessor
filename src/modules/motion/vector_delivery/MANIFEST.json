@@ -1,0 +1,32 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "motion.vector_delivery",
+  "unit": "motion",
+  "order": 130,
+  "status": "partial",
+  "code_location": "legacy",
+  "live_files": [
+    "src/VideoProcessor-Lib/vprenderer/DejudderPolicy.h",
+    "src/VideoProcessor-Lib/vprenderer/DejudderWarp.h"
+  ],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [],
+    "upstream_modules": [
+      "motion.estimation",
+      "scaling.rebase",
+      "scaling.route_4k",
+      "scaling.geometry"
+    ]
+  },
+  "fallback_when_missing": "Invalid geometry map -> vectors invalid -> consumers fall back.",
+  "fallback_entry": "Vectors: invalid (<reason>)"
+}

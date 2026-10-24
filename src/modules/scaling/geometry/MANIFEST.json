@@ -1,0 +1,44 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "scaling.geometry",
+  "unit": "scaling",
+  "order": 150,
+  "status": "built",
+  "code_location": "legacy",
+  "live_files": [
+    "src/VideoProcessor-Lib/NlsGeometryPolicy.cpp",
+    "src/VideoProcessor-Lib/vprenderer/NlsMaskMapping.h",
+    "src/VideoProcessor-Lib/vprenderer/NlsHookRecovery.h",
+    "src/VideoProcessor-Lib/vprenderer/AnamorphicPresentation.h",
+    "src/VideoProcessor-Lib/vprenderer/AlphaSourceCropPolicy.cpp",
+    "shaders/NLS.glsl",
+    "shaders/NLSPlus.glsl"
+  ],
+  "components": {
+    "files": {
+      "required": [
+        "shaders/NLS.glsl",
+        "shaders/NLSPlus.glsl"
+      ],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [
+      "nls",
+      "nls_active",
+      "nls_curve",
+      "nls_geometry",
+      "nls_protect",
+      "nls_scale"
+    ],
+    "upstream_modules": [
+      "input.source_analysis"
+    ]
+  },
+  "fallback_when_missing": "NLS failure redraws with the linear safe fit (already in code).",
+  "fallback_entry": "Geometry: NLS safe fit (hook failure)"
+}

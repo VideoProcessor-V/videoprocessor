@@ -1,0 +1,28 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "control.net_runtime",
+  "unit": "control",
+  "order": 910,
+  "status": "placeholder",
+  "code_location": "none (placeholder)",
+  "live_files": [],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [
+      "TrainKit exporter (export_glsl.py) for net packages"
+    ],
+    "config_keys": [
+      "nets_enabled"
+    ],
+    "upstream_modules": []
+  },
+  "fallback_when_missing": "Mismatch/missing -> bypass that net only.",
+  "fallback_entry": "Nets: bypassed (<net>: <reason>)"
+}

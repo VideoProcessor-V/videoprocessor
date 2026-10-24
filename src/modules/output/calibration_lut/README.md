@@ -1,0 +1,70 @@
+# Projector calibration LUT (`output.calibration_lut`)
+
+Unit: **output** | side: output | order: 250 | status: **partial** | hook point: PRE_OUTPUT
+
+## Purpose / why
+
+The LAST colour op: SDR target -> projector codes, applied BY VP at the end of its PRE_OUTPUT hooks, after LED compensation and black level. Today it is libplacebo's target LUT, which runs BEFORE VP's hooks (wrong order).
+
+## Contract
+
+- Input: final target-light picture
+- Output: projector codes
+- Geometry: output size
+- Delay share: 0 frames
+- Look-ahead: none
+
+## Settings
+
+- Existing keys: `calibration_lut`, `calibration_lut_enabled`, `calibration_lut_input_gamma`, `calibration_lut_input_transfer`
+- Planned keys: `calibration_lut_stage`
+- Tiers: not tiered
+
+## Fallbacks
+
+- "Fallbacks engaged" entry: Calibration LUT: libplacebo target LUT (VP stage unavailable)
+- Behaviour: Until the VP stage exists, libplacebo's target LUT (current behaviour).
+
+## Net fingerprint / upstream
+
+- Fingerprint: (none)
+- Upstream modules: `drive.black_level`
+
+## How to build / test
+
+Build the solution via the shared build-slot runner (see AGENTS.md); tests single-threaded; GPU tests only on mains with `VP_TEST_ADAPTER=NVIDIA`.
+
+Placeholder tests:
+- byte-identical while the VP stage is off (libplacebo LUT path unchanged)
+
+Isolation tests:
+- LibplaceboDisplayLut tests
+
+Contract tests:
+- applied after LED compensation
+
+Chain tests:
+- BTB/WTW probes with the LUT
+
+## Known issues / open items
+
+- move into VP's LAST output hook via pl_shader_custom_lut + BTB/WTW late restore (barrier R1; owner agreed); LED measurement then sees target light, not projector codes; check OutputEncodingRepair
+
+## Where the code lives (live file list)
+
+Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+
+- `src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.cpp`
+- `src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.h`
+- `src/VideoProcessor-Lib/vprenderer/LibplaceboCalibrationLutPolicy.h`
+- `src/VideoProcessor-Lib/calibration`
+
+## Migration directive
+
+Code moves into this folder only when this slot is touched (opportunistic until M1, a dedicated phase after M1, finished by M2). A move = `git mv` + project/include updates + this module's `live_files` + `docs/design/components-master.json` (regenerate with `python tools/check_module_manifests.py --write`) in the SAME commit, with the build, this module's tests and the chain-gate subset passing. Never leave a copy behind; one module per change; never during a release/deploy window. Update this README in the same commit as any slot change.
+
+## Links
+
+- Design: [VP-pipeline-final.md](../../../../docs/design/VP-pipeline-final.md)
+- Slot data: [slots.json](../../../../docs/design/slots.json)
+- Decisions: ADR-0013 in [docs/decisions](../../../../docs/decisions/README.md)
