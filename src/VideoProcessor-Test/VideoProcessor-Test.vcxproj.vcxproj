@@ -201,6 +201,7 @@
     <ClCompile Include="DvTunnelLoopbackTests.cpp" />
     <ClCompile Include="DvIncomingHdrModeTests.cpp" />
     <ClCompile Include="DvRawCorpusTests.cpp" />
+    <ClCompile Include="DvSyntheticCorpusTests.cpp" />
     <ClCompile Include="DvRpuAnchorTests.cpp" />
     <ClCompile Include="DvTunnelHandoffTests.cpp" />
     <ClCompile Include="ShortcutDefaultsTests.cpp" />

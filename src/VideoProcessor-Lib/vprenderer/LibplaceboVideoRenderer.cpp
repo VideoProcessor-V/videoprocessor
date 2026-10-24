@@ -17220,6 +17220,15 @@ struct LibplaceboVideoRenderer::Impl
 		// BT.2020): every SDR gate (input transfer, gamma, LUT domain, luminance) uses it.
 		const bool inputIsSdr = state.eotf == EOTF::SDR || tunnelRgbFallback;
 		dejudderDolbyVisionTunnel = state.dolbyVisionTunnel;   // Bug hunt 2026-10-17
+		// test/dv-synthetic 2026-10-24 (owner rule: no silent fallbacks): the tunnel's automatic
+		// degradations are listed under "Fallbacks engaged" while they last; none outside a tunnel.
+		if (!tunnelActive)
+		{
+			ReleaseFallback("Dolby Vision metadata");
+			ReleaseFallback("Dolby Vision source range");
+			ReleaseFallback("Dolby Vision scene metadata");
+			ReleaseFallback("Dolby Vision trims");
+		}
 		if (tunnelActive && (!convertedPayload ||
 			!convertedPayload->dolby.valid || convertedPayload->dolby.requiresBlackFrame))
 		{
@@ -17239,12 +17248,17 @@ struct LibplaceboVideoRenderer::Impl
 					sceneDescriptorObserved = true;
 				}
 			}
+			EngageFallback("Dolby Vision metadata", !convertedPayload || !convertedPayload->dolby.valid ?
+				"picture black: no usable display-management metadata" :
+				"picture black: this picture's DM packet failed its CRC or is missing");
 			const bool presented = PresentBlackFrame(!dvTransitionBlackActive);
 			if (presented && !dvTransitionBlackActive)
 				DebugLog::Log("Dolby Vision transition: presenting black until a trusted picture is available");
 			dvTransitionBlackActive = presented;
 			return presented;
 		}
+		if (tunnelActive)
+			ReleaseFallback("Dolby Vision metadata");
 		if (dvTransitionBlackActive)
 		{
 			DebugLog::Log("Dolby Vision transition: trusted %s picture restored",
@@ -18479,6 +18493,16 @@ struct LibplaceboVideoRenderer::Impl
 			const auto luminance = DolbyVisionLuminancePolicy::ApplyWithSceneMin(dm, image.color.hdr);
 			frameScene = SceneDescriptorParsers::FromDolbyVisionTunnel(dm, frameScene);
 			frameDvLuminance = luminance;
+			// test/dv-synthetic 2026-10-24: a DM without a usable source range or L1 degrades the
+			// tone mapping (static range / no per-scene curve): listed, not log-only.
+			if (luminance.sourceRangeFromMetadata)
+				ReleaseFallback("Dolby Vision source range");
+			else
+				EngageFallback("Dolby Vision source range", "the DM's source range is invalid: the static range is used");
+			if (luminance.sceneAvailable)
+				ReleaseFallback("Dolby Vision scene metadata");
+			else
+				EngageFallback("Dolby Vision scene metadata", "no L1: tone mapping from the source range, not per scene");
 			const uint64_t luminanceTick = GetTickCount64();
 			if (luminanceTick >= nextSourceLuminanceLogTick)
 			{
@@ -22777,6 +22801,14 @@ struct LibplaceboVideoRenderer::Impl
                         params = DolbyVisionTrims::Describe(selection);
                 }
             }
+            // test/dv-synthetic 2026-10-24 (no silent fallbacks): dv_trims on, a DV picture with DM,
+            // but the trim cannot act (a calibration LUT, an unsupported output transfer, the shader
+            // missing): listed. Neutral (no L2 for this picture) is the trims' own answer, not a fallback.
+            if (activeSettings.dvTrims && dvPicture &&
+                (target.lut || (!pq && !gammaSignal) || state.compare(0, 11, "NOT applied") == 0))
+                EngageFallback("Dolby Vision trims", state);
+            else
+                ReleaseFallback("Dolby Vision trims");
             // Review S5: the reason on change; the parameters (they follow the
             // scene) at most every 10 s, and only when they changed.
             if (state != dvTrimsLogged)

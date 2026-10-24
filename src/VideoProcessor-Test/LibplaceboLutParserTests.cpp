@@ -22,6 +22,7 @@
 #include <vprenderer/DolbyVisionTunnelUnpackReference.h>
 #include <video_frame_formatter/CR210DolbyVisionTunnelFormatter.h>
 #include "DolbyVisionTunnelSender.h"
+#include <RawCaptureCorpus.h>
 #include <vprenderer/EarlyUpload.h>
 #include <vprenderer/SourceRebase.h>
 #include <KernelInverse.h>
@@ -11845,6 +11846,121 @@ namespace VideoProcessorTest
 			pl_tex_destroy(gpu, &planes[1]);
 			AssertCleanLibplaceboLog(log);
 			Logger::WriteMessage(("GpuDolbyVisionTunnelUnpack: " + std::to_string(cases) + " cases matched the CPU unpack\n").c_str());
+		}
+
+		// Synthetic DV tunnel validation (test/dv-synthetic, 2026-10-24): the GPU unpack on the
+		// GPU (not its transcription) against the planes an independent Python implementation
+		// of the tunnel wrote (tools/dv_synth/make_corpus.py, VP_TEST_DV_SYNTH_CORPUS): every
+		// accuracy segment (r210 / R10b / R10l, low8 / high8 / high8 with replicated bits,
+		// 1080p and 2160p), bit-exact; the 4K pass timed (hardware). WARP by default.
+		TEST_METHOD(GpuDolbyVisionTunnelUnpackMatchesTheSyntheticCorpus)
+		{
+			char* rootValue = nullptr;
+			size_t rootLength = 0;
+			const std::string root = _dupenv_s(&rootValue, &rootLength, "VP_TEST_DV_SYNTH_CORPUS") == 0 && rootValue ? rootValue : "";
+			std::free(rootValue);
+			if (root.empty())
+			{
+				Logger::WriteMessage("SKIP-NO-CORPUS GpuDolbyVisionTunnelUnpackMatchesTheSyntheticCorpus (VP_TEST_DV_SYNTH_CORPUS)\n");
+				return;
+			}
+			char* gpuValue = nullptr;
+			size_t gpuLength = 0;
+			const bool hardware = _dupenv_s(&gpuValue, &gpuLength, "VP_TEST_GPU") == 0 && gpuValue && std::string(gpuValue) == "hardware";
+			std::free(gpuValue);
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			GpuDolbyVisionTunnelUnpack unpack(fixture.Log(), gpu);
+			unpack.SetHostReadableForTest(true);
+			pl_tex planes[2] = { nullptr, nullptr };
+			auto download = [&](pl_tex tex)
+			{
+				std::vector<uint16_t> samples(static_cast<size_t>(tex->params.w) * tex->params.h *
+					tex->params.format->num_components);
+				pl_tex_transfer_params d{};
+				d.tex = tex;
+				d.ptr = samples.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d), L"plane not host-readable");
+				return samples;
+			};
+			size_t frames = 0;
+			for (const std::string& folder : FindRawCorpusSegments(root))
+			{
+				const std::string name = folder.substr(folder.find_last_of("\/") + 1);
+				if (name.compare(0, 4, "acc-") != 0)
+					continue;
+				RawCorpusSegment seg;
+				std::string error;
+				Assert::IsTrue(LoadRawCorpusSegment(folder, seg, error), ExtendedRangeGpuProbe::ToWide(error).c_str());
+				if (!hardware && seg.width > 2000)
+					continue;   // WARP: 1080p only
+				std::ifstream truth(folder + "\truth.txt");
+				std::string line, placement;
+				std::map<std::string, std::string> planesOf;
+				std::vector<std::pair<size_t, std::string>> framePicture;
+				while (std::getline(truth, line))
+				{
+					auto value = [&line](const char* key) {
+						const std::string k = std::string(" ") + key + "=";
+						const size_t at = line.find(k);
+						if (at == std::string::npos) return std::string();
+						const size_t end = line.find(' ', at + k.size());
+						return line.substr(at + k.size(), end == std::string::npos ? std::string::npos : end - at - k.size()); };
+					if (line.compare(0, 8, "segment ") == 0) placement = value("placement");
+					else if (line.compare(0, 8, "picture ") == 0) planesOf[value("id")] = value("planes");
+					else if (line.compare(0, 6, "frame ") == 0)
+						framePicture.push_back({ static_cast<size_t>(std::atoi(value("index").c_str())), value("picture") });
+				}
+				const bool highAligned = placement != "low8";
+				const size_t n = static_cast<size_t>(seg.width) * seg.height;
+				uint64_t bad = 0;
+				double passMs = 1e30, wallMs = 1e30;
+				pl_timer timer = hardware ? pl_timer_create(gpu) : nullptr;
+				unpack.SetTimerForTest(timer);
+				for (const auto& fp : framePicture)
+				{
+					const std::string planesFile = planesOf[fp.second];
+					if (planesFile.empty() || planesFile == "-")
+						continue;
+					std::ifstream in(folder + "\\" + planesFile, std::ios::binary);
+					std::vector<uint16_t> want(n * 2);
+					in.read(reinterpret_cast<char*>(want.data()), static_cast<std::streamsize>(want.size() * 2));
+					Assert::IsTrue(static_cast<bool>(in), L"planes file");
+					std::vector<uint8_t> bytes;
+					Assert::IsTrue(seg.LoadFrame(fp.first, bytes));
+					pl_gpu_finish(gpu);
+					const auto t0 = std::chrono::steady_clock::now();
+					Assert::IsTrue(unpack.Unpack(seg.encoding, bytes.data(), seg.rowBytes, static_cast<int>(seg.width), static_cast<int>(seg.height),
+						highAligned, planes), ExtendedRangeGpuProbe::ToWide(name + ": " + unpack.Error()).c_str());
+					pl_gpu_finish(gpu);
+					wallMs = std::min(wallMs, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+					if (timer)
+					{
+						const uint64_t ns = pl_timer_query(gpu, timer);
+						if (ns > 0) passMs = std::min(passMs, ns / 1e6);
+					}
+					const std::vector<uint16_t> gotY = download(planes[0]), gotC = download(planes[1]);
+					Assert::AreEqual(n, gotY.size());
+					for (size_t k = 0; k < n; ++k)
+						bad += (gotY[k] != want[k] ? 1 : 0) + (gotC[k] != want[n + k] ? 1 : 0);
+					++frames;
+				}
+				unpack.SetTimerForTest(nullptr);
+				if (timer) pl_timer_destroy(gpu, &timer);
+				char text[512];
+				snprintf(text, sizeof(text), "GPU UNPACK %s (%ux%u %s): mismatching samples %llu; raw upload + pass %.2f ms, pass alone %.3f ms (%s)\n",
+					name.c_str(), seg.width, seg.height, placement.c_str(), (unsigned long long)bad, wallMs, passMs < 1e29 ? passMs : -1.0,
+					hardware ? "hardware" : "WARP");
+				Logger::WriteMessage(text);
+				Assert::AreEqual<uint64_t>(0, bad, ExtendedRangeGpuProbe::ToWide(name + ": the GPU unpack differs from the generator's planes").c_str());
+			}
+			pl_tex_destroy(gpu, &planes[0]);
+			pl_tex_destroy(gpu, &planes[1]);
+			AssertCleanLibplaceboLog(log);
+			Assert::IsTrue(frames > 0, L"no corpus frame checked");
 		}
 
 		// Rule test (2026-10-17): Dolby Vision GPU unpack with a lost / corrupt DM packet

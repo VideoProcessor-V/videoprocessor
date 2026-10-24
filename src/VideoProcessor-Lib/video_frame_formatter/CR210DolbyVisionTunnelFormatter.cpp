@@ -749,6 +749,8 @@ void CR210DolbyVisionTunnelFormatter::OnVideoState(VideoStateComPtr& state)
 		throw std::runtime_error("R210 stride is shorter than the active width");
 	m_outputSize = static_cast<LONG>(outputSize);
 	m_alignment = ByteAlignment::UNKNOWN;
+	m_placementProven = false;
+	m_ambiguousPlacementPictures = 0;
 	m_missingPacketFrames = 0;
 	m_missingPacketReported = false;
 	m_hasPacketLoss = false; // Bug hunt 2026-10-17
@@ -1020,8 +1022,55 @@ CR210DolbyVisionTunnelFormatter::AnalyzeFrame(const VideoFrame& frame)
 
 	// Prefer the current alignment so normal low8 capture does not probe a
 	// known-wrong layout on every picture. Only CRC can confirm the tunnel.
-	const ByteAlignment firstCandidate = m_alignment == ByteAlignment::RIGHT ?
+	ByteAlignment firstCandidate = m_alignment == ByteAlignment::RIGHT ?
 		ByteAlignment::RIGHT : ByteAlignment::LEFT;
+	// test/dv-synthetic 2026-10-24 (dv_tunnel_fixes): the packet bit is the parity of the
+	// whole RGB8 pixel, so where the header rows are flat (black bars, a flat top) the
+	// placement's two dropped bits are constant and the header's CRC is valid under BOTH
+	// placements. Trying high8 first then locked a low8 capture as high8: the DM decoded,
+	// the picture unpacked as garbage, for as long as the top rows stayed flat. Until the
+	// placement is proven, both are checked; when both pass, the placement votes over the
+	// raster (low8 never sets the top two bits of a 10-bit field, high8 never the bottom two)
+	// decide, and an undecided picture keeps the current placement (high8 at first).
+	if (m_bugHuntFixes && !m_placementProven && m_tunnelCapable)
+	{
+		auto headerValid = [&](ByteAlignment a)
+		{
+			std::array<uint8_t, kPacketBytes> packet{};
+			ParsedPacket parsed;
+			return readPacket(0, a, packet) && (packet[0] >> 6) <= 1 && ParseHeader(packet.data(), parsed);
+		};
+		const bool leftValid = headerValid(ByteAlignment::LEFT);
+		const bool rightValid = headerValid(ByteAlignment::RIGHT);
+		if (leftValid != rightValid)
+		{
+			firstCandidate = leftValid ? ByteAlignment::LEFT : ByteAlignment::RIGHT;
+			m_placementProven = true;
+		}
+		else if (leftValid)
+		{
+			TunnelWordReader reader;
+			reader.source = source;
+			reader.width = m_width;
+			reader.stride = m_stride;
+			reader.layout = ToLayout(static_cast<int>(m_wordLayout));
+			const PlacementVotes votes = CountPlacementVotes(reader, m_width, m_height);
+			const size_t nonDark = votes.NonDark();
+			const bool left = votes.left >= kMinPlacementVotes && (votes.right + votes.contradictory) * 100 <= nonDark * 2;
+			const bool right = votes.right >= kMinPlacementVotes && (votes.left + votes.contradictory) * 100 <= nonDark * 2;
+			++m_ambiguousPlacementPictures;
+			if (left || right)
+			{
+				firstCandidate = right ? ByteAlignment::RIGHT : ByteAlignment::LEFT;
+				m_placementProven = true;
+				DebugLog::Log("Dolby Vision RGB tunnel: the header is CRC-valid under both RGB8 placements (flat header rows); placement votes (high8 %zu, low8 %zu, both %zu) chose %s",
+					votes.left, votes.right, votes.contradictory, right ? "low8" : "high8");
+			}
+			else if (m_ambiguousPlacementPictures == 1)
+				DebugLog::Log("Dolby Vision RGB tunnel: the header is CRC-valid under both RGB8 placements and the picture does not decide (votes high8 %zu, low8 %zu, both %zu); keeping %s until a picture decides",
+					votes.left, votes.right, votes.contradictory, firstCandidate == ByteAlignment::LEFT ? "high8" : "low8");
+		}
+	}
 	for (const ByteAlignment candidate : { firstCandidate,
 		firstCandidate == ByteAlignment::LEFT ? ByteAlignment::RIGHT : ByteAlignment::LEFT })
 	{

@@ -95,6 +95,7 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <vprenderer/OptionalRendererLayout.h>
 #include <SourceRuleVariable.h>
 #include <DolbyVisionTunnelGate.h>
+#include <DolbyVisionTunnelSourceState.h>
 #include <HdrInferenceSignalBuilder.h>
 #include <LldvStaticMetadata.h>
 #include <RawCaptureRecorder.h>
@@ -14084,29 +14085,9 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
 	}
 	if (videoState->dolbyVisionTunnel)
 	{
-		videoState->eotf = EOTF::PQ;
-		videoState->colorspace = ColorSpace::BT_2020;
-		if (!videoState->hdrData)
-			videoState->hdrData = std::make_shared<HDRData>();
-		auto& hdr = *videoState->hdrData;
-		if (hdr.displayPrimaryRedX <= 0 || hdr.displayPrimaryGreenX <= 0 ||
-			hdr.displayPrimaryBlueX <= 0 || hdr.whitePointX <= 0)
-		{
-			hdr.displayPrimaryRedX = ColorSpaceToCie1931RedX(ColorSpace::BT_2020);
-			hdr.displayPrimaryRedY = ColorSpaceToCie1931RedY(ColorSpace::BT_2020);
-			hdr.displayPrimaryGreenX = ColorSpaceToCie1931GreenX(ColorSpace::BT_2020);
-			hdr.displayPrimaryGreenY = ColorSpaceToCie1931GreenY(ColorSpace::BT_2020);
-			hdr.displayPrimaryBlueX = ColorSpaceToCie1931BlueX(ColorSpace::BT_2020);
-			hdr.displayPrimaryBlueY = ColorSpaceToCie1931BlueY(ColorSpace::BT_2020);
-			hdr.whitePointX = ColorSpaceToCie1931WpX(ColorSpace::BT_2020);
-			hdr.whitePointY = ColorSpaceToCie1931WpY(ColorSpace::BT_2020);
-		}
-		if (hdr.masteringDisplayMaxLuminance <= 0)
-			hdr.masteringDisplayMaxLuminance = 1000;
-		if (hdr.maxCll <= 0)
-			hdr.maxCll = 1000;
-		if (hdr.maxFall <= 0)
-			hdr.maxFall = 1000;
+		// DolbyVisionTunnelSourceState.h (test/dv-synthetic 2026-10-24: the same rule, shared with
+		// the renderer capture harness).
+		ApplyDolbyVisionTunnelSourceState(*videoState);
 		DebugLog::Log("Dolby Vision RGB tunnel: effective source R210/12-bit 4:2:2 PQ BT.2020");
 	}
 	else if (enableDolbyVisionTunnel && !tunnelGate.handedOff)
