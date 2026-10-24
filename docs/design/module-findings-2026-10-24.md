@@ -268,3 +268,214 @@ merging a branch that changes slots.json, re-run the seed script.
 See "LED module boundaries" in `migration-m2-plan.md`: `projector_control` becomes transport
 only, `led_compensation` becomes control (with `LedController`), and `led_measure` becomes
 measurement, with `FrameStats` split out and an `IPredictionSink` interface.
+
+---
+
+# Part 2: blocked modules (findings only, not fixed)
+
+This is a read-only review of the modules early migration could not move. Other branches own these
+files, so nothing here is fixed on this branch; the M2 plan's mandatory per-move step picks them
+up. Line numbers are at `240d582b`. **LVR** = `src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp`,
+**Cfg** = `src/VideoProcessor-Config/ConfigEditorWindow.cpp`, **Dlg** =
+`src/VideoProcessor-GUI/VideoProcessorDlg.cpp`.
+
+The renderer's only `EngageFallback` ids today are: entrance once, re-base precision, the three
+GPU unpacks, the Dolby Vision ones, calibration LUT, pipeline settings and order, render-ahead,
+delay budget and look-ahead. Every other documented "Fallbacks engaged" entry is unimplemented.
+
+## High
+
+1. **Sigma-delta dropped with only a log line** (`output.dither`; ADR-0001). LVR:24405-24431 erases
+   the hook for an unsupported code domain. CustomHookChain.cpp:231/:258 (shader not loaded) and
+   :353 (disabled by libplacebo) log only.
+   - Scenario: on the 8-bit FL35 link the picture quietly switches to libplacebo's dither; Ctrl+I
+     says "none".
+   - Fix: `EngageFallback("dither", ...)` at each site; release on recovery.
+2. **BTB/WTW clipped, log-only** (`colour.extended_range`; ADR-0002 + ADR-0001). The hook failure is
+   latched until restart (LVR:24563, 24910-24914). `ForTemporal` turns it off with a LUT or gamut
+   mapping (LVR:24567). Plain smooth motion clips BTB on mixed refreshes, logged once
+   (LVR:24585-24592).
+   - Scenario: below-black is lost on screen with no visible entry.
+   - Fix: `EngageFallback("BTB/WTW", Describe(extended))` for HookFailed / TemporalMix /
+     `mixClipsBtb`.
+3. **Turning the `scaling.rebase` slot off still sets every downstream stage up for a re-based
+   picture.** LVR:23150-23151 computes `rebaseFactor` / `rebaseFactorX` from `source_resolution`
+   alone, without `pipelineSlots.Runs(ScalingRebase)`. The factors feed the debander
+   field/radius scales (23218-23229), detail pulse and texture restore (23272-23276), the adaptive
+   upscale decision (24207) and the status line.
+   - Scenario: a 4K-from-1080p source with `pipeline_slots_off: scaling.rebase` gets vector and
+     trust lookups at twice the position, so detail pulse measures at the wrong grain scale.
+   - Fix: force both factors to 1 when the slot does not run.
+4. **A VP debander failure, or its slot switched off, leaves no deband at all.**
+   `LibplaceboDebandYieldsToVp` (LVR:2244-2247, used at 9623) turns libplacebo's deband off whenever
+   `deband_vp` is not off, and only temporal frames turn it back on (24677). A debander failure is
+   logged once (6252-6254), and `pipeline_slots_off: repair.deband` has the same hole.
+   - Scenario: banding returns with nothing shown.
+   - Fix: re-enable libplacebo's deband when VP's fails or is off, and engage "Deband: libplacebo
+     deband (...)".
+5. **NVIDIA optical-flow failure, matcher fallback log-only** (`motion.estimation`). The sticky
+   `opticalFlowFailed` (DejudderWarp.cpp:3353-3356) is only logged when the source string changes
+   (LVR:16853-16857). The look-ahead producer stops itself after three failures
+   (MotionAheadProducer.cpp:290-297), or fails to start, and both are log-only (LVR:23009-23023).
+   - Fix: `EngageFallback("motion", "matcher only: ...")`.
+6. **Open-loop presentation silent; de-judder held with no display rate silent**
+   (`output.presentation`).
+   - Without DXGI statistics, render-ahead goes open loop with only a log line and
+     DiagnosticHistory "ra-open-loop" (LVR:6895-6910, 17282-17291).
+   - With render_ahead off, the de-judder holds every frame ("timing not known: display rate",
+     LVR:17112-17119), which is plain judder.
+   - Scenario: window or iGPU panel; Ctrl+I says "none".
+   - Fix: engage "presentation" for both.
+7. **Failed refresh-rate switch only logged.** LVR:4881-4884, 4917-4921, 4927-4933 and the
+   per-candidate failures return with DebugLog only.
+   - Scenario: 23.976p on a display with no matching mode stays at 60 Hz, giving 3:2 judder with
+     nothing shown.
+   - Fix: `EngageFallback("refresh rate", "kept <hz> for <input> Hz: <why>")`.
+8. **SDR tone shape shader failing to load is log-only.** LVR:23860 (state 3) logs only, though
+   the manifest promises "SDR tone shape: not applied (shader did not load)".
+   - Scenario: harsh SDR highlight clipping with "none" shown.
+   - Fix: copy the DV-trims pattern (LVR:23946-23953).
+
+## Medium-High
+
+9. **Hooks that libplacebo disables at runtime are never detected for SDR tone shape, DV trims
+   or OutputEncodingRepair.** The `pl_renderer_get_errors` scan (LVR:24903-24930) checks custom hooks,
+   LED compensation, extended range, calibration LUT and LED measurement only.
+   - Scenario: the GPU rejects a shader; the hook is dropped every frame while status says active.
+   - On stable libplacebo 7.360, a failed OutputEncodingRepair (OutputEncodingRepair.cpp:65-95)
+     silently loses output levels. Beta 377 is not affected.
+10. **Adaptive downscale failures fall back silently to plain SSIM (w = 1).**
+    AdaptiveDownscale.cpp:592-866 returns the input unchanged on every GPU failure; `Failures()` is
+    never read; the status line (LVR:13135) says "idle (not downscaling)". SSimDownscaler missing
+    (LVR:24375-24379) is log plus status only.
+    - Scenario: grain sharpened into noise and edge haloes, with a misleading status.
+11. **The short-queue (look-ahead) fallback shows only under a delay budget.** "look-ahead" engages
+    only inside the active hold (LVR:26786-26790). With the shipped frame-count target, a target
+    below the motion look-ahead is only logged (Dlg:14969-14980). Config's "Balanced" preset
+    (Cfg:6236, target 2) at 24p needs 3. Also, `QueueLatency::ClampToCapacity` (Dlg:14956) is
+    called without its `clamped` output, so a target above queue_size is cut silently.
+12. **Render-ahead's budget check uses the wrong queue count under a delay budget.**
+    `UpdateRenderAheadBudget` (LVR:7902-7904) passes `earlyUploadQueueTarget` (the frame-count target,
+    6 at 250 ms/24p) instead of the hold's `targetFrames` (3). `FitDelayBudget` passes, and
+    `CombineQueueTarget` (AlphaQueuePolicy.h:123-128) then steers to 3 - 1 = 2, below the promised
+    minimum.
+    - Scenario: repeats or drops at 24p.
+    - Also, the budget counts 2 swapchain frames while render-ahead runs latency 3
+      (RenderAheadPolicy.h:31), so the total is one refresh short.
+13. **The recommended 250 ms gives only 3 frames at 23.976, 24 and 25p.** Fixed costs at 60 Hz are
+    99.7 ms, so floor(150.3 / 41.7) = 3, and "look-ahead (3 of 4)" engages at the owner's main rate.
+    The 4-frame value is 267 ms (DelayBudgetLadder.h, slots.json), yet the docs
+    (VP-settings-reference.md:86, :460), the Cfg:6902 tooltip and the queue_timing README say 250.
+
+## Medium
+
+14. **Shipped config says the link is 10-bit; the FL35 link is 8-bit.** VideoProcessor.cfg:142
+    `display_bit_depth: 10`, and the Config seed writes 10 (Cfg:2526). The docs and renderer default
+    to auto (LVR:1372, :3734). `ApplyDisplayBitDepth` (LibplaceboRenderParameters.cpp:201-219) then
+    quantises the sigma-delta at 10 bits and the driver truncates to 8.
+    - Scenario: banding the sigma-delta exists to prevent.
+15. **The shipped defaults never run the sigma-delta or the hybrid scaler.** VideoProcessor.cfg sets
+    no `temporal_dither`, so auto means libplacebo's dither, although its comment at :160-163 says
+    banding is "the sigma-delta's job". The Low/Mid Scaling tiers (VpvTierTable.generated.h:201-211)
+    set `adaptive_downscale on` but don't add SSimDownscaler, so they do nothing until the user picks
+    the shader. `temporal_dither` auto-loads its shader (LVR:13009); `adaptive_downscale` does not.
+16. **`render_ahead on` is a no-op with defaults, and Config says otherwise.** `FitDelayBudget`
+    refuses any lead when `render_ahead_queue_credit` is off (RenderAheadPolicy.h:124-127), and it
+    defaults off (LVR:1336, Cfg:10878). The Cfg:8856 / :8885 tooltips promise reported latency
+    instead. VP-settings-reference.md:494 calls the credit superseded.
+17. **Config's delay note uses the old ceil rule.** Cfg:471-491 (`FramesForLatency`) shows "24p 6
+    frames (250 ms)"; the renderer queues 3 plus padding inside a total. The Cfg:6905 tooltip and the
+    docs caveat (VP-settings-reference.md:96-97) say the budget is not wired, but it is (Dlg:14967,
+    LVR:26694).
+    - Scenario: wrong AVR lip-sync numbers.
+18. **ADR-0020's single total delay is off in the shipped config.** VideoProcessor.cfg `[queue.Normal]`
+    (lines 67-72) has `target_frames: 5` and no `target_latency_ms`: 208 ms at 24p, 83 ms at 60p. Its
+    comment about 4 frames for motion is stale (MotionAhead.h:29-46). The Config "Reliable" preset
+    (Cfg:6237, 11474) does the same.
+19. **Refresh-mode ranking hard-codes a rate band** (ADR-0018). DisplayRefreshRatePolicy.cpp:163 tries
+    the doubled rate only for 24.1 < input < 31.
+    - Scenario: 23.976p with a 48 Hz mode but no 24 Hz is never tried.
+20. **Chroma siting wrong on the CPU RGB->P010 path.** LVR:19734-19740 tags every CPU 4:2:0 picture
+    TOP_LEFT. CDeckLinkRGBToP010VideoFrameFormatter.cpp:313-315 (and its AVX2 path) and
+    CARGBtoP010VideoFrameFormatter.cpp:202-204 average 2x2, which is centre-sited.
+    - Scenario: r210/R12 with `native_rgb_ingest=off`, or R12 at a width not divisible by 8, gives
+      colour fringing.
+21. **Debander vectors used across a hiccup-repair gap.** No `OnePeriodField` gate on
+    `vpDebandParams.field` / `grainError` (LVR:23222-23226); F10 added it only to texture restore
+    (23310). The hold reads `lp - f.xy` k+1 periods too far (VpDebander.cpp:91-97).
+22. **Texture restore carries its reference with no motion when there are no vectors.** With
+    `useField` false and a consecutive sequence, the REF pass reads `ref_old` at the same tile
+    (TextureRestore.cpp:339-346, 776).
+    - Scenario: on a slow pan at 60p with the de-judder idle, a neighbour's peak lifts texture by up
+      to 1.5x.
+    - Fix: restart, or skip the carry, without a field.
+23. **"re-base precision" never clears.** `formatNote` (SourceRebase.cpp:242) is never reset, so the
+    entry stays all session (LVR:6182-6190).
+24. **A failed re-base is log-only, and on extras it is not even logged.** Main path: log once, then
+    a 5-60 s pause (LVR:6193-6194, 23180). Extra path (6202-6211): the native frame silently.
+25. **Detail pulse and texture restore failures reach only the Ctrl+I description text**
+    (LVR:6356-6383, 13157-13160), not "Fallbacks engaged".
+26. **Silent fallbacks in capture:**
+    - Early upload unavailable is log-only (LVR:5480-5484), and the init log still claims "uploaded
+      early" (12042-12044).
+    - R12B/R12L at widths not divisible by 8 skip native ingest silently (30404-30410).
+27. **Capture fallback text says 4:2:0, but the CPU path is lossless 4:2:2** (LVR:6618 vs
+    `CreateAlphaFormatter` 900-918). The README item 44 treats the better behaviour as a defect.
+28. **Defaults disagree:**
+    - `dv_tunnel_gpu_unpack`: renderer and Config on (LVR:1097, Cfg:10870), but docs :117,
+      vpv-tiers.json:67 and the tier table say off. So VP-V shows "default: off" while the renderer
+      runs it.
+    - `dv_trims`: on in code, off in docs :128.
+    - `queue_size`: docs "auto", schema integer, default 32.
+    - `lead_frames`: docs "auto", default 1.
+
+## Low
+
+29. Log-only 60 Hz assumptions: render-stall threshold (LVR:31795-31797, `DEFAULT_FRAME_RATE_HZ`),
+    PulldownDetector.h:333, the adaptive-downscale frame period (LVR:13565-13570, a literal 24 Hz).
+    The last makes smoothing about 2.5x slow at 24p on 60 Hz.
+30. Automatic look-ahead and the GUI short-target log use the frame-count target, not the hold
+    (Dlg:15004-15008, 14972).
+31. `source_range` full/limited ignored on the CPU RGB path, logged once (LVR:19560-19570).
+    SDR tone shape off under a calibration LUT is log-only (23833), unlike DV trims.
+32. One undithered frame when libplacebo disables the sigma-delta: `quantiserInFrame` is set before
+    the render (LVR:24766-24771), and the failure is marked after it (24905).
+33. With `downscale_light gamma`, an anamorphic frame that shrinks x but grows y upscales in gamma
+    against `upscale_light linear` (DownscaleLight.h; LVR:24694-24700).
+34. An invalid `source_resolution` is dropped with no log (LVR:2483-2488).
+35. Misleading comments:
+    - LVR:5428-5436 says unpack failures are "logged once"; they are now engaged.
+    - LVR:23268-23271 says the detail check is "exactly the debander's" (it omits the live-field
+      clause).
+    - shaders/Temporal sigma-delta.glsl:855-856 says "2^(n-8) - 1" reserved codes (it is 2^(n-8)).
+    - OutputHookOrder.h says the renderer uses `Order(tagged)` (it uses `OrderSlotsInPlace`).
+    - HDRData.cpp:9 has `#pragma once` in a .cpp.
+    - TranslatePrimaries maps P3_D60 to Display P3, a D65 white point (LVR:778).
+36. Key-list and README errors:
+    - dither lists `sigma_delta` (a value), not `temporal_dither` / `occlusion_mask`.
+    - scaling.output lists `hybrid_refine_d` (unparsed).
+    - sdr_tone_shape omits `sdr_white_headroom`, `sdr_knee_start`, `sdr_knee_strength`,
+      `sdr_contrast_recovery`.
+    - input.signal lists `dv_trims` (it belongs to sdr_tone_shape) and omits `dv_tunnel_gpu_unpack`.
+    - queue_timing lists `low_latency` (a profile) and `queue_recovery` (a legacy section).
+    - motion lists `dejudder_est`, `dejudder_hold` (log labels) and `motion_ahead_ms` (unparsed).
+    - `motion_engine`, `smooth_motion` and `frame_mixer` are missing from the settings reference.
+    - capture/signal docs call the unpack fallbacks "log-only", but they are engaged.
+    - slots.json says "Lanczos fallback" and "polar retired" for scaling.output. Without SSIM the
+      quality-preset downscaler runs, and `adaptive_faithful auto` still uses polar
+      (AdaptiveDownscale.cpp:631-689).
+    - The re-base description ("1-D ... r16") is wrong: luma uses polar EWA, with float fallbacks.
+    - The open items "forced 5-frame minimum", "time-based motion_ahead" and "render-ahead inside
+      the budget" are already done.
+
+**Checked and found consistent:**
+- the sigma-delta code limits against the shader;
+- the quantiser kept last among OUTPUT hooks;
+- the BTB/WTW restore under gamma-light downscale;
+- SSIM seeing the clipped picture with the remainder carried;
+- per-axis vector mapping in the debander, texture restore, detail pulse, warp and interpolator;
+- R210 limited mapping keeping BTB/WTW;
+- V210/UYVY GPU unpack bit-exact with the P210 contract;
+- the DV hand-off window derived from the measured rate;
+- motion/deband/texture defaults across Config, renderer, cfg and docs;
+- no races in the queue-hold paths.
