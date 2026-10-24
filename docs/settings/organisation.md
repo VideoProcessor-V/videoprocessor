@@ -29,8 +29,9 @@ every control still exists exactly once.
 
 ## Page tree
 
-**VP-V** (sidebar): Pathway, Profile (the same one the Rendering page shows), Global tier,
-Fallbacks engaged; then one tab per unit, each with **Main | Advanced**.
+**VP-V** (sidebar): Pathway, Profile (the same one the Rendering page shows), Global tier, **Full
+precision for every tier** (32-bit float intermediates; on by default, off only by choice, with a
+warning line when off), Fallbacks engaged; then one tab per unit, each with **Main | Advanced**.
 
 | Tab | Main | Advanced |
 |---|---|---|

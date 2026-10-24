@@ -40,7 +40,8 @@
 
 namespace Vpv
 {
-	enum class ItemKind { Toggle, Section, Row, Hide, Note };
+	// Elsewhere: a toggle of this unit shown in another place (named in the note), not on this card.
+	enum class ItemKind { Toggle, Section, Row, Hide, Note, Elsewhere };
 	struct CardItem { ItemKind kind; const char* id; };
 	enum class LockKind { None, Tier, Slider, Feature, Defaults };
 	struct Lock
@@ -170,7 +171,8 @@ namespace Vpv
 			{ "colour", "dv", "Dolby Vision", "How Dolby Vision pictures are mapped to your display.", false, false, {
 				{ K::Toggle, "dv_trims" } } },
 			{ "colour", "range", "Range and precision", "Keeps every value the source carries.", false, false, {
-				{ K::Toggle, "preserve_extended_range" }, { K::Toggle, "fbo_float32" } } },
+				{ K::Toggle, "preserve_extended_range" }, { K::Elsewhere, "fbo_float32" },
+				{ K::Note, "Full precision (32-bit float intermediates) is chosen once for every tier, under the global tier at the top of this page." } } },
 			{ "colour", "sdr", "SDR tone shape", "A gentle highlight knee for SDR sources.", false, false, {
 				{ K::Toggle, "sdr_tone_shape" } } },
 			{ "colour", "room", "Room-light adaptation (experimental)",

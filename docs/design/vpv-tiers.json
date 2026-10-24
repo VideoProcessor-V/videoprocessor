@@ -600,7 +600,7 @@
         },
         {
           "key": "fbo_float32",
-          "label": "32-bit float processing (exact highlights)",
+          "label": "Full precision for every tier (32-bit float intermediates)",
           "values": [
             "auto",
             "on",

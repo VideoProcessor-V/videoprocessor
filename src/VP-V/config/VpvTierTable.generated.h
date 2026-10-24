@@ -262,7 +262,7 @@ namespace Vpv
                 u.toggles.push_back({ "dv_trims", "Dolby Vision trims for your display", { "on", "off" }, "colour.sdr_tone_shape" });
                 u.toggles.push_back({ "preserve_extended_range", "Keep below-black and above-white (SDR)", { "on", "off" }, "colour.extended_range" });
                 u.toggles.push_back({ "sdr_tone_shape", "SDR tone shape", { "off", "knee" }, "colour.sdr_tone_shape" });
-                u.toggles.push_back({ "fbo_float32", "32-bit float processing (exact highlights)", { "auto", "on", "off" }, "colour.tone_gamut" });
+                u.toggles.push_back({ "fbo_float32", "Full precision for every tier (32-bit float intermediates)", { "auto", "on", "off" }, "colour.tone_gamut" });
                 u.toggles.push_back({ "ambient_adapt", "Room-light adaptation (experimental)", { "on", "off" }, "colour.appearance" });
                 u.planned.push_back({ "combined_hdr_lut", "Combined HDR->SDR LUT (low-end cards)", "colour.tone_gamut" });
                 u.planned.push_back({ "appearance_adaptation", "Stage 13 appearance (dim screen)", "colour.appearance" });

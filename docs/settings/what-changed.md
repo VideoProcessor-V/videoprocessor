@@ -44,6 +44,11 @@ setting is still there, once. Details: `organisation.md` (the map) and `VP-setti
 
 ## Smaller changes
 
+- **Full precision** (32-bit float intermediates) is one visible choice under the global tier, for
+  every tier: on by default; turn it off only on a weak GPU (it saves a few ms per frame at 4K; values
+  above white may then round by up to 0.84 of a 10-bit step). A warning line shows while it is off; a
+  Ctrl+I note needs a renderer change (pending).
+
 - Dolby Vision trims moved to Colour; their default (and the DV tunnel GPU unpack's) is now on, as in
   the renderer.
 - Expert plumbing moved to Advanced: the capture upload timing, and the SSIM / CNN steadiness switches.

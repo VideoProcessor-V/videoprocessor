@@ -721,6 +721,9 @@ namespace Vpv
 					if (!MoveSection(state->host.upstreamRoot, id, card, !spec.collapsed && sections == 1))
 						state->missing << QStringLiteral("section %1").arg(id);
 					break;
+				case ItemKind::Elsewhere:
+					placedToggles.insert(item.id);
+					break;
 				case ItemKind::Hide:
 					state->hidden << id;
 					break;
@@ -989,21 +992,7 @@ namespace Vpv
 				state->host.setValue(section, QStringLiteral("calibration_lut_stage"), lutStage->itemData(i).toString());
 			});
 
-			// B3 (ADR-0024): the motion pictures from the processed A and B (the input side once per
-			// source frame). A diagnostic switch until it passes its acceptance criteria.
-			auto* entranceOnce = new QComboBox;
-			entranceOnce->setObjectName(ObjectName(QStringLiteral("expert.pipeline_entrance_once")));
-			entranceOnce->addItem(QStringLiteral("Off (default; the stages run on every picture)"), QString());
-			entranceOnce->addItem(QStringLiteral("On (stages once per source frame; under test)"), QStringLiteral("on"));
-			entranceOnce->setToolTip(QStringLiteral("Key pipeline_entrance_once. On: interpolated pictures, hiccup repairs and "
-				"warped extras are made from each frame's processed picture, so the input stages run once per source frame "
-				"(design B3). The Original pathway never uses it."));
-			form->addRow(QStringLiteral("Input stages once per frame"), entranceOnce);
-			QObject::connect(entranceOnce, qOverload<int>(&QComboBox::currentIndexChanged), entranceOnce, [state, entranceOnce, section](int i)
-			{
-				if (state->refreshing || i < 0 || !state->host.setValue) return;
-				state->host.setValue(section, QStringLiteral("pipeline_entrance_once"), entranceOnce->itemData(i).toString());
-			});
+			// pipeline_entrance_once (B3, ADR-0024) is a hidden diagnostic/test key with no Config control (skeleton b76571c1).
 
 			// The module order: slot names moved within their zone.
 			auto* order = new QLineEdit;
@@ -1059,16 +1048,12 @@ namespace Vpv
 			layout->addLayout(form);
 			layout->addStretch();
 
-			state->refreshers.push_back([state, lutStage, entranceOnce, order, slotsOff, section]()
+			state->refreshers.push_back([state, lutStage, order, slotsOff, section]()
 			{
 				const auto get = [&](const char* key) { return state->host.value ? state->host.value(section, QString::fromLatin1(key)).trimmed() : QString(); };
 				{
 					const QSignalBlocker blocker(lutStage);
 					lutStage->setCurrentIndex(get("calibration_lut_stage").compare(QStringLiteral("vp"), Qt::CaseInsensitive) == 0 ? 1 : 0);
-				}
-				{
-					const QSignalBlocker blocker(entranceOnce);
-					entranceOnce->setCurrentIndex(get("pipeline_entrance_once").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0 ? 1 : 0);
 				}
 				if (!order->hasFocus()) order->setText(get("pipeline_order"));
 				if (!slotsOff->hasFocus()) slotsOff->setText(get("pipeline_slots_off"));
@@ -1838,6 +1823,36 @@ namespace Vpv
 		global.reset->setText(QStringLiteral("Reset all units"));
 		global.defaults->setVisible(false);
 		contentLayout->addWidget(global.box);
+		// Full precision (owner 2026-10-24): one choice for every tier, on by default (fbo_float32 auto = on);
+		// off only by choice, e.g. on a laptop GPU. The renderer key is read as before.
+		for (const Unit& u : table.units)
+			for (const Toggle& t : u.toggles)
+				if (std::string(t.key) == "fbo_float32")
+				{
+					auto* precisionHost = new QWidget;
+					auto* precisionForm = new QFormLayout(precisionHost);
+					precisionForm->setContentsMargins(0, 0, 0, 0);
+					AddToggleRow(state, Q(u.id), t, precisionForm);
+					if (auto* combo = precisionHost->findChild<QComboBox*>(ObjectName(Q(u.id) + QStringLiteral(".fbo_float32"))))
+						combo->setToolTip(QStringLiteral("Full precision for every tier: each intermediate picture in 32-bit float. "
+							"On (the default, \"auto\"): exact highlights. Off: half-float intermediates save GPU memory bandwidth "
+							"(a few ms per frame at 4K on a laptop GPU), and values above white may round by up to 0.84 of a "
+							"10-bit step. The final output stage is always 32-bit float. Key fbo_float32."));
+					auto* precisionNote = Help(QString());
+					precisionNote->setObjectName(ObjectName(QStringLiteral("full_precision.note")));
+					precisionNote->setStyleSheet(QStringLiteral("color: #e0a040;"));
+					precisionForm->addRow(precisionNote);
+					contentLayout->addWidget(precisionHost);
+					state->refreshers.push_back([state, precisionNote]()
+					{
+						std::string v = state->Get("fbo_float32");
+						if (v.empty()) v = TierTable().Default("fbo_float32");
+						const bool off = SameValue(v, "off");
+						precisionNote->setText(off ? QStringLiteral("Full precision is off for this profile: highlights may round by "
+							"up to 0.84 of a 10-bit step (to save GPU time).") : QString());
+						precisionNote->setVisible(off);
+					});
+				}
 		state->own.push_back(global.box);
 		auto applyGlobal = [state](int g)
 		{

@@ -199,40 +199,39 @@ Generated from the Config test exe's `--inventory` dump and the source; do not e
 
 | Measure | Count |
 |---|---|
-| Keys VP accepts (schemas + tone tuning + retired) | 563 |
+| Keys VP accepts (schemas + tone tuning + retired) | 564 |
 | ... with a Config control (upstream page, VP-V toggle or VP-V tier) | 502 |
-| ... without a control, allow-listed with a reason (alias / legacy location / retired / diagnostic) | 61 |
+| ... without a control, allow-listed with a reason (alias / legacy location / retired / diagnostic) | 62 |
 | ... without a control and NOT allow-listed (violates the rule) | 0 |
 | ... accepted but changing nothing (allow-list says retired / ignored / never read) | 17 |
 | ... accepted but never read as a literal by the player/renderer (orphan candidates) | 0 |
-| ... on the VP-V page (toggle or tier) | 52 |
-| ... on the VP-V page AND an upstream page (managed duplicates: the upstream control greys under VP-V) | 44 |
+| ... on the VP-V page (toggle or tier) | 51 |
+| ... on the VP-V page AND an upstream page (managed duplicates: the upstream control greys under VP-V) | 43 |
 | ... with controls on two or more upstream pages | 0 |
 | ... in the settings guide | 212 |
-| ... retirement candidates (guide section 12) | 41 |
+| ... retirement candidates (guide section 12) | 39 |
 | Upstream controls that write a key no schema accepts (no effect; UI helpers excluded) | 0 |
 | Shortcut actions (compiled defaults) / with a Shortcuts-page control | 22 / 22 |
 
 Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-listed** = no control by design (reason in the Notes column); **NO EFFECT** = accepted but ignored at runtime; **ORPHAN?** = accepted but no literal read in the player/renderer (see section 3 for the hand check); **DUAL (managed)** = on the VP-V page and an upstream page (the upstream one is greyed 'Managed by VP-V' while the VP-V pathway is on); **DUP pages** = controls on two upstream pages; **retire X** = guide section 12 group X.
 
-### Input (34)
+### Input (33)
 
 | Key | Section | Upstream control | VP-V | Tier | Default | Guide | Flags / notes |
 |---|---|---|---|---|---|---|---|
 | `active_picture_lookahead_frames` | queue | Queue > Profile details | - | - | 0 | s2 |  |
 | `active_picture_lookahead_frames` | vprenderer | Queue > Profile details | - | - | 0 | s2 |  |
-| `capture_path` | vprenderer | Rendering > Profile details | Input | - | gpu | s2 | DUAL (managed) |
-| `capture_upload` | vprenderer | Rendering > Profile details | Input | - | Auto (early in the low-latency path) | s2 | DUAL (managed) |
-| `dv_trims` | vprenderer | Rendering > Profile details | Input | - | Off | s2 | DUAL (managed) |
+| `capture_path` | vprenderer | Rendering > Profile details | Main | - | gpu | s2 | DUAL (managed) |
+| `capture_upload` | vprenderer | Rendering > Profile details | Advanced | - | Auto (early in the low-latency path) | s2 | DUAL (managed) |
 | `dv_tunnel_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | s2 | retire A |
-| `dv_tunnel_gpu_unpack` | vprenderer | Rendering > Profile details | Input | - | Off | s2 | DUAL (managed) |
+| `dv_tunnel_gpu_unpack` | vprenderer | Rendering > Profile details | Main | - | On | s2 | DUAL (managed) |
 | `dv_tunnel_handoff` | general | DV > Profile details | - | - | checked | s2 |  |
-| `intent_content` | vprenderer | Rendering > Profile details | Input | - | Off | s3 | DUAL (managed) |
+| `intent_content` | vprenderer | Rendering > Profile details | Main | - | Off | s3 | DUAL (managed) |
 | `lead_frames` | queue | Queue > Profile details | - | - | frames | s2 |  |
 | `lead_frames` | vprenderer | Queue > Profile details | - | - | frames | s2 |  |
 | `low_latency_path` | queue | Queue > Profile details | - | - | - | s2 |  |
 | `low_latency_path` | vprenderer | Queue > Profile details | - | - | - | s2 |  |
-| `native_rgb_ingest` | vprenderer | Rendering > Profile details | Input | - | On | s2 | DUAL (managed) |
+| `native_rgb_ingest` | vprenderer | Rendering > Profile details | Main | - | On | s2 | DUAL (managed) |
 | `newlldv` | general | DV > Profile details | - | - | unchecked | s2 |  |
 | `newlldv_sdr_veto` | general | DV > Profile details | - | - | checked | s2 |  |
 | `queue_size` | general | only in Queue > Profile details | - | - | - | s2 | allow-listed: legacy location: VP reads [command_line] then [general] queue_size after the default queue profile (hunt 3, CFG9); Config moves both into [queue.*], which has the control |
@@ -246,7 +245,7 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 | `reset_queue_too_large_percent` | queue_recovery | Queue > Profile details | - | - | 1 | s2 | legacy location: Config moves it into [queue.*], which has the control |
 | `reset_queue_too_large_percent` | vprenderer | Queue > Profile details | - | - | 1 | s2 |  |
 | `source_coding_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | s2 | retire A |
-| `source_range` | vprenderer | Rendering > Profile details | Input | - | Auto (from the capture format) | s2 | DUAL (managed) |
+| `source_range` | vprenderer | Rendering > Profile details | Main | - | Auto (from the capture format) | s2 | DUAL (managed) |
 | `startup_preroll_frames` | queue | Queue > Profile details | - | - | frames | s2 |  |
 | `startup_preroll_frames` | vprenderer | Queue > Profile details | - | - | frames | s2 |  |
 | `target_frames` | queue | Queue > Profile details | - | - | frames | s2 | retire C |
@@ -258,56 +257,56 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 
 | Key | Section | Upstream control | VP-V | Tier | Default | Guide | Flags / notes |
 |---|---|---|---|---|---|---|---|
-| `dejudder_consistency_px` | vprenderer | VP-V > Motion | - | - | 2 | s3 |  |
-| `dejudder_cut_histogram` | vprenderer | VP-V > Motion | - | - | 0.3 | s3 |  |
-| `dejudder_est_candidates` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
-| `dejudder_est_gate` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
-| `dejudder_est_lambda` | vprenderer | VP-V > Motion | - | - | 0.5 | s3 |  |
-| `dejudder_est_qpel` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
-| `dejudder_est_split` | vprenderer | VP-V > Motion | - | Low=off, Mid=off, Upper=on | Off | s3 | DUAL (managed) |
-| `dejudder_est_split_sad` | vprenderer | VP-V > Motion | - | - | 0 | s3 |  |
-| `dejudder_estimate_ahead` | vprenderer | VP-V > Motion | Motion | - | On | s3 | DUAL (managed) |
-| `dejudder_even_rates` | vprenderer | VP-V > Motion | - | - | whole | s3 |  |
-| `dejudder_fade_floor` | vprenderer | VP-V > Motion | - | - | 0.25 | s3 |  |
-| `dejudder_fade_match` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
-| `dejudder_frame_trust` | vprenderer | VP-V > Motion | - | - | 0.25 | s3 |  |
-| `dejudder_gate` | vprenderer | VP-V > Motion | - | - | Auto (per frame with render ahead) | s3 |  |
-| `dejudder_global_prior` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
-| `dejudder_global_two` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
-| `dejudder_hold_feather_px` | vprenderer | VP-V > Motion | - | - | 4 | s3 |  |
-| `dejudder_hold_hysteresis` | vprenderer | VP-V > Motion | - | - | 2 | s3 |  |
-| `dejudder_landing_check` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
-| `dejudder_low_res` | vprenderer | VP-V > Motion | - | - | all | s3 |  |
-| `dejudder_match_tolerance` | vprenderer | VP-V > Motion | - | - | 4.5 | s3 |  |
-| `dejudder_motion_rolloff` | vprenderer | VP-V > Motion | - | - | Off | s3 |  |
-| `dejudder_object_strength` | vprenderer | VP-V > Motion | - | - | 1 (off) | s3 |  |
-| `dejudder_pulldown` | vprenderer | VP-V > Motion | - | - | Off | s3 |  |
-| `dejudder_regional_hold` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
-| `dejudder_search_range` | vprenderer | VP-V > Motion | - | - | 8 | s3 |  |
-| `dejudder_strength` | vprenderer | VP-V > Motion | - | Classic=0 | 0 = off; the slider sets it | s3 | DUAL (managed) |
-| `dejudder_strength_even` | vprenderer | VP-V > Motion | - | Classic=0 | 0 = off | s3 | DUAL (managed) |
-| `dejudder_texture_tolerance` | vprenderer | VP-V > Motion | - | - | 0.25 | s3 |  |
-| `dejudder_trust_scale` | vprenderer | VP-V > Motion | - | - | 0.6 | s3 |  |
-| `dejudder_vector_smooth` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
-| `dither_vectors` | vprenderer | VP-V > Output | Proposed retirement | - | De-judder's (auto) | s8 | DUAL (managed), retire C |
-| `intent_content_hold_seconds` | vprenderer | VP-V > Input | - | - | 5 | s3 |  |
-| `intent_ease_s` | vprenderer | VP-V > Motion | - | - | 1.5 | s3 |  |
-| `intent_motion` | vprenderer | Rendering > Profile details | Motion | - | Off | s3 | DUAL (managed) |
-| `interpolation` | vprenderer | VP-V > Motion | Motion | - | Off | s3 | DUAL (managed) |
-| `interpolation_fallback` | vprenderer | VP-V > Motion | Motion | - | hold | s3 | DUAL (managed) |
-| `interpolation_fill_gaps` | vprenderer | VP-V > Motion | Motion | - | On | s3 | DUAL (managed) |
+| `dejudder_consistency_px` | vprenderer | VP-V > Advanced | - | - | 2 | s3 |  |
+| `dejudder_cut_histogram` | vprenderer | VP-V > Advanced | - | - | 0.3 | s3 |  |
+| `dejudder_est_candidates` | vprenderer | VP-V > Advanced | - | - | On | s3 |  |
+| `dejudder_est_gate` | vprenderer | VP-V > Advanced | - | - | On | s3 |  |
+| `dejudder_est_lambda` | vprenderer | VP-V > Advanced | - | - | 0.5 | s3 |  |
+| `dejudder_est_qpel` | vprenderer | VP-V > Advanced | - | Classic=off, Low=on, Mid=on, Upper=on | On | s3 | DUAL (managed) |
+| `dejudder_est_split` | vprenderer | VP-V > Advanced | - | Low=off, Mid=off, Upper=on | Off | s3 | DUAL (managed) |
+| `dejudder_est_split_sad` | vprenderer | VP-V > Advanced | - | - | 0 | s3 |  |
+| `dejudder_estimate_ahead` | vprenderer | VP-V > Advanced | Main | - | On | s3 | DUAL (managed) |
+| `dejudder_even_rates` | vprenderer | VP-V > Advanced | - | - | whole | s3 |  |
+| `dejudder_fade_floor` | vprenderer | VP-V > Advanced | - | - | 0.25 | s3 |  |
+| `dejudder_fade_match` | vprenderer | VP-V > Advanced | - | - | On | s3 |  |
+| `dejudder_frame_trust` | vprenderer | VP-V > Advanced | - | - | 0.25 | s3 |  |
+| `dejudder_gate` | vprenderer | VP-V > Advanced | - | - | Auto (per frame with render ahead) | s3 |  |
+| `dejudder_global_prior` | vprenderer | VP-V > Advanced | - | - | On | s3 |  |
+| `dejudder_global_two` | vprenderer | VP-V > Advanced | - | - | On | s3 |  |
+| `dejudder_hold_feather_px` | vprenderer | VP-V > Advanced | - | - | 4 | s3 |  |
+| `dejudder_hold_hysteresis` | vprenderer | VP-V > Advanced | - | - | 2 | s3 |  |
+| `dejudder_landing_check` | vprenderer | VP-V > Advanced | - | - | On | s3 |  |
+| `dejudder_low_res` | vprenderer | VP-V > Advanced | - | - | all | s3 |  |
+| `dejudder_match_tolerance` | vprenderer | VP-V > Advanced | - | - | 4.5 | s3 |  |
+| `dejudder_motion_rolloff` | vprenderer | VP-V > Advanced | - | - | Off | s3 |  |
+| `dejudder_object_strength` | vprenderer | VP-V > Advanced | - | - | 1 (off) | s3 |  |
+| `dejudder_pulldown` | vprenderer | VP-V > Advanced | - | - | Off | s3 |  |
+| `dejudder_regional_hold` | vprenderer | VP-V > Advanced | - | - | On | s3 |  |
+| `dejudder_search_range` | vprenderer | VP-V > Advanced | - | - | 8 | s3 |  |
+| `dejudder_strength` | vprenderer | VP-V > Advanced | - | - | 0 = off; the slider sets it | s3 |  |
+| `dejudder_strength_even` | vprenderer | VP-V > Advanced | - | - | 0 = off | s3 |  |
+| `dejudder_texture_tolerance` | vprenderer | VP-V > Advanced | - | - | 0.25 | s3 |  |
+| `dejudder_trust_scale` | vprenderer | VP-V > Advanced | - | - | 0.6 | s3 |  |
+| `dejudder_vector_smooth` | vprenderer | VP-V > Advanced | - | - | On | s3 |  |
+| `dither_vectors` | vprenderer | Rendering > Profile details | Proposed retirement | - | De-judder's (auto) | s8 | DUAL (managed), retire C |
+| `intent_content_hold_seconds` | vprenderer | VP-V > Advanced | - | - | 5 | s3 |  |
+| `intent_ease_s` | vprenderer | VP-V > Advanced | - | - | 1.5 | s3 |  |
+| `intent_motion` | vprenderer | Rendering > Profile details | Main | - | Off | s3 | DUAL (managed) |
+| `interpolation` | vprenderer | VP-V > Advanced | Main | - | Off | s3 | DUAL (managed) |
+| `interpolation_fallback` | vprenderer | VP-V > Advanced | Main | - | hold | s3 | DUAL (managed) |
+| `interpolation_fill_gaps` | vprenderer | VP-V > Advanced | Main | - | On | s3 | DUAL (managed) |
 | `interpolation_grain` | vprenderer | VP-V > Proposed retirement | - | - | preserve | s3 | retire B |
-| `motion_ahead_frames` | vprenderer | VP-V > Motion | - | Classic=0, Low=0, Mid=4, Upper=4 | 4 | s3 | DUAL (managed), retire C |
-| `optical_flow` | vprenderer | VP-V > Motion | - | Classic=off, Low=off, Mid=on, Upper=on | On | s3 | DUAL (managed) |
+| `motion_ahead_frames` | vprenderer | VP-V > Advanced | - | Classic=0, Low=0, Mid=4, Upper=4 | 4 | s3 | DUAL (managed) |
+| `optical_flow` | vprenderer | VP-V > Advanced | - | Classic=off, Low=off, Mid=on, Upper=on | On | s3 | DUAL (managed) |
 | `optical_flow_cost_trust` | vprenderer | VP-V > Proposed retirement | - | - | Off | s3 | retire B |
-| `optical_flow_fb_check` | vprenderer | VP-V > Motion | - | - | Off | s3 |  |
-| `optical_flow_global` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
-| `optical_flow_global_fallback` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
+| `optical_flow_fb_check` | vprenderer | VP-V > Advanced | - | - | Off | s3 |  |
+| `optical_flow_global` | vprenderer | VP-V > Advanced | - | - | On | s3 |  |
+| `optical_flow_global_fallback` | vprenderer | VP-V > Advanced | - | - | On | s3 |  |
 | `pulldown_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | s3 | retire A |
-| `render_ahead` | vprenderer | Rendering > Profile details | Motion | - | Off | s3 | DUAL (managed) |
-| `render_ahead_queue_credit` | vprenderer | VP-V > Proposed retirement | - | - | Off | s3 | retire C |
-| `render_ahead_utilisation` | vprenderer | VP-V > Motion | - | - | 0.85 | s3 |  |
-| `source_class` | vprenderer | VP-V > Motion | - | - | legacy | s3 |  |
+| `render_ahead` | vprenderer | Rendering > Profile details | Main | - | Off | s3 | DUAL (managed) |
+| `render_ahead_queue_credit` | vprenderer | VP-V > Advanced | - | - | Off | s3 |  |
+| `render_ahead_utilisation` | vprenderer | VP-V > Advanced | - | - | 0.85 | s3 |  |
+| `source_class` | vprenderer | VP-V > Advanced | - | - | legacy | s3 |  |
 
 ### Repair (11)
 
@@ -315,62 +314,63 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 |---|---|---|---|---|---|---|---|
 | `deband_grain` | vprenderer | VP-V > Proposed retirement | - | - | Off | s4 | retire B |
 | `deband_strength` | vprenderer | Rendering > Profile details | - | - | Auto | s4 |  |
-| `deband_vp` | vprenderer | VP-V > Scaling | - | Classic=off, Low=off, Mid=on, Upper=on | Off | s4 | DUAL (managed) |
-| `deband_vp_exclusive` | vprenderer | Rendering > Profile details | Repair | - | On | s4 | DUAL (managed) |
-| `deband_vp_grain_guard` | vprenderer | Rendering > Profile details | Repair | - | On | s4 | DUAL (managed) |
-| `detail_pulse_cap` | vprenderer | VP-V > Repair | - | - | 1.35 | s4 |  |
+| `deband_vp` | vprenderer | VP-V > Advanced | - | Classic=off, Low=off, Mid=on, Upper=on | Off | s4 | DUAL (managed) |
+| `deband_vp_exclusive` | vprenderer | Rendering > Profile details | Main | - | On | s4 | DUAL (managed) |
+| `deband_vp_grain_guard` | vprenderer | Rendering > Profile details | Main | - | On | s4 | DUAL (managed) |
+| `detail_pulse_cap` | vprenderer | VP-V > Advanced | - | - | 1.35 | s4 |  |
 | `detail_pulse_fast` | vprenderer | Rendering > Profile details | Proposed retirement | - | On | s4 | DUAL (managed), retire C |
-| `detail_pulse_stabilise` | vprenderer | Rendering > Profile details | - | Classic=off, Low=on, Mid=on, Upper=on | On | s4 | DUAL (managed) |
-| `low_bitrate_handling` | vprenderer | VP-V > Scaling | Repair | - | Auto (measured) | s4 | DUAL (managed) |
-| `texture_restore` | vprenderer | Rendering > Profile details | - | Classic=off, Low=off, Mid=off, Upper=statistical | Off | s4 | DUAL (managed) |
-| `texture_restore_cap` | vprenderer | VP-V > Repair | - | - | 1.50 | s4 |  |
+| `detail_pulse_stabilise` | vprenderer | VP-V > Advanced | - | Classic=off, Low=on, Mid=on, Upper=on | On | s4 | DUAL (managed) |
+| `low_bitrate_handling` | vprenderer | Rendering > Profile details | Main | - | Auto (measured) | s4 | DUAL (managed) |
+| `texture_restore` | vprenderer | VP-V > Advanced | - | Classic=off, Low=off, Mid=off, Upper=statistical | Off | s4 | DUAL (managed) |
+| `texture_restore_cap` | vprenderer | VP-V > Advanced | - | - | 1.50 | s4 |  |
 
 ### Scaling (24)
 
 | Key | Section | Upstream control | VP-V | Tier | Default | Guide | Flags / notes |
 |---|---|---|---|---|---|---|---|
 | `active_picture_startup_hold` | vprenderer | VP-V > Proposed retirement | - | - | On | s5 | retire A |
-| `adaptive_chroma_ssim` | vprenderer | VP-V > Scaling | - | - | Off | s5 |  |
-| `adaptive_downscale` | vprenderer | VP-V > Scaling | - | Classic=off, Low=on, Mid=on | Off | s5 | DUAL (managed) |
-| `adaptive_faithful` | vprenderer | VP-V > Scaling | Scaling | - | Auto (polar; separable when only one axi | s5 | DUAL (managed) |
-| `adaptive_grain_map` | vprenderer | VP-V > Scaling | Scaling | - | On | s5 | DUAL (managed) |
-| `adaptive_upscale` | vprenderer | VP-V > Scaling | Scaling | - | Off | s5 | DUAL (managed) |
-| `adaptive_upscale_superres_scale` | vprenderer | VP-V > Scaling | - | - | On | s5 |  |
-| `adaptive_upscale_w_base` | vprenderer | VP-V > Scaling | - | - | 1 | s5 |  |
-| `adaptive_w_base` | vprenderer | VP-V > Scaling | - | Low=0.2, Mid=0.2 | 1 | s5 | DUAL (managed) |
-| `cnn_residual_stabilise` | vprenderer | VP-V > Scaling | Scaling | - | On | s5 | DUAL (managed) |
+| `adaptive_chroma_ssim` | vprenderer | VP-V > Advanced | - | - | Off | s5 |  |
+| `adaptive_downscale` | vprenderer | VP-V > Advanced | - | Classic=off, Low=off, Mid=on | Off | s5 | DUAL (managed) |
+| `adaptive_faithful` | vprenderer | VP-V > Advanced | Main | - | Auto (polar; separable when only one axi | s5 | DUAL (managed) |
+| `adaptive_grain_map` | vprenderer | VP-V > Advanced | Main | - | On | s5 | DUAL (managed) |
+| `adaptive_upscale` | vprenderer | VP-V > Advanced | Main | - | Off | s5 | DUAL (managed) |
+| `adaptive_upscale_superres_scale` | vprenderer | VP-V > Advanced | - | - | On | s5 |  |
+| `adaptive_upscale_w_base` | vprenderer | VP-V > Advanced | - | - | 1 | s5 |  |
+| `adaptive_w_base` | vprenderer | VP-V > Advanced | - | Mid=0.2 | 1 | s5 | DUAL (managed) |
+| `cnn_residual_stabilise` | vprenderer | VP-V > Advanced | Advanced | - | On | s5 | DUAL (managed) |
 | `downscale_light` | vprenderer | Scaling > Profile details | - | - | - | s5 |  |
 | `nls_sampling` | vprenderer | VP-V > Proposed retirement | - | - | catmull | s5 | retire B |
-| `rebase_kernel_match` | vprenderer | VP-V > Scaling | Scaling | - | On | s5 | DUAL (managed) |
+| `rebase_kernel_match` | vprenderer | Rendering > Profile details | Main | - | On | s5 | DUAL (managed) |
 | `residual_stabilise_grain_guard` | vprenderer | VP-V > Proposed retirement | - | - | On | s5 | retire A |
-| `source_resolution` | vprenderer | VP-V > Scaling | - | Classic=native, Low=native, Mid=auto | Auto (detected) | s2 | DUAL (managed) |
-| `source_resolution_auto_min_confidence` | vprenderer | VP-V > Scaling | - | - | 0.8 | s5 |  |
-| `source_resolution_engage_max_wait_s` | vprenderer | VP-V > Scaling | - | - | 20 | s5 |  |
+| `source_resolution` | vprenderer | VP-V > Advanced | - | Classic=native, Low=auto, Mid=auto | Auto (detected) | s2 | DUAL (managed) |
+| `source_resolution_auto_min_confidence` | vprenderer | VP-V > Advanced | - | - | 0.8 | s5 |  |
+| `source_resolution_engage_max_wait_s` | vprenderer | VP-V > Advanced | - | - | 20 | s5 |  |
 | `source_resolution_latch_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | s5 | retire A |
-| `source_resolution_mixed_guard` | vprenderer | VP-V > Scaling | Scaling | - | On | s2 | DUAL (managed) |
-| `source_resolution_text_guard` | vprenderer | VP-V > Scaling | Scaling | - | On | s2 | DUAL (managed) |
-| `ssim_bitrate_aware` | vprenderer | VP-V > Scaling | Scaling | - | On | s5 | DUAL (managed) |
-| `ssim_bitrate_floor` | vprenderer | VP-V > Scaling | - | - | 0.4 | s5 |  |
-| `ssim_residual_stabilise` | vprenderer | VP-V > Scaling | Scaling | - | On | s5 | DUAL (managed) |
-| `upscale_light` | vprenderer | VP-V > Scaling | - | - | linear | s5 |  |
+| `source_resolution_mixed_guard` | vprenderer | Rendering > Profile details | Main | - | On | s2 | DUAL (managed) |
+| `source_resolution_text_guard` | vprenderer | Rendering > Profile details | Main | - | On | s2 | DUAL (managed) |
+| `ssim_bitrate_aware` | vprenderer | VP-V > Advanced | Main | - | On | s5 | DUAL (managed) |
+| `ssim_bitrate_floor` | vprenderer | VP-V > Advanced | - | - | 0.4 | s5 |  |
+| `ssim_residual_stabilise` | vprenderer | VP-V > Advanced | Advanced | - | On | s5 | DUAL (managed) |
+| `upscale_light` | vprenderer | VP-V > Advanced | - | - | linear | s5 |  |
 
-### Colour (13)
+### Colour (14)
 
 | Key | Section | Upstream control | VP-V | Tier | Default | Guide | Flags / notes |
 |---|---|---|---|---|---|---|---|
-| `ambient_adapt` | vprenderer | Rendering > Profile details | Colour | - | Off | s6 | DUAL (managed) |
+| `ambient_adapt` | vprenderer | Rendering > Profile details | Main | - | Off | s6 | DUAL (managed) |
 | `custom_tone_mapping` | vprenderer | Rendering > Profile details | - | - | unchecked | s6 |  |
+| `dv_trims` | vprenderer | Rendering > Profile details | Main | - | On | s2 | DUAL (managed) |
 | `dynamic_target` | vprenderer | Rendering > Profile details | - | - | checked | s6 |  |
 | `extended_range_more_cases` | vprenderer | VP-V > Proposed retirement | - | - | On | s6 | retire A |
-| `fbo_float32` | vprenderer | Rendering > Profile details | Colour | - | Auto | s6 | DUAL (managed) |
-| `intent_black` | vprenderer | Rendering > Profile details | - | - | Off | s6 |  |
-| `intent_display` | vprenderer | Rendering > Profile details | - | - | Off | s6 |  |
-| `preserve_extended_range` | vprenderer | Rendering > Profile details | Colour | - | On | s6 | DUAL (managed) |
-| `sdr_contrast_recovery` | vprenderer | VP-V > Colour | - | - | Auto | s6 |  |
-| `sdr_knee_start` | vprenderer | VP-V > Colour | - | - | 0.80 | s6 |  |
-| `sdr_knee_strength` | vprenderer | VP-V > Colour | - | - | 0.5 | s6 |  |
-| `sdr_tone_shape` | vprenderer | VP-V > Colour | Colour | - | Off | s6 | DUAL (managed) |
-| `sdr_white_headroom` | vprenderer | VP-V > Colour | - | - | 0 | s6 |  |
+| `fbo_float32` | vprenderer | Rendering > Profile details | - | - | Auto | s6 | DUAL (managed) |
+| `intent_black` | vprenderer | VP-V > Advanced | - | - | Off | s6 |  |
+| `intent_display` | vprenderer | VP-V > Advanced | - | - | Off | s6 |  |
+| `preserve_extended_range` | vprenderer | Rendering > Profile details | Main | - | On | s6 | DUAL (managed) |
+| `sdr_contrast_recovery` | vprenderer | VP-V > Advanced | - | - | Auto | s6 |  |
+| `sdr_knee_start` | vprenderer | VP-V > Advanced | - | - | 0.80 | s6 |  |
+| `sdr_knee_strength` | vprenderer | VP-V > Advanced | - | - | 0.5 | s6 |  |
+| `sdr_tone_shape` | vprenderer | VP-V > Advanced | Main | - | Off | s6 | DUAL (managed) |
+| `sdr_white_headroom` | vprenderer | VP-V > Advanced | - | - | 0 | s6 |  |
 
 ### Dynamic Drive (63)
 
@@ -378,38 +378,38 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 |---|---|---|---|---|---|---|---|
 | `ack_timeout_ms` | projector | Dynamic Drive > Advanced projector | - | - | 300 | s7 |  |
 | `adaptive_gamma` | led_drive | Dynamic Drive | - | - | unchecked | s7 |  |
-| `anti_pump_band` | led_drive | Dynamic Drive > Advanced LED | - | - | 3 levels | s7 |  |
-| `apl_persist_ms` | led_drive | Dynamic Drive > Advanced LED | - | - | 100 ms | s7 |  |
-| `apl_weights` | led_drive | Dynamic Drive > Advanced LED | - | - | 0.114, 0.587, 0.299 | s7 |  |
+| `anti_pump_band` | led_drive | Dynamic Drive > Advanced | - | - | 3 levels | s7 |  |
+| `apl_persist_ms` | led_drive | Dynamic Drive > Advanced | - | - | 100 ms | s7 |  |
+| `apl_weights` | led_drive | Dynamic Drive > Advanced | - | - | 0.114, 0.587, 0.299 | s7 |  |
 | `black_prelift_max` | led_drive | Dynamic Drive > Contrast and cuts | - | - | 120 | s7 |  |
-| `bright_cut_dump` | led_drive | Dynamic Drive > Advanced LED | - | - | checked | s7 |  |
+| `bright_cut_dump` | led_drive | Dynamic Drive > Advanced | - | - | checked | s7 |  |
 | `cntr_latency_ms` | projector | Dynamic Drive > Projector connection | - | - | 80 ms | s7 |  |
 | `cntr_max_usable` | projector | Dynamic Drive > Projector response | - | - | 74 | s7 |  |
 | `cntr_pair_predict` | led_drive | Dynamic Drive > Contrast and cuts | - | - | checked | s7 | retire A |
 | `command_source` | led_drive | Dynamic Drive | - | - | Compensate (VP's own controller) | s7 |  |
 | `compensation_eotf` | led_drive | Dynamic Drive | - | - | 2.41 | s7 |  |
 | `correction_weight_by_time` | led_drive | Dynamic Drive > Experimental | - | - | checked | s7 | retire A |
-| `curve` | led_drive | Dynamic Drive > Advanced LED | - | - | 0:100, 20:100, 40:200, 70:230, 100:255,  | s7 |  |
+| `curve` | led_drive | Dynamic Drive > Advanced | - | - | 0:100, 20:100, 40:200, 70:230, 100:255,  | s7 |  |
 | `cut_cntr_dump` | led_drive | Dynamic Drive > Contrast and cuts | - | - | checked | s7 |  |
 | `cut_cntr_level` | led_drive | Dynamic Drive > Contrast and cuts | - | - | auto (white clip) | s7 |  |
-| `cut_jump` | led_drive | Dynamic Drive > Advanced LED | - | - | checked | s7 |  |
+| `cut_jump` | led_drive | Dynamic Drive > Advanced | - | - | checked | s7 |  |
 | `cut_lead` | led_drive | Dynamic Drive > Contrast and cuts | - | - | Off | s7 |  |
-| `cut_threshold` | led_drive | Dynamic Drive > Advanced LED | - | - | 24.0 | s7 |  |
-| `deadband` | led_drive | Dynamic Drive > Advanced LED | - | - | 3 levels | s7 |  |
+| `cut_threshold` | led_drive | Dynamic Drive > Advanced | - | - | 24.0 | s7 |  |
+| `deadband` | led_drive | Dynamic Drive > Advanced | - | - | 3 levels | s7 |  |
 | `dmd_clip_cntr` | projector | Dynamic Drive > Projector response | - | - | 59 | s7 |  |
-| `early_ramp` | led_drive | Dynamic Drive > Advanced LED | - | - | checked | s7 |  |
+| `early_ramp` | led_drive | Dynamic Drive > Advanced | - | - | checked | s7 |  |
 | `echo` | projector | Dynamic Drive > Advanced projector | - | - | checked | s7 |  |
 | `enabled` | led_drive | Dynamic Drive | - | - | checked | s7 |  |
-| `fade_min_slope` | led_drive | Dynamic Drive > Advanced LED | - | - | 12.0 /s | s7 |  |
-| `fade_ms` | led_drive | Dynamic Drive > Advanced LED | - | - | 250 ms | s7 |  |
+| `fade_min_slope` | led_drive | Dynamic Drive > Advanced | - | - | 12.0 /s | s7 |  |
+| `fade_ms` | led_drive | Dynamic Drive > Advanced | - | - | 250 ms | s7 |  |
 | `flux_table` | projector | Dynamic Drive > Advanced projector | - | - | empty = light proportional to the LED le | s7 |  |
-| `highlight_percentile` | led_drive | Dynamic Drive > Advanced LED | - | - | 99.5 % | s7 |  |
-| `highlight_persist_ms` | led_drive | Dynamic Drive > Advanced LED | - | - | 250 ms | s7 |  |
-| `highlight_release_ms` | led_drive | Dynamic Drive > Advanced LED | - | - | 2000 ms | s7 |  |
+| `highlight_percentile` | led_drive | Dynamic Drive > Advanced | - | - | 99.5 % | s7 |  |
+| `highlight_persist_ms` | led_drive | Dynamic Drive > Advanced | - | - | 250 ms | s7 |  |
+| `highlight_release_ms` | led_drive | Dynamic Drive > Advanced | - | - | 2000 ms | s7 |  |
 | `highlight_tolerance_stops` | led_drive | Dynamic Drive | - | - | Medium | s7 |  |
-| `knee` | led_drive | Dynamic Drive > Advanced LED | - | - | 0.08 | s7 |  |
+| `knee` | led_drive | Dynamic Drive > Advanced | - | - | 0.08 | s7 |  |
 | `led_btb_passthrough` | led_drive | Dynamic Drive > Contrast and cuts | - | - | checked | s7 | retire A |
-| `led_ceiling` | led_drive | Dynamic Drive > Advanced LED | - | - | 255 | s7 |  |
+| `led_ceiling` | led_drive | Dynamic Drive > Advanced | - | - | 255 | s7 |  |
 | `led_floor` | led_drive | Dynamic Drive | - | - | 100 | s7 |  |
 | `led_floor_black` | led_drive | Dynamic Drive | - | - | 60 | s7 |  |
 | `led_floor_reactive` | led_drive | Dynamic Drive | - | - | 100 | s7 |  |
@@ -430,7 +430,7 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 | `read_back` | projector | Dynamic Drive > Projector connection | - | - | unchecked | s7 |  |
 | `recovery_bias_pct` | led_drive | Dynamic Drive > Contrast and cuts | - | - | 3.0 | s7 |  |
 | `script_echo_ms` | led_drive | Dynamic Drive | - | - | 30 ms | s7 |  |
-| `script_highlight_code` | led_drive | Dynamic Drive > Advanced LED | - | - | 215 | s7 |  |
+| `script_highlight_code` | led_drive | Dynamic Drive > Advanced | - | - | 215 | s7 |  |
 | `script_lookahead` | led_drive | Dynamic Drive | - | - | checked | s7 |  |
 | `script_measure_ms` | led_drive | Dynamic Drive | - | - | 150 ms | s7 |  |
 | `script_pacing` | led_drive | Dynamic Drive | - | - | The script's own rhythm | s7 |  |
@@ -438,19 +438,19 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 | `shaped_recovery` | led_drive | Dynamic Drive > Contrast and cuts | - | - | checked | s7 |  |
 | `software_first` | led_drive | Dynamic Drive > Contrast and cuts | - | - | checked | s7 |  |
 | `terminator` | projector | Dynamic Drive > Advanced projector | - | - | Automatic (try the projector) | s7 |  |
-| `tick_ms` | led_drive | Dynamic Drive > Advanced LED | - | - | 400 ms | s7 |  |
+| `tick_ms` | led_drive | Dynamic Drive > Advanced | - | - | 400 ms | s7 |  |
 
 ### Output (5)
 
 | Key | Section | Upstream control | VP-V | Tier | Default | Guide | Flags / notes |
 |---|---|---|---|---|---|---|---|
 | `display_bit_depth` | vprenderer | Rendering > Profile details | - | - | Auto | s8 |  |
-| `dither_grain_tolerance_scale` | vprenderer | VP-V > Output | - | - | 3 | s8 |  |
+| `dither_grain_tolerance_scale` | vprenderer | VP-V > Advanced | - | - | 3 | s8 |  |
 | `dithering` | vprenderer | Rendering > Profile details | - | - | Auto | s8 |  |
-| `occlusion_mask` | vprenderer | VP-V > Output | Output | - | Off | s8 | DUAL (managed) |
-| `temporal_dither` | vprenderer | VP-V > Output | - | Classic=libplacebo, Low=sigma_delta | Auto (the shader list decides) | s8 | DUAL (managed) |
+| `occlusion_mask` | vprenderer | Rendering > Profile details | Main | - | Off | s8 | DUAL (managed) |
+| `temporal_dither` | vprenderer | VP-V > Advanced | - | Classic=libplacebo, Low=auto, Mid=sigma_delta | Auto (the shader list decides) | s8 | DUAL (managed) |
 
-### No control of its own (allow-listed) (60)
+### No control of its own (allow-listed) (61)
 
 | Key | Section | Upstream control | VP-V | Tier | Default | Guide | Flags / notes |
 |---|---|---|---|---|---|---|---|
@@ -476,6 +476,7 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 | `mode` | vprenderer | only in General > Room lights | - | - | - | - | allow-listed, NO EFFECT: legacy Screen label (normal / scope): validated for compatibility, never changes the geometry; screen_aspect has the control |
 | `new_lldv` | general | - | - | - | - | - | allow-listed: alias of newlldv |
 | `no_ui` | general | - | - | - | - | - | allow-listed: alias of noui |
+| `pipeline_entrance_once` | vprenderer | - | - | - | - | - | allow-listed: hidden diagnostic/test key (ADR-0024) |
 | `presentation_lead_frames` | directshow | - | - | - | - | - | allow-listed: legacy location: Config moves it to [queue.*] lead_frames, which has the control |
 | `profile_update_mode` | vprenderer | only in General > Display | - | - | - | - | allow-listed: renderer policy read from [general]; the [general] control covers it |
 | `python` | led_drive | - | - | - | - | - | allow-listed, NO EFFECT: retired (ignored) |
@@ -607,7 +608,7 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 | `cntr_assist` | led_drive | Dynamic Drive > Contrast and cuts | - | - | checked | s10 |  |
 | `cntr_assist_max` | led_drive | Dynamic Drive > Contrast and cuts | - | - | 100 | - |  |
 | `cntr_settle_ms` | projector | Dynamic Drive > Projector response | - | - | 0 | - |  |
-| `ftb_black_ms` | led_drive | Dynamic Drive > Advanced LED | - | - | 500 ms | - |  |
+| `ftb_black_ms` | led_drive | Dynamic Drive > Advanced | - | - | 500 ms | - |  |
 | `ftb_custom_dim` | led_drive | Dynamic Drive > Experimental | - | - | All three colours together | - |  |
 | `ftb_custom_floor` | led_drive | Dynamic Drive > Experimental | - | - | 0 | - |  |
 | `ftb_custom_start` | led_drive | Dynamic Drive > Experimental | - | - | 40 | - |  |
@@ -616,31 +617,31 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 | `gamma_boost` | led_drive | Dynamic Drive | - | - | Off (plain output gamma) | - |  |
 | `gamma_boost_knee` | led_drive | Dynamic Drive | - | - | 0.00 | - |  |
 | `gamma_boost_knee_width` | led_drive | Dynamic Drive | - | - | 0.05 | - |  |
-| `highlight_area_large` | led_drive | Dynamic Drive > Advanced LED | - | - | 0.050 | - |  |
-| `highlight_area_small` | led_drive | Dynamic Drive > Advanced LED | - | - | 0.005 | - |  |
+| `highlight_area_large` | led_drive | Dynamic Drive > Advanced | - | - | 0.050 | - |  |
+| `highlight_area_small` | led_drive | Dynamic Drive > Advanced | - | - | 0.005 | - |  |
 | `led_settle_ms` | projector | Dynamic Drive > Projector response | - | - | 300 | - |  |
 | `light_max` | projector | Dynamic Drive > Advanced projector | - | - | Ask the projector | - |  |
 | `light_min` | projector | Dynamic Drive > Advanced projector | - | - | Ask the projector | - |  |
 | `port` | projector | Dynamic Drive > Projector connection | - | - | COM1 | - |  |
 | `profile_file` | led_drive | Dynamic Drive > LED profile | - | - | Built-in (your dimming script's values) | - |  |
-| `rate_gain_down` | led_drive | Dynamic Drive > LED speeds | - | - | preset | - |  |
-| `rate_gain_up` | led_drive | Dynamic Drive > LED speeds | - | - | preset | - |  |
-| `rate_max_down` | led_drive | Dynamic Drive > LED speeds | - | - | preset | - |  |
-| `rate_max_up` | led_drive | Dynamic Drive > LED speeds | - | - | preset | - |  |
-| `rate_min_down` | led_drive | Dynamic Drive > LED speeds | - | - | preset | - |  |
-| `rate_min_up` | led_drive | Dynamic Drive > LED speeds | - | - | preset | - |  |
+| `rate_gain_down` | led_drive | Dynamic Drive > Advanced | - | - | preset | - |  |
+| `rate_gain_up` | led_drive | Dynamic Drive > Advanced | - | - | preset | - |  |
+| `rate_max_down` | led_drive | Dynamic Drive > Advanced | - | - | preset | - |  |
+| `rate_max_up` | led_drive | Dynamic Drive > Advanced | - | - | preset | - |  |
+| `rate_min_down` | led_drive | Dynamic Drive > Advanced | - | - | preset | - |  |
+| `rate_min_up` | led_drive | Dynamic Drive > Advanced | - | - | preset | - |  |
 | `rate_preset` | led_drive | Dynamic Drive > LED speeds | - | - | Script (your beta 22 speeds) | - |  |
-| `recovery_rate_gain` | led_drive | Dynamic Drive > LED speeds | - | - | preset | - |  |
-| `recovery_rate_max` | led_drive | Dynamic Drive > LED speeds | - | - | preset | - |  |
-| `recovery_rate_min` | led_drive | Dynamic Drive > LED speeds | - | - | preset | - |  |
+| `recovery_rate_gain` | led_drive | Dynamic Drive > Advanced | - | - | preset | - |  |
+| `recovery_rate_max` | led_drive | Dynamic Drive > Advanced | - | - | preset | - |  |
+| `recovery_rate_min` | led_drive | Dynamic Drive > Advanced | - | - | preset | - |  |
 | `shadow_lift_ansi` | led_drive | Dynamic Drive | - | - | 0.00 | - |  |
 | `shadow_lift_ansi_ramp_hi` | led_drive | Dynamic Drive | - | - | 0.100 | - |  |
 | `shadow_lift_ansi_ramp_lo` | led_drive | Dynamic Drive | - | - | 0.010 | - |  |
 | `shadow_lift_ansi_rate` | led_drive | Dynamic Drive | - | - | 1.00 | - |  |
-| `steps_down` | led_drive | Dynamic Drive > Advanced LED | - | - | 100:5, 50:3, 25:2, 10:1, 0:1 | - |  |
-| `steps_up_bright` | led_drive | Dynamic Drive > Advanced LED | - | - | 100:7, 50:4, 25:2, 10:1, 0:1 | - |  |
-| `steps_up_dark` | led_drive | Dynamic Drive > Advanced LED | - | - | 100:7, 50:5, 25:4, 10:1, 0:1 | - |  |
-| `steps_up_split_apl` | led_drive | Dynamic Drive > Advanced LED | - | - | 40 | - |  |
+| `steps_down` | led_drive | Dynamic Drive > Advanced | - | - | 100:5, 50:3, 25:2, 10:1, 0:1 | - |  |
+| `steps_up_bright` | led_drive | Dynamic Drive > Advanced | - | - | 100:7, 50:4, 25:2, 10:1, 0:1 | - |  |
+| `steps_up_dark` | led_drive | Dynamic Drive > Advanced | - | - | 100:7, 50:5, 25:4, 10:1, 0:1 | - |  |
+| `steps_up_split_apl` | led_drive | Dynamic Drive > Advanced | - | - | 40 | - |  |
 
 ### Upstream: General (49)
 
@@ -837,46 +838,46 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 
 | Key | Section | Upstream control | VP-V | Tier | Default | Guide | Flags / notes |
 |---|---|---|---|---|---|---|---|
-| `adaptive_edge_hi` | vprenderer | VP-V > Scaling | - | - | 40 | - |  |
-| `adaptive_edge_lo` | vprenderer | VP-V > Scaling | - | - | 8 | - |  |
-| `adaptive_grain_floor` | vprenderer | VP-V > Scaling | - | - | 0.4 | - |  |
-| `adaptive_grain_hi` | vprenderer | VP-V > Scaling | - | - | 8 | - |  |
-| `adaptive_grain_lo` | vprenderer | VP-V > Scaling | - | - | 2 | - |  |
-| `adaptive_grain_map_smooth_ms` | vprenderer | VP-V > Scaling | - | - | 500 | - |  |
-| `adaptive_grain_shadow_bias` | vprenderer | VP-V > Scaling | - | - | 0.5 | - |  |
-| `adaptive_grain_smooth_ms` | vprenderer | VP-V > Scaling | - | - | 1000 | - |  |
-| `ambient_adapt_strength` | vprenderer | VP-V > Colour | - | - | 1 | - |  |
-| `ambient_max_black_nits` | vprenderer | VP-V > Colour | - | - | 1 | - |  |
-| `ambient_screen_reflect` | vprenderer | VP-V > Colour | - | - | 0.01 | - |  |
-| `ambient_tau_down_s` | vprenderer | VP-V > Colour | - | - | 90 | - |  |
-| `ambient_tau_up_s` | vprenderer | VP-V > Colour | - | - | 15 | - |  |
+| `adaptive_edge_hi` | vprenderer | VP-V > Advanced | - | - | 40 | - |  |
+| `adaptive_edge_lo` | vprenderer | VP-V > Advanced | - | - | 8 | - |  |
+| `adaptive_grain_floor` | vprenderer | VP-V > Advanced | - | - | 0.4 | - |  |
+| `adaptive_grain_hi` | vprenderer | VP-V > Advanced | - | - | 8 | - |  |
+| `adaptive_grain_lo` | vprenderer | VP-V > Advanced | - | - | 2 | - |  |
+| `adaptive_grain_map_smooth_ms` | vprenderer | VP-V > Advanced | - | - | 500 | - |  |
+| `adaptive_grain_shadow_bias` | vprenderer | VP-V > Advanced | - | - | 0.5 | - |  |
+| `adaptive_grain_smooth_ms` | vprenderer | VP-V > Advanced | - | - | 1000 | - |  |
+| `ambient_adapt_strength` | vprenderer | VP-V > Advanced | - | - | 1 | - |  |
+| `ambient_max_black_nits` | vprenderer | VP-V > Advanced | - | - | 1 | - |  |
+| `ambient_screen_reflect` | vprenderer | VP-V > Advanced | - | - | 0.01 | - |  |
+| `ambient_tau_down_s` | vprenderer | VP-V > Advanced | - | - | 90 | - |  |
+| `ambient_tau_up_s` | vprenderer | VP-V > Advanced | - | - | 15 | - |  |
 | `cadence_class_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | - | retire A |
 | `dejudder_block_taper` | vprenderer | VP-V > Proposed retirement | - | - | Off | - | retire B |
-| `dejudder_motion_scale_hi` | vprenderer | VP-V > Motion | - | - | 1.5 | - |  |
-| `dejudder_motion_scale_lo` | vprenderer | VP-V > Motion | - | - | 0.25 | - |  |
+| `dejudder_motion_scale_hi` | vprenderer | VP-V > Advanced | - | - | 1.5 | - |  |
+| `dejudder_motion_scale_lo` | vprenderer | VP-V > Advanced | - | - | 0.25 | - |  |
 | `dejudder_occlusion_fill` | vprenderer | VP-V > Proposed retirement | - | - | Off | - | retire B |
-| `dejudder_pixel_trust` | vprenderer | VP-V > Motion | - | - | On | - |  |
-| `dejudder_pixel_trust_hi` | vprenderer | VP-V > Motion | - | - | 8 | - |  |
-| `dejudder_pixel_trust_lo` | vprenderer | VP-V > Motion | - | - | 3 | - |  |
-| `dejudder_roll_floor` | vprenderer | VP-V > Motion | - | - | 0.25 | - |  |
-| `dejudder_roll_hi` | vprenderer | VP-V > Motion | - | - | 24 | - |  |
-| `dejudder_roll_lo` | vprenderer | VP-V > Motion | - | - | 8 | - |  |
+| `dejudder_pixel_trust` | vprenderer | VP-V > Advanced | - | - | On | - |  |
+| `dejudder_pixel_trust_hi` | vprenderer | VP-V > Advanced | - | - | 8 | - |  |
+| `dejudder_pixel_trust_lo` | vprenderer | VP-V > Advanced | - | - | 3 | - |  |
+| `dejudder_roll_floor` | vprenderer | VP-V > Advanced | - | - | 0.25 | - |  |
+| `dejudder_roll_hi` | vprenderer | VP-V > Advanced | - | - | 24 | - |  |
+| `dejudder_roll_lo` | vprenderer | VP-V > Advanced | - | - | 8 | - |  |
 | `dejudder_source_warp_filter` | vprenderer | VP-V > Proposed retirement | - | - | catmull | - | retire B |
 | `dejudder_taper_sad` | vprenderer | VP-V > Proposed retirement | - | - | 0 | - | retire B |
-| `dejudder_verify` | vprenderer | VP-V > Motion | - | - | Off | - | retire D |
-| `dejudder_verify_share` | vprenderer | VP-V > Motion | - | - | 0.2 | - | retire D |
+| `dejudder_verify` | vprenderer | VP-V > Advanced | - | - | Off | - | retire D |
+| `dejudder_verify_share` | vprenderer | VP-V > Advanced | - | - | 0.2 | - | retire D |
 | `dejudder_warp_stage` | vprenderer | VP-V > Proposed retirement | - | - | rendered | - | retire B |
 | `efficiency_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | - | retire A |
 | `general_rate_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | - | retire A |
-| `intent_motion_min` | vprenderer | VP-V > Motion | - | - | 0.5 | - |  |
-| `intent_motion_min_shot_s` | vprenderer | VP-V > Motion | - | - | 2 | - |  |
-| `intent_motion_policy` | vprenderer | VP-V > Motion | - | - | display | - |  |
+| `intent_motion_min` | vprenderer | VP-V > Advanced | - | - | 0.5 | - |  |
+| `intent_motion_min_shot_s` | vprenderer | VP-V > Advanced | - | - | 2 | - |  |
+| `intent_motion_policy` | vprenderer | VP-V > Advanced | - | - | display | - |  |
 | `motion_history_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | - | retire A |
-| `source_resolution_crossfade_s` | vprenderer | VP-V > Scaling | - | - | 1.5 | - |  |
+| `source_resolution_crossfade_s` | vprenderer | VP-V > Advanced | - | - | 1.5 | - |  |
 | `source_resolution_cut_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | - | retire A |
-| `source_resolution_evidence_seconds` | vprenderer | VP-V > Scaling | - | - | 10 | - |  |
-| `source_resolution_evidence_shots` | vprenderer | VP-V > Scaling | - | - | 3 | - |  |
-| `source_resolution_release_fade_s` | vprenderer | VP-V > Scaling | - | - | 0.25 | - |  |
+| `source_resolution_evidence_seconds` | vprenderer | VP-V > Advanced | - | - | 10 | - |  |
+| `source_resolution_evidence_shots` | vprenderer | VP-V > Advanced | - | - | 3 | - |  |
+| `source_resolution_release_fade_s` | vprenderer | VP-V > Advanced | - | - | 0.25 | - |  |
 | `timing_continuity_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | - | retire A |
 
 ### Upstream: Zoom (6)
