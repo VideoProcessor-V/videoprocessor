@@ -7387,6 +7387,81 @@ struct LibplaceboVideoRenderer::Impl
 				if (dejudderMaskSequence[slot] == nextSourceSequence && motionValidity.Current(dejudderMaskEpoch[slot]))
 					motion.occlusionB = dejudder->Occlusion(slot);
 		}
+		// WIP DEBUG (near-black residual, 2026-10-24; VP_DEBUG_PHASE_AB=1 only): are A's and B's raw
+		// planes bit-identical when the source repeats a frame bit-exactly? Logs the differing luma
+		// samples and the field's first vector for the first 40 pictures between frames.
+		{
+			static int debugCount = 0;
+			char flag[4] = {};
+			if (debugCount < 40 && GetEnvironmentVariableA("VP_DEBUG_PHASE_AB", flag, sizeof(flag)) > 0 && flag[0] == '1' &&
+				a.luma && b.luma && a.luma->params.w == b.luma->params.w && a.luma->params.h == b.luma->params.h)
+			{
+				++debugCount;
+				EnsureRebaseDispatch();
+				// A host-readable copy of each luma plane (a plain copy pass), then a byte compare.
+				auto readBack = [&](pl_tex src, std::vector<uint8_t>& out) {
+					pl_tex_params tp{};
+					tp.w = src->params.w; tp.h = src->params.h; tp.format = src->params.format;
+					if (src->params.format->type == PL_FMT_FLOAT)   // the field: a renderable, readable float format
+						tp.format = pl_find_fmt(d3d11->gpu, PL_FMT_FLOAT, 4, 32, 32,
+							static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+					if (!tp.format) return false;
+					tp.sampleable = true; tp.renderable = true; tp.host_readable = true;
+					pl_tex copy = pl_tex_create(d3d11->gpu, &tp);
+					if (!copy) return false;
+					pl_shader sh = pl_dispatch_begin(rebaseDispatch);
+					pl_sample_src sample{};
+					sample.tex = src;
+					sample.components = src->params.format->num_components;
+					bool ok = pl_shader_sample_direct(sh, &sample);
+					if (ok)
+					{
+						pl_dispatch_params dp{};
+						dp.shader = &sh;
+						dp.target = copy;
+						ok = pl_dispatch_finish(rebaseDispatch, &dp);
+					}
+					else
+						pl_dispatch_abort(rebaseDispatch, &sh);
+					if (ok)
+					{
+						out.resize(static_cast<size_t>(tp.w) * tp.h * tp.format->texel_size);
+						pl_tex_transfer_params t{};
+						t.tex = copy;
+						t.ptr = out.data();
+						ok = pl_tex_download(d3d11->gpu, &t);
+					}
+					pl_tex_destroy(d3d11->gpu, &copy);
+					return ok; };
+				std::vector<uint8_t> da, db;
+				size_t differing = 0;
+				const bool ok = readBack(a.luma, da) && readBack(b.luma, db) && da.size() == db.size();
+				if (ok)
+					for (size_t i = 0; i < da.size(); ++i) differing += da[i] != db[i] ? 1 : 0;
+				// The field's vectors (rgba32f: vx, vy, trust, error) - mean and max length of trusted blocks.
+				double meanLen = 0.0, maxLen = 0.0, gx = 0.0, gy = 0.0;
+				size_t trusted = 0, blocks = 0;
+				if (motion.field)
+				{
+					std::vector<uint8_t> df;
+					if (readBack(motion.field, df) && df.size() == static_cast<size_t>(motion.field->params.w) * motion.field->params.h * 16)
+					{
+						const float* f = reinterpret_cast<const float*>(df.data());
+						blocks = df.size() / 16;
+						for (size_t i = 0; i < blocks; ++i)
+							if (f[i * 4 + 2] > 0.5f)
+							{
+								const double l = std::sqrt(double(f[i * 4]) * f[i * 4] + double(f[i * 4 + 1]) * f[i * 4 + 1]);
+								meanLen += l; maxLen = (std::max)(maxLen, l); gx += f[i * 4]; gy += f[i * 4 + 1]; ++trusted;
+							}
+						if (trusted) { meanLen /= trusted; gx /= trusted; gy /= trusted; }
+					}
+				}
+				DebugLog::Log("DEBUG phase A/B: sequence %llu next %llu phase %.3f vectors %d: luma bytes differing %zu of %zu%s; field: %zu of %zu blocks trusted, |v| mean %.3f max %.3f, mean v (%.3f, %.3f)",
+					static_cast<unsigned long long>(sourceSequence), static_cast<unsigned long long>(nextSourceSequence),
+					vpOutputPhase, vectors ? 1 : 0, differing, da.size(), ok ? "" : " (readback failed)", trusted, blocks, meanLen, maxLen, gx, gy);
+			}
+		}
 		// Bug hunt 3 F5: a standalone gap pair on an active de-judder at its strength.
 		vpPhaseA = a;
 		vpPhaseB = b;

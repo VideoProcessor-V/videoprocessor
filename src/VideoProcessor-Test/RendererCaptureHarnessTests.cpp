@@ -4521,7 +4521,11 @@ namespace Tests
 				plan.rateDenominator = 1001;
 				plan.step = [](int) { FrameStep f; f.content = 0; return f; };
 				plan.captureTimes = { 3.6, 4.2, 4.8, 5.4 };   // after the start-up settling (~3 s)
-				return Run(VideoFrameEncoding::V210, "gpu", 6.5, false, extra, false, &plan).captureMetadataList; };
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.5, false, extra, false, &plan);
+				for (const std::string& line : r.log)   // WIP debug evidence (VP_DEBUG_PHASE_AB)
+					if (line.find("DEBUG phase A/B") != std::string::npos)
+						Logger::WriteMessage(("   " + line).c_str());
+				return r.captureMetadataList; };
 			const std::vector<std::string> plain = capturesOf("interpolation: off\n" + stages);
 			const std::vector<std::string> timeline = capturesOf("interpolation: auto\n" + stages);
 			// Re-audit MED 2: a regression threshold - the timeline's pictures of a still frame differ
