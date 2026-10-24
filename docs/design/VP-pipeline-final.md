@@ -446,6 +446,14 @@ redundant per-refresh repeats removed.
   delay 60-120 ms above the budget.
 - OFF is byte-identical to today's code (GPU test against the r6 build). The Original pathway
   never uses it.
+- **Audit 2026-10-24 (fixed):** after B is processed as its own A, a late fallback picture of A
+  never runs the stateful stages again (the ring's processed A or the per-picture path; a
+  "history breaks" counter proves it); a fallback stays shown for its source frame; ring
+  pictures are drawn with the frame's own descriptor (crop, per-frame HDR metadata); occlusion
+  fill off on processed planes is shown; held sheds drop exactly the late frames.
+- **Timestamps mean the frame's start** (Magewell stamps the start; DeckLink's arrival stamp is
+  moved back by the frame duration), and the age gate waits the transfer, then the hold: the
+  transfer is counted once for every card.
 
 **The hard gate.** B3 passes ADR-0024's nine real-clip criteria and becomes the default before
 any deploy, motion training or dependent net integration. The net runner and net A come after
@@ -456,7 +464,6 @@ it. Until then `motion.consumers` stays fixed in the order and outside `Upstream
 | Gap | Where it shows | What closes it |
 |---|---|---|
 | B3 not yet the default | `pipeline_entrance_once` off; ADR-0024 | the nine criteria on real clips (owner A/B for pans) |
-| B3 source-path extras not verified on screen | test marks PENDING-ONSCREEN (an off-screen window gets no DXGI statistics) | one short on-screen harness run (owner OK pending) |
 | B3 crossfade keeps the old order | "Fallbacks engaged: entrance once (source-resolution crossfade)" | version 2: both paths' processed pictures in the ring |
 | render_ahead total across rates | "Fallbacks engaged: delay budget (render-ahead ... PENDING-RA)"; delay gate PENDING-RA | render-ahead's lead folded into the queue hold |
 | 120 Hz displays hold ~4 film frames more than planned | delay gate PENDING-HZ | investigate the 120 Hz harness case |
@@ -467,8 +474,11 @@ it. Until then `motion.consumers` stays fixed in the order and outside `Upstream
 | Steering settle time after a reset | 1-2 minutes for a large sub-frame rest at 30p | a faster initial trim |
 | Detail look-ahead for B ahead | B3's B ahead skips the optional detail look-ahead | measure C's bands when C is uploaded |
 | B3 needs C queued for B's field ahead | "Fallbacks engaged: entrance once (B's vectors not ready ahead (no frame after next ...))" at start-up or on a short queue | the delay budget's 4-frame look-ahead keeps C queued; shorter queues fall back per picture |
-| Timeline pictures vs plain draws at near-black | +-1 code at codes 2-3 in ~0.01% of pixels, B3 on AND off (a downstream dark-level stage) | identify the stage; criterion 1 is asserted at B3's boundary meanwhile |
-| Source-path extras need DXGI statistics | an off-screen or windowed laptop window holds the extras ("timing not known: display rate") | a fullscreen run verifies B3's extras |
+| Timeline pictures vs plain draws at near-black | was ~2500 pixels of a still 1080p frame at +-1 code (B3 on and off): sub-pixel noise vectors resampled at each phase - fixed in the interpolator (unchanged pixels with under half a pixel of motion drawn as themselves); residual ~15 pixels at codes 0-3 | identify the residual (candidates: the A-aligned consumers skipped on pictures between frames - grain map, residual hold, occlusion mask); `NearBlackTimelineVsPlainProbe` switches stages by environment |
+| Closed-loop de-judder extras on this laptop | its panel (iGPU-driven) gives no DXGI statistics, windowed or fullscreen: the extras hold ("timing not known: display rate") | B3's source-path extras are verified through render-ahead's open loop (asserted); closed loop needs a display with statistics (the 3090 / projector PC) |
+| Delay total: the timeline (interpolation) path | the plain path's age gate holds transfer + hold from the frame's start; the timeline steers by frame count, its total is covered only by the DelayGate model | measure the timeline's total in the harness the way the ladder test does |
+| Delay total: swapchain and display phase | modelled constants in the ladder test ("hold + transfer + render measured") | an input-to-light bench (the hardware loop) |
+| Start-up dark-level settling | a still picture's near-black codes change once ~3 s after start (plain draws too) | identify the settling stage; tests capture after it |
 
 ### 3.9 Real-time proof on the laptop (B4)
 
