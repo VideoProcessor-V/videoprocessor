@@ -243,6 +243,17 @@ namespace ExtendedRange
 	// One log line's worth: transfers, primaries, modes.
 	std::string Describe(const Decision& decision);
 
+	// Efficiency audit 2026-10-24 #7: how the carry ran. None = one pass with
+	// two outputs; the others name why the two original passes are used
+	// (identical output, one extra source-size pass).
+	enum class CarryPassReason { None, NoCompute, NotStorable, OnePassFailed };
+	const char* CarryPassReasonText(CarryPassReason reason);
+	// The one-pass body (pure text, CPU-tested): the old body up to the
+	// clamp, then the remainder store and the clipped colour.
+	std::string CarryOnePassBody();
+	// The original carry body (both two-pass forms; for the CPU text test).
+	const char* CarryBody();
+
 	class Hooks
 	{
 	public:
@@ -270,12 +281,17 @@ namespace ExtendedRange
 				signature == restoreTexture.signature || signature == late.signature;
 		}
 		unsigned long long Applied() const { return applied; }
+		// Efficiency audit 2026-10-24 #7 (diagnostic readout).
+		CarryPassReason CarryPasses() const { return carryOnePassReason; }
+		std::string CarryPassesDescribe() const;
 		// The textures: before the GPU goes.
 		void Release();
 
 	private:
 		static pl_hook_res RunCarry(void* priv, const pl_hook_params* params);
-		static bool EnsureFloat(pl_gpu gpu, pl_gpu& owner, pl_tex& tex, int w, int h);
+		static bool EnsureFloat(pl_gpu gpu, pl_gpu& owner, pl_tex& tex, int w, int h, bool storable = false);
+		bool RunCarryOnePass(const pl_hook_params* params, const float& convertGamma, const float& convertPrimaries,
+			const float& sourceKind, const float& outputKind, const float& linearRemainder);
 		static pl_hook_res RunRestore(void* priv, const pl_hook_params* params);
 		static pl_hook_res RunRestoreTexture(void* priv, const pl_hook_params* params);
 		bool AppendRestore(pl_shader sh, pl_color_space& color, const pl_rect2df& rect) const;
@@ -292,6 +308,8 @@ namespace ExtendedRange
 		pl_color_space output{};
 		float gammaRatio = 1.0f;
 		unsigned long long applied = 0;
+		CarryPassReason carryOnePassReason = CarryPassReason::None;
+		unsigned long long carryOnePassFrames = 0, carryTwoPassFrames = 0;
 		pl_gpu gpu = nullptr;
 		pl_tex clipped = nullptr;     // the carry's output (the picture libplacebo goes on with)
 		pl_tex remainder = nullptr;   // value - clipped, per channel

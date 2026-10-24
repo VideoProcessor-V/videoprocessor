@@ -604,5 +604,36 @@ namespace VideoProcessorTest
 			Assert::IsTrue(pl_color_space_equal(&source, &s));
 			Assert::AreEqual(size_t(0), list.size());
 		}
+
+		// Efficiency audit 2026-10-24 #7: the one-pass carry is the old body
+		// verbatim up to the clamp, then exactly the old ER_REMAINDER
+		// expressions (stored) and the old clipped assignment. Byte identity
+		// on the GPU: docs/design/efficiency-byte-identical-tests.md (#7).
+		TEST_METHOD(OnePassCarryKeepsBothPassesExpressions)
+		{
+			const std::string old = ExtendedRange::CarryBody();
+			const std::string one = ExtendedRange::CarryOnePassBody();
+			const size_t split = old.find("#ifdef ER_REMAINDER");
+			Assert::IsTrue(split != std::string::npos);
+			Assert::AreEqual(old.substr(0, split), one.substr(0, split));
+			const std::string tail = one.substr(split);
+			Assert::IsTrue(tail.find("#ifdef") == std::string::npos && tail.find("#else") == std::string::npos);
+			for (const char* expr : { "er_to_linear(color.rgb, er_out_kind, er_out_param) -",
+				"er_to_linear(er_clipped, er_out_kind, er_out_param)", "color.rgb - er_clipped",
+				"if (er_linear_remainder > 0.5)" })
+			{
+				Assert::IsTrue(old.find(expr, split) != std::string::npos);
+				Assert::IsTrue(tail.find(expr) != std::string::npos);
+			}
+			Assert::IsTrue(tail.find("imageStore(er_remainder_out, ivec2(gl_FragCoord.xy), vec4(er_rem, 1.0));") != std::string::npos);
+			// The clipped colour is the last statement, as in the old clipped pass.
+			const std::string last = "color.rgb = er_clipped;\n";
+			Assert::IsTrue(tail.size() >= last.size() && tail.compare(tail.size() - last.size(), last.size(), last) == 0);
+
+			ExtendedRange::Hooks hooks;
+			Assert::IsTrue(hooks.CarryPasses() == ExtendedRange::CarryPassReason::None);
+			Assert::IsTrue(hooks.CarryPassesDescribe().find("one pass") != std::string::npos);
+			Assert::IsTrue(std::string(ExtendedRange::CarryPassReasonText(ExtendedRange::CarryPassReason::OnePassFailed)).find("two passes") == 0);
+		}
 	};
 }
