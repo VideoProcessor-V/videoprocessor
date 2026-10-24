@@ -9231,7 +9231,8 @@ struct LibplaceboVideoRenderer::Impl
 	void CaptureRenderedOutput(ID3D11Texture2D* authoritativeBackbuffer,
 		const char* owner, uint64_t frameGeneration, uint64_t sourceSequence,
 		const struct pl_frame& sourceImage,
-		const DolbyVisionLuminanceStatus& captureDvLuminance)
+		const DolbyVisionLuminanceStatus& captureDvLuminance,
+		uint64_t sourceFrameCounter = 0)
 	{
 		std::vector<uint32_t> pixels;
 		D3D11_TEXTURE2D_DESC desc{};
@@ -9273,6 +9274,9 @@ struct LibplaceboVideoRenderer::Impl
 			<< "{\n  \"schema\": \"vp-rendered-output-capture-v1\",\n"
 			<< "  \"capture_id\": \"" << JsonEscape(WideToUtf8(stem)) << "\",\n"
 			<< "  \"source_sequence\": " << sourceSequence << ",\n"
+			// fix/vpscalerender-motion: the source's own frame number (its VideoFrame counter), so a
+			// test harness maps a capture to the frame it sent (source_sequence counts accepted frames).
+			<< "  \"source_frame_counter\": " << sourceFrameCounter << ",\n"
 			<< "  \"renderer_generation\": " << frameGeneration << ",\n"
 			<< "  \"presenter_owner\": \"" << JsonEscape(owner) << "\",\n"
 			<< "  \"swapchain_generation\": " << vpOwnedSwapchainGeneration << ",\n"
@@ -9375,6 +9379,16 @@ struct LibplaceboVideoRenderer::Impl
 				JsonEscape(activeSettings.toneMapping) << "\",\n"
 			<< "  \"gamut_mapping\": \"" <<
 				JsonEscape(activeSettings.gamutMapping) << "\",\n"
+			// fix/vpscalerender-motion (2026-10-24): read-only proof for picture_seq training renders
+			// (VpScaleRender, docs/VP-scale-render-motion.md) that the hybrid scaler's grain map ran on
+			// motion vectors for this picture ("vectors"), on its no-vector scalar ("no-vectors"), or
+			// not at all; with the session's estimate / invalidation counts. Metadata only.
+			<< "  \"hybrid_motion_mode\": \"" << (!activeSettings.adaptiveDownscale || !adaptiveDownscale.Active() ? "off" :
+				adaptiveDownscale.LastMapState() == AdaptiveDownscale::MapState::Used ? "vectors" :
+				adaptiveDownscale.LastMapState() == AdaptiveDownscale::MapState::NoField ? "no-vectors" : "map-off") << "\",\n"
+			<< "  \"hybrid_stabilised_frames\": " << adaptiveDownscale.StabilisedFrames() << ",\n"
+			<< "  \"motion_estimates\": " << dejudderEstimates << ",\n"
+			<< "  \"motion_invalidations\": " << motionInvalidations << ",\n"
 			<< "  \"min_rgb_code\": [" << stats.minimum[0] << ", " <<
 				stats.minimum[1] << ", " << stats.minimum[2] << "],\n"
 			<< "  \"max_rgb_code\": [" << stats.maximum[0] << ", " <<
@@ -24870,7 +24884,7 @@ struct LibplaceboVideoRenderer::Impl
 				std::memory_order_acq_rel))
 			{
 				CaptureRenderedOutput(vpOwnedBackbuffer, "VP-owned-DXGI",
-					frameGeneration, sourceSequence, image, frameDvLuminance);
+					frameGeneration, sourceSequence, image, frameDvLuminance, videoFrame.GetCounter());
 			}
 			if (outputDiagnostics && rendered && !diagnosticReadbackComplete)
 			{
@@ -24906,7 +24920,7 @@ struct LibplaceboVideoRenderer::Impl
 				std::memory_order_acq_rel))
 			{
 				CaptureRenderedOutput(nullptr, "libplacebo-owned",
-					frameGeneration, sourceSequence, image, frameDvLuminance);
+					frameGeneration, sourceSequence, image, frameDvLuminance, videoFrame.GetCounter());
 			}
 			if (outputDiagnostics && rendered && !diagnosticReadbackComplete)
 			{
