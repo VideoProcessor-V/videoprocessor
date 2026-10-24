@@ -501,29 +501,45 @@ vec4 dv_hook_ext(vec4 color)
 }
 
 // feat/dv-l8 task 5: the trims in ICtCp (DvDolbyStyle::ApplyPixelIctcp).
-const mat3 DV_LMS_TO_ICTCP = transpose(mat3(0.5, 0.5, 0.0,
-                                            6610.0 / 4096.0, -13613.0 / 4096.0, 7003.0 / 4096.0,
-                                            17933.0 / 4096.0, -17390.0 / 4096.0, -543.0 / 4096.0));
-
-vec3 dv_from_ictcp(vec3 ictcp, mat3 from_lms)
+// ICtCp <-> PQ LMS (ITU-R BT.2100), written out: no matrix functions in the shader.
+vec3 dv_lms_to_ictcp(vec3 p)
 {
-    vec3 pq = inverse(DV_LMS_TO_ICTCP) * ictcp;
+    return vec3(0.5 * p.x + 0.5 * p.y,
+                (6610.0 * p.x - 13613.0 * p.y + 7003.0 * p.z) / 4096.0,
+                (17933.0 * p.x - 17390.0 * p.y - 543.0 * p.z) / 4096.0);
+}
+
+vec3 dv_ictcp_to_lms(vec3 c)
+{
+    return vec3(dot(vec3(0.99999999999999978, 0.008609037037932761, 0.11102962500302598), c),
+                dot(vec3(0.99999999999999978, -0.0086090370379327524, -0.11102962500302593), c),
+                dot(vec3(0.99999999999999978, 0.56003133571067909, -0.3206271749873188), c));
+}
+
+vec3 dv_mul_rows(vec3 r0, vec3 r1, vec3 r2, vec3 v)
+{
+    return vec3(dot(r0, v), dot(r1, v), dot(r2, v));
+}
+
+vec3 dv_from_ictcp(vec3 ictcp)
+{
+    vec3 pq = dv_ictcp_to_lms(ictcp);
     vec3 lms = vec3(nits_from_pq(pq.x), nits_from_pq(pq.y), nits_from_pq(pq.z)) / 10000.0;
-    return (from_lms * lms) * 10000.0;
+    return dv_mul_rows(vec3(dv_ilms00, dv_ilms01, dv_ilms02), vec3(dv_ilms10, dv_ilms11, dv_ilms12),
+                       vec3(dv_ilms20, dv_ilms21, dv_ilms22), lms) * 10000.0;
 }
 
 vec4 dv_hook_ictcp(vec4 color)
 {
-    mat3 to_lms = transpose(mat3(dv_lms00, dv_lms01, dv_lms02, dv_lms10, dv_lms11, dv_lms12, dv_lms20, dv_lms21, dv_lms22));
-    mat3 from_lms = transpose(mat3(dv_ilms00, dv_ilms01, dv_ilms02, dv_ilms10, dv_ilms11, dv_ilms12, dv_ilms20, dv_ilms21, dv_ilms22));
     vec3 L = vec3(to_nits(color.r), to_nits(color.g), to_nits(color.b));
     vec3 pos = max(L, vec3(0.0));
     vec3 carry = L - pos;
     if (!(pos.r + pos.g + pos.b > 0.0))
         return color;
-    vec3 lms = to_lms * (pos / 10000.0);
+    vec3 lms = dv_mul_rows(vec3(dv_lms00, dv_lms01, dv_lms02), vec3(dv_lms10, dv_lms11, dv_lms12),
+                           vec3(dv_lms20, dv_lms21, dv_lms22), pos / 10000.0);
     vec3 lmspq = vec3(pq_from_nits(lms.x * 10000.0), pq_from_nits(lms.y * 10000.0), pq_from_nits(lms.z * 10000.0));
-    vec3 ictcp = DV_LMS_TO_ICTCP * lmspq;
+    vec3 ictcp = dv_lms_to_ictcp(lmspq);
     if (!(ictcp.x > 0.0))
         return color;
     float peak_pq = pq_from_nits(dv_peak_nits);
@@ -561,7 +577,7 @@ vec4 dv_hook_ictcp(vec4 color)
     float ct = ictcp.y * cos(a) - ictcp.z * sin(a);
     float cp = ictcp.y * sin(a) + ictcp.z * cos(a);
     float k = gain;
-    vec3 outn = dv_from_ictcp(vec3(I2, ct * k, cp * k), from_lms);
+    vec3 outn = dv_from_ictcp(vec3(I2, ct * k, cp * k));
     float tolerance = -1e-4 * (pos.r + pos.g + pos.b);   // DvDolbyStyle::kBelowTolerance
     for (int iter = 0; iter < 12; iter++) {
         bool below = false;
@@ -570,7 +586,7 @@ vec4 dv_hook_ictcp(vec4 color)
         if (!below)
             break;
         k *= 0.5;
-        outn = iter == 11 ? dv_from_ictcp(vec3(I2, 0.0, 0.0), from_lms) : dv_from_ictcp(vec3(I2, ct * k, cp * k), from_lms);
+        outn = iter == 11 ? dv_from_ictcp(vec3(I2, 0.0, 0.0)) : dv_from_ictcp(vec3(I2, ct * k, cp * k));
     }
     outn = max(outn, vec3(0.0)) + carry;
     color.rgb = vec3(from_nits(outn.r), from_nits(outn.g), from_nits(outn.b));
