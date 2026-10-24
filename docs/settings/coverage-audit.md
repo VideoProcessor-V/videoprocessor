@@ -187,8 +187,8 @@ missing Beta renderer DLL, built since, and a 250 ms timing test that passes whe
 
 ## 6. Not done here (for the owner / later)
 - The retirements themselves (needs your yes per group).
-- Moving the expert internals into collapsed VP-V groups (an organisation pass after your review
-  of the preview).
+- ~~Moving the expert internals into collapsed VP-V groups~~ done in the first organisation pass
+  (2026-10-24): see `docs/settings/organisation.md`; the inventory below shows the new homes.
 - The upstream items in 3.4 (layered overrides, `sdr_input_transfer` in two profile kinds).
 
 <!-- BEGIN GENERATED (tools/settings_coverage_audit.py) -->
@@ -224,7 +224,7 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 | `capture_path` | vprenderer | Rendering > Profile details | Input | - | gpu | s2 | DUAL (managed) |
 | `capture_upload` | vprenderer | Rendering > Profile details | Input | - | Auto (early in the low-latency path) | s2 | DUAL (managed) |
 | `dv_trims` | vprenderer | Rendering > Profile details | Input | - | Off | s2 | DUAL (managed) |
-| `dv_tunnel_fixes` | vprenderer | Rendering > Profile details | - | - | On | s2 | retire A |
+| `dv_tunnel_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | s2 | retire A |
 | `dv_tunnel_gpu_unpack` | vprenderer | Rendering > Profile details | Input | - | Off | s2 | DUAL (managed) |
 | `dv_tunnel_handoff` | general | DV > Profile details | - | - | checked | s2 |  |
 | `intent_content` | vprenderer | Rendering > Profile details | Input | - | Off | s3 | DUAL (managed) |
@@ -238,14 +238,14 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 | `queue_size` | general | only in Queue > Profile details | - | - | - | s2 | allow-listed: legacy location: VP reads [command_line] then [general] queue_size after the default queue profile (hunt 3, CFG9); Config moves both into [queue.*], which has the control |
 | `queue_size` | queue | Queue > Profile details | - | - | 1 | s2 |  |
 | `queue_size` | vprenderer | Queue > Profile details | - | - | 1 | s2 |  |
-| `queue_timing_fixes` | vprenderer | Rendering > Profile details | - | - | On | s2 | retire A |
+| `queue_timing_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | s2 | retire A |
 | `reset_after_render_restart_seconds` | queue | Queue > Profile details | - | - | 1 | s2 |  |
 | `reset_after_render_restart_seconds` | queue_recovery | Queue > Profile details | - | - | 1 | s2 | legacy location: Config moves it into [queue.*], which has the control |
 | `reset_after_render_restart_seconds` | vprenderer | Queue > Profile details | - | - | 1 | s2 |  |
 | `reset_queue_too_large_percent` | queue | Queue > Profile details | - | - | 1 | s2 |  |
 | `reset_queue_too_large_percent` | queue_recovery | Queue > Profile details | - | - | 1 | s2 | legacy location: Config moves it into [queue.*], which has the control |
 | `reset_queue_too_large_percent` | vprenderer | Queue > Profile details | - | - | 1 | s2 |  |
-| `source_coding_fixes` | vprenderer | Rendering > Profile details | - | - | On | s2 | retire A |
+| `source_coding_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | s2 | retire A |
 | `source_range` | vprenderer | Rendering > Profile details | Input | - | Auto (from the capture format) | s2 | DUAL (managed) |
 | `startup_preroll_frames` | queue | Queue > Profile details | - | - | frames | s2 |  |
 | `startup_preroll_frames` | vprenderer | Queue > Profile details | - | - | frames | s2 |  |
@@ -258,101 +258,101 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 
 | Key | Section | Upstream control | VP-V | Tier | Default | Guide | Flags / notes |
 |---|---|---|---|---|---|---|---|
-| `dejudder_consistency_px` | vprenderer | Rendering > Profile details | - | - | 2 | s3 |  |
-| `dejudder_cut_histogram` | vprenderer | Rendering > Profile details | - | - | 0.3 | s3 |  |
-| `dejudder_est_candidates` | vprenderer | Rendering > Profile details | - | - | On | s3 |  |
-| `dejudder_est_gate` | vprenderer | Rendering > Profile details | - | - | On | s3 |  |
-| `dejudder_est_lambda` | vprenderer | Rendering > Profile details | - | - | 0.5 | s3 |  |
-| `dejudder_est_qpel` | vprenderer | Rendering > Profile details | - | - | On | s3 |  |
-| `dejudder_est_split` | vprenderer | Rendering > Profile details | - | Low=off, Mid=off, Upper=on | Off | s3 | DUAL (managed) |
-| `dejudder_est_split_sad` | vprenderer | Rendering > Profile details | - | - | 0 | s3 |  |
-| `dejudder_estimate_ahead` | vprenderer | Rendering > Profile details | Motion | - | On | s3 | DUAL (managed) |
-| `dejudder_even_rates` | vprenderer | Rendering > Profile details | - | - | whole | s3 |  |
-| `dejudder_fade_floor` | vprenderer | Rendering > Profile details | - | - | 0.25 | s3 |  |
-| `dejudder_fade_match` | vprenderer | Rendering > Profile details | - | - | On | s3 |  |
-| `dejudder_frame_trust` | vprenderer | Rendering > Profile details | - | - | 0.25 | s3 |  |
-| `dejudder_gate` | vprenderer | Rendering > Profile details | - | - | Auto (per frame with render ahead) | s3 |  |
-| `dejudder_global_prior` | vprenderer | Rendering > Profile details | - | - | On | s3 |  |
-| `dejudder_global_two` | vprenderer | Rendering > Profile details | - | - | On | s3 |  |
-| `dejudder_hold_feather_px` | vprenderer | Rendering > Profile details | - | - | 4 | s3 |  |
-| `dejudder_hold_hysteresis` | vprenderer | Rendering > Profile details | - | - | 2 | s3 |  |
-| `dejudder_landing_check` | vprenderer | Rendering > Profile details | - | - | On | s3 |  |
-| `dejudder_low_res` | vprenderer | Rendering > Profile details | - | - | all | s3 |  |
-| `dejudder_match_tolerance` | vprenderer | Rendering > Profile details | - | - | 4.5 | s3 |  |
-| `dejudder_motion_rolloff` | vprenderer | Rendering > Profile details | - | - | Off | s3 |  |
-| `dejudder_object_strength` | vprenderer | Rendering > Profile details | - | - | 1 (off) | s3 |  |
-| `dejudder_pulldown` | vprenderer | Rendering > Profile details | - | - | Off | s3 |  |
-| `dejudder_regional_hold` | vprenderer | Rendering > Profile details | - | - | On | s3 |  |
-| `dejudder_search_range` | vprenderer | Rendering > Profile details | - | - | 8 | s3 |  |
-| `dejudder_strength` | vprenderer | Rendering > Profile details | - | Classic=0 | 0 = off; the slider sets it | s3 | DUAL (managed) |
-| `dejudder_strength_even` | vprenderer | Rendering > Profile details | - | Classic=0 | 0 = off | s3 | DUAL (managed) |
-| `dejudder_texture_tolerance` | vprenderer | Rendering > Profile details | - | - | 0.25 | s3 |  |
-| `dejudder_trust_scale` | vprenderer | Rendering > Profile details | - | - | 0.6 | s3 |  |
-| `dejudder_vector_smooth` | vprenderer | Rendering > Profile details | - | - | On | s3 |  |
-| `dither_vectors` | vprenderer | Rendering > Profile details | Motion | - | De-judder's (auto) | s8 | DUAL (managed), retire C |
-| `intent_content_hold_seconds` | vprenderer | Rendering > Profile details | - | - | 5 | s3 |  |
-| `intent_ease_s` | vprenderer | Rendering > Profile details | - | - | 1.5 | s3 |  |
+| `dejudder_consistency_px` | vprenderer | VP-V > Motion | - | - | 2 | s3 |  |
+| `dejudder_cut_histogram` | vprenderer | VP-V > Motion | - | - | 0.3 | s3 |  |
+| `dejudder_est_candidates` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
+| `dejudder_est_gate` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
+| `dejudder_est_lambda` | vprenderer | VP-V > Motion | - | - | 0.5 | s3 |  |
+| `dejudder_est_qpel` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
+| `dejudder_est_split` | vprenderer | VP-V > Motion | - | Low=off, Mid=off, Upper=on | Off | s3 | DUAL (managed) |
+| `dejudder_est_split_sad` | vprenderer | VP-V > Motion | - | - | 0 | s3 |  |
+| `dejudder_estimate_ahead` | vprenderer | VP-V > Motion | Motion | - | On | s3 | DUAL (managed) |
+| `dejudder_even_rates` | vprenderer | VP-V > Motion | - | - | whole | s3 |  |
+| `dejudder_fade_floor` | vprenderer | VP-V > Motion | - | - | 0.25 | s3 |  |
+| `dejudder_fade_match` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
+| `dejudder_frame_trust` | vprenderer | VP-V > Motion | - | - | 0.25 | s3 |  |
+| `dejudder_gate` | vprenderer | VP-V > Motion | - | - | Auto (per frame with render ahead) | s3 |  |
+| `dejudder_global_prior` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
+| `dejudder_global_two` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
+| `dejudder_hold_feather_px` | vprenderer | VP-V > Motion | - | - | 4 | s3 |  |
+| `dejudder_hold_hysteresis` | vprenderer | VP-V > Motion | - | - | 2 | s3 |  |
+| `dejudder_landing_check` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
+| `dejudder_low_res` | vprenderer | VP-V > Motion | - | - | all | s3 |  |
+| `dejudder_match_tolerance` | vprenderer | VP-V > Motion | - | - | 4.5 | s3 |  |
+| `dejudder_motion_rolloff` | vprenderer | VP-V > Motion | - | - | Off | s3 |  |
+| `dejudder_object_strength` | vprenderer | VP-V > Motion | - | - | 1 (off) | s3 |  |
+| `dejudder_pulldown` | vprenderer | VP-V > Motion | - | - | Off | s3 |  |
+| `dejudder_regional_hold` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
+| `dejudder_search_range` | vprenderer | VP-V > Motion | - | - | 8 | s3 |  |
+| `dejudder_strength` | vprenderer | VP-V > Motion | - | Classic=0 | 0 = off; the slider sets it | s3 | DUAL (managed) |
+| `dejudder_strength_even` | vprenderer | VP-V > Motion | - | Classic=0 | 0 = off | s3 | DUAL (managed) |
+| `dejudder_texture_tolerance` | vprenderer | VP-V > Motion | - | - | 0.25 | s3 |  |
+| `dejudder_trust_scale` | vprenderer | VP-V > Motion | - | - | 0.6 | s3 |  |
+| `dejudder_vector_smooth` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
+| `dither_vectors` | vprenderer | VP-V > Output | Proposed retirement | - | De-judder's (auto) | s8 | DUAL (managed), retire C |
+| `intent_content_hold_seconds` | vprenderer | VP-V > Input | - | - | 5 | s3 |  |
+| `intent_ease_s` | vprenderer | VP-V > Motion | - | - | 1.5 | s3 |  |
 | `intent_motion` | vprenderer | Rendering > Profile details | Motion | - | Off | s3 | DUAL (managed) |
-| `interpolation` | vprenderer | Rendering > Profile details | Motion | - | Off | s3 | DUAL (managed) |
-| `interpolation_fallback` | vprenderer | Rendering > Profile details | Motion | - | hold | s3 | DUAL (managed) |
-| `interpolation_fill_gaps` | vprenderer | Rendering > Profile details | Motion | - | On | s3 | DUAL (managed) |
-| `interpolation_grain` | vprenderer | Rendering > Profile details | - | - | preserve | s3 | retire B |
-| `motion_ahead_frames` | vprenderer | Rendering > Profile details | - | Classic=0, Low=0, Mid=4, Upper=4 | 4 | s3 | DUAL (managed), retire C |
-| `optical_flow` | vprenderer | Rendering > Profile details | - | Classic=off, Low=off, Mid=on, Upper=on | On | s3 | DUAL (managed) |
-| `optical_flow_cost_trust` | vprenderer | Rendering > Profile details | - | - | Off | s3 | retire B |
-| `optical_flow_fb_check` | vprenderer | Rendering > Profile details | - | - | Off | s3 |  |
-| `optical_flow_global` | vprenderer | Rendering > Profile details | - | - | On | s3 |  |
-| `optical_flow_global_fallback` | vprenderer | Rendering > Profile details | - | - | On | s3 |  |
-| `pulldown_fixes` | vprenderer | Rendering > Profile details | - | - | On | s3 | retire A |
+| `interpolation` | vprenderer | VP-V > Motion | Motion | - | Off | s3 | DUAL (managed) |
+| `interpolation_fallback` | vprenderer | VP-V > Motion | Motion | - | hold | s3 | DUAL (managed) |
+| `interpolation_fill_gaps` | vprenderer | VP-V > Motion | Motion | - | On | s3 | DUAL (managed) |
+| `interpolation_grain` | vprenderer | VP-V > Proposed retirement | - | - | preserve | s3 | retire B |
+| `motion_ahead_frames` | vprenderer | VP-V > Motion | - | Classic=0, Low=0, Mid=4, Upper=4 | 4 | s3 | DUAL (managed), retire C |
+| `optical_flow` | vprenderer | VP-V > Motion | - | Classic=off, Low=off, Mid=on, Upper=on | On | s3 | DUAL (managed) |
+| `optical_flow_cost_trust` | vprenderer | VP-V > Proposed retirement | - | - | Off | s3 | retire B |
+| `optical_flow_fb_check` | vprenderer | VP-V > Motion | - | - | Off | s3 |  |
+| `optical_flow_global` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
+| `optical_flow_global_fallback` | vprenderer | VP-V > Motion | - | - | On | s3 |  |
+| `pulldown_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | s3 | retire A |
 | `render_ahead` | vprenderer | Rendering > Profile details | Motion | - | Off | s3 | DUAL (managed) |
-| `render_ahead_queue_credit` | vprenderer | Rendering > Profile details | - | - | Off | s3 | retire C |
-| `render_ahead_utilisation` | vprenderer | Rendering > Profile details | - | - | 0.85 | s3 |  |
-| `source_class` | vprenderer | Rendering > Profile details | - | - | legacy | s3 |  |
+| `render_ahead_queue_credit` | vprenderer | VP-V > Proposed retirement | - | - | Off | s3 | retire C |
+| `render_ahead_utilisation` | vprenderer | VP-V > Motion | - | - | 0.85 | s3 |  |
+| `source_class` | vprenderer | VP-V > Motion | - | - | legacy | s3 |  |
 
 ### Repair (11)
 
 | Key | Section | Upstream control | VP-V | Tier | Default | Guide | Flags / notes |
 |---|---|---|---|---|---|---|---|
-| `deband_grain` | vprenderer | Rendering > Profile details | - | - | Off | s4 | retire B |
+| `deband_grain` | vprenderer | VP-V > Proposed retirement | - | - | Off | s4 | retire B |
 | `deband_strength` | vprenderer | Rendering > Profile details | - | - | Auto | s4 |  |
-| `deband_vp` | vprenderer | Rendering > Profile details | - | Classic=off, Low=off, Mid=on, Upper=on | Off | s4 | DUAL (managed) |
+| `deband_vp` | vprenderer | VP-V > Scaling | - | Classic=off, Low=off, Mid=on, Upper=on | Off | s4 | DUAL (managed) |
 | `deband_vp_exclusive` | vprenderer | Rendering > Profile details | Repair | - | On | s4 | DUAL (managed) |
 | `deband_vp_grain_guard` | vprenderer | Rendering > Profile details | Repair | - | On | s4 | DUAL (managed) |
-| `detail_pulse_cap` | vprenderer | Rendering > Profile details | - | - | 1.35 | s4 |  |
-| `detail_pulse_fast` | vprenderer | Rendering > Profile details | Repair | - | On | s4 | DUAL (managed), retire C |
+| `detail_pulse_cap` | vprenderer | VP-V > Repair | - | - | 1.35 | s4 |  |
+| `detail_pulse_fast` | vprenderer | Rendering > Profile details | Proposed retirement | - | On | s4 | DUAL (managed), retire C |
 | `detail_pulse_stabilise` | vprenderer | Rendering > Profile details | - | Classic=off, Low=on, Mid=on, Upper=on | On | s4 | DUAL (managed) |
-| `low_bitrate_handling` | vprenderer | Rendering > Profile details | Repair | - | Auto (measured) | s4 | DUAL (managed) |
+| `low_bitrate_handling` | vprenderer | VP-V > Scaling | Repair | - | Auto (measured) | s4 | DUAL (managed) |
 | `texture_restore` | vprenderer | Rendering > Profile details | - | Classic=off, Low=off, Mid=off, Upper=statistical | Off | s4 | DUAL (managed) |
-| `texture_restore_cap` | vprenderer | Rendering > Profile details | - | - | 1.50 | s4 |  |
+| `texture_restore_cap` | vprenderer | VP-V > Repair | - | - | 1.50 | s4 |  |
 
 ### Scaling (24)
 
 | Key | Section | Upstream control | VP-V | Tier | Default | Guide | Flags / notes |
 |---|---|---|---|---|---|---|---|
-| `active_picture_startup_hold` | vprenderer | Rendering > Profile details | - | - | On | s5 | retire A |
-| `adaptive_chroma_ssim` | vprenderer | Rendering > Profile details | - | - | Off | s5 |  |
-| `adaptive_downscale` | vprenderer | Rendering > Profile details | - | Classic=off, Low=on, Mid=on | Off | s5 | DUAL (managed) |
-| `adaptive_faithful` | vprenderer | Rendering > Profile details | Scaling | - | Auto (polar; separable when only one axi | s5 | DUAL (managed) |
-| `adaptive_grain_map` | vprenderer | Rendering > Profile details | Scaling | - | On | s5 | DUAL (managed) |
-| `adaptive_upscale` | vprenderer | Rendering > Profile details | Scaling | - | Off | s5 | DUAL (managed) |
-| `adaptive_upscale_superres_scale` | vprenderer | Rendering > Profile details | - | - | On | s5 |  |
-| `adaptive_upscale_w_base` | vprenderer | Rendering > Profile details | - | - | 1 | s5 |  |
-| `adaptive_w_base` | vprenderer | Rendering > Profile details | - | Low=0.2, Mid=0.2 | 1 | s5 | DUAL (managed) |
-| `cnn_residual_stabilise` | vprenderer | Rendering > Profile details | Scaling | - | On | s5 | DUAL (managed) |
+| `active_picture_startup_hold` | vprenderer | VP-V > Proposed retirement | - | - | On | s5 | retire A |
+| `adaptive_chroma_ssim` | vprenderer | VP-V > Scaling | - | - | Off | s5 |  |
+| `adaptive_downscale` | vprenderer | VP-V > Scaling | - | Classic=off, Low=on, Mid=on | Off | s5 | DUAL (managed) |
+| `adaptive_faithful` | vprenderer | VP-V > Scaling | Scaling | - | Auto (polar; separable when only one axi | s5 | DUAL (managed) |
+| `adaptive_grain_map` | vprenderer | VP-V > Scaling | Scaling | - | On | s5 | DUAL (managed) |
+| `adaptive_upscale` | vprenderer | VP-V > Scaling | Scaling | - | Off | s5 | DUAL (managed) |
+| `adaptive_upscale_superres_scale` | vprenderer | VP-V > Scaling | - | - | On | s5 |  |
+| `adaptive_upscale_w_base` | vprenderer | VP-V > Scaling | - | - | 1 | s5 |  |
+| `adaptive_w_base` | vprenderer | VP-V > Scaling | - | Low=0.2, Mid=0.2 | 1 | s5 | DUAL (managed) |
+| `cnn_residual_stabilise` | vprenderer | VP-V > Scaling | Scaling | - | On | s5 | DUAL (managed) |
 | `downscale_light` | vprenderer | Scaling > Profile details | - | - | - | s5 |  |
-| `nls_sampling` | vprenderer | Rendering > Profile details | - | - | catmull | s5 | retire B |
-| `rebase_kernel_match` | vprenderer | Rendering > Profile details | Scaling | - | On | s5 | DUAL (managed) |
-| `residual_stabilise_grain_guard` | vprenderer | Rendering > Profile details | - | - | On | s5 | retire A |
-| `source_resolution` | vprenderer | Rendering > Profile details | - | Classic=native, Low=native, Mid=auto | Auto (detected) | s2 | DUAL (managed) |
-| `source_resolution_auto_min_confidence` | vprenderer | Rendering > Profile details | - | - | 0.8 | s5 |  |
-| `source_resolution_engage_max_wait_s` | vprenderer | Rendering > Profile details | - | - | 20 | s5 |  |
-| `source_resolution_latch_fixes` | vprenderer | Rendering > Profile details | - | - | On | s5 | retire A |
-| `source_resolution_mixed_guard` | vprenderer | Rendering > Profile details | Scaling | - | On | s2 | DUAL (managed) |
-| `source_resolution_text_guard` | vprenderer | Rendering > Profile details | Scaling | - | On | s2 | DUAL (managed) |
-| `ssim_bitrate_aware` | vprenderer | Rendering > Profile details | Scaling | - | On | s5 | DUAL (managed) |
-| `ssim_bitrate_floor` | vprenderer | Rendering > Profile details | - | - | 0.4 | s5 |  |
-| `ssim_residual_stabilise` | vprenderer | Rendering > Profile details | Scaling | - | On | s5 | DUAL (managed) |
-| `upscale_light` | vprenderer | Rendering > Profile details | - | - | linear | s5 |  |
+| `nls_sampling` | vprenderer | VP-V > Proposed retirement | - | - | catmull | s5 | retire B |
+| `rebase_kernel_match` | vprenderer | VP-V > Scaling | Scaling | - | On | s5 | DUAL (managed) |
+| `residual_stabilise_grain_guard` | vprenderer | VP-V > Proposed retirement | - | - | On | s5 | retire A |
+| `source_resolution` | vprenderer | VP-V > Scaling | - | Classic=native, Low=native, Mid=auto | Auto (detected) | s2 | DUAL (managed) |
+| `source_resolution_auto_min_confidence` | vprenderer | VP-V > Scaling | - | - | 0.8 | s5 |  |
+| `source_resolution_engage_max_wait_s` | vprenderer | VP-V > Scaling | - | - | 20 | s5 |  |
+| `source_resolution_latch_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | s5 | retire A |
+| `source_resolution_mixed_guard` | vprenderer | VP-V > Scaling | Scaling | - | On | s2 | DUAL (managed) |
+| `source_resolution_text_guard` | vprenderer | VP-V > Scaling | Scaling | - | On | s2 | DUAL (managed) |
+| `ssim_bitrate_aware` | vprenderer | VP-V > Scaling | Scaling | - | On | s5 | DUAL (managed) |
+| `ssim_bitrate_floor` | vprenderer | VP-V > Scaling | - | - | 0.4 | s5 |  |
+| `ssim_residual_stabilise` | vprenderer | VP-V > Scaling | Scaling | - | On | s5 | DUAL (managed) |
+| `upscale_light` | vprenderer | VP-V > Scaling | - | - | linear | s5 |  |
 
 ### Colour (13)
 
@@ -361,16 +361,16 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 | `ambient_adapt` | vprenderer | Rendering > Profile details | Colour | - | Off | s6 | DUAL (managed) |
 | `custom_tone_mapping` | vprenderer | Rendering > Profile details | - | - | unchecked | s6 |  |
 | `dynamic_target` | vprenderer | Rendering > Profile details | - | - | checked | s6 |  |
-| `extended_range_more_cases` | vprenderer | Rendering > Profile details | - | - | On | s6 | retire A |
+| `extended_range_more_cases` | vprenderer | VP-V > Proposed retirement | - | - | On | s6 | retire A |
 | `fbo_float32` | vprenderer | Rendering > Profile details | Colour | - | Auto | s6 | DUAL (managed) |
 | `intent_black` | vprenderer | Rendering > Profile details | - | - | Off | s6 |  |
 | `intent_display` | vprenderer | Rendering > Profile details | - | - | Off | s6 |  |
 | `preserve_extended_range` | vprenderer | Rendering > Profile details | Colour | - | On | s6 | DUAL (managed) |
-| `sdr_contrast_recovery` | vprenderer | Rendering > Profile details | - | - | Auto | s6 |  |
-| `sdr_knee_start` | vprenderer | Rendering > Profile details | - | - | 0.80 | s6 |  |
-| `sdr_knee_strength` | vprenderer | Rendering > Profile details | - | - | 0.5 | s6 |  |
-| `sdr_tone_shape` | vprenderer | Rendering > Profile details | Colour | - | Off | s6 | DUAL (managed) |
-| `sdr_white_headroom` | vprenderer | Rendering > Profile details | - | - | 0 | s6 |  |
+| `sdr_contrast_recovery` | vprenderer | VP-V > Colour | - | - | Auto | s6 |  |
+| `sdr_knee_start` | vprenderer | VP-V > Colour | - | - | 0.80 | s6 |  |
+| `sdr_knee_strength` | vprenderer | VP-V > Colour | - | - | 0.5 | s6 |  |
+| `sdr_tone_shape` | vprenderer | VP-V > Colour | Colour | - | Off | s6 | DUAL (managed) |
+| `sdr_white_headroom` | vprenderer | VP-V > Colour | - | - | 0 | s6 |  |
 
 ### Dynamic Drive (63)
 
@@ -445,10 +445,10 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 | Key | Section | Upstream control | VP-V | Tier | Default | Guide | Flags / notes |
 |---|---|---|---|---|---|---|---|
 | `display_bit_depth` | vprenderer | Rendering > Profile details | - | - | Auto | s8 |  |
-| `dither_grain_tolerance_scale` | vprenderer | Rendering > Profile details | - | - | 3 | s8 |  |
+| `dither_grain_tolerance_scale` | vprenderer | VP-V > Output | - | - | 3 | s8 |  |
 | `dithering` | vprenderer | Rendering > Profile details | - | - | Auto | s8 |  |
-| `occlusion_mask` | vprenderer | Rendering > Profile details | Output | - | Off | s8 | DUAL (managed) |
-| `temporal_dither` | vprenderer | Rendering > Profile details | - | Classic=libplacebo, Low=sigma_delta | Auto (the shader list decides) | s8 | DUAL (managed) |
+| `occlusion_mask` | vprenderer | VP-V > Output | Output | - | Off | s8 | DUAL (managed) |
+| `temporal_dither` | vprenderer | VP-V > Output | - | Classic=libplacebo, Low=sigma_delta | Auto (the shader list decides) | s8 | DUAL (managed) |
 
 ### No control of its own (allow-listed) (60)
 
@@ -744,55 +744,20 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 | `shortcut` | queue | Queue > Profile details | - | - | - | - |  |
 | `when` | queue | Queue > Profile details | - | - | - | - |  |
 
-### Upstream: Rendering (65)
+### Upstream: Rendering (24)
 
 | Key | Section | Upstream control | VP-V | Tier | Default | Guide | Flags / notes |
 |---|---|---|---|---|---|---|---|
-| `adaptive_edge_hi` | vprenderer | Rendering > Profile details | - | - | 40 | - |  |
-| `adaptive_edge_lo` | vprenderer | Rendering > Profile details | - | - | 8 | - |  |
-| `adaptive_grain_floor` | vprenderer | Rendering > Profile details | - | - | 0.4 | - |  |
-| `adaptive_grain_hi` | vprenderer | Rendering > Profile details | - | - | 8 | - |  |
-| `adaptive_grain_lo` | vprenderer | Rendering > Profile details | - | - | 2 | - |  |
-| `adaptive_grain_map_smooth_ms` | vprenderer | Rendering > Profile details | - | - | 500 | - |  |
-| `adaptive_grain_shadow_bias` | vprenderer | Rendering > Profile details | - | - | 0.5 | - |  |
-| `adaptive_grain_smooth_ms` | vprenderer | Rendering > Profile details | - | - | 1000 | - |  |
-| `ambient_adapt_strength` | vprenderer | Rendering > Profile details | - | - | 1 | - |  |
-| `ambient_max_black_nits` | vprenderer | Rendering > Profile details | - | - | 1 | - |  |
-| `ambient_screen_reflect` | vprenderer | Rendering > Profile details | - | - | 0.01 | - |  |
-| `ambient_tau_down_s` | vprenderer | Rendering > Profile details | - | - | 90 | - |  |
-| `ambient_tau_up_s` | vprenderer | Rendering > Profile details | - | - | 15 | - |  |
 | `black_cutoff` | vprenderer | Rendering > Profile details | - | - | 1 | - |  |
-| `cadence_class_fixes` | vprenderer | Rendering > Profile details | - | - | On | - | retire A |
 | `contrast_recovery` | vprenderer | Rendering > Profile details | - | - | Auto | - |  |
-| `dejudder_block_taper` | vprenderer | Rendering > Profile details | - | - | Off | - | retire B |
-| `dejudder_motion_scale_hi` | vprenderer | Rendering > Profile details | - | - | 1.5 | - |  |
-| `dejudder_motion_scale_lo` | vprenderer | Rendering > Profile details | - | - | 0.25 | - |  |
-| `dejudder_occlusion_fill` | vprenderer | Rendering > Profile details | - | - | Off | - | retire B |
-| `dejudder_pixel_trust` | vprenderer | Rendering > Profile details | - | - | On | - |  |
-| `dejudder_pixel_trust_hi` | vprenderer | Rendering > Profile details | - | - | 8 | - |  |
-| `dejudder_pixel_trust_lo` | vprenderer | Rendering > Profile details | - | - | 3 | - |  |
-| `dejudder_roll_floor` | vprenderer | Rendering > Profile details | - | - | 0.25 | - |  |
-| `dejudder_roll_hi` | vprenderer | Rendering > Profile details | - | - | 24 | - |  |
-| `dejudder_roll_lo` | vprenderer | Rendering > Profile details | - | - | 8 | - |  |
-| `dejudder_source_warp_filter` | vprenderer | Rendering > Profile details | - | - | catmull | - | retire B |
-| `dejudder_taper_sad` | vprenderer | Rendering > Profile details | - | - | 0 | - | retire B |
-| `dejudder_verify` | vprenderer | Rendering > Profile details | - | - | Off | - | retire D |
-| `dejudder_verify_share` | vprenderer | Rendering > Profile details | - | - | 0.2 | - | retire D |
-| `dejudder_warp_stage` | vprenderer | Rendering > Profile details | - | - | rendered | - | retire B |
-| `efficiency_fixes` | vprenderer | Rendering > Profile details | - | - | On | - | retire A |
 | `film_strength` | vprenderer | Rendering > Profile details | - | - | 0.3 | - |  |
 | `gamut_mapping` | vprenderer | Rendering > Profile details | - | - | Auto | - |  |
-| `general_rate_fixes` | vprenderer | Rendering > Profile details | - | - | On | - | retire A |
-| `intent_motion_min` | vprenderer | Rendering > Profile details | - | - | 0.5 | - |  |
-| `intent_motion_min_shot_s` | vprenderer | Rendering > Profile details | - | - | 2 | - |  |
-| `intent_motion_policy` | vprenderer | Rendering > Profile details | - | - | display | - |  |
 | `knee_adaptation` | vprenderer | Rendering > Profile details | - | - | 0.4 | - |  |
 | `knee_default` | vprenderer | Rendering > Profile details | - | - | 0.4 | - |  |
 | `knee_maximum` | vprenderer | Rendering > Profile details | - | - | 0.8 | - |  |
 | `knee_minimum` | vprenderer | Rendering > Profile details | - | - | 0.1 | - |  |
 | `knee_offset` | vprenderer | Rendering > Profile details | - | - | 1 | - |  |
 | `mastering_clip` | vprenderer | Rendering > Profile details | - | - | 1 | - |  |
-| `motion_history_fixes` | vprenderer | Rendering > Profile details | - | - | On | - | retire A |
 | `peak_detection` | vprenderer | Rendering > Profile details | - | - | Auto | - |  |
 | `percentile` | vprenderer | Rendering > Profile details | - | - | 99.995 | - |  |
 | `quality` | vprenderer | Rendering > Profile details | - | - | High | - |  |
@@ -805,13 +770,7 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 | `slope_offset` | vprenderer | Rendering > Profile details | - | - | 0.2 | - |  |
 | `slope_tuning` | vprenderer | Rendering > Profile details | - | - | 1.5 | - |  |
 | `smoothing_period` | vprenderer | Rendering > Profile details | - | - | 20 | - |  |
-| `source_resolution_crossfade_s` | vprenderer | Rendering > Profile details | - | - | 1.5 | - |  |
-| `source_resolution_cut_fixes` | vprenderer | Rendering > Profile details | - | - | On | - | retire A |
-| `source_resolution_evidence_seconds` | vprenderer | Rendering > Profile details | - | - | 10 | - |  |
-| `source_resolution_evidence_shots` | vprenderer | Rendering > Profile details | - | - | 3 | - |  |
-| `source_resolution_release_fade_s` | vprenderer | Rendering > Profile details | - | - | 0.25 | - |  |
 | `spline_contrast` | vprenderer | Rendering > Profile details | - | - | 0.5 | - |  |
-| `timing_continuity_fixes` | vprenderer | Rendering > Profile details | - | - | On | - | retire A |
 | `tone_mapping` | vprenderer | Rendering > Profile details | - | - | Auto | - |  |
 
 ### Upstream: Scaling (4)
@@ -873,6 +832,52 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 | `subtitle_text_color` | vprenderer | Subtitles > Profile details | - | - | RRGGBB | - |  |
 | `text_reduction_percent` | vprenderer | Subtitles > Profile details | - | - | % (0 = unchanged) | - |  |
 | `type` | vprenderer | Subtitles > Profile details | - | - | Off | - |  |
+
+### Upstream: VP-V (41)
+
+| Key | Section | Upstream control | VP-V | Tier | Default | Guide | Flags / notes |
+|---|---|---|---|---|---|---|---|
+| `adaptive_edge_hi` | vprenderer | VP-V > Scaling | - | - | 40 | - |  |
+| `adaptive_edge_lo` | vprenderer | VP-V > Scaling | - | - | 8 | - |  |
+| `adaptive_grain_floor` | vprenderer | VP-V > Scaling | - | - | 0.4 | - |  |
+| `adaptive_grain_hi` | vprenderer | VP-V > Scaling | - | - | 8 | - |  |
+| `adaptive_grain_lo` | vprenderer | VP-V > Scaling | - | - | 2 | - |  |
+| `adaptive_grain_map_smooth_ms` | vprenderer | VP-V > Scaling | - | - | 500 | - |  |
+| `adaptive_grain_shadow_bias` | vprenderer | VP-V > Scaling | - | - | 0.5 | - |  |
+| `adaptive_grain_smooth_ms` | vprenderer | VP-V > Scaling | - | - | 1000 | - |  |
+| `ambient_adapt_strength` | vprenderer | VP-V > Colour | - | - | 1 | - |  |
+| `ambient_max_black_nits` | vprenderer | VP-V > Colour | - | - | 1 | - |  |
+| `ambient_screen_reflect` | vprenderer | VP-V > Colour | - | - | 0.01 | - |  |
+| `ambient_tau_down_s` | vprenderer | VP-V > Colour | - | - | 90 | - |  |
+| `ambient_tau_up_s` | vprenderer | VP-V > Colour | - | - | 15 | - |  |
+| `cadence_class_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | - | retire A |
+| `dejudder_block_taper` | vprenderer | VP-V > Proposed retirement | - | - | Off | - | retire B |
+| `dejudder_motion_scale_hi` | vprenderer | VP-V > Motion | - | - | 1.5 | - |  |
+| `dejudder_motion_scale_lo` | vprenderer | VP-V > Motion | - | - | 0.25 | - |  |
+| `dejudder_occlusion_fill` | vprenderer | VP-V > Proposed retirement | - | - | Off | - | retire B |
+| `dejudder_pixel_trust` | vprenderer | VP-V > Motion | - | - | On | - |  |
+| `dejudder_pixel_trust_hi` | vprenderer | VP-V > Motion | - | - | 8 | - |  |
+| `dejudder_pixel_trust_lo` | vprenderer | VP-V > Motion | - | - | 3 | - |  |
+| `dejudder_roll_floor` | vprenderer | VP-V > Motion | - | - | 0.25 | - |  |
+| `dejudder_roll_hi` | vprenderer | VP-V > Motion | - | - | 24 | - |  |
+| `dejudder_roll_lo` | vprenderer | VP-V > Motion | - | - | 8 | - |  |
+| `dejudder_source_warp_filter` | vprenderer | VP-V > Proposed retirement | - | - | catmull | - | retire B |
+| `dejudder_taper_sad` | vprenderer | VP-V > Proposed retirement | - | - | 0 | - | retire B |
+| `dejudder_verify` | vprenderer | VP-V > Motion | - | - | Off | - | retire D |
+| `dejudder_verify_share` | vprenderer | VP-V > Motion | - | - | 0.2 | - | retire D |
+| `dejudder_warp_stage` | vprenderer | VP-V > Proposed retirement | - | - | rendered | - | retire B |
+| `efficiency_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | - | retire A |
+| `general_rate_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | - | retire A |
+| `intent_motion_min` | vprenderer | VP-V > Motion | - | - | 0.5 | - |  |
+| `intent_motion_min_shot_s` | vprenderer | VP-V > Motion | - | - | 2 | - |  |
+| `intent_motion_policy` | vprenderer | VP-V > Motion | - | - | display | - |  |
+| `motion_history_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | - | retire A |
+| `source_resolution_crossfade_s` | vprenderer | VP-V > Scaling | - | - | 1.5 | - |  |
+| `source_resolution_cut_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | - | retire A |
+| `source_resolution_evidence_seconds` | vprenderer | VP-V > Scaling | - | - | 10 | - |  |
+| `source_resolution_evidence_shots` | vprenderer | VP-V > Scaling | - | - | 3 | - |  |
+| `source_resolution_release_fade_s` | vprenderer | VP-V > Scaling | - | - | 0.25 | - |  |
+| `timing_continuity_fixes` | vprenderer | VP-V > Proposed retirement | - | - | On | - | retire A |
 
 ### Upstream: Zoom (6)
 

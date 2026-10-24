@@ -3,10 +3,12 @@
 
 #include "VpvSection.h"
 
+#include "VpvOrganisation.h"
 #include "VpvTierTable.generated.h"
 
 #include <VP-V/core/DelayBudgetLadder.h>
 
+#include <QAbstractItemModel>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QFrame>
@@ -14,6 +16,8 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QPointer>
 #include <QRegularExpression>
 #include <QScrollArea>
 #include <QPushButton>
@@ -21,10 +25,13 @@
 #include <QSlider>
 #include <QTabWidget>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <algorithm>
 #include <memory>
+#include <set>
 #include <vector>
 
 namespace Vpv
@@ -63,16 +70,26 @@ namespace Vpv
 			return root->findChildren<QWidget*>(name);
 		}
 
-		// The Config page a widget is on (createPage's viewport is named "<title> settings").
+		// The Config page a widget is on (createPage's viewport is named "<title> settings"); a
+		// control moved onto the VP-V page (organisation pass) says which unit tab and card.
 		QString PageOf(const QWidget* w)
 		{
+			QString card, tab;
 			for (const QWidget* p = w ? w->parentWidget() : nullptr; p; p = p->parentWidget())
+			{
+				if (card.isEmpty() && !p->property("vpvCardTitle").toString().isEmpty())
+					card = p->property("vpvCardTitle").toString();
+				if (tab.isEmpty() && !p->property("vpvTabTitle").toString().isEmpty())
+					tab = p->property("vpvTabTitle").toString();
+				if (p->objectName() == ObjectName(QStringLiteral("section")))
+					return QStringLiteral("VP-V > ") + tab + (card.isEmpty() ? QString() : QStringLiteral(" > ") + card);
 				if (p->objectName() == QStringLiteral("pageViewport") && qobject_cast<const QScrollArea*>(p))
 				{
 					QString page = p->accessibleName();
 					if (page.endsWith(QStringLiteral(" settings"))) page.chop(9);
 					return page;
 				}
+			}
 			return QString();
 		}
 
@@ -91,11 +108,180 @@ namespace Vpv
 
 		// A unit tab's page: a themed card (VpTheme styles QFrame[card="true"]), so the tab's text is
 		// on Config's dark surface instead of the platform style's white tab pane.
-		QWidget* NewTabPage()
+		QWidget* NewTabPage(const QString& tabTitle)
 		{
 			auto* frame = new QFrame;
 			frame->setProperty("card", true);
+			frame->setProperty("vpvTabTitle", tabTitle);
 			return frame;
+		}
+
+		// ---- Organisation pass (VpvOrganisation.h): cards, and moving upstream rows/sections ----
+
+		// One labelled card inside a unit tab. A collapsible card (the "Advanced" ones) opens from its
+		// header, styled like the Rendering page's collapsible sections.
+		struct CardBox
+		{
+			QFrame* frame = nullptr;
+			QWidget* body = nullptr;
+			QVBoxLayout* layout = nullptr;
+			QFormLayout* form = nullptr;   // the current form for toggles and rows (a section or note ends it)
+			QToolButton* toggle = nullptr;
+
+			QFormLayout* Form()
+			{
+				if (!form)
+				{
+					auto* host = new QWidget;
+					form = new QFormLayout(host);
+					form->setContentsMargins(0, 0, 0, 0);
+					form->setHorizontalSpacing(18);
+					form->setVerticalSpacing(8);
+					layout->addWidget(host);
+				}
+				return form;
+			}
+			void Add(QWidget* w) { form = nullptr; layout->addWidget(w); }
+			bool hasHelp = false;
+			bool Empty() const { return layout->count() <= (hasHelp ? 1 : 0); }   // only the help line (or nothing)
+		};
+
+		CardBox MakeCard(const QString& objectName, const QString& title, const QString& help, bool collapsible)
+		{
+			CardBox c;
+			c.frame = new QFrame;
+			c.frame->setObjectName(objectName);
+			c.frame->setProperty("vpvCard", true);
+			c.frame->setStyleSheet(QStringLiteral(
+				"QFrame[vpvCard=\"true\"] { background: #0c1620; border: 1px solid #22384c; border-radius: 6px; }"));
+			auto* outer = new QVBoxLayout(c.frame);
+			outer->setContentsMargins(10, 8, 10, 10);
+			outer->setSpacing(6);
+			if (collapsible)
+			{
+				c.toggle = new QToolButton;
+				c.toggle->setObjectName(objectName + QStringLiteral(".toggle"));
+				c.toggle->setText(title);
+				c.toggle->setProperty("profileSection", true);
+				c.toggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+				c.toggle->setArrowType(Qt::RightArrow);
+				c.toggle->setCheckable(true);
+				c.toggle->setChecked(false);
+				c.toggle->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+				c.toggle->setAccessibleDescription(QStringLiteral("Expand or collapse %1.").arg(title));
+				outer->addWidget(c.toggle);
+			}
+			else
+			{
+				auto* heading = new QLabel(title);
+				heading->setObjectName(objectName + QStringLiteral(".title"));
+				heading->setStyleSheet(QStringLiteral("font-size: 14px; font-weight: 650; color: #f0f6fb;"));
+				outer->addWidget(heading);
+			}
+			c.body = new QWidget(c.frame);
+			c.body->setObjectName(objectName + QStringLiteral(".body"));
+			c.body->setProperty("vpvCardTitle", title);
+			c.layout = new QVBoxLayout(c.body);
+			c.layout->setContentsMargins(collapsible ? 8 : 0, 0, 0, 0);
+			c.layout->setSpacing(6);
+			if (!help.isEmpty())
+			{
+				auto* line = Help(help);
+				line->setProperty("help", true);
+				c.layout->addWidget(line);
+				c.hasHelp = true;
+			}
+			outer->addWidget(c.body);
+			if (c.toggle)
+			{
+				c.body->setVisible(false);
+				QToolButton* toggle = c.toggle;
+				QWidget* body = c.body;
+				QObject::connect(toggle, &QToolButton::toggled, toggle, [toggle, body](bool open)
+				{
+					body->setVisible(open);
+					toggle->setArrowType(open ? Qt::DownArrow : Qt::RightArrow);
+				});
+			}
+			return c;
+		}
+
+		// A Rendering-page section ("rendererSection.<id>": its toggle; the section is its parent).
+		QWidget* UpstreamSection(QWidget* root, const QString& id)
+		{
+			if (!root) return nullptr;
+			auto* toggle = root->findChild<QToolButton*>(QStringLiteral("rendererSection.") + id);
+			return toggle ? toggle->parentWidget() : nullptr;
+		}
+
+		// The form rows of a renderer key: every control named config.vprenderer.<key>[.<part>] is
+		// walked up to the widget that is a field of a QFormLayout. Sorted in form order.
+		QList<QWidget*> RowFields(QWidget* root, const QString& key)
+		{
+			QList<QWidget*> fields;
+			if (!root) return fields;
+			const QRegularExpression name(QStringLiteral("^config\\.vprenderer\\.%1(\\.[^.]+)?$").arg(QRegularExpression::escape(key)));
+			for (QWidget* w : root->findChildren<QWidget*>(name))
+				for (QWidget* f = w; f && f->parentWidget() && f != root; f = f->parentWidget())
+					if (auto* form = qobject_cast<QFormLayout*>(f->parentWidget()->layout()))
+					{
+						int row = -1;
+						QFormLayout::ItemRole role = QFormLayout::LabelRole;
+						form->getWidgetPosition(f, &row, &role);
+						if (row < 0) continue;
+						if (role != QFormLayout::LabelRole && !fields.contains(f)) fields << f;
+						break;
+					}
+			std::stable_sort(fields.begin(), fields.end(), [](QWidget* a, QWidget* b)
+			{
+				auto* fa = qobject_cast<QFormLayout*>(a->parentWidget()->layout());
+				auto* fb = qobject_cast<QFormLayout*>(b->parentWidget()->layout());
+				if (fa != fb) return false;
+				int ra = -1, rb = -1;
+				QFormLayout::ItemRole role;
+				fa->getWidgetPosition(a, &ra, &role);
+				fb->getWidgetPosition(b, &rb, &role);
+				return ra < rb;
+			});
+			return fields;
+		}
+
+		// Moves one form row (label and field) to another form, keeping its visibility; the controls,
+		// names and behaviour are unchanged (as Config's own moveRow, ConfigEditorWindow.cpp).
+		bool MoveRow(QWidget* field, QFormLayout* to)
+		{
+			if (!field || !to || !field->parentWidget()) return false;
+			auto* from = qobject_cast<QFormLayout*>(field->parentWidget()->layout());
+			if (!from || from == to) return false;
+			int row = -1;
+			QFormLayout::ItemRole role;
+			from->getWidgetPosition(field, &row, &role);
+			if (row < 0) return false;
+			const bool visible = from->isRowVisible(row);
+			const QFormLayout::TakeRowResult taken = from->takeRow(row);
+			QWidget* label = taken.labelItem ? taken.labelItem->widget() : nullptr;
+			delete taken.labelItem;
+			delete taken.fieldItem;
+			if (label) to->addRow(label, field); else to->addRow(field);
+			to->setRowVisible(field, visible);
+			return true;
+		}
+
+		// Moves a whole upstream section into a card. A card that is the section's only home (not an
+		// Advanced card) shows it open without its own collapse button.
+		bool MoveSection(QWidget* root, const QString& id, CardBox& card, bool flatten)
+		{
+			QWidget* section = UpstreamSection(root, id);
+			if (!section) return false;
+			if (QLayout* old = section->parentWidget() ? section->parentWidget()->layout() : nullptr) old->removeWidget(section);
+			card.Add(section);
+			if (flatten)
+				if (auto* toggle = section->findChild<QToolButton*>(QStringLiteral("rendererSection.") + id, Qt::FindDirectChildrenOnly))
+				{
+					toggle->setChecked(true);
+					toggle->setVisible(false);
+				}
+			return true;
 		}
 
 		// Shared state of one VP-V page.
@@ -106,6 +292,10 @@ namespace Vpv
 			QString profile = kDefaultProfile;
 			std::vector<std::function<void()>> refreshers;
 			bool refreshing = false;
+			QWidget* root = nullptr;
+			QPointer<QListWidget> upstreamList;          // the Rendering page's profile list (the picker follows it)
+			std::vector<QPointer<QWidget>> own;          // VP-V's own controls: disabled in the Original pathway
+			QStringList missing;                         // organisation items the editor does not have (tests)
 
 			// The profile's value, else the default profile's (renderer profiles inherit).
 			std::string Get(const std::string& key) const
@@ -121,11 +311,20 @@ namespace Vpv
 				return host.value ? host.value(profile, QString::fromStdString(key)).trimmed().toStdString() : std::string();
 			}
 			Vpv::Getter MakeGetter() const { return [this](const std::string& key) { return Get(key); }; }
+			// The upstream Rendering rows (some now on this page) show the document's values again after
+			// VP-V wrote keys: Config reloads a profile's fields when its list's current item changes.
+			void ReloadUpstream()
+			{
+				if (!upstreamList) return;
+				if (QListWidgetItem* item = upstreamList->currentItem())
+					emit upstreamList->currentItemChanged(item, item);
+			}
 			void Write(const std::vector<std::pair<std::string, std::string>>& writes)
 			{
 				if (!host.setValue) return;
 				for (const auto& w : writes)
 					host.setValue(profile, QString::fromStdString(w.first), QString::fromStdString(w.second));
+				if (!writes.empty()) ReloadUpstream();
 			}
 			void RefreshAll()
 			{
@@ -237,15 +436,109 @@ namespace Vpv
 			return text;
 		}
 
+		// A VP-V toggle: a choice with "Not set (default: ...)" first; it writes the key in the profile.
+		void AddToggleRow(const std::shared_ptr<State>& state, const QString& unitId, const Toggle& toggle, QFormLayout* form)
+		{
+			const Table& table = TierTable();
+			auto* combo = new QComboBox;
+			const QString key = Q(toggle.key);
+			combo->setObjectName(ObjectName(unitId + QLatin1Char('.') + key));
+			const Retirement* retiring = table.FindRetirement(toggle.key, "vprenderer");
+			const QString label = retiring ? QStringLiteral("%1 (%2)").arg(Q(toggle.label), RetirementCaption(*retiring)) : Q(toggle.label);
+			combo->setAccessibleName(label);
+			combo->addItem(QStringLiteral("Not set (default: %1)").arg(Q(table.Default(toggle.key))), QString());
+			for (const char* v : toggle.values) combo->addItem(Q(v), Q(v));
+			const SlotInfo* slot = table.Slot(toggle.slot);
+			combo->setToolTip(QStringLiteral("Key %1 (renderer profile). Slot: %2. See docs/settings/VP-settings-reference.md.")
+				.arg(key, slot ? Q(slot->name) : Q(toggle.slot)) +
+				(retiring ? QStringLiteral("\n\n") + RetirementTip(table, *retiring) : QString()));
+			form->addRow(label, combo);
+			state->own.push_back(combo);
+			QObject::connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), combo, [state, combo, key](int index)
+			{
+				if (state->refreshing || index < 0 || !state->host.setValue) return;
+				state->host.setValue(state->profile, key, combo->itemData(index).toString());
+				state->ReloadUpstream();
+				state->RefreshAll();
+			});
+			const std::string k = toggle.key;
+			state->refreshers.push_back([state, combo, k]()
+			{
+				const QString own = QString::fromStdString(state->Own(k));
+				int index = 0;
+				for (int i = 1; i < combo->count(); ++i)
+					if (SameValue(combo->itemData(i).toString().toStdString(), own.toStdString())) index = i;
+				const QSignalBlocker blocker(combo);
+				combo->setCurrentIndex(own.isEmpty() ? 0 : index);
+			});
+		}
+
+		const Toggle* FindToggle(const Unit& unit, const char* key)
+		{
+			for (const Toggle& t : unit.toggles)
+				if (std::string(t.key) == key) return &t;
+			return nullptr;
+		}
+
+		// Fills one card from the organisation table: toggles of `unit` (null on the retirement tab),
+		// upstream rows and sections moved here, notes.
+		void FillCard(const std::shared_ptr<State>& state, const Unit* unit, const QString& unitId, const Card& spec,
+			CardBox& card, std::set<std::string>& placedToggles)
+		{
+			const Table& table = TierTable();
+			int sections = 0;
+			for (const CardItem& item : spec.items) sections += item.kind == ItemKind::Section ? 1 : 0;
+			for (const CardItem& item : spec.items)
+			{
+				const QString id = Q(item.id);
+				switch (item.kind)
+				{
+				case ItemKind::Toggle:
+				{
+					const Toggle* t = unit ? FindToggle(*unit, item.id) : nullptr;
+					if (!t) { state->missing << QStringLiteral("toggle %1 (%2)").arg(id, unitId); break; }
+					placedToggles.insert(t->key);
+					// Owner: retirement candidates only on the Proposed retirement tab.
+					if (table.FindRetirement(t->key, "vprenderer")) break;
+					AddToggleRow(state, unitId, *t, card.Form());
+					break;
+				}
+				case ItemKind::Row:
+				{
+					// On the Rendering page, or in a section an earlier card already moved here.
+					QList<QWidget*> fields = RowFields(state->host.upstreamRoot, id);
+					if (fields.isEmpty()) fields = RowFields(state->root, id);
+					bool moved = false;
+					for (QWidget* f : fields) moved = MoveRow(f, card.Form()) || moved;
+					if (!moved) state->missing << QStringLiteral("row %1").arg(id);
+					break;
+				}
+				case ItemKind::Section:
+					if (!MoveSection(state->host.upstreamRoot, id, card, !spec.collapsed && sections == 1))
+						state->missing << QStringLiteral("section %1").arg(id);
+					break;
+				case ItemKind::Note:
+				{
+					auto* note = Help(id);
+					note->setProperty("help", true);
+					card.Add(note);
+					break;
+				}
+				}
+			}
+		}
+
 		QWidget* MakeUnitPage(const std::shared_ptr<State>& state, const Unit& unit)
 		{
 			const Table& table = TierTable();
 			const QString unitId = Q(unit.id);
-			QWidget* page = NewTabPage();
+			QWidget* page = NewTabPage(Q(unit.name));
 			page->setObjectName(ObjectName(unitId));
 			auto* layout = new QVBoxLayout(page);
+			layout->setSpacing(10);
 			layout->addWidget(Help(Q(unit.summary)));
 
+			// 1. The unit's tier slider.
 			if (unit.Tiered())
 			{
 				QStringList positions;
@@ -254,6 +547,7 @@ namespace Vpv
 					QStringLiteral("The %1 tier: each step sets the settings listed in its description. A changed setting "
 						"shows Custom; Reset to tier puts it back.").arg(Q(unit.name)));
 				layout->addWidget(t.box);
+				state->own.push_back(t.box);
 				QStringList notes;
 				for (const PlannedTier& pt : unit.plannedTiers)
 					notes << QStringLiteral("%1: not yet implemented (%2).").arg(Q(pt.tier), Q(pt.note));
@@ -307,67 +601,50 @@ namespace Vpv
 				layout->addWidget(reason);
 			}
 
+			// 2. The unit's cards (VpvOrganisation.h), Advanced ones last as listed.
+			std::set<std::string> placed;
+			for (const Card& spec : Organisation())
+			{
+				if (unitId != Q(spec.unit)) continue;
+				CardBox card = MakeCard(ObjectName(unitId + QStringLiteral(".card.") + Q(spec.id)), Q(spec.title), Q(spec.help), spec.collapsed);
+				FillCard(state, &unit, unitId, spec, card, placed);
+				layout->addWidget(card.frame);
+			}
+			// A toggle the table does not place (nothing is lost) - unless it is a retirement candidate.
+			{
+				CardBox other = MakeCard(ObjectName(unitId + QStringLiteral(".card.other")), QStringLiteral("Other settings"), QString(), false);
+				for (const Toggle& t : unit.toggles)
+					if (!placed.count(t.key) && !table.FindRetirement(t.key, "vprenderer"))
+						AddToggleRow(state, unitId, t, other.Form());
+				if (other.Empty()) delete other.frame; else layout->addWidget(other.frame);
+			}
 			if (unit.id == std::string("input"))
 			{
+				CardBox delayCard = MakeCard(ObjectName(QStringLiteral("input.card.delay")), QStringLiteral("Total delay"), QString(), false);
 				auto* delay = Help(QString());
 				delay->setObjectName(ObjectName(QStringLiteral("input.delay")));
 				delay->setTextFormat(Qt::RichText);
-				layout->addWidget(delay);
+				delayCard.Add(delay);
+				layout->addWidget(delayCard.frame);
 				state->refreshers.push_back([state, delay]() { delay->setText(DelaySummary(state->host, TierTable())); });
 			}
 
-			if (!unit.toggles.empty() || !unit.planned.empty())
+			// 3. Planned settings, where the rest is, and the unit's stages.
+			if (!unit.planned.empty())
 			{
-				auto* heading = Bold(ObjectName(unitId + QStringLiteral(".settings")));
-				heading->setText(QStringLiteral("Settings in this unit"));
-				layout->addWidget(heading);
-				auto* formHost = new QWidget;
-				auto* form = new QFormLayout(formHost);
-				form->setContentsMargins(0, 0, 0, 0);
-				for (const Toggle& toggle : unit.toggles)
+				CardBox planned = MakeCard(ObjectName(unitId + QStringLiteral(".card.planned")), QStringLiteral("Planned (not yet implemented)"),
+					QStringLiteral("Reserved in the pipeline; their components are not built yet."), true);
+				for (const Planned& p : unit.planned)
 				{
-					auto* combo = new QComboBox;
-					const QString key = Q(toggle.key);
-					combo->setObjectName(ObjectName(unitId + QLatin1Char('.') + key));
-					const Retirement* retiring = table.FindRetirement(toggle.key, "vprenderer");
-					const QString label = retiring ? QStringLiteral("%1 (%2)").arg(Q(toggle.label), RetirementCaption(*retiring)) : Q(toggle.label);
-					combo->setAccessibleName(label);
-					combo->addItem(QStringLiteral("Not set (default: %1)").arg(Q(table.Default(toggle.key))), QString());
-					for (const char* v : toggle.values) combo->addItem(Q(v), Q(v));
-					const SlotInfo* slot = table.Slot(toggle.slot);
-					combo->setToolTip(QStringLiteral("Key %1 (renderer profile). Slot: %2. See docs/settings/VP-settings-reference.md.")
-						.arg(key, slot ? Q(slot->name) : Q(toggle.slot)) +
-						(retiring ? QStringLiteral("\n\n") + RetirementTip(table, *retiring) : QString()));
-					form->addRow(label, combo);
-					QObject::connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), combo, [state, combo, key](int index)
-					{
-						if (state->refreshing || index < 0 || !state->host.setValue) return;
-						state->host.setValue(state->profile, key, combo->itemData(index).toString());
-						state->RefreshAll();
-					});
-					const std::string k = toggle.key;
-					state->refreshers.push_back([state, combo, k]()
-					{
-						const QString own = QString::fromStdString(state->Own(k));
-						int index = 0;
-						for (int i = 1; i < combo->count(); ++i)
-							if (SameValue(combo->itemData(i).toString().toStdString(), own.toStdString())) index = i;
-						const QSignalBlocker blocker(combo);
-						combo->setCurrentIndex(own.isEmpty() ? 0 : index);
-					});
-				}
-				for (const Planned& planned : unit.planned)
-				{
-					auto* box = new QCheckBox(Q(planned.label) + QStringLiteral(" - not yet implemented"));
-					box->setObjectName(ObjectName(unitId + QStringLiteral(".planned.") + Q(planned.key)));
+					auto* box = new QCheckBox(Q(p.label) + QStringLiteral(" - not yet implemented"));
+					box->setObjectName(ObjectName(unitId + QStringLiteral(".planned.") + Q(p.key)));
 					box->setEnabled(false);
 					box->setToolTip(QStringLiteral("Planned key %1 (slot %2): reserved in the pipeline; its component is not built yet.")
-						.arg(Q(planned.key), Q(planned.slot)));
-					form->addRow(QString(), box);
+						.arg(Q(p.key), Q(p.slot)));
+					planned.Form()->addRow(QString(), box);
 				}
-				layout->addWidget(formHost);
+				layout->addWidget(planned.frame);
 			}
-
 			if (unit.more && *unit.more)
 			{
 				auto* more = Help(QStringLiteral("<b>More settings of this unit</b> (on the other pages): ") + Q(unit.more).toHtmlEscaped());
@@ -375,16 +652,18 @@ namespace Vpv
 				more->setObjectName(ObjectName(unitId + QStringLiteral(".more")));
 				layout->addWidget(more);
 			}
-
+			CardBox stages = MakeCard(ObjectName(unitId + QStringLiteral(".card.stages")), QStringLiteral("Stages in this unit (pipeline order)"),
+				QString(), true);
 			auto* slotsHeading = Bold(ObjectName(unitId + QStringLiteral(".slots_heading")));
-			slotsHeading->setText(QStringLiteral("Stages in this unit (pipeline order)"));
-			layout->addWidget(slotsHeading);
+			slotsHeading->setText(QStringLiteral("Each stage and what it falls back to"));
+			stages.Add(slotsHeading);
 			QStringList lines;
 			for (const char* id : unit.slotIds) lines << SlotLine(table, id);
 			auto* slotLabel = Help(lines.join(QStringLiteral("<br>")));
 			slotLabel->setTextFormat(Qt::RichText);
 			slotLabel->setObjectName(ObjectName(unitId + QStringLiteral(".slots")));
-			layout->addWidget(slotLabel);
+			stages.Add(slotLabel);
+			layout->addWidget(stages.frame);
 			layout->addStretch();
 			return page;
 		}
@@ -396,8 +675,9 @@ namespace Vpv
 		QWidget* MakeExpertPage(const std::shared_ptr<State>& state)
 		{
 			const QString section = Q(TierTable().section);
-			QWidget* page = NewTabPage();
+			QWidget* page = NewTabPage(QStringLiteral("Pipeline (expert)"));
 			page->setObjectName(ObjectName(QStringLiteral("expert")));
+			state->own.push_back(page);
 			auto* layout = new QVBoxLayout(page);
 			layout->addWidget(Help(QStringLiteral("For testing and measurement. Normal viewing never needs these: the tiers "
 				"and the Original pathway switch cover it.")));
@@ -489,16 +769,35 @@ namespace Vpv
 	{
 		// The guide's section-12 candidates (coverage audit 2026-10-24): visible, never removed.
 		// Each line says where its control is and, for renderer-profile and [general] keys, the value
-		// in use; the same text is appended to the control's own tooltip (MarkRetirements).
+		// in use; the same text is appended to the control's own tooltip (MarkRetirements). The
+		// renderer-profile candidates' controls themselves live here (organisation pass: candidates
+		// only on this tab); [general], [led_drive] and [queue] ones stay on their own pages.
 		QWidget* MakeRetirementPage(const std::shared_ptr<State>& state)
 		{
 			const Table& table = TierTable();
-			QWidget* page = NewTabPage();
+			QWidget* page = NewTabPage(QStringLiteral("Proposed retirement"));
 			page->setObjectName(ObjectName(QStringLiteral("retirement")));
 			auto* layout = new QVBoxLayout(page);
 			auto* intro = Help(Q(table.retirementNote));
 			intro->setObjectName(ObjectName(QStringLiteral("retirement.note")));
 			layout->addWidget(intro);
+
+			// VP-V toggles that are candidates (their unit tabs leave them out).
+			CardBox toggles = MakeCard(ObjectName(QStringLiteral("retirement.card.toggles")),
+				QStringLiteral("VP-V switches proposed for retirement"), QString(), false);
+			for (const Unit& u : table.units)
+				for (const Toggle& t : u.toggles)
+					if (table.FindRetirement(t.key, "vprenderer")) AddToggleRow(state, Q(u.id), t, toggles.Form());
+			if (toggles.Empty()) delete toggles.frame; else layout->addWidget(toggles.frame);
+			std::set<std::string> unused;
+			for (const Card& spec : Organisation())
+			{
+				if (std::string(spec.unit) != "retirement") continue;
+				CardBox card = MakeCard(ObjectName(QStringLiteral("retirement.card.") + Q(spec.id)), Q(spec.title), Q(spec.help), spec.collapsed);
+				FillCard(state, nullptr, QStringLiteral("retirement"), spec, card, unused);
+				layout->addWidget(card.frame);
+			}
+
 			auto* list = Help(QString());
 			list->setObjectName(ObjectName(QStringLiteral("retirement.list")));
 			list->setTextFormat(Qt::RichText);
@@ -514,9 +813,11 @@ namespace Vpv
 					for (const Retirement& r : t.retirements)
 					{
 						if (std::string(r.group) != g.key) continue;
-						const QList<QWidget*> controls = UpstreamControls(state->host.upstreamRoot, Q(r.section), Q(r.key));
-						const QString where = controls.isEmpty() ? QStringLiteral("no control found") :
-							QStringLiteral("%1 page").arg(PageOf(controls.front()));
+						QList<QWidget*> controls = UpstreamControls(state->host.upstreamRoot, Q(r.section), Q(r.key));
+						if (controls.isEmpty() && state->root)
+							controls = UpstreamControls(state->root, Q(r.section), Q(r.key));
+						QString where = controls.isEmpty() ? QStringLiteral("no control found") : PageOf(controls.front());
+						if (!controls.isEmpty() && !where.startsWith(QStringLiteral("VP-V"))) where += QStringLiteral(" page");
 						QString value;
 						if (std::string(r.section) == "vprenderer")
 						{
@@ -543,18 +844,154 @@ namespace Vpv
 			});
 			return page;
 		}
+
+		// Rows of VP-V-managed keys that sit on the VP-V page (inside moved sections) are hidden
+		// while the VP-V pathway is on: the VP-V tier or toggle above them is the live control. The
+		// Original pathway shows them again (only the rows hidden here).
+		void ApplyManagedRows(const std::shared_ptr<State>& state, bool vpvOn)
+		{
+			if (!state->root) return;
+			for (const std::string& key : ManagedKeys(TierTable()))
+				for (QWidget* field : RowFields(state->root, QString::fromStdString(key)))
+				{
+					auto* form = qobject_cast<QFormLayout*>(field->parentWidget()->layout());
+					int row = -1;
+					QFormLayout::ItemRole role;
+					form->getWidgetPosition(field, &row, &role);
+					if (row < 0) continue;
+					if (vpvOn && form->isRowVisible(row) && !field->property("vpvHidRow").toBool())
+					{
+						field->setProperty("vpvHidRow", true);
+						form->setRowVisible(row, false);
+					}
+					else if (!vpvOn && field->property("vpvHidRow").toBool())
+					{
+						field->setProperty("vpvHidRow", false);
+						form->setRowVisible(row, true);
+					}
+				}
+		}
+
+		// The Rendering page after the moves: Bill's sections stay as his themed cards; every other
+		// section left there goes into one collapsed "All raw settings (expert)" group at the bottom
+		// (the safety net), after a line saying where VP's settings went.
+		void OrganiseRendering(const Host& host)
+		{
+			QWidget* tone = UpstreamSection(host.upstreamRoot, QStringLiteral("toneMapping"));
+			QWidget* fields = tone ? tone->parentWidget() : nullptr;
+			auto* fieldsLayout = fields ? qobject_cast<QBoxLayout*>(fields->layout()) : nullptr;
+			if (!fieldsLayout || fields->findChild<QToolButton*>(QStringLiteral("rendererSection.allRaw"))) return;
+			std::set<QString> bill;
+			for (const char* id : UpstreamRenderingSections()) bill.insert(Q(id));
+			QList<QWidget*> rest;
+			for (int i = 0; i < fieldsLayout->count(); ++i)
+			{
+				QWidget* w = fieldsLayout->itemAt(i)->widget();
+				if (!w) continue;
+				for (QToolButton* t : w->findChildren<QToolButton*>(QRegularExpression(QStringLiteral("^rendererSection\\.[A-Za-z0-9]+$")),
+					Qt::FindDirectChildrenOnly))
+					if (!bill.count(t->objectName().mid(16))) rest << w;
+			}
+			auto* pointer = Help(QStringLiteral("<b>VP's own settings</b> (motion and de-judder, deband and texture, re-base and "
+				"grain-aware scaling, SDR tone shape, room light, temporal dither) are on the <b>VP-V</b> page, one tab per "
+				"unit. Bill's settings stay here."));
+			pointer->setTextFormat(Qt::RichText);
+			pointer->setObjectName(ObjectName(QStringLiteral("rendering.pointer")));
+			pointer->setProperty("help", true);
+			fieldsLayout->addWidget(pointer);
+
+			auto* group = new QWidget(fields);
+			group->setObjectName(QStringLiteral("rendererSection.allRawGroup"));
+			auto* groupLayout = new QVBoxLayout(group);
+			groupLayout->setContentsMargins(0, 0, 0, 0);
+			groupLayout->setSpacing(5);
+			auto* toggle = new QToolButton;
+			toggle->setObjectName(QStringLiteral("rendererSection.allRaw"));
+			toggle->setText(QStringLiteral("All raw settings (expert)"));
+			toggle->setProperty("profileSection", true);
+			toggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+			toggle->setArrowType(Qt::RightArrow);
+			toggle->setCheckable(true);
+			toggle->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+			groupLayout->addWidget(toggle);
+			auto* content = new QWidget(group);
+			content->setObjectName(QStringLiteral("rendererSection.allRaw.content"));
+			auto* contentLayout = new QVBoxLayout(content);
+			contentLayout->setContentsMargins(12, 4, 4, 8);
+			contentLayout->setSpacing(7);
+			auto* note = Help(QStringLiteral("The rest of this profile's settings, as they were: controls VP-V manages (greyed "
+				"\"Managed by VP-V\"; change them on the VP-V page), the switches it does not show elsewhere, and "
+				"diagnostics. Nothing here needs changing for normal viewing."));
+			note->setProperty("help", true);
+			contentLayout->addWidget(note);
+			for (QWidget* w : rest)
+			{
+				fieldsLayout->removeWidget(w);
+				contentLayout->addWidget(w);
+			}
+			groupLayout->addWidget(content);
+			fieldsLayout->addWidget(group);
+			content->setVisible(false);
+			QObject::connect(toggle, &QToolButton::toggled, toggle, [toggle, content](bool open)
+			{
+				content->setVisible(open);
+				toggle->setArrowType(open ? Qt::DownArrow : Qt::RightArrow);
+			});
+		}
+
+		// Video conversion / container colour space / HDR colour space / HDR luminance have a
+		// control on General and an override on each renderer's Input processing page (Bill's
+		// layered design, kept). A note names General as the one place to set them.
+		void NoteAbove(QWidget* root, const QString& controlName, const QString& objectName, const QString& text)
+		{
+			auto* control = root ? root->findChild<QWidget*>(controlName) : nullptr;
+			if (!control || root->findChild<QLabel*>(objectName)) return;
+			for (QWidget* f = control; f && f->parentWidget(); f = f->parentWidget())
+				if (auto* form = qobject_cast<QFormLayout*>(f->parentWidget()->layout()))
+				{
+					int row = -1;
+					QFormLayout::ItemRole role;
+					form->getWidgetPosition(f, &row, &role);
+					if (row < 0) continue;
+					auto* note = Help(text);
+					note->setObjectName(objectName);
+					note->setProperty("help", true);
+					form->insertRow(row, note);
+					return;
+				}
+		}
+
+		void NoteInputPolicy(const Host& host)
+		{
+			NoteAbove(host.upstreamRoot, QStringLiteral("config.general.video_conversion"), ObjectName(QStringLiteral("note.input_policy.general")),
+				QStringLiteral("Set these four once, here. The VP Renderer and DirectShow pages each have an override for them "
+					"(Input processing); they show \"Inherited\" while they follow this page, which is normal."));
+			for (const char* section : { "vprenderer.input_processing", "directshow" })
+				NoteAbove(host.upstreamRoot, QStringLiteral("config.%1.video_conversion").arg(Q(section)),
+					ObjectName(QStringLiteral("note.input_policy.") + Q(section)),
+					QStringLiteral("Overrides of General > Input processing, for this renderer only. Leave them on Inherited "
+						"unless this renderer must differ from General."));
+		}
+	}
+
+	namespace
+	{
+		void MarkRetirementsIn(QWidget* root)
+		{
+			const Table& table = TierTable();
+			for (const Retirement& r : table.retirements)
+				for (QWidget* w : UpstreamControls(root, Q(r.section), Q(r.key)))
+				{
+					if (w->property("vpvRetirementMarked").toBool()) continue;
+					w->setProperty("vpvRetirementMarked", true);
+					w->setToolTip((w->toolTip().isEmpty() ? QString() : w->toolTip() + QStringLiteral("\n\n")) + RetirementTip(table, r));
+				}
+		}
 	}
 
 	void MarkRetirements(const Host& host)
 	{
-		const Table& table = TierTable();
-		for (const Retirement& r : table.retirements)
-			for (QWidget* w : UpstreamControls(host.upstreamRoot, Q(r.section), Q(r.key)))
-			{
-				if (w->property("vpvRetirementMarked").toBool()) continue;
-				w->setProperty("vpvRetirementMarked", true);
-				w->setToolTip((w->toolTip().isEmpty() ? QString() : w->toolTip() + QStringLiteral("\n\n")) + RetirementTip(table, r));
-			}
+		MarkRetirementsIn(host.upstreamRoot);
 	}
 
 	bool PathwayIsVpv(const Host& host)
@@ -568,12 +1005,19 @@ namespace Vpv
 
 	void ApplyManagedState(const Host& host, bool vpvOn)
 	{
-		if (!host.upstreamRoot || !host.upstreamControlName) return;
+		ApplyManagedIn(host, host.upstreamRoot, vpvOn);
+	}
+
+	void ApplyManagedIn(const Host& host, QWidget* root, bool vpvOn)
+	{
+		if (!root || !host.upstreamControlName) return;
 		for (const std::string& key : ManagedKeys(TierTable()))
 		{
 			const QString name = host.upstreamControlName(QString::fromStdString(key));
 			if (name.isEmpty()) continue;
-			for (QWidget* w : host.upstreamRoot->findChildren<QWidget*>(name))
+			// The key's control itself (exact name). Its parts (".engine" buttons, ".check" boxes beside a
+			// hidden combo) stay as upstream built them: inside VP-V cards their rows are hidden instead.
+			for (QWidget* w : root->findChildren<QWidget*>(name))
 			{
 				if (w->objectName().startsWith(QStringLiteral("vpv."))) continue;
 				const bool managed = w->property("vpvManaged").toBool();
@@ -604,6 +1048,7 @@ namespace Vpv
 
 		auto* root = new QWidget;
 		root->setObjectName(ObjectName(QStringLiteral("section")));
+		state->root = root;
 		auto* layout = new QVBoxLayout(root);
 		layout->setContentsMargins(0, 0, 0, 0);
 
@@ -616,9 +1061,9 @@ namespace Vpv
 		pathway->addItem(QStringLiteral("Original pathway"), QStringLiteral("on"));
 		pathway->setToolTip(QStringLiteral(
 			"VP-V: the settings below own the units they list, and the matching controls on the other pages are greyed "
-			"(\"Managed by VP-V\"). Original: this page is disabled and the other pages behave exactly as upstream. "
-			"In the renderer, Original switches every VP addition off and runs the mixed stages in their upstream form "
-			"(ADR-0019). Stored as [vpv] pipeline_original_pathway."));
+			"(\"Managed by VP-V\"). Original: the tiers and VP-V switches are disabled and the other pages behave exactly "
+			"as upstream. In the renderer, Original switches every VP addition off and runs the mixed stages in their "
+			"upstream form (ADR-0019). Stored as [vpv] pipeline_original_pathway."));
 		pathwayRow->addRow(QStringLiteral("Pathway"), pathway);
 		layout->addLayout(pathwayRow);
 
@@ -628,21 +1073,46 @@ namespace Vpv
 		contentLayout->setContentsMargins(0, 0, 0, 0);
 		layout->addWidget(content);
 
+		// The renderer profile. It follows the Rendering page's profile list, whose selected profile
+		// the moved upstream rows edit (one current renderer profile on both pages).
 		auto* profileRow = new QFormLayout;
 		auto* profile = new QComboBox;
 		profile->setObjectName(ObjectName(QStringLiteral("profile")));
 		profile->setAccessibleName(QStringLiteral("Renderer profile"));
-		profile->setToolTip(QStringLiteral("The renderer profile the tiers below edit. A named profile inherits every "
-			"setting it does not set from the default profile; profile rules choose the profile (e.g. per frame rate)."));
-		QStringList profiles = host.profileSections ? host.profileSections(kDefaultProfile) : QStringList();
-		if (profiles.isEmpty()) profiles << kDefaultProfile;
-		state->defaultProfile = state->profile = profiles.front();
-		for (const QString& section : profiles)
+		profile->setToolTip(QStringLiteral("The renderer profile this page edits (the same one the Rendering page shows). "
+			"A named profile inherits every setting it does not set from the default profile; profile rules choose the "
+			"profile (e.g. per frame rate)."));
+		if (host.upstreamRoot && host.upstreamControlName)
+			state->upstreamList = host.upstreamRoot->findChild<QListWidget*>(host.upstreamControlName(QStringLiteral("profiles")));
+		auto fillPicker = [state, profile, host]()
 		{
-			const QString name = section.compare(kDefaultProfile, Qt::CaseInsensitive) == 0 ? QStringLiteral("(unnamed)") :
-				section.mid(kDefaultProfile.size() + 1);
-			profile->addItem(section == profiles.front() ? QStringLiteral("%1 (default profile)").arg(name) : name, section);
-		}
+			QStringList sections, names;
+			if (state->upstreamList)
+				for (int i = 0; i < state->upstreamList->count(); ++i)
+				{
+					sections << state->upstreamList->item(i)->data(Qt::UserRole).toString();
+					names << state->upstreamList->item(i)->data(Qt::UserRole + 1).toString();
+				}
+			if (sections.isEmpty())
+			{
+				sections = host.profileSections ? host.profileSections(kDefaultProfile) : QStringList();
+				if (sections.isEmpty()) sections << kDefaultProfile;
+				for (const QString& section : sections)
+					names << (section.compare(kDefaultProfile, Qt::CaseInsensitive) == 0 ? QStringLiteral("(unnamed)") :
+						section.mid(kDefaultProfile.size() + 1));
+			}
+			const QSignalBlocker blocker(profile);
+			profile->clear();
+			for (int i = 0; i < sections.size(); ++i)
+				profile->addItem(i == 0 ? QStringLiteral("%1 (default profile)").arg(names[i]) : names[i], sections[i]);
+			state->defaultProfile = sections.front();
+			if (state->upstreamList && state->upstreamList->currentItem())
+				state->profile = state->upstreamList->currentItem()->data(Qt::UserRole).toString();
+			int index = profile->findData(state->profile, Qt::UserRole, Qt::MatchFixedString);
+			if (index < 0) { index = 0; state->profile = sections.front(); }
+			profile->setCurrentIndex(index);
+		};
+		fillPicker();
 		profileRow->addRow(QStringLiteral("Profile"), profile);
 		contentLayout->addLayout(profileRow);
 
@@ -656,11 +1126,17 @@ namespace Vpv
 		global.reset->setText(QStringLiteral("Reset all units"));
 		global.defaults->setVisible(false);
 		contentLayout->addWidget(global.box);
+		state->own.push_back(global.box);
 		auto applyGlobal = [state](int g)
 		{
+			std::vector<std::pair<std::string, std::string>> writes;
 			for (const Unit& u : TierTable().units)
 				if (u.Tiered())
-					state->Write(ApplyTier(TierTable(), u, GlobalToUnit(TierTable(), u, g), state->MakeGetter()));
+				{
+					const auto unitWrites = ApplyTier(TierTable(), u, GlobalToUnit(TierTable(), u, g), state->MakeGetter());
+					writes.insert(writes.end(), unitWrites.begin(), unitWrites.end());
+				}
+			state->Write(writes);
 			state->RefreshAll();
 		};
 		QObject::connect(global.slider, &QSlider::valueChanged, global.slider, [state, applyGlobal](int g)
@@ -701,29 +1177,71 @@ namespace Vpv
 		mirror();
 		auto* timer = new QTimer(fallbacks);
 		timer->setInterval(1000);
-		QObject::connect(timer, &QTimer::timeout, fallbacks, mirror);
+		// Also re-reads the tiers while the page is shown: a moved upstream row edits the document
+		// directly, so a tier name may need to change to Custom (or back).
+		QObject::connect(timer, &QTimer::timeout, fallbacks, [mirror, state, root]()
+		{
+			mirror();
+			if (root->isVisible()) state->RefreshAll();
+		});
 		timer->start();
 
 		auto* tabs = new QTabWidget;
 		tabs->setObjectName(ObjectName(QStringLiteral("units")));
 		tabs->setStyleSheet(QStringLiteral("QTabWidget::pane { border: 0; background: transparent; }"));
+		contentLayout->addWidget(tabs);   // first, so a card can find what an earlier card moved under root
 		for (const Unit& u : table.units)
 			tabs->addTab(MakeUnitPage(state, u), Q(u.name));
 		tabs->addTab(MakeExpertPage(state), QStringLiteral("Pipeline (expert)"));
 		tabs->addTab(MakeRetirementPage(state), QStringLiteral("Proposed retirement"));
-		contentLayout->addWidget(tabs);
+		OrganiseRendering(host);
+		NoteInputPolicy(host);
+		root->setProperty("vpvMissing", state->missing.join(QStringLiteral("; ")));
 
 		QObject::connect(profile, qOverload<int>(&QComboBox::currentIndexChanged), profile, [state, profile](int index)
 		{
 			if (index < 0) return;
+			if (state->upstreamList && index < state->upstreamList->count())
+			{
+				state->upstreamList->setCurrentRow(index);   // loads the moved rows; the list's signal refreshes below
+				return;
+			}
 			state->profile = profile->itemData(index).toString();
 			state->RefreshAll();
 		});
-
-		auto applyPathway = [state, content](bool vpvOn)
+		if (QListWidget* list = state->upstreamList)
 		{
-			content->setEnabled(vpvOn);
+			QObject::connect(list, &QListWidget::currentRowChanged, profile, [state, profile](int row)
+			{
+				if (row < 0 || !state->upstreamList) return;
+				state->profile = state->upstreamList->item(row)->data(Qt::UserRole).toString();
+				const QSignalBlocker blocker(profile);
+				profile->setCurrentIndex((std::min)(row, profile->count() - 1));
+				state->RefreshAll();
+			});
+			// Profiles added, removed, renamed or moved on the Rendering page: rebuild the picker
+			// once the list has settled.
+			auto rebuild = [profile, fillPicker, state]()
+			{
+				QTimer::singleShot(0, profile, [fillPicker, state]() { fillPicker(); state->RefreshAll(); });
+			};
+			QAbstractItemModel* model = list->model();
+			QObject::connect(model, &QAbstractItemModel::rowsInserted, profile, rebuild);
+			QObject::connect(model, &QAbstractItemModel::rowsRemoved, profile, rebuild);
+			QObject::connect(model, &QAbstractItemModel::rowsMoved, profile, rebuild);
+			QObject::connect(model, &QAbstractItemModel::dataChanged, profile, rebuild);
+			QObject::connect(model, &QAbstractItemModel::modelReset, profile, rebuild);
+		}
+
+		auto applyPathway = [state](bool vpvOn)
+		{
+			// VP-V's own controls follow the pathway; the upstream rows and sections moved onto this
+			// page stay usable (in the Original pathway they behave exactly as on the Rendering page).
+			for (const QPointer<QWidget>& w : state->own)
+				if (w) w->setEnabled(vpvOn);
 			ApplyManagedState(state->host, vpvOn);
+			ApplyManagedIn(state->host, state->root, vpvOn);   // the managed rows moved onto this page
+			ApplyManagedRows(state, vpvOn);
 		};
 		{
 			const QSignalBlocker blocker(pathway);
@@ -741,6 +1259,7 @@ namespace Vpv
 		});
 		// Before the managed greying, so the Original pathway restores tooltips that keep the mark.
 		MarkRetirements(host);
+		MarkRetirementsIn(root);   // the candidates' controls moved onto this page
 		state->RefreshAll();
 		applyPathway(PathwayIsVpv(host));
 		return root;

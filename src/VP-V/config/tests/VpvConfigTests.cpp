@@ -5,6 +5,7 @@
 #include "ConfigEditorWindow.h"
 #include <VP-V/config/VpvSection.h>
 #include <VP-V/config/VpvTierTable.generated.h>
+#include <VP-V/config/VpvOrganisation.h>
 
 #include <ConfigFile.h>
 #include <VP-V/core/DelayBudgetLadder.h>
@@ -16,6 +17,8 @@
 #include <QFile>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QToolButton>
 #include <QSlider>
 #include <QTemporaryDir>
 #include <QWidget>
@@ -23,6 +26,7 @@
 #include <cmath>
 #include <functional>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 
@@ -268,7 +272,11 @@ namespace
 			pathway->setCurrentIndex(1);
 			QCoreApplication::processEvents();
 			require(upstream->isEnabled(), "Original pathway gives the upstream control back");
-			require(!control<QWidget>(window, Vpv::ObjectName("content"))->isEnabled(), "Original pathway disables VP-V");
+			require(!control<QWidget>(window, Vpv::ObjectName("global_tier"))->isEnabled() &&
+				!control<QWidget>(window, Vpv::ObjectName("repair.deband_vp_grain_guard"))->isEnabled(),
+				"Original pathway disables VP-V's tiers and switches");
+			require(control<QWidget>(window, Vpv::ObjectName("repair.card.texture.body"))->isEnabled(),
+				"Original pathway leaves the upstream rows hosted on the VP-V page usable");
 			save(window);
 		}
 		std::string v;
@@ -384,7 +392,8 @@ namespace
 			require(!window.findChild<QCheckBox*>(Vpv::ObjectName("output.planned.calibration_lut_stage")),
 				"the LUT stage is not listed as not yet implemented (the expert tab sets it)");
 			const QString list = control<QLabel>(window, Vpv::ObjectName("retirement.list"))->text();
-			require(list.contains(QStringLiteral("pulldown_fixes")) && list.contains(QStringLiteral("Rendering page")) &&
+			require(list.contains(QStringLiteral("pulldown_fixes")) && list.contains(QStringLiteral("VP-V &gt; Proposed retirement")) &&
+				list.contains(QStringLiteral("General page")) &&
 				list.contains(QStringLiteral("magewell_recover_faults")) && list.contains(QStringLiteral("dejudder_verify_share")),
 				"the Proposed retirement tab lists the candidates with their pages");
 			require(!list.contains(QStringLiteral("no control found")), "every retirement candidate's control is found");
@@ -406,6 +415,93 @@ namespace
 	}
 }
 
+namespace
+{
+	// Organisation pass (2026-10-24, VpvOrganisation.h, docs/settings/organisation.md): VP's own
+	// Rendering-page rows and sections live in labelled cards on the VP-V unit tabs (moved, never
+	// copied), the renderer-profile retirement candidates on the Proposed retirement tab, the rest
+	// of VP's in a collapsed "All raw settings (expert)" group under Bill's sections; the VP-V
+	// profile picker follows the Rendering page's list; a VP-V write reloads the moved rows.
+	void testOrganisation()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir,
+			"[vprenderer]\nquality: high\ntexture_restore_cap: 1.5\n"
+			"[vprenderer.Cinema]\ntexture_restore_cap: 2\n"
+			"[queue]\ntarget_latency_ms: 250\n");
+		ConfigEditorWindow window(path, 0, true);
+		auto* section = control<QWidget>(window, Vpv::ObjectName("section"));
+		const QString missing = section->property("vpvMissing").toString();
+		require(missing.isEmpty(), ("every organisation item was found: " + missing).toStdString().c_str());
+		for (const Vpv::Card& card : Vpv::Organisation())
+		{
+			auto* body = control<QWidget>(window, Vpv::ObjectName(QString::fromLatin1(card.unit) + QStringLiteral(".card.") +
+				QString::fromLatin1(card.id) + QStringLiteral(".body")));
+			for (const Vpv::CardItem& item : card.items)
+			{
+				QWidget* w = nullptr;
+				if (item.kind == Vpv::ItemKind::Row)
+					w = window.findChild<QWidget*>(QStringLiteral("config.vprenderer.") + QString::fromLatin1(item.id));
+				else if (item.kind == Vpv::ItemKind::Section)
+					w = window.findChild<QWidget*>(QStringLiteral("rendererSection.") + QString::fromLatin1(item.id));
+				else if (item.kind == Vpv::ItemKind::Toggle && !Vpv::TierTable().FindRetirement(item.id, "vprenderer"))
+					w = window.findChild<QWidget*>(Vpv::ObjectName(QString::fromLatin1(card.unit) + QLatin1Char('.') + QString::fromLatin1(item.id)));
+				else
+					continue;
+				require(w && body->isAncestorOf(w), (std::string("in its card: ") + card.unit + "/" + card.id + " " + item.id).c_str());
+			}
+		}
+		// Bill's sections stay on the Rendering page; the rest of VP's is in the raw group there.
+		auto* raw = control<QWidget>(window, QStringLiteral("rendererSection.allRaw.content"));
+		auto* tone = control<QWidget>(window, QStringLiteral("rendererSection.toneMapping"));
+		require(!section->isAncestorOf(tone) && !raw->isAncestorOf(tone), "Bill's tone mapping stays in place on the Rendering page");
+		require(raw->isAncestorOf(control<QWidget>(window, QStringLiteral("config.vprenderer.capture_path"))) &&
+			raw->isAncestorOf(control<QWidget>(window, QStringLiteral("config.vprenderer.intent_black"))),
+			"the managed duplicates and diagnostics are in All raw settings");
+		require(!control<QToolButton>(window, QStringLiteral("rendererSection.allRaw"))->isChecked(), "All raw settings starts collapsed");
+		// Retirement candidates (renderer profile): only on the Proposed retirement tab, except the
+		// ones a tier or toggle manages (hidden there) and the diagnostics pair kept with the estimator.
+		auto* retirement = control<QWidget>(window, Vpv::ObjectName("retirement"));
+		const std::set<std::string> exceptions = { "motion_ahead_frames", "dither_vectors", "detail_pulse_fast",
+			"dejudder_verify", "dejudder_verify_share" };
+		for (const Vpv::Retirement& r : Vpv::TierTable().retirements)
+		{
+			if (std::string(r.section) != "vprenderer" || exceptions.count(r.key)) continue;
+			auto* w = window.findChild<QWidget*>(QStringLiteral("config.vprenderer.") + QString::fromLatin1(r.key));
+			require(w && retirement->isAncestorOf(w), (std::string("a retirement candidate on the retirement tab: ") + r.key).c_str());
+		}
+		// A managed row on the VP-V page is hidden (the VP-V control above is live); Original shows it.
+		auto* debandRow = control<QWidget>(window, QStringLiteral("config.vprenderer.deband_vp"));
+		auto* rebaseCard = control<QWidget>(window, Vpv::ObjectName("scaling.card.rebase.body"));
+		require(rebaseCard->isAncestorOf(debandRow) && !debandRow->isVisibleTo(rebaseCard), "a managed row moved onto VP-V is hidden");
+		// The picker follows the Rendering list, and the moved rows edit the picked profile.
+		auto* list = control<QListWidget>(window, QStringLiteral("config.vprenderer.profiles"));
+		auto* picker = control<QComboBox>(window, Vpv::ObjectName("profile"));
+		require(picker->count() == list->count(), "the picker lists the Rendering profiles");
+		picker->setCurrentIndex(1);
+		QCoreApplication::processEvents();
+		require(list->currentRow() == 1, "the Rendering list follows the VP-V picker");
+		require(control<QLineEdit>(window, QStringLiteral("config.vprenderer.texture_restore_cap"))->text() == QStringLiteral("2"),
+			"a moved row shows the picked profile's value");
+		list->setCurrentRow(0);
+		QCoreApplication::processEvents();
+		require(picker->currentIndex() == 0, "the VP-V picker follows the Rendering list");
+		// A tier write reloads the upstream rows (no stale values next to the tier).
+		control<QSlider>(window, Vpv::ObjectName("repair.tier"))->setValue(3);
+		QCoreApplication::processEvents();
+		require(control<QComboBox>(window, QStringLiteral("config.vprenderer.deband_vp"))->currentData().toString() == QStringLiteral("on"),
+			"the Rendering control shows the value the tier wrote");
+		// The input-policy notes.
+		for (const char* note : { "note.input_policy.general", "note.input_policy.vprenderer.input_processing", "note.input_policy.directshow" })
+			control<QLabel>(window, Vpv::ObjectName(QString::fromLatin1(note)));
+		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);
+		QCoreApplication::processEvents();
+		require(debandRow->isVisibleTo(rebaseCard), "the Original pathway shows the managed row again");
+		save(window);
+		requireVpReads(path);
+	}
+}
+
 int RunVpvConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
 	const std::function<void(bool, const char*)>& requireHelper, const std::function<void(ConfigEditorWindow&)>& saveHelper)
 {
@@ -420,5 +516,6 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: unbuilt slots and toggles", testUnbuiltSlotsAndToggles);
 	failures += run("VP-V: expert pipeline keys validated and stored", testExpertPipelineKeys);
 	failures += run("VP-V: coverage audit toggles, pointers and retirement marks", testCoverageAuditAdditions);
+	failures += run("VP-V: organisation cards, raw group, picker and reload", testOrganisation);
 	return failures;
 }

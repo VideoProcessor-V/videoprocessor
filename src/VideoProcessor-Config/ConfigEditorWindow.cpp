@@ -11298,6 +11298,17 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 				controlName(sectionPrefix, QStringLiteral("target_mode_refresh"))))
 				refresh->trigger();
 		}
+		// VP-V organisation pass (2026-10-24, src/VP-V/config/VpvOrganisation.h): the VP-V page moves some
+		// of this profile's sections and rows onto its unit tabs (still bound to this profile), so a
+		// lookup that misses profileFields also searches the whole editor (the names are unique there).
+		const auto findProfileWidget = [this, profileFields](const QString& objectName) -> QWidget* {
+			QWidget* found = profileFields->findChild<QWidget*>(objectName);
+			return found ? found : findChild<QWidget*>(objectName);
+		};
+		const auto findProfileAction = [this, profileFields](const QString& objectName) -> QAction* {
+			QAction* found = profileFields->findChild<QAction*>(objectName);
+			return found ? found : findChild<QAction*>(objectName);
+		};
 		// The motion slider follows the loaded fields (loading blocks their own
 		// change signals).
 		static const QStringList kContentGateKeys = { QStringLiteral("intent_content"),
@@ -11308,7 +11319,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 			// Hunt 3 (CFG5): undo the previous profile's content-gate greying first,
 			// so the refreshes below set the state they own.
 			for (const QString& key : kContentGateKeys)
-				if (QWidget* widget = profileFields->findChild<QWidget*>(controlName(sectionPrefix, key)))
+				if (QWidget* widget = findProfileWidget(controlName(sectionPrefix, key)))
 					if (widget->property("contentGateIgnored").toBool())
 					{
 						widget->setProperty("contentGateIgnored", false);
@@ -11316,34 +11327,34 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 						widget->setEnabled(true);
 						widget->setToolTip(widget->property("contentGateTooltip").toString());
 					}
-			if (auto* refresh = profileFields->findChild<QAction*>(
+			if (auto* refresh = findProfileAction(
 				controlName(sectionPrefix, QStringLiteral("motion_preset_refresh"))))
 				refresh->trigger();
-			if (auto* refresh = profileFields->findChild<QAction*>(
+			if (auto* refresh = findProfileAction(
 				controlName(sectionPrefix, QStringLiteral("picture_preset_refresh"))))
 				refresh->trigger();
-			if (auto* refresh = profileFields->findChild<QAction*>(
+			if (auto* refresh = findProfileAction(
 				controlName(sectionPrefix, QStringLiteral("adaptive_faithful_refresh"))))
 				refresh->trigger();
-			if (auto* refresh = profileFields->findChild<QAction*>(
+			if (auto* refresh = findProfileAction(
 				controlName(sectionPrefix, QStringLiteral("optical_flow_refresh"))))
 				refresh->trigger();
-			if (auto* refresh = profileFields->findChild<QAction*>(
+			if (auto* refresh = findProfileAction(
 				controlName(sectionPrefix, QStringLiteral("interpolation_refresh"))))
 				refresh->trigger();
-			if (auto* refresh = profileFields->findChild<QAction*>(
+			if (auto* refresh = findProfileAction(
 				controlName(sectionPrefix, QStringLiteral("temporal_dither_refresh"))))
 				refresh->trigger();
-			if (auto* refresh = profileFields->findChild<QAction*>(
+			if (auto* refresh = findProfileAction(
 				controlName(sectionPrefix, QStringLiteral("intent_content_refresh"))))
 				refresh->trigger();
-			if (auto* refresh = profileFields->findChild<QAction*>(
+			if (auto* refresh = findProfileAction(
 				controlName(sectionPrefix, QStringLiteral("detail_restore_refresh"))))
 				refresh->trigger();
-			if (auto* refresh = profileFields->findChild<QAction*>(
+			if (auto* refresh = findProfileAction(
 				controlName(sectionPrefix, QStringLiteral("intent_adaptive_refresh"))))
 				refresh->trigger();
-			if (auto* refresh = profileFields->findChild<QAction*>(
+			if (auto* refresh = findProfileAction(
 				controlName(sectionPrefix, QStringLiteral("greyed_state_refresh"))))
 				refresh->trigger();
 			// Hunt 3 (CFG5): in a profile whose when: rule reads $content, the
@@ -11358,12 +11369,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 					std::string error;
 					contentGated = expression.Compile(when, error, true) && expression.Variables().count("content") != 0;
 				}
-				const QString cadenceFixes = effectiveChoiceValue(profileFields->findChild<QComboBox*>(
-					controlName(sectionPrefix, QStringLiteral("cadence_class_fixes"))));
+				const QString cadenceFixes = effectiveChoiceValue(qobject_cast<QComboBox*>(findProfileWidget(
+					controlName(sectionPrefix, QStringLiteral("cadence_class_fixes")))));
 				const bool ignored = contentGated && cadenceFixes != QStringLiteral("off");
 				for (const QString& key : kContentGateKeys)
 				{
-					QWidget* widget = profileFields->findChild<QWidget*>(controlName(sectionPrefix, key));
+					QWidget* widget = findProfileWidget(controlName(sectionPrefix, key));
 					if (!widget || !ignored) continue;
 					widget->setProperty("contentGateTooltip", widget->toolTip());
 					widget->setProperty("contentGateIgnored", true);

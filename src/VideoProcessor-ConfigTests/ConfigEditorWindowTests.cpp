@@ -1735,9 +1735,13 @@ void testDetailRestoreControls()
     auto* restore = requireControl<QComboBox>(window, "config.vprenderer.texture_restore");
     auto* restoreCap = requireControl<QLineEdit>(window, "config.vprenderer.texture_restore_cap");
     auto* pulseFast = requireControl<QComboBox>(window, "config.vprenderer.detail_pulse_fast");   // 2026-10-18
+    // Organisation pass 2026-10-24: the caps moved to VP-V > Repair > Texture restore and detail
+    // pulse; the stage switches (managed by the Repair tier) stay in the content-adaptive group.
+    auto* texture = requireControl<QWidget>(window, "vpv.repair.card.texture.body");
     for (QWidget* control : std::initializer_list<QWidget*>{ pulse, pulseCap, pulseFast, restore, restoreCap })
     {
-        require(content->isAncestorOf(control), "a detail control is outside the content-adaptive group");
+        const bool cap = control == pulseCap || control == restoreCap;
+        require((cap ? texture : content)->isAncestorOf(control), "a detail control is outside its group");
         require(!control->toolTip().trimmed().isEmpty(), "a detail control has no tooltip");
     }
     require(pulse->toolTip().contains("never averaged") || pulse->toolTip().contains("nothing is copied", Qt::CaseInsensitive),
@@ -9500,9 +9504,22 @@ int writeSettingsInventory(const QString& outPath)
         else if (auto* label = qobject_cast<QLabel*>(w)) shown = label->text().left(80);
         // Where it is: the page (createPage's viewport, "<title> settings") and the nearest tab,
         // else the nearest card (createCard: a "card" frame with a "cardTitle" label).
-        QString page, tab;
+        QString page, tab, group;
         for (QWidget* parent = w->parentWidget(); parent; parent = parent->parentWidget())
         {
+            // The innermost labelled group (organisation pass 2026-10-24): a collapsible section
+            // ("<x>Section.<id>.content", titled by its toggle) or a card with a vpvCardTitle property.
+            if (group.isEmpty())
+            {
+                const QString pn = parent->objectName();
+                if (!parent->property("vpvCardTitle").toString().isEmpty())
+                    group = parent->property("vpvCardTitle").toString();
+                else if (pn.endsWith(QStringLiteral(".content")) && pn.contains(QStringLiteral("Section.")) && parent->parentWidget())
+                {
+                    if (auto* toggle = parent->parentWidget()->findChild<QToolButton*>(pn.chopped(8), Qt::FindDirectChildrenOnly))
+                        group = toggle->text();
+                }
+            }
             if (tab.isEmpty())
             {
                 if (auto* tabs = qobject_cast<QTabWidget*>(parent))
@@ -9525,7 +9542,8 @@ int writeSettingsInventory(const QString& outPath)
         }
         stream << "C\t" << name << '\t' << w->metaObject()->className() << '\t' << inventoryField(shown) << '\t'
             << (w->toolTip().trimmed().isEmpty() ? 0 : 1) << '\t' << (w->isEnabled() ? 1 : 0) << '\t'
-            << inventoryField(w->toolTip()).left(240) << '\t' << inventoryField(page) << '\t' << inventoryField(tab) << '\n';
+            << inventoryField(w->toolTip()).left(240) << '\t' << inventoryField(page) << '\t' << inventoryField(tab)
+            << '\t' << inventoryField(group) << '\n';
     }
     for (const ShortcutDefault& d : kShortcutDefaults)
         stream << "S\t" << d.key << '\t' << d.chord << '\n';
