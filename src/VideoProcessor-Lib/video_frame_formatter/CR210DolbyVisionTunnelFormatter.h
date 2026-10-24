@@ -84,6 +84,7 @@ public:
 		metadata.allowSdrFallback = !m_tunnelConfirmed;
 		metadata.requiresBlackFrame = m_tunnelConfirmed &&
 			(!m_currentPictureHasValidHeader || !metadata.valid);
+		metadata.reusedPreviousDm = metadata.valid && !m_currentPictureDmAccepted;
 		return metadata;
 	}
 
@@ -142,6 +143,7 @@ private:
 	bool m_haveDiagnosticIds = false;
 	std::array<bool, 256> m_seenExtensionLevels{};
 	DolbyVisionTunnelFrameMetadata m_metadata;
+	bool m_currentPictureDmAccepted = true;   // this picture's own DM was accepted (else reused)
 	DolbyVisionTunnelFrameMetadata m_pendingMetadata;
 	bool m_hasPendingMetadata = false;
 	uint8_t m_pendingAffectedId = 0;

@@ -534,6 +534,10 @@ namespace Tests
 							ok = d.shown == Shown::Rejected;   // the renderer keeps the previous picture
 						else   // any: never packed pixels (SDR passthrough or the normal path) inside a DV stream
 							ok = d.shown != Shown::Handoff && d.shown != Shown::TunnelOff;
+						// DV open item (2026-10-24, no silent fallbacks): a picture shown with a DM that is
+						// not its own (its DM rejected, the previous one reused) is flagged for the status.
+						if (ok && d.shown == Shown::Picture && f.dm == "keep" && !d.md.reusedPreviousDm)
+							ok = false;
 						if (!ok)
 						{
 							++failures;

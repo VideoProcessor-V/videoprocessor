@@ -1315,6 +1315,7 @@ CR210DolbyVisionTunnelFormatter::AnalyzeFrame(const VideoFrame& frame)
 	// Metadata retention is separate from permission to display this picture.
 	// On source exit, ordinary RGB/blank pixels must never use cached DV matrices.
 	m_currentPictureHasValidHeader = supportedHeader;
+	m_currentPictureDmAccepted = acceptedMetadata;
 	if (acceptedMetadata)
 	{
 		m_missingPacketFrames = 0;

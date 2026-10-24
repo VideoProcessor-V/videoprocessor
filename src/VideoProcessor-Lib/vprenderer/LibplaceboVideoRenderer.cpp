@@ -1094,11 +1094,11 @@ namespace
 		// DV extension item 7 (owner 2026-10-16, off until validated): the
 		// Dolby Vision tunnel's picture unpacked on the GPU; the CPU keeps the
 		// DM packet (its pixels only). A failed unpack falls back to the CPU.
-		bool dvTunnelGpuUnpack = false;
+		bool dvTunnelGpuUnpack = true;   // default on (test/dv-synthetic verdict, 2026-10-24; failures listed under Fallbacks engaged)
 		// DV extension item 3 (owner 2026-10-17, off): Dolby Vision L2 trims as a
 		// VP pass after libplacebo's tone mapping (shaders\DV trims.glsl; a
 		// non-certified reimplementation, see DolbyVisionTrims.h).
-		bool dvTrims = false;
+		bool dvTrims = true;             // default on (test/dv-synthetic verdict, 2026-10-24; not certified)
 		// Restore switch (DV tunnel bug hunt 2026-10-17, default on): the whole-raster
 		// SDR alignment probe, the grey SDR exit, the loss limit in source pictures
 		// and L2 trims before L8 (CR210DolbyVisionTunnelFormatter). Off = before them.
@@ -17744,6 +17744,11 @@ struct LibplaceboVideoRenderer::Impl
 		dejudderDolbyVisionTunnel = state.dolbyVisionTunnel;   // Bug hunt 2026-10-17
 		// test/dv-synthetic 2026-10-24 (owner rule: no silent fallbacks): the tunnel's automatic
 		// degradations are listed under "Fallbacks engaged" while they last; none outside a tunnel.
+		// DV open item (2026-10-24): a rejected DM silently kept the previous one; now visible.
+		if (tunnelActive && convertedPayload && convertedPayload->dolby.reusedPreviousDm)
+			EngageFallback("Dolby Vision DM reused", "this picture's metadata was rejected; the previous picture's DM is used");
+		else
+			ReleaseFallback("Dolby Vision DM reused");
 		if (!tunnelActive)
 		{
 			ReleaseFallback("Dolby Vision metadata");
@@ -23294,7 +23299,7 @@ struct LibplaceboVideoRenderer::Impl
                     activeSettings.sdrTone.recovery < 0.0 ? "auto" : std::to_string(activeSettings.sdrTone.recovery).c_str());
             }
         }
-        // dv_trims (owner 2026-10-17, off): the Dolby Vision L2 trim for the
+        // dv_trims (owner 2026-10-17; default on since the DV synthetic validation 2026-10-24): the Dolby Vision L2 trim for the
         // display's peak, after libplacebo's tone mapping (PRE_OUTPUT, before
         // the LED stages). Tunnel pictures with DM only; not after a
         // calibration LUT; PQ or gamma outputs. Non-certified (DolbyVisionTrims.h).
