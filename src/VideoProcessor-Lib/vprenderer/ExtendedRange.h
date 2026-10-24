@@ -283,9 +283,16 @@ namespace ExtendedRange
 		unsigned long long Applied() const { return applied; }
 		// Efficiency audit 2026-10-24 #7 (diagnostic readout).
 		CarryPassReason CarryPasses() const { return carryOnePassReason; }
+		// GPU byte-identity test (#7): the two original passes on demand (A/B of the same frame).
+		void ForceTwoPassCarryForTest(bool twoPass)
+		{
+			carryOnePassReason = twoPass ? CarryPassReason::OnePassFailed : CarryPassReason::None;
+		}
 		std::string CarryPassesDescribe() const;
-		// The textures: before the GPU goes.
+		// The textures: before the GPU goes (and, efficiency audit 2026-10-24 #8b, after the
+		// feature has been idle: FeatureTextureIdle; each is rewritten before it is read).
 		void Release();
+		bool HoldsTextures() const { return clipped || remainder || restoreTex || lateTex || lutTex; }
 
 	private:
 		static pl_hook_res RunCarry(void* priv, const pl_hook_params* params);
