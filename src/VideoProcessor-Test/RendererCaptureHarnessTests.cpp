@@ -4471,8 +4471,8 @@ namespace Tests
 				plan.rateNumerator = 24000;
 				plan.rateDenominator = 1001;
 				plan.step = [](int) { FrameStep f; f.content = 0; return f; };
-				plan.captureTimes = { 3.0, 3.6, 4.2, 4.8 };
-				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 5.5, false, extra, false, &plan);
+				plan.captureTimes = { 3.6, 4.2, 4.8, 5.4 };   // after the start-up's dark-level settling (~3 s)
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.5, false, extra, false, &plan);
 				std::set<std::string> hashes;
 				for (const std::string& json : r.captureMetadataList)
 				{
@@ -4617,8 +4617,8 @@ namespace Tests
 					plan.rateNumerator = 24000;
 					plan.rateDenominator = 1001;
 					plan.step = [](int) { FrameStep f; f.content = 0; return f; };
-					plan.captureTimes = { 3.0, 3.6, 4.2, 4.8 };
-					const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 5.5, false, extra, false, &plan);
+					plan.captureTimes = { 3.6, 4.2, 4.8, 5.4 };   // after the start-up settling (~3 s)
+					const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.5, false, extra, false, &plan);
 					{
 						static int runIndex = 0;
 						std::ofstream dump(std::wstring(shots) + L"\\b3-still-" + std::to_wstring(runIndex++ % 4) + L".log", std::ios::trunc);

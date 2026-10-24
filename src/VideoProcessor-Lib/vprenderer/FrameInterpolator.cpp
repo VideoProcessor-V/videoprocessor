@@ -25,6 +25,7 @@ if (q.x < size.x && q.y < size.y) {
     vec4 a0 = texelFetch(src_a, q, 0);
     vec4 b0 = texelFetch(src_b, q, 0);
     vec4 outv;
+    bool stillHere = false;   // unchanged content, no motion: the pixel itself (near-black fix)
     if (phase <= 0.0) {
         outv = a0;
     } else if (phase >= 1.0) {
@@ -41,6 +42,13 @@ if (q.x < size.x && q.y < size.y) {
             vec2 v1;
             if (field_vector(lp - phase * v, v1))
                 v = v1;
+            // Near-black investigation 2026-10-24: a still picture's estimate leaves sub-pixel noise
+            // vectors; resampled at every refresh's phase they moved dark flat areas by a code. Below
+            // 1/16 source pixel the motion is no motion, and a pixel A and B hold identically with
+            // under half a pixel of motion is unchanged content: drawn exactly as itself.
+            if (dot(v, v) < 0.00390625 || (dot(v, v) < 0.25 && all(equal(a0, b0))))
+                v = vec2(0.0);
+            stillHere = dot(v, v) == 0.0 && all(equal(a0, b0));
             vec2 la = lp - phase * v;
             vec2 lb = lp + (1.0 - phase) * v;
             vec4 sa = bilerp_a(la / plane_scale);
@@ -60,6 +68,7 @@ if (q.x < size.x && q.y < size.y) {
             // fp16 values can round one code away).
             if (all(equal(sa, sb))) outv = sa;
 #endif
+            if (stillHere) outv = a0;
         } else {
 #ifdef FALLBACK_BLEND
             outv = mix(a0, b0, phase);
@@ -180,6 +189,7 @@ vec4 lo = vec4(0.0);
 vec4 hf = vec4(0.0);
 vec4 tg = vec4(0.0);
 bool synth = false;
+bool stillHere = false;   // unchanged content, no motion: the pixel itself (near-black fix)
 #ifdef EXACT_EQUAL
 bool exactSame = false;   // B3: A's and B's samples equal - the sample itself (criterion 1)
 vec4 exactValue = vec4(0.0);
@@ -200,6 +210,13 @@ if (inside) {
             vec2 v1;
             if (field_vector(lp - phase * v, v1))
                 v = v1;
+            // Near-black investigation 2026-10-24: a still picture's estimate leaves sub-pixel noise
+            // vectors; resampled at every refresh's phase they moved dark flat areas by a code. Below
+            // 1/16 source pixel the motion is no motion, and a pixel A and B hold identically with
+            // under half a pixel of motion is unchanged content: drawn exactly as itself.
+            if (dot(v, v) < 0.00390625 || (dot(v, v) < 0.25 && all(equal(a0, b0))))
+                v = vec2(0.0);
+            stillHere = dot(v, v) == 0.0 && all(equal(a0, b0));
             vec2 pa = (lp - phase * v) / plane_scale;
             vec2 pb = (lp + (1.0 - phase) * v) / plane_scale;
             float wb = phase;
@@ -296,6 +313,7 @@ if (inside) {
 #ifdef EXACT_EQUAL
         if (exactSame) outv = exactValue;
 #endif
+        if (stillHere) outv = texelFetch(src_a, q, 0);
     }
     imageStore(dst, q, outv);
 }
