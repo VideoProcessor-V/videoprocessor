@@ -3,7 +3,7 @@
 // VP Renderer DirectShow filter: ends a held LED drive when the player closes.
 //
 // Between files the renderer DLL parks its LED drive for file_led_holdover_ms
-// (led/LedDriveHoldover.h) so MPC's per-file graph rebuild does not flash the
+// (VP-V/modules/drive/led_compensation/LedDriveHoldover.h) so MPC's per-file graph rebuild does not flash the
 // projector to full light. The holder is deliberately never destroyed (no
 // thread join or projector command under the loader lock), so a player that
 // exits inside the hold-over window would leave the projector at the held LED

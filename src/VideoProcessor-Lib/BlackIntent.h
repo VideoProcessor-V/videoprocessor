@@ -162,7 +162,7 @@ namespace BlackIntent
     // one 8-bit code above black. 0 = no cap (no valid statistics, or p5 is
     // black itself / already under the threshold, so there is nothing to keep).
     //
-    // Derivation from the drive's gain model (led/LedController.h,
+    // Derivation from the drive's gain model (VP-V/modules/drive/projector_control/LedController.h,
     // CompensationGainForLed; LedDriveModule): the projector's light above
     // black scales with the LED's share s (flux(level) / flux(ceiling)). VP's
     // compensation gain is 1/s only while it is free; it is capped by the

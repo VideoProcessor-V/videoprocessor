@@ -71,6 +71,14 @@ new path. To find them all: `forwarding_headers` in the manifests.
 | `scaling.chroma_upscale` | `shaders/CfL_Prediction.glsl` | not moved | Runtime shader folder (deploy layout), not source |
 | `colour.appearance` (Stage 13 CAM16), `drive.black_level`, `repair.encoding`, `scaling.route_4k`, `scaling.refine`, `control.net_runtime` | none | n/a | Placeholders: no legacy code to move |
 
+## Old -> new paths
+
+[`migration-path-map.md`](migration-path-map.md) lists every moved file (generated from git renames
+and the forwarding headers by `python tools/migration_path_map.py --write`). Living documents,
+scripts and source comments were updated to the new paths; dated historical records
+(`docs/agent-reports/`, `docs/audit/`, prompts) keep the old ones and resolve through the map.
+`tools/check_module_manifests.py` fails if the map is stale or a living file names an old path.
+
 ## Results
 
 Filled in as each module lands (one module per commit, x64 Release build + CPU suite green after

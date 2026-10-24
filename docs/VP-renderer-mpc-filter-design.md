@@ -60,7 +60,7 @@ also claimed 36) becomes 38 when it merges. "ABI 35" below means that contract.
   - The render loop treats `filmHz>0 && arrivalQpc>0` as an exact film timeline: motion-ahead at :26386, the VP per-vsync timeline at :26932-26946.
 - **Frame and format types.** `VideoFrame.h:17-86` holds a data pointer, a counter, a timestamp, a discontinuity flag and an IUnknown that keeps the buffer alive. `VideoFrameEncoding.h:20-61` has **no NV12/P010/P016**. The internal converted payload is already 2-plane (`LibplaceboVideoRenderer.cpp:13958-13979`; `LibplaceboVideoRenderer.h:159-189`), so planar upload already exists.
 - **Swapchain and fullscreen.** VP's own `CreateSwapChainForHwnd` is FLIP_DISCARD and windowed (`LibplaceboVideoRenderer.cpp:8660-8700`). `SetFullscreenState` is never called, so a borderless fullscreen player window gets independent flip. That is the right model inside MPC.
-- **Dynamic Drive lifetime.** `led/LedDriveModule.h:44` is held per renderer instance (`LibplaceboVideoRenderer.cpp:5996`). It is created or reconfigured in `UpdateLedDrive` (:23143) and restores full light on Stop (`StopLedDriveForShutdown`, :24548).
+- **Dynamic Drive lifetime.** `VP-V/modules/drive/led_compensation/LedDriveModule.h:44` is held per renderer instance (`LibplaceboVideoRenderer.cpp:5996`). It is created or reconfigured in `UpdateLedDrive` (:23143) and restores full light on Stop (`StopLedDriveForShutdown`, :24548).
 - **Profiles and rules.** Rule variables are listed in **three** places: `RendererProfileConfig.h:1477`, `:2280` and `UnifiedProfileRuntime.cpp:184`. Their values come from `StateVariables.cpp:176` and `LibplaceboVideoRenderer.cpp:1519-1536`.
 - **Reusable DirectShow pieces.**
   - `3rdparty/microsoft_directshow_baseclasses` (already in the solution).
@@ -160,6 +160,6 @@ also claimed 36) becomes 38 when it merges. "ABI 35" below means that contract.
 - src\VideoProcessor-Lib\vprenderer\LibplaceboRendererPluginApi.h
 - src\VideoProcessor-Lib\IRenderer.h (with VideoFrame.h and VideoFrameEncoding.h)
 - src\VideoProcessor-Lib\RendererProfileConfig.h (with UnifiedProfileRuntime.cpp)
-- src\VideoProcessor-Lib\led\LedDriveModule.h
+- src\VP-V\modules\drive\led_compensation\LedDriveModule.h
 
 Sources: [LAV Filters changelog](https://www.codecguide.com/changelogs_lavfilters.htm), [MPC-HC 2.3.0 release notes](https://newreleases.io/project/github/clsid2/mpc-hc/release/2.3.0), [Doom9 renderer-selection thread](https://forum.doom9.org/showthread.php?p=2000720)

@@ -477,7 +477,7 @@ A button under the projector connection settings: LED 60, read back
 (`LPW1 ?`), wait 5 s, LED 255 (or the projector's reported maximum when
 lower), read back; PASS when both read-backs match, otherwise FAIL with the
 step that failed (not sent, no reply, or the level the projector reports).
-`led/ConnectionTest.{h,cpp}`; unit-tested against the fake FL35.
+`VP-V/modules/drive/projector_control/ConnectionTest.{h,cpp}`; unit-tested against the fake FL35.
 
 - **Always a read-back connection:** with `read_back: off` (the old script's
   way) the driver never listens, so the test opens its own connection with

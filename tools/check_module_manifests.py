@@ -6,7 +6,9 @@ master component list docs/design/components-master.json agree, that every live 
 and that no source file exists both inside src/VP-V/modules and in a legacy location (no duplicate
 source during the migration). A moved header may leave a pure forwarding header at its legacy
 path while other active branches still include that path; it must be listed in its module's
-"forwarding_headers" and is removed in M2 (docs/design/migration-early-inventory.md).
+"forwarding_headers" and is removed in M2 (docs/design/migration-early-inventory.md). It also runs
+tools/migration_path_map.py's check: docs/design/migration-path-map.md is current and no living
+file names an old path of a moved file.
 
   python tools/check_module_manifests.py          # check; exit 1 on any mismatch
   python tools/check_module_manifests.py --write  # regenerate the master list from the manifests
@@ -215,6 +217,12 @@ def check(write):
                             continue   # checked above
                         errors.append(f"duplicate source: {os.path.relpath(os.path.join(dirpath, name), ROOT)} "
                                       f"and {os.path.relpath(moved[name.lower()], ROOT)}")
+
+    # Moved files: the old -> new path map is current and no living document, script or source
+    # comment still names an old path (dated historical records are exempt; see the tool).
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import migration_path_map
+    errors.extend(migration_path_map.problems())
 
     master = build_master(manifests)
     if write:

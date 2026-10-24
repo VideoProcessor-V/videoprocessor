@@ -21,7 +21,7 @@ The tree mirrors `docs/design/slots.json`. The master component list is
 - **Early migrations** (2026-10-24, `docs/design/migration-early-inventory.md`; code no active
   branch touches, one module per commit):
   - `control/diagnostics`: crash state ring (`CrashState.*`) and state report (`StateReport*`).
-  - `drive/projector_control`: LED controller, Barco ASCII + projector drivers, RS-232 serial port, connection test, clock seam, shutdown restore (forwarders: `led/SerialPort.h`, `led/ConnectionTest.h`).
+  - `drive/projector_control`: LED controller, Barco ASCII + projector drivers, RS-232 serial port, connection test, clock seam, shutdown restore (forwarders: `VP-V/modules/drive/projector_control/SerialPort.h`, `VP-V/modules/drive/projector_control/ConnectionTest.h`).
   - `drive/led_measure`: LED picture measurement and look-ahead (`LedMeasurement.*`, `LedLookahead.*`); `LedMeasurementHook.*` stays (the test project compiles it).
   - `drive/led_compensation`: Dynamic Drive core (`LedDriveModule.*`), COM-port arbiter, hold-over (forwarders for all three headers: the renderer includes them); `LedRawTransfer.*` stays (the test project compiles it).
   - `scaling/rebase`: kernel inverse helper (`KernelInverse.*`; forwarder `KernelInverse.h` for the renderer and the entrance/srcres code, which keep the old include); `SourceRebase.*` stays (entrance code).
