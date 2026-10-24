@@ -1,0 +1,98 @@
+diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+index 5c24cd7c..655bb3cf 100644
+--- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+@@ -4,6 +4,7 @@
+ #include <GeneralRateLog.h>
+ #include <RefreshKey.h>
+ #include <MotionValidity.h>
++#include <VP-V/modules/motion/MotionSegment.h>
+ #include <KernelInverse.h>
+ #include <vprenderer/MotionAheadProducer.h>
+ #include "../SubtitleProfileUpdatePolicy.h"
+@@ -7370,6 +7371,7 @@ struct LibplaceboVideoRenderer::Impl
+ 		// B3 (i): after B's field was estimated ahead, A's (A, B) inputs are the snapshot.
+ 		const bool snapshot = !DejudderLiveFieldFor(sourceSequence) && EntranceOnce() && EntranceOnceSnapshotFor(sourceSequence);
+ 		const bool vectors = DejudderLiveFieldFor(sourceSequence) || snapshot;
++		MotionShadowCheck(sourceSequence, nextSourceSequence, DejudderLiveFieldFor(sourceSequence));
+ 		vpPhaseVectors = vectors;
+ 		if (vectors)
+ 		{
+@@ -7568,6 +7570,7 @@ struct LibplaceboVideoRenderer::Impl
+ 		frameInterpolator.reset();
+ 		dejudder.reset();
+ 		dejudderLiveFieldFrom = 0;
++		motionSegment.Retract(VpMotion::Direction::Forward);
+ 		dejudderMotionSourceKey = -1;
+ 		// 6d: the cache and the rendered warp hold textures (and a dispatch)
+ 		// of this device (audit stage10-6d blocker 1).
+@@ -8087,6 +8090,26 @@ struct LibplaceboVideoRenderer::Impl
+ 	// checks the epoch its vectors were made in.
+ 	MotionValidity::State motionValidity;
+ 	uint64_t motionValiditySeen = MotionValidity::State::kInitialEpoch;   // render thread
++	// S0 motion segment, SHADOW step (P-b1, 2026-10-24 draft): it shares motionValidity, records every
++	// live estimate (RunDejudderEstimate) and withdraws it where the host clears
++	// dejudderLiveFieldFrom; the VP phase picture asks it in parallel with the host's own predicate
++	// (DejudderLiveFieldFor). Mismatches are counted and logged; nothing is delivered from it yet, so
++	// pixels are unchanged. Step 2 switches the consumers once the byte-identity gate shows 0.
++	struct MotionShadowField { uint64_t from = 0, to = 0; };
++	VpMotion::MotionSegment<MotionShadowField> motionSegment{ &motionValidity };
++	unsigned long long motionShadowChecks = 0, motionShadowMismatches = 0;
++	void MotionShadowCheck(uint64_t sequence, uint64_t nextSequence, bool hostLive)
++	{
++		const auto d = motionSegment.Fetch(VpMotion::Consumer::Interpolator, VpMotion::Direction::Forward,
++			sequence, nextSequence, 0);
++		++motionShadowChecks;
++		if (static_cast<bool>(d) == hostLive)
++			return;
++		if (++motionShadowMismatches == 1 || motionShadowMismatches % 2400 == 0)
++			DebugLog::Log("Motion segment (shadow): mismatch source=%llu next=%llu host=%d segment=%d (%s; %llu of %llu)",
++				static_cast<unsigned long long>(sequence), static_cast<unsigned long long>(nextSequence), hostLive ? 1 : 0,
++				d ? 1 : 0, VpMotion::Describe(d.miss), motionShadowMismatches, motionShadowChecks);
++	}
+ 	std::atomic<int> motionAheadDepth{ 0 };   // the frames ahead to submit (0 = none)
+ 	// r6 fix 3: the time-based depth at this source rate (MotionAhead::DepthAt; 2 at 24p, 4 at 60p):
+ 	// the look-ahead engages once that many are queued ahead (was always 4).
+@@ -13758,6 +13781,7 @@ struct LibplaceboVideoRenderer::Impl
+ 		dejudderEstimatedSequence = 0;
+ 		dejudderEstimatedEpoch = 0;
+ 		dejudderLiveFieldFrom = 0;
++		motionSegment.Retract(VpMotion::Direction::Forward);
+ 		adaptiveDownscale.ForgetMap();
+ 		debander.ForgetHold();
+ 		detailPulse.Forget();      // detail restore: both histories restart (docs/VP-detail-restore.md)
+@@ -16546,6 +16570,7 @@ struct LibplaceboVideoRenderer::Impl
+ 		const bool estimated = RunDejudderEstimate(a, a, 0, 0);
+ 		motionEngineWarming = false;
+ 		dejudderLiveFieldFrom = 0;
++		motionSegment.Retract(VpMotion::Direction::Forward);
+ 		bool pictured = false;
+ 		if (estimated && dejudder)
+ 		{
+@@ -16821,6 +16846,7 @@ struct LibplaceboVideoRenderer::Impl
+ 	// into the slot not holding a's.
+ 	bool RunDejudderEstimate(const Dejudder::Planes& a, const Dejudder::Planes& b, uint64_t aSequence, uint64_t bSequence)
+ 	{
++		const uint64_t motionShadowEpoch = motionValidity.Epoch();   // shadow segment: as the callers' estimateEpoch
+ 		// The matcher's settings from the profile, refinements included.
+ 		auto wanted = [&](Dejudder::Settings settings)
+ 		{
+@@ -16955,6 +16981,7 @@ struct LibplaceboVideoRenderer::Impl
+ 			motionProducer->Prune(aSequence);
+ 		}
+ 		dejudderLiveFieldFrom = 0;   // the live outputs are being replaced
++		motionSegment.Retract(VpMotion::Direction::Forward);
+ 		if (!dejudder->Estimate(sa, sb, maskSlot, adaptiveGrainMapWanted))
+ 		{
+ 			// Bug hunt 3 F4: a texture the engine could not create (low video memory).
+@@ -16966,6 +16993,10 @@ struct LibplaceboVideoRenderer::Impl
+ 			return false;
+ 		}
+ 		dejudderLiveFieldFrom = aSequence;
++		motionSegment.Publish(VpMotion::Direction::Forward, aSequence, bSequence, MotionShadowField{ aSequence, bSequence },
++			dejudder->ExternalFlowUsed() ? VpMotion::Source::EngineAhead :
++			dejudder->OpticalFlowUsed() ? VpMotion::Source::EngineAtRender : VpMotion::Source::Matcher,
++			motionShadowEpoch, 0, bSequence != aSequence + 1);
+ 		if (motionEngineWarming)
+ 			return true;   // r6 fix 1: warm-up only; nothing counted, logged or handed on
+ 		if (maskSlot >= 0)
