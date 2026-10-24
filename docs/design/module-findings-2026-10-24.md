@@ -170,3 +170,101 @@ below.
   block after `Collect`, when `Dropped()` grows, log it once per change. If it keeps growing
   (readbacks lost every frame), engage `LED measurement` / "readbacks dropped: the LED follows the
   last statistics".
+
+## 2. Every listed fallback visible (partly done, rest hand-off)
+
+**Done in module code:** the LED dry run. `LedDriveModule::Run`, which used to log only "continuing
+as a dry run", now engages `projector (not connected: <error>; LED drive off (dry run))` in the
+module's `FallbackEntries()`. It was committed with item 1, which adds the module's fallback list,
+and the renderer merges it as in item 1.
+
+**Hand-off (all in LibplaceboVideoRenderer.cpp, which owns the registry).** Each line below is a
+log-only downgrade today. Add the `EngageFallback` call shown next to the existing log line, and
+`ReleaseFallback` where it recovers:
+
+| Site | Engage |
+|---|---|
+| `RejectDisplayLutAfterRenderFailure` | `EngageFallback("calibration LUT", "dropped after a render error: <error>; no projector LUT for this renderer")` |
+| `PresentCalibrationPattern`, windowed patch falls back to full field | `EngageFallback("calibration patch", "full field (window unavailable: <why>); LCD/OLED readings are affected")`, and report `windowed = false` in the pattern result so `CalibrationSession` records it per patch |
+| `EnsureAutoLimitedFallback` | `EngageFallback("output range", "AUTO Limited unavailable: composed Full/sRGB swapchain (<reason>)")` |
+| Initialise: rejected or unsupported output request renders on Full/sRGB | `EngageFallback("output request", "<requested> rejected: Full/sRGB (<Actual.reason>)")` |
+| Re-base failure pause ("Re-base failed ...", 5 s doubling to 60 s) | `EngageFallback("re-base", "paused after a failure: native frame for <n> s (<error>)")`; release when a pass succeeds |
+| NLS hook failure (`SetShaderStatus("NLS: Safe fit (hook failure)")` in the `RenderOwned` callback) | `EngageFallback("geometry", "NLS safe fit (hook failure)")` |
+| Subtitle cue lost: `Consume` reset with "preview-unavailable"; jobs dropped at `SubtitleMeasurementWorker::Submit` capacity; exceptions swallowed in `SubtitleMeasurementWorker::Run` | `EngageFallback("subtitle detection", "worker late: cue dropped")` (or "jobs dropped" / "worker error"), released at the next good cue; the counters already exist |
+
+**Listed entries that can never occur.** Remove them from slots.json `fallback.entry` and the
+manifests' `fallback_entry`, or keep them marked "planned":
+
+- `Tone map: libplacebo (combined LUT missing)`: there is no combined LUT yet; mark planned.
+- `Source analysis: labels unknown (<reason>)`: labels are not implemented; mark planned.
+- `Re-base: off (<reason>)`: replace with the real `re-base precision` entry, plus the pause entry
+  above.
+- `Calibration LUT: libplacebo target LUT (VP stage unavailable)`: the code's entry is
+  `calibration LUT (the VP stage failed; libplacebo's target LUT (before the LED compensation))`.
+  Use that text.
+- `LED: drive held (measurement unavailable)` (`drive.led_measure`): no code produces it. Either add
+  it with the `Dropped()` hand-off (item 7), or remove it.
+- `LED compensation: off (shader did not load)` (`drive.led_compensation`): superseded by item 1's
+  `LED drive (held at full: picture compensation unavailable (...))`. Use that.
+- `Projector: not connected (LED drive off)` (`drive.projector_control`): now produced as
+  `projector (not connected: ...)`. Align the text.
+
+slots.json is on dv-l8's change list and in the skeleton worktree, so these edits are handed off.
+After editing slots.json, run `python tools/check_module_manifests.py --write` and
+`python -I tools/vpv_tests/seed_module_readmes.py`.
+
+## 3. VP LUT stage status (hand-off)
+
+LibplaceboVideoRenderer.cpp, render path:
+
+- `targetLutApplied` / `calibrationLutAttached` is computed from `target.lut != nullptr`. With
+  `calibration_lut_stage = vp`, `target.lut` is null on purpose, so the LUT reads as not attached
+  in `ActiveProfileStatus`, the Ctrl+I limited-range text, the "(inactive: calibration LUT)" marker,
+  and Config's `liveCalibrationLutAttached_` / `usableLut`.
+  Change: `calibrationLutAttached = target.lut != nullptr || <the VP calibration LUT hook was
+  pushed this frame>`. The render path already knows when it pushes `calibrationLutStage`; set a
+  local flag there.
+- `ConfigureDisplayLutForTarget` writes `displayLutStatus = "Active (VP stage): ..."` every frame,
+  which overwrites `Active (reload rejected: ...)`. Change: keep the libplacebo branch's guard, and
+  only write the VP-stage text when the status does not already carry `reload rejected`.
+
+## 4. slots.json and manifest key lists (hand-off; slots.json is on dv-l8's list)
+
+The drift check requires each manifest's `config_keys` to equal slots.json `settings_keys` +
+`planned_keys`, so both change together in one commit. Proposed lists (the "Config keys actually
+read" sections of the module READMEs on this branch hold the full detail):
+
+| Slot | Remove | Add | Move |
+|---|---|---|---|
+| `drive.projector_control` | `led_compensation` (only a shader rule name) | `projector` (the `[projector.default]` group) | |
+| `drive.led_measure` | `led_compensation`, `led_protect` (a value of `intent_black`) | `lookahead`, `led_lookahead_ms`, `highlight_percentile`, `highlight_persist_ms`, `apl_persist_ms`, `cut_threshold`, `fade_ms`, `led_peak_full_coverage`, `led_picture_only`, `led_highlight_grain_suppress` | |
+| `drive.led_compensation` | `led_compensation` | `led_drive` (the `[led_drive.default]` group), `adaptive_gamma`, `gamma_boost`, `shadow_lift_ansi`, `intent_black` | |
+| `output.calibration_lut` | `calibration_lut` (no such key), `calibration_lut_input_gamma` (retired) | `calibration_lut_bt709`, `calibration_lut_p3_d65`, `calibration_lut_bt2020` | `calibration_lut_stage`: planned -> settings (implemented) |
+| `scaling.geometry` | `nls_active`, `nls_curve`, `nls_geometry`, `nls_protect`, `nls_scale` | `nls_sampling`, `screen_aspect` (`nls` stays: the selection group) | |
+| `colour.tone_gamut` | `tone_mapping_tuning` (a log name) | `output_presentation`, `output_range`, `output_gamma`, `output_transport_gamma`, `sdr_target_primaries`, `report_bt2020_to_display`, `sdr_adjust_gamma`, `sdr_input_transfer`, `hdr_tone_map_target_gamma` | |
+| `control.diagnostics` | | `state_report`, `auto_report`, `report_thumbnail` | |
+| `input.source_analysis` | `subtitle_type` (the real key is `type` in `[vprenderer.subtitles.*]`), `subtitle_reposition` (parsed and ignored) | `subtitle_near_bar_px`, `subtitle_hold_ms`, `subtitle_script_hint` | |
+| `scaling.rebase` | | | `entrance_rebase` stays planned (not read) |
+
+**`subtitle_detection_optimization` (hand-off; decision: remove).** It is parsed from legacy rule
+and display sections, then reset to the default by the renderer's "Discard legacy subtitle
+settings" block. So `SetOptimizationMode` always gets 0, while Config still accepts the key.
+Making it work would revive a setting upstream deliberately discarded, so remove it:
+- delete its validation in `RendererProfileConfig.h` (`ValidateProfileSetting`);
+- move it to the retired keys (`RendererConfigView.h` / `ConfigurationApplyPolicy.h`) so old files
+  load silently;
+- drop the dead parse in LibplaceboVideoRenderer.cpp.
+`SubtitleDetectionOptimization.h` can then go.
+
+## 8. README settings-guide link (done)
+
+`tools/vpv_tests/seed_module_readmes.py` generated `../../../../docs/settings/...` from
+`src/VP-V/modules/<unit>/<slot>/`, which resolves under `src/`. It now uses `../../../../../`, and
+the 27 affected generated blocks are regenerated. `run_chain_gate.ps1` runs `seed --check`. After
+merging a branch that changes slots.json, re-run the seed script.
+
+## 9. LED module boundaries (done, in the M2 plan)
+
+See "LED module boundaries" in `migration-m2-plan.md`: `projector_control` becomes transport
+only, `led_compensation` becomes control (with `LedController`), and `led_measure` becomes
+measurement, with `FrameStats` split out and an `IPredictionSink` interface.
