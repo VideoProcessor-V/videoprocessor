@@ -1,6 +1,6 @@
 diff -ru a/src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp b/src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp
 --- a/src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp	2026-10-24 13:53:37.957086600 -0400
-+++ b/src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp	2026-10-24 13:54:59.135926900 -0400
++++ b/src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp	2026-10-24 13:58:57.506588100 -0400
 @@ -338,6 +338,17 @@
          return _stricmp(name.c_str(), SigmaDeltaFileName) == 0;
      }
@@ -21,7 +21,7 @@ diff -ru a/src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp b/src/VideoProc
          bool changed = false;
 diff -ru a/src/VideoProcessor-Lib/vprenderer/CustomHookChain.h b/src/VideoProcessor-Lib/vprenderer/CustomHookChain.h
 --- a/src/VideoProcessor-Lib/vprenderer/CustomHookChain.h	2026-10-24 13:53:37.657006300 -0400
-+++ b/src/VideoProcessor-Lib/vprenderer/CustomHookChain.h	2026-10-24 13:54:59.134931400 -0400
++++ b/src/VideoProcessor-Lib/vprenderer/CustomHookChain.h	2026-10-24 13:58:57.505589000 -0400
 @@ -109,6 +109,11 @@
          // Latches entries whose hook libplacebo disabled at runtime. Returns
          // true when at least one entry newly dropped out.
@@ -36,7 +36,7 @@ diff -ru a/src/VideoProcessor-Lib/vprenderer/CustomHookChain.h b/src/VideoProces
          // case-insensitive). Stage 8 needs the SSIM downscaler in the chain.
 diff -ru a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp	2026-10-24 13:53:37.343937800 -0400
-+++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp	2026-10-24 13:54:59.131925800 -0400
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp	2026-10-24 13:58:57.503590300 -0400
 @@ -82,6 +82,7 @@
  #include <VP-V/core/EntranceEpoch.h>
  #include <VP-V/core/OutputHookOrder.h>
@@ -259,21 +259,22 @@ diff -ru a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/V
          }
          // Stage 6d: when this frame may get de-judder extras, keep A's
          // PRE_OUTPUT picture for them (the hook goes last among the
-@@ -24674,7 +24748,12 @@
+@@ -24674,7 +24748,13 @@
          // Hunt 2 picture sweep: deband_vp_exclusive yields libplacebo's automatic deband to VP's
          // debander, which is idle while smooth motion or deinterlacing runs; those frames keep
          // libplacebo's deband as configured (otherwise nothing would deband them).
 -        if (debandYieldedToVp && yieldedDebandOn && temporalRenderer.Active())
-+        // Silent-fallbacks batch: libplacebo's deband yields only while VP's debander really runs (not
-+        // failed, slot not off); otherwise it debands and the entry says so.
++        // Silent-fallbacks batch: a FAILED VP debander is replaced by libplacebo's deband, visibly. The
++        // slot switched off is a choice (no substitute); DV tunnel pictures are never substituted.
 +        const FallbackCatalog::DebandPlan debandPlan = FallbackCatalog::PlanDeband(debandYieldedToVp,
-+            pipelineSlots.Runs(PipelineSlots::Id::RepairDeband), debander.Failures() > 0, debander.LastError());
++            pipelineSlots.Runs(PipelineSlots::Id::RepairDeband), debander.Failures() > 0,
++            renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION, debander.LastError());
 +        SyncFallback(debandPlan.fallback);
 +        if (debandYieldedToVp && yieldedDebandOn && (temporalRenderer.Active() || !debandPlan.libplaceboYields))
          {
              frameParams.deband_params = &yieldedDebandParams;
              if (!yieldedDebandLogged)
-@@ -27053,6 +27132,8 @@
+@@ -27053,6 +27133,8 @@
  	m_impl->ledShadowLift.store(m_ledShadowLift, std::memory_order_release);
  	m_impl->ledWtwPassthrough.store(m_ledWtwPassthrough, std::memory_order_release);
  	m_impl->ledBtbPassthrough.store(m_ledBtbPassthrough, std::memory_order_release);
@@ -284,7 +285,7 @@ diff -ru a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/V
  			double requestedRefreshRate, double previousRefreshRate)
 diff -ru a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
 --- a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj	2026-10-24 13:53:38.263551100 -0400
-+++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj	2026-10-24 13:54:59.136927700 -0400
++++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj	2026-10-24 13:58:57.508589800 -0400
 @@ -451,6 +451,9 @@
      <ClCompile Include="..\VP-V\tests\DelayGateTests.cpp">
        <PrecompiledHeader>NotUsing</PrecompiledHeader>

@@ -76,23 +76,31 @@ namespace FallbackCatalogTest
 			Assert::IsFalse(RebasePaused(false, 20.0, "x").engaged);
 		}
 
-		TEST_METHOD(DebandNeverLeavesThePictureWithoutDeband)
+		TEST_METHOD(DebandSubstitutesOnlyForAFailedVpDebander)
 		{
-			// VP's debander runs: libplacebo yields, nothing engaged.
-			DebandPlan plan = PlanDeband(true, true, false);
+			// VP's debander runs: libplacebo yields as configured, nothing engaged.
+			DebandPlan plan = PlanDeband(true, true, false, false);
 			Assert::IsTrue(plan.libplaceboYields);
 			Assert::IsFalse(plan.fallback.engaged);
 			// VP's failed: libplacebo debands, visibly.
-			plan = PlanDeband(true, true, true, "texture");
+			plan = PlanDeband(true, true, true, false, "texture");
 			Assert::IsFalse(plan.libplaceboYields);
 			Assert::IsTrue(plan.fallback.engaged);
+			Assert::AreEqual(std::string("deband"), plan.fallback.id);
 			Assert::IsTrue(Has(plan.fallback, "failed") && Has(plan.fallback, "texture"));
-			// The slot is switched off: libplacebo debands, visibly.
-			plan = PlanDeband(true, false, false);
-			Assert::IsFalse(plan.libplaceboYields);
-			Assert::IsTrue(Has(plan.fallback, "slot"));
-			// deband_vp off: libplacebo's deband is the setting, nothing engaged.
-			plan = PlanDeband(false, true, false);
+			// The slot switched off is a choice: no substitute, no entry (even after a failure).
+			plan = PlanDeband(true, false, false, false);
+			Assert::IsTrue(plan.libplaceboYields);
+			Assert::IsFalse(plan.fallback.engaged);
+			plan = PlanDeband(true, false, true, false);
+			Assert::IsTrue(plan.libplaceboYields);
+			Assert::IsFalse(plan.fallback.engaged);
+			// Dolby Vision tunnel pictures: never substituted.
+			plan = PlanDeband(true, true, true, true);
+			Assert::IsTrue(plan.libplaceboYields);
+			Assert::IsFalse(plan.fallback.engaged);
+			// No yield by the settings: libplacebo's deband is the user's own setting, nothing engaged.
+			plan = PlanDeband(false, true, true, false);
 			Assert::IsFalse(plan.libplaceboYields);
 			Assert::IsFalse(plan.fallback.engaged);
 		}

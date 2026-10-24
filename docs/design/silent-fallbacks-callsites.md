@@ -27,13 +27,21 @@ needs `FallbackCatalog.h`.
 | Sigma-delta dropped (part 2 #1) | the sigma-delta code-domain loop; `CustomHookChain::Chain` | Records a domain drop. A new `Chain::QuantizerProblem()` reports a quantiser shader that did not load or was disabled. Entry: `dither` |
 | BTB/WTW clipped (part 2 #2) | after the extended-range decision and the `mixClipsBtb` log | Hook failed, frame mixing, or smooth-motion BTB clip engages `BTB/WTW`. Design exclusions stay status-only |
 | Re-base slot off still drives downstream scaling (part 2 #3) | after `rebaseFactor` / `rebaseFactorX` are set | `EffectiveRebaseFactors` forces both to 1 when `scaling.rebase` does not run. The failure pause engages `re-base` |
-| Debander failure = no deband (part 2 #4) | where libplacebo's deband is re-enabled for temporal frames | `PlanDeband`: libplacebo debands whenever VP's debander fails or its slot is off. Entry: `deband`. A debander failure is sticky for the session (`Failures() > 0`) |
+| Debander failure = no deband (part 2 #4) | where libplacebo's deband is re-enabled for temporal frames | `PlanDeband`: libplacebo's deband stands in only when VP's debander has FAILED. Entry: `deband`. The failure is sticky for the session (`Failures() > 0`). The `repair.deband` slot switched off (pipeline_slots_off, Original pathway) is a choice: no substitute and no entry, and libplacebo's deband follows the user's settings as before. Dolby Vision tunnel pictures are never substituted (see below) |
 | Optical-flow failure (part 2 #5) | the de-judder motion-source block | Engine failed, or the look-ahead producer stopped. Entry: `motion` |
 | Open-loop presentation (part 2 #6) | after the render-ahead display-rate choice; the de-judder timing check | Open loop, or the de-judder held for want of a display rate. Entry: `presentation`. New member `dejudderHeldNoDisplayRate` |
 | Failed refresh-rate switch (part 2 #7) | `ScopedDisplayRefreshRate::Switch` | New `SetFallbackSink`. Every "retaining" exit reports `refresh rate (kept X Hz for Y Hz input: why)`. Each confirmed or applied switch releases it. Wired next to `SetEventSink` |
 | SDR tone shape shader not loaded (part 2 #8) | before the SDR tone shape state log | State 3 engages `SDR tone shape` |
 | Early upload unavailable (part 2 #26) | `earlyOpenFailed` | Entry: `early upload` |
 | Test project | `VideoProcessor-Test.vcxproj.vcxproj` | Adds `..\VP-V\tests\FallbackCatalogTests.cpp` (NotUsing PCH, like DelayGateTests) |
+
+## Interaction with feat/dv-l8 (deband)
+
+feat/dv-l8 runs neither debander on Dolby Vision tunnel pictures. `PlanDeband` therefore never
+substitutes libplacebo's deband on them and engages no entry. The patch passes
+`renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION` as the DV-tunnel-picture fact. If dv-l8
+has its own "tunnel picture" flag (the one it uses to skip the debanders), pass that flag instead
+when merging, so the two rules can never disagree.
 
 ## Builders ready but not yet wired (no clean single anchor; wire with the owning change)
 

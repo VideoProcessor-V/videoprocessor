@@ -109,24 +109,31 @@ namespace FallbackCatalog
 	}
 
 	// ---- repair.deband --------------------------------------------------------------------------
-	// libplacebo's deband yields to VP's debander only while VP's actually runs; otherwise it
-	// debands, and the entry says so. Before this, a failed debander (or its slot switched off)
-	// left the picture with no deband at all.
+	// libplacebo's automatic deband yields to VP's debander (deband_vp_exclusive). Before this, a
+	// FAILED VP debander left the picture with no deband at all; now libplacebo's deband stands in
+	// for it, visibly. Only a failure is a fallback:
+	//  - the repair.deband slot switched off (pipeline_slots_off, the Original pathway) is a
+	//    choice: no substitute, no entry; libplacebo's deband follows the user's own settings as
+	//    before (still yielded when deband_vp_exclusive says so);
+	//  - Dolby Vision tunnel pictures: no substitute (feat/dv-l8 runs neither debander on them).
 	struct DebandPlan
 	{
-		bool libplaceboYields = false;   // switch libplacebo's deband off for this frame
+		bool libplaceboYields = false;   // keep libplacebo's deband off for this frame (as configured)
 		Decision fallback;
 	};
-	inline DebandPlan PlanDeband(bool vpRequested, bool slotRuns, bool vpFailed, const std::string& error = std::string())
+	// vpRequested: libplacebo yields to VP by the settings (LibplaceboDebandYieldsToVp).
+	inline DebandPlan PlanDeband(bool vpRequested, bool slotRuns, bool vpFailed, bool dvTunnelPicture,
+		const std::string& error = std::string())
 	{
 		DebandPlan plan;
-		const bool vpRuns = vpRequested && slotRuns && !vpFailed;
-		plan.libplaceboYields = vpRuns;
-		if (!vpRequested || vpRuns)
-			plan.fallback = Released("deband");
-		else
-			plan.fallback = Engaged("deband", !slotRuns ? std::string("libplacebo deband (slot repair.deband is off)") :
-				"libplacebo deband (VP debander failed" + (error.empty() ? std::string() : ": " + error) + ")");
+		plan.libplaceboYields = vpRequested;
+		plan.fallback = Released("deband");
+		if (vpRequested && slotRuns && vpFailed && !dvTunnelPicture)
+		{
+			plan.libplaceboYields = false;
+			plan.fallback = Engaged("deband", "libplacebo deband (VP debander failed" +
+				(error.empty() ? std::string() : ": " + error) + ")");
+		}
 		return plan;
 	}
 
