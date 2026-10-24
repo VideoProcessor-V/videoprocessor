@@ -54,7 +54,10 @@ lives in VP files committed on the branch: `vprenderer/EarlyUploadPolicy.h`,
    "upload: CPU copy + unpack submit (render thread)" or "(early slot)". The readout is logged
    every 30 s while frames are timed. T3: before each de-judder estimate
    `dejudder->SetPassSampling(Sampling())` (DejudderWarp's own per-pass pl_timers, no drain,
-   polled when the pass next runs) and `AddGpuGroups("motion: ", TakePassGpuMs())` after it (Ctrl+Alt+D's `log-excerpt.txt` carries it). A dedicated
+   polled when the pass next runs) and `AddGpuGroups("motion: ", TakePassGpuMs())` after it.
+   T2: each entrance stage in `RunEntrance` is bracketed by a `GpuSpanTimers` span (D3D11
+   disjoint + timestamps on the immediate context, polled with DONOTFLUSH, dropped if not ready
+   after 16 polls) on timed refreshes; polled once per refresh; released at device teardown (Ctrl+Alt+D's `log-excerpt.txt` carries it). A dedicated
    status line would need a plugin API number, assigned at integration only.
 4. **#8b** after `ExtendedRange::Prepare`: `extendedRangeIdle.Note(active, HoldsTextures(), now)`
    releases ER's textures after 10 s idle (backing off when it thrashes).
@@ -75,9 +78,7 @@ lives in VP files committed on the branch: `vprenderer/EarlyUploadPolicy.h`,
 - **#10 remainder**: `ExtendedRange::Describe` per frame (one string) and the per-frame hook
   vectors (`frameHooks`, rebuilt per extra) are VP code in the host; reserve-once members in
   `Impl` are a follow-up call-site change.
-- **Timers still to wire**: entrance S1 per stage (pl_timer per stage on `rebaseDispatch`, polled
-  with `pl_timer_query` two frames later, never drained) in `RunMainEntrance`/`RunEntrance`;
-  the half-size inner MotionWarp's passes (its passTiming is not set by
+- **Timers still to wire**: the half-size inner MotionWarp's passes (its passTiming is not set by
   SetPassSampling); NVOF itself (QPC around the producer's fence); reading
   `EarlyUpload::Stats::copyCpuMs*` (recorded on the conversion thread) into the readout; a
   pl_timer around the GPU unpack.

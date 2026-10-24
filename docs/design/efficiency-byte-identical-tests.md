@@ -105,8 +105,9 @@ path is touched.
    (render present, de-judder extra vblank waits), upload CPU line.
 4. Motion (T3): "motion: <pass>" GPU groups appear on de-judder content; DejudderWarp output
    identical with sampling on/off (timers do not change dispatches).
-5. Still to wire (design in efficiency-callsites.md): entrance S1 per stage (polled pl_timers on
-   `rebaseDispatch`), the inner half-size MotionWarp, the conversion thread's copy time into the
+5. Entrance (T2): "entrance: deband / re-base / texture restore" groups appear; output identical
+   with sampling on/off; `GpuSpanTimers::Dropped()` stays near 0.
+6. Still to wire (design in efficiency-callsites.md): the inner half-size MotionWarp, the conversion thread's copy time into the
    readout, GPU unpack pl_timer.
 
 ## G9: B3 ring handover (when built)
