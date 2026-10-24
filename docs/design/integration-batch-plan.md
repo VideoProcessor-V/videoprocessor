@@ -1070,3 +1070,6 @@ D1 decided: the merged S2/S3 hooks become the default once the GPU fixture shows
 D3 decided: no A/B; use the correct downscaler, and the separable 1-D version wherever the polar one can't be used.
 D4 decided: D runs only with VP deband off for now; a D for the deband-on case goes on the round-3 list.
 D8 decided: the 3090 real-time check runs with the next training run, after the restructure is complete.
+
+## WP-24: captured-repeat render reuse (owner concern: GPU time lost in Bill's host)
+The largest GPU waste on Bill's side: captured repeats (24-in-30, 30-in-60) re-run the whole libplacebo render (efficiency audit #4; 20-50% of renders on that content). Recover it inside option (d) with ONE small hook in his render loop: when the source frame is a captured repeat of the last rendered one and nothing upstream changed, reuse the cached rendered picture (the de-judder extras' rendered-picture cache) and run only the OUTPUT segment (S3: dither etc. keep running per refresh). Upstreamable (offer to Bill). Byte-identity: repeats must equal a full re-render except temporal-dither phase (dither keeps advancing). Early in the batch, after WP-6; ~4-6 agent h; timing-gated.
