@@ -8,6 +8,7 @@
 #include <GeneralRateLog.h>
 #include <CpuFeatures.h>
 #include "CR210DolbyVisionTunnelFormatter.h"
+#include <VP-V/modules/input/signal/DvSignalLevels.h>   // feat/dv-l8: L9 / L10
 
 #include <array>
 #include <cmath>
@@ -438,6 +439,10 @@ namespace
 				ParseL6(dm + extension + 5, payloadLength, parsed);
 			else if (level == 11 && !parsed.hasL11)
 				ParseL11(dm + extension + 5, payloadLength, parsed);
+			else if (level == 10)   // feat/dv-l8: the targets L8 refers to
+				DvSignalLevels::ParseL10(dm + extension + 5, payloadLength, parsed);
+			else if (level == 9)
+				DvSignalLevels::ParseL9(dm + extension + 5, payloadLength, parsed);
 			extension = end;
 		}
 		for (uint8_t i = 0; i < l8Count; ++i)
@@ -795,6 +800,8 @@ void CR210DolbyVisionTunnelFormatter::OnVideoState(VideoStateComPtr& state)
 		std::floor(m_frameRate * kPacketLossSeconds + 0.5)));
 	m_sdrFallbackFrames = static_cast<uint64_t>((std::max)(2.0,
 		std::ceil(m_frameRate * kSdrFallbackSeconds - 1e-9)));
+	m_dmHold.SetRate(m_frameRate);   // feat/dv-l8: the hold is a time at the measured rate
+	m_dmHold.Reset();
 	m_sdrSuspect = false;
 	m_sdrSuspectStartCounter = 0;
 	m_lastHeaderCounter = 0;
@@ -1361,6 +1368,15 @@ CR210DolbyVisionTunnelFormatter::AnalyzeFrame(const VideoFrame& frame)
 			m_hasPendingMetadata = false;
 		}
 	}
+	// feat/dv-l8 (no silent fallbacks): a rejected DM is held only briefly, then reduced to
+	// its static part (DvMetadataHold.h); every rejected picture after DV lock is counted.
+	// The retained DM itself is kept whole (a later no-metadata packet or a black picture still
+	// refers to it); only a SHOWN picture past the hold gets the static copy (getter).
+	if (m_bugHuntFixes && (m_tunnelConfirmed || acceptedMetadata) &&
+		m_dmHold.OnPicture(acceptedMetadata, m_metadata.valid, counter) == DvMetadataHold::Phase::Static &&
+		m_dmHold.EnteredStatic())
+		DebugLog::Log("Dolby Vision RGB tunnel: DM rejected for longer than the %u-picture hold; shown pictures use static metadata only (scene L1 and trims dropped) until fresh DM; %u rejected pictures so far",
+			m_dmHold.HoldPictures(), m_dmHold.RejectedPictures());
 	// audit 2026-10-16: safe exit for a same-mode SDR switch without EOS.
 	// CRC loss alone still never authorizes SDR (a damaged tunnel looks the
 	// same). Only when, for kSdrFallbackSeconds of capture time (counted in

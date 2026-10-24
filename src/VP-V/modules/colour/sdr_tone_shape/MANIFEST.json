@@ -9,7 +9,9 @@
     "src/VideoProcessor-Lib/vprenderer/SdrToneShape.h",
     "src/VideoProcessor-Lib/vprenderer/DolbyVisionTrims.h",
     "shaders/SDR tone shape.glsl",
-    "shaders/DV trims.glsl"
+    "shaders/DV trims.glsl",
+    "src/VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h",
+    "src/VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h"
   ],
   "components": {
     "files": {

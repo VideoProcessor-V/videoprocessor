@@ -1,6 +1,7 @@
 #pragma once
 
 #include <video_frame_formatter/IVideoFrameFormatter.h>
+#include <VP-V/modules/input/signal/DvMetadataHold.h>   // feat/dv-l8: the bounded DM hold
 #include <VideoFrameEncoding.h>
 #include <Windows.h>
 #include <cstdint>
@@ -85,6 +86,10 @@ public:
 		metadata.requiresBlackFrame = m_tunnelConfirmed &&
 			(!m_currentPictureHasValidHeader || !metadata.valid);
 		metadata.reusedPreviousDm = metadata.valid && !m_currentPictureDmAccepted;
+		metadata.dmHoldPhase = static_cast<uint8_t>(metadata.reusedPreviousDm ? m_dmHold.CurrentPhase() : DvMetadataHold::Phase::Own);
+		metadata.dmRejectedPictures = m_dmHold.RejectedPictures();
+		if (metadata.dmHoldPhase == static_cast<uint8_t>(DvMetadataHold::Phase::Static) && m_currentPictureHasValidHeader)
+			DvMetadataHold::StripToStatic(metadata);   // feat/dv-l8: past the hold, a shown picture gets the static part
 		return metadata;
 	}
 
@@ -144,6 +149,7 @@ private:
 	std::array<bool, 256> m_seenExtensionLevels{};
 	DolbyVisionTunnelFrameMetadata m_metadata;
 	bool m_currentPictureDmAccepted = true;   // this picture's own DM was accepted (else reused)
+	DvMetadataHold::Tracker m_dmHold;          // feat/dv-l8: held, then static, counted
 	DolbyVisionTunnelFrameMetadata m_pendingMetadata;
 	bool m_hasPendingMetadata = false;
 	uint8_t m_pendingAffectedId = 0;

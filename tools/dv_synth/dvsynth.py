@@ -196,11 +196,34 @@ def ext_l6(max_m, min_m, cll, fall):
     return (6, b"".join(be16(v) for v in (max_m, min_m, cll, fall)))
 
 
-def ext_l8(index, slope=2048, offset=2048, power=2048, chroma=2048, sat=2048, ms=2048, mid_clip=None):
+def ext_l8(index, slope=2048, offset=2048, power=2048, chroma=2048, sat=2048, ms=2048, mid_clip=None,
+           sat_vector=None, hue_vector=None):
+    """L8 in VP's assumed 16-bit containers: index (u8), six 16-bit trims, then the optional
+    [mid_contrast, clip_trim] (16 bit each), [6 saturation bytes], [6 hue bytes] (feat/dv-l8:
+    the vectors; each needs the fields before it, 128 = neutral)."""
     p = bytes([index & 0xFF]) + b"".join(be16(v) for v in (slope, offset, power, chroma, sat, ms))
-    if mid_clip is not None:
-        p += be16(mid_clip[0]) + be16(mid_clip[1])
+    if mid_clip is not None or sat_vector is not None or hue_vector is not None:
+        mc = mid_clip if mid_clip is not None else (2048, 2048)
+        p += be16(mc[0]) + be16(mc[1])
+    if sat_vector is not None or hue_vector is not None:
+        p += bytes((v & 0xFF) for v in (sat_vector if sat_vector is not None else [128] * 6))
+    if hue_vector is not None:
+        p += bytes((v & 0xFF) for v in hue_vector)
     return (8, p)
+
+
+def ext_l9(source_primary_index):
+    """L9: source_primary_index (u8)."""
+    return (9, bytes([source_primary_index & 0xFF]))
+
+
+def ext_l10(index, max_pq, min_pq=62, primary_index=2, packed=False):
+    """L10 custom target display (feat/dv-l8): index (u8), target_max_pq, target_min_pq,
+    target_primary_index (u8); 16-bit containers (6 bytes) or the RPU's packed 5 bytes."""
+    if packed:
+        bits = (index & 0xFF) << 32 | (max_pq & 0xFFF) << 20 | (min_pq & 0xFFF) << 8 | (primary_index & 0xFF)
+        return (10, bits.to_bytes(5, "big"))
+    return (10, bytes([index & 0xFF]) + be16(max_pq) + be16(min_pq) + bytes([primary_index & 0xFF]))
 
 
 def ext_l11(content_type, whitepoint=0, reference=False, b2=0, b3=0):

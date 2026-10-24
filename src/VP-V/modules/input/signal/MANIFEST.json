@@ -15,7 +15,10 @@
     "src/VideoProcessor-Lib/DolbyVisionTunnelHandoff.h",
     "src/VideoProcessor-Lib/vprenderer/GpuDolbyVisionTunnelUnpack.cpp",
     "src/VideoProcessor-Lib/vprenderer/GpuDolbyVisionTunnelUnpack.h",
-    "src/VideoProcessor-Lib/vprenderer/Bt2020SignalController.h"
+    "src/VideoProcessor-Lib/vprenderer/Bt2020SignalController.h",
+    "src/VP-V/modules/input/signal/DvSignalLevels.h",
+    "src/VP-V/modules/input/signal/DvMetadataHold.h",
+    "src/VP-V/modules/input/signal/DvCompareCapture.h"
   ],
   "components": {
     "files": {

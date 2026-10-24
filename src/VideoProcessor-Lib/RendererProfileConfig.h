@@ -730,6 +730,7 @@ namespace RendererProfileConfig
 			// Owner 2026-10-13: the capture path (gpu = the low-latency GPU unpack).
 			if (key == "capture_path") return IsChoice(value, { "standard", "gpu" });
 			if (key == "capture_upload") return IsChoice(value, { "auto", "render", "early" });
+			if (key == "dv_tone_mapping") return IsChoice(value, { "libplacebo", "dolby_style" });   // feat/dv-l8
 			if (key == "source_range") return IsChoice(value, { "auto", "full", "limited" });
 			// native | auto | any height in lines (general: not a fixed list).
 			if (key == "source_resolution")

@@ -262,12 +262,40 @@ namespace Tests
 					check(want.size() >= 7 && t.targetDisplayIndex == want[0] && t.slope == want[1] && t.offset == want[2] &&
 						t.power == want[3] && t.chromaWeight == want[4] && t.saturationGain == want[5] &&
 						static_cast<uint16_t>(t.msWeight) == static_cast<uint16_t>(want[6]), "l8_fields");
+					// feat/dv-l8: the optional fields (mid contrast, clip trim, the vectors).
+					if (want.size() >= 9)
+						check(t.hasMidContrastAndClip && t.midContrast == want[7] && t.clipTrim == want[8], "l8_mid_clip");
+					if (want.size() >= 15)
+					{
+						bool vec = t.hasSaturationVector;
+						for (int v = 0; vec && v < 6; ++v) vec = t.saturationVector[v] == want[9 + v];
+						check(vec, "l8_sat_vector");
+					}
+					if (want.size() >= 21)
+					{
+						bool vec = t.hasHueVector;
+						for (int v = 0; vec && v < 6; ++v) vec = t.hueVector[v] == want[15 + v];
+						check(vec, "l8_hue_vector");
+					}
 					++gotL8;
 				}
 			}
 			check(gotL2 == wantL2, "l2_count");
 			check(gotL8 == wantL8, "l8_count");
 			check(md.trimOverflow == (l2n + l8n > maxTrims), "trim_overflow");
+			// feat/dv-l8: L10 targets (corpora written before L10 carry no l10n key).
+			if (f.keys.count("l10n"))
+			{
+				const int l10n = std::atoi(f.keys.at("l10n").c_str());
+				bool l10 = md.targetDisplayCount == l10n;
+				for (int k = 0; l10 && k < l10n; ++k)
+				{
+					const std::vector<int> want = Ints(f.keys.at("l10_" + std::to_string(k)));
+					const auto& t = md.targetDisplays[k];
+					l10 = want.size() == 4 && t.index == want[0] && t.maxPq == want[1] && t.minPq == want[2] && t.primaryIndex == want[3];
+				}
+				check(l10, "l10");
+			}
 			const std::vector<int> l5 = Ints(f.keys.at("l5"));
 			check(l5.empty() ? !md.hasActiveArea : (md.hasActiveArea && md.activeAreaLeft == l5[0] && md.activeAreaRight == l5[1] &&
 				md.activeAreaTop == l5[2] && md.activeAreaBottom == l5[3]), "l5");

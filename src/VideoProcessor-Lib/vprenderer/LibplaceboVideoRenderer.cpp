@@ -59,6 +59,8 @@
 #include <vprenderer/GpuRgbUnpack.h>
 #include <vprenderer/GpuDolbyVisionTunnelUnpack.h>
 #include <vprenderer/DolbyVisionTrims.h>
+#include <VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h>   // feat/dv-l8: the L8 / L2 trim choice
+#include <VP-V/modules/input/signal/DvCompareCapture.h>          // feat/dv-l8: DV comparison capture (diagnostic)
 #include <vprenderer/EarlyUpload.h>
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/InterpolationPolicy.h>
@@ -139,6 +141,9 @@
 #include <libplacebo/cache.h>
 #include <libplacebo/d3d11.h>
 #include <libplacebo/options.h>
+#include <libplacebo/tone_mapping.h>
+#include <libplacebo/shaders/colorspace.h>
+#include <VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h>   // feat/dv-l8 task 5: dv_tone_mapping dolby_style
 #include <libplacebo/renderer.h>
 #include <libplacebo/shaders/custom.h>
 #include <libplacebo/utils/upload.h>
@@ -1099,6 +1104,7 @@ namespace
 		// VP pass after libplacebo's tone mapping (shaders\DV trims.glsl; a
 		// non-certified reimplementation, see DolbyVisionTrims.h).
 		bool dvTrims = true;             // default on (test/dv-synthetic verdict, 2026-10-24; not certified)
+		std::string dvToneMapping = "libplacebo";   // feat/dv-l8: libplacebo | dolby_style (DvDolbyStyle.h; approx.)
 		// Restore switch (DV tunnel bug hunt 2026-10-17, default on): the whole-raster
 		// SDR alignment probe, the grey SDR exit, the loss limit in source pictures
 		// and L2 trims before L8 (CR210DolbyVisionTunnelFormatter). Off = before them.
@@ -1519,7 +1525,7 @@ namespace
 			<< settings.preserveExtendedRange << '|' << settings.extendedRangeMoreCases << '|' << settings.dejudderWarpRendered << '|'
 			// Settings applied live must change the fingerprint, or a profile edit
 			// touching only them is not applied until something else changes.
-			<< settings.captureUpload << '|' << settings.sourceRange << '|' << settings.sourceResolution << '|'
+			<< settings.captureUpload << '|' << settings.sourceRange << '|' << settings.sourceResolution << '|' << settings.dvToneMapping << '|'
 			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.sourceResolutionEvidenceShots << '|'
 			<< settings.sourceResolutionEvidenceSeconds << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
 			<< settings.pipelineOriginalPathway << '|' << settings.pipelineOrder << '|' << settings.pipelineSlotsOff << '|'
@@ -2474,6 +2480,7 @@ namespace
 		readChoice("dejudder_low_res", settings.dejudderLowRes, { "off", "search", "all" });
 		readChoice("capture_path", settings.capturePath, { "standard", "gpu" });
 		readChoice("capture_upload", settings.captureUpload, { "auto", "render", "early" });
+		readChoice("dv_tone_mapping", settings.dvToneMapping, { "libplacebo", "dolby_style" });   // feat/dv-l8
 		readChoice("source_range", settings.sourceRange, { "auto", "full", "limited" });
 		readChoice("deband_vp", settings.debandVp, { "off", "auto", "on" });
 		readChoice("low_bitrate_handling", settings.lowBitrateHandling, { "auto", "off", "on" });
@@ -7709,6 +7716,19 @@ struct LibplaceboVideoRenderer::Impl
 	std::string dvTrimsLogged;          // the state / reason last logged (on change)
 	std::string dvTrimsParamsLogged;    // the parameters last logged (at most every 10 s)
 	ULONGLONG dvTrimsParamsTick = 0;
+	// feat/dv-l8: the trim level in use (the DV ingress / Ctrl+I line), the last choice for the
+	// DV comparison capture (off unless VP_DV_COMPARE_PATH; DvCompareCapture.h).
+	std::string dvTrimsStatus = "DV trims: off";
+	DvTrimSelection::Selection dvTrimsSelection;
+	bool dvTrimsEvaluated = false;
+	double dvTrimsTargetNits = 0.0;
+	DvCompareCapture::Recorder dvCompare{ DvCompareCapture::Options::FromEnvironment() };
+	// feat/dv-l8 task 5: the Dolby-style DV tone mapping (dv_tone_mapping), its status, and the
+	// reference viewing conditions of the last DV picture (for the later CAM16 stage).
+	DvDolbyStyle::ToneSwitch dvToneSwitch;
+	bool dvToneDolbyRunning = false;
+	std::string dvToneStatus = "DV tone mapping: libplacebo";
+	DvDolbyStyle::ReferenceConditions dvReferenceConditions;
 	bool sdrToneShapeConfigured = false;
 	int sdrToneShapeLogged = -1;
 	bool ledCompensationConfigured = false;
@@ -12458,6 +12478,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.nativeRgbIngest != next.nativeRgbIngest, "native_rgb_ingest");
 		changed(current.dvTunnelGpuUnpack != next.dvTunnelGpuUnpack, "dv_tunnel_gpu_unpack");
 		changed(current.dvTrims != next.dvTrims, "dv_trims");
+		changed(current.dvToneMapping != next.dvToneMapping, "dv_tone_mapping");
 		changed(current.dvTunnelFixes != next.dvTunnelFixes, "dv_tunnel_fixes");
 		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
 			current.dejudderHoldHysteresis != next.dejudderHoldHysteresis ||
@@ -18315,10 +18336,12 @@ struct LibplaceboVideoRenderer::Impl
 		// test/dv-synthetic 2026-10-24 (owner rule: no silent fallbacks): the tunnel's automatic
 		// degradations are listed under "Fallbacks engaged" while they last; none outside a tunnel.
 		// DV open item (2026-10-24): a rejected DM silently kept the previous one; now visible.
-		if (tunnelActive && convertedPayload && convertedPayload->dolby.reusedPreviousDm)
-			EngageFallback("Dolby Vision DM reused", "this picture's metadata was rejected; the previous picture's DM is used");
+		// feat/dv-l8: held briefly, then static metadata (DvMetadataHold.h), counted on the DV line.
+		std::string dvMetadataReason;
+		if (tunnelActive && convertedPayload && DvMetadataHold::FallbackReason(convertedPayload->dolby, dvMetadataReason))
+			EngageFallback("DV metadata", dvMetadataReason);
 		else
-			ReleaseFallback("Dolby Vision DM reused");
+			ReleaseFallback("DV metadata");
 		if (!tunnelActive)
 		{
 			ReleaseFallback("Dolby Vision metadata");
@@ -19490,8 +19513,8 @@ struct LibplaceboVideoRenderer::Impl
 				case VideoFrameEncoding::R210:
 				case VideoFrameEncoding::R10b:
 				case VideoFrameEncoding::R10l:
-					setIngressStatus(convertedPayload->dvTunnelRaw ? "Dolby Vision RGB tunnel (12-bit 4:2:2, GPU unpack)" :
-						"Dolby Vision RGB tunnel (12-bit 4:2:2)");
+					setIngressStatus(std::string(convertedPayload->dvTunnelRaw ? "Dolby Vision RGB tunnel (12-bit 4:2:2, GPU unpack)" :
+						"Dolby Vision RGB tunnel (12-bit 4:2:2)") + "; " + dvTrimsStatus + "; " + dvToneStatus + DvMetadataHold::StatusSuffix(convertedPayload->dolby));
 					break;
 				case VideoFrameEncoding::V210:
 					setIngressStatus(convertedPayload->Raw() ? "P210 (lossless v210 4:2:2, GPU unpack)" : "P210 (lossless v210 4:2:2)");
@@ -23873,6 +23896,17 @@ struct LibplaceboVideoRenderer::Impl
         // display's peak, after libplacebo's tone mapping (PRE_OUTPUT, before
         // the LED stages). Tunnel pictures with DM only; not after a
         // calibration LUT; PQ or gamma outputs. Non-certified (DolbyVisionTrims.h).
+        // feat/dv-l8 task 5 (DvDolbyStyle.h): dv_tone_mapping dolby_style - the Dolby-style curve for DV pictures and
+        // the trims in ICtCp; when it cannot run: bt2390 + the luminance trims, under "Fallbacks engaged".
+        const bool dvToneDolby = DvDolbyStyle::ParseMode(activeSettings.dvToneMapping) == DvDolbyStyle::Mode::DolbyStyle;
+        const bool dvTonePicture = renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION && convertedPayload && convertedPayload->dolby.valid;
+        const std::string dvToneFallback = DvDolbyStyle::CannotRun(dvToneDolby && dvTonePicture, target.lut != nullptr,
+            target.color.transfer, pipelineSlots.Runs(PipelineSlots::Id::ColourSdrToneShape));
+        dvToneDolbyRunning = dvToneDolby && dvTonePicture && dvToneFallback.empty();
+        dvToneSwitch.Apply(colorMapParams, dvToneDolbyRunning ? &DvDolbyStyle::Function() : !dvToneFallback.empty() ? &pl_tone_map_bt2390 : nullptr);
+        if (!dvToneFallback.empty()) EngageFallback("DV tone mapping", dvToneFallback + ": bt2390 + trims"); else ReleaseFallback("DV tone mapping");
+        dvToneStatus = DvDolbyStyle::StatusText(dvToneDolby ? DvDolbyStyle::Mode::DolbyStyle : DvDolbyStyle::Mode::Libplacebo,
+            dvToneDolbyRunning, activeSettings.toneMapping, dvToneFallback);
         if (activeSettings.dvTrims || !dvTrimsLogged.empty())
         {
             std::string state;
@@ -23888,7 +23922,7 @@ struct LibplaceboVideoRenderer::Impl
                 trc == PL_COLOR_TRC_GAMMA22 || trc == PL_COLOR_TRC_GAMMA24 || trc == PL_COLOR_TRC_GAMMA26 ||
                 trc == PL_COLOR_TRC_GAMMA28 || trc == PL_COLOR_TRC_BT_1886 || trc == PL_COLOR_TRC_SRGB;
             std::string params;
-            DolbyVisionTrims::Selection selection;
+            DvTrimSelection::Selection selection;   // feat/dv-l8: L8, else L2, else none
             if (!activeSettings.dvTrims || !pipelineSlots.Runs(PipelineSlots::Id::ColourSdrToneShape))
                 state = "off";
             else if (!dvPicture)
@@ -23899,7 +23933,10 @@ struct LibplaceboVideoRenderer::Impl
                 state = "off for this output transfer (PQ, gamma, BT.1886 or sRGB outputs only)";
             else
             {
-                selection = DolbyVisionTrims::Select(convertedPayload->dolby, display.hdr.max_luma);
+                selection = DvTrimSelection::Select(convertedPayload->dolby, display.hdr.max_luma);
+                dvTrimsSelection = selection;
+                dvTrimsEvaluated = true;
+                dvTrimsTargetNits = display.hdr.max_luma;
                 if (!selection.apply)
                     state = std::string("neutral: ") + selection.reason;
                 else
@@ -23924,13 +23961,13 @@ struct LibplaceboVideoRenderer::Impl
                         const double blue[2] = { prim->blue.x, prim->blue.y }, white[2] = { prim->white.x, prim->white.y };
                         DolbyVisionTrims::LuminanceWeights(red, green, blue, white, kr, kg, kb);
                     }
+                    const auto ictcp = DvDolbyStyle::ShaderParameters(dvToneDolbyRunning, prim);   // dv_space + output RGB -> LMS
                     for (size_t i = start; i < frameHooks.size(); ++i)
                     {
-                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_slope", selection.params.slope);
-                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_offset", selection.params.offset);
-                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_power", selection.params.power);
-                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_chroma_weight", selection.params.chromaWeight);
-                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_sat_gain", selection.params.saturationGain);
+                        for (const auto& parameter : DvTrimSelection::ShaderParameters(selection.params))
+                            CustomHookChain::SetHookParameter(frameHooks[i], parameter.first, parameter.second);
+                        for (const auto& parameter : ictcp)
+                            CustomHookChain::SetHookParameter(frameHooks[i], parameter.first, parameter.second);
                         CustomHookChain::SetHookParameter(frameHooks[i], "dv_signal_pq", pq ? 1.0 : 0.0);
                         CustomHookChain::SetHookParameter(frameHooks[i], "dv_gamma", LedDisplayGamma(target.color.transfer));
                         CustomHookChain::SetHookParameter(frameHooks[i], "dv_peak_nits", display.hdr.max_luma);
@@ -23940,12 +23977,15 @@ struct LibplaceboVideoRenderer::Impl
                     state = frameHooks.size() == start ? "NOT applied (shaders\\DV trims.glsl did not load)" :
                         std::string("active: ") + selection.reason;
                     if (frameHooks.size() > start)
-                        params = DolbyVisionTrims::Describe(selection);
+                        params = DvTrimSelection::Describe(selection);
                 }
             }
             // test/dv-synthetic 2026-10-24 (no silent fallbacks): dv_trims on, a DV picture with DM,
             // but the trim cannot act (a calibration LUT, an unsupported output transfer, the shader
             // missing): listed. Neutral (no L2 for this picture) is the trims' own answer, not a fallback.
+            dvTrimsStatus = DvTrimSelection::StatusText(activeSettings.dvTrims, selection);
+            if (dvPicture)
+                dvReferenceConditions = DvDolbyStyle::Conditions(convertedPayload->dolby, selection, dvToneDolbyRunning, activeSettings.toneMapping);
             if (activeSettings.dvTrims && dvPicture &&
                 (target.lut || (!pq && !gammaSignal) || state.compare(0, 11, "NOT applied") == 0))
                 EngageFallback("Dolby Vision trims", state);
@@ -23968,6 +24008,10 @@ struct LibplaceboVideoRenderer::Impl
                 DebugLog::Log("Dolby Vision trims (non-certified): %s", params.c_str());
             }
         }
+        if (dvCompare.Enabled())   // feat/dv-l8: DV comparison capture (diagnostic; VP_DV_COMPARE_PATH)
+            dvCompare.OnRender(state, convertedPayload ? convertedPayload->rawFrame.get() : nullptr, videoFrame.GetCounter(),
+                convertedPayload && state.dolbyVisionTunnel ? &convertedPayload->dolby : nullptr, activeSettings.dvTrims,
+                std::exchange(dvTrimsEvaluated, false) ? &dvTrimsSelection : nullptr, dvTrimsTargetNits);
         // Automatic calibration phase 2 (HDR verify): VP's own tone curve for this
         // frame's colour mapping, rebuilt only when that changes (a hash per frame).
         if (target.color.transfer == PL_COLOR_TRC_PQ)
@@ -32552,6 +32596,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "native_rgb_ingest=" << s.nativeRgbIngest << "\n"
 		<< "dv_tunnel_gpu_unpack=" << s.dvTunnelGpuUnpack << "\n"
 		<< "dv_trims=" << s.dvTrims << "\n"
+		<< "dv_tone_mapping=" << s.dvToneMapping << "\n"
 		<< "dv_tunnel_fixes=" << (s.dvTunnelFixes ? "on" : "off") << "\n"
 		<< "occlusion_mask=" << s.occlusionMask << "\n"
 		<< "dither_vectors_own=" << s.ditherVectorsOwn << "\n"
