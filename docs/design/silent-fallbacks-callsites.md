@@ -71,7 +71,8 @@ Run the CPU tests `FallbackCatalogTests` plus the existing renderer CPU tests.
 Byte identity: no picture changes except in three places, each only while its fallback is in
 force:
 - the re-base factors with the slot off;
-- libplacebo's deband when VP's debander has failed or its slot is off;
+- libplacebo's deband when VP's debander has failed (not when its slot is switched off, and never
+  on DV tunnel pictures);
 - the refresh sink (no picture effect).
 
 The chain gate's byte-identity subset should stay identical with default settings.
