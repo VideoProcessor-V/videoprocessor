@@ -127,3 +127,8 @@ below.
 - **`.ccss` letter case (done).** `CalibrationController::CreateMeter` matched only ".ccss" and
   ".CCSS", so ".Ccss" got past the "takes only .ccmx" refusal. Now `IsSpectralSampleFile`, which
   ignores case. Test: `SpectralSampleFileIsRecognisedInAnyCase`.
+- **Look-ahead measuring with `lookahead: off` (done).** `LedDriveModule::WantsPredictions`
+  returned true for compensate even with `lookahead: off`, so the renderer's queued-frame walk
+  measured every new raw frame (about 2–3 ms per 4K frame) for predictions nothing read. It now
+  returns `LookaheadWantedLocked()`. The renderer already re-reads `WantsPredictions` on every
+  `Reconfigure`. Test: `CompensateWithoutLookaheadWantsNoPredictions`.

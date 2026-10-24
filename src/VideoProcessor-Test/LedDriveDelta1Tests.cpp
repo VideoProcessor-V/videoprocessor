@@ -1577,6 +1577,20 @@ namespace VideoProcessorTest
 			Assert::IsTrue(LedDriveModule(ProjectorConfig(), Compensate()).WantsPredictions());
 		}
 
+		// Module findings 2026-10-24 item 7: compensate with lookahead: off reads no prediction, so the
+		// queued-frame walk is not asked to measure raw frames for it.
+		TEST_METHOD(CompensateWithoutLookaheadWantsNoPredictions)
+		{
+			LedDriveConfig off = Compensate();
+			off.lookahead = false;
+			Assert::IsFalse(LedDriveModule(ProjectorConfig(), off).WantsPredictions());
+			LedDriveModule module(ProjectorConfig(), off);
+			LedDriveConfig on = off;
+			on.lookahead = true;
+			Assert::IsTrue(module.Reconfigure(ProjectorConfig(), on));
+			Assert::IsTrue(module.WantsPredictions(), L"switching the look-ahead on asks for predictions again");
+		}
+
 		// Review 2026-10-17: the new keys, their defaults and validation.
 		TEST_METHOD(Review20261017KeysAreReadWithTheirDefaults)
 		{

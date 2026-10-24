@@ -341,7 +341,10 @@ namespace LedDrive
 	bool LedDriveModule::WantsPredictions() const
 	{
 		std::lock_guard<std::mutex> guard(mutex);
-		return led.mode == Mode::Compensate || (led.mode == Mode::Script && led.scriptLookahead);
+		// Module findings 2026-10-24 item 7: compensate with lookahead: off never reads a
+		// prediction (StepCompensateLocked and the custom-dim fade use the exact statistics, depth
+		// 0), so the walk's raw-frame measuring (about 2-3 ms per new 4K frame) was wasted work.
+		return LookaheadWantedLocked();
 	}
 
 	LedDriveConfig LedDriveModule::Config() const
