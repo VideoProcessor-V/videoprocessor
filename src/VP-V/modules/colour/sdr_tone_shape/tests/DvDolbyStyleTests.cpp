@@ -260,6 +260,35 @@ namespace Tests
 					Assert::AreEqual(r == c ? 1.0 : 0.0, m[r][0] * mi[0][c] + m[r][1] * mi[1][c] + m[r][2] * mi[2][c], 1e-12);
 		}
 
+		// Through libplacebo's own LUT generation (pl_tone_map_generate, the path its colour map
+		// takes): the generated LUT is the curve (GPU check 2026-10-24 showed a PQ-linear result).
+		TEST_METHOD(LibplaceboGeneratesTheCurve)
+		{
+			using namespace DvDolby;
+			pl_tone_map_params p = {};
+			p.function = &DvDolbyStyle::Function();
+			p.input_scaling = p.output_scaling = PL_HDR_PQ;
+			p.lut_size = 64;
+			p.input_min = static_cast<float>(Pq(0.0));
+			p.input_max = static_cast<float>(Pq(200.0));
+			p.input_avg = static_cast<float>(Pq(5.0));
+			p.output_min = static_cast<float>(Pq(0.0));
+			p.output_max = static_cast<float>(Pq(100.0));
+			std::vector<float> lut(p.lut_size);
+			pl_tone_map_generate(lut.data(), &p);
+			const DvDolbyStyle::Curve c = DvDolbyStyle::Build(p.input_min, p.input_avg, p.input_max, p.output_min, p.output_max);
+			std::string text;
+			double worst = 0.0;
+			for (size_t i = 0; i < lut.size(); ++i)
+			{
+				const double x = p.input_min + (p.input_max - p.input_min) * i / (lut.size() - 1.0);
+				worst = (std::max)(worst, std::fabs(lut[i] - c.Map(x)));
+				if (i % 8 == 0) text += std::to_string(x) + "->" + std::to_string(lut[i]) + "/" + std::to_string(c.Map(x)) + " ";
+			}
+			Logger::WriteMessage(("libplacebo LUT vs curve: " + text + " worst " + std::to_string(worst) + "\n").c_str());
+			Assert::IsTrue(worst < 1e-4, L"libplacebo's generated LUT is the curve");
+		}
+
 		TEST_METHOD(ReferenceConditionsDescribeWhatTheGradeAssumed)
 		{
 			using namespace DvDolby;

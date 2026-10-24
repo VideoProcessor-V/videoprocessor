@@ -17,8 +17,8 @@
 //      PQ) and the target display (min / max, from the user's tone-mapping target): the
 //      three-anchor rational curve y = (c1 + c2 x) / (1 + c3 x) of SMPTE ST 2094-10 Annex B
 //      (the public form of Dolby's CM v2.9 curve), evaluated in PQ; the scene mid (L1 avg) is
-//      kept where the target allows it (kMidAdaptation of the way from the proportional
-//      position toward the source mid), never above kMidCeiling of the target range;
+//      kept where the target allows it (kMidAdaptation = 1: the source mid itself), never above
+//      kMidCeiling of the target range;
 //   3. chroma handled separately from the intensity (libplacebo applies the curve in its IPT /
 //      cone stage with chromaticity-preserving cone ratios; its gamut mapping compresses
 //      what leaves the target gamut);
@@ -48,7 +48,12 @@
 
 namespace DvDolbyStyle
 {
-	constexpr double kMidAdaptation = 0.7;      // how far the target mid moves toward the source mid
+	// How far the target mid moves from the proportional (chord) position toward the source mid.
+	// 1 = the scene mid kept where the target allows it (below kMidCeiling), as Dolby's display
+	// management keeps the scene's mid-tones. GPU check 2026-10-24: 0.7 rendered the synthetic
+	// policy scenes about one stop darker than the L1 intent model (luminance ratio ~0.5 even on
+	// the dim scene, where bt2390 gave 0.998). To be tuned against the LLDV pairs.
+	constexpr double kMidAdaptation = 1.0;
 	constexpr double kMidCeiling = 0.85;        // the target mid stays below this share of the target range
 	constexpr double kMidMinShare = 0.1;        // the source mid is kept inside [10 %, 90 %] of the scene range
 	constexpr double kMidMaxShare = 0.9;
