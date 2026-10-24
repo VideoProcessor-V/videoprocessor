@@ -3533,6 +3533,7 @@ namespace
 		settings.nativeRgbIngest = false;                  // key=native_rgb_ingest
 		settings.dvTunnelGpuUnpack = false;                // key=dv_tunnel_gpu_unpack
 		settings.dvTunnelFixes = false;                    // key=dv_tunnel_fixes
+		settings.dvCompareCaptureFolder.clear();           // key=dv_compare_capture_folder
 		settings.dvTrims = false;                          // key=dv_trims
 		settings.dvToneMapping = "libplacebo";             // key=dv_tone_mapping
 		settings.queueTimingFixes = false;                 // key=queue_timing_fixes

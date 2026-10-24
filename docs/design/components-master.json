@@ -78,6 +78,7 @@
         },
         "tools": [],
         "config_keys": [
+          "dv_compare_capture_folder",
           "dv_trims",
           "dv_tunnel_fixes",
           "dv_tunnel_handoff"
