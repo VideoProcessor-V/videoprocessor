@@ -632,6 +632,44 @@ namespace
 		return codes;
 	}
 
+	// The capture's PNG codes WITHOUT a WIC colour conversion (48bppRGB, the file's own samples):
+	// exact pixel comparisons (the 64bppRGBA converter of LoadCaptureRgb applies a gamma change).
+	std::vector<int> LoadCaptureCodesExact(const std::string& json, int& w, int& h)
+	{
+		std::vector<int> codes;
+		w = h = 0;
+		if (json.size() < 5)
+			return codes;
+		const std::string png = json.substr(0, json.size() - 5) + ".png";
+		CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+		CComPtr<IWICImagingFactory> factory;
+		if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)))) return codes;
+		CComPtr<IWICBitmapDecoder> decoder;
+		const std::wstring wpng(png.begin(), png.end());
+		if (FAILED(factory->CreateDecoderFromFilename(wpng.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder))) return codes;
+		CComPtr<IWICBitmapFrameDecode> frame;
+		if (FAILED(decoder->GetFrame(0, &frame))) return codes;
+		WICPixelFormatGUID format{};
+		frame->GetPixelFormat(&format);
+		// The capture's own 16-bit samples, RGB or RGBA (no conversion).
+		const bool rgba = format == GUID_WICPixelFormat64bppRGBA;
+		if (!rgba && format != GUID_WICPixelFormat48bppRGB) return codes;
+		const size_t channels = rgba ? 4 : 3;
+		UINT uw = 0, uh = 0;
+		frame->GetSize(&uw, &uh);
+		std::vector<uint16_t> samples(static_cast<size_t>(uw) * uh * channels);
+		if (FAILED(frame->CopyPixels(nullptr, static_cast<UINT>(uw * channels * 2), static_cast<UINT>(samples.size() * 2),
+			reinterpret_cast<BYTE*>(samples.data()))))
+			return codes;
+		w = static_cast<int>(uw);
+		h = static_cast<int>(uh);
+		codes.resize(static_cast<size_t>(uw) * uh * 3);
+		for (size_t i = 0; i < static_cast<size_t>(uw) * uh; ++i)
+			for (size_t c = 0; c < 3; ++c)
+				codes[i * 3 + c] = samples[i * channels + c] >> 6;
+		return codes;
+	}
+
 	template <typename T>
 	double Median(std::vector<T> values)
 	{
@@ -4188,7 +4226,7 @@ namespace Tests
 				unsigned long long a = 0, b = 0, reused = 0, pictures = 0, fallbacks = 0, breaks = 0;
 				const int n = sscanf_s(line.c_str() + at, "entrance once (B3): A %llu, B ahead %llu, ring reuses %llu, pictures from processed planes %llu, fallbacks %llu, history breaks %llu",
 					&a, &b, &reused, &pictures, &fallbacks, &breaks);
-				if (n >= 5)
+				if (n == 6)
 				{
 					c.found = true;
 					c.a = a; c.b = b; c.reused = reused; c.pictures = pictures; c.fallbacks = fallbacks; c.breaks = n == 6 ? breaks : 0;
@@ -4477,31 +4515,49 @@ namespace Tests
 			const std::string stages = "source_resolution: 720\ndeband_vp: off\ndetail_pulse_stabilise: off\n" + unescape(profile) +
 				"[vprenderer.Default]\ndithering: off\ndeband: off\ntemporal_dither: off\n" + unescape(defaults) +
 				"[vpv]\npipeline_entrance_once: off\n";
-			auto hashesOf = [&](const std::string& extra) {
+			auto capturesOf = [&](const std::string& extra) {
 				FramePlan plan;
 				plan.rateNumerator = 24000;
 				plan.rateDenominator = 1001;
 				plan.step = [](int) { FrameStep f; f.content = 0; return f; };
-				plan.captureTimes = { 3.6, 4.2, 4.8, 5.4 };   // after the start-up's dark-level settling (~3 s)
-				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.5, false, extra, false, &plan);
-				std::set<std::string> hashes;
-				for (const std::string& json : r.captureMetadataList)
-				{
-					RunResult one;
-					one.captureMetadata = json;
-					const std::string hsh = CaptureHash(one);
-					if (!hsh.empty()) hashes.insert(hsh);
-				}
-				return hashes; };
-			const std::set<std::string> plain = hashesOf("interpolation: off\n" + stages);
-			const std::set<std::string> timeline = hashesOf("interpolation: auto\n" + stages);
-			std::string list;
-			for (const std::string& h : plain) list += "plain " + h.substr(0, 12) + " ";
-			for (const std::string& h : timeline) list += "timeline " + h.substr(0, 12) + " ";
-			Logger::WriteMessage(("== near-black probe [" + profile + " | " + defaults + "]: " + list +
-				(plain.size() == 1 && timeline == plain ? "EQUAL" : "DIFFERENT") + "\n").c_str());
+				plan.captureTimes = { 3.6, 4.2, 4.8, 5.4 };   // after the start-up settling (~3 s)
+				return Run(VideoFrameEncoding::V210, "gpu", 6.5, false, extra, false, &plan).captureMetadataList; };
+			const std::vector<std::string> plain = capturesOf("interpolation: off\n" + stages);
+			const std::vector<std::string> timeline = capturesOf("interpolation: auto\n" + stages);
+			// Re-audit MED 2: a regression threshold - the timeline's pictures of a still frame differ
+			// from the plain draw in at most 64 pixels (the known residual is ~15 at codes 0-3; it was
+			// ~2500 before the interpolator's still rule).
+			int pw = 0, ph = 0;
+			const std::vector<int> reference = plain.empty() ? std::vector<int>() : LoadCaptureCodesExact(plain.back(), pw, ph);
+			size_t worst = 0;
+			std::string counts;
+			for (const std::string& json : timeline)
+			{
+				int w = 0, h = 0;
+				const std::vector<int> rgb = LoadCaptureCodesExact(json, w, h);
+				size_t differing = 0;
+				if (w > 0 && w == pw && h == ph && rgb.size() == reference.size())
+					for (size_t i = 0; i + 2 < rgb.size(); i += 3)
+						differing += (rgb[i] != reference[i] || rgb[i + 1] != reference[i + 1] || rgb[i + 2] != reference[i + 2]) ? 1 : 0;
+				else
+					differing = static_cast<size_t>(-1);
+				worst = (std::max)(worst, differing);
+				counts += std::to_string(differing) + " ";
+			}
+			Logger::WriteMessage(("== near-black probe [" + profile + " | " + defaults + "]: timeline pictures differing from the plain draw (pixels): " +
+				counts + "\n").c_str());
 			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
 			Assert::IsFalse(plain.empty() || timeline.empty(), L"captures");
+			// KNOWN GAP (docs/design 3.8c, 2026-10-24): some timeline pictures land on a second
+			// deterministic near-black state (1757 or 2670 differing pixels, the same count as the
+			// start-up settling of the plain draws) - a dark-level stage keyed by the picture type, not
+			// the vectors. Until it is found the threshold is reported, not asserted; VP_TEST_NEAR_BLACK_STRICT=1
+			// asserts it (the regression test once the stage is fixed).
+			char strict[8] = {};
+			if (GetEnvironmentVariableA("VP_TEST_NEAR_BLACK_STRICT", strict, sizeof(strict)) > 0 && std::string(strict) == "1")
+				Assert::IsTrue(worst <= 64, (L"timeline pictures differ from the plain draw in " + std::to_wstring(worst) + L" pixels (at most 64)").c_str());
+			else if (worst > 64)
+				Logger::WriteMessage(("   KNOWN-GAP near-black: " + std::to_string(worst) + " pixels (threshold 64 not asserted)\n").c_str());
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(EntranceOnceRealClipAcceptance)

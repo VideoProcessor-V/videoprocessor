@@ -6240,6 +6240,7 @@ struct LibplaceboVideoRenderer::Impl
 	{
 		processedFrame = nullptr;
 		entranceOnceCurrentA = sequence;
+		ReleaseFallback("entrance once fill");   // engaged again below only when this extra warps processed planes
 		if (EntranceOnceCrossfading())
 		{
 			EntranceOnceFallback("source-resolution crossfade");
@@ -26297,6 +26298,7 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 				static_cast<double>(callbackQpc) / qpcPerSecond, hardwareAgeKnown,
 				static_cast<double>(hardwareQpc) / qpcPerSecond, !timestampBreak, queueFixes);
 			arrivalQpc = arrival.Hardware() ? hardwareQpc : 0;
+			m_enqueueArrivalIsFrameStart = arrivalQpc != 0;   // re-audit MED 1
 			if (arrival.staleStart || arrival.staleEnd)
 			{
 				m_captureStaleGapPending = true;
@@ -26310,7 +26312,10 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 			}
 		}
 		else
+		{
 			arrivalQpc = 0;
+			m_enqueueArrivalIsFrameStart = false;
+		}
 		if (!queueFixes)
 			m_captureStaleGapPending = false;
 	}
@@ -26503,6 +26508,7 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 				QueryPerformanceFrequency(&frequency);
 				const double qpcPerSecond = static_cast<double>(frequency.QuadPart);
 				const int64_t arrived = arrivalQpc > 0 ? arrivalQpc : callbackQpc;
+				m_enqueueArrivalIsFrameStart = arrivalQpc > 0;   // the film clock keeps its anchor's meaning
 				arrivalQpc = static_cast<int64_t>((fixes ? m_pulldownClock.Time(decision.filmIndex,
 					static_cast<double>(arrived) / qpcPerSecond, filmHz, decision.cadenceLateness, decision.cadenceLatenessMax) :
 					m_pulldownClock.Time(decision.filmIndex, static_cast<double>(arrived) / qpcPerSecond, filmHz)) * qpcPerSecond);
@@ -26676,6 +26682,7 @@ void LibplaceboVideoRenderer::EnqueueFrame(VideoFrame& videoFrame,
 			queuedFrame.activePictureIdentity = activePictureIdentity;
 			queuedFrame.callbackQpc = callbackQpc;
 			queuedFrame.arrivalQpc = arrivalQpc;
+			queuedFrame.arrivalIsFrameStart = file == nullptr && arrivalQpc != 0 && m_enqueueArrivalIsFrameStart;
 			queuedFrame.gapBefore = gapBefore;
 			queuedFrame.gapCause = gapCause;
 			queuedFrame.gapFrames = gapFrames;
@@ -26995,9 +27002,11 @@ int64_t LibplaceboVideoRenderer::HoldTicksUntilDueLocked() const
 	LARGE_INTEGER frequency{};
 	if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0)
 		return 0;
-	// The timestamp marks the frame's START (audit MED 7): it arrives after the transfer, then waits
-	// the hold - the transfer counted once, as the plan counts it.
-	const int64_t due = since + static_cast<int64_t>((hold.transferMs + hold.holdMs) * static_cast<double>(frequency.QuadPart) / 1000.0);
+	// A hardware FRAME-START time (audit MED 7): the frame arrives after the transfer, then waits the
+	// hold - the transfer counted once, as the plan counts it. A callback or enqueue time (re-audit
+	// MED 1): the frame is already received, the hold alone.
+	const double waitMs = DelayBudget::WaitAfterTimestampMs(hold.holdMs, hold.transferMs, head.arrivalQpc != 0 && head.arrivalIsFrameStart);
+	const int64_t due = since + static_cast<int64_t>(waitMs * static_cast<double>(frequency.QuadPart) / 1000.0);
 	const int64_t now = PerformanceCounterNow();
 	return due > now ? due - now : 0;
 }
@@ -30880,6 +30889,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 		int64_t enqueueQpc = 0;
 		int64_t callbackQpc = 0;
 		int64_t arrivalQpc = 0;
+		bool arrivalIsFrameStart = false;   // re-audit MED 1 (the dequeued frame's)
 		double frameFilmHz = 0.0;
 		// ABI 37: the dequeued frame came from a file source (OnTimedVideoFrame);
 		// motion off: no B is offered for it (playback rate != 1, paused).
@@ -31223,6 +31233,7 @@ void LibplaceboVideoRenderer::RenderLoop()
             guardedReturn = m_frameQueue.front().guardedRememberedReturn;
 			callbackQpc = m_frameQueue.front().callbackQpc;
 			arrivalQpc = m_frameQueue.front().arrivalQpc;
+			arrivalIsFrameStart = m_frameQueue.front().arrivalIsFrameStart;
 			frameFilmHz = m_frameQueue.front().filmHz;
 			enqueueQpc = m_frameQueue.front().enqueueQpc;
 			cadenceRepeat = m_frameQueue.front().cadenceRepeat;
@@ -31908,8 +31919,10 @@ void LibplaceboVideoRenderer::RenderLoop()
 							const int64_t since = head.arrivalQpc != 0 ? head.arrivalQpc : head.enqueueQpc;
 							const double headAgeMs = since > 0 && nowQpc > since ?
 								static_cast<double>(nowQpc - since) * 1000.0 / static_cast<double>(qpcFrequency.QuadPart) : 0.0;
-							// The head's age counts from its start: the transfer, then the hold (audit MED 7).
-							const double heldMs = heldQueue.transferMs + heldQueue.holdMs;
+							// The head's age counts from its start: the transfer, then the hold (audit MED 7) -
+							// the transfer only for a hardware frame-start time (re-audit MED 1).
+							const double heldMs = DelayBudget::WaitAfterTimestampMs(heldQueue.holdMs, heldQueue.transferMs,
+								head.arrivalQpc != 0 && head.arrivalIsFrameStart);
 							heldBacklog = AlphaQueuePolicy::ShouldShedHeldBacklog(queueBefore, recoveryTarget, headAgeMs,
 								heldMs, queueRateHz) ||
 								AlphaQueuePolicy::ShouldShedHeldExcess(queueBefore, recoveryTarget, headAgeMs, heldMs,
@@ -32316,6 +32329,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 						repeatFrame.activePictureIdentity = activePictureIdentity;
 						repeatFrame.callbackQpc = callbackQpc;
 						repeatFrame.arrivalQpc = arrivalQpc;
+						repeatFrame.arrivalIsFrameStart = arrivalIsFrameStart;
 						repeatFrame.filmHz = frameFilmHz;
                         repeatFrame.subtitleBoxPreview = subtitlePreview;
                         repeatFrame.subtitleBoxPreview.newScanMs = 0.0;

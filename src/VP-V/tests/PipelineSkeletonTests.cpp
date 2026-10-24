@@ -361,6 +361,10 @@ namespace PipelineSkeletonTestsNs
 			Assert::AreEqual(0u, run);
 			for (int i = 0; i < 100; ++i)   // jitter: late every other frame (at the normal depth)
 				Assert::IsFalse(AlphaQueuePolicy::ShouldShedHeldExcess(13, 11, hold + (i % 2 ? 22.0 : 5.0), hold, 60.0, run));
+			// Jitter at depth 14 where 14 is the normal depth (a 210 ms hold: 13 hold frames + 1 arriving).
+			run = 0;
+			for (int i = 0; i < 100; ++i)
+				Assert::IsFalse(AlphaQueuePolicy::ShouldShedHeldExcess(14, 11, 210.0 + (i % 2 ? 22.0 : 5.0), 210.0, 60.0, run));
 			// Audit MED 6: by depth too (an extra frame at a locked rate, due at once): 12 hold frames
 			// + 1 arriving = 13 normal, 14 = one too many.
 			run = 0;
@@ -375,6 +379,15 @@ namespace PipelineSkeletonTestsNs
 			Assert::AreEqual(static_cast<size_t>(3), AlphaQueuePolicy::HeldShedFrames(16, 11, hold + 55.0, hold, 60.0));
 			Assert::AreEqual(static_cast<size_t>(1), AlphaQueuePolicy::HeldShedFrames(12, 11, hold + 200.0, hold, 60.0));
 			Assert::AreEqual(static_cast<size_t>(0), AlphaQueuePolicy::HeldShedFrames(11, 11, hold + 200.0, hold, 60.0));
+		}
+
+		TEST_METHOD(TransferCountedOnceWhateverTheTimestampMarks)
+		{
+			// Re-audit MED 1: a hardware frame-start time waits the transfer, then the hold; a callback /
+			// enqueue / film-clock time (the frame already received) waits the hold alone.
+			Assert::AreEqual(150.0 + 41.7, DelayBudget::WaitAfterTimestampMs(150.0, 41.7, true), 1e-9);
+			Assert::AreEqual(150.0, DelayBudget::WaitAfterTimestampMs(150.0, 41.7, false), 1e-9);
+			Assert::AreEqual(0.0, DelayBudget::WaitAfterTimestampMs(-5.0, -1.0, true), 1e-9);
 		}
 
 		TEST_METHOD(DelayBudgetQueueCapacityCoversTheHold)

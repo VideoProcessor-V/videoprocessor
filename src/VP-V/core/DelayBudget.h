@@ -84,6 +84,15 @@ namespace DelayBudget
 		double holdFraction = 0.0;      // the rest, 0 .. 1 frame
 	};
 
+	// How long a queued frame waits after its timestamp (audit MED 7, re-audit MED 1): a capture
+	// card's FRAME-START time is followed by the transfer (the frame is received one signal frame
+	// later), then the hold; a callback / enqueue / film-clock time marks a frame already received:
+	// the hold alone. The transfer is counted once in every case.
+	inline double WaitAfterTimestampMs(double holdMs, double transferMs, bool timestampIsFrameStart)
+	{
+		return (std::max)(0.0, holdMs) + (timestampIsFrameStart ? (std::max)(0.0, transferMs) : 0.0);
+	}
+
 	// The FIFO slots a hold needs (gate 4, 2026-10-24): every frame that arrives during the hold
 	// waits in the queue, plus two slots of margin (the frame arriving while the head is taken, and
 	// arrival jitter; one slot overflowed in the harness at 60p).

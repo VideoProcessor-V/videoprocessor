@@ -249,6 +249,8 @@ if (inside) {
             vec4 dl = la - lbv;
             tg += wb * (1.0 - wb) * min(dl * dl, 4.0 * tg);
             synth = true;
+            // A still pixel is written as itself and stays out of the group's grain gain (re-audit).
+            if (stillHere) { outv = a0; synth = false; }
         } else {
 #ifdef FALLBACK_BLEND
             vec4 la = LOW_A(vec2(q) + vec2(0.5));

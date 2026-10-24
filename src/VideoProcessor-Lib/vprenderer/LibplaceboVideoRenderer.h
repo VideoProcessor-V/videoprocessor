@@ -238,6 +238,11 @@ private:
 		// the de-judder's phase, free of callback scheduling jitter (stream
 		// robustness, owner 2026-10-14).
 		int64_t arrivalQpc = 0;
+		// Re-audit MED 1 (2026-10-24): arrivalQpc is the capture hardware's FRAME-START time (the
+		// delay budget then waits the transfer before the hold). False: the callback time (a stale
+		// frame, a card without a hardware age), a pulldown film clock anchored on it, or a file
+		// frame's due time - the frame is already fully received: no transfer is added.
+		bool arrivalIsFrameStart = false;
 		// Frames were lost just before this one (capture missed frames, an
 		// overflow drop or a backlog flush): the frame before it is not paired
 		// with it, and the motion history starts over (owner 2026-10-14).
@@ -410,7 +415,8 @@ private:
 	QueueHold m_queueHold;
 	QueueHold CurrentQueueHold() const;
 	std::string m_queueHoldLogged;
-	unsigned m_heldExcessRun = 0;   // consecutive held heads a frame late (AlphaQueuePolicy::ShouldShedHeldExcess)
+	unsigned m_heldExcessRun = 0;
+	bool m_enqueueArrivalIsFrameStart = false;   // OnVideoFrame -> EnqueueFrame (capture callbacks are serial)   // consecutive held heads a frame late (AlphaQueuePolicy::ShouldShedHeldExcess)
 	std::atomic<uint64_t> m_droppedFrames{0};
 	std::atomic<uint64_t> m_conversionFailures{0};
 	std::atomic<size_t> m_activePictureLookaheadFrames{0};
