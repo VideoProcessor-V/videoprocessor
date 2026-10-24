@@ -26,8 +26,14 @@
 // a 12-bit tunnel picture, and debanding opponent planes is the wrong domain anyway.
 //
 // Policy: no libplacebo plane deband on DV tunnel pictures (the renderer drops deband_params for
-// those frames and says so once in the log and on the DV status line). VP's own debander and the
-// other entrance stages already treat the tunnel separately (and the nets never run on raw IPT).
+// those frames and says so once in the log and on the DV status line).
+//
+// KNOWN GAP (owner 2026-10-24: streamed DV still carries compression banding from its 10-bit base
+// layer): there is NO deband after the decode for the tunnel. VP's own debander (deband_vp,
+// VpDebander.h, default off) is also a pass on the SOURCE planes before libplacebo's decode
+// (every plane, the IPT chroma included), so it does not act on the decoded picture either; when
+// switched on it debands the opponent planes, the same wrong domain. A post-decode deband for DV
+// (e.g. on the intensity of the decoded, still-PQ picture) is future work, not built here.
 // GPU check to run (queued): the full_acc job with this policy - the 2020 green patch within one
 // code of the faithful result, and patch_max_err_codes <= 1.
 namespace DvTunnelPolicy
@@ -35,5 +41,8 @@ namespace DvTunnelPolicy
 	// True when libplacebo's plane deband must not run for this picture.
 	inline bool SkipPlaneDeband(bool dolbyVisionTunnelPicture) { return dolbyVisionTunnelPicture; }
 
-	inline const char* DebandStatus() { return "; deband off on the tunnel planes (12-bit IPT)"; }
+	inline const char* DebandStatus()
+	{
+		return "; libplacebo plane deband off on the tunnel (12-bit IPT; no deband after decode yet)";
+	}
 }

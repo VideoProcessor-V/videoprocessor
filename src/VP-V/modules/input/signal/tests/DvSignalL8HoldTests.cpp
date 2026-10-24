@@ -117,7 +117,7 @@ namespace Tests
 		{
 			Assert::IsTrue(DvTunnelPolicy::SkipPlaneDeband(true));
 			Assert::IsFalse(DvTunnelPolicy::SkipPlaneDeband(false));
-			Assert::IsTrue(std::string(DvTunnelPolicy::DebandStatus()).find("deband off") != std::string::npos);
+			Assert::IsTrue(std::string(DvTunnelPolicy::DebandStatus()).find("plane deband off") != std::string::npos);
 		}
 
 		TEST_METHOD(L10ParsesBothFormsAndRejectsBadBlocks)

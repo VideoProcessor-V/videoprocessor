@@ -131,8 +131,13 @@ an fp16 step is 1-2 codes at Ct ~0.31 / Cp ~0.69 and one Cp code moves a near-ze
 saturated primary by ~4-5 output codes (computed with the corpus' P5 matrices; fp16 truncation
 of the three planes reproduces the pattern: R 0-0.8, B 3.8-4.5). Fix: no libplacebo plane
 deband on DV tunnel pictures (`src/VP-V/modules/input/signal/DvTunnelPolicy.h`; logged once,
-"deband off on the tunnel planes" on the DV status line). To confirm on the GPU: the full_acc
-job with the fix, the patch within one code of the faithful result.
+"libplacebo plane deband off on the tunnel (12-bit IPT; no deband after decode yet)" on the DV
+status line). To confirm on the GPU: the full_acc job with the fix (the patch within one code of
+the faithful result) and, on the current code, the same job with deband off only.
+KNOWN GAP: no deband acts on the DECODED tunnel picture. VP's own debander (deband_vp, default
+off) also runs on the source planes before the decode (all planes, IPT chroma included), so
+streamed DV's base-layer compression banding is not debanded after decode; a post-decode DV
+deband is future work.
 
 dv_trims follows the tone-mapping target: the renderer hands libplacebo's target peak
 (sdr_target_nits for SDR outputs) to `DolbyVisionTrims::Select` every frame; below every
