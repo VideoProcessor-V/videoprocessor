@@ -52,10 +52,10 @@ new path. To find them all: `forwarding_headers` in the manifests.
 | `drive.led_measure` | `led/LedMeasurement.*`, `led/LedLookahead.*` | **SAFE (partial)** | `LedMeasurementHook.*` stays: its `.cpp` is compiled by `VideoProcessor-Test.vcxproj` |
 | `drive.led_compensation` (adaptive gamma) | `led/LedDriveModule.*`, `LedDriveArbiter.*`, `LedDriveHoldover.*` | **SAFE (partial)** | Forwarders for all three headers (renderer includes them). `LedRawTransfer.*` stays (test project compiles it); `shaders/LED compensation.glsl` stays (runtime shader folder) |
 | `scaling.rebase` | `KernelInverse.*` (kernel inverse helper) | **SAFE (partial)** | Forwarder `KernelInverse.h` (renderer; the entrance and source-resolution includers `SourceRebase.cpp` / `SourceResolutionMonitor.cpp` are left untouched and use it too). `SourceRebase.*` is entrance code (B3): BLOCKED. Also listed by `input.source_analysis`; both manifests updated |
-| `input.source_analysis` | subtitle detection: `SubtitleBoxDetector.*`, `SubtitleBarEvidence.h`, `SubtitleBoxLookahead.h`, `SubtitleOpaqueCardRefinement.h`, `SubtitleTemporalFill.h` | **SAFE (partial)** | Forwarders `SubtitleBoxDetector.h`, `SubtitleTemporalFill.h` (renderer `.cpp`), `SubtitleBoxLookahead.h` (`LibplaceboVideoRenderer.h`). Placement/renderer-side subtitle headers stay; `SubtitleDetectionOptimization.h` / `SubtitleGeneratedGrayStyle.h` stay (included by `RendererProfileConfig.h`, dv-l8) |
+| `input.source_analysis` | subtitle detection: `SubtitleBoxDetector.*`, `SubtitleBarEvidence.h`, `SubtitleBoxLookahead.h`, `SubtitleOpaqueCardRefinement.h`, `SubtitleTemporalFill.h` | **BILL-OWNED (not moved)** | All are in Bill's upstream `v1.4.02-beta`. Bill's code stays where he has it (owner, 2026-10-24); the move was made, then dropped. VP-side subtitle features are extracted into VP-V adapters instead (M2 plan, option (d)) |
 | `input.source_analysis` (rest) | `SceneDetector`, `ActivePicture*`, `AnalysisFrame`, `SourceResolution*` | not this round | Cross-cutting crop analysis with many includers; `SourceResolution*` is the srcres latch work. Candidate for the M1-M2 phase |
-| `scaling.geometry` | `NlsGeometryPolicy.*` | **SAFE (partial)** | Lib-only; includers `MadVRShaderRuntimeState.h` + tests. `Nls*.h`, `AnamorphicPresentation.h`, `AlphaSourceCropPolicy.*` stay (renderer / crop pipeline includers) |
-| `colour.tone_gamut` | `LibplaceboOutputPolicy.*` | **SAFE (partial)** | Lib-only; forwarder for the header (renderer). `LibplaceboRenderParameters.cpp` is compiled by the test project: BLOCKED; `ToneMappingTuning.h` is included by `RendererProfileConfig.h`: BLOCKED |
+| `scaling.geometry` | `NlsGeometryPolicy.*` | **BILL-OWNED (not moved)** | In Bill's upstream; move dropped. VP's NLS additions (`NlsMaskMapping.h`) stay VP's |
+| `colour.tone_gamut` | `LibplaceboOutputPolicy.*` | **BILL-OWNED (not moved)** | In Bill's upstream; move dropped. Its dead strict Full-G22 code is recorded as a note for Bill (findings item 6), not changed |
 | `output.calibration_lut` | `calibration/` (45 files: meter, ArgyllCMS, session, patterns) | **SAFE (partial)** | Lib-only; moved as a sub-folder `calibration_lut/calibration/`. Forwarders for `CalibrationPattern.h`, `CalibrationController.h`, `CalibrationSimulation.h`, `PatternCodes.h` (renderer, `RendererCaptureHarnessTests.cpp`, `IRenderer.h`) and `CalibrationConfig.h` (`MainConfigSchema.h`, config code, left untouched). `LibplaceboDisplayLut.cpp` is compiled by the test project: BLOCKED |
 | `input.capture` | capture unpack, early upload, DeckLink/Magewell, formatters | BLOCKED | Renderer `.cpp`s compiled by the test project; `video_frame_formatter` changed by dv-l8 |
 | `input.signal` | HDR inference, DV gate/handoff, DV unpack | BLOCKED | DV code; dv-l8 changes this module |
@@ -87,18 +87,21 @@ Branch `chore/early-migrations` was rebased onto `feat/skeleton` `fd60b650` (B3)
 
 | # | Commit | Module | Forwarders |
 |---|---|---|---|
-| 1 | `46a484f2` | `control.diagnostics`: CrashState, StateReport, StateReportSettings | 0 |
-| 2 | `0f356ed4` | `drive.projector_control`: LED controller, Barco/projector drivers, RS-232, connection test, clock, shutdown restore | 2 |
-| 3 | `01a11f92` | `drive.led_measure`: LedMeasurement, LedLookahead | 0 |
-| 4 | `19c9cdf7` | `drive.led_compensation`: LedDriveModule, arbiter, hold-over | 3 |
-| 5 | `5fdc8b27` | `scaling.rebase`: KernelInverse | 1 |
-| 6 | `75dce46d` | `input.source_analysis`: subtitle detection (5 files) | 3 |
-| 7 | `fcee365e` | `scaling.geometry`: NlsGeometryPolicy | 0 |
-| 8 | `72103e12` | `colour.tone_gamut`: LibplaceboOutputPolicy | 1 |
-| 9 | `c9464870` | `output.calibration_lut`: `calibration/` (45 files) | 5 |
+| 1 | `259cfa50` | `control.diagnostics`: CrashState, StateReport, StateReportSettings | 0 |
+| 2 | `570b1ee8` | `drive.projector_control`: LED controller, Barco/projector drivers, RS-232, connection test, clock, shutdown restore | 2 |
+| 3 | `9bfb55d6` | `drive.led_measure`: LedMeasurement, LedLookahead | 0 |
+| 4 | `9e055034` | `drive.led_compensation`: LedDriveModule, arbiter, hold-over | 3 |
+| 5 | `648da813` | `scaling.rebase`: KernelInverse | 1 |
+| 6 | `d2517eb1` | `output.calibration_lut`: `calibration/` (45 files) | 5 |
 
+Dropped on 2026-10-24 (owner principle: Bill's code stays where he has it): the moves of subtitle
+detection, NlsGeometryPolicy and LibplaceboOutputPolicy, all in Bill's upstream, and the two fixes
+that edited Bill's code (subtitle temporal-fill margins; the output policy's dead strict Full-G22
+code). Both fixes are now notes for Bill in the findings doc. `tools/migration_path_map.py` now fails
+the drift check if a file in Bill's upstream beta is moved or owned by a module. The pre-drop
+branch is kept locally as `backup/early-migrations-pre-bill-drop`.
 Verification plan (coordinator, 2026-10-24): an x64 Release build at every migration commit; the
-full CPU suite (single-threaded, TRX) at commit 5 and at commit 9; one subtitle probe tool build;
+full CPU suite (single-threaded, TRX) at commit 5 and at commit 6 (the last move); one subtitle probe tool build;
 then the `fix:` commits (see `module-findings-2026-10-24.md`) built and tested at the branch tip.
 The status of each run is in the hand-off report. A commit is marked verified here only after its
 run is green.
@@ -108,7 +111,7 @@ run is green.
 **Order.** Merge after B3 (`feat/skeleton` at or after `fd60b650`, already the base) and after any
 branch that adds includes of the moved headers. None of the active branches does: checked against
 feat/skeleton, feat/net-runner, fix/vpscalerender-motion, feat/dv-l8, feat/settings-preview and
-fix/r6-baseline. Merge the migration commits (1-9 plus the docs commits) as one unit. The `fix:`
+fix/r6-baseline. Merge the migration commits (1-6 plus the docs commits) as one unit. The `fix:`
 commits after them can merge with them or separately, but never before them.
 
 **Expected conflicts: none textual.** `git merge-tree` against every active branch tip is clean.
@@ -122,9 +125,9 @@ Generated files and checks to re-run after each merge:
 3. The README settings blocks: run `python -I tools/vpv_tests/seed_module_readmes.py` after a branch
    that changes `slots.json`, because this branch changed the generator's link depth.
 4. A branch that adds a new `#include` of a moved header by its old path still builds while that
-   header has a forwarder (15 of them). For the headers without a forwarder (CrashState,
+   header has a forwarder (11 of them). For the headers without a forwarder (CrashState,
    StateReport, LedController, ProjectorDriver, BarcoAsciiDriver, LedClock, LedShutdownRestore,
-   LedMeasurement, LedLookahead, the subtitle detection helpers, NlsGeometryPolicy and most of
+   LedMeasurement, LedLookahead and most of
    `calibration/`), it fails to compile. Switch such an include to the `<VP-V/...>` path given in
    the path map.
 5. After the merge, build the solution and run the CPU suite once on the merged tip.

@@ -479,3 +479,41 @@ delay budget and look-ahead. Every other documented "Fallbacks engaged" entry is
 - the DV hand-off window derived from the measured rate;
 - motion/deband/texture defaults across Config, renderer, cfg and docs;
 - no races in the queue-hold paths.
+
+---
+
+# Part 3: efficiency of the migrated modules (findings only, no code changed)
+
+This was a reading-only pass: nothing was built or measured. Savings are estimates from loop bounds,
+pixel counts x taps and file sizes x frequency; each module README's "Cost" section says how each
+was estimated. Ranked by estimated saving. "Bill" marks code that stays Bill's (notes for Bill, or a
+VP-V adapter).
+
+| # | Module | Finding | Est. saving (how) | Fix | Byte-identical | Risk |
+|---|---|---|---|---|---|---|
+| 1 | `drive.led_measure` | `LedMeasurementHook::Collect` reads the slot submitted that same frame. On D3D11, `pl_buf_poll` always says "ready" and `pl_buf_read` is CopyResource plus a blocking Map, so the render thread waits for the whole GPU frame. The ring of 4 never fills and `Dropped` never counts | Up to one GPU frame time of render-thread wait per output frame (call order, libplacebo 7.360.1 d3d11 source). Confirm with QPC around `Collect` | A VP-owned staging buffer plus an event query, mapped with DO_NOT_WAIT 1-3 frames later; or collect before the next submit | Picture: yes in log_only/script; compensate stats arrive 1-3 frames later | Medium (check Beta 377 too) |
+| 2 | `scaling.rebase` (VP-side, legacy `SourceResolutionMonitor`) | `Analyse` holds the monitor mutex through two `KernelInverse::FitTile` calls (about 24 ms each at 2160 lines); the render thread takes that mutex 3-5 times per frame | Render stalls up to about 50 ms, twice a second, while a 2:1 source is gathered or declared (24 M MACs per tile at 1 ns per tap) | Fit outside the lock; gate the fit on `rebase_kernel_match` and `source_resolution` (about 100 ms CPU per second when unused); several accumulators (3-4x) | Yes | Low |
+| 3 | `drive.led_measure` | The full-coverage peak is computed in compensate and picture_only, where nothing reads `FrameStats::maximum` | 2-3 ms CPU per new 4K frame (`LookaheadPeakCostAt4K`), i.e. 48-72 ms/s at 24p, plus a GPU peak pass of 0.05-0.35 ms per frame | Enable `peakFullCoverage` only in modes that read it | Yes | Low |
+| 4 | `output.calibration_lut` (calibration run) | Patch wait: `GetCalibrationOutput` try-locks `renderMutex` 100 x `Sleep(2)`, while the render thread holds it through the vsync-paced present | 0.2-1.6 s wall time per patch (100 sleeps x timer resolution), so minutes per run | Read the generation atomics only, or use the cache while patterns are active | Yes | Low |
+| 5 | `input.source_analysis` (Bill) | The near-bar retry re-reads every pixel; `Sample()` re-validates with 64-bit divisions on every call; `Measure` scans the same planes twice on one path; caption probes build a fresh detector (4.7 MB zero-fill) on the render thread | Worker 1-4 ms per no-subtitle frame; 1-3 ms per pass for non-planar formats; one whole `Analyze` (2-6 ms) on that path; 0.5-1.5 ms render-thread spikes | Use the existing `shared_samples` mode (tested identical); unchecked sampler after one validation; reuse the probe result; keep a member detector | Yes | Low (notes for Bill) |
+| 6 | `drive.led_compensation` | The identity compensation pass runs (log_only, dry run, gain 1 with no boost or lift) | About 66 MB per frame at 2560x1600: 0.07 ms on the 3090, 0.35 ms on the 3050 Ti, double at 4K | Don't push the hook when it is the identity | Yes while measurement runs | Low |
+| 7 | `scaling.rebase` (GPU, legacy `SourceRebase`) | Kernel-inverse passes fetch about 311 M texels per frame (4K->1080, 50 taps) | 0.3-0.5 ms per frame on the 3090, 2-3 ms on the 3050 Ti (about 10x fewer fetches with shared-memory tiling) | Shared-memory tiling | Yes in principle (chart test) | Medium |
+| 8 | `output.calibration_lut` | The VP stage adds a full-frame pass; libplacebo folds the LUT into its colour pass | 0.07-0.14 ms on the 3090, 0.34-0.7 ms on the 3050 Ti (bytes per frame / bandwidth) | Fold the clamp, LUT and restore into the compensation hook when the slots are adjacent | No (one fp16 rounding fewer) | Medium |
+| 9 | `output.calibration_lut` | LUT load on the render thread: one `istringstream` per line for directive checks | 20-50 ms (33^3) to 0.15-0.4 s (65^3) per load or reload (lines x stream cost) | One hand-written pass; skip the re-read when the file is unchanged; optionally parse on a worker | Yes | Low |
+| 10 | `drive.led_measure` | Slot off still runs the look-ahead; raw grid through `Sample()`; grain path recomputes block means 9 times; per-frame rebuild of the peak accumulator and tables | 2-3 ms per new 4K frame (slot off); 0.25-0.5 ms; 0.03-0.15 ms GPU; 20-60 µs | No predictions with the slot off; row readers; block means once; cache by geometry | Yes | Low / low-medium |
+| 11 | `control.diagnostics` | Crash state rewritten every second: two opens and two forced flushes, 2-60 KB, 86,400 times a day | 0.2-5 GB/day of writes plus antivirus scans (size x frequency) | One handle; skip unchanged writes (keep the power-loss flush) | Yes / no (the timestamp header) | Low |
+| 12 | `colour.tone_gamut` (Bill) | The rendered-output capture (screenshot or report thumbnail) analyses and hashes 16 MB on the render thread | 30-80 ms per capture at 2560x1600 | Move the stats, FNV, SHA and JSON to the capture worker | Yes | Low |
+| 13 | `scaling.geometry` (Bill), `colour.tone_gamut` (Bill), LED, calibration | Per-frame strings: parameter maps, string-stream signatures, status labels, compensate log lines built and discarded | 3-40 µs per frame each, about 1-2.5 ms CPU per second for NLS | Cache per generation; compare small keys; format only when logged | Yes | Low |
+
+**Cost when off:**
+- LED disabled: zero (log_only and picture_only still run both GPU passes, the stalling readback and
+  the identity pass).
+- Calibration LUT absent: a few ns per frame.
+- Subtitle detection off (`type` off/classic): zero detection. It runs only for `black` and
+  `generated_gray`.
+- NLS off: under 1 µs.
+- The output policy and the crash-state writer have no off; they cost µs per frame and the
+  per-second write.
+
+Shared with the separate pipeline-wide audit: `SourceResolutionMonitor` and `AdaptiveDownscale` use
+the same blocking poll/read pattern as item 1.

@@ -11,6 +11,50 @@ Estimates are **agent wall-clock hours**. Each covers the mechanical move, an in
 Release build (about 10-15 min) and its share of the verification below. They are not
 human-developer time.
 
+## Bill's code is never moved (owner principle, 2026-10-24)
+
+Bill's code stays where he has it, and VP builds around it. A file that exists in Bill's current
+upstream beta (`origin/v1.4.02-beta`) is never moved into `src/VP-V/modules`. The drift check
+enforces this: `tools/migration_path_map.py` fails on a move or module-owned file that
+`git cat-file -e origin/<beta>:<path>` finds.
+
+Where a VP feature lives inside one of Bill's files, M2 uses **option (d)**:
+
+- extract the VP part into a VP-V adapter (a module-owned header or source under
+  `src/VP-V/modules/<unit>/<slot>/`);
+- leave Bill's file in place, with at most a call into the adapter.
+
+A module's `live_files` may still list Bill's files, as code the slot uses. That is not ownership.
+
+The early moves of subtitle detection, `NlsGeometryPolicy` and `LibplaceboOutputPolicy` were
+dropped for this reason. Fixes inside Bill's files become notes for Bill (findings doc).
+
+Bill-owned files in the steps below (checked 2026-10-24 against `origin/v1.4.02-beta` b1415da4).
+These stay put; only the VP parts move:
+
+| Step / slot | Bill's files (stay) | VP files (move) |
+|---|---|---|
+| 3 `output.calibration_lut` | `LibplaceboDisplayLut.*`, `LibplaceboCalibrationLutPolicy.h` | none: the VP stage (`CalibrationLutStage`) and `calibration/` already moved |
+| 4 `colour.extended_range` | none | `ExtendedRange.*` |
+| 5 `output.dither` | none | `SigmaDeltaDomain.h`, `OutputEncodingRepair.*`, `CustomHookChain.*` (the shader stays in `shaders/`) |
+| 6 `colour.sdr_tone_shape` | none | `SdrToneShape.h`, `DolbyVisionTrims.h` |
+| 7 `colour.tone_gamut` | `LibplaceboRenderParameters.cpp`, `LibplaceboOutputPolicy.*`, `ToneMappingTuning.h` (all) | adapters only (option (d)) |
+| 8 `scaling.output` | none | `AdaptiveDownscale.*`, `DownscaleLight.h` |
+| 9 `scaling.geometry` | `NlsGeometryPolicy.*`, `NlsHookRecovery.h`, `AnamorphicPresentation.h`, `AlphaSourceCropPolicy.*`, `NLS.glsl`, `NLSPlus.glsl` | `NlsMaskMapping.h` |
+| 10 `input.source_analysis` | `ActivePictureAnalyzer.*`, `SceneDetector.*`, `AnalysisFrame.*`, subtitle detection | `SourceResolutionDetector.*`, `SourceResolutionMonitor.*` |
+| 11 `repair.deband` | the renderer host | `VpDebander.*` |
+| 12 `repair.texture_restore` | none | `TextureRestore.*`, `DetailPulse.*` |
+| 13 `scaling.rebase` | the renderer host | `SourceRebase.*` |
+| 14 `input.signal` | `HDRData.cpp`, `ColorSpace.cpp`, `EOTF.cpp`, `Bt2020SignalController.h` | `HdrInference.*`, DV gate/hand-off, `GpuDolbyVisionTunnelUnpack.*` |
+| 15 `input.capture` | `CaptureInput.*`, `AlphaNativeRgbIngress.h`, `VideoConversionOverride.cpp`, `blackmagic_decklink/`, `magewell/`, `video_frame_formatter/` | `GpuCaptureUnpack.*`, `GpuRgbUnpack.*`, `UploadReuse.h`, `EarlyUpload.*` |
+| 16-17 motion | `MotionConfig.h`, `TemporalRenderer.h` | the de-judder, NVOF, interpolator and warp files |
+| 18 queue/timing, presentation | `QueueConfiguration.h`, `CaptureFrameQueue.h`, `VideoTimingController.cpp`, `TimingClock.cpp`, `UnifiedProfileRuntime.cpp`, `AlphaQueuePolicy.h`, `AlphaPresentationTelemetry.cpp`, `DisplayRefreshRatePolicy.cpp`, `NativeStatsOverlayBitmap.h` | `QueueLatency.h`, `QueueLookahead.h`, `PulldownDetector.h`, `RenderAheadPolicy.h`, `OpenLoopDisplayRate.h` |
+| 19 `control.config` | `ConfigFile.cpp`, `ConfigSchema.h`, `MainConfigSchema.h`, `RendererProfileConfig.h`, the Config app (all) | adapters only: VP-V's own config section (`src/VP-V/config`) |
+| `control.diagnostics` (rest) | `DebugLog.h`, `StatsOverlayWindow.cpp` | none |
+
+The estimates below still hold for the VP files. For the Bill-owned rows, budget about half the
+step for adapter work instead of moves.
+
 ## Why these modules wait for M2
 
 1. **`VideoProcessor-Test.vcxproj.vcxproj`** compiles most `vprenderer/*.cpp` units directly. While
@@ -20,7 +64,7 @@ human-developer time.
    settings work.
 3. **Includers on active branches.** `LibplaceboVideoRenderer.cpp`/`.h`, `ConfigEditorWindow.cpp`,
    `IRenderer.h`, `MainConfigSchema.h` and `RendererCaptureHarnessTests.cpp` include almost
-   everything. The early moves left 15 forwarding headers for them.
+   everything. The early moves left 11 forwarding headers for them.
 
 After M1, once every feature branch has merged and no branch is open against the test project,
 blocker 1 disappears. Blockers 2 and 3 go away as each area's work lands. M2 is a short freeze
@@ -134,21 +178,17 @@ step 0, before step 1. Verify with build, the LED test classes and a CPU suite.
 
 ## Forwarding headers: when each one goes
 
-All 15 are removed in **step 0**: their includers are switched to the new paths in the same commit.
+All 11 are removed in **step 0**: their includers are switched to the new paths in the same commit.
 Fallback: if step 0 has to be split, remove each one with its includer.
 
 | Forwarding header (legacy path) | Module | Includers that keep it alive | Removed |
 |---|---|---|---|
 | `src/VideoProcessor-Lib/KernelInverse.h` | `scaling.rebase` | `LibplaceboVideoRenderer.cpp`, `SourceRebase.cpp`, `SourceResolutionMonitor.cpp` | step 0 (fallback: step 13) |
-| `src/VideoProcessor-Lib/SubtitleBoxDetector.h` | `input.source_analysis` | `LibplaceboVideoRenderer.cpp` | step 0 |
-| `src/VideoProcessor-Lib/SubtitleTemporalFill.h` | `input.source_analysis` | `LibplaceboVideoRenderer.cpp` | step 0 |
-| `src/VideoProcessor-Lib/SubtitleBoxLookahead.h` | `input.source_analysis` | `LibplaceboVideoRenderer.h` | step 0 |
 | `src/VideoProcessor-Lib/led/LedDriveModule.h` | `drive.led_compensation` | `LibplaceboVideoRenderer.cpp` | step 0 |
 | `src/VideoProcessor-Lib/led/LedDriveArbiter.h` | `drive.led_compensation` | `LibplaceboVideoRenderer.cpp` | step 0 |
 | `src/VideoProcessor-Lib/led/LedDriveHoldover.h` | `drive.led_compensation` | `LibplaceboVideoRenderer.cpp` | step 0 |
 | `src/VideoProcessor-Lib/led/SerialPort.h` | `drive.projector_control` | `ConfigEditorWindow.cpp` | step 0 (fallback: step 19) |
 | `src/VideoProcessor-Lib/led/ConnectionTest.h` | `drive.projector_control` | `ConfigEditorWindow.cpp` | step 0 (fallback: step 19) |
-| `src/VideoProcessor-Lib/vprenderer/LibplaceboOutputPolicy.h` | `colour.tone_gamut` | `LibplaceboVideoRenderer.cpp` | step 0 |
 | `src/VideoProcessor-Lib/calibration/CalibrationPattern.h` | `output.calibration_lut` | `LibplaceboVideoRenderer.cpp`, `IRenderer.h` | step 0 |
 | `src/VideoProcessor-Lib/calibration/CalibrationController.h` | `output.calibration_lut` | `LibplaceboVideoRenderer.cpp`, `RendererCaptureHarnessTests.cpp` | step 0 |
 | `src/VideoProcessor-Lib/calibration/CalibrationSimulation.h` | `output.calibration_lut` | `LibplaceboVideoRenderer.cpp`, `RendererCaptureHarnessTests.cpp` | step 0 |
