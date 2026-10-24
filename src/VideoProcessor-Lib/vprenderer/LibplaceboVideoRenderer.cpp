@@ -5652,8 +5652,22 @@ struct LibplaceboVideoRenderer::Impl
 	}
 
 	// Runs the active entrance stages on `frame` for one call site.
+	unsigned long long entranceStageRuns = 0;     // every call (any path): the input side's cost unit
+	unsigned long long entranceSourceFrames = 0;  // distinct source frames drawn
+	unsigned long long entranceCostLoggedAt = 0;
+	uint64_t entranceLastSourceSequence = 0;
+	void NoteEntranceSourceFrame(uint64_t sequence)
+	{
+		if (sequence != 0 && sequence != entranceLastSourceSequence)
+		{
+			entranceLastSourceSequence = sequence;
+			++entranceSourceFrames;
+		}
+	}
 	void RunEntrance(EntranceRun& run, pl_frame& frame)
 	{
+		if (!pipelineSlots.ActiveEntrance().empty())
+			++entranceStageRuns;
 		if (run.path != EntrancePath::Main || run.phasePicture)
 			++entranceGeneration;   // the modules' output textures are about to change
 		for (PipelineSlots::Id id : pipelineSlots.ActiveEntrance())
@@ -5713,10 +5727,13 @@ struct LibplaceboVideoRenderer::Impl
 	void LogEntranceCounters()
 	{
 		static GeneralRate::LogInterval entranceLog = GeneralRate::LogInterval::ForFrames(2400);
-		// B3 on: also every 120 input-side runs, A or B ahead (the harness reads the counters in short runs).
-		const unsigned long long inputRuns = entranceRuns + entranceOnceB;
-		if (entranceLog.DueOr(entranceRuns == 1 || (EntranceOnce() && inputRuns % 120 == 0)))
+		// Also every 240 input-side runs (the harness reads the counters in short runs; the cost
+		// criterion of B3 compares runs per source frame with it on and off).
+		const bool batch = entranceStageRuns >= entranceCostLoggedAt + 120;
+		if (entranceLog.DueOr(entranceRuns == 1 || batch))
 		{
+			entranceCostLoggedAt = entranceStageRuns;
+			DebugLog::Log("Entrance cost: %llu input-side runs for %llu source frames", entranceStageRuns, entranceSourceFrames);
 			if (EntranceOnce())
 				DebugLog::Log("Entrance stages: %llu runs, %llu repeats reused (once per source frame); entrance once (B3): "
 					"A %llu, B ahead %llu, ring reuses %llu, pictures from processed planes %llu, fallbacks %llu",
@@ -5747,14 +5764,16 @@ struct LibplaceboVideoRenderer::Impl
 		return true;
 	}
 
-	// The ring's key for a source frame: stateless - the frame and the re-base alone (so B ahead
-	// and A later share it); else everything the stages read (EntranceEpochFor, no texture identity).
+	// The ring's key for a source frame: the frame (crop, range, colour - not the texture it was
+	// uploaded into), the re-base and the active stages. The stages' per-frame parameters (the
+	// readings, the vector field) are deliberately NOT in it: a source frame's processed picture,
+	// once made (as A, or ahead as B with B's own field), is that frame's picture for its whole
+	// time - the input side once per source frame, B ahead identical to B drawn as A. Any settings
+	// apply invalidates the ring (UpdatePipelineSlots).
 	uint64_t EntranceRingKey(const pl_frame& raw) const
 	{
-		if (!EntranceStatelessNow())
-			return EntranceEpochFor(raw, false);
 		EntranceEpoch::Key key;
-		key.Add(0x5354415445ull);   // a stateless key never equals a full one
+		key.Add(0x5354415445ull);
 		EntranceEpoch::AddFrame(key, raw, false);
 		key.Add(rebaseFactor).Add(rebaseFactorX);
 		for (PipelineSlots::Id id : pipelineSlots.ActiveEntrance())
@@ -5911,15 +5930,33 @@ struct LibplaceboVideoRenderer::Impl
 	{
 		if (nextSequence == 0)
 			return nullptr;
-		// Stateless: B ahead is B's own A (one run per source frame); else a per-picture B.
-		const bool stateless = EntranceStatelessNow();
-		const EntranceStages::Role role = stateless ? EntranceStages::Role::A : EntranceStages::Role::B;
 		const uint64_t key = EntranceRingKey(rawB);
-		if (const OwnedEntrance* hit = entranceRing.Find(nextSequence, key, role))
+		// B already processed as its own A (ahead, or stateless).
+		if (const OwnedEntrance* hit = entranceRing.Find(nextSequence, key, EntranceStages::Role::A))
 		{
 			++entranceOnceReused;
 			return hit;
 		}
+		const bool stateless = EntranceStatelessNow();
+		if (!stateless)
+		{
+			// (i) Stateful stages (the debander's hold, the detail history): B is processed exactly
+			// as its own draw will process it - with B's own vector field, estimated ahead (B, C)
+			// while A's consumers read the snapshot of (A, B) - and kept as B's A: exact continuity
+			// at the source-frame boundary.
+			std::string why;
+			if (EntranceOnceFieldAhead(aSequence, nextSequence, why))
+				return EntranceProcessBAsA(rawB, nextSequence, key);
+			// (ii) The fallback, visible: B per picture (A's decisions as a repeat, never advancing).
+			EntranceOnceFallback("B's vectors not ready ahead (" + why + "); B per picture");
+		}
+		const EntranceStages::Role role = stateless ? EntranceStages::Role::A : EntranceStages::Role::B;
+		if (!stateless)
+			if (const OwnedEntrance* hit = entranceRing.Find(nextSequence, key, role))
+			{
+				++entranceOnceReused;
+				return hit;
+			}
 		EntranceRun run;
 		run.path = EntrancePath::Extra;
 		run.factorX = rebaseFactorX;
@@ -5932,6 +5969,92 @@ struct LibplaceboVideoRenderer::Impl
 		if (!StoreEntranceOwned(nextSequence, key, role, rawB, frame))
 			return nullptr;
 		return entranceRing.Find(nextSequence, key, role);
+	}
+
+	// (i) B's own vector field ahead: the de-judder's estimate ahead (Dejudder::AheadSchedule, as
+	// the rendered warp's extras use it) run for B3 - A's warp inputs snapshotted, C uploaded, (B, C)
+	// estimated. A's remaining pictures read the snapshot (entranceOnceSnapFor). At B's own frame
+	// the estimate is consumed (no second estimate). False: why not (the schedule's reason).
+	uint64_t entranceOnceSnapFor = 0;      // A whose (A, B) warp inputs are in the snapshot
+	uint64_t entranceOnceSnapEpoch = 0;
+	bool entranceOnceAheadNow = false;     // set when this call made the estimate (the extras switch to the snapshot)
+	uint64_t entranceOnceAheadFailedFor = 0;
+	std::string entranceOnceAheadFailure;
+	bool EntranceOnceSnapshotFor(uint64_t aSequence) const
+	{
+		return dejudder && aSequence != 0 && entranceOnceSnapFor == aSequence && motionValidity.Current(entranceOnceSnapEpoch) &&
+			dejudder->SnapField() && dejudder->SnapFrameTrust();
+	}
+	bool EntranceOnceFieldAhead(uint64_t aSequence, uint64_t bSequence, std::string& why)
+	{
+		if (!dejudder)
+		{
+			why = "no motion estimate";
+			return false;
+		}
+		if (EntranceOnceSnapshotFor(aSequence) && dejudderLiveFieldFrom == bSequence)
+			return true;   // already estimated ahead for this A
+		if (entranceOnceAheadFailedFor == aSequence)
+		{
+			why = entranceOnceAheadFailure;   // tried once for this A (never every refresh)
+			return false;
+		}
+		const bool snapshotInUse = EstimateAhead(aSequence, bSequence, true, nullptr, true);
+		if (snapshotInUse)
+		{
+			entranceOnceSnapFor = aSequence;
+			entranceOnceSnapEpoch = motionValidity.Epoch();
+			entranceOnceAheadNow = true;
+		}
+		if (snapshotInUse && dejudderAhead.LastReason() == Dejudder::AheadSchedule::Reason::Ahead && dejudderLiveFieldFrom == bSequence)
+			return true;
+		why = Dejudder::AheadSchedule::Name(dejudderAhead.LastReason());
+		// A failure after the snapshot (upload, estimate) is not retried for this A (it would redo
+		// the copy every refresh); a skip before it (C not queued yet) is retried on the next picture.
+		if (snapshotInUse)
+		{
+			entranceOnceAheadFailedFor = aSequence;
+			entranceOnceAheadFailure = why;
+		}
+		return false;
+	}
+
+	// B through the main (stateful) path as its own A: B's field and sequence in the stages'
+	// parameters (the readings stay A's: a one-frame lag of the bitrate/level readings), the hold
+	// and the history advanced on B once. Kept as B's A in the ring.
+	const OwnedEntrance* EntranceProcessBAsA(const pl_frame& rawB, uint64_t bSequence, uint64_t key)
+	{
+		const VpDebander::Params savedDeband = vpDebandParams;
+		const DetailPulse::Params savedPulse = detailPulseParams;
+		const TextureRestore::Params savedRestore = textureRestoreParams;
+		const bool bField = dejudder && dejudderLiveFieldFrom == bSequence && motionValidity.Current(dejudderEstimatedEpoch);
+		vpDebandParams.field = bField ? dejudder->Field() : nullptr;
+		vpDebandParams.grainError = bField ? dejudder->GrainError() : nullptr;
+		vpDebandParams.sequence = bSequence;
+		detailPulseParams.field = bField ? dejudder->Field() : nullptr;
+		detailPulseParams.sequence = bSequence;
+		textureRestoreParams.field = bField ? dejudder->Field() : nullptr;
+		textureRestoreParams.sequence = bSequence;
+		EntranceRun run;
+		run.path = EntrancePath::Main;
+		run.factorX = rebaseFactorX;
+		run.factorY = rebaseFactor;
+		run.sequence = bSequence;
+		run.source = &rawB;
+		run.nextSequence = 0;   // the detail look-ahead (optional) is not taken ahead
+		run.image = &rawB;
+		run.aFrame = rawB;
+		pl_frame frame = rawB;
+		RunEntrance(run, frame);
+		++entranceGeneration;   // the modules' slot-0 textures now hold B: the plain cache must not reuse A's
+		vpDebandParams = savedDeband;
+		detailPulseParams = savedPulse;
+		textureRestoreParams = savedRestore;
+		++entranceOnceB;
+		LogEntranceCounters();
+		if (!StoreEntranceOwned(bSequence, key, EntranceStages::Role::A, rawB, frame))
+			return nullptr;
+		return entranceRing.Find(bSequence, key, EntranceStages::Role::A);
 	}
 
 	// A crossfade between source resolutions renders both paths per picture: the per-picture
@@ -5955,6 +6078,13 @@ struct LibplaceboVideoRenderer::Impl
 		rawB.planes[0].texture = vpPhaseB.luma;
 		rawB.planes[1].texture = vpPhaseB.chroma;
 		const OwnedEntrance* pb = EntranceProcessedB(rawB, nextSequence, sequence);
+		// (i) the estimate ahead replaced the live (A, B) field: A's picture reads the snapshot.
+		if (vpPhaseVectors && EntranceOnceSnapshotFor(sequence) && dejudderLiveFieldFrom != sequence)
+		{
+			vpPhaseMotion.field = dejudder->SnapField();
+			vpPhaseMotion.frameTrust = dejudder->SnapFrameTrust();
+			vpPhaseMotion.subField = dejudder->SnapSubField();
+		}
 		if (!pb)
 			return false;
 		if (pa->identity && pb->identity)
@@ -6996,6 +7126,7 @@ struct LibplaceboVideoRenderer::Impl
 	// The picture's inputs (raw A and B, the motion, the phase). B3 on: the picture is made in the
 	// draw from the processed A and B (vpPhaseDeferred; EntranceOncePhasePicture), else here.
 	bool vpPhaseDeferred = false;
+	bool vpPhaseVectors = false;     // the picture uses the pair's vectors (live, or B3's snapshot)
 	Dejudder::Planes vpPhaseA, vpPhaseB;
 	Interpolator::Motion vpPhaseMotion;
 	float vpPhaseT = 0.0f;
@@ -7103,12 +7234,15 @@ struct LibplaceboVideoRenderer::Impl
 		b.luma = dejudderNextTextures[0];
 		b.chroma = dejudderNextTextures[1];
 		Interpolator::Motion motion;
-		const bool vectors = DejudderLiveFieldFor(sourceSequence);
+		// B3 (i): after B's field was estimated ahead, A's (A, B) inputs are the snapshot.
+		const bool snapshot = !DejudderLiveFieldFor(sourceSequence) && EntranceOnce() && EntranceOnceSnapshotFor(sourceSequence);
+		const bool vectors = DejudderLiveFieldFor(sourceSequence) || snapshot;
+		vpPhaseVectors = vectors;
 		if (vectors)
 		{
-			motion.field = dejudder->Field();
-			motion.frameTrust = dejudder->FrameTrust();
-			motion.subField = dejudder->SubField();
+			motion.field = snapshot ? dejudder->SnapField() : dejudder->Field();
+			motion.frameTrust = snapshot ? dejudder->SnapFrameTrust() : dejudder->FrameTrust();
+			motion.subField = snapshot ? dejudder->SnapSubField() : dejudder->SubField();
 			motion.minTrustedShare = dejudder->GetSettings().minTrustedShare;
 			for (int slot = 0; slot < 2; ++slot)
 				if (dejudderMaskSequence[slot] == nextSourceSequence && motionValidity.Current(dejudderMaskEpoch[slot]))
@@ -16762,12 +16896,13 @@ struct LibplaceboVideoRenderer::Impl
 	// estimate. The next frame's upload is left out: its CPU copy runs between the
 	// timestamps with the GPU idle and was measured as GPU time (p95 20-37 ms on a
 	// 3050 Ti for an estimate of a few ms; render-ahead follow-up 2026-10-17).
+	// forEntranceOnce: B3's B ahead (any path: its consumers read the snapshot; ProcessedB).
 	bool EstimateAhead(uint64_t sourceSequence, uint64_t nextSourceSequence, bool renderedPath,
-		AlphaFrameGpuTimingScope* timing = nullptr)
+		AlphaFrameGpuTimingScope* timing = nullptr, bool forEntranceOnce = false)
 	{
 		Dejudder::AheadSchedule::Conditions c;
 		c.enabled = activeSettings.dejudderEstimateAhead;
-		c.renderedWarp = activeSettings.dejudderWarpRendered && renderedPath;
+		c.renderedWarp = forEntranceOnce || (activeSettings.dejudderWarpRendered && renderedPath);
 		c.active = dejudder && dejudderReason == DejudderPolicy::Reason::Active &&
 			dejudderNextTextures[0] && (dejudderNextTextures[1] || dejudderLayout.rgb);
 		c.source = sourceSequence;
@@ -17514,8 +17649,23 @@ struct LibplaceboVideoRenderer::Impl
 				Dejudder::Planes processedA, processedB;
 				const pl_frame* processedFrame = nullptr;
 				if (EntranceOnce())
+				{
+					entranceOnceAheadNow = false;
 					(void)EntranceOnceExtra(image, f.sourceSequence, f.nextSourceSequence, interpolating, a, processedA,
 						processedB, processedFrame);
+					if (entranceOnceAheadNow)
+					{
+						// B3 (i) estimated (B, C) ahead: this and the remaining extras read (A, B)'s snapshot,
+						// as after the rendered warp's own estimate ahead.
+						aheadTried = true;
+						warpField = dejudder->SnapField();
+						warpTrust = dejudder->LookAheadTrust();
+						warpSub = dejudder->SnapSubField();
+						if (warpCamera) warpCamera = dejudder->SnapCamera();
+						if (warpMask) warpMask = dejudder->SnapPixelMask();
+						if (warpVectorOk) warpVectorOk = dejudder->SnapVectorOk();
+					}
+				}
 				if (interpolating)
 				{
 					// Stage A: A and B (the next frame's planes, uploaded for the estimate)
@@ -17576,6 +17726,7 @@ struct LibplaceboVideoRenderer::Impl
 					run.factorY = rebaseFactor;
 					run.sequence = f.sourceSequence;
 					RunEntrance(run, image);
+					LogEntranceCounters();
 				}
 				// Hunt 3 F3: the extra's path being left (the crossfade runs on every present of the
 				// fade, not only on A's), with the same stages (EntranceCrossfadeFrom).
@@ -24650,6 +24801,7 @@ struct LibplaceboVideoRenderer::Impl
                 pl_frame frame = source;
                 // Stage B: the picture at this refresh's phase in place of A's planes (a
                 // composed picture keeps A: hold). Everything after runs on it unchanged.
+                NoteEntranceSourceFrame(sourceSequence);
                 bool phasePicture = vpPhasePlanesValid && source.num_planes == 2 &&
                     source.planes[0].texture == textures[0] && source.planes[1].texture == textures[1];
                 // B3 (pipeline_entrance_once): the picture from the processed A and B, no stages after.
@@ -31533,6 +31685,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 					double oldestBeforeMs = 0.0;
 					double oldestAfterMs = 0.0;
 					bool recoveredBacklog = false;
+					bool heldBacklog = false;
 					{
 						std::lock_guard<std::mutex> queueGuard(m_queueMutex);
 						queueBefore = m_frameQueue.size();
@@ -31571,6 +31724,19 @@ void LibplaceboVideoRenderer::RenderLoop()
 							renderCycleMs,
 							queueRateHz,
 							queueFixes);
+						// VP-V delay budget: a held queue sheds a backlog beyond its hold (gate 5).
+						const QueueHold heldQueue = CurrentQueueHold();
+						if (!recoveredBacklog && heldQueue.active && qpcAvailable && !currentFileFrame && !m_frameQueue.empty() &&
+							!m_frameQueue.front().fileFrame)
+						{
+							const QueuedFrame& head = m_frameQueue.front();
+							const int64_t since = head.arrivalQpc != 0 ? head.arrivalQpc : head.enqueueQpc;
+							const double headAgeMs = since > 0 && nowQpc > since ?
+								static_cast<double>(nowQpc - since) * 1000.0 / static_cast<double>(qpcFrequency.QuadPart) : 0.0;
+							heldBacklog = AlphaQueuePolicy::ShouldShedHeldBacklog(queueBefore, recoveryTarget, headAgeMs,
+								heldQueue.holdMs, queueRateHz);
+							recoveredBacklog = heldBacklog;
+						}
 						if (recoveredBacklog)
 						{
 							while (m_frameQueue.size() > recoveryTarget)
@@ -31636,7 +31802,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 							"Alpha backlog recovery: generation=%llu source=%llu trigger=%s render_cycle_ms=%.3f threshold_ms=%.3f queue_before=%zu target=%zu oldest_before_ms=%.3f dropped=%zu dropped_total=%llu canceled_repeats=%zu queue_after=%zu oldest_after_ms=%.3f shader=%s mapping=%s decision=flush_to_target",
 							static_cast<unsigned long long>(frameGeneration),
 							static_cast<unsigned long long>(sourceSequence),
-							renderStall ? "render_stall" : "stale_age",
+							heldBacklog ? "held_backlog" : renderStall ? "render_stall" : "stale_age",
 							renderCycleMs,
 							AlphaQueuePolicy::RenderStallThresholdMs(captureRateHz),
 							queueBefore,

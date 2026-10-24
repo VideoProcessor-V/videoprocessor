@@ -498,6 +498,25 @@ namespace RealClip
 		void Close() { m_pipe.Close(); }
 		int width = 0, height = 0;
 
+		// B3 acceptance (2026-10-24): whole frames in `pixFmt` (e.g. yuv422p10le) at the filter's
+		// output size outW x outH (the caller's filter must produce it); NextRaw reads frameBytes.
+		bool OpenRaw(const Manifest& m, const Clip& c, const std::string& filter, const std::string& pixFmt, std::string& error)
+		{
+			std::string threads = Env("VP_TEST_FFMPEG_THREADS");
+			if (threads.empty())
+				threads = "3";
+			std::string cmd = Quote(m.ffmpeg) + " -v error -nostdin -threads " + threads + " -i " + Quote(m.FullPath(c));
+			if (!filter.empty())
+				cmd += " -vf " + Quote(filter);
+			cmd += " -fps_mode passthrough -an -f rawvideo -pix_fmt " + pixFmt + " -";
+			return m_pipe.Start(cmd, error);
+		}
+		bool NextRaw(std::vector<uint8_t>& frame, size_t frameBytes)
+		{
+			frame.resize(frameBytes);
+			return m_pipe.ReadExact(frame.data(), frame.size());
+		}
+
 	private:
 		Pipe m_pipe;
 	};

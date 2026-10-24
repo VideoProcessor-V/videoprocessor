@@ -54,6 +54,12 @@ if (q.x < size.x && q.y < size.y) {
                 wb = 0.0;
 #endif
             outv = mix(sa, sb, wb);
+#ifdef EXACT_EQUAL
+            // B3 (ADR-0024 criterion 1): equal samples of A and B are that sample exactly - a still
+            // or locked picture is byte-identical to the plain processed frame (mix() of two equal
+            // fp16 values can round one code away).
+            if (all(equal(sa, sb))) outv = sa;
+#endif
         } else {
 #ifdef FALLBACK_BLEND
             outv = mix(a0, b0, phase);
@@ -174,6 +180,10 @@ vec4 lo = vec4(0.0);
 vec4 hf = vec4(0.0);
 vec4 tg = vec4(0.0);
 bool synth = false;
+#ifdef EXACT_EQUAL
+bool exactSame = false;   // B3: A's and B's samples equal - the sample itself (criterion 1)
+vec4 exactValue = vec4(0.0);
+#endif
 if (inside) {
     vec4 a0 = texelFetch(src_a, q, 0);
     vec4 b0 = texelFetch(src_b, q, 0);
@@ -213,6 +223,12 @@ if (inside) {
             // difference of the warped low bands is theirs; at most 4x the pixel's own
             // high-band energy, so a vector error is not read as grain) is made up in
             // the high band's target.
+#ifdef EXACT_EQUAL
+            {
+                vec4 ca = cat_a(pa), cb = cat_b(pb);
+                if (all(equal(ca, cb))) { exactSame = true; exactValue = ca; }
+            }
+#endif
             vec4 dl = la - lbv;
             tg += wb * (1.0 - wb) * min(dl * dl, 4.0 * tg);
             synth = true;
@@ -277,6 +293,9 @@ if (inside) {
                     g[c] = clamp(sqrt(st[c] / sh[c]), gain_lo, gain_hi);
         }
         outv = lo + g * hf;
+#ifdef EXACT_EQUAL
+        if (exactSame) outv = exactValue;
+#endif
     }
     imageStore(dst, q, outv);
 }
@@ -648,7 +667,8 @@ if (q.x < size.x && q.y < size.y) {
 		}
 		if (!Ensure(outLuma, a.luma) || (a.chroma && !Ensure(outChroma, a.chroma)))
 			return false;
-		const std::string header = std::string(fallback == InterpolationPolicy::Fallback::Blend ? "#define FALLBACK_BLEND 1\n" : "") +
+		const std::string header = std::string(estimateWidth > 0 && estimateHeight > 0 ? "#define EXACT_EQUAL 1\n" : "") +
+			std::string(fallback == InterpolationPolicy::Fallback::Blend ? "#define FALLBACK_BLEND 1\n" : "") +
 			(use.occlusionB ? "#define OCCLUSION 1\n" : "") +
 			(use.subField ? Dejudder::FieldVectorGlslSplit() : Dejudder::FieldVectorGlsl()) + BILERP_HEADER;
 		// interpolation_grain preserve: each plane's low band of A and B

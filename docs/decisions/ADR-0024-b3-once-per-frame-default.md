@@ -68,3 +68,18 @@ At 24p in 60, a net in the entrance would run 2-3 times per film frame (barrier 
   - the stateful stages;
   - SlotTiming;
   - the tests.
+
+## Implementation (2026-10-24, feat/skeleton)
+
+- Switch: `[vpv] pipeline_entrance_once` (on|off, default off; also read from `[vprenderer]`;
+  Config expert page). The Original pathway never uses it.
+- Ring: `EntranceStages::Ring` (owned copies of A and B by sequence, structure key and role).
+- B ahead as its own A: with stateful stages, B's own field is estimated ahead (the de-judder's
+  estimate ahead, A's pictures read the (A, B) snapshot), so B ahead is B drawn as A. Otherwise
+  (no C queued, an estimate failure) B is processed per picture for that frame, visibly.
+- Shaders: `MotionWarp::WarpProcessed`, `FrameInterpolator::Run(..., estimate size)`.
+- Fallbacks (visible, "Fallbacks engaged: entrance once"): crossfade, composed picture, copy
+  failure, B's vectors not ready ahead.
+- Tests: `EntranceOnceMotionPicturesFromTheProcessedFrames`, `EntranceOnceRealClipAcceptance`
+  (criteria 1, 2, 5, 6, 8 on a real film clip), every harness test with
+  `VP_TEST_ENTRANCE_ONCE=1` (criteria 4, 9), CPU ring tests.

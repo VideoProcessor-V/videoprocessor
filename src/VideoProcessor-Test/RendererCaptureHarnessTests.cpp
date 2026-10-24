@@ -42,6 +42,7 @@
 #include <calibration/CalibrationController.h>
 #include <calibration/CalibrationSimulation.h>
 #include <calibration/PatternCodes.h>
+#include "RealClipLibrary.h"   // B3 real-clip acceptance (decoded clip frames into the harness)
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 // capture_path (owner 2026-10-13): the shipped VP renderer DLL driven like the
@@ -683,6 +684,14 @@ namespace
 			config << "[general]\npersist_profile_selection: false\n"
 				"[vprenderer.input.low_latency]\nwhen: $source_rate > " << (film || plan ? 0 : 59) << "\ncapture_path: " << capturePath << "\n"
 				<< extra;
+			// B3 acceptance (ADR-0024): VP_TEST_ENTRANCE_ONCE=1 runs any harness test with the
+			// motion pictures from the processed frames (criteria 4, 8, 9 with the existing tests).
+			char* once = nullptr;
+			size_t onceLength = 0;
+			if (_dupenv_s(&once, &onceLength, "VP_TEST_ENTRANCE_ONCE") == 0 && once && std::string(once) == "1" &&
+				extra.find("pipeline_entrance_once") == std::string::npos)
+				config << "\n[vpv]\npipeline_entrance_once: on\n";
+			std::free(once);
 		}
 		// A small window off the screen.
 		WNDCLASSA wc{};
@@ -4189,8 +4198,15 @@ namespace Tests
 				{ "interpolation, re-base only", display * 5.0 / 6.0, false, "interpolation: auto\nsource_resolution: 720\ndeband_vp: off\ndetail_pulse_stabilise: off\n" + on, true, true, false, true },
 				{ "hiccup gap pair", display * 5.0 / 6.0, false, "interpolation: auto\ninterpolation_fill_gaps: on\n" + stages + on, true, false, true, true },
 				{ "source-warp extras", 24000.0 / 1001.0, true, "dejudder_strength: 0.25\ndejudder_warp_stage: source\n" + stages + on, false, false, false, true },
+				// Render-ahead plans the extras from the monitor's rate (open loop) when a window gets no
+				// DXGI statistics: the source-path extras run off screen too.
+				{ "source-warp extras, render-ahead", 24000.0 / 1001.0, true,
+					"dejudder_strength: 0.25\ndejudder_warp_stage: source\nrender_ahead: on\n" + stages + on, false, false, false, true },
 				{ "off (default)", display * 5.0 / 6.0, false, "interpolation: auto\n" + stages, true, false, false, false },
 			};
+			// B3's stateful path needs C (the frame after B) queued to estimate B's field ahead: the
+			// look-ahead queue the delay budget keeps (4 frames); the harness default (3) is too short.
+			g_harnessQueueTarget = 5;
 			for (const Case& c : cases)
 			{
 				FramePlan plan = RatePlan(c.rate);
@@ -4211,6 +4227,15 @@ namespace Tests
 				Logger::WriteMessage(line);
 				const std::string name = c.name;
 				const size_t failuresBefore = failures.size();
+				{
+					// The fallback reasons this run showed (evidence; each distinct heading once).
+					std::set<std::string> reasons;
+					for (const std::string& logLine : r.log)
+						if (logLine.find("entrance once (") != std::string::npos && logLine.find("Fallbacks engaged") != std::string::npos)
+							reasons.insert(logLine);
+					for (const std::string& reason : reasons)
+						Logger::WriteMessage(("   " + reason).c_str());
+				}
 				if (!r.presented) failures += name + ": not presented; ";
 				if (r.Logged("Interpolation: failed") || r.Logged("warp failed") || r.Logged("marking renderer failed"))
 					failures += name + ": a failure was logged; ";
@@ -4247,6 +4272,8 @@ namespace Tests
 							logLine.find("Interpolation") != std::string::npos || logLine.find("entrance once") != std::string::npos ||
 							logLine.find("Fallbacks engaged") != std::string::npos)
 							Logger::WriteMessage(("   " + logLine + "\n").c_str());
+				if (!c.interpolation)
+					Logger::WriteMessage(("   " + name + ": " + r.dejudderStatus + "\n").c_str());
 				if (!c.interpolation && k.found && k.pictures == 0)
 				{
 					// Extras need the display's measured rate, which an off-screen window does not get
@@ -4262,6 +4289,266 @@ namespace Tests
 						Logger::WriteMessage(("   PENDING-ONSCREEN " + name + ": no extra rendered off screen (" + r.dejudderStatus + ")\n").c_str());
 				}
 			}
+			Assert::IsTrue(failures.empty(), std::wstring(failures.begin(), failures.end()).c_str());
+		}
+
+		// ---- B3 real-clip acceptance (ADR-0024) ------------------------------------------------
+		// A real clip's frames (yuv422p10le from ffmpeg, letterboxed into 1920x1080) as v210 buffers
+		// for the harness's picture list (g_harnessDvFrames: one raw frame per content index).
+		static bool LoadClipV210(const std::string& id, int frames, std::vector<std::vector<BYTE>>& out, std::string& error)
+		{
+			const RealClip::Manifest manifest = RealClip::Manifest::Load();
+			const RealClip::Clip* clip = manifest.Loaded() ? manifest.Find(id) : nullptr;
+			if (!clip)
+			{
+				error = manifest.Loaded() ? "clip " + id + " not in the manifest" : "no clip manifest (" + manifest.error + ")";
+				return false;
+			}
+			const int w = 1920, h = 1080;
+			RealClip::Decoder decoder;
+			const std::string filter = "scale=1920:-2,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,format=yuv422p10le";
+			if (!decoder.OpenRaw(manifest, *clip, filter, "yuv422p10le", error))
+				return false;
+			const size_t lumaBytes = static_cast<size_t>(w) * h * 2, chromaBytes = static_cast<size_t>(w / 2) * h * 2;
+			const size_t rowBytes = static_cast<size_t>((w + 47) / 48) * 128;
+			std::vector<uint8_t> raw;
+			out.clear();
+			for (int i = 0; i < frames && decoder.NextRaw(raw, lumaBytes + 2 * chromaBytes); ++i)
+			{
+				const uint16_t* Y = reinterpret_cast<const uint16_t*>(raw.data());
+				const uint16_t* U = reinterpret_cast<const uint16_t*>(raw.data() + lumaBytes);
+				const uint16_t* V = reinterpret_cast<const uint16_t*>(raw.data() + lumaBytes + chromaBytes);
+				std::vector<BYTE> frame(rowBytes * h, 0);
+				for (int y = 0; y < h; ++y)
+				{
+					uint32_t* row = reinterpret_cast<uint32_t*>(frame.data() + rowBytes * y);
+					const uint16_t* yl = Y + static_cast<size_t>(y) * w;
+					const uint16_t* ul = U + static_cast<size_t>(y) * (w / 2);
+					const uint16_t* vl = V + static_cast<size_t>(y) * (w / 2);
+					auto L = [&](int x) { return static_cast<uint32_t>(yl[(std::min)(x, w - 1)] & 0x3FF); };
+					auto Cb = [&](int x) { return static_cast<uint32_t>(ul[(std::min)(x, w / 2 - 1)] & 0x3FF); };
+					auto Cr = [&](int x) { return static_cast<uint32_t>(vl[(std::min)(x, w / 2 - 1)] & 0x3FF); };
+					for (int pack = 0; pack < (w + 5) / 6; ++pack)
+					{
+						const int x = pack * 6, c = pack * 3;
+						row[pack * 4 + 0] = Cb(c) | (L(x) << 10) | (Cr(c) << 20);
+						row[pack * 4 + 1] = L(x + 1) | (Cb(c + 1) << 10) | (L(x + 2) << 20);
+						row[pack * 4 + 2] = Cr(c + 1) | (L(x + 3) << 10) | (Cb(c + 2) << 20);
+						row[pack * 4 + 3] = L(x + 4) | (Cr(c + 2) << 10) | (L(x + 5) << 20);
+					}
+				}
+				out.push_back(std::move(frame));
+			}
+			decoder.Close();
+			if (out.empty())
+				error = "no frame decoded from " + id;
+			return !out.empty();
+		}
+
+		// The mean high-band energy (|4c - the 4 neighbours|) of a capture's green channel inside the
+		// picture rows: the grain/texture measure of the B3 grain criterion.
+		static double CaptureHighBand(const std::string& json)
+		{
+			int w = 0, h = 0;
+			const std::vector<int> rgb = LoadCaptureRgb(json, w, h);
+			if (w < 8 || h < 8 || rgb.size() < static_cast<size_t>(w) * h * 3)
+				return 0.0;
+			double sum = 0.0;
+			long count = 0;
+			const int top = h * 15 / 100, bottom = h * 85 / 100;   // inside the letterbox
+			for (int y = (std::max)(1, top); y < (std::min)(h - 1, bottom); ++y)
+				for (int x = 1; x < w - 1; ++x)
+				{
+					auto g = [&](int xx, int yy) { return rgb[(static_cast<size_t>(yy) * w + xx) * 3 + 1]; };
+					sum += std::abs(4 * g(x, y) - g(x - 1, y) - g(x + 1, y) - g(x, y - 1) - g(x, y + 1));
+					++count;
+				}
+			return count ? sum / count : 0.0;
+		}
+
+		struct EntranceCost { bool found = false; unsigned long long runs = 0, frames = 0; };
+		static EntranceCost ReadEntranceCost(const RunResult& r)
+		{
+			EntranceCost c;
+			for (const std::string& line : r.log)
+			{
+				const size_t at = line.find("Entrance cost: ");
+				unsigned long long runs = 0, frames = 0;
+				if (at != std::string::npos &&
+					sscanf_s(line.c_str() + at, "Entrance cost: %llu input-side runs for %llu source frames", &runs, &frames) == 2)
+				{
+					c.found = true; c.runs = runs; c.frames = frames;
+				}
+			}
+			return c;
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(EntranceOnceRealClipAcceptance)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(EntranceOnceRealClipAcceptance)
+		{
+			const HarnessScope harnessScope;
+			// B3 acceptance on a real film clip (ADR-0024), 24p in the display's rate with interpolation
+			// (the timeline: B3's main case), entrance stages that change the picture (re-base to 720,
+			// VP deband on, detail pulse on by default), the output captured at 1920x1080:
+			//   1 identity: a still real frame - every capture (pictures between frames included) is
+			//     byte-identical to the plain processed frame (interpolation off), B3 on;
+			//   2 continuity: B processed ahead IS B drawn as A (B's own field ahead; the draw never
+			//     recomputes A), no fallback;
+			//   5 grain: the captures' high-band energy with B3 on is at least 90% of B3 off;
+			//   6 cost: input-side runs per source frame drop (reported; target 2-3x);
+			//   8 signal: interpolation off, B3 on is byte-identical to B3 off (the ring's copy exact).
+			if (!RequireHardwareOrSkip("EntranceOnceRealClipAcceptance")) return;
+			std::vector<std::vector<BYTE>> clip;
+			std::string error;
+			if (!LoadClipV210("tos_1920x800_24p", 72, clip, error))
+			{
+				const bool require = RealClip::Env("VP_TEST_REQUIRE_FOOTAGE") == "1";
+				Logger::WriteMessage(("SKIP-NO-FOOTAGE EntranceOnceRealClipAcceptance: " + error + "\n").c_str());
+				Assert::IsFalse(require, std::wstring(error.begin(), error.end()).c_str());
+				return;
+			}
+			wchar_t tempPath[MAX_PATH] = {};
+			GetTempPathW(MAX_PATH, tempPath);
+			const std::wstring shots = std::wstring(tempPath) + L"vp-b3-acceptance";
+			CreateDirectoryW(shots.c_str(), nullptr);
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			g_harnessWindowWidth = 1920;
+			g_harnessWindowHeight = 1080;
+			const std::string stages = "source_resolution: 720\ndeband_vp: on\n[vprenderer.Default]\ndithering: off\ndeband: off\n";
+			const std::string on = "[vpv]\npipeline_entrance_once: on\n";
+			std::string failures;
+			const int frames = static_cast<int>(clip.size());
+			g_harnessQueueTarget = 5;   // C queued for B's field ahead (the delay budget's look-ahead)
+			auto motionPlan = [frames]() {
+				FramePlan p;
+				p.rateNumerator = 24000;
+				p.rateDenominator = 1001;
+				p.step = [frames](int n) { FrameStep f; f.content = n % frames; return f; };
+				p.captureTimes = { 3.0, 4.0, 5.0, 6.0, 7.0 };
+				return p; };
+			// 5 + 6 (+2): motion, B3 off then on.
+			double band[2] = { 0.0, 0.0 };
+			EntranceCost cost[2];
+			for (int b3 = 0; b3 < 2; ++b3)
+			{
+				g_harnessDvFrames = clip;
+				FramePlan plan = motionPlan();
+				// film = false: interpolation's timeline at 23.976 (the de-judder profile would take the
+				// rendered warp instead: B3 has nothing to do there).
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 8.0, false, "interpolation: auto\ndejudder_strength: 0\n" + stages + (b3 ? on : ""), false, &plan);
+				double sum = 0.0;
+				int n = 0;
+				for (const std::string& json : r.captureMetadataList)
+				{
+					const double e = CaptureHighBand(json);
+					if (e > 0.0) { sum += e; ++n; }
+				}
+				band[b3] = n ? sum / n : 0.0;
+				cost[b3] = ReadEntranceCost(r);
+				{
+					std::ofstream dump(std::wstring(shots) + (b3 ? L"\\b3-motion-on.log" : L"\\b3-motion-off.log"), std::ios::trunc);
+					for (const std::string& logLine : r.log) dump << logLine;
+				}
+				for (const std::string& logLine : r.log)
+					if (logLine.find("nterpolat") != std::string::npos || logLine.find("De-judder:") != std::string::npos ||
+						logLine.find("Motion engine") != std::string::npos || logLine.find("Pipeline:") != std::string::npos)
+						Logger::WriteMessage(("   " + logLine).c_str());
+				const EntranceOnceCounters k = ReadEntranceOnce(r);
+				char line[400];
+				snprintf(line, sizeof(line), "== real clip motion, B3 %s: presented %s, captures %d, high band %.3f, input-side runs %llu for %llu source frames; "
+					"B3 A %llu, B ahead %llu, pictures %llu, fallbacks %llu; %s\n", b3 ? "on" : "off", r.presented ? "yes" : "NO", n, band[b3],
+					cost[b3].runs, cost[b3].frames, k.a, k.b, k.pictures, k.fallbacks, r.fallbacksStatus.c_str());
+				Logger::WriteMessage(line);
+				if (!r.presented) failures += std::string("motion B3 ") + (b3 ? "on" : "off") + ": not presented; ";
+				if (n == 0) failures += std::string("motion B3 ") + (b3 ? "on" : "off") + ": no capture; ";
+				if (b3)
+				{
+					if (!k.found || k.pictures == 0) failures += "motion B3 on: no picture from the processed planes; ";
+					if (r.fallbacksStatus.find("entrance once") != std::string::npos)
+						failures += "motion B3 on: fell back (" + r.fallbacksStatus + "); ";
+					// 2: the draw found B's A made ahead (the input side once per source frame).
+					if (k.found && k.b > 10 && k.a * 10 > k.b)
+						failures += "motion B3 on: B ahead was not B's A (A " + std::to_string(k.a) + ", B " + std::to_string(k.b) + "); ";
+				}
+			}
+			if (band[0] > 0.0 && band[1] < 0.9 * band[0])
+				failures += "grain: high band " + std::to_string(band[1]) + " with B3 vs " + std::to_string(band[0]) + " without (below 90%); ";
+			if (cost[0].found && cost[1].found && cost[0].frames > 0 && cost[1].frames > 0)
+			{
+				const double off = static_cast<double>(cost[0].runs) / cost[0].frames, onRuns = static_cast<double>(cost[1].runs) / cost[1].frames;
+				char line[200];
+				snprintf(line, sizeof(line), "== input-side runs per source frame: B3 off %.2f, on %.2f (%.2fx lower)\n", off, onRuns, onRuns > 0.0 ? off / onRuns : 0.0);
+				Logger::WriteMessage(line);
+				if (!(onRuns < off))
+					failures += "cost: input-side runs per source frame did not drop; ";
+			}
+			else
+				failures += "cost: the counters were not logged; ";
+			// 1 + 8: a still real frame, captured four times in each of three runs - B3 off and on
+			// without motion pictures (the plain processed frame), and B3 on with interpolation. The
+			// stages that change the picture without temporal state (re-base, VP deband) - the plain
+			// frame must be deterministic for an identity criterion; the runs check that first.
+			{
+				g_harnessDvFrames = { clip[clip.size() / 2] };
+				// The VP debander's threshold follows the source readings (bitrate quality), which move
+				// over a run: re-base alone gives a deterministic plain frame.
+				const std::string stillStages = "source_resolution: 720\ndeband_vp: off\ndetail_pulse_stabilise: off\n"
+					"[vprenderer.Default]\ndithering: off\ndeband: off\ntemporal_dither: off\ncnn_residual_stabilise: off\nssim_residual_stabilise: off\nadaptive_upscale: off\nadaptive_downscale: off\n";
+				auto hashesOf = [&](const std::string& extra) {
+					FramePlan plan;
+					plan.rateNumerator = 24000;
+					plan.rateDenominator = 1001;
+					plan.step = [](int) { FrameStep f; f.content = 0; return f; };
+					plan.captureTimes = { 3.0, 3.6, 4.2, 4.8 };
+					const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 5.5, false, extra, false, &plan);
+					{
+						static int runIndex = 0;
+						std::ofstream dump(std::wstring(shots) + L"\\b3-still-" + std::to_wstring(runIndex++ % 4) + L".log", std::ios::trunc);
+						for (const std::string& logLine : r.log) dump << logLine;
+						for (const std::string& json : r.captureMetadataList) dump << "CAPTURE " << json << "\n";
+					}
+					std::set<std::string> hashes;
+					for (const std::string& json : r.captureMetadataList)
+					{
+						RunResult one;
+						one.captureMetadata = json;
+						const std::string hsh = CaptureHash(one);
+						if (!hsh.empty()) hashes.insert(hsh);
+					}
+					return hashes; };
+				auto list = [](const std::set<std::string>& hashes) {
+					std::string out;
+					for (const std::string& hsh : hashes) out += hsh.substr(0, 12) + " ";
+					return out.empty() ? std::string("none ") : out; };
+				const std::set<std::string> plainOff = hashesOf("interpolation: off\n" + stillStages);
+				const std::set<std::string> plainOn = hashesOf("interpolation: off\n" + stillStages + on);
+				const std::set<std::string> motionOn = hashesOf("interpolation: auto\n" + stillStages + on);
+				// Reference (reported): today's motion path (B3 off) on the same still.
+				const std::set<std::string> motionOff = hashesOf("interpolation: auto\n" + stillStages);
+				Logger::WriteMessage(("== still real frame: interpolation B3 off " + list(motionOff) + "\n").c_str());
+				Logger::WriteMessage(("== still real frame: plain B3 off " + list(plainOff) + "| plain B3 on " + list(plainOn) +
+					"| interpolation B3 on " + list(motionOn) + "\n").c_str());
+				if (plainOff.empty() || plainOn.empty() || motionOn.empty())
+					failures += "still: a capture is missing; ";
+				else if (plainOff.size() != 1)
+					failures += "still: the plain processed frame is not deterministic with B3 off (" + list(plainOff) + "); ";
+				else
+				{
+					if (plainOn != plainOff)
+						failures += "still: B3 on differs from B3 off without motion pictures (criterion 8); ";
+					// Criterion 1 at the output: the timeline's pictures between frames differ from the
+					// plain draws by 1 code in ~0.01% of pixels WITH B3 OFF TOO (downstream of the entrance;
+					// docs/design 3.8c), so the output comparison is reported, and criterion 1 is asserted
+					// at B3's own boundary (EntranceOnceInterpolatorIsExactOnStillOrInvalidVectors).
+					if (motionOn != plainOff)
+						Logger::WriteMessage(("   still: timeline pictures differ from the plain frame at the output (B3 on "
+							+ std::to_string(motionOn.size()) + " hashes; B3 off " + std::to_string(motionOff.size()) + " hashes, same behaviour)\n").c_str());
+				}
+			}
+			g_harnessDvFrames.clear();
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
 			Assert::IsTrue(failures.empty(), std::wstring(failures.begin(), failures.end()).c_str());
 		}
 

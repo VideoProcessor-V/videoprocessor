@@ -408,24 +408,67 @@ redundant per-refresh repeats removed.
   settings, re-base factors, processing size or format, so a stale picture is never reused.
   Sequence 0 (unknown) is never served from the cache.
 
-### 3.8b KNOWN GAP until B3 lands (skeleton audit item 3), and the hard gate (ADR-0024)
+### 3.8b B3 status and the hard gate (ADR-0024)
 
-**Today the motion consumers still run BEFORE the entrance.** The skeleton removed only the
-redundant repeats of the same picture (one stage list, a cadence repeat reuses its result).
+**Built behind `pipeline_entrance_once` (default OFF until the acceptance passes).** With it on:
 
-- De-judder phase pictures and extras are warped from the NATIVE planes and then sent through
-  the entrance again.
-- The debander hold and the detail history run A once more.
-- So `motion.consumers` stays fixed in the order (not reorderable) and outside `UpstreamKey`
-  until B3 lands.
+- **The ring.** `EntranceStages::Ring` keeps each source frame's processed picture as its own
+  copy (a plain copy pass, exact for the 16-bit and float planes), keyed by the unique source
+  sequence, the frame's structure (crop, range, colour, re-base, active stages) and a role.
+  - A: the frame drawn as itself, the stateful stages (debander hold, detail history) advanced
+    on it once.
+  - B ahead: the next frame, processed **as its own A** before it is shown. With stateful
+    stages, B's own vector field is estimated ahead (the de-judder's estimate ahead, (B, C),
+    while A's remaining pictures read the snapshot of (A, B)). So the picture B shows at its own
+    draw is the very texture made ahead: exact continuity at the source-frame boundary. When
+    B's field cannot be made ahead (no C queued yet, an estimate failure), B is processed per
+    picture for that frame and "Fallbacks engaged: entrance once (B's vectors not ready ahead
+    ...)" says so.
+  - The per-frame readings (bitrate quality, level step) of B ahead are A's: a one-frame lag of
+    those readings, by design (a frame's processed picture is made once).
+- **The consumers.** Timeline pictures between frames (interpolation, hiccup gap pairs) and the
+  source-path extras (the warp, Stage A interpolation) warp or blend the processed planes. The
+  shaders map the field (estimate pixels) onto the processed size (`MotionWarp::WarpProcessed`,
+  `FrameInterpolator::Run(estimate size)`); at scale 1 they are byte-identical to before.
+- **Visible fallbacks:** a source-resolution crossfade, a composed (subtitle) picture, a copy
+  failure. Those pictures take today's per-picture stages.
+- **Cost (measured, real film clip, 24p in 60 with interpolation).** Input-side runs per
+  source frame: 2.43 with B3 off, 1.05 with B3 on (about 2.3x lower). The default 24p-in-60
+  path (the de-judder's rendered warp) already runs the input side once per source frame with
+  B3 off; B3 does not change it.
+- **Measured acceptance so far** (`EntranceOnceRealClipAcceptance`,
+  `EntranceOnceInterpolatorIsExactOnStillOrInvalidVectors`): continuity (B ahead is B's A,
+  fallbacks only at start-up), grain 96-101% of B3 off, B3 on byte-identical to B3 off without
+  motion pictures, the interpolator exact on stills and invalid vectors at plane scales 1.5
+  and 2. The delay gate's ladder passes with the held-backlog shedding.
+- **A held queue sheds a backlog** older than its hold by more than two frames
+  (`AlphaQueuePolicy::ShouldShedHeldBacklog`): without it, a start-up or render stall left the
+  delay 60-120 ms above the budget.
+- OFF is byte-identical to today's code (GPU test against the r6 build). The Original pathway
+  never uses it.
 
-**B3** (the input side once per source frame; consumers warp the cached PROCESSED frame) is a
-HARD GATE. Its nine real-clip acceptance criteria are in ADR-0024.
+**The hard gate.** B3 passes ADR-0024's nine real-clip criteria and becomes the default before
+any deploy, motion training or dependent net integration. The net runner and net A come after
+it. Until then `motion.consumers` stays fixed in the order and outside `UpstreamKey`.
 
-- Until it passes them there is no deploy, no motion training and no dependent net
-  integration. The net runner and net A come after it.
-- It is built to default-ON quality. The switch remains only as a diagnostic/fallback: OFF is
-  byte-identical to today's code, and the Original pathway is unchanged.
+### 3.8c KNOWN GAPS (the single list; nothing is dropped silently)
+
+| Gap | Where it shows | What closes it |
+|---|---|---|
+| B3 not yet the default | `pipeline_entrance_once` off; ADR-0024 | the nine criteria on real clips (owner A/B for pans) |
+| B3 source-path extras not verified on screen | test marks PENDING-ONSCREEN (an off-screen window gets no DXGI statistics) | one short on-screen harness run (owner OK pending) |
+| B3 crossfade keeps the old order | "Fallbacks engaged: entrance once (source-resolution crossfade)" | version 2: both paths' processed pictures in the ring |
+| render_ahead total across rates | "Fallbacks engaged: delay budget (render-ahead ... PENDING-RA)"; delay gate PENDING-RA | render-ahead's lead folded into the queue hold |
+| 120 Hz displays hold ~4 film frames more than planned | delay gate PENDING-HZ | investigate the 120 Hz harness case |
+| A queue_size below the hold | "Fallbacks engaged: delay budget (queue_size N holds X of Y ms; raise queue_size)" | the operator raises queue_size (32, the deployed value, holds 267 ms at 60p) |
+| LED and subtitle consumers at 2 queued frames | look-ahead ladder | a projector/subtitle fixture to test the shorter look-ahead |
+| Nets and tiers | slots are placeholders (zero cost) | the net runner after B3, then net A |
+| Mid-stream rate change in the delay gate | not yet a test | a harness case switching 23.976 -> 59.94 |
+| Steering settle time after a reset | 1-2 minutes for a large sub-frame rest at 30p | a faster initial trim |
+| Detail look-ahead for B ahead | B3's B ahead skips the optional detail look-ahead | measure C's bands when C is uploaded |
+| B3 needs C queued for B's field ahead | "Fallbacks engaged: entrance once (B's vectors not ready ahead (no frame after next ...))" at start-up or on a short queue | the delay budget's 4-frame look-ahead keeps C queued; shorter queues fall back per picture |
+| Timeline pictures vs plain draws at near-black | +-1 code at codes 2-3 in ~0.01% of pixels, B3 on AND off (a downstream dark-level stage) | identify the stage; criterion 1 is asserted at B3's boundary meanwhile |
+| Source-path extras need DXGI statistics | an off-screen or windowed laptop window holds the extras ("timing not known: display rate") | a fullscreen run verifies B3's extras |
 
 ### 3.9 Real-time proof on the laptop (B4)
 
@@ -535,11 +578,11 @@ a few clearly commented `#include <VP-V/...>` hooks. Read `src/VP-V/README.md` f
      redundant per-refresh repeats removed (3.8).
    - The debander hold and the detail history still advance once per source frame on A, which
      is processed by the stages before them, whatever the order.
-3. **Next: phase pictures and extras warp the cached processed picture** (the full B3 change).
-   This needs the warp/interpolator shaders to read vectors scaled per axis (`VectorScale`) at
-   the processed size.
-   - It is a visible, intended change to de-judder frames, so it goes behind a switch and is
-     checked on real clips before it becomes the default.
+3. **Built behind `pipeline_entrance_once` (3.8b):** phase pictures and extras warp the
+   ring's processed pictures; the shaders map the field to the processed size; B is processed
+   ahead as its own A with B's field estimated ahead. Default OFF until ADR-0024's acceptance
+   passes on real clips (`EntranceOnceRealClipAcceptance`, and the existing harness tests with
+   `VP_TEST_ENTRANCE_ONCE=1`).
 4. **Done:** output slot hooks tagged and ordered by the registry (unchanged for the designed
    order), and the VP calibration-LUT hook (R1) available.
    - The LUT runs before the de-judder rendered-picture cache, so the extras show the LUT-mapped

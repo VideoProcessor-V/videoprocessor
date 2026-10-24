@@ -212,6 +212,19 @@ namespace AlphaQueuePolicy
 			staleAgeMs >= StaleBacklogAgeThresholdMs(frameRateHz);
 	}
 
+	// VP-V delay budget (gate 5, 2026-10-24): with a time hold the head waits holdMs by design, so
+	// the stale-age rule above (100 ms beyond the frame-count target) left up to ~100 ms of backlog
+	// in place after a start-up or render stall - the total delay stayed above the budget. With a
+	// hold, a backlog is a head older than the hold by more than two frames; it is shed to target.
+	inline bool ShouldShedHeldBacklog(size_t queueDepth, size_t desiredDepth, double headAgeMs, double holdMs,
+		double frameRateHz)
+	{
+		if (!(holdMs > 0.0) || queueDepth <= NormalizeDesiredDepth(desiredDepth))
+			return false;
+		const double periodMs = 1000.0 / ValidFrameRateOrDefault(frameRateHz);
+		return headAgeMs > holdMs + 2.0 * periodMs;
+	}
+
 	// The VP timeline's queue steering (hunt 2 13-timing H2, L3). The refresh
 	// spacing is trimmed by the smoothed distance of the queue (after the dequeue)
 	// from its target, at most 0.3%. The target after the dequeue keeps one frame of

@@ -5,6 +5,7 @@
 #include <VP-V/core/EntranceEpoch.h>
 #include <VP-V/core/OriginalPathway.h>
 #include <RendererProfileConfig.h>
+#include <vprenderer/AlphaQueuePolicy.h>
 #include <VP-V/core/EntranceStages.h>
 #include <VP-V/core/OutputHookOrder.h>
 #include <VP-V/core/SlotRegistry.h>
@@ -339,6 +340,19 @@ namespace PipelineSkeletonTestsNs
 			// Unknown rate: no plan.
 			in.sourceFps = 0.0;
 			Assert::IsFalse(DelayBudget::Compute(in).feasible);
+		}
+
+		TEST_METHOD(HeldQueueShedsABacklogBeyondItsHold)
+		{
+			// Gate 5 (2026-10-24): a held queue's head waits the hold by design; only a head older than
+			// the hold by more than two frames (and a queue above target) is a backlog to shed.
+			const double hold = 192.5;
+			Assert::IsFalse(AlphaQueuePolicy::ShouldShedHeldBacklog(14, 11, hold + 10.0, hold, 60.0));    // jitter
+			Assert::IsTrue(AlphaQueuePolicy::ShouldShedHeldBacklog(16, 11, hold + 40.0, hold, 60.0));     // 2.4 frames late
+			Assert::IsFalse(AlphaQueuePolicy::ShouldShedHeldBacklog(11, 11, hold + 400.0, hold, 60.0));   // at target
+			Assert::IsFalse(AlphaQueuePolicy::ShouldShedHeldBacklog(16, 11, hold + 400.0, 0.0, 60.0));    // no hold
+			Assert::IsFalse(AlphaQueuePolicy::ShouldShedHeldBacklog(8, 4, 167.0 + 80.0, 167.0, 23.976));  // < 2 film frames
+			Assert::IsTrue(AlphaQueuePolicy::ShouldShedHeldBacklog(8, 4, 167.0 + 90.0, 167.0, 23.976));
 		}
 
 		TEST_METHOD(DelayBudgetQueueCapacityCoversTheHold)

@@ -14722,6 +14722,54 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLog(log);
 		}
 
+		TEST_METHOD(EntranceOnceInterpolatorIsExactOnStillOrInvalidVectors)
+		{
+			// B3 (ADR-0024 criterion 1) at its own boundary: the interpolator reading PROCESSED planes
+			// (another size than the estimate: plane_scale 1.5, and 2) returns the processed A
+			// byte for byte when A and B are the same picture with zero vectors, and when there are
+			// no valid vectors (the hold), at every phase, in both grain modes.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+			const int width = 96, height = 64;
+			const DejudderFrame frame = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x, y); },
+				[](int x, int y, int c) { return static_cast<uint16_t>(20000 + 7 * DejudderTexture(x + 1000 * c, y) % 20000); });
+			DejudderGpuPlanes a, b;
+			UploadDejudderFrame(gpu, frame, a);
+			UploadDejudderFrame(gpu, frame, b);   // the same picture in other textures (B processed ahead)
+			const std::vector<uint16_t> lumaA = DownloadPlane(gpu, a.planes.luma), chromaA = DownloadPlane(gpu, a.planes.chroma);
+			for (double scale : { 1.5, 2.0 })
+			{
+				const int ew = static_cast<int>(width * scale), eh = static_cast<int>(height * scale);
+				InterpolatorField still;
+				MakeInterpolatorField(gpu, ew, eh, 1.0f, [](int, int) { return std::array<float, 4>{ 0.0f, 0.0f, 1.0f, 0.0f }; }, still);
+				for (bool preserve : { true, false })
+					for (bool vectors : { true, false })
+					{
+						Interpolator::FrameInterpolator interpolator(fixture.Log(), gpu, true);
+						interpolator.SetGrain(preserve ? InterpolationPolicy::Grain::Preserve : InterpolationPolicy::Grain::Blend);
+						for (float t : { 0.25f, 0.5f, 0.75f })
+						{
+							Dejudder::Planes out;
+							const Interpolator::Motion motion = vectors ? InterpolatorMotion(still) : Interpolator::Motion();
+							Assert::IsTrue(interpolator.Run(a.planes, b.planes, motion, t, InterpolationPolicy::Fallback::Hold, out, ew, eh),
+								InterpolatorError(interpolator, log).c_str());
+							char name[128];
+							snprintf(name, sizeof(name), "scale %.1f %s %s t=%.2f", scale, preserve ? "preserve" : "blend",
+								vectors ? "zero vectors" : "no vectors", t);
+							const std::wstring wname(name, name + strlen(name));
+							Assert::IsTrue(DownloadPlane(gpu, out.luma) == lumaA, (wname + L": luma is the processed A").c_str());
+							Assert::IsTrue(DownloadPlane(gpu, out.chroma) == chromaA, (wname + L": chroma is the processed A").c_str());
+						}
+					}
+			}
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
 		TEST_METHOD(DejudderRenderedWarpKeepsGrainRms)
 		{
 			// The de-judder's rendered warp (Catmull-Rom at the output resolution; no switch):
