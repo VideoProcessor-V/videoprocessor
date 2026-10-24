@@ -217,12 +217,14 @@ namespace NetRunnerTestsNs
 		const std::string shaderFile = c.desc["shader"].text;
 		std::string shader;
 		bool found = false;
+		std::string exportDir;
 		for (const std::string& dir : ExportDirs())
 		{
 			std::string candidate;
 			if (ReadTextFile(dir + "/shaders/" + shaderFile, candidate) && Sha256Hex(candidate) == c.desc["shader_sha256"].text)
 			{
 				shader = candidate;
+				exportDir = dir;
 				found = true;
 				break;
 			}
@@ -242,6 +244,16 @@ namespace NetRunnerTestsNs
 		ParseResult pr = ParseShaderText(shader, shaderFile.substr(0, shaderFile.size() - 5));
 		Assert::IsTrue(pr.ok, W(pr.error).c_str());
 		c.pkg = pr.package;
+		// The export json's fingerprint (fp16 check, complete fields), when it is beside the shader:
+		// export_<stem>.json, or export_<stem without _h / _v>.json for the two-pass nets.
+		{
+			std::string stem = c.pkg.name, jtext, jerr;
+			if (!ReadTextFile(exportDir + "/export_" + stem + ".json", jtext) && stem.size() > 2 && stem[stem.size() - 2] == '_')
+				ReadTextFile(exportDir + "/export_" + stem.substr(0, stem.size() - 2) + ".json", jtext);
+			Json ej;
+			if (!jtext.empty() && ParseJson(jtext, ej, &jerr))
+				Assert::IsTrue(MergeExportFingerprint(c.pkg, ej, &jerr), W(jerr).c_str());
+		}
 		const Json& binds = c.desc["bindings"];
 		c.textures.reserve(binds.items.size());
 		for (const Json& b : binds.items)

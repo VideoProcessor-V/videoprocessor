@@ -288,7 +288,7 @@ namespace VpNets
 			return lit + ")";
 		};
 		s << "    ivec2 l = ivec2(gl_LocalInvocationID.xy) * 2;\n    ivec2 P0 = base + ivec2(1) + l;\n";
-		const size_t chunk = 2;   // output groups per pass over the inputs (register pressure)
+		const size_t chunk = 1;   // output groups per pass over the inputs: 1 keeps 16 accumulators live (2 spilled on the 3050 Ti: 99 ms vs 43 direct)
 		for (size_t o0 = 0; o0 < O; o0 += chunk)
 		{
 			const size_t o1 = std::min(O, o0 + chunk);
