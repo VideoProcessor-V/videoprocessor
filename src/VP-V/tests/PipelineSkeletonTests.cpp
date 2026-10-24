@@ -341,6 +341,21 @@ namespace PipelineSkeletonTestsNs
 			Assert::IsFalse(DelayBudget::Compute(in).feasible);
 		}
 
+		TEST_METHOD(DelayBudgetQueueCapacityCoversTheHold)
+		{
+			// Gate 4 (2026-10-24): the FIFO must hold every frame that arrives during the hold plus two
+			// slots; a queue_size below that gets the hold cut to HoldForCapacity (visibly, in the renderer).
+			const double p60 = 1000.0 / 60.0;
+			Assert::AreEqual(static_cast<size_t>(14), DelayBudget::QueueCapacityFor(192.5, p60));   // 11.55 -> 12 + 2
+			Assert::AreEqual(static_cast<size_t>(5), DelayBudget::QueueCapacityFor(3.0 * p60, p60)); // exact fit: 3 + 2
+			Assert::AreEqual(static_cast<size_t>(1), DelayBudget::QueueCapacityFor(0.0, p60));
+			Assert::AreEqual(6.0 * p60, DelayBudget::HoldForCapacity(8, p60), 1e-9);
+			Assert::AreEqual(0.0, DelayBudget::HoldForCapacity(2, p60), 1e-9);
+			// The inverse never asks for more slots than it was given.
+			for (size_t capacity = 2; capacity <= 32; ++capacity)
+				Assert::IsTrue(DelayBudget::QueueCapacityFor(DelayBudget::HoldForCapacity(capacity, p60), p60) <= capacity);
+		}
+
 		TEST_METHOD(OriginalPathwayTurnsEveryVpAdditionOff)
 		{
 			// ADR-0019: the baseline reproduces Bill's original pathway: no VP slot runs, every
@@ -522,6 +537,47 @@ namespace PipelineSkeletonTestsNs
 			FakeFrame texture = base; texture.planes[1].texture = &textureA;
 			for (const FakeFrame* f : { &crop, &levels, &depth, &color, &texture })
 				Assert::AreNotEqual(same, key(*f));
+			// B3's ring (owned copies keyed by the unique source sequence): the texture a frame was
+			// uploaded into is left out, everything else still counts.
+			auto ringKey = [](const FakeFrame& f) { EntranceEpoch::Key k; EntranceEpoch::AddFrame(k, f, false); return k.Value(); };
+			Assert::AreEqual(ringKey(base), ringKey(texture));
+			for (const FakeFrame* f : { &crop, &levels, &depth, &color })
+				Assert::AreNotEqual(ringKey(base), ringKey(*f));
+		}
+
+		TEST_METHOD(EntranceRingKeepsAAndBByRoleAndReplacesTheOldest)
+		{
+			// B3 (ADR-0024): the processed A and B are kept as the ring's own copies, by sequence, key
+			// and role; a claimed entry is valid only once committed; the least recently used goes.
+			EntranceStages::Ring<int, 3> ring;
+			using EntranceStages::Role;
+			Assert::IsNull(ring.Find(1, 7, Role::A));
+			ring.Claim(1, 7, Role::A) = 101;
+			Assert::IsNull(ring.Find(1, 7, Role::A));           // not committed yet
+			ring.Commit();
+			Assert::AreEqual(101, *ring.Find(1, 7, Role::A));
+			Assert::IsNull(ring.Find(1, 7, Role::B));           // another role
+			Assert::IsNull(ring.Find(1, 8, Role::A));           // another key (parameters changed)
+			Assert::IsNull(ring.Find(0, 7, Role::A));           // sequence 0 is never cached
+			ring.Claim(2, 7, Role::B) = 202; ring.Commit();
+			ring.Claim(2, 7, Role::A) = 203; ring.Commit();
+			Assert::AreEqual(static_cast<size_t>(3), ring.ValidCount());
+			(void)ring.Find(1, 7, Role::A);                     // A of 1 used again: 2/B is the oldest now
+			ring.Claim(3, 7, Role::A) = 303; ring.Commit();
+			Assert::IsNull(ring.Find(2, 7, Role::B));
+			Assert::AreEqual(101, *ring.Find(1, 7, Role::A));
+			Assert::AreEqual(203, *ring.Find(2, 7, Role::A));
+			Assert::AreEqual(303, *ring.Find(3, 7, Role::A));
+			// The same sequence and role refills its own entry (new parameters), never a second one.
+			ring.Claim(3, 9, Role::A) = 304; ring.Commit();
+			Assert::IsNull(ring.Find(3, 7, Role::A));
+			Assert::AreEqual(304, *ring.Find(3, 9, Role::A));
+			Assert::AreEqual(static_cast<size_t>(3), ring.ValidCount());
+			// A failed copy (claimed, never committed) leaves nothing behind.
+			ring.Claim(4, 7, Role::B) = 404;
+			Assert::IsNull(ring.Find(4, 7, Role::B));
+			ring.Invalidate();
+			Assert::AreEqual(static_cast<size_t>(0), ring.ValidCount());
 		}
 
 		TEST_METHOD(NothingThatChangesThePictureBetweenLedMeasureAndCompensation)

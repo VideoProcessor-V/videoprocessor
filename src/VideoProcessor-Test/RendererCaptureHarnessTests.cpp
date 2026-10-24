@@ -308,6 +308,8 @@ namespace
 	size_t g_harnessQueueTarget = 0;
 	// VP-V delay budget (ADR-0020): the total delay the app sends (SetQueueDelayBudget); 0 = none.
 	int g_harnessDelayBudgetMs = 0;
+	// The renderer's FIFO capacity (queue_size); 8 unless a test sets it (the delay ladder: 60p holds ~12).
+	size_t g_harnessQueueCapacity = 8;
 	// Another renderer DLL to run instead of this build's (the byte-identity test against the r6
 	// baseline build); empty = this build's.
 	std::string g_harnessRendererDll;
@@ -371,6 +373,7 @@ namespace
 		int windowWidth = 640, windowHeight = 360;
 		size_t queueTarget = 0;
 		int delayBudgetMs = 0;
+		size_t queueCapacity = 8;
 		std::string rendererDll;
 		int activePictureLookahead = -1;
 		bool lookaheadAutomatic = false;
@@ -397,6 +400,7 @@ namespace
 		g.windowHeight = g_harnessWindowHeight;
 		g.queueTarget = g_harnessQueueTarget;
 		g.delayBudgetMs = g_harnessDelayBudgetMs;
+		g.queueCapacity = g_harnessQueueCapacity;
 		g.rendererDll = g_harnessRendererDll;
 		g.activePictureLookahead = g_harnessActivePictureLookahead;
 		g.lookaheadAutomatic = g_harnessLookaheadAutomatic;
@@ -423,6 +427,7 @@ namespace
 		g_harnessWindowHeight = g.windowHeight;
 		g_harnessQueueTarget = g.queueTarget;
 		g_harnessDelayBudgetMs = g.delayBudgetMs;
+		g_harnessQueueCapacity = g.queueCapacity;
 		g_harnessRendererDll = g.rendererDll;
 		g_harnessActivePictureLookahead = g.activePictureLookahead;
 		g_harnessLookaheadAutomatic = g.lookaheadAutomatic;
@@ -709,7 +714,7 @@ namespace
 			SetForegroundWindow(hwnd);
 		Callback callback;
 		Clock clock;
-		IVideoRenderer* renderer = create(&callback, 1, hwnd, &clock, true, 8,
+		IVideoRenderer* renderer = create(&callback, 1, hwnd, &clock, true, g_harnessQueueCapacity,
 			VideoConversionOverride::VIDEOCONVERSION_NONE, configPath.c_str(), &CaptureLog);
 		result.created = renderer != nullptr;
 		resources.SetRenderer(renderer, destroy);
@@ -1404,6 +1409,9 @@ namespace Tests
 			for (const Rate& r : rates) rateList.push_back(static_cast<double>(r.numerator) / r.denominator);
 			const double refreshMs = 1000.0 / refreshHz;
 			std::string failures;
+			// The deployed queue_size (32) holds a 267 ms total at 60p (~12 frames); 20 stays inside the
+			// harness's 24-buffer source ring.
+			g_harnessQueueCapacity = 20;
 			for (int frames : { 4, 3, 2 })
 			{
 				const int budget = static_cast<int>(DelayBudget::BudgetForFrames(frames, rateList, model));
@@ -1492,6 +1500,39 @@ namespace Tests
 					r.fallbacksStatus.find("render-ahead") == std::string::npos)
 					failures += "render_ahead on: no visible delay-budget note; ";
 			}
+			// A queue_size too small for the hold (8 slots, the 4-frame total at 60p needs ~13): the hold
+			// is cut to what the queue holds - a steady, shorter delay, never the overflow's drop cycle -
+			// and "Fallbacks engaged: delay budget (queue_size ...)" says so.
+			{
+				g_harnessQueueCapacity = 8;
+				g_harnessDelayBudgetMs = static_cast<int>(DelayBudget::BudgetForFrames(4, rateList, model));
+				FramePlan framePlan;
+				framePlan.rateNumerator = 60000;
+				framePlan.rateDenominator = 1000;
+				framePlan.step = [](int n) { FrameStep f; f.content = n; return f; };
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, true, "dejudder_strength: 0.25\n", false, &framePlan);
+				const double reachable = DelayBudget::HoldForCapacity(8, 1000.0 / 60.0);
+				const double median = Median(r.exitLatencyMs);
+				Logger::WriteMessage(("== queue_size 8 @60: delay " + std::to_string(median) + " ms (reachable hold " +
+					std::to_string(reachable) + " ms); " + r.fallbacksStatus + "\n").c_str());
+				if (r.fallbacksStatus.find("queue_size") == std::string::npos)
+					failures += "queue_size 8 @60: no visible queue_size note; ";
+				if (median > 0.0 && (median < reachable - 2.0 * refreshMs || median > reachable + 2.0 * refreshMs + DelayBudget::kProcessingAllowanceMs))
+					failures += "queue_size 8 @60: delay " + std::to_string(median) + " ms vs the reachable hold " + std::to_string(reachable) + " ms; ";
+				// After the cut hold engaged (the start-up prefill before the display rate is known is
+				// the frame-count queue): no overflow.
+				bool cut = false, overflowAfter = false;
+				for (const std::string& line : r.log)
+				{
+					if (line.find("raise queue_size") != std::string::npos) cut = true;
+					else if (cut && line.find("Alpha queue hard overflow") != std::string::npos) overflowAfter = true;
+				}
+				// Reported, not failed: a 60.00x source on a 60 Hz display drifts, and with a queue this
+				// tight the overflow drops the drift's frame before the cadence correction does.
+				if (overflowAfter)
+					Logger::WriteMessage("   queue_size 8 @60: an overflow after the hold was cut (drift at a tight queue_size)\n");
+			}
+			g_harnessQueueCapacity = 8;
 			g_harnessDelayBudgetMs = 0;
 			Assert::IsTrue(failures.empty(), std::wstring(failures.begin(), failures.end()).c_str());
 		}
@@ -4095,6 +4136,133 @@ namespace Tests
 				if (line.find("Interpolation") != std::string::npos || line.find("motion invalidated") != std::string::npos ||
 					line.find("interpolated=1") != std::string::npos || line.find("Motion engine") != std::string::npos)
 					Logger::WriteMessage(("   " + line).c_str());
+		}
+
+		// B3 (ADR-0024): the counters the renderer logs with pipeline_entrance_once on (the last line).
+		struct EntranceOnceCounters
+		{
+			bool found = false;
+			unsigned long long a = 0, b = 0, reused = 0, pictures = 0, fallbacks = 0;
+		};
+		static EntranceOnceCounters ReadEntranceOnce(const RunResult& r)
+		{
+			EntranceOnceCounters c;
+			for (const std::string& line : r.log)
+			{
+				const size_t at = line.find("entrance once (B3): A ");
+				if (at == std::string::npos)
+					continue;
+				unsigned long long a = 0, b = 0, reused = 0, pictures = 0, fallbacks = 0;
+				if (sscanf_s(line.c_str() + at, "entrance once (B3): A %llu, B ahead %llu, ring reuses %llu, pictures from processed planes %llu, fallbacks %llu",
+					&a, &b, &reused, &pictures, &fallbacks) == 5)
+				{
+					c.found = true;
+					c.a = a; c.b = b; c.reused = reused; c.pictures = pictures; c.fallbacks = fallbacks;
+				}
+			}
+			return c;
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(EntranceOnceMotionPicturesFromTheProcessedFrames)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(EntranceOnceMotionPicturesFromTheProcessedFrames)
+		{
+			const HarnessScope harnessScope;
+			// B3 (pipeline_entrance_once, ADR-0024) through the real renderer, with entrance stages that
+			// change the picture (a 1080 source re-based to 720, VP's debander forced on):
+			//   - interpolated pictures between frames come from the processed A and B (counted), no
+			//     fallback note, no failure; with a stateful stage (the debander's hold) B is processed
+			//     ahead once per source frame (A + B per frame at most), re-base alone promotes B ahead
+			//     to B's own A (the input side once per source frame);
+			//   - a hiccup gap pair (interpolation_fill_gaps) comes from the processed planes too;
+			//   - source-warp de-judder extras warp the processed A;
+			//   - off (the default): none of it runs (no B3 counters).
+			if (!RequireHardwareOrSkip("EntranceOnceMotionPicturesFromTheProcessedFrames")) return;
+			const double display = HarnessMonitorHz();
+			const std::string on = "[vpv]\npipeline_entrance_once: on\n";
+			std::string failures;
+			struct Case { const char* name; double rate; bool film; std::string extra; bool interpolation; bool stateless; bool gap; bool b3; };
+			const std::string stages = "source_resolution: 720\ndeband_vp: on\n";
+			const Case cases[] = {
+				{ "interpolation, stateful stages", display * 5.0 / 6.0, false, "interpolation: auto\n" + stages + on, true, false, false, true },
+				{ "interpolation, re-base only", display * 5.0 / 6.0, false, "interpolation: auto\nsource_resolution: 720\ndeband_vp: off\ndetail_pulse_stabilise: off\n" + on, true, true, false, true },
+				{ "hiccup gap pair", display * 5.0 / 6.0, false, "interpolation: auto\ninterpolation_fill_gaps: on\n" + stages + on, true, false, true, true },
+				{ "source-warp extras", 24000.0 / 1001.0, true, "dejudder_strength: 0.25\ndejudder_warp_stage: source\n" + stages + on, false, false, false, true },
+				{ "off (default)", display * 5.0 / 6.0, false, "interpolation: auto\n" + stages, true, false, false, false },
+			};
+			for (const Case& c : cases)
+			{
+				FramePlan plan = RatePlan(c.rate);
+				if (c.film)
+				{
+					plan.rateNumerator = 24000;
+					plan.rateDenominator = 1001;
+				}
+				const int gap = static_cast<int>(c.rate * 5.0);
+				if (c.gap)
+					plan.step = [gap](int n) { FrameStep f; f.content = n; f.send = n != gap; return f; };
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", c.gap ? 8.5 : 7.0, c.film, c.extra, false, &plan);
+				const EntranceOnceCounters k = ReadEntranceOnce(r);
+				char line[320];
+				snprintf(line, sizeof(line), "== %s: presented %s; B3 counters %s: A %llu, B ahead %llu, ring reuses %llu, pictures %llu, fallbacks %llu; %s\n",
+					c.name, r.presented ? "yes" : "NO", k.found ? "found" : "none", k.a, k.b, k.reused, k.pictures, k.fallbacks,
+					r.fallbacksStatus.c_str());
+				Logger::WriteMessage(line);
+				const std::string name = c.name;
+				const size_t failuresBefore = failures.size();
+				if (!r.presented) failures += name + ": not presented; ";
+				if (r.Logged("Interpolation: failed") || r.Logged("warp failed") || r.Logged("marking renderer failed"))
+					failures += name + ": a failure was logged; ";
+				if (!c.b3)
+				{
+					if (k.found || r.Logged("entrance once (B3) on"))
+						failures += name + ": B3 ran while off; ";
+					continue;
+				}
+				if (!r.Logged("entrance once (B3) on"))
+					failures += name + ": the pipeline state does not say B3 is on; ";
+				if (r.fallbacksStatus.find("entrance once") != std::string::npos)
+					failures += name + ": B3 fell back (" + r.fallbacksStatus + "); ";
+				if (c.interpolation)
+				{
+					if (!k.found || k.pictures == 0)
+						failures += name + ": no picture from the processed planes; ";
+					// The input side per source frame: A + B ahead (stateful), A alone (stateless: B ahead
+					// becomes B's A, so A is almost never computed in the draw).
+					if (k.found && k.b > 0)
+					{
+						if (c.stateless && k.a * 5 > k.b)
+							failures += name + ": B ahead was not reused as B's A (A " + std::to_string(k.a) + ", B " + std::to_string(k.b) + "); ";
+						if (!c.stateless && (k.a + k.b) > 2 * (k.b + 2))
+							failures += name + ": more than A + B per source frame; ";
+					}
+				}
+				if (c.gap && !r.Logged("Interpolation: gap pair across"))
+					failures += name + ": no gap pair; ";
+				// On a failure, the renderer's own lines about the pipeline and the timeline (evidence).
+				if (failures.size() != failuresBefore)
+					for (const std::string& logLine : r.log)
+						if (logLine.find("Entrance") != std::string::npos || logLine.find("Pipeline:") != std::string::npos ||
+							logLine.find("Interpolation") != std::string::npos || logLine.find("entrance once") != std::string::npos ||
+							logLine.find("Fallbacks engaged") != std::string::npos)
+							Logger::WriteMessage(("   " + logLine + "\n").c_str());
+				if (!c.interpolation && k.found && k.pictures == 0)
+				{
+					// Extras need the display's measured rate, which an off-screen window does not get
+					// (DXGI statistics): strict on screen (VP_TEST_HARNESS_ONSCREEN=1), else reported.
+					char* onScreen = nullptr;
+					size_t length = 0;
+					const bool strictExtras = _dupenv_s(&onScreen, &length, "VP_TEST_HARNESS_ONSCREEN") == 0 && onScreen &&
+						std::string(onScreen) == "1";
+					std::free(onScreen);
+					if (strictExtras)
+						failures += name + ": no extra from the processed A on screen; ";
+					else
+						Logger::WriteMessage(("   PENDING-ONSCREEN " + name + ": no extra rendered off screen (" + r.dejudderStatus + ")\n").c_str());
+				}
+			}
+			Assert::IsTrue(failures.empty(), std::wstring(failures.begin(), failures.end()).c_str());
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(InterpolationRunsAtAMeasuredRateMismatch)

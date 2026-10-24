@@ -38,15 +38,18 @@ namespace EntranceEpoch
 	};
 
 	// Every field of the frame the stages read or pass on: its planes (texture identity and
-	// component mapping), crop, representation and colour.
+	// component mapping), crop, representation and colour. textureIdentity false (B3's ring, whose
+	// pictures are owned copies keyed by the unique source sequence): the plane textures are left
+	// out, so the same source frame uploaded into other textures (B ahead, then A) keys the same.
 	template <class Frame>
-	void AddFrame(Key& key, const Frame& frame)
+	void AddFrame(Key& key, const Frame& frame, bool textureIdentity = true)
 	{
 		const int planeCapacity = static_cast<int>(sizeof(frame.planes) / sizeof(frame.planes[0]));
 		key.Add(frame.num_planes);
 		for (int i = 0; i < frame.num_planes && i < planeCapacity; ++i)
 		{
-			key.Add(static_cast<const void*>(frame.planes[i].texture));
+			if (textureIdentity)
+				key.Add(static_cast<const void*>(frame.planes[i].texture));
 			key.Add(frame.planes[i].components);
 			for (int c = 0; c < 4; ++c)
 				key.Add(frame.planes[i].component_mapping[c]);

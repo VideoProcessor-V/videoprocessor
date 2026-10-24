@@ -84,6 +84,22 @@ namespace DelayBudget
 		double holdFraction = 0.0;      // the rest, 0 .. 1 frame
 	};
 
+	// The FIFO slots a hold needs (gate 4, 2026-10-24): every frame that arrives during the hold
+	// waits in the queue, plus two slots of margin (the frame arriving while the head is taken, and
+	// arrival jitter; one slot overflowed in the harness at 60p).
+	inline size_t QueueCapacityFor(double holdMs, double periodMs)
+	{
+		if (!(holdMs > 0.0) || !(periodMs > 0.0))
+			return 1;
+		return static_cast<size_t>(std::ceil(holdMs / periodMs - kExactFitTolerance)) + 2;
+	}
+
+	// The longest hold a FIFO of `capacity` slots keeps without overflowing (QueueCapacityFor's inverse).
+	inline double HoldForCapacity(size_t capacity, double periodMs)
+	{
+		return capacity > 2 ? static_cast<double>(capacity - 2) * periodMs : 0.0;
+	}
+
 	inline Plan Compute(const Inputs& in)
 	{
 		Plan plan;

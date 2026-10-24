@@ -124,4 +124,84 @@ namespace EntranceStages
 		uint64_t cachedEpoch = 0;
 		bool valid = false;
 	};
+
+	// B3 (2026-10-24): the processed pictures the motion consumers read, OWNED by the ring (their
+	// own copies, so a module writing its output texture again - for another picture - never
+	// changes them). Keyed by source sequence, an epoch (the stages' parameters, without the
+	// module-texture generation the plain Cache needs) and a role: A (the source frame drawn as
+	// itself, the stateful stages advanced on it) or B (the next frame processed AHEAD, per
+	// picture, never advancing any stage's state). N entries, least recently used replaced.
+	enum class Role { A = 0, B = 1 };
+
+	template <class Payload, size_t N = 3>
+	class Ring
+	{
+	public:
+		Payload* Find(uint64_t sequence, uint64_t epoch, Role role)
+		{
+			for (Entry& e : entries)
+				if (e.valid && sequence != 0 && e.sequence == sequence && e.epoch == epoch && e.role == role)
+				{
+					e.used = ++clock;
+					return &e.payload;
+				}
+			return nullptr;
+		}
+
+		// The entry to (re)fill for this key: the same key, else an invalid one, else the least
+		// recently used. Its payload is kept (the caller reuses its textures). Valid only after Commit.
+		Payload& Claim(uint64_t sequence, uint64_t epoch, Role role)
+		{
+			Entry* pick = nullptr;
+			for (Entry& e : entries)
+				if (e.valid && e.sequence == sequence && e.role == role) { pick = &e; break; }
+			if (!pick)
+				for (Entry& e : entries)
+					if (!e.valid) { pick = &e; break; }
+			if (!pick)
+			{
+				pick = &entries[0];
+				for (Entry& e : entries)
+					if (e.used < pick->used) pick = &e;
+			}
+			pick->valid = false;
+			pick->sequence = sequence;
+			pick->epoch = epoch;
+			pick->role = role;
+			pick->used = ++clock;
+			claimed = pick;
+			return pick->payload;
+		}
+
+		// The last Claim's payload holds the picture now.
+		void Commit() { if (claimed) claimed->valid = true; claimed = nullptr; }
+
+		void Invalidate()
+		{
+			for (Entry& e : entries) e.valid = false;
+			claimed = nullptr;
+		}
+
+		template <class Fn>
+		void ForEachPayload(Fn fn) { for (Entry& e : entries) fn(e.payload); }
+
+		size_t ValidCount() const
+		{
+			size_t n = 0;
+			for (const Entry& e : entries) n += e.valid ? 1 : 0;
+			return n;
+		}
+
+	private:
+		struct Entry
+		{
+			uint64_t sequence = 0, epoch = 0, used = 0;
+			Role role = Role::A;
+			bool valid = false;
+			Payload payload{};
+		};
+		std::array<Entry, N> entries{};
+		Entry* claimed = nullptr;
+		uint64_t clock = 0;
+	};
 }

@@ -373,6 +373,10 @@ namespace Dejudder
 		// next Warp call. With trusted = false nothing is warped (a cut, or
 		// no estimate): `out` is A's planes.
 		bool Warp(const Planes& a, float shift, Planes& out, bool trusted = true);
+		// B3 (2026-10-24): the same warp on A's PROCESSED planes (re-based / repaired / 4K-routed),
+		// at their own size: the field stays in estimate px and the shaders map positions. The
+		// occlusion fill is off here until B is processed too. Its own output planes.
+		bool WarpProcessed(const Planes& a, float shift, Planes& out, bool trusted = true);
 
 		// D3 on a raw field (one texel per block, as Field()) into Field(),
 		// with the last Estimate's half-resolution planes for the promotion
@@ -618,6 +622,8 @@ namespace Dejudder
 		pl_tex grainError = nullptr;
 		bool grainErrorValid = false;
 		pl_tex warpedLuma = nullptr, warpedChroma = nullptr;
+		pl_tex processedLuma = nullptr, processedChroma = nullptr;   // B3: WarpProcessed's planes
+		bool WarpImpl(const Planes& a, float shift, Planes& out, bool trusted, bool processedTarget);
 		bool estimated = false;
 		// lowRes: the inner matcher searching this one's half-resolution luma
 		// (already in code units; searches only, no warp planes).

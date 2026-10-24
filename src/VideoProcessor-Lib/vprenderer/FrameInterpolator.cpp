@@ -610,7 +610,7 @@ if (q.x < size.x && q.y < size.y) {
 	}
 
 	bool FrameInterpolator::Run(const Dejudder::Planes& a, const Dejudder::Planes& b, const Motion& motion, float t,
-		InterpolationPolicy::Fallback fallback, Dejudder::Planes& out)
+		InterpolationPolicy::Fallback fallback, Dejudder::Planes& out, int estimateWidth, int estimateHeight)
 	{
 		error.clear();
 		out = a;
@@ -654,7 +654,10 @@ if (q.x < size.x && q.y < size.y) {
 		// interpolation_grain preserve: each plane's low band of A and B
 		// first (blend: today's pass alone, byte for byte).
 		const bool preserve = grain == InterpolationPolicy::Grain::Preserve;
-		const float lumaScale[2] = { 1.0f, 1.0f };
+		const bool processed = estimateWidth > 0 && estimateHeight > 0;
+		const float lumaScale[2] = {
+			processed ? static_cast<float>(estimateWidth) / static_cast<float>(a.luma->params.w) : 1.0f,
+			processed ? static_cast<float>(estimateHeight) / static_cast<float>(a.luma->params.h) : 1.0f };
 		if (preserve && !PrepareBands(0, a.luma, b.luma))
 			return false;
 		if (!Plane(preserve ? "VideoProcessor interpolator: luma (grain preserved)" : "VideoProcessor interpolator: luma",
@@ -663,8 +666,11 @@ if (q.x < size.x && q.y < size.y) {
 		out.luma = outLuma;
 		if (a.chroma)
 		{
+			// Estimate px per chroma px: the subsampling, or on processed planes the real sizes
+			// (never assume the (w+1)/2 rounding cancels).
 			const float chromaScale[2] = {
-				static_cast<float>(1 << a.chromaShiftX), static_cast<float>(1 << a.chromaShiftY) };
+				processed ? static_cast<float>(estimateWidth) / static_cast<float>(a.chroma->params.w) : static_cast<float>(1 << a.chromaShiftX),
+				processed ? static_cast<float>(estimateHeight) / static_cast<float>(a.chroma->params.h) : static_cast<float>(1 << a.chromaShiftY) };
 			if (preserve && !PrepareBands(1, a.chroma, b.chroma))
 				return false;
 			if (!Plane(preserve ? "VideoProcessor interpolator: chroma (grain preserved)" : "VideoProcessor interpolator: chroma",
