@@ -413,6 +413,7 @@ namespace Dejudder
 		// its clock in the drained gaps); FlushPassTimers collects the last.
 		void SetPassTiming(bool on, bool drain = true) { passTiming = on; passDrain = drain; passMs.clear(); passGpuMs.clear(); }
 		void FlushPassTimers();
+		void PollPassTimers();   // non-blocking: never pl_gpu_finish
 		// Tests only: the serial block search the parallel one must reproduce.
 		void SetSerialSearchForTest(bool on) { serialSearchForTest = on; }
 		uint64_t ReusedPlanesForTest() const { return reusedPlanesForTest; }
