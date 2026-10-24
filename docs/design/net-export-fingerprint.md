@@ -32,7 +32,9 @@ VP cannot check fields it has to guess, so the exporter must write them.
 | `slot` | VP slot id | The slot the net serves: `repair.encoding` (A), `scaling.rebase` (C), `scaling.route_4k` (B), `scaling.refine` (4K refine), `scaling.output` (D) |
 | `upstream_key` | `>`-joined VP slot ids, may be `""` | Picture-changing VP slots in front of the net during training, in order (VP's `SlotRegistry::UpstreamKey`, without non-modifying slots such as `motion.estimation`). Use `""` for A on the original frame |
 | `upstream_nets` | `slot=identity\|...`, may be `""` | The NETS the training data went through, in order: `slot=<net file stem>@<sha256 of its exported shader, 16 hex>`, or `slot=bypassed` when the net slot ran without its net. The fingerprint id alone cannot name a net (A_single and A_motion share one). Record what was actually used, including the kit's fallbacks: a downstream net trained "with the fallback" must say so |
-| `hybrid_motion_mode` | `"no_vectors"` / `"vectors"` / `"both"` | D only: the hybrid scaler's motion mode in its training renders. VP bypasses D while the hybrid runs in a mode D was not validated for |
+| `hybrid_motion_mode` | `"no_vectors"` / `"vectors"` / `"both"` | D only: the hybrid scaler's motion mode in its training renders (D_motion: `"vectors"`; round 2 wrote prose `"NO VECTORS: ..."`, read as `no_vectors`). VP bypasses D while the hybrid runs in a mode D was not validated for |
+| `render_settings_sha256` | sha256 | Of `render_settings.json` (see below), so the file can be tied to the export |
+| `render_tool_sha256`, `render_dll_sha256` | sha256 (full) | The VpScaleRender executable and renderer DLL that made the training renders (the motion-mode build for D_motion). The legacy `renderer_dll_sha256` (16 hex) stays as is |
 | `front_end_states` | object | The VP front-end stages in the training renders, each `"on"`/`"off"`: `deband`, `deband_vp`, `texture_restore`, `detail_pulse_stabilise`, `source_resolution`, and the hybrid scaler's motion mode (for D) |
 | `pass_order` | `"H>V"` / `"n/a"` | The separable pass order the net assumes (B, C); `"n/a"` for A and D. The shared `texture_formats` wording is NOT read as a pass order |
 | `intermediate_format` | `"rgba32f"` / `"rgba16f"` | The net's intermediates in training/validation |
@@ -58,8 +60,19 @@ Store the fingerprint too, as today.
 ## Render settings
 
 Write the `scaling_manifest.json` settings object the hash was made from next to the export as
-`render_settings.json`. A hash alone cannot say which front-end stages were off. The stamp tool
-needs the manifest to stamp B and D: it verifies the hash, then reads the states.
+`render_settings.json` (`{"settings": {...}}`, or the settings object itself). A hash alone
+cannot say which front-end stages were off. The stamp tool reads it automatically from next to
+the export, or takes `--scaling-manifest`, and verifies it against `scaler_blend_settings`.
+
+For a net whose inputs ARE those renders (D), the verified settings also prove two things:
+- **No upstream nets.** When the settings load only classical shader profiles (no VPNN shader),
+  the stamp writes `upstream_nets: ""`. VP then runs D only while no upstream net is active (A off
+  or bypassed) and bypasses it, visibly, when A runs.
+- **The motion mode.** `dejudder_strength` 0, `interpolation` off and no motion keys mean VP's
+  motion estimate never started: `hybrid_motion_mode: no_vectors`.
+
+A recorded field always wins. These settings never prove anything for C or B, whose inputs are
+the kit's Python ports.
 
 ## `bilinear_mode` (exporter option)
 

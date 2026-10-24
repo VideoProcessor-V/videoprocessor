@@ -55,6 +55,17 @@ KIND_SLOT = {"A": "repair.encoding", "C": "scaling.rebase", "B": "scaling.route_
 # Slots that hold a NET (their output depends on which net, and whether it ran).
 NET_SLOTS = {"repair.encoding", "scaling.rebase", "scaling.route_4k", "scaling.refine"}
 
+# Shader profiles of the kit's render settings that are classical (no VP net). Anything else, or
+# any name mentioning a VPNN shader, means the renders may have contained a net: not provable.
+CLASSICAL_SHADERS = {"standard.ssim_downscaler", "standard.fsrcnnx", "standard.ssim_superres"}
+# Slots that exist (today) only to run a net: absent from renders made without nets.
+NET_ONLY_SLOTS = {"repair.encoding", "scaling.route_4k", "scaling.refine"}
+# Net kinds whose training inputs are the kit's VP scaling renders (input_stage "D: inside the
+# planned hybrid SSIM downscale ..."): their render settings describe what ran upstream.
+RENDER_INPUT_KINDS = {"D"}
+# Render-settings keys that start VP's motion estimate (the hybrid then runs with vectors).
+MOTION_KEYS = {"motion_engine", "occlusion_mask", "motion_vectors"}
+
 # VP front-end slots that modify the picture and sit between scaling.rebase and scaling.output in
 # VP's designed order; the render settings must show them off for a net after them.
 FRONT_END_SETTINGS_OFF = ["deband", "deband_vp", "texture_restore", "detail_pulse_stabilise"]
@@ -181,6 +192,21 @@ def stamp(export_path, config_path, scaling_manifest=None, kit_dir=None):
     kind = net_kind(fp, texts)
     slot = KIND_SLOT[kind]
 
+    # The kit's render settings (the scaling renders' VP settings): --scaling-manifest, else the
+    # export's own render_settings.json (round 3). Used only when they hash to the recorded
+    # scaler_blend_settings (the settings the training renders actually used).
+    if not scaling_manifest:
+        side = os.path.join(os.path.dirname(os.path.abspath(export_path)), "render_settings.json")
+        scaling_manifest = side if os.path.exists(side) else None
+    rs = None
+    if scaling_manifest:
+        with open(scaling_manifest, encoding="utf-8") as f:
+            sm = json.load(f)
+        settings = sm.get("settings", sm)
+        if h({k: v for k, v in settings.items() if k in ("common", "down", "up", "adapter")}) != fp.get("scaler_blend_settings"):
+            raise Refuse("the render settings do not hash to the recorded scaler_blend_settings")
+        rs = settings
+
     # upstream_key: the recorded stage order (which must hash to the recorded stage_order).
     order = fp.get("stage_order_text")
     if not order:
@@ -199,18 +225,25 @@ def stamp(export_path, config_path, scaling_manifest=None, kit_dir=None):
     elif fp.get("upstream_nets") is not None:
         upstream_nets = fp["upstream_nets"]
         derived["upstream_nets"] = "the export's own record"
+    elif kind in RENDER_INPUT_KINDS and rs is not None and net_free(rs):
+        # The training inputs were VP renders whose recorded (hash-verified) settings load no net
+        # shader: no VP net ran upstream. Such a net MATCHES only while no upstream net is active.
+        # Only for nets whose recorded inputs ARE those renders (D: inside VP's hybrid scaler); C's
+        # and B's inputs are the kit's Python ports of A's output, which these settings say nothing about.
+        upstream_nets = ""
+        derived["upstream_nets"] = ("none: the hash-verified render settings load only classical shaders (" +
+                                    ", ".join(sorted(shader_profiles(rs))) + ")")
+        # Its module order then holds only the classical slots of the planned order: the net slots
+        # (A's repair.encoding, the route_4k / refine nets) did not run in those renders.
+        key = ">".join(k for k in key.split(">") if k and k not in NET_ONLY_SLOTS)
+        derived["upstream_key"] += "; net-only slots removed (no net ran in the renders)"
     else:
         raise Refuse("the training data passed through net slot(s) " + ", ".join(upstream_net_slots) +
-                     ", but the kit recorded no upstream_nets (which net fingerprint, and whether it ran): cannot prove the upstream nets")
+                     ", but the kit recorded no upstream_nets and no net-free render settings: cannot prove the upstream nets")
     if SLOT_ORDER[slot] > SLOT_ORDER["repair.deband"]:
-        if not scaling_manifest:
+        if rs is None:
             raise Refuse(f"{slot} comes after VP's deband/texture-restore slots: the render settings (--scaling-manifest) are needed to know they were off")
-        with open(scaling_manifest, encoding="utf-8") as f:
-            sm = json.load(f)
-        settings = sm.get("settings", {})
-        if h({k: v for k, v in settings.items() if k in ("common", "down", "up", "adapter")}) != fp.get("scaler_blend_settings"):
-            raise Refuse("the scaling manifest does not hash to the recorded scaler_blend_settings")
-        common = settings.get("common", {})
+        common = rs.get("common", {})
         on = [k for k in FRONT_END_SETTINGS_OFF if common.get(k) != "off"]
         if on:
             raise Refuse("the render settings do not show these front-end stages off: " + ", ".join(on))
@@ -237,6 +270,27 @@ def stamp(export_path, config_path, scaling_manifest=None, kit_dir=None):
             handoff = "r16"
         else:
             raise Refuse("texture_formats does not name the r16 hand-off this net kind needs")
+    # D: the hybrid's motion mode in its training renders. Recorded (round 2: "NO VECTORS: ...",
+    # D_motion: "vectors"), else derived from hash-verified render settings that never start VP's
+    # motion estimate (dejudder 0, no interpolation, no motion keys: the estimate does not run,
+    # docs/VP-scale-render-motion.md root cause 1).
+    hybrid_motion = "n/a"
+    if kind == "D":
+        rec = fp.get("hybrid_motion_mode")
+        if rec:
+            hybrid_motion = "no_vectors" if "NO VECTORS" in str(rec) else str(rec).lower()
+            derived["hybrid_motion_mode"] = "the export's own record"
+        elif rs is not None:
+            common = rs.get("common", {})
+            keys = {k for part in ("common", "down", "up") for k in rs.get(part, {})}
+            if str(common.get("dejudder_strength", "")) == "0" and common.get("interpolation") == "off" and not (keys & MOTION_KEYS):
+                hybrid_motion = "no_vectors"
+                derived["hybrid_motion_mode"] = "render settings: dejudder 0, interpolation off, no motion keys (the estimate never starts)"
+            else:
+                raise Refuse("the render settings may have run VP's motion estimate: the hybrid motion mode cannot be derived")
+        else:
+            raise Refuse("D needs its hybrid motion mode: no record and no render settings")
+
     stage_contract = fp.get("stage_contract")
     if not stage_contract:
         raise Refuse("the export records no stage_contract")
@@ -282,6 +336,7 @@ def stamp(export_path, config_path, scaling_manifest=None, kit_dir=None):
         "fields": {
             "upstream_key": key,
             "upstream_nets": upstream_nets,
+            "hybrid_motion_mode": hybrid_motion,
             "pass_order": pass_order,
             "intermediate_format": intermediate,
             "handoff_format": handoff,
@@ -293,6 +348,17 @@ def stamp(export_path, config_path, scaling_manifest=None, kit_dir=None):
         "kit": kit,
         "stamped_by": "tools/net_stamp.py",
     }
+
+
+def shader_profiles(rs):
+    return {sh for part in ("down", "up") for sh in rs.get(part, {}).get("shaders", [])}
+
+
+def net_free(rs):
+    """True when the render settings load only known classical shader profiles (no VP net)."""
+    profiles = shader_profiles(rs)
+    text = json.dumps(rs).lower()
+    return profiles <= CLASSICAL_SHADERS and "vpnn" not in text
 
 
 def sidecar_name(export_path):

@@ -19,7 +19,8 @@ ORDER = ("dv_reconstruction(nets never see raw DV IPT)>detect_on_original(kernel
          "per_axis[1D_rebase_pass(kernel-matched 2:1 or 1D Lanczos, r16)>C]>per_axis[x2_pass>B(H r16 hand-off)]>hybrid_ssim_downscale(w0.2, lanczos base, ortho)>D>rest_of_VP")
 CFG = {"split_eps_codes": 6.0, "split_r2160": 2, "bound": {"b0": 1.5, "b1": 2.0, "b2": 0.35, "bmax": 24.0},
        "scale_bound": {"c0": 1.0, "c1": 0.25, "cmax": 32.0}, "delivered_bound": {"c0": 1.5, "c1": 0.35, "cmax": 32.0}}
-SETTINGS = {"common": {"deband": "off", "deband_vp": "off", "texture_restore": "off", "detail_pulse_stabilise": "off"}, "down": {}, "up": {}, "adapter": "NVIDIA"}
+SETTINGS = {"common": {"deband": "off", "deband_vp": "off", "texture_restore": "off", "detail_pulse_stabilise": "off", "dejudder_strength": "0",
+                      "interpolation": "off"}, "down": {"shaders": ["standard.ssim_downscaler"]}, "up": {}, "adapter": "NVIDIA"}
 SMOKE = r"D:\nn-corpus\VP-NN-TrainKit\smoke\staging"
 SMOKE_MANIFEST = r"D:\nn-corpus\VP-NN-TrainKit\data\scaling\scaling_manifest.json"
 
@@ -138,26 +139,56 @@ class StampTests(unittest.TestCase):
             ns.stamp(ex, cp)
 
     def test_d_needs_the_render_settings(self):
-        fp0 = fingerprint("D")
-        ex, cp, mp = self.write("D", fp0, {"D.glsl": plain_shader(fp0["fingerprint"], "D")})
-        with self.assertRaisesRegex(ns.Refuse, "upstream_nets"):
-            ns.stamp(ex, cp, mp)   # D's data passed through A and B's slots: unproven without a record
-        up = "repair.encoding=bypassed|scaling.route_4k=bypassed"
-        fp = fingerprint("D", upstream_nets=up)
+        fp = fingerprint("D")
         ex, cp, mp = self.write("D", fp, {"D.glsl": plain_shader(fp["fingerprint"], "D")})
-        with self.assertRaisesRegex(ns.Refuse, "--scaling-manifest"):
-            ns.stamp(ex, cp)
+        with self.assertRaisesRegex(ns.Refuse, "upstream"):
+            ns.stamp(ex, cp)   # no record and no render settings: nothing proves the upstream nets
+        # Net-free, hash-verified render settings prove "no upstream nets" for D (its inputs ARE
+        # those renders); the module order keeps only the classical slots; the motion mode follows.
         s = ns.stamp(ex, cp, mp)
-        self.assertEqual(s["fields"]["upstream_key"], "repair.encoding>scaling.rebase>scaling.route_4k")
-        self.assertEqual(s["fields"]["upstream_nets"], up)
+        self.assertEqual(s["fields"]["upstream_nets"], "")
+        self.assertEqual(s["fields"]["upstream_key"], "scaling.rebase")
+        self.assertEqual(s["fields"]["hybrid_motion_mode"], "no_vectors")
+        # render_settings.json next to the export (round 3) is found without --scaling-manifest.
+        import json as _j
+        with open(os.path.join(self.dir, "render_settings.json"), "w") as f:
+            _j.dump({"settings": SETTINGS}, f)
+        self.assertEqual(ns.stamp(ex, cp)["fields"]["upstream_nets"], "")
+        os.remove(os.path.join(self.dir, "render_settings.json"))
+        # A net shader in the render settings: not provable.
+        withnet = copy.deepcopy(SETTINGS)
+        withnet["down"]["shaders"] = ["standard.ssim_downscaler", "standard.vpnn_test"]
+        fpn = fingerprint("D", settings=withnet)
+        ex, cp, mp = self.write("D", fpn, {"D.glsl": plain_shader(fpn["fingerprint"], "D")}, settings=withnet)
+        with self.assertRaisesRegex(ns.Refuse, "upstream"):
+            ns.stamp(ex, cp, mp)
+        # Settings that may have started VP's motion estimate: the motion mode is not derivable.
+        moving = copy.deepcopy(SETTINGS)
+        moving["common"]["dejudder_strength"] = "1"
+        fpm = fingerprint("D", settings=moving)
+        ex, cp, mp = self.write("D", fpm, {"D.glsl": plain_shader(fpm["fingerprint"], "D")}, settings=moving)
+        with self.assertRaisesRegex(ns.Refuse, "motion"):
+            ns.stamp(ex, cp, mp)
+        # A recorded motion mode wins (D_motion: "vectors").
+        fpv = fingerprint("D", settings=moving, hybrid_motion_mode="vectors")
+        ex, cp, mp = self.write("D", fpv, {"D.glsl": plain_shader(fpv["fingerprint"], "D")}, settings=moving)
+        self.assertEqual(ns.stamp(ex, cp, mp)["fields"]["hybrid_motion_mode"], "vectors")
+        # Front-end stages on in the renders: refused.
         on = copy.deepcopy(SETTINGS)
         on["common"]["deband"] = "on"
-        fp2 = fingerprint("D", settings=on, upstream_nets=up)
+        fp2 = fingerprint("D", settings=on)
         ex, cp, mp = self.write("D", fp2, {"D.glsl": plain_shader(fp2["fingerprint"], "D")}, settings=on)
         with self.assertRaisesRegex(ns.Refuse, "deband"):
             ns.stamp(ex, cp, mp)
         ex, cp, mp = self.write("D", fp, {"D.glsl": plain_shader(fp["fingerprint"], "D")}, settings=on)
         with self.assertRaisesRegex(ns.Refuse, "scaler_blend_settings"):
+            ns.stamp(ex, cp, mp)
+
+    def test_render_settings_never_prove_c(self):
+        # C's inputs are the kit's Python ports of A's output: render settings say nothing about them.
+        fp = fingerprint("C", c_structure="passes H then V")
+        ex, cp, mp = self.write("C", fp, {"C_h.glsl": plain_shader(fp["fingerprint"], "C")})
+        with self.assertRaisesRegex(ns.Refuse, "upstream"):
             ns.stamp(ex, cp, mp)
 
     def test_unknown_stage_token_refuses(self):
@@ -194,8 +225,10 @@ class StampTests(unittest.TestCase):
         with self.assertRaisesRegex(ns.Refuse, "upstream_nets"):
             ns.stamp(os.path.join(SMOKE, "export_C_rebase_refine.json"), cfg)
         if os.path.exists(SMOKE_MANIFEST):
-            with self.assertRaisesRegex(ns.Refuse, "upstream_nets"):
-                ns.stamp(os.path.join(SMOKE, "export_D_hybrid_refine.json"), cfg, SMOKE_MANIFEST)
+            # D: its renders loaded no net shader -> "no upstream nets", no vectors.
+            s = ns.stamp(os.path.join(SMOKE, "export_D_hybrid_refine.json"), cfg, SMOKE_MANIFEST)
+            self.assertEqual((s["fields"]["upstream_nets"], s["fields"]["upstream_key"], s["fields"]["hybrid_motion_mode"]),
+                             ("", "scaling.rebase", "no_vectors"))
 
 
 if __name__ == "__main__":

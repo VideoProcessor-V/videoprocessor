@@ -562,9 +562,9 @@ namespace NetRunnerTestsNs
 			// An upstream net that changes per frame (bypassed upstream) refuses this frame.
 			NetRunInputs changed = inputs;
 			changed.upstreamNetsKnown = true;
-			changed.upstreamNets = UpstreamNetsKey({ { "scaling.rebase", "bypassed" } });
+			changed.upstreamNets = UpstreamNetsKey({ { "scaling.rebase", "C_rebase_refine_h@0123456789abcdef" } });
 			Assert::IsFalse(slot.Run(NetDeviceContext(), changed, out));
-			Assert::IsTrue(registry.Heading().find("T_tiny: upstream nets this frame 'scaling.rebase=bypassed' != loaded 'none'") != std::string::npos,
+			Assert::IsTrue(registry.Heading().find("T_tiny: upstream nets this frame 'scaling.rebase=C_rebase_refine_h@0123456789abcdef' != loaded 'none'") != std::string::npos,
 				W(registry.Heading()).c_str());
 			Assert::AreEqual(std::string("bypassed"), slot.State("repair.encoding").state);
 			changed.upstreamNets = "";
@@ -796,8 +796,9 @@ namespace NetRunnerTestsNs
 		{
 			Assert::AreEqual(std::string("repair.encoding"), NormaliseUpstreamKey("motion.estimation>repair.encoding"));
 			Assert::AreEqual(std::string(""), NormaliseUpstreamKey("motion.estimation"));
-			Assert::AreEqual(std::string("repair.encoding>scaling.rebase>scaling.geometry"), NormaliseUpstreamKey("repair.encoding>scaling.rebase>scaling.geometry"),
-				L"fail safe: an unlisted slot (geometry) counts as changing the picture");
+			Assert::AreEqual(std::string("repair.encoding>scaling.rebase"), NormaliseUpstreamKey("repair.encoding>scaling.rebase>scaling.geometry"),
+				L"the scaler's own libplacebo stages ahead of D are not compared");
+			Assert::IsTrue(PipelineSlots::ContractOf(PipelineSlots::Id::ScalingGeometry).modifies, L"fail safe: an unlisted slot changes the picture");
 			Assert::AreEqual(std::string("repair.encoding"), NormaliseUpstreamKey("repair.encoding>scaling.chroma_upscale"), L"chroma-only: not seen by a luma net");
 			Assert::AreEqual(std::string("unknown.slot"), NormaliseUpstreamKey("unknown.slot"), L"unknown names stay (they can only mismatch)");
 			// The registry's real key, with A running first (ADR-0005) and deband / texture restore off.
@@ -894,9 +895,41 @@ namespace NetRunnerTestsNs
 						ctx.upstreamKey = def.UpstreamKey(PipelineSlots::Id::RepairEncoding);
 						Assert::IsFalse(CheckFingerprint(p, ctx).match, W(p.name + " in the default order (key '" + ctx.upstreamKey + "')").c_str());
 					}
+					else if (p.role == NetRole::ScaleRefine)
+					{
+						// D: its renders loaded no net shader, so the stamp proves "no upstream nets".
+						// It matches with A off (or bypassed) and is bypassed, visibly, when A runs.
+						Assert::IsTrue(p.fingerprint.Has("upstream_nets") && p.fingerprint.Field("upstream_nets").empty(), W(p.name).c_str());
+						Assert::AreEqual(std::string("no_vectors"), p.fingerprint.hybridMotionMode);
+						PipelineSlots::Registry noA;   // A is a placeholder: not running
+						noA.SetEnabled(PipelineSlots::Id::RepairDeband, false);
+						noA.SetEnabled(PipelineSlots::Id::RepairTextureRestore, false);
+						NetRuntimeContext dctx = ctx;
+						dctx.upstreamKey = noA.UpstreamKey(PipelineSlots::Id::ScalingOutput);
+						dctx.upstreamNets = UpstreamNetsKey({ { "repair.encoding", "bypassed" } });
+						const FingerprintResult dr = CheckFingerprint(p, dctx);
+						Log(p.name + " with A off (key '" + dctx.upstreamKey + "'): " + (dr.match ? std::string("MATCH") : dr.Summary()));
+						if (render.IsObject()) Assert::IsTrue(dr.match, W(p.name + ": " + dr.Summary()).c_str());
+						// A running upstream: bypassed (until a D trained on A's output exists).
+						NetRuntimeContext withA = dctx;
+						withA.upstreamNets = UpstreamNetsKey({ { "repair.encoding", "A_motion_small@52fd496d13224b7c" } });
+						const FingerprintResult ar = CheckFingerprint(p, withA);
+						Assert::IsFalse(ar.match);
+						Assert::IsTrue(ar.Summary().find("upstream nets 'repair.encoding=A_motion_small@52fd496d13224b7c' != trained 'none'") == 0, W(ar.Summary()).c_str());
+						// The hybrid with vectors: D was validated without them.
+						NetRuntimeContext vec = dctx;
+						vec.hybridMotionMode = "vectors";
+						Assert::IsFalse(CheckFingerprint(p, vec).match);
+						// Deband on in front of D: a different module order.
+						PipelineSlots::Registry deband = noA;
+						deband.SetEnabled(PipelineSlots::Id::RepairDeband, true);
+						NetRuntimeContext db = dctx;
+						db.upstreamKey = deband.UpstreamKey(PipelineSlots::Id::ScalingOutput);
+						Assert::IsFalse(CheckFingerprint(p, db).match, W(db.upstreamKey).c_str());
+					}
 					else
 					{
-						// Round 1 recorded no upstream nets: no stamp, so C, B and D stay bypassed.
+						// Round 1 recorded no upstream nets for C and B: no stamp, so they stay bypassed.
 						Assert::IsFalse(p.fingerprint.Has("upstream_key"), W(p.name).c_str());
 						Assert::IsFalse(r.match, W(p.name).c_str());
 						Assert::IsTrue(std::find(r.reasons.begin(), r.reasons.end(), "export has no upstream key") != r.reasons.end(), W(r.Summary()).c_str());

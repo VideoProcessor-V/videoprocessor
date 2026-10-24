@@ -64,14 +64,17 @@ namespace VpNets
 		FingerprintPolicy policy;
 	};
 
-	// "repair.encoding=A_motion_small@52fd496d13224b7c|scaling.route_4k=bypassed", in pixel-path
-	// order. State: the running net's NetPackage::Identity(), or "bypassed".
+	// "repair.encoding=A_motion_small@52fd496d13224b7c", in pixel-path order. State: the running
+	// net's NetPackage::Identity(), or "bypassed" (then omitted from the key).
 	struct UpstreamNet { std::string slot; std::string state; };
+	// A bypassed net slot ran no net, so it is left out: a net trained without upstream nets matches
+	// while A is off or bypassed, and a net trained on A's output does not.
 	inline std::string UpstreamNetsKey(const std::vector<UpstreamNet>& nets)
 	{
 		std::string k;
 		for (const UpstreamNet& n : nets)
-			k += (k.empty() ? "" : "|") + n.slot + "=" + n.state;
+			if (!n.state.empty() && n.state != "bypassed")
+				k += (k.empty() ? "" : "|") + n.slot + "=" + n.state;
 		return k;
 	}
 
@@ -135,8 +138,11 @@ namespace VpNets
 			bool keep = true;
 			for (const PipelineSlots::Info& info : PipelineSlots::Slots())
 				if (name == info.name)
-					// Every net is luma-only: a chroma-only slot does not change what it sees.
-					keep = PipelineSlots::ContractOf(info.id).modifies && info.id != PipelineSlots::Id::ScalingChromaUpscale;
+					// Every net is luma-only: a chroma-only slot does not change what it sees. The
+					// libplacebo-zone slots ahead of D (scaling.geometry) are the scaler's own stages:
+					// always present in VP and in D's training renders, so they are not compared.
+					keep = PipelineSlots::ContractOf(info.id).modifies && info.id != PipelineSlots::Id::ScalingChromaUpscale &&
+						PipelineSlots::ZoneOf(info.id) != PipelineSlots::Zone::Libplacebo;
 			if (keep && !name.empty()) out += (out.empty() ? "" : ">") + name;
 			if (b == std::string::npos) break;
 			a = b + 1;
