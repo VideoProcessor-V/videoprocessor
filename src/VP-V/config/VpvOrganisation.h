@@ -76,7 +76,7 @@ namespace Vpv
 				{ K::Toggle, "dv_tunnel_gpu_unpack" }, { K::Toggle, "dv_trims" } } },
 			{ "input", "signal", "Signal and content", "What kind of signal it is, and labels the profile rules can use.", false, false, {
 				{ K::Toggle, "source_range" }, { K::Toggle, "intent_content" } } },
-			{ "input", "content_tuning", "Content labels: tuning", nullptr, true, false, {
+			{ "input", "content_tuning", "Content labels: tuning", "How long a label (film, video, sports) is held before it may change.", true, false, {
 				{ K::Row, "intent_content_hold_seconds" } },
 				{ L::Feature, "Content labels", "intent_content", nullptr, "off", "off" } },
 			{ "input", "diagnostics", "Readouts (diagnostics)", "Shown in the stats overlay; they change nothing in the picture.", true, true, {
@@ -95,7 +95,7 @@ namespace Vpv
 				{ K::Toggle, "render_ahead" } } },
 			{ "motion", "easing", "Per-shot easing", "Lowers the de-judder on shots that need less (never raises it).", false, false, {
 				{ K::Toggle, "intent_motion" } } },
-			{ "motion", "tier_keys", "Set by the Motion tier", nullptr, true, false, {
+			{ "motion", "tier_keys", "Set by the Motion tier", "The motion features the Motion tier chooses: where the motion vectors come from, how far ahead they look, finer block splitting.", true, false, {
 				{ K::Row, "optical_flow" }, { K::Row, "motion_ahead_frames" }, { K::Row, "dejudder_est_split" },
 				{ K::Hide, "motion_source_heading" }, { K::Hide, "hiccup_repair_heading" }, { K::Hide, "interpolation_heading" },
 				{ K::Hide, "interpolation_note" } },
@@ -108,10 +108,10 @@ namespace Vpv
 			{ "motion", "shaping", "De-judder shaping (yours; the slider does not set these)",
 				"Fade matching, pulldown handling and the motion-vector options: independent of the amount.", true, false, {
 				{ K::Section, "dejudder" } } },
-			{ "motion", "render_ahead_tuning", "Render ahead: tuning", nullptr, true, false, {
+			{ "motion", "render_ahead_tuning", "Render ahead: tuning", "How render ahead budgets its early frames. Used only while render ahead is on.", true, false, {
 				{ K::Row, "dejudder_gate" }, { K::Row, "render_ahead_utilisation" } },
 				{ L::Feature, "Render ahead", "render_ahead", nullptr, "off", "off" } },
-			{ "motion", "easing_tuning", "Per-shot easing: tuning", nullptr, true, false, {
+			{ "motion", "easing_tuning", "Per-shot easing: tuning", "How strongly and how quickly the de-judder eases per shot. Used only while easing is on.", true, false, {
 				{ K::Row, "intent_motion_policy" }, { K::Row, "intent_motion_min" }, { K::Row, "intent_motion_min_shot_s" },
 				{ K::Row, "intent_ease_s" } },
 				{ L::Feature, "Per-shot easing", "intent_motion", nullptr, "off", "off" } },
@@ -125,7 +125,7 @@ namespace Vpv
 				{ K::Toggle, "deband_vp_grain_guard" }, { K::Toggle, "deband_vp_exclusive" }, { K::Toggle, "low_bitrate_handling" },
 				{ K::Note, "libplacebo's own debander (Deband strength) is Bill's: VP Renderer > Rendering > Processing. "
 					"With VP's debander on it is replaced (the switch above)." } } },
-			{ "repair", "tier_keys", "Set by the Repair tier", nullptr, true, false, {
+			{ "repair", "tier_keys", "Set by the Repair tier", "The repair stages the Repair tier switches on: VP's debander, the detail-pulse steadier and texture restore.", true, false, {
 				{ K::Row, "deband_vp" }, { K::Row, "detail_pulse_stabilise" }, { K::Row, "texture_restore" } },
 				{ L::Tier, "the Repair tier" } },
 			{ "repair", "limits", "Texture restore and detail pulse: limits",
@@ -142,7 +142,7 @@ namespace Vpv
 				{ K::Toggle, "adaptive_faithful" }, { K::Toggle, "adaptive_grain_map" }, { K::Toggle, "ssim_bitrate_aware" },
 				{ K::Toggle, "ssim_residual_stabilise" }, { K::Toggle, "cnn_residual_stabilise" }, { K::Toggle, "adaptive_upscale" },
 				{ K::Note, "The scaler filters themselves (upscaler, downscaler, chroma) are Bill's: VP Renderer > Scaling." } } },
-			{ "scaling", "tier_keys", "Set by the Scaling tier", nullptr, true, false, {
+			{ "scaling", "tier_keys", "Set by the Scaling tier", "What the Scaling tier switches on: re-base (working from the real source size) and the grain-aware downscale.", true, false, {
 				{ K::Row, "source_resolution" }, { K::Row, "adaptive_downscale" }, { K::Row, "adaptive_w_base" } },
 				{ L::Tier, "the Scaling tier" } },
 			{ "scaling", "slider_keys", "Re-base evidence", "The values the picture slider sets.", true, false, {
@@ -164,22 +164,22 @@ namespace Vpv
 			{ "colour", "room", "Room-light adaptation (experimental)",
 				"Adjusts black and contrast to the room light the sensor measures.", false, false, {
 				{ K::Toggle, "ambient_adapt" } } },
-			{ "colour", "upstream", "Tone mapping and display (Bill's pages)", nullptr, false, false, {
+			{ "colour", "upstream", "Tone mapping and display (Bill's pages)", "Where the colour settings that are not VP-V's live.", false, false, {
 				{ K::Note, "Tone mapping, HDR target, gamut and output gamma: VP Renderer > Rendering (Tone mapping cards) and "
 					"VP Renderer > Color / Output. The calibration LUT file: Color / Output; where it runs: the Pipeline (expert) tab." },
 				{ K::Note, "Colour space, HDR luminance and video conversion of the INPUT are set once on General > Input "
 					"processing. The VP Renderer and DirectShow pages can override them for one renderer; they say "
 					"\"Inherited\" while they follow General." } } },
-			{ "colour", "sdr_tuning", "SDR tone shape: values", nullptr, true, false, {
+			{ "colour", "sdr_tuning", "SDR tone shape: values", "Where the highlight knee starts and how strong it is. Used only while SDR tone shape is on.", true, false, {
 				{ K::Section, "sdrHighlights" } },
 				{ L::Feature, "SDR tone shape", "sdr_tone_shape", nullptr, "off", "off" } },
-			{ "colour", "room_tuning", "Room-light adaptation: values", nullptr, true, false, {
+			{ "colour", "room_tuning", "Room-light adaptation: values", "How strongly and how fast the picture follows the room light. Used only while room-light adaptation is on.", true, false, {
 				{ K::Row, "ambient_adapt_strength" }, { K::Row, "ambient_screen_reflect" }, { K::Row, "ambient_max_black_nits" },
 				{ K::Row, "ambient_tau_up_s" }, { K::Row, "ambient_tau_down_s" } },
 				{ L::Feature, "Room-light adaptation", "ambient_adapt", nullptr, "off", "off" } },
 
 			// ---- Dynamic Drive ----
-			{ "drive", "pages", "Dynamic Drive (its own page)", nullptr, false, false, {
+			{ "drive", "pages", "Dynamic Drive (its own page)", "The projector LED dimming has its own page in the sidebar.", false, false, {
 				{ K::Note, "Everything Dynamic Drive does is on the Dynamic Drive page. Its master is the command source "
 					"(your script, VP's compensate, or none): each card appears only when that source uses it. The "
 					"Advanced LED card has two more masters: \"Advanced LED values\" (your script's values, or Custom) "
@@ -188,13 +188,13 @@ namespace Vpv
 			// ---- Output ----
 			{ "output", "dither", "Temporal dither", "How the final picture is fitted to the projector link's bit depth.", false, false, {
 				{ K::Toggle, "occlusion_mask" } } },
-			{ "output", "presentation", "Presentation and delay", nullptr, false, false, {
+			{ "output", "presentation", "Presentation and delay", "Where the final output depth and the total delay are set.", false, false, {
 				{ K::Note, "Display bit depth and libplacebo's dithering (used when VP's is off) are Bill's: VP Renderer > "
 					"Rendering > Processing. The total delay: Input tab (Total delay) and the Queue page." } } },
-			{ "output", "tier_keys", "Set by the Output tier", nullptr, true, false, {
+			{ "output", "tier_keys", "Set by the Output tier", "The dither the Output tier chooses: libplacebo's, or VP's motion-aware dither.", true, false, {
 				{ K::Row, "temporal_dither" } },
 				{ L::Tier, "the Output tier" } },
-			{ "output", "dither_tuning", "Temporal dither: tuning", nullptr, true, false, {
+			{ "output", "dither_tuning", "Temporal dither: tuning", "How much grain the dither tolerates before it backs off.", true, false, {
 				{ K::Row, "dither_grain_tolerance_scale" } } },
 
 			// ---- Proposed retirement: the candidates' controls (they still work until approved) ----
@@ -226,18 +226,18 @@ namespace Vpv
 	// The Dynamic Drive page's Advanced LED card, regrouped (organisation pass 2). Every group is set
 	// by the master "Advanced LED values" (your script's values, or Custom); a group a command source
 	// does not use is greyed too (mode: "internal_script" / "compensate" / nullptr = both).
-	struct LedGroup { const char* id; const char* title; const char* mode; std::vector<const char*> keys; };
+	struct LedGroup { const char* id; const char* title; const char* help; const char* mode; std::vector<const char*> keys; };
 	inline const std::vector<LedGroup>& LedAdvancedGroups()
 	{
 		static const std::vector<LedGroup> groups = {
-			{ "tables", "Light curve, steps and ramps (your script's tables)", nullptr,
+			{ "tables", "Light curve, steps and ramps (your script's tables)", "Which LED level each picture brightness gets, and how big each LED step is.", nullptr,
 				{ "curve", "steps_up_dark", "steps_up_bright", "steps_up_split_apl", "steps_down", "anti_pump_band", "apl_weights",
 					"led_ceiling" } },
-			{ "highlights", "Highlights", nullptr,
+			{ "highlights", "Highlights", "What counts as a highlight that the LED must keep bright, and for how long.", nullptr,
 				{ "highlight_percentile", "highlight_persist_ms", "highlight_area_small", "highlight_area_large", "highlight_release_ms" } },
-			{ "cuts", "Cuts and fades", nullptr, { "cut_jump", "cut_threshold", "fade_ms", "fade_min_slope" } },
-			{ "script", "Script mode only (VP's copy of your script)", "internal_script", { "tick_ms", "script_highlight_code" } },
-			{ "compensate", "Compensate mode only", "compensate",
+			{ "cuts", "Cuts and fades", "How a scene cut or a fade is recognised and how the LED follows it.", nullptr, { "cut_jump", "cut_threshold", "fade_ms", "fade_min_slope" } },
+			{ "script", "Script mode only (VP's copy of your script)", "Timing of VP's copy of your dimming script.", "internal_script", { "tick_ms", "script_highlight_code" } },
+			{ "compensate", "Compensate mode only", "How VP's own controller holds the LED steady and treats bright cuts.", "compensate",
 				{ "deadband", "knee", "apl_persist_ms", "early_ramp", "bright_cut_dump", "ftb_black_ms" } },
 		};
 		return groups;

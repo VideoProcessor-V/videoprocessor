@@ -170,6 +170,7 @@ namespace Vpv
 				c.toggle->setChecked(false);
 				c.toggle->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 				c.toggle->setAccessibleDescription(QStringLiteral("Expand or collapse %1.").arg(title));
+				c.toggle->setToolTip(help);
 				outer->addWidget(c.toggle);
 			}
 			else
@@ -177,6 +178,7 @@ namespace Vpv
 				auto* heading = new QLabel(title);
 				heading->setObjectName(objectName + QStringLiteral(".title"));
 				heading->setStyleSheet(QStringLiteral("font-size: 14px; font-weight: 650; color: #f0f6fb;"));
+				heading->setToolTip(help);
 				outer->addWidget(heading);
 			}
 			c.body = new QWidget(c.frame);
@@ -772,6 +774,9 @@ namespace Vpv
 			QWidget* advancedPage = NewSubPage(ObjectName(unitId + QStringLiteral(".advanced")), Q(unit.name), &advanced);
 			sub->addTab(mainPage, QStringLiteral("Main"));
 			sub->addTab(advancedPage, QStringLiteral("Advanced"));
+			sub->setTabToolTip(0, QStringLiteral("The %1 tier and the switches you might use; start here.").arg(Q(unit.name)));
+			sub->setTabToolTip(1, QStringLiteral("What the controls on Main set (greyed until you tick Custom), tuning used only "
+				"while its feature is on, and measured internals. Normal viewing never needs it."));
 			auto* advancedIntro = Help(QStringLiteral("Settings set by the controls on Main (greyed, \"Set by ...\", until you tick "
 				"Custom), tuning used only while its feature is on, and the measured internals."));
 			advancedIntro->setProperty("help", true);
@@ -1358,6 +1363,8 @@ namespace Vpv
 			advancedLayout->addWidget(intro);
 			pages->addTab(mainPage, QStringLiteral("Main"));
 			pages->addTab(advancedPage, QStringLiteral("Advanced"));
+			pages->setTabToolTip(0, QStringLiteral("Whether Dynamic Drive runs, what drives it, its LED profile and speed preset, and the projector link."));
+			pages->setTabToolTip(1, QStringLiteral("What those choices set (greyed until Custom), Compensate's tuning and the projector's measured limits."));
 			column->insertWidget(column->indexOf(grid), pages);
 			auto place = [&](const QString& title, QVBoxLayout* to)
 			{
@@ -1375,6 +1382,8 @@ namespace Vpv
 			speedValues.Add(speedNote);
 			auto* speedCustom = new QCheckBox(QStringLiteral("Custom (change these by hand)"));
 			speedCustom->setObjectName(ObjectName(QStringLiteral("drive.card.speed_values.custom")));
+			speedCustom->setToolTip(QStringLiteral("Off: every speed follows the LED speeds preset on Main (greyed). On: set them "
+				"by hand. Unticking puts every field back to \"preset\"."));
 			speedValues.Add(speedCustom);
 			auto* speedRows = new QWidget;
 			auto* speedForm = new QFormLayout(speedRows);
@@ -1416,7 +1425,7 @@ namespace Vpv
 			auto groups = std::make_shared<std::vector<Group>>();
 			for (const LedGroup& g : LedAdvancedGroups())
 			{
-				CardBox card = MakeCard(ObjectName(QStringLiteral("drive.group.") + Q(g.id)), Q(g.title), QString(), false);
+				CardBox card = MakeCard(ObjectName(QStringLiteral("drive.group.") + Q(g.id)), Q(g.title), Q(g.help), false);
 				auto* note = Help(QString());
 				note->setProperty("help", true);
 				card.Add(note);
@@ -1822,9 +1831,14 @@ namespace Vpv
 		tabs->setStyleSheet(QStringLiteral("QTabWidget::pane { border: 0; background: transparent; }"));
 		contentLayout->addWidget(tabs);   // first, so a card can find what an earlier card moved under root
 		for (const Unit& u : table.units)
+		{
 			tabs->addTab(MakeUnitPage(state, u), Q(u.name));
+			tabs->setTabToolTip(tabs->count() - 1, Q(u.summary));
+		}
 		tabs->addTab(MakeExpertPage(state), QStringLiteral("Pipeline (expert)"));
 		tabs->addTab(MakeRetirementPage(state), QStringLiteral("Proposed retirement"));
+		tabs->setTabToolTip(tabs->count() - 2, QStringLiteral("For testing and measurement: where the calibration LUT runs, the stage order, stages switched off."));
+		tabs->setTabToolTip(tabs->count() - 1, QStringLiteral("Switches proposed for retirement (still working until you decide), with why and where each is."));
 		OrganiseRendering(host);
 		QWidget* drivePage = OrganiseDynamicDrive(host);
 		NoteInputPolicy(host);
