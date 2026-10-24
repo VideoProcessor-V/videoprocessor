@@ -110,6 +110,30 @@ namespace VpvTests
 			Assert::IsTrue(s.Stats(Consumer::DitherNext).lastMiss == Miss::NotEstimated);
 		}
 
+		TEST_METHOD(RetractWithdrawsLiveOutputsWithoutMovingTheEpoch)
+		{
+			Segment s;
+			const uint64_t e = s.Validity().Epoch();
+			s.Publish(Direction::Forward, 1, 2, FakeField{ 1 }, Source::Matcher, e, 0);
+			s.Publish(Direction::Backward, 1, 2, FakeField{ 2 }, Source::Matcher, e, 0);
+			s.Retract(Direction::Forward);   // the live field is being replaced
+			Assert::IsTrue(s.FetchFrom(Consumer::Interpolator, 1, 0).miss == Miss::NotEstimated);
+			Assert::IsTrue(static_cast<bool>(s.FetchBackward(Consumer::LowLatency, 2, false, 0)));
+			Assert::AreEqual(e, s.Validity().Epoch());
+		}
+
+		TEST_METHOD(GapFillPairsAndASharedHostState)
+		{
+			MotionValidity::State host;
+			Segment s(&host);   // shadow step: the host's state
+			s.Publish(Direction::Forward, 50, 53, FakeField{ 9 }, Source::Matcher, host.Epoch(), 0, true);   // spans 2 missed frames
+			Assert::IsTrue(static_cast<bool>(s.Fetch(Consumer::Interpolator, Direction::Forward, 50, 53, 0)));
+			s.Publish(Direction::Forward, 60, 62, FakeField{ 1 }, Source::Matcher, host.Epoch(), 0);   // not a fill pair
+			Assert::IsTrue(s.Fetch(Consumer::Interpolator, Direction::Forward, 60, 62, 0).miss == Miss::NotAdjacent);
+			host.Invalidate(MotionValidity::Cause::Resync);   // the host's invalidation reaches the segment
+			Assert::IsTrue(s.Fetch(Consumer::Interpolator, Direction::Forward, 50, 53, 0).miss == Miss::Stale);
+		}
+
 		TEST_METHOD(SmoothMotionExcludesTheEngine)
 		{
 			Segment s;

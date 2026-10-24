@@ -116,6 +116,12 @@ namespace VpMotion
 		// wanted make a "Fallbacks engaged" entry (cleared by the next engine estimate).
 		static constexpr unsigned kVisibleMatcherRun = 8;
 
+		// external: share the host's state while the host still owns it (shadow step, P-b1);
+		// nullptr: the segment owns it (the target).
+		explicit MotionSegment(MotionValidity::State* external = nullptr) : m_validity(external ? *external : m_own) {}
+		MotionSegment(const MotionSegment&) = delete;
+		MotionSegment& operator=(const MotionSegment&) = delete;
+
 		MotionValidity::State& Validity() { return m_validity; }
 		const MotionValidity::State& Validity() const { return m_validity; }
 
@@ -134,8 +140,10 @@ namespace VpMotion
 		// Called by the estimation part of the segment once a field exists. epochAtInputs: the
 		// validity epoch when the inputs were taken (estimates that straddle an invalidation are
 		// stored but never delivered).
+		// fillPair: a gap-fill pair (hunt 2 L1: a pair spanning missed capture frames on purpose),
+		// delivered although `to` is not `from + 1`.
 		void Publish(Direction direction, uint64_t from, uint64_t to, const Field& field, Source source,
-			uint64_t epochAtInputs, uint64_t geometryGeneration)
+			uint64_t epochAtInputs, uint64_t geometryGeneration, bool fillPair = false)
 		{
 			Slot& s = m_slots[m_next];
 			m_next = (m_next + 1) % Slots;
@@ -148,6 +156,7 @@ namespace VpMotion
 			s.epoch = epochAtInputs;
 			s.geometry = geometryGeneration;
 			s.serial = ++m_serial;
+			s.fillPair = fillPair;
 			if (direction == Direction::Forward)
 			{
 				if (source == Source::Matcher && m_engineWanted)
@@ -155,6 +164,16 @@ namespace VpMotion
 				else if (source != Source::Matcher)
 					m_matcherRun = 0;
 			}
+		}
+
+		// The live outputs are being replaced or released (the host's dejudderLiveFieldFrom = 0 sites:
+		// an estimate in progress, a release, a reset): nothing published so far in `direction` is
+		// delivered any more. Unlike Invalidate this does not move the epoch (other state stays valid).
+		void Retract(Direction direction)
+		{
+			for (Slot& s : m_slots)
+				if (s.direction == direction)
+					s.used = false;
 		}
 
 		// The field for exactly (from, to).
@@ -212,6 +231,7 @@ namespace VpMotion
 			Source source = Source::None;
 			uint64_t epoch = 0, geometry = 0;
 			uint64_t serial = 0;   // publish order: the newest estimate of a pair wins
+			bool fillPair = false;
 		};
 
 		static size_t Index(Consumer c)
@@ -224,15 +244,17 @@ namespace VpMotion
 		{
 			if (!m_engaged)
 				return Miss::Disengaged;
-			if (!MotionValidity::Adjacent(from, to))
-				return Miss::NotAdjacent;
+			if (from == 0 || to <= from)
+				return Miss::NotAdjacent;   // a repeat or a step back is never a pair
 			const Slot* found = nullptr;
 			for (const Slot& s : m_slots)
 				if (s.used && s.direction == direction && s.from == from && s.to == to &&
 					(!found || s.serial > found->serial))
 					found = &s;
 			if (!found)
-				return Miss::NotEstimated;
+				return MotionValidity::Adjacent(from, to) ? Miss::NotEstimated : Miss::NotAdjacent;
+			if (!MotionValidity::Adjacent(from, to) && !found->fillPair)
+				return Miss::NotAdjacent;
 			if (!m_validity.Current(found->epoch))
 				return Miss::Stale;
 			if (found->geometry != geometryGeneration)
@@ -255,7 +277,8 @@ namespace VpMotion
 			return d;
 		}
 
-		MotionValidity::State m_validity;
+		MotionValidity::State m_own;
+		MotionValidity::State& m_validity;
 		std::array<Slot, Slots> m_slots{};
 		size_t m_next = 0;
 		uint64_t m_serial = 0;
