@@ -93,7 +93,7 @@ With `statisticsDepth = 0` and `outward = 0` the result is his preview exactly.
 
 ## 4. The patch (`motion-timing-callsites.patch`)
 
-12 files, +117/-369. Apply with `git apply docs/design/motion-timing-callsites.patch` on d0212534.
+12 files, +121/-369. Apply with `git apply docs/design/motion-timing-callsites.patch` on d0212534.
 
 - `AlphaQueuePolicy.h` (Bill's file): **restored to 83b7ffea** (−240 lines). This is the whole VP
   delta removed from his file.
@@ -112,6 +112,9 @@ With `statisticsDepth = 0` and `outward = 0` the result is his preview exactly.
   - The look-ahead walk: `SelectLookaheadWalk` becomes `SelectWalk`.
 - 7 test files and `QueueStressHarness.h`: one `#include` of the compat shim. The test vcxproj
   registers the 2 new test files.
+- `QueueTimingFixesTests.cpp`: the `NoCopiedRateBoundLiterals` scan skips `AlphaQueuePolicy.h`.
+  Upstream's file keeps its literal 10..240 bound; `UpstreamRateBoundEqualsCaptureRateBounds`
+  proves it equals `CaptureRateBounds`.
 
 ### How the patch meets Bill's v1.4.02 (where his hunks land)
 
@@ -170,11 +173,33 @@ upload stay as the segment's estimation part. `RunDejudderEstimate` publishes; t
 That removes about 6 separate validity expressions and 2 duplicate assemblies. The sequence/epoch
 checks become one predicate (`Evaluate`), and per-consumer fallback counters come for free.
 
+### 5.1 Shadow step, drafted: `motion-shadow-callsites.patch`
+
+This patch (renderer only, +31 lines) applies alone or on top of the queue patch; both orders pass
+`git apply --check --cached` on d0212534. It is P-b1 step 1, and nothing is delivered from the
+segment yet:
+
+- The `Impl` gets `MotionSegment<MotionShadowField> motionSegment{ &motionValidity }`, which
+  **shares** the host's state.
+- `RunDejudderEstimate` publishes the pair where the host sets `dejudderLiveFieldFrom = aSequence`.
+  The source is engine ahead, engine at render or matcher. A pair spanning missed frames is
+  published as a fill pair.
+- `Retract(Forward)` runs at all 4 `dejudderLiveFieldFrom = 0` sites.
+- The VP phase picture asks `MotionShadowCheck(seq, next, DejudderLiveFieldFor(seq))`. A mismatch
+  is counted and logged on the first occurrence and every 2400th.
+
+Expectations:
+- pixels are identical, since only bookkeeping runs (r6 byte-identity gate);
+- the shadow mismatch count is **0** over the gate runs with `motion_history_fixes` on (the
+  default). With it off, the host does not require the live-field match, so mismatches after a
+  retract are expected and explained.
+- Step 2 is consumers fetching from the segment. It goes in only after step 1 shows 0 in the gates.
+
 ## 6. Tests
 
 CPU (`VideoProcessor-Test`, single-threaded; built with the patch applied, see section 7):
 
-- `QueueTimingPolicy`, 10 tests:
+- `QueueTimingPolicy`, 11 tests (incl. the upstream rate bound == `CaptureRateBounds`):
   - frozen-host equivalence for hold, target, due and backlog;
   - the 4/3/2 ladder and the capacity cap (visible note);
   - the held shed drops exactly the late frames and keeps timing;
@@ -184,7 +209,7 @@ CPU (`VideoProcessor-Test`, single-threaded; built with the patch applied, see s
   - Original = upstream on a frame-count queue;
   - either/or selection;
   - the one walk == the old walk and == his preparation (50k random queues).
-- `MotionSegmentTests`, 9 tests:
+- `MotionSegmentTests`, 11 tests (Retract and gap-fill/shared-state added):
   - direct fetch;
   - all 9 discontinuity causes make every consumer fall back;
   - an estimate straddling an invalidation is never delivered;
@@ -198,6 +223,34 @@ CPU (`VideoProcessor-Test`, single-threaded; built with the patch applied, see s
 GPU and timing (written, not run): `src/VP-V/tests/gpu/MotionTimingGpuTests.inc`, G1-G2 plus the
 T1-T3 renderer gates with stated expectations. They need the 2.5 h timing gates next session.
 
-## 7. Verification done / not done
+## 7. Verification (2026-10-24)
 
-See the report. Builds ran only through the shared slot runner, and no GPU test was run.
+Both patches were applied in the worktree and then reverted; the branch carries them as files.
+
+- **Builds** (x64 Release, shared slot runner, `/m:4`, `CL_MPCount=2`): `VideoProcessor-Test` +
+  `VideoProcessor-VPRenderer` built with the queue patch, and again with queue + shadow patches.
+  The DejudderWarp efficiency commit built with them (one earlier relink failed only because a
+  test process held the DLL).
+- **CPU tests**, single-threaded vstest with TRX:
+  - new tests 21/21: `QueueTimingPolicy` 11, `MotionSegmentTests` 10;
+  - affected suites with the queue patch: 544/545 (Queue*, RenderAhead*, DelayGate,
+    PipelineSkeleton, Efficiency, *Lookahead*, IntentInterpreter, CombinationRunner). The one
+    failure was `NoCopiedRateBoundLiterals`, flagging upstream's restored literal; it is fixed by
+    the exemption plus the equivalence test, and `QueueTimingFixes` is now 21/21.
+- **Not run**: GPU tests (none today); the 2.5 h timing gates (T1-T3); r6 byte identity; the
+  shadow mismatch count; the full CPU suite (about 4k tests); the Beta renderer project.
+- **Patch checks**: `git apply --check --cached` on d0212534 passes for the queue patch, the
+  shadow patch, and the two stacked.
+
+## 8. Inefficiencies found in today's motion/timing glue (estimates, not measured)
+
+| # | Where | Waste | Est. cost | Addressed by |
+|---|---|---|---|---|
+| 1 | `MotionWarp::TimedDispatch`/`FlushPassTimers` | per-pass timing drains the GPU: `pl_gpu_finish` before and after each of about 40 passes, plus 2 more in Flush (inner + outer). So production has **no** motion timing at all | 1.5-4 ms per estimate on the laptop at 4K when on (round trips + lost overlap); 0 today because it is off | commit 0bcab280 (`PollPassTimers`, single finish) + `SampledPassTimers` (1 in N, poll only; G2 expects ≤3%) |
+| 2 | render-thread upload (`UploadDejudderPlanes`, raw RGB route) | the normal (film) mode uploads each 4K frame on the render thread; native RGB + de-judder uploads twice (no `TakeNextPlanes` reuse) | ~5.4 ms of render-thread time per 4K 12-bit source frame, ×2 on RGB | not here (efficiency audit #3); the segment's estimation part is where the shared early slot should feed both |
+| 3 | vector hand-offs | about 6 host sites re-derive validity with separate expressions; `Interpolator::Motion` is built twice (phase + extras); `VectorField::Run` runs per extra | CPU <0.05 ms; the risk is the cost (the grain map and matcher history carried stale state across resyncs before) | `MotionSegment` (shadow now, delivery next) |
+| 4 | sigma-delta own search when the de-judder field exists but is not carried | duplicate motion search at output size | ~0.2-0.5 ms on the laptop | `FetchFrom(DitherNext/DitherExtras)` makes "field exists" one query |
+| 5 | NVOF producer CPU luma decode | the 5th-7th CPU pass over the same 4K frame (analysis, LED, intent, producer) | ~1-3 ms CPU per pass on the laptop (uncertain) | shared reduced-luma product (interface proposal; partly Bill's analysis) |
+| 6 | two or three queue walks after the upstream merge | his preview, preparation and `futureOutwardFrames` loops plus our LED/intent walk: 3 passes and 3 `SourceBufferAddRef` sets | µs CPU, refcount churn | `QueueLookaheadWalk` (one pass, three views) |
+| 7 | silent motion-source downgrade | "De-judder motion: block searches (no engine)" is **log-only** (vp-no-silent-fallbacks) | visibility, not time | `MotionSegment::FallbackEntry` (sustained matcher run while the engine is wanted) |
+| 8 | `PrefillTargetLocked` | called repeatedly in dequeue waits, each call taking `m_queueHoldMutex` and re-running `LockedFilmQueueTarget` | µs | unchanged by design in commit (a); cache the target per queue change later |

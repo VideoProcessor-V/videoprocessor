@@ -684,7 +684,7 @@ index d436b3c2..735e9e36 100644
  #include <vprenderer/DejudderPolicy.h>
  #include <vprenderer/InterpolationTimeline.h>
 diff --git a/src/VideoProcessor-Test/QueueTimingFixesTests.cpp b/src/VideoProcessor-Test/QueueTimingFixesTests.cpp
-index 20aebe7a..950567be 100644
+index 20aebe7a..ec309dad 100644
 --- a/src/VideoProcessor-Test/QueueTimingFixesTests.cpp
 +++ b/src/VideoProcessor-Test/QueueTimingFixesTests.cpp
 @@ -12,6 +12,7 @@
@@ -695,6 +695,17 @@ index 20aebe7a..950567be 100644
  #include <vprenderer/OpenLoopDisplayRate.h>
  
  #include <algorithm>
+@@ -615,6 +616,10 @@ namespace Tests
+ 				const std::string name = path.substr(path.rfind('\\') + 1);
+ 				if (name == "DisplayRefreshRatePolicy.h")
+ 					continue;   // the bounds themselves
++				// Upstream's file, kept byte-identical to billslack2 (motion-timing extraction 2026-10-24): its
++				// 10..240 literal equals CaptureRateBounds (QueueTimingPolicy.UpstreamRateBoundEqualsCaptureRateBounds).
++				if (name == "AlphaQueuePolicy.h")
++					continue;
+ 				std::ifstream file(path, std::ios::binary);
+ 				std::string line;
+ 				int number = 0;
 diff --git a/src/VideoProcessor-Test/RealFootageSuiteTests.cpp b/src/VideoProcessor-Test/RealFootageSuiteTests.cpp
 index 9c1e09e0..e0cecc14 100644
 --- a/src/VideoProcessor-Test/RealFootageSuiteTests.cpp
