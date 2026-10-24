@@ -27,11 +27,12 @@ namespace OutputSegments
 			(s3.Segment().CurrentMode() == Mode::Merged && s3.Member(hook));
 	}
 
-	Merger::Scope::Scope(Merger& m, pl_render_params& p, const pl_render_errors* errors)
+	Merger::Scope::Scope(Merger* merger, pl_render_params& p, const pl_render_errors* errors)
 		: params(p), hooks(p.hooks), count(p.num_hooks)
 	{
-		if (!m.active || !p.hooks || p.num_hooks < 2)
+		if (!merger || !merger->active || !p.hooks || p.num_hooks < 2)
 			return;
+		Merger& m = *merger;
 		m.in.assign(p.hooks, p.hooks + p.num_hooks);
 		m.lastMembers.clear();
 		for (const pl_hook* h : m.in)
@@ -57,6 +58,14 @@ namespace OutputSegments
 				if (m.first == f.signature)
 					inS2 = m.second;
 			(inS2 ? s2.Segment() : s3.Segment()).Downgrade(f.reason, fallbacks);
+		}
+		for (const auto& t : runner.TakeTimings())
+		{
+			const PipelineSlots::Id slot = s2.SlotOf(t.first);
+			if (slot != PipelineSlots::Id::Count)
+				s2.Segment().Timing().Poll(slot, t.second);
+			else if (s3.Member(t.first))
+				s3.Segment().Timing().Poll(PipelineSlots::Id::OutputDither, t.second);
 		}
 		active = s2.Segment().CurrentMode() == Mode::Merged || s3.Segment().CurrentMode() == Mode::Merged;
 	}

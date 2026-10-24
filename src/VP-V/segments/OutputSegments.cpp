@@ -26,7 +26,15 @@ namespace OutputSegments
 	{
 		ColourCounts counts;
 		members.clear();
-		auto note = [this, &hooks](size_t start) { members.insert(members.end(), hooks.begin() + static_cast<std::ptrdiff_t>(start), hooks.end()); };
+		memberSlots.clear();
+		auto note = [this, &hooks](size_t start, Id slot)
+		{
+			for (size_t i = start; i < hooks.size(); ++i)
+			{
+				members.push_back(hooks[i]);
+				memberSlots.push_back(slot);
+			}
+		};
 
 		// colour.sdr_tone_shape (delta 13): first at PRE_OUTPUT.
 		if (f.toneShape)
@@ -43,7 +51,7 @@ namespace OutputSegments
 				SetHookParameter(hooks[i], "recovery", f.tone.recovery);
 			}
 			counts.toneShape = hooks.size() - start;
-			note(start);
+			note(start, Id::ColourSdrToneShape);
 		}
 		// DV L2 trims (same slot switch; not tagged today, so not tagged here).
 		if (f.dvTrims)
@@ -64,7 +72,7 @@ namespace OutputSegments
 				SetHookParameter(hooks[i], "dv_kb", f.dv.kb);
 			}
 			counts.dvTrims = hooks.size() - start;
-			note(start);
+			note(start, Id::ColourSdrToneShape);
 		}
 		// colour.appearance (Stage 13): placeholder, no component, no hook (zero-cost rule).
 		if (f.ledBlock)
@@ -75,7 +83,7 @@ namespace OutputSegments
 				hooks.push_back(measure.Hook());
 				tag(hooks.size() - 1, Id::DriveLedMeasure);
 				counts.ledMeasure = 1;
-				note(hooks.size() - 1);
+				note(hooks.size() - 1, Id::DriveLedMeasure);
 			}
 			// drive.led_compensation (gain, gamma boost, shadow lift, veil; BTB/WTW passthrough).
 			const size_t start = hooks.size();
@@ -98,7 +106,7 @@ namespace OutputSegments
 				SetHookParameter(hooks[i], "btb_passthrough", c.btbPassthrough);
 			}
 			counts.ledCompensation = hooks.size() - start;
-			note(start);
+			note(start, Id::DriveLedCompensation);
 		}
 		// drive.black_level: placeholder, no hook.
 		// The edge: the user's PRE_OUTPUT (and other) shaders, exactly where they are today.
@@ -113,7 +121,7 @@ namespace OutputSegments
 			hooks.push_back(lut.Get());
 			tag(hooks.size() - 1, Id::OutputCalibrationLut);
 			counts.lut = 1;
-			note(hooks.size() - 1);
+			note(hooks.size() - 1, Id::OutputCalibrationLut);
 		}
 		return counts;
 	}
@@ -121,6 +129,14 @@ namespace OutputSegments
 	bool OutputColourSegment::Member(const pl_hook* hook) const
 	{
 		return std::find(members.begin(), members.end(), hook) != members.end();
+	}
+
+	Id OutputColourSegment::SlotOf(const pl_hook* hook) const
+	{
+		for (size_t i = 0; i < members.size(); ++i)
+			if (members[i] == hook)
+				return memberSlots[i];
+		return Id::Count;
 	}
 
 	OutputFinishSegment::OutputFinishSegment(OutputEncodingRepair::Hook& repairIn, OcclusionMask::Hook& maskIn)

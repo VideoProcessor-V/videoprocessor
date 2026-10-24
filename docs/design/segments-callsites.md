@@ -89,16 +89,29 @@ statistics unchanged; whole-chain matrix and owner acceptance. Expected 0 (only 
 change; intermediates keep libplacebo's format). Then measure the saving with `SlotTiming`
 before/after (audit #1 estimates ~1-1.5 ms per refresh on the 3090; do not assume it).
 
+## Extras, timing and the setting (added 15:30)
+
+- **De-judder extras** draw through the same segment objects: `PresentDejudderExtras` wraps its
+  per-extra parameters (`timedParams`) in a `Merger::Scope`, so with the switch on each extra
+  gets the same merged S2/S3 hooks (the cached-picture path gets the merged S3 only, since it
+  draws OUTPUT hooks alone). The pointer filters before it (LED measurement, mask, cache,
+  repair re-check) still work on the unmerged list. The fallback draw of A keeps the separate list.
+- **Timing:** `HookSegment::Runner::TakeTimings` hands over the timer results that arrived;
+  `Merger::Report` records them per slot in each segment's `TimingSampler` (`S2Timing()`,
+  `S3Timing()`; S3's repair and mask go under `output.dither`). Limitation: only stages that
+  return a shader are timed by the runner. VP's S2/S3 hooks all return textures (they dispatch
+  inside themselves), so their per-stage time must come from libplacebo's pass information
+  (`info_callback`, as `DitherExtraPassCallback` does); feeding that into the same samplers is
+  the follow-up. The extras' `info_callback` timing of the sigma-delta is unaffected.
+- **Setting key for the settings branch (no Config control added here):** `output_segments_merged`
+  = `on` / `off` (profile toggle, default `off`; owner: becomes the default once the GPU fixture
+  shows only removed-rounding differences with BTB/WTW unchanged). Unit: output; tier: advanced.
+
 ## Known gaps / follow-ups
 
-- De-judder extras (`PresentDejudderExtras`) still use the separate form; add a `Scope` there
-  after the main path passes the gate.
-- The setting has no Config control yet (owner rule: every setting gets one) and is not in the
-  settings reference; add with integration.
-- Per-stage timing into `SlotTiming` is wired in the core, not yet from `Merger` (`LastNs` exists).
+- Per-stage GPU time for texture-returning stages via `info_callback` (see above).
 - A stage disabled inside the merged hook stays disabled after a settings change re-merges.
-- Fusing stages into fewer passes (per-pixel stages in one shader) is the next step once the
-  segment owns its intermediates; not attempted.
+- Fusing per-pixel stages into fewer passes is the next step; not attempted.
 
 ## Verification done
 

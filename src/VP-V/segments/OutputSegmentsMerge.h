@@ -41,7 +41,8 @@ namespace OutputSegments
 		class Scope
 		{
 		public:
-			Scope(Merger& merger, pl_render_params& params, const pl_render_errors* errors);
+			// A null merger (none created yet) changes nothing.
+			Scope(Merger* merger, pl_render_params& params, const pl_render_errors* errors);
 			~Scope();
 			Scope(const Scope&) = delete;
 			Scope& operator=(const Scope&) = delete;
@@ -54,7 +55,11 @@ namespace OutputSegments
 
 		// After the render: an inner stage that failed is reported and its segment drops to the
 		// separate form until the next settings change ("Fallbacks engaged", never log-only).
+		// Timer results that arrived are recorded per slot in each segment's TimingSampler (S3's
+		// repair and mask have no slot of their own: recorded under output.dither).
 		void Report(FallbackStatus::Registry& fallbacks);
+		const SlotTiming::Accumulator& S2Timing() const { return s2.Segment().Timing().Accumulated(); }
+		const SlotTiming::Accumulator& S3Timing() const { return s3.Segment().Timing().Accumulated(); }
 		// Last polled GPU time of a stage hook, ns (0 = none; SIG_TEX stages time inside the hook).
 		uint64_t LastNs(const pl_hook* hook) const { return runner.LastNs(hook); }
 		void Release() { runner.Release(); }

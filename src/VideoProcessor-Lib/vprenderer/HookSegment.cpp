@@ -267,6 +267,7 @@ namespace HookSegment
 				const uint64_t ns = pl_timer_query(gpu, f.timers[i]);
 				if (ns)
 				{
+					fresh.emplace_back(h, ns);
 					auto it = std::find_if(lastNs.begin(), lastNs.end(),
 						[h](const std::pair<const pl_hook*, uint64_t>& e) { return e.first == h; });
 					if (it == lastNs.end())
@@ -294,6 +295,13 @@ namespace HookSegment
 		return taken;
 	}
 
+	std::vector<std::pair<const pl_hook*, uint64_t>> Runner::TakeTimings()
+	{
+		std::vector<std::pair<const pl_hook*, uint64_t>> taken;
+		taken.swap(fresh);
+		return taken;
+	}
+
 	uint64_t Runner::LastNs(const pl_hook* inner) const
 	{
 		for (const auto& e : lastNs)
@@ -316,5 +324,6 @@ namespace HookSegment
 		fused.clear();
 		used = 0;
 		lastNs.clear();
+		fresh.clear();
 	}
 }
