@@ -299,7 +299,7 @@
           "slot": "motion.estimation"
         }
       ],
-      "more_settings": "Your motion taste (the slider) and motion profiles: Motion page. The motion estimator's measured internals ('measured, leave alone') and the fixes under test: Rendering page."
+      "more_settings": "Smooth motion (libplacebo) vs VP's de-judder, and deinterlacing: VP Renderer > Motion. Everything else of this unit is on Main and Advanced here."
     },
     {
       "id": "repair",
@@ -401,7 +401,7 @@
           "slot": "repair.encoding"
         }
       ],
-      "more_settings": "libplacebo's own debander (deband_strength) and the detail-pulse / texture-restore limits: Rendering page."
+      "more_settings": "libplacebo's own debander (Deband strength): VP Renderer > Rendering > Processing."
     },
     {
       "id": "scaling",
@@ -555,7 +555,7 @@
           "slot": "scaling.output"
         }
       ],
-      "more_settings": "Upscaler, downscaler and chroma filters (libplacebo): Scaling page. The adaptive scaler's thresholds and weights: Rendering page."
+      "more_settings": "The upscaler, downscaler and chroma filters (libplacebo): VP Renderer > Scaling."
     },
     {
       "id": "colour",
@@ -630,7 +630,7 @@
           "slot": "colour.appearance"
         }
       ],
-      "more_settings": "Tone mapping, gamut, output gamma and the calibration LUT file: Color / Output and Rendering pages. Room-light details: Rendering page (Ambient)."
+      "more_settings": "Tone mapping, HDR target, gamut and output gamma: VP Renderer > Rendering and Color / Output. The calibration LUT file: Color / Output."
     },
     {
       "id": "drive",
@@ -707,7 +707,7 @@
         }
       ],
       "planned": [],
-      "more_settings": "Display bit depth and libplacebo's dithering: Rendering page. Where the calibration LUT runs: the Pipeline (expert) tab here."
+      "more_settings": "Display bit depth and libplacebo's dithering: VP Renderer > Rendering > Processing. Where the calibration LUT runs: the Pipeline (expert) tab."
     }
   ],
   "proposed_retirement": {

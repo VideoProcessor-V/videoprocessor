@@ -114,7 +114,7 @@ namespace Vpv
                 Unit u;
                 u.id = "motion"; u.name = "Motion"; u.summary = "Measures motion once on the untouched picture and feeds the de-judder, hiccup repair and dither.";
                 u.untieredReason = nullptr;
-                u.more = "Your motion taste (the slider) and motion profiles: Motion page. The motion estimator's measured internals ('measured, leave alone') and the fixes under test: Rendering page.";
+                u.more = "Smooth motion (libplacebo) vs VP's de-judder, and deinterlacing: VP Renderer > Motion. Everything else of this unit is on Main and Advanced here.";
                 u.slotIds.push_back("motion.estimation");
                 u.slotIds.push_back("motion.vector_delivery");
                 u.slotIds.push_back("motion.consumers");
@@ -165,7 +165,7 @@ namespace Vpv
                 Unit u;
                 u.id = "repair"; u.name = "Repair"; u.summary = "Cleans streaming damage at the picture's real size: encoding repair (planned), deband, breathing and texture restore.";
                 u.untieredReason = nullptr;
-                u.more = "libplacebo's own debander (deband_strength) and the detail-pulse / texture-restore limits: Rendering page.";
+                u.more = "libplacebo's own debander (Deband strength): VP Renderer > Rendering > Processing.";
                 u.slotIds.push_back("repair.encoding");
                 u.slotIds.push_back("repair.deband");
                 u.slotIds.push_back("repair.texture_restore");
@@ -208,7 +208,7 @@ namespace Vpv
                 Unit u;
                 u.id = "scaling"; u.name = "Scaling"; u.summary = "Undoes the player's upscale (re-base), brings the picture to 4K and scales it to the projector.";
                 u.untieredReason = nullptr;
-                u.more = "Upscaler, downscaler and chroma filters (libplacebo): Scaling page. The adaptive scaler's thresholds and weights: Rendering page.";
+                u.more = "The upscaler, downscaler and chroma filters (libplacebo): VP Renderer > Scaling.";
                 u.slotIds.push_back("scaling.rebase");
                 u.slotIds.push_back("scaling.route_4k");
                 u.slotIds.push_back("scaling.refine");
@@ -254,7 +254,7 @@ namespace Vpv
                 Unit u;
                 u.id = "colour"; u.name = "Colour"; u.summary = "libplacebo tone and gamut mapping, below-black/above-white kept, SDR tone shape, Stage 13 appearance (planned).";
                 u.untieredReason = "libplacebo does the colour in every tier; the cheaper combined HDR->SDR LUT for Classic/Low is not yet implemented.";
-                u.more = "Tone mapping, gamut, output gamma and the calibration LUT file: Color / Output and Rendering pages. Room-light details: Rendering page (Ambient).";
+                u.more = "Tone mapping, HDR target, gamut and output gamma: VP Renderer > Rendering and Color / Output. The calibration LUT file: Color / Output.";
                 u.slotIds.push_back("colour.tone_gamut");
                 u.slotIds.push_back("colour.extended_range");
                 u.slotIds.push_back("colour.sdr_tone_shape");
@@ -284,7 +284,7 @@ namespace Vpv
                 Unit u;
                 u.id = "output"; u.name = "Output"; u.summary = "The calibration LUT, the dither for the 8-bit link and the presentation.";
                 u.untieredReason = nullptr;
-                u.more = "Display bit depth and libplacebo's dithering: Rendering page. Where the calibration LUT runs: the Pipeline (expert) tab here.";
+                u.more = "Display bit depth and libplacebo's dithering: VP Renderer > Rendering > Processing. Where the calibration LUT runs: the Pipeline (expert) tab.";
                 u.slotIds.push_back("output.calibration_lut");
                 u.slotIds.push_back("output.dither");
                 u.slotIds.push_back("output.presentation");

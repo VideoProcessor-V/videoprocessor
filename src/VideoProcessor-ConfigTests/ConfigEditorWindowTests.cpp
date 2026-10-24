@@ -9612,7 +9612,7 @@ int writeSettingsScreens(const QString& configPath, const QString& outDir)
     };
     auto* pathway = window.findChild<QComboBox*>(QStringLiteral("vpv.pathway"));
     auto* units = window.findChild<QTabWidget*>(QStringLiteral("vpv.units"));
-    auto* drive = window.findChild<QTabWidget*>(QStringLiteral("vpv.drive.pages"));
+    auto* drive = window.findChild<QTabWidget*>(QStringLiteral("vpv.drivepage.pages"));
     auto* rendering = window.findChild<QWidget*>(QStringLiteral("config.vprenderer.profiles"));
     if (!pathway || !units) return 1;
     for (int p = 0; p < 2; ++p)

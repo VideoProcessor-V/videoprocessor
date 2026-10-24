@@ -1389,15 +1389,15 @@ namespace Vpv
 			// Main | Advanced, replacing the two-column grid (which is deleted once its cards are taken out,
 			// so it can never take them back on a resize).
 			auto* pages = new QTabWidget;
-			pages->setObjectName(ObjectName(QStringLiteral("drive.pages")));
+			pages->setObjectName(ObjectName(QStringLiteral("drivepage.pages")));
 			pages->setDocumentMode(true);
 			auto* mainPage = new QWidget;
-			mainPage->setObjectName(ObjectName(QStringLiteral("drive.main")));
+			mainPage->setObjectName(ObjectName(QStringLiteral("drivepage.main")));
 			auto* mainLayout = new QVBoxLayout(mainPage);
 			mainLayout->setContentsMargins(0, 8, 0, 0);
 			mainLayout->setSpacing(12);
 			auto* advancedPage = new QWidget;
-			advancedPage->setObjectName(ObjectName(QStringLiteral("drive.advanced")));
+			advancedPage->setObjectName(ObjectName(QStringLiteral("drivepage.advanced")));
 			auto* advancedLayout = new QVBoxLayout(advancedPage);
 			advancedLayout->setContentsMargins(0, 8, 0, 0);
 			advancedLayout->setSpacing(12);
@@ -1414,7 +1414,7 @@ namespace Vpv
 			auto* originalNote = Help(QStringLiteral("<b>Original pathway:</b> Dynamic Drive is a VP addition, so it is off and "
 				"this page is disabled. Switch the VP-V page back to the VP-V pathway to use it."));
 			originalNote->setTextFormat(Qt::RichText);
-			originalNote->setObjectName(ObjectName(QStringLiteral("drive.original_note")));
+			originalNote->setObjectName(ObjectName(QStringLiteral("drivepage.original_note")));
 			originalNote->setVisible(false);
 			column->insertWidget(column->indexOf(pages), originalNote);
 			auto place = [&](const QString& title, QVBoxLayout* to)
@@ -1878,8 +1878,16 @@ namespace Vpv
 			}
 			else
 			{
-				global.name->setText(QStringLiteral("Custom (per unit)"));
-				global.description->setText(QStringLiteral("The units are on different tiers; each tab shows its own."));
+				// Every unit on its shipped tier (Motion Mid, the others Low) is the shipped state, not Custom.
+				bool shipped = true;
+				for (const Unit& u : TierTable().units)
+					if (u.Tiered() && MatchTier(TierTable(), u, state->MakeGetter()) !=
+						MatchTier(TierTable(), u, [](const std::string&) { return std::string(); }))
+						shipped = false;
+				global.name->setText(shipped ? QStringLiteral("Default (the shipped values)") : QStringLiteral("Custom (per unit)"));
+				global.description->setText(shipped ?
+					QStringLiteral("Each unit is on the tier VP ships with (Motion Mid, the others Low). Move the slider to put every unit on one step.") :
+					QStringLiteral("The units are on different tiers; each tab shows its own."));
 			}
 		});
 
@@ -2009,8 +2017,8 @@ namespace Vpv
 			// Dynamic Drive is a VP addition: off (and its page disabled) in the Original pathway.
 			if (QWidget* root = state->host.upstreamRoot)
 			{
-				if (QWidget* drive = root->findChild<QWidget*>(ObjectName(QStringLiteral("drive.pages")))) drive->setEnabled(vpvOn);
-				if (QWidget* note = root->findChild<QWidget*>(ObjectName(QStringLiteral("drive.original_note")))) note->setVisible(!vpvOn);
+				if (QWidget* drive = root->findChild<QWidget*>(ObjectName(QStringLiteral("drivepage.pages")))) drive->setEnabled(vpvOn);
+				if (QWidget* note = root->findChild<QWidget*>(ObjectName(QStringLiteral("drivepage.original_note")))) note->setVisible(!vpvOn);
 			}
 			ApplyManagedState(state->host, vpvOn);
 			ApplyManagedIn(state->host, state->root, vpvOn);   // the managed rows moved onto this page

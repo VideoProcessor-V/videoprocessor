@@ -625,11 +625,11 @@ namespace
 		require(highlights->isEnabled() && !control<QWidget>(window, QStringLiteral("config.led_drive.default.tick_ms"))->isEnabled(),
 			"Custom frees the groups the chosen source uses (Script-only stays greyed in Compensate)");
 		// The Dynamic Drive page: masters on Main, what they set on Advanced (the speeds set by their preset).
-		auto* driveMain = control<QWidget>(window, Vpv::ObjectName("drive.main"));
-		auto* driveAdvanced = control<QWidget>(window, Vpv::ObjectName("drive.advanced"));
+		auto* driveMain = control<QWidget>(window, Vpv::ObjectName("drivepage.main"));
+		auto* driveAdvanced = control<QWidget>(window, Vpv::ObjectName("drivepage.advanced"));
 		require(driveMain->isAncestorOf(control<QWidget>(window, QStringLiteral("config.led_drive.default.command_source"))) &&
 			driveMain->isAncestorOf(control<QWidget>(window, QStringLiteral("config.led_drive.default.rate_preset"))),
-			("the Dynamic Drive masters are on Main: " + [&]{ QString d; for (QWidget* w = control<QWidget>(window, QStringLiteral("config.led_drive.default.command_source")); w; w = w->parentWidget()) d += w->objectName() + QLatin1Char('<') + QString::fromLatin1(w->metaObject()->className()) + QStringLiteral("> "); return d; }().toStdString()).c_str());
+			"the Dynamic Drive masters are on Main");
 		auto* rateUp = control<QWidget>(window, QStringLiteral("config.led_drive.default.rate_gain_up"));
 		require(driveAdvanced->isAncestorOf(rateUp) && !rateUp->isEnabled(), "the LED speeds values are set by their preset (Advanced)");
 		control<QCheckBox>(window, Vpv::ObjectName("drive.card.speed_values.custom"))->setChecked(true);
@@ -688,7 +688,7 @@ namespace
 			}
 		}
 		// The Dynamic Drive page, in the same scheme (Main | Advanced), fits too.
-		auto* drivePages = control<QTabWidget>(window, Vpv::ObjectName("drive.pages"));
+		auto* drivePages = control<QTabWidget>(window, Vpv::ObjectName("drivepage.pages"));
 		for (int i = 0; pages && i < pages->count(); ++i)
 			if (pages->widget(i)->isAncestorOf(drivePages)) window.selectPage(i);
 		QScrollArea* driveScroll = nullptr;
@@ -745,6 +745,15 @@ namespace
 			"[projector.Default]\nprotocol: barco_ascii\nport: COM1\n");
 		ConfigEditorWindow window(path, 0, true);
 		const Vpv::Table& table = Vpv::TierTable();
+		// MEDIUM 5 (on the fresh config, before any edit): the layout's defaults equal the renderer's (Config's mirrored default table).
+		for (const Vpv::KeyValue& kv : table.defaults)
+			if (auto* w = window.findChild<QWidget*>(QStringLiteral("config.vprenderer.") + QString::fromLatin1(kv.key)))
+			{
+				const QString effective = w->property("effectiveValue").toString().trimmed();
+				if (effective.isEmpty()) continue;
+				require(Vpv::SameValue(effective.toStdString(), kv.value),
+					(std::string("default of ") + kv.key + ": layout " + kv.value + ", renderer " + effective.toStdString()).c_str());
+			}
 		// HIGH 1: on a fresh config every tiered unit reads a tier (the shipped values), never Custom; Default works.
 		for (const Vpv::Unit& u : table.units)
 		{
@@ -783,15 +792,6 @@ namespace
 		list->setCurrentRow(0);
 		QCoreApplication::processEvents();
 		require(!repairCustom->isChecked(), "a profile switch unticks Custom when the values sit on the tier");
-		// MEDIUM 5: the layout's defaults equal the renderer's (Config's mirrored default table).
-		for (const Vpv::KeyValue& kv : table.defaults)
-			if (auto* w = window.findChild<QWidget*>(QStringLiteral("config.vprenderer.") + QString::fromLatin1(kv.key)))
-			{
-				const QString effective = w->property("effectiveValue").toString().trimmed();
-				if (effective.isEmpty()) continue;
-				require(Vpv::SameValue(effective.toStdString(), kv.value),
-					(std::string("default of ") + kv.key + ": layout " + kv.value + ", renderer " + effective.toStdString()).c_str());
-			}
 		// One visible, enabled control per key, in both pathways.
 		auto oneEach = [&](const char* pathway)
 		{
@@ -833,7 +833,7 @@ namespace
 		// MEDIUM 6: the Original pathway turns every VP addition off, Dynamic Drive included.
 		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);
 		QCoreApplication::processEvents();
-		require(!control<QWidget>(window, Vpv::ObjectName("drive.pages"))->isEnabled(), "the Original pathway disables Dynamic Drive");
+		require(!control<QWidget>(window, Vpv::ObjectName("drivepage.pages"))->isEnabled(), "the Original pathway disables Dynamic Drive");
 		oneEach("Original pathway");
 	}
 }
