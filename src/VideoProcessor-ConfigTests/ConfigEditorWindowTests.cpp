@@ -2310,7 +2310,7 @@ void testLedDrivePageAndLiveSwitches()
         "led_peak_full_coverage / led_picture_only are not on by default");
     // Organisation pass 2: the LED fixes under test have one master (Advanced LED card), all on until Custom.
     require(!fullPeak->isEnabled(), "the LED fixes are not set by their master");
-    requireControl<QComboBox>(window, "vpv.drive.led_fixes")->setCurrentIndex(1);
+    requireControl<QCheckBox>(window, "vpv.drive.led_fixes")->setChecked(true);
     QCoreApplication::processEvents();
     require(fullPeak->isVisibleTo(&window) && pictureOnly->isVisibleTo(&window) && fullPeak->isEnabled() &&
         pictureOnly->isEnabled(), "The Dynamic Drive measurement switches are not offered");

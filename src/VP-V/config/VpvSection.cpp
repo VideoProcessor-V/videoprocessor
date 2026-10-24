@@ -12,6 +12,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QFrame>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -31,6 +32,7 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <map>
 #include <memory>
 #include <set>
 #include <vector>
@@ -311,6 +313,14 @@ namespace Vpv
 			QStringList missing;                         // organisation items the editor does not have (tests)
 			QStringList hidden;                          // upstream rows hidden while the VP-V pathway is on (Hide items)
 			bool vpvOn = true;                           // the pathway (locks to a tier apply only on VP-V)
+			bool reloading = false;                      // a profile (re)load: Custom boxes recompute both ways
+			std::map<std::string, int> chosen;           // unit -> the tier last chosen or matched on this page
+			int globalChosen = -1;                       // the global tier last chosen or matched
+			int ChosenTier(const char* unit) const
+			{
+				const auto it = chosen.find(unit);
+				return it == chosen.end() ? -1 : it->second;
+			}
 
 			// The profile's value, else the default profile's (renderer profiles inherit).
 			std::string Get(const std::string& key) const
@@ -388,9 +398,9 @@ namespace Vpv
 			row->addWidget(new QLabel(positions.value(0)));
 			row->addWidget(t.slider, 1);
 			row->addWidget(new QLabel(positions.value(positions.size() - 1)));
-			t.reset = new QPushButton(QStringLiteral("Reset to tier"));
+			t.reset = new QPushButton(QStringLiteral("Reset"));
 			t.reset->setObjectName(ObjectName(prefix + QStringLiteral(".reset")));
-			t.reset->setToolTip(QStringLiteral("Puts the tier's settings back to the slider position's values."));
+			t.reset->setToolTip(QStringLiteral("Puts the settings back to the tier last chosen here (shown on the slider)."));
 			row->addWidget(t.reset);
 			t.defaults = new QPushButton(QStringLiteral("Default"));
 			t.defaults->setObjectName(ObjectName(prefix + QStringLiteral(".default")));
@@ -516,7 +526,10 @@ namespace Vpv
 			std::string v = state->Get(lock.masterKey ? lock.masterKey : "");
 			if (v.empty()) v = lock.fallback ? lock.fallback : "";
 			if (v.empty()) v = TierTable().Default(lock.masterKey ? lock.masterKey : "");
-			for (const QString& off : Q(lock.offValues).split(QLatin1Char(','), Qt::SkipEmptyParts))
+			const QString offValues = Q(lock.offValues);
+			if (offValues.startsWith(QLatin1Char('!')))   // "!auto": usable only at that value
+				return !SameValue(v, offValues.mid(1).trimmed().toStdString());
+			for (const QString& off : offValues.split(QLatin1Char(','), Qt::SkipEmptyParts))
 				if (SameValue(v, off.trimmed().toStdString())) return true;
 			return false;
 		}
@@ -605,7 +618,10 @@ namespace Vpv
 			}
 			case LockKind::Defaults:
 				for (const QString& key : lock->keys)
-					if (!state->Own(key.toStdString()).empty()) return true;
+				{
+					const std::string own = state->Get(key.toStdString());
+					if (!own.empty() && !(lock->spec.fallback && SameValue(own, lock->spec.fallback))) return true;
+				}
 				return false;
 			default:
 				return false;
@@ -620,9 +636,11 @@ namespace Vpv
 			case LockKind::Tier:
 				if (unit && unit->Tiered())
 				{
-					int tier = 0;
-					if (auto* slider = state->root->findChild<QSlider*>(ObjectName(lock->unitId + QStringLiteral(".tier")))) tier = slider->value();
-					state->Write(ApplyTier(TierTable(), *unit, tier, state->MakeGetter()));
+					// The tier last chosen or shown here; else the shipped default tier. Never a slider position
+					// the user did not choose (audit 2026-10-24, HIGH 1).
+					int tier = state->ChosenTier(unit->id);
+					if (tier < 0) tier = MatchTier(TierTable(), *unit, [](const std::string&) { return std::string(); });
+					if (tier >= 0) state->Write(ApplyTier(TierTable(), *unit, tier, state->MakeGetter()));
 				}
 				break;
 			case LockKind::Slider:
@@ -631,8 +649,11 @@ namespace Vpv
 				break;
 			case LockKind::Defaults:
 			{
+				// Written explicitly (e.g. every fix "on"): a cleared key in a named profile would inherit the
+				// default profile's value instead.
 				std::vector<std::pair<std::string, std::string>> writes;
-				for (const QString& key : lock->keys) writes.emplace_back(key.toStdString(), std::string());
+				for (const QString& key : lock->keys)
+					writes.emplace_back(key.toStdString(), lock->spec.fallback ? std::string(lock->spec.fallback) : std::string());
 				state->Write(writes);
 				break;
 			}
@@ -732,11 +753,17 @@ namespace Vpv
 						});
 			state->refreshers.push_back([state, lock, unit]()
 			{
-				// Custom follows the values: ticked by itself when they differ from the master's.
-				if (lock->custom && MasterIsCustom(state, lock, unit) && !lock->custom->isChecked())
+				// Custom follows the values: on a profile (re)load both ways (ticked when they differ from the
+				// master's, unticked when they sit exactly on it); otherwise it only ticks itself, so a box the
+				// user just ticked is not taken away.
+				if (lock->custom)
 				{
-					const QSignalBlocker blocker(lock->custom);
-					lock->custom->setChecked(true);
+					const bool custom = MasterIsCustom(state, lock, unit);
+					if (state->reloading ? custom != lock->custom->isChecked() : (custom && !lock->custom->isChecked()))
+					{
+						const QSignalBlocker blocker(lock->custom);
+						lock->custom->setChecked(custom);
+					}
 				}
 				ApplyLock(state, lock);
 			});
@@ -789,7 +816,7 @@ namespace Vpv
 				for (const Preset& p : unit.presets) positions << Q(p.tier);
 				TierBox t = MakeTierBox(unitId + QStringLiteral(".tier"), Q(unit.name) + QStringLiteral(" tier"), positions,
 					QStringLiteral("The %1 tier: each step sets the settings listed in its description (Advanced > Set by the "
-						"tier). A changed setting shows Custom; Reset to tier puts it back.").arg(Q(unit.name)));
+						"tier). A changed setting shows Custom; Reset puts it back; Default = the shipped values.").arg(Q(unit.name)));
 				layout->addWidget(t.box);
 				state->own.push_back(t.box);
 				QStringList notes;
@@ -802,14 +829,15 @@ namespace Vpv
 					layout->addWidget(planned);
 				}
 				const Unit* u = &unit;
-				// The tier the built-in defaults give (none when they match no tier).
+				// The shipped values are a tier of every tiered unit (vpv-tiers.json; audit 2026-10-24, HIGH 1).
 				const int defaultTier = MatchTier(table, unit, [](const std::string&) { return std::string(); });
 				t.defaults->setEnabled(defaultTier >= 0);
 				t.defaults->setToolTip(defaultTier >= 0 ?
-					QStringLiteral("Back to the built-in default tier, %1.").arg(Q(unit.presets[static_cast<size_t>(defaultTier)].tier)) :
-					QStringLiteral("VP's built-in defaults match no tier of this unit."));
+					QStringLiteral("Back to the shipped values (the %1 tier).").arg(Q(unit.presets[static_cast<size_t>(defaultTier)].tier)) :
+					QStringLiteral("VP's shipped values match no tier of this unit."));
 				auto apply = [state, u](int p)
 				{
+					state->chosen[u->id] = p;
 					state->Write(ApplyTier(TierTable(), *u, p, state->MakeGetter()));
 					state->RefreshAll();
 				};
@@ -817,13 +845,23 @@ namespace Vpv
 				{
 					if (!state->refreshing) apply(p);
 				});
-				QObject::connect(t.reset, &QPushButton::clicked, t.reset, [apply, t]() { apply(t.slider->value()); });
-				QObject::connect(t.defaults, &QPushButton::clicked, t.defaults, [apply, defaultTier]() { apply(defaultTier); });
+				// Choosing the step the handle already sits on (after Custom) moves nothing: releasing it applies it.
+				QObject::connect(t.slider, &QSlider::sliderReleased, t.slider, [state, u, t, apply]()
+				{
+					if (!state->refreshing && MatchTier(TierTable(), *u, state->MakeGetter()) != t.slider->value()) apply(t.slider->value());
+				});
+				QObject::connect(t.reset, &QPushButton::clicked, t.reset, [state, u, apply]()
+				{
+					const int tier = state->ChosenTier(u->id);
+					if (tier >= 0) apply(tier);
+				});
+				QObject::connect(t.defaults, &QPushButton::clicked, t.defaults, [apply, defaultTier]() { if (defaultTier >= 0) apply(defaultTier); });
 				state->refreshers.push_back([state, u, t]()
 				{
 					const int match = MatchTier(TierTable(), *u, state->MakeGetter());
 					if (match >= 0)
 					{
+						state->chosen[u->id] = match;
 						const QSignalBlocker blocker(t.slider);
 						t.slider->setValue(match);
 						const Preset& p = u->presets[static_cast<size_t>(match)];
@@ -832,10 +870,16 @@ namespace Vpv
 					}
 					else
 					{
+						// Custom: no tier is applied or implied; Reset goes back only to a tier chosen here.
+						const int chosen = state->ChosenTier(u->id);
 						t.name->setText(QStringLiteral("Custom"));
-						t.description->setText(QStringLiteral("The settings differ from %1 (Advanced > Set by the tier). Reset to "
-							"tier puts them back.").arg(Q(u->presets[static_cast<size_t>(t.slider->value())].tier)));
+						t.description->setText(chosen >= 0 ?
+							QStringLiteral("The settings differ from %1 (Advanced > Set by the tier). Reset puts them back.")
+								.arg(Q(u->presets[static_cast<size_t>(chosen)].tier)) :
+							QStringLiteral("The settings match no tier. Move the slider to choose one, or Default for the "
+								"shipped values."));
 					}
+					t.reset->setEnabled(match >= 0 || state->ChosenTier(u->id) >= 0);
 				});
 			}
 			else
@@ -1325,7 +1369,7 @@ namespace Vpv
 			const QList<QToolButton*> toggles = root ? root->findChildren<QToolButton*>(
 				QRegularExpression(QStringLiteral("^config\\.led_drive\\.[^.]+\\.advanced_toggle$"))) : QList<QToolButton*>();
 			QToolButton* toggle = toggles.isEmpty() ? nullptr : toggles.front();
-			if (!toggle || root->findChild<QComboBox*>(ObjectName(QStringLiteral("drive.advanced_values")))) return nullptr;
+			if (!toggle || root->findChild<QWidget*>(ObjectName(QStringLiteral("drive.advanced_values")))) return nullptr;
 			const QString prefix = toggle->objectName().chopped(QStringLiteral("advanced_toggle").size());
 			QWidget* holder = toggle->parentWidget();
 			QWidget* advanced = holder && holder->layout() && holder->layout()->count() > 1 ? holder->layout()->itemAt(1)->widget() : nullptr;
@@ -1366,6 +1410,12 @@ namespace Vpv
 			pages->setTabToolTip(0, QStringLiteral("Whether Dynamic Drive runs, what drives it, its LED profile and speed preset, and the projector link."));
 			pages->setTabToolTip(1, QStringLiteral("What those choices set (greyed until Custom), Compensate's tuning and the projector's measured limits."));
 			column->insertWidget(column->indexOf(grid), pages);
+			auto* originalNote = Help(QStringLiteral("<b>Original pathway:</b> Dynamic Drive is a VP addition, so it is off and "
+				"this page is disabled. Switch the VP-V page back to the VP-V pathway to use it."));
+			originalNote->setTextFormat(Qt::RichText);
+			originalNote->setObjectName(ObjectName(QStringLiteral("drive.original_note")));
+			originalNote->setVisible(false);
+			column->insertWidget(column->indexOf(pages), originalNote);
 			auto place = [&](const QString& title, QVBoxLayout* to)
 			{
 				if (QWidget* card = CardTitled(cards, title)) { to->addWidget(card); cards.removeAll(card); }
@@ -1401,21 +1451,20 @@ namespace Vpv
 			place(QStringLiteral("Contrast and cuts"), advancedLayout);
 
 			// Advanced LED: its card keeps the two masters; each group becomes a card of its own.
-			auto* values = new QComboBox;
+			// Custom is a check box everywhere (audit 2026-10-24, LOW): off = the master's values (greyed).
+			auto* values = new QCheckBox(QStringLiteral("Custom (change the advanced LED values by hand)"));
 			values->setObjectName(ObjectName(QStringLiteral("drive.advanced_values")));
-			values->addItem(QStringLiteral("Your script's values (default)"), QStringLiteral("default"));
-			values->addItem(QStringLiteral("Custom (change them below)"), QStringLiteral("custom"));
-			values->setToolTip(QStringLiteral("The master of the advanced LED groups below. Your script's values: each field shows "
-				"the built-in value (your dimming script's) and is greyed. Custom: edit them; choosing your script's values "
-				"again removes every change (each field's Reset)."));
-			auto* fixes = new QComboBox;
+			values->setToolTip(QStringLiteral("The master of the advanced LED groups below. Off: each field shows the LED profile's "
+				"value (your script's built-in values, or the profile file's) and is greyed. On: edit them; unticking removes "
+				"every change (each field's Reset)."));
+			auto* fixes = new QCheckBox(QStringLiteral("Custom (switch the LED fixes under test one by one)"));
 			fixes->setObjectName(ObjectName(QStringLiteral("drive.led_fixes")));
-			fixes->addItem(QStringLiteral("All on (default)"), QStringLiteral("default"));
-			fixes->addItem(QStringLiteral("Custom (switch them one by one)"), QStringLiteral("custom"));
 			fixes->setToolTip(QStringLiteral("The master of the nine LED fixes under test (Dynamic Drive, Contrast and cuts, "
-				"Experimental cards; proposed for retirement, which keeps them on). All on: greyed on. Custom: switch them one by one."));
-			advancedForm->insertRow(1, QStringLiteral("Advanced LED values"), values);
-			advancedForm->insertRow(2, QStringLiteral("LED fixes under test"), fixes);
+				"Experimental cards; proposed for retirement, which keeps them on). Off: all on, greyed. On: switch them one by "
+				"one; unticking turns them all on again."));
+			advancedForm->insertRow(1, QString(), values);
+			advancedForm->insertRow(2, QString(), fixes);
+			auto* profileFile = root->findChild<QLineEdit*>(prefix + QStringLiteral("profile_file"));
 			toggle->setChecked(true);    // the card is on Advanced already: no second "show advanced" step
 			toggle->setVisible(false);
 			QWidget* advancedLedCard = CardTitled(cards, QStringLiteral("Advanced LED"));
@@ -1456,10 +1505,14 @@ namespace Vpv
 				for (QWidget* p = any; p && !speedsCard; p = p->parentWidget())
 					if (p->property("card").toBool()) speedsCard = p;
 			auto apply = [groups, values, fixes, source, enabled, root, prefix, advancedLedCard, speedsCard, speedValues, speedRows,
-				speedNote, speedCustom, speedSpins]()
+				speedNote, speedCustom, speedSpins, profileFile]()
 			{
 				const bool driveOn = !enabled || enabled->isChecked();
-				const bool custom = values->currentData().toString() == QStringLiteral("custom");
+				const bool custom = values->isChecked();
+				// Where the greyed values come from: the LED profile file when one is chosen, else the script's.
+				const QString file = profileFile ? profileFile->text().trimmed() : QString();
+				const QString from = file.isEmpty() ? QStringLiteral("your script's built-in values") :
+					QStringLiteral("the LED profile file %1").arg(QFileInfo(file).fileName());
 				const QString chosen = source ? source->currentData().toString() : QString();
 				// The group cards follow the Advanced LED card (shown for VP's own sources, greyed with the drive off).
 				const bool groupsShown = !advancedLedCard || !advancedLedCard->isHidden();
@@ -1472,10 +1525,10 @@ namespace Vpv
 					g.rows->setEnabled(custom && modeOk);
 					g.note->setText(!modeOk ? QStringLiteral("Used only in %1 mode.").arg(std::string(g.mode) == "compensate" ?
 						QStringLiteral("Compensate") : QStringLiteral("Script")) :
-						!custom ? QStringLiteral("Set by Advanced LED values: your script's values. Choose Custom to change.") : QString());
+						!custom ? QStringLiteral("Set by %1 (LED profile). Tick Custom in the Advanced LED card to change.").arg(from) : QString());
 					g.note->setVisible(!g.note->text().isEmpty());
 				}
-				const bool fixesCustom = fixes->currentData().toString() == QStringLiteral("custom");
+				const bool fixesCustom = fixes->isChecked();
 				for (const char* key : LedFixKeys())
 					if (auto* box = root->findChild<QCheckBox*>(prefix + Q(key)))
 					{
@@ -1493,33 +1546,39 @@ namespace Vpv
 					QStringLiteral("Set by the LED speeds preset (Main). Tick Custom to change these by hand."));
 				speedNote->setVisible(!speedNote->text().isEmpty());
 			};
-			// Custom follows the saved values: any field set (its Reset is enabled) / any fix off / any speed not "preset".
-			bool anySet = false;
-			for (const Group& g : *groups)
-				for (const QString& key : g.keys)
-					if (auto* reset = root->findChild<QToolButton*>(prefix + key + QStringLiteral(".reset")))
-						anySet = anySet || reset->isEnabled();
-			bool anyFixOff = false;
-			for (const char* key : LedFixKeys())
-				if (auto* box = root->findChild<QCheckBox*>(prefix + Q(key))) anyFixOff = anyFixOff || !box->isChecked();
-			bool anySpeed = false;
-			for (QDoubleSpinBox* spin : speedSpins) anySpeed = anySpeed || spin->value() > spin->minimum();
-			values->setCurrentIndex(anySet ? 1 : 0);
-			fixes->setCurrentIndex(anyFixOff ? 1 : 0);
-			speedCustom->setChecked(anySpeed);
-			apply();
-			QObject::connect(values, qOverload<int>(&QComboBox::currentIndexChanged), values, [groups, values, root, prefix, apply](int)
+			// Custom follows the saved values, both ways (audit MEDIUM 3): any field set (its Reset is enabled) /
+			// any fix off / any speed not "preset". Run now, and again whenever the LED profile changes.
+			auto recompute = [groups, values, fixes, speedCustom, speedSpins, root, prefix, apply]()
 			{
-				if (values->currentData().toString() == QStringLiteral("default"))
+				bool anySet = false;
+				for (const Group& g : *groups)
+					for (const QString& key : g.keys)
+						if (auto* reset = root->findChild<QToolButton*>(prefix + key + QStringLiteral(".reset")))
+							anySet = anySet || reset->isEnabled();
+				bool anyFixOff = false;
+				for (const char* key : LedFixKeys())
+					if (auto* box = root->findChild<QCheckBox*>(prefix + Q(key))) anyFixOff = anyFixOff || !box->isChecked();
+				bool anySpeed = false;
+				for (QDoubleSpinBox* spin : speedSpins) anySpeed = anySpeed || spin->value() > spin->minimum();
+				const QSignalBlocker a(values), b(fixes), c(speedCustom);
+				values->setChecked(anySet);
+				fixes->setChecked(anyFixOff);
+				speedCustom->setChecked(anySpeed);
+				apply();
+			};
+			recompute();
+			QObject::connect(values, &QCheckBox::toggled, values, [groups, root, prefix, apply](bool on)
+			{
+				if (!on)
 					for (const Group& g : *groups)
 						for (const QString& key : g.keys)
 							if (auto* reset = root->findChild<QToolButton*>(prefix + key + QStringLiteral(".reset")))
 								if (reset->isEnabled()) reset->click();
 				apply();
 			});
-			QObject::connect(fixes, qOverload<int>(&QComboBox::currentIndexChanged), fixes, [fixes, root, prefix, apply](int)
+			QObject::connect(fixes, &QCheckBox::toggled, fixes, [root, prefix, apply](bool on)
 			{
-				if (fixes->currentData().toString() == QStringLiteral("default"))
+				if (!on)
 					for (const char* key : LedFixKeys())
 						if (auto* box = root->findChild<QCheckBox*>(prefix + Q(key)))
 							if (!box->isChecked())
@@ -1539,6 +1598,18 @@ namespace Vpv
 				QObject::connect(source, qOverload<int>(&QComboBox::currentIndexChanged), values, [apply](int) { apply(); });
 			if (enabled)
 				QObject::connect(enabled, &QCheckBox::toggled, values, [apply](bool) { apply(); });
+			// A profile file chosen or the built-in one restored: the values (and where they come from) change.
+			if (profileFile)
+				QObject::connect(profileFile, &QLineEdit::textChanged, values, [recompute](const QString&)
+				{
+					QTimer::singleShot(0, [recompute]() { recompute(); });
+				});
+			for (const char* part : { "profile_browse", "profile_builtin" })
+				if (auto* button = root->findChild<QPushButton*>(prefix + Q(part)))
+					QObject::connect(button, &QPushButton::clicked, values, [recompute]()
+					{
+						QTimer::singleShot(0, [recompute]() { recompute(); });
+					});
 			return pages;
 		}
 
@@ -1769,6 +1840,7 @@ namespace Vpv
 		state->own.push_back(global.box);
 		auto applyGlobal = [state](int g)
 		{
+			state->globalChosen = g;
 			std::vector<std::pair<std::string, std::string>> writes;
 			for (const Unit& u : TierTable().units)
 				if (u.Tiered())
@@ -1783,10 +1855,19 @@ namespace Vpv
 		{
 			if (!state->refreshing) applyGlobal(g);
 		});
-		QObject::connect(global.reset, &QPushButton::clicked, global.reset, [applyGlobal, global]() { applyGlobal(global.slider->value()); });
+		QObject::connect(global.slider, &QSlider::sliderReleased, global.slider, [state, applyGlobal, global]()
+		{
+			if (!state->refreshing && MatchGlobal(TierTable(), state->MakeGetter()) != global.slider->value()) applyGlobal(global.slider->value());
+		});
+		QObject::connect(global.reset, &QPushButton::clicked, global.reset, [state, applyGlobal]()
+		{
+			if (state->globalChosen >= 0) applyGlobal(state->globalChosen);
+		});
 		state->refreshers.push_back([state, global]()
 		{
 			const int g = MatchGlobal(TierTable(), state->MakeGetter());
+			if (g >= 0) state->globalChosen = g;
+			global.reset->setEnabled(state->globalChosen >= 0);
 			if (g >= 0)
 			{
 				const QSignalBlocker blocker(global.slider);
@@ -1856,18 +1937,11 @@ namespace Vpv
 				box->setEnabled(!locked);
 				box->setToolTip(locked ? why : box->property("vpvTasteTip").toString());
 			};
-			for (const Unit& u : t.units)
-				if (u.id == std::string("motion"))
-				{
-					const bool classic = state->vpvOn && MatchTier(t, u, state->MakeGetter()) == 0;
-					lockBox(state->root->findChild<QWidget*>(QStringLiteral("config.vprenderer.motion_preset_box")), classic,
-						QStringLiteral("Set by the Motion tier: Classic has no de-judder. Choose Low or above to set the amount."));
-				}
 			std::string source = state->Get("source_resolution");
 			if (source.empty()) source = t.Default("source_resolution");
 			const bool rebaseOff = state->vpvOn && !SameValue(source, "auto");
 			lockBox(state->root->findChild<QWidget*>(QStringLiteral("config.vprenderer.picture_preset_box")), rebaseOff,
-				QStringLiteral("Set by the Scaling tier: re-base is off below Mid. Choose Mid to set how much evidence it needs."));
+				QStringLiteral("Set by the Scaling tier: re-base is off at Classic. Choose Low or above to set how much evidence it needs."));
 			if (auto* slider = state->root->findChild<QSlider*>(QStringLiteral("config.vprenderer.picture_preset")))
 			{
 				const QSignalBlocker blocker(slider);
@@ -1897,13 +1971,21 @@ namespace Vpv
 				state->profile = state->upstreamList->item(row)->data(Qt::UserRole).toString();
 				const QSignalBlocker blocker(profile);
 				profile->setCurrentIndex((std::min)(row, profile->count() - 1));
+				state->reloading = true;
 				state->RefreshAll();
+				state->reloading = false;
 			});
 			// Profiles added, removed, renamed or moved on the Rendering page: rebuild the picker
 			// once the list has settled.
 			auto rebuild = [profile, fillPicker, state]()
 			{
-				QTimer::singleShot(0, profile, [fillPicker, state]() { fillPicker(); state->RefreshAll(); });
+				QTimer::singleShot(0, profile, [fillPicker, state]()
+				{
+					fillPicker();
+					state->reloading = true;
+					state->RefreshAll();
+					state->reloading = false;
+				});
 			};
 			QAbstractItemModel* model = list->model();
 			QObject::connect(model, &QAbstractItemModel::rowsInserted, profile, rebuild);
@@ -1923,6 +2005,12 @@ namespace Vpv
 				if (w) w->setEnabled(vpvOn);
 			if (QWidget* content = state->root->findChild<QWidget*>(ObjectName(QStringLiteral("content")))) content->setEnabled(vpvOn);
 			if (QWidget* note = state->root->findChild<QWidget*>(ObjectName(QStringLiteral("original_note")))) note->setVisible(!vpvOn);
+			// Dynamic Drive is a VP addition: off (and its page disabled) in the Original pathway.
+			if (QWidget* root = state->host.upstreamRoot)
+			{
+				if (QWidget* drive = root->findChild<QWidget*>(ObjectName(QStringLiteral("drive.pages")))) drive->setEnabled(vpvOn);
+				if (QWidget* note = root->findChild<QWidget*>(ObjectName(QStringLiteral("drive.original_note")))) note->setVisible(!vpvOn);
+			}
 			ApplyManagedState(state->host, vpvOn);
 			ApplyManagedIn(state->host, state->root, vpvOn);   // the managed rows moved onto this page
 			ApplyManagedRows(state, vpvOn);
@@ -1945,7 +2033,9 @@ namespace Vpv
 		// Before the managed greying, so the Original pathway restores tooltips that keep the mark.
 		MarkRetirements(host);
 		MarkRetirementsIn(root);   // the candidates' controls moved onto this page
+		state->reloading = true;
 		state->RefreshAll();
+		state->reloading = false;
 		applyPathway(PathwayIsVpv(host));
 		return root;
 	}

@@ -72,10 +72,11 @@ namespace Vpv
 		static const std::vector<Card> cards = {
 			// ---- Input ----
 			{ "input", "capture", "Capture", "How the picture comes in from the capture card.", false, false, {
-				{ K::Toggle, "capture_path" }, { K::Toggle, "capture_upload" }, { K::Toggle, "native_rgb_ingest" },
-				{ K::Toggle, "dv_tunnel_gpu_unpack" }, { K::Toggle, "dv_trims" } } },
+				{ K::Toggle, "capture_path" }, { K::Toggle, "native_rgb_ingest" }, { K::Toggle, "dv_tunnel_gpu_unpack" } } },
 			{ "input", "signal", "Signal and content", "What kind of signal it is, and labels the profile rules can use.", false, false, {
 				{ K::Toggle, "source_range" }, { K::Toggle, "intent_content" } } },
+			{ "input", "plumbing", "Capture plumbing (expert)", "When each captured frame is copied to the GPU. Normal viewing never needs it.", true, false, {
+				{ K::Toggle, "capture_upload" } } },
 			{ "input", "content_tuning", "Content labels: tuning", "How long a label (film, video, sports) is held before it may change.", true, false, {
 				{ K::Row, "intent_content_hold_seconds" } },
 				{ L::Feature, "Content labels", "intent_content", nullptr, "off", "off" } },
@@ -84,8 +85,8 @@ namespace Vpv
 
 			// ---- Motion ----
 			{ "motion", "taste", "De-judder amount (your taste)",
-				"How much film judder is smoothed. The tier above chooses the motion features; this is the amount. "
-				"At the Classic tier there is no de-judder.", false, false, {
+				"How much film judder is smoothed: your taste. The tier above chooses how motion is measured; it never "
+				"changes the amount (As shot = no motion processing).", false, false, {
 				{ K::Row, "motion_preset_box" } } },
 			{ "motion", "engine", "Motion engine and hiccup repair",
 				"How dropped or repeated frames are repaired, and how motion is estimated.", false, false, {
@@ -97,6 +98,7 @@ namespace Vpv
 				{ K::Toggle, "intent_motion" } } },
 			{ "motion", "tier_keys", "Set by the Motion tier", "The motion features the Motion tier chooses: where the motion vectors come from, how far ahead they look, finer block splitting.", true, false, {
 				{ K::Row, "optical_flow" }, { K::Row, "motion_ahead_frames" }, { K::Row, "dejudder_est_split" },
+				{ K::Row, "dejudder_est_qpel" },
 				{ K::Hide, "motion_source_heading" }, { K::Hide, "hiccup_repair_heading" }, { K::Hide, "interpolation_heading" },
 				{ K::Hide, "interpolation_note" } },
 				{ L::Tier, "the Motion tier" } },
@@ -109,7 +111,7 @@ namespace Vpv
 				"Fade matching, pulldown handling and the motion-vector options: independent of the amount.", true, false, {
 				{ K::Section, "dejudder" } } },
 			{ "motion", "render_ahead_tuning", "Render ahead: tuning", "How render ahead budgets its early frames. Used only while render ahead is on.", true, false, {
-				{ K::Row, "dejudder_gate" }, { K::Row, "render_ahead_utilisation" } },
+				{ K::Row, "dejudder_gate" }, { K::Row, "render_ahead_utilisation" }, { K::Row, "render_ahead_queue_credit" } },
 				{ L::Feature, "Render ahead", "render_ahead", nullptr, "off", "off" } },
 			{ "motion", "easing_tuning", "Per-shot easing: tuning", "How strongly and how quickly the de-judder eases per shot. Used only while easing is on.", true, false, {
 				{ K::Row, "intent_motion_policy" }, { K::Row, "intent_motion_min" }, { K::Row, "intent_motion_min_shot_s" },
@@ -124,7 +126,8 @@ namespace Vpv
 				"VP's debander: removes banding from compressed sources and leaves film grain alone.", false, false, {
 				{ K::Toggle, "deband_vp_grain_guard" }, { K::Toggle, "deband_vp_exclusive" }, { K::Toggle, "low_bitrate_handling" },
 				{ K::Note, "libplacebo's own debander (Deband strength) is Bill's: VP Renderer > Rendering > Processing. "
-					"With VP's debander on it is replaced (the switch above)." } } },
+					"With VP's debander on it is replaced (the switch above)." } },
+				{ L::Feature, "VP's debander (the Repair tier, Mid or above)", "deband_vp", nullptr, "off", "off" } },
 			{ "repair", "tier_keys", "Set by the Repair tier", "The repair stages the Repair tier switches on: VP's debander, the detail-pulse steadier and texture restore.", true, false, {
 				{ K::Row, "deband_vp" }, { K::Row, "detail_pulse_stabilise" }, { K::Row, "texture_restore" } },
 				{ L::Tier, "the Repair tier" } },
@@ -137,10 +140,13 @@ namespace Vpv
 				"Finds a picture that was upscaled before VP (a 1080p film sent at 4K) and works from its real size. The tier "
 				"turns re-base on (Mid); the slider sets how much evidence it needs.", false, false, {
 				{ K::Row, "picture_preset_box" }, { K::Toggle, "rebase_kernel_match" }, { K::Toggle, "source_resolution_text_guard" },
-				{ K::Toggle, "source_resolution_mixed_guard" } } },
-			{ "scaling", "grain", "Grain-aware scaling", "VP's downscale and upscale blends that keep film grain true.", false, false, {
-				{ K::Toggle, "adaptive_faithful" }, { K::Toggle, "adaptive_grain_map" }, { K::Toggle, "ssim_bitrate_aware" },
-				{ K::Toggle, "ssim_residual_stabilise" }, { K::Toggle, "cnn_residual_stabilise" }, { K::Toggle, "adaptive_upscale" },
+				{ K::Toggle, "source_resolution_mixed_guard" } },
+				{ L::Feature, "re-base (the Scaling tier, Low or above)", "source_resolution", nullptr, "!auto", "auto" } },
+			{ "scaling", "grain", "Grain-aware downscale", "VP's downscale blend that keeps film grain true.", false, false, {
+				{ K::Toggle, "adaptive_faithful" }, { K::Toggle, "adaptive_grain_map" }, { K::Toggle, "ssim_bitrate_aware" } },
+				{ L::Feature, "the grain-aware downscale (the Scaling tier, Mid)", "adaptive_downscale", nullptr, "off", "off" } },
+			{ "scaling", "upscale", "Grain-aware upscale", "For sources smaller than the projector.", false, false, {
+				{ K::Toggle, "adaptive_upscale" },
 				{ K::Note, "The scaler filters themselves (upscaler, downscaler, chroma) are Bill's: VP Renderer > Scaling." } } },
 			{ "scaling", "tier_keys", "Set by the Scaling tier", "What the Scaling tier switches on: re-base (working from the real source size) and the grain-aware downscale.", true, false, {
 				{ K::Row, "source_resolution" }, { K::Row, "adaptive_downscale" }, { K::Row, "adaptive_w_base" } },
@@ -149,14 +155,20 @@ namespace Vpv
 				{ K::Row, "source_resolution_auto_min_confidence" }, { K::Row, "source_resolution_evidence_seconds" },
 				{ K::Row, "source_resolution_evidence_shots" } },
 				{ L::Slider, "the picture slider", "picture_preset_name", "picture_preset_reset" } },
-			{ "scaling", "rebase_timing", "Re-base timing", "Used only while re-base is automatic (greyed otherwise).", true, false, {
+			{ "scaling", "rebase_timing", "Re-base timing", "How quickly re-base engages and fades.", true, false, {
 				{ K::Row, "source_resolution_engage_max_wait_s" }, { K::Row, "source_resolution_crossfade_s" },
-				{ K::Row, "source_resolution_release_fade_s" } } },
+				{ K::Row, "source_resolution_release_fade_s" } },
+				{ L::Feature, "re-base (the Scaling tier, Low or above)", "source_resolution", nullptr, "!auto", "auto" } },
+			{ "scaling", "steadiness", "Scaler steadiness (expert)",
+				"Keeps the SSIM and CNN scalers' added detail steady along motion. Normal viewing never needs these.", true, false, {
+				{ K::Toggle, "ssim_residual_stabilise" }, { K::Toggle, "cnn_residual_stabilise" } } },
 			{ "scaling", "internals", "Grain-aware scaler thresholds (measured, leave alone)",
 				"Measured thresholds and weights. Normal viewing never needs these.", true, true, {
 				{ K::Section, "adaptiveDownscale" }, { K::Section, "adaptiveUpscale" } } },
 
 			// ---- Colour ----
+			{ "colour", "dv", "Dolby Vision", "How Dolby Vision pictures are mapped to your display.", false, false, {
+				{ K::Toggle, "dv_trims" } } },
 			{ "colour", "range", "Range and precision", "Keeps every value the source carries.", false, false, {
 				{ K::Toggle, "preserve_extended_range" }, { K::Toggle, "fbo_float32" } } },
 			{ "colour", "sdr", "SDR tone shape", "A gentle highlight knee for SDR sources.", false, false, {
@@ -187,7 +199,8 @@ namespace Vpv
 
 			// ---- Output ----
 			{ "output", "dither", "Temporal dither", "How the final picture is fitted to the projector link's bit depth.", false, false, {
-				{ K::Toggle, "occlusion_mask" } } },
+				{ K::Toggle, "occlusion_mask" } },
+				{ L::Feature, "VP's sigma-delta dither (the Output tier)", "temporal_dither", nullptr, "off,libplacebo", "auto" } },
 			{ "output", "presentation", "Presentation and delay", "Where the final output depth and the total delay are set.", false, false, {
 				{ K::Note, "Display bit depth and libplacebo's dithering (used when VP's is off) are Bill's: VP Renderer > "
 					"Rendering > Processing. The total delay: Input tab (Total delay) and the Queue page." } } },
@@ -195,7 +208,9 @@ namespace Vpv
 				{ K::Row, "temporal_dither" } },
 				{ L::Tier, "the Output tier" } },
 			{ "output", "dither_tuning", "Temporal dither: tuning", "How much grain the dither tolerates before it backs off.", true, false, {
-				{ K::Row, "dither_grain_tolerance_scale" } } },
+				{ K::Row, "dither_grain_tolerance_scale" },
+				{ K::Note, "It also follows the grain map (Scaling > Grain-aware downscale)." } },
+				{ L::Feature, "VP's sigma-delta dither (the Output tier)", "temporal_dither", nullptr, "off,libplacebo", "auto" } },
 
 			// ---- Proposed retirement: the candidates' controls (they still work until approved) ----
 			{ "retirement", "fixes", "Proven fixes (all on by default)",
@@ -205,11 +220,11 @@ namespace Vpv
 				{ K::Row, "efficiency_fixes" }, { K::Row, "source_coding_fixes" }, { K::Row, "source_resolution_latch_fixes" },
 				{ K::Row, "source_resolution_cut_fixes" }, { K::Row, "active_picture_startup_hold" },
 				{ K::Row, "extended_range_more_cases" }, { K::Row, "dv_tunnel_fixes" }, { K::Row, "residual_stabilise_grain_guard" } },
-				{ L::Defaults, "Proven fixes: all on" } },
+				{ L::Defaults, "Proven fixes: all on", nullptr, nullptr, nullptr, "on" } },
 			{ "retirement", "experiments", "Experiments that lost, and superseded switches",
 				"Each still works as before until you decide.", false, true, {
 				{ K::Row, "optical_flow_cost_trust" }, { K::Row, "interpolation_grain" }, { K::Row, "dejudder_source_warp_filter" },
-				{ K::Row, "nls_sampling" }, { K::Row, "deband_grain" }, { K::Row, "render_ahead_queue_credit" },
+				{ K::Row, "nls_sampling" }, { K::Row, "deband_grain" },
 				{ K::Section, "dejudderExperiments" } } },
 		};
 		return cards;
@@ -226,6 +241,8 @@ namespace Vpv
 	// The Dynamic Drive page's Advanced LED card, regrouped (organisation pass 2). Every group is set
 	// by the master "Advanced LED values" (your script's values, or Custom); a group a command source
 	// does not use is greyed too (mode: "internal_script" / "compensate" / nullptr = both).
+	// "Set by" for the Advanced LED groups: the LED profile (your script's built-in values, or a
+	// profile file) and, once Custom is ticked, you.
 	struct LedGroup { const char* id; const char* title; const char* help; const char* mode; std::vector<const char*> keys; };
 	inline const std::vector<LedGroup>& LedAdvancedGroups()
 	{

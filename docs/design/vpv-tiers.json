@@ -65,11 +65,11 @@
     "capture_path": "gpu",
     "capture_upload": "auto",
     "native_rgb_ingest": "on",
-    "dv_tunnel_gpu_unpack": "off",
+    "dv_tunnel_gpu_unpack": "on",
     "preserve_extended_range": "on",
     "sdr_tone_shape": "off",
     "source_range": "auto",
-    "dv_trims": "off",
+    "dv_trims": "on",
     "intent_content": "off",
     "interpolation_fallback": "hold",
     "intent_motion": "off",
@@ -148,15 +148,6 @@
           "slot": "input.signal"
         },
         {
-          "key": "dv_trims",
-          "label": "Dolby Vision trims for your display (under test)",
-          "values": [
-            "on",
-            "off"
-          ],
-          "slot": "input.signal"
-        },
-        {
           "key": "intent_content",
           "label": "Content labels for profile rules (film / video / sports)",
           "values": [
@@ -192,30 +183,23 @@
       ],
       "presets": {
         "Classic": {
-          "description": "No motion processing: frames shown as delivered (VP's de-judder off, no motion search).",
-          "cost": "none",
-          "set": {
-            "dejudder_strength": "0",
-            "dejudder_strength_even": "0",
-            "optical_flow": "off",
-            "motion_ahead_frames": "0"
-          }
-        },
-        "Low": {
-          "description": "De-judder with VP's own motion search only (no NVIDIA engine, nothing computed ahead): cheapest working motion.",
+          "description": "VP's basic motion search only: whole-pixel matching, no NVIDIA engine, nothing computed ahead. Your de-judder amount still applies (choose As shot for no motion processing).",
           "cost": "low",
           "set": {
             "optical_flow": "off",
             "motion_ahead_frames": "0",
-            "dejudder_est_split": "off"
-          },
-          "on_enter": [
-            {
-              "key": "dejudder_strength",
-              "from": "0",
-              "to": "0.25"
-            }
-          ]
+            "dejudder_est_qpel": "off"
+          }
+        },
+        "Low": {
+          "description": "VP's own motion search at quarter-pixel precision (no NVIDIA engine, nothing computed ahead).",
+          "cost": "low",
+          "set": {
+            "optical_flow": "off",
+            "motion_ahead_frames": "0",
+            "dejudder_est_split": "off",
+            "dejudder_est_qpel": "on"
+          }
         },
         "Mid": {
           "description": "NVIDIA optical-flow engine plus VP's matcher, vectors computed 4 frames ahead (the default motion engine).",
@@ -224,14 +208,7 @@
             "optical_flow": "on",
             "motion_ahead_frames": "4",
             "dejudder_est_split": "off"
-          },
-          "on_enter": [
-            {
-              "key": "dejudder_strength",
-              "from": "0",
-              "to": "0.25"
-            }
-          ]
+          }
         },
         "Upper": {
           "description": "As Mid, and poorly matched blocks are searched again as quarter blocks (small objects on moving backgrounds get their own motion).",
@@ -240,14 +217,7 @@
             "optical_flow": "on",
             "motion_ahead_frames": "4",
             "dejudder_est_split": "on"
-          },
-          "on_enter": [
-            {
-              "key": "dejudder_strength",
-              "from": "0",
-              "to": "0.25"
-            }
-          ]
+          }
         }
       },
       "taste": [
@@ -461,16 +431,15 @@
           }
         },
         "Low": {
-          "description": "No re-base; the hybrid SSIM/faithful downscale (weight 0.2) to the projector size.",
+          "description": "Re-base: a picture upscaled before VP is worked from its real size (kernel-matched); plain scaling to the projector size. The shipped default.",
           "cost": "low",
           "set": {
-            "source_resolution": "native",
-            "adaptive_downscale": "on",
-            "adaptive_w_base": "0.2"
+            "source_resolution": "auto",
+            "adaptive_downscale": "off"
           }
         },
         "Mid": {
-          "description": "Re-base first (the player's upscale undone, kernel-matched), then the hybrid downscale.",
+          "description": "Re-base, then the hybrid SSIM/faithful downscale (weight 0.2) to the projector size.",
           "cost": "medium",
           "set": {
             "source_resolution": "auto",
@@ -601,6 +570,15 @@
       "presets": {},
       "toggles": [
         {
+          "key": "dv_trims",
+          "label": "Dolby Vision trims for your display",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "colour.sdr_tone_shape"
+        },
+        {
           "key": "preserve_extended_range",
           "label": "Keep below-black and above-white (SDR)",
           "values": [
@@ -686,11 +664,11 @@
       ],
       "tiers": [
         "Classic",
-        "Low"
+        "Low",
+        "Mid"
       ],
       "planned_tiers": {
-        "Mid": "no extra output step yet (Mid uses Low)",
-        "Upper": "no extra output step yet (Upper uses Low)"
+        "Upper": "no extra output step yet (Upper uses Mid)"
       },
       "presets": {
         "Classic": {
@@ -701,7 +679,14 @@
           }
         },
         "Low": {
-          "description": "VP's sigma-delta temporal dither: the finest steps through the 8-bit projector link.",
+          "description": "As shipped: the shader list decides the dither (the cinema list loads VP's sigma-delta).",
+          "cost": "low",
+          "set": {
+            "temporal_dither": "auto"
+          }
+        },
+        "Mid": {
+          "description": "Always VP's sigma-delta temporal dither: the finest steps through the 8-bit projector link.",
           "cost": "low",
           "set": {
             "temporal_dither": "sigma_delta"
@@ -935,18 +920,6 @@
         "key": "deband_grain",
         "group": "B",
         "reason": "Experiment that lost: VP's dither does that job."
-      },
-      {
-        "section": "vprenderer",
-        "key": "render_ahead_queue_credit",
-        "group": "C",
-        "reason": "Superseded: render-ahead now always counts inside the total delay."
-      },
-      {
-        "section": "vprenderer",
-        "key": "motion_ahead_frames",
-        "group": "C",
-        "reason": "Superseded: becomes time-based (planned motion_ahead_ms)."
       },
       {
         "section": "vprenderer",

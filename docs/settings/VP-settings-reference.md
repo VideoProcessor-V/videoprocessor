@@ -82,15 +82,16 @@ have their controls on the Proposed retirement tab.
 
 | Unit | Classic | Low | Mid | Upper |
 |---|---|---|---|---|
-| Motion | no motion processing | de-judder with VP's matcher only | NVIDIA engine + matcher, 4 ahead | + split poorly matched blocks |
+| Motion | VP's basic matcher (whole-pixel, nothing ahead) | VP's matcher at quarter-pixel | NVIDIA engine + matcher, 4 ahead (shipped) | + split poorly matched blocks |
 | Repair | libplacebo deband only | + breathing reduction (today's default) | VP's grain-safe debander | + texture restore |
-| Scaling | no re-base, plain scaling | hybrid SSIM downscale (w 0.2) | re-base + hybrid | *not yet: refine net / D (uses Mid)* |
-| Output | libplacebo dither | sigma-delta dither | *same as Low* | *same as Low* |
+| Scaling | no re-base, plain scaling | re-base, plain scaling (shipped) | re-base + hybrid SSIM downscale (w 0.2) | *not yet: refine net / D (uses Mid)* |
+| Output | libplacebo dither | as shipped: the shader list decides (the cinema list loads the sigma-delta) | always VP's sigma-delta | *same as Mid* |
 | Input, Colour, Dynamic Drive | not tiered (paths and set-up, not quality steps) | | | |
 
-Leaving Motion's Classic step restores the default motion taste (Cinema, strength 0.25). The motion
-taste slider (the de-judder amount, Motion > Main) is never part of a tier, because it is your taste,
-not a cost choice; at the Classic tier it is greyed, because Classic has no de-judder.
+The motion taste slider (the de-judder amount, Motion > Main) is never part of a tier and no tier
+writes it: it is your taste, not a cost choice (As shot = no motion processing). The shipped values
+are a tier of every unit (Motion Mid, Repair Low, Scaling Low, Output Low); when values match no
+tier the unit shows Custom and no tier is written unless you choose one.
 
 ---
 

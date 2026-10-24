@@ -43,11 +43,11 @@ namespace Vpv
             t.defaults.push_back({ "capture_path", "gpu" });
             t.defaults.push_back({ "capture_upload", "auto" });
             t.defaults.push_back({ "native_rgb_ingest", "on" });
-            t.defaults.push_back({ "dv_tunnel_gpu_unpack", "off" });
+            t.defaults.push_back({ "dv_tunnel_gpu_unpack", "on" });
             t.defaults.push_back({ "preserve_extended_range", "on" });
             t.defaults.push_back({ "sdr_tone_shape", "off" });
             t.defaults.push_back({ "source_range", "auto" });
-            t.defaults.push_back({ "dv_trims", "off" });
+            t.defaults.push_back({ "dv_trims", "on" });
             t.defaults.push_back({ "intent_content", "off" });
             t.defaults.push_back({ "interpolation_fallback", "hold" });
             t.defaults.push_back({ "intent_motion", "off" });
@@ -106,7 +106,6 @@ namespace Vpv
                 u.toggles.push_back({ "native_rgb_ingest", "Native 10/12-bit RGB capture", { "on", "off" }, "input.capture" });
                 u.toggles.push_back({ "dv_tunnel_gpu_unpack", "Dolby Vision tunnel: GPU unpack", { "on", "off" }, "input.signal" });
                 u.toggles.push_back({ "source_range", "Source range (when the source mislabels it)", { "auto", "full", "limited" }, "input.signal" });
-                u.toggles.push_back({ "dv_trims", "Dolby Vision trims for your display (under test)", { "on", "off" }, "input.signal" });
                 u.toggles.push_back({ "intent_content", "Content labels for profile rules (film / video / sports)", { "on", "off" }, "input.source_analysis" });
                 u.planned.push_back({ "label_detector", "Label-detector net (codec family, film grain)", "input.source_analysis" });
                 t.units.push_back(u);
@@ -120,19 +119,18 @@ namespace Vpv
                 u.slotIds.push_back("motion.vector_delivery");
                 u.slotIds.push_back("motion.consumers");
                 {
-                    Preset p; p.tier = "Classic"; p.description = "No motion processing: frames shown as delivered (VP's de-judder off, no motion search)."; p.cost = "none";
-                    p.set.push_back({ "dejudder_strength", "0" });
-                    p.set.push_back({ "dejudder_strength_even", "0" });
+                    Preset p; p.tier = "Classic"; p.description = "VP's basic motion search only: whole-pixel matching, no NVIDIA engine, nothing computed ahead. Your de-judder amount still applies (choose As shot for no motion processing)."; p.cost = "low";
                     p.set.push_back({ "optical_flow", "off" });
                     p.set.push_back({ "motion_ahead_frames", "0" });
+                    p.set.push_back({ "dejudder_est_qpel", "off" });
                     u.presets.push_back(p);
                 }
                 {
-                    Preset p; p.tier = "Low"; p.description = "De-judder with VP's own motion search only (no NVIDIA engine, nothing computed ahead): cheapest working motion."; p.cost = "low";
+                    Preset p; p.tier = "Low"; p.description = "VP's own motion search at quarter-pixel precision (no NVIDIA engine, nothing computed ahead)."; p.cost = "low";
                     p.set.push_back({ "optical_flow", "off" });
                     p.set.push_back({ "motion_ahead_frames", "0" });
                     p.set.push_back({ "dejudder_est_split", "off" });
-                    p.onEnter.push_back({ "dejudder_strength", "0", "0.25" });
+                    p.set.push_back({ "dejudder_est_qpel", "on" });
                     u.presets.push_back(p);
                 }
                 {
@@ -140,7 +138,6 @@ namespace Vpv
                     p.set.push_back({ "optical_flow", "on" });
                     p.set.push_back({ "motion_ahead_frames", "4" });
                     p.set.push_back({ "dejudder_est_split", "off" });
-                    p.onEnter.push_back({ "dejudder_strength", "0", "0.25" });
                     u.presets.push_back(p);
                 }
                 {
@@ -148,7 +145,6 @@ namespace Vpv
                     p.set.push_back({ "optical_flow", "on" });
                     p.set.push_back({ "motion_ahead_frames", "4" });
                     p.set.push_back({ "dejudder_est_split", "on" });
-                    p.onEnter.push_back({ "dejudder_strength", "0", "0.25" });
                     u.presets.push_back(p);
                 }
                 u.taste.push_back("dejudder_strength");
@@ -224,14 +220,13 @@ namespace Vpv
                     u.presets.push_back(p);
                 }
                 {
-                    Preset p; p.tier = "Low"; p.description = "No re-base; the hybrid SSIM/faithful downscale (weight 0.2) to the projector size."; p.cost = "low";
-                    p.set.push_back({ "source_resolution", "native" });
-                    p.set.push_back({ "adaptive_downscale", "on" });
-                    p.set.push_back({ "adaptive_w_base", "0.2" });
+                    Preset p; p.tier = "Low"; p.description = "Re-base: a picture upscaled before VP is worked from its real size (kernel-matched); plain scaling to the projector size. The shipped default."; p.cost = "low";
+                    p.set.push_back({ "source_resolution", "auto" });
+                    p.set.push_back({ "adaptive_downscale", "off" });
                     u.presets.push_back(p);
                 }
                 {
-                    Preset p; p.tier = "Mid"; p.description = "Re-base first (the player's upscale undone, kernel-matched), then the hybrid downscale."; p.cost = "medium";
+                    Preset p; p.tier = "Mid"; p.description = "Re-base, then the hybrid SSIM/faithful downscale (weight 0.2) to the projector size."; p.cost = "medium";
                     p.set.push_back({ "source_resolution", "auto" });
                     p.set.push_back({ "adaptive_downscale", "on" });
                     p.set.push_back({ "adaptive_w_base", "0.2" });
@@ -262,6 +257,7 @@ namespace Vpv
                 u.slotIds.push_back("colour.extended_range");
                 u.slotIds.push_back("colour.sdr_tone_shape");
                 u.slotIds.push_back("colour.appearance");
+                u.toggles.push_back({ "dv_trims", "Dolby Vision trims for your display", { "on", "off" }, "colour.sdr_tone_shape" });
                 u.toggles.push_back({ "preserve_extended_range", "Keep below-black and above-white (SDR)", { "on", "off" }, "colour.extended_range" });
                 u.toggles.push_back({ "sdr_tone_shape", "SDR tone shape", { "off", "knee" }, "colour.sdr_tone_shape" });
                 u.toggles.push_back({ "fbo_float32", "32-bit float processing (exact highlights)", { "auto", "on", "off" }, "colour.tone_gamut" });
@@ -296,12 +292,16 @@ namespace Vpv
                     u.presets.push_back(p);
                 }
                 {
-                    Preset p; p.tier = "Low"; p.description = "VP's sigma-delta temporal dither: the finest steps through the 8-bit projector link."; p.cost = "low";
+                    Preset p; p.tier = "Low"; p.description = "As shipped: the shader list decides the dither (the cinema list loads VP's sigma-delta)."; p.cost = "low";
+                    p.set.push_back({ "temporal_dither", "auto" });
+                    u.presets.push_back(p);
+                }
+                {
+                    Preset p; p.tier = "Mid"; p.description = "Always VP's sigma-delta temporal dither: the finest steps through the 8-bit projector link."; p.cost = "low";
                     p.set.push_back({ "temporal_dither", "sigma_delta" });
                     u.presets.push_back(p);
                 }
-                u.plannedTiers.push_back({ "Mid", "no extra output step yet (Mid uses Low)" });
-                u.plannedTiers.push_back({ "Upper", "no extra output step yet (Upper uses Low)" });
+                u.plannedTiers.push_back({ "Upper", "no extra output step yet (Upper uses Mid)" });
                 u.toggles.push_back({ "occlusion_mask", "Dither: no smear where new picture appears", { "on", "off" }, "output.dither" });
                 t.units.push_back(u);
             }
@@ -344,8 +344,6 @@ namespace Vpv
             t.retirements.push_back({ "vprenderer", "dejudder_source_warp_filter", "B", "Experiment that lost: the 'bilinear' value loses grain." });
             t.retirements.push_back({ "vprenderer", "nls_sampling", "B", "Experiment that lost: the 'bilinear' value loses grain." });
             t.retirements.push_back({ "vprenderer", "deband_grain", "B", "Experiment that lost: VP's dither does that job." });
-            t.retirements.push_back({ "vprenderer", "render_ahead_queue_credit", "C", "Superseded: render-ahead now always counts inside the total delay." });
-            t.retirements.push_back({ "vprenderer", "motion_ahead_frames", "C", "Superseded: becomes time-based (planned motion_ahead_ms)." });
             t.retirements.push_back({ "vprenderer", "detail_pulse_fast", "C", "Superseded: the picture is identical, so the fast path can always be on." });
             t.retirements.push_back({ "vprenderer", "dither_vectors", "C", "Superseded: auto always does the right thing." });
             t.retirements.push_back({ "queue", "target_frames", "C", "Superseded for normal profiles: one total delay (target_latency_ms) replaces it." });

@@ -17,6 +17,7 @@
 #include <QFile>
 #include <QFontDatabase>
 #include <QLabel>
+#include <QSet>
 #include <QTabWidget>
 #include <QStackedWidget>
 #include <QScrollBar>
@@ -386,7 +387,7 @@ namespace
 		const QString path = WriteFixture(dir);
 		{
 			ConfigEditorWindow window(path, 0, true);
-			for (const char* name : { "input.source_range", "input.dv_trims", "input.intent_content", "motion.interpolation_fallback",
+			for (const char* name : { "input.source_range", "colour.dv_trims", "input.intent_content", "motion.interpolation_fallback",
 				"motion.intent_motion", "repair.low_bitrate_handling", "scaling.source_resolution_text_guard",
 				"scaling.source_resolution_mixed_guard", "scaling.adaptive_grain_map", "scaling.ssim_bitrate_aware",
 				"scaling.ssim_residual_stabilise", "scaling.cnn_residual_stabilise", "scaling.adaptive_upscale",
@@ -583,14 +584,13 @@ namespace
 		auto* strength = control<QWidget>(window, QStringLiteral("config.vprenderer.dejudder_strength"));
 		require(!strength->isEnabled() || control<QCheckBox>(window, Vpv::ObjectName("motion.card.taste_keys.custom"))->isChecked(),
 			"the de-judder fields are set by the de-judder amount");
+		// The tier never sets the taste (audit HIGH 2): Classic and back leave the amount alone and enabled.
 		control<QSlider>(window, Vpv::ObjectName("motion.tier"))->setValue(0);
 		QCoreApplication::processEvents();
-		require(!control<QWidget>(window, QStringLiteral("config.vprenderer.motion_preset_box"))->isEnabled(),
-			"the Classic Motion tier greys the de-judder amount");
+		require(control<QWidget>(window, QStringLiteral("config.vprenderer.motion_preset_box"))->isEnabled(),
+			"the Classic Motion tier leaves the de-judder amount usable");
 		control<QSlider>(window, Vpv::ObjectName("motion.tier"))->setValue(2);
 		QCoreApplication::processEvents();
-		require(control<QWidget>(window, QStringLiteral("config.vprenderer.motion_preset_box"))->isEnabled(),
-			"a Motion tier above Classic frees the de-judder amount");
 		require(control<QSlider>(window, QStringLiteral("config.vprenderer.picture_preset"))->minimum() == 1,
 			"the picture slider never offers its own Off (the Scaling tier owns re-base on/off)");
 		// The slider-set fields and the independent shaping are separate cards.
@@ -614,10 +614,10 @@ namespace
 			}
 		}
 		// Dynamic Drive: the Advanced LED card's masters grey their groups.
-		auto* values = control<QComboBox>(window, Vpv::ObjectName("drive.advanced_values"));
+		auto* values = control<QCheckBox>(window, Vpv::ObjectName("drive.advanced_values"));
 		auto* highlights = control<QWidget>(window, QStringLiteral("config.led_drive.default.highlight_percentile"));
-		require(values->currentIndex() == 0 && !highlights->isEnabled(), "the LED groups are set by your script's values");
-		values->setCurrentIndex(1);
+		require(!values->isChecked() && !highlights->isEnabled(), "the LED groups are set by the LED profile");
+		values->setChecked(true);
 		QCoreApplication::processEvents();
 		require(highlights->isEnabled() && !control<QWidget>(window, QStringLiteral("config.led_drive.default.tick_ms"))->isEnabled(),
 			"Custom frees the groups the chosen source uses (Script-only stays greyed in Compensate)");
@@ -634,8 +634,8 @@ namespace
 		require(rateUp->isEnabled(), "Custom frees the LED speeds values");
 		require(driveAdvanced->isAncestorOf(control<QWidget>(window, Vpv::ObjectName("drive.group.highlights"))),
 			"each advanced LED group is a card of its own on Advanced");
-		auto* fixes = control<QComboBox>(window, Vpv::ObjectName("drive.led_fixes"));
-		require(fixes->currentIndex() == 0 && !control<QWidget>(window, QStringLiteral("config.led_drive.default.cntr_pair_predict"))->isEnabled(),
+		auto* fixes = control<QCheckBox>(window, Vpv::ObjectName("drive.led_fixes"));
+		require(!fixes->isChecked() && !control<QWidget>(window, QStringLiteral("config.led_drive.default.cntr_pair_predict"))->isEnabled(),
 			"the LED fixes are set by their master");
 		// The VP-V page fits the default window: no sideways scroll on any unit sub-page. Measured only with
 		// real fonts (run_config_tests.ps1 reruns this test with QT_QPA_FONTDIR); off screen without
@@ -704,6 +704,137 @@ namespace
 	}
 }
 
+namespace
+{
+	// The shown control of a key in a row: the row's field, when it is shown and enabled.
+	QSet<QWidget*> LiveRows(QWidget& window, const QString& key)
+	{
+		QSet<QWidget*> rows;
+		const QRegularExpression name(QStringLiteral("^config\\.vprenderer\\.%1(\\.[^.]+)?$").arg(QRegularExpression::escape(key)));
+		for (QWidget* w : window.findChildren<QWidget*>(name))
+		{
+			if (!w->isEnabled() || w->isHidden()) continue;
+			for (QWidget* f = w; f && f->parentWidget(); f = f->parentWidget())
+				if (auto* form = qobject_cast<QFormLayout*>(f->parentWidget()->layout()))
+				{
+					int row = -1;
+					QFormLayout::ItemRole role;
+					form->getWidgetPosition(f, &row, &role);
+					if (row < 0) continue;
+					if (form->isRowVisible(row)) rows.insert(f);
+					break;
+				}
+		}
+		return rows;
+	}
+
+	// Logic audit 2026-10-24 (HIGH 1-2, MEDIUM 3-6, LOW): tiers never written unasked, the taste kept,
+	// Custom recomputed, one live control per key in both pathways, defaults equal the renderer's,
+	// the LED profile named, Dynamic Drive off in the Original pathway, fixes restored explicitly.
+	void testLogicAuditFixes()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir,
+			"[vprenderer]\nquality: high\n"
+			"[vprenderer.Cinema]\nquality: high\n"
+			"[queue]\ntarget_latency_ms: 250\n"
+			"[led_drive.Default]\nenabled: true\ncommand_source: compensate\n"
+			"[projector.Default]\nprotocol: barco_ascii\nport: COM1\n");
+		ConfigEditorWindow window(path, 0, true);
+		const Vpv::Table& table = Vpv::TierTable();
+		// HIGH 1: on a fresh config every tiered unit reads a tier (the shipped values), never Custom; Default works.
+		for (const Vpv::Unit& u : table.units)
+		{
+			if (!u.Tiered()) continue;
+			const QString id = QString::fromLatin1(u.id);
+			require(control<QLabel>(window, Vpv::ObjectName(id + QStringLiteral(".tier.name")))->text() != QStringLiteral("Custom"),
+				(std::string("the shipped values read as a tier: ") + u.id).c_str());
+			require(control<QPushButton>(window, Vpv::ObjectName(id + QStringLiteral(".tier.default")))->isEnabled(),
+				(std::string("Default is offered: ") + u.id).c_str());
+		}
+		auto* dither = control<QComboBox>(window, QStringLiteral("config.vprenderer.temporal_dither"));
+		auto effective = [](QComboBox* combo) { const QString v = combo->currentData().toString(); return v.isEmpty() ? combo->property("effectiveValue").toString() : v; };
+		const QString ditherBefore = effective(dither);
+		control<QPushButton>(window, Vpv::ObjectName("global_tier.reset"))->click();
+		auto* outputCustom = control<QCheckBox>(window, Vpv::ObjectName("output.card.tier_keys.custom"));
+		outputCustom->setChecked(true);
+		outputCustom->setChecked(false);
+		QCoreApplication::processEvents();
+		require(effective(dither) == ditherBefore,
+			"Reset all units / unticking Custom on a fresh config writes no tier (the sigma-delta is kept)");
+		// HIGH 2: the tier never writes the taste; leaving Classic keeps the amount.
+		auto* even = control<QLineEdit>(window, QStringLiteral("config.vprenderer.dejudder_strength_even"));
+		control<QCheckBox>(window, Vpv::ObjectName("motion.card.taste_keys.custom"))->setChecked(true);
+		even->setText(QStringLiteral("0.5"));
+		QMetaObject::invokeMethod(even, "editingFinished", Qt::DirectConnection);
+		control<QSlider>(window, Vpv::ObjectName("motion.tier"))->setValue(0);
+		control<QSlider>(window, Vpv::ObjectName("motion.tier"))->setValue(2);
+		QCoreApplication::processEvents();
+		require(even->text() == QStringLiteral("0.5"), "Classic and back keep the even-cadence strength (the taste)");
+		// MEDIUM 3: Custom recomputes both ways on a profile switch.
+		auto* list = control<QListWidget>(window, QStringLiteral("config.vprenderer.profiles"));
+		auto* repairCustom = control<QCheckBox>(window, Vpv::ObjectName("repair.card.tier_keys.custom"));
+		repairCustom->setChecked(true);
+		list->setCurrentRow(1);
+		QCoreApplication::processEvents();
+		list->setCurrentRow(0);
+		QCoreApplication::processEvents();
+		require(!repairCustom->isChecked(), "a profile switch unticks Custom when the values sit on the tier");
+		// MEDIUM 5: the layout's defaults equal the renderer's (Config's mirrored default table).
+		for (const Vpv::KeyValue& kv : table.defaults)
+			if (auto* w = window.findChild<QWidget*>(QStringLiteral("config.vprenderer.") + QString::fromLatin1(kv.key)))
+			{
+				const QString effective = w->property("effectiveValue").toString().trimmed();
+				if (effective.isEmpty()) continue;
+				require(Vpv::SameValue(effective.toStdString(), kv.value),
+					(std::string("default of ") + kv.key + ": layout " + kv.value + ", renderer " + effective.toStdString()).c_str());
+			}
+		// One visible, enabled control per key, in both pathways.
+		auto oneEach = [&](const char* pathway)
+		{
+			std::set<std::string> keys;
+			for (QWidget* w : window.findChildren<QWidget*>(QRegularExpression(QStringLiteral("^config\\.vprenderer\\.[a-z0-9_]+$"))))
+				keys.insert(w->objectName().mid(18).toStdString());
+			for (const std::string& key : keys)
+			{
+				int live = LiveRows(window, QString::fromStdString(key)).size();
+				for (QWidget* w : window.findChildren<QWidget*>(QRegularExpression(QStringLiteral("^vpv\\.[a-z]+\\.%1$").arg(QString::fromStdString(key)))))
+					live += (w->isEnabled() && !w->isHidden()) ? 1 : 0;
+				require(live <= 1, (std::string(pathway) + ": more than one live control for " + key).c_str());
+			}
+		};
+		oneEach("VP-V pathway");
+		// LOW: the proven fixes come back explicitly on.
+		auto* fixesCustom = control<QCheckBox>(window, Vpv::ObjectName("retirement.card.fixes.custom"));
+		fixesCustom->setChecked(true);
+		{ auto* pulldown = control<QComboBox>(window, QStringLiteral("config.vprenderer.pulldown_fixes")); pulldown->setCurrentIndex(pulldown->findData(QStringLiteral("off"))); }
+		fixesCustom->setChecked(false);
+		QCoreApplication::processEvents();
+		require(control<QComboBox>(window, QStringLiteral("config.vprenderer.pulldown_fixes"))->currentData().toString() == QStringLiteral("on"),
+			"unticking Proven fixes writes every fix on again");
+		// LED profile: the greyed groups say where their values come from.
+		bool named = false;
+		for (QLabel* label : control<QWidget>(window, Vpv::ObjectName("drive.group.highlights"))->findChildren<QLabel*>())
+			named = named || label->text().contains(QStringLiteral("your script's built-in values"));
+		require(named, "the greyed LED values say they are the script's built-in values (no profile file)");
+		if (auto* file = window.findChild<QLineEdit*>(QStringLiteral("config.led_drive.default.profile_file")))
+		{
+			file->setText(QStringLiteral("C:/profiles/cinema.json"));
+			QCoreApplication::processEvents();
+			QCoreApplication::processEvents();
+			bool fromFile = false;
+			for (QLabel* label : control<QWidget>(window, Vpv::ObjectName("drive.group.highlights"))->findChildren<QLabel*>())
+				fromFile = fromFile || label->text().contains(QStringLiteral("cinema.json"));
+			require(fromFile, "the greyed LED values name the LED profile file");
+		}
+		// MEDIUM 6: the Original pathway turns every VP addition off, Dynamic Drive included.
+		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);
+		QCoreApplication::processEvents();
+		require(!control<QWidget>(window, Vpv::ObjectName("drive.pages"))->isEnabled(), "the Original pathway disables Dynamic Drive");
+		oneEach("Original pathway");
+	}
+}
+
 int RunVpvConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
 	const std::function<void(bool, const char*)>& requireHelper, const std::function<void(ConfigEditorWindow&)>& saveHelper)
 {
@@ -720,5 +851,6 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: coverage audit toggles, pointers and retirement marks", testCoverageAuditAdditions);
 	failures += run("VP-V: organisation cards, raw group, picker and reload", testOrganisation);
 	failures += run("VP-V: masters, derived settings, one control per key, fits the window", testMastersAndFit);
+	failures += run("VP-V: logic audit fixes", testLogicAuditFixes);
 	return failures;
 }

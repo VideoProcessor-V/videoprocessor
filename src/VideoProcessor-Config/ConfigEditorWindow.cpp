@@ -7709,7 +7709,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "(e.g. a 24p profile at Cinema, a 30p profile at Natural). Film-like sources only; off for 50p/60p "
             "video, in the low-latency queue and for interlaced input. The Motion page's Motion handling chooses "
             "VP's de-judder or libplacebo's smooth motion - one or the other, never both."));
-        auto* motionReset = new QPushButton(QStringLiteral("Reset to preset"));
+        auto* motionReset = new QPushButton(QStringLiteral("Reset"))   /* one word for every slider's reset (organisation audit 2026-10-24) */;
         motionReset->setObjectName(controlName(sectionPrefix, QStringLiteral("motion_preset_reset")));
         motionReset->setToolTip(QStringLiteral("Puts the fields below back to the slider position's values."));
         motionRow->addWidget(new QLabel(QStringLiteral("As shot")));
@@ -7872,7 +7872,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                         return;
                     }
                 motionName->setText(QStringLiteral("Custom"));
-                motionDescription->setText(QStringLiteral("The fields below differ from %1. Reset to preset puts them back.")
+                motionDescription->setText(QStringLiteral("The fields below differ from %1. Reset puts them back.")
                     .arg(QString::fromLatin1(kPositions[motionSlider->value()].name)));
             };
             auto apply = [=](int p) {
@@ -8228,7 +8228,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "upscale clarity; the values appear in the fields below and can be edited (Custom). Real detail above the "
             "detected size, a seek or a source change always returns to native at once. Subtitles the player draws "
             "itself are softened (to about the detected size) when a stream is re-based; they stay legible."));
-        auto* pictureReset = new QPushButton(QStringLiteral("Reset to preset"));
+        auto* pictureReset = new QPushButton(QStringLiteral("Reset"))   /* one word for every slider's reset (organisation audit 2026-10-24) */;
         pictureReset->setObjectName(controlName(sectionPrefix, QStringLiteral("picture_preset_reset")));
         pictureReset->setToolTip(QStringLiteral("Puts the fields below back to the slider position's values."));
         auto* pictureDefault = new QPushButton(QStringLiteral("Default"));
@@ -8373,7 +8373,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                         return;
                     }
                 pictureName->setText(QStringLiteral("Custom"));
-                pictureDescription->setText(QStringLiteral("The fields below differ from %1. Reset to preset puts them back.")
+                pictureDescription->setText(QStringLiteral("The fields below differ from %1. Reset puts them back.")
                     .arg(QString::fromLatin1(kPositions[pictureSlider->value()].name)));
             };
             auto apply = [=](int p) {
