@@ -103,9 +103,11 @@ path is touched.
 3. The readout appears in vp.log every 30 s while frames are timed (and so in the Ctrl+Alt+D
    bundle's `log-excerpt.txt`): GPU passes by description, CPU work split, CPU waits apart
    (render present, de-judder extra vblank waits), upload CPU line.
-4. Still to wire (design in efficiency-callsites.md): entrance S1 per stage (polled pl_timers on
-   `rebaseDispatch`), DejudderWarp's per-pass timers without `passDrain`, the conversion thread's
-   early-upload CPU copy, GPU unpack pl_timer.
+4. Motion (T3): "motion: <pass>" GPU groups appear on de-judder content; DejudderWarp output
+   identical with sampling on/off (timers do not change dispatches).
+5. Still to wire (design in efficiency-callsites.md): entrance S1 per stage (polled pl_timers on
+   `rebaseDispatch`), the inner half-size MotionWarp, the conversion thread's copy time into the
+   readout, GPU unpack pl_timer.
 
 ## G9: B3 ring handover (when built)
 

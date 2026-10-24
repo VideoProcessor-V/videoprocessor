@@ -412,6 +412,23 @@ namespace Dejudder
 		// drain = false: GPU timers only, the GPU kept busy (a laptop GPU drops
 		// its clock in the drained gaps); FlushPassTimers collects the last.
 		void SetPassTiming(bool on, bool drain = true) { passTiming = on; passDrain = drain; passMs.clear(); passGpuMs.clear(); }
+		// Efficiency timers T3 (audit 2026-10-24): production sampling of the same per-pass
+		// pl_timers WITHOUT the drain (results polled with pl_timer_query when the pass next runs,
+		// never waited for). A test's drained timing (SetPassTiming(true, true)) is left alone.
+		void SetPassSampling(bool on)
+		{
+			if (passTiming && passDrain)
+				return;
+			passTiming = on;
+			passDrain = false;
+		}
+		// The GPU ms per pass description collected since the last call (completed timers only).
+		std::map<std::string, double> TakePassGpuMs()
+		{
+			std::map<std::string, double> taken;
+			taken.swap(passGpuMs);
+			return taken;
+		}
 		void FlushPassTimers();
 		// Tests only: the serial block search the parallel one must reproduce.
 		void SetSerialSearchForTest(bool on) { serialSearchForTest = on; }

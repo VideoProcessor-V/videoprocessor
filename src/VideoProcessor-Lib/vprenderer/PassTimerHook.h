@@ -7,6 +7,7 @@
 #include <windows.h>
 
 #include <cstdint>
+#include <map>
 #include <string>
 
 // Efficiency timer plan (audit 2026-10-24 section 4): the renderer side of VP-V/core/PassTimers.h.
@@ -73,6 +74,13 @@ namespace PassTimerHook
 		void CpuMark(const char* name, PassTimers::Kind kind) { if (sampling) split.Mark(acc, name, kind, NowMs()); }
 		void CpuEnd() { split.End(); }
 		void AddCpu(const char* name, PassTimers::Kind kind, double ms) { if (sampling) acc.Add(kind, name, ms); }
+		// Completed GPU timers collected elsewhere (DejudderWarp's polled pass timers): each entry
+		// is one sample of "<prefix><description>". They are only produced on timed refreshes.
+		void AddGpuGroups(const char* prefix, const std::map<std::string, double>& ms)
+		{
+			for (const auto& kv : ms)
+				acc.Add(PassTimers::Kind::GpuGroup, std::string(prefix) + kv.first, kv.second);
+		}
 
 		// The readout when due (empty otherwise); the statistics restart after each readout so
 		// every readout covers its own interval.

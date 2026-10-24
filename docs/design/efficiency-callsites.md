@@ -17,9 +17,8 @@ lives in VP files committed on the branch: `vprenderer/EarlyUploadPolicy.h`,
 (a new generic header with no VP-V dependency, so it can go to Bill with the patch, with
 `ChangeKeyTests.cpp`).
 
-**Not compiled yet as a whole renderer**: the patches were checked to apply; the renderer DLL with
-them applied still needs one x64 Release build (queued behind the other agents' verification
-builds; see the report). The VP files they call compile in the test project.
+**Compiled**: with both d0212534 patches applied, the x64 Release renderer DLL
+(VideoProcessor-VPRenderer) builds (2026-10-24 15:27, then the host file was reverted). Not run.
 
 ## Upstreamable vs VP-only
 
@@ -53,7 +52,9 @@ builds; see the report). The VP files they call compile in the test project.
    works); `Install(timedParams)` on each de-judder extra (chains the R1 sigma-delta callback);
    each extra's `WaitForVBlank` timed as `CpuWait`; the raw unpack sites add
    "upload: CPU copy + unpack submit (render thread)" or "(early slot)". The readout is logged
-   every 30 s while frames are timed (Ctrl+Alt+D's `log-excerpt.txt` carries it). A dedicated
+   every 30 s while frames are timed. T3: before each de-judder estimate
+   `dejudder->SetPassSampling(Sampling())` (DejudderWarp's own per-pass pl_timers, no drain,
+   polled when the pass next runs) and `AddGpuGroups("motion: ", TakePassGpuMs())` after it (Ctrl+Alt+D's `log-excerpt.txt` carries it). A dedicated
    status line would need a plugin API number, assigned at integration only.
 4. **#8b** after `ExtendedRange::Prepare`: `extendedRangeIdle.Note(active, HoldsTextures(), now)`
    releases ER's textures after 10 s idle (backing off when it thrashes).
@@ -76,8 +77,9 @@ builds; see the report). The VP files they call compile in the test project.
   `Impl` are a follow-up call-site change.
 - **Timers still to wire**: entrance S1 per stage (pl_timer per stage on `rebaseDispatch`, polled
   with `pl_timer_query` two frames later, never drained) in `RunMainEntrance`/`RunEntrance`;
-  DejudderWarp's existing per-pass pl_timers (2585-2640) sampled without `passDrain`, split
-  matcher / NVOF consume / warp; the conversion thread's early-upload copy (QPC inside
-  `EarlyUpload::Upload`, atomics in `Stats`); a pl_timer around the GPU unpack.
+  the half-size inner MotionWarp's passes (its passTiming is not set by
+  SetPassSampling); NVOF itself (QPC around the producer's fence); reading
+  `EarlyUpload::Stats::copyCpuMs*` (recorded on the conversion thread) into the readout; a
+  pl_timer around the GPU unpack.
 - **#8b follow-ups**: AdaptiveDownscale, CrossfadeMix, re-base, debander, texture restore (the
   entrance ones must invalidate `entranceCache` and bump `entranceGeneration`), each after G8b.

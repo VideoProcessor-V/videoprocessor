@@ -1,5 +1,5 @@
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index 5c24cd7c..800fb19c 100644
+index 5c24cd7c..fa848b2c 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 @@ -1,6 +1,9 @@
@@ -174,7 +174,19 @@ index 5c24cd7c..800fb19c 100644
  	// test/dv-synthetic 2026-10-24: the DV tunnel's SDR passthrough repacked to BGRA8 (tunnelSdrRepack).
  	std::vector<uint32_t> tunnelSdrBgra;
  	void EngageFallback(const char* id, const std::string& reason)
-@@ -17658,7 +17717,11 @@ struct LibplaceboVideoRenderer::Impl
+@@ -16955,7 +17014,10 @@ struct LibplaceboVideoRenderer::Impl
+ 			motionProducer->Prune(aSequence);
+ 		}
+ 		dejudderLiveFieldFrom = 0;   // the live outputs are being replaced
+-		if (!dejudder->Estimate(sa, sb, maskSlot, adaptiveGrainMapWanted))
++		dejudder->SetPassSampling(passTimerHook.Sampling());   // efficiency timers T3: polled, never drained
++		const bool motionEstimated = dejudder->Estimate(sa, sb, maskSlot, adaptiveGrainMapWanted);
++		passTimerHook.AddGpuGroups("motion: ", dejudder->TakePassGpuMs());
++		if (!motionEstimated)
+ 		{
+ 			// Bug hunt 3 F4: a texture the engine could not create (low video memory).
+ 			if (dejudder->LastError().find("cannot create") != std::string::npos)
+@@ -17658,7 +17720,11 @@ struct LibplaceboVideoRenderer::Impl
  				DXGI_FRAME_STATISTICS statistics{};
  				for (int wait = 0; wait < 3 && !shown; ++wait)
  				{
@@ -187,7 +199,7 @@ index 5c24cd7c..800fb19c 100644
  						break;
  					spent = true;
  					if (FAILED(native->GetFrameStatistics(&statistics)))
-@@ -17950,6 +18013,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -17950,6 +18016,7 @@ struct LibplaceboVideoRenderer::Impl
  			pl_render_params timedParams = *extraParams;
  			timedParams.info_callback = DitherExtraPassCallback;
  			timedParams.info_priv = &ditherTotals;
@@ -195,7 +207,7 @@ index 5c24cd7c..800fb19c 100644
  			extraParams = &timedParams;
  			pl_frame target = *f.target;
  			if (renderedCrop)
-@@ -18280,6 +18344,8 @@ struct LibplaceboVideoRenderer::Impl
+@@ -18280,6 +18347,8 @@ struct LibplaceboVideoRenderer::Impl
  		bool& dejudderExtrasSpentTime)
  	{
  		dejudderExtrasSpentTime = false;
@@ -204,7 +216,7 @@ index 5c24cd7c..800fb19c 100644
  		// Render-ahead: the last plan's interval for this frame's main present, consumed
  		// here so that no exit (a failed render) leaves it for a later present (bug hunt
  		// 05 L2).
-@@ -23914,6 +23980,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -23914,6 +23983,7 @@ struct LibplaceboVideoRenderer::Impl
              lastMotionStatus=temporalRenderer.status;
              DebugLog::Log("VP motion: %s delay_ms=%.3f source_hz=%.6f display_hz=%.6f",lastMotionStatus.c_str(),temporalRenderer.DelayMs(),captureRateHz,renderLoadDisplayRefreshHz.load());
          }
@@ -212,7 +224,7 @@ index 5c24cd7c..800fb19c 100644
  		const SteadyClock::time_point renderStart = SteadyClock::now();
  		const bool targetLutApplied =
  			target.lut == displayLut && target.lut_type == PL_LUT_NORMALIZED;
-@@ -23923,6 +23990,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -23923,6 +23993,7 @@ struct LibplaceboVideoRenderer::Impl
  			AlphaOriginalPrRenderLoadInfoCallback : nullptr;
  		renderParams.info_priv = sampleOriginalPr ?
  			&originalPrPassAccumulator : nullptr;
@@ -220,7 +232,7 @@ index 5c24cd7c..800fb19c 100644
  		frameGpuTiming.BeginStage(
  			AlphaD3D11FrameGpuTimer::Stage::CoreRender);
          // renderParams carries only the NLS hook; custom hooks join it in a
-@@ -24705,6 +24773,13 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24705,6 +24776,13 @@ struct LibplaceboVideoRenderer::Impl
              // RGB capture) takes the carry's texture form (ExtendedRange.cpp).
              ExtendedRange::Prepare(extended, extendedRangeHooks, renderImage.color, target.color, frameHooks,
                  renderImage.num_planes == 1);
@@ -234,7 +246,7 @@ index 5c24cd7c..800fb19c 100644
              // Logged on any change of the description (a LUT attached, a mode change while active).
              const std::string described = ExtendedRange::Describe(extended);
              if (described != extendedRangeDescribed && (activeSettings.preserveExtendedRange || extendedRangeLogged >= 0))
-@@ -25235,6 +25310,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25235,6 +25313,7 @@ struct LibplaceboVideoRenderer::Impl
                  DebugLog::Log("VP anamorphic render failure: schema=1 sequence=%llu generation=%llu recovery=%d present_policy=black_clear consume_acquired_frame=1",
                      sourceSequence, frameGeneration, hookRender.retried ? 1 : 0);
              }
@@ -242,7 +254,7 @@ index 5c24cd7c..800fb19c 100644
  			submitted = pl_swapchain_submit_frame(swapchain);
  			if (submitted)
  			{
-@@ -25262,6 +25338,14 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25262,6 +25341,14 @@ struct LibplaceboVideoRenderer::Impl
  			}
  		}
  		const int64_t swapEndQpc = PerformanceCounterNow();
