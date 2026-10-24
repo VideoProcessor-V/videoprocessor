@@ -9012,6 +9012,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Not used with a calibration 3D LUT."));
         auto* dvTone = addChoice(QStringLiteral("VP's interpretation of DV metadata: tone mapping"),
             QStringLiteral("dv_tone_mapping"), { QStringLiteral("libplacebo"), QStringLiteral("dolby_style") });
+        dvTone->setItemText(dvTone->findData(QStringLiteral("dolby_style")), QStringLiteral("Dolby-style (approx.)"));
         dvTone->setToolTip(QStringLiteral(
             "Under test (default libplacebo). dolby_style: for Dolby Vision pictures, a Dolby-style curve driven by the "
             "scene metadata (L1) and your tone-mapping target, with the L2/L8 trims applied in ICtCp. An approximation of "
@@ -9021,7 +9022,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             QStringLiteral("dv_compare_capture_folder"));
         dvCompare->setToolTip(QStringLiteral(
             "Diagnostic, off when empty. A folder on a large drive (never a source folder): the dv_compare_capture "
-            "shortcut (default Ctrl+Alt+C) or a RECORD file there records a short labelled clip (raw frames plus the "
+            "shortcut (default Ctrl+Alt+Shift+W) or a RECORD file there records a short labelled clip (raw frames plus the "
             "decoded Dolby Vision metadata and the trims VP chose) for the LLDV-vs-tunnel comparison "
             "(docs/dv/LLDV-vs-tunnel-check.md). Clips are never uploaded or committed."));
         auto* dvGpu = addChoice(QStringLiteral("Dolby Vision tunnel: GPU unpack"),

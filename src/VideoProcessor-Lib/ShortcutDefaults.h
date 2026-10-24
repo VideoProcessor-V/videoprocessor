@@ -60,7 +60,7 @@ constexpr ShortcutDefault kShortcutDefaults[] = {
 	// reapply_rules (Config tests), which a default would then take over.
 	{ "raw_capture",             "Ctrl+Alt+W",   false },
 	// feat/dv-l8 WIP: DV comparison capture (DvCompareCapture.h; needs its Diagnostics folder).
-	{ "dv_compare_capture",      "Ctrl+Alt+C",   false },
+	{ "dv_compare_capture",      "Ctrl+Alt+Shift+W", false },
 	{ "reapply_rules",           "",             false },
 	{ "room_lights",             "",             false },
 	{ "show_profiles",           "Ctrl+Alt+I",   false },

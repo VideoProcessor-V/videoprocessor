@@ -62,7 +62,7 @@ carries, per picture, the decoded DM (L1/L2/L8/L9/L10), the DM hold state, and t
 parameters VP chose, so the comparison can say which trims (L8 or L2) were in force. It is off unless
 the variable is set. WIP (drafted, not yet verified): the Config Diagnostics folder
 `dv_compare_capture_folder` replaces the variable, and the `dv_compare_capture` shortcut
-(default Ctrl+Alt+C) starts a clip or stops it early, instead of the RECORD file.
+(default Ctrl+Alt+Shift+W) starts a clip or stops it early, instead of the RECORD file.
 
 - Start VP from PowerShell with a folder on a large drive (never a source folder):
   ```
