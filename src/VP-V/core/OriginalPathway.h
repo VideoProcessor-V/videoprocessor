@@ -25,9 +25,9 @@ namespace OriginalPathway
 		const char* slot;   // the slot whose VP additions it removes (slots.json id)
 	};
 
-	inline const std::array<Override, 47>& Overrides()
+	inline const std::array<Override, 54>& Overrides()
 	{
-		static const std::array<Override, 47> table = { {
+		static const std::array<Override, 54> table = { {
 			{ "capture_path", "standard", "input.capture" },
 			{ "capture_upload", "render", "input.capture" },
 			{ "native_rgb_ingest", "off", "input.capture" },
@@ -75,6 +75,14 @@ namespace OriginalPathway
 			{ "temporal_dither", "libplacebo", "output.dither" },
 			{ "render_ahead", "off", "output.presentation" },
 			{ "calibration_lut_stage", "libplacebo", "output.calibration_lut" },
+			// Settings audit 2026-10-24: VP additions the first table missed (absent from Bill's v1.4.02-beta).
+			{ "active_picture_startup_hold", "off", "input.source_analysis" },
+			{ "low_bitrate_handling", "off", "repair.deband" },
+			{ "ssim_residual_stabilise", "off", "scaling.output" },
+			{ "cnn_residual_stabilise", "off", "scaling.output" },
+			{ "residual_stabilise_grain_guard", "off", "scaling.output" },
+			{ "dejudder_estimate_ahead", "off", "motion.estimation" },
+			{ "interpolation_fallback", "hold", "motion.consumers" },
 		} };
 		return table;
 	}

@@ -1452,20 +1452,22 @@ namespace Tests
 						failures += std::string(name) + ": stall/failure; ";
 					if (median > 0.0)
 					{
-						// The TOTAL input-to-light delay (gate 6, owner 2026-10-24: the same at every rate, equal
-						// to the budget). The measured delay runs from the capture timestamp to the present
-						// (the hold + the render); the plan's other fixed costs lie outside it - the capture
-						// transfer of one SIGNAL frame (42 ms at 24p, 17 ms at 60p: the harness delivers a frame
-						// at its timestamp), the swapchain's 2 refreshes and the display phase. So
-						//   total = measured + (fixed - processing allowance)
-						// and the hold already made room for the transfer: the total equals the budget.
+						// The TOTAL input-to-light delay (owner 2026-10-24: the same at every rate, equal to the
+						// budget). The measured delay runs from the frame's START (the capture timestamp, audit
+						// MED 7) to the present: the capture transfer (one SIGNAL frame - the age gate waits it
+						// before the hold, as a real card delivers a frame only once it is received), the hold
+						// and the render. Outside it, MODELLED constants: the swapchain's 2 refreshes and the
+						// display phase (no input-to-light bench yet). So
+						//   total = measured + (fixed - processing allowance - transfer)
+						// = "hold + transfer + render measured, swapchain + display phase modelled".
 						const double renderAllowanceMs = DelayBudget::kProcessingAllowanceMs;
-						const double total = median + plan.fixedMs - renderAllowanceMs;
+						const double transferMs = 1000.0 / fps;   // the signal is the content rate here
+						const double total = median + plan.fixedMs - renderAllowanceMs - transferMs;
 						low = (std::min)(low, total);
 						high = (std::max)(high, total);
 						char line[200];
-						snprintf(line, sizeof(line), "   %s: TOTAL %.1f ms (budget %d; measured %.1f + fixed outside it %.1f)\n",
-							name, total, budget, median, plan.fixedMs - renderAllowanceMs);
+						snprintf(line, sizeof(line), "   %s: TOTAL %.1f ms (budget %d; measured %.1f + modelled swapchain/phase %.1f)\n",
+							name, total, budget, median, plan.fixedMs - renderAllowanceMs - transferMs);
 						Logger::WriteMessage(line);
 						// ABSOLUTE: the total within half a refresh below the budget and one refresh plus the
 						// render allowance above it (vblank phase and render-time jitter).
@@ -1532,7 +1534,8 @@ namespace Tests
 				framePlan.rateDenominator = 1000;
 				framePlan.step = [](int n) { FrameStep f; f.content = n; return f; };
 				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, true, "dejudder_strength: 0.25\n", false, &framePlan);
-				const double reachable = DelayBudget::HoldForCapacity(8, 1000.0 / 60.0);
+				// The measured delay counts from the frame's start: the transfer (one frame) + the hold.
+				const double reachable = DelayBudget::HoldForCapacity(8, 1000.0 / 60.0) + 1000.0 / 60.0;
 				const double median = Median(r.exitLatencyMs);
 				Logger::WriteMessage(("== queue_size 8 @60: delay " + std::to_string(median) + " ms (reachable hold " +
 					std::to_string(reachable) + " ms); " + r.fallbacksStatus + "\n").c_str());
@@ -4163,7 +4166,7 @@ namespace Tests
 		struct EntranceOnceCounters
 		{
 			bool found = false;
-			unsigned long long a = 0, b = 0, reused = 0, pictures = 0, fallbacks = 0;
+			unsigned long long a = 0, b = 0, reused = 0, pictures = 0, fallbacks = 0, breaks = 0;
 		};
 		static EntranceOnceCounters ReadEntranceOnce(const RunResult& r)
 		{
@@ -4173,12 +4176,13 @@ namespace Tests
 				const size_t at = line.find("entrance once (B3): A ");
 				if (at == std::string::npos)
 					continue;
-				unsigned long long a = 0, b = 0, reused = 0, pictures = 0, fallbacks = 0;
-				if (sscanf_s(line.c_str() + at, "entrance once (B3): A %llu, B ahead %llu, ring reuses %llu, pictures from processed planes %llu, fallbacks %llu",
-					&a, &b, &reused, &pictures, &fallbacks) == 5)
+				unsigned long long a = 0, b = 0, reused = 0, pictures = 0, fallbacks = 0, breaks = 0;
+				const int n = sscanf_s(line.c_str() + at, "entrance once (B3): A %llu, B ahead %llu, ring reuses %llu, pictures from processed planes %llu, fallbacks %llu, history breaks %llu",
+					&a, &b, &reused, &pictures, &fallbacks, &breaks);
+				if (n >= 5)
 				{
 					c.found = true;
-					c.a = a; c.b = b; c.reused = reused; c.pictures = pictures; c.fallbacks = fallbacks;
+					c.a = a; c.b = b; c.reused = reused; c.pictures = pictures; c.fallbacks = fallbacks; c.breaks = n == 6 ? breaks : 0;
 				}
 			}
 			return c;
@@ -4203,7 +4207,10 @@ namespace Tests
 			const double display = HarnessMonitorHz();
 			const std::string on = "[vpv]\npipeline_entrance_once: on\n";
 			std::string failures;
-			struct Case { const char* name; double rate; bool film; std::string extra; bool interpolation; bool stateless; bool gap; bool b3; };
+			// expectFallback: the run must SHOW the fallback (audit HIGH 2); forceEvery: every Nth picture
+			// between frames takes a late fallback (VP_TEST_ENTRANCE_ONCE_FALLBACK_EVERY, audit HIGH 1).
+			struct Case { const char* name; double rate; bool film; std::string extra; bool interpolation; bool stateless; bool gap; bool b3;
+				bool expectFallback; unsigned forceEvery; };
 			const std::string stages = "source_resolution: 720\ndeband_vp: on\n";
 			const Case cases[] = {
 				{ "interpolation, stateful stages", display * 5.0 / 6.0, false, "interpolation: auto\n" + stages + on, true, false, false, true },
@@ -4215,6 +4222,12 @@ namespace Tests
 				{ "source-warp extras, render-ahead", 24000.0 / 1001.0, true,
 					"dejudder_strength: 0.25\ndejudder_warp_stage: source\nrender_ahead: on\nrender_ahead_queue_credit: on\n" + stages + on, false, false, false, true },
 				{ "off (default)", display * 5.0 / 6.0, false, "interpolation: auto\n" + stages + "[vpv]\npipeline_entrance_once: off\n", true, false, false, false },
+				// HIGH 2: without the estimate ahead every B is processed per picture - shown, not silent.
+				{ "estimate ahead off: B per picture, shown", display * 5.0 / 6.0, false,
+					"interpolation: auto\ndejudder_estimate_ahead: off\n" + stages + on, true, false, false, true, true, 0u },
+				// HIGH 1: late fallbacks of A after B was processed as B's A never restart the history.
+				{ "forced late fallbacks: no history restart", display * 5.0 / 6.0, false, "interpolation: auto\n" + stages + on,
+					true, false, false, true, true, 3u },
 			};
 			// B3's stateful path needs C (the frame after B) queued to estimate B's field ahead: the
 			// look-ahead queue the delay budget keeps (4 frames); the harness default (3) is too short.
@@ -4230,11 +4243,15 @@ namespace Tests
 				const int gap = static_cast<int>(c.rate * 5.0);
 				if (c.gap)
 					plan.step = [gap](int n) { FrameStep f; f.content = n; f.send = n != gap; return f; };
+				if (c.forceEvery)
+					SetEnvironmentVariableA("VP_TEST_ENTRANCE_ONCE_FALLBACK_EVERY", std::to_string(c.forceEvery).c_str());
 				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", c.gap ? 8.5 : 7.0, c.film, c.extra, false, &plan);
+				if (c.forceEvery)
+					SetEnvironmentVariableA("VP_TEST_ENTRANCE_ONCE_FALLBACK_EVERY", nullptr);
 				const EntranceOnceCounters k = ReadEntranceOnce(r);
 				char line[320];
-				snprintf(line, sizeof(line), "== %s: presented %s; B3 counters %s: A %llu, B ahead %llu, ring reuses %llu, pictures %llu, fallbacks %llu; %s\n",
-					c.name, r.presented ? "yes" : "NO", k.found ? "found" : "none", k.a, k.b, k.reused, k.pictures, k.fallbacks,
+				snprintf(line, sizeof(line), "== %s: presented %s; B3 counters %s: A %llu, B ahead %llu, ring reuses %llu, pictures %llu, fallbacks %llu, history breaks %llu; %s\n",
+					c.name, r.presented ? "yes" : "NO", k.found ? "found" : "none", k.a, k.b, k.reused, k.pictures, k.fallbacks, k.breaks,
 					r.fallbacksStatus.c_str());
 				Logger::WriteMessage(line);
 				const std::string name = c.name;
@@ -4243,7 +4260,8 @@ namespace Tests
 					// The fallback reasons this run showed (evidence; each distinct heading once).
 					std::set<std::string> reasons;
 					for (const std::string& logLine : r.log)
-						if (logLine.find("entrance once (") != std::string::npos && logLine.find("Fallbacks engaged") != std::string::npos)
+						if ((logLine.find("entrance once (") != std::string::npos && logLine.find("Fallbacks engaged") != std::string::npos) ||
+							logLine.find("out of sequence") != std::string::npos)
 							reasons.insert(logLine);
 					for (const std::string& reason : reasons)
 						Logger::WriteMessage(("   " + reason).c_str());
@@ -4259,8 +4277,25 @@ namespace Tests
 				}
 				if (!r.Logged("entrance once (B3) on"))
 					failures += name + ": the pipeline state does not say B3 is on; ";
-				if (r.fallbacksStatus.find("entrance once") != std::string::npos)
-					failures += name + ": B3 fell back (" + r.fallbacksStatus + "); ";
+				const bool shown = r.fallbacksStatus.find("entrance once") != std::string::npos;
+				if (c.expectFallback)
+				{
+					if (c.forceEvery == 0 && !shown)
+						failures += name + ": the fallback is not shown at the end (" + r.fallbacksStatus + "); ";
+					if (k.fallbacks == 0)
+						failures += name + ": no fallback counted; ";
+				}
+				else
+				{
+					if (shown)
+						failures += name + ": B3 fell back (" + r.fallbacksStatus + "); ";
+					// Start-up only (C not yet queued): never more than a few (audit HIGH 2).
+					if (k.found && k.fallbacks > 3)
+						failures += name + ": " + std::to_string(k.fallbacks) + " fallbacks (start-up allows 3); ";
+				}
+				// HIGH 1: the stateful stages never ran out of sequence (gaps excepted: they skip sequences).
+				if (!c.gap && k.found && k.breaks > 0)
+					failures += name + ": " + std::to_string(k.breaks) + " stateful history breaks; ";
 				if (c.interpolation)
 				{
 					if (!k.found || k.pictures == 0)
@@ -4398,6 +4433,66 @@ namespace Tests
 			return c;
 		}
 
+		// Near-black investigation (2026-10-24): a still real frame, the plain draws (interpolation off)
+		// against the timeline's pictures (interpolation auto), B3 off, with VP_TEST_NEAR_BLACK_PROFILE
+		// (input-profile keys) and VP_TEST_NEAR_BLACK_DEFAULT ([vprenderer.Default] keys) appended, so
+		// candidate stages can be switched off without a rebuild. Reports the hashes and whether the
+		// timeline pictures equal the plain frame; fails only on a missing capture.
+		BEGIN_TEST_METHOD_ATTRIBUTE(NearBlackTimelineVsPlainProbe)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(NearBlackTimelineVsPlainProbe)
+		{
+			const HarnessScope harnessScope;
+			if (!RequireHardwareOrSkip("NearBlackTimelineVsPlainProbe")) return;
+			std::vector<std::vector<BYTE>> clip;
+			std::string error;
+			if (!LoadClipV210("tos_1920x800_24p", 48, clip, error))
+			{
+				Logger::WriteMessage(("SKIP-NO-FOOTAGE NearBlackTimelineVsPlainProbe: " + error + "\n").c_str());
+				return;
+			}
+			wchar_t tempPath[MAX_PATH] = {};
+			GetTempPathW(MAX_PATH, tempPath);
+			const std::wstring shots = std::wstring(tempPath) + L"vp-near-black";
+			CreateDirectoryW(shots.c_str(), nullptr);
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			g_harnessWindowWidth = 1920;
+			g_harnessWindowHeight = 1080;
+			g_harnessDvFrames = { clip[clip.size() / 2] };
+			const std::string profile = RealClip::Env("VP_TEST_NEAR_BLACK_PROFILE");
+			const std::string defaults = RealClip::Env("VP_TEST_NEAR_BLACK_DEFAULT");
+			auto unescape = [](std::string t) { size_t k; while ((k = t.find("\\n")) != std::string::npos) t.replace(k, 2, "\n"); return t; };
+			const std::string stages = "source_resolution: 720\ndeband_vp: off\ndetail_pulse_stabilise: off\n" + unescape(profile) +
+				"[vprenderer.Default]\ndithering: off\ndeband: off\ntemporal_dither: off\n" + unescape(defaults) +
+				"[vpv]\npipeline_entrance_once: off\n";
+			auto hashesOf = [&](const std::string& extra) {
+				FramePlan plan;
+				plan.rateNumerator = 24000;
+				plan.rateDenominator = 1001;
+				plan.step = [](int) { FrameStep f; f.content = 0; return f; };
+				plan.captureTimes = { 3.0, 3.6, 4.2, 4.8 };
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 5.5, false, extra, false, &plan);
+				std::set<std::string> hashes;
+				for (const std::string& json : r.captureMetadataList)
+				{
+					RunResult one;
+					one.captureMetadata = json;
+					const std::string hsh = CaptureHash(one);
+					if (!hsh.empty()) hashes.insert(hsh);
+				}
+				return hashes; };
+			const std::set<std::string> plain = hashesOf("interpolation: off\n" + stages);
+			const std::set<std::string> timeline = hashesOf("interpolation: auto\n" + stages);
+			std::string list;
+			for (const std::string& h : plain) list += "plain " + h.substr(0, 12) + " ";
+			for (const std::string& h : timeline) list += "timeline " + h.substr(0, 12) + " ";
+			Logger::WriteMessage(("== near-black probe [" + profile + " | " + defaults + "]: " + list +
+				(plain.size() == 1 && timeline == plain ? "EQUAL" : "DIFFERENT") + "\n").c_str());
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
+			Assert::IsFalse(plain.empty() || timeline.empty(), L"captures");
+		}
+
 		BEGIN_TEST_METHOD_ATTRIBUTE(EntranceOnceRealClipAcceptance)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()
@@ -4485,6 +4580,11 @@ namespace Tests
 					if (r.fallbacksStatus.find("entrance once") != std::string::npos)
 						failures += "motion B3 on: fell back (" + r.fallbacksStatus + "); ";
 					// 2: the draw found B's A made ahead (the input side once per source frame).
+					// Audit HIGH 1/2: start-up fallbacks only, and the stateful history never restarted.
+					if (k.found && k.fallbacks > 3)
+						failures += "motion B3 on: " + std::to_string(k.fallbacks) + " fallbacks (start-up allows 3); ";
+					if (k.found && k.breaks > 0)
+						failures += "motion B3 on: " + std::to_string(k.breaks) + " stateful history breaks; ";
 					if (k.found && k.b > 10 && k.a * 10 > k.b)
 						failures += "motion B3 on: B ahead was not B's A (A " + std::to_string(k.a) + ", B " + std::to_string(k.b) + "); ";
 				}

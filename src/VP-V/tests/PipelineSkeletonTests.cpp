@@ -359,8 +359,22 @@ namespace PipelineSkeletonTestsNs
 				Assert::IsFalse(AlphaQueuePolicy::ShouldShedHeldExcess(14, 11, hold + 22.0, hold, 60.0, run));
 			Assert::IsTrue(AlphaQueuePolicy::ShouldShedHeldExcess(14, 11, hold + 22.0, hold, 60.0, run));
 			Assert::AreEqual(0u, run);
-			for (int i = 0; i < 100; ++i)   // jitter: late every other frame
-				Assert::IsFalse(AlphaQueuePolicy::ShouldShedHeldExcess(14, 11, hold + (i % 2 ? 22.0 : 5.0), hold, 60.0, run));
+			for (int i = 0; i < 100; ++i)   // jitter: late every other frame (at the normal depth)
+				Assert::IsFalse(AlphaQueuePolicy::ShouldShedHeldExcess(13, 11, hold + (i % 2 ? 22.0 : 5.0), hold, 60.0, run));
+			// Audit MED 6: by depth too (an extra frame at a locked rate, due at once): 12 hold frames
+			// + 1 arriving = 13 normal, 14 = one too many.
+			run = 0;
+			for (int i = 0; i < 29; ++i)
+				Assert::IsFalse(AlphaQueuePolicy::ShouldShedHeldExcess(14, 11, hold + 2.0, hold, 60.0, run));
+			Assert::IsTrue(AlphaQueuePolicy::ShouldShedHeldExcess(14, 11, hold + 2.0, hold, 60.0, run));
+			run = 0;
+			for (int i = 0; i < 60; ++i)
+				Assert::IsFalse(AlphaQueuePolicy::ShouldShedHeldExcess(13, 11, hold + 2.0, hold, 60.0, run));
+			// The shed drops exactly the late frames, at least one, never below the target.
+			Assert::AreEqual(static_cast<size_t>(1), AlphaQueuePolicy::HeldShedFrames(14, 11, hold + 22.0, hold, 60.0));
+			Assert::AreEqual(static_cast<size_t>(3), AlphaQueuePolicy::HeldShedFrames(16, 11, hold + 55.0, hold, 60.0));
+			Assert::AreEqual(static_cast<size_t>(1), AlphaQueuePolicy::HeldShedFrames(12, 11, hold + 200.0, hold, 60.0));
+			Assert::AreEqual(static_cast<size_t>(0), AlphaQueuePolicy::HeldShedFrames(11, 11, hold + 200.0, hold, 60.0));
 		}
 
 		TEST_METHOD(DelayBudgetQueueCapacityCoversTheHold)
@@ -636,6 +650,10 @@ namespace PipelineSkeletonTestsNs
 				Assert::IsTrue(PipelineSlots::Get(slot).origin != PipelineSlots::Origin::Upstream,
 					W(std::string(o.key) + ": an upstream-only slot has no VP additions to remove").c_str());
 			}
+			// Settings audit 2026-10-24: the VP additions the first table missed are switched off too.
+			for (const char* key : { "active_picture_startup_hold", "low_bitrate_handling", "ssim_residual_stabilise",
+				"cnn_residual_stabilise", "residual_stabilise_grain_guard", "dejudder_estimate_ahead", "interpolation_fallback" })
+				Assert::IsTrue(keys.count(key) == 1, W(std::string(key) + " is not in the Original pathway").c_str());
 		}
 
 		TEST_METHOD(UpstreamKeyLeavesTheMotionConsumersOutUntilB3)

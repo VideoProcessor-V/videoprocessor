@@ -286,7 +286,8 @@
           "source_resolution": "native",
           "source_coding_fixes": "off",
           "source_resolution_latch_fixes": "off",
-          "source_resolution_cut_fixes": "off"
+          "source_resolution_cut_fixes": "off",
+          "active_picture_startup_hold": "off"
         }
       },
       "zone": "host",
@@ -355,7 +356,8 @@
         "settings": {
           "optical_flow": "off",
           "motion_ahead_frames": "0",
-          "motion_history_fixes": "off"
+          "motion_history_fixes": "off",
+          "dejudder_estimate_ahead": "off"
         }
       },
       "zone": "front_end",
@@ -547,7 +549,8 @@
         "mode": "off",
         "settings": {
           "deband_vp": "off",
-          "deband_vp_exclusive": "off"
+          "deband_vp_exclusive": "off",
+          "low_bitrate_handling": "off"
         }
       },
       "zone": "front_end",
@@ -918,7 +921,8 @@
           "interpolation": "off",
           "interpolation_fill_gaps": "off",
           "occlusion_mask": "off",
-          "dejudder_source_warp_filter": "bilinear"
+          "dejudder_source_warp_filter": "bilinear",
+          "interpolation_fallback": "hold"
         }
       },
       "zone": "front_end",
@@ -1049,7 +1053,10 @@
           "adaptive_upscale": "off",
           "ssim_bitrate_aware": "off",
           "downscale_light": "linear",
-          "fbo_float32": "off"
+          "fbo_float32": "off",
+          "ssim_residual_stabilise": "off",
+          "cnn_residual_stabilise": "off",
+          "residual_stabilise_grain_guard": "off"
         }
       },
       "zone": "libplacebo",

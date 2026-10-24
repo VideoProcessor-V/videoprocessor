@@ -770,13 +770,20 @@ HRESULT STDMETHODCALLTYPE BlackMagicDeckLinkCaptureDevice::VideoInputFrameArrive
 		assert(m_bmdDisplayMode);
 
 		timingclocktime_t timingClockFrameTime = 0;
+		timingclocktime_t timingClockFrameDuration = 0;
 
 		// Get timestamp
-		IF_NOT_S_OK(videoFrame->GetHardwareReferenceTimestamp(TimingClockTicksPerSecond(), &timingClockFrameTime, nullptr))
+		IF_NOT_S_OK(videoFrame->GetHardwareReferenceTimestamp(TimingClockTicksPerSecond(), &timingClockFrameTime, &timingClockFrameDuration))
 		{
 			Error(TEXT("Failed to get video frame hardware timestamp"));
 			return E_FAIL;
 		}
+		// VP-V delay budget (audit MED 7, 2026-10-24): VP's frame timestamps mean the frame's START
+		// (Magewell stamps allFieldStartTimes[0]). DeckLink stamps the frame's ARRIVAL - its capture
+		// complete, one frame duration later (SDK: "the point of video input frame arrival") - so
+		// the duration is taken off; the delay budget then counts the transfer once, for every card.
+		if (timingClockFrameDuration > 0 && timingClockFrameTime > timingClockFrameDuration)
+			timingClockFrameTime -= timingClockFrameDuration;
 		const timingclocktime_t captureTimingClockFrameTime = timingClockFrameTime;
 
 		// Figure out how many frames fit in the interval

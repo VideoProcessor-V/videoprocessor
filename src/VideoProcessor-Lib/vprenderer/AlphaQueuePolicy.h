@@ -229,17 +229,38 @@ namespace AlphaQueuePolicy
 	// a frame the queue gained (an early burst, a stall) never drains: the total stays a frame above
 	// the budget. A head older than the hold by more than 1.25 frames for half a second in a row
 	// (jitter never lasts) is that frame: shed it too. `run` counts the consecutive late heads.
+	// Audit MED 6: also by depth - at a locked 60p on 60 Hz with a small vblank phase the head's age
+	// cannot tell an extra frame (it is due at once); the queue then holds a frame more than the
+	// hold's own frames (ceil(hold / period)) plus the one arriving.
+	// queueHoldMs: the part of holdMs the frames wait IN the queue (after their transfer; < 0: all).
 	inline bool ShouldShedHeldExcess(size_t queueDepth, size_t desiredDepth, double headAgeMs, double holdMs,
-		double frameRateHz, unsigned& run)
+		double frameRateHz, unsigned& run, double queueHoldMs = -1.0)
 	{
 		const double periodMs = 1000.0 / ValidFrameRateOrDefault(frameRateHz);
-		const bool late = holdMs > 0.0 && queueDepth > NormalizeDesiredDepth(desiredDepth) && headAgeMs > holdMs + 1.25 * periodMs;
+		const double inQueueMs = queueHoldMs >= 0.0 ? queueHoldMs : holdMs;
+		const size_t holdFrames = inQueueMs > 0.0 ? static_cast<size_t>(std::ceil(inQueueMs / periodMs - 1e-9)) : 0;
+		const bool deep = holdMs > 0.0 && queueDepth > holdFrames + 1;
+		const bool late = holdMs > 0.0 && queueDepth > NormalizeDesiredDepth(desiredDepth) &&
+			(headAgeMs > holdMs + 1.25 * periodMs || deep);
 		run = late ? run + 1 : 0;
 		const unsigned needed = (std::max)(8u, static_cast<unsigned>(std::lround(0.5 * ValidFrameRateOrDefault(frameRateHz))));
 		if (run < needed)
 			return false;
 		run = 0;
 		return true;
+	}
+
+	// How many frames a held shed drops (audit MED 6): the frames the head is late by (at least
+	// one), never below the hold's whole frames - not the flush-to-target of a frame-count queue,
+	// which would undershoot the budget and stutter.
+	inline size_t HeldShedFrames(size_t queueDepth, size_t desiredDepth, double headAgeMs, double holdMs, double frameRateHz)
+	{
+		const double periodMs = 1000.0 / ValidFrameRateOrDefault(frameRateHz);
+		const double lateFrames = (headAgeMs - holdMs) / periodMs;
+		const size_t want = lateFrames >= 2.0 ? static_cast<size_t>(std::floor(lateFrames)) : 1;
+		const size_t target = NormalizeDesiredDepth(desiredDepth);
+		const size_t room = queueDepth > target ? queueDepth - target : 0;
+		return (std::min)(want, room);
 	}
 
 	// The VP timeline's queue steering (hunt 2 13-timing H2, L3). The refresh

@@ -402,6 +402,7 @@ private:
 	{
 		bool active = false;
 		double holdMs = 0.0;
+		double transferMs = 0.0;   // the capture transfer before the hold (timestamps mark a frame's start)
 		double fraction = 0.0;
 		size_t targetFrames = 0;
 	};
