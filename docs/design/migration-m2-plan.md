@@ -26,6 +26,38 @@ After M1, once every feature branch has merged and no branch is open against the
 blocker 1 disappears. Blockers 2 and 3 go away as each area's work lands. M2 is a short freeze
 window: no feature branches open while it runs.
 
+## Mandatory for every M2 module move (owner-endorsed, 2026-10-24)
+
+Each move is done when all of the following are true, not just when the build and tests pass. This
+is the pass done on the nine early-migrated modules (commit "Module READMEs checked against the
+code"; findings in `module-findings-2026-10-24.md`):
+
+1. **README checked against the code.** The module README has a "How the code works" section
+   covering:
+   - public API;
+   - data flow in/out;
+   - threading (threads, locks, what runs on the render thread);
+   - the config keys the code really reads, with their section;
+   - the fallbacks a user actually sees;
+   - what is needed to lift the module;
+   - "Test it standalone" (test classes and the vstest command).
+   Every older statement is checked and corrected in place. The generated settings/tests block is
+   left to `tools/vpv_tests/seed_module_readmes.py`.
+2. **Key lists corrected.** `docs/design/slots.json` `settings_keys` / `planned_keys`, and the
+   module's `MANIFEST.json` `config_keys`, list exactly the keys the code reads: no invented keys,
+   none missing, planned versus implemented right. Then regenerate the master list
+   (`check_module_manifests.py --write`) and the README blocks (`seed_module_readmes.py`).
+3. **Every fallback verified visible** (ADR-0001). Each automatic downgrade in the module engages
+   a "Fallbacks engaged" entry (FallbackStatus) with a one-time notice, never log-only. A listed
+   entry that the code can never produce is removed from slots.json and the manifest.
+4. **Code findings logged and fixed separately.** Anything wrong found in the code goes into a
+   dated findings document. Each finding is fixed in its own `fix:` commit after the
+   behaviour-free move commit, with a test where feasible. The move commit itself never changes
+   behaviour.
+
+Allow about 1-2 extra agent hours per module for this, more for big modules (capture, motion,
+config). That is on top of the move estimates below.
+
 ## Order
 
 Leaves first, timing and motion last. Each step is one commit unless noted. **CPU** means the full
