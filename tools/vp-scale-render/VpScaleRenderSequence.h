@@ -119,18 +119,22 @@ namespace VpScaleRenderSequence
 		const std::set<std::string> all(sectionsLower.begin(), sectionsLower.end());
 		for (const std::string& s : sectionsLower)
 			if (s == "vprenderer" || s == "general" || s == "profile_groups" || s == "event_actions" ||
-				s.rfind("profiles.", 0) == 0 || s.rfind("profile_groups.", 0) == 0)
+				s.rfind("profiles.", 0) == 0 || s.rfind("profile_groups.", 0) == 0 || s.rfind("vprenderer.", 0) == 0)
 				plan.unified = true;
+		// the display variants [vprenderer.<name>] (selectable display profiles: they may set the keys too)
+		for (const std::string& s : sectionsLower)
+			if (s.rfind("vprenderer.", 0) == 0)
+			{
+				const std::string name = s.substr(11);
+				if (!name.empty() && name.find('.') == std::string::npos && !IsChildNamespace(name))
+					plan.targets.insert(s);
+			}
+		// the display baseline the renderer reads (RendererConfigView::TryGetDisplayString): [vprenderer], else the
+		// legacy [vpvr.display] / [display] / [libplacebo]; adding [vprenderer] next to a legacy section would move the
+		// lookup away from it, so a legacy section is used when it exists.
 		if (all.count("vprenderer"))
 		{
 			plan.targets.insert("vprenderer");
-			for (const std::string& s : sectionsLower)
-				if (s.rfind("vprenderer.", 0) == 0)
-				{
-					const std::string name = s.substr(11);
-					if (!name.empty() && name.find('.') == std::string::npos && !IsChildNamespace(name))
-						plan.targets.insert(s);
-				}
 			return plan;
 		}
 		for (const char* legacy : { "vpvr.display", "display", "libplacebo" })

@@ -112,7 +112,7 @@ namespace VpScaleRenderMotionTests
 			const std::string head = "[" + name + "]\n";
 			const size_t a = text.find(head);
 			if (a == std::string::npos) return std::string("<absent>");
-			const size_t b = text.find("\n[", a + head.size());
+			const size_t b = text.find("\n[", a + head.size() - 1);   // an empty section ends at the next header
 			return text.substr(a + head.size(), b == std::string::npos ? std::string::npos : b + 1 - a - head.size());
 		}
 
@@ -194,9 +194,8 @@ namespace VpScaleRenderMotionTests
 				Assert::AreEqual(RendererProfileConfig::IsUnified(a), RendererProfileConfig::IsUnified(b), L"the form is kept");
 				if (okOriginal)
 					Assert::IsTrue(okMotion, std::wstring(errMotion.begin(), errMotion.end()).c_str());
-				std::string v;
-				const char* displaySection = b.HasSection("vprenderer") ? "vprenderer" : "display";
-				Assert::IsTrue(b.TryGetString(displaySection, "occlusion_mask", v) && v == "on", L"the override is where the renderer reads it");
+				std::string v;   // the renderer's own display-key lookup (RendererConfigView)
+				Assert::IsTrue(RendererConfigView(b).TryGetDisplayString("occlusion_mask", v) && v == "on", L"the override is where the renderer reads it");
 			}
 		}
 
