@@ -112,11 +112,16 @@ then the `fix:` commits (see `module-findings-2026-10-24.md`) built and tested a
   the Windows `small` macro. Fixed in 5349b394.
 - CPU suite at 648da813: stopped by the coordinator at 15:57 after 1655 passed and 0 failed. It
   had been started without the CPU exclusion filter, so it reached GPU/harness tests and held the GPU.
-- **Not yet run (WIP):** the CPU suite with the standard exclusion filter at 648da813, d2517eb1 and
-  the tip. Filter: `FullyQualifiedName!~RendererCaptureHarnessTests&Name!~NlsHookFailureRetry&
-  Name!~DvAutotestGpu&Name!~DolbyVisionGpuUnpack`, excluding the categories GpuHardware,
-  GpuOnScreen, MeterHardware and ProjectorHardware. The new tests in the `fix:` commits have
-  compiled but not run.
+- **Filtered CPU suite at d2ea5fa4** (the branch tip at the time, with every migration and `fix:`
+  commit), single-threaded, standard exclusion filter: **3969 of 3969 passed, 0 failed**, in 1.18 h
+  (TRX `suite-tip2-filtered.trx`). Filter: `FullyQualifiedName!~RendererCaptureHarnessTests&
+  Name!~NlsHookFailureRetry&Name!~DvAutotestGpu&Name!~DolbyVisionGpuUnpack`, excluding the
+  categories GpuHardware, GpuOnScreen, MeterHardware and ProjectorHardware.
+- An earlier filtered run at 5349b394 caught a bug in the new LED readback copy pass: libplacebo
+  declares storage images as float `image2D`, so `r32ui` was rejected (3 WARP hook tests failed).
+  Fixed in d2ea5fa4 with one RGBA8 texel per word. That run was stopped for the rebuild.
+- Not run separately: suites at 648da813 and d2517eb1. The tip run covers their code; per-commit
+  builds are green.
 
 ## Merge note
 
