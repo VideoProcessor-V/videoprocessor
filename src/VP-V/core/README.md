@@ -46,3 +46,23 @@ Header-only and pure: no libplacebo, no Windows, C++14. The renderer and the CPU
 4. Give it a case in the renderer's `RunEntrance`, or tag its hook with `TagSlotHooks`, only when
    a component exists.
 5. Add tests: placeholder byte-identity, isolation, contract, chain.
+
+## Segments (DRAFT 2026-10-24, not integrated)
+
+`SegmentRunner.h/.cpp` is the core of the owner's chain-segment principle: VP stages hand
+directly to the next VP stage, and the host (libplacebo) sees one entry and one exit per
+contiguous VP segment (`docs/design/central-migration-needs.md` section 6).
+
+| Piece | Where | What |
+|---|---|---|
+| Stage contracts | `SegmentRunner.h` (`StageContract`, `StageInfo`) | size domain, colour domain, intermediate format, BTB/WTW range, vector validity; roles Vp / Edge (user shaders split the segment) / Quantiser (must be last) |
+| Checks | `CheckOrder`, `CheckContracts` | run on a settings change only (`Segment::Configure`, keyed by a signature). The registry order must pass `OrderValidator`; stages follow the registry ranks; nothing after the dither; no stage clips BTB/WTW before the dither |
+| Fallbacks | `Segment::Configure` / `Downgrade` | a failed check or a run-time stage failure runs the separate hooks (today's behaviour) and is listed as "Fallbacks engaged: output segment S2/S3 (...)" |
+| Timing | `TimingSampler` | 1 in N runs timed; results polled without waiting; recorded per slot in `SlotTiming` |
+| Pool + one-hook runner | `src/VideoProcessor-Lib/vprenderer/HookSegment*.h` | generic (no VP-V dependency, offerable upstream): runs a run of hooks as one libplacebo hook on its own texture pool |
+| Output stage adapters | `src/VP-V/segments/` | S2 `OutputColourSegment`, S3 `OutputFinishSegment` (separate form, byte-identical), `Merger` (merged form behind `output_segments_merged`, default off) |
+
+S2 (PRE_OUTPUT): SDR tone shape, DV trims, [Stage 13], LED measurement, LED compensation,
+[black level], | user shaders |, calibration LUT. S3 (OUTPUT): encoding repair, occlusion mask,
+sigma-delta last. The calibration LUT stays in S2 while libplacebo owns the output encoding
+(see `docs/design/segments-callsites.md`).
