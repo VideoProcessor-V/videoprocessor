@@ -835,14 +835,14 @@ namespace VideoProcessorTest
 			Assert::IsFalse(ring.RunningLate());
 			Assert::AreEqual(std::string(), ring.Note(), L"in time again: no note");
 			// Drops are reported once, then cleared.
-			ReadbackRing small(1, 3);
-			Assert::AreEqual(0, small.Claim(1));
-			Assert::AreEqual(-1, small.Claim(2));
-			Assert::IsTrue(small.Note().find("not measured") != std::string::npos);
-			Assert::AreEqual(std::string(), small.Note());
-			small.Reset();
-			Assert::AreEqual(0, small.Pending());
-			Assert::AreEqual(0, small.Claim(3));
+			ReadbackRing single(1, 3);
+			Assert::AreEqual(0, single.Claim(1));
+			Assert::AreEqual(-1, single.Claim(2));
+			Assert::IsTrue(single.Note().find("not measured") != std::string::npos);
+			Assert::AreEqual(std::string(), single.Note());
+			single.Reset();
+			Assert::AreEqual(0, single.Pending());
+			Assert::AreEqual(0, single.Claim(3));
 		}
 	};
 }
