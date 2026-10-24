@@ -398,6 +398,15 @@ namespace VpvTests
 			Assert::IsTrue(std::string("upstream") == policies[1]->Name());
 		}
 
+		// Upstream's AlphaQueuePolicy.h keeps its literal 10..240 rate bound (the file stays his); it must
+		// equal VP's CaptureRateBounds so the general-rate rule (vp-general-not-fixed) still holds.
+		TEST_METHOD(UpstreamRateBoundEqualsCaptureRateBounds)
+		{
+			for (double hz : { 0.0, 9.999, 10.0, 10.001, 23.976, 60.0, 239.999, 240.0, 240.001, 1000.0, -1.0 })
+				Assert::AreEqual(CaptureRateBounds::Accepts(hz) ? hz : AlphaQueuePolicy::DEFAULT_FRAME_RATE_HZ,
+					AlphaQueuePolicy::ValidFrameRateOrDefault(hz));
+		}
+
 		TEST_METHOD(OneWalkEqualsOldWalkAndUpstreamPreparation)
 		{
 			std::mt19937 rng(3);
