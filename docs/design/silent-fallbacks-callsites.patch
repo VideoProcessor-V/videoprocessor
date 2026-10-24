@@ -1,6 +1,6 @@
 diff -ru a/src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp b/src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp
 --- a/src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp	2026-10-24 13:53:37.957086600 -0400
-+++ b/src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp	2026-10-24 13:58:57.506588100 -0400
++++ b/src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp	2026-10-24 14:45:36.066447800 -0400
 @@ -338,6 +338,17 @@
          return _stricmp(name.c_str(), SigmaDeltaFileName) == 0;
      }
@@ -21,7 +21,7 @@ diff -ru a/src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp b/src/VideoProc
          bool changed = false;
 diff -ru a/src/VideoProcessor-Lib/vprenderer/CustomHookChain.h b/src/VideoProcessor-Lib/vprenderer/CustomHookChain.h
 --- a/src/VideoProcessor-Lib/vprenderer/CustomHookChain.h	2026-10-24 13:53:37.657006300 -0400
-+++ b/src/VideoProcessor-Lib/vprenderer/CustomHookChain.h	2026-10-24 13:58:57.505589000 -0400
++++ b/src/VideoProcessor-Lib/vprenderer/CustomHookChain.h	2026-10-24 14:45:36.065447800 -0400
 @@ -109,6 +109,11 @@
          // Latches entries whose hook libplacebo disabled at runtime. Returns
          // true when at least one entry newly dropped out.
@@ -36,7 +36,7 @@ diff -ru a/src/VideoProcessor-Lib/vprenderer/CustomHookChain.h b/src/VideoProces
          // case-insensitive). Stage 8 needs the SSIM downscaler in the chain.
 diff -ru a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp	2026-10-24 13:53:37.343937800 -0400
-+++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp	2026-10-24 13:58:57.503590300 -0400
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp	2026-10-24 14:45:36.062446900 -0400
 @@ -82,6 +82,7 @@
  #include <VP-V/core/EntranceEpoch.h>
  #include <VP-V/core/OutputHookOrder.h>
@@ -274,7 +274,18 @@ diff -ru a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/V
          {
              frameParams.deband_params = &yieldedDebandParams;
              if (!yieldedDebandLogged)
-@@ -27053,6 +27133,8 @@
+@@ -24942,6 +25022,10 @@
+             ledMeasurement.Collect(measured, 0, &measuredSequences);
+             for (size_t i = 0; i < measured.size(); ++i)
+                 led->SubmitMeasurement(measured[i], measuredSequences[i]);
++            // Silent-fallbacks batch: measurement results running late (or frames not measured) are visible.
++            const std::string measureNote = ledMeasurement.LateNote();
++            SyncFallback(measureNote.empty() ? FallbackCatalog::Released("LED measurement") :
++                FallbackCatalog::Engaged("LED measurement", measureNote));
+         }
+         if (hookRender.retried)
+             DebugLog::Log("VP anamorphic hook recovery: schema=1 sequence=%llu generation=%llu hook=%llu errors=0x%x retry=1 rendered=%d lens=%.6f latch=until_shader_selection_change",
+@@ -27053,6 +27137,8 @@
  	m_impl->ledShadowLift.store(m_ledShadowLift, std::memory_order_release);
  	m_impl->ledWtwPassthrough.store(m_ledWtwPassthrough, std::memory_order_release);
  	m_impl->ledBtbPassthrough.store(m_ledBtbPassthrough, std::memory_order_release);
@@ -285,7 +296,7 @@ diff -ru a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/V
  			double requestedRefreshRate, double previousRefreshRate)
 diff -ru a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
 --- a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj	2026-10-24 13:53:38.263551100 -0400
-+++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj	2026-10-24 13:58:57.508589800 -0400
++++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj	2026-10-24 14:45:36.067450900 -0400
 @@ -451,6 +451,9 @@
      <ClCompile Include="..\VP-V\tests\DelayGateTests.cpp">
        <PrecompiledHeader>NotUsing</PrecompiledHeader>

@@ -16,7 +16,7 @@ git apply docs/design/silent-fallbacks-callsites.patch
 
 The patch was generated against `chore/early-migrations` at the commit that adds it, whose
 `LibplaceboVideoRenderer.cpp` is `feat/skeleton` `fd60b650`. `git apply --check --cached` passes
-there. On a later renderer, apply with `git apply -3` or by hand: the patch consists of 23
+there. On a later renderer, apply with `git apply -3` or by hand: the patch consists of 24
 self-contained hunks, listed below. Apply it after `chore/early-migrations` has merged, because it
 needs `FallbackCatalog.h`.
 
@@ -33,6 +33,7 @@ needs `FallbackCatalog.h`.
 | Failed refresh-rate switch (part 2 #7) | `ScopedDisplayRefreshRate::Switch` | New `SetFallbackSink`. Every "retaining" exit reports `refresh rate (kept X Hz for Y Hz input: why)`. Each confirmed or applied switch releases it. Wired next to `SetEventSink` |
 | SDR tone shape shader not loaded (part 2 #8) | before the SDR tone shape state log | State 3 engages `SDR tone shape` |
 | Early upload unavailable (part 2 #26) | `earlyOpenFailed` | Entry: `early upload` |
+| LED measurement results late (part 3 #1) | after `ledMeasurement.Collect` / `SubmitMeasurement` | `MeasurementHook::LateNote()` (non-blocking readback) gives a note while results arrive more than 3 frames late, or frames go unmeasured. Entry: `LED measurement` |
 | Test project | `VideoProcessor-Test.vcxproj.vcxproj` | Adds `..\VP-V\tests\FallbackCatalogTests.cpp` (NotUsing PCH, like DelayGateTests) |
 
 ## Interaction with feat/dv-l8 (deband)

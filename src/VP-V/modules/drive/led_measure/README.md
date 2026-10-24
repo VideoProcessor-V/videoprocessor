@@ -135,6 +135,7 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 - `src/VP-V/modules/drive/led_measure/LedLookahead.cpp`
 - `src/VP-V/modules/drive/led_measure/LedMeasurement.h`
 - `src/VP-V/modules/drive/led_measure/LedLookahead.h`
+- `src/VP-V/modules/drive/led_measure/ReadbackRing.h`
 - `src/VideoProcessor-Lib/led/LedMeasurementHook.cpp`
 
 `LedMeasurementHook.*` stays at the legacy path for now: `VideoProcessor-Test.vcxproj` (changed by active branches) compiles its `.cpp`.

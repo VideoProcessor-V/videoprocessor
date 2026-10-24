@@ -1,12 +1,18 @@
 #pragma once
 
 #include <VP-V/modules/drive/led_measure/LedMeasurement.h>
+#include <VP-V/modules/drive/led_measure/ReadbackRing.h>
 
 #include <libplacebo/gpu.h>
 #include <libplacebo/shaders/custom.h>
 
 #include <deque>
+#include <string>
 #include <vector>
+
+struct ID3D11DeviceContext;
+struct ID3D11Query;
+struct ID3D11Texture2D;
 
 // Layer 1 of the LED drive module, GPU side: a native libplacebo hook at
 // PL_HOOK_PRE_OUTPUT (after tone mapping, gamut mapping and the normalized
@@ -15,6 +21,15 @@
 // hand results back to the host, so this is C++: one compute pass writes the
 // block statistics into a storage buffer, read back a few frames later
 // without ever waiting on the GPU. It never modifies the picture.
+//
+// Module findings 2026-10-24 (part 3 item 1): on D3D11 libplacebo's buffer
+// poll always says "ready" and pl_buf_read is CopyResource + a blocking Map,
+// so the old Collect made the render thread wait for the whole GPU frame. On
+// D3D11 the results are now copied, right after the measurement pass, into a
+// VP-owned R32_UINT texture per slot (a small copy pass), then natively into a
+// staging texture with an event query; Collect reads a slot only once its
+// query reports done and maps it with DO_NOT_WAIT (ReadbackRing schedules).
+// Other backends keep pl_buf_poll / pl_buf_read, which do not block there.
 namespace LedDrive
 {
 	class MeasurementHook
@@ -80,19 +95,30 @@ namespace LedDrive
 		void Release();
 		int Dropped() const { return dropped; }
 		int Measured() const { return measured; }
+		// "" while results arrive in time; otherwise a short note for the
+		// "Fallbacks engaged" line (results late or frames not measured).
+		std::string LateNote() { return schedule.Note(); }
+		// True when the non-blocking D3D11 readback is in use.
+		bool NativeReadback() const { return nativeReadback; }
+		// A result still unread this many frames after its pass counts as late.
+		static constexpr int LATE_FRAMES = 3;
 
 	private:
 		static pl_hook_res Run(void* priv, const struct pl_hook_params* params);
 		pl_hook_res Measure(const struct pl_hook_params* params);
+		// D3D11: create the per-slot readback textures and queries (once per GPU).
+		bool EnsureNativeReadback();
+		// D3D11: the copy pass into the slot's texture, then the native copy + query.
+		bool QueueNativeCopy(const struct pl_hook_params* params, int slot);
+		bool NativeReady(int slot);
+		bool NativeRead(int slot, RawMeasurement& raw);
+		void ReleaseNative();
 
 		pl_hook hook{};
 		pl_gpu gpu = nullptr;
 		pl_buf ring[RING] = {};
-		bool busy[RING] = {};
 		uint64_t slotSequence[RING] = {};
 		uint64_t sequence = 0;
-		std::deque<int> submitted;
-		int next = 0;
 		MeasurementRect rect;
 		float weights[3] = { 0.114f, 0.587f, 0.299f };
 		float boost = 1.0f;
@@ -105,5 +131,14 @@ namespace LedDrive
 		pl_rect2df crop{};
 		int dropped = 0;
 		int measured = 0;
+		uint64_t frames = 0;   // measurement passes queued (the schedule's clock)
+		ReadbackRing schedule{ RING, LATE_FRAMES };
+		bool nativeTried = false;
+		bool nativeReadback = false;
+		ID3D11DeviceContext* immediate = nullptr;
+		ID3D11Texture2D* readbackTex[RING] = {};
+		ID3D11Texture2D* stagingTex[RING] = {};
+		ID3D11Query* copyDone[RING] = {};
+		pl_tex readbackWrapped[RING] = {};
 	};
 }
