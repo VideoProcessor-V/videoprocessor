@@ -68,6 +68,36 @@ The input is the decoded picture at the encoded size, which is what VP's re-base
 If the sweep finds a clear winner that VP cannot select today (spline36, or anti-ringing > 0),
 the follow-up is a small renderer change: an `upscaler_antiring` key and a `spline36` choice.
 
+### (d) The downscale A/B: AdaptiveDownscale polar vs separable (owner 2026-10-24)
+
+This uses the native 4K case `native2160`: the 4K master itself (no encode), fitted into
+3840x2160, then VP to the FL35. It compares the grain-aware hybrid downscale's faithful branch
+both ways:
+
+- `adaptive_faithful: auto`: polar `ewa_lanczossharp` whenever both axes scale alike, as
+  4K -> 2560x1440 does (AdaptiveDownscale.cpp:631-636);
+- `adaptive_faithful: ortho`: two separable Lanczos passes.
+
+Everything else follows the kit's locked down settings (`w_base` 0.2, linear light,
+SSimDownscaler). Each runs with `fbo_float32` on and off, so there are 4 variants. The same
+metrics apply, plus cost (`study.py cost`, below).
+
+The owner agreed to test separable on clips first. It becomes the default only if it is faithful:
+no worse grain keep, halos or ringing.
+
+### (e) fbo_float32 on/off (the per-tier option decision)
+
+- `down_*_fbo32on|off` and `direct_vp_hybrid` vs `direct_vp_hybrid_fbo32off` on the upscale
+  cases.
+- **Highlight error:** `hl_err_codes`, the mean error where the reference is above code 900.
+- **WTW keep:** `wtw_kept`, the share of the reference's above-white pixels (> 940) still above
+  940. VP's captures are scored unclamped, so WTW survives into the metric.
+- Real masters have few above-white pixels, so the downscale case adds a synthetic still
+  `wtwramp`: a code 64 -> 1019 ramp with 1-code noise, plus thin lines at 1019.
+- **Cost:** `study.py cost` runs each downscale variant and the fbo pair on a 12 s held still
+  with no capture. It samples nvidia-smi utilisation every 200 ms (the kit's vpbench method,
+  first 4 s dropped) and writes `cost.json`; the report adds a cost table.
+
 ### (c) Metrics (`metrics.py`, the kit's functions, on the GPU with the kit's Python)
 
 - **PSNR, SSIM:** luma, `C.psnr` / `C.ssim`.
@@ -90,6 +120,7 @@ python tools/upscale_study/study.py plan    --work D:\codex\upscale-study       
 python tools/upscale_study/study.py prepare --work D:\codex\upscale-study            # CPU: ffmpeg
 tools\upscale_study\build_sweep.bat                                                  # once (cl)
 python tools/upscale_study/study.py render  --work D:\codex\upscale-study            # GPU
+python tools/upscale_study/study.py cost    --work D:\codex\upscale-study            # GPU: (d)/(e) cost, ~2 min
 python tools/upscale_study/study.py score   --work D:\codex\upscale-study [--d-staging E:\VP-NN-TrainKit\work\staging]
 python tools/upscale_study/study.py report  --work D:\codex\upscale-study
 ```
@@ -104,8 +135,10 @@ python tools/upscale_study/study.py report  --work D:\codex\upscale-study
 
 ## Expected run time
 
-The dry run (`plan --dry-run`) gives: 28 frames per case, 5 cases, 55 VpScaleRender jobs,
-300 sweep batches (8,400 upscales), and about 9,900 scored items.
+The dry run (`plan --dry-run`) gives: 28 frames per case (29 with the WTW ramp in the
+downscale case), 6 cases, 64 VpScaleRender jobs, 300 sweep batches (8,700 upscales), and about
+10,500 scored items. Parts (d)/(e) add about 10 min of renders and a 2-3 min cost run on either
+PC.
 
 | stage | laptop (RTX 3050 Ti) | cinema PC (RTX 3090) | bound by |
 |---|---|---|---|

@@ -60,7 +60,12 @@ CASES = [
     dict(id="n720", enc=(1280, 720), codec="libx264", kbps=3000, player=None),
     dict(id="p720_1080", enc=(1280, 720), codec="libx264", kbps=3000, player=dict(size=(1920, 1080), kernel="lanczos")),
     dict(id="p720_2160", enc=(1280, 720), codec="libx264", kbps=3000, player=dict(size=(3840, 2160), kernel="catmull_rom")),
+    # (d) the downscale A/B: the 4K master itself to the FL35 (no encode): AdaptiveDownscale's
+    # faithful branch polar EWA vs separable, and fbo_float32 on/off. Plus a synthetic WTW ramp.
+    dict(id="native2160", enc=(3840, 2160), codec=None, kbps=0, player=None, kind="down"),
 ]
+# A synthetic still for the highlight / WTW check (codes 64 -> 1019 ramp with 1-code noise).
+WTW_RAMP = dict(id="wtwramp", path=None, size=(3840, 2160), synthetic=True)
 PLAYER_FLAGS = {"catmull_rom": "bicubic:param0=0:param1=0.5", "lanczos": "lanczos:param0=3", "bilinear": "bilinear"}
 
 # VP renderer settings (keys and values VP's renderer accepts: LibplaceboVideoRenderer.cpp
@@ -80,11 +85,15 @@ SHADER_SECTIONS = (
     "[shader.standard.fsrcnnx]\nshader_type: custom\nlabel: FSRCNNX upscaler\nstage: pre_resize\norder: 15\nglsl_file: FSRCNNX_x2_16-0-4-1.glsl\n"
     "[shader.standard.ssim_superres]\nshader_type: custom\nlabel: SSimSuperRes (upscale refinement)\nstage: post_resize\norder: 25\nglsl_file: SSimSuperRes.glsl\n")
 VP_UPSCALERS = ["lanczos", "catmull_rom", "ewa_lanczos", "ewa_lanczossharp"]
+# AdaptiveDownscale's faithful branch: "auto" = polar ewa_lanczossharp when both axes scale alike
+# (4K -> 2560x1440 does), "ortho" = two separable Lanczos passes (AdaptiveDownscale.cpp:631-636).
+VP_FAITHFUL = {"polar": "auto", "separable": "ortho"}
 VALID = {  # the renderer's accepted values (LibplaceboVideoRenderer.cpp readChoice)
     "upscaler": {"auto", "none", "nearest", "bilinear", "oversample", "bicubic", "gaussian", "catmull_rom", "lanczos", "ewa_lanczos",
                  "ewa_lanczossharp", "ewa_lanczos4sharpest"},
     "downscaler": {"auto", "gpu", "box", "hermite", "bilinear", "bicubic", "gaussian", "catmull_rom", "mitchell", "lanczos"},
     "upscale_light": {"linear", "gamma"}, "downscale_light": {"linear", "gamma"},
+    "adaptive_faithful": {"auto", "ortho"}, "fbo_float32": {"auto", "on", "off"},
 }
 
 # The kernel sweep (PlScaleSweep, libplacebo directly): what VP's renderer does not expose
@@ -100,9 +109,20 @@ def fit(w, h, bw, bh):
     return min(ow, bw), min(oh, bh)
 
 
-def variants():
-    """(a) VP renderer variants. Each: id, stages [(source kind, window, settings, shader profiles)], d (bool)."""
-    v = [dict(id="direct_vp_hybrid", route="direct", stages=[dict(window=OUTPUT_BOX, settings=VP_UP_HYBRID, shaders=["standard.fsrcnnx", "standard.ssim_superres"])])]
+def variants(case=None):
+    """VP renderer variants for a case. Each: id, stages [(window, settings, shader profiles)], d (bool).
+    The downscale case gets (d); the upscale cases get (a) plus the fbo_float32 off check."""
+    if case is not None and case.get("kind") == "down":
+        v = []
+        for name, faithful in VP_FAITHFUL.items():
+            for fbo in ("on", "off"):
+                v.append(dict(id=f"down_{name}_fbo32{fbo}", route="down",
+                              stages=[dict(window=OUTPUT_BOX, settings=dict(VP_DOWN, adaptive_faithful=faithful, fbo_float32=fbo),
+                                           shaders=["standard.ssim_downscaler"])]))
+        return v
+    v = [dict(id="direct_vp_hybrid", route="direct", stages=[dict(window=OUTPUT_BOX, settings=VP_UP_HYBRID, shaders=["standard.fsrcnnx", "standard.ssim_superres"])]),
+         dict(id="direct_vp_hybrid_fbo32off", route="direct",
+              stages=[dict(window=OUTPUT_BOX, settings=dict(VP_UP_HYBRID, fbo_float32="off"), shaders=["standard.fsrcnnx", "standard.ssim_superres"])])]
     for u in VP_UPSCALERS:
         v.append(dict(id=f"direct_{u}", route="direct",
                       stages=[dict(window=OUTPUT_BOX, settings=dict(VP_UP_HYBRID, upscaler=u, adaptive_upscale="off"), shaders=[])]))
@@ -149,7 +169,7 @@ class Plan:
         self.check(os.path.isdir(a.kit) and os.path.exists(os.path.join(a.kit, "trainkit", "common.py")), f"kit not found: {a.kit}")
         if a.d_staging:
             self.check(os.path.exists(os.path.join(a.d_staging, "weights", "D_hybrid_refine.pt")), f"D weights not found under {a.d_staging}")
-        for v in variants():
+        for v in variants() + variants(CASES[-1]):
             for st in v["stages"]:
                 for k, val in st["settings"].items():
                     if k in VALID:
@@ -158,10 +178,11 @@ class Plan:
             for si, start in enumerate(SEGMENT_STARTS):
                 for f in EVAL_FRAMES:
                     self.frames.append((m["id"], si, f))
+        self.frames.append((WTW_RAMP["id"], 0, 0))   # scored for the downscale case only (see job_text)
         for case in CASES:
             src = case["player"]["size"] if case["player"] else case["enc"]
             rebase = case["enc"][1] if case["player"] else None
-            for v in variants():
+            for v in variants(case):
                 if v.get("reuse"):
                     continue   # +D reuses the route's renders (D runs at scoring)
                 for si_, st in enumerate(v["stages"]):
@@ -171,6 +192,8 @@ class Plan:
                     s_size = ROUTE_4K if feed == "stage1" else src
                     self.jobs.append(dict(id=jid, dir=d, case=case["id"], variant=v["id"], stage=si_ + 1, feed=feed, source=list(s_size),
                                           window=list(st["window"]), shaders=st["shaders"], cfg=cfg_text(st["settings"], rebase if feed == "delivered" else None)))
+            if case.get("kind") == "down":
+                continue   # the kernel sweep is about upscaling
             for filt in SWEEP_FILTERS:
                 for ar in SWEEP_ANTIRING:
                     for target in ("output", "route4k"):
@@ -187,7 +210,7 @@ class Plan:
                     # per batch: ~0.6 s device + compile; per upscale: upload + 9 timed renders + readback
                     sweep_min_laptop=round((len(self.sweeps) * 0.6 + sweep_renders * 0.06) / 60, 1),
                     sweep_min_3090=round((len(self.sweeps) * 0.4 + sweep_renders * 0.03) / 60, 1),
-                    score_items=(len(CASES) * (len(variants())) + len(self.sweeps)) * pictures)
+                    score_items=(sum(len(variants(c)) for c in CASES) + len(self.sweeps)) * pictures)
 
     def write(self):
         os.makedirs(self.work, exist_ok=True)
@@ -199,7 +222,7 @@ class Plan:
                 f.write(job_text(self.a, j, self.frames, self.work))
         with open(os.path.join(self.work, "plan.json"), "w", newline="\n") as f:
             json.dump(dict(jobs=[{k: v for k, v in j.items() if k != "cfg"} for j in self.jobs], sweeps=self.sweeps,
-                           frames=self.frames, cases=CASES, masters=MASTERS, estimate=self.estimate()), f, indent=1)
+                           frames=self.frames, cases=CASES, masters=MASTERS + [WTW_RAMP], estimate=self.estimate()), f, indent=1)
 
 
 def raw_path(work, case_id, master, seg, frame, kind):
@@ -215,7 +238,10 @@ def job_text(a, j, frames, work):
         lines.append("shaders " + " ".join(j["shaders"]))
     lines.append(f"require_adapter {a.adapter}")
     first = True
+    down = j["case"] == "native2160"
     for (m, s, f) in frames:
+        if m == WTW_RAMP["id"] and not down:
+            continue   # the WTW ramp is a downscale-case still
         if j["feed"] == "stage1":
             p = os.path.join(work, "vp_stage1", j["case"], j["variant"], f"{m}_s{s}_f{f:03d}.y16")
         else:
@@ -240,6 +266,13 @@ def prepare(a, plan):
                 run_or_print(a, [ff, "-y", "-v", "error", "-i", seg, "-vf", f"select=eq(n\\,{f})", "-frames:v", "1", "-pix_fmt", "gray16le",
                                  "-f", "rawvideo", out], out)
             for case in CASES:
+                if case.get("kind") == "down":
+                    for f in EVAL_FRAMES:   # the master itself, fitted into 3840x2160 (bars padded), 10-bit
+                        out_d = raw_path(plan.work, case["id"], m["id"], si, f, "delivered")
+                        run_or_print(a, [ff, "-y", "-v", "error", "-i", seg, "-vf",
+                                         f"select=eq(n\\,{f}),scale=3840:2160:force_original_aspect_ratio=decrease:flags=lanczos,pad=3840:2160:(ow-iw)/2:(oh-ih)/2:color=black",
+                                         "-frames:v", "1", "-pix_fmt", "gray10le", "-f", "rawvideo", out_d], out_d)
+                    continue
                 ew, eh = fit(m["size"][0], m["size"][1], *case["enc"])
                 enc = os.path.join(plan.work, "enc", case["id"], f"{m['id']}_s{si}.mp4")
                 run_or_print(a, [ff, "-y", "-v", "error", "-i", seg, "-vf", f"scale={ew}:{eh}:flags=lanczos,format=yuv420p" + ("10le" if "265" in case["codec"] else ""),
@@ -259,6 +292,26 @@ def prepare(a, plan):
                         cw, ch = case["enc"]
                         vf = f"{sel},pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=black"
                     run_or_print(a, [ff, "-y", "-v", "error", "-i", enc, "-vf", vf, "-frames:v", "1", "-pix_fmt", "gray10le", "-f", "rawvideo", out_d], out_d)
+
+
+def prepare_ramp(a, plan):
+    """The synthetic WTW still: a horizontal ramp from code 64 to 1019 (above white 940 on the right),
+    1-code noise, plus a few 1-px white-to-WTW lines (where clipping or halos show)."""
+    w, h = WTW_RAMP["size"]
+    d = raw_path(plan.work, "native2160", WTW_RAMP["id"], 0, 0, "delivered")
+    r = raw_path(plan.work, None, WTW_RAMP["id"], 0, 0, "ref").replace(".y16", "_master.y16")
+    if a.dry_run:
+        print(f"    (synthetic) {d} and {r}")
+        return
+    import numpy as np
+    rng = np.random.default_rng(940)
+    x = np.linspace(64.0, 1019.0, w)[None, :].repeat(h, 0) + rng.normal(0.0, 1.0, (h, w))
+    x[::97, :] = 1019.0   # thin lines at the WTW ceiling
+    codes = np.clip(np.round(x), 4, 1019).astype("<u2")
+    os.makedirs(os.path.dirname(d), exist_ok=True)
+    os.makedirs(os.path.dirname(r), exist_ok=True)
+    codes.tofile(d)
+    (codes.astype(np.float64) * 65535.0 / 1023.0).round().astype("<u2").tofile(r)
 
 
 def run_or_print(a, cmd, out):
@@ -314,6 +367,8 @@ def render(a, plan):
         folder = os.path.join(plan.work, "sweep", s["case"], f"{s['filter']}_ar{s['antiring']:.2f}_{s['target']}")
         lines = []
         for (m, si, f) in plan.frames:
+            if m == WTW_RAMP["id"]:
+                continue
             inp = raw_path(plan.work, s["case"], m, si, f, "encoded")
             case = next(c for c in CASES if c["id"] == s["case"])
             mm = next(x for x in MASTERS if x["id"] == m)
@@ -334,6 +389,58 @@ def render(a, plan):
     if a.dry_run:
         print(f"    + {len(plan.sweeps)} PlScaleSweep batch runs ({len(plan.sweeps) * len(plan.frames)} upscales), e.g.:")
         print("     ", a.sweep_tool, "--batch <work>/sweep/<case>/<filter>_ar<A>_<target>/batch.txt --adapter", a.adapter)
+
+
+def cost(a, plan):
+    """GPU cost per output frame of each downscale variant (and the upscale fbo_float32 pair), the
+    kit's vpbench method: utilisation sampled every 200 ms over a held still (nocapture), the first
+    4 s dropped; ms per output frame = utilisation x refresh period."""
+    import threading
+    results = {}
+    for j in plan.jobs:
+        if not (j["case"] == "native2160" or j["variant"].startswith("direct_vp_hybrid")):
+            continue
+        d = os.path.join(plan.work, "cost", j["id"])
+        frame = raw_path(plan.work, j["case"], MASTERS[0]["id"], 0, EVAL_FRAMES[0], "delivered")
+        text = job_text(a, dict(j, dir=d), [], plan.work).replace(f"hold {a.hold}", "hold 12") + f"nocapture 1\npicture cost {frame} 1\n"
+        if a.dry_run:
+            print(f"    cost {j['id']}: {a.render_tool} {os.path.join(d, 'job.txt')} (12 s held still, nvidia-smi)")
+            continue
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "render.cfg"), "w", newline="\n") as f:
+            f.write(j["cfg"])
+        with open(os.path.join(d, "job.txt"), "w", newline="\n") as f:
+            f.write(text)
+        wait_quiet(a)
+        samples, stop = [], threading.Event()
+
+        def sample():
+            p = subprocess.Popen(["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits", "-lms", "200"],
+                                 stdout=subprocess.PIPE, text=True)
+            t0 = time.time()
+            for line in p.stdout:
+                if stop.is_set():
+                    break
+                try:
+                    samples.append((time.time() - t0, float(line.strip())))
+                except ValueError:
+                    pass
+            p.kill()
+        th = threading.Thread(target=sample, daemon=True)
+        th.start()
+        t0 = time.time()
+        subprocess.run([a.render_tool, os.path.join(d, "job.txt")], capture_output=True, text=True, timeout=300,
+                       env=dict(os.environ, VP_TEST_SHADER_DIR=os.path.dirname(a.dll), VP_TEST_ADAPTER=a.adapter))
+        dur = time.time() - t0
+        stop.set()
+        th.join(5)
+        steady = [u for t, u in samples if 4.0 <= t <= dur - 1.0]
+        util = sum(steady) / len(steady) if steady else None
+        results[j["variant"] + "@" + j["case"]] = dict(util_pct=util, ms_per_output_frame_60hz=None if util is None else round(util / 100 * 1000 / 60, 3))
+        print(j["id"], results[j["variant"] + "@" + j["case"]])
+    if not a.dry_run:
+        with open(os.path.join(plan.work, "cost.json"), "w", newline="\n") as f:
+            json.dump(results, f, indent=1)
 
 
 def export_stage1(a, plan, j):
@@ -357,7 +464,7 @@ def export_stage1(a, plan, j):
 # ------------------------------------------------------------------------------------------ main
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("stage", choices=["plan", "prepare", "render", "score", "report"])
+    ap.add_argument("stage", choices=["plan", "prepare", "render", "cost", "score", "report"])
     ap.add_argument("--work", required=True)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--ffmpeg", default=r"D:\nn-corpus\VP-NN-TrainKit-r2\ffmpeg\ffmpeg.exe")
@@ -397,10 +504,13 @@ def main(argv=None):
         return 1
     if a.stage == "prepare":
         prepare(a, plan)
+        prepare_ramp(a, plan)
     elif a.stage == "render":
         if not a.dry_run:
             plan.write()
         render(a, plan)
+    elif a.stage == "cost":
+        cost(a, plan)
     elif a.stage == "score":
         cmd = [a.kit_python, "-I", "-B", os.path.join(HERE, "metrics.py"), "--work", plan.work, "--kit", a.kit, "--plan", os.path.join(plan.work, "plan.json")]
         if a.d_staging:

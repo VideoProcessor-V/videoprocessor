@@ -10,6 +10,9 @@ Kaiser-windowed sinc) of the 4K master to the picture size VP used:
   grain_keep          the kit's C.grain_keep_term ratio: high-band RMS of out / ref on grain tiles
                       (1.0 = grain kept, < 0.95 = grain lost)
   hf_err_codes        mean |highpass(out) - highpass(ref)|
+  hl_err_codes        mean |out - ref| where the reference is above code 900 (highlights; fbo_float32)
+  wtw_kept            share of the reference's above-white pixels (> code 940) still above 940 in the
+                      output (BTB/WTW preserved, owner rule); empty when the frame has (almost) none
   gpu_ms              PlScaleSweep's pl_timer median (sweep rows only)
 Inputs come from study.py (plan.json, the renders); writes <work>/scores.csv. Read-only on the kit.
 """
@@ -65,8 +68,13 @@ def main():
         mn = -F.max_pool2d(-pad, 3, 1)
         over = ((edge * (F.relu(y - mx) + F.relu(mn - y))).sum() / n).item() / C.CODE
         _, gk = C.grain_keep_term(y, ref)
+        hl = ref > 900.0 / 1023.0
+        wtw = ref > 940.0 / 1023.0
+        n_wtw = int(wtw.sum().item())
         return dict(psnr=C.psnr(y, ref), ssim=C.ssim(y, ref), ring_codes=ring, overshoot_codes=over, grain_keep=float(gk),
-                    hf_err_codes=(C.highpass(y) - C.highpass(ref)).abs().mean().item() / C.CODE)
+                    hf_err_codes=(C.highpass(y) - C.highpass(ref)).abs().mean().item() / C.CODE,
+                    hl_err_codes=((y - ref).abs()[hl].mean().item() / C.CODE) if int(hl.sum().item()) > 100 else None,
+                    wtw_kept=(float(((y > 940.0 / 1023.0) & wtw).sum().item()) / n_wtw) if n_wtw > 100 else None)
 
     def vp_rect(job_dir):
         text = open(os.path.join(job_dir, "vp.log"), encoding="utf-8", errors="replace").read()
@@ -109,8 +117,10 @@ def main():
             master, seg, frame = mm.group(1), int(mm.group(2)), int(mm.group(3))
             y = T(read_r10(f[2])[y0:y1, x0:x1])
             ref = reference(master, seg, frame, x1 - x0, y1 - y0)
+            # (VP's captures map R10 back with the fixed limited->full inverse; values above 1.0
+            # are WTW and are NOT clamped before scoring, so wtw_kept sees them.)
             base = dict(case=j["case"], variant=j["variant"], master=master, seg=seg, frame=frame, size=f"{x1 - x0}x{y1 - y0}")
-            rows.append(dict(base, **score(y.clamp(0, 1), ref)))
+            rows.append(dict(base, **score(y, ref)))
             if netD is not None and j["variant"].startswith("route4k_"):
                 s1 = jobs.get(j["id"].replace("__s2", "__s1"))
                 p1 = os.path.join(a.work, "vp_stage1", j["case"], j["variant"], f[0] + ".y16")

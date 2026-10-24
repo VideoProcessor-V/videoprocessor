@@ -9,7 +9,7 @@ import csv
 import os
 from collections import defaultdict
 
-METRICS = ["psnr", "ssim", "ring_codes", "overshoot_codes", "grain_keep", "hf_err_codes", "gpu_ms"]
+METRICS = ["psnr", "ssim", "ring_codes", "overshoot_codes", "grain_keep", "hf_err_codes", "hl_err_codes", "wtw_kept", "gpu_ms"]
 
 
 def main(argv=None):
@@ -36,6 +36,14 @@ def main(argv=None):
             flag = " (grain lost)" if means["grain_keep"] is not None and means["grain_keep"] < 0.95 else ""
             cells = [("-" if means[m] is None else f"{means[m]:.4f}" if m in ("ssim", "grain_keep") else f"{means[m]:.3f}") for m in METRICS]
             out.append(f"| {variant}{flag} | {n} | " + " | ".join(cells) + " |")
+        out.append("")
+    cost_path = os.path.join(a.work, "cost.json")
+    if os.path.exists(cost_path):
+        import json
+        cost = json.load(open(cost_path))
+        out += ["## GPU cost (VP chain, nvidia-smi utilisation, ms per output frame at 60 Hz)", "", "| variant | GPU % | ms |", "|---|---|---|"]
+        for k, v in sorted(cost.items()):
+            out.append(f"| {k} | {v.get('util_pct') if v.get('util_pct') is None else round(v['util_pct'], 1)} | {v.get('ms_per_output_frame_60hz')} |")
         out.append("")
     path = os.path.join(a.work, "report.md")
     with open(path, "w", newline="\n") as f:

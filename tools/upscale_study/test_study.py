@@ -69,7 +69,14 @@ class StudyTests(unittest.TestCase):
         self.assertIn("picture warmup", text)
         est = plan.estimate()
         self.assertGreater(est["vp_jobs"], 0)
-        self.assertEqual(est["scored_frames_per_case"], len(study.MASTERS) * len(study.SEGMENT_STARTS) * len(study.EVAL_FRAMES))
+        self.assertEqual(est["scored_frames_per_case"], len(study.MASTERS) * len(study.SEGMENT_STARTS) * len(study.EVAL_FRAMES) + 1, "+ the WTW ramp")
+        # The downscale A/B: polar vs separable faithful branch, fbo_float32 on/off, the ramp only there.
+        down = [j for j in plan.jobs if j["case"] == "native2160"]
+        self.assertEqual(sorted(j["variant"] for j in down), sorted(["down_polar_fbo32on", "down_polar_fbo32off", "down_separable_fbo32on", "down_separable_fbo32off"]))
+        self.assertTrue(any("adaptive_faithful: ortho" in j["cfg"] for j in down) and any("adaptive_faithful: auto" in j["cfg"] for j in down))
+        self.assertIn("wtwramp", open(os.path.join(down[0]["dir"], "job.txt")).read())
+        self.assertNotIn("wtwramp", text)
+        self.assertFalse(any(sw["case"] == "native2160" for sw in plan.sweeps))
 
     def test_dry_run_refuses_read_only_work_folders(self):
         a = self.args()
