@@ -517,3 +517,41 @@ VP-V adapter).
 
 Shared with the separate pipeline-wide audit: `SourceResolutionMonitor` and `AdaptiveDownscale` use
 the same blocking poll/read pattern as item 1.
+
+## Part 3 fixes (separate `fix:` commits; not built at the time of writing)
+
+- **Item 1, the LED readback that never waits (done).** Files: `LedMeasurementHook` and the new
+  `ReadbackRing.h`. On D3D11 each frame's results are:
+  1. copied right after the measurement pass into a VP-owned R32_UINT texture per slot, by a
+     64-wide copy pass that imageStores the buffer words;
+  2. copied natively (`CopyResource`) into a staging texture, followed by an event query;
+  3. read in `Collect` only once `GetData(DONOTFLUSH)` reports done, through
+     `Map(DO_NOT_WAIT)`.
+
+  `ReadbackRing` keeps frame order, drops a frame rather than wait, and reports late results
+  through `LateNote()`. The `LED measurement` entry is wired in the call-site patch. Other backends
+  keep `pl_buf_poll`/`pl_buf_read`. CPU tests: `ReadbackRingNeverWaitsAndKeepsFrameOrder`,
+  `ReadbackRingReportsLateResultsOnce`.
+
+  Picture effect: none. In compensate, the statistics reach the controller 1-3 frames later than
+  the blocking read delivered them. That lag is what the README always described.
+
+  **GPU / timing tests for the next session** (they need the test project and WARP or the NVIDIA
+  adapter, so they are not written into a file on this branch):
+  1. *Identity.* Render the existing GPU hook test pictures (LibplaceboLutParserTests'
+     measurement cases), and collect with `waitMs = 200`. The `RawMeasurement` must equal, bit for
+     bit, what the old blocking path gives. Run once with `NativeReadback()` true and once forced
+     false.
+  2. *Never waits.* With `VP_TEST_GPU=hardware`, render 120 frames with a heavy dummy pass, and time
+     `Collect(out, 0)` with QPC. Expected: under 0.2 ms at the 99th percentile; before this change
+     it was about one GPU frame. `Dropped()` stays 0 at 60 Hz.
+  3. *Late note.* Hold the GPU (a long dispatch) for more than 3 frames: `LateNote()` becomes
+     non-empty, then clears.
+  4. Beta 377: repeat test 1 against the Beta renderer DLL.
+- **Item 3, the peak nobody reads (done).** `LedDriveModule::Config()` reports
+  `led_peak_full_coverage` only in modes whose controllers read `FrameStats::maximum`
+  (`PeakConsumed`: script, log_only). So the renderer's `SetPeak(led->Config().peakFullCoverage)`
+  and the look-ahead observer skip it in compensate and picture_only, with no renderer change.
+  `ConfiguredSettings()` keeps the configured value. Test: `FullCoveragePeakOnlyWhereItIsRead`.
+  Byte-identical picture: yes. The LED commands in compensate are unchanged, because nothing read
+  the value.
