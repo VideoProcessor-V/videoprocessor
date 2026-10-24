@@ -120,6 +120,8 @@ if (tile < int(tiles) && g.y < ts) {
 		Analyse(j);
 	}
 
+	void (*Monitor::kernelFitProbeForTest)(Monitor&) = nullptr;
+
 	void Monitor::AnalyseTilesForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight)
 	{
 		Job j;
@@ -620,16 +622,29 @@ if (tile < int(tiles) && g.y < ts) {
 		for (;;)
 		{
 			Job current;
+			const char* cause = nullptr;
+			bool have = false;
 			{
 				std::unique_lock<std::mutex> lock(mutex);
 				wake.wait(lock, [this] { return stopping || haveJob || discontinuityCause.load(std::memory_order_acquire); });
 				if (stopping) return;
-				const char* cause = discontinuityCause.exchange(nullptr, std::memory_order_acq_rel);
-				if (cause) ResetEvidence(cause);
-				if (!haveJob) continue;
-				current = std::move(job);
-				haveJob = false;
+				cause = discontinuityCause.exchange(nullptr, std::memory_order_acq_rel);
+				have = haveJob;
+				if (have)
+				{
+					current = std::move(job);
+					haveJob = false;
+				}
 			}
+			// Efficiency 2026-10-24: evidenceMutex (then mutex) serialises a reset with an analysis
+			// whose kernel fit runs with `mutex` released (tests analyse on their own thread).
+			if (cause)
+			{
+				std::lock_guard<std::mutex> evidence(evidenceMutex);
+				std::lock_guard<std::mutex> lock(mutex);
+				ResetEvidence(cause);
+			}
+			if (!have) continue;
 			Analyse(current);
 			FlushHistory(false);
 		}
@@ -665,6 +680,7 @@ if (tile < int(tiles) && g.y < ts) {
 
 	void Monitor::Analyse(Job& j)
 	{
+		std::lock_guard<std::mutex> evidence(evidenceMutex);   // efficiency 2026-10-24: order evidenceMutex -> mutex
 		const auto start = std::chrono::steady_clock::now();
 		std::vector<SourceResolution::Spectrum> spectra(static_cast<size_t>(j.tiles));
 		const int T = j.tileSize > 0 ? j.tileSize : kTile;
@@ -700,7 +716,8 @@ if (tile < int(tiles) && g.y < ts) {
 		thresholds.signatureTiles = j.baseTiles;
 		const SourceResolution::FrameReading frame = SourceResolution::ReadFrame(spectra, thresholds);
 
-		std::lock_guard<std::mutex> lock(mutex);
+		// Efficiency 2026-10-24: a unique_lock so the kernel fit (below) runs unlocked.
+		std::unique_lock<std::mutex> lock(mutex);
 		{
 			const int shots = evidenceShots.load(std::memory_order_acquire);
 			const double seconds = evidenceSeconds.load(std::memory_order_acquire);
@@ -821,13 +838,33 @@ if (tile < int(tiles) && g.y < ts) {
 			{
 				const int signalBits = static_cast<int>(std::lround(std::log2(j.codeMaximum + 1.0)));
 				const double floorCodes = KernelInverse::FloorCodes(bitsSmoothed > 0.0 ? bitsSmoothed : signalBits, signalBits);
+				// Efficiency 2026-10-24 (module pass): the fits (~25 ms each at 2:1) used to run with
+				// `mutex` held, so the render thread's Read() (AutoFactor, the overlay) stalled ~50 ms
+				// twice a second. The inputs are chosen under the lock (the counter, the informative
+				// tiles, the shot), fitted unlocked, and the accepted votes published under the lock
+				// in the same order. Every piece of evidence (trackers, votes, counter, bitsSmoothed)
+				// is written only by this worker thread (ResetEvidence runs in Worker(); Discontinuity()
+				// only sets an atomic), so the unlocked window cannot change a decision.
+				int fitTiles[2] = { -1, -1 };
+				int fitCount = 0;
 				for (int k = 0; k < 2; ++k)
 				{
 					const int t = static_cast<int>((kernelFitCounter++) % static_cast<unsigned long long>(j.tiles));
 					if (!SourceResolution::Informative(spectra[static_cast<size_t>(t)], thresholds)) continue;
-					const KernelInverse::TileFit fit = KernelInverse::FitTile(codeTiles[static_cast<size_t>(t)].data(), T, T, j.codeMaximum);
-					if (KernelInverse::Accept(fit, floorCodes))
-						kernelVotes.push_back({ j.seconds, fit.best, tracker.Cuts() });
+					fitTiles[fitCount++] = t;
+				}
+				if (fitCount > 0)
+				{
+					const unsigned long long shot = tracker.Cuts();
+					KernelInverse::TileFit fits[2];
+					lock.unlock();
+					if (kernelFitProbeForTest) kernelFitProbeForTest(*this);
+					for (int k = 0; k < fitCount; ++k)
+						fits[k] = KernelInverse::FitTile(codeTiles[static_cast<size_t>(fitTiles[k])].data(), T, T, j.codeMaximum);
+					lock.lock();
+					for (int k = 0; k < fitCount; ++k)
+						if (KernelInverse::Accept(fits[k], floorCodes))
+							kernelVotes.push_back({ j.seconds, fits[k].best, shot });
 				}
 			}
 			int best = -1, bestCount = 0;

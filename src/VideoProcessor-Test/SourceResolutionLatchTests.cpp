@@ -1,6 +1,9 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include <atomic>
+#include <future>
+
 #include <SourceResolutionDetector.h>
 #include <KernelInverse.h>
 #include <vprenderer/SourceResolutionMonitor.h>
@@ -1329,6 +1332,41 @@ namespace VideoProcessorTest
 
 		// Native 4K then a cut to a 1080 upscale (cuts every 4 s), then a cut back to native: the
 		// engage time after the first upscaled cut and the unlatch latency on the way back.
+		// Efficiency 2026-10-24: the kernel fit at a 2:1 reading runs with the monitor's lock
+		// released - a Read() from another thread (the render thread's AutoFactor / overlay)
+		// returns while a fit is pending. The decisions are the ones the test above checks.
+		TEST_METHOD(KernelFitDoesNotHoldTheReadLock)
+		{
+			using namespace SrcLatch;
+			const std::string root = Root();
+			if (Skip(root, "KernelFitDoesNotHoldTheReadLock")) return;
+			Studio st(root);
+			const Clips c = AddClips(st.corpus);
+			Assert::IsTrue(c.Complete());
+			const std::vector<ShotSource> shots = Shots(c);
+			std::vector<Segment> segs;
+			for (int i = 0; i < 4; ++i)
+				segs.push_back({ AddUpscale(st, shots[static_cast<size_t>(i)].clip, shots[static_cast<size_t>(i)].frame0, 0.5, kLanczos3, 0.0, 0.0, " lock"), 3.0 });
+			static std::atomic<int> probes{ 0 }, blocked{ 0 };
+			probes = 0;
+			blocked = 0;
+			SourceResolutionMonitor::Monitor::kernelFitProbeForTest = [](SourceResolutionMonitor::Monitor& m)
+			{
+				++probes;
+				auto reader = std::async(std::launch::async, [&m] { (void)m.Read(); });
+				if (reader.wait_for(std::chrono::seconds(2)) != std::future_status::ready) ++blocked;
+				reader.wait();
+			};
+			RunOptions o;
+			const RunResult r = Run(st, segs, o, "kernel fit lock");
+			SourceResolutionMonitor::Monitor::kernelFitProbeForTest = nullptr;
+			char line[160];
+			snprintf(line, sizeof(line), "RESULT kernel fit lock: probes %d, blocked %d, kernel %d\n", probes.load(), blocked.load(), r.kernel);
+			Logger::WriteMessage(line);
+			Assert::IsTrue(probes.load() > 0, L"no kernel fit ran (no 2:1 reading)");
+			Assert::AreEqual(0, blocked.load());
+		}
+
 		TEST_METHOD(CutFromNativeToUpscaleAndBack)
 		{
 			using namespace SrcLatch;
