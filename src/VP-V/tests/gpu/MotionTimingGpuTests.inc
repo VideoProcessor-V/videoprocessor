@@ -3,7 +3,7 @@
 // 2.5 h skeleton timing gates. To run next session: #include this file from
 // src/VideoProcessor-BetaTests/BetaGpuTests.cpp after DrainedMs() and call RunMotionTimingGpuTests
 // from its test list. Uses only BetaGpuTests' existing helpers (Gpu, Check, DrainedMs, ChainGpuProbe)
-// and MotionWarp's SetPassTiming(on, drain=false) + PollPassTimers()/PassGpuMs() (efficiency commit).
+// and MotionWarp's SetPassTiming(on, drain=false) + PollPassTimers()/PassGpuMs() (PollPassTimers: efficiency commit; PassGpuMs already exists).
 //
 // Expectations (stated before running):
 //  G1 undrained per-pass GPU times agree with the drained ones within 15% per pass >= 0.2 ms and
