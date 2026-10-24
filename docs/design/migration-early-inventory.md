@@ -83,5 +83,50 @@ The BLOCKED modules and the forwarder removal are planned in [`migration-m2-plan
 
 ## Results
 
-Filled in as each module lands (one module per commit, x64 Release build + CPU suite green after
-each). See the merge note below.
+Branch `chore/early-migrations` was rebased onto `feat/skeleton` `fd60b650` (B3) on 2026-10-24.
+
+| # | Commit | Module | Forwarders |
+|---|---|---|---|
+| 1 | `46a484f2` | `control.diagnostics`: CrashState, StateReport, StateReportSettings | 0 |
+| 2 | `0f356ed4` | `drive.projector_control`: LED controller, Barco/projector drivers, RS-232, connection test, clock, shutdown restore | 2 |
+| 3 | `01a11f92` | `drive.led_measure`: LedMeasurement, LedLookahead | 0 |
+| 4 | `19c9cdf7` | `drive.led_compensation`: LedDriveModule, arbiter, hold-over | 3 |
+| 5 | `5fdc8b27` | `scaling.rebase`: KernelInverse | 1 |
+| 6 | `75dce46d` | `input.source_analysis`: subtitle detection (5 files) | 3 |
+| 7 | `fcee365e` | `scaling.geometry`: NlsGeometryPolicy | 0 |
+| 8 | `72103e12` | `colour.tone_gamut`: LibplaceboOutputPolicy | 1 |
+| 9 | `c9464870` | `output.calibration_lut`: `calibration/` (45 files) | 5 |
+
+Verification plan (coordinator, 2026-10-24): an x64 Release build at every migration commit; the
+full CPU suite (single-threaded, TRX) at commit 5 and at commit 9; one subtitle probe tool build;
+then the `fix:` commits (see `module-findings-2026-10-24.md`) built and tested at the branch tip.
+The status of each run is in the hand-off report. A commit is marked verified here only after its
+run is green.
+
+## Merge note
+
+**Order.** Merge after B3 (`feat/skeleton` at or after `fd60b650`, already the base) and after any
+branch that adds includes of the moved headers. None of the active branches does: checked against
+feat/skeleton, feat/net-runner, fix/vpscalerender-motion, feat/dv-l8, feat/settings-preview and
+fix/r6-baseline. Merge the migration commits (1-9 plus the docs commits) as one unit. The `fix:`
+commits after them can merge with them or separately, but never before them.
+
+**Expected conflicts: none textual.** `git merge-tree` against every active branch tip is clean.
+Generated files and checks to re-run after each merge:
+
+1. `docs/design/components-master.json` is generated. Several branches touch it, so after each merge
+   run `python tools/check_module_manifests.py --write` and commit the result if it changed.
+2. `docs/design/migration-path-map.md` is generated from git. Run
+   `python tools/migration_path_map.py --write` if the check reports it stale. It will not, unless
+   another move lands.
+3. The README settings blocks: run `python -I tools/vpv_tests/seed_module_readmes.py` after a branch
+   that changes `slots.json`, because this branch changed the generator's link depth.
+4. A branch that adds a new `#include` of a moved header by its old path still builds while that
+   header has a forwarder (15 of them). For the headers without a forwarder (CrashState,
+   StateReport, LedController, ProjectorDriver, BarcoAsciiDriver, LedClock, LedShutdownRestore,
+   LedMeasurement, LedLookahead, the subtitle detection helpers, NlsGeometryPolicy and most of
+   `calibration/`), it fails to compile. Switch such an include to the `<VP-V/...>` path given in
+   the path map.
+5. After the merge, build the solution and run the CPU suite once on the merged tip.
+
+The forwarding headers go in M2 step 0 (`migration-m2-plan.md`).
