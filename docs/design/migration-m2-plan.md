@@ -92,6 +92,33 @@ tests.
 **Total:** about 30 agent hours of moves and checks. Allow about 35 h including bisects and the GPU
 checkpoints, which are Claude's and depend on GPU availability.
 
+### LED module boundaries (re-cut in M2, before step 1)
+
+The early moves followed the manifests' file lists, which mix transport and control:
+
+- `LedController.*` is the controllers' logic (curve, compensate and script controllers, flux
+  model, `FrameStats`), but sits in `drive.projector_control`.
+- `LedDriveArbiter.*` owns the COM port across processes (VP.exe and the MPC filter), but sits in
+  `drive.led_compensation`.
+- `drive.led_measure` depends on `drive.projector_control` (`FrameStats` lives in `LedController.h`),
+  and `LookaheadObserver` calls `LedDriveModule::SubmitPrediction` directly. So neither LED module
+  lifts on its own.
+
+Re-cut, one `git mv` per commit, behaviour-free:
+
+1. `projector_control` = transport only: `ProjectorDriver`, `BarcoAsciiDriver`, `SerialPort`,
+   `ConnectionTest`, `LedShutdownRestore`, `LedClock`, plus `LedDriveArbiter` (port ownership).
+2. `led_compensation` = control: `LedDriveModule`, `LedDriveHoldover`, `LedController` (the
+   controllers), `LedRawTransfer`.
+3. `led_measure` = measurement: `FrameStats`, `RawMeasurement` and `StatsBuilder` in
+   `LedMeasurement.h`, with `FrameStats` moved out of `LedController.h` into its own header there.
+   `LookaheadObserver` reports through a small interface (`IPredictionSink`) that `LedDriveModule`
+   implements, so `led_measure` no longer includes `LedDriveModule.h`.
+4. `led/LedDriveConfig.h` goes to `led_compensation`, or to `control.config` at step 19.
+
+Estimate: about 2 agent hours (one header split, one interface, three moves). Do it right after
+step 0, before step 1. Verify with build, the LED test classes and a CPU suite.
+
 ### Not moved (by design)
 
 - `src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp`/`.h`: Bill's renderer host stays
