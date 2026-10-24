@@ -42,6 +42,12 @@ probe suite.
 
 ## GS: source-resolution monitor, fit outside the lock
 
+CPU status 2026-10-24: on the branch build, SourceResolutionLatchTests + SourceResolutionMonitor +
+MixedScreenSourceResolutionTests + EarlyUpload filter: 51/51 passed (real corpus);
+KernelFitDoesNotHoldTheReadLock: 24 fits probed, 0 blocked. The RESULT-line diff against a
+d0212534-equivalent build was started and stopped unfinished (it used another worktree's build);
+redo it from this worktree with d0212534 built separately.
+
 1. Real clips (`D:\testclips` manifest, the 2:1 upscales used by
    `UpscalesEngageAtACutWithTheirClassAndKernel` and `RealClipSourceResolutionCutsAndLatch`):
    run the latch suite on d0212534 and on the branch with the monitor history CSV on; the CSVs
