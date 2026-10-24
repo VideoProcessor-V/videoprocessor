@@ -4,13 +4,16 @@
   "unit": "scaling",
   "order": 60,
   "status": "built",
-  "code_location": "legacy",
+  "code_location": "partly migrated",
   "live_files": [
+    "src/VP-V/modules/scaling/rebase/KernelInverse.cpp",
+    "src/VP-V/modules/scaling/rebase/KernelInverse.h",
     "src/VideoProcessor-Lib/vprenderer/SourceRebase.cpp",
     "src/VideoProcessor-Lib/vprenderer/SourceRebase.h",
-    "src/VideoProcessor-Lib/KernelInverse.cpp",
-    "src/VideoProcessor-Lib/KernelInverse.h",
     "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
+  ],
+  "forwarding_headers": [
+    "src/VideoProcessor-Lib/KernelInverse.h"
   ],
   "components": {
     "files": {

@@ -399,7 +399,7 @@
 	<ClInclude Include="GeneralRateLog.h" />
 	<ClInclude Include="RefreshKey.h" />
 	<ClInclude Include="microsoft_directshow\DirectShowRatePolicy.h" />
-	<ClInclude Include="KernelInverse.h" />
+	<ClInclude Include="..\VP-V\modules\scaling\rebase\KernelInverse.h" />
 	<ClInclude Include="vprenderer\AlphaNativeRgbIngress.h" />
     <ClInclude Include="SubtitleRepositionMode.h" />
     <ClInclude Include="StringUtils.h" />
@@ -600,7 +600,7 @@
 	<ClCompile Include="SceneDetector.cpp" />
 	<ClCompile Include="HdrInference.cpp" />
 	<ClCompile Include="SourceResolutionDetector.cpp" />
-	<ClCompile Include="KernelInverse.cpp" />
+	<ClCompile Include="..\VP-V\modules\scaling\rebase\KernelInverse.cpp" />
     <ClCompile Include="StringUtils.cpp" />
     <ClCompile Include="TimingClock.cpp" />
 	<ClCompile Include="VideoTimingController.cpp" />

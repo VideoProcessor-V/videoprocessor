@@ -53,13 +53,19 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **partly migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
+- `src/VP-V/modules/scaling/rebase/KernelInverse.cpp`
+- `src/VP-V/modules/scaling/rebase/KernelInverse.h`
 - `src/VideoProcessor-Lib/vprenderer/SourceRebase.cpp`
 - `src/VideoProcessor-Lib/vprenderer/SourceRebase.h`
-- `src/VideoProcessor-Lib/KernelInverse.cpp`
-- `src/VideoProcessor-Lib/KernelInverse.h`
 - `src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp`
+
+Forwarding headers at the legacy path (early migration, removed in M2; they only keep files on active branches building, new code includes the `<VP-V/...>` path):
+
+- `src/VideoProcessor-Lib/KernelInverse.h`
+
+`SourceRebase.*` stays at the legacy path: it is an entrance stage the B3 work is changing.
 
 ## Migration directive
 

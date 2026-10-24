@@ -24,6 +24,7 @@ The tree mirrors `docs/design/slots.json`. The master component list is
   - `drive/projector_control`: LED controller, Barco ASCII + projector drivers, RS-232 serial port, connection test, clock seam, shutdown restore (forwarders: `led/SerialPort.h`, `led/ConnectionTest.h`).
   - `drive/led_measure`: LED picture measurement and look-ahead (`LedMeasurement.*`, `LedLookahead.*`); `LedMeasurementHook.*` stays (the test project compiles it).
   - `drive/led_compensation`: Dynamic Drive core (`LedDriveModule.*`), COM-port arbiter, hold-over (forwarders for all three headers: the renderer includes them); `LedRawTransfer.*` stays (the test project compiles it).
+  - `scaling/rebase`: kernel inverse helper (`KernelInverse.*`; forwarder `KernelInverse.h` for the renderer and the entrance/srcres code, which keep the old include); `SourceRebase.*` stays (entrance code).
 - **Order and moves:** see `src/VP-V/core/README.md`. A module moves only within its zone
   (ADR-0021).
 

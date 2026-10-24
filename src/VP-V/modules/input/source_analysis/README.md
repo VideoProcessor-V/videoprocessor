@@ -62,7 +62,7 @@ Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.j
 - `src/VideoProcessor-Lib/SourceResolutionDetector.h`
 - `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.cpp`
 - `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.h`
-- `src/VideoProcessor-Lib/KernelInverse.cpp`
+- `src/VP-V/modules/scaling/rebase/KernelInverse.cpp`
 - `src/VideoProcessor-Lib/ActivePictureAnalyzer.cpp`
 - `src/VideoProcessor-Lib/SceneDetector.cpp`
 - `src/VideoProcessor-Lib/SubtitleBoxDetector.cpp`

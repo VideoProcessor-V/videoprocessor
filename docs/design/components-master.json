@@ -139,7 +139,7 @@
         "src/VideoProcessor-Lib/SourceResolutionDetector.h",
         "src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.cpp",
         "src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.h",
-        "src/VideoProcessor-Lib/KernelInverse.cpp",
+        "src/VP-V/modules/scaling/rebase/KernelInverse.cpp",
         "src/VideoProcessor-Lib/ActivePictureAnalyzer.cpp",
         "src/VideoProcessor-Lib/SceneDetector.cpp",
         "src/VideoProcessor-Lib/SubtitleBoxDetector.cpp",
@@ -220,12 +220,12 @@
       "slot": "scaling.rebase",
       "order": 60,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
+        "src/VP-V/modules/scaling/rebase/KernelInverse.cpp",
+        "src/VP-V/modules/scaling/rebase/KernelInverse.h",
         "src/VideoProcessor-Lib/vprenderer/SourceRebase.cpp",
         "src/VideoProcessor-Lib/vprenderer/SourceRebase.h",
-        "src/VideoProcessor-Lib/KernelInverse.cpp",
-        "src/VideoProcessor-Lib/KernelInverse.h",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
       ],
       "components": {
