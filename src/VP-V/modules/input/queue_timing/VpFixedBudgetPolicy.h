@@ -22,6 +22,7 @@
 #include <VP-V/core/DelayBudgetLadder.h>
 #include "VpQueueRules.h"
 
+#include <atomic>
 #include <cstdio>
 #include <string>
 
@@ -38,19 +39,28 @@ namespace VpQueueTiming
 	class VpFixedBudgetPolicy final : public IQueueTimingPolicy
 	{
 	public:
-		explicit VpFixedBudgetPolicy(const Options& options = Options()) : m_options(options) {}
-		void SetOptions(const Options& options) { m_options = options; }
-		const Options& GetOptions() const { return m_options; }
+		explicit VpFixedBudgetPolicy(const Options& options = Options()) { SetOptions(options); }
+		// Any thread (the settings apply, or the host right before a call from the same sources it
+		// read before the move); each option is read once per decision.
+		void SetOptions(const Options& options)
+		{
+			m_originalPathway.store(options.originalPathway, std::memory_order_relaxed);
+			m_queueTimingFixes.store(options.queueTimingFixes, std::memory_order_relaxed);
+		}
+		Options GetOptions() const
+		{
+			return Options{ m_originalPathway.load(std::memory_order_relaxed), m_queueTimingFixes.load(std::memory_order_relaxed) };
+		}
 
 		Kind GetKind() const override { return Kind::External; }
-		const char* Name() const override { return m_options.originalPathway ? "vp (original pathway)" : "vp fixed delay"; }
+		const char* Name() const override { return m_originalPathway.load(std::memory_order_relaxed) ? "vp (original pathway)" : "vp fixed delay"; }
 
 		// UpdateQueueDelayHold, d0212534 26866-26927 (the decision; the host keeps status/log).
 		HoldPlan PlanHold(const HoldContext& c) const override
 		{
 			int budgetMs = c.budgetMs;
 			// The Original pathway keeps upstream's frame-count queue (ADR-0019; audit B2).
-			if (m_options.originalPathway)
+			if (m_originalPathway.load(std::memory_order_relaxed))
 				budgetMs = 0;
 			DelayBudget::Plan plan;
 			double transferMs = 0.0;   // the plan's capture transfer (timestamps mark a frame's start)
@@ -119,7 +129,7 @@ namespace VpQueueTiming
 				AlphaQueuePolicy::ClampDesiredDepthToCapacity(c.hold.targetFrames, c.capacity) :
 				c.cadenceScaledDepth;
 			return VpQueueRules::CombineQueueTarget(desired, c.renderAheadCreditFrames, c.lookaheadFloor,
-				m_options.queueTimingFixes);
+				m_queueTimingFixes.load(std::memory_order_relaxed));
 		}
 
 		// HoldTicksUntilDueLocked, d0212534 26978-26997 (the host checks the empty queue / no Impl).
@@ -142,7 +152,7 @@ namespace VpQueueTiming
 		BacklogDecision EvaluateBacklog(const BacklogContext& c, BacklogRunState& run) const override
 		{
 			BacklogDecision d;
-			const bool queueFixes = m_options.queueTimingFixes;
+			const bool queueFixes = m_queueTimingFixes.load(std::memory_order_relaxed);
 			const double queueRateHz = queueFixes ? VpQueueRules::QueueFrameRateHz(c.frontFilmHz, c.measuredSignalRateHz) :
 				c.captureRateHz;
 			d.queueRateHz = queueRateHz;
@@ -177,7 +187,8 @@ namespace VpQueueTiming
 		}
 
 	private:
-		Options m_options;
+		std::atomic<bool> m_originalPathway{ false };
+		std::atomic<bool> m_queueTimingFixes{ true };
 	};
 
 	// The either/or selection (owner 2026-10-24): queue_policy = vp (default) | upstream. The
