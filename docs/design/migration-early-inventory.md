@@ -79,6 +79,8 @@ scripts and source comments were updated to the new paths; dated historical reco
 (`docs/agent-reports/`, `docs/audit/`, prompts) keep the old ones and resolve through the map.
 `tools/check_module_manifests.py` fails if the map is stale or a living file names an old path.
 
+The BLOCKED modules and the forwarder removal are planned in [`migration-m2-plan.md`](migration-m2-plan.md).
+
 ## Results
 
 Filled in as each module lands (one module per commit, x64 Release build + CPU suite green after
