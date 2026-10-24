@@ -1,5 +1,5 @@
 From a9be18d4a9a28dd42f089f99a4cefbb5152e3fc9 Mon Sep 17 00:00:00 2001
-From: Victor McPherson <vmcpherson2012@gmail.com>
+From: Victor McPherson <343226326+vmcpherson2012-dev@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 18:26:11 -0400
 Subject: [PATCH 2/2] colorspace: keep footroom and headroom in the limited
  range output clamp

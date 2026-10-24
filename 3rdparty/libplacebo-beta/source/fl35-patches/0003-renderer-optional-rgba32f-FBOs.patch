@@ -1,4 +1,4 @@
-From: Victor McPherson <vmcpherson2012@gmail.com>
+From: Victor McPherson <343226326+vmcpherson2012-dev@users.noreply.github.com>
 Date: Mon, 12 Oct 2026 17:50:00 -0400
 Subject: [PATCH 3/3] renderer: optional rgba32f FBOs (output pass, or all)
 

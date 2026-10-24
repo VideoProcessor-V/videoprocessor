@@ -1,5 +1,5 @@
 From 207ee031ac30a5f12276d815bdffe26c176309d7 Mon Sep 17 00:00:00 2001
-From: Victor McPherson <vmcpherson2012@gmail.com>
+From: Victor McPherson <343226326+vmcpherson2012-dev@users.noreply.github.com>
 Date: Sun, 11 Oct 2026 18:24:30 -0400
 Subject: [PATCH 1/2] colorspace: use the luma limits for all channels of
  limited range RGB
