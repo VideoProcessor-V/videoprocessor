@@ -319,7 +319,9 @@ private:
 	// budget's hold (the plain path's age gate); 0 when due or no budget hold applies.
 	int64_t HoldTicksUntilDueLocked() const;
 	// Recomputes the queue hold from the budget at this source rate (render thread).
-	void UpdateQueueDelayHold(double sourceRateHz);
+	// sourceRateHz: the content rate the queue holds (the film rate under a pulldown lock);
+	// signalRateHz: the HDMI signal's rate (one signal frame of capture transfer).
+	void UpdateQueueDelayHold(double sourceRateHz, double signalRateHz);
 	// The render loop's dequeue wait: CanDequeueLocked, then (file heads only)
 	// the head's due time.
 	void WaitForDequeueLocked(std::unique_lock<std::mutex>& lock, bool wakeOnCalibrationPattern = false);
@@ -394,10 +396,18 @@ private:
 	// VP-V delay budget (ADR-0020): the user's one total delay (0 = none) and the hold this
 	// rate gives (DelayBudget::Plan): whole frames as the queue target, the rest as a fraction.
 	std::atomic<int> m_queueDelayBudgetMs{0};
-	std::atomic<bool> m_queueHoldActive{false};
-	std::atomic<double> m_queueHoldMs{0.0};
-	std::atomic<double> m_queueHoldFraction{0.0};
-	std::atomic<size_t> m_queueHoldTargetFrames{0};
+	// One coherent hold (audit B2): written together by UpdateQueueDelayHold, read together under
+	// m_queueHoldMutex (lock order: m_queueMutex, then m_queueHoldMutex).
+	struct QueueHold
+	{
+		bool active = false;
+		double holdMs = 0.0;
+		double fraction = 0.0;
+		size_t targetFrames = 0;
+	};
+	mutable std::mutex m_queueHoldMutex;
+	QueueHold m_queueHold;
+	QueueHold CurrentQueueHold() const;
 	std::string m_queueHoldLogged;
 	std::atomic<uint64_t> m_droppedFrames{0};
 	std::atomic<uint64_t> m_conversionFailures{0};

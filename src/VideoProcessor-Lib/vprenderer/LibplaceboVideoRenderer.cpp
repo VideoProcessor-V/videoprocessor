@@ -11200,7 +11200,7 @@ struct LibplaceboVideoRenderer::Impl
 			LibplaceboExportedData<pl_d3d11_params>("pl_d3d11_default_params");
 		deviceParams.allow_software = false;
 		deviceParams.min_feature_level = D3D_FEATURE_LEVEL_10_0;
-		deviceParams.max_frame_latency = 2;
+		deviceParams.max_frame_latency = DelayBudget::kSwapchainFrames;   // also a fixed cost of the delay budget
 		deviceParams.no_compute = settings.diagnosticDisableCompute;
 		// Tests: VP_TEST_ADAPTER=<text> picks the GPU whose name contains it
 		// (e.g. Intel, the laptop screen's own GPU, for real display timing);
@@ -26119,67 +26119,91 @@ void LibplaceboVideoRenderer::SetQueueDelayBudget(int totalMs)
 	m_queueChanged.notify_all();
 }
 
-void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz)
+LibplaceboVideoRenderer::QueueHold LibplaceboVideoRenderer::CurrentQueueHold() const
 {
-	const int budgetMs = m_queueDelayBudgetMs.load(std::memory_order_acquire);
+	std::lock_guard<std::mutex> guard(m_queueHoldMutex);
+	return m_queueHold;
+}
+
+void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz, double signalRateHz)
+{
+	int budgetMs = m_queueDelayBudgetMs.load(std::memory_order_acquire);
+	// The Original pathway keeps upstream's frame-count queue (ADR-0019; audit B2).
+	if (m_impl && m_impl->pipelineSlots.OriginalPathway())
+		budgetMs = 0;
+	const bool lowLatency = m_impl && m_impl->lowLatencyQueueActive.load(std::memory_order_acquire);
 	DelayBudget::Plan plan;
-	bool lowLatency = false;
-	if (budgetMs > 0 && m_impl && sourceRateHz > 0.0)
+	std::string budgetNote;   // why the budget is not exact (shown under "Fallbacks engaged")
+	if (budgetMs > 0 && m_impl && sourceRateHz > 0.0 && !lowLatency)
 	{
-		lowLatency = m_impl->lowLatencyQueueActive.load(std::memory_order_acquire);
-		DelayBudget::Model model;   // the libplacebo swapchain depth, processing and capture defaults
+		DelayBudget::Model model;
+		// The MEASURED display refresh (or the monitor's), never an assumed one (audit B2).
 		const double displayHz = m_impl->TimelineDisplayHz();
 		if (displayHz > 0.0)
-			model.refreshHz = displayHz;
-		if (m_impl->RenderAheadActive())
 		{
-			// render-ahead's planned lead is presented on top; the queue gives back its whole
-			// frames (the credit), the rest is a fixed cost of the budget.
-			const double ps = 1.0 / sourceRateHz;
-			const double lead = RenderAhead::PlannedLead(ps, 1.0 / model.refreshHz);
-			model.renderAheadMs = (lead - static_cast<double>(RenderAhead::CreditFrames(lead, ps)) * ps) * 1000.0;
+			model.refreshHz = displayHz;
+			if (m_impl->RenderAheadActive())
+			{
+				// render-ahead presents its planned lead on top and the queue gives back the frames
+				// FitDelayBudget granted (renderAheadCreditFrames, the one credit source); the rest
+				// of the lead is a fixed cost. Its constant total across rates is not verified yet.
+				const double ps = 1.0 / sourceRateHz;
+				const double lead = RenderAhead::PlannedLead(ps, 1.0 / displayHz);
+				const size_t credit = m_impl->renderAheadCreditFrames.load(std::memory_order_acquire);
+				model.renderAheadMs = (std::max)(0.0, lead - static_cast<double>(credit) * ps) * 1000.0;
+				budgetNote = "render-ahead on: the total across frame rates is not verified yet (PENDING-RA)";
+			}
+			plan = DelayBudget::Compute(DelayBudget::InputsFor(budgetMs, sourceRateHz, model, signalRateHz));
+			if (!plan.feasible)
+				budgetNote = "too short for 2 queued frames at this rate; frame-count queue";
 		}
-		if (!lowLatency)
-			plan = DelayBudget::Compute(DelayBudget::InputsFor(budgetMs, sourceRateHz, model));
+		else
+			budgetNote = "display refresh not known yet; frame-count queue";
 	}
-	const bool active = plan.feasible;
-	m_queueHoldMs.store(active ? plan.holdMs : 0.0, std::memory_order_release);
-	m_queueHoldFraction.store(active ? plan.holdFraction : 0.0, std::memory_order_release);
-	m_queueHoldTargetFrames.store(active ? plan.queueTargetFrames : 0, std::memory_order_release);
-	const bool wasActive = m_queueHoldActive.exchange(active, std::memory_order_acq_rel);
-	if (m_impl && budgetMs > 0 && !lowLatency && sourceRateHz > 0.0)
+	QueueHold next;
+	next.active = plan.feasible;
+	next.holdMs = next.active ? plan.holdMs : 0.0;
+	next.fraction = next.active ? plan.holdFraction : 0.0;
+	next.targetFrames = next.active ? plan.queueTargetFrames : 0;
+	bool wasActive = false;
 	{
-		if (active)
+		std::lock_guard<std::mutex> guard(m_queueHoldMutex);
+		wasActive = m_queueHold.active;
+		m_queueHold = next;
+	}
+	if (m_impl)
+	{
+		if (budgetNote.empty())
 			m_impl->ReleaseFallback("delay budget");
 		else
-			m_impl->EngageFallback("delay budget", "too short for 2 queued frames at this rate; frame-count queue");
+			m_impl->EngageFallback("delay budget", budgetNote);
 		// The frame fallback ladder (owner 2026-10-20/24): below the design depth every look-ahead
 		// consumer uses what is queued (shorter look-ahead, never waiting, never adding delay);
 		// visible, not silent.
-		if (active && plan.degraded)
-		{
-			char why[96] = {};
-			sprintf_s(why, "%d of %d queued frames (delay budget %d ms)", plan.queueFrames, DelayBudget::kDesignDepth, budgetMs);
-			m_impl->EngageFallback("look-ahead", why);
-		}
+		if (next.active && plan.degraded)
+			m_impl->EngageFallback("look-ahead", std::to_string(plan.queueFrames) + " of " + std::to_string(DelayBudget::kDesignDepth) +
+				" queued frames (delay budget " + std::to_string(budgetMs) + " ms)");
 		else
 			m_impl->ReleaseFallback("look-ahead");
 	}
-	else if (m_impl)
-		m_impl->ReleaseFallback("look-ahead");
-	char state[192] = {};
-	if (active)
-		sprintf_s(state, "%d ms at %.3f Hz: %d look-ahead frames, hold %.1f ms = target %zu + %.2f frames, padding %.1f ms",
-			budgetMs, sourceRateHz, plan.queueFrames, plan.holdMs, plan.queueTargetFrames, plan.holdFraction, plan.paddingMs);
+	std::string state;
+	if (next.active)
+	{
+		char text[192] = {};
+		sprintf_s(text, "%d ms at %.3f Hz (signal %.3f Hz): %d look-ahead frames, hold %.1f ms = target %zu + %.2f frames, padding %.1f ms",
+			budgetMs, sourceRateHz, signalRateHz > 0.0 ? signalRateHz : sourceRateHz, plan.queueFrames, plan.holdMs,
+			plan.queueTargetFrames, plan.holdFraction, plan.paddingMs);
+		state = text;
+	}
 	if (state != m_queueHoldLogged)
 	{
 		m_queueHoldLogged = state;
-		if (active)
-			DebugLog::Log("Delay budget: %s", state);
+		if (next.active)
+			DebugLog::Log("Delay budget: %s", state.c_str());
 		else if (wasActive)
 			DebugLog::Log("Delay budget: hold off (%s)", budgetMs <= 0 ? "no budget" : lowLatency ? "low latency" : "not feasible");
 	}
-	if (active != wasActive)
+	if (next.active != wasActive)
 		m_queueChanged.notify_all();
 }
 
@@ -26188,19 +26212,25 @@ int64_t LibplaceboVideoRenderer::HoldTicksUntilDueLocked() const
 	// The plain per-refresh path only. The VP timeline realises the rest by its steering (target +
 	// holdFraction); an age gate there adds a frame its slow steering does not drain (delay-gate
 	// finding 2026-10-24).
-	if (!m_queueHoldActive.load(std::memory_order_acquire) || m_frameQueue.empty() || !m_impl || m_impl->vpTimelineActive)
+	const QueueHold hold = CurrentQueueHold();
+	if (!hold.active || m_frameQueue.empty() || !m_impl || m_impl->vpTimelineActive)
 		return 0;
 	const QueuedFrame& head = m_frameQueue.front();
-	if (head.fileFrame || head.enqueueQpc == 0)
+	// Measured from the capture hardware's arrival when known (audit B2), else the enqueue.
+	const int64_t since = head.arrivalQpc != 0 ? head.arrivalQpc : head.enqueueQpc;
+	if (head.fileFrame || since == 0)
 		return 0;
 	LARGE_INTEGER frequency{};
 	if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0)
 		return 0;
-	const double holdMs = m_queueHoldMs.load(std::memory_order_acquire);
-	const int64_t due = head.enqueueQpc + static_cast<int64_t>(holdMs * static_cast<double>(frequency.QuadPart) / 1000.0);
+	const int64_t due = since + static_cast<int64_t>(hold.holdMs * static_cast<double>(frequency.QuadPart) / 1000.0);
 	const int64_t now = PerformanceCounterNow();
 	return due > now ? due - now : 0;
 }
+
+// A timed dequeue wait (a file head's due time, the delay budget's hold) re-checks at least this
+// often, so a changed presentation lead or budget is followed promptly.
+static constexpr int64_t kDueWaitRecheckMicros = 100000;
 
 void LibplaceboVideoRenderer::WaitForDequeueLocked(std::unique_lock<std::mutex>& lock,
 	bool wakeOnCalibrationPattern)
@@ -26231,7 +26261,7 @@ void LibplaceboVideoRenderer::WaitForDequeueLocked(std::unique_lock<std::mutex>&
 		// Woken early by any queue change (a reset, a stop, a new head); re-checked
 		// at least every 100 ms so a changed presentation lead is followed.
 		m_queueChanged.wait_for(lock, std::chrono::microseconds(
-			(std::max)(int64_t{ 1 }, (std::min)(micros, int64_t{ 100000 }))));
+			(std::max)(int64_t{ 1 }, (std::min)(micros, kDueWaitRecheckMicros))));
 	}
 }
 
@@ -30738,7 +30768,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 			m_queueTargetFloor.store(m_impl->activeSettings.opticalFlow && m_impl->activeSettings.motionAheadFrames > 0 ?
 				MotionAhead::QueueFramesFor(MotionAhead::DepthAt(m_impl->activeSettings.motionAheadFrames, captureRateHz,
 					m_impl->activeSettings.generalRateFixes)) : 0, std::memory_order_relaxed);
-			UpdateQueueDelayHold(captureRateHz);   // VP-V delay budget (ADR-0020)
+			UpdateQueueDelayHold(captureRateHz, measuredCaptureRateHz > 0.0 ? measuredCaptureRateHz :
+				(state && state->displayMode ? state->displayMode->RefreshRateHz() : 0.0));   // VP-V delay budget (ADR-0020)
 			m_impl->contentIntent->Configure(m_impl->activeSettings.intentContent,
 				m_impl->activeSettings.intentContentHoldSeconds);
 			m_impl->ConfigureIntentInterpreter();
@@ -30946,7 +30977,7 @@ void LibplaceboVideoRenderer::RenderLoop()
                     else
                         m_impl->vpQueueSteering.Update(queueDepthAfterDequeue,desiredQueueDepth,rateHz,
                             m_queueTimingFixes.load(std::memory_order_relaxed),
-                            m_queueHoldActive.load(std::memory_order_acquire) ? m_queueHoldFraction.load(std::memory_order_acquire) : 0.0);
+                            CurrentQueueHold().fraction);
                     m_impl->vpTimeline.SetRateTrim(currentFileFrame?1.0:m_impl->vpQueueSteering.RateTrim());
                     m_impl->vpTimeline.SetSpanInTime(m_impl->activeSettings.generalRateFixes);   // fixed-constant batch 2026-10-18
                     const unsigned long long updatesBefore=m_impl->vpTimeline.Updates();
@@ -31713,18 +31744,16 @@ size_t LibplaceboVideoRenderer::PrefillTargetLocked() const
 		return 1;
 	// VP-V delay budget (ADR-0020): with a budget the queue target is the hold's whole frames at
 	// this rate (time-based already, so no film-lock scaling); otherwise the frame-count target.
-	const size_t desired = m_queueHoldActive.load(std::memory_order_acquire) ?
-		AlphaQueuePolicy::ClampDesiredDepthToCapacity(m_queueHoldTargetFrames.load(std::memory_order_acquire), m_frameQueueMaxSize) :
+	const QueueHold hold = CurrentQueueHold();
+	const size_t desired = hold.active ?
+		AlphaQueuePolicy::ClampDesiredDepthToCapacity(hold.targetFrames, m_frameQueueMaxSize) :
 		LockedFilmQueueTarget(AlphaQueuePolicy::ClampDesiredDepthToCapacity(m_frameQueueDesiredDepth, m_frameQueueMaxSize));
-	// render_ahead_queue_credit (design step 7): the queue gives back the frames the
-	// queued extras' lead adds to the latency (never below 2 queued frames). 0 unless on.
+	// render_ahead_queue_credit (design step 7) and the look-ahead floor (hunt 2 13-timing M3), in
+	// the one rule the stress harness tests too (AlphaQueuePolicy::CombineQueueTarget): the floor
+	// never exceeds `desired`, so a delay budget's hold target wins (audit B2).
 	const size_t credit = m_impl ? m_impl->renderAheadCreditFrames.load(std::memory_order_acquire) : 0;
-	const size_t target = credit > 0 && desired > 2 ? desired - (std::min)(credit, desired - 2) : desired;
-	// Hunt 2 13-timing M3 (queue_timing_fixes): the credit never takes the target
-	// below the look-ahead's frames, so motion-ahead can still engage while it is held.
-	const size_t targetFloor = m_queueTimingFixes.load(std::memory_order_relaxed) ?
-		(std::min)(desired, m_queueTargetFloor.load(std::memory_order_relaxed)) : 0;
-	return (std::max)(target, targetFloor);
+	return AlphaQueuePolicy::CombineQueueTarget(desired, credit, m_queueTargetFloor.load(std::memory_order_relaxed),
+		m_queueTimingFixes.load(std::memory_order_relaxed));
 }
 
 

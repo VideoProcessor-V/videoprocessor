@@ -17,16 +17,23 @@
 
 namespace DelayBudget
 {
+	// The display refresh used where VP has not measured one (the Config card before VP has run,
+	// the CPU tests): the owner's FL35 mode. The renderer always passes its measured refresh.
+	constexpr double kReferenceRefreshHz = 60.0;
+
 	struct Model
 	{
-		double refreshHz = 60.0;            // the FL35 mode
-		int swapchainFrames = 2;            // libplacebo max_frame_latency
-		double processingMs = 8.0;
-		bool captureTransfer = true;        // one source frame (signal = source with rate matching)
+		double refreshHz = kReferenceRefreshHz;   // the renderer: the measured display refresh
+		int swapchainFrames = kSwapchainFrames;   // libplacebo max_frame_latency
+		double processingMs = kProcessingAllowanceMs;
+		bool captureTransfer = true;        // one SIGNAL frame of HDMI transfer (O1)
 		double renderAheadMs = 0.0;
 	};
 
-	inline Inputs InputsFor(double budgetMs, double sourceFps, const Model& m = Model())
+	// signalFps: the HDMI signal's rate when it differs from the content rate (a pulldown lock: the
+	// queue holds film frames, but one signal frame is transferred; audit B2 2026-10-24). 0 = the
+	// same as sourceFps.
+	inline Inputs InputsFor(double budgetMs, double sourceFps, const Model& m = Model(), double signalFps = 0.0)
 	{
 		Inputs in;
 		in.budgetMs = budgetMs;
@@ -35,7 +42,8 @@ namespace DelayBudget
 		in.swapchainFrames = m.swapchainFrames;
 		in.processingMs = m.processingMs;
 		in.renderAheadMs = m.renderAheadMs;
-		in.captureTransferMs = m.captureTransfer && sourceFps > 0.0 ? 1000.0 / sourceFps : 0.0;
+		const double transferFps = signalFps > 0.0 ? signalFps : sourceFps;
+		in.captureTransferMs = m.captureTransfer && transferFps > 0.0 ? 1000.0 / transferFps : 0.0;
 		return in;
 	}
 
@@ -56,7 +64,7 @@ namespace DelayBudget
 			if (!(fps > 0.0)) continue;
 			need = (std::max)(need, FixedCostsMs(InputsFor(0.0, fps, m)) + frames * 1000.0 / fps);
 		}
-		return std::ceil(need - 1e-9);
+		return std::ceil(need - kExactFitTolerance);
 	}
 
 	inline const char* LevelName(const Plan& p)

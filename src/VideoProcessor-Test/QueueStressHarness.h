@@ -818,6 +818,7 @@ namespace QueueStress
 		double profileResetDelay = 5.0;   // the queue policy reset after a profile switch
 		int motionAheadDepth = 4;         // NVOF look-ahead on by default (owner 2026-10-16)
 		double holdFraction = 0.0;        // VP-V delay budget: the sub-frame rest of the hold (DelayBudget::Plan)
+		bool budgetActive = false;        // VP-V delay budget: normalTarget is the hold's whole frames (no film scaling)
 	};
 
 	class Presentation
@@ -885,7 +886,8 @@ namespace QueueStress
 			// credit (never below 2), the queue-fixes floor (the look-ahead frames).
 			size_t desired = AlphaQueuePolicy::ClampDesiredDepthToCapacity(target, capacity);
 			const size_t lookahead = !lowLatency && sc.sw.lookaheadAuto ? (std::min)({ target - 1, capacity - 1, size_t{ 8 } }) : 0;
-			if (cadence != 0)
+			// A delay budget's hold is time-based already: no film-lock scaling (the renderer's rule).
+			if (cadence != 0 && !cfg.budgetActive)
 			{
 				size_t minimum = 2;
 				if (!lowLatency && cfg.motionAheadDepth > 0 && sc.sw.lookaheadAuto)
@@ -894,9 +896,8 @@ namespace QueueStress
 					minimum = (std::max)(minimum, lookahead + 1);
 				desired = Pulldown::LockedQueueTarget(desired, Pulldown::FilmToSignalRatio(cadence >> 16, cadence & 0xffff), minimum);
 			}
-			const size_t t = credit > 0 && desired > 2 ? desired - (std::min)(credit, desired - 2) : desired;
-			const size_t floor = sc.sw.queueFixes ? (std::min)(desired, lookahead) : 0;
-			return (std::max)(t, floor);
+			// The renderer's own rule (PrefillTargetLocked): credit, look-ahead floor capped at desired.
+			return AlphaQueuePolicy::CombineQueueTarget(desired, credit, lookahead, sc.sw.queueFixes);
 		}
 
 		void Enqueue(const Kept& k)

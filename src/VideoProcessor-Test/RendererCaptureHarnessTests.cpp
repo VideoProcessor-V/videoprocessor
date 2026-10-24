@@ -1437,6 +1437,12 @@ namespace Tests
 					{
 						low = (std::min)(low, median);
 						high = (std::max)(high, median);
+						// ABSOLUTE (audit B2): the capture-to-output delay is the planned hold plus the render,
+						// within the display phase (a refresh), one more refresh of jitter and the render.
+						const double renderAllowanceMs = DelayBudget::kProcessingAllowanceMs;
+						if (median < plan.holdMs - refreshMs || median > plan.holdMs + 2.0 * refreshMs + renderAllowanceMs)
+							failures += std::string(name) + ": delay " + std::to_string(median) + " ms vs planned hold " +
+								std::to_string(plan.holdMs) + " ms; ";
 					}
 				}
 				// The same total at every rate: the capture-to-output delay varies by at most a refresh
@@ -1469,6 +1475,22 @@ namespace Tests
 				if (!r.presented) failures += "recovery: not presented; ";
 				if (b > 0.0 && a > 0.0 && std::fabs(a - b) > refreshMs)
 					failures += "recovery: the delay did not return (" + std::to_string(b) + " -> " + std::to_string(a) + " ms); ";
+			}
+			// render_ahead on: its constant total across rates is not verified yet (PENDING-RA), so the
+			// renderer says so under "Fallbacks engaged: delay budget (render-ahead ...)" - never silent.
+			{
+				g_harnessDelayBudgetMs = static_cast<int>(DelayBudget::BudgetForFrames(4, rateList, model));
+				FramePlan framePlan;
+				framePlan.rateNumerator = 24000;
+				framePlan.rateDenominator = 1001;
+				framePlan.step = [](int n) { FrameStep f; f.content = n; return f; };
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, true,
+					"dejudder_strength: 0.25\nrender_ahead: on\nrender_ahead_queue_credit: on\n", false, &framePlan);
+				Logger::WriteMessage(("== render_ahead on: " + r.fallbacksStatus + "\n").c_str());
+				const bool renderAheadRan = r.Logged("Render-ahead") || r.Logged("render-ahead");
+				if (renderAheadRan && r.fallbacksStatus.find("delay budget") == std::string::npos &&
+					r.fallbacksStatus.find("render-ahead") == std::string::npos)
+					failures += "render_ahead on: no visible delay-budget note; ";
 			}
 			g_harnessDelayBudgetMs = 0;
 			Assert::IsTrue(failures.empty(), std::wstring(failures.begin(), failures.end()).c_str());

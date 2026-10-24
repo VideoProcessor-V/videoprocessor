@@ -164,8 +164,9 @@ namespace Vpv
 			const double recommended = DelayBudget::BudgetForFrames(table.recommendedFrames, rates);
 			QString text = QStringLiteral(
 				"<b>Total delay.</b> One value, the same at every frame rate, so your AVR's fixed audio delay always matches. "
-				"<b>Recommended: %1 ms</b> (4 queued frames at 23.976p, the slowest rate). Shorter settings still work: the "
-				"look-ahead features fall back to 3 or 2 frames.").arg(recommended, 0, 'f', 0);
+				"<b>Recommended: %1 ms</b> (4 queued frames at 23.976p, the slowest rate, on a %2 Hz display; VP plans with "
+				"the display refresh it measures, so a faster display needs less). Shorter settings still work: the "
+				"look-ahead features fall back to 3 or 2 frames.").arg(recommended, 0, 'f', 0).arg(DelayBudget::kReferenceRefreshHz, 0, 'f', 0);
 			// The default queue profile's delay (the first [queue.*] profile; a literal [queue] in old files).
 			QStringList queues = host.profileSections ? host.profileSections(Q(table.delaySection)) : QStringList();
 			if (queues.isEmpty()) queues << Q(table.delaySection);

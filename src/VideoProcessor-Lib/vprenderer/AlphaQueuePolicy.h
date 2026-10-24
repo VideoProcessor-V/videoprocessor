@@ -114,6 +114,19 @@ namespace AlphaQueuePolicy
 		return desired;
 	}
 
+	// The queue target the renderer steers to (PrefillTargetLocked; the stress harness uses the
+	// same function, so the delay gate tests the real rule). desired = the delay budget's whole
+	// hold frames when a budget is active (time-based already), else the (film-scaled) frame-count
+	// target. render_ahead_queue_credit gives back frames, never below 2; with queue_timing_fixes the
+	// credit never takes the target below the look-ahead floor - but never above `desired`, so a
+	// short delay budget is never exceeded (the look-ahead uses what is queued).
+	inline size_t CombineQueueTarget(size_t desired, size_t credit, size_t lookaheadFloor, bool queueTimingFixes)
+	{
+		const size_t target = credit > 0 && desired > 2 ? desired - (std::min)(credit, desired - 2) : desired;
+		const size_t floor = queueTimingFixes ? (std::min)(desired, lookaheadFloor) : 0;
+		return (std::max)(target, floor);
+	}
+
 	inline bool CanDequeue(size_t queueDepth, size_t desiredDepth,
 		bool startupPrefillPending)
 	{

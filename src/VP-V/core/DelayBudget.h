@@ -31,13 +31,20 @@ namespace DelayBudget
 {
 	constexpr int kDesignDepth = 4;     // owner 2026-10-20: build for 4 queued frames
 	constexpr int kMinimumDepth = 2;    // the graceful-fallback floor of the ladder
+	// libplacebo's swapchain depth (pl_d3d11_params::max_frame_latency, set to this by the renderer).
+	constexpr int kSwapchainFrames = 2;
+	// The processing + present allowance inside the budget: VP's render cycle at 24p on the
+	// laptop measures 5-8 ms; the allowance is the upper end (a deliberate, documented margin).
+	constexpr double kProcessingAllowanceMs = 8.0;
+	// Floating-point slack so an exact fit (e.g. 4 x 41.6667 ms) is not lost to rounding.
+	constexpr double kExactFitTolerance = 1e-9;
 
 	struct Inputs
 	{
 		double budgetMs = 250.0;          // the user's ONE total delay (AVR setting)
 		double sourceFps = 0.0;            // measured source rate
 		double refreshHz = 0.0;            // measured display refresh
-		int swapchainFrames = 2;           // libplacebo max_frame_latency
+		int swapchainFrames = kSwapchainFrames;   // libplacebo max_frame_latency
 		double renderAheadMs = 0.0;        // counted inside the budget, never on top
 		double processingMs = 0.0;         // processing + present allowance
 		double captureTransferMs = 0.0;    // one input frame's transfer, if the budget covers it (O1)
@@ -86,7 +93,7 @@ namespace DelayBudget
 		plan.fixedMs = FixedCostsMs(in);
 		const double available = in.budgetMs - plan.fixedMs;
 		// A tiny tolerance so an exact fit (e.g. 4 x 41.6667 ms) is not lost to rounding.
-		const int fit = available > 0.0 ? static_cast<int>(std::floor(available / period + 1e-9)) : 0;
+		const int fit = available > 0.0 ? static_cast<int>(std::floor(available / period + kExactFitTolerance)) : 0;
 		plan.queueFrames = (std::min)(fit, kDesignDepth);
 		plan.feasible = plan.queueFrames >= kMinimumDepth;
 		if (!plan.feasible)
@@ -100,7 +107,7 @@ namespace DelayBudget
 		plan.holdMs = in.budgetMs - plan.fixedMs;
 		const double holdFrames = plan.holdMs / period;
 		plan.queueTargetFrames = (std::max)(static_cast<size_t>(plan.queueFrames),
-			static_cast<size_t>(std::floor(holdFrames + 1e-9)));
+			static_cast<size_t>(std::floor(holdFrames + kExactFitTolerance)));
 		plan.holdFraction = (std::max)(0.0, holdFrames - static_cast<double>(plan.queueTargetFrames));
 		return plan;
 	}
@@ -120,6 +127,6 @@ namespace DelayBudget
 			in.budgetMs = 0.0;
 			worst = (std::max)(worst, FixedCostsMs(in) + kDesignDepth * 1000.0 / fps);
 		}
-		return std::ceil(worst - 1e-9);
+		return std::ceil(worst - kExactFitTolerance);
 	}
 }
