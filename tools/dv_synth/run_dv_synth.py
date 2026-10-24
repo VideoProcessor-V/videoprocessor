@@ -28,17 +28,37 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dvsynth as dv  # noqa: E402
 import dm_model  # noqa: E402
 
-NO_TM = ("[vprenderer.Default]\\ndithering: off\\ndeband: off\\ntone_mapping: spline\\npeak_detection: off\\n"
+# Owner direction 2026-10-24: (a) accuracy, (c) alignment, (d) policy and (e) LLDV vs tunnel measure the
+# FAITHFUL DV path: only the capture unpack (CPU / GPU), the DM packet extraction and libplacebo's
+# Dolby Vision decode and tone mapping run. Every VP stage is switched off here, and the GPU test
+# asserts from the renderer's log and status that each one stayed inactive (faithful=1 jobs).
+# Kept identical to kDvSynthFaithful in RendererCaptureHarnessTests.cpp.
+FAITHFUL = ("source_resolution: native\\nsource_resolution_crossfade_s: 0\\ndeband: off\\ndeband_vp: off\\n"
+            "detail_pulse_stabilise: off\\ntexture_restore: off\\ndejudder_strength: 0\\ninterpolation: off\\n"
+            "interpolation_fill_gaps: off\\nintent_motion: off\\nintent_content: off\\n"
+            "intent_black: off\\nintent_display: off\\ndithering: off\\ntemporal_dither: off\\n"
+            "adaptive_upscale: off\\nadaptive_downscale: off\\nadaptive_grain_map: off\\nadaptive_chroma_ssim: off\\n")
+# (automatic_crop / subtitle_fit are viewport and subtitle settings, rejected in renderer profiles: the
+# harness has no viewport or subtitle profile, so neither is active.)
+
+NO_TM = ("[vprenderer.Default]\\n" + FAITHFUL + "tone_mapping: spline\\npeak_detection: off\\n"
          "sdr_target_nits: 1000\\nsdr_black_nits: 0\\ncontrast_recovery: 0\\noutput_gamma: 2.2\\n"
          "target_primaries: BT2020\\noutput_range: full\\n")
 
 
-def cinema(target, tm="spline"):
+def cinema(target, tm="spline", faithful=True):
     # docs/cinema/VideoProcessor-test.cfg: spline, peak_detection off, gamut auto, contrast
     # recovery 0.3, P3 D65 target, 2.2 power, 100 nits. Dither off for measurement.
-    return ("[vprenderer.Default]\\ndithering: off\\ndeband: off\\ntone_mapping: %s\\npeak_detection: off\\n"
+    return ("[vprenderer.Default]\\n" + (FAITHFUL if faithful else "dithering: off\\n") +
+            "tone_mapping: %s\\npeak_detection: off\\n"
             "gamut_mapping: auto\\ncontrast_recovery: 0.3\\nsdr_target_nits: %g\\nsdr_black_nits: 0\\n"
             "output_gamma: 2.2\\ntarget_primaries: p3_d65\\noutput_range: full\\n" % (tm, target))
+
+
+# The separate, later, clearly labelled FULL-PIPELINE check (VP's stages at their defaults).
+FULL_NO_TM = ("[vprenderer.Default]\\ndithering: off\\ntone_mapping: spline\\npeak_detection: off\\n"
+              "sdr_target_nits: 1000\\nsdr_black_nits: 0\\ncontrast_recovery: 0\\noutput_gamma: 2.2\\n"
+              "target_primaries: BT2020\\noutput_range: full\\n")
 
 
 def jobs(root):
@@ -76,6 +96,13 @@ def jobs(root):
     out.append(("lldv_bright1000_cinema100", seg("lldv-1080p24-bright-1000"), "frame=0 seconds=3.0 capture=2.2 pq=1000", cinema(100)))
     out.append(("lldv_bright100_cinema48", seg("lldv-1080p24-bright-100"), "frame=0 seconds=3.0 capture=2.2 pq=100", cinema(48)))
     out.append(("lldv_bright1000_cinema48", seg("lldv-1080p24-bright-1000"), "frame=0 seconds=3.0 capture=2.2 pq=1000", cinema(48)))
+    # FULL PIPELINE (separate, labelled): the same accuracy content and a policy scene with VP's
+    # stages at their defaults; reported apart from the faithful measurements.
+    for unpack in ("off", "on"):
+        out.append(("full_acc_1080p24-p5-r210-low8_%s" % ("gpu" if unpack == "on" else "cpu"), seg("acc-1080p24-p5-r210-low8"),
+                    "frame=0 seconds=3.0 capture=2.2", "dv_tunnel_gpu_unpack: %s\\n" % unpack + FULL_NO_TM))
+    out.append(("full_pol_100_blend_mid", seg("policy-1080p24-real"), "frame=1 seconds=3.0 capture=2.2",
+                "dv_tunnel_gpu_unpack: on\\ndv_trims: on\\n" + cinema(100, faithful=False)))
     out.append(("lldv_bright1000_bt2390-100", seg("lldv-1080p24-bright-1000"), "frame=0 seconds=3.0 capture=2.2 pq=1000", cinema(100, "bt2390")))
     return out
 
@@ -83,7 +110,8 @@ def jobs(root):
 def write_jobs(root, path):
     with open(path, "w", newline="\n") as f:
         for jid, folder, keys, settings in jobs(root):
-            f.write("job id=%s segment=%s %s settings=%s\n" % (jid, folder, keys, settings))
+            faithful = not jid.startswith("full_") and jid != "sdr_passthrough"
+            f.write("job id=%s segment=%s %s%s settings=%s\n" % (jid, folder, keys, " faithful=1" if faithful else "", settings))
     print("wrote", path)
 
 
@@ -209,7 +237,13 @@ def analyze(root, jobs_path, out, report_path):
             report["missing"].append(jid)
             continue
         truth = load_truth(folder)
-        if jid.startswith("acc_"):
+        if jid.startswith("full_acc_"):
+            report.setdefault("full_pipeline", {})[jid] = analyze_accuracy(truth, meta, codes)
+        elif jid.startswith("full_pol_"):
+            real = load_truth(os.path.join(root, "policy-1080p24-real"))
+            report.setdefault("full_pipeline", {})[jid] = {
+                "vs_intent_nearest_trim": analyze_policy(truth, codes, 100.0, 1, "nearest", trims_of(real))}
+        elif jid.startswith("acc_"):
             report["accuracy"][jid] = analyze_accuracy(truth, meta, codes)
         elif jid.startswith("btb_"):
             report["extremes"][jid] = analyze_extremes(truth, codes)
@@ -268,6 +302,15 @@ def summarize(r):
             print("  %-32s intent(trimmed) %5.2f / %5.2f | untrimmed model %5.2f" %
                   (jid, p["vs_intent_nearest_trim"]["mean_dE_itp"], p["vs_intent_nearest_trim"]["max_dE_itp"],
                    p["vs_untrimmed_model"]["mean_dE_itp"]))
+    if r.get("full_pipeline"):
+        print("== FULL PIPELINE (separate check: VP's stages at their defaults)")
+        for jid, p in sorted(r["full_pipeline"].items()):
+            if "patch_max_err_codes" in p:
+                print("  %-36s patches max %.2f codes, mean dE %.3f; ramp max %.2f codes PSNR %.1f dB" %
+                      (jid, p["patch_max_err_codes"], p["patch_mean_dE_itp"], p["ramp_max_err_codes"], p["ramp_psnr_db"]))
+            else:
+                print("  %-36s intent(trimmed) %5.2f / %5.2f" % (jid, p["vs_intent_nearest_trim"]["mean_dE_itp"],
+                                                            p["vs_intent_nearest_trim"]["max_dE_itp"]))
     if "sdr_passthrough" in r:
         print("== SDR passthrough on the tunnel input:", r["sdr_passthrough"])
     if r["missing"]:

@@ -111,6 +111,26 @@ Run: `powershell -File tools\dv_synth\run_dv_synth.ps1 -Corpus D:\codex\dv-synth
 | `DvSynthGpuRobustnessThroughTheRenderer` | the robustness segment streamed (CPU, GPU, GPU failing): no libplacebo error, black on DM loss, restored, listed under "Fallbacks engaged" |
 | `DvSynthGpuUnpackPerformance4K` | 2160p60/24 streamed with each unpack route |
 
+Faithful path (owner direction 2026-10-24): accuracy, alignment, policy and LLDV-vs-tunnel
+run with every VP stage off (`FAITHFUL` in `run_dv_synth.py` = `DvSynthFaithfulSettings()`
+in the harness: source_resolution native, crossfade 0, deband/deband_vp off, detail pulse and
+texture restore off, de-judder 0, interpolation and gap fill off, intent_* off, dithering and
+temporal dither off, adaptive scaling off), and the GPU tests assert from the renderer's log
+and status that none was active (no motion engine, no detail pulse, libplacebo deband and
+dither off). Only the unpack, the DM extraction and libplacebo's DV decode / tone mapping run.
+The full pipeline is reported separately (`full_*` jobs, `DvSynthGpuAlignmentAtCutsFullPipeline`;
+robustness runs with the full pipeline).
+
+dv_trims follows the tone-mapping target: the renderer hands libplacebo's target peak
+(sdr_target_nits for SDR outputs) to `DolbyVisionTrims::Select` every frame; below every
+authored target the lowest-target trim is used as sent (no extrapolation), between two
+targets it interpolates in PQ (`SelectionFollowsTheToneMappingTarget`: 48 -> the 100-nit trim,
+100 -> exact, 200 -> 0.377 toward 600). L8 trims are parsed but not applied (their targets need
+L10 / predefined display indexes). The trim works in PQ normalised to the display peak
+(output signal -> nits -> PQ(Y)/PQ(peak) -> CDL -> back), chroma scaled around luminance in
+linear light (an approximation of Dolby's IPT saturation), float FBOs, no clamp below black or
+above the peak; order: tone mapping -> PRE_OUTPUT trims -> the LED stages.
+
 Fixed here (with tests): a low8 capture with flat header rows (black bars) locked
 the high8 placement (the header CRC is valid under both placements: correct DM,
 garbage picture); `DV trims.glsl` was missing from the build output and the

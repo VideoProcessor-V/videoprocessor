@@ -3322,6 +3322,47 @@ namespace Tests
 			return hi - lo > 40 && (word >> 24) == 0xA5;
 		}
 
+		// Owner direction 2026-10-24: the faithful DV path. Every VP stage off, so only the capture unpack,
+		// the DM extraction and libplacebo's Dolby Vision decode / tone mapping run (identical to FAITHFUL
+		// in tools/dv_synth/run_dv_synth.py).
+		static const char* DvSynthFaithfulSettings()
+		{
+			return			"source_resolution: native\nsource_resolution_crossfade_s: 0\ndeband: off\ndeband_vp: off\n"
+			"detail_pulse_stabilise: off\ntexture_restore: off\ndejudder_strength: 0\ninterpolation: off\n"
+			"interpolation_fill_gaps: off\nintent_motion: off\nintent_content: off\n"
+			"intent_black: off\nintent_display: off\ndithering: off\ntemporal_dither: off\n"
+			"adaptive_upscale: off\nadaptive_downscale: off\nadaptive_grain_map: off\nadaptive_chroma_ssim: off\n";
+		}
+
+		// The VP stages a faithful run must not show active, from the renderer's own log and status
+		// (empty when clean): motion engine / de-judder / interpolation / hiccup repair, re-base and its
+		// crossfade, VP deband, detail pulse, texture restore, sigma-delta / dither, adaptive scaling,
+		// the profile's libplacebo deband and dithering.
+		static std::string DvSynthFaithfulViolations(const RunResult& r)
+		{
+			std::string bad;
+			const char* const activeMarkers[] = { "Motion engine: loaded", "Motion engine: created", "De-judder: motion estimated",
+				"Interpolation: interpolating", "Interpolation: filling", "Detail pulse stabilise: on", "Texture restore: on",
+				"Texture restore: statistical", "Re-base: active", "Re-base: on", "Source resolution: re-base", "Source resolution: crossfade",
+				"VP deband: on", "VP deband: active", "Sigma-delta vectors", "Adaptive upscale: on", "Adaptive downscale: on" };
+			for (const char* m : activeMarkers)
+				if (r.Logged(m))
+					bad += std::string("[") + m + "] ";
+			bool settingsSeen = false;
+			for (const std::string& l : r.log)
+				if (l.find("libplacebo settings:") != std::string::npos)
+				{
+					settingsSeen = true;
+					if (l.find(" dithering=off") == std::string::npos) bad += "[libplacebo dithering not off] ";
+					if (l.find(" deband=off") == std::string::npos && l.find("deband=auto/off") == std::string::npos &&
+						l.find("deband=off/off") == std::string::npos) bad += "[libplacebo deband not off] ";
+				}
+			if (!settingsSeen) bad += "[no libplacebo settings line] ";
+			if (r.dejudderStatus.find("Motion: Off") == std::string::npos && !r.dejudderStatus.empty())
+				bad += "[motion status: " + r.dejudderStatus + "] ";
+			return bad;
+		}
+
 		// Mean green code over a rectangle of a capture.
 		static double DvSynthMean(const std::vector<int>& codes, int w, int x0, int y0, int x1, int y1, int channel = 1)
 		{
@@ -3365,7 +3406,7 @@ namespace Tests
 			std::ifstream jobs(jobsPath);
 			Assert::IsTrue(static_cast<bool>(jobs), HarnessWide("cannot read " + jobsPath).c_str());
 			std::string line;
-			size_t done = 0, failed = 0;
+			size_t done = 0, failed = 0, faithfulFailures = 0;
 			std::string loadedSegment;
 			RawCorpusSegment seg;
 			std::vector<size_t> contentOfFrame;
@@ -3439,9 +3480,18 @@ namespace Tests
 					std::ofstream raw(stem + ".r10", std::ios::binary | std::ios::trunc);
 					raw.write(reinterpret_cast<const char*>(packed.data()), static_cast<std::streamsize>(packed.size() * 2));
 				}
+				const bool faithful = key["faithful"] == "1";
+				const std::string violations = faithful ? DvSynthFaithfulViolations(r) : std::string();
+				if (!violations.empty())
+				{
+					++faithfulFailures;
+					Logger::WriteMessage(("FAITHFUL VIOLATION " + id + ": " + violations + "\n").c_str());
+				}
 				{
 					std::ofstream log(out + "\\" + id + ".log", std::ios::trunc);
 					log << "presented=" << (r.presented ? 1 : 0) << "\ncaptures=" << captures.size() << "\nfallbacks=" << r.fallbacksStatus << "\n";
+					log << "faithful=" << (faithful ? 1 : 0) << "\nfaithful_violations=" << violations << "\ndejudder_status=" << r.dejudderStatus <<
+						"\nsource_status=" << r.sourceStatus << "\npresentation_status=" << r.presentationStatus << "\n";
 					for (const std::string& l : r.log)
 						if (l.find("Dolby Vision") != std::string::npos || l.find("Fallbacks engaged") != std::string::npos ||
 							l.find("tone") != std::string::npos || l.find("SDR_GAMMA") != std::string::npos ||
@@ -3457,6 +3507,7 @@ namespace Tests
 			Logger::WriteMessage(("DvSynthGpuRendersJobs: " + std::to_string(done) + " jobs, " + std::to_string(failed) + " without a capture\n").c_str());
 			Assert::IsTrue(done > 0, L"no jobs");
 			Assert::AreEqual<size_t>(0, failed, L"every job presents and captures");
+			Assert::AreEqual<size_t>(0, faithfulFailures, L"a faithful job showed a VP stage active (FAITHFUL VIOLATION lines)");
 		}
 
 		// (c) RPU <-> frame alignment through the whole renderer: the cut segments streamed at their
@@ -3464,23 +3515,47 @@ namespace Tests
 		// output came from; its brightness must be its own scene's (from a still render of each
 		// scene), never the neighbouring scene's (a one-frame metadata misalignment = a flash at
 		// the cut). Cinema-like tone mapping (spline, peak_detection off: L1 drives the curve).
+		// Faithful (owner direction 2026-10-24): every VP stage off (kDvSynthFaithful), asserted inactive
+		// on every run. The full pipeline (VP's stages at their defaults) is the separate, labelled
+		// DvSynthGpuAlignmentAtCutsFullPipeline.
 		BEGIN_TEST_METHOD_ATTRIBUTE(DvSynthGpuAlignmentAtCuts)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(DvSynthGpuAlignmentAtCuts)
 		{
+			DvSynthAlignment(true, "DvSynthGpuAlignmentAtCuts");
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(DvSynthGpuAlignmentAtCutsFullPipeline)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DvSynthGpuAlignmentAtCutsFullPipeline)
+		{
+			DvSynthAlignment(false, "DvSynthGpuAlignmentAtCutsFullPipeline");
+		}
+
+		static void DvSynthAlignment(bool faithful, const char* testName)
+		{
 			const HarnessScope harnessScope;
 			const std::string root = DvSynthEnv("VP_TEST_DV_SYNTH_CORPUS");
 			if (root.empty())
 			{
-				Logger::WriteMessage("SKIP-NO-CORPUS DvSynthGpuAlignmentAtCuts (VP_TEST_DV_SYNTH_CORPUS)\n");
+				Logger::WriteMessage((std::string("SKIP-NO-CORPUS ") + testName + " (VP_TEST_DV_SYNTH_CORPUS)\n").c_str());
 				return;
 			}
-			if (!RequireHardwareOrSkip("DvSynthGpuAlignmentAtCuts")) return;
+			if (!RequireHardwareOrSkip(testName)) return;
 			const std::wstring shots = HarnessTempFolder(L"vp-dv-synth-cuts");
 			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
-			const std::string settings = "[vprenderer.Default]\ndithering: off\ndeband: off\ntone_mapping: spline\npeak_detection: off\n"
-				"sdr_target_nits: 100\ncontrast_recovery: 0\n" + DvSynthEnv("VP_TEST_DV_SYNTH_EXTRA");
+			const std::string settings = std::string("[vprenderer.Default]\n") + (faithful ? DvSynthFaithfulSettings() : "dithering: off\n") +
+				"tone_mapping: spline\npeak_detection: off\nsdr_target_nits: 100\ncontrast_recovery: 0\n" + DvSynthEnv("VP_TEST_DV_SYNTH_EXTRA");
+			auto checkFaithful = [faithful](const RunResult& r, const std::string& what)
+			{
+				if (!faithful) return;
+				const std::string bad = DvSynthFaithfulViolations(r);
+				Assert::IsTrue(bad.empty(), HarnessWide("faithful run with a VP stage active (" + what + "): " + bad).c_str());
+			};
+			Logger::WriteMessage(faithful ? "ALIGNMENT mode: FAITHFUL (every VP stage off, asserted)\n" :
+				"ALIGNMENT mode: FULL PIPELINE (VP's stages at their defaults)\n");
 			size_t totalMisaligned = 0, totalReadable = 0, totalCaptures = 0;
 			for (const std::string& folder : FindRawCorpusSegments(root))
 			{
@@ -3543,6 +3618,7 @@ namespace Tests
 					}
 					Assert::IsTrue(!codes.empty() && cw == w && ch == h, (HarnessWide("scene still capture: metadata '" + r.captureMetadata +
 						"' size " + std::to_string(cw) + "x" + std::to_string(ch) + " presented " + (r.presented ? "yes" : "no") + "\n") + r.Tail()).c_str());
+					checkFaithful(r, "scene still");
 					sceneMean[sceneOf[f]] = DvSynthMean(codes, w, x0, y0, x1, y1);
 				}
 				// 2. The stream with captures every ~0.07 s after a warm-up.
@@ -3559,6 +3635,7 @@ namespace Tests
 					stream.captureTimes.push_back(t);
 				const RunResult r = Run(seg.ReplayEncoding(true), "standard", seconds, true, settings, false, &stream);
 				Assert::IsTrue(r.presented, (L"stream presented\n" + r.Tail()).c_str());
+				checkFaithful(r, "stream");
 				size_t readable = 0, misaligned = 0, nearCut = 0;
 				std::string first;
 				for (const std::string& json : r.captureMetadataList)
