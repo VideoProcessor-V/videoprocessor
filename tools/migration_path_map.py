@@ -211,6 +211,35 @@ def problems():
         errs.append("docs/design/migration-path-map.md is out of date (run tools/migration_path_map.py --write)")
     for rel, no, text in scan(want):
         errs.append(f"old path in living file {rel}:{no}: {text[:120]}")
+    errs.extend(bill_owned_problems(want))
+    return errs
+
+
+# Owner principle (2026-10-24): Bill's code stays where he has it; VP builds around it. A file that
+# exists in Bill's current upstream beta is never moved into src/VP-V/modules (nor left behind as a
+# forwarder). VP features living inside such files are extracted into VP-V adapters instead (M2
+# plan, option (d)). The upstream ref is VP_UPSTREAM_BETA (default origin/v1.4.02-beta); when it is
+# not available locally the guard reports that it was skipped instead of passing silently.
+UPSTREAM_BETA = os.environ.get("VP_UPSTREAM_BETA", "origin/v1.4.02-beta")
+
+
+def in_upstream(path):
+    return subprocess.run(["git", "-C", ROOT, "cat-file", "-e", f"{UPSTREAM_BETA}:{path}"],
+                          capture_output=True).returncode == 0
+
+
+def bill_owned_problems(moves):
+    if subprocess.run(["git", "-C", ROOT, "rev-parse", "--verify", "-q", UPSTREAM_BETA],
+                      capture_output=True).returncode != 0:
+        return [f"Bill-file guard skipped: {UPSTREAM_BETA} not found (git fetch origin, or set VP_UPSTREAM_BETA)"]
+    errs = []
+    for old, new in moves:
+        if in_upstream(old):
+            errs.append(f"{old} is Bill's file (in {UPSTREAM_BETA}) but was moved to {new}: Bill's files are never moved")
+    # A file owned by a module folder must not be a path Bill's upstream has either.
+    for rel in git("ls-files", MODULES_REL).splitlines():
+        if in_upstream(rel):
+            errs.append(f"{rel} exists in {UPSTREAM_BETA}: a module folder must not own Bill's file")
     return errs
 
 
