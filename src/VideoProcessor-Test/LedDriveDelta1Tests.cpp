@@ -1579,6 +1579,30 @@ namespace VideoProcessorTest
 
 		// Module findings 2026-10-24 item 7: compensate with lookahead: off reads no prediction, so the
 		// queued-frame walk is not asked to measure raw frames for it.
+		// Module findings 2026-10-24 part 3 item 3: the full-coverage peak (FrameStats::maximum) is only
+		// read by the script controllers, so Config() reports led_peak_full_coverage off elsewhere and the
+		// GPU hook and the look-ahead skip it; the configured value is kept.
+		TEST_METHOD(FullCoveragePeakOnlyWhereItIsRead)
+		{
+			LedDriveConfig compensate = Compensate();
+			Assert::IsTrue(compensate.peakFullCoverage, L"on by default");
+			LedDriveModule module(ProjectorConfig(), compensate);
+			Assert::IsFalse(module.Config().peakFullCoverage, L"compensate never reads the peak");
+			Assert::IsTrue(module.ConfiguredSettings().peakFullCoverage, L"the configured value is kept");
+			LedDriveConfig script = compensate;
+			script.mode = Mode::Script;
+			Assert::IsTrue(module.Reconfigure(ProjectorConfig(), script));
+			Assert::IsTrue(module.Config().peakFullCoverage, L"the script reads it");
+			LedDriveConfig logOnly = compensate;
+			logOnly.mode = Mode::LogOnly;
+			Assert::IsTrue(LedDriveModule(ProjectorConfig(), logOnly).Config().peakFullCoverage, L"log_only runs the script controller");
+			LedDriveConfig pictureOnly = compensate;
+			pictureOnly.mode = Mode::PictureOnly;
+			Assert::IsFalse(LedDriveModule(ProjectorConfig(), pictureOnly).Config().peakFullCoverage);
+			script.peakFullCoverage = false;
+			Assert::IsFalse(LedDriveModule(ProjectorConfig(), script).Config().peakFullCoverage, L"off stays off");
+		}
+
 		TEST_METHOD(CompensateWithoutLookaheadWantsNoPredictions)
 		{
 			LedDriveConfig off = Compensate();

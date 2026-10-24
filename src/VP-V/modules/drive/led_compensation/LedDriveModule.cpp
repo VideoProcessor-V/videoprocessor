@@ -350,6 +350,14 @@ namespace LedDrive
 	LedDriveConfig LedDriveModule::Config() const
 	{
 		std::lock_guard<std::mutex> guard(mutex);
+		LedDriveConfig effective = led;
+		effective.peakFullCoverage = led.peakFullCoverage && PeakConsumed(led.mode);
+		return effective;
+	}
+
+	LedDriveConfig LedDriveModule::ConfiguredSettings() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
 		return led;
 	}
 

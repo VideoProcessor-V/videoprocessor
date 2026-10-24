@@ -129,7 +129,14 @@ namespace LedDrive
 		bool Reconfigure(const ProjectorConfig& projector, const LedDriveConfig& led);
 		// Increases with every Reconfigure().
 		uint64_t ConfigGeneration() const;
+		// The settings in force. led_peak_full_coverage is reported on only in the modes that read
+		// the full-coverage peak (FrameStats::maximum: the script controllers, PeakConsumed), so
+		// callers configuring the measurement (the renderer's GPU hook, the look-ahead observer)
+		// skip a peak nobody uses (module findings 2026-10-24, part 3 item 3: 2-3 ms CPU per new 4K
+		// frame plus a GPU pass in compensate). ConfiguredSettings() returns them unmodified.
 		LedDriveConfig Config() const;
+		LedDriveConfig ConfiguredSettings() const;
+		static bool PeakConsumed(Mode mode) { return mode == Mode::Script || mode == Mode::LogOnly; }
 		// The gamma VP's output is encoded for (the renderer sets it from the
 		// frame's output transfer): the gamma boost's base (delta 4).
 		void SetDisplayGamma(double gamma) { displayGamma.store(gamma, std::memory_order_release); }
