@@ -77,7 +77,9 @@
 // VP-V pipeline skeleton (src/VP-V; see src/VP-V/README.md): the slot registry, the entrance
 // stage list, the output-hook order and the VP calibration-LUT stage.
 #include <VP-V/core/SlotRegistry.h>
+#include <VP-V/core/DelayBudgetLadder.h>   // the delay budget's hold (ADR-0020)
 #include <VP-V/core/EntranceStages.h>
+#include <VP-V/core/EntranceEpoch.h>
 #include <VP-V/core/OutputHookOrder.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
 #include <vprenderer/DownscaleLight.h>
@@ -1092,11 +1094,11 @@ namespace
 		// DV extension item 7 (owner 2026-10-16, off until validated): the
 		// Dolby Vision tunnel's picture unpacked on the GPU; the CPU keeps the
 		// DM packet (its pixels only). A failed unpack falls back to the CPU.
-		bool dvTunnelGpuUnpack = false;
+		bool dvTunnelGpuUnpack = true;   // default on (test/dv-synthetic verdict, 2026-10-24; failures listed under Fallbacks engaged)
 		// DV extension item 3 (owner 2026-10-17, off): Dolby Vision L2 trims as a
 		// VP pass after libplacebo's tone mapping (shaders\DV trims.glsl; a
 		// non-certified reimplementation, see DolbyVisionTrims.h).
-		bool dvTrims = false;
+		bool dvTrims = true;             // default on (test/dv-synthetic verdict, 2026-10-24; not certified)
 		// Restore switch (DV tunnel bug hunt 2026-10-17, default on): the whole-raster
 		// SDR alignment probe, the grey SDR exit, the loss limit in source pictures
 		// and L2 trims before L8 (CR210DolbyVisionTunnelFormatter). Off = before them.
@@ -1252,6 +1254,12 @@ namespace
 		std::string pipelineOrder;
 		std::string pipelineSlotsOff;
 		std::string calibrationLutStage = "libplacebo";
+		// pipeline_entrance_once (B3, ADR-0024): the motion consumers (interpolated pictures, hiccup
+		// gap pairs, source-warp extras) warp or blend the PROCESSED A and B - the entrance stages
+		// run once per source frame - instead of re-running the stages on every picture. Off until
+		// it passes its acceptance criteria (then the default); the Original pathway never uses it.
+		bool pipelineEntranceOnce = false;
+		std::string pipelineSettingsProblems;   // refused values, shown under "Fallbacks engaged" (audit item 4)
 		// Kernel-matched re-base (docs/VP-stage12-build-plan.md; owner 2026-10-16: optimise
 		// 1080p): the identified player kernel's inverse for an exact 2:1 luma re-base.
 		bool rebaseKernelMatch = true;
@@ -1515,7 +1523,7 @@ namespace
 			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.sourceResolutionEvidenceShots << '|'
 			<< settings.sourceResolutionEvidenceSeconds << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
 			<< settings.pipelineOriginalPathway << '|' << settings.pipelineOrder << '|' << settings.pipelineSlotsOff << '|'
-			<< settings.calibrationLutStage << '|'
+			<< settings.calibrationLutStage << '|' << settings.pipelineEntranceOnce << '|'
 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
 			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.opticalFlowGlobal << '|'
 			<< settings.opticalFlowGlobalFallback << '|' << settings.opticalFlowCostTrust << '|' << settings.opticalFlowFbCheck << '|'
@@ -3507,42 +3515,59 @@ namespace
 
 	// ADR-0019: the Original pathway baseline. Every VP addition is switched off and every slot
 	// that exists upstream runs in its upstream form, so the renderer reproduces Bill's original
-	// pathway (the overrides mirror docs/design/slots.json "original_pathway").
+	// pathway. The list is src/VP-V/core/OriginalPathway.h (verified against bill-v1.4.02); each
+	// line here names its key, and the drift check fails when the two disagree.
 	static void ApplyOriginalPathwaySettings(RendererSettings& settings)
 	{
-		// Verified against bill-v1.4.02 (docs/design/original-pathway-verified.md).
-		settings.capturePath = "standard";            // input.capture: the CPU formatters
-		settings.captureUpload = "render";            // upstream uploads on the render thread
-		settings.nativeRgbIngest = false;
-		settings.dvTunnelGpuUnpack = false;           // input.signal
-		settings.dvTunnelFixes = false;
-		settings.dvTrims = false;
-		settings.queueTimingFixes = false;            // input.queue_timing
-		settings.pulldownFixes = false;
-		settings.sourceResolution = "native";         // input.source_analysis + scaling.rebase
-		settings.rebaseKernelMatch = false;
-		settings.sourceCodingFixes = false;
-		settings.debandVp = "off";                    // repair.deband
-		settings.debandVpExclusive = false;
-		settings.detailPulseStabilise = false;        // repair.texture_restore
-		settings.textureRestore = false;
-		settings.dejudderStrength = 0.0;              // motion.*
-		settings.dejudderStrengthEven = 0.0;
-		settings.interpolation = InterpolationPolicy::Mode::Off;
-		settings.interpolationFillGaps = false;
-		settings.occlusionMask = false;
-		settings.opticalFlow = false;
-		settings.motionAheadFrames = 0;               // no motion look-ahead (the matcher stops at strength 0)
-		settings.adaptiveDownscale = false;           // scaling.output: libplacebo's scalers
-		settings.downscaleLight = "linear";           // libplacebo's default light
-		settings.adaptiveUpscale = false;
-		settings.preserveExtendedRange = false;       // colour.extended_range
-		settings.extendedRangeMoreCases = false;
-		settings.sdrTone.knee = false;                // colour.sdr_tone_shape
-		settings.temporalDither = "libplacebo";       // output.dither
-		settings.renderAhead = false;                 // output.presentation
-		settings.calibrationLutStage = "libplacebo";  // output.calibration_lut: as upstream
-		settings.pipelineOrder.clear();
+		settings.capturePath = "standard";                 // key=capture_path
+		settings.captureUpload = "render";                 // key=capture_upload
+		settings.nativeRgbIngest = false;                  // key=native_rgb_ingest
+		settings.dvTunnelGpuUnpack = false;                // key=dv_tunnel_gpu_unpack
+		settings.dvTunnelFixes = false;                    // key=dv_tunnel_fixes
+		settings.dvTrims = false;                          // key=dv_trims
+		settings.queueTimingFixes = false;                 // key=queue_timing_fixes
+		settings.pulldownFixes = false;                    // key=pulldown_fixes
+		settings.timingContinuityFixes = false;            // key=timing_continuity_fixes
+		settings.cadenceClassFixes = false;                // key=cadence_class_fixes
+		settings.generalRateFixes = false;                 // key=general_rate_fixes
+		settings.efficiencyFixes = false;                  // key=efficiency_fixes
+		settings.sourceResolution = "native";              // key=source_resolution
+		settings.rebaseKernelMatch = false;                // key=rebase_kernel_match
+		settings.sourceCodingFixes = false;                // key=source_coding_fixes
+		settings.sourceResolutionLatchFixes = false;       // key=source_resolution_latch_fixes
+		settings.sourceResolutionCutFixes = false;         // key=source_resolution_cut_fixes
+		settings.debandVp = "off";                         // key=deband_vp
+		settings.debandVpExclusive = false;                // key=deband_vp_exclusive
+		settings.detailPulseStabilise = false;             // key=detail_pulse_stabilise
+		settings.textureRestore = false;                   // key=texture_restore
+		settings.dejudderStrength = 0.0;                   // key=dejudder_strength
+		settings.dejudderStrengthEven = 0.0;               // key=dejudder_strength_even
+		settings.interpolation = InterpolationPolicy::Mode::Off;   // key=interpolation
+		settings.interpolationFillGaps = false;            // key=interpolation_fill_gaps
+		settings.occlusionMask = false;                    // key=occlusion_mask
+		settings.opticalFlow = false;                      // key=optical_flow
+		settings.motionAheadFrames = 0;                    // key=motion_ahead_frames
+		settings.motionHistoryFixes = false;               // key=motion_history_fixes
+		settings.dejudderSourceWarpCatmull = false;        // key=dejudder_source_warp_filter
+		settings.nlsSamplingCatmull = false;               // key=nls_sampling
+		settings.adaptiveDownscale = false;                // key=adaptive_downscale
+		settings.adaptiveUpscale = false;                  // key=adaptive_upscale
+		settings.ssimBitrateAware = false;                 // key=ssim_bitrate_aware
+		settings.downscaleLight = "linear";                // key=downscale_light
+		settings.fboFloat32 = 0;                           // key=fbo_float32
+		settings.preserveExtendedRange = false;            // key=preserve_extended_range
+		settings.extendedRangeMoreCases = false;           // key=extended_range_more_cases
+		settings.sdrTone.knee = false;                     // key=sdr_tone_shape
+		settings.intentContent = false;                    // key=intent_content
+		settings.intentMotion = false;                     // key=intent_motion
+		settings.intentDisplay = false;                    // key=intent_display
+		settings.intentBlack = BlackIntentMode::Off;       // key=intent_black
+		settings.ambientAdapt = false;                     // key=ambient_adapt
+		settings.temporalDither = "libplacebo";            // key=temporal_dither
+		settings.renderAhead = false;                      // key=render_ahead
+		settings.calibrationLutStage = "libplacebo";       // key=calibration_lut_stage
+		settings.pipelineOrder.clear();                    // the designed order
+		settings.pipelineEntranceOnce = false;             // B3: per-picture stages, as upstream
 	}
 
 	// Pipeline skeleton settings (global: [vpv] first, then [vprenderer]); see RendererSettings.
@@ -3561,8 +3586,7 @@ namespace
 			if (value == "on" || value == "off")
 				settings.pipelineOriginalPathway = value == "on";
 			else
-				DebugLog::Log("pipeline_original_pathway '%s' must be on or off; keeping %s", raw.c_str(),
-					settings.pipelineOriginalPathway ? "on" : "off");
+				settings.pipelineSettingsProblems += "pipeline_original_pathway '" + raw + "' (on|off); ";
 		}
 		if (TryGetPipelineString(config, "pipeline_order", raw))
 			settings.pipelineOrder = ConfigFile::Trim(raw);
@@ -3574,8 +3598,15 @@ namespace
 			if (value == "libplacebo" || value == "vp")
 				settings.calibrationLutStage = value;
 			else
-				DebugLog::Log("calibration_lut_stage '%s' must be libplacebo or vp; keeping %s", raw.c_str(),
-					settings.calibrationLutStage.c_str());
+				settings.pipelineSettingsProblems += "calibration_lut_stage '" + raw + "' (libplacebo|vp); ";
+		}
+		if (TryGetPipelineString(config, "pipeline_entrance_once", raw))
+		{
+			const std::string value = ConfigFile::NormalizeName(raw);
+			if (value == "on" || value == "off")
+				settings.pipelineEntranceOnce = value == "on";
+			else
+				settings.pipelineSettingsProblems += "pipeline_entrance_once '" + raw + "' (on|off); ";
 		}
 		if (settings.pipelineOriginalPathway)
 			ApplyOriginalPathwaySettings(settings);
@@ -5572,28 +5603,47 @@ struct LibplaceboVideoRenderer::Impl
 	EntranceStages::Cache<pl_frame> entranceCache;
 	uint64_t entranceGeneration = 1;
 	unsigned long long entranceRuns = 0, entranceReuses = 0;
-
-	static uint64_t EntranceMix(uint64_t h, uint64_t v) { return (h ^ v) * 0x100000001B3ull; }
-	static uint64_t EntranceBits(double v) { uint64_t b = 0; std::memcpy(&b, &v, sizeof(b)); return b; }
-	uint64_t EntranceEpoch(const pl_frame& source) const
+	// B3 (pipeline_entrance_once, ADR-0024): the processed A (drawn as itself, the stateful stages
+	// advanced on it) and the processed B (the next frame, ahead, per picture) as the ring's OWN
+	// copies, so the motion consumers read them while the modules' textures are reused.
+	struct OwnedEntrance
 	{
-		uint64_t h = 0xCBF29CE484222325ull;
-		h = EntranceMix(h, entranceGeneration);
-		h = EntranceMix(h, static_cast<uint64_t>(source.num_planes));
-		for (int i = 0; i < source.num_planes && i < PL_MAX_PLANES; ++i)
-			h = EntranceMix(h, reinterpret_cast<uintptr_t>(source.planes[i].texture));
-		h = EntranceMix(h, EntranceBits(rebaseFactor));
-		h = EntranceMix(h, EntranceBits(rebaseFactorX));
-		h = EntranceMix(h, EntranceBits(debandThreshold));
-		h = EntranceMix(h, EntranceBits(vpDebandParams.thresholdCodes));
-		h = EntranceMix(h, EntranceBits(vpDebandParams.radiusScale));
-		h = EntranceMix(h, reinterpret_cast<uintptr_t>(vpDebandParams.field));
-		h = EntranceMix(h, reinterpret_cast<uintptr_t>(vpDebandParams.grainError));
-		h = EntranceMix(h, vpDebandParams.sequence);
-		h = EntranceMix(h, (detailPulseRuns ? 1u : 0u) | (textureRestoreRuns ? 2u : 0u));
-		h = EntranceMix(h, detailPulseParams.sequence);
-		h = EntranceMix(h, textureRestoreParams.sequence);
-		return h;
+		pl_tex tex[4] = {};
+		pl_frame frame{};
+		bool identity = false;   // no stage changed the picture: the raw planes are the processed ones
+	};
+	EntranceStages::Ring<OwnedEntrance, 3> entranceRing;
+	unsigned long long entranceOnceA = 0, entranceOnceB = 0, entranceOnceReused = 0, entranceOncePictures = 0,
+		entranceOnceFallbacks = 0;
+	std::string entranceOnceNote;   // the fallback shown under "Fallbacks engaged" (empty: none)
+	size_t entranceRingBytesLogged = 0;
+
+	// Everything a cached entrance result depends on (VP-V/core/EntranceEpoch.h; audit blocker 1):
+	// the frame itself (planes, crop, representation, colour), every stage's parameters, the
+	// detail stages' vector fields and bitrate quality, and the generation moved by any other use
+	// of the modules' output textures.
+	// withGeneration false: the B3 ring's key (its pictures are owned copies, so a module writing
+	// its textures again does not change them).
+	uint64_t EntranceEpochFor(const pl_frame& source, bool withGeneration = true) const
+	{
+		EntranceEpoch::Key key;
+		key.Add(withGeneration ? entranceGeneration : 0);
+		// The ring (withGeneration false) keys by the unique source sequence and content, not by the
+		// texture the frame was uploaded into (its pictures are owned copies).
+		EntranceEpoch::AddFrame(key, source, withGeneration);
+		key.Add(rebaseFactor).Add(rebaseFactorX);
+		key.Add(debandThreshold).Add(vpDebandParams.thresholdCodes).Add(vpDebandParams.radiusScale);
+		key.Add(static_cast<const void*>(vpDebandParams.field)).Add(static_cast<const void*>(vpDebandParams.grainError));
+		key.Add(vpDebandParams.fieldScale).Add(vpDebandParams.fieldScaleX).Add(vpDebandParams.sequence);
+		key.Add((detailPulseRuns ? 1 : 0) | (textureRestoreRuns ? 2 : 0));
+		key.Add(detailPulseParams.sequence).Add(static_cast<const void*>(detailPulseParams.field)).Add(detailPulseParams.bitrateQuality)
+			.Add(detailPulseParams.fieldScale).Add(detailPulseParams.fieldScaleX).Add(detailPulseParams.planeLines).Add(detailPulseParams.cap);
+		key.Add(textureRestoreParams.sequence).Add(static_cast<const void*>(textureRestoreParams.field)).Add(textureRestoreParams.bitrateQuality)
+			.Add(textureRestoreParams.fieldScale).Add(textureRestoreParams.fieldScaleX).Add(textureRestoreParams.planeLines).Add(textureRestoreParams.cap);
+		// The registry's entrance (slot switches, order) changes the result as well.
+		for (PipelineSlots::Id id : pipelineSlots.ActiveEntrance())
+			key.Add(static_cast<int>(id));
+		return key.Value();
 	}
 
 	void EnsureRebaseDispatch()
@@ -5602,8 +5652,22 @@ struct LibplaceboVideoRenderer::Impl
 	}
 
 	// Runs the active entrance stages on `frame` for one call site.
+	unsigned long long entranceStageRuns = 0;     // every call (any path): the input side's cost unit
+	unsigned long long entranceSourceFrames = 0;  // distinct source frames drawn
+	unsigned long long entranceCostLoggedAt = 0;
+	uint64_t entranceLastSourceSequence = 0;
+	void NoteEntranceSourceFrame(uint64_t sequence)
+	{
+		if (sequence != 0 && sequence != entranceLastSourceSequence)
+		{
+			entranceLastSourceSequence = sequence;
+			++entranceSourceFrames;
+		}
+	}
 	void RunEntrance(EntranceRun& run, pl_frame& frame)
 	{
+		if (!pipelineSlots.ActiveEntrance().empty())
+			++entranceStageRuns;
 		if (run.path != EntrancePath::Main || run.phasePicture)
 			++entranceGeneration;   // the modules' output textures are about to change
 		for (PipelineSlots::Id id : pipelineSlots.ActiveEntrance())
@@ -5624,7 +5688,20 @@ struct LibplaceboVideoRenderer::Impl
 	void RunMainEntrance(EntranceRun& run, pl_frame& frame)
 	{
 		const bool cacheable = !run.phasePicture && run.sequence != 0;
-		const uint64_t epoch = cacheable ? EntranceEpoch(frame) : 0;
+		// B3: a picture drawn as itself is A's processed picture, kept (owned) in the ring.
+		const bool once = cacheable && EntranceOnce();
+		const uint64_t ringKey = once ? EntranceRingKey(frame) : 0;
+		if (once)
+			if (const OwnedEntrance* owned = entranceRing.Find(run.sequence, ringKey, EntranceStages::Role::A))
+			{
+				if (!owned->identity)
+					frame = owned->frame;
+				++entranceReuses;
+				EntranceDetailLookAhead(run);
+				return;
+			}
+		const pl_frame rawFrame = frame;
+		const uint64_t epoch = cacheable ? EntranceEpochFor(frame) : 0;
 		if (cacheable)
 			if (const pl_frame* hit = entranceCache.Find(run.sequence, epoch))
 			{
@@ -5639,9 +5716,454 @@ struct LibplaceboVideoRenderer::Impl
 			entranceCache.Store(run.sequence, epoch, frame);
 		else
 			entranceCache.Invalidate();
+		if (once)
+		{
+			++entranceOnceA;
+			(void)StoreEntranceOwned(run.sequence, ringKey, EntranceStages::Role::A, rawFrame, frame);
+		}
+		LogEntranceCounters();
+	}
+
+	void LogEntranceCounters()
+	{
 		static GeneralRate::LogInterval entranceLog = GeneralRate::LogInterval::ForFrames(2400);
-		if (entranceLog.DueOr(entranceRuns == 1))
-			DebugLog::Log("Entrance stages: %llu runs, %llu repeats reused (once per source frame)", entranceRuns, entranceReuses);
+		// Also every 240 input-side runs (the harness reads the counters in short runs; the cost
+		// criterion of B3 compares runs per source frame with it on and off).
+		const bool batch = entranceStageRuns >= entranceCostLoggedAt + 120;
+		if (entranceLog.DueOr(entranceRuns == 1 || batch))
+		{
+			entranceCostLoggedAt = entranceStageRuns;
+			DebugLog::Log("Entrance cost: %llu input-side runs for %llu source frames", entranceStageRuns, entranceSourceFrames);
+			if (EntranceOnce())
+				DebugLog::Log("Entrance stages: %llu runs, %llu repeats reused (once per source frame); entrance once (B3): "
+					"A %llu, B ahead %llu, ring reuses %llu, pictures from processed planes %llu, fallbacks %llu",
+					entranceRuns, entranceReuses, entranceOnceA, entranceOnceB, entranceOnceReused, entranceOncePictures,
+					entranceOnceFallbacks);
+			else
+				DebugLog::Log("Entrance stages: %llu runs, %llu repeats reused (once per source frame)", entranceRuns, entranceReuses);
+		}
+	}
+
+	// ---- B3: the input side once per source frame (pipeline_entrance_once, ADR-0024) ----
+	bool EntranceOnce() const { return activeSettings.pipelineEntranceOnce && !pipelineSlots.OriginalPathway(); }
+
+	// No stage that runs on this frame keeps state across frames (the re-base alone; the debander
+	// idle; the detail stages off): then B processed ahead IS what B's own draw computes, and the
+	// ring keeps it as B's A - the input side runs exactly once per source frame. A stage not
+	// listed here counts as stateful (a new module states it explicitly).
+	bool EntranceStatelessNow() const
+	{
+		for (PipelineSlots::Id id : pipelineSlots.ActiveEntrance())
+			switch (id)
+			{
+			case PipelineSlots::Id::ScalingRebase: break;
+			case PipelineSlots::Id::RepairDeband: if (debandThreshold > 0.0) return false; break;
+			case PipelineSlots::Id::RepairTextureRestore: if (detailPulseRuns || textureRestoreRuns) return false; break;
+			default: return false;
+			}
+		return true;
+	}
+
+	// The ring's key for a source frame: the frame (crop, range, colour - not the texture it was
+	// uploaded into), the re-base and the active stages. The stages' per-frame parameters (the
+	// readings, the vector field) are deliberately NOT in it: a source frame's processed picture,
+	// once made (as A, or ahead as B with B's own field), is that frame's picture for its whole
+	// time - the input side once per source frame, B ahead identical to B drawn as A. Any settings
+	// apply invalidates the ring (UpdatePipelineSlots).
+	uint64_t EntranceRingKey(const pl_frame& raw) const
+	{
+		EntranceEpoch::Key key;
+		key.Add(0x5354415445ull);
+		EntranceEpoch::AddFrame(key, raw, false);
+		key.Add(rebaseFactor).Add(rebaseFactorX);
+		for (PipelineSlots::Id id : pipelineSlots.ActiveEntrance())
+			key.Add(static_cast<int>(id));
+		return key.Value();
+	}
+
+	// Visible, never silent (owner rule): which pictures took the per-picture stages and why.
+	void EntranceOnceFallback(const std::string& why)
+	{
+		++entranceOnceFallbacks;
+		if (why != entranceOnceNote)
+		{
+			entranceOnceNote = why;
+			EngageFallback("entrance once", why + "; those pictures take the per-picture stages");
+		}
+	}
+
+	void EntranceOnceWorking()
+	{
+		++entranceOncePictures;
+		if (!entranceOnceNote.empty())
+		{
+			entranceOnceNote.clear();
+			ReleaseFallback("entrance once");
+		}
+	}
+
+	static bool SamePlanes(const pl_frame& a, const pl_frame& b)
+	{
+		if (a.num_planes != b.num_planes)
+			return false;
+		for (int p = 0; p < a.num_planes; ++p)
+			if (a.planes[p].texture != b.planes[p].texture)
+				return false;
+		return true;
+	}
+
+	// The ring's own copy of a processed picture (a plain copy pass per plane, exact for the
+	// 16-bit and float planes the stages write).
+	bool CopyEntrance(const pl_frame& in, OwnedEntrance& out)
+	{
+		EnsureRebaseDispatch();
+		out.frame = in;
+		for (int p = 0; p < in.num_planes; ++p)
+		{
+			const pl_tex src = in.planes[p].texture;
+			if (!src || !src->params.sampleable || !(src->params.format->caps & PL_FMT_CAP_RENDERABLE))
+				return false;
+			bool shared = false;
+			for (int q = 0; q < p; ++q)
+				if (in.planes[q].texture == src)
+				{
+					out.frame.planes[p].texture = out.frame.planes[q].texture;
+					shared = true;
+				}
+			if (shared)
+				continue;
+			pl_tex_params tp{};
+			tp.w = src->params.w;
+			tp.h = src->params.h;
+			tp.format = src->params.format;
+			tp.sampleable = true;
+			tp.renderable = true;
+			tp.storable = (src->params.format->caps & PL_FMT_CAP_STORABLE) != 0;
+			if (!pl_tex_recreate(d3d11->gpu, &out.tex[p], &tp))
+				return false;
+			pl_shader sh = pl_dispatch_begin(rebaseDispatch);
+			pl_sample_src sample{};
+			sample.tex = src;
+			sample.components = src->params.format->num_components;
+			if (!pl_shader_sample_direct(sh, &sample))
+			{
+				pl_dispatch_abort(rebaseDispatch, &sh);
+				return false;
+			}
+			pl_dispatch_params dp{};
+			dp.shader = &sh;
+			dp.target = out.tex[p];
+			if (!pl_dispatch_finish(rebaseDispatch, &dp))
+				return false;
+			out.frame.planes[p].texture = out.tex[p];
+		}
+		return true;
+	}
+
+	bool StoreEntranceOwned(uint64_t sequence, uint64_t key, EntranceStages::Role role, const pl_frame& raw, const pl_frame& result)
+	{
+		OwnedEntrance& entry = entranceRing.Claim(sequence, key, role);
+		entry.identity = SamePlanes(raw, result);
+		if (entry.identity)
+			entry.frame = result;
+		else if (!CopyEntrance(result, entry))
+		{
+			EntranceOnceFallback("cannot copy the processed picture");
+			return false;
+		}
+		entranceRing.Commit();
+		// The ring's memory, logged when it changes (3 pictures at the processing size).
+		size_t bytes = 0;
+		entranceRing.ForEachPayload([&](OwnedEntrance& e)
+			{
+				for (pl_tex t : e.tex)
+					if (t) bytes += static_cast<size_t>(t->params.w) * static_cast<size_t>(t->params.h) * t->params.format->texel_size;
+			});
+		if (bytes != entranceRingBytesLogged)
+		{
+			entranceRingBytesLogged = bytes;
+			DebugLog::Log("Entrance once (B3): ring of processed pictures %.1f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+		}
+		return true;
+	}
+
+	void ReleaseEntranceRing(pl_gpu gpu)
+	{
+		entranceRing.ForEachPayload([&](OwnedEntrance& e)
+			{
+				for (pl_tex& t : e.tex)
+					if (t) pl_tex_destroy(gpu, &t);
+				e = OwnedEntrance{};
+			});
+		entranceRing.Invalidate();
+		entranceRingBytesLogged = 0;
+	}
+
+	// The processed A of `sequence`: its entrance result drawn as itself (the stateful stages -
+	// the debander's hold, the detail history - advanced on it once), from the ring.
+	const OwnedEntrance* EntranceProcessedA(const pl_frame& rawA, uint64_t sequence, uint64_t nextSequence, const pl_frame* image)
+	{
+		const uint64_t key = EntranceRingKey(rawA);
+		if (const OwnedEntrance* hit = entranceRing.Find(sequence, key, EntranceStages::Role::A))
+		{
+			++entranceOnceReused;
+			return hit;
+		}
+		EntranceRun run;
+		run.path = EntrancePath::Main;
+		run.factorX = rebaseFactorX;
+		run.factorY = rebaseFactor;
+		run.sequence = sequence;
+		run.source = &rawA;
+		run.nextSequence = nextSequence;
+		run.image = image;
+		run.aFrame = rawA;
+		pl_frame frame = rawA;
+		RunMainEntrance(run, frame);   // stores A in the ring (B3 on)
+		return entranceRing.Find(sequence, key, EntranceStages::Role::A);
+	}
+
+	// The processed B (the next source frame) ahead of its own draw: the per-picture stages of an
+	// extra (re-base, VP deband per picture, the detail stages' decision of A as a repeat), never
+	// advancing any stage's state. Once per next frame (the ring).
+	const OwnedEntrance* EntranceProcessedB(const pl_frame& rawB, uint64_t nextSequence, uint64_t aSequence)
+	{
+		if (nextSequence == 0)
+			return nullptr;
+		const uint64_t key = EntranceRingKey(rawB);
+		// B already processed as its own A (ahead, or stateless).
+		if (const OwnedEntrance* hit = entranceRing.Find(nextSequence, key, EntranceStages::Role::A))
+		{
+			++entranceOnceReused;
+			return hit;
+		}
+		const bool stateless = EntranceStatelessNow();
+		if (!stateless)
+		{
+			// (i) Stateful stages (the debander's hold, the detail history): B is processed exactly
+			// as its own draw will process it - with B's own vector field, estimated ahead (B, C)
+			// while A's consumers read the snapshot of (A, B) - and kept as B's A: exact continuity
+			// at the source-frame boundary.
+			std::string why;
+			if (EntranceOnceFieldAhead(aSequence, nextSequence, why))
+				return EntranceProcessBAsA(rawB, nextSequence, key);
+			// (ii) The fallback, visible: B per picture (A's decisions as a repeat, never advancing).
+			EntranceOnceFallback("B's vectors not ready ahead (" + why + "); B per picture");
+		}
+		const EntranceStages::Role role = stateless ? EntranceStages::Role::A : EntranceStages::Role::B;
+		if (!stateless)
+			if (const OwnedEntrance* hit = entranceRing.Find(nextSequence, key, role))
+			{
+				++entranceOnceReused;
+				return hit;
+			}
+		EntranceRun run;
+		run.path = EntrancePath::Extra;
+		run.factorX = rebaseFactorX;
+		run.factorY = rebaseFactor;
+		run.sequence = aSequence;   // the detail stages apply A's decision (a repeat, never advancing)
+		pl_frame frame = rawB;
+		RunEntrance(run, frame);    // moves entranceGeneration: the plain cache is not reused after it
+		++entranceOnceB;
+		LogEntranceCounters();
+		if (!StoreEntranceOwned(nextSequence, key, role, rawB, frame))
+			return nullptr;
+		return entranceRing.Find(nextSequence, key, role);
+	}
+
+	// (i) B's own vector field ahead: the de-judder's estimate ahead (Dejudder::AheadSchedule, as
+	// the rendered warp's extras use it) run for B3 - A's warp inputs snapshotted, C uploaded, (B, C)
+	// estimated. A's remaining pictures read the snapshot (entranceOnceSnapFor). At B's own frame
+	// the estimate is consumed (no second estimate). False: why not (the schedule's reason).
+	uint64_t entranceOnceSnapFor = 0;      // A whose (A, B) warp inputs are in the snapshot
+	uint64_t entranceOnceSnapEpoch = 0;
+	bool entranceOnceAheadNow = false;     // set when this call made the estimate (the extras switch to the snapshot)
+	uint64_t entranceOnceAheadFailedFor = 0;
+	std::string entranceOnceAheadFailure;
+	bool EntranceOnceSnapshotFor(uint64_t aSequence) const
+	{
+		return dejudder && aSequence != 0 && entranceOnceSnapFor == aSequence && motionValidity.Current(entranceOnceSnapEpoch) &&
+			dejudder->SnapField() && dejudder->SnapFrameTrust();
+	}
+	bool EntranceOnceFieldAhead(uint64_t aSequence, uint64_t bSequence, std::string& why)
+	{
+		if (!dejudder)
+		{
+			why = "no motion estimate";
+			return false;
+		}
+		if (EntranceOnceSnapshotFor(aSequence) && dejudderLiveFieldFrom == bSequence)
+			return true;   // already estimated ahead for this A
+		if (entranceOnceAheadFailedFor == aSequence)
+		{
+			why = entranceOnceAheadFailure;   // tried once for this A (never every refresh)
+			return false;
+		}
+		const bool snapshotInUse = EstimateAhead(aSequence, bSequence, true, nullptr, true);
+		if (snapshotInUse)
+		{
+			entranceOnceSnapFor = aSequence;
+			entranceOnceSnapEpoch = motionValidity.Epoch();
+			entranceOnceAheadNow = true;
+		}
+		if (snapshotInUse && dejudderAhead.LastReason() == Dejudder::AheadSchedule::Reason::Ahead && dejudderLiveFieldFrom == bSequence)
+			return true;
+		why = Dejudder::AheadSchedule::Name(dejudderAhead.LastReason());
+		// A failure after the snapshot (upload, estimate) is not retried for this A (it would redo
+		// the copy every refresh); a skip before it (C not queued yet) is retried on the next picture.
+		if (snapshotInUse)
+		{
+			entranceOnceAheadFailedFor = aSequence;
+			entranceOnceAheadFailure = why;
+		}
+		return false;
+	}
+
+	// B through the main (stateful) path as its own A: B's field and sequence in the stages'
+	// parameters (the readings stay A's: a one-frame lag of the bitrate/level readings), the hold
+	// and the history advanced on B once. Kept as B's A in the ring.
+	const OwnedEntrance* EntranceProcessBAsA(const pl_frame& rawB, uint64_t bSequence, uint64_t key)
+	{
+		const VpDebander::Params savedDeband = vpDebandParams;
+		const DetailPulse::Params savedPulse = detailPulseParams;
+		const TextureRestore::Params savedRestore = textureRestoreParams;
+		const bool bField = dejudder && dejudderLiveFieldFrom == bSequence && motionValidity.Current(dejudderEstimatedEpoch);
+		vpDebandParams.field = bField ? dejudder->Field() : nullptr;
+		vpDebandParams.grainError = bField ? dejudder->GrainError() : nullptr;
+		vpDebandParams.sequence = bSequence;
+		detailPulseParams.field = bField ? dejudder->Field() : nullptr;
+		detailPulseParams.sequence = bSequence;
+		textureRestoreParams.field = bField ? dejudder->Field() : nullptr;
+		textureRestoreParams.sequence = bSequence;
+		EntranceRun run;
+		run.path = EntrancePath::Main;
+		run.factorX = rebaseFactorX;
+		run.factorY = rebaseFactor;
+		run.sequence = bSequence;
+		run.source = &rawB;
+		run.nextSequence = 0;   // the detail look-ahead (optional) is not taken ahead
+		run.image = &rawB;
+		run.aFrame = rawB;
+		pl_frame frame = rawB;
+		RunEntrance(run, frame);
+		++entranceGeneration;   // the modules' slot-0 textures now hold B: the plain cache must not reuse A's
+		vpDebandParams = savedDeband;
+		detailPulseParams = savedPulse;
+		textureRestoreParams = savedRestore;
+		++entranceOnceB;
+		LogEntranceCounters();
+		if (!StoreEntranceOwned(bSequence, key, EntranceStages::Role::A, rawB, frame))
+			return nullptr;
+		return entranceRing.Find(bSequence, key, EntranceStages::Role::A);
+	}
+
+	// A crossfade between source resolutions renders both paths per picture: the per-picture
+	// stages there (visible), never a processed picture of the other path.
+	bool EntranceOnceCrossfading() const { return rebaseFade < 1.0 && !temporalRenderer.Active(); }
+
+	// B3 for the timeline's picture between frames (interpolation, hiccup gap pairs): interpolated
+	// from the processed A and B. True: `frame` is the picture (no further entrance stages).
+	bool EntranceOncePhasePicture(const pl_frame& source, uint64_t sequence, uint64_t nextSequence, const pl_frame* image,
+		pl_frame& frame)
+	{
+		if (EntranceOnceCrossfading())
+		{
+			EntranceOnceFallback("source-resolution crossfade");
+			return false;
+		}
+		const OwnedEntrance* pa = EntranceProcessedA(source, sequence, nextSequence, image);
+		if (!pa)
+			return false;
+		pl_frame rawB = source;
+		rawB.planes[0].texture = vpPhaseB.luma;
+		rawB.planes[1].texture = vpPhaseB.chroma;
+		const OwnedEntrance* pb = EntranceProcessedB(rawB, nextSequence, sequence);
+		// (i) the estimate ahead replaced the live (A, B) field: A's picture reads the snapshot.
+		if (vpPhaseVectors && EntranceOnceSnapshotFor(sequence) && dejudderLiveFieldFrom != sequence)
+		{
+			vpPhaseMotion.field = dejudder->SnapField();
+			vpPhaseMotion.frameTrust = dejudder->SnapFrameTrust();
+			vpPhaseMotion.subField = dejudder->SnapSubField();
+		}
+		if (!pb)
+			return false;
+		if (pa->identity && pb->identity)
+			return false;   // no stage changes the picture: today's path draws the same picture
+		if (pa->frame.num_planes != 2 || pb->frame.num_planes != 2)
+		{
+			EntranceOnceFallback("processed picture not in two planes");
+			return false;
+		}
+		Dejudder::Planes a = vpPhaseA, b = vpPhaseA, out;
+		a.luma = pa->frame.planes[0].texture;
+		a.chroma = pa->frame.planes[1].texture;
+		b.luma = pb->frame.planes[0].texture;
+		b.chroma = pb->frame.planes[1].texture;
+		if (!frameInterpolator)
+			frameInterpolator = std::make_unique<Interpolator::FrameInterpolator>(log, d3d11->gpu);
+		frameInterpolator->SetGrain(activeSettings.interpolationGrain);
+		if (!frameInterpolator->Run(a, b, vpPhaseMotion, vpPhaseT, activeSettings.interpolationFallback, out,
+			vpPhaseA.luma->params.w, vpPhaseA.luma->params.h))
+		{
+			EntranceOnceFallback("interpolation on the processed planes failed (" + frameInterpolator->LastError() + ")");
+			return false;
+		}
+		frame = pa->frame;
+		frame.planes[0].texture = out.luma;
+		frame.planes[1].texture = out.chroma;
+		EntranceOnceWorking();
+		return true;
+	}
+
+	// B3 for a de-judder extra on the source path (the warp, or Stage A interpolation): the
+	// processed A (and B). False: today's path (the raw planes, then the per-picture stages).
+	bool EntranceOnceExtra(const pl_frame& image, uint64_t sequence, uint64_t nextSequence, bool interpolating,
+		const Dejudder::Planes& a, Dejudder::Planes& processedA, Dejudder::Planes& processedB, const pl_frame*& processedFrame)
+	{
+		processedFrame = nullptr;
+		if (EntranceOnceCrossfading())
+		{
+			EntranceOnceFallback("source-resolution crossfade");
+			return false;
+		}
+		if (image.num_planes != 2 || image.planes[0].texture != a.luma || image.planes[1].texture != a.chroma)
+		{
+			EntranceOnceFallback("composed picture");
+			return false;
+		}
+		const OwnedEntrance* pa = EntranceProcessedA(image, sequence, nextSequence, &image);
+		if (!pa)
+			return false;
+		const OwnedEntrance* pb = nullptr;
+		if (interpolating)
+		{
+			if (!dejudderNextTextures[0] || !dejudderNextTextures[1])
+				return false;
+			pl_frame rawB = image;
+			rawB.planes[0].texture = dejudderNextTextures[0];
+			rawB.planes[1].texture = dejudderNextTextures[1];
+			pb = EntranceProcessedB(rawB, nextSequence, sequence);
+			if (!pb)
+				return false;
+		}
+		if (pa->identity && (!pb || pb->identity))
+			return false;   // no stage changes the picture: today's path draws the same picture
+		if (pa->frame.num_planes != 2 || (pb && pb->frame.num_planes != 2))
+		{
+			EntranceOnceFallback("processed picture not in two planes");
+			return false;
+		}
+		processedA = a;
+		processedA.luma = pa->frame.planes[0].texture;
+		processedA.chroma = pa->frame.planes[1].texture;
+		if (pb)
+		{
+			processedB = a;
+			processedB.luma = pb->frame.planes[0].texture;
+			processedB.chroma = pb->frame.planes[1].texture;
+		}
+		processedFrame = &pa->frame;
+		return true;
 	}
 
 	// scaling.rebase
@@ -5661,6 +6183,11 @@ struct LibplaceboVideoRenderer::Impl
 					{
 						rebaseFormatNoteLogged = sourceRebase.FormatNote();
 						DebugLog::Log("Re-base: %s", rebaseFormatNoteLogged.c_str());
+						// A float (fp16) intermediate instead of r16 keeps ~11 bits near white: visible.
+						if (rebaseFormatNoteLogged.empty())
+							ReleaseFallback("re-base precision");
+						else
+							EngageFallback("re-base precision", rebaseFormatNoteLogged);
 					}
 				}
 				else if (sourceRebase.Failures() == 1)
@@ -6596,6 +7123,29 @@ struct LibplaceboVideoRenderer::Impl
 	double vpOutputPhase = 0.0;      // the phase of the refresh being drawn
 	bool vpPhasePlanesValid = false; // vpPhasePlanes hold this draw's picture
 	Dejudder::Planes vpPhasePlanes;
+	// The picture's inputs (raw A and B, the motion, the phase). B3 on: the picture is made in the
+	// draw from the processed A and B (vpPhaseDeferred; EntranceOncePhasePicture), else here.
+	bool vpPhaseDeferred = false;
+	bool vpPhaseVectors = false;     // the picture uses the pair's vectors (live, or B3's snapshot)
+	Dejudder::Planes vpPhaseA, vpPhaseB;
+	Interpolator::Motion vpPhaseMotion;
+	float vpPhaseT = 0.0f;
+	// The raw interpolation into vpPhasePlanes (today's path; B3's fallback).
+	bool RunVpPhaseInterpolation()
+	{
+		if (!frameInterpolator)
+			frameInterpolator = std::make_unique<Interpolator::FrameInterpolator>(log, d3d11->gpu);
+		frameInterpolator->SetGrain(activeSettings.interpolationGrain);
+		if (!frameInterpolator->Run(vpPhaseA, vpPhaseB, vpPhaseMotion, vpPhaseT, activeSettings.interpolationFallback,
+			vpPhasePlanes))
+		{
+			if (++interpolationFailures == 1 || interpolationFailures % 2400 == 0)
+				DebugLog::Log("Interpolation: failed (%s; %llu failures); the source frame is shown",
+					frameInterpolator->LastError().c_str(), interpolationFailures);
+			return false;
+		}
+		return true;
+	}
 	uint64_t dejudderNextUploadedSequence = 0;   // the source frame in dejudderNextTextures (B)
 	// Efficiency round 2026-10-18 (efficiency_fixes, UploadReuse.h): how dejudderNextTextures /
 	// dejudderAheadTextures were filled (swapped with them), so that the frame shown takes
@@ -6684,30 +7234,29 @@ struct LibplaceboVideoRenderer::Impl
 		b.luma = dejudderNextTextures[0];
 		b.chroma = dejudderNextTextures[1];
 		Interpolator::Motion motion;
-		const bool vectors = DejudderLiveFieldFor(sourceSequence);
+		// B3 (i): after B's field was estimated ahead, A's (A, B) inputs are the snapshot.
+		const bool snapshot = !DejudderLiveFieldFor(sourceSequence) && EntranceOnce() && EntranceOnceSnapshotFor(sourceSequence);
+		const bool vectors = DejudderLiveFieldFor(sourceSequence) || snapshot;
+		vpPhaseVectors = vectors;
 		if (vectors)
 		{
-			motion.field = dejudder->Field();
-			motion.frameTrust = dejudder->FrameTrust();
-			motion.subField = dejudder->SubField();
+			motion.field = snapshot ? dejudder->SnapField() : dejudder->Field();
+			motion.frameTrust = snapshot ? dejudder->SnapFrameTrust() : dejudder->FrameTrust();
+			motion.subField = snapshot ? dejudder->SnapSubField() : dejudder->SubField();
 			motion.minTrustedShare = dejudder->GetSettings().minTrustedShare;
 			for (int slot = 0; slot < 2; ++slot)
 				if (dejudderMaskSequence[slot] == nextSourceSequence && motionValidity.Current(dejudderMaskEpoch[slot]))
 					motion.occlusionB = dejudder->Occlusion(slot);
 		}
-		if (!frameInterpolator)
-			frameInterpolator = std::make_unique<Interpolator::FrameInterpolator>(log, d3d11->gpu);
-		frameInterpolator->SetGrain(activeSettings.interpolationGrain);
 		// Bug hunt 3 F5: a standalone gap pair on an active de-judder at its strength.
-		const float phase = static_cast<float>(vpOutputPhase) * (vpGapFillStandalone ? vpGapPhaseScale : 1.0f);
-		if (!frameInterpolator->Run(a, b, motion, phase, activeSettings.interpolationFallback,
-			vpPhasePlanes))
-		{
-			if (++interpolationFailures == 1 || interpolationFailures % 2400 == 0)
-				DebugLog::Log("Interpolation: failed (%s; %llu failures); the source frame is shown",
-					frameInterpolator->LastError().c_str(), interpolationFailures);
+		vpPhaseA = a;
+		vpPhaseB = b;
+		vpPhaseMotion = motion;
+		vpPhaseT = static_cast<float>(vpOutputPhase) * (vpGapFillStandalone ? vpGapPhaseScale : 1.0f);
+		// B3: made in the draw from the processed planes (the same inputs).
+		vpPhaseDeferred = EntranceOnce();
+		if (!vpPhaseDeferred && !RunVpPhaseInterpolation())
 			return;
-		}
 		vpPhasePlanesValid = true;
 		++vpPhasePictures;
 		if (!vectors)
@@ -7228,6 +7777,7 @@ struct LibplaceboVideoRenderer::Impl
 	// output.calibration_lut in VP's output hooks (calibration_lut_stage = vp; R1).
 	CalibrationLutStage::Hook calibrationLutStage;
 	bool calibrationLutStageLogged = false;
+	bool calibrationLutStageFailed = false;   // the VP stage failed once: libplacebo's target LUT for the session
 	std::vector<std::string> activeCustomShaders;
 	std::atomic<bool> lowLatencyQueueActive{ false };
 	// docs/VP-nvof-ahead.md: source frames queued after the current one (the render
@@ -7248,6 +7798,8 @@ struct LibplaceboVideoRenderer::Impl
 	// r6 fix 7 (owner rule vp-no-silent-fallbacks): the renderer's automatic fallbacks, published
 	// as "Fallbacks engaged: <list> / none" (GetFallbacksStatus: Ctrl+I, Config status, Ctrl+Alt+D).
 	FallbackStatus::Registry fallbacks;
+	// test/dv-synthetic 2026-10-24: the DV tunnel's SDR passthrough repacked to BGRA8 (tunnelSdrRepack).
+	std::vector<uint32_t> tunnelSdrBgra;
 	void EngageFallback(const char* id, const std::string& reason)
 	{
 		if (fallbacks.Engage(id, reason))
@@ -7268,7 +7820,8 @@ struct LibplaceboVideoRenderer::Impl
 		PipelineSlots::Registry next;
 		if (settings.pipelineOriginalPathway)
 			next.ApplyOriginalPathway();
-		std::string unknown;
+		// Every refused value is visible (owner rule: no silent fallbacks), never log-only.
+		std::string problems = settings.pipelineSettingsProblems;
 		std::string token;
 		auto flush = [&]()
 		{
@@ -7276,7 +7829,9 @@ struct LibplaceboVideoRenderer::Impl
 				return;
 			const PipelineSlots::Id id = PipelineSlots::FromName(token.c_str());
 			if (id == PipelineSlots::Id::Count)
-				unknown += (unknown.empty() ? "" : ", ") + token;
+				problems += "pipeline_slots_off: unknown slot '" + token + "'; ";
+			else if (!PipelineSlots::SwitchHonoured(id))
+				problems += "pipeline_slots_off: " + token + " has no slot switch yet; ";
 			else
 				next.SetEnabled(id, false);
 			token.clear();
@@ -7289,21 +7844,35 @@ struct LibplaceboVideoRenderer::Impl
 				token += ch;
 		}
 		flush();
-		if (!unknown.empty())
-			DebugLog::Log("pipeline_slots_off: unknown slot(s) %s ignored", unknown.c_str());
+		if (!problems.empty())
+		{
+			problems.resize(problems.size() - 2);   // the last "; "
+			EngageFallback("pipeline settings", "ignored: " + problems);
+		}
+		else
+			ReleaseFallback("pipeline settings");
 		std::string reason;
 		if (!settings.pipelineOriginalPathway && !next.SetOrderByNames(settings.pipelineOrder, &reason))
 			EngageFallback("pipeline order", "designed order kept: " + reason);   // an invalid order never runs
 		else
 			ReleaseFallback("pipeline order");
+		(void)next.ActiveEntrance();   // warm the kept list here, so the render thread only reads it
 		pipelineSlots = next;
 		entranceCache.Invalidate();
+		entranceRing.Invalidate();
 		std::string state = settings.pipelineOriginalPathway ? "Original pathway (every VP addition off)" :
 			pipelineSlots.IsDefaultOrder() ? "designed order" : "custom order";
 		std::string entrance;
 		for (PipelineSlots::Id id : pipelineSlots.ActiveEntrance())
 			entrance += (entrance.empty() ? "" : " > ") + std::string(PipelineSlots::Get(id).name);
 		state += "; entrance: " + (entrance.empty() ? std::string("none") : entrance);
+		state += settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway ?
+			"; entrance once (B3) on: motion pictures from the processed A and B" : "; entrance once (B3) off";
+		if (!settings.pipelineEntranceOnce || settings.pipelineOriginalPathway)
+		{
+			entranceOnceNote.clear();
+			ReleaseFallback("entrance once");
+		}
 		if (state != pipelineStateLogged)
 		{
 			pipelineStateLogged = state;
@@ -8136,6 +8705,9 @@ struct LibplaceboVideoRenderer::Impl
 				debander.Release(d3d11->gpu);       // and the debander's planes
 				detailPulse.Release(d3d11->gpu);    // detail pulse stabilisation's history
 				textureRestore.Release(d3d11->gpu); // and texture restore's
+				entranceCache.Invalidate();         // the cached entrance result pointed at those textures
+				ReleaseEntranceRing(d3d11->gpu);    // B3: the processed pictures' own copies
+				++entranceGeneration;
 				crossfadeMixer.Release(d3d11->gpu); // hunt 3 F1: the crossfade's textures
 				if (rebaseDispatch) pl_dispatch_destroy(&rebaseDispatch);
 				extendedRangeHooks.Release();   // Stage 10: its textures
@@ -11080,7 +11652,7 @@ struct LibplaceboVideoRenderer::Impl
 		// LED compensation, instead of libplacebo's target LUT (which runs before VP's hooks).
 		// The Original pathway keeps libplacebo's target LUT, as upstream did.
 		if (activeSettings.calibrationLutStage == "vp" && !pipelineSlots.OriginalPathway() &&
-			pipelineSlots.Runs(PipelineSlots::Id::OutputCalibrationLut))
+			pipelineSlots.Runs(PipelineSlots::Id::OutputCalibrationLut) && !calibrationLutStageFailed)
 		{
 			calibrationLutStage.SetLut(displayLut);
 			displayLutStatus = "Active (VP stage): " + LutFileName(displayLutPath);
@@ -11163,7 +11735,7 @@ struct LibplaceboVideoRenderer::Impl
 			LibplaceboExportedData<pl_d3d11_params>("pl_d3d11_default_params");
 		deviceParams.allow_software = false;
 		deviceParams.min_feature_level = D3D_FEATURE_LEVEL_10_0;
-		deviceParams.max_frame_latency = 2;
+		deviceParams.max_frame_latency = DelayBudget::kSwapchainFrames;   // also a fixed cost of the delay budget
 		deviceParams.no_compute = settings.diagnosticDisableCompute;
 		// Tests: VP_TEST_ADAPTER=<text> picks the GPU whose name contains it
 		// (e.g. Intel, the laptop screen's own GPU, for real display timing);
@@ -11789,6 +12361,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.pipelineOrder != next.pipelineOrder, "pipeline_order");
 		changed(current.pipelineSlotsOff != next.pipelineSlotsOff, "pipeline_slots_off");
 		changed(current.calibrationLutStage != next.calibrationLutStage, "calibration_lut_stage");
+		changed(current.pipelineEntranceOnce != next.pipelineEntranceOnce, "pipeline_entrance_once");
 		changed(current.adaptive.cnnResidualStabilise != next.adaptive.cnnResidualStabilise ||
 			current.adaptive.ssimResidualStabilise != next.adaptive.ssimResidualStabilise, "residual_stabilise");
 		changed(current.ssimBitrateAware != next.ssimBitrateAware || current.ssimBitrateFloor != next.ssimBitrateFloor, "ssim_bitrate_aware");
@@ -16323,12 +16896,13 @@ struct LibplaceboVideoRenderer::Impl
 	// estimate. The next frame's upload is left out: its CPU copy runs between the
 	// timestamps with the GPU idle and was measured as GPU time (p95 20-37 ms on a
 	// 3050 Ti for an estimate of a few ms; render-ahead follow-up 2026-10-17).
+	// forEntranceOnce: B3's B ahead (any path: its consumers read the snapshot; ProcessedB).
 	bool EstimateAhead(uint64_t sourceSequence, uint64_t nextSourceSequence, bool renderedPath,
-		AlphaFrameGpuTimingScope* timing = nullptr)
+		AlphaFrameGpuTimingScope* timing = nullptr, bool forEntranceOnce = false)
 	{
 		Dejudder::AheadSchedule::Conditions c;
 		c.enabled = activeSettings.dejudderEstimateAhead;
-		c.renderedWarp = activeSettings.dejudderWarpRendered && renderedPath;
+		c.renderedWarp = forEntranceOnce || (activeSettings.dejudderWarpRendered && renderedPath);
 		c.active = dejudder && dejudderReason == DejudderPolicy::Reason::Active &&
 			dejudderNextTextures[0] && (dejudderNextTextures[1] || dejudderLayout.rgb);
 		c.source = sourceSequence;
@@ -17070,6 +17644,28 @@ struct LibplaceboVideoRenderer::Impl
 			else
 			{
 				Dejudder::Planes warped;
+				// B3 (pipeline_entrance_once): the warp / interpolation reads the processed A (and B);
+				// the picture then needs no entrance stages. Else today's path below.
+				Dejudder::Planes processedA, processedB;
+				const pl_frame* processedFrame = nullptr;
+				if (EntranceOnce())
+				{
+					entranceOnceAheadNow = false;
+					(void)EntranceOnceExtra(image, f.sourceSequence, f.nextSourceSequence, interpolating, a, processedA,
+						processedB, processedFrame);
+					if (entranceOnceAheadNow)
+					{
+						// B3 (i) estimated (B, C) ahead: this and the remaining extras read (A, B)'s snapshot,
+						// as after the rendered warp's own estimate ahead.
+						aheadTried = true;
+						warpField = dejudder->SnapField();
+						warpTrust = dejudder->LookAheadTrust();
+						warpSub = dejudder->SnapSubField();
+						if (warpCamera) warpCamera = dejudder->SnapCamera();
+						if (warpMask) warpMask = dejudder->SnapPixelMask();
+						if (warpVectorOk) warpVectorOk = dejudder->SnapVectorOk();
+					}
+				}
 				if (interpolating)
 				{
 					// Stage A: A and B (the next frame's planes, uploaded for the estimate)
@@ -17090,7 +17686,10 @@ struct LibplaceboVideoRenderer::Impl
 					if (!frameInterpolator)
 						frameInterpolator = std::make_unique<Interpolator::FrameInterpolator>(log, d3d11->gpu);
 					frameInterpolator->SetGrain(activeSettings.interpolationGrain);
-					if (!frameInterpolator->Run(a, b, motion, shift, activeSettings.interpolationFallback, warped))
+					if (!(processedFrame ?
+						frameInterpolator->Run(processedA, processedB, motion, shift, activeSettings.interpolationFallback, warped,
+							a.luma->params.w, a.luma->params.h) :
+						frameInterpolator->Run(a, b, motion, shift, activeSettings.interpolationFallback, warped)))
 					{
 						if (++interpolationFailures == 1 || interpolationFailures % 2400 == 0)
 							DebugLog::Log("Interpolation: failed (%s; %llu failures)", frameInterpolator->LastError().c_str(),
@@ -17100,10 +17699,16 @@ struct LibplaceboVideoRenderer::Impl
 					}
 					++interpolatedPresents;
 				}
-				else if (!dejudder->Warp(a, shift, warped, true))
+				else if (!(processedFrame ? dejudder->WarpProcessed(processedA, shift, warped, true) :
+					dejudder->Warp(a, shift, warped, true)))
 				{
 					failure = "warp failed";
 					break;
+				}
+				if (processedFrame)
+				{
+					image = *processedFrame;   // the processed geometry (re-based crop), warped planes
+					EntranceOnceWorking();
 				}
 				image.planes[0].texture = warped.luma;
 				image.planes[1].texture = warped.chroma;
@@ -17113,6 +17718,7 @@ struct LibplaceboVideoRenderer::Impl
 				// Pipeline skeleton (B3/R2): the extra runs the same entrance stage list as the main
 				// frame (re-base, VP deband per frame, the detail stages' decision of its source
 				// frame), with the extra's own module slots.
+				if (!processedFrame)
 				{
 					EntranceRun run;
 					run.path = EntrancePath::Extra;
@@ -17120,10 +17726,11 @@ struct LibplaceboVideoRenderer::Impl
 					run.factorY = rebaseFactor;
 					run.sequence = f.sourceSequence;
 					RunEntrance(run, image);
+					LogEntranceCounters();
 				}
 				// Hunt 3 F3: the extra's path being left (the crossfade runs on every present of the
 				// fade, not only on A's), with the same stages (EntranceCrossfadeFrom).
-				if (rebaseFade < 1.0 && !temporalRenderer.Active())
+				if (!processedFrame && rebaseFade < 1.0 && !temporalRenderer.Active())
 				{
 					extraFrom = warpedNative;
 					extraFade = EntranceCrossfadeFrom(extraFrom, f.sourceSequence);
@@ -17705,6 +18312,20 @@ struct LibplaceboVideoRenderer::Impl
 		// BT.2020): every SDR gate (input transfer, gamma, LUT domain, luminance) uses it.
 		const bool inputIsSdr = state.eotf == EOTF::SDR || tunnelRgbFallback;
 		dejudderDolbyVisionTunnel = state.dolbyVisionTunnel;   // Bug hunt 2026-10-17
+		// test/dv-synthetic 2026-10-24 (owner rule: no silent fallbacks): the tunnel's automatic
+		// degradations are listed under "Fallbacks engaged" while they last; none outside a tunnel.
+		// DV open item (2026-10-24): a rejected DM silently kept the previous one; now visible.
+		if (tunnelActive && convertedPayload && convertedPayload->dolby.reusedPreviousDm)
+			EngageFallback("Dolby Vision DM reused", "this picture's metadata was rejected; the previous picture's DM is used");
+		else
+			ReleaseFallback("Dolby Vision DM reused");
+		if (!tunnelActive)
+		{
+			ReleaseFallback("Dolby Vision metadata");
+			ReleaseFallback("Dolby Vision source range");
+			ReleaseFallback("Dolby Vision scene metadata");
+			ReleaseFallback("Dolby Vision trims");
+		}
 		if (tunnelActive && (!convertedPayload ||
 			!convertedPayload->dolby.valid || convertedPayload->dolby.requiresBlackFrame))
 		{
@@ -17724,12 +18345,17 @@ struct LibplaceboVideoRenderer::Impl
 					sceneDescriptorObserved = true;
 				}
 			}
+			EngageFallback("Dolby Vision metadata", !convertedPayload || !convertedPayload->dolby.valid ?
+				"picture black: no usable display-management metadata" :
+				"picture black: this picture's DM packet failed its CRC or is missing");
 			const bool presented = PresentBlackFrame(!dvTransitionBlackActive);
 			if (presented && !dvTransitionBlackActive)
 				DebugLog::Log("Dolby Vision transition: presenting black until a trusted picture is available");
 			dvTransitionBlackActive = presented;
 			return presented;
 		}
+		if (tunnelActive)
+			ReleaseFallback("Dolby Vision metadata");
 		if (dvTransitionBlackActive)
 		{
 			DebugLog::Log("Dolby Vision transition: trusted %s picture restored",
@@ -17752,8 +18378,14 @@ struct LibplaceboVideoRenderer::Impl
 		// here to native RGB (rgba16) on the GPU (never on the Dolby Vision tunnel).
 		const bool rgbRawFrame = !state.dolbyVisionTunnel && convertedPayload && convertedPayload->Raw() &&
 			GpuRgbUnpack::Supports(convertedPayload->rawEncoding);
+		// test/dv-synthetic 2026-10-24: libplacebo cannot endian-swap packed 10-bit words (its swap
+		// needs 16- or 32-bit components; r210 failed every SDR passthrough picture with "Failed
+		// swapping endianness", so nothing was shown after EOS / before lock). The tunnel's SDR
+		// passthrough is RGB8 in the 10-bit fields: repacked on the CPU to BGRA8 and uploaded as 8-bit.
+		const bool tunnelSdrRepack = tunnelRgbFallback && (state.videoFrameEncoding == VideoFrameEncoding::R210 ||
+			state.videoFrameEncoding == VideoFrameEncoding::R10b || state.videoFrameEncoding == VideoFrameEncoding::R10l);
 		const bool nativeRgbUpload = tunnelRgbFallback ?
-			GetAlphaNativeRgbLayout(state.videoFrameEncoding, nativeRgbLayout) :
+			GetAlphaNativeRgbLayout(tunnelSdrRepack ? VideoFrameEncoding::BGRA_8BIT : state.videoFrameEncoding, nativeRgbLayout) :
 			(!rgbRawFrame && !state.dolbyVisionTunnel &&
 				videoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE &&
 				AlphaCanUseNativeRgbUpload(state.videoFrameEncoding) &&
@@ -18640,6 +19272,36 @@ struct LibplaceboVideoRenderer::Impl
 			plane.row_stride = state.BytesPerRow();
 			plane.pixels = videoFrame.GetData();
 			plane.swapped = nativeRgbLayout.swapped;
+			if (tunnelSdrRepack)
+			{
+				// RGB8 from each 10-bit field (high8: the top eight bits) into BGRA8 words.
+				const unsigned shift = convertedPayload && convertedPayload->dolby.rgbBitAlignment == 1 ? 2u : 0u;
+				const VideoFrameEncoding e = state.videoFrameEncoding;
+				const uint8_t* src = static_cast<const uint8_t*>(videoFrame.GetData());
+				const size_t srcStride = state.BytesPerRow();
+				tunnelSdrBgra.resize(static_cast<size_t>(width) * height);
+				for (int y = 0; y < height; ++y)
+				{
+					const uint8_t* row = src + static_cast<size_t>(y) * srcStride;
+					uint32_t* out = tunnelSdrBgra.data() + static_cast<size_t>(y) * width;
+					for (int x = 0; x < width; ++x)
+					{
+						const uint8_t* b = row + static_cast<size_t>(x) * 4;
+						uint32_t w = e == VideoFrameEncoding::R10l ?
+							(static_cast<uint32_t>(b[3]) << 24) | (static_cast<uint32_t>(b[2]) << 16) | (static_cast<uint32_t>(b[1]) << 8) | b[0] :
+							(static_cast<uint32_t>(b[0]) << 24) | (static_cast<uint32_t>(b[1]) << 16) | (static_cast<uint32_t>(b[2]) << 8) | b[3];
+						if (e != VideoFrameEncoding::R210)
+							w >>= 2;
+						const uint32_t r = (((w >> 20) & 0x3FFu) >> shift) & 0xFFu;
+						const uint32_t g = (((w >> 10) & 0x3FFu) >> shift) & 0xFFu;
+						const uint32_t bl = ((w & 0x3FFu) >> shift) & 0xFFu;
+						out[x] = 0xFF000000u | (r << 16) | (g << 8) | bl;   // bytes B G R A
+					}
+				}
+				plane.pixels = tunnelSdrBgra.data();
+				plane.row_stride = static_cast<size_t>(width) * 4;
+				plane.swapped = false;
+			}
 			pl_plane_data_from_mask(&plane, nativeRgbLayout.masks);
 			frameGpuTiming.BeginStage(
 				AlphaD3D11FrameGpuTimer::Stage::SourceUpload);
@@ -18875,7 +19537,7 @@ struct LibplaceboVideoRenderer::Impl
 			(tunnelRgbFallback || nativeRgb8Upload ? 8 : 10) :
 			formattedContract.colorDepth;
 		image.repr.bits.bit_shift = nativeRgbUpload ?
-			(tunnelRgbFallback && convertedPayload->dolby.rgbBitAlignment == 1 ?
+			(tunnelRgbFallback && !tunnelSdrRepack && convertedPayload->dolby.rgbBitAlignment == 1 ?
 				2 : 0) :
 			formattedContract.bitShift;
 		if (rgbRawUpload)
@@ -18964,6 +19626,16 @@ struct LibplaceboVideoRenderer::Impl
 			const auto luminance = DolbyVisionLuminancePolicy::ApplyWithSceneMin(dm, image.color.hdr);
 			frameScene = SceneDescriptorParsers::FromDolbyVisionTunnel(dm, frameScene);
 			frameDvLuminance = luminance;
+			// test/dv-synthetic 2026-10-24: a DM without a usable source range or L1 degrades the
+			// tone mapping (static range / no per-scene curve): listed, not log-only.
+			if (luminance.sourceRangeFromMetadata)
+				ReleaseFallback("Dolby Vision source range");
+			else
+				EngageFallback("Dolby Vision source range", "the DM's source range is invalid: the static range is used");
+			if (luminance.sceneAvailable)
+				ReleaseFallback("Dolby Vision scene metadata");
+			else
+				EngageFallback("Dolby Vision scene metadata", "no L1: tone mapping from the source range, not per scene");
 			const uint64_t luminanceTick = GetTickCount64();
 			if (luminanceTick >= nextSourceLuminanceLogTick)
 			{
@@ -19058,8 +19730,14 @@ struct LibplaceboVideoRenderer::Impl
 		image.crop.y0 = 0.0f;
 		image.crop.x1 = static_cast<float>(width);
 		image.crop.y1 = static_cast<float>(height);
+		// Chroma siting (research/chroma 2026-10-24): the legacy CPU path that turns a capture's
+		// 4:2:2 or RGB into P010 keeps the EVEN chroma lines only, so its 4:2:0 chroma is TOP-LEFT
+		// sited; decoded file frames (NV12/P010/P016) and the 4:2:2 uploads are LEFT-sited.
+		const bool decodedFileFormat = state.videoFrameEncoding == VideoFrameEncoding::NV12 ||
+			state.videoFrameEncoding == VideoFrameEncoding::P010 || state.videoFrameEncoding == VideoFrameEncoding::P016;
 		if (!nativeRgbUpload && !rgbRawUpload)
-			pl_frame_set_chroma_location(&image, PL_CHROMA_LEFT);
+			pl_frame_set_chroma_location(&image, !lossless422Upload && !decodedFileFormat && !pipelineSlots.OriginalPathway() ?
+				PL_CHROMA_TOP_LEFT : PL_CHROMA_LEFT);   // the Original pathway keeps upstream's tag (ADR-0019)
 
         if(temporalRenderer.Active()) {
             if(!temporalRenderer.Capture(d3d11->gpu,image,sourceSequence))temporalRenderer.Bypass(temporalRenderer.status);
@@ -23191,7 +23869,7 @@ struct LibplaceboVideoRenderer::Impl
                     activeSettings.sdrTone.recovery < 0.0 ? "auto" : std::to_string(activeSettings.sdrTone.recovery).c_str());
             }
         }
-        // dv_trims (owner 2026-10-17, off): the Dolby Vision L2 trim for the
+        // dv_trims (owner 2026-10-17; default on since the DV synthetic validation 2026-10-24): the Dolby Vision L2 trim for the
         // display's peak, after libplacebo's tone mapping (PRE_OUTPUT, before
         // the LED stages). Tunnel pictures with DM only; not after a
         // calibration LUT; PQ or gamma outputs. Non-certified (DolbyVisionTrims.h).
@@ -23265,6 +23943,14 @@ struct LibplaceboVideoRenderer::Impl
                         params = DolbyVisionTrims::Describe(selection);
                 }
             }
+            // test/dv-synthetic 2026-10-24 (no silent fallbacks): dv_trims on, a DV picture with DM,
+            // but the trim cannot act (a calibration LUT, an unsupported output transfer, the shader
+            // missing): listed. Neutral (no L2 for this picture) is the trims' own answer, not a fallback.
+            if (activeSettings.dvTrims && dvPicture &&
+                (target.lut || (!pq && !gammaSignal) || state.compare(0, 11, "NOT applied") == 0))
+                EngageFallback("Dolby Vision trims", state);
+            else
+                ReleaseFallback("Dolby Vision trims");
             // Review S5: the reason on change; the parameters (they follow the
             // scene) at most every 10 s, and only when they changed.
             if (state != dvTrimsLogged)
@@ -24115,9 +24801,18 @@ struct LibplaceboVideoRenderer::Impl
                 pl_frame frame = source;
                 // Stage B: the picture at this refresh's phase in place of A's planes (a
                 // composed picture keeps A: hold). Everything after runs on it unchanged.
-                const bool phasePicture = vpPhasePlanesValid && source.num_planes == 2 &&
+                NoteEntranceSourceFrame(sourceSequence);
+                bool phasePicture = vpPhasePlanesValid && source.num_planes == 2 &&
                     source.planes[0].texture == textures[0] && source.planes[1].texture == textures[1];
-                if (phasePicture)
+                // B3 (pipeline_entrance_once): the picture from the processed A and B, no stages after.
+                bool entranceOnceDone = false;
+                if (phasePicture && vpPhaseDeferred)
+                {
+                    entranceOnceDone = EntranceOncePhasePicture(source, sourceSequence, nextSourceSequence, &image, frame);
+                    if (!entranceOnceDone && !RunVpPhaseInterpolation())
+                        phasePicture = false;   // A (never waiting)
+                }
+                if (phasePicture && !entranceOnceDone)
                 {
                     frame.planes[0].texture = vpPhasePlanes.luma;
                     frame.planes[1].texture = vpPhasePlanes.chroma;
@@ -24130,6 +24825,7 @@ struct LibplaceboVideoRenderer::Impl
                 // libplacebo's scaling and never on renderImage (the source-resolution monitor read
                 // the original frame above). A cadence repeat of a picture drawn as itself reuses
                 // its entrance result (the modules would recompute the same picture).
+                if (!entranceOnceDone)
                 {
                     EntranceRun run;
                     run.path = EntrancePath::Main;
@@ -24217,6 +24913,19 @@ struct LibplaceboVideoRenderer::Impl
                     extendedRangeHookFailed = true;
                     DebugLog::Log("Extended range (BTB/WTW): WARNING libplacebo disabled its hook; off until VP restarts (today's path)");
                 }
+            // output.calibration_lut (VP stage, R1): a disabled or failing hook reverts to libplacebo's
+            // target LUT for the rest of the session, visibly (skeleton audit item 5).
+            if (!calibrationLutStageFailed && calibrationLutStage.Lut())
+            {
+                bool disabled = calibrationLutStage.Failures() > 0;
+                for (int i = 0; !disabled && i < hookErrors.num_disabled_hooks; ++i)
+                    disabled = hookErrors.disabled_hooks[i] == calibrationLutStage.Get()->signature;
+                if (disabled)
+                {
+                    calibrationLutStageFailed = true;
+                    EngageFallback("calibration LUT", "the VP stage failed; libplacebo's target LUT (before the LED compensation)");
+                }
+            }
             for (int i = 0; led && !ledMeasurementDisabledLogged && i < hookErrors.num_disabled_hooks; ++i)
                 if (hookErrors.disabled_hooks[i] == ledMeasurement.Hook()->signature)
                 {
@@ -25976,6 +26685,156 @@ int64_t LibplaceboVideoRenderer::FileHeadTicksUntilDueLocked() const
 }
 
 
+// VP-V delay budget (ADR-0020, barrier B2). The user sets ONE total delay, the same at every
+// frame rate. DelayBudget turns it into the time each frame waits in this queue (the hold):
+// fixed costs (swapchain, processing, capture transfer, render-ahead's residual lead) + hold =
+// the budget. The whole frames of the hold are the queue target (PrefillTargetLocked); the
+// sub-frame rest by the age gate below on the plain path, by the steering (target + holdFraction)
+// on the VP timeline. Not in low latency (no budget there).
+void LibplaceboVideoRenderer::SetQueueDelayBudget(int totalMs)
+{
+	const int previous = m_queueDelayBudgetMs.exchange(totalMs > 0 ? totalMs : 0, std::memory_order_acq_rel);
+	if (previous != totalMs)
+		DebugLog::Log("Delay budget: %d ms total (0 = frame-count queue)", totalMs > 0 ? totalMs : 0);
+	m_queueChanged.notify_all();
+}
+
+LibplaceboVideoRenderer::QueueHold LibplaceboVideoRenderer::CurrentQueueHold() const
+{
+	std::lock_guard<std::mutex> guard(m_queueHoldMutex);
+	return m_queueHold;
+}
+
+void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz, double signalRateHz)
+{
+	int budgetMs = m_queueDelayBudgetMs.load(std::memory_order_acquire);
+	// The Original pathway keeps upstream's frame-count queue (ADR-0019; audit B2).
+	if (m_impl && m_impl->pipelineSlots.OriginalPathway())
+		budgetMs = 0;
+	const bool lowLatency = m_impl && m_impl->lowLatencyQueueActive.load(std::memory_order_acquire);
+	DelayBudget::Plan plan;
+	std::string budgetNote;   // why the budget is not exact (shown under "Fallbacks engaged")
+	if (budgetMs > 0 && m_impl && sourceRateHz > 0.0 && !lowLatency)
+	{
+		DelayBudget::Model model;
+		// The MEASURED display refresh (or the monitor's), never an assumed one (audit B2).
+		const double displayHz = m_impl->TimelineDisplayHz();
+		if (displayHz > 0.0)
+		{
+			model.refreshHz = displayHz;
+			if (m_impl->RenderAheadActive())
+			{
+				// render-ahead presents its planned lead on top and the queue gives back the frames
+				// FitDelayBudget granted (renderAheadCreditFrames, the one credit source); the rest
+				// of the lead is a fixed cost. Its constant total across rates is not verified yet.
+				const double ps = 1.0 / sourceRateHz;
+				const double lead = RenderAhead::PlannedLead(ps, 1.0 / displayHz);
+				const size_t credit = m_impl->renderAheadCreditFrames.load(std::memory_order_acquire);
+				model.renderAheadMs = (std::max)(0.0, lead - static_cast<double>(credit) * ps) * 1000.0;
+				budgetNote = "render-ahead on: the total across frame rates is not verified yet (PENDING-RA)";
+			}
+			plan = DelayBudget::Compute(DelayBudget::InputsFor(budgetMs, sourceRateHz, model, signalRateHz));
+			if (!plan.feasible)
+				budgetNote = "too short for 2 queued frames at this rate; frame-count queue";
+			else
+			{
+				// The FIFO must hold the hold (gate 4, 2026-10-24): at 60p a 267 ms total holds ~12
+				// frames. A queue_size below that would overflow and drop frames every cycle (an
+				// unstable, far shorter delay), so the hold is cut to what the queue holds - visibly.
+				size_t capacity = 0;
+				{
+					std::lock_guard<std::mutex> guard(m_queueMutex);
+					capacity = m_useFrameQueue ? m_frameQueueMaxSize : 1;
+				}
+				const double periodMs = 1000.0 / sourceRateHz;
+				const size_t needed = DelayBudget::QueueCapacityFor(plan.holdMs, periodMs);
+				if (needed > capacity)
+				{
+					const double reachableMs = plan.fixedMs + DelayBudget::HoldForCapacity(capacity, periodMs);
+					const DelayBudget::Plan cut = DelayBudget::Compute(DelayBudget::InputsFor(reachableMs, sourceRateHz, model, signalRateHz));
+					char text[192] = {};
+					sprintf_s(text, "queue_size %zu holds %.0f of %d ms at %.3f Hz (needs %zu); raise queue_size", capacity,
+						cut.feasible ? cut.fixedMs + cut.holdMs : 0.0, budgetMs, sourceRateHz, needed);
+					budgetNote = text;
+					plan = cut;
+				}
+			}
+		}
+		else
+			budgetNote = "display refresh not known yet; frame-count queue";
+	}
+	QueueHold next;
+	next.active = plan.feasible;
+	next.holdMs = next.active ? plan.holdMs : 0.0;
+	next.fraction = next.active ? plan.holdFraction : 0.0;
+	next.targetFrames = next.active ? plan.queueTargetFrames : 0;
+	bool wasActive = false;
+	{
+		std::lock_guard<std::mutex> guard(m_queueHoldMutex);
+		wasActive = m_queueHold.active;
+		m_queueHold = next;
+	}
+	if (m_impl)
+	{
+		if (budgetNote.empty())
+			m_impl->ReleaseFallback("delay budget");
+		else
+			m_impl->EngageFallback("delay budget", budgetNote);
+		// The frame fallback ladder (owner 2026-10-20/24): below the design depth every look-ahead
+		// consumer uses what is queued (shorter look-ahead, never waiting, never adding delay);
+		// visible, not silent.
+		if (next.active && plan.degraded)
+			m_impl->EngageFallback("look-ahead", std::to_string(plan.queueFrames) + " of " + std::to_string(DelayBudget::kDesignDepth) +
+				" queued frames (delay budget " + std::to_string(budgetMs) + " ms)");
+		else
+			m_impl->ReleaseFallback("look-ahead");
+	}
+	std::string state;
+	if (next.active)
+	{
+		char text[192] = {};
+		sprintf_s(text, "%d ms at %.3f Hz (signal %.3f Hz): %d look-ahead frames, hold %.1f ms = target %zu + %.2f frames, padding %.1f ms",
+			budgetMs, sourceRateHz, signalRateHz > 0.0 ? signalRateHz : sourceRateHz, plan.queueFrames, plan.holdMs,
+			plan.queueTargetFrames, plan.holdFraction, plan.paddingMs);
+		state = text;
+	}
+	if (state != m_queueHoldLogged)
+	{
+		m_queueHoldLogged = state;
+		if (next.active)
+			DebugLog::Log("Delay budget: %s", state.c_str());
+		else if (wasActive)
+			DebugLog::Log("Delay budget: hold off (%s)", budgetMs <= 0 ? "no budget" : lowLatency ? "low latency" : "not feasible");
+	}
+	if (next.active != wasActive)
+		m_queueChanged.notify_all();
+}
+
+int64_t LibplaceboVideoRenderer::HoldTicksUntilDueLocked() const
+{
+	// The plain per-refresh path only. The VP timeline realises the rest by its steering (target +
+	// holdFraction); an age gate there adds a frame its slow steering does not drain (delay-gate
+	// finding 2026-10-24).
+	const QueueHold hold = CurrentQueueHold();
+	if (!hold.active || m_frameQueue.empty() || !m_impl || m_impl->vpTimelineActive)
+		return 0;
+	const QueuedFrame& head = m_frameQueue.front();
+	// Measured from the capture hardware's arrival when known (audit B2), else the enqueue.
+	const int64_t since = head.arrivalQpc != 0 ? head.arrivalQpc : head.enqueueQpc;
+	if (head.fileFrame || since == 0)
+		return 0;
+	LARGE_INTEGER frequency{};
+	if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0)
+		return 0;
+	const int64_t due = since + static_cast<int64_t>(hold.holdMs * static_cast<double>(frequency.QuadPart) / 1000.0);
+	const int64_t now = PerformanceCounterNow();
+	return due > now ? due - now : 0;
+}
+
+// A timed dequeue wait (a file head's due time, the delay budget's hold) re-checks at least this
+// often, so a changed presentation lead or budget is followed promptly.
+static constexpr int64_t kDueWaitRecheckMicros = 100000;
+
 void LibplaceboVideoRenderer::WaitForDequeueLocked(std::unique_lock<std::mutex>& lock,
 	bool wakeOnCalibrationPattern)
 {
@@ -25992,8 +26851,10 @@ void LibplaceboVideoRenderer::WaitForDequeueLocked(std::unique_lock<std::mutex>&
 			return m_stopRequested || CanDequeueLocked() || calibrationActive(); });
 		if (m_stopRequested || calibrationActive())
 			return;
-		// Capture heads: 0 at once, the wait above unchanged.
-		const int64_t ticks = FileHeadTicksUntilDueLocked();
+		// Capture heads: 0 at once (the wait above), unless the delay budget's hold applies
+		// (HoldTicksUntilDueLocked: the plain path's age gate).
+		const int64_t fileTicks = FileHeadTicksUntilDueLocked();
+		const int64_t ticks = fileTicks > 0 ? fileTicks : HoldTicksUntilDueLocked();
 		if (ticks <= 0)
 			return;
 		LARGE_INTEGER frequency{};
@@ -26003,7 +26864,7 @@ void LibplaceboVideoRenderer::WaitForDequeueLocked(std::unique_lock<std::mutex>&
 		// Woken early by any queue change (a reset, a stop, a new head); re-checked
 		// at least every 100 ms so a changed presentation lead is followed.
 		m_queueChanged.wait_for(lock, std::chrono::microseconds(
-			(std::max)(int64_t{ 1 }, (std::min)(micros, int64_t{ 100000 }))));
+			(std::max)(int64_t{ 1 }, (std::min)(micros, kDueWaitRecheckMicros))));
 	}
 }
 
@@ -26507,8 +27368,11 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 		m_impl->ledWtwPassthrough.store(m_ledWtwPassthrough, std::memory_order_release);
 		m_impl->ledBtbPassthrough.store(m_ledBtbPassthrough, std::memory_order_release);
 	}
+	// VP-V: slot drive.projector_control (off in the Original pathway, ADR-0019, or at slot level):
+	// the RS-232 LED/CNTR drive is not started.
+	const bool projectorAllowed = !m_impl || m_impl->pipelineSlots.Runs(PipelineSlots::Id::DriveProjectorControl);
 	if (signature == m_ledDriveSignature && (m_ledDrive != nullptr) ==
-		(valid && LedDrive::ReadLedDriveConfig(configuration).enabled))
+		(valid && projectorAllowed && LedDrive::ReadLedDriveConfig(configuration).enabled))
 		return;
 	// A broken LED profile never stops VP: it is left out (built-in values
 	// plus the main settings) and said once per change.
@@ -26544,9 +27408,10 @@ void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
 		return;
 	}
 	const LedDrive::LedDriveConfig led = LedDrive::ReadLedDriveConfig(configuration);
-	if (!led.enabled)
+	if (!led.enabled || !projectorAllowed)
 	{
-		if (previous) DebugLog::Log("Dynamic Drive: disabled");
+		if (previous || (led.enabled && !projectorAllowed))
+			DebugLog::Log("Dynamic Drive: disabled%s", projectorAllowed ? "" : " (slot drive.projector_control off: Original pathway or pipeline_slots_off)");
 		return;
 	}
 	// VP Renderer filter (2026-10-17): a drive the previous file's renderer
@@ -30506,6 +31371,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 			m_queueTargetFloor.store(m_impl->activeSettings.opticalFlow && m_impl->activeSettings.motionAheadFrames > 0 ?
 				MotionAhead::QueueFramesFor(MotionAhead::DepthAt(m_impl->activeSettings.motionAheadFrames, captureRateHz,
 					m_impl->activeSettings.generalRateFixes)) : 0, std::memory_order_relaxed);
+			UpdateQueueDelayHold(captureRateHz, measuredCaptureRateHz > 0.0 ? measuredCaptureRateHz :
+				(state && state->displayMode ? state->displayMode->RefreshRateHz() : 0.0));   // VP-V delay budget (ADR-0020)
 			m_impl->contentIntent->Configure(m_impl->activeSettings.intentContent,
 				m_impl->activeSettings.intentContentHoldSeconds);
 			m_impl->ConfigureIntentInterpreter();
@@ -30712,7 +31579,8 @@ void LibplaceboVideoRenderer::RenderLoop()
                         m_impl->vpQueueSteering.Reset();
                     else
                         m_impl->vpQueueSteering.Update(queueDepthAfterDequeue,desiredQueueDepth,rateHz,
-                            m_queueTimingFixes.load(std::memory_order_relaxed));
+                            m_queueTimingFixes.load(std::memory_order_relaxed),
+                            CurrentQueueHold().fraction);
                     m_impl->vpTimeline.SetRateTrim(currentFileFrame?1.0:m_impl->vpQueueSteering.RateTrim());
                     m_impl->vpTimeline.SetSpanInTime(m_impl->activeSettings.generalRateFixes);   // fixed-constant batch 2026-10-18
                     const unsigned long long updatesBefore=m_impl->vpTimeline.Updates();
@@ -30817,6 +31685,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 					double oldestBeforeMs = 0.0;
 					double oldestAfterMs = 0.0;
 					bool recoveredBacklog = false;
+					bool heldBacklog = false;
 					{
 						std::lock_guard<std::mutex> queueGuard(m_queueMutex);
 						queueBefore = m_frameQueue.size();
@@ -30855,6 +31724,21 @@ void LibplaceboVideoRenderer::RenderLoop()
 							renderCycleMs,
 							queueRateHz,
 							queueFixes);
+						// VP-V delay budget: a held queue sheds a backlog beyond its hold (gate 5).
+						const QueueHold heldQueue = CurrentQueueHold();
+						if (!recoveredBacklog && heldQueue.active && qpcAvailable && !currentFileFrame && !m_frameQueue.empty() &&
+							!m_frameQueue.front().fileFrame)
+						{
+							const QueuedFrame& head = m_frameQueue.front();
+							const int64_t since = head.arrivalQpc != 0 ? head.arrivalQpc : head.enqueueQpc;
+							const double headAgeMs = since > 0 && nowQpc > since ?
+								static_cast<double>(nowQpc - since) * 1000.0 / static_cast<double>(qpcFrequency.QuadPart) : 0.0;
+							heldBacklog = AlphaQueuePolicy::ShouldShedHeldBacklog(queueBefore, recoveryTarget, headAgeMs,
+								heldQueue.holdMs, queueRateHz) ||
+								AlphaQueuePolicy::ShouldShedHeldExcess(queueBefore, recoveryTarget, headAgeMs, heldQueue.holdMs,
+									queueRateHz, m_heldExcessRun);
+							recoveredBacklog = heldBacklog;
+						}
 						if (recoveredBacklog)
 						{
 							while (m_frameQueue.size() > recoveryTarget)
@@ -30920,7 +31804,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 							"Alpha backlog recovery: generation=%llu source=%llu trigger=%s render_cycle_ms=%.3f threshold_ms=%.3f queue_before=%zu target=%zu oldest_before_ms=%.3f dropped=%zu dropped_total=%llu canceled_repeats=%zu queue_after=%zu oldest_after_ms=%.3f shader=%s mapping=%s decision=flush_to_target",
 							static_cast<unsigned long long>(frameGeneration),
 							static_cast<unsigned long long>(sourceSequence),
-							renderStall ? "render_stall" : "stale_age",
+							heldBacklog ? "held_backlog" : renderStall ? "render_stall" : "stale_age",
 							renderCycleMs,
 							AlphaQueuePolicy::RenderStallThresholdMs(captureRateHz),
 							queueBefore,
@@ -31477,17 +32361,18 @@ size_t LibplaceboVideoRenderer::PrefillTargetLocked() const
 {
 	if (!m_useFrameQueue)
 		return 1;
-	const size_t desired = LockedFilmQueueTarget(AlphaQueuePolicy::ClampDesiredDepthToCapacity(
-		m_frameQueueDesiredDepth, m_frameQueueMaxSize));
-	// render_ahead_queue_credit (design step 7): the queue gives back the frames the
-	// queued extras' lead adds to the latency (never below 2 queued frames). 0 unless on.
+	// VP-V delay budget (ADR-0020): with a budget the queue target is the hold's whole frames at
+	// this rate (time-based already, so no film-lock scaling); otherwise the frame-count target.
+	const QueueHold hold = CurrentQueueHold();
+	const size_t desired = hold.active ?
+		AlphaQueuePolicy::ClampDesiredDepthToCapacity(hold.targetFrames, m_frameQueueMaxSize) :
+		LockedFilmQueueTarget(AlphaQueuePolicy::ClampDesiredDepthToCapacity(m_frameQueueDesiredDepth, m_frameQueueMaxSize));
+	// render_ahead_queue_credit (design step 7) and the look-ahead floor (hunt 2 13-timing M3), in
+	// the one rule the stress harness tests too (AlphaQueuePolicy::CombineQueueTarget): the floor
+	// never exceeds `desired`, so a delay budget's hold target wins (audit B2).
 	const size_t credit = m_impl ? m_impl->renderAheadCreditFrames.load(std::memory_order_acquire) : 0;
-	const size_t target = credit > 0 && desired > 2 ? desired - (std::min)(credit, desired - 2) : desired;
-	// Hunt 2 13-timing M3 (queue_timing_fixes): the credit never takes the target
-	// below the look-ahead's frames, so motion-ahead can still engage while it is held.
-	const size_t targetFloor = m_queueTimingFixes.load(std::memory_order_relaxed) ?
-		(std::min)(desired, m_queueTargetFloor.load(std::memory_order_relaxed)) : 0;
-	return (std::max)(target, targetFloor);
+	return AlphaQueuePolicy::CombineQueueTarget(desired, credit, m_queueTargetFloor.load(std::memory_order_relaxed),
+		m_queueTimingFixes.load(std::memory_order_relaxed));
 }
 
 

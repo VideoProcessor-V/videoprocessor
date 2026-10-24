@@ -9019,14 +9019,14 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* dvTrims = addChoice(QStringLiteral("VP's interpretation of DV metadata: L2 trims"),
             QStringLiteral("dv_trims"), { QStringLiteral("on"), QStringLiteral("off") });
         dvTrims->setToolTip(QStringLiteral(
-            "Under test (default off). VP's interpretation of DV metadata: applies the Level 2 trim chosen for "
+            "Default on (DV synthetic validation, 2026-10-24). VP's interpretation of DV metadata: applies the Level 2 trim chosen for "
             "your display's peak (interpolated between the grader's trims) after VP's tone mapping: slope, offset, "
             "power, chroma weight and saturation. Not certified and not Dolby display management. "
             "Not used with a calibration 3D LUT."));
         auto* dvGpu = addChoice(QStringLiteral("Dolby Vision tunnel: GPU unpack"),
             QStringLiteral("dv_tunnel_gpu_unpack"), { QStringLiteral("on"), QStringLiteral("off") });
         dvGpu->setToolTip(QStringLiteral(
-            "Under test (default off). The Dolby Vision RGB tunnel's 12-bit picture is unpacked on the GPU, bit for bit "
+            "Default on (DV synthetic validation, 2026-10-24). The Dolby Vision RGB tunnel's 12-bit picture is unpacked on the GPU, bit for bit "
             "the same as the CPU; the CPU still reads and checks the Dolby Vision metadata packet, but no longer the whole "
             "frame. If the GPU unpack fails, VP goes back to the CPU unpack for the session (logged)."));
 
@@ -10890,7 +10890,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },
                     { "dejudder_est_split", "off" }, { "dejudder_motion_rolloff", "off" }, { "dejudder_global_two", "on" },
                     { "dejudder_regional_hold", "on" }, { "dejudder_pixel_trust", "on" }, { "dejudder_verify", "off" },
-                    { "dejudder_landing_check", "on" }, { "native_rgb_ingest", "on" }, { "dv_tunnel_gpu_unpack", "off" }, { "dv_trims", "off" }, { "dejudder_pulldown", "off" },
+                    { "dejudder_landing_check", "on" }, { "native_rgb_ingest", "on" }, { "dv_tunnel_gpu_unpack", "on" }, { "dv_trims", "on" }, { "dejudder_pulldown", "off" },
                     { "dejudder_fade_match", "on" }, { "dejudder_low_res", "all" }, { "dejudder_estimate_ahead", "on" },
                     { "dejudder_block_taper", "off" }, { "dither_vectors", "auto" }, { "adaptive_downscale", "off" },
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "auto" }, { "adaptive_grain_map", "on" },

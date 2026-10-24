@@ -17,7 +17,7 @@ The picture travels through **eight units**. The pipeline runs top to bottom:
 
 | Side | Unit | What it does, in plain words | Status |
 |---|---|---|---|
-| **INPUT SIDE** | Input | Takes frames from the card without losing precision; works out the signal type (SDR/HDR10/LLDV/DV); holds the frames for ONE total delay you set to match your AVR (recommended: enough for 4 frames, about 250 ms at 24p), the same at every frame rate | built |
+| **INPUT SIDE** | Input | Takes frames from the card without losing precision; works out the signal type (SDR/HDR10/LLDV/DV); holds the frames for ONE total delay you set to match your AVR (recommended: enough for 4 frames, about 267 ms at 24p on a 60 Hz display, measured), the same at every frame rate | built |
 | | Input (analysis) | Studies the **untouched** frame: how the player scaled it, where the picture is, cuts/fades, subtitles | built |
 | | Motion | Measures motion on the untouched frame at its own size (cheap, accurate); one "vectors valid" switch every user obeys | built |
 | | Scaling: **re-base** | Undoes the player's upscale, axis by axis, so we work on the real picture | built (order pending) |
@@ -63,7 +63,7 @@ overlay, in Config and in Ctrl+Alt+D, plus a one-time notice.
 - **Fixed delay** (ADR-0003, timing decided in ADR-0020):
   - The user sets ONE total delay to match the AVR. It is identical at every frame rate (padded),
     so the AVR setting never changes between titles.
-  - The pipeline is built for 4 queued frames: this is the RECOMMENDED setting, about 250 ms at
+  - The pipeline is built for 4 queued frames: this is the RECOMMENDED setting, about 267 ms (measured) at
     24p.
   - A lower total walks the 4 -> 3 -> 2 ladder, and every feature keeps working at the lower
     margin.
@@ -107,7 +107,7 @@ unpacks the DV tunnel. Output: a signal descriptor on every frame. Fallback: DV 
 **input.queue_timing (30), built, host.** Holds ONE user-set total delay (`target_latency_ms`; ADR-0020) and runs cadence/pulldown
 detection, the film clock and stale-burst handling.
 - **Recommended total:** enough for 4 queued frames at the slowest source rate. At 24p that is
-  4 x 41.7 = 167 ms, plus the swapchain, render-ahead and processing: about 230-250 ms.
+  4 x 41.7 = 167 ms, plus the swapchain, render-ahead and processing: about 267 ms (measured, 23.976 on 60 Hz).
 - **The same total at every frame rate:** faster rates are padded, so the AVR delay never
   changes between titles.
 - **A lower total:** the queue depth = floor((total - fixed costs) / frame period). It walks the
@@ -185,6 +185,23 @@ active, libplacebo receives 4:4:4 and must not re-upsample. **Open:** verify wha
 with 4:2:2/4:2:0 chroma in our path; chroma siting vs crop/A-lens/NLS; BTB/WTW; DV tunnel;
 subtitles. Candidates: CfL-style luma-guided or separable Lanczos.
 
+**Chroma decision (research/chroma c7564afa, 2026-10-24).**
+
+- **The slot stays EMPTY for now.** libplacebo's chroma upscaler ('auto' = catmull_rom) is the
+  default for every tier.
+- **CfL is opt-in** (graphics/subtitles). Its bundled `chroma_offset_x` is now -0.5, matching
+  VP's LEFT-sited input (synthetic edge dE 2.17 -> 0.88).
+- **Siting fixes, applied:**
+  - the re-base scales each plane's shift with its factor (`VP-V/core/ChromaSiting.h`);
+  - the legacy CPU P010 path (even chroma lines only) is tagged TOP_LEFT.
+- **The contract for a future chroma slot:**
+  - 2 planes: luma plus full-size CbCr, >= 12-bit or float, shift 0;
+  - no clamp (BTB/WTW kept);
+  - the full frame including bars;
+  - DV tunnel handling defined;
+  - the `(w+1)/2` chroma-width maths audited for odd sizes;
+  - any VP stage that resamples chroma scales the plane shift (`ShiftAfterResample`).
+
 ### 3.2 PROCESSING
 
 **motion.vector_delivery (130), partial, host.** Hands source-size vectors to each consumer
@@ -223,7 +240,7 @@ hook runs at the **output size**. Order (ADR-0013):
 | # | Slot | Stage | Status today |
 |---|---|---|---|
 | 0 | (plumbing) | libplacebo output-encoding repair: first, when any PRE_OUTPUT hook runs | built |
-| 200 | colour.sdr_tone_shape | Delta 13 SDR tone shape + DV trims | built |
+| 200 | colour.sdr_tone_shape | Delta 13 SDR tone shape + DV trims (part of the Stage 13 design: the shape runs first) | built |
 | 210 | colour.appearance | **Stage 13 CAM16** (off by default) | placeholder |
 | 220 | drive.led_measure | LED measurement (pre-compensation content) | built |
 | 230 | drive.led_compensation | LED adaptive gamma / compensation (CNTR never above need) | built |
@@ -324,7 +341,7 @@ These rules change HOW the slots run, not their order.
     5 frames = 208 ms.
   - DECIDED (owner 2026-10-24, ADR-0020):
     - ONE user-set total delay. 4 frames is RECOMMENDED (`DelayBudget::RecommendedBudgetMs`:
-      4 frames at the slowest source rate, about 230-250 ms at 24p).
+      4 frames at the slowest source rate, about 267 ms (measured, 23.976 on 60 Hz) at 24p).
     - The SAME total at every frame rate: faster rates are padded (`Plan::paddingMs`).
     - The ladder is 4 -> 3 -> 2. Config shows the resulting frames, degraded state and margin.
     - The budget stays configurable.
@@ -360,6 +377,7 @@ additions are modular add-ons and gives a known-good reference.
 | OutputEncodingRepair | It runs only when a PRE_OUTPUT hook is present; original mode has none, so it is inactive | identical |
 | VP bug fixes in upstream code (queue/timing fixes, capture resync hardening, crash fixes) | Fixes that cannot be switched off without reintroducing crashes/stalls | timing only; listed per fix |
 | Config migration (retired/renamed keys) | Upstream configs are migrated on load | n/a (settings mapping test) |
+| Chroma siting fixes (2026-10-24) | Re-based frames scale the plane shift; the legacy CPU P010 path is tagged TOP_LEFT; VP corrections of upstream behaviour; the Original pathway keeps upstream's LEFT tag and has no re-base | none in the Original pathway |
 | "Fallbacks engaged" status / diagnostics | Status only, not in the pixel path | n/a |
 | LED drive (Dynamic Drive) | The LED module is created by the host, not the renderer. Original mode turns its hooks off (slot switches), but the projector commands follow the LED config, so the golden test runs with the LED drive off | test precondition |
 
@@ -389,6 +407,68 @@ redundant per-refresh repeats removed.
 - **Cache keys.** The cache is keyed by the source sequence + an epoch. The epoch is bumped on
   settings, re-base factors, processing size or format, so a stale picture is never reused.
   Sequence 0 (unknown) is never served from the cache.
+
+### 3.8b B3 status and the hard gate (ADR-0024)
+
+**Built behind `pipeline_entrance_once` (default OFF until the acceptance passes).** With it on:
+
+- **The ring.** `EntranceStages::Ring` keeps each source frame's processed picture as its own
+  copy (a plain copy pass, exact for the 16-bit and float planes), keyed by the unique source
+  sequence, the frame's structure (crop, range, colour, re-base, active stages) and a role.
+  - A: the frame drawn as itself, the stateful stages (debander hold, detail history) advanced
+    on it once.
+  - B ahead: the next frame, processed **as its own A** before it is shown. With stateful
+    stages, B's own vector field is estimated ahead (the de-judder's estimate ahead, (B, C),
+    while A's remaining pictures read the snapshot of (A, B)). So the picture B shows at its own
+    draw is the very texture made ahead: exact continuity at the source-frame boundary. When
+    B's field cannot be made ahead (no C queued yet, an estimate failure), B is processed per
+    picture for that frame and "Fallbacks engaged: entrance once (B's vectors not ready ahead
+    ...)" says so.
+  - The per-frame readings (bitrate quality, level step) of B ahead are A's: a one-frame lag of
+    those readings, by design (a frame's processed picture is made once).
+- **The consumers.** Timeline pictures between frames (interpolation, hiccup gap pairs) and the
+  source-path extras (the warp, Stage A interpolation) warp or blend the processed planes. The
+  shaders map the field (estimate pixels) onto the processed size (`MotionWarp::WarpProcessed`,
+  `FrameInterpolator::Run(estimate size)`); at scale 1 they are byte-identical to before.
+- **Visible fallbacks:** a source-resolution crossfade, a composed (subtitle) picture, a copy
+  failure. Those pictures take today's per-picture stages.
+- **Cost (measured, real film clip, 24p in 60 with interpolation).** Input-side runs per
+  source frame: 2.43 with B3 off, 1.05 with B3 on (about 2.3x lower). The default 24p-in-60
+  path (the de-judder's rendered warp) already runs the input side once per source frame with
+  B3 off; B3 does not change it.
+- **Measured acceptance so far** (`EntranceOnceRealClipAcceptance`,
+  `EntranceOnceInterpolatorIsExactOnStillOrInvalidVectors`): continuity (B ahead is B's A,
+  fallbacks only at start-up), grain 96-101% of B3 off, B3 on byte-identical to B3 off without
+  motion pictures, the interpolator exact on stills and invalid vectors at plane scales 1.5
+  and 2. The delay gate's ladder passes with the held-backlog shedding.
+- **A held queue sheds a backlog** older than its hold by more than two frames
+  (`AlphaQueuePolicy::ShouldShedHeldBacklog`): without it, a start-up or render stall left the
+  delay 60-120 ms above the budget.
+- OFF is byte-identical to today's code (GPU test against the r6 build). The Original pathway
+  never uses it.
+
+**The hard gate.** B3 passes ADR-0024's nine real-clip criteria and becomes the default before
+any deploy, motion training or dependent net integration. The net runner and net A come after
+it. Until then `motion.consumers` stays fixed in the order and outside `UpstreamKey`.
+
+### 3.8c KNOWN GAPS (the single list; nothing is dropped silently)
+
+| Gap | Where it shows | What closes it |
+|---|---|---|
+| B3 not yet the default | `pipeline_entrance_once` off; ADR-0024 | the nine criteria on real clips (owner A/B for pans) |
+| B3 source-path extras not verified on screen | test marks PENDING-ONSCREEN (an off-screen window gets no DXGI statistics) | one short on-screen harness run (owner OK pending) |
+| B3 crossfade keeps the old order | "Fallbacks engaged: entrance once (source-resolution crossfade)" | version 2: both paths' processed pictures in the ring |
+| render_ahead total across rates | "Fallbacks engaged: delay budget (render-ahead ... PENDING-RA)"; delay gate PENDING-RA | render-ahead's lead folded into the queue hold |
+| 120 Hz displays hold ~4 film frames more than planned | delay gate PENDING-HZ | investigate the 120 Hz harness case |
+| A queue_size below the hold | "Fallbacks engaged: delay budget (queue_size N holds X of Y ms; raise queue_size)" | the operator raises queue_size (32, the deployed value, holds 267 ms at 60p) |
+| LED and subtitle consumers at 2 queued frames | look-ahead ladder | a projector/subtitle fixture to test the shorter look-ahead |
+| Nets and tiers | slots are placeholders (zero cost) | the net runner after B3, then net A |
+| Mid-stream rate change in the delay gate | not yet a test | a harness case switching 23.976 -> 59.94 |
+| Steering settle time after a reset | 1-2 minutes for a large sub-frame rest at 30p | a faster initial trim |
+| Detail look-ahead for B ahead | B3's B ahead skips the optional detail look-ahead | measure C's bands when C is uploaded |
+| B3 needs C queued for B's field ahead | "Fallbacks engaged: entrance once (B's vectors not ready ahead (no frame after next ...))" at start-up or on a short queue | the delay budget's 4-frame look-ahead keeps C queued; shorter queues fall back per picture |
+| Timeline pictures vs plain draws at near-black | +-1 code at codes 2-3 in ~0.01% of pixels, B3 on AND off (a downstream dark-level stage) | identify the stage; criterion 1 is asserted at B3's boundary meanwhile |
+| Source-path extras need DXGI statistics | an off-screen or windowed laptop window holds the extras ("timing not known: display rate") | a fullscreen run verifies B3's extras |
 
 ### 3.9 Real-time proof on the laptop (B4)
 
@@ -436,7 +516,7 @@ can move a module to another position.
 
 ## 4. Decisions and open items
 
-Decisions: see `docs/decisions/` (ADR-0001 .. ADR-0023).
+Decisions: see `docs/decisions/` (ADR-0001 .. ADR-0024).
 
 | Open item | Decided by | Affects |
 |---|---|---|
@@ -498,11 +578,11 @@ a few clearly commented `#include <VP-V/...>` hooks. Read `src/VP-V/README.md` f
      redundant per-refresh repeats removed (3.8).
    - The debander hold and the detail history still advance once per source frame on A, which
      is processed by the stages before them, whatever the order.
-3. **Next: phase pictures and extras warp the cached processed picture** (the full B3 change).
-   This needs the warp/interpolator shaders to read vectors scaled per axis (`VectorScale`) at
-   the processed size.
-   - It is a visible, intended change to de-judder frames, so it goes behind a switch and is
-     checked on real clips before it becomes the default.
+3. **Built behind `pipeline_entrance_once` (3.8b):** phase pictures and extras warp the
+   ring's processed pictures; the shaders map the field to the processed size; B is processed
+   ahead as its own A with B's field estimated ahead. Default OFF until ADR-0024's acceptance
+   passes on real clips (`EntranceOnceRealClipAcceptance`, and the existing harness tests with
+   `VP_TEST_ENTRANCE_ONCE=1`).
 4. **Done:** output slot hooks tagged and ordered by the registry (unchanged for the designed
    order), and the VP calibration-LUT hook (R1) available.
    - The LUT runs before the de-judder rendered-picture cache, so the extras show the LUT-mapped

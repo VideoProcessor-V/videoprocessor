@@ -15,6 +15,23 @@
 // (ADR-0021). See core/README.md for how the core headers connect.
 namespace PipelineSlots
 {
+	// The slots whose switch the renderer honours today: each has a Runs() check on its pass or
+	// hook. A switch for any other slot would be accepted and silently ignored, so
+	// pipeline_slots_off refuses it visibly (skeleton audit item 4, 2026-10-24). Grows as slots
+	// get their components (and their Runs() checks).
+	inline bool SwitchHonoured(Id id)
+	{
+		switch (id)
+		{
+		case Id::ScalingRebase: case Id::RepairDeband: case Id::RepairTextureRestore:
+		case Id::ColourSdrToneShape: case Id::DriveLedMeasure: case Id::DriveLedCompensation:
+		case Id::OutputCalibrationLut: case Id::DriveProjectorControl:
+			return true;
+		default:
+			return false;
+		}
+	}
+
 	// Slot-level enable/disable, which slots have a component, the order, and the Original
 	// pathway mode. Defaults: every slot with a component is enabled (its own settings still
 	// decide whether it does anything); every placeholder is disabled and has no component.
@@ -32,12 +49,12 @@ namespace PipelineSlots
 			ResetOrder();
 		}
 
-		void SetEnabled(Id id, bool on) { enabled[static_cast<size_t>(id)] = on; }
+		void SetEnabled(Id id, bool on) { enabled[static_cast<size_t>(id)] = on; entranceDirty = true; }
 		bool Enabled(Id id) const { return enabled[static_cast<size_t>(id)]; }
 
 		// A real component registers itself when it lands in its slot (or is unavailable, e.g.
 		// missing net weights: then the slot reports its "Fallbacks engaged" entry and stays inert).
-		void SetComponent(Id id, bool present) { component[static_cast<size_t>(id)] = present; }
+		void SetComponent(Id id, bool present) { component[static_cast<size_t>(id)] = present; entranceDirty = true; }
 		bool HasComponent(Id id) const { return component[static_cast<size_t>(id)]; }
 
 		// THE zero-cost rule: only an enabled slot with a component may run a pass or register
@@ -55,6 +72,7 @@ namespace PipelineSlots
 				const size_t i = static_cast<size_t>(info.id);
 				if (info.origin == Origin::Vp)
 					enabled[i] = false;
+				entranceDirty = true;
 				upstreamForm[i] = info.origin != Origin::Vp;
 			}
 			ResetOrder();
@@ -166,7 +184,10 @@ namespace PipelineSlots
 			{
 				if (other == id)
 					break;
-				if (ZoneOf(other) == Zone::Host || !Runs(other))
+				// The motion consumers stay out until B3 lands: today they run BEFORE the entrance in
+				// the renderer (phase pictures and extras are made from native planes), so their
+				// position in the order does not describe what a net downstream sees.
+				if (ZoneOf(other) == Zone::Host || !Runs(other) || other == Id::MotionConsumers)
 					continue;
 				if (!key.empty()) key += '>';
 				key += Get(other).name;
@@ -178,16 +199,23 @@ namespace PipelineSlots
 		std::vector<Id> Active() const { return Collect(false, HookPoint::Host); }
 		std::vector<Id> Active(HookPoint hook) const { return Collect(true, hook); }
 		// The entrance stages that run this frame, in effective order.
-		std::vector<Id> ActiveEntrance() const
+		// The renderer walks it per picture, so it is kept, not rebuilt (refreshed on any change).
+		const std::vector<Id>& ActiveEntrance() const
 		{
-			std::vector<Id> ids = Active(HookPoint::Prepass);
-			ids.erase(std::remove_if(ids.begin(), ids.end(), [](Id id) { return !IsEntranceStage(id); }), ids.end());
-			return ids;
+			if (entranceDirty)
+			{
+				entrance = Active(HookPoint::Prepass);
+				entrance.erase(std::remove_if(entrance.begin(), entrance.end(), [](Id id) { return !IsEntranceStage(id); }),
+					entrance.end());
+				entranceDirty = false;
+			}
+			return entrance;
 		}
 
 	private:
 		void SetFullOrder(const std::vector<Id>& full)
 		{
+			entranceDirty = true;
 			order = full;
 			for (size_t i = 0; i < order.size(); ++i)
 				rank[static_cast<size_t>(order[i])] = static_cast<int>(i);
@@ -208,5 +236,7 @@ namespace PipelineSlots
 		std::array<int, kCount> rank{};
 		std::vector<Id> order;
 		bool original = false;
+		mutable std::vector<Id> entrance;
+		mutable bool entranceDirty = true;
 	};
 }

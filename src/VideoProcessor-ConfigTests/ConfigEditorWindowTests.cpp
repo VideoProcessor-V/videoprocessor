@@ -665,7 +665,7 @@ void testEveryNewRendererControlReachesVp()
         { "dejudder_pixel_trust_lo", "2", false }, { "dejudder_pixel_trust_hi", "7", false },
         { "dejudder_landing_check", "off", true }, { "dejudder_pixel_trust", "off", true },
         { "dejudder_pulldown", "on", true },
-        { "dv_tunnel_gpu_unpack", "on", true }, { "dv_trims", "on", true },
+        { "dv_tunnel_gpu_unpack", "off", true }, { "dv_trims", "off", true },
         { "dejudder_verify_share", "0.3", false },
         { "dejudder_verify", "on", true }, { "dejudder_low_res", "search", true },
         { "dejudder_estimate_ahead", "off", true }, { "dejudder_hold_feather_px", "3", false },
@@ -9400,6 +9400,7 @@ static const std::map<std::string, const char*>& CoverageAllowList()
         { "renderer:pipeline_order", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.pipeline_order); also read from [vprenderer]" },
         { "renderer:pipeline_slots_off", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.pipeline_slots_off); also read from [vprenderer]" },
         { "renderer:calibration_lut_stage", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.calibration_lut_stage); also read from [vprenderer]" },
+        { "renderer:pipeline_entrance_once", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.pipeline_entrance_once); also read from [vprenderer]" },
     };
     return allowList;
 }

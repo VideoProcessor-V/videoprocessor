@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <VP-V/core/DelayBudgetLadder.h>   // VP-V delay budget (the ladder test)
 #include <FileFrameTiming.h>
 #include <wincodec.h>
 #include <atlbase.h>
@@ -36,9 +37,12 @@
 #include <dv_loopback/DvLoopbackPattern.h>
 #include <dv_loopback/DvCaptureContainer.h>
 #include <RawCaptureCorpus.h>
+#include <DolbyVisionTunnelSourceState.h>
+#include <HDRData.h>
 #include <calibration/CalibrationController.h>
 #include <calibration/CalibrationSimulation.h>
 #include <calibration/PatternCodes.h>
+#include "RealClipLibrary.h"   // B3 real-clip acceptance (decoded clip frames into the harness)
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 // capture_path (owner 2026-10-13): the shipped VP renderer DLL driven like the
@@ -262,6 +266,8 @@ namespace
 		std::string fallbacksStatus;   // r6 fix 7: "Fallbacks engaged: ..." (GetFallbacksStatus)
 		std::string sourceStatus;   // the crash state's source resolution line (Stage 12)
 		std::string captureMetadata;   // the rendered-output capture's JSON sidecar (plan->captureAtSeconds)
+		// test/dv-synthetic 2026-10-24: every capture's sidecar, in completion order (plan->captureTimes).
+		std::vector<std::string> captureMetadataList;
 		// Sampled once per sent frame through the second half of the run: the renderer's queue depth
 		// (GetFrameQueueSize) and its capture-to-output delay (ExitLatencyMs).
 		std::vector<size_t> queueDepths;
@@ -289,6 +295,10 @@ namespace
 	// each exactly BytesPerFrame long.
 	bool g_harnessDolbyVision = false;
 	std::vector<std::vector<BYTE>> g_harnessDvFrames;
+	// test/dv-synthetic 2026-10-24: a PQ BT.2020 source that is not a tunnel (an LLDV-like
+	// V210 signal as VP sees it after newlldv's inference): mastering / MaxCLL nits, 0 = off
+	// (the harness's SDR / Rec.709 state).
+	double g_harnessPqSourceNits = 0.0;
 
 	// The harness's frame size (1080p unless a test sets it; the 4K stress run).
 	int g_harnessWidth = 1920, g_harnessHeight = 1080;
@@ -297,6 +307,13 @@ namespace
 	// The queue target (0: 4 for film, 3 otherwise) and, as the app does, the profile snapshot
 	// applied before Build (the queue profile reaches the renderer that way).
 	size_t g_harnessQueueTarget = 0;
+	// VP-V delay budget (ADR-0020): the total delay the app sends (SetQueueDelayBudget); 0 = none.
+	int g_harnessDelayBudgetMs = 0;
+	// The renderer's FIFO capacity (queue_size); 8 unless a test sets it (the delay ladder: 60p holds ~12).
+	size_t g_harnessQueueCapacity = 8;
+	// Another renderer DLL to run instead of this build's (the byte-identity test against the r6
+	// baseline build); empty = this build's.
+	std::string g_harnessRendererDll;
 	// Bug hunt 3 F7: the active-picture look-ahead given to the renderer after Build, as the
 	// app does (-1: not called; the renderer's own 0). g_harnessLookaheadAutomatic: told as automatic.
 	int g_harnessActivePictureLookahead = -1;
@@ -330,6 +347,9 @@ namespace
 		unsigned fileRateDenominator = 1;
 		double resetAtSeconds = -1.0;    // an HDMI resync (renderer Reset) at this time
 		double captureAtSeconds = -1.0;  // a rendered-output capture (VP-0133) at this time
+		// test/dv-synthetic 2026-10-24: more captures, one at each of these times (seconds); the
+		// sidecars come back in RunResult::captureMetadataList.
+		std::vector<double> captureTimes;
 		std::function<FrameStep(int)> step;
 		// Called once per loop iteration with the seconds since the start (automatic
 		// calibration: patterns shown through the running renderer).
@@ -349,9 +369,13 @@ namespace
 		int shotFrames = 0;
 		bool dolbyVision = false;
 		std::vector<std::vector<BYTE>> dvFrames;
+		double pqSourceNits = 0.0;
 		int width = 1920, height = 1080;
 		int windowWidth = 640, windowHeight = 360;
 		size_t queueTarget = 0;
+		int delayBudgetMs = 0;
+		size_t queueCapacity = 8;
+		std::string rendererDll;
 		int activePictureLookahead = -1;
 		bool lookaheadAutomatic = false;
 		bool applySnapshot = false;
@@ -370,11 +394,15 @@ namespace
 		g.shotFrames = g_harnessShotFrames;
 		g.dolbyVision = g_harnessDolbyVision;
 		g.dvFrames = g_harnessDvFrames;
+		g.pqSourceNits = g_harnessPqSourceNits;
 		g.width = g_harnessWidth;
 		g.height = g_harnessHeight;
 		g.windowWidth = g_harnessWindowWidth;
 		g.windowHeight = g_harnessWindowHeight;
 		g.queueTarget = g_harnessQueueTarget;
+		g.delayBudgetMs = g_harnessDelayBudgetMs;
+		g.queueCapacity = g_harnessQueueCapacity;
+		g.rendererDll = g_harnessRendererDll;
 		g.activePictureLookahead = g_harnessActivePictureLookahead;
 		g.lookaheadAutomatic = g_harnessLookaheadAutomatic;
 		g.applySnapshot = g_harnessApplySnapshot;
@@ -393,11 +421,15 @@ namespace
 		g_harnessShotFrames = g.shotFrames;
 		g_harnessDolbyVision = g.dolbyVision;
 		g_harnessDvFrames = g.dvFrames;
+		g_harnessPqSourceNits = g.pqSourceNits;
 		g_harnessWidth = g.width;
 		g_harnessHeight = g.height;
 		g_harnessWindowWidth = g.windowWidth;
 		g_harnessWindowHeight = g.windowHeight;
 		g_harnessQueueTarget = g.queueTarget;
+		g_harnessDelayBudgetMs = g.delayBudgetMs;
+		g_harnessQueueCapacity = g.queueCapacity;
+		g_harnessRendererDll = g.rendererDll;
 		g_harnessActivePictureLookahead = g.activePictureLookahead;
 		g_harnessLookaheadAutomatic = g.lookaheadAutomatic;
 		g_harnessApplySnapshot = g.applySnapshot;
@@ -635,8 +667,8 @@ namespace
 		// r6 fix 5: VP_TEST_HARNESS_BETA=1 runs the Beta flavour (libplacebo Beta) instead.
 		const bool betaFlavour = [] { char* v = nullptr; size_t n = 0; const bool on = _dupenv_s(&v, &n,
 			"VP_TEST_HARNESS_BETA") == 0 && v && v[0] == '1'; std::free(v); return on; }();
-		const std::string dllPath = folder + (betaFlavour ? "vprenderer-beta\\VideoProcessorVPRendererBeta.dll" :
-			"vprenderer\\VideoProcessorVPRenderer.dll");
+		const std::string dllPath = !g_harnessRendererDll.empty() ? g_harnessRendererDll :
+			folder + (betaFlavour ? "vprenderer-beta\\VideoProcessorVPRendererBeta.dll" : "vprenderer\\VideoProcessorVPRenderer.dll");
 		HMODULE dll = LoadLibraryExA(dllPath.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
 		Assert::IsNotNull(dll, (L"cannot load " + std::wstring(dllPath.begin(), dllPath.end())).c_str());
 		using Create = IVideoRenderer* (__cdecl*)(IRendererCallback*, uint32_t, HWND, ITimingClock*, bool, size_t,
@@ -652,6 +684,14 @@ namespace
 			config << "[general]\npersist_profile_selection: false\n"
 				"[vprenderer.input.low_latency]\nwhen: $source_rate > " << (film || plan ? 0 : 59) << "\ncapture_path: " << capturePath << "\n"
 				<< extra;
+			// B3 acceptance (ADR-0024): VP_TEST_ENTRANCE_ONCE=1 runs any harness test with the
+			// motion pictures from the processed frames (criteria 4, 8, 9 with the existing tests).
+			char* once = nullptr;
+			size_t onceLength = 0;
+			if (_dupenv_s(&once, &onceLength, "VP_TEST_ENTRANCE_ONCE") == 0 && once && std::string(once) == "1" &&
+				extra.find("pipeline_entrance_once") == std::string::npos)
+				config << "\n[vpv]\npipeline_entrance_once: on\n";
+			std::free(once);
 		}
 		// A small window off the screen.
 		WNDCLASSA wc{};
@@ -683,7 +723,7 @@ namespace
 			SetForegroundWindow(hwnd);
 		Callback callback;
 		Clock clock;
-		IVideoRenderer* renderer = create(&callback, 1, hwnd, &clock, true, 8,
+		IVideoRenderer* renderer = create(&callback, 1, hwnd, &clock, true, g_harnessQueueCapacity,
 			VideoConversionOverride::VIDEOCONVERSION_NONE, configPath.c_str(), &CaptureLog);
 		result.created = renderer != nullptr;
 		resources.SetRenderer(renderer, destroy);
@@ -699,6 +739,29 @@ namespace
 			state->colorspace = ColorSpace::REC_709;
 			state->eotf = EOTF::SDR;
 			state->dolbyVisionTunnel = g_harnessDolbyVision;
+			// test/dv-synthetic 2026-10-24: the tunnel's source state exactly as the app builds it
+			// (PQ / BT.2020 with static defaults; DolbyVisionTunnelSourceState.h). Before this the
+			// harness rendered the decoded tunnel as SDR / Rec.709 (gamma), unlike VP.
+			if (g_harnessDolbyVision)
+				ApplyDolbyVisionTunnelSourceState(*state);
+			else if (g_harnessPqSourceNits > 0.0)
+			{
+				state->eotf = EOTF::PQ;
+				state->colorspace = ColorSpace::BT_2020;
+				state->hdrData = std::make_shared<HDRData>();
+				state->hdrData->displayPrimaryRedX = ColorSpaceToCie1931RedX(ColorSpace::BT_2020);
+				state->hdrData->displayPrimaryRedY = ColorSpaceToCie1931RedY(ColorSpace::BT_2020);
+				state->hdrData->displayPrimaryGreenX = ColorSpaceToCie1931GreenX(ColorSpace::BT_2020);
+				state->hdrData->displayPrimaryGreenY = ColorSpaceToCie1931GreenY(ColorSpace::BT_2020);
+				state->hdrData->displayPrimaryBlueX = ColorSpaceToCie1931BlueX(ColorSpace::BT_2020);
+				state->hdrData->displayPrimaryBlueY = ColorSpaceToCie1931BlueY(ColorSpace::BT_2020);
+				state->hdrData->whitePointX = ColorSpaceToCie1931WpX(ColorSpace::BT_2020);
+				state->hdrData->whitePointY = ColorSpaceToCie1931WpY(ColorSpace::BT_2020);
+				state->hdrData->masteringDisplayMinLuminance = 0.0001;
+				state->hdrData->masteringDisplayMaxLuminance = g_harnessPqSourceNits;
+				state->hdrData->maxCll = g_harnessPqSourceNits;
+				state->hdrData->maxFall = g_harnessPqSourceNits / 4.0;
+			}
 			renderer->OnVideoState(state);
 			if (g_harnessApplySnapshot)
 			{
@@ -734,6 +797,8 @@ namespace
 					renderer->Build();
 			}
 			renderer->SetQueueFramePolicy(2, g_harnessQueueTarget ? g_harnessQueueTarget : (film ? 4 : 3), true);
+			if (g_harnessDelayBudgetMs > 0)   // VP-V delay budget (plugin API 42; never called on an older DLL)
+				renderer->SetQueueDelayBudget(g_harnessDelayBudgetMs);
 			if (g_harnessActivePictureLookahead >= 0)
 			{
 				renderer->SetActivePictureLookaheadAutomatic(g_harnessLookaheadAutomatic);
@@ -750,8 +815,24 @@ namespace
 				1e6 * rateDenominator / rateNumerator * (plan ? plan->paceScale : 1.0)));
 			const double ticksPerUs = static_cast<double>(clock.TimingClockTicksPerSecond()) / 1e6;
 			bool resetDone = false, captureRequested = false;
+			size_t capturesRequested = 0, nextCaptureTime = 0;
 			const timingclocktime_t startTicks = clock.TimingClockNow();
-			for (int n = 0; std::chrono::steady_clock::now() - start < std::chrono::duration<double>(seconds); ++n)
+			// test/dv-synthetic 2026-10-24: a capture is taken at the next MAIN render; a still picture
+			// (bit-exact repeats) may not render again before the run ends, so the stream continues
+			// (up to 6 s more) until every requested capture has completed.
+			auto capturesPending = [&]() {
+				const size_t wanted = capturesRequested + (captureRequested ? 1 : 0);
+				if (wanted == 0) return false;
+				size_t done = 0;
+				std::lock_guard<std::mutex> guard(g_logMutex);
+				for (const std::string& line : g_log)
+					done += line.find("Rendered-output capture complete") != std::string::npos ? 1 : 0;
+				return done < wanted; };
+			auto keepRunning = [&]() {
+				const auto elapsed = std::chrono::steady_clock::now() - start;
+				if (elapsed < std::chrono::duration<double>(seconds)) return true;
+				return elapsed < std::chrono::duration<double>(seconds + 6.0) && capturesPending(); };
+			for (int n = 0; keepRunning(); ++n)
 			{
 				const FrameStep step = plan && plan->step ? plan->step(n) : FrameStep{ true, n, 0 };
 				if (plan && !resetDone && plan->resetAtSeconds >= 0.0 &&
@@ -770,6 +851,17 @@ namespace
 					Logger::WriteMessage(("capture request: " + std::string(accepted ? "accepted - " : "refused - ") +
 						CStringA(captureStatus).GetString() + "\n").c_str());
 					captureRequested = true;
+				}
+				while (plan && nextCaptureTime < plan->captureTimes.size() &&
+					std::chrono::steady_clock::now() - start >= std::chrono::duration<double>(plan->captureTimes[nextCaptureTime]))
+				{
+					CString captureStatus;
+					if (renderer->RequestRenderedOutputCapture(captureStatus))
+						++capturesRequested;
+					else
+						Logger::WriteMessage(("capture request refused at " + std::to_string(plan->captureTimes[nextCaptureTime]) + " s: " +
+							CStringA(captureStatus).GetString() + "\n").c_str());
+					++nextCaptureTime;
 				}
 				if (plan && plan->tick)
 					plan->tick(*renderer, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
@@ -839,6 +931,35 @@ namespace
 								result.captureMetadata = line.substr(m + 9, end == std::string::npos ? std::string::npos : end - m - 9);
 							}
 						}
+					}
+					std::this_thread::sleep_for(std::chrono::milliseconds(20));
+				}
+			}
+			if (capturesRequested > 0)
+			{
+				const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+				for (;;)
+				{
+					MSG msg;
+					while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
+					std::vector<std::string> found;
+					{
+						std::lock_guard<std::mutex> guard(g_logMutex);
+						for (const std::string& line : g_log)
+						{
+							const size_t at = line.find("Rendered-output capture complete");
+							const size_t m = line.find("metadata=");
+							if (at != std::string::npos && m != std::string::npos)
+							{
+								const size_t end = line.find(" raw_bytes=", m);
+								found.push_back(line.substr(m + 9, end == std::string::npos ? std::string::npos : end - m - 9));
+							}
+						}
+					}
+					if (found.size() >= capturesRequested + (captureRequested ? 1 : 0) || std::chrono::steady_clock::now() >= until)
+					{
+						result.captureMetadataList = found;
+						break;
 					}
 					std::this_thread::sleep_for(std::chrono::milliseconds(20));
 				}
@@ -1212,6 +1333,229 @@ namespace Tests
 				Assert::IsTrue(r.presented, (wname + L": frames presented\n" + r.Tail()).c_str());
 			}
 			_putenv_s("VP_TEST_HARNESS_BETA", "");
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(ByteIdenticalToTheR6BaselineWithThePlaceholdersOff)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(ByteIdenticalToTheR6BaselineWithThePlaceholdersOff)
+		{
+			const HarnessScope harnessScope;
+			// The skeleton's promise (ADR-0015): with every placeholder slot off (the default) the
+			// rendered output is byte-identical to the build before the skeleton (fix/r6-baseline).
+			// VP_TEST_BASELINE_RENDERER_DLL names that build's VideoProcessorVPRenderer.dll; the same
+			// still picture is rendered by both DLLs and the rendered-output captures' raw R10 hashes
+			// compared (dither and deband off, so the picture is deterministic).
+			if (!RequireHardwareOrSkip("ByteIdenticalToTheR6BaselineWithThePlaceholdersOff")) return;
+			char* value = nullptr;
+			size_t length = 0;
+			const std::string baseline = _dupenv_s(&value, &length, "VP_TEST_BASELINE_RENDERER_DLL") == 0 && value ? value : "";
+			std::free(value);
+			if (baseline.empty() || GetFileAttributesA(baseline.c_str()) == INVALID_FILE_ATTRIBUTES)
+			{
+				Logger::WriteMessage("SKIP-NO-BASELINE ByteIdenticalToTheR6BaselineWithThePlaceholdersOff (set VP_TEST_BASELINE_RENDERER_DLL)\n");
+				return;
+			}
+			wchar_t tempPath[MAX_PATH] = {};
+			GetTempPathW(MAX_PATH, tempPath);
+			const std::wstring shots = std::wstring(tempPath) + L"vp-byte-identity";
+			CreateDirectoryW(shots.c_str(), nullptr);
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			FramePlan plan;
+			plan.captureAtSeconds = 2.5;
+			plan.step = [](int) { return FrameStep{ true, 0, 0 }; };
+			const std::string extra = "[vprenderer.Default]\ndithering: off\ndeband: off\n";
+			struct Case { const char* name; VideoFrameEncoding encoding; const char* path; bool film; };
+			const Case cases[] = { { "v210 gpu 23.976", VideoFrameEncoding::V210, "gpu", true },
+				{ "v210 standard 59.94", VideoFrameEncoding::V210, "standard", false } };
+			std::string failures;
+			for (const Case& c : cases)
+			{
+				g_harnessRendererDll.clear();
+				const RunResult ours = Run(c.encoding, c.path, 3.5, c.film, extra, false, &plan);
+				g_harnessRendererDll = baseline;
+				const RunResult theirs = Run(c.encoding, c.path, 3.5, c.film, extra, false, &plan);
+				g_harnessRendererDll.clear();
+				const std::string a = CaptureHash(ours), b = CaptureHash(theirs);
+				Logger::WriteMessage((std::string("== ") + c.name + ": skeleton " + a + ", r6 " + b + "\n").c_str());
+				if (a.empty() || b.empty())
+					failures += std::string(c.name) + ": a capture is missing; ";
+				else if (a != b)
+					failures += std::string(c.name) + ": the output differs from the r6 baseline; ";
+			}
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
+			Assert::IsTrue(failures.empty(), std::wstring(failures.begin(), failures.end()).c_str());
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(DelayBudgetFrameLadderHoldsTheTotalAtEveryRate)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DelayBudgetFrameLadderHoldsTheTotalAtEveryRate)
+		{
+			const HarnessScope harnessScope;
+			// The frame fallback ladder through the real renderer (owner 2026-10-20 item 41, 2026-10-24:
+			// ADR-0020). For the 4-, 3- and 2-frame budgets at 23.976/25/30/50/60p, with the motion
+			// engine, the de-judder, hiccup repair and the active-picture look-ahead on:
+			//   - the renderer plans the expected look-ahead frames, and below 4 says so under
+			//     "Fallbacks engaged: look-ahead (...)" (visible, not silent);
+			//   - frames are presented with no stall and no renderer failure;
+			//   - the capture-to-output delay (ExitLatencyMs, the queue hold plus the render) is the
+			//     SAME at every rate for one budget, within a refresh plus measurement jitter;
+			//   - recovery: after a one-second capture gap the delay returns to its level.
+			if (!RequireHardwareOrSkip("DelayBudgetFrameLadderHoldsTheTotalAtEveryRate")) return;
+			double refreshHz = 60.0;
+			{
+				DEVMODEW mode{};
+				mode.dmSize = sizeof(mode);
+				if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1)
+					refreshHz = static_cast<double>(mode.dmDisplayFrequency);
+			}
+			DelayBudget::Model model;
+			model.refreshHz = refreshHz;
+			struct Rate { int numerator, denominator; };
+			const Rate rates[] = { { 24000, 1001 }, { 25000, 1000 }, { 30000, 1000 }, { 50000, 1000 }, { 60000, 1000 } };
+			std::vector<double> rateList;
+			for (const Rate& r : rates) rateList.push_back(static_cast<double>(r.numerator) / r.denominator);
+			const double refreshMs = 1000.0 / refreshHz;
+			std::string failures;
+			// The deployed queue_size (32) holds a 267 ms total at 60p (~12 frames); 20 stays inside the
+			// harness's 24-buffer source ring.
+			g_harnessQueueCapacity = 20;
+			for (int frames : { 4, 3, 2 })
+			{
+				const int budget = static_cast<int>(DelayBudget::BudgetForFrames(frames, rateList, model));
+				g_harnessDelayBudgetMs = budget;
+				double low = 1e9, high = -1e9;
+				for (const Rate& rate : rates)
+				{
+					const double fps = static_cast<double>(rate.numerator) / rate.denominator;
+					const DelayBudget::Plan plan = DelayBudget::Compute(DelayBudget::InputsFor(budget, fps, model));
+					FramePlan framePlan;
+					framePlan.rateNumerator = rate.numerator;
+					framePlan.rateDenominator = rate.denominator;
+					framePlan.step = [](int n) { FrameStep f; f.content = n; return f; };
+					const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, true, "dejudder_strength: 0.25\n", false, &framePlan);
+					char name[96];
+					snprintf(name, sizeof(name), "%d-frame %d ms @%.3f", frames, budget, fps);
+					const double median = Median(r.exitLatencyMs);
+					char expected[64];
+					snprintf(expected, sizeof(expected), "%d look-ahead frames", plan.queueFrames);
+					Logger::WriteMessage((std::string("== ") + name + ": presented " + (r.presented ? "yes" : "NO") +
+						", delay " + std::to_string(median) + " ms, planned hold " + std::to_string(plan.holdMs) + " ms; " +
+						r.fallbacksStatus + "\n").c_str());
+					if (!r.presented) failures += std::string(name) + ": not presented; ";
+					if (!r.Logged(expected)) failures += std::string(name) + ": no '" + expected + "' plan; ";
+					const bool ladderNote = r.fallbacksStatus.find("look-ahead") != std::string::npos;
+					if (ladderNote != (plan.queueFrames < DelayBudget::kDesignDepth))
+						failures += std::string(name) + ": look-ahead fallback note " + (ladderNote ? "shown" : "missing") + "; ";
+					if (r.Logged("marking renderer failed") || r.Logged("Render stall"))
+						failures += std::string(name) + ": stall/failure; ";
+					if (median > 0.0)
+					{
+						// The TOTAL input-to-light delay (gate 6, owner 2026-10-24: the same at every rate, equal
+						// to the budget). The measured delay runs from the capture timestamp to the present
+						// (the hold + the render); the plan's other fixed costs lie outside it - the capture
+						// transfer of one SIGNAL frame (42 ms at 24p, 17 ms at 60p: the harness delivers a frame
+						// at its timestamp), the swapchain's 2 refreshes and the display phase. So
+						//   total = measured + (fixed - processing allowance)
+						// and the hold already made room for the transfer: the total equals the budget.
+						const double renderAllowanceMs = DelayBudget::kProcessingAllowanceMs;
+						const double total = median + plan.fixedMs - renderAllowanceMs;
+						low = (std::min)(low, total);
+						high = (std::max)(high, total);
+						char line[200];
+						snprintf(line, sizeof(line), "   %s: TOTAL %.1f ms (budget %d; measured %.1f + fixed outside it %.1f)\n",
+							name, total, budget, median, plan.fixedMs - renderAllowanceMs);
+						Logger::WriteMessage(line);
+						// ABSOLUTE: the total within half a refresh below the budget and one refresh plus the
+						// render allowance above it (vblank phase and render-time jitter).
+						if (total < budget - 0.5 * refreshMs || total > budget + refreshMs + renderAllowanceMs)
+							failures += std::string(name) + ": total " + std::to_string(total) + " ms vs budget " +
+								std::to_string(budget) + " ms; ";
+					}
+				}
+				// The same TOTAL at every rate: it varies by at most a refresh plus 50% of one
+				// (render-time and vblank jitter on a desktop GPU).
+				char spread[160];
+				snprintf(spread, sizeof(spread), "%d-frame %d ms: TOTAL %.1f .. %.1f ms across rates", frames, budget, low, high);
+				Logger::WriteMessage((std::string(spread) + "\n").c_str());
+				if (high - low > 1.5 * refreshMs)
+					failures += std::string(spread) + " (spread above 1.5 refreshes); ";
+			}
+			// Recovery: a one-second capture gap at 23.976 with the 3-frame budget; the delay of the
+			// last second is back at the level before the gap (within a refresh).
+			{
+				g_harnessDelayBudgetMs = static_cast<int>(DelayBudget::BudgetForFrames(3, rateList, model));
+				FramePlan framePlan;
+				framePlan.rateNumerator = 24000;
+				framePlan.rateDenominator = 1001;
+				const int gapStart = 72, gapEnd = 96;   // frames 3 s .. 4 s
+				framePlan.step = [gapStart, gapEnd](int n) { FrameStep f; f.content = n; f.send = n < gapStart || n >= gapEnd; return f; };
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 9.0, true, "dejudder_strength: 0.25\n", false, &framePlan);
+				std::vector<double> before, after;
+				for (const auto& t : r.trend)
+				{
+					if (t.seconds > 1.5 && t.seconds < 2.9) before.push_back(t.exitLatencyMs);
+					if (t.seconds > 7.5) after.push_back(t.exitLatencyMs);
+				}
+				const double b = Median(before), a = Median(after);
+				Logger::WriteMessage(("== recovery: delay before the gap " + std::to_string(b) + " ms, after " +
+					std::to_string(a) + " ms; " + r.fallbacksStatus + "\n").c_str());
+				if (!r.presented) failures += "recovery: not presented; ";
+				if (b > 0.0 && a > 0.0 && std::fabs(a - b) > refreshMs)
+					failures += "recovery: the delay did not return (" + std::to_string(b) + " -> " + std::to_string(a) + " ms); ";
+			}
+			// render_ahead on: its constant total across rates is not verified yet (PENDING-RA), so the
+			// renderer says so under "Fallbacks engaged: delay budget (render-ahead ...)" - never silent.
+			{
+				g_harnessDelayBudgetMs = static_cast<int>(DelayBudget::BudgetForFrames(4, rateList, model));
+				FramePlan framePlan;
+				framePlan.rateNumerator = 24000;
+				framePlan.rateDenominator = 1001;
+				framePlan.step = [](int n) { FrameStep f; f.content = n; return f; };
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, true,
+					"dejudder_strength: 0.25\nrender_ahead: on\nrender_ahead_queue_credit: on\n", false, &framePlan);
+				Logger::WriteMessage(("== render_ahead on: " + r.fallbacksStatus + "\n").c_str());
+				const bool renderAheadRan = r.Logged("Render-ahead") || r.Logged("render-ahead");
+				if (renderAheadRan && r.fallbacksStatus.find("delay budget") == std::string::npos &&
+					r.fallbacksStatus.find("render-ahead") == std::string::npos)
+					failures += "render_ahead on: no visible delay-budget note; ";
+			}
+			// A queue_size too small for the hold (8 slots, the 4-frame total at 60p needs ~13): the hold
+			// is cut to what the queue holds - a steady, shorter delay, never the overflow's drop cycle -
+			// and "Fallbacks engaged: delay budget (queue_size ...)" says so.
+			{
+				g_harnessQueueCapacity = 8;
+				g_harnessDelayBudgetMs = static_cast<int>(DelayBudget::BudgetForFrames(4, rateList, model));
+				FramePlan framePlan;
+				framePlan.rateNumerator = 60000;
+				framePlan.rateDenominator = 1000;
+				framePlan.step = [](int n) { FrameStep f; f.content = n; return f; };
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, true, "dejudder_strength: 0.25\n", false, &framePlan);
+				const double reachable = DelayBudget::HoldForCapacity(8, 1000.0 / 60.0);
+				const double median = Median(r.exitLatencyMs);
+				Logger::WriteMessage(("== queue_size 8 @60: delay " + std::to_string(median) + " ms (reachable hold " +
+					std::to_string(reachable) + " ms); " + r.fallbacksStatus + "\n").c_str());
+				if (r.fallbacksStatus.find("queue_size") == std::string::npos)
+					failures += "queue_size 8 @60: no visible queue_size note; ";
+				if (median > 0.0 && (median < reachable - 2.0 * refreshMs || median > reachable + 2.0 * refreshMs + DelayBudget::kProcessingAllowanceMs))
+					failures += "queue_size 8 @60: delay " + std::to_string(median) + " ms vs the reachable hold " + std::to_string(reachable) + " ms; ";
+				// After the cut hold engaged (the start-up prefill before the display rate is known is
+				// the frame-count queue): no overflow.
+				bool cut = false, overflowAfter = false;
+				for (const std::string& line : r.log)
+				{
+					if (line.find("raise queue_size") != std::string::npos) cut = true;
+					else if (cut && line.find("Alpha queue hard overflow") != std::string::npos) overflowAfter = true;
+				}
+				// Reported, not failed: a 60.00x source on a 60 Hz display drifts, and with a queue this
+				// tight the overflow drops the drift's frame before the cadence correction does.
+				if (overflowAfter)
+					Logger::WriteMessage("   queue_size 8 @60: an overflow after the hold was cut (drift at a tight queue_size)\n");
+			}
+			g_harnessQueueCapacity = 8;
+			g_harnessDelayBudgetMs = 0;
+			Assert::IsTrue(failures.empty(), std::wstring(failures.begin(), failures.end()).c_str());
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(StreamFaultsKeepTheDejudderSafeAndRecovering)
@@ -3131,6 +3475,11 @@ namespace Tests
 			Assert::IsTrue(LoadRawCorpusSegment(corpus, seg, error), HarnessWide(error).c_str());
 			g_harnessWidth = static_cast<int>(seg.width);
 			g_harnessHeight = static_cast<int>(seg.height);
+			// test/dv-synthetic 2026-10-24: rendered at the source raster (no output scaling in
+			// the comparison) and in the recording's own container (r210, R10b or R10l).
+			g_harnessWindowWidth = static_cast<int>(seg.width);
+			g_harnessWindowHeight = static_cast<int>(seg.height);
+			const VideoFrameEncoding replayEncoding = seg.ReplayEncoding(true);
 			g_harnessDolbyVision = true;
 			CreateDirectoryA(out.c_str(), nullptr);
 			wchar_t tempPath[MAX_PATH] = {};
@@ -3149,7 +3498,7 @@ namespace Tests
 				still.rateDenominator = static_cast<int>(seg.rateDenominator);
 				still.captureAtSeconds = 2.0;
 				still.step = [](int) { return FrameStep{ true, 0, 0 }; };
-				const RunResult r = Run(VideoFrameEncoding::R210, "standard", 3.0, true, extra, false, &still);
+				const RunResult r = Run(replayEncoding, "standard", 3.0, true, extra, false, &still);
 				if (r.captureMetadata.size() < 5) continue;
 				const std::string png = r.captureMetadata.substr(0, r.captureMetadata.size() - 5) + ".png";
 				char name[64];
@@ -3159,6 +3508,567 @@ namespace Tests
 			}
 			Logger::WriteMessage(("rendered " + std::to_string(rendered) + " tunnel frames to " + out + "\n").c_str());
 			Assert::IsTrue(rendered > 0, L"no frame rendered");
+		}
+
+		// ---- Synthetic DV tunnel validation (test/dv-synthetic, 2026-10-24) ----
+		// The corpus: tools/dv_synth/make_corpus.py (an independent Python implementation of the
+		// tunnel; VP_TEST_DV_SYNTH_CORPUS = its root). tools/dv_synth/run_dv_synth.ps1 runs it all.
+		static std::string DvSynthEnv(const char* name)
+		{
+			char* v = nullptr;
+			size_t n = 0;
+			std::string out;
+			if (_dupenv_s(&v, &n, name) == 0 && v) out = v;
+			std::free(v);
+			return out;
+		}
+
+		// A corpus segment's frames into the harness (each frame file once; content index = frame).
+		static bool DvSynthLoadSegment(const std::string& folder, RawCorpusSegment& seg, std::vector<size_t>& contentOfFrame,
+			size_t maxFrames = 100000)
+		{
+			std::string error;
+			if (!LoadRawCorpusSegment(folder, seg, error))
+				return false;
+			g_harnessDvFrames.clear();
+			contentOfFrame.clear();
+			std::map<std::string, size_t> byFile;
+			std::vector<uint8_t> bytes;
+			for (size_t i = 0; i < seg.frames.size() && i < maxFrames; ++i)
+			{
+				const auto it = byFile.find(seg.frames[i].file);
+				if (it != byFile.end())
+				{
+					contentOfFrame.push_back(it->second);
+					continue;
+				}
+				if (!seg.LoadFrame(i, bytes))
+					return false;
+				byFile[seg.frames[i].file] = g_harnessDvFrames.size();
+				contentOfFrame.push_back(g_harnessDvFrames.size());
+				g_harnessDvFrames.push_back(std::vector<BYTE>(bytes.begin(), bytes.end()));
+			}
+			g_harnessWidth = g_harnessWindowWidth = static_cast<int>(seg.width);
+			g_harnessHeight = g_harnessWindowHeight = static_cast<int>(seg.height);
+			return true;
+		}
+
+		// The generator's stamp read back from a rendered capture (R10 codes, the source raster):
+		// 32 cells across the stamp band; a cell is a one when brighter than the midpoint of the
+		// darkest and brightest cells. False unless the magic byte 0xA5 is there.
+		static bool DvSynthReadStamp(const std::vector<int>& codes, int w, int h, uint32_t& word)
+		{
+			const int y = static_cast<int>(72.0 * h / 1080.0);
+			int cell[32], lo = 4096, hi = -1;
+			for (int bit = 0; bit < 32; ++bit)
+			{
+				const int x = (bit * w / 32 + (bit + 1) * w / 32) / 2;
+				cell[bit] = codes[(static_cast<size_t>(y) * w + x) * 3 + 1];
+				lo = (std::min)(lo, cell[bit]);
+				hi = (std::max)(hi, cell[bit]);
+			}
+			word = 0;
+			for (int bit = 0; bit < 32; ++bit)
+				word = (word << 1) | (cell[bit] * 2 > lo + hi ? 1u : 0u);
+			return hi - lo > 40 && (word >> 24) == 0xA5;
+		}
+
+		// Owner direction 2026-10-24: the faithful DV path. Every VP stage off, so only the capture unpack,
+		// the DM extraction and libplacebo's Dolby Vision decode / tone mapping run (identical to FAITHFUL
+		// in tools/dv_synth/run_dv_synth.py).
+		static const char* DvSynthFaithfulSettings()
+		{
+			return			"source_resolution: native\nsource_resolution_crossfade_s: 0\ndeband: off\ndeband_vp: off\n"
+			"detail_pulse_stabilise: off\ntexture_restore: off\ndejudder_strength: 0\ninterpolation: off\n"
+			"interpolation_fill_gaps: off\nintent_motion: off\nintent_content: off\n"
+			"intent_black: off\nintent_display: off\ndithering: off\ntemporal_dither: off\n"
+			"adaptive_upscale: off\nadaptive_downscale: off\nadaptive_grain_map: off\nadaptive_chroma_ssim: off\n";
+		}
+
+		// The VP stages a faithful run must not show active, from the renderer's own log and status
+		// (empty when clean): motion engine / de-judder / interpolation / hiccup repair, re-base and its
+		// crossfade, VP deband, detail pulse, texture restore, sigma-delta / dither, adaptive scaling,
+		// the profile's libplacebo deband and dithering.
+		static std::string DvSynthFaithfulViolations(const RunResult& r)
+		{
+			std::string bad;
+			const char* const activeMarkers[] = { "Motion engine: loaded", "Motion engine: created", "De-judder: motion estimated",
+				"Interpolation: interpolating", "Interpolation: filling", "Detail pulse stabilise: on", "Texture restore: on",
+				"Texture restore: statistical", "Re-base: active", "Re-base: on", "Source resolution: re-base", "Source resolution: crossfade",
+				"VP deband: on", "VP deband: active", "Sigma-delta vectors", "Adaptive upscale: on", "Adaptive downscale: on" };
+			for (const char* m : activeMarkers)
+				if (r.Logged(m))
+					bad += std::string("[") + m + "] ";
+			bool settingsSeen = false;
+			for (const std::string& l : r.log)
+				if (l.find("libplacebo settings:") != std::string::npos)
+				{
+					settingsSeen = true;
+					if (l.find(" dithering=off") == std::string::npos) bad += "[libplacebo dithering not off] ";
+					if (l.find(" deband=off") == std::string::npos && l.find("deband=auto/off") == std::string::npos &&
+						l.find("deband=off/off") == std::string::npos) bad += "[libplacebo deband not off] ";
+				}
+			if (!settingsSeen) bad += "[no libplacebo settings line] ";
+			if (r.dejudderStatus.find("Motion: Off") == std::string::npos && !r.dejudderStatus.empty())
+				bad += "[motion status: " + r.dejudderStatus + "] ";
+			return bad;
+		}
+
+		// Mean green code over a rectangle of a capture.
+		static double DvSynthMean(const std::vector<int>& codes, int w, int x0, int y0, int x1, int y1, int channel = 1)
+		{
+			double sum = 0.0;
+			size_t n = 0;
+			for (int y = y0; y < y1; ++y)
+				for (int x = x0; x < x1; ++x)
+				{
+					sum += codes[(static_cast<size_t>(y) * w + x) * 3 + channel];
+					++n;
+				}
+			return n ? sum / n : -1.0;
+		}
+
+		// Renders the jobs a jobs file lists (written by tools/dv_synth/run_dv_synth.py) and copies
+		// each capture to VP_TEST_DV_SYNTH_OUT for the Python analysis (decode accuracy against
+		// the reference render, BTB/WTW, policy, LLDV vs tunnel). One line per job:
+		//   job id=<name> segment=<folder> frame=<k> seconds=<s> capture=<s> [pq=<nits>] [frames=a-b]
+		//       [captures=t1,t2,...] settings=<profile lines, "\n" for new lines>   (settings last)
+		BEGIN_TEST_METHOD_ATTRIBUTE(DvSynthGpuRendersJobs)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DvSynthGpuRendersJobs)
+		{
+			const HarnessScope harnessScope;
+			const std::string jobsPath = DvSynthEnv("VP_TEST_DV_SYNTH_JOBS"), out = DvSynthEnv("VP_TEST_DV_SYNTH_OUT");
+			if (jobsPath.empty() || out.empty())
+			{
+				Logger::WriteMessage("SKIP-NO-CORPUS DvSynthGpuRendersJobs (VP_TEST_DV_SYNTH_JOBS, VP_TEST_DV_SYNTH_OUT)\n");
+				return;
+			}
+			if (!RequireHardwareOrSkip("DvSynthGpuRendersJobs")) return;
+			CreateDirectoryA(out.c_str(), nullptr);
+			const std::wstring shots = HarnessTempFolder(L"vp-dv-synth");
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			// The shaders beside the test DLL (dv_trims' DV trims.glsl), as beside VP's exe.
+			{
+				const std::string here = Here();
+				SetEnvironmentVariableA("VP_TEST_SHADER_DIR", here.substr(0, here.size() - 1).c_str());
+			}
+			std::ifstream jobs(jobsPath);
+			Assert::IsTrue(static_cast<bool>(jobs), HarnessWide("cannot read " + jobsPath).c_str());
+			std::string line;
+			size_t done = 0, failed = 0, faithfulFailures = 0;
+			std::string loadedSegment;
+			RawCorpusSegment seg;
+			std::vector<size_t> contentOfFrame;
+			while (std::getline(jobs, line))
+			{
+				if (line.compare(0, 4, "job ") != 0)
+					continue;
+				std::map<std::string, std::string> key;
+				const size_t settingsAt = line.find(" settings=");
+				std::string settings = settingsAt == std::string::npos ? std::string() : line.substr(settingsAt + 10);
+				for (size_t at = settings.find("\\n"); at != std::string::npos; at = settings.find("\\n", at))
+					settings.replace(at, 2, "\n");
+				std::stringstream ss(line.substr(0, settingsAt));
+				std::string word;
+				while (ss >> word)
+				{
+					const size_t eq = word.find('=');
+					if (eq != std::string::npos)
+						key[word.substr(0, eq)] = word.substr(eq + 1);
+				}
+				const std::string id = key["id"];
+				if (key["segment"] != loadedSegment)
+				{
+					Assert::IsTrue(DvSynthLoadSegment(key["segment"], seg, contentOfFrame), HarnessWide("segment " + key["segment"]).c_str());
+					loadedSegment = key["segment"];
+				}
+				const bool lldv = key.count("pq") > 0;
+				g_harnessDolbyVision = !lldv;
+				g_harnessPqSourceNits = lldv ? std::atof(key["pq"].c_str()) : 0.0;
+				const double seconds = key.count("seconds") ? std::atof(key["seconds"].c_str()) : 3.0;
+				FramePlan plan;
+				plan.rateNumerator = static_cast<int>(seg.rateNumerator);
+				plan.rateDenominator = static_cast<int>(seg.rateDenominator);
+				const std::vector<size_t> content = contentOfFrame;
+				if (key.count("frames"))
+				{
+					// A stream: frames a..b in order, looping.
+					const size_t dash = key["frames"].find('-');
+					const int a = std::atoi(key["frames"].substr(0, dash).c_str());
+					const int b = std::atoi(key["frames"].substr(dash + 1).c_str());
+					plan.step = [content, a, b](int n) { return FrameStep{ true, static_cast<int>(content[static_cast<size_t>(a + n % (b - a + 1))]), 0 }; };
+					std::stringstream ts(key["captures"]);
+					std::string t;
+					while (std::getline(ts, t, ','))
+						plan.captureTimes.push_back(std::atof(t.c_str()));
+				}
+				else
+				{
+					const int frame = std::atoi(key["frame"].c_str());
+					plan.step = [content, frame](int) { return FrameStep{ true, static_cast<int>(content[static_cast<size_t>(frame)]), 0 }; };
+					plan.captureAtSeconds = key.count("capture") ? std::atof(key["capture"].c_str()) : seconds - 1.0;
+				}
+				RunResult r = Run(seg.ReplayEncoding(true), "standard", seconds, true, settings, false, &plan);
+				if (r.captureMetadataList.empty() && r.captureMetadata.empty())
+					r = Run(seg.ReplayEncoding(true), "standard", seconds + 1.0, true, settings, false, &plan);   // one retry
+				std::vector<std::string> captures = r.captureMetadataList;
+				if (captures.empty() && !r.captureMetadata.empty())
+					captures.push_back(r.captureMetadata);
+				for (size_t k = 0; k < captures.size(); ++k)
+				{
+					const std::string json = captures[k];
+					if (json.size() < 5) continue;
+					const std::string png = json.substr(0, json.size() - 5) + ".png";
+					const std::string stem = out + "\\" + id + (captures.size() > 1 || key.count("frames") ? "_" + std::to_string(k) : std::string());
+					CopyFileA(png.c_str(), (stem + ".png").c_str(), FALSE);
+					CopyFileA(json.c_str(), (stem + ".json").c_str(), FALSE);
+					// The R10 codes as raw little-endian uint16 (R, G, B per pixel) for the analysis.
+					int cw = 0, ch = 0;
+					const std::vector<int> codes = LoadCaptureRgb(json, cw, ch);
+					std::vector<uint16_t> packed(codes.begin(), codes.end());
+					std::ofstream raw(stem + ".r10", std::ios::binary | std::ios::trunc);
+					raw.write(reinterpret_cast<const char*>(packed.data()), static_cast<std::streamsize>(packed.size() * 2));
+				}
+				const bool faithful = key["faithful"] == "1";
+				const std::string violations = faithful ? DvSynthFaithfulViolations(r) : std::string();
+				if (!violations.empty())
+				{
+					++faithfulFailures;
+					Logger::WriteMessage(("FAITHFUL VIOLATION " + id + ": " + violations + "\n").c_str());
+				}
+				{
+					std::ofstream log(out + "\\" + id + ".log", std::ios::trunc);
+					log << "presented=" << (r.presented ? 1 : 0) << "\ncaptures=" << captures.size() << "\nfallbacks=" << r.fallbacksStatus << "\n";
+					log << "faithful=" << (faithful ? 1 : 0) << "\nfaithful_violations=" << violations << "\ndejudder_status=" << r.dejudderStatus <<
+						"\nsource_status=" << r.sourceStatus << "\npresentation_status=" << r.presentationStatus << "\n";
+					for (const std::string& l : r.log)
+						if (l.find("Dolby Vision") != std::string::npos || l.find("Fallbacks engaged") != std::string::npos ||
+							l.find("tone") != std::string::npos || l.find("SDR_GAMMA") != std::string::npos ||
+							l.find("failed") != std::string::npos || l.find("Rendered-output capture") != std::string::npos ||
+							l.find("output diagnostic") != std::string::npos || l.find("newlldv") != std::string::npos)
+							log << l << "\n";
+				}
+				++done;
+				failed += (r.presented && !captures.empty()) ? 0 : 1;
+				Logger::WriteMessage(("job " + id + ": presented " + (r.presented ? "yes" : "NO") + ", " + std::to_string(captures.size()) +
+					" capture(s); " + r.fallbacksStatus + "\n").c_str());
+			}
+			Logger::WriteMessage(("DvSynthGpuRendersJobs: " + std::to_string(done) + " jobs, " + std::to_string(failed) + " without a capture\n").c_str());
+			Assert::IsTrue(done > 0, L"no jobs");
+			Assert::AreEqual<size_t>(0, failed, L"every job presents and captures");
+			Assert::AreEqual<size_t>(0, faithfulFailures, L"a faithful job showed a VP stage active (FAITHFUL VIOLATION lines)");
+		}
+
+		// (c) RPU <-> frame alignment through the whole renderer: the cut segments streamed at their
+		// rate with captures through the run. Each capture's stamp names the frame (and scene) the
+		// output came from; its brightness must be its own scene's (from a still render of each
+		// scene), never the neighbouring scene's (a one-frame metadata misalignment = a flash at
+		// the cut). Cinema-like tone mapping (spline, peak_detection off: L1 drives the curve).
+		// Faithful (owner direction 2026-10-24): every VP stage off (kDvSynthFaithful), asserted inactive
+		// on every run. The full pipeline (VP's stages at their defaults) is the separate, labelled
+		// DvSynthGpuAlignmentAtCutsFullPipeline.
+		BEGIN_TEST_METHOD_ATTRIBUTE(DvSynthGpuAlignmentAtCuts)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DvSynthGpuAlignmentAtCuts)
+		{
+			DvSynthAlignment(true, "DvSynthGpuAlignmentAtCuts");
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(DvSynthGpuAlignmentAtCutsFullPipeline)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DvSynthGpuAlignmentAtCutsFullPipeline)
+		{
+			DvSynthAlignment(false, "DvSynthGpuAlignmentAtCutsFullPipeline");
+		}
+
+		static void DvSynthAlignment(bool faithful, const char* testName)
+		{
+			const HarnessScope harnessScope;
+			const std::string root = DvSynthEnv("VP_TEST_DV_SYNTH_CORPUS");
+			if (root.empty())
+			{
+				Logger::WriteMessage((std::string("SKIP-NO-CORPUS ") + testName + " (VP_TEST_DV_SYNTH_CORPUS)\n").c_str());
+				return;
+			}
+			if (!RequireHardwareOrSkip(testName)) return;
+			const std::wstring shots = HarnessTempFolder(L"vp-dv-synth-cuts");
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			const std::string settings = std::string("[vprenderer.Default]\n") + (faithful ? DvSynthFaithfulSettings() : "dithering: off\n") +
+				"tone_mapping: spline\npeak_detection: off\nsdr_target_nits: 100\ncontrast_recovery: 0\n" + DvSynthEnv("VP_TEST_DV_SYNTH_EXTRA");
+			auto checkFaithful = [faithful](const RunResult& r, const std::string& what)
+			{
+				if (!faithful) return;
+				const std::string bad = DvSynthFaithfulViolations(r);
+				Assert::IsTrue(bad.empty(), HarnessWide("faithful run with a VP stage active (" + what + "): " + bad).c_str());
+			};
+			Logger::WriteMessage(faithful ? "ALIGNMENT mode: FAITHFUL (every VP stage off, asserted)\n" :
+				"ALIGNMENT mode: FULL PIPELINE (VP's stages at their defaults)\n");
+			size_t totalMisaligned = 0, totalReadable = 0, totalCaptures = 0;
+			for (const std::string& folder : FindRawCorpusSegments(root))
+			{
+				if (folder.find("cuts-") == std::string::npos)
+					continue;
+				RawCorpusSegment seg;
+				std::vector<size_t> contentOfFrame;
+				Assert::IsTrue(DvSynthLoadSegment(folder, seg, contentOfFrame), HarnessWide(folder).c_str());
+				g_harnessDolbyVision = true;
+				// Scenes from truth.txt: frame -> scene.
+				std::vector<int> sceneOf;
+				{
+					std::ifstream truth(folder + "\\truth.txt");
+					std::string l;
+					while (std::getline(truth, l))
+					{
+						const size_t at = l.find(" scene=");
+						if (l.compare(0, 6, "frame ") == 0 && at != std::string::npos)
+							sceneOf.push_back(std::atoi(l.c_str() + at + 7));
+					}
+				}
+				Assert::AreEqual(seg.frames.size(), sceneOf.size(), L"truth frames");
+				const int w = static_cast<int>(seg.width), h = static_cast<int>(seg.height);
+				// The measurement area: below the stamp band, a centre rectangle.
+				const int x0 = w / 4, x1 = 3 * w / 4, y0 = static_cast<int>(0.40 * h), y1 = static_cast<int>(0.55 * h);
+				// 1. Each scene still (its first frame repeated): the scene's brightness. Advance-metadata
+				// frames are not self-contained (a cut frame says no_md; the frame before announces the
+				// next DM), so their stills come from the same-frame twin segment (identical pictures and
+				// per-scene DM); the stream below is the advance segment itself.
+				std::map<int, double> sceneMean;
+				const size_t advanceAt = folder.find("-advance");
+				if (advanceAt != std::string::npos)
+				{
+					RawCorpusSegment twin;
+					std::vector<size_t> twinContent;
+					Assert::IsTrue(DvSynthLoadSegment(folder.substr(0, advanceAt) + "-same", twin, twinContent), L"same-frame twin");
+					contentOfFrame = twinContent;
+				}
+				for (size_t f = 0; f < sceneOf.size(); ++f)
+				{
+					if (sceneMean.count(sceneOf[f]))
+						continue;
+					FramePlan still;
+					still.rateNumerator = static_cast<int>(seg.rateNumerator);
+					still.rateDenominator = static_cast<int>(seg.rateDenominator);
+					still.captureAtSeconds = 2.2;
+					const int content = static_cast<int>(contentOfFrame[f]);
+					still.step = [content](int) { return FrameStep{ true, content, 0 }; };
+					RunResult r = Run(seg.ReplayEncoding(true), "standard", 3.2, true, settings, false, &still);
+					if (r.captureMetadata.empty())   // one retry (a capture request can be refused while the queue warms up)
+						r = Run(seg.ReplayEncoding(true), "standard", 4.0, true, settings, false, &still);
+					int cw = 0, ch = 0;
+					const std::vector<int> codes = LoadCaptureRgb(r.captureMetadata, cw, ch);
+					if (codes.empty())
+					{
+						const std::string temp = DvSynthEnv("TEMP");
+						std::ofstream full((temp.empty() ? std::string(".") : temp) + "\\vp-dv-synth-cuts-still.log", std::ios::trunc);
+						for (const std::string& l : r.log)
+							full << l << "\n";
+					}
+					Assert::IsTrue(!codes.empty() && cw == w && ch == h, (HarnessWide("scene still capture: metadata '" + r.captureMetadata +
+						"' size " + std::to_string(cw) + "x" + std::to_string(ch) + " presented " + (r.presented ? "yes" : "no") + "\n") + r.Tail()).c_str());
+					checkFaithful(r, "scene still");
+					sceneMean[sceneOf[f]] = DvSynthMean(codes, w, x0, y0, x1, y1);
+				}
+				// 2. The stream with captures every ~0.07 s after a warm-up.
+				if (advanceAt != std::string::npos)
+					Assert::IsTrue(DvSynthLoadSegment(folder, seg, contentOfFrame), HarnessWide(folder).c_str());
+				FramePlan stream;
+				stream.rateNumerator = static_cast<int>(seg.rateNumerator);
+				stream.rateDenominator = static_cast<int>(seg.rateDenominator);
+				const std::vector<size_t> content = contentOfFrame;
+				stream.step = [content](int n) { return FrameStep{ true, static_cast<int>(content[static_cast<size_t>(n) % content.size()]), 0 }; };
+				const double loop = static_cast<double>(seg.frames.size()) * seg.rateDenominator / seg.rateNumerator;
+				const double seconds = 1.5 + 2.0 * loop;
+				for (double t = 1.5; t < seconds - 0.3; t += 0.07)
+					stream.captureTimes.push_back(t);
+				const RunResult r = Run(seg.ReplayEncoding(true), "standard", seconds, true, settings, false, &stream);
+				Assert::IsTrue(r.presented, (L"stream presented\n" + r.Tail()).c_str());
+				checkFaithful(r, "stream");
+				size_t readable = 0, misaligned = 0, nearCut = 0;
+				std::string first;
+				for (const std::string& json : r.captureMetadataList)
+				{
+					int cw = 0, ch = 0;
+					const std::vector<int> codes = LoadCaptureRgb(json, cw, ch);
+					uint32_t word = 0;
+					if (codes.empty() || cw != w || ch != h || !DvSynthReadStamp(codes, w, h, word))
+						continue;
+					const size_t frame = (word >> 8) & 0xFFFF;
+					const int scene = static_cast<int>(word & 0xFF);
+					if (frame >= sceneOf.size() || sceneOf[frame] != scene)
+						continue;
+					++readable;
+					const double m = DvSynthMean(codes, w, x0, y0, x1, y1);
+					const double own = sceneMean[scene];
+					double nearestOther = 1e9;
+					for (const auto& kv : sceneMean)
+						if (kv.first != scene && std::fabs(kv.second - own) > 2.0)
+							nearestOther = (std::min)(nearestOther, std::fabs(m - kv.second));
+					const bool atCut = (frame > 0 && sceneOf[frame - 1] != scene) || (frame + 1 < sceneOf.size() && sceneOf[frame + 1] != scene);
+					nearCut += atCut ? 1 : 0;
+					if (std::fabs(m - own) > 1.5 && std::fabs(m - own) > nearestOther * 0.5)
+					{
+						++misaligned;
+						if (first.empty())
+							first = "frame " + std::to_string(frame) + " scene " + std::to_string(scene) + (atCut ? " (at a cut)" : "") +
+							": mean " + std::to_string(m) + ", own scene " + std::to_string(own);
+					}
+				}
+				const std::string name = folder.substr(folder.find_last_of("\\/") + 1);
+				std::string means;
+				for (const auto& kv : sceneMean) means += std::to_string(kv.first) + ":" + std::to_string(static_cast<int>(kv.second + 0.5)) + " ";
+				Logger::WriteMessage(("GPU ALIGNMENT " + name + ": scene means " + means + "| captures " + std::to_string(r.captureMetadataList.size()) +
+					", stamped " + std::to_string(readable) + " (" + std::to_string(nearCut) + " next to a cut), misaligned " +
+					std::to_string(misaligned) + (first.empty() ? "" : "; first " + first) + "\n").c_str());
+				totalMisaligned += misaligned;
+				totalReadable += readable;
+				totalCaptures += r.captureMetadataList.size();
+			}
+			Assert::IsTrue(totalReadable > totalCaptures / 2, L"most captures carry a readable stamp");
+			Assert::AreEqual<size_t>(0, totalMisaligned, L"a capture showed another scene's tone mapping (metadata misaligned)");
+		}
+
+		// (b) Robustness through the whole renderer: the robustness segment (missing, damaged,
+		// truncated, malformed, extreme metadata; EOS -> SDR -> DV) streamed with the CPU unpack,
+		// the GPU unpack, and the GPU unpack forced to fail. Never a crash or a conversion failure;
+		// black on DM loss and the picture restored; every fallback under "Fallbacks engaged".
+		BEGIN_TEST_METHOD_ATTRIBUTE(DvSynthGpuRobustnessThroughTheRenderer)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DvSynthGpuRobustnessThroughTheRenderer)
+		{
+			const HarnessScope harnessScope;
+			const std::string root = DvSynthEnv("VP_TEST_DV_SYNTH_CORPUS");
+			if (root.empty())
+			{
+				Logger::WriteMessage("SKIP-NO-CORPUS DvSynthGpuRobustnessThroughTheRenderer (VP_TEST_DV_SYNTH_CORPUS)\n");
+				return;
+			}
+			if (!RequireHardwareOrSkip("DvSynthGpuRobustnessThroughTheRenderer")) return;
+			RawCorpusSegment seg;
+			std::vector<size_t> contentOfFrame;
+			Assert::IsTrue(DvSynthLoadSegment(root + "\\robust-1080p24", seg, contentOfFrame), L"robust-1080p24");
+			g_harnessDolbyVision = true;
+			g_harnessWindowWidth = 640;
+			g_harnessWindowHeight = 360;
+			const std::string settings = "[vprenderer.Default]\ndithering: off\ndeband: off\n";
+			FramePlan stream;
+			stream.rateNumerator = static_cast<int>(seg.rateNumerator);
+			stream.rateDenominator = static_cast<int>(seg.rateDenominator);
+			const std::vector<size_t> content = contentOfFrame;
+			stream.step = [content](int n) { return FrameStep{ true, static_cast<int>(content[(std::min)(static_cast<size_t>(n), content.size() - 1)]), 0 }; };
+			const double seconds = 1.0 + static_cast<double>(seg.frames.size()) * seg.rateDenominator / seg.rateNumerator;
+			for (int mode = 0; mode < 3; ++mode)
+			{
+				SetEnvironmentVariableW(L"VP_TEST_DV_UNPACK_FAIL", mode == 2 ? L"1" : nullptr);
+				const char* name = mode == 0 ? "CPU unpack" : mode == 1 ? "GPU unpack" : "GPU unpack failing";
+				const RunResult r = Run(seg.ReplayEncoding(true), "standard", seconds, true,
+					std::string(mode == 0 ? "dv_tunnel_gpu_unpack: off\n" : "dv_tunnel_gpu_unpack: on\n") + settings, false, &stream);
+				size_t blacks = 0, restores = 0, fallbackLines = 0;
+				std::string headings;
+				{
+					// The whole log, for the report (%TEMP%\vp-dv-synth-robust-<mode>.log).
+					const std::string temp = DvSynthEnv("TEMP");
+					std::ofstream full((temp.empty() ? std::string(".") : temp) + "\\vp-dv-synth-robust-" +
+						std::to_string(mode) + ".log", std::ios::trunc);
+					for (const std::string& l : r.log)
+						full << l << "\n";
+				}
+				for (const std::string& l : r.log)
+				{
+					blacks += l.find("Dolby Vision transition: presenting black") != std::string::npos ? 1 : 0;
+					restores += l.find("Dolby Vision transition: trusted") != std::string::npos ? 1 : 0;
+					if (l.find("Fallbacks engaged:") != std::string::npos)
+					{
+						++fallbackLines;
+						if (headings.size() < 600) headings += "\n   " + l;
+					}
+				}
+				Logger::WriteMessage((std::string("GPU ROBUST ") + name + ": presented " + (r.presented ? "yes" : "NO") + ", black episodes " +
+					std::to_string(blacks) + ", restores " + std::to_string(restores) + ", final status '" + r.fallbacksStatus + "'" + headings + "\n").c_str());
+				Assert::IsTrue(r.presented, HarnessWide(std::string(name) + ": presented\n").c_str());
+				Assert::IsTrue(blacks >= 3, (HarnessWide(std::string(name) + ": black on DM loss\n") + r.Tail()).c_str());
+				Assert::IsTrue(restores >= 3, (HarnessWide(std::string(name) + ": the picture restored\n") + r.Tail()).c_str());
+				// A truncated transfer is rejected by the formatter (the previous picture stays): that is
+				// the only conversion failure allowed. No libplacebo error anywhere (the SDR passthrough
+				// after EOS used to fail every picture: "Failed swapping endianness").
+				size_t conversionFailures = 0, truncated = 0, libplaceboErrors = 0;
+				for (const std::string& l : r.log)
+				{
+					conversionFailures += l.find("Alpha conversion failed") != std::string::npos ? 1 : 0;
+					truncated += l.find("incomplete frame (last row blank") != std::string::npos ? 1 : 0;
+					libplaceboErrors += l.find("libplacebo [error]") != std::string::npos ? 1 : 0;
+				}
+				Logger::WriteMessage(("   conversion failures " + std::to_string(conversionFailures) + " (truncated transfers rejected " +
+					std::to_string(truncated) + "), libplacebo errors " + std::to_string(libplaceboErrors) + "\n").c_str());
+				Assert::IsTrue(conversionFailures <= truncated, (HarnessWide(name) + L": conversion\n" + r.Tail()).c_str());
+				Assert::AreEqual<size_t>(0, libplaceboErrors, (HarnessWide(name) + L": libplacebo errors\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("could not be unpacked on the GPU or the CPU"), HarnessWide(name).c_str());
+				Assert::IsTrue(r.Logged("EOS boundary; allowing SDR RGB passthrough"), (HarnessWide(name) + L": EOS -> SDR\n" + r.Tail()).c_str());
+				// Owner rule (no silent fallbacks): the DM loss is listed while it lasts and released after.
+				Assert::IsTrue(r.Logged("Fallbacks engaged: ") && r.Logged("Dolby Vision metadata"),
+					(HarnessWide(name) + L": the DM loss under Fallbacks engaged\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.fallbacksStatus.find("Dolby Vision metadata") == std::string::npos,
+					HarnessWide(std::string(name) + ": released after recovery: " + r.fallbacksStatus).c_str());
+				if (mode == 2)
+					Assert::IsTrue(r.Logged("Dolby Vision GPU unpack"), (HarnessWide(name) + L": the unpack fallback listed\n" + r.Tail()).c_str());
+			}
+			SetEnvironmentVariableW(L"VP_TEST_DV_UNPACK_FAIL", nullptr);
+		}
+
+		// GPU vs CPU tunnel unpack at 4K: the 2160p corpus streamed at its rate (60p and 24p) with
+		// each route; frames dropped, queue and exit latency, and the presentation timing line.
+		BEGIN_TEST_METHOD_ATTRIBUTE(DvSynthGpuUnpackPerformance4K)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DvSynthGpuUnpackPerformance4K)
+		{
+			const HarnessScope harnessScope;
+			const std::string root = DvSynthEnv("VP_TEST_DV_SYNTH_CORPUS");
+			if (root.empty())
+			{
+				Logger::WriteMessage("SKIP-NO-CORPUS DvSynthGpuUnpackPerformance4K (VP_TEST_DV_SYNTH_CORPUS)\n");
+				return;
+			}
+			if (!RequireHardwareOrSkip("DvSynthGpuUnpackPerformance4K")) return;
+			const std::string extra = DvSynthEnv("VP_TEST_DV_SYNTH_EXTRA");
+			for (const char* name : { "acc-2160p60-p5-r210-high8", "acc-2160p24-p5-r210-low8" })
+			{
+				RawCorpusSegment seg;
+				std::vector<size_t> contentOfFrame;
+				Assert::IsTrue(DvSynthLoadSegment(root + "\\" + name, seg, contentOfFrame), HarnessWide(name).c_str());
+				g_harnessDolbyVision = true;
+				g_harnessWindowWidth = 1920;   // a 1080p window: the 4K picture scaled, as a projector chain might
+				g_harnessWindowHeight = 1080;
+				FramePlan stream;
+				stream.rateNumerator = static_cast<int>(seg.rateNumerator);
+				stream.rateDenominator = static_cast<int>(seg.rateDenominator);
+				const std::vector<size_t> content = contentOfFrame;
+				stream.step = [content](int n) { return FrameStep{ true, static_cast<int>(content[static_cast<size_t>(n) % content.size()]), 0 }; };
+				for (const bool gpu : { false, true })
+				{
+					const RunResult r = Run(seg.ReplayEncoding(true), "standard", 8.0, true,
+						std::string(gpu ? "dv_tunnel_gpu_unpack: on\n" : "dv_tunnel_gpu_unpack: off\n") +
+						"[vprenderer.Default]\ndithering: off\n" + extra, false, &stream);
+					const uint64_t dropped = r.trend.empty() ? 0 : r.trend.back().dropped;
+					const uint64_t droppedHalf = r.trend.empty() ? 0 : r.trend[r.trend.size() / 2].dropped;
+					char line[1024];
+					snprintf(line, sizeof(line), "GPU PERF %s %s unpack: presented %s, frames sent %zu, dropped %llu (second half %llu), median queue %.1f, median exit latency %.1f ms; %s\n",
+						name, gpu ? "GPU" : "CPU", r.presented ? "yes" : "NO", r.trend.size(), (unsigned long long)dropped,
+						(unsigned long long)(dropped - droppedHalf), Median(r.queueDepths), Median(r.exitLatencyMs), r.presentationStatus.c_str());
+					Logger::WriteMessage(line);
+					for (const std::string& l : r.log)
+						if (l.find("unpacked on the GPU") != std::string::npos || l.find("render time") != std::string::npos ||
+							l.find("Frame timing") != std::string::npos)
+							Logger::WriteMessage(("   " + l).c_str());
+					Assert::IsTrue(r.presented, HarnessWide(std::string(name) + ": presented").c_str());
+					if (gpu)
+						Assert::IsTrue(r.Logged("Dolby Vision RGB tunnel: picture unpacked on the GPU"), L"the GPU unpack ran");
+				}
+			}
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(CapturePathRunsThroughTheRendererWithFakeDeckLinkFrames)
@@ -3247,6 +4157,415 @@ namespace Tests
 				if (line.find("Interpolation") != std::string::npos || line.find("motion invalidated") != std::string::npos ||
 					line.find("interpolated=1") != std::string::npos || line.find("Motion engine") != std::string::npos)
 					Logger::WriteMessage(("   " + line).c_str());
+		}
+
+		// B3 (ADR-0024): the counters the renderer logs with pipeline_entrance_once on (the last line).
+		struct EntranceOnceCounters
+		{
+			bool found = false;
+			unsigned long long a = 0, b = 0, reused = 0, pictures = 0, fallbacks = 0;
+		};
+		static EntranceOnceCounters ReadEntranceOnce(const RunResult& r)
+		{
+			EntranceOnceCounters c;
+			for (const std::string& line : r.log)
+			{
+				const size_t at = line.find("entrance once (B3): A ");
+				if (at == std::string::npos)
+					continue;
+				unsigned long long a = 0, b = 0, reused = 0, pictures = 0, fallbacks = 0;
+				if (sscanf_s(line.c_str() + at, "entrance once (B3): A %llu, B ahead %llu, ring reuses %llu, pictures from processed planes %llu, fallbacks %llu",
+					&a, &b, &reused, &pictures, &fallbacks) == 5)
+				{
+					c.found = true;
+					c.a = a; c.b = b; c.reused = reused; c.pictures = pictures; c.fallbacks = fallbacks;
+				}
+			}
+			return c;
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(EntranceOnceMotionPicturesFromTheProcessedFrames)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(EntranceOnceMotionPicturesFromTheProcessedFrames)
+		{
+			const HarnessScope harnessScope;
+			// B3 (pipeline_entrance_once, ADR-0024) through the real renderer, with entrance stages that
+			// change the picture (a 1080 source re-based to 720, VP's debander forced on):
+			//   - interpolated pictures between frames come from the processed A and B (counted), no
+			//     fallback note, no failure; with a stateful stage (the debander's hold) B is processed
+			//     ahead once per source frame (A + B per frame at most), re-base alone promotes B ahead
+			//     to B's own A (the input side once per source frame);
+			//   - a hiccup gap pair (interpolation_fill_gaps) comes from the processed planes too;
+			//   - source-warp de-judder extras warp the processed A;
+			//   - off (the default): none of it runs (no B3 counters).
+			if (!RequireHardwareOrSkip("EntranceOnceMotionPicturesFromTheProcessedFrames")) return;
+			const double display = HarnessMonitorHz();
+			const std::string on = "[vpv]\npipeline_entrance_once: on\n";
+			std::string failures;
+			struct Case { const char* name; double rate; bool film; std::string extra; bool interpolation; bool stateless; bool gap; bool b3; };
+			const std::string stages = "source_resolution: 720\ndeband_vp: on\n";
+			const Case cases[] = {
+				{ "interpolation, stateful stages", display * 5.0 / 6.0, false, "interpolation: auto\n" + stages + on, true, false, false, true },
+				{ "interpolation, re-base only", display * 5.0 / 6.0, false, "interpolation: auto\nsource_resolution: 720\ndeband_vp: off\ndetail_pulse_stabilise: off\n" + on, true, true, false, true },
+				{ "hiccup gap pair", display * 5.0 / 6.0, false, "interpolation: auto\ninterpolation_fill_gaps: on\n" + stages + on, true, false, true, true },
+				{ "source-warp extras", 24000.0 / 1001.0, true, "dejudder_strength: 0.25\ndejudder_warp_stage: source\n" + stages + on, false, false, false, true },
+				// Render-ahead plans the extras from the monitor's rate (open loop) when a window gets no
+				// DXGI statistics: the source-path extras run off screen too.
+				{ "source-warp extras, render-ahead", 24000.0 / 1001.0, true,
+					"dejudder_strength: 0.25\ndejudder_warp_stage: source\nrender_ahead: on\nrender_ahead_queue_credit: on\n" + stages + on, false, false, false, true },
+				{ "off (default)", display * 5.0 / 6.0, false, "interpolation: auto\n" + stages + "[vpv]\npipeline_entrance_once: off\n", true, false, false, false },
+			};
+			// B3's stateful path needs C (the frame after B) queued to estimate B's field ahead: the
+			// look-ahead queue the delay budget keeps (4 frames); the harness default (3) is too short.
+			g_harnessQueueTarget = 5;
+			for (const Case& c : cases)
+			{
+				FramePlan plan = RatePlan(c.rate);
+				if (c.film)
+				{
+					plan.rateNumerator = 24000;
+					plan.rateDenominator = 1001;
+				}
+				const int gap = static_cast<int>(c.rate * 5.0);
+				if (c.gap)
+					plan.step = [gap](int n) { FrameStep f; f.content = n; f.send = n != gap; return f; };
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", c.gap ? 8.5 : 7.0, c.film, c.extra, false, &plan);
+				const EntranceOnceCounters k = ReadEntranceOnce(r);
+				char line[320];
+				snprintf(line, sizeof(line), "== %s: presented %s; B3 counters %s: A %llu, B ahead %llu, ring reuses %llu, pictures %llu, fallbacks %llu; %s\n",
+					c.name, r.presented ? "yes" : "NO", k.found ? "found" : "none", k.a, k.b, k.reused, k.pictures, k.fallbacks,
+					r.fallbacksStatus.c_str());
+				Logger::WriteMessage(line);
+				const std::string name = c.name;
+				const size_t failuresBefore = failures.size();
+				{
+					// The fallback reasons this run showed (evidence; each distinct heading once).
+					std::set<std::string> reasons;
+					for (const std::string& logLine : r.log)
+						if (logLine.find("entrance once (") != std::string::npos && logLine.find("Fallbacks engaged") != std::string::npos)
+							reasons.insert(logLine);
+					for (const std::string& reason : reasons)
+						Logger::WriteMessage(("   " + reason).c_str());
+				}
+				if (!r.presented) failures += name + ": not presented; ";
+				if (r.Logged("Interpolation: failed") || r.Logged("warp failed") || r.Logged("marking renderer failed"))
+					failures += name + ": a failure was logged; ";
+				if (!c.b3)
+				{
+					if (k.found || r.Logged("entrance once (B3) on"))
+						failures += name + ": B3 ran while off; ";
+					continue;
+				}
+				if (!r.Logged("entrance once (B3) on"))
+					failures += name + ": the pipeline state does not say B3 is on; ";
+				if (r.fallbacksStatus.find("entrance once") != std::string::npos)
+					failures += name + ": B3 fell back (" + r.fallbacksStatus + "); ";
+				if (c.interpolation)
+				{
+					if (!k.found || k.pictures == 0)
+						failures += name + ": no picture from the processed planes; ";
+					// The input side per source frame: A + B ahead (stateful), A alone (stateless: B ahead
+					// becomes B's A, so A is almost never computed in the draw).
+					if (k.found && k.b > 0)
+					{
+						if (c.stateless && k.a * 5 > k.b)
+							failures += name + ": B ahead was not reused as B's A (A " + std::to_string(k.a) + ", B " + std::to_string(k.b) + "); ";
+						if (!c.stateless && (k.a + k.b) > 2 * (k.b + 2))
+							failures += name + ": more than A + B per source frame; ";
+					}
+				}
+				if (c.gap && !r.Logged("Interpolation: gap pair across"))
+					failures += name + ": no gap pair; ";
+				// On a failure, the renderer's own lines about the pipeline and the timeline (evidence).
+				if (failures.size() != failuresBefore)
+					for (const std::string& logLine : r.log)
+						if (logLine.find("Entrance") != std::string::npos || logLine.find("Pipeline:") != std::string::npos ||
+							logLine.find("Interpolation") != std::string::npos || logLine.find("entrance once") != std::string::npos ||
+							logLine.find("Fallbacks engaged") != std::string::npos)
+							Logger::WriteMessage(("   " + logLine + "\n").c_str());
+				if (!c.interpolation)
+					Logger::WriteMessage(("   " + name + ": " + r.dejudderStatus + "\n").c_str());
+				if (!c.interpolation && (!k.found || k.pictures == 0))
+				{
+					// Extras need the display's measured rate, which an off-screen window does not get
+					// (DXGI statistics): strict on screen (VP_TEST_HARNESS_ONSCREEN=1), else reported.
+					char* onScreen = nullptr;
+					size_t length = 0;
+					const bool strictExtras = _dupenv_s(&onScreen, &length, "VP_TEST_HARNESS_ONSCREEN") == 0 && onScreen &&
+						std::string(onScreen) == "1";
+					std::free(onScreen);
+					// Render-ahead plans its extras open loop from the monitor's rate: strict everywhere. The
+					// closed-loop extras need DXGI statistics, which this laptop's panel never gives (an
+					// iGPU-driven panel: windowed or fullscreen) - strict only where they exist.
+					if (strictExtras || name.find("render-ahead") != std::string::npos)
+						failures += name + ": no extra from the processed A; ";
+					else
+						Logger::WriteMessage(("   PENDING-ONSCREEN " + name + ": no extra rendered off screen (" + r.dejudderStatus + ")\n").c_str());
+				}
+			}
+			Assert::IsTrue(failures.empty(), std::wstring(failures.begin(), failures.end()).c_str());
+		}
+
+		// ---- B3 real-clip acceptance (ADR-0024) ------------------------------------------------
+		// A real clip's frames (yuv422p10le from ffmpeg, letterboxed into 1920x1080) as v210 buffers
+		// for the harness's picture list (g_harnessDvFrames: one raw frame per content index).
+		static bool LoadClipV210(const std::string& id, int frames, std::vector<std::vector<BYTE>>& out, std::string& error)
+		{
+			const RealClip::Manifest manifest = RealClip::Manifest::Load();
+			const RealClip::Clip* clip = manifest.Loaded() ? manifest.Find(id) : nullptr;
+			if (!clip)
+			{
+				error = manifest.Loaded() ? "clip " + id + " not in the manifest" : "no clip manifest (" + manifest.error + ")";
+				return false;
+			}
+			const int w = 1920, h = 1080;
+			RealClip::Decoder decoder;
+			const std::string filter = "scale=1920:-2,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,format=yuv422p10le";
+			if (!decoder.OpenRaw(manifest, *clip, filter, "yuv422p10le", error))
+				return false;
+			const size_t lumaBytes = static_cast<size_t>(w) * h * 2, chromaBytes = static_cast<size_t>(w / 2) * h * 2;
+			const size_t rowBytes = static_cast<size_t>((w + 47) / 48) * 128;
+			std::vector<uint8_t> raw;
+			out.clear();
+			for (int i = 0; i < frames && decoder.NextRaw(raw, lumaBytes + 2 * chromaBytes); ++i)
+			{
+				const uint16_t* Y = reinterpret_cast<const uint16_t*>(raw.data());
+				const uint16_t* U = reinterpret_cast<const uint16_t*>(raw.data() + lumaBytes);
+				const uint16_t* V = reinterpret_cast<const uint16_t*>(raw.data() + lumaBytes + chromaBytes);
+				std::vector<BYTE> frame(rowBytes * h, 0);
+				for (int y = 0; y < h; ++y)
+				{
+					uint32_t* row = reinterpret_cast<uint32_t*>(frame.data() + rowBytes * y);
+					const uint16_t* yl = Y + static_cast<size_t>(y) * w;
+					const uint16_t* ul = U + static_cast<size_t>(y) * (w / 2);
+					const uint16_t* vl = V + static_cast<size_t>(y) * (w / 2);
+					auto L = [&](int x) { return static_cast<uint32_t>(yl[(std::min)(x, w - 1)] & 0x3FF); };
+					auto Cb = [&](int x) { return static_cast<uint32_t>(ul[(std::min)(x, w / 2 - 1)] & 0x3FF); };
+					auto Cr = [&](int x) { return static_cast<uint32_t>(vl[(std::min)(x, w / 2 - 1)] & 0x3FF); };
+					for (int pack = 0; pack < (w + 5) / 6; ++pack)
+					{
+						const int x = pack * 6, c = pack * 3;
+						row[pack * 4 + 0] = Cb(c) | (L(x) << 10) | (Cr(c) << 20);
+						row[pack * 4 + 1] = L(x + 1) | (Cb(c + 1) << 10) | (L(x + 2) << 20);
+						row[pack * 4 + 2] = Cr(c + 1) | (L(x + 3) << 10) | (Cb(c + 2) << 20);
+						row[pack * 4 + 3] = L(x + 4) | (Cr(c + 2) << 10) | (L(x + 5) << 20);
+					}
+				}
+				out.push_back(std::move(frame));
+			}
+			decoder.Close();
+			if (out.empty())
+				error = "no frame decoded from " + id;
+			return !out.empty();
+		}
+
+		// The mean high-band energy (|4c - the 4 neighbours|) of a capture's green channel inside the
+		// picture rows: the grain/texture measure of the B3 grain criterion.
+		static double CaptureHighBand(const std::string& json)
+		{
+			int w = 0, h = 0;
+			const std::vector<int> rgb = LoadCaptureRgb(json, w, h);
+			if (w < 8 || h < 8 || rgb.size() < static_cast<size_t>(w) * h * 3)
+				return 0.0;
+			double sum = 0.0;
+			long count = 0;
+			const int top = h * 15 / 100, bottom = h * 85 / 100;   // inside the letterbox
+			for (int y = (std::max)(1, top); y < (std::min)(h - 1, bottom); ++y)
+				for (int x = 1; x < w - 1; ++x)
+				{
+					auto g = [&](int xx, int yy) { return rgb[(static_cast<size_t>(yy) * w + xx) * 3 + 1]; };
+					sum += std::abs(4 * g(x, y) - g(x - 1, y) - g(x + 1, y) - g(x, y - 1) - g(x, y + 1));
+					++count;
+				}
+			return count ? sum / count : 0.0;
+		}
+
+		struct EntranceCost { bool found = false; unsigned long long runs = 0, frames = 0; };
+		static EntranceCost ReadEntranceCost(const RunResult& r)
+		{
+			EntranceCost c;
+			for (const std::string& line : r.log)
+			{
+				const size_t at = line.find("Entrance cost: ");
+				unsigned long long runs = 0, frames = 0;
+				if (at != std::string::npos &&
+					sscanf_s(line.c_str() + at, "Entrance cost: %llu input-side runs for %llu source frames", &runs, &frames) == 2)
+				{
+					c.found = true; c.runs = runs; c.frames = frames;
+				}
+			}
+			return c;
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(EntranceOnceRealClipAcceptance)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(EntranceOnceRealClipAcceptance)
+		{
+			const HarnessScope harnessScope;
+			// B3 acceptance on a real film clip (ADR-0024), 24p in the display's rate with interpolation
+			// (the timeline: B3's main case), entrance stages that change the picture (re-base to 720,
+			// VP deband on, detail pulse on by default), the output captured at 1920x1080:
+			//   1 identity: a still real frame - every capture (pictures between frames included) is
+			//     byte-identical to the plain processed frame (interpolation off), B3 on;
+			//   2 continuity: B processed ahead IS B drawn as A (B's own field ahead; the draw never
+			//     recomputes A), no fallback;
+			//   5 grain: the captures' high-band energy with B3 on is at least 90% of B3 off;
+			//   6 cost: input-side runs per source frame drop (reported; target 2-3x);
+			//   8 signal: interpolation off, B3 on is byte-identical to B3 off (the ring's copy exact).
+			if (!RequireHardwareOrSkip("EntranceOnceRealClipAcceptance")) return;
+			std::vector<std::vector<BYTE>> clip;
+			std::string error;
+			if (!LoadClipV210("tos_1920x800_24p", 72, clip, error))
+			{
+				const bool require = RealClip::Env("VP_TEST_REQUIRE_FOOTAGE") == "1";
+				Logger::WriteMessage(("SKIP-NO-FOOTAGE EntranceOnceRealClipAcceptance: " + error + "\n").c_str());
+				Assert::IsFalse(require, std::wstring(error.begin(), error.end()).c_str());
+				return;
+			}
+			wchar_t tempPath[MAX_PATH] = {};
+			GetTempPathW(MAX_PATH, tempPath);
+			const std::wstring shots = std::wstring(tempPath) + L"vp-b3-acceptance";
+			CreateDirectoryW(shots.c_str(), nullptr);
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			g_harnessWindowWidth = 1920;
+			g_harnessWindowHeight = 1080;
+			const std::string stages = "source_resolution: 720\ndeband_vp: on\n[vprenderer.Default]\ndithering: off\ndeband: off\n";
+			const std::string on = "[vpv]\npipeline_entrance_once: on\n";
+			const std::string off = "[vpv]\npipeline_entrance_once: off\n";   // explicit: never overridden by VP_TEST_ENTRANCE_ONCE
+			std::string failures;
+			const int frames = static_cast<int>(clip.size());
+			g_harnessQueueTarget = 5;   // C queued for B's field ahead (the delay budget's look-ahead)
+			auto motionPlan = [frames]() {
+				FramePlan p;
+				p.rateNumerator = 24000;
+				p.rateDenominator = 1001;
+				p.step = [frames](int n) { FrameStep f; f.content = n % frames; return f; };
+				p.captureTimes = { 3.0, 4.0, 5.0, 6.0, 7.0 };
+				return p; };
+			// 5 + 6 (+2): motion, B3 off then on.
+			double band[2] = { 0.0, 0.0 };
+			EntranceCost cost[2];
+			for (int b3 = 0; b3 < 2; ++b3)
+			{
+				g_harnessDvFrames = clip;
+				FramePlan plan = motionPlan();
+				// film = false: interpolation's timeline at 23.976 (the de-judder profile would take the
+				// rendered warp instead: B3 has nothing to do there).
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 8.0, false, "interpolation: auto\ndejudder_strength: 0\n" + stages + (b3 ? on : off), false, &plan);
+				double sum = 0.0;
+				int n = 0;
+				for (const std::string& json : r.captureMetadataList)
+				{
+					const double e = CaptureHighBand(json);
+					if (e > 0.0) { sum += e; ++n; }
+				}
+				band[b3] = n ? sum / n : 0.0;
+				cost[b3] = ReadEntranceCost(r);
+				{
+					std::ofstream dump(std::wstring(shots) + (b3 ? L"\\b3-motion-on.log" : L"\\b3-motion-off.log"), std::ios::trunc);
+					for (const std::string& logLine : r.log) dump << logLine;
+				}
+				for (const std::string& logLine : r.log)
+					if (logLine.find("nterpolat") != std::string::npos || logLine.find("De-judder:") != std::string::npos ||
+						logLine.find("Motion engine") != std::string::npos || logLine.find("Pipeline:") != std::string::npos)
+						Logger::WriteMessage(("   " + logLine).c_str());
+				const EntranceOnceCounters k = ReadEntranceOnce(r);
+				char line[400];
+				snprintf(line, sizeof(line), "== real clip motion, B3 %s: presented %s, captures %d, high band %.3f, input-side runs %llu for %llu source frames; "
+					"B3 A %llu, B ahead %llu, pictures %llu, fallbacks %llu; %s\n", b3 ? "on" : "off", r.presented ? "yes" : "NO", n, band[b3],
+					cost[b3].runs, cost[b3].frames, k.a, k.b, k.pictures, k.fallbacks, r.fallbacksStatus.c_str());
+				Logger::WriteMessage(line);
+				if (!r.presented) failures += std::string("motion B3 ") + (b3 ? "on" : "off") + ": not presented; ";
+				if (n == 0) failures += std::string("motion B3 ") + (b3 ? "on" : "off") + ": no capture; ";
+				if (b3)
+				{
+					if (!k.found || k.pictures == 0) failures += "motion B3 on: no picture from the processed planes; ";
+					if (r.fallbacksStatus.find("entrance once") != std::string::npos)
+						failures += "motion B3 on: fell back (" + r.fallbacksStatus + "); ";
+					// 2: the draw found B's A made ahead (the input side once per source frame).
+					if (k.found && k.b > 10 && k.a * 10 > k.b)
+						failures += "motion B3 on: B ahead was not B's A (A " + std::to_string(k.a) + ", B " + std::to_string(k.b) + "); ";
+				}
+			}
+			if (band[0] > 0.0 && band[1] < 0.9 * band[0])
+				failures += "grain: high band " + std::to_string(band[1]) + " with B3 vs " + std::to_string(band[0]) + " without (below 90%); ";
+			if (cost[0].found && cost[1].found && cost[0].frames > 0 && cost[1].frames > 0)
+			{
+				const double off = static_cast<double>(cost[0].runs) / cost[0].frames, onRuns = static_cast<double>(cost[1].runs) / cost[1].frames;
+				char line[200];
+				snprintf(line, sizeof(line), "== input-side runs per source frame: B3 off %.2f, on %.2f (%.2fx lower)\n", off, onRuns, onRuns > 0.0 ? off / onRuns : 0.0);
+				Logger::WriteMessage(line);
+				if (!(onRuns < off))
+					failures += "cost: input-side runs per source frame did not drop; ";
+			}
+			else
+				failures += "cost: the counters were not logged; ";
+			// 1 + 8: a still real frame, captured four times in each of three runs - B3 off and on
+			// without motion pictures (the plain processed frame), and B3 on with interpolation. The
+			// stages that change the picture without temporal state (re-base, VP deband) - the plain
+			// frame must be deterministic for an identity criterion; the runs check that first.
+			{
+				g_harnessDvFrames = { clip[clip.size() / 2] };
+				// The VP debander's threshold follows the source readings (bitrate quality), which move
+				// over a run: re-base alone gives a deterministic plain frame.
+				const std::string stillStages = "source_resolution: 720\ndeband_vp: off\ndetail_pulse_stabilise: off\n"
+					"[vprenderer.Default]\ndithering: off\ndeband: off\ntemporal_dither: off\ncnn_residual_stabilise: off\nssim_residual_stabilise: off\nadaptive_upscale: off\nadaptive_downscale: off\n";
+				auto hashesOf = [&](const std::string& extra) {
+					FramePlan plan;
+					plan.rateNumerator = 24000;
+					plan.rateDenominator = 1001;
+					plan.step = [](int) { FrameStep f; f.content = 0; return f; };
+					plan.captureTimes = { 3.0, 3.6, 4.2, 4.8 };
+					const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 5.5, false, extra, false, &plan);
+					{
+						static int runIndex = 0;
+						std::ofstream dump(std::wstring(shots) + L"\\b3-still-" + std::to_wstring(runIndex++ % 4) + L".log", std::ios::trunc);
+						for (const std::string& logLine : r.log) dump << logLine;
+						for (const std::string& json : r.captureMetadataList) dump << "CAPTURE " << json << "\n";
+					}
+					std::set<std::string> hashes;
+					for (const std::string& json : r.captureMetadataList)
+					{
+						RunResult one;
+						one.captureMetadata = json;
+						const std::string hsh = CaptureHash(one);
+						if (!hsh.empty()) hashes.insert(hsh);
+					}
+					return hashes; };
+				auto list = [](const std::set<std::string>& hashes) {
+					std::string out;
+					for (const std::string& hsh : hashes) out += hsh.substr(0, 12) + " ";
+					return out.empty() ? std::string("none ") : out; };
+				const std::set<std::string> plainOff = hashesOf("interpolation: off\n" + stillStages + off);
+				const std::set<std::string> plainOn = hashesOf("interpolation: off\n" + stillStages + on);
+				const std::set<std::string> motionOn = hashesOf("interpolation: auto\n" + stillStages + on);
+				// Reference (reported): today's motion path (B3 off) on the same still.
+				const std::set<std::string> motionOff = hashesOf("interpolation: auto\n" + stillStages + off);
+				Logger::WriteMessage(("== still real frame: interpolation B3 off " + list(motionOff) + "\n").c_str());
+				Logger::WriteMessage(("== still real frame: plain B3 off " + list(plainOff) + "| plain B3 on " + list(plainOn) +
+					"| interpolation B3 on " + list(motionOn) + "\n").c_str());
+				if (plainOff.empty() || plainOn.empty() || motionOn.empty())
+					failures += "still: a capture is missing; ";
+				else if (plainOff.size() != 1)
+					failures += "still: the plain processed frame is not deterministic with B3 off (" + list(plainOff) + "); ";
+				else
+				{
+					if (plainOn != plainOff)
+						failures += "still: B3 on differs from B3 off without motion pictures (criterion 8); ";
+					// Criterion 1 at the output: the timeline's pictures between frames differ from the
+					// plain draws by 1 code in ~0.01% of pixels WITH B3 OFF TOO (downstream of the entrance;
+					// docs/design 3.8c), so the output comparison is reported, and criterion 1 is asserted
+					// at B3's own boundary (EntranceOnceInterpolatorIsExactOnStillOrInvalidVectors).
+					if (motionOn != plainOff)
+						Logger::WriteMessage(("   still: timeline pictures differ from the plain frame at the output (B3 on "
+							+ std::to_string(motionOn.size()) + " hashes; B3 off " + std::to_string(motionOff.size()) + " hashes, same behaviour)\n").c_str());
+				}
+			}
+			g_harnessDvFrames.clear();
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
+			Assert::IsTrue(failures.empty(), std::wstring(failures.begin(), failures.end()).c_str());
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(InterpolationRunsAtAMeasuredRateMismatch)

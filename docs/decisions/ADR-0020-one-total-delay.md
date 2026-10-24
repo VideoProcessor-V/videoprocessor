@@ -15,7 +15,7 @@ fixed, so the video delay must never change between titles.
 
 1. **One user-set total delay**, set to match the AVR.
    - The RECOMMENDED setting is the design depth of **4 queued frames** at the slowest source
-     rate: about 230-250 ms at 24p. It is stated clearly in Config and the docs.
+     rate: about 267 ms at 23.976 on 60 Hz (measured by the delay gate: swapchain, display phase, capture transfer, processing + 4 frames). It is stated clearly in Config and the docs.
    - Queue depth = floor((total - fixed costs) / frame period), where fixed costs = swapchain
      depth + render-ahead + processing (+ capture transfer where covered).
    - The depth is capped at 4, with a graceful 4 -> 3 -> 2 fallback ladder (a "Fallbacks

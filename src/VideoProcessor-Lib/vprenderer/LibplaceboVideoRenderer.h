@@ -152,6 +152,7 @@ public:
 	bool GetPresentationTimingStatus(CString& status) const override;
 	bool GetDejudderStatus(CString& status) const override;
 	bool GetFallbacksStatus(CString& status) const override;
+	void SetQueueDelayBudget(int totalMs) override;
 	bool GetLedDriveStatus(CString& status) const override;
 	bool GetSourceResolutionStatus(CString& status) const override;
 	bool SuspendLedDriveForTest(CString& reason) override;
@@ -314,6 +315,13 @@ private:
 	// ABI 37: QPC ticks until the queue's head (a file frame) is due; 0 when
 	// due, or when the head is not a file frame (capture: unchanged).
 	int64_t FileHeadTicksUntilDueLocked() const;
+	// VP-V delay budget (ADR-0020, barrier B2): QPC ticks until a capture head has waited the
+	// budget's hold (the plain path's age gate); 0 when due or no budget hold applies.
+	int64_t HoldTicksUntilDueLocked() const;
+	// Recomputes the queue hold from the budget at this source rate (render thread).
+	// sourceRateHz: the content rate the queue holds (the film rate under a pulldown lock);
+	// signalRateHz: the HDMI signal's rate (one signal frame of capture transfer).
+	void UpdateQueueDelayHold(double sourceRateHz, double signalRateHz);
 	// The render loop's dequeue wait: CanDequeueLocked, then (file heads only)
 	// the head's due time.
 	void WaitForDequeueLocked(std::unique_lock<std::mutex>& lock, bool wakeOnCalibrationPattern = false);
@@ -385,6 +393,23 @@ private:
 	std::atomic_bool m_presentationTargetTimingKnown{false};
 	std::atomic<double> m_presentationTargetLeadMs{0.0};
 	std::atomic<double> m_captureToPresentationTargetMs{0.0};
+	// VP-V delay budget (ADR-0020): the user's one total delay (0 = none) and the hold this
+	// rate gives (DelayBudget::Plan): whole frames as the queue target, the rest as a fraction.
+	std::atomic<int> m_queueDelayBudgetMs{0};
+	// One coherent hold (audit B2): written together by UpdateQueueDelayHold, read together under
+	// m_queueHoldMutex (lock order: m_queueMutex, then m_queueHoldMutex).
+	struct QueueHold
+	{
+		bool active = false;
+		double holdMs = 0.0;
+		double fraction = 0.0;
+		size_t targetFrames = 0;
+	};
+	mutable std::mutex m_queueHoldMutex;
+	QueueHold m_queueHold;
+	QueueHold CurrentQueueHold() const;
+	std::string m_queueHoldLogged;
+	unsigned m_heldExcessRun = 0;   // consecutive held heads a frame late (AlphaQueuePolicy::ShouldShedHeldExcess)
 	std::atomic<uint64_t> m_droppedFrames{0};
 	std::atomic<uint64_t> m_conversionFailures{0};
 	std::atomic<size_t> m_activePictureLookaheadFrames{0};

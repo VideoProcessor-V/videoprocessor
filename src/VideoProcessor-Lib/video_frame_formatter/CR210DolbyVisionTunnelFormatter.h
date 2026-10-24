@@ -84,6 +84,7 @@ public:
 		metadata.allowSdrFallback = !m_tunnelConfirmed;
 		metadata.requiresBlackFrame = m_tunnelConfirmed &&
 			(!m_currentPictureHasValidHeader || !metadata.valid);
+		metadata.reusedPreviousDm = metadata.valid && !m_currentPictureDmAccepted;
 		return metadata;
 	}
 
@@ -115,6 +116,11 @@ private:
 	uint32_t m_stride = 0;
 	LONG m_outputSize = 0;
 	ByteAlignment m_alignment = ByteAlignment::UNKNOWN;
+	// test/dv-synthetic 2026-10-24: the placement proven (the header's CRC valid under one
+	// placement only, or decided by the placement votes when flat header rows make it valid
+	// under both). Until then every picture re-checks (dv_tunnel_fixes).
+	bool m_placementProven = false;
+	uint32_t m_ambiguousPlacementPictures = 0;
 	uint32_t m_missingPacketFrames = 0;   // source pictures since the first loss
 	bool m_missingPacketReported = false;
 	// Bug hunt 2026-10-17: source counter of the first picture of the current
@@ -137,6 +143,7 @@ private:
 	bool m_haveDiagnosticIds = false;
 	std::array<bool, 256> m_seenExtensionLevels{};
 	DolbyVisionTunnelFrameMetadata m_metadata;
+	bool m_currentPictureDmAccepted = true;   // this picture's own DM was accepted (else reused)
 	DolbyVisionTunnelFrameMetadata m_pendingMetadata;
 	bool m_hasPendingMetadata = false;
 	uint8_t m_pendingAffectedId = 0;

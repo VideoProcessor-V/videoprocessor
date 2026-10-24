@@ -2201,11 +2201,16 @@ DEFINE_CATMULL(warp_cat_src_b, src_b)
 #endif
 )GLSL";
 
+		// B3 (2026-10-24): the luma may be at another size than the estimate (the processed
+		// frame: re-based, repaired, 4K-routed). luma_scale = estimate px per target px; the field,
+		// masks and thresholds stay in estimate (source) px (lc = c * luma_scale), displacements
+		// come back as v / luma_scale. At luma_scale (1, 1) every expression is exactly the old one.
 		const char* const WARP_LUMA_BODY = R"GLSL(
 ivec2 q = ivec2(gl_GlobalInvocationID.xy);
 ivec2 size = imageSize(dst);
 if (q.x < size.x && q.y < size.y) {
     vec2 c = vec2(q) + vec2(0.5);
+    vec2 lc = c * luma_scale;   // the field's (estimate) pixels
     vec2 v;
     vec4 outv;
 #ifdef PIXEL_TRUST
@@ -2214,28 +2219,28 @@ if (q.x < size.x && q.y < size.y) {
         // The vector where the pixel comes from (two fixed-point steps: at a
         // moving edge the output position's own vector is the wrong one).
         float sc = shift * strength_scale();
-        vec2 va = field_vector_all(c);
-        va = field_vector_all(c - sc * va);
-        va = field_vector_all(c - sc * va);
+        vec2 va = field_vector_all(lc);
+        va = field_vector_all(lc - sc * va);
+        va = field_vector_all(lc - sc * va);
 #ifdef OBJECT
         va = object_scale(va);
 #endif
-        vec2 from = c - sc * va;
+        vec2 from = c - sc * va / luma_scale;
         float m = texture(pix_mask, from / vec2(size)).r;
 #ifdef LAND_A
         {
             // The landing check (owner 2026-10-14): the source pixel counts
             // only if its own motion carries it back here (else it is a valid
             // pixel that is not the one visible here - an occlusion).
-            vec2 vl = field_vector_all(from);
+            vec2 vl = field_vector_all(from * luma_scale);
 #ifdef OBJECT
             vl = object_scale(vl);
 #endif
-            if (length(from + sc * vl - c) > LAND_A) m = 0.0;
+            if (length(from * luma_scale + sc * vl - lc) > LAND_A) m = 0.0;
         }
 #endif
 #ifdef PIXEL_MOTION
-        outv = WARP_SRC((c - m * sc * va) / vec2(size));   // the weight's share of the motion
+        outv = WARP_SRC((c - m * sc * va / luma_scale) / vec2(size));   // the weight's share of the motion
 #else
         outv = mix(texelFetch(src, q, 0), WARP_SRC(from / vec2(size)), m);
 #endif
@@ -2244,17 +2249,17 @@ if (q.x < size.x && q.y < size.y) {
     imageStore(dst, q, outv);
     return;
 #endif
-    if (field_vector(c, v)) {
+    if (field_vector(lc, v)) {
         // Edges clamp (the sampler's address mode): never black.
-        outv = WARP_SRC((c - shift * strength_scale() * block_strength(c) * v) / vec2(size));
+        outv = WARP_SRC((c - shift * strength_scale() * block_strength(lc) * v / luma_scale) / vec2(size));
 #ifdef FEATHER
-        outv = mix(texelFetch(src, q, 0), outv, hold_weight(c, feather_px));
+        outv = mix(texelFetch(src, q, 0), outv, hold_weight(lc, feather_px));
 #endif
     } else {
 #ifdef FILL
         vec2 pb;
-        if (fill_position(c, shift * strength_scale(), pb))
-            outv = WARP_SRC_B(pb / vec2(size));
+        if (fill_position(lc, shift * strength_scale(), pb))
+            outv = WARP_SRC_B(pb / luma_scale / vec2(size));
         else
 #endif
         outv = texelFetch(src, q, 0);   // hard hold of A
@@ -2384,7 +2389,7 @@ if (q.x < size.x && q.y < size.y) {
 		// teardown on NVIDIA GPUs once the engine became the default, 2026-10-16).
 		opticalFlowEngine.reset();
 		for (pl_tex* tex : { &halfA, &halfB, &l1A, &l1B, &l2A, &l2B, &halfK, &l1K, &l2K, &forward, &backward,
-			&field, &frameTrust, &occlusion[0], &occlusion[1], &grainError, &warpedLuma, &warpedChroma,
+			&field, &frameTrust, &occlusion[0], &occlusion[1], &grainError, &warpedLuma, &warpedChroma, &processedLuma, &processedChroma,
 			&rawField, &globalVector[0], &globalVector[1], &strengthState, &fillOcclusion,
 			&sweep[0], &sweep[1], &ofSearch[0], &ofSearch[1], &ofNone, &previousSearch[0], &previousSearch[1], &qpelField, &subField,
 			&subSearch[0], &subSearch[1], &holdState[0], &holdState[1], &subHoldState[0], &subHoldState[1],
@@ -4076,25 +4081,75 @@ if (b.x < blocks.x && b.y < blocks.y) {
 
 	bool MotionWarp::Warp(const Planes& a, float shift, Planes& out, bool trusted)
 	{
+		return WarpImpl(a, shift, out, trusted, false);
+	}
+
+	bool MotionWarp::WarpProcessed(const Planes& a, float shift, Planes& out, bool trusted)
+	{
+		return WarpImpl(a, shift, out, trusted, true);
+	}
+
+	bool MotionWarp::WarpImpl(const Planes& a, float shift, Planes& out, bool trusted, bool processedTarget)
+	{
 		out = a;
 		if (!trusted || !estimated || shift == 0.0f)
 			return true;   // hold: A itself
-		// The warped planes were made for the frame Estimate saw: refuse a
-		// different size or chroma layout (e.g. 4:2:2 -> 4:2:0) rather than
-		// write into the old one.
-		if (!a.chroma || !warpedLuma || !warpedChroma || a.luma->params.w != width || a.luma->params.h != height ||
-			a.chroma->params.w != warpedChroma->params.w || a.chroma->params.h != warpedChroma->params.h ||
-			a.chroma->params.format != warpedChroma->params.format ||
-			a.luma->params.format != warpedLuma->params.format)
+		pl_tex dstLuma = warpedLuma, dstChroma = warpedChroma;
+		float lumaScale[2] = { 1.0f, 1.0f };
+		if (!processedTarget)
 		{
-			error = "Warp without a matching Estimate";
-			return false;
+			// The warped planes were made for the frame Estimate saw: refuse a
+			// different size or chroma layout (e.g. 4:2:2 -> 4:2:0) rather than
+			// write into the old one.
+			if (!a.chroma || !warpedLuma || !warpedChroma || a.luma->params.w != width || a.luma->params.h != height ||
+				a.chroma->params.w != warpedChroma->params.w || a.chroma->params.h != warpedChroma->params.h ||
+				a.chroma->params.format != warpedChroma->params.format ||
+				a.luma->params.format != warpedLuma->params.format)
+			{
+				error = "Warp without a matching Estimate";
+				return false;
+			}
+		}
+		else
+		{
+			// B3: the processed frame of the source frame Estimate saw, at its own size. The field
+			// stays in estimate px; the shaders map positions (luma_scale, chroma_scale).
+			if (!a.luma || !a.chroma || width <= 0 || height <= 0)
+			{
+				error = "WarpProcessed without planes or an estimate";
+				return false;
+			}
+			for (const auto& plane : { std::make_pair(a.luma, &processedLuma), std::make_pair(a.chroma, &processedChroma) })
+			{
+				const pl_tex in = plane.first;
+				if (!(in->params.format->caps & PL_FMT_CAP_STORABLE))
+				{
+					error = std::string("processed plane format not storable: ") + in->params.format->name;
+					return false;
+				}
+				pl_tex_params params{};
+				params.w = in->params.w;
+				params.h = in->params.h;
+				params.format = in->params.format;
+				params.sampleable = true;
+				params.storable = true;
+				params.renderable = (in->params.format->caps & PL_FMT_CAP_RENDERABLE) != 0;
+				if (!pl_tex_recreate(gpu, plane.second, &params))
+				{
+					error = "cannot create the processed warp planes";
+					return false;
+				}
+			}
+			dstLuma = processedLuma;
+			dstChroma = processedChroma;
+			lumaScale[0] = static_cast<float>(width) / static_cast<float>(a.luma->params.w);
+			lumaScale[1] = static_cast<float>(height) / static_cast<float>(a.luma->params.h);
 		}
 		// `src` is linear for the warp; the hold reads it with texelFetch.
 		const float minShare = settings.minTrustedShare;
 		const float tolerance = settings.matchTolerance;
 		// D5: B, its backward vectors and its occlusion bound only when on.
-		const bool fill = settings.occlusionFill && fillReady && lastB.luma && lastB.chroma;
+		const bool fill = settings.occlusionFill && fillReady && lastB.luma && lastB.chroma && !processedTarget;
 		// 11a E2: the sub-field bound (and read) only while the split is on.
 		const bool split = settings.estSplit && subField;
 		// Delta 14 R-B: the camera from D1 (when it runs).
@@ -4115,7 +4170,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		const float taperSadW = settings.taperSad > 0.0f ? settings.taperSad : 2.0f * settings.matchTolerance;
 		std::vector<pl_shader_desc> lumaDesc = {
 			Sampled("src", a.luma, true), Sampled("field", field, false),
-			Sampled("frame_trust", frameTrust, false), Storage("dst", warpedLuma) };
+			Sampled("frame_trust", frameTrust, false), Storage("dst", dstLuma) };
 		if (fill)
 		{
 			lumaDesc.push_back(Sampled("src_b", lastB.luma, true));
@@ -4131,6 +4186,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		if (withCamera)
 			lumaDesc.push_back(Sampled("camera", camera, false));
 		std::vector<pl_shader_var> lumaVars = { { pl_var_float("shift"), &shift, true },
+			{ pl_var_vec2("luma_scale"), lumaScale, true },
 			{ pl_var_float("min_trusted_share"), &minShare, true } };
 		if (fill) lumaVars.push_back({ pl_var_float("fill_tolerance"), &tolerance, true });
 		if (settings.holdFeatherPx > 0.0f) lumaVars.push_back({ pl_var_float("feather_px"), &featherPx, true });
@@ -4142,13 +4198,16 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		if (settings.objectStrength < 1.0f) lumaVars.push_back({ pl_var_float("object_strength"), &objectStrength, true });
 		if (!Dispatch("VideoProcessor de-judder: warp luma", header.c_str(), WARP_LUMA_BODY,
 			lumaDesc.data(), static_cast<int>(lumaDesc.size()), lumaVars.data(), static_cast<int>(lumaVars.size()),
-			width, height, 16))
+			a.luma->params.w, a.luma->params.h, 16))
 			return false;
+		// Estimate (luma) px per chroma px: the subsampling, or on a processed target the real
+		// plane sizes (research/chroma: never assume the (w+1)/2 rounding cancels).
 		const float chromaScale[2] = {
-			static_cast<float>(1 << a.chromaShiftX), static_cast<float>(1 << a.chromaShiftY) };
+			processedTarget ? static_cast<float>(width) / static_cast<float>(a.chroma->params.w) : static_cast<float>(1 << a.chromaShiftX),
+			processedTarget ? static_cast<float>(height) / static_cast<float>(a.chroma->params.h) : static_cast<float>(1 << a.chromaShiftY) };
 		std::vector<pl_shader_desc> chromaDesc = {
 			Sampled("src", a.chroma, true), Sampled("field", field, false),
-			Sampled("frame_trust", frameTrust, false), Storage("dst", warpedChroma) };
+			Sampled("frame_trust", frameTrust, false), Storage("dst", dstChroma) };
 		if (fill)
 		{
 			chromaDesc.push_back(Sampled("src_b", lastB.chroma, true));
@@ -4179,8 +4238,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			chromaDesc.data(), static_cast<int>(chromaDesc.size()), chromaVars.data(), static_cast<int>(chromaVars.size()),
 			a.chroma->params.w, a.chroma->params.h, 16))
 			return false;
-		out.luma = warpedLuma;
-		out.chroma = warpedChroma;
+		out.luma = dstLuma;
+		out.chroma = dstChroma;
 		return true;
 	}
 }

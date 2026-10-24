@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "CppUnitTest.h"
+#include <VP-V/core/PipelineSlots.h>
 
 #include <ConfigFile.h>
 #include <MainConfigSchema.h>
@@ -420,14 +421,23 @@ namespace DetailRestoreConfigTestsNs
 		{
 			const std::string text = ReadText(RepositoryRoot() + "\\src\\VideoProcessor-Lib\\vprenderer\\LibplaceboVideoRenderer.cpp");
 			Assert::IsFalse(text.empty(), L"the renderer source");
+			// Pipeline skeleton (2026-10-24): the stages are one stage list (RunEntrance, in the slot
+			// registry's order: re-base, deband, then detail pulse + texture restore), called by the
+			// render hook through RunMainEntrance AFTER the source-resolution monitor read the
+			// original frame. Inside the texture-restore stage, the detail pulse runs before texture
+			// restore.
 			const size_t monitor = text.find("sourceMonitor.Frame(d3d11->gpu, rebaseDispatch, renderImage,");
-			const size_t debander = text.find("debander.Apply(d3d11->gpu, rebaseDispatch, frame,");
-			// In the render hook (after its debander); the de-judder extras (another function)
-			// apply the frame's decision to their pictures as repeats.
-			const size_t pulse = debander == std::string::npos ? std::string::npos : text.find("detailPulse.Apply(", debander);
+			const size_t hookEntrance = monitor == std::string::npos ? std::string::npos : text.find("RunMainEntrance(run, frame);", monitor);
+			const size_t debandStage = text.find("void EntranceDeband(EntranceRun& run, pl_frame& frame)");
+			const size_t debander = debandStage == std::string::npos ? std::string::npos : text.find("debander.Apply(d3d11->gpu, rebaseDispatch, frame,", debandStage);
+			const size_t detailStage = text.find("void EntranceDetail(EntranceRun& run, pl_frame& frame)");
+			const size_t pulse = detailStage == std::string::npos ? std::string::npos : text.find("detailPulse.Apply(", detailStage);
 			const size_t restore = pulse == std::string::npos ? std::string::npos : text.find("textureRestore.Apply(", pulse);
-			Assert::IsTrue(monitor != std::string::npos && pulse != std::string::npos && restore != std::string::npos && debander != std::string::npos, L"the calls");
-			Assert::IsTrue(monitor < debander && debander < pulse && pulse < restore, L"monitor, then debander, then detail pulse, then texture restore");
+			Assert::IsTrue(monitor != std::string::npos && hookEntrance != std::string::npos && debander != std::string::npos &&
+				pulse != std::string::npos && restore != std::string::npos, L"the calls");
+			Assert::IsTrue(debandStage < detailStage && pulse < restore, L"debander stage, then detail pulse, then texture restore");
+			Assert::IsTrue(PipelineSlots::Get(PipelineSlots::Id::RepairDeband).order < PipelineSlots::Get(PipelineSlots::Id::RepairTextureRestore).order,
+				L"the designed order: deband before the texture-restore stage");
 			int calls = 0;
 			for (const char* call : { "detailPulse.Apply(", "detailPulse.MeasureAhead(", "textureRestore.Apply(" })
 				for (size_t at = text.find(call); at != std::string::npos; at = text.find(call, at + 1))

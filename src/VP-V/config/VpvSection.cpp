@@ -423,8 +423,9 @@ namespace Vpv
 			const double recommended = DelayBudget::BudgetForFrames(table.recommendedFrames, rates);
 			QString text = QStringLiteral(
 				"<b>Total delay.</b> One value, the same at every frame rate, so your AVR's fixed audio delay always matches. "
-				"<b>Recommended: %1 ms</b> (4 queued frames at 23.976p, the slowest rate). Shorter settings still work: the "
-				"look-ahead features fall back to 3 or 2 frames.").arg(recommended, 0, 'f', 0);
+				"<b>Recommended: %1 ms</b> (4 queued frames at 23.976p, the slowest rate, on a %2 Hz display; VP plans with "
+				"the display refresh it measures, so a faster display needs less). Shorter settings still work: the "
+				"look-ahead features fall back to 3 or 2 frames.").arg(recommended, 0, 'f', 0).arg(DelayBudget::kReferenceRefreshHz, 0, 'f', 0);
 			// The default queue profile's delay (the first [queue.*] profile; a literal [queue] in old files).
 			QStringList queues = host.profileSections ? host.profileSections(Q(table.delaySection)) : QStringList();
 			if (queues.isEmpty()) queues << Q(table.delaySection);
@@ -938,6 +939,22 @@ namespace Vpv
 				state->host.setValue(section, QStringLiteral("calibration_lut_stage"), lutStage->itemData(i).toString());
 			});
 
+			// B3 (ADR-0024): the motion pictures from the processed A and B (the input side once per
+			// source frame). A diagnostic switch until it passes its acceptance criteria.
+			auto* entranceOnce = new QComboBox;
+			entranceOnce->setObjectName(ObjectName(QStringLiteral("expert.pipeline_entrance_once")));
+			entranceOnce->addItem(QStringLiteral("Off (default; the stages run on every picture)"), QString());
+			entranceOnce->addItem(QStringLiteral("On (stages once per source frame; under test)"), QStringLiteral("on"));
+			entranceOnce->setToolTip(QStringLiteral("Key pipeline_entrance_once. On: interpolated pictures, hiccup repairs and "
+				"warped extras are made from each frame's processed picture, so the input stages run once per source frame "
+				"(design B3). The Original pathway never uses it."));
+			form->addRow(QStringLiteral("Input stages once per frame"), entranceOnce);
+			QObject::connect(entranceOnce, qOverload<int>(&QComboBox::currentIndexChanged), entranceOnce, [state, entranceOnce, section](int i)
+			{
+				if (state->refreshing || i < 0 || !state->host.setValue) return;
+				state->host.setValue(section, QStringLiteral("pipeline_entrance_once"), entranceOnce->itemData(i).toString());
+			});
+
 			// The module order: slot names moved within their zone.
 			auto* order = new QLineEdit;
 			order->setObjectName(ObjectName(QStringLiteral("expert.pipeline_order")));
@@ -992,12 +1009,16 @@ namespace Vpv
 			layout->addLayout(form);
 			layout->addStretch();
 
-			state->refreshers.push_back([state, lutStage, order, slotsOff, section]()
+			state->refreshers.push_back([state, lutStage, entranceOnce, order, slotsOff, section]()
 			{
 				const auto get = [&](const char* key) { return state->host.value ? state->host.value(section, QString::fromLatin1(key)).trimmed() : QString(); };
 				{
 					const QSignalBlocker blocker(lutStage);
 					lutStage->setCurrentIndex(get("calibration_lut_stage").compare(QStringLiteral("vp"), Qt::CaseInsensitive) == 0 ? 1 : 0);
+				}
+				{
+					const QSignalBlocker blocker(entranceOnce);
+					entranceOnce->setCurrentIndex(get("pipeline_entrance_once").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0 ? 1 : 0);
 				}
 				if (!order->hasFocus()) order->setText(get("pipeline_order"));
 				if (!slotsOff->hasFocus()) slotsOff->setText(get("pipeline_slots_off"));
@@ -1595,7 +1616,9 @@ namespace Vpv
 	bool PathwayIsVpv(const Host& host)
 	{
 		const Table& table = TierTable();
+		// The renderer's precedence (skeleton audit item 6): [vpv] first, then [vprenderer].
 		QString v = host.value ? host.value(Q(table.section), Q(table.pathwayKey)).trimmed() : QString();
+		if (v.isEmpty() && host.value) v = host.value(QStringLiteral("vprenderer"), Q(table.pathwayKey)).trimmed();
 		if (v.isEmpty()) v = Q(table.pathwayDefault);
 		// pipeline_original_pathway on = the Original pathway (ADR-0019); off/absent = VP-V.
 		return v.compare(QStringLiteral("on"), Qt::CaseInsensitive) != 0;
@@ -1900,9 +1923,9 @@ namespace Vpv
 			if (index < 0 || !state->host.setValue) return;
 			const Table& t = TierTable();
 			const QString value = pathway->itemData(index).toString();
-			// The default (VP-V) is written as an absent key, so untouched configs stay unchanged.
-			state->host.setValue(Q(t.section), Q(t.pathwayKey),
-				value == Q(t.pathwayDefault) ? QString() : value);
+			// Written explicitly, 'off' included: an absent [vpv] key would let a [vprenderer] value win
+			// (the renderer reads [vpv] first, then [vprenderer]; skeleton audit item 6).
+			state->host.setValue(Q(t.section), Q(t.pathwayKey), value);
 			applyPathway(value != QStringLiteral("on"));
 		});
 		// Before the managed greying, so the Original pathway restores tooltips that keep the mark.

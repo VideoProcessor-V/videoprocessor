@@ -79,8 +79,12 @@ namespace Interpolator
 		// The picture at phase t between A and B. `out` is A's or B's planes at
 		// t <= 0 / t >= 1, else this object's planes (valid until the next Run).
 		// A and B must share sizes and formats; the plane formats must be storable.
+		// B3 (2026-10-24): estimateWidth/Height > 0 when A and B are PROCESSED planes (re-based,
+		// repaired, 4K-routed) at another size than the frame the field was estimated on: the
+		// shader maps positions with plane_scale = estimate px per plane px from the real plane
+		// sizes. 0 (the default): today's scales (1 for luma, the chroma subsampling), byte for byte.
 		bool Run(const Dejudder::Planes& a, const Dejudder::Planes& b, const Motion& motion, float t,
-			InterpolationPolicy::Fallback fallback, Dejudder::Planes& out);
+			InterpolationPolicy::Fallback fallback, Dejudder::Planes& out, int estimateWidth = 0, int estimateHeight = 0);
 
 		// interpolation_grain (InterpolationPolicy::Grain); takes effect on the next Run.
 		void SetGrain(InterpolationPolicy::Grain value) { grain = value; }

@@ -22,14 +22,18 @@ and every SKIP-* marker.
 #>
 param(
     [string]$Dll = (Join-Path $PSScriptRoot "..\x64\Release\VideoProcessor-Test.dll"),
-    [string]$Names = "ExtendedRange|SigmaDelta|Interpolator|DolbyVision|DelayGate|CombinationRunner",
+    [string]$Names = "ExtendedRange|SigmaDelta|Interpolator|DolbyVision|DelayGate|CombinationRunner|PipelineSkeletonTests",
     [switch]$NoSettingsChecks,   # skip the VP-V data checks (settings agent 2026-10-24)
     [switch]$AllowBattery,       # GPU runs need mains power (owner rule); this overrides the check
     [switch]$NoHarness,
     [switch]$OnScreen,
     [string]$Fullscreen = "",   # VP_TEST_HARNESS_FULLSCREEN for the on-screen tests: 0, 1 or both
     [string]$Adapter = "NVIDIA",
-    [string]$OutDir = (Join-Path ([System.IO.Path]::GetTempPath()) "vp-chain-gate")
+    [string]$OutDir = (Join-Path ([System.IO.Path]::GetTempPath()) "vp-chain-gate"),
+    # The pre-skeleton build's renderer DLL for the byte-identity test (skeleton lead 2026-10-24);
+    # empty: the test reports SKIP-NO-BASELINE.
+    [string]$BaselineRendererDll = "",
+    [switch]$LenientDelay        # the delay gate reports instead of failing (VP_DELAY_GATE_STRICT off)
 )
 $ErrorActionPreference = "Stop"
 # GPU tests only on mains power (BatteryStatus 2 = on AC; no battery = a desktop).
@@ -41,7 +45,7 @@ if (-not $NoSettingsChecks) {
     $root = Join-Path $PSScriptRoot ".."
     foreach ($check in @(@("tools/gen_vpv_tiers.py", "--check"), @("tools/vpv_tests/slot_matrix.py", "--check"),
                          @("tools/vpv_tests/dimensions.py", "--check"), @("tools/vpv_tests/pairwise.py", "--verify", "tests/vpv/pairwise.txt"),
-                         @("tools/vpv_tests/seed_module_readmes.py", "--check"))) {
+                         @("tools/vpv_tests/seed_module_readmes.py", "--check"), @("tools/check_module_manifests.py"))) {
         Push-Location $root
         try { & python -I @check | ForEach-Object { "$_" } } finally { Pop-Location }
         if ($LASTEXITCODE -ne 0) { throw "VP-V data check failed: $($check -join ' ')" }
@@ -61,11 +65,15 @@ $filter = $clauses -join '|'
 $trx = Join-Path $OutDir "chain-gate.trx"
 Remove-Item $trx -ErrorAction SilentlyContinue
 $saved = @{}
-foreach ($k in "VP_TEST_GPU", "VP_TEST_ADAPTER", "VP_TEST_REQUIRE_GPU", "VP_TEST_REQUIRE_HARDWARE", "VP_TEST_HARNESS_ONSCREEN", "VP_TEST_HARNESS_FULLSCREEN") {
+foreach ($k in "VP_TEST_GPU", "VP_TEST_ADAPTER", "VP_TEST_REQUIRE_GPU", "VP_TEST_REQUIRE_HARDWARE", "VP_TEST_HARNESS_ONSCREEN", "VP_TEST_HARNESS_FULLSCREEN", "VP_DELAY_GATE_STRICT", "VP_TEST_BASELINE_RENDERER_DLL") {
     $saved[$k] = [Environment]::GetEnvironmentVariable($k)
 }
 $onScreenRequested = $OnScreen -or $env:VP_TEST_HARNESS_ONSCREEN -eq "1"
 $env:VP_TEST_GPU = "hardware"; $env:VP_TEST_ADAPTER = $Adapter; $env:VP_TEST_REQUIRE_GPU = "1"
+# The delay gate is strict (owner 2026-10-24: the same total at every rate, render_ahead off);
+# the byte-identity test runs against the baseline build when one is given.
+if (-not $LenientDelay) { $env:VP_DELAY_GATE_STRICT = "1" }
+if ($BaselineRendererDll) { $env:VP_TEST_BASELINE_RENDERER_DLL = (Resolve-Path $BaselineRendererDll).Path }
 # Fail closed on the owner's machine: a test whose hardware precondition (desktop size, CPU class,
 # hardware D3D11 renderer) is missing fails instead of logging SKIP-NO-HARDWARE.
 $env:VP_TEST_REQUIRE_HARDWARE = "1"

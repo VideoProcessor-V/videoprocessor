@@ -114,6 +114,19 @@ namespace AlphaQueuePolicy
 		return desired;
 	}
 
+	// The queue target the renderer steers to (PrefillTargetLocked; the stress harness uses the
+	// same function, so the delay gate tests the real rule). desired = the delay budget's whole
+	// hold frames when a budget is active (time-based already), else the (film-scaled) frame-count
+	// target. render_ahead_queue_credit gives back frames, never below 2; with queue_timing_fixes the
+	// credit never takes the target below the look-ahead floor - but never above `desired`, so a
+	// short delay budget is never exceeded (the look-ahead uses what is queued).
+	inline size_t CombineQueueTarget(size_t desired, size_t credit, size_t lookaheadFloor, bool queueTimingFixes)
+	{
+		const size_t target = credit > 0 && desired > 2 ? desired - (std::min)(credit, desired - 2) : desired;
+		const size_t floor = queueTimingFixes ? (std::min)(desired, lookaheadFloor) : 0;
+		return (std::max)(target, floor);
+	}
+
 	inline bool CanDequeue(size_t queueDepth, size_t desiredDepth,
 		bool startupPrefillPending)
 	{
@@ -199,6 +212,36 @@ namespace AlphaQueuePolicy
 			staleAgeMs >= StaleBacklogAgeThresholdMs(frameRateHz);
 	}
 
+	// VP-V delay budget (gate 5, 2026-10-24): with a time hold the head waits holdMs by design, so
+	// the stale-age rule above (100 ms beyond the frame-count target) left up to ~100 ms of backlog
+	// in place after a start-up or render stall - the total delay stayed above the budget. With a
+	// hold, a backlog is a head older than the hold by more than two frames; it is shed to target.
+	inline bool ShouldShedHeldBacklog(size_t queueDepth, size_t desiredDepth, double headAgeMs, double holdMs,
+		double frameRateHz)
+	{
+		if (!(holdMs > 0.0) || queueDepth <= NormalizeDesiredDepth(desiredDepth))
+			return false;
+		const double periodMs = 1000.0 / ValidFrameRateOrDefault(frameRateHz);
+		return headAgeMs > holdMs + 2.0 * periodMs;
+	}
+
+	// One frame behind for good (gate 7): when the source rate equals the display's (60p on 60 Hz)
+	// a frame the queue gained (an early burst, a stall) never drains: the total stays a frame above
+	// the budget. A head older than the hold by more than 1.25 frames for half a second in a row
+	// (jitter never lasts) is that frame: shed it too. `run` counts the consecutive late heads.
+	inline bool ShouldShedHeldExcess(size_t queueDepth, size_t desiredDepth, double headAgeMs, double holdMs,
+		double frameRateHz, unsigned& run)
+	{
+		const double periodMs = 1000.0 / ValidFrameRateOrDefault(frameRateHz);
+		const bool late = holdMs > 0.0 && queueDepth > NormalizeDesiredDepth(desiredDepth) && headAgeMs > holdMs + 1.25 * periodMs;
+		run = late ? run + 1 : 0;
+		const unsigned needed = (std::max)(8u, static_cast<unsigned>(std::lround(0.5 * ValidFrameRateOrDefault(frameRateHz))));
+		if (run < needed)
+			return false;
+		run = 0;
+		return true;
+	}
+
 	// The VP timeline's queue steering (hunt 2 13-timing H2, L3). The refresh
 	// spacing is trimmed by the smoothed distance of the queue (after the dequeue)
 	// from its target, at most 0.3%. The target after the dequeue keeps one frame of
@@ -224,11 +267,14 @@ namespace AlphaQueuePolicy
 			return 1.0 - std::exp(-1.0 / (sourceRateHz * kSmoothingSeconds));
 		}
 
+		// targetFraction (VP-V delay budget, ADR-0020): the sub-frame part of the queue's time
+		// hold (DelayBudget::Plan::holdFraction), so the queue settles at desired + fraction
+		// frames on average and the total delay equals the budget at every rate. 0 = as before.
 		double Update(size_t queueDepthAfterDequeue, size_t desiredDepth,
-			double sourceRateHz, bool timeConstant)
+			double sourceRateHz, bool timeConstant, double targetFraction = 0.0)
 		{
 			const double sample = static_cast<double>(queueDepthAfterDequeue) -
-				static_cast<double>(NormalizeDesiredDepth(desiredDepth));
+				(static_cast<double>(NormalizeDesiredDepth(desiredDepth)) + targetFraction);
 			m_error += Weight(sourceRateHz, timeConstant) * (sample - m_error);
 			return m_error;
 		}

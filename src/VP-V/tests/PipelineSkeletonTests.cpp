@@ -1,6 +1,11 @@
 #include "CppUnitTest.h"
 
+#include <VP-V/core/ChromaSiting.h>
 #include <VP-V/core/DelayBudget.h>
+#include <VP-V/core/EntranceEpoch.h>
+#include <VP-V/core/OriginalPathway.h>
+#include <RendererProfileConfig.h>
+#include <vprenderer/AlphaQueuePolicy.h>
 #include <VP-V/core/EntranceStages.h>
 #include <VP-V/core/OutputHookOrder.h>
 #include <VP-V/core/SlotRegistry.h>
@@ -284,8 +289,8 @@ namespace PipelineSkeletonTestsNs
 
 		TEST_METHOD(DelayBudgetRoundsDownInsideTheBudget)
 		{
-			// 24p (23.976) at 200 ms on a 60 Hz output with libplacebo's 2-frame swapchain and a
-			// 20 ms processing allowance: 200 - 33.3 - 20 = 146.7 ms -> 3 frames (degraded), padding kept.
+			// 24p (23.976) at 200 ms on a 60 Hz output with libplacebo's 2-frame swapchain, the display
+			// phase and a 20 ms processing allowance: 200 - 50 - 20 = 130 ms -> 3 frames (degraded).
 			DelayBudget::Inputs in;
 			in.budgetMs = 200.0; in.sourceFps = 24000.0 / 1001.0; in.refreshHz = 60.0;
 			in.swapchainFrames = 2; in.processingMs = 20.0;
@@ -300,8 +305,9 @@ namespace PipelineSkeletonTestsNs
 			plan = DelayBudget::Compute(in);
 			Assert::AreEqual(4, plan.queueFrames);
 			Assert::IsFalse(plan.degraded);
-			// A 1-frame swapchain and 15 ms processing fit 4 frames at 200 ms.
-			in.budgetMs = 200.0; in.swapchainFrames = 1; in.processingMs = 15.0;
+			// A 1-frame swapchain, no display phase (an exact-present display) and 15 ms processing
+			// fit 4 frames at 200 ms.
+			in.budgetMs = 200.0; in.swapchainFrames = 1; in.displayPhaseRefreshes = 0; in.processingMs = 15.0;
 			Assert::AreEqual(4, DelayBudget::Compute(in).queueFrames);
 			// Never more than the design depth (60p).
 			in.sourceFps = 60.0;
@@ -334,6 +340,42 @@ namespace PipelineSkeletonTestsNs
 			// Unknown rate: no plan.
 			in.sourceFps = 0.0;
 			Assert::IsFalse(DelayBudget::Compute(in).feasible);
+		}
+
+		TEST_METHOD(HeldQueueShedsABacklogBeyondItsHold)
+		{
+			// Gate 5 (2026-10-24): a held queue's head waits the hold by design; only a head older than
+			// the hold by more than two frames (and a queue above target) is a backlog to shed.
+			const double hold = 192.5;
+			Assert::IsFalse(AlphaQueuePolicy::ShouldShedHeldBacklog(14, 11, hold + 10.0, hold, 60.0));    // jitter
+			Assert::IsTrue(AlphaQueuePolicy::ShouldShedHeldBacklog(16, 11, hold + 40.0, hold, 60.0));     // 2.4 frames late
+			Assert::IsFalse(AlphaQueuePolicy::ShouldShedHeldBacklog(11, 11, hold + 400.0, hold, 60.0));   // at target
+			Assert::IsFalse(AlphaQueuePolicy::ShouldShedHeldBacklog(16, 11, hold + 400.0, 0.0, 60.0));    // no hold
+			Assert::IsFalse(AlphaQueuePolicy::ShouldShedHeldBacklog(8, 4, 167.0 + 80.0, 167.0, 23.976));  // < 2 film frames
+			Assert::IsTrue(AlphaQueuePolicy::ShouldShedHeldBacklog(8, 4, 167.0 + 90.0, 167.0, 23.976));
+			// One frame behind for good: shed after half a second of late heads, never on jitter.
+			unsigned run = 0;
+			for (int i = 0; i < 29; ++i)
+				Assert::IsFalse(AlphaQueuePolicy::ShouldShedHeldExcess(14, 11, hold + 22.0, hold, 60.0, run));
+			Assert::IsTrue(AlphaQueuePolicy::ShouldShedHeldExcess(14, 11, hold + 22.0, hold, 60.0, run));
+			Assert::AreEqual(0u, run);
+			for (int i = 0; i < 100; ++i)   // jitter: late every other frame
+				Assert::IsFalse(AlphaQueuePolicy::ShouldShedHeldExcess(14, 11, hold + (i % 2 ? 22.0 : 5.0), hold, 60.0, run));
+		}
+
+		TEST_METHOD(DelayBudgetQueueCapacityCoversTheHold)
+		{
+			// Gate 4 (2026-10-24): the FIFO must hold every frame that arrives during the hold plus two
+			// slots; a queue_size below that gets the hold cut to HoldForCapacity (visibly, in the renderer).
+			const double p60 = 1000.0 / 60.0;
+			Assert::AreEqual(static_cast<size_t>(14), DelayBudget::QueueCapacityFor(192.5, p60));   // 11.55 -> 12 + 2
+			Assert::AreEqual(static_cast<size_t>(5), DelayBudget::QueueCapacityFor(3.0 * p60, p60)); // exact fit: 3 + 2
+			Assert::AreEqual(static_cast<size_t>(1), DelayBudget::QueueCapacityFor(0.0, p60));
+			Assert::AreEqual(6.0 * p60, DelayBudget::HoldForCapacity(8, p60), 1e-9);
+			Assert::AreEqual(0.0, DelayBudget::HoldForCapacity(2, p60), 1e-9);
+			// The inverse never asks for more slots than it was given.
+			for (size_t capacity = 2; capacity <= 32; ++capacity)
+				Assert::IsTrue(DelayBudget::QueueCapacityFor(DelayBudget::HoldForCapacity(capacity, p60), p60) <= capacity);
 		}
 
 		TEST_METHOD(OriginalPathwayTurnsEveryVpAdditionOff)
@@ -486,6 +528,133 @@ namespace PipelineSkeletonTestsNs
 			Assert::IsTrue(registry.SetOrderByNames("repair.encoding, scaling.rebase", &reason));
 			registry.ApplyOriginalPathway();
 			Assert::IsTrue(registry.IsDefaultOrder());
+		}
+
+		TEST_METHOD(EntranceEpochCoversCropRangeAndColour)
+		{
+			// Audit blocker 1: a cached entrance result must never come back for a frame with another
+			// crop, range, bit depth or colour (the renderer keys its cache with this function).
+			struct Plane { const void* texture; int components; int component_mapping[4]; };
+			struct Rect { float x0, y0, x1, y1; };
+			struct Bits { int sample_depth, color_depth, bit_shift; };
+			struct Repr { int sys, levels, alpha; Bits bits; };
+			struct Hdr { float min_luma, max_luma; };
+			struct Color { int primaries, transfer; Hdr hdr; };
+			struct FakeFrame { int num_planes; Plane planes[4]; Rect crop; Repr repr; Color color; };
+			int textureA = 0, textureB = 0;
+			FakeFrame base{};
+			base.num_planes = 2;
+			base.planes[0] = { &textureA, 1, { 0, -1, -1, -1 } };
+			base.planes[1] = { &textureB, 2, { 1, 2, -1, -1 } };
+			base.crop = { 0.0f, 0.0f, 1920.0f, 1080.0f };
+			base.repr = { 1, 1, 0, { 16, 10, 6 } };
+			base.color = { 1, 1, { 0.0f, 100.0f } };
+			auto key = [](const FakeFrame& f) { EntranceEpoch::Key k; EntranceEpoch::AddFrame(k, f); return k.Value(); };
+			const uint64_t same = key(base);
+			Assert::AreEqual(same, key(base));
+			FakeFrame crop = base; crop.crop.y0 = 132.0f;          // a start-up crop hold releasing
+			FakeFrame levels = base; levels.repr.levels = 2;       // range re-detection
+			FakeFrame depth = base; depth.repr.bits.color_depth = 12;
+			FakeFrame color = base; color.color.transfer = 2;
+			FakeFrame texture = base; texture.planes[1].texture = &textureA;
+			for (const FakeFrame* f : { &crop, &levels, &depth, &color, &texture })
+				Assert::AreNotEqual(same, key(*f));
+			// B3's ring (owned copies keyed by the unique source sequence): the texture a frame was
+			// uploaded into is left out, everything else still counts.
+			auto ringKey = [](const FakeFrame& f) { EntranceEpoch::Key k; EntranceEpoch::AddFrame(k, f, false); return k.Value(); };
+			Assert::AreEqual(ringKey(base), ringKey(texture));
+			for (const FakeFrame* f : { &crop, &levels, &depth, &color })
+				Assert::AreNotEqual(ringKey(base), ringKey(*f));
+		}
+
+		TEST_METHOD(EntranceRingKeepsAAndBByRoleAndReplacesTheOldest)
+		{
+			// B3 (ADR-0024): the processed A and B are kept as the ring's own copies, by sequence, key
+			// and role; a claimed entry is valid only once committed; the least recently used goes.
+			EntranceStages::Ring<int, 3> ring;
+			using EntranceStages::Role;
+			Assert::IsNull(ring.Find(1, 7, Role::A));
+			ring.Claim(1, 7, Role::A) = 101;
+			Assert::IsNull(ring.Find(1, 7, Role::A));           // not committed yet
+			ring.Commit();
+			Assert::AreEqual(101, *ring.Find(1, 7, Role::A));
+			Assert::IsNull(ring.Find(1, 7, Role::B));           // another role
+			Assert::IsNull(ring.Find(1, 8, Role::A));           // another key (parameters changed)
+			Assert::IsNull(ring.Find(0, 7, Role::A));           // sequence 0 is never cached
+			ring.Claim(2, 7, Role::B) = 202; ring.Commit();
+			ring.Claim(2, 7, Role::A) = 203; ring.Commit();
+			Assert::AreEqual(static_cast<size_t>(3), ring.ValidCount());
+			(void)ring.Find(1, 7, Role::A);                     // A of 1 used again: 2/B is the oldest now
+			ring.Claim(3, 7, Role::A) = 303; ring.Commit();
+			Assert::IsNull(ring.Find(2, 7, Role::B));
+			Assert::AreEqual(101, *ring.Find(1, 7, Role::A));
+			Assert::AreEqual(203, *ring.Find(2, 7, Role::A));
+			Assert::AreEqual(303, *ring.Find(3, 7, Role::A));
+			// The same sequence and role refills its own entry (new parameters), never a second one.
+			ring.Claim(3, 9, Role::A) = 304; ring.Commit();
+			Assert::IsNull(ring.Find(3, 7, Role::A));
+			Assert::AreEqual(304, *ring.Find(3, 9, Role::A));
+			Assert::AreEqual(static_cast<size_t>(3), ring.ValidCount());
+			// A failed copy (claimed, never committed) leaves nothing behind.
+			ring.Claim(4, 7, Role::B) = 404;
+			Assert::IsNull(ring.Find(4, 7, Role::B));
+			ring.Invalidate();
+			Assert::AreEqual(static_cast<size_t>(0), ring.ValidCount());
+		}
+
+		TEST_METHOD(NothingThatChangesThePictureBetweenLedMeasureAndCompensation)
+		{
+			// Audit item 8: the compensation must act on exactly the measured picture.
+			PipelineSlots::Registry registry;
+			std::string reason;
+			// Moving Stage 13 between them (measure, appearance, compensation) is refused.
+			Assert::IsFalse(registry.SetOrderByNames("drive.led_measure, colour.appearance", &reason));
+			Assert::IsTrue(reason.find("between drive.led_measure and drive.led_compensation") != std::string::npos, W(reason).c_str());
+		}
+
+		TEST_METHOD(OnlyHonouredSlotSwitchesAreAccepted)
+		{
+			// Audit item 4: a switch for a slot the renderer never consults would be silently ignored.
+			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::RepairDeband));
+			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::DriveProjectorControl));
+			Assert::IsFalse(PipelineSlots::SwitchHonoured(Id::ScalingGeometry));
+			Assert::IsFalse(PipelineSlots::SwitchHonoured(Id::ColourToneGamut));
+		}
+
+		TEST_METHOD(OriginalPathwayOverridesAreRealKeysAndValues)
+		{
+			// Audit item 7: every override names a real renderer key with a value the configuration
+			// validator accepts, and belongs to a slot that is not upstream-only.
+			std::set<std::string> keys;
+			for (const OriginalPathway::Override& o : OriginalPathway::Overrides())
+			{
+				Assert::IsTrue(keys.insert(o.key).second, W(std::string("duplicate ") + o.key).c_str());
+				Assert::IsTrue(RendererProfileConfig::ValidateBaseSetting(o.key, o.value),
+					W(std::string(o.key) + ": " + o.value + " is not a valid renderer setting").c_str());
+				const Id slot = PipelineSlots::FromName(o.slot);
+				Assert::IsTrue(slot != Id::Count, W(std::string(o.key) + ": unknown slot " + o.slot).c_str());
+				Assert::IsTrue(PipelineSlots::Get(slot).origin != PipelineSlots::Origin::Upstream,
+					W(std::string(o.key) + ": an upstream-only slot has no VP additions to remove").c_str());
+			}
+		}
+
+		TEST_METHOD(UpstreamKeyLeavesTheMotionConsumersOutUntilB3)
+		{
+			// Audit item 3: the consumers still run before the entrance in the renderer.
+			PipelineSlots::Registry registry;
+			const std::string key = registry.UpstreamKey(Id::ScalingOutput);
+			Assert::IsTrue(key.find("motion.consumers") == std::string::npos, W(key).c_str());
+			Assert::IsTrue(key.find("repair.deband") != std::string::npos, W(key).c_str());
+		}
+
+		TEST_METHOD(ChromaShiftScalesWithAnEdgeAlignedResample)
+		{
+			// research/chroma 2026-10-24: a 2:1 re-base of LEFT-sited 4:2:x keeps the colour in place
+			// only when the plane shift scales with it (-0.5 -> -0.25); 1:1 leaves it unchanged.
+			Assert::AreEqual(-0.25f, ChromaSiting::ShiftAfterResample(-0.5f, 0.5));
+			Assert::AreEqual(-0.5f, ChromaSiting::ShiftAfterResample(-0.5f, 1.0));
+			Assert::AreEqual(0.0f, ChromaSiting::ShiftAfterResample(0.0f, 0.75));
+			Assert::AreEqual(-0.375f, ChromaSiting::ShiftAfterResample(-0.5f, 0.75));   // 1440 -> 1080 class
 		}
 	};
 }

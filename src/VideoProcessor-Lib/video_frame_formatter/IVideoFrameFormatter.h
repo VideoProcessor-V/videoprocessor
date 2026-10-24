@@ -134,6 +134,10 @@ struct DolbyVisionTunnelFrameMetadata
     uint8_t l11Brightness = 0;
     uint8_t l11Color = 0;
     uint8_t l11Raw[4] = {};
+    // DV open item (2026-10-24, no silent fallbacks): this picture's own DM was rejected
+    // (missing, CRC-invalid or malformed) and the previous DM is being reused within the loss
+    // limit. The renderer lists it under "Fallbacks engaged" while it lasts.
+    bool reusedPreviousDm = false;
 };
 
 /**

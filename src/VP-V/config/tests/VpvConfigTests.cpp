@@ -157,7 +157,7 @@ namespace
 	{
 		const auto rates = DelayBudget::StandardRates();
 		const double recommended = DelayBudget::BudgetForFrames(4, rates);
-		require(std::abs(recommended - 250.0) < 1e-9, "4 frames at 23.976 on a 60 Hz display recommend 250 ms");
+		require(std::abs(recommended - 267.0) < 1e-9, "4 frames at 23.976 on a 60 Hz display recommend 267 ms (display phase included)");
 		for (int frames : { 4, 3, 2 })
 		{
 			const double budget = DelayBudget::BudgetForFrames(frames, rates);
@@ -303,8 +303,9 @@ namespace
 			control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(0);
 			save(window);
 		}
-		require(config.Load(path.toStdString()) && !config.TryGetString("vpv", "pipeline_original_pathway", v),
-			"back to VP-V (the default) removes the key again");
+		ConfigFile reloaded;
+		require(reloaded.Load(path.toStdString()) && reloaded.TryGetString("vpv", "pipeline_original_pathway", v) && v == "off",
+			"back to VP-V writes 'off' explicitly, so a [vprenderer] value cannot win (skeleton audit item 6)");
 	}
 
 	void testUnbuiltSlotsAndToggles()
@@ -322,7 +323,7 @@ namespace
 		require(control<QLabel>(window, Vpv::ObjectName("fallbacks"))->text().startsWith(QStringLiteral("Fallbacks engaged:")),
 			"the Fallbacks engaged heading is shown");
 		const QString delay = control<QLabel>(window, Vpv::ObjectName("input.delay"))->text();
-		require(delay.contains(QStringLiteral("Recommended: 250 ms")) && delay.contains(QStringLiteral("Target delay: <b>250 ms</b>")),
+		require(delay.contains(QStringLiteral("Recommended: 267 ms")) && delay.contains(QStringLiteral("Target delay: <b>250 ms</b>")),
 			"the delay card states the recommended value and the chosen one");
 		auto* guard = control<QComboBox>(window, Vpv::ObjectName("repair.deband_vp_grain_guard"));
 		const int before = control<QSlider>(window, Vpv::ObjectName("repair.tier"))->value();

@@ -111,6 +111,41 @@ namespace Tests
 			Assert::IsFalse(DolbyVisionTrims::Select(Dm({ L2(t100) }), 100.0).apply);
 		}
 
+		// test/dv-synthetic 2026-10-24 (owner: the trim follows VP's tone-mapping target): the renderer
+		// passes libplacebo's target peak (sdr_target_nits for an SDR output, re-read every frame, so a
+		// changed setting is followed live) to Select. Trims authored at 100 / 600 / 1000 nits:
+		//   48 nits  (below every target): the 100-nit trim as sent, no extrapolation;
+		//   100 nits: the 100-nit trim exactly;
+		//   200 nits: interpolated in PQ between 100 and 600 (weight = (PQ(200) - PQ(100)) / (PQ(600) - PQ(100))).
+		TEST_METHOD(SelectionFollowsTheToneMappingTarget)
+		{
+			const uint16_t t100 = static_cast<uint16_t>(std::lround(DolbyVisionTrims::PqFromNits(100.0) * 4095.0));
+			const uint16_t t600 = static_cast<uint16_t>(std::lround(DolbyVisionTrims::PqFromNits(600.0) * 4095.0));
+			const uint16_t t1000 = static_cast<uint16_t>(std::lround(DolbyVisionTrims::PqFromNits(1000.0) * 4095.0));
+			const auto dm = Dm({ L2(t1000, 2048 + 30), L2(t100, 2048 + 160), L2(t600, 2048 + 60) }, static_cast<uint16_t>(t1000 + 300));
+			const double s100 = 1.0 + 160 / 4096.0, s600 = 1.0 + 60 / 4096.0;
+			{
+				const auto s = DolbyVisionTrims::Select(dm, 48.0);
+				Assert::IsTrue(s.apply);
+				Assert::AreEqual(1, s.upperIndex, L"48 nits: the lowest-target (100-nit) trim");
+				Assert::AreEqual(-1, s.lowerIndex);
+				Assert::AreEqual(s100, s.params.slope, 1e-9, L"48 nits: the 100-nit trim as sent (no extrapolation)");
+			}
+			{
+				const auto s = DolbyVisionTrims::Select(dm, 100.0);
+				Assert::AreEqual(s100, s.params.slope, 1e-3, L"100 nits: the 100-nit trim");
+			}
+			{
+				const auto s = DolbyVisionTrims::Select(dm, 200.0);
+				const double w = (DolbyVisionTrims::PqFromNits(200.0) * 4095.0 - t100) / static_cast<double>(t600 - t100);
+				Assert::AreEqual(1, s.lowerIndex);
+				Assert::AreEqual(2, s.upperIndex);
+				Assert::AreEqual(w, s.weight, 1e-9, L"200 nits: weight in PQ");
+				Assert::AreEqual(s100 + (s600 - s100) * w, s.params.slope, 1e-9, L"200 nits: interpolated");
+				Logger::WriteMessage(("target 200 nits: weight toward the 600-nit trim " + std::to_string(w) + "\n").c_str());
+			}
+		}
+
 		TEST_METHOD(CurveIsMonotonicAndKeepsAboveWhite)
 		{
 			DolbyVisionTrims::Params p;
