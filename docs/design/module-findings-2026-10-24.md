@@ -132,3 +132,41 @@ below.
   measured every new raw frame (about 2–3 ms per 4K frame) for predictions nothing read. It now
   returns `LookaheadWantedLocked()`. The renderer already re-reads `WantsPredictions` on every
   `Reconfigure`. Test: `CompensateWithoutLookaheadWantsNoPredictions`.
+- **Subtitle temporal-fill margins (note for Bill; no change).** `SubtitleTemporalFill::Matches` (Bill's
+  code) searches ±192 / ±120 px around the cleanup box with a 4 px guard, whatever the resolution
+  (ADR-0018). A fix (fractions of the picture, identical at 1920x1080) was drafted and withdrawn
+  under the owner principle that Bill's code stays as he has it. Suggested to Bill:
+  `(192*width+960)/1920`, `(120*height+540)/1080`, `max(1,(4*height+540)/1080)`. The 120 / 32
+  thresholds are code differences and need no change. The renderer's default
+  `subtitleNearBarDistance = 20` source pixels has the same issue.
+- **Misleading comment in `CalibrationLutStage.h` (done).** It said `OutputHookOrder` ranks the hook
+  after the user shaders and before the de-judder cache. That position actually comes from the
+  render path's push order, and `pipeline_order` can move this slot ahead of LED compensation. The
+  comment now says so. Whether `output.calibration_lut` should be movable at all is an owner
+  question; the slot rule lives in `slots.json` / `SlotContracts.h`, both on other branches' change
+  lists.
+- **Misleading comment in `RendererProfileConfig.h` (hand-off; dv-l8 changes that file).** Above
+  `MIN_SUBTITLE_HOLD_SECONDS`, "sampled every third rendered frame" is wrong. Replace it with:
+  "subtitle detection inspects every new source frame on the measurement worker
+  (`SubtitleBoxDetector::Detect`)".
+- **LED measurements stamped at collection time (deferred; needs a build to validate).**
+  `LedDriveModule::SubmitMeasurement` builds `FrameStats` with `NowMs()`, so frames collected
+  together share a time, and under render-ahead it is not the display time. The fix is to stamp
+  with the frame clock time `BeginFrame*` recorded for that sequence: a small bounded map
+  sequence -> frame time, falling back to `lastFrameMs` for sequence 0. But it changes the time base
+  of every persistence and fade window, and the LED tests feed synthetic frame times. It needs the
+  LED test classes run while it is being written, so it is left for a session with builds.
+- **`CalibrationController::Start` blocks the RPC thread (deferred).** `FindSpotread` (drive and
+  profile scans) runs synchronously on the RPC thread, and `worker` / `currentVpRoot` are written
+  outside `mutex`. The fix is to move discovery and session construction onto the worker, report
+  "starting" immediately, and guard `worker` / `currentVpRoot` with `mutex`. That restructures the
+  start path and its error reporting (the RPC currently returns the start error synchronously),
+  so it needs Config-side agreement and the calibration tests. Not done blind.
+- **Calibration config path (hand-off; VideoProcessorDlg.cpp, dv-l8).** In
+  `HandleCalibrationRpc`, set `hooks.configPath = [this] { return <the path VP loaded its config
+  from>; };` so the controller never falls back to `ConfigFile::DEFAULT_FILENAME` relative to the
+  working directory.
+- **`MeasurementHook::Dropped()` is never read (hand-off; LibplaceboVideoRenderer.cpp).** In the LED
+  block after `Collect`, when `Dropped()` grows, log it once per change. If it keeps growing
+  (readbacks lost every frame), engage `LED measurement` / "readbacks dropped: the LED follows the
+  last statistics".
