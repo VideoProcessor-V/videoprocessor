@@ -133,6 +133,9 @@ namespace CalibrationLutHost
 		}
 
 		// The probed version differs from the one last loaded (LibplaceboDisplayLut::SameFileVersion).
+		// The file version the last load read (WP-24's display-LUT identity reads it).
+		uint64_t ObservedBytes() const { return observedBytes; }
+		uint64_t ObservedWriteTime() const { return observedWriteTime; }
 		bool Changed(bool available, uint64_t fileBytes, uint64_t fileWriteTime) const
 		{
 			return !(available == observedAvailable && fileBytes == observedBytes && fileWriteTime == observedWriteTime);
