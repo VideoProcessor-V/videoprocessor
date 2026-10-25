@@ -1,6 +1,7 @@
 {
  "schema": 1,
  "about": "Category of tests that use the GPU and carry no Category attribute (or whose file must stay untouched). Categories: GpuHardware, GpuOnScreen, MeterHardware, ProjectorHardware are excluded from the CPU run; GpuWarp renders on WARP and stays in it; Cpu marks a reviewed false positive of the name heuristic. First matching entry wins. Checked by tools/check_test_categories.py; the CPU filter comes from tools/gen_test_filters.py. Copyright(C) 2026 VP-V contributors; SPDX-License-Identifier: GPL-3.0-only",
+ "scope": "Native-test sources named *Tests.cpp under src. Not covered: the Beta host tests (VideoProcessor-BetaTests/BetaGpuTests.cpp, BetaTestHost.cpp) use no TEST_METHOD macros, so the scanner cannot see them; the checker also does not follow helper calls, so a test that reaches the GPU only through a helper needs a Gpu in its name or a manifest entry.",
  "entries": [
   {
    "kind": "class",
@@ -103,9 +104,9 @@
   {
    "kind": "method",
    "value": "MotionRendererTests::AllMixerFiltersRenderOnGpu",
-   "category": "GpuWarp",
+   "category": "GpuHardware",
    "file": "src/VideoProcessor-Test/MotionRendererTests.cpp",
-   "note": "Renders on WARP."
+   "note": "Uses the real GPU (setup sets only allow_software)."
   },
   {
    "kind": "method",
@@ -169,6 +170,13 @@
    "category": "Cpu",
    "file": "src/VP-V/tests/PipelineSkeletonTests.cpp",
    "note": "Name mentions the GPU; the body is CPU only (reviewed)."
+  },
+  {
+   "kind": "method",
+   "value": "DiagnosticsAdapterTests::TestAdapterMatchSelectsAndLogs",
+   "category": "Cpu",
+   "file": "src/VP-V/modules/control/diagnostics/tests/DiagnosticsAdapterTests.cpp",
+   "note": "Enumerates DXGI adapters only; renders nothing (reviewed)."
   }
  ]
 }
