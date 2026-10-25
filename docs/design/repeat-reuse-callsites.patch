@@ -36,6 +36,18 @@ index 7c0ddbfd..a1670033 100644
          }
        },
        "zone": "present",
+diff --git a/docs/settings/VP-settings-reference.md b/docs/settings/VP-settings-reference.md
+index e59b6c54..fdfb9690 100644
+--- a/docs/settings/VP-settings-reference.md
++++ b/docs/settings/VP-settings-reference.md
+@@ -388,6 +388,7 @@ CNTR change. Not yet implemented.
+ | `dithering` | libplacebo's dither pattern (blue noise etc.), used when libplacebo dithers. | Upstream option. | auto | tiny |
+ | `display_bit_depth` | Dither target depth (8/10). | Clamped to the surface depth. | auto | none |
+ | `occlusion_mask` | Tells the sigma-delta where new picture appears, so it does not carry a residual into it. | No smears at edges of moving objects. | off | low |
++| `repeat_render_reuse` | Draft (WP-24): a captured repeat (24p in 30, 30p in 60) is drawn from the first present's cached picture with only the output stage; anything that changes the picture refuses it (Ctrl+I, Fallbacks engaged). Off in the Original pathway and with output.presentation off. | Saves GPU time on repeats; the picture stays the same (the dither keeps moving). | off | low |
+ | `dither_grain_tolerance_scale` | The sigma-delta's motion match tolerates grain this many times more. | Keeps the 10-bit averaging alive on grain. | 3 | none |
+ | `dither_vectors` | The dither takes the de-judder's motion on in-between pictures (auto) or always searches itself (own). | Saves about 1 ms per in-between. | auto | saves time |
+ | Calibration LUT (Color / Output page) | The projector calibration LUT. | Today libplacebo applies it before VP's output hooks; the design moves it to VP's last step (planned `calibration_lut_stage`). | | low |
 diff --git a/src/VP-V/core/OriginalPathway.h b/src/VP-V/core/OriginalPathway.h
 index fad9f9db..e3a6f59c 100644
 --- a/src/VP-V/core/OriginalPathway.h
@@ -74,6 +86,40 @@ index 7b268123..2ab10813 100644
      ],
      "upstream_modules": [
        "output.dither"
+diff --git a/src/VideoProcessor-Config/ConfigEditorWindow.cpp b/src/VideoProcessor-Config/ConfigEditorWindow.cpp
+index 3c86b878..9c4bdc46 100644
+--- a/src/VideoProcessor-Config/ConfigEditorWindow.cpp
++++ b/src/VideoProcessor-Config/ConfigEditorWindow.cpp
+@@ -9519,6 +9519,17 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
+             "does not carry its sub-code residual into it. Works with the de-judder off too "
+             "(the motion matcher then runs for the mask alone). Needs the temporal sigma-delta: Dither set to VP's "
+             "motion-aware dither, or the sigma-delta shader selected in the shader list."));   // audit 2026-10-16
++        // WP-24 (draft, default off until its GPU byte-identity check passes): captured repeats drawn from
++        // the rendered-picture cache with the OUTPUT stage only. The renderer forces it off in the Original
++        // pathway and with output.presentation switched off.
++        auto* repeatReuse = addChoice(QStringLiteral("Reuse the picture on captured repeats (draft)"),
++            QStringLiteral("repeat_render_reuse"), { QStringLiteral("on"), QStringLiteral("off") });
++        repeatReuse->setToolTip(QStringLiteral(
++            "Key repeat_render_reuse. When the capture repeats a frame (24p in 30, 30p in 60), draw the "
++            "repeat from the first present's cached picture and run only the output stage (dither keeps "
++            "running), instead of rendering the whole chain again. Draft: off until its GPU check passes. "
++            "Anything that would change the picture refuses the reuse (shown in Ctrl+I and Fallbacks "
++            "engaged). Always off in the Original pathway and with output.presentation switched off."));
+         auto* grainTolerance = addText(QStringLiteral("Dither carry on grain (1 to 8)"),
+             QStringLiteral("dither_grain_tolerance_scale"));
+         grainTolerance->setValidator(new QDoubleValidator(1.0, 8.0, 2, grainTolerance));
+diff --git a/src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp b/src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp
+index 7bf9d392..c03b633d 100644
+--- a/src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp
++++ b/src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp
+@@ -672,6 +672,7 @@ void testEveryNewRendererControlReachesVp()
+         { "dejudder_hold_hysteresis", "3", false }, { "dejudder_taper_sad", "9", false },
+         { "dejudder_block_taper", "on", true }, { "dejudder_warp_stage", "source", true },
+         { "dejudder_occlusion_fill", "on", true }, { "occlusion_mask", "on", true },
++        { "repeat_render_reuse", "on", true },
+         { "dither_grain_tolerance_scale", "2", false }, { "dither_vectors", "own", true },
+         { "sdr_tone_shape", "knee", true }, { "sdr_white_headroom", "0.1", false }, { "sdr_knee_start", "0.7", false },
+         { "sdr_knee_strength", "0.6", false }, { "sdr_contrast_recovery", "1.2", false },
 diff --git a/src/VideoProcessor-Lib/RendererProfileConfig.h b/src/VideoProcessor-Lib/RendererProfileConfig.h
 index 132d26e3..98af14e6 100644
 --- a/src/VideoProcessor-Lib/RendererProfileConfig.h
@@ -88,7 +134,7 @@ index 132d26e3..98af14e6 100644
  			if (key == "dejudder_warp_stage") return IsChoice(value, { "rendered", "source" });
  			// Refinements (docs/VP-build-plan-refinements.md): D1 global prior,
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index 9a22280f..387a597a 100644
+index 8b884d48..1fd39877 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 @@ -8,6 +8,8 @@
