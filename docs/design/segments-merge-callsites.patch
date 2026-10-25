@@ -1,8 +1,8 @@
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index 200587fb..fc244e60 100644
+index 421901fb..fdd468c9 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-@@ -83,6 +83,7 @@
+@@ -86,6 +86,7 @@
  #include <VP-V/core/OutputHookOrder.h>
  #include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
  #include <VP-V/segments/OutputSegments.h>   // S2/S3 output segments (central-migration-needs.md §6)
@@ -10,7 +10,7 @@ index 200587fb..fc244e60 100644
  #include <vprenderer/DownscaleLight.h>
  #include <vprenderer/SourceRebase.h>
  #include <vprenderer/SourceResolutionMonitor.h>
-@@ -1352,6 +1353,7 @@ namespace
+@@ -1361,6 +1362,7 @@ namespace
  		bool extendedRangeMoreCases = true;   // GPU tests pass (2026-10-17 night); owner: BTB/WTW in all cases
  		SdrToneShape::Settings sdrTone;     // delta 13: SDR tone shape and headroom (off)
  		bool dejudderWarpRendered = true;   // 6d: extras warp A's rendered picture (false: a warped source)
@@ -18,15 +18,15 @@ index 200587fb..fc244e60 100644
  		std::string upscaler = "auto";
  		std::string chromaUpscaler = "auto";   // owner 2026-10-13: plane_upscaler (auto = Catmull-Rom, upscaler = the upscaler)
  		std::string downscaler = "auto";
-@@ -1518,6 +1520,7 @@ namespace
+@@ -1527,6 +1529,7 @@ namespace
  			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
  			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
  			<< settings.preserveExtendedRange << '|' << settings.extendedRangeMoreCases << '|' << settings.dejudderWarpRendered << '|'
 +			<< settings.outputSegmentsMerged << '|'
  			// Settings applied live must change the fingerprint, or a profile edit
  			// touching only them is not applied until something else changes.
- 			<< settings.captureUpload << '|' << settings.sourceRange << '|' << settings.sourceResolution << '|'
-@@ -3131,7 +3134,8 @@ namespace
+ 			<< settings.captureUpload << '|' << settings.sourceRange << '|' << settings.sourceResolution << '|' << settings.dvToneMapping << '|' << settings.dvCompareCaptureFolder << '|'
+@@ -3142,7 +3145,8 @@ namespace
  			std::make_pair("adaptive_chroma_ssim", &settings.adaptive.chromaSsim),
  			std::make_pair("adaptive_grain_map", &settings.adaptive.grainMap),
  			std::make_pair("adaptive_upscale", &settings.adaptiveUpscale),
@@ -36,7 +36,7 @@ index 200587fb..fc244e60 100644
  		{
  			if (!tryChoice(toggle.first, raw))
  				continue;
-@@ -7915,6 +7919,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -8030,6 +8034,7 @@ struct LibplaceboVideoRenderer::Impl
  	OutputSegments::OutputColourSegment outputColour{ sdrToneShape, dvTrimsHook, ledMeasurement, ledCompensation, calibrationLutStage };
  	OutputSegments::OutputFinishSegment outputFinish{ outputEncodingRepair, occlusionMaskHook };
  	std::vector<const pl_hook*> userFrameHooks;   // the S2 edge: the user's shaders this frame
@@ -44,7 +44,7 @@ index 200587fb..fc244e60 100644
  	bool calibrationLutStageLogged = false;
  	bool calibrationLutStageFailed = false;   // the VP stage failed once: libplacebo's target LUT for the session
  	std::vector<std::string> activeCustomShaders;
-@@ -8853,6 +8858,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -8969,6 +8974,7 @@ struct LibplaceboVideoRenderer::Impl
  				if (rebaseDispatch) pl_dispatch_destroy(&rebaseDispatch);
  				extendedRangeHooks.Release();   // Stage 10: its textures
  				calibrationLutStage.Release();  // R1: the VP calibration stage's LUT texture
@@ -52,7 +52,7 @@ index 200587fb..fc244e60 100644
  				dejudderOutput.Release();
  				dejudderOutputSwapchain = nullptr;
  				dejudderExtraIds.clear();
-@@ -17957,6 +17963,10 @@ struct LibplaceboVideoRenderer::Impl
+@@ -18089,6 +18095,10 @@ struct LibplaceboVideoRenderer::Impl
  			timedParams.info_callback = DitherExtraPassCallback;
  			timedParams.info_priv = &ditherTotals;
  			extraParams = &timedParams;
@@ -63,19 +63,21 @@ index 200587fb..fc244e60 100644
  			pl_frame target = *f.target;
  			if (renderedCrop)
  			{
-@@ -24893,6 +24903,11 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25084,6 +25094,13 @@ struct LibplaceboVideoRenderer::Impl
          // Bug hunt 2026-10-17: the retry withdraws the failed NLS hook from
          // frameHooks itself (a member), so frameParams - read again by the
          // de-judder extras - never points at a list local to the recovery.
++        // output_segments_merged: the segments' checks rerun only when the module order or switches
++        // change (a cheap signature, no string building per frame).
 +        if (!outputMerger)
 +            outputMerger = std::make_unique<OutputSegments::Merger>(d3d11->gpu, outputColour, outputFinish);
-+        outputMerger->Configure(pipelineSlots, activeSettings.outputSegmentsMerged, activeSettings.fboFloat32 != 0, 30,
-+            std::hash<std::string>()(pipelineSlots.UpstreamKey(PipelineSlots::Id::OutputPresentation)) ^
-+            (activeSettings.outputSegmentsMerged ? 1u : 0u) ^ (activeSettings.fboFloat32 != 0 ? 2u : 0u), fallbacks);
++        outputMerger->Configure(pipelineSlots, activeSettings.outputSegmentsMerged, 30, fallbacks);
++        if (outputMerger->FallbacksChanged())
++            DebugLog::Log("%s", fallbacks.Heading().c_str());
          const auto hookRender = NlsHookRecovery::RenderOwned(renderer, d3d11->gpu,
              renderImage, target, baseTarget, frameParams, frameHooks, submittedNls, [&]()
              {
-@@ -24917,6 +24932,8 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25108,6 +25125,8 @@ struct LibplaceboVideoRenderer::Impl
                  occlusionMaskHook.SetFrame(nullptr, renderImage.crop, linearFallbackCrop);
                  assembleOverlays();
              }, [&](const pl_frame& source, const pl_frame& destination, pl_render_params& parameters) {
@@ -84,16 +86,30 @@ index 200587fb..fc244e60 100644
                  // Stage 12 step A: the planes libplacebo samples, re-based.
                  pl_frame frame = source;
                  // Stage B: the picture at this refresh's phase in place of A's planes (a
-@@ -25035,6 +25052,7 @@ struct LibplaceboVideoRenderer::Impl
-                 return temporalRenderer.Render(renderer,frame,destination,parameters,
-                     extendedRangeRelabelled ? &source.color : nullptr);
-             });
-+        outputMerger->Report(fallbacks);
-         bool rendered = hookRender.rendered;
-         // Bug hunt 2026-10-17: B's carried vectors are for this present only;
-         // released here so the de-judder extras below never see them bound.
+@@ -25236,7 +25255,20 @@ struct LibplaceboVideoRenderer::Impl
+             renderParams.num_hooks = 0;
+         }
+         {
+-            const auto hookErrors = pl_renderer_get_errors(renderer);
++            pl_render_errors hookErrors = pl_renderer_get_errors(renderer);
++            // output_segments_merged (audit M4): a stage that failed inside a merged hook takes the
++            // same path as a hook libplacebo disabled; a disabled merged hook falls back visibly.
++            const std::vector<uint64_t> mergedFailed = outputMerger->Report(&hookErrors);
++            if (outputMerger->FallbacksChanged())
++                DebugLog::Log("%s", fallbacks.Heading().c_str());
++            std::vector<uint64_t> allDisabled;
++            if (!mergedFailed.empty())
++            {
++                allDisabled.assign(hookErrors.disabled_hooks, hookErrors.disabled_hooks + hookErrors.num_disabled_hooks);
++                allDisabled.insert(allDisabled.end(), mergedFailed.begin(), mergedFailed.end());
++                hookErrors.disabled_hooks = allDisabled.data();
++                hookErrors.num_disabled_hooks = static_cast<int>(allDisabled.size());
++            }
+             if (customHooks.MarkRuntimeFailures(hookErrors.disabled_hooks,
+                 hookErrors.num_disabled_hooks))
+                 PublishCustomShaderStatus();
 diff --git a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
-index 8ff9051d..9a11852f 100644
+index f0a5298e..aec7a49e 100644
 --- a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
 +++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
 @@ -384,6 +384,10 @@
@@ -107,6 +123,18 @@ index 8ff9051d..9a11852f 100644
      <ClCompile Include="..\VP-V\tests\SegmentRunnerTests.cpp" />
      <ClCompile Include="..\VP-V\tests\OutputSegmentsGpuTests.cpp" />
      <ClCompile Include="..\VP-V\core\SegmentRunner.cpp">
+diff --git a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj.filters b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj.filters
+index 2f559a1e..e4a62765 100644
+--- a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj.filters
++++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj.filters
+@@ -226,6 +226,7 @@
+   <ItemGroup><ClCompile Include="CrossfadeMixTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+   <ItemGroup><Filter Include="VP-V"><UniqueIdentifier>{6f1b7a52-4c3e-4f6a-9d1e-5a0c2b7e9d41}</UniqueIdentifier></Filter></ItemGroup>
+   <ItemGroup><ClCompile Include="..\VP-V\tests\PipelineSkeletonTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
++  <ItemGroup><ClCompile Include="..\VP-V\segments\OutputSegmentsMerge.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+   <ItemGroup><ClCompile Include="..\VP-V\tests\SegmentRunnerTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+   <ItemGroup><ClCompile Include="..\VP-V\tests\OutputSegmentsGpuTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+   <ItemGroup><ClCompile Include="..\VP-V\core\SegmentRunner.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
 diff --git a/src/VideoProcessor-VPRenderer/VideoProcessor-VPRenderer.vcxproj b/src/VideoProcessor-VPRenderer/VideoProcessor-VPRenderer.vcxproj
 index 6c042971..4553f026 100644
 --- a/src/VideoProcessor-VPRenderer/VideoProcessor-VPRenderer.vcxproj
