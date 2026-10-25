@@ -338,6 +338,17 @@ namespace CustomHookChain
         return _stricmp(name.c_str(), SigmaDeltaFileName) == 0;
     }
 
+    std::string Chain::QuantizerProblem() const
+    {
+        for (const Entry& entry : entries)
+        {
+            if (!entry.quantizer && !IsOutputQuantizer(entry.rule.filename, entry.source)) continue;
+            if (entry.runtimeFailed) return kQuantizerDisabled;
+            if (entry.loadFailed) return kQuantizerNotLoaded;
+        }
+        return std::string();
+    }
+
     bool Chain::MarkRuntimeFailures(const uint64_t* signatures, int count)
     {
         bool changed = false;

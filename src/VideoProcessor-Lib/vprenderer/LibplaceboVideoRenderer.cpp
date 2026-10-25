@@ -85,6 +85,7 @@
 #include <VP-V/core/EntranceEpoch.h>
 #include <VP-V/core/OutputHookOrder.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
+#include <VP-V/core/FallbackCatalog.h>   // VP-V: the silent-fallbacks batch (src/VP-V/core)
 #include <vprenderer/DownscaleLight.h>
 #include <vprenderer/SourceRebase.h>
 #include <vprenderer/SourceResolutionMonitor.h>
@@ -4860,6 +4861,11 @@ namespace
 		{
 			m_eventSink = eventSink;
 		}
+		// Silent-fallbacks batch: a switch that kept the display at another rate is visible.
+		void SetFallbackSink(const std::function<void(const FallbackCatalog::Decision&)>& sink)
+		{
+			m_fallbackSink = sink;
+		}
 
 		bool RestoreNow()
 		{
@@ -4902,6 +4908,7 @@ namespace
 				m_displayDeviceName, paths, modes, pathCount, modeCount, pathIndex))
 			{
 				DebugLog::Log("libplacebo refresh-rate switch: active display path not found");
+				ReportKept(state.displayMode->RefreshRateHz(), \"active display path not found\");
 				return;
 			}
 
@@ -4928,6 +4935,7 @@ namespace
 					RefreshRateHz(m_originalRefreshRate),
 					contentRate);
 				RunRefreshRateCommand(settings, RefreshRateHz(m_originalRefreshRate));
+				ReportSwitched();
 				PublishEvent("refresh.confirmed",
 					RefreshRateHz(m_originalRefreshRate),
 					RefreshRateHz(targetRefreshRate),
@@ -4941,6 +4949,7 @@ namespace
 				DebugLog::Log(
 					"libplacebo refresh-rate switch: DXGI rational mode enumeration failed; retaining %.6f Hz",
 					RefreshRateHz(m_originalRefreshRate));
+				ReportKept(contentRate, \"DXGI mode enumeration failed\");
 				return;
 			}
 			const std::vector<RankedDisplayRefreshRate> rankedRates =
@@ -4951,6 +4960,7 @@ namespace
 					"libplacebo refresh-rate switch: no safe DXGI candidate for input=%.6f Hz target=%.6f Hz candidates=%zu; retaining %.6f Hz",
 					contentRate, RefreshRateHz(targetRefreshRate), supportedRates.size(),
 					RefreshRateHz(m_originalRefreshRate));
+				ReportKept(contentRate, \"no matching display mode\");
 				return;
 			}
 
@@ -4975,6 +4985,7 @@ namespace
 					DebugLog::Log("libplacebo refresh-rate candidate already active: actual=%.6f Hz attempt=%zu/%zu",
 						RefreshRateHz(currentRefreshRate), attempt + 1, rankedRates.size());
 					RunRefreshRateCommand(settings, RefreshRateHz(currentRefreshRate));
+					ReportSwitched();
 					PublishEvent("refresh.confirmed", RefreshRateHz(currentRefreshRate),
 						RefreshRateHz(candidate.refreshRate), RefreshRateHz(m_originalRefreshRate));
 					return;
@@ -5014,6 +5025,7 @@ namespace
 						RefreshRateHz(m_originalRefreshRate),
 						RefreshRateHz(actualRefreshRate), attempt + 1, rankedRates.size());
 					RunRefreshRateCommand(settings, RefreshRateHz(actualRefreshRate));
+					ReportSwitched();
 					PublishEvent("refresh.applied", RefreshRateHz(actualRefreshRate),
 						RefreshRateHz(candidate.refreshRate),
 						RefreshRateHz(m_originalRefreshRate));
@@ -5036,6 +5048,7 @@ namespace
 				{
 					DebugLog::Log(
 						"libplacebo refresh-rate candidate rollback failed; retaining unverified display state");
+					ReportKept(contentRate, \"rollback failed; display state unverified\");
 					return;
 				}
 			}
@@ -5043,7 +5056,20 @@ namespace
 			DebugLog::Log(
 				"libplacebo refresh-rate switch: all %zu ranked DXGI candidates failed verification; retaining %.6f Hz",
 				rankedRates.size(), RefreshRateHz(m_originalRefreshRate));
+			ReportKept(contentRate, \"every candidate failed verification\");
 		}
+
+		void ReportKept(double inputHz, const char* why)
+		{
+			if (m_fallbackSink)
+				m_fallbackSink(FallbackCatalog::RefreshRate(true, inputHz, RefreshRateHz(m_originalRefreshRate), why));
+		}
+		void ReportSwitched()
+		{
+			if (m_fallbackSink)
+				m_fallbackSink(FallbackCatalog::RefreshRate(false, 0.0, 0.0, std::string()));
+		}
+		std::function<void(const FallbackCatalog::Decision&)> m_fallbackSink;
 
 	private:
 		bool GetCurrentRefreshRate(DISPLAYCONFIG_RATIONAL& refreshRate) const
@@ -5502,6 +5528,7 @@ struct LibplaceboVideoRenderer::Impl
 		{
 			earlyOpenFailed = true;
 			DebugLog::Log("Early upload: not available (%s); the render upload", earlyUpload->LastError().c_str());
+			SyncFallback(FallbackCatalog::EarlyUpload(true, false, earlyUpload->LastError()));
 		}
 	}
 	// Render thread: the early-uploaded texture of a payload (with its GPU wait
@@ -7061,6 +7088,9 @@ struct LibplaceboVideoRenderer::Impl
 				OpenLoopDisplayRate::Name(choice.source), choice.openLoop ? 1 : 0, 0, choice.hz);
 			dejudderDisplayRateLogged = choice;
 		}
+		// Silent-fallbacks batch: open-loop presentation and a de-judder held for want of a display rate.
+		SyncFallback(FallbackCatalog::Presentation(RenderAheadActive() && choice.openLoop, dejudderHeldNoDisplayRate,
+			choice.openLoop ? OpenLoopDisplayRate::Name(choice.source) : ""));
 		return choice;
 	}
 
@@ -8058,6 +8088,15 @@ struct LibplaceboVideoRenderer::Impl
 		if (fallbacks.Release(id))
 			DebugLog::Log("%s", fallbacks.Heading().c_str());
 	}
+	// Silent-fallbacks batch (module findings 2026-10-24): one line per site; the wording and when an
+	// entry is engaged live in VP-V/core/FallbackCatalog.h (CPU-tested).
+	void SyncFallback(const FallbackCatalog::Decision& decision)
+	{
+		if (FallbackCatalog::Sync(fallbacks, decision))
+			DebugLog::Log("%s", fallbacks.Heading().c_str());
+	}
+	// The de-judder held this frame because the display rate is not known (presentation entry).
+	bool dejudderHeldNoDisplayRate = false;
 	// Pipeline skeleton (design freeze 2026-10-24): the ONE slot registry (VP-V/core/SlotRegistry.h). It
 	// decides which slots run and in which order: the entrance stage list (RunEntrance) and the
 	// output hooks follow it. Rebuilt from the settings on every settings apply.
@@ -17124,6 +17163,12 @@ struct LibplaceboVideoRenderer::Impl
 				else
 					DebugLog::Log("De-judder motion: %s", source);
 			}
+			// Silent-fallbacks batch: the matcher standing in for the optical-flow engine is visible.
+			const bool flowFailed = !dejudder->OpticalFlowUsed() && !dejudder->ExternalFlowUsed() &&
+				!dejudder->OpticalFlowError().empty();
+			const bool producerStopped = motionProducer && !motionProducer->Running();
+			SyncFallback(FallbackCatalog::Motion(dejudder->GetSettings().opticalFlow, flowFailed, producerStopped,
+				flowFailed ? dejudder->OpticalFlowError() : producerStopped ? motionProducer->Error() : std::string()));
 		}
 		static GeneralRate::LogInterval motionAheadStatsLog = GeneralRate::LogInterval::ForFrames(2400);   // fixed-constant batch B7 2026-10-18: seconds, not frames
 		if (motionProducer && dejudderEstimates + 1 >= 24 && motionAheadStatsLog.DueOr((dejudderEstimates + 1) == 24))   // as the other periodic logs (audit 2026-10-16)
@@ -17380,6 +17425,7 @@ struct LibplaceboVideoRenderer::Impl
 			!DisplayRefreshBounds::Accepts(displayHz) ? "timing not known: display rate" :
 			qpc <= 0.0 || f.callbackQpc <= 0 ? "timing not known: frame arrival" :
 			f.mainCallQpc <= f.callbackQpc ? "timing not known: present before arrival" : nullptr;
+		dejudderHeldNoDisplayRate = CaptureRateBounds::Accepts(f.captureRateHz) && !DisplayRefreshBounds::Accepts(displayHz);
 		if (timingMissing)
 		{
 			DejudderHold(timingMissing);
@@ -23419,6 +23465,16 @@ struct LibplaceboVideoRenderer::Impl
 			const double previousRebase = rebaseFactor, previousRebaseX = rebaseFactorX;
 			rebaseFactor = wanted < 1.0 && !temporal && !rebasePaused ? wanted : 1.0;
 			rebaseFactorX = wantedX < 1.0 && !temporal && !rebasePaused ? wantedX : 1.0;
+			// Silent-fallbacks batch: with scaling.rebase switched off the planes stay native, so every
+			// downstream stage (debander, detail pulse, texture restore, adaptive upscale) uses factor 1.
+			{
+				const FallbackCatalog::RebaseFactors effective = FallbackCatalog::EffectiveRebaseFactors(
+					pipelineSlots.Runs(PipelineSlots::Id::ScalingRebase), rebaseFactorX, rebaseFactor);
+				rebaseFactorX = effective.x;
+				rebaseFactor = effective.y;
+			}
+			SyncFallback(FallbackCatalog::RebasePaused((wanted < 1.0 || wantedX < 1.0) && rebasePaused,
+				rebasePauseSeconds, sourceRebase.LastError()));
 			// Latch review 2026-10-17: a crossfade between the path being left and this one (auto
 			// only; never while smooth motion / deinterlacing runs or the re-base is paused).
 			rebaseFade = 1.0;
@@ -24139,6 +24195,8 @@ struct LibplaceboVideoRenderer::Impl
                 if (frameHooks.size() == start)
                     state = 3;
             }
+            SyncFallback(FallbackCatalog::SdrToneShape(state == 1 || state == 3, state == 1,
+                state == 3 ? "the shader did not load" : ""));
             if (state != sdrToneShapeLogged)
             {
                 sdrToneShapeLogged = state;
@@ -24718,6 +24776,7 @@ struct LibplaceboVideoRenderer::Impl
         {
             const SigmaDeltaDomain::Domain domain = SigmaDeltaDomain::FromTarget(target.repr);
             bool any = false;
+            bool sigmaDomainDropped = false;
             for (size_t i = 0; i < frameHooks.size();)
             {
                 const pl_hook* hook = frameHooks[i];
@@ -24725,6 +24784,7 @@ struct LibplaceboVideoRenderer::Impl
                 any = any || sigma;
                 if (sigma && !domain.supported)
                 {
+                    sigmaDomainDropped = true;
                     frameHooks.erase(frameHooks.begin() + static_cast<std::ptrdiff_t>(i));
                     continue;
                 }
@@ -24744,6 +24804,14 @@ struct LibplaceboVideoRenderer::Impl
                     DebugLog::Log("Sigma-delta: off for this output (%s range, %d-bit swapchain, colour depth %d: not an 8- or 10-bit code domain)",
                         domain.full ? "full" : "limited", domain.sample, domain.color);
             }
+            // Silent-fallbacks batch: the sigma-delta asked for but not running is visible (ADR-0001).
+            const std::string quantiserProblem = customHooks.QuantizerProblem();
+            SyncFallback(FallbackCatalog::Dither(any || !quantiserProblem.empty(),
+                sigmaDomainDropped ? FallbackCatalog::DitherDrop::UnsupportedDomain :
+                quantiserProblem == CustomHookChain::Chain::kQuantizerNotLoaded ? FallbackCatalog::DitherDrop::ShaderNotLoaded :
+                !quantiserProblem.empty() ? FallbackCatalog::DitherDrop::DisabledByLibplacebo : FallbackCatalog::DitherDrop::None,
+                sigmaDomainDropped ? std::string(domain.full ? "full" : "limited") + " range, " +
+                    std::to_string(domain.sample) + "-bit swapchain, colour depth " + std::to_string(domain.color) : std::string()));
         }
         // The dither is the last processing of every picture: if a configured
         // shader would run after the sigma-delta at the OUTPUT stage, the
@@ -24902,6 +24970,12 @@ struct LibplaceboVideoRenderer::Impl
                     DebugLog::Log("Extended range (BTB/WTW): libplacebo smooth motion (frame mixing) clips BTB on mixed refreshes "
                         "(libplacebo limitation; WTW kept); VP's own motion engine keeps both");
             }
+            // Silent-fallbacks batch: BTB/WTW clipping is visible (ADR-0002, ADR-0001). Design exclusions
+            // (HDR source, output primaries, ...) are not downgrades and stay status-only.
+            SyncFallback(FallbackCatalog::BtbWtw(activeSettings.preserveExtendedRange,
+                extended.reason == ExtendedRange::Reason::HookFailed ? FallbackCatalog::BtbWtwClip::HookFailed :
+                extended.reason == ExtendedRange::Reason::TemporalMix ? FallbackCatalog::BtbWtwClip::FrameMixing :
+                mixClipsBtb ? FallbackCatalog::BtbWtwClip::MixClipsBtb : FallbackCatalog::BtbWtwClip::None));
         }
         // Stage 6d: when this frame may get de-judder extras, keep A's
         // PRE_OUTPUT picture for them (the hook goes last among the
@@ -24988,7 +25062,13 @@ struct LibplaceboVideoRenderer::Impl
         // Hunt 2 picture sweep: deband_vp_exclusive yields libplacebo's automatic deband to VP's
         // debander, which is idle while smooth motion or deinterlacing runs; those frames keep
         // libplacebo's deband as configured (otherwise nothing would deband them).
-        if (debandYieldedToVp && yieldedDebandOn && temporalRenderer.Active())
+        // Silent-fallbacks batch: a FAILED VP debander is replaced by libplacebo's deband, visibly. The
+        // slot switched off is a choice (no substitute); DV tunnel pictures are never substituted.
+        const FallbackCatalog::DebandPlan debandPlan = FallbackCatalog::PlanDeband(debandYieldedToVp,
+            pipelineSlots.Runs(PipelineSlots::Id::RepairDeband), debander.Failures() > 0,
+            renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION, debander.LastError());
+        SyncFallback(debandPlan.fallback);
+        if (debandYieldedToVp && yieldedDebandOn && (temporalRenderer.Active() || !debandPlan.libplaceboYields))
         {
             frameParams.deband_params = &yieldedDebandParams;
             if (!yieldedDebandLogged)
@@ -25292,6 +25372,10 @@ struct LibplaceboVideoRenderer::Impl
             ledMeasurement.Collect(measured, 0, &measuredSequences);
             for (size_t i = 0; i < measured.size(); ++i)
                 led->SubmitMeasurement(measured[i], measuredSequences[i]);
+            // Silent-fallbacks batch: measurement results running late (or frames not measured) are visible.
+            const std::string measureNote = ledMeasurement.LateNote();
+            SyncFallback(measureNote.empty() ? FallbackCatalog::Released("LED measurement") :
+                FallbackCatalog::Engaged("LED measurement", measureNote));
         }
         if (hookRender.retried)
             DebugLog::Log("VP anamorphic hook recovery: schema=1 sequence=%llu generation=%llu hook=%llu errors=0x%x retry=1 rendered=%d lens=%.6f latch=until_shader_selection_change",
@@ -27417,6 +27501,8 @@ void LibplaceboVideoRenderer::Build()
 	m_impl->ledShadowLift.store(m_ledShadowLift, std::memory_order_release);
 	m_impl->ledWtwPassthrough.store(m_ledWtwPassthrough, std::memory_order_release);
 	m_impl->ledBtbPassthrough.store(m_ledBtbPassthrough, std::memory_order_release);
+	m_impl->displayRefreshRate.SetFallbackSink(
+		[this](const FallbackCatalog::Decision& decision) { if (m_impl) m_impl->SyncFallback(decision); });
 	m_impl->displayRefreshRate.SetEventSink(
 		[this](const std::string& event, double actualRefreshRate,
 			double requestedRefreshRate, double previousRefreshRate)

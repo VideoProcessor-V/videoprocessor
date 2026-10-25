@@ -109,6 +109,11 @@ namespace CustomHookChain
         // Latches entries whose hook libplacebo disabled at runtime. Returns
         // true when at least one entry newly dropped out.
         bool MarkRuntimeFailures(const uint64_t* signatures, int count);
+        // The configured output quantiser (the sigma-delta) that does not run (silent-fallbacks
+        // batch): "" when none failed, kQuantizerNotLoaded or kQuantizerDisabled.
+        static constexpr const char* kQuantizerNotLoaded = "not loaded";
+        static constexpr const char* kQuantizerDisabled = "disabled";
+        std::string QuantizerProblem() const;
 
         // True when a submitted rule loads this file (by name, any folder,
         // case-insensitive). Stage 8 needs the SSIM downscaler in the chain.
