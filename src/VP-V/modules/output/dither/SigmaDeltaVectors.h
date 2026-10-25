@@ -15,6 +15,10 @@
 // as the static helpers did. Threading: render thread only.
 namespace SigmaDeltaVectors
 {
+// Internal linkage (audit 2026-10-25 LOW-1), as the renderer's file-static helpers had: the bodies
+// depend on which libplacebo the translation unit sees, so no two TUs may share one definition.
+namespace
+{
 	// Delta 8 R1: the sigma-delta's VPVEC texture can be set on its hook.
 	inline bool Supported()
 	{
@@ -93,8 +97,9 @@ namespace SigmaDeltaVectors
 		std::vector<const pl_hook*> applied;
 	};
 }
+}
 
 // The host's call-site names (kept so the renderer's de-judder extras code is unchanged).
-inline bool SigmaDeltaVectorsSupported() { return SigmaDeltaVectors::Supported(); }
-inline bool SetSigmaDeltaPixelVectors(const pl_hook* hook, pl_tex displacement) { return SigmaDeltaVectors::SetPixel(hook, displacement); }
-inline bool SetSigmaDeltaVectors(const pl_hook* hook, pl_tex vectors) { return SigmaDeltaVectors::Set(hook, vectors); }
+static inline bool SigmaDeltaVectorsSupported() { return SigmaDeltaVectors::Supported(); }
+static inline bool SetSigmaDeltaPixelVectors(const pl_hook* hook, pl_tex displacement) { return SigmaDeltaVectors::SetPixel(hook, displacement); }
+static inline bool SetSigmaDeltaVectors(const pl_hook* hook, pl_tex vectors) { return SigmaDeltaVectors::Set(hook, vectors); }
