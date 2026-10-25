@@ -241,6 +241,9 @@ namespace SourceResolutionMonitor
 		// ... and the frame's source sequence (the look-ahead's evidence for the step; 0 = none).
 		void AnalyseTilesForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight,
 			const std::vector<float>& tileX, const std::vector<float>& tileY, int baseTiles, int tileSize, double blackLevel, uint64_t sequence);
+		// Tests only (efficiency 2026-10-24): called on the analysing thread just before the
+		// kernel fits, with `mutex` released (a test can prove Read() does not wait for a fit).
+		static void (*kernelFitProbeForTest)(Monitor&);
 
 	private:
 		struct Job
@@ -281,6 +284,9 @@ namespace SourceResolutionMonitor
 		// Worker side.
 		std::thread worker;
 		mutable std::mutex mutex;
+		// Efficiency 2026-10-24: held for a whole analysis and for a reset (always before `mutex`),
+		// so the kernel fit can run with `mutex` released and no reset can interleave.
+		std::mutex evidenceMutex;
 		std::condition_variable wake;
 		bool stopping = false;
 		bool haveJob = false;

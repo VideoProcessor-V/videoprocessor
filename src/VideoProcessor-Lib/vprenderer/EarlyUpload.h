@@ -64,7 +64,9 @@ public:
 
 	// noFreeHeld / noFreeGpu: at each no-free-slot, the slots still held by a
 	// payload and those free but waiting for their GPU release.
-	struct Stats { uint64_t uploads = 0, noFreeSlot = 0, failures = 0, noFreeHeld = 0, noFreeGpu = 0; int slotsMade = 0; };
+	// copyCpuMs*: the conversion thread's copy + signal per upload (efficiency timers T4).
+	struct Stats { uint64_t uploads = 0, noFreeSlot = 0, failures = 0, noFreeHeld = 0, noFreeGpu = 0; int slotsMade = 0;
+		double copyCpuMsTotal = 0.0, copyCpuMsMax = 0.0; };
 	Stats GetStats() const;
 	const std::string& LastError() const { return error; }
 	size_t CapBytes() const { return budgetCap; }   // the pool's byte cap after the memory budget

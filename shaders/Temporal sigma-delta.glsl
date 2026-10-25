@@ -127,8 +127,12 @@
  *   renderer reset, so they follow resolution changes). RESID/PREV hold the
  *   carried residual (rgb, with a validity tag in a) and the last presented
  *   input value for the motion gate; RESID_NEXT/PREV_NEXT are the staging
- *   copies the quantizer writes. LQPREV and MVPREV use only their top-left
- *   quarter / sixteenth. Storage textures start uninitialised, so every
+ *   copies the quantizer writes. LQPREV is sized to the quarter-resolution
+ *   luma grid ({{output_width_q4}}: ceil((w + 1.5) / 4), at least LUMAQ's
+ *   WIDTH expression however libplacebo rounds it) and MVPREV to the block
+ *   grid ({{output_width_b16}}: ceil((w + 7.5) / 16), at least MV's); every
+ *   index the passes use lies inside (efficiency audit 2026-10-24 #8a: was
+ *   full output size, ~125 MB unused at 4K). Storage textures start uninitialised, so every
  *   read is guarded by a tag. The tag is per hook instance (`instance_tag`,
  *   set by the renderer when it creates the hook): on a hardware GPU a new
  *   hook can be given a freed hook's memory, and a constant tag made it
@@ -297,14 +301,14 @@
 //!STORAGE
 
 //!TEXTURE LQPREV
-//!SIZE {{output_width}} {{output_height}}
+//!SIZE {{output_width_q4}} {{output_height_q4}}
 //!FORMAT rgba16f
 //!FILTER NEAREST
 //!BORDER CLAMP
 //!STORAGE
 
 //!TEXTURE MVPREV
-//!SIZE {{output_width}} {{output_height}}
+//!SIZE {{output_width_b16}} {{output_height_b16}}
 //!FORMAT rgba16f
 //!FILTER NEAREST
 //!BORDER CLAMP

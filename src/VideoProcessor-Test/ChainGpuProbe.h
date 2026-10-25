@@ -109,6 +109,9 @@ namespace ChainGpuProbe
 		if (text.empty()) { error = std::string("shader not found: ") + file; return nullptr; }
 		const std::map<std::string, std::string> tokens = {
 			{ "output_width", std::to_string(ow) }, { "output_height", std::to_string(oh) },
+			// Efficiency audit 2026-10-24 #8a: the sigma-delta's grid templates, as CustomHookChain.
+			{ "output_width_q4", std::to_string((2 * ow + 10) / 8) }, { "output_height_q4", std::to_string((2 * oh + 10) / 8) },
+			{ "output_width_b16", std::to_string((2 * ow + 46) / 32) }, { "output_height_b16", std::to_string((2 * oh + 46) / 32) },
 			{ "strength", "1.0" }, { "curve", "2.0" }, { "geometry", "1" }, { "center_protection", "0.35" },
 			{ "axis_balance", "0.0" }, { "max_center_zoom", "1.08" },
 			{ "horizontal_center_protection", "0.35" }, { "vertical_center_protection", "0.25" } };

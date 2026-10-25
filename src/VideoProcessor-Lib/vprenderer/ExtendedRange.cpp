@@ -97,6 +97,28 @@ color.rgb = er_clipped;
 #endif
 )GLSL";
 
+		// Efficiency audit 2026-10-24 #7: the carry in ONE pass with two
+		// outputs. The clipped picture leaves through the pass's own target
+		// (exactly the old clipped pass: same sampling, same body); the
+		// remainder is computed from the same sampled colour with the same
+		// expressions as the old ER_REMAINDER pass and stored into the
+		// remainder texture at this fragment's texel (a storage image in a
+		// raster pass: D3D11 OMSetRenderTargetsAndUnorderedAccessViews).
+		// Byte-identical by construction; proven by the GPU test in
+		// docs/design/efficiency-byte-identical-tests.md (#7).
+		const char* const CARRY_ONE_PASS_TAIL = R"GLSL(
+{
+    vec3 er_rem;
+    if (er_linear_remainder > 0.5)
+        er_rem = er_to_linear(color.rgb, er_out_kind, er_out_param) -
+            er_to_linear(er_clipped, er_out_kind, er_out_param);
+    else
+        er_rem = color.rgb - er_clipped;
+    imageStore(er_remainder_out, ivec2(gl_FragCoord.xy), vec4(er_rem, 1.0));
+}
+color.rgb = er_clipped;
+)GLSL";
+
 		// The restore: the remainder at the output pixel's position in the
 		// carry's rectangle, averaged over the pixel's footprint (4x4 bilinear
 		// taps, at least one source pixel wide), added back.
@@ -567,9 +589,9 @@ color.a = 1.0;
 		scaledValid = false;   // audit 2026-10-16: set again by this frame's SCALED restore
 	}
 
-	bool Hooks::EnsureFloat(pl_gpu gpu, pl_gpu& owner, pl_tex& tex, int w, int h)
+	bool Hooks::EnsureFloat(pl_gpu gpu, pl_gpu& owner, pl_tex& tex, int w, int h, bool storable)
 	{
-		if (tex && owner == gpu && tex->params.w == w && tex->params.h == h)
+		if (tex && owner == gpu && tex->params.w == w && tex->params.h == h && (!storable || tex->params.storable))
 			return true;
 		if (owner)
 			pl_tex_destroy(owner, &tex);
@@ -584,6 +606,9 @@ color.a = 1.0;
 		tp.format = fmt;
 		tp.sampleable = true;
 		tp.renderable = true;
+		tp.storable = storable && (fmt->caps & PL_FMT_CAP_STORABLE) != 0;
+		if (storable && !tp.storable)
+			return false;
 		tex = pl_tex_create(gpu, &tp);
 		if (!tex)
 			return false;
@@ -591,8 +616,10 @@ color.a = 1.0;
 		return true;
 	}
 
-	// The split: two passes over the RGB-stage texture into VP's own float
-	// textures (the clipped picture, handed on; the remainder, kept).
+	// The split into VP's own float textures (the clipped picture, handed on;
+	// the remainder, kept). Efficiency audit 2026-10-24 #7: one pass with two
+	// outputs when the GPU can store into the remainder; otherwise (or after
+	// a one-pass failure, latched with its reason) the two original passes.
 	pl_hook_res Hooks::RunCarry(void* priv, const pl_hook_params* params)
 	{
 		Hooks* self = static_cast<Hooks*>(priv);
@@ -602,8 +629,21 @@ color.a = 1.0;
 		if (self->gpu && self->gpu != params->gpu)
 			self->Release();
 		pl_gpu ownerA = self->gpu, ownerB = self->gpu;
-		if (!EnsureFloat(params->gpu, ownerA, self->clipped, w, h) ||
-			!EnsureFloat(params->gpu, ownerB, self->remainder, w, h))
+		bool onePass = self->onePassAllowed && self->carryOnePassReason == CarryPassReason::None;
+		if (onePass && !params->gpu->glsl.compute)
+		{
+			self->carryOnePassReason = CarryPassReason::NoCompute;
+			onePass = false;
+		}
+		if (!EnsureFloat(params->gpu, ownerA, self->clipped, w, h))
+			return Failure();
+		if (onePass && !EnsureFloat(params->gpu, ownerB, self->remainder, w, h, true))
+		{
+			// Not storable here: the two-pass form, a plain renderable texture.
+			self->carryOnePassReason = CarryPassReason::NotStorable;
+			onePass = false;
+		}
+		if (!onePass && !EnsureFloat(params->gpu, ownerB, self->remainder, w, h))
 			return Failure();
 		self->gpu = params->gpu;
 		const float convertGamma = self->decision.convertGamma ? 1.0f : 0.0f;
@@ -611,6 +651,26 @@ color.a = 1.0;
 		const float sourceKind = TransferKindValue(self->decision.source);
 		const float outputKind = TransferKindValue(self->decision.output);
 		const float linearRemainder = self->decision.libplaceboMapsPrimaries ? 1.0f : 0.0f;
+		if (onePass)
+		{
+			if (self->RunCarryOnePass(params, convertGamma, convertPrimaries, sourceKind, outputKind, linearRemainder))
+			{
+				++self->carryOnePassFrames;
+				self->carryRect = params->rect;
+				pl_hook_res res{};
+				res.output = PL_HOOK_SIG_TEX;
+				res.tex = self->clipped;
+				res.repr = params->repr;
+				res.color = params->color;
+				res.components = params->components;
+				res.rect = params->rect;
+				return res;
+			}
+			// Latched: the two passes from now on (same output; visible in
+			// CarryPassesDescribe for the diagnostic readout).
+			self->carryOnePassReason = CarryPassReason::OnePassFailed;
+		}
+		++self->carryTwoPassFrames;
 		const std::string remainderHeader = std::string("#define ER_REMAINDER 1\n") + TRANSFER_GLSL;
 		for (int pass = 0; pass < 2; ++pass)
 		{
@@ -655,6 +715,83 @@ color.a = 1.0;
 		res.components = params->components;
 		res.rect = params->rect;
 		return res;
+	}
+
+	bool Hooks::RunCarryOnePass(const pl_hook_params* params, const float& convertGamma,
+		const float& convertPrimaries, const float& sourceKind, const float& outputKind,
+		const float& linearRemainder)
+	{
+		pl_shader sh = pl_dispatch_begin(params->dispatch);
+		pl_sample_src src{};
+		src.tex = params->tex;
+		src.components = 4;
+		const pl_shader_var variables[8] = {
+			{ pl_var_float("er_convert_gamma"), &convertGamma, true },
+			{ pl_var_float("er_convert_primaries"), &convertPrimaries, true },
+			{ pl_var_float("er_src_kind"), &sourceKind, true },
+			{ pl_var_float("er_src_param"), &decision.source.param, true },
+			{ pl_var_float("er_out_kind"), &outputKind, true },
+			{ pl_var_float("er_out_param"), &decision.output.param, true },
+			{ pl_var_float("er_linear_remainder"), &linearRemainder, true },
+			{ pl_var_mat3("er_matrix"), decision.matrix, true } };
+		pl_shader_desc out{};
+		out.desc.name = "er_remainder_out";
+		out.desc.type = PL_DESC_STORAGE_IMG;
+		out.desc.access = PL_DESC_ACCESS_WRITEONLY;
+		out.binding.object = remainder;
+		const std::string body = CarryOnePassBody();
+		pl_custom_shader custom{};
+		custom.description = "VP extended range: clipped picture + remainder";
+		custom.header = TRANSFER_GLSL;
+		custom.input = PL_SHADER_SIG_COLOR;
+		custom.output = PL_SHADER_SIG_COLOR;
+		custom.variables = variables;
+		custom.num_variables = 8;
+		custom.descriptors = &out;
+		custom.num_descriptors = 1;
+		custom.body = body.c_str();
+		if (!pl_shader_sample_direct(sh, &src) || !pl_shader_custom(sh, &custom))
+		{
+			pl_dispatch_abort(params->dispatch, &sh);
+			return false;
+		}
+		pl_dispatch_params dp{};
+		dp.shader = &sh;
+		dp.target = clipped;
+		return pl_dispatch_finish(params->dispatch, &dp);
+	}
+
+	std::string CarryOnePassBody()
+	{
+		// The old body without ER_REMAINDER ends with "color.rgb = er_clipped;":
+		// keep everything before the #ifdef (conversion + clamp), then the tail.
+		std::string body = CARRY_BODY;
+		body.erase(body.find("#ifdef ER_REMAINDER"));
+		return body + CARRY_ONE_PASS_TAIL;
+	}
+
+	const char* CarryBody() { return CARRY_BODY; }
+
+	const char* CarryPassReasonText(CarryPassReason reason)
+	{
+		switch (reason)
+		{
+		case CarryPassReason::None: return "one pass";
+		case CarryPassReason::NoCompute: return "two passes (GPU has no storage images)";
+		case CarryPassReason::NotStorable: return "two passes (rgba32f not storable)";
+		case CarryPassReason::OnePassFailed: return "two passes (one-pass shader failed)";
+		case CarryPassReason::Off: return "two passes (efficiency_fixes off)";
+		}
+		return "two passes";
+	}
+
+	std::string Hooks::CarryPassesDescribe() const
+	{
+		std::string s = "ER carry: ";
+		s += CarryPassReasonText(CarryPasses());
+		s += " (frames: one-pass " + std::to_string(carryOnePassFrames) + ", two-pass " +
+			std::to_string(carryTwoPassFrames) + ")";
+		return s;
 	}
 
 	// The restore on a shader: libplacebo's own delinearize when the stage

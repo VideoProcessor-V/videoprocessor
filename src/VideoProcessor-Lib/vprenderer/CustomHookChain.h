@@ -26,6 +26,10 @@ namespace CustomHookChain
         int sourceHeight = 0;
         double refreshHz = 0.0;
         double sourceFps = 0.0;
+        // Modularity 2026-10-25 (efficiency audit #8a): {{output_width_q4}} / {{output_width_b16}}
+        // (and heights) are the sigma-delta's quarter / block grids only with efficiency_fixes
+        // on; off (the default, the Original pathway) they are the full output size as before.
+        bool sigmaDeltaGrids = false;
     };
 
     // Rules this chain owns, in execution order. Like the madVR path, the
@@ -35,6 +39,10 @@ namespace CustomHookChain
 
     // Replaces {{name}} with built-ins first, then rule parameters. Fails when a
     // {{identifier}} token remains or a used built-in is not yet known (zero).
+    // Efficiency audit 2026-10-24 #8a: ceil((n + 1.5) / 4) and ceil((n + 7.5) / 16) in integers.
+    inline int QuarterGrid(int n) { return n > 0 ? (2 * n + 10) / 8 : 0; }
+    inline int BlockGrid(int n) { return n > 0 ? (2 * n + 46) / 32 : 0; }
+
     bool ApplyTemplates(std::string& source, const TemplateValues& values,
         const std::map<std::string, std::string>& parameters, std::string& reason);
 

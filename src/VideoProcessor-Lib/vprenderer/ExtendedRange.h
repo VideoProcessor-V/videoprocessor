@@ -243,6 +243,19 @@ namespace ExtendedRange
 	// One log line's worth: transfers, primaries, modes.
 	std::string Describe(const Decision& decision);
 
+	// Efficiency audit 2026-10-24 #7: how the carry ran. None = one pass with
+	// two outputs; Off = the two original passes because efficiency_fixes is off
+	// (the Original pathway; not a fallback); the others name why the two
+	// original passes are used although one pass was wanted (identical output,
+	// one extra source-size pass).
+	enum class CarryPassReason { None, NoCompute, NotStorable, OnePassFailed, Off };
+	const char* CarryPassReasonText(CarryPassReason reason);
+	// The one-pass body (pure text, CPU-tested): the old body up to the
+	// clamp, then the remainder store and the clipped colour.
+	std::string CarryOnePassBody();
+	// The original carry body (both two-pass forms; for the CPU text test).
+	const char* CarryBody();
+
 	class Hooks
 	{
 	public:
@@ -270,12 +283,33 @@ namespace ExtendedRange
 				signature == restoreTexture.signature || signature == late.signature;
 		}
 		unsigned long long Applied() const { return applied; }
-		// The textures: before the GPU goes.
+		// Efficiency audit 2026-10-24 #7 (diagnostic readout).
+		CarryPassReason CarryPasses() const { return onePassAllowed ? carryOnePassReason : CarryPassReason::Off; }
+		// Modularity 2026-10-25: the one-pass carry runs only with efficiency_fixes on (the host
+		// sets it per frame); off (the default, and the Original pathway) is the two original passes.
+		void SetOnePassAllowed(bool allowed) { onePassAllowed = allowed; }
+		// True when one pass was wanted but the two passes run (the "Fallbacks engaged" entry).
+		bool CarryFallbackEngaged() const
+		{
+			return onePassAllowed && carryOnePassReason != CarryPassReason::None;
+		}
+		// GPU byte-identity test (#7): the two original passes on demand (A/B of the same frame).
+		void ForceTwoPassCarryForTest(bool twoPass)
+		{
+			onePassAllowed = true;
+			carryOnePassReason = twoPass ? CarryPassReason::OnePassFailed : CarryPassReason::None;
+		}
+		std::string CarryPassesDescribe() const;
+		// The textures: before the GPU goes (and, efficiency audit 2026-10-24 #8b, after the
+		// feature has been idle: FeatureTextureIdle; each is rewritten before it is read).
 		void Release();
+		bool HoldsTextures() const { return clipped || remainder || restoreTex || lateTex || lutTex; }
 
 	private:
 		static pl_hook_res RunCarry(void* priv, const pl_hook_params* params);
-		static bool EnsureFloat(pl_gpu gpu, pl_gpu& owner, pl_tex& tex, int w, int h);
+		static bool EnsureFloat(pl_gpu gpu, pl_gpu& owner, pl_tex& tex, int w, int h, bool storable = false);
+		bool RunCarryOnePass(const pl_hook_params* params, const float& convertGamma, const float& convertPrimaries,
+			const float& sourceKind, const float& outputKind, const float& linearRemainder);
 		static pl_hook_res RunRestore(void* priv, const pl_hook_params* params);
 		static pl_hook_res RunRestoreTexture(void* priv, const pl_hook_params* params);
 		bool AppendRestore(pl_shader sh, pl_color_space& color, const pl_rect2df& rect) const;
@@ -292,6 +326,9 @@ namespace ExtendedRange
 		pl_color_space output{};
 		float gammaRatio = 1.0f;
 		unsigned long long applied = 0;
+		CarryPassReason carryOnePassReason = CarryPassReason::None;
+		bool onePassAllowed = false;   // efficiency_fixes (set by the host each frame)
+		unsigned long long carryOnePassFrames = 0, carryTwoPassFrames = 0;
 		pl_gpu gpu = nullptr;
 		pl_tex clipped = nullptr;     // the carry's output (the picture libplacebo goes on with)
 		pl_tex remainder = nullptr;   // value - clipped, per channel

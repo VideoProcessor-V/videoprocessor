@@ -1,0 +1,342 @@
+diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+index 8417cb0..c6c6177 100644
+--- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+@@ -1,6 +1,10 @@
+ #include <pch.h>
+ #include <MotionAhead.h>
+ #include <VP-V/core/FallbackStatus.h>   // VP-V: "Fallbacks engaged" (src/VP-V/core)
++#include <vprenderer/EarlyUploadPolicy.h>   // VP: efficiency audit 2026-10-24 #3
++#include <vprenderer/FeatureTextureIdle.h>  // VP: efficiency audit 2026-10-24 #8b
++#include <vprenderer/PassTimerHook.h>       // VP: efficiency timers (audit 2026-10-24 section 4)
++#include <vprenderer/GpuSpanTimers.h>       // VP: efficiency timers T2 (entrance stages)
+ #include <GeneralRateLog.h>
+ #include <RefreshKey.h>
+ #include <MotionValidity.h>
+@@ -5487,12 +5491,22 @@ struct LibplaceboVideoRenderer::Impl
+ 	// conversion thread reads the pointer); it is opened and closed on the
+ 	// render thread.
+ 	std::atomic<bool> earlyWanted{ false };
+-	// capture_upload auto (the default since 2026-10-16): early upload in the low-latency path.
++	// capture_upload auto (the default since 2026-10-16): early upload; efficiency audit 2026-10-24
++	// #3: in EVERY mode (was the low-latency path only), behind EarlyUploadPolicy's VRAM guard.
+ 	std::atomic<bool> earlyAuto{ false };
++	std::atomic<bool> earlyGuardBlocked{ false };   // the guard keeps the render upload (a listed fallback)
++	std::atomic<bool> earlyEfficiency{ false };     // efficiency_fixes: every mode + guard (off: the old rule)
++	bool earlyGuardChecked = false;
++	SteadyClock::time_point earlyGuardCheckedAt{};
++	bool EarlyRequested() const
++	{
++		return EarlyUploadPolicy::Requested(earlyWanted.load(std::memory_order_acquire) ? EarlyUploadPolicy::Mode::Early :
++			earlyAuto.load(std::memory_order_acquire) ? EarlyUploadPolicy::Mode::Auto : EarlyUploadPolicy::Mode::Render,
++			earlyEfficiency.load(std::memory_order_acquire), lowLatencyQueueActive.load(std::memory_order_acquire));
++	}
+ 	bool EarlyActive() const
+ 	{
+-		return earlyWanted.load(std::memory_order_acquire) ||
+-			(earlyAuto.load(std::memory_order_acquire) && lowLatencyQueueActive.load(std::memory_order_acquire));
++		return EarlyRequested() && !earlyGuardBlocked.load(std::memory_order_acquire);
+ 	}
+ 	const std::unique_ptr<EarlyUpload> earlyUpload = std::make_unique<EarlyUpload>();
+ 	bool earlyOpenFailed = false;
+@@ -5500,10 +5514,12 @@ struct LibplaceboVideoRenderer::Impl
+ 	uint64_t rawAnalysisLoggedGeneration = 0;
+ 	uint64_t earlyUsed = 0, earlyFallback = 0;
+ 	// Render thread, each raw frame: the pool open when wanted (closed when not).
+-	void SyncEarlyUpload()
++	// Efficiency audit 2026-10-24 #3: the decision is EarlyUploadPolicy's (VRAM guard by need,
++	// re-checked every 5 s while closed); a guard refusal is listed under "Fallbacks engaged".
++	void SyncEarlyUpload(size_t frameBytes)
+ 	{
+-		const bool wanted = EarlyActive() && d3d11;
+-		if (!wanted)
++		const bool requested = EarlyRequested() && d3d11;
++		if (!requested)
+ 		{
+ 			if (earlyUpload->IsOpen())
+ 			{
+@@ -5512,21 +5528,60 @@ struct LibplaceboVideoRenderer::Impl
+ 					static_cast<unsigned long long>(earlyUsed), static_cast<unsigned long long>(earlyFallback));
+ 			}
+ 			earlyOpenFailed = false;
++			earlyGuardChecked = false;
++			earlyGuardBlocked.store(false, std::memory_order_release);
++			SyncFallback(FallbackCatalog::EarlyUpload(false, false, std::string()));
+ 			return;
+ 		}
+-		if (earlyUpload->IsOpen() || earlyOpenFailed)
++		if (earlyUpload->IsOpen())
++			return;
++		const SteadyClock::time_point now = SteadyClock::now();
++		if (earlyGuardChecked && now - earlyGuardCheckedAt < std::chrono::seconds(5))
+ 			return;
++		earlyGuardChecked = true;
++		earlyGuardCheckedAt = now;
+ 		// Frames in flight (queue, de-judder next / ahead, the one being
+ 		// filled, a cadence repeat) plus a margin of 3 (owner 2026-10-15);
+ 		// capped at 1 GB and a quarter of the card's memory. The queue part
+ 		// follows the queue target (hunt 2 13-timing L4).
+ 		const int slots = AlphaQueuePolicy::EarlyUploadSlots(earlyUploadQueueTarget.load(std::memory_order_acquire));
++		EarlyUploadPolicy::Input guard;
++		guard.mode = earlyWanted.load(std::memory_order_acquire) ? EarlyUploadPolicy::Mode::Early : EarlyUploadPolicy::Mode::Auto;
++		guard.device = d3d11 && d3d11->device;
++		guard.slots = slots;
++		guard.frameBytes = frameBytes;
++		uint64_t usage = 0, budget = 0;
++		if (QueryMotionEngineBudget(usage, budget))
++		{
++			guard.usageBytes = usage;
++			guard.budgetBytes = budget;
++		}
++		guard.openFailed = earlyOpenFailed;
++		guard.guard = earlyEfficiency.load(std::memory_order_acquire);
++		const EarlyUploadPolicy::Decision decision = EarlyUploadPolicy::Decide(guard);
++		if (decision.reason == EarlyUploadPolicy::Reason::FrameSizeUnknown)
++		{
++			earlyGuardChecked = false;   // not known yet: decide on the next raw frame (no pool, no entry)
++			return;
++		}
++		earlyGuardBlocked.store(!decision.early, std::memory_order_release);
++		if (!decision.early)
++		{
++			const std::string why = decision.FallbackReason();
++			if (!why.empty())
++				SyncFallback(FallbackCatalog::EarlyUpload(true, false, why));
++			return;
++		}
+ 		if (earlyUpload->Open(d3d11->device, d3d11->gpu, slots))
++		{
+ 			DebugLog::Log("Early upload: on (%d slots, up to %zu MB; frames uploaded as they arrive on a second device)", slots,
+ 				earlyUpload->CapBytes() >> 20);
++			SyncFallback(FallbackCatalog::EarlyUpload(true, true, std::string()));
++		}
+ 		else
+ 		{
+ 			earlyOpenFailed = true;
++			earlyGuardBlocked.store(true, std::memory_order_release);
+ 			DebugLog::Log("Early upload: not available (%s); the render upload", earlyUpload->LastError().c_str());
+ 			SyncFallback(FallbackCatalog::EarlyUpload(true, false, earlyUpload->LastError()));
+ 		}
+@@ -5750,6 +5805,7 @@ struct LibplaceboVideoRenderer::Impl
+ 			++entranceGeneration;   // the modules' output textures are about to change
+ 		for (PipelineSlots::Id id : pipelineSlots.ActiveEntrance())
+ 		{
++			const int span = passTimerHook.Sampling() && d3d11 ? entranceSpans.Begin(d3d11->device, PipelineSlots::Get(id).name) : -1;
+ 			switch (id)
+ 			{
+ 			case PipelineSlots::Id::ScalingRebase: EntranceRebase(run, frame); break;
+@@ -5757,6 +5813,7 @@ struct LibplaceboVideoRenderer::Impl
+ 			case PipelineSlots::Id::RepairTextureRestore: EntranceDetail(run, frame); break;
+ 			default: break;   // slots without a component yet: never active (zero cost)
+ 			}
++			entranceSpans.End(span);
+ 			if (!run.ready)
+ 				return;
+ 		}
+@@ -6646,13 +6703,16 @@ struct LibplaceboVideoRenderer::Impl
+ 			return false;
+ 		if (!rgbUnpack)
+ 			rgbUnpack = std::make_unique<GpuRgbUnpack>(log, d3d11->gpu);
+-		SyncEarlyUpload();
++		SyncEarlyUpload(payload.rawBytes);
+ 		EarlyUpload::Slot* slot = nullptr;
++		const double uploadCpuStart = PassTimerHook::Hook::NowMs();   // efficiency timers T4
+ 		const pl_tex early = EarlyTexture(payload, slot);
+ 		bool unpacked = rgbUnpack->Unpack(payload.rawEncoding, bt2020, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
+ 			rgb, luma, false, early);
+ 		if (slot)
+ 			earlyUpload->Used(*slot);
++		passTimerHook.AddCpu(early ? "upload: unpack submit (early slot)" : "upload: CPU copy + unpack submit (render thread)",
++			PassTimers::Kind::CpuWork, PassTimerHook::Hook::NowMs() - uploadCpuStart);
+ 		if (!unpacked && early)
+ 			unpacked = rgbUnpack->Unpack(payload.rawEncoding, bt2020, payload.rawFrame->GetData(), payload.rawRowBytes, width, height, rgb, luma);
+ 		if (unpacked)
+@@ -6710,13 +6770,16 @@ struct LibplaceboVideoRenderer::Impl
+ 			return false;
+ 		if (!dvUnpack)
+ 			dvUnpack = std::make_unique<GpuDolbyVisionTunnelUnpack>(log, d3d11->gpu);
+-		SyncEarlyUpload();
++		SyncEarlyUpload(payload.rawBytes);
+ 		EarlyUpload::Slot* slot = nullptr;
++		const double uploadCpuStart = PassTimerHook::Hook::NowMs();   // efficiency timers T4
+ 		const pl_tex early = EarlyTexture(payload, slot);
+ 		bool unpacked = dvUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
+ 			payload.dvTunnelHighAligned, planes, early);
+ 		if (slot)
+ 			earlyUpload->Used(*slot);
++		passTimerHook.AddCpu(early ? "upload: unpack submit (early slot)" : "upload: CPU copy + unpack submit (render thread)",
++			PassTimers::Kind::CpuWork, PassTimerHook::Hook::NowMs() - uploadCpuStart);
+ 		if (!unpacked && early)   // the early texture refused: the frame itself
+ 			unpacked = dvUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
+ 				payload.dvTunnelHighAligned, planes);
+@@ -6762,13 +6825,16 @@ struct LibplaceboVideoRenderer::Impl
+ 			return UnpackDolbyVisionPayload(payload, width, height, planes, sessionFallback);
+ 		if (!captureUnpack)
+ 			captureUnpack = std::make_unique<GpuCaptureUnpack>(log, d3d11->gpu);
+-		SyncEarlyUpload();
++		SyncEarlyUpload(payload.rawBytes);
+ 		EarlyUpload::Slot* slot = nullptr;
++		const double uploadCpuStart = PassTimerHook::Hook::NowMs();   // efficiency timers T4
+ 		const pl_tex early = EarlyTexture(payload, slot);
+ 		bool unpacked = captureUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
+ 			planes, early);
+ 		if (slot)
+ 			earlyUpload->Used(*slot);
++		passTimerHook.AddCpu(early ? "upload: unpack submit (early slot)" : "upload: CPU copy + unpack submit (render thread)",
++			PassTimers::Kind::CpuWork, PassTimerHook::Hook::NowMs() - uploadCpuStart);
+ 		if (!unpacked && early)   // the early texture refused: the frame itself
+ 			unpacked = captureUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height, planes);
+ 		if (unpacked)
+@@ -8076,6 +8142,11 @@ struct LibplaceboVideoRenderer::Impl
+ 	// r6 fix 7 (owner rule vp-no-silent-fallbacks): the renderer's automatic fallbacks, published
+ 	// as "Fallbacks engaged: <list> / none" (GetFallbacksStatus: Ctrl+I, Config status, Ctrl+Alt+D).
+ 	FallbackStatus::Registry fallbacks;
++	// Efficiency timer plan (audit 2026-10-24 section 4; vprenderer/PassTimerHook.h).
++	PassTimerHook::Hook passTimerHook;
++	GpuSpanTimers entranceSpans;   // T2: entrance stages (polled D3D11 timestamps, never waited for)
++	// Efficiency audit 2026-10-24 #8b: feature textures freed after the feature has been idle.
++	FeatureTextureIdle::Releaser extendedRangeIdle;
+ 	// test/dv-synthetic 2026-10-24: the DV tunnel's SDR passthrough repacked to BGRA8 (tunnelSdrRepack).
+ 	std::vector<uint32_t> tunnelSdrBgra;
+ 	void EngageFallback(const char* id, const std::string& reason)
+@@ -8999,6 +9070,7 @@ struct LibplaceboVideoRenderer::Impl
+ 				ReleaseEntranceRing(d3d11->gpu);    // B3: the processed pictures' own copies
+ 				++entranceGeneration;
+ 				crossfadeMixer.Release(d3d11->gpu); // hunt 3 F1: the crossfade's textures
++				entranceSpans.Release();            // efficiency timers T2: the D3D11 queries
+ 				if (rebaseDispatch) pl_dispatch_destroy(&rebaseDispatch);
+ 				extendedRangeHooks.Release();   // Stage 10: its textures
+ 				calibrationLutStage.Release();  // R1: the VP calibration stage's LUT texture
+@@ -12020,6 +12092,7 @@ struct LibplaceboVideoRenderer::Impl
+ 		dvGpuWanted.store(settings.dvTunnelGpuUnpack, std::memory_order_release);
+ 		earlyWanted.store(settings.captureUpload == "early", std::memory_order_release);
+ 		earlyAuto.store(settings.captureUpload == "auto", std::memory_order_release);
++		earlyEfficiency.store(settings.efficiencyFixes, std::memory_order_release);   // modularity 2026-10-25
+         selectedSubtitleMode.store(settings.subtitleMode,std::memory_order_release);
+         calibrationStatusAvailable = false;
+ 		PublishSettingsState(settings);
+@@ -12344,7 +12417,7 @@ struct LibplaceboVideoRenderer::Impl
+ 			yuv422 ? (settings.capturePath == "gpu" ? "lossless P210 (GPU unpack)" : "lossless P210 (CPU)") :
+ 			VideoFrameEncodingIsTwoPlane420(e) ? "file 4:2:0 two-plane (NV12/P010/P016 as 16-bit planes, CPU copy)" : "P010 (CPU)";
+ 		if ((dvGpu || (!state->dolbyVisionTunnel && (rgbUnpack || (yuv422 && settings.capturePath == "gpu" && !overridden)))) &&
+-			EarlyActive())
++			EarlyActive() && earlyUpload->IsOpen())
+ 			route += ", uploaded early";
+ 		std::string gpuName = "unknown GPU";
+ 		{
+@@ -13188,6 +13261,7 @@ struct LibplaceboVideoRenderer::Impl
+ 		}
+ 		earlyWanted.store(settings.captureUpload == "early", std::memory_order_release);
+ 		earlyAuto.store(settings.captureUpload == "auto", std::memory_order_release);   // live too (audit 2026-10-16)
++		earlyEfficiency.store(settings.efficiencyFixes, std::memory_order_release);   // modularity 2026-10-25
+         selectedSubtitleMode.store(settings.subtitleMode,std::memory_order_release);
+         calibrationStatusAvailable = false;
+ 		sdrTargetNits = settings.sdrTargetNits;
+@@ -17126,7 +17200,10 @@ struct LibplaceboVideoRenderer::Impl
+ 			motionProducer->Prune(aSequence);
+ 		}
+ 		dejudderLiveFieldFrom = 0;   // the live outputs are being replaced
+-		if (!dejudder->Estimate(sa, sb, maskSlot, adaptiveGrainMapWanted))
++		dejudder->SetPassSampling(passTimerHook.Sampling());   // efficiency timers T3: polled, never drained
++		const bool motionEstimated = dejudder->Estimate(sa, sb, maskSlot, adaptiveGrainMapWanted);
++		passTimerHook.AddGpuGroups("motion: ", dejudder->TakePassGpuMs());
++		if (!motionEstimated)
+ 		{
+ 			// Bug hunt 3 F4: a texture the engine could not create (low video memory).
+ 			if (dejudder->LastError().find("cannot create") != std::string::npos)
+@@ -17836,7 +17913,11 @@ struct LibplaceboVideoRenderer::Impl
+ 				DXGI_FRAME_STATISTICS statistics{};
+ 				for (int wait = 0; wait < 3 && !shown; ++wait)
+ 				{
+-					if (FAILED(dejudderOutput->WaitForVBlank()))
++					const double vblankWaitStart = PassTimerHook::Hook::NowMs();
++					const bool vblankFailed = FAILED(dejudderOutput->WaitForVBlank());
++					passTimerHook.AddCpu("de-judder extra: vblank wait", PassTimers::Kind::CpuWait,
++						PassTimerHook::Hook::NowMs() - vblankWaitStart);
++					if (vblankFailed)
+ 						break;
+ 					spent = true;
+ 					if (FAILED(native->GetFrameStatistics(&statistics)))
+@@ -18128,6 +18209,7 @@ struct LibplaceboVideoRenderer::Impl
+ 			pl_render_params timedParams = *extraParams;
+ 			timedParams.info_callback = DitherExtraPassCallback;
+ 			timedParams.info_priv = &ditherTotals;
++			passTimerHook.Install(timedParams);   // efficiency timers T1/T5 (chains the R1 callback)
+ 			extraParams = &timedParams;
+ 			pl_frame target = *f.target;
+ 			if (renderedCrop)
+@@ -18458,6 +18540,8 @@ struct LibplaceboVideoRenderer::Impl
+ 		bool& dejudderExtrasSpentTime)
+ 	{
+ 		dejudderExtrasSpentTime = false;
++		passTimerHook.BeginFrame();   // efficiency timers: 1 refresh in N timed (no waits)
++		passTimerHook.CpuBegin();
+ 		// Render-ahead: the last plan's interval for this frame's main present, consumed
+ 		// here so that no exit (a failed render) leaves it for a later present (bug hunt
+ 		// 05 L2).
+@@ -24116,6 +24200,7 @@ struct LibplaceboVideoRenderer::Impl
+             lastMotionStatus=temporalRenderer.status;
+             DebugLog::Log("VP motion: %s delay_ms=%.3f source_hz=%.6f display_hz=%.6f",lastMotionStatus.c_str(),temporalRenderer.DelayMs(),captureRateHz,renderLoadDisplayRefreshHz.load());
+         }
++		passTimerHook.CpuMark("render: analysis, crop, subtitles, overlays", PassTimers::Kind::CpuWork);
+ 		const SteadyClock::time_point renderStart = SteadyClock::now();
+ 		const bool targetLutApplied =
+ 			target.lut == displayLut && target.lut_type == PL_LUT_NORMALIZED;
+@@ -24125,6 +24210,7 @@ struct LibplaceboVideoRenderer::Impl
+ 			AlphaOriginalPrRenderLoadInfoCallback : nullptr;
+ 		renderParams.info_priv = sampleOriginalPr ?
+ 			&originalPrPassAccumulator : nullptr;
++		passTimerHook.Install(renderParams);   // efficiency timers T1: per-pass GPU time (chains the above)
+ 		frameGpuTiming.BeginStage(
+ 			AlphaD3D11FrameGpuTimer::Stage::CoreRender);
+         // renderParams carries only the NLS hook; custom hooks join it in a
+@@ -24138,6 +24224,7 @@ struct LibplaceboVideoRenderer::Impl
+         CustomHookChain::TemplateValues hookTemplates;
+         hookTemplates.outputWidth = static_cast<int>(std::lround(baseTarget.crop.x1 - baseTarget.crop.x0));
+         hookTemplates.outputHeight = static_cast<int>(std::lround(baseTarget.crop.y1 - baseTarget.crop.y0));
++        hookTemplates.sigmaDeltaGrids = activeSettings.efficiencyFixes;   // #8a only with efficiency_fixes
+         hookTemplates.sourceWidth = width;
+         hookTemplates.sourceHeight = height;
+         if (customHookRefreshTick == 0 || GetTickCount64() - customHookRefreshTick >= 2000)
+@@ -24956,6 +25043,17 @@ struct LibplaceboVideoRenderer::Impl
+             // RGB capture) takes the carry's texture form (ExtendedRange.cpp).
+             ExtendedRange::Prepare(extended, extendedRangeHooks, renderImage.color, target.color, frameHooks,
+                 renderImage.num_planes == 1);
++            // Efficiency audit 2026-10-24 #7 / #8b, only with efficiency_fixes (off: the original two passes,
++            // textures kept): one-pass carry; ER's textures (~266 MB at 4K) freed after it has been idle.
++            extendedRangeHooks.SetOnePassAllowed(activeSettings.efficiencyFixes);
++            if (activeSettings.efficiencyFixes && extendedRangeIdle.Note(extended.Active(), extendedRangeHooks.HoldsTextures(),
++                std::chrono::duration<double>(SteadyClock::now().time_since_epoch()).count()))
++                extendedRangeHooks.Release();
++            // #7: one pass wanted but two passes run (same output, one extra pass): listed with its reason.
++            if (extendedRangeHooks.CarryFallbackEngaged())
++                EngageFallback("extended range one-pass carry", ExtendedRange::CarryPassReasonText(extendedRangeHooks.CarryPasses()));
++            else
++                ReleaseFallback("extended range one-pass carry");
+             // Logged on any change of the description (a LUT attached, a mode change while active).
+             const std::string described = ExtendedRange::Describe(extended);
+             if (described != extendedRangeDescribed && (activeSettings.preserveExtendedRange || extendedRangeLogged >= 0))
+@@ -25514,6 +25612,7 @@ struct LibplaceboVideoRenderer::Impl
+                 DebugLog::Log("VP anamorphic render failure: schema=1 sequence=%llu generation=%llu recovery=%d present_policy=black_clear consume_acquired_frame=1",
+                     sourceSequence, frameGeneration, hookRender.retried ? 1 : 0);
+             }
++			passTimerHook.CpuMark("render: hook assembly + libplacebo render (CPU)", PassTimers::Kind::CpuWork);
+ 			submitted = pl_swapchain_submit_frame(swapchain);
+ 			if (submitted)
+ 			{
+@@ -25541,6 +25640,15 @@ struct LibplaceboVideoRenderer::Impl
+ 			}
+ 		}
+ 		const int64_t swapEndQpc = PerformanceCounterNow();
++		passTimerHook.CpuMark("render: submit + present (may wait for the swap chain)", PassTimers::Kind::CpuWait);
++		passTimerHook.CpuEnd();
++		entranceSpans.Poll(passTimerHook.acc);   // T2: finished entrance spans (never waits)
++		{
++			const std::string readout = passTimerHook.DueReadout(
++				std::chrono::duration<double>(SteadyClock::now().time_since_epoch()).count());
++			if (!readout.empty())
++				DebugLog::Log("%s", readout.c_str());
++		}
+ 		LARGE_INTEGER qpcFrequency{};
+ 		QueryPerformanceFrequency(&qpcFrequency);
+ 		const double swapBlockMs =
