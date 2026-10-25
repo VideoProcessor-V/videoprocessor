@@ -910,11 +910,11 @@
       "slot": "output.presentation",
       "order": 270,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/RenderAheadPolicy.h",
+        "src/VP-V/modules/output/presentation/RenderAheadPolicy.h",
         "src/VideoProcessor-Lib/vprenderer/AlphaPresentationTelemetry.cpp",
-        "src/VideoProcessor-Lib/vprenderer/OpenLoopDisplayRate.h",
+        "src/VP-V/modules/output/presentation/OpenLoopDisplayRate.h",
         "src/VideoProcessor-Lib/DisplayRefreshRatePolicy.cpp",
         "src/VideoProcessor-Lib/vprenderer/NativeStatsOverlayBitmap.h"
       ],

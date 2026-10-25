@@ -38,9 +38,9 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/led/ProjectorDriver.h` | `src/VP-V/modules/drive/projector_control/ProjectorDriver.h` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/SerialPort.cpp` | `src/VP-V/modules/drive/projector_control/SerialPort.cpp` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/SerialPort.h` | `src/VP-V/modules/drive/projector_control/SerialPort.h` | 570b1ee8 | fwd |
-| `src/VideoProcessor-Lib/vprenderer/PulldownDetector.h` | `src/VP-V/modules/input/queue_timing/PulldownDetector.h` | ? | fwd |
-| `src/VideoProcessor-Lib/QueueLatency.h` | `src/VP-V/modules/input/queue_timing/QueueLatency.h` | ? | fwd |
-| `src/VideoProcessor-Lib/QueueLookahead.h` | `src/VP-V/modules/input/queue_timing/QueueLookahead.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/PulldownDetector.h` | `src/VP-V/modules/input/queue_timing/PulldownDetector.h` | 9c39a74b | fwd |
+| `src/VideoProcessor-Lib/QueueLatency.h` | `src/VP-V/modules/input/queue_timing/QueueLatency.h` | 9c39a74b | fwd |
+| `src/VideoProcessor-Lib/QueueLookahead.h` | `src/VP-V/modules/input/queue_timing/QueueLookahead.h` | 9c39a74b | fwd |
 | `src/VideoProcessor-Lib/vprenderer/DejudderAhead.h` | `src/VP-V/modules/motion/consumers/DejudderAhead.h` | 2f84c093 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp` | `src/VP-V/modules/motion/consumers/DejudderWarp.cpp` | 2f84c093 |  |
 | `src/VideoProcessor-Lib/vprenderer/FrameInterpolator.cpp` | `src/VP-V/modules/motion/consumers/FrameInterpolator.cpp` | 2f84c093 |  |
@@ -107,5 +107,7 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/calibration/Terminal.h` | `src/VP-V/modules/output/calibration_lut/calibration/Terminal.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/TranscriptRecorder.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/TranscriptRecorder.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/TranscriptRecorder.h` | `src/VP-V/modules/output/calibration_lut/calibration/TranscriptRecorder.h` | d2517eb1 |  |
+| `src/VideoProcessor-Lib/vprenderer/OpenLoopDisplayRate.h` | `src/VP-V/modules/output/presentation/OpenLoopDisplayRate.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/RenderAheadPolicy.h` | `src/VP-V/modules/output/presentation/RenderAheadPolicy.h` | ? | fwd |
 | `src/VideoProcessor-Lib/KernelInverse.cpp` | `src/VP-V/modules/scaling/rebase/KernelInverse.cpp` | 648da813 |  |
 | `src/VideoProcessor-Lib/KernelInverse.h` | `src/VP-V/modules/scaling/rebase/KernelInverse.h` | 648da813 | fwd |

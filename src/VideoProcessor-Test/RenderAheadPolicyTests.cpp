@@ -5,8 +5,8 @@
 #include <vprenderer/AlphaQueuePolicy.h>
 #include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
 #include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
-#include <vprenderer/RenderAheadPolicy.h>
-#include <vprenderer/OpenLoopDisplayRate.h>
+#include <VP-V/modules/output/presentation/RenderAheadPolicy.h>
+#include <VP-V/modules/output/presentation/OpenLoopDisplayRate.h>
 #include <DisplayRefreshRatePolicy.h>
 
 #include <algorithm>

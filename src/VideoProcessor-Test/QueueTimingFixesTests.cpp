@@ -12,7 +12,7 @@
 #include <TimingClock.h>
 #include <vprenderer/AlphaCadenceCorrectionPolicy.h>
 #include <vprenderer/AlphaQueuePolicy.h>
-#include <vprenderer/OpenLoopDisplayRate.h>
+#include <VP-V/modules/output/presentation/OpenLoopDisplayRate.h>
 
 #include <algorithm>
 #include <cmath>

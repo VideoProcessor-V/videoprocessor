@@ -9,7 +9,7 @@
 #include <VP-V/core/FallbackStatus.h>
 #include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <RendererProfileConfig.h>
-#include <vprenderer/RenderAheadPolicy.h>
+#include <VP-V/modules/output/presentation/RenderAheadPolicy.h>
 
 #include <fstream>
 #include <set>

@@ -53,13 +53,18 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **partly migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
-- `src/VideoProcessor-Lib/vprenderer/RenderAheadPolicy.h`
+- `src/VP-V/modules/output/presentation/RenderAheadPolicy.h`
 - `src/VideoProcessor-Lib/vprenderer/AlphaPresentationTelemetry.cpp`
-- `src/VideoProcessor-Lib/vprenderer/OpenLoopDisplayRate.h`
+- `src/VP-V/modules/output/presentation/OpenLoopDisplayRate.h`
 - `src/VideoProcessor-Lib/DisplayRefreshRatePolicy.cpp`
 - `src/VideoProcessor-Lib/vprenderer/NativeStatsOverlayBitmap.h`
+
+Forwarding headers (old paths kept for Bill's files, the renderer host and RendererCaptureHarnessTests.cpp; removed at M2 step 0):
+
+- `src/VideoProcessor-Lib/vprenderer/OpenLoopDisplayRate.h`
+- `src/VideoProcessor-Lib/vprenderer/RenderAheadPolicy.h`
 
 ## Migration directive
 

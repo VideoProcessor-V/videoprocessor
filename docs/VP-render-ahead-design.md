@@ -153,7 +153,7 @@ drift-correction repeats.
 
 ## As built (2026-10-17, feat/render-ahead; not yet judged on screen)
 
-- **Planner:** `vprenderer/RenderAheadPolicy.h` (pure). A owns the refreshes from its predicted
+- **Planner:** `VP-V/modules/output/presentation/RenderAheadPolicy.h` (pure). A owns the refreshes from its predicted
   first vsync while (V - film time - L - lead) / P_s < 1. Phase <= 0 (a restart's lead) holds A.
   A refresh A owns but does not render is a *hold*: the next present (the next extra, or B's
   own present) gets SyncInterval 1 + holds (DXGI limit 4), so holds cost no GPU work. This
@@ -185,7 +185,7 @@ drift-correction repeats.
 - **Found on screen:** on the laptop's internal panel (Intel iGPU, no DXGI frame statistics)
   every render-ahead case held with "timing not known: display rate" before the planner ran, and
   the on-screen tests passed vacuously.
-- **Rate source** (`vprenderer/OpenLoopDisplayRate.h`, pure): the statistics' measured rate
+- **Rate source** (`VP-V/modules/output/presentation/OpenLoopDisplayRate.h`, pure): the statistics' measured rate
   always wins (closed loop). Without it, and only with `render_ahead on`, the first available of:
   the window's monitor mode as an exact rational (QueryDisplayConfig target mode), DWM's
   composition period (DwmGetCompositionTimingInfo, skipped when it disagrees with the monitor's
