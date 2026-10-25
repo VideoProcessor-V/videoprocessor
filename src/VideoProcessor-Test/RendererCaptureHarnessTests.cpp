@@ -3664,6 +3664,105 @@ namespace Tests
 			return bad;
 		}
 
+		// fix/dv-dolby-style-dark audit MEDIUM-1: the job's requested settings against what the capture
+		// reports it rendered with (empty when they agree). A dropped or misspelled setting (the
+		// 2026-10-24 Dolby-style jobs rendered bt2390 at the 203-nit sRGB default) fails the job.
+		// Checked only for the keys the job sets: dv_tone_mapping (the ingress "DV tone mapping:"),
+		// sdr_target_nits (target_nits), target_primaries, output_gamma (actual_pixel_transfer).
+		static std::string DvSynthSettingsMismatch(const std::string& settings, const std::string& capture)
+		{
+			auto requested = [&](const char* key) -> std::string {
+				const std::string k = std::string(key) + ":";
+				size_t at = 0;
+				std::string value;   // the last occurrence wins, as in a profile
+				while ((at = settings.find(k, at)) != std::string::npos)
+				{
+					if (at == 0 || settings[at - 1] == '\n')
+					{
+						const size_t end = settings.find('\n', at);
+						value = settings.substr(at + k.size(), end == std::string::npos ? std::string::npos : end - at - k.size());
+						value.erase(0, value.find_first_not_of(" \t"));
+						value.erase(value.find_last_not_of(" \t\r") + 1);
+					}
+					at += k.size();
+				}
+				return value;
+			};
+			auto reported = [&](const char* field) -> std::string {
+				const std::string k = std::string("\"") + field + "\":";
+				size_t at = capture.find(k);
+				if (at == std::string::npos)
+					return std::string();
+				at = capture.find_first_not_of(" \t", at + k.size());
+				if (at == std::string::npos)
+					return std::string();
+				if (capture[at] == '"')
+				{
+					const size_t end = capture.find('"', at + 1);
+					return end == std::string::npos ? std::string() : capture.substr(at + 1, end - at - 1);
+				}
+				const size_t end = capture.find_first_of(",}\r\n", at);
+				return capture.substr(at, end == std::string::npos ? std::string::npos : end - at);
+			};
+			auto squash = [](const std::string& s) {
+				std::string out;
+				for (char c : s)
+					if (std::isalnum(static_cast<unsigned char>(c)))
+						out += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+				return out;
+			};
+			std::string bad;
+			const std::string tone = requested("dv_tone_mapping");
+			if (!tone.empty())
+			{
+				const std::string ingress = reported("ingress");
+				const std::string want = tone == "dolby_style" ? "DV tone mapping: Dolby-style" : "DV tone mapping: libplacebo";
+				if (ingress.find(want) == std::string::npos)
+					bad += "[dv_tone_mapping " + tone + " requested, ingress: " + ingress + "] ";
+			}
+			const std::string nits = requested("sdr_target_nits");
+			if (!nits.empty())
+			{
+				const std::string got = reported("target_nits");
+				if (got.empty() || std::fabs(std::atof(got.c_str()) - std::atof(nits.c_str())) > 0.5)
+					bad += "[sdr_target_nits " + nits + " requested, target_nits " + got + "] ";
+			}
+			const std::string primaries = requested("target_primaries");
+			if (!primaries.empty() && squash(reported("target_primaries")) != squash(primaries))
+				bad += "[target_primaries " + primaries + " requested, reported " + reported("target_primaries") + "] ";
+			const std::string gamma = requested("output_gamma");
+			if (!gamma.empty())
+			{
+				const std::string transfer = reported("actual_pixel_transfer");
+				if (transfer.find("Gamma " + gamma) == std::string::npos)
+					bad += "[output_gamma " + gamma + " requested, actual_pixel_transfer " + transfer + "] ";
+			}
+			return bad;
+		}
+
+		// CPU only: the settings check against the 2026-10-24 captures (abridged). The split Dolby-style
+		// job rendered bt2390 at the 203-nit sRGB default: all four requested settings are flagged.
+		TEST_METHOD(DvSynthSettingsCheckFlagsDroppedSettings)
+		{
+			const std::string job = "dv_tunnel_gpu_unpack: on\ndv_trims: off\n[vprenderer.Default]\ntone_mapping: bt2390\n"
+				"dv_tone_mapping: dolby_style\npeak_detection: off\nsdr_target_nits: 100\noutput_gamma: 2.2\ntarget_primaries: p3_d65\n";
+			const std::string dropped = "{\n  \"ingress\": \"Dolby Vision RGB tunnel (12-bit 4:2:2, GPU unpack); DV trims: off; DV tone mapping: libplacebo (bt2390)\",\n"
+				"  \"actual_pixel_transfer\": \"sRGB\",\n  \"target_primaries\": \"Rec.709\",\n  \"target_nits\": 203,\n  \"black_nits\": 0\n}";
+			const std::string bad = DvSynthSettingsMismatch(job, dropped);
+			for (const char* key : { "[dv_tone_mapping", "[sdr_target_nits", "[target_primaries", "[output_gamma" })
+				Assert::IsTrue(bad.find(key) != std::string::npos, (L"flagged: " + std::wstring(key, key + std::strlen(key))).c_str());
+			const std::string applied = "{\n  \"ingress\": \"Dolby Vision RGB tunnel (12-bit 4:2:2, GPU unpack); DV trims: off; DV tone mapping: Dolby-style (approx.)\",\n"
+				"  \"actual_pixel_transfer\": \"Pure Gamma 2.2\",\n  \"target_primaries\": \"P3-D65\",\n  \"target_nits\": 100,\n  \"black_nits\": 0\n}";
+			Assert::AreEqual(std::string(), DvSynthSettingsMismatch(job, applied), L"applied settings: no mismatch");
+			// A Dolby-style request that fell back to bt2390 is flagged; keys a job does not set are not checked.
+			const std::string fellBack = "{\"ingress\": \"...; DV tone mapping: bt2390 + trims (Dolby-style could not run: a calibration LUT is active)\"}";
+			Assert::IsFalse(DvSynthSettingsMismatch("dv_tone_mapping: dolby_style\n", fellBack).empty());
+			Assert::AreEqual(std::string(), DvSynthSettingsMismatch("[vprenderer.Default]\ndithering: off\n", dropped));
+			// BT2020 requested, "BT.2020" reported; target 1000 with a 2.2 output.
+			Assert::AreEqual(std::string(), DvSynthSettingsMismatch("sdr_target_nits: 1000\noutput_gamma: 2.2\ntarget_primaries: BT2020\n",
+				"{\"actual_pixel_transfer\": \"Pure Gamma 2.2\", \"target_primaries\": \"BT.2020\", \"target_nits\": 1000}"));
+		}
+
 		// Mean green code over a rectangle of a capture.
 		static double DvSynthMean(const std::vector<int>& codes, int w, int x0, int y0, int x1, int y1, int channel = 1)
 		{
@@ -3707,12 +3806,24 @@ namespace Tests
 			std::ifstream jobs(jobsPath);
 			Assert::IsTrue(static_cast<bool>(jobs), HarnessWide("cannot read " + jobsPath).c_str());
 			std::string line;
-			size_t done = 0, failed = 0, faithfulFailures = 0;
+			// fix/dv-dolby-style-dark: a real new line inside a job's settings split the job, which then
+			// ran silently without everything after it (the 2026-10-24 Dolby-style jobs rendered bt2390
+			// at the 203-nit default). Before any render: job lines, blank lines and # comments only.
+			while (std::getline(jobs, line))
+			{
+				const size_t first = line.find_first_not_of(" \t\r");   // indentation allowed (audit LOW-2)
+				Assert::IsTrue(first == std::string::npos || line[first] == '#' || line.compare(first, 4, "job ") == 0,
+					HarnessWide("jobs file: a line that is not a job (a real new line inside settings? write \\n): " + line.substr(0, 80)).c_str());
+			}
+			jobs.clear();
+			jobs.seekg(0);
+			size_t done = 0, failed = 0, faithfulFailures = 0, settingsFailures = 0;
 			std::string loadedSegment;
 			RawCorpusSegment seg;
 			std::vector<size_t> contentOfFrame;
 			while (std::getline(jobs, line))
 			{
+				line.erase(0, line.find_first_not_of(" \t"));
 				if (line.compare(0, 4, "job ") != 0)
 					continue;
 				std::map<std::string, std::string> key;
@@ -3774,6 +3885,16 @@ namespace Tests
 					const std::string stem = out + "\\" + id + (captures.size() > 1 || key.count("frames") ? "_" + std::to_string(k) : std::string());
 					CopyFileA(png.c_str(), (stem + ".png").c_str(), FALSE);
 					CopyFileA(json.c_str(), (stem + ".json").c_str(), FALSE);
+					{
+						std::ifstream in(json, std::ios::binary);
+						const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+						const std::string mismatch = DvSynthSettingsMismatch(settings, text);
+						if (!mismatch.empty())
+						{
+							++settingsFailures;
+							Logger::WriteMessage(("SETTINGS NOT APPLIED " + id + ": " + mismatch + "\n").c_str());
+						}
+					}
 					// The R10 codes as raw little-endian uint16 (R, G, B per pixel) for the analysis.
 					int cw = 0, ch = 0;
 					const std::vector<int> codes = LoadCaptureRgb(json, cw, ch);
@@ -3809,6 +3930,7 @@ namespace Tests
 			Assert::IsTrue(done > 0, L"no jobs");
 			Assert::AreEqual<size_t>(0, failed, L"every job presents and captures");
 			Assert::AreEqual<size_t>(0, faithfulFailures, L"a faithful job showed a VP stage active (FAITHFUL VIOLATION lines)");
+			Assert::AreEqual<size_t>(0, settingsFailures, L"a capture did not render with the job's settings (SETTINGS NOT APPLIED lines)");
 		}
 
 		// (c) RPU <-> frame alignment through the whole renderer: the cut segments streamed at their
