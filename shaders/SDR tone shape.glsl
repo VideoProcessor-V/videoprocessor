@@ -7,8 +7,8 @@
  * (libplacebo's PL_HOOK_PRE_OUTPUT), before the LED compensation: after
  * scaling, the Stage 10 restore and the target LUT, before the encode.
  * Values are the target's signal (0-1, above-white above 1) in the output
- * gamma. The reference is SdrToneShape::Map (src/VideoProcessor-Lib/
- * vprenderer/SdrToneShape.h); the two must stay identical.
+ * gamma. The reference is SdrToneShape::Map
+ * (src/VP-V/modules/colour/sdr_tone_shape/SdrToneShape.h); the two must stay identical.
  *
  *   headroom   reference white at (1 - headroom) of peak (linear scale)
  *   knee_start where the roll-off starts (fraction of peak, linear)

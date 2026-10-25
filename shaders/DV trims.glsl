@@ -8,7 +8,7 @@
  * the renderer for the Dolby Vision tunnel only, not as a standard shader.
  * Hooked at PREOUTPUT (after tone mapping and the encode to the output's
  * signal). The reference is DolbyVisionTrims::ApplyPixel
- * (src/VideoProcessor-Lib/vprenderer/DolbyVisionTrims.h); the two must stay
+ * (src/VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h); the two must stay
  * identical.
  *
  *   dv_slope, dv_offset, dv_power  the CDL on PQ(Y) / PQ(peak)

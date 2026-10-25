@@ -112,12 +112,16 @@ index 1, and the curve's mid adaptation constants are VP assumptions, to calibra
 
 ## Where the code lives (live file list)
 
-Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **partly migrated** (M2 step 6; the shaders stay in `shaders/`, the runtime layout). The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
-- `src/VideoProcessor-Lib/vprenderer/SdrToneShape.h`
-- `src/VideoProcessor-Lib/vprenderer/DolbyVisionTrims.h`
+- `src/VP-V/modules/colour/sdr_tone_shape/SdrToneShape.h`
+- `src/VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h`
+- `src/VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h`
+- `src/VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h`
 - `shaders/SDR tone shape.glsl`
 - `shaders/DV trims.glsl`
+
+Forwarding headers (removed in M2 step 0): `src/VideoProcessor-Lib/vprenderer/SdrToneShape.h` and `DolbyVisionTrims.h`, kept for the renderer host and Bill's `LibplaceboLutParserTests.cpp`.
 
 ## Migration directive
 

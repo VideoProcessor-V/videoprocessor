@@ -150,7 +150,7 @@ independent reimplementation from the published L2 fields (12-bit codes,
   BT.1886 or sRGB (e.g. linear, HLG), and for pictures without DM. The log
   reports the reason on change and the parameters at most every 10 s
   ("Dolby Vision trims").
-  The reference maths is `vprenderer/DolbyVisionTrims.h`. Tests:
+  The reference maths is `VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h`. Tests:
   `DolbyVisionTrimsTests` (CPU) and `DolbyVisionTrimShaderMatchesItsReference`
   (GPU).
 

@@ -657,10 +657,10 @@
       "slot": "colour.sdr_tone_shape",
       "order": 200,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/SdrToneShape.h",
-        "src/VideoProcessor-Lib/vprenderer/DolbyVisionTrims.h",
+        "src/VP-V/modules/colour/sdr_tone_shape/SdrToneShape.h",
+        "src/VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h",
         "shaders/SDR tone shape.glsl",
         "shaders/DV trims.glsl",
         "src/VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h",
