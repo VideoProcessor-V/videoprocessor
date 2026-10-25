@@ -77,7 +77,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Keys: `deband_vp`, `deband_vp_exclusive`, `deband_vp_grain_guard`, `deband`, `deband_strength`, `deband_grain`.
 - Tiers: Classic libplacebo deband; Low..Upper VP deband.
 - VP-V page, Repair tab: tiers Classic / Low / Mid / Upper; tier keys `deband_vp`, `detail_pulse_stabilise`, `texture_restore`.
-- Listed under the tier: `deband_vp_grain_guard`, `deband_vp_exclusive`.
+- Listed under the tier: `deband_vp_grain_guard`, `deband_vp_exclusive`, `low_bitrate_handling`.
 - Plain-language guide: [docs/settings/VP-settings-reference.md#4-repair](../../../../../docs/settings/VP-settings-reference.md#4-repair).
 - Fallback entry ("Fallbacks engaged"): `Deband: libplacebo deband (VP debander idle: <reason>)`.
 

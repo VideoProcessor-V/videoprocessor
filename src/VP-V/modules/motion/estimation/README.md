@@ -84,7 +84,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Keys: `motion_engine`, `motion_ahead_frames`, `motion_history_fixes`, `dejudder_est`, `dejudder_estimate_ahead`, `dejudder_search_range`.
 - Planned keys (not yet implemented): `motion_ahead_ms`.
 - Tiers: Classic off .. Upper full (NVOF + matcher).
-- VP-V page, Motion tab: tiers Classic / Low / Mid / Upper; tier keys `dejudder_est_split`, `dejudder_strength`, `dejudder_strength_even`, `motion_ahead_frames`, `optical_flow`.
+- VP-V page, Motion tab: tiers Classic / Low / Mid / Upper; tier keys `dejudder_est_qpel`, `dejudder_est_split`, `motion_ahead_frames`, `optical_flow`.
 - Listed under the tier: `dejudder_estimate_ahead`.
 - Plain-language guide: [docs/settings/VP-settings-reference.md#3-motion](../../../../../docs/settings/VP-settings-reference.md#3-motion).
 - Fallback entry ("Fallbacks engaged"): `Motion: matcher only (NVOF unavailable: <reason>)`.

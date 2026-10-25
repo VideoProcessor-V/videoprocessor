@@ -69,6 +69,9 @@ Chain tests:
   3.6 codes), and no VP deband there either (deband_vp also works on the source planes before
   the decode; "Fallbacks engaged: VP deband" when it is on). KNOWN GAP / queued: a post-decode DV
   deband (intensity in PQ before tone mapping).
+  The libplacebo skip runs only with `dv_tunnel_fixes` on, so the Original pathway keeps Bill's
+  libplacebo deband (integ/batch1 merge audit). Its DV ingress status suffix is a policy line, not
+  a downgrade, so it is not listed under "Fallbacks engaged".
 
 ## Known issues / open items
 
@@ -103,10 +106,10 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 
 ## Settings
 
-- Keys: `dv_tunnel_handoff`, `dv_tunnel_fixes`, `dv_trims`.
+- Keys: `dv_tunnel_handoff`, `dv_tunnel_fixes`, `dv_trims`, `dv_compare_capture_folder`.
 - Tiers: not tiered.
 - VP-V page, Input tab: not tiered (Always on: capture and timing have no quality steps, only paths (the toggles below).).
-- Listed under the tier: `dv_tunnel_gpu_unpack`.
+- Listed under the tier: `dv_tunnel_gpu_unpack`, `source_range`.
 - Plain-language guide: [docs/settings/VP-settings-reference.md#2-input](../../../../../docs/settings/VP-settings-reference.md#2-input).
 - Fallback entry ("Fallbacks engaged"): `Signal: DV tunnel unpack on the CPU (<reason>)`.
 

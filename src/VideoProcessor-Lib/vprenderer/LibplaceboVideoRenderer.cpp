@@ -24999,7 +24999,8 @@ struct LibplaceboVideoRenderer::Impl
             yieldedDebandLogged = false;
         // feat/dv-l8 WIP (DvTunnelPolicy.h): no libplacebo plane deband on the raw DV tunnel planes (opponent
         // codes before the decode; its fp16 plane pass moved saturated near-zero channels by up to 3.6 codes).
-        dvDebandSkipped = DvTunnelPolicy::SkipPlaneDeband(renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION) &&
+        dvDebandSkipped = activeSettings.dvTunnelFixes &&   // integ/batch1: Original pathway keeps Bill's deband
+            DvTunnelPolicy::SkipPlaneDeband(renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION) &&
             frameParams.deband_params != nullptr;
         if (dvDebandSkipped)
         {

@@ -81,8 +81,8 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 
 - Keys: `dejudder_strength`, `dejudder_hold`, `interpolation`, `interpolation_fallback`, `smooth_motion`, `frame_mixer`, `dither_vectors`.
 - Tiers: Classic off .. Upper full.
-- VP-V page, Motion tab: tiers Classic / Low / Mid / Upper; tier keys `dejudder_est_split`, `dejudder_strength`, `dejudder_strength_even`, `motion_ahead_frames`, `optical_flow`.
-- Listed under the tier: `interpolation_fill_gaps`, `interpolation`, `dither_vectors`.
+- VP-V page, Motion tab: tiers Classic / Low / Mid / Upper; tier keys `dejudder_est_qpel`, `dejudder_est_split`, `motion_ahead_frames`, `optical_flow`.
+- Listed under the tier: `interpolation_fill_gaps`, `interpolation`, `dither_vectors`, `interpolation_fallback`, `intent_motion`.
 - Plain-language guide: [docs/settings/VP-settings-reference.md#3-motion](../../../../../docs/settings/VP-settings-reference.md#3-motion).
 - Fallback entry ("Fallbacks engaged"): `Motion consumers: no-motion form (vectors invalid / short queue)`.
 

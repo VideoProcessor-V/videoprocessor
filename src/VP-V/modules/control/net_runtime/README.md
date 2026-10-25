@@ -81,8 +81,8 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 ## Tests
 
 - Placeholder (byte-identity on/off, zero cost): n/a.
-- Isolation (fixed inputs, expected outputs, cost): `NetRunnerTests` (fingerprints, CPU executor vs PyTorch, timing hook).
-- Contract (formats, geometry, fallback entry): `NetRunnerTests` (binding contract, intermediate format, 8K rule, "nets: bypassed" entry).
+- Isolation (fixed inputs, expected outputs, cost): fingerprint match/mismatch unit tests.
+- Contract (formats, geometry, fallback entry): MISSING.
 - Chain (total delay at the 4/3/2-frame budgets): n/a.
 - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
 

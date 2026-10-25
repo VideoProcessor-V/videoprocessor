@@ -80,7 +80,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Planned keys (not yet implemented): `hybrid_refine_d`.
 - Tiers: Classic Lanczos; Low..Upper hybrid; Upper + D.
 - VP-V page, Scaling tab: tiers Classic / Low / Mid; tier keys `adaptive_downscale`, `adaptive_w_base`, `source_resolution`.
-- Listed under the tier: `adaptive_faithful`.
+- Listed under the tier: `adaptive_faithful`, `adaptive_grain_map`, `ssim_bitrate_aware`, `ssim_residual_stabilise`, `cnn_residual_stabilise`, `adaptive_upscale`.
 - Plain-language guide: [docs/settings/VP-settings-reference.md#5-scaling](../../../../../docs/settings/VP-settings-reference.md#5-scaling).
 - Fallback entry ("Fallbacks engaged"): `Output scaling: Lanczos (hybrid unavailable: <reason>)`.
 
