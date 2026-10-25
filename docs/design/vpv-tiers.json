@@ -421,7 +421,7 @@
         "Mid"
       ],
       "planned_tiers": {
-        "Upper": "the 4K refine net and the D refine add-on are not built yet"
+        "Upper": "a sharper 4K scaling step is not built yet"
       },
       "presets": {
         "Classic": {
@@ -551,7 +551,7 @@
         },
         {
           "key": "hybrid_refine_d",
-          "label": "D refine add-on under the hybrid scaler",
+          "label": "Extra detail-recovery step under the hybrid scaler",
           "slot": "scaling.output"
         }
       ],

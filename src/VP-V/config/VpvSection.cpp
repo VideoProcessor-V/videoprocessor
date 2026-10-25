@@ -1405,10 +1405,16 @@ namespace Vpv
 		}
 
 		// The plain name of a retirement candidate: its control's own label, else the key in words.
-		QString PlainSettingName(const QString& accessible, const QString& key)
+		QString PlainSettingName(const QWidget* control, const QString& key)
 		{
-			QString plain = accessible.trimmed();
-			plain.remove(QStringLiteral(" (proposed retirement)")).remove(QStringLiteral(" (proposed: hide as diagnostic)"));
+			QString plain = control ? control->accessibleName().trimmed() : QString();
+			// A check box carries its words as its text (the LED fixes: "Peak from every pixel of the picture (fix under test)").
+			if (plain.isEmpty())
+				if (const auto* button = qobject_cast<const QAbstractButton*>(control)) plain = button->text().trimmed();
+			plain.remove(QStringLiteral(" (proposed retirement)")).remove(QStringLiteral(" (proposed: hide as diagnostic)"))
+				.remove(QStringLiteral(" (fix under test)")).remove(QStringLiteral("Fix under test: "));
+			plain = plain.trimmed();
+			if (!plain.isEmpty()) plain = plain.left(1).toUpper() + plain.mid(1);
 			if (!plain.isEmpty()) return plain;
 			QString words = key;
 			words.replace(QLatin1Char('_'), QLatin1Char(' '));
@@ -1537,17 +1543,23 @@ namespace Vpv
 						if (controls.isEmpty()) controls = UpstreamControls(state->host.upstreamRoot, Q(r.section), Q(r.key));
 						QString where = controls.isEmpty() ? QStringLiteral("no control found") : PageOf(controls.front());
 						if (!controls.isEmpty() && !where.startsWith(QStringLiteral("VP-V"))) where += QStringLiteral(" page");
-						const QString plain = PlainSettingName(controls.isEmpty() ? QString() : controls.front()->accessibleName(), Q(r.key));
+						const QString plain = PlainSettingName(controls.isEmpty() ? nullptr : controls.front(), Q(r.key));
+						// The value in use, from the section the setting lives in; "not set" names the default.
 						QString value;
-						if (std::string(r.section) == "vprenderer")
 						{
-							const std::string v = state->Get(r.key);
-							value = v.empty() ? QStringLiteral("not set (default)") : QString::fromStdString(v);
-						}
-						else if (std::string(r.section) == "general" && state->host.value)
-						{
-							const QString v = state->host.value(QStringLiteral("general"), Q(r.key)).trimmed();
-							value = v.isEmpty() ? QStringLiteral("not set (default)") : v;
+							const std::string section = r.section;
+							QString stored;
+							if (section == "vprenderer") stored = QString::fromStdString(state->Get(r.key));
+							else if (state->host.value)
+							{
+								QStringList sections = state->host.profileSections ? state->host.profileSections(Q(r.section)) : QStringList();
+								stored = state->host.value(sections.isEmpty() ? Q(r.section) : sections.front(), Q(r.key)).trimmed();
+							}
+							QString fallback = Q(t.Default(r.key));
+							if (fallback.isEmpty() && std::string(r.group) == "A") fallback = QStringLiteral("on");   // the proven fixes are on by default
+							fallback = fallback.left(1).toUpper() + fallback.mid(1);
+							value = !stored.isEmpty() ? stored : fallback.isEmpty() ? QStringLiteral("not set (the built-in default)") :
+								QStringLiteral("%1 (the default)").arg(fallback);
 						}
 						// Group A's reason is the same for every line (it is in the group text above); the others differ.
 						const QString reason = std::string(g.key) == "A" ? QString() :
@@ -2167,6 +2179,23 @@ namespace Vpv
 				for (const QPointer<QWidget>& w : driveOffControls) SetGreyReason(w, driveOn ? QString() : offWhy);
 				for (QWidget* card : { cardConnection, cardResponse, cardProfile, cardAssist, cardSpeeds, cardAdvancedProjector, cardExperiment })
 					SetGreyReason(card, driveOn ? QString() : offWhy);
+				// The LED profile and the speeds preset stay on Main (owner 2026-10-25); a command source that does not
+				// use them greys them with the reason instead of hiding them.
+				const bool ownSource = compensate || chosen == QStringLiteral("internal_script");
+				if (cardProfile)
+				{
+					cardProfile->setVisible(true);
+					cardProfile->setEnabled(driveOn && ownSource);
+					SetGreyReason(cardProfile, !driveOn ? offWhy : ownSource ? QString() :
+						QStringLiteral("Greyed: used only with VP's copy of your script or Compensate (choose one above)."));
+				}
+				if (cardSpeeds)
+				{
+					cardSpeeds->setVisible(true);
+					cardSpeeds->setEnabled(driveOn && compensate);
+					SetGreyReason(cardSpeeds, !driveOn ? offWhy : compensate ? QString() :
+						QStringLiteral("Greyed: used only with the Compensate command source (choose it above)."));
+				}
 				const bool adaptiveOn = !adaptiveBox || adaptiveBox->isChecked();
 				const QString liftWhy = QStringLiteral("Greyed: used only when Adaptive gamma is on (tick it above).");
 				for (const QPointer<QWidget>& w : liftControls) SetGreyReason(w, adaptiveOn ? QString() : liftWhy);

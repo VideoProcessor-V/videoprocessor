@@ -86,7 +86,7 @@ namespace Vpv
 			if (!q.defaultProfileOnScreen && !q.profileRule.empty())
 			{
 				r.source = ValueSource::RuleProfile;
-				r.text = "Set by profile \"" + q.profileName + "\" (chosen by its rule)" + shown;
+				r.text = "Set by you, in profile \"" + q.profileName + "\" (used when its rule matches)" + shown;
 			}
 			else
 			{

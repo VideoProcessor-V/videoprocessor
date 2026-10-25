@@ -890,7 +890,7 @@ namespace
 		require(r.source == Vpv::ValueSource::ThisProfile && r.text == "Set by you, in profile \"Film24\": On", ("you in a profile: " + r.text).c_str());
 		q.profileRule = "$source_rate < 25";
 		r = Vpv::SetBy(q);
-		require(r.source == Vpv::ValueSource::RuleProfile && r.text.find("chosen by its rule") != std::string::npos, ("rule profile: " + r.text).c_str());
+		require(r.source == Vpv::ValueSource::RuleProfile && r.text.find("used when its rule matches") != std::string::npos, ("rule profile: " + r.text).c_str());
 		q.ownValue.clear();
 		q.inheritedValue = "on";
 		r = Vpv::SetBy(q);
@@ -941,7 +941,7 @@ namespace
 		auto* picker = control<QComboBox>(window, Vpv::ObjectName("profile"));
 		picker->setCurrentIndex(picker->findData(QStringLiteral("vprenderer.Film24")));
 		QCoreApplication::processEvents();
-		require(note("texture_restore_cap") == QStringLiteral("Set by profile \"Film24\" (chosen by its rule): 2"),
+		require(note("texture_restore_cap") == QStringLiteral("Set by you, in profile \"Film24\" (used when its rule matches): 2"),
 			("rule profile: " + S(note("texture_restore_cap"))).c_str());
 		require(note("adaptive_upscale") == QStringLiteral("Set by the default profile: On"), ("inherited: " + S(note("adaptive_upscale"))).c_str());
 		picker->setCurrentIndex(0);
@@ -1004,8 +1004,20 @@ namespace
 		QCoreApplication::processEvents();
 		require(RowShown(whiteClips) && !whiteClips->isEnabled() && whiteClips->toolTip().contains(QStringLiteral("Compensate")),
 			"another source: the white-clips control stays, greyed, saying it is for Compensate");
+		// "No LED commands": the LED profile and the speeds preset stay on Main, greyed with the reason (not hidden).
+		control<QRadioButton>(window, QStringLiteral("config.led_drive.default.command_source.none"))->click();
+		QCoreApplication::processEvents();
+		for (const char* key : { "profile_file", "rate_preset" })
+		{
+			auto* w = control<QWidget>(window, QStringLiteral("config.led_drive.default.") + QString::fromLatin1(key));
+			require(w->isVisibleTo(main) && !w->isEnabled(), (std::string("greyed, not hidden, with another source: ") + key).c_str());
+			bool reason = false;
+			for (QWidget* p = w; p && p != main; p = p->parentWidget()) reason = reason || p->toolTip().contains(QStringLiteral("Greyed: used only with"));
+			require(reason, (std::string("the greyed control says why: ") + key).c_str());
+		}
 		control<QRadioButton>(window, QStringLiteral("config.led_drive.default.command_source.compensate"))->click();
 		QCoreApplication::processEvents();
+		require(control<QWidget>(window, QStringLiteral("config.led_drive.default.rate_preset"))->isEnabled(), "Compensate: the speeds preset is usable");
 		// Greyed controls say why: adaptive gamma off greys the shadow lift; Dynamic Drive off greys the rest.
 		auto* adaptive = control<QCheckBox>(window, QStringLiteral("config.led_drive.default.adaptive_gamma"));
 		adaptive->setChecked(false);
