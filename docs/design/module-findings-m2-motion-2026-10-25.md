@@ -43,6 +43,7 @@ or pixels, needs the big test round first; **no fix** = not a defect on inspecti
 | C13 | LOW | `MotionAheadProducer.cpp` 358-359 | a target size the producer cannot make returns success silently, so every pair misses | fix: count + log once (then V2 makes it visible) |
 | C14 | LOW | `MotionAheadProducer.cpp` 69-71 | R12B decode reads whole 36-byte blocks at the row end | no fix: R12B rows are padded to whole 8-pixel blocks (DeckLink row bytes = ceil(w/8) x 36), as v210's 6-pixel groups |
 | C15 | LOW | `MotionAhead.h` 23-27 | the B3 comment ("167 ms at 24p") reads as current although r6 fix 3 replaced it | fixed in this branch (comment) |
+| C17 | MED | host ~16620-16626 (`dejudderAhead.Consume` branch) | an estimate-ahead field gets `dejudderEstimatedEpoch = motionValidity.Epoch()` at CONSUME time, not the epoch its inputs were taken in; an invalidation between the ahead estimate (previous frame's extras) and the consume is not seen by `DejudderLiveFieldFor` (`Consume` itself checks no epoch; only `PairValid` of the pair at consume time). The S0 segment keeps the inputs' epoch and refuses it: the shadow gate's mismatch counter will show it | gate: record the ahead estimate's epoch in `AheadSchedule` and use it at consume (or let P-b1 step 2's segment decide) |
 | C16 | LOW | host 17081 | the failure log interval is a fixed 2400 frames | fix with `GeneralRate::LogInterval` (log cadence only) |
 
 ## Efficiency

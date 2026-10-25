@@ -1,24 +1,24 @@
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index 5c24cd7c..655bb3cf 100644
+index 395b11a0..0a78f565 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 @@ -4,6 +4,7 @@
  #include <GeneralRateLog.h>
  #include <RefreshKey.h>
  #include <MotionValidity.h>
-+#include <VP-V/modules/motion/MotionSegment.h>
++#include <VP-V/modules/motion/vector_delivery/MotionSegment.h>
  #include <KernelInverse.h>
  #include <vprenderer/MotionAheadProducer.h>
  #include "../SubtitleProfileUpdatePolicy.h"
-@@ -7370,6 +7371,7 @@ struct LibplaceboVideoRenderer::Impl
- 		// B3 (i): after B's field was estimated ahead, A's (A, B) inputs are the snapshot.
- 		const bool snapshot = !DejudderLiveFieldFor(sourceSequence) && EntranceOnce() && EntranceOnceSnapshotFor(sourceSequence);
- 		const bool vectors = DejudderLiveFieldFor(sourceSequence) || snapshot;
+@@ -7392,6 +7393,7 @@ struct LibplaceboVideoRenderer::Impl
+ 		const bool forceNoVectors = GetEnvironmentVariableA("VP_DEBUG_PHASE_NOVECTORS", noVectorsFlag, sizeof(noVectorsFlag)) > 0 &&
+ 			noVectorsFlag[0] == '1';
+ 		const bool vectors = (DejudderLiveFieldFor(sourceSequence) || snapshot) && !forceNoVectors;
 +		MotionShadowCheck(sourceSequence, nextSourceSequence, DejudderLiveFieldFor(sourceSequence));
  		vpPhaseVectors = vectors;
  		if (vectors)
  		{
-@@ -7568,6 +7570,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -7665,6 +7667,7 @@ struct LibplaceboVideoRenderer::Impl
  		frameInterpolator.reset();
  		dejudder.reset();
  		dejudderLiveFieldFrom = 0;
@@ -26,7 +26,7 @@ index 5c24cd7c..655bb3cf 100644
  		dejudderMotionSourceKey = -1;
  		// 6d: the cache and the rendered warp hold textures (and a dispatch)
  		// of this device (audit stage10-6d blocker 1).
-@@ -8087,6 +8090,26 @@ struct LibplaceboVideoRenderer::Impl
+@@ -8203,6 +8206,26 @@ struct LibplaceboVideoRenderer::Impl
  	// checks the epoch its vectors were made in.
  	MotionValidity::State motionValidity;
  	uint64_t motionValiditySeen = MotionValidity::State::kInitialEpoch;   // render thread
@@ -53,7 +53,7 @@ index 5c24cd7c..655bb3cf 100644
  	std::atomic<int> motionAheadDepth{ 0 };   // the frames ahead to submit (0 = none)
  	// r6 fix 3: the time-based depth at this source rate (MotionAhead::DepthAt; 2 at 24p, 4 at 60p):
  	// the look-ahead engages once that many are queued ahead (was always 4).
-@@ -13758,6 +13781,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -13890,6 +13913,7 @@ struct LibplaceboVideoRenderer::Impl
  		dejudderEstimatedSequence = 0;
  		dejudderEstimatedEpoch = 0;
  		dejudderLiveFieldFrom = 0;
@@ -61,7 +61,7 @@ index 5c24cd7c..655bb3cf 100644
  		adaptiveDownscale.ForgetMap();
  		debander.ForgetHold();
  		detailPulse.Forget();      // detail restore: both histories restart (docs/VP-detail-restore.md)
-@@ -16546,6 +16570,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -16678,6 +16702,7 @@ struct LibplaceboVideoRenderer::Impl
  		const bool estimated = RunDejudderEstimate(a, a, 0, 0);
  		motionEngineWarming = false;
  		dejudderLiveFieldFrom = 0;
@@ -69,7 +69,7 @@ index 5c24cd7c..655bb3cf 100644
  		bool pictured = false;
  		if (estimated && dejudder)
  		{
-@@ -16821,6 +16846,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -16953,6 +16978,7 @@ struct LibplaceboVideoRenderer::Impl
  	// into the slot not holding a's.
  	bool RunDejudderEstimate(const Dejudder::Planes& a, const Dejudder::Planes& b, uint64_t aSequence, uint64_t bSequence)
  	{
@@ -77,7 +77,7 @@ index 5c24cd7c..655bb3cf 100644
  		// The matcher's settings from the profile, refinements included.
  		auto wanted = [&](Dejudder::Settings settings)
  		{
-@@ -16955,6 +16981,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -17087,6 +17113,7 @@ struct LibplaceboVideoRenderer::Impl
  			motionProducer->Prune(aSequence);
  		}
  		dejudderLiveFieldFrom = 0;   // the live outputs are being replaced
@@ -85,7 +85,7 @@ index 5c24cd7c..655bb3cf 100644
  		if (!dejudder->Estimate(sa, sb, maskSlot, adaptiveGrainMapWanted))
  		{
  			// Bug hunt 3 F4: a texture the engine could not create (low video memory).
-@@ -16966,6 +16993,10 @@ struct LibplaceboVideoRenderer::Impl
+@@ -17098,6 +17125,10 @@ struct LibplaceboVideoRenderer::Impl
  			return false;
  		}
  		dejudderLiveFieldFrom = aSequence;

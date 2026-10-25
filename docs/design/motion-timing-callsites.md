@@ -5,6 +5,33 @@
 edit to an existing file is in `motion-timing-callsites.patch` (`git apply --check --cached`
 passes against d0212534).
 
+## 0. Status 2026-10-25 (branch `feat/m2-motion`, WP-7 + M2 steps 16-18)
+
+Rebased onto `integ/batch1` dc149284 together with the M2 moves of the VP motion/timing files
+(`src/VP-V/modules/motion/{estimation,vector_delivery,consumers}`, `input/queue_timing`,
+`output/presentation`; forwarding headers keep the host's old include spellings). Paths below that
+name `src/VideoProcessor-Lib/...` for those files are the old ones; the module READMEs and
+`migration-path-map.md` have the new ones. The three call-site patches, applied in this order on
+the branch tip (each `git apply --check` clean alone and stacked):
+
+| # | Patch | What | Behaviour |
+|---|---|---|---|
+| 1 | `motion-timing-callsites.patch` (P-a) | host queue calls `IQueueTimingPolicy` at the four points + one walk; `AlphaQueuePolicy.h` back to Bill's 83b7ffea text; tests include the compat shim; test project registers `QueueTimingPolicyTests` + `MotionSegmentTests` | byte-identical decisions (frozen-host comparison, re-frozen at 2f75d36d with the re-audit MED 1 frame-start rule: `DueContext::arrivalIsFrameStart`, `BacklogContext::headArrivalIsFrameStart`) |
+| 2 | `motion-timing-slots.patch` (P-c + slot switches) | `SwitchHonoured` for `input.queue_timing`, `motion.estimation`, `motion.vector_delivery`, `motion.consumers`, `output.presentation`; one `SlotSwitchSettings::Apply` call in `ReadPipelineSettings`; `QueuePolicy()` picks `BillQueuePolicy` for the Original pathway or `input.queue_timing` off; the pipeline state line names the switched slots | Original pathway = Bill's queue policy. Decision-identical to today's Original pathway (budget off, `cadence_class_fixes` off = no cadence scaling, render-ahead off = no credit: the preconditions of `OriginalPathwayDecidesLikeUpstreamOnAFrameCountQueue`). A switched-off slot = its Original pathway overrides (one list, `OriginalPathway.h`); `motion.consumers` follows its vectors |
+| 3 | `motion-shadow-callsites.patch` (P-b1 step 1) | the S0 segment runs beside the host's validity check and counts mismatches | pixels unchanged; the gate must show 0 mismatches before step 2 |
+
+Apply from the committed blob, not the working-tree file: with `core.autocrlf=true` the checked-out
+`.patch` has CRLF line ends and `git apply` rejects it (one cause of the rejects reported on
+dc149284). On the branch tip: `git show HEAD:docs/design/motion-timing-callsites.patch | git apply`,
+then `motion-timing-slots.patch`, then `motion-shadow-callsites.patch`. They target the tip of
+`feat/m2-motion` (its test-include moves and the frame-start policy commits), not bare dc149284.
+Compile-checked together (VPRenderer + Test, x64 Release, 2026-10-25 18:16).
+
+P-b1 step 2 (consumers fetch from the segment) is NOT drafted as a patch yet: it goes in only after
+step 1 shows 0 mismatches in the gates (section 5.1). One mismatch source is predicted
+(findings C17): the estimate-ahead path refreshes `dejudderEstimatedEpoch` at consume time, so the
+host accepts an ahead field across an invalidation that the segment (epoch at the inputs) refuses.
+
 Sources: central-migration-needs.md section 6 (segment S0, clusters 7/20/22/25), the efficiency audit
 of 2026-10-24, the v1.4.02 upstream forecast, and Bill's changes read with
 `git diff 83b7ffea origin/v1.4.02-beta` (b1415da4).
