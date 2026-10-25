@@ -188,10 +188,7 @@ namespace IntentInterpreter
             const bool built = luma.IsValid() && ContentIntent::BuildGrid(
                 [&luma](int x, int y, uint16_t& value)
                 {
-                    AnalysisLumaSample s;
-                    if (!luma.Sample(x, y, s)) return false;
-                    value = s.luma;
-                    return true;
+                    return luma.SampleLuma(x, y, value);   // WP-23: the shared decode when ready
                 }, picture.left, picture.top, picture.right, picture.bottom, grid);
             bool formatChange = false;
             if (luma.generation != m_generation)

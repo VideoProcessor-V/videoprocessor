@@ -331,13 +331,13 @@ bool SampleHdrVetoGrid(const AnalysisLumaSource& source, int columns, int rows,
 		for (int x = 0; x < columns; ++x)
 		{
 			const int sx = static_cast<int>((2LL * x + 1) * source.width / (2LL * columns));
-			AnalysisLumaSample sample;
-			if (!source.Sample(sx, sy, sample))
+			uint16_t luma = 0;
+			if (!source.SampleLuma(sx, sy, luma))   // WP-23: the shared decode when ready
 			{
 				grid.clear();
 				return false;
 			}
-			grid.push_back(sample.luma);
+			grid.push_back(luma);
 		}
 	}
 	return true;

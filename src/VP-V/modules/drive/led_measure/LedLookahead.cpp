@@ -91,18 +91,21 @@ namespace LedDrive
 		for (int code = 0; code < LUMA_CODES; ++code)
 			clamped[code] = std::max(0.0f, std::min(table[code], 1.0f));
 		// The 16-bit plane formats are read in place, the table indexed by the
-		// lane's upper ten bits; other formats are decoded a row at a time.
+		// lane's upper ten bits; other formats read the frame's shared luma
+		// decode (WP-23, Sample().luma per pixel) or are decoded a row at a time.
 		const bool plane = luma.LumaPlaneRow(top) != nullptr;
+		const bool shared = !plane && luma.SharedLumaRow(top) != nullptr;
 		LumaValueTable planeTable{};
 		if (plane)
 			for (int code = 0; code < LUMA_CODES; ++code)
 				planeTable[code] = clamped[luma.PlaneLuma(static_cast<uint16_t>(code))];
-		std::vector<uint16_t> codes(plane ? 0 : static_cast<size_t>(width));
+		std::vector<uint16_t> codes(plane || shared ? 0 : static_cast<size_t>(width));
 		AreaPeakAccumulator::Span spans[MAX_MASK_RECTS];
 		for (int y = top; y < bottom; ++y)
 		{
 			const uint16_t* planeRow = plane ? luma.LumaPlaneRow(y) : nullptr;
-			if (plane ? !planeRow : !luma.SampleLumaRow(left, y, width, codes.data()))
+			const uint16_t* sharedRow = shared ? luma.SharedLumaRow(y) : nullptr;
+			if (plane ? !planeRow : shared ? !sharedRow : !luma.SampleLumaRow(left, y, width, codes.data()))
 			{
 				// A format the row reader cannot decode: the per-pixel reference.
 				auto value = [&](int x, int yy, double& v)
@@ -139,6 +142,8 @@ namespace LedDrive
 					spans[merged++] = spans[i];
 			if (plane)
 				accumulator.AddRow(planeRow + left, 6, planeTable.data(), spans, merged, true);
+			else if (shared)
+				accumulator.AddRow(sharedRow + left, 0, clamped.data(), spans, merged);
 			else
 				accumulator.AddRow(codes.data(), 0, clamped.data(), spans, merged);
 		}
@@ -163,9 +168,9 @@ namespace LedDrive
 		const LumaValueTable table = PeakValueTable(luma, transfer, range);
 		auto mapped = [&](int x, int y, double& value)
 		{
-			AnalysisLumaSample sample;
-			if (!luma.Sample(x, y, sample)) return false;
-			value = table[std::min<int>(sample.luma, LUMA_CODES - 1)];
+			uint16_t code = 0;
+			if (!luma.SampleLuma(x, y, code)) return false;   // WP-23: the shared decode when ready
+			value = table[std::min<int>(code, LUMA_CODES - 1)];
 			return true;
 		};
 		const int maskCount = std::max(0, std::min(options.maskCount, MAX_MASK_RECTS));

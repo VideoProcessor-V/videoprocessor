@@ -14,7 +14,10 @@
     "src/VideoProcessor-Lib/ActivePictureAnalyzer.cpp",
     "src/VideoProcessor-Lib/SceneDetector.cpp",
     "src/VideoProcessor-Lib/SubtitleBoxDetector.cpp",
-    "src/VideoProcessor-Lib/AnalysisFrame.cpp"
+    "src/VideoProcessor-Lib/AnalysisFrame.cpp",
+    "src/VP-V/modules/input/source_analysis/VpFrameAnalysis.cpp",
+    "src/VP-V/modules/input/source_analysis/VpFrameAnalysis.h",
+    "src/VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h"
   ],
   "components": {
     "files": {
