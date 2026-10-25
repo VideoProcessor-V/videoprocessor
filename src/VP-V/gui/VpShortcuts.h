@@ -20,6 +20,7 @@
 #define ID_COMMAND_ROOM_LIGHTS          33206
 #define ID_COMMAND_STATE_REPORT         33207
 #define ID_COMMAND_RAW_CAPTURE_TOGGLE   33208
+#define ID_COMMAND_DV_COMPARE_CAPTURE   33209   // feat/dv-l8 WIP: handled by its own ON_COMMAND, ahead of the VP range
 #define ID_COMMAND_VP_LAST              33299
 
 namespace VpvShortcuts

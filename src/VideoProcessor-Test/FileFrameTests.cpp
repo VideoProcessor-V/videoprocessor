@@ -121,10 +121,11 @@ namespace VideoProcessorTest
 		// 36 on its branch); 40 since SetActivePictureLookaheadAutomatic (bug hunt 3 F2,
 		// integration round 5); 41 since GetFallbacksStatus (r6 fix 7); 42 since SetQueueDelayBudget
 		// (VP-V delay budget, ADR-0020); 43 since ToggleDvCompareCapture (feat/dv-l8,
-		// assigned at the integ/batch1 merge). The version check is equality.
-		TEST_METHOD(PluginApiVersionIs43)
+		// assigned at the integ/batch1 merge); 44 since GetModuleStatus / InvokeModuleCommand
+		// (WP-11, integration group C). The version check is equality.
+		TEST_METHOD(PluginApiVersionIs44)
 		{
-			Assert::AreEqual(static_cast<uint32_t>(43), VP_LIBPLACEBO_PLUGIN_API_VERSION);
+			Assert::AreEqual(static_cast<uint32_t>(44), VP_LIBPLACEBO_PLUGIN_API_VERSION);
 		}
 	};
 
