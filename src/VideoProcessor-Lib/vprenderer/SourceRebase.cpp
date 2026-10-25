@@ -173,6 +173,8 @@ if (p.x < size.x && p.y < size.y) {
 			{
 				if (textures[slot][plane] && gpu) pl_tex_destroy(gpu, &textures[slot][plane]);
 				textures[slot][plane] = nullptr;
+				if (alternate[slot][plane] && gpu) pl_tex_destroy(gpu, &alternate[slot][plane]);
+				alternate[slot][plane] = nullptr;
 				pl_shader_obj_destroy(&luts[slot][plane]);
 				if (separableTemp[slot][plane] && gpu) pl_tex_destroy(gpu, &separableTemp[slot][plane]);
 				separableTemp[slot][plane] = nullptr;
@@ -193,6 +195,12 @@ if (p.x < size.x && p.y < size.y) {
 		}
 		const bool oneAxis = factorX >= 1.0 || factorY >= 1.0;
 		slot = (std::max)(0, (std::min)(slot, kSlots - 1));
+		{   // DEBUG (VP_DEBUG_REBASE_PINGPONG=1): alternate between two output texture sets per slot
+			char flag[4] = {};
+			if (GetEnvironmentVariableA("VP_DEBUG_REBASE_PINGPONG", flag, sizeof(flag)) > 0 && flag[0] == '1')
+				for (int plane = 0; plane < PL_MAX_PLANES; ++plane)
+					std::swap(textures[slot][plane], alternate[slot][plane]);
+		}
 		pl_frame result = source;
 		for (int plane = 0; plane < source.num_planes; ++plane)
 		{
@@ -243,7 +251,10 @@ if (p.x < size.x && p.y < size.y) {
 					" not renderable, " + (params.format->name ? params.format->name : "float") +
 					(half ? " (half float: 32-bit float not renderable)" : "");
 			}
-			if (!pl_tex_recreate(gpu, &textures[slot][plane], &params))
+			const pl_tex beforeRecreate = textures[slot][plane];
+			if (pl_tex_recreate(gpu, &textures[slot][plane], &params) && textures[slot][plane] != beforeRecreate)
+				++debugRecreations;
+			if (!textures[slot][plane])
 			{
 				error = "texture allocation failed";
 				++failures;
@@ -319,10 +330,15 @@ if (p.x < size.x && p.y < size.y) {
 			filter.filter = oneAxis ? pl_filter_lanczos : pl_filter_ewa_lanczossharp;
 			filter.antiring = antiring;
 			filter.lut = &luts[slot][plane];
+			{   // DEBUG (VP_DEBUG_REBASE_NOCOMPUTE=1): the polar filter as a fragment pass
+				char flag[4] = {};
+				filter.no_compute = GetEnvironmentVariableA("VP_DEBUG_REBASE_NOCOMPUTE", flag, sizeof(flag)) > 0 && flag[0] == '1';
+			}
 			pl_dispatch_params dp{};
 			dp.shader = &sh;
 			dp.target = textures[slot][plane];
 			const bool sampled = oneAxis ? pl_shader_sample_ortho2(sh, &src, &filter) : pl_shader_sample_polar(sh, &src, &filter);
+			if (plane == 0) lastLumaKind = sampled ? (pl_shader_is_compute(sh) ? 1 : 2) : 0;
 			if (!sampled || !pl_dispatch_finish(dispatch, &dp))
 			{
 				if (sh) pl_dispatch_abort(dispatch, &sh);
@@ -331,6 +347,10 @@ if (p.x < size.x && p.y < size.y) {
 				return false;
 			}
 			result.planes[plane].texture = textures[slot][plane];
+			{   // DEBUG (VP_DEBUG_SYNC & 64): GPU finish after the polar pass
+				char syncText[8] = {};
+				if (GetEnvironmentVariableA("VP_DEBUG_SYNC", syncText, sizeof(syncText)) > 0 && (atoi(syncText) & 64)) pl_gpu_finish(gpu);
+			}
 		}
 		// Chroma siting (research/chroma 2026-10-24): the planes were resampled edge-aligned by the
 		// factors, so their shifts scale with them; the old -0.5 moved colour by 1/4 of a re-based

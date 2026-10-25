@@ -6321,6 +6321,11 @@ struct LibplaceboVideoRenderer::Impl
 				// The picture being drawn (a Stage B picture between frames, or A).
 				if (sourceRebase.Apply(d3d11->gpu, rebaseDispatch, frame, rebaseFactorX, rebaseFactor, rebased, 0))
 				{
+					{   // DEBUG (VP_DEBUG_SYNC & 16): GPU finish right after the main re-base
+						char syncText[8] = {};
+						if (GetEnvironmentVariableA("VP_DEBUG_SYNC", syncText, sizeof(syncText)) > 0 && (atoi(syncText) & 16))
+							pl_gpu_finish(d3d11->gpu);
+					}
 					frame = rebased;
 					if (sourceRebase.FormatNote() != rebaseFormatNoteLogged)
 					{
@@ -7352,6 +7357,52 @@ struct LibplaceboVideoRenderer::Impl
 		return activeSettings.interpolation != InterpolationPolicy::Mode::Off && (interpolating || keep) &&
 			!lowLatencyQueueActive.load(std::memory_order_acquire);
 	}
+	// DEBUG (in-between residual hunt 2026-10-25): a host copy of a plane (a plain copy pass) for
+	// the env-gated draw trace (VP_DEBUG_DRAW_TRACE=1); never used on an ordinary run.
+	bool DebugReadTextureBytes(pl_tex src, std::vector<uint8_t>& out)
+	{
+		if (!src) return false;
+		EnsureRebaseDispatch();
+		pl_tex_params tp{};
+		tp.w = src->params.w; tp.h = src->params.h; tp.format = src->params.format;
+		if (!(tp.format->caps & PL_FMT_CAP_RENDERABLE) || !(tp.format->caps & PL_FMT_CAP_HOST_READABLE))
+			return false;
+		tp.sampleable = true; tp.renderable = true; tp.host_readable = true;
+		pl_tex copy = pl_tex_create(d3d11->gpu, &tp);
+		if (!copy) return false;
+		pl_shader sh = pl_dispatch_begin(rebaseDispatch);
+		pl_sample_src sample{};
+		sample.tex = src;
+		sample.components = src->params.format->num_components;
+		bool ok = pl_shader_sample_direct(sh, &sample);
+		if (ok)
+		{
+			pl_dispatch_params dp{};
+			dp.shader = &sh;
+			dp.target = copy;
+			ok = pl_dispatch_finish(rebaseDispatch, &dp);
+		}
+		else
+			pl_dispatch_abort(rebaseDispatch, &sh);
+		if (ok)
+		{
+			out.resize(static_cast<size_t>(tp.w) * tp.h * tp.format->texel_size);
+			pl_tex_transfer_params t{};
+			t.tex = copy;
+			t.ptr = out.data();
+			ok = pl_tex_download(d3d11->gpu, &t);
+		}
+		pl_tex_destroy(d3d11->gpu, &copy);
+		return ok;
+	}
+	static size_t DebugBytesDiffering(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b)
+	{
+		if (a.size() != b.size()) return static_cast<size_t>(-1);
+		size_t n = 0;
+		for (size_t i = 0; i < a.size(); ++i) n += a[i] != b[i] ? 1 : 0;
+		return n;
+	}
+	std::string captureDrawDebug;   // the captured draw's geometry/phase (capture sidecar "draw_debug")
 	// The picture at vpOutputPhase between A (the uploaded planes) and B (the next
 	// frame's planes, uploaded for the estimate), into vpPhasePlanes. With the pair's
 	// vectors valid: the interpolator; without (an invalidation, no estimate): its
@@ -9670,6 +9721,7 @@ struct LibplaceboVideoRenderer::Impl
 			<< "  \"source_sample_depth\": " << sourceImage.repr.bits.sample_depth << ",\n"
 			<< "  \"source_color_depth\": " << sourceImage.repr.bits.color_depth << ",\n"
 			<< "  \"source_bit_shift\": " << sourceImage.repr.bits.bit_shift << ",\n"
+			<< "  \"draw_debug\": \"" << JsonEscape(captureDrawDebug) << "\",\n"
 			<< "  \"dolby_vision\": {\"active\": " <<
 				(captureDolbyVision ? "true" : "false") <<
 				", \"composition\": \"" <<
@@ -25029,6 +25081,11 @@ struct LibplaceboVideoRenderer::Impl
                 // Stage B: the picture at this refresh's phase in place of A's planes (a
                 // composed picture keeps A: hold). Everything after runs on it unchanged.
                 NoteEntranceSourceFrame(sourceSequence);
+                // DEBUG (in-between residual hunt 2026-10-25): VP_DEBUG_SYNC bitmask - GPU finish at the draw's
+                // start (8), after the phase picture (4), before libplacebo's render (2).
+                char debugSyncText[8] = {};
+                const int debugSync = GetEnvironmentVariableA("VP_DEBUG_SYNC", debugSyncText, sizeof(debugSyncText)) > 0 ? atoi(debugSyncText) : 0;
+                if (debugSync & 8) pl_gpu_finish(d3d11->gpu);
                 bool phasePicture = vpPhasePlanesValid && source.num_planes == 2 &&
                     source.planes[0].texture == textures[0] && source.planes[1].texture == textures[1];
                 // B3 (pipeline_entrance_once): the picture from the processed A and B, no stages after.
@@ -25058,6 +25115,7 @@ struct LibplaceboVideoRenderer::Impl
                 }
                 // Latch review 2026-10-17: during a crossfade the path being left, drawn with the
                 // other's weight (below); the frame before the entrance stages is kept for it.
+                if (debugSync & 4) pl_gpu_finish(d3d11->gpu);
                 const pl_frame unrebased = frame;
                 // Pipeline skeleton (B3/R2): the entrance stages in the registry's order - re-base,
                 // VP deband, detail pulse + texture restore (docs/VP-detail-restore.md), all before
@@ -25095,6 +25153,115 @@ struct LibplaceboVideoRenderer::Impl
                         ((debandThreshold > 0.0 && pipelineSlots.Runs(PipelineSlots::Id::RepairDeband)) ||
                          (historyNeeded && pipelineSlots.Runs(PipelineSlots::Id::RepairTextureRestore)));
                     RunMainEntrance(run, frame);
+                }
+                // DEBUG (in-between residual hunt 2026-10-25): the captured draw's picture type,
+                // phase and geometry for the capture sidecar; VP_DEBUG_DRAW_TRACE=1 also logs it for
+                // every draw with the phase picture's planes compared against A's (both planes).
+                {
+                    char traceFlag[4] = {};
+                    const bool trace = GetEnvironmentVariableA("VP_DEBUG_DRAW_TRACE", traceFlag, sizeof(traceFlag)) > 0 && (traceFlag[0] == '1' || traceFlag[0] == '2');
+                    const bool capturing = renderedOutputCaptureRequested.load(std::memory_order_acquire);
+                    if (trace || capturing)
+                    {
+                        long long lumaDiff = -2, chromaDiff = -2;   // -2: not compared
+                        if (trace && capturing && phasePicture && vpPhasePlanes.luma && textures[0] && textures[1] &&
+                            unrebased.planes[0].texture == vpPhasePlanes.luma)
+                        {
+                            std::vector<uint8_t> pa, pb;
+                            lumaDiff = DebugReadTextureBytes(vpPhasePlanes.luma, pa) && DebugReadTextureBytes(textures[0], pb)
+                                ? static_cast<long long>(DebugBytesDiffering(pa, pb)) : -1;
+                            chromaDiff = DebugReadTextureBytes(vpPhasePlanes.chroma, pa) && DebugReadTextureBytes(textures[1], pb)
+                                ? static_cast<long long>(DebugBytesDiffering(pa, pb)) : -1;
+                        }
+                        // Content hashes of the planes libplacebo samples (after the entrance stages)
+                        // and of the planes before them: equal inputs with unequal outputs localise a
+                        // nondeterministic stage.
+                        auto planeHash = [&](pl_tex t) -> unsigned long long {
+                            std::vector<uint8_t> bytes;
+                            if (!DebugReadTextureBytes(t, bytes)) return 0ull;
+                            unsigned long long hsh = 1469598103934665603ull;
+                            for (const uint8_t b : bytes) { hsh ^= b; hsh *= 1099511628211ull; }
+                            char dumpDir[512] = {};   // VP_DEBUG_DUMP_DIR: each distinct plane content once
+                            if (GetEnvironmentVariableA("VP_DEBUG_DUMP_DIR", dumpDir, sizeof(dumpDir)) > 0)
+                            {
+                                char path[700];
+                                snprintf(path, sizeof(path), "%s/plane-%dx%d-%016llx.bin", dumpDir, t->params.w, t->params.h, hsh);
+                                if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES)
+                                    { FILE* f = nullptr; if (fopen_s(&f, path, "wb") == 0 && f) { fwrite(bytes.data(), 1, bytes.size(), f); fclose(f); } }
+                            }
+                            return hsh; };
+                        unsigned long long hashIn[2] = {}, hashOut[2] = {};
+                        if (trace && (capturing || traceFlag[0] == '2'))
+                            for (int p = 0; p < 2 && p < frame.num_planes; ++p)
+                            {
+                                hashIn[p] = planeHash(unrebased.planes[p].texture);
+                                hashOut[p] = planeHash(frame.planes[p].texture);
+                            }
+                        char hashes[240];
+                        snprintf(hashes, sizeof(hashes), " in=%016llx,%016llx out=%016llx,%016llx rebase_kind=%d recreations=%llu tex=%p storable=%d", hashIn[0], hashIn[1], hashOut[0], hashOut[1], sourceRebase.LastLumaShaderKind(), sourceRebase.debugRecreations, static_cast<const void*>(frame.planes[0].texture), frame.planes[0].texture && frame.planes[0].texture->params.storable ? 1 : 0);
+                        char line[900];
+                        snprintf(line, sizeof(line),
+                            "seq=%llu next=%llu phase_picture=%d phase=%.4f vectors=%d deferred=%d entrance_once=%d b_as_a=%d cadence_repeat=%d "
+                            "planes=%s src_crop=%.9g,%.9g-%.9g,%.9g frame_crop=%.9g,%.9g-%.9g,%.9g dst_crop=%.9g,%.9g-%.9g,%.9g "
+                            "frame_tex=%dx%d hooks=%d upscaler=%s downscaler=%s temporal=%d fade=%.3f phase_vs_a_luma_bytes=%lld chroma_bytes=%lld",
+                            static_cast<unsigned long long>(sourceSequence), static_cast<unsigned long long>(nextSourceSequence),
+                            phasePicture ? 1 : 0, vpPhaseT, vpPhaseVectors ? 1 : 0, vpPhaseDeferred ? 1 : 0, entranceOnceDone ? 1 : 0,
+                            bAlreadyA ? 1 : 0, cadenceRepeat ? 1 : 0,
+                            unrebased.planes[0].texture == textures[0] ? "A" : (phasePicture && unrebased.planes[0].texture == vpPhasePlanes.luma ? "phase" : "other"),
+                            source.crop.x0, source.crop.y0, source.crop.x1, source.crop.y1,
+                            frame.crop.x0, frame.crop.y0, frame.crop.x1, frame.crop.y1,
+                            destination.crop.x0, destination.crop.y0, destination.crop.x1, destination.crop.y1,
+                            frame.planes[0].texture ? frame.planes[0].texture->params.w : 0, frame.planes[0].texture ? frame.planes[0].texture->params.h : 0,
+                            parameters.num_hooks, parameters.upscaler && parameters.upscaler->name ? parameters.upscaler->name : "-",
+                            parameters.downscaler && parameters.downscaler->name ? parameters.downscaler->name : "-",
+                            temporalRenderer.Active() ? 1 : 0, rebaseFade, lumaDiff, chromaDiff);
+                        // Everything else libplacebo reads: the hooks (signature, parameters) and the
+                        // parameter blocks / colour descriptors (byte hashes).
+                        std::ostringstream extra;
+                        extra.imbue(std::locale::classic());
+                        auto podHash = [](const void* p, size_t n) -> unsigned long long {
+                            if (!p) return 0ull;
+                            unsigned long long hsh = 1469598103934665603ull;
+                            const uint8_t* b = static_cast<const uint8_t*>(p);
+                            for (size_t i = 0; i < n; ++i) { hsh ^= b[i]; hsh *= 1099511628211ull; }
+                            return hsh; };
+                        extra << std::hex << " frame_color=" << podHash(&frame.color, sizeof(frame.color))
+                              << " frame_repr=" << podHash(&frame.repr, sizeof(frame.repr))
+                              << " dst_color=" << podHash(&destination.color, sizeof(destination.color))
+                              << " dst_repr=" << podHash(&destination.repr, sizeof(destination.repr))
+                              << " color_map=" << podHash(parameters.color_map_params, sizeof(pl_color_map_params))
+                              << " adjust=" << podHash(parameters.color_adjustment, sizeof(pl_color_adjustment))
+                              << " sigmoid=" << podHash(parameters.sigmoid_params, sizeof(pl_sigmoid_params))
+                              << " deband=" << podHash(parameters.deband_params, sizeof(pl_deband_params))
+                              << " dither=" << podHash(parameters.dither_params, sizeof(pl_dither_params))
+                              << " peak=" << podHash(parameters.peak_detect_params, sizeof(pl_peak_detect_params))
+                              << " mixer=" << (parameters.frame_mixer ? 1 : 0) << std::dec
+                              << " antiring=" << parameters.antiringing_strength
+                              << " overlays=" << frame.num_overlays << "/" << destination.num_overlays
+                              << std::setprecision(9) << " shifts=" << frame.planes[0].shift_x << "," << frame.planes[0].shift_y << ";"
+                              << frame.planes[1].shift_x << "," << frame.planes[1].shift_y
+                              << " dst_tex=" << (destination.planes[0].texture ? destination.planes[0].texture->params.w : 0) << "x"
+                              << (destination.planes[0].texture ? destination.planes[0].texture->params.h : 0)
+                              << " frame_tex_ptr=" << static_cast<const void*>(frame.planes[0].texture);
+                        for (int k = 0; k < parameters.num_hooks; ++k)
+                        {
+                            const pl_hook* hk = parameters.hooks[k];
+                            if (!hk) continue;
+                            extra << " hook" << k << "=" << std::hex << hk->signature << std::dec << "[" << hk->stages;
+                            for (int pi = 0; pi < hk->num_parameters; ++pi)
+                            {
+                                const pl_hook_par& par = hk->parameters[pi];
+                                if (!par.data) continue;
+                                extra << " " << (par.name ? par.name : "?") << "=";
+                                if (par.type == PL_VAR_FLOAT) extra << std::setprecision(9) << par.data->f;
+                                else if (par.type == PL_VAR_SINT) extra << par.data->i;
+                                else extra << par.data->u;
+                            }
+                            extra << "]";
+                        }
+                        if (capturing) captureDrawDebug = std::string(line) + hashes + extra.str();
+                        if (trace) DebugLog::Log("DEBUG draw trace: %s%s", line, hashes);
+                    }
                 }
                 if (rebaseFade < 1.0 && !temporalRenderer.Active())
                 {
@@ -25139,6 +25306,8 @@ struct LibplaceboVideoRenderer::Impl
                         }
                     }
                 }
+                if (debugSync & 2) pl_gpu_finish(d3d11->gpu);
+                if (debugSync & 32) pl_gpu_flush(d3d11->gpu);
                 return temporalRenderer.Render(renderer,frame,destination,parameters,
                     extendedRangeRelabelled ? &source.color : nullptr);
             });

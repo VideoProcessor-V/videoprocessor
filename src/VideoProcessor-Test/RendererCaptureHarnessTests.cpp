@@ -4523,8 +4523,9 @@ namespace Tests
 				plan.rateNumerator = 24000;
 				plan.rateDenominator = 1001;
 				plan.step = [](int) { FrameStep f; f.content = 0; return f; };
-				plan.captureTimes = { 3.6, 4.2, 4.8, 5.4 };   // after the start-up settling (~3 s)
-				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.5, false, extra, false, &plan);
+				const double delay = atof(RealClip::Env("VP_TEST_NEAR_BLACK_DELAY").c_str());   // extra seconds before the captures (slow start-ups)
+				plan.captureTimes = { 3.6 + delay, 4.2 + delay, 4.8 + delay, 5.4 + delay };   // after the start-up settling (~3 s)
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.5 + delay, false, extra, false, &plan);
 				for (const std::string& line : r.log)
 				{
 					// A rejected configuration silently runs the defaults: the probe's result would be

@@ -10333,6 +10333,140 @@ namespace VideoProcessorTest
 			pl_dispatch_destroy(&dispatch);
 		}
 
+		TEST_METHOD(SourceRebaseIsDeterministicAcrossCallsAndInputs)
+		{
+			// In-between residual hunt (2026-10-25): the re-base of the same picture must give the
+			// same bytes on every call - from either of two textures holding identical content (A's
+			// unpacked planes and the interpolator's phase planes), in either slot, interleaved as
+			// the draw does. A second result was seen in the renderer (one in ~4 draws).
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			const int W = 1920, H = 1080;
+			std::mt19937 rng(11);
+			std::uniform_int_distribution<int> code(64, 940);
+			std::vector<uint16_t> luma(static_cast<size_t>(W) * H), chroma(static_cast<size_t>(W / 2) * H * 2);
+			for (int y = 0; y < H; ++y)
+				for (int x = 0; x < W; ++x)
+					luma[static_cast<size_t>(y) * W + x] = static_cast<uint16_t>((y < 140 || y >= 940 ? 64 : code(rng)) << 6);
+			for (uint16_t& v : chroma) v = static_cast<uint16_t>(code(rng) << 6);
+			auto makePlanes = [&](bool phaseLike, pl_tex out[2]) {
+				pl_tex_params lp{};
+				lp.w = W; lp.h = H; lp.format = pl_find_named_fmt(gpu, "r16"); lp.sampleable = true; lp.storable = true;
+				lp.blit_src = phaseLike; lp.initial_data = luma.data();
+				pl_tex_params cp = lp;
+				cp.w = W / 2; cp.format = pl_find_named_fmt(gpu, "rg16"); cp.initial_data = chroma.data();
+				out[0] = pl_tex_create(gpu, &lp);
+				out[1] = pl_tex_create(gpu, &cp);
+				Assert::IsTrue(out[0] && out[1], L"planes");
+			};
+			pl_tex a[2] = {}, p[2] = {}, b[2] = {};
+			makePlanes(false, a);
+			makePlanes(true, p);
+			makePlanes(false, b);
+			// The phase picture as the draw makes it: the interpolator's output planes (no vectors: A's pixels).
+			Interpolator::FrameInterpolator interpolator(fixture.Log(), gpu);
+			auto frameOf = [&](pl_tex planes[2]) {
+				pl_frame f{};
+				f.num_planes = 2;
+				f.planes[0].texture = planes[0]; f.planes[0].components = 1; f.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				f.planes[1].texture = planes[1]; f.planes[1].components = 2;
+				f.planes[1].component_mapping[0] = PL_CHANNEL_CB; f.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+				f.planes[1].shift_x = -0.5f;
+				f.crop = { 0.0f, 140.0f, static_cast<float>(W), 940.0f };
+				f.repr = pl_color_repr_hdtv;
+				f.color = pl_color_space_bt709;
+				return f; };
+			auto hashOf = [&](pl_tex t) {
+				pl_tex_params rp{};
+				rp.w = t->params.w; rp.h = t->params.h; rp.format = t->params.format; rp.host_readable = true; rp.blit_dst = true;
+				pl_tex readable = pl_tex_create(gpu, &rp);
+				Assert::IsNotNull(readable);
+				pl_tex_blit_params bp{}; bp.src = t; bp.dst = readable;
+				pl_tex_blit(gpu, &bp);
+				std::vector<uint8_t> bytes(static_cast<size_t>(rp.w) * rp.h * rp.format->texel_size);
+				pl_tex_transfer_params d{}; d.tex = readable; d.ptr = bytes.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d));
+				pl_tex_destroy(gpu, &readable);
+				unsigned long long h = 1469598103934665603ull;
+				for (const uint8_t b : bytes) { h ^= b; h *= 1099511628211ull; }
+				return h; };
+			const double factor = 720.0 / 1080.0;
+			SourceRebase::Module rebase;
+			// An identified player kernel makes the luma target storable: the polar re-base then runs as a
+			// compute shader (the renderer's case; VP_TEST_REBASE_KERNEL=-1 keeps the fragment path).
+			char kernelText[8] = {};
+			rebase.SetKernel(GetEnvironmentVariableA("VP_TEST_REBASE_KERNEL", kernelText, sizeof(kernelText)) > 0 ? atoi(kernelText) : 0);
+			std::map<std::pair<unsigned long long, unsigned long long>, int> results;
+			std::map<unsigned long long, int> renders;   // the re-based picture rendered to 1920x1080 (polar upscale)
+			std::string sequence;
+			char iterationsText[16] = {};
+			const int iterations = GetEnvironmentVariableA("VP_TEST_REBASE_ITERATIONS", iterationsText, sizeof(iterationsText)) > 0 ?
+				(std::max)(4, atoi(iterationsText)) : 48;
+			pl_tex_params targetParams{};
+			targetParams.w = W; targetParams.h = H; targetParams.format = pl_find_named_fmt(gpu, "rgba16");
+			targetParams.renderable = true; targetParams.blit_src = true; targetParams.storable = true;
+			pl_tex target = pl_tex_create(gpu, &targetParams);
+			Assert::IsNotNull(target);
+			for (int i = 0; i < iterations; ++i)
+			{
+				pl_frame out{};
+				const int pattern = i % 4;   // A slot 0; phase slot 0; phase slot 0 then A slot 1; A slot 1
+				pl_frame source = frameOf(pattern == 0 || pattern == 3 ? a : p);
+				if (pattern == 1 || pattern == 2)
+				{
+					Dejudder::Planes pa, pb, phase;
+					pa.luma = a[0]; pa.chroma = a[1]; pa.chromaShiftX = 1; pa.chromaShiftY = 0;
+					pb = pa; pb.luma = b[0]; pb.chroma = b[1];
+					Assert::IsTrue(interpolator.Run(pa, pb, Interpolator::Motion{}, 0.1f + 0.2f * static_cast<float>(i % 5), InterpolationPolicy::Fallback::Hold, phase),
+						ExtendedRangeGpuProbe::ToWide(interpolator.LastError()).c_str());
+					pl_tex planes[2] = { phase.luma, phase.chroma };
+					source = frameOf(planes);
+				}
+				const int slot = pattern == 3 ? 1 : 0;
+				Assert::IsTrue(rebase.Apply(gpu, dispatch, source, factor, factor, out, slot), ExtendedRangeGpuProbe::ToWide(rebase.LastError()).c_str());
+				if (pattern == 2)
+				{
+					pl_frame outA{};
+					Assert::IsTrue(rebase.Apply(gpu, dispatch, frameOf(a), factor, factor, outA, 1));
+					++results[std::make_pair(hashOf(outA.planes[0].texture), hashOf(outA.planes[1].texture))];
+				}
+				{
+					pl_frame dst{};
+					dst.num_planes = 1;
+					dst.planes[0].texture = target; dst.planes[0].components = 3;
+					dst.planes[0].component_mapping[0] = 0; dst.planes[0].component_mapping[1] = 1; dst.planes[0].component_mapping[2] = 2;
+					dst.repr = pl_color_repr_rgb;
+					dst.color = pl_color_space_bt709;
+					dst.crop = { 0.0f, 140.0f, static_cast<float>(W), 940.0f };
+					pl_render_params rp = pl_render_high_quality_params;
+					rp.upscaler = &pl_filter_ewa_lanczossharp;
+					rp.dither_params = nullptr;
+					rp.deband_params = nullptr;
+					Assert::IsTrue(pl_render_image(fixture.Renderer(), &out, &dst, &rp), L"render");
+					const unsigned long long rendered = hashOf(target);
+					const auto key = std::make_pair(hashOf(out.planes[0].texture), hashOf(out.planes[1].texture));
+					if (results.find(key) == results.end())
+						sequence += " new result at call " + std::to_string(i) + " (pattern " + std::to_string(pattern) + ")";
+					++results[key];
+					if (renders.find(rendered) == renders.end())
+						sequence += " new render at call " + std::to_string(i);
+					++renders[rendered];
+				}
+			}
+			pl_tex_destroy(gpu, &target);
+			Logger::WriteMessage(("re-base determinism: " + std::to_string(results.size()) + " distinct results, " +
+				std::to_string(renders.size()) + " distinct renders over " + std::to_string(iterations) + " calls (luma re-base shader kind " + std::to_string(rebase.LastLumaShaderKind()) + ");" + sequence + "\n").c_str());
+			for (pl_tex& t : a) pl_tex_destroy(gpu, &t);
+			for (pl_tex& t : p) pl_tex_destroy(gpu, &t);
+			for (pl_tex& t : b) pl_tex_destroy(gpu, &t);
+			rebase.Release(gpu);
+			pl_dispatch_destroy(&dispatch);
+			Assert::AreEqual(static_cast<size_t>(1), results.size(), L"every re-base of the same picture gives the same bytes");
+			Assert::AreEqual(static_cast<size_t>(1), renders.size(), L"every render of the same re-based picture gives the same bytes");
+		}
+
 		TEST_METHOD(SourceRebaseHandlesAnRgbPlane)
 		{
 			// Plan A4 (owner 2026-10-15): RGB 4:4:4 (native RGB ingest, the GPU

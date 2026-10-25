@@ -75,6 +75,7 @@ namespace SourceRebase
 		void SetKernel(int candidate) { kernel = candidate; }
 		int Kernel() const { return kernel; }
 		bool KernelUsed() const { return kernelUsed; }
+		int LastLumaShaderKind() const { return lastLumaKind; }   // DEBUG: 1 compute, 2 fragment, 0 not run
 		const std::string& LastError() const { return error; }
 		// C19: the last float fallback taken for a plane whose format is not renderable
 		// (empty: none); the renderer logs it once per change.
@@ -92,11 +93,16 @@ namespace SourceRebase
 	private:
 		static constexpr int kSlots = 3;
 		pl_tex textures[kSlots][PL_MAX_PLANES] = {};
+		pl_tex alternate[kSlots][PL_MAX_PLANES] = {};   // DEBUG (VP_DEBUG_REBASE_PINGPONG): a second output set
 		pl_tex inverseTemp[kSlots] = {};   // the first (horizontal) inverse pass
 		pl_tex separableTemp[kSlots][PL_MAX_PLANES] = {};   // the separable filter's first pass
 		pl_shader_obj lutsDown[kSlots][PL_MAX_PLANES] = {};
 		int kernel = -1;
 		bool kernelUsed = false;
+		int lastLumaKind = 0;
+	public:
+		unsigned long long debugRecreations = 0;   // DEBUG: output textures (re)created
+	private:
 		bool InversePlane(pl_gpu gpu, pl_dispatch dispatch, pl_tex in, int w, int h, bool acrossInverse, bool downInverse,
 			pl_tex out, int slot);
 		pl_shader_obj luts[kSlots][PL_MAX_PLANES] = {};
