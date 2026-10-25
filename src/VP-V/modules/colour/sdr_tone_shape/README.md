@@ -97,7 +97,10 @@ index 1, and the curve's mid adaptation constants are VP assumptions, to calibra
   formatter logs the first L8 block per title with its raw bytes; dv-frames.jsonl records L10).
 - GPU 2026-10-24: the shader matches its C++ references on the NVIDIA GPU (L2, L8 and ICtCp
   paths: DolbyVisionTrimShaderMatchesItsReference, DolbyVisionTrimShaderL8AndIctcpPathsMatchTheirReferences).
-- RESOLVED 2026-10-25 (fix/dv-dolby-style-dark): the "one stop dark" Dolby-style report
+- OPEN - FIX PENDING GPU CONFIRMATION (fix/dv-dolby-style-dark, 2026-10-25; dv_tone_mapping
+  stays default libplacebo). Close it only after the GPU re-run (`run_dv_synth.py jobs <root>
+  <file> -dolby_`, then DvSynthGpuRendersJobs) shows the wedge on the curve. Diagnosis (CPU and
+  the captures): the "one stop dark" Dolby-style report
   (200 -> 98.5, 20 -> 9.7, 5 -> ~2, 1 -> 0.21 nits at 100 nits) was a broken test, not the mode.
   The hand-edited Dolby-style jobs had a REAL new line after `tone_mapping: bt2390`, so the
   harness ran each job without dv_tone_mapping, sdr_target_nits, the P3 target and the 2.2 output:
@@ -108,7 +111,8 @@ index 1, and the curve's mid adaptation constants are VP assumptions, to calibra
   adjustment of the tone-mapped intensity, which is where they act (relative to the target
   peak), and the corpus's L2 brightens slightly (CurveThenIctcpTrimsKeepTheWedgeOnTheCurve).
   run_dv_synth.py now writes the Dolby-style jobs (`jobs <root> <file> -dolby_`) and
-  DvSynthGpuRendersJobs rejects a jobs file with non-job lines. GPU confirmation pending.
+  DvSynthGpuRendersJobs rejects a jobs file with non-job lines and fails any capture whose
+  reported tone mapping / target nits / primaries / output gamma differ from the job's.
 
 ## Where the code lives (live file list)
 
