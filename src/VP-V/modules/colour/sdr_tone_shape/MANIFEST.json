@@ -11,7 +11,8 @@
     "shaders/SDR tone shape.glsl",
     "shaders/DV trims.glsl",
     "src/VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h",
-    "src/VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h"
+    "src/VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h",
+    "src/VP-V/modules/colour/sdr_tone_shape/DvHostStage.h"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/vprenderer/DolbyVisionTrims.h",

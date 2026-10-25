@@ -22,7 +22,8 @@
     "src/VP-V/modules/input/signal/DvTunnelPolicy.h",
     "src/VP-V/modules/input/signal/HdrInferenceSignalBuilder.h",
     "src/VP-V/modules/input/signal/HdrVetoCaptureGate.h",
-    "src/VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h"
+    "src/VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h",
+    "src/VP-V/modules/input/signal/DvGpuUnpackSession.h"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/DolbyVisionTunnelGate.h",

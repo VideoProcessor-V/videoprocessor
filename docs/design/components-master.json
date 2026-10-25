@@ -69,7 +69,8 @@
         "src/VP-V/modules/input/signal/DvTunnelPolicy.h",
         "src/VP-V/modules/input/signal/HdrInferenceSignalBuilder.h",
         "src/VP-V/modules/input/signal/HdrVetoCaptureGate.h",
-        "src/VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h"
+        "src/VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h",
+        "src/VP-V/modules/input/signal/DvGpuUnpackSession.h"
       ],
       "components": {
         "files": {
@@ -667,7 +668,8 @@
         "shaders/SDR tone shape.glsl",
         "shaders/DV trims.glsl",
         "src/VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h",
-        "src/VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h"
+        "src/VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h",
+        "src/VP-V/modules/colour/sdr_tone_shape/DvHostStage.h"
       ],
       "components": {
         "files": {
