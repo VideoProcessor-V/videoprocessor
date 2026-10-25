@@ -140,5 +140,7 @@ vtable (status getters added since API 42 switch to the generic entry, plan WP-1
   `D:\codexideoprocessor\wp11-build1.log`, `wp11-build2.log`).
 - CPU tests: `ModuleStatusTextTests`, `StatusTextTests`, `VpStatusAdapterTests`, plus
   `ShortcutDefaultsTests` and `R6BaselineTests`: 35/35 passed (TRX in
-  `D:\codexideoprocessor\wp11-trx`). Filtered CPU suite: see the branch's last commit.
+  `D:\codexideoprocessor\wp11-trx`). Targeted set after the audit fixes (area + PipelineSkeleton, DelayGate, CombinationRunner,
+  NativeStatsOverlayPlacement): 75/75 (`wp11-targeted.trx`). The full filtered suite runs once per
+  integration group on integ/batch1 (coordinator policy 2026-10-25).
 - Big test (WP-20): one on-screen Ctrl+I look (coordinator).
