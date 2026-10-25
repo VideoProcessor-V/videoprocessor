@@ -3,6 +3,7 @@
 
 #include <VP-V/core/EntranceEpoch.h>
 
+#include <VP-V/modules/control/diagnostics/DiagnosticsAdapter.h>
 #include <DebugLog.h>
 #include <GeneralRateLog.h>
 
@@ -304,22 +305,11 @@ namespace EntranceSegment
 
 	void Segment::LogCounters()
 	{
-		static GeneralRate::LogInterval entranceLog = GeneralRate::LogInterval::ForFrames(2400);
-		// Also every 240 input-side runs (the harness reads the counters in short runs; the cost
-		// criterion of B3 compares runs per source frame with it on and off).
-		const bool batch = entranceStageRuns >= entranceCostLoggedAt + 120;
-		if (entranceLog.DueOr(entranceRuns == 1 || batch))
-		{
-			entranceCostLoggedAt = entranceStageRuns;
-			DebugLog::Log("Entrance cost: %llu input-side runs for %llu source frames", entranceStageRuns, entranceSourceFrames);
-			if (Once())
-				DebugLog::Log("Entrance stages: %llu runs, %llu repeats reused (once per source frame); entrance once (B3): "
-					"A %llu, B ahead %llu, ring reuses %llu, pictures from processed planes %llu, fallbacks %llu, history breaks %llu",
-					entranceRuns, entranceReuses, entranceOnceA, entranceOnceB, entranceOnceReused, entranceOncePictures,
-					entranceOnceFallbacks, entranceStatefulBreaks);
-			else
-				DebugLog::Log("Entrance stages: %llu runs, %llu repeats reused (once per source frame)", entranceRuns, entranceReuses);
-		}
+		// The "Entrance cost" / "Entrance stages" lines and their cadence live in the diagnostics adapter.
+		VpDiagnostics::EntranceCounters c = {
+			entranceStageRuns, entranceSourceFrames, entranceRuns, entranceReuses, entranceOnceA, entranceOnceB,
+			entranceOnceReused, entranceOncePictures, entranceOnceFallbacks, entranceStatefulBreaks, Once() };
+		VpDiagnostics::LogEntranceCounters(c, entranceCostLoggedAt);
 	}
 
 	void Segment::Invalidate()

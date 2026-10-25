@@ -435,6 +435,7 @@ namespace VpDiagnostics
 		unsigned long long onceReused;
 		unsigned long long oncePictures;
 		unsigned long long onceFallbacks;
+		unsigned long long statefulBreaks; // stateful history breaks (once mode)
 		bool once;                         // entrance once (B3) active
 	};
 
@@ -451,8 +452,8 @@ namespace VpDiagnostics
 		DebugLog::Log("Entrance cost: %llu input-side runs for %llu source frames", c.stageRuns, c.sourceFrames);
 		if (c.once)
 			DebugLog::Log("Entrance stages: %llu runs, %llu repeats reused (once per source frame); entrance once (B3): "
-				"A %llu, B ahead %llu, ring reuses %llu, pictures from processed planes %llu, fallbacks %llu",
-				c.runs, c.reuses, c.onceA, c.onceB, c.onceReused, c.oncePictures, c.onceFallbacks);
+				"A %llu, B ahead %llu, ring reuses %llu, pictures from processed planes %llu, fallbacks %llu, history breaks %llu",
+				c.runs, c.reuses, c.onceA, c.onceB, c.onceReused, c.oncePictures, c.onceFallbacks, c.statefulBreaks);
 		else
 			DebugLog::Log("Entrance stages: %llu runs, %llu repeats reused (once per source frame)", c.runs, c.reuses);
 	}
