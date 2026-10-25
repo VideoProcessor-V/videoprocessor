@@ -96,6 +96,10 @@ matrix, as WP-13's acceptance says.
 
 ## Rebase notes (onto integ/batch1)
 
+Order (audit 2026-10-25 M-1): this branch is based on perf/byte-identical, so it lands **after
+WP-5**. Apply WP-5's host patch first, regenerate this patch on top, fold WP-5's ER lines into
+`ExtendedRangeStage::Prepare` (a semantic merge), then re-run the GPU byte-identity tests.
+
 1. Rebase the branch; regenerate the patch against the new base (re-apply the edits above to the
    host, then `git diff > docs/design/m2-output-callsites.patch`); `git apply --check --cached`.
 2. Fold WP-4's BTB/WTW line and WP-5's ER idle/two-pass lines as described above.
