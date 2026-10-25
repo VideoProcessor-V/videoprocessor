@@ -52,12 +52,18 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
-- `src/VideoProcessor-Lib/vprenderer/SigmaDeltaDomain.h`
+- `src/VP-V/modules/output/dither/SigmaDeltaDomain.h`
+- `src/VP-V/modules/output/dither/OutputEncodingRepair.h`
+- `src/VP-V/modules/output/dither/OutputEncodingRepair.cpp`
+- `src/VP-V/modules/output/dither/CustomHookChain.h`
+- `src/VP-V/modules/output/dither/CustomHookChain.cpp`
 - `shaders/Temporal sigma-delta.glsl`
-- `src/VideoProcessor-Lib/vprenderer/OutputEncodingRepair.cpp`
-- `src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp`
+
+Forwarding headers (legacy path; removed in M2 step 0): `src/VideoProcessor-Lib/vprenderer/CustomHookChain.h`, `src/VideoProcessor-Lib/vprenderer/OutputEncodingRepair.h`, `src/VideoProcessor-Lib/vprenderer/SigmaDeltaDomain.h`.
+
+The forwarders stay for LibplaceboVideoRenderer.cpp (Bill's host) and the upstream LibplaceboLutParserTests.cpp, which this move does not edit; feat/segment-runner's OutputSegments.cpp also includes the old paths until its rebase. The sigma-delta shader stays in shaders/ (runtime layout).
 
 ## Migration directive
 

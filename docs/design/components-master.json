@@ -864,12 +864,14 @@
       "slot": "output.dither",
       "order": 260,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/SigmaDeltaDomain.h",
-        "shaders/Temporal sigma-delta.glsl",
-        "src/VideoProcessor-Lib/vprenderer/OutputEncodingRepair.cpp",
-        "src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp"
+        "src/VP-V/modules/output/dither/SigmaDeltaDomain.h",
+        "src/VP-V/modules/output/dither/OutputEncodingRepair.h",
+        "src/VP-V/modules/output/dither/OutputEncodingRepair.cpp",
+        "src/VP-V/modules/output/dither/CustomHookChain.h",
+        "src/VP-V/modules/output/dither/CustomHookChain.cpp",
+        "shaders/Temporal sigma-delta.glsl"
       ],
       "components": {
         "files": {

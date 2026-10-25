@@ -415,7 +415,7 @@ baseline and a first deploy folder.
    as their own commit, first item on the first cinema checklist. Then a
    `saturation` key in the rendering profile (libplacebo colour adjustment;
    madVR runs +5).
-New `vprenderer/CustomHookChain.h/.cpp`, owned by the renderer:
+New `VP-V/modules/output/dither/CustomHookChain.h/.cpp`, owned by the renderer:
 1. In `SetConfiguredShaderSelection`, collect rules with
    `!nls && !none && !filename.empty()` ordered by `stageOrder` then
    `profileSelectionOrder`; read file; apply `{{…}}` templates (built-ins

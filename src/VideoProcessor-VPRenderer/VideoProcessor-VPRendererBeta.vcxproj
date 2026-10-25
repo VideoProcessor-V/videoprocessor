@@ -101,7 +101,7 @@
   <ItemGroup>
     <ClCompile Include="..\VideoProcessor-Lib\led\LedMeasurementHook.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\led\LedRawTransfer.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\CustomHookChain.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\dither\CustomHookChain.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\DejudderWarp.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\FrameInterpolator.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\NvOpticalFlow.cpp" />
@@ -120,7 +120,7 @@
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\DetailPulse.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\CrossfadeMix.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\TextureRestore.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OutputEncodingRepair.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\dither\OutputEncodingRepair.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutStage.cpp" />
     <ClCompile Include="LibplaceboPluginExports.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\LibplaceboDisplayLut.cpp" />

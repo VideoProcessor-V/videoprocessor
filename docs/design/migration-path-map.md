@@ -11,8 +11,8 @@ the old path until M2 so files on active branches keep building.
 
 | Old path | New path | Commit | Note |
 |---|---|---|---|
-| `src/VideoProcessor-Lib/vprenderer/ExtendedRange.cpp` | `src/VP-V/modules/colour/extended_range/ExtendedRange.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/ExtendedRange.h` | `src/VP-V/modules/colour/extended_range/ExtendedRange.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/ExtendedRange.cpp` | `src/VP-V/modules/colour/extended_range/ExtendedRange.cpp` | 0aaaf2e5 |  |
+| `src/VideoProcessor-Lib/vprenderer/ExtendedRange.h` | `src/VP-V/modules/colour/extended_range/ExtendedRange.h` | 0aaaf2e5 | fwd |
 | `src/VideoProcessor-Lib/CrashState.cpp` | `src/VP-V/modules/control/diagnostics/CrashState.cpp` | 259cfa50 |  |
 | `src/VideoProcessor-Lib/CrashState.h` | `src/VP-V/modules/control/diagnostics/CrashState.h` | 259cfa50 |  |
 | `src/VideoProcessor-Lib/StateReport.cpp` | `src/VP-V/modules/control/diagnostics/StateReport.cpp` | 259cfa50 |  |
@@ -85,5 +85,10 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/calibration/Terminal.h` | `src/VP-V/modules/output/calibration_lut/calibration/Terminal.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/TranscriptRecorder.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/TranscriptRecorder.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/TranscriptRecorder.h` | `src/VP-V/modules/output/calibration_lut/calibration/TranscriptRecorder.h` | d2517eb1 |  |
+| `src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp` | `src/VP-V/modules/output/dither/CustomHookChain.cpp` | staged |  |
+| `src/VideoProcessor-Lib/vprenderer/CustomHookChain.h` | `src/VP-V/modules/output/dither/CustomHookChain.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/OutputEncodingRepair.cpp` | `src/VP-V/modules/output/dither/OutputEncodingRepair.cpp` | staged |  |
+| `src/VideoProcessor-Lib/vprenderer/OutputEncodingRepair.h` | `src/VP-V/modules/output/dither/OutputEncodingRepair.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/SigmaDeltaDomain.h` | `src/VP-V/modules/output/dither/SigmaDeltaDomain.h` | ? | fwd |
 | `src/VideoProcessor-Lib/KernelInverse.cpp` | `src/VP-V/modules/scaling/rebase/KernelInverse.cpp` | 648da813 |  |
 | `src/VideoProcessor-Lib/KernelInverse.h` | `src/VP-V/modules/scaling/rebase/KernelInverse.h` | 648da813 | fwd |

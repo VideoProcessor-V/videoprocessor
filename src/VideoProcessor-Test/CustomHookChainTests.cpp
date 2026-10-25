@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include <vprenderer/CustomHookChain.h>
+#include <VP-V/modules/output/dither/CustomHookChain.h>
 
 #include <map>
 #include <string>

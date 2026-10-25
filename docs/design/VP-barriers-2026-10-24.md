@@ -67,7 +67,7 @@ Efforts are in agent wall-clock hours.
   - The agreed order needs the LUT as VP's last PRE_OUTPUT hook.
 - Resolution:
   - Apply the LUT with pl_shader_custom_lut inside a VP hook, plus the BTB/WTW late restore.
-  - Check the OutputEncodingRepair interplay (VideoProcessor-Lib/vprenderer/OutputEncodingRepair.cpp:27).
+  - Check the OutputEncodingRepair interplay (VP-V/modules/output/dither/OutputEncodingRepair.cpp:27).
 - Effort: 4-6 h.
 
 **R2. Hook order is assembled in many places.**
