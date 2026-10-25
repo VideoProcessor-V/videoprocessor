@@ -120,6 +120,7 @@ namespace CalibrationLutHost
 		// ---- LUT file reload policy (VP's auto reload vs Bill's explicit Apply; ReloadPolicy) ----
 
 		ReloadPolicy& Reload() { return reload; }
+		const ReloadPolicy& Reload() const { return reload; }
 		// LoadDisplayLut: the file version the load read (the same handle it parsed).
 		void NoteLutFileVersion(const LibplaceboDisplayLut::FileVersion& version, uint64_t nowMs);
 		// MaybeReloadDisplayLut, render thread, every frame: true = reload the selected LUT now

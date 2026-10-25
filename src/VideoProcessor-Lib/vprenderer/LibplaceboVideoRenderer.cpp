@@ -7723,7 +7723,8 @@ struct LibplaceboVideoRenderer::Impl
 	// reject without touching the LUT code (audit H2).
 	uint64_t DisplayLutSignature() const
 	{
-		return RepeatRenderReuse::Signature().Add(displayLutObservedBytes).Add(displayLutObservedWriteTime)
+		return RepeatRenderReuse::Signature().Add(calibrationHost.Reload().ObservedBytes())
+			.Add(calibrationHost.Reload().ObservedWriteTime())
 			.Add(displayLutParsed).Add(displayLut != nullptr).Value();
 	}
 	std::unique_ptr<DejudderRendered::Warp> dejudderRenderedWarp;
