@@ -4,7 +4,7 @@
 """Synthetic DV tunnel validation: writes the GPU render jobs and runs the analysis.
 
   python -I run_dv_synth.py jobs    <corpus-root> <jobs.txt> [id-substring]
-  python -I run_dv_synth.py analyze <corpus-root> <jobs.txt> <render-out> <report.json>
+  python -I run_dv_synth.py analyze <corpus-root> <jobs.txt> <render-out> <report.json> [id-substring]
 
 The jobs (DvSynthGpuRendersJobs renders them through VP's whole renderer):
   acc_*     decode accuracy: each accuracy segment with tone mapping out of the way
@@ -242,9 +242,11 @@ def trims_of(truth):
     return t["l2"] if t else []
 
 
-def analyze(root, jobs_path, out, report_path):
+def analyze(root, jobs_path, out, report_path, only=None):
     report = {"accuracy": {}, "extremes": {}, "policy": {}, "lldv": {}, "missing": []}
-    jl = jobs(root)
+    # only: the same id filter the jobs file was written with (audit D-1, 2026-10-25): a filtered
+    # run must not list every other job as a missing capture.
+    jl = [j for j in jobs(root) if not only or only in j[0]]
     for jid, folder, keys, settings in jl:
         meta, codes = load_capture(out, jid)
         if meta is None:
@@ -335,7 +337,7 @@ if __name__ == "__main__":
     if len(sys.argv) >= 4 and sys.argv[1] == "jobs":
         write_jobs(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) >= 5 else None)
     elif len(sys.argv) >= 6 and sys.argv[1] == "analyze":
-        analyze(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
+        analyze(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6] if len(sys.argv) >= 7 else None)
     else:
         print(__doc__)
         sys.exit(2)
