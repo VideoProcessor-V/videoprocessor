@@ -316,27 +316,27 @@ namespace VpvTests
 		TEST_METHOD(TemporalShaderTextIsRecognised)
 		{
 			auto t = [](const char* text) { return ShaderTextIsTemporal(text, std::strlen(text)); };
-			Assert::IsTrue(t("//!HOOK MAIN
-vec4 hook() { return HOOKED_tex(HOOKED_pos) + vec4(random); }"));
-			Assert::IsTrue(t("//!HOOK MAIN
-vec4 hook() { float f = float(frame % 2); return vec4(f); }"));
-			Assert::IsTrue(t("//!BUFFER state
+			Assert::IsTrue(t(R"(//!HOOK MAIN
+vec4 hook() { return HOOKED_tex(HOOKED_pos) + vec4(random); })"));
+			Assert::IsTrue(t(R"(//!HOOK MAIN
+vec4 hook() { float f = float(frame % 2); return vec4(f); })"));
+			Assert::IsTrue(t(R"(//!BUFFER state
 //!VAR float x
 //!HOOK MAIN
-vec4 hook() { return vec4(0); }"));
-			Assert::IsFalse(t("//!HOOK MAIN
+vec4 hook() { return vec4(0); })"));
+			Assert::IsFalse(t(R"(//!HOOK MAIN
 // frame and random only in a comment
-vec4 hook() { return HOOKED_tex(HOOKED_pos); }"));
-			Assert::IsFalse(t("//!HOOK MAIN
-vec4 hook() { float framed = 1.0; return vec4(framed); }"));   // not the identifier
-			Assert::IsFalse(t("/* random */ //!HOOK MAIN
-vec4 hook() { return vec4(1); }"));
+vec4 hook() { return HOOKED_tex(HOOKED_pos); })"));
+			Assert::IsFalse(t(R"(//!HOOK MAIN
+vec4 hook() { float framed = 1.0; return vec4(framed); })"));   // not the identifier
+			Assert::IsFalse(t(R"(/* random */ //!HOOK MAIN
+vec4 hook() { return vec4(1); })"));
 		}
 
 		TEST_METHOD(TemporalRegistryMakesTheHookOpaqueAndMovesTheSetGeneration)
 		{
-			static const char text[] = "//!HOOK MAIN
-vec4 hook() { return vec4(random); }";
+			static const char text[] = R"(//!HOOK MAIN
+vec4 hook() { return vec4(random); })";
 			pl_hook mpvLike{};
 			mpvLike.stages = PL_HOOK_MAIN;
 			int fakeFn = 0;
