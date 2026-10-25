@@ -721,8 +721,7 @@ if (p.x < sz.x && p.y < sz.y) {
 			!Ensure(gpu, m.grain, tw, th, f4) || !Ensure(gpu, m.ref[0], tw, th, f4) || !Ensure(gpu, m.ref[1], tw, th, f4) ||
 			!Ensure(gpu, m.gains, tw, th, f4) || !Ensure(gpu, m.state[0], 1, 1, f4) || !Ensure(gpu, m.state[1], 1, 1, f4))
 			return fail("no float texture for the tile statistics");
-		if (repeat && !m.have)
-			return fail("no gains for the repeated frame");
+		// (A repeat implies m.have: `repeat` needs sameSize, which needs m.have, and `fail` returns.)
 
 		// One code of the signal in the plane texture's normalised units (as VpDebander).
 		const int sampleDepth = source.repr.bits.sample_depth > 0 ? source.repr.bits.sample_depth : luma->params.format->component_depth[0];
