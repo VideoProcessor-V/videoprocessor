@@ -209,7 +209,10 @@ namespace EntranceSegment
 	void Segment::RunStages(StageRun& run, pl_frame& frame)
 	{
 		if (!slots().ActiveEntrance().empty())
+		{
 			++entranceStageRuns;
+			host.OnStagesRun();   // entrance_gpu_drain (group E): the drain sees every entrance run
+		}
 		if (run.path == Path::Main && !StatelessNow())
 		{
 			const unsigned long long before = entranceStatefulBreaks;
@@ -231,6 +234,7 @@ namespace EntranceSegment
 		}
 		for (Id id : slots().ActiveEntrance())
 		{
+			const int span = host.BeginStageSpan(PipelineSlots::Get(id).name);   // efficiency timers T2 (WP-5)
 			switch (StageFor(id))
 			{
 			case Stage::Rebase: Rebase(run, frame); break;
@@ -250,6 +254,7 @@ namespace EntranceSegment
 			}
 			default: break;
 			}
+			host.EndStageSpan(span);
 			if (!run.ready)
 				return;
 		}

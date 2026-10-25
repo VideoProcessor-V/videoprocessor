@@ -98,6 +98,12 @@ namespace EntranceSegment
 		// The next source frame's planes when the de-judder uploaded them (the detail look-ahead).
 		struct NextUpload { uint64_t sequence = 0; pl_tex luma = nullptr, chroma = nullptr; bool rgbLuma = false; };
 		virtual NextUpload Next() const = 0;
+		// Group D integration with groups A and E (no-ops by default): every call that runs at least one
+		// active entrance stage (entrance_gpu_drain's NoteEntranceRun), and a per-stage GPU span
+		// (WP-5 timers T2; -1 = not timed).
+		virtual void OnStagesRun() {}
+		virtual int BeginStageSpan(const char* name) { (void)name; return -1; }
+		virtual void EndStageSpan(int span) { (void)span; }
 	};
 
 	// The host-owned modules and per-frame parameters the stages read (commit 1: not moved).
