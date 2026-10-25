@@ -20,7 +20,7 @@ Efforts are in agent wall-clock hours.
   - Build a VP **NetRunner** that executes the exporter's mpv-format passes standalone through pl_dispatch: a small shim for the DESC/HOOK/BIND/SAVE/WIDTH/HEIGHT/COMPONENTS/COMPUTE directives and the HOOKED_*/name_tex macros.
   - Its inputs are a pl_dispatch and textures, so the same runner serves the front end (A, the 4K refine) and C hooks (D inside AdaptiveDownscale's POST_KERNEL, VideoProcessor-Lib/vprenderer/AdaptiveDownscale.cpp:420-425; pl_hook_params carries a dispatch).
   - For RGB: run A on the existing r16 luma, then add the luma delta to R, G and B.
-  - Alternative: change the exporter to emit pl_shader_custom units (the SourceRebase pattern, VideoProcessor-Lib/vprenderer/SourceRebase.cpp:80-130).
+  - Alternative: change the exporter to emit pl_shader_custom units (the SourceRebase pattern, VP-V/modules/scaling/rebase/SourceRebase.cpp:80-130).
 - Effort: 8-12 h for the runner and tests; RGB recombine 3-4 h.
 
 **B2. 200 ms is unreachable at 24p even after the 5-frame minimum is removed.**

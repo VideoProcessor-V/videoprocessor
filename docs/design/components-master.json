@@ -225,12 +225,12 @@
       "slot": "scaling.rebase",
       "order": 60,
       "status": "built",
-      "code_location": "partly migrated",
+      "code_location": "migrated",
       "live_files": [
         "src/VP-V/modules/scaling/rebase/KernelInverse.cpp",
         "src/VP-V/modules/scaling/rebase/KernelInverse.h",
-        "src/VideoProcessor-Lib/vprenderer/SourceRebase.cpp",
-        "src/VideoProcessor-Lib/vprenderer/SourceRebase.h",
+        "src/VP-V/modules/scaling/rebase/SourceRebase.cpp",
+        "src/VP-V/modules/scaling/rebase/SourceRebase.h",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
       ],
       "components": {

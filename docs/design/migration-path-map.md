@@ -89,9 +89,11 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/calibration/TranscriptRecorder.h` | `src/VP-V/modules/output/calibration_lut/calibration/TranscriptRecorder.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/vprenderer/VpDebander.cpp` | `src/VP-V/modules/repair/deband/VpDebander.cpp` | 83f0ce05 |  |
 | `src/VideoProcessor-Lib/vprenderer/VpDebander.h` | `src/VP-V/modules/repair/deband/VpDebander.h` | 83f0ce05 | fwd |
-| `src/VideoProcessor-Lib/vprenderer/DetailPulse.cpp` | `src/VP-V/modules/repair/texture_restore/DetailPulse.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/DetailPulse.h` | `src/VP-V/modules/repair/texture_restore/DetailPulse.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/TextureRestore.cpp` | `src/VP-V/modules/repair/texture_restore/TextureRestore.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/TextureRestore.h` | `src/VP-V/modules/repair/texture_restore/TextureRestore.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/DetailPulse.cpp` | `src/VP-V/modules/repair/texture_restore/DetailPulse.cpp` | 2395faec |  |
+| `src/VideoProcessor-Lib/vprenderer/DetailPulse.h` | `src/VP-V/modules/repair/texture_restore/DetailPulse.h` | 2395faec | fwd |
+| `src/VideoProcessor-Lib/vprenderer/TextureRestore.cpp` | `src/VP-V/modules/repair/texture_restore/TextureRestore.cpp` | 2395faec |  |
+| `src/VideoProcessor-Lib/vprenderer/TextureRestore.h` | `src/VP-V/modules/repair/texture_restore/TextureRestore.h` | 2395faec | fwd |
 | `src/VideoProcessor-Lib/KernelInverse.cpp` | `src/VP-V/modules/scaling/rebase/KernelInverse.cpp` | 648da813 |  |
 | `src/VideoProcessor-Lib/KernelInverse.h` | `src/VP-V/modules/scaling/rebase/KernelInverse.h` | 648da813 | fwd |
+| `src/VideoProcessor-Lib/vprenderer/SourceRebase.cpp` | `src/VP-V/modules/scaling/rebase/SourceRebase.cpp` | staged |  |
+| `src/VideoProcessor-Lib/vprenderer/SourceRebase.h` | `src/VP-V/modules/scaling/rebase/SourceRebase.h` | ? | fwd |

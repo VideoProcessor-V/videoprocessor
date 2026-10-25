@@ -137,7 +137,7 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 
 - `src/VP-V/modules/scaling/rebase/KernelInverse.cpp`
 - `src/VP-V/modules/scaling/rebase/KernelInverse.h`
-- `src/VideoProcessor-Lib/vprenderer/SourceRebase.cpp`
+- `src/VP-V/modules/scaling/rebase/SourceRebase.cpp`
 - `src/VideoProcessor-Lib/vprenderer/SourceRebase.h`
 - `src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp`
 
