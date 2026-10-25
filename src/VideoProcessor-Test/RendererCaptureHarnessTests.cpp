@@ -4512,9 +4512,12 @@ namespace Tests
 			const std::string profile = RealClip::Env("VP_TEST_NEAR_BLACK_PROFILE");
 			const std::string defaults = RealClip::Env("VP_TEST_NEAR_BLACK_DEFAULT");
 			auto unescape = [](std::string t) { size_t k; while ((k = t.find("\\n")) != std::string::npos) t.replace(k, 2, "\n"); return t; };
-			const std::string stages = "source_resolution: 720\ndeband_vp: off\ndetail_pulse_stabilise: off\n" + unescape(profile) +
+			const std::string sourceResolution = RealClip::Env("VP_TEST_NEAR_BLACK_SRCRES");   // default 720 (the re-base)
+			const std::string stages = "source_resolution: " + (sourceResolution.empty() ? std::string("720") : sourceResolution) +
+				"\ndeband_vp: off\ndetail_pulse_stabilise: off\n" + unescape(profile) +
 				"[vprenderer.Default]\ndithering: off\ndeband: off\ntemporal_dither: off\n" + unescape(defaults) +
 				"[vpv]\npipeline_entrance_once: " + (RealClip::Env("VP_TEST_NEAR_BLACK_B3") == "on" ? "on" : "off") + "\n";
+			std::string configErrors;
 			auto capturesOf = [&](const std::string& extra) {
 				FramePlan plan;
 				plan.rateNumerator = 24000;
@@ -4522,15 +4525,34 @@ namespace Tests
 				plan.step = [](int) { FrameStep f; f.content = 0; return f; };
 				plan.captureTimes = { 3.6, 4.2, 4.8, 5.4 };   // after the start-up settling (~3 s)
 				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.5, false, extra, false, &plan);
-				for (const std::string& line : r.log)   // WIP debug evidence (VP_DEBUG_PHASE_AB)
-					if (line.find("DEBUG phase A/B") != std::string::npos)
+				for (const std::string& line : r.log)
+				{
+					// A rejected configuration silently runs the defaults: the probe's result would be
+					// meaningless (2026-10-24: an invalid key dropped the whole profile).
+					if (line.find("configuration ignored") != std::string::npos ||
+						(line.find("profile '") != std::string::npos && line.find("': invalid ") != std::string::npos))
+						configErrors += line;
+					if (line.find("DEBUG phase A/B") != std::string::npos || line.find("DEBUG draw trace") != std::string::npos)
 						Logger::WriteMessage(("   " + line).c_str());
+				}
 				return r.captureMetadataList; };
+			// VP_TEST_NEAR_BLACK_SECOND overrides the second run's interpolation line (e.g. "off": plain
+			// against plain, the run-to-run baseline).
+			const std::string second = RealClip::Env("VP_TEST_NEAR_BLACK_SECOND");
 			const std::vector<std::string> plain = capturesOf("interpolation: off\n" + stages);
-			const std::vector<std::string> timeline = capturesOf("interpolation: auto\n" + stages);
+			const std::vector<std::string> timeline = capturesOf("interpolation: " + (second.empty() ? std::string("auto") : second) + "\n" + stages);
+			Assert::IsTrue(configErrors.empty(), (L"the probe's configuration was rejected: " + std::wstring(configErrors.begin(), configErrors.end())).c_str());
 			// Re-audit MED 2: a regression threshold - the timeline's pictures of a still frame differ
 			// from the plain draw in at most 64 pixels (the known residual is ~15 at codes 0-3; it was
 			// ~2500 before the interpolator's still rule).
+			// The capture sidecar's draw description (picture type, phase, crop/target rectangles).
+			auto drawDebugOf = [](const std::string& path) {
+				std::ifstream in(path);
+				const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+				const size_t at = text.find("\"draw_debug\": \"");
+				if (at == std::string::npos) return std::string("(no draw_debug)");
+				const size_t from = at + 15, to = text.find('"', from);
+				return text.substr(from, to == std::string::npos ? std::string::npos : to - from); };
 			int pw = 0, ph = 0;
 			const std::vector<int> reference = plain.empty() ? std::vector<int>() : LoadCaptureCodesExact(plain.back(), pw, ph);
 			size_t worst = 0;
@@ -4547,7 +4569,10 @@ namespace Tests
 					differing = static_cast<size_t>(-1);
 				worst = (std::max)(worst, differing);
 				counts += std::to_string(differing) + " ";
+				Logger::WriteMessage(("   capture " + std::to_string(differing) + " px: " + drawDebugOf(json) + "\n").c_str());
 			}
+			for (const std::string& json : plain)
+				Logger::WriteMessage(("   plain: " + drawDebugOf(json) + "\n").c_str());
 			Logger::WriteMessage(("== near-black probe [" + profile + " | " + defaults + "]: timeline pictures differing from the plain draw (pixels): " +
 				counts + "\n").c_str());
 			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
