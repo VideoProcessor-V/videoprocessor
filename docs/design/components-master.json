@@ -734,7 +734,9 @@
         "src/VP-V/modules/drive/led_measure/LedMeasurement.h",
         "src/VP-V/modules/drive/led_measure/LedLookahead.h",
         "src/VP-V/modules/drive/led_measure/ReadbackRing.h",
-        "src/VideoProcessor-Lib/led/LedMeasurementHook.cpp"
+        "src/VP-V/modules/drive/led_measure/LedMeasurementHook.cpp",
+        "src/VP-V/modules/drive/led_measure/LedMeasurementHook.h",
+        "src/VP-V/modules/drive/led_measure/FrameStats.h"
       ],
       "components": {
         "files": {
@@ -749,14 +751,26 @@
         },
         "tools": [],
         "config_keys": [
-          "led_compensation",
-          "led_protect"
+          "apl_persist_ms",
+          "apl_weights",
+          "cut_threshold",
+          "fade_min_slope",
+          "fade_ms",
+          "highlight_percentile",
+          "highlight_persist_ms",
+          "led_highlight_grain_suppress",
+          "led_lookahead_ms",
+          "led_peak_full_coverage",
+          "led_picture_only",
+          "lookahead",
+          "script_highlight_code",
+          "script_lookahead"
         ],
         "upstream_modules": [
           "colour.appearance"
         ]
       },
-      "fallback_when_missing": "Holdover keeps the last drive."
+      "fallback_when_missing": "Compensate holds the LED at full drive while its measurement is off (slot off or the pass disabled by libplacebo): 'LED drive (held at full: measurement off (...))' (owner 2026-10-25). Readbacks late or frames not measured: the controllers keep the last statistics, shown as 'LED measurement (...)'."
     },
     {
       "slot": "drive.led_compensation",
@@ -765,12 +779,19 @@
       "code_location": "partly migrated",
       "live_files": [
         "src/VP-V/modules/drive/led_compensation/LedDriveModule.cpp",
-        "src/VP-V/modules/drive/led_compensation/LedDriveArbiter.cpp",
         "src/VP-V/modules/drive/led_compensation/LedDriveModule.h",
-        "src/VP-V/modules/drive/led_compensation/LedDriveArbiter.h",
         "src/VP-V/modules/drive/led_compensation/LedDriveHoldover.cpp",
         "src/VP-V/modules/drive/led_compensation/LedDriveHoldover.h",
-        "shaders/LED compensation.glsl"
+        "shaders/LED compensation.glsl",
+        "src/VP-V/modules/drive/led_compensation/LedController.cpp",
+        "src/VP-V/modules/drive/led_compensation/LedController.h",
+        "src/VP-V/modules/drive/led_compensation/LedRawTransfer.cpp",
+        "src/VP-V/modules/drive/led_compensation/LedRawTransfer.h",
+        "src/VP-V/modules/drive/led_compensation/LedDriveConfig.h",
+        "src/VP-V/modules/drive/led_compensation/DynamicDriveHost.cpp",
+        "src/VP-V/modules/drive/led_compensation/DynamicDriveHost.h",
+        "src/VP-V/modules/drive/led_compensation/DynamicDriveFrame.cpp",
+        "src/VP-V/modules/drive/led_compensation/DynamicDriveFrame.h"
       ],
       "components": {
         "files": {
@@ -787,13 +808,17 @@
         },
         "tools": [],
         "config_keys": [
-          "led_compensation"
+          "adaptive_gamma",
+          "gamma_boost",
+          "intent_black",
+          "led_drive",
+          "shadow_lift_ansi"
         ],
         "upstream_modules": [
           "drive.led_measure"
         ]
       },
-      "fallback_when_missing": "Failure -> drive held at full, no compensation."
+      "fallback_when_missing": "Compensation unavailable (shader not loaded, disabled by libplacebo, or slot off) -> compensate holds the LED at full drive (led_ceiling); script mode is not held. A configured gamma boost that cannot apply shows 'gamma boost (not applied: ...)'."
     },
     {
       "slot": "drive.black_level",
@@ -935,18 +960,18 @@
       "status": "built",
       "code_location": "partly migrated",
       "live_files": [
-        "src/VP-V/modules/drive/projector_control/LedController.cpp",
         "src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.cpp",
         "src/VP-V/modules/drive/projector_control/ProjectorDriver.cpp",
         "src/VP-V/modules/drive/projector_control/SerialPort.cpp",
-        "src/VP-V/modules/drive/projector_control/LedController.h",
         "src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.h",
         "src/VP-V/modules/drive/projector_control/ProjectorDriver.h",
         "src/VP-V/modules/drive/projector_control/SerialPort.h",
         "src/VP-V/modules/drive/projector_control/ConnectionTest.cpp",
         "src/VP-V/modules/drive/projector_control/ConnectionTest.h",
         "src/VP-V/modules/drive/projector_control/LedClock.h",
-        "src/VP-V/modules/drive/projector_control/LedShutdownRestore.h"
+        "src/VP-V/modules/drive/projector_control/LedShutdownRestore.h",
+        "src/VP-V/modules/drive/projector_control/LedDriveArbiter.cpp",
+        "src/VP-V/modules/drive/projector_control/LedDriveArbiter.h"
       ],
       "components": {
         "files": {
@@ -961,11 +986,11 @@
         },
         "tools": [],
         "config_keys": [
-          "led_compensation"
+          "projector"
         ],
         "upstream_modules": []
       },
-      "fallback_when_missing": "No serial projector -> drive off."
+      "fallback_when_missing": "No serial projector (or another process owns the port) -> dry run: the LED is not driven and the picture is not compensated."
     },
     {
       "slot": "control.net_runtime",

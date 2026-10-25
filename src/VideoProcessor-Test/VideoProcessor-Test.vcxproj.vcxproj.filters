@@ -58,6 +58,9 @@
     <ClCompile Include="LedDriveHoldoverTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="DynamicDriveAdapterTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="DolbyVisionTunnelFormatterTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

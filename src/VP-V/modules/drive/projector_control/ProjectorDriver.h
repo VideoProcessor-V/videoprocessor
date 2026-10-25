@@ -1,7 +1,7 @@
 #pragma once
 
 #include "LedClock.h"
-#include <led/LedDriveConfig.h>
+#include <VP-V/modules/drive/led_compensation/LedDriveConfig.h>
 #include "SerialPort.h"
 
 #include <chrono>

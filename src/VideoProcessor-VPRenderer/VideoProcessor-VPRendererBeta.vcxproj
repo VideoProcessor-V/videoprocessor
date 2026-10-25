@@ -99,8 +99,9 @@
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="..\VideoProcessor-Lib\led\LedMeasurementHook.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\led\LedRawTransfer.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\led_measure\LedMeasurementHook.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\led_compensation\DynamicDriveFrame.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\led_compensation\LedRawTransfer.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\CustomHookChain.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\DejudderWarp.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\FrameInterpolator.cpp" />

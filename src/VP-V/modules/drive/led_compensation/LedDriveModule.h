@@ -3,8 +3,8 @@
 #include <atomic>
 
 #include <VP-V/modules/drive/projector_control/LedClock.h>
-#include <VP-V/modules/drive/projector_control/LedController.h>
-#include <led/LedDriveConfig.h>
+#include <VP-V/modules/drive/led_compensation/LedController.h>
+#include <VP-V/modules/drive/led_compensation/LedDriveConfig.h>
 #include <VP-V/modules/drive/led_measure/LedLookahead.h>
 #include <VP-V/modules/drive/led_measure/LedMeasurement.h>
 #include <VP-V/modules/drive/projector_control/ProjectorDriver.h>
@@ -45,7 +45,7 @@ namespace LedDrive
 		double veil = 0.0;
 	};
 
-	class LedDriveModule
+	class LedDriveModule : public IPredictionSink
 	{
 	public:
 		LedDriveModule(const ProjectorConfig& projector, const LedDriveConfig& led,
@@ -87,16 +87,16 @@ namespace LedDrive
 		// to its queued-frame walk and hands over the raw-to-output transfer
 		// whenever its colour mapping changes.
 		QueuedFrameStatistics::IObserver& Lookahead() { return lookahead; }
-		bool WantsPredictions() const;
+		bool WantsPredictions() const override;
 		void SetRawTransfer(std::shared_ptr<const RawTransfer> transfer);
-		std::shared_ptr<const RawTransfer> CurrentRawTransfer() const;
-		void SetLookaheadDepth(size_t futureFrames);
+		std::shared_ptr<const RawTransfer> CurrentRawTransfer() const override;
+		void SetLookaheadDepth(size_t futureFrames) override;
 		// Render thread: the captured signal's range as the picture uses it
 		// (source_range: 1 full, 0 limited, -1 from the format), for the
 		// look-ahead's reading of the captured frame.
 		void SetSourceRange(int range) { sourceRange.store(range, std::memory_order_relaxed); }
-		int SourceRange() const { return sourceRange.load(std::memory_order_relaxed); }
-		void SubmitPrediction(uint64_t sequence, const FrameStats& predicted);
+		int SourceRange() const override { return sourceRange.load(std::memory_order_relaxed); }
+		void SubmitPrediction(uint64_t sequence, const FrameStats& predicted) override;
 		// Hunt 3 (LED2): a new stream starts on this module (a hold-over drive
 		// adopted by the next file, whose source sequence restarts): the
 		// predictions by sequence are dropped and the look-ahead observer
@@ -105,7 +105,7 @@ namespace LedDrive
 		// adopting renderer; BeginFrame also calls it when the source sequence
 		// goes backwards. Any thread.
 		void ResetLookahead();
-		uint64_t LookaheadEpoch() const { return lookaheadEpoch.load(std::memory_order_acquire); }
+		uint64_t LookaheadEpoch() const override { return lookaheadEpoch.load(std::memory_order_acquire); }
 		// Tests: the stored prediction for a source sequence (uncorrected).
 		bool PredictionFor(uint64_t sequence, FrameStats& out) const;
 		// Hunt 3: the most predictions kept (sequence 0 never prunes them).
@@ -128,22 +128,22 @@ namespace LedDrive
 		// driving the projector (enabled, log_only).
 		bool Reconfigure(const ProjectorConfig& projector, const LedDriveConfig& led);
 		// Increases with every Reconfigure().
-		uint64_t ConfigGeneration() const;
+		uint64_t ConfigGeneration() const override;
 		// The settings in force. led_peak_full_coverage is reported on only in the modes that read
 		// the full-coverage peak (FrameStats::maximum: the script controllers, PeakConsumed), so
 		// callers configuring the measurement (the renderer's GPU hook, the look-ahead observer)
 		// skip a peak nobody uses (module findings 2026-10-24, part 3 item 3: 2-3 ms CPU per new 4K
 		// frame plus a GPU pass in compensate). ConfiguredSettings() returns them unmodified.
-		LedDriveConfig Config() const;
+		LedDriveConfig Config() const override;
 		LedDriveConfig ConfiguredSettings() const;
 		static bool PeakConsumed(Mode mode) { return mode == Mode::Script || mode == Mode::LogOnly; }
 		// The gamma VP's output is encoded for (the renderer sets it from the
 		// frame's output transfer): the gamma boost's base (delta 4).
 		void SetDisplayGamma(double gamma) { displayGamma.store(gamma, std::memory_order_release); }
-		double DisplayGamma() const { return displayGamma.load(std::memory_order_acquire); }
+		double DisplayGamma() const override { return displayGamma.load(std::memory_order_acquire); }
 		// Real-time length of one source frame (the output frame period when the
 		// source rate is unknown).
-		double SourceFramePeriodMs() const;
+		double SourceFramePeriodMs() const override;
 		// The LED level the gain is following: the last level the driver
 		// actually wrote to the port that has had led_latency_ms (whole frames)
 		// to land, then settling with led_settle_ms (7c-1; 0 = dead time only),
@@ -227,6 +227,13 @@ namespace LedDrive
 		bool CompensationAvailable() const;
 		// True while compensate is holding the LED at full drive for that reason.
 		bool HoldingFullForCompensation() const;
+		// Owner decision 2026-10-25: compensate also holds full drive while its measurement is
+		// unavailable (slot drive.led_measure off, or the pass disabled by libplacebo): without
+		// exact statistics the LED would act on stale ones. Same hold, same jump, same "LED drive"
+		// entry, reason "held at full: measurement off (<reason>)". Script mode is not held. Any
+		// thread; available by default.
+		void SetMeasurementAvailable(bool available, const std::string& reason = std::string());
+		bool MeasurementAvailable() const;
 		// The reason for SetCompensationAvailable(false, ...) from the renderer's facts; empty
 		// when the compensation can run.
 		static std::string CompensationUnavailableReason(bool slotOn, bool shaderLoaded, bool shaderEnabled);
@@ -432,8 +439,11 @@ namespace LedDrive
 		// SetCompensationAvailable: the hold at full drive and the module's fallback entries.
 		bool compensationAvailable = true;
 		std::string compensationUnavailableReason;
+		bool measurementAvailable = true;
+		std::string measurementUnavailableReason;
 		bool holdingFull = false;
 		FallbackStatus::Registry fallbacks;
 		void UpdateHoldFallbackLocked();
+		void StartHoldJumpLocked(bool wasHolding);
 	};
 }

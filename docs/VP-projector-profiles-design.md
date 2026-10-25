@@ -228,6 +228,6 @@ Delete `BarcoAsciiDriver` one release after the golden tests pass.
 ### Critical files for implementation
 - src\VP-V\modules\drive\projector_control\BarcoAsciiDriver.cpp
 - src\VP-V\modules\drive\projector_control\ProjectorDriver.h
-- src\VideoProcessor-Lib\led\LedDriveConfig.h
+- src\VP-V\modules\drive\led_compensation\LedDriveConfig.h
 - src\VP-V\modules\drive\projector_control\SerialPort.h
 - src\VideoProcessor-Test\LedDriveTestSupport.h
