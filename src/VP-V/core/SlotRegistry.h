@@ -25,7 +25,7 @@ namespace PipelineSlots
 		{
 		case Id::ScalingRebase: case Id::RepairDeband: case Id::RepairTextureRestore:
 		case Id::ColourSdrToneShape: case Id::DriveLedMeasure: case Id::DriveLedCompensation:
-		case Id::OutputCalibrationLut: case Id::DriveProjectorControl:
+		case Id::OutputCalibrationLut: case Id::OutputDither: case Id::DriveProjectorControl:
 			return true;
 		default:
 			return false;

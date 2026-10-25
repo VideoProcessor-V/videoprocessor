@@ -644,6 +644,7 @@ namespace PipelineSkeletonTestsNs
 			// Audit item 4: a switch for a slot the renderer never consults would be silently ignored.
 			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::RepairDeband));
 			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::DriveProjectorControl));
+			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::OutputDither));   // S3 PrepareDither honours it (segments)
 			Assert::IsFalse(PipelineSlots::SwitchHonoured(Id::ScalingGeometry));
 			Assert::IsFalse(PipelineSlots::SwitchHonoured(Id::ColourToneGamut));
 		}

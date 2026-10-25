@@ -109,6 +109,10 @@
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\MotionAheadProducer.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OutputEncodingRepair.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutStage.cpp" />
+    <ClCompile Include="..\VP-V\segments\OutputSegments.cpp" />
+    <ClCompile Include="..\VP-V\core\SegmentRunner.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\HookSegment.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OcclusionMaskHook.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\ExtendedRange.cpp" />

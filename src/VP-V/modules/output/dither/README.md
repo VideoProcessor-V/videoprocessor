@@ -83,7 +83,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 ## Tests
 
 - Placeholder (byte-identity on/off, zero cost): n/a.
-- Isolation (fixed inputs, expected outputs, cost): SigmaDeltaDomain tests.
+- Isolation (fixed inputs, expected outputs, cost): SigmaDeltaDomain tests; SegmentRunnerTests.DitherSlotOffRemovesTheSigmaDelta (switch honoured: output.dither off submits no sigma-delta); SegmentRunnerTests.DitherFallbackOnlyForDomainOrShaderNotForSlotOff.
 - Contract (formats, geometry, fallback entry): the quantiser is the last OUTPUT hook.
 - Chain (total delay at the 4/3/2-frame budgets): MISSING.
 - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
