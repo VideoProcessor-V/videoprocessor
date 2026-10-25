@@ -654,6 +654,7 @@ void testEveryNewRendererControlReachesVp()
         { "dejudder_motion_scale_lo", "0.5", false }, { "dejudder_motion_scale_hi", "2", false },
         { "dejudder_trust_scale", "0.5", false }, { "dejudder_est_lambda", "1", false },
         { "dejudder_est_candidates", "off", true }, { "dejudder_est_qpel", "off", true },
+        { "dejudder_est_still_zero", "off", true },
         { "dejudder_est_split_sad", "6", false }, { "dejudder_est_split", "on", true },
         { "dejudder_search_range", "6", false }, { "dejudder_global_two", "off", true },
         { "dejudder_texture_tolerance", "0.5", false }, { "dejudder_consistency_px", "3", false },
@@ -764,7 +765,7 @@ void testConfigKeysActivateTheRendererAndMatcherSettings()
         "dejudder_object_strength: 0.5\ndejudder_fade_floor: 0.2\ndejudder_fade_match: off\n"
         "dejudder_match_tolerance: 5\ndejudder_frame_trust: 0.3\ndejudder_est_gate: off\ndejudder_global_prior: off\n"
         "dejudder_vector_smooth: off\ndejudder_motion_scale_lo: 0.5\ndejudder_motion_scale_hi: 2\n"
-        "dejudder_trust_scale: 0.5\ndejudder_est_lambda: 1\ndejudder_est_candidates: off\ndejudder_est_qpel: off\n"
+        "dejudder_trust_scale: 0.5\ndejudder_est_lambda: 1\ndejudder_est_candidates: off\ndejudder_est_qpel: off\ndejudder_est_still_zero: off\n"
         "dejudder_est_split_sad: 6\ndejudder_est_split: on\ndejudder_search_range: 6\ndejudder_global_two: off\n"
         "dejudder_texture_tolerance: 0.5\ndejudder_consistency_px: 3\ndejudder_cut_histogram: 0.4\n"
         "dejudder_regional_hold: off\ndejudder_pixel_trust_lo: 2\ndejudder_pixel_trust_hi: 7\ndejudder_pixel_trust: off\ndejudder_landing_check: off\ndejudder_pulldown: on\n"
@@ -784,7 +785,7 @@ void testConfigKeysActivateTheRendererAndMatcherSettings()
         { "matcher.matchTolerance", "5" }, { "matcher.minTrustedShare", "0.3" }, { "matcher.globalPrior", "0" },
         { "matcher.vectorSmooth", "0" }, { "matcher.motionScaleLo", "0.5" }, { "matcher.motionScaleHi", "2" },
         { "matcher.trustScaleFull", "0.5" }, { "matcher.occlusionFill", "1" }, { "matcher.estCandidates", "0" },
-        { "matcher.estLambda", "1" }, { "matcher.estQpel", "0" }, { "matcher.estGate", "0" }, { "matcher.estSplit", "1" },
+        { "matcher.estLambda", "1" }, { "matcher.estQpel", "0" }, { "dejudder_est_still_zero", "0" }, { "matcher.estGate", "0" }, { "matcher.estSplit", "1" },
         { "matcher.estSplitSad", "6" }, { "matcher.motionRolloff", "1" }, { "matcher.rollLo", "6" },
         { "matcher.rollHi", "20" }, { "matcher.rollFloor", "0.3" }, { "matcher.objectStrength", "0.5" },
         { "matcher.textureTolerance", "0.5" }, { "matcher.globalTwo", "0" }, { "matcher.regionalHold", "0" },

@@ -357,7 +357,8 @@
           "optical_flow": "off",
           "motion_ahead_frames": "0",
           "motion_history_fixes": "off",
-          "dejudder_estimate_ahead": "off"
+          "dejudder_estimate_ahead": "off",
+          "dejudder_est_still_zero": "off"
         }
       },
       "zone": "front_end",

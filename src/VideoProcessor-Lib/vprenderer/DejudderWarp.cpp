@@ -2584,7 +2584,7 @@ if (q.x < size.x && q.y < size.y) {
 		return true;
 	}
 
-	// Identical blocks get the exact zero vector: `fieldTex` through `scratch` (swapped).
+	// Identical blocks get the exact zero vector: `fieldTex` through `scratch`, copied back.
 	bool MotionWarp::StillZero(pl_tex& fieldTex, pl_tex& scratch, const Planes& a, const Planes& b, int w, int h, int blockPixels,
 		bool subField)
 	{
@@ -2606,8 +2606,10 @@ if (q.x < size.x && q.y < size.y) {
 		if (!Dispatch("VideoProcessor de-judder: identical blocks still", header.empty() ? nullptr : header.c_str(), STILL_ZERO_BODY,
 			same ? descSame : desc, same ? 3 : 4, vars, 1, w, h, 8))
 			return false;
-		std::swap(fieldTex, scratch);
-		return true;
+		// Copied back (not swapped): the published field / sub-field textures stay the same objects.
+		const pl_shader_desc copyDesc[2] = { Sampled("src", scratch, false), Storage("dst", fieldTex) };
+		return Dispatch("VideoProcessor de-judder: identical blocks still (copy back)", nullptr, COPY_BODY, copyDesc, 2,
+			nullptr, 0, w, h, 8);
 	}
 
 	bool MotionWarp::Dispatch(const char* description, const char* header, const char* body,

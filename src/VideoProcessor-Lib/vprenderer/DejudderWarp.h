@@ -638,7 +638,7 @@ namespace Dejudder
 		pl_tex snapMask = nullptr;
 		pl_tex snapVectorOk = nullptr;
 		bool snapMaskValid = false;
-		pl_tex stillField = nullptr, stillSub = nullptr;   // the identical-block pass's own outputs (swapped)
+		pl_tex stillField = nullptr, stillSub = nullptr;   // the identical-block pass's scratch outputs (copied back)
 		pl_tex verifyField = nullptr;   // M5's output, swapped with the field
 		bool holdResetPending = false;  // H2's state cleared at the next Estimate
 		pl_tex pixelMask = nullptr;     // M6: A's half-resolution weights

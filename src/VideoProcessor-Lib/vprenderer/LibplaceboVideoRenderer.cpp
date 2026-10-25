@@ -32857,6 +32857,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "matcher.opticalFlow=" << m.opticalFlow << "\n"
 		<< "matcher.estLambda=" << m.estLambda << "\n"
 		<< "matcher.estQpel=" << m.estQpel << "\n"
+		<< "dejudder_est_still_zero=" << m.estStillZero << "\n"
 		<< "matcher.estGate=" << m.estGate << "\n"
 		<< "matcher.estSplit=" << m.estSplit << "\n"
 		<< "matcher.estSplitSad=" << m.estSplitSad << "\n"
