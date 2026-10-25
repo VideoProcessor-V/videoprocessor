@@ -87,8 +87,8 @@ Bill's behaviour back.
 
 - Patch applied, Magewell SDK, whole solution: rc=0 (`D:/codex/videoprocessor/hdr-choice-build5.log`).
 - CPU classes HdrInferenceChoiceTests, HdrInferenceChoiceWiringTests, HdrInferenceTests,
-  DvIncomingHdrModeTests, PipelineSkeletonTests, ConfigFileTests: 231/231
-  (`D:/codex/videoprocessor/hdr-choice-trx/f8`).
-- Config tests, off screen, `-Match "VP-V|every schema key|inventory"`: 13/13, gate passed
-  (`D:/codex/videoprocessor/hdr-choice-trx/config`).
+  DvIncomingHdrModeTests, PipelineSkeletonTests, ConfigFileTests: 232/232 after the use-gate fix
+  (`D:/codex/videoprocessor/hdr-choice-trx/f8b`; 231/231 before it, `f8`).
+- Config tests, off screen, `-Match "VP-V|every schema key|inventory"`: gate passed, 0 failures
+  (`D:/codex/videoprocessor/hdr-choice-trx/config2`; the first run, 13/13, in `config`).
 - Not run: GPU / on-screen; the GUI start-up path (Bill's App / dialog) has no automated test.
