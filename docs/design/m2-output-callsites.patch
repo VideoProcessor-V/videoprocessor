@@ -1,5 +1,5 @@
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index 5c24cd7c..6cf21647 100644
+index 5c24cd7c..25a7b326 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 @@ -74,6 +74,11 @@
@@ -102,7 +102,7 @@ index 5c24cd7c..6cf21647 100644
  	// 6b-2b: the stats overlay line, published by the render thread at most
  	// twice a second and read by the UI under its own small lock.
  	std::mutex dejudderStatusMutex;
-@@ -24332,194 +24299,54 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24332,194 +24299,58 @@ struct LibplaceboVideoRenderer::Impl
          // skips its motion search (zero motion; owner 2026-10-13 efficiency).
          for (const pl_hook* hook : frameHooks)
              CustomHookChain::SetHookParameter(hook, "static_refresh", cadenceRepeat ? 1.0 : 0.0);
@@ -335,13 +335,17 @@ index 5c24cd7c..6cf21647 100644
 +            adaptiveHost.publishStatus = [this]() { PublishCustomShaderStatus(); };
 +            adaptiveStage.Register(adaptiveFrame, adaptiveHost,
 +                { bitrateWeightScale, adaptiveGrainMapWanted, adaptiveNoSsimLogged }, frameHooks);
++            // ADR-0001 (findings 2026-10-25 #1): SSimDownscaler missing or a GPU failure is visible.
++            const FallbackCatalog::Decision scalingFallback = adaptiveStage.Fallback();
++            if (scalingFallback.engaged) EngageFallback(scalingFallback.id.c_str(), scalingFallback.reason);
++            else ReleaseFallback(scalingFallback.id.c_str());
          }
 -        if (!activeSettings.adaptiveDownscale && !upscaleBlend)
 -            adaptiveGrainMapWanted = false;
          // Delta 5 (D5-1): the sigma-delta's code domain comes from this
          // frame's target, never from the shader rule: range, swapchain sample
          // depth and the colour depth it quantises to. A float or 16-bit
-@@ -24689,99 +24516,38 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24689,99 +24520,38 @@ struct LibplaceboVideoRenderer::Impl
          // frame is converted twice (TemporalRenderer::Render historyColor).
          bool extendedRangeRelabelled = false;
          {
@@ -469,7 +473,7 @@ index 5c24cd7c..6cf21647 100644
          }
          // libplacebo 7.360.1 drops the output encoding (limited range) after
          // a texture-input PRE_OUTPUT hook; the repair runs first at OUTPUT,
-@@ -24820,65 +24586,22 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24820,65 +24590,22 @@ struct LibplaceboVideoRenderer::Impl
              yieldedDebandLogged = false;
          // Stage 8-1: a downscaling frame in gamma light when chosen (the de-
          // judder extras reuse these parameters).
@@ -542,7 +546,7 @@ index 5c24cd7c..6cf21647 100644
              {
                  ++ditherVectorsNextUsed;
                  if (!ditherVectorsNextLogged)
-@@ -25066,12 +24789,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25066,12 +24793,7 @@ struct LibplaceboVideoRenderer::Impl
                  PublishCustomShaderStatus();
              ledCompensation.MarkRuntimeFailures(hookErrors.disabled_hooks,
                  hookErrors.num_disabled_hooks);

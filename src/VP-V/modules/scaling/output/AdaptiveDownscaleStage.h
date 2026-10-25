@@ -1,5 +1,6 @@
 #pragma once
 
+#include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscale.h>
 
 #include <libplacebo/renderer.h>
@@ -97,6 +98,14 @@ namespace AdaptiveDownscaleStage
 
 		bool UpscaleThisFrame() const { return upscaleThisFrame; }
 
+		// ADR-0001 (findings 2026-10-25 #1): the "output scaling" entry for the frame just registered:
+		// the blend asked for but SSimDownscaler not in the shader list (libplacebo's downscaler), or
+		// the blend failed on the GPU during the previous render (plain SSIM / the unblended picture).
+		FallbackCatalog::Decision Fallback() const
+		{
+			return FallbackCatalog::OutputScaling(requested, newFailures, ssimMissing);
+		}
+
 	private:
 		AdaptiveDownscale::Module& module;
 		bool upscaleThisFrame = false;   // Stage 8b on the frame being built
@@ -104,5 +113,9 @@ namespace AdaptiveDownscaleStage
 		bool mapNlsLogged = false;       // 8-3
 		unsigned long long statsTick = 0;
 		int lightLogged = -1;            // Stage 8-1: the last logged light domain
+		bool requested = false;          // the blend asked for on this frame (downscale on, or the upscale form)
+		bool ssimMissing = false;        // downscale on without SSimDownscaler in the chain
+		unsigned long long failuresSeen = 0;
+		unsigned long long newFailures = 0;   // module failures during the previous render
 	};
 }

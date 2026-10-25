@@ -223,6 +223,26 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1, x.published);   // the status at most once a second
 		}
 
+		TEST_METHOD(AdaptiveOutputScalingFallbackIsVisible)
+		{
+			// Findings 2026-10-25 #1: SSimDownscaler missing while adaptive downscale is on engages
+			// "output scaling"; with the shader present (and no GPU failure) it is released; off is a choice.
+			AdaptiveFixture x;
+			std::vector<const pl_hook*> hooks;
+			AdaptiveDownscaleStage::Frame f = x.Frame(2160, 1080);
+			x.Run(f, hooks);
+			Assert::IsFalse(x.stage.Fallback().engaged);
+			f.adaptiveDownscale = true;
+			x.Run(f, hooks);
+			const FallbackCatalog::Decision d = x.stage.Fallback();
+			Assert::IsTrue(d.engaged);
+			Assert::AreEqual(std::string("output scaling"), d.id);
+			Assert::IsTrue(d.reason.find("SSimDownscaler") != std::string::npos);
+			x.ssim = true;
+			x.Run(f, hooks);
+			Assert::IsFalse(x.stage.Fallback().engaged);
+		}
+
 		TEST_METHOD(AdaptiveUpscaleTakesTheUpscaleFormAndItsLight)
 		{
 			AdaptiveFixture x;

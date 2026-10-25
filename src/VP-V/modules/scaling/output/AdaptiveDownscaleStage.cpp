@@ -50,6 +50,11 @@ namespace AdaptiveDownscaleStage
 		const float targetCropH = std::fabs(frame.targetCrop.y1 - frame.targetCrop.y0);
 		const bool upscaleBlend = frame.adaptiveUpscale && sourceCropH + 0.5f < targetCropH;
 		upscaleThisFrame = upscaleBlend;
+		// Findings 2026-10-25 #1: what Fallback() reports (no effect on the picture).
+		newFailures = module.Failures() - failuresSeen;
+		failuresSeen = module.Failures();
+		requested = upscaleBlend || frame.adaptiveDownscale;
+		ssimMissing = false;
 		// SSimSuperRes takes the grain term through alpha only when the blend runs (its
 		// vp_grain_strength; 0 otherwise).
 		const pl_hook* superresHook = nullptr;
@@ -185,11 +190,15 @@ namespace AdaptiveDownscaleStage
 				hooks.push_back(module.Blend());
 				state.noSsimLogged = false;
 			}
-			else if (!state.noSsimLogged)
+			else
 			{
-				state.grainMapWanted = false;
-				state.noSsimLogged = true;
-				DebugLog::Log("Adaptive downscale: on, but the SSimDownscaler shader is not in the chain; not used");
+				ssimMissing = true;
+				if (!state.noSsimLogged)
+				{
+					state.grainMapWanted = false;
+					state.noSsimLogged = true;
+					DebugLog::Log("Adaptive downscale: on, but the SSimDownscaler shader is not in the chain; not used");
+				}
 			}
 			if (statsTick == 0 || GetTickCount64() - statsTick >= 1000)
 			{
