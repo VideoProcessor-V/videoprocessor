@@ -118,8 +118,13 @@ namespace LedDrive
 			DebugLog::Log("Dynamic Drive: gamma boost %s (exponent %.4f on output gamma %.2f)",
 				boostExponent != 1.0 ? "on" : "off", boostExponent, displayGamma);
 		}
+		if (boostExponent == 1.0)
+			ReleaseFallback(kBoostFallbackId);
 		if (!(led || boostExponent != 1.0 || shadowLift.load(std::memory_order_acquire) > 0.0))
+		{
+			MergeModuleFallbacks(led);
 			return;
+		}
 		if (!compensationConfigured)
 		{
 			ConfiguredShaderRule compensationRule;
@@ -214,19 +219,32 @@ namespace LedDrive
 		if (in.compensationSlotRuns)
 			compensation.Collect(false, hooks);
 		tagSlot(compensationStart, PipelineSlots::Id::DriveLedCompensation);
+		// Module findings 2026-10-24 item 1: compensate dims the LED only because this hook
+		// brightens the picture by the same amount. When it does not run this frame (slot off,
+		// shader not loaded, or disabled by libplacebo) the module holds full drive and shows
+		// "Fallbacks engaged: LED drive (held at full: ...)"; cheap when unchanged. Also when the
+		// hook is skipped, not only when it is pushed.
+		const std::string unavailable = CompensationUnavailable(in.compensationSlotRuns,
+			hooks.size() - compensationStart, compensationRuntimeDisabled);
+		if (led)
+			led->SetCompensationAvailable(unavailable.empty(), unavailable);
 		if (boostExponent != 1.0 && hooks.size() == compensationStart)
 		{
 			if (!boostMissingLogged)
 				DebugLog::Log("Dynamic Drive: WARNING gamma boost NOT applied - shaders\\LED compensation.glsl did not load or was disabled; the picture is plain output_gamma (exponent %.4f missing)",
 					boostExponent);
 			boostMissingLogged = true;
+			// No silent fallbacks (owner rule): the boost's loss is visible, not log-only.
+			Engage(kBoostFallbackId, "not applied: " + unavailable + "; the picture is plain output_gamma");
 		}
 		else if (hooks.size() > compensationStart)
 		{
 			if (boostMissingLogged)
 				DebugLog::Log("Dynamic Drive: gamma boost applied again (compensation hook running)");
 			boostMissingLogged = false;
+			ReleaseFallback(kBoostFallbackId);
 		}
+		MergeModuleFallbacks(led);
 		for (size_t i = compensationStart; i < hooks.size(); ++i)
 		{
 			CustomHookChain::SetHookParameter(hooks[i], "gain", gain.active ? gain.gain : 1.0);
@@ -247,13 +265,16 @@ namespace LedDrive
 
 	void DynamicDriveFrame::OnHookErrors(const uint64_t* disabledSignatures, int count)
 	{
-		compensation.MarkRuntimeFailures(disabledSignatures, count);
+		// The chain latches its own entry; the adapter remembers it for the hold's reason.
+		if (compensation.MarkRuntimeFailures(disabledSignatures, count))
+			compensationRuntimeDisabled = true;
 		const std::shared_ptr<LedDriveModule> led = std::atomic_load(&module);
 		for (int i = 0; led && !measurementDisabledLogged && i < count; ++i)
 			if (disabledSignatures[i] == measurement.Hook()->signature)
 			{
 				DebugLog::Log("Dynamic Drive: WARNING libplacebo disabled the measurement pass; the LED keeps its last statistics");
 				measurementDisabledLogged = true;
+				UpdateMeasurementFallback();
 			}
 	}
 
@@ -267,6 +288,36 @@ namespace LedDrive
 		measurement.Collect(measured, 0, &measuredSequences);
 		for (size_t i = 0; i < measured.size(); ++i)
 			led->SubmitMeasurement(measured[i], measuredSequences[i]);
+		// Module findings item 7 / silent-fallbacks batch part 3 #1: results arriving more than
+		// MeasurementHook::LATE_FRAMES late, or frames not measured (the readback ring's note),
+		// mean the LED follows old statistics: visible, never log-only. The entry stays until no
+		// note has come for two seconds, and its text carries no counts, so an intermittent
+		// note neither flaps the heading nor rewrites it every frame.
+		const std::string note = measurement.LateNote();
+		const uint64_t now = GetTickCount64();
+		if (!note.empty())
+		{
+			lateNoteTick = now;
+			readbacksReason = note.rfind("readbacks late", 0) == 0 ? note :
+				std::string("readbacks behind: frames not measured; the LED follows the last statistics");
+		}
+		const bool losing = lateNoteTick != 0 && now - lateNoteTick < 2000;
+		if (losing != readbacksLosing || (losing && readbacksReason != readbacksEngagedReason))
+		{
+			readbacksLosing = losing;
+			readbacksEngagedReason = losing ? readbacksReason : std::string();
+			UpdateMeasurementFallback();
+		}
+	}
+
+	void DynamicDriveFrame::UpdateMeasurementFallback()
+	{
+		if (measurementDisabledLogged)
+			Engage(kMeasurementFallbackId, "libplacebo disabled the measurement pass; the LED follows the last statistics");
+		else if (readbacksLosing)
+			Engage(kMeasurementFallbackId, readbacksEngagedReason);
+		else
+			ReleaseFallback(kMeasurementFallbackId);
 	}
 
 	void DynamicDriveFrame::Release()
@@ -274,6 +325,13 @@ namespace LedDrive
 		measurement.Release();
 		compensation.Clear();
 		compensationConfigured = false;
+		// A new renderer reloads both hooks: their libplacebo state starts over.
+		compensationRuntimeDisabled = false;
+		measurementDisabledLogged = false;
+		readbacksLosing = false;
+		lateNoteTick = 0;
+		readbacksEngagedReason.clear();
+		UpdateMeasurementFallback();
 	}
 
 	void DynamicDriveFrame::Engage(const char* id, const std::string& reason)
@@ -288,7 +346,20 @@ namespace LedDrive
 			DebugLog::Log("%s", fallbacks.Heading().c_str());
 	}
 
-	void DynamicDriveFrame::MergeModuleFallbacks(const std::shared_ptr<LedDriveModule>&)
+	void DynamicDriveFrame::MergeModuleFallbacks(const std::shared_ptr<LedDriveModule>& led)
 	{
+		// Module findings items 1 and 2: the module's own entries ("LED drive" while it holds full
+		// drive, "projector" during a dry run) join the renderer's heading; released when the
+		// module clears them or goes away. Engage/Release return at once when unchanged.
+		const std::vector<FallbackStatus::Entry> entries = led ? led->FallbackEntries() : std::vector<FallbackStatus::Entry>();
+		for (const char* id : { LedDriveModule::kHoldFallbackId, LedDriveModule::kDryRunFallbackId })
+		{
+			const auto it = std::find_if(entries.begin(), entries.end(),
+				[&](const FallbackStatus::Entry& e) { return e.id == id; });
+			if (it != entries.end())
+				Engage(id, it->reason);
+			else
+				ReleaseFallback(id);
+		}
 	}
 }

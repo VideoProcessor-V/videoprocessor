@@ -8,6 +8,7 @@
 #include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
 #include <ConfigFile.h>
 #include <MainConfigSchema.h>
+#include "LedDriveTestSupport.h"
 #include <Windows.h>
 #include <fstream>
 #include <memory>
@@ -44,8 +45,48 @@ namespace
 	{
 		std::shared_ptr<QueuedFrameStatistics::IObserver> observer;
 		FallbackStatus::Registry fallbacks;
+		// An empty loader: "LED compensation.glsl" cannot load (the shader-missing case).
 		LedDrive::DynamicDriveFrame frame{ observer, fallbacks, CustomHookChain::Loader{} };
 	};
+
+	// The facts of one 1080p SDR frame with no subtitle and no NLS.
+	struct FrameFacts
+	{
+		pl_frame image{};
+		pl_frame target{};
+		pl_render_params params = pl_render_default_params;
+		CustomHookChain::TemplateValues templates;
+		std::string range = "limited";
+		HdrPeakAnalysisCrop::TrustedPicture trusted;
+		LedDrive::DynamicDriveFrameInputs in;
+		FrameFacts()
+		{
+			image.crop = { 0.0f, 0.0f, 1920.0f, 1080.0f };
+			image.color = pl_color_space_bt709;
+			target.crop = image.crop;
+			target.color = pl_color_space_bt709;
+			in.image = &image;
+			in.target = &target;
+			in.screen = &target;
+			in.params = &params;
+			in.hookTemplates = &templates;
+			in.sourceRange = &range;
+			in.displayGamma = 2.2;
+			in.trustedPicture = &trusted;
+			in.sourceSequence = 1;
+			in.compensationSlotRuns = true;
+		}
+	};
+
+	std::string ReasonOf(const FallbackStatus::Registry& registry, const char* id)
+	{
+		for (const FallbackStatus::Entry& e : registry.Entries())
+			if (e.id == id)
+				return e.reason;
+		return std::string();
+	}
+
+	const auto NoTag = [](size_t, PipelineSlots::Id) {};
 }
 
 namespace VideoProcessorTest
@@ -185,6 +226,73 @@ namespace VideoProcessorTest
 			// No detection: nothing masked.
 			subtitle.detected = false;
 			Assert::AreEqual(0, LedDrive::DynamicDriveFrame::PictureOnlyMasks(in, masks, source));
+		}
+
+		// Module findings 2026-10-24 item 1 (the WP-15 wiring): compensate holds full drive while
+		// nothing compensates, and the renderer's heading shows it.
+		TEST_METHOD(CompensationUnavailableHoldsFullDriveVisibly)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			LedDrive::LedDriveConfig config;
+			config.enabled = true;
+			config.mode = LedDrive::Mode::Compensate;
+			LedDrive::ProjectorConfig port;
+			port.protocol = "barco_ascii";
+			auto module = std::make_shared<LedDrive::LedDriveModule>(port, config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			FrameFixture f;
+			f.frame.PublishModule(module);
+			FrameFacts facts;
+			std::vector<const pl_hook*> hooks;
+			f.frame.PrepareFrame(facts.in, hooks, NoTag);
+			Assert::IsTrue(hooks.empty(), L"the shader could not load");
+			Assert::IsTrue(module->HoldingFullForCompensation());
+			Assert::IsTrue(ReasonOf(f.fallbacks, LedDrive::LedDriveModule::kHoldFallbackId).find("did not load") != std::string::npos);
+			// The slot switched off is a reason of its own.
+			facts.in.compensationSlotRuns = false;
+			hooks.clear();
+			f.frame.PrepareFrame(facts.in, hooks, NoTag);
+			Assert::IsTrue(ReasonOf(f.fallbacks, LedDrive::LedDriveModule::kHoldFallbackId).find("slot drive.led_compensation is off") != std::string::npos);
+			// The module gone: its entries leave the heading.
+			f.frame.Clear();
+			hooks.clear();
+			f.frame.PrepareFrame(facts.in, hooks, NoTag);
+			Assert::IsFalse(f.fallbacks.Engaged(LedDrive::LedDriveModule::kHoldFallbackId));
+		}
+
+		TEST_METHOD(ScriptModeIsNotHeld)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			LedDrive::LedDriveConfig config;
+			config.enabled = true;
+			config.mode = LedDrive::Mode::Script;
+			LedDrive::ProjectorConfig port;
+			port.protocol = "barco_ascii";
+			auto module = std::make_shared<LedDrive::LedDriveModule>(port, config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			FrameFixture f;
+			f.frame.PublishModule(module);
+			FrameFacts facts;
+			std::vector<const pl_hook*> hooks;
+			f.frame.PrepareFrame(facts.in, hooks, NoTag);
+			Assert::IsFalse(module->HoldingFullForCompensation());
+			Assert::IsFalse(f.fallbacks.Engaged(LedDrive::LedDriveModule::kHoldFallbackId));
+		}
+
+		TEST_METHOD(MissingGammaBoostIsVisible)
+		{
+			FrameFixture f;
+			LedDrive::DynamicDriveParams params;
+			params.gammaBoost = 2.4;   // output gamma 2.2: exponent 2.2 / 2.4
+			f.frame.PublishParams(params);
+			FrameFacts facts;
+			std::vector<const pl_hook*> hooks;
+			f.frame.PrepareFrame(facts.in, hooks, NoTag);
+			Assert::IsTrue(ReasonOf(f.fallbacks, LedDrive::DynamicDriveFrame::kBoostFallbackId).find("did not load") != std::string::npos);
+			params.gammaBoost = 0.0;
+			f.frame.PublishParams(params);
+			f.frame.PrepareFrame(facts.in, hooks, NoTag);
+			Assert::IsFalse(f.fallbacks.Engaged(LedDrive::DynamicDriveFrame::kBoostFallbackId));
 		}
 
 		TEST_METHOD(ObserverPublishingFollowsTheModule)

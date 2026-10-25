@@ -131,6 +131,7 @@ namespace LedDrive
 		void Engage(const char* id, const std::string& reason);
 		void ReleaseFallback(const char* id);
 		void MergeModuleFallbacks(const std::shared_ptr<LedDriveModule>& led);
+		void UpdateMeasurementFallback();
 
 		FallbackStatus::Registry& fallbacks;
 		MeasurementHook measurement;
@@ -141,7 +142,9 @@ namespace LedDrive
 		bool boostMissingLogged = false;
 		bool measurementDisabledLogged = false;
 		double lastLoggedBoostExponent = 1.0;
-		int lastDropped = 0;
-		int droppedGrowthFrames = 0;
+		uint64_t lateNoteTick = 0;               // GetTickCount64 of the last readback-ring note
+		std::string readbacksReason;             // that note, without counts
+		std::string readbacksEngagedReason;      // the text the entry shows now
+		bool readbacksLosing = false;
 	};
 }
