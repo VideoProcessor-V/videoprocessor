@@ -7,7 +7,9 @@
   "code_location": "migrated",
   "live_files": [
     "src/VP-V/modules/colour/extended_range/ExtendedRange.cpp",
-    "src/VP-V/modules/colour/extended_range/ExtendedRange.h"
+    "src/VP-V/modules/colour/extended_range/ExtendedRange.h",
+    "src/VP-V/modules/colour/extended_range/ExtendedRangeStage.h",
+    "src/VP-V/modules/colour/extended_range/ExtendedRangeStage.cpp"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/vprenderer/ExtendedRange.h"

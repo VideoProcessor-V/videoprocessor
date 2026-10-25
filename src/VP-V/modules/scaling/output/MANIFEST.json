@@ -10,7 +10,9 @@
     "src/VP-V/modules/scaling/output/AdaptiveDownscale.h",
     "src/VP-V/modules/scaling/output/DownscaleLight.h",
     "shaders/SSimDownscaler.glsl",
-    "shaders/SSimSuperRes.glsl"
+    "shaders/SSimSuperRes.glsl",
+    "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.h",
+    "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.cpp"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h",

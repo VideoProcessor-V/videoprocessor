@@ -4,7 +4,7 @@
   "unit": "motion",
   "order": 140,
   "status": "built",
-  "code_location": "legacy",
+  "code_location": "partly migrated",
   "live_files": [
     "src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp",
     "src/VideoProcessor-Lib/vprenderer/DejudderAhead.h",
@@ -13,7 +13,9 @@
     "src/VideoProcessor-Lib/vprenderer/InterpolationTimeline.h",
     "src/VideoProcessor-Lib/vprenderer/InterpolationPolicy.h",
     "src/VideoProcessor-Lib/vprenderer/OcclusionMaskHook.cpp",
-    "src/VideoProcessor-Lib/vprenderer/TemporalRenderer.h"
+    "src/VideoProcessor-Lib/vprenderer/TemporalRenderer.h",
+    "src/VP-V/modules/motion/consumers/DejudderCacheStage.h",
+    "src/VP-V/modules/motion/consumers/DejudderCacheStage.cpp"
   ],
   "components": {
     "files": {

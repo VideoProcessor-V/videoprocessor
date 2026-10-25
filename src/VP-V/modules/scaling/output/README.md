@@ -61,10 +61,12 @@ Code location: **migrated**. The authoritative list is `live_files` in [MANIFEST
 - `src/VP-V/modules/scaling/output/DownscaleLight.h`
 - `shaders/SSimDownscaler.glsl`
 - `shaders/SSimSuperRes.glsl`
+- `src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.h`
+- `src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.cpp`
 
 Forwarding headers (legacy path; removed in M2 step 0): `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h`, `src/VideoProcessor-Lib/vprenderer/DownscaleLight.h`.
 
-The forwarders stay for LibplaceboVideoRenderer.cpp (Bill's host) and the upstream LibplaceboLutParserTests.cpp / ConfigFileTests.cpp, which this move does not edit. The SSIM shaders stay in shaders/ (runtime layout).
+The forwarders stay for LibplaceboVideoRenderer.cpp (Bill's host) and the upstream LibplaceboLutParserTests.cpp / ConfigFileTests.cpp, which this move does not edit. The SSIM shaders stay in shaders/ (runtime layout). AdaptiveDownscaleStage.* is the host glue (WP-13): the host's call sites are in docs/design/m2-output-callsites.patch.
 
 ## Migration directive
 

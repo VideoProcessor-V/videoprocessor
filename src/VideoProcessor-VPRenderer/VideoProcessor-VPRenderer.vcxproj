@@ -111,6 +111,9 @@
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutStage.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OcclusionMaskHook.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\extended_range\ExtendedRange.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\extended_range\ExtendedRangeStage.cpp" />
+    <ClCompile Include="..\VP-V\modules\scaling\output\AdaptiveDownscaleStage.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\consumers\DejudderCacheStage.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\RenderedWarp.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\GpuCaptureUnpack.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\GpuRgbUnpack.cpp" />

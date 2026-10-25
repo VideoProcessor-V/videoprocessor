@@ -56,10 +56,12 @@ Code location: **migrated**. The authoritative list is `live_files` in [MANIFEST
 
 - `src/VP-V/modules/colour/extended_range/ExtendedRange.cpp`
 - `src/VP-V/modules/colour/extended_range/ExtendedRange.h`
+- `src/VP-V/modules/colour/extended_range/ExtendedRangeStage.h`
+- `src/VP-V/modules/colour/extended_range/ExtendedRangeStage.cpp`
 
 Forwarding headers (legacy path; removed in M2 step 0): `src/VideoProcessor-Lib/vprenderer/ExtendedRange.h`.
 
-The forwarder stays for LibplaceboVideoRenderer.cpp (Bill's host) and two upstream test files (LibplaceboLutParserTests.cpp, MotionRendererTests.cpp), which this move does not edit.
+The forwarder stays for LibplaceboVideoRenderer.cpp (Bill's host) and two upstream test files (LibplaceboLutParserTests.cpp, MotionRendererTests.cpp), which this move does not edit. ExtendedRangeStage.* is the host glue (WP-13): the host's call sites are in docs/design/m2-output-callsites.patch.
 
 ## Migration directive
 

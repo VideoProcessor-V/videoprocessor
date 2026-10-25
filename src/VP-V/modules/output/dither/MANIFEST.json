@@ -11,7 +11,8 @@
     "src/VP-V/modules/output/dither/OutputEncodingRepair.cpp",
     "src/VP-V/modules/output/dither/CustomHookChain.h",
     "src/VP-V/modules/output/dither/CustomHookChain.cpp",
-    "shaders/Temporal sigma-delta.glsl"
+    "shaders/Temporal sigma-delta.glsl",
+    "src/VP-V/modules/output/dither/SigmaDeltaVectors.h"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/vprenderer/CustomHookChain.h",
