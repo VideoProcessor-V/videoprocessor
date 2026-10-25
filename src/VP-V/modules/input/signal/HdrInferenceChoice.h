@@ -6,8 +6,8 @@
 // F-8 (m2-dv findings, owner rule vp-either-or-overlaps): the either/or between VP's HDR inference
 // (HdrInferenceTracker: BT.2020 at 10/12-bit or 8-bit with an LLDV indication, DV-tunnel and
 // explicit-settings gates, signal epochs, the picture-statistics SDR veto) and Bill's candidate
-// decision (BT.2020 + SDR EOTF + no HDR InfoFrame + both HDR modes Follow input (LLDV), confirmed
-// after 1.5 s). The dialog flow around the decision stays VP's.
+// decision (BT.2020 + SDR EOTF + no HDR InfoFrame, confirmed after 1.5 s; used only while both HDR
+// modes are Follow input (LLDV), as upstream). The dialog flow around the decision stays VP's.
 //
 // Key: [vpv] hdr_inference = vp | original (default vp: the behaviour since 2026-10-17).
 // The selection is gated through the slot registry on input.signal: the Original pathway puts
@@ -91,6 +91,16 @@ namespace HdrInferenceChoice
 		if (!r.problem.empty())
 			text += "; invalid " + r.problem + ", kept vp";
 		return text;
+	}
+
+	// Whether a confirmed candidate may be USED (PQ applied) under the current HDR modes, exactly
+	// as each side decides it: Bill's isHDFuryLLDV needs both modes "Follow input (LLDV)"
+	// (IsNewLldvModeSelected); VP's inference uses its own HdrSettingsPermitInference result. The
+	// candidate itself is tracked independently of the modes on both sides, so a mode change never
+	// resets it and PQ applies as soon as the modes allow it.
+	inline bool ModesPermit(bool originalHeuristic, bool lldvModesSelected, bool vpModesPermit)
+	{
+		return originalHeuristic ? lldvModesSelected : vpModesPermit;
 	}
 
 	// From VideoProcessor.cfg in the working directory (the GUI start-up).

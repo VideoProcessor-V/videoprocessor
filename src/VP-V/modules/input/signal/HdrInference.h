@@ -64,9 +64,6 @@ struct HdrInferenceSignal
 	// Explicit owner settings that force a non-HDR10 reading. hdr_colorspace
 	// REC709 declares the source's primaries as Rec.709.
 	bool explicitSettingsForbid = false;
-	// Bill's original heuristic only (F-8 audit): hdr_colorspace AND hdr_luminance are both
-	// "Follow input (LLDV)" (his IsNewLldvModeSelected). VP's inference does not read it.
-	bool lldvModesSelected = false;
 	// Identity of the signal contract (mode, rate, encoding). A change starts
 	// a new epoch even while the signal stays eligible.
 	uint64_t signalKey = 0;
@@ -99,10 +96,10 @@ struct HdrInferenceOptions
 	bool originalHeuristic = false;
 };
 
-// Bill's original newlldv candidate decision (upstream UpdateNewLldvCandidate + the
-// IsNewLldvModeSelected gate of his isHDFuryLLDV): the capture state is valid, BT.2020, SDR EOTF,
-// carries no HDR InfoFrame, and both HDR modes are "Follow input (LLDV)". (Gated here at
-// eligibility, so changing a mode restarts the stabilisation; upstream gated the use instead.)
+// Bill's original newlldv candidate rule (upstream UpdateNewLldvCandidate): the capture state is
+// valid, BT.2020, SDR EOTF and carries no HDR InfoFrame. Exactly upstream: the HDR modes do NOT
+// gate the candidate; they gate its USE (his isHDFuryLLDV = confirmed && IsNewLldvModeSelected),
+// see HdrInferenceChoice::ModesPermit.
 HdrInferenceEligibility EvaluateOriginalNewLldvEligibility(const HdrInferenceSignal& signal);
 
 // One analysed picture, in the order the capture delivered it.

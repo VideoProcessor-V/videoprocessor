@@ -84,8 +84,6 @@ HdrInferenceEligibility EvaluateOriginalNewLldvEligibility(
 		result.reason = "source EOTF is not SDR (original heuristic)";
 	else if (signal.hdrInfoFrame)
 		result.reason = "source sends an HDR InfoFrame (original heuristic)";
-	else if (!signal.lldvModesSelected)
-		result.reason = "hdr_colorspace / hdr_luminance are not both Follow input (LLDV) (original heuristic)";
 	else
 	{
 		result.eligible = true;

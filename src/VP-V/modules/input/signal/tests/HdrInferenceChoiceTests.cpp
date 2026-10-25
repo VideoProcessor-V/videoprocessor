@@ -36,7 +36,6 @@ namespace Tests
 			s.hdrInfoFrame = false;
 			s.bitDepth = 8;
 			s.signalKey = 1;
-			s.lldvModesSelected = true;   // both HDR modes Follow input (LLDV)
 			return s;
 		}
 
@@ -77,8 +76,6 @@ namespace Tests
 			Assert::IsFalse(EvaluateOriginalNewLldvEligibility(t).eligible);
 			t = Candidate(); t.valid = false;
 			Assert::IsFalse(EvaluateOriginalNewLldvEligibility(t).eligible);
-			t = Candidate(); t.lldvModesSelected = false;
-			Assert::IsFalse(EvaluateOriginalNewLldvEligibility(t).eligible, L"an explicit hdr_colorspace / hdr_luminance rejects, as upstream");
 			t = Candidate(); t.enabled = false;
 			Assert::IsFalse(EvaluateOriginalNewLldvEligibility(t).eligible, L"newlldv stays the master switch");
 		}
@@ -120,6 +117,39 @@ namespace Tests
 			const HdrInferenceUpdate ended = tracker.OnSignal(s, 61000);
 			Assert::IsTrue(ended.event == HdrInferenceEvent::Ended && ended.effectiveChanged);
 			Assert::IsFalse(tracker.IsCandidate());
+		}
+
+		// Owner rule "match Bill exactly" (merge audit 2026-10-25): the HDR modes gate the USE of the
+		// candidate, not the candidate. A mode change does not reset a confirmed candidate, and PQ applies
+		// at once when the modes become LLDV with a confirmed candidate (upstream isHDFuryLLDV).
+		TEST_METHOD(OriginalModesGateTheUseNotTheCandidate)
+		{
+			using namespace HdrChoice;
+			HdrInferenceTracker tracker;
+			HdrInferenceOptions options;
+			options.originalHeuristic = true;
+			tracker.SetOptions(options);
+			const HdrInferenceSignal s = Candidate();   // the signal carries no HDR-mode input at all
+			bool lldvModes = false;                     // e.g. an explicit BT.2020 hdr_colorspace
+			auto pqApplied = [&]() { return tracker.IsInferredPq() && HdrInferenceChoice::ModesPermit(true, lldvModes, true); };
+			tracker.OnSignal(s, 0);
+			tracker.OnSignal(s, 1500);
+			Assert::IsTrue(tracker.IsInferredPq(), L"the candidate confirms whatever the modes");
+			Assert::IsFalse(pqApplied(), L"explicit modes: not used, as upstream");
+			// Mode changes (rebuilding the state each time) do not reset the confirmed candidate.
+			for (uint64_t t = 1600; t < 3000; t += 100)
+			{
+				lldvModes = !lldvModes;
+				Assert::IsTrue(tracker.OnSignal(s, t).event == HdrInferenceEvent::None);
+				Assert::IsTrue(tracker.IsInferredPq(), L"a mode change keeps the confirmed candidate");
+			}
+			// The modes become LLDV with a confirmed candidate: PQ applies immediately (no new wait).
+			lldvModes = true;
+			Assert::IsTrue(tracker.OnSignal(s, 3001).event == HdrInferenceEvent::None);
+			Assert::IsTrue(pqApplied(), L"PQ at once when the modes allow it");
+			// VP's side keeps its own mode rule.
+			Assert::IsTrue(HdrInferenceChoice::ModesPermit(false, false, true));
+			Assert::IsFalse(HdrInferenceChoice::ModesPermit(false, true, false));
 		}
 
 		TEST_METHOD(VpModeIsUnchangedByDefault)

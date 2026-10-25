@@ -20,11 +20,10 @@
 // validity are taken from the state here.
 inline HdrInferenceSignal BuildHdrInferenceSignalFromState(const VideoState* state,
 	bool newlldvEnabled, BitDepth cardInputBitDepth, DolbyVisionTunnelGateInput tunnel,
-	bool explicitSettingsForbid, bool lldvModesSelected = false)
+	bool explicitSettingsForbid)
 {
 	HdrInferenceSignal signal;
 	signal.enabled = newlldvEnabled;
-	signal.lldvModesSelected = lldvModesSelected;   // F-8: Bill's original heuristic only
 	signal.valid = state && state->valid;
 	if (!signal.valid)
 		return signal;
