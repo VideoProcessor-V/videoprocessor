@@ -1163,6 +1163,8 @@ namespace Vpv
 					const QSignalBlocker blocker(merged);
 					merged->setChecked(get("output_segments_merged").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0);
 					merged->setEnabled(get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) != 0);
+				}
+				{
 					const QSignalBlocker blocker(drain);
 					const QString value = get("entrance_gpu_drain").toLower();
 					drain->setCurrentIndex(value == QStringLiteral("finish") ? 2 : value == QStringLiteral("flush") ? 1 : 0);
