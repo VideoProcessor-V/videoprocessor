@@ -1,5 +1,5 @@
 #include <pch.h>
-#include "EarlyUpload.h"
+#include <VP-V/modules/input/capture/EarlyUpload.h>
 
 #include <libplacebo/d3d11.h>
 #include <dxgi1_4.h>

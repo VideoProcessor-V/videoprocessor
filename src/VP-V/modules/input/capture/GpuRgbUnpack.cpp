@@ -1,5 +1,5 @@
 #include <pch.h>
-#include "GpuRgbUnpack.h"
+#include <VP-V/modules/input/capture/GpuRgbUnpack.h>
 
 #include <libplacebo/shaders/custom.h>
 

@@ -54,22 +54,29 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **partly migrated** (M2 step 15, VP files only). The capture back-ends and formatters are Bill's (present in origin/v1.4.02-beta) and never move; this slot uses them. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
-- `src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.cpp`
-- `src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.h`
-- `src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.cpp`
-- `src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.h`
+VP files (in this folder):
+
+- `src/VP-V/modules/input/capture/GpuCaptureUnpack.h`
+- `src/VP-V/modules/input/capture/GpuCaptureUnpack.cpp`
+- `src/VP-V/modules/input/capture/GpuRgbUnpack.h`
+- `src/VP-V/modules/input/capture/GpuRgbUnpack.cpp`
+- `src/VP-V/modules/input/capture/UploadReuse.h`
+- `src/VP-V/modules/input/capture/EarlyUpload.h`
+- `src/VP-V/modules/input/capture/EarlyUpload.cpp`
+
+Bill's files used (stay):
+
 - `src/VideoProcessor-Lib/vprenderer/AlphaNativeRgbIngress.h`
-- `src/VideoProcessor-Lib/vprenderer/UploadReuse.h`
-- `src/VideoProcessor-Lib/vprenderer/EarlyUpload.cpp`
-- `src/VideoProcessor-Lib/vprenderer/EarlyUpload.h`
 - `src/VideoProcessor-Lib/CaptureInput.cpp`
 - `src/VideoProcessor-Lib/CaptureInput.h`
 - `src/VideoProcessor-Lib/blackmagic_decklink`
 - `src/VideoProcessor-Lib/magewell`
 - `src/VideoProcessor-Lib/video_frame_formatter`
 - `src/VideoProcessor-Lib/VideoConversionOverride.cpp`
+
+Forwarding headers (removed in M2 step 0) stay at `src/VideoProcessor-Lib/vprenderer/` for the four moved headers, for the renderer host and Bill's `LibplaceboLutParserTests.cpp`; listed in the MANIFEST. The Magewell SDK (`MagewellSdkRoot`, `/p:VpCiNoMagewell=true`) only concerns Bill's `magewell/` back-end; nothing here includes it.
 
 ## Migration directive
 

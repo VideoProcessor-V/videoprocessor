@@ -393,7 +393,7 @@
 	<ClInclude Include="vprenderer\MotionEngineIdle.h" />
 	<ClInclude Include="vprenderer\CaptureTimestampGap.h" />
 	<ClInclude Include="vprenderer\DisplayRateHold.h" />
-	<ClInclude Include="vprenderer\UploadReuse.h" />
+	<ClInclude Include="..\VP-V\modules\input\capture\UploadReuse.h" />
 	<ClInclude Include="MotionAhead.h" />
 	<ClInclude Include="GeneralRate.h" />
 	<ClInclude Include="GeneralRateLog.h" />

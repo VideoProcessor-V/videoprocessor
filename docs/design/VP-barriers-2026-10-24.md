@@ -14,7 +14,7 @@ Efforts are in agent wall-clock hours.
   - The exporter binds A as `//!HOOK LUMA` at the re-base output (D:\nn-corpus\VP-NN-TrainKit\trainkit\export_glsl.py:13-16, :94).
   - VP's front end is not built from libplacebo hooks. It is a chain of pl_frame-to-pl_frame pl_dispatch passes that run before pl_render: re-base, then deband, then detail pulse, then texture restore (LVR:23524, 23568, 23631, 23650).
   - A LUMA hook therefore runs AFTER deband and texture restore. The agreed order is the reverse: A, then deband, then texture restore.
-  - libplacebo never fires LUMA_INPUT for an RGB frame: renderer.c:1457 maps it to PLANE_LUMA only. Native RGB ingest is one rgba16 plane plus a matcher r16 luma plane (VideoProcessor-Lib/vprenderer/GpuRgbUnpack.cpp:183-218), so A would silently never run on RGB capture.
+  - libplacebo never fires LUMA_INPUT for an RGB frame: renderer.c:1457 maps it to PLANE_LUMA only. Native RGB ingest is one rgba16 plane plus a matcher r16 luma plane (VP-V/modules/input/capture/GpuRgbUnpack.cpp:183-218), so A would silently never run on RGB capture.
   - The bindings `SCALER_SRC`/`SCALER_OUT` for D (export_glsl.py:19-22) are not libplacebo stages.
 - Resolution:
   - Build a VP **NetRunner** that executes the exporter's mpv-format passes standalone through pl_dispatch: a small shim for the DESC/HOOK/BIND/SAVE/WIDTH/HEIGHT/COMPONENTS/COMPUTE directives and the HOOKED_*/name_tex macros.
