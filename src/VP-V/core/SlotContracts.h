@@ -79,6 +79,19 @@ namespace PipelineSlots
 		default:
 			// Host, libplacebo-internal, quantiser and presentation slots stay where they are.
 			c.movable = false;
+			// Fail safe (net-runner audit 2026-10-24): a slot changes the picture unless it is known
+			// not to. Net fingerprints compare only picture-changing upstream slots, so a wrong "no"
+			// could hide a changed pipeline; a wrong "yes" only bypasses a net visibly.
+			switch (id)
+			{
+			case Id::InputCapture: case Id::InputSignal: case Id::InputQueueTiming: case Id::InputSourceAnalysis:
+			case Id::MotionVectorDelivery: case Id::OutputPresentation: case Id::DriveProjectorControl:
+			case Id::ControlNetRuntime: case Id::ControlDiagnostics: case Id::ControlConfig:
+				break;
+			default:
+				c.modifies = true;
+				break;
+			}
 			break;
 		}
 		return c;

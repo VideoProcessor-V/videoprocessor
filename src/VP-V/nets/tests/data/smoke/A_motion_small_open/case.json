@@ -1,0 +1,57 @@
+{
+ "case": "A_motion_small_open",
+ "shader": "A_motion_small.glsl",
+ "shader_sha256": "b4ebf1767f553bf05aef1562bd83e25573d9c073ed94167315154bc94b8362e7",
+ "params": {
+  "vpnn_ry": 0.5,
+  "vpnn_rx": 0.5,
+  "vpnn_kernel": 1,
+  "vpnn_codec": 1,
+  "vpnn_fgs": 0.0,
+  "vpnn_bpp_tier": 0.5,
+  "vpnn_bits10": 1.0
+ },
+ "bindings": [
+  {
+   "name": "HOOKED",
+   "width": 64,
+   "height": 48,
+   "components": 1,
+   "file": "HOOKED.f32"
+  },
+  {
+   "name": "VPNN_PREV",
+   "width": 64,
+   "height": 48,
+   "components": 1,
+   "file": "VPNN_PREV.f32"
+  },
+  {
+   "name": "VPNN_NEXT",
+   "width": 64,
+   "height": 48,
+   "components": 1,
+   "file": "VPNN_NEXT.f32"
+  },
+  {
+   "name": "VPNN_MASK",
+   "width": 64,
+   "height": 48,
+   "components": 2,
+   "file": "VPNN_MASK.f32"
+  }
+ ],
+ "output": {
+  "width": 64,
+  "height": 48,
+  "file": "expected.f32"
+ },
+ "fingerprint": "179062b98b108209",
+ "label_schema": "vpnn-labels-v1",
+ "text_patch": {
+  "from": "float gl = 1.9922794103622437;",
+  "to": "float gl = 25.992279052734375;"
+ },
+ "gate_tiles_open": 12,
+ "gate_tiles": 12
+}
