@@ -132,11 +132,14 @@ namespace VpRepeatReuse
 		bool TryDrawRepeat(const RepeatFrameKey&, pl_renderer renderer, const pl_frame& destination,
 			const pl_render_params& params) override
 		{
-			if (!m_decision.reuse || !m_hooks || !m_ctx.cache)
+			if (!m_decision.reuse || !m_ctx.cache)
 				return false;
 			const std::vector<const pl_hook*> exclude(m_ctx.exclude.begin(), m_ctx.exclude.begin() + m_ctx.excludeCount);
+			// The draw's own hook list (params), not the assembled one: it is what a full render of this
+			// refresh would run (e.g. with output_segments_merged the merged S3 hook - WP-6).
+			const std::vector<const pl_hook*> drawHooks(params.hooks, params.hooks + (params.hooks ? params.num_hooks : 0));
 			if (m_adapter.DrawFromCache(renderer, m_ctx.cache->Texture(m_key.sourceSequence), m_ctx.cache->Repr(),
-				m_ctx.cache->Color(), m_cacheTargetCrop, params, *m_hooks, exclude, m_ctx.encodingRepair, destination))
+				m_ctx.cache->Color(), m_cacheTargetCrop, params, drawHooks, exclude, m_ctx.encodingRepair, destination))
 				return true;
 			m_failed = true;
 			m_policy.NoteDrawFailed();
