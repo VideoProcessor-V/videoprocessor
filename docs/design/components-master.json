@@ -767,7 +767,11 @@
         "src/VP-V/modules/drive/led_compensation/LedController.h",
         "src/VP-V/modules/drive/led_compensation/LedRawTransfer.cpp",
         "src/VP-V/modules/drive/led_compensation/LedRawTransfer.h",
-        "src/VP-V/modules/drive/led_compensation/LedDriveConfig.h"
+        "src/VP-V/modules/drive/led_compensation/LedDriveConfig.h",
+        "src/VP-V/modules/drive/led_compensation/DynamicDriveHost.cpp",
+        "src/VP-V/modules/drive/led_compensation/DynamicDriveHost.h",
+        "src/VP-V/modules/drive/led_compensation/DynamicDriveFrame.cpp",
+        "src/VP-V/modules/drive/led_compensation/DynamicDriveFrame.h"
       ],
       "components": {
         "files": {

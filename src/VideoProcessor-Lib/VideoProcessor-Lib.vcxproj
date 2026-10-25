@@ -233,6 +233,8 @@
     <ClInclude Include="..\VP-V\modules\drive\led_compensation\LedRawTransfer.h" />
     <ClInclude Include="..\VP-V\modules\drive\projector_control\LedDriveArbiter.h" />
     <ClInclude Include="..\VP-V\modules\drive\led_compensation\LedDriveHoldover.h" />
+    <ClInclude Include="..\VP-V\modules\drive\led_compensation\DynamicDriveHost.h" />
+    <ClInclude Include="..\VP-V\modules\drive\led_compensation\DynamicDriveFrame.h" />
     <ClInclude Include="filesource\FileHost.h" />
     <ClInclude Include="filesource\FileHostSettings.h" />
     <ClInclude Include="SourceRuleVariable.h" />
@@ -526,6 +528,7 @@
     <ClCompile Include="..\VP-V\modules\drive\led_measure\LedLookahead.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\projector_control\LedDriveArbiter.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\led_compensation\LedDriveHoldover.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\led_compensation\DynamicDriveHost.cpp" />
     <ClCompile Include="filesource\FileHost.cpp" />
     <ClCompile Include="ConfigurationDiscovery.cpp" />
 	<ClCompile Include="DisplayTopologySession.cpp" />
