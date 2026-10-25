@@ -39,5 +39,5 @@
     ]
   },
   "fallback_when_missing": "VP debander failure renders without it; temporal frames keep libplacebo's deband.",
-  "fallback_entry": "VP deband: off on the DV tunnel planes (no deband after decode yet)"
+  "fallback_entry": "deband: libplacebo deband (VP debander failed: <error>) / VP deband: off on the DV tunnel planes (no deband after decode yet)"
 }

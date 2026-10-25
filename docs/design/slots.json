@@ -566,8 +566,8 @@
       "planned_keys": [],
       "tiers": "Classic libplacebo deband; Low..Upper VP deband",
       "fallback": {
-        "entry": "VP deband: off on the DV tunnel planes (no deband after decode yet)",
-        "behaviour": "VP debander failure renders without it; temporal frames keep libplacebo's deband."
+        "entry": "deband: libplacebo deband (VP debander failed: <error>) / VP deband: off on the DV tunnel planes (no deband after decode yet)",
+        "behaviour": "A failed VP debander: libplacebo's deband stands in (FallbackCatalog::PlanDeband, WP-4). On the DV tunnel the VP debander is skipped (raw opponent planes before the decode; DvHostStage) and listed; temporal frames keep libplacebo's deband."
       },
       "upstream": [
         "repair.encoding"

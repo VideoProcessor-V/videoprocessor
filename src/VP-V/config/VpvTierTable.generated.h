@@ -69,7 +69,7 @@ namespace Vpv
             t.slotList.push_back({ "motion.estimation", "Motion estimation + vector store", "motion", "built", 50, "motion: matcher only (optical flow failed: <error>) / no optical-flow look-ahead (producer stopped: <error>)" });
             t.slotList.push_back({ "scaling.rebase", "Re-base (entrance stage 2a)", "scaling", "built", 60, "re-base precision: <the re-base's float-intermediate note>" });
             t.slotList.push_back({ "repair.encoding", "Encoding repair (entrance stage 1)", "repair", "placeholder", 70, "Repair: bypassed (net fingerprint mismatch / missing weights / DV IPT input)" });
-            t.slotList.push_back({ "repair.deband", "Deband", "repair", "built", 80, "VP deband: off on the DV tunnel planes (no deband after decode yet)" });
+            t.slotList.push_back({ "repair.deband", "Deband", "repair", "built", 80, "deband: libplacebo deband (VP debander failed: <error>) / VP deband: off on the DV tunnel planes (no deband after decode yet)" });
             t.slotList.push_back({ "repair.texture_restore", "Texture restore + breathing add-on", "repair", "built", 90, "Texture restore: inactive (<reason>)" });
             t.slotList.push_back({ "scaling.route_4k", "4K route (entrance stage 2b)", "scaling", "placeholder", 100, "4K route: off (<reason>)" });
             t.slotList.push_back({ "scaling.refine", "Refine net", "scaling", "placeholder", 110, "Refine: bypassed (fingerprint mismatch / group underperforms / low latency)" });
