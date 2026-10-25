@@ -92,8 +92,20 @@ namespace Calibration
 		bool Active() const;
 
 	private:
+		// What `start` checked on the RPC thread; the worker opens the devices and builds the run.
+		struct PendingStart
+		{
+			std::string kind;
+			CalibrationSettings settings;
+			SessionEnvironment environment;
+			LedDrive::ProjectorConfig projectorConfig;
+			LedDrive::LedDriveConfig ledConfig;
+		};
+
 		std::string StatusText();
 		std::string Start(const std::string& arguments, std::string& error);
+		// Worker: opens the projector / sensor / meter (spotread search), builds and runs the session.
+		void RunWorker(const PendingStart& pending);
 		void JoinWorker();
 		void StartProbe(const std::string& argyllPath);
 		std::unique_ptr<IMeter> CreateMeter(const CalibrationSettings& settings, IPatternSink& sink, double& floorNits,
@@ -104,6 +116,15 @@ namespace Calibration
 		mutable std::mutex mutex;
 		std::shared_ptr<RendererPatternSink> sink;
 		std::shared_ptr<ICalibrationRun> session;
+		// Module findings 2026-10-24 item 7 (WP-12): `start` no longer opens devices or searches for
+		// spotread on the RPC thread. While the worker does that, `starting` is set and the status
+		// reads "starting"; a failure there becomes the status (step Failed) until the next start.
+		// worker, currentVpRoot, starting, startCancel and startFailure are guarded by `mutex`.
+		bool starting = false;
+		bool startCancel = false;
+		std::string startingKind;
+		bool startFailed = false;
+		SessionStatus startFailure;
 		std::string currentVpRoot;   // the folder of the configuration the run started from
 		std::thread worker;
 		std::atomic_bool stopping{ false };
