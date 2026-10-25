@@ -11,8 +11,8 @@ the old path until M2 so files on active branches keep building.
 
 | Old path | New path | Commit | Note |
 |---|---|---|---|
-| `src/VideoProcessor-Lib/vprenderer/ExtendedRange.cpp` | `src/VP-V/modules/colour/extended_range/ExtendedRange.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/ExtendedRange.h` | `src/VP-V/modules/colour/extended_range/ExtendedRange.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/ExtendedRange.cpp` | `src/VP-V/modules/colour/extended_range/ExtendedRange.cpp` | 4a7a73c0 |  |
+| `src/VideoProcessor-Lib/vprenderer/ExtendedRange.h` | `src/VP-V/modules/colour/extended_range/ExtendedRange.h` | 4a7a73c0 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/DolbyVisionTrims.h` | `src/VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h` | d58d0b4c | fwd |
 | `src/VideoProcessor-Lib/vprenderer/SdrToneShape.h` | `src/VP-V/modules/colour/sdr_tone_shape/SdrToneShape.h` | d58d0b4c | fwd |
 | `src/VideoProcessor-Lib/CrashState.cpp` | `src/VP-V/modules/control/diagnostics/CrashState.cpp` | 259cfa50 |  |
@@ -42,13 +42,13 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/led/ProjectorDriver.h` | `src/VP-V/modules/drive/projector_control/ProjectorDriver.h` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/SerialPort.cpp` | `src/VP-V/modules/drive/projector_control/SerialPort.cpp` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/SerialPort.h` | `src/VP-V/modules/drive/projector_control/SerialPort.h` | 570b1ee8 | fwd |
-| `src/VideoProcessor-Lib/vprenderer/EarlyUpload.cpp` | `src/VP-V/modules/input/capture/EarlyUpload.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/EarlyUpload.h` | `src/VP-V/modules/input/capture/EarlyUpload.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.cpp` | `src/VP-V/modules/input/capture/GpuCaptureUnpack.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.h` | `src/VP-V/modules/input/capture/GpuCaptureUnpack.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.cpp` | `src/VP-V/modules/input/capture/GpuRgbUnpack.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.h` | `src/VP-V/modules/input/capture/GpuRgbUnpack.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/UploadReuse.h` | `src/VP-V/modules/input/capture/UploadReuse.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/EarlyUpload.cpp` | `src/VP-V/modules/input/capture/EarlyUpload.cpp` | 27622366 |  |
+| `src/VideoProcessor-Lib/vprenderer/EarlyUpload.h` | `src/VP-V/modules/input/capture/EarlyUpload.h` | 27622366 | fwd |
+| `src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.cpp` | `src/VP-V/modules/input/capture/GpuCaptureUnpack.cpp` | 27622366 |  |
+| `src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.h` | `src/VP-V/modules/input/capture/GpuCaptureUnpack.h` | 27622366 | fwd |
+| `src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.cpp` | `src/VP-V/modules/input/capture/GpuRgbUnpack.cpp` | 27622366 |  |
+| `src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.h` | `src/VP-V/modules/input/capture/GpuRgbUnpack.h` | 27622366 | fwd |
+| `src/VideoProcessor-Lib/vprenderer/UploadReuse.h` | `src/VP-V/modules/input/capture/UploadReuse.h` | 27622366 | fwd |
 | `src/VideoProcessor-Lib/DolbyVisionTunnelGate.h` | `src/VP-V/modules/input/signal/DolbyVisionTunnelGate.h` | a177e22a | fwd |
 | `src/VideoProcessor-Lib/DolbyVisionTunnelHandoff.h` | `src/VP-V/modules/input/signal/DolbyVisionTunnelHandoff.h` | a177e22a | fwd |
 | `src/VideoProcessor-Lib/vprenderer/DolbyVisionTunnelUnpackReference.h` | `src/VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h` | a177e22a | fwd |
@@ -103,13 +103,13 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/calibration/Terminal.h` | `src/VP-V/modules/output/calibration_lut/calibration/Terminal.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/TranscriptRecorder.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/TranscriptRecorder.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/TranscriptRecorder.h` | `src/VP-V/modules/output/calibration_lut/calibration/TranscriptRecorder.h` | d2517eb1 |  |
-| `src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp` | `src/VP-V/modules/output/dither/CustomHookChain.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/CustomHookChain.h` | `src/VP-V/modules/output/dither/CustomHookChain.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/OutputEncodingRepair.cpp` | `src/VP-V/modules/output/dither/OutputEncodingRepair.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/OutputEncodingRepair.h` | `src/VP-V/modules/output/dither/OutputEncodingRepair.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/SigmaDeltaDomain.h` | `src/VP-V/modules/output/dither/SigmaDeltaDomain.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.cpp` | `src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h` | `src/VP-V/modules/scaling/output/AdaptiveDownscale.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/DownscaleLight.h` | `src/VP-V/modules/scaling/output/DownscaleLight.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp` | `src/VP-V/modules/output/dither/CustomHookChain.cpp` | 4799f96f |  |
+| `src/VideoProcessor-Lib/vprenderer/CustomHookChain.h` | `src/VP-V/modules/output/dither/CustomHookChain.h` | 4799f96f | fwd |
+| `src/VideoProcessor-Lib/vprenderer/OutputEncodingRepair.cpp` | `src/VP-V/modules/output/dither/OutputEncodingRepair.cpp` | 4799f96f |  |
+| `src/VideoProcessor-Lib/vprenderer/OutputEncodingRepair.h` | `src/VP-V/modules/output/dither/OutputEncodingRepair.h` | 4799f96f | fwd |
+| `src/VideoProcessor-Lib/vprenderer/SigmaDeltaDomain.h` | `src/VP-V/modules/output/dither/SigmaDeltaDomain.h` | 4799f96f | fwd |
+| `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.cpp` | `src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp` | f45b4b00 |  |
+| `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h` | `src/VP-V/modules/scaling/output/AdaptiveDownscale.h` | f45b4b00 | fwd |
+| `src/VideoProcessor-Lib/vprenderer/DownscaleLight.h` | `src/VP-V/modules/scaling/output/DownscaleLight.h` | f45b4b00 | fwd |
 | `src/VideoProcessor-Lib/KernelInverse.cpp` | `src/VP-V/modules/scaling/rebase/KernelInverse.cpp` | 648da813 |  |
 | `src/VideoProcessor-Lib/KernelInverse.h` | `src/VP-V/modules/scaling/rebase/KernelInverse.h` | 648da813 | fwd |
