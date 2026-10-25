@@ -53,7 +53,7 @@
 #include "GrainReferenceModel.h"
 #include <memory>
 #include <vprenderer/NlsMaskMapping.h>
-#include <led/LedMeasurementHook.h>
+#include <VP-V/modules/drive/led_measure/LedMeasurementHook.h>
 #include <led/LedRawTransfer.h>
 #include <NlsGeometryPolicy.h>
 #include <libplacebo/d3d11.h>

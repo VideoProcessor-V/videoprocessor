@@ -26,6 +26,8 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/led/LedLookahead.h` | `src/VP-V/modules/drive/led_measure/LedLookahead.h` | 9bfb55d6 |  |
 | `src/VideoProcessor-Lib/led/LedMeasurement.cpp` | `src/VP-V/modules/drive/led_measure/LedMeasurement.cpp` | 9bfb55d6 |  |
 | `src/VideoProcessor-Lib/led/LedMeasurement.h` | `src/VP-V/modules/drive/led_measure/LedMeasurement.h` | 9bfb55d6 |  |
+| `src/VideoProcessor-Lib/led/LedMeasurementHook.cpp` | `src/VP-V/modules/drive/led_measure/LedMeasurementHook.cpp` | staged |  |
+| `src/VideoProcessor-Lib/led/LedMeasurementHook.h` | `src/VP-V/modules/drive/led_measure/LedMeasurementHook.h` | ? | fwd |
 | `src/VideoProcessor-Lib/led/BarcoAsciiDriver.cpp` | `src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.cpp` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/BarcoAsciiDriver.h` | `src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.h` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/ConnectionTest.cpp` | `src/VP-V/modules/drive/projector_control/ConnectionTest.cpp` | 570b1ee8 |  |

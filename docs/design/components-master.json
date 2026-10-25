@@ -726,7 +726,9 @@
         "src/VP-V/modules/drive/led_measure/LedMeasurement.h",
         "src/VP-V/modules/drive/led_measure/LedLookahead.h",
         "src/VP-V/modules/drive/led_measure/ReadbackRing.h",
-        "src/VideoProcessor-Lib/led/LedMeasurementHook.cpp"
+        "src/VP-V/modules/drive/led_measure/LedMeasurementHook.cpp",
+        "src/VP-V/modules/drive/led_measure/LedMeasurementHook.h",
+        "src/VP-V/modules/drive/led_measure/FrameStats.h"
       ],
       "components": {
         "files": {

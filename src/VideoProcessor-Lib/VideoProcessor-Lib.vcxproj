@@ -226,8 +226,9 @@
     <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\TranscriptRecorder.h" />
     <ClInclude Include="..\VP-V\modules\drive\projector_control\LedController.h" />
     <ClInclude Include="..\VP-V\modules\drive\led_measure\LedMeasurement.h" />
+    <ClInclude Include="..\VP-V\modules\drive\led_measure\FrameStats.h" />
     <ClInclude Include="..\VP-V\modules\drive\led_compensation\LedDriveModule.h" />
-    <ClInclude Include="led\LedMeasurementHook.h" />
+    <ClInclude Include="..\VP-V\modules\drive\led_measure\LedMeasurementHook.h" />
     <ClInclude Include="..\VP-V\modules\drive\led_measure\LedLookahead.h" />
     <ClInclude Include="led\LedRawTransfer.h" />
     <ClInclude Include="..\VP-V\modules\drive\led_compensation\LedDriveArbiter.h" />

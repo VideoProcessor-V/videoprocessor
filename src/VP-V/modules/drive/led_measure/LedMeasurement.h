@@ -1,6 +1,6 @@
 #pragma once
 
-#include <VP-V/modules/drive/projector_control/LedController.h>
+#include <VP-V/modules/drive/led_measure/FrameStats.h>
 #include <led/LedDriveConfig.h>
 
 #include <algorithm>

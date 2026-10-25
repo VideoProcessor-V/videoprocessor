@@ -18,7 +18,7 @@ Measure the picture's light for the LED drive: the rendered picture at PRE_OUTPU
 
 ### Public API
 
-- `MeasurementHook` (src/VideoProcessor-Lib/led/LedMeasurementHook.*, still at the legacy path). A native libplacebo hook at `PL_HOOK_PRE_OUTPUT`: one compute pass writes 3x3 block means (up to 320 x 180 blocks) into a storage buffer.
+- `MeasurementHook` (src/VP-V/modules/drive/led_measure/LedMeasurementHook.*, still at the legacy path). A native libplacebo hook at `PL_HOOK_PRE_OUTPUT`: one compute pass writes 3x3 block means (up to 320 x 180 blocks) into a storage buffer.
   - Per frame, before rendering: `SetFrame` (rect, APL weights, gamma-boost exponent, source sequence), `SetPeak`, `SetMask`, `SetGrain`.
   - After rendering: `Collect` returns finished measurements and their sequences.
   - `Release` before the GPU goes away. It never modifies the picture.
@@ -136,7 +136,7 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 - `src/VP-V/modules/drive/led_measure/LedMeasurement.h`
 - `src/VP-V/modules/drive/led_measure/LedLookahead.h`
 - `src/VP-V/modules/drive/led_measure/ReadbackRing.h`
-- `src/VideoProcessor-Lib/led/LedMeasurementHook.cpp`
+- `src/VP-V/modules/drive/led_measure/LedMeasurementHook.cpp`
 
 `LedMeasurementHook.*` stays at the legacy path for now: `VideoProcessor-Test.vcxproj` (changed by active branches) compiles its `.cpp`.
 
