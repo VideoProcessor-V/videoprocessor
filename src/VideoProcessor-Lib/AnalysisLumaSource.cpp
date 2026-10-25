@@ -410,11 +410,33 @@ bool AnalysisLumaSource::SampleLuma(int x, int y, uint16_t& luma) const
 	return true;
 }
 
+void AnalysisLumaPlane::Bind(const AnalysisLumaSource& source)
+{
+	width = source.width;
+	height = source.height;
+	boundData = source.data;
+	boundRowBytes = source.rowBytes;
+	boundChromaRowBytes = source.chromaRowBytes;
+	boundFormat = static_cast<int>(source.format);
+	boundEncoding = static_cast<int>(source.encoding);
+	boundColorspace = static_cast<int>(source.colorspace);
+	boundRange = (source.fullRangeYuv ? 1 : 0);
+	boundAlignment = source.rgbBitAlignment;
+}
+
+bool AnalysisLumaPlane::Matches(const AnalysisLumaSource& source) const
+{
+	return width == source.width && height == source.height && boundData == source.data &&
+		boundRowBytes == source.rowBytes && boundChromaRowBytes == source.chromaRowBytes &&
+		boundFormat == static_cast<int>(source.format) && boundEncoding == static_cast<int>(source.encoding) &&
+		boundColorspace == static_cast<int>(source.colorspace) && boundRange == (source.fullRangeYuv ? 1 : 0) &&
+		boundAlignment == source.rgbBitAlignment;
+}
+
 const uint16_t* AnalysisLumaSource::SharedLumaRow(int y) const
 {
 	const AnalysisLumaPlane* plane = sharedLuma.get();
-	if (!plane || y < 0 || y >= height || !plane->Ready() ||
-		plane->width != width || plane->height != height ||
+	if (!plane || y < 0 || y >= height || !plane->Ready() || !plane->Matches(*this) ||
 		plane->codes.size() != static_cast<size_t>(width) * static_cast<size_t>(height))
 		return nullptr;
 	return plane->codes.data() + static_cast<size_t>(y) * static_cast<size_t>(width);

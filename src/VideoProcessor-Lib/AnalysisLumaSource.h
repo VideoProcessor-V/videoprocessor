@@ -46,14 +46,16 @@ struct AnalysisLumaSample
 // producer owns the frame and then read by every analyser. Readers never wait:
 // until Publish() the plane is ignored and Sample() decodes as before, so every
 // value, and every decision built on it, is identical with or without it.
+struct AnalysisLumaSource;
+
 struct AnalysisLumaPlane
 {
 	int width = 0;
 	int height = 0;
 	std::vector<uint16_t> codes; // row-major, `width` per row: Sample(x, y).luma
 
-	// One producer fills `codes` after a successful TryClaim(), then calls
-	// Publish(); nothing writes the plane after that.
+	// One producer fills `codes` after a successful TryClaim() and Bind(source),
+	// then calls Publish(); nothing writes the plane after that.
 	bool TryClaim()
 	{
 		bool expected = false;
@@ -61,10 +63,30 @@ struct AnalysisLumaPlane
 	}
 	void Publish() { ready.store(true, std::memory_order_release); }
 	bool Ready() const { return ready.load(std::memory_order_acquire); }
+	// Records the view the codes are decoded from (pixels, layout and every
+	// field Sample() depends on). A source describing anything else, even at
+	// the same size, never reads this plane.
+	void Bind(const AnalysisLumaSource& source);
+	bool Matches(const AnalysisLumaSource& source) const;
+	// For a producer that pools planes: back to unclaimed and unpublished. Only
+	// when nothing else holds the plane.
+	void Recycle()
+	{
+		ready.store(false, std::memory_order_relaxed);
+		claimed.store(false, std::memory_order_release);
+	}
 
 private:
 	std::atomic<bool> claimed{ false };
 	std::atomic<bool> ready{ false };
+	const uint8_t* boundData = nullptr;
+	size_t boundRowBytes = 0;
+	size_t boundChromaRowBytes = 0;
+	int boundFormat = -1;
+	int boundEncoding = -1;
+	int boundColorspace = -1;
+	int boundRange = -1;
+	uint8_t boundAlignment = 0;
 };
 
 struct AnalysisLumaSource
