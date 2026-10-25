@@ -277,5 +277,70 @@ namespace VideoProcessorTest
 			todays.Release();
 			moved.Release();
 		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(AdaptiveDownscaleStageRendersTodaysCodes)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(AdaptiveDownscaleStageRendersTodaysCodes)
+		{
+			// Audit LOW-2: the downscale form (the cinema's default path, 4K -> 2560x1600), 0.5x,
+			// with the SSIM check answered "present" (the hook list is then today's: measure first,
+			// blend last; the SSIM shader itself is not needed for the identity).
+			Device dev;
+			Assert::IsTrue(dev.d3d && dev.renderer, L"Could not create the libplacebo test device");
+			const ExtendedRangeGpuProbe::Planes planes = ExtendedRangeGpuProbe::Edges();
+			AdaptiveDownscale::Module todays;
+			AdaptiveDownscale::Module moved;
+			AdaptiveDownscaleStage::Stage stage{ moved };
+			const AdaptiveDownscale::Settings settings;
+			for (int frameIndex = 1; frameIndex <= 3; ++frameIndex)
+			{
+				const Rendered a = RenderWith(dev.d3d->gpu, dev.renderer, planes, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_GAMMA22,
+					PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_GAMMA22, 0.5,
+					[&](pl_frame&, const pl_frame&, std::vector<const pl_hook*>& list) {
+						AdaptiveDownscale::Settings now = settings;
+#if defined(PL_RENDER_PARAMS_FBO_FLOAT32)
+						now.float32Picture = true;
+#endif
+						now.residualCodingNoiseCodes = 0.0f;
+						todays.SetUpscale(AdaptiveDownscale::Upscale());
+						todays.SetFrame(now, static_cast<uint64_t>(frameIndex), 1.0f / 24.0f);
+						todays.SetSourceDownscales(true);
+						todays.ClearGrainField();
+						todays.ClearMotion();
+						list.insert(list.begin(), todays.Measure());
+						list.push_back(todays.Blend());
+					});
+				double weight = 1.0;
+				bool grainWanted = false, noSsim = false;
+				AdaptiveDownscaleStage::Host host;
+				host.fallbackFramePeriod = []() { return 1.0f / 24.0f; };
+				host.bitrate = [](double& q) { q = 1.0; return false; };
+				host.nlsMapping = []() { return NlsMaskMapping::Mapping(); };
+				host.ssimInChain = []() { return true; };
+				host.motion = []() { return AdaptiveDownscaleStage::MotionSource(); };
+				host.publishStatus = []() {};
+				const Rendered b = RenderWith(dev.d3d->gpu, dev.renderer, planes, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_GAMMA22,
+					PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_GAMMA22, 0.5,
+					[&](pl_frame& image, const pl_frame& out, std::vector<const pl_hook*>& list) {
+						AdaptiveDownscaleStage::Frame f;
+						f.adaptiveDownscale = true;
+						f.adaptive = &settings;
+						f.lowBitrateOff = true;
+						f.fboFloat32 = 1;
+						f.sourceSequence = static_cast<uint64_t>(frameIndex);
+						f.nominalSourceRateHz = 24.0;
+						f.sourceCrop = { 0, 0, static_cast<float>(image.planes[0].texture->params.w),
+							static_cast<float>(image.planes[0].texture->params.h) };
+						f.targetCrop = { 0, 0, static_cast<float>(out.planes[0].texture->params.w),
+							static_cast<float>(out.planes[0].texture->params.h) };
+						stage.Register(f, host, { weight, grainWanted, noSsim }, list);
+					});
+				Assert::IsTrue(a.ok && b.ok, W("render failed: " + a.error + " / " + b.error).c_str());
+				Assert::AreEqual(0, MaxDifference(a, b), L"the stage must render today's codes exactly");
+			}
+			todays.Release();
+			moved.Release();
+		}
 	};
 }
