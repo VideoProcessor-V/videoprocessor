@@ -296,6 +296,13 @@
    "category": "Cpu",
    "file": "src/VP-V/modules/control/diagnostics/tests/DiagnosticsAdapterTests.cpp",
    "note": "Enumerates DXGI adapters only; renders nothing (reviewed)."
+  },
+  {
+   "kind": "method",
+   "value": "FallbackCatalogTests::MotionConsumerGpuFailuresAreVisibleWhileRecent",
+   "category": "Cpu",
+   "file": "src/VP-V/tests/FallbackCatalogTests.cpp",
+   "note": "Name mentions the GPU; the body is CPU only (MotionConsumerFailures catalog logic, reviewed)."
   }
  ]
 }
