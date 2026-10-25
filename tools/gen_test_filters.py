@@ -28,6 +28,21 @@ def clause(entry, negate):
     return f'Name{bang}~{value}'
 
 
+def attribute_names(manifest):
+    """Methods carrying an excluded Category attribute that no excluded manifest entry already covers."""
+    names = []
+    for path in lib.test_sources(lib.repo_root()):
+        for t in lib.scan_file(path):
+            if t['category'] not in lib.EXCLUDED_FROM_CPU:
+                continue
+            if any(e['category'] in lib.EXCLUDED_FROM_CPU and lib.entry_matches(e, t['cls'], t['method'])
+                   for e in manifest['entries']):
+                continue
+            if t['method'] not in names:
+                names.append(t['method'])
+    return sorted(names)
+
+
 def clauses(manifest, negate):
     out = []
     for e in manifest['entries']:
@@ -35,6 +50,9 @@ def clauses(manifest, negate):
             c = clause(e, negate)
             if c not in out:
                 out.append(c)
+    bang = '!' if negate else ''
+    for n in attribute_names(manifest):
+        out.append(f'Name{bang}~{n}')
     return out
 
 
