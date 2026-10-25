@@ -372,6 +372,9 @@ namespace
 			auto* analysis = control<QCheckBox>(window, Vpv::ObjectName("expert.frame_analysis_store"));
 			require(!analysis->isChecked(), "the frame analysis store is off by default");
 			analysis->setChecked(true);
+			auto* hdr = control<QComboBox>(window, Vpv::ObjectName("expert.hdr_inference"));
+			require(hdr->currentIndex() == 0, "hdr_inference shows vp by default");
+			hdr->setCurrentIndex(1);
 			save(window);
 		}
 		ConfigFile config;
@@ -384,6 +387,7 @@ namespace
 		require(config.TryGetString("vpv", "output_segments_merged", v) && v == "on", "the merged output chain is stored in [vpv]");
 		require(config.TryGetString("vpv", "entrance_gpu_drain", v) && v == "finish", "the entrance GPU drain is stored in [vpv]");
 		require(config.TryGetString("vpv", "frame_analysis_store", v) && v == "on", "the frame analysis store is stored in [vpv]");
+		require(config.TryGetString("vpv", "hdr_inference", v) && v == "original", "the HDR inference choice is stored in [vpv]");
 		requireVpReads(path);
 		{
 			ConfigEditorWindow window(path, 0, true);

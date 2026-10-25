@@ -1066,6 +1066,21 @@ namespace Vpv
 				state->host.setValue(section, QStringLiteral("calibration_lut_stage"), lutStage->itemData(i).toString());
 			});
 
+			// F-8 (owner rule vp-either-or-overlaps): which HDR inference decides an unflagged BT.2020
+			// signal - VP's or Bill's original newlldv heuristic. The Original pathway selects Bill's.
+			auto* hdrInference = new QComboBox;
+			hdrInference->setObjectName(ObjectName(QStringLiteral("expert.hdr_inference")));
+			hdrInference->addItem(QStringLiteral("VP (default; bit-depth, DV-tunnel and settings gates, SDR veto)"), QString());
+			hdrInference->addItem(QStringLiteral("Original (Bill's newlldv heuristic: BT.2020 + SDR + no InfoFrame)"), QStringLiteral("original"));
+			hdrInference->setToolTip(QStringLiteral("Key hdr_inference. Both need [general] newlldv on. The Original pathway "
+				"always uses the original heuristic. Applied at the next start of VideoProcessor."));
+			form->addRow(QStringLiteral("HDR inference (newlldv)"), hdrInference);
+			QObject::connect(hdrInference, qOverload<int>(&QComboBox::currentIndexChanged), hdrInference, [state, hdrInference, section](int i)
+			{
+				if (state->refreshing || i < 0 || !state->host.setValue) return;
+				state->host.setValue(section, QStringLiteral("hdr_inference"), hdrInference->itemData(i).toString());
+			});
+
 			// pipeline_entrance_once (B3, ADR-0024) is a hidden diagnostic/test key with no Config control (skeleton b76571c1).
 
 			// Output segments S2/S3 as one hook each (draft): off until the GPU check passes; never in the
@@ -1165,7 +1180,7 @@ namespace Vpv
 			layout->addLayout(form);
 			layout->addStretch();
 
-			state->refreshers.push_back([state, lutStage, merged, drain, analysis, order, slotsOff, section]()
+			state->refreshers.push_back([state, lutStage, merged, drain, analysis, hdrInference, order, slotsOff, section]()
 			{
 				const auto get = [&](const char* key) { return state->host.value ? state->host.value(section, QString::fromLatin1(key)).trimmed() : QString(); };
 				{
@@ -1186,6 +1201,10 @@ namespace Vpv
 					const QSignalBlocker blocker(analysis);
 					analysis->setChecked(get("frame_analysis_store").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0);
 					analysis->setEnabled(get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) != 0);
+				}
+				{
+					const QSignalBlocker blocker(hdrInference);
+					hdrInference->setCurrentIndex(get("hdr_inference").compare(QStringLiteral("original"), Qt::CaseInsensitive) == 0 ? 1 : 0);
 				}
 				if (!order->hasFocus()) order->setText(get("pipeline_order"));
 				if (!slotsOff->hasFocus()) slotsOff->setText(get("pipeline_slots_off"));

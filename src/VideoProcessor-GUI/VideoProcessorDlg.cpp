@@ -5676,7 +5676,7 @@ void CVideoProcessorDlg::EnableNewLldvHeuristic(bool enabled)
 {
 	m_useNewLldvHeuristic = enabled;
 	DebugLog::Log(
-		"newlldv: %s (BT.2020, 10/12-bit, no HDR InfoFrame is treated as PQ for LLDV and HDR10)",
+		"newlldv: %s (an unflagged BT.2020 signal may be treated as PQ; hdr_inference selects VP's or Bill's decision)",
 		enabled ? "on" : "off");
 }
 
@@ -5687,6 +5687,29 @@ void CVideoProcessorDlg::EnableHdrInferenceSdrVeto(bool enabled)
 	options.sdrVeto = enabled;
 	m_hdrInference.SetOptions(options);
 	DebugLog::Log("newlldv_sdr_veto: %s", enabled ? "on" : "off");
+}
+
+// F-8 (owner rule vp-either-or-overlaps): Bill's original newlldv heuristic or VP's inference,
+// one tracker option (HdrInferenceOptions::originalHeuristic).
+void CVideoProcessorDlg::SelectOriginalNewLldvHeuristic(bool original, const HdrInferenceChoice::Resolved& fromConfig)
+{
+	HdrInferenceOptions options = m_hdrInference.Options();
+	options.originalHeuristic = original;
+	m_hdrInference.SetOptions(options);
+	m_hdrInferenceProblem = fromConfig.problem;
+	DebugLog::Log("hdr_inference: %s", HdrInferenceChoice::StartupLine(original, fromConfig).c_str());
+}
+
+// F-8: Bill's IsNewLldvModeSelected, restored for the USE of his candidate (original mode only).
+bool CVideoProcessorDlg::LldvModesSelected()
+{
+	if (m_hdrColorspaceCombo.GetCurSel() < 0 || m_hdrLuminanceCombo.GetCurSel() < 0)
+		return false;
+	return
+		static_cast<HdrColorspaceOptions>(m_hdrColorspaceCombo.GetItemData(m_hdrColorspaceCombo.GetCurSel())) ==
+			HdrColorspaceOptions::HDR_COLORSPACE_FOLLOW_INPUT_LLDV &&
+		static_cast<HdrLuminanceOptions>(m_hdrLuminanceCombo.GetItemData(m_hdrLuminanceCombo.GetCurSel())) ==
+			HdrLuminanceOptions::HDR_LUMINANCE_FOLLOW_INPUT_LLDV;
 }
 
 void CVideoProcessorDlg::EnableDolbyVisionTunnel(bool enabled)
@@ -13098,7 +13121,10 @@ bool CVideoProcessorDlg::HdrModesPermitInference()
 	const ColorSpace container = m_colorspaceContainerCombo.GetCurSel() >= 0 ?
 		static_cast<ColorSpace>(m_colorspaceContainerCombo.GetItemData(
 			m_colorspaceContainerCombo.GetCurSel())) : ColorSpace::UNKNOWN;
-	return HdrSettingsPermitInference(hdrRec709, container);
+	// F-8: the original heuristic uses its candidate only with both modes Follow input (LLDV), exactly
+	// as upstream's isHDFuryLLDV (HdrInferenceChoice::ModesPermit).
+	return HdrInferenceChoice::ModesPermit(m_hdrInference.Options().originalHeuristic, LldvModesSelected(),
+		HdrSettingsPermitInference(hdrRec709, container));
 }
 
 HdrInferenceSignal CVideoProcessorDlg::BuildHdrInferenceSignal()
@@ -13132,11 +13158,15 @@ HdrInferenceUpdate CVideoProcessorDlg::UpdateNewLldvCandidate()
 	switch (update.event)
 	{
 	case HdrInferenceEvent::CandidateSeen:
-		DebugLog::Log(
-			"newlldv: BT.2020 / %d-bit / no HDR InfoFrame candidate seen (epoch %llu); waiting %ums before treating it as PQ",
-			signal.bitDepth,
-			static_cast<unsigned long long>(m_hdrInference.Epoch()),
-			m_hdrInference.Options().confirmMs);
+		if (m_hdrInference.Options().originalHeuristic)   // F-8: no bit-depth gate in Bill's decision
+			DebugLog::Log("newlldv (original): BT.2020 / SDR / no HDR InfoFrame candidate seen; waiting %ums before treating it as PQ",
+				m_hdrInference.Options().confirmMs);
+		else
+			DebugLog::Log(
+				"newlldv: BT.2020 / %d-bit / no HDR InfoFrame candidate seen (epoch %llu); waiting %ums before treating it as PQ",
+				signal.bitDepth,
+				static_cast<unsigned long long>(m_hdrInference.Epoch()),
+				m_hdrInference.Options().confirmMs);
 		break;
 	case HdrInferenceEvent::Inferred:
 		DebugLog::Log(
@@ -13611,7 +13641,8 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
 	else if (m_useNewLldvHeuristic)
 	{
 		if (isHDFuryLLDV)
-			lldvDecisionReason =
+			lldvDecisionReason = m_hdrInference.Options().originalHeuristic ?
+				"new-match (original): stabilized BT.2020 / SDR / no HDR InfoFrame, both modes Follow input (LLDV)" :
 				"new-match: stabilized BT.2020 / 10-12-bit / no HDR InfoFrame (LLDV or HDR10)";
 		else if (m_hdrInference.State() == HdrInferenceState::Waiting)
 			lldvDecisionReason = "new-candidate-waiting: stabilization not complete";
@@ -13648,7 +13679,9 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
 		" raw_hdr=" + (rawHdrData ? "1" : "0") +
 		" newlldv=" + (m_useNewLldvHeuristic ? "1" : "0") +
 		" hdr_modes_permit=" + (HdrModesPermitInference() ? "1" : "0") +
-		" inference=" + ToString(m_hdrInference.State());
+		" inference=" + ToString(m_hdrInference.State()) +
+		" hdr_inference=" + (m_hdrInference.Options().originalHeuristic ? "original" : "vp") +
+		(m_hdrInferenceProblem.empty() ? std::string() : " hdr_inference_problem=" + m_hdrInferenceProblem);
 	// A veto preview (BuildHdrVetoSdrState) logs and records nothing.
 	if (!m_hdrVetoPreviewing)
 	{
@@ -13914,7 +13947,7 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
 			hdrInferred)
 		{
 			ShowProfileOverlayItems({ { "hdr", "HDR",
-				hdrInferred ? "PQ inferred (no HDR flag)" :
+				hdrInferred ? (m_hdrInference.Options().originalHeuristic ? "PQ inferred (no HDR flag; original heuristic)" : "PQ inferred (no HDR flag)") :
 					"SDR (picture veto; no HDR flag)",
 				ProfileChangeOverlay::Item::Indicator::None } },
 				false, "hdr-inference");
@@ -13999,8 +14032,10 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
 		m_videoValidText.SetWindowText(_T("Yes"));
 		m_videoDisplayModeText.SetWindowText(videoState->displayMode->ToString());
 		m_videoPixelFormatText.SetWindowText(ToString(videoState->videoFrameEncoding));
-		if (videoState->hdrInferred)
-			m_videoEotfText.SetWindowText(_T("PQ (inferred)"));
+		if (videoState->hdrInferred)   // F-8: which decision inferred it, and an unreadable key, are shown
+			m_videoEotfText.SetWindowText(m_hdrInference.Options().originalHeuristic ?
+				(m_hdrInferenceProblem.empty() ? _T("PQ (inferred, original)") : _T("PQ (inferred, original; hdr_inference invalid)")) :
+				(m_hdrInferenceProblem.empty() ? _T("PQ (inferred)") : _T("PQ (inferred; hdr_inference invalid)")));
 		else
 			m_videoEotfText.SetWindowText(ToString(videoState->eotf));
 		m_videoColorSpaceText.SetWindowText(ToString(videoState->colorspace));

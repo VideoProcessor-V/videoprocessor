@@ -9419,6 +9419,7 @@ static const std::map<std::string, const char*>& CoverageAllowList()
         { "renderer:pipeline_entrance_once", "hidden diagnostic/test key (ADR-0024): B3 is the default and the pre-B3 path is retired; no Config control" },
         { "renderer:entrance_gpu_drain", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.entrance_gpu_drain); also read from [vprenderer]" },
         { "renderer:frame_analysis_store", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.frame_analysis_store); also read from [vprenderer]" },
+        { "renderer:hdr_inference", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.hdr_inference); also read from [vprenderer]" },
     };
     return allowList;
 }
@@ -9524,7 +9525,7 @@ int writeSettingsInventory(const QString& outPath)
                 << (reason == allowList.end() ? QString() : inventoryField(QString::fromUtf8(reason->second))) << '\n';
         }
     }
-    for (const char* key : { "pipeline_original_pathway", "pipeline_order", "pipeline_slots_off", "calibration_lut_stage", "output_segments_merged" })
+    for (const char* key : { "pipeline_original_pathway", "pipeline_order", "pipeline_slots_off", "calibration_lut_stage", "output_segments_merged", "hdr_inference" })
         stream << "K\tvpv\tvpv\t" << key << "\t\n";
     for (QWidget* w : window.findChildren<QWidget*>())
     {

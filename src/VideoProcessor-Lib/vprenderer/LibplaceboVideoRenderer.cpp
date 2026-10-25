@@ -1280,6 +1280,7 @@ namespace
 		std::string pipelineOrder;
 		std::string pipelineSlotsOff;
 		std::string calibrationLutStage = "libplacebo";
+		std::string hdrInference = "vp";   // [vpv] hdr_inference (F-8): the GUI's choice; dumped and fingerprinted here
 		// pipeline_entrance_once (B3, ADR-0024): the motion consumers (interpolated pictures, hiccup
 		// gap pairs, source-warp extras) warp or blend the PROCESSED A and B - the entrance stages
 		// run once per source frame - instead of re-running the stages on every picture. The
@@ -1561,7 +1562,7 @@ namespace
 			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.sourceResolutionEvidenceShots << '|'
 			<< settings.sourceResolutionEvidenceSeconds << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
 			<< settings.pipelineOriginalPathway << '|' << settings.pipelineOrder << '|' << settings.pipelineSlotsOff << '|'
-			<< settings.calibrationLutStage << '|' << settings.pipelineEntranceOnce << '|' << settings.frameAnalysisStore << '|' << settings.entranceGpuDrain << '|'
+			<< settings.calibrationLutStage << '|' << settings.pipelineEntranceOnce << '|' << settings.frameAnalysisStore << '|' << settings.entranceGpuDrain << '|' << settings.hdrInference << '|'
 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
 			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.opticalFlowGlobal << '|'
 			<< settings.opticalFlowGlobalFallback << '|' << settings.opticalFlowCostTrust << '|' << settings.opticalFlowFbCheck << '|'
@@ -3614,6 +3615,7 @@ namespace
 		settings.outputSegmentsMerged = false;             // key=output_segments_merged
 		settings.renderAhead = false;                      // key=render_ahead
 		settings.calibrationLutStage = "libplacebo";       // key=calibration_lut_stage
+		settings.hdrInference = "original";                // key=hdr_inference
 		// Settings audit 2026-10-24: VP additions the first table missed (absent from Bill's v1.4.02-beta).
 		settings.activePictureStartupHold = false;         // key=active_picture_startup_hold
 		settings.lowBitrateHandling = "off";               // key=low_bitrate_handling
@@ -3665,6 +3667,14 @@ namespace
 				settings.outputSegmentsMerged = value == "on";
 			else
 				settings.pipelineSettingsProblems += "output_segments_merged '" + raw + "' (on|off); ";
+		}
+		if (TryGetPipelineString(config, "hdr_inference", raw))   // F-8 (HdrInferenceChoice.h)
+		{
+			const std::string value = ConfigFile::NormalizeName(raw);
+			if (value == "vp" || value == "original")
+				settings.hdrInference = value;
+			else
+				settings.pipelineSettingsProblems += "hdr_inference '" + raw + "' (vp|original); ";
 		}
 		if (TryGetPipelineString(config, "pipeline_entrance_once", raw))
 		{
@@ -11853,6 +11863,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.pipelineOrder != next.pipelineOrder, "pipeline_order");
 		changed(current.pipelineSlotsOff != next.pipelineSlotsOff, "pipeline_slots_off");
 		changed(current.calibrationLutStage != next.calibrationLutStage, "calibration_lut_stage");
+		changed(current.hdrInference != next.hdrInference, "hdr_inference");
 		changed(current.pipelineEntranceOnce != next.pipelineEntranceOnce, "pipeline_entrance_once");
 		changed(current.outputSegmentsMerged != next.outputSegmentsMerged, "output_segments_merged");
 		changed(current.entranceGpuDrain != next.entranceGpuDrain, "entrance_gpu_drain");
@@ -31313,6 +31324,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "dv_tone_mapping=" << s.dvToneMapping << "\n"
 		<< "dv_compare_capture_folder=" << s.dvCompareCaptureFolder << "\n"
 		<< "dv_tunnel_fixes=" << (s.dvTunnelFixes ? "on" : "off") << "\n"
+		<< "hdr_inference=" << s.hdrInference << "\n"
 		<< "occlusion_mask=" << s.occlusionMask << "\n"
 		<< "dither_vectors_own=" << s.ditherVectorsOwn << "\n"
 		<< "dither_grain_tolerance_scale=" << s.ditherGrainToleranceScale << "\n"

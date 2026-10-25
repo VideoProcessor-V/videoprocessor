@@ -66,6 +66,7 @@
 #include <ConfigurationApplyPolicy.h>
 #include <CaptureVideoStatePolicy.h>
 #include <HdrInference.h>
+#include <VP-V/modules/input/signal/HdrInferenceChoice.h>   // F-8: [vpv] hdr_inference
 #include <DolbyVisionTunnelHandoff.h>
 #include <HdrVetoCaptureGate.h>
 #include <ConfigEditorCore.h>
@@ -217,6 +218,7 @@ public:
 	void SubtitleRepositioning(SubtitleRepositionMode mode);
 	void EnableNewLldvHeuristic(bool enabled = true);
 	void EnableHdrInferenceSdrVeto(bool enabled = true);
+	void SelectOriginalNewLldvHeuristic(bool original, const HdrInferenceChoice::Resolved& fromConfig);   // F-8: [vpv] hdr_inference
 	void EnableDolbyVisionTunnel(bool enabled = true);
 	void EnableDolbyVisionTunnelHandoff(bool enabled = true);
 	void EnableBoundedInvalidCaptureRecovery(bool enabled);
@@ -417,6 +419,7 @@ protected:
 	// picture-statistics SDR veto ([general] newlldv_sdr_veto, default on).
 	HdrInferenceTracker m_hdrInference;
 	bool m_hdrInferenceSdrVeto = true;
+	std::string m_hdrInferenceProblem;   // F-8: an unreadable [vpv] hdr_inference (shown with the EOTF)
 	BitDepth m_captureInputBitDepth = BitDepth::UNKNOWN;
 	bool m_hdrInferredApplied = false;
 	std::string m_lastHdrInferenceEligibilityLog;
@@ -1329,6 +1332,7 @@ protected:
 	void ApplyNoUiLayout();
 	HdrInferenceUpdate UpdateNewLldvCandidate();
 	bool HdrModesPermitInference();
+	bool LldvModesSelected();   // F-8: Bill's IsNewLldvModeSelected (both HDR modes Follow input (LLDV))
 	HdrInferenceSignal BuildHdrInferenceSignal();
 	void UpdateHdrVetoMeasurement();
 	void ApplyHdrInferenceVeto(const HdrInferenceUpdate& update, const char* source);

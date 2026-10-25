@@ -8,6 +8,7 @@
 
 #include <pch.h>
 #include <VP-V/modules/control/diagnostics/CrashState.h>
+#include <VP-V/modules/input/signal/HdrInferenceChoice.h>   // F-8: [vpv] hdr_inference
 #include <UpdateLauncher.h>
 #include <ApplicationShutdownPolicy.h>
 
@@ -345,6 +346,13 @@ Options:
       With /newlldv, return real SDR sent as BT.2020 to SDR from picture
       statistics (at a cut, after SDR evidence in two shots). Default on;
       /newlldv_sdr_veto false (or newlldv_sdr_veto: false) turns it off.
+
+  /hdr_inference <vp|original>
+      Which decision /newlldv uses: vp (default; VP's inference with its
+      bit-depth, DV-tunnel and settings gates and the SDR veto) or original
+      (Bill's candidate decision: BT.2020 + SDR + no InfoFrame, used while both
+      HDR modes are Follow input (LLDV)). Built from [vpv] hdr_inference; the
+      Original pathway always selects original.
 
   /dv_tunnel_handoff
       With the DV tunnel on, hand a signal that is not a tunnel (10-bit RGB,
@@ -850,6 +858,9 @@ std::vector<std::wstring> LoadConfiguredCommandLineArguments(
 	AppendConfigBoolOption(arguments, config, "scene_correction_basic");
 	AppendConfigBoolOption(arguments, config, "newlldv");
 	AppendConfigBoolOption(arguments, config, "newlldv_sdr_veto");
+	// F-8 ([vpv] hdr_inference; the Original pathway selects Bill's heuristic): HdrInferenceChoice.h.
+	arguments.emplace_back(L"/hdr_inference");
+	arguments.emplace_back(HdrInferenceChoice::FromConfig(config).effective == HdrInferenceChoice::Mode::Original ? L"original" : L"vp");
 	AppendConfigBoolOption(arguments, config, "dv_tunnel_handoff");
 	AppendConfigBoolOption(arguments, config, "dolby_vision_tunnel");
 	AppendConfigBoolOption(arguments, config, "noui");
@@ -1138,7 +1149,8 @@ bool RequiresCommandLineValue(const wchar_t* argument)
 		IsCommandLineOption(argument, L"/active_output_sweep_hold_ms") ||
 		IsCommandLineOption(argument, L"/active_output_sweep_suite") ||
 		IsCommandLineOption(argument, L"/active_output_sweep_tests") ||
-		IsCommandLineOption(argument, L"/active_output_sweep_restart");
+		IsCommandLineOption(argument, L"/active_output_sweep_restart") ||
+		IsCommandLineOption(argument, L"/hdr_inference");
 }
 
 bool HasCaseInsensitiveValue(const wchar_t* argument)
@@ -1237,6 +1249,10 @@ void ValidateCommandLineArguments(const std::vector<const wchar_t*>& arguments)
 
 		if (IsCommandLineOption(argument, L"/queue_size") && !IsPositiveInteger(arguments[index + 1]))
 			throw std::runtime_error("Invalid /queue_size: expected a positive integer");
+
+		if (IsCommandLineOption(argument, L"/hdr_inference") &&
+			_wcsicmp(arguments[index + 1], L"vp") != 0 && _wcsicmp(arguments[index + 1], L"original") != 0)
+			throw std::runtime_error("Invalid /hdr_inference: expected vp or original");
 
 		if (IsCommandLineOption(argument, L"/reset_after_render_restart_seconds") &&
 			!IsPositiveInteger(arguments[index + 1]))
@@ -2104,6 +2120,8 @@ BOOL CVideoProcessorApp::InitInstance()
 			{
 				dlg.EnableHdrInferenceSdrVeto(booleanValue);
 			}
+			if (wcscmp(pArgs[i], L"/hdr_inference") == 0 && (i + 1) < iNumOfArgs)   // F-8
+				dlg.SelectOriginalNewLldvHeuristic(_wcsicmp(pArgs[i + 1], L"original") == 0, HdrInferenceChoice::Load());
 			if (ReadBooleanOption(pArgs.data(), i, iNumOfArgs,
 				L"/dolby_vision_tunnel", booleanValue))
 			{
