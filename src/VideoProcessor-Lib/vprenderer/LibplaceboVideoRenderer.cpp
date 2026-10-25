@@ -9924,7 +9924,7 @@ struct LibplaceboVideoRenderer::Impl
 		const LibplaceboRenderParameters::Settings unyieldedSettings = parameterSettings;
 		debandYieldedToVp = false;
 		yieldedDebandOn = false;
-		if (LibplaceboDebandYieldsToVp(settings))
+		if (LibplaceboDebandYieldsToVp(settings) && pipelineSlots.Runs(PipelineSlots::Id::RepairDeband))   // modularity: slot off = no yield
 		{
 			debandYieldedToVp = true;
 			// deband_vp_exclusive: VP's grain-guarded debander does the job; libplacebo's
@@ -23529,7 +23529,8 @@ struct LibplaceboVideoRenderer::Impl
 			std::string debandState;
 			// feat/dv-l8 (owner 2026-10-24, DvTunnelPolicy.h): VP's debander works on the source planes, which for the
 			// DV tunnel are the 12-bit opponent planes before libplacebo's decode - skipped there, visibly.
-			dvVpDebandSkipped = DvTunnelPolicy::SkipVpDeband(renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION, activeSettings.debandVp != "off");
+			dvVpDebandSkipped = DvTunnelPolicy::SkipVpDeband(renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION,
+                activeSettings.debandVp != "off" && pipelineSlots.Runs(PipelineSlots::Id::RepairDeband));
 			if (dvVpDebandSkipped)
 			{
 				debandState = "VP deband: off on Dolby Vision tunnel pictures (12-bit opponent planes before the decode)";
@@ -24213,7 +24214,9 @@ struct LibplaceboVideoRenderer::Impl
         // calibration LUT; PQ or gamma outputs. Non-certified (DolbyVisionTrims.h).
         // feat/dv-l8 task 5 (DvDolbyStyle.h): dv_tone_mapping dolby_style - the Dolby-style curve for DV pictures and
         // the trims in ICtCp; when it cannot run: bt2390 + the luminance trims, under "Fallbacks engaged".
-        const bool dvToneDolby = DvDolbyStyle::ParseMode(activeSettings.dvToneMapping) == DvDolbyStyle::Mode::DolbyStyle;
+        // Modularity (integ/batch1): with colour.sdr_tone_shape off, Dolby-style is not wanted (no bt2390, no fallback).
+        const bool dvToneDolby = DvDolbyStyle::ParseMode(activeSettings.dvToneMapping) == DvDolbyStyle::Mode::DolbyStyle &&
+            pipelineSlots.Runs(PipelineSlots::Id::ColourSdrToneShape);
         const bool dvTonePicture = renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION && convertedPayload && convertedPayload->dolby.valid;
         const std::string dvToneFallback = DvDolbyStyle::CannotRun(dvToneDolby && dvTonePicture, target.lut != nullptr,
             target.color.transfer, pipelineSlots.Runs(PipelineSlots::Id::ColourSdrToneShape), activeSettings.dvTrims && dvTrimsShaderMissing);
@@ -24275,6 +24278,7 @@ struct LibplaceboVideoRenderer::Impl
                     dvTrimsHook.Ensure(hookTemplates);
                     const size_t start = frameHooks.size();
                     dvTrimsHook.Collect(false, frameHooks);
+                    TagSlotHooks(start, PipelineSlots::Id::ColourSdrToneShape);   // modularity: trims follow the colour slot order
                     // Review C4: the luminance coefficients of the output's own primaries.
                     const pl_raw_primaries* prim = pl_raw_primaries_get(display.primaries);
                     double kr = 0.2126, kg = 0.7152, kb = 0.0722;
