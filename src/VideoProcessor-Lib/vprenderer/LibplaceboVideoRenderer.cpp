@@ -8105,10 +8105,6 @@ struct LibplaceboVideoRenderer::Impl
 	}
 	// output.calibration_lut in VP's output hooks (calibration_lut_stage = vp; R1).
 	CalibrationLutStage::Hook calibrationLutStage;
-	// The output segments (S2 PRE_OUTPUT colour + drive, S3 OUTPUT finish): one owner of their
-	// stages, order and parameters; the host keeps the decisions and calls each segment.
-	OutputSegments::OutputColourSegment outputColour{ sdrToneShape, dvTrimsHook, dynamicDrive.Measurement(), dynamicDrive.Compensation(), calibrationLutStage };
-	OutputSegments::OutputFinishSegment outputFinish{ outputEncodingRepair, occlusionMaskHook };
 	std::vector<const pl_hook*> userFrameHooks;   // the S2 edge: the user's shaders this frame
 	std::unique_ptr<OutputSegments::Merger> outputMerger;   // output_segments_merged
 	bool calibrationLutStageLogged = false;
@@ -8136,6 +8132,11 @@ struct LibplaceboVideoRenderer::Impl
 	// Dynamic Drive, render side (WP-15): the LED module the outer renderer publishes, the S2 LED
 	// measurement and compensation hooks and their per-frame set-up (DynamicDriveFrame.h).
 	LedDrive::DynamicDriveFrame dynamicDrive{ queuedFrameObserver, fallbacks, GlslHookLoader() };
+	// The output segments (S2 PRE_OUTPUT colour + drive, S3 OUTPUT finish): one owner of their
+	// stages, order and parameters; the host keeps the decisions and calls each segment.
+	// Declared after dynamicDrive: S2 holds the adapter's hook objects by reference (merge audit C1).
+	OutputSegments::OutputColourSegment outputColour{ sdrToneShape, dvTrimsHook, dynamicDrive.Measurement(), dynamicDrive.Compensation(), calibrationLutStage };
+	OutputSegments::OutputFinishSegment outputFinish{ outputEncodingRepair, occlusionMaskHook };
 	// Efficiency timer plan (audit 2026-10-24 section 4; vprenderer/PassTimerHook.h).
 	PassTimerHook::Hook passTimerHook;
 	GpuSpanTimers entranceSpans;   // T2: entrance stages (polled D3D11 timestamps, never waited for)
