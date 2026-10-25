@@ -56,9 +56,9 @@ Chain tests:
 
 Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
-- `src/VideoProcessor-Lib/vprenderer/TextureRestore.cpp`
+- `src/VP-V/modules/repair/texture_restore/TextureRestore.cpp`
 - `src/VideoProcessor-Lib/vprenderer/TextureRestore.h`
-- `src/VideoProcessor-Lib/vprenderer/DetailPulse.cpp`
+- `src/VP-V/modules/repair/texture_restore/DetailPulse.cpp`
 - `src/VideoProcessor-Lib/vprenderer/DetailPulse.h`
 - `docs/VP-detail-restore.md`
 

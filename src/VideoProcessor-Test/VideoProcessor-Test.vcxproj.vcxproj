@@ -320,11 +320,11 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\DetailPulse.cpp">
+    <ClCompile Include="..\VP-V\modules\repair\texture_restore\DetailPulse.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\TextureRestore.cpp">
+    <ClCompile Include="..\VP-V\modules\repair\texture_restore\TextureRestore.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>

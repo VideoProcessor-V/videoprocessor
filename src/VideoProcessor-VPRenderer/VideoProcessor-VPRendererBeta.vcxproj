@@ -117,9 +117,9 @@
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\SourceRebase.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\SourceResolutionMonitor.cpp" />
     <ClCompile Include="..\VP-V\modules\repair\deband\VpDebander.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\DetailPulse.cpp" />
+    <ClCompile Include="..\VP-V\modules\repair\texture_restore\DetailPulse.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\CrossfadeMix.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\TextureRestore.cpp" />
+    <ClCompile Include="..\VP-V\modules\repair\texture_restore\TextureRestore.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OutputEncodingRepair.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutStage.cpp" />
     <ClCompile Include="LibplaceboPluginExports.cpp" />

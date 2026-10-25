@@ -4,7 +4,7 @@
 #include "TextureRestoreModel.h"
 #include "ExtendedRangeGpuProbe.h"
 
-#include <vprenderer/TextureRestore.h>
+#include <VP-V/modules/repair/texture_restore/TextureRestore.h>
 
 #include <libplacebo/dispatch.h>
 
@@ -21,7 +21,7 @@
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 // texture_restore (docs/VP-detail-restore.md; algorithm and constants:
-// src/VideoProcessor-Lib/vprenderer/TextureRestore.h). CPU tests run the reference model
+// src/VP-V/modules/repair/texture_restore/TextureRestore.h). CPU tests run the reference model
 // (TextureRestoreModel.h, which mirrors the shader); TextureRestoreGpu* tests check the shader
 // against it on a libplacebo device (WARP unless VP_TEST_GPU=hardware); TextureRestoreRealClip*
 // runs the model on the x265 breathing clips (VP_TEST_REAL_FOOTAGE).

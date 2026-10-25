@@ -6,8 +6,8 @@
 #include <MainConfigSchema.h>
 #include <RendererProfileConfig.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
-#include <vprenderer/DetailPulse.h>
-#include <vprenderer/TextureRestore.h>
+#include <VP-V/modules/repair/texture_restore/DetailPulse.h>
+#include <VP-V/modules/repair/texture_restore/TextureRestore.h>
 
 #include "DetailPulseModel.h"
 #include "TextureRestoreModel.h"

@@ -321,12 +321,12 @@
       "slot": "repair.texture_restore",
       "order": 90,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/TextureRestore.cpp",
-        "src/VideoProcessor-Lib/vprenderer/TextureRestore.h",
-        "src/VideoProcessor-Lib/vprenderer/DetailPulse.cpp",
-        "src/VideoProcessor-Lib/vprenderer/DetailPulse.h",
+        "src/VP-V/modules/repair/texture_restore/DetailPulse.cpp",
+        "src/VP-V/modules/repair/texture_restore/DetailPulse.h",
+        "src/VP-V/modules/repair/texture_restore/TextureRestore.cpp",
+        "src/VP-V/modules/repair/texture_restore/TextureRestore.h",
         "docs/VP-detail-restore.md"
       ],
       "components": {

@@ -12,7 +12,7 @@
 
 #include "GrainReferenceModel.h"
 
-#include <vprenderer/DetailPulse.h>
+#include <VP-V/modules/repair/texture_restore/DetailPulse.h>
 #include <vprenderer/GrainPreserve.h>
 
 #include <algorithm>
