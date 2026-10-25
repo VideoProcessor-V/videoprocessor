@@ -184,10 +184,7 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 Forwarding headers at the legacy path (early migration, removed in M2; they only keep files on active branches building, new code includes the `<VP-V/...>` path):
 
 - `src/VideoProcessor-Lib/calibration/CalibrationConfig.h`
-- `src/VideoProcessor-Lib/calibration/CalibrationController.h`
 - `src/VideoProcessor-Lib/calibration/CalibrationPattern.h`
-- `src/VideoProcessor-Lib/calibration/CalibrationSimulation.h`
-- `src/VideoProcessor-Lib/calibration/PatternCodes.h`
 
 The automatic-calibration code (meter, ArgyllCMS, session, patterns; `calibration/`) moved here early; its tests moved to `tests/` in M2 step 3 (WP-12). `LibplaceboDisplayLut.*` and `LibplaceboCalibrationLutPolicy.h` are Bill's files (present in his upstream beta): they never move; the slot uses them (listed in `live_files`, not owned). The renderer's calibration glue moved into `CalibrationLutHost` (WP-12, option (d)); the forwarding headers go in M2 step 0.
 

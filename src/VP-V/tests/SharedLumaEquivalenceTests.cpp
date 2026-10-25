@@ -11,7 +11,7 @@
 
 #include <ActivePictureEvidence.h>
 #include <ContentIntentObserver.h>
-#include <HdrInference.h>
+#include <VP-V/modules/input/signal/HdrInference.h>
 #include <SceneDetector.h>
 #include <SubtitleBoxDetector.h>
 #include <VP-V/modules/drive/led_measure/LedLookahead.h>

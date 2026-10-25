@@ -28,7 +28,7 @@
 #include <VP-V/segments/OutputSegments.h>
 #include <VP-V/modules/drive/led_compensation/DynamicDriveHost.h>
 #include <VP-V/modules/drive/led_measure/LedMeasurementHook.h>
-#include <vprenderer/CustomHookChain.h>
+#include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <vprenderer/HdrPeakAnalysisCrop.h>
 #include <VP-V/modules/scaling/geometry/NlsMaskMapping.h>
 #include <QueuedFrameStatistics.h>

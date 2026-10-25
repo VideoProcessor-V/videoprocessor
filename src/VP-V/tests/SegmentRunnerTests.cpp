@@ -7,11 +7,11 @@
 #include <VP-V/segments/OutputSegments.h>
 #include <VP-V/segments/OutputSegmentsMerge.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
-#include <led/LedMeasurementHook.h>
-#include <vprenderer/CustomHookChain.h>
+#include <VP-V/modules/drive/led_measure/LedMeasurementHook.h>
+#include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
-#include <vprenderer/OutputEncodingRepair.h>
-#include <vprenderer/SigmaDeltaDomain.h>
+#include <VP-V/modules/output/dither/OutputEncodingRepair.h>
+#include <VP-V/modules/output/dither/SigmaDeltaDomain.h>
 
 #include <algorithm>
 #include <deque>

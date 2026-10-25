@@ -142,7 +142,7 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 - `src/VP-V/modules/drive/led_measure/LedMeasurementHook.h`
 - `src/VP-V/modules/drive/led_measure/FrameStats.h`
 
-Forwarding header at the legacy path (removed in M2 step 0): `src/VideoProcessor-Lib/led/LedMeasurementHook.h` (LibplaceboVideoRenderer.cpp still includes it until the WP-15 call-site patch lands).
+The legacy forwarding header `LedMeasurementHook.h` under `src/VideoProcessor-Lib/led/` was removed in M2 step 0 (commit A).
 
 ## Migration directive
 

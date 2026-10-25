@@ -172,7 +172,7 @@ Chain tests:
 
 Code location: **partly migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
-Forwarding headers (WP-17; removed in M2 step 0 with their includers): `src/VideoProcessor-Lib/DiagnosticHistory.h` (included by `IRenderer.h` and `VideoProcessorDlg.cpp`, Bill's files), `src/VideoProcessor-Lib/vprenderer/RendererDiagnosticCodes.h` (included by `LibplaceboVideoRenderer.cpp`) `src/VideoProcessor-Lib/RawCaptureRecorder.h` (included by `VideoProcessorDlg.cpp`; on active branches also by `DvCompareCapture.h` and WP-11's `VpStatusAdapter.h`), `src/VideoProcessor-Lib/StoreZipWriter.h` and `src/VideoProcessor-Lib/RawCaptureCorpus.h` (so Bill's test files `LibplaceboLutParserTests.cpp` / `LibplaceboPluginProxyTests.cpp` keep their includes untouched).
+Forwarding headers (WP-17; removed in M2 step 0 with their includers): `src/VideoProcessor-Lib/DiagnosticHistory.h` (included by `IRenderer.h` and `VideoProcessorDlg.cpp`, Bill's files), `src/VideoProcessor-Lib/vprenderer/RendererDiagnosticCodes.h` (included by `LibplaceboVideoRenderer.cpp`), `src/VideoProcessor-Lib/RawCaptureRecorder.h` (included by `VideoProcessorDlg.cpp`; on active branches also by `DvCompareCapture.h` and WP-11's `VpStatusAdapter.h`) and `src/VideoProcessor-Lib/RawCaptureCorpus.h` (so Bill's test files `LibplaceboLutParserTests.cpp` / `LibplaceboPluginProxyTests.cpp` keep their includes untouched). The `StoreZipWriter.h` forwarder was deleted in step 0 commit A (no Bill file includes it).
 
 - `src/VP-V/modules/control/diagnostics/StateReport.cpp`
 - `src/VP-V/modules/control/diagnostics/CrashState.cpp`

@@ -4,7 +4,7 @@
 #include "ConfigFile.h"
 #include "ConfigSchema.h"
 #include "DisplayRuleExpression.h"
-#include "led/LedDriveConfig.h"
+#include <VP-V/modules/drive/led_compensation/LedDriveConfig.h>
 
 #include <cstdlib>
 #include <string>

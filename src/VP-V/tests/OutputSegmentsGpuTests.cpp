@@ -5,8 +5,8 @@
 
 #include <VP-V/segments/OutputSegments.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
-#include <led/LedMeasurementHook.h>
-#include <vprenderer/CustomHookChain.h>
+#include <VP-V/modules/drive/led_measure/LedMeasurementHook.h>
+#include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <vprenderer/HookSegment.h>
 
 #include <libplacebo/d3d11.h>

@@ -15,7 +15,7 @@
 #include <VP-V/modules/input/signal/DvGpuUnpackSession.h>
 #include <VP-V/segments/OutputSegments.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
-#include <led/LedMeasurementHook.h>
+#include <VP-V/modules/drive/led_measure/LedMeasurementHook.h>
 
 #include <algorithm>
 #include <atomic>

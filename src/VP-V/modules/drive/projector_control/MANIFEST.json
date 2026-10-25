@@ -21,8 +21,7 @@
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/led/ConnectionTest.h",
-    "src/VideoProcessor-Lib/led/SerialPort.h",
-    "src/VideoProcessor-Lib/led/LedDriveArbiter.h"
+    "src/VideoProcessor-Lib/led/SerialPort.h"
   ],
   "components": {
     "files": {

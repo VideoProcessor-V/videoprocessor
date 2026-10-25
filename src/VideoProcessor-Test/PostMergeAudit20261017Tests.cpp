@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include <led/LedDriveConfig.h>
+#include <VP-V/modules/drive/led_compensation/LedDriveConfig.h>
 #include <video_frame_formatter/IVideoFrameFormatter.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscale.h>
 #include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>

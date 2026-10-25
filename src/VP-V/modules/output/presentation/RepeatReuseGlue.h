@@ -14,7 +14,7 @@
 #include "RepeatReuseAdapter.h"
 
 // Old path: a forwarder after M2 (src/VP-V/modules/motion/consumers/RenderedWarp.h); switch at M2 step 0.
-#include <vprenderer/RenderedWarp.h>
+#include <VP-V/modules/motion/consumers/RenderedWarp.h>
 #include <SubtitleCutPaste.h>
 
 #include <array>

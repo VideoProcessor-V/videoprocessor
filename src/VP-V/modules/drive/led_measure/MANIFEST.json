@@ -15,9 +15,6 @@
     "src/VP-V/modules/drive/led_measure/LedMeasurementHook.h",
     "src/VP-V/modules/drive/led_measure/FrameStats.h"
   ],
-  "forwarding_headers": [
-    "src/VideoProcessor-Lib/led/LedMeasurementHook.h"
-  ],
   "components": {
     "files": {
       "required": [],
