@@ -1,8 +1,8 @@
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index 395b11a0..7b803246 100644
+index 44759155..17898c19 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-@@ -57,11 +57,7 @@
+@@ -61,11 +61,7 @@
  #include <vprenderer/DejudderAhead.h>
  #include <vprenderer/GpuCaptureUnpack.h>
  #include <vprenderer/GpuRgbUnpack.h>
@@ -13,9 +13,9 @@ index 395b11a0..7b803246 100644
 -#include <VP-V/modules/input/signal/DvTunnelPolicy.h>            // feat/dv-l8: no plane deband on the tunnel
 +#include <VP-V/modules/input/signal/DvGpuUnpackSession.h>   // WP-14: the DV tunnel GPU unpack glue
  #include <vprenderer/EarlyUpload.h>
+ #include <VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h>   // WP-23 frame analysis store
  #include <vprenderer/DejudderPolicy.h>
- #include <vprenderer/InterpolationPolicy.h>
-@@ -144,7 +140,7 @@
+@@ -159,7 +155,7 @@
  #include <libplacebo/options.h>
  #include <libplacebo/tone_mapping.h>
  #include <libplacebo/shaders/colorspace.h>
@@ -24,7 +24,7 @@ index 395b11a0..7b803246 100644
  #include <libplacebo/renderer.h>
  #include <libplacebo/shaders/custom.h>
  #include <libplacebo/utils/upload.h>
-@@ -5522,10 +5518,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -5607,10 +5603,7 @@ struct LibplaceboVideoRenderer::Impl
  	// failed unpack turns the session back to the CPU unpack (logged once).
  	std::atomic<bool> dvGpuWanted{ false };
  	std::atomic<bool> dvGpuFailed{ false };
@@ -36,21 +36,24 @@ index 395b11a0..7b803246 100644
  	bool dvUnrecoverableLogged = false;
  	// Stage 12 step A: the re-base of the source to its class height.
  	SourceRebase::Module sourceRebase;
-@@ -6681,48 +6674,19 @@ struct LibplaceboVideoRenderer::Impl
+@@ -6771,51 +6764,22 @@ struct LibplaceboVideoRenderer::Impl
  		// to the CPU fallback (no GPU retry per frame, no burst of late frames).
  		if (dvGpuFailed.load(std::memory_order_acquire))
  			return false;
 -		if (!dvUnpack)
 -			dvUnpack = std::make_unique<GpuDolbyVisionTunnelUnpack>(log, d3d11->gpu);
 +		GpuDolbyVisionTunnelUnpack& unpack = dvUnpack.Unpacker(log, d3d11->gpu);
- 		SyncEarlyUpload();
+ 		SyncEarlyUpload(payload.rawBytes);
  		EarlyUpload::Slot* slot = nullptr;
+ 		const double uploadCpuStart = PassTimerHook::Hook::NowMs();   // efficiency timers T4
  		const pl_tex early = EarlyTexture(payload, slot);
 -		bool unpacked = dvUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
 +		bool unpacked = unpack.Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
  			payload.dvTunnelHighAligned, planes, early);
  		if (slot)
  			earlyUpload->Used(*slot);
+ 		passTimerHook.AddCpu(early ? "upload: unpack submit (early slot)" : "upload: CPU copy + unpack submit (render thread)",
+ 			PassTimers::Kind::CpuWork, PassTimerHook::Hook::NowMs() - uploadCpuStart);
  		if (!unpacked && early)   // the early texture refused: the frame itself
 -			unpacked = dvUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
 +			unpacked = unpack.Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
@@ -90,7 +93,7 @@ index 395b11a0..7b803246 100644
  	}
  	// The planes of a raw payload: the GPU unpack, or false (and the session
  	// back to the CPU path) when it fails.
-@@ -7934,29 +7898,12 @@ struct LibplaceboVideoRenderer::Impl
+@@ -8034,29 +7998,12 @@ struct LibplaceboVideoRenderer::Impl
  	bool outputEncodingRepairLogged = false;
  	CustomHookChain::Chain ledCompensation{ GlslHookLoader() };
  	CustomHookChain::Chain sdrToneShape{ GlslHookLoader() };   // delta 13
@@ -126,7 +129,16 @@ index 395b11a0..7b803246 100644
  	bool sdrToneShapeConfigured = false;
  	int sdrToneShapeLogged = -1;
  	bool ledCompensationConfigured = false;
-@@ -8911,8 +8858,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -8126,7 +8073,7 @@ struct LibplaceboVideoRenderer::Impl
+ 	CalibrationLutStage::Hook calibrationLutStage;
+ 	// The output segments (S2 PRE_OUTPUT colour + drive, S3 OUTPUT finish): one owner of their
+ 	// stages, order and parameters; the host keeps the decisions and calls each segment.
+-	OutputSegments::OutputColourSegment outputColour{ sdrToneShape, dvTrimsHook, ledMeasurement, ledCompensation, calibrationLutStage };
++	OutputSegments::OutputColourSegment outputColour{ sdrToneShape, dvStage.TrimsHook(), ledMeasurement, ledCompensation, calibrationLutStage };
+ 	OutputSegments::OutputFinishSegment outputFinish{ outputEncodingRepair, occlusionMaskHook };
+ 	std::vector<const pl_hook*> userFrameHooks;   // the S2 edge: the user's shaders this frame
+ 	std::unique_ptr<OutputSegments::Merger> outputMerger;   // output_segments_merged
+@@ -9036,8 +8983,7 @@ struct LibplaceboVideoRenderer::Impl
  			ledCompensation.Clear();
  			sdrToneShape.Clear();
  			sdrToneShapeConfigured = false;
@@ -136,7 +148,7 @@ index 395b11a0..7b803246 100644
  			ledCompensationConfigured = false;
              pl_mpv_user_shader_destroy(&subtitleCutPasteHook);
              subtitleCutPasteHookFailed = false;
-@@ -8933,10 +8879,9 @@ struct LibplaceboVideoRenderer::Impl
+@@ -9058,10 +9004,9 @@ struct LibplaceboVideoRenderer::Impl
  					pl_tex_destroy(d3d11->gpu, &texture);
  				captureUnpack.reset();   // its textures and dispatch, before the device
  				rgbUnpack.reset();       // the same for the RGB unpack, and its planes
@@ -148,7 +160,7 @@ index 395b11a0..7b803246 100644
  				pl_tex_destroy(d3d11->gpu, &rgbIngestLuma);
  				if (earlyUpload->IsOpen())
  				{
-@@ -18579,22 +18524,8 @@ struct LibplaceboVideoRenderer::Impl
+@@ -18732,22 +18677,8 @@ struct LibplaceboVideoRenderer::Impl
  		// BT.2020): every SDR gate (input transfer, gamma, LUT domain, luminance) uses it.
  		const bool inputIsSdr = state.eotf == EOTF::SDR || tunnelRgbFallback;
  		dejudderDolbyVisionTunnel = state.dolbyVisionTunnel;   // Bug hunt 2026-10-17
@@ -173,7 +185,7 @@ index 395b11a0..7b803246 100644
  		if (tunnelActive && (!convertedPayload ||
  			!convertedPayload->dolby.valid || convertedPayload->dolby.requiresBlackFrame))
  		{
-@@ -19760,8 +19691,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -19913,8 +19844,7 @@ struct LibplaceboVideoRenderer::Impl
  				case VideoFrameEncoding::R10b:
  				case VideoFrameEncoding::R10l:
  					setIngressStatus(std::string(convertedPayload->dvTunnelRaw ? "Dolby Vision RGB tunnel (12-bit 4:2:2, GPU unpack)" :
@@ -183,13 +195,14 @@ index 395b11a0..7b803246 100644
  					break;
  				case VideoFrameEncoding::V210:
  					setIngressStatus(convertedPayload->Raw() ? "P210 (lossless v210 4:2:2, GPU unpack)" : "P210 (lossless v210 4:2:2)");
-@@ -23471,16 +23401,10 @@ struct LibplaceboVideoRenderer::Impl
+@@ -23634,17 +23564,10 @@ struct LibplaceboVideoRenderer::Impl
  			debandThreshold = 0.0;
  			vpDebandParams = VpDebander::Params();
  			std::string debandState;
 -			// feat/dv-l8 (owner 2026-10-24, DvTunnelPolicy.h): VP's debander works on the source planes, which for the
 -			// DV tunnel are the 12-bit opponent planes before libplacebo's decode - skipped there, visibly.
--			dvVpDebandSkipped = DvTunnelPolicy::SkipVpDeband(renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION, activeSettings.debandVp != "off");
+-			dvVpDebandSkipped = DvTunnelPolicy::SkipVpDeband(renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION,
+-                activeSettings.debandVp != "off" && pipelineSlots.Runs(PipelineSlots::Id::RepairDeband));
 -			if (dvVpDebandSkipped)
 -			{
 -				debandState = "VP deband: off on Dolby Vision tunnel pictures (12-bit opponent planes before the decode)";
@@ -204,17 +217,33 @@ index 395b11a0..7b803246 100644
  			if (activeSettings.debandVp != "off" && luma && !dvVpDebandSkipped)
  			{
  				const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
-@@ -24149,139 +24073,15 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24271,13 +24194,6 @@ struct LibplaceboVideoRenderer::Impl
+         // S2 (output colour + drive): the blocks below decide; outputColour.Collect adds the hooks.
+         OutputSegments::ColourFrame colourFrame;
+         int sdrToneShapeState = 0;
+-        struct DvTrimsFrame
+-        {
+-            bool ran = false, pending = false, dvPicture = false, pq = false, gammaSignal = false;
+-            std::string state, params;
+-            float peak = 0.0f;
+-            DvTrimSelection::Selection selection;
+-        } dvFrame;
+         // Delta 13: the SDR tone shape and headroom, first at PRE_OUTPUT
+         // (before the LED measurement and compensation). SDR source and
+         // output only; off installs nothing.
+@@ -24324,157 +24240,14 @@ struct LibplaceboVideoRenderer::Impl
                      activeSettings.sdrTone.recovery < 0.0 ? "auto" : std::to_string(activeSettings.sdrTone.recovery).c_str());
              }
-         }
+         };
 -        // dv_trims (owner 2026-10-17; default on since the DV synthetic validation 2026-10-24): the Dolby Vision L2 trim for the
 -        // display's peak, after libplacebo's tone mapping (PRE_OUTPUT, before
 -        // the LED stages). Tunnel pictures with DM only; not after a
 -        // calibration LUT; PQ or gamma outputs. Non-certified (DolbyVisionTrims.h).
 -        // feat/dv-l8 task 5 (DvDolbyStyle.h): dv_tone_mapping dolby_style - the Dolby-style curve for DV pictures and
 -        // the trims in ICtCp; when it cannot run: bt2390 + the luminance trims, under "Fallbacks engaged".
--        const bool dvToneDolby = DvDolbyStyle::ParseMode(activeSettings.dvToneMapping) == DvDolbyStyle::Mode::DolbyStyle;
+-        // Modularity (integ/batch1): with colour.sdr_tone_shape off, Dolby-style is not wanted (no bt2390, no fallback).
+-        const bool dvToneDolby = DvDolbyStyle::ParseMode(activeSettings.dvToneMapping) == DvDolbyStyle::Mode::DolbyStyle &&
+-            pipelineSlots.Runs(PipelineSlots::Id::ColourSdrToneShape);
 -        const bool dvTonePicture = renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION && convertedPayload && convertedPayload->dolby.valid;
 -        const std::string dvToneFallback = DvDolbyStyle::CannotRun(dvToneDolby && dvTonePicture, target.lut != nullptr,
 -            target.color.transfer, pipelineSlots.Runs(PipelineSlots::Id::ColourSdrToneShape), activeSettings.dvTrims && dvTrimsShaderMissing);
@@ -233,6 +262,7 @@ index 395b11a0..7b803246 100644
 -            dvToneDolbyRunning, activeSettings.toneMapping, dvToneFallback, activeSettings.dvTrims, dvToneL1Missing);
 -        if (activeSettings.dvTrims || !dvTrimsLogged.empty())
 -        {
+-            dvFrame.ran = true;
 -            std::string state;
 -            const bool dvPicture = state.empty() && renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION &&
 -                convertedPayload && convertedPayload->dolby.valid;
@@ -274,8 +304,6 @@ index 395b11a0..7b803246 100644
 -                        dvTrimsConfigured = true;
 -                    }
 -                    dvTrimsHook.Ensure(hookTemplates);
--                    const size_t start = frameHooks.size();
--                    dvTrimsHook.Collect(false, frameHooks);
 -                    // Review C4: the luminance coefficients of the output's own primaries.
 -                    const pl_raw_primaries* prim = pl_raw_primaries_get(display.primaries);
 -                    double kr = 0.2126, kg = 0.7152, kb = 0.0722;
@@ -286,23 +314,40 @@ index 395b11a0..7b803246 100644
 -                        DolbyVisionTrims::LuminanceWeights(red, green, blue, white, kr, kg, kb);
 -                    }
 -                    const auto ictcp = DvDolbyStyle::ShaderParameters(dvToneDolbyRunning, prim);   // dv_space + output RGB -> LMS
--                    for (size_t i = start; i < frameHooks.size(); ++i)
--                    {
--                        for (const auto& parameter : DvTrimSelection::ShaderParameters(selection.params))
--                            CustomHookChain::SetHookParameter(frameHooks[i], parameter.first, parameter.second);
--                        for (const auto& parameter : ictcp)
--                            CustomHookChain::SetHookParameter(frameHooks[i], parameter.first, parameter.second);
--                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_signal_pq", pq ? 1.0 : 0.0);
--                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_gamma", LedDisplayGamma(target.color.transfer));
--                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_peak_nits", display.hdr.max_luma);
--                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_kr", kr);
--                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_kb", kb);
--                    }
--                    state = frameHooks.size() == start ? "NOT applied (shaders\\DV trims.glsl did not load)" :
--                        std::string("active: ") + selection.reason;
--                    if (frameHooks.size() > start)
--                        params = DvTrimSelection::Describe(selection);
+-                    // The parameters in today's order (selection, ICtCp, then the fixed five); S2 sets them.
+-                    colourFrame.dvTrims = true;
+-                    colourFrame.dv = DvTrimSelection::ShaderParameters(selection.params);
+-                    colourFrame.dv.insert(colourFrame.dv.end(), ictcp.begin(), ictcp.end());
+-                    colourFrame.dv.push_back({ "dv_signal_pq", pq ? 1.0 : 0.0 });
+-                    colourFrame.dv.push_back({ "dv_gamma", LedDisplayGamma(target.color.transfer) });
+-                    colourFrame.dv.push_back({ "dv_peak_nits", display.hdr.max_luma });
+-                    colourFrame.dv.push_back({ "dv_kr", kr });
+-                    colourFrame.dv.push_back({ "dv_kb", kb });
+-                    dvFrame.pending = true;   // state and params once the segment has collected
 -                }
+-            }
+-            dvFrame.state = state;
+-            dvFrame.params = params;
+-            dvFrame.selection = selection;
+-            dvFrame.dvPicture = dvPicture;
+-            dvFrame.pq = pq;
+-            dvFrame.gammaSignal = gammaSignal;
+-            dvFrame.peak = display.hdr.max_luma;
+-        }
+-        auto finishDvTrims = [&](size_t collected)
+-        {
+-            if (!dvFrame.ran)
+-                return;
+-            std::string& state = dvFrame.state;
+-            std::string& params = dvFrame.params;
+-            const DvTrimSelection::Selection& selection = dvFrame.selection;
+-            const bool dvPicture = dvFrame.dvPicture, pq = dvFrame.pq, gammaSignal = dvFrame.gammaSignal;
+-            if (dvFrame.pending)
+-            {
+-                state = collected == 0 ? "NOT applied (shaders\\DV trims.glsl did not load)" :
+-                    std::string("active: ") + selection.reason;
+-                if (collected > 0)
+-                    params = DvTrimSelection::Describe(selection);
 -            }
 -            // test/dv-synthetic 2026-10-24 (no silent fallbacks): dv_trims on, a DV picture with DM,
 -            // but the trim cannot act (a calibration LUT, an unsupported output transfer, the shader
@@ -325,7 +370,7 @@ index 395b11a0..7b803246 100644
 -            {
 -                dvTrimsLogged = activeSettings.dvTrims ? state : std::string();
 -                DebugLog::Log("Dolby Vision trims (non-certified): %s (display peak %.1f nits)", state.c_str(),
--                    static_cast<double>(display.hdr.max_luma));
+-                    static_cast<double>(dvFrame.peak));
 -            }
 -            const ULONGLONG trimsNow = GetTickCount64();
 -            if (!params.empty() && params != dvTrimsParamsLogged &&
@@ -335,25 +380,33 @@ index 395b11a0..7b803246 100644
 -                dvTrimsParamsTick = trimsNow;
 -                DebugLog::Log("Dolby Vision trims (non-certified): %s", params.c_str());
 -            }
--        }
+-        };
 -        dvCompare.Configure(activeSettings.dvCompareCaptureFolder);   // feat/dv-l8 WIP: the Config folder
 -        if (dvCompare.Enabled())   // feat/dv-l8: DV comparison capture (diagnostic; VP_DV_COMPARE_PATH)
 -            dvCompare.OnRender(state, convertedPayload ? convertedPayload->rawFrame.get() : nullptr, videoFrame.GetCounter(),
 -                convertedPayload && state.dolbyVisionTunnel ? &convertedPayload->dolby : nullptr, activeSettings.dvTrims,
 -                std::exchange(dvTrimsEvaluated, false) ? &dvTrimsSelection : nullptr, dvTrimsTargetNits);
-+        // WP-14: the Dolby-style curve hook (dv_tone_mapping), the L8 / L2 trims (dv_trims) at PRE_OUTPUT
-+        // before the LED stages, the reference conditions, the DV comparison capture (DvHostStage).
-+        const size_t dvTrimsStart = frameHooks.size();
-+        dvStage.OnPreOutput({ activeSettings.dvToneMapping, activeSettings.dvTrims, activeSettings.toneMapping,
++        // WP-14 (DvHostStage), phase 1: the Dolby-style curve hook (dv_tone_mapping), the L8 / L2 trims
++        // decision and their parameters for the S2 segment (it collects, tags and parameterises the
++        // trims hook - the one emitter), and the DV comparison capture.
++        dvStage.PrepareToneAndTrims({ activeSettings.dvToneMapping, activeSettings.dvTrims, activeSettings.toneMapping,
 +            activeSettings.dvCompareCaptureFolder, pipelineSlots.Runs(PipelineSlots::Id::ColourSdrToneShape), renderImage, target,
 +            convertedPayload ? &convertedPayload->dolby : nullptr, LedDisplayGamma(target.color.transfer), state,
 +            convertedPayload ? convertedPayload->rawFrame.get() : nullptr, videoFrame.GetCounter() },
-+            colorMapParams, hookTemplates, frameHooks);
-+        TagSlotHooks(dvTrimsStart, PipelineSlots::Id::ColourSdrToneShape);   // the trims move with their slot
++            colorMapParams, hookTemplates, colourFrame.dvTrims, colourFrame.dv);
          // Automatic calibration phase 2 (HDR verify): VP's own tone curve for this
          // frame's colour mapping, rebuilt only when that changes (a hash per frame).
          if (target.color.transfer == PL_COLOR_TRC_PQ)
-@@ -24997,18 +24797,10 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24674,7 +24447,7 @@ struct LibplaceboVideoRenderer::Impl
+         const OutputSegments::ColourCounts colourCounts = outputColour.Collect(colourFrame, pipelineSlots, frameHooks,
+             [this](size_t start, PipelineSlots::Id slot) { TagSlotHooks(start, slot); });
+         logSdrToneShape(sdrToneShapeState == 1 && colourCounts.toneShape == 0 ? 3 : sdrToneShapeState);
+-        finishDvTrims(colourCounts.dvTrims);
++        dvStage.FinishTrims(colourCounts.dvTrims);   // WP-14 phase 2: state, status, fallback, logs
+         SyncFallback(colourCounts.unhandled ? FallbackCatalog::Engaged("S2 placeholder stage",
+             "a placeholder slot has a component but no output-segment stage yet (not run)") :
+             FallbackCatalog::Released("S2 placeholder stage"));
+@@ -24988,18 +24761,10 @@ struct LibplaceboVideoRenderer::Impl
          }
          else
              yieldedDebandLogged = false;
@@ -374,8 +427,8 @@ index 395b11a0..7b803246 100644
 -        }
          // Stage 8-1: a downscaling frame in gamma light when chosen (the de-
          // judder extras reuse these parameters).
-         {
-@@ -29371,7 +29163,7 @@ bool LibplaceboVideoRenderer::ToggleDvCompareCapture(CString& status)
+         // 8b: both branches in one light domain (AdaptiveDownscaleStage::ApplyLight; WP-13).
+@@ -29358,7 +29123,7 @@ bool LibplaceboVideoRenderer::ToggleDvCompareCapture(CString& status)
  	status.Empty();
  	if (!m_impl)
  		return false;
