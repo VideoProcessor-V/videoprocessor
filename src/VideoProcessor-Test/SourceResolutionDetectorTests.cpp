@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include <SourceResolutionDetector.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
 #include "SubtitleTextTestPattern.h"
 
 #include <algorithm>

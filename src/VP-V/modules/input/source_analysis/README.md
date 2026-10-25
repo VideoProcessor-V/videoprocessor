@@ -65,7 +65,7 @@ Dependencies to lift it:
 ### Legacy remainder (still at legacy paths)
 
 - `SourceResolutionDetector` (Stage 12 step B): effective source height from the luma spectrum; a reading only.
-- `vprenderer/SourceResolutionMonitor`: render-thread compute pass a few times a second; effective resolution, bitrate quality and bit depth, and `source_resolution: auto` acting on them.
+- `VP-V/modules/input/source_analysis/SourceResolutionMonitor`: render-thread compute pass a few times a second; effective resolution, bitrate quality and bit depth, and `source_resolution: auto` acting on them.
 - `KernelInverse` (src/VP-V/modules/scaling/rebase): kernel-matched re-base inverse, used with `rebase_kernel_match`.
 - `ActivePictureAnalyzer`: active picture / crop decisions.
 - `SceneDetector`: sparse P010 luma cut/fade/black detector.
@@ -218,9 +218,9 @@ Chain tests:
 
 Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
-- `src/VideoProcessor-Lib/SourceResolutionDetector.cpp`
-- `src/VideoProcessor-Lib/SourceResolutionDetector.h`
-- `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.cpp`
+- `src/VP-V/modules/input/source_analysis/SourceResolutionDetector.cpp`
+- `src/VP-V/modules/input/source_analysis/SourceResolutionDetector.h`
+- `src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.cpp`
 - `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.h`
 - `src/VP-V/modules/scaling/rebase/KernelInverse.cpp`
 - `src/VideoProcessor-Lib/ActivePictureAnalyzer.cpp`

@@ -5,7 +5,7 @@
 #include <ConfigFile.h>
 #include <MainConfigSchema.h>
 #include <RendererProfileConfig.h>
-#include <SourceResolutionDetector.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
 #include <vprenderer/DetailPulse.h>
 #include <vprenderer/TextureRestore.h>
 

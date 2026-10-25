@@ -384,7 +384,7 @@
     <ClInclude Include="UnifiedProfileRuntime.h" />
 	<ClInclude Include="SceneDetector.h" />
 	<ClInclude Include="HdrInference.h" />
-	<ClInclude Include="SourceResolutionDetector.h" />
+	<ClInclude Include="..\VP-V\modules\input\source_analysis\SourceResolutionDetector.h" />
 	<ClInclude Include="VectorStore.h" />
 	<ClInclude Include="MotionValidity.h" />
 	<ClInclude Include="vprenderer\InterpolationPolicy.h" />
@@ -599,7 +599,7 @@
     <ClCompile Include="UnifiedProfileRuntime.cpp" />
 	<ClCompile Include="SceneDetector.cpp" />
 	<ClCompile Include="HdrInference.cpp" />
-	<ClCompile Include="SourceResolutionDetector.cpp" />
+	<ClCompile Include="..\VP-V\modules\input\source_analysis\SourceResolutionDetector.cpp" />
 	<ClCompile Include="..\VP-V\modules\scaling\rebase\KernelInverse.cpp" />
     <ClCompile Include="StringUtils.cpp" />
     <ClCompile Include="TimingClock.cpp" />

@@ -2,8 +2,8 @@
 #include "SourceResolutionMonitor.h"
 #include <KernelInverse.h>
 
-#include "../DebugLog.h"
-#include "../GeneralRateLog.h"
+#include <DebugLog.h>
+#include <GeneralRateLog.h>
 
 #include <libplacebo/dispatch.h>
 
