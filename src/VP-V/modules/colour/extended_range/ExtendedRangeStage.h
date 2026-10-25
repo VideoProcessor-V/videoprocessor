@@ -34,6 +34,9 @@ namespace ExtendedRangeStage
 		bool singlePlaneRgb = false;        // renderImage.num_planes == 1 (the carry's texture form)
 		const pl_custom_lut* targetLut = nullptr;          // target.lut
 		enum pl_lut_type targetLutType = PL_LUT_UNKNOWN;   // target.lut ? target.lut_type : UNKNOWN
+		// The slot switch (pipeline_slots_off, Original pathway): off decides exactly as
+		// preserve_extended_range off (no relabel, no hooks): byte-identical to the switch off.
+		bool slotRuns = true;
 	};
 
 	// The ExtendedRange::Settings today's host code builds from the two keys and the peak detection.
@@ -62,6 +65,7 @@ namespace ExtendedRangeStage
 		// ADR-0001/0002: the "Fallbacks engaged" decision for the last frame (the wording lives in
 		// FallbackCatalog::BtbWtw). Design exclusions (HDR source, output primaries, ...) are not
 		// downgrades and stay status-only.
+		// A slot switched off is a choice, not a downgrade (released).
 		FallbackCatalog::Decision Fallback(bool preserveRequested) const;
 
 		// The carry/restore hook objects (status readouts, the efficiency audit's idle release).
@@ -76,5 +80,6 @@ namespace ExtendedRangeStage
 		bool hookFailed = false;    // libplacebo disabled a hook: off until restart
 		bool mixLogged = false;     // hunt 2 (08 #2): BTB lost in libplacebo's frame mix, logged
 		bool mixClipsBtb = false;
+		bool slotRuns = true;       // the last frame's slot switch
 	};
 }

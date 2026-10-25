@@ -48,12 +48,13 @@ namespace AdaptiveDownscaleStage
 		// Stage 12: the height libplacebo will sample (re-based when the factor is below 1).
 		const float sourceCropH = std::fabs(frame.sourceCrop.y1 - frame.sourceCrop.y0) * static_cast<float>(frame.rebaseFactor);
 		const float targetCropH = std::fabs(frame.targetCrop.y1 - frame.targetCrop.y0);
-		const bool upscaleBlend = frame.adaptiveUpscale && sourceCropH + 0.5f < targetCropH;
+		const bool upscaleBlend = frame.slotRuns && frame.adaptiveUpscale && sourceCropH + 0.5f < targetCropH;
+		const bool downscaleOn = frame.slotRuns && frame.adaptiveDownscale;   // slot off: as adaptive_downscale off
 		upscaleThisFrame = upscaleBlend;
 		// Findings 2026-10-25 #1: what Fallback() reports (no effect on the picture).
 		newFailures = module.Failures() - failuresSeen;
 		failuresSeen = module.Failures();
-		requested = upscaleBlend || frame.adaptiveDownscale;
+		requested = upscaleBlend || downscaleOn;
 		ssimMissing = false;
 		// SSimSuperRes takes the grain term through alpha only when the blend runs (its
 		// vp_grain_strength; 0 otherwise).
@@ -138,7 +139,7 @@ namespace AdaptiveDownscaleStage
 					ratio == 1 ? "faithful branch from the source picture" : "not applied on the last frame (prescale ratio not 1 or 2)");
 			}
 		}
-		else if (frame.adaptiveDownscale)
+		else if (downscaleOn)
 		{
 			module.SetUpscale(AdaptiveDownscale::Upscale());
 			if (host.ssimInChain())
@@ -206,7 +207,7 @@ namespace AdaptiveDownscaleStage
 				host.publishStatus();
 			}
 		}
-		if (!frame.adaptiveDownscale && !upscaleBlend)
+		if (!downscaleOn && !upscaleBlend)
 			state.grainMapWanted = false;
 	}
 
@@ -214,18 +215,19 @@ namespace AdaptiveDownscaleStage
 	{
 		// Stage 8-1: a downscaling frame in gamma light when chosen (the de-judder extras reuse
 		// these parameters).
-		const bool gamma = light.downscaleGamma && DownscaleLight::Downscales(light.sourceCrop, light.targetCrop);
+		const bool downscaleGamma = light.slotRuns && light.downscaleGamma;   // slot off: linear (libplacebo's)
+		const bool gamma = downscaleGamma && DownscaleLight::Downscales(light.sourceCrop, light.targetCrop);
 		if (gamma)
 			params.disable_linear_scaling = true;
 		// 8b: both branches in one light domain: linear (no sigmoid) or gamma.
-		if (upscaleThisFrame)
+		if (upscaleThisFrame && light.slotRuns)
 		{
 			if (light.upscaleGamma)
 				params.disable_linear_scaling = true;
 			else
 				params.sigmoid_params = nullptr;
 		}
-		const int logged = light.downscaleGamma ? (gamma ? 2 : 1) : 0;
+		const int logged = downscaleGamma ? (gamma ? 2 : 1) : 0;
 		if (logged != lightLogged)
 		{
 			lightLogged = logged;

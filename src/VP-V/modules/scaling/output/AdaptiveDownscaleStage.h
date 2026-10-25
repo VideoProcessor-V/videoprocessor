@@ -55,6 +55,9 @@ namespace AdaptiveDownscaleStage
 		double rebaseFactorX = 1.0;
 		bool nlsSubmitted = false;               // submittedNls != nullptr
 		const char* nlsFile = "";                // nlsRule.filename (log only)
+		// The slot switch (pipeline_slots_off, Original pathway): off = adaptive_downscale and
+		// adaptive_upscale off (no hooks): byte-identical to those switches off.
+		bool slotRuns = true;
 	};
 
 	// What the stage asks the host for, only where today's code asked (each one is a pure read
@@ -83,6 +86,7 @@ namespace AdaptiveDownscaleStage
 		bool upscaleGamma = false;     // upscale_light == gamma
 		pl_rect2df sourceCrop{};       // renderImage.crop
 		pl_rect2df targetCrop{};       // target.crop
+		bool slotRuns = true;          // scaling.output's slot switch: off = libplacebo's linear light
 	};
 
 	class Stage

@@ -5,6 +5,8 @@
 
 #include <VP-V/modules/colour/extended_range/ExtendedRangeStage.h>
 #include <VP-V/modules/motion/consumers/DejudderCacheStage.h>
+#include <VP-V/core/SlotRegistry.h>
+#include <VP-V/modules/output/dither/DitherSlot.h>
 #include <VP-V/modules/output/dither/SigmaDeltaVectors.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleStage.h>
 
@@ -344,6 +346,89 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1, nlsAsks);
 			Assert::IsFalse(valid);
 			Assert::IsTrue(hooks.empty());
+		}
+
+		// ---- slot switches (pipeline_slots_off, Original pathway): off = byte-identical --------
+
+		TEST_METHOD(ExtendedRangeSlotOffIsPreserveOff)
+		{
+			// Slot off decides, relabels and places hooks exactly as preserve_extended_range off.
+			const pl_color_space target = Space(PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_GAMMA22);
+			for (int moreCases = 0; moreCases < 2; ++moreCases)
+			{
+				ExtendedRangeStage::Frame off;
+				off.preserve = true;
+				off.moreCases = moreCases != 0;
+				off.slotRuns = false;
+				ExtendedRangeStage::Frame preserveOff = off;
+				preserveOff.preserve = false;
+				preserveOff.slotRuns = true;
+				ExtendedRangeStage::Stage a, b;
+				pl_color_space ca = Space(PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_GAMMA24), cb = ca;
+				std::vector<const pl_hook*> la, lb;
+				Assert::AreEqual(b.Prepare(preserveOff, cb, target, lb), a.Prepare(off, ca, target, la));
+				Assert::IsTrue(pl_color_space_equal(&ca, &cb));
+				Assert::IsTrue(Signatures(la) == Signatures(lb));
+				Assert::IsTrue(la.empty());
+				Assert::IsTrue(a.LastDecision().reason == ExtendedRange::Reason::Off);
+				Assert::IsFalse(a.Fallback(true).engaged);   // a choice, not a downgrade
+				// On again: active.
+				off.slotRuns = true;
+				ca = Space(PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_GAMMA24);
+				la.clear();
+				Assert::IsTrue(a.Prepare(off, ca, target, la));
+				Assert::IsFalse(la.empty());
+			}
+		}
+
+		TEST_METHOD(OutputScalingSlotOffIsAdaptiveOff)
+		{
+			// Slot off = adaptive_downscale and adaptive_upscale off (no hooks, no grain-map request,
+			// no fallback) and libplacebo's linear light.
+			for (int up = 0; up < 2; ++up)
+			{
+				AdaptiveFixture x;
+				x.ssim = true;
+				std::vector<const pl_hook*> hooks;
+				AdaptiveDownscaleStage::Frame f = up ? x.Frame(1080, 2160) : x.Frame(2160, 1080);
+				f.adaptiveDownscale = f.adaptiveUpscale = true;
+				f.slotRuns = false;
+				x.Run(f, hooks);
+				Assert::IsTrue(hooks.empty());
+				Assert::IsFalse(x.grainWanted);
+				Assert::IsFalse(x.stage.UpscaleThisFrame());
+				Assert::IsFalse(x.stage.Fallback().engaged);
+				pl_render_params p = pl_render_default_params;
+				x.stage.ApplyLight(p, { true, true, f.sourceCrop, f.targetCrop, false });
+				Assert::IsFalse(p.disable_linear_scaling);
+				Assert::IsTrue(p.sigmoid_params == pl_render_default_params.sigmoid_params);
+				f.slotRuns = true;   // on again: the module's hooks
+				x.Run(f, hooks);
+				Assert::IsFalse(hooks.empty());
+			}
+		}
+
+		TEST_METHOD(DitherSlotOffRemovesOnlyTheQuantiser)
+		{
+			const pl_hook a{}, quantiser{}, b{};
+			std::vector<const pl_hook*> hooks{ &a, &quantiser, &b };
+			const size_t removed = DitherSlot::RemoveQuantisers(hooks, [&](const pl_hook* h) { return h == &quantiser; });
+			Assert::AreEqual(size_t(1), removed);
+			Assert::AreEqual(size_t(2), hooks.size());
+			Assert::IsTrue(hooks[0] == &a && hooks[1] == &b);   // the rest keep their order
+		}
+
+		TEST_METHOD(OriginalPathwayTurnsTheExtendedRangeSlotOff)
+		{
+			// colour.extended_range is a VP addition: the Original pathway switches it off; dither and
+			// output scaling are mixed slots and stay in their upstream form (their VP keys are reset
+			// by the Original pathway overrides).
+			PipelineSlots::Registry r;
+			Assert::IsTrue(r.Runs(PipelineSlots::Id::ColourExtendedRange));
+			r.ApplyOriginalPathway();
+			Assert::IsFalse(r.Runs(PipelineSlots::Id::ColourExtendedRange));
+			Assert::IsTrue(r.Runs(PipelineSlots::Id::OutputDither));
+			Assert::IsTrue(r.Runs(PipelineSlots::Id::ScalingOutput));
 		}
 
 		// ---- output.dither: the sigma-delta's vectors -----------------------------------------

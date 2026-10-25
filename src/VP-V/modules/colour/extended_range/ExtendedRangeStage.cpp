@@ -22,7 +22,8 @@ namespace ExtendedRangeStage
 	bool Stage::Prepare(const Frame& frame, pl_color_space& sourceColor, const pl_color_space& targetColor,
 		std::vector<const pl_hook*>& list)
 	{
-		ExtendedRange::Decision extended = ExtendedRange::Decide(frame.preserve, SettingsFor(frame),
+		slotRuns = frame.slotRuns;
+		ExtendedRange::Decision extended = ExtendedRange::Decide(frame.preserve && frame.slotRuns, SettingsFor(frame),
 			sourceColor, targetColor, frame.targetLut, frame.targetLutType);
 		if (extended.Active() && hookFailed)
 			extended = ExtendedRange::Decision{ ExtendedRange::Reason::HookFailed };
@@ -69,7 +70,7 @@ namespace ExtendedRangeStage
 
 	FallbackCatalog::Decision Stage::Fallback(bool preserveRequested) const
 	{
-		return FallbackCatalog::BtbWtw(preserveRequested,
+		return FallbackCatalog::BtbWtw(preserveRequested && slotRuns,
 			decision.reason == ExtendedRange::Reason::HookFailed ? FallbackCatalog::BtbWtwClip::HookFailed :
 			decision.reason == ExtendedRange::Reason::TemporalMix ? FallbackCatalog::BtbWtwClip::FrameMixing :
 			mixClipsBtb ? FallbackCatalog::BtbWtwClip::MixClipsBtb : FallbackCatalog::BtbWtwClip::None);

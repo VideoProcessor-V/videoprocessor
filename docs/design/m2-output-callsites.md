@@ -21,7 +21,7 @@ docs/design/m2-output-callsites.patch` is clean against this branch. To be rebas
 | Sigma-delta vector helpers (`SigmaDeltaVectorsSupported`, `SetSigmaDeltaVectors`, `SetSigmaDeltaPixelVectors`, 5278-5311) and the next-frame `NextVectorGuard` (24847-24880) | `src/VP-V/modules/output/dither/SigmaDeltaVectors.h` (header-only; the legacy names stay as inline wrappers so the de-judder extras code is untouched) | guard object + `Apply` |
 | Impl state: `adaptiveUpscaleThisFrame`, `adaptiveUpscaleRatioLogged`, `adaptiveMapNlsLogged`, `adaptiveStatsTick`, `downscaleLightLogged`, `dejudderWarpStageLogged`, `extendedRangeLogged/Described/HookFailed/MixLogged` | owned by the stages | `extendedRange`, `adaptiveStage`, `dejudderCacheStage` members; `extendedRangeHooks` stays as a reference to the stage's hooks (no edit at the crossfade's late restore or the GPU teardown) |
 
-Net: the host file loses 375 lines and gains 93 (9 hunks). Shared host state that other host code
+Net: the host file loses about 375 lines and gains about 100. Shared host state that other host code
 still reads (`bitrateWeightScale`, `adaptiveGrainMapWanted`, `adaptiveNoSsimLogged`,
 `dejudderGeometry(Valid)`) stays in `Impl` and is passed by reference, so the status line and the
 de-judder's grain-map request are not edited.
@@ -32,6 +32,24 @@ segments patch context, left for S3); the AD status line in `PublishCustomShader
 text, WP-11); the extras' vector patching in `PresentDejudderExtras` (WP-7 / M2 step 17); NLS and
 `NlsHookRecovery` (Bill's). The now-unused DownscaleLight include (legacy forwarder path) in the host is
 left for the M2 step-0 include sweep (it sits in the segments patch's context).
+
+## Slot switches (owner modularity rule, 2026-10-25)
+
+The patch also makes the three slots switchable (`pipeline_slots_off`, the Original pathway) and
+adds them to `PipelineSlots::SwitchHonoured` (`src/VP-V/core/SlotRegistry.h`, in this patch so the
+switch is accepted only together with the host checks; `PipelineSkeletonTests` asserts it):
+
+| Slot | Off means | Byte-identical to |
+|---|---|---|
+| `colour.extended_range` (VP; off in the Original pathway) | `ExtendedRangeStage::Frame::slotRuns = false`: no relabel, no hooks; no fallback entry (a choice) | `preserve_extended_range: off` |
+| `scaling.output` (mixed) | `AdaptiveDownscaleStage` `slotRuns = false`: no measure/blend, no grain-map request, linear light | `adaptive_downscale`/`adaptive_upscale` off, `downscale_light`/`upscale_light: linear` |
+| `output.dither` (mixed) | `DitherSlot::RemoveQuantisers` drops the output quantiser hook (the sigma-delta) right after the adaptive stage; libplacebo's dither runs | the shader list without the sigma-delta (`temporal_dither: libplacebo`) |
+
+Order: unchanged. The dither stays last whenever it runs (the host's dither-last step, S3's
+`KeepDitherLast`, `OutputHookOrder`'s `kQuantiser` rank, `OrderValidator`'s designed order); the
+stages add hooks at today's positions only. No placeholder slot is touched. CPU tests:
+`ExtendedRangeSlotOffIsPreserveOff`, `OutputScalingSlotOffIsAdaptiveOff`,
+`DitherSlotOffRemovesOnlyTheQuantiser`, `OriginalPathwayTurnsTheExtendedRangeSlotOff`.
 
 ## Why it is byte-identical (two-commit rule: this is commit 1, behaviour-free)
 

@@ -104,10 +104,11 @@ Code location: **migrated**. The authoritative list is `live_files` in [MANIFEST
 - `src/VP-V/modules/output/dither/CustomHookChain.cpp`
 - `shaders/Temporal sigma-delta.glsl`
 - `src/VP-V/modules/output/dither/SigmaDeltaVectors.h`
+- `src/VP-V/modules/output/dither/DitherSlot.h`
 
 Forwarding headers (legacy path; removed in M2 step 0): `src/VideoProcessor-Lib/vprenderer/CustomHookChain.h`, `src/VideoProcessor-Lib/vprenderer/OutputEncodingRepair.h`, `src/VideoProcessor-Lib/vprenderer/SigmaDeltaDomain.h`.
 
-The forwarders stay for LibplaceboVideoRenderer.cpp (Bill's host) and the upstream LibplaceboLutParserTests.cpp, which this move does not edit; feat/segment-runner's OutputSegments.cpp also includes the old paths until its rebase. The sigma-delta shader stays in shaders/ (runtime layout). SigmaDeltaVectors.h is the host's vector glue (WP-13): call sites in docs/design/m2-output-callsites.patch.
+The forwarders stay for LibplaceboVideoRenderer.cpp (Bill's host) and the upstream LibplaceboLutParserTests.cpp, which this move does not edit; feat/segment-runner's OutputSegments.cpp also includes the old paths until its rebase. The sigma-delta shader stays in shaders/ (runtime layout). SigmaDeltaVectors.h and DitherSlot.h are the host's vector glue and slot switch (WP-13): call sites in docs/design/m2-output-callsites.patch.
 
 ## Migration directive
 
