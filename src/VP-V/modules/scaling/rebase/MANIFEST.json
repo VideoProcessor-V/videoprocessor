@@ -8,6 +8,7 @@
   "live_files": [
     "src/VideoProcessor-Lib/vprenderer/SourceRebase.cpp",
     "src/VideoProcessor-Lib/vprenderer/SourceRebase.h",
+    "src/VP-V/modules/scaling/rebase/EntranceGpuDrain.h",
     "src/VideoProcessor-Lib/KernelInverse.cpp",
     "src/VideoProcessor-Lib/KernelInverse.h",
     "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"

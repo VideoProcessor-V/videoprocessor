@@ -1,6 +1,7 @@
 #include <pch.h>
 #include <MotionAhead.h>
 #include <VP-V/core/FallbackStatus.h>   // VP-V: "Fallbacks engaged" (src/VP-V/core)
+#include <VP-V/modules/scaling/rebase/EntranceGpuDrain.h>   // entrance_gpu_drain (scaling.rebase)
 #include <GeneralRateLog.h>
 #include <RefreshKey.h>
 #include <MotionValidity.h>
@@ -5712,40 +5713,24 @@ struct LibplaceboVideoRenderer::Impl
 			++entranceSourceFrames;
 		}
 	}
-	bool entranceRanThisDraw = false;   // an entrance stage ran in this draw (entrance_gpu_drain)
-	// entrance_gpu_drain: the CPU time each drain took (ms), summarised in the log every ~10 s.
-	std::vector<double> entranceDrainMs;
-	SteadyClock::time_point entranceDrainLoggedAt{};
-	void DrainAfterEntrance()
+	// entrance_gpu_drain (VP-V/modules/scaling/rebase/EntranceGpuDrain.h): call sites only.
+	EntranceGpuDrain::Drain entranceDrain;
+	void DrainEntranceBeforeRender()
 	{
-		const std::string& mode = activeSettings.entranceGpuDrain;
-		if (mode == "off" || !entranceRanThisDraw || pipelineSlots.OriginalPathway() ||
-			!pipelineSlots.Runs(PipelineSlots::Id::ScalingRebase) || !d3d11 || !d3d11->gpu)
-			return;
-		const auto start = SteadyClock::now();
-		if (mode == "finish")
-			pl_gpu_finish(d3d11->gpu);
-		else
-			pl_gpu_flush(d3d11->gpu);
-		const auto now = SteadyClock::now();
-		entranceDrainMs.push_back(std::chrono::duration<double, std::milli>(now - start).count());
-		if (now - entranceDrainLoggedAt >= std::chrono::seconds(10) && entranceDrainMs.size() >= 20)
-		{
-			std::vector<double> sorted = entranceDrainMs;
-			std::sort(sorted.begin(), sorted.end());
-			const auto at = [&](double q) { return sorted[static_cast<size_t>(q * (sorted.size() - 1))]; };
-			DebugLog::Log("Entrance GPU drain (%s): CPU wait p50 %.3f ms, p99 %.3f ms, max %.3f ms over %zu draws",
-				mode.c_str(), at(0.5), at(0.99), sorted.back(), sorted.size());
-			entranceDrainMs.clear();
-			entranceDrainLoggedAt = now;
-		}
+		EntranceGpuDrain::Mode mode = EntranceGpuDrain::Mode::Off;
+		if (!pipelineSlots.OriginalPathway()) EntranceGpuDrain::Parse(activeSettings.entranceGpuDrain, mode);
+		pl_gpu gpu = d3d11 ? d3d11->gpu : nullptr;
+		std::string summary;
+		entranceDrain.BeforeRender(gpu ? mode : EntranceGpuDrain::Mode::Off, pipelineSlots.Runs(PipelineSlots::Id::ScalingRebase),
+			[gpu]() { pl_gpu_flush(gpu); }, [gpu]() { pl_gpu_finish(gpu); }, &summary);
+		if (!summary.empty()) DebugLog::Log("%s", summary.c_str());
 	}
 	void RunEntrance(EntranceRun& run, pl_frame& frame)
 	{
 		if (!pipelineSlots.ActiveEntrance().empty())
 		{
 			++entranceStageRuns;
-			entranceRanThisDraw = true;
+			entranceDrain.NoteEntranceRun();
 		}
 		if (run.path == EntrancePath::Main && !EntranceStatelessNow())
 		{
@@ -8138,12 +8123,14 @@ struct LibplaceboVideoRenderer::Impl
 		state += settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway ?
 			"; entrance once (B3) on: motion pictures from the processed A and B" : "; entrance once (B3) off";
 		// entrance_gpu_drain: visible while it is on (Ctrl+I "engaged" line, Config status), never silent.
-		if (settings.entranceGpuDrain != "off" && !settings.pipelineOriginalPathway)
+		// Listed only when it can act: on, not the Original pathway, and scaling.rebase runs.
+		EntranceGpuDrain::Mode drainMode = EntranceGpuDrain::Mode::Off;
+		EntranceGpuDrain::Parse(settings.entranceGpuDrain, drainMode);
+		if (drainMode != EntranceGpuDrain::Mode::Off && !settings.pipelineOriginalPathway &&
+			pipelineSlots.Runs(PipelineSlots::Id::ScalingRebase))
 		{
-			state += "; entrance GPU drain: " + settings.entranceGpuDrain;
-			EngageFallback("entrance GPU drain", settings.entranceGpuDrain == "finish" ?
-				"the GPU is drained after the entrance stages (expert workaround: pictures between frames exact)" :
-				"the GPU queue is flushed after the entrance stages (expert workaround)");
+			state += std::string("; entrance GPU drain: ") + EntranceGpuDrain::Name(drainMode);
+			EngageFallback("entrance GPU drain", EntranceGpuDrain::StatusReason(drainMode));   // a mode change updates the reason
 		}
 		else
 			ReleaseFallback("entrance GPU drain");
@@ -18020,6 +18007,7 @@ struct LibplaceboVideoRenderer::Impl
 					extraFade = EntranceCrossfadeFrom(extraFrom, f.sourceSequence);
 				}
 			}
+			DrainEntranceBeforeRender();   // entrance_gpu_drain: after the extra's last entrance run
 			// Delta 8 R1: the sigma-delta takes the motion since the previous
 			// present (A or the last extra: the shift step) from the de-judder's
 			// field instead of searching. The guard restores the hooks (own
@@ -25086,7 +25074,6 @@ struct LibplaceboVideoRenderer::Impl
                 // Stage B: the picture at this refresh's phase in place of A's planes (a
                 // composed picture keeps A: hold). Everything after runs on it unchanged.
                 NoteEntranceSourceFrame(sourceSequence);
-                entranceRanThisDraw = false;   // entrance_gpu_drain: set by RunEntrance below
                 bool phasePicture = vpPhasePlanesValid && source.num_planes == 2 &&
                     source.planes[0].texture == textures[0] && source.planes[1].texture == textures[1];
                 // B3 (pipeline_entrance_once): the picture from the processed A and B, no stages after.
@@ -25154,9 +25141,6 @@ struct LibplaceboVideoRenderer::Impl
                          (historyNeeded && pipelineSlots.Runs(PipelineSlots::Id::RepairTextureRestore)));
                     RunMainEntrance(run, frame);
                 }
-                // entrance_gpu_drain (expert): the entrance stages' GPU work drained (or flushed)
-                // before libplacebo's render; off = nothing (today's path).
-                DrainAfterEntrance();
                 if (rebaseFade < 1.0 && !temporalRenderer.Active())
                 {
                     // The crossfade (owner 2026-10-17): both paths of this one frame, exact at both
@@ -25165,6 +25149,7 @@ struct LibplaceboVideoRenderer::Impl
                     // own bands), so none drops out in one step when the fade starts.
                     pl_frame from = unrebased;
                     const bool fromReady = EntranceCrossfadeFrom(from, sourceSequence);
+                    DrainEntranceBeforeRender();   // entrance_gpu_drain: after the last entrance run (the path left)
                     if (fromReady)
                     {
                         // Hunt 3 F1: mixed in the output signal domain by VP's PRE_OUTPUT hooks
@@ -25200,6 +25185,7 @@ struct LibplaceboVideoRenderer::Impl
                         }
                     }
                 }
+                DrainEntranceBeforeRender();   // entrance_gpu_drain: once, after the draw's last entrance run
                 return temporalRenderer.Render(renderer,frame,destination,parameters,
                     extendedRangeRelabelled ? &source.color : nullptr);
             });
