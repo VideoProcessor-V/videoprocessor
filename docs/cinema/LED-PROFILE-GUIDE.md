@@ -41,7 +41,7 @@ full light.
 - The section must be `[led_drive.Default]`.
 - `enabled` and `profile_file` are not allowed in a profile (main file only).
 - Values must be in range, the same rules as the main file (listed in
-  `src/VideoProcessor-Lib/led/LedDriveConfig.h`, `LedDriveRules()`).
+  `src/VP-V/modules/drive/led_compensation/LedDriveConfig.h`, `LedDriveRules()`).
 - Together with the main settings: `led_floor_black <= led_floor <=
   led_ceiling`, and `highlight_area_small < highlight_area_large`.
 - Projector settings (`port`, `led_latency_ms`, `flux_table`, command timing)

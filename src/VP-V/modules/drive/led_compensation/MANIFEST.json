@@ -12,12 +12,19 @@
     "src/VP-V/modules/drive/led_compensation/LedDriveArbiter.h",
     "src/VP-V/modules/drive/led_compensation/LedDriveHoldover.cpp",
     "src/VP-V/modules/drive/led_compensation/LedDriveHoldover.h",
-    "shaders/LED compensation.glsl"
+    "shaders/LED compensation.glsl",
+    "src/VP-V/modules/drive/led_compensation/LedController.cpp",
+    "src/VP-V/modules/drive/led_compensation/LedController.h",
+    "src/VP-V/modules/drive/led_compensation/LedRawTransfer.cpp",
+    "src/VP-V/modules/drive/led_compensation/LedRawTransfer.h",
+    "src/VP-V/modules/drive/led_compensation/LedDriveConfig.h"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/led/LedDriveArbiter.h",
     "src/VideoProcessor-Lib/led/LedDriveHoldover.h",
-    "src/VideoProcessor-Lib/led/LedDriveModule.h"
+    "src/VideoProcessor-Lib/led/LedDriveModule.h",
+    "src/VideoProcessor-Lib/led/LedRawTransfer.h",
+    "src/VideoProcessor-Lib/led/LedDriveConfig.h"
   ],
   "components": {
     "files": {

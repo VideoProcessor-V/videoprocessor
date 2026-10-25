@@ -47,7 +47,7 @@ The Dynamic Drive core (`LedDriveModule`) and the picture compensation it drives
 
 ### Config keys actually read
 
-- `[led_drive.default]` (alias `[dynamic_drive.default]`; validated by `LedDriveRules` in led/LedDriveConfig.h):
+- `[led_drive.default]` (alias `[dynamic_drive.default]`; validated by `LedDriveRules` in VP-V/modules/drive/led_compensation/LedDriveConfig.h):
   - Mode: `enabled` (off), `mode` (compensate | script | log_only | picture_only; `listen` retired), `command_source` (internal_script | compensate | none; `python` retired), `adaptive_gamma` (picture gain on/off; LED drive unaffected).
   - Look-ahead and timing: `lookahead` (on), `led_lookahead_ms` (0), `led_landing_ms` (on), `led_idle_restore_s` (10).
   - Controller: `led_floor` / `led_floor_reactive` / `led_floor_black` / `led_ceiling`, `rate_*`, `rate_preset`, `deadband`, `early_ramp`, `cut_jump`, `bright_cut_dump`, `highlight_tolerance_stops`, `highlight_area_small` / `_large`, `highlight_release_ms`.
@@ -76,8 +76,8 @@ The Dynamic Drive core (`LedDriveModule`) and the picture compensation it drives
 
 - `drive.projector_control`: ProjectorDriver, SerialPort, LedController, LedClock.
 - `drive.led_measure`: LedMeasurement, LedLookahead.
-- led/LedDriveConfig.h; DebugLog.h; Win32 (arbiter mutex, `GetTickCount64` in the holdover).
-- The renderer builds the look-ahead transfer with led/LedRawTransfer.* (legacy path).
+- VP-V/modules/drive/led_compensation/LedDriveConfig.h; DebugLog.h; Win32 (arbiter mutex, `GetTickCount64` in the holdover).
+- The renderer builds the look-ahead transfer with VP-V/modules/drive/led_compensation/LedRawTransfer.* (legacy path).
 - The shader file shaders/LED compensation.glsl and the renderer's hook chain (`CustomHookChain`, `GlslHookLoader`) to apply the gain. The module itself has no libplacebo dependency.
 - Callers: LibplaceboVideoRenderer.cpp (`UpdateLedDrive`, the per-frame block), LibplaceboPluginExports.cpp (`EndHeldLedDrive`), VideoProcessorDlg.cpp (shutdown restore, connection test).
 
@@ -151,6 +151,11 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 - `src/VP-V/modules/drive/led_compensation/LedDriveArbiter.h`
 - `src/VP-V/modules/drive/led_compensation/LedDriveHoldover.cpp`
 - `src/VP-V/modules/drive/led_compensation/LedDriveHoldover.h`
+- `src/VP-V/modules/drive/led_compensation/LedController.cpp`
+- `src/VP-V/modules/drive/led_compensation/LedController.h`
+- `src/VP-V/modules/drive/led_compensation/LedRawTransfer.cpp`
+- `src/VP-V/modules/drive/led_compensation/LedRawTransfer.h`
+- `src/VP-V/modules/drive/led_compensation/LedDriveConfig.h`
 - `shaders/LED compensation.glsl`
 
 Forwarding headers at the legacy path (early migration, removed in M2; they only keep files on active branches building, new code includes the `<VP-V/...>` path):
@@ -158,8 +163,10 @@ Forwarding headers at the legacy path (early migration, removed in M2; they only
 - `src/VideoProcessor-Lib/led/LedDriveArbiter.h`
 - `src/VideoProcessor-Lib/led/LedDriveHoldover.h`
 - `src/VideoProcessor-Lib/led/LedDriveModule.h`
+- `src/VideoProcessor-Lib/led/LedRawTransfer.h`
+- `src/VideoProcessor-Lib/led/LedDriveConfig.h`
 
-`LedRawTransfer.*` stays at the legacy path for now (`VideoProcessor-Test.vcxproj`, changed by active branches, compiles its `.cpp`); `shaders/LED compensation.glsl` stays in the runtime shader folder.
+`shaders/LED compensation.glsl` stays in the runtime shader folder.
 
 ## Migration directive
 

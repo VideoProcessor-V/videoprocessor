@@ -183,7 +183,7 @@ alias; `[display_rules]` legacy-only).
 | `[queue.*]` incl. `low_latency_path`, `target_latency_ms` (MCS:146-159) | both | phase 2 | timing scope |
 | `[shortcuts] foreground_only`, `global_hotkeys` (MCS:197) | ours | keep-unique | |
 | `[ambient]` mode, room, lux_lit, lux_dark, hold_s, sensor port/baud (AmbientConfig.h) | ours | keep-unique | owner: ambient adaptation is a real feature |
-| `[led_drive.*]` / `[dynamic_drive.*]` (~100 keys, led/LedDriveConfig.h) | ours | keep-unique | Python source keys already retired-and-ignored (2026-10-15); Dynamic Drive rename + projector profiles queued - LED tuning keys reviewed there (phase 2) |
+| `[led_drive.*]` / `[dynamic_drive.*]` (~100 keys, VP-V/modules/drive/led_compensation/LedDriveConfig.h) | ours | keep-unique | Python source keys already retired-and-ignored (2026-10-15); Dynamic Drive rename + projector profiles queued - LED tuning keys reviewed there (phase 2) |
 | Config pages (CEW): Queue, Output/Colour, Rendering (sections Capture & source, Source resolution & re-base, Adaptive downscale/upscale, De-judder, Estimation, Temporal dither, Fixes under test, De-judder experiments, Content-adaptive, Processing, SDR highlights), Motion, Subtitles, Screen/Zoom, LLDV, Shaders, LED drive, Ambient, Updates | mixed | - | the three retired switches' controls are gone from Fixes under test; no other page changed |
 
 ## 5. Unsure - for the owner

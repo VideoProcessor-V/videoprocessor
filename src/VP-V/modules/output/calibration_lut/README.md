@@ -129,7 +129,7 @@ External tools:
 
 Dependencies needed to lift it:
 - Windows (ConPTY, job objects, `MultiByteToWideChar`), the project's `pch.h`, `DebugLog`.
-- VideoProcessor-Lib: `ConfigFile.h`, `ConfigSchema.h`, `DisplayRuleExpression.h`, `DisplayProfile.h`, `AmbientConfig.h`, `IRenderer.h`, `led/LedDriveConfig.h`.
+- VideoProcessor-Lib: `ConfigFile.h`, `ConfigSchema.h`, `DisplayRuleExpression.h`, `DisplayProfile.h`, `AmbientConfig.h`, `IRenderer.h`, `VP-V/modules/drive/led_compensation/LedDriveConfig.h`.
 - VideoProcessor-ConfigCore: `ConfigEditorCore.h` (key-only edits, validation, `SaveSafely`).
 - VP-V: `modules/drive/projector_control/ProjectorDriver.h` and `SerialPort.h` (LED run).
 - The pure core (ColorMath.h, PatternPlan, PatternCodes, DisplayModel, LedCharacterize, the Spotread text parser, Simulated*) needs only the C++ standard library.

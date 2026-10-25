@@ -18,23 +18,24 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/StateReportSettings.h` | `src/VP-V/modules/control/diagnostics/StateReportSettings.h` | 259cfa50 |  |
 | `src/VideoProcessor-Lib/led/LedDriveArbiter.cpp` | `src/VP-V/modules/drive/led_compensation/LedDriveArbiter.cpp` | 9e055034 |  |
 | `src/VideoProcessor-Lib/led/LedDriveArbiter.h` | `src/VP-V/modules/drive/led_compensation/LedDriveArbiter.h` | 9e055034 | fwd |
+| `src/VideoProcessor-Lib/led/LedDriveConfig.h` | `src/VP-V/modules/drive/led_compensation/LedDriveConfig.h` | ? | fwd |
 | `src/VideoProcessor-Lib/led/LedDriveHoldover.cpp` | `src/VP-V/modules/drive/led_compensation/LedDriveHoldover.cpp` | 9e055034 |  |
 | `src/VideoProcessor-Lib/led/LedDriveHoldover.h` | `src/VP-V/modules/drive/led_compensation/LedDriveHoldover.h` | 9e055034 | fwd |
 | `src/VideoProcessor-Lib/led/LedDriveModule.cpp` | `src/VP-V/modules/drive/led_compensation/LedDriveModule.cpp` | 9e055034 |  |
 | `src/VideoProcessor-Lib/led/LedDriveModule.h` | `src/VP-V/modules/drive/led_compensation/LedDriveModule.h` | 9e055034 | fwd |
+| `src/VideoProcessor-Lib/led/LedRawTransfer.cpp` | `src/VP-V/modules/drive/led_compensation/LedRawTransfer.cpp` | staged |  |
+| `src/VideoProcessor-Lib/led/LedRawTransfer.h` | `src/VP-V/modules/drive/led_compensation/LedRawTransfer.h` | ? | fwd |
 | `src/VideoProcessor-Lib/led/LedLookahead.cpp` | `src/VP-V/modules/drive/led_measure/LedLookahead.cpp` | 9bfb55d6 |  |
 | `src/VideoProcessor-Lib/led/LedLookahead.h` | `src/VP-V/modules/drive/led_measure/LedLookahead.h` | 9bfb55d6 |  |
 | `src/VideoProcessor-Lib/led/LedMeasurement.cpp` | `src/VP-V/modules/drive/led_measure/LedMeasurement.cpp` | 9bfb55d6 |  |
 | `src/VideoProcessor-Lib/led/LedMeasurement.h` | `src/VP-V/modules/drive/led_measure/LedMeasurement.h` | 9bfb55d6 |  |
-| `src/VideoProcessor-Lib/led/LedMeasurementHook.cpp` | `src/VP-V/modules/drive/led_measure/LedMeasurementHook.cpp` | staged |  |
-| `src/VideoProcessor-Lib/led/LedMeasurementHook.h` | `src/VP-V/modules/drive/led_measure/LedMeasurementHook.h` | ? | fwd |
+| `src/VideoProcessor-Lib/led/LedMeasurementHook.cpp` | `src/VP-V/modules/drive/led_measure/LedMeasurementHook.cpp` | b1fb1c75 |  |
+| `src/VideoProcessor-Lib/led/LedMeasurementHook.h` | `src/VP-V/modules/drive/led_measure/LedMeasurementHook.h` | b1fb1c75 | fwd |
 | `src/VideoProcessor-Lib/led/BarcoAsciiDriver.cpp` | `src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.cpp` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/BarcoAsciiDriver.h` | `src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.h` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/ConnectionTest.cpp` | `src/VP-V/modules/drive/projector_control/ConnectionTest.cpp` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/ConnectionTest.h` | `src/VP-V/modules/drive/projector_control/ConnectionTest.h` | 570b1ee8 | fwd |
 | `src/VideoProcessor-Lib/led/LedClock.h` | `src/VP-V/modules/drive/projector_control/LedClock.h` | 570b1ee8 |  |
-| `src/VideoProcessor-Lib/led/LedController.cpp` | `src/VP-V/modules/drive/projector_control/LedController.cpp` | 570b1ee8 |  |
-| `src/VideoProcessor-Lib/led/LedController.h` | `src/VP-V/modules/drive/projector_control/LedController.h` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/LedShutdownRestore.h` | `src/VP-V/modules/drive/projector_control/LedShutdownRestore.h` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/ProjectorDriver.cpp` | `src/VP-V/modules/drive/projector_control/ProjectorDriver.cpp` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/ProjectorDriver.h` | `src/VP-V/modules/drive/projector_control/ProjectorDriver.h` | 570b1ee8 |  |

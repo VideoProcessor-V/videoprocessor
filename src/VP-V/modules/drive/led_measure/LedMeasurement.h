@@ -1,7 +1,7 @@
 #pragma once
 
 #include <VP-V/modules/drive/led_measure/FrameStats.h>
-#include <led/LedDriveConfig.h>
+#include <VP-V/modules/drive/led_compensation/LedDriveConfig.h>
 
 #include <algorithm>
 #include <cmath>

@@ -764,7 +764,12 @@
         "src/VP-V/modules/drive/led_compensation/LedDriveArbiter.h",
         "src/VP-V/modules/drive/led_compensation/LedDriveHoldover.cpp",
         "src/VP-V/modules/drive/led_compensation/LedDriveHoldover.h",
-        "shaders/LED compensation.glsl"
+        "shaders/LED compensation.glsl",
+        "src/VP-V/modules/drive/led_compensation/LedController.cpp",
+        "src/VP-V/modules/drive/led_compensation/LedController.h",
+        "src/VP-V/modules/drive/led_compensation/LedRawTransfer.cpp",
+        "src/VP-V/modules/drive/led_compensation/LedRawTransfer.h",
+        "src/VP-V/modules/drive/led_compensation/LedDriveConfig.h"
       ],
       "components": {
         "files": {
@@ -928,11 +933,9 @@
       "status": "built",
       "code_location": "partly migrated",
       "live_files": [
-        "src/VP-V/modules/drive/projector_control/LedController.cpp",
         "src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.cpp",
         "src/VP-V/modules/drive/projector_control/ProjectorDriver.cpp",
         "src/VP-V/modules/drive/projector_control/SerialPort.cpp",
-        "src/VP-V/modules/drive/projector_control/LedController.h",
         "src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.h",
         "src/VP-V/modules/drive/projector_control/ProjectorDriver.h",
         "src/VP-V/modules/drive/projector_control/SerialPort.h",

@@ -26,7 +26,7 @@ Measure the picture's light for the LED drive: the rendered picture at PRE_OUTPU
 - `StatsBuilder::Build(raw, timeMs)` (LedMeasurement.cpp): raw counts to `FrameStats`. Highlight percentile from the histogram; sustained highlight/APL as window minima (`highlight_persist_ms`, `apl_persist_ms`); cut = mean cell difference above `cut_threshold`; fade = APL falling for `fade_ms` at `fade_min_slope` or more.
 - `ActivePictureRect`, `SourceRectInCrop`, `AreaPeakGrid`, `AreaAveragedMaximum` (the reference), `AreaPeakAccumulator` (the fast separable form), `HistogramPercentile`.
 - `LookaheadObserver` (LedLookahead.h) implements `QueuedFrameStatistics::IObserver`: `BeginWalk`, `WantsFrame`, `ObserveFrame`. Each queued frame is measured once, in source order, with `MeasureRawFrame` (3x3 blocks on a grid of at most 96 x 54, plus `FullCoveragePeak`), then built into stats and passed to `LedDriveModule::SubmitPrediction`. `SetPictureGeometry` passes the screen size and current subtitle masks.
-- The raw-to-output transfer used by `MeasureRawFrame` is built by `BuildRawTransfer` (src/VideoProcessor-Lib/led/LedRawTransfer.*, legacy path) from the renderer's colour mapping.
+- The raw-to-output transfer used by `MeasureRawFrame` is built by `BuildRawTransfer` (src/VP-V/modules/drive/led_compensation/LedRawTransfer.*, legacy path) from the renderer's colour mapping.
 
 ### Data flow
 
@@ -60,7 +60,7 @@ Measure the picture's light for the LED drive: the rendered picture at PRE_OUTPU
 
 ### Dependencies (to lift it)
 
-- LedController.h from `drive.projector_control` (`FrameStats`), led/LedDriveConfig.h.
+- LedController.h from `drive.projector_control` (`FrameStats`), VP-V/modules/drive/led_compensation/LedDriveConfig.h.
 - QueuedFrameStatistics.h and `AnalysisLumaSource` (renderer queue walk).
 - `LedDriveModule` (`drive.led_compensation`) as the consumer: `LookaheadObserver` calls it directly.
 - libplacebo (LedMeasurementHook, LedRawTransfer), both still in src/VideoProcessor-Lib/led/.

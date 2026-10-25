@@ -46,7 +46,7 @@ RS-232 projector driver (Barco ASCII: LPW1 light, CNTR contrast, LDMM/LDCx custo
 
 ### Config keys actually read
 
-- `[projector.default]` (strict rules in led/LedDriveConfig.h, `ProjectorRules`). Read by the driver: `protocol` (`barco_ascii` | `none`, default none), `port` (COM1), `baud` (19200), `light_min` / `light_max` (auto = query), `ack_timeout_ms` (300), `min_command_gap_ms` (200), `max_levels_per_command` (12), `burst_commands` (0) / `burst_pause_ms` (5000), `read_back` (off), `echo` (on), `terminator` (auto | cr | literal_cr | script).
+- `[projector.default]` (strict rules in VP-V/modules/drive/led_compensation/LedDriveConfig.h, `ProjectorRules`). Read by the driver: `protocol` (`barco_ascii` | `none`, default none), `port` (COM1), `baud` (19200), `light_min` / `light_max` (auto = query), `ack_timeout_ms` (300), `min_command_gap_ms` (200), `max_levels_per_command` (12), `burst_commands` (0) / `burst_pause_ms` (5000), `read_back` (off), `echo` (on), `terminator` (auto | cr | literal_cr | script).
 - Same section, read by the module and controllers: `led_latency_ms` (80), `led_settle_ms` (300), `cntr_latency_ms` (80), `cntr_settle_ms` (0), `cntr_max_usable` (74), `dmd_clip_cntr` (59), `flux_table`.
 - `[led_drive.default]` (alias `[dynamic_drive.default]`; `[led_drive.*]` wins when both exist) holds the controller keys: `enabled` (off), `mode` / `command_source`, `tick_ms`, `curve`, `steps_*`, `led_floor*`, `led_ceiling`, `rate_*`, `deadband`, `highlight_*`, `script_*`, `cntr_assist*`, `cut_*`, `ftb_*` and more (full list in `LedDriveRules`). `profile_file` names an LED profile merged under the main section.
 - The module talks to the port only when `enabled` is on and `mode` is compensate or script (`EffectiveProtocol`); otherwise the dry-run driver is used.
@@ -63,7 +63,7 @@ RS-232 projector driver (Barco ASCII: LPW1 light, CNTR contrast, LDMM/LDCx custo
 
 ### Dependencies (to lift it)
 
-- led/LedDriveConfig.h (`ProjectorConfig`, `LedDriveConfig`, parsing and validation; pulls in ConfigFile.h, ConfigSchema.h, DisplayRuleExpression.h).
+- VP-V/modules/drive/led_compensation/LedDriveConfig.h (`ProjectorConfig`, `LedDriveConfig`, parsing and validation; pulls in ConfigFile.h, ConfigSchema.h, DisplayRuleExpression.h).
 - DebugLog.h, pch.h, and Win32 for SerialPort.cpp. No renderer or libplacebo dependency.
 - LedController.h depends only on LedDriveConfig.h. It is control logic, not transport; `drive.led_measure` and `drive.led_compensation` include it.
 - Compiled into VideoProcessor-Lib. SerialPort, BarcoAsciiDriver, ProjectorDriver and ConnectionTest are also compiled standalone by VideoProcessor-Config and VideoProcessor-ConfigTests.
@@ -132,11 +132,9 @@ Chain tests:
 
 Code location: **partly migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
-- `src/VP-V/modules/drive/projector_control/LedController.cpp`
 - `src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.cpp`
 - `src/VP-V/modules/drive/projector_control/ProjectorDriver.cpp`
 - `src/VP-V/modules/drive/projector_control/SerialPort.cpp`
-- `src/VP-V/modules/drive/projector_control/LedController.h`
 - `src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.h`
 - `src/VP-V/modules/drive/projector_control/ProjectorDriver.h`
 - `src/VP-V/modules/drive/projector_control/SerialPort.h`
