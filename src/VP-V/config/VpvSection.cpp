@@ -4,16 +4,19 @@
 #include "VpvSection.h"
 
 #include "VpvOrganisation.h"
+#include "VpvSetBy.h"
 #include "VpvTierTable.generated.h"
 
 #include <VP-V/core/DelayBudgetLadder.h>
 
 #include <QAbstractButton>
 #include <QAbstractItemModel>
+#include <QButtonGroup>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QFrame>
 #include <QDoubleSpinBox>
+#include <QEvent>
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -107,8 +110,8 @@ namespace Vpv
 		QString RetirementTip(const Table& table, const Retirement& r)
 		{
 			const QString caption = RetirementCaption(r);
-			return QStringLiteral("%1 (group %2, %3): %4 Nothing changes until the owner approves; see the VP-V page's "
-				"Proposed retirement tab and docs/settings/VP-settings-reference.md section 12.")
+			return QStringLiteral("%1 (group %2, %3): %4 Nothing changes until you approve it and a later clean-up run is done; "
+				"see the VP-V page's Proposed retirement tab.")
 				.arg(caption.left(1).toUpper() + caption.mid(1), Q(r.group), Q(table.RetirementGroupTitle(r.group)), Q(r.reason));
 		}
 
@@ -302,6 +305,18 @@ namespace Vpv
 			return true;
 		}
 
+		struct LockState;
+
+		// One setting's "Set by" line (usability package 2026-10-25): a small label in the setting's own form,
+		// under its row, saying where the value comes from (VpvSetBy.h). Filled by a refresher.
+		struct FieldNote
+		{
+			QString key;
+			QPointer<QWidget> field;
+			QPointer<QLabel> label;
+			std::weak_ptr<LockState> lock;
+		};
+
 		// Shared state of one VP-V page.
 		struct State
 		{
@@ -319,6 +334,7 @@ namespace Vpv
 			bool reloading = false;                      // a profile (re)load: Custom boxes recompute both ways
 			std::map<std::string, int> chosen;           // unit -> the tier last chosen or matched on this page
 			int globalChosen = -1;                       // the global tier last chosen or matched
+			std::vector<FieldNote> fieldNotes;           // the per-setting "Set by" lines
 			int ChosenTier(const char* unit) const
 			{
 				const auto it = chosen.find(unit);
@@ -382,7 +398,7 @@ namespace Vpv
 		};
 
 		TierBox MakeTierBox(const QString& prefix, const QString& accessible, const QStringList& positions,
-			const QString& sliderTip)
+			const QString& sliderTip, const QString& lastLabel = QString())
 		{
 			TierBox t;
 			t.box = new QWidget;
@@ -400,7 +416,7 @@ namespace Vpv
 			t.slider->setToolTip(sliderTip);
 			row->addWidget(new QLabel(positions.value(0)));
 			row->addWidget(t.slider, 1);
-			row->addWidget(new QLabel(positions.value(positions.size() - 1)));
+			row->addWidget(new QLabel(lastLabel.isEmpty() ? positions.value(positions.size() - 1) : lastLabel));
 			t.reset = new QPushButton(QStringLiteral("Reset"));
 			t.reset->setObjectName(ObjectName(prefix + QStringLiteral(".reset")));
 			t.reset->setToolTip(QStringLiteral("Puts the settings back to the tier last chosen here (shown on the slider)."));
@@ -545,6 +561,9 @@ namespace Vpv
 			QPointer<QLabel> note;
 			QStringList keys;                // the card's row keys (Defaults: what Custom clears)
 			bool onMain = false;             // a Main card collapses to its one-line note while locked
+			bool locked = false;             // as of the last ApplyLock (the per-field "Set by" reads it)
+			QString master;                  // plain "Repair tier (Low)" for a Tier / Slider / Defaults lock, else ""
+			QString unusedBecause;           // plain "VP's debander is off" for a Feature lock that is off, else ""
 		};
 
 		bool EffectiveOff(const std::shared_ptr<State>& state, const Lock& lock)
@@ -574,11 +593,36 @@ namespace Vpv
 			return found;
 		}
 
+		// The one line a disabled Main card collapses to: where the feature turns on. When a tier switches it on,
+		// the tier is named from the data (Repair Mid, Scaling Low ...: the first step of the unit whose preset
+		// sets the master key to a value that is not "off"); otherwise it turns on with its own switch.
+		QString TurnsOnLine(const Lock& spec)
+		{
+			const Table& table = TierTable();
+			const std::string masterKey = spec.masterKey ? spec.masterKey : "";
+			const QString offValues = Q(spec.offValues);
+			auto isOff = [&](const std::string& v)
+			{
+				if (offValues.startsWith(QLatin1Char('!'))) return !SameValue(v, offValues.mid(1).trimmed().toStdString());
+				for (const QString& off : offValues.split(QLatin1Char(','), Qt::SkipEmptyParts))
+					if (SameValue(v, off.trimmed().toStdString())) return true;
+				return false;
+			};
+			for (const Unit& unit : table.units)
+				for (const Preset& preset : unit.presets)
+					for (const KeyValue& kv : preset.set)
+						if (masterKey == kv.key && !isOff(kv.value))
+							return QStringLiteral("Turns on at %1 %2.").arg(Q(unit.name), Q(preset.tier));
+			return QStringLiteral("Turns on with %1.").arg(Q(spec.master));
+		}
+
 		void ApplyLock(const std::shared_ptr<State>& state, const std::shared_ptr<LockState>& lock)
 		{
 			const Lock& spec = lock->spec;
 			bool locked = false;
 			QString why;
+			lock->master.clear();
+			lock->unusedBecause.clear();
 			switch (spec.kind)
 			{
 			case LockKind::None: return;
@@ -588,6 +632,7 @@ namespace Vpv
 				// A tier exists only on the VP-V pathway; in the Original pathway its keys are plain controls.
 				locked = lock->custom && !lock->custom->isChecked() && (spec.kind != LockKind::Tier || state->vpvOn);
 				why = QStringLiteral("Set by %1. Tick Custom to change these by hand.").arg(Q(spec.master));
+				if (locked) lock->master = Q(spec.master);
 				if (spec.kind == LockKind::Tier)
 					if (const Unit* unit = TierTable().FindUnit(lock->unitId.toStdString()))
 					{
@@ -600,15 +645,17 @@ namespace Vpv
 								values << QStringLiteral("%1 %2").arg(Q(kv.key).replace(QLatin1Char('_'), QLatin1Char(' ')), Q(kv.value));
 							why = QStringLiteral("Set by the %1 tier (%2): %3. Tick Custom to change these by hand.")
 								.arg(Q(unit->name), Q(unit->presets[static_cast<size_t>(t)].tier), values.join(QStringLiteral(", ")));
+							if (locked) lock->master = QStringLiteral("the %1 tier (%2)").arg(Q(unit->name), Q(unit->presets[static_cast<size_t>(t)].tier));
 						}
 					}
 				break;
 			case LockKind::Feature:
 				locked = EffectiveOff(state, spec);
-				why = lock->onMain ? QStringLiteral("Turns on with %1.").arg(Q(spec.master)) :
-					QStringLiteral("Used only when %1 is on (Main).").arg(Q(spec.master));
+				why = lock->onMain ? TurnsOnLine(spec) : QStringLiteral("Used only when %1 is on (Main).").arg(Q(spec.master));
+				if (locked) lock->unusedBecause = QStringLiteral("%1 is off").arg(Q(spec.master));
 				break;
 			}
+			lock->locked = locked;
 			if (lock->note) lock->note->setText(locked ? why : (spec.kind == LockKind::Feature ? QString() :
 				QStringLiteral("Custom: these are yours; unticking Custom puts back the values %1 sets.").arg(Q(spec.master))));
 			if (lock->note) lock->note->setVisible(!lock->note->text().isEmpty());
@@ -704,6 +751,94 @@ namespace Vpv
 			}
 		}
 
+		// Follows the shown state of a setting's row: the "Set by" line under it is shown only while the row is.
+		class RowFollower : public QObject
+		{
+		public:
+			RowFollower(QWidget* field, QLabel* label) : QObject(label), m_field(field), m_label(label) { field->installEventFilter(this); }
+			void Sync()
+			{
+				if (m_field && m_label) m_label->setVisible(!m_field->isHidden() && !m_label->text().isEmpty());
+			}
+		protected:
+			bool eventFilter(QObject*, QEvent* e) override
+			{
+				switch (e->type())
+				{
+				case QEvent::Show: case QEvent::Hide: case QEvent::ShowToParent: case QEvent::HideToParent: Sync(); break;
+				default: break;
+				}
+				return false;
+			}
+		private:
+			QPointer<QWidget> m_field;
+			QPointer<QLabel> m_label;
+		};
+
+		// Puts a (still empty) "Set by" line under the row of `field` and lists it for the refresher.
+		void AddFieldNote(const std::shared_ptr<State>& state, QWidget* field, const QString& key, const std::shared_ptr<LockState>& lock)
+		{
+			auto* form = field && field->parentWidget() ? qobject_cast<QFormLayout*>(field->parentWidget()->layout()) : nullptr;
+			if (!form) return;
+			int row = -1;
+			QFormLayout::ItemRole role;
+			form->getWidgetPosition(field, &row, &role);
+			if (row < 0) return;
+			auto* label = new QLabel;
+			label->setObjectName(ObjectName(QStringLiteral("setby.line.") + key));   // two segments: never mistaken for a "vpv.<unit>.<key>" control
+			label->setWordWrap(true);
+			label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+			label->setStyleSheet(QStringLiteral("QLabel { color: #8fa6bb; font-size: 11px; } QLabel:disabled { color: #8fa6bb; }"));
+			label->setVisible(false);
+			form->insertRow(row + 1, label);
+			new RowFollower(field, label);
+			state->fieldNotes.push_back({ key, field, label, lock });
+		}
+
+		// The plain name of the profile on screen ("vprenderer.Cinema" -> "Cinema").
+		QString PlainProfileName(const std::shared_ptr<State>& state)
+		{
+			QString name = state->profile;
+			if (name.startsWith(kDefaultProfile + QLatin1Char('.'), Qt::CaseInsensitive)) name = name.mid(kDefaultProfile.size() + 1);
+			return name;
+		}
+
+		// Fills every setting's "Set by" line from where its value comes from now (VpvSetBy.h).
+		void RefreshFieldNotes(const std::shared_ptr<State>& state)
+		{
+			const Table& table = TierTable();
+			const bool defaultOnScreen = state->profile.compare(state->defaultProfile, Qt::CaseInsensitive) == 0;
+			const QString rule = !defaultOnScreen && state->host.value ? state->host.value(state->profile, QStringLiteral("when")).trimmed() : QString();
+			for (const FieldNote& note : state->fieldNotes)
+			{
+				if (!note.label) continue;
+				const std::string key = note.key.toStdString();
+				SetByQuery q;
+				q.originalPathway = !state->vpvOn;
+				q.key = key;
+				q.ownValue = state->Own(key);
+				q.defaultProfileOnScreen = defaultOnScreen;
+				if (!defaultOnScreen && state->host.value)
+					q.inheritedValue = state->host.value(state->defaultProfile, note.key).trimmed().toStdString();
+				q.profileName = PlainProfileName(state).toStdString();
+				q.profileRule = rule.toStdString();
+				q.builtInDefault = table.Default(key);
+				q.effectiveValue = state->Get(key);
+				if (const auto lock = note.lock.lock())
+					if (lock->locked)
+					{
+						q.master = lock->master.toStdString();
+						q.notUsedBecause = lock->unusedBecause.toStdString();
+					}
+				const SetByResult result = SetBy(q);
+				note.label->setText(QString::fromStdString(result.text));
+				note.label->setProperty("vpvSource", static_cast<int>(result.source));
+				note.label->setToolTip(QStringLiteral("Where this value comes from: the Original pathway, a master above it (a tier, a "
+					"slider, a preset), a profile rule, your own entry in this profile, the default profile, or VP's built-in default."));
+				note.label->setVisible(note.field && !note.field->isHidden());
+			}
+		}
+
 		// Fills one card from the organisation table: toggles of `unit` (null on the retirement tab),
 		// upstream rows and sections moved here, rows hidden, notes; then its lock.
 		void FillCard(const std::shared_ptr<State>& state, const Unit* unit, const QString& unitId, const Card& spec,
@@ -747,6 +882,7 @@ namespace Vpv
 					// Owner: retirement candidates only on the Proposed retirement tab.
 					if (table.FindRetirement(t->key, "vprenderer")) break;
 					AddToggleRow(state, unitId, *t, card.Form());
+					AddFieldNote(state, card.body->findChild<QComboBox*>(ObjectName(unitId + QLatin1Char('.') + Q(t->key))), Q(t->key), lock);
 					break;
 				}
 				case ItemKind::Row:
@@ -757,6 +893,7 @@ namespace Vpv
 					bool moved = false;
 					for (QWidget* f : fields) moved = MoveRow(f, card.Form()) || moved;
 					if (!moved) state->missing << QStringLiteral("row %1").arg(id);
+					else AddFieldNote(state, fields.front(), id, lock);
 					lock->keys << id;
 					break;
 				}
@@ -859,21 +996,32 @@ namespace Vpv
 			// 1. The unit's tier slider.
 			if (unit.Tiered())
 			{
+				// Four steps everywhere (owner 2026-10-25): a step the unit has not built yet is SHOWN, marked
+				// "planned - uses <the highest built step> for now", and never written (no hidden substitution).
 				QStringList positions;
 				for (const Preset& p : unit.presets) positions << Q(p.tier);
+				const int implemented = static_cast<int>(positions.size());
+				const QString usesTier = Q(unit.presets.back().tier);
+				for (const PlannedTier& pt : unit.plannedTiers)
+					positions << QStringLiteral("%1 (planned - uses %2 for now)").arg(Q(pt.tier), usesTier);
 				TierBox t = MakeTierBox(unitId + QStringLiteral(".tier"), Q(unit.name) + QStringLiteral(" tier"), positions,
 					QStringLiteral("The %1 tier: each step sets the settings listed in its description (Advanced > Set by the "
-						"tier). A changed setting shows Custom; Reset puts it back; Default = the shipped values.").arg(Q(unit.name)));
+						"tier). A changed setting shows Custom; Reset puts it back; Default = the shipped values.").arg(Q(unit.name)),
+					unit.plannedTiers.empty() ? QString() : QStringLiteral("%1 (planned)").arg(Q(unit.plannedTiers.back().tier)));
 				layout->addWidget(t.box);
 				state->own.push_back(t.box);
 				QStringList notes;
 				for (const PlannedTier& pt : unit.plannedTiers)
-					notes << QStringLiteral("%1: not yet implemented (%2).").arg(Q(pt.tier), Q(pt.note));
+					notes << QStringLiteral("%1 is planned, not built yet: it uses %2 for now (%3). The slider does not move onto it "
+						"and nothing is written.").arg(Q(pt.tier), usesTier, Q(pt.note));
+				QLabel* plannedLabel = nullptr;
+				QString plannedText;
 				if (!notes.isEmpty())
 				{
-					auto* planned = Help(notes.join(QLatin1Char(' ')));
-					planned->setObjectName(ObjectName(unitId + QStringLiteral(".tier.planned")));
-					layout->addWidget(planned);
+					plannedText = notes.join(QLatin1Char(' '));
+					plannedLabel = Help(plannedText);
+					plannedLabel->setObjectName(ObjectName(unitId + QStringLiteral(".tier.planned")));
+					layout->addWidget(plannedLabel);
 				}
 				const Unit* u = &unit;
 				// The shipped values are a tier of every tiered unit (vpv-tiers.json; audit 2026-10-24, HIGH 1).
@@ -882,20 +1030,38 @@ namespace Vpv
 				t.defaults->setToolTip(defaultTier >= 0 ?
 					QStringLiteral("Back to the shipped values (the %1 tier).").arg(Q(unit.presets[static_cast<size_t>(defaultTier)].tier)) :
 					QStringLiteral("VP's shipped values match no tier of this unit."));
-				auto apply = [state, u](int p)
+				QPointer<QLabel> plannedPtr(plannedLabel);
+				auto apply = [state, u, implemented, plannedPtr, plannedText](int p)
 				{
+					if (p >= implemented) return;   // a planned step is never written
+					if (plannedPtr) plannedPtr->setText(plannedText);
 					state->chosen[u->id] = p;
 					state->Write(ApplyTier(TierTable(), *u, p, state->MakeGetter()));
 					state->RefreshAll();
 				};
-				QObject::connect(t.slider, &QSlider::valueChanged, t.slider, [state, apply](int p)
+				// A planned step: the handle goes back to where it was and nothing is written.
+				auto plannedHit = [state, u, t, implemented, plannedPtr, plannedText](int p)
 				{
-					if (!state->refreshing) apply(p);
+					if (p < implemented) return false;
+					int back = MatchTier(TierTable(), *u, state->MakeGetter());
+					if (back < 0) back = state->ChosenTier(u->id);
+					if (back < 0) back = implemented - 1;
+					const QSignalBlocker blocker(t.slider);
+					t.slider->setValue(back);
+					if (plannedPtr)
+						plannedPtr->setText(QStringLiteral("Nothing was changed: that step is planned, not built yet. ") + plannedText);
+					return true;
+				};
+				QObject::connect(t.slider, &QSlider::valueChanged, t.slider, [state, apply, plannedHit](int p)
+				{
+					if (state->refreshing) return;
+					if (!plannedHit(p)) apply(p);
 				});
 				// Choosing the step the handle already sits on (after Custom) moves nothing: releasing it applies it.
-				QObject::connect(t.slider, &QSlider::sliderReleased, t.slider, [state, u, t, apply]()
+				QObject::connect(t.slider, &QSlider::sliderReleased, t.slider, [state, u, t, apply, implemented]()
 				{
-					if (!state->refreshing && MatchTier(TierTable(), *u, state->MakeGetter()) != t.slider->value()) apply(t.slider->value());
+					if (!state->refreshing && t.slider->value() < implemented &&
+						MatchTier(TierTable(), *u, state->MakeGetter()) != t.slider->value()) apply(t.slider->value());
 				});
 				QObject::connect(t.reset, &QPushButton::clicked, t.reset, [state, u, apply]()
 				{
@@ -1215,8 +1381,39 @@ namespace Vpv
 
 	namespace
 	{
+		// A group's plain description for the owner (the table's group titles are short; usability package
+		// 2026-10-25). What Approve means is the same for every group: the decision is only recorded.
+		QString RetirementGroupPlain(const std::string& group)
+		{
+			if (group == "A")
+				return QStringLiteral("Each of these fixes replaced older behaviour and has been on for weeks. Approving them means: one day "
+					"they are built in for good (they stay ON, exactly as now).");
+			if (group == "B")
+				return QStringLiteral("Experiments that did not beat the normal way. Approving them means: one day they are taken out and "
+					"today's normal behaviour stays.");
+			if (group == "C")
+				return QStringLiteral("Settings the new design makes unnecessary. Approving them means: one day the old setting is taken out.");
+			if (group == "D")
+				return QStringLiteral("Settings kept, but only useful for testing. Approving them means: one day they are hidden from normal "
+					"view (they keep working).");
+			return QString();
+		}
+
+		// The plain name of a retirement candidate: its control's own label, else the key in words.
+		QString PlainSettingName(const QString& accessible, const QString& key)
+		{
+			QString plain = accessible.trimmed();
+			plain.remove(QStringLiteral(" (proposed retirement)")).remove(QStringLiteral(" (proposed: hide as diagnostic)"));
+			if (!plain.isEmpty()) return plain;
+			QString words = key;
+			words.replace(QLatin1Char('_'), QLatin1Char(' '));
+			return words.left(1).toUpper() + words.mid(1);
+		}
+
 		// The guide's section-12 candidates (coverage audit 2026-10-24): visible, never removed.
-		// Each line says where its control is and, for renderer-profile and [general] keys, the value
+		// Each group has an Approve / Keep choice (usability package 2026-10-25, owner decision): it is only
+		// RECORDED in [vpv] retirement_a..d; nothing is hidden or removed by it (a later clean-up run reads it).
+		// Each line says where the setting's control is and, for renderer-profile and [general] keys, the value
 		// in use; the same text is appended to the control's own tooltip (MarkRetirements). The
 		// renderer-profile candidates' controls themselves live here (organisation pass: candidates
 		// only on this tab); [general], [led_drive] and [queue] ones stay on their own pages.
@@ -1229,6 +1426,60 @@ namespace Vpv
 			auto* intro = Help(Q(table.retirementNote));
 			intro->setObjectName(ObjectName(QStringLiteral("retirement.note")));
 			layout->addWidget(intro);
+
+			// One card per group: what it is, the Approve / Keep choice, and the settings in it.
+			struct GroupWidgets { QPointer<QLabel> status; QPointer<QLabel> list; QPointer<QRadioButton> none, approve, keep; };
+			auto groupWidgets = std::make_shared<std::map<std::string, GroupWidgets>>();
+			for (const KeyValue& g : table.retirementGroups)
+			{
+				const std::string group = g.key;
+				const QString letter = Q(g.key);
+				CardBox card = MakeCard(ObjectName(QStringLiteral("retirement.group.") + letter),
+					QStringLiteral("%1. %2").arg(letter, Q(g.value)), RetirementGroupPlain(group), false);
+				GroupWidgets w;
+				auto* choice = new QWidget;
+				choice->setObjectName(ObjectName(QStringLiteral("retirement.decision_") + letter));
+				auto* choiceLayout = new QHBoxLayout(choice);
+				choiceLayout->setContentsMargins(0, 0, 0, 0);
+				auto* buttons = new QButtonGroup(choice);
+				buttons->setExclusive(true);
+				auto addChoice = [&](const char* part, const QString& text, const QString& tip, Decision decision) -> QRadioButton*
+				{
+					auto* radio = new QRadioButton(text);
+					radio->setObjectName(ObjectName(QStringLiteral("retirement.decision_") + letter + QLatin1Char('.') + Q(part)));
+					radio->setToolTip(tip);
+					buttons->addButton(radio);
+					choiceLayout->addWidget(radio);
+					QObject::connect(radio, &QRadioButton::clicked, radio, [state, group, decision]()
+					{
+						if (state->refreshing || !state->host.setValue) return;
+						state->host.setValue(Q(TierTable().section), Q(DecisionKey(group[0])), Q(DecisionValue(decision)));
+						state->RefreshAll();
+					});
+					return radio;
+				};
+				w.none = addChoice("none", QStringLiteral("Not decided yet"), QStringLiteral("No decision recorded for this group."), Decision::NotDecided);
+				w.approve = addChoice("approve", QStringLiteral("Approve"),
+					QStringLiteral("Records that you approve retiring this group. Nothing is hidden, turned off or removed now."), Decision::Approve);
+				w.keep = addChoice("keep", QStringLiteral("Keep"),
+					QStringLiteral("Records that you want this group kept as it is."), Decision::Keep);
+				choiceLayout->addStretch(1);
+				card.Add(choice);
+				w.status = Help(QString());
+				w.status->setObjectName(ObjectName(QStringLiteral("retirement.group.") + letter + QStringLiteral(".status")));
+				card.Add(w.status);
+				w.list = Help(QString());
+				w.list->setObjectName(ObjectName(QStringLiteral("retirement.group.") + letter + QStringLiteral(".list")));
+				w.list->setTextFormat(Qt::RichText);
+				card.Add(w.list);
+				layout->addWidget(card.frame);
+				(*groupWidgets)[group] = w;
+			}
+
+			// The switches themselves, which still work until a later clean-up run.
+			auto* controlsHeading = Bold(ObjectName(QStringLiteral("retirement.controls_heading")));
+			controlsHeading->setText(QStringLiteral("The switches themselves (they all still work)"));
+			layout->addWidget(controlsHeading);
 
 			// VP-V toggles that are candidates (their unit tabs leave them out).
 			CardBox toggles = MakeCard(ObjectName(QStringLiteral("retirement.card.toggles")),
@@ -1245,18 +1496,28 @@ namespace Vpv
 				FillCard(state, nullptr, QStringLiteral("retirement"), spec, card, unused);
 				layout->addWidget(card.frame);
 			}
-
-			auto* list = Help(QString());
-			list->setObjectName(ObjectName(QStringLiteral("retirement.list")));
-			list->setTextFormat(Qt::RichText);
-			layout->addWidget(list);
 			layout->addStretch();
-			state->refreshers.push_back([state, list]()
+			state->refreshers.push_back([state, groupWidgets]()
 			{
 				const Table& t = TierTable();
-				QString html;
 				for (const KeyValue& g : t.retirementGroups)
 				{
+					GroupWidgets& w = (*groupWidgets)[g.key];
+					// The recorded decision (stored in [vpv]); absent = not decided.
+					const QByteArray stored = state->host.value ? state->host.value(Q(t.section), Q(DecisionKey(g.key[0]))).toUtf8() : QByteArray();
+					const Decision decision = ParseDecision(stored.constData());
+					if (w.none && w.approve && w.keep)
+					{
+						const QSignalBlocker a(w.none), b(w.approve), c(w.keep);
+						w.none->setChecked(decision == Decision::NotDecided);
+						w.approve->setChecked(decision == Decision::Approve);
+						w.keep->setChecked(decision == Decision::Keep);
+					}
+					if (w.status)
+						w.status->setText(decision == Decision::Approve ?
+							QStringLiteral("Recorded: Approve. Nothing is hidden, turned off or removed now; a later clean-up run will act on it.") :
+							decision == Decision::Keep ? QStringLiteral("Recorded: Keep. These settings stay as they are.") :
+							QStringLiteral("No decision recorded yet. Choosing Approve or Keep only records it."));
 					QString rows;
 					for (const Retirement& r : t.retirements)
 					{
@@ -1266,14 +1527,12 @@ namespace Vpv
 						QList<QWidget*> controls;
 						if (state->root)
 							controls = state->root->findChildren<QWidget*>(QRegularExpression(
-								QStringLiteral("^vpv\.[a-z]+\.%1$").arg(QRegularExpression::escape(Q(r.key)))));
+								QStringLiteral("^vpv\\.[a-z]+\\.%1$").arg(QRegularExpression::escape(Q(r.key)))));
 						if (controls.isEmpty() && state->root) controls = UpstreamControls(state->root, Q(r.section), Q(r.key));
 						if (controls.isEmpty()) controls = UpstreamControls(state->host.upstreamRoot, Q(r.section), Q(r.key));
 						QString where = controls.isEmpty() ? QStringLiteral("no control found") : PageOf(controls.front());
 						if (!controls.isEmpty() && !where.startsWith(QStringLiteral("VP-V"))) where += QStringLiteral(" page");
-						// A plain name (the control's own label) before the key.
-						QString plain = controls.isEmpty() ? QString() : controls.front()->accessibleName().trimmed();
-						plain.remove(QStringLiteral(" (proposed retirement)")).remove(QStringLiteral(" (proposed: hide as diagnostic)"));
+						const QString plain = PlainSettingName(controls.isEmpty() ? QString() : controls.front()->accessibleName(), Q(r.key));
 						QString value;
 						if (std::string(r.section) == "vprenderer")
 						{
@@ -1285,17 +1544,15 @@ namespace Vpv
 							const QString v = state->host.value(QStringLiteral("general"), Q(r.key)).trimmed();
 							value = v.isEmpty() ? QStringLiteral("not set (default)") : v;
 						}
-						rows += QStringLiteral("<p><b>%1</b> &mdash; %2 &mdash; this profile: %3<br><i>%4</i></p>")
-							.arg((plain.isEmpty() ? Q(r.key) : plain + QStringLiteral(" <small>(") + Q(r.key) + QStringLiteral(")</small>")).toHtmlEscaped().replace(QStringLiteral("&lt;small&gt;"), QStringLiteral("<small>")).replace(QStringLiteral("&lt;/small&gt;"), QStringLiteral("</small>")), where.toHtmlEscaped(),
-								value.isEmpty() ? QStringLiteral("-") : value.toHtmlEscaped(), Q(r.reason).toHtmlEscaped());
+						// Group A's reason is the same for every line (it is in the group text above); the others differ.
+						const QString reason = std::string(g.key) == "A" ? QString() :
+							QStringLiteral("<br><i>%1</i>").arg(Q(r.reason).toHtmlEscaped());
+						rows += QStringLiteral("<p><b>%1</b> &mdash; where: %2%3%4</p>")
+							.arg(plain.toHtmlEscaped(), where.toHtmlEscaped(),
+								value.isEmpty() ? QString() : QStringLiteral(" &mdash; now: %1").arg(value.toHtmlEscaped()), reason);
 					}
-					if (rows.isEmpty()) continue;
-					html += QStringLiteral("<p><b>%1. %2</b> (%3)</p>%4")
-						.arg(Q(g.key), Q(g.value).toHtmlEscaped(),
-							std::string(g.key) == "D" ? QStringLiteral("proposed: hide as diagnostics") : QStringLiteral("proposed retirement"),
-							rows);
+					if (w.list) w.list->setText(rows);
 				}
-				list->setText(html);
 			});
 			return page;
 		}
@@ -1503,12 +1760,21 @@ namespace Vpv
 			return nullptr;
 		}
 
+		// A reason in a greyed control's tooltip, ahead of its own tooltip (cleared again when it is usable).
+		void SetGreyReason(QWidget* w, const QString& reason)
+		{
+			if (!w) return;
+			if (!w->property("vpvGreyBase").isValid()) w->setProperty("vpvGreyBase", w->toolTip());
+			const QString base = w->property("vpvGreyBase").toString();
+			w->setToolTip(reason.isEmpty() ? base : base.isEmpty() ? reason : reason + QStringLiteral("\n\n") + base);
+		}
+
 		// The Dynamic Drive page in the same scheme as the VP-V units (organisation pass 2): Main holds the
 		// masters (the drive and its command source, the LED profile, the LED speeds preset, the projector
 		// connection); Advanced holds what they set or tune, greyed "Set by <master>" until Custom, and the
 		// projector's measured limits. The page's own show/hide by command source keeps working (it shows
 		// and hides the same card frames). Returns the new page body (for the width fit), or null.
-		QWidget* OrganiseDynamicDrive(const Host& host)
+		QWidget* OrganiseDynamicDrive(const Host& host, const std::shared_ptr<State>& state)
 		{
 			QWidget* root = host.upstreamRoot;
 			const QList<QToolButton*> toggles = root ? root->findChildren<QToolButton*>(
@@ -1566,8 +1832,88 @@ namespace Vpv
 			{
 				if (QWidget* card = CardTitled(cards, title)) { to->addWidget(card); cards.removeAll(card); }
 			};
-			for (const char* title : { "Dynamic Drive", "LED profile", "LED speeds", "Projector connection" })
+			// MAIN holds only (owner 2026-10-25): on / off, the command source, the LED profile, the LED speeds
+			// preset and the projector link. The first card is split: its on / off and command source stay here;
+			// the rest of its form (adaptive gamma, look-ahead, how low the LED may dim, the gamma boost, the
+			// script's pacing ...) moves whole to an Advanced card, so the page's own show / hide logic keeps working.
+			QWidget* oldDriveCard = CardTitled(cards, QStringLiteral("Dynamic Drive"));
+			QWidget* driveWidget = enabled ? enabled->parentWidget() : nullptr;
+			auto* driveForm = driveWidget ? qobject_cast<QFormLayout*>(driveWidget->layout()) : nullptr;
+			QWidget* cardConnection = CardTitled(cards, QStringLiteral("Projector connection"));
+			QWidget* cardResponse = CardTitled(cards, QStringLiteral("Projector response"));
+			QWidget* cardProfile = CardTitled(cards, QStringLiteral("LED profile"));
+			QWidget* cardAssist = CardTitled(cards, QStringLiteral("Contrast and cuts"));
+			QWidget* cardSpeeds = CardTitled(cards, QStringLiteral("LED speeds"));
+			QWidget* cardAdvancedProjector = CardTitled(cards, QStringLiteral("Advanced projector"));
+			QWidget* cardExperiment = CardTitled(cards, QStringLiteral("Experimental"));
+			CardBox behaviour;
+			bool split = false;
+			if (oldDriveCard && driveWidget && driveForm && oldDriveCard->isAncestorOf(driveWidget))
+			{
+				CardBox mainDrive = MakeCard(ObjectName(QStringLiteral("drive.card.main")), QStringLiteral("Dynamic Drive"),
+					QStringLiteral("Dim the projector's LED with the picture, as your dimming script does."), false);
+				QWidget* sourceButtons = root->findChild<QWidget*>(prefix + QStringLiteral("command_source.buttons"));
+				QWidget* sourceHelp = nullptr;
+				if (sourceButtons)
+				{
+					int r = -1;
+					QFormLayout::ItemRole role;
+					driveForm->getWidgetPosition(sourceButtons, &r, &role);
+					if (r >= 0)
+						if (QLayoutItem* item = driveForm->itemAt(r + 1, QFormLayout::FieldRole)) sourceHelp = item->widget();
+				}
+				QFormLayout* mainForm = mainDrive.Form();
+				MoveRow(enabled, mainForm, false);
+				if (source) MoveRow(source, mainForm, false);   // the hidden value holder travels with its buttons
+				if (sourceButtons) MoveRow(sourceButtons, mainForm, false);
+				if (sourceHelp) MoveRow(sourceHelp, mainForm, false);
+				mainLayout->addWidget(mainDrive.frame);
+				behaviour = MakeCard(ObjectName(QStringLiteral("drive.card.behaviour")), QStringLiteral("Dynamic Drive: behaviour and tuning"),
+					QStringLiteral("Adaptive gamma, look-ahead, how low the LED may dim, the gamma boost and the script's pacing. "
+						"What applies depends on the command source chosen on Main; a greyed line says why."), false);
+				auto* behaviourReasons = Help(QString());
+				behaviourReasons->setObjectName(ObjectName(QStringLiteral("drive.reason.behaviour")));
+				behaviourReasons->setProperty("help", true);
+				behaviourReasons->setVisible(false);
+				behaviour.Add(behaviourReasons);
+				if (auto* oldLayout = driveWidget->parentWidget() ? driveWidget->parentWidget()->layout() : nullptr) oldLayout->removeWidget(driveWidget);
+				behaviour.Add(driveWidget);
+				cards.removeAll(oldDriveCard);
+				delete oldDriveCard;
+				split = true;
+			}
+			for (const char* title : { "LED profile", "LED speeds", "Projector connection" })
 				place(Q(title), mainLayout);
+			if (!split) place(QStringLiteral("Dynamic Drive"), mainLayout);
+
+			// The projector link on Main is the protocol, the port and the test button; the two response times
+			// and the reply reading go to Advanced (with their own help lines).
+			CardBox linkTiming = MakeCard(ObjectName(QStringLiteral("drive.card.link_timing")), QStringLiteral("Projector link: timing and replies"),
+				QStringLiteral("How long the projector takes to answer a command, and whether VP reads its replies. "
+					"The defaults match the FL35."), false);
+			QFormLayout* timingForm = linkTiming.Form();
+			{
+				QString projectorPrefix = prefix;
+				projectorPrefix.replace(QStringLiteral("led_drive"), QStringLiteral("projector"));
+				for (const char* key : { "led_latency_ms", "cntr_latency_ms", "read_back" })
+					for (QWidget* f : PrefixedRowFields(root, projectorPrefix, Q(key)))
+					{
+						auto* from = f->parentWidget() ? qobject_cast<QFormLayout*>(f->parentWidget()->layout()) : nullptr;
+						if (!from) continue;
+						QWidget* help = nullptr;
+						int r = -1;
+						QFormLayout::ItemRole role;
+						from->getWidgetPosition(f, &r, &role);
+						if (r >= 0)
+							if (QLayoutItem* item = from->itemAt(r + 1, QFormLayout::FieldRole))
+								if (qobject_cast<QLabel*>(item->widget())) help = item->widget();
+						MoveRow(f, timingForm, false);
+						if (help) MoveRow(help, timingForm, false);
+					}
+			}
+			if (split) advancedLayout->addWidget(behaviour.frame);
+			const bool linkTimingUsed = timingForm->rowCount() > 0;
+			if (!linkTimingUsed) delete linkTiming.frame;
 
 			// LED speeds: the preset stays on Main; its nine values go to Advanced, set by it until Custom.
 			CardBox speedValues = MakeCard(ObjectName(QStringLiteral("drive.card.speed_values")), QStringLiteral("LED speeds: values"),
@@ -1589,6 +1935,11 @@ namespace Vpv
 			QList<QDoubleSpinBox*> speedSpins;
 			for (const char* key : kSpeedKeys)
 				for (QWidget* f : PrefixedRowFields(root, prefix, Q(key))) MoveRow(f, speedForm, false);
+			// The explanation of the values goes with them (Main keeps only the preset).
+			if (cardSpeeds)
+				for (QLabel* label : cardSpeeds->findChildren<QLabel*>())
+					if (label->text().startsWith(QStringLiteral("Levels per second")))
+						if (MoveRow(label, speedForm, false)) break;
 			for (const char* key : { "rate_gain_up", "rate_min_up", "rate_max_up", "rate_gain_down", "rate_min_down", "rate_max_down",
 				"recovery_rate_gain", "recovery_rate_min", "recovery_rate_max" })
 				if (auto* spin = root->findChild<QDoubleSpinBox*>(prefix + Q(key))) speedSpins << spin;
@@ -1641,6 +1992,7 @@ namespace Vpv
 				advancedLayout->addWidget(card.frame);
 				groups->push_back(group);
 			}
+			if (linkTimingUsed) advancedLayout->addWidget(linkTiming.frame);
 			for (const char* title : { "Projector response", "Advanced projector", "Experimental" })
 				place(Q(title), advancedLayout);
 			for (QWidget* card : cards) advancedLayout->addWidget(card);   // anything else, last (nothing is lost)
@@ -1760,6 +2112,104 @@ namespace Vpv
 					{
 						QTimer::singleShot(0, [recompute]() { recompute(); });
 					});
+
+			// ---- Every greyed control says why (owner 2026-10-25) ----
+			// One banner above both sub-pages while Dynamic Drive is off; a reason in the tooltip of each control
+			// the page greys; the behaviour card lists what is greyed and why; "Contrast where white clips" and
+			// "Highest useful contrast" stay visible (greyed, Compensate only) instead of vanishing, so the help
+			// line that names them always has its control.
+			auto* offNote = Help(QString());
+			offNote->setObjectName(ObjectName(QStringLiteral("drivepage.off_note")));
+			offNote->setStyleSheet(QStringLiteral("background: #1d2a38; color: #cfe0ef; padding: 8px; border-radius: 5px;"));
+			offNote->setVisible(false);
+			column->insertWidget(column->indexOf(pages), offNote);
+			const QString projectorPrefix = QString(prefix).replace(QStringLiteral("led_drive"), QStringLiteral("projector"));
+			auto* behaviourReasons = root->findChild<QLabel*>(ObjectName(QStringLiteral("drive.reason.behaviour")));
+			auto* adaptiveBox = root->findChild<QCheckBox*>(prefix + QStringLiteral("adaptive_gamma"));
+			auto* boostChoice = root->findChild<QComboBox*>(prefix + QStringLiteral("gamma_boost"));
+			auto* experimentBox = root->findChild<QCheckBox*>(prefix + QStringLiteral("ftb_experimental"));
+			auto* experimentMethod = root->findChild<QComboBox*>(prefix + QStringLiteral("ftb_custom_dim"));
+			// The controls are looked up once (the editor holds thousands of widgets); the refresher keeps pointers.
+			using Controls = std::vector<QPointer<QWidget>>;
+			auto collect = [root](const QString& pre, std::initializer_list<const char*> keys)
+			{
+				Controls found;
+				for (const char* key : keys)
+				{
+					const QList<QWidget*> fields = PrefixedRowFields(root, pre, Q(key));
+					if (!fields.isEmpty()) found.emplace_back(fields.front());
+				}
+				return found;
+			};
+			const Controls driveOffControls = collect(prefix, { "adaptive_gamma", "lookahead", "script_pacing", "script_lookahead", "script_measure_ms", "script_echo_ms" });
+			const Controls liftControls = collect(prefix, { "shadow_lift_ansi", "shadow_lift_ansi_ramp_lo", "shadow_lift_ansi_ramp_hi", "shadow_lift_ansi_rate" });
+			const Controls boostControls = collect(prefix, { "gamma_boost_knee", "gamma_boost_knee_width" });
+			const Controls experimentControls = collect(prefix, { "ftb_custom_dim", "ftb_step_ms", "ftb_custom_start", "ftb_custom_floor" });
+			const Controls turnControls = collect(prefix, { "ftb_turn_step" });
+			const Controls compensateControls = collect(projectorPrefix, { "cntr_max_usable", "dmd_clip_cntr" });
+			QWidget* whiteClips = compensateControls.size() == 2 ? compensateControls[1].data() : nullptr;
+			QFormLayout* responseForm = whiteClips && whiteClips->parentWidget() ? qobject_cast<QFormLayout*>(whiteClips->parentWidget()->layout()) : nullptr;
+			auto refreshReasons = [=]()
+			{
+				const bool original = state && !state->vpvOn;
+				const bool driveOn = !enabled || enabled->isChecked();
+				const QString chosen = source ? source->currentData().toString() : QString();
+				const bool compensate = chosen == QStringLiteral("compensate");
+				offNote->setText(original ? QString() : QStringLiteral("Dynamic Drive is off, so the settings below are greyed. Tick "
+					"\"Dynamic Drive on\" at the top of Main to use them."));
+				offNote->setVisible(!original && !driveOn);
+				const QString offWhy = QStringLiteral("Greyed: Dynamic Drive is off (the tick box at the top of Main).");
+				for (const QPointer<QWidget>& w : driveOffControls) SetGreyReason(w, driveOn ? QString() : offWhy);
+				for (QWidget* card : { cardConnection, cardResponse, cardProfile, cardAssist, cardSpeeds, cardAdvancedProjector, cardExperiment })
+					SetGreyReason(card, driveOn ? QString() : offWhy);
+				const bool adaptiveOn = !adaptiveBox || adaptiveBox->isChecked();
+				const QString liftWhy = QStringLiteral("Greyed: used only when Adaptive gamma is on (tick it above).");
+				for (const QPointer<QWidget>& w : liftControls) SetGreyReason(w, adaptiveOn ? QString() : liftWhy);
+				const QString boost = boostChoice ? boostChoice->currentData().toString() : QString();
+				const bool boostOn = !boost.isEmpty() && boost != QStringLiteral("off");
+				const QString boostWhy = QStringLiteral("Greyed: used only when the Gamma boost is on (choose 2.4 above).");
+				for (const QPointer<QWidget>& w : boostControls) SetGreyReason(w, boostOn ? QString() : boostWhy);
+				const bool experimentOn = !experimentBox || experimentBox->isChecked();
+				const QString experimentWhy = QStringLiteral("Greyed: tick \"Experimental: deeper fade to black\" first.");
+				for (const QPointer<QWidget>& w : experimentControls) SetGreyReason(w, experimentOn ? QString() : experimentWhy);
+				const bool turns = experimentMethod && experimentMethod->currentData().toString() == QStringLiteral("turns");
+				for (const QPointer<QWidget>& w : turnControls)
+					SetGreyReason(w, !experimentOn ? experimentWhy : turns ? QString() :
+						QStringLiteral("Greyed: used only when the colours take turns (choose that Method)."));
+				// Compensate-only response values: shown, greyed with the reason.
+				const QString compensateWhy = QStringLiteral("Greyed: used only with the Compensate command source (choose it on Main).");
+				for (const QPointer<QWidget>& w : compensateControls)
+					if (w)
+					{
+						if (responseForm) responseForm->setRowVisible(w, true);
+						w->setEnabled(compensate);
+						SetGreyReason(w, compensate ? QString() : compensateWhy);
+					}
+				QStringList reasons;
+				if (!adaptiveOn) reasons << QStringLiteral("Shadow lift is greyed: it needs Adaptive gamma, which is off.");
+				if (!boostOn) reasons << QStringLiteral("The gamma boost's dark-protection values are greyed: the Gamma boost is Off.");
+				if (behaviourReasons)
+				{
+					behaviourReasons->setText(reasons.join(QLatin1Char(' ')));
+					behaviourReasons->setVisible(!reasons.isEmpty());
+				}
+			};
+			refreshReasons();
+			for (QObject* trigger : { static_cast<QObject*>(source), static_cast<QObject*>(enabled), static_cast<QObject*>(adaptiveBox),
+				static_cast<QObject*>(boostChoice), static_cast<QObject*>(experimentBox), static_cast<QObject*>(experimentMethod) })
+			{
+				if (!trigger) continue;
+				if (trigger == source || trigger == boostChoice || trigger == experimentMethod)
+					QObject::connect(static_cast<QComboBox*>(trigger), qOverload<int>(&QComboBox::currentIndexChanged), pages, [refreshReasons](int) { refreshReasons(); });
+				else
+					QObject::connect(static_cast<QCheckBox*>(trigger), &QCheckBox::toggled, pages, [refreshReasons](bool) { refreshReasons(); });
+			}
+			// The Original pathway switch and anything else that changes while the page is shown.
+			auto* reasonTimer = new QTimer(pages);
+			reasonTimer->setInterval(1000);
+			QObject::connect(reasonTimer, &QTimer::timeout, pages, [pages, refreshReasons]() { if (pages->isVisible()) refreshReasons(); });
+			reasonTimer->start();
+			if (state) state->refreshers.push_back(refreshReasons);
 			return pages;
 		}
 
@@ -2155,7 +2605,7 @@ namespace Vpv
 			overviewLayout->addStretch();
 		}
 		OrganiseRendering(host);
-		QWidget* drivePage = OrganiseDynamicDrive(host);
+		QWidget* drivePage = OrganiseDynamicDrive(host, state);
 		NoteInputPolicy(host);
 		// One control per unit (organisation pass 2): the tier decides whether the unit's taste
 		// slider applies. At the Classic Motion tier there is no de-judder, so the amount is greyed;
@@ -2182,6 +2632,8 @@ namespace Vpv
 				slider->setMinimum(state->vpvOn ? 1 : 0);
 			}
 		});
+		// The per-setting "Set by" lines, last: they read what the locks above decided.
+		state->refreshers.push_back([state]() { RefreshFieldNotes(state); });
 		FitWidth(root);
 		if (drivePage) FitWidth(drivePage);   // the Dynamic Drive page fits the default window too
 		if (drivePage) drivePage->setStyleSheet(ReadableButtons() +

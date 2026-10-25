@@ -99,6 +99,24 @@ Upstream footprint of the moves: in `ConfigEditorWindow.cpp`'s profile refresh, 
 renderer's refresh actions and content-gate widgets also search the whole editor when they miss
 `profileFields` (`findProfileWidget` / `findProfileAction`, commented). Re-apply with the hook.
 
+## Config usability package (2026-10-25)
+
+Owner decisions of 2026-10-25, built on the pages above:
+
+- **Dynamic Drive Main** holds only on/off, the command source, the LED profile, the LED speeds preset and
+  the projector link (`DriveMainKeys()`); the rest of the first card moves whole to an Advanced "behaviour
+  and tuning" card (so the page's own show/hide logic keeps working), the two response times and the reply
+  reading go to "Projector link: timing and replies". Every greyed control says why (`SetGreyReason`, the
+  banner and the behaviour card's reasons).
+- **Four tier steps everywhere**: a unit's `plannedTiers` give a fourth slider position, "Upper (planned -
+  uses Mid for now)"; moving onto it snaps back and writes nothing.
+- **"Set by" per setting** (`VpvSetBy.h`, pure): a small line under each setting's row on the unit tabs
+  (Original pathway / a master / a profile rule / you / the default profile / VP's built-in default; and
+  "Not used now: ..." when a feature switch leaves it unused). A disabled Main card collapses to
+  "Turns on at <Unit> <Tier>".
+- **Approve / Keep per retirement group**: recorded as `[vpv] retirement_a..d = approve | keep` (validator
+  in `RendererProfileConfig.h`; no render effect, so no Original-pathway entry). Nothing is hidden.
+
 ## Rules
 
 - **Tiers are presets of existing keys.** No key stores a tier; it is read back from the values,

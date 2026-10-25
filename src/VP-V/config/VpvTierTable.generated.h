@@ -234,7 +234,7 @@ namespace Vpv
                     p.set.push_back({ "adaptive_w_base", "0.2" });
                     u.presets.push_back(p);
                 }
-                u.plannedTiers.push_back({ "Upper", "the 4K refine net and the D refine add-on (not yet implemented; Upper uses Mid)" });
+                u.plannedTiers.push_back({ "Upper", "the 4K refine net and the D refine add-on are not built yet" });
                 u.toggles.push_back({ "rebase_kernel_match", "Re-base: undo the player's upscaler", { "on", "off" }, "scaling.rebase" });
                 u.toggles.push_back({ "adaptive_faithful", "Grain-true downscale filter", { "auto", "ortho" }, "scaling.output" });
                 u.toggles.push_back({ "source_resolution_text_guard", "Re-base ignores the player's own subtitles", { "on", "off" }, "scaling.rebase" });
@@ -303,11 +303,11 @@ namespace Vpv
                     p.set.push_back({ "temporal_dither", "sigma_delta" });
                     u.presets.push_back(p);
                 }
-                u.plannedTiers.push_back({ "Upper", "no extra output step yet (Upper uses Mid)" });
+                u.plannedTiers.push_back({ "Upper", "there is no extra output step yet" });
                 u.toggles.push_back({ "occlusion_mask", "Dither: no smear where new picture appears", { "on", "off" }, "output.dither" });
                 t.units.push_back(u);
             }
-            t.retirementNote = "Switches proposed for retirement. Each still works as before until you decide; retiring one keeps today's default behaviour. Groups: A proven fixes (kept on), B experiments that lost, C superseded, D keep but hide as diagnostics.";
+            t.retirementNote = "These settings are proposed for retirement. Every one still works exactly as before. For each group below, choose Approve or Keep: your choice is only RECORDED here. Nothing is hidden, turned off or removed until a later clean-up run, which reads your choice. Groups: A proven fixes (kept on), B experiments that lost, C superseded by the new design, D kept but hidden as diagnostics.";
             t.retirementGroups.push_back({ "A", "Fixes under test that are proven" });
             t.retirementGroups.push_back({ "B", "Experiments that lost" });
             t.retirementGroups.push_back({ "C", "Superseded by the new design" });

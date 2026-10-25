@@ -36,6 +36,7 @@
 // lockKeys (optional): lock only these keys' controls in place (a moved section whose other rows
 // stay editable); otherwise the whole card body is locked.
 
+#include <string>
 #include <vector>
 
 namespace Vpv
@@ -222,7 +223,7 @@ namespace Vpv
 				{ K::Row, "efficiency_fixes" }, { K::Row, "source_coding_fixes" }, { K::Row, "source_resolution_latch_fixes" },
 				{ K::Row, "source_resolution_cut_fixes" }, { K::Row, "active_picture_startup_hold" },
 				{ K::Row, "extended_range_more_cases" }, { K::Row, "dv_tunnel_fixes" }, { K::Row, "residual_stabilise_grain_guard" } },
-				{ L::Defaults, "Proven fixes: all on", nullptr, nullptr, nullptr, "on" } },
+				{ L::Defaults, "the proven-fixes setting (all on)", nullptr, nullptr, nullptr, "on" } },
 			{ "retirement", "experiments", "Experiments that lost, and superseded switches",
 				"Each still works as before until you decide.", false, true, {
 				{ K::Row, "optical_flow_cost_trust" }, { K::Row, "interpolation_grain" }, { K::Row, "dejudder_source_warp_filter" },
@@ -261,6 +262,49 @@ namespace Vpv
 		};
 		return groups;
 	}
+	// ---- Config usability package (2026-10-25) ----
+
+	// The Dynamic Drive page's MAIN sub-page holds only these controls (owner decision 2026-10-25): on / off,
+	// the command source, the LED profile, the LED speeds preset and the projector link (protocol, port, test).
+	// Everything else is on Advanced. Each entry is the key part of a control named
+	// "config.led_drive.default.<key>" or "config.projector.default.<key>" (helper parts such as ".buttons",
+	// ".reset" or ".result" belong to the same control). Pure data: the Config tests read it.
+	inline const std::vector<const char*>& DriveMainKeys()
+	{
+		static const std::vector<const char*> keys = {
+			"enabled", "command_source", "profile_file", "profile_browse", "profile_builtin", "profile_status", "rate_preset",
+			"protocol", "port", "connection_test" };
+		return keys;
+	}
+
+	// The owner's decision for a retirement group A-D (Proposed retirement tab): stored in [vpv] as
+	// retirement_a .. retirement_d = approve | keep (key names are case-insensitive; absent = not decided yet).
+	// A UI-only record: nothing in the renderer reads it, nothing is hidden or removed by it (a later clean-up
+	// run reads it), so it has no Original-pathway entry.
+	enum class Decision { NotDecided, Approve, Keep };
+	inline const char* DecisionKey(char group)
+	{
+		switch (group)
+		{
+		case 'A': return "retirement_a";
+		case 'B': return "retirement_b";
+		case 'C': return "retirement_c";
+		case 'D': return "retirement_d";
+		default: return "";
+		}
+	}
+	inline Decision ParseDecision(const char* text)
+	{
+		const std::string v = text ? text : "";
+		std::string lower;
+		for (char c : v) if (c != ' ' && c != '\t') lower += static_cast<char>((c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c);
+		return lower == "approve" ? Decision::Approve : lower == "keep" ? Decision::Keep : Decision::NotDecided;
+	}
+	inline const char* DecisionValue(Decision d)
+	{
+		return d == Decision::Approve ? "approve" : d == Decision::Keep ? "keep" : "";
+	}
+
 	// The LED switches proposed for retirement (group A): one master "LED fixes under test".
 	inline const std::vector<const char*>& LedFixKeys()
 	{

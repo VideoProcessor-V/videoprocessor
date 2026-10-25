@@ -44,7 +44,7 @@ Config now has one **VP-V** page that holds everything VP adds.
 | **Fallbacks engaged** | The running VP's list of automatic downgrades, for example "Fallbacks engaged: capture GPU unpack (CPU 4:2:0 ...)", or "none". It is the same line as Ctrl+I and Ctrl+Alt+D. |
 | **Unit tabs** | Each tab has two sub-pages. **Main**: the unit's tier slider, its taste slider where it has one, and small cards of switches. **Advanced**: the settings a master on Main sets (greyed "Set by ..." until you tick *Custom* on that card; unticking puts the master's values back), tuning used only while its feature is on ("Used only when ... is on"), the measured internals (collapsed), the planned settings and the unit's stages with their fallback text. The layout map is `docs/settings/organisation.md`. |
 | **Pipeline (expert)** | For testing only: where the calibration LUT runs (`calibration_lut_stage`: libplacebo today, or VP's last colour step after Dynamic Drive), the module order (`pipeline_order`, checked with the renderer's own rules; an order it would reject is shown with the reason and not saved), stages switched off entirely (`pipeline_slots_off`), and the output chain as one hook per stage (`output_segments_merged`, draft: off until its GPU check passes; disabled in the Original pathway), and the frame analysis store (`frame_analysis_store`, WP-23: each captured frame's luma decoded once and shared by every analyser, same results with less CPU; off until the full test round; disabled in the Original pathway). Switching off `input.queue_timing`, `motion.estimation`, `motion.vector_delivery`, `motion.consumers` or `output.presentation` runs that stage in its upstream form (the Original pathway's settings for it): `input.queue_timing` off = Bill's frame-count queue policy (also what the Original pathway uses), `output.presentation` off = render-ahead off, the motion consumers go off with their vectors. The pipeline status line names what is off. Also which HDR inference reads an unflagged BT.2020 signal (`hdr_inference`: `vp`, the default - bit-depth, DV-tunnel and settings gates plus the SDR veto - or `original`, Bill's newlldv heuristic: BT.2020 + SDR + no InfoFrame after 1.5 s; both need `newlldv` on; the Original pathway always uses `original`; read at start-up). |
-| **Proposed retirement** | The section-12 candidates below, by group, with where each control is and the value in use. The same note is added to each control's tooltip. Nothing is removed until you approve. Each unit tab also ends with "More settings of this unit", naming the pages that hold the rest (coverage audit: `docs/settings/coverage-audit.md`). |
+| **Proposed retirement** | The section-12 candidates below, by group, in plain words, with where each control is and the value in use. Each group has **Approve** / **Keep**: the choice is only RECORDED (`[vpv] retirement_a` .. `retirement_d` = approve or keep; absent = not decided). Nothing is hidden, turned off or removed until a later clean-up run reads it. The same note is added to each control's tooltip. Each unit tab also ends with "More settings of this unit", naming the pages that hold the rest (coverage audit: `docs/settings/coverage-audit.md`). |
 
 **One control per key.** Every VP setting has exactly one live control. VP's own settings that used
 to be on the VP Renderer > Rendering page moved to the VP-V page (the Rendering page keeps Bill's:
@@ -84,9 +84,14 @@ have their controls on the Proposed retirement tab.
 |---|---|---|---|---|
 | Motion | VP's basic matcher (whole-pixel, nothing ahead) | VP's matcher at quarter-pixel | NVIDIA engine + matcher, 4 ahead (shipped) | + split poorly matched blocks |
 | Repair | libplacebo deband only | + breathing reduction (today's default) | VP's grain-safe debander | + texture restore |
-| Scaling | no re-base, plain scaling | re-base, plain scaling (shipped) | re-base + hybrid SSIM downscale (w 0.2) | *not yet: refine net / D (uses Mid)* |
-| Output | libplacebo dither | as shipped: the shader list decides (the cinema list loads the sigma-delta) | always VP's sigma-delta | *same as Mid* |
+| Scaling | no re-base, plain scaling | re-base, plain scaling (shipped) | re-base + hybrid SSIM downscale (w 0.2) | *planned - uses Mid for now (refine net / D not built)* |
+| Output | libplacebo dither | as shipped: the shader list decides (the cinema list loads the sigma-delta) | always VP's sigma-delta | *planned - uses Mid for now (no extra output step yet)* |
 | Input, Colour, Dynamic Drive | not tiered (paths and set-up, not quality steps) | | | |
+
+Every tiered unit's slider shows all four steps (Classic / Low / Mid / Upper). A step the unit has not
+built yet is SHOWN, marked "planned - uses Mid for now", and cannot be chosen: the handle goes back,
+nothing is written and the tab says so (no hidden substitution). The global tier's Upper still puts
+such a unit on its highest built step, and the unit's tab shows that.
 
 The motion taste slider (the de-judder amount, Motion > Main) is never part of a tier and no tier
 writes it: it is your taste, not a cost choice (As shot = no motion processing). The shipped values
