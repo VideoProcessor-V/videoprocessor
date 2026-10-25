@@ -104,3 +104,37 @@ TODO after the rebase onto the final `integ/batch1` (if WP-11 is in): the render
 `InvokeModuleCommand("vp", "dv_compare_capture")` calls `dvStage.ToggleCompareCapture()`, the
 GUI shortcut dispatches through it, and the dedicated virtual leaves `IRenderer.h`,
 `LibplaceboPluginVideoRenderer` and the GUI (`OnCommandDvCompareCapture`).
+
+## Formatter hook: VP's DM additions out of Bill's formatter (audit M-1)
+
+feat/dv-l8 (merge 1) put VP logic into Bill's `CR210DolbyVisionTunnelFormatter.cpp/.h`: the L9 /
+L10 parse calls, the bounded DM hold (`DvMetadataHold::Tracker`, the static / black transitions
+and their log lines) and a VP-V include in his header. They move into
+`src/VP-V/modules/input/signal/DvTunnelMetadataExtension.h` behind
+`video_frame_formatter/DolbyVisionMetadataExtension.h` (committed; UPSTREAMABLE, no VP-V
+dependency; no extension = his formatter's behaviour).
+
+Two patches, in this order:
+
+1. [m2-dv-formatter-hook.patch](m2-dv-formatter-hook.patch) - UPSTREAMABLE, Bill's files only
+   (`CR210DolbyVisionTunnelFormatter.cpp/.h`): `SetMetadataExtension`, and five calls
+   (OnSignal in `OnVideoState`, ParseExtensionBlock for unhandled levels in `ParseMetadata`,
+   KeepDmPastLossLimit at the loss limit, OnPicture after the loss handling, Decorate in
+   `GetDolbyVisionTunnelMetadata`). Removes the VP-V includes, the tracker member and ~45 lines
+   of VP logic; adds ~36 generic lines. The DM data fields VP added to `IVideoFrameFormatter.h`
+   (L9/L10 targets, hold phase, rejected count) stay: they are the data the hook fills.
+2. [m2-dv-formatter-install.patch](m2-dv-formatter-install.patch) - VP-only: the renderer's
+   `CreateAlphaFormatter` (host, one call) and `DvLoopbackAnalyzer.cpp` install a
+   `DvTunnelMetadataExtension` on every tunnel formatter they create.
+
+Behaviour with both applied: identical to merge 1 (same code, same order, same log lines; the
+extension sees exactly the values the inline code read). Behaviour with patch 1 only: Bill's
+formatter as upstream (no L9/L10, no hold) - which is what his own formatter tests exercise.
+Tests: `DvTunnelMetadataExtensionTests` (CPU, the extension alone, on the branch now);
+`DvSignalL8HoldTests::FormatterParsesL8AndL10AndHoldsThenStatics` and `HoldFollowsTheTunnelFixesSwitch`
+(end to end through the loopback analyzer, which installs the extension) need both patches;
+`DolbyVisionTunnelFormatterTests` (Bill's) run on his behaviour.
+
+Out of scope here (finding F-11): the formatter still differs from origin/v1.4.02-beta by about
+1100 lines of earlier VP changes (bug-hunt fixes, DV input fixes, AVX2 work); they predate this
+batch and need their own inventory and hook plan.
