@@ -144,6 +144,7 @@
 #include <video_frame_formatter/CARGBtoP010VideoFrameFormatter.h>
 #include <video_frame_formatter/CDeckLinkRGBToP010VideoFrameFormatter.h>
 #include <video_frame_formatter/CR210DolbyVisionTunnelFormatter.h>
+#include <VP-V/modules/input/signal/DvTunnelMetadataExtension.h>   // WP-14: VP's DM additions through the formatter hook
 #include <DolbyVisionTunnelPresentation.h>
 #include <video_frame_formatter/CUYVYtoP010VideoFrameFormatter.h>
 #include <video_frame_formatter/CUYVYtoP210VideoFrameFormatter.h>
@@ -946,8 +947,12 @@ namespace
 		case VideoFrameEncoding::R10l:
 		case VideoFrameEncoding::R210:
 			if (dolbyVisionTunnel)
-				return std::unique_ptr<IVideoFrameFormatter>(
-					new CR210DolbyVisionTunnelFormatter());
+			{
+				// WP-14: VP's DM additions (L9/L10, the bounded hold) through the formatter's hook.
+				auto dv = std::make_unique<CR210DolbyVisionTunnelFormatter>();
+				dv->SetMetadataExtension(std::make_shared<DvTunnelMetadataExtension>());
+				return std::unique_ptr<IVideoFrameFormatter>(std::move(dv));
+			}
 			return std::unique_ptr<IVideoFrameFormatter>(
 				new CDeckLinkRGBToP010VideoFrameFormatter());
 		case VideoFrameEncoding::R12B:

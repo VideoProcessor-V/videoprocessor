@@ -1,11 +1,12 @@
 #pragma once
 
 #include <video_frame_formatter/IVideoFrameFormatter.h>
-#include <VP-V/modules/input/signal/DvMetadataHold.h>   // feat/dv-l8: the bounded DM hold
+#include <video_frame_formatter/DolbyVisionMetadataExtension.h>
 #include <VideoFrameEncoding.h>
 #include <Windows.h>
 #include <cstdint>
 #include <array>
+#include <memory>
 
 // DeckLink r210 carries the HDMI 8-bit RGB tunnel. Each pixel contains one
 // 12-bit I sample and one alternating 12-bit chroma sample.
@@ -19,6 +20,8 @@ public:
 	// whole-raster SDR alignment probe, the grey SDR exit, the loss limit in
 	// source pictures and L2 trims before L8. Off = the formatter before them.
 	void SetBugHuntFixes(bool on) { m_bugHuntFixes = on; }
+	// Optional DM extension (extra extension levels, a rejected-DM policy); null = none.
+	void SetMetadataExtension(std::shared_ptr<IDolbyVisionMetadataExtension> extension) { m_metadataExtension = std::move(extension); }
 	bool BugHuntFixes() const { return m_bugHuntFixes; }
 	CR210DolbyVisionTunnelFormatter();
 	~CR210DolbyVisionTunnelFormatter() override;
@@ -86,10 +89,8 @@ public:
 		metadata.requiresBlackFrame = m_tunnelConfirmed &&
 			(!m_currentPictureHasValidHeader || !metadata.valid);
 		metadata.reusedPreviousDm = metadata.valid && !m_currentPictureDmAccepted;
-		metadata.dmHoldPhase = static_cast<uint8_t>(metadata.reusedPreviousDm ? m_dmHold.CurrentPhase() : DvMetadataHold::Phase::Own);
-		metadata.dmRejectedPictures = m_dmHold.RejectedPictures();
-		if (metadata.dmHoldPhase == static_cast<uint8_t>(DvMetadataHold::Phase::Static) && m_currentPictureHasValidHeader)
-			DvMetadataHold::StripToStatic(metadata);   // feat/dv-l8: past the hold, a shown picture gets the static part
+		if (m_metadataExtension)
+			m_metadataExtension->Decorate(metadata, m_currentPictureHasValidHeader);
 		return metadata;
 	}
 
@@ -149,7 +150,7 @@ private:
 	std::array<bool, 256> m_seenExtensionLevels{};
 	DolbyVisionTunnelFrameMetadata m_metadata;
 	bool m_currentPictureDmAccepted = true;   // this picture's own DM was accepted (else reused)
-	DvMetadataHold::Tracker m_dmHold;          // feat/dv-l8: held, then static, counted
+	std::shared_ptr<IDolbyVisionMetadataExtension> m_metadataExtension;   // optional (DolbyVisionMetadataExtension.h)
 	DolbyVisionTunnelFrameMetadata m_pendingMetadata;
 	bool m_hasPendingMetadata = false;
 	uint8_t m_pendingAffectedId = 0;
