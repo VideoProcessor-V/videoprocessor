@@ -13,6 +13,9 @@
 
 #include <VP-V/modules/colour/sdr_tone_shape/DvHostStage.h>
 #include <VP-V/modules/input/signal/DvGpuUnpackSession.h>
+#include <VP-V/segments/OutputSegments.h>
+#include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
+#include <led/LedMeasurementHook.h>
 
 #include <algorithm>
 #include <atomic>
@@ -85,6 +88,22 @@ namespace Tests
 			return f;
 		}
 
+		// A loader whose files always "load" as one dummy hook (no GPU): counts the emitted hooks.
+		inline const pl_hook* DummyHook()
+		{
+			static const pl_hook hook{};
+			return &hook;
+		}
+		inline CustomHookChain::Loader DummyShaders()
+		{
+			return {
+				[](const std::string&, std::string& source, std::string&) { source = "//!HOOK MAIN\n"; return true; },
+				[](const std::string&) -> const pl_hook* { return DummyHook(); },
+				[](const pl_hook*& hook) { hook = nullptr; } };
+		}
+
+		// One render frame as the host runs it (group D): DvHostStage phase 1, the S2 output
+		// segment collecting (the ONE emitter of the trims hook), DvHostStage phase 2.
 		struct Run
 		{
 			std::string mode = "libplacebo";
@@ -93,13 +112,29 @@ namespace Tests
 			std::string folder;
 			bool colourRuns = true;
 			VideoState state;
+			size_t trimsHooks = 0;                       // the segment's count this frame
+			std::vector<PipelineSlots::Id> tags;         // the slots the segment tagged this frame
 
 			void Frame(DvHostStage& stage, const pl_frame& image, const pl_frame& target,
 				const DolbyVisionTunnelFrameMetadata* dm, pl_color_map_params& params, std::vector<const pl_hook*>& hooks)
 			{
 				CustomHookChain::TemplateValues templates;
-				stage.OnPreOutput({ mode, trims, curve, folder, colourRuns, image, target, dm, 2.4, state, nullptr, 1 },
-					params, templates, hooks);
+				OutputSegments::ColourFrame colourFrame;
+				std::vector<const pl_hook*> user;
+				colourFrame.userPreOutput = &user;
+				stage.PrepareToneAndTrims({ mode, trims, curve, folder, colourRuns, image, target, dm, 2.4, state, nullptr, 1 },
+					params, templates, colourFrame.dvTrims, colourFrame.dv);
+				CustomHookChain::Chain tone(NoShaders()), comp(NoShaders());
+				LedDrive::MeasurementHook measure;
+				CalibrationLutStage::Hook lut;
+				OutputSegments::OutputColourSegment s2(tone, stage.TrimsHook(), measure, comp, lut);
+				PipelineSlots::Registry registry;
+				registry.SetEnabled(PipelineSlots::Id::ColourSdrToneShape, colourRuns);
+				tags.clear();
+				const OutputSegments::ColourCounts counts = s2.Collect(colourFrame, registry, hooks,
+					[this, &hooks](size_t start, PipelineSlots::Id slot) { for (size_t i = start; i < hooks.size(); ++i) tags.push_back(slot); });
+				trimsHooks = counts.dvTrims;
+				stage.FinishTrims(counts.dvTrims);
 			}
 		};
 	}
@@ -302,6 +337,49 @@ namespace Tests
 			run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
 			Assert::IsTrue(reg.engaged.empty() && hooks.empty(), L"off again: released");
 			Assert::IsTrue(params.tone_mapping_function == &pl_tone_map_spline);
+		}
+
+		// Group D (2026-10-25): the S2 output segment is the ONE emitter of the DV trims hook. Per frame
+		// exactly one trims hook, tagged to colour.sdr_tone_shape, recorded once as a segment member
+		// (what output_segments_merged fuses at draw time - the fused render itself is GPU-only,
+		// OutputSegmentsGpuTests); none with the slot off; DvHostStage itself pushes nothing.
+		TEST_METHOD(TrimsHookExactlyOncePerFrameAndNoneWithTheSlotOff)
+		{
+			using namespace DvHost;
+			Registry reg;
+			DvHostStage stage(DummyShaders(), reg.Engage(), reg.Release());
+			Run run;
+			pl_color_map_params params = pl_color_map_default_params;
+			const DolbyVisionTunnelFrameMetadata dm = TrimmedDm();
+			const pl_frame image = Picture(true);
+			for (int frame = 0; frame < 4; ++frame)
+			{
+				std::vector<const pl_hook*> hooks;
+				run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
+				Assert::AreEqual<size_t>(1, run.trimsHooks, L"one trims hook from the segment");
+				Assert::AreEqual<ptrdiff_t>(1, std::count(hooks.begin(), hooks.end(), DummyHook()), L"exactly once in the frame");
+				Assert::IsTrue(run.tags.size() == 1 && run.tags[0] == PipelineSlots::Id::ColourSdrToneShape, L"tagged to its slot");
+				Assert::IsFalse(reg.Has("Dolby Vision trims"), L"active: no fallback");
+				Assert::AreEqual(std::string("DV trims: L2"), stage.TrimsStatus());
+			}
+			// Phase 1 alone never emits: the hook list stays empty without the segment.
+			{
+				OutputSegments::ColourFrame colourFrame;
+				CustomHookChain::TemplateValues templates;
+				stage.PrepareToneAndTrims({ run.mode, true, run.curve, run.folder, true, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, 2.4,
+					run.state, nullptr, 9 }, params, templates, colourFrame.dvTrims, colourFrame.dv);
+				Assert::IsTrue(colourFrame.dvTrims && !colourFrame.dv.empty(), L"the parameters go to the segment");
+				stage.FinishTrims(1);
+			}
+			run.colourRuns = false;
+			for (int frame = 0; frame < 2; ++frame)
+			{
+				std::vector<const pl_hook*> hooks;
+				run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
+				Assert::AreEqual<size_t>(0, run.trimsHooks, L"slot off: no trims hook");
+				Assert::IsTrue(hooks.empty() && run.tags.empty());
+				Assert::IsTrue(reg.engaged.empty(), L"slot off: nothing listed");
+			}
 		}
 
 		TEST_METHOD(GpuUnpackSessionLogsOnceAndSwitchesTheSessionToTheCpuOnce)
