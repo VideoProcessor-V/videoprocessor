@@ -56,7 +56,6 @@ namespace OriginalPathway
 			{ "interpolation", "off", "motion.consumers" },
 			{ "interpolation_fill_gaps", "off", "motion.consumers" },
 			{ "occlusion_mask", "off", "motion.consumers" },
-			{ "repeat_render_reuse", "off", "output.presentation" },
 			{ "optical_flow", "off", "motion.estimation" },
 			{ "motion_ahead_frames", "0", "motion.estimation" },
 			{ "motion_history_fixes", "off", "motion.estimation" },
