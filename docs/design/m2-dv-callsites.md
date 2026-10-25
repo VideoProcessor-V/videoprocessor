@@ -77,3 +77,19 @@ Threading: every DvHostStage call is on the render thread (`RenderLocked`), as t
   the DV autotest / loopback (`test/dv-tunnel-auto`), `GpuDolbyVisionUnpackMatchesTheCpu*`, the
   `VP_TEST_DV_UNPACK_FAIL=1` renderer-harness fallback check, and the frozen-b3base byte identity
   on a DV clip (the patch must be byte-identical).
+
+## Fix patch (separate, after the move): m2-dv-fixes.patch
+
+Findings F-3 and F-4 ([module-findings-2026-10-25-m2-dv.md](module-findings-2026-10-25-m2-dv.md))
+need host changes, so they come as their own patch (behaviour change, NOT part of the move):
+
+- F-3: the `capture GPU unpack` entry reads "CPU formatters for the session: <error>" (it claimed
+  4:2:0; the CPU formatters keep P210 4:2:2 for V210 / UYVY / HDYC unless P010 is forced).
+- F-4: early upload that cannot open (capture_upload early, or auto in the low-latency path) engages
+  `early upload: render upload (<error>)` instead of only logging; released when it opens or is no
+  longer wanted (including after a device loss, on the next raw frame).
+
+Independent of the call-site patch (`git apply --check --cached` clean on its own, and stacked on
+top of it). Tests to run with it (GPU, coordinator): the renderer capture harness fallback test
+(prefix "capture GPU unpack (CPU formatters" still matches), and an early-upload open failure
+check (none exists yet; candidate: force `EarlyUpload::Open` to fail via a test environment switch).

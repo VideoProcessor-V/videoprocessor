@@ -1,0 +1,42 @@
+diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+index 78096f51..d4385679 100644
+--- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+@@ -5486,6 +5486,7 @@ struct LibplaceboVideoRenderer::Impl
+ 					static_cast<unsigned long long>(earlyUsed), static_cast<unsigned long long>(earlyFallback));
+ 			}
+ 			earlyOpenFailed = false;
++			ReleaseFallback("early upload");
+ 			return;
+ 		}
+ 		if (earlyUpload->IsOpen() || earlyOpenFailed)
+@@ -5496,12 +5497,18 @@ struct LibplaceboVideoRenderer::Impl
+ 		// follows the queue target (hunt 2 13-timing L4).
+ 		const int slots = AlphaQueuePolicy::EarlyUploadSlots(earlyUploadQueueTarget.load(std::memory_order_acquire));
+ 		if (earlyUpload->Open(d3d11->device, d3d11->gpu, slots))
++		{
+ 			DebugLog::Log("Early upload: on (%d slots, up to %zu MB; frames uploaded as they arrive on a second device)", slots,
+ 				earlyUpload->CapBytes() >> 20);
++			ReleaseFallback("early upload");
++		}
+ 		else
+ 		{
+ 			earlyOpenFailed = true;
+ 			DebugLog::Log("Early upload: not available (%s); the render upload", earlyUpload->LastError().c_str());
++			// F-4 (m2-dv findings, no silent fallbacks): early upload was asked for (capture_upload early,
++			// or auto in the low-latency path) and every frame now takes the render upload.
++			EngageFallback("early upload", "render upload (" + earlyUpload->LastError() + ")");
+ 		}
+ 	}
+ 	// Render thread: the early-uploaded texture of a payload (with its GPU wait
+@@ -6766,7 +6773,9 @@ struct LibplaceboVideoRenderer::Impl
+ 		{
+ 			DebugLog::Log("Capture path gpu: the GPU unpack failed (%s); the CPU formatters for the rest of the session",
+ 				captureUnpack->Error().c_str());
+-			EngageFallback("capture GPU unpack", "CPU formatters (4:2:0) for the session: " + captureUnpack->Error());
++			// F-3 (m2-dv findings): the CPU formatters keep P210 4:2:2 for V210 / UYVY / HDYC unless the
++			// P010 conversion is forced, so the entry no longer claims 4:2:0.
++			EngageFallback("capture GPU unpack", "CPU formatters for the session: " + captureUnpack->Error());
+ 		}
+ 		return false;
+ 	}
