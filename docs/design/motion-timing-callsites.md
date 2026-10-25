@@ -25,7 +25,13 @@ Apply from the committed blob, not the working-tree file: with `core.autocrlf=tr
 dc149284). On the branch tip: `git show HEAD:docs/design/motion-timing-callsites.patch | git apply`,
 then `motion-timing-slots.patch`, then `motion-shadow-callsites.patch`. They target the tip of
 `feat/m2-motion` (its test-include moves and the frame-start policy commits), not bare dc149284.
-Compile-checked together (VPRenderer + Test, x64 Release, 2026-10-25 18:16).
+Verified 2026-10-25 on integ/batch1 43ebff50 + this branch with all three applied: x64 Release
+build (VPRenderer + Test) and the targeted CPU tests, single-threaded vstest, 624/624 passed
+(QueueTimingPolicy incl. the 20k/200k frozen-host comparison, MotionSegmentTests, SlotSwitchSettings,
+PipelineSkeleton, DelayGate, QueueStress*, QueueTimingFixes, RenderAhead*, AlphaQueuePolicy, Pulldown*,
+motion/interpolation classes, ConfigFile, the canonical GPU/hardware exclusions;
+TRX D:\codex\m2-motion-logs\trx\ADMIN_DESKTOP-PVU5F32_2026-10-25_19_08_33_net40.trx). Not run: GPU
+tests, timing gates, the shadow mismatch count (big test round).
 
 P-b1 step 2 (consumers fetch from the segment) is NOT drafted as a patch yet: it goes in only after
 step 1 shows 0 mismatches in the gates (section 5.1). One mismatch source is predicted
