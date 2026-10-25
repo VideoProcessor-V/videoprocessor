@@ -97,13 +97,18 @@ index 1, and the curve's mid adaptation constants are VP assumptions, to calibra
   formatter logs the first L8 block per title with its raw bytes; dv-frames.jsonl records L10).
 - GPU 2026-10-24: the shader matches its C++ references on the NVIDIA GPU (L2, L8 and ICtCp
   paths: DolbyVisionTrimShaderMatchesItsReference, DolbyVisionTrimShaderL8AndIctcpPathsMatchTheirReferences).
-- OPEN (WIP, dv_tone_mapping stays default libplacebo): on the synthetic policy scenes the
-  Dolby-style mode renders about one stop darker than the L1 intent model with crushed shadows
-  (wedge: 200 -> 98.5, 20 -> 9.7, 5 -> ~2, 1 -> 0.21 nits at a 100-nit target; bt2390: 100, 20,
-  5, 1). libplacebo's own LUT generation reproduces the curve exactly on the CPU
-  (LibplaceboGeneratesTheCurve), and changing the mid adaptation 0.7 -> 1.0 did not change the
-  render, so the inputs libplacebo hands the function in the renderer (scene min/avg/max, target)
-  or the swap itself are the suspects: log the effective tone parameters per frame next.
+- RESOLVED 2026-10-25 (fix/dv-dolby-style-dark): the "one stop dark" Dolby-style report
+  (200 -> 98.5, 20 -> 9.7, 5 -> ~2, 1 -> 0.21 nits at 100 nits) was a broken test, not the mode.
+  The hand-edited Dolby-style jobs had a REAL new line after `tone_mapping: bt2390`, so the
+  harness ran each job without dv_tone_mapping, sdr_target_nits, the P3 target and the 2.2 output:
+  every capture says "DV tone mapping: libplacebo (bt2390)", 203 nits, Rec.709, sRGB. bt2390 at
+  203 nits encoded sRGB and read as a 100-nit 2.2 picture gives 98.6 / 9.73 / 2.04 / 0.207 -
+  the reported numbers to three digits (and why the mid adaptation changed nothing). The ICtCp
+  trims are not a second darkening: in ST 2094-10 / CM the trim is the target-specific
+  adjustment of the tone-mapped intensity, which is where they act (relative to the target
+  peak), and the corpus's L2 brightens slightly (CurveThenIctcpTrimsKeepTheWedgeOnTheCurve).
+  run_dv_synth.py now writes the Dolby-style jobs (`jobs <root> <file> -dolby_`) and
+  DvSynthGpuRendersJobs rejects a jobs file with non-job lines. GPU confirmation pending.
 
 ## Where the code lives (live file list)
 

@@ -3707,6 +3707,17 @@ namespace Tests
 			std::ifstream jobs(jobsPath);
 			Assert::IsTrue(static_cast<bool>(jobs), HarnessWide("cannot read " + jobsPath).c_str());
 			std::string line;
+			// fix/dv-dolby-style-dark: a real new line inside a job's settings split the job, which then
+			// ran silently without everything after it (the 2026-10-24 Dolby-style jobs rendered bt2390
+			// at the 203-nit default). Before any render: job lines, blank lines and # comments only.
+			while (std::getline(jobs, line))
+			{
+				const size_t first = line.find_first_not_of(" \t\r");
+				Assert::IsTrue(first == std::string::npos || line[first] == '#' || line.compare(0, 4, "job ") == 0,
+					HarnessWide("jobs file: a line that is not a job (a real new line inside settings? write \\n): " + line.substr(0, 80)).c_str());
+			}
+			jobs.clear();
+			jobs.seekg(0);
 			size_t done = 0, failed = 0, faithfulFailures = 0;
 			std::string loadedSegment;
 			RawCorpusSegment seg;
