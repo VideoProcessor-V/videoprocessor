@@ -92,7 +92,13 @@ reference), `ledIntentLimitsSent` (intent glue, WP-16), the calibration tone-cur
     keep its `displayRefreshRate.SetFallbackSink(...)` line right after `m_dynamicDrive.Attach(...)`.
 - **WP-6 segments (S2)**: the measure/compensation pixel work stays in their S2 stages;
   `PrepareFrame` is the S2 LED entry point the segment runner can call instead of the host.
-- **WP-12** (calibration glue) still uses `LedRawTransfer` and `calibrationTone` in the host.
+- **WP-12** (feat/wp12-calib-glue, wp12-calib-callsites.patch): applied after this patch with
+  `--3way`, 3 trivial conflicts (checked 2026-10-25): the tone-curve hunk (keep
+  `calibrationHost.NoteToneCurve(...)` before the Dynamic Drive block) and the calibration-pattern
+  start/end (keep WP-12's `SetPattern` / `ResetPatternLogs` / `EndPattern` /
+  `ReleaseFallback("calibration patch")` around `SuspendForCalibration` / `ResumeAfterCalibration`).
+  WP-12 removes `calibrationTone` and the host's LedRawTransfer use; then this patch's
+  `LedRawTransfer.h` include line can go too.
 
 ## Tests
 
