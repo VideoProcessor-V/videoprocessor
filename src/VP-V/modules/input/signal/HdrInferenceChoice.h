@@ -5,8 +5,9 @@
  */
 // F-8 (m2-dv findings, owner rule vp-either-or-overlaps): the either/or between VP's HDR inference
 // (HdrInferenceTracker: BT.2020 at 10/12-bit or 8-bit with an LLDV indication, DV-tunnel and
-// explicit-settings gates, signal epochs, the picture-statistics SDR veto) and Bill's original
-// newlldv heuristic (BT.2020 + SDR EOTF + no HDR InfoFrame, confirmed after 1.5 s).
+// explicit-settings gates, signal epochs, the picture-statistics SDR veto) and Bill's candidate
+// decision (BT.2020 + SDR EOTF + no HDR InfoFrame + both HDR modes Follow input (LLDV), confirmed
+// after 1.5 s). The dialog flow around the decision stays VP's.
 //
 // Key: [vpv] hdr_inference = vp | original (default vp: the behaviour since 2026-10-17).
 // The selection is gated through the slot registry on input.signal: the Original pathway puts
@@ -84,7 +85,7 @@ namespace HdrInferenceChoice
 	inline std::string Describe(const Resolved& r)
 	{
 		std::string text = std::string("HDR inference: ") + (r.effective == Mode::Original ?
-			"original newlldv heuristic (Bill's)" : "VP inference");
+			"Bill's candidate decision (original newlldv heuristic)" : "VP inference");
 		if (r.effective != r.setting)
 			text += " (hdr_inference " + std::string(Name(r.setting)) + "; the Original pathway selects Bill's)";
 		if (!r.problem.empty())

@@ -36,6 +36,7 @@ namespace Tests
 			s.hdrInfoFrame = false;
 			s.bitDepth = 8;
 			s.signalKey = 1;
+			s.lldvModesSelected = true;   // both HDR modes Follow input (LLDV)
 			return s;
 		}
 
@@ -76,6 +77,8 @@ namespace Tests
 			Assert::IsFalse(EvaluateOriginalNewLldvEligibility(t).eligible);
 			t = Candidate(); t.valid = false;
 			Assert::IsFalse(EvaluateOriginalNewLldvEligibility(t).eligible);
+			t = Candidate(); t.lldvModesSelected = false;
+			Assert::IsFalse(EvaluateOriginalNewLldvEligibility(t).eligible, L"an explicit hdr_colorspace / hdr_luminance rejects, as upstream");
 			t = Candidate(); t.enabled = false;
 			Assert::IsFalse(EvaluateOriginalNewLldvEligibility(t).eligible, L"newlldv stays the master switch");
 		}
