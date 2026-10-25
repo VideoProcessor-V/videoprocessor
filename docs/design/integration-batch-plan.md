@@ -76,10 +76,10 @@ Markers: `TODO`, `WIP` (branch + last commit + the resume step), `VERIFY` (code 
 | WP-2c | Verify chore/early-migrations | TODO | chore/early-migrations (migrate) | 5d5390bd | step 1 |
 | WP-2d | Verify fix/vpscalerender-motion | TODO | fix/vpscalerender-motion (motion-harness) | 2f8fb24c | step 1 |
 | WP-2e | Verify feat/net-runner (PlNetRunner, fused) | TODO | feat/net-runner (nets) | 5805e928 | step 1 |
-| WP-3 | Merge helpers into `integ/batch1` | VERIFY | integ/batch1 (integ-batch1) | 43ebff50 | merges 1-5 + follow-ups built (x64 Release 0 errors); targeted 575/576 (the 1 = GPU test VpScaleRenderMotionGpu, owed quiet rerun); full filtered suite running; held: fix/dv-dolby-style-dark (1e3bfd5d) + fix/net-fp16-gate (183251a5) until their GPU checks |
-| WP-4 | Silent-fallback call sites | VERIFY | integ/batch1 | 64ab319b (+ modularity fixes 38badcb0) | group A merge audit, then build + targeted + full suite with perf + segments |
-| WP-5 | Byte-identical efficiency fixes + timers | BLOCKED | perf/byte-identical (efficiency-fixes) | c245c003 | modularity FIX FIRST (efficiency_fixes gating); then merge + efficiency-callsites.patch in group A |
-| WP-6 | Output segments S2/S3 | BLOCKED | feat/segment-runner (segments) | 8a6d2045 | modularity LOWs + patches regenerated on 38badcb0; then group A |
+| WP-3 | Merge helpers into `integ/batch1` | DONE | integ/batch1 | 43ebff50 (pushed fork) | full filtered suite 4031/4031; fix branches merged 90aef136/50f11ae0 after GPU checks |
+| WP-4 | Silent-fallback call sites | VERIFY | integ/batch1 | 64ab319b + build fix ce3fd4de | group A built (0 errors); full suite held (owner) |
+| WP-5 | Byte-identical efficiency fixes + timers | VERIFY | integ/batch1 | 0dbf2d7e + b17449d6 | group A built; GPU byte-identity tests G3-G10 exist only as a plan (owed as code) |
+| WP-6 | Output segments S2/S3 | VERIFY | integ/batch1 | 2e209b11..b160a54a | group A built; OutputSegmentsGpu PASS (merged = separate, max 0) |
 | WP-7 | Motion/timing extraction + queue policy interface | TODO | feat/m2-motion supersedes feat/motion-timing-extract (retired) | - | group B |
 | WP-23 | VP frame analysis store (FAS): interface, producer, consumer migration | TODO | feat/frame-analysis-store (fas) | - | step 1 |
 | WP-8 | S1 entrance segment + small B3 closures | TODO | integ/batch1 | - | step 1 |
@@ -97,6 +97,8 @@ Markers: `TODO`, `WIP` (branch + last commit + the resume step), `VERIFY` (code 
 | WP-20 | The ONE large test procedure | TODO | integ/batch1 | - | step 1 |
 | WP-21 | Batched Bill merge | TODO | integ/bill-merge | - | step 1 |
 | WP-22 | M1 deploy prep | TODO | integ/bill-merge | - | step 1 |
+
+**Integration lead state (2026-10-25 ~22:00):** integ/batch1 local tip = A+B+C+E (0349051c + this commit), built x64 Release 0 errors, small targeted 168/168; backup ref fork/integ/batch1-wip = 0349051c; fork/integ/batch1 = verified 43ebff50. Owner HOLD: no full suite / GPU until the complete merge. Next: merge group D (integ-group-d, audit interim FIX FIRST D1/D2 + m2-entrance re-cut) when its final merge audit is OK; then the copyright-header sweep (scratchpad integ/copyright_sweep.py: 56 VP files, Bill-file guard by original path) + CONTRIBUTING note; then ONE build, union of targeted tests, ONE full filtered suite (filter must also exclude VpScaleRenderMotionGpu, PlNetRunnerGpuTests, OutputSegmentsGpu: the TestCategory clauses are inert, the repo uses the trait name Category). Owed GPU: RepeatReuse R1-R3, efficiency G-tests (not written), DejudderIdenticalFramesGiveExactZeroVectors, frozen r6 / frozen-b3base (WP-0 steps 2-3).
 
 Mirror every status change in two places: (1) one line in the queue memory
 (`vp-post-reset-queue.md`, a new numbered item), (2) the handover
