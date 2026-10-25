@@ -82,6 +82,12 @@
 #include <vprenderer/ExtendedRange.h>
 #include <vprenderer/SdrToneShape.h>
 #include <vprenderer/RenderedWarp.h>
+// WP-13: the dither/output glue as VP-V stages (one call each below).
+#include <VP-V/modules/colour/extended_range/ExtendedRangeStage.h>
+#include <VP-V/modules/scaling/output/AdaptiveDownscaleStage.h>
+#include <VP-V/modules/motion/consumers/DejudderCacheStage.h>
+#include <VP-V/modules/output/dither/SigmaDeltaVectors.h>
+#include <VP-V/modules/output/dither/DitherSlot.h>
 // VP-V pipeline skeleton (src/VP-V; see src/VP-V/README.md): the slot registry, the entrance
 // stage list, the output-hook order and the VP calibration-LUT stage.
 #include <VP-V/core/SlotRegistry.h>
@@ -5345,40 +5351,6 @@ enum class AlphaGpuTimingSampleMode
 };
 
 
-// Delta 8 R1: the sigma-delta's VPVEC texture (libplacebo 377 with VP's fork
-// patch 0004; 7.360 has no such call and the sigma-delta searches itself).
-static bool SigmaDeltaVectorsSupported()
-{
-#ifdef PL_VP_MPV_USER_SHADER_SET_TEXTURE
-	return true;
-#else
-	return false;
-#endif
-}
-
-// Planner D2: the per-pixel displacement (VPPIX), the same fork call.
-static bool SetSigmaDeltaPixelVectors(const pl_hook* hook, pl_tex displacement)
-{
-#ifdef PL_VP_MPV_USER_SHADER_SET_TEXTURE
-	return hook && pl_mpv_user_shader_set_texture(hook, "VPPIX", displacement);
-#else
-	(void)hook;
-	(void)displacement;
-	return false;
-#endif
-}
-
-static bool SetSigmaDeltaVectors(const pl_hook* hook, pl_tex vectors)
-{
-#ifdef PL_VP_MPV_USER_SHADER_SET_TEXTURE
-	return hook && pl_mpv_user_shader_set_texture(hook, "VPVEC", vectors);
-#else
-	(void)hook;
-	(void)vectors;
-	return false;
-#endif
-}
-
 // Delta 8 R1 timing (planner 2026-10-13): the GPU time of an extra's
 // sigma-delta passes (libplacebo's per-pass timers; `last` is the most recent
 // completed measurement of that pass).
@@ -7260,7 +7232,7 @@ struct LibplaceboVideoRenderer::Impl
 		// The frame latency the VP-owned chain was made with (bug hunt 05 M6: today's 2
 		// without extras or in low latency).
 		g.queueDepth = vpOwnedSwapchain ? static_cast<int>(renderAheadChainDepth.latency) : 2;
-		g.l1Available = activeSettings.ditherVectorsOwn && SigmaDeltaVectorsSupported();
+		g.l1Available = activeSettings.ditherVectorsOwn && DitherVectorsSupported();
 		g.costs.newFrameMs = renderAheadNewFrameCost.P95();
 		g.costs.estimateMs = renderAheadEstimateCost.Current();
 		// X per vector mode, each level priced with its own (M7). A degraded level renders
@@ -7638,8 +7610,6 @@ struct LibplaceboVideoRenderer::Impl
 	bool dejudderFillIgnoredLogged = false;   // D5 with the rendered warp (logged once)
 	float dejudderEffectiveStrength = 0.0f;   // delta 10: uneven or even strength for this source
 	int dejudderEvenCycle = 0;   // refreshes per film frame on an even cadence, 0 = uneven
-	bool adaptiveUpscaleThisFrame = false;    // Stage 8b on the frame being built
-	int adaptiveUpscaleRatioLogged = -1;   // S1: the sigma-delta's grain_tolerance_scale above 1 this frame
 	bool smoothMotionEngine = false;   // motion_engine resolved to libplacebo's smooth motion
 	bool motionEngineLogged = false;
 	bool smoothMotionMixingLogged = false;
@@ -7648,7 +7618,6 @@ struct LibplaceboVideoRenderer::Impl
 	bool sigmaDeltaReorderLogged = false;   // the sigma-delta moved to run last
 	bool dejudderMaskNoSigmaLogged = false;
 	bool dejudderMaskNlsLogged = false;
-	bool adaptiveMapNlsLogged = false;   // 8-3
 	ULONGLONG dejudderMaskUsedTick = 0;    // last refresh the mask was used on
 	std::string dejudderMaskState;         // why the mask is not used, for the stats line
 	bool dejudderMaskRateLogged = false;
@@ -7669,21 +7638,25 @@ struct LibplaceboVideoRenderer::Impl
 	std::unique_ptr<DejudderRendered::VectorField> dejudderVectorField;
 	unsigned long long ditherVectorsExternal = 0;
 	int ditherVectorsLogged = -1;
-	int dejudderWarpStageLogged = -1;
-	int downscaleLightLogged = -1;   // Stage 8-1: the last logged light domain
+	// Stage 6d registration (WP-13: VP-V/modules/motion/consumers/DejudderCacheStage.h).
+	DejudderCacheStage::Stage dejudderCacheStage{ dejudderCache, dejudderGeometry, dejudderGeometryValid };
 	// Stage 8-2: the adaptive downscale blend.
 	AdaptiveDownscale::Module adaptiveDownscale;
 	bool adaptiveNoSsimLogged = false;
 	// 8-3: the grain map wants the matcher (set where the hooks are chosen,
 	// read by the next source frame's estimate: the blend ran on a downscale).
 	bool adaptiveGrainMapWanted = false;
-	ULONGLONG adaptiveStatsTick = 0;
-	// Stage 10: the BTB/WTW carry and VP's SDR conversion.
-	ExtendedRange::Hooks extendedRangeHooks;
-	int extendedRangeLogged = -1;          // the last logged decision
-	std::string extendedRangeDescribed;    // the last logged description (audit 2026-10-16)
-	bool extendedRangeHookFailed = false;  // libplacebo disabled a hook: off until restart
-	bool extendedRangeMixLogged = false;   // hunt 2 (08 #2): BTB lost in libplacebo's frame mix, logged
+	// output.dither's vector producers run only while the slot runs (WP-13, DitherSlot.h).
+	bool DitherVectorsSupported() const
+	{
+		return DitherSlot::VectorsWanted(pipelineSlots.Runs(PipelineSlots::Id::OutputDither), SigmaDeltaVectorsSupported());
+	}
+	// Stage 8-1 / 8-2 / 8b registration (WP-13: VP-V/modules/scaling/output/AdaptiveDownscaleStage.h).
+	AdaptiveDownscaleStage::Stage adaptiveStage{ adaptiveDownscale };
+	// Stage 10: the BTB/WTW carry and VP's SDR conversion (WP-13: VP-V/modules/colour/
+	// extended_range/ExtendedRangeStage.h owns the hooks, the decision and its log state).
+	ExtendedRangeStage::Stage extendedRange;
+	ExtendedRange::Hooks& extendedRangeHooks = extendedRange.CarryHooks();
 	// 6b-2b: the stats overlay line, published by the render thread at most
 	// twice a second and read by the UI under its own small lock.
 	std::mutex dejudderStatusMutex;
@@ -18060,7 +18033,7 @@ struct LibplaceboVideoRenderer::Impl
 			// With M6 the picture moves per pixel: the sigma-delta follows the
 			// warp's own per-pixel displacement (the step since the previous
 			// present) instead of block vectors.
-			const bool pixelVectors = warpMask != nullptr && !ditherOwnOnExtras && SigmaDeltaVectorsSupported() &&
+			const bool pixelVectors = warpMask != nullptr && !ditherOwnOnExtras && DitherVectorsSupported() &&
 				shift > 0.0f;
 			if (cached && dejudderRenderedWarp)
 			{
@@ -18194,7 +18167,7 @@ struct LibplaceboVideoRenderer::Impl
 				~VectorGuard() { Release(); }
 			} vectorGuard;
 			{
-				const bool patch = SigmaDeltaVectorsSupported();
+				const bool patch = DitherVectorsSupported();
 				const bool use = DejudderRendered::UseExternalVectors(ditherOwnOnExtras, patch,
 					warpField != nullptr, dejudderGeometryValid);
 				pl_tex vectors = nullptr;
@@ -18469,7 +18442,7 @@ struct LibplaceboVideoRenderer::Impl
 		// Hunt 2 09-L4: not after a failed extra. The fallback showed A at shift 0 (or
 		// nothing was presented), so vectors from previousShift would carry from the
 		// wrong place; the sigma-delta's own search covers B (vector validity rule).
-		if (!failure && !activeSettings.ditherVectorsOwn && SigmaDeltaVectorsSupported() &&
+		if (!failure && !activeSettings.ditherVectorsOwn && DitherVectorsSupported() &&
 			warpField && warpTrust &&
 			dejudderGeometryValid && f.nextSourceSequence != 0)
 		{
@@ -24720,194 +24693,62 @@ struct LibplaceboVideoRenderer::Impl
         // skips its motion search (zero motion; owner 2026-10-13 efficiency).
         for (const pl_hook* hook : frameHooks)
             CustomHookChain::SetHookParameter(hook, "static_refresh", cadenceRepeat ? 1.0 : 0.0);
-        // Stage 8-2: the blend measures at PREKERNEL and blends after the user
-        // hooks at POSTKERNEL (after the SSIM shader's passes); it needs the
-        // SSIM downscaler in the chain.
-        // Stage 8b: a source shorter than the destination with the upscale
-        // blend on takes the module in its upscale form (no SSIM needed: the
-        // perceptual branch is whatever upscales, CNN + SuperRes when enabled).
-        // Stage 12: the height libplacebo will sample (re-based when the factor is below 1).
-        const float sourceCropH = std::fabs(renderImage.crop.y1 - renderImage.crop.y0) * static_cast<float>(rebaseFactor);
-        const float targetCropH = std::fabs(target.crop.y1 - target.crop.y0);
-        const bool upscaleBlend = activeSettings.adaptiveUpscale && sourceCropH + 0.5f < targetCropH;
-        adaptiveUpscaleThisFrame = upscaleBlend;
-        // SSimSuperRes takes the grain term through alpha only when the blend
-        // runs (its vp_grain_strength; 0 otherwise).
-        const pl_hook* superresHook = nullptr;
-        for (const pl_hook* hook : frameHooks)
-            if (CustomHookChain::SetHookParameter(hook, "vp_grain_strength",
-                upscaleBlend && activeSettings.adaptiveUpscaleSuperresScale ? 1.0 : 0.0))
-                superresHook = hook;
-        const bool superresFound = superresHook != nullptr;
-        // Stage 12 §2c / delta 15 S8-2: at a low bitrate quality the CNN's and
-        // SSIM's weights fall towards the floor and the faithful branch's
-        // anti-ringing rises (low_bitrate_handling off: every source clean).
-        AdaptiveDownscale::Settings adaptiveNow = activeSettings.adaptive;
-#if defined(PL_RENDER_PARAMS_FBO_FLOAT32)
-        adaptiveNow.float32Picture = activeSettings.fboFloat32 != 0;
-#endif
-        bitrateWeightScale = 1.0;
-        if (activeSettings.lowBitrateHandling != "off" && (upscaleBlend || activeSettings.ssimBitrateAware))
+        // Stage 8-2 / 8b (scaling.output): the adaptive blend's measure and blend hooks, its
+        // bitrate weighting, residual motion and grain field (VP-V/modules/scaling/output/
+        // AdaptiveDownscaleStage.h; WP-13).
         {
-            const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
-            double quality = snap.reading ? snap.bitrateQuality : 1.0;
-            if (activeSettings.lowBitrateHandling == "on") quality = (std::min)(quality, 0.4);
-            bitrateWeightScale = AdaptiveDownscale::BitrateScale(quality, activeSettings.ssimBitrateFloor);
-            adaptiveNow.antiring = AdaptiveDownscale::BitrateAntiring(activeSettings.adaptive.antiring, bitrateWeightScale,
-                activeSettings.ssimBitrateFloor);
-            if (!upscaleBlend)
-                adaptiveNow.wBase = static_cast<float>(activeSettings.adaptive.wBase * bitrateWeightScale);
-        }
-        // residual_stabilise_grain_guard: the held residual change limited to the coding
-        // noise the bitrate reading implies (no reading: no limit).
-        adaptiveNow.residualCodingNoiseCodes = 0.0f;
-        if (adaptiveNow.residualGrainGuard)
-        {
-            const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
-            if (snap.reading)
-                adaptiveNow.residualCodingNoiseCodes = static_cast<float>(GrainPreserve::CodingNoiseCodes(snap.bitrateQuality));
-        }
-        if (upscaleBlend)
-        {
-            adaptiveDownscale.SetFrame(adaptiveNow, sourceSequence,
-                nominalSourceRateHz > 0.0 ? static_cast<float>(1.0 / nominalSourceRateHz) : AdaptiveFallbackFramePeriod());
-            AdaptiveDownscale::Upscale up;
-            up.on = true;
-            up.wBase = static_cast<float>(activeSettings.adaptiveUpscaleWBase * bitrateWeightScale);
-            up.superresAlpha = activeSettings.adaptiveUpscaleSuperresScale && superresFound;
-            up.nativeHeight = sourceCropH;
-            adaptiveDownscale.SetUpscale(up);
-            adaptiveDownscale.ClearGrainField();
-            // Stage 12 §2c / S8-1: the motion for holding the CNN / SSIM residual
-            // (vectors of this source frame only; never with NLS - its map is not
-            // linear; never starts the matcher).
-            adaptiveDownscale.ClearMotion();
-            if (!submittedNls && DejudderLiveFieldFor(sourceSequence) && !VpPhaseDrawn(renderImage) &&
-                dejudder->Field() && dejudder->FrameTrust())
-            {
-                AdaptiveDownscale::Motion motion;
-                motion.field = dejudder->Field();
-                motion.frameTrust = dejudder->FrameTrust();
-                motion.minTrustedShare = dejudder->GetSettings().minTrustedShare;
-                motion.sourceCrop = renderImage.crop;
-                adaptiveDownscale.SetMotion(motion);
-            }
-            if (activeSettings.adaptive.grainMap && DejudderLiveFieldFor(sourceSequence) && !VpPhaseDrawn(renderImage) &&
-                dejudder->GrainError())
-            {
-                AdaptiveDownscale::GrainField field;
-                field.error = dejudder->GrainError();
-                field.field = dejudder->Field();
-                field.frameTrust = dejudder->FrameTrust();
-                field.minTrustedShare = dejudder->GetSettings().minTrustedShare;
-                field.sourceCrop = renderImage.crop;
-                bool known = true;
-                if (submittedNls)
+            AdaptiveDownscaleStage::Frame adaptiveFrame;
+            adaptiveFrame.adaptiveDownscale = activeSettings.adaptiveDownscale;
+            adaptiveFrame.adaptiveUpscale = activeSettings.adaptiveUpscale;
+            adaptiveFrame.upscaleWBase = activeSettings.adaptiveUpscaleWBase;
+            adaptiveFrame.upscaleSuperresScale = activeSettings.adaptiveUpscaleSuperresScale;
+            adaptiveFrame.adaptive = &activeSettings.adaptive;
+            adaptiveFrame.lowBitrateOff = activeSettings.lowBitrateHandling == "off";
+            adaptiveFrame.lowBitrateOn = activeSettings.lowBitrateHandling == "on";
+            adaptiveFrame.ssimBitrateAware = activeSettings.ssimBitrateAware;
+            adaptiveFrame.ssimBitrateFloor = activeSettings.ssimBitrateFloor;
+            adaptiveFrame.fboFloat32 = activeSettings.fboFloat32;
+            adaptiveFrame.sourceSequence = sourceSequence;
+            adaptiveFrame.nominalSourceRateHz = nominalSourceRateHz;
+            adaptiveFrame.sourceCrop = renderImage.crop;
+            adaptiveFrame.targetCrop = target.crop;
+            adaptiveFrame.rebaseFactor = rebaseFactor;
+            adaptiveFrame.rebaseFactorX = rebaseFactorX;
+            adaptiveFrame.nlsSubmitted = submittedNls != nullptr;
+            adaptiveFrame.nlsFile = nlsRule.filename.c_str();
+            adaptiveFrame.slotRuns = pipelineSlots.Runs(PipelineSlots::Id::ScalingOutput);
+            AdaptiveDownscaleStage::Host adaptiveHost;
+            adaptiveHost.fallbackFramePeriod = [this]() { return AdaptiveFallbackFramePeriod(); };
+            adaptiveHost.bitrate = [this](double& quality) {
+                const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
+                quality = snap.bitrateQuality;
+                return snap.reading;
+            };
+            adaptiveHost.nlsMapping = [this]() { return KnownNlsMapping(); };
+            adaptiveHost.ssimInChain = [&]() { return customHooks.SubmitsFile("SSimDownscaler.glsl", lowLatencyQueue); };
+            adaptiveHost.motion = [&]() {
+                AdaptiveDownscaleStage::MotionSource m;
+                m.live = DejudderLiveFieldFor(sourceSequence) && !VpPhaseDrawn(renderImage);
+                if (m.live)
                 {
-                    field.nls = KnownNlsMapping();
-                    known = field.nls.valid;
+                    m.field = dejudder->Field();
+                    m.frameTrust = dejudder->FrameTrust();
+                    m.grainError = dejudder->GrainError();
+                    m.minTrustedShare = dejudder->GetSettings().minTrustedShare;
                 }
-                if (known)
-                    adaptiveDownscale.SetGrainField(field);
-            }
-            adaptiveGrainMapWanted = activeSettings.adaptive.grainMap && adaptiveDownscale.Active();
-            frameHooks.insert(frameHooks.begin(), adaptiveDownscale.Measure());
-            // The blend before SSimSuperRes (both POST_KERNEL): SuperRes refines
-            // the blended picture with its strength scaled by the grain term.
-            const auto superres = std::find(frameHooks.begin(), frameHooks.end(), superresHook);
-            if (superresHook && superres != frameHooks.end())
-                frameHooks.insert(superres, adaptiveDownscale.Blend());
-            else
-                frameHooks.push_back(adaptiveDownscale.Blend());
-            const int ratio = adaptiveDownscale.LastUpscaleRatio();
-            if (ratio != adaptiveUpscaleRatioLogged)
-            {
-                adaptiveUpscaleRatioLogged = ratio;
-                DebugLog::Log("Adaptive upscale: %s", ratio == 2 ? "faithful branch from the doubler's output at source resolution" :
-                    ratio == 1 ? "faithful branch from the source picture" : "not applied on the last frame (prescale ratio not 1 or 2)");
-            }
+                return m;
+            };
+            adaptiveHost.publishStatus = [this]() { PublishCustomShaderStatus(); };
+            adaptiveStage.Register(adaptiveFrame, adaptiveHost,
+                { bitrateWeightScale, adaptiveGrainMapWanted, adaptiveNoSsimLogged }, frameHooks);
+            // ADR-0001 (findings 2026-10-25 #1): SSimDownscaler missing or a GPU failure is visible.
+            const FallbackCatalog::Decision scalingFallback = adaptiveStage.Fallback();
+            if (scalingFallback.engaged) EngageFallback(scalingFallback.id.c_str(), scalingFallback.reason);
+            else ReleaseFallback(scalingFallback.id.c_str());
         }
-        else if (activeSettings.adaptiveDownscale)
-        {
-            adaptiveDownscale.SetUpscale(AdaptiveDownscale::Upscale());
-            if (customHooks.SubmitsFile("SSimDownscaler.glsl", lowLatencyQueue))
-            {
-                adaptiveDownscale.SetFrame(activeSettings.ssimBitrateAware ? adaptiveNow : activeSettings.adaptive, sourceSequence,
-                    nominalSourceRateHz > 0.0 ? static_cast<float>(1.0 / nominalSourceRateHz) : AdaptiveFallbackFramePeriod());
-                // SSIM's `//!WHEN NATIVE_CROPPED.h POSTKERNEL.h >`: the source
-                // crop against the destination, not the (prescaled) PRE_KERNEL
-                // picture (audit stage8-rs232 item 3).
-                // Audit 2026-10-16: the shader now runs when either axis shrinks (a width-only
-                // downscale ran pass 2 without L2); the blend follows.
-                {
-                    const float sourceCropW = std::fabs(renderImage.crop.x1 - renderImage.crop.x0) * static_cast<float>(rebaseFactorX);
-                    adaptiveDownscale.SetSourceDownscales(sourceCropH > std::fabs(target.crop.y1 - target.crop.y0) + 0.5f ||
-                        sourceCropW > std::fabs(target.crop.x1 - target.crop.x0) + 0.5f);
-                }
-                // 8-3: the matcher's field for this source frame, when it ran
-                // for it (A->B, estimated at upload); the map follows NLS's
-                // own map (bundled NLS / NLS+ only; otherwise the scalar).
-                adaptiveDownscale.ClearGrainField();
-                // Stage 12 §2c / S8-1: the motion for holding the CNN / SSIM residual
-                // (vectors of this source frame only; never with NLS - its map is not
-                // linear; never starts the matcher).
-                adaptiveDownscale.ClearMotion();
-                if (!submittedNls && DejudderLiveFieldFor(sourceSequence) && !VpPhaseDrawn(renderImage) &&
-                    dejudder->Field() && dejudder->FrameTrust())
-                {
-                    AdaptiveDownscale::Motion motion;
-                    motion.field = dejudder->Field();
-                    motion.frameTrust = dejudder->FrameTrust();
-                    motion.minTrustedShare = dejudder->GetSettings().minTrustedShare;
-                    motion.sourceCrop = renderImage.crop;
-                    adaptiveDownscale.SetMotion(motion);
-                }
-                if (activeSettings.adaptive.grainMap && DejudderLiveFieldFor(sourceSequence) && !VpPhaseDrawn(renderImage) &&
-                    dejudder->GrainError())
-                {
-                    AdaptiveDownscale::GrainField field;
-                    field.error = dejudder->GrainError();
-                    field.field = dejudder->Field();
-                    field.frameTrust = dejudder->FrameTrust();
-                    field.minTrustedShare = dejudder->GetSettings().minTrustedShare;
-                    field.sourceCrop = renderImage.crop;
-                    bool known = true;
-                    if (submittedNls)
-                    {
-                        field.nls = KnownNlsMapping();
-                        known = field.nls.valid;
-                    }
-                    if (known)
-                        adaptiveDownscale.SetGrainField(field);
-                    else if (!adaptiveMapNlsLogged)
-                    {
-                        adaptiveMapNlsLogged = true;
-                        DebugLog::Log("Adaptive downscale: grain map not used with NLS shader '%s' (its map is not known); per-frame grain",
-                            nlsRule.filename.c_str());
-                    }
-                }
-                // The next source frame's estimate runs for the map when the
-                // blend acts on this picture (a downscale; Active() is the
-                // last measured frame's).
-                adaptiveGrainMapWanted = activeSettings.adaptive.grainMap && adaptiveDownscale.Active();
-                frameHooks.insert(frameHooks.begin(), adaptiveDownscale.Measure());
-                frameHooks.push_back(adaptiveDownscale.Blend());
-                adaptiveNoSsimLogged = false;
-            }
-            else if (!adaptiveNoSsimLogged)
-            {
-                adaptiveGrainMapWanted = false;
-                adaptiveNoSsimLogged = true;
-                DebugLog::Log("Adaptive downscale: on, but the SSimDownscaler shader is not in the chain; not used");
-            }
-            if (adaptiveStatsTick == 0 || GetTickCount64() - adaptiveStatsTick >= 1000)
-            {
-                adaptiveStatsTick = GetTickCount64();
-                PublishCustomShaderStatus();
-            }
-        }
-        if (!activeSettings.adaptiveDownscale && !upscaleBlend)
-            adaptiveGrainMapWanted = false;
+        // output.dither switched off (pipeline_slots_off): no quantiser hook, libplacebo's dither.
+        if (!pipelineSlots.Runs(PipelineSlots::Id::OutputDither))
+            DitherSlot::RemoveQuantisers(frameHooks, [&](const pl_hook* h) { return customHooks.IsQuantizerHook(h); });
         // Delta 5 (D5-1): the sigma-delta's code domain comes from this
         // frame's target, never from the shader rule: range, swapchain sample
         // depth and the colour depth it quantises to. A float or 16-bit
@@ -25055,116 +24896,53 @@ struct LibplaceboVideoRenderer::Impl
         // frame is converted twice (TemporalRenderer::Render historyColor).
         bool extendedRangeRelabelled = false;
         {
-            ExtendedRange::Settings extendedSettings;
-            extendedSettings.piecewiseTransfers = extendedSettings.wideSourcePrimaries =
-                extendedSettings.calibrationLut = extendedSettings.hdrPassthrough = activeSettings.extendedRangeMoreCases;
-            extendedSettings.hdrDynamicToneMapping = renderParams.peak_detect_params != nullptr;   // audit 2026-10-16
-            ExtendedRange::Decision extended = ExtendedRange::Decide(activeSettings.preserveExtendedRange, extendedSettings,
-                renderImage.color, target.color, target.lut, target.lut ? target.lut_type : PL_LUT_UNKNOWN);
-            if (extended.Active() && extendedRangeHookFailed)
-                extended = ExtendedRange::Decision{ ExtendedRange::Reason::HookFailed };
-            // Hunt 2 (08 #1): a late restore cannot follow libplacebo's frame mix.
-            if (temporalRenderer.Active())
-                extended = ExtendedRange::ForTemporal(extended, temporalRenderer.Mixing());
-            extendedRangeRelabelled = extended.Active();
-            // A one-plane RGB source (the subtitle move's composed picture, an
-            // RGB capture) takes the carry's texture form (ExtendedRange.cpp).
-            ExtendedRange::Prepare(extended, extendedRangeHooks, renderImage.color, target.color, frameHooks,
-                renderImage.num_planes == 1);
-            // Efficiency audit 2026-10-24 #7 / #8b, only with efficiency_fixes (off: the original two passes,
-            // textures kept): one-pass carry; ER's textures (~266 MB at 4K) freed after it has been idle.
+            ExtendedRangeStage::Frame extendedFrame;
+            extendedFrame.preserve = activeSettings.preserveExtendedRange;
+            extendedFrame.moreCases = activeSettings.extendedRangeMoreCases;
+            extendedFrame.hdrDynamicToneMapping = renderParams.peak_detect_params != nullptr;   // audit 2026-10-16
+            extendedFrame.temporalActive = temporalRenderer.Active();
+            extendedFrame.temporalMixing = temporalRenderer.Mixing();
+            extendedFrame.singlePlaneRgb = renderImage.num_planes == 1;
+            extendedFrame.targetLut = target.lut;
+            extendedFrame.targetLutType = target.lut ? target.lut_type : PL_LUT_UNKNOWN;
+            extendedFrame.slotRuns = pipelineSlots.Runs(PipelineSlots::Id::ColourExtendedRange);
+            extendedRangeRelabelled = extendedRange.Prepare(extendedFrame, renderImage.color, target.color, frameHooks);
+            // Efficiency audit 2026-10-24 #7 / #8b (WP-5), only with efficiency_fixes (off: the original two passes,
+            // textures kept): one-pass carry; ER's textures freed after it has been idle. Through the stage's hooks
+            // (CarryHooks); group D integration: to fold into ExtendedRangeStage::Prepare (m2-output doc).
             extendedRangeHooks.SetOnePassAllowed(activeSettings.efficiencyFixes);
-            if (activeSettings.efficiencyFixes && extendedRangeIdle.Note(extended.Active(), extendedRangeHooks.HoldsTextures(),
-                std::chrono::duration<double>(SteadyClock::now().time_since_epoch()).count()))
+            if (activeSettings.efficiencyFixes && extendedRangeIdle.Note(extendedRange.LastDecision().Active(),
+                extendedRangeHooks.HoldsTextures(), std::chrono::duration<double>(SteadyClock::now().time_since_epoch()).count()))
                 extendedRangeHooks.Release();
             // #7: one pass wanted but two passes run (same output, one extra pass): listed with its reason.
             if (extendedRangeHooks.CarryFallbackEngaged())
                 EngageFallback("extended range one-pass carry", ExtendedRange::CarryPassReasonText(extendedRangeHooks.CarryPasses()));
             else
                 ReleaseFallback("extended range one-pass carry");
-            // Logged on any change of the description (a LUT attached, a mode change while active).
-            const std::string described = ExtendedRange::Describe(extended);
-            if (described != extendedRangeDescribed && (activeSettings.preserveExtendedRange || extendedRangeLogged >= 0))
-            {
-                extendedRangeDescribed = described;
-                extendedRangeLogged = static_cast<int>(extended.reason);
-                DebugLog::Log("Extended range (BTB/WTW): %s", described.c_str());
-            }
-            // Hunt 2 (08 #2): libplacebo's frame mixer linearises each frame with
-            // a clamp at 0 (no fork): mixed refreshes lose BTB, WTW is kept.
-            const bool mixClipsBtb = extended.Active() && temporalRenderer.Mixing();
-            if (mixClipsBtb != extendedRangeMixLogged)
-            {
-                extendedRangeMixLogged = mixClipsBtb;
-                if (mixClipsBtb)
-                    DebugLog::Log("Extended range (BTB/WTW): libplacebo smooth motion (frame mixing) clips BTB on mixed refreshes "
-                        "(libplacebo limitation; WTW kept); VP's own motion engine keeps both");
-            }
-            // Silent-fallbacks batch: BTB/WTW clipping is visible (ADR-0002, ADR-0001). Design exclusions
-            // (HDR source, output primaries, ...) are not downgrades and stay status-only.
-            SyncFallback(FallbackCatalog::BtbWtw(activeSettings.preserveExtendedRange,
-                extended.reason == ExtendedRange::Reason::HookFailed ? FallbackCatalog::BtbWtwClip::HookFailed :
-                extended.reason == ExtendedRange::Reason::TemporalMix ? FallbackCatalog::BtbWtwClip::FrameMixing :
-                mixClipsBtb ? FallbackCatalog::BtbWtwClip::MixClipsBtb : FallbackCatalog::BtbWtwClip::None));
+            // Silent-fallbacks batch (WP-4): BTB/WTW clipping is visible; the stage's Fallback is the same mapping.
+            SyncFallback(extendedRange.Fallback(activeSettings.preserveExtendedRange));
         }
-        // Stage 6d: when this frame may get de-judder extras, keep A's
-        // PRE_OUTPUT picture for them (the hook goes last among the
-        // PRE_OUTPUT hooks, after the LED compensation). With NLS the warp
-        // needs the NLS map; an unknown NLS shader keeps the source path.
-        dejudderCache.Disarm();
-        dejudderGeometryValid = false;
+        // Stage 6d (motion.consumers): the de-judder rendered-picture cache and the extras' geometry
+        // (VP-V/modules/motion/consumers/DejudderCacheStage.h; WP-13).
         dejudderSubtitleComposed = subtitleCompositionSucceeded;
-        // Only when extras may follow (not in mask-only mode; audit
-        // stage10-6d item 3). The geometry is kept on the source path too:
-        // the sigma-delta's vectors on the extras need it (delta 8 R1).
-        if (dejudderReason == DejudderPolicy::Reason::Active &&
-            dejudderExtrasAllowed && dejudder && !cadenceRepeat && sourceSequence != 0)
         {
-            DejudderRendered::Geometry geometry;
             const pl_tex framebuffer = target.planes[0].texture;
-            const DejudderRendered::Rects rounded = DejudderRendered::Rounded(renderImage.crop, target.crop,
-                framebuffer ? static_cast<float>(framebuffer->params.w) : 0.0f,
-                framebuffer ? static_cast<float>(framebuffer->params.h) : 0.0f);
-            geometry.sourceCrop = rounded.source;
-            geometry.targetCrop = rounded.target;
-            bool mapped = true;
-            if (submittedNls)
-            {
-                const std::string file = nlsRule.filename;
-                const size_t slash = file.find_last_of("\\/");
-                const std::string name = slash == std::string::npos ? file : file.substr(slash + 1);
-                const bool plus = _stricmp(name.c_str(), "NLSPlus.glsl") == 0;
-                if (plus || _stricmp(name.c_str(), "NLS.glsl") == 0)
-                    geometry.nls = NlsMaskMapping::FromParameters(FixedNlsParameters(nlsRule),
-                        nlsDecision.stretchRatio, nlsDecision.verticalWarp, plus);
-                geometry.nlsDomain = renderImage.crop;
-                mapped = geometry.nls.valid;
-            }
-            // A moved subtitle: where it was, its fill and where it is shown
-            // stay still in the extras (2 source pixels of margin).
-            if (subtitleCompositionSucceeded)
-                for (const SubtitleBoxRect& r : { relocatedSubtitle.source, relocatedSubtitle.generatedCleanup,
-                    relocatedSubtitle.destination, relocatedSubtitle.layoutCoverage })
-                    if (r.Valid() && geometry.numHolds < static_cast<int>(geometry.holds.size()))
-                        geometry.holds[geometry.numHolds++] = { static_cast<float>(r.left - 2), static_cast<float>(r.top - 2),
-                            static_cast<float>(r.right + 2), static_cast<float>(r.bottom + 2) };
-            if (mapped)
-            {
-                dejudderGeometry = geometry;
-                dejudderGeometryValid = true;
-            }
-            if (mapped && activeSettings.dejudderWarpRendered && !interpolating)
-            {
-                dejudderCache.Arm(sourceSequence);
-                frameHooks.push_back(dejudderCache.Hook());
-            }
-            const int stage = mapped ? 1 : 0;
-            if (activeSettings.dejudderWarpRendered && stage != dejudderWarpStageLogged)
-            {
-                dejudderWarpStageLogged = stage;
-                DebugLog::Log(mapped ? "De-judder extras: warping the rendered picture (6d)" :
-                    "De-judder extras: NLS shader map not known; warping the source instead");
-            }
+            const SubtitleBoxRect subtitleHolds[] = { relocatedSubtitle.source, relocatedSubtitle.generatedCleanup,
+                relocatedSubtitle.destination, relocatedSubtitle.layoutCoverage };
+            DejudderCacheStage::Frame cacheFrame;
+            cacheFrame.extrasMayFollow = dejudderReason == DejudderPolicy::Reason::Active &&
+                dejudderExtrasAllowed && dejudder && !cadenceRepeat && sourceSequence != 0;
+            cacheFrame.sourceSequence = sourceSequence;
+            cacheFrame.sourceCrop = renderImage.crop;
+            cacheFrame.targetCrop = target.crop;
+            cacheFrame.framebufferW = framebuffer ? static_cast<float>(framebuffer->params.w) : 0.0f;
+            cacheFrame.framebufferH = framebuffer ? static_cast<float>(framebuffer->params.h) : 0.0f;
+            cacheFrame.nlsSubmitted = submittedNls != nullptr;
+            cacheFrame.warpRendered = activeSettings.dejudderWarpRendered;
+            cacheFrame.interpolating = interpolating;
+            cacheFrame.subtitleHolds = subtitleCompositionSucceeded ? subtitleHolds : nullptr;
+            cacheFrame.numSubtitleHolds = 4;
+            dejudderCacheStage.Register(cacheFrame, [this]() { return KnownNlsMapping(); }, frameHooks);
         }
         // libplacebo 7.360.1 drops the output encoding (limited range) after
         // a texture-input PRE_OUTPUT hook; the repair runs first at OUTPUT,
@@ -25219,65 +24997,23 @@ struct LibplaceboVideoRenderer::Impl
         }
         // Stage 8-1: a downscaling frame in gamma light when chosen (the de-
         // judder extras reuse these parameters).
-        {
-            const bool gamma = DownscaleLight::UseGammaLight(activeSettings.downscaleLight,
-                renderImage.crop, target.crop);
-            if (gamma)
-                frameParams.disable_linear_scaling = true;
-            // 8b: both branches in one light domain: linear (no sigmoid) or gamma.
-            if (adaptiveUpscaleThisFrame)
-            {
-                if (activeSettings.upscaleLight == "gamma")
-                    frameParams.disable_linear_scaling = true;
-                else
-                    frameParams.sigmoid_params = nullptr;
-            }
-            const int logged = activeSettings.downscaleLight == "gamma" ? (gamma ? 2 : 1) : 0;
-            if (logged != downscaleLightLogged)
-            {
-                downscaleLightLogged = logged;
-                DebugLog::Log("Downscale light: %s", logged == 2 ? "gamma (downscaling frame)" :
-                    logged == 1 ? "gamma chosen; linear on this frame (not downscaling)" : "linear");
-            }
-        }
+        // 8b: both branches in one light domain (AdaptiveDownscaleStage::ApplyLight; WP-13).
+        adaptiveStage.ApplyLight(frameParams, { activeSettings.downscaleLight == "gamma",
+            activeSettings.upscaleLight == "gamma", renderImage.crop, target.crop,
+            pipelineSlots.Runs(PipelineSlots::Id::ScalingOutput) });
         OrderFrameSlotHooks();   // the registry's order for slot hooks (unchanged for the designed order)
         frameParams.hooks = frameHooks.empty() ? nullptr : frameHooks.data();
         frameParams.num_hooks = static_cast<int>(frameHooks.size());
         // Efficiency (owner 2026-10-14): B's own first present takes the
         // sigma-delta's vectors made from A's field at the end of A's extras
-        // (same sequence and geometry only); its per-pixel gate checks every
-        // carried value, so a cut or a wrong vector falls back to the plain
-        // gate. Restored after this render.
-        struct NextVectorGuard
-        {
-            std::vector<const pl_hook*> hooks;
-            void Release()
-            {
-                for (const pl_hook* hook : hooks)
-                {
-                    CustomHookChain::SetHookParameter(hook, "vector_source", 0.0);
-                    SetSigmaDeltaVectors(hook, nullptr);
-                }
-                hooks.clear();
-            }
-            ~NextVectorGuard() { Release(); }
-        } nextVectorGuard;
+        // (same sequence and geometry only); restored after this render
+        // (SigmaDeltaVectors::NextVectorGuard, output.dither; WP-13).
+        SigmaDeltaVectors::NextVectorGuard nextVectorGuard;
         if (dejudderNextVectorsSequence != 0 && dejudderNextVectorsSequence == sourceSequence && !cadenceRepeat &&
             dejudderNextVectors && dejudderGeometryValid && SameGeometry(dejudderGeometry, dejudderNextVectorsGeometry) &&
             ditherNextGate.CheckAt(motionValidity, sourceSequence))
         {
-            for (int i = 0; i < frameParams.num_hooks; ++i)
-            {
-                const pl_hook* hook = frameParams.hooks[i];
-                if (CustomHookChain::SetHookParameter(hook, "vector_source", 1.0))
-                {
-                    if (SetSigmaDeltaVectors(hook, dejudderNextVectors))
-                        nextVectorGuard.hooks.push_back(hook);
-                    else
-                        CustomHookChain::SetHookParameter(hook, "vector_source", 0.0);
-                }
-            }
-            if (!nextVectorGuard.hooks.empty())
+            if (nextVectorGuard.Apply(frameParams.hooks, frameParams.num_hooks, dejudderNextVectors))
             {
                 ++ditherVectorsNextUsed;
                 if (!ditherVectorsNextLogged)
@@ -25293,13 +25029,15 @@ struct LibplaceboVideoRenderer::Impl
         // S2: every FBO in rgba32f (exact highlights; +bandwidth). Auto: on everywhere, the
         // low-latency path too (owner 2026-10-16: higher precision is the default; half-float
         // there was never agreed). Off by hand only.
-        frameParams.fbo_float32 = activeSettings.fboFloat32 != 0;
+        frameParams.fbo_float32 = AdaptiveDownscaleStage::FboFloat32(activeSettings.fboFloat32,
+            pipelineSlots.Runs(PipelineSlots::Id::ScalingOutput));
 #endif
         // Only a quantiser submitted with this frame replaces libplacebo's dither (audit 2026-10-16:
         // a sigma-delta left out of the frame for its domain still cleared the dither).
         const bool quantiserInFrame = std::any_of(frameHooks.begin(), frameHooks.end(),
             [&](const pl_hook* h) { return customHooks.IsQuantizerHook(h); });
-        if (quantiserInFrame || activeSettings.temporalDither == "off")
+        if (DitherSlot::ClearsLibplaceboDither(quantiserInFrame, activeSettings.temporalDither == "off",
+            pipelineSlots.Runs(PipelineSlots::Id::OutputDither)))
         {
             frameParams.dither_params = nullptr;
             frameParams.error_diffusion = nullptr;
@@ -25487,12 +25225,7 @@ struct LibplaceboVideoRenderer::Impl
                 PublishCustomShaderStatus();
             ledCompensation.MarkRuntimeFailures(hookErrors.disabled_hooks,
                 hookErrors.num_disabled_hooks);
-            for (int i = 0; !extendedRangeHookFailed && i < hookErrors.num_disabled_hooks; ++i)
-                if (extendedRangeHooks.Owns(hookErrors.disabled_hooks[i]))
-                {
-                    extendedRangeHookFailed = true;
-                    DebugLog::Log("Extended range (BTB/WTW): WARNING libplacebo disabled its hook; off until VP restarts (today's path)");
-                }
+            extendedRange.NoteDisabledHooks(hookErrors.disabled_hooks, hookErrors.num_disabled_hooks);
             // output.calibration_lut (VP stage, R1): a disabled or failing hook reverts to libplacebo's
             // target LUT for the rest of the session, visibly (skeleton audit item 5).
             if (!calibrationLutStageFailed && calibrationLutStage.Lut())

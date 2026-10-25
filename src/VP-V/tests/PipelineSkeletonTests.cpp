@@ -647,6 +647,10 @@ namespace PipelineSkeletonTestsNs
 			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::OutputDither));   // S3 PrepareDither honours it (segments)
 			Assert::IsFalse(PipelineSlots::SwitchHonoured(Id::ScalingGeometry));
 			Assert::IsFalse(PipelineSlots::SwitchHonoured(Id::ColourToneGamut));
+			// WP-13: extended range, dither and output scaling honour pipeline_slots_off.
+			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::ColourExtendedRange));
+			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::OutputDither));
+			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::ScalingOutput));
 		}
 
 		TEST_METHOD(OriginalPathwayOverridesAreRealKeysAndValues)
