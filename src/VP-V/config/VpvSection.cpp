@@ -1165,7 +1165,7 @@ namespace Vpv
 			layout->addLayout(form);
 			layout->addStretch();
 
-			state->refreshers.push_back([state, lutStage, merged, drain, order, slotsOff, section]()
+			state->refreshers.push_back([state, lutStage, merged, drain, analysis, order, slotsOff, section]()
 			{
 				const auto get = [&](const char* key) { return state->host.value ? state->host.value(section, QString::fromLatin1(key)).trimmed() : QString(); };
 				{
