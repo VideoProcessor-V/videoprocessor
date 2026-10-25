@@ -79,7 +79,7 @@ The keys `nls_active`, `nls_curve`, `nls_geometry`, `nls_protect` and `nls_scale
 
 ### Dependencies to lift it
 
-`NlsGeometryPolicy.*`: C++ standard library and `pch.h` only. It is compiled into VideoProcessor-Lib. The rest of the slot needs the crop pipeline (`AlphaSourceCropPolicy.*`), `AnamorphicPresentation.h`, `NlsHookRecovery.h`, `NlsMaskMapping.h`, the shader loader and the GLSL shaders.
+`NlsGeometryPolicy.*`: C++ standard library and `pch.h` only. It is compiled into VideoProcessor-Lib. The rest of the slot needs the crop pipeline (`AlphaSourceCropPolicy.*`), `AnamorphicPresentation.h`, `NlsHookRecovery.h`, `NlsMaskMapping.h` (in this folder), the shader loader and the GLSL shaders.
 
 ### Test it standalone
 
@@ -143,10 +143,10 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **legacy** in the manifest, mixed in practice: `NlsMaskMapping.h` is VP-owned and lives in this folder; the other files are Bill-owned and stay in place. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
 - `src/VideoProcessor-Lib/NlsGeometryPolicy.cpp`
-- `src/VideoProcessor-Lib/vprenderer/NlsMaskMapping.h`
+- `src/VP-V/modules/scaling/geometry/NlsMaskMapping.h` (moved here at M2 step 9; the old path is a forwarding header for Bill-owned includers)
 - `src/VideoProcessor-Lib/vprenderer/NlsHookRecovery.h`
 - `src/VideoProcessor-Lib/vprenderer/AnamorphicPresentation.h`
 - `src/VideoProcessor-Lib/vprenderer/AlphaSourceCropPolicy.cpp`
@@ -167,7 +167,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 
 ## Settings
 
-- Keys: `nls`, `nls_active`, `nls_curve`, `nls_geometry`, `nls_protect`, `nls_scale`.
+- Keys: `anamorphic_scale`, `nls`, `nls_active`, `nls_curve`, `nls_geometry`, `nls_protect`, `nls_sampling`, `nls_scale`.
 - Tiers: not tiered.
 - VP-V page, Scaling tab: tiers Classic / Low / Mid; tier keys `adaptive_downscale`, `adaptive_w_base`, `source_resolution`.
 - Plain-language guide: [docs/settings/VP-settings-reference.md#5-scaling](../../../../../docs/settings/VP-settings-reference.md#5-scaling).

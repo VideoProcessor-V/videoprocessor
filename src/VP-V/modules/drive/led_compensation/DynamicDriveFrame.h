@@ -30,7 +30,7 @@
 #include <VP-V/modules/drive/led_measure/LedMeasurementHook.h>
 #include <vprenderer/CustomHookChain.h>
 #include <vprenderer/HdrPeakAnalysisCrop.h>
-#include <vprenderer/NlsMaskMapping.h>
+#include <VP-V/modules/scaling/geometry/NlsMaskMapping.h>
 #include <QueuedFrameStatistics.h>
 #include <SubtitleBoxDetector.h>
 #include <SubtitleCutPaste.h>

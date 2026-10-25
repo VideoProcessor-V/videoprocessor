@@ -72,10 +72,10 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/HdrInference.h` | `src/VP-V/modules/input/signal/HdrInference.h` | a177e22a | fwd |
 | `src/VideoProcessor-Lib/HdrInferenceSignalBuilder.h` | `src/VP-V/modules/input/signal/HdrInferenceSignalBuilder.h` | a177e22a | fwd |
 | `src/VideoProcessor-Lib/HdrVetoCaptureGate.h` | `src/VP-V/modules/input/signal/HdrVetoCaptureGate.h` | a177e22a | fwd |
-| `src/VideoProcessor-Lib/SourceResolutionDetector.cpp` | `src/VP-V/modules/input/source_analysis/SourceResolutionDetector.cpp` | staged |  |
-| `src/VideoProcessor-Lib/SourceResolutionDetector.h` | `src/VP-V/modules/input/source_analysis/SourceResolutionDetector.h` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.cpp` | `src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.h` | `src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.h` | ? | fwd |
+| `src/VideoProcessor-Lib/SourceResolutionDetector.cpp` | `src/VP-V/modules/input/source_analysis/SourceResolutionDetector.cpp` | 14e3962a |  |
+| `src/VideoProcessor-Lib/SourceResolutionDetector.h` | `src/VP-V/modules/input/source_analysis/SourceResolutionDetector.h` | 14e3962a |  |
+| `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.cpp` | `src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.cpp` | 14e3962a |  |
+| `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.h` | `src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.h` | 14e3962a | fwd |
 | `src/VideoProcessor-Lib/vprenderer/DejudderAhead.h` | `src/VP-V/modules/motion/consumers/DejudderAhead.h` | c64ec0ca | fwd |
 | `src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp` | `src/VP-V/modules/motion/consumers/DejudderWarp.cpp` | c64ec0ca |  |
 | `src/VideoProcessor-Lib/vprenderer/FrameInterpolator.cpp` | `src/VP-V/modules/motion/consumers/FrameInterpolator.cpp` | c64ec0ca |  |
@@ -164,16 +164,17 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/vprenderer/SigmaDeltaDomain.h` | `src/VP-V/modules/output/dither/SigmaDeltaDomain.h` | 4799f96f | fwd |
 | `src/VideoProcessor-Lib/vprenderer/OpenLoopDisplayRate.h` | `src/VP-V/modules/output/presentation/OpenLoopDisplayRate.h` | 05d2a6e4 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/RenderAheadPolicy.h` | `src/VP-V/modules/output/presentation/RenderAheadPolicy.h` | 05d2a6e4 | fwd |
-| `src/VideoProcessor-Lib/vprenderer/VpDebander.cpp` | `src/VP-V/modules/repair/deband/VpDebander.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/VpDebander.h` | `src/VP-V/modules/repair/deband/VpDebander.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/DetailPulse.cpp` | `src/VP-V/modules/repair/texture_restore/DetailPulse.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/DetailPulse.h` | `src/VP-V/modules/repair/texture_restore/DetailPulse.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/TextureRestore.cpp` | `src/VP-V/modules/repair/texture_restore/TextureRestore.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/TextureRestore.h` | `src/VP-V/modules/repair/texture_restore/TextureRestore.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/VpDebander.cpp` | `src/VP-V/modules/repair/deband/VpDebander.cpp` | 090b87cf |  |
+| `src/VideoProcessor-Lib/vprenderer/VpDebander.h` | `src/VP-V/modules/repair/deband/VpDebander.h` | 090b87cf | fwd |
+| `src/VideoProcessor-Lib/vprenderer/DetailPulse.cpp` | `src/VP-V/modules/repair/texture_restore/DetailPulse.cpp` | 0a93e340 |  |
+| `src/VideoProcessor-Lib/vprenderer/DetailPulse.h` | `src/VP-V/modules/repair/texture_restore/DetailPulse.h` | 0a93e340 | fwd |
+| `src/VideoProcessor-Lib/vprenderer/TextureRestore.cpp` | `src/VP-V/modules/repair/texture_restore/TextureRestore.cpp` | 0a93e340 |  |
+| `src/VideoProcessor-Lib/vprenderer/TextureRestore.h` | `src/VP-V/modules/repair/texture_restore/TextureRestore.h` | 0a93e340 | fwd |
+| `src/VideoProcessor-Lib/vprenderer/NlsMaskMapping.h` | `src/VP-V/modules/scaling/geometry/NlsMaskMapping.h` | ? | fwd |
 | `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.cpp` | `src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp` | f45b4b00 |  |
 | `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h` | `src/VP-V/modules/scaling/output/AdaptiveDownscale.h` | f45b4b00 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/DownscaleLight.h` | `src/VP-V/modules/scaling/output/DownscaleLight.h` | f45b4b00 | fwd |
 | `src/VideoProcessor-Lib/KernelInverse.cpp` | `src/VP-V/modules/scaling/rebase/KernelInverse.cpp` | 648da813 |  |
 | `src/VideoProcessor-Lib/KernelInverse.h` | `src/VP-V/modules/scaling/rebase/KernelInverse.h` | 648da813 | fwd |
-| `src/VideoProcessor-Lib/vprenderer/SourceRebase.cpp` | `src/VP-V/modules/scaling/rebase/SourceRebase.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/SourceRebase.h` | `src/VP-V/modules/scaling/rebase/SourceRebase.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/SourceRebase.cpp` | `src/VP-V/modules/scaling/rebase/SourceRebase.cpp` | 17536bbc |  |
+| `src/VideoProcessor-Lib/vprenderer/SourceRebase.h` | `src/VP-V/modules/scaling/rebase/SourceRebase.h` | 17536bbc | fwd |
