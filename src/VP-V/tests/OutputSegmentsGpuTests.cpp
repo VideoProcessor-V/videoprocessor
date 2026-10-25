@@ -19,8 +19,8 @@
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 // DRAFT (2026-10-24): GPU fixture for the output segments. WRITTEN, NOT RUN (no GPU tests today:
-// the timing gates and the DV suite own the machine). Category "GPU"; run it single-threaded with
-// /TestCaseFilter:"TestCategory=GPU&FullyQualifiedName~OutputSegmentsGpu" /Logger:trx.
+// the timing gates and the DV suite own the machine). Category "GpuHardware" (the repo's trait name); run it single-threaded with
+// /TestCaseFilter:"FullyQualifiedName~OutputSegmentsGpu" (VP_TEST_GPU=hardware) /Logger:trx.
 //
 // It renders a grey ramp with BTB (code 4) and WTW (code 1019) columns through VP's real S2
 // stages (the SDR tone shape and LED compensation GLSL files from shaders\, the LED measurement
@@ -86,7 +86,7 @@ namespace OutputSegmentsGpuTestsNs
 	{
 	public:
 		BEGIN_TEST_METHOD_ATTRIBUTE(OutputSegmentsGpuSeparateIsByteIdenticalMergedWithinOneCode)
-			TEST_METHOD_ATTRIBUTE(L"TestCategory", L"GPU")
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(OutputSegmentsGpuSeparateIsByteIdenticalMergedWithinOneCode)
 		{
