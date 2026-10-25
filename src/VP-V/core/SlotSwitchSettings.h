@@ -120,10 +120,10 @@ namespace SlotSwitchSettings
 		static const char* const queue[] = { "queue_timing_fixes", "pulldown_fixes", "timing_continuity_fixes",
 			"cadence_class_fixes", "general_rate_fixes" };
 		static const char* const estimation[] = { "optical_flow", "motion_ahead_frames", "motion_history_fixes",
-			"dejudder_estimate_ahead" };
+			"dejudder_estimate_ahead", "dejudder_est_still_zero" };
 		static const char* const consumers[] = { "dejudder_strength", "dejudder_strength_even", "interpolation",
 			"interpolation_fill_gaps", "occlusion_mask", "dejudder_source_warp_filter", "interpolation_fallback" };
-		static const char* const presentation[] = { "render_ahead" };
+		static const char* const presentation[] = { "render_ahead", "repeat_render_reuse" };
 		switch (id)
 		{
 		case Id::InputQueueTiming: count = sizeof(queue) / sizeof(queue[0]); return queue;
@@ -153,6 +153,7 @@ namespace SlotSwitchSettings
 			settings.motionAheadFrames = 0;               // motion_ahead_frames
 			settings.motionHistoryFixes = false;          // motion_history_fixes
 			settings.dejudderEstimateAhead = false;       // dejudder_estimate_ahead
+			settings.dejudderEstStillZero = false;        // dejudder_est_still_zero (group E, bug hunt 2026-10-25)
 		}
 		if (off.consumers)
 		{
@@ -167,7 +168,10 @@ namespace SlotSwitchSettings
 			settings.interpolationFallback = Fallback::Hold;   // interpolation_fallback
 		}
 		if (off.presentation)
+		{
 			settings.renderAhead = false;                 // render_ahead
+			settings.repeatRenderReuse = false;           // repeat_render_reuse (WP-24, group B)
+		}
 	}
 
 	// One status line (Ctrl+I / log): which of these slots are off and what runs instead. Empty
