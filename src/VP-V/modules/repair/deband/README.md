@@ -56,7 +56,7 @@ Chain tests:
 
 Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
-- `src/VideoProcessor-Lib/vprenderer/VpDebander.cpp`
+- `src/VP-V/modules/repair/deband/VpDebander.cpp`
 - `src/VideoProcessor-Lib/vprenderer/VpDebander.h`
 - `src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp`
 

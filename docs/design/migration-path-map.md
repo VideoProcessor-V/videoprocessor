@@ -38,10 +38,10 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/led/ProjectorDriver.h` | `src/VP-V/modules/drive/projector_control/ProjectorDriver.h` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/SerialPort.cpp` | `src/VP-V/modules/drive/projector_control/SerialPort.cpp` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/SerialPort.h` | `src/VP-V/modules/drive/projector_control/SerialPort.h` | 570b1ee8 | fwd |
-| `src/VideoProcessor-Lib/SourceResolutionDetector.cpp` | `src/VP-V/modules/input/source_analysis/SourceResolutionDetector.cpp` | staged |  |
-| `src/VideoProcessor-Lib/SourceResolutionDetector.h` | `src/VP-V/modules/input/source_analysis/SourceResolutionDetector.h` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.cpp` | `src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.h` | `src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.h` | ? | fwd |
+| `src/VideoProcessor-Lib/SourceResolutionDetector.cpp` | `src/VP-V/modules/input/source_analysis/SourceResolutionDetector.cpp` | f399b706 |  |
+| `src/VideoProcessor-Lib/SourceResolutionDetector.h` | `src/VP-V/modules/input/source_analysis/SourceResolutionDetector.h` | f399b706 |  |
+| `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.cpp` | `src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.cpp` | f399b706 |  |
+| `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.h` | `src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.h` | f399b706 | fwd |
 | `src/VideoProcessor-Lib/calibration/AmbientCheck.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/AmbientCheck.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/AmbientCheck.h` | `src/VP-V/modules/output/calibration_lut/calibration/AmbientCheck.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/ArgyllInstall.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/ArgyllInstall.cpp` | d2517eb1 |  |
@@ -87,5 +87,7 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/calibration/Terminal.h` | `src/VP-V/modules/output/calibration_lut/calibration/Terminal.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/TranscriptRecorder.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/TranscriptRecorder.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/TranscriptRecorder.h` | `src/VP-V/modules/output/calibration_lut/calibration/TranscriptRecorder.h` | d2517eb1 |  |
+| `src/VideoProcessor-Lib/vprenderer/VpDebander.cpp` | `src/VP-V/modules/repair/deband/VpDebander.cpp` | staged |  |
+| `src/VideoProcessor-Lib/vprenderer/VpDebander.h` | `src/VP-V/modules/repair/deband/VpDebander.h` | ? | fwd |
 | `src/VideoProcessor-Lib/KernelInverse.cpp` | `src/VP-V/modules/scaling/rebase/KernelInverse.cpp` | 648da813 |  |
 | `src/VideoProcessor-Lib/KernelInverse.h` | `src/VP-V/modules/scaling/rebase/KernelInverse.h` | 648da813 | fwd |

@@ -3,7 +3,7 @@
 #include <libplacebo/renderer.h>
 
 #include <vprenderer/GrainPreserve.h>
-#include <vprenderer/VpDebander.h>
+#include <VP-V/modules/repair/deband/VpDebander.h>
 
 #include <algorithm>
 #include <cmath>

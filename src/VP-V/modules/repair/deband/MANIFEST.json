@@ -4,11 +4,14 @@
   "unit": "repair",
   "order": 80,
   "status": "built",
-  "code_location": "legacy",
+  "code_location": "migrated",
   "live_files": [
-    "src/VideoProcessor-Lib/vprenderer/VpDebander.cpp",
-    "src/VideoProcessor-Lib/vprenderer/VpDebander.h",
+    "src/VP-V/modules/repair/deband/VpDebander.cpp",
+    "src/VP-V/modules/repair/deband/VpDebander.h",
     "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
+  ],
+  "forwarding_headers": [
+    "src/VideoProcessor-Lib/vprenderer/VpDebander.h"
   ],
   "components": {
     "files": {
