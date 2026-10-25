@@ -31,12 +31,17 @@ namespace ModuleStatusTextTest
 			Assert::AreEqual(std::string(), entries[2].value, L"an empty value is a line");
 		}
 
-		TEST_METHOD(AValueIsAlwaysOneLine)
+		TEST_METHOD(AValueIsOneLineAndRoundTripsExactly)
 		{
 			std::wstring text;
-			Assert::IsTrue(ModuleStatusText::Append(text, "a", std::wstring(L"one\ntwo\r\nthree")));
-			Assert::AreEqual(std::wstring(L"a=one two  three"), text);
-			Assert::AreEqual(size_t(1), ModuleStatusText::Parse(text).size());
+			const std::wstring value = L"one\ntwo\r\nthree \\n C:\\path\\ end\\";
+			Assert::IsTrue(ModuleStatusText::Append(text, "a", value));
+			Assert::AreEqual(std::wstring(L"a=one\\ntwo\\r\\nthree \\\\n C:\\\\path\\\\ end\\\\"), text);
+			const auto entries = ModuleStatusText::Parse(text + L"\r\nb=x");
+			Assert::AreEqual(size_t(2), entries.size(), L"the value stays one line");
+			Assert::AreEqual(value, entries[0].value, L"Parse restores the value exactly");
+			Assert::AreEqual(std::wstring(L"x"), entries[1].value);
+			Assert::AreEqual(std::wstring(L"odd \\q kept"), ModuleStatusText::Parse(std::wstring(L"k=odd \\q kept"))[0].value);
 		}
 
 		TEST_METHOD(InvalidKeysAreRefusedAndMalformedLinesSkipped)
