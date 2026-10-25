@@ -89,7 +89,16 @@ struct HdrInferenceOptions
 	uint32_t shotsRequired = 2;         // shots with evidence before the veto arms
 	uint32_t noCutFallbackMs = 20000;   // armed with no cut: switch anyway
 	uint32_t maxSampleGapMs = 250;      // longest interval one sample may cover
+	// F-8 either/or ([vpv] hdr_inference, HdrInferenceChoice.h): true = Bill's original newlldv
+	// heuristic - BT.2020 + SDR EOTF + no HDR InfoFrame, confirmed after confirmMs (his 1500 ms),
+	// no bit-depth / DV-tunnel / explicit-settings gates, no signal epochs, no SDR veto. The
+	// Original pathway selects it. false (default) = VP's inference.
+	bool originalHeuristic = false;
 };
+
+// Bill's original newlldv candidate rule (upstream CVideoProcessorDlg::UpdateNewLldvCandidate):
+// the capture state is valid, BT.2020, SDR EOTF and carries no HDR InfoFrame.
+HdrInferenceEligibility EvaluateOriginalNewLldvEligibility(const HdrInferenceSignal& signal);
 
 // One analysed picture, in the order the capture delivered it.
 struct HdrPictureObservation
@@ -146,7 +155,7 @@ public:
 	// The capture path computes picture statistics only while this is true.
 	bool WantsPictureStatistics() const
 	{
-		return m_state == HdrInferenceState::InferredPq && m_options.sdrVeto;
+		return m_state == HdrInferenceState::InferredPq && VetoOn();
 	}
 	uint64_t Epoch() const { return m_epoch; }
 	uint32_t ShotsWithEvidence() const { return m_shotsWithEvidence; }
@@ -155,6 +164,8 @@ public:
 	const char* Reason() const { return m_reason; }
 
 private:
+	// The SDR veto is VP's; Bill's original heuristic has none.
+	bool VetoOn() const { return m_options.sdrVeto && !m_options.originalHeuristic; }
 	HdrInferenceUpdate Flip(HdrInferenceEvent event);
 	void StartEpoch(uint64_t nowMs, uint64_t signalKey);
 	void ResetShots();

@@ -70,6 +70,28 @@ HdrInferenceEligibility EvaluateHdrInferenceEligibility(
 	return result;
 }
 
+HdrInferenceEligibility EvaluateOriginalNewLldvEligibility(
+	const HdrInferenceSignal& signal)
+{
+	HdrInferenceEligibility result;
+	if (!signal.enabled)
+		result.reason = "newlldv off";
+	else if (!signal.valid)
+		result.reason = "capture state invalid";
+	else if (signal.colorspace != ColorSpace::BT_2020)
+		result.reason = "colorimetry is not BT.2020 (original heuristic)";
+	else if (signal.eotf != EOTF::SDR)
+		result.reason = "source EOTF is not SDR (original heuristic)";
+	else if (signal.hdrInfoFrame)
+		result.reason = "source sends an HDR InfoFrame (original heuristic)";
+	else
+	{
+		result.eligible = true;
+		result.reason = "BT.2020 / SDR, no HDR InfoFrame (original heuristic)";
+	}
+	return result;
+}
+
 void HdrInferenceTracker::Reset()
 {
 	m_state = HdrInferenceState::Off;
@@ -117,8 +139,8 @@ HdrInferenceUpdate HdrInferenceTracker::OnSignal(
 	const HdrInferenceSignal& signal, uint64_t nowMs)
 {
 	HdrInferenceUpdate update;
-	const HdrInferenceEligibility eligibility =
-		EvaluateHdrInferenceEligibility(signal);
+	const HdrInferenceEligibility eligibility = m_options.originalHeuristic ?
+		EvaluateOriginalNewLldvEligibility(signal) : EvaluateHdrInferenceEligibility(signal);
 	if (!eligibility.eligible)
 	{
 		const bool wasInferred = IsInferredPq();
@@ -142,7 +164,8 @@ HdrInferenceUpdate HdrInferenceTracker::OnSignal(
 		return update;
 	}
 
-	if (signal.signalKey != m_signalKey)
+	// Bill's original heuristic has no signal epochs: a mode change while still a candidate keeps it.
+	if (!m_options.originalHeuristic && signal.signalKey != m_signalKey)
 	{
 		// Mode/rate/format change while still eligible: a new epoch. A PQ
 		// epoch stays PQ (no flicker through SDR); a vetoed or still waiting
@@ -178,7 +201,7 @@ HdrInferenceUpdate HdrInferenceTracker::OnTick(uint64_t nowMs)
 		update.effectiveChanged = true;
 		return update;
 	}
-	if (m_state == HdrInferenceState::InferredPq && m_options.sdrVeto &&
+	if (m_state == HdrInferenceState::InferredPq && VetoOn() &&
 		m_vetoArmed && nowMs - m_vetoArmedMs >= m_options.noCutFallbackMs)
 		return Flip(HdrInferenceEvent::VetoWithoutCut);
 	return update;
@@ -188,7 +211,7 @@ HdrInferenceUpdate HdrInferenceTracker::OnPicture(
 	const HdrPictureObservation& picture, uint64_t nowMs)
 {
 	HdrInferenceUpdate update;
-	if (m_state != HdrInferenceState::InferredPq || !m_options.sdrVeto)
+	if (m_state != HdrInferenceState::InferredPq || !VetoOn())
 	{
 		m_havePicture = false;
 		return update;
