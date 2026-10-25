@@ -4,9 +4,14 @@
   "unit": "colour",
   "order": 175,
   "status": "built",
-  "code_location": "legacy",
+  "code_location": "migrated",
   "live_files": [
-    "src/VideoProcessor-Lib/vprenderer/ExtendedRange.cpp",
+    "src/VP-V/modules/colour/extended_range/ExtendedRange.cpp",
+    "src/VP-V/modules/colour/extended_range/ExtendedRange.h",
+    "src/VP-V/modules/colour/extended_range/ExtendedRangeStage.h",
+    "src/VP-V/modules/colour/extended_range/ExtendedRangeStage.cpp"
+  ],
+  "forwarding_headers": [
     "src/VideoProcessor-Lib/vprenderer/ExtendedRange.h"
   ],
   "components": {
@@ -27,6 +32,6 @@
       "colour.tone_gamut"
     ]
   },
-  "fallback_when_missing": "Hook failure or libplacebo frame mixing clips BTB (today log-only).",
-  "fallback_entry": "BTB/WTW: clipped (<reason>)"
+  "fallback_when_missing": "Hook failure (latched), a late restore under libplacebo's frame mix, or smooth motion's mixed refreshes clip BTB (FallbackCatalog::BtbWtw; call site WP-4).",
+  "fallback_entry": "BTB/WTW: clipped: <reason>"
 }

@@ -3,7 +3,7 @@
 
 #include <led/LedDriveConfig.h>
 #include <video_frame_formatter/IVideoFrameFormatter.h>
-#include <vprenderer/AdaptiveDownscale.h>
+#include <VP-V/modules/scaling/output/AdaptiveDownscale.h>
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/PulldownDetector.h>
 

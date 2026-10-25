@@ -100,7 +100,7 @@ After Stage 6 as proposed, as its own stage ("Stage 10 — extended range"):
 
 ## BTB/WTW and HDR (as built, 2026-10-17)
 
-Eligibility is decided by `ExtendedRange::Decide` (src/VideoProcessor-Lib/vprenderer/ExtendedRange.h
+Eligibility is decided by `ExtendedRange::Decide` (src/VP-V/modules/colour/extended_range/ExtendedRange.h
 and .cpp); the reason is logged.
 
 - **HDR source tone-mapped to an SDR output: BTB/WTW have no meaning there, by design.** The tone

@@ -18,7 +18,7 @@ Efforts are in agent wall-clock hours.
   - The bindings `SCALER_SRC`/`SCALER_OUT` for D (export_glsl.py:19-22) are not libplacebo stages.
 - Resolution:
   - Build a VP **NetRunner** that executes the exporter's mpv-format passes standalone through pl_dispatch: a small shim for the DESC/HOOK/BIND/SAVE/WIDTH/HEIGHT/COMPONENTS/COMPUTE directives and the HOOKED_*/name_tex macros.
-  - Its inputs are a pl_dispatch and textures, so the same runner serves the front end (A, the 4K refine) and C hooks (D inside AdaptiveDownscale's POST_KERNEL, VideoProcessor-Lib/vprenderer/AdaptiveDownscale.cpp:420-425; pl_hook_params carries a dispatch).
+  - Its inputs are a pl_dispatch and textures, so the same runner serves the front end (A, the 4K refine) and C hooks (D inside AdaptiveDownscale's POST_KERNEL, VP-V/modules/scaling/output/AdaptiveDownscale.cpp:420-425; pl_hook_params carries a dispatch).
   - For RGB: run A on the existing r16 luma, then add the luma delta to R, G and B.
   - Alternative: change the exporter to emit pl_shader_custom units (the SourceRebase pattern, VideoProcessor-Lib/vprenderer/SourceRebase.cpp:80-130).
 - Effort: 8-12 h for the runner and tests; RGB recombine 3-4 h.
@@ -67,7 +67,7 @@ Efforts are in agent wall-clock hours.
   - The agreed order needs the LUT as VP's last PRE_OUTPUT hook.
 - Resolution:
   - Apply the LUT with pl_shader_custom_lut inside a VP hook, plus the BTB/WTW late restore.
-  - Check the OutputEncodingRepair interplay (VideoProcessor-Lib/vprenderer/OutputEncodingRepair.cpp:27).
+  - Check the OutputEncodingRepair interplay (VP-V/modules/output/dither/OutputEncodingRepair.cpp:27).
 - Effort: 4-6 h.
 
 **R2. Hook order is assembled in many places.**

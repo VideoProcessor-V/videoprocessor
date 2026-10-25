@@ -476,7 +476,7 @@
       "slot": "motion.consumers",
       "order": 140,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
         "src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp",
         "src/VideoProcessor-Lib/vprenderer/DejudderAhead.h",
@@ -485,7 +485,9 @@
         "src/VideoProcessor-Lib/vprenderer/InterpolationTimeline.h",
         "src/VideoProcessor-Lib/vprenderer/InterpolationPolicy.h",
         "src/VideoProcessor-Lib/vprenderer/OcclusionMaskHook.cpp",
-        "src/VideoProcessor-Lib/vprenderer/TemporalRenderer.h"
+        "src/VideoProcessor-Lib/vprenderer/TemporalRenderer.h",
+        "src/VP-V/modules/motion/consumers/DejudderCacheStage.h",
+        "src/VP-V/modules/motion/consumers/DejudderCacheStage.cpp"
       ],
       "components": {
         "files": {
@@ -557,13 +559,15 @@
       "slot": "scaling.output",
       "order": 160,
       "status": "partial",
-      "code_location": "legacy",
+      "code_location": "migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.cpp",
-        "src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h",
-        "src/VideoProcessor-Lib/vprenderer/DownscaleLight.h",
+        "src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp",
+        "src/VP-V/modules/scaling/output/AdaptiveDownscale.h",
+        "src/VP-V/modules/scaling/output/DownscaleLight.h",
         "shaders/SSimDownscaler.glsl",
-        "shaders/SSimSuperRes.glsl"
+        "shaders/SSimSuperRes.glsl",
+        "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.h",
+        "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.cpp"
       ],
       "components": {
         "files": {
@@ -579,12 +583,30 @@
         },
         "tools": [],
         "config_keys": [
+          "adaptive_chroma_ssim",
           "adaptive_downscale",
+          "adaptive_edge_hi",
+          "adaptive_edge_lo",
           "adaptive_faithful",
+          "adaptive_grain_floor",
+          "adaptive_grain_hi",
+          "adaptive_grain_lo",
+          "adaptive_grain_map",
+          "adaptive_grain_map_smooth_ms",
+          "adaptive_grain_shadow_bias",
+          "adaptive_grain_smooth_ms",
           "adaptive_upscale",
+          "adaptive_upscale_superres_scale",
+          "adaptive_upscale_w_base",
           "adaptive_w_base",
+          "cnn_residual_stabilise",
           "downscale_light",
+          "fbo_float32",
           "hybrid_refine_d",
+          "residual_stabilise_grain_guard",
+          "ssim_bitrate_aware",
+          "ssim_bitrate_floor",
+          "ssim_residual_stabilise",
           "upscale_light"
         ],
         "upstream_modules": [
@@ -593,7 +615,7 @@
           "scaling.geometry"
         ]
       },
-      "fallback_when_missing": "SSIM shader missing -> Lanczos."
+      "fallback_when_missing": "SSimDownscaler missing while adaptive_downscale is on, or a GPU failure of the blend (FallbackCatalog::OutputScaling)."
     },
     {
       "slot": "colour.tone_gamut",
@@ -632,10 +654,12 @@
       "slot": "colour.extended_range",
       "order": 175,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/ExtendedRange.cpp",
-        "src/VideoProcessor-Lib/vprenderer/ExtendedRange.h"
+        "src/VP-V/modules/colour/extended_range/ExtendedRange.cpp",
+        "src/VP-V/modules/colour/extended_range/ExtendedRange.h",
+        "src/VP-V/modules/colour/extended_range/ExtendedRangeStage.h",
+        "src/VP-V/modules/colour/extended_range/ExtendedRangeStage.cpp"
       ],
       "components": {
         "files": {
@@ -655,7 +679,7 @@
           "colour.tone_gamut"
         ]
       },
-      "fallback_when_missing": "Hook failure or libplacebo frame mixing clips BTB (today log-only)."
+      "fallback_when_missing": "Hook failure (latched), a late restore under libplacebo's frame mix, or smooth motion's mixed refreshes clip BTB (FallbackCatalog::BtbWtw; call site WP-4)."
     },
     {
       "slot": "colour.sdr_tone_shape",
@@ -868,12 +892,16 @@
       "slot": "output.dither",
       "order": 260,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/SigmaDeltaDomain.h",
+        "src/VP-V/modules/output/dither/SigmaDeltaDomain.h",
+        "src/VP-V/modules/output/dither/OutputEncodingRepair.h",
+        "src/VP-V/modules/output/dither/OutputEncodingRepair.cpp",
+        "src/VP-V/modules/output/dither/CustomHookChain.h",
+        "src/VP-V/modules/output/dither/CustomHookChain.cpp",
         "shaders/Temporal sigma-delta.glsl",
-        "src/VideoProcessor-Lib/vprenderer/OutputEncodingRepair.cpp",
-        "src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp"
+        "src/VP-V/modules/output/dither/SigmaDeltaVectors.h",
+        "src/VP-V/modules/output/dither/DitherSlot.h"
       ],
       "components": {
         "files": {
@@ -892,13 +920,13 @@
           "dither_vectors",
           "dithering",
           "output_segments_merged",
-          "sigma_delta"
+          "temporal_dither"
         ],
         "upstream_modules": [
           "output.calibration_lut"
         ]
       },
-      "fallback_when_missing": "Unsupported code domain drops the sigma-delta (logged)."
+      "fallback_when_missing": "Unsupported code domain, shader not loaded or disabled by libplacebo drops the sigma-delta (FallbackCatalog::Dither; call site WP-4)."
     },
     {
       "slot": "output.presentation",

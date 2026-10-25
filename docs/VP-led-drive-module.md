@@ -859,7 +859,7 @@ it: limited-range red came out 255 instead of 235 with the hook. Nothing
 had been tested on the projector yet. The calibration LUT is not affected:
 VP's is a normalized target LUT, applied earlier in colour management.
 
-**Fix.** `vprenderer/OutputEncodingRepair.h/.cpp`, a native OUTPUT-stage hook.
+**Fix.** `VP-V/modules/output/dither/OutputEncodingRepair.h/.cpp`, a native OUTPUT-stage hook.
 - When the frame's chain contains a texture-input PRE_OUTPUT hook, the
   repair is put first in the chain, so it runs before the sigma-delta.
 - It re-applies exactly `pl_shader_encode_color` with the normalised target

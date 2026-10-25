@@ -24,12 +24,12 @@
 
 #include "ExtendedRangeGpuProbe.h"
 
-#include <vprenderer/AdaptiveDownscale.h>
+#include <VP-V/modules/scaling/output/AdaptiveDownscale.h>
 #include <vprenderer/DejudderWarp.h>
 #include <vprenderer/HookInstanceTag.h>
 #include <vprenderer/OcclusionMaskHook.h>
-#include <vprenderer/OutputEncodingRepair.h>
-#include <vprenderer/SigmaDeltaDomain.h>
+#include <VP-V/modules/output/dither/OutputEncodingRepair.h>
+#include <VP-V/modules/output/dither/SigmaDeltaDomain.h>
 #include <SubtitleCutPasteShader.h>
 
 #include <libplacebo/shaders/custom.h>

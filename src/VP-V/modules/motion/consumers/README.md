@@ -54,7 +54,7 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **partly migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
 - `src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp`
 - `src/VideoProcessor-Lib/vprenderer/DejudderAhead.h`
@@ -64,6 +64,10 @@ Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.j
 - `src/VideoProcessor-Lib/vprenderer/InterpolationPolicy.h`
 - `src/VideoProcessor-Lib/vprenderer/OcclusionMaskHook.cpp`
 - `src/VideoProcessor-Lib/vprenderer/TemporalRenderer.h`
+- `src/VP-V/modules/motion/consumers/DejudderCacheStage.h`
+- `src/VP-V/modules/motion/consumers/DejudderCacheStage.cpp`
+
+DejudderCacheStage.* (WP-13) is the rendered-picture cache registration moved out of the host (call site in docs/design/m2-output-callsites.patch); the cache itself (RenderedWarp.*) moves with M2 step 17.
 
 ## Migration directive
 

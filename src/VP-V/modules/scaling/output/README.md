@@ -16,14 +16,14 @@ Scale to the output active size inside libplacebo: hybrid SSIM downscale (adapti
 
 ## Settings
 
-- Existing keys: `adaptive_downscale`, `adaptive_w_base`, `adaptive_faithful`, `adaptive_upscale`, `downscale_light`, `upscale_light`
+- Existing keys: `adaptive_downscale`, `adaptive_w_base`, `adaptive_edge_lo`, `adaptive_edge_hi`, `adaptive_grain_lo`, `adaptive_grain_hi`, `adaptive_grain_floor`, `adaptive_grain_smooth_ms`, `adaptive_grain_shadow_bias`, `adaptive_chroma_ssim`, `adaptive_grain_map`, `adaptive_grain_map_smooth_ms`, `adaptive_faithful`, `adaptive_upscale`, `adaptive_upscale_w_base`, `adaptive_upscale_superres_scale`, `downscale_light`, `upscale_light`, `ssim_bitrate_aware`, `ssim_bitrate_floor`, `cnn_residual_stabilise`, `ssim_residual_stabilise`, `residual_stabilise_grain_guard`, `fbo_float32`
 - Planned keys: `hybrid_refine_d`
 - Tiers: Classic Lanczos; Low..Upper hybrid; Upper + D
 
 ## Fallbacks
 
-- "Fallbacks engaged" entry: Output scaling: Lanczos (hybrid unavailable: <reason>)
-- Behaviour: SSIM shader missing -> Lanczos.
+- "Fallbacks engaged" entry: output scaling: libplacebo downscaler (SSimDownscaler not in the shader list) | plain SSIM (adaptive downscale failed on the GPU)
+- Behaviour: SSimDownscaler missing while adaptive_downscale is on, or a GPU failure of the blend (FallbackCatalog::OutputScaling).
 
 ## Net fingerprint / upstream
 
@@ -52,15 +52,60 @@ Chain tests:
 - D cost unknown in VP (PyTorch bound 35.8 ms at 4K)
 - D grain gate FAIL (0.75)
 
+## How the code works
+
+Checked against the code 2026-10-25 (M2 step 8 + WP-13).
+
+### Public API
+
+- `AdaptiveDownscale.h` (namespace `AdaptiveDownscale`): `Module` with two hooks, `Measure()` (PRE_KERNEL: edge and grain statistics, the grain map) and `Blend()` (POST_KERNEL: blends the SSIM / CNN picture with the faithful branch by a per-pixel weight). Per frame: `SetFrame(settings, sequence, frameSeconds)`, `SetUpscale(Upscale)` (the Stage 8b form), `SetSourceDownscales`, `SetMotion` / `ClearMotion` (residual stabilisation), `SetGrainField` / `ClearGrainField` (the 8-3 grain map). Readouts: `Active()`, `LastStats()`, `LastMapState()`, `GrainMap()`, `LastUpscaleRatio()`, `Failures()`. Helpers: `BitrateScale`, `BitrateAntiring`.
+- `DownscaleLight.h`: `Downscales(source, target)`, `UseGammaLight(setting, source, target)`.
+- `AdaptiveDownscaleStage.h` (WP-13): the host glue. `Register(Frame, Host, SharedState, hooks)`: upscale or downscale form, measure first, blend before SSimSuperRes or last, bitrate weighting, residual motion, grain field, the SSIM-missing log and the status tick. `ApplyLight(params, Light)`: the Stage 8-1 / 8b light domain. `UpscaleThisFrame()`.
+
+### Data flow
+
+The renderer (render thread, `RenderLocked`) calls `Register` after the user hooks and the VP calibration LUT are collected and before the sigma-delta's code-domain step. The stage asks the host (the `Host` callbacks) for the source monitor's bitrate reading, the NLS map, whether SSimDownscaler is submitted and the de-judder's field for this source frame, only where the code needs them. `SharedState` writes back the host members other host code reads: `bitrateWeightScale` (status line), `adaptiveGrainMapWanted` (the de-judder estimate runs for the map) and `adaptiveNoSsimLogged` (status line). `ApplyLight` runs on the frame's `pl_render_params` (the de-judder extras reuse them). The grain map also feeds the sigma-delta's grain tolerance and the LED highlight-grain suppression (host code).
+
+### Threading
+
+Render thread only. No locks.
+
+### Config keys actually read
+
+Per renderer profile (display-rule overrides): `adaptive_downscale`, `adaptive_w_base`, `adaptive_edge_lo`, `adaptive_edge_hi`, `adaptive_grain_lo`, `adaptive_grain_hi`, `adaptive_grain_floor`, `adaptive_grain_smooth_ms`, `adaptive_grain_shadow_bias`, `adaptive_chroma_ssim`, `adaptive_grain_map`, `adaptive_grain_map_smooth_ms`, `adaptive_faithful` (retired values migrated), `adaptive_upscale`, `adaptive_upscale_w_base`, `adaptive_upscale_superres_scale`, `downscale_light` and `upscale_light` (`linear` / `gamma`), `ssim_bitrate_aware`, `ssim_bitrate_floor`, `cnn_residual_stabilise`, `ssim_residual_stabilise`, `residual_stabilise_grain_guard`. `fbo_float32` (Beta builds: every libplacebo FBO in rgba32f; a scaling.output VP addition, off with the slot off and in the Original pathway). Read here but owned elsewhere: `low_bitrate_handling` (input.source_analysis). `hybrid_refine_d` is planned (not read).
+
+### Fallbacks a user sees
+
+- `output scaling` under "Fallbacks engaged" (`FallbackCatalog::OutputScaling`): adaptive downscale on but SSimDownscaler not in the shader list (libplacebo's downscaler), or the blend failed on the GPU on the last frame (plain SSIM). Engaged through `AdaptiveDownscaleStage::Stage::Fallback` (the fix after the WP-13 move; findings 2026-10-25).
+- The custom-shader status line also says "Adaptive downscale: needs SSimDownscaler" / "idle" / "measuring".
+- The grain map not used with an unknown NLS shader: per-frame grain (logged once). A designed path, not a downgrade.
+
+### What it needs to be lifted
+
+libplacebo (hooks, dispatch, filters), `pch.h`, `vprenderer/NlsMaskMapping.h`, `vprenderer/OcclusionMaskHook.h`, `vprenderer/GrainPreserve.h`, `CustomHookChain` (output.dither) for SSimSuperRes's parameter, `DebugLog.h`, `GeneralRateLog.h`. The SSIM shaders stay in `shaders/`.
+
+### Test it standalone
+
+- CPU: `OutputGlueStagesTests` methods `Adaptive*` and `DownscaleLight*`; `PostMergeAudit20261017Tests`.
+- GPU (WARP unless `VP_TEST_GPU=hardware`; only when allowed): `LibplaceboLutParserTests` Stage 8 methods, `OutputGlueStagesGpuTests.AdaptiveUpscaleStageRendersTodaysCodes` (Category GpuHardware).
+
+`vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /TestCaseFilter:"FullyQualifiedName~OutputGlueStagesTests|FullyQualifiedName~PostMergeAudit20261017Tests" /Logger:"trx;LogFileName=scaling_output.trx"`
+
 ## Where the code lives (live file list)
 
-Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
-- `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.cpp`
-- `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h`
-- `src/VideoProcessor-Lib/vprenderer/DownscaleLight.h`
+- `src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp`
+- `src/VP-V/modules/scaling/output/AdaptiveDownscale.h`
+- `src/VP-V/modules/scaling/output/DownscaleLight.h`
 - `shaders/SSimDownscaler.glsl`
 - `shaders/SSimSuperRes.glsl`
+- `src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.h`
+- `src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.cpp`
+
+Forwarding headers (legacy path; removed in M2 step 0): `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h`, `src/VideoProcessor-Lib/vprenderer/DownscaleLight.h`.
+
+The forwarders stay for LibplaceboVideoRenderer.cpp (Bill's host) and the upstream LibplaceboLutParserTests.cpp / ConfigFileTests.cpp, which this move does not edit. The SSIM shaders stay in shaders/ (runtime layout). AdaptiveDownscaleStage.* is the host glue (WP-13): the host's call sites are in docs/design/m2-output-callsites.patch.
 
 ## Migration directive
 
@@ -76,7 +121,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 
 ## Settings
 
-- Keys: `adaptive_downscale`, `adaptive_w_base`, `adaptive_faithful`, `adaptive_upscale`, `downscale_light`, `upscale_light`.
+- Keys: `adaptive_downscale`, `adaptive_w_base`, `adaptive_edge_lo`, `adaptive_edge_hi`, `adaptive_grain_lo`, `adaptive_grain_hi`, `adaptive_grain_floor`, `adaptive_grain_smooth_ms`, `adaptive_grain_shadow_bias`, `adaptive_chroma_ssim`, `adaptive_grain_map`, `adaptive_grain_map_smooth_ms`, `adaptive_faithful`, `adaptive_upscale`, `adaptive_upscale_w_base`, `adaptive_upscale_superres_scale`, `downscale_light`, `upscale_light`, `ssim_bitrate_aware`, `ssim_bitrate_floor`, `cnn_residual_stabilise`, `ssim_residual_stabilise`, `residual_stabilise_grain_guard`, `fbo_float32`.
 - Planned keys (not yet implemented): `hybrid_refine_d`.
 - Tiers: Classic Lanczos; Low..Upper hybrid; Upper + D.
 - VP-V page, Scaling tab: tiers Classic / Low / Mid; tier keys `adaptive_downscale`, `adaptive_w_base`, `source_resolution`.

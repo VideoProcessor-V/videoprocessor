@@ -7,7 +7,7 @@
 //    a texture-input PRE_OUTPUT hook drops the output encoding, and VP's
 //    repair restores it. If a libplacebo update fixes the bug, the repair
 //    would encode twice and must be switched off for the Beta.
-#include "../VideoProcessor-Lib/vprenderer/OutputEncodingRepair.h"
+#include <VP-V/modules/output/dither/OutputEncodingRepair.h>
 #include "../VideoProcessor-Lib/vprenderer/DejudderWarp.h"
 #include "../VideoProcessor-Lib/vprenderer/OcclusionMaskHook.h"
 #include "../VideoProcessor-Lib/vprenderer/RenderedWarp.h"
