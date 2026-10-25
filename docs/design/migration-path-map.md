@@ -85,10 +85,13 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/calibration/Terminal.h` | `src/VP-V/modules/output/calibration_lut/calibration/Terminal.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/TranscriptRecorder.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/TranscriptRecorder.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/TranscriptRecorder.h` | `src/VP-V/modules/output/calibration_lut/calibration/TranscriptRecorder.h` | d2517eb1 |  |
-| `src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp` | `src/VP-V/modules/output/dither/CustomHookChain.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/CustomHookChain.h` | `src/VP-V/modules/output/dither/CustomHookChain.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/OutputEncodingRepair.cpp` | `src/VP-V/modules/output/dither/OutputEncodingRepair.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/OutputEncodingRepair.h` | `src/VP-V/modules/output/dither/OutputEncodingRepair.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/SigmaDeltaDomain.h` | `src/VP-V/modules/output/dither/SigmaDeltaDomain.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp` | `src/VP-V/modules/output/dither/CustomHookChain.cpp` | 2c393254 |  |
+| `src/VideoProcessor-Lib/vprenderer/CustomHookChain.h` | `src/VP-V/modules/output/dither/CustomHookChain.h` | 2c393254 | fwd |
+| `src/VideoProcessor-Lib/vprenderer/OutputEncodingRepair.cpp` | `src/VP-V/modules/output/dither/OutputEncodingRepair.cpp` | 2c393254 |  |
+| `src/VideoProcessor-Lib/vprenderer/OutputEncodingRepair.h` | `src/VP-V/modules/output/dither/OutputEncodingRepair.h` | 2c393254 | fwd |
+| `src/VideoProcessor-Lib/vprenderer/SigmaDeltaDomain.h` | `src/VP-V/modules/output/dither/SigmaDeltaDomain.h` | 2c393254 | fwd |
+| `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.cpp` | `src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp` | staged |  |
+| `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h` | `src/VP-V/modules/scaling/output/AdaptiveDownscale.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/DownscaleLight.h` | `src/VP-V/modules/scaling/output/DownscaleLight.h` | ? | fwd |
 | `src/VideoProcessor-Lib/KernelInverse.cpp` | `src/VP-V/modules/scaling/rebase/KernelInverse.cpp` | 648da813 |  |
 | `src/VideoProcessor-Lib/KernelInverse.h` | `src/VP-V/modules/scaling/rebase/KernelInverse.h` | 648da813 | fwd |

@@ -54,13 +54,17 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
-- `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.cpp`
-- `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h`
-- `src/VideoProcessor-Lib/vprenderer/DownscaleLight.h`
+- `src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp`
+- `src/VP-V/modules/scaling/output/AdaptiveDownscale.h`
+- `src/VP-V/modules/scaling/output/DownscaleLight.h`
 - `shaders/SSimDownscaler.glsl`
 - `shaders/SSimSuperRes.glsl`
+
+Forwarding headers (legacy path; removed in M2 step 0): `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h`, `src/VideoProcessor-Lib/vprenderer/DownscaleLight.h`.
+
+The forwarders stay for LibplaceboVideoRenderer.cpp (Bill's host) and the upstream LibplaceboLutParserTests.cpp / ConfigFileTests.cpp, which this move does not edit. The SSIM shaders stay in shaders/ (runtime layout).
 
 ## Migration directive
 

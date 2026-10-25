@@ -300,7 +300,7 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\AdaptiveDownscale.cpp">
+    <ClCompile Include="..\VP-V\modules\scaling\output\AdaptiveDownscale.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>

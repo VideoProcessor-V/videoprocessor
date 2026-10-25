@@ -24,7 +24,7 @@
 
 #include "ExtendedRangeGpuProbe.h"
 
-#include <vprenderer/AdaptiveDownscale.h>
+#include <VP-V/modules/scaling/output/AdaptiveDownscale.h>
 #include <vprenderer/DejudderWarp.h>
 #include <vprenderer/HookInstanceTag.h>
 #include <vprenderer/OcclusionMaskHook.h>

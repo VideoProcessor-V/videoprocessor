@@ -116,7 +116,7 @@
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\GpuRgbUnpack.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\GpuDolbyVisionTunnelUnpack.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\EarlyUpload.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\AdaptiveDownscale.cpp" />
+    <ClCompile Include="..\VP-V\modules\scaling\output\AdaptiveDownscale.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\SourceRebase.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\SourceResolutionMonitor.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\VpDebander.cpp" />

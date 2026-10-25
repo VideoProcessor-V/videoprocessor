@@ -553,11 +553,11 @@
       "slot": "scaling.output",
       "order": 160,
       "status": "partial",
-      "code_location": "legacy",
+      "code_location": "migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.cpp",
-        "src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h",
-        "src/VideoProcessor-Lib/vprenderer/DownscaleLight.h",
+        "src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp",
+        "src/VP-V/modules/scaling/output/AdaptiveDownscale.h",
+        "src/VP-V/modules/scaling/output/DownscaleLight.h",
         "shaders/SSimDownscaler.glsl",
         "shaders/SSimSuperRes.glsl"
       ],
