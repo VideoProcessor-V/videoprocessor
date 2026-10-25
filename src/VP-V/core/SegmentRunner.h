@@ -64,7 +64,10 @@ namespace SegmentRunner
 		const char* name = "";          // e.g. "dv_trims" (several stages may share one slot)
 		Role role = Role::Vp;
 		StageContract needs;            // what it requires of its input
-		StageContract gives;            // what it hands on (0 / unchanged fields keep the input's)
+		// What it hands on. All-zero by default: a zero field keeps the input's value, so only the
+		// fields a stage really changes are set (audit 2026-10-25: the old non-zero defaults reset
+		// the flow after every stage).
+		StageContract gives{ 0, 0, 0, 0, false };
 		bool modifies = true;           // false = measures only (the LED measurement)
 	};
 
@@ -144,14 +147,19 @@ namespace SegmentRunner
 		// Run when settings change (the caller passes a signature of what the checks depend on:
 		// registry order, switches, the merged switch); unchanged signature = nothing re-checked.
 		// A failed check while Merged is wanted runs the Separate form instead and says so under
-		// "Fallbacks engaged"; a failed check in the Separate form is reported too (the hooks
-		// still run as today: the separate form is the current behaviour).
+		// "Fallbacks engaged". With the merged form not wanted nothing is engaged: the separate
+		// form IS today's behaviour, so it is not a fallback (audit L4); LastCheck() keeps the
+		// reason. Rechecked() / FallbackChanged() tell the caller what the last call did.
+		// Segments without libplacebo hooks (S1) use CheckOrder/CheckContracts directly.
 		Mode Configure(const PipelineSlots::Registry& registry, bool mergedWanted, uint64_t signature,
 			FallbackStatus::Registry& fallbacks)
 		{
+			rechecked = false;
+			fallbackChanged = false;
 			if (configured && signature == lastSignature && mergedWanted == lastMergedWanted)
 				return mode;
 			configured = true;
+			rechecked = true;
 			lastSignature = signature;
 			lastMergedWanted = mergedWanted;
 			Check order = CheckOrder(Active(registry), registry);
@@ -160,22 +168,25 @@ namespace SegmentRunner
 			if (!last.ok)
 			{
 				mode = Mode::Separate;
-				fallbacks.Engage(id, std::string(mergedWanted ? "separate hooks: " : "") + last.reason);
+				fallbackChanged = mergedWanted ? fallbacks.Engage(id, "separate hooks: " + last.reason) : fallbacks.Release(id);
 				return mode;
 			}
 			mode = mergedWanted ? Mode::Merged : Mode::Separate;
-			fallbacks.Release(id);
+			fallbackChanged = fallbacks.Release(id);
 			return mode;
 		}
-		// The GPU side reports a run-time downgrade (a stage failed, the pool could not allocate):
-		// the segment drops to the separate form until the next Configure, visibly.
+		// The GPU side reports a run-time downgrade (a stage failed, libplacebo disabled the merged
+		// hook): the segment drops to the separate form until the next SETTINGS CHANGE (Configure
+		// with a new signature), visibly.
 		void Downgrade(const std::string& reason, FallbackStatus::Registry& fallbacks)
 		{
 			mode = Mode::Separate;
 			last.ok = false;
 			last.reason = reason;
-			fallbacks.Engage(id, "separate hooks: " + reason);
+			fallbackChanged = fallbacks.Engage(id, "separate hooks: " + reason) || fallbackChanged;
 		}
+		bool Rechecked() const { return rechecked; }
+		bool FallbackChanged() const { return fallbackChanged; }
 		Mode CurrentMode() const { return mode; }
 		const Check& LastCheck() const { return last; }
 
@@ -199,6 +210,8 @@ namespace SegmentRunner
 		Mode mode = Mode::Separate;
 		Check last;
 		bool configured = false;
+		bool rechecked = false;
+		bool fallbackChanged = false;
 		bool lastMergedWanted = false;
 		uint64_t lastSignature = 0;
 		TimingSampler timing;
