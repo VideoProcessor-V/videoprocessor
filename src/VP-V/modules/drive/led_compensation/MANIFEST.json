@@ -7,9 +7,7 @@
   "code_location": "partly migrated",
   "live_files": [
     "src/VP-V/modules/drive/led_compensation/LedDriveModule.cpp",
-    "src/VP-V/modules/drive/led_compensation/LedDriveArbiter.cpp",
     "src/VP-V/modules/drive/led_compensation/LedDriveModule.h",
-    "src/VP-V/modules/drive/led_compensation/LedDriveArbiter.h",
     "src/VP-V/modules/drive/led_compensation/LedDriveHoldover.cpp",
     "src/VP-V/modules/drive/led_compensation/LedDriveHoldover.h",
     "shaders/LED compensation.glsl",
@@ -20,7 +18,6 @@
     "src/VP-V/modules/drive/led_compensation/LedDriveConfig.h"
   ],
   "forwarding_headers": [
-    "src/VideoProcessor-Lib/led/LedDriveArbiter.h",
     "src/VideoProcessor-Lib/led/LedDriveHoldover.h",
     "src/VideoProcessor-Lib/led/LedDriveModule.h",
     "src/VideoProcessor-Lib/led/LedRawTransfer.h",

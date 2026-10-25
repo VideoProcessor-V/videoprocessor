@@ -231,7 +231,7 @@
     <ClInclude Include="..\VP-V\modules\drive\led_measure\LedMeasurementHook.h" />
     <ClInclude Include="..\VP-V\modules\drive\led_measure\LedLookahead.h" />
     <ClInclude Include="..\VP-V\modules\drive\led_compensation\LedRawTransfer.h" />
-    <ClInclude Include="..\VP-V\modules\drive\led_compensation\LedDriveArbiter.h" />
+    <ClInclude Include="..\VP-V\modules\drive\projector_control\LedDriveArbiter.h" />
     <ClInclude Include="..\VP-V\modules\drive\led_compensation\LedDriveHoldover.h" />
     <ClInclude Include="filesource\FileHost.h" />
     <ClInclude Include="filesource\FileHostSettings.h" />
@@ -524,7 +524,7 @@
     <ClCompile Include="..\VP-V\modules\drive\led_compensation\LedDriveModule.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\projector_control\ConnectionTest.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\led_measure\LedLookahead.cpp" />
-    <ClCompile Include="..\VP-V\modules\drive\led_compensation\LedDriveArbiter.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\projector_control\LedDriveArbiter.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\led_compensation\LedDriveHoldover.cpp" />
     <ClCompile Include="filesource\FileHost.cpp" />
     <ClCompile Include="ConfigurationDiscovery.cpp" />

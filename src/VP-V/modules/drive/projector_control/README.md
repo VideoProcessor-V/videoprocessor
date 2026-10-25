@@ -142,11 +142,14 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 - `src/VP-V/modules/drive/projector_control/ConnectionTest.h`
 - `src/VP-V/modules/drive/projector_control/LedClock.h`
 - `src/VP-V/modules/drive/projector_control/LedShutdownRestore.h`
+- `src/VP-V/modules/drive/projector_control/LedDriveArbiter.cpp`
+- `src/VP-V/modules/drive/projector_control/LedDriveArbiter.h`
 
 Forwarding headers at the legacy path (early migration, removed in M2; they only keep files on active branches building, new code includes the `<VP-V/...>` path):
 
 - `src/VideoProcessor-Lib/led/ConnectionTest.h`
 - `src/VideoProcessor-Lib/led/SerialPort.h`
+- `src/VideoProcessor-Lib/led/LedDriveArbiter.h`
 
 ## Migration directive
 

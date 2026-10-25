@@ -146,9 +146,7 @@ Chain tests:
 Code location: **partly migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
 - `src/VP-V/modules/drive/led_compensation/LedDriveModule.cpp`
-- `src/VP-V/modules/drive/led_compensation/LedDriveArbiter.cpp`
 - `src/VP-V/modules/drive/led_compensation/LedDriveModule.h`
-- `src/VP-V/modules/drive/led_compensation/LedDriveArbiter.h`
 - `src/VP-V/modules/drive/led_compensation/LedDriveHoldover.cpp`
 - `src/VP-V/modules/drive/led_compensation/LedDriveHoldover.h`
 - `src/VP-V/modules/drive/led_compensation/LedController.cpp`
@@ -160,7 +158,6 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 
 Forwarding headers at the legacy path (early migration, removed in M2; they only keep files on active branches building, new code includes the `<VP-V/...>` path):
 
-- `src/VideoProcessor-Lib/led/LedDriveArbiter.h`
 - `src/VideoProcessor-Lib/led/LedDriveHoldover.h`
 - `src/VideoProcessor-Lib/led/LedDriveModule.h`
 - `src/VideoProcessor-Lib/led/LedRawTransfer.h`
