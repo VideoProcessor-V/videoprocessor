@@ -441,6 +441,7 @@
     <ClCompile Include="LedScriptCorrelationTests.cpp" />
     <ClCompile Include="CrashStateTests.cpp" />
     <ClCompile Include="DiagnosticHistoryTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\control\diagnostics\tests\DiagnosticsAdapterTests.cpp" />
     <ClCompile Include="StateReportTests.cpp" />
     <ClCompile Include="RendererCaptureHarnessTests.cpp" />
     <ClCompile Include="VpScaleRenderMotionTests.cpp" />

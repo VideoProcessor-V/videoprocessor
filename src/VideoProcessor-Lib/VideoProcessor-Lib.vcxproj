@@ -243,10 +243,13 @@
     <ClInclude Include="ConfigSchema.h" />
     <ClInclude Include="DebugLog.h" />
     <ClInclude Include="..\VP-V\modules\control\diagnostics\CrashState.h" />
-    <ClInclude Include="DiagnosticHistory.h" />
+    <ClInclude Include="..\VP-V\modules\control\diagnostics\DiagnosticHistory.h" />
+    <ClInclude Include="..\VP-V\modules\control\diagnostics\DiagnosticsAdapter.h" />
+    <ClInclude Include="..\VP-V\modules\control\diagnostics\DiagnosticsReportRun.h" />
+    <ClInclude Include="..\VP-V\modules\control\diagnostics\RendererDiagnosticCodes.h" />
     <ClInclude Include="..\VP-V\modules\control\diagnostics\StateReport.h" />
     <ClInclude Include="..\VP-V\modules\control\diagnostics\StateReportSettings.h" />
-    <ClInclude Include="StoreZipWriter.h" />
+    <ClInclude Include="..\VP-V\modules\control\diagnostics\StoreZipWriter.h" />
     <ClInclude Include="VpBuildIdentity.h" />
     <ClInclude Include="DebugLogRetention.h" />
     <ClInclude Include="DisplayMode.h" />
@@ -423,8 +426,8 @@
     <ClInclude Include="ShortcutChord.h" />
     <ClInclude Include="SessionEndShutdown.h" />
     <ClInclude Include="LldvStaticMetadata.h" />
-    <ClInclude Include="RawCaptureRecorder.h" />
-    <ClInclude Include="RawCaptureCorpus.h" />
+    <ClInclude Include="..\VP-V\modules\control\diagnostics\RawCaptureRecorder.h" />
+    <ClInclude Include="..\VP-V\modules\control\diagnostics\RawCaptureCorpus.h" />
     <ClInclude Include="dv_loopback\DvTunnelPacker.h" />
     <ClInclude Include="dv_loopback\DvCaptureContainer.h" />
     <ClInclude Include="dv_loopback\DvLoopbackPattern.h" />
@@ -617,7 +620,7 @@
     <ClCompile Include="video_frame_formatter\CR210toRGB48VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CR210DolbyVisionTunnelFormatter.cpp" />
     <ClCompile Include="dv_loopback\DvLoopbackAnalyzer.cpp" />
-    <ClCompile Include="RawCaptureRecorder.cpp" />
+    <ClCompile Include="..\VP-V\modules\control\diagnostics\RawCaptureRecorder.cpp" />
     <ClCompile Include="video_frame_formatter\CR12BtoRGB48VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CNoopVideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CTwoPlane420VideoFrameFormatter.cpp" />

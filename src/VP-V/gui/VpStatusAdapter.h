@@ -11,7 +11,7 @@
 
 #include <IRenderer.h>
 #include <IntentInterpreterSupport.h>
-#include <RawCaptureRecorder.h>
+#include <VP-V/modules/control/diagnostics/RawCaptureRecorder.h>
 #include <VP-V/core/StatusText.h>
 #include <VP-V/gui/VpShortcuts.h>
 

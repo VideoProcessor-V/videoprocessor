@@ -13,9 +13,15 @@ the old path until M2 so files on active branches keep building.
 |---|---|---|---|
 | `src/VideoProcessor-Lib/CrashState.cpp` | `src/VP-V/modules/control/diagnostics/CrashState.cpp` | 259cfa50 |  |
 | `src/VideoProcessor-Lib/CrashState.h` | `src/VP-V/modules/control/diagnostics/CrashState.h` | 259cfa50 |  |
+| `src/VideoProcessor-Lib/DiagnosticHistory.h` | `src/VP-V/modules/control/diagnostics/DiagnosticHistory.h` | 7307d49a | fwd |
+| `src/VideoProcessor-Lib/RawCaptureCorpus.h` | `src/VP-V/modules/control/diagnostics/RawCaptureCorpus.h` | 84599765 |  |
+| `src/VideoProcessor-Lib/RawCaptureRecorder.cpp` | `src/VP-V/modules/control/diagnostics/RawCaptureRecorder.cpp` | 84599765 |  |
+| `src/VideoProcessor-Lib/RawCaptureRecorder.h` | `src/VP-V/modules/control/diagnostics/RawCaptureRecorder.h` | 84599765 | fwd |
+| `src/VideoProcessor-Lib/vprenderer/RendererDiagnosticCodes.h` | `src/VP-V/modules/control/diagnostics/RendererDiagnosticCodes.h` | 7307d49a | fwd |
 | `src/VideoProcessor-Lib/StateReport.cpp` | `src/VP-V/modules/control/diagnostics/StateReport.cpp` | 259cfa50 |  |
 | `src/VideoProcessor-Lib/StateReport.h` | `src/VP-V/modules/control/diagnostics/StateReport.h` | 259cfa50 |  |
 | `src/VideoProcessor-Lib/StateReportSettings.h` | `src/VP-V/modules/control/diagnostics/StateReportSettings.h` | 259cfa50 |  |
+| `src/VideoProcessor-Lib/StoreZipWriter.h` | `src/VP-V/modules/control/diagnostics/StoreZipWriter.h` | 7307d49a |  |
 | `src/VideoProcessor-Lib/led/LedController.cpp` | `src/VP-V/modules/drive/led_compensation/LedController.cpp` | c543f69a |  |
 | `src/VideoProcessor-Lib/led/LedController.h` | `src/VP-V/modules/drive/led_compensation/LedController.h` | c543f69a |  |
 | `src/VideoProcessor-Lib/led/LedDriveConfig.h` | `src/VP-V/modules/drive/led_compensation/LedDriveConfig.h` | c543f69a | fwd |

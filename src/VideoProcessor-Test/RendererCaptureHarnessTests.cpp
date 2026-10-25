@@ -36,7 +36,7 @@
 #include "DolbyVisionTunnelSender.h"
 #include <dv_loopback/DvLoopbackPattern.h>
 #include <dv_loopback/DvCaptureContainer.h>
-#include <RawCaptureCorpus.h>
+#include <VP-V/modules/control/diagnostics/RawCaptureCorpus.h>
 #include <DolbyVisionTunnelSourceState.h>
 #include <HDRData.h>
 #include <calibration/CalibrationController.h>

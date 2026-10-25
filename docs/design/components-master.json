@@ -66,6 +66,7 @@
         "src/VP-V/modules/input/signal/DvSignalLevels.h",
         "src/VP-V/modules/input/signal/DvMetadataHold.h",
         "src/VP-V/modules/input/signal/DvCompareCapture.h",
+        "src/VP-V/modules/input/signal/DvCompareCaptureSink.h",
         "src/VP-V/modules/input/signal/DvTunnelPolicy.h"
       ],
       "components": {
@@ -1061,6 +1062,14 @@
         "src/VP-V/modules/control/diagnostics/CrashState.h",
         "src/VP-V/modules/control/diagnostics/StateReport.h",
         "src/VP-V/modules/control/diagnostics/StateReportSettings.h",
+        "src/VP-V/modules/control/diagnostics/DiagnosticHistory.h",
+        "src/VP-V/modules/control/diagnostics/RendererDiagnosticCodes.h",
+        "src/VP-V/modules/control/diagnostics/StoreZipWriter.h",
+        "src/VP-V/modules/control/diagnostics/RawCaptureRecorder.cpp",
+        "src/VP-V/modules/control/diagnostics/RawCaptureRecorder.h",
+        "src/VP-V/modules/control/diagnostics/RawCaptureCorpus.h",
+        "src/VP-V/modules/control/diagnostics/DiagnosticsAdapter.h",
+        "src/VP-V/modules/control/diagnostics/DiagnosticsReportRun.h",
         "src/VP-V/core/SlotTiming.h",
         "src/VP-V/core/FallbackStatus.h",
         "src/VideoProcessor-GUI/StatsOverlayWindow.cpp",
@@ -1076,7 +1085,12 @@
           "optional": []
         },
         "tools": [],
-        "config_keys": [],
+        "config_keys": [
+          "auto_report",
+          "raw_capture",
+          "report_thumbnail",
+          "state_report"
+        ],
         "upstream_modules": []
       },
       "fallback_when_missing": "Owns the format: 'Fallbacks engaged: none' when clean."

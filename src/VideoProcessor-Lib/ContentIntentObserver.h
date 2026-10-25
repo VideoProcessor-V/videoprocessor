@@ -15,7 +15,7 @@
 #include <AnalysisLumaSource.h>
 #include <ContentClassifier.h>
 #include <DebugLog.h>
-#include <DiagnosticHistory.h>
+#include <VP-V/modules/control/diagnostics/DiagnosticHistory.h>
 #include <IntentDescriptor.h>
 #include <QueuedFrameStatistics.h>
 #include <vprenderer/InterpolationPolicy.h>

@@ -1790,7 +1790,7 @@
         "delay_share": "n/a",
         "lookahead": "n/a"
       },
-      "settings_keys": [],
+      "settings_keys": ["state_report", "raw_capture", "auto_report", "report_thumbnail"],
       "planned_keys": [],
       "tiers": "n/a",
       "fallback": {
