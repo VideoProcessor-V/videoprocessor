@@ -35,7 +35,7 @@ index 6324542a..7c0ddbfd 100644
        },
        "zone": "quantise",
 diff --git a/docs/settings/VP-settings-reference.md b/docs/settings/VP-settings-reference.md
-index e55abf29..70cf8f09 100644
+index 587607b5..e59b6c54 100644
 --- a/docs/settings/VP-settings-reference.md
 +++ b/docs/settings/VP-settings-reference.md
 @@ -43,7 +43,7 @@ Config now has one **VP-V** page that holds everything VP adds.
@@ -229,10 +229,10 @@ index 919bb7f5..132d26e3 100644
  				for (const char* key : vpvKeys) known = known || value.first == key;
  				if (!known)
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index 667545db..ebf72bee 100644
+index a818e4eb..9a22280f 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-@@ -86,6 +86,7 @@
+@@ -90,6 +90,7 @@
  #include <VP-V/core/OutputHookOrder.h>
  #include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
  #include <VP-V/segments/OutputSegments.h>   // S2/S3 output segments (central-migration-needs.md §6)
@@ -240,7 +240,7 @@ index 667545db..ebf72bee 100644
  #include <VP-V/core/FallbackCatalog.h>   // VP-V: the silent-fallbacks batch (src/VP-V/core)
  #include <vprenderer/DownscaleLight.h>
  #include <vprenderer/SourceRebase.h>
-@@ -1362,6 +1363,7 @@ namespace
+@@ -1366,6 +1367,7 @@ namespace
  		bool extendedRangeMoreCases = true;   // GPU tests pass (2026-10-17 night); owner: BTB/WTW in all cases
  		SdrToneShape::Settings sdrTone;     // delta 13: SDR tone shape and headroom (off)
  		bool dejudderWarpRendered = true;   // 6d: extras warp A's rendered picture (false: a warped source)
@@ -248,7 +248,7 @@ index 667545db..ebf72bee 100644
  		std::string upscaler = "auto";
  		std::string chromaUpscaler = "auto";   // owner 2026-10-13: plane_upscaler (auto = Catmull-Rom, upscaler = the upscaler)
  		std::string downscaler = "auto";
-@@ -1528,6 +1530,7 @@ namespace
+@@ -1532,6 +1534,7 @@ namespace
  			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
  			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
  			<< settings.preserveExtendedRange << '|' << settings.extendedRangeMoreCases << '|' << settings.dejudderWarpRendered << '|'
@@ -256,7 +256,7 @@ index 667545db..ebf72bee 100644
  			// Settings applied live must change the fingerprint, or a profile edit
  			// touching only them is not applied until something else changes.
  			<< settings.captureUpload << '|' << settings.sourceRange << '|' << settings.sourceResolution << '|' << settings.dvToneMapping << '|' << settings.dvCompareCaptureFolder << '|'
-@@ -3579,6 +3582,7 @@ namespace
+@@ -3583,6 +3586,7 @@ namespace
  		settings.intentBlack = BlackIntentMode::Off;       // key=intent_black
  		settings.ambientAdapt = false;                     // key=ambient_adapt
  		settings.temporalDither = "libplacebo";            // key=temporal_dither
@@ -264,7 +264,7 @@ index 667545db..ebf72bee 100644
  		settings.renderAhead = false;                      // key=render_ahead
  		settings.calibrationLutStage = "libplacebo";       // key=calibration_lut_stage
  		// Settings audit 2026-10-24: VP additions the first table missed (absent from Bill's v1.4.02-beta).
-@@ -3623,6 +3627,14 @@ namespace
+@@ -3627,6 +3631,14 @@ namespace
  			else
  				settings.pipelineSettingsProblems += "calibration_lut_stage '" + raw + "' (libplacebo|vp); ";
  		}
@@ -279,7 +279,7 @@ index 667545db..ebf72bee 100644
  		if (TryGetPipelineString(config, "pipeline_entrance_once", raw))
  		{
  			const std::string value = ConfigFile::NormalizeName(raw);
-@@ -8060,6 +8072,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -8126,6 +8138,7 @@ struct LibplaceboVideoRenderer::Impl
  	OutputSegments::OutputColourSegment outputColour{ sdrToneShape, dvTrimsHook, ledMeasurement, ledCompensation, calibrationLutStage };
  	OutputSegments::OutputFinishSegment outputFinish{ outputEncodingRepair, occlusionMaskHook };
  	std::vector<const pl_hook*> userFrameHooks;   // the S2 edge: the user's shaders this frame
@@ -287,7 +287,7 @@ index 667545db..ebf72bee 100644
  	bool calibrationLutStageLogged = false;
  	bool calibrationLutStageFailed = false;   // the VP stage failed once: libplacebo's target LUT for the session
  	std::vector<std::string> activeCustomShaders;
-@@ -9008,6 +9021,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -9080,6 +9093,7 @@ struct LibplaceboVideoRenderer::Impl
  				if (rebaseDispatch) pl_dispatch_destroy(&rebaseDispatch);
  				extendedRangeHooks.Release();   // Stage 10: its textures
  				calibrationLutStage.Release();  // R1: the VP calibration stage's LUT texture
@@ -295,7 +295,7 @@ index 667545db..ebf72bee 100644
  				dejudderOutput.Release();
  				dejudderOutputSwapchain = nullptr;
  				dejudderExtraIds.clear();
-@@ -12672,6 +12686,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -12745,6 +12759,7 @@ struct LibplaceboVideoRenderer::Impl
  		changed(current.pipelineSlotsOff != next.pipelineSlotsOff, "pipeline_slots_off");
  		changed(current.calibrationLutStage != next.calibrationLutStage, "calibration_lut_stage");
  		changed(current.pipelineEntranceOnce != next.pipelineEntranceOnce, "pipeline_entrance_once");
@@ -303,9 +303,9 @@ index 667545db..ebf72bee 100644
  		changed(current.adaptive.cnnResidualStabilise != next.adaptive.cnnResidualStabilise ||
  			current.adaptive.ssimResidualStabilise != next.adaptive.ssimResidualStabilise, "residual_stabilise");
  		changed(current.ssimBitrateAware != next.ssimBitrateAware || current.ssimBitrateFloor != next.ssimBitrateFloor, "ssim_bitrate_aware");
-@@ -18135,6 +18150,10 @@ struct LibplaceboVideoRenderer::Impl
- 			timedParams.info_callback = DitherExtraPassCallback;
+@@ -18217,6 +18232,10 @@ struct LibplaceboVideoRenderer::Impl
  			timedParams.info_priv = &ditherTotals;
+ 			passTimerHook.Install(timedParams);   // efficiency timers T1/T5 (chains the R1 callback)
  			extraParams = &timedParams;
 +			// output_segments_merged: the extras draw through the same S2/S3 segment objects (merged
 +			// for these draws only; the fallback draw of A keeps the separate list).
@@ -314,7 +314,7 @@ index 667545db..ebf72bee 100644
  			pl_frame target = *f.target;
  			if (renderedCrop)
  			{
-@@ -25170,6 +25189,13 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25268,6 +25287,13 @@ struct LibplaceboVideoRenderer::Impl
          // Bug hunt 2026-10-17: the retry withdraws the failed NLS hook from
          // frameHooks itself (a member), so frameParams - read again by the
          // de-judder extras - never points at a list local to the recovery.
@@ -328,7 +328,7 @@ index 667545db..ebf72bee 100644
          const auto hookRender = NlsHookRecovery::RenderOwned(renderer, d3d11->gpu,
              renderImage, target, baseTarget, frameParams, frameHooks, submittedNls, [&]()
              {
-@@ -25194,6 +25220,8 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25292,6 +25318,8 @@ struct LibplaceboVideoRenderer::Impl
                  occlusionMaskHook.SetFrame(nullptr, renderImage.crop, linearFallbackCrop);
                  assembleOverlays();
              }, [&](const pl_frame& source, const pl_frame& destination, pl_render_params& parameters) {
@@ -337,7 +337,7 @@ index 667545db..ebf72bee 100644
                  // Stage 12 step A: the planes libplacebo samples, re-based.
                  pl_frame frame = source;
                  // Stage B: the picture at this refresh's phase in place of A's planes (a
-@@ -25322,7 +25350,20 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25420,7 +25448,20 @@ struct LibplaceboVideoRenderer::Impl
              renderParams.num_hooks = 0;
          }
          {
@@ -360,10 +360,10 @@ index 667545db..ebf72bee 100644
                  hookErrors.num_disabled_hooks))
                  PublishCustomShaderStatus();
 diff --git a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
-index a1bb7944..a3a333d5 100644
+index e791ab07..efee968a 100644
 --- a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
 +++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
-@@ -384,6 +384,10 @@
+@@ -389,6 +389,10 @@
      <ClCompile Include="..\VP-V\tests\PipelineSkeletonTests.cpp">
        <PrecompiledHeader>NotUsing</PrecompiledHeader>
      </ClCompile>

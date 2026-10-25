@@ -1,8 +1,8 @@
 diff --git a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
-index a3bc9995..48594c09 100644
+index ae90c09d..0df27666 100644
 --- a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
 +++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
-@@ -384,6 +384,11 @@
+@@ -389,6 +389,11 @@
      <ClCompile Include="..\VP-V\tests\PipelineSkeletonTests.cpp">
        <PrecompiledHeader>NotUsing</PrecompiledHeader>
      </ClCompile>

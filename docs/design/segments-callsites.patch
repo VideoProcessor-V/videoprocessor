@@ -65,10 +65,10 @@ index 2ed3092e..bed93f19 100644
  			Assert::IsFalse(PipelineSlots::SwitchHonoured(Id::ColourToneGamut));
  		}
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index 8417cb09..667545db 100644
+index c6c61773..a818e4eb 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-@@ -85,6 +85,7 @@
+@@ -89,6 +89,7 @@
  #include <VP-V/core/EntranceEpoch.h>
  #include <VP-V/core/OutputHookOrder.h>
  #include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
@@ -76,7 +76,7 @@ index 8417cb09..667545db 100644
  #include <VP-V/core/FallbackCatalog.h>   // VP-V: the silent-fallbacks batch (src/VP-V/core)
  #include <vprenderer/DownscaleLight.h>
  #include <vprenderer/SourceRebase.h>
-@@ -8054,6 +8055,11 @@ struct LibplaceboVideoRenderer::Impl
+@@ -8120,6 +8121,11 @@ struct LibplaceboVideoRenderer::Impl
  	}
  	// output.calibration_lut in VP's output hooks (calibration_lut_stage = vp; R1).
  	CalibrationLutStage::Hook calibrationLutStage;
@@ -88,7 +88,7 @@ index 8417cb09..667545db 100644
  	bool calibrationLutStageLogged = false;
  	bool calibrationLutStageFailed = false;   // the VP stage failed once: libplacebo's target LUT for the session
  	std::vector<std::string> activeCustomShaders;
-@@ -24158,6 +24164,16 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24245,6 +24251,16 @@ struct LibplaceboVideoRenderer::Impl
          }
          frameHooks.clear();
          frameSlotHooks.clear();
@@ -105,7 +105,7 @@ index 8417cb09..667545db 100644
          // Delta 13: the SDR tone shape and headroom, first at PRE_OUTPUT
          // (before the LED measurement and compensation). SDR source and
          // output only; off installs nothing.
-@@ -24179,23 +24195,19 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24266,23 +24282,19 @@ struct LibplaceboVideoRenderer::Impl
                      sdrToneShapeConfigured = true;
                  }
                  sdrToneShape.Ensure(hookTemplates);
@@ -139,7 +139,7 @@ index 8417cb09..667545db 100644
              SyncFallback(FallbackCatalog::SdrToneShape(state == 1 || state == 3, state == 1,
                  state == 3 ? "the shader did not load" : ""));
              if (state != sdrToneShapeLogged)
-@@ -24207,7 +24219,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24294,7 +24306,7 @@ struct LibplaceboVideoRenderer::Impl
                      activeSettings.sdrTone.kneeStart, activeSettings.sdrTone.kneeStrength,
                      activeSettings.sdrTone.recovery < 0.0 ? "auto" : std::to_string(activeSettings.sdrTone.recovery).c_str());
              }
@@ -148,7 +148,7 @@ index 8417cb09..667545db 100644
          // dv_trims (owner 2026-10-17; default on since the DV synthetic validation 2026-10-24): the Dolby Vision L2 trim for the
          // display's peak, after libplacebo's tone mapping (PRE_OUTPUT, before
          // the LED stages). Tunnel pictures with DM only; not after a
-@@ -24235,6 +24247,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24322,6 +24334,7 @@ struct LibplaceboVideoRenderer::Impl
              dvToneDolbyRunning, activeSettings.toneMapping, dvToneFallback, activeSettings.dvTrims, dvToneL1Missing);
          if (activeSettings.dvTrims || !dvTrimsLogged.empty())
          {
@@ -156,7 +156,7 @@ index 8417cb09..667545db 100644
              std::string state;
              const bool dvPicture = state.empty() && renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION &&
                  convertedPayload && convertedPayload->dolby.valid;
-@@ -24276,9 +24289,6 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24363,9 +24376,6 @@ struct LibplaceboVideoRenderer::Impl
                          dvTrimsConfigured = true;
                      }
                      dvTrimsHook.Ensure(hookTemplates);
@@ -166,7 +166,7 @@ index 8417cb09..667545db 100644
                      // Review C4: the luminance coefficients of the output's own primaries.
                      const pl_raw_primaries* prim = pl_raw_primaries_get(display.primaries);
                      double kr = 0.2126, kg = 0.7152, kb = 0.0722;
-@@ -24289,24 +24299,41 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24376,24 +24386,41 @@ struct LibplaceboVideoRenderer::Impl
                          DolbyVisionTrims::LuminanceWeights(red, green, blue, white, kr, kg, kb);
                      }
                      const auto ictcp = DvDolbyStyle::ShaderParameters(dvToneDolbyRunning, prim);   // dv_space + output RGB -> LMS
@@ -224,7 +224,7 @@ index 8417cb09..667545db 100644
              // test/dv-synthetic 2026-10-24 (no silent fallbacks): dv_trims on, a DV picture with DM,
              // but the trim cannot act (a calibration LUT, an unsupported output transfer, the shader
              // missing): listed. Neutral (no L2 for this picture) is the trims' own answer, not a fallback.
-@@ -24328,7 +24355,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24415,7 +24442,7 @@ struct LibplaceboVideoRenderer::Impl
              {
                  dvTrimsLogged = activeSettings.dvTrims ? state : std::string();
                  DebugLog::Log("Dolby Vision trims (non-certified): %s (display peak %.1f nits)", state.c_str(),
@@ -233,7 +233,7 @@ index 8417cb09..667545db 100644
              }
              const ULONGLONG trimsNow = GetTickCount64();
              if (!params.empty() && params != dvTrimsParamsLogged &&
-@@ -24338,7 +24365,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24425,7 +24452,7 @@ struct LibplaceboVideoRenderer::Impl
                  dvTrimsParamsTick = trimsNow;
                  DebugLog::Log("Dolby Vision trims (non-certified): %s", params.c_str());
              }
@@ -242,7 +242,7 @@ index 8417cb09..667545db 100644
          dvCompare.Configure(activeSettings.dvCompareCaptureFolder);   // feat/dv-l8 WIP: the Config folder
          if (dvCompare.Enabled())   // feat/dv-l8: DV comparison capture (diagnostic; VP_DV_COMPARE_PATH)
              dvCompare.OnRender(state, convertedPayload ? convertedPayload->rawFrame.get() : nullptr, videoFrame.GetCounter(),
-@@ -24517,57 +24544,51 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24604,57 +24631,51 @@ struct LibplaceboVideoRenderer::Impl
                      adaptiveDownscale.LastMapState() == AdaptiveDownscale::MapState::Used ?
                      adaptiveDownscale.GrainMap() : nullptr, static_cast<float>(activeSettings.adaptive.grainFloor),
                      renderImage.crop);
@@ -333,7 +333,7 @@ index 8417cb09..667545db 100644
          }
          // A cadence repeat shows the previous picture again: the sigma-delta
          // skips its motion search (zero motion; owner 2026-10-13 efficiency).
-@@ -24779,24 +24800,10 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24866,24 +24887,10 @@ struct LibplaceboVideoRenderer::Impl
  #endif
          {
              const SigmaDeltaDomain::Domain domain = SigmaDeltaDomain::FromTarget(target.repr);
@@ -362,7 +362,7 @@ index 8417cb09..667545db 100644
              const int signature = (domain.full ? 1 : 0) | (domain.sample << 1) | (domain.color << 8);
              if (any && signature != sigmaDeltaDomainLogged)
              {
-@@ -24810,7 +24817,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24897,7 +24904,7 @@ struct LibplaceboVideoRenderer::Impl
              }
              // Silent-fallbacks batch: the sigma-delta asked for but not running is visible (ADR-0001).
              const std::string quantiserProblem = customHooks.QuantizerProblem();
@@ -371,7 +371,7 @@ index 8417cb09..667545db 100644
                  sigmaDomainDropped ? FallbackCatalog::DitherDrop::UnsupportedDomain :
                  quantiserProblem == CustomHookChain::Chain::kQuantizerNotLoaded ? FallbackCatalog::DitherDrop::ShaderNotLoaded :
                  !quantiserProblem.empty() ? FallbackCatalog::DitherDrop::DisabledByLibplacebo : FallbackCatalog::DitherDrop::None,
-@@ -24822,22 +24829,9 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24909,22 +24916,9 @@ struct LibplaceboVideoRenderer::Impl
          // sigma-delta is moved to the end (logged once). The occlusion mask
          // and the encoding repair are placed relative to it below.
          {
@@ -396,7 +396,7 @@ index 8417cb09..667545db 100644
                  if (!sigmaDeltaReorderLogged)
                      DebugLog::Log("Sigma-delta: another OUTPUT-stage shader was configured after it; the sigma-delta now runs last");
                  sigmaDeltaReorderLogged = true;
-@@ -24885,14 +24879,9 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24972,14 +24966,9 @@ struct LibplaceboVideoRenderer::Impl
                      grainInstall = false;
                  }
              }
@@ -414,7 +414,7 @@ index 8417cb09..667545db 100644
              if (sigmaIndex == frameHooks.size())
                  grainInstall = false;
              grainToleranceParamSet = grainInstall;
-@@ -24919,7 +24908,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25006,7 +24995,7 @@ struct LibplaceboVideoRenderer::Impl
                  // MAIN-stage texture libplacebo hooks is the cropped picture).
                  if (submittedNls)
                      occlusionMaskHook.SetNls(nlsMapping, renderImage.crop);
@@ -423,7 +423,7 @@ index 8417cb09..667545db 100644
              }
              if (install)
              {
-@@ -25044,11 +25033,9 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25142,11 +25131,9 @@ struct LibplaceboVideoRenderer::Impl
          // a texture-input PRE_OUTPUT hook; the repair runs first at OUTPUT,
          // before any OUTPUT-stage shader such as the sigma-delta.
          const pl_render_errors renderErrors = pl_renderer_get_errors(renderer);
@@ -438,10 +438,10 @@ index 8417cb09..667545db 100644
                  DebugLog::Log("libplacebo output encoding repair active (PRE_OUTPUT hook in the chain; target levels=%d)",
                      static_cast<int>(target.repr.levels));
 diff --git a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
-index 48594c09..a1bb7944 100644
+index 0df27666..e791ab07 100644
 --- a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
 +++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
-@@ -384,6 +384,20 @@
+@@ -389,6 +389,20 @@
      <ClCompile Include="..\VP-V\tests\PipelineSkeletonTests.cpp">
        <PrecompiledHeader>NotUsing</PrecompiledHeader>
      </ClCompile>
