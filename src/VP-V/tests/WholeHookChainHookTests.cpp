@@ -642,5 +642,32 @@ namespace VideoProcessorTest
 				AssertCleanLibplaceboLogExceptPreOutputBug(log);
 			}
 		}
+
+		// Every warning or error libplacebo logs fails the test (design review 4, N-6): the clean-log
+		// check that used to sit inside Bill's BundledNlsGlSlHooksMovePixelsOnTheRealGpuPath.
+		TEST_METHOD(BundledNlsHooksLogCleanly)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			std::string cleanLog;
+			fixture.CaptureLog(&cleanLog);
+			fixture.RenderCoordinateField(nullptr);
+			const pl_hook* balanced = ParseBundledNlsShader(fixture.Gpu(), "NLSPlus.glsl", 0.25, 0.8);
+			BindNlsShader(balanced, 1.32f, 0.0f);
+			fixture.RenderCoordinateField(balanced);
+			const pl_hook* oneAxisPlus = ParseBundledNlsShader(fixture.Gpu(), "NLSPlus.glsl", 0.0);
+			const pl_hook* established = ParseBundledNlsShader(fixture.Gpu(), "NLS.glsl", 0.0);
+			BindNlsShader(oneAxisPlus, 1.32f, 0.0f);
+			BindNlsShader(established, 1.32f, 0.0f);
+			fixture.RenderCoordinateField(oneAxisPlus);
+			fixture.RenderCoordinateField(established);
+			BindNlsShader(established, 1.125f, 1.0f);
+			fixture.RenderCoordinateField(established);
+			pl_mpv_user_shader_destroy(&balanced);
+			pl_mpv_user_shader_destroy(&oneAxisPlus);
+			pl_mpv_user_shader_destroy(&established);
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(cleanLog);
+		}
 	};
 }

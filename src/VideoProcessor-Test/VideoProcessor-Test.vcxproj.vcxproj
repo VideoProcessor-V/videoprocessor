@@ -674,6 +674,7 @@
 	<ClCompile Include="ConsecutiveFrameDurationHistoryTests.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="..\VP-V\tests\VpLutGpuTestSupport.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="RealClipLibrary.h" />
   </ItemGroup>

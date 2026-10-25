@@ -94,7 +94,7 @@ vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /TestCaseFi
   - `SourceResolutionDetectorTests`: detector and tracker. `RealFootageReadings` needs `VP_TEST_REAL_FOOTAGE`, `RealCodecReadings` needs `VP_TEST_CODEC_CORPUS`; else skipped.
   - `SourceResolutionLatchTests`: the monitor through `AnalyseTilesForTest`. Real-footage cases need `VP_TEST_REAL_FOOTAGE` (or D:\hfr); `RealFilmCutDecisions` needs `VP_TEST_CUT_FILMS`.
   - `MixedScreenSourceResolutionTests`: the mixed-screen guard and the dense grid.
-- GPU (D3D11; WARP unless `VP_TEST_GPU=hardware`; only when GPU tests are allowed): `LibplaceboLutParserTests` methods `SourceResolutionMonitorIdentifiesThePlayerKernel`, `SourceResolutionLookAheadVerifiesOrCancelsTheSwitch`, `SourceResolutionMonitorDeclaresAutoEngagesAtACutAndDisengagesAtOnce`, `SourceResolutionReadsAndRebasesTheDolbyVisionTunnel` (filter `FullyQualifiedName~LibplaceboLutParserTests.SourceResolution`).
+- GPU (D3D11; WARP unless `VP_TEST_GPU=hardware`; only when GPU tests are allowed): `SourceResolutionHookTests` (moved from LibplaceboLutParserTests) methods `SourceResolutionMonitorIdentifiesThePlayerKernel`, `SourceResolutionLookAheadVerifiesOrCancelsTheSwitch`, `SourceResolutionMonitorDeclaresAutoEngagesAtACutAndDisengagesAtOnce`, `SourceResolutionReadsAndRebasesTheDolbyVisionTunnel` (filter `FullyQualifiedName~SourceResolutionHookTests`).
 - Bill's subtitle code: `SubtitleBoxDetectorTests`, `SubtitleBoxLookaheadTests`, `SubtitleOpaqueCardRefinementTests`, `SubtitleMeasurementWorkerTests`; probes in tools/subtitle_*_probe; exact native frame capture with `VP_SUBTITLE_CAPTURE_PATH` (see AGENTS.md).
 
 ## Cost

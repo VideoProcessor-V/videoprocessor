@@ -247,6 +247,7 @@
   <ItemGroup><ClCompile Include="..\VP-V\modules\scaling\rebase\tests\SourceRebaseHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\scaling\refine\tests\ResidualHoldHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\tests\WholeHookChainHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClInclude Include="..\VP-V\tests\VpLutGpuTestSupport.h"><Filter>VP-V</Filter></ClInclude></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\tests\PipelineSkeletonTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\segments\OutputSegmentsMerge.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\tests\SegmentRunnerTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
