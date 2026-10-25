@@ -123,7 +123,8 @@ def write_jobs(root, path, only=None):
         for jid, folder, keys, settings in jobs(root):
             if only and only not in jid:
                 continue
-            assert "\n" not in settings and "\r" not in settings, jid + ": a real new line inside the settings"
+            if "\n" in settings or "\r" in settings:   # not assert: it must hold under python -O (audit LOW-3)
+                raise ValueError(jid + ": a real new line inside the settings")
             faithful = not jid.startswith("full_") and jid != "sdr_passthrough"
             f.write("job id=%s segment=%s %s%s settings=%s\n" % (jid, folder, keys, " faithful=1" if faithful else "", settings))
     print("wrote", path)

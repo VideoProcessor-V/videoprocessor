@@ -3761,8 +3761,8 @@ namespace Tests
 			// at the 203-nit default). Before any render: job lines, blank lines and # comments only.
 			while (std::getline(jobs, line))
 			{
-				const size_t first = line.find_first_not_of(" \t\r");
-				Assert::IsTrue(first == std::string::npos || line[first] == '#' || line.compare(0, 4, "job ") == 0,
+				const size_t first = line.find_first_not_of(" \t\r");   // indentation allowed (audit LOW-2)
+				Assert::IsTrue(first == std::string::npos || line[first] == '#' || line.compare(first, 4, "job ") == 0,
 					HarnessWide("jobs file: a line that is not a job (a real new line inside settings? write \\n): " + line.substr(0, 80)).c_str());
 			}
 			jobs.clear();
@@ -3773,6 +3773,7 @@ namespace Tests
 			std::vector<size_t> contentOfFrame;
 			while (std::getline(jobs, line))
 			{
+				line.erase(0, line.find_first_not_of(" \t"));
 				if (line.compare(0, 4, "job ") != 0)
 					continue;
 				std::map<std::string, std::string> key;

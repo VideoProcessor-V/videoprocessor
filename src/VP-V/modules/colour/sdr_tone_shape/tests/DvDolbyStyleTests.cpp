@@ -334,7 +334,7 @@ namespace Tests
 						else
 						{
 							// The trim's own change (slope 1.04, offset +0.01, power 0.95: brighter), never darker.
-							Assert::IsTrue(ratio >= 0.999 && ratio < 2.0, L"corpus L2: brighter than the curve by the trim alone, never darker, under one stop");
+							Assert::IsTrue(ratio >= 1.0 - 1e-4 && ratio < 2.0, L"corpus L2: brighter than the curve by the trim alone, never darker (1e-4), under one stop");
 							const double peakPq = Pq(target), i = Pq(curveNits);
 							const double want = DolbyVisionTrims::NitsFromPq(DvTrimSelection::Curve(i / peakPq, l2, DolbyVisionTrims::kOffsetFadePq / peakPq) * peakPq);
 							Assert::AreEqual(want, out, want * 2e-3 + 1e-6, L"a grey's intensity is the trim curve of the curve's output");
