@@ -1,0 +1,436 @@
+diff --git a/docs/design/slots.json b/docs/design/slots.json
+index ef0c7f3e..b07fb51f 100644
+--- a/docs/design/slots.json
++++ b/docs/design/slots.json
+@@ -143,7 +143,8 @@
+         "settings": {
+           "dv_tunnel_gpu_unpack": "off",
+           "dv_tunnel_fixes": "off",
+-          "dv_compare_capture_folder": ""
++          "dv_compare_capture_folder": "",
++          "hdr_inference": "original"
+         }
+       },
+       "zone": "host",
+diff --git a/docs/settings/VP-settings-reference.md b/docs/settings/VP-settings-reference.md
+index e55abf29..ed6e3bf1 100644
+--- a/docs/settings/VP-settings-reference.md
++++ b/docs/settings/VP-settings-reference.md
+@@ -43,7 +43,7 @@ Config now has one **VP-V** page that holds everything VP adds.
+ | **Global tier** | Classic / Low / Mid / Upper for every unit at once. If a unit has no step at that level, it uses its nearest lower step. Change one unit afterwards and the global tier shows *Custom (per unit)*. |
+ | **Fallbacks engaged** | The running VP's list of automatic downgrades, for example "Fallbacks engaged: capture GPU unpack (CPU 4:2:0 ...)", or "none". It is the same line as Ctrl+I and Ctrl+Alt+D. |
+ | **Unit tabs** | Each tab has two sub-pages. **Main**: the unit's tier slider, its taste slider where it has one, and small cards of switches. **Advanced**: the settings a master on Main sets (greyed "Set by ..." until you tick *Custom* on that card; unticking puts the master's values back), tuning used only while its feature is on ("Used only when ... is on"), the measured internals (collapsed), the planned settings and the unit's stages with their fallback text. The layout map is `docs/settings/organisation.md`. |
+-| **Pipeline (expert)** | For testing only: where the calibration LUT runs (`calibration_lut_stage`: libplacebo today, or VP's last colour step after Dynamic Drive), the module order (`pipeline_order`, checked with the renderer's own rules; an order it would reject is shown with the reason and not saved), and stages switched off entirely (`pipeline_slots_off`). |
++| **Pipeline (expert)** | For testing only: where the calibration LUT runs (`calibration_lut_stage`: libplacebo today, or VP's last colour step after Dynamic Drive), the module order (`pipeline_order`, checked with the renderer's own rules; an order it would reject is shown with the reason and not saved), and stages switched off entirely (`pipeline_slots_off`). Also which HDR inference reads an unflagged BT.2020 signal (`hdr_inference`: `vp`, the default - bit-depth, DV-tunnel and settings gates plus the SDR veto - or `original`, Bill's newlldv heuristic: BT.2020 + SDR + no InfoFrame after 1.5 s; both need `newlldv` on; the Original pathway always uses `original`; read at start-up). |
+ | **Proposed retirement** | The section-12 candidates below, by group, with where each control is and the value in use. The same note is added to each control's tooltip. Nothing is removed until you approve. Each unit tab also ends with "More settings of this unit", naming the pages that hold the rest (coverage audit: `docs/settings/coverage-audit.md`). |
+ 
+ **One control per key.** Every VP setting has exactly one live control. VP's own settings that used
+@@ -67,7 +67,7 @@ have their controls on the Proposed retirement tab.
+ 
+ **Where VP-V keys live.**
+ - The global VP-V keys are in a `[vpv]` section: `pipeline_original_pathway`, `pipeline_order`,
+-  `pipeline_slots_off` and `calibration_lut_stage`. Config renames and reorders renderer profiles;
++  `pipeline_slots_off`, `calibration_lut_stage` and `hdr_inference`. Config renames and reorders renderer profiles;
+   it never touches `[vpv]`.
+ - The renderer reads `[vpv]` first. The same keys in `[vprenderer]`, where the skeleton first
+   put them, still work.
+diff --git a/src/VP-V/config/VpvSection.cpp b/src/VP-V/config/VpvSection.cpp
+index df28258a..1f640003 100644
+--- a/src/VP-V/config/VpvSection.cpp
++++ b/src/VP-V/config/VpvSection.cpp
+@@ -1066,6 +1066,21 @@ namespace Vpv
+ 				state->host.setValue(section, QStringLiteral("calibration_lut_stage"), lutStage->itemData(i).toString());
+ 			});
+ 
++			// F-8 (owner rule vp-either-or-overlaps): which HDR inference decides an unflagged BT.2020
++			// signal - VP's or Bill's original newlldv heuristic. The Original pathway selects Bill's.
++			auto* hdrInference = new QComboBox;
++			hdrInference->setObjectName(ObjectName(QStringLiteral("expert.hdr_inference")));
++			hdrInference->addItem(QStringLiteral("VP (default; bit-depth, DV-tunnel and settings gates, SDR veto)"), QString());
++			hdrInference->addItem(QStringLiteral("Original (Bill's newlldv heuristic: BT.2020 + SDR + no InfoFrame)"), QStringLiteral("original"));
++			hdrInference->setToolTip(QStringLiteral("Key hdr_inference. Both need [general] newlldv on. The Original pathway "
++				"always uses the original heuristic. Applied at the next start of VideoProcessor."));
++			form->addRow(QStringLiteral("HDR inference (newlldv)"), hdrInference);
++			QObject::connect(hdrInference, qOverload<int>(&QComboBox::currentIndexChanged), hdrInference, [state, hdrInference, section](int i)
++			{
++				if (state->refreshing || i < 0 || !state->host.setValue) return;
++				state->host.setValue(section, QStringLiteral("hdr_inference"), hdrInference->itemData(i).toString());
++			});
++
+ 			// pipeline_entrance_once (B3, ADR-0024) is a hidden diagnostic/test key with no Config control (skeleton b76571c1).
+ 
+ 			// The module order: slot names moved within their zone.
+@@ -1122,13 +1137,17 @@ namespace Vpv
+ 			layout->addLayout(form);
+ 			layout->addStretch();
+ 
+-			state->refreshers.push_back([state, lutStage, order, slotsOff, section]()
++			state->refreshers.push_back([state, lutStage, hdrInference, order, slotsOff, section]()
+ 			{
+ 				const auto get = [&](const char* key) { return state->host.value ? state->host.value(section, QString::fromLatin1(key)).trimmed() : QString(); };
+ 				{
+ 					const QSignalBlocker blocker(lutStage);
+ 					lutStage->setCurrentIndex(get("calibration_lut_stage").compare(QStringLiteral("vp"), Qt::CaseInsensitive) == 0 ? 1 : 0);
+ 				}
++				{
++					const QSignalBlocker blocker(hdrInference);
++					hdrInference->setCurrentIndex(get("hdr_inference").compare(QStringLiteral("original"), Qt::CaseInsensitive) == 0 ? 1 : 0);
++				}
+ 				if (!order->hasFocus()) order->setText(get("pipeline_order"));
+ 				if (!slotsOff->hasFocus()) slotsOff->setText(get("pipeline_slots_off"));
+ 			});
+diff --git a/src/VP-V/config/tests/VpvConfigTests.cpp b/src/VP-V/config/tests/VpvConfigTests.cpp
+index a62f3bb8..c6d550e7 100644
+--- a/src/VP-V/config/tests/VpvConfigTests.cpp
++++ b/src/VP-V/config/tests/VpvConfigTests.cpp
+@@ -364,6 +364,9 @@ namespace
+ 			QMetaObject::invokeMethod(off, "editingFinished", Qt::DirectConnection);
+ 			auto* lut = control<QComboBox>(window, Vpv::ObjectName("expert.calibration_lut_stage"));
+ 			lut->setCurrentIndex(1);
++			auto* hdr = control<QComboBox>(window, Vpv::ObjectName("expert.hdr_inference"));
++			require(hdr->currentIndex() == 0, "hdr_inference shows vp by default");
++			hdr->setCurrentIndex(1);
+ 			save(window);
+ 		}
+ 		ConfigFile config;
+@@ -373,6 +376,7 @@ namespace
+ 		require(config.TryGetString("vpv", "pipeline_slots_off", v) && v == "repair.texture_restore, colour.appearance",
+ 			"the stages switched off are stored in [vpv]");
+ 		require(config.TryGetString("vpv", "calibration_lut_stage", v) && v == "vp", "the LUT stage is stored in [vpv]");
++		require(config.TryGetString("vpv", "hdr_inference", v) && v == "original", "the HDR inference choice is stored in [vpv]");
+ 		requireVpReads(path);
+ 	}
+ }
+diff --git a/src/VP-V/core/OriginalPathway.h b/src/VP-V/core/OriginalPathway.h
+index a20eab56..1940e442 100644
+--- a/src/VP-V/core/OriginalPathway.h
++++ b/src/VP-V/core/OriginalPathway.h
+@@ -25,14 +25,15 @@ namespace OriginalPathway
+ 		const char* slot;   // the slot whose VP additions it removes (slots.json id)
+ 	};
+ 
+-	inline const std::array<Override, 56>& Overrides()
++	inline const std::array<Override, 57>& Overrides()
+ 	{
+-		static const std::array<Override, 56> table = { {
++		static const std::array<Override, 57> table = { {
+ 			{ "capture_path", "standard", "input.capture" },
+ 			{ "capture_upload", "render", "input.capture" },
+ 			{ "native_rgb_ingest", "off", "input.capture" },
+ 			{ "dv_tunnel_gpu_unpack", "off", "input.signal" },
+ 			{ "dv_tunnel_fixes", "off", "input.signal" },
++			{ "hdr_inference", "original", "input.signal" },   // F-8: Bill's newlldv heuristic
+ 			{ "dv_compare_capture_folder", "", "input.signal" },   // feat/dv-l8: the diagnostic off
+ 			{ "dv_trims", "off", "colour.sdr_tone_shape" },
+ 			{ "dv_tone_mapping", "libplacebo", "colour.sdr_tone_shape" },   // feat/dv-l8
+diff --git a/src/VP-V/modules/input/signal/tests/HdrInferenceChoiceWiringTests.cpp b/src/VP-V/modules/input/signal/tests/HdrInferenceChoiceWiringTests.cpp
+new file mode 100644
+index 00000000..f62148ed
+--- /dev/null
++++ b/src/VP-V/modules/input/signal/tests/HdrInferenceChoiceWiringTests.cpp
+@@ -0,0 +1,94 @@
++/*
++ * Copyright(C) 2026 Victor McPherson
++ * SPDX-License-Identifier: GPL-3.0-or-later
++ */
++// F-8 wiring (2026-10-25; part of docs/design/hdr-inference-choice-callsites.patch): [vpv]
++// hdr_inference through the configuration validator and the renderer's settings reader - its
++// default, both values, an invalid value (kept, reported), the Original pathway forcing original,
++// the settings dump line and the live-apply fingerprint. CPU only (the renderer DLL's test exports).
++#include "pch.h"
++#include "CppUnitTest.h"
++
++#include <RendererProfileConfig.h>
++
++#include <Windows.h>
++
++#include <cstring>
++#include <fstream>
++#include <string>
++#include <vector>
++
++using namespace Microsoft::VisualStudio::CppUnitTestFramework;
++
++namespace Tests
++{
++	namespace HdrChoiceWiring
++	{
++		inline std::string Here()
++		{
++			char here[MAX_PATH] = {};
++			HMODULE self = nullptr;
++			GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++				reinterpret_cast<LPCSTR>(&Here), &self);
++			GetModuleFileNameA(self, here, MAX_PATH);
++			const std::string binary(here);
++			return binary.substr(0, binary.find_last_of("\\/") + 1);
++		}
++	}
++
++	TEST_CLASS(HdrInferenceChoiceWiringTests)
++	{
++	public:
++		TEST_METHOD(ValidatorAcceptsTheChoiceInVpv)
++		{
++			Assert::IsTrue(RendererProfileConfig::ValidateBaseSetting("hdr_inference", "vp"));
++			Assert::IsTrue(RendererProfileConfig::ValidateBaseSetting("hdr_inference", "original"));
++			Assert::IsFalse(RendererProfileConfig::ValidateBaseSetting("hdr_inference", "bill"));
++		}
++
++		TEST_METHOD(RendererReadsDumpsAndFingerprintsHdrInference)
++		{
++			using namespace HdrChoiceWiring;
++			const std::string folder = Here();
++			HMODULE dll = LoadLibraryExA((folder + "vprenderer\\VideoProcessorVPRenderer.dll").c_str(), nullptr,
++				LOAD_WITH_ALTERED_SEARCH_PATH);
++			Assert::IsNotNull(dll, L"the renderer DLL next to the tests");
++			using Export = int(__cdecl*)(const char*, char*, int);
++			const auto describe = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboDescribeSettingsForTest"));
++			const auto fingerprintOf = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboSettingsFingerprintForTest"));
++			Assert::IsNotNull(reinterpret_cast<void*>(describe));
++			Assert::IsNotNull(reinterpret_cast<void*>(fingerprintOf));
++			int callIndex = 0;
++			std::vector<std::string> written;
++			auto call = [&](Export function, const std::string& keys) {
++				const std::string path = folder + "vp-hdr-inference-wiring-" + std::to_string(callIndex++) + ".cfg";
++				written.push_back(path);
++				{
++					std::ofstream config(path, std::ios::trunc | std::ios::binary);
++					config << "[general]\npersist_profile_selection: false\n[vprenderer.Default]\nquality: high\n" << keys;
++				}
++				std::vector<char> buffer(1 << 20);
++				const int length = function(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
++				Assert::IsTrue(length > 0, L"the export ran");
++				return std::string(buffer.data());
++			};
++			auto line = [](const std::string& dump) {
++				const std::string key = "\nhdr_inference=";
++				const size_t at = dump.find(key);
++				if (at == std::string::npos) return std::string("(missing)");
++				const size_t start = at + key.size();
++				return dump.substr(start, dump.find('\n', start) - start);
++			};
++			Assert::AreEqual(std::string("vp"), line(call(describe, "")), L"default vp");
++			Assert::AreEqual(std::string("original"), line(call(describe, "[vpv]\nhdr_inference: original\n")));
++			Assert::AreEqual(std::string("vp"), line(call(describe, "[vpv]\nhdr_inference: vp\n")));
++			Assert::AreEqual(std::string("vp"), line(call(describe, "[vpv]\nhdr_inference: maybe\n")), L"invalid: kept");
++			Assert::AreEqual(std::string("original"), line(call(describe, "[vpv]\nhdr_inference: vp\npipeline_original_pathway: on\n")),
++				L"the Original pathway selects Bill's heuristic");
++			Assert::AreNotEqual(call(fingerprintOf, ""), call(fingerprintOf, "[vpv]\nhdr_inference: original\n"),
++				L"the choice changes the fingerprint");
++			for (const std::string& path : written)
++				DeleteFileA(path.c_str());
++		}
++	};
++}
+diff --git a/src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp b/src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp
+index acbc8011..6e130f8a 100644
+--- a/src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp
++++ b/src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp
+@@ -9414,6 +9414,7 @@ static const std::map<std::string, const char*>& CoverageAllowList()
+         { "renderer:pipeline_slots_off", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.pipeline_slots_off); also read from [vprenderer]" },
+         { "renderer:calibration_lut_stage", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.calibration_lut_stage); also read from [vprenderer]" },
+         { "renderer:pipeline_entrance_once", "hidden diagnostic/test key (ADR-0024): B3 is the default and the pre-B3 path is retired; no Config control" },
++        { "renderer:hdr_inference", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.hdr_inference); also read from [vprenderer]" },
+     };
+     return allowList;
+ }
+@@ -9519,7 +9520,7 @@ int writeSettingsInventory(const QString& outPath)
+                 << (reason == allowList.end() ? QString() : inventoryField(QString::fromUtf8(reason->second))) << '\n';
+         }
+     }
+-    for (const char* key : { "pipeline_original_pathway", "pipeline_order", "pipeline_slots_off", "calibration_lut_stage" })
++    for (const char* key : { "pipeline_original_pathway", "pipeline_order", "pipeline_slots_off", "calibration_lut_stage", "hdr_inference" })
+         stream << "K\tvpv\tvpv\t" << key << "\t\n";
+     for (QWidget* w : window.findChildren<QWidget*>())
+     {
+diff --git a/src/VideoProcessor-GUI/VideoProcessorApp.cpp b/src/VideoProcessor-GUI/VideoProcessorApp.cpp
+index 27675a56..c6d6eb67 100644
+--- a/src/VideoProcessor-GUI/VideoProcessorApp.cpp
++++ b/src/VideoProcessor-GUI/VideoProcessorApp.cpp
+@@ -8,6 +8,7 @@
+ 
+ #include <pch.h>
+ #include <VP-V/modules/control/diagnostics/CrashState.h>
++#include <VP-V/modules/input/signal/HdrInferenceChoice.h>   // F-8: [vpv] hdr_inference
+ #include <UpdateLauncher.h>
+ #include <ApplicationShutdownPolicy.h>
+ 
+@@ -850,6 +851,9 @@ std::vector<std::wstring> LoadConfiguredCommandLineArguments(
+ 	AppendConfigBoolOption(arguments, config, "scene_correction_basic");
+ 	AppendConfigBoolOption(arguments, config, "newlldv");
+ 	AppendConfigBoolOption(arguments, config, "newlldv_sdr_veto");
++	// F-8 ([vpv] hdr_inference; the Original pathway selects Bill's heuristic): HdrInferenceChoice.h.
++	arguments.emplace_back(L"/hdr_inference");
++	arguments.emplace_back(HdrInferenceChoice::FromConfig(config).effective == HdrInferenceChoice::Mode::Original ? L"original" : L"vp");
+ 	AppendConfigBoolOption(arguments, config, "dv_tunnel_handoff");
+ 	AppendConfigBoolOption(arguments, config, "dolby_vision_tunnel");
+ 	AppendConfigBoolOption(arguments, config, "noui");
+@@ -1138,7 +1142,8 @@ bool RequiresCommandLineValue(const wchar_t* argument)
+ 		IsCommandLineOption(argument, L"/active_output_sweep_hold_ms") ||
+ 		IsCommandLineOption(argument, L"/active_output_sweep_suite") ||
+ 		IsCommandLineOption(argument, L"/active_output_sweep_tests") ||
+-		IsCommandLineOption(argument, L"/active_output_sweep_restart");
++		IsCommandLineOption(argument, L"/active_output_sweep_restart") ||
++		IsCommandLineOption(argument, L"/hdr_inference");
+ }
+ 
+ bool HasCaseInsensitiveValue(const wchar_t* argument)
+@@ -1238,6 +1243,10 @@ void ValidateCommandLineArguments(const std::vector<const wchar_t*>& arguments)
+ 		if (IsCommandLineOption(argument, L"/queue_size") && !IsPositiveInteger(arguments[index + 1]))
+ 			throw std::runtime_error("Invalid /queue_size: expected a positive integer");
+ 
++		if (IsCommandLineOption(argument, L"/hdr_inference") &&
++			_wcsicmp(arguments[index + 1], L"vp") != 0 && _wcsicmp(arguments[index + 1], L"original") != 0)
++			throw std::runtime_error("Invalid /hdr_inference: expected vp or original");
++
+ 		if (IsCommandLineOption(argument, L"/reset_after_render_restart_seconds") &&
+ 			!IsPositiveInteger(arguments[index + 1]))
+ 			throw std::runtime_error(
+@@ -2104,6 +2113,8 @@ BOOL CVideoProcessorApp::InitInstance()
+ 			{
+ 				dlg.EnableHdrInferenceSdrVeto(booleanValue);
+ 			}
++			if (wcscmp(pArgs[i], L"/hdr_inference") == 0 && (i + 1) < iNumOfArgs)   // F-8
++				dlg.SelectOriginalNewLldvHeuristic(_wcsicmp(pArgs[i + 1], L"original") == 0);
+ 			if (ReadBooleanOption(pArgs.data(), i, iNumOfArgs,
+ 				L"/dolby_vision_tunnel", booleanValue))
+ 			{
+diff --git a/src/VideoProcessor-GUI/VideoProcessorDlg.cpp b/src/VideoProcessor-GUI/VideoProcessorDlg.cpp
+index 996c07af..407e59c5 100644
+--- a/src/VideoProcessor-GUI/VideoProcessorDlg.cpp
++++ b/src/VideoProcessor-GUI/VideoProcessorDlg.cpp
+@@ -5680,6 +5680,16 @@ void CVideoProcessorDlg::EnableHdrInferenceSdrVeto(bool enabled)
+ 	DebugLog::Log("newlldv_sdr_veto: %s", enabled ? "on" : "off");
+ }
+ 
++// F-8 (owner rule vp-either-or-overlaps): Bill's original newlldv heuristic or VP's inference,
++// one tracker option (HdrInferenceOptions::originalHeuristic).
++void CVideoProcessorDlg::SelectOriginalNewLldvHeuristic(bool original)
++{
++	HdrInferenceOptions options = m_hdrInference.Options();
++	options.originalHeuristic = original;
++	m_hdrInference.SetOptions(options);
++	DebugLog::Log("hdr_inference: %s", original ? "original (Bill's newlldv heuristic)" : "vp (VP's HDR inference)");
++}
++
+ void CVideoProcessorDlg::EnableDolbyVisionTunnel(bool enabled)
+ {
+ 	m_enableDolbyVisionTunnel = enabled;
+diff --git a/src/VideoProcessor-GUI/VideoProcessorDlg.h b/src/VideoProcessor-GUI/VideoProcessorDlg.h
+index 9f28b439..83fa3614 100644
+--- a/src/VideoProcessor-GUI/VideoProcessorDlg.h
++++ b/src/VideoProcessor-GUI/VideoProcessorDlg.h
+@@ -217,6 +217,7 @@ public:
+ 	void SubtitleRepositioning(SubtitleRepositionMode mode);
+ 	void EnableNewLldvHeuristic(bool enabled = true);
+ 	void EnableHdrInferenceSdrVeto(bool enabled = true);
++	void SelectOriginalNewLldvHeuristic(bool original);   // F-8: [vpv] hdr_inference (HdrInferenceChoice.h)
+ 	void EnableDolbyVisionTunnel(bool enabled = true);
+ 	void EnableDolbyVisionTunnelHandoff(bool enabled = true);
+ 	void EnableBoundedInvalidCaptureRecovery(bool enabled);
+diff --git a/src/VideoProcessor-Lib/RendererProfileConfig.h b/src/VideoProcessor-Lib/RendererProfileConfig.h
+index 919bb7f5..a61dffe7 100644
+--- a/src/VideoProcessor-Lib/RendererProfileConfig.h
++++ b/src/VideoProcessor-Lib/RendererProfileConfig.h
+@@ -1090,6 +1090,7 @@ namespace RendererProfileConfig
+ 		if (key == "pipeline_order" || key == "pipeline_slots_off")
+ 			return value.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_.,;> ") == std::string::npos;
+ 		if (key == "calibration_lut_stage") return IsChoice(value, { "libplacebo", "vp" });
++		if (key == "hdr_inference") return IsChoice(value, { "vp", "original" });   // F-8 (HdrInferenceChoice.h)
+ 		if (key == "video_conversion")
+ 			return IsChoice(value, { "none", "off", "v210_to_p010", "uyvy_to_p010" });
+ 		if (key == "container_colorspace")
+@@ -2110,7 +2111,7 @@ namespace RendererProfileConfig
+ 			for (const auto& value : *vpvValues)
+ 			{
+ 				static const char* const vpvKeys[] = { "pipeline_original_pathway", "pipeline_order",
+-					"pipeline_slots_off", "calibration_lut_stage", "pipeline_entrance_once" };
++					"pipeline_slots_off", "calibration_lut_stage", "pipeline_entrance_once", "hdr_inference" };
+ 				bool known = false;
+ 				for (const char* key : vpvKeys) known = known || value.first == key;
+ 				if (!known)
+diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+index 395b11a0..ddf8b5b3 100644
+--- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+@@ -1262,6 +1262,7 @@ namespace
+ 		std::string pipelineOrder;
+ 		std::string pipelineSlotsOff;
+ 		std::string calibrationLutStage = "libplacebo";
++		std::string hdrInference = "vp";   // [vpv] hdr_inference (F-8): the GUI's choice; dumped and fingerprinted here
+ 		// pipeline_entrance_once (B3, ADR-0024): the motion consumers (interpolated pictures, hiccup
+ 		// gap pairs, source-warp extras) warp or blend the PROCESSED A and B - the entrance stages
+ 		// run once per source frame - instead of re-running the stages on every picture. The
+@@ -1532,7 +1533,7 @@ namespace
+ 			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.sourceResolutionEvidenceShots << '|'
+ 			<< settings.sourceResolutionEvidenceSeconds << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
+ 			<< settings.pipelineOriginalPathway << '|' << settings.pipelineOrder << '|' << settings.pipelineSlotsOff << '|'
+-			<< settings.calibrationLutStage << '|' << settings.pipelineEntranceOnce << '|'
++			<< settings.calibrationLutStage << '|' << settings.pipelineEntranceOnce << '|' << settings.hdrInference << '|'
+ 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
+ 			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.opticalFlowGlobal << '|'
+ 			<< settings.opticalFlowGlobalFallback << '|' << settings.opticalFlowCostTrust << '|' << settings.opticalFlowFbCheck << '|'
+@@ -3579,6 +3580,7 @@ namespace
+ 		settings.temporalDither = "libplacebo";            // key=temporal_dither
+ 		settings.renderAhead = false;                      // key=render_ahead
+ 		settings.calibrationLutStage = "libplacebo";       // key=calibration_lut_stage
++		settings.hdrInference = "original";                // key=hdr_inference
+ 		// Settings audit 2026-10-24: VP additions the first table missed (absent from Bill's v1.4.02-beta).
+ 		settings.activePictureStartupHold = false;         // key=active_picture_startup_hold
+ 		settings.lowBitrateHandling = "off";               // key=low_bitrate_handling
+@@ -3621,6 +3623,14 @@ namespace
+ 			else
+ 				settings.pipelineSettingsProblems += "calibration_lut_stage '" + raw + "' (libplacebo|vp); ";
+ 		}
++		if (TryGetPipelineString(config, "hdr_inference", raw))   // F-8 (HdrInferenceChoice.h)
++		{
++			const std::string value = ConfigFile::NormalizeName(raw);
++			if (value == "vp" || value == "original")
++				settings.hdrInference = value;
++			else
++				settings.pipelineSettingsProblems += "hdr_inference '" + raw + "' (vp|original); ";
++		}
+ 		if (TryGetPipelineString(config, "pipeline_entrance_once", raw))
+ 		{
+ 			const std::string value = ConfigFile::NormalizeName(raw);
+@@ -12626,6 +12636,7 @@ struct LibplaceboVideoRenderer::Impl
+ 		changed(current.pipelineOrder != next.pipelineOrder, "pipeline_order");
+ 		changed(current.pipelineSlotsOff != next.pipelineSlotsOff, "pipeline_slots_off");
+ 		changed(current.calibrationLutStage != next.calibrationLutStage, "calibration_lut_stage");
++		changed(current.hdrInference != next.hdrInference, "hdr_inference");
+ 		changed(current.pipelineEntranceOnce != next.pipelineEntranceOnce, "pipeline_entrance_once");
+ 		changed(current.adaptive.cnnResidualStabilise != next.adaptive.cnnResidualStabilise ||
+ 			current.adaptive.ssimResidualStabilise != next.adaptive.ssimResidualStabilise, "residual_stabilise");
+@@ -32944,6 +32955,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
+ 		<< "dv_tone_mapping=" << s.dvToneMapping << "\n"
+ 		<< "dv_compare_capture_folder=" << s.dvCompareCaptureFolder << "\n"
+ 		<< "dv_tunnel_fixes=" << (s.dvTunnelFixes ? "on" : "off") << "\n"
++		<< "hdr_inference=" << s.hdrInference << "\n"
+ 		<< "occlusion_mask=" << s.occlusionMask << "\n"
+ 		<< "dither_vectors_own=" << s.ditherVectorsOwn << "\n"
+ 		<< "dither_grain_tolerance_scale=" << s.ditherGrainToleranceScale << "\n"
+diff --git a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
+index 6cde5756..152b6c1f 100644
+--- a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
++++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
+@@ -390,6 +390,7 @@
+     <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvHostStageTests.cpp" />
+     <ClCompile Include="..\VP-V\modules\input\signal\tests\DvSignalL8HoldTests.cpp" />
+     <ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceTests.cpp" />
++    <ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceWiringTests.cpp" />
+     <ClCompile Include="..\VP-V\modules\input\signal\tests\DvTunnelMetadataExtensionTests.cpp" />
+     <ClCompile Include="DetailRestoreConfigTests.cpp" />
+     <ClCompile Include="KernelInverseTests.cpp" />
+diff --git a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj.filters b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj.filters
+index fc704d3a..4844ff7e 100644
+--- a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj.filters
++++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj.filters
+@@ -240,6 +240,7 @@
+   <ItemGroup><ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvHostStageTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+   <ItemGroup><ClCompile Include="..\VP-V\modules\input\signal\tests\DvSignalL8HoldTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+   <ItemGroup><ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
++  <ItemGroup><ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceWiringTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+   <ItemGroup><ClCompile Include="..\VP-V\modules\input\signal\tests\DvTunnelMetadataExtensionTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+   <ItemGroup><ClCompile Include="DetailRestoreConfigTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+   <ItemGroup><ClCompile Include="PulldownReliabilityTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
