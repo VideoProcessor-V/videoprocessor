@@ -37,10 +37,10 @@
     },
     "tools": [],
     "config_keys": [
-      "led_compensation"
+      "projector"
     ],
     "upstream_modules": []
   },
-  "fallback_when_missing": "No serial projector -> drive off.",
-  "fallback_entry": "Projector: not connected (LED drive off)"
+  "fallback_when_missing": "No serial projector (or another process owns the port) -> dry run: the LED is not driven and the picture is not compensated.",
+  "fallback_entry": "projector (not connected: <error>; LED drive off (dry run))"
 }

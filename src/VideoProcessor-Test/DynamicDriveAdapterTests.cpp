@@ -10,7 +10,10 @@
 #include <MainConfigSchema.h>
 #include "LedDriveTestSupport.h"
 #include <Windows.h>
+#include <chrono>
 #include <fstream>
+#include <functional>
+#include <thread>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -87,6 +90,18 @@ namespace
 	}
 
 	const auto NoTag = [](size_t, PipelineSlots::Id) {};
+
+	bool WaitFor(const std::function<bool()>& condition, int timeoutMs = 4000)
+	{
+		const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+		while (std::chrono::steady_clock::now() < end)
+		{
+			if (condition())
+				return true;
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		}
+		return condition();
+	}
 }
 
 namespace VideoProcessorTest
@@ -293,6 +308,29 @@ namespace VideoProcessorTest
 			f.frame.PublishParams(params);
 			f.frame.PrepareFrame(facts.in, hooks, NoTag);
 			Assert::IsFalse(f.fallbacks.Engaged(LedDrive::DynamicDriveFrame::kBoostFallbackId));
+		}
+
+		// Module findings item 2: the dry run (no port) reaches the renderer's heading.
+		TEST_METHOD(DryRunShowsTheProjectorFallback)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->openFails = true;
+			LedDrive::LedDriveConfig config;
+			config.enabled = true;
+			config.mode = LedDrive::Mode::Script;
+			LedDrive::ProjectorConfig port;
+			port.protocol = "barco_ascii";
+			auto module = std::make_shared<LedDrive::LedDriveModule>(port, config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			module->Start();
+			Assert::IsTrue(WaitFor([&] { return !module->FallbackEntries().empty(); }), L"the module ran as a dry run");
+			FrameFixture f;
+			f.frame.PublishModule(module);
+			FrameFacts facts;
+			std::vector<const pl_hook*> hooks;
+			f.frame.PrepareFrame(facts.in, hooks, NoTag);
+			Assert::IsTrue(ReasonOf(f.fallbacks, LedDrive::LedDriveModule::kDryRunFallbackId).find("dry run") != std::string::npos);
+			module->Stop();
 		}
 
 		TEST_METHOD(ObserverPublishingFollowsTheModule)

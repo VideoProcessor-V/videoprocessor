@@ -582,13 +582,14 @@
     "LED correlation harness"
    ],
    "contract": [
-    "measures after Stage 13, before compensation"
+    "measures after Stage 13, before compensation",
+    "picture-only masks (Dynamic Drive adapter tests)"
    ],
    "chain": [
     "LED + subtitles at a 2-frame queue"
    ]
   },
-  "fallback_entry": "LED: drive held (measurement unavailable)",
+  "fallback_entry": "LED measurement (<reason>; the LED follows the last statistics)",
   "missing": []
  },
  {
@@ -605,16 +606,19 @@
   "tests": {
    "placeholder": [],
    "isolation": [
-    "LED compensation shader tests"
+    "LED compensation shader tests",
+    "LedController tests",
+    "Dynamic Drive adapter tests"
    ],
    "contract": [
-    "CNTR never above need"
+    "CNTR never above need",
+    "compensation unavailable holds full drive, visibly"
    ],
    "chain": [
     "LED + Stage 13 + LUT + black level"
    ]
   },
-  "fallback_entry": "LED compensation: off (shader did not load)",
+  "fallback_entry": "LED drive (held at full: picture compensation unavailable (<reason>))",
   "missing": []
  },
  {
@@ -742,15 +746,15 @@
    "placeholder": [],
    "isolation": [
     "BarcoAsciiDriver tests",
-    "LedController tests"
+    "LedDriveArbiter tests"
    ],
-   "contract": [],
+   "contract": [
+    "dry run engages the projector fallback (DynamicDriveAdapterTests)"
+   ],
    "chain": []
   },
-  "fallback_entry": "Projector: not connected (LED drive off)",
-  "missing": [
-   "contract"
-  ]
+  "fallback_entry": "projector (not connected: <error>; LED drive off (dry run))",
+  "missing": []
  },
  {
   "id": "control.net_runtime",

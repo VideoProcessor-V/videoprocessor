@@ -1310,14 +1310,26 @@
         "lookahead": "LED look-ahead (ms-based)"
       },
       "settings_keys": [
-        "led_compensation",
-        "led_protect"
+        "apl_persist_ms",
+        "apl_weights",
+        "cut_threshold",
+        "fade_min_slope",
+        "fade_ms",
+        "highlight_percentile",
+        "highlight_persist_ms",
+        "led_highlight_grain_suppress",
+        "led_lookahead_ms",
+        "led_peak_full_coverage",
+        "led_picture_only",
+        "lookahead",
+        "script_highlight_code",
+        "script_lookahead"
       ],
       "planned_keys": [],
       "tiers": "not tiered",
       "fallback": {
-        "entry": "LED: drive held (measurement unavailable)",
-        "behaviour": "Holdover keeps the last drive."
+        "entry": "LED measurement (<reason>; the LED follows the last statistics)",
+        "behaviour": "The controllers keep acting on the last statistics. Shown when libplacebo disables the measurement pass, or while readbacks run late / frames go unmeasured (not the between-files LedDriveHoldover)."
       },
       "upstream": [
         "colour.appearance"
@@ -1330,7 +1342,8 @@
           "LED correlation harness"
         ],
         "contract": [
-          "measures after Stage 13, before compensation"
+          "measures after Stage 13, before compensation",
+          "picture-only masks (Dynamic Drive adapter tests)"
         ],
         "chain": [
           "LED + subtitles at a 2-frame queue"
@@ -1367,13 +1380,17 @@
         "lookahead": "LED look-ahead"
       },
       "settings_keys": [
-        "led_compensation"
+        "adaptive_gamma",
+        "gamma_boost",
+        "intent_black",
+        "led_drive",
+        "shadow_lift_ansi"
       ],
       "planned_keys": [],
       "tiers": "not tiered",
       "fallback": {
-        "entry": "LED compensation: off (shader did not load)",
-        "behaviour": "Failure -> drive held at full, no compensation."
+        "entry": "LED drive (held at full: picture compensation unavailable (<reason>))",
+        "behaviour": "Compensation unavailable (shader not loaded, disabled by libplacebo, or slot off) -> compensate holds the LED at full drive (led_ceiling); script mode is not held. A configured gamma boost that cannot apply shows 'gamma boost (not applied: ...)'."
       },
       "upstream": [
         "drive.led_measure"
@@ -1382,10 +1399,13 @@
       "tests": {
         "placeholder": null,
         "isolation": [
-          "LED compensation shader tests"
+          "LED compensation shader tests",
+          "LedController tests",
+          "Dynamic Drive adapter tests"
         ],
         "contract": [
-          "CNTR never above need"
+          "CNTR never above need",
+          "compensation unavailable holds full drive, visibly"
         ],
         "chain": [
           "LED + Stage 13 + LUT + black level"
@@ -1652,13 +1672,13 @@
         "lookahead": "LED look-ahead"
       },
       "settings_keys": [
-        "led_compensation"
+        "projector"
       ],
       "planned_keys": [],
       "tiers": "not tiered",
       "fallback": {
-        "entry": "Projector: not connected (LED drive off)",
-        "behaviour": "No serial projector -> drive off."
+        "entry": "projector (not connected: <error>; LED drive off (dry run))",
+        "behaviour": "No serial projector (or another process owns the port) -> dry run: the LED is not driven and the picture is not compensated."
       },
       "upstream": [],
       "fingerprint": null,
@@ -1666,9 +1686,11 @@
         "placeholder": null,
         "isolation": [
           "BarcoAsciiDriver tests",
-          "LedController tests"
+          "LedDriveArbiter tests"
         ],
-        "contract": [],
+        "contract": [
+          "dry run engages the projector fallback (DynamicDriveAdapterTests)"
+        ],
         "chain": []
       },
       "open_items": [

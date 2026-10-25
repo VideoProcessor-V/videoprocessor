@@ -26,13 +26,13 @@ Kinds: placeholder = byte-identity on/off + zero cost (required for placeholder/
 | 175 | colour.extended_range | built | libplacebo | not required | ExtendedRange tests | BTB/WTW probe codes identical with every output slot on and off | chain gate BTB/WTW probes | BTB/WTW: clipped (<reason>) |
 | 200 | colour.sdr_tone_shape | built | PRE_OUTPUT | not required | SdrToneShape tests<br>DolbyVisionTrims tests | output encoding repair present when a PRE_OUTPUT hook runs | MISSING | SDR tone shape: not applied (shader did not load) |
 | 210 | colour.appearance | placeholder | PRE_OUTPUT | byte-identical with the slot off<br>zero hooks when off | identity at equal conditions; reference CAM16 grey ramp / primaries / skin; monotonic J; hue within 1 degree | BTB/WTW probe codes identical on and off | constant output across synthetic LED dimming with compensation on | Appearance: off (shader failed) |
-| 220 | drive.led_measure | built | PRE_OUTPUT | not required | LedMeasurement tests<br>LED correlation harness | measures after Stage 13, before compensation | LED + subtitles at a 2-frame queue | LED: drive held (measurement unavailable) |
-| 230 | drive.led_compensation | built | PRE_OUTPUT | not required | LED compensation shader tests | CNTR never above need | LED + Stage 13 + LUT + black level | LED compensation: off (shader did not load) |
+| 220 | drive.led_measure | built | PRE_OUTPUT | not required | LedMeasurement tests<br>LED correlation harness | measures after Stage 13, before compensation<br>picture-only masks (Dynamic Drive adapter tests) | LED + subtitles at a 2-frame queue | LED measurement (<reason>; the LED follows the last statistics) |
+| 230 | drive.led_compensation | built | PRE_OUTPUT | not required | LED compensation shader tests<br>LedController tests<br>Dynamic Drive adapter tests | CNTR never above need<br>compensation unavailable holds full drive, visibly | LED + Stage 13 + LUT + black level | LED drive (held at full: picture compensation unavailable (<reason>)) |
 | 240 | drive.black_level | placeholder | PRE_OUTPUT | byte-identical with the slot off<br>zero hooks when off | MISSING | dark-hair scene check | MISSING | Black level: off (<reason>) |
 | 250 | output.calibration_lut | partial | PRE_OUTPUT | byte-identical while the VP stage is off (libplacebo LUT path unchanged) | LibplaceboDisplayLut tests | applied after LED compensation | BTB/WTW probes with the LUT | Calibration LUT: libplacebo target LUT (VP stage unavailable) |
 | 260 | output.dither | built | OUTPUT | not required | SigmaDeltaDomain tests | the quantiser is the last OUTPUT hook | MISSING | Dither: libplacebo (sigma-delta dropped: <reason>) |
 | 270 | output.presentation | built | present | not required | RenderAheadPolicy tests<br>AlphaPresentationTelemetry tests | render-ahead at 24p fits 200 ms | delay gate | Presentation: open loop (no display statistics) |
-| 900 | drive.projector_control | built | host | n/a (control slot) | BarcoAsciiDriver tests<br>LedController tests | MISSING | n/a (control slot) | Projector: not connected (LED drive off) |
+| 900 | drive.projector_control | built | host | n/a (control slot) | BarcoAsciiDriver tests<br>LedDriveArbiter tests | dry run engages the projector fallback (DynamicDriveAdapterTests) | n/a (control slot) | projector (not connected: <error>; LED drive off (dry run)) |
 | 910 | control.net_runtime | placeholder | host | n/a (control slot) | fingerprint match/mismatch unit tests | MISSING | n/a (control slot) | Nets: bypassed (<net>: <reason>) |
 | 920 | control.diagnostics | partial | host | n/a (control slot) | FallbackRegistry unit tests | every slot's fallback entry reaches the overlay, Config status and Ctrl+Alt+D | n/a (control slot) |  |
 | 930 | control.config | partial | host | n/a (control slot) | ConfigFileTests<br>ConfigEditorWindowTests | every planned key exists once the settings agent lands | n/a (control slot) |  |
@@ -41,5 +41,5 @@ Kinds: placeholder = byte-identity on/off + zero cost (required for placeholder/
 
 - placeholder: 3 (input.source_analysis, motion.vector_delivery, scaling.output)
 - isolation: 2 (scaling.chroma_upscale, drive.black_level)
-- contract: 2 (drive.projector_control, control.net_runtime)
+- contract: 1 (control.net_runtime)
 - chain: 4 (scaling.chroma_upscale, colour.sdr_tone_shape, drive.black_level, output.dither)

@@ -42,12 +42,16 @@
     },
     "tools": [],
     "config_keys": [
-      "led_compensation"
+      "adaptive_gamma",
+      "gamma_boost",
+      "intent_black",
+      "led_drive",
+      "shadow_lift_ansi"
     ],
     "upstream_modules": [
       "drive.led_measure"
     ]
   },
-  "fallback_when_missing": "Failure -> drive held at full, no compensation.",
-  "fallback_entry": "LED compensation: off (shader did not load)"
+  "fallback_when_missing": "Compensation unavailable (shader not loaded, disabled by libplacebo, or slot off) -> compensate holds the LED at full drive (led_ceiling); script mode is not held. A configured gamma boost that cannot apply shows 'gamma boost (not applied: ...)'.",
+  "fallback_entry": "LED drive (held at full: picture compensation unavailable (<reason>))"
 }
