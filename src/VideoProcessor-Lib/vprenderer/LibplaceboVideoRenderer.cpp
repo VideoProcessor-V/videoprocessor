@@ -67,6 +67,7 @@
 #include <VP-V/modules/input/signal/DvCompareCapture.h>          // feat/dv-l8: DV comparison capture (diagnostic)
 #include <VP-V/modules/input/signal/DvTunnelPolicy.h>            // feat/dv-l8: no plane deband on the tunnel
 #include <vprenderer/EarlyUpload.h>
+#include <VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h>   // WP-23 frame analysis store
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/InterpolationPolicy.h>
 #include <vprenderer/InterpolationTimeline.h>
@@ -1275,6 +1276,9 @@ namespace
 		// default (owner accepted 2026-10-24); off = the per-picture stages (a diagnostic). The
 		// Original pathway never uses it.
 		bool pipelineEntranceOnce = true;
+		// frame_analysis_store (WP-23): VP's per-source-frame analysis record + ONE shared luma decode
+		// read by every analyser (VpFrameAnalysisHost.h). Off until the big test; never in Original.
+		bool frameAnalysisStore = false;
 		std::string pipelineSettingsProblems;   // refused values, shown under "Fallbacks engaged" (audit item 4)
 		// Kernel-matched re-base (docs/VP-stage12-build-plan.md; owner 2026-10-16: optimise
 		// 1080p): the identified player kernel's inverse for an exact 2:1 luma re-base.
@@ -1541,7 +1545,7 @@ namespace
 			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.sourceResolutionEvidenceShots << '|'
 			<< settings.sourceResolutionEvidenceSeconds << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
 			<< settings.pipelineOriginalPathway << '|' << settings.pipelineOrder << '|' << settings.pipelineSlotsOff << '|'
-			<< settings.calibrationLutStage << '|' << settings.pipelineEntranceOnce << '|'
+			<< settings.calibrationLutStage << '|' << settings.pipelineEntranceOnce << '|' << settings.frameAnalysisStore << '|'
 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
 			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.opticalFlowGlobal << '|'
 			<< settings.opticalFlowGlobalFallback << '|' << settings.opticalFlowCostTrust << '|' << settings.opticalFlowFbCheck << '|'
@@ -3599,6 +3603,7 @@ namespace
 		settings.interpolationFallback = InterpolationPolicy::Fallback::Hold; // key=interpolation_fallback
 		settings.pipelineOrder.clear();                    // the designed order
 		settings.pipelineEntranceOnce = false;             // B3: per-picture stages, as upstream
+		settings.frameAnalysisStore = false;               // key=frame_analysis_store (WP-23: upstream's own decodes only)
 	}
 
 	// Pipeline skeleton settings (global: [vpv] first, then [vprenderer]); see RendererSettings.
@@ -3646,6 +3651,14 @@ namespace
 				settings.pipelineEntranceOnce = value == "on";
 			else
 				settings.pipelineSettingsProblems += "pipeline_entrance_once '" + raw + "' (on|off); ";
+		}
+		if (TryGetPipelineString(config, "frame_analysis_store", raw))
+		{
+			const std::string value = ConfigFile::NormalizeName(raw);
+			if (value == "on" || value == "off")
+				settings.frameAnalysisStore = value == "on";
+			else
+				settings.pipelineSettingsProblems += "frame_analysis_store '" + raw + "' (on|off); ";
 		}
 		if (settings.pipelineOriginalPathway)
 			ApplyOriginalPathwaySettings(settings);
@@ -8161,6 +8174,8 @@ struct LibplaceboVideoRenderer::Impl
 	// r6 fix 7 (owner rule vp-no-silent-fallbacks): the renderer's automatic fallbacks, published
 	// as "Fallbacks engaged: <list> / none" (GetFallbacksStatus: Ctrl+I, Config status, Ctrl+Alt+D).
 	FallbackStatus::Registry fallbacks;
+	// WP-23: the frame analysis store, its producer and the shared luma decode (one handle).
+	VpFrameAnalysis::Host frameAnalysis;
 	// Efficiency timer plan (audit 2026-10-24 section 4; vprenderer/PassTimerHook.h).
 	PassTimerHook::Hook passTimerHook;
 	GpuSpanTimers entranceSpans;   // T2: entrance stages (polled D3D11 timestamps, never waited for)
@@ -8236,6 +8251,9 @@ struct LibplaceboVideoRenderer::Impl
 		next.SetEntranceOnce(settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway);   // B3: consumers after the entrance
 		(void)next.ActiveEntrance();   // warm the kept list here, so the render thread only reads it
 		pipelineSlots = next;
+		frameAnalysis.Configure(settings.frameAnalysisStore && !settings.pipelineOriginalPathway,   // WP-23
+			VpFrameAnalysis::Host::FullLumaReaders(pipelineSlots, settings.opticalFlow, settings.motionAheadFrames,
+				settings.sourceResolution == "auto"));   // running full-luma readers; record readers: none yet
 		entranceCache.Invalidate();
 		entranceRing.Invalidate();
 		std::string state = settings.pipelineOriginalPathway ? "Original pathway (every VP addition off)" :
@@ -13075,6 +13093,7 @@ struct LibplaceboVideoRenderer::Impl
             prepared.profile = profile;
             prepared.source.generation = generation;
         }
+        VpFrameAnalysis::Host::AttachIfEnabled(prepared.source);   // WP-23: one shared luma decode per frame
         stored = prepared;
         if (profile == AnalysisSourceProfile::LiveRenderer) {
             cache->liveNative = rendererUsesNative;
@@ -13997,6 +14016,7 @@ struct LibplaceboVideoRenderer::Impl
 	void RequestMotionInvalidate(MotionValidity::Cause cause)
 	{
 		motionValidity.Invalidate(cause);
+		frameAnalysis.OnDiscontinuity(static_cast<int>(cause));   // WP-23: the one shared epoch
 	}
 	// The render thread's apply point: everything built from vectors of an older
 	// epoch is forgotten (each consumer also checks the epoch it was made in).
@@ -27364,6 +27384,9 @@ void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz, double s
 			m_impl->ReleaseFallback("delay budget");
 		else
 			m_impl->EngageFallback("delay budget", budgetNote);
+		// WP-23: the store's ring follows the budget (queue + look-ahead + 2), never a fixed count.
+		const int analysisFrames = next.active ? plan.queueFrames : static_cast<int>(AlphaQueuePolicy::DEFAULT_DESIRED_DEPTH);
+		m_impl->frameAnalysis.SetRingDepth(analysisFrames, analysisFrames);
 		// The frame fallback ladder (owner 2026-10-20/24): below the design depth every look-ahead
 		// consumer uses what is queued (shorter look-ahead, never waiting, never adding delay);
 		// visible, not silent.
@@ -31164,6 +31187,8 @@ void LibplaceboVideoRenderer::ConversionLoop()
 		const double conversionUs = converted ?
 			converted->conversionCpuMs * 1000.0 : 0.0;
 		bool published = false;
+		QueuedFrame analysed;   // WP-23: the frame for the analysis producer (on arrival)
+		bool analyse = false;
 		{
 			std::lock_guard<std::mutex> guard(m_queueMutex);
 			if (!m_stopRequested && generation == m_queueGeneration)
@@ -31179,6 +31204,12 @@ void LibplaceboVideoRenderer::ConversionLoop()
 					queued->conversionInProgress = false;
 					queued->conversionFailed = !error.empty();
 					queued->converted = std::move(converted);
+					if (error.empty() && m_impl->frameAnalysis.Enabled() && queued->state)
+					{
+						analysed = *queued;
+						analysed.frame.SourceBufferAddRef();
+						analyse = true;
+					}
 					if (error.empty())
 					{
 						std::lock_guard<std::mutex> timingGuard(m_conversionTimingMutex);
@@ -31201,6 +31232,32 @@ void LibplaceboVideoRenderer::ConversionLoop()
 						static_cast<unsigned long long>(failures), error.c_str());
 			}
 			m_queueChanged.notify_all();
+		}
+		if (analyse)
+		{
+			// WP-23: prepared once here (the cache every later walk reuses), measured off this thread.
+			try
+			{
+				const VideoState& analysedState = *analysed.state;
+				if (analysedState.displayMode)
+				{
+					const auto prepared = Impl::PrepareFrameAnalysis(analysed.frame, analysedState, analysed.converted,
+						analysed.analysis, AnalysisSourceProfile::QueuedCapture,
+						analysed.activePictureIdentity.sourceFormatGeneration, false, analysedState.dolbyVisionTunnel);
+					m_impl->frameAnalysis.OnArrival(analysed.sourceSequence, prepared.source, FrameAnalysis::Rect{},
+						analysed.arrivalQpc, analysed.cadenceRepeat);
+				}
+			}
+			catch (const std::exception& e)
+			{
+				DebugLog::Log("Frame analysis: frame %llu skipped: %s", static_cast<unsigned long long>(sequence), e.what());
+			}
+			analysed.frame.SourceBufferRelease();
+			std::string behind;
+			if (m_impl->frameAnalysis.FallbackReason(behind))
+				m_impl->EngageFallback(FrameAnalysis::kFallbackId, behind);
+			else
+				m_impl->ReleaseFallback(FrameAnalysis::kFallbackId);
 		}
 	}
 	DebugLog::Log("Alpha conversion worker stopped");
@@ -31600,8 +31657,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 					if (!luma.IsValid()) continue;
 					m_impl->sourceMonitor.LookAheadFrame(ahead.sourceSequence, luma.width, luma.height,
 						[&luma](int x, int y) {
-							AnalysisLumaSample sample;
-							return luma.Sample(x, y, sample) ? static_cast<int>(sample.luma) : 0;
+							uint16_t code = 0;   // WP-23: the shared decode when ready
+							return luma.SampleLuma(x, y, code) ? static_cast<int>(code) : 0;
 						}, 0, 0, luma.width, luma.height);
 				}
 			}
