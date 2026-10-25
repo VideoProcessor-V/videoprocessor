@@ -1,8 +1,10 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include <VP-V/core/OutputHookOrder.h>
 #include <VP-V/core/SegmentRunner.h>
 #include <VP-V/segments/OutputSegments.h>
+#include <VP-V/segments/OutputSegmentsMerge.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
 #include <led/LedMeasurementHook.h>
 #include <vprenderer/CustomHookChain.h>
@@ -34,6 +36,7 @@ namespace SegmentRunnerTestsNs
 	// ---- fake mpv hooks with named parameters -------------------------------------------------
 	struct FakeHooks
 	{
+		static pl_hook_res Noop(void*, const pl_hook_params*) { return pl_hook_res{}; }
 		struct Made { std::unique_ptr<pl_hook> hook; std::vector<pl_hook_par> pars; std::vector<pl_var_data> data; };
 		std::deque<Made> made;
 		std::map<std::string, std::string> files;
@@ -48,6 +51,7 @@ namespace SegmentRunnerTestsNs
 			m.hook->stages = source.find("STAGE=OUT") != std::string::npos ? PL_HOOK_OUTPUT : PL_HOOK_PRE_OUTPUT;
 			m.hook->input = PL_HOOK_SIG_TEX;
 			m.hook->signature = nextSignature++;
+			m.hook->hook = &Noop;   // a callable hook (the merge takes only hooks that can run)
 			const size_t p = source.find("PARS=");
 			std::vector<std::string> names;
 			if (p != std::string::npos)
@@ -168,16 +172,8 @@ namespace SegmentRunnerTestsNs
 			m.dv.Collect(false, frameHooks);
 			for (size_t i = start; i < frameHooks.size(); ++i)
 			{
-				CustomHookChain::SetHookParameter(frameHooks[i], "dv_slope", f.dv.slope);
-				CustomHookChain::SetHookParameter(frameHooks[i], "dv_offset", f.dv.offset);
-				CustomHookChain::SetHookParameter(frameHooks[i], "dv_power", f.dv.power);
-				CustomHookChain::SetHookParameter(frameHooks[i], "dv_chroma_weight", f.dv.chromaWeight);
-				CustomHookChain::SetHookParameter(frameHooks[i], "dv_sat_gain", f.dv.saturationGain);
-				CustomHookChain::SetHookParameter(frameHooks[i], "dv_signal_pq", f.dv.signalPq);
-				CustomHookChain::SetHookParameter(frameHooks[i], "dv_gamma", f.dv.gamma);
-				CustomHookChain::SetHookParameter(frameHooks[i], "dv_peak_nits", f.dv.peakNits);
-				CustomHookChain::SetHookParameter(frameHooks[i], "dv_kr", f.dv.kr);
-				CustomHookChain::SetHookParameter(frameHooks[i], "dv_kb", f.dv.kb);
+				for (const auto& parameter : f.dv)   // dc149284: the selection's list, ICtCp list, then the fixed five
+					CustomHookChain::SetHookParameter(frameHooks[i], parameter.first, parameter.second);
 			}
 		}
 		if (f.ledBlock)
@@ -221,7 +217,7 @@ namespace SegmentRunnerTestsNs
 		f.toneShape = (variant & 1) != 0;
 		f.tone = { 1.25, 0.6, 0.8, 2.4, 0.3 };
 		f.dvTrims = (variant & 2) != 0;
-		f.dv.slope = 1.1; f.dv.offset = 0.01; f.dv.power = 0.95; f.dv.peakNits = 120.0;
+		f.dv = { { "dv_slope", 1.1 }, { "dv_offset", 0.01 }, { "dv_power", 0.95 }, { "dv_signal_pq", 1.0 }, { "dv_peak_nits", 120.0 } };
 		f.ledBlock = (variant & 4) != 0;
 		f.ledMeasure = (variant & 8) != 0;
 		f.ledCompensation = (variant & 16) != 0;
@@ -393,6 +389,7 @@ namespace SegmentRunnerTestsNs
 		// Commit 1: the S2 adapter equals today's assembly for every combination of stages.
 		TEST_METHOD(S2SeparateFormIsTodaysHookListTagsAndParameters)
 		{
+			PipelineSlots::Registry registry;
 			for (int withUser = 0; withUser < 2; ++withUser)
 				for (int variant = 0; variant < 64; ++variant)
 				{
@@ -405,7 +402,7 @@ namespace SegmentRunnerTestsNs
 					b.user.Collect(false, user);
 					f.userPreOutput = &user;
 					OutputSegments::OutputColourSegment s2(b.tone, b.dv, b.measure, b.comp, b.lut);
-					s2.Collect(f, seg, [&](size_t start, Id slot) { for (size_t i = start; i < seg.size(); ++i) segTags.emplace_back(seg[i], slot); });
+					s2.Collect(f, registry, seg, [&](size_t start, Id slot) { for (size_t i = start; i < seg.size(); ++i) segTags.emplace_back(seg[i], slot); });
 					Assert::AreEqual(legacy.size(), seg.size());
 					for (size_t i = 0; i < legacy.size(); ++i)
 					{
@@ -422,6 +419,7 @@ namespace SegmentRunnerTestsNs
 		// Commit 1: the S3 steps equal today's loops (domain, dither last, mask place, repair).
 		TEST_METHOD(S3SeparateStepsAreTodaysLoops)
 		{
+			PipelineSlots::Registry registry;
 			for (int supported = 0; supported < 2; ++supported)
 				for (int lateShader = 0; lateShader < 2; ++lateShader)
 				{
@@ -471,7 +469,7 @@ namespace SegmentRunnerTestsNs
 					OutputSegments::OutputFinishSegment s3(repair, mask);
 					std::vector<const pl_hook*> seg = base;
 					s3.BeginFrame();
-					s3.PrepareDither(seg, domain, true);
+					s3.PrepareDither(seg, domain, true, registry);
 					s3.KeepDitherLast(seg, false);
 					Assert::IsTrue(seg == afterLegacy);
 					if (!seg.empty())
@@ -483,18 +481,32 @@ namespace SegmentRunnerTestsNs
 						Assert::IsTrue(seg[index] == mask.Get());
 						Assert::IsTrue(s3.Member(mask.Get()));
 					}
+					// Step 4, the repair, against today's insertion (a texture PRE_OUTPUT hook in front).
+					std::vector<const pl_hook*> pre;
+					m.tone.Collect(false, pre);
+					std::vector<const pl_hook*> legacyR = pre;
+					legacyR.insert(legacyR.end(), seg.begin(), seg.end());
+					std::vector<const pl_hook*> segR = legacyR;
+					const bool needed = OutputEncodingRepair::Needed(legacyR, nullptr, PL_LUT_UNKNOWN);
+					if (needed)
+						legacyR.insert(legacyR.begin(), repair.Get());
+					Assert::AreEqual(needed, s3.Repair(segR, nullptr, PL_LUT_UNKNOWN, pl_color_repr{}));
+					Assert::IsTrue(segR == legacyR);
+					Assert::AreEqual(needed, s3.Member(repair.Get()));
+					Assert::AreEqual(std::string("encoding_repair"), std::string(s3.StageName(repair.Get())));
 				}
 		}
 
 		TEST_METHOD(S2MembersExcludeTheUserEdge)
 		{
+			PipelineSlots::Registry registry;
 			Modules m(true);
 			OutputSegments::ColourFrame f = Frame(1 | 4 | 8 | 16 | 32);
 			std::vector<const pl_hook*> user, hooks;
 			m.user.Collect(false, user);
 			f.userPreOutput = &user;
 			OutputSegments::OutputColourSegment s2(m.tone, m.dv, m.measure, m.comp, m.lut);
-			s2.Collect(f, hooks, [](size_t, Id) {});
+			s2.Collect(f, registry, hooks, [](size_t, Id) {});
 			for (const pl_hook* h : user)
 				Assert::IsFalse(s2.Member(h));
 			Assert::IsTrue(s2.Member(m.measure.Hook()));
@@ -505,6 +517,198 @@ namespace SegmentRunnerTestsNs
 			Assert::IsTrue(s2.SlotOf(hooks.front()) == Id::ColourSdrToneShape);
 			for (const pl_hook* h : user)
 				Assert::IsTrue(s2.SlotOf(h) == Id::Count);
+		}
+
+		// Merger without a GPU: the scope swaps and restores the hooks, failures are attributed to
+		// the right segment with the stage's name and returned for the host, a merged hook libplacebo
+		// disabled downgrades its segment, and a settings change gives stages another chance.
+		TEST_METHOD(MergerScopeRestoresAndReportsVisibly)
+		{
+			Modules m(false);
+			PipelineSlots::Registry registry;
+			FallbackStatus::Registry fallbacks;
+			OutputSegments::ColourFrame f = Frame(1 | 4 | 8 | 16 | 32);
+			std::vector<const pl_hook*> user, hooks;
+			m.user.Collect(false, user);   // the sigma-delta (OUTPUT)
+			f.userPreOutput = &user;
+			OutputSegments::OutputColourSegment s2(m.tone, m.dv, m.measure, m.comp, m.lut);
+			s2.Collect(f, registry, hooks, [](size_t, Id) {});
+			OutputEncodingRepair::Hook repair;
+			OcclusionMask::Hook mask;
+			OutputSegments::OutputFinishSegment s3(repair, mask);
+			s3.BeginFrame();
+			SigmaDeltaDomain::Domain domain;
+			s3.PrepareDither(hooks, domain, true, registry);
+			s3.InsertMask(hooks, s3.MarkMask(hooks, true, false, 1.0));
+			OutputSegments::Merger merger(nullptr, s2, s3);
+			Assert::IsFalse(merger.Configure(registry, false, 0, fallbacks), L"switch off: nothing merges");
+			Assert::IsTrue(merger.Configure(registry, true, 0, fallbacks));
+			pl_render_params params{};
+			params.hooks = hooks.data();
+			params.num_hooks = static_cast<int>(hooks.size());
+			{
+				OutputSegments::Merger::Scope scope(&merger, params, nullptr);
+				// tone, measure, compensation, lut -> 1; mask, sigma -> 1
+				Assert::AreEqual(2, params.num_hooks);
+			}
+			Assert::IsTrue(params.hooks == hooks.data() && params.num_hooks == static_cast<int>(hooks.size()), L"restored");
+			// The LED measurement fails inside the merged hook.
+			merger.Runner().MarkFailed(m.measure.Hook(), "hook failed");
+			const std::vector<uint64_t> failed = merger.Report(nullptr);
+			Assert::AreEqual<size_t>(1, failed.size());
+			Assert::AreEqual(m.measure.Hook()->signature, failed[0]);
+			Assert::IsTrue(s2.Segment().CurrentMode() == SegmentRunner::Mode::Separate);
+			Assert::IsTrue(s3.Segment().CurrentMode() == SegmentRunner::Mode::Merged, L"S3 is not blamed");
+			const std::string heading = fallbacks.Heading();
+			Assert::IsTrue(heading.find("output segment S2 (separate hooks: drive.led_measure: hook failed)") != std::string::npos, W(heading).c_str());
+			Assert::IsTrue(merger.FallbacksChanged());
+			// libplacebo disables the merged S3 hook: S3 falls back too.
+			uint64_t mergedSignature = 0;
+			{
+				OutputSegments::Merger::Scope scope(&merger, params, nullptr);
+				Assert::AreEqual(1, static_cast<int>(merger.Runner().MergedCount()));
+				for (int i = 0; i < params.num_hooks; ++i)
+					if (params.hooks[i]->hook && std::find(hooks.begin(), hooks.end(), params.hooks[i]) == hooks.end())
+						mergedSignature = params.hooks[i]->signature;
+			}
+			pl_render_errors errors{};
+			errors.disabled_hooks = &mergedSignature;
+			errors.num_disabled_hooks = 1;
+			merger.Report(&errors);
+			Assert::IsTrue(s3.Segment().CurrentMode() == SegmentRunner::Mode::Separate);
+			Assert::IsTrue(fallbacks.Heading().find("libplacebo disabled the merged hook (occlusion_mask, sigma_delta)") != std::string::npos,
+				W(fallbacks.Heading()).c_str());
+			Assert::IsFalse(merger.Active());
+			// A settings change re-checks, clears the failures and merges again.
+			registry.SetEnabled(Id::DriveLedMeasure, true);   // same switches: no change yet
+			merger.Configure(registry, true, 0, fallbacks);
+			Assert::IsFalse(merger.Active(), L"same settings: the downgrade holds");
+			registry.SetEnabled(Id::RepairDeband, false);      // a real settings change
+			Assert::IsTrue(merger.Configure(registry, true, 0, fallbacks));
+			Assert::IsFalse(merger.Runner().Failed(m.measure.Hook()));
+			Assert::AreEqual(std::string("Fallbacks engaged: none"), fallbacks.Heading());
+		}
+
+		// ---- owner rules: every S2/S3 slot switchable, order from the registry, placeholders inert ----
+		static std::vector<uint64_t> Signatures(const std::vector<const pl_hook*>& v)
+		{
+			std::vector<uint64_t> out;
+			for (const pl_hook* h : v) out.push_back(h->signature);
+			return out;
+		}
+
+		// The segment's list for `registry` against today's assembly with the host's flags for the
+		// same switches (Runs() decided in the host today).
+		static void CompareWithLegacy(PipelineSlots::Registry& registry, const wchar_t* what, int variant = 63)
+		{
+			Modules a(true), b(true);
+			OutputSegments::ColourFrame f = Frame(variant);
+			OutputSegments::ColourFrame legacyFrame = f;
+			legacyFrame.toneShape = f.toneShape && registry.Runs(Id::ColourSdrToneShape);
+			legacyFrame.dvTrims = f.dvTrims && registry.Runs(Id::ColourSdrToneShape);
+			legacyFrame.ledMeasure = f.ledMeasure && registry.Runs(Id::DriveLedMeasure);
+			legacyFrame.ledCompensation = f.ledCompensation && registry.Runs(Id::DriveLedCompensation);
+			if (!registry.Runs(Id::OutputCalibrationLut)) a.lut.SetLut(nullptr);
+			std::vector<const pl_hook*> legacy, seg, user;
+			std::vector<std::pair<const pl_hook*, Id>> legacyTags, segTags;
+			LegacyS2(a, legacyFrame, legacy, legacyTags);
+			// Today's host then puts the slot hooks in the registry's order (OrderFrameSlotHooks).
+			std::vector<OutputHookOrder::Tagged<const pl_hook*>> tagged;
+			for (const pl_hook* h : legacy)
+			{
+				OutputHookOrder::Tagged<const pl_hook*> t;
+				t.hook = h;
+				for (const auto& e : legacyTags)
+					if (e.first == h) { t.kind = OutputHookOrder::Kind::Slot; t.slot = e.second; }
+				tagged.push_back(t);
+			}
+			legacy = OutputHookOrder::OrderSlotsInPlace(tagged, [&registry](Id id) { return registry.Order(id); });
+			b.user.Collect(false, user);
+			f.userPreOutput = &user;
+			OutputSegments::OutputColourSegment s2(b.tone, b.dv, b.measure, b.comp, b.lut);
+			s2.Collect(f, registry, seg, [&](size_t start, Id slot) { for (size_t i = start; i < seg.size(); ++i) segTags.emplace_back(seg[i], slot); });
+			Assert::IsTrue(Signatures(legacy) == Signatures(seg), what);
+		}
+
+		TEST_METHOD(EachS2SlotSwitchesOffAndLeavesTheRestUnchanged)
+		{
+			for (Id slot : { Id::ColourSdrToneShape, Id::DriveLedMeasure, Id::DriveLedCompensation, Id::OutputCalibrationLut })
+			{
+				PipelineSlots::Registry registry;
+				registry.SetEnabled(slot, false);
+				CompareWithLegacy(registry, W(std::string("off: ") + PipelineSlots::Get(slot).name).c_str());
+				// And the slot really adds nothing.
+				Modules m(false);
+				OutputSegments::ColourFrame f = Frame(63);
+				std::vector<const pl_hook*> hooks;
+				OutputSegments::OutputColourSegment s2(m.tone, m.dv, m.measure, m.comp, m.lut);
+				const OutputSegments::ColourCounts c = s2.Collect(f, registry, hooks, [](size_t, Id) {});
+				const size_t added = slot == Id::ColourSdrToneShape ? c.toneShape + c.dvTrims : slot == Id::DriveLedMeasure ? c.ledMeasure :
+					slot == Id::DriveLedCompensation ? c.ledCompensation : c.lut;
+				Assert::AreEqual<size_t>(0, added, W(std::string("hook added while off: ") + PipelineSlots::Get(slot).name).c_str());
+			}
+		}
+
+		TEST_METHOD(OriginalPathwayAndPlaceholdersAreByteIdentical)
+		{
+			PipelineSlots::Registry original;
+			original.ApplyOriginalPathway();
+			CompareWithLegacy(original, L"Original pathway");
+			// Placeholders (Stage 13, black level) switched on have no component: nothing changes.
+			PipelineSlots::Registry placeholders;
+			placeholders.SetEnabled(Id::ColourAppearance, true);
+			placeholders.SetEnabled(Id::DriveBlackLevel, true);
+			Assert::IsFalse(placeholders.Runs(Id::ColourAppearance) || placeholders.Runs(Id::DriveBlackLevel));
+			CompareWithLegacy(placeholders, L"placeholders on");
+			PipelineSlots::Registry designed;
+			CompareWithLegacy(designed, L"designed order");
+		}
+
+		TEST_METHOD(S2FollowsAValidatedCustomOrder)
+		{
+			PipelineSlots::Registry registry;
+			std::string reason;
+			// LED measurement and compensation before the SDR tone shape (Stage 13 keeps following it).
+			Assert::IsTrue(registry.SetOrder({ Id::DriveLedMeasure, Id::DriveLedCompensation, Id::ColourSdrToneShape, Id::ColourAppearance }, &reason),
+				W(reason).c_str());
+			// Without the DV trims the segment equals today's host reorder exactly. With them it differs on
+			// purpose: today the untagged DV trims hook stays in place and would land BETWEEN the LED
+			// measurement and compensation (against OrderValidator rule 3b); the segment keeps it with its
+			// slot (the SDR tone shape).
+			CompareWithLegacy(registry, L"custom order", 63 & ~2);
+			Modules m(false);
+			OutputSegments::ColourFrame f = Frame(1 | 2 | 4 | 8 | 16 | 32);
+			std::vector<const pl_hook*> hooks;
+			OutputSegments::OutputColourSegment s2(m.tone, m.dv, m.measure, m.comp, m.lut);
+			s2.Collect(f, registry, hooks, [](size_t, Id) {});
+			Assert::IsTrue(hooks.size() >= 5);
+			Assert::IsTrue(hooks[0] == m.measure.Hook(), L"the measurement runs first in this order");
+			Assert::IsTrue(s2.SlotOf(hooks[1]) == Id::DriveLedCompensation, L"compensation right after the measurement");
+			Assert::IsTrue(s2.SlotOf(hooks[2]) == Id::ColourSdrToneShape && s2.SlotOf(hooks[3]) == Id::ColourSdrToneShape,
+				L"tone shape and DV trims together");
+			// An invalid order is refused by the validator and changes nothing.
+			Assert::IsFalse(registry.SetOrder({ Id::DriveLedCompensation, Id::DriveLedMeasure }, &reason));
+		}
+
+		TEST_METHOD(DitherSlotOffRemovesTheSigmaDelta)
+		{
+			Modules m(false);
+			std::vector<const pl_hook*> hooks;
+			m.user.Collect(false, hooks);   // the sigma-delta
+			const size_t before = hooks.size();
+			PipelineSlots::Registry registry;
+			registry.SetEnabled(Id::OutputDither, false);
+			OutputEncodingRepair::Hook repair;
+			OcclusionMask::Hook mask;
+			OutputSegments::OutputFinishSegment s3(repair, mask);
+			SigmaDeltaDomain::Domain domain;
+			Assert::IsTrue(s3.PrepareDither(hooks, domain, true, registry), L"found");
+			Assert::AreEqual<size_t>(before - 1, hooks.size(), L"not submitted while off");
+			PipelineSlots::Registry on;
+			std::vector<const pl_hook*> again;
+			m.user.Collect(false, again);
+			s3.PrepareDither(again, domain, true, on);
+			Assert::AreEqual<size_t>(before, again.size());
 		}
 	};
 }

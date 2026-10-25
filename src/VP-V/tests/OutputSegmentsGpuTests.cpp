@@ -139,7 +139,8 @@ namespace OutputSegmentsGpuTestsNs
 				// The segment's list (sets the same parameters on the same hooks).
 				std::vector<const pl_hook*> segmentList;
 				OutputSegments::OutputColourSegment s2(tone, dv, measure, comp, lut);
-				s2.Collect(f, segmentList, [](size_t, Id) {});
+				PipelineSlots::Registry registry;
+				s2.Collect(f, registry, segmentList, [](size_t, Id) {});
 				Assert::IsTrue(segmentList == legacy, L"commit 1: the segment's hook list differs from today's");
 
 				const std::vector<int> codes = { 4, 16, 40, 64, 100, 300, 600, 900, 940, 980, 1019 };
@@ -153,26 +154,42 @@ namespace OutputSegmentsGpuTestsNs
 				Assert::IsTrue(separate.ok && moved.ok, ToWide(separate.error + " / " + moved.error).c_str());
 				Assert::AreEqual(0, ExtendedRangeGpuProbe::Compare(separate, moved).max, L"commit 1 must be byte-identical");
 
-				// Commit 2: one PRE_OUTPUT hook, internal hand-offs.
+				// Note (audit M5): this commit-1 render comparison adds little, since the lists are already
+				// asserted equal above; the list equality IS the byte-identity proof. It stays as a smoke
+				// test of the segment's parameters on the real shaders.
+
+				// Commit 2: one PRE_OUTPUT hook, internal hand-offs. Both output-pass formats: the fork's
+				// output_fbo_float32 on (rgba32f) and off (libplacebo's default), audit M1: the merged
+				// hand-offs must take libplacebo's own format either way.
 				HookSegment::Runner runner(gpu);
-				runner.SetFloat32(true);
 				runner.SetSampleEvery(1);
-				std::vector<const pl_hook*> merged;
-				runner.Fuse(segmentList, merged, [&](const pl_hook* h) { return s2.Member(h); });
-				Assert::AreEqual<size_t>(1, merged.size(), L"the S2 run must become one hook");
-				c.extraHooks = merged;
-				const ExtendedRangeGpuProbe::Result one = ExtendedRangeGpuProbe::Render(gpu, renderer, planes, c);
-				Assert::IsTrue(one.ok, ToWide(one.error).c_str());
-				Assert::IsTrue(runner.TakeFailures().empty(), L"an inner stage failed in the merged hook");
-				const ExtendedRangeGpuProbe::Difference d = ExtendedRangeGpuProbe::Compare(separate, one);
-				const std::vector<int> a = ExtendedRangeGpuProbe::Columns(separate, int(codes.size()), 1.0);
-				const std::vector<int> b = ExtendedRangeGpuProbe::Columns(one, int(codes.size()), 1.0);
-				const std::string text = "separate " + ExtendedRangeGpuProbe::Join(a) + " | merged " + ExtendedRangeGpuProbe::Join(b) +
-					" | max " + std::to_string(d.max) + " mean " + std::to_string(d.mean);
-				Logger::WriteMessage(text.c_str());
-				Assert::IsTrue(d.max <= 1, ToWide("commit 2 tolerance (<= 1 code): " + text).c_str());
-				Assert::AreEqual(a.front(), b.front(), ToWide("BTB column changed: " + text).c_str());
-				Assert::AreEqual(a.back(), b.back(), ToWide("WTW column changed: " + text).c_str());
+				for (int outputFloat32 = 1; outputFloat32 >= 0; --outputFloat32)
+				{
+					c.outputFloat32 = outputFloat32 != 0;
+					c.extraHooks = legacy;
+					const ExtendedRangeGpuProbe::Result base = ExtendedRangeGpuProbe::Render(gpu, renderer, planes, c);
+					std::vector<const pl_hook*> merged;
+					runner.Fuse(segmentList, merged, [&](const pl_hook* h) { return s2.Member(h); });
+					Assert::AreEqual<size_t>(1, merged.size(), L"the S2 run must become one hook");
+					c.extraHooks = merged;
+					const ExtendedRangeGpuProbe::Result one = ExtendedRangeGpuProbe::Render(gpu, renderer, planes, c);
+					Assert::IsTrue(base.ok && one.ok, ToWide(base.error + " / " + one.error).c_str());
+					Assert::IsTrue(runner.TakeFailures().empty(), L"an inner stage failed in the merged hook");
+					const pl_render_errors errors = pl_renderer_get_errors(renderer);
+					Assert::IsTrue(runner.DisabledRuns(&errors).empty(), L"libplacebo disabled the merged hook (audit H2)");
+					const ExtendedRangeGpuProbe::Difference d = ExtendedRangeGpuProbe::Compare(base, one);
+					const std::vector<int> a = ExtendedRangeGpuProbe::Columns(base, int(codes.size()), 1.0);
+					const std::vector<int> b = ExtendedRangeGpuProbe::Columns(one, int(codes.size()), 1.0);
+					const std::string text = std::string(outputFloat32 ? "output fp32: " : "output default: ") +
+						"separate " + ExtendedRangeGpuProbe::Join(a) + " | merged " + ExtendedRangeGpuProbe::Join(b) +
+						" | max " + std::to_string(d.max) + " mean " + std::to_string(d.mean);
+					Logger::WriteMessage(text.c_str());
+					Assert::IsTrue(d.max <= 1, ToWide("commit 2 tolerance (<= 1 code): " + text).c_str());
+					Assert::AreEqual(a.front(), b.front(), ToWide("BTB column changed: " + text).c_str());
+					Assert::AreEqual(a.back(), b.back(), ToWide("WTW column changed: " + text).c_str());
+				}
+				// Still missing (documented): a merged S3 case with the real sigma-delta, the mask and the
+				// repair, checking the sigma-delta statistics and "dither last".
 				runner.Release();
 				lut.Release();
 			}

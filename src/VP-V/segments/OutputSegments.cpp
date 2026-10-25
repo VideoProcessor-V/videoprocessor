@@ -9,6 +9,7 @@
 #include <vprenderer/SigmaDeltaDomain.h>
 
 #include <algorithm>
+#include <iterator>
 
 namespace OutputSegments
 {
@@ -22,7 +23,8 @@ namespace OutputSegments
 	{
 	}
 
-	ColourCounts OutputColourSegment::Collect(const ColourFrame& f, std::vector<const pl_hook*>& hooks, const TagFn& tag)
+	ColourCounts OutputColourSegment::Collect(const ColourFrame& f, const PipelineSlots::Registry& registry,
+		std::vector<const pl_hook*>& hooks, const TagFn& tag)
 	{
 		ColourCounts counts;
 		members.clear();
@@ -36,63 +38,59 @@ namespace OutputSegments
 			}
 		};
 
-		// colour.sdr_tone_shape (delta 13): first at PRE_OUTPUT.
-		if (f.toneShape)
+		// colour.sdr_tone_shape (delta 13) and the DV trims (same slot switch; the trims are not
+		// tagged today, so not tagged here).
+		auto toneStage = [&]()
 		{
-			const size_t start = hooks.size();
-			toneShape.Collect(false, hooks);
-			tag(start, Id::ColourSdrToneShape);
-			for (size_t i = start; i < hooks.size(); ++i)
+			if (f.toneShape)
 			{
-				SetHookParameter(hooks[i], "headroom", f.tone.headroom);
-				SetHookParameter(hooks[i], "knee_start", f.tone.kneeStart);
-				SetHookParameter(hooks[i], "strength", f.tone.strength);
-				SetHookParameter(hooks[i], "eotf", f.tone.eotf);
-				SetHookParameter(hooks[i], "recovery", f.tone.recovery);
+				const size_t start = hooks.size();
+				toneShape.Collect(false, hooks);
+				tag(start, Id::ColourSdrToneShape);
+				for (size_t i = start; i < hooks.size(); ++i)
+				{
+					SetHookParameter(hooks[i], "headroom", f.tone.headroom);
+					SetHookParameter(hooks[i], "knee_start", f.tone.kneeStart);
+					SetHookParameter(hooks[i], "strength", f.tone.strength);
+					SetHookParameter(hooks[i], "eotf", f.tone.eotf);
+					SetHookParameter(hooks[i], "recovery", f.tone.recovery);
+				}
+				counts.toneShape = hooks.size() - start;
+				note(start, Id::ColourSdrToneShape);
 			}
-			counts.toneShape = hooks.size() - start;
-			note(start, Id::ColourSdrToneShape);
-		}
-		// DV L2 trims (same slot switch; not tagged today, so not tagged here).
-		if (f.dvTrims)
+			if (f.dvTrims)
+			{
+				const size_t start = hooks.size();
+				dvTrims.Collect(false, hooks);
+				for (size_t i = start; i < hooks.size(); ++i)
+					for (const auto& parameter : f.dv)
+						SetHookParameter(hooks[i], parameter.first, parameter.second);
+				counts.dvTrims = hooks.size() - start;
+				note(start, Id::ColourSdrToneShape);
+			}
+		};
+		// drive.led_measure: sees the picture before the gain.
+		auto measureStage = [&]()
 		{
-			const size_t start = hooks.size();
-			dvTrims.Collect(false, hooks);
-			for (size_t i = start; i < hooks.size(); ++i)
-			{
-				SetHookParameter(hooks[i], "dv_slope", f.dv.slope);
-				SetHookParameter(hooks[i], "dv_offset", f.dv.offset);
-				SetHookParameter(hooks[i], "dv_power", f.dv.power);
-				SetHookParameter(hooks[i], "dv_chroma_weight", f.dv.chromaWeight);
-				SetHookParameter(hooks[i], "dv_sat_gain", f.dv.saturationGain);
-				SetHookParameter(hooks[i], "dv_signal_pq", f.dv.signalPq);
-				SetHookParameter(hooks[i], "dv_gamma", f.dv.gamma);
-				SetHookParameter(hooks[i], "dv_peak_nits", f.dv.peakNits);
-				SetHookParameter(hooks[i], "dv_kr", f.dv.kr);
-				SetHookParameter(hooks[i], "dv_kb", f.dv.kb);
-			}
-			counts.dvTrims = hooks.size() - start;
-			note(start, Id::ColourSdrToneShape);
-		}
-		// colour.appearance (Stage 13): placeholder, no component, no hook (zero-cost rule).
-		if (f.ledBlock)
+			if (!f.ledBlock || !f.ledMeasure)
+				return;
+			hooks.push_back(measure.Hook());
+			tag(hooks.size() - 1, Id::DriveLedMeasure);
+			counts.ledMeasure = 1;
+			note(hooks.size() - 1, Id::DriveLedMeasure);
+		};
+		// drive.led_compensation (gain, gamma boost, shadow lift, veil; BTB/WTW passthrough).
+		auto compensationStage = [&]()
 		{
-			// drive.led_measurement: sees the picture before the gain.
-			if (f.ledMeasure)
-			{
-				hooks.push_back(measure.Hook());
-				tag(hooks.size() - 1, Id::DriveLedMeasure);
-				counts.ledMeasure = 1;
-				note(hooks.size() - 1, Id::DriveLedMeasure);
-			}
-			// drive.led_compensation (gain, gamma boost, shadow lift, veil; BTB/WTW passthrough).
+			if (!f.ledBlock)
+				return;
 			const size_t start = hooks.size();
 			if (f.ledCompensation)
 				compensation.Collect(false, hooks);
 			tag(start, Id::DriveLedCompensation);
+			const CompensationParams& c = f.compensation;
 			for (size_t i = start; i < hooks.size(); ++i)
 			{
-				const CompensationParams& c = f.compensation;
 				SetHookParameter(hooks[i], "gain", c.gain);
 				SetHookParameter(hooks[i], "knee", c.knee);
 				SetHookParameter(hooks[i], "gain_domain", c.gainDomain);
@@ -107,22 +105,62 @@ namespace OutputSegments
 			}
 			counts.ledCompensation = hooks.size() - start;
 			note(start, Id::DriveLedCompensation);
-		}
-		// drive.black_level: placeholder, no hook.
-		// The edge: the user's PRE_OUTPUT (and other) shaders, exactly where they are today.
-		if (f.userPreOutput)
+		};
+		// The edge: the user's shaders. They run before VP's calibration LUT (R1), wherever the
+		// module order puts the LUT, exactly as today.
+		bool edgeDone = false;
+		auto edge = [&]()
 		{
-			hooks.insert(hooks.end(), f.userPreOutput->begin(), f.userPreOutput->end());
-			counts.user = f.userPreOutput->size();
-		}
-		// output.calibration_lut (VP stage, R1): VP's last colour hook.
-		if (f.calibrationLut)
+			if (edgeDone)
+				return;
+			edgeDone = true;
+			if (f.userPreOutput)
+			{
+				hooks.insert(hooks.end(), f.userPreOutput->begin(), f.userPreOutput->end());
+				counts.user = f.userPreOutput->size();
+			}
+		};
+		// output.calibration_lut (VP stage, R1): VP's last colour hook in the designed order.
+		auto lutStage = [&]()
 		{
+			edge();
+			if (!f.calibrationLut)
+				return;
 			hooks.push_back(lut.Get());
 			tag(hooks.size() - 1, Id::OutputCalibrationLut);
 			counts.lut = 1;
 			note(hooks.size() - 1, Id::OutputCalibrationLut);
+		};
+
+		// The stages in the REGISTRY's effective order (validated by OrderValidator against
+		// SlotContracts), each only when its slot runs (pipeline_slots_off, Original pathway): a slot
+		// that is off adds no hook. colour.appearance (Stage 13) and drive.black_level are
+		// placeholders: no component, so they never run and cost nothing.
+		struct Stage { Id slot; int order; int kind; };
+		Stage stages[] = {
+			{ Id::ColourSdrToneShape, registry.Order(Id::ColourSdrToneShape), 0 },
+			{ Id::DriveLedMeasure, registry.Order(Id::DriveLedMeasure), 1 },
+			{ Id::DriveLedCompensation, registry.Order(Id::DriveLedCompensation), 2 },
+			{ Id::OutputCalibrationLut, registry.Order(Id::OutputCalibrationLut), 3 },
+		};
+		std::stable_sort(std::begin(stages), std::end(stages), [](const Stage& x, const Stage& y) { return x.order < y.order; });
+		for (const Stage& st : stages)
+		{
+			if (!registry.Runs(st.slot))
+			{
+				if (st.kind == 3)
+					edge();   // the user's shaders still run where the LUT would be
+				continue;
+			}
+			switch (st.kind)
+			{
+			case 0: toneStage(); break;
+			case 1: measureStage(); break;
+			case 2: compensationStage(); break;
+			default: lutStage(); break;
+			}
 		}
+		edge();
 		return counts;
 	}
 
@@ -152,15 +190,18 @@ namespace OutputSegments
 	}
 
 	bool OutputFinishSegment::PrepareDither(std::vector<const pl_hook*>& hooks, const SigmaDeltaDomain::Domain& domain,
-		bool outputFloat32)
+		bool outputFloat32, const PipelineSlots::Registry& registry)
 	{
+		// output.dither off (pipeline_slots_off): the sigma-delta is not submitted, exactly as for a
+		// code domain it does not support; libplacebo's own dither then runs as configured.
+		const bool ditherRuns = registry.Runs(Id::OutputDither);
 		bool any = false;
 		for (size_t i = 0; i < hooks.size();)
 		{
 			const pl_hook* hook = hooks[i];
 			const bool sigma = SetHookParameter(hook, "levels_full", domain.full ? 1.0 : 0.0);
 			any = any || sigma;
-			if (sigma && !domain.supported)
+			if (sigma && (!domain.supported || !ditherRuns))
 			{
 				hooks.erase(hooks.begin() + static_cast<std::ptrdiff_t>(i));
 				continue;
@@ -221,6 +262,11 @@ namespace OutputSegments
 		hooks.insert(hooks.begin(), repair.Get());
 		Note(repair.Get());
 		return true;
+	}
+
+	const char* OutputFinishSegment::StageName(const pl_hook* hook) const
+	{
+		return hook == repair.Get() ? "encoding_repair" : hook == mask.Get() ? "occlusion_mask" : "sigma_delta";
 	}
 
 	bool OutputFinishSegment::Member(const pl_hook* hook) const
