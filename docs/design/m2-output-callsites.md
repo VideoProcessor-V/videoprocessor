@@ -30,7 +30,7 @@ Not moved here (owned elsewhere): the sigma-delta code-domain step, dither-last 
 mask and encoding repair (S3, `feat/segment-runner`); the `static_refresh` loop (adjacent to the
 segments patch context, left for S3); the AD status line in `PublishCustomShaderStatus` (status
 text, WP-11); the extras' vector patching in `PresentDejudderExtras` (WP-7 / M2 step 17); NLS and
-`NlsHookRecovery` (Bill's). The now-unused `#include <vprenderer/DownscaleLight.h>` in the host is
+`NlsHookRecovery` (Bill's). The now-unused DownscaleLight include (legacy forwarder path) in the host is
 left for the M2 step-0 include sweep (it sits in the segments patch's context).
 
 ## Why it is byte-identical (two-commit rule: this is commit 1, behaviour-free)

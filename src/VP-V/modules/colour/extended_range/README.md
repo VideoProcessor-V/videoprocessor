@@ -22,8 +22,8 @@ Keep below-black and above-white codes through every conversion (owner rule: bot
 
 ## Fallbacks
 
-- "Fallbacks engaged" entry: BTB/WTW: clipped (<reason>)
-- Behaviour: Hook failure or libplacebo frame mixing clips BTB (today log-only).
+- "Fallbacks engaged" entry: BTB/WTW: clipped: <reason>
+- Behaviour: Hook failure (latched), a late restore under libplacebo's frame mix, or smooth motion's mixed refreshes clip BTB (FallbackCatalog::BtbWtw; call site WP-4).
 
 ## Net fingerprint / upstream
 
@@ -49,6 +49,47 @@ Chain tests:
 ## Known issues / open items
 
 - (none yet)
+
+## How the code works
+
+Checked against the code 2026-10-25 (M2 step 4 + WP-13).
+
+### Public API
+
+- `ExtendedRange.h` (namespace `ExtendedRange`): `Decide(enabled, Settings, source, output, lut, lutType)` returns a `Decision` (`Reason` plus the modes: gamma/primaries conversion, LUT carry, late/scaled restore, HDR pass-through). `ForTemporal(decision, frameMixing)`: a late restore cannot follow libplacebo's frame mix (`TemporalMix`). `Describe(decision)`: one log line. `Prepare(decision, Hooks&, sourceColor, output, list, singlePlaneRgb)` relabels the source to the output's colour space and places the hooks (carry last at RGB, restore first at SCALED, late restore first at PRE_OUTPUT). `Hooks` owns the four `pl_hook`s (carry, restore, its texture form, late restore) and their float textures: `Owns(signature)`, `Release()`, `HoldsTextures()`, `CarryPasses()` (efficiency audit #7: one pass with two outputs, or two passes and why). The maths (`DescribeTransfer`, LUT sampling/extrapolation) is CPU-testable.
+- `ExtendedRangeStage.h` (WP-13): the host glue as one object. `Prepare(Frame, sourceColor, targetColor, hooks)` (decision, relabel, hooks, both log lines), `NoteDisabledHooks(disabled, count)` (latches the feature off for the session), `LateRestore()`, `Release()`, `LastDecision()`, `MixClipsBtb()`, `Fallback(preserveRequested)` (the "Fallbacks engaged" decision through `FallbackCatalog::BtbWtw`).
+
+### Data flow
+
+The renderer (render thread, `RenderLocked`) fills `ExtendedRangeStage::Frame` from the active settings and the frame (peak detection on, temporal renderer active/mixing, one-plane RGB source, target LUT) and calls `Prepare` before the de-judder cache registration. The relabel flag goes to the temporal renderer (`historyColor`) and the crossfade. After each render the renderer passes libplacebo's disabled-hook list to `NoteDisabledHooks`. The crossfade mix (`RenderCrossfadeMix`) reads `LateRestore()`. The hooks run inside libplacebo's passes.
+
+### Threading
+
+Render thread only (decision, hooks, textures). No locks.
+
+### Config keys actually read
+
+Per renderer profile (display-rule overrides: `[vprenderer.Default]` and matching `[vprenderer.<name>]`):
+
+- `preserve_extended_range`: `on` / `off`, default `on` (owner: BTB and WTW kept in all cases). The Original pathway sets it `off`.
+- `extended_range_more_cases`: `on` / `off`, default `on`: the carry also for BT.1886/sRGB, SDR in other primaries, around a calibration LUT and for HDR passed through unmapped (`off` = the Stage 10 eligibility).
+- Not a key: peak detection (`renderParams.peak_detect_params`) makes HDR dynamic tone mapping a refusal (`HdrMapped`).
+
+### Fallbacks a user sees
+
+- `BTB/WTW` under "Fallbacks engaged" (ADR-0001/0002) when preserve is on and libplacebo disabled a carry hook (latched until restart), a late restore met libplacebo's frame mix, or libplacebo's smooth motion clips BTB on mixed refreshes. Wording: `FallbackCatalog::BtbWtw`. The renderer call site is WP-4's (`silent-fallbacks-callsites.patch`); after the WP-13 rebase it reads `extendedRange.Fallback(...)`. On a base without WP-4 these cases reach only the log.
+- Design exclusions (HDR mapped, output primaries, unsupported LUT, ...) are not downgrades: log/status only.
+
+### What it needs to be lifted
+
+libplacebo (hooks, dispatch, shaders), `pch.h`, `FallbackCatalog.h` (VP-V core, header-only), `DebugLog.h` for the stage's log lines. No renderer state: everything comes in through `Frame`.
+
+### Test it standalone
+
+- CPU: `ExtendedRangeCarryTests` (maths, Decide); `OutputGlueStagesTests` methods `ExtendedRange*` (the stage against a copy of today's host code, the failure latch, the fallback decision).
+- GPU (WARP unless `VP_TEST_GPU=hardware`; only when GPU tests are allowed): `LibplaceboLutParserTests` extended-range methods, `CrossfadeMixTests`, `OutputGlueStagesGpuTests.ExtendedRangeStageRendersTodaysCodes` (Category GpuHardware).
+
+`vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /TestCaseFilter:"FullyQualifiedName~ExtendedRangeCarryTests|FullyQualifiedName~OutputGlueStagesTests" /Logger:"trx;LogFileName=extended_range.trx"`
 
 ## Where the code lives (live file list)
 

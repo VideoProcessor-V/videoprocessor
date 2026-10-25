@@ -35,12 +35,12 @@
       "dither_grain_tolerance_scale",
       "dither_vectors",
       "dithering",
-      "sigma_delta"
+      "temporal_dither"
     ],
     "upstream_modules": [
       "output.calibration_lut"
     ]
   },
-  "fallback_when_missing": "Unsupported code domain drops the sigma-delta (logged).",
-  "fallback_entry": "Dither: libplacebo (sigma-delta dropped: <reason>)"
+  "fallback_when_missing": "Unsupported code domain, shader not loaded or disabled by libplacebo drops the sigma-delta (FallbackCatalog::Dither; call site WP-4).",
+  "fallback_entry": "dither: libplacebo dither; sigma-delta dropped: <reason>"
 }

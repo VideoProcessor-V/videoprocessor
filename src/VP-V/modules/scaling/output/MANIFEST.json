@@ -32,12 +32,29 @@
     },
     "tools": [],
     "config_keys": [
+      "adaptive_chroma_ssim",
       "adaptive_downscale",
+      "adaptive_edge_hi",
+      "adaptive_edge_lo",
       "adaptive_faithful",
+      "adaptive_grain_floor",
+      "adaptive_grain_hi",
+      "adaptive_grain_lo",
+      "adaptive_grain_map",
+      "adaptive_grain_map_smooth_ms",
+      "adaptive_grain_shadow_bias",
+      "adaptive_grain_smooth_ms",
       "adaptive_upscale",
+      "adaptive_upscale_superres_scale",
+      "adaptive_upscale_w_base",
       "adaptive_w_base",
+      "cnn_residual_stabilise",
       "downscale_light",
       "hybrid_refine_d",
+      "residual_stabilise_grain_guard",
+      "ssim_bitrate_aware",
+      "ssim_bitrate_floor",
+      "ssim_residual_stabilise",
       "upscale_light"
     ],
     "upstream_modules": [
@@ -46,6 +63,6 @@
       "scaling.geometry"
     ]
   },
-  "fallback_when_missing": "SSIM shader missing -> Lanczos.",
-  "fallback_entry": "Output scaling: Lanczos (hybrid unavailable: <reason>)"
+  "fallback_when_missing": "SSimDownscaler missing while adaptive_downscale is on, or a GPU failure of the blend (FallbackCatalog::OutputScaling).",
+  "fallback_entry": "output scaling: libplacebo downscaler (SSimDownscaler not in the shader list) | plain SSIM (adaptive downscale failed on the GPU)"
 }
