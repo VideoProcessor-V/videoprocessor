@@ -10,9 +10,9 @@
 // - repeat_render_reuse (Config, Output unit): on | off. Draft default OFF until the GPU byte-identity
 //   gate passes; then the owner's rule applies (features default on when faithful on the 3090).
 //   The Original pathway sets it off (upstream renders every refresh).
-// - Arming: the cache copy costs one output-size copy per source frame, so it is armed only while
-//   repeats are being seen (a captured repeat within the last kArmWindowSeconds - time based, no
-//   fixed cadence list: vp-general-not-fixed), or when the de-judder arms it anyway.
+// - Arming: the cache copy costs one output-size copy (rgba32f) per armed frame, so it is armed only
+//   for a first present the queue already holds a repeat of, with a key that could be reused (not
+//   opaque, not temporal), and not during a back-off after persistent refusals (audit H1).
 // - Hook state: every hook that runs before OUTPUT contributes to the key. mpv-style hooks (their
 //   pointer and the current value of every parameter: LED compensation, tone shape, DV trims, intent
 //   values change through parameters), registered static C hooks (their pointer), picture-neutral
@@ -32,7 +32,12 @@ namespace VpRepeatReuse
 {
 	using namespace RepeatRenderReuse;
 
-	constexpr double kArmWindowSeconds = 1.0;   // repeats seen within the last second keep the cache armed
+	// Arming (audit H1): only a first present the queue already holds a repeat of (exact, no cadence
+	// list), never when the key is opaque or temporal (the repeat would be refused: the copy would be
+	// pure cost), and not for kArmBackoffSeconds after kPersistentRefusalsToStop repeats in a row were
+	// refused for a persistent reason.
+	constexpr unsigned kPersistentRefusalsToStop = 3;
+	constexpr double kArmBackoffSeconds = 2.0;
 
 	enum class HookKind : int
 	{
@@ -116,14 +121,18 @@ namespace VpRepeatReuse
 		// At the hook point. nowSeconds: the render thread's clock (for the arm window).
 		Decision Decide(const RepeatFrameKey& now, bool cacheValid, double nowSeconds)
 		{
-			if (now.cadenceRepeat)
-				m_lastRepeatSeconds = nowSeconds;
 			Decision d;
 			if (!Active())
 				d.refusal = Refusal::Disabled;
 			else
 				d = RepeatReuseRules::Compare(m_cached, cacheValid && m_cachedValid, now);
 			m_stats.Note(now.cadenceRepeat, d, d.refusal == Refusal::HookStateOpaque ? now.opaqueDetail : std::string());
+			if (now.cadenceRepeat && Active())
+			{
+				m_persistentRun = Persistent(d.refusal) ? m_persistentRun + 1 : 0;
+				if (m_persistentRun >= kPersistentRefusalsToStop)
+					m_armBackoffUntil = nowSeconds + kArmBackoffSeconds;
+			}
 			return d;
 		}
 
@@ -139,8 +148,8 @@ namespace VpRepeatReuse
 		// Arm the cache on this first present? (The de-judder may arm it regardless.)
 		bool WantArm(const RepeatFrameKey& now, double nowSeconds) const
 		{
-			return Active() && !now.cadenceRepeat && !now.temporalRenderState && m_lastRepeatSeconds >= 0.0 &&
-				nowSeconds - m_lastRepeatSeconds <= kArmWindowSeconds;
+			return Active() && !now.cadenceRepeat && now.nextIsRepeat && !now.hookStateOpaque && !now.temporalRenderState &&
+				nowSeconds >= m_armBackoffUntil;
 		}
 
 		// After a full render that is a source frame's first present.
@@ -152,14 +161,15 @@ namespace VpRepeatReuse
 			m_cachedValid = cacheCaptured;
 		}
 
-		void Reset() { m_cachedValid = false; m_cached = RepeatFrameKey{}; m_lastRepeatSeconds = -1.0; }
+		void Reset() { m_cachedValid = false; m_cached = RepeatFrameKey{}; m_persistentRun = 0; m_armBackoffUntil = 0.0; }
 		const Stats& GetStats() const { return m_stats; }
 
 	private:
 		Options m_options;
 		RepeatFrameKey m_cached;
 		bool m_cachedValid = false;
-		double m_lastRepeatSeconds = -1.0;
+		unsigned m_persistentRun = 0;
+		double m_armBackoffUntil = 0.0;
 		Stats m_stats;
 	};
 }

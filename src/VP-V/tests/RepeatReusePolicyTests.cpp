@@ -148,17 +148,41 @@ namespace VpvTests
 			}
 		}
 
-		TEST_METHOD(ArmsOnlyWhileRepeatsAreSeen)
+		// Audit H1: arm only what can be reused.
+		TEST_METHOD(ArmsOnlyWhenTheQueueHoldsAReusableRepeat)
 		{
 			Policy p = OnPolicy();
-			Assert::IsFalse(p.WantArm(Key(1, false), 0.0));   // no repeat seen yet: no copy cost
-			p.Decide(Key(1, true), false, 10.0);               // a repeat seen at t = 10 s
-			Assert::IsTrue(p.WantArm(Key(2, false), 10.5));
-			Assert::IsFalse(p.WantArm(Key(2, true), 10.5));    // never on a repeat
-			Assert::IsFalse(p.WantArm(Key(3, false), 10.0 + kArmWindowSeconds + 0.01));   // cadence gone (e.g. 24p on 24 Hz)
-			RepeatFrameKey temporal = Key(4, false);
-			temporal.temporalRenderState = true;
-			Assert::IsFalse(p.WantArm(temporal, 10.5));
+			RepeatFrameKey k = Policy::Complete(Key(1, false), VpTemporal{}, Hooks(1));
+			Assert::IsFalse(p.WantArm(k, 0.0));                 // the queue holds no repeat of it
+			k.nextIsRepeat = true;
+			Assert::IsTrue(p.WantArm(k, 0.0));
+			RepeatFrameKey repeat = k;
+			repeat.cadenceRepeat = true;
+			Assert::IsFalse(p.WantArm(repeat, 0.0));            // never on a repeat
+			RepeatFrameKey opaque = Policy::Complete(Key(1, false), VpTemporal{}, Hooks(1, true));
+			opaque.nextIsRepeat = true;
+			Assert::IsFalse(p.WantArm(opaque, 0.0));            // e.g. AdaptiveDownscale active: no copy
+			VpTemporal t;
+			t.peakDetection = true;
+			RepeatFrameKey temporal = Policy::Complete(Key(1, false), t, Hooks(1));
+			temporal.nextIsRepeat = true;
+			Assert::IsFalse(p.WantArm(temporal, 0.0));
+		}
+
+		TEST_METHOD(PersistentRefusalsBackOffArming)
+		{
+			Policy p = OnPolicy();
+			VpTemporal t;
+			t.crossfade = true;
+			for (unsigned i = 0; i < kPersistentRefusalsToStop; ++i)
+			{
+				p.NoteFullRender(Policy::Complete(Key(10 + i, false), VpTemporal{}, Hooks(1)), true);
+				p.Decide(Policy::Complete(Key(10 + i, true), t, Hooks(1)), true, 5.0);
+			}
+			RepeatFrameKey next = Policy::Complete(Key(20, false), VpTemporal{}, Hooks(1));
+			next.nextIsRepeat = true;
+			Assert::IsFalse(p.WantArm(next, 5.0 + kArmBackoffSeconds / 2));
+			Assert::IsTrue(p.WantArm(next, 5.0 + kArmBackoffSeconds + 0.01));
 		}
 
 		TEST_METHOD(RefusedRepeatDoesNotReplaceTheReference)
@@ -188,6 +212,7 @@ namespace VpvTests
 			{
 				Policy p = OnPolicy();
 				uint64_t sequence = 0, armedFor = 0;
+				int armedCount = 0;
 				int repeats = 0;
 				double t = 0.0;
 				for (int cycle = 0; cycle < 60; ++cycle)
@@ -197,21 +222,26 @@ namespace VpvTests
 						const bool repeat = r >= pat.unique;
 						if (!repeat)
 							++sequence;
-						const RepeatFrameKey k = Policy::Complete(Key(sequence, repeat), VpTemporal{}, Hooks(1));
+						RepeatFrameKey k = Policy::Complete(Key(sequence, repeat), VpTemporal{}, Hooks(1));
+						k.nextIsRepeat = !repeat && r + 1 < pat.refreshes && r + 1 >= pat.unique;   // the queue's view
 						if (!repeat && p.WantArm(k, t))
+						{
 							armedFor = sequence;
+							++armedCount;
+						}
 						const Decision d = p.Decide(k, armedFor == sequence, t);
 						if (repeat)
 						{
 							++repeats;
-							// Only the very first repeat finds no cache (nothing was armed before a repeat was seen).
-							Assert::IsTrue(d.reuse || repeats == 1);
+							// The queue announced every repeat, so every one finds its cache.
+							Assert::IsTrue(d.reuse);
 						}
 						else
 							p.NoteFullRender(k, armedFor == sequence);
 					}
 				Assert::AreEqual(static_cast<uint64_t>(repeats), p.GetStats().repeats);
-				Assert::IsTrue(p.GetStats().reused + 1 >= p.GetStats().repeats);
+				Assert::AreEqual(p.GetStats().repeats, p.GetStats().reused);
+				Assert::AreEqual(p.GetStats().repeats, static_cast<uint64_t>(armedCount));   // one copy per reused repeat, no waste
 			}
 		}
 
