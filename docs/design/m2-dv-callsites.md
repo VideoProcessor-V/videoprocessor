@@ -93,3 +93,14 @@ Independent of the call-site patch (`git apply --check --cached` clean on its ow
 top of it). Tests to run with it (GPU, coordinator): the renderer capture harness fallback test
 (prefix "capture GPU unpack (CPU formatters" still matches), and an early-upload open failure
 check (none exists yet; candidate: force `EarlyUpload::Open` to fail via a test environment switch).
+
+## Pending dependency: the compare-capture toggle (audit M-2)
+
+`IRenderer::ToggleDvCompareCapture` (plugin API 43, a dedicated virtual in Bill's interface) is
+for a WIP diagnostic. WP-11 (`feat/wp11-status`, `docs/design/wp11-callsites.md`) adds the generic
+`InvokeModuleCommand(module, command, reply)`; its plan already routes `dv_compare_capture` through
+it. Not merged into `integ/batch1` at this branch's base, so hook 11 keeps the dedicated virtual.
+TODO after the rebase onto the final `integ/batch1` (if WP-11 is in): the renderer's
+`InvokeModuleCommand("vp", "dv_compare_capture")` calls `dvStage.ToggleCompareCapture()`, the
+GUI shortcut dispatches through it, and the dedicated virtual leaves `IRenderer.h`,
+`LibplaceboPluginVideoRenderer` and the GUI (`OnCommandDvCompareCapture`).

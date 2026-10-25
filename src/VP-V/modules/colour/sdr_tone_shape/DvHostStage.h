@@ -149,6 +149,9 @@ public:
 	}
 
 	// feat/dv-l8 WIP (plugin API 43): the dv_compare_capture shortcut (DvCompareCapture.h).
+	// TODO(WP-11, audit M-2): once feat/wp11-status is on integ/batch1, the renderer answers
+	// InvokeModuleCommand("vp", "dv_compare_capture") with this, and the dedicated
+	// IRenderer::ToggleDvCompareCapture virtual (Bill's interface) is removed.
 	std::string ToggleCompareCapture() { return m_compare.Toggle(); }
 
 	// The reference viewing conditions of the last DV picture (for the later CAM16 stage).
