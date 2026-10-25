@@ -1,5 +1,5 @@
 diff --git a/src/VP-V/core/SlotRegistry.h b/src/VP-V/core/SlotRegistry.h
-index 528e7082..f5b61060 100644
+index 3bbaf192..c23d2893 100644
 --- a/src/VP-V/core/SlotRegistry.h
 +++ b/src/VP-V/core/SlotRegistry.h
 @@ -26,6 +26,8 @@ namespace PipelineSlots
@@ -12,10 +12,10 @@ index 528e7082..f5b61060 100644
  		default:
  			return false;
 diff --git a/src/VP-V/tests/PipelineSkeletonTests.cpp b/src/VP-V/tests/PipelineSkeletonTests.cpp
-index 4a5cc586..bbf4c7ba 100644
+index 2ed3092e..7f4744fd 100644
 --- a/src/VP-V/tests/PipelineSkeletonTests.cpp
 +++ b/src/VP-V/tests/PipelineSkeletonTests.cpp
-@@ -633,6 +633,10 @@ namespace PipelineSkeletonTestsNs
+@@ -646,6 +646,10 @@ namespace PipelineSkeletonTestsNs
  			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::DriveProjectorControl));
  			Assert::IsFalse(PipelineSlots::SwitchHonoured(Id::ScalingGeometry));
  			Assert::IsFalse(PipelineSlots::SwitchHonoured(Id::ColourToneGamut));
@@ -27,10 +27,10 @@ index 4a5cc586..bbf4c7ba 100644
  
  		TEST_METHOD(OriginalPathwayOverridesAreRealKeysAndValues)
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index 5c24cd7c..df2e2323 100644
+index 395b11a0..7df82613 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-@@ -74,6 +74,12 @@
+@@ -77,6 +77,12 @@
  #include <vprenderer/ExtendedRange.h>
  #include <vprenderer/SdrToneShape.h>
  #include <vprenderer/RenderedWarp.h>
@@ -43,7 +43,7 @@ index 5c24cd7c..df2e2323 100644
  // VP-V pipeline skeleton (src/VP-V; see src/VP-V/README.md): the slot registry, the entrance
  // stage list, the output-hook order and the VP calibration-LUT stage.
  #include <VP-V/core/SlotRegistry.h>
-@@ -5276,40 +5282,6 @@ enum class AlphaGpuTimingSampleMode
+@@ -5289,40 +5295,6 @@ enum class AlphaGpuTimingSampleMode
  };
  
  
@@ -84,7 +84,7 @@ index 5c24cd7c..df2e2323 100644
  // Delta 8 R1 timing (planner 2026-10-13): the GPU time of an extra's
  // sigma-delta passes (libplacebo's per-pass timers; `last` is the most recent
  // completed measurement of that pass).
-@@ -7120,7 +7092,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -7138,7 +7110,7 @@ struct LibplaceboVideoRenderer::Impl
  		// The frame latency the VP-owned chain was made with (bug hunt 05 M6: today's 2
  		// without extras or in low latency).
  		g.queueDepth = vpOwnedSwapchain ? static_cast<int>(renderAheadChainDepth.latency) : 2;
@@ -93,7 +93,7 @@ index 5c24cd7c..df2e2323 100644
  		g.costs.newFrameMs = renderAheadNewFrameCost.P95();
  		g.costs.estimateMs = renderAheadEstimateCost.Current();
  		// X per vector mode, each level priced with its own (M7). A degraded level renders
-@@ -7419,8 +7391,6 @@ struct LibplaceboVideoRenderer::Impl
+@@ -7516,8 +7488,6 @@ struct LibplaceboVideoRenderer::Impl
  	bool dejudderFillIgnoredLogged = false;   // D5 with the rendered warp (logged once)
  	float dejudderEffectiveStrength = 0.0f;   // delta 10: uneven or even strength for this source
  	int dejudderEvenCycle = 0;   // refreshes per film frame on an even cadence, 0 = uneven
@@ -102,7 +102,7 @@ index 5c24cd7c..df2e2323 100644
  	bool smoothMotionEngine = false;   // motion_engine resolved to libplacebo's smooth motion
  	bool motionEngineLogged = false;
  	bool smoothMotionMixingLogged = false;
-@@ -7429,7 +7399,6 @@ struct LibplaceboVideoRenderer::Impl
+@@ -7526,7 +7496,6 @@ struct LibplaceboVideoRenderer::Impl
  	bool sigmaDeltaReorderLogged = false;   // the sigma-delta moved to run last
  	bool dejudderMaskNoSigmaLogged = false;
  	bool dejudderMaskNlsLogged = false;
@@ -110,7 +110,7 @@ index 5c24cd7c..df2e2323 100644
  	ULONGLONG dejudderMaskUsedTick = 0;    // last refresh the mask was used on
  	std::string dejudderMaskState;         // why the mask is not used, for the stats line
  	bool dejudderMaskRateLogged = false;
-@@ -7450,21 +7419,25 @@ struct LibplaceboVideoRenderer::Impl
+@@ -7547,21 +7516,25 @@ struct LibplaceboVideoRenderer::Impl
  	std::unique_ptr<DejudderRendered::VectorField> dejudderVectorField;
  	unsigned long long ditherVectorsExternal = 0;
  	int ditherVectorsLogged = -1;
@@ -145,7 +145,7 @@ index 5c24cd7c..df2e2323 100644
  	// 6b-2b: the stats overlay line, published by the render thread at most
  	// twice a second and read by the UI under its own small lock.
  	std::mutex dejudderStatusMutex;
-@@ -17760,7 +17733,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -17892,7 +17865,7 @@ struct LibplaceboVideoRenderer::Impl
  			// With M6 the picture moves per pixel: the sigma-delta follows the
  			// warp's own per-pixel displacement (the step since the previous
  			// present) instead of block vectors.
@@ -154,7 +154,7 @@ index 5c24cd7c..df2e2323 100644
  				shift > 0.0f;
  			if (cached && dejudderRenderedWarp)
  			{
-@@ -17894,7 +17867,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -18026,7 +17999,7 @@ struct LibplaceboVideoRenderer::Impl
  				~VectorGuard() { Release(); }
  			} vectorGuard;
  			{
@@ -163,7 +163,7 @@ index 5c24cd7c..df2e2323 100644
  				const bool use = DejudderRendered::UseExternalVectors(ditherOwnOnExtras, patch,
  					warpField != nullptr, dejudderGeometryValid);
  				pl_tex vectors = nullptr;
-@@ -18164,7 +18137,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -18296,7 +18269,7 @@ struct LibplaceboVideoRenderer::Impl
  		// Hunt 2 09-L4: not after a failed extra. The fallback showed A at shift 0 (or
  		// nothing was presented), so vectors from previousShift would carry from the
  		// wrong place; the sigma-delta's own search covers B (vector validity rule).
@@ -172,7 +172,7 @@ index 5c24cd7c..df2e2323 100644
  			warpField && warpTrust &&
  			dejudderGeometryValid && f.nextSourceSequence != 0)
  		{
-@@ -24332,194 +24305,62 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24511,194 +24484,62 @@ struct LibplaceboVideoRenderer::Impl
          // skips its motion search (zero motion; owner 2026-10-13 efficiency).
          for (const pl_hook* hook : frameHooks)
              CustomHookChain::SetHookParameter(hook, "static_refresh", cadenceRepeat ? 1.0 : 0.0);
@@ -419,7 +419,7 @@ index 5c24cd7c..df2e2323 100644
          // Delta 5 (D5-1): the sigma-delta's code domain comes from this
          // frame's target, never from the shader rule: range, swapchain sample
          // depth and the colour depth it quantises to. A float or 16-bit
-@@ -24689,99 +24530,39 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24868,99 +24709,39 @@ struct LibplaceboVideoRenderer::Impl
          // frame is converted twice (TemporalRenderer::Render historyColor).
          bool extendedRangeRelabelled = false;
          {
@@ -548,8 +548,8 @@ index 5c24cd7c..df2e2323 100644
          }
          // libplacebo 7.360.1 drops the output encoding (limited range) after
          // a texture-input PRE_OUTPUT hook; the repair runs first at OUTPUT,
-@@ -24820,65 +24601,23 @@ struct LibplaceboVideoRenderer::Impl
-             yieldedDebandLogged = false;
+@@ -25011,65 +24792,23 @@ struct LibplaceboVideoRenderer::Impl
+         }
          // Stage 8-1: a downscaling frame in gamma light when chosen (the de-
          // judder extras reuse these parameters).
 -        {
@@ -622,7 +622,7 @@ index 5c24cd7c..df2e2323 100644
              {
                  ++ditherVectorsNextUsed;
                  if (!ditherVectorsNextLogged)
-@@ -24894,13 +24633,15 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25085,13 +24824,15 @@ struct LibplaceboVideoRenderer::Impl
          // S2: every FBO in rgba32f (exact highlights; +bandwidth). Auto: on everywhere, the
          // low-latency path too (owner 2026-10-16: higher precision is the default; half-float
          // there was never agreed). Off by hand only.
@@ -640,7 +640,7 @@ index 5c24cd7c..df2e2323 100644
          {
              frameParams.dither_params = nullptr;
              frameParams.error_diffusion = nullptr;
-@@ -25066,12 +24807,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25257,12 +24998,7 @@ struct LibplaceboVideoRenderer::Impl
                  PublishCustomShaderStatus();
              ledCompensation.MarkRuntimeFailures(hookErrors.disabled_hooks,
                  hookErrors.num_disabled_hooks);

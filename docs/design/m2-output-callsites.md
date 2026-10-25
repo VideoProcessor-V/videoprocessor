@@ -4,10 +4,11 @@ Status: **DRAFT patch, not applied** (2026-10-25, branch `feat/m2-output`). Inte
 renderer change is `m2-output-callsites.patch`; this branch commits only VP-V files, tests and
 project entries. VP-ONLY (nothing here is upstreamable).
 
-Base: `perf/byte-identical` 29c3843d + `chore/early-migrations` ac49a1de (merge d20bc45c), then the
-three module moves (0aaaf2e5 step 4, 2c393254 step 5, 1f3d6fbc step 8). `git apply --check --cached
-docs/design/m2-output-callsites.patch` is clean against this branch. To be rebased onto
-`integ/batch1` when its hash arrives (see "Rebase notes").
+Base: `integ/batch1` 43ebff50 (rebased 2026-10-25 from perf/byte-identical 29c3843d + early
+migrations; only this branch's own commits were carried, the moved files are integ's content).
+`git apply --check --cached docs/design/m2-output-callsites.patch` is clean against this branch.
+The patch carries the renderer hunks plus `SlotRegistry.h` (SwitchHonoured) and the
+`PipelineSkeletonTests` assertion: apply all three together.
 
 ## What moves out of `LibplaceboVideoRenderer.cpp` (RenderLocked and two helpers)
 
@@ -85,8 +86,9 @@ matrix, as WP-13's acceptance says.
 
 ## Compatibility with the other drafted host patches
 
-- `segments-callsites.patch` (feat/segment-runner 8b4806a0): its renderer hunks still apply on top
-  of this patch (checked with `git apply --check`); no hunk overlaps.
+- `segments-callsites.patch`: on the old base its renderer hunks applied on top of this patch with no
+  overlap. Its current draft (feat/segment-runner 544aff9c, made on integ 38badcb0) does not apply
+  to integ 43ebff50 by itself (hunk at line 85), so re-check after it is regenerated.
 - `silent-fallbacks-callsites.patch` (WP-4) adds `SyncFallback(FallbackCatalog::BtbWtw(...))` after
   the extended-range block. After the rebase that line becomes
   `SyncFallback(extendedRange.Fallback(activeSettings.preserveExtendedRange));`

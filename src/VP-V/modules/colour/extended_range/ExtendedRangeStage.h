@@ -68,7 +68,7 @@ namespace ExtendedRangeStage
 		// A slot switched off is a choice, not a downgrade (released).
 		FallbackCatalog::Decision Fallback(bool preserveRequested) const;
 
-		// The carry/restore hook objects (status readouts, the efficiency audit's idle release).
+		// The carry/restore hook objects (status readouts; WP-5 idle release once it lands).
 		ExtendedRange::Hooks& CarryHooks() { return hooks; }
 		const ExtendedRange::Hooks& CarryHooks() const { return hooks; }
 
