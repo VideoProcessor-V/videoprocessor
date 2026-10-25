@@ -91,7 +91,8 @@ namespace Tests
 		// A loader whose files always "load" as one dummy hook (no GPU): counts the emitted hooks.
 		inline const pl_hook* DummyHook()
 		{
-			static const pl_hook hook{};
+			// A known stage (CustomHookChain drops a hook with no //!HOOK stage).
+			static const pl_hook hook = []() { pl_hook h{}; h.stages = PL_HOOK_PRE_OUTPUT; return h; }();
 			return &hook;
 		}
 		inline CustomHookChain::Loader DummyShaders()
