@@ -153,21 +153,9 @@ index 3d032b1a..e04a2c06 100644
  			else
  			{
 diff --git a/src/VideoProcessor-Lib/SubtitleBoxDetector.cpp b/src/VideoProcessor-Lib/SubtitleBoxDetector.cpp
-index fb111dd4..9e6d4241 100644
+index fb111dd4..99d09850 100644
 --- a/src/VideoProcessor-Lib/SubtitleBoxDetector.cpp
 +++ b/src/VideoProcessor-Lib/SubtitleBoxDetector.cpp
-@@ -65,9 +65,9 @@ namespace
-                 return supported*100>=unsigned(run)*85;
-             };
-             for(int x=interior.left+1;x<interior.right-1;++x) {
--                AnalysisLumaSample value;if(!source.Sample(x,sourceY,value))return false;
-+                uint16_t luma=0;if(!source.SampleLuma(x,sourceY,luma))return false; // WP-23 shared luma
-                 ++tested;
--                if(value.luma<=darkLimit) {
-+                if(luma<=darkLimit) {
-                     if(!supportedRun(x))return false;
-                     ++black;run=0;continue;
-                 }
 @@ -386,9 +386,9 @@ bool SubtitleBoxDetector::Detect(const AnalysisLumaSource& source, int pictureTo
          if(r.top<top || r.bottom>bottom)return true;
          auto black=[&](int x,int y) {

@@ -17,8 +17,8 @@ frame. The patch lets it carry ONE decoded luma plane per frame:
 - `SampleLuma(x, y, luma)` — `Sample(x, y).luma`, from the published plane when there is one.
 - `SharedLumaRow(y)` — the published plane's row, or null.
 - His luma-only reads switch from `Sample()` to `SampleLuma()`: `SceneDetector::Analyze` (1),
-  `ActivePictureEvidence` (`Luma()` helper and the inner-row mean: 2), `SubtitleBoxDetector` (7
-  luma-only scans: the native interior row run, card/edge darkness probes). Reads that also use
+  `ActivePictureEvidence` (`Luma()` helper and the inner-row mean: 2), `SubtitleBoxDetector` (6
+  luma-only scans: card and edge darkness probes). Reads that also use
   chroma are unchanged. In his v1.4.02 the luma-only row reader `MeasureLumaRowContent` also reads
   the shared row (one extra hunk in the upstream variant).
 
@@ -43,7 +43,7 @@ We feed his code its INPUT once; every decision (crop, subtitles, scene cuts) st
 | `wp23-bill-analysers-upstream-v1.4.02.patch` | `origin/v1.4.02-beta` (6ba412bd), checked with `git apply --check` | the PR to offer Bill; includes the `MeasureLumaRowContent` hunk |
 
 Files touched (all Bill's, none moved): `AnalysisLumaSource.h/.cpp`, `SceneDetector.cpp`,
-`ActivePictureEvidence.cpp`, `SubtitleBoxDetector.cpp`. Size: ~40 lines in the view, 10 one-line
+`ActivePictureEvidence.cpp`, `SubtitleBoxDetector.cpp`. Size: ~40 lines in the view, 9 one-line
 call changes in the analysers. The end-state patch set grows by this one hook; it shrinks again
 when Bill takes it.
 

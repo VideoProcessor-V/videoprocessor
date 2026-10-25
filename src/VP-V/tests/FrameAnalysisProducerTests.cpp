@@ -157,7 +157,10 @@ namespace FrameAnalysisProducerTestsNs
 				Assert::IsTrue(measured.range.btb > 0.0, KindName(kind));
 				Assert::IsTrue(measured.range.wtw > 0.0, KindName(kind));
 				Assert::IsTrue(measured.luma.minimum < 64 && measured.luma.maximum > 940, KindName(kind));
-				Assert::IsTrue(measured.range.clipped > 0.0, KindName(kind));
+				// The YCbCr probes reach the container top; r210's 64..960 RGB scaling maps RGB 1019
+				// below 1019 luma (still WTW).
+				if (kind != Kind::R210)
+					Assert::IsTrue(measured.range.clipped > 0.0, KindName(kind));
 			}
 		}
 

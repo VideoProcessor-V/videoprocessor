@@ -160,18 +160,6 @@
      innerMean /= innerKnown;
 --- a/src/VideoProcessor-Lib/SubtitleBoxDetector.cpp
 +++ b/src/VideoProcessor-Lib/SubtitleBoxDetector.cpp
-@@ -65,9 +65,9 @@
-                 return supported*100>=unsigned(run)*85;
-             };
-             for(int x=interior.left+1;x<interior.right-1;++x) {
--                AnalysisLumaSample value;if(!source.Sample(x,sourceY,value))return false;
-+                uint16_t luma=0;if(!source.SampleLuma(x,sourceY,luma))return false; // WP-23 shared luma
-                 ++tested;
--                if(value.luma<=darkLimit) {
-+                if(luma<=darkLimit) {
-                     if(!supportedRun(x))return false;
-                     ++black;run=0;continue;
-                 }
 @@ -394,9 +394,9 @@
          if(r.top<top || r.bottom>bottom)return true;
          auto black=[&](int x,int y) {
