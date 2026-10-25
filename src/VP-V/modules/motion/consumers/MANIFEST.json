@@ -80,5 +80,5 @@
     ]
   },
   "fallback_when_missing": "Each consumer falls back as the vector rules say; the visible entries today are \"entrance once fill\" / \"entrance once\" (B3) and \"look-ahead\" (short queue). Warp/interpolation failures are log/status only (findings doc).",
-  "fallback_entry": null
+  "fallback_entry": "motion consumers: <warp failed | rendered warp failed | interpolation failed>: the source frame is shown instead"
 }

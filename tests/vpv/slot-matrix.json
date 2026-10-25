@@ -23,7 +23,7 @@
     "chain gate subset: capture formats x 24/50/60p"
    ]
   },
-  "fallback_entry": "Capture: CPU 4:2:0 (GPU unpack failed: <reason>)",
+  "fallback_entry": "capture GPU unpack: CPU formatters for the session: <error> | native RGB GPU unpack: CPU conversion to 10-bit 4:2:0 for the session: <error> | early upload: the render upload (<error>)",
   "missing": []
  },
  {
@@ -50,7 +50,7 @@
     "chain gate: SDR / HDR10 / LLDV / tunnel"
    ]
   },
-  "fallback_entry": "Signal: DV tunnel unpack on the CPU (<reason>)",
+  "fallback_entry": "Dolby Vision GPU unpack: CPU unpack for the session: <error> | DV metadata: <held | static>",
   "missing": []
  },
  {
@@ -78,7 +78,7 @@
     "delay gate: the recommended total and lower totals (4/3/2 frames) at 23.976/24/25/30/50/60p; identical measured total across rates; no stalls; recovery when frames return"
    ]
   },
-  "fallback_entry": "Queue: short look-ahead (<n> of 4 frames)",
+  "fallback_entry": "look-ahead: <n> of 4 queued frames (delay budget <ms>); delay budget: <why the total is not exact>",
   "missing": []
  },
  {
@@ -137,7 +137,7 @@
     "vector validity across cuts/drops at 24/30/60p"
    ]
   },
-  "fallback_entry": "Motion: matcher only (NVOF unavailable: <reason>)",
+  "fallback_entry": "motion: matcher only (optical flow failed: <error>) / no optical-flow look-ahead (producer stopped: <error>)",
   "missing": []
  },
  {
@@ -365,7 +365,7 @@
     "single-axis re-base + de-judder"
    ]
   },
-  "fallback_entry": "Vectors: invalid (<reason>)",
+  "fallback_entry": "motion: matcher (optical flow unavailable)",
   "missing": [
    "placeholder"
   ]
@@ -395,7 +395,7 @@
     "24p in 60 at 200 ms, 4/3/2 frames"
    ]
   },
-  "fallback_entry": "Motion consumers: no-motion form (vectors invalid / short queue)",
+  "fallback_entry": "motion consumers: <warp failed | rendered warp failed | interpolation failed>: the source frame is shown instead",
   "missing": []
  },
  {
@@ -529,7 +529,7 @@
    ],
    "chain": []
   },
-  "fallback_entry": "SDR tone shape: not applied (shader did not load)",
+  "fallback_entry": "DV tone mapping: <why>: bt2390[ + trims] | Dolby Vision trims: <state> | SDR tone shape: not applied (<why>)",
   "missing": [
    "chain"
   ]
@@ -731,7 +731,7 @@
     "delay gate"
    ]
   },
-  "fallback_entry": "Presentation: open loop (no display statistics)",
+  "fallback_entry": "presentation: open loop: no display statistics, estimated rate / de-judder held: display rate not known",
   "missing": []
  },
  {

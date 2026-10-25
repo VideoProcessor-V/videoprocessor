@@ -43,5 +43,5 @@
     ]
   },
   "fallback_when_missing": "No entry of its own: invalid vectors make every consumer take its no-motion form (by design, not a downgrade). Engine/matcher downgrades are motion.estimation's entry.",
-  "fallback_entry": null
+  "fallback_entry": "motion: matcher (optical flow unavailable)"
 }

@@ -877,8 +877,8 @@
       "planned_keys": [],
       "tiers": "follows motion.estimation",
       "fallback": {
-        "entry": null,
-        "behaviour": "No entry of its own: invalid vectors make every consumer take its no-motion form (by design, not a downgrade). Engine/matcher downgrades are motion.estimation's entry."
+        "entry": "motion: matcher (optical flow unavailable)",
+        "behaviour": "The sustained matcher delivery (MotionSegment::FallbackEntry) is listed. Invalid vectors at a discontinuity make every consumer take its no-motion form (by design, momentary, not a downgrade)."
       },
       "upstream": [
         "motion.estimation",
@@ -969,8 +969,8 @@
       "planned_keys": [],
       "tiers": "Classic off .. Upper full",
       "fallback": {
-        "entry": null,
-        "behaviour": "Each consumer falls back as the vector rules say; the visible entries today are \"entrance once fill\" / \"entrance once\" (B3) and \"look-ahead\" (short queue). Warp/interpolation failures are log/status only (findings doc)."
+        "entry": "motion consumers: <warp failed | rendered warp failed | interpolation failed>: the source frame is shown instead",
+        "behaviour": "Each consumer falls back as the vector rules say. Failed GPU passes (de-judder warp, rendered warp, interpolation) are listed while recent (FallbackCatalog::MotionConsumerFailures, 5 s hold; group D audit D3); the B3 entries \"entrance once fill\" / \"entrance once\" and \"look-ahead\" (short queue) as before."
       },
       "upstream": [
         "motion.vector_delivery"
@@ -1899,7 +1899,12 @@
         "delay_share": "n/a",
         "lookahead": "n/a"
       },
-      "settings_keys": ["state_report", "raw_capture", "auto_report", "report_thumbnail"],
+      "settings_keys": [
+        "state_report",
+        "raw_capture",
+        "auto_report",
+        "report_thumbnail"
+      ],
       "planned_keys": [],
       "tiers": "n/a",
       "fallback": {
