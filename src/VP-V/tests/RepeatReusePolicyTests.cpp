@@ -9,6 +9,7 @@
 
 #include <VP-V/modules/output/presentation/RepeatReuseAdapter.h>
 #include <VP-V/modules/output/presentation/TemporalShaders.h>
+#include <VP-V/modules/output/presentation/RepeatReuseRegistryKey.h>
 
 #include <cstring>
 #include <string>
@@ -374,6 +375,32 @@ vec4 hook() { return vec4(random); })";
 			cached.extension = base.Signature();
 			now.extension = e.Signature();
 			Assert::IsTrue(RepeatReuseRules::Compare(cached, true, now).refusal == Refusal::ExtensionChanged);
+		}
+
+		// Modularity review: a registry change (slot off, order, Original, B3) refuses the reuse even
+		// without a settings apply; the presentation slot switch turns the reuse off.
+		TEST_METHOD(RegistryChangeRefusesAndSlotSwitchDisables)
+		{
+			PipelineSlots::Registry registry;
+			VpExtension before;
+			before.registryFingerprint = RegistryFingerprint(registry);
+			registry.SetEnabled(PipelineSlots::Id::RepairDeband, false);   // e.g. a GPU-failure path
+			VpExtension after = before;
+			after.registryFingerprint = RegistryFingerprint(registry);
+			Assert::AreNotEqual(before.registryFingerprint, after.registryFingerprint);
+			RepeatFrameKey cached = Key(5, false), now = Key(5, true);
+			cached.extension = before.Signature();
+			now.extension = after.Signature();
+			Assert::IsTrue(RepeatReuseRules::Compare(cached, true, now).refusal == Refusal::ExtensionChanged);
+			PipelineSlots::Registry b3off;
+			b3off.SetEntranceOnce(!b3off.EntranceOnce());
+			Assert::AreNotEqual(RegistryFingerprint(PipelineSlots::Registry{}), RegistryFingerprint(b3off));
+			PipelineSlots::Registry original;
+			original.ApplyOriginalPathway();
+			Assert::AreNotEqual(RegistryFingerprint(PipelineSlots::Registry{}), RegistryFingerprint(original));
+			Policy p;
+			p.SetOptions({ true, false, false });   // output.presentation switched off
+			Assert::IsFalse(p.Active());
 		}
 
 		TEST_METHOD(SignatureIsExactOnFloats)

@@ -107,10 +107,11 @@ namespace VpRepeatReuse
 		uint64_t lutSignature = 0;
 		uint64_t subtitleSignature = 0;
 		uint64_t fallbacksSignature = 0;
+		uint64_t registryFingerprint = 0;   // slot on/off, components, order, Original, B3 (RepeatReuseRegistryKey.h)
 		uint64_t Signature() const
 		{
 			return RepeatRenderReuse::Signature().Add(rebaseFactor).Add(rebaseFactorX).Add(rebaseKernel).Add(lutSignature)
-				.Add(subtitleSignature).Add(fallbacksSignature).Value();
+				.Add(subtitleSignature).Add(fallbacksSignature).Add(registryFingerprint).Value();
 		}
 	};
 
@@ -118,6 +119,7 @@ namespace VpRepeatReuse
 	{
 		bool enabled = false;            // repeat_render_reuse (draft default off)
 		bool originalPathway = false;    // upstream behaviour: never reuse
+		bool slotRuns = true;            // pipelineSlots.Runs(output.presentation): its slot switch
 	};
 
 	class Policy
@@ -125,7 +127,7 @@ namespace VpRepeatReuse
 	public:
 		void SetOptions(const Options& o) { m_options = o; }
 		const Options& GetOptions() const { return m_options; }
-		bool Active() const { return m_options.enabled && !m_options.originalPathway; }
+		bool Active() const { return m_options.enabled && !m_options.originalPathway && m_options.slotRuns; }
 
 		// Combine the host key with VP's temporal flags and hook state.
 		static RepeatFrameKey Complete(RepeatFrameKey key, const VpTemporal& temporal, const std::vector<HookInfo>& hooks)
