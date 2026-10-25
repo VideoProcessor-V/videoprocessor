@@ -296,7 +296,7 @@ namespace VpvTests
 		TEST_METHOD(MultiStageHookWithOutputIsOpaque)
 		{
 			pl_hook multi{}, outputOnly{}, early{};
-			multi.stages = static_cast<pl_hook_stage>(PL_HOOK_MAIN | PL_HOOK_OUTPUT);
+			multi.stages = static_cast<pl_hook_stage>(PL_HOOK_RGB | PL_HOOK_OUTPUT);
 			outputOnly.stages = PL_HOOK_OUTPUT;
 			early.stages = PL_HOOK_PRE_OUTPUT;
 			const std::vector<KnownHook> known = { { &early, HookKind::Static, 0, "test static" } };
@@ -339,7 +339,7 @@ vec4 hook() { return vec4(1); })"));
 			static const char text[] = R"(//!HOOK MAIN
 vec4 hook() { return vec4(random); })";
 			pl_hook mpvLike{};
-			mpvLike.stages = PL_HOOK_MAIN;
+			mpvLike.stages = PL_HOOK_RGB;
 			int fakeFn = 0;
 			mpvLike.hook = reinterpret_cast<pl_hook_res (*)(void*, const pl_hook_params*)>(&fakeFn);
 			auto& reg = TemporalShaderRegistry::Global();
