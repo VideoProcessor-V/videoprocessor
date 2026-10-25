@@ -39,10 +39,18 @@ VP-ONLY except the Bill-file hook (`wp23-bill-analysers.md`, UPSTREAMABLE).
 - Memory: 2 bytes x pixels per decoded frame (16.6 MB at 4K). Planes are recycled from a pool of
   at most 12 once nothing holds them (no per-frame allocation or zero-fill, audit M1); the pool is
   emptied when the store is switched off. Off: nothing allocated.
-- Decoded only when a full-luma reader exists (`Host::Configure(enabled, fullLumaReaders)`; the
-  call site passes optical flow on or source_resolution auto; WP-15 adds LED full coverage). Sparse
-  readers alone (scene, HDR, intent grids, subtitle probes) keep their cheaper own samples. The
-  record is measured either way (its own row pass).
+- Decoded only when a full-luma reader RUNS (`Host::FullLumaReaders`: NVOF only with optical flow,
+  look-ahead frames and running motion.estimation + motion.consumers; the source-resolution
+  look-ahead only in auto with scaling.rebase running; WP-15 adds LED full coverage). Sparse readers
+  alone (scene, HDR, intent grids, subtitle probes) keep their cheaper own samples.
+- The record is measured only when a running slot reads it (`recordReaders`; none on this branch,
+  consumers register in WP-13..16 behind their own slot's `Runs()`). With no reader running, an
+  arriving frame costs nothing: no job, no record, no plane (modularity sweep).
+- `frame_analysis_store` is in the Original pathway table (`OriginalPathway.h`, slots.json, the
+  manifest's config keys). The renderer side of that (`// key=` in ApplyOriginalPathwaySettings and
+  the validator line) is in `wp23-callsites.patch`, so the drift check and the
+  `OriginalPathwayOverridesAreRealKeysAndValues` test pass only with the patch applied (as for every
+  host-delivered key).
 - The plane is bound to the view it was decoded from (`Bind`/`Matches`, audit M2).
 
 ## Range model (explicit decision)

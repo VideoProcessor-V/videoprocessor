@@ -8,12 +8,13 @@
 //   conversion done (arrival)      frameAnalysis.OnArrival(...)
 //   RequestMotionInvalidate        frameAnalysis.OnDiscontinuity(cause)   (the shared epoch)
 //   UpdateQueueDelayHold           frameAnalysis.SetRingDepth(queue frames, look-ahead frames)
-//   settings apply                 frameAnalysis.Configure(settings.frameAnalysisStore && !Original)
+//   settings apply                 frameAnalysis.Configure(store key && !Original, FullLumaReaders(slots, ...))
 //
 // Everything else (records, epochs, the shared luma decode, the worker) lives here and in
 // VpFrameAnalysis / FrameAnalysisStore, tested on the CPU.
 
 #include "VpFrameAnalysis.h"
+#include <VP-V/core/SlotRegistry.h>
 
 #include <atomic>
 #include <cstdio>
@@ -31,20 +32,38 @@ namespace VpFrameAnalysis
 		Host(const Host&) = delete;
 		Host& operator=(const Host&) = delete;
 
+		// The full-luma readers that actually RUN (modularity sweep): the NVOF half luma only when the
+		// optical-flow engine feeds running motion slots, the source-resolution look-ahead only when
+		// it is in auto and scaling.rebase runs. A switched-off slot costs no decode.
+		static bool FullLumaReaders(const PipelineSlots::Registry& slots, bool opticalFlow, int motionAheadFrames,
+			bool sourceResolutionAuto)
+		{
+			using PipelineSlots::Id;
+			const bool nvof = opticalFlow && motionAheadFrames > 0 && slots.Runs(Id::MotionEstimation) &&
+				slots.Runs(Id::MotionConsumers);
+			const bool sourceLookahead = sourceResolutionAuto && slots.Runs(Id::ScalingRebase);
+			return nvof || sourceLookahead;
+		}
+
 		// frame_analysis_store (default off until the big test; the Original pathway never runs it).
-		// fullLumaReaders: some reader reads every pixel's luma (optical flow's half luma, the
-		// source-resolution look-ahead, LED full coverage). Only then is the shared plane decoded
-		// (audit M1): sparse readers alone (scene, HDR, intent grids, subtitle probes) are cheaper
-		// decoding their own samples. The records are measured either way.
-		void Configure(bool enabled, bool fullLumaReaders = true)
+		// fullLumaReaders (FullLumaReaders above; WP-15 adds LED full coverage): only then is the shared
+		// plane decoded (audit M1). recordReaders: a running slot reads the measured record groups;
+		// only then is the measurement pass run (none on this branch: consumers register in WP-13..16,
+		// each behind its own slot's Runs()). With neither, an arriving frame costs nothing.
+		void Configure(bool enabled, bool fullLumaReaders = false, bool recordReaders = false)
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			m_fullLumaReaders = fullLumaReaders;
+			m_recordReaders = recordReaders;
 			SharedFlag().store(enabled && fullLumaReaders, std::memory_order_release);
 			if (enabled == m_enabled) return;
 			m_enabled = enabled;
 			m_store.SetEnabled(enabled);
-			if (enabled) m_producer.Start();
+			if (enabled)
+			{
+				if (m_pendingDepth && m_pendingDepth != m_store.Depth()) m_store.Resize(m_pendingDepth);
+				m_producer.Start();
+			}
 			else
 			{
 				m_producer.Stop();
@@ -73,7 +92,9 @@ namespace VpFrameAnalysis
 		void SetRingDepth(int queueFrames, int lookaheadFrames)
 		{
 			const size_t depth = FrameAnalysis::RingDepth(queueFrames, lookaheadFrames);
-			if (depth != m_store.Depth()) m_store.Resize(depth);
+			std::lock_guard<std::mutex> lock(m_mutex);
+			m_pendingDepth = depth;   // off: remembered, applied when switched on
+			if (m_enabled && depth != m_store.Depth()) m_store.Resize(depth);
 		}
 
 		// A converted frame entered the queue (the conversion thread). picture: Bill's active-picture
@@ -84,11 +105,13 @@ namespace VpFrameAnalysis
 		{
 			uint64_t original = 0;
 			bool repeat = false;
-			bool decodePlane = false;
+			bool decodePlane = false, measure = false;
 			{
 				std::lock_guard<std::mutex> lock(m_mutex);
 				if (!m_enabled || !source.IsValid()) return;
 				decodePlane = m_fullLumaReaders;
+				measure = m_recordReaders;
+				if (!decodePlane && !measure) return;   // nothing runs that would read it
 				repeat = captureRepeat && m_haveUnique;
 				original = m_lastUnique;
 				if (!captureRepeat)
@@ -110,14 +133,15 @@ namespace VpFrameAnalysis
 			identity.sourceGeneration = source.generation;
 			if (repeat)
 			{
-				m_store.Begin(identity, FrameAnalysis::kMeasuredGroups);
-				if (m_store.MarkRepeat(seq, original))
+				m_store.Begin(identity, measure ? FrameAnalysis::kMeasuredGroups : 0u);
+				if (measure && m_store.MarkRepeat(seq, original))
 					return;   // the original's record serves the repeat
 			}
 			Job job;
 			job.identity = identity;
 			job.source = source;
 			job.decodePlane = decodePlane;
+			job.measure = measure;
 			m_producer.Submit(std::move(job));
 		}
 
@@ -176,7 +200,9 @@ namespace VpFrameAnalysis
 		FrameAnalysis::Store m_store;
 		Producer m_producer;
 		bool m_enabled = false;
-		bool m_fullLumaReaders = true;
+		bool m_fullLumaReaders = false;
+		bool m_recordReaders = false;
+		size_t m_pendingDepth = 0;
 		uint64_t m_lastUnique = 0;
 		bool m_haveUnique = false;
 	};

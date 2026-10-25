@@ -165,9 +165,9 @@ namespace FrameAnalysisProducerTestsNs
 
 		TEST_METHOD(NoPlaneWithoutAFullLumaReader)
 		{
-			// Audit M1: only sparse readers -> no shared decode; the record is still measured.
+			// Audit M1: only sparse readers -> no shared decode; a record reader still gets its record.
 			VpFrameAnalysis::Host host;
-			host.Configure(true, false);
+			host.Configure(true, false, true);
 			host.Worker().Stop();
 			Frame frame = Make(Kind::Uyvy, 1);
 			VpFrameAnalysis::Host::AttachIfEnabled(frame.source);
@@ -181,6 +181,52 @@ namespace FrameAnalysisProducerTestsNs
 			VpFrameAnalysis::Host::AttachIfEnabled(frame.source);
 			Assert::IsTrue(frame.source.sharedLuma != nullptr);
 			host.Configure(false);
+		}
+
+		TEST_METHOD(NothingRunsWithoutARunningReader)
+		{
+			// Modularity sweep: the store on but no full-luma reader and no record reader -> an
+			// arriving frame costs nothing (no job, no record, no plane).
+			VpFrameAnalysis::Host host;
+			host.Configure(true, false, false);
+			host.Worker().Stop();
+			Frame frame = Make(Kind::R210, 1);
+			VpFrameAnalysis::Host::AttachIfEnabled(frame.source);
+			Assert::IsTrue(frame.source.sharedLuma == nullptr);
+			host.OnArrival(1, frame.source, FrameAnalysis::Rect{}, 0, false);
+			host.Worker().Drain();
+			Assert::AreEqual(uint64_t(0), host.Worker().Processed());
+			FrameAnalysis::Record record;
+			Assert::IsTrue(host.Store().Read(1, FrameAnalysis::Use::SingleFrame, FrameAnalysis::kIdentity, record) ==
+				FrameAnalysis::ReadStatus::Missing);
+			// Ring depth while off is remembered, not allocated, and applied when switched on.
+			VpFrameAnalysis::Host off;
+			off.SetRingDepth(2, 2);
+			Assert::AreEqual(size_t(10), off.Store().Depth());
+			off.Configure(true);
+			Assert::AreEqual(size_t(6), off.Store().Depth());
+			off.Configure(false);
+			host.Configure(false);
+		}
+
+		TEST_METHOD(FullLumaReadersFollowTheRunningSlots)
+		{
+			using PipelineSlots::Id;
+			PipelineSlots::Registry slots;
+			Assert::IsTrue(VpFrameAnalysis::Host::FullLumaReaders(slots, true, 4, true));
+			Assert::IsTrue(VpFrameAnalysis::Host::FullLumaReaders(slots, false, 0, true), L"source look-ahead");
+			Assert::IsTrue(VpFrameAnalysis::Host::FullLumaReaders(slots, true, 4, false), L"NVOF");
+			Assert::IsFalse(VpFrameAnalysis::Host::FullLumaReaders(slots, true, 0, false), L"no look-ahead frames: no NVOF");
+			// scaling.rebase off: the source-resolution look-ahead does not run, no decode for it.
+			slots.SetEnabled(Id::ScalingRebase, false);
+			Assert::IsFalse(VpFrameAnalysis::Host::FullLumaReaders(slots, false, 0, true));
+			// motion consumers off: the engine's half luma is not needed.
+			slots.SetEnabled(Id::MotionConsumers, false);
+			Assert::IsFalse(VpFrameAnalysis::Host::FullLumaReaders(slots, true, 4, true));
+			// The Original pathway: every VP reader off.
+			PipelineSlots::Registry original;
+			original.ApplyOriginalPathway();
+			Assert::IsFalse(VpFrameAnalysis::Host::FullLumaReaders(original, true, 4, true));
 		}
 
 		TEST_METHOD(RangeModelIsOneStudioMapping)
@@ -338,7 +384,7 @@ namespace FrameAnalysisProducerTestsNs
 			FrameAnalysis::Record record;
 			Assert::IsTrue(host.Store().Read(1, FrameAnalysis::Use::SingleFrame, FrameAnalysis::kIdentity, record) ==
 				FrameAnalysis::ReadStatus::Disabled);
-			host.Configure(true);
+			host.Configure(true, true, true);
 			host.SetRingDepth(4, 4);
 			Assert::AreEqual(size_t(10), host.Store().Depth());
 			VpFrameAnalysis::Host::AttachIfEnabled(frame.source);

@@ -159,6 +159,7 @@
         },
         "tools": [],
         "config_keys": [
+          "frame_analysis_store",
           "label_detector",
           "rebase_kernel_match",
           "source_coding_fixes",

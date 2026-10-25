@@ -242,7 +242,8 @@
         "subtitle_fit",
         "subtitle_reposition",
         "subtitle_type",
-        "source_coding_fixes"
+        "source_coding_fixes",
+        "frame_analysis_store"
       ],
       "planned_keys": [
         "label_detector"
@@ -286,7 +287,8 @@
           "source_resolution": "native",
           "source_coding_fixes": "off",
           "source_resolution_latch_fixes": "off",
-          "source_resolution_cut_fixes": "off"
+          "source_resolution_cut_fixes": "off",
+          "frame_analysis_store": "off"
         }
       },
       "zone": "host",

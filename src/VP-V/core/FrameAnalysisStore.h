@@ -35,6 +35,12 @@
 // (vp-no-silent-fallbacks): FallbackEntry(consumer, status) gives
 //   "Fallbacks engaged: frame analysis (<consumer>: <why>)".
 //
+// Order rule (modularity sweep): a record describes the SOURCE as input.source_analysis saw it
+// (order 40, before every movable module). A consumer slot that reads it must declare that it wants
+// pre-module statistics in SlotContracts, so OrderValidator sees the dependency; a consumer placed
+// after a module that changes the picture (re-base, deband, encoding repair) must not treat the
+// record as describing its own input. Each consumer registers behind its own slot's Runs().
+//
 // Threads: Begin() on the arrival thread, Publish*() on the producer's worker, Read*() on any
 // thread (render loop, look-ahead walks). One mutex; every critical section is a slot copy, never
 // a computation, so a reader is never held up by the producer's work.
