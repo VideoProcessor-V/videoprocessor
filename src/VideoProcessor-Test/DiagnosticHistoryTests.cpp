@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include <DiagnosticHistory.h>
+#include <VP-V/modules/control/diagnostics/DiagnosticHistory.h>
 
 #include <atomic>
 #include <cstring>

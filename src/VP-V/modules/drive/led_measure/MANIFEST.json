@@ -11,7 +11,12 @@
     "src/VP-V/modules/drive/led_measure/LedMeasurement.h",
     "src/VP-V/modules/drive/led_measure/LedLookahead.h",
     "src/VP-V/modules/drive/led_measure/ReadbackRing.h",
-    "src/VideoProcessor-Lib/led/LedMeasurementHook.cpp"
+    "src/VP-V/modules/drive/led_measure/LedMeasurementHook.cpp",
+    "src/VP-V/modules/drive/led_measure/LedMeasurementHook.h",
+    "src/VP-V/modules/drive/led_measure/FrameStats.h"
+  ],
+  "forwarding_headers": [
+    "src/VideoProcessor-Lib/led/LedMeasurementHook.h"
   ],
   "components": {
     "files": {
@@ -26,13 +31,25 @@
     },
     "tools": [],
     "config_keys": [
-      "led_compensation",
-      "led_protect"
+      "apl_persist_ms",
+      "apl_weights",
+      "cut_threshold",
+      "fade_min_slope",
+      "fade_ms",
+      "highlight_percentile",
+      "highlight_persist_ms",
+      "led_highlight_grain_suppress",
+      "led_lookahead_ms",
+      "led_peak_full_coverage",
+      "led_picture_only",
+      "lookahead",
+      "script_highlight_code",
+      "script_lookahead"
     ],
     "upstream_modules": [
       "colour.appearance"
     ]
   },
-  "fallback_when_missing": "Holdover keeps the last drive.",
-  "fallback_entry": "LED: drive held (measurement unavailable)"
+  "fallback_when_missing": "Compensate holds the LED at full drive while its measurement is off (slot off or the pass disabled by libplacebo): 'LED drive (held at full: measurement off (...))' (owner 2026-10-25). Readbacks late or frames not measured: the controllers keep the last statistics, shown as 'LED measurement (...)'.",
+  "fallback_entry": "LED measurement (<reason>; the LED follows the last statistics)"
 }

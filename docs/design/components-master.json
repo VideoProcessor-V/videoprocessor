@@ -71,7 +71,8 @@
         "src/VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h",
         "src/VP-V/modules/input/signal/DvGpuUnpackSession.h",
         "src/VP-V/modules/input/signal/DvTunnelMetadataExtension.h",
-        "src/VideoProcessor-Lib/video_frame_formatter/DolbyVisionMetadataExtension.h"
+        "src/VideoProcessor-Lib/video_frame_formatter/DolbyVisionMetadataExtension.h",
+        "src/VP-V/modules/input/signal/DvCompareCaptureSink.h"
       ],
       "components": {
         "files": {
@@ -279,6 +280,7 @@
         "src/VP-V/modules/scaling/rebase/KernelInverse.h",
         "src/VideoProcessor-Lib/vprenderer/SourceRebase.cpp",
         "src/VideoProcessor-Lib/vprenderer/SourceRebase.h",
+        "src/VP-V/modules/scaling/rebase/EntranceGpuDrain.h",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
       ],
       "components": {
@@ -293,6 +295,7 @@
         "tools": [],
         "config_keys": [
           "entrance_rebase",
+          "entrance_gpu_drain",
           "rebase_kernel_match",
           "source_resolution"
         ],
@@ -853,7 +856,9 @@
         "src/VP-V/modules/drive/led_measure/LedMeasurement.h",
         "src/VP-V/modules/drive/led_measure/LedLookahead.h",
         "src/VP-V/modules/drive/led_measure/ReadbackRing.h",
-        "src/VideoProcessor-Lib/led/LedMeasurementHook.cpp"
+        "src/VP-V/modules/drive/led_measure/LedMeasurementHook.cpp",
+        "src/VP-V/modules/drive/led_measure/LedMeasurementHook.h",
+        "src/VP-V/modules/drive/led_measure/FrameStats.h"
       ],
       "components": {
         "files": {
@@ -868,14 +873,26 @@
         },
         "tools": [],
         "config_keys": [
-          "led_compensation",
-          "led_protect"
+          "apl_persist_ms",
+          "apl_weights",
+          "cut_threshold",
+          "fade_min_slope",
+          "fade_ms",
+          "highlight_percentile",
+          "highlight_persist_ms",
+          "led_highlight_grain_suppress",
+          "led_lookahead_ms",
+          "led_peak_full_coverage",
+          "led_picture_only",
+          "lookahead",
+          "script_highlight_code",
+          "script_lookahead"
         ],
         "upstream_modules": [
           "colour.appearance"
         ]
       },
-      "fallback_when_missing": "Holdover keeps the last drive."
+      "fallback_when_missing": "Compensate holds the LED at full drive while its measurement is off (slot off or the pass disabled by libplacebo): 'LED drive (held at full: measurement off (...))' (owner 2026-10-25). Readbacks late or frames not measured: the controllers keep the last statistics, shown as 'LED measurement (...)'."
     },
     {
       "slot": "drive.led_compensation",
@@ -884,12 +901,19 @@
       "code_location": "partly migrated",
       "live_files": [
         "src/VP-V/modules/drive/led_compensation/LedDriveModule.cpp",
-        "src/VP-V/modules/drive/led_compensation/LedDriveArbiter.cpp",
         "src/VP-V/modules/drive/led_compensation/LedDriveModule.h",
-        "src/VP-V/modules/drive/led_compensation/LedDriveArbiter.h",
         "src/VP-V/modules/drive/led_compensation/LedDriveHoldover.cpp",
         "src/VP-V/modules/drive/led_compensation/LedDriveHoldover.h",
-        "shaders/LED compensation.glsl"
+        "shaders/LED compensation.glsl",
+        "src/VP-V/modules/drive/led_compensation/LedController.cpp",
+        "src/VP-V/modules/drive/led_compensation/LedController.h",
+        "src/VP-V/modules/drive/led_compensation/LedRawTransfer.cpp",
+        "src/VP-V/modules/drive/led_compensation/LedRawTransfer.h",
+        "src/VP-V/modules/drive/led_compensation/LedDriveConfig.h",
+        "src/VP-V/modules/drive/led_compensation/DynamicDriveHost.cpp",
+        "src/VP-V/modules/drive/led_compensation/DynamicDriveHost.h",
+        "src/VP-V/modules/drive/led_compensation/DynamicDriveFrame.cpp",
+        "src/VP-V/modules/drive/led_compensation/DynamicDriveFrame.h"
       ],
       "components": {
         "files": {
@@ -906,13 +930,17 @@
         },
         "tools": [],
         "config_keys": [
-          "led_compensation"
+          "adaptive_gamma",
+          "gamma_boost",
+          "intent_black",
+          "led_drive",
+          "shadow_lift_ansi"
         ],
         "upstream_modules": [
           "drive.led_measure"
         ]
       },
-      "fallback_when_missing": "Failure -> drive held at full, no compensation."
+      "fallback_when_missing": "Compensation unavailable (shader not loaded, disabled by libplacebo, or slot off) -> compensate holds the LED at full drive (led_ceiling); script mode is not held. A configured gamma boost that cannot apply shows 'gamma boost (not applied: ...)'."
     },
     {
       "slot": "drive.black_level",
@@ -947,6 +975,9 @@
       "live_files": [
         "src/VP-V/modules/output/calibration_lut/CalibrationLutStage.h",
         "src/VP-V/modules/output/calibration_lut/CalibrationLutStage.cpp",
+        "src/VP-V/modules/output/calibration_lut/CalibrationLutHost.h",
+        "src/VP-V/modules/output/calibration_lut/CalibrationLutHost.cpp",
+        "src/VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h",
         "src/VP-V/modules/output/calibration_lut/calibration",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.cpp",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.h",
@@ -967,17 +998,19 @@
           "ArgyllCMS (optional, building the LUT)"
         ],
         "config_keys": [
-          "calibration_lut",
+          "calibration_lut_bt2020",
+          "calibration_lut_bt709",
           "calibration_lut_enabled",
-          "calibration_lut_input_gamma",
           "calibration_lut_input_transfer",
+          "calibration_lut_p3_d65",
+          "calibration_lut_reload",
           "calibration_lut_stage"
         ],
         "upstream_modules": [
           "drive.black_level"
         ]
       },
-      "fallback_when_missing": "Until the VP stage exists, libplacebo's target LUT (current behaviour)."
+      "fallback_when_missing": "The VP stage fails: the LUT runs as libplacebo's target LUT (the old order, before the LED compensation) for the renderer instance. A LUT dropped after a libplacebo render error engages the same id (no projector LUT for the renderer instance)."
     },
     {
       "slot": "output.dither",
@@ -1045,7 +1078,8 @@
           "dejudder_gate",
           "render_ahead",
           "render_ahead_queue_credit",
-          "render_ahead_utilisation"
+          "render_ahead_utilisation",
+          "repeat_render_reuse"
         ],
         "upstream_modules": [
           "output.dither"
@@ -1059,18 +1093,18 @@
       "status": "built",
       "code_location": "partly migrated",
       "live_files": [
-        "src/VP-V/modules/drive/projector_control/LedController.cpp",
         "src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.cpp",
         "src/VP-V/modules/drive/projector_control/ProjectorDriver.cpp",
         "src/VP-V/modules/drive/projector_control/SerialPort.cpp",
-        "src/VP-V/modules/drive/projector_control/LedController.h",
         "src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.h",
         "src/VP-V/modules/drive/projector_control/ProjectorDriver.h",
         "src/VP-V/modules/drive/projector_control/SerialPort.h",
         "src/VP-V/modules/drive/projector_control/ConnectionTest.cpp",
         "src/VP-V/modules/drive/projector_control/ConnectionTest.h",
         "src/VP-V/modules/drive/projector_control/LedClock.h",
-        "src/VP-V/modules/drive/projector_control/LedShutdownRestore.h"
+        "src/VP-V/modules/drive/projector_control/LedShutdownRestore.h",
+        "src/VP-V/modules/drive/projector_control/LedDriveArbiter.cpp",
+        "src/VP-V/modules/drive/projector_control/LedDriveArbiter.h"
       ],
       "components": {
         "files": {
@@ -1085,11 +1119,11 @@
         },
         "tools": [],
         "config_keys": [
-          "led_compensation"
+          "projector"
         ],
         "upstream_modules": []
       },
-      "fallback_when_missing": "No serial projector -> drive off."
+      "fallback_when_missing": "No serial projector (or another process owns the port) -> dry run: the LED is not driven and the picture is not compensated."
     },
     {
       "slot": "control.net_runtime",
@@ -1155,6 +1189,14 @@
         "src/VP-V/modules/control/diagnostics/CrashState.h",
         "src/VP-V/modules/control/diagnostics/StateReport.h",
         "src/VP-V/modules/control/diagnostics/StateReportSettings.h",
+        "src/VP-V/modules/control/diagnostics/DiagnosticHistory.h",
+        "src/VP-V/modules/control/diagnostics/RendererDiagnosticCodes.h",
+        "src/VP-V/modules/control/diagnostics/StoreZipWriter.h",
+        "src/VP-V/modules/control/diagnostics/RawCaptureRecorder.cpp",
+        "src/VP-V/modules/control/diagnostics/RawCaptureRecorder.h",
+        "src/VP-V/modules/control/diagnostics/RawCaptureCorpus.h",
+        "src/VP-V/modules/control/diagnostics/DiagnosticsAdapter.h",
+        "src/VP-V/modules/control/diagnostics/DiagnosticsReportRun.h",
         "src/VP-V/core/SlotTiming.h",
         "src/VP-V/core/FallbackStatus.h",
         "src/VideoProcessor-GUI/StatsOverlayWindow.cpp",
@@ -1170,7 +1212,12 @@
           "optional": []
         },
         "tools": [],
-        "config_keys": [],
+        "config_keys": [
+          "auto_report",
+          "raw_capture",
+          "report_thumbnail",
+          "state_report"
+        ],
         "upstream_modules": []
       },
       "fallback_when_missing": "Owns the format: 'Fallbacks engaged: none' when clean."

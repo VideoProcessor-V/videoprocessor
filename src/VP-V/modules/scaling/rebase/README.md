@@ -161,7 +161,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 
 ## Settings
 
-- Keys: `source_resolution`, `rebase_kernel_match`.
+- Keys: `source_resolution`, `rebase_kernel_match`, `entrance_gpu_drain`.
 - Planned keys (not yet implemented): `entrance_rebase`.
 - Tiers: Classic off; Low off; Mid/Upper on.
 - VP-V page, Scaling tab: tiers Classic / Low / Mid; tier keys `adaptive_downscale`, `adaptive_w_base`, `source_resolution`.

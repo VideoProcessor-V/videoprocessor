@@ -25,7 +25,8 @@
     "src/VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h",
     "src/VP-V/modules/input/signal/DvGpuUnpackSession.h",
     "src/VP-V/modules/input/signal/DvTunnelMetadataExtension.h",
-    "src/VideoProcessor-Lib/video_frame_formatter/DolbyVisionMetadataExtension.h"
+    "src/VideoProcessor-Lib/video_frame_formatter/DolbyVisionMetadataExtension.h",
+    "src/VP-V/modules/input/signal/DvCompareCaptureSink.h"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/DolbyVisionTunnelGate.h",

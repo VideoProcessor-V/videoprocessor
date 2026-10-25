@@ -99,8 +99,8 @@
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="..\VideoProcessor-Lib\led\LedMeasurementHook.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\led\LedRawTransfer.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\led_measure\LedMeasurementHook.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\led_compensation\LedRawTransfer.cpp" />
     <ClCompile Include="..\VP-V\modules\output\dither\CustomHookChain.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\consumers\DejudderWarp.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\consumers\FrameInterpolator.cpp" />
@@ -117,6 +117,7 @@
     <ClCompile Include="..\VP-V\modules\input\signal\GpuDolbyVisionTunnelUnpack.cpp" />
     <ClCompile Include="..\VP-V\modules\input\capture\EarlyUpload.cpp" />
     <ClCompile Include="..\VP-V\modules\scaling\output\AdaptiveDownscale.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\led_compensation\DynamicDriveFrame.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\SourceRebase.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\SourceResolutionMonitor.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\VpDebander.cpp" />
@@ -131,6 +132,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\HookSegment.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutHost.cpp" />
     <ClCompile Include="LibplaceboPluginExports.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\LibplaceboDisplayLut.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\LibplaceboRenderParameters.cpp" />

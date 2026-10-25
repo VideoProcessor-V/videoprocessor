@@ -8044,6 +8044,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         estQpel->setToolTip(QStringLiteral(
             "Refines trusted motion to a quarter of a source pixel: sharper in-between frames on slow pans, "
             "no stepping."));
+        auto* estStillZero = addChoice(QStringLiteral("Identical blocks are still"),
+            QStringLiteral("dejudder_est_still_zero"), { QStringLiteral("on"), QStringLiteral("off") });
+        estStillZero->setToolTip(QStringLiteral(
+            "A block that is pixel-for-pixel the same in both frames gets exactly no motion, so a repeated or "
+            "static picture is shown unchanged between frames (off: the search's own small vectors)."));
         auto* estSplit = addChoice(QStringLiteral("Split poorly matched blocks"),
             QStringLiteral("dejudder_est_split"), { QStringLiteral("on"), QStringLiteral("off") });
         estSplit->setToolTip(QStringLiteral(
@@ -8163,6 +8168,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         MarkGpuCost(form, vectorSmooth, 1);
         MarkGpuCost(form, estCandidates, 1);
         MarkGpuCost(form, estQpel, 1);
+        MarkGpuCost(form, estStillZero, 1);
         MarkGpuCost(form, estSplit, 1);
         MarkGpuCost(form, searchRange, 1);
         MarkGpuCost(form, globalTwo, 1);
@@ -9519,6 +9525,17 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "does not carry its sub-code residual into it. Works with the de-judder off too "
             "(the motion matcher then runs for the mask alone). Needs the temporal sigma-delta: Dither set to VP's "
             "motion-aware dither, or the sigma-delta shader selected in the shader list."));   // audit 2026-10-16
+        // WP-24 (draft, default off until its GPU byte-identity check passes): captured repeats drawn from
+        // the rendered-picture cache with the OUTPUT stage only. The renderer forces it off in the Original
+        // pathway and with output.presentation switched off.
+        auto* repeatReuse = addChoice(QStringLiteral("Reuse the picture on captured repeats (draft)"),
+            QStringLiteral("repeat_render_reuse"), { QStringLiteral("on"), QStringLiteral("off") });
+        repeatReuse->setToolTip(QStringLiteral(
+            "Key repeat_render_reuse. When the capture repeats a frame (24p in 30, 30p in 60), draw the "
+            "repeat from the first present's cached picture and run only the output stage (dither keeps "
+            "running), instead of rendering the whole chain again. Draft: off until its GPU check passes. "
+            "Anything that would change the picture refuses the reuse (shown in Ctrl+I and Fallbacks "
+            "engaged). Always off in the Original pathway and with output.presentation switched off."));
         auto* grainTolerance = addText(QStringLiteral("Dither carry on grain (1 to 8)"),
             QStringLiteral("dither_grain_tolerance_scale"));
         grainTolerance->setValidator(new QDoubleValidator(1.0, 8.0, 2, grainTolerance));
@@ -9619,7 +9636,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             // Every switch says its default (audit 2026-10-14c).
             const std::pair<QComboBox*, const char*> switchDefaults[] = {
                 { rolloff, "Default off." }, { fadeMatch, "Default on." }, { estCandidates, "Default on." },
-                { estQpel, "Default on." }, { estGate, "Default on." },
+                { estQpel, "Default on." }, { estStillZero, "Default on." }, { estGate, "Default on." },
                 { estSplit, "Default off: with the 4.5 match tolerance and pixel-by-pixel decisions, splitting cost "
                     "de-judder benefit on real footage." },
                 { globalTwo, "Default on." }, { regional, "Default on." }, { pixelTrust, "Default on." },
@@ -10903,7 +10920,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "capture_path", "gpu" }, { "capture_upload", "auto" }, { "source_range", "auto" }, { "source_resolution", "auto" }, { "deband_vp", "off" }, { "low_bitrate_handling", "auto" }, { "cnn_residual_stabilise", "on" }, { "ssim_residual_stabilise", "on" }, { "ssim_bitrate_aware", "on" }, { "optical_flow", "on" }, { "optical_flow_global", "on" }, { "rebase_kernel_match", "on" }, { "source_resolution_text_guard", "on" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
                     { "dejudder_warp_stage", "rendered" }, { "dejudder_global_prior", "on" },
                     { "dejudder_vector_smooth", "on" }, { "dejudder_occlusion_fill", "off" },
-                    { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },
+                    { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_still_zero", "on" }, { "dejudder_est_gate", "on" },
                     { "dejudder_est_split", "off" }, { "dejudder_motion_rolloff", "off" }, { "dejudder_global_two", "on" },
                     { "dejudder_regional_hold", "on" }, { "dejudder_pixel_trust", "on" }, { "dejudder_verify", "off" },
                     { "dejudder_landing_check", "on" }, { "native_rgb_ingest", "on" }, { "dv_tunnel_gpu_unpack", "on" }, { "dv_trims", "on" }, { "dv_tone_mapping", "libplacebo" }, { "dejudder_pulldown", "off" },

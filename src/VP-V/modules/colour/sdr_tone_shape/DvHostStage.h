@@ -19,10 +19,11 @@
 //   (phase 1:)       the Dolby-style curve hook (dv_tone_mapping; DvDolbyStyle.h), the L8 / L2
 //                     trims at PRE_OUTPUT (dv_trims; DvTrimSelection.h, shaders/DV trims.glsl), the
 //                     reference conditions of the last DV picture (for the CAM16 stage, Stage 13),
-//                     and the DV comparison capture (DvCompareCapture.h);
+//                     and the trim choice the DV comparison capture reads (TakeTrimsSelection;
+//                     the capture itself is the WP-17 diagnostics adapter's, in the host);
 //   SkipPlaneDeband - libplacebo's plane deband dropped on the raw tunnel planes, logged once;
 //   ReleaseHooks    - the trims hook released with the device;
-//   ToggleCompareCapture - the dv_compare_capture shortcut (plugin API).
+//   (the dv_compare_capture shortcut: the host's RenderedFrameCaptures::Invoke, WP-17).
 // Fallbacks go through the host's registry (the two callbacks), so every entry stays under
 // "Fallbacks engaged" exactly as before (ADR-0001, vp-no-silent-fallbacks).
 //
@@ -154,11 +155,15 @@ public:
 		m_trimsConfigured = false;
 	}
 
-	// feat/dv-l8 WIP (plugin API 43): the dv_compare_capture shortcut (DvCompareCapture.h).
-	// TODO(WP-11, audit M-2): once feat/wp11-status is on integ/batch1, the renderer answers
-	// InvokeModuleCommand("vp", "dv_compare_capture") with this, and the dedicated
-	// IRenderer::ToggleDvCompareCapture virtual (Bill's interface) is removed.
-	std::string ToggleCompareCapture() { return m_compare.Toggle(); }
+	// The DV comparison capture (dv_compare_capture) is the WP-17 diagnostics adapter's
+	// (VpDiagnostics::RenderedFrameCaptures, the one caller in the host, group D 2026-10-25). It reads
+	// this frame's trim choice from here: the selection once per evaluation (null when none), and
+	// the display peak it was chosen for.
+	const DvTrimSelection::Selection* TakeTrimsSelection()
+	{
+		return std::exchange(m_trimsEvaluated, false) ? &m_trimsSelection : nullptr;
+	}
+	double TrimsTargetNits() const { return m_trimsTargetNits; }
 
 	// The reference viewing conditions of the last DV picture (for the later CAM16 stage).
 	const DvDolbyStyle::ReferenceConditions& ReferenceConditions() const { return m_referenceConditions; }
@@ -289,11 +294,7 @@ public:
 			m_pending.gammaSignal = gammaSignal;
 			m_pending.peak = display.hdr.max_luma;
 		}
-		m_compare.Configure(f.compareFolder);   // feat/dv-l8 WIP: the Config folder
-		if (m_compare.Enabled())   // feat/dv-l8: DV comparison capture (diagnostic; VP_DV_COMPARE_PATH)
-			m_compare.OnRender(f.state, f.rawFrame, f.counter,
-				f.state.dolbyVisionTunnel ? f.dm : nullptr, f.trims,
-				std::exchange(m_trimsEvaluated, false) ? &m_trimsSelection : nullptr, m_trimsTargetNits);
+		// The comparison capture runs in the host through the WP-17 adapter (TakeTrimsSelection).
 	}
 
 	// PRE_OUTPUT, phase 2: after the S2 segment collected (collected = how many trims hooks it
@@ -378,7 +379,6 @@ private:
 	DvTrimSelection::Selection m_trimsSelection;
 	bool m_trimsEvaluated = false;
 	double m_trimsTargetNits = 0.0;
-	DvCompareCapture::Recorder m_compare{ DvCompareCapture::Options::FromEnvironment() };
 	// feat/dv-l8 task 5: the Dolby-style DV tone mapping (dv_tone_mapping), its status, and the
 	// reference viewing conditions of the last DV picture (for the later CAM16 stage).
 	DvDolbyStyle::ToneSwitch m_toneSwitch;

@@ -393,7 +393,8 @@
           "optical_flow": "off",
           "motion_ahead_frames": "0",
           "motion_history_fixes": "off",
-          "dejudder_estimate_ahead": "off"
+          "dejudder_estimate_ahead": "off",
+          "dejudder_est_still_zero": "off"
         }
       },
       "zone": "front_end",
@@ -418,7 +419,8 @@
       },
       "settings_keys": [
         "source_resolution",
-        "rebase_kernel_match"
+        "rebase_kernel_match",
+        "entrance_gpu_drain"
       ],
       "planned_keys": [
         "entrance_rebase"
@@ -456,7 +458,8 @@
       "original_pathway": {
         "mode": "off",
         "settings": {
-          "rebase_kernel_match": "off"
+          "rebase_kernel_match": "off",
+          "entrance_gpu_drain": "off"
         }
       },
       "zone": "front_end",
@@ -1414,14 +1417,26 @@
         "lookahead": "LED look-ahead (ms-based)"
       },
       "settings_keys": [
-        "led_compensation",
-        "led_protect"
+        "apl_persist_ms",
+        "apl_weights",
+        "cut_threshold",
+        "fade_min_slope",
+        "fade_ms",
+        "highlight_percentile",
+        "highlight_persist_ms",
+        "led_highlight_grain_suppress",
+        "led_lookahead_ms",
+        "led_peak_full_coverage",
+        "led_picture_only",
+        "lookahead",
+        "script_highlight_code",
+        "script_lookahead"
       ],
       "planned_keys": [],
       "tiers": "not tiered",
       "fallback": {
-        "entry": "LED: drive held (measurement unavailable)",
-        "behaviour": "Holdover keeps the last drive."
+        "entry": "LED measurement (<reason>; the LED follows the last statistics)",
+        "behaviour": "Compensate holds the LED at full drive while its measurement is off (slot off or the pass disabled by libplacebo): 'LED drive (held at full: measurement off (...))' (owner 2026-10-25). Readbacks late or frames not measured: the controllers keep the last statistics, shown as 'LED measurement (...)'."
       },
       "upstream": [
         "colour.appearance"
@@ -1434,7 +1449,8 @@
           "LED correlation harness"
         ],
         "contract": [
-          "measures after Stage 13, before compensation"
+          "measures after Stage 13, before compensation",
+          "picture-only masks (Dynamic Drive adapter tests)"
         ],
         "chain": [
           "LED + subtitles at a 2-frame queue"
@@ -1471,13 +1487,17 @@
         "lookahead": "LED look-ahead"
       },
       "settings_keys": [
-        "led_compensation"
+        "adaptive_gamma",
+        "gamma_boost",
+        "intent_black",
+        "led_drive",
+        "shadow_lift_ansi"
       ],
       "planned_keys": [],
       "tiers": "not tiered",
       "fallback": {
-        "entry": "LED compensation: off (shader did not load)",
-        "behaviour": "Failure -> drive held at full, no compensation."
+        "entry": "LED drive (held at full: picture compensation unavailable (<reason>))",
+        "behaviour": "Compensation unavailable (shader not loaded, disabled by libplacebo, or slot off) -> compensate holds the LED at full drive (led_ceiling); script mode is not held. A configured gamma boost that cannot apply shows 'gamma boost (not applied: ...)'."
       },
       "upstream": [
         "drive.led_measure"
@@ -1486,10 +1506,13 @@
       "tests": {
         "placeholder": null,
         "isolation": [
-          "LED compensation shader tests"
+          "LED compensation shader tests",
+          "LedController tests",
+          "Dynamic Drive adapter tests"
         ],
         "contract": [
-          "CNTR never above need"
+          "CNTR never above need",
+          "compensation unavailable holds full drive, visibly"
         ],
         "chain": [
           "LED + Stage 13 + LUT + black level"
@@ -1571,7 +1594,7 @@
       "order": 250,
       "status": "partial",
       "hook_point": "PRE_OUTPUT",
-      "purpose": "The LAST colour op: SDR target -> projector codes, applied BY VP at the end of its PRE_OUTPUT hooks, after LED compensation and black level. Today it is libplacebo's target LUT, which runs BEFORE VP's hooks (wrong order).",
+      "purpose": "The LAST colour op: SDR target -> projector codes, applied BY VP at the end of its PRE_OUTPUT hooks, after LED compensation and black level (calibration_lut_stage vp). The default is still libplacebo's target LUT, which runs BEFORE VP's hooks (wrong order).",
       "contract": {
         "input": "final target-light picture",
         "output": "projector codes",
@@ -1580,18 +1603,20 @@
         "lookahead": "none"
       },
       "settings_keys": [
-        "calibration_lut",
+        "calibration_lut_bt2020",
+        "calibration_lut_bt709",
         "calibration_lut_enabled",
-        "calibration_lut_input_gamma",
-        "calibration_lut_input_transfer"
+        "calibration_lut_input_transfer",
+        "calibration_lut_p3_d65",
+        "calibration_lut_stage"
       ],
       "planned_keys": [
-        "calibration_lut_stage"
+        "calibration_lut_reload"
       ],
       "tiers": "not tiered",
       "fallback": {
-        "entry": "Calibration LUT: libplacebo target LUT (VP stage unavailable)",
-        "behaviour": "Until the VP stage exists, libplacebo's target LUT (current behaviour)."
+        "entry": "calibration LUT (the VP stage failed; libplacebo's target LUT (before the LED compensation))",
+        "behaviour": "The VP stage fails: the LUT runs as libplacebo's target LUT (the old order, before the LED compensation) for the renderer instance. A LUT dropped after a libplacebo render error engages the same id (no projector LUT for the renderer instance)."
       },
       "upstream": [
         "drive.black_level"
@@ -1612,7 +1637,8 @@
         ]
       },
       "open_items": [
-        "move into VP's LAST output hook via pl_shader_custom_lut + BTB/WTW late restore (barrier R1; owner agreed); LED measurement then sees target light, not projector codes; check OutputEncodingRepair"
+        "the VP stage (calibration_lut_stage vp) is built; open: its GPU test, the OutputEncodingRepair check, switching the default after measurement (LED measurement then sees target light, not projector codes)",
+        "calibration_lut_reload (auto = VP's file probe | apply = Bill's explicit Apply; the Original pathway selects apply): the policy is in CalibrationLutHostPolicy.h; wire the key with the Bill merge (WP-21) and the settings readers (WP-18)"
       ],
       "decisions": [
         "ADR-0013"
@@ -1705,7 +1731,8 @@
         "dejudder_gate",
         "render_ahead",
         "render_ahead_queue_credit",
-        "render_ahead_utilisation"
+        "render_ahead_utilisation",
+        "repeat_render_reuse"
       ],
       "planned_keys": [],
       "tiers": "not tiered",
@@ -1738,7 +1765,8 @@
       "original_pathway": {
         "mode": "upstream form",
         "settings": {
-          "render_ahead": "off"
+          "render_ahead": "off",
+          "repeat_render_reuse": "off"
         }
       },
       "zone": "present",
@@ -1761,13 +1789,13 @@
         "lookahead": "LED look-ahead"
       },
       "settings_keys": [
-        "led_compensation"
+        "projector"
       ],
       "planned_keys": [],
       "tiers": "not tiered",
       "fallback": {
-        "entry": "Projector: not connected (LED drive off)",
-        "behaviour": "No serial projector -> drive off."
+        "entry": "projector (not connected: <error>; LED drive off (dry run))",
+        "behaviour": "No serial projector (or another process owns the port) -> dry run: the LED is not driven and the picture is not compensated."
       },
       "upstream": [],
       "fingerprint": null,
@@ -1775,9 +1803,11 @@
         "placeholder": null,
         "isolation": [
           "BarcoAsciiDriver tests",
-          "LedController tests"
+          "LedDriveArbiter tests"
         ],
-        "contract": [],
+        "contract": [
+          "dry run engages the projector fallback (DynamicDriveAdapterTests)"
+        ],
         "chain": []
       },
       "open_items": [
@@ -1859,7 +1889,7 @@
         "delay_share": "n/a",
         "lookahead": "n/a"
       },
-      "settings_keys": [],
+      "settings_keys": ["state_report", "raw_capture", "auto_report", "report_thumbnail"],
       "planned_keys": [],
       "tiers": "n/a",
       "fallback": {

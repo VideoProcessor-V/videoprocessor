@@ -7,17 +7,25 @@
   "code_location": "partly migrated",
   "live_files": [
     "src/VP-V/modules/drive/led_compensation/LedDriveModule.cpp",
-    "src/VP-V/modules/drive/led_compensation/LedDriveArbiter.cpp",
     "src/VP-V/modules/drive/led_compensation/LedDriveModule.h",
-    "src/VP-V/modules/drive/led_compensation/LedDriveArbiter.h",
     "src/VP-V/modules/drive/led_compensation/LedDriveHoldover.cpp",
     "src/VP-V/modules/drive/led_compensation/LedDriveHoldover.h",
-    "shaders/LED compensation.glsl"
+    "shaders/LED compensation.glsl",
+    "src/VP-V/modules/drive/led_compensation/LedController.cpp",
+    "src/VP-V/modules/drive/led_compensation/LedController.h",
+    "src/VP-V/modules/drive/led_compensation/LedRawTransfer.cpp",
+    "src/VP-V/modules/drive/led_compensation/LedRawTransfer.h",
+    "src/VP-V/modules/drive/led_compensation/LedDriveConfig.h",
+    "src/VP-V/modules/drive/led_compensation/DynamicDriveHost.cpp",
+    "src/VP-V/modules/drive/led_compensation/DynamicDriveHost.h",
+    "src/VP-V/modules/drive/led_compensation/DynamicDriveFrame.cpp",
+    "src/VP-V/modules/drive/led_compensation/DynamicDriveFrame.h"
   ],
   "forwarding_headers": [
-    "src/VideoProcessor-Lib/led/LedDriveArbiter.h",
     "src/VideoProcessor-Lib/led/LedDriveHoldover.h",
-    "src/VideoProcessor-Lib/led/LedDriveModule.h"
+    "src/VideoProcessor-Lib/led/LedDriveModule.h",
+    "src/VideoProcessor-Lib/led/LedRawTransfer.h",
+    "src/VideoProcessor-Lib/led/LedDriveConfig.h"
   ],
   "components": {
     "files": {
@@ -34,12 +42,16 @@
     },
     "tools": [],
     "config_keys": [
-      "led_compensation"
+      "adaptive_gamma",
+      "gamma_boost",
+      "intent_black",
+      "led_drive",
+      "shadow_lift_ansi"
     ],
     "upstream_modules": [
       "drive.led_measure"
     ]
   },
-  "fallback_when_missing": "Failure -> drive held at full, no compensation.",
-  "fallback_entry": "LED compensation: off (shader did not load)"
+  "fallback_when_missing": "Compensation unavailable (shader not loaded, disabled by libplacebo, or slot off) -> compensate holds the LED at full drive (led_ceiling); script mode is not held. A configured gamma boost that cannot apply shows 'gamma boost (not applied: ...)'.",
+  "fallback_entry": "LED drive (held at full: picture compensation unavailable (<reason>))"
 }

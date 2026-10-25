@@ -727,37 +727,19 @@ void StatsOverlayWindow::DrawStats(HDC hdc)
 	DrawText(hdc, line, PADDING, y);
 	y += lineHeight;
 
-	// Delta 6: a key's change against the saved settings is always shown.
-	if (!m_stats.keyOverrides.IsEmpty())
+	const auto drawExtraRows = [&](const std::vector<StatsExtraRow>& rows)
 	{
-		line.Format(TEXT("Key override:     %-s"), static_cast<LPCTSTR>(m_stats.keyOverrides));
-		DrawText(hdc, line, PADDING, y);
-		y += lineHeight;
-	}
-	if (!m_stats.room.IsEmpty())
-	{
-		line.Format(TEXT("Room:             %-s"), static_cast<LPCTSTR>(m_stats.room));
-		DrawText(hdc, line, PADDING, y);
-		y += lineHeight;
-	}
-	if (!m_stats.content.IsEmpty())
-	{
-		line.Format(TEXT("Content:          %-s"), static_cast<LPCTSTR>(m_stats.content));
-		DrawText(hdc, line, PADDING, y);
-		y += lineHeight;
-	}
-	// Intent interpreter items 2-5 (2026-10-17): only while each function is on.
-	const std::pair<LPCTSTR, const CString*> intentLines[] = {
-		{ TEXT("Motion intent:    %-s"), &m_stats.motionIntent }, { TEXT("Ambient:          %-s"), &m_stats.ambientIntent },
-		{ TEXT("Black:            %-s"), &m_stats.blackIntent }, { TEXT("Display:          %-s"), &m_stats.displayIntent } };
-	for (const auto& intentLine : intentLines)
-	{
-		if (intentLine.second->IsEmpty())
-			continue;
-		line.Format(intentLine.first, static_cast<LPCTSTR>(*intentLine.second));
-		DrawText(hdc, line, PADDING, y);
-		y += lineHeight;
-	}
+		for (const StatsExtraRow& row : rows)
+		{
+			if (row.label.IsEmpty())
+				line = row.value;
+			else
+				line.Format(TEXT("%-18s%s"), static_cast<LPCTSTR>(row.label), static_cast<LPCTSTR>(row.value));
+			DrawText(hdc, line, PADDING, y);
+			y += lineHeight;
+		}
+	};
+	drawExtraRows(m_stats.extraRowsAfterShaderRule);
 
 	if (m_stats.activeShaders.empty())
 		line.Format(TEXT("Shaders:          None"));
@@ -773,18 +755,7 @@ void StatsOverlayWindow::DrawStats(HDC hdc)
 		y += lineHeight;
 	}
 
-	if (!m_stats.dejudderStatus.IsEmpty())
-	{
-		line.Format(TEXT("De-judder:        %s"), static_cast<LPCTSTR>(m_stats.dejudderStatus));
-		DrawText(hdc, line, PADDING, y);
-		y += lineHeight;
-	}
-	// r6 fix 7 (vp-no-silent-fallbacks): one heading for every automatic fallback.
-	if (!m_stats.fallbacksStatus.IsEmpty())
-	{
-		DrawText(hdc, m_stats.fallbacksStatus, PADDING, y);
-		y += lineHeight;
-	}
+	drawExtraRows(m_stats.extraRowsAfterShaders);
 	
 	// Conversion Performance (show if available)
 	if (m_stats.hasConversionData)
@@ -1057,19 +1028,7 @@ int StatsOverlayWindow::CalculateRequiredHeight(const StatsData& stats) const
 	// The selected rule and shader summary are always visible, followed by one row per active
 	// shader. DrawStats also contains three four-pixel section separators.
 	lineCount += 2 + stats.activeShaders.size();
-	if (!stats.keyOverrides.IsEmpty())
-		++lineCount;
-	if (!stats.room.IsEmpty())
-		++lineCount;
-	if (!stats.content.IsEmpty())
-		++lineCount;
-	for (const CString* intentLine : { &stats.motionIntent, &stats.ambientIntent, &stats.blackIntent, &stats.displayIntent })
-		if (!intentLine->IsEmpty())
-			++lineCount;
-	if (!stats.dejudderStatus.IsEmpty())
-		++lineCount;
-	if (!stats.fallbacksStatus.IsEmpty())
-		++lineCount;
+	lineCount += stats.extraRowsAfterShaderRule.size() + stats.extraRowsAfterShaders.size();
 	const int lineHeight =
 		stats.isAlphaRenderer ? ALPHA_LINE_HEIGHT : LINE_HEIGHT;
 	return PADDING * 2 + static_cast<int>(lineCount) * lineHeight + 12;

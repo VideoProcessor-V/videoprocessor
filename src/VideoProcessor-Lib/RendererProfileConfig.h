@@ -697,6 +697,8 @@ namespace RendererProfileConfig
 			// 6c: the de-judder's occlusion mask for the sigma-delta (works
 			// with dejudder_strength 0: mask-only mode).
 			if (key == "occlusion_mask") return IsChoice(value, { "on", "off" });
+			// WP-24: captured repeats drawn from the rendered-picture cache (OUTPUT stage only).
+			if (key == "repeat_render_reuse") return IsChoice(value, { "on", "off" });
 			// 6d: the extras warp A's rendered picture, or a warped source.
 			if (key == "dejudder_warp_stage") return IsChoice(value, { "rendered", "source" });
 			// Refinements (docs/VP-build-plan-refinements.md): D1 global prior,
@@ -705,7 +707,7 @@ namespace RendererProfileConfig
 			// strength (share at full strength, 0 = off); S1 the sigma-delta's
 			// tolerance on grain (1 = off).
 			if (key == "dejudder_global_prior" || key == "dejudder_vector_smooth" || key == "dejudder_occlusion_fill" ||
-				key == "dejudder_est_candidates" || key == "dejudder_est_qpel" || key == "dejudder_est_gate" ||
+				key == "dejudder_est_candidates" || key == "dejudder_est_qpel" || key == "dejudder_est_still_zero" || key == "dejudder_est_gate" ||
 				key == "dejudder_est_split" || key == "dejudder_block_taper" || key == "dejudder_estimate_ahead" ||
 				key == "dejudder_motion_rolloff" || key == "dejudder_global_two" || key == "dejudder_regional_hold" ||
 				key == "dejudder_fade_match" || key == "dejudder_verify" || key == "dejudder_pixel_trust" ||
@@ -1088,6 +1090,7 @@ namespace RendererProfileConfig
 		if (key == "pipeline_original_pathway") return IsChoice(value, { "on", "off" });
 		if (key == "pipeline_entrance_once") return IsChoice(value, { "on", "off" });   // B3 (ADR-0024)
 		if (key == "frame_analysis_store") return IsChoice(value, { "on", "off" });     // WP-23
+		if (key == "entrance_gpu_drain") return IsChoice(value, { "off", "flush", "finish" });   // expert workaround
 		if (key == "pipeline_order" || key == "pipeline_slots_off")
 			return value.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_.,;> ") == std::string::npos;
 		if (key == "calibration_lut_stage") return IsChoice(value, { "libplacebo", "vp" });
@@ -2112,7 +2115,7 @@ namespace RendererProfileConfig
 			for (const auto& value : *vpvValues)
 			{
 				static const char* const vpvKeys[] = { "pipeline_original_pathway", "pipeline_order",
-					"pipeline_slots_off", "calibration_lut_stage", "pipeline_entrance_once", "output_segments_merged", "frame_analysis_store" };
+					"pipeline_slots_off", "calibration_lut_stage", "pipeline_entrance_once", "output_segments_merged", "frame_analysis_store", "entrance_gpu_drain" };
 				bool known = false;
 				for (const char* key : vpvKeys) known = known || value.first == key;
 				if (!known)

@@ -368,6 +368,7 @@ namespace
 			require(!merged->isChecked(), "the merged output chain is off by default");
 			require(merged->toolTip().contains(QStringLiteral("off until its GPU check passes")), "the merged output chain says why it is off");
 			merged->setChecked(true);
+			control<QComboBox>(window, Vpv::ObjectName("expert.entrance_gpu_drain"))->setCurrentIndex(2);
 			save(window);
 		}
 		ConfigFile config;
@@ -378,6 +379,7 @@ namespace
 			"the stages switched off are stored in [vpv]");
 		require(config.TryGetString("vpv", "calibration_lut_stage", v) && v == "vp", "the LUT stage is stored in [vpv]");
 		require(config.TryGetString("vpv", "output_segments_merged", v) && v == "on", "the merged output chain is stored in [vpv]");
+		require(config.TryGetString("vpv", "entrance_gpu_drain", v) && v == "finish", "the entrance GPU drain is stored in [vpv]");
 		requireVpReads(path);
 		{
 			ConfigEditorWindow window(path, 0, true);

@@ -126,6 +126,7 @@
     <ClCompile Include="..\VP-V\modules\input\signal\GpuDolbyVisionTunnelUnpack.cpp" />
     <ClCompile Include="..\VP-V\modules\input\capture\EarlyUpload.cpp" />
     <ClCompile Include="..\VP-V\modules\scaling\output\AdaptiveDownscale.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutHost.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\SourceRebase.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\SourceResolutionMonitor.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\VpDebander.cpp" />
@@ -133,8 +134,9 @@
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\CrossfadeMix.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\TextureRestore.cpp" />
     <ClCompile Include="..\VP-V\modules\output\dither\CustomHookChain.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\led\LedMeasurementHook.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\led\LedRawTransfer.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\led_measure\LedMeasurementHook.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\led_compensation\LedRawTransfer.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\led_compensation\DynamicDriveFrame.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\VideoProcessor-Lib\VideoProcessor-Lib.vcxproj">

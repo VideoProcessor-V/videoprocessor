@@ -65,6 +65,8 @@ Chain tests:
   trim level / parameters, target nits) for `tools/dv_compare/dv_pair_compare.py`, which pairs an
   LLDV clip with a tunnel clip by picture fingerprint and scores PSNR / Delta E ITP / stops.
   Captured film frames are never committed.
+  `DvCompareCaptureSink.h` wraps the recorder as a `VpDiagnostics::RenderedFrameCapture` (WP-17): the renderer
+  calls it through its `RenderedFrameCaptures` (frame rendered, and `ToggleDvCompareCapture` -> `Invoke("dv_compare_capture")`).
 - `DvTunnelPolicy.h` (WIP until its GPU check): no libplacebo plane deband on tunnel pictures (it
   ran on the 12-bit IPT planes before the decode and moved saturated near-zero channels by up to
   3.6 codes), and no VP deband there either (deband_vp also works on the source planes before

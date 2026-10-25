@@ -1,0 +1,668 @@
+diff --git a/src/VideoProcessor-GUI/Resource.h b/src/VideoProcessor-GUI/Resource.h
+index 91c127df..4738fd1e 100644
+--- a/src/VideoProcessor-GUI/Resource.h
++++ b/src/VideoProcessor-GUI/Resource.h
+@@ -118,9 +118,6 @@
+ #define ID_COMMAND_REAPPLY_RULES             33203
+ #define ID_COMMAND_SHOW_PROFILES             33204
+ #define ID_COMMAND_SUBTITLE_TOGGLE           33205
+-#define ID_COMMAND_ROOM_LIGHTS               33206
+-#define ID_COMMAND_STATE_REPORT              33207
+-#define ID_COMMAND_RAW_CAPTURE_TOGGLE        33208
+ #define ID_COMMAND_UNIFIED_PROFILE_FIRST   33300
+ #define ID_COMMAND_UNIFIED_PROFILE_LAST    33399
+ 	
+diff --git a/src/VideoProcessor-GUI/StatsOverlayWindow.cpp b/src/VideoProcessor-GUI/StatsOverlayWindow.cpp
+index 5ce2be23..4ae847b0 100644
+--- a/src/VideoProcessor-GUI/StatsOverlayWindow.cpp
++++ b/src/VideoProcessor-GUI/StatsOverlayWindow.cpp
+@@ -727,37 +727,19 @@ void StatsOverlayWindow::DrawStats(HDC hdc)
+ 	DrawText(hdc, line, PADDING, y);
+ 	y += lineHeight;
+ 
+-	// Delta 6: a key's change against the saved settings is always shown.
+-	if (!m_stats.keyOverrides.IsEmpty())
++	const auto drawExtraRows = [&](const std::vector<StatsExtraRow>& rows)
+ 	{
+-		line.Format(TEXT("Key override:     %-s"), static_cast<LPCTSTR>(m_stats.keyOverrides));
+-		DrawText(hdc, line, PADDING, y);
+-		y += lineHeight;
+-	}
+-	if (!m_stats.room.IsEmpty())
+-	{
+-		line.Format(TEXT("Room:             %-s"), static_cast<LPCTSTR>(m_stats.room));
+-		DrawText(hdc, line, PADDING, y);
+-		y += lineHeight;
+-	}
+-	if (!m_stats.content.IsEmpty())
+-	{
+-		line.Format(TEXT("Content:          %-s"), static_cast<LPCTSTR>(m_stats.content));
+-		DrawText(hdc, line, PADDING, y);
+-		y += lineHeight;
+-	}
+-	// Intent interpreter items 2-5 (2026-10-17): only while each function is on.
+-	const std::pair<LPCTSTR, const CString*> intentLines[] = {
+-		{ TEXT("Motion intent:    %-s"), &m_stats.motionIntent }, { TEXT("Ambient:          %-s"), &m_stats.ambientIntent },
+-		{ TEXT("Black:            %-s"), &m_stats.blackIntent }, { TEXT("Display:          %-s"), &m_stats.displayIntent } };
+-	for (const auto& intentLine : intentLines)
+-	{
+-		if (intentLine.second->IsEmpty())
+-			continue;
+-		line.Format(intentLine.first, static_cast<LPCTSTR>(*intentLine.second));
+-		DrawText(hdc, line, PADDING, y);
+-		y += lineHeight;
+-	}
++		for (const StatsExtraRow& row : rows)
++		{
++			if (row.label.IsEmpty())
++				line = row.value;
++			else
++				line.Format(TEXT("%-18s%s"), static_cast<LPCTSTR>(row.label), static_cast<LPCTSTR>(row.value));
++			DrawText(hdc, line, PADDING, y);
++			y += lineHeight;
++		}
++	};
++	drawExtraRows(m_stats.extraRowsAfterShaderRule);
+ 
+ 	if (m_stats.activeShaders.empty())
+ 		line.Format(TEXT("Shaders:          None"));
+@@ -773,18 +755,7 @@ void StatsOverlayWindow::DrawStats(HDC hdc)
+ 		y += lineHeight;
+ 	}
+ 
+-	if (!m_stats.dejudderStatus.IsEmpty())
+-	{
+-		line.Format(TEXT("De-judder:        %s"), static_cast<LPCTSTR>(m_stats.dejudderStatus));
+-		DrawText(hdc, line, PADDING, y);
+-		y += lineHeight;
+-	}
+-	// r6 fix 7 (vp-no-silent-fallbacks): one heading for every automatic fallback.
+-	if (!m_stats.fallbacksStatus.IsEmpty())
+-	{
+-		DrawText(hdc, m_stats.fallbacksStatus, PADDING, y);
+-		y += lineHeight;
+-	}
++	drawExtraRows(m_stats.extraRowsAfterShaders);
+ 	
+ 	// Conversion Performance (show if available)
+ 	if (m_stats.hasConversionData)
+@@ -1057,19 +1028,7 @@ int StatsOverlayWindow::CalculateRequiredHeight(const StatsData& stats) const
+ 	// The selected rule and shader summary are always visible, followed by one row per active
+ 	// shader. DrawStats also contains three four-pixel section separators.
+ 	lineCount += 2 + stats.activeShaders.size();
+-	if (!stats.keyOverrides.IsEmpty())
+-		++lineCount;
+-	if (!stats.room.IsEmpty())
+-		++lineCount;
+-	if (!stats.content.IsEmpty())
+-		++lineCount;
+-	for (const CString* intentLine : { &stats.motionIntent, &stats.ambientIntent, &stats.blackIntent, &stats.displayIntent })
+-		if (!intentLine->IsEmpty())
+-			++lineCount;
+-	if (!stats.dejudderStatus.IsEmpty())
+-		++lineCount;
+-	if (!stats.fallbacksStatus.IsEmpty())
+-		++lineCount;
++	lineCount += stats.extraRowsAfterShaderRule.size() + stats.extraRowsAfterShaders.size();
+ 	const int lineHeight =
+ 		stats.isAlphaRenderer ? ALPHA_LINE_HEIGHT : LINE_HEIGHT;
+ 	return PADDING * 2 + static_cast<int>(lineCount) * lineHeight + 12;
+diff --git a/src/VideoProcessor-GUI/StatsOverlayWindow.h b/src/VideoProcessor-GUI/StatsOverlayWindow.h
+index db7f6a26..1f30f035 100644
+--- a/src/VideoProcessor-GUI/StatsOverlayWindow.h
++++ b/src/VideoProcessor-GUI/StatsOverlayWindow.h
+@@ -14,6 +14,15 @@
+ #include <mutex>
+ #include <vector>
+ 
++// A row added to the overlay without a dedicated field (a renderer module's or a plug-in's status
++// line): drawn as `label` in the label column and `value` beside it, or `value` alone when the
++// label is empty.
++struct StatsExtraRow
++{
++	CString label;
++	CString value;
++};
++
+ // Simple stats data structure - no complex types that need initialization
+ struct StatsData
+ {
+@@ -29,13 +38,9 @@ struct StatsData
+ 	CString colorspace;        // e.g., "BT.2020"
+ 	CString pixelFormat;       // e.g., "P010"
+ 	CString viewport;          // e.g., "cinema (2.35:1)"
+-	CString keyOverrides;      // delta 6: what a key changed against the saved settings
+-	CString room;              // Stage 9: room lights (empty when off)
+-	CString content;           // content intent: class and source (empty when off)
+-	CString motionIntent;      // intent interpreter items 2-5 (empty when off)
+-	CString ambientIntent;
+-	CString blackIntent;
+-	CString displayIntent;
++	// Extension rows, in order: after "Shader Rule:" and after the active shader list.
++	std::vector<StatsExtraRow> extraRowsAfterShaderRule;
++	std::vector<StatsExtraRow> extraRowsAfterShaders;
+ 	CString rendererName;      // selected presentation backend
+ 	CString surfaceMode;       // actual presentation host: fullscreen or windowed
+ 
+@@ -87,8 +92,6 @@ struct StatsData
+ 	double scheduledLatencyMs = 0.0;
+ 	bool presentationTargetTimingKnown = false;
+ 	CString presentationTimingStatus;
+-	CString dejudderStatus;    // VP Renderer de-judder / occlusion mask line (empty = off)
+-	CString fallbacksStatus;   // r6 fix 7: "Fallbacks engaged: <list> / none" (empty = renderer without it)
+ 	double presentationTargetLeadMs = 0.0;
+ 	double captureToPresentationTargetMs = 0.0;
+ 
+diff --git a/src/VideoProcessor-GUI/VideoProcessorDlg.cpp b/src/VideoProcessor-GUI/VideoProcessorDlg.cpp
+index b8803648..ff9460a1 100644
+--- a/src/VideoProcessor-GUI/VideoProcessorDlg.cpp
++++ b/src/VideoProcessor-GUI/VideoProcessorDlg.cpp
+@@ -45,6 +45,7 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
+ #include <VP-V/modules/control/diagnostics/StateReportSettings.h>
+ #include <AmbientConfig.h>
+ #include <IntentInterpreterSupport.h>
++#include <VP-V/gui/VpStatusAdapter.h>   // VP-V: VP's Ctrl+I/crash-state/report lines and shortcuts (WP-11)
+ #include <QueueLookahead.h>
+ #include <led/LedDriveConfig.h>
+ #include <VP-V/modules/drive/projector_control/SerialPort.h>
+@@ -666,12 +667,7 @@ const ShortcutDefinition SHORTCUT_DEFINITIONS[] =
+ 	{ "fullscreen_toggle",     ID_COMMAND_FULLSCREEN_TOGGLE },
+ 	{ "toggle_stats_overlay",  ID_COMMAND_TOGGLE_STATS_OVERLAY },
+ 	{ "capture_rendered_output", ID_COMMAND_CAPTURE_RENDERED_OUTPUT },
+-	// Report-a-problem (StateReport.h); default Ctrl+Alt+D.
+-	{ "state_report",          ID_COMMAND_STATE_REPORT },
+-	// Raw capture recording (RawCaptureRecorder.h; needs VP_RAW_CAPTURE_PATH).
+-	{ "raw_capture",           ID_COMMAND_RAW_CAPTURE_TOGGLE },
+ 	{ "reapply_rules",         ID_COMMAND_REAPPLY_RULES },
+-	{ "room_lights",           ID_COMMAND_ROOM_LIGHTS },
+ 	{ "show_profiles",         ID_COMMAND_SHOW_PROFILES },
+ 	{ "pq_set",                ID_COMMAND_PQ_SET },
+ 	{ "renderer_restart",      ID_COMMAND_RENDERER_RESTART },
+@@ -687,6 +683,13 @@ const ShortcutDefinition SHORTCUT_DEFINITIONS[] =
+ 	{ "display_rules_auto",    ID_COMMAND_DISPLAY_RULE_AUTO },
+ };
+ 
++// VP-V (WP-11): the table above with VP's shortcuts (src/VP-V/gui/VpShortcuts.h) in their places.
++static const std::vector<ShortcutDefinition>& AllShortcutDefinitions()
++{
++	static const std::vector<ShortcutDefinition> all = VpvShortcuts::Merge(SHORTCUT_DEFINITIONS);
++	return all;
++}
++
+ // audit 2026-10-16: keyboard auto-repeat (a held key) re-dispatches only the
+ // commands listed here. The allow-list is deliberately empty: every
+ // configurable command toggles, selects, cycles (unified profile keys),
+@@ -861,7 +864,7 @@ HACCEL CreateConfiguredAccelerators(
+ 			*bindingError = error;
+ 	};
+ 
+-	for (const auto& definition : SHORTCUT_DEFINITIONS)
++	for (const auto& definition : AllShortcutDefinitions())
+ 	{
+ 		const ShortcutDefault* compiled = FindShortcutDefault(definition.configKey);
+ 		const bool rendererSpecific = compiled && compiled->rendererSpecific;
+@@ -2212,7 +2215,6 @@ BEGIN_MESSAGE_MAP(CVideoProcessorDlg, CDialog)
+ 	ON_COMMAND(ID_COMMAND_RENDERER_RESET, &CVideoProcessorDlg::OnCommandRendererReset)
+ 	ON_COMMAND(ID_COMMAND_RENDERER_RESTART, &CVideoProcessorDlg::OnCommandRendererRestart)
+ 	ON_COMMAND(ID_COMMAND_REAPPLY_RULES, &CVideoProcessorDlg::OnCommandReapplyRules)
+-	ON_COMMAND(ID_COMMAND_ROOM_LIGHTS, &CVideoProcessorDlg::OnCommandRoomLights)
+ 	ON_COMMAND(ID_COMMAND_SHOW_PROFILES, &CVideoProcessorDlg::OnCommandShowProfiles)
+ 
+ 	ON_COMMAND(ID_COMMAND_PQ_SET, &CVideoProcessorDlg::OnCommandPQSet)
+@@ -2222,8 +2224,7 @@ BEGIN_MESSAGE_MAP(CVideoProcessorDlg, CDialog)
+ 	ON_COMMAND(ID_COMMAND_VC_P010, &CVideoProcessorDlg::SetVideoConversionP010)
+ 	ON_COMMAND(ID_COMMAND_TOGGLE_STATS_OVERLAY, &CVideoProcessorDlg::OnCommandToggleStatsOverlay)
+ 	ON_COMMAND(ID_COMMAND_CAPTURE_RENDERED_OUTPUT, &CVideoProcessorDlg::OnCommandCaptureRenderedOutput)
+-	ON_COMMAND(ID_COMMAND_STATE_REPORT, &CVideoProcessorDlg::OnCommandStateReport)
+-	ON_COMMAND(ID_COMMAND_RAW_CAPTURE_TOGGLE, &CVideoProcessorDlg::OnCommandRawCaptureToggle)
++	ON_COMMAND_RANGE(ID_COMMAND_VP_FIRST, ID_COMMAND_VP_LAST, &CVideoProcessorDlg::OnVpCommand)   // VP-V (WP-11)
+ 	ON_COMMAND(ID_COMMAND_DISPLAY_RULE_AUTO, &CVideoProcessorDlg::OnCommandDisplayRuleAuto)
+ 	ON_COMMAND(ID_COMMAND_CONFIG_EDITOR, &CVideoProcessorDlg::OnCommandConfigEditor)
+ 	ON_COMMAND(ID_COMMAND_TOGGLE_NO_UI, &CVideoProcessorDlg::OnCommandToggleNoUi)
+@@ -2587,7 +2588,7 @@ void CVideoProcessorDlg::StartGlobalShortcutObserver()
+ 	// this low-level hook, which therefore is not installed at all by
+ 	// default.
+ 	std::set<WORD> globalCommands;
+-	for (const ShortcutDefinition& definition : SHORTCUT_DEFINITIONS)
++	for (const ShortcutDefinition& definition : AllShortcutDefinitions())
+ 		if (m_shortcutsGlobalActions.count(definition.configKey))
+ 			globalCommands.insert(definition.command);
+ 	std::vector<ACCEL> observedAccelerators;
+@@ -8081,13 +8082,8 @@ void CVideoProcessorDlg::ToggleKeyOverride(const char* what, const CString& valu
+ // profile groups a key holds against their rules.
+ CString CVideoProcessorDlg::KeyOverrideSummary() const
+ {
+-	CString summary;
+-	auto add = [&summary](const CString& item)
+-	{
+-		if (!summary.IsEmpty())
+-			summary += TEXT(", ");
+-		summary += item;
+-	};
++	std::vector<CString> items;   // joined by VpvGui::KeyOverrideSummary (WP-11)
++	auto add = [&items](const CString& item) { items.push_back(item); };
+ 	if (m_profileRuntime.IsInitialized())
+ 	{
+ 		const auto snapshot = m_profileRuntime.GetSnapshot();
+@@ -8105,7 +8101,7 @@ CString CVideoProcessorDlg::KeyOverrideSummary() const
+ 	}
+ 	for (const auto& entry : m_keyOverrides)
+ 		add(CString(entry.first.c_str()) + TEXT(" ") + entry.second);
+-	return summary;
++	return VpvGui::KeyOverrideSummary(items);
+ }
+ 
+ void CVideoProcessorDlg::OnCommandFullScreenToggle()
+@@ -8783,9 +8779,16 @@ void CVideoProcessorDlg::OnCommandCaptureRenderedOutput()
+ // settings, crash-state text) so they describe the moment of the key press;
+ // a worker hashes the binaries, reads the log and config, writes the zip and
+ // posts WM_MESSAGE_STATE_REPORT_DONE.
+-void CVideoProcessorDlg::OnCommandStateReport()
++// VP-V (WP-11): VP's shortcuts (src/VP-V/gui/VpShortcuts.h) dispatch in one place.
++void CVideoProcessorDlg::OnVpCommand(UINT commandId)
+ {
+-	SaveStateReport("hotkey");
++	VpvGui::CommandHost host;
++	host.roomLights = [this] { OnCommandRoomLights(); };
++	host.stateReport = [this] { SaveStateReport("hotkey"); };
++	host.showDetail = [this](const CString& status)
++		{ OnRendererDetailString(status, m_rendererGeneration.load(std::memory_order_acquire)); };
++	host.renderer = m_videoRenderer.get();
++	VpvGui::DispatchCommand(commandId, host);
+ }
+ 
+ void CVideoProcessorDlg::ShowStateReportToast(const std::string& value)
+@@ -8982,21 +8985,7 @@ void CVideoProcessorDlg::SaveStateReport(const char* trigger)
+ 	if (const auto snapshot = m_profileRuntime.GetSnapshot())
+ 		for (const auto& selection : RendererProfileConfig::FormatSelections(snapshot->effectiveSelections))
+ 			settings.emplace_back("profile." + selection.first, selection.second);
+-	if (m_videoRenderer)
+-	{
+-		CString text;
+-		if (m_videoRenderer->GetPresentationTimingStatus(text))
+-			settings.emplace_back("presentation", std::string(CStringA(text).GetString()));
+-		if (m_videoRenderer->GetDejudderStatus(text))
+-			settings.emplace_back("dejudder", std::string(CStringA(text).GetString()));
+-		// r6 fix 7: "Fallbacks engaged: <list> / none".
+-		if (m_videoRenderer->GetFallbacksStatus(text))
+-			settings.emplace_back("fallbacks", std::string(CStringA(text).GetString()));
+-		if (m_videoRenderer->GetRenderStallStatus(text))
+-			settings.emplace_back("render_stall", std::string(CStringA(text).GetString()));
+-		if (m_videoRenderer->GetOutputModeInfo(text))
+-			settings.emplace_back("output_mode", std::string(CStringA(text).GetString()));
+-	}
++	VpvGui::AppendBundleSettings(settings, m_videoRenderer.get());   // VP-V (WP-11)
+ 
+ 	// Configuration files VP reads (full paths stay local; the bundle gets names).
+ 	{
+@@ -9126,15 +9115,6 @@ LRESULT CVideoProcessorDlg::OnStateReportDone(WPARAM, LPARAM lParam)
+ 	return 0;
+ }
+ 
+-// Raw capture recording on / off (RawCaptureRecorder.h): the status line is
+-// logged by the recorder and shown like the rendered-output capture status.
+-void CVideoProcessorDlg::OnCommandRawCaptureToggle()
+-{
+-	const std::string status = RawCaptureRecorder::Instance().Toggle();
+-	OnRendererDetailString(CString(status.c_str()),
+-		m_rendererGeneration.load(std::memory_order_acquire));
+-}
+-
+ void CVideoProcessorDlg::OnCommandCaptureAnalysisDiagnostics(bool includeFrames)
+ {
+ 	auto& trace = AnalysisDiagnosticTrace::Instance();
+@@ -14478,11 +14458,8 @@ void CVideoProcessorDlg::PublishActiveProfileStatus()
+ // r6 fix 7 (vp-no-silent-fallbacks): the renderer's "Fallbacks engaged" heading, polled with the
+ // crash-state lines. A change re-publishes the Config status; each fallback id engaged for the
+ // first time this session gets a brief transient notice (never an always-on OSD).
+-void CVideoProcessorDlg::UpdateFallbacksStatus()
++void CVideoProcessorDlg::UpdateFallbacksStatus(const std::string& heading)
+ {
+-	CString text;
+-	const std::string heading = m_videoRenderer && m_videoRenderer->GetFallbacksStatus(text) ?
+-		std::string(CStringA(text).GetString()) : std::string();
+ 	if (heading == m_lastFallbacksHeading)
+ 		return;
+ 	m_lastFallbacksHeading = heading;
+@@ -15488,42 +15465,24 @@ void CVideoProcessorDlg::UpdateIntentInterpreter()
+ // "sports (inferred)" / "film (from metadata)"; empty while the switch is off.
+ CString CVideoProcessorDlg::ContentIntentLine() const
+ {
+-	if (!m_contentStatus.enabled)
+-		return CString();
+-	CString line;
+-	if (m_contentStatus.content == ContentClass::Unknown)
+-		line.Format(TEXT("classifying (%hs)"), m_contentStatus.reason);
+-	else
+-		line.Format(TEXT("%hs (%hs)"), ToString(m_contentStatus.content), DisplayName(m_contentStatus.source));
+-	if (m_contentStatus.candidate != ContentClass::Unknown && m_contentStatus.candidate != m_contentStatus.content)
+-	{
+-		CString pending;
+-		pending.Format(TEXT(", next %hs at a cut"), ToString(m_contentStatus.candidate));
+-		line += pending;
+-	}
+-	return line;
++	return VpvGui::ContentIntentLine(m_contentStatus);   // wording: src/VP-V/core/StatusText.h (WP-11)
+ }
+ 
+ CString CVideoProcessorDlg::AmbientOverlayLine() const
+ {
+-	if (m_ambientConfigured.mode == Ambient::Mode::Off)
+-		return CString();
+-	CString line(CurrentAmbientValue().c_str());
+-	if (m_ambientOverride)
+-		line += TEXT(" (key)");
+-	else if (m_ambientConfigured.mode == Ambient::Mode::Manual)
+-		line += TEXT(" (manual)");
+-	else if (m_ambientConfigured.port.empty())
+-		line += TEXT(" (sensor: no port set; saved room)");
+-	else if (m_ambientState.Sensed())
++	// Wording: src/VP-V/core/StatusText.h (WP-11); the facts are the dialog's ambient state.
++	VpStatusText::AmbientFacts facts;
++	facts.enabled = m_ambientConfigured.mode != Ambient::Mode::Off;
++	if (facts.enabled)
+ 	{
+-		CString reading;
+-		reading.Format(TEXT(" (sensor %.1f lux)"), m_ambientState.LastLux());
+-		line += reading;
++		facts.value = CurrentAmbientValue();
++		facts.keyOverride = m_ambientOverride;
++		facts.manual = m_ambientConfigured.mode == Ambient::Mode::Manual;
++		facts.portSet = !m_ambientConfigured.port.empty();
++		facts.sensed = facts.portSet && m_ambientState.Sensed();
++		facts.lux = facts.sensed ? m_ambientState.LastLux() : 0.0;
+ 	}
+-	else
+-		line += TEXT(" (sensor not reporting; saved room)");
+-	return line;
++	return VpvGui::AmbientLine(facts);
+ }
+ 
+ // Backup key (settings first): flips dark / lit until restart or a Config
+@@ -19081,6 +19040,17 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
+ 				static_cast<unsigned long>(m_processCpuUsage.Processors()));
+ 		}
+ 	}
++	// VP-V (WP-11): one poll of the renderer's VP lines for the crash state and the overlay.
++	const VpvGui::Snapshot vpStatus = VpvGui::Poll(m_videoRenderer.get());
++	const auto vpDialogLines = [this]
++	{
++		VpvGui::DialogLines lines;
++		lines.keyOverrides = KeyOverrideSummary();
++		lines.room = AmbientOverlayLine();
++		lines.content = ContentIntentLine();
++		lines.intent = m_intentStatus;
++		return lines;
++	};
+ 	// Crash state (owner 2026-10-15): the key facts of this moment, kept in
+ 	// the rolling state file whether or not the overlay is shown.
+ 	{
+@@ -19112,38 +19082,10 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
+ 				profiles += (profiles.empty() ? "" : ", ") + selection.first + "=" + selection.second;
+ 			crashState.SetValue("profiles", profiles.empty() ? std::string("(none)") : profiles);
+ 		}
+-		const auto rendererLine = [&](const char* key, bool known, const CString& text)
+-		{
+-			crashState.SetValue(key, known && !text.IsEmpty() ? std::string(CStringA(text).GetString()) : std::string("-"));
+-		};
+-		CString text;
+-		if (m_videoRenderer)
+-		{
+-			// The de-judder line names the motion engine in use (smooth motion
+-			// steps it aside with that reason).
+-			rendererLine("de-judder", m_videoRenderer->GetDejudderStatus(text), text);
+-			rendererLine("fallbacks", m_videoRenderer->GetFallbacksStatus(text), text);
+-			rendererLine("presentation", m_videoRenderer->GetPresentationTimingStatus(text), text);
+-			rendererLine("render stall", m_videoRenderer->GetRenderStallStatus(text), text);
+-			rendererLine("Dynamic Drive", m_videoRenderer->GetLedDriveStatus(text), text);
+-			rendererLine("source resolution", m_videoRenderer->GetSourceResolutionStatus(text), text);
+-			rendererLine("content", true, ContentIntentLine());
+-			rendererLine("motion intent", true, CString(IntentInterpreter::MotionIntentLine(m_intentStatus.motion).c_str()));
+-			rendererLine("ambient", true, CString(IntentInterpreter::AmbientIntentLine(m_intentStatus.ambient).c_str()));
+-			rendererLine("black intent", true, CString(IntentInterpreter::BlackIntentLine(m_intentStatus.black).c_str()));
+-			rendererLine("display intent", true, CString(IntentInterpreter::DisplayIntentLine(m_intentStatus.display).c_str()));
+-		}
+-		else
+-		{
+-			// audit 2026-10-16: no renderer, so clear the renderer-owned keys
+-			// instead of keeping a dead renderer's last values.
+-			static const char* const kRendererKeys[] = {
+-				"de-judder", "fallbacks", "presentation", "render stall", "Dynamic Drive", "source resolution", "content",
+-				"motion intent", "ambient", "black intent", "display intent" };
+-			for (const char* key : kRendererKeys)
+-				crashState.SetValue(key, std::string("-"));
+-		}
+-		UpdateFallbacksStatus();   // r6 fix 7
++		// VP-V (WP-11): the renderer-owned keys ("-" for each without a renderer).
++		VpvGui::RecordCrashState(crashState, m_videoRenderer.get(), vpStatus,
++			m_videoRenderer ? ContentIntentLine() : CString(), m_intentStatus);
++		UpdateFallbacksStatus(VpvGui::FallbacksHeading(vpStatus));   // r6 fix 7
+ 	}
+ 	// Preserve the requested visibility through renderer handoff. The next
+ 	// refresh submits to the native API once ready; never create a desktop OSD.
+@@ -19322,9 +19264,7 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
+ 					stats.captureToPresentationTargetMs);
+ 			m_videoRenderer->GetPresentationTimingStatus(
+ 				stats.presentationTimingStatus);
+-			m_videoRenderer->GetDejudderStatus(stats.dejudderStatus);
+ 		}
+-		m_videoRenderer->GetFallbacksStatus(stats.fallbacksStatus);   // r6 fix 7
+ 		RendererRenderLoad renderLoad;
+ 		if (m_videoRenderer->GetRenderLoad(renderLoad))
+ 		{
+@@ -19406,13 +19346,9 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
+ 				stats.sceneLastCorrectionSecondsFromDeadline,
+ 				stats.sceneLastCorrectionTick);
+ 		stats.activeShaderRule = m_videoRenderer->ActiveShaderRule();
+-		stats.keyOverrides = KeyOverrideSummary();
+-		stats.room = AmbientOverlayLine();
+-		stats.content = ContentIntentLine();
+-		stats.motionIntent = CString(IntentInterpreter::MotionIntentLine(m_intentStatus.motion).c_str());
+-		stats.ambientIntent = CString(IntentInterpreter::AmbientIntentLine(m_intentStatus.ambient).c_str());
+-		stats.blackIntent = CString(IntentInterpreter::BlackIntentLine(m_intentStatus.black).c_str());
+-		stats.displayIntent = CString(IntentInterpreter::DisplayIntentLine(m_intentStatus.display).c_str());
++		// VP-V (WP-11): VP's Ctrl+I rows (src/VP-V/gui/VpStatusAdapter.h).
++		VpvGui::FillCtrlIRows(stats.extraRowsAfterShaderRule, stats.extraRowsAfterShaders, vpStatus,
++			vpDialogLines(), stats.isAlphaRenderer);
+ 		stats.activeShaders = m_videoRenderer->ActiveShaders();
+ 	}
+ 	// A graph reset can briefly make the renderer non-rendering while the same
+diff --git a/src/VideoProcessor-GUI/VideoProcessorDlg.h b/src/VideoProcessor-GUI/VideoProcessorDlg.h
+index fc53cc35..d6945d91 100644
+--- a/src/VideoProcessor-GUI/VideoProcessorDlg.h
++++ b/src/VideoProcessor-GUI/VideoProcessorDlg.h
+@@ -331,13 +331,13 @@ public:
+ 	void OnCommandCaptureRenderedOutput();
+ 	// Report-a-problem (StateReport.h): the state_report shortcut and the
+ 	// system-menu item. trigger: "hotkey", "menu" or "auto:<reason>".
+-	void OnCommandStateReport();
+ 	void SaveStateReport(const char* trigger);
++	// VP-V (WP-11): VP's shortcuts, dispatched by src/VP-V/gui/VpStatusAdapter.h.
++	afx_msg void OnVpCommand(UINT commandId);
+ 	// auto_report: a report on a recovery reset or render stall, rate-limited.
+ 	void MaybeAutoReport(const char* reason);
+ 	void RecordDiagnosticStats(double sourceHz, double displayHz);
+ 	void ShowStateReportToast(const std::string& value);
+-	void OnCommandRawCaptureToggle();
+ 	void OnCommandCaptureAnalysisDiagnostics(bool includeFrames);
+ 	void OnCommandConfigEditor();
+ 
+@@ -735,7 +735,7 @@ protected:
+ 	// and the ids already announced by a one-time notice this session.
+ 	std::string m_lastFallbacksHeading;
+ 	FallbackStatus::Notices m_fallbackNotices;
+-	void UpdateFallbacksStatus();
++	void UpdateFallbacksStatus(const std::string& heading);
+ 	void ShowFallbackNotice(const std::string& id, const std::string& heading);
+ 	std::string m_intentLogKeys[4];             // the last logged state per function
+ 	void UpdateIntentInterpreter();
+diff --git a/src/VideoProcessor-Lib/IRenderer.h b/src/VideoProcessor-Lib/IRenderer.h
+index b92ebf75..f807a2a6 100644
+--- a/src/VideoProcessor-Lib/IRenderer.h
++++ b/src/VideoProcessor-Lib/IRenderer.h
+@@ -737,4 +737,27 @@ public:
+ 		(void)totalMs;
+ 	}
+ 
++	// Generic module status (plugin API: next; the integrator assigns the number). ONE
++	// versioned entry for every status line a renderer module publishes, so a new line needs no
++	// new virtual and no ABI change. `status` is key/value text, one "key=value" per line
++	// (ModuleStatusText.h documents the format); `module` "" asks for the index of module ids.
++	// False: the renderer has no such module (status empty).
++	virtual bool GetModuleStatus(const char* module, CString& status) const
++	{
++		(void)module;
++		status.Empty();
++		return false;
++	}
++
++	// Generic module command, the counterpart of GetModuleStatus: a shortcut or host action a
++	// renderer module handles (e.g. a capture toggle) without a new virtual. `reply` uses the
++	// same key/value format; its "status" key is the line to show. False: not handled.
++	virtual bool InvokeModuleCommand(const char* module, const char* command, CString& reply)
++	{
++		(void)module;
++		(void)command;
++		reply.Empty();
++		return false;
++	}
++
+ };
+diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.cpp
+index fd98a732..e389b76f 100644
+--- a/src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.cpp
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.cpp
+@@ -703,6 +703,18 @@ void LibplaceboPluginVideoRenderer::SetQueueDelayBudget(int totalMs)
+ 		m_renderer->SetQueueDelayBudget(totalMs);
+ }
+ 
++bool LibplaceboPluginVideoRenderer::GetModuleStatus(const char* module, CString& status) const
++{
++	status.Empty();
++	return m_renderer && m_renderer->GetModuleStatus(module, status);
++}
++
++bool LibplaceboPluginVideoRenderer::InvokeModuleCommand(const char* module, const char* command, CString& reply)
++{
++	reply.Empty();
++	return m_renderer && m_renderer->InvokeModuleCommand(module, command, reply);
++}
++
+ bool LibplaceboPluginVideoRenderer::GetSourceResolutionStatus(CString& status) const
+ {
+ 	status.Empty();
+diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.h b/src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.h
+index d1ac5d78..2b32b1ef 100644
+--- a/src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.h
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.h
+@@ -116,6 +116,8 @@ public:
+ 	bool GetSourceResolutionStatus(CString& status) const override;
+ 	bool GetFallbacksStatus(CString& status) const override;
+ 	void SetQueueDelayBudget(int totalMs) override;
++	bool GetModuleStatus(const char* module, CString& status) const override;
++	bool InvokeModuleCommand(const char* module, const char* command, CString& reply) override;
+ 	bool SuspendLedDriveForTest(CString& reason) override;
+ 	void SetPostStallResetTelemetrySuppressedUntil(uint64_t untilMs) override;
+ 	bool StopLedDriveForShutdown() override;
+diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboRendererPluginApi.h b/src/VideoProcessor-Lib/vprenderer/LibplaceboRendererPluginApi.h
+index 35e369a0..9fcca8c8 100644
+--- a/src/VideoProcessor-Lib/vprenderer/LibplaceboRendererPluginApi.h
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboRendererPluginApi.h
+@@ -45,13 +45,17 @@
+ // SetActivePictureLookaheadAutomatic in the vtable.
+ // 42: SetQueueDelayBudget (VP-V delay budget, ADR-0020 / barrier B2, 2026-10-24), after
+ // GetFallbacksStatus in the vtable.
++// next (WP-11, INTEGRATOR: assign the next free number and raise the constant below):
++// GetModuleStatus / InvokeModuleCommand, the generic module status and command entries
++// (ModuleStatusText.h), appended last in the vtable. New status lines and module commands use
++// them and need no further version change.
+ //
+ // The counter is maintained by hand and can collide across branches or miss
+ // a layout change. The build ID is the
+ // mechanical check: the loader refuses any DLL whose
+ // VP_LIBPLACEBO_BUILD_ID_EXPORT differs from the executable's own build ID
+ // (VpBuildIdentity.h), so only a DLL from the same build loads.
+-static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 42;
++static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 42;   // API: next (WP-11) - integrator assigns
+ static constexpr const char* VP_LIBPLACEBO_BUILD_ID_EXPORT =
+ 	"VideoProcessorLibplaceboGetBuildId";
+ // Returns the DLL's 32-hex-digit build ID (static storage); never throws.
+diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+index c27f40d0..a93bf9f0 100644
+--- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+@@ -1,6 +1,7 @@
+ #include <pch.h>
+ #include <MotionAhead.h>
+ #include <VP-V/core/FallbackStatus.h>   // VP-V: "Fallbacks engaged" (src/VP-V/core)
++#include <VP-V/core/StatusText.h>       // VP-V: the generic module status, module "vp" (WP-11)
+ #include <GeneralRateLog.h>
+ #include <RefreshKey.h>
+ #include <MotionValidity.h>
+@@ -29001,6 +29002,25 @@ bool LibplaceboVideoRenderer::GetFallbacksStatus(CString& status) const
+ 	return true;
+ }
+ 
++// VP-V (WP-11): the renderer's VP lines through the generic module status entry; the keys and
++// format live in src/VP-V/core/StatusText.h, the lines come from the getters above.
++bool LibplaceboVideoRenderer::GetModuleStatus(const char* module, CString& status) const
++{
++	std::wstring text;
++	const bool answered = VpStatusText::RendererModuleStatus<wchar_t>(module,
++		[this](VpStatusText::RendererLines<wchar_t>& lines)
++		{
++			CString line;   // read after each getter (argument order is unspecified)
++			const auto take = [&line](VpStatusText::Line<wchar_t>& to, bool known) { to.Set(known, line.GetString()); };
++			take(lines.dejudder, GetDejudderStatus(line));
++			take(lines.fallbacks, GetFallbacksStatus(line));
++			take(lines.ledDrive, GetLedDriveStatus(line));
++			take(lines.sourceResolution, GetSourceResolutionStatus(line));
++		}, text);
++	status = text.c_str();
++	return answered;
++}
++
+ bool LibplaceboVideoRenderer::GetLedDriveStatus(CString& status) const
+ {
+ 	status.Empty();
+diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h
+index e6b9b775..ed9e2e6f 100644
+--- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.h
+@@ -153,6 +153,8 @@ public:
+ 	bool GetDejudderStatus(CString& status) const override;
+ 	bool GetFallbacksStatus(CString& status) const override;
+ 	void SetQueueDelayBudget(int totalMs) override;
++	// VP-V (WP-11): VP's status lines through the generic entry (module "vp").
++	bool GetModuleStatus(const char* module, CString& status) const override;
+ 	bool GetLedDriveStatus(CString& status) const override;
+ 	bool GetSourceResolutionStatus(CString& status) const override;
+ 	bool SuspendLedDriveForTest(CString& reason) override;
+diff --git a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
+index 9a6c1588..15476d12 100644
+--- a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
++++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
+@@ -454,6 +454,11 @@
+     <ClCompile Include="..\VP-V\tests\CombinationRunnerTests.cpp">
+       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+     </ClCompile>
++    <ClCompile Include="..\VP-V\tests\StatusTextTests.cpp">
++      <PrecompiledHeader>NotUsing</PrecompiledHeader>
++    </ClCompile>
++    <ClCompile Include="..\VP-V\tests\VpStatusAdapterTests.cpp" />
++    <ClCompile Include="ModuleStatusTextTests.cpp" />
+     <ClCompile Include="QueueStressLaneTests.cpp" />
+     <ClCompile Include="RendererPostStallResetAdvisorTests.cpp" />
+     <ClCompile Include="MadVRShaderRuntimeStateTests.cpp" />
+diff --git a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj.filters b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj.filters
+index 8bc10286..f66037aa 100644
+--- a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj.filters
++++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj.filters
+@@ -226,6 +226,7 @@
+   <ItemGroup><ClCompile Include="CrossfadeMixTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+   <ItemGroup><Filter Include="VP-V"><UniqueIdentifier>{6f1b7a52-4c3e-4f6a-9d1e-5a0c2b7e9d41}</UniqueIdentifier></Filter></ItemGroup>
+   <ItemGroup><ClCompile Include="..\VP-V\tests\PipelineSkeletonTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
++  <ItemGroup><ClCompile Include="..\VP-V\tests\StatusTextTests.cpp"><Filter>VP-V</Filter></ClCompile><ClCompile Include="..\VP-V\tests\VpStatusAdapterTests.cpp"><Filter>VP-V</Filter></ClCompile><ClCompile Include="ModuleStatusTextTests.cpp" /></ItemGroup>
+   <ItemGroup><ClCompile Include="TextureRestoreTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+   <ItemGroup><ClCompile Include="DetailRestoreConfigTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+   <ItemGroup><ClCompile Include="PulldownReliabilityTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>

@@ -44,8 +44,8 @@ Files (all new unless noted):
 | `.../dv_loopback/DvMetadataModel.h` | DM as named fields: what VP must decode from a sent DM; diff |
 | `.../dv_loopback/DvLoopbackAnalyzer.{h,cpp}` | the receiving side and the report |
 | `.../dv_loopback/DvSimulatedLoop.h`, `DvLoopbackHarness.h` | the in-memory loop and the harness |
-| `src/VideoProcessor-Lib/RawCaptureRecorder.{h,cpp}` | raw capture recording (Tier 3, LLDV-vs-tunnel runs, hardware loop capture) |
-| `src/VideoProcessor-Lib/RawCaptureCorpus.h` | reads VP recordings and StreamRecorder `--raw` folders |
+| `src/VP-V/modules/control/diagnostics/RawCaptureRecorder.{h,cpp}` | raw capture recording (Tier 3, LLDV-vs-tunnel runs, hardware loop capture) |
+| `src/VP-V/modules/control/diagnostics/RawCaptureCorpus.h` | reads VP recordings and StreamRecorder `--raw` folders |
 | `src/VideoProcessor-DvLoopback/` | `VideoProcessorDvLoopback.exe`: `--probe` (read-only), `--send` (VPV, owner present), `--restore-sdr` |
 | `src/VideoProcessor-Test/DvTunnelReferenceEncoder.h` | the independent reference encoder |
 | `src/VideoProcessor-Test/DvTunnelLoopbackTests.cpp`, `DvIncomingHdrModeTests.cpp`, `DvRawCorpusTests.cpp`, `DvRpuAnchorTests.cpp` | CPU tests |

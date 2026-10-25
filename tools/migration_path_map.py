@@ -50,16 +50,28 @@ def collect():
     # Staged moves (git mv, not yet committed) first, so a migration is checked before its commit.
     staged = ["@staged"] + git("diff", "--cached", "-M", "--diff-filter=R", "--name-status").splitlines()
     history = git("log", "-M", "--diff-filter=R", "--format=@%h", "--name-status", "HEAD").splitlines()
+    renames = []
     for line in staged + history:
         if line.startswith("@"):
             commit = line[1:]
             continue
-        parts = line.split("\t")
+        parts = line.split("	")
         if len(parts) == 3 and parts[0].startswith("R"):
-            old, new = parts[1], parts[2]
-            if new.startswith(MODULES_REL) and old.startswith("src/VideoProcessor-") and old not in entries:
-                if os.path.exists(os.path.join(ROOT, new)):
-                    entries[old] = (new, commit)   # newest first: the first record wins
+            renames.append((parts[1], parts[2], commit))
+    # Later moves between modules (M2 re-cuts, e.g. projector_control -> led_compensation):
+    # follow them so a legacy path maps to where the file lives now (newest record wins).
+    module_moves = {}
+    for old, new, commit in renames:
+        if old.startswith(MODULES_REL) and new.startswith(MODULES_REL) and old not in module_moves:
+            module_moves[old] = (new, commit)
+    for old, new, commit in renames:
+        if new.startswith(MODULES_REL) and old.startswith("src/VideoProcessor-") and old not in entries:
+            seen = set()
+            while not os.path.exists(os.path.join(ROOT, new)) and new in module_moves and new not in seen:
+                seen.add(new)
+                new, commit = module_moves[new]
+            if os.path.exists(os.path.join(ROOT, new)):
+                entries[old] = (new, commit)   # newest first: the first record wins
     # A header that left a forwarding header behind shows as an add, not a rename.
     for dirpath, _, files in os.walk(os.path.join(ROOT, *MODULES_REL.split("/"))):
         if "MANIFEST.json" not in files:

@@ -137,6 +137,7 @@ Chain tests:
 - delay gate (`DelayGate`)
 
 ## Known issues / open items
+- WP-24 captured-repeat render reuse (`repeat_render_reuse`, draft default off; Original pathway off): RepeatReuseGlue.h / RepeatReusePolicy.h / RepeatReuseAdapter.h / TemporalShaders.h / RepeatReuseRegistryKey.h here. It depends on motion.consumers' rendered-picture cache (DejudderRendered::Cache, RenderedWarp.h). Host call sites: docs/design/repeat-reuse-callsites.patch.
 
 - Open loop, the display-rate hold, gate step-downs and a kept refresh rate are log-only (wire FallbackCatalog::Presentation / RefreshRate).
 - The delay budget counts 2 swapchain frames while render-ahead's chain runs at latency 3 (PENDING-RA).
@@ -171,7 +172,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 
 ## Settings
 
-- Keys: `dejudder_gate`, `render_ahead`, `render_ahead_queue_credit`, `render_ahead_utilisation`.
+- Keys: `dejudder_gate`, `render_ahead`, `render_ahead_queue_credit`, `render_ahead_utilisation`, `repeat_render_reuse`.
 - Tiers: not tiered.
 - VP-V page, Output tab: tiers Classic / Low / Mid; tier keys `temporal_dither`.
 - Plain-language guide: [docs/settings/VP-settings-reference.md#8-output](../../../../../docs/settings/VP-settings-reference.md#8-output).

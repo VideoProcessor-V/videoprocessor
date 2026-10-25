@@ -19,8 +19,6 @@
 // each frame once it is rendered.
 namespace LedDrive
 {
-	class LedDriveModule;
-
 	// Entries over the normalised input signal (0 = black, 1 = white after
 	// the range expansion); values are the normalised PRE_OUTPUT signal in the
 	// target transfer, before the gamma boost.
@@ -30,6 +28,25 @@ namespace LedDrive
 	// The identity transfer (output = input), used until the renderer has
 	// built a real one.
 	RawTransfer IdentityRawTransfer();
+
+	// What the look-ahead needs from the drive (LED module re-cut, migration-m2-plan.md "LED module
+	// boundaries"): LedDriveModule (drive.led_compensation) implements it, so drive.led_measure no
+	// longer includes the module. Every call is thread-safe on the implementation's side.
+	class IPredictionSink
+	{
+	public:
+		virtual ~IPredictionSink() = default;
+		virtual bool WantsPredictions() const = 0;
+		virtual void SetLookaheadDepth(size_t futureFrames) = 0;
+		virtual uint64_t ConfigGeneration() const = 0;
+		virtual uint64_t LookaheadEpoch() const = 0;
+		virtual LedDriveConfig Config() const = 0;
+		virtual std::shared_ptr<const RawTransfer> CurrentRawTransfer() const = 0;
+		virtual double DisplayGamma() const = 0;
+		virtual int SourceRange() const = 0;
+		virtual double SourceFramePeriodMs() const = 0;
+		virtual void SubmitPrediction(uint64_t sequence, const FrameStats& predicted) = 0;
+	};
 
 	// Whether the luma reader returns full-range codes for this source (8-bit
 	// and 12-bit RGB) rather than limited-range ones (YUV, 10-bit RGB). Its
@@ -92,7 +109,7 @@ namespace LedDrive
 	class LookaheadObserver : public QueuedFrameStatistics::IObserver
 	{
 	public:
-		explicit LookaheadObserver(LedDriveModule& module);
+		explicit LookaheadObserver(IPredictionSink& module);
 		void BeginWalk(size_t futureFrames) override;
 		void ObserveFrame(uint64_t sourceSequence, size_t framesAhead,
 			const AnalysisLumaSource& luma, const QueuedFrameStatistics::PictureRect& activePicture) override;
@@ -110,7 +127,7 @@ namespace LedDrive
 		void SetPictureGeometry(double screenWidth, double screenHeight, const PixelRect* masks, int count);
 
 	private:
-		LedDriveModule& module;
+		IPredictionSink& module;
 		StatsBuilder builder;
 		uint64_t builderGeneration = 0;
 		uint64_t lastSequence = 0;

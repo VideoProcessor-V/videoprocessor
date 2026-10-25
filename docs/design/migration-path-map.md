@@ -17,26 +17,37 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/vprenderer/SdrToneShape.h` | `src/VP-V/modules/colour/sdr_tone_shape/SdrToneShape.h` | d58d0b4c | fwd |
 | `src/VideoProcessor-Lib/CrashState.cpp` | `src/VP-V/modules/control/diagnostics/CrashState.cpp` | 259cfa50 |  |
 | `src/VideoProcessor-Lib/CrashState.h` | `src/VP-V/modules/control/diagnostics/CrashState.h` | 259cfa50 |  |
+| `src/VideoProcessor-Lib/DiagnosticHistory.h` | `src/VP-V/modules/control/diagnostics/DiagnosticHistory.h` | ? | fwd |
+| `src/VideoProcessor-Lib/RawCaptureCorpus.h` | `src/VP-V/modules/control/diagnostics/RawCaptureCorpus.h` | ? | fwd |
+| `src/VideoProcessor-Lib/RawCaptureRecorder.cpp` | `src/VP-V/modules/control/diagnostics/RawCaptureRecorder.cpp` | staged |  |
+| `src/VideoProcessor-Lib/RawCaptureRecorder.h` | `src/VP-V/modules/control/diagnostics/RawCaptureRecorder.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/RendererDiagnosticCodes.h` | `src/VP-V/modules/control/diagnostics/RendererDiagnosticCodes.h` | ? | fwd |
 | `src/VideoProcessor-Lib/StateReport.cpp` | `src/VP-V/modules/control/diagnostics/StateReport.cpp` | 259cfa50 |  |
 | `src/VideoProcessor-Lib/StateReport.h` | `src/VP-V/modules/control/diagnostics/StateReport.h` | 259cfa50 |  |
 | `src/VideoProcessor-Lib/StateReportSettings.h` | `src/VP-V/modules/control/diagnostics/StateReportSettings.h` | 259cfa50 |  |
-| `src/VideoProcessor-Lib/led/LedDriveArbiter.cpp` | `src/VP-V/modules/drive/led_compensation/LedDriveArbiter.cpp` | 9e055034 |  |
-| `src/VideoProcessor-Lib/led/LedDriveArbiter.h` | `src/VP-V/modules/drive/led_compensation/LedDriveArbiter.h` | 9e055034 | fwd |
+| `src/VideoProcessor-Lib/StoreZipWriter.h` | `src/VP-V/modules/control/diagnostics/StoreZipWriter.h` | ? | fwd |
+| `src/VideoProcessor-Lib/led/LedController.cpp` | `src/VP-V/modules/drive/led_compensation/LedController.cpp` | staged |  |
+| `src/VideoProcessor-Lib/led/LedController.h` | `src/VP-V/modules/drive/led_compensation/LedController.h` | staged |  |
+| `src/VideoProcessor-Lib/led/LedDriveConfig.h` | `src/VP-V/modules/drive/led_compensation/LedDriveConfig.h` | ? | fwd |
 | `src/VideoProcessor-Lib/led/LedDriveHoldover.cpp` | `src/VP-V/modules/drive/led_compensation/LedDriveHoldover.cpp` | 9e055034 |  |
 | `src/VideoProcessor-Lib/led/LedDriveHoldover.h` | `src/VP-V/modules/drive/led_compensation/LedDriveHoldover.h` | 9e055034 | fwd |
 | `src/VideoProcessor-Lib/led/LedDriveModule.cpp` | `src/VP-V/modules/drive/led_compensation/LedDriveModule.cpp` | 9e055034 |  |
 | `src/VideoProcessor-Lib/led/LedDriveModule.h` | `src/VP-V/modules/drive/led_compensation/LedDriveModule.h` | 9e055034 | fwd |
+| `src/VideoProcessor-Lib/led/LedRawTransfer.cpp` | `src/VP-V/modules/drive/led_compensation/LedRawTransfer.cpp` | staged |  |
+| `src/VideoProcessor-Lib/led/LedRawTransfer.h` | `src/VP-V/modules/drive/led_compensation/LedRawTransfer.h` | ? | fwd |
 | `src/VideoProcessor-Lib/led/LedLookahead.cpp` | `src/VP-V/modules/drive/led_measure/LedLookahead.cpp` | 9bfb55d6 |  |
 | `src/VideoProcessor-Lib/led/LedLookahead.h` | `src/VP-V/modules/drive/led_measure/LedLookahead.h` | 9bfb55d6 |  |
 | `src/VideoProcessor-Lib/led/LedMeasurement.cpp` | `src/VP-V/modules/drive/led_measure/LedMeasurement.cpp` | 9bfb55d6 |  |
 | `src/VideoProcessor-Lib/led/LedMeasurement.h` | `src/VP-V/modules/drive/led_measure/LedMeasurement.h` | 9bfb55d6 |  |
+| `src/VideoProcessor-Lib/led/LedMeasurementHook.cpp` | `src/VP-V/modules/drive/led_measure/LedMeasurementHook.cpp` | staged |  |
+| `src/VideoProcessor-Lib/led/LedMeasurementHook.h` | `src/VP-V/modules/drive/led_measure/LedMeasurementHook.h` | ? | fwd |
 | `src/VideoProcessor-Lib/led/BarcoAsciiDriver.cpp` | `src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.cpp` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/BarcoAsciiDriver.h` | `src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.h` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/ConnectionTest.cpp` | `src/VP-V/modules/drive/projector_control/ConnectionTest.cpp` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/ConnectionTest.h` | `src/VP-V/modules/drive/projector_control/ConnectionTest.h` | 570b1ee8 | fwd |
 | `src/VideoProcessor-Lib/led/LedClock.h` | `src/VP-V/modules/drive/projector_control/LedClock.h` | 570b1ee8 |  |
-| `src/VideoProcessor-Lib/led/LedController.cpp` | `src/VP-V/modules/drive/projector_control/LedController.cpp` | 570b1ee8 |  |
-| `src/VideoProcessor-Lib/led/LedController.h` | `src/VP-V/modules/drive/projector_control/LedController.h` | 570b1ee8 |  |
+| `src/VideoProcessor-Lib/led/LedDriveArbiter.cpp` | `src/VP-V/modules/drive/projector_control/LedDriveArbiter.cpp` | staged |  |
+| `src/VideoProcessor-Lib/led/LedDriveArbiter.h` | `src/VP-V/modules/drive/projector_control/LedDriveArbiter.h` | ? | fwd |
 | `src/VideoProcessor-Lib/led/LedShutdownRestore.h` | `src/VP-V/modules/drive/projector_control/LedShutdownRestore.h` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/ProjectorDriver.cpp` | `src/VP-V/modules/drive/projector_control/ProjectorDriver.cpp` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/ProjectorDriver.h` | `src/VP-V/modules/drive/projector_control/ProjectorDriver.h` | 570b1ee8 |  |
@@ -49,9 +60,9 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.cpp` | `src/VP-V/modules/input/capture/GpuRgbUnpack.cpp` | 27622366 |  |
 | `src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.h` | `src/VP-V/modules/input/capture/GpuRgbUnpack.h` | 27622366 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/UploadReuse.h` | `src/VP-V/modules/input/capture/UploadReuse.h` | 27622366 | fwd |
-| `src/VideoProcessor-Lib/vprenderer/PulldownDetector.h` | `src/VP-V/modules/input/queue_timing/PulldownDetector.h` | ? | fwd |
-| `src/VideoProcessor-Lib/QueueLatency.h` | `src/VP-V/modules/input/queue_timing/QueueLatency.h` | ? | fwd |
-| `src/VideoProcessor-Lib/QueueLookahead.h` | `src/VP-V/modules/input/queue_timing/QueueLookahead.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/PulldownDetector.h` | `src/VP-V/modules/input/queue_timing/PulldownDetector.h` | 2670de58 | fwd |
+| `src/VideoProcessor-Lib/QueueLatency.h` | `src/VP-V/modules/input/queue_timing/QueueLatency.h` | 2670de58 | fwd |
+| `src/VideoProcessor-Lib/QueueLookahead.h` | `src/VP-V/modules/input/queue_timing/QueueLookahead.h` | 2670de58 | fwd |
 | `src/VideoProcessor-Lib/DolbyVisionTunnelGate.h` | `src/VP-V/modules/input/signal/DolbyVisionTunnelGate.h` | a177e22a | fwd |
 | `src/VideoProcessor-Lib/DolbyVisionTunnelHandoff.h` | `src/VP-V/modules/input/signal/DolbyVisionTunnelHandoff.h` | a177e22a | fwd |
 | `src/VideoProcessor-Lib/vprenderer/DolbyVisionTunnelUnpackReference.h` | `src/VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h` | a177e22a | fwd |
@@ -61,27 +72,27 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/HdrInference.h` | `src/VP-V/modules/input/signal/HdrInference.h` | a177e22a | fwd |
 | `src/VideoProcessor-Lib/HdrInferenceSignalBuilder.h` | `src/VP-V/modules/input/signal/HdrInferenceSignalBuilder.h` | a177e22a | fwd |
 | `src/VideoProcessor-Lib/HdrVetoCaptureGate.h` | `src/VP-V/modules/input/signal/HdrVetoCaptureGate.h` | a177e22a | fwd |
-| `src/VideoProcessor-Lib/vprenderer/DejudderAhead.h` | `src/VP-V/modules/motion/consumers/DejudderAhead.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp` | `src/VP-V/modules/motion/consumers/DejudderWarp.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/FrameInterpolator.cpp` | `src/VP-V/modules/motion/consumers/FrameInterpolator.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/FrameInterpolator.h` | `src/VP-V/modules/motion/consumers/FrameInterpolator.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/InterpolationPolicy.h` | `src/VP-V/modules/motion/consumers/InterpolationPolicy.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/InterpolationTimeline.h` | `src/VP-V/modules/motion/consumers/InterpolationTimeline.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/OcclusionMaskHook.cpp` | `src/VP-V/modules/motion/consumers/OcclusionMaskHook.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/OcclusionMaskHook.h` | `src/VP-V/modules/motion/consumers/OcclusionMaskHook.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/RenderedWarp.cpp` | `src/VP-V/modules/motion/consumers/RenderedWarp.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/RenderedWarp.h` | `src/VP-V/modules/motion/consumers/RenderedWarp.h` | ? | fwd |
-| `src/VideoProcessor-Lib/MotionAhead.h` | `src/VP-V/modules/motion/estimation/MotionAhead.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/MotionAheadProducer.cpp` | `src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/MotionAheadProducer.h` | `src/VP-V/modules/motion/estimation/MotionAheadProducer.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/MotionEngineIdle.h` | `src/VP-V/modules/motion/estimation/MotionEngineIdle.h` | ? | fwd |
-| `src/VideoProcessor-Lib/MotionValidity.h` | `src/VP-V/modules/motion/estimation/MotionValidity.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/NvOpticalFlow.cpp` | `src/VP-V/modules/motion/estimation/NvOpticalFlow.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/NvOpticalFlow.h` | `src/VP-V/modules/motion/estimation/NvOpticalFlow.h` | staged |  |
-| `src/VideoProcessor-Lib/OpticalFlowTrust.h` | `src/VP-V/modules/motion/estimation/OpticalFlowTrust.h` | staged |  |
-| `src/VideoProcessor-Lib/VectorStore.h` | `src/VP-V/modules/motion/estimation/VectorStore.h` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/DejudderPolicy.h` | `src/VP-V/modules/motion/vector_delivery/DejudderPolicy.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/DejudderWarp.h` | `src/VP-V/modules/motion/vector_delivery/DejudderWarp.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/DejudderAhead.h` | `src/VP-V/modules/motion/consumers/DejudderAhead.h` | c64ec0ca | fwd |
+| `src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp` | `src/VP-V/modules/motion/consumers/DejudderWarp.cpp` | c64ec0ca |  |
+| `src/VideoProcessor-Lib/vprenderer/FrameInterpolator.cpp` | `src/VP-V/modules/motion/consumers/FrameInterpolator.cpp` | c64ec0ca |  |
+| `src/VideoProcessor-Lib/vprenderer/FrameInterpolator.h` | `src/VP-V/modules/motion/consumers/FrameInterpolator.h` | c64ec0ca | fwd |
+| `src/VideoProcessor-Lib/vprenderer/InterpolationPolicy.h` | `src/VP-V/modules/motion/consumers/InterpolationPolicy.h` | c64ec0ca | fwd |
+| `src/VideoProcessor-Lib/vprenderer/InterpolationTimeline.h` | `src/VP-V/modules/motion/consumers/InterpolationTimeline.h` | c64ec0ca | fwd |
+| `src/VideoProcessor-Lib/vprenderer/OcclusionMaskHook.cpp` | `src/VP-V/modules/motion/consumers/OcclusionMaskHook.cpp` | c64ec0ca |  |
+| `src/VideoProcessor-Lib/vprenderer/OcclusionMaskHook.h` | `src/VP-V/modules/motion/consumers/OcclusionMaskHook.h` | c64ec0ca | fwd |
+| `src/VideoProcessor-Lib/vprenderer/RenderedWarp.cpp` | `src/VP-V/modules/motion/consumers/RenderedWarp.cpp` | c64ec0ca |  |
+| `src/VideoProcessor-Lib/vprenderer/RenderedWarp.h` | `src/VP-V/modules/motion/consumers/RenderedWarp.h` | c64ec0ca | fwd |
+| `src/VideoProcessor-Lib/MotionAhead.h` | `src/VP-V/modules/motion/estimation/MotionAhead.h` | 6b04d45e | fwd |
+| `src/VideoProcessor-Lib/vprenderer/MotionAheadProducer.cpp` | `src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp` | 6b04d45e |  |
+| `src/VideoProcessor-Lib/vprenderer/MotionAheadProducer.h` | `src/VP-V/modules/motion/estimation/MotionAheadProducer.h` | 6b04d45e | fwd |
+| `src/VideoProcessor-Lib/vprenderer/MotionEngineIdle.h` | `src/VP-V/modules/motion/estimation/MotionEngineIdle.h` | 6b04d45e | fwd |
+| `src/VideoProcessor-Lib/MotionValidity.h` | `src/VP-V/modules/motion/estimation/MotionValidity.h` | 6b04d45e | fwd |
+| `src/VideoProcessor-Lib/vprenderer/NvOpticalFlow.cpp` | `src/VP-V/modules/motion/estimation/NvOpticalFlow.cpp` | 6b04d45e |  |
+| `src/VideoProcessor-Lib/vprenderer/NvOpticalFlow.h` | `src/VP-V/modules/motion/estimation/NvOpticalFlow.h` | 6b04d45e |  |
+| `src/VideoProcessor-Lib/OpticalFlowTrust.h` | `src/VP-V/modules/motion/estimation/OpticalFlowTrust.h` | 6b04d45e |  |
+| `src/VideoProcessor-Lib/VectorStore.h` | `src/VP-V/modules/motion/estimation/VectorStore.h` | 6b04d45e |  |
+| `src/VideoProcessor-Lib/vprenderer/DejudderPolicy.h` | `src/VP-V/modules/motion/vector_delivery/DejudderPolicy.h` | f262bde0 | fwd |
+| `src/VideoProcessor-Lib/vprenderer/DejudderWarp.h` | `src/VP-V/modules/motion/vector_delivery/DejudderWarp.h` | f262bde0 | fwd |
 | `src/VideoProcessor-Lib/calibration/AmbientCheck.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/AmbientCheck.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/AmbientCheck.h` | `src/VP-V/modules/output/calibration_lut/calibration/AmbientCheck.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/ArgyllInstall.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/ArgyllInstall.cpp` | d2517eb1 |  |
@@ -127,13 +138,27 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/calibration/Terminal.h` | `src/VP-V/modules/output/calibration_lut/calibration/Terminal.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/TranscriptRecorder.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/TranscriptRecorder.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/TranscriptRecorder.h` | `src/VP-V/modules/output/calibration_lut/calibration/TranscriptRecorder.h` | d2517eb1 |  |
+| `src/VideoProcessor-Test/CalibrationMeterTests.cpp` | `src/VP-V/modules/output/calibration_lut/tests/CalibrationMeterTests.cpp` | staged |  |
+| `src/VideoProcessor-Test/CalibrationPhase2Tests.cpp` | `src/VP-V/modules/output/calibration_lut/tests/CalibrationPhase2Tests.cpp` | staged |  |
+| `src/VideoProcessor-Test/CalibrationRemainderTests.cpp` | `src/VP-V/modules/output/calibration_lut/tests/CalibrationRemainderTests.cpp` | staged |  |
+| `src/VideoProcessor-Test/CalibrationTestSupport.h` | `src/VP-V/modules/output/calibration_lut/tests/CalibrationTestSupport.h` | staged |  |
+| `src/VideoProcessor-Test/data/spotread/README.txt` | `src/VP-V/modules/output/calibration_lut/tests/data/spotread/README.txt` | staged |  |
+| `src/VideoProcessor-Test/data/spotread/crash.txt` | `src/VP-V/modules/output/calibration_lut/tests/data/spotread/crash.txt` | staged |  |
+| `src/VideoProcessor-Test/data/spotread/hang.txt` | `src/VP-V/modules/output/calibration_lut/tests/data/spotread/hang.txt` | staged |  |
+| `src/VideoProcessor-Test/data/spotread/hang_now.txt` | `src/VP-V/modules/output/calibration_lut/tests/data/spotread/hang_now.txt` | staged |  |
+| `src/VideoProcessor-Test/data/spotread/i1d3_session.txt` | `src/VP-V/modules/output/calibration_lut/tests/data/spotread/i1d3_session.txt` | staged |  |
+| `src/VideoProcessor-Test/data/spotread/i1pro_calibration.txt` | `src/VP-V/modules/output/calibration_lut/tests/data/spotread/i1pro_calibration.txt` | staged |  |
+| `src/VideoProcessor-Test/data/spotread/init_failed.txt` | `src/VP-V/modules/output/calibration_lut/tests/data/spotread/init_failed.txt` | staged |  |
+| `src/VideoProcessor-Test/data/spotread/no_instrument.txt` | `src/VP-V/modules/output/calibration_lut/tests/data/spotread/no_instrument.txt` | staged |  |
+| `src/VideoProcessor-Test/data/spotread/read_failure.txt` | `src/VP-V/modules/output/calibration_lut/tests/data/spotread/read_failure.txt` | staged |  |
+| `src/VideoProcessor-Test/data/spotread/redraw.txt` | `src/VP-V/modules/output/calibration_lut/tests/data/spotread/redraw.txt` | staged |  |
 | `src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp` | `src/VP-V/modules/output/dither/CustomHookChain.cpp` | 4799f96f |  |
 | `src/VideoProcessor-Lib/vprenderer/CustomHookChain.h` | `src/VP-V/modules/output/dither/CustomHookChain.h` | 4799f96f | fwd |
 | `src/VideoProcessor-Lib/vprenderer/OutputEncodingRepair.cpp` | `src/VP-V/modules/output/dither/OutputEncodingRepair.cpp` | 4799f96f |  |
 | `src/VideoProcessor-Lib/vprenderer/OutputEncodingRepair.h` | `src/VP-V/modules/output/dither/OutputEncodingRepair.h` | 4799f96f | fwd |
 | `src/VideoProcessor-Lib/vprenderer/SigmaDeltaDomain.h` | `src/VP-V/modules/output/dither/SigmaDeltaDomain.h` | 4799f96f | fwd |
-| `src/VideoProcessor-Lib/vprenderer/OpenLoopDisplayRate.h` | `src/VP-V/modules/output/presentation/OpenLoopDisplayRate.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/RenderAheadPolicy.h` | `src/VP-V/modules/output/presentation/RenderAheadPolicy.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/OpenLoopDisplayRate.h` | `src/VP-V/modules/output/presentation/OpenLoopDisplayRate.h` | 05d2a6e4 | fwd |
+| `src/VideoProcessor-Lib/vprenderer/RenderAheadPolicy.h` | `src/VP-V/modules/output/presentation/RenderAheadPolicy.h` | 05d2a6e4 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.cpp` | `src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp` | f45b4b00 |  |
 | `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h` | `src/VP-V/modules/scaling/output/AdaptiveDownscale.h` | f45b4b00 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/DownscaleLight.h` | `src/VP-V/modules/scaling/output/DownscaleLight.h` | f45b4b00 | fwd |

@@ -12,6 +12,7 @@
 #include <VP-V/core/SlotRegistry.h>
 #include <VP-V/core/SlotTiming.h>
 #include <VP-V/core/VectorScale.h>
+#include <VP-V/modules/scaling/rebase/EntranceGpuDrain.h>
 
 #include <cstring>
 #include <set>
@@ -695,8 +696,42 @@ namespace PipelineSkeletonTestsNs
 			// Settings audit 2026-10-24: the VP additions the first table missed are switched off too.
 			for (const char* key : { "active_picture_startup_hold", "low_bitrate_handling", "ssim_residual_stabilise",
 				"cnn_residual_stabilise", "residual_stabilise_grain_guard", "dejudder_estimate_ahead", "interpolation_fallback",
-				"output_segments_merged" })
+				"output_segments_merged", "dejudder_est_still_zero", "entrance_gpu_drain" })
 				Assert::IsTrue(keys.count(key) == 1, W(std::string(key) + " is not in the Original pathway").c_str());
+		}
+
+		TEST_METHOD(EntranceGpuDrainOnceAfterTheLastEntranceRun)
+		{
+			// entrance_gpu_drain (scaling.rebase): one drain before a render, after the last entrance
+			// run; nothing without an entrance run, when off, or with the slot not running; finish and
+			// flush issue their own call; a mode change starts the statistics over.
+			EntranceGpuDrain::Mode mode = EntranceGpuDrain::Mode::Off;
+			Assert::IsTrue(EntranceGpuDrain::Parse("finish", mode) && mode == EntranceGpuDrain::Mode::Finish);
+			Assert::IsTrue(EntranceGpuDrain::Parse("flush", mode) && mode == EntranceGpuDrain::Mode::Flush);
+			Assert::IsTrue(EntranceGpuDrain::Parse("off", mode) && mode == EntranceGpuDrain::Mode::Off);
+			Assert::IsFalse(EntranceGpuDrain::Parse("wait", mode));
+			int flushes = 0, finishes = 0;
+			const auto flush = [&]() { ++flushes; };
+			const auto finish = [&]() { ++finishes; };
+			EntranceGpuDrain::Drain drain;
+			using M = EntranceGpuDrain::Mode;
+			Assert::IsFalse(drain.BeforeRender(M::Finish, true, flush, finish), L"no entrance run: no drain");
+			drain.NoteEntranceRun();
+			drain.NoteEntranceRun();   // the main frame and the crossfade's path left
+			Assert::IsTrue(drain.BeforeRender(M::Finish, true, flush, finish), L"after the last entrance run");
+			Assert::IsFalse(drain.BeforeRender(M::Finish, true, flush, finish), L"once per run (the note is consumed)");
+			Assert::AreEqual(1, finishes);
+			Assert::AreEqual(static_cast<size_t>(1), drain.Samples());
+			drain.NoteEntranceRun();
+			Assert::IsTrue(drain.BeforeRender(M::Flush, true, flush, finish), L"flush");
+			Assert::AreEqual(1, flushes);
+			Assert::AreEqual(static_cast<size_t>(1), drain.Samples(), L"a mode change starts the statistics over");
+			drain.NoteEntranceRun();
+			Assert::IsFalse(drain.BeforeRender(M::Flush, false, flush, finish), L"slot not running: nothing");
+			drain.NoteEntranceRun();
+			Assert::IsFalse(drain.BeforeRender(M::Off, true, flush, finish), L"off: nothing");
+			Assert::AreEqual(1, flushes);
+			Assert::AreEqual(1, finishes);
 		}
 
 		TEST_METHOD(UpstreamKeyCountsTheMotionConsumersWithB3)

@@ -1,7 +1,6 @@
 #include <pch.h>
 #include "LedLookahead.h"
 
-#include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
 
 #include <algorithm>
 #include <cmath>
@@ -220,7 +219,7 @@ namespace LedDrive
 		return out.blocks > 0;
 	}
 
-	LookaheadObserver::LookaheadObserver(LedDriveModule& moduleIn)
+	LookaheadObserver::LookaheadObserver(IPredictionSink& moduleIn)
 		: module(moduleIn), builder(LedDriveConfig())
 	{
 	}

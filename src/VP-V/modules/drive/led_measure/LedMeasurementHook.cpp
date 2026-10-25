@@ -1,7 +1,7 @@
 #include <pch.h>
 #include "LedMeasurementHook.h"
 
-#include "../DebugLog.h"
+#include <DebugLog.h>
 
 #include <libplacebo/dispatch.h>
 

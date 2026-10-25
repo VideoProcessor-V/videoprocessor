@@ -11,8 +11,8 @@
 #include "CppUnitTest.h"
 
 #include <dv_loopback/DvLoopbackHarness.h>
-#include <RawCaptureRecorder.h>
-#include <RawCaptureCorpus.h>
+#include <VP-V/modules/control/diagnostics/RawCaptureRecorder.h>
+#include <VP-V/modules/control/diagnostics/RawCaptureCorpus.h>
 
 #include <cstdio>
 #include <map>

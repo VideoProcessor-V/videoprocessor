@@ -30,7 +30,7 @@
 // bytes are the raw capture frame the render already holds (capture_path gpu); without one
 // (CPU ingest) only the metadata lines are written and the header says so. The copy runs on
 // the render thread while a clip records (a few ms per 4K frame) - a diagnostic cost.
-#include <RawCaptureRecorder.h>
+#include <VP-V/modules/control/diagnostics/RawCaptureRecorder.h>
 #include <VideoFrame.h>
 #include <VideoState.h>
 #include <EOTF.h>

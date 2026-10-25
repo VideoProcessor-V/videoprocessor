@@ -26,7 +26,7 @@
 #include "CppUnitTest.h"
 
 #include <dv_loopback/DvLoopbackHarness.h>
-#include <RawCaptureCorpus.h>
+#include <VP-V/modules/control/diagnostics/RawCaptureCorpus.h>
 #include <VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h>
 
 #include <chrono>

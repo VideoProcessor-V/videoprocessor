@@ -29,7 +29,7 @@
 #include <PixelValueRange.h>
 #include <OutputReadinessController.h>
 #include <ShortcutRepeatGuard.h>
-#include <VP-V/modules/control/diagnostics/StateReport.h>
+#include <VP-V/modules/control/diagnostics/DiagnosticsReportRun.h>
 #include <VP-V/modules/control/diagnostics/StateReportSettings.h>
 #include <CCie1931Control.h>
 #include <IRenderer.h>
@@ -331,13 +331,13 @@ public:
 	void OnCommandCaptureRenderedOutput();
 	// Report-a-problem (StateReport.h): the state_report shortcut and the
 	// system-menu item. trigger: "hotkey", "menu" or "auto:<reason>".
-	void OnCommandStateReport();
 	void SaveStateReport(const char* trigger);
+	// VP-V (WP-11): VP's shortcuts, dispatched by src/VP-V/gui/VpStatusAdapter.h.
+	afx_msg void OnVpCommand(UINT commandId);
 	// auto_report: a report on a recovery reset or render stall, rate-limited.
 	void MaybeAutoReport(const char* reason);
 	void RecordDiagnosticStats(double sourceHz, double displayHz);
 	void ShowStateReportToast(const std::string& value);
-	void OnCommandRawCaptureToggle();
 	void OnCommandDvCompareCapture();   // feat/dv-l8 WIP
 	void OnCommandCaptureAnalysisDiagnostics(bool includeFrames);
 	void OnCommandConfigEditor();
@@ -690,20 +690,7 @@ protected:
 	StagedRuntimeSettings m_stagedRuntimeSettings;
 	// Report-a-problem (owner 2026-10-17).
 	StateReportSettings::Settings m_stateReportSettings;
-	StateReport::AutoReportLimiter m_autoReportLimiter;
-	std::atomic<bool> m_stateReportBusy{ false };
-	ULONGLONG m_stateReportBusySince = 0;   // UI thread (bug hunt 3 C10)
-	// Bug hunt 3 (SH11): the report worker stays detached (it never touches
-	// the dialog) but signals `done`, so the exit waits for it (bounded)
-	// instead of killing it mid-write; `cancel` skips its thumbnail wait.
-	struct StateReportWorkerState
-	{
-		std::mutex mutex;
-		std::condition_variable doneChanged;
-		bool done = false;
-		std::atomic<bool> cancel{ false };
-	};
-	std::shared_ptr<StateReportWorkerState> m_stateReportWorker;
+	VpDiagnostics::ReportRun m_reportRun;   // the report-a-problem run (VP diagnostics adapter)
 	std::atomic<uint64_t> m_diagnosticCapturedFrames{ 0 };
 	std::atomic<uint64_t> m_diagnosticRejectedFrames{ 0 };
 	uint64_t m_diagnosticLastCapturedFrames = 0;
@@ -736,7 +723,7 @@ protected:
 	// and the ids already announced by a one-time notice this session.
 	std::string m_lastFallbacksHeading;
 	FallbackStatus::Notices m_fallbackNotices;
-	void UpdateFallbacksStatus();
+	void UpdateFallbacksStatus(const std::string& heading);
 	void ShowFallbackNotice(const std::string& id, const std::string& heading);
 	std::string m_intentLogKeys[4];             // the last logged state per function
 	void UpdateIntentInterpreter();

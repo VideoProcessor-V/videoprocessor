@@ -2,7 +2,7 @@
 #include "BarcoAsciiDriver.h"
 
 #include <DebugLog.h>
-#include <DiagnosticHistory.h>
+#include <VP-V/modules/control/diagnostics/DiagnosticHistory.h>
 
 #include <algorithm>
 #include <cctype>

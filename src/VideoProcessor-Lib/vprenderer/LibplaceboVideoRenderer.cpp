@@ -5,10 +5,14 @@
 #include <vprenderer/FeatureTextureIdle.h>  // VP: efficiency audit 2026-10-24 #8b
 #include <vprenderer/PassTimerHook.h>       // VP: efficiency timers (audit 2026-10-24 section 4)
 #include <vprenderer/GpuSpanTimers.h>       // VP: efficiency timers T2 (entrance stages)
+#include <VP-V/core/StatusText.h>       // VP-V: the generic module status, module "vp" (WP-11)
+#include <VP-V/modules/scaling/rebase/EntranceGpuDrain.h>   // entrance_gpu_drain (scaling.rebase)
 #include <GeneralRateLog.h>
 #include <RefreshKey.h>
 #include <MotionValidity.h>
 #include <VP-V/modules/motion/vector_delivery/MotionSegment.h>
+#include <VP-V/modules/output/presentation/RepeatReuseGlue.h>
+#include <VP-V/modules/output/presentation/RepeatReuseRegistryKey.h>
 #include <KernelInverse.h>
 #include <vprenderer/MotionAheadProducer.h>
 #include "../SubtitleProfileUpdatePolicy.h"
@@ -65,6 +69,7 @@
 #include <vprenderer/GpuCaptureUnpack.h>
 #include <vprenderer/GpuRgbUnpack.h>
 #include <VP-V/modules/input/signal/DvGpuUnpackSession.h>   // WP-14: the DV tunnel GPU unpack glue
+#include <VP-V/modules/input/signal/DvCompareCaptureSink.h>      // feat/dv-l8: DV comparison capture (diagnostic; WP-17 adapter)
 #include <vprenderer/EarlyUpload.h>
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h>   // WP-23 frame analysis store
 #include <vprenderer/DejudderPolicy.h>
@@ -73,7 +78,7 @@
 #include <vprenderer/RenderAheadPolicy.h>
 #include <vprenderer/UploadReuse.h>
 #include <vprenderer/OpenLoopDisplayRate.h>
-#include <vprenderer/RendererDiagnosticCodes.h>
+#include <VP-V/modules/control/diagnostics/DiagnosticsAdapter.h>   // WP-17: VP diagnostics/captures adapter
 #include <vprenderer/FrameInterpolator.h>
 #include <vprenderer/GrainPreserve.h>
 #include <vprenderer/OcclusionMaskHook.h>
@@ -95,7 +100,7 @@
 #include <VP-V/core/EntranceStages.h>
 #include <VP-V/core/EntranceEpoch.h>
 #include <VP-V/core/OutputHookOrder.h>
-#include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
+#include <VP-V/modules/output/calibration_lut/CalibrationLutHost.h>   // WP-12: the calibration glue
 #include <VP-V/segments/OutputSegments.h>   // S2/S3 output segments (central-migration-needs.md §6)
 #include <VP-V/segments/OutputSegmentsMerge.h>   // output_segments_merged (default off)
 #include <VP-V/core/FallbackCatalog.h>   // VP-V: the silent-fallbacks batch (src/VP-V/core)
@@ -111,13 +116,8 @@
 #include <vprenderer/NlsMaskMapping.h>
 #include <vprenderer/MotionEngineIdle.h>
 #include <QueueLookahead.h>
-#include <led/LedDriveModule.h>
-#include <led/LedDriveArbiter.h>
-#include <led/LedDriveHoldover.h>
-#include <filesource/FileHostSettings.h>
+#include <VP-V/modules/drive/led_compensation/DynamicDriveFrame.h>
 #include <calibration/CalibrationPattern.h>
-#include <led/LedMeasurementHook.h>
-#include <led/LedRawTransfer.h>
 #include <QueuedFrameStatistics.h>
 #include <ContentIntentObserver.h>
 #include <IntentInterpreterObserver.h>
@@ -258,11 +258,9 @@ namespace
 		// Tests only: a writable folder when the process lives somewhere
 		// read-only (the test runner in Program Files). Unset: beside the exe.
 		{
-			// The process environment (a test sets it in-process; the CRT's copy may be the DLL's own).
-			wchar_t overrideDir[1024] = {};
-			const DWORD overrideLength = GetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", overrideDir, 1024);
-			if (overrideLength > 0 && overrideLength < 1024)
-				return std::wstring(overrideDir, overrideLength);
+			std::wstring testFolder;
+			if (VpDiagnostics::TestFolderOverride(VpDiagnostics::TestFolder::Screenshots, testFolder))
+				return testFolder;
 		}
 		std::vector<wchar_t> buffer(32768);
 		const DWORD length = GetModuleFileNameW(
@@ -474,10 +472,9 @@ namespace
 		// runner's executable lives elsewhere). Unset: beside the exe, as always.
 		std::string executablePath = CurrentExecutablePath();
 		{
-			char overrideDir[1024] = {};
-			const DWORD overrideLength = GetEnvironmentVariableA("VP_TEST_SHADER_DIR", overrideDir, 1024);
-			if (overrideLength > 0 && overrideLength < 1024)
-				executablePath = std::string(overrideDir, overrideLength) + "\\VideoProcessor.exe";
+			std::string testFolder;
+			if (VpDiagnostics::TestFolderOverride(VpDiagnostics::TestFolder::Shaders, testFolder))
+				executablePath = testFolder + "\\VideoProcessor.exe";
 		}
 		if (!MadVRShaderLoader::ResolveShaderFilename(
 			filename, executablePath, resolvedPath, reason))
@@ -685,11 +682,10 @@ namespace
 	// the exe, as always.
 	bool ShaderCacheTestFolder(const char* relative, std::string& path)
 	{
-		char overrideDir[1024] = {};
-		const DWORD overrideLength = GetEnvironmentVariableA("VP_TEST_SHADER_CACHE_DIR", overrideDir, 1024);
-		if (overrideLength == 0 || overrideLength >= 1024)
+		std::string testFolder;
+		if (!VpDiagnostics::TestFolderOverride(VpDiagnostics::TestFolder::ShaderCache, testFolder))
 			return false;
-		path = std::string(overrideDir, overrideLength) + "\\" + relative;
+		path = testFolder + "\\" + relative;
 		return true;
 	}
 
@@ -1058,6 +1054,7 @@ namespace
 		double dejudderMatchTolerance = 4.5;   // owner 2026-10-14: with the fade match (planner Q8's condition met)
 		double dejudderFrameTrust = 0.25;   // 6b-2: whole-frame hold below this share
 		bool occlusionMask = false;         // 6c: the de-judder's occlusion mask for the sigma-delta
+		bool repeatRenderReuse = false;     // WP-24: captured repeats drawn from the rendered-picture cache (draft: off)
 		// Refinements (docs/VP-build-plan-refinements.md); inert while the
 		// de-judder and the grain map are off.
 		bool dejudderGlobalPrior = true;          // D1
@@ -1070,6 +1067,7 @@ namespace
 		bool dejudderEstCandidates = true;        // E1
 		double dejudderEstLambda = 0.5;           // E1 smoothness penalty, codes per source px
 		bool dejudderEstQpel = true;              // E3
+		bool dejudderEstStillZero = true;         // identical blocks: exactly the zero vector (bug hunt 2026-10-25)
 		bool dejudderEstGate = true;              // E4
 		bool dejudderEstSplit = false;            // E2 (off from 2026-10-14: with the 4.5 tolerance and M6 it costs benefit)
 		double dejudderEstSplitSad = 0.0;         // E2 threshold (0 = the match tolerance)
@@ -1290,6 +1288,12 @@ namespace
 		// frame_analysis_store (WP-23): VP's per-source-frame analysis record + ONE shared luma decode
 		// read by every analyser (VpFrameAnalysisHost.h). Off until the big test; never in Original.
 		bool frameAnalysisStore = false;
+		// entrance_gpu_drain (expert; bug hunt 2026-10-25, root cause open): after the entrance stages
+		// ran on a draw, "flush" submits the GPU queue and "finish" waits for it before libplacebo's
+		// render. Pictures between frames then match plain draws byte for byte (without it libplacebo's
+		// scaling passes vary by +-1 of 16 bits on scattered textured pixels with the GPU's timing).
+		// off = today's path (the default until it is costed on the 3090); Original pathway: off.
+		std::string entranceGpuDrain = "off";
 		std::string pipelineSettingsProblems;   // refused values, shown under "Fallbacks engaged" (audit item 4)
 		// Kernel-matched re-base (docs/VP-stage12-build-plan.md; owner 2026-10-16: optimise
 		// 1080p): the identified player kernel's inverse for an exact 2:1 luma re-base.
@@ -1535,7 +1539,7 @@ namespace
 			<< settings.dejudderMotionScaleHi << '|' << settings.dejudderVectorSmooth << '|'
 			<< settings.dejudderTrustScale << '|' << settings.dejudderOcclusionFill << '|'
 			<< settings.dejudderEstCandidates << '|' << settings.dejudderEstLambda << '|'
-			<< settings.dejudderEstQpel << '|' << settings.dejudderEstGate << '|'
+			<< settings.dejudderEstQpel << '|' << settings.dejudderEstStillZero << '|' << settings.dejudderEstGate << '|'
 			<< settings.dejudderEstSplit << '|' << settings.dejudderEstSplitSad << '|' << settings.dejudderLowRes << '|' << settings.dejudderEstimateAhead << '|' << settings.capturePath << '|' << settings.dejudderMotionRolloff << '|' << settings.dejudderRollLo << '|'
 			<< settings.dejudderRollHi << '|' << settings.dejudderRollFloor << '|' << settings.dejudderObjectStrength << '|'
 			<< settings.dejudderTextureTolerance << '|' << settings.dejudderGlobalTwo << '|' << settings.dejudderRegionalHold << '|'
@@ -1556,7 +1560,7 @@ namespace
 			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.sourceResolutionEvidenceShots << '|'
 			<< settings.sourceResolutionEvidenceSeconds << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
 			<< settings.pipelineOriginalPathway << '|' << settings.pipelineOrder << '|' << settings.pipelineSlotsOff << '|'
-			<< settings.calibrationLutStage << '|' << settings.pipelineEntranceOnce << '|' << settings.frameAnalysisStore << '|'
+			<< settings.calibrationLutStage << '|' << settings.pipelineEntranceOnce << '|' << settings.frameAnalysisStore << '|' << settings.entranceGpuDrain << '|'
 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
 			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.opticalFlowGlobal << '|'
 			<< settings.opticalFlowGlobalFallback << '|' << settings.opticalFlowCostTrust << '|' << settings.opticalFlowFbCheck << '|'
@@ -2754,11 +2758,13 @@ namespace
 					settings.fboFloat32 < 0 ? "auto" : (settings.fboFloat32 ? "on" : "off"));
 		}
 		for (const auto& toggle : { std::make_pair("occlusion_mask", &settings.occlusionMask),
+			std::make_pair("repeat_render_reuse", &settings.repeatRenderReuse),
 			std::make_pair("dejudder_global_prior", &settings.dejudderGlobalPrior),
 			std::make_pair("dejudder_vector_smooth", &settings.dejudderVectorSmooth),
 			std::make_pair("dejudder_occlusion_fill", &settings.dejudderOcclusionFill),
 			std::make_pair("dejudder_est_candidates", &settings.dejudderEstCandidates),
 			std::make_pair("dejudder_est_qpel", &settings.dejudderEstQpel),
+			std::make_pair("dejudder_est_still_zero", &settings.dejudderEstStillZero),
 			std::make_pair("dejudder_est_gate", &settings.dejudderEstGate),
 			std::make_pair("dejudder_est_split", &settings.dejudderEstSplit),
 			std::make_pair("dejudder_block_taper", &settings.dejudderBlockTaper),
@@ -3510,6 +3516,7 @@ namespace
 		settings.opticalFlowFbCheck = profile.opticalFlowFbCheck;
 		settings.estLambda = static_cast<float>(profile.dejudderEstLambda);
 		settings.estQpel = profile.dejudderEstQpel;
+		settings.estStillZero = profile.dejudderEstStillZero;
 		settings.estGate = profile.dejudderEstGate;
 		settings.estSplit = profile.dejudderEstSplit;
 		settings.estSplitSad = static_cast<float>(profile.dejudderEstSplitSad);
@@ -3582,6 +3589,8 @@ namespace
 		settings.interpolation = InterpolationPolicy::Mode::Off;   // key=interpolation
 		settings.interpolationFillGaps = false;            // key=interpolation_fill_gaps
 		settings.occlusionMask = false;                    // key=occlusion_mask
+		settings.repeatRenderReuse = false;                // key=repeat_render_reuse
+		settings.dejudderEstStillZero = false;             // key=dejudder_est_still_zero
 		settings.opticalFlow = false;                      // key=optical_flow
 		settings.motionAheadFrames = 0;                    // key=motion_ahead_frames
 		settings.motionHistoryFixes = false;               // key=motion_history_fixes
@@ -3615,6 +3624,7 @@ namespace
 		settings.pipelineOrder.clear();                    // the designed order
 		settings.pipelineEntranceOnce = false;             // B3: per-picture stages, as upstream
 		settings.frameAnalysisStore = false;               // key=frame_analysis_store (WP-23: upstream's own decodes only)
+		settings.entranceGpuDrain = "off";                 // key=entrance_gpu_drain
 	}
 
 	// Pipeline skeleton settings (global: [vpv] first, then [vprenderer]); see RendererSettings.
@@ -3670,6 +3680,14 @@ namespace
 				settings.frameAnalysisStore = value == "on";
 			else
 				settings.pipelineSettingsProblems += "frame_analysis_store '" + raw + "' (on|off); ";
+		}
+		if (TryGetPipelineString(config, "entrance_gpu_drain", raw))
+		{
+			const std::string value = ConfigFile::NormalizeName(raw);
+			if (value == "off" || value == "flush" || value == "finish")
+				settings.entranceGpuDrain = value;
+			else
+				settings.pipelineSettingsProblems += "entrance_gpu_drain '" + raw + "' (off|flush|finish); ";
 		}
 		if (settings.pipelineOriginalPathway)
 			ApplyOriginalPathwaySettings(settings);
@@ -5789,10 +5807,25 @@ struct LibplaceboVideoRenderer::Impl
 			++entranceSourceFrames;
 		}
 	}
+	// entrance_gpu_drain (VP-V/modules/scaling/rebase/EntranceGpuDrain.h): call sites only.
+	EntranceGpuDrain::Drain entranceDrain;
+	void DrainEntranceBeforeRender()
+	{
+		EntranceGpuDrain::Mode mode = EntranceGpuDrain::Mode::Off;
+		if (!pipelineSlots.OriginalPathway()) EntranceGpuDrain::Parse(activeSettings.entranceGpuDrain, mode);
+		pl_gpu gpu = d3d11 ? d3d11->gpu : nullptr;
+		std::string summary;
+		entranceDrain.BeforeRender(gpu ? mode : EntranceGpuDrain::Mode::Off, pipelineSlots.Runs(PipelineSlots::Id::ScalingRebase),
+			[gpu]() { pl_gpu_flush(gpu); }, [gpu]() { pl_gpu_finish(gpu); }, &summary);
+		if (!summary.empty()) DebugLog::Log("%s", summary.c_str());
+	}
 	void RunEntrance(EntranceRun& run, pl_frame& frame)
 	{
 		if (!pipelineSlots.ActiveEntrance().empty())
+		{
 			++entranceStageRuns;
+			entranceDrain.NoteEntranceRun();
+		}
 		if (run.path == EntrancePath::Main && !EntranceStatelessNow())
 		{
 			const unsigned long long before = entranceStatefulBreaks;
@@ -6924,11 +6957,7 @@ struct LibplaceboVideoRenderer::Impl
 	CComPtr<IDXGIOutput> dejudderOutput;
 	IDXGISwapChain* dejudderOutputSwapchain = nullptr;   // identity only, not owned
 	IDXGISwapChain* dejudderOutputFailedSwapchain = nullptr;   // GetContainingOutput failed (identity only)
-	ULONGLONG dejudderHoldLogTick = 0;
-	unsigned long long dejudderHoldsNotLogged = 0;
-	// The holds since the last hold lines, per reason (render-ahead follow-up 2026-10-17:
-	// one line per reason, so a count is never put on a reason it does not belong to).
-	std::vector<std::pair<std::string, unsigned long long>> dejudderHoldsPending;
+	VpDiagnostics::HoldLog dejudderHoldLog;   // "De-judder: hold" lines (WP-17 adapter)
 	double dejudderPredictedVsync = 0.0;   // where the frame after extras should show (s)
 	uint64_t dejudderPredictedGeneration = 0;
 	uint64_t dejudderPredictedSequence = 0;   // the source frame the prediction is for
@@ -7603,6 +7632,61 @@ struct LibplaceboVideoRenderer::Impl
 	OcclusionMask::Hook occlusionMaskHook;
 	// Stage 6d: A's PRE_OUTPUT picture for the extras, and its warp.
 	DejudderRendered::Cache dejudderCache;
+	// WP-24 captured-repeat render reuse (VP: src/VP-V/modules/output/presentation/RepeatReuseGlue.h).
+	uint64_t activeSettingsGeneration = 0;
+	bool repeatNextQueued = false;   // the render loop: the queue holds a repeat of the frame being drawn
+	VpRepeatReuse::Glue repeatReuse{ [this](const char* id, const std::string& reason) { EngageFallback(id, reason); },
+		[this](const char* id) { ReleaseFallback(id); } };
+	VpRepeatReuse::VpContext RepeatReuseContext(const pl_frame& image, const pl_frame& target)
+	{
+		VpRepeatReuse::VpContext c;
+		c.temporal.phasePicture = interpolating || VpPhaseDrawn(image);
+		c.temporal.dejudderExtras = dejudderReason == DejudderPolicy::Reason::Active && dejudderExtrasAllowed;
+		c.temporal.crossfade = rebaseFade < 1.0;
+		c.temporal.startupHoldBlack = startupHoldBlack;
+		c.temporal.deinterlacing = temporalRenderer.Active();
+		c.temporal.frameMixing = smoothMotionEngine || temporalRenderer.Mixing();
+		c.temporal.ledMeasurePerRefresh = std::find(frameHooks.begin(), frameHooks.end(), dynamicDrive.MeasurementHookPointer()) != frameHooks.end();
+		c.cache = &dejudderCache;
+		c.gpu = d3d11 ? d3d11->gpu : nullptr;
+		c.encodingRepair = outputEncodingRepair.Get();
+		c.image = &image;
+		c.target = &target;
+		const uint64_t lut = DisplayLutSignature();
+		c.extension = { rebaseFactor, rebaseFactorX, sourceRebase.Kernel(), lut, 0,
+			RepeatRenderReuse::Signature().Add(fallbacks.Heading()).Value(), VpRepeatReuse::RegistryFingerprint(pipelineSlots) };
+		using K = VpRepeatReuse::HookKind;
+		const VpRepeatReuse::KnownHook known[] = {
+			{ dynamicDrive.MeasurementHookPointer(), K::PictureNeutral, 0, "LED measurement" },
+			{ dejudderCache.Hook(), K::PictureNeutral, 0, "rendered-picture cache" },
+			{ calibrationHost.Stage().Get(), K::Generation, lut, "calibration LUT stage" },
+			{ outputEncodingRepair.Get(), K::Static, 0, "output encoding repair" },
+			// Extended Range: a function of the source frame, the colours, the LUT and the settings
+			// (all in the key) - static per source frame (audit H1).
+			{ extendedRangeHooks.Carry(), K::Static, 0, "Extended Range carry" },
+			{ extendedRangeHooks.LateRestore(), K::Static, 0, "Extended Range late restore" },
+			{ extendedRangeHooks.Restore(false), K::Static, 0, "Extended Range restore" },
+			{ extendedRangeHooks.Restore(true), K::Static, 0, "Extended Range restore" },
+			// AdaptiveDownscale smooths its grain map over time: opaque until it exposes a state generation.
+			{ adaptiveDownscale.Measure(), K::Opaque, 0, "AdaptiveDownscale" },
+			{ adaptiveDownscale.Blend(), K::Opaque, 0, "AdaptiveDownscale" },
+		};
+		for (const auto& k : known)
+			if (c.knownCount < static_cast<int>(c.known.size()))
+				c.known[c.knownCount++] = k;
+		// Left out of the reuse draw: picture-neutral only. The occlusion mask hook stays (audit M3): on a
+		// repeat it carries the sigma-delta's grain-tolerance map.
+		c.exclude[c.excludeCount++] = dynamicDrive.MeasurementHookPointer();
+		c.exclude[c.excludeCount++] = dejudderCache.Hook();
+		return c;
+	}
+	// The display LUT's identity (observed file version + parsed state): moves on a hot reload or a
+	// reject without touching the LUT code (audit H2).
+	uint64_t DisplayLutSignature() const
+	{
+		return RepeatRenderReuse::Signature().Add(displayLutObservedBytes).Add(displayLutObservedWriteTime)
+			.Add(displayLutParsed).Add(displayLut != nullptr).Value();
+	}
 	std::unique_ptr<DejudderRendered::Warp> dejudderRenderedWarp;
 	DejudderRendered::Geometry dejudderGeometry;
 	bool dejudderGeometryValid = false;   // this frame's geometry (both warp paths; delta 8 R1)
@@ -7736,6 +7820,8 @@ struct LibplaceboVideoRenderer::Impl
 				text += ", motion: " + motionSourceLogged;
 		}
 		std::lock_guard<std::mutex> guard(dejudderStatusMutex);
+		if (repeatReuse.Active())
+			text += (text.empty() ? std::string() : std::string("; ")) + repeatReuse.StatusLine();
 		dejudderStatus = std::move(text);
 	}
 	void ReleaseDejudder()
@@ -7749,6 +7835,7 @@ struct LibplaceboVideoRenderer::Impl
 		// 6d: the cache and the rendered warp hold textures (and a dispatch)
 		// of this device (audit stage10-6d blocker 1).
 		dejudderCache.Release();
+		repeatReuse.Release();   // WP-24: its probe hook while the GPU exists; its fallback entry
 		dejudderRenderedWarp.reset();
 		dejudderVectorField.reset();
 		for (pl_tex& tex : dejudderNextTextures)
@@ -7858,10 +7945,6 @@ struct LibplaceboVideoRenderer::Impl
     bool calibrationStatusAvailable = false;
     LibplaceboOutput::SdrTransfer lastRenderedTargetTransfer = LibplaceboOutput::SdrTransfer::UNKNOWN;
     bool calibrationLutAttached = false;
-	bool displayLutObservedAvailable = false;
-	uint64_t displayLutObservedBytes = 0;
-	uint64_t displayLutObservedWriteTime = 0;
-	uint64_t displayLutNextVersionCheckTick = 0;
 	bool displayCalibrationContractLogged = false;
 	std::unique_ptr<IVideoFrameFormatter> formatter;
 	std::map<std::string, std::unique_ptr<pl_dovi_metadata>> doviMetadataCache;
@@ -7961,21 +8044,13 @@ struct LibplaceboVideoRenderer::Impl
 			},
 			[this](const std::string& source) -> const pl_hook*
 			{
-				return d3d11 ? pl_mpv_user_shader_parse(d3d11->gpu, source.data(), source.size()) :
-					nullptr;
+				const pl_hook* hook = d3d11 ? pl_mpv_user_shader_parse(d3d11->gpu, source.data(), source.size()) : nullptr;
+				VpRepeatReuse::TemporalShaderRegistry::Global().Note(hook, source.data(), source.size());   // WP-24 M2
+				return hook;
 			},
 			[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } };
 	}
 	CustomHookChain::Chain customHooks{ GlslHookLoader() };
-	// LED drive (owned by the outer renderer). Per frame: the measurement hook
-	// and the compensation hook run first at PRE_OUTPUT; the module is touched
-	// only by BeginFrame (before rendering) and SubmitMeasurement (after).
-	std::shared_ptr<LedDrive::LedDriveModule> ledDrive;
-	uint64_t ledRawTransferSignature = 0;
-	// The gamma boost lives in the compensation hook: say so loudly when it
-	// is configured but the hook is not running.
-	bool ledBoostMissingLogged = false;
-	bool ledMeasurementDisabledLogged = false;
 	// Statistics consumers of the queued-frame walk (read-only).
 	std::shared_ptr<QueuedFrameStatistics::IObserver> queuedFrameObserver;
 	// Content recognition (intent interpreter item 1, 2026-10-17): its own
@@ -8007,12 +8082,10 @@ struct LibplaceboVideoRenderer::Impl
 	std::chrono::steady_clock::time_point blackShareTime;  // render thread
 	int blackIntentLogged = -1;                           // render thread: steps below last logged
 	std::string displayIntentLogged;                      // render thread
-	LedDrive::MeasurementHook ledMeasurement;
 	// Re-applies the output encoding libplacebo drops after a texture-input
 	// PRE_OUTPUT hook (the LED measurement and compensation hooks).
 	OutputEncodingRepair::Hook outputEncodingRepair;
 	bool outputEncodingRepairLogged = false;
-	CustomHookChain::Chain ledCompensation{ GlslHookLoader() };
 	CustomHookChain::Chain sdrToneShape{ GlslHookLoader() };   // delta 13
 	// WP-14 (VP-V colour.sdr_tone_shape / input.signal): the Dolby Vision glue - trims, the Dolby-style
 	// curve, the metadata hold entries, the tunnel deband skips, the comparison capture, the reference
@@ -8020,13 +8093,9 @@ struct LibplaceboVideoRenderer::Impl
 	DvHostStage dvStage{ GlslHookLoader(),
 		[this](const char* id, const std::string& reason) { EngageFallback(id, reason); },
 		[this](const char* id) { ReleaseFallback(id); } };
+	VpDiagnostics::RenderedFrameCaptures captures = DvCompareCapture::RendererCaptures();   // rendered-frame captures (WP-17)
 	bool sdrToneShapeConfigured = false;
 	int sdrToneShapeLogged = -1;
-	bool ledCompensationConfigured = false;
-	// [led_drive] gamma_boost applies whether or not the module drives the
-	// LED; published by the outer renderer from the configuration.
-	std::atomic<double> ledGammaBoost{ 0.0 };   // the gamma_boost setting (0 = off)
-	double lastLoggedBoostExponent = 1.0;
 	// The gamma an SDR output transfer encodes for: the gamma boost's base
 	// (delta 4). Pure powers as given; BT.1886 as 2.4 and sRGB as 2.2; anything
 	// else (HDR) keeps 2.2, the value the boost has always used.
@@ -8045,14 +8114,6 @@ struct LibplaceboVideoRenderer::Impl
 		default: return 2.2;
 		}
 	}
-	std::atomic<double> ledCompensationEotf{ 2.2 };
-	std::atomic<double> ledKnee{ 0.08 };
-	// Delta 11: the boost toe and the ANSI lift's strength (module or not).
-	std::atomic<double> ledBoostKnee{ 0.0 };
-	std::atomic<double> ledBoostKneeWidth{ 0.05 };
-	std::atomic<bool> ledWtwPassthrough{ true };   // led_wtw_passthrough ([led_drive], default on)
-	std::atomic<bool> ledBtbPassthrough{ true };   // led_btb_passthrough ([led_drive], default on)
-	std::atomic<double> ledShadowLift{ 0.0 };
 	std::vector<const pl_hook*> frameHooks;
 	// Pipeline skeleton (R2): which of this frame's hooks belong to a pipeline slot (by pointer,
 	// since plumbing hooks are inserted in front later); OutputHookOrder::OrderSlotsInPlace
@@ -8085,16 +8146,10 @@ struct LibplaceboVideoRenderer::Impl
 		frameHooks = OutputHookOrder::OrderSlotsInPlace(tagged,
 			[this](PipelineSlots::Id id) { return pipelineSlots.Order(id); });
 	}
-	// output.calibration_lut in VP's output hooks (calibration_lut_stage = vp; R1).
-	CalibrationLutStage::Hook calibrationLutStage;
-	// The output segments (S2 PRE_OUTPUT colour + drive, S3 OUTPUT finish): one owner of their
-	// stages, order and parameters; the host keeps the decisions and calls each segment.
-	OutputSegments::OutputColourSegment outputColour{ sdrToneShape, dvStage.TrimsHook(), ledMeasurement, ledCompensation, calibrationLutStage };
-	OutputSegments::OutputFinishSegment outputFinish{ outputEncodingRepair, occlusionMaskHook };
+	// WP-12: VP's calibration glue (output.calibration_lut VP stage, patterns, calibration getters).
+	CalibrationLutHost::Adapter calibrationHost;
 	std::vector<const pl_hook*> userFrameHooks;   // the S2 edge: the user's shaders this frame
 	std::unique_ptr<OutputSegments::Merger> outputMerger;   // output_segments_merged
-	bool calibrationLutStageLogged = false;
-	bool calibrationLutStageFailed = false;   // the VP stage failed once: libplacebo's target LUT for the session
 	std::vector<std::string> activeCustomShaders;
 	std::atomic<bool> lowLatencyQueueActive{ false };
 	// docs/VP-nvof-ahead.md: source frames queued after the current one (the render
@@ -8117,6 +8172,14 @@ struct LibplaceboVideoRenderer::Impl
 	FallbackStatus::Registry fallbacks;
 	// WP-23: the frame analysis store, its producer and the shared luma decode (one handle).
 	VpFrameAnalysis::Host frameAnalysis;
+	// Dynamic Drive, render side (WP-15): the LED module the outer renderer publishes, the S2 LED
+	// measurement and compensation hooks and their per-frame set-up (DynamicDriveFrame.h).
+	LedDrive::DynamicDriveFrame dynamicDrive{ queuedFrameObserver, fallbacks, GlslHookLoader() };
+	// The output segments (S2 PRE_OUTPUT colour + drive, S3 OUTPUT finish): one owner of their
+	// stages, order and parameters; the host keeps the decisions and calls each segment.
+	// Declared after dynamicDrive: S2 holds the adapter's hook objects by reference (merge audit C1).
+	OutputSegments::OutputColourSegment outputColour{ sdrToneShape, dvStage.TrimsHook(), dynamicDrive.Measurement(), dynamicDrive.Compensation(), calibrationHost.Stage() };
+	OutputSegments::OutputFinishSegment outputFinish{ outputEncodingRepair, occlusionMaskHook };
 	// Efficiency timer plan (audit 2026-10-24 section 4; vprenderer/PassTimerHook.h).
 	PassTimerHook::Hook passTimerHook;
 	GpuSpanTimers entranceSpans;   // T2: entrance stages (polled D3D11 timestamps, never waited for)
@@ -8209,6 +8272,18 @@ struct LibplaceboVideoRenderer::Impl
 			state += "; " + slotSwitches;
 		state += settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway ?
 			"; entrance once (B3) on: motion pictures from the processed A and B" : "; entrance once (B3) off";
+		// entrance_gpu_drain: visible while it is on (Ctrl+I "engaged" line, Config status), never silent.
+		// Listed only when it can act: on, not the Original pathway, and scaling.rebase runs.
+		EntranceGpuDrain::Mode drainMode = EntranceGpuDrain::Mode::Off;
+		EntranceGpuDrain::Parse(settings.entranceGpuDrain, drainMode);
+		if (drainMode != EntranceGpuDrain::Mode::Off && !settings.pipelineOriginalPathway &&
+			pipelineSlots.Runs(PipelineSlots::Id::ScalingRebase))
+		{
+			state += std::string("; entrance GPU drain: ") + EntranceGpuDrain::Name(drainMode);
+			EngageFallback("entrance GPU drain", EntranceGpuDrain::StatusReason(drainMode));   // a mode change updates the reason
+		}
+		else
+			ReleaseFallback("entrance GPU drain");
 		if (!settings.pipelineEntranceOnce || settings.pipelineOriginalPathway)
 		{
 			entranceOnceNote.clear();
@@ -9022,12 +9097,10 @@ struct LibplaceboVideoRenderer::Impl
 			captureWorkers.clear();
 			pl_mpv_user_shader_destroy(&nlsHook);
 			customHooks.Clear();
-			ledMeasurement.Release();
-			ledCompensation.Clear();
+			dynamicDrive.Release();
 			sdrToneShape.Clear();
 			sdrToneShapeConfigured = false;
 			dvStage.ReleaseHooks();
-			ledCompensationConfigured = false;
             pl_mpv_user_shader_destroy(&subtitleCutPasteHook);
             subtitleCutPasteHookFailed = false;
             subtitleCutPastePresentation.Reset(); subtitleLayoutAnchor.Reset();
@@ -9042,7 +9115,6 @@ struct LibplaceboVideoRenderer::Impl
 				pl_tex_destroy(d3d11->gpu, &statsOverlayTexture);
 				pl_tex_destroy(d3d11->gpu, &sweepOverlayTexture);
 				pl_tex_destroy(d3d11->gpu, &profileOverlayTexture);
-				pl_tex_destroy(d3d11->gpu, &calibrationPatchTexture);
 				for (pl_tex& texture : textures)
 					pl_tex_destroy(d3d11->gpu, &texture);
 				captureUnpack.reset();   // its textures and dispatch, before the device
@@ -9076,7 +9148,7 @@ struct LibplaceboVideoRenderer::Impl
 				entranceSpans.Release();            // efficiency timers T2: the D3D11 queries
 				if (rebaseDispatch) pl_dispatch_destroy(&rebaseDispatch);
 				extendedRangeHooks.Release();   // Stage 10: its textures
-				calibrationLutStage.Release();  // R1: the VP calibration stage's LUT texture
+				calibrationHost.ReleaseGpu(d3d11->gpu);  // the VP calibration stage's LUT, the patch texture
 				if (outputMerger) { outputMerger->Release(); outputMerger.reset(); }
 				dejudderOutput.Release();
 				dejudderOutputSwapchain = nullptr;
@@ -9151,202 +9223,17 @@ struct LibplaceboVideoRenderer::Impl
 
 	bool dvTransitionBlackActive = false;
 
-	// Automatic calibration (docs/calibration/AUTO-CALIBRATION.md): the patch
-	// the render loop presents instead of video, as raw codes written to the
-	// backbuffer. No libplacebo pass runs for it, so the sigma-delta, dither,
-	// LUT, tone / gamut mapping and every hook are bypassed for the patch only;
-	// the swapchain, its DXGI colour space and HDR signalling stay as they are.
-	std::mutex calibrationPatternMutex;
-	Calibration::PatternRequest calibrationPattern;
-	std::atomic<uint64_t> calibrationPresentedGeneration{ 0 };
-	std::atomic<uint64_t> calibrationPresentsOfGeneration{ 0 };
-	std::atomic<uint32_t> calibrationSurfaceWidth{ 0 };
-	std::atomic<uint32_t> calibrationSurfaceHeight{ 0 };
-	std::atomic<int> calibrationTargetTransfer{ -1 };   // pl_color_transfer of the last video frame's target
-	pl_tex calibrationPatchTexture = nullptr;
-	bool calibrationWindowFallbackLogged = false;
-	bool calibrationFailureLogged = false;
-	mutable std::mutex calibrationOutputCacheMutex;
-	Calibration::PatternOutputInfo calibrationOutputCache;
-	std::atomic<uint64_t> calibrationReadbackGeneration{ 0 };
-	std::atomic<uint32_t> calibrationReadbackCenter{ 0 };   // R10G10B10A2 words
-	std::atomic<uint32_t> calibrationReadbackCorner{ 0 };
-	// Phase 2 (HDR verify): VP's tone curve for the last video frame and the
-	// metadata it sends, rebuilt only when the colour mapping changes.
-	uint64_t calibrationToneSignature = 0;
-	mutable std::mutex calibrationToneMutex;
-	LedDrive::ToneCurveSamples calibrationTone;
-	pl_hdr_metadata calibrationSentHdr{};
-
-	// Tests (PatternReadback): the filled backbuffer's centre and corner pixels.
-	void ReadBackCalibrationPattern(ID3D11Texture2D* backbuffer, uint64_t generation)
-	{
-		std::vector<uint32_t> pixels;
-		D3D11_TEXTURE2D_DESC desc{};
-		std::string error;
-		if (!ReadR10Texture(backbuffer, pixels, desc, error) || pixels.empty())
-		{
-			DebugLog::Log("Calibration patterns: readback unavailable (%s)", error.c_str());
-			return;
-		}
-		calibrationReadbackCenter.store(pixels[static_cast<size_t>(desc.Height / 2) * desc.Width + desc.Width / 2],
-			std::memory_order_release);
-		calibrationReadbackCorner.store(pixels[0], std::memory_order_release);
-		calibrationReadbackGeneration.store(generation, std::memory_order_release);
-	}
-
-	// Writes the patch into fbo: the background, then the window (a cleared
-	// texture of the same format blitted 1:1, so the codes stay exact).
-	bool FillCalibrationPattern(pl_tex fbo, const Calibration::PatternRequest& pattern)
-	{
-		if (!fbo || !d3d11 || !d3d11->gpu) return false;
-		const pl_gpu gpu = d3d11->gpu;
-		const double maxValue =
-			negotiatedSwapchainFormat == DXGI_FORMAT_R10G10B10A2_UNORM ? 1023.0 :
-			negotiatedSwapchainFormat == DXGI_FORMAT_R8G8B8A8_UNORM ||
-			negotiatedSwapchainFormat == DXGI_FORMAT_B8G8R8A8_UNORM ? 255.0 : 0.0;
-		if (!(maxValue > 0.0) || !fbo->params.renderable) return false;
-		const float patch[4] = {
-			static_cast<float>(pattern.patch[0] / maxValue), static_cast<float>(pattern.patch[1] / maxValue),
-			static_cast<float>(pattern.patch[2] / maxValue), 1.0f };
-		const float background[4] = {
-			static_cast<float>(pattern.background[0] / maxValue), static_cast<float>(pattern.background[1] / maxValue),
-			static_cast<float>(pattern.background[2] / maxValue), 1.0f };
-		const int width = fbo->params.w, height = fbo->params.h;
-		const Calibration::PixelRect rect = Calibration::PatchWindowRect(width, height, pattern.windowAreaPercent);
-		const bool fullField = rect.left == 0 && rect.top == 0 && rect.right == width && rect.bottom == height;
-		if (fullField)
-		{
-			pl_tex_clear(gpu, fbo, patch);
-			return true;
-		}
-		bool windowed = fbo->params.blit_dst;
-		if (windowed && (!calibrationPatchTexture || calibrationPatchTexture->params.w != rect.Width() ||
-			calibrationPatchTexture->params.h != rect.Height() ||
-			calibrationPatchTexture->params.format != fbo->params.format))
-		{
-			pl_tex_destroy(gpu, &calibrationPatchTexture);
-			pl_tex_params params{};
-			params.w = rect.Width();
-			params.h = rect.Height();
-			params.format = fbo->params.format;
-			params.renderable = true;
-			params.blit_src = true;
-			calibrationPatchTexture = pl_tex_create(gpu, &params);
-			windowed = calibrationPatchTexture != nullptr;
-		}
-		if (!windowed)
-		{
-			// The surface cannot take a blit: full field (exact codes still).
-			if (!calibrationWindowFallbackLogged)
-			{
-				calibrationWindowFallbackLogged = true;
-				DebugLog::Log("Calibration patterns: windowed patch unavailable on this surface (blit_dst=%d); full field shown",
-					fbo->params.blit_dst ? 1 : 0);
-			}
-			pl_tex_clear(gpu, fbo, patch);
-			return true;
-		}
-		pl_tex_clear(gpu, fbo, background);
-		pl_tex_clear(gpu, calibrationPatchTexture, patch);
-		pl_tex_blit_params blit{};
-		blit.src = calibrationPatchTexture;
-		blit.dst = fbo;
-		blit.src_rc.x0 = 0; blit.src_rc.y0 = 0; blit.src_rc.z0 = 0;
-		blit.src_rc.x1 = rect.Width(); blit.src_rc.y1 = rect.Height(); blit.src_rc.z1 = 1;
-		blit.dst_rc.x0 = rect.left; blit.dst_rc.y0 = rect.top; blit.dst_rc.z0 = 0;
-		blit.dst_rc.x1 = rect.right; blit.dst_rc.y1 = rect.bottom; blit.dst_rc.z1 = 1;
-		blit.sample_mode = PL_TEX_SAMPLE_NEAREST;
-		pl_tex_blit(gpu, &blit);
-		return true;
-	}
-
-	// One refresh of the current patch (the caller holds renderMutex).
+	// Automatic calibration (docs/calibration/AUTO-CALIBRATION.md): one refresh of the current
+	// patch, presented by the calibration adapter (the caller holds renderMutex).
 	bool PresentCalibrationPattern()
 	{
 		if (!d3d11 || !d3d11->gpu || !swapchain || outputResourcesRetired)
 			return false;
-		Calibration::PatternRequest pattern;
-		{
-			std::lock_guard<std::mutex> guard(calibrationPatternMutex);
-			pattern = calibrationPattern;
-		}
-		if (!pattern.active)
-			return false;
-		bool filled = false;
-		bool presented = false;
-		uint32_t width = 0, height = 0;
-		if (vpOwnedSwapchain)
-		{
-			CComPtr<ID3D11Texture2D> backbuffer;
-			if (FAILED(vpOwnedSwapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer))) || !backbuffer)
-				return false;
-			pl_d3d11_wrap_params wrapParams{};
-			wrapParams.tex = static_cast<ID3D11Resource*>(backbuffer.p);
-			pl_tex targetTexture = pl_d3d11_wrap(d3d11->gpu, &wrapParams);
-			if (targetTexture)
-			{
-				width = static_cast<uint32_t>(targetTexture->params.w);
-				height = static_cast<uint32_t>(targetTexture->params.h);
-				filled = FillCalibrationPattern(targetTexture, pattern);
-				pl_gpu_flush(d3d11->gpu);
-				pl_tex_destroy(d3d11->gpu, &targetTexture);
-				if (filled && (pattern.flags & Calibration::PatternReadback) &&
-					calibrationReadbackGeneration.load(std::memory_order_acquire) != pattern.generation)
-					ReadBackCalibrationPattern(backbuffer, pattern.generation);
-			}
-			backbuffer.Release();
-			if (filled)
-				presented = SUCCEEDED(vpOwnedSwapchain->Present(1, 0));
-		}
-		else
-		{
-			struct pl_swapchain_frame frame{};
-			if (!pl_swapchain_start_frame(swapchain, &frame))
-				return false;
-			if (frame.fbo)
-			{
-				width = static_cast<uint32_t>(frame.fbo->params.w);
-				height = static_cast<uint32_t>(frame.fbo->params.h);
-			}
-			filled = FillCalibrationPattern(frame.fbo, pattern);
-			if (filled && (pattern.flags & Calibration::PatternReadback) &&
-				calibrationReadbackGeneration.load(std::memory_order_acquire) != pattern.generation)
-			{
-				pl_gpu_flush(d3d11->gpu);
-				ReadBackCalibrationPattern(nullptr, pattern.generation);
-			}
-			if (!filled)
-			{
-				struct pl_frame target{};
-				pl_frame_from_swapchain(&target, &frame);
-				const float black[] = { 0.0f, 0.0f, 0.0f };
-				pl_frame_clear(d3d11->gpu, &target, black);
-			}
-			presented = pl_swapchain_submit_frame(swapchain);
-			if (presented)
-				pl_swapchain_swap_buffers(swapchain);
-			presented = presented && filled;
-		}
-		if (!presented)
-		{
-			if (!calibrationFailureLogged)
-			{
-				calibrationFailureLogged = true;
-				DebugLog::Log("Calibration patterns: present failed (filled=%d format=%d)", filled ? 1 : 0,
-					static_cast<int>(negotiatedSwapchainFormat));
-			}
-			return false;
-		}
-		calibrationSurfaceWidth.store(width, std::memory_order_release);
-		calibrationSurfaceHeight.store(height, std::memory_order_release);
-		if (calibrationPresentedGeneration.load(std::memory_order_acquire) != pattern.generation)
-		{
-			calibrationPresentsOfGeneration.store(0, std::memory_order_release);
-			calibrationPresentedGeneration.store(pattern.generation, std::memory_order_release);
-		}
-		calibrationPresentsOfGeneration.fetch_add(1, std::memory_order_acq_rel);
-		return true;
+		const CalibrationLutHost::PresentResult presented = calibrationHost.Present({ d3d11->gpu, vpOwnedSwapchain,
+			swapchain, negotiatedSwapchainFormat, [this](ID3D11Texture2D* backbuffer, std::vector<uint32_t>& pixels,
+				D3D11_TEXTURE2D_DESC& desc, std::string& error) { return ReadR10Texture(backbuffer, pixels, desc, error); } });
+		if (presented.patchWindow.engaged) EngageFallback(presented.patchWindow.id.c_str(), presented.patchWindow.reason);
+		return presented.presented;
 	}
 
 	bool PresentBlackFrame(bool logPresentation = true)
@@ -9830,10 +9717,8 @@ struct LibplaceboVideoRenderer::Impl
 				", \"source_max_nits\": " << sourceImage.color.hdr.max_luma <<
 				", \"scene_peak_pq\": " << sourceImage.color.hdr.max_pq_y <<
 				", \"scene_average_pq\": " << sourceImage.color.hdr.avg_pq_y <<
-				", \"scene_min_present\": " <<
-				(captureDolbyVision && captureDvLuminance.sceneMinAvailable ? "true" : "false") <<
-				", \"scene_min_nits\": " <<
-				(captureDolbyVision && captureDvLuminance.sceneMinAvailable ? captureDvLuminance.sceneMin : 0.0f) << "},\n"
+				VpDiagnostics::DvSceneMinFields{ captureDolbyVision,
+					captureDvLuminance.sceneMinAvailable, captureDvLuminance.sceneMin } << "},\n"
 			<< "  \"source_levels\": \"" <<
 				(sourceImage.repr.levels == PL_COLOR_LEVELS_LIMITED ?
 					"limited" : "full") << "\",\n"
@@ -11937,10 +11822,7 @@ struct LibplaceboVideoRenderer::Impl
 		// Acknowledge exactly the file handle version that was parsed. A second
 		// path probe here could observe a writer's later completed replacement and
 		// accidentally suppress the retry that validates those final bytes.
-		displayLutObservedAvailable = result.fileVersion.available;
-		displayLutObservedBytes = result.fileVersion.fileBytes;
-		displayLutObservedWriteTime = result.fileVersion.fileWriteTime;
-		displayLutNextVersionCheckTick = GetTickCount64() + 1000;
+		calibrationHost.NoteLutFileVersion(result.fileVersion, GetTickCount64());   // WP-12: VP's auto reload
 
 		if (result.status != LibplaceboDisplayLut::Status::ACTIVE)
 		{
@@ -11988,23 +11870,10 @@ struct LibplaceboVideoRenderer::Impl
 
 	void MaybeReloadDisplayLut()
 	{
-		if (displayLutPath.empty() || !activeSettings.calibrationLutEnabled)
-			return;
-		const uint64_t now = GetTickCount64();
-		if (now < displayLutNextVersionCheckTick)
-			return;
-		displayLutNextVersionCheckTick = now + 1000;
-		const LibplaceboDisplayLut::FileVersion observed =
-			LibplaceboDisplayLut::ProbeFileVersion(displayLutPath);
-		const LibplaceboDisplayLut::FileVersion acknowledged{
-			displayLutObservedAvailable, displayLutObservedBytes,
-			displayLutObservedWriteTime };
-		if (LibplaceboDisplayLut::SameFileVersion(observed, acknowledged))
-			return;
-		DebugLog::Log(
-			"display calibration LUT file changed in place: file=%s; validating transactional reload",
-			displayLutPath.c_str());
-		LoadDisplayLut(activeSettings, true);
+		// WP-12: VP's automatic reload (the calibration adapter's reload policy; Bill's explicit
+		// Apply is the other choice, see CalibrationLutHostPolicy.h).
+		if (calibrationHost.LutReloadDue(displayLutPath, activeSettings.calibrationLutEnabled, GetTickCount64()))
+			LoadDisplayLut(activeSettings, true);
 	}
 
 	void RejectDisplayLutAfterRenderFailure()
@@ -12024,27 +11893,13 @@ struct LibplaceboVideoRenderer::Impl
 	{
 		target.lut = nullptr;
 		target.lut_type = PL_LUT_UNKNOWN;
-		calibrationLutStage.SetLut(nullptr);
+		// WP-12: the VP stage (calibration_lut_stage = vp, R1) takes the LUT as VP's last colour hook.
+		if (calibrationHost.TakeLut(displayLutParsed ? displayLut : nullptr, { activeSettings.calibrationLutStage == "vp",
+			pipelineSlots.OriginalPathway(), pipelineSlots.Runs(PipelineSlots::Id::OutputCalibrationLut) },
+			displayLutPath, displayLutStatus))
+			return;
 		if (!displayLutParsed || !displayLut)
 			return;
-
-		// R1 (calibration_lut_stage = vp): VP applies the LUT as its last colour hook, after the
-		// LED compensation, instead of libplacebo's target LUT (which runs before VP's hooks).
-		// The Original pathway keeps libplacebo's target LUT, as upstream did.
-		if (activeSettings.calibrationLutStage == "vp" && !pipelineSlots.OriginalPathway() &&
-			pipelineSlots.Runs(PipelineSlots::Id::OutputCalibrationLut) && !calibrationLutStageFailed)
-		{
-			calibrationLutStage.SetLut(displayLut);
-			displayLutStatus = "Active (VP stage): " + LutFileName(displayLutPath);
-			if (!calibrationLutStageLogged)
-				DebugLog::Log("display calibration LUT: applied by VP as its last colour hook (calibration_lut_stage vp; "
-					"after the LED compensation; BTB/WTW carried at slope 1)");
-			calibrationLutStageLogged = true;
-			return;
-		}
-		if (calibrationLutStageLogged)
-			DebugLog::Log("display calibration LUT: libplacebo target LUT (calibration_lut_stage libplacebo)");
-		calibrationLutStageLogged = false;
 
 		target.lut = displayLut;
 		// For a target-frame LUT in libplacebo 7.360.1, NORMALIZED is the
@@ -12090,6 +11945,7 @@ struct LibplaceboVideoRenderer::Impl
 		if (settings.renderAhead && !activeSettings.renderAhead)
 			renderAheadEpoch.Invalidate();   // render_ahead switched on: the gate starts again (bug hunt 05 H3)
 		activeSettings = settings;
+		++activeSettingsGeneration;   // WP-24: the repeat key's settings generation
 		UpdatePipelineSlots(settings);
 		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
 		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
@@ -12122,29 +11978,7 @@ struct LibplaceboVideoRenderer::Impl
 		// (e.g. Intel, the laptop screen's own GPU, for real display timing);
 		// unset = libplacebo's choice, as always.
 		CComPtr<IDXGIAdapter1> testAdapter;
-		{
-			char* v = nullptr;
-			size_t n = 0;
-			if (_dupenv_s(&v, &n, "VP_TEST_ADAPTER") == 0 && v && v[0])
-			{
-				const std::wstring want(v, v + std::strlen(v));
-				CComPtr<IDXGIFactory1> factory;
-				if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))))
-					for (UINT i = 0; !testAdapter; ++i)
-					{
-						CComPtr<IDXGIAdapter1> candidate;
-						if (factory->EnumAdapters1(i, &candidate) == DXGI_ERROR_NOT_FOUND)
-							break;
-						DXGI_ADAPTER_DESC1 desc{};
-						if (SUCCEEDED(candidate->GetDesc1(&desc)) && std::wstring(desc.Description).find(want) != std::wstring::npos)
-						{
-							testAdapter = candidate;
-							DebugLog::Log("libplacebo: VP_TEST_ADAPTER selects %ls", desc.Description);
-						}
-					}
-			}
-			std::free(v);
-		}
+		VpDiagnostics::TestAdapterFromEnvironment(&testAdapter);
 		if (testAdapter)
 			deviceParams.adapter = testAdapter;
 		d3d11 = pl_d3d11_create(log, &deviceParams);
@@ -12625,6 +12459,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.dejudderEstCandidates = next.dejudderEstCandidates;
 		currentTransport.dejudderEstLambda = next.dejudderEstLambda;
 		currentTransport.dejudderEstQpel = next.dejudderEstQpel;
+		currentTransport.dejudderEstStillZero = next.dejudderEstStillZero;
 		currentTransport.dejudderEstGate = next.dejudderEstGate;
 		currentTransport.dejudderEstSplit = next.dejudderEstSplit;
 		currentTransport.dejudderEstSplitSad = next.dejudderEstSplitSad;
@@ -12744,6 +12579,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.calibrationLutStage != next.calibrationLutStage, "calibration_lut_stage");
 		changed(current.pipelineEntranceOnce != next.pipelineEntranceOnce, "pipeline_entrance_once");
 		changed(current.outputSegmentsMerged != next.outputSegmentsMerged, "output_segments_merged");
+		changed(current.entranceGpuDrain != next.entranceGpuDrain, "entrance_gpu_drain");
 		changed(current.adaptive.cnnResidualStabilise != next.adaptive.cnnResidualStabilise ||
 			current.adaptive.ssimResidualStabilise != next.adaptive.ssimResidualStabilise, "residual_stabilise");
 		changed(current.ssimBitrateAware != next.ssimBitrateAware || current.ssimBitrateFloor != next.ssimBitrateFloor, "ssim_bitrate_aware");
@@ -12817,6 +12653,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.dejudderOcclusionFill != next.dejudderOcclusionFill, "dejudder_occlusion_fill");
 		changed(current.dejudderEstCandidates != next.dejudderEstCandidates ||
 			current.dejudderEstLambda != next.dejudderEstLambda || current.dejudderEstQpel != next.dejudderEstQpel ||
+			current.dejudderEstStillZero != next.dejudderEstStillZero ||
 			current.dejudderEstGate != next.dejudderEstGate || current.dejudderEstSplit != next.dejudderEstSplit ||
 			current.dejudderEstSplitSad != next.dejudderEstSplitSad, "dejudder_est");
 		changed(current.dejudderLowRes != next.dejudderLowRes, "dejudder_low_res");
@@ -13251,6 +13088,7 @@ struct LibplaceboVideoRenderer::Impl
 		if (settings.renderAhead && !activeSettings.renderAhead)
 			renderAheadEpoch.Invalidate();   // render_ahead switched on: the gate starts again (bug hunt 05 H3)
 		activeSettings = settings;
+		++activeSettingsGeneration;   // WP-24: the repeat key's settings generation
 		UpdatePipelineSlots(settings);
 		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
 		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
@@ -13602,6 +13440,7 @@ struct LibplaceboVideoRenderer::Impl
 			return false;
 		hook = pl_mpv_user_shader_parse(
 			d3d11->gpu, source.data(), source.size());
+		VpRepeatReuse::TemporalShaderRegistry::Global().Note(hook, source.data(), source.size());   // WP-24 M2
 		if (!hook)
 		{
 			reason = "libplacebo could not parse shader";
@@ -16447,19 +16286,9 @@ struct LibplaceboVideoRenderer::Impl
 			displayIntentStatus = mapping;
 		}
 		limits.shadowMinimumShare = share;
-		if (IntentInterpreter::LedLimitsDiffer(limits, ledIntentLimitsSent))
-		{
-			const std::shared_ptr<LedDrive::LedDriveModule> led = std::atomic_load(&ledDrive);
-			if (led)
-			{
-				// The display black at full drive lets the LED drive derive the
-				// ambient share floor (LedDriveModule::SetIntentLimits).
-				led->SetIntentLimits(limits.shadowMinimumShare, limits.ambientBlackNits, sdrBlackNits);
-				DebugLog::Log("Intent interpreter: LED intent limits shadow minimum share %.3f, ambient black %.5f nits, display black %.5f nits",
-					limits.shadowMinimumShare, limits.ambientBlackNits, sdrBlackNits);
-				ledIntentLimitsSent = limits;
-			}
-		}
+		if (IntentInterpreter::LedLimitsDiffer(limits, ledIntentLimitsSent) &&
+			dynamicDrive.SendIntentLimits(limits.shadowMinimumShare, limits.ambientBlackNits, sdrBlackNits))
+			ledIntentLimitsSent = limits;
 	}
 
 	// The caller holds renderMutex. Queue-generation validation and rendering
@@ -17106,7 +16935,7 @@ struct LibplaceboVideoRenderer::Impl
 				current.motionScaleLo != next.motionScaleLo || current.motionScaleHi != next.motionScaleHi ||
 				current.trustScaleFull != next.trustScaleFull || current.occlusionFill != next.occlusionFill ||
 				current.estCandidates != next.estCandidates || current.estLambda != next.estLambda ||
-				current.estQpel != next.estQpel || current.estGate != next.estGate ||
+				current.estQpel != next.estQpel || current.estStillZero != next.estStillZero || current.estGate != next.estGate ||
 				current.estSplit != next.estSplit || current.estSplitSad != next.estSplitSad ||
 				current.lowRes != next.lowRes || current.lowResAll != next.lowResAll ||
 				current.holdFeatherPx != next.holdFeatherPx || current.holdHysteresis != next.holdHysteresis ||
@@ -17386,57 +17215,20 @@ struct LibplaceboVideoRenderer::Impl
 
 	void DejudderHold(const char* why)
 	{
-		// Report-a-problem: one repeated-stage frame row per hold (code in
-		// RendererDiagnosticCodes.h), and a decision when the reason changes.
-		{
-			const uint32_t code = RendererDiagnostics::ClassifyDejudderHold(why);
-			DiagnosticHistory::FrameRecord record;
-			record.stage = DiagnosticHistory::StageRepeated;
-			record.counter = diagExtrasCounter;
-			record.holdReason = code;
-			record.flags = RenderAheadActive() ? DiagnosticHistory::FlagRenderAhead : 0u;
-			if (RenderAheadActive() && dejudderDisplayRate.openLoop)
-				record.flags |= DiagnosticHistory::FlagOpenLoop;
-			record.rendererGeneration = diagRendererGeneration;
-			record.repeatedTotal = dejudderExtraStats.holds + 1;
-			DiagnosticHistory::Global().RecordFrame(record);
-			if (code != diagLastHoldCode)
-			{
-				diagLastHoldCode = code;
-				DiagnosticHistory::Global().RecordDecision("dejudder-hold", why, code,
-					static_cast<int64_t>(diagExtrasSequence));
-			}
-		}
+		// Report-a-problem: one repeated-stage frame row per hold and a decision when the
+		// reason changes; the hold lines (VP diagnostics adapter).
+		VpDiagnostics::RecordDejudderHold({ why, diagExtrasCounter, diagExtrasSequence, RenderAheadActive(),
+			dejudderDisplayRate.openLoop, diagRendererGeneration, dejudderExtraStats.holds }, diagLastHoldCode);
 		++dejudderExtraStats.holds;
 		dejudderExtraStats.lastHold = why;
-		++dejudderHoldsNotLogged;
-		auto pending = std::find_if(dejudderHoldsPending.begin(), dejudderHoldsPending.end(),
-			[why](const std::pair<std::string, unsigned long long>& p) { return p.first == why; });
-		if (pending == dejudderHoldsPending.end())
-			dejudderHoldsPending.emplace_back(why, 1);
-		else
-			++pending->second;
-		const ULONGLONG now = GetTickCount64();
-		if (dejudderHoldLogTick == 0 || now - dejudderHoldLogTick >= 5000)
-		{
-			FlushDejudderHolds();
-			dejudderHoldLogTick = now;
-		}
+		dejudderHoldLog.OnHold(why, dejudderExtraStats.holds);
 		// Render-ahead: every hold also shows on the "Render-ahead:" line with the gate's level.
 		if (RenderAheadActive())
 			LogRenderAhead(dejudderExtraStats.cadenceRatio, renderAheadGate.Level(), why);
 	}
 
-	// One "De-judder: hold" line per reason held since the last lines (also at teardown, so
-	// the last holds are never lost).
-	void FlushDejudderHolds()
-	{
-		for (const auto& pending : dejudderHoldsPending)
-			DebugLog::Log("De-judder: hold (%s; %llu holds since the last line, %llu in total)",
-				pending.first.c_str(), pending.second, dejudderExtraStats.holds);
-		dejudderHoldsPending.clear();
-		dejudderHoldsNotLogged = 0;
-	}
+	// The last hold lines at teardown, so the last holds are never lost.
+	void FlushDejudderHolds() { dejudderHoldLog.Flush(dejudderExtraStats.holds); }
 
 	bool PresentDejudderExtras(const DejudderExtrasFrame& f)
 	{
@@ -18146,6 +17938,7 @@ struct LibplaceboVideoRenderer::Impl
 					extraFade = EntranceCrossfadeFrom(extraFrom, f.sourceSequence);
 				}
 			}
+			DrainEntranceBeforeRender();   // entrance_gpu_drain: after the extra's last entrance run
 			// Delta 8 R1: the sigma-delta takes the motion since the previous
 			// present (A or the last extra: the shift step) from the de-judder's
 			// field instead of searching. The guard restores the hooks (own
@@ -20308,7 +20101,7 @@ struct LibplaceboVideoRenderer::Impl
 		// Ambient adaptation (intent interpreter item 3, 2026-10-17): the black this frame
 		// renders to; exactly sdr_black_nits while ambient_adapt is off or at strength 0.
 		const double renderBlackNits = IntentTargetBlackNits(sourceSequence);
-		calibrationTargetTransfer.store(static_cast<int>(baseTarget.color.transfer), std::memory_order_release);
+		calibrationHost.NoteVideoTarget(static_cast<int>(baseTarget.color.transfer));
 		LibplaceboRenderParameters::ApplyTargetLuminance(
 			inputIsSdr, static_cast<float>(sdrTargetNits),
 			static_cast<float>(renderBlackNits), baseTarget.color);
@@ -20773,6 +20566,7 @@ struct LibplaceboVideoRenderer::Impl
                             }
                             subtitleComposedImage=composed;
                             relocatedSubtitle=move;
+                            repeatReuse.NoteSubtitleComposition(move, subtitleCutPasteBackground, donorReady);   // WP-24
                             subtitleCompositionSucceeded=true;
                         }
                         else DebugLog::Log("SUBTITLE COMPOSITION: failed; preserving normal viewport");
@@ -24300,202 +24094,56 @@ struct LibplaceboVideoRenderer::Impl
             convertedPayload ? &convertedPayload->dolby : nullptr, LedDisplayGamma(target.color.transfer), state,
             convertedPayload ? convertedPayload->rawFrame.get() : nullptr, videoFrame.GetCounter() },
             colorMapParams, hookTemplates, colourFrame.dvTrims, colourFrame.dv);
-        // Automatic calibration phase 2 (HDR verify): VP's own tone curve for this
-        // frame's colour mapping, rebuilt only when that changes (a hash per frame).
-        if (target.color.transfer == PL_COLOR_TRC_PQ)
+        // Rendered-frame captures (DV comparison capture; the WP-17 diagnostics adapter is the one
+        // caller). The context is built only while one is on (it consumes the trim selection).
+        captures.Configure(DvCompareCapture::kCommand, activeSettings.dvCompareCaptureFolder);
+        if (captures.AnyEnabled())
         {
-            const pl_color_map_params* toneColorMap = renderParams.color_map_params ?
-                renderParams.color_map_params : &pl_color_map_default_params;
-            const uint64_t toneSignature =
-                LedDrive::RawTransferSignature(renderImage.color, target.color, toneColorMap);
-            if (toneSignature != calibrationToneSignature)
-            {
-                calibrationToneSignature = toneSignature;
-                const LedDrive::ToneCurveSamples samples =
-                    LedDrive::SampleToneCurve(renderImage.color, target.color, toneColorMap);
-                std::lock_guard<std::mutex> toneGuard(calibrationToneMutex);
-                calibrationTone = samples;
-                calibrationSentHdr = target.color.hdr;
-            }
+            const DvTrimSelection::Selection* trimsSelection = dvStage.TakeTrimsSelection();
+            captures.OnFrameRendered({ &state, convertedPayload ? convertedPayload->rawFrame.get() : nullptr, videoFrame.GetCounter(),
+                convertedPayload && state.dolbyVisionTunnel ? &convertedPayload->dolby : nullptr, activeSettings.dvTrims,
+                trimsSelection, dvStage.TrimsTargetNits() });
         }
-        // LED drive, gain in: measurement first (it must see the picture before
-        // the gain), then the compensation hook with this frame's parameters.
-        const std::shared_ptr<LedDrive::LedDriveModule> led = std::atomic_load(&ledDrive);
-        // The gamma boost's base is the gamma this frame's output is encoded
-        // for (delta 4), not the projector's compensation_eotf.
-        const double displayGamma = LedDisplayGamma(target.color.transfer);
-        if (led)
-            led->SetDisplayGamma(displayGamma);
-        const double boostExponent = LedDrive::BoostExponent(
-            ledGammaBoost.load(std::memory_order_acquire), displayGamma);
-        if (boostExponent != lastLoggedBoostExponent)
+        // Automatic calibration phase 2 (HDR verify): VP's own tone curve (PQ targets).
+        calibrationHost.NoteToneCurve(renderImage.color, target.color, renderParams.color_map_params);
+        // S2 Dynamic Drive (WP-15 host adapter): gain in and this frame's LED decisions for the S2
+        // segment, the only emitter of the LED hooks (DynamicDriveFrame::DecideFrame; merge audit C1).
+        LedDrive::DynamicDriveFrameInputs led;
         {
-            lastLoggedBoostExponent = boostExponent;
-            DebugLog::Log("Dynamic Drive: gamma boost %s (exponent %.4f on output gamma %.2f)",
-                boostExponent != 1.0 ? "on" : "off", boostExponent, displayGamma);
-        }
-        if (led || boostExponent != 1.0 || ledShadowLift.load(std::memory_order_acquire) > 0.0)
-        {
-            if (!ledCompensationConfigured)
-            {
-                ConfiguredShaderRule compensationRule;
-                compensationRule.name = "led_compensation";
-                compensationRule.filename = "LED compensation.glsl";
-                ledCompensation.Configure({ compensationRule });
-                ledCompensationConfigured = true;
-            }
-            ledCompensation.Ensure(hookTemplates);
-            LedDrive::CompensationGain compensation;
-            compensation.knee = ledKnee.load(std::memory_order_acquire);
-            compensation.eotf = ledCompensationEotf.load(std::memory_order_acquire);
-            if (led)
-            {
-                // The look-ahead reads the captured frame: its range as the picture's.
-                led->SetSourceRange(activeSettings.sourceRange == "full" ? 1 : activeSettings.sourceRange == "limited" ? 0 : -1);
-                // Integration 2026-10-17 (owner: measured, not nominal): the source rate the LED
-                // look-ahead converts led_lookahead_ms with is the measured one (the film rate
-                // when pulldown is locked, else the measured capture rate); nominal only when
-                // nothing is measured yet.
-                const double ledSourceRateHz = CaptureRateBounds::Accepts(captureRateHz) ?
-                    captureRateHz : nominalSourceRateHz;
-                // Render-ahead (design step 6): this frame is rendered ahead of its display,
-                // so the gain and the projector drive use the planned refresh it lands on
-                // (the chain's next refresh) instead of the wall clock.
-                double ledAheadMs = 0.0;
-                if (RenderAheadActive() && renderAheadSchedule.Active())
-                {
-                    LARGE_INTEGER ledQpcFrequency{};
-                    if (QueryPerformanceFrequency(&ledQpcFrequency) && ledQpcFrequency.QuadPart > 0)
-                        ledAheadMs = (renderAheadSchedule.NextVsync() - static_cast<double>(PerformanceCounterNow()) /
-                            static_cast<double>(ledQpcFrequency.QuadPart)) * 1000.0;
-                }
-                compensation = ledAheadMs > 0.0 && ledAheadMs < 1000.0 ?
-                    led->BeginFrameAhead(sourceSequence, ledAheadMs, ledSourceRateHz) :
-                    led->BeginFrame(sourceSequence, ledSourceRateHz);
-                if (led->WantsPredictions())
-                {
-                    // The lookahead's raw-to-output transfer follows this frame's
-                    // colour mapping; rebuilt only when that changes.
-                    const pl_color_map_params* colorMap = renderParams.color_map_params ?
-                        renderParams.color_map_params : &pl_color_map_default_params;
-                    const uint64_t transferSignature =
-                        LedDrive::RawTransferSignature(renderImage.color, target.color, colorMap);
-                    if (transferSignature != ledRawTransferSignature)
-                    {
-                        ledRawTransferSignature = transferSignature;
-                        led->SetRawTransfer(std::make_shared<const LedDrive::RawTransfer>(
-                            LedDrive::BuildRawTransfer(renderImage.color, target.color, colorMap)));
-                    }
-                }
-                ledMeasurement.SetFrame(LedDrive::ActivePictureRect(hdrTrustedPicture.available,
-                    hdrTrustedPicture.left, hdrTrustedPicture.top, hdrTrustedPicture.right,
-                    hdrTrustedPicture.bottom, renderImage.crop.x0, renderImage.crop.y0,
-                    renderImage.crop.x1, renderImage.crop.y1), led->Config().aplWeights, boostExponent,
-                    sourceSequence);
-                // Bug hunt 2 (owner 2026-10-17, led_peak_full_coverage): the peak over every
-                // pixel, in boxes the share of the screen of the script's full-screen
-                // downscale. The screen is the whole output (the script's screenshot).
-                const double ledScreenW = baseTarget.crop.x1 - baseTarget.crop.x0;
-                const double ledScreenH = baseTarget.crop.y1 - baseTarget.crop.y0;
-                ledMeasurement.SetPeak(led->Config().peakFullCoverage, ledScreenW, ledScreenH);
-                // Bug hunt 2 (owner 2026-10-17, led_picture_only): measure the PICTURE ONLY. The
-                // detected subtitle (padded box and card), and a moved subtitle's place, cover
-                // and cleanup fill, are left out of every LED statistic. Detection runs only with
-                // a subtitle style that moves cues (Black / Generated gray) or the box test; with
-                // no detection nothing is masked. VP's own overlays (stats, OSD, profile panel,
-                // the subtitle test box) are target overlays libplacebo draws after the output
-                // pass, so this PRE_OUTPUT measurement never sees them.
-                LedDrive::MeasurementRect ledMasks[LedDrive::MAX_MASK_RECTS];
-                LedDrive::PixelRect ledSourceMasks[LedDrive::MAX_MASK_RECTS];
-                int ledMaskCount = 0;
-                if (led->Config().pictureOnly)
-                {
-                    std::vector<SubtitleBoxRect> boxes;
-                    if (subtitleBoxResult.detected && subtitleBoxResult.bounds.Valid())
-                    {
-                        boxes.push_back(ExpandSubtitleBox(subtitleBoxResult.bounds, width, height, safeSubtitlePadding));
-                        boxes.push_back(subtitleBoxResult.sourcePanel);
-                    }
-                    if (subtitleCompositionSucceeded)
-                        for (const SubtitleBoxRect& r : { relocatedSubtitle.destination, relocatedSubtitle.layoutCoverage,
-                            relocatedSubtitle.generatedCleanup, relocatedSubtitle.source })
-                            boxes.push_back(r);
-                    // NLS warps the picture before the scaler: a box follows the NLS map (the
-                    // shader's output-to-source curve, inverted per edge). An NLS shader whose map
-                    // is not known masks the box's rows across the whole width, a little taller.
-                    const NlsMaskMapping::Mapping ledNls = submittedNls ? KnownNlsMapping() : NlsMaskMapping::Mapping();
-                    auto outputOf = [&](double source, bool vertical)
-                    {
-                        const double scale = vertical ? ledNls.yScale : ledNls.xScale;
-                        const double protect = vertical ? ledNls.yProtect : ledNls.xProtect;
-                        double lo = 0.0, hi = 1.0;
-                        for (int i = 0; i < 40; ++i)
-                        {
-                            const double mid = 0.5 * (lo + hi);
-                            if (NlsMaskMapping::MapCoordinate(mid, scale, ledNls.curve, ledNls.geometry, protect) < source)
-                                lo = mid;
-                            else
-                                hi = mid;
-                        }
-                        return 0.5 * (lo + hi);
-                    };
-                    for (const SubtitleBoxRect& box : boxes)
-                    {
-                        if (!box.Valid() || ledMaskCount >= LedDrive::MAX_MASK_RECTS) continue;
-                        LedDrive::MeasurementRect m = LedDrive::SourceRectInCrop(box.left, box.top, box.right,
-                            box.bottom, renderImage.crop.x0, renderImage.crop.y0, renderImage.crop.x1, renderImage.crop.y1);
-                        if (LedDrive::Empty(m)) continue;
-                        ledSourceMasks[ledMaskCount] = { static_cast<double>(box.left), static_cast<double>(box.top),
-                            static_cast<double>(box.right), static_cast<double>(box.bottom) };
-                        if (submittedNls && ledNls.valid)
-                            m = { outputOf(m.x0, false), outputOf(m.y0, true), outputOf(m.x1, false), outputOf(m.y1, true) };
-                        else if (submittedNls)
-                            m = { 0.0, std::max(0.0, m.y0 - 0.02), 1.0, std::min(1.0, m.y1 + 0.02) };
-                        ledMasks[ledMaskCount++] = m;
-                    }
-                }
-                ledMeasurement.SetMask(ledMasks, ledMaskCount);
-                // The look-ahead measures queued raw frames (source raster): the screen in
-                // source pixels for the box size, and the current subtitle for their masks.
-                {
-                    const double cropW = renderImage.crop.x1 - renderImage.crop.x0;
-                    const double cropH = renderImage.crop.y1 - renderImage.crop.y0;
-                    const double shownW = target.crop.x1 - target.crop.x0;
-                    const double shownH = target.crop.y1 - target.crop.y0;
-                    static_cast<LedDrive::LookaheadObserver&>(led->Lookahead()).SetPictureGeometry(
-                        shownW > 0.0 && cropW > 0.0 ? ledScreenW * cropW / shownW : 0.0,
-                        shownH > 0.0 && cropH > 0.0 ? ledScreenH * cropH / shownH : 0.0,
-                        ledSourceMasks, ledMaskCount);
-                }
-                // Delta 8 R2: the grain map (the previous source frame's, as
-                // for S1) for grain-suppressed highlight statistics.
-                ledMeasurement.SetGrain(led->Config().highlightGrainSuppress && adaptiveDownscale.Active() &&
-                    adaptiveDownscale.LastMapState() == AdaptiveDownscale::MapState::Used ?
-                    adaptiveDownscale.GrainMap() : nullptr, static_cast<float>(activeSettings.adaptive.grainFloor),
-                    renderImage.crop);
-                colourFrame.ledMeasure = pipelineSlots.Runs(PipelineSlots::Id::DriveLedMeasure);
-            }
-            colourFrame.ledBlock = true;
-            colourFrame.ledCompensation = pipelineSlots.Runs(PipelineSlots::Id::DriveLedCompensation);
-            OutputSegments::CompensationParams& c = colourFrame.compensation;
-            c.gain = compensation.active ? compensation.gain : 1.0;
-            c.knee = compensation.knee;
-            c.gainDomain = compensation.domain == LedDrive::GainDomain::Linear ? 1.0 : 0.0;
-            c.eotf = compensation.eotf;
-            c.boost = boostExponent;
-            c.boostKnee = ledBoostKnee.load(std::memory_order_acquire);
-            c.boostKneeWidth = ledBoostKneeWidth.load(std::memory_order_acquire);
-            c.shadowLift = ledShadowLift.load(std::memory_order_acquire);
-            c.veil = compensation.veil;
-            c.wtwPassthrough = ledWtwPassthrough.load(std::memory_order_acquire) ? 1.0 : 0.0;
-            c.btbPassthrough = ledBtbPassthrough.load(std::memory_order_acquire) ? 1.0 : 0.0;
+            led.image = &renderImage;
+            led.target = &target;
+            led.screen = &baseTarget;
+            led.params = &renderParams;
+            led.hookTemplates = &hookTemplates;
+            led.sourceRange = &activeSettings.sourceRange;
+            led.displayGamma = LedDisplayGamma(target.color.transfer);
+            led.captureRateHz = captureRateHz;
+            led.nominalSourceRateHz = nominalSourceRateHz;
+            led.renderAheadActive = RenderAheadActive() && renderAheadSchedule.Active();
+            led.renderAheadNextVsyncSeconds = led.renderAheadActive ? renderAheadSchedule.NextVsync() : 0.0;
+            led.sourceSequence = sourceSequence;
+            led.trustedPicture = &hdrTrustedPicture;
+            led.subtitle = &subtitleBoxResult;
+            led.sourceWidth = width;
+            led.sourceHeight = height;
+            led.subtitlePadding = safeSubtitlePadding;
+            led.subtitleComposed = subtitleCompositionSucceeded;
+            led.relocatedSubtitle = &relocatedSubtitle;
+            led.nlsSubmitted = submittedNls != nullptr;
+            led.nlsMapping = [this] { return KnownNlsMapping(); };
+            led.grainMap = adaptiveDownscale.Active() && adaptiveDownscale.LastMapState() ==
+                AdaptiveDownscale::MapState::Used ? adaptiveDownscale.GrainMap() : nullptr;
+            led.grainFloor = static_cast<float>(activeSettings.adaptive.grainFloor);
+            led.measureSlotRuns = pipelineSlots.Runs(PipelineSlots::Id::DriveLedMeasure);
+            led.compensationSlotRuns = pipelineSlots.Runs(PipelineSlots::Id::DriveLedCompensation);
+            dynamicDrive.DecideFrame(led, colourFrame);
         }
         // The user's shaders (the S2 edge) and VP's calibration LUT stage; then S2 adds this
         // frame's hooks in the segment's order, exactly as the separate blocks did.
         userFrameHooks.clear();
         customHooks.Collect(lowLatencyQueue, userFrameHooks);
         colourFrame.userPreOutput = &userFrameHooks;
-        colourFrame.calibrationLut = calibrationLutStage.Lut() != nullptr;
+        colourFrame.calibrationLut = calibrationHost.HookForFrame() != nullptr;   // S2 pushes it (WP-12: the adapter never does)
         const OutputSegments::ColourCounts colourCounts = outputColour.Collect(colourFrame, pipelineSlots, frameHooks,
             [this](size_t start, PipelineSlots::Id slot) { TagSlotHooks(start, slot); });
         logSdrToneShape(sdrToneShapeState == 1 && colourCounts.toneShape == 0 ? 3 : sdrToneShapeState);
@@ -24503,22 +24151,7 @@ struct LibplaceboVideoRenderer::Impl
         SyncFallback(colourCounts.unhandled ? FallbackCatalog::Engaged("S2 placeholder stage",
             "a placeholder slot has a component but no output-segment stage yet (not run)") :
             FallbackCatalog::Released("S2 placeholder stage"));
-        if (colourFrame.ledBlock)
-        {
-            if (boostExponent != 1.0 && colourCounts.ledCompensation == 0)
-            {
-                if (!ledBoostMissingLogged)
-                    DebugLog::Log("Dynamic Drive: WARNING gamma boost NOT applied - shaders\\LED compensation.glsl did not load or was disabled; the picture is plain output_gamma (exponent %.4f missing)",
-                        boostExponent);
-                ledBoostMissingLogged = true;
-            }
-            else if (colourCounts.ledCompensation > 0)
-            {
-                if (ledBoostMissingLogged)
-                    DebugLog::Log("Dynamic Drive: gamma boost applied again (compensation hook running)");
-                ledBoostMissingLogged = false;
-            }
-        }
+        dynamicDrive.AfterCollect(led, colourCounts.ledCompensation);
         // A cadence repeat shows the previous picture again: the sigma-delta
         // skips its motion search (zero motion; owner 2026-10-13 efficiency).
         for (const pl_hook* hook : frameHooks)
@@ -24775,6 +24408,16 @@ struct LibplaceboVideoRenderer::Impl
             cacheFrame.numSubtitleHolds = 4;
             dejudderCacheStage.Register(cacheFrame, [this]() { return KnownNlsMapping(); }, frameHooks);
         }
+        // WP-24 repeat reuse, call 1 of 3: decide this refresh; arm the cache for a first present the
+        // queue holds a repeat of (before the encoding-repair check, which looks at PRE_OUTPUT hooks).
+        repeatReuse.SetOptions({ activeSettings.repeatRenderReuse, pipelineSlots.OriginalPathway(),
+            pipelineSlots.Runs(PipelineSlots::Id::OutputPresentation) });
+        if (repeatReuse.Active())
+        {
+            repeatReuse.SetContext(RepeatReuseContext(renderImage, target));
+            repeatReuse.PrepareFirstPresent(RepeatRenderReuse::KeyFrom(sourceSequence, cadenceRepeat, repeatNextQueued,
+                frameGeneration, activeSettingsGeneration, renderImage, target, renderParams, DisplayLutSignature()), frameHooks);
+        }
         // libplacebo 7.360.1 drops the output encoding (limited range) after
         // a texture-input PRE_OUTPUT hook; the repair runs first at OUTPUT,
         // before any OUTPUT-stage shader such as the sigma-delta.
@@ -24901,6 +24544,9 @@ struct LibplaceboVideoRenderer::Impl
             }, [&](const pl_frame& source, const pl_frame& destination, pl_render_params& parameters) {
                 // output_segments_merged: S2/S3 as one hook each for this draw only (restored after).
                 OutputSegments::Merger::Scope mergedOutput(outputMerger.get(), parameters, &renderErrors);
+                // WP-24 repeat reuse, call 2 of 3 (upstreamable): a reusable repeat runs the OUTPUT stage only.
+                if (repeatReuse.TryDrawRepeat(repeatReuse.Key(), renderer, destination, parameters))
+                    return true;
                 // Stage 12 step A: the planes libplacebo samples, re-based.
                 pl_frame frame = source;
                 // Stage B: the picture at this refresh's phase in place of A's planes (a
@@ -24981,6 +24627,7 @@ struct LibplaceboVideoRenderer::Impl
                     // own bands), so none drops out in one step when the fade starts.
                     pl_frame from = unrebased;
                     const bool fromReady = EntranceCrossfadeFrom(from, sourceSequence);
+                    DrainEntranceBeforeRender();   // entrance_gpu_drain: after the last entrance run (the path left)
                     if (fromReady)
                     {
                         // Hunt 3 F1: mixed in the output signal domain by VP's PRE_OUTPUT hooks
@@ -25016,10 +24663,12 @@ struct LibplaceboVideoRenderer::Impl
                         }
                     }
                 }
+                DrainEntranceBeforeRender();   // entrance_gpu_drain: once, after the draw's last entrance run
                 return temporalRenderer.Render(renderer,frame,destination,parameters,
                     extendedRangeRelabelled ? &source.color : nullptr);
             });
         bool rendered = hookRender.rendered;
+        repeatReuse.NoteRendered(repeatReuse.Key(), rendered && !hookRender.retried);   // WP-24 call 3 of 3
         // Bug hunt 2026-10-17: B's carried vectors are for this present only;
         // released here so the de-judder extras below never see them bound.
         nextVectorGuard.Release();
@@ -25046,43 +24695,17 @@ struct LibplaceboVideoRenderer::Impl
             if (customHooks.MarkRuntimeFailures(hookErrors.disabled_hooks,
                 hookErrors.num_disabled_hooks))
                 PublishCustomShaderStatus();
-            ledCompensation.MarkRuntimeFailures(hookErrors.disabled_hooks,
-                hookErrors.num_disabled_hooks);
+            dynamicDrive.OnHookErrors(hookErrors.disabled_hooks, hookErrors.num_disabled_hooks);
             extendedRange.NoteDisabledHooks(hookErrors.disabled_hooks, hookErrors.num_disabled_hooks);
             // output.calibration_lut (VP stage, R1): a disabled or failing hook reverts to libplacebo's
             // target LUT for the rest of the session, visibly (skeleton audit item 5).
-            if (!calibrationLutStageFailed && calibrationLutStage.Lut())
             {
-                bool disabled = calibrationLutStage.Failures() > 0;
-                for (int i = 0; !disabled && i < hookErrors.num_disabled_hooks; ++i)
-                    disabled = hookErrors.disabled_hooks[i] == calibrationLutStage.Get()->signature;
-                if (disabled)
-                {
-                    calibrationLutStageFailed = true;
-                    EngageFallback("calibration LUT", "the VP stage failed; libplacebo's target LUT (before the LED compensation)");
-                }
+                const FallbackCatalog::Decision calibration = calibrationHost.AfterRender(hookErrors);
+                if (calibration.engaged) EngageFallback(calibration.id.c_str(), calibration.reason);
             }
-            for (int i = 0; led && !ledMeasurementDisabledLogged && i < hookErrors.num_disabled_hooks; ++i)
-                if (hookErrors.disabled_hooks[i] == ledMeasurement.Hook()->signature)
-                {
-                    DebugLog::Log("Dynamic Drive: WARNING libplacebo disabled the measurement pass; the LED keeps its last statistics");
-                    ledMeasurementDisabledLogged = true;
-                }
         }
-        // LED drive, stats out: finished measurements (a few frames old; the
-        // render thread never waits for them).
-        if (led)
-        {
-            std::vector<LedDrive::RawMeasurement> measured;
-            std::vector<uint64_t> measuredSequences;
-            ledMeasurement.Collect(measured, 0, &measuredSequences);
-            for (size_t i = 0; i < measured.size(); ++i)
-                led->SubmitMeasurement(measured[i], measuredSequences[i]);
-            // Silent-fallbacks batch: measurement results running late (or frames not measured) are visible.
-            const std::string measureNote = ledMeasurement.LateNote();
-            SyncFallback(measureNote.empty() ? FallbackCatalog::Released("LED measurement") :
-                FallbackCatalog::Engaged("LED measurement", measureNote));
-        }
+        // Dynamic Drive, stats out: finished measurements (a few frames old; never waits).
+        dynamicDrive.CollectMeasurements();
         if (hookRender.retried)
             DebugLog::Log("VP anamorphic hook recovery: schema=1 sequence=%llu generation=%llu hook=%llu errors=0x%x retry=1 rendered=%d lens=%.6f latch=until_shader_selection_change",
                 sourceSequence, frameGeneration, hookRender.failedSignature, hookRender.errors,
@@ -25143,10 +24766,14 @@ struct LibplaceboVideoRenderer::Impl
 		const double renderMs = std::chrono::duration<double, std::milli>(
 			SteadyClock::now() - renderStart).count();
         if (!rendered && targetLutApplied)
+        {
             RejectDisplayLutAfterRenderFailure();
+            const FallbackCatalog::Decision dropped = calibrationHost.LutDropped(displayLutPath);
+            if (dropped.engaged) EngageFallback(dropped.id.c_str(), dropped.reason);
+        }
         calibrationStatusAvailable = rendered;
         if (rendered) lastRenderedTargetTransfer = ToSdrTransfer(baseTarget.color.transfer);
-        calibrationLutAttached = rendered && targetLutApplied;
+        calibrationLutAttached = calibrationHost.LutAttached(rendered, targetLutApplied);
 		// h3-latch (K3): held black until the first crop decision (the frame was rendered as usual).
 		if (rendered && startupHoldBlack)
 			pl_frame_clear(d3d11->gpu, &baseTarget, black);
@@ -25548,48 +25175,37 @@ struct LibplaceboVideoRenderer::Impl
 					presentationTargetTimingKnown = true;
 				}
 			}
-			// Report-a-problem (DiagnosticHistory): one presented row per frame from
-			// values already at hand. No locks, allocation, strings or GPU queries.
+			// Report-a-problem: one presented row per frame from values already at hand
+			// (VP diagnostics adapter; no locks, allocation, strings or GPU queries).
 			{
-				DiagnosticHistory::FrameRecord diag;
-				diag.qpc = swapEndQpc;
-				diag.stage = DiagnosticHistory::StagePresented;
+				VpDiagnostics::PresentedFacts diag;
+				diag.swapEndQpc = swapEndQpc;
 				diag.counter = record.sourceFrameNumber;
 				diag.sourceTimestamp = record.captureTimestamp;
 				diag.captureTimestamp = videoFrame.GetCaptureTimingTimestamp();
-				const double qpcPerMs = static_cast<double>(qpcFrequency.QuadPart) / 1000.0;
-				if (presentationTargetTimingKnown && qpcPerMs > 0.0)
-				{
-					diag.presentQpc = swapEndQpc + static_cast<int64_t>(presentationTargetLeadMs * qpcPerMs);
-					diag.leadMs = static_cast<float>(presentationTargetLeadMs);
-				}
-				diag.queueDepth = static_cast<uint32_t>(queueDepthAfterDequeue);
-				diag.renderMs = static_cast<float>(renderMs);
-				diag.uploadMs = static_cast<float>(sourceUploadCpuLastMs);
-				diag.waitMs = static_cast<float>(swapBlockMs);
-				diag.intervalMs = static_cast<float>(submitGapMs);
-				if (qpcPerMs > 0.0 && callbackQpc > 0 && swapEndQpc > callbackQpc)
-					diag.latencyMs = static_cast<float>(static_cast<double>(swapEndQpc - callbackQpc) / qpcPerMs);
-				uint32_t flags = 0;
-				if (temporalRenderer.Active()) flags |= DiagnosticHistory::FlagInterpolated;
-				if (RenderAheadActive())
-				{
-					flags |= DiagnosticHistory::FlagRenderAhead;
-					if (dejudderDisplayRate.openLoop) flags |= DiagnosticHistory::FlagOpenLoop;
-					diag.phase = renderAheadPendingMainInterval;   // the main present's SyncInterval
-				}
-				if (dejudder && sourceSequence != 0 && dejudderEstimatedSequence == sourceSequence &&
-					motionValidity.Current(dejudderEstimatedEpoch))
-					flags |= DiagnosticHistory::FlagVectorsValid;
-				if (pl_color_space_is_hdr(&image.color)) flags |= DiagnosticHistory::FlagHdr;
-				if (videoFrame.IsSourceDiscontinuity()) flags |= DiagnosticHistory::FlagDiscontinuity;
-				diag.flags = flags;
-				diag.repeatCount = cadenceRepeat ? 1 : 0;
-				diag.width = width > 0 ? static_cast<uint32_t>(width) : 0u;
-				diag.height = height > 0 ? static_cast<uint32_t>(height) : 0u;
-				diag.repeatedTotal = dejudderExtraStats.holds;
+				diag.qpcFrequency = qpcFrequency.QuadPart;
+				diag.targetTimingKnown = presentationTargetTimingKnown;
+				diag.targetLeadMs = presentationTargetLeadMs;
+				diag.queueDepth = queueDepthAfterDequeue;
+				diag.renderMs = renderMs;
+				diag.uploadMs = sourceUploadCpuLastMs;
+				diag.waitMs = swapBlockMs;
+				diag.intervalMs = submitGapMs;
+				diag.callbackQpc = callbackQpc;
+				diag.interpolated = temporalRenderer.Active();
+				diag.renderAhead = RenderAheadActive();
+				diag.openLoop = dejudderDisplayRate.openLoop;
+				diag.mainInterval = renderAheadPendingMainInterval;   // the main present's SyncInterval
+				diag.vectorsValid = dejudder && sourceSequence != 0 && dejudderEstimatedSequence == sourceSequence &&
+					motionValidity.Current(dejudderEstimatedEpoch);
+				diag.hdr = pl_color_space_is_hdr(&image.color);
+				diag.discontinuity = videoFrame.IsSourceDiscontinuity();
+				diag.cadenceRepeat = cadenceRepeat;
+				diag.width = width;
+				diag.height = height;
+				diag.holds = dejudderExtraStats.holds;
 				diag.rendererGeneration = diagRendererGeneration;
-				DiagnosticHistory::Global().RecordFrame(diag);
+				VpDiagnostics::RecordPresented(diag);
 			}
 
 			const uint64_t nowTick = GetTickCount64();
@@ -25861,7 +25477,7 @@ struct LibplaceboVideoRenderer::Impl
 			extrasFrame.image = &renderImage;
 			extrasFrame.target = &target;
 			extrasFrame.params = &frameParams;
-			extrasFrame.ledMeasurementHook = ledMeasurement.Hook();
+			extrasFrame.ledMeasurementHook = dynamicDrive.MeasurementHookPointer();
 			extrasFrame.lossless422 = lossless422Upload;
 			extrasFrame.cadenceRepeat = cadenceRepeat;
 			extrasFrame.frameGeneration = frameGeneration;
@@ -26025,17 +25641,9 @@ LibplaceboVideoRenderer::~LibplaceboVideoRenderer()
 	if (m_conversionThread.joinable())
 		m_conversionThread.join();
 	ClearQueue("renderer destruction");
-	// VP Renderer filter (2026-10-17): in the filter process (source=file) the
-	// running LED drive is held for the next graph instead of returning the
-	// projector to full light; the capture app never gets here with a hold-over.
-	if (m_ledHoldoverMs > 0 && m_ledDrive && !m_ledDriveSuspended)
-	{
-		std::shared_ptr<LedDrive::LedDriveModule> held = m_ledDrive;
-		m_ledDrive.reset();
-		if (m_impl)
-			std::atomic_store(&m_impl->ledDrive, std::shared_ptr<LedDrive::LedDriveModule>());
-		LedDrive::ProcessLedDriveHoldover().Park(held, m_ledDriveSignature, m_ledHoldoverMs);
-	}
+	// VP Renderer filter (2026-10-17): in the filter process the running LED drive is parked
+	// for the next graph (DynamicDriveHost::ParkForHoldover).
+	m_dynamicDrive.ParkForHoldover(DynamicDriveContext());
 	m_impl.reset();
 }
 
@@ -26175,27 +25783,8 @@ bool LibplaceboVideoRenderer::OnVideoState(VideoStateComPtr& videoState)
 }
 
 
-namespace
-{
-	// Report-a-problem (DiagnosticHistory): a renderer frame row outside
-	// RenderLocked (ingest, drops). Lock-free, no allocation.
-	void RecordRendererFrame(uint32_t stage, uint64_t counter, int64_t sourceTimestamp,
-		size_t queueDepth, uint32_t reason, uint64_t droppedTotal, uint32_t rendererGeneration,
-		uint32_t flags = 0, int64_t qpc = 0) noexcept
-	{
-		DiagnosticHistory::FrameRecord record;
-		record.qpc = qpc;
-		record.stage = stage;
-		record.counter = counter;
-		record.sourceTimestamp = sourceTimestamp;
-		record.queueDepth = static_cast<uint32_t>(queueDepth);
-		record.holdReason = reason;
-		record.droppedTotal = droppedTotal;
-		record.rendererGeneration = rendererGeneration;
-		record.flags = flags;
-		DiagnosticHistory::Global().RecordFrame(record);
-	}
-}
+// Report-a-problem: a renderer frame row outside RenderLocked (ingest, drops): VP diagnostics adapter.
+using VpDiagnostics::RecordRendererFrame;
 
 void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 {
@@ -27178,18 +26767,7 @@ void LibplaceboVideoRenderer::Build()
 		static_cast<int64_t>(m_callbackGeneration));
 	// The queue path as last applied (the snapshot may have been applied before this Build).
 	m_impl->lowLatencyQueueActive.store(lowLatencyQueue, std::memory_order_release);
-	std::atomic_store(&m_impl->ledDrive, m_ledDrive);
-	if (m_ledDrive && m_ledDrive->WantsPredictions())
-		std::atomic_store(&m_impl->queuedFrameObserver, std::shared_ptr<QueuedFrameStatistics::IObserver>(
-			m_ledDrive, &m_ledDrive->Lookahead()));
-	m_impl->ledGammaBoost.store(m_ledGammaBoost, std::memory_order_release);
-	m_impl->ledCompensationEotf.store(m_ledCompensationEotf, std::memory_order_release);
-	m_impl->ledKnee.store(m_ledKnee, std::memory_order_release);
-	m_impl->ledBoostKnee.store(m_ledBoostKnee, std::memory_order_release);
-	m_impl->ledBoostKneeWidth.store(m_ledBoostKneeWidth, std::memory_order_release);
-	m_impl->ledShadowLift.store(m_ledShadowLift, std::memory_order_release);
-	m_impl->ledWtwPassthrough.store(m_ledWtwPassthrough, std::memory_order_release);
-	m_impl->ledBtbPassthrough.store(m_ledBtbPassthrough, std::memory_order_release);
+	m_dynamicDrive.Attach(DynamicDriveContext());
 	m_impl->displayRefreshRate.SetFallbackSink(
 		[this](const FallbackCatalog::Decision& decision) { if (m_impl) m_impl->SyncFallback(decision); });
 	m_impl->displayRefreshRate.SetEventSink(
@@ -27453,126 +27031,18 @@ bool LibplaceboVideoRenderer::RefreshShaderRule(
 }
 
 
-void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
+// Dynamic Drive (WP-15): what the host adapter needs from this renderer, built per call.
+LedDrive::HostContext LibplaceboVideoRenderer::DynamicDriveContext() const
 {
-	// Only [projector.default] and [led_drive.default] (or its alias
-	// [dynamic_drive.default]) matter; any other configuration change leaves
-	// a running module alone.
-	std::string signature;
-	const std::string ledSection = LedDrive::ResolveLedDriveSection(configuration);
-	for (const std::string& section : { std::string(LedDrive::PROJECTOR_SECTION), ledSection })
-		if (const auto* values = configuration.GetSectionValues(section))
-			for (const auto& value : *values)
-				signature += section + "." + value.first + "=" + value.second + "\n";
-	// Both spellings in one file: [led_drive.*] wins; said once per change.
-	const std::string aliasConflict = LedDrive::LedDriveAliasConflict(configuration);
-	if (aliasConflict != m_ledDriveAliasConflict && !aliasConflict.empty())
-		DebugLog::Log("Dynamic Drive: WARNING %s", aliasConflict.c_str());
-	m_ledDriveAliasConflict = aliasConflict;
-	// An LED profile file is part of the settings: editing it applies too.
-	const std::string ledProfilePath = LedDrive::LedProfilePath(configuration);
-	if (!ledProfilePath.empty())
-	{
-		std::ifstream profile(ledProfilePath, std::ios::binary);
-		signature += "profile=" + std::string((std::istreambuf_iterator<char>(profile)),
-			std::istreambuf_iterator<char>());
-	}
-	std::string validationError;
-	const bool valid = LedDrive::Validate(configuration, validationError);
-	// The gamma boost applies even with the module off or in log_only.
-	const LedDrive::LedDriveConfig boostConfig = valid ?
-		LedDrive::ReadLedDriveConfig(configuration) : LedDrive::LedDriveConfig();
-	// The exponent is output gamma / gamma_boost, worked out per frame from
-	// the frame's output transfer; the renderer logs it when it changes.
-	if (boostConfig.gammaBoost != m_ledGammaBoost)
-		DebugLog::Log("Dynamic Drive: gamma boost setting %s (%.2f)",
-			boostConfig.gammaBoost > 0.0 ? "on" : "off", boostConfig.gammaBoost);
-	m_ledGammaBoost = boostConfig.gammaBoost;
-	m_ledCompensationEotf = boostConfig.compensationEotf;
-	m_ledKnee = boostConfig.knee;
-	m_ledBoostKnee = boostConfig.gammaBoostKnee;
-	m_ledBoostKneeWidth = boostConfig.gammaBoostKneeWidth;
-	m_ledWtwPassthrough = boostConfig.wtwPassthrough;
-	m_ledBtbPassthrough = boostConfig.btbPassthrough;
-	// The shadow lift is part of adaptive gamma (owner 2026-10-14).
-	m_ledShadowLift = boostConfig.adaptiveGamma ? boostConfig.shadowLiftAnsi : 0.0;
+	LedDrive::HostContext context;
 	if (m_impl)
 	{
-		m_impl->ledGammaBoost.store(m_ledGammaBoost, std::memory_order_release);
-		m_impl->ledCompensationEotf.store(m_ledCompensationEotf, std::memory_order_release);
-		m_impl->ledKnee.store(m_ledKnee, std::memory_order_release);
-		m_impl->ledBoostKnee.store(m_ledBoostKnee, std::memory_order_release);
-		m_impl->ledBoostKneeWidth.store(m_ledBoostKneeWidth, std::memory_order_release);
-		m_impl->ledShadowLift.store(m_ledShadowLift, std::memory_order_release);
-		m_impl->ledWtwPassthrough.store(m_ledWtwPassthrough, std::memory_order_release);
-		m_impl->ledBtbPassthrough.store(m_ledBtbPassthrough, std::memory_order_release);
+		context.frame = &m_impl->dynamicDrive;
+		// VP-V: slot drive.projector_control (off in the Original pathway, ADR-0019, or at slot level).
+		context.projectorAllowed = m_impl->pipelineSlots.Runs(PipelineSlots::Id::DriveProjectorControl);
+		context.lastRenderStartedTick = m_impl->libplaceboRenderStartedTick.load(std::memory_order_acquire);
 	}
-	// VP-V: slot drive.projector_control (off in the Original pathway, ADR-0019, or at slot level):
-	// the RS-232 LED/CNTR drive is not started.
-	const bool projectorAllowed = !m_impl || m_impl->pipelineSlots.Runs(PipelineSlots::Id::DriveProjectorControl);
-	if (signature == m_ledDriveSignature && (m_ledDrive != nullptr) ==
-		(valid && projectorAllowed && LedDrive::ReadLedDriveConfig(configuration).enabled))
-		return;
-	// A broken LED profile never stops VP: it is left out (built-in values
-	// plus the main settings) and said once per change.
-	std::string profileProblem;
-	if (!LedDrive::ValidateLedProfile(configuration, profileProblem))
-		DebugLog::Log("Dynamic Drive: WARNING LED profile ignored (%s); using the built-in values",
-			profileProblem.c_str());
-	// Tuning and script/compensate switches go to the running module, so the
-	// LED carries on from its level instead of restoring full light.
-	if (valid && m_ledDrive && m_ledDrive->Reconfigure(LedDrive::ReadProjectorConfig(configuration),
-		LedDrive::ReadLedDriveConfig(configuration)))
-	{
-		m_ledDriveSignature = signature;
-		if (m_impl)
-			std::atomic_store(&m_impl->queuedFrameObserver, m_ledDrive->WantsPredictions() ?
-				std::shared_ptr<QueuedFrameStatistics::IObserver>(m_ledDrive, &m_ledDrive->Lookahead()) :
-				std::shared_ptr<QueuedFrameStatistics::IObserver>());
-		return;
-	}
-	m_ledDriveSignature = signature;
-	std::shared_ptr<LedDrive::LedDriveModule> previous = m_ledDrive;
-	m_ledDrive.reset();
-	if (m_impl)
-	{
-		std::atomic_store(&m_impl->ledDrive, std::shared_ptr<LedDrive::LedDriveModule>());
-		std::atomic_store(&m_impl->queuedFrameObserver, std::shared_ptr<QueuedFrameStatistics::IObserver>());
-	}
-	if (previous) previous->Stop();
-	if (!valid)
-	{
-		DebugLog::Log("Dynamic Drive: configuration rejected (%s); module and gamma boost off",
-			validationError.c_str());
-		return;
-	}
-	const LedDrive::LedDriveConfig led = LedDrive::ReadLedDriveConfig(configuration);
-	if (!led.enabled || !projectorAllowed)
-	{
-		if (previous || (led.enabled && !projectorAllowed))
-			DebugLog::Log("Dynamic Drive: disabled%s", projectorAllowed ? "" : " (slot drive.projector_control off: Original pathway or pipeline_slots_off)");
-		return;
-	}
-	// VP Renderer filter (2026-10-17): a drive the previous file's renderer
-	// held (same LED settings) carries on; nothing is held in the capture app.
-	m_ledDrive = LedDrive::ProcessLedDriveHoldover().Adopt(signature);
-	if (!m_ledDrive)
-	{
-		// The serial port goes through the LED drive arbiter: VideoProcessor.exe
-		// and the filter never drive the projector at the same time.
-		m_ledDrive = std::make_shared<LedDrive::LedDriveModule>(
-			LedDrive::ReadProjectorConfig(configuration), led, LedDrive::ArbitratedSerialPortFactory());
-		m_ledDrive->Start();
-	}
-	if (m_impl)
-	{
-		std::atomic_store(&m_impl->ledDrive, m_ledDrive);
-		// The module's lookahead watches the queued-frame walk; the aliasing
-		// pointer keeps the module alive while the walk holds it.
-		if (m_ledDrive->WantsPredictions())
-			std::atomic_store(&m_impl->queuedFrameObserver, std::shared_ptr<QueuedFrameStatistics::IObserver>(
-				m_ledDrive, &m_ledDrive->Lookahead()));
-	}
+	return context;
 }
 
 std::vector<CString> LibplaceboVideoRenderer::ActiveShaders() const
@@ -27648,13 +27118,11 @@ bool LibplaceboVideoRenderer::ApplyApplicationState(
 	};
 	if (snapshot.configuration)
 	{
-		// VP Renderer filter (2026-10-17): the LED hold-over is for file playback only.
+		// Dynamic Drive (WP-15): the LED drive's settings; the hold-over is for file playback only.
 		std::string sourceKind;
-		m_ledHoldoverMs = snapshot.LookupVariable("source", sourceKind) && sourceKind == "file" ?
-			FileSource::ReadFileHostSettings(*snapshot.configuration).ledHoldoverMs : 0;
-		m_ledDriveConfiguration = snapshot.configuration;
-		if (!m_ledDriveSuspended)
-			UpdateLedDrive(*snapshot.configuration);
+		if (!snapshot.LookupVariable("source", sourceKind))
+			sourceKind.clear();
+		m_dynamicDrive.ApplySnapshot(snapshot.configuration, sourceKind, DynamicDriveContext());
 	}
 	VideoStateComPtr state = m_videoState;
 	auto candidateConfiguration = m_rendererConfiguration;
@@ -28878,83 +28346,23 @@ bool LibplaceboVideoRenderer::GetCalibrationOutput(Calibration::PatternOutputInf
 	// The format fields are render-thread state: read under renderMutex, which
 	// the loop releases between refreshes; a cached copy answers when it stays busy.
 	bool fresh = false;
-	for (int attempt = 0; attempt < 100 && !fresh; ++attempt)
+	const int attempts = m_impl->calibrationHost.FreshOutputAttempts(m_calibrationPatternActive.load(std::memory_order_acquire));
+	for (int attempt = 0; attempt < attempts && !fresh; ++attempt)
 	{
 		std::unique_lock<std::mutex> guard(m_impl->renderMutex, std::try_to_lock);
 		if (!guard.owns_lock())
 		{
-			Sleep(2);
+			if (attempts > 1) Sleep(2);
 			continue;
 		}
-		Calibration::PatternOutputInfo current;
-		const DXGI_FORMAT format = m_impl->negotiatedSwapchainFormat;
-		current.containerBits =
-			format == DXGI_FORMAT_R10G10B10A2_UNORM ? 10 :
-			format == DXGI_FORMAT_R16G16B16A16_FLOAT ? 16 :
-			format == DXGI_FORMAT_B8G8R8A8_UNORM || format == DXGI_FORMAT_R8G8B8A8_UNORM ? 8 : 0;
-		current.codeBits = current.containerBits;
-		const std::string depth = m_impl->activeSettings.displayBitDepth;
-		if ((depth == "8" || depth == "10") && (current.containerBits == 8 || current.containerBits == 10))
-			current.codeBits = (std::min)(current.containerBits, static_cast<uint32_t>(std::stoi(depth)));
-		current.limitedRange = Impl::EncodingLevels(m_impl->actualOutput.encoding) == PL_COLOR_LEVELS_LIMITED;
-		current.bt2020 = m_impl->TargetIsBt2020();
-		const int transfer = m_impl->calibrationTargetTransfer.load(std::memory_order_acquire);
-		current.transfer = transfer == PL_COLOR_TRC_PQ ? Calibration::SignalTransfer::Pq :
-			transfer == PL_COLOR_TRC_HLG ? Calibration::SignalTransfer::Hlg : Calibration::SignalTransfer::Sdr;
 		double hz = m_impl->renderLoadDisplayRefreshHz.load(std::memory_order_acquire);
 		if (!(hz > 0.0)) hz = MonitorRefreshHz(m_videoHwnd);
-		current.refreshHz = hz;
-		current.available = m_impl->swapchain != nullptr && !m_impl->outputResourcesRetired;
-		if (!current.available) strncpy_s(current.reason, sizeof(current.reason), "the output is not ready", _TRUNCATE);
-		std::lock_guard<std::mutex> cache(m_impl->calibrationOutputCacheMutex);
-		m_impl->calibrationOutputCache = current;
+		m_impl->calibrationHost.PublishOutputFacts({ m_impl->negotiatedSwapchainFormat, m_impl->activeSettings.displayBitDepth,
+			Impl::EncodingLevels(m_impl->actualOutput.encoding) == PL_COLOR_LEVELS_LIMITED, m_impl->TargetIsBt2020(), hz,
+			m_impl->swapchain != nullptr && !m_impl->outputResourcesRetired });
 		fresh = true;
 	}
-	{
-		std::lock_guard<std::mutex> cache(m_impl->calibrationOutputCacheMutex);
-		info = m_impl->calibrationOutputCache;
-	}
-	if (!fresh && info.containerBits == 0)
-	{
-		setReason("the VP Renderer is busy; try again");
-		return false;
-	}
-	info.width = m_impl->calibrationSurfaceWidth.load(std::memory_order_acquire);
-	info.height = m_impl->calibrationSurfaceHeight.load(std::memory_order_acquire);
-	info.presentedGeneration = m_impl->calibrationPresentedGeneration.load(std::memory_order_acquire);
-	info.presentsOfGeneration = m_impl->calibrationPresentsOfGeneration.load(std::memory_order_acquire);
-	info.readbackGeneration = m_impl->calibrationReadbackGeneration.load(std::memory_order_acquire);
-	const uint32_t center = m_impl->calibrationReadbackCenter.load(std::memory_order_acquire);
-	const uint32_t corner = m_impl->calibrationReadbackCorner.load(std::memory_order_acquire);
-	for (int c = 0; c < 3; ++c)
-	{
-		info.readbackCenter[c] = static_cast<uint16_t>((center >> (10 * c)) & 0x3FF);
-		info.readbackCorner[c] = static_cast<uint16_t>((corner >> (10 * c)) & 0x3FF);
-	}
-	if (info.transfer == Calibration::SignalTransfer::Pq)
-	{
-		std::lock_guard<std::mutex> toneGuard(m_impl->calibrationToneMutex);
-		const LedDrive::ToneCurveSamples& tone = m_impl->calibrationTone;
-		const uint32_t n = (std::min)(static_cast<uint32_t>((std::max)(tone.count, 0)),
-			Calibration::PatternOutputInfo::ToneCurveMax);
-		info.toneCurveCount = n;
-		for (uint32_t i = 0; i < n; ++i)
-		{
-			info.toneCurveSourceNits[i] = tone.sourceNits[i];
-			info.toneCurveOutputNits[i] = tone.outputNits[i];
-		}
-		info.sourcePeakNits = tone.sourcePeak;
-		info.targetPeakNits = tone.targetPeak;
-		info.targetBlackNits = tone.targetBlack;
-		info.toneMappingActive = tone.active;
-		strncpy_s(info.toneFunction, sizeof(info.toneFunction), tone.function ? tone.function : "", _TRUNCATE);
-		const pl_hdr_metadata& sent = m_impl->calibrationSentHdr;
-		info.sentMaxLuma = sent.max_luma;
-		info.sentMinLuma = sent.min_luma;
-		info.sentMaxCll = sent.max_cll;
-		info.sentMaxFall = sent.max_fall;
-	}
-	return info.available;
+	return m_impl->calibrationHost.FillOutputInfo(info, fresh);
 }
 
 bool LibplaceboVideoRenderer::SetCalibrationPattern(const Calibration::PatternRequest& request, CString& reason)
@@ -28972,53 +28380,27 @@ bool LibplaceboVideoRenderer::SetCalibrationPattern(const Calibration::PatternRe
 			reason = TEXT("the VP Renderer is not rendering (start VP with any source)");
 			return false;
 		}
-		{
-			std::lock_guard<std::mutex> guard(m_impl->calibrationPatternMutex);
-			m_impl->calibrationPattern = request;
-		}
+		m_impl->calibrationHost.SetPattern(request);
 		if (!m_calibrationPatternActive.load(std::memory_order_acquire))
 		{
-			// The LED drive stops (Stop() restores full light: LDMM 0, LPW1 to the
-			// ceiling, CNTR 50) so no APL command moves the light between patches.
-			std::shared_ptr<LedDrive::LedDriveModule> module;
-			{
-				std::unique_lock<std::mutex> guard(m_stateMutex);
-				module = m_ledDrive;
-				if (module)
-				{
-					m_ledDrive.reset();
-					m_ledDriveSignature.clear();
-					m_ledDriveSuspended = true;
-					m_calibrationLedSuspended = true;
-					std::atomic_store(&m_impl->ledDrive, std::shared_ptr<LedDrive::LedDriveModule>());
-					std::atomic_store(&m_impl->queuedFrameObserver, std::shared_ptr<QueuedFrameStatistics::IObserver>());
-				}
-			}
-			if (module)
-				module->Stop();
-			m_impl->calibrationWindowFallbackLogged = false;
-			m_impl->calibrationFailureLogged = false;
+			// The LED drive stops at full light for the patches (DynamicDriveHost::SuspendForCalibration).
+			const bool ledStopped = m_dynamicDrive.SuspendForCalibration(DynamicDriveContext());
+			m_impl->calibrationHost.ResetPatternLogs();
 			m_calibrationPatternActive.store(true, std::memory_order_release);
 			BeginQueueGeneration("calibration patterns");
 			DebugLog::Log("Calibration patterns: started (video paused, Dynamic Drive %s)",
-				module ? "stopped at full light" : "not running");
+				ledStopped ? "stopped at full light" : "not running");
 		}
 		m_queueChanged.notify_all();
 		return true;
 	}
 	if (!m_calibrationPatternActive.exchange(false, std::memory_order_acq_rel))
 		return true;
-	{
-		std::lock_guard<std::mutex> guard(m_impl->calibrationPatternMutex);
-		m_impl->calibrationPattern.active = false;
-	}
+	m_impl->calibrationHost.EndPattern();
 	BeginQueueGeneration("calibration patterns ended");
 	m_queueChanged.notify_all();
-	if (m_calibrationLedSuspended)
-	{
-		m_calibrationLedSuspended = false;
-		ResumeLedDriveAfterTest();
-	}
+	m_dynamicDrive.ResumeAfterCalibration(DynamicDriveContext());
+	m_impl->ReleaseFallback("calibration patch");   // WP-12: the full-field fallback lasts for the run
 	DebugLog::Log("Calibration patterns: ended (video resumes)");
 	return true;
 }
@@ -29026,97 +28408,29 @@ bool LibplaceboVideoRenderer::SetCalibrationPattern(const Calibration::PatternRe
 bool LibplaceboVideoRenderer::SuspendLedDriveForTest(CString& reason)
 {
 	reason.Empty();
-	std::shared_ptr<LedDrive::LedDriveModule> module;
-	{
-		std::unique_lock<std::mutex> guard(m_stateMutex);
-		bool playing = false;
-		if (m_ledDrive)
-			playing = m_ledDrive->MsSinceLastFrame() < 2000.0;
-		else if (m_impl)
-		{
-			const ULONGLONG last = m_impl->libplaceboRenderStartedTick.load(std::memory_order_acquire);
-			playing = last != 0 && GetTickCount64() - last < 2000;
-		}
-		if (playing)
-		{
-			reason = TEXT("Not run: video is playing. Stop playback and try again.");
-			return false;
-		}
-		module = m_ledDrive;
-		m_ledDrive.reset();
-		m_ledDriveSignature.clear();
-		m_ledDriveSuspended = true;
-		if (m_impl)
-		{
-			std::atomic_store(&m_impl->ledDrive, std::shared_ptr<LedDrive::LedDriveModule>());
-			std::atomic_store(&m_impl->queuedFrameObserver, std::shared_ptr<QueuedFrameStatistics::IObserver>());
-		}
-	}
-	if (module)
-	{
-		module->Stop();
-		DebugLog::Log("Dynamic Drive: stopped for the RS-232 connection test");
-	}
-	return true;
+	std::string why;
+	const bool suspended = m_dynamicDrive.SuspendForTest(DynamicDriveContext(), why);
+	if (!suspended)
+		reason = CString(why.c_str());
+	return suspended;
 }
 
 // Integration 2026-10-17: the forced shutdown's LED stop. The render state lock may be
 // held by the blocked retirement, so the module comes from the render loop's atomic copy
-// (or m_ledDrive when the lock is free at once). Stop() restores full light.
+// (or the host adapter's when the lock is free at once). Stop() restores full light.
 bool LibplaceboVideoRenderer::StopLedDriveForShutdown()
 {
-	std::shared_ptr<LedDrive::LedDriveModule> module;
+	// Only the render side's module copy and a lock that is free at once (never pipelineSlots:
+	// the render thread may be rebuilding it while a blocked retirement holds the state lock).
+	LedDrive::HostContext context;
 	if (m_impl)
-		module = std::atomic_load(&m_impl->ledDrive);
-	if (!module)
-	{
-		std::unique_lock<std::mutex> guard(m_stateMutex, std::try_to_lock);
-		if (guard.owns_lock())
-			module = m_ledDrive;
-	}
-	if (!module)
-		return true;
-	DebugLog::Log("Dynamic Drive: stopping for the forced shutdown (restoring full light)");
-	// Bug hunt 2 2026-10-17: the restore's result (light, and LDMM / CNTR
-	// when sent), so the caller can say "not confirmed" when it was not.
-	const bool confirmed = module->Stop();
-	DebugLog::Log("Dynamic Drive: stopped for the forced shutdown%s",
-		confirmed ? "" : " (restore not confirmed)");
-	return confirmed;
+		context.frame = &m_impl->dynamicDrive;
+	return m_dynamicDrive.StopForShutdown(context);
 }
 
 void LibplaceboVideoRenderer::ResumeLedDriveAfterTest()
 {
-	// A renderer created during the test (a restart, a new signal) started
-	// its own LED drive while the test held the port: that drive found the
-	// port busy and runs as a dry run. Restart it too (audit stage8-rs232
-	// item 1); the dialog calls this after every test.
-	std::shared_ptr<LedDrive::LedDriveModule> stale;
-	{
-		std::unique_lock<std::mutex> guard(m_stateMutex);
-		if (!m_ledDriveSuspended && m_ledDrive)
-		{
-			stale = m_ledDrive;
-			m_ledDrive.reset();
-			m_ledDriveSignature.clear();
-			if (m_impl)
-			{
-				std::atomic_store(&m_impl->ledDrive, std::shared_ptr<LedDrive::LedDriveModule>());
-				std::atomic_store(&m_impl->queuedFrameObserver, std::shared_ptr<QueuedFrameStatistics::IObserver>());
-			}
-		}
-	}
-	if (stale)
-		stale->Stop();   // closes the port before the new drive opens it
-	std::unique_lock<std::mutex> guard(m_stateMutex);
-	const bool wasSuspended = m_ledDriveSuspended;
-	m_ledDriveSuspended = false;
-	if ((wasSuspended || stale) && m_ledDriveConfiguration)
-	{
-		UpdateLedDrive(*m_ledDriveConfiguration);
-		DebugLog::Log(wasSuspended ? "Dynamic Drive: restarted after the RS-232 connection test" :
-			"Dynamic Drive: restarted after the RS-232 connection test (renderer created during the test)");
-	}
+	m_dynamicDrive.ResumeAfterTest(DynamicDriveContext());
 }
 
 bool LibplaceboVideoRenderer::GetDejudderStatus(CString& status) const
@@ -29140,41 +28454,41 @@ bool LibplaceboVideoRenderer::GetFallbacksStatus(CString& status) const
 	return true;
 }
 
+// VP-V (WP-11): the renderer's VP lines through the generic module status entry; the keys and
+// format live in src/VP-V/core/StatusText.h, the lines come from the getters above.
+bool LibplaceboVideoRenderer::GetModuleStatus(const char* module, CString& status) const
+{
+	std::wstring text;
+	const bool answered = VpStatusText::RendererModuleStatus<wchar_t>(module,
+		[this](VpStatusText::RendererLines<wchar_t>& lines)
+		{
+			CString line;   // read after each getter (argument order is unspecified)
+			const auto take = [&line](VpStatusText::Line<wchar_t>& to, bool known) { to.Set(known, line.GetString()); };
+			take(lines.dejudder, GetDejudderStatus(line));
+			take(lines.fallbacks, GetFallbacksStatus(line));
+			take(lines.ledDrive, GetLedDriveStatus(line));
+			take(lines.sourceResolution, GetSourceResolutionStatus(line));
+		}, text);
+	status = text.c_str();
+	return answered;
+}
+
 // feat/dv-l8 WIP (plugin API 43): the dv_compare_capture shortcut (DvCompareCapture.h).
 bool LibplaceboVideoRenderer::ToggleDvCompareCapture(CString& status)
 {
 	status.Empty();
 	if (!m_impl)
 		return false;
-	status = CString(m_impl->dvStage.ToggleCompareCapture().c_str());
+	std::string reply;
+	if (!m_impl->captures.Invoke(DvCompareCapture::kCommand, reply))
+		return false;
+	status = CString(reply.c_str());
 	return true;
 }
 
 bool LibplaceboVideoRenderer::GetLedDriveStatus(CString& status) const
 {
-	status.Empty();
-	const std::shared_ptr<LedDrive::LedDriveModule> led = m_ledDrive;
-	if (!led)
-	{
-		status = TEXT("off");
-		return true;
-	}
-	const LedDrive::LedDriveConfig config = led->Config();
-	const LedDrive::DriverStatus driver = led->ProjectorStatus();
-	const LedDrive::CompensationGain gain = led->CurrentGain();
-	const char* mode = config.mode == LedDrive::Mode::Compensate ? "compensate" :
-		config.mode == LedDrive::Mode::Script ? "script" :
-		config.mode == LedDrive::Mode::PictureOnly ? "picture_only" : "log_only";
-	char text[512];
-	snprintf(text, sizeof(text),
-		"source %s (mode %s%s), %s, light last sent %d (confirmed %d), contrast last sent %d, commands %d, timeouts %d, "
-		"picture gain %s %.3f",
-		config.commandSource.empty() ? "(from mode)" : config.commandSource.c_str(), mode,
-		config.mode == LedDrive::Mode::Script ? (config.scriptPacing ? ", script pacing" : ", tick loop") : "",
-		led->DrivingProjector() ? "driving the projector" : "not driving the projector (dry run)",
-		driver.lastSentLight, driver.lastLight, driver.lastSentContrast, driver.commands, driver.timeouts,
-		gain.active ? "on" : "off", gain.gain);
-	status = CString(text);
+	status = CString(m_dynamicDrive.StatusText().c_str());
 	return true;
 }
 
@@ -30939,13 +30253,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 		// wait for extra proof frames: a short window keeps the normal live fallback.
 		// led_lookahead_ms (2026-10-17): the LED's own depth extends the walk (its
 		// statistics observer only); read before the queue lock (the LED's own lock).
-		size_t ledWantedLookahead = 0;
-		if (m_impl && std::atomic_load(&m_impl->queuedFrameObserver))
-		{
-			const std::shared_ptr<LedDrive::LedDriveModule> led = std::atomic_load(&m_impl->ledDrive);
-			if (led)
-				ledWantedLookahead = led->WantedLookaheadFrames();
-		}
+		const size_t ledWantedLookahead = m_impl ? m_impl->dynamicDrive.WantedLookaheadFrames() : 0;
 		// Hunt 2 (cadence_class_fixes, 02-dv M4): content intent needs each queued frame once;
 		// with no active-picture look-ahead and no LED it walks the current frame and the next.
 		const bool contentWantsWalk = m_impl && m_impl->activeSettings.cadenceClassFixes &&
@@ -31304,6 +30612,9 @@ void LibplaceboVideoRenderer::RenderLoop()
 			if (state)
 				motionLastState = state;
 			m_frameQueue.pop_front();
+			if (m_impl)   // WP-24: arm the repeat cache only for a frame the queue holds a repeat of
+				m_impl->repeatNextQueued = !m_frameQueue.empty() && m_frameQueue.front().cadenceRepeat &&
+					m_frameQueue.front().sourceSequence == sourceSequence;
 			nextConvertedPayload.reset();
 			nextSourceSequence = 0;
 			nextPts = 0.0;
@@ -32365,17 +31676,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 					m_sceneCorrectionRepeatCount.load(
 						std::memory_order_relaxed);
 				// Report-a-problem: a drift-correction repeat queued (shown twice).
-				{
-					DiagnosticHistory::FrameRecord diag;
-					diag.stage = DiagnosticHistory::StageRepeated;
-					diag.counter = frame.GetCounter();
-					diag.sourceTimestamp = frame.GetTimingTimestamp();
-					diag.queueDepth = static_cast<uint32_t>(repeatQueueDepth);
-					diag.holdReason = RendererDiagnostics::RepeatCadenceCorrection;
-					diag.repeatedTotal = repeatCount;
-					diag.rendererGeneration = m_callbackGeneration;
-					DiagnosticHistory::Global().RecordFrame(diag);
-				}
+				VpDiagnostics::RecordCadenceRepeat(frame.GetCounter(), frame.GetTimingTimestamp(),
+					repeatQueueDepth, repeatCount, m_callbackGeneration);
 				{
 					std::lock_guard<std::mutex> renderGuard(
 						m_impl->renderMutex);
@@ -32773,6 +32075,8 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "matcher.opticalFlow=" << m.opticalFlow << "\n"
 		<< "matcher.estLambda=" << m.estLambda << "\n"
 		<< "matcher.estQpel=" << m.estQpel << "\n"
+		<< "dejudder_est_still_zero=" << m.estStillZero << "\n"
+		<< "entrance_gpu_drain=" << s.entranceGpuDrain << "\n"
 		<< "matcher.estGate=" << m.estGate << "\n"
 		<< "matcher.estSplit=" << m.estSplit << "\n"
 		<< "matcher.estSplitSad=" << m.estSplitSad << "\n"
@@ -32880,17 +32184,8 @@ void LibplaceboVideoRenderer::SetAmbientLux(double lux, bool valid, double nowSe
 bool LibplaceboVideoRenderer::WriteDiagnosticHistory(
 	VpDiagnosticHistorySink sink, void* context, int64_t referenceQpc) const
 {
-	// Report-a-problem: this module's rings, tagged "renderer". Nothing may
-	// cross the plugin boundary as an exception.
-	try
-	{
-		return DiagnosticHistory::WriteJsonlToSink(
-			DiagnosticHistory::Global(), "renderer", referenceQpc, sink, context);
-	}
-	catch (...)
-	{
-		return false;
-	}
+	// Report-a-problem: this module's rings, tagged "renderer" (VP diagnostics adapter).
+	return VpDiagnostics::WriteRendererHistory(sink, context, referenceQpc);
 }
 
 bool LibplaceboVideoRenderer::GetSceneDescriptor(
