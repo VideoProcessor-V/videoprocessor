@@ -4,7 +4,7 @@
 #include "GrainReferenceModel.h"
 
 #include <vprenderer/GrainPreserve.h>
-#include <vprenderer/InterpolationPolicy.h>
+#include <VP-V/modules/motion/consumers/InterpolationPolicy.h>
 #include <vprenderer/LibplaceboRenderParameters.h>
 #include <ConfigFile.h>
 #include <RendererProfileConfig.h>

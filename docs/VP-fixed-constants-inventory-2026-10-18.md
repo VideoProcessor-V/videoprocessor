@@ -45,14 +45,14 @@ changes have no switch.
      family), less a 2% relative measurement tolerance (`VideoRateFloorHz()` = 49 Hz, :101-106).
    - `DejudderPolicy::Input::generalRates` (:69) feeds `EffectiveStrength` (:164) and `Decide` (:204);
      `InterpolationPolicy::Input::generalRates` and `IsFilmLike(..., generalRates)`
-     (vprenderer/InterpolationPolicy.h:106-112, `DejudderTakes`) use the same rule.
+     (VP-V/modules/motion/consumers/InterpolationPolicy.h:106-112, `DejudderTakes`) use the same rule.
    - Renderer: LibplaceboVideoRenderer.cpp:14129 (de-judder) and :14159 (interpolator).
    - Unchanged: every standard rate (23.976 ... 48 film; 50, 59.94, 60, 100, 119.88, 120, 144, 240
      video). Changed: odd rates 30.5-47.5 and 48.5-49 become film-like (were video).
 2. **Gap-fill span as a time** (owner 2026-10-18) - behaviour, switched.
    - `InterpolationTimeline::kMaxSpanSeconds` = the legacy 4 periods at the owner's 23.976p
      reference = 166.8 ms; `MaxSpanFrames(rate, inTime)` = whole periods that fit
-     (vprenderer/InterpolationTimeline.h:44-58): 4 at 23.976/24/25 (unchanged), 5 at 29.97/30,
+     (VP-V/modules/motion/consumers/InterpolationTimeline.h:44-58): 4 at 23.976/24/25 (unchanged), 5 at 29.97/30,
      8 at 48/50, 10 at 59.94/60, 20 at 119.88/120, 40 at 240; 4 (legacy) when off or the rate is
      unknown.
    - `MaxPairSpanFrames(rate, displayHz)` (:63) additionally caps a gap PAIR to the periods that

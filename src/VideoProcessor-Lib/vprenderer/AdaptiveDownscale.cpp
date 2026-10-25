@@ -7,7 +7,7 @@
 #include <libplacebo/shaders/custom.h>
 #include <libplacebo/shaders/sampling.h>
 
-#include <vprenderer/OcclusionMaskHook.h>
+#include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 
 #include <algorithm>
 #include <vector>

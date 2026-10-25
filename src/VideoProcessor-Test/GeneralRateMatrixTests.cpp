@@ -15,8 +15,8 @@
 #include <DisplayRefreshRatePolicy.h>
 #include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
 #include <vprenderer/GrainPreserve.h>
-#include <vprenderer/InterpolationPolicy.h>
-#include <vprenderer/InterpolationTimeline.h>
+#include <VP-V/modules/motion/consumers/InterpolationPolicy.h>
+#include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <GeneralRate.h>
 #include <QueueLatency.h>

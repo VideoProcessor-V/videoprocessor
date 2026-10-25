@@ -231,7 +231,7 @@ other per frame, never both).
 
 ### Step 3: `FrameInterpolator` (GPU)
 
-`src/VideoProcessor-Lib/vprenderer/FrameInterpolator.*`. A, B, the A->B block field (the matcher's,
+`src/VP-V/modules/motion/consumers/FrameInterpolator.*`. A, B, the A->B block field (the matcher's,
 engine-seeded or from the producer), the frame trust, the optional sub-field and B's occlusion mask, a
 phase t. t <= 0 / t >= 1 return A's / B's planes (nothing dispatched). A trusted position takes the
 field's own rule (`FieldVectorGlsl`, one fixed-point step to the content there at t) and blends A at
@@ -292,7 +292,7 @@ true motion); step 1b (the store keyed on the epoch); the chain-gate matrix axis
 
 ## Stage B and gap fill (2026-10-17, branch interp-5060)
 
-**Per-vsync timeline** (`vprenderer/InterpolationTimeline.h`, pure). The render loop plans each
+**Per-vsync timeline** (`VP-V/modules/motion/consumers/InterpolationTimeline.h`, pure). The render loop plans each
 dequeued source frame's display refreshes inside [A, B): none, one or several, each with its true
 phase. Smooth motion's draw model is reused: the loop draws once per planned refresh and skips the
 present of a frame no refresh falls on. The presents therefore consume source frames at the source

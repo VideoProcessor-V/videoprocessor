@@ -9,8 +9,8 @@
 //    would encode twice and must be switched off for the Beta.
 #include "../VideoProcessor-Lib/vprenderer/OutputEncodingRepair.h"
 #include <VP-V/modules/motion/vector_delivery/DejudderWarp.h>
-#include "../VideoProcessor-Lib/vprenderer/OcclusionMaskHook.h"
-#include "../VideoProcessor-Lib/vprenderer/RenderedWarp.h"
+#include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
+#include <VP-V/modules/motion/consumers/RenderedWarp.h>
 #include "../VideoProcessor-Lib/vprenderer/HookInstanceTag.h"
 #include "../VideoProcessor-Test/ExtendedRangeGpuProbe.h"
 #include "../VideoProcessor-Test/ChainGpuProbe.h"

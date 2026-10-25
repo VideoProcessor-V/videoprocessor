@@ -4,7 +4,7 @@
 #include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
 #include <vprenderer/AlphaQueuePolicy.h>
 #include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
-#include <vprenderer/InterpolationTimeline.h>
+#include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
 #include <vprenderer/RenderAheadPolicy.h>
 #include <vprenderer/OpenLoopDisplayRate.h>
 #include <DisplayRefreshRatePolicy.h>

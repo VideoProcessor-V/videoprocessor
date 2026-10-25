@@ -387,9 +387,9 @@
 	<ClInclude Include="SourceResolutionDetector.h" />
 	<ClInclude Include="..\VP-V\modules\motion\estimation\VectorStore.h" />
 	<ClInclude Include="..\VP-V\modules\motion\estimation\MotionValidity.h" />
-	<ClInclude Include="vprenderer\InterpolationPolicy.h" />
-	<ClInclude Include="vprenderer\FrameInterpolator.h" />
-	<ClInclude Include="vprenderer\InterpolationTimeline.h" />
+	<ClInclude Include="..\VP-V\modules\motion\consumers\InterpolationPolicy.h" />
+	<ClInclude Include="..\VP-V\modules\motion\consumers\FrameInterpolator.h" />
+	<ClInclude Include="..\VP-V\modules\motion\consumers\InterpolationTimeline.h" />
 	<ClInclude Include="..\VP-V\modules\motion\estimation\MotionEngineIdle.h" />
 	<ClInclude Include="vprenderer\CaptureTimestampGap.h" />
 	<ClInclude Include="vprenderer\DisplayRateHold.h" />

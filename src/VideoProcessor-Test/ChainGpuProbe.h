@@ -27,7 +27,7 @@
 #include <vprenderer/AdaptiveDownscale.h>
 #include <VP-V/modules/motion/vector_delivery/DejudderWarp.h>
 #include <vprenderer/HookInstanceTag.h>
-#include <vprenderer/OcclusionMaskHook.h>
+#include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <vprenderer/OutputEncodingRepair.h>
 #include <vprenderer/SigmaDeltaDomain.h>
 #include <SubtitleCutPasteShader.h>

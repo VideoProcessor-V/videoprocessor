@@ -13,7 +13,7 @@
 #include <ContentIntentObserver.h>
 #include <MainConfigSchema.h>
 #include <RendererProfileConfig.h>
-#include <vprenderer/InterpolationPolicy.h>
+#include <VP-V/modules/motion/consumers/InterpolationPolicy.h>
 #include <vprenderer/PulldownDetector.h>
 
 #include <Windows.h>

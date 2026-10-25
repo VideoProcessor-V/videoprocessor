@@ -38,6 +38,16 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/led/ProjectorDriver.h` | `src/VP-V/modules/drive/projector_control/ProjectorDriver.h` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/SerialPort.cpp` | `src/VP-V/modules/drive/projector_control/SerialPort.cpp` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/SerialPort.h` | `src/VP-V/modules/drive/projector_control/SerialPort.h` | 570b1ee8 | fwd |
+| `src/VideoProcessor-Lib/vprenderer/DejudderAhead.h` | `src/VP-V/modules/motion/consumers/DejudderAhead.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp` | `src/VP-V/modules/motion/consumers/DejudderWarp.cpp` | staged |  |
+| `src/VideoProcessor-Lib/vprenderer/FrameInterpolator.cpp` | `src/VP-V/modules/motion/consumers/FrameInterpolator.cpp` | staged |  |
+| `src/VideoProcessor-Lib/vprenderer/FrameInterpolator.h` | `src/VP-V/modules/motion/consumers/FrameInterpolator.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/InterpolationPolicy.h` | `src/VP-V/modules/motion/consumers/InterpolationPolicy.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/InterpolationTimeline.h` | `src/VP-V/modules/motion/consumers/InterpolationTimeline.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/OcclusionMaskHook.cpp` | `src/VP-V/modules/motion/consumers/OcclusionMaskHook.cpp` | staged |  |
+| `src/VideoProcessor-Lib/vprenderer/OcclusionMaskHook.h` | `src/VP-V/modules/motion/consumers/OcclusionMaskHook.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/RenderedWarp.cpp` | `src/VP-V/modules/motion/consumers/RenderedWarp.cpp` | staged |  |
+| `src/VideoProcessor-Lib/vprenderer/RenderedWarp.h` | `src/VP-V/modules/motion/consumers/RenderedWarp.h` | ? | fwd |
 | `src/VideoProcessor-Lib/MotionAhead.h` | `src/VP-V/modules/motion/estimation/MotionAhead.h` | 3df81b90 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/MotionAheadProducer.cpp` | `src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp` | 3df81b90 |  |
 | `src/VideoProcessor-Lib/vprenderer/MotionAheadProducer.h` | `src/VP-V/modules/motion/estimation/MotionAheadProducer.h` | 3df81b90 | fwd |
@@ -47,8 +57,8 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/vprenderer/NvOpticalFlow.h` | `src/VP-V/modules/motion/estimation/NvOpticalFlow.h` | 3df81b90 |  |
 | `src/VideoProcessor-Lib/OpticalFlowTrust.h` | `src/VP-V/modules/motion/estimation/OpticalFlowTrust.h` | 3df81b90 |  |
 | `src/VideoProcessor-Lib/VectorStore.h` | `src/VP-V/modules/motion/estimation/VectorStore.h` | 3df81b90 |  |
-| `src/VideoProcessor-Lib/vprenderer/DejudderPolicy.h` | `src/VP-V/modules/motion/vector_delivery/DejudderPolicy.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/DejudderWarp.h` | `src/VP-V/modules/motion/vector_delivery/DejudderWarp.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/DejudderPolicy.h` | `src/VP-V/modules/motion/vector_delivery/DejudderPolicy.h` | 9df3b7b7 | fwd |
+| `src/VideoProcessor-Lib/vprenderer/DejudderWarp.h` | `src/VP-V/modules/motion/vector_delivery/DejudderWarp.h` | 9df3b7b7 | fwd |
 | `src/VideoProcessor-Lib/calibration/AmbientCheck.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/AmbientCheck.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/AmbientCheck.h` | `src/VP-V/modules/output/calibration_lut/calibration/AmbientCheck.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/ArgyllInstall.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/ArgyllInstall.cpp` | d2517eb1 |  |

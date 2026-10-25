@@ -18,7 +18,7 @@
 #include <DiagnosticHistory.h>
 #include <IntentDescriptor.h>
 #include <QueuedFrameStatistics.h>
-#include <vprenderer/InterpolationPolicy.h>
+#include <VP-V/modules/motion/consumers/InterpolationPolicy.h>
 
 #include <algorithm>
 #include <cstdint>

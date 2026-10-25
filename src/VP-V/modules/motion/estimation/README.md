@@ -58,7 +58,7 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 
 - `src/VP-V/modules/motion/estimation/NvOpticalFlow.cpp`
 - `src/VP-V/modules/motion/estimation/NvOpticalFlow.h`
-- `src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp`
+- `src/VP-V/modules/motion/consumers/DejudderWarp.cpp`
 - `src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp`
 - `src/VP-V/modules/motion/estimation/MotionAhead.h`
 - `src/VP-V/modules/motion/estimation/VectorStore.h`

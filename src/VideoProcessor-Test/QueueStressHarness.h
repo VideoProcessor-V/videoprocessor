@@ -32,7 +32,7 @@
 #include <vprenderer/AlphaQueuePolicy.h>
 #include <vprenderer/CaptureTimestampGap.h>
 #include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
-#include <vprenderer/InterpolationTimeline.h>
+#include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
 #include <vprenderer/OpenLoopDisplayRate.h>
 #include <vprenderer/PulldownDetector.h>
 #include <vprenderer/RenderAheadPolicy.h>

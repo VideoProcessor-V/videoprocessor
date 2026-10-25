@@ -4,16 +4,28 @@
   "unit": "motion",
   "order": 140,
   "status": "built",
-  "code_location": "legacy",
+  "code_location": "partly migrated",
   "live_files": [
-    "src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp",
+    "src/VP-V/modules/motion/consumers/DejudderWarp.cpp",
+    "src/VP-V/modules/motion/consumers/DejudderAhead.h",
+    "src/VP-V/modules/motion/consumers/RenderedWarp.cpp",
+    "src/VP-V/modules/motion/consumers/FrameInterpolator.cpp",
+    "src/VP-V/modules/motion/consumers/InterpolationTimeline.h",
+    "src/VP-V/modules/motion/consumers/InterpolationPolicy.h",
+    "src/VP-V/modules/motion/consumers/OcclusionMaskHook.cpp",
+    "src/VideoProcessor-Lib/vprenderer/TemporalRenderer.h",
+    "src/VP-V/modules/motion/consumers/RenderedWarp.h",
+    "src/VP-V/modules/motion/consumers/FrameInterpolator.h",
+    "src/VP-V/modules/motion/consumers/OcclusionMaskHook.h",
+    "src/VP-V/modules/motion/consumers/SampledPassTimers.h"
+  ],
+  "forwarding_headers": [
     "src/VideoProcessor-Lib/vprenderer/DejudderAhead.h",
-    "src/VideoProcessor-Lib/vprenderer/RenderedWarp.cpp",
-    "src/VideoProcessor-Lib/vprenderer/FrameInterpolator.cpp",
-    "src/VideoProcessor-Lib/vprenderer/InterpolationTimeline.h",
+    "src/VideoProcessor-Lib/vprenderer/FrameInterpolator.h",
     "src/VideoProcessor-Lib/vprenderer/InterpolationPolicy.h",
-    "src/VideoProcessor-Lib/vprenderer/OcclusionMaskHook.cpp",
-    "src/VideoProcessor-Lib/vprenderer/TemporalRenderer.h"
+    "src/VideoProcessor-Lib/vprenderer/InterpolationTimeline.h",
+    "src/VideoProcessor-Lib/vprenderer/OcclusionMaskHook.h",
+    "src/VideoProcessor-Lib/vprenderer/RenderedWarp.h"
   ],
   "components": {
     "files": {

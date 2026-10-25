@@ -54,16 +54,29 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **partly migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
-- `src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp`
-- `src/VideoProcessor-Lib/vprenderer/DejudderAhead.h`
-- `src/VideoProcessor-Lib/vprenderer/RenderedWarp.cpp`
-- `src/VideoProcessor-Lib/vprenderer/FrameInterpolator.cpp`
-- `src/VideoProcessor-Lib/vprenderer/InterpolationTimeline.h`
-- `src/VideoProcessor-Lib/vprenderer/InterpolationPolicy.h`
-- `src/VideoProcessor-Lib/vprenderer/OcclusionMaskHook.cpp`
+- `src/VP-V/modules/motion/consumers/DejudderWarp.cpp`
+- `src/VP-V/modules/motion/consumers/DejudderAhead.h`
+- `src/VP-V/modules/motion/consumers/RenderedWarp.cpp`
+- `src/VP-V/modules/motion/consumers/FrameInterpolator.cpp`
+- `src/VP-V/modules/motion/consumers/InterpolationTimeline.h`
+- `src/VP-V/modules/motion/consumers/InterpolationPolicy.h`
+- `src/VP-V/modules/motion/consumers/OcclusionMaskHook.cpp`
 - `src/VideoProcessor-Lib/vprenderer/TemporalRenderer.h`
+- `src/VP-V/modules/motion/consumers/RenderedWarp.h`
+- `src/VP-V/modules/motion/consumers/FrameInterpolator.h`
+- `src/VP-V/modules/motion/consumers/OcclusionMaskHook.h`
+- `src/VP-V/modules/motion/consumers/SampledPassTimers.h`
+
+Forwarding headers (old paths kept for Bill's files, the renderer host and RendererCaptureHarnessTests.cpp; removed at M2 step 0):
+
+- `src/VideoProcessor-Lib/vprenderer/DejudderAhead.h`
+- `src/VideoProcessor-Lib/vprenderer/FrameInterpolator.h`
+- `src/VideoProcessor-Lib/vprenderer/InterpolationPolicy.h`
+- `src/VideoProcessor-Lib/vprenderer/InterpolationTimeline.h`
+- `src/VideoProcessor-Lib/vprenderer/OcclusionMaskHook.h`
+- `src/VideoProcessor-Lib/vprenderer/RenderedWarp.h`
 
 ## Migration directive
 

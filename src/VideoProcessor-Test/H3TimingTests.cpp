@@ -12,7 +12,7 @@
 #include <QueueLookahead.h>
 #include <vprenderer/AlphaCadenceCorrectionPolicy.h>
 #include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
-#include <vprenderer/InterpolationTimeline.h>
+#include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
 #include <VP-V/modules/motion/estimation/MotionEngineIdle.h>
 #include <vprenderer/PulldownDetector.h>
 #include <vprenderer/SourceResolutionMonitor.h>

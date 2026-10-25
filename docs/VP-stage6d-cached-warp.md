@@ -62,7 +62,7 @@ defer.
 
 Built ahead of the measurement at the owner's request (2026-10-12: the de-judder
 path is settled first so Stage 8's use of the vectors is built against it).
-`vprenderer/RenderedWarp.{h,cpp}`; key `dejudder_warp_stage: rendered|source`
+`VP-V/modules/motion/consumers/RenderedWarp.{h,cpp}`; key `dejudder_warp_stage: rendered|source`
 (input group, default `rendered`; Config "De-judder" card, "Extra frames
 from").
 - **Survey:** libplacebo's order is scale (SCALED hooks) → colour conversion

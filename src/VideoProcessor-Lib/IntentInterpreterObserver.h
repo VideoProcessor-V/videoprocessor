@@ -31,7 +31,7 @@
 #include <IntentDescriptor.h>
 #include <MotionIntent.h>
 #include <QueuedFrameStatistics.h>
-#include <vprenderer/InterpolationPolicy.h>
+#include <VP-V/modules/motion/consumers/InterpolationPolicy.h>
 
 #include <algorithm>
 #include <cmath>
