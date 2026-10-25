@@ -82,7 +82,7 @@ Per renderer profile (display-rule overrides): `adaptive_downscale`, `adaptive_w
 
 ### What it needs to be lifted
 
-libplacebo (hooks, dispatch, filters), `pch.h`, `vprenderer/NlsMaskMapping.h`, `vprenderer/OcclusionMaskHook.h`, `vprenderer/GrainPreserve.h`, `CustomHookChain` (output.dither) for SSimSuperRes's parameter, `DebugLog.h`, `GeneralRateLog.h`. The SSIM shaders stay in `shaders/`.
+libplacebo (hooks, dispatch, filters), `pch.h`, `vprenderer/NlsMaskMapping.h`, `VP-V/modules/motion/consumers/OcclusionMaskHook.h`, `vprenderer/GrainPreserve.h`, `CustomHookChain` (output.dither) for SSimSuperRes's parameter, `DebugLog.h`, `GeneralRateLog.h`. The SSIM shaders stay in `shaders/`.
 
 ### Test it standalone
 

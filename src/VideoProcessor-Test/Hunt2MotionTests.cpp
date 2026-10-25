@@ -4,8 +4,8 @@
 #include <RendererProfileConfig.h>
 #include <video_frame_formatter/IVideoFrameFormatter.h>
 #include <VideoFrameEncoding.h>
-#include <vprenderer/DejudderPolicy.h>
-#include <MotionValidity.h>
+#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
+#include <VP-V/modules/motion/estimation/MotionValidity.h>
 
 #include <string>
 

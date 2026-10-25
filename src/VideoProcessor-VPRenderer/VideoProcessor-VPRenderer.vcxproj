@@ -103,10 +103,10 @@
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\LibplaceboDisplayLut.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\LibplaceboRenderParameters.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\LibplaceboVideoRenderer.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\DejudderWarp.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\FrameInterpolator.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\NvOpticalFlow.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\MotionAheadProducer.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\consumers\DejudderWarp.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\consumers\FrameInterpolator.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\estimation\NvOpticalFlow.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\estimation\MotionAheadProducer.cpp" />
     <ClCompile Include="..\VP-V\modules\output\dither\OutputEncodingRepair.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutStage.cpp" />
     <ClCompile Include="..\VP-V\segments\OutputSegmentsMerge.cpp" />
@@ -115,12 +115,12 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\HookSegment.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OcclusionMaskHook.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\consumers\OcclusionMaskHook.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\extended_range\ExtendedRange.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\extended_range\ExtendedRangeStage.cpp" />
     <ClCompile Include="..\VP-V\modules\scaling\output\AdaptiveDownscaleStage.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\consumers\DejudderCacheStage.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\RenderedWarp.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\consumers\RenderedWarp.cpp" />
     <ClCompile Include="..\VP-V\modules\input\capture\GpuCaptureUnpack.cpp" />
     <ClCompile Include="..\VP-V\modules\input\capture\GpuRgbUnpack.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\GpuDolbyVisionTunnelUnpack.cpp" />

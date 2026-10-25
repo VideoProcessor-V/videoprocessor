@@ -1,0 +1,134 @@
+diff --git a/docs/settings/VP-settings-reference.md b/docs/settings/VP-settings-reference.md
+index e59b6c54..32ce1da8 100644
+--- a/docs/settings/VP-settings-reference.md
++++ b/docs/settings/VP-settings-reference.md
+@@ -43,7 +43,7 @@ Config now has one **VP-V** page that holds everything VP adds.
+ | **Global tier** | Classic / Low / Mid / Upper for every unit at once. If a unit has no step at that level, it uses its nearest lower step. Change one unit afterwards and the global tier shows *Custom (per unit)*. |
+ | **Fallbacks engaged** | The running VP's list of automatic downgrades, for example "Fallbacks engaged: capture GPU unpack (CPU 4:2:0 ...)", or "none". It is the same line as Ctrl+I and Ctrl+Alt+D. |
+ | **Unit tabs** | Each tab has two sub-pages. **Main**: the unit's tier slider, its taste slider where it has one, and small cards of switches. **Advanced**: the settings a master on Main sets (greyed "Set by ..." until you tick *Custom* on that card; unticking puts the master's values back), tuning used only while its feature is on ("Used only when ... is on"), the measured internals (collapsed), the planned settings and the unit's stages with their fallback text. The layout map is `docs/settings/organisation.md`. |
+-| **Pipeline (expert)** | For testing only: where the calibration LUT runs (`calibration_lut_stage`: libplacebo today, or VP's last colour step after Dynamic Drive), the module order (`pipeline_order`, checked with the renderer's own rules; an order it would reject is shown with the reason and not saved), stages switched off entirely (`pipeline_slots_off`), and the output chain as one hook per stage (`output_segments_merged`, draft: off until its GPU check passes; disabled in the Original pathway). |
++| **Pipeline (expert)** | For testing only: where the calibration LUT runs (`calibration_lut_stage`: libplacebo today, or VP's last colour step after Dynamic Drive), the module order (`pipeline_order`, checked with the renderer's own rules; an order it would reject is shown with the reason and not saved), stages switched off entirely (`pipeline_slots_off`), and the output chain as one hook per stage (`output_segments_merged`, draft: off until its GPU check passes; disabled in the Original pathway). Switching off `input.queue_timing`, `motion.estimation`, `motion.vector_delivery`, `motion.consumers` or `output.presentation` runs that stage in its upstream form (the Original pathway's settings for it): `input.queue_timing` off = Bill's frame-count queue policy (also what the Original pathway uses), `output.presentation` off = render-ahead off, the motion consumers go off with their vectors. The pipeline status line names what is off. |
+ | **Proposed retirement** | The section-12 candidates below, by group, with where each control is and the value in use. The same note is added to each control's tooltip. Nothing is removed until you approve. Each unit tab also ends with "More settings of this unit", naming the pages that hold the rest (coverage audit: `docs/settings/coverage-audit.md`). |
+ 
+ **One control per key.** Every VP setting has exactly one live control. VP's own settings that used
+diff --git a/src/VP-V/core/SlotRegistry.h b/src/VP-V/core/SlotRegistry.h
+index d356fa12..5edaf8e9 100644
+--- a/src/VP-V/core/SlotRegistry.h
++++ b/src/VP-V/core/SlotRegistry.h
+@@ -28,6 +28,10 @@ namespace PipelineSlots
+ 		case Id::OutputCalibrationLut: case Id::OutputDither: case Id::DriveProjectorControl:
+ 		// WP-13 (m2-output-callsites.patch): the extended range and output scaling glue stages.
+ 		case Id::ColourExtendedRange: case Id::ScalingOutput:
++		// Owner 2026-10-25: the motion and queue/timing slots (SlotSwitchSettings.h; the renderer applies
++		// their upstream form in ReadPipelineSettings and picks Bill's queue policy in QueuePolicy()).
++		case Id::InputQueueTiming: case Id::MotionEstimation: case Id::MotionVectorDelivery: case Id::MotionConsumers:
++		case Id::OutputPresentation:
+ 			return true;
+ 		default:
+ 			return false;
+diff --git a/src/VP-V/tests/PipelineSkeletonTests.cpp b/src/VP-V/tests/PipelineSkeletonTests.cpp
+index b9dd707c..0473ab4d 100644
+--- a/src/VP-V/tests/PipelineSkeletonTests.cpp
++++ b/src/VP-V/tests/PipelineSkeletonTests.cpp
+@@ -652,6 +652,29 @@ namespace PipelineSkeletonTestsNs
+ 			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::ColourExtendedRange));
+ 			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::OutputDither));
+ 			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::ScalingOutput));
++			// Owner 2026-10-25: the motion and queue/timing slots are switchable (SlotSwitchSettings).
++			for (Id id : { Id::InputQueueTiming, Id::MotionEstimation, Id::MotionVectorDelivery, Id::MotionConsumers,
++				Id::OutputPresentation })
++				Assert::IsTrue(PipelineSlots::SwitchHonoured(id), W(PipelineSlots::Get(id).name).c_str());
++		}
++
++		TEST_METHOD(MotionAndQueueSlotsOffAreHonouredAndOriginalIsUpstream)
++		{
++			// A switched-off motion/queue slot stops running in the registry (zero-cost rule), and the
++			// Original pathway puts input.queue_timing in its upstream form (Bill's queue policy).
++			for (Id id : { Id::InputQueueTiming, Id::MotionEstimation, Id::MotionVectorDelivery, Id::MotionConsumers,
++				Id::OutputPresentation })
++			{
++				PipelineSlots::Registry registry;
++				Assert::IsTrue(registry.Runs(id), W(PipelineSlots::Get(id).name).c_str());
++				registry.SetEnabled(id, false);
++				Assert::IsFalse(registry.Runs(id), W(PipelineSlots::Get(id).name).c_str());
++			}
++			PipelineSlots::Registry original;
++			original.ApplyOriginalPathway();
++			Assert::IsTrue(original.UpstreamForm(Id::InputQueueTiming));
++			Assert::IsFalse(original.Runs(Id::MotionEstimation));
++			Assert::IsFalse(original.Runs(Id::MotionConsumers));
+ 		}
+ 
+ 		TEST_METHOD(OriginalPathwayOverridesAreRealKeysAndValues)
+diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+index 7d956a2f..bfc8366f 100644
+--- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+@@ -93,6 +93,7 @@
+ // VP-V pipeline skeleton (src/VP-V; see src/VP-V/README.md): the slot registry, the entrance
+ // stage list, the output-hook order and the VP calibration-LUT stage.
+ #include <VP-V/core/SlotRegistry.h>
++#include <VP-V/core/SlotSwitchSettings.h>   // motion + queue/timing slot switches (owner 2026-10-25)
+ #include <VP-V/core/DelayBudgetLadder.h>   // the delay budget's hold (ADR-0020)
+ #include <VP-V/core/EntranceStages.h>
+ #include <VP-V/core/EntranceEpoch.h>
+@@ -3675,6 +3676,8 @@ namespace
+ 		}
+ 		if (settings.pipelineOriginalPathway)
+ 			ApplyOriginalPathwaySettings(settings);
++		// Motion + queue/timing slots switched off run in their upstream form (owner 2026-10-25).
++		SlotSwitchSettings::Apply(SlotSwitchSettings::FromText(settings.pipelineSlotsOff), settings);
+ 	}
+ 
+ 	RendererSettings LoadRendererSettings(const ConfigFile& config,
+@@ -7653,6 +7656,12 @@ struct LibplaceboVideoRenderer::Impl
+ 	// 8-3: the grain map wants the matcher (set where the hooks are chosen,
+ 	// read by the next source frame's estimate: the blend ran on a downscale).
+ 	bool adaptiveGrainMapWanted = false;
++	// Owner 2026-10-25 (zero-cost rule): with motion.estimation or motion.vector_delivery switched off no
++	// estimate pass runs at all; every vector reader then takes its no-vector form (SlotSwitchSettings.h).
++	bool MotionVectorsRun() const
++	{
++		return pipelineSlots.Runs(PipelineSlots::Id::MotionEstimation) && pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery);
++	}
+ 	// output.dither's vector producers run only while the slot runs (WP-13, DitherSlot.h).
+ 	bool DitherVectorsSupported() const
+ 	{
+@@ -8242,6 +8251,10 @@ struct LibplaceboVideoRenderer::Impl
+ 		for (PipelineSlots::Id id : pipelineSlots.ActiveEntrance())
+ 			entrance += (entrance.empty() ? "" : " > ") + std::string(PipelineSlots::Get(id).name);
+ 		state += "; entrance: " + (entrance.empty() ? std::string("none") : entrance);
++		const std::string slotSwitches = SlotSwitchSettings::Describe(SlotSwitchSettings::FromText(settings.pipelineSlotsOff),
++			settings.pipelineOriginalPathway);
++		if (!slotSwitches.empty())
++			state += "; " + slotSwitches;
+ 		state += settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway ?
+ 			"; entrance once (B3) on: motion pictures from the processed A and B" : "; entrance once (B3) off";
+ 		if (!settings.pipelineEntranceOnce || settings.pipelineOriginalPathway)
+@@ -24724,6 +24737,7 @@ struct LibplaceboVideoRenderer::Impl
+             adaptiveFrame.nlsSubmitted = submittedNls != nullptr;
+             adaptiveFrame.nlsFile = nlsRule.filename.c_str();
+             adaptiveFrame.slotRuns = pipelineSlots.Runs(PipelineSlots::Id::ScalingOutput);
++            adaptiveFrame.vectorsRun = MotionVectorsRun();   // motion.estimation / vector_delivery off: no grain-map estimate
+             AdaptiveDownscaleStage::Host adaptiveHost;
+             adaptiveHost.fallbackFramePeriod = [this]() { return AdaptiveFallbackFramePeriod(); };
+             adaptiveHost.bitrate = [this](double& quality) {
+@@ -27047,11 +27061,14 @@ LibplaceboVideoRenderer::QueueHold LibplaceboVideoRenderer::CurrentQueueHold() c
+ 
+ const QueueTimingPolicy::IQueueTimingPolicy& LibplaceboVideoRenderer::QueuePolicy() const
+ {
+-	// Commit (a): VP's policy for both pathways, its options read from the same sources as before.
+-	// Later (separate commit): queue_policy = upstream, and the Original pathway, select
+-	// m_upstreamQueuePolicy (VpQueueTiming::Select).
++	// Either/or (owner 2026-10-25): the Original pathway and input.queue_timing switched off run Bill's
++	// queue policy (SlotSwitchSettings::UsesUpstreamQueuePolicy); otherwise VP's fixed total delay.
++	const bool original = m_impl && m_impl->pipelineSlots.OriginalPathway();
++	const bool slotOff = m_impl && !m_impl->pipelineSlots.Runs(PipelineSlots::Id::InputQueueTiming);
++	if (VpQueueTiming::Select(slotOff, original, true) == VpQueueTiming::Selection::Upstream)
++		return m_upstreamQueuePolicy;
+ 	const_cast<VpQueueTiming::VpFixedBudgetPolicy&>(m_vpQueuePolicy).SetOptions({
+-		m_impl && m_impl->pipelineSlots.OriginalPathway(), m_queueTimingFixes.load(std::memory_order_relaxed) });
++		original, m_queueTimingFixes.load(std::memory_order_relaxed) });
+ 	return m_vpQueuePolicy;
+ }
+ 

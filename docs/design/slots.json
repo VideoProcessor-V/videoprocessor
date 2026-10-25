@@ -165,20 +165,27 @@
         "lookahead": "provides the shared look-ahead window: queue depth = deepest single look-ahead + hiccup spare (features share, never add)"
       },
       "settings_keys": [
-        "target_latency_ms",
+        "active_picture_lookahead_frames",
+        "cadence_class_fixes",
+        "general_rate_fixes",
+        "low_latency_path",
+        "pulldown_fixes",
+        "queue_auto_reset",
         "queue_size",
         "queue_timing_fixes",
-        "queue_recovery",
-        "queue_auto_reset",
-        "pulldown_fixes",
-        "low_latency",
-        "low_latency_path"
+        "reset_after_render_restart_seconds",
+        "reset_queue_too_large_percent",
+        "startup_preroll_frames",
+        "target_frames",
+        "target_latency_ms",
+        "timing_continuity_fixes",
+        "use_frame_queue"
       ],
       "planned_keys": [],
       "tiers": "not tiered; one user-set total delay (recommended = 4 frames at the slowest rate)",
       "fallback": {
-        "entry": "Queue: short look-ahead (<n> of 4 frames)",
-        "behaviour": "With 2-3 frames available, every look-ahead consumer shortens its look-ahead or falls back; the delay never changes."
+        "entry": "look-ahead: <n> of 4 queued frames (delay budget <ms>); delay budget: <why the total is not exact>",
+        "behaviour": "The 4/3/2 ladder shortens the look-ahead when the budget cannot hold 4 frames (\"look-ahead\"); an infeasible budget, unknown display refresh or a queue_size cut falls back to the frame-count queue (\"delay budget\"). The total delay never changes silently."
       },
       "upstream": [
         "input.capture"
@@ -315,20 +322,44 @@
         "lookahead": "motion_ahead (time-based, falls back to the matcher on a short queue)"
       },
       "settings_keys": [
-        "motion_engine",
-        "motion_ahead_frames",
-        "motion_history_fixes",
-        "dejudder_est",
+        "dejudder_consistency_px",
+        "dejudder_cut_histogram",
+        "dejudder_est_candidates",
+        "dejudder_est_gate",
+        "dejudder_est_lambda",
+        "dejudder_est_qpel",
+        "dejudder_est_split",
+        "dejudder_est_split_sad",
         "dejudder_estimate_ahead",
-        "dejudder_search_range"
+        "dejudder_fade_floor",
+        "dejudder_fade_match",
+        "dejudder_global_prior",
+        "dejudder_global_two",
+        "dejudder_low_res",
+        "dejudder_match_tolerance",
+        "dejudder_regional_hold",
+        "dejudder_search_range",
+        "dejudder_texture_tolerance",
+        "dejudder_vector_smooth",
+        "dejudder_verify",
+        "dejudder_verify_share",
+        "general_rate_fixes",
+        "motion_ahead_frames",
+        "motion_engine",
+        "motion_history_fixes",
+        "optical_flow",
+        "optical_flow_cost_trust",
+        "optical_flow_fb_check",
+        "optical_flow_global",
+        "optical_flow_global_fallback"
       ],
       "planned_keys": [
         "motion_ahead_ms"
       ],
       "tiers": "Classic off .. Upper full (NVOF + matcher)",
       "fallback": {
-        "entry": "Motion: matcher only (NVOF unavailable: <reason>)",
-        "behaviour": "NVOF rejected/absent -> VP's matcher; vectors invalid -> every consumer falls back to its no-motion form."
+        "entry": "motion: matcher only (optical flow failed: <error>) / no optical-flow look-ahead (producer stopped: <error>)",
+        "behaviour": "NVOF failed or the look-ahead producer stopped -> VP's matcher (entry from FallbackCatalog::Motion, wired by WP-4's silent-fallbacks patch; log-only until it lands); vectors invalid -> every consumer takes its no-motion form (by design, no entry)."
       },
       "upstream": [
         "input.queue_timing",
@@ -820,12 +851,21 @@
         "delay_share": "0 frames",
         "lookahead": "none"
       },
-      "settings_keys": [],
+      "settings_keys": [
+        "dejudder_even_rates",
+        "dejudder_strength",
+        "dejudder_strength_even",
+        "general_rate_fixes",
+        "motion_engine",
+        "motion_history_fixes",
+        "occlusion_mask",
+        "timing_continuity_fixes"
+      ],
       "planned_keys": [],
       "tiers": "follows motion.estimation",
       "fallback": {
-        "entry": "Vectors: invalid (<reason>)",
-        "behaviour": "Invalid geometry map -> vectors invalid -> consumers fall back."
+        "entry": null,
+        "behaviour": "No entry of its own: invalid vectors make every consumer take its no-motion form (by design, not a downgrade). Engine/matcher downgrades are motion.estimation's entry."
       },
       "upstream": [
         "motion.estimation",
@@ -877,19 +917,47 @@
         "lookahead": "de-judder pair (1), estimate-ahead (2), hiccup spare (1) - all degrade on a short queue"
       },
       "settings_keys": [
+        "cadence_class_fixes",
+        "dejudder_block_taper",
+        "dejudder_estimate_ahead",
+        "dejudder_even_rates",
+        "dejudder_frame_trust",
+        "dejudder_hold_feather_px",
+        "dejudder_hold_hysteresis",
+        "dejudder_landing_check",
+        "dejudder_motion_rolloff",
+        "dejudder_motion_scale_hi",
+        "dejudder_motion_scale_lo",
+        "dejudder_object_strength",
+        "dejudder_occlusion_fill",
+        "dejudder_pixel_trust",
+        "dejudder_pixel_trust_hi",
+        "dejudder_pixel_trust_lo",
+        "dejudder_roll_floor",
+        "dejudder_roll_hi",
+        "dejudder_roll_lo",
+        "dejudder_source_warp_filter",
         "dejudder_strength",
-        "dejudder_hold",
+        "dejudder_strength_even",
+        "dejudder_taper_sad",
+        "dejudder_trust_scale",
+        "dejudder_warp_stage",
+        "dither_vectors",
+        "frame_mixer",
+        "general_rate_fixes",
         "interpolation",
         "interpolation_fallback",
+        "interpolation_fill_gaps",
+        "interpolation_grain",
+        "occlusion_mask",
         "smooth_motion",
-        "frame_mixer",
-        "dither_vectors"
+        "source_class"
       ],
       "planned_keys": [],
       "tiers": "Classic off .. Upper full",
       "fallback": {
-        "entry": "Motion consumers: no-motion form (vectors invalid / short queue)",
-        "behaviour": "Each consumer falls back as the vector rules say."
+        "entry": null,
+        "behaviour": "Each consumer falls back as the vector rules say; the visible entries today are \"entrance once fill\" / \"entrance once\" (B3) and \"look-ahead\" (short queue). Warp/interpolation failures are log/status only (findings doc)."
       },
       "upstream": [
         "motion.vector_delivery"
@@ -1634,6 +1702,7 @@
         "lookahead": "render-ahead"
       },
       "settings_keys": [
+        "dejudder_gate",
         "render_ahead",
         "render_ahead_queue_credit",
         "render_ahead_utilisation"
@@ -1641,8 +1710,8 @@
       "planned_keys": [],
       "tiers": "not tiered",
       "fallback": {
-        "entry": "Presentation: open loop (no display statistics)",
-        "behaviour": "Window / iGPU panel -> open loop."
+        "entry": "presentation: open loop: no display statistics, estimated rate / de-judder held: display rate not known",
+        "behaviour": "Window / iGPU panel without DXGI statistics -> render-ahead open loop on an estimated rate (entry from FallbackCatalog::Presentation, wired by WP-4's silent-fallbacks patch; log-only until it lands)."
       },
       "upstream": [
         "output.dither"

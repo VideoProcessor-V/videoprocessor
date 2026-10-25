@@ -4,7 +4,7 @@
 #include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
 #include <led/LedMeasurementHook.h>
 #include <vprenderer/CustomHookChain.h>
-#include <vprenderer/OcclusionMaskHook.h>
+#include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <vprenderer/OutputEncodingRepair.h>
 #include <vprenderer/SigmaDeltaDomain.h>
 

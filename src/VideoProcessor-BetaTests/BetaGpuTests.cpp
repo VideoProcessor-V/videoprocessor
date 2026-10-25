@@ -8,9 +8,9 @@
 //    repair restores it. If a libplacebo update fixes the bug, the repair
 //    would encode twice and must be switched off for the Beta.
 #include <VP-V/modules/output/dither/OutputEncodingRepair.h>
-#include "../VideoProcessor-Lib/vprenderer/DejudderWarp.h"
-#include "../VideoProcessor-Lib/vprenderer/OcclusionMaskHook.h"
-#include "../VideoProcessor-Lib/vprenderer/RenderedWarp.h"
+#include <VP-V/modules/motion/vector_delivery/DejudderWarp.h>
+#include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
+#include <VP-V/modules/motion/consumers/RenderedWarp.h>
 #include "../VideoProcessor-Lib/vprenderer/HookInstanceTag.h"
 #include "../VideoProcessor-Test/ExtendedRangeGpuProbe.h"
 #include "../VideoProcessor-Test/ChainGpuProbe.h"

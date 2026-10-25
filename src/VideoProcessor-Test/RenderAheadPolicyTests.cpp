@@ -3,10 +3,10 @@
 
 #include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
 #include <vprenderer/AlphaQueuePolicy.h>
-#include <vprenderer/DejudderPolicy.h>
-#include <vprenderer/InterpolationTimeline.h>
-#include <vprenderer/RenderAheadPolicy.h>
-#include <vprenderer/OpenLoopDisplayRate.h>
+#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
+#include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
+#include <VP-V/modules/output/presentation/RenderAheadPolicy.h>
+#include <VP-V/modules/output/presentation/OpenLoopDisplayRate.h>
 #include <DisplayRefreshRatePolicy.h>
 
 #include <algorithm>

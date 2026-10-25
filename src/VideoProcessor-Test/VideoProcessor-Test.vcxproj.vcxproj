@@ -260,11 +260,11 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\DejudderWarp.cpp">
+    <ClCompile Include="..\VP-V\modules\motion\consumers\DejudderWarp.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\FrameInterpolator.cpp">
+    <ClCompile Include="..\VP-V\modules\motion\consumers\FrameInterpolator.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -272,7 +272,7 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OcclusionMaskHook.cpp">
+    <ClCompile Include="..\VP-V\modules\motion\consumers\OcclusionMaskHook.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -294,7 +294,7 @@
     </ClCompile>
     <ClCompile Include="..\VP-V\tests\OutputGlueStagesTests.cpp" />
     <ClCompile Include="..\VP-V\tests\OutputGlueStagesGpuTests.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\RenderedWarp.cpp">
+    <ClCompile Include="..\VP-V\modules\motion\consumers\RenderedWarp.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -458,11 +458,11 @@
     <ClCompile Include="Hunt2CadenceClassTests.cpp" />
     <ClCompile Include="GeneralRateMatrixTests.cpp" />
     <ClCompile Include="BugHunt20261017Tests.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\NvOpticalFlow.cpp">
+    <ClCompile Include="..\VP-V\modules\motion\estimation\NvOpticalFlow.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\MotionAheadProducer.cpp">
+    <ClCompile Include="..\VP-V\modules\motion\estimation\MotionAheadProducer.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -503,6 +503,9 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VP-V\tests\CombinationRunnerTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\tests\SlotSwitchSettingsTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VP-V\nets\NetFusion.cpp">

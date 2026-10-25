@@ -1,8 +1,8 @@
 #include <pch.h>
 #include "RenderedWarp.h"
 
-#include <vprenderer/DejudderWarp.h>
-#include <vprenderer/OcclusionMaskHook.h>
+#include <VP-V/modules/motion/vector_delivery/DejudderWarp.h>
+#include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 
 #include <libplacebo/shaders/custom.h>
 

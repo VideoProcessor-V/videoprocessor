@@ -16,7 +16,7 @@
 #include <SubtitleBoxDetector.h>
 #include <VP-V/modules/drive/led_measure/LedLookahead.h>
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysis.h>
-#include <vprenderer/MotionAheadProducer.h>
+#include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include "SyntheticAnalysisFrames.h"
 
 #include <cstring>
