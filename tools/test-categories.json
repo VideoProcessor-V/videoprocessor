@@ -1,0 +1,174 @@
+{
+ "schema": 1,
+ "about": "Category of tests that use the GPU and carry no Category attribute (or whose file must stay untouched). Categories: GpuHardware, GpuOnScreen, MeterHardware, ProjectorHardware are excluded from the CPU run; GpuWarp renders on WARP and stays in it; Cpu marks a reviewed false positive of the name heuristic. First matching entry wins. Checked by tools/check_test_categories.py; the CPU filter comes from tools/gen_test_filters.py. Copyright(C) 2026 VP-V contributors; SPDX-License-Identifier: GPL-3.0-only",
+ "entries": [
+  {
+   "kind": "class",
+   "value": "RendererCaptureHarnessTests",
+   "category": "GpuHardware",
+   "file": "src/VideoProcessor-Test/RendererCaptureHarnessTests.cpp",
+   "note": "Every method also carries its own attribute; the class clause is how the CPU run and the chain gate select it."
+  },
+  {
+   "kind": "methodPrefix",
+   "value": "NlsHookFailureRetry",
+   "category": "GpuHardware",
+   "file": "src/VideoProcessor-Test/LibplaceboLutParserTests.cpp",
+   "note": "Bill's file; the one method already has the attribute, the name clause is kept for the native adapter."
+  },
+  {
+   "kind": "methodPrefix",
+   "value": "DvAutotestGpu",
+   "category": "GpuHardware",
+   "file": "src/VideoProcessor-Test/RendererCaptureHarnessTests.cpp",
+   "note": "Harness tests; name clause kept for the native adapter."
+  },
+  {
+   "kind": "methodPrefix",
+   "value": "DolbyVisionGpuUnpack",
+   "category": "GpuHardware",
+   "file": "src/VideoProcessor-Test/RendererCaptureHarnessTests.cpp",
+   "note": "Harness test; name clause kept for the native adapter."
+  },
+  {
+   "kind": "class",
+   "value": "VpScaleRenderMotionGpu",
+   "category": "GpuHardware",
+   "file": "src/VideoProcessor-Test/VpScaleRenderMotionTests.cpp",
+   "note": "Real-adapter motion render tests."
+  },
+  {
+   "kind": "class",
+   "value": "PlNetRunnerGpuTests",
+   "category": "GpuHardware",
+   "file": "src/VP-V/nets/tests/PlNetRunnerGpuTests.cpp",
+   "note": "Net runner on the GPU (hardware timing, NVIDIA adapter)."
+  },
+  {
+   "kind": "classPrefix",
+   "value": "OutputSegmentsGpu",
+   "category": "GpuHardware",
+   "file": "src/VP-V/tests/OutputSegmentsGpuTests.cpp",
+   "note": "Output segment byte-identity on the adapter."
+  },
+  {
+   "kind": "class",
+   "value": "NvOpticalFlowTests",
+   "category": "GpuHardware",
+   "file": "src/VideoProcessor-Test/NvOpticalFlowTests.cpp",
+   "note": "NVIDIA-only engine (the tests skip themselves elsewhere). Extends the canonical CPU filter; no CPU coverage lost."
+  },
+  {
+   "kind": "class",
+   "value": "LibplaceboLutParserTests",
+   "category": "GpuWarp",
+   "file": "src/VideoProcessor-Test/LibplaceboLutParserTests.cpp",
+   "note": "Bill's file, left untouched: renders on WARP (TargetLutGpuFixture), runs in the CPU CI."
+  },
+  {
+   "kind": "methodPrefix",
+   "value": "DetailPulseGpu",
+   "category": "GpuWarp",
+   "file": "src/VideoProcessor-Test/DetailPulseTests.cpp",
+   "note": "WARP unless VP_TEST_GPU=hardware."
+  },
+  {
+   "kind": "method",
+   "value": "TextureRestoreTests::TextureRestoreRealClipBreathing",
+   "category": "GpuWarp",
+   "file": "src/VideoProcessor-Test/TextureRestoreTests.cpp",
+   "note": "Real-footage run; self-skips without VP_TEST_REAL_FOOTAGE."
+  },
+  {
+   "kind": "class",
+   "value": "TextureRestoreGpuTests",
+   "category": "GpuWarp",
+   "file": "src/VideoProcessor-Test/TextureRestoreTests.cpp",
+   "note": "WARP unless VP_TEST_GPU=hardware."
+  },
+  {
+   "kind": "class",
+   "value": "CrossfadeMixGpuTests",
+   "category": "GpuWarp",
+   "file": "src/VideoProcessor-Test/CrossfadeMixTests.cpp",
+   "note": "WARP unless VP_TEST_GPU=hardware."
+  },
+  {
+   "kind": "class",
+   "value": "AmbientSdrGpuTests",
+   "category": "GpuWarp",
+   "file": "src/VideoProcessor-Test/AmbientAdaptationTests.cpp",
+   "note": "WARP unless VP_TEST_GPU=hardware."
+  },
+  {
+   "kind": "method",
+   "value": "MotionRendererTests::AllMixerFiltersRenderOnGpu",
+   "category": "GpuWarp",
+   "file": "src/VideoProcessor-Test/MotionRendererTests.cpp",
+   "note": "Renders on WARP."
+  },
+  {
+   "kind": "method",
+   "value": "AlphaRenderLoadMeterTests::RejectsInvalidGpuDurations",
+   "category": "Cpu",
+   "file": "src/VideoProcessor-Test/AlphaRenderLoadMeterTests.cpp",
+   "note": "Name mentions the GPU; the body is CPU only (reviewed)."
+  },
+  {
+   "kind": "method",
+   "value": "AmbientSdrLiftTests::AmbientSdrLiftReachesTheCodes",
+   "category": "Cpu",
+   "file": "src/VideoProcessor-Test/AmbientAdaptationTests.cpp",
+   "note": "Name mentions the GPU; the body is CPU only (reviewed)."
+  },
+  {
+   "kind": "method",
+   "value": "CrossfadeMixTests::CrossfadeFromPathTakesThePictureHooksOnly",
+   "category": "Cpu",
+   "file": "src/VideoProcessor-Test/CrossfadeMixTests.cpp",
+   "note": "Name mentions the GPU; the body is CPU only (reviewed)."
+  },
+  {
+   "kind": "method",
+   "value": "LedDriveDelta1Tests::RawFramesAreMeasuredThroughTheTransferLikeTheGpuPass",
+   "category": "Cpu",
+   "file": "src/VideoProcessor-Test/LedDriveDelta1Tests.cpp",
+   "note": "Name mentions the GPU; the body is CPU only (reviewed)."
+  },
+  {
+   "kind": "method",
+   "value": "DvHostStageTests::GpuUnpackSessionLogsOnceAndSwitchesTheSessionToTheCpuOnce",
+   "category": "Cpu",
+   "file": "src/VP-V/modules/colour/sdr_tone_shape/tests/DvHostStageTests.cpp",
+   "note": "Name mentions the GPU; the body is CPU only (reviewed)."
+  },
+  {
+   "kind": "method",
+   "value": "NetRunnerTests::RgbLumaDeltaKeepsChromaAndMatchesTheGpuPass",
+   "category": "Cpu",
+   "file": "src/VP-V/nets/tests/NetRunnerTests.cpp",
+   "note": "Name mentions the GPU; the body is CPU only (reviewed)."
+  },
+  {
+   "kind": "method",
+   "value": "OutputGlueStagesTests::AdaptiveGpuFailureIsHeldThenReleased",
+   "category": "Cpu",
+   "file": "src/VP-V/tests/OutputGlueStagesTests.cpp",
+   "note": "Name mentions the GPU; the body is CPU only (reviewed)."
+  },
+  {
+   "kind": "method",
+   "value": "PassTimersTests::UnreadGpuTimersAreNotSamples",
+   "category": "Cpu",
+   "file": "src/VP-V/tests/PassTimersTests.cpp",
+   "note": "Name mentions the GPU; the body is CPU only (reviewed)."
+  },
+  {
+   "kind": "method",
+   "value": "PipelineSkeletonTests::EntranceGpuDrainOnceAfterTheLastEntranceRun",
+   "category": "Cpu",
+   "file": "src/VP-V/tests/PipelineSkeletonTests.cpp",
+   "note": "Name mentions the GPU; the body is CPU only (reviewed)."
+  }
+ ]
+}
