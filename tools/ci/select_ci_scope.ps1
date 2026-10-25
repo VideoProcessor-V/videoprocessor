@@ -166,7 +166,7 @@ foreach ($rel in $changed) {
     foreach ($o in $owners) { [void]$affectedProjects.Add($o) }
     foreach ($u in $users) { foreach ($o in (OwnersOf $u)) { [void]$affectedProjects.Add($o) } }
     # CPU test selection.
-    $inTest = $fullPath.ToLowerInvariant().StartsWith($testDir + '\')
+    $inTest = $fullPath.ToLowerInvariant().StartsWith($testDir + '\') -or ($isSource -and $fullPath -match 'Tests\.cpp$' -and $owners -contains 'VideoProcessor-Test')
     if ($inTest -and $isSource) { [void]$testFiles.Add($fullPath); $reasons.Add("test source: $rel"); continue }
     $headers = @()
     if ($isHeader) { $headers = @($fullPath) }
@@ -178,7 +178,7 @@ foreach ($rel in $changed) {
     } else {
         if ($owners -contains 'VideoProcessor-Lib' -or $owners -contains 'VideoProcessor-Test') { Write-Full "$rel is a non-code item of a tested project (full suite)" $base }
     }
-    $tests = @(IncludeClosure $headers | Where-Object { $_.ToLowerInvariant().StartsWith($testDir + '\') -and $_ -match '\.cpp$' })
+    $tests = @(IncludeClosure $headers | Where-Object { $_ -match '\.cpp$' -and ($_.ToLowerInvariant().StartsWith($testDir + '\') -or ($_ -match 'Tests\.cpp$' -and (OwnersOf $_) -contains 'VideoProcessor-Test')) })
     if ($inTest) { $tests += @($fullPath) }
     foreach ($t in $tests) { [void]$testFiles.Add($t) }
     $reasons.Add("$rel -> projects [$((@($owners) + @($users | ForEach-Object { OwnersOf $_ }) | Sort-Object -Unique) -join ', ')]; $($tests.Count) test file(s)")

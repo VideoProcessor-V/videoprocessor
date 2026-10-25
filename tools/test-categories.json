@@ -14,8 +14,8 @@
    "kind": "methodPrefix",
    "value": "NlsHookFailureRetry",
    "category": "GpuHardware",
-   "file": "src/VideoProcessor-Test/LibplaceboLutParserTests.cpp",
-   "note": "Bill's file; the one method already has the attribute, the name clause is kept for the native adapter."
+   "file": "src/VP-V/modules/motion/consumers/tests/DejudderHookTests.cpp",
+   "note": "The one method already has the attribute, the name clause is kept for the native adapter."
   },
   {
    "kind": "methodPrefix",
@@ -65,6 +65,125 @@
    "category": "GpuWarp",
    "file": "src/VideoProcessor-Test/LibplaceboLutParserTests.cpp",
    "note": "Bill's file, left untouched: renders on WARP (TargetLutGpuFixture), runs in the CPU CI."
+  },
+  {
+   "kind": "class",
+   "value": "AdaptiveScalingHookTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/scaling/output/tests/AdaptiveScalingHookTests.cpp",
+   "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
+  },
+  {
+   "kind": "class",
+   "value": "CaptureUnpackHookTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/input/capture/tests/CaptureUnpackHookTests.cpp",
+   "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
+  },
+  {
+   "kind": "class",
+   "value": "DejudderHookTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/motion/consumers/tests/DejudderHookTests.cpp",
+   "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
+  },
+  {
+   "kind": "class",
+   "value": "DvTunnelUnpackHookTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/input/signal/tests/DvTunnelUnpackHookTests.cpp",
+   "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
+  },
+  {
+   "kind": "class",
+   "value": "EstimatorHookTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/motion/estimation/tests/EstimatorHookTests.cpp",
+   "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
+  },
+  {
+   "kind": "class",
+   "value": "ExtendedRangeHookTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/colour/extended_range/tests/ExtendedRangeHookTests.cpp",
+   "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
+  },
+  {
+   "kind": "class",
+   "value": "InterpolatorHookTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/motion/consumers/tests/InterpolatorHookTests.cpp",
+   "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
+  },
+  {
+   "kind": "class",
+   "value": "LedCompensationHookTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/drive/led_compensation/tests/LedCompensationHookTests.cpp",
+   "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
+  },
+  {
+   "kind": "class",
+   "value": "LedMeasureHookTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/drive/led_measure/tests/LedMeasureHookTests.cpp",
+   "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
+  },
+  {
+   "kind": "class",
+   "value": "OcclusionMaskHookTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/motion/consumers/tests/OcclusionMaskHookTests.cpp",
+   "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
+  },
+  {
+   "kind": "class",
+   "value": "ResidualHoldHookTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/scaling/refine/tests/ResidualHoldHookTests.cpp",
+   "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
+  },
+  {
+   "kind": "class",
+   "value": "SdrToneShapeHookTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/colour/sdr_tone_shape/tests/SdrToneShapeHookTests.cpp",
+   "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
+  },
+  {
+   "kind": "class",
+   "value": "SigmaDeltaHookTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/output/dither/tests/SigmaDeltaHookTests.cpp",
+   "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
+  },
+  {
+   "kind": "class",
+   "value": "SourceRebaseHookTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/scaling/rebase/tests/SourceRebaseHookTests.cpp",
+   "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
+  },
+  {
+   "kind": "class",
+   "value": "SourceResolutionHookTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/input/source_analysis/tests/SourceResolutionHookTests.cpp",
+   "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
+  },
+  {
+   "kind": "class",
+   "value": "VpDebanderHookTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/repair/deband/tests/VpDebanderHookTests.cpp",
+   "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
+  },
+  {
+   "kind": "class",
+   "value": "WholeHookChainHookTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/tests/WholeHookChainHookTests.cpp",
+   "note": "Moved from LibplaceboLutParserTests (VP-added GPU hook tests); WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
   },
   {
    "kind": "methodPrefix",
@@ -177,6 +296,13 @@
    "category": "Cpu",
    "file": "src/VP-V/modules/control/diagnostics/tests/DiagnosticsAdapterTests.cpp",
    "note": "Enumerates DXGI adapters only; renders nothing (reviewed)."
+  },
+  {
+   "kind": "method",
+   "value": "FallbackCatalogTests::MotionConsumerGpuFailuresAreVisibleWhileRecent",
+   "category": "Cpu",
+   "file": "src/VP-V/tests/FallbackCatalogTests.cpp",
+   "note": "Name mentions the GPU; the body is CPU only (MotionConsumerFailures catalog logic, reviewed)."
   }
  ]
 }

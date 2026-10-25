@@ -113,7 +113,7 @@ From the source worktree, using Visual Studio's MSBuild and VSTest:
 
 ```powershell
 MSBuild.exe VideoProcessor.sln /t:Rebuild /m:4 /p:Configuration=Release /p:Platform=x64 /p:LinkTimeCodeGeneration=UseLinkTimeCodeGeneration
-vstest.console.exe x64/Release/VideoProcessor-Test.dll /Platform:x64 /TestCaseFilter:"FullyQualifiedName~LibplaceboRenderParametersTests|FullyQualifiedName~LibplaceboLutParserTests|FullyQualifiedName~LibplaceboOutputPolicyTests|FullyQualifiedName~ConfigFileTests|FullyQualifiedName~ConfigEditorCoreTests"
+vstest.console.exe x64/Release/VideoProcessor-Test.dll /Platform:x64 /TestCaseFilter:"FullyQualifiedName~LibplaceboRenderParametersTests|FullyQualifiedName~LibplaceboLutParserTests|FullyQualifiedName~HookTests|FullyQualifiedName~LibplaceboOutputPolicyTests|FullyQualifiedName~ConfigFileTests|FullyQualifiedName~ConfigEditorCoreTests"
 $env:QT_QPA_PLATFORM='offscreen'
 ./x64/Release/VideoProcessorConfigTests.exe --test 'HDR target luminance validation retains saved value'
 ./x64/Release/VideoProcessorConfigTests.exe --test 'every page round trips'
