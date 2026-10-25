@@ -10,8 +10,13 @@ renderer side. **VP-only** (not upstreamable).
 ## Apply
 
 ```
-git apply docs/design/wp12-calib-callsites.patch
+git show feat/wp12-calib-glue:docs/design/wp12-calib-callsites.patch | git apply -
 ```
+
+Apply the committed blob (as above), not the working-tree file: with `core.autocrlf=true` a
+Windows checkout gives `*.patch` files CRLF line ends and `git apply` then rejects every hunk
+(WP-4's `silent-fallbacks-callsites.patch` has the same problem; a repo-wide `*.patch -text` in
+`.gitattributes` would fix it for all patch hand-offs).
 
 Generated against `feat/wp12-calib-glue`'s base (`chore/early-migrations` ac49a1de, renderer =
 `feat/skeleton` fd60b650); `git apply --check --cached` passes on this branch. On a later renderer
