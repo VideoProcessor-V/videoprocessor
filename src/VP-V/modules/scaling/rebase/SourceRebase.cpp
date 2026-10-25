@@ -194,6 +194,9 @@ if (p.x < size.x && p.y < size.y) {
 		const bool oneAxis = factorX >= 1.0 || factorY >= 1.0;
 		slot = (std::max)(0, (std::min)(slot, kSlots - 1));
 		pl_frame result = source;
+		// This call's float-intermediate note: FormatNote() describes the last successful re-base,
+		// so "re-base precision" is released once the 16-bit path is used again (finding R1).
+		std::string note;
 		for (int plane = 0; plane < source.num_planes; ++plane)
 		{
 			const pl_tex in = source.planes[plane].texture;
@@ -239,7 +242,7 @@ if (p.x < size.x && p.y < size.y) {
 					return false;
 				}
 				params.storable = plane == 0 && kernel >= 0 && (params.format->caps & PL_FMT_CAP_STORABLE);
-				formatNote = "plane " + std::to_string(plane) + ": " + (wanted->name ? wanted->name : "?") +
+				note = "plane " + std::to_string(plane) + ": " + (wanted->name ? wanted->name : "?") +
 					" not renderable, " + (params.format->name ? params.format->name : "float") +
 					(half ? " (half float: 32-bit float not renderable)" : "");
 			}
@@ -346,6 +349,7 @@ if (p.x < size.x && p.y < size.y) {
 		result.crop.x1 = static_cast<float>(source.crop.x1 * factorX);
 		result.crop.y1 = static_cast<float>(source.crop.y1 * factorY);
 		out = result;
+		formatNote = note;
 		return true;
 	}
 }

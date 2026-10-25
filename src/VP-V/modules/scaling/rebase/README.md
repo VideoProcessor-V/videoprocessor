@@ -71,7 +71,7 @@ Validated as `input`-group keys (RendererProfileConfig.h; sections `[vprenderer.
 
 ### User-visible fallbacks / notices
 
-- `re-base precision (<note>)` under "Fallbacks engaged" when a plane's 16-bit format is not renderable and a float intermediate is used (engaged by the entrance segment on a change of `FormatNote`). `FormatNote` is never cleared once set, so the entry stays engaged after the re-base stops or the format changes.
+- `re-base precision (<note>)` under "Fallbacks engaged" when a plane's 16-bit format is not renderable and a float intermediate is used (engaged by the entrance segment on a change of `FormatNote`). `FormatNote` describes the last successful `Apply`, so the entry is released when the 16-bit path is used again, and the entrance segment releases it when the main picture is not re-based.
 - A failed re-base renders the native frame and pauses the re-base for 5 s, doubling to 60 s while it keeps failing. Log only: "Re-base failed (...); the native frame is rendered" (the first failure of a session only) and "Re-base: paused N s after a failure (...)".
 - Re-base wanted while smooth motion or deinterlacing runs: not applied, log only ("Re-base: not applied while ...").
 - No identified kernel: the polar filter, logged as "Re-base kernel: none identified (the polar filter)". This is the designed path, not a fallback.

@@ -676,6 +676,12 @@ namespace EntranceSegment
 					if (run.aReady) run.aFrame = rebasedA;
 				}
 			}
+			else if (!rebaseFormatNoteLogged.empty())
+			{
+				// No re-base on this picture: its float-intermediate note no longer applies (finding R1).
+				rebaseFormatNoteLogged.clear();
+				host.ReleaseFallback("re-base precision");
+			}
 			return;
 		}
 		if (run.path == Path::Extra)
