@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include <vprenderer/SdrToneShape.h>
+#include <VP-V/modules/colour/sdr_tone_shape/SdrToneShape.h>
 
 #include <cmath>
 #include <string>

@@ -1,6 +1,6 @@
 #include "pch.h"
 #include "CppUnitTest.h"
-#include <vprenderer/DolbyVisionTrims.h>
+#include <VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h>
 
 #include <cmath>
 #include <string>

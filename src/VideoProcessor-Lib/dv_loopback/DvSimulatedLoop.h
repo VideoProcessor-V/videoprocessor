@@ -16,7 +16,7 @@
 // at n periods), so the simulated runs are deterministic.
 #include "DvCaptureContainer.h"
 #include "DvLoopbackAnalyzer.h"
-#include <DolbyVisionTunnelGate.h>
+#include <VP-V/modules/input/signal/DolbyVisionTunnelGate.h>
 #include <BitDepth.h>
 #include <HDRData.h>
 #include <ColorSpace.h>

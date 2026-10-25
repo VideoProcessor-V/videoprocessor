@@ -12,7 +12,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include <DolbyVisionTunnelHandoff.h>
+#include <VP-V/modules/input/signal/DolbyVisionTunnelHandoff.h>
 #include <dv_loopback/DvCaptureContainer.h>
 #include <dv_loopback/DvTunnelPacker.h>
 

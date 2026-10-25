@@ -1,6 +1,6 @@
 #include <pch.h>
-#include "GpuDolbyVisionTunnelUnpack.h"
-#include "DolbyVisionTunnelUnpackReference.h"
+#include <VP-V/modules/input/signal/GpuDolbyVisionTunnelUnpack.h>
+#include <VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h>
 
 #include <libplacebo/shaders/custom.h>
 

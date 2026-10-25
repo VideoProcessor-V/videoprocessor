@@ -4,14 +4,19 @@
   "unit": "colour",
   "order": 200,
   "status": "built",
-  "code_location": "legacy",
+  "code_location": "partly migrated",
   "live_files": [
-    "src/VideoProcessor-Lib/vprenderer/SdrToneShape.h",
-    "src/VideoProcessor-Lib/vprenderer/DolbyVisionTrims.h",
+    "src/VP-V/modules/colour/sdr_tone_shape/SdrToneShape.h",
+    "src/VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h",
     "shaders/SDR tone shape.glsl",
     "shaders/DV trims.glsl",
     "src/VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h",
-    "src/VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h"
+    "src/VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h",
+    "src/VP-V/modules/colour/sdr_tone_shape/DvHostStage.h"
+  ],
+  "forwarding_headers": [
+    "src/VideoProcessor-Lib/vprenderer/DolbyVisionTrims.h",
+    "src/VideoProcessor-Lib/vprenderer/SdrToneShape.h"
   ],
   "components": {
     "files": {
@@ -29,12 +34,16 @@
     "config_keys": [
       "dv_tone_mapping",
       "dv_trims",
-      "sdr_tone_shape"
+      "sdr_contrast_recovery",
+      "sdr_knee_start",
+      "sdr_knee_strength",
+      "sdr_tone_shape",
+      "sdr_white_headroom"
     ],
     "upstream_modules": [
       "colour.tone_gamut"
     ]
   },
-  "fallback_when_missing": "Shader failure skips it.",
-  "fallback_entry": "SDR tone shape: not applied (shader did not load)"
+  "fallback_when_missing": "A shader failure skips the stage; the Dolby-style curve falls back to bt2390 (+ the luminance trims). SDR tone shape entry: call site in WP-4's silent-fallbacks patch.",
+  "fallback_entry": "DV tone mapping: <why>: bt2390[ + trims] | Dolby Vision trims: <state> | SDR tone shape: not applied (<why>)"
 }

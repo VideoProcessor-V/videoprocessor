@@ -298,19 +298,19 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\GpuCaptureUnpack.cpp">
+    <ClCompile Include="..\VP-V\modules\input\capture\GpuCaptureUnpack.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\GpuRgbUnpack.cpp">
+    <ClCompile Include="..\VP-V\modules\input\capture\GpuRgbUnpack.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\GpuDolbyVisionTunnelUnpack.cpp">
+    <ClCompile Include="..\VP-V\modules\input\signal\GpuDolbyVisionTunnelUnpack.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\EarlyUpload.cpp">
+    <ClCompile Include="..\VP-V\modules\input\capture\EarlyUpload.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -429,7 +429,9 @@
     <ClCompile Include="TextureRestoreTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvTrimSelectionTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvDolbyStyleTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvHostStageTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\DvSignalL8HoldTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\signal\tests\DvTunnelMetadataExtensionTests.cpp" />
     <ClCompile Include="DetailRestoreConfigTests.cpp" />
     <ClCompile Include="KernelInverseTests.cpp" />
     <ClCompile Include="WindowResizeLayoutTests.cpp" />

@@ -13,6 +13,8 @@ the old path until M2 so files on active branches keep building.
 |---|---|---|---|
 | `src/VideoProcessor-Lib/vprenderer/ExtendedRange.cpp` | `src/VP-V/modules/colour/extended_range/ExtendedRange.cpp` | staged |  |
 | `src/VideoProcessor-Lib/vprenderer/ExtendedRange.h` | `src/VP-V/modules/colour/extended_range/ExtendedRange.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/DolbyVisionTrims.h` | `src/VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h` | d58d0b4c | fwd |
+| `src/VideoProcessor-Lib/vprenderer/SdrToneShape.h` | `src/VP-V/modules/colour/sdr_tone_shape/SdrToneShape.h` | d58d0b4c | fwd |
 | `src/VideoProcessor-Lib/CrashState.cpp` | `src/VP-V/modules/control/diagnostics/CrashState.cpp` | 259cfa50 |  |
 | `src/VideoProcessor-Lib/CrashState.h` | `src/VP-V/modules/control/diagnostics/CrashState.h` | 259cfa50 |  |
 | `src/VideoProcessor-Lib/StateReport.cpp` | `src/VP-V/modules/control/diagnostics/StateReport.cpp` | 259cfa50 |  |
@@ -40,6 +42,22 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/led/ProjectorDriver.h` | `src/VP-V/modules/drive/projector_control/ProjectorDriver.h` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/SerialPort.cpp` | `src/VP-V/modules/drive/projector_control/SerialPort.cpp` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/SerialPort.h` | `src/VP-V/modules/drive/projector_control/SerialPort.h` | 570b1ee8 | fwd |
+| `src/VideoProcessor-Lib/vprenderer/EarlyUpload.cpp` | `src/VP-V/modules/input/capture/EarlyUpload.cpp` | staged |  |
+| `src/VideoProcessor-Lib/vprenderer/EarlyUpload.h` | `src/VP-V/modules/input/capture/EarlyUpload.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.cpp` | `src/VP-V/modules/input/capture/GpuCaptureUnpack.cpp` | staged |  |
+| `src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.h` | `src/VP-V/modules/input/capture/GpuCaptureUnpack.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.cpp` | `src/VP-V/modules/input/capture/GpuRgbUnpack.cpp` | staged |  |
+| `src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.h` | `src/VP-V/modules/input/capture/GpuRgbUnpack.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/UploadReuse.h` | `src/VP-V/modules/input/capture/UploadReuse.h` | ? | fwd |
+| `src/VideoProcessor-Lib/DolbyVisionTunnelGate.h` | `src/VP-V/modules/input/signal/DolbyVisionTunnelGate.h` | a177e22a | fwd |
+| `src/VideoProcessor-Lib/DolbyVisionTunnelHandoff.h` | `src/VP-V/modules/input/signal/DolbyVisionTunnelHandoff.h` | a177e22a | fwd |
+| `src/VideoProcessor-Lib/vprenderer/DolbyVisionTunnelUnpackReference.h` | `src/VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h` | a177e22a | fwd |
+| `src/VideoProcessor-Lib/vprenderer/GpuDolbyVisionTunnelUnpack.cpp` | `src/VP-V/modules/input/signal/GpuDolbyVisionTunnelUnpack.cpp` | a177e22a |  |
+| `src/VideoProcessor-Lib/vprenderer/GpuDolbyVisionTunnelUnpack.h` | `src/VP-V/modules/input/signal/GpuDolbyVisionTunnelUnpack.h` | a177e22a | fwd |
+| `src/VideoProcessor-Lib/HdrInference.cpp` | `src/VP-V/modules/input/signal/HdrInference.cpp` | a177e22a |  |
+| `src/VideoProcessor-Lib/HdrInference.h` | `src/VP-V/modules/input/signal/HdrInference.h` | a177e22a | fwd |
+| `src/VideoProcessor-Lib/HdrInferenceSignalBuilder.h` | `src/VP-V/modules/input/signal/HdrInferenceSignalBuilder.h` | a177e22a | fwd |
+| `src/VideoProcessor-Lib/HdrVetoCaptureGate.h` | `src/VP-V/modules/input/signal/HdrVetoCaptureGate.h` | a177e22a | fwd |
 | `src/VideoProcessor-Lib/calibration/AmbientCheck.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/AmbientCheck.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/AmbientCheck.h` | `src/VP-V/modules/output/calibration_lut/calibration/AmbientCheck.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/ArgyllInstall.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/ArgyllInstall.cpp` | d2517eb1 |  |

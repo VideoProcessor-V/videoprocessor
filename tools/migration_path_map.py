@@ -141,6 +141,8 @@ def living_files():
             continue
         if rel.startswith(MODULES_REL) and rel.endswith("MANIFEST.json"):
             continue
+        if bill_owned(rel):
+            continue   # Bill's files are never edited for a VP move; the forwarder keeps the old path valid
         yield rel
 
 
@@ -232,6 +234,14 @@ def in_upstream(path):
     if _upstream_files is None:
         _upstream_files = set(git("ls-tree", "-r", "--name-only", UPSTREAM_BETA).splitlines())
     return path in _upstream_files
+
+
+def bill_owned(rel):
+    """True for a file in Bill's upstream beta (False when the ref is not available locally)."""
+    try:
+        return in_upstream(rel)
+    except subprocess.CalledProcessError:
+        return False
 
 
 def bill_owned_problems(moves):

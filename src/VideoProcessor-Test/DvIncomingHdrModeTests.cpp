@@ -15,8 +15,8 @@
 #include "CppUnitTest.h"
 
 #include <dv_loopback/DvLoopbackHarness.h>
-#include <DolbyVisionTunnelGate.h>
-#include <HdrInferenceSignalBuilder.h>
+#include <VP-V/modules/input/signal/DolbyVisionTunnelGate.h>
+#include <VP-V/modules/input/signal/HdrInferenceSignalBuilder.h>
 #include <LldvStaticMetadata.h>
 
 #include <algorithm>

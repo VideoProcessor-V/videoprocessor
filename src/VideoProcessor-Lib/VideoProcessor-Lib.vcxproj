@@ -386,7 +386,7 @@
     <ClInclude Include="StateVariables.h" />
     <ClInclude Include="UnifiedProfileRuntime.h" />
 	<ClInclude Include="SceneDetector.h" />
-	<ClInclude Include="HdrInference.h" />
+	<ClInclude Include="..\VP-V\modules\input\signal\HdrInference.h" />
 	<ClInclude Include="SourceResolutionDetector.h" />
 	<ClInclude Include="VectorStore.h" />
 	<ClInclude Include="MotionValidity.h" />
@@ -396,7 +396,7 @@
 	<ClInclude Include="vprenderer\MotionEngineIdle.h" />
 	<ClInclude Include="vprenderer\CaptureTimestampGap.h" />
 	<ClInclude Include="vprenderer\DisplayRateHold.h" />
-	<ClInclude Include="vprenderer\UploadReuse.h" />
+	<ClInclude Include="..\VP-V\modules\input\capture\UploadReuse.h" />
 	<ClInclude Include="MotionAhead.h" />
 	<ClInclude Include="GeneralRate.h" />
 	<ClInclude Include="GeneralRateLog.h" />
@@ -415,10 +415,10 @@
     <ClInclude Include="video_frame_formatter\CDeckLinkRGBToP010VideoFrameFormatter.h" />
     <ClInclude Include="video_frame_formatter\CR210toRGB48VideoFrameFormatter.h" />
     <ClInclude Include="video_frame_formatter\CR210DolbyVisionTunnelFormatter.h" />
-    <ClInclude Include="DolbyVisionTunnelGate.h" />
+    <ClInclude Include="..\VP-V\modules\input\signal\DolbyVisionTunnelGate.h" />
     <ClInclude Include="DolbyVisionTunnelPresentation.h" />
-    <ClInclude Include="HdrInferenceSignalBuilder.h" />
-    <ClInclude Include="DolbyVisionTunnelHandoff.h" />
+    <ClInclude Include="..\VP-V\modules\input\signal\HdrInferenceSignalBuilder.h" />
+    <ClInclude Include="..\VP-V\modules\input\signal\DolbyVisionTunnelHandoff.h" />
     <ClInclude Include="ShortcutDefaults.h" />
     <ClInclude Include="ShortcutChord.h" />
     <ClInclude Include="SessionEndShutdown.h" />
@@ -602,7 +602,7 @@
     <ClCompile Include="StateVariables.cpp" />
     <ClCompile Include="UnifiedProfileRuntime.cpp" />
 	<ClCompile Include="SceneDetector.cpp" />
-	<ClCompile Include="HdrInference.cpp" />
+	<ClCompile Include="..\VP-V\modules\input\signal\HdrInference.cpp" />
 	<ClCompile Include="SourceResolutionDetector.cpp" />
 	<ClCompile Include="..\VP-V\modules\scaling\rebase\KernelInverse.cpp" />
     <ClCompile Include="StringUtils.cpp" />

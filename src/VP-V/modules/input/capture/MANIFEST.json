@@ -4,22 +4,28 @@
   "unit": "input",
   "order": 10,
   "status": "built",
-  "code_location": "legacy",
+  "code_location": "partly migrated",
   "live_files": [
-    "src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.cpp",
-    "src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.h",
-    "src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.cpp",
-    "src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.h",
+    "src/VP-V/modules/input/capture/GpuCaptureUnpack.cpp",
+    "src/VP-V/modules/input/capture/GpuCaptureUnpack.h",
+    "src/VP-V/modules/input/capture/GpuRgbUnpack.cpp",
+    "src/VP-V/modules/input/capture/GpuRgbUnpack.h",
     "src/VideoProcessor-Lib/vprenderer/AlphaNativeRgbIngress.h",
-    "src/VideoProcessor-Lib/vprenderer/UploadReuse.h",
-    "src/VideoProcessor-Lib/vprenderer/EarlyUpload.cpp",
-    "src/VideoProcessor-Lib/vprenderer/EarlyUpload.h",
+    "src/VP-V/modules/input/capture/UploadReuse.h",
+    "src/VP-V/modules/input/capture/EarlyUpload.cpp",
+    "src/VP-V/modules/input/capture/EarlyUpload.h",
     "src/VideoProcessor-Lib/CaptureInput.cpp",
     "src/VideoProcessor-Lib/CaptureInput.h",
     "src/VideoProcessor-Lib/blackmagic_decklink",
     "src/VideoProcessor-Lib/magewell",
     "src/VideoProcessor-Lib/video_frame_formatter",
     "src/VideoProcessor-Lib/VideoConversionOverride.cpp"
+  ],
+  "forwarding_headers": [
+    "src/VideoProcessor-Lib/vprenderer/EarlyUpload.h",
+    "src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.h",
+    "src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.h",
+    "src/VideoProcessor-Lib/vprenderer/UploadReuse.h"
   ],
   "components": {
     "files": {
@@ -38,11 +44,10 @@
     "config_keys": [
       "capture_path",
       "capture_upload",
-      "dv_tunnel_gpu_unpack",
       "native_rgb_ingest"
     ],
     "upstream_modules": []
   },
-  "fallback_when_missing": "GPU unpack failure switches to the CPU formatters for the session (today log-only; must become visible, queue item 44/45).",
-  "fallback_entry": "Capture: CPU 4:2:0 (GPU unpack failed: <reason>)"
+  "fallback_when_missing": "A GPU unpack failure switches to the CPU formatters for the session; early upload unavailable takes the render upload (entry: WP-4 FallbackCatalog::EarlyUpload; releases: m2-dv-fixes.patch).",
+  "fallback_entry": "capture GPU unpack: CPU formatters for the session: <error> | native RGB GPU unpack: CPU conversion to 10-bit 4:2:0 for the session: <error> | early upload: the render upload (<error>)"
 }

@@ -6,16 +6,16 @@
       "slot": "input.capture",
       "order": 10,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.cpp",
-        "src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.h",
-        "src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.cpp",
-        "src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.h",
+        "src/VP-V/modules/input/capture/GpuCaptureUnpack.cpp",
+        "src/VP-V/modules/input/capture/GpuCaptureUnpack.h",
+        "src/VP-V/modules/input/capture/GpuRgbUnpack.cpp",
+        "src/VP-V/modules/input/capture/GpuRgbUnpack.h",
         "src/VideoProcessor-Lib/vprenderer/AlphaNativeRgbIngress.h",
-        "src/VideoProcessor-Lib/vprenderer/UploadReuse.h",
-        "src/VideoProcessor-Lib/vprenderer/EarlyUpload.cpp",
-        "src/VideoProcessor-Lib/vprenderer/EarlyUpload.h",
+        "src/VP-V/modules/input/capture/UploadReuse.h",
+        "src/VP-V/modules/input/capture/EarlyUpload.cpp",
+        "src/VP-V/modules/input/capture/EarlyUpload.h",
         "src/VideoProcessor-Lib/CaptureInput.cpp",
         "src/VideoProcessor-Lib/CaptureInput.h",
         "src/VideoProcessor-Lib/blackmagic_decklink",
@@ -40,33 +40,38 @@
         "config_keys": [
           "capture_path",
           "capture_upload",
-          "dv_tunnel_gpu_unpack",
           "native_rgb_ingest"
         ],
         "upstream_modules": []
       },
-      "fallback_when_missing": "GPU unpack failure switches to the CPU formatters for the session (today log-only; must become visible, queue item 44/45)."
+      "fallback_when_missing": "A GPU unpack failure switches to the CPU formatters for the session; early upload unavailable takes the render upload (entry: WP-4 FallbackCatalog::EarlyUpload; releases: m2-dv-fixes.patch)."
     },
     {
       "slot": "input.signal",
       "order": 20,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/HdrInference.cpp",
-        "src/VideoProcessor-Lib/HdrInference.h",
+        "src/VP-V/modules/input/signal/HdrInference.cpp",
+        "src/VP-V/modules/input/signal/HdrInference.h",
         "src/VideoProcessor-Lib/HDRData.cpp",
         "src/VideoProcessor-Lib/ColorSpace.cpp",
         "src/VideoProcessor-Lib/EOTF.cpp",
-        "src/VideoProcessor-Lib/DolbyVisionTunnelGate.h",
-        "src/VideoProcessor-Lib/DolbyVisionTunnelHandoff.h",
-        "src/VideoProcessor-Lib/vprenderer/GpuDolbyVisionTunnelUnpack.cpp",
-        "src/VideoProcessor-Lib/vprenderer/GpuDolbyVisionTunnelUnpack.h",
+        "src/VP-V/modules/input/signal/DolbyVisionTunnelGate.h",
+        "src/VP-V/modules/input/signal/DolbyVisionTunnelHandoff.h",
+        "src/VP-V/modules/input/signal/GpuDolbyVisionTunnelUnpack.cpp",
+        "src/VP-V/modules/input/signal/GpuDolbyVisionTunnelUnpack.h",
         "src/VideoProcessor-Lib/vprenderer/Bt2020SignalController.h",
         "src/VP-V/modules/input/signal/DvSignalLevels.h",
         "src/VP-V/modules/input/signal/DvMetadataHold.h",
         "src/VP-V/modules/input/signal/DvCompareCapture.h",
-        "src/VP-V/modules/input/signal/DvTunnelPolicy.h"
+        "src/VP-V/modules/input/signal/DvTunnelPolicy.h",
+        "src/VP-V/modules/input/signal/HdrInferenceSignalBuilder.h",
+        "src/VP-V/modules/input/signal/HdrVetoCaptureGate.h",
+        "src/VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h",
+        "src/VP-V/modules/input/signal/DvGpuUnpackSession.h",
+        "src/VP-V/modules/input/signal/DvTunnelMetadataExtension.h",
+        "src/VideoProcessor-Lib/video_frame_formatter/DolbyVisionMetadataExtension.h"
       ],
       "components": {
         "files": {
@@ -80,15 +85,17 @@
         "tools": [],
         "config_keys": [
           "dv_compare_capture_folder",
-          "dv_trims",
           "dv_tunnel_fixes",
-          "dv_tunnel_handoff"
+          "dv_tunnel_gpu_unpack",
+          "dv_tunnel_handoff",
+          "newlldv",
+          "newlldv_sdr_veto"
         ],
         "upstream_modules": [
           "input.capture"
         ]
       },
-      "fallback_when_missing": "DV tunnel GPU unpack failure falls back to the CPU (today log-only)."
+      "fallback_when_missing": "A failed DV tunnel GPU unpack switches the session to the CPU unpack; a rejected DM is held briefly, then static metadata, then black."
     },
     {
       "slot": "input.queue_timing",
@@ -685,14 +692,15 @@
       "slot": "colour.sdr_tone_shape",
       "order": 200,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/SdrToneShape.h",
-        "src/VideoProcessor-Lib/vprenderer/DolbyVisionTrims.h",
+        "src/VP-V/modules/colour/sdr_tone_shape/SdrToneShape.h",
+        "src/VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h",
         "shaders/SDR tone shape.glsl",
         "shaders/DV trims.glsl",
         "src/VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h",
-        "src/VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h"
+        "src/VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h",
+        "src/VP-V/modules/colour/sdr_tone_shape/DvHostStage.h"
       ],
       "components": {
         "files": {
@@ -710,13 +718,17 @@
         "config_keys": [
           "dv_tone_mapping",
           "dv_trims",
-          "sdr_tone_shape"
+          "sdr_contrast_recovery",
+          "sdr_knee_start",
+          "sdr_knee_strength",
+          "sdr_tone_shape",
+          "sdr_white_headroom"
         ],
         "upstream_modules": [
           "colour.tone_gamut"
         ]
       },
-      "fallback_when_missing": "Shader failure skips it."
+      "fallback_when_missing": "A shader failure skips the stage; the Dolby-style curve falls back to bt2390 (+ the luminance trims). SDR tone shape entry: call site in WP-4's silent-fallbacks patch."
     },
     {
       "slot": "colour.appearance",

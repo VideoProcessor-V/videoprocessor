@@ -16,14 +16,14 @@ Delta 13's SDR tone shape and headroom, and the (non-certified) DV trims; first 
 
 ## Settings
 
-- Existing keys: `sdr_tone_shape`, `dv_trims`, `dv_tone_mapping` (feat/dv-l8: `libplacebo` | `dolby_style`, default `libplacebo`)
+- Existing keys: `sdr_tone_shape`, `sdr_white_headroom`, `sdr_knee_start`, `sdr_knee_strength`, `sdr_contrast_recovery`, `dv_trims`, `dv_tone_mapping` (feat/dv-l8: `libplacebo` | `dolby_style`, default `libplacebo`)
 - Planned keys: (none)
 - Tiers: not tiered
 
 ## Fallbacks
 
-- "Fallbacks engaged" entry: SDR tone shape: not applied (shader did not load)
-- Behaviour: Shader failure skips it.
+- "Fallbacks engaged" entries: `SDR tone shape: not applied (<why>)` (call site in WP-4's patch), `DV tone mapping: <why>: bt2390[ + trims]`, `Dolby Vision trims: <state>`
+- Behaviour: a shader failure skips the stage; the Dolby-style curve falls back to bt2390 (+ the luminance trims).
 
 ## Net fingerprint / upstream
 
@@ -40,6 +40,7 @@ Placeholder tests:
 Isolation tests:
 - SdrToneShape tests
 - DolbyVisionTrims tests
+- DvTrimSelectionTests, DvDolbyStyleTests, DvHostStageTests
 
 Contract tests:
 - output encoding repair present when a PRE_OUTPUT hook runs
@@ -89,6 +90,74 @@ Public sources (structure only; no Dolby code or confidential material):
 The interpretation of L8's mid contrast, clip trim and vectors, the predefined target list beyond
 index 1, and the curve's mid adaptation constants are VP assumptions, to calibrate against LLDV.
 
+## How the code works
+
+Checked against the code 2026-10-25 (WP-14 / M2 step 6, `feat/m2-dv`).
+
+**Public API** (all header-only):
+- `SdrToneShape.h` - `SdrToneShape::Settings` (knee on/off, headroom, knee start, knee strength,
+  recovery), `Active`, `Map` (the CPU reference of `shaders/SDR tone shape.glsl`),
+  `EffectiveStrength`, `EffectiveRecovery`.
+- `DolbyVisionTrims.h` - the L2 trim arithmetic (`ApplyPixel`, `PqFromNits`, `LuminanceWeights`),
+  the CPU reference of `shaders/DV trims.glsl`.
+- `DvTrimSelection.h` - `Select(dm, displayPeakNits)`: L8, else L2, else none; `ShaderParameters`,
+  `Describe`, `StatusText`.
+- `DvDolbyStyle.h` - the Dolby-style curve (`Build`, `ForDm`, `Function()` as a libplacebo
+  tone-mapping function), ICtCp helpers, `CannotRun`, `ShaderParameters`, `ToneSwitch`,
+  `StatusText`, `Conditions` (the `ReferenceConditions` record).
+- `DvHostStage.h` (WP-14) - the renderer's DV glue in one object: `OnTunnelState`,
+  `IngressSuffix`, `SkipVpDeband`, `OnPreOutput`, `SkipPlaneDeband`, `ReleaseHooks`,
+  `ToggleCompareCapture`, `ReferenceConditions()`. The host calls it once per hook point
+  ([m2-dv-callsites.md](../../../../../docs/design/m2-dv-callsites.md)); until that patch is
+  applied the same code still runs inline in `LibplaceboVideoRenderer.cpp`.
+
+**Data flow.** In: the target-light picture at PRE_OUTPUT (after libplacebo's tone and gamut
+mapping and the encode to the output signal), the picture's DV DM (`DolbyVisionTunnelFrameMetadata`
+from Bill's tunnel formatter), the output target (transfer, primaries, peak, calibration LUT).
+Out: up to two PRE_OUTPUT hooks (`SDR tone shape.glsl` for SDR in/out; `DV trims.glsl` for DV
+tunnel pictures) with their parameters, and for `dv_tone_mapping: dolby_style` libplacebo's
+tone-mapping function swapped for the Dolby-style curve on DV pictures (`ToneSwitch` restores the
+configured curve otherwise). The DV hook runs after the SDR shape and before the LED measurement
+and compensation; the output encoding repair (`output.dither`) follows any PRE_OUTPUT hook.
+
+**Threading.** Everything runs on the render thread (`RenderLocked`). Settings are copied into the
+frame's `activeSettings` before the render; no locks here. The comparison capture recorder that
+`DvHostStage` owns has its own mutex (its toggle arrives from the GUI through the plugin API).
+
+**Config keys the code reads** (renderer profile sections, `[vprenderer.*]`, read by the host's
+settings reader, `LibplaceboVideoRenderer.cpp`, until WP-18):
+`sdr_tone_shape` (off | knee), `sdr_white_headroom`, `sdr_knee_start`, `sdr_knee_strength`,
+`sdr_contrast_recovery` (auto | off | 0-2), `dv_trims` (on | off, default on), `dv_tone_mapping`
+(libplacebo | dolby_style, default libplacebo). The Original pathway sets `sdr_tone_shape off`,
+`dv_trims off`, `dv_tone_mapping libplacebo`.
+
+**Fallbacks a user sees** ("Fallbacks engaged", Ctrl+I / Config status / Ctrl+Alt+D, one-time notice):
+- `DV tone mapping: <why>: bt2390[ + trims]` - Dolby-style requested on a DV picture but it cannot
+  run (calibration LUT, unsupported output transfer, the slot off, the trims shader missing).
+- `Dolby Vision trims: <state>` - trims on, a DV picture with DM, but the trim cannot act (a
+  calibration LUT, an output transfer other than PQ / gamma / BT.1886 / sRGB, the shader missing,
+  or L8 present with every L8 target unknown and no L2). "Neutral" (no trim for this picture) is
+  not a fallback.
+- `SDR tone shape: not applied (<why>)` - the shader did not load. TODAY LOG-ONLY in the host: the
+  builder exists (`FallbackCatalog::SdrToneShape`) and its call site is in WP-4's
+  `silent-fallbacks-callsites.patch` (not yet applied on this branch).
+- The tunnel deband skips appear as `VP deband: off on the DV tunnel planes ...` (owned by
+  `DvHostStage`, entry id `VP deband`) and on the DV ingress line.
+
+**To lift the module** (a stand-alone slot): the host patch applied (all DV calls through
+`DvHostStage`); the SDR tone shape block moved into the same adapter (it is still inline host
+code); the settings readers moved into VP-V's config section (WP-18); the shaders stay in
+`shaders/` (deploy layout).
+
+**Test it standalone** (CPU, single-threaded, from the solution root after a Release build):
+
+```
+vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /Logger:trx /Tests:SdrToneShapeWtwTests,DolbyVisionTrimsTests,DvTrimSelectionTests,DvDolbyStyleTests,DvHostStageTests
+```
+
+GPU (not run by agents): `DolbyVisionTrimShaderMatchesItsReference`,
+`DolbyVisionTrimShaderL8AndIctcpPathsMatchTheirReferences`, the DV synthetic suite.
+
 ## Known issues / open items
 
 - KNOWN GAP (needs a live capture, after the deploy / with the DeckLink): the L8 / L9 / L10
@@ -117,12 +186,16 @@ index 1, and the curve's mid adaptation constants are VP assumptions, to calibra
 
 ## Where the code lives (live file list)
 
-Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **partly migrated** (M2 step 6; the shaders stay in `shaders/`, the runtime layout). The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
-- `src/VideoProcessor-Lib/vprenderer/SdrToneShape.h`
-- `src/VideoProcessor-Lib/vprenderer/DolbyVisionTrims.h`
+- `src/VP-V/modules/colour/sdr_tone_shape/SdrToneShape.h`
+- `src/VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h`
+- `src/VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h`
+- `src/VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h`
 - `shaders/SDR tone shape.glsl`
 - `shaders/DV trims.glsl`
+
+Forwarding headers (removed in M2 step 0): `src/VideoProcessor-Lib/vprenderer/SdrToneShape.h` and `DolbyVisionTrims.h`, kept for the renderer host and Bill's `LibplaceboLutParserTests.cpp`.
 
 ## Migration directive
 
@@ -138,12 +211,12 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 
 ## Settings
 
-- Keys: `sdr_tone_shape`, `dv_trims`, `dv_tone_mapping`.
+- Keys: `sdr_tone_shape`, `sdr_white_headroom`, `sdr_knee_start`, `sdr_knee_strength`, `sdr_contrast_recovery`, `dv_trims`, `dv_tone_mapping`.
 - Tiers: not tiered.
 - VP-V page, Colour tab: not tiered (libplacebo does the colour in every tier; the cheaper combined HDR->SDR LUT for Classic/Low is not yet implemented.).
 - Listed under the tier: `dv_trims`, `sdr_tone_shape`.
 - Plain-language guide: [docs/settings/VP-settings-reference.md#6-colour](../../../../../docs/settings/VP-settings-reference.md#6-colour).
-- Fallback entry ("Fallbacks engaged"): `SDR tone shape: not applied (shader did not load)`.
+- Fallback entry ("Fallbacks engaged"): `DV tone mapping: <why>: bt2390[ + trims] | Dolby Vision trims: <state> | SDR tone shape: not applied (<why>)`.
 
 ## Tests
 
