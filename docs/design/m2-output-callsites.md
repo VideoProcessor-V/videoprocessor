@@ -98,6 +98,10 @@ matrix, as WP-13's acceptance says.
   (hooks owned by the stage; `CarryHooks()` gives the efficiency code its `HoldsTextures` /
   `Release` / `CarryPasses`). Its other hunks (8844 teardown etc.) are untouched by this patch.
 
+- `motion-timing-slots.patch` (feat/m2-motion) edits the two `adaptiveGrainMapWanted` lines this patch
+  moves into `AdaptiveDownscaleStage`. Apply this patch first; their two hunks become
+  `adaptiveFrame.vectorsRun = MotionVectorsRun();` in the adaptive block's frame fill.
+
 ## Rebase notes (onto integ/batch1)
 
 Order (audit 2026-10-25 M-1): this branch is based on perf/byte-identical, so it lands **after
