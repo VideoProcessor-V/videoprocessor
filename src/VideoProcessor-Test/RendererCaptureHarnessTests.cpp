@@ -4520,7 +4520,9 @@ namespace Tests
 			std::string configErrors;
 			auto capturesOf = [&](const std::string& extra) {
 				FramePlan plan;
-				plan.rateNumerator = 24000;
+				// VP_TEST_NEAR_BLACK_RATE: the source rate numerator over 1001 (default 24000; 60000 = 59.94p).
+				const int rate = atoi(RealClip::Env("VP_TEST_NEAR_BLACK_RATE").c_str());
+				plan.rateNumerator = rate > 0 ? rate : 24000;
 				plan.rateDenominator = 1001;
 				plan.step = [](int) { FrameStep f; f.content = 0; return f; };
 				const double delay = atof(RealClip::Env("VP_TEST_NEAR_BLACK_DELAY").c_str());   // extra seconds before the captures (slow start-ups)
