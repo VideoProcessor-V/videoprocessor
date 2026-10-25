@@ -241,7 +241,7 @@ namespace VideoProcessorTest
 			pl_dispatch_destroy(&dispatch);
 		}
 
-		// Efficiency round 2026-10-18 (efficiency_fixes, vprenderer/UploadReuse.h): the frame shown
+		// Efficiency round 2026-10-18 (efficiency_fixes, VP-V/modules/input/capture/UploadReuse.h): the frame shown
 		// takes the planes the de-judder uploaded for it as the next frame. That is exact because
 		// an upload is a pure function of the payload and the layout: the same bytes through the
 		// same route (the CPU route's pl_upload_plane of P010 / P210, or capture_path gpu's raw
