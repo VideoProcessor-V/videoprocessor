@@ -359,10 +359,10 @@
     <ClCompile Include="MixedScreenSourceResolutionTests.cpp" />
     <ClCompile Include="SourceResolutionLatchTests.cpp" />
     <ClCompile Include="ExtendedRangeCarryTests.cpp" />
-    <ClCompile Include="CalibrationCoreTests.cpp" />
-    <ClCompile Include="CalibrationRemainderTests.cpp" />
-    <ClCompile Include="CalibrationMeterTests.cpp" />
-    <ClCompile Include="CalibrationPhase2Tests.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationCoreTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationRemainderTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationMeterTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationPhase2Tests.cpp" />
     <ClCompile Include="SdrToneShapeWtwTests.cpp" />
     <ClCompile Include="BugHunt20261017CaptureTests.cpp" />
     <ClCompile Include="BugHunt2GuiTests.cpp" />
