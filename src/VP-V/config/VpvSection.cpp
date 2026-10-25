@@ -1040,9 +1040,12 @@ namespace Vpv
 					state->RefreshAll();
 				};
 				// A planned step: the handle goes back to where it was and nothing is written.
-				auto plannedHit = [state, u, t, implemented, plannedPtr, plannedText](int p)
+				// A drag that ends on a planned step must not apply anything on release (the handle was put back).
+				auto draggedToPlanned = std::make_shared<bool>(false);
+				auto plannedHit = [state, u, t, implemented, plannedPtr, plannedText, draggedToPlanned](int p)
 				{
-					if (p < implemented) return false;
+					if (p < implemented) { *draggedToPlanned = false; return false; }
+					*draggedToPlanned = t.slider->isSliderDown();
 					int back = MatchTier(TierTable(), *u, state->MakeGetter());
 					if (back < 0) back = state->ChosenTier(u->id);
 					if (back < 0) back = implemented - 1;
@@ -1058,8 +1061,10 @@ namespace Vpv
 					if (!plannedHit(p)) apply(p);
 				});
 				// Choosing the step the handle already sits on (after Custom) moves nothing: releasing it applies it.
-				QObject::connect(t.slider, &QSlider::sliderReleased, t.slider, [state, u, t, apply, implemented]()
+				QObject::connect(t.slider, &QSlider::sliderPressed, t.slider, [draggedToPlanned]() { *draggedToPlanned = false; });
+				QObject::connect(t.slider, &QSlider::sliderReleased, t.slider, [state, u, t, apply, implemented, draggedToPlanned]()
 				{
+					if (*draggedToPlanned) { *draggedToPlanned = false; return; }
 					if (!state->refreshing && t.slider->value() < implemented &&
 						MatchTier(TierTable(), *u, state->MakeGetter()) != t.slider->value()) apply(t.slider->value());
 				});

@@ -1082,6 +1082,43 @@ namespace
 		requireVpReads(path);
 	}
 
+	// Dragging the handle from Custom onto the planned Upper and letting go changes nothing (audit 2026-10-25, MEDIUM).
+	void testPlannedDragFromCustomWritesNothing()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir);
+		ConfigEditorWindow window(path, 0, true);
+		auto set = [&](const char* key, const char* value)
+		{
+			auto* combo = control<QComboBox>(window, QStringLiteral("config.vprenderer.") + QString::fromLatin1(key));
+			combo->setCurrentIndex(combo->findData(QString::fromLatin1(value)));
+		};
+		control<QCheckBox>(window, Vpv::ObjectName("scaling.card.tier_keys.custom"))->setChecked(true);
+		set("source_resolution", "native");   // Classic's value ...
+		set("adaptive_downscale", "on");      // ... with Mid's: no tier matches
+		QCoreApplication::processEvents();
+		require(control<QLabel>(window, Vpv::ObjectName("scaling.tier.name"))->text() == QStringLiteral("Custom"), "the unit reads Custom");
+		auto snapshot = [&]()
+		{
+			std::map<std::string, std::string> keys;
+			for (const char* key : { "source_resolution", "adaptive_downscale", "adaptive_w_base" })
+				if (auto* w = window.findChild<QWidget*>(QStringLiteral("config.vprenderer.") + QString::fromLatin1(key)))
+				{
+					if (auto* combo = qobject_cast<QComboBox*>(w)) keys[key] = S(combo->currentData().toString());
+					else if (auto* edit = qobject_cast<QLineEdit*>(w)) keys[key] = S(edit->text());
+				}
+			return keys;
+		};
+		const auto before = snapshot();
+		auto* slider = control<QSlider>(window, Vpv::ObjectName("scaling.tier"));
+		slider->setSliderDown(true);
+		slider->setValue(3);
+		slider->setSliderDown(false);   // releases: emits sliderReleased
+		QCoreApplication::processEvents();
+		require(snapshot() == before, "a drag from Custom onto the planned Upper and release writes no key");
+		require(control<QLabel>(window, Vpv::ObjectName("scaling.tier.name"))->text() == QStringLiteral("Custom"), "the unit is still Custom");
+	}
+
 	// Approve / Keep per retirement group: only recorded; nothing is hidden; stored as [vpv] retirement_a..d.
 	void testRetirementDecisions()
 	{
@@ -1195,6 +1232,7 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: every setting says where its value comes from (Set by)", testSetByOnThePage);
 	failures += run("VP-V: Dynamic Drive main page contents and greyed reasons", testDynamicDriveMainPage);
 	failures += run("VP-V: four tier steps, Upper shown as planned", testFourTierSteps);
+	failures += run("VP-V: a drag from Custom onto the planned step writes nothing", testPlannedDragFromCustomWritesNothing);
 	failures += run("VP-V: retirement Approve and Keep are recorded without hiding", testRetirementDecisions);
 	return failures;
 }
