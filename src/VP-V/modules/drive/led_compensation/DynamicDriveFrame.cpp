@@ -94,7 +94,11 @@ namespace LedDrive
 	{
 		if (collected > 0)
 			return std::string();
-		return LedDriveModule::CompensationUnavailableReason(slotRuns, !slotRuns || runtimeDisabled, !runtimeDisabled);
+		// Nothing was collected: either the slot is off, or (slot on) the chain's one entry was
+		// disabled by libplacebo after loading, or it never loaded.
+		const bool shaderLoaded = runtimeDisabled;    // read only when the slot runs
+		const bool shaderEnabled = !runtimeDisabled;
+		return LedDriveModule::CompensationUnavailableReason(slotRuns, shaderLoaded, shaderEnabled);
 	}
 
 	void DynamicDriveFrame::PrepareFrame(const DynamicDriveFrameInputs& in, std::vector<const pl_hook*>& hooks,
@@ -118,8 +122,11 @@ namespace LedDrive
 			DebugLog::Log("Dynamic Drive: gamma boost %s (exponent %.4f on output gamma %.2f)",
 				boostExponent != 1.0 ? "on" : "off", boostExponent, displayGamma);
 		}
-		if (boostExponent == 1.0)
+		if (boostExponent == 1.0 && boostEngaged)
+		{
 			ReleaseFallback(kBoostFallbackId);
+			boostEngaged = false;
+		}
 		if (!(led || boostExponent != 1.0 || shadowLift.load(std::memory_order_acquire) > 0.0))
 		{
 			MergeModuleFallbacks(led);
@@ -236,6 +243,7 @@ namespace LedDrive
 			boostMissingLogged = true;
 			// No silent fallbacks (owner rule): the boost's loss is visible, not log-only.
 			Engage(kBoostFallbackId, "not applied: " + unavailable + "; the picture is plain output_gamma");
+			boostEngaged = true;
 		}
 		else if (hooks.size() > compensationStart)
 		{
@@ -243,6 +251,7 @@ namespace LedDrive
 				DebugLog::Log("Dynamic Drive: gamma boost applied again (compensation hook running)");
 			boostMissingLogged = false;
 			ReleaseFallback(kBoostFallbackId);
+			boostEngaged = false;
 		}
 		MergeModuleFallbacks(led);
 		for (size_t i = compensationStart; i < hooks.size(); ++i)
@@ -351,6 +360,9 @@ namespace LedDrive
 		// Module findings items 1 and 2: the module's own entries ("LED drive" while it holds full
 		// drive, "projector" during a dry run) join the renderer's heading; released when the
 		// module clears them or goes away. Engage/Release return at once when unchanged.
+		// Audit N1: with no module and nothing engaged, no registry calls (the LED-off frame).
+		if (!led && !moduleEntriesEngaged)
+			return;
 		const std::vector<FallbackStatus::Entry> entries = led ? led->FallbackEntries() : std::vector<FallbackStatus::Entry>();
 		for (const char* id : { LedDriveModule::kHoldFallbackId, LedDriveModule::kDryRunFallbackId })
 		{
@@ -361,5 +373,6 @@ namespace LedDrive
 			else
 				ReleaseFallback(id);
 		}
+		moduleEntriesEngaged = !entries.empty();
 	}
 }

@@ -146,5 +146,7 @@ namespace LedDrive
 		std::string readbacksReason;             // that note, without counts
 		std::string readbacksEngagedReason;      // the text the entry shows now
 		bool readbacksLosing = false;
+		bool boostEngaged = false;             // the gamma boost entry is engaged (audit N1)
+		bool moduleEntriesEngaged = false;     // a module entry was engaged last frame (audit N1)
 	};
 }

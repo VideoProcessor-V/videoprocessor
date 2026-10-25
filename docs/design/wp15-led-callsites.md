@@ -108,7 +108,7 @@ reference), `ledIntentLimitsSent` (intent glue, WP-16), the calibration tone-cur
   - `LibplaceboLutParserTests`: `LedMeasurementHook*`, `LedCompensation*`, `LedBoostToeAndShadowLift`,
     `LedHighlightStatisticIgnoresGrain` (WARP; moved files, unchanged code);
   - with the patch applied: renderer harness byte identity LED off (r6 frozen hashes) and with
-    compensate + script dry run; forced shader-missing run (LED held, entry shown); BTB/WTW probes
+    compensate + script dry run; forced shader-missing run (LED held, entry shown); renderer restart / rebuild with compensate on: no "held at full" engagement on the first frames (audit I3: the shader must be ready when the first frame's hooks are collected, or the LED jumps to full); BTB/WTW probes
     through the compensation hook (codes 4 and 1019);
   - FL35 dry run / real projector: hold-over between files in the filter, RS-232 test
     suspend/resume, calibration patterns suspend/resume, forced-shutdown restore.
