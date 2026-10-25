@@ -1,5 +1,5 @@
 diff --git a/src/VP-V/tests/PipelineSkeletonTests.cpp b/src/VP-V/tests/PipelineSkeletonTests.cpp
-index 2ed3092e..6158c5fc 100644
+index 230d6235..b9dd707c 100644
 --- a/src/VP-V/tests/PipelineSkeletonTests.cpp
 +++ b/src/VP-V/tests/PipelineSkeletonTests.cpp
 @@ -6,6 +6,7 @@
@@ -297,10 +297,10 @@ index 91dea47c..f3edb140 100644
  
  	inline bool TryParsePositiveSize(const std::string& value, size_t& parsedValue)
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index 395b11a0..e2dd4ddf 100644
+index 44759155..7d956a2f 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-@@ -34,6 +34,8 @@
+@@ -38,6 +38,8 @@
  #include <microsoft_directshow/MadVRShaderLoader.h>
  #include <vprenderer/AlphaCadenceCorrectionPolicy.h>
  #include <vprenderer/AlphaQueuePolicy.h>
@@ -309,7 +309,7 @@ index 395b11a0..e2dd4ddf 100644
  #include <vprenderer/LibplaceboDisplayLut.h>
  #include <vprenderer/LibplaceboCalibrationLutPolicy.h>
  #include <vprenderer/AlphaPresentationTelemetry.h>
-@@ -27061,73 +27063,42 @@ LibplaceboVideoRenderer::QueueHold LibplaceboVideoRenderer::CurrentQueueHold() c
+@@ -27043,73 +27045,42 @@ LibplaceboVideoRenderer::QueueHold LibplaceboVideoRenderer::CurrentQueueHold() c
  	return m_queueHold;
  }
  
@@ -416,7 +416,7 @@ index 395b11a0..e2dd4ddf 100644
  	bool wasActive = false;
  	{
  		std::lock_guard<std::mutex> guard(m_queueHoldMutex);
-@@ -27155,7 +27126,7 @@ void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz, double s
+@@ -27140,7 +27111,7 @@ void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz, double s
  		char text[192] = {};
  		sprintf_s(text, "%d ms at %.3f Hz (signal %.3f Hz): %d look-ahead frames, hold %.1f ms = target %zu + %.2f frames, padding %.1f ms",
  			budgetMs, sourceRateHz, signalRateHz > 0.0 ? signalRateHz : sourceRateHz, plan.queueFrames, plan.holdMs,
@@ -425,7 +425,7 @@ index 395b11a0..e2dd4ddf 100644
  		state = text;
  	}
  	if (state != m_queueHoldLogged)
-@@ -27164,7 +27135,7 @@ void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz, double s
+@@ -27149,7 +27120,7 @@ void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz, double s
  		if (next.active)
  			DebugLog::Log("Delay budget: %s", state.c_str());
  		else if (wasActive)
@@ -434,7 +434,7 @@ index 395b11a0..e2dd4ddf 100644
  	}
  	if (next.active != wasActive)
  		m_queueChanged.notify_all();
-@@ -27175,24 +27146,22 @@ int64_t LibplaceboVideoRenderer::HoldTicksUntilDueLocked() const
+@@ -27160,24 +27131,22 @@ int64_t LibplaceboVideoRenderer::HoldTicksUntilDueLocked() const
  	// The plain per-refresh path only. The VP timeline realises the rest by its steering (target +
  	// holdFraction); an age gate there adds a frame its slow steering does not drain (delay-gate
  	// finding 2026-10-24).
@@ -472,7 +472,7 @@ index 395b11a0..e2dd4ddf 100644
  }
  
  // A timed dequeue wait (a file head's due time, the delay budget's hold) re-checks at least this
-@@ -31177,10 +31146,13 @@ void LibplaceboVideoRenderer::RenderLoop()
+@@ -31198,10 +31167,13 @@ void LibplaceboVideoRenderer::RenderLoop()
  			previewWaitMs = std::chrono::duration<double, std::milli>(
  				SteadyClock::now() - waitStarted).count();
              intentWantedLookahead = intentWalkActive ? IntentInterpreter::WantedWalkFrames(m_frameQueue.size()) : 0;
@@ -490,7 +490,7 @@ index 395b11a0..e2dd4ddf 100644
              const auto& window = walk.window;
              activePictureWalkFrames = walk.activePictureFrames;
              activePictureLookaheadPolicyGeneration =
-@@ -32085,49 +32057,38 @@ void LibplaceboVideoRenderer::RenderLoop()
+@@ -32106,49 +32078,38 @@ void LibplaceboVideoRenderer::RenderLoop()
  						// lock holds the queue holds film frames, so the front frame's film
  						// rate; otherwise the signal's rate (measured, else nominal), not the
  						// dequeued frame's film rate once the queue has left the lock.
@@ -564,7 +564,7 @@ index 395b11a0..e2dd4ddf 100644
  							{
  								if (m_frameQueue.front().cadenceRepeat)
  									++canceledRepeats;
-@@ -32149,7 +32110,7 @@ void LibplaceboVideoRenderer::RenderLoop()
+@@ -32170,7 +32131,7 @@ void LibplaceboVideoRenderer::RenderLoop()
  								m_frameQueue.front().gapFrames = 0;   // a flush: never a gap-fill pair
  								// A held shed of the late frames keeps the steering and render-ahead's anchor
  								// (the queue is back at its hold, not restarted).
@@ -573,7 +573,7 @@ index 395b11a0..e2dd4ddf 100644
  								{
  									m_impl->vpQueueErrorReset.store(true, std::memory_order_release);
  									if (m_impl->RenderAheadActive())
-@@ -32752,16 +32713,20 @@ size_t LibplaceboVideoRenderer::PrefillTargetLocked() const
+@@ -32773,16 +32734,20 @@ size_t LibplaceboVideoRenderer::PrefillTargetLocked() const
  		return 1;
  	// VP-V delay budget (ADR-0020): with a budget the queue target is the hold's whole frames at
  	// this rate (time-based already, so no film-lock scaling); otherwise the frame-count target.
@@ -645,7 +645,7 @@ index cf832fb6..9e501a0b 100644
  	std::atomic<uint64_t> m_conversionFailures{0};
  	std::atomic<size_t> m_activePictureLookaheadFrames{0};
 diff --git a/src/VideoProcessor-Test/EfficiencyTests.cpp b/src/VideoProcessor-Test/EfficiencyTests.cpp
-index bca54176..3c713516 100644
+index 1c8340cc..d7d21e16 100644
 --- a/src/VideoProcessor-Test/EfficiencyTests.cpp
 +++ b/src/VideoProcessor-Test/EfficiencyTests.cpp
 @@ -8,6 +8,7 @@
@@ -653,7 +653,7 @@ index bca54176..3c713516 100644
  #include <VP-V/modules/drive/led_measure/LedLookahead.h>
  #include <vprenderer/AlphaQueuePolicy.h>
 +#include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
- #include <vprenderer/UploadReuse.h>
+ #include <VP-V/modules/input/capture/UploadReuse.h>
  
  #include <chrono>
 diff --git a/src/VideoProcessor-Test/IntentInterpreterTests.cpp b/src/VideoProcessor-Test/IntentInterpreterTests.cpp
@@ -740,13 +740,13 @@ index 5e01abe9..b08bdbeb 100644
  #include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
  #include <VP-V/modules/output/presentation/RenderAheadPolicy.h>
 diff --git a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
-index d1cb44b0..45bb87a3 100644
+index 93d19957..1e52d308 100644
 --- a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
 +++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
-@@ -482,6 +482,12 @@
-     <ClCompile Include="..\VP-V\nets\CpuNetExecutor.cpp">
-       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+@@ -534,6 +534,12 @@
      </ClCompile>
+     <ClCompile Include="..\VP-V\tests\FrameAnalysisProducerTests.cpp" />
+     <ClCompile Include="..\VP-V\tests\SharedLumaEquivalenceTests.cpp" />
 +    <ClCompile Include="..\VP-V\tests\QueueTimingPolicyTests.cpp">
 +      <PrecompiledHeader>NotUsing</PrecompiledHeader>
 +    </ClCompile>
