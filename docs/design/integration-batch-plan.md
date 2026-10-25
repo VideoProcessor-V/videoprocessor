@@ -364,7 +364,7 @@ so verification is against the batch base.
   uncommitted host/test edits = the patch being finalised); queue 164; forecast §2.1; vp-either-or-
   overlaps; vp-low-latency-vectors; vp-vector-validity.
 - **Files:** upstreamable: `vprenderer/QueueTimingPolicy.h`, `QueueLookaheadWalk.h`. VP:
-  `src/VP-V/modules/input/queue_timing/*`, `src/VP-V/modules/motion/MotionSegment.h`,
+  `src/VP-V/modules/input/queue_timing/*`, `src/VP-V/modules/motion/vector_delivery/MotionSegment.h`,
   `SampledPassTimers.h`, tests. Host + Bill's `AlphaQueuePolicy.h` via
   `motion-timing-callsites.patch` (P-a), then P-b1/P-b2/P-c as separate commits. Restoring
   `AlphaQueuePolicy.h` to Bill's text is **removing our edits from his file**, which the rules

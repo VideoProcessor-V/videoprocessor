@@ -13,14 +13,14 @@
 #include "CppUnitTest.h"
 
 #include <DisplayRefreshRatePolicy.h>
-#include <vprenderer/DejudderPolicy.h>
+#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
 #include <vprenderer/GrainPreserve.h>
-#include <vprenderer/InterpolationPolicy.h>
-#include <vprenderer/InterpolationTimeline.h>
-#include <vprenderer/MotionAheadProducer.h>
+#include <VP-V/modules/motion/consumers/InterpolationPolicy.h>
+#include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
+#include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <GeneralRate.h>
-#include <QueueLatency.h>
-#include <MotionAhead.h>
+#include <VP-V/modules/input/queue_timing/QueueLatency.h>
+#include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <RefreshKey.h>
 #include <LiveEpochConvergenceController.h>
 #include <microsoft_directshow/DirectShowRatePolicy.h>

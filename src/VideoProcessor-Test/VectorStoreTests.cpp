@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include <VectorStore.h>
+#include <VP-V/modules/motion/estimation/VectorStore.h>
 
 #include <atomic>
 #include <thread>
@@ -104,7 +104,7 @@ namespace VectorStoreTest
 	};
 }
 
-#include <MotionAhead.h>
+#include <VP-V/modules/motion/estimation/MotionAhead.h>
 
 namespace MotionAheadTest
 {
@@ -167,7 +167,7 @@ namespace MotionAheadSwitchTest
 	};
 }
 
-#include <vprenderer/MotionAheadProducer.h>
+#include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <memory>
 
 namespace MotionAheadLumaTest
@@ -352,7 +352,7 @@ namespace MotionAheadRgbLumaTest
 	};
 }
 
-#include <OpticalFlowTrust.h>
+#include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
 
 // 2026-10-17 (docs/VP-nvof-ahead.md, the engine's extras): the cost and the engine's own
 // forward/backward consistency as trust weights, and the engine's whole-frame motion with a

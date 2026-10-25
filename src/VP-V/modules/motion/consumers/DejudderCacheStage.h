@@ -1,6 +1,6 @@
 #pragma once
 
-#include <vprenderer/RenderedWarp.h>
+#include <VP-V/modules/motion/consumers/RenderedWarp.h>
 #include <SubtitleBoxDetector.h>
 
 #include <libplacebo/renderer.h>

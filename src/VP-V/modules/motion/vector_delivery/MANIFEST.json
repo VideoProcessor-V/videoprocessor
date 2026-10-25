@@ -4,9 +4,14 @@
   "unit": "motion",
   "order": 130,
   "status": "partial",
-  "code_location": "legacy",
+  "code_location": "partly migrated",
   "live_files": [
     "src/VP-V/core/VectorScale.h",
+    "src/VP-V/modules/motion/vector_delivery/DejudderPolicy.h",
+    "src/VP-V/modules/motion/vector_delivery/DejudderWarp.h",
+    "src/VP-V/modules/motion/vector_delivery/MotionSegment.h"
+  ],
+  "forwarding_headers": [
     "src/VideoProcessor-Lib/vprenderer/DejudderPolicy.h",
     "src/VideoProcessor-Lib/vprenderer/DejudderWarp.h"
   ],
@@ -20,7 +25,16 @@
       "optional": []
     },
     "tools": [],
-    "config_keys": [],
+    "config_keys": [
+      "dejudder_even_rates",
+      "dejudder_strength",
+      "dejudder_strength_even",
+      "general_rate_fixes",
+      "motion_engine",
+      "motion_history_fixes",
+      "occlusion_mask",
+      "timing_continuity_fixes"
+    ],
     "upstream_modules": [
       "motion.estimation",
       "scaling.rebase",
@@ -28,6 +42,6 @@
       "scaling.geometry"
     ]
   },
-  "fallback_when_missing": "Invalid geometry map -> vectors invalid -> consumers fall back.",
-  "fallback_entry": "Vectors: invalid (<reason>)"
+  "fallback_when_missing": "No entry of its own: invalid vectors make every consumer take its no-motion form (by design, not a downgrade). Engine/matcher downgrades are motion.estimation's entry.",
+  "fallback_entry": null
 }

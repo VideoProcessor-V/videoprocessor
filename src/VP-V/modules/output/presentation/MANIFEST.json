@@ -4,13 +4,17 @@
   "unit": "output",
   "order": 270,
   "status": "built",
-  "code_location": "legacy",
+  "code_location": "partly migrated",
   "live_files": [
-    "src/VideoProcessor-Lib/vprenderer/RenderAheadPolicy.h",
+    "src/VP-V/modules/output/presentation/RenderAheadPolicy.h",
     "src/VideoProcessor-Lib/vprenderer/AlphaPresentationTelemetry.cpp",
-    "src/VideoProcessor-Lib/vprenderer/OpenLoopDisplayRate.h",
+    "src/VP-V/modules/output/presentation/OpenLoopDisplayRate.h",
     "src/VideoProcessor-Lib/DisplayRefreshRatePolicy.cpp",
     "src/VideoProcessor-Lib/vprenderer/NativeStatsOverlayBitmap.h"
+  ],
+  "forwarding_headers": [
+    "src/VideoProcessor-Lib/vprenderer/OpenLoopDisplayRate.h",
+    "src/VideoProcessor-Lib/vprenderer/RenderAheadPolicy.h"
   ],
   "components": {
     "files": {
@@ -23,6 +27,7 @@
     },
     "tools": [],
     "config_keys": [
+      "dejudder_gate",
       "render_ahead",
       "render_ahead_queue_credit",
       "render_ahead_utilisation"
@@ -31,6 +36,6 @@
       "output.dither"
     ]
   },
-  "fallback_when_missing": "Window / iGPU panel -> open loop.",
-  "fallback_entry": "Presentation: open loop (no display statistics)"
+  "fallback_when_missing": "Window / iGPU panel without DXGI statistics -> render-ahead open loop on an estimated rate (entry from FallbackCatalog::Presentation, wired by WP-4's silent-fallbacks patch; log-only until it lands).",
+  "fallback_entry": "presentation: open loop: no display statistics, estimated rate / de-judder held: display rate not known"
 }

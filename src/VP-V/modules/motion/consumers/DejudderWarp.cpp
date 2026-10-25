@@ -1,9 +1,9 @@
 ﻿#include <pch.h>
-#include "DejudderWarp.h"
+#include <VP-V/modules/motion/vector_delivery/DejudderWarp.h>
 #include <vprenderer/GrainPreserve.h>
-#include <vprenderer/MotionAheadProducer.h>
-#include <OpticalFlowTrust.h>
-#include <vprenderer/DejudderPolicy.h>
+#include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
+#include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
+#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
 
 #include <chrono>
 
@@ -2634,11 +2634,19 @@ if (q.x < size.x && q.y < size.y) {
 
 	void MotionWarp::FlushPassTimers()
 	{
-		pl_gpu_finish(gpu);
+		pl_gpu_finish(gpu);   // once: the inner shares the GPU (it used to finish a second time)
+		PollPassTimers();
+	}
+
+	// Efficiency (motion-timing extraction, 2026-10-24): collect whatever timer results are ready,
+	// never waiting on the GPU. With SetPassTiming(true, false) this is the production-safe path
+	// (VpMotion::SampledPassTimers arms it 1 frame in N); FlushPassTimers stays the tests' drain.
+	void MotionWarp::PollPassTimers()
+	{
 		for (const auto& entry : passTimers)
 			CollectTimer(entry.first, entry.second);
 		if (inner)
-			inner->FlushPassTimers();
+			inner->PollPassTimers();
 	}
 
 	bool MotionWarp::DispatchPerBlock(const char* description, const char* header, const char* body,

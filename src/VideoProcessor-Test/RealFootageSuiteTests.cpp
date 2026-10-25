@@ -49,13 +49,13 @@
 
 #include <ContentClassifier.h>
 #include <ContentIntentObserver.h>
-#include <MotionValidity.h>
+#include <VP-V/modules/motion/estimation/MotionValidity.h>
 #include <SourceResolutionDetector.h>
 #include <vprenderer/AlphaQueuePolicy.h>
 #include <vprenderer/CaptureTimestampGap.h>
-#include <vprenderer/DejudderPolicy.h>
-#include <vprenderer/InterpolationTimeline.h>
-#include <vprenderer/PulldownDetector.h>
+#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
+#include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
+#include <VP-V/modules/input/queue_timing/PulldownDetector.h>
 #include <vprenderer/SourceResolutionMonitor.h>
 #include <vprenderer/StartupCropHold.h>
 

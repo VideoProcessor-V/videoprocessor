@@ -101,19 +101,24 @@
       "slot": "input.queue_timing",
       "order": 30,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
         "src/VP-V/core/DelayBudget.h",
-        "src/VideoProcessor-Lib/QueueLatency.h",
+        "src/VP-V/modules/input/queue_timing/QueueLatency.h",
         "src/VideoProcessor-Lib/QueueConfiguration.h",
-        "src/VideoProcessor-Lib/QueueLookahead.h",
+        "src/VP-V/modules/input/queue_timing/QueueLookahead.h",
         "src/VideoProcessor-Lib/CaptureFrameQueue.h",
         "src/VideoProcessor-Lib/VideoTimingController.cpp",
         "src/VideoProcessor-Lib/TimingClock.cpp",
         "src/VideoProcessor-Lib/UnifiedProfileRuntime.cpp",
-        "src/VideoProcessor-Lib/vprenderer/PulldownDetector.h",
+        "src/VP-V/modules/input/queue_timing/PulldownDetector.h",
         "src/VideoProcessor-Lib/vprenderer/AlphaQueuePolicy.h",
-        "src/VideoProcessor-GUI/VideoProcessorDlg.cpp"
+        "src/VideoProcessor-GUI/VideoProcessorDlg.cpp",
+        "src/VP-V/modules/input/queue_timing/VpQueueRules.h",
+        "src/VP-V/modules/input/queue_timing/VpFixedBudgetPolicy.h",
+        "src/VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h",
+        "src/VideoProcessor-Lib/vprenderer/QueueTimingPolicy.h",
+        "src/VideoProcessor-Lib/vprenderer/QueueLookaheadWalk.h"
       ],
       "components": {
         "files": {
@@ -126,20 +131,27 @@
         },
         "tools": [],
         "config_keys": [
-          "low_latency",
+          "active_picture_lookahead_frames",
+          "cadence_class_fixes",
+          "general_rate_fixes",
           "low_latency_path",
           "pulldown_fixes",
           "queue_auto_reset",
-          "queue_recovery",
           "queue_size",
           "queue_timing_fixes",
-          "target_latency_ms"
+          "reset_after_render_restart_seconds",
+          "reset_queue_too_large_percent",
+          "startup_preroll_frames",
+          "target_frames",
+          "target_latency_ms",
+          "timing_continuity_fixes",
+          "use_frame_queue"
         ],
         "upstream_modules": [
           "input.capture"
         ]
       },
-      "fallback_when_missing": "With 2-3 frames available, every look-ahead consumer shortens its look-ahead or falls back; the delay never changes."
+      "fallback_when_missing": "The 4/3/2 ladder shortens the look-ahead when the budget cannot hold 4 frames (\"look-ahead\"); an infeasible budget, unknown display refresh or a queue_size cut falls back to the frame-count queue (\"delay budget\"). The total delay never changes silently."
     },
     {
       "slot": "input.source_analysis",
@@ -191,18 +203,19 @@
       "slot": "motion.estimation",
       "order": 50,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/NvOpticalFlow.cpp",
-        "src/VideoProcessor-Lib/vprenderer/NvOpticalFlow.h",
-        "src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp",
-        "src/VideoProcessor-Lib/vprenderer/MotionAheadProducer.cpp",
-        "src/VideoProcessor-Lib/MotionAhead.h",
-        "src/VideoProcessor-Lib/VectorStore.h",
-        "src/VideoProcessor-Lib/MotionValidity.h",
-        "src/VideoProcessor-Lib/OpticalFlowTrust.h",
+        "src/VP-V/modules/motion/estimation/NvOpticalFlow.cpp",
+        "src/VP-V/modules/motion/estimation/NvOpticalFlow.h",
+        "src/VP-V/modules/motion/consumers/DejudderWarp.cpp",
+        "src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp",
+        "src/VP-V/modules/motion/estimation/MotionAhead.h",
+        "src/VP-V/modules/motion/estimation/VectorStore.h",
+        "src/VP-V/modules/motion/estimation/MotionValidity.h",
+        "src/VP-V/modules/motion/estimation/OpticalFlowTrust.h",
         "src/VideoProcessor-Lib/MotionConfig.h",
-        "src/VideoProcessor-Lib/vprenderer/MotionEngineIdle.h"
+        "src/VP-V/modules/motion/estimation/MotionEngineIdle.h",
+        "src/VP-V/modules/motion/estimation/MotionAheadProducer.h"
       ],
       "components": {
         "files": {
@@ -217,20 +230,44 @@
         },
         "tools": [],
         "config_keys": [
-          "dejudder_est",
+          "dejudder_consistency_px",
+          "dejudder_cut_histogram",
+          "dejudder_est_candidates",
+          "dejudder_est_gate",
+          "dejudder_est_lambda",
+          "dejudder_est_qpel",
+          "dejudder_est_split",
+          "dejudder_est_split_sad",
           "dejudder_estimate_ahead",
+          "dejudder_fade_floor",
+          "dejudder_fade_match",
+          "dejudder_global_prior",
+          "dejudder_global_two",
+          "dejudder_low_res",
+          "dejudder_match_tolerance",
+          "dejudder_regional_hold",
           "dejudder_search_range",
+          "dejudder_texture_tolerance",
+          "dejudder_vector_smooth",
+          "dejudder_verify",
+          "dejudder_verify_share",
+          "general_rate_fixes",
           "motion_ahead_frames",
           "motion_ahead_ms",
           "motion_engine",
-          "motion_history_fixes"
+          "motion_history_fixes",
+          "optical_flow",
+          "optical_flow_cost_trust",
+          "optical_flow_fb_check",
+          "optical_flow_global",
+          "optical_flow_global_fallback"
         ],
         "upstream_modules": [
           "input.queue_timing",
           "input.source_analysis"
         ]
       },
-      "fallback_when_missing": "NVOF rejected/absent -> VP's matcher; vectors invalid -> every consumer falls back to its no-motion form."
+      "fallback_when_missing": "NVOF failed or the look-ahead producer stopped -> VP's matcher (entry from FallbackCatalog::Motion, wired by WP-4's silent-fallbacks patch; log-only until it lands); vectors invalid -> every consumer takes its no-motion form (by design, no entry)."
     },
     {
       "slot": "scaling.rebase",
@@ -453,11 +490,12 @@
       "slot": "motion.vector_delivery",
       "order": 130,
       "status": "partial",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
         "src/VP-V/core/VectorScale.h",
-        "src/VideoProcessor-Lib/vprenderer/DejudderPolicy.h",
-        "src/VideoProcessor-Lib/vprenderer/DejudderWarp.h"
+        "src/VP-V/modules/motion/vector_delivery/DejudderPolicy.h",
+        "src/VP-V/modules/motion/vector_delivery/DejudderWarp.h",
+        "src/VP-V/modules/motion/vector_delivery/MotionSegment.h"
       ],
       "components": {
         "files": {
@@ -469,7 +507,16 @@
           "optional": []
         },
         "tools": [],
-        "config_keys": [],
+        "config_keys": [
+          "dejudder_even_rates",
+          "dejudder_strength",
+          "dejudder_strength_even",
+          "general_rate_fixes",
+          "motion_engine",
+          "motion_history_fixes",
+          "occlusion_mask",
+          "timing_continuity_fixes"
+        ],
         "upstream_modules": [
           "motion.estimation",
           "scaling.rebase",
@@ -477,7 +524,7 @@
           "scaling.geometry"
         ]
       },
-      "fallback_when_missing": "Invalid geometry map -> vectors invalid -> consumers fall back."
+      "fallback_when_missing": "No entry of its own: invalid vectors make every consumer take its no-motion form (by design, not a downgrade). Engine/matcher downgrades are motion.estimation's entry."
     },
     {
       "slot": "motion.consumers",
@@ -485,14 +532,18 @@
       "status": "built",
       "code_location": "partly migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp",
-        "src/VideoProcessor-Lib/vprenderer/DejudderAhead.h",
-        "src/VideoProcessor-Lib/vprenderer/RenderedWarp.cpp",
-        "src/VideoProcessor-Lib/vprenderer/FrameInterpolator.cpp",
-        "src/VideoProcessor-Lib/vprenderer/InterpolationTimeline.h",
-        "src/VideoProcessor-Lib/vprenderer/InterpolationPolicy.h",
-        "src/VideoProcessor-Lib/vprenderer/OcclusionMaskHook.cpp",
+        "src/VP-V/modules/motion/consumers/DejudderWarp.cpp",
+        "src/VP-V/modules/motion/consumers/DejudderAhead.h",
+        "src/VP-V/modules/motion/consumers/RenderedWarp.cpp",
+        "src/VP-V/modules/motion/consumers/FrameInterpolator.cpp",
+        "src/VP-V/modules/motion/consumers/InterpolationTimeline.h",
+        "src/VP-V/modules/motion/consumers/InterpolationPolicy.h",
+        "src/VP-V/modules/motion/consumers/OcclusionMaskHook.cpp",
         "src/VideoProcessor-Lib/vprenderer/TemporalRenderer.h",
+        "src/VP-V/modules/motion/consumers/RenderedWarp.h",
+        "src/VP-V/modules/motion/consumers/FrameInterpolator.h",
+        "src/VP-V/modules/motion/consumers/OcclusionMaskHook.h",
+        "src/VP-V/modules/motion/consumers/SampledPassTimers.h",
         "src/VP-V/modules/motion/consumers/DejudderCacheStage.h",
         "src/VP-V/modules/motion/consumers/DejudderCacheStage.cpp"
       ],
@@ -507,19 +558,47 @@
         },
         "tools": [],
         "config_keys": [
-          "dejudder_hold",
+          "cadence_class_fixes",
+          "dejudder_block_taper",
+          "dejudder_estimate_ahead",
+          "dejudder_even_rates",
+          "dejudder_frame_trust",
+          "dejudder_hold_feather_px",
+          "dejudder_hold_hysteresis",
+          "dejudder_landing_check",
+          "dejudder_motion_rolloff",
+          "dejudder_motion_scale_hi",
+          "dejudder_motion_scale_lo",
+          "dejudder_object_strength",
+          "dejudder_occlusion_fill",
+          "dejudder_pixel_trust",
+          "dejudder_pixel_trust_hi",
+          "dejudder_pixel_trust_lo",
+          "dejudder_roll_floor",
+          "dejudder_roll_hi",
+          "dejudder_roll_lo",
+          "dejudder_source_warp_filter",
           "dejudder_strength",
+          "dejudder_strength_even",
+          "dejudder_taper_sad",
+          "dejudder_trust_scale",
+          "dejudder_warp_stage",
           "dither_vectors",
           "frame_mixer",
+          "general_rate_fixes",
           "interpolation",
           "interpolation_fallback",
-          "smooth_motion"
+          "interpolation_fill_gaps",
+          "interpolation_grain",
+          "occlusion_mask",
+          "smooth_motion",
+          "source_class"
         ],
         "upstream_modules": [
           "motion.vector_delivery"
         ]
       },
-      "fallback_when_missing": "Each consumer falls back as the vector rules say."
+      "fallback_when_missing": "Each consumer falls back as the vector rules say; the visible entries today are \"entrance once fill\" / \"entrance once\" (B3) and \"look-ahead\" (short queue). Warp/interpolation failures are log/status only (findings doc)."
     },
     {
       "slot": "scaling.geometry",
@@ -944,11 +1023,11 @@
       "slot": "output.presentation",
       "order": 270,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/RenderAheadPolicy.h",
+        "src/VP-V/modules/output/presentation/RenderAheadPolicy.h",
         "src/VideoProcessor-Lib/vprenderer/AlphaPresentationTelemetry.cpp",
-        "src/VideoProcessor-Lib/vprenderer/OpenLoopDisplayRate.h",
+        "src/VP-V/modules/output/presentation/OpenLoopDisplayRate.h",
         "src/VideoProcessor-Lib/DisplayRefreshRatePolicy.cpp",
         "src/VideoProcessor-Lib/vprenderer/NativeStatsOverlayBitmap.h"
       ],
@@ -963,6 +1042,7 @@
         },
         "tools": [],
         "config_keys": [
+          "dejudder_gate",
           "render_ahead",
           "render_ahead_queue_credit",
           "render_ahead_utilisation"
@@ -971,7 +1051,7 @@
           "output.dither"
         ]
       },
-      "fallback_when_missing": "Window / iGPU panel -> open loop."
+      "fallback_when_missing": "Window / iGPU panel without DXGI statistics -> render-ahead open loop on an estimated rate (entry from FallbackCatalog::Presentation, wired by WP-4's silent-fallbacks patch; log-only until it lands)."
     },
     {
       "slot": "drive.projector_control",

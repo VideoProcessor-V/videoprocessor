@@ -117,19 +117,31 @@ def patterns(rows):
     for old, new in rows:
         if not old.startswith(LIB_REL):
             continue
-        stem_old = os.path.splitext(old[len(LIB_REL):])[0]          # e.g. "led/<Name>"
-        by_stem.setdefault(stem_old, os.path.splitext(new)[0])
+        stem_old, ext = os.path.splitext(old[len(LIB_REL):])         # e.g. "led/<Name>", ".h"
+        by_stem.setdefault(stem_old, {})[ext] = os.path.splitext(new)[0]
     # Longest first so StateReportSettings wins over StateReport.
     for stem_old in sorted(by_stem, key=len, reverse=True):
-        new_stem = by_stem[stem_old]
+        targets = by_stem[stem_old]
         d, name = os.path.split(stem_old)
         sep = r"[/\\]"
         dir_part = (re.escape(d) + sep) if d else ""
         full = r"(?P<pre>(?:src" + sep + r")?VideoProcessor-Lib" + sep + r")"
         prefix = full + ("?" if d else "")
-        rx = re.compile(r"(?<![\w-])" + prefix + dir_part + re.escape(name) +
-                        r"(?P<suf>\.(?:cpp|hpp|h|inl)|\.\*|\.\{[^}\s]*\})?(?![\w])")
-        out.append((rx, new_stem))
+        # A header and its source may move to different modules (M2: DejudderWarp.h to
+        # motion.vector_delivery, DejudderWarp.cpp to motion.consumers), or only one of them may have
+        # moved so far. Then only references naming the exact extension are rewritten; the bare stem
+        # and the ".*" / ".{h,cpp}" forms are ambiguous and left alone.
+        unmoved = [e for e in (".cpp", ".h", ".hpp", ".inl") if e not in targets and
+                   os.path.exists(os.path.join(ROOT, LIB_REL + stem_old + e))]
+        if len(set(targets.values())) == 1 and not unmoved:
+            rx = re.compile(r"(?<![\w-])" + prefix + dir_part + re.escape(name) +
+                            r"(?P<suf>\.(?:cpp|hpp|h|inl)|\.\*|\.\{[^}\s]*\})?(?![\w])")
+            out.append((rx, next(iter(targets.values()))))
+            continue
+        for ext, new_stem in sorted(targets.items()):
+            rx = re.compile(r"(?<![\w-])" + prefix + dir_part + re.escape(name) +
+                            r"(?P<suf>" + re.escape(ext) + r")(?![\w])")
+            out.append((rx, new_stem))
     return out
 
 

@@ -25,9 +25,9 @@
 #include "ExtendedRangeGpuProbe.h"
 
 #include <VP-V/modules/scaling/output/AdaptiveDownscale.h>
-#include <vprenderer/DejudderWarp.h>
+#include <VP-V/modules/motion/vector_delivery/DejudderWarp.h>
 #include <vprenderer/HookInstanceTag.h>
-#include <vprenderer/OcclusionMaskHook.h>
+#include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <VP-V/modules/output/dither/OutputEncodingRepair.h>
 #include <VP-V/modules/output/dither/SigmaDeltaDomain.h>
 #include <SubtitleCutPasteShader.h>

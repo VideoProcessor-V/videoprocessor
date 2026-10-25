@@ -12,7 +12,7 @@
 #include <IntentInterpreterSupport.h>
 #include <ActivePictureEvidence.h>
 #include <AnalysisFrame.h>
-#include <QueueLookahead.h>
+#include <VP-V/modules/input/queue_timing/QueueLookahead.h>
 #include <QueueConfiguration.h>
 #include <ConfigFile.h>
 #include <RendererProfileConfig.h>
