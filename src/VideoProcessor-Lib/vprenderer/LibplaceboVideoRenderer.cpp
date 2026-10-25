@@ -65,7 +65,7 @@
 #include <vprenderer/GpuDolbyVisionTunnelUnpack.h>
 #include <vprenderer/DolbyVisionTrims.h>
 #include <VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h>   // feat/dv-l8: the L8 / L2 trim choice
-#include <VP-V/modules/input/signal/DvCompareCapture.h>          // feat/dv-l8: DV comparison capture (diagnostic)
+#include <VP-V/modules/input/signal/DvCompareCaptureSink.h>      // feat/dv-l8: DV comparison capture (diagnostic; WP-17 adapter)
 #include <VP-V/modules/input/signal/DvTunnelPolicy.h>            // feat/dv-l8: no plane deband on the tunnel
 #include <vprenderer/EarlyUpload.h>
 #include <vprenderer/DejudderPolicy.h>
@@ -74,7 +74,7 @@
 #include <vprenderer/RenderAheadPolicy.h>
 #include <vprenderer/UploadReuse.h>
 #include <vprenderer/OpenLoopDisplayRate.h>
-#include <vprenderer/RendererDiagnosticCodes.h>
+#include <VP-V/modules/control/diagnostics/DiagnosticsAdapter.h>   // WP-17: VP diagnostics/captures adapter
 #include <vprenderer/FrameInterpolator.h>
 #include <vprenderer/GrainPreserve.h>
 #include <vprenderer/OcclusionMaskHook.h>
@@ -246,11 +246,9 @@ namespace
 		// Tests only: a writable folder when the process lives somewhere
 		// read-only (the test runner in Program Files). Unset: beside the exe.
 		{
-			// The process environment (a test sets it in-process; the CRT's copy may be the DLL's own).
-			wchar_t overrideDir[1024] = {};
-			const DWORD overrideLength = GetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", overrideDir, 1024);
-			if (overrideLength > 0 && overrideLength < 1024)
-				return std::wstring(overrideDir, overrideLength);
+			std::wstring testFolder;
+			if (VpDiagnostics::TestFolderOverride(VpDiagnostics::TestFolder::Screenshots, testFolder))
+				return testFolder;
 		}
 		std::vector<wchar_t> buffer(32768);
 		const DWORD length = GetModuleFileNameW(
@@ -462,10 +460,9 @@ namespace
 		// runner's executable lives elsewhere). Unset: beside the exe, as always.
 		std::string executablePath = CurrentExecutablePath();
 		{
-			char overrideDir[1024] = {};
-			const DWORD overrideLength = GetEnvironmentVariableA("VP_TEST_SHADER_DIR", overrideDir, 1024);
-			if (overrideLength > 0 && overrideLength < 1024)
-				executablePath = std::string(overrideDir, overrideLength) + "\\VideoProcessor.exe";
+			std::string testFolder;
+			if (VpDiagnostics::TestFolderOverride(VpDiagnostics::TestFolder::Shaders, testFolder))
+				executablePath = testFolder + "\\VideoProcessor.exe";
 		}
 		if (!MadVRShaderLoader::ResolveShaderFilename(
 			filename, executablePath, resolvedPath, reason))
@@ -673,11 +670,10 @@ namespace
 	// the exe, as always.
 	bool ShaderCacheTestFolder(const char* relative, std::string& path)
 	{
-		char overrideDir[1024] = {};
-		const DWORD overrideLength = GetEnvironmentVariableA("VP_TEST_SHADER_CACHE_DIR", overrideDir, 1024);
-		if (overrideLength == 0 || overrideLength >= 1024)
+		std::string testFolder;
+		if (!VpDiagnostics::TestFolderOverride(VpDiagnostics::TestFolder::ShaderCache, testFolder))
 			return false;
-		path = std::string(overrideDir, overrideLength) + "\\" + relative;
+		path = testFolder + "\\" + relative;
 		return true;
 	}
 
@@ -6958,11 +6954,7 @@ struct LibplaceboVideoRenderer::Impl
 	CComPtr<IDXGIOutput> dejudderOutput;
 	IDXGISwapChain* dejudderOutputSwapchain = nullptr;   // identity only, not owned
 	IDXGISwapChain* dejudderOutputFailedSwapchain = nullptr;   // GetContainingOutput failed (identity only)
-	ULONGLONG dejudderHoldLogTick = 0;
-	unsigned long long dejudderHoldsNotLogged = 0;
-	// The holds since the last hold lines, per reason (render-ahead follow-up 2026-10-17:
-	// one line per reason, so a count is never put on a reason it does not belong to).
-	std::vector<std::pair<std::string, unsigned long long>> dejudderHoldsPending;
+	VpDiagnostics::HoldLog dejudderHoldLog;   // "De-judder: hold" lines (WP-17 adapter)
 	double dejudderPredictedVsync = 0.0;   // where the frame after extras should show (s)
 	uint64_t dejudderPredictedGeneration = 0;
 	uint64_t dejudderPredictedSequence = 0;   // the source frame the prediction is for
@@ -8035,7 +8027,7 @@ struct LibplaceboVideoRenderer::Impl
 	DvTrimSelection::Selection dvTrimsSelection;
 	bool dvTrimsEvaluated = false;
 	double dvTrimsTargetNits = 0.0;
-	DvCompareCapture::Recorder dvCompare{ DvCompareCapture::Options::FromEnvironment() };
+	VpDiagnostics::RenderedFrameCaptures captures = DvCompareCapture::RendererCaptures();   // rendered-frame captures (WP-17)
 	// feat/dv-l8 task 5: the Dolby-style DV tone mapping (dv_tone_mapping), its status, and the
 	// reference viewing conditions of the last DV picture (for the later CAM16 stage).
 	DvDolbyStyle::ToneSwitch dvToneSwitch;
@@ -9628,10 +9620,8 @@ struct LibplaceboVideoRenderer::Impl
 				", \"source_max_nits\": " << sourceImage.color.hdr.max_luma <<
 				", \"scene_peak_pq\": " << sourceImage.color.hdr.max_pq_y <<
 				", \"scene_average_pq\": " << sourceImage.color.hdr.avg_pq_y <<
-				", \"scene_min_present\": " <<
-				(captureDolbyVision && captureDvLuminance.sceneMinAvailable ? "true" : "false") <<
-				", \"scene_min_nits\": " <<
-				(captureDolbyVision && captureDvLuminance.sceneMinAvailable ? captureDvLuminance.sceneMin : 0.0f) << "},\n"
+				VpDiagnostics::DvSceneMinFields{ captureDolbyVision,
+					captureDvLuminance.sceneMinAvailable, captureDvLuminance.sceneMin } << "},\n"
 			<< "  \"source_levels\": \"" <<
 				(sourceImage.repr.levels == PL_COLOR_LEVELS_LIMITED ?
 					"limited" : "full") << "\",\n"
@@ -11890,29 +11880,7 @@ struct LibplaceboVideoRenderer::Impl
 		// (e.g. Intel, the laptop screen's own GPU, for real display timing);
 		// unset = libplacebo's choice, as always.
 		CComPtr<IDXGIAdapter1> testAdapter;
-		{
-			char* v = nullptr;
-			size_t n = 0;
-			if (_dupenv_s(&v, &n, "VP_TEST_ADAPTER") == 0 && v && v[0])
-			{
-				const std::wstring want(v, v + std::strlen(v));
-				CComPtr<IDXGIFactory1> factory;
-				if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))))
-					for (UINT i = 0; !testAdapter; ++i)
-					{
-						CComPtr<IDXGIAdapter1> candidate;
-						if (factory->EnumAdapters1(i, &candidate) == DXGI_ERROR_NOT_FOUND)
-							break;
-						DXGI_ADAPTER_DESC1 desc{};
-						if (SUCCEEDED(candidate->GetDesc1(&desc)) && std::wstring(desc.Description).find(want) != std::wstring::npos)
-						{
-							testAdapter = candidate;
-							DebugLog::Log("libplacebo: VP_TEST_ADAPTER selects %ls", desc.Description);
-						}
-					}
-			}
-			std::free(v);
-		}
+		VpDiagnostics::TestAdapterFromEnvironment(&testAdapter);
 		if (testAdapter)
 			deviceParams.adapter = testAdapter;
 		d3d11 = pl_d3d11_create(log, &deviceParams);
@@ -17133,57 +17101,20 @@ struct LibplaceboVideoRenderer::Impl
 
 	void DejudderHold(const char* why)
 	{
-		// Report-a-problem: one repeated-stage frame row per hold (code in
-		// RendererDiagnosticCodes.h), and a decision when the reason changes.
-		{
-			const uint32_t code = RendererDiagnostics::ClassifyDejudderHold(why);
-			DiagnosticHistory::FrameRecord record;
-			record.stage = DiagnosticHistory::StageRepeated;
-			record.counter = diagExtrasCounter;
-			record.holdReason = code;
-			record.flags = RenderAheadActive() ? DiagnosticHistory::FlagRenderAhead : 0u;
-			if (RenderAheadActive() && dejudderDisplayRate.openLoop)
-				record.flags |= DiagnosticHistory::FlagOpenLoop;
-			record.rendererGeneration = diagRendererGeneration;
-			record.repeatedTotal = dejudderExtraStats.holds + 1;
-			DiagnosticHistory::Global().RecordFrame(record);
-			if (code != diagLastHoldCode)
-			{
-				diagLastHoldCode = code;
-				DiagnosticHistory::Global().RecordDecision("dejudder-hold", why, code,
-					static_cast<int64_t>(diagExtrasSequence));
-			}
-		}
+		// Report-a-problem: one repeated-stage frame row per hold and a decision when the
+		// reason changes; the hold lines (VP diagnostics adapter).
+		VpDiagnostics::RecordDejudderHold({ why, diagExtrasCounter, diagExtrasSequence, RenderAheadActive(),
+			dejudderDisplayRate.openLoop, diagRendererGeneration, dejudderExtraStats.holds }, diagLastHoldCode);
 		++dejudderExtraStats.holds;
 		dejudderExtraStats.lastHold = why;
-		++dejudderHoldsNotLogged;
-		auto pending = std::find_if(dejudderHoldsPending.begin(), dejudderHoldsPending.end(),
-			[why](const std::pair<std::string, unsigned long long>& p) { return p.first == why; });
-		if (pending == dejudderHoldsPending.end())
-			dejudderHoldsPending.emplace_back(why, 1);
-		else
-			++pending->second;
-		const ULONGLONG now = GetTickCount64();
-		if (dejudderHoldLogTick == 0 || now - dejudderHoldLogTick >= 5000)
-		{
-			FlushDejudderHolds();
-			dejudderHoldLogTick = now;
-		}
+		dejudderHoldLog.OnHold(why, dejudderExtraStats.holds);
 		// Render-ahead: every hold also shows on the "Render-ahead:" line with the gate's level.
 		if (RenderAheadActive())
 			LogRenderAhead(dejudderExtraStats.cadenceRatio, renderAheadGate.Level(), why);
 	}
 
-	// One "De-judder: hold" line per reason held since the last lines (also at teardown, so
-	// the last holds are never lost).
-	void FlushDejudderHolds()
-	{
-		for (const auto& pending : dejudderHoldsPending)
-			DebugLog::Log("De-judder: hold (%s; %llu holds since the last line, %llu in total)",
-				pending.first.c_str(), pending.second, dejudderExtraStats.holds);
-		dejudderHoldsPending.clear();
-		dejudderHoldsNotLogged = 0;
-	}
+	// The last hold lines at teardown, so the last holds are never lost.
+	void FlushDejudderHolds() { dejudderHoldLog.Flush(dejudderExtraStats.holds); }
 
 	bool PresentDejudderExtras(const DejudderExtrasFrame& f)
 	{
@@ -24214,11 +24145,13 @@ struct LibplaceboVideoRenderer::Impl
                 DebugLog::Log("Dolby Vision trims (non-certified): %s", params.c_str());
             }
         };
-        dvCompare.Configure(activeSettings.dvCompareCaptureFolder);   // feat/dv-l8 WIP: the Config folder
-        if (dvCompare.Enabled())   // feat/dv-l8: DV comparison capture (diagnostic; VP_DV_COMPARE_PATH)
-            dvCompare.OnRender(state, convertedPayload ? convertedPayload->rawFrame.get() : nullptr, videoFrame.GetCounter(),
+        // Rendered-frame captures (DV comparison capture; VP diagnostics adapter). The context is
+        // built only while one is on (it consumes the trim selection, as before).
+        captures.Configure(DvCompareCapture::kCommand, activeSettings.dvCompareCaptureFolder);
+        if (captures.AnyEnabled())
+            captures.OnFrameRendered({ &state, convertedPayload ? convertedPayload->rawFrame.get() : nullptr, videoFrame.GetCounter(),
                 convertedPayload && state.dolbyVisionTunnel ? &convertedPayload->dolby : nullptr, activeSettings.dvTrims,
-                std::exchange(dvTrimsEvaluated, false) ? &dvTrimsSelection : nullptr, dvTrimsTargetNits);
+                std::exchange(dvTrimsEvaluated, false) ? &dvTrimsSelection : nullptr, dvTrimsTargetNits });
         // Automatic calibration phase 2 (HDR verify): VP's own tone curve (PQ targets).
         calibrationHost.NoteToneCurve(renderImage.color, target.color, renderParams.color_map_params);
         // S2 Dynamic Drive (WP-15 host adapter): gain in and this frame's LED decisions for the S2
@@ -25521,48 +25454,37 @@ struct LibplaceboVideoRenderer::Impl
 					presentationTargetTimingKnown = true;
 				}
 			}
-			// Report-a-problem (DiagnosticHistory): one presented row per frame from
-			// values already at hand. No locks, allocation, strings or GPU queries.
+			// Report-a-problem: one presented row per frame from values already at hand
+			// (VP diagnostics adapter; no locks, allocation, strings or GPU queries).
 			{
-				DiagnosticHistory::FrameRecord diag;
-				diag.qpc = swapEndQpc;
-				diag.stage = DiagnosticHistory::StagePresented;
+				VpDiagnostics::PresentedFacts diag;
+				diag.swapEndQpc = swapEndQpc;
 				diag.counter = record.sourceFrameNumber;
 				diag.sourceTimestamp = record.captureTimestamp;
 				diag.captureTimestamp = videoFrame.GetCaptureTimingTimestamp();
-				const double qpcPerMs = static_cast<double>(qpcFrequency.QuadPart) / 1000.0;
-				if (presentationTargetTimingKnown && qpcPerMs > 0.0)
-				{
-					diag.presentQpc = swapEndQpc + static_cast<int64_t>(presentationTargetLeadMs * qpcPerMs);
-					diag.leadMs = static_cast<float>(presentationTargetLeadMs);
-				}
-				diag.queueDepth = static_cast<uint32_t>(queueDepthAfterDequeue);
-				diag.renderMs = static_cast<float>(renderMs);
-				diag.uploadMs = static_cast<float>(sourceUploadCpuLastMs);
-				diag.waitMs = static_cast<float>(swapBlockMs);
-				diag.intervalMs = static_cast<float>(submitGapMs);
-				if (qpcPerMs > 0.0 && callbackQpc > 0 && swapEndQpc > callbackQpc)
-					diag.latencyMs = static_cast<float>(static_cast<double>(swapEndQpc - callbackQpc) / qpcPerMs);
-				uint32_t flags = 0;
-				if (temporalRenderer.Active()) flags |= DiagnosticHistory::FlagInterpolated;
-				if (RenderAheadActive())
-				{
-					flags |= DiagnosticHistory::FlagRenderAhead;
-					if (dejudderDisplayRate.openLoop) flags |= DiagnosticHistory::FlagOpenLoop;
-					diag.phase = renderAheadPendingMainInterval;   // the main present's SyncInterval
-				}
-				if (dejudder && sourceSequence != 0 && dejudderEstimatedSequence == sourceSequence &&
-					motionValidity.Current(dejudderEstimatedEpoch))
-					flags |= DiagnosticHistory::FlagVectorsValid;
-				if (pl_color_space_is_hdr(&image.color)) flags |= DiagnosticHistory::FlagHdr;
-				if (videoFrame.IsSourceDiscontinuity()) flags |= DiagnosticHistory::FlagDiscontinuity;
-				diag.flags = flags;
-				diag.repeatCount = cadenceRepeat ? 1 : 0;
-				diag.width = width > 0 ? static_cast<uint32_t>(width) : 0u;
-				diag.height = height > 0 ? static_cast<uint32_t>(height) : 0u;
-				diag.repeatedTotal = dejudderExtraStats.holds;
+				diag.qpcFrequency = qpcFrequency.QuadPart;
+				diag.targetTimingKnown = presentationTargetTimingKnown;
+				diag.targetLeadMs = presentationTargetLeadMs;
+				diag.queueDepth = queueDepthAfterDequeue;
+				diag.renderMs = renderMs;
+				diag.uploadMs = sourceUploadCpuLastMs;
+				diag.waitMs = swapBlockMs;
+				diag.intervalMs = submitGapMs;
+				diag.callbackQpc = callbackQpc;
+				diag.interpolated = temporalRenderer.Active();
+				diag.renderAhead = RenderAheadActive();
+				diag.openLoop = dejudderDisplayRate.openLoop;
+				diag.mainInterval = renderAheadPendingMainInterval;   // the main present's SyncInterval
+				diag.vectorsValid = dejudder && sourceSequence != 0 && dejudderEstimatedSequence == sourceSequence &&
+					motionValidity.Current(dejudderEstimatedEpoch);
+				diag.hdr = pl_color_space_is_hdr(&image.color);
+				diag.discontinuity = videoFrame.IsSourceDiscontinuity();
+				diag.cadenceRepeat = cadenceRepeat;
+				diag.width = width;
+				diag.height = height;
+				diag.holds = dejudderExtraStats.holds;
 				diag.rendererGeneration = diagRendererGeneration;
-				DiagnosticHistory::Global().RecordFrame(diag);
+				VpDiagnostics::RecordPresented(diag);
 			}
 
 			const uint64_t nowTick = GetTickCount64();
@@ -26140,27 +26062,8 @@ bool LibplaceboVideoRenderer::OnVideoState(VideoStateComPtr& videoState)
 }
 
 
-namespace
-{
-	// Report-a-problem (DiagnosticHistory): a renderer frame row outside
-	// RenderLocked (ingest, drops). Lock-free, no allocation.
-	void RecordRendererFrame(uint32_t stage, uint64_t counter, int64_t sourceTimestamp,
-		size_t queueDepth, uint32_t reason, uint64_t droppedTotal, uint32_t rendererGeneration,
-		uint32_t flags = 0, int64_t qpc = 0) noexcept
-	{
-		DiagnosticHistory::FrameRecord record;
-		record.qpc = qpc;
-		record.stage = stage;
-		record.counter = counter;
-		record.sourceTimestamp = sourceTimestamp;
-		record.queueDepth = static_cast<uint32_t>(queueDepth);
-		record.holdReason = reason;
-		record.droppedTotal = droppedTotal;
-		record.rendererGeneration = rendererGeneration;
-		record.flags = flags;
-		DiagnosticHistory::Global().RecordFrame(record);
-	}
-}
+// Report-a-problem: a renderer frame row outside RenderLocked (ingest, drops): VP diagnostics adapter.
+using VpDiagnostics::RecordRendererFrame;
 
 void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 {
@@ -28882,7 +28785,10 @@ bool LibplaceboVideoRenderer::ToggleDvCompareCapture(CString& status)
 	status.Empty();
 	if (!m_impl)
 		return false;
-	status = CString(m_impl->dvCompare.Toggle().c_str());
+	std::string reply;
+	if (!m_impl->captures.Invoke(DvCompareCapture::kCommand, reply))
+		return false;
+	status = CString(reply.c_str());
 	return true;
 }
 
@@ -32047,17 +31953,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 					m_sceneCorrectionRepeatCount.load(
 						std::memory_order_relaxed);
 				// Report-a-problem: a drift-correction repeat queued (shown twice).
-				{
-					DiagnosticHistory::FrameRecord diag;
-					diag.stage = DiagnosticHistory::StageRepeated;
-					diag.counter = frame.GetCounter();
-					diag.sourceTimestamp = frame.GetTimingTimestamp();
-					diag.queueDepth = static_cast<uint32_t>(repeatQueueDepth);
-					diag.holdReason = RendererDiagnostics::RepeatCadenceCorrection;
-					diag.repeatedTotal = repeatCount;
-					diag.rendererGeneration = m_callbackGeneration;
-					DiagnosticHistory::Global().RecordFrame(diag);
-				}
+				VpDiagnostics::RecordCadenceRepeat(frame.GetCounter(), frame.GetTimingTimestamp(),
+					repeatQueueDepth, repeatCount, m_callbackGeneration);
 				{
 					std::lock_guard<std::mutex> renderGuard(
 						m_impl->renderMutex);
@@ -32558,17 +32455,8 @@ void LibplaceboVideoRenderer::SetAmbientLux(double lux, bool valid, double nowSe
 bool LibplaceboVideoRenderer::WriteDiagnosticHistory(
 	VpDiagnosticHistorySink sink, void* context, int64_t referenceQpc) const
 {
-	// Report-a-problem: this module's rings, tagged "renderer". Nothing may
-	// cross the plugin boundary as an exception.
-	try
-	{
-		return DiagnosticHistory::WriteJsonlToSink(
-			DiagnosticHistory::Global(), "renderer", referenceQpc, sink, context);
-	}
-	catch (...)
-	{
-		return false;
-	}
+	// Report-a-problem: this module's rings, tagged "renderer" (VP diagnostics adapter).
+	return VpDiagnostics::WriteRendererHistory(sink, context, referenceQpc);
 }
 
 bool LibplaceboVideoRenderer::GetSceneDescriptor(

@@ -41,7 +41,7 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <ShortcutChord.h>
 #include <VP-V/modules/control/diagnostics/CrashState.h>
 #include <DiagnosticHistory.h>
-#include <VP-V/modules/control/diagnostics/StateReport.h>
+#include <VP-V/modules/control/diagnostics/DiagnosticsReportRun.h>
 #include <VP-V/modules/control/diagnostics/StateReportSettings.h>
 #include <AmbientConfig.h>
 #include <IntentInterpreterSupport.h>
@@ -8820,22 +8820,8 @@ void CVideoProcessorDlg::ShowStateReportToast(const std::string& value)
 
 void CVideoProcessorDlg::MaybeAutoReport(const char* reason)
 {
-	if (!m_stateReportSettings.autoReport)
-		return;
-	// Bug hunt 3 (SH11): a report already being written spends no slot.
-	if (m_stateReportBusy.load())
-	{
-		DebugLog::Log("Automatic problem report skipped (a report is being saved): reason=%s "
-			"saved_this_run=%d", reason, m_autoReportLimiter.Count());
-		return;
-	}
-	if (!m_autoReportLimiter.Allow(GetTickCount64(), m_stateReportBusy.load()))
-	{
-		DebugLog::Log("Automatic problem report skipped (rate limit): reason=%s saved_this_run=%d",
-			reason, m_autoReportLimiter.Count());
-		return;
-	}
-	SaveStateReport((std::string("auto:") + reason).c_str());
+	if (m_reportRun.AllowAutomatic(m_stateReportSettings.autoReport, reason, GetTickCount64()))
+		SaveStateReport((std::string("auto:") + reason).c_str());
 }
 
 void CVideoProcessorDlg::RecordDiagnosticStats(double sourceHz, double displayHz)
@@ -8871,66 +8857,15 @@ void CVideoProcessorDlg::RecordDiagnosticStats(double sourceHz, double displayHz
 	DiagnosticHistory::Global().RecordStats(record);
 }
 
-namespace
-{
-	std::wstring ExecutableFolder()
-	{
-		std::vector<wchar_t> buffer(32768);
-		const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-		if (length == 0 || length >= buffer.size())
-			return std::wstring();
-		std::wstring path(buffer.data(), length);
-		const size_t separator = path.find_last_of(L"\\/");
-		return separator == std::wstring::npos ? std::wstring() : path.substr(0, separator);
-	}
-
-	std::wstring WidenAnsi(const std::string& text)
-	{
-		return std::wstring(CStringW(CStringA(text.c_str())).GetString());
-	}
-
-	// The newest .png in `folder` written at or after `since`, empty if none.
-	std::wstring NewestScreenshotSince(const std::wstring& folder, const FILETIME& since)
-	{
-		WIN32_FIND_DATAW data;
-		HANDLE find = FindFirstFileW((folder + L"\\*.png").c_str(), &data);
-		if (find == INVALID_HANDLE_VALUE)
-			return std::wstring();
-		std::wstring best;
-		FILETIME bestTime = since;
-		do
-		{
-			if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
-				CompareFileTime(&data.ftLastWriteTime, &bestTime) >= 0)
-			{
-				bestTime = data.ftLastWriteTime;
-				best = folder + L"\\" + data.cFileName;
-			}
-		} while (FindNextFileW(find, &data));
-		FindClose(find);
-		return best;
-	}
-}
-
 void CVideoProcessorDlg::SaveStateReport(const char* trigger)
 {
-	// Bug hunt 3 (C10): a report whose completion never came back (its post
-	// failed) frees the flag after two minutes; a real report takes seconds.
-	const ULONGLONG busyNow = GetTickCount64();
-	if (m_stateReportBusy.exchange(true) &&
-		!(m_stateReportBusySince != 0 && busyNow - m_stateReportBusySince > 120000))
+	// The run, the shared inputs and the worker: VP diagnostics adapter (DiagnosticsReportRun.h).
+	if (!m_reportRun.TryBegin(GetTickCount64()))
 	{
 		ShowStateReportToast("already saving");
 		return;
 	}
-	m_stateReportBusySince = busyNow;
-	const int64_t referenceQpc = DiagnosticHistory::NowQpc();
-	DiagnosticHistory::Global().RecordDecision("state-report", trigger);
-
-	auto inputs = std::make_shared<StateReport::Inputs>();
-	inputs->trigger = trigger;
-	inputs->vpRoot = ExecutableFolder();
-	inputs->reportsDirectory = inputs->vpRoot + L"\\logs\\reports";
+	auto inputs = m_reportRun.NewInputs(trigger, m_videoRenderer.get());
 	inputs->buildId = VpBuildIdentity::Id();
 	inputs->commit = VpBuildIdentity::Commit();
 	inputs->version = std::string(CStringA(VERSION_DESCRIBE).GetString()) + " (" +
@@ -8938,32 +8873,6 @@ void CVideoProcessorDlg::SaveStateReport(const char* trigger)
 	inputs->pluginApi = VP_LIBPLACEBO_PLUGIN_API_VERSION;
 	inputs->rendererName = !m_videoRenderer ? "none" :
 		(m_activeRendererIsDirectShow ? "DirectShow" : "VP Renderer");
-	inputs->binaries.push_back({ "VideoProcessor.exe", inputs->vpRoot + L"\\VideoProcessor.exe" });
-	for (const bool beta : { false, true })
-	{
-		const std::wstring plugin = OptionalRendererLayout::PluginPath(inputs->vpRoot, beta);
-		if (GetFileAttributesW(plugin.c_str()) == INVALID_FILE_ATTRIBUTES)
-			continue;
-		std::wstring relative = plugin.size() > inputs->vpRoot.size() + 1 ?
-			plugin.substr(inputs->vpRoot.size() + 1) : plugin;
-		std::replace(relative.begin(), relative.end(), L'\\', L'/');
-		inputs->binaries.push_back({ std::string(CStringA(relative.c_str()).GetString()), plugin });
-	}
-
-	// The rings, at the moment of the key press.
-	inputs->historyExe = DiagnosticHistory::ToJsonl(DiagnosticHistory::Global(), "exe", referenceQpc);
-	if (m_videoRenderer)
-		inputs->rendererContributed = m_videoRenderer->WriteDiagnosticHistory(
-			&DiagnosticHistory::AppendToStringSink, &inputs->historyRenderer, referenceQpc);
-
-	CrashState::Recorder& crashState = CrashState::Global();
-	inputs->crashStateLive = crashState.Text();
-	{
-		std::string live = crashState.LivePath();
-		const size_t separator = live.find_last_of("\\/");
-		if (separator != std::string::npos)
-			inputs->crashStateDirectory = WidenAnsi(live.substr(0, separator));
-	}
 
 	// Live settings: the effective choices now (values are redacted on write).
 	auto& settings = inputs->liveSettings;
@@ -8997,131 +8906,19 @@ void CVideoProcessorDlg::SaveStateReport(const char* trigger)
 			settings.emplace_back("profile." + selection.first, selection.second);
 	VpvGui::AppendBundleSettings(settings, m_videoRenderer.get());   // VP-V (WP-11)
 
-	// Configuration files VP reads (full paths stay local; the bundle gets names).
-	{
-		ConfigFile main;
-		if (main.Load())
-			inputs->configFiles.push_back(WidenAnsi(main.GetLoadedPath()));
-		ConfigFile renderer;
-		if (renderer.Load(ConfigFile::RENDERER_FILENAME) && !renderer.GetLoadedPath().empty() &&
-			(inputs->configFiles.empty() || WidenAnsi(renderer.GetLoadedPath()) != inputs->configFiles.front()))
-			inputs->configFiles.push_back(WidenAnsi(renderer.GetLoadedPath()));
-	}
-	const std::wstring logPath = WidenAnsi(DebugLog::GetLogFilePath());
-	std::string recentLog;
-	for (const std::string& line : DebugLog::RecentLines(~0ull, 600))
-		recentLog += line + "\n";
-
-	// Optional picture (off by default): the next rendered frame via the
-	// existing screenshot path, scaled down by the worker.
-	bool thumbnailRequested = false;
-	FILETIME requestTime = {};
-	GetSystemTimeAsFileTime(&requestTime);
-	inputs->thumbnailEnabled = m_stateReportSettings.thumbnail;
-	if (inputs->thumbnailEnabled)
-	{
-		CString status;
-		thumbnailRequested = m_videoRenderer && m_videoRenderer->RequestRenderedOutputCapture(status);
-		if (!thumbnailRequested)
-			inputs->thumbnailNote = status.IsEmpty() ? std::string("no active VP Renderer") :
-				std::string(CStringA(status).GetString());
-	}
-	std::wstring screenshotFolder = inputs->vpRoot + L"\\screenshots";
-	{
-		wchar_t overrideDir[1024] = {};
-		const DWORD overrideLength = GetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", overrideDir, 1024);
-		if (overrideLength > 0 && overrideLength < 1024)
-			screenshotFolder.assign(overrideDir, overrideLength);
-	}
+	// Optional picture (report_thumbnail, off by default).
+	m_reportRun.RequestThumbnail(*inputs, m_stateReportSettings.thumbnail, m_videoRenderer.get());
 
 	ShowStateReportToast("saving...");
-	const HWND window = GetSafeHwnd();
-	auto worker = std::make_shared<StateReportWorkerState>();
-	std::atomic_store_explicit(&m_stateReportWorker, worker, std::memory_order_release);
-	try
-	{
-		std::thread([inputs, window, logPath, recentLog, thumbnailRequested, requestTime, screenshotFolder, worker]()
-		{
-			const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-			auto* result = new StateReport::Result();
-			try
-			{
-				std::string log = StateReport::ReadFileTail(logPath, 512 * 1024);
-				inputs->logExcerpt = log.empty() ? recentLog : log;
-				if (thumbnailRequested)
-				{
-					std::wstring shot;
-					for (int attempt = 0; attempt < 40 && shot.empty() && !worker->cancel.load(); ++attempt)
-					{
-						Sleep(100);
-						shot = NewestScreenshotSince(screenshotFolder, requestTime);
-					}
-					std::string error;
-					if (shot.empty())
-						inputs->thumbnailNote = "the rendered frame did not arrive within 4 s";
-					else
-					{
-						Sleep(200);   // let the screenshot writer finish the file
-						if (!StateReport::MakeThumbnailPng(shot, 480, inputs->thumbnailPng, &error))
-							inputs->thumbnailNote = error;
-					}
-				}
-				*result = StateReport::Write(*inputs);
-			}
-			catch (const std::exception& exception)
-			{
-				result->ok = false;
-				result->error = exception.what();
-			}
-			if (SUCCEEDED(com))
-				CoUninitialize();
-			// Bug hunt 3 (C10): a failed post (a full message queue) used to leave
-			// the busy flag set for good, refusing every later report. The post is
-			// retried while the window lives; only a closed window drops it.
-			bool posted = false;
-			for (int attempt = 0; attempt < 100 && !posted && ::IsWindow(window); ++attempt)
-			{
-				posted = ::PostMessageW(window, WM_MESSAGE_STATE_REPORT_DONE, 0,
-					reinterpret_cast<LPARAM>(result)) != FALSE;
-				if (!posted)
-					Sleep(50);
-			}
-			if (!posted)
-				delete result;
-			{
-				std::lock_guard<std::mutex> lock(worker->mutex);
-				worker->done = true;
-			}
-			worker->doneChanged.notify_all();
-		}).detach();
-	}
-	catch (const std::exception& exception)
-	{
-		m_stateReportBusy.store(false);
-		DebugLog::Log("Problem report could not start: %s", exception.what());
+	if (!m_reportRun.Start(inputs, GetSafeHwnd(), WM_MESSAGE_STATE_REPORT_DONE))
 		ShowStateReportToast("failed");
-	}
 }
 
 LRESULT CVideoProcessorDlg::OnStateReportDone(WPARAM, LPARAM lParam)
 {
-	std::unique_ptr<StateReport::Result> result(reinterpret_cast<StateReport::Result*>(lParam));
-	m_stateReportBusy.store(false);
-	if (!result)
-		return 0;
-	if (result->ok)
-	{
-		DebugLog::Log("Problem report saved: logs\\reports\\%s bytes=%zu files=%zu removed_old=%zu",
-			result->fileName.c_str(), result->bytes, result->entries.size(), result->removed.size());
-		DiagnosticHistory::Global().RecordDecision("state-report-saved", result->fileName.c_str(),
-			static_cast<int64_t>(result->bytes));
-		ShowStateReportToast("saved " + result->fileName);
-	}
-	else
-	{
-		DebugLog::Log("Problem report failed: %s", result->error.c_str());
-		ShowStateReportToast("failed (" + result->error + ")");
-	}
+	const std::string toast = m_reportRun.Finish(lParam);
+	if (!toast.empty())
+		ShowStateReportToast(toast);
 	return 0;
 }
 
@@ -10554,18 +10351,7 @@ bool CVideoProcessorDlg::WaitForShutdownWorkers(DWORD timeoutMs)
 	}
 	// Bug hunt 3 (SH11): a problem report being written is finished (its
 	// thumbnail wait cut short), not killed mid-write.
-	bool reportDone = true;
-	if (const auto worker = std::atomic_load_explicit(&m_stateReportWorker, std::memory_order_acquire))
-	{
-		worker->cancel.store(true);
-		const ULONGLONG now = GetTickCount64();
-		const DWORD remaining = now >= deadline ? 0 : static_cast<DWORD>(deadline - now);
-		std::unique_lock<std::mutex> lock(worker->mutex);
-		reportDone = worker->doneChanged.wait_for(lock, std::chrono::milliseconds(remaining),
-			[&worker] { return worker->done; });
-		if (!reportDone)
-			DebugLog::Log("Problem report still being written at exit (timeout_ms=%lu)", timeoutMs);
-	}
+	const bool reportDone = m_reportRun.WaitForExit(deadline, timeoutMs);
 	if (!retirementDone || !resetDone || !livenessDone || !unifiedDone || !projectorTestDone || !reportDone)
 	{
 		DebugLog::Log(
