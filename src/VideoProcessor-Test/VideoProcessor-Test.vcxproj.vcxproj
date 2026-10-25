@@ -245,6 +245,57 @@
     <ClCompile Include="LibplaceboLutParserTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\colour\extended_range\tests\ExtendedRangeHookTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\SdrToneShapeHookTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\drive\led_compensation\tests\LedCompensationHookTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\drive\led_measure\tests\LedMeasureHookTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\capture\tests\CaptureUnpackHookTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\signal\tests\DvTunnelUnpackHookTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\tests\SourceResolutionHookTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\consumers\tests\DejudderHookTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\consumers\tests\InterpolatorHookTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\consumers\tests\OcclusionMaskHookTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\tests\EstimatorHookTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\output\dither\tests\SigmaDeltaHookTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\repair\deband\tests\VpDebanderHookTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\scaling\output\tests\AdaptiveScalingHookTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\scaling\rebase\tests\SourceRebaseHookTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\scaling\refine\tests\ResidualHoldHookTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\tests\WholeHookChainHookTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="MotionRendererTests.cpp"><ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild></ClCompile>
     <ClCompile Include="LibplaceboRenderParametersTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
