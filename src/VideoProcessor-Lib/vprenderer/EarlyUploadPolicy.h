@@ -27,7 +27,15 @@
 namespace EarlyUploadPolicy
 {
 	enum class Mode { Render, Early, Auto };
-	enum class Reason { Active, SettingRender, NoDevice, NoBudget, MemoryShort, OpenFailed, FrameSizeUnknown };
+	enum class Reason { Active, SettingRender, NoDevice, NoBudget, MemoryShort, OpenFailed, FrameSizeUnknown, Unguarded };
+
+	// Modularity 2026-10-25: whether the pool is wanted. efficiency_fixes on: "auto" = early in
+	// every mode (#3). Off (the Original pathway): the old rule, "auto" = early only in the
+	// low-latency path. "early" is early either way, "render" never.
+	inline bool Requested(Mode mode, bool efficiencyFixes, bool lowLatency)
+	{
+		return mode == Mode::Early || (mode == Mode::Auto && (efficiencyFixes || lowLatency));
+	}
 
 	struct Input
 	{
@@ -39,6 +47,7 @@ namespace EarlyUploadPolicy
 		uint64_t usageBytes = 0;         // DXGI local current usage
 		uint64_t poolBytesHeld = 0;      // what an open pool already holds (counted in usage)
 		bool openFailed = false;         // EarlyUpload::Open failed this session
+		bool guard = true;               // efficiency_fixes: the VRAM guard (off: opened as before, unguarded)
 	};
 
 	// The reserve kept free after the pool: a quarter of the budget, at least 256 MB (the
@@ -76,6 +85,7 @@ namespace EarlyUploadPolicy
 		if (in.mode == Mode::Render) { d.reason = Reason::SettingRender; return d; }
 		if (!in.device) { d.reason = Reason::NoDevice; return d; }
 		if (in.openFailed) { d.reason = Reason::OpenFailed; return d; }
+		if (!in.guard) { d.early = true; d.reason = Reason::Unguarded; return d; }   // efficiency_fixes off: as before
 		if (in.frameBytes == 0) { d.reason = Reason::FrameSizeUnknown; return d; }
 		d.needBytes = static_cast<uint64_t>(in.slots > 0 ? in.slots : 0) * static_cast<uint64_t>(in.frameBytes);
 		if (in.budgetBytes == 0)

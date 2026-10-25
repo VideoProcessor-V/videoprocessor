@@ -26,6 +26,10 @@ namespace CustomHookChain
         int sourceHeight = 0;
         double refreshHz = 0.0;
         double sourceFps = 0.0;
+        // Modularity 2026-10-25 (efficiency audit #8a): {{output_width_q4}} / {{output_width_b16}}
+        // (and heights) are the sigma-delta's quarter / block grids only with efficiency_fixes
+        // on; off (the default, the Original pathway) they are the full output size as before.
+        bool sigmaDeltaGrids = false;
     };
 
     // Rules this chain owns, in execution order. Like the madVR path, the

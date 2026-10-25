@@ -88,6 +88,31 @@ namespace VideoProcessorTest
 			Assert::IsTrue(EarlyUploadPolicy::Decide(in).reason == EarlyUploadPolicy::Reason::NoDevice);
 		}
 
+		// Modularity 2026-10-25: efficiency_fixes off restores the old rule and the unguarded open.
+		TEST_METHOD(EarlyUploadFollowsEfficiencyFixes)
+		{
+			using EarlyUploadPolicy::Mode;
+			Assert::IsTrue(EarlyUploadPolicy::Requested(Mode::Auto, true, false), L"on: every mode");
+			Assert::IsFalse(EarlyUploadPolicy::Requested(Mode::Auto, false, false), L"off: not outside low latency");
+			Assert::IsTrue(EarlyUploadPolicy::Requested(Mode::Auto, false, true), L"off: low latency as before");
+			Assert::IsTrue(EarlyUploadPolicy::Requested(Mode::Early, false, false));
+			Assert::IsFalse(EarlyUploadPolicy::Requested(Mode::Render, true, true));
+			EarlyUploadPolicy::Input in;
+			in.slots = 10;
+			in.frameBytes = 33 * MB;
+			in.budgetBytes = 3584 * MB;
+			in.usageBytes = 3500 * MB;    // short: the guard would refuse
+			in.guard = false;             // off: opened as before (EarlyUpload's own byte cap)
+			EarlyUploadPolicy::Decision d = EarlyUploadPolicy::Decide(in);
+			Assert::IsTrue(d.early && d.reason == EarlyUploadPolicy::Reason::Unguarded);
+			Assert::IsTrue(d.FallbackReason().empty());
+			in.frameBytes = 0;            // off: no wait for the frame size either
+			Assert::IsTrue(EarlyUploadPolicy::Decide(in).early);
+			in.guard = true;
+			in.frameBytes = 33 * MB;
+			Assert::IsTrue(EarlyUploadPolicy::Decide(in).reason == EarlyUploadPolicy::Reason::MemoryShort);
+		}
+
 		TEST_METHOD(IdleTexturesAreReleasedAfterTheIdleTime)
 		{
 			FeatureTextureIdle::Releaser r;

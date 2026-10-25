@@ -40,10 +40,10 @@ namespace CustomHookChain
                 // (the target crop only shrinks from the output; audit 2026-10-25 #4). The old
                 // full-size textures had 4x / 16x slack; these have none, so a larger HOOKED would
                 // drop writes beyond the grid. GPU test G8a covers edge blanking + NLS.
-                { "output_width_q4", std::to_string(QuarterGrid(values.outputWidth)), values.outputWidth > 0 },
-                { "output_height_q4", std::to_string(QuarterGrid(values.outputHeight)), values.outputHeight > 0 },
-                { "output_width_b16", std::to_string(BlockGrid(values.outputWidth)), values.outputWidth > 0 },
-                { "output_height_b16", std::to_string(BlockGrid(values.outputHeight)), values.outputHeight > 0 },
+                { "output_width_q4", std::to_string(values.sigmaDeltaGrids ? QuarterGrid(values.outputWidth) : values.outputWidth), values.outputWidth > 0 },
+                { "output_height_q4", std::to_string(values.sigmaDeltaGrids ? QuarterGrid(values.outputHeight) : values.outputHeight), values.outputHeight > 0 },
+                { "output_width_b16", std::to_string(values.sigmaDeltaGrids ? BlockGrid(values.outputWidth) : values.outputWidth), values.outputWidth > 0 },
+                { "output_height_b16", std::to_string(values.sigmaDeltaGrids ? BlockGrid(values.outputHeight) : values.outputHeight), values.outputHeight > 0 },
                 { "source_width", std::to_string(values.sourceWidth), values.sourceWidth > 0 },
                 { "source_height", std::to_string(values.sourceHeight), values.sourceHeight > 0 },
                 { "refresh_hz", FormatNumber(values.refreshHz), values.refreshHz > 0.0 },

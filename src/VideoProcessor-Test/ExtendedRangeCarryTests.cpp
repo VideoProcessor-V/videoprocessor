@@ -630,9 +630,20 @@ namespace VideoProcessorTest
 			const std::string last = "color.rgb = er_clipped;\n";
 			Assert::IsTrue(tail.size() >= last.size() && tail.compare(tail.size() - last.size(), last.size(), last) == 0);
 
+			// Modularity 2026-10-25: efficiency_fixes off (the default, the Original pathway) = the
+			// two original passes, not a fallback; on = one pass wanted.
 			ExtendedRange::Hooks hooks;
+			Assert::IsTrue(hooks.CarryPasses() == ExtendedRange::CarryPassReason::Off);
+			Assert::IsFalse(hooks.CarryFallbackEngaged());
+			Assert::IsTrue(hooks.CarryPassesDescribe().find("efficiency_fixes off") != std::string::npos);
+			hooks.SetOnePassAllowed(true);
 			Assert::IsTrue(hooks.CarryPasses() == ExtendedRange::CarryPassReason::None);
+			Assert::IsFalse(hooks.CarryFallbackEngaged());
 			Assert::IsTrue(hooks.CarryPassesDescribe().find("one pass") != std::string::npos);
+			hooks.ForceTwoPassCarryForTest(true);
+			Assert::IsTrue(hooks.CarryFallbackEngaged());
+			hooks.SetOnePassAllowed(false);
+			Assert::IsFalse(hooks.CarryFallbackEngaged(), L"off: the two passes are the original, not a fallback");
 			Assert::IsTrue(std::string(ExtendedRange::CarryPassReasonText(ExtendedRange::CarryPassReason::OnePassFailed)).find("two passes") == 0);
 		}
 	};

@@ -244,9 +244,11 @@ namespace ExtendedRange
 	std::string Describe(const Decision& decision);
 
 	// Efficiency audit 2026-10-24 #7: how the carry ran. None = one pass with
-	// two outputs; the others name why the two original passes are used
-	// (identical output, one extra source-size pass).
-	enum class CarryPassReason { None, NoCompute, NotStorable, OnePassFailed };
+	// two outputs; Off = the two original passes because efficiency_fixes is off
+	// (the Original pathway; not a fallback); the others name why the two
+	// original passes are used although one pass was wanted (identical output,
+	// one extra source-size pass).
+	enum class CarryPassReason { None, NoCompute, NotStorable, OnePassFailed, Off };
 	const char* CarryPassReasonText(CarryPassReason reason);
 	// The one-pass body (pure text, CPU-tested): the old body up to the
 	// clamp, then the remainder store and the clipped colour.
@@ -282,10 +284,19 @@ namespace ExtendedRange
 		}
 		unsigned long long Applied() const { return applied; }
 		// Efficiency audit 2026-10-24 #7 (diagnostic readout).
-		CarryPassReason CarryPasses() const { return carryOnePassReason; }
+		CarryPassReason CarryPasses() const { return onePassAllowed ? carryOnePassReason : CarryPassReason::Off; }
+		// Modularity 2026-10-25: the one-pass carry runs only with efficiency_fixes on (the host
+		// sets it per frame); off (the default, and the Original pathway) is the two original passes.
+		void SetOnePassAllowed(bool allowed) { onePassAllowed = allowed; }
+		// True when one pass was wanted but the two passes run (the "Fallbacks engaged" entry).
+		bool CarryFallbackEngaged() const
+		{
+			return onePassAllowed && carryOnePassReason != CarryPassReason::None;
+		}
 		// GPU byte-identity test (#7): the two original passes on demand (A/B of the same frame).
 		void ForceTwoPassCarryForTest(bool twoPass)
 		{
+			onePassAllowed = true;
 			carryOnePassReason = twoPass ? CarryPassReason::OnePassFailed : CarryPassReason::None;
 		}
 		std::string CarryPassesDescribe() const;
@@ -316,6 +327,7 @@ namespace ExtendedRange
 		float gammaRatio = 1.0f;
 		unsigned long long applied = 0;
 		CarryPassReason carryOnePassReason = CarryPassReason::None;
+		bool onePassAllowed = false;   // efficiency_fixes (set by the host each frame)
 		unsigned long long carryOnePassFrames = 0, carryTwoPassFrames = 0;
 		pl_gpu gpu = nullptr;
 		pl_tex clipped = nullptr;     // the carry's output (the picture libplacebo goes on with)

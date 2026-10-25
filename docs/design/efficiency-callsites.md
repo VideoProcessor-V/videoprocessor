@@ -3,18 +3,25 @@
 `LibplaceboVideoRenderer.cpp` is Bill's file (present on `origin/v1.4.02-beta`), so the branch
 does **not** edit it (vp-host-call-sites-only). Its changes are patches here.
 
-**Order and base (2026-10-25, regenerated after the audit
-`skeleton-notes/audit-perf-byte-identical.md`):** `efficiency-callsites.patch` is generated against
-`integ/batch1` 43ebff50 (renderer identical to dc149284) **with
-`docs/design/silent-fallbacks-callsites.patch` already applied**, the order the lead applies them:
+**Base (2026-10-25, regenerated after the audit and the modularity sweep):**
+`efficiency-callsites.patch` is generated against the committed renderer blob of `integ/batch1`
+**38badcb0**, which already contains the silent-fallbacks call sites (WP-4, 64ab319b) and the
+modularity fixes. Verified with `git apply --check --cached` on a 38badcb0 index. (It still needs
+the silent-fallbacks call sites present: on an older base apply silent-fallbacks first.)
 
-```
-git apply docs/design/silent-fallbacks-callsites.patch
-git apply docs/design/efficiency-callsites.patch
-```
+**efficiency_fixes gates every behaviour change (modularity sweep 2026-10-25;
+skeleton-notes/modularity-perf-byte-identical.md).** Off (also the Original pathway's override)
+restores the old code path; on is the new one. Tests cover both states.
 
-Verified with `git apply --cached` in sequence on a 43ebff50 index (it does not apply without the
-silent-fallbacks patch first). The early-upload fallback uses the silent-fallbacks batch's
+| Change | efficiency_fixes off | on |
+|---|---|---|
+| #3 early upload | old rule: `auto` early only in low latency; opened unguarded as before | `auto` early in every mode, VRAM guard (EarlyUploadPolicy::Requested / Input.guard) |
+| #7 ER carry | the two original passes (`CarryPassReason::Off`, not a fallback, no entry) | one pass; two passes only as a listed fallback (`CarryFallbackEngaged`, released when one pass runs) |
+| #8a sigma-delta grids | `{{output_width_q4}}`/`_b16` = full output size (as before) | the q4 / b16 grids (`TemplateValues::sigmaDeltaGrids`, part of the template key) |
+| #8b ER idle release | textures kept until teardown (as before) | released after idle |
+| timers, ChangeKey, monitor fit | no picture effect (identical by construction), ungated | |
+
+Entrance span labels come from the slot table (`PipelineSlots::Get(id).name`). The early-upload fallback uses the silent-fallbacks batch's
 `FallbackCatalog::EarlyUpload` entry (id "early upload") through `SyncFallback`: the catalog's line
 in the open-failure branch is kept, and the VRAM-guard refusal, the open success and "not
 requested" go through the same builder. It also needs this branch's VP headers

@@ -629,7 +629,7 @@ color.a = 1.0;
 		if (self->gpu && self->gpu != params->gpu)
 			self->Release();
 		pl_gpu ownerA = self->gpu, ownerB = self->gpu;
-		bool onePass = self->carryOnePassReason == CarryPassReason::None;
+		bool onePass = self->onePassAllowed && self->carryOnePassReason == CarryPassReason::None;
 		if (onePass && !params->gpu->glsl.compute)
 		{
 			self->carryOnePassReason = CarryPassReason::NoCompute;
@@ -780,6 +780,7 @@ color.a = 1.0;
 		case CarryPassReason::NoCompute: return "two passes (GPU has no storage images)";
 		case CarryPassReason::NotStorable: return "two passes (rgba32f not storable)";
 		case CarryPassReason::OnePassFailed: return "two passes (one-pass shader failed)";
+		case CarryPassReason::Off: return "two passes (efficiency_fixes off)";
 		}
 		return "two passes";
 	}
@@ -787,7 +788,7 @@ color.a = 1.0;
 	std::string Hooks::CarryPassesDescribe() const
 	{
 		std::string s = "ER carry: ";
-		s += CarryPassReasonText(carryOnePassReason);
+		s += CarryPassReasonText(CarryPasses());
 		s += " (frames: one-pass " + std::to_string(carryOnePassFrames) + ", two-pass " +
 			std::to_string(carryTwoPassFrames) + ")";
 		return s;

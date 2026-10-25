@@ -125,10 +125,19 @@ namespace VideoProcessorTest
 				Assert::IsTrue(CustomHookChain::BlockGrid(n) >= static_cast<int>(std::ceil(b)));
 				Assert::IsTrue(CustomHookChain::BlockGrid(n) <= static_cast<int>(std::ceil(b)) + 1);
 			}
-			std::string source = "//!SIZE {{output_width_q4}} {{output_height_q4}}\n//!SIZE {{output_width_b16}} {{output_height_b16}}";
+			const std::string text = "//!SIZE {{output_width_q4}} {{output_height_q4}}\n//!SIZE {{output_width_b16}} {{output_height_b16}}";
 			std::string reason;
-			Assert::IsTrue(CustomHookChain::ApplyTemplates(source, Output2560x1600(), {}, reason));
+			// Modularity 2026-10-25: efficiency_fixes off (default) = the full output size as before.
+			std::string off = text;
+			Assert::IsTrue(CustomHookChain::ApplyTemplates(off, Output2560x1600(), {}, reason));
+			Assert::AreEqual(std::string("//!SIZE 2560 1600\n//!SIZE 2560 1600"), off);
+			CustomHookChain::TemplateValues on = Output2560x1600();
+			on.sigmaDeltaGrids = true;
+			std::string source = text;
+			Assert::IsTrue(CustomHookChain::ApplyTemplates(source, on, {}, reason));
 			Assert::AreEqual(std::string("//!SIZE 641 401\n//!SIZE 161 101"), source);
+			// The switch is part of the template key: toggling it rebuilds the hook.
+			Assert::AreNotEqual(CustomHookChain::TemplateKey(text, Output2560x1600()), CustomHookChain::TemplateKey(text, on));
 		}
 
 		TEST_METHOD(TemplatesResolveBuiltInsAndParametersAndRejectLeftovers)
