@@ -30,6 +30,8 @@ namespace OutputSegments
 	{
 		fallbacks = &registryOfFallbacks;
 		fallbacksChanged = false;
+		// The Original pathway reproduces Bill's pathway: never VP's merged hooks (modularity sweep).
+		mergedWanted = mergedWanted && !registry.OriginalPathway();
 		runner.SetSampleEvery(sampleEvery);
 		const uint64_t signature = Signature(registry, mergedWanted);
 		const bool a = s2.Segment().Configure(registry, mergedWanted, signature, registryOfFallbacks) == Mode::Merged;
