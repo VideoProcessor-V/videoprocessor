@@ -1,5 +1,5 @@
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index 78096f51..ede42073 100644
+index 395b11a0..1d81b591 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 @@ -83,6 +83,7 @@
@@ -1054,7 +1054,7 @@ index 78096f51..ede42073 100644
  				crossfadeMixer.Release(d3d11->gpu); // hunt 3 F1: the crossfade's textures
  				if (rebaseDispatch) pl_dispatch_destroy(&rebaseDispatch);
  				extendedRangeHooks.Release();   // Stage 10: its textures
-@@ -17961,7 +17228,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -17975,7 +17242,7 @@ struct LibplaceboVideoRenderer::Impl
  				if (processedFrame)
  				{
  					image = *processedFrame;   // the processed geometry (re-based crop), warped planes
@@ -1063,7 +1063,7 @@ index 78096f51..ede42073 100644
  				}
  				image.planes[0].texture = warped.luma;
  				image.planes[1].texture = warped.chroma;
-@@ -17973,20 +17240,20 @@ struct LibplaceboVideoRenderer::Impl
+@@ -17987,20 +17254,20 @@ struct LibplaceboVideoRenderer::Impl
  				// frame), with the extra's own module slots.
  				if (!processedFrame)
  				{
@@ -1093,7 +1093,7 @@ index 78096f51..ede42073 100644
  				}
  			}
  			// Delta 8 R1: the sigma-delta takes the motion since the previous
-@@ -25112,7 +24379,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25127,7 +24394,7 @@ struct LibplaceboVideoRenderer::Impl
                  pl_frame frame = source;
                  // Stage B: the picture at this refresh's phase in place of A's planes (a
                  // composed picture keeps A: hold). Everything after runs on it unchanged.
@@ -1102,7 +1102,7 @@ index 78096f51..ede42073 100644
                  bool phasePicture = vpPhasePlanesValid && source.num_planes == 2 &&
                      source.planes[0].texture == textures[0] && source.planes[1].texture == textures[1];
                  // B3 (pipeline_entrance_once): the picture from the processed A and B, no stages after.
-@@ -25120,7 +24387,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25135,7 +24402,7 @@ struct LibplaceboVideoRenderer::Impl
                  // Audit HIGH 1: B was processed as its own A - A's pictures must not advance the
                  // stateful stages again (the per-picture path for any late fallback).
                  // (Evaluated after the B3 picture: its first call may process B as B's A.)
@@ -1111,7 +1111,7 @@ index 78096f51..ede42073 100644
                  bool bAlreadyA = bAsADone();
                  if (phasePicture && vpPhaseDeferred)
                  {
-@@ -25129,7 +24396,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25144,7 +24411,7 @@ struct LibplaceboVideoRenderer::Impl
                      bAlreadyA = bAsADone();
                      if (!entranceOnceDone && bAlreadyA && heldA && !(rebaseFade < 1.0 && !temporalRenderer.Active()))
                      {
@@ -1120,7 +1120,7 @@ index 78096f51..ede42073 100644
                          entranceOnceDone = true;
                      }
                      else if (!entranceOnceDone && !RunVpPhaseInterpolation())
-@@ -25148,37 +24415,19 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25163,37 +24430,19 @@ struct LibplaceboVideoRenderer::Impl
                  // libplacebo's scaling and never on renderImage (the source-resolution monitor read
                  // the original frame above). A cadence repeat of a picture drawn as itself reuses
                  // its entrance result (the modules would recompute the same picture).
@@ -1169,7 +1169,7 @@ index 78096f51..ede42073 100644
                  }
                  if (rebaseFade < 1.0 && !temporalRenderer.Active())
                  {
-@@ -25187,7 +24436,10 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25202,7 +24451,10 @@ struct LibplaceboVideoRenderer::Impl
                      // picture, the detail pulse's and texture restore's decision of this frame on its
                      // own bands), so none drops out in one step when the fade starts.
                      pl_frame from = unrebased;
@@ -1182,7 +1182,7 @@ index 78096f51..ede42073 100644
                      {
                          // Hunt 3 F1: mixed in the output signal domain by VP's PRE_OUTPUT hooks
 diff --git a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
-index 9c77cd0a..041fc989 100644
+index c19c0076..92594cc5 100644
 --- a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
 +++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
 @@ -308,6 +308,10 @@
