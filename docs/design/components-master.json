@@ -51,22 +51,25 @@
       "slot": "input.signal",
       "order": 20,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/HdrInference.cpp",
-        "src/VideoProcessor-Lib/HdrInference.h",
+        "src/VP-V/modules/input/signal/HdrInference.cpp",
+        "src/VP-V/modules/input/signal/HdrInference.h",
         "src/VideoProcessor-Lib/HDRData.cpp",
         "src/VideoProcessor-Lib/ColorSpace.cpp",
         "src/VideoProcessor-Lib/EOTF.cpp",
-        "src/VideoProcessor-Lib/DolbyVisionTunnelGate.h",
-        "src/VideoProcessor-Lib/DolbyVisionTunnelHandoff.h",
-        "src/VideoProcessor-Lib/vprenderer/GpuDolbyVisionTunnelUnpack.cpp",
-        "src/VideoProcessor-Lib/vprenderer/GpuDolbyVisionTunnelUnpack.h",
+        "src/VP-V/modules/input/signal/DolbyVisionTunnelGate.h",
+        "src/VP-V/modules/input/signal/DolbyVisionTunnelHandoff.h",
+        "src/VP-V/modules/input/signal/GpuDolbyVisionTunnelUnpack.cpp",
+        "src/VP-V/modules/input/signal/GpuDolbyVisionTunnelUnpack.h",
         "src/VideoProcessor-Lib/vprenderer/Bt2020SignalController.h",
         "src/VP-V/modules/input/signal/DvSignalLevels.h",
         "src/VP-V/modules/input/signal/DvMetadataHold.h",
         "src/VP-V/modules/input/signal/DvCompareCapture.h",
-        "src/VP-V/modules/input/signal/DvTunnelPolicy.h"
+        "src/VP-V/modules/input/signal/DvTunnelPolicy.h",
+        "src/VP-V/modules/input/signal/HdrInferenceSignalBuilder.h",
+        "src/VP-V/modules/input/signal/HdrVetoCaptureGate.h",
+        "src/VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h"
       ],
       "components": {
         "files": {

@@ -1,5 +1,5 @@
 #include "pch.h"
-#include "HdrInference.h"
+#include <VP-V/modules/input/signal/HdrInference.h>
 
 #include <algorithm>
 #include <cmath>

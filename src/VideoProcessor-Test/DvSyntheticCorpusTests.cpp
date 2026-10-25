@@ -27,7 +27,7 @@
 
 #include <dv_loopback/DvLoopbackHarness.h>
 #include <RawCaptureCorpus.h>
-#include <vprenderer/DolbyVisionTunnelUnpackReference.h>
+#include <VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h>
 
 #include <chrono>
 #include <cstdio>

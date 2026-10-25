@@ -14,7 +14,7 @@
 #include <dv_loopback/DvLoopbackHarness.h>
 #include <dv_loopback/DvTunnelPacker.h>
 #include <dv_loopback/DvMetadataModel.h>
-#include <DolbyVisionTunnelGate.h>
+#include <VP-V/modules/input/signal/DolbyVisionTunnelGate.h>
 #include <DolbyVisionTunnelPresentation.h>
 
 #include <algorithm>

@@ -18,7 +18,7 @@
 #include <VideoFrame.h>
 #include <VideoState.h>
 #include <video_frame_formatter/CR210DolbyVisionTunnelFormatter.h>
-#include <DolbyVisionTunnelHandoff.h>
+#include <VP-V/modules/input/signal/DolbyVisionTunnelHandoff.h>
 #include <functional>
 #include <memory>
 #include <string>

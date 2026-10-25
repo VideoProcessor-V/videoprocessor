@@ -79,18 +79,32 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **partly migrated** (M2 step 14). Bill's files (`HDRData.cpp`, `ColorSpace.cpp`, `EOTF.cpp`, `vprenderer/Bt2020SignalController.h`; present in origin/v1.4.02-beta) are code this slot uses, not owned, and never move. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
-- `src/VideoProcessor-Lib/HdrInference.cpp`
-- `src/VideoProcessor-Lib/HdrInference.h`
+VP files (in this folder):
+
+- `src/VP-V/modules/input/signal/HdrInference.h`
+- `src/VP-V/modules/input/signal/HdrInference.cpp`
+- `src/VP-V/modules/input/signal/HdrInferenceSignalBuilder.h`
+- `src/VP-V/modules/input/signal/HdrVetoCaptureGate.h`
+- `src/VP-V/modules/input/signal/DolbyVisionTunnelGate.h`
+- `src/VP-V/modules/input/signal/DolbyVisionTunnelHandoff.h`
+- `src/VP-V/modules/input/signal/GpuDolbyVisionTunnelUnpack.h`
+- `src/VP-V/modules/input/signal/GpuDolbyVisionTunnelUnpack.cpp`
+- `src/VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h`
+- `src/VP-V/modules/input/signal/DvSignalLevels.h`
+- `src/VP-V/modules/input/signal/DvMetadataHold.h`
+- `src/VP-V/modules/input/signal/DvCompareCapture.h`
+- `src/VP-V/modules/input/signal/DvTunnelPolicy.h`
+
+Bill's files used (stay):
+
 - `src/VideoProcessor-Lib/HDRData.cpp`
 - `src/VideoProcessor-Lib/ColorSpace.cpp`
 - `src/VideoProcessor-Lib/EOTF.cpp`
-- `src/VideoProcessor-Lib/DolbyVisionTunnelGate.h`
-- `src/VideoProcessor-Lib/DolbyVisionTunnelHandoff.h`
-- `src/VideoProcessor-Lib/vprenderer/GpuDolbyVisionTunnelUnpack.cpp`
-- `src/VideoProcessor-Lib/vprenderer/GpuDolbyVisionTunnelUnpack.h`
 - `src/VideoProcessor-Lib/vprenderer/Bt2020SignalController.h`
+
+Forwarding headers (removed in M2 step 0) stay at the old paths of the seven moved headers for the renderer host and Bill's files (`VideoProcessorDlg.cpp`/`.h`, `ConfigFileTests.cpp`, `AnalysisFrame.cpp`, `AnalysisLumaSource.cpp`, `LibplaceboLutParserTests.cpp`, `DolbyVisionTunnelFormatterTests.cpp`); listed in the MANIFEST.
 
 ## Migration directive
 
