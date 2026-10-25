@@ -65,9 +65,9 @@ namespace
                 return supported*100>=unsigned(run)*85;
             };
             for(int x=interior.left+1;x<interior.right-1;++x) {
-                uint16_t luma=0;if(!source.SampleLuma(x,sourceY,luma))return false; // WP-23 shared luma
+                AnalysisLumaSample value;if(!source.Sample(x,sourceY,value))return false;
                 ++tested;
-                if(luma<=darkLimit) {
+                if(value.luma<=darkLimit) {
                     if(!supportedRun(x))return false;
                     ++black;run=0;continue;
                 }
