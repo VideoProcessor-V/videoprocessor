@@ -25,6 +25,7 @@
 #include <vprenderer/RepeatRenderReuse.h>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace VpRepeatReuse
@@ -48,10 +49,11 @@ namespace VpRepeatReuse
 		bool beforeOutput = true;   // runs at a stage before OUTPUT (OUTPUT-only hooks run again anyway)
 		HookKind kind = HookKind::Opaque;
 		uint64_t value = 0;         // Parameters: hash of the parameter values; Generation: the generation
+		const char* name = nullptr; // for the status line when the hook is opaque
 	};
 
 	// The hookState signature; `opaque` set when a pre-OUTPUT hook's state cannot be known.
-	inline uint64_t HookStateSignature(const std::vector<HookInfo>& hooks, bool& opaque)
+	inline uint64_t HookStateSignature(const std::vector<HookInfo>& hooks, bool& opaque, std::string* detail = nullptr)
 	{
 		Signature s;
 		opaque = false;
@@ -60,7 +62,11 @@ namespace VpRepeatReuse
 			if (!h.beforeOutput || h.kind == HookKind::PictureNeutral)
 				continue;
 			if (h.kind == HookKind::Opaque)
+			{
+				if (!opaque && detail)
+					*detail = std::string(h.name ? h.name : "a hook") + " has no registered state";
 				opaque = true;
+			}
 			s.Add(h.id).Add(static_cast<int>(h.kind)).Add(h.value);
 		}
 		return s.Value();
@@ -101,7 +107,7 @@ namespace VpRepeatReuse
 		static RepeatFrameKey Complete(RepeatFrameKey key, const VpTemporal& temporal, const std::vector<HookInfo>& hooks)
 		{
 			bool opaque = false;
-			key.hookState = HookStateSignature(hooks, opaque);
+			key.hookState = HookStateSignature(hooks, opaque, &key.opaqueDetail);
 			key.temporalRenderState = key.temporalRenderState || temporal.Any();
 			key.hookStateOpaque = key.hookStateOpaque || opaque;   // refuses as HookStateChanged
 			return key;
@@ -117,7 +123,7 @@ namespace VpRepeatReuse
 				d.refusal = Refusal::Disabled;
 			else
 				d = RepeatReuseRules::Compare(m_cached, cacheValid && m_cachedValid, now);
-			m_stats.Note(now.cadenceRepeat, d);
+			m_stats.Note(now.cadenceRepeat, d, d.refusal == Refusal::HookStateOpaque ? now.opaqueDetail : std::string());
 			return d;
 		}
 

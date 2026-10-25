@@ -7,8 +7,10 @@
 // comparison rules, VP's policy (switch, Original pathway, arming window, temporal stages, hook
 // state incl. opaque hooks), the visible counters, and a simulated 24-in-30 / 30-in-60 cadence.
 
-#include <VP-V/modules/output/presentation/RepeatReusePolicy.h>
+#include <VP-V/modules/output/presentation/RepeatReuseAdapter.h>
+#include <VP-V/modules/output/presentation/TemporalShaders.h>
 
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -256,6 +258,71 @@ namespace VpvTests
 			params.deband_params = nullptr;
 			params.peak_detect_params = &pl_peak_detect_default_params;
 			Assert::IsTrue(KeyFrom(5, true, false, 1, 1, image, target, params, 7).temporalRenderState);
+		}
+
+		// Audit M1: a hook with an OUTPUT pass and an earlier stage would lose its OUTPUT pass in the
+		// OUTPUT-only reuse draw - it makes the key opaque (with its reason on the status line).
+		TEST_METHOD(MultiStageHookWithOutputIsOpaque)
+		{
+			pl_hook multi{}, outputOnly{}, early{};
+			multi.stages = static_cast<pl_hook_stage>(PL_HOOK_MAIN | PL_HOOK_OUTPUT);
+			outputOnly.stages = PL_HOOK_OUTPUT;
+			early.stages = PL_HOOK_PRE_OUTPUT;
+			const std::vector<KnownHook> known = { { &early, HookKind::Static, 0, "test static" } };
+			const auto infos = ClassifyHooks({ &multi, &outputOnly, &early }, known, nullptr);
+			Assert::IsTrue(infos[0].kind == HookKind::Opaque);
+			Assert::IsTrue(infos[0].beforeOutput);
+			Assert::IsTrue(infos[1].kind == HookKind::Opaque);   // unknown native, but OUTPUT-only: outside the key
+			Assert::IsFalse(infos[1].beforeOutput);
+			Assert::IsTrue(infos[2].kind == HookKind::Static);
+			const RepeatFrameKey k = Policy::Complete(Key(5, true), VpTemporal{}, infos);
+			Assert::IsTrue(k.hookStateOpaque);
+			Assert::IsTrue(k.opaqueDetail.find("OUTPUT pass") != std::string::npos);
+			// Without the multi-stage hook the key is known.
+			Assert::IsFalse(Policy::Complete(Key(5, true), VpTemporal{}, ClassifyHooks({ &outputOnly, &early }, known, nullptr)).hookStateOpaque);
+		}
+
+		// Audit M2: mpv shaders with per-render state are never static.
+		TEST_METHOD(TemporalShaderTextIsRecognised)
+		{
+			auto t = [](const char* text) { return ShaderTextIsTemporal(text, std::strlen(text)); };
+			Assert::IsTrue(t("//!HOOK MAIN
+vec4 hook() { return HOOKED_tex(HOOKED_pos) + vec4(random); }"));
+			Assert::IsTrue(t("//!HOOK MAIN
+vec4 hook() { float f = float(frame % 2); return vec4(f); }"));
+			Assert::IsTrue(t("//!BUFFER state
+//!VAR float x
+//!HOOK MAIN
+vec4 hook() { return vec4(0); }"));
+			Assert::IsFalse(t("//!HOOK MAIN
+// frame and random only in a comment
+vec4 hook() { return HOOKED_tex(HOOKED_pos); }"));
+			Assert::IsFalse(t("//!HOOK MAIN
+vec4 hook() { float framed = 1.0; return vec4(framed); }"));   // not the identifier
+			Assert::IsFalse(t("/* random */ //!HOOK MAIN
+vec4 hook() { return vec4(1); }"));
+		}
+
+		TEST_METHOD(TemporalRegistryMakesTheHookOpaqueAndMovesTheSetGeneration)
+		{
+			static const char text[] = "//!HOOK MAIN
+vec4 hook() { return vec4(random); }";
+			pl_hook mpvLike{};
+			mpvLike.stages = PL_HOOK_MAIN;
+			int fakeFn = 0;
+			mpvLike.hook = reinterpret_cast<pl_hook_res (*)(void*, const pl_hook_params*)>(&fakeFn);
+			auto& reg = TemporalShaderRegistry::Global();
+			const uint64_t before = reg.Generation();
+			reg.Note(&mpvLike, text, std::strlen(text));
+			Assert::IsTrue(reg.Generation() > before);
+			const auto infos = ClassifyHooks({ &mpvLike }, {}, reinterpret_cast<const void*>(mpvLike.hook));
+			Assert::IsTrue(infos[0].kind == HookKind::Opaque);
+			reg.Forget(&mpvLike);
+			const auto plain = ClassifyHooks({ &mpvLike }, {}, reinterpret_cast<const void*>(mpvLike.hook));
+			Assert::IsTrue(plain[0].kind == HookKind::Parameters);
+			// The set generation is part of the hook state (L4).
+			Assert::AreNotEqual(Policy::Complete(Key(5, true), VpTemporal{}, infos).hookState,
+				Policy::Complete(Key(5, true), VpTemporal{}, plain).hookState);
 		}
 
 		TEST_METHOD(SignatureIsExactOnFloats)
