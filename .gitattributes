@@ -1,3 +1,5 @@
 *.bmp binary
 *.pdf binary
 *.png binary
+*.patch -text
+*.diff -text
