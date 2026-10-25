@@ -46,14 +46,16 @@
     "tools": [],
     "config_keys": [
       "dv_compare_capture_folder",
-      "dv_trims",
       "dv_tunnel_fixes",
-      "dv_tunnel_handoff"
+      "dv_tunnel_gpu_unpack",
+      "dv_tunnel_handoff",
+      "newlldv",
+      "newlldv_sdr_veto"
     ],
     "upstream_modules": [
       "input.capture"
     ]
   },
-  "fallback_when_missing": "DV tunnel GPU unpack failure falls back to the CPU (today log-only).",
-  "fallback_entry": "Signal: DV tunnel unpack on the CPU (<reason>)"
+  "fallback_when_missing": "A failed DV tunnel GPU unpack switches the session to the CPU unpack; a rejected DM is held briefly, then static metadata, then black.",
+  "fallback_entry": "Dolby Vision GPU unpack: CPU unpack for the session: <error> | DV metadata: <held | static>"
 }

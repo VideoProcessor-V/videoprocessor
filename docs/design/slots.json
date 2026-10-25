@@ -42,14 +42,13 @@
       "settings_keys": [
         "capture_path",
         "capture_upload",
-        "native_rgb_ingest",
-        "dv_tunnel_gpu_unpack"
+        "native_rgb_ingest"
       ],
       "planned_keys": [],
       "tiers": "not tiered (always on); manual paths in Config",
       "fallback": {
-        "entry": "Capture: CPU 4:2:0 (GPU unpack failed: <reason>)",
-        "behaviour": "GPU unpack failure switches to the CPU formatters for the session (today log-only; must become visible, queue item 44/45)."
+        "entry": "capture GPU unpack: CPU formatters for the session: <error> | native RGB GPU unpack: CPU conversion to 10-bit 4:2:0 for the session: <error> | early upload: render upload (<error>)",
+        "behaviour": "A GPU unpack failure switches to the CPU formatters for the session; early upload unavailable takes the render upload (entry added by m2-dv-fixes.patch)."
       },
       "upstream": [],
       "fingerprint": null,
@@ -103,16 +102,18 @@
         "lookahead": "none"
       },
       "settings_keys": [
+        "newlldv",
+        "newlldv_sdr_veto",
         "dv_tunnel_handoff",
+        "dv_tunnel_gpu_unpack",
         "dv_tunnel_fixes",
-        "dv_trims",
         "dv_compare_capture_folder"
       ],
       "planned_keys": [],
       "tiers": "not tiered",
       "fallback": {
-        "entry": "Signal: DV tunnel unpack on the CPU (<reason>)",
-        "behaviour": "DV tunnel GPU unpack failure falls back to the CPU (today log-only)."
+        "entry": "Dolby Vision GPU unpack: CPU unpack for the session: <error> | DV metadata: <held | static>",
+        "behaviour": "A failed DV tunnel GPU unpack switches the session to the CPU unpack; a rejected DM is held briefly, then static metadata, then black."
       },
       "upstream": [
         "input.capture"
@@ -1201,14 +1202,18 @@
       },
       "settings_keys": [
         "sdr_tone_shape",
+        "sdr_white_headroom",
+        "sdr_knee_start",
+        "sdr_knee_strength",
+        "sdr_contrast_recovery",
         "dv_trims",
         "dv_tone_mapping"
       ],
       "planned_keys": [],
       "tiers": "not tiered",
       "fallback": {
-        "entry": "SDR tone shape: not applied (shader did not load)",
-        "behaviour": "Shader failure skips it."
+        "entry": "DV tone mapping: <why>: bt2390[ + trims] | Dolby Vision trims: <state> | SDR tone shape: not applied (<why>)",
+        "behaviour": "A shader failure skips the stage; the Dolby-style curve falls back to bt2390 (+ the luminance trims). SDR tone shape entry: call site in WP-4's silent-fallbacks patch."
       },
       "upstream": [
         "colour.tone_gamut"
