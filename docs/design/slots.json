@@ -107,7 +107,8 @@
         "dv_tunnel_handoff",
         "dv_tunnel_gpu_unpack",
         "dv_tunnel_fixes",
-        "dv_compare_capture_folder"
+        "dv_compare_capture_folder",
+        "hdr_inference"
       ],
       "planned_keys": [],
       "tiers": "not tiered",
