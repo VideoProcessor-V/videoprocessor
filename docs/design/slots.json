@@ -383,7 +383,8 @@
       },
       "settings_keys": [
         "source_resolution",
-        "rebase_kernel_match"
+        "rebase_kernel_match",
+        "entrance_gpu_drain"
       ],
       "planned_keys": [
         "entrance_rebase"
@@ -421,7 +422,8 @@
       "original_pathway": {
         "mode": "off",
         "settings": {
-          "rebase_kernel_match": "off"
+          "rebase_kernel_match": "off",
+          "entrance_gpu_drain": "off"
         }
       },
       "zone": "front_end",

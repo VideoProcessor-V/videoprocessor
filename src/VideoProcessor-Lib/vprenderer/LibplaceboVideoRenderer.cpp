@@ -1261,6 +1261,12 @@ namespace
 		// default (owner accepted 2026-10-24); off = the per-picture stages (a diagnostic). The
 		// Original pathway never uses it.
 		bool pipelineEntranceOnce = true;
+		// entrance_gpu_drain (expert; bug hunt 2026-10-25, root cause open): after the entrance stages
+		// ran on a draw, "flush" submits the GPU queue and "finish" waits for it before libplacebo's
+		// render. Pictures between frames then match plain draws byte for byte (without it libplacebo's
+		// scaling passes vary by +-1 of 16 bits on scattered textured pixels with the GPU's timing).
+		// off = today's path (the default until it is costed on the 3090); Original pathway: off.
+		std::string entranceGpuDrain = "off";
 		std::string pipelineSettingsProblems;   // refused values, shown under "Fallbacks engaged" (audit item 4)
 		// Kernel-matched re-base (docs/VP-stage12-build-plan.md; owner 2026-10-16: optimise
 		// 1080p): the identified player kernel's inverse for an exact 2:1 luma re-base.
@@ -1525,7 +1531,7 @@ namespace
 			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.sourceResolutionEvidenceShots << '|'
 			<< settings.sourceResolutionEvidenceSeconds << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
 			<< settings.pipelineOriginalPathway << '|' << settings.pipelineOrder << '|' << settings.pipelineSlotsOff << '|'
-			<< settings.calibrationLutStage << '|' << settings.pipelineEntranceOnce << '|'
+			<< settings.calibrationLutStage << '|' << settings.pipelineEntranceOnce << '|' << settings.entranceGpuDrain << '|'
 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
 			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.opticalFlowGlobal << '|'
 			<< settings.opticalFlowGlobalFallback << '|' << settings.opticalFlowCostTrust << '|' << settings.opticalFlowFbCheck << '|'
@@ -3581,6 +3587,7 @@ namespace
 		settings.interpolationFallback = InterpolationPolicy::Fallback::Hold; // key=interpolation_fallback
 		settings.pipelineOrder.clear();                    // the designed order
 		settings.pipelineEntranceOnce = false;             // B3: per-picture stages, as upstream
+		settings.entranceGpuDrain = "off";                 // key=entrance_gpu_drain
 	}
 
 	// Pipeline skeleton settings (global: [vpv] first, then [vprenderer]); see RendererSettings.
@@ -3620,6 +3627,14 @@ namespace
 				settings.pipelineEntranceOnce = value == "on";
 			else
 				settings.pipelineSettingsProblems += "pipeline_entrance_once '" + raw + "' (on|off); ";
+		}
+		if (TryGetPipelineString(config, "entrance_gpu_drain", raw))
+		{
+			const std::string value = ConfigFile::NormalizeName(raw);
+			if (value == "off" || value == "flush" || value == "finish")
+				settings.entranceGpuDrain = value;
+			else
+				settings.pipelineSettingsProblems += "entrance_gpu_drain '" + raw + "' (off|flush|finish); ";
 		}
 		if (settings.pipelineOriginalPathway)
 			ApplyOriginalPathwaySettings(settings);
@@ -5697,10 +5712,41 @@ struct LibplaceboVideoRenderer::Impl
 			++entranceSourceFrames;
 		}
 	}
+	bool entranceRanThisDraw = false;   // an entrance stage ran in this draw (entrance_gpu_drain)
+	// entrance_gpu_drain: the CPU time each drain took (ms), summarised in the log every ~10 s.
+	std::vector<double> entranceDrainMs;
+	SteadyClock::time_point entranceDrainLoggedAt{};
+	void DrainAfterEntrance()
+	{
+		const std::string& mode = activeSettings.entranceGpuDrain;
+		if (mode == "off" || !entranceRanThisDraw || pipelineSlots.OriginalPathway() ||
+			!pipelineSlots.Runs(PipelineSlots::Id::ScalingRebase) || !d3d11 || !d3d11->gpu)
+			return;
+		const auto start = SteadyClock::now();
+		if (mode == "finish")
+			pl_gpu_finish(d3d11->gpu);
+		else
+			pl_gpu_flush(d3d11->gpu);
+		const auto now = SteadyClock::now();
+		entranceDrainMs.push_back(std::chrono::duration<double, std::milli>(now - start).count());
+		if (now - entranceDrainLoggedAt >= std::chrono::seconds(10) && entranceDrainMs.size() >= 20)
+		{
+			std::vector<double> sorted = entranceDrainMs;
+			std::sort(sorted.begin(), sorted.end());
+			const auto at = [&](double q) { return sorted[static_cast<size_t>(q * (sorted.size() - 1))]; };
+			DebugLog::Log("Entrance GPU drain (%s): CPU wait p50 %.3f ms, p99 %.3f ms, max %.3f ms over %zu draws",
+				mode.c_str(), at(0.5), at(0.99), sorted.back(), sorted.size());
+			entranceDrainMs.clear();
+			entranceDrainLoggedAt = now;
+		}
+	}
 	void RunEntrance(EntranceRun& run, pl_frame& frame)
 	{
 		if (!pipelineSlots.ActiveEntrance().empty())
+		{
 			++entranceStageRuns;
+			entranceRanThisDraw = true;
+		}
 		if (run.path == EntrancePath::Main && !EntranceStatelessNow())
 		{
 			const unsigned long long before = entranceStatefulBreaks;
@@ -8091,6 +8137,16 @@ struct LibplaceboVideoRenderer::Impl
 		state += "; entrance: " + (entrance.empty() ? std::string("none") : entrance);
 		state += settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway ?
 			"; entrance once (B3) on: motion pictures from the processed A and B" : "; entrance once (B3) off";
+		// entrance_gpu_drain: visible while it is on (Ctrl+I "engaged" line, Config status), never silent.
+		if (settings.entranceGpuDrain != "off" && !settings.pipelineOriginalPathway)
+		{
+			state += "; entrance GPU drain: " + settings.entranceGpuDrain;
+			EngageFallback("entrance GPU drain", settings.entranceGpuDrain == "finish" ?
+				"the GPU is drained after the entrance stages (expert workaround: pictures between frames exact)" :
+				"the GPU queue is flushed after the entrance stages (expert workaround)");
+		}
+		else
+			ReleaseFallback("entrance GPU drain");
 		if (!settings.pipelineEntranceOnce || settings.pipelineOriginalPathway)
 		{
 			entranceOnceNote.clear();
@@ -12588,6 +12644,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.pipelineSlotsOff != next.pipelineSlotsOff, "pipeline_slots_off");
 		changed(current.calibrationLutStage != next.calibrationLutStage, "calibration_lut_stage");
 		changed(current.pipelineEntranceOnce != next.pipelineEntranceOnce, "pipeline_entrance_once");
+		changed(current.entranceGpuDrain != next.entranceGpuDrain, "entrance_gpu_drain");
 		changed(current.adaptive.cnnResidualStabilise != next.adaptive.cnnResidualStabilise ||
 			current.adaptive.ssimResidualStabilise != next.adaptive.ssimResidualStabilise, "residual_stabilise");
 		changed(current.ssimBitrateAware != next.ssimBitrateAware || current.ssimBitrateFloor != next.ssimBitrateFloor, "ssim_bitrate_aware");
@@ -25029,6 +25086,7 @@ struct LibplaceboVideoRenderer::Impl
                 // Stage B: the picture at this refresh's phase in place of A's planes (a
                 // composed picture keeps A: hold). Everything after runs on it unchanged.
                 NoteEntranceSourceFrame(sourceSequence);
+                entranceRanThisDraw = false;   // entrance_gpu_drain: set by RunEntrance below
                 bool phasePicture = vpPhasePlanesValid && source.num_planes == 2 &&
                     source.planes[0].texture == textures[0] && source.planes[1].texture == textures[1];
                 // B3 (pipeline_entrance_once): the picture from the processed A and B, no stages after.
@@ -25096,6 +25154,9 @@ struct LibplaceboVideoRenderer::Impl
                          (historyNeeded && pipelineSlots.Runs(PipelineSlots::Id::RepairTextureRestore)));
                     RunMainEntrance(run, frame);
                 }
+                // entrance_gpu_drain (expert): the entrance stages' GPU work drained (or flushed)
+                // before libplacebo's render; off = nothing (today's path).
+                DrainAfterEntrance();
                 if (rebaseFade < 1.0 && !temporalRenderer.Active())
                 {
                     // The crossfade (owner 2026-10-17): both paths of this one frame, exact at both
@@ -32858,6 +32919,7 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "matcher.estLambda=" << m.estLambda << "\n"
 		<< "matcher.estQpel=" << m.estQpel << "\n"
 		<< "dejudder_est_still_zero=" << m.estStillZero << "\n"
+		<< "entrance_gpu_drain=" << s.entranceGpuDrain << "\n"
 		<< "matcher.estGate=" << m.estGate << "\n"
 		<< "matcher.estSplit=" << m.estSplit << "\n"
 		<< "matcher.estSplitSad=" << m.estSplitSad << "\n"

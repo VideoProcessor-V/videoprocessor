@@ -24,6 +24,7 @@
     "tools": [],
     "config_keys": [
       "entrance_rebase",
+      "entrance_gpu_drain",
       "rebase_kernel_match",
       "source_resolution"
     ],

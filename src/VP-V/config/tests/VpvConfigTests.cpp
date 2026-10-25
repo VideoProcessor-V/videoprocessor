@@ -340,6 +340,7 @@ namespace
 			QMetaObject::invokeMethod(off, "editingFinished", Qt::DirectConnection);
 			auto* lut = control<QComboBox>(window, Vpv::ObjectName("expert.calibration_lut_stage"));
 			lut->setCurrentIndex(1);
+			control<QComboBox>(window, Vpv::ObjectName("expert.entrance_gpu_drain"))->setCurrentIndex(2);
 			save(window);
 		}
 		ConfigFile config;
@@ -349,6 +350,7 @@ namespace
 		require(config.TryGetString("vpv", "pipeline_slots_off", v) && v == "repair.texture_restore, colour.appearance",
 			"the stages switched off are stored in [vpv]");
 		require(config.TryGetString("vpv", "calibration_lut_stage", v) && v == "vp", "the LUT stage is stored in [vpv]");
+		require(config.TryGetString("vpv", "entrance_gpu_drain", v) && v == "finish", "the entrance GPU drain is stored in [vpv]");
 		requireVpReads(path);
 	}
 }

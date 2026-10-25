@@ -25,9 +25,9 @@ namespace OriginalPathway
 		const char* slot;   // the slot whose VP additions it removes (slots.json id)
 	};
 
-	inline const std::array<Override, 55>& Overrides()
+	inline const std::array<Override, 56>& Overrides()
 	{
-		static const std::array<Override, 55> table = { {
+		static const std::array<Override, 56> table = { {
 			{ "capture_path", "standard", "input.capture" },
 			{ "capture_upload", "render", "input.capture" },
 			{ "native_rgb_ingest", "off", "input.capture" },
@@ -42,6 +42,7 @@ namespace OriginalPathway
 			{ "efficiency_fixes", "off", "input.capture" },
 			{ "source_resolution", "native", "input.source_analysis" },
 			{ "rebase_kernel_match", "off", "scaling.rebase" },
+			{ "entrance_gpu_drain", "off", "scaling.rebase" },
 			{ "source_coding_fixes", "off", "input.source_analysis" },
 			{ "source_resolution_latch_fixes", "off", "input.source_analysis" },
 			{ "source_resolution_cut_fixes", "off", "input.source_analysis" },
