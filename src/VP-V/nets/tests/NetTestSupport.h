@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -24,6 +25,40 @@ namespace NetRunnerTestsNs
 
 	inline std::wstring W(const std::string& s) { return std::wstring(s.begin(), s.end()); }
 	inline void Log(const std::string& s) { Logger::WriteMessage((s + "\n").c_str()); }
+
+	// ------------------------------------------------------------------ host texel decoding
+	// IEEE half bits -> float (NaN folded to inf: never expected in net textures).
+	inline float HalfBitsToFloat(uint16_t hb)
+	{
+		const int e = (hb >> 10) & 31, m = hb & 1023;
+		const float v = e == 0 ? std::ldexp(static_cast<float>(m), -24) : e == 31 ? INFINITY : std::ldexp(static_cast<float>(m + 1024), e - 25);
+		return (hb & 0x8000) ? -v : v;
+	}
+
+	// A downloaded texture's host bytes -> CpuTexture. `hostBits` is the format's host_bits[0], NOT
+	// its component_depth: libplacebo's D3D11 "r16f"/"rg16f"/"rgba16f" are EMULATED formats that
+	// store R16_FLOAT on the GPU but transfer 32-bit floats to and from the host (component_depth 16,
+	// host_bits 32, texel_size 4 per component; the real half host layout is "r16hf"). Decoding those
+	// bytes as halves read the low 16 bits of each fp32 (mantissa bits only) and produced the
+	// "implausible" fp16 gate logits (2.0, -0.0078, -2, -512) of 2026-10-24 (fix/net-fp16-gate).
+	inline CpuTexture DecodeHostTexels(const uint8_t* raw, int w, int h, int comps, int hostBits)
+	{
+		CpuTexture out(w, h, comps);
+		for (size_t i = 0; i < static_cast<size_t>(w) * h; ++i)
+			for (int c = 0; c < comps; ++c)
+			{
+				float v;
+				if (hostBits == 16)
+				{
+					uint16_t hb;
+					std::memcpy(&hb, raw + (i * comps + c) * 2, 2);
+					v = HalfBitsToFloat(hb);
+				}
+				else std::memcpy(&v, raw + (i * comps + c) * 4, 4);
+				out.rgba[i * 4 + c] = v;
+			}
+		return out;
+	}
 
 	// ------------------------------------------------------------------ paths and files
 	inline std::string DataDir()

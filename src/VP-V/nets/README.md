@@ -145,7 +145,24 @@ Estimates, to be confirmed on the first GPU run (`VP_TEST_ADAPTER=NVIDIA`, mains
 - **rgba16f** (GPU vs the CPU's half emulation): at most 0.01 code. A GPU may round fp16
   stores differently at exact ties.
 - **Gate decisions** must agree exactly. Any tile whose decision flips counts as a failure: a
-  flipped tile is a different code path, not a tolerance.
+  flipped tile is a different code path, not a tolerance. The only exception is a logit within
+  0.05 of zero at fp16 (tie rounding), counted and logged. The GPU test also compares the
+  gate-branch inputs (`VPNNAGP_*`, `VPNNAG2_*`), the logits and `VPNNGATED` against the CPU,
+  because the output alone cannot catch a gate defect (the 3x3 dilation and small output
+  weights hide a flipped tile).
+
+### fp16 textures on the host (libplacebo D3D11)
+
+libplacebo's D3D11 `r16f` / `rg16f` / `rgba16f` are **emulated** formats: `R16_FLOAT` on the
+GPU, but **fp32 on the host** (`component_depth` 16, `host_bits` 32, `texel_size` 4 per
+component). The half host layout is `r16hf` / `rg16hf` / `rgba16hf`. Code that uploads or
+downloads net textures must use `host_bits` (or `texel_size`), never `component_depth`, to pick
+the layout. On the GPU the two formats are the same, so the runner and its fp16 maths are not
+affected. The "implausible" fp16 gate logits of 2026-10-24 (2.0, -2, -512) came from this.
+The test readback decoded fp32 host bytes as halves. It was not a runner precision or overflow
+problem (fix/net-fp16-gate: `DecodeHostTexels`, `R16fRoundTripReadback`,
+`EmulatedFp16ReadbackDecodeReproducesTheGateValues`). The gate branch therefore follows the
+fingerprint's intermediate format like every other pass. No fp32 exception is needed.
 
 ## Fused compute path (optional, `PlNetRunner::SetFusion`)
 
