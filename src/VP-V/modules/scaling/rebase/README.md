@@ -16,7 +16,7 @@ Undo the player's upscale per axis, back to the ENCODED grid, so later stages wo
 
 ## How the code works
 
-All four files are in this folder: `KernelInverse.h/.cpp` (moved earlier) and `SourceRebase.h/.cpp` (M2 step 13). The entrance glue that calls the re-base (the host's former `EntranceRebase` / `RunEntrance` code) now lives in the entrance segment, src/VP-V/segments/EntranceSegment.{h,cpp}, moved verbatim and still uncommitted. The renderer host (LibplaceboVideoRenderer.cpp) still owns the `sourceRebase` and `sourceMonitor` objects and sets `rebaseFactor`, `rebaseFactorX`, `rebaseFade` and `rebaseFromFactor(X)` every frame.
+All four files are in this folder: `KernelInverse.h/.cpp` (moved earlier) and `SourceRebase.h/.cpp` (M2 step 13). The entrance glue that calls the re-base (the host's former `EntranceRebase` / `RunEntrance` code) now lives in the entrance segment, src/VP-V/segments/EntranceSegment.{h,cpp}, moved verbatim (S1 commit 1). The renderer host (LibplaceboVideoRenderer.cpp) still owns the `sourceRebase` and `sourceMonitor` objects and sets `rebaseFactor`, `rebaseFactorX`, `rebaseFade` and `rebaseFromFactor(X)` every frame.
 
 ### Kernel inverse (`KernelInverse.h/.cpp`)
 
@@ -80,7 +80,7 @@ Validated as `input`-group keys (RendererProfileConfig.h; sections `[vprenderer.
 ### Dependencies to lift it
 
 - `KernelInverse.*`: only the C++ standard library (and `pch.h`); compiled into VideoProcessor-Lib.
-- `SourceRebase.*`: libplacebo (dispatch, custom compute shaders, sampling), `VP-V/core/ChromaSiting.h`, and `KernelInverse` (still included through the legacy forwarding header `<KernelInverse.h>`); compiled into the renderer DLL and the test project.
+- `SourceRebase.*`: libplacebo (dispatch, custom compute shaders, sampling), `VP-V/core/ChromaSiting.h`, and `KernelInverse` (`<VP-V/modules/scaling/rebase/KernelInverse.h>`); compiled into the renderer DLL and the test project.
 - The factors and the kernel come from the source-resolution monitor (input.source_analysis) through the host; the stage call needs `EntranceSegment::Host` (GPU, dispatch, fallbacks) and `Bindings` (pointers to the host's module and factors).
 - Forwarding headers src/VideoProcessor-Lib/KernelInverse.h and src/VideoProcessor-Lib/vprenderer/SourceRebase.h keep old includes building until M2 step 0.
 
@@ -170,7 +170,7 @@ Code location: **migrated**. The authoritative list is `live_files` in [MANIFEST
 - `src/VP-V/modules/scaling/rebase/SourceRebase.h`
 - `src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp` (host: owns the module, the factors and the crossfade state)
 
-The entrance glue is in the entrance segment, src/VP-V/segments/EntranceSegment.{h,cpp} (uncommitted at the time of writing; not in `live_files`).
+The entrance glue is in the entrance segment, src/VP-V/segments/EntranceSegment.{h,cpp} (listed in `live_files`).
 
 Forwarding headers at the legacy path (early migration, removed in M2; they only keep files on active branches building, new code includes the `<VP-V/...>` path):
 

@@ -1,6 +1,6 @@
 #include <pch.h>
 #include "SourceResolutionMonitor.h"
-#include <KernelInverse.h>
+#include <VP-V/modules/scaling/rebase/KernelInverse.h>
 
 #include <DebugLog.h>
 #include <GeneralRateLog.h>

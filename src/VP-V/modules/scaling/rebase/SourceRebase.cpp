@@ -3,7 +3,7 @@
 
 #include <VP-V/core/ChromaSiting.h>   // VP-V: the plane shifts after the resample
 
-#include <KernelInverse.h>
+#include <VP-V/modules/scaling/rebase/KernelInverse.h>
 #include <libplacebo/shaders/custom.h>
 
 #include <libplacebo/dispatch.h>

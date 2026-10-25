@@ -25,7 +25,7 @@
 // analysis (SourceResolutionDetector) runs on a worker thread; the render
 // thread reads the latest snapshot. Never waits for the GPU or the worker.
 //
-// Auto (owner: an option now, default native): re-bases from the tracker's
+// Auto (the default source_resolution): re-bases from the tracker's
 // declared reading when its confidence passes the minimum. Engaging waits
 // for the next cut (no change in the middle of a shot); disengaging is
 // immediate - detail above the re-based height, a discontinuity (resync,

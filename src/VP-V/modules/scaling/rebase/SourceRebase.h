@@ -24,7 +24,7 @@ namespace SourceRebase
 {
 	// The setting's height in lines, any whole number from kMinimumHeight to
 	// kMaximumHeight (general: not a fixed list of classes); 0 = native (no
-	// re-base). auto is native until detection (step B) exists.
+	// re-base). auto (the default) is decided by the source-resolution monitor.
 	constexpr int kMinimumHeight = 144;
 	constexpr int kMaximumHeight = 8640;
 	int ClassHeight(const std::string& setting);
