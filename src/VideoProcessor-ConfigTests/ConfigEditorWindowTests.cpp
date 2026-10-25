@@ -1957,7 +1957,10 @@ void testInheritedButtonsAndReorganisedSections()
     require(inSection("config.vprenderer.native_rgb_ingest", QStringLiteral("fixesUnderTest")), "native RGB left Fixes under test");
     require(inSection("config.vprenderer.dv_tunnel_gpu_unpack", QStringLiteral("fixesUnderTest")), "DV GPU unpack left Fixes under test");
     require(inSection("config.vprenderer.dv_trims", QStringLiteral("fixesUnderTest")), "DV trims left Fixes under test");
-    require(inSection("config.vprenderer.dv_tone_mapping", QStringLiteral("fixesUnderTest")), "DV tone mapping left Fixes under test");
+    // integ/batch1 (queue 126): dv_tone_mapping moves to VP-V > Colour > Dolby Vision (with dv_trims), the
+    // DV comparison capture folder to VP-V > Input > Advanced > Readouts (diagnostics).
+    require(inCard("config.vprenderer.dv_tone_mapping", "vpv.colour.card.dv.body"), "DV tone mapping not on the Colour Dolby Vision card");
+    require(inCard("config.vprenderer.dv_compare_capture_folder", "vpv.input.card.diagnostics.body"), "DV comparison capture folder not under Input readouts");
     require(inSection("config.vprenderer.capture_upload", QStringLiteral("fixesUnderTest")), "capture_upload left Fixes under test");
     auto* profiles = requireControl<QListWidget>(window, "config.vprenderer.profiles");
     profiles->setCurrentRow(1);
