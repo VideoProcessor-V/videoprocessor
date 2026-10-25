@@ -562,7 +562,6 @@
         "src/VP-V/modules/motion/consumers/RenderedWarp.h",
         "src/VP-V/modules/motion/consumers/FrameInterpolator.h",
         "src/VP-V/modules/motion/consumers/OcclusionMaskHook.h",
-        "src/VP-V/modules/motion/consumers/SampledPassTimers.h",
         "src/VP-V/modules/motion/consumers/DejudderCacheStage.h",
         "src/VP-V/modules/motion/consumers/DejudderCacheStage.cpp"
       ],

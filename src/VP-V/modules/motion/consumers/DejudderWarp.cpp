@@ -2699,7 +2699,8 @@ if (q.x < size.x && q.y < size.y) {
 
 	// Efficiency (motion-timing extraction, 2026-10-24): collect whatever timer results are ready,
 	// never waiting on the GPU. With SetPassTiming(true, false) this is the production-safe path
-	// (VpMotion::SampledPassTimers arms it 1 frame in N); FlushPassTimers stays the tests' drain.
+	// (WP-5's SetPassSampling / TakePassGpuMs arm it 1 frame in N; group D removed the duplicate
+	// SampledPassTimers); FlushPassTimers stays the tests' drain.
 	void MotionWarp::PollPassTimers()
 	{
 		for (const auto& entry : passTimers)

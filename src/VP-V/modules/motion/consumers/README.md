@@ -19,7 +19,6 @@ Checked against the code on 2026-10-25 (feat/m2-motion). The module is the de-ju
 - `InterpolationPolicy.h` (pure): `Decide(Input) -> Decision` (Off, SmoothMotion, LowLatency, Interlaced, UnknownRates, FilmToDejudder, FilmIntegerRatio, IntegerRatio, RatioBelowOne, NativeRgb, SubtitleComposed, NoNextFrame, else Interpolate), `WholeRatio` (relative tolerance 0.5%), `IsFilmLike` (legacy / measured; with `cadence_class_fixes` the class comes from the source rate alone), `Phase`, `RefreshPhase`, parsers for `interpolation`, `interpolation_fallback`, `interpolation_grain`, `source_class`.
 - `InterpolationTimeline.h` (pure): `Timeline::Plan(generation, sequence, pts, nextPts, sourceHz, displayHz, discontinuity)` (the refreshes inside [A, B) with their phases; restart on a discontinuity / generation / rate change / jump, re-anchor beyond a quarter period, cadence repeat re-presents the last output, film update gets no refresh, at most 16 outputs), `SetRateTrim` (+-1%), `MaxSpanFrames` / `MaxPairSpanFrames` (the gap span as 4 periods of 23.976p in time with `general_rate_fixes`), `GapFillPair`, `GapFillStandalone`, `StandaloneGap`, `FieldPeriods` / `OnePeriodField`.
 - `DejudderAhead.h`: `Dejudder::AheadSchedule` (`TryAhead` after A's first extra, `Consume` at the next frame, `Reset`, reason counters).
-- `SampledPassTimers.h` (`VpMotion::SampledPassTimers`): sampled, never-drained GPU pass timers. NOT used by the renderer yet (production has no motion pass timing).
 
 ### Data flow
 
@@ -70,11 +69,11 @@ The listed entry `Motion consumers: no-motion form (vectors invalid / short queu
 
 ### What is needed to lift it
 
-libplacebo (gpu, dispatch, renderer, shaders), D3D11 (the optical-flow engine path in `DejudderWarp.cpp`), `../vector_delivery/DejudderWarp.h` and `DejudderPolicy.h`, `../estimation/NvOpticalFlow.h`, `MotionAhead.h`, `OpticalFlowTrust.h`, `vprenderer/NlsMaskMapping.h`, `GeneralRate.h`, the grain helpers (`GrainPreserve`). The pure headers (`InterpolationPolicy.h`, `InterpolationTimeline.h`, `DejudderAhead.h`, `SampledPassTimers.h`) need only the standard library (InterpolationPolicy also `DejudderPolicy.h`).
+libplacebo (gpu, dispatch, renderer, shaders), D3D11 (the optical-flow engine path in `DejudderWarp.cpp`), `../vector_delivery/DejudderWarp.h` and `DejudderPolicy.h`, `../estimation/NvOpticalFlow.h`, `MotionAhead.h`, `OpticalFlowTrust.h`, `vprenderer/NlsMaskMapping.h`, `GeneralRate.h`, the grain helpers (`GrainPreserve`). The pure headers (`InterpolationPolicy.h`, `InterpolationTimeline.h`, `DejudderAhead.h`) need only the standard library (InterpolationPolicy also `DejudderPolicy.h`).
 
 ### Test it standalone
 
-- CPU (VideoProcessor-Test): `InterpolationPolicyTests`, `InterpolationTimelineTests`, `InterpolationDebandHoldTests`, `InterpolationDecisionMatrix`, `GapSpanMatrix`, `TimelineSpanMatrix` (GeneralRateMatrixTests.cpp), `Hunt2CadenceClassPolicyTests`, `RenderAheadGapFillTests`, `MotionSegmentTests.TimersSampleOneFrameInNAndOnlyPoll` (SampledPassTimers), the AheadSchedule cases in `LibplaceboLutParserTests`.
+- CPU (VideoProcessor-Test): `InterpolationPolicyTests`, `InterpolationTimelineTests`, `InterpolationDebandHoldTests`, `InterpolationDecisionMatrix`, `GapSpanMatrix`, `TimelineSpanMatrix` (GeneralRateMatrixTests.cpp), `Hunt2CadenceClassPolicyTests`, `RenderAheadGapFillTests`, the AheadSchedule cases in `LibplaceboLutParserTests`.
 - GPU (D3D11; WARP unless `VP_TEST_GPU=hardware`; run only when GPU tests are allowed): `LibplaceboLutParserTests` `Dejudder*` (27 methods: warp, rendered warp, hold at a cut, occlusion fill, ...), `OcclusionMask*`, `InterpolatorKeepsGrainRmsAtEveryPhase`, `InterpolatorGrainNotSmearedAcrossFrames`; VideoProcessor-BetaTests (`BetaGpuTests.cpp`, MotionWarp corpora; read the TRX) and `src/VP-V/tests/gpu/MotionTimingGpuTests.inc`.
 
 Run single-threaded and read the TRX:
@@ -128,7 +127,6 @@ Chain tests:
 
 - The listed fallback entry is never produced; warp/interpolation failures and the rendered-to-source warp downgrade are log/status only
 - `RenderedWarp` cache copy failures are counted but never read or shown
-- `SampledPassTimers` is not wired: production has no motion pass timing
 - KNOWN GAP (audit item 3): the consumers run before the entrance; B3 (ADR-0024) warps the processed frame
 
 ## Where the code lives (live file list)
@@ -146,7 +144,6 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 - `src/VP-V/modules/motion/consumers/RenderedWarp.h`
 - `src/VP-V/modules/motion/consumers/FrameInterpolator.h`
 - `src/VP-V/modules/motion/consumers/OcclusionMaskHook.h`
-- `src/VP-V/modules/motion/consumers/SampledPassTimers.h`
 - `src/VP-V/modules/motion/consumers/DejudderCacheStage.h`
 - `src/VP-V/modules/motion/consumers/DejudderCacheStage.cpp`
 

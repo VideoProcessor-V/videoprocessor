@@ -9,7 +9,6 @@
 // (current + last), the visible engine->matcher downgrade, and timers that never drain.
 
 #include <VP-V/modules/motion/vector_delivery/MotionSegment.h>
-#include <VP-V/modules/motion/consumers/SampledPassTimers.h>
 
 #include <deque>
 #include <string>
@@ -21,33 +20,6 @@ namespace
 {
 	struct FakeField { int id = 0; };
 	using Segment = MotionSegment<FakeField>;
-
-	// A fake GPU: a timer's result becomes readable `lag` polls after issue; Finish is never offered.
-	struct FakeGpu
-	{
-		struct Pending { int timer; int pollsLeft; uint64_t ns; };
-		std::deque<Pending> pending;
-		int created = 0, destroyed = 0, queries = 0;
-	};
-	struct FakeOps
-	{
-		FakeGpu* gpu = nullptr;
-		int Create() { return ++gpu->created; }
-		uint64_t Query(int timer)
-		{
-			++gpu->queries;
-			for (auto it = gpu->pending.begin(); it != gpu->pending.end(); ++it)
-				if (it->timer == timer)
-				{
-					if (it->pollsLeft-- > 0) return 0;
-					const uint64_t ns = it->ns;
-					gpu->pending.erase(it);
-					return ns;
-				}
-			return 0;
-		}
-		void Destroy(int& timer) { ++gpu->destroyed; timer = 0; }
-	};
 }
 
 namespace VpvTests
@@ -185,32 +157,6 @@ namespace VpvTests
 			for (uint64_t i = 0; i < 20; ++i)
 				s.Publish(Direction::Forward, 200 + i, 201 + i, FakeField{}, Source::Matcher, e, 0);
 			Assert::IsTrue(s.FallbackEntry().empty());
-		}
-
-		TEST_METHOD(TimersSampleOneFrameInNAndOnlyPoll)
-		{
-			FakeGpu gpu;
-			SampledPassTimers<int, FakeOps> timers(FakeOps{ &gpu }, 4);
-			int timed = 0;
-			for (int frame = 0; frame < 16; ++frame)
-			{
-				if (timers.BeginFrame())
-				{
-					++timed;
-					const int t = timers.TimerFor("matcher search");
-					Assert::IsTrue(t != 0);
-					gpu.pending.push_back({ t, 2, 1500000 });   // 1.5 ms, readable after two polls
-				}
-				else
-					Assert::AreEqual(0, timers.TimerFor("matcher search"));
-				timers.Poll();   // never blocks: results arrive frames later
-			}
-			Assert::AreEqual(4, timed);
-			Assert::AreEqual(1, gpu.created);   // one timer per pass description, reused
-			Assert::IsTrue(timers.Samples("matcher search") >= 3);
-			Assert::AreEqual(1.5, timers.MeanMs("matcher search"), 1e-9);
-			timers.Release();
-			Assert::AreEqual(1, gpu.destroyed);
 		}
 	};
 }
