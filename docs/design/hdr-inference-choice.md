@@ -71,9 +71,13 @@ Bill's behaviour back.
 - No live switch: the choice is read at start-up, like `newlldv` itself (both are command-line
   switches built from the configuration).
 - "Original" is **Bill's candidate decision**: BT.2020 + SDR + no InfoFrame, confirmed after 1.5 s,
-  and (audit 2) both HDR modes "Follow input (LLDV)" - his `IsNewLldvModeSelected`, restored as
-  `LldvModesSelected()` and passed in the signal, so an explicit BT.2020 hdr_colorspace rejects as
-  upstream. It gates eligibility (a mode change restarts the stabilisation; upstream gated the use).
+  tracked independently of the HDR modes, exactly as upstream (owner rule: match Bill exactly unless
+  a divergence is a PR-worthy fix). The modes gate only the USE, as his `isHDFuryLLDV` = confirmed &&
+  `IsNewLldvModeSelected`: in original mode the dialog's `HdrModesPermitInference()` returns his
+  rule (`LldvModesSelected()`, both modes "Follow input (LLDV)") through
+  `HdrInferenceChoice::ModesPermit`, so an explicit BT.2020 hdr_colorspace keeps PQ off as upstream,
+  a mode change never resets a confirmed candidate, and PQ applies at once when the modes become
+  LLDV (test `OriginalModesGateTheUseNotTheCandidate`).
   The dialog flow around it stays VP's (restart scheduling, the veto capture gate - inert with no
   veto). Restoring his full dialog flow would mean reverting VP's changes inside his file.
 - GUI start-up has no automated test (Bill's App/dialog). `HdrInferenceChoice::FromConfig` is

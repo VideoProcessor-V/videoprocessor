@@ -245,7 +245,7 @@ index acbc8011..6e130f8a 100644
      for (QWidget* w : window.findChildren<QWidget*>())
      {
 diff --git a/src/VideoProcessor-GUI/VideoProcessorApp.cpp b/src/VideoProcessor-GUI/VideoProcessorApp.cpp
-index 27675a56..3f55594b 100644
+index 27675a56..1addbb23 100644
 --- a/src/VideoProcessor-GUI/VideoProcessorApp.cpp
 +++ b/src/VideoProcessor-GUI/VideoProcessorApp.cpp
 @@ -8,6 +8,7 @@
@@ -263,9 +263,9 @@ index 27675a56..3f55594b 100644
 +  /hdr_inference <vp|original>
 +      Which decision /newlldv uses: vp (default; VP's inference with its
 +      bit-depth, DV-tunnel and settings gates and the SDR veto) or original
-+      (Bill's candidate decision: BT.2020 + SDR + no InfoFrame, both HDR modes
-+      Follow input (LLDV)). Built from [vpv] hdr_inference; the Original
-+      pathway always selects original.
++      (Bill's candidate decision: BT.2020 + SDR + no InfoFrame, used while both
++      HDR modes are Follow input (LLDV)). Built from [vpv] hdr_inference; the
++      Original pathway always selects original.
 +
    /dv_tunnel_handoff
        With the DV tunnel on, hand a signal that is not a tunnel (10-bit RGB,
@@ -311,7 +311,7 @@ index 27675a56..3f55594b 100644
  				L"/dolby_vision_tunnel", booleanValue))
  			{
 diff --git a/src/VideoProcessor-GUI/VideoProcessorDlg.cpp b/src/VideoProcessor-GUI/VideoProcessorDlg.cpp
-index 996c07af..6a19cb68 100644
+index 996c07af..4387b982 100644
 --- a/src/VideoProcessor-GUI/VideoProcessorDlg.cpp
 +++ b/src/VideoProcessor-GUI/VideoProcessorDlg.cpp
 @@ -5667,7 +5667,7 @@ void CVideoProcessorDlg::EnableNewLldvHeuristic(bool enabled)
@@ -338,7 +338,7 @@ index 996c07af..6a19cb68 100644
 +	DebugLog::Log("hdr_inference: %s", HdrInferenceChoice::StartupLine(original, fromConfig).c_str());
 +}
 +
-+// F-8: Bill's IsNewLldvModeSelected, restored for his candidate decision (original mode only).
++// F-8: Bill's IsNewLldvModeSelected, restored for the USE of his candidate (original mode only).
 +bool CVideoProcessorDlg::LldvModesSelected()
 +{
 +	if (m_hdrColorspaceCombo.GetCurSel() < 0 || m_hdrLuminanceCombo.GetCurSel() < 0)
@@ -353,16 +353,19 @@ index 996c07af..6a19cb68 100644
  void CVideoProcessorDlg::EnableDolbyVisionTunnel(bool enabled)
  {
  	m_enableDolbyVisionTunnel = enabled;
-@@ -13347,7 +13370,7 @@ HdrInferenceSignal CVideoProcessorDlg::BuildHdrInferenceSignal()
- 	const VideoState* state = m_captureDeviceVideoState;
- 	return BuildHdrInferenceSignalFromState(state, m_useNewLldvHeuristic,
- 		m_captureInputBitDepth, tunnelGate,
--		state && state->valid ? !HdrModesPermitInference() : false);
-+		state && state->valid ? !HdrModesPermitInference() : false, LldvModesSelected());
+@@ -13324,7 +13347,10 @@ bool CVideoProcessorDlg::HdrModesPermitInference()
+ 	const ColorSpace container = m_colorspaceContainerCombo.GetCurSel() >= 0 ?
+ 		static_cast<ColorSpace>(m_colorspaceContainerCombo.GetItemData(
+ 			m_colorspaceContainerCombo.GetCurSel())) : ColorSpace::UNKNOWN;
+-	return HdrSettingsPermitInference(hdrRec709, container);
++	// F-8: the original heuristic uses its candidate only with both modes Follow input (LLDV), exactly
++	// as upstream's isHDFuryLLDV (HdrInferenceChoice::ModesPermit).
++	return HdrInferenceChoice::ModesPermit(m_hdrInference.Options().originalHeuristic, LldvModesSelected(),
++		HdrSettingsPermitInference(hdrRec709, container));
  }
  
- HdrInferenceUpdate CVideoProcessorDlg::UpdateNewLldvCandidate()
-@@ -13358,11 +13381,15 @@ HdrInferenceUpdate CVideoProcessorDlg::UpdateNewLldvCandidate()
+ HdrInferenceSignal CVideoProcessorDlg::BuildHdrInferenceSignal()
+@@ -13358,11 +13384,15 @@ HdrInferenceUpdate CVideoProcessorDlg::UpdateNewLldvCandidate()
  	switch (update.event)
  	{
  	case HdrInferenceEvent::CandidateSeen:
@@ -383,7 +386,7 @@ index 996c07af..6a19cb68 100644
  		break;
  	case HdrInferenceEvent::Inferred:
  		DebugLog::Log(
-@@ -13837,7 +13864,8 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
+@@ -13837,7 +13867,8 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
  	else if (m_useNewLldvHeuristic)
  	{
  		if (isHDFuryLLDV)
@@ -393,7 +396,7 @@ index 996c07af..6a19cb68 100644
  				"new-match: stabilized BT.2020 / 10-12-bit / no HDR InfoFrame (LLDV or HDR10)";
  		else if (m_hdrInference.State() == HdrInferenceState::Waiting)
  			lldvDecisionReason = "new-candidate-waiting: stabilization not complete";
-@@ -13874,7 +13902,9 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
+@@ -13874,7 +13905,9 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
  		" raw_hdr=" + (rawHdrData ? "1" : "0") +
  		" newlldv=" + (m_useNewLldvHeuristic ? "1" : "0") +
  		" hdr_modes_permit=" + (HdrModesPermitInference() ? "1" : "0") +
@@ -404,7 +407,7 @@ index 996c07af..6a19cb68 100644
  	// A veto preview (BuildHdrVetoSdrState) logs and records nothing.
  	if (!m_hdrVetoPreviewing)
  	{
-@@ -14140,7 +14170,7 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
+@@ -14140,7 +14173,7 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
  			hdrInferred)
  		{
  			ShowProfileOverlayItems({ { "hdr", "HDR",
@@ -413,7 +416,7 @@ index 996c07af..6a19cb68 100644
  					"SDR (picture veto; no HDR flag)",
  				ProfileChangeOverlay::Item::Indicator::None } },
  				false, "hdr-inference");
-@@ -14225,8 +14255,10 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
+@@ -14225,8 +14258,10 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
  		m_videoValidText.SetWindowText(_T("Yes"));
  		m_videoDisplayModeText.SetWindowText(videoState->displayMode->ToString());
  		m_videoPixelFormatText.SetWindowText(ToString(videoState->videoFrameEncoding));
