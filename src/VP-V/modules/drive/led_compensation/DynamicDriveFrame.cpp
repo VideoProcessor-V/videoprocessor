@@ -141,7 +141,9 @@ namespace LedDrive
 			MergeModuleFallbacks(led);
 			return;
 		}
-		if (!compensationConfigured)
+		// Slot drive.led_compensation off (pipeline_slots_off, Original pathway): no hook state is
+		// built at all (modularity sweep: off = no state change).
+		if (in.compensationSlotRuns && !compensationConfigured)
 		{
 			ConfiguredShaderRule compensationRule;
 			compensationRule.name = "led_compensation";
@@ -149,7 +151,8 @@ namespace LedDrive
 			compensation.Configure({ compensationRule });
 			compensationConfigured = true;
 		}
-		compensation.Ensure(*in.hookTemplates);
+		if (in.compensationSlotRuns)
+			compensation.Ensure(*in.hookTemplates);
 		CompensationGain gain;
 		gain.knee = knee.load(std::memory_order_acquire);
 		gain.eotf = compensationEotf.load(std::memory_order_acquire);
@@ -255,9 +258,18 @@ namespace LedDrive
 				DebugLog::Log("Dynamic Drive: WARNING gamma boost NOT applied - shaders\\LED compensation.glsl did not load or was disabled; the picture is plain output_gamma (exponent %.4f missing)",
 					boostExponent);
 			boostMissingLogged = true;
-			// No silent fallbacks (owner rule): the boost's loss is visible, not log-only.
-			Engage(kBoostFallbackId, "not applied: " + unavailable + "; the picture is plain output_gamma");
-			boostEngaged = true;
+			// No silent fallbacks (owner rule): the boost's loss is visible, not log-only. A slot the
+			// user switched off is a choice, not a fallback: log only (modularity sweep).
+			if (in.compensationSlotRuns)
+			{
+				Engage(kBoostFallbackId, "not applied: " + unavailable + "; the picture is plain output_gamma");
+				boostEngaged = true;
+			}
+			else if (boostEngaged)
+			{
+				ReleaseFallback(kBoostFallbackId);
+				boostEngaged = false;
+			}
 		}
 		else if (hooks.size() > compensationStart)
 		{

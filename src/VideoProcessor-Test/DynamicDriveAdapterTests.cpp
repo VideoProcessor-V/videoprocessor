@@ -300,14 +300,27 @@ namespace VideoProcessorTest
 			FrameFacts facts;
 			facts.in.measureSlotRuns = false;
 			std::vector<const pl_hook*> hooks;
-			frame.PrepareFrame(facts.in, hooks, NoTag);
-			Assert::AreEqual(size_t{ 1 }, hooks.size(), L"the compensation hook runs");
+			std::vector<std::pair<const pl_hook*, PipelineSlots::Id>> tags;
+			const auto record = [&](size_t start, PipelineSlots::Id id)
+			{
+				for (size_t i = start; i < hooks.size(); ++i)
+					tags.emplace_back(hooks[i], id);
+			};
+			frame.PrepareFrame(facts.in, hooks, record);
+			Assert::AreEqual(size_t{ 1 }, hooks.size(), L"the compensation hook runs, no measurement hook");
+			Assert::AreEqual(size_t{ 1 }, tags.size());
+			Assert::IsTrue(tags[0].second == PipelineSlots::Id::DriveLedCompensation, L"no DriveLedMeasure tag with the slot off");
 			Assert::IsTrue(module->HoldingFullForCompensation());
 			Assert::IsTrue(ReasonOf(fallbacks, LedDrive::LedDriveModule::kHoldFallbackId).find("held at full: measurement off") != std::string::npos);
 			facts.in.measureSlotRuns = true;
 			hooks.clear();
-			frame.PrepareFrame(facts.in, hooks, NoTag);
+			tags.clear();
+			frame.PrepareFrame(facts.in, hooks, record);
 			Assert::AreEqual(size_t{ 2 }, hooks.size(), L"measurement + compensation");
+			Assert::IsTrue(hooks[0] == frame.MeasurementHookPointer(), L"measurement first");
+			Assert::AreEqual(size_t{ 2 }, tags.size());
+			Assert::IsTrue(tags[0].first == frame.MeasurementHookPointer() && tags[0].second == PipelineSlots::Id::DriveLedMeasure);
+			Assert::IsTrue(tags[1].second == PipelineSlots::Id::DriveLedCompensation);
 			Assert::IsFalse(module->HoldingFullForCompensation());
 			Assert::IsFalse(fallbacks.Engaged(LedDrive::LedDriveModule::kHoldFallbackId));
 		}
