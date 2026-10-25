@@ -1,0 +1,1221 @@
+diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+index 78096f51..bac8ac13 100644
+--- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+@@ -83,6 +83,7 @@
+ #include <VP-V/core/DelayBudgetLadder.h>   // the delay budget's hold (ADR-0020)
+ #include <VP-V/core/EntranceStages.h>
+ #include <VP-V/core/EntranceEpoch.h>
++#include <VP-V/segments/EntranceSegment.h>   // S1: the entrance segment (WP-8)
+ #include <VP-V/core/OutputHookOrder.h>
+ #include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
+ #include <vprenderer/DownscaleLight.h>
+@@ -5549,7 +5550,6 @@ struct LibplaceboVideoRenderer::Impl
+ 	std::string ambientSdrLogged;
+ 	pl_color_adjustment frameColorAdjustment{};
+ 	unsigned long long rebaseFailuresSeen = 0;
+-	std::string rebaseFormatNoteLogged;   // C19: the re-base's float fallback, logged once per change
+ 	SteadyClock::time_point rebasePausedUntil{};
+ 	int rebasePauseSeconds = 5;
+ 	double rebaseFactorX = 1.0;         // the width's (per axis; = rebaseFactor when uniform)
+@@ -5581,7 +5581,6 @@ struct LibplaceboVideoRenderer::Impl
+ 	// the status then says "inactive (...)" instead of "on".
+ 	std::string detailPulseInactive;
+ 	std::string textureRestoreInactive;
+-	std::string detailPulseFailLogged, textureRestoreFailLogged;   // each reason logged once
+ 	// Delta 15 S8-2 / 2c: this frame's weight scale from the bitrate quality (1 = clean).
+ 	double bitrateWeightScale = 1.0;
+ 	pl_tex rgbIngestLuma = nullptr;
+@@ -5592,505 +5591,70 @@ struct LibplaceboVideoRenderer::Impl
+ 	bool dejudderRgbBt2020 = false;
+ 	pl_tex dejudderRgbScratch = nullptr;
+ 	bool rgbGpuLogged = false;
+-	// Pipeline skeleton (design freeze 2026-10-24; barrier B3/R2): the input side as ONE stage
+-	// list. Every call site that processes a picture through the entrance stages - the main draw,
+-	// a de-judder extra, and the crossfade's path being left - runs RunEntrance, which walks the
+-	// slot registry's active entrance stages in their (data-driven, validated) order. Each call
+-	// site keeps its own module slots and rules (the EntranceRun path), exactly as before; a
+-	// placeholder slot has no case here and never runs (zero cost).
+-	enum class EntrancePath { Main, Extra, CrossfadeFrom };
+-	struct EntranceRun
+-	{
+-		EntrancePath path = EntrancePath::Main;
+-		double factorX = 1.0, factorY = 1.0;   // the re-base factors this picture takes
+-		uint64_t sequence = 0;                  // its source frame
+-		// Main only: A's own planes (the debander's hold and the detail history advance once per
+-		// source frame on A, processed by the stages before them), this draw's situation, and
+-		// the picture the look-ahead reads.
+-		const pl_frame* source = nullptr;
+-		bool phasePicture = false;
+-		bool cadenceRepeat = false;
+-		uint64_t nextSequence = 0;
+-		const pl_frame* image = nullptr;
+-		bool aNeeded = false;      // A goes through the stages alongside (hold / history)
+-		bool aReady = true;
+-		pl_frame aFrame{};
+-		bool ready = true;         // CrossfadeFrom: false when its re-base failed (no fade)
+-	};
+-	// The entrance result of a picture drawn as itself, by source frame (barrier B3): a cadence
+-	// repeat of the same source frame reuses it instead of re-running every stage. The epoch
+-	// covers everything the result depends on; any other use of the modules' output textures (an
+-	// extra, the crossfade, the hold) moves entranceGeneration, so a stale texture is never shown.
+-	EntranceStages::Cache<pl_frame> entranceCache;
+-	uint64_t entranceGeneration = 1;
+-	unsigned long long entranceRuns = 0, entranceReuses = 0;
+-	// B3 (pipeline_entrance_once, ADR-0024): the processed A (drawn as itself, the stateful stages
+-	// advanced on it) and the processed B (the next frame, ahead, per picture) as the ring's OWN
+-	// copies, so the motion consumers read them while the modules' textures are reused.
+-	struct OwnedEntrance
+-	{
+-		pl_tex tex[4] = {};
+-		pl_frame frame{};
+-		bool identity = false;   // no stage changed the picture: the raw planes are the processed ones
+-		pl_rect2df rawCrop{};    // the raw frame's crop and luma size it was made from (audit MED 4)
+-		int rawW = 0, rawH = 0;
+-	};
+-	// Audit MED 3/4: a ring picture as drawn for THIS frame - the owned planes, but the caller's own
+-	// descriptor (crop, colour incl. per-frame HDR metadata); the crop mapped to the processed size
+-	// like the stages map it. An identity entry is the caller's raw frame itself (its planes are
+-	// not the ring's).
+-	static pl_frame EntranceOwnedFrame(const OwnedEntrance& e, const pl_frame& raw)
+-	{
+-		if (e.identity || e.rawW <= 0 || e.rawH <= 0 || !e.frame.planes[0].texture)
+-			return raw;
+-		pl_frame out = e.frame;
+-		out.color = raw.color;
+-		const double sx = static_cast<double>(e.frame.planes[0].texture->params.w) / e.rawW;
+-		const double sy = static_cast<double>(e.frame.planes[0].texture->params.h) / e.rawH;
+-		out.crop.x0 = static_cast<float>(e.frame.crop.x0 + (raw.crop.x0 - e.rawCrop.x0) * sx);
+-		out.crop.x1 = static_cast<float>(e.frame.crop.x1 + (raw.crop.x1 - e.rawCrop.x1) * sx);
+-		out.crop.y0 = static_cast<float>(e.frame.crop.y0 + (raw.crop.y0 - e.rawCrop.y0) * sy);
+-		out.crop.y1 = static_cast<float>(e.frame.crop.y1 + (raw.crop.y1 - e.rawCrop.y1) * sy);
+-		return out;
+-	}
+-	EntranceStages::Ring<OwnedEntrance, 3> entranceRing;
+-	unsigned long long entranceOnceA = 0, entranceOnceB = 0, entranceOnceReused = 0, entranceOncePictures = 0,
+-		entranceOnceFallbacks = 0;
+-	std::string entranceOnceNote;   // the fallback shown under "Fallbacks engaged" (empty: none)
+-	size_t entranceRingBytesLogged = 0;
+-
+-	// Everything a cached entrance result depends on (VP-V/core/EntranceEpoch.h; audit blocker 1):
+-	// the frame itself (planes, crop, representation, colour), every stage's parameters, the
+-	// detail stages' vector fields and bitrate quality, and the generation moved by any other use
+-	// of the modules' output textures.
+-	// withGeneration false: the B3 ring's key (its pictures are owned copies, so a module writing
+-	// its textures again does not change them).
+-	uint64_t EntranceEpochFor(const pl_frame& source, bool withGeneration = true) const
+-	{
+-		EntranceEpoch::Key key;
+-		key.Add(withGeneration ? entranceGeneration : 0);
+-		// The ring (withGeneration false) keys by the unique source sequence and content, not by the
+-		// texture the frame was uploaded into (its pictures are owned copies).
+-		EntranceEpoch::AddFrame(key, source, withGeneration);
+-		key.Add(rebaseFactor).Add(rebaseFactorX);
+-		key.Add(debandThreshold).Add(vpDebandParams.thresholdCodes).Add(vpDebandParams.radiusScale);
+-		key.Add(static_cast<const void*>(vpDebandParams.field)).Add(static_cast<const void*>(vpDebandParams.grainError));
+-		key.Add(vpDebandParams.fieldScale).Add(vpDebandParams.fieldScaleX).Add(vpDebandParams.sequence);
+-		key.Add((detailPulseRuns ? 1 : 0) | (textureRestoreRuns ? 2 : 0));
+-		key.Add(detailPulseParams.sequence).Add(static_cast<const void*>(detailPulseParams.field)).Add(detailPulseParams.bitrateQuality)
+-			.Add(detailPulseParams.fieldScale).Add(detailPulseParams.fieldScaleX).Add(detailPulseParams.planeLines).Add(detailPulseParams.cap);
+-		key.Add(textureRestoreParams.sequence).Add(static_cast<const void*>(textureRestoreParams.field)).Add(textureRestoreParams.bitrateQuality)
+-			.Add(textureRestoreParams.fieldScale).Add(textureRestoreParams.fieldScaleX).Add(textureRestoreParams.planeLines).Add(textureRestoreParams.cap);
+-		// The registry's entrance (slot switches, order) changes the result as well.
+-		for (PipelineSlots::Id id : pipelineSlots.ActiveEntrance())
+-			key.Add(static_cast<int>(id));
+-		return key.Value();
+-	}
+-
+-	void EnsureRebaseDispatch()
+-	{
+-		if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
+-	}
+-
+-	// Runs the active entrance stages on `frame` for one call site.
+-	unsigned long long entranceStageRuns = 0;     // every call (any path): the input side's cost unit
+-	unsigned long long entranceSourceFrames = 0;  // distinct source frames drawn
+-	unsigned long long entranceCostLoggedAt = 0;
+-	uint64_t entranceLastSourceSequence = 0;
+-	void NoteEntranceSourceFrame(uint64_t sequence)
+-	{
+-		if (sequence != 0 && sequence != entranceLastSourceSequence)
+-		{
+-			entranceLastSourceSequence = sequence;
+-			++entranceSourceFrames;
+-		}
+-	}
+-	void RunEntrance(EntranceRun& run, pl_frame& frame)
++	// S1, the entrance segment (VP-V/segments/EntranceSegment.h; WP-8, M2 steps 10-13): the input
++	// side at source size - re-base, [repair A], deband, texture restore / detail pulse, [4K route] -
++	// with its per-path rules, per-source-frame cache and B3 ring, behind ONE call per picture.
++	// The modules and their per-frame parameters stay here (Bindings); the host hands back the
++	// motion estimate ahead, B's field and the next frame's upload (S0) through this adapter.
++	struct EntranceHost final : EntranceSegment::Host
+ 	{
+-		if (!pipelineSlots.ActiveEntrance().empty())
+-			++entranceStageRuns;
+-		if (run.path == EntrancePath::Main && !EntranceStatelessNow())
+-		{
+-			const unsigned long long before = entranceStatefulBreaks;
+-			const uint64_t last = entranceStatefulLast;
+-			NoteStatefulRun(run.sequence);
+-			if (entranceStatefulBreaks != before && entranceStatefulBreaks <= 3)
+-				DebugLog::Log("Entrance once (B3): stateful run out of sequence (source %llu after %llu; phase picture %d, A alongside %d, repeat %d)",
+-					static_cast<unsigned long long>(run.sequence), static_cast<unsigned long long>(last), run.phasePicture ? 1 : 0,
+-					run.aNeeded ? 1 : 0, run.cadenceRepeat ? 1 : 0);
+-		}
+-		if (run.path != EntrancePath::Main || run.phasePicture)
+-			++entranceGeneration;   // the modules' output textures are about to change
+-		for (PipelineSlots::Id id : pipelineSlots.ActiveEntrance())
++		Impl& r;
++		explicit EntranceHost(Impl& impl) : r(impl) {}
++		pl_gpu Gpu() const override { return r.d3d11 ? r.d3d11->gpu : nullptr; }
++		pl_dispatch Dispatch() override { r.EnsureRebaseDispatch(); return r.rebaseDispatch; }
++		void EngageFallback(const std::string& id, const std::string& text) override { r.EngageFallback(id.c_str(), text); }
++		void ReleaseFallback(const std::string& id) override { r.ReleaseFallback(id.c_str()); }
++		bool FieldAhead(uint64_t a, uint64_t b, std::string& why) override { return r.EntranceOnceFieldAhead(a, b, why); }
++		Field FieldOf(uint64_t sequence) const override
+ 		{
+-			switch (id)
++			Field f;
++			if (r.dejudder && r.dejudderLiveFieldFrom == sequence && r.motionValidity.Current(r.dejudderEstimatedEpoch))
+ 			{
+-			case PipelineSlots::Id::ScalingRebase: EntranceRebase(run, frame); break;
+-			case PipelineSlots::Id::RepairDeband: EntranceDeband(run, frame); break;
+-			case PipelineSlots::Id::RepairTextureRestore: EntranceDetail(run, frame); break;
+-			default: break;   // slots without a component yet: never active (zero cost)
++				f.field = r.dejudder->Field();
++				f.grainError = r.dejudder->GrainError();
+ 			}
+-			if (!run.ready)
+-				return;
++			return f;
+ 		}
+-	}
+-
+-	// The main draw: the cached entrance result for a picture drawn as itself, else the stages.
+-	void RunMainEntrance(EntranceRun& run, pl_frame& frame)
+-	{
+-		const bool cacheable = !run.phasePicture && run.sequence != 0;
+-		// B3 switched off live: the ring's textures go (render thread).
+-		if (!EntranceOnce() && entranceRingBytesLogged > 0 && d3d11 && d3d11->gpu)
+-			ReleaseEntranceRing(d3d11->gpu);
+-		// B3: a picture drawn as itself is A's processed picture, kept (owned) in the ring.
+-		const bool once = cacheable && EntranceOnce();
+-		const uint64_t ringKey = once ? EntranceRingKey(frame) : 0;
+-		if (once)
+-			if (const OwnedEntrance* owned = entranceRing.Find(run.sequence, ringKey, EntranceStages::Role::A))
+-			{
+-				frame = EntranceOwnedFrame(*owned, frame);
+-				++entranceReuses;
+-				EntranceDetailLookAhead(run);
+-				return;
+-			}
+-		const pl_frame rawFrame = frame;
+-		const uint64_t epoch = cacheable ? EntranceEpochFor(frame) : 0;
+-		if (cacheable)
+-			if (const pl_frame* hit = entranceCache.Find(run.sequence, epoch))
+-			{
+-				frame = *hit;
+-				++entranceReuses;
+-				EntranceDetailLookAhead(run);
+-				return;
+-			}
+-		RunEntrance(run, frame);
+-		++entranceRuns;
+-		if (cacheable)
+-			entranceCache.Store(run.sequence, epoch, frame);
+-		else
+-			entranceCache.Invalidate();
+-		if (once)
++		NextUpload Next() const override
+ 		{
+-			++entranceOnceA;
+-			(void)StoreEntranceOwned(run.sequence, ringKey, EntranceStages::Role::A, rawFrame, frame);
++			return { r.dejudderNextUploadedSequence, r.dejudderNextTextures[0], r.dejudderNextTextures[1], r.dejudderRgbLuma != nullptr };
+ 		}
+-		LogEntranceCounters();
+-	}
++	};
++	EntranceSegment::Bindings EntranceBindings()
++	{
++		EntranceSegment::Bindings b;
++		b.sourceRebase = &sourceRebase;
++		b.debander = &debander;
++		b.detailPulse = &detailPulse;
++		b.textureRestore = &textureRestore;
++		b.slots = &pipelineSlots;
++		b.entranceOnceSetting = &activeSettings.pipelineEntranceOnce;
++		b.rebaseFactor = &rebaseFactor;
++		b.rebaseFactorX = &rebaseFactorX;
++		b.rebaseFromFactor = &rebaseFromFactor;
++		b.rebaseFromFactorX = &rebaseFromFactorX;
++		b.debandThreshold = &debandThreshold;
++		b.vpDebandParams = &vpDebandParams;
++		b.detailPulseParams = &detailPulseParams;
++		b.textureRestoreParams = &textureRestoreParams;
++		b.detailPulseRuns = &detailPulseRuns;
++		b.textureRestoreRuns = &textureRestoreRuns;
++		b.detailPulseInactive = &detailPulseInactive;
++		b.textureRestoreInactive = &textureRestoreInactive;
++		b.detailPulseAheadSequence = &detailPulseAheadSequence;
++		return b;
++	}
++	EntranceHost entranceHost{ *this };
++	EntranceSegment::Segment entrance{ entranceHost, EntranceBindings() };
++	using OwnedEntrance = EntranceSegment::OwnedEntrance;
+ 
+-	void LogEntranceCounters()
++	void EnsureRebaseDispatch()
+ 	{
+-		static GeneralRate::LogInterval entranceLog = GeneralRate::LogInterval::ForFrames(2400);
+-		// Also every 240 input-side runs (the harness reads the counters in short runs; the cost
+-		// criterion of B3 compares runs per source frame with it on and off).
+-		const bool batch = entranceStageRuns >= entranceCostLoggedAt + 120;
+-		if (entranceLog.DueOr(entranceRuns == 1 || batch))
+-		{
+-			entranceCostLoggedAt = entranceStageRuns;
+-			DebugLog::Log("Entrance cost: %llu input-side runs for %llu source frames", entranceStageRuns, entranceSourceFrames);
+-			if (EntranceOnce())
+-				DebugLog::Log("Entrance stages: %llu runs, %llu repeats reused (once per source frame); entrance once (B3): "
+-					"A %llu, B ahead %llu, ring reuses %llu, pictures from processed planes %llu, fallbacks %llu, history breaks %llu",
+-					entranceRuns, entranceReuses, entranceOnceA, entranceOnceB, entranceOnceReused, entranceOncePictures,
+-					entranceOnceFallbacks, entranceStatefulBreaks);
+-			else
+-				DebugLog::Log("Entrance stages: %llu runs, %llu repeats reused (once per source frame)", entranceRuns, entranceReuses);
+-		}
++		if (!rebaseDispatch) rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
+ 	}
+ 
+ 	// ---- B3: the input side once per source frame (pipeline_entrance_once, ADR-0024) ----
+-	bool EntranceOnce() const { return activeSettings.pipelineEntranceOnce && !pipelineSlots.OriginalPathway(); }
+-
+-	// No stage that runs on this frame keeps state across frames (the re-base alone; the debander
+-	// idle; the detail stages off): then B processed ahead IS what B's own draw computes, and the
+-	// ring keeps it as B's A - the input side runs exactly once per source frame. A stage not
+-	// listed here counts as stateful (a new module states it explicitly).
+-	bool EntranceStatelessNow() const
+-	{
+-		for (PipelineSlots::Id id : pipelineSlots.ActiveEntrance())
+-			switch (id)
+-			{
+-			case PipelineSlots::Id::ScalingRebase: break;
+-			case PipelineSlots::Id::RepairDeband: if (debandThreshold > 0.0) return false; break;
+-			case PipelineSlots::Id::RepairTextureRestore: if (detailPulseRuns || textureRestoreRuns) return false; break;
+-			default: return false;
+-			}
+-		return true;
+-	}
+-
+-	// The ring's key for a source frame: the frame (crop, range, colour - not the texture it was
+-	// uploaded into), the re-base and the active stages. The stages' per-frame parameters (the
+-	// readings, the vector field) are deliberately NOT in it: a source frame's processed picture,
+-	// once made (as A, or ahead as B with B's own field), is that frame's picture for its whole
+-	// time - the input side once per source frame, B ahead identical to B drawn as A. Any settings
+-	// apply invalidates the ring (UpdatePipelineSlots).
+-	uint64_t EntranceRingKey(const pl_frame& raw) const
+-	{
+-		EntranceEpoch::Key key;
+-		key.Add(0x5354415445ull);
+-		// The planes' layout, the codes' meaning and the crop (what the stages read); the per-frame
+-		// HDR metadata is applied from the drawn frame (EntranceOwnedFrame), so B made ahead with A's
+-		// descriptor is found by B's own draw (audit MED 4).
+-		key.Add(raw.num_planes);
+-		for (int i = 0; i < raw.num_planes && i < 4; ++i)
+-		{
+-			const pl_tex t = raw.planes[i].texture;
+-			key.Add(t ? t->params.w : 0).Add(t ? t->params.h : 0).Add(static_cast<const void*>(t ? t->params.format : nullptr));
+-			key.Add(raw.planes[i].components);
+-			for (int c = 0; c < 4; ++c)
+-				key.Add(raw.planes[i].component_mapping[c]);
+-		}
+-		key.Add(static_cast<int>(raw.repr.sys)).Add(static_cast<int>(raw.repr.levels)).Add(static_cast<int>(raw.repr.alpha));
+-		key.Add(raw.repr.bits.sample_depth).Add(raw.repr.bits.color_depth).Add(raw.repr.bits.bit_shift);
+-		key.Add(static_cast<int>(raw.color.primaries)).Add(static_cast<int>(raw.color.transfer));
+-		// The crop IS in the key: the stages read it (re-base geometry, the active picture), and a
+-		// start-up crop hold releasing must re-process a repeated frame (2026-10-24, still-frame
+-		// identity with B3 on vs off). Only the per-frame HDR metadata stays out.
+-		key.Add(raw.crop.x0).Add(raw.crop.y0).Add(raw.crop.x1).Add(raw.crop.y1);
+-		key.Add(rebaseFactor).Add(rebaseFactorX);
+-		for (PipelineSlots::Id id : pipelineSlots.ActiveEntrance())
+-			key.Add(static_cast<int>(id));
+-		return key.Value();
+-	}
+-
+-	// Visible, never silent (owner rule): which pictures took the per-picture stages and why.
+-	// Audit HIGH 2: a fallback stays shown for its whole source frame (a picture made with the
+-	// fallback in the same call never releases it); released only by a source frame that runs
+-	// without one.
+-	uint64_t entranceOnceCurrentA = 0;     // the source frame whose pictures are being made
+-	uint64_t entranceOnceFallbackFor = 0;  // the source frame that fell back (sticky until the next clean one)
+-	void EntranceOnceFallback(const std::string& why)
+-	{
+-		++entranceOnceFallbacks;
+-		entranceOnceFallbackFor = entranceOnceCurrentA;
+-		if (why != entranceOnceNote)
+-		{
+-			entranceOnceNote = why;
+-			EngageFallback("entrance once", why + "; those pictures take the per-picture stages");
+-		}
+-	}
+-
+-	void EntranceOnceWorking()
+-	{
+-		++entranceOncePictures;
+-		if (!entranceOnceNote.empty() && entranceOnceFallbackFor != entranceOnceCurrentA)
+-		{
+-			entranceOnceNote.clear();
+-			ReleaseFallback("entrance once");
+-		}
+-	}
+-
+-	// Audit HIGH 1: once B was processed as its own A (the stateful stages advanced on B), no
+-	// picture of A may run the stateful stages again: A's late fallbacks show the ring's
+-	// processed A (the hold) or take the per-picture path (never advancing).
+-	uint64_t entranceOnceBAsAFor = 0;      // A whose B was processed as B's A
+-	// A stateful main run for an EARLIER source frame than one already run (A after B was processed
+-	// as B's A: the hold chain and the history would restart). A forward skip is a capture gap.
+-	unsigned long long entranceStatefulBreaks = 0;
+-	uint64_t entranceStatefulLast = 0;
+-	void NoteStatefulRun(uint64_t sequence)
+-	{
+-		if (sequence == 0)
+-			return;
+-		if (entranceStatefulLast != 0 && sequence < entranceStatefulLast)
+-			++entranceStatefulBreaks;
+-		entranceStatefulLast = (std::max)(entranceStatefulLast, sequence);
+-	}
+-	// Test only (VP_TEST_ENTRANCE_ONCE_FALLBACK_EVERY=N): every Nth picture between frames takes
+-	// the late fallback, so the harness proves the stateful stages never restart (HIGH 1).
+-	unsigned entranceOnceForcedEvery = 0, entranceOnceForcedCount = 0;
+-	bool entranceOnceForcedRead = false;
+-	bool EntranceOnceForcedFallback()
+-	{
+-		if (!entranceOnceForcedRead)
+-		{
+-			entranceOnceForcedRead = true;
+-			// The process environment (the harness sets it with SetEnvironmentVariable).
+-			char v[32] = {};
+-			if (GetEnvironmentVariableA("VP_TEST_ENTRANCE_ONCE_FALLBACK_EVERY", v, sizeof(v)) > 0)
+-				entranceOnceForcedEvery = static_cast<unsigned>(std::strtoul(v, nullptr, 10));
+-		}
+-		return entranceOnceForcedEvery > 0 && (++entranceOnceForcedCount % entranceOnceForcedEvery) == 0;
+-	}
+-
+-	static bool SamePlanes(const pl_frame& a, const pl_frame& b)
+-	{
+-		if (a.num_planes != b.num_planes)
+-			return false;
+-		for (int p = 0; p < a.num_planes; ++p)
+-			if (a.planes[p].texture != b.planes[p].texture)
+-				return false;
+-		return true;
+-	}
+-
+-	// The ring's own copy of a processed picture (a plain copy pass per plane, exact for the
+-	// 16-bit and float planes the stages write).
+-	bool CopyEntrance(const pl_frame& in, OwnedEntrance& out)
+-	{
+-		EnsureRebaseDispatch();
+-		out.frame = in;
+-		for (int p = 0; p < in.num_planes; ++p)
+-		{
+-			const pl_tex src = in.planes[p].texture;
+-			if (!src || !src->params.sampleable || !(src->params.format->caps & PL_FMT_CAP_RENDERABLE))
+-				return false;
+-			bool shared = false;
+-			for (int q = 0; q < p; ++q)
+-				if (in.planes[q].texture == src)
+-				{
+-					out.frame.planes[p].texture = out.frame.planes[q].texture;
+-					shared = true;
+-				}
+-			if (shared)
+-				continue;
+-			pl_tex_params tp{};
+-			tp.w = src->params.w;
+-			tp.h = src->params.h;
+-			tp.format = src->params.format;
+-			tp.sampleable = true;
+-			tp.renderable = true;
+-			tp.storable = (src->params.format->caps & PL_FMT_CAP_STORABLE) != 0;
+-			if (!pl_tex_recreate(d3d11->gpu, &out.tex[p], &tp))
+-				return false;
+-			pl_shader sh = pl_dispatch_begin(rebaseDispatch);
+-			pl_sample_src sample{};
+-			sample.tex = src;
+-			sample.components = src->params.format->num_components;
+-			if (!pl_shader_sample_direct(sh, &sample))
+-			{
+-				pl_dispatch_abort(rebaseDispatch, &sh);
+-				return false;
+-			}
+-			pl_dispatch_params dp{};
+-			dp.shader = &sh;
+-			dp.target = out.tex[p];
+-			if (!pl_dispatch_finish(rebaseDispatch, &dp))
+-				return false;
+-			out.frame.planes[p].texture = out.tex[p];
+-		}
+-		return true;
+-	}
+-
+-	bool StoreEntranceOwned(uint64_t sequence, uint64_t key, EntranceStages::Role role, const pl_frame& raw, const pl_frame& result)
+-	{
+-		OwnedEntrance& entry = entranceRing.Claim(sequence, key, role);
+-		entry.identity = SamePlanes(raw, result);
+-		entry.rawCrop = raw.crop;
+-		entry.rawW = raw.planes[0].texture ? raw.planes[0].texture->params.w : 0;
+-		entry.rawH = raw.planes[0].texture ? raw.planes[0].texture->params.h : 0;
+-		if (entry.identity)
+-			entry.frame = result;
+-		else if (!CopyEntrance(result, entry))
+-		{
+-			EntranceOnceFallback("cannot copy the processed picture");
+-			return false;
+-		}
+-		entranceRing.Commit();
+-		// The ring's memory, logged when it changes (3 pictures at the processing size).
+-		size_t bytes = 0;
+-		entranceRing.ForEachPayload([&](OwnedEntrance& e)
+-			{
+-				for (pl_tex t : e.tex)
+-					if (t) bytes += static_cast<size_t>(t->params.w) * static_cast<size_t>(t->params.h) * t->params.format->texel_size;
+-			});
+-		if (bytes != entranceRingBytesLogged)
+-		{
+-			entranceRingBytesLogged = bytes;
+-			DebugLog::Log("Entrance once (B3): ring of processed pictures %.1f MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+-		}
+-		return true;
+-	}
+-
+-	void ReleaseEntranceRing(pl_gpu gpu)
+-	{
+-		entranceRing.ForEachPayload([&](OwnedEntrance& e)
+-			{
+-				for (pl_tex& t : e.tex)
+-					if (t) pl_tex_destroy(gpu, &t);
+-				e = OwnedEntrance{};
+-			});
+-		entranceRing.Invalidate();
+-		entranceRingBytesLogged = 0;
+-	}
+-
+-	// The processed A of `sequence`: its entrance result drawn as itself (the stateful stages -
+-	// the debander's hold, the detail history - advanced on it once), from the ring.
+-	const OwnedEntrance* EntranceProcessedA(const pl_frame& rawA, uint64_t sequence, uint64_t nextSequence, const pl_frame* image)
+-	{
+-		const uint64_t key = EntranceRingKey(rawA);
+-		if (const OwnedEntrance* hit = entranceRing.Find(sequence, key, EntranceStages::Role::A))
+-		{
+-			++entranceOnceReused;
+-			return hit;
+-		}
+-		EntranceRun run;
+-		run.path = EntrancePath::Main;
+-		run.factorX = rebaseFactorX;
+-		run.factorY = rebaseFactor;
+-		run.sequence = sequence;
+-		run.source = &rawA;
+-		run.nextSequence = nextSequence;
+-		run.image = image;
+-		run.aFrame = rawA;
+-		pl_frame frame = rawA;
+-		RunMainEntrance(run, frame);   // stores A in the ring (B3 on)
+-		return entranceRing.Find(sequence, key, EntranceStages::Role::A);
+-	}
+-
+-	// The processed B (the next source frame) ahead of its own draw: the per-picture stages of an
+-	// extra (re-base, VP deband per picture, the detail stages' decision of A as a repeat), never
+-	// advancing any stage's state. Once per next frame (the ring).
+-	const OwnedEntrance* EntranceProcessedB(const pl_frame& rawB, uint64_t nextSequence, uint64_t aSequence)
+-	{
+-		if (nextSequence == 0)
+-		{
+-			EntranceOnceFallback("no next frame known");
+-			return nullptr;
+-		}
+-		const uint64_t key = EntranceRingKey(rawB);
+-		// B already processed as its own A (ahead, or stateless).
+-		if (const OwnedEntrance* hit = entranceRing.Find(nextSequence, key, EntranceStages::Role::A))
+-		{
+-			++entranceOnceReused;
+-			return hit;
+-		}
+-		const bool stateless = EntranceStatelessNow();
+-		if (!stateless)
+-		{
+-			// (i) Stateful stages (the debander's hold, the detail history): B is processed exactly
+-			// as its own draw will process it - with B's own vector field, estimated ahead (B, C)
+-			// while A's consumers read the snapshot of (A, B) - and kept as B's A: exact continuity
+-			// at the source-frame boundary.
+-			std::string why;
+-			if (EntranceOnceFieldAhead(aSequence, nextSequence, why))
+-			{
+-				const OwnedEntrance* b = EntranceProcessBAsA(rawB, nextSequence, key);
+-				if (b)
+-					entranceOnceBAsAFor = aSequence;
+-				return b;
+-			}
+-			// (ii) The fallback, visible: B per picture (A's decisions as a repeat, never advancing).
+-			EntranceOnceFallback("B's vectors not ready ahead (" + why + "); B per picture");
+-		}
+-		const EntranceStages::Role role = stateless ? EntranceStages::Role::A : EntranceStages::Role::B;
+-		if (!stateless)
+-			if (const OwnedEntrance* hit = entranceRing.Find(nextSequence, key, role))
+-			{
+-				++entranceOnceReused;
+-				return hit;
+-			}
+-		EntranceRun run;
+-		run.path = EntrancePath::Extra;
+-		run.factorX = rebaseFactorX;
+-		run.factorY = rebaseFactor;
+-		run.sequence = aSequence;   // the detail stages apply A's decision (a repeat, never advancing)
+-		pl_frame frame = rawB;
+-		RunEntrance(run, frame);    // moves entranceGeneration: the plain cache is not reused after it
+-		++entranceOnceB;
+-		LogEntranceCounters();
+-		if (!StoreEntranceOwned(nextSequence, key, role, rawB, frame))
+-			return nullptr;
+-		return entranceRing.Find(nextSequence, key, role);
+-	}
++	bool EntranceOnce() const { return entrance.Once(); }
+ 
+ 	// (i) B's own vector field ahead: the de-judder's estimate ahead (Dejudder::AheadSchedule, as
+ 	// the rendered warp's extras use it) run for B3 - A's warp inputs snapshotted, C uploaded, (B, C)
+@@ -6140,44 +5704,6 @@ struct LibplaceboVideoRenderer::Impl
+ 		return false;
+ 	}
+ 
+-	// B through the main (stateful) path as its own A: B's field and sequence in the stages'
+-	// parameters (the readings stay A's: a one-frame lag of the bitrate/level readings), the hold
+-	// and the history advanced on B once. Kept as B's A in the ring.
+-	const OwnedEntrance* EntranceProcessBAsA(const pl_frame& rawB, uint64_t bSequence, uint64_t key)
+-	{
+-		const VpDebander::Params savedDeband = vpDebandParams;
+-		const DetailPulse::Params savedPulse = detailPulseParams;
+-		const TextureRestore::Params savedRestore = textureRestoreParams;
+-		const bool bField = dejudder && dejudderLiveFieldFrom == bSequence && motionValidity.Current(dejudderEstimatedEpoch);
+-		vpDebandParams.field = bField ? dejudder->Field() : nullptr;
+-		vpDebandParams.grainError = bField ? dejudder->GrainError() : nullptr;
+-		vpDebandParams.sequence = bSequence;
+-		detailPulseParams.field = bField ? dejudder->Field() : nullptr;
+-		detailPulseParams.sequence = bSequence;
+-		textureRestoreParams.field = bField ? dejudder->Field() : nullptr;
+-		textureRestoreParams.sequence = bSequence;
+-		EntranceRun run;
+-		run.path = EntrancePath::Main;
+-		run.factorX = rebaseFactorX;
+-		run.factorY = rebaseFactor;
+-		run.sequence = bSequence;
+-		run.source = &rawB;
+-		run.nextSequence = 0;   // the detail look-ahead (optional) is not taken ahead
+-		run.image = &rawB;
+-		run.aFrame = rawB;
+-		pl_frame frame = rawB;
+-		RunEntrance(run, frame);
+-		++entranceGeneration;   // the modules' slot-0 textures now hold B: the plain cache must not reuse A's
+-		vpDebandParams = savedDeband;
+-		detailPulseParams = savedPulse;
+-		textureRestoreParams = savedRestore;
+-		++entranceOnceB;
+-		LogEntranceCounters();
+-		if (!StoreEntranceOwned(bSequence, key, EntranceStages::Role::A, rawB, frame))
+-			return nullptr;
+-		return entranceRing.Find(bSequence, key, EntranceStages::Role::A);
+-	}
+-
+ 	// A crossfade between source resolutions renders both paths per picture: the per-picture
+ 	// stages there (visible), never a processed picture of the other path.
+ 	bool EntranceOnceCrossfading() const { return rebaseFade < 1.0 && !temporalRenderer.Active(); }
+@@ -6187,20 +5713,20 @@ struct LibplaceboVideoRenderer::Impl
+ 	bool EntranceOncePhasePicture(const pl_frame& source, uint64_t sequence, uint64_t nextSequence, const pl_frame* image,
+ 		pl_frame& frame, const OwnedEntrance** heldA = nullptr)
+ 	{
+-		entranceOnceCurrentA = sequence;
++		entrance.SetCurrentA(sequence);
+ 		if (heldA) *heldA = nullptr;
+ 		if (EntranceOnceCrossfading())
+ 		{
+-			EntranceOnceFallback("source-resolution crossfade");
++			entrance.OnceFallback("source-resolution crossfade");
+ 			return false;
+ 		}
+-		const OwnedEntrance* pa = EntranceProcessedA(source, sequence, nextSequence, image);
++		const OwnedEntrance* pa = entrance.ProcessedA(source, sequence, nextSequence, image);
+ 		if (!pa)
+ 			return false;
+ 		pl_frame rawB = source;
+ 		rawB.planes[0].texture = vpPhaseB.luma;
+ 		rawB.planes[1].texture = vpPhaseB.chroma;
+-		const OwnedEntrance* pb = EntranceProcessedB(rawB, nextSequence, sequence);
++		const OwnedEntrance* pb = entrance.ProcessedB(rawB, nextSequence, sequence);
+ 		// (i) the estimate ahead replaced the live (A, B) field: A's picture reads the snapshot.
+ 		if (vpPhaseVectors && EntranceOnceSnapshotFor(sequence) && dejudderLiveFieldFrom != sequence)
+ 		{
+@@ -6213,15 +5739,15 @@ struct LibplaceboVideoRenderer::Impl
+ 			return false;
+ 		if (pa->identity && pb->identity)
+ 			return false;   // no stage changes the picture: today's path draws the same picture
+-		const pl_frame drawnA = EntranceOwnedFrame(*pa, source), drawnB = EntranceOwnedFrame(*pb, rawB);
++		const pl_frame drawnA = EntranceSegment::OwnedFrame(*pa, source), drawnB = EntranceSegment::OwnedFrame(*pb, rawB);
+ 		if (drawnA.num_planes != 2 || drawnB.num_planes != 2)
+ 		{
+-			EntranceOnceFallback("processed picture not in two planes");
++			entrance.OnceFallback("processed picture not in two planes");
+ 			return false;
+ 		}
+-		if (EntranceOnceForcedFallback())
++		if (entrance.ForcedFallback())
+ 		{
+-			EntranceOnceFallback("test: forced late fallback");
++			entrance.OnceFallback("test: forced late fallback");
+ 			return false;
+ 		}
+ 		Dejudder::Planes a = vpPhaseA, b = vpPhaseA, out;
+@@ -6235,13 +5761,13 @@ struct LibplaceboVideoRenderer::Impl
+ 		if (!frameInterpolator->Run(a, b, vpPhaseMotion, vpPhaseT, activeSettings.interpolationFallback, out,
+ 			vpPhaseA.luma->params.w, vpPhaseA.luma->params.h))
+ 		{
+-			EntranceOnceFallback("interpolation on the processed planes failed (" + frameInterpolator->LastError() + ")");
++			entrance.OnceFallback("interpolation on the processed planes failed (" + frameInterpolator->LastError() + ")");
+ 			return false;
+ 		}
+ 		frame = drawnA;
+ 		frame.planes[0].texture = out.luma;
+ 		frame.planes[1].texture = out.chroma;
+-		EntranceOnceWorking();
++		entrance.OnceWorking();
+ 		return true;
+ 	}
+ 
+@@ -6251,19 +5777,19 @@ struct LibplaceboVideoRenderer::Impl
+ 		const Dejudder::Planes& a, Dejudder::Planes& processedA, Dejudder::Planes& processedB, const pl_frame*& processedFrame)
+ 	{
+ 		processedFrame = nullptr;
+-		entranceOnceCurrentA = sequence;
++		entrance.SetCurrentA(sequence);
+ 		ReleaseFallback("entrance once fill");   // engaged again below only when this extra warps processed planes
+ 		if (EntranceOnceCrossfading())
+ 		{
+-			EntranceOnceFallback("source-resolution crossfade");
++			entrance.OnceFallback("source-resolution crossfade");
+ 			return false;
+ 		}
+ 		if (image.num_planes != 2 || image.planes[0].texture != a.luma || image.planes[1].texture != a.chroma)
+ 		{
+-			EntranceOnceFallback("composed picture");
++			entrance.OnceFallback("composed picture");
+ 			return false;
+ 		}
+-		const OwnedEntrance* pa = EntranceProcessedA(image, sequence, nextSequence, &image);
++		const OwnedEntrance* pa = entrance.ProcessedA(image, sequence, nextSequence, &image);
+ 		if (!pa)
+ 			return false;
+ 		const OwnedEntrance* pb = nullptr;
+@@ -6271,30 +5797,30 @@ struct LibplaceboVideoRenderer::Impl
+ 		{
+ 			if (!dejudderNextTextures[0] || !dejudderNextTextures[1])
+ 			{
+-				EntranceOnceFallback("the next frame's planes are not uploaded");
++				entrance.OnceFallback("the next frame's planes are not uploaded");
+ 				return false;
+ 			}
+ 			pl_frame rawB = image;
+ 			rawB.planes[0].texture = dejudderNextTextures[0];
+ 			rawB.planes[1].texture = dejudderNextTextures[1];
+-			pb = EntranceProcessedB(rawB, nextSequence, sequence);
++			pb = entrance.ProcessedB(rawB, nextSequence, sequence);
+ 			if (!pb)
+ 				return false;
+ 		}
+ 		if (pa->identity && (!pb || pb->identity))
+ 			return false;   // no stage changes the picture: today's path draws the same picture
+-		entranceOnceExtraFrame = EntranceOwnedFrame(*pa, image);
++		entranceOnceExtraFrame = EntranceSegment::OwnedFrame(*pa, image);
+ 		pl_frame drawnB{};
+ 		if (pb)
+ 		{
+ 			pl_frame rawB = image;
+ 			rawB.planes[0].texture = dejudderNextTextures[0];
+ 			rawB.planes[1].texture = dejudderNextTextures[1];
+-			drawnB = EntranceOwnedFrame(*pb, rawB);
++			drawnB = EntranceSegment::OwnedFrame(*pb, rawB);
+ 		}
+ 		if (entranceOnceExtraFrame.num_planes != 2 || (pb && drawnB.num_planes != 2))
+ 		{
+-			EntranceOnceFallback("processed picture not in two planes");
++			entrance.OnceFallback("processed picture not in two planes");
+ 			return false;
+ 		}
+ 		processedA = a;
+@@ -6317,259 +5843,6 @@ struct LibplaceboVideoRenderer::Impl
+ 	}
+ 	pl_frame entranceOnceExtraFrame{};   // the extra's processed A as drawn (EntranceOwnedFrame)
+ 
+-	// scaling.rebase
+-	void EntranceRebase(EntranceRun& run, pl_frame& frame)
+-	{
+-		if (run.path == EntrancePath::Main)
+-		{
+-			if (rebaseFactor < 1.0 || rebaseFactorX < 1.0)
+-			{
+-				EnsureRebaseDispatch();
+-				pl_frame rebased{};
+-				// The picture being drawn (a Stage B picture between frames, or A).
+-				if (sourceRebase.Apply(d3d11->gpu, rebaseDispatch, frame, rebaseFactorX, rebaseFactor, rebased, 0))
+-				{
+-					frame = rebased;
+-					if (sourceRebase.FormatNote() != rebaseFormatNoteLogged)
+-					{
+-						rebaseFormatNoteLogged = sourceRebase.FormatNote();
+-						DebugLog::Log("Re-base: %s", rebaseFormatNoteLogged.c_str());
+-						// A float (fp16) intermediate instead of r16 keeps ~11 bits near white: visible.
+-						if (rebaseFormatNoteLogged.empty())
+-							ReleaseFallback("re-base precision");
+-						else
+-							EngageFallback("re-base precision", rebaseFormatNoteLogged);
+-					}
+-				}
+-				else if (sourceRebase.Failures() == 1)
+-					DebugLog::Log("Re-base failed (%s); the native frame is rendered", sourceRebase.LastError().c_str());
+-				// A itself, for the hold and the history (its own slot).
+-				if (run.aNeeded && run.aReady)
+-				{
+-					pl_frame rebasedA{};
+-					run.aReady = sourceRebase.Apply(d3d11->gpu, rebaseDispatch, run.aFrame, rebaseFactorX, rebaseFactor, rebasedA, 1);
+-					if (run.aReady) run.aFrame = rebasedA;
+-				}
+-			}
+-			return;
+-		}
+-		if (run.path == EntrancePath::Extra)
+-		{
+-			// Stage 12: an extra shows the same re-based source as the main frame.
+-			if (rebaseFactor < 1.0 || rebaseFactorX < 1.0)
+-			{
+-				EnsureRebaseDispatch();
+-				pl_frame rebased{};
+-				if (sourceRebase.Apply(d3d11->gpu, rebaseDispatch, frame, rebaseFactorX, rebaseFactor, rebased, 1))
+-					frame = rebased;
+-			}
+-			return;
+-		}
+-		// The crossfade's path being left, at the factors faded from.
+-		if (run.factorY < 1.0 || run.factorX < 1.0)
+-		{
+-			EnsureRebaseDispatch();
+-			pl_frame rebasedFrom{};
+-			run.ready = sourceRebase.Apply(d3d11->gpu, rebaseDispatch, frame, run.factorX, run.factorY, rebasedFrom,
+-				SourceRebase::Module::kSlotCrossfade);
+-			if (run.ready) frame = rebasedFrom;
+-		}
+-	}
+-
+-	// repair.deband (Stage 12 §2b/§2d: VP's debander at source resolution)
+-	void EntranceDeband(EntranceRun& run, pl_frame& frame)
+-	{
+-		if (!(debandThreshold > 0.0))
+-			return;
+-		EnsureRebaseDispatch();
+-		if (run.path == EntrancePath::Main)
+-		{
+-			// (6) The hold (slot 0) advances once per source frame on A itself, even when every
+-			// refresh of the frame shows a picture between frames: A's first draw. Hunt 3 F5: A's
+-			// debanded picture (the hold's draw) is also the picture the detail stages' history
+-			// advances on, so the history has one domain (debanded).
+-			if (run.phasePicture && !run.cadenceRepeat && run.aNeeded && run.aReady)
+-			{
+-				pl_frame heldA{};
+-				if (debander.Apply(d3d11->gpu, rebaseDispatch, run.aFrame, vpDebandParams, heldA, 0))
+-					run.aFrame = heldA;
+-			}
+-			// A picture between frames decides per picture (slot 1, no hold along A's field).
+-			VpDebander::Params phaseParams = vpDebandParams;
+-			if (run.phasePicture) { phaseParams.field = nullptr; phaseParams.grainError = nullptr; }
+-			pl_frame debanded{};
+-			if (debander.Apply(d3d11->gpu, rebaseDispatch, frame, run.phasePicture ? phaseParams : vpDebandParams, debanded,
+-				run.phasePicture ? 1 : 0))
+-				frame = debanded;
+-			else if (debander.Failures() == 1)
+-				DebugLog::Log("VP deband failed (%s); the frame is rendered without it", debander.LastError().c_str());
+-			return;
+-		}
+-		VpDebander::Params p = vpDebandParams;
+-		p.field = nullptr;
+-		p.grainError = nullptr;
+-		pl_frame debanded{};
+-		if (run.path == EntrancePath::Extra)
+-		{
+-			// The same debander per frame on an extra.
+-			if (debander.Apply(d3d11->gpu, rebaseDispatch, frame, p, debanded, 1))
+-				frame = debanded;
+-			return;
+-		}
+-		// Hunt 3 (crossfade lead): the path being left keeps VP's debander (its crossfade slot),
+-		// at its own geometry.
+-		const double ratio = rebaseFactor > 0.0 ? run.factorY / rebaseFactor : 1.0;
+-		p.radiusScale = vpDebandParams.radiusScale * ratio;
+-		if (debander.Apply(d3d11->gpu, rebaseDispatch, frame, p, debanded, VpDebander::Module::kSlotCrossfade))
+-			frame = debanded;
+-	}
+-
+-	// repair.texture_restore: detail_pulse_stabilise, then texture_restore (docs/VP-detail-restore.md).
+-	// Never while smooth motion / deinterlacing runs (those flags are false then).
+-	void EntranceDetail(EntranceRun& run, pl_frame& frame)
+-	{
+-		if (!detailPulseRuns && !textureRestoreRuns)
+-			return;
+-		EnsureRebaseDispatch();
+-		if (run.path == EntrancePath::CrossfadeFrom)
+-		{
+-			// The decision of this source frame on the picture's own bands (ApplyForeign: another
+-			// geometry, never advancing), so neither drops out in one step when a fade starts.
+-			const double ratio = rebaseFactor > 0.0 ? run.factorY / rebaseFactor : 1.0;
+-			if (detailPulseRuns && run.sequence != 0 && detailPulse.HistorySequence() == run.sequence)
+-			{
+-				DetailPulse::Params p = detailPulseParams;
+-				p.planeLines = detailPulseParams.planeLines * ratio;
+-				pl_frame pulsed{};
+-				if (detailPulse.ApplyForeign(d3d11->gpu, rebaseDispatch, frame, p, pulsed))
+-					frame = pulsed;
+-			}
+-			if (textureRestoreRuns && run.sequence != 0 && textureRestore.HistorySequence() == run.sequence)
+-			{
+-				TextureRestore::Params p = textureRestoreParams;
+-				p.planeLines = textureRestoreParams.planeLines * ratio;
+-				pl_frame restored{};
+-				if (textureRestore.ApplyForeign(d3d11->gpu, rebaseDispatch, frame, p, restored))
+-					frame = restored;
+-			}
+-			return;
+-		}
+-		if (run.path == EntrancePath::Extra)
+-		{
+-			// An extra shows its source frame's decision (a repeat of the sequence the history
+-			// advanced on with A), so the detail level does not change from refresh to refresh.
+-			// Never advances: skipped when A's own frame was not processed (another sequence).
+-			if (detailPulseRuns && detailPulseParams.sequence == run.sequence &&
+-				detailPulse.HistorySequence() == run.sequence && run.sequence != 0)
+-			{
+-				pl_frame pulsed{};
+-				if (detailPulse.Apply(d3d11->gpu, rebaseDispatch, frame, detailPulseParams, pulsed))
+-					frame = pulsed;
+-			}
+-			if (textureRestoreRuns && textureRestoreParams.sequence == run.sequence &&
+-				textureRestore.HistorySequence() == run.sequence && run.sequence != 0)
+-			{
+-				pl_frame restored{};
+-				if (textureRestore.Apply(d3d11->gpu, rebaseDispatch, frame, textureRestoreParams, restored))
+-					frame = restored;
+-			}
+-			return;
+-		}
+-		// Main. A Stage B picture between frames takes its frame's decision as a repeat (no
+-		// refresh-to-refresh detail flicker). The history advances once per source frame on A
+-		// itself (processed by the stages before this one, as drawn): A's first draw.
+-		if (run.phasePicture && !run.cadenceRepeat && run.aNeeded && run.aReady &&
+-			((detailPulseRuns && detailPulse.HistorySequence() != run.sequence) ||
+-			 (textureRestoreRuns && textureRestore.HistorySequence() != run.sequence)))
+-		{
+-			pl_frame aFrame = run.aFrame;
+-			if (detailPulseRuns)
+-			{
+-				pl_frame pulsedA{};
+-				if (detailPulse.Apply(d3d11->gpu, rebaseDispatch, aFrame, detailPulseParams, pulsedA))
+-					aFrame = pulsedA;
+-			}
+-			if (textureRestoreRuns)
+-			{
+-				pl_frame restoredA{};
+-				(void)textureRestore.Apply(d3d11->gpu, rebaseDispatch, aFrame, textureRestoreParams, restoredA);
+-			}
+-		}
+-		if (detailPulseRuns)
+-		{
+-			EntranceDetailLookAhead(run);
+-			pl_frame pulsed{};
+-			if (detailPulse.Apply(d3d11->gpu, rebaseDispatch, frame, detailPulseParams, pulsed))
+-			{
+-				frame = pulsed;
+-				detailPulseInactive.clear();
+-			}
+-			else
+-			{
+-				// Hunt 3 F8: counted and reported ("inactive (...)" in the status), logged
+-				// whenever the reason changes.
+-				if (detailPulse.LastError() != detailPulseFailLogged)
+-					DebugLog::Log("Detail pulse stabilise: not applied (%s; %llu frames so far); the frame is rendered without it",
+-						detailPulse.LastError().c_str(), detailPulse.Failures());
+-				detailPulseFailLogged = detailPulse.LastError();
+-				detailPulseInactive = detailPulse.LastError();
+-			}
+-		}
+-		if (textureRestoreRuns)
+-		{
+-			pl_frame restored{};
+-			if (textureRestore.Apply(d3d11->gpu, rebaseDispatch, frame, textureRestoreParams, restored))
+-			{
+-				frame = restored;
+-				textureRestoreInactive.clear();
+-			}
+-			else
+-			{
+-				if (textureRestore.LastError() != textureRestoreFailLogged)
+-					DebugLog::Log("Texture restore: not applied (%s; %llu frames so far); the frame is rendered without it",
+-						textureRestore.LastError().c_str(), textureRestore.Failures());
+-				textureRestoreFailLogged = textureRestore.LastError();
+-				textureRestoreInactive = textureRestore.LastError();
+-			}
+-		}
+-	}
+-
+-	// detail_pulse_stabilise's look-ahead (optional): the next source frame's band energies when
+-	// it is already uploaded (the de-judder's B) and no re-base is engaged; once per new source
+-	// frame. Hunt 3 F4: in Apply's domain - B through VP's debander (per picture, its look-ahead
+-	// slot) when the debander runs on this frame. Also checked on a reused entrance result.
+-	void EntranceDetailLookAhead(const EntranceRun& run)
+-	{
+-		if (!detailPulseRuns || !pipelineSlots.Runs(PipelineSlots::Id::RepairTextureRestore))
+-			return;
+-		if (!run.cadenceRepeat && run.nextSequence != 0 && detailPulseAheadSequence != run.nextSequence &&
+-			dejudderNextUploadedSequence == run.nextSequence && dejudderNextTextures[0] && dejudderNextTextures[1] &&
+-			!dejudderRgbLuma && run.image && run.image->num_planes == 2 && rebaseFactor == 1.0 && rebaseFactorX == 1.0)
+-		{
+-			EnsureRebaseDispatch();
+-			detailPulseAheadSequence = run.nextSequence;
+-			pl_frame next = *run.image;
+-			next.planes[0].texture = dejudderNextTextures[0];
+-			next.planes[1].texture = dejudderNextTextures[1];
+-			(void)detailPulse.MeasureAhead(d3d11->gpu, rebaseDispatch, next, dejudderNextUploadedSequence, detailPulseParams,
+-				debandThreshold > 0.0 && pipelineSlots.Runs(PipelineSlots::Id::RepairDeband) ? &debander : nullptr, &vpDebandParams);
+-		}
+-	}
+-
+-	// Hunt 3 (crossfade lead): the crossfade's path being left carries the stages the path being
+-	// entered has, from its own (un-re-based) picture at the factors faded from. False: its
+-	// re-base failed and there is no fade on this present.
+-	bool EntranceCrossfadeFrom(pl_frame& from, uint64_t sequence)
+-	{
+-		EntranceRun run;
+-		run.path = EntrancePath::CrossfadeFrom;
+-		run.factorX = rebaseFromFactorX;
+-		run.factorY = rebaseFromFactor;
+-		run.sequence = sequence;
+-		RunEntrance(run, from);
+-		return run.ready;
+-	}
+-
+ 	// Hunt 3 F1: the crossfade mixed in the output signal domain (CrossfadeMix.h): `from` (the
+ 	// path being left) rendered with the picture-stage hooks and captured at PRE_OUTPUT, then
+ 	// `to` rendered with the mix hook right after the extended-range late restore. BTB/WTW are
+@@ -8107,8 +7380,7 @@ struct LibplaceboVideoRenderer::Impl
+ 		next.SetEntranceOnce(settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway);   // B3: consumers after the entrance
+ 		(void)next.ActiveEntrance();   // warm the kept list here, so the render thread only reads it
+ 		pipelineSlots = next;
+-		entranceCache.Invalidate();
+-		entranceRing.Invalidate();
++		entrance.Invalidate();
+ 		std::string state = settings.pipelineOriginalPathway ? "Original pathway (every VP addition off)" :
+ 			pipelineSlots.IsDefaultOrder() ? "designed order" : "custom order";
+ 		std::string entrance;
+@@ -8119,10 +7391,7 @@ struct LibplaceboVideoRenderer::Impl
+ 			"; entrance once (B3) on: motion pictures from the processed A and B" : "; entrance once (B3) off";
+ 		if (!settings.pipelineEntranceOnce || settings.pipelineOriginalPathway)
+ 		{
+-			entranceOnceNote.clear();
+-			ReleaseFallback("entrance once");
+-			ReleaseFallback("entrance once fill");
+-			// Its textures are freed on the render thread (RunMainEntrance), never from here.
++			this->entrance.OnceSwitchedOff();   // its textures are freed on the render thread, never from here
+ 		}
+ 		if (state != pipelineStateLogged)
+ 		{
+@@ -8956,9 +8225,7 @@ struct LibplaceboVideoRenderer::Impl
+ 				debander.Release(d3d11->gpu);       // and the debander's planes
+ 				detailPulse.Release(d3d11->gpu);    // detail pulse stabilisation's history
+ 				textureRestore.Release(d3d11->gpu); // and texture restore's
+-				entranceCache.Invalidate();         // the cached entrance result pointed at those textures
+-				ReleaseEntranceRing(d3d11->gpu);    // B3: the processed pictures' own copies
+-				++entranceGeneration;
++				entrance.ReleaseDevice(d3d11->gpu); // S1: the cached entrance result and B3's own copies
+ 				crossfadeMixer.Release(d3d11->gpu); // hunt 3 F1: the crossfade's textures
+ 				if (rebaseDispatch) pl_dispatch_destroy(&rebaseDispatch);
+ 				extendedRangeHooks.Release();   // Stage 10: its textures
+@@ -17961,7 +17228,7 @@ struct LibplaceboVideoRenderer::Impl
+ 				if (processedFrame)
+ 				{
+ 					image = *processedFrame;   // the processed geometry (re-based crop), warped planes
+-					EntranceOnceWorking();
++					entrance.OnceWorking();
+ 				}
+ 				image.planes[0].texture = warped.luma;
+ 				image.planes[1].texture = warped.chroma;
+@@ -17973,20 +17240,20 @@ struct LibplaceboVideoRenderer::Impl
+ 				// frame), with the extra's own module slots.
+ 				if (!processedFrame)
+ 				{
+-					EntranceRun run;
+-					run.path = EntrancePath::Extra;
+-					run.factorX = rebaseFactorX;
+-					run.factorY = rebaseFactor;
+-					run.sequence = f.sourceSequence;
+-					RunEntrance(run, image);
+-					LogEntranceCounters();
++					EntranceSegment::Request rq;
++					rq.path = EntranceSegment::Path::Extra;
++					rq.sequence = f.sourceSequence;
++					(void)entrance.Run(rq, image);
+ 				}
+ 				// Hunt 3 F3: the extra's path being left (the crossfade runs on every present of the
+ 				// fade, not only on A's), with the same stages (EntranceCrossfadeFrom).
+ 				if (!processedFrame && rebaseFade < 1.0 && !temporalRenderer.Active())
+ 				{
+ 					extraFrom = warpedNative;
+-					extraFade = EntranceCrossfadeFrom(extraFrom, f.sourceSequence);
++					EntranceSegment::Request rq;
++					rq.path = EntranceSegment::Path::CrossfadeFrom;
++					rq.sequence = f.sourceSequence;
++					extraFade = entrance.Run(rq, extraFrom);
+ 				}
+ 			}
+ 			// Delta 8 R1: the sigma-delta takes the motion since the previous
+@@ -25112,7 +24379,7 @@ struct LibplaceboVideoRenderer::Impl
+                 pl_frame frame = source;
+                 // Stage B: the picture at this refresh's phase in place of A's planes (a
+                 // composed picture keeps A: hold). Everything after runs on it unchanged.
+-                NoteEntranceSourceFrame(sourceSequence);
++                entrance.NoteSourceFrame(sourceSequence);
+                 bool phasePicture = vpPhasePlanesValid && source.num_planes == 2 &&
+                     source.planes[0].texture == textures[0] && source.planes[1].texture == textures[1];
+                 // B3 (pipeline_entrance_once): the picture from the processed A and B, no stages after.
+@@ -25120,7 +24387,7 @@ struct LibplaceboVideoRenderer::Impl
+                 // Audit HIGH 1: B was processed as its own A - A's pictures must not advance the
+                 // stateful stages again (the per-picture path for any late fallback).
+                 // (Evaluated after the B3 picture: its first call may process B as B's A.)
+-                auto bAsADone = [&]() { return EntranceOnce() && entranceOnceBAsAFor == sourceSequence; };
++                auto bAsADone = [&]() { return EntranceOnce() && entrance.BAsAFor() == sourceSequence; };
+                 bool bAlreadyA = bAsADone();
+                 if (phasePicture && vpPhaseDeferred)
+                 {
+@@ -25129,7 +24396,7 @@ struct LibplaceboVideoRenderer::Impl
+                     bAlreadyA = bAsADone();
+                     if (!entranceOnceDone && bAlreadyA && heldA && !(rebaseFade < 1.0 && !temporalRenderer.Active()))
+                     {
+-                        frame = EntranceOwnedFrame(*heldA, source);   // the processed A, held (no stage runs)
++                        frame = EntranceSegment::OwnedFrame(*heldA, source);   // the processed A, held (no stage runs)
+                         entranceOnceDone = true;
+                     }
+                     else if (!entranceOnceDone && !RunVpPhaseInterpolation())
+@@ -25148,37 +24415,19 @@ struct LibplaceboVideoRenderer::Impl
+                 // libplacebo's scaling and never on renderImage (the source-resolution monitor read
+                 // the original frame above). A cadence repeat of a picture drawn as itself reuses
+                 // its entrance result (the modules would recompute the same picture).
+-                if (!entranceOnceDone && bAlreadyA && phasePicture)
+-                {
+-                    // The per-picture stages, never advancing (the extra's path; the detail stages
+-                    // keep B's history - they skip this picture rather than restart).
+-                    EntranceRun run;
+-                    run.path = EntrancePath::Extra;
+-                    run.factorX = rebaseFactorX;
+-                    run.factorY = rebaseFactor;
+-                    run.sequence = sourceSequence;
+-                    RunEntrance(run, frame);
+-                    entranceOnceDone = true;
+-                }
+                 if (!entranceOnceDone)
+                 {
+-                    EntranceRun run;
+-                    run.path = EntrancePath::Main;
+-                    run.factorX = rebaseFactorX;
+-                    run.factorY = rebaseFactor;
+-                    run.sequence = sourceSequence;
+-                    run.source = &source;
+-                    run.phasePicture = phasePicture;
+-                    run.cadenceRepeat = cadenceRepeat;
+-                    run.nextSequence = nextSourceSequence;
+-                    run.image = &image;
+-                    run.aFrame = source;
+-                    const bool historyNeeded = (detailPulseRuns && detailPulse.HistorySequence() != sourceSequence) ||
+-                        (textureRestoreRuns && textureRestore.HistorySequence() != sourceSequence);
+-                    run.aNeeded = phasePicture && !cadenceRepeat &&
+-                        ((debandThreshold > 0.0 && pipelineSlots.Runs(PipelineSlots::Id::RepairDeband)) ||
+-                         (historyNeeded && pipelineSlots.Runs(PipelineSlots::Id::RepairTextureRestore)));
+-                    RunMainEntrance(run, frame);
++                    // S1, one call: the main draw (cached / B3 ring), or - B already processed as its
++                    // own A - the per-picture stages, never advancing (audit HIGH 1).
++                    EntranceSegment::Request rq;
++                    rq.sequence = sourceSequence;
++                    rq.source = &source;
++                    rq.image = &image;
++                    rq.nextSequence = nextSourceSequence;
++                    rq.phasePicture = phasePicture;
++                    rq.cadenceRepeat = cadenceRepeat;
++                    rq.perPicture = bAlreadyA && phasePicture;
++                    (void)entrance.Run(rq, frame);
+                 }
+                 if (rebaseFade < 1.0 && !temporalRenderer.Active())
+                 {
+@@ -25187,7 +24436,10 @@ struct LibplaceboVideoRenderer::Impl
+                     // picture, the detail pulse's and texture restore's decision of this frame on its
+                     // own bands), so none drops out in one step when the fade starts.
+                     pl_frame from = unrebased;
+-                    const bool fromReady = EntranceCrossfadeFrom(from, sourceSequence);
++                    EntranceSegment::Request fromRq;
++                    fromRq.path = EntranceSegment::Path::CrossfadeFrom;
++                    fromRq.sequence = sourceSequence;
++                    const bool fromReady = entrance.Run(fromRq, from);
+                     if (fromReady)
+                     {
+                         // Hunt 3 F1: mixed in the output signal domain by VP's PRE_OUTPUT hooks
+diff --git a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
+index 9c77cd0a..041fc989 100644
+--- a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
++++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
+@@ -308,6 +308,10 @@
+       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+     </ClCompile>
++    <ClCompile Include="..\VP-V\segments\EntranceSegment.cpp">
++      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
++      <PrecompiledHeader>NotUsing</PrecompiledHeader>
++    </ClCompile>
+     <ClCompile Include="..\VP-V\modules\input\source_analysis\SourceResolutionMonitor.cpp">
+       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+@@ -384,6 +388,10 @@
+     <ClCompile Include="..\VP-V\tests\PipelineSkeletonTests.cpp">
+       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+     </ClCompile>
++    <ClCompile Include="..\VP-V\tests\EntranceSegmentTests.cpp">
++      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
++      <PrecompiledHeader>NotUsing</PrecompiledHeader>
++    </ClCompile>
+     <ClCompile Include="TextureRestoreTests.cpp" />
+     <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvTrimSelectionTests.cpp" />
+     <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvDolbyStyleTests.cpp" />
+diff --git a/src/VideoProcessor-VPRenderer/VideoProcessor-VPRenderer.vcxproj b/src/VideoProcessor-VPRenderer/VideoProcessor-VPRenderer.vcxproj
+index d31990a1..114003b5 100644
+--- a/src/VideoProcessor-VPRenderer/VideoProcessor-VPRenderer.vcxproj
++++ b/src/VideoProcessor-VPRenderer/VideoProcessor-VPRenderer.vcxproj
+@@ -118,6 +118,7 @@
+     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\EarlyUpload.cpp" />
+     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\AdaptiveDownscale.cpp" />
+     <ClCompile Include="..\VP-V\modules\scaling\rebase\SourceRebase.cpp" />
++    <ClCompile Include="..\VP-V\segments\EntranceSegment.cpp" />
+     <ClCompile Include="..\VP-V\modules\input\source_analysis\SourceResolutionMonitor.cpp" />
+     <ClCompile Include="..\VP-V\modules\repair\deband\VpDebander.cpp" />
+     <ClCompile Include="..\VP-V\modules\repair\texture_restore\DetailPulse.cpp" />
+diff --git a/src/VideoProcessor-VPRenderer/VideoProcessor-VPRendererBeta.vcxproj b/src/VideoProcessor-VPRenderer/VideoProcessor-VPRendererBeta.vcxproj
+index 4dbbbe79..8559417d 100644
+--- a/src/VideoProcessor-VPRenderer/VideoProcessor-VPRendererBeta.vcxproj
++++ b/src/VideoProcessor-VPRenderer/VideoProcessor-VPRendererBeta.vcxproj
+@@ -115,6 +115,7 @@
+     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\EarlyUpload.cpp" />
+     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\AdaptiveDownscale.cpp" />
+     <ClCompile Include="..\VP-V\modules\scaling\rebase\SourceRebase.cpp" />
++    <ClCompile Include="..\VP-V\segments\EntranceSegment.cpp" />
+     <ClCompile Include="..\VP-V\modules\input\source_analysis\SourceResolutionMonitor.cpp" />
+     <ClCompile Include="..\VP-V\modules\repair\deband\VpDebander.cpp" />
+     <ClCompile Include="..\VP-V\modules\repair\texture_restore\DetailPulse.cpp" />
