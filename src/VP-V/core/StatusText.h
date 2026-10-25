@@ -306,7 +306,16 @@ namespace VpStatusText
 		bool sensed = false;       // the sensor reports
 		double lux = 0.0;
 	};
-	inline std::string AmbientLine(const AmbientFacts& f)
+	// The lux reading " (sensor 12.3 lux)". The GUI passes its own formatter: CString::Format
+	// and snprintf can round a %.1f tie differently (3.25), and the old line used CString::Format.
+	inline std::string DefaultLuxReading(double lux)
+	{
+		char reading[64];
+		std::snprintf(reading, sizeof(reading), " (sensor %.1f lux)", lux);
+		return reading;
+	}
+	template <class LuxReading>
+	std::string AmbientLine(const AmbientFacts& f, LuxReading luxReading)
 	{
 		if (!f.enabled)
 			return std::string();
@@ -318,15 +327,12 @@ namespace VpStatusText
 		else if (!f.portSet)
 			line += " (sensor: no port set; saved room)";
 		else if (f.sensed)
-		{
-			char reading[64];
-			std::snprintf(reading, sizeof(reading), " (sensor %.1f lux)", f.lux);
-			line += reading;
-		}
+			line += luxReading(f.lux);
 		else
 			line += " (sensor not reporting; saved room)";
 		return line;
 	}
+	inline std::string AmbientLine(const AmbientFacts& f) { return AmbientLine(f, DefaultLuxReading); }
 
 	// VP-V nets (net-runner wiring, WP-10): which nets run and their GPU cost; the bypasses are under
 	// "Fallbacks engaged". Byte-identical to the draft in docs/design/net-runner-wiring.patch

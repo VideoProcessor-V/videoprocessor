@@ -166,7 +166,12 @@ namespace VpvGui
 
 	inline CString AmbientLine(const VpStatusText::AmbientFacts& facts)
 	{
-		return CString(VpStatusText::AmbientLine(facts).c_str());
+		return CString(VpStatusText::AmbientLine(facts, [](double lux)
+		{
+			CString reading;
+			reading.Format(TEXT(" (sensor %.1f lux)"), lux);   // as the old line (see DefaultLuxReading)
+			return std::string(CStringA(reading).GetString());
+		}).c_str());
 	}
 
 	// Delta 6 "Key override" items, joined.

@@ -86,11 +86,12 @@ namespace VpStatusAdapterTest
 				const bool answered = VpStatusText::RendererModuleStatus<wchar_t>(module,
 					[this](VpStatusText::RendererLines<wchar_t>& lines)
 					{
-						CString line;
-						lines.dejudder.Set(GetDejudderStatus(line), line.GetString());
-						lines.fallbacks.Set(GetFallbacksStatus(line), line.GetString());
-						lines.ledDrive.Set(GetLedDriveStatus(line), line.GetString());
-						lines.sourceResolution.Set(GetSourceResolutionStatus(line), line.GetString());
+						CString line;   // read after each getter (argument order is unspecified)
+						const auto take = [&line](VpStatusText::Line<wchar_t>& to, bool known) { to.Set(known, line.GetString()); };
+						take(lines.dejudder, GetDejudderStatus(line));
+						take(lines.fallbacks, GetFallbacksStatus(line));
+						take(lines.ledDrive, GetLedDriveStatus(line));
+						take(lines.sourceResolution, GetSourceResolutionStatus(line));
 					}, text);
 				status = text.c_str();
 				return answered;
