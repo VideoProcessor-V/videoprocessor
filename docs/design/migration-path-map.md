@@ -11,6 +11,8 @@ the old path until M2 so files on active branches keep building.
 
 | Old path | New path | Commit | Note |
 |---|---|---|---|
+| `src/VideoProcessor-Lib/vprenderer/ExtendedRange.cpp` | `src/VP-V/modules/colour/extended_range/ExtendedRange.cpp` | staged |  |
+| `src/VideoProcessor-Lib/vprenderer/ExtendedRange.h` | `src/VP-V/modules/colour/extended_range/ExtendedRange.h` | ? | fwd |
 | `src/VideoProcessor-Lib/CrashState.cpp` | `src/VP-V/modules/control/diagnostics/CrashState.cpp` | 259cfa50 |  |
 | `src/VideoProcessor-Lib/CrashState.h` | `src/VP-V/modules/control/diagnostics/CrashState.h` | 259cfa50 |  |
 | `src/VideoProcessor-Lib/StateReport.cpp` | `src/VP-V/modules/control/diagnostics/StateReport.cpp` | 259cfa50 |  |

@@ -4,9 +4,12 @@
   "unit": "colour",
   "order": 175,
   "status": "built",
-  "code_location": "legacy",
+  "code_location": "migrated",
   "live_files": [
-    "src/VideoProcessor-Lib/vprenderer/ExtendedRange.cpp",
+    "src/VP-V/modules/colour/extended_range/ExtendedRange.cpp",
+    "src/VP-V/modules/colour/extended_range/ExtendedRange.h"
+  ],
+  "forwarding_headers": [
     "src/VideoProcessor-Lib/vprenderer/ExtendedRange.h"
   ],
   "components": {

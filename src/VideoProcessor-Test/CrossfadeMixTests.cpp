@@ -4,7 +4,7 @@
 #include "ExtendedRangeGpuProbe.h"
 
 #include <vprenderer/CrossfadeMix.h>
-#include <vprenderer/ExtendedRange.h>
+#include <VP-V/modules/colour/extended_range/ExtendedRange.h>
 #include <vprenderer/OutputEncodingRepair.h>
 #include <vprenderer/SourceResolutionMonitor.h>
 

@@ -1084,7 +1084,7 @@ Approved in `docs/VP-btb-wtw-answers.md` on `docs/VP-btb-wtw-investigation.md`.
   switch on) and a PLUGE at 8-bit codes 4/12/16/20 (record whether the FL35
   shows sub-black at input level video).
 
-**Built (10a, 2026-10-12).** `vprenderer/ExtendedRange.{h,cpp}`; profile key
+**Built (10a, 2026-10-12).** `VP-V/modules/colour/extended_range/ExtendedRange.{h,cpp}`; profile key
 `preserve_extended_range: on|off` (input group, default off; Config page
 "Processing" card).
 - **Survey:** libplacebo always converts from the frame's *declared* colour

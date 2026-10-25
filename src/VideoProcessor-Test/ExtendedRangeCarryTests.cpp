@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include <vprenderer/ExtendedRange.h>
+#include <VP-V/modules/colour/extended_range/ExtendedRange.h>
 
 #include <libplacebo/colorspace.h>
 

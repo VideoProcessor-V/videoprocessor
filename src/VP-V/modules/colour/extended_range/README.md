@@ -52,10 +52,14 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
-- `src/VideoProcessor-Lib/vprenderer/ExtendedRange.cpp`
-- `src/VideoProcessor-Lib/vprenderer/ExtendedRange.h`
+- `src/VP-V/modules/colour/extended_range/ExtendedRange.cpp`
+- `src/VP-V/modules/colour/extended_range/ExtendedRange.h`
+
+Forwarding headers (legacy path; removed in M2 step 0): `src/VideoProcessor-Lib/vprenderer/ExtendedRange.h`.
+
+The forwarder stays for LibplaceboVideoRenderer.cpp (Bill's host) and two upstream test files (LibplaceboLutParserTests.cpp, MotionRendererTests.cpp), which this move does not edit.
 
 ## Migration directive
 

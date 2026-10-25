@@ -107,7 +107,7 @@
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\NvOpticalFlow.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\MotionAheadProducer.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OcclusionMaskHook.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\ExtendedRange.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\extended_range\ExtendedRange.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\RenderedWarp.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\GpuCaptureUnpack.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\GpuRgbUnpack.cpp" />

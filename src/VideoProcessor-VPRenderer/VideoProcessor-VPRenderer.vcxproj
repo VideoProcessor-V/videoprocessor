@@ -110,7 +110,7 @@
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OutputEncodingRepair.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutStage.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OcclusionMaskHook.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\ExtendedRange.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\extended_range\ExtendedRange.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\RenderedWarp.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\GpuCaptureUnpack.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\GpuRgbUnpack.cpp" />

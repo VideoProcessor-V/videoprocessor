@@ -2,7 +2,7 @@
 
 2026-10-12. Owner-approved (option 1 of the Stage 10 correction options) after
 the whole-chain tests found 10a's limits. Implemented in
-`vprenderer/ExtendedRange.{h,cpp}`; planner review requested for one item
+`VP-V/modules/colour/extended_range/ExtendedRange.{h,cpp}`; planner review requested for one item
 (precision, below).
 
 ## Why
