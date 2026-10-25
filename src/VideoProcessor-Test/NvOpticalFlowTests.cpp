@@ -1,9 +1,9 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include <vprenderer/NvOpticalFlow.h>
-#include <vprenderer/MotionAheadProducer.h>
-#include <OpticalFlowTrust.h>
+#include <VP-V/modules/motion/estimation/NvOpticalFlow.h>
+#include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
+#include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
 #include <chrono>
 #include <thread>
 

@@ -4,23 +4,38 @@
   "unit": "input",
   "order": 20,
   "status": "built",
-  "code_location": "legacy",
+  "code_location": "partly migrated",
   "live_files": [
-    "src/VideoProcessor-Lib/HdrInference.cpp",
-    "src/VideoProcessor-Lib/HdrInference.h",
+    "src/VP-V/modules/input/signal/HdrInference.cpp",
+    "src/VP-V/modules/input/signal/HdrInference.h",
     "src/VideoProcessor-Lib/HDRData.cpp",
     "src/VideoProcessor-Lib/ColorSpace.cpp",
     "src/VideoProcessor-Lib/EOTF.cpp",
-    "src/VideoProcessor-Lib/DolbyVisionTunnelGate.h",
-    "src/VideoProcessor-Lib/DolbyVisionTunnelHandoff.h",
-    "src/VideoProcessor-Lib/vprenderer/GpuDolbyVisionTunnelUnpack.cpp",
-    "src/VideoProcessor-Lib/vprenderer/GpuDolbyVisionTunnelUnpack.h",
+    "src/VP-V/modules/input/signal/DolbyVisionTunnelGate.h",
+    "src/VP-V/modules/input/signal/DolbyVisionTunnelHandoff.h",
+    "src/VP-V/modules/input/signal/GpuDolbyVisionTunnelUnpack.cpp",
+    "src/VP-V/modules/input/signal/GpuDolbyVisionTunnelUnpack.h",
     "src/VideoProcessor-Lib/vprenderer/Bt2020SignalController.h",
     "src/VP-V/modules/input/signal/DvSignalLevels.h",
     "src/VP-V/modules/input/signal/DvMetadataHold.h",
     "src/VP-V/modules/input/signal/DvCompareCapture.h",
-    "src/VP-V/modules/input/signal/DvCompareCaptureSink.h",
-    "src/VP-V/modules/input/signal/DvTunnelPolicy.h"
+    "src/VP-V/modules/input/signal/DvTunnelPolicy.h",
+    "src/VP-V/modules/input/signal/HdrInferenceSignalBuilder.h",
+    "src/VP-V/modules/input/signal/HdrVetoCaptureGate.h",
+    "src/VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h",
+    "src/VP-V/modules/input/signal/DvGpuUnpackSession.h",
+    "src/VP-V/modules/input/signal/DvTunnelMetadataExtension.h",
+    "src/VideoProcessor-Lib/video_frame_formatter/DolbyVisionMetadataExtension.h",
+    "src/VP-V/modules/input/signal/DvCompareCaptureSink.h"
+  ],
+  "forwarding_headers": [
+    "src/VideoProcessor-Lib/DolbyVisionTunnelGate.h",
+    "src/VideoProcessor-Lib/DolbyVisionTunnelHandoff.h",
+    "src/VideoProcessor-Lib/HdrInference.h",
+    "src/VideoProcessor-Lib/HdrInferenceSignalBuilder.h",
+    "src/VideoProcessor-Lib/HdrVetoCaptureGate.h",
+    "src/VideoProcessor-Lib/vprenderer/DolbyVisionTunnelUnpackReference.h",
+    "src/VideoProcessor-Lib/vprenderer/GpuDolbyVisionTunnelUnpack.h"
   ],
   "components": {
     "files": {
@@ -34,14 +49,16 @@
     "tools": [],
     "config_keys": [
       "dv_compare_capture_folder",
-      "dv_trims",
       "dv_tunnel_fixes",
-      "dv_tunnel_handoff"
+      "dv_tunnel_gpu_unpack",
+      "dv_tunnel_handoff",
+      "newlldv",
+      "newlldv_sdr_veto"
     ],
     "upstream_modules": [
       "input.capture"
     ]
   },
-  "fallback_when_missing": "DV tunnel GPU unpack failure falls back to the CPU (today log-only).",
-  "fallback_entry": "Signal: DV tunnel unpack on the CPU (<reason>)"
+  "fallback_when_missing": "A failed DV tunnel GPU unpack switches the session to the CPU unpack; a rejected DM is held briefly, then static metadata, then black.",
+  "fallback_entry": "Dolby Vision GPU unpack: CPU unpack for the session: <error> | DV metadata: <held | static>"
 }

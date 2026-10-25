@@ -9,13 +9,13 @@
 #include "CppUnitTest.h"
 #include <IntentInterpreterObserver.h>
 #include <MotionIntent.h>
-#include <QueueLookahead.h>
+#include <VP-V/modules/input/queue_timing/QueueLookahead.h>
 #include <vprenderer/AlphaCadenceCorrectionPolicy.h>
-#include <vprenderer/DejudderPolicy.h>
-#include <vprenderer/InterpolationTimeline.h>
-#include <vprenderer/MotionEngineIdle.h>
-#include <vprenderer/PulldownDetector.h>
-#include <vprenderer/SourceResolutionMonitor.h>
+#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
+#include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
+#include <VP-V/modules/motion/estimation/MotionEngineIdle.h>
+#include <VP-V/modules/input/queue_timing/PulldownDetector.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
 
 #include <cmath>
 #include <cstdint>

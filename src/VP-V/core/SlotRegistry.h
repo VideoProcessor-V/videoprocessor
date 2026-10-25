@@ -26,6 +26,12 @@ namespace PipelineSlots
 		case Id::ScalingRebase: case Id::RepairDeband: case Id::RepairTextureRestore:
 		case Id::ColourSdrToneShape: case Id::DriveLedMeasure: case Id::DriveLedCompensation:
 		case Id::OutputCalibrationLut: case Id::OutputDither: case Id::DriveProjectorControl:
+		// WP-13 (m2-output-callsites.patch): the extended range and output scaling glue stages.
+		case Id::ColourExtendedRange: case Id::ScalingOutput:
+		// Owner 2026-10-25: the motion and queue/timing slots (SlotSwitchSettings.h; the renderer applies
+		// their upstream form in ReadPipelineSettings and picks Bill's queue policy in QueuePolicy()).
+		case Id::InputQueueTiming: case Id::MotionEstimation: case Id::MotionVectorDelivery: case Id::MotionConsumers:
+		case Id::OutputPresentation:
 			return true;
 		default:
 			return false;

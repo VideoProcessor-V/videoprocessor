@@ -415,7 +415,7 @@ baseline and a first deploy folder.
    as their own commit, first item on the first cinema checklist. Then a
    `saturation` key in the rendering profile (libplacebo colour adjustment;
    madVR runs +5).
-New `vprenderer/CustomHookChain.h/.cpp`, owned by the renderer:
+New `VP-V/modules/output/dither/CustomHookChain.h/.cpp`, owned by the renderer:
 1. In `SetConfiguredShaderSelection`, collect rules with
    `!nls && !none && !filename.empty()` ordered by `stageOrder` then
    `profileSelectionOrder`; read file; apply `{{…}}` templates (built-ins
@@ -554,7 +554,7 @@ low confidence ⇒ existing gate. Budget ≈1 ms. Reference: FFmpeg
 **Status (2026-10-10): built, not yet on the projector.** Built on
 `stage7-step5-delta1`, before the planned rebase onto rc2, at the owner's
 request. Where it lives:
-- `src/VideoProcessor-Lib/QueueLatency.h`: the derived count and its order of
+- `src/VP-V/modules/input/queue_timing/QueueLatency.h`: the derived count and its order of
   precedence.
 - `CVideoProcessorDlg::ApplyUnifiedProfileSnapshot`: re-evaluated with every profile
   snapshot, which changes when `${cadence}` does.
@@ -632,7 +632,7 @@ override the sketch below where they differ.
 - **Build order:** 6a standalone component with WARP tests → 6b ring,
   presents, phase, flag, stats, Config → 6c mask.
 
-**6a status (2026-10-10): built, not connected.** `vprenderer/DejudderWarp.h/.cpp`
+**6a status (2026-10-10): built, not connected.** `VP-V/modules/motion/vector_delivery/DejudderWarp.h` / `VP-V/modules/motion/consumers/DejudderWarp.cpp`
 holds `Dejudder::MotionWarp`, a native compute component with its own
 `pl_dispatch`.
 
@@ -1084,7 +1084,7 @@ Approved in `docs/VP-btb-wtw-answers.md` on `docs/VP-btb-wtw-investigation.md`.
   switch on) and a PLUGE at 8-bit codes 4/12/16/20 (record whether the FL35
   shows sub-black at input level video).
 
-**Built (10a, 2026-10-12).** `vprenderer/ExtendedRange.{h,cpp}`; profile key
+**Built (10a, 2026-10-12).** `VP-V/modules/colour/extended_range/ExtendedRange.{h,cpp}`; profile key
 `preserve_extended_range: on|off` (input group, default off; Config page
 "Processing" card).
 - **Survey:** libplacebo always converts from the frame's *declared* colour

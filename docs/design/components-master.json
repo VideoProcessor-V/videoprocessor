@@ -6,16 +6,16 @@
       "slot": "input.capture",
       "order": 10,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.cpp",
-        "src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.h",
-        "src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.cpp",
-        "src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.h",
+        "src/VP-V/modules/input/capture/GpuCaptureUnpack.cpp",
+        "src/VP-V/modules/input/capture/GpuCaptureUnpack.h",
+        "src/VP-V/modules/input/capture/GpuRgbUnpack.cpp",
+        "src/VP-V/modules/input/capture/GpuRgbUnpack.h",
         "src/VideoProcessor-Lib/vprenderer/AlphaNativeRgbIngress.h",
-        "src/VideoProcessor-Lib/vprenderer/UploadReuse.h",
-        "src/VideoProcessor-Lib/vprenderer/EarlyUpload.cpp",
-        "src/VideoProcessor-Lib/vprenderer/EarlyUpload.h",
+        "src/VP-V/modules/input/capture/UploadReuse.h",
+        "src/VP-V/modules/input/capture/EarlyUpload.cpp",
+        "src/VP-V/modules/input/capture/EarlyUpload.h",
         "src/VideoProcessor-Lib/CaptureInput.cpp",
         "src/VideoProcessor-Lib/CaptureInput.h",
         "src/VideoProcessor-Lib/blackmagic_decklink",
@@ -40,34 +40,39 @@
         "config_keys": [
           "capture_path",
           "capture_upload",
-          "dv_tunnel_gpu_unpack",
           "native_rgb_ingest"
         ],
         "upstream_modules": []
       },
-      "fallback_when_missing": "GPU unpack failure switches to the CPU formatters for the session (today log-only; must become visible, queue item 44/45)."
+      "fallback_when_missing": "A GPU unpack failure switches to the CPU formatters for the session; early upload unavailable takes the render upload (entry and releases: WP-4 / perf, FallbackCatalog::EarlyUpload)."
     },
     {
       "slot": "input.signal",
       "order": 20,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/HdrInference.cpp",
-        "src/VideoProcessor-Lib/HdrInference.h",
+        "src/VP-V/modules/input/signal/HdrInference.cpp",
+        "src/VP-V/modules/input/signal/HdrInference.h",
         "src/VideoProcessor-Lib/HDRData.cpp",
         "src/VideoProcessor-Lib/ColorSpace.cpp",
         "src/VideoProcessor-Lib/EOTF.cpp",
-        "src/VideoProcessor-Lib/DolbyVisionTunnelGate.h",
-        "src/VideoProcessor-Lib/DolbyVisionTunnelHandoff.h",
-        "src/VideoProcessor-Lib/vprenderer/GpuDolbyVisionTunnelUnpack.cpp",
-        "src/VideoProcessor-Lib/vprenderer/GpuDolbyVisionTunnelUnpack.h",
+        "src/VP-V/modules/input/signal/DolbyVisionTunnelGate.h",
+        "src/VP-V/modules/input/signal/DolbyVisionTunnelHandoff.h",
+        "src/VP-V/modules/input/signal/GpuDolbyVisionTunnelUnpack.cpp",
+        "src/VP-V/modules/input/signal/GpuDolbyVisionTunnelUnpack.h",
         "src/VideoProcessor-Lib/vprenderer/Bt2020SignalController.h",
         "src/VP-V/modules/input/signal/DvSignalLevels.h",
         "src/VP-V/modules/input/signal/DvMetadataHold.h",
         "src/VP-V/modules/input/signal/DvCompareCapture.h",
-        "src/VP-V/modules/input/signal/DvCompareCaptureSink.h",
-        "src/VP-V/modules/input/signal/DvTunnelPolicy.h"
+        "src/VP-V/modules/input/signal/DvTunnelPolicy.h",
+        "src/VP-V/modules/input/signal/HdrInferenceSignalBuilder.h",
+        "src/VP-V/modules/input/signal/HdrVetoCaptureGate.h",
+        "src/VP-V/modules/input/signal/DolbyVisionTunnelUnpackReference.h",
+        "src/VP-V/modules/input/signal/DvGpuUnpackSession.h",
+        "src/VP-V/modules/input/signal/DvTunnelMetadataExtension.h",
+        "src/VideoProcessor-Lib/video_frame_formatter/DolbyVisionMetadataExtension.h",
+        "src/VP-V/modules/input/signal/DvCompareCaptureSink.h"
       ],
       "components": {
         "files": {
@@ -81,33 +86,40 @@
         "tools": [],
         "config_keys": [
           "dv_compare_capture_folder",
-          "dv_trims",
           "dv_tunnel_fixes",
-          "dv_tunnel_handoff"
+          "dv_tunnel_gpu_unpack",
+          "dv_tunnel_handoff",
+          "newlldv",
+          "newlldv_sdr_veto"
         ],
         "upstream_modules": [
           "input.capture"
         ]
       },
-      "fallback_when_missing": "DV tunnel GPU unpack failure falls back to the CPU (today log-only)."
+      "fallback_when_missing": "A failed DV tunnel GPU unpack switches the session to the CPU unpack; a rejected DM is held briefly, then static metadata, then black."
     },
     {
       "slot": "input.queue_timing",
       "order": 30,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
         "src/VP-V/core/DelayBudget.h",
-        "src/VideoProcessor-Lib/QueueLatency.h",
+        "src/VP-V/modules/input/queue_timing/QueueLatency.h",
         "src/VideoProcessor-Lib/QueueConfiguration.h",
-        "src/VideoProcessor-Lib/QueueLookahead.h",
+        "src/VP-V/modules/input/queue_timing/QueueLookahead.h",
         "src/VideoProcessor-Lib/CaptureFrameQueue.h",
         "src/VideoProcessor-Lib/VideoTimingController.cpp",
         "src/VideoProcessor-Lib/TimingClock.cpp",
         "src/VideoProcessor-Lib/UnifiedProfileRuntime.cpp",
-        "src/VideoProcessor-Lib/vprenderer/PulldownDetector.h",
+        "src/VP-V/modules/input/queue_timing/PulldownDetector.h",
         "src/VideoProcessor-Lib/vprenderer/AlphaQueuePolicy.h",
-        "src/VideoProcessor-GUI/VideoProcessorDlg.cpp"
+        "src/VideoProcessor-GUI/VideoProcessorDlg.cpp",
+        "src/VP-V/modules/input/queue_timing/VpQueueRules.h",
+        "src/VP-V/modules/input/queue_timing/VpFixedBudgetPolicy.h",
+        "src/VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h",
+        "src/VideoProcessor-Lib/vprenderer/QueueTimingPolicy.h",
+        "src/VideoProcessor-Lib/vprenderer/QueueLookaheadWalk.h"
       ],
       "components": {
         "files": {
@@ -120,36 +132,46 @@
         },
         "tools": [],
         "config_keys": [
-          "low_latency",
+          "active_picture_lookahead_frames",
+          "cadence_class_fixes",
+          "general_rate_fixes",
           "low_latency_path",
           "pulldown_fixes",
           "queue_auto_reset",
-          "queue_recovery",
           "queue_size",
           "queue_timing_fixes",
-          "target_latency_ms"
+          "reset_after_render_restart_seconds",
+          "reset_queue_too_large_percent",
+          "startup_preroll_frames",
+          "target_frames",
+          "target_latency_ms",
+          "timing_continuity_fixes",
+          "use_frame_queue"
         ],
         "upstream_modules": [
           "input.capture"
         ]
       },
-      "fallback_when_missing": "With 2-3 frames available, every look-ahead consumer shortens its look-ahead or falls back; the delay never changes."
+      "fallback_when_missing": "The 4/3/2 ladder shortens the look-ahead when the budget cannot hold 4 frames (\"look-ahead\"); an infeasible budget, unknown display refresh or a queue_size cut falls back to the frame-count queue (\"delay budget\"). The total delay never changes silently."
     },
     {
       "slot": "input.source_analysis",
       "order": 40,
       "status": "partial",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/SourceResolutionDetector.cpp",
-        "src/VideoProcessor-Lib/SourceResolutionDetector.h",
-        "src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.cpp",
-        "src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.h",
+        "src/VP-V/modules/input/source_analysis/SourceResolutionDetector.cpp",
+        "src/VP-V/modules/input/source_analysis/SourceResolutionDetector.h",
+        "src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.cpp",
+        "src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.h",
         "src/VP-V/modules/scaling/rebase/KernelInverse.cpp",
         "src/VideoProcessor-Lib/ActivePictureAnalyzer.cpp",
         "src/VideoProcessor-Lib/SceneDetector.cpp",
         "src/VideoProcessor-Lib/SubtitleBoxDetector.cpp",
-        "src/VideoProcessor-Lib/AnalysisFrame.cpp"
+        "src/VideoProcessor-Lib/AnalysisFrame.cpp",
+        "src/VP-V/modules/input/source_analysis/VpFrameAnalysis.cpp",
+        "src/VP-V/modules/input/source_analysis/VpFrameAnalysis.h",
+        "src/VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h"
       ],
       "components": {
         "files": {
@@ -162,10 +184,20 @@
         },
         "tools": [],
         "config_keys": [
+          "frame_analysis_store",
           "label_detector",
-          "rebase_kernel_match",
           "source_coding_fixes",
           "source_resolution",
+          "source_resolution_auto_min_confidence",
+          "source_resolution_crossfade_s",
+          "source_resolution_cut_fixes",
+          "source_resolution_engage_max_wait_s",
+          "source_resolution_evidence_seconds",
+          "source_resolution_evidence_shots",
+          "source_resolution_latch_fixes",
+          "source_resolution_mixed_guard",
+          "source_resolution_release_fade_s",
+          "source_resolution_text_guard",
           "subtitle_fit",
           "subtitle_reposition",
           "subtitle_type"
@@ -181,18 +213,19 @@
       "slot": "motion.estimation",
       "order": 50,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/NvOpticalFlow.cpp",
-        "src/VideoProcessor-Lib/vprenderer/NvOpticalFlow.h",
-        "src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp",
-        "src/VideoProcessor-Lib/vprenderer/MotionAheadProducer.cpp",
-        "src/VideoProcessor-Lib/MotionAhead.h",
-        "src/VideoProcessor-Lib/VectorStore.h",
-        "src/VideoProcessor-Lib/MotionValidity.h",
-        "src/VideoProcessor-Lib/OpticalFlowTrust.h",
+        "src/VP-V/modules/motion/estimation/NvOpticalFlow.cpp",
+        "src/VP-V/modules/motion/estimation/NvOpticalFlow.h",
+        "src/VP-V/modules/motion/consumers/DejudderWarp.cpp",
+        "src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp",
+        "src/VP-V/modules/motion/estimation/MotionAhead.h",
+        "src/VP-V/modules/motion/estimation/VectorStore.h",
+        "src/VP-V/modules/motion/estimation/MotionValidity.h",
+        "src/VP-V/modules/motion/estimation/OpticalFlowTrust.h",
         "src/VideoProcessor-Lib/MotionConfig.h",
-        "src/VideoProcessor-Lib/vprenderer/MotionEngineIdle.h"
+        "src/VP-V/modules/motion/estimation/MotionEngineIdle.h",
+        "src/VP-V/modules/motion/estimation/MotionAheadProducer.h"
       ],
       "components": {
         "files": {
@@ -207,31 +240,57 @@
         },
         "tools": [],
         "config_keys": [
-          "dejudder_est",
+          "dejudder_consistency_px",
+          "dejudder_cut_histogram",
+          "dejudder_est_candidates",
+          "dejudder_est_gate",
+          "dejudder_est_lambda",
+          "dejudder_est_qpel",
+          "dejudder_est_split",
+          "dejudder_est_split_sad",
           "dejudder_estimate_ahead",
+          "dejudder_fade_floor",
+          "dejudder_fade_match",
+          "dejudder_global_prior",
+          "dejudder_global_two",
+          "dejudder_low_res",
+          "dejudder_match_tolerance",
+          "dejudder_regional_hold",
           "dejudder_search_range",
+          "dejudder_texture_tolerance",
+          "dejudder_vector_smooth",
+          "dejudder_verify",
+          "dejudder_verify_share",
+          "general_rate_fixes",
           "motion_ahead_frames",
           "motion_ahead_ms",
           "motion_engine",
-          "motion_history_fixes"
+          "motion_history_fixes",
+          "optical_flow",
+          "optical_flow_cost_trust",
+          "optical_flow_fb_check",
+          "optical_flow_global",
+          "optical_flow_global_fallback"
         ],
         "upstream_modules": [
           "input.queue_timing",
           "input.source_analysis"
         ]
       },
-      "fallback_when_missing": "NVOF rejected/absent -> VP's matcher; vectors invalid -> every consumer falls back to its no-motion form."
+      "fallback_when_missing": "NVOF failed or the look-ahead producer stopped -> VP's matcher (entry from FallbackCatalog::Motion, wired by WP-4's silent-fallbacks patch; log-only until it lands); vectors invalid -> every consumer takes its no-motion form (by design, no entry)."
     },
     {
       "slot": "scaling.rebase",
       "order": 60,
       "status": "built",
-      "code_location": "partly migrated",
+      "code_location": "migrated",
       "live_files": [
         "src/VP-V/modules/scaling/rebase/KernelInverse.cpp",
         "src/VP-V/modules/scaling/rebase/KernelInverse.h",
-        "src/VideoProcessor-Lib/vprenderer/SourceRebase.cpp",
-        "src/VideoProcessor-Lib/vprenderer/SourceRebase.h",
+        "src/VP-V/modules/scaling/rebase/SourceRebase.cpp",
+        "src/VP-V/modules/scaling/rebase/SourceRebase.h",
+        "src/VP-V/segments/EntranceSegment.cpp",
+        "src/VP-V/segments/EntranceSegment.h",
         "src/VP-V/modules/scaling/rebase/EntranceGpuDrain.h",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
       ],
@@ -290,10 +349,12 @@
       "slot": "repair.deband",
       "order": 80,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/VpDebander.cpp",
-        "src/VideoProcessor-Lib/vprenderer/VpDebander.h",
+        "src/VP-V/modules/repair/deband/VpDebander.cpp",
+        "src/VP-V/modules/repair/deband/VpDebander.h",
+        "src/VP-V/segments/EntranceSegment.cpp",
+        "src/VP-V/segments/EntranceSegment.h",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
       ],
       "components": {
@@ -312,7 +373,8 @@
           "deband_strength",
           "deband_vp",
           "deband_vp_exclusive",
-          "deband_vp_grain_guard"
+          "deband_vp_grain_guard",
+          "low_bitrate_handling"
         ],
         "upstream_modules": [
           "repair.encoding"
@@ -324,12 +386,14 @@
       "slot": "repair.texture_restore",
       "order": 90,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/TextureRestore.cpp",
-        "src/VideoProcessor-Lib/vprenderer/TextureRestore.h",
-        "src/VideoProcessor-Lib/vprenderer/DetailPulse.cpp",
-        "src/VideoProcessor-Lib/vprenderer/DetailPulse.h",
+        "src/VP-V/modules/repair/texture_restore/DetailPulse.cpp",
+        "src/VP-V/modules/repair/texture_restore/DetailPulse.h",
+        "src/VP-V/modules/repair/texture_restore/TextureRestore.cpp",
+        "src/VP-V/modules/repair/texture_restore/TextureRestore.h",
+        "src/VP-V/segments/EntranceSegment.cpp",
+        "src/VP-V/segments/EntranceSegment.h",
         "docs/VP-detail-restore.md"
       ],
       "components": {
@@ -445,46 +509,12 @@
       "slot": "motion.vector_delivery",
       "order": 130,
       "status": "partial",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
         "src/VP-V/core/VectorScale.h",
-        "src/VideoProcessor-Lib/vprenderer/DejudderPolicy.h",
-        "src/VideoProcessor-Lib/vprenderer/DejudderWarp.h"
-      ],
-      "components": {
-        "files": {
-          "required": [],
-          "optional": []
-        },
-        "hardware": {
-          "required": [],
-          "optional": []
-        },
-        "tools": [],
-        "config_keys": [],
-        "upstream_modules": [
-          "motion.estimation",
-          "scaling.rebase",
-          "scaling.route_4k",
-          "scaling.geometry"
-        ]
-      },
-      "fallback_when_missing": "Invalid geometry map -> vectors invalid -> consumers fall back."
-    },
-    {
-      "slot": "motion.consumers",
-      "order": 140,
-      "status": "built",
-      "code_location": "legacy",
-      "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp",
-        "src/VideoProcessor-Lib/vprenderer/DejudderAhead.h",
-        "src/VideoProcessor-Lib/vprenderer/RenderedWarp.cpp",
-        "src/VideoProcessor-Lib/vprenderer/FrameInterpolator.cpp",
-        "src/VideoProcessor-Lib/vprenderer/InterpolationTimeline.h",
-        "src/VideoProcessor-Lib/vprenderer/InterpolationPolicy.h",
-        "src/VideoProcessor-Lib/vprenderer/OcclusionMaskHook.cpp",
-        "src/VideoProcessor-Lib/vprenderer/TemporalRenderer.h"
+        "src/VP-V/modules/motion/vector_delivery/DejudderPolicy.h",
+        "src/VP-V/modules/motion/vector_delivery/DejudderWarp.h",
+        "src/VP-V/modules/motion/vector_delivery/MotionSegment.h"
       ],
       "components": {
         "files": {
@@ -497,19 +527,96 @@
         },
         "tools": [],
         "config_keys": [
-          "dejudder_hold",
+          "dejudder_even_rates",
           "dejudder_strength",
+          "dejudder_strength_even",
+          "general_rate_fixes",
+          "motion_engine",
+          "motion_history_fixes",
+          "occlusion_mask",
+          "timing_continuity_fixes"
+        ],
+        "upstream_modules": [
+          "motion.estimation",
+          "scaling.rebase",
+          "scaling.route_4k",
+          "scaling.geometry"
+        ]
+      },
+      "fallback_when_missing": "No entry of its own: invalid vectors make every consumer take its no-motion form (by design, not a downgrade). Engine/matcher downgrades are motion.estimation's entry."
+    },
+    {
+      "slot": "motion.consumers",
+      "order": 140,
+      "status": "built",
+      "code_location": "partly migrated",
+      "live_files": [
+        "src/VP-V/modules/motion/consumers/DejudderWarp.cpp",
+        "src/VP-V/modules/motion/consumers/DejudderAhead.h",
+        "src/VP-V/modules/motion/consumers/RenderedWarp.cpp",
+        "src/VP-V/modules/motion/consumers/FrameInterpolator.cpp",
+        "src/VP-V/modules/motion/consumers/InterpolationTimeline.h",
+        "src/VP-V/modules/motion/consumers/InterpolationPolicy.h",
+        "src/VP-V/modules/motion/consumers/OcclusionMaskHook.cpp",
+        "src/VideoProcessor-Lib/vprenderer/TemporalRenderer.h",
+        "src/VP-V/modules/motion/consumers/RenderedWarp.h",
+        "src/VP-V/modules/motion/consumers/FrameInterpolator.h",
+        "src/VP-V/modules/motion/consumers/OcclusionMaskHook.h",
+        "src/VP-V/modules/motion/consumers/DejudderCacheStage.h",
+        "src/VP-V/modules/motion/consumers/DejudderCacheStage.cpp"
+      ],
+      "components": {
+        "files": {
+          "required": [],
+          "optional": []
+        },
+        "hardware": {
+          "required": [],
+          "optional": []
+        },
+        "tools": [],
+        "config_keys": [
+          "cadence_class_fixes",
+          "dejudder_block_taper",
+          "dejudder_estimate_ahead",
+          "dejudder_even_rates",
+          "dejudder_frame_trust",
+          "dejudder_hold_feather_px",
+          "dejudder_hold_hysteresis",
+          "dejudder_landing_check",
+          "dejudder_motion_rolloff",
+          "dejudder_motion_scale_hi",
+          "dejudder_motion_scale_lo",
+          "dejudder_object_strength",
+          "dejudder_occlusion_fill",
+          "dejudder_pixel_trust",
+          "dejudder_pixel_trust_hi",
+          "dejudder_pixel_trust_lo",
+          "dejudder_roll_floor",
+          "dejudder_roll_hi",
+          "dejudder_roll_lo",
+          "dejudder_source_warp_filter",
+          "dejudder_strength",
+          "dejudder_strength_even",
+          "dejudder_taper_sad",
+          "dejudder_trust_scale",
+          "dejudder_warp_stage",
           "dither_vectors",
           "frame_mixer",
+          "general_rate_fixes",
           "interpolation",
           "interpolation_fallback",
-          "smooth_motion"
+          "interpolation_fill_gaps",
+          "interpolation_grain",
+          "occlusion_mask",
+          "smooth_motion",
+          "source_class"
         ],
         "upstream_modules": [
           "motion.vector_delivery"
         ]
       },
-      "fallback_when_missing": "Each consumer falls back as the vector rules say."
+      "fallback_when_missing": "Each consumer falls back as the vector rules say; the visible entries today are \"entrance once fill\" / \"entrance once\" (B3) and \"look-ahead\" (short queue). Warp/interpolation failures are log/status only (findings doc)."
     },
     {
       "slot": "scaling.geometry",
@@ -556,13 +663,15 @@
       "slot": "scaling.output",
       "order": 160,
       "status": "partial",
-      "code_location": "legacy",
+      "code_location": "migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.cpp",
-        "src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h",
-        "src/VideoProcessor-Lib/vprenderer/DownscaleLight.h",
+        "src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp",
+        "src/VP-V/modules/scaling/output/AdaptiveDownscale.h",
+        "src/VP-V/modules/scaling/output/DownscaleLight.h",
         "shaders/SSimDownscaler.glsl",
-        "shaders/SSimSuperRes.glsl"
+        "shaders/SSimSuperRes.glsl",
+        "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.h",
+        "src/VP-V/modules/scaling/output/AdaptiveDownscaleStage.cpp"
       ],
       "components": {
         "files": {
@@ -578,12 +687,30 @@
         },
         "tools": [],
         "config_keys": [
+          "adaptive_chroma_ssim",
           "adaptive_downscale",
+          "adaptive_edge_hi",
+          "adaptive_edge_lo",
           "adaptive_faithful",
+          "adaptive_grain_floor",
+          "adaptive_grain_hi",
+          "adaptive_grain_lo",
+          "adaptive_grain_map",
+          "adaptive_grain_map_smooth_ms",
+          "adaptive_grain_shadow_bias",
+          "adaptive_grain_smooth_ms",
           "adaptive_upscale",
+          "adaptive_upscale_superres_scale",
+          "adaptive_upscale_w_base",
           "adaptive_w_base",
+          "cnn_residual_stabilise",
           "downscale_light",
+          "fbo_float32",
           "hybrid_refine_d",
+          "residual_stabilise_grain_guard",
+          "ssim_bitrate_aware",
+          "ssim_bitrate_floor",
+          "ssim_residual_stabilise",
           "upscale_light"
         ],
         "upstream_modules": [
@@ -592,7 +719,7 @@
           "scaling.geometry"
         ]
       },
-      "fallback_when_missing": "SSIM shader missing -> Lanczos."
+      "fallback_when_missing": "SSimDownscaler missing while adaptive_downscale is on, or a GPU failure of the blend (FallbackCatalog::OutputScaling)."
     },
     {
       "slot": "colour.tone_gamut",
@@ -631,10 +758,12 @@
       "slot": "colour.extended_range",
       "order": 175,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/ExtendedRange.cpp",
-        "src/VideoProcessor-Lib/vprenderer/ExtendedRange.h"
+        "src/VP-V/modules/colour/extended_range/ExtendedRange.cpp",
+        "src/VP-V/modules/colour/extended_range/ExtendedRange.h",
+        "src/VP-V/modules/colour/extended_range/ExtendedRangeStage.h",
+        "src/VP-V/modules/colour/extended_range/ExtendedRangeStage.cpp"
       ],
       "components": {
         "files": {
@@ -654,20 +783,21 @@
           "colour.tone_gamut"
         ]
       },
-      "fallback_when_missing": "Hook failure or libplacebo frame mixing clips BTB (today log-only)."
+      "fallback_when_missing": "Hook failure (latched), a late restore under libplacebo's frame mix, or smooth motion's mixed refreshes clip BTB (FallbackCatalog::BtbWtw; call site WP-4)."
     },
     {
       "slot": "colour.sdr_tone_shape",
       "order": 200,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/SdrToneShape.h",
-        "src/VideoProcessor-Lib/vprenderer/DolbyVisionTrims.h",
+        "src/VP-V/modules/colour/sdr_tone_shape/SdrToneShape.h",
+        "src/VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h",
         "shaders/SDR tone shape.glsl",
         "shaders/DV trims.glsl",
         "src/VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h",
-        "src/VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h"
+        "src/VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h",
+        "src/VP-V/modules/colour/sdr_tone_shape/DvHostStage.h"
       ],
       "components": {
         "files": {
@@ -685,13 +815,17 @@
         "config_keys": [
           "dv_tone_mapping",
           "dv_trims",
-          "sdr_tone_shape"
+          "sdr_contrast_recovery",
+          "sdr_knee_start",
+          "sdr_knee_strength",
+          "sdr_tone_shape",
+          "sdr_white_headroom"
         ],
         "upstream_modules": [
           "colour.tone_gamut"
         ]
       },
-      "fallback_when_missing": "Shader failure skips it."
+      "fallback_when_missing": "A shader failure skips the stage; the Dolby-style curve falls back to bt2390 (+ the luminance trims). SDR tone shape entry: call site in WP-4's silent-fallbacks patch."
     },
     {
       "slot": "colour.appearance",
@@ -897,12 +1031,16 @@
       "slot": "output.dither",
       "order": 260,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/SigmaDeltaDomain.h",
+        "src/VP-V/modules/output/dither/SigmaDeltaDomain.h",
+        "src/VP-V/modules/output/dither/OutputEncodingRepair.h",
+        "src/VP-V/modules/output/dither/OutputEncodingRepair.cpp",
+        "src/VP-V/modules/output/dither/CustomHookChain.h",
+        "src/VP-V/modules/output/dither/CustomHookChain.cpp",
         "shaders/Temporal sigma-delta.glsl",
-        "src/VideoProcessor-Lib/vprenderer/OutputEncodingRepair.cpp",
-        "src/VideoProcessor-Lib/vprenderer/CustomHookChain.cpp"
+        "src/VP-V/modules/output/dither/SigmaDeltaVectors.h",
+        "src/VP-V/modules/output/dither/DitherSlot.h"
       ],
       "components": {
         "files": {
@@ -921,23 +1059,23 @@
           "dither_vectors",
           "dithering",
           "output_segments_merged",
-          "sigma_delta"
+          "temporal_dither"
         ],
         "upstream_modules": [
           "output.calibration_lut"
         ]
       },
-      "fallback_when_missing": "Unsupported code domain drops the sigma-delta (logged)."
+      "fallback_when_missing": "Unsupported code domain, shader not loaded or disabled by libplacebo drops the sigma-delta (FallbackCatalog::Dither; call site WP-4)."
     },
     {
       "slot": "output.presentation",
       "order": 270,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/RenderAheadPolicy.h",
+        "src/VP-V/modules/output/presentation/RenderAheadPolicy.h",
         "src/VideoProcessor-Lib/vprenderer/AlphaPresentationTelemetry.cpp",
-        "src/VideoProcessor-Lib/vprenderer/OpenLoopDisplayRate.h",
+        "src/VP-V/modules/output/presentation/OpenLoopDisplayRate.h",
         "src/VideoProcessor-Lib/DisplayRefreshRatePolicy.cpp",
         "src/VideoProcessor-Lib/vprenderer/NativeStatsOverlayBitmap.h"
       ],
@@ -952,6 +1090,7 @@
         },
         "tools": [],
         "config_keys": [
+          "dejudder_gate",
           "render_ahead",
           "render_ahead_queue_credit",
           "render_ahead_utilisation",
@@ -961,7 +1100,7 @@
           "output.dither"
         ]
       },
-      "fallback_when_missing": "Window / iGPU panel -> open loop."
+      "fallback_when_missing": "Window / iGPU panel without DXGI statistics -> render-ahead open loop on an estimated rate (entry from FallbackCatalog::Presentation, wired by WP-4's silent-fallbacks patch; log-only until it lands)."
     },
     {
       "slot": "drive.projector_control",

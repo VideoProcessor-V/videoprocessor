@@ -87,11 +87,11 @@ struct SampleContext
 	int Luma(int x, int y)
 	{
 		if (IsErasedOverlay(x, y) || IsResidualOverlay(x, y)) return erasedBlackFloor;
-		AnalysisLumaSample sample;
-		if (!source.Sample(x, y, sample))
+		uint16_t luma = 0;
+		if (!source.SampleLuma(x, y, luma)) // WP-23 shared luma
 			return 0;
 		++lumaSamples;
-		return sample.luma;
+		return luma;
 	}
 
 	void Chroma(int x, int y, int& u, int& v)
@@ -1488,9 +1488,9 @@ OccludedBarInspection InspectSubtitleOccludedBar(
     {
         const int x = ((i * 2 + 1) * source.width) / (kLineSamples * 2);
         if (unknownAt(x, innerY)) { ++out.unknown; continue; }
-        AnalysisLumaSample pixel;
-        if (!source.Sample(x, innerY, pixel)) return out;
-        ++out.samples; innerMean += pixel.luma; ++innerKnown;
+        uint16_t luma = 0;
+        if (!source.SampleLuma(x, innerY, luma)) return out; // WP-23 shared luma
+        ++out.samples; innerMean += luma; ++innerKnown;
     }
     if (innerKnown < 16) return out;
     innerMean /= innerKnown;

@@ -7,6 +7,7 @@
 #include "DvCaptureContainer.h"
 #include <DolbyVisionTunnelPresentation.h>
 #include <DebugLog.h>
+#include <VP-V/modules/input/signal/DvTunnelMetadataExtension.h>   // WP-14: the formatter hook
 
 #include <algorithm>
 #include <cstdio>
@@ -122,7 +123,11 @@ namespace DvLoopback
 			signal.frameRate = state->displayMode->RefreshRateHz();
 		m_handoff.Reset(signal);
 		if (!m_formatter)
+		{
 			m_formatter.reset(new CR210DolbyVisionTunnelFormatter());
+			// WP-14: VP's DM additions (L9/L10, the bounded hold) through the formatter's hook.
+			m_formatter->SetMetadataExtension(std::make_shared<DvTunnelMetadataExtension>());
+		}
 		m_formatter->SetBugHuntFixes(m_options.bugHuntFixes);
 		if (m_options.scalarUnpack)
 			m_formatter->SetConversionMethod(CR210DolbyVisionTunnelFormatter::ConversionMethod::SCALAR);

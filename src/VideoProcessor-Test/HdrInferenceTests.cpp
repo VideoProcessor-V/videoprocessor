@@ -11,8 +11,8 @@
 // VP_TEST_REAL_FOOTAGE names that folder; otherwise it logs and passes.
 
 #include <AviInfoFrameColorimetry.h>
-#include <HdrInference.h>
-#include <HdrVetoCaptureGate.h>
+#include <VP-V/modules/input/signal/HdrInference.h>
+#include <VP-V/modules/input/signal/HdrVetoCaptureGate.h>
 #include <RendererProfileConfig.h>
 #include <VideoState.h>
 

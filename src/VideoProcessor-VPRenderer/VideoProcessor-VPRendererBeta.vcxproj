@@ -100,31 +100,35 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\VP-V\modules\drive\led_measure\LedMeasurementHook.cpp" />
-    <ClCompile Include="..\VP-V\modules\drive\led_compensation\DynamicDriveFrame.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\led_compensation\LedRawTransfer.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\CustomHookChain.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\DejudderWarp.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\FrameInterpolator.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\NvOpticalFlow.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\MotionAheadProducer.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OcclusionMaskHook.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\ExtendedRange.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\RenderedWarp.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\GpuCaptureUnpack.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\GpuRgbUnpack.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\GpuDolbyVisionTunnelUnpack.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\EarlyUpload.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\AdaptiveDownscale.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\SourceRebase.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\SourceResolutionMonitor.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\VpDebander.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\DetailPulse.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\dither\CustomHookChain.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\consumers\DejudderWarp.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\consumers\FrameInterpolator.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\estimation\NvOpticalFlow.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\estimation\MotionAheadProducer.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\consumers\OcclusionMaskHook.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\extended_range\ExtendedRange.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\extended_range\ExtendedRangeStage.cpp" />
+    <ClCompile Include="..\VP-V\modules\scaling\output\AdaptiveDownscaleStage.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\consumers\DejudderCacheStage.cpp" />
+    <ClCompile Include="..\VP-V\modules\motion\consumers\RenderedWarp.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\capture\GpuCaptureUnpack.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\capture\GpuRgbUnpack.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\signal\GpuDolbyVisionTunnelUnpack.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\capture\EarlyUpload.cpp" />
+    <ClCompile Include="..\VP-V\modules\scaling\output\AdaptiveDownscale.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\led_compensation\DynamicDriveFrame.cpp" />
+    <ClCompile Include="..\VP-V\modules\scaling\rebase\SourceRebase.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\SourceResolutionMonitor.cpp" />
+    <ClCompile Include="..\VP-V\modules\repair\deband\VpDebander.cpp" />
+    <ClCompile Include="..\VP-V\modules\repair\texture_restore\DetailPulse.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\CrossfadeMix.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\TextureRestore.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OutputEncodingRepair.cpp" />
+    <ClCompile Include="..\VP-V\modules\repair\texture_restore\TextureRestore.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\dither\OutputEncodingRepair.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutStage.cpp" />
     <ClCompile Include="..\VP-V\segments\OutputSegmentsMerge.cpp" />
     <ClCompile Include="..\VP-V\segments\OutputSegments.cpp" />
+    <ClCompile Include="..\VP-V\segments\EntranceSegment.cpp" />
     <ClCompile Include="..\VP-V\core\SegmentRunner.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>

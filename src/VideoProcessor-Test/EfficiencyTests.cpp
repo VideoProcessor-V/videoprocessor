@@ -8,7 +8,8 @@
 #include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
 #include <VP-V/modules/drive/led_measure/LedLookahead.h>
 #include <vprenderer/AlphaQueuePolicy.h>
-#include <vprenderer/UploadReuse.h>
+#include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
+#include <VP-V/modules/input/capture/UploadReuse.h>
 
 #include <chrono>
 #include <cstdint>

@@ -42,14 +42,13 @@
       "settings_keys": [
         "capture_path",
         "capture_upload",
-        "native_rgb_ingest",
-        "dv_tunnel_gpu_unpack"
+        "native_rgb_ingest"
       ],
       "planned_keys": [],
       "tiers": "not tiered (always on); manual paths in Config",
       "fallback": {
-        "entry": "Capture: CPU 4:2:0 (GPU unpack failed: <reason>)",
-        "behaviour": "GPU unpack failure switches to the CPU formatters for the session (today log-only; must become visible, queue item 44/45)."
+        "entry": "capture GPU unpack: CPU formatters for the session: <error> | native RGB GPU unpack: CPU conversion to 10-bit 4:2:0 for the session: <error> | early upload: the render upload (<error>)",
+        "behaviour": "A GPU unpack failure switches to the CPU formatters for the session; early upload unavailable takes the render upload (entry and releases: WP-4 / perf, FallbackCatalog::EarlyUpload)."
       },
       "upstream": [],
       "fingerprint": null,
@@ -103,16 +102,18 @@
         "lookahead": "none"
       },
       "settings_keys": [
+        "newlldv",
+        "newlldv_sdr_veto",
         "dv_tunnel_handoff",
+        "dv_tunnel_gpu_unpack",
         "dv_tunnel_fixes",
-        "dv_trims",
         "dv_compare_capture_folder"
       ],
       "planned_keys": [],
       "tiers": "not tiered",
       "fallback": {
-        "entry": "Signal: DV tunnel unpack on the CPU (<reason>)",
-        "behaviour": "DV tunnel GPU unpack failure falls back to the CPU (today log-only)."
+        "entry": "Dolby Vision GPU unpack: CPU unpack for the session: <error> | DV metadata: <held | static>",
+        "behaviour": "A failed DV tunnel GPU unpack switches the session to the CPU unpack; a rejected DM is held briefly, then static metadata, then black."
       },
       "upstream": [
         "input.capture"
@@ -164,20 +165,27 @@
         "lookahead": "provides the shared look-ahead window: queue depth = deepest single look-ahead + hiccup spare (features share, never add)"
       },
       "settings_keys": [
-        "target_latency_ms",
+        "active_picture_lookahead_frames",
+        "cadence_class_fixes",
+        "general_rate_fixes",
+        "low_latency_path",
+        "pulldown_fixes",
+        "queue_auto_reset",
         "queue_size",
         "queue_timing_fixes",
-        "queue_recovery",
-        "queue_auto_reset",
-        "pulldown_fixes",
-        "low_latency",
-        "low_latency_path"
+        "reset_after_render_restart_seconds",
+        "reset_queue_too_large_percent",
+        "startup_preroll_frames",
+        "target_frames",
+        "target_latency_ms",
+        "timing_continuity_fixes",
+        "use_frame_queue"
       ],
       "planned_keys": [],
       "tiers": "not tiered; one user-set total delay (recommended = 4 frames at the slowest rate)",
       "fallback": {
-        "entry": "Queue: short look-ahead (<n> of 4 frames)",
-        "behaviour": "With 2-3 frames available, every look-ahead consumer shortens its look-ahead or falls back; the delay never changes."
+        "entry": "look-ahead: <n> of 4 queued frames (delay budget <ms>); delay budget: <why the total is not exact>",
+        "behaviour": "The 4/3/2 ladder shortens the look-ahead when the budget cannot hold 4 frames (\"look-ahead\"); an infeasible budget, unknown display refresh or a queue_size cut falls back to the frame-count queue (\"delay budget\"). The total delay never changes silently."
       },
       "upstream": [
         "input.capture"
@@ -240,11 +248,21 @@
       },
       "settings_keys": [
         "source_resolution",
-        "rebase_kernel_match",
+        "source_resolution_auto_min_confidence",
+        "source_resolution_evidence_shots",
+        "source_resolution_evidence_seconds",
+        "source_resolution_text_guard",
+        "source_resolution_mixed_guard",
+        "source_resolution_latch_fixes",
+        "source_resolution_cut_fixes",
+        "source_resolution_engage_max_wait_s",
+        "source_resolution_crossfade_s",
+        "source_resolution_release_fade_s",
         "subtitle_fit",
         "subtitle_reposition",
         "subtitle_type",
-        "source_coding_fixes"
+        "source_coding_fixes",
+        "frame_analysis_store"
       ],
       "planned_keys": [
         "label_detector"
@@ -289,7 +307,8 @@
           "source_coding_fixes": "off",
           "source_resolution_latch_fixes": "off",
           "source_resolution_cut_fixes": "off",
-          "active_picture_startup_hold": "off"
+          "active_picture_startup_hold": "off",
+          "frame_analysis_store": "off"
         }
       },
       "zone": "host",
@@ -312,20 +331,44 @@
         "lookahead": "motion_ahead (time-based, falls back to the matcher on a short queue)"
       },
       "settings_keys": [
-        "motion_engine",
-        "motion_ahead_frames",
-        "motion_history_fixes",
-        "dejudder_est",
+        "dejudder_consistency_px",
+        "dejudder_cut_histogram",
+        "dejudder_est_candidates",
+        "dejudder_est_gate",
+        "dejudder_est_lambda",
+        "dejudder_est_qpel",
+        "dejudder_est_split",
+        "dejudder_est_split_sad",
         "dejudder_estimate_ahead",
-        "dejudder_search_range"
+        "dejudder_fade_floor",
+        "dejudder_fade_match",
+        "dejudder_global_prior",
+        "dejudder_global_two",
+        "dejudder_low_res",
+        "dejudder_match_tolerance",
+        "dejudder_regional_hold",
+        "dejudder_search_range",
+        "dejudder_texture_tolerance",
+        "dejudder_vector_smooth",
+        "dejudder_verify",
+        "dejudder_verify_share",
+        "general_rate_fixes",
+        "motion_ahead_frames",
+        "motion_engine",
+        "motion_history_fixes",
+        "optical_flow",
+        "optical_flow_cost_trust",
+        "optical_flow_fb_check",
+        "optical_flow_global",
+        "optical_flow_global_fallback"
       ],
       "planned_keys": [
         "motion_ahead_ms"
       ],
       "tiers": "Classic off .. Upper full (NVOF + matcher)",
       "fallback": {
-        "entry": "Motion: matcher only (NVOF unavailable: <reason>)",
-        "behaviour": "NVOF rejected/absent -> VP's matcher; vectors invalid -> every consumer falls back to its no-motion form."
+        "entry": "motion: matcher only (optical flow failed: <error>) / no optical-flow look-ahead (producer stopped: <error>)",
+        "behaviour": "NVOF failed or the look-ahead producer stopped -> VP's matcher (entry from FallbackCatalog::Motion, wired by WP-4's silent-fallbacks patch; log-only until it lands); vectors invalid -> every consumer takes its no-motion form (by design, no entry)."
       },
       "upstream": [
         "input.queue_timing",
@@ -393,7 +436,7 @@
       ],
       "tiers": "Classic off; Low off; Mid/Upper on",
       "fallback": {
-        "entry": "Re-base: off (<reason>)",
+        "entry": "re-base precision: <the re-base's float-intermediate note>",
         "behaviour": "A failed pass renders the native frame (already in code); unknown kernel -> Lanczos; off -> straight to output scaling."
       },
       "upstream": [
@@ -517,13 +560,14 @@
         "deband_vp_grain_guard",
         "deband",
         "deband_strength",
-        "deband_grain"
+        "deband_grain",
+        "low_bitrate_handling"
       ],
       "planned_keys": [],
       "tiers": "Classic libplacebo deband; Low..Upper VP deband",
       "fallback": {
-        "entry": "Deband: libplacebo deband (VP debander idle: <reason>)",
-        "behaviour": "VP debander failure renders without it; temporal frames keep libplacebo's deband."
+        "entry": "deband: libplacebo deband (VP debander failed: <error>) / VP deband: off on the DV tunnel planes (no deband after decode yet)",
+        "behaviour": "A failed VP debander: libplacebo's deband stands in (FallbackCatalog::PlanDeband, WP-4). On the DV tunnel the VP debander is skipped (raw opponent planes before the decode; DvHostStage) and listed; temporal frames keep libplacebo's deband."
       },
       "upstream": [
         "repair.encoding"
@@ -820,12 +864,21 @@
         "delay_share": "0 frames",
         "lookahead": "none"
       },
-      "settings_keys": [],
+      "settings_keys": [
+        "dejudder_even_rates",
+        "dejudder_strength",
+        "dejudder_strength_even",
+        "general_rate_fixes",
+        "motion_engine",
+        "motion_history_fixes",
+        "occlusion_mask",
+        "timing_continuity_fixes"
+      ],
       "planned_keys": [],
       "tiers": "follows motion.estimation",
       "fallback": {
-        "entry": "Vectors: invalid (<reason>)",
-        "behaviour": "Invalid geometry map -> vectors invalid -> consumers fall back."
+        "entry": "motion: matcher (optical flow unavailable)",
+        "behaviour": "The sustained matcher delivery (MotionSegment::FallbackEntry) is listed. Invalid vectors at a discontinuity make every consumer take its no-motion form (by design, momentary, not a downgrade)."
       },
       "upstream": [
         "motion.estimation",
@@ -877,19 +930,47 @@
         "lookahead": "de-judder pair (1), estimate-ahead (2), hiccup spare (1) - all degrade on a short queue"
       },
       "settings_keys": [
+        "cadence_class_fixes",
+        "dejudder_block_taper",
+        "dejudder_estimate_ahead",
+        "dejudder_even_rates",
+        "dejudder_frame_trust",
+        "dejudder_hold_feather_px",
+        "dejudder_hold_hysteresis",
+        "dejudder_landing_check",
+        "dejudder_motion_rolloff",
+        "dejudder_motion_scale_hi",
+        "dejudder_motion_scale_lo",
+        "dejudder_object_strength",
+        "dejudder_occlusion_fill",
+        "dejudder_pixel_trust",
+        "dejudder_pixel_trust_hi",
+        "dejudder_pixel_trust_lo",
+        "dejudder_roll_floor",
+        "dejudder_roll_hi",
+        "dejudder_roll_lo",
+        "dejudder_source_warp_filter",
         "dejudder_strength",
-        "dejudder_hold",
+        "dejudder_strength_even",
+        "dejudder_taper_sad",
+        "dejudder_trust_scale",
+        "dejudder_warp_stage",
+        "dither_vectors",
+        "frame_mixer",
+        "general_rate_fixes",
         "interpolation",
         "interpolation_fallback",
+        "interpolation_fill_gaps",
+        "interpolation_grain",
+        "occlusion_mask",
         "smooth_motion",
-        "frame_mixer",
-        "dither_vectors"
+        "source_class"
       ],
       "planned_keys": [],
       "tiers": "Classic off .. Upper full",
       "fallback": {
-        "entry": "Motion consumers: no-motion form (vectors invalid / short queue)",
-        "behaviour": "Each consumer falls back as the vector rules say."
+        "entry": "motion consumers: <warp failed | rendered warp failed | interpolation failed>: the source frame is shown instead",
+        "behaviour": "Each consumer falls back as the vector rules say. Failed GPU passes (de-judder warp, rendered warp, interpolation) are listed while recent (FallbackCatalog::MotionConsumerFailures, 5 s hold; group D audit D3); the B3 entries \"entrance once fill\" / \"entrance once\" and \"look-ahead\" (short queue) as before."
       },
       "upstream": [
         "motion.vector_delivery"
@@ -1011,10 +1092,28 @@
       "settings_keys": [
         "adaptive_downscale",
         "adaptive_w_base",
+        "adaptive_edge_lo",
+        "adaptive_edge_hi",
+        "adaptive_grain_lo",
+        "adaptive_grain_hi",
+        "adaptive_grain_floor",
+        "adaptive_grain_smooth_ms",
+        "adaptive_grain_shadow_bias",
+        "adaptive_chroma_ssim",
+        "adaptive_grain_map",
+        "adaptive_grain_map_smooth_ms",
         "adaptive_faithful",
         "adaptive_upscale",
+        "adaptive_upscale_w_base",
+        "adaptive_upscale_superres_scale",
         "downscale_light",
-        "upscale_light"
+        "upscale_light",
+        "ssim_bitrate_aware",
+        "ssim_bitrate_floor",
+        "cnn_residual_stabilise",
+        "ssim_residual_stabilise",
+        "residual_stabilise_grain_guard",
+        "fbo_float32"
       ],
       "planned_keys": [
         "hybrid_refine_d"
@@ -1204,14 +1303,18 @@
       },
       "settings_keys": [
         "sdr_tone_shape",
+        "sdr_white_headroom",
+        "sdr_knee_start",
+        "sdr_knee_strength",
+        "sdr_contrast_recovery",
         "dv_trims",
         "dv_tone_mapping"
       ],
       "planned_keys": [],
       "tiers": "not tiered",
       "fallback": {
-        "entry": "SDR tone shape: not applied (shader did not load)",
-        "behaviour": "Shader failure skips it."
+        "entry": "DV tone mapping: <why>: bt2390[ + trims] | Dolby Vision trims: <state> | SDR tone shape: not applied (<why>)",
+        "behaviour": "A shader failure skips the stage; the Dolby-style curve falls back to bt2390 (+ the luminance trims). SDR tone shape entry: call site in WP-4's silent-fallbacks patch."
       },
       "upstream": [
         "colour.tone_gamut"
@@ -1577,7 +1680,7 @@
         "lookahead": "none"
       },
       "settings_keys": [
-        "sigma_delta",
+        "temporal_dither",
         "dithering",
         "dither_vectors",
         "dither_grain_tolerance_scale",
@@ -1635,6 +1738,7 @@
         "lookahead": "render-ahead"
       },
       "settings_keys": [
+        "dejudder_gate",
         "render_ahead",
         "render_ahead_queue_credit",
         "render_ahead_utilisation",
@@ -1643,8 +1747,8 @@
       "planned_keys": [],
       "tiers": "not tiered",
       "fallback": {
-        "entry": "Presentation: open loop (no display statistics)",
-        "behaviour": "Window / iGPU panel -> open loop."
+        "entry": "presentation: open loop: no display statistics, estimated rate / de-judder held: display rate not known",
+        "behaviour": "Window / iGPU panel without DXGI statistics -> render-ahead open loop on an estimated rate (entry from FallbackCatalog::Presentation, wired by WP-4's silent-fallbacks patch; log-only until it lands)."
       },
       "upstream": [
         "output.dither"
@@ -1795,7 +1899,12 @@
         "delay_share": "n/a",
         "lookahead": "n/a"
       },
-      "settings_keys": ["state_report", "raw_capture", "auto_report", "report_thumbnail"],
+      "settings_keys": [
+        "state_report",
+        "raw_capture",
+        "auto_report",
+        "report_thumbnail"
+      ],
       "planned_keys": [],
       "tiers": "n/a",
       "fallback": {

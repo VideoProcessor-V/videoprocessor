@@ -147,6 +147,42 @@ namespace FallbackCatalog
 		return Engaged("motion", reason + (error.empty() ? std::string() : ": " + error) + ")");
 	}
 
+	// ---- motion.consumers -----------------------------------------------------------------------
+	// A picture between frames could not be made on the GPU (the de-judder warp, the rendered warp
+	// or the interpolation failed): the source frame is shown instead (the de-judder holds). Engaged
+	// while such failures are recent (one id, so the heading changes only when it engages/releases),
+	// released after holdMs without one (group D audit D3, owner rule vp-no-silent-fallbacks).
+	inline bool IsMotionConsumerGpuFailure(const char* failure)
+	{
+		if (!failure) return false;
+		const std::string f(failure);
+		return f == "warp failed" || f == "rendered warp failed" || f == "interpolation failed";
+	}
+	struct MotionConsumerFailures
+	{
+		unsigned long long count = 0;
+		unsigned long long lastFailureMs = 0;
+		std::string what;
+		// Every attempt (extras run, picture between frames): `failure` null or a non-GPU reason
+		// (too late, no backbuffer: timing, not a failed pass) only re-evaluates the hold.
+		Decision Note(unsigned long long nowMs, const char* failure, unsigned long long holdMs = 5000)
+		{
+			if (IsMotionConsumerGpuFailure(failure))
+			{
+				++count;
+				lastFailureMs = nowMs;
+				what = failure;
+			}
+			return Current(nowMs, holdMs);
+		}
+		Decision Current(unsigned long long nowMs, unsigned long long holdMs = 5000) const
+		{
+			if (count == 0 || nowMs - lastFailureMs >= holdMs)
+				return Released("motion consumers");
+			return Engaged("motion consumers", what + ": the source frame is shown instead");
+		}
+	};
+
 	// ---- output.presentation --------------------------------------------------------------------
 	// Without DXGI frame statistics render-ahead runs open loop on an estimated rate, and with
 	// render-ahead off the de-judder holds every frame (judder) until a display rate is known.

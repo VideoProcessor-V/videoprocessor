@@ -14,18 +14,18 @@ Efforts are in agent wall-clock hours.
   - The exporter binds A as `//!HOOK LUMA` at the re-base output (D:\nn-corpus\VP-NN-TrainKit\trainkit\export_glsl.py:13-16, :94).
   - VP's front end is not built from libplacebo hooks. It is a chain of pl_frame-to-pl_frame pl_dispatch passes that run before pl_render: re-base, then deband, then detail pulse, then texture restore (LVR:23524, 23568, 23631, 23650).
   - A LUMA hook therefore runs AFTER deband and texture restore. The agreed order is the reverse: A, then deband, then texture restore.
-  - libplacebo never fires LUMA_INPUT for an RGB frame: renderer.c:1457 maps it to PLANE_LUMA only. Native RGB ingest is one rgba16 plane plus a matcher r16 luma plane (VideoProcessor-Lib/vprenderer/GpuRgbUnpack.cpp:183-218), so A would silently never run on RGB capture.
+  - libplacebo never fires LUMA_INPUT for an RGB frame: renderer.c:1457 maps it to PLANE_LUMA only. Native RGB ingest is one rgba16 plane plus a matcher r16 luma plane (VP-V/modules/input/capture/GpuRgbUnpack.cpp:183-218), so A would silently never run on RGB capture.
   - The bindings `SCALER_SRC`/`SCALER_OUT` for D (export_glsl.py:19-22) are not libplacebo stages.
 - Resolution:
   - Build a VP **NetRunner** that executes the exporter's mpv-format passes standalone through pl_dispatch: a small shim for the DESC/HOOK/BIND/SAVE/WIDTH/HEIGHT/COMPONENTS/COMPUTE directives and the HOOKED_*/name_tex macros.
-  - Its inputs are a pl_dispatch and textures, so the same runner serves the front end (A, the 4K refine) and C hooks (D inside AdaptiveDownscale's POST_KERNEL, VideoProcessor-Lib/vprenderer/AdaptiveDownscale.cpp:420-425; pl_hook_params carries a dispatch).
+  - Its inputs are a pl_dispatch and textures, so the same runner serves the front end (A, the 4K refine) and C hooks (D inside AdaptiveDownscale's POST_KERNEL, VP-V/modules/scaling/output/AdaptiveDownscale.cpp:420-425; pl_hook_params carries a dispatch).
   - For RGB: run A on the existing r16 luma, then add the luma delta to R, G and B.
-  - Alternative: change the exporter to emit pl_shader_custom units (the SourceRebase pattern, VideoProcessor-Lib/vprenderer/SourceRebase.cpp:80-130).
+  - Alternative: change the exporter to emit pl_shader_custom units (the SourceRebase pattern, VP-V/modules/scaling/rebase/SourceRebase.cpp:80-130).
 - Effort: 8-12 h for the runner and tests; RGB recombine 3-4 h.
 
 **B2. 200 ms is unreachable at 24p even after the 5-frame minimum is removed.**
 - Evidence:
-  - The queue time target rounds UP: `ceil(ms x rate)` (VideoProcessor-Lib/QueueLatency.h:27-35). 200 ms x 23.976 = 4.8, which becomes 5 frames, which is 208.5 ms of queue alone.
+  - The queue time target rounds UP: `ceil(ms x rate)` (VP-V/modules/input/queue_timing/QueueLatency.h:27-35). 200 ms x 23.976 = 4.8, which becomes 5 frames, which is 208.5 ms of queue alone.
   - On top of that:
     - libplacebo `max_frame_latency = 2` (LVR:10550): up to about 33 ms at 60 Hz;
     - render-ahead (LVR:9708-9713);
@@ -35,7 +35,7 @@ Efforts are in agent wall-clock hours.
   - Add a **total-delay budget** that queue frames are derived from: frames = floor((budget - fixed overheads) / period), with a 4 / 3 / 2 fallback ladder.
   - Count render-ahead and the swapchain depth inside the budget.
   - Remove the minimum (update the 5 in VideoProcessor-ConfigTests/ConfigFileTests.cpp:782).
-  - Make motion_ahead time-based (VideoProcessor-Lib/MotionAhead.h:20-33).
+  - Make motion_ahead time-based (VP-V/modules/motion/estimation/MotionAhead.h:20-33).
   - See owner decision O1 for what the 200 ms covers.
 - Effort: 5-8 h.
 
@@ -67,7 +67,7 @@ Efforts are in agent wall-clock hours.
   - The agreed order needs the LUT as VP's last PRE_OUTPUT hook.
 - Resolution:
   - Apply the LUT with pl_shader_custom_lut inside a VP hook, plus the BTB/WTW late restore.
-  - Check the OutputEncodingRepair interplay (VideoProcessor-Lib/vprenderer/OutputEncodingRepair.cpp:27).
+  - Check the OutputEncodingRepair interplay (VP-V/modules/output/dither/OutputEncodingRepair.cpp:27).
 - Effort: 4-6 h.
 
 **R2. Hook order is assembled in many places.**

@@ -7,7 +7,7 @@ rendering-profile keys, matcher for the grain map on film-rate sources).
 
 ## Shape
 
-A native module `vprenderer/AdaptiveDownscale.{h,cpp}` with two hooks, off
+A native module `VP-V/modules/scaling/output/AdaptiveDownscale.{h,cpp}` with two hooks, off
 unless `adaptive_downscale: on` and only on frames that downscale (source
 crop taller or wider than the destination rectangle). The SSIM shader
 (`SSimDownscaler.glsl`, igv) is unchanged and stays on Mitchell.
@@ -113,7 +113,7 @@ and policy).
 - **8-1** (ce2e34f7 in the clone, cherry-picked): `downscale_light`
   (scaling group; Config Scaling "Downscale light"); `DownscaleLight::
   UseGammaLight` gates gamma light on frames that downscale on either axis.
-- **8-2:** `vprenderer/AdaptiveDownscale.{h,cpp}` as planned, with these
+- **8-2:** `VP-V/modules/scaling/output/AdaptiveDownscale.{h,cpp}` as planned, with these
   findings:
   - **Gate:** the SSIM shader acts only when the picture is made *shorter*
     (`NATIVE_CROPPED.h > POSTKERNEL.h`), so the blend uses the same

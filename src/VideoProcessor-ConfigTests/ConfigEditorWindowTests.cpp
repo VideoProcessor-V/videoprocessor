@@ -9418,6 +9418,7 @@ static const std::map<std::string, const char*>& CoverageAllowList()
         { "renderer:output_segments_merged", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.output_segments_merged); also read from [vprenderer]" },
         { "renderer:pipeline_entrance_once", "hidden diagnostic/test key (ADR-0024): B3 is the default and the pre-B3 path is retired; no Config control" },
         { "renderer:entrance_gpu_drain", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.entrance_gpu_drain); also read from [vprenderer]" },
+        { "renderer:frame_analysis_store", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.frame_analysis_store); also read from [vprenderer]" },
     };
     return allowList;
 }

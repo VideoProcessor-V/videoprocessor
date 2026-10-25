@@ -47,7 +47,7 @@
 // The meanings of mid contrast / clip trim / the vectors and their ranges are assumptions
 // (no public Dolby definition); they are kept small and continuous, and are the first things
 // to calibrate against the LLDV reference (docs/dv/DV-trims-certified-reference.md).
-#include <vprenderer/DolbyVisionTrims.h>
+#include <VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h>
 #include <VP-V/modules/input/signal/DvSignalLevels.h>
 
 #include <cmath>

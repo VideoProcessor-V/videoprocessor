@@ -82,13 +82,11 @@ SceneDetectorResult SceneDetector::Analyze(const SceneDetectorInput& input)
 			uint16_t luma = 0;
 			if (source)
 			{
-				AnalysisLumaSample sample;
-				if (!source->Sample(static_cast<int>(x), static_cast<int>(y), sample))
+				if (!source->SampleLuma(static_cast<int>(x), static_cast<int>(y), luma)) // WP-23 shared luma
 				{
 					result.status = SceneDetectorStatus::Failed;
 					return result;
 				}
-				luma = sample.luma;
 			}
 			else
 			{

@@ -5,7 +5,7 @@
 #include "ExtendedRangeGpuProbe.h"
 #include "GrainReferenceModel.h"
 
-#include <vprenderer/DetailPulse.h>
+#include <VP-V/modules/repair/texture_restore/DetailPulse.h>
 
 #include <libplacebo/d3d11.h>
 #include <libplacebo/dispatch.h>

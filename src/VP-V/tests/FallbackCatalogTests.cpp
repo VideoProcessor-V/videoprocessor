@@ -140,5 +140,23 @@ namespace FallbackCatalogTest
 			Assert::IsTrue(Has(OutputScaling(true, 0, true), "SSimDownscaler"));
 			Assert::IsFalse(EarlyUpload(true, true, "").engaged);
 		}
+
+		TEST_METHOD(MotionConsumerGpuFailuresAreVisibleWhileRecent)
+		{
+			// Group D audit D3: warp / interpolation failures are listed, timing reasons are not.
+			MotionConsumerFailures f;
+			Assert::IsFalse(f.Note(1000, nullptr).engaged);
+			Assert::IsFalse(f.Note(1100, "too late for the refresh").engaged);
+			Decision d = f.Note(1200, "interpolation failed");
+			Assert::IsTrue(d.engaged);
+			Assert::AreEqual(std::string("motion consumers"), d.id);
+			Assert::IsTrue(Has(d, "interpolation failed"));
+			Assert::IsTrue(Has(d, "source frame"));
+			Assert::IsTrue(f.Note(3000, nullptr).engaged);           // still recent
+			Assert::IsTrue(Has(f.Note(4000, "rendered warp failed"), "rendered warp failed"));
+			Assert::IsFalse(f.Note(9001, nullptr).engaged);          // 5 s without a failure
+			Assert::IsTrue(f.Note(9100, "warp failed").engaged);
+			Assert::IsFalse(f.Current(14100).engaged);
+		}
 	};
 }

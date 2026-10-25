@@ -7,9 +7,9 @@
 
 #include <ConfigFile.h>
 #include <VP-V/core/FallbackStatus.h>
-#include <MotionAhead.h>
+#include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <RendererProfileConfig.h>
-#include <vprenderer/RenderAheadPolicy.h>
+#include <VP-V/modules/output/presentation/RenderAheadPolicy.h>
 
 #include <fstream>
 #include <set>
@@ -31,11 +31,11 @@ namespace R6BaselineTest
 		TEST_METHOD(PopulatedWithEachFallbackAndItsReason)
 		{
 			FallbackStatus::Registry r;
-			Assert::IsTrue(r.Engage("capture GPU unpack", "CPU formatters (4:2:0) for the session: cannot create texture"));
-			Assert::IsFalse(r.Engage("capture GPU unpack", "CPU formatters (4:2:0) for the session: cannot create texture"),
+			Assert::IsTrue(r.Engage("capture GPU unpack", "CPU formatters for the session: cannot create texture"));
+			Assert::IsFalse(r.Engage("capture GPU unpack", "CPU formatters for the session: cannot create texture"),
 				L"the same reason again: no change");
 			Assert::IsTrue(r.Engage("render-ahead", "off: its 33 ms lead does not fit the 209 ms delay budget; a; b"));
-			Assert::AreEqual(std::string("Fallbacks engaged: capture GPU unpack (CPU formatters (4:2:0) for the session: "
+			Assert::AreEqual(std::string("Fallbacks engaged: capture GPU unpack (CPU formatters for the session: "
 				"cannot create texture); render-ahead (off: its 33 ms lead does not fit the 209 ms delay budget; a; b)"), r.Heading());
 			const auto ids = FallbackStatus::Ids(r.Heading());
 			Assert::AreEqual(size_t{ 2 }, ids.size(), L"nested parentheses and '; ' inside a reason do not split");

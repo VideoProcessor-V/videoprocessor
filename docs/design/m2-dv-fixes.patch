@@ -1,0 +1,15 @@
+diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+index 44759155..9bf2efb8 100644
+--- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+@@ -6862,7 +6862,9 @@ struct LibplaceboVideoRenderer::Impl
+ 		{
+ 			DebugLog::Log("Capture path gpu: the GPU unpack failed (%s); the CPU formatters for the rest of the session",
+ 				captureUnpack->Error().c_str());
+-			EngageFallback("capture GPU unpack", "CPU formatters (4:2:0) for the session: " + captureUnpack->Error());
++			// F-3 (m2-dv findings): the CPU formatters keep P210 4:2:2 for V210 / UYVY / HDYC unless the
++			// P010 conversion is forced, so the entry no longer claims 4:2:0.
++			EngageFallback("capture GPU unpack", "CPU formatters for the session: " + captureUnpack->Error());
+ 		}
+ 		return false;
+ 	}

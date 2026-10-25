@@ -7,7 +7,7 @@
 // renderer calls them) or off (libplacebo's own path). Returns RGB codes.
 // No test framework here; the callers assert.
 
-#include <vprenderer/ExtendedRange.h>
+#include <VP-V/modules/colour/extended_range/ExtendedRange.h>
 #include <vprenderer/LibplaceboRenderParameters.h>
 #include <libplacebo/d3d11.h>
 #include <dxgi.h>

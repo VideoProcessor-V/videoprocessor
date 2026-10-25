@@ -11,8 +11,8 @@
 
 #include <ContentIntentObserver.h>
 #include <VP-V/modules/drive/led_measure/LedMeasurement.h>
-#include <vprenderer/SourceResolutionMonitor.h>
-#include <SourceResolutionDetector.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
 
 #include <chrono>
 #include <map>

@@ -11,7 +11,7 @@
 // Every AUTOMATIC fallback or quality downgrade is visible, never log-only, under ONE heading in
 // the Ctrl+I overlay, the Config status and the Ctrl+Alt+D bundle:
 //
-//   Fallbacks engaged: capture GPU unpack (CPU 4:2:0 formatters: <reason>); render-ahead (off: ...)
+//   Fallbacks engaged: capture GPU unpack (CPU formatters for the session: <reason>); render-ahead (off: ...)
 //   Fallbacks engaged: none
 //
 // plus a brief one-time notice (no always-on OSD) the first time each fallback engages in a session.
@@ -31,7 +31,7 @@ namespace FallbackStatus
 	struct Entry
 	{
 		std::string id;       // stable short name, e.g. "capture GPU unpack"
-		std::string reason;   // short reason / active path, e.g. "CPU 4:2:0 formatters: <error>"
+		std::string reason;   // short reason / active path, e.g. "CPU formatters for the session: <error>"
 	};
 
 	// "Fallbacks engaged: a (why); b (why)" or "Fallbacks engaged: none". Ids keep engagement order.

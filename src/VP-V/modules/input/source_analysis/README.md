@@ -18,85 +18,89 @@ Analyse the ORIGINAL delivered frame before anything changes it: source resoluti
 
 ## How the code works
 
-### Subtitle detection (migrated, this folder)
+VP owns two file pairs in this folder (moved by `git mv` in M2 step 10): `SourceResolutionDetector.h/.cpp` and `SourceResolutionMonitor.h/.cpp`. The subtitle, active-picture, scene and analysis-frame code the slot also uses is Bill's and stays in src/VideoProcessor-Lib (see "Bill's code the slot uses" below).
 
-Files and public API:
+### Public API (VP)
 
-- `SubtitleBoxDetector.h/.cpp`: `SubtitleBoxDetector::Analyze(source, pictureTop, pictureBottom, sequence, viewportGeneration)` returns a `SubtitleBoxResult` (cue bounds, up to 3 line boxes, source/capture card panels, bar anchor, ink signatures, `cue` id, `detected` / `held` / `revised` / `workLimit`, `diagnosticReason`). `SetScriptHint`, `SetNearBarDistance` and `SetOptimizationMode` reset the detector when the value changes. `InkSnapshot()` exposes the sampled raw ink for later cue revalidation. `SamplingStep()` samples about 960x540 (step 2 at 1080p, 4 at UHD). A lost cue is reported `held` for at most 2 frames while its bar anchor is still present.
-- `SubtitleBarEvidence.h`: `ExtractSubtitleBarEvidence` (proves top/bottom bar edges from current pixels), `RevalidateSubtitleBarEvidence` (re-proves a previous bar plane), `ResolveCurrentSubtitleAnalysisBars`, `ProveSubtitleCaptionStrip`. Subtitle-only evidence, never crop authority.
-- `SubtitleOpaqueCardRefinement.h`: `RefineSubtitleOpaqueCard` measures an opaque caption card around a confirmed text seed (bounded sample budget). Called from the detector.
-- `SubtitleBoxLookahead.h`: `SubtitleBoxLookahead::Measure` (one frame: bars, picture bounds, detector scan, giving a `SubtitleBoxObservation`), `Resolve` (current + queued observations into a `SubtitleBoxPreview`), `CanReuseMeasurement`, `AdvanceBarTrackingReference`. Class `SubtitleBoxPresentation`: `Consume` turns previews into the presented `SubtitleBoxResult` with a hold; also `RefreshReferencePixels`, `ReusePreviewForRepeatedSourceFrame`. Class `SubtitleStabilityTelemetry`: loss / flash counters.
-- `SubtitleTemporalFill.h`: `SubtitleTemporalFill::Capture` / `Matches` take a 32x18 sample signature of a clean frame and check that the area around a cleanup box still matches, so the renderer can reuse that frame as the fill donor.
+- `SourceResolutionDetector.h`, namespace `SourceResolution` (pure CPU maths, standard library only):
+  - `Analyse(luma, stride, n, Spectrum&, codeMaximum)`: one n x n tile (values 0..1) into a `Spectrum` (mirror-coherence curves per axis, coding measures, text band, sharp steps, periodic peak, bars, tile mean). `MeasureCoding` is the coding part alone.
+  - `ReadFrame(tiles, Thresholds)`: the tiles of one frame into a `FrameReading` (ratio, per-axis `ratioV`/`ratioH`, informative/text/periodic/bar tiles, the mixed-screen guard's result, bitrate quality, effective bits, black). `Thresholds` carries `textBand`, `mixedGuard`, `codingFixes`, `latchFixes`, `blackLevel`, the tile centres and the signature tiles.
+  - Helpers: `PlaceTiles` (the base 4 x 2 grid, plus two rows when dense), `TileSize` (with the latch fixes: 128 at 1080, 256 at 2160), `Informative`, `FindPeak`, `DetailAbove`, `AxisFrame`, `SnapRatio`, `PatternChange`, `Describe`.
+  - `Tracker`: the conservative declared value. It needs `minimumShots` and `minimumSeconds` of agreeing evidence (defaults 3 shots, 10 s; set by `SetEvidence`). Also `SetLatchFixes`, `SetCutFixes`, `Update`, `Discontinuity`, `Ratio`, `Candidate`, `Cuts`. `Tracker::CutJudge` and `FrameCutJudge` are the cut judges.
+- `SourceResolutionMonitor.h`, class `SourceResolutionMonitor::Monitor` (needs libplacebo):
+  - Render thread: `Frame(gpu, dispatch, source, sequence, seconds)`; `AutoFactor` / `AutoFactors` (the factor `source_resolution: auto` wants, per axis); `AutoTransition` (the crossfade weight and the factors being left); `LookAheadFrame` (queued frames ahead); `SetSelection`, `SetMotion`; the setters `SetTextGuard`, `SetMixedGuard`, `SetCodingFixes`, `SetLatchFixes`, `SetCutFixes`, `SetEngageTiming`, `SetEvidence`, `SetHistoryFolder`; `Release`.
+  - Any thread: `Read()` (a `Snapshot` copy under the mutex), `Discontinuity(cause)`, `AutoRatio()`, `Selection()`, `Ahead()`.
+  - Tests: `AnalyseTilesForTest` (synchronous, no GPU), `FadeWeight`, `FadeMixTimestamps`, `FadeMixValue`.
+  - Free function `Describe(snapshot, autoRatio, autoSelected)`: the status text.
 
-Data flow:
+### Data flow (VP)
 
-1. The renderer prepares an `AnalysisLumaSource` from the untouched frame (`PrepareAnalysisFrame`, AnalysisFrame.h).
-2. `QueueSubtitleMeasurement` (LibplaceboVideoRenderer.cpp) builds a key (frame identity, policy/continuity generations, near-bar distance, optimization mode, script hint, shared picture snapshot) and submits it to `SubtitleMeasurementWorker`. A matching ready result is taken; otherwise the call returns at once with `analyzed = false`.
-3. On the worker, `SubtitleMeasurementSampler::Measure` runs `SubtitleBoxLookahead::Measure`. Picture bounds come from the shared Classic picture snapshot when it is available, else from this frame's own bar proof. Then `SubtitleBoxDetector::Analyze` runs. Accepted independent detections also feed `EvaluateSubtitleAssistedVerticalBarProof` (ActivePictureEvidence.cpp).
-4. The frame-queue pass resolves the current + queued observations into the front frame's `SubtitleBoxPreview`. The render thread re-checks it against the current identity and generations. While the worker is late it tries `SubtitlePendingMeasurementGuard`, then calls `SubtitleBoxPresentation::Consume`.
-5. Placement and rendering (`SubtitleCutPaste*`, layout anchor, padding, temporal/stretch/mirror fill) stay in src/VideoProcessor-Lib and consume the result.
+1. LibplaceboVideoRenderer.cpp (render thread, once per new source frame) calls `Frame` with the native, unwarped, not re-based frame (`renderImage`). Every `intervalSeconds` (0.5 s) a compute shader copies 8 tiles (16 with the dense grid) of plane 0, inside the crop, into one of two readback buffers. Finished copies are collected without waiting (`pl_buf_poll(..., 0)`) and handed to the worker; a newer copy replaces one the worker has not started. A change of the source signature (size, system, levels, bits, transfer, primaries) is a discontinuity. Dolby Vision is read on its decoded I plane.
+2. The worker runs `SourceResolution::Analyse` per tile and `ReadFrame`. It then updates three trackers (both axes, vertical, horizontal; the per-axis ones need twice the evidence), the live reading (median over about 2 s), the coherence-based confidence, the smoothed bitrate quality and effective bits, and the kernel votes (KernelInverse; see the scaling.rebase README). It writes the `Snapshot` and a history CSV ("source-resolution <date>.csv" beside the log; newest 1200 rows, rewritten every few seconds; newest 5 sessions kept).
+3. The host then pushes the selection and the setters from the active settings. In `auto` it calls `AutoFactors(width, height, source_resolution_auto_min_confidence, ...)`. Engaging waits for a cut, a real black, a fast pan or a low-detail moment (latch fixes), else crossfades after `source_resolution_engage_max_wait_s`. A return to native is immediate on detail above the re-based height or a discontinuity, and at the next cut (at most 5 s) when only the confidence fell. The host turns the result into `rebaseFactor` / `rebaseFactorX` and, with the latch fixes, `rebaseFade` / `rebaseFromFactor(X)` from `AutoTransition`.
+4. Look-ahead (`auto` only): the render loop passes up to 4 queued frames through `LookAheadFrame`, sampling luma through Bill's `AnalysisLumaSource`. The host passes the whole frame, not the active picture. A cheap 32 x 32-sample check per tile finds a cut or black ahead. While a change is pending, the first frame with picture after it is copied and analysed on the look-ahead worker, and `AutoFactor` engages exactly at that frame or cancels the change.
+5. Other readers of `Read()`: the kernel for the re-base (`rebase_kernel_match`), VP deband and detail restore strength, low-bitrate handling, the residual grain guard, and the stats/status line (`Describe`). The host reports discontinuities on resync/source change, live queue reset (seek or skip) and file seek/step/rate change.
 
-Threading:
+### Threading (VP)
 
-- `SubtitleBoxDetector` and `SubtitleBoxPresentation` are not thread-safe; each owner keeps its own instance.
-- Full scans run on one CPU worker thread (`SubtitleMeasurementWorker`, SubtitleMeasurementWorker.h), started on the first submit. Up to 8 pending jobs; the oldest is dropped beyond that. Duplicate keys are coalesced. A scan that throws is counted as failed and returns `analyzed = false`.
-- The render thread never waits for a scan. It runs `Resolve`, `Consume`, `RefreshReferencePixels` and `SubtitleTemporalFill` itself (cheap, bounded sampling).
-- `ActivePictureEvidence.cpp` and the renderer's caption-strip check create short-lived local detectors on their own thread.
+- Two threads per `Monitor`, started in the constructor: `Worker` (analysis, trackers, kernel fits, history file) and `AheadWorker` (look-ahead target frames).
+- Locks: `mutex` (snapshot, trackers, selection, history), `aheadMutex` (look-ahead state and tiles), `frameJudgeMutex` (the per-frame cut judge). The settings flags are atomics.
+- Render thread: `Frame` (GPU submit and readback collection; never waits for the GPU), `AutoFactors`, `AutoTransition`, the setters and `LookAheadFrame`. `LookAheadFrame` copies the target frame's tiles through a `std::function` call per sample, under `aheadMutex`.
+- The lock as the code stands here: `Analyse` holds `mutex` from the tracker updates through both `KernelInverse::FitTile` calls and the snapshot write. The render thread takes the same mutex several times per frame (`SetSelection`, `Read()` in `AutoFactor`/`AutoFactors`, the kernel read, the deband/detail reads). So while a 2:1 reading is declared or gathered it can wait for the fits (up to about 50 ms). The fix (fits outside the lock) is on branch perf/byte-identical (queue item 165) and is not merged here.
 
-Config keys actually read (all in `[vprenderer.subtitles.<Name>]`, the profile chosen by the `subtitles` selection; subtitle keys in other sections are discarded after loading):
+### Config keys actually read (VP)
 
-- `type` (`off` / `classic` / `generated_gray` / `black`): presentation style; `classic` (or empty) turns on Classic subtitle fit.
-- `subtitle_script_hint` (`general` = `latin`, `cjk`, `arabic`, `thai`): `SetScriptHint`.
-- `subtitle_near_bar_px` (0..200, default 20 source pixels): `SetNearBarDistance`, a second detector pass for cues near but not touching the bar.
-- `subtitle_hold_ms` (0..1000, default 250): the `SubtitleBoxPresentation::Consume` hold and the pending-guard bridge.
-- `cleanup_fill` (`mirror` / `stretch` / `temporal`) or legacy `temporal_fill`: picks the fill; `temporal` uses `SubtitleTemporalFill`.
-- Placement-only keys in the same section (`offset_pixels`, `minimum_headroom_pixels`, `subtitle_hold_seconds`, `subtitle_engage_drift_ms`, `subtitle_release_drift_ms`, `subtitle_target_buffer_pixels`, colours, opacity, blur) do not affect detection.
-- `subtitle_detection_optimization` (`baseline` / `buffers` / `shared_samples`, for `SetOptimizationMode`) is parsed only from legacy sections and then reset to `baseline`. The `subtitles` group does not accept it, so detection always runs `baseline` today.
+All are validated as `input`-group keys (RendererProfileConfig.h; sections `[vprenderer.input.<Name>]`, flattened into the renderer profile) and read per active profile in `ApplyDisplayRuleOverrides` (LibplaceboVideoRenderer.cpp). Defaults from `RendererSettings`:
 
-User-visible fallbacks / notices: none. Subtitle detection registers no "Fallbacks engaged" entry. A late worker result is bridged by `SubtitlePendingMeasurementGuard`; when that fails the cue is dropped and `SUBTITLE PENDING` is logged (first 4 only). Work-limit hits (`calibration-budget`, `component-budget`) and worker drops/failures appear only in the log and the worker diagnostics.
+- `source_resolution`: `native` / `auto` / a height (144..8640) / `WIDTHxHEIGHT`; default `auto`. An unrecognised value is ignored without a log line.
+- `source_resolution_auto_min_confidence` (0..1, default 0.8), `source_resolution_evidence_shots` (1..10, default 3), `source_resolution_evidence_seconds` (2..120, default 10).
+- `source_resolution_text_guard`, `source_resolution_mixed_guard`, `source_coding_fixes`, `source_resolution_latch_fixes`, `source_resolution_cut_fixes`: `on` / `off`, all default `on`.
+- `source_resolution_engage_max_wait_s` (0..600, default 20), `source_resolution_crossfade_s` (0..10, default 1.5), `source_resolution_release_fade_s` (0..0.25, default 0.25).
+- `rebase_kernel_match` is read by the host for the re-base (scaling.rebase). The monitor fits kernels whatever it says.
+- The Original pathway forces `source_resolution: native`, `rebase_kernel_match: off`, `source_coding_fixes: off`, `source_resolution_latch_fixes: off` and `source_resolution_cut_fixes: off` (OriginalPathway.h).
+- `label_detector` is not read anywhere (planned).
+- Test only: the environment variable `VP_TEST_SOURCE_MONITOR_DIGEST=1` logs a digest of each tile readback.
 
-Dependencies to lift it:
+### User-visible fallbacks / notices (VP)
 
-- `AnalysisLumaSource.h/.cpp` (with ColorSpace.h, VideoFrameEncoding.h) for every file.
-- `SubtitleBoxLookahead.h` also needs `ActivePictureEvidence.h` and `ActivePictureDecisionTimeline.h` (`ActivePictureFrameIdentity`, `ActivePictureBounds`, `SubtitleAssistedVerticalBarProof`, `ActivePictureArDarknessEvidence`).
-- `SubtitleBoxDetector.cpp` uses the project `pch.h`.
-- The worker (`SubtitleMeasurementWorker.h`) and the renderer glue stay in src/VideoProcessor-Lib.
+- No "Fallbacks engaged" entry. The planned `Source analysis: labels unknown (<reason>)` is never produced.
+- A GPU-side failure of the tile copy (buffer, shader, dispatch, readback) is logged once per cause and retried after 60 s. While nothing is read the status/stats line shows "Source resolution: not read (...)", and `auto` stays native. A source that cannot be sampled shows the same way.
+- The look-ahead's cut judge assumes 24 Hz until the frame interval is measured: log only ("Rate fallback: source-resolution cut judge ...").
 
-### Legacy remainder (still at legacy paths)
+### Dependencies to lift it
 
-- `SourceResolutionDetector` (Stage 12 step B): effective source height from the luma spectrum; a reading only.
-- `vprenderer/SourceResolutionMonitor`: render-thread compute pass a few times a second; effective resolution, bitrate quality and bit depth, and `source_resolution: auto` acting on them.
-- `KernelInverse` (src/VP-V/modules/scaling/rebase): kernel-matched re-base inverse, used with `rebase_kernel_match`.
-- `ActivePictureAnalyzer`: active picture / crop decisions.
-- `SceneDetector`: sparse P010 luma cut/fade/black detector.
-- `AnalysisFrame`: canonical analysis-frame selection and preparation, shared by live and queued analysis.
-- `source_resolution`, `rebase_kernel_match` and `source_coding_fixes` are read from the renderer profile section (validated in the `input` group, RendererProfileConfig.h).
+- `SourceResolutionDetector.*`: the standard library and the project `pch.h`; compiled into VideoProcessor-Lib.
+- `SourceResolutionMonitor.*`: libplacebo (dispatch, buffers), `KernelInverse` (`<VP-V/modules/scaling/rebase/KernelInverse.h>`), `DebugLog.h`, `GeneralRateLog.h` and Windows `GetEnvironmentVariableA`. Compiled into the renderer DLL (VideoProcessor-VPRenderer) and the test project. The look-ahead's caller needs Bill's `AnalysisLumaSource` / `PrepareFrameAnalysis`.
+- The forwarding header src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.h keeps the host's include building until M2 step 0.
+
+### Bill's code the slot uses (not owned by VP)
+
+These stay in src/VideoProcessor-Lib and VP does not change them (owner principle 2026-10-24):
+
+- Subtitle detection: `SubtitleBoxDetector`, `SubtitleBarEvidence.h`, `SubtitleOpaqueCardRefinement.h`, `SubtitleBoxLookahead.h` (the current frame plus up to 7 queued frames, `MaxFrames` = 8), `SubtitleTemporalFill.h`, and the worker `SubtitleMeasurementWorker.h`. Scans run on one CPU worker thread; the render thread never waits for one. Driven by the `[vprenderer.subtitles.<Name>]` profile: `type` (`off` / `classic` / `generated_gray` / `black`; detection runs only for `black` and `generated_gray`), `subtitle_script_hint`, `subtitle_near_bar_px` (0..200, default 20), `subtitle_hold_ms` (0..1000, default 250), `cleanup_fill`. It registers no "Fallbacks engaged" entry. `subtitle_reposition` (main config / command line) is parsed and ignored: repositioning is disabled.
+- `ActivePictureAnalyzer` (active picture / crop), `SceneDetector` (cut/fade/black), `AnalysisFrame` (analysis-frame preparation shared by live and queued analysis).
 
 ### Test it standalone
 
-Build x64 Release, then run single-threaded from the repo root, one class at a time:
+Build x64 Release, then run single-threaded from the repo root, one class at a time, and read the TRX:
 
 ```
-vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /TestCaseFilter:"FullyQualifiedName~SubtitleBoxDetectorTests" /Logger:"trx;LogFileName=x.trx"
+vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /TestCaseFilter:"FullyQualifiedName~SourceResolutionDetectorTests" /Logger:"trx;LogFileName=source_analysis.trx"
+vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /TestCaseFilter:"FullyQualifiedName~SourceResolutionLatchTests" /Logger:"trx;LogFileName=source_latch.trx"
+vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /TestCaseFilter:"FullyQualifiedName~MixedScreenSourceResolutionTests" /Logger:"trx;LogFileName=source_mixed.trx"
 ```
 
-Read the TRX for the result. Classes:
-
-- `SubtitleBoxDetectorTests`: the detector (scripts, cards, near-bar, work limits).
-- `SubtitleBoxLookaheadTests`: Measure / Resolve / Presentation / bar tracking.
-- `SubtitleOpaqueCardRefinementTests`: card refinement.
-- `SubtitleMeasurementWorkerTests`: worker keys, coalescing, pending guard.
-- `ActivePictureEvidenceTests`, `AnalysisRecoveryParityTests`: subtitle-assisted bar proof and analysis parity.
-- Legacy part: `SourceResolutionDetectorTests`, `SourceResolutionLatchTests`, `SceneDetectorTests`.
-
-`SubtitleTemporalFill` has no unit test.
-
-Probes (offline, no decoder): tools/subtitle_bbox_probe (stdin P010 frames, args `width height pictureTop pictureBottom [script]`, CSV out), tools/subtitle_clip_probe, tools/subtitle_opaque_card_probe, tools/subtitle_worker_probe. The Python drivers tools/test_subtitle_*.py need numpy/opencv and a built probe. Exact native frame capture: `VP_SUBTITLE_CAPTURE_PATH` (see AGENTS.md).
+- CPU only:
+  - `SourceResolutionDetectorTests`: detector and tracker. `RealFootageReadings` needs `VP_TEST_REAL_FOOTAGE`, `RealCodecReadings` needs `VP_TEST_CODEC_CORPUS`; else skipped.
+  - `SourceResolutionLatchTests`: the monitor through `AnalyseTilesForTest`. Real-footage cases need `VP_TEST_REAL_FOOTAGE` (or D:\hfr); `RealFilmCutDecisions` needs `VP_TEST_CUT_FILMS`.
+  - `MixedScreenSourceResolutionTests`: the mixed-screen guard and the dense grid.
+- GPU (D3D11; WARP unless `VP_TEST_GPU=hardware`; only when GPU tests are allowed): `LibplaceboLutParserTests` methods `SourceResolutionMonitorIdentifiesThePlayerKernel`, `SourceResolutionLookAheadVerifiesOrCancelsTheSwitch`, `SourceResolutionMonitorDeclaresAutoEngagesAtACutAndDisengagesAtOnce`, `SourceResolutionReadsAndRebasesTheDolbyVisionTunnel` (filter `FullyQualifiedName~LibplaceboLutParserTests.SourceResolution`).
+- Bill's subtitle code: `SubtitleBoxDetectorTests`, `SubtitleBoxLookaheadTests`, `SubtitleOpaqueCardRefinementTests`, `SubtitleMeasurementWorkerTests`; probes in tools/subtitle_*_probe; exact native frame capture with `VP_SUBTITLE_CAPTURE_PATH` (see AGENTS.md).
 
 ## Cost
 
-This slot's code is **Bill's** (upstream `v1.4.02-beta`). It stays at its path and VP does not change it
-(owner principle 2026-10-24). The notes below describe how VP drives it and what that costs. Changes
+This section covers the subtitle code, which is **Bill's** (upstream `v1.4.02-beta`). It stays at its path and VP does not change it
+(owner principle 2026-10-24). The cost of VP's own source-resolution monitor (tile copies, analysis, kernel fits, the lock) is reviewed in the scaling.rebase README, "Cost". The notes below describe how VP drives it and what that costs. Changes
 inside Bill's files are suggestions for Bill, or for a VP-V adapter around them (M2 plan, option (d)).
 
 Review 2026-10-24, from reading the code only. Nothing was built or measured. Every number is an estimate from operation counts. Measure the real cost with the worker diagnostics (`fullMs`, `fullPeakMs`) or the `analysisMs` trace metric.
@@ -174,7 +178,7 @@ Cost when off: zero detection work. `type` = `off` and `classic` both leave `Sub
 ## Settings
 
 - Slot keys (slots.json): `source_resolution`, `rebase_kernel_match`, `subtitle_fit`, `subtitle_reposition`, `subtitle_type`, `source_coding_fixes`
-- As read today: `source_resolution`, `rebase_kernel_match` and `source_coding_fixes` are live. `subtitle_type` is the key `type` in `[vprenderer.subtitles.<Name>]`. `subtitle_fit` outside that section is discarded (fit follows `type`). `subtitle_reposition` (main config / command line) is parsed and ignored; repositioning is permanently disabled. Detection keys: see "How the code works".
+- As read today: `source_resolution` and `source_coding_fixes` are live, together with the ten `source_resolution_*` keys listed under "How the code works" (added to the slot list in this pass). `rebase_kernel_match` is read for the re-base, not by this slot's code. `subtitle_type` is the key `type` in `[vprenderer.subtitles.<Name>]` (Bill's subtitle code). `subtitle_fit` outside that section is discarded (fit follows `type`). `subtitle_reposition` (main config / command line) is parsed and ignored; repositioning is permanently disabled. Detection keys: see "How the code works".
 - Planned keys: `label_detector`
 - Tiers: not tiered; label-detector net optional
 
@@ -182,7 +186,7 @@ Cost when off: zero detection work. `type` = `off` and `classic` both leave `Sub
 
 - "Fallbacks engaged" entry: Source analysis: labels unknown (<reason>). Planned, NOT implemented: no labels are produced and nothing engages it.
 - Behaviour (planned): Low confidence -> 'unknown' labels (A is trained with ~12% unknown); un-identified kernel -> Lanczos re-base or no re-base.
-- Today: subtitle detection has no fallback entry (see "User-visible fallbacks / notices").
+- Today: no entry. Monitor GPU failures show only on the status/stats line; subtitle detection (Bill's) has none (see "User-visible fallbacks / notices").
 
 ## Net fingerprint / upstream
 
@@ -216,17 +220,26 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **partly migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
-- `src/VideoProcessor-Lib/SourceResolutionDetector.cpp`
-- `src/VideoProcessor-Lib/SourceResolutionDetector.h`
-- `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.cpp`
+VP code in this folder:
+
+- `src/VP-V/modules/input/source_analysis/SourceResolutionDetector.cpp`
+- `src/VP-V/modules/input/source_analysis/SourceResolutionDetector.h`
+- `src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.cpp`
+- `src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.h`
+
+Also listed (used, owned elsewhere):
+
+- `src/VP-V/modules/scaling/rebase/KernelInverse.cpp` (scaling.rebase; the monitor's kernel fits)
+- `src/VideoProcessor-Lib/ActivePictureAnalyzer.cpp` (Bill's)
+- `src/VideoProcessor-Lib/SceneDetector.cpp` (Bill's)
+- `src/VideoProcessor-Lib/SubtitleBoxDetector.cpp` (Bill's)
+- `src/VideoProcessor-Lib/AnalysisFrame.cpp` (Bill's)
+
+Forwarding header at the legacy path (removed at M2 step 0; new code includes the `<VP-V/...>` path):
+
 - `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.h`
-- `src/VP-V/modules/scaling/rebase/KernelInverse.cpp`
-- `src/VideoProcessor-Lib/ActivePictureAnalyzer.cpp`
-- `src/VideoProcessor-Lib/SceneDetector.cpp`
-- `src/VideoProcessor-Lib/SubtitleBoxDetector.cpp`
-- `src/VideoProcessor-Lib/AnalysisFrame.cpp`
 
 ## Migration directive
 
@@ -242,7 +255,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 
 ## Settings
 
-- Keys: `source_resolution`, `rebase_kernel_match`, `subtitle_fit`, `subtitle_reposition`, `subtitle_type`, `source_coding_fixes`.
+- Keys: `source_resolution`, `source_resolution_auto_min_confidence`, `source_resolution_evidence_shots`, `source_resolution_evidence_seconds`, `source_resolution_text_guard`, `source_resolution_mixed_guard`, `source_resolution_latch_fixes`, `source_resolution_cut_fixes`, `source_resolution_engage_max_wait_s`, `source_resolution_crossfade_s`, `source_resolution_release_fade_s`, `subtitle_fit`, `subtitle_reposition`, `subtitle_type`, `source_coding_fixes`, `frame_analysis_store`.
 - Planned keys (not yet implemented): `label_detector`.
 - Tiers: not tiered; label-detector net optional.
 - VP-V page, Input tab: not tiered (Always on: capture and timing have no quality steps, only paths (the toggles below).).

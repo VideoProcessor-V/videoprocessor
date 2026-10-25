@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include <MotionValidity.h>
+#include <VP-V/modules/motion/estimation/MotionValidity.h>
 
 #include <atomic>
 #include <string>

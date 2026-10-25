@@ -4,17 +4,23 @@
   "unit": "input",
   "order": 40,
   "status": "partial",
-  "code_location": "legacy",
+  "code_location": "partly migrated",
   "live_files": [
-    "src/VideoProcessor-Lib/SourceResolutionDetector.cpp",
-    "src/VideoProcessor-Lib/SourceResolutionDetector.h",
-    "src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.cpp",
-    "src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.h",
+    "src/VP-V/modules/input/source_analysis/SourceResolutionDetector.cpp",
+    "src/VP-V/modules/input/source_analysis/SourceResolutionDetector.h",
+    "src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.cpp",
+    "src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.h",
     "src/VP-V/modules/scaling/rebase/KernelInverse.cpp",
     "src/VideoProcessor-Lib/ActivePictureAnalyzer.cpp",
     "src/VideoProcessor-Lib/SceneDetector.cpp",
     "src/VideoProcessor-Lib/SubtitleBoxDetector.cpp",
-    "src/VideoProcessor-Lib/AnalysisFrame.cpp"
+    "src/VideoProcessor-Lib/AnalysisFrame.cpp",
+    "src/VP-V/modules/input/source_analysis/VpFrameAnalysis.cpp",
+    "src/VP-V/modules/input/source_analysis/VpFrameAnalysis.h",
+    "src/VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h"
+  ],
+  "forwarding_headers": [
+    "src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.h"
   ],
   "components": {
     "files": {
@@ -27,10 +33,20 @@
     },
     "tools": [],
     "config_keys": [
+      "frame_analysis_store",
       "label_detector",
-      "rebase_kernel_match",
       "source_coding_fixes",
       "source_resolution",
+      "source_resolution_auto_min_confidence",
+      "source_resolution_crossfade_s",
+      "source_resolution_cut_fixes",
+      "source_resolution_engage_max_wait_s",
+      "source_resolution_evidence_seconds",
+      "source_resolution_evidence_shots",
+      "source_resolution_latch_fixes",
+      "source_resolution_mixed_guard",
+      "source_resolution_release_fade_s",
+      "source_resolution_text_guard",
       "subtitle_fit",
       "subtitle_reposition",
       "subtitle_type"

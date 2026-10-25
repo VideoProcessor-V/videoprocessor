@@ -25,9 +25,9 @@ namespace OriginalPathway
 		const char* slot;   // the slot whose VP additions it removes (slots.json id)
 	};
 
-	inline const std::array<Override, 60>& Overrides()
+	inline const std::array<Override, 61>& Overrides()
 	{
-		static const std::array<Override, 60> table = { {
+		static const std::array<Override, 61> table = { {
 			{ "capture_path", "standard", "input.capture" },
 			{ "capture_upload", "render", "input.capture" },
 			{ "native_rgb_ingest", "off", "input.capture" },
@@ -46,6 +46,7 @@ namespace OriginalPathway
 			{ "rebase_kernel_match", "off", "scaling.rebase" },
 			{ "entrance_gpu_drain", "off", "scaling.rebase" },
 			{ "source_coding_fixes", "off", "input.source_analysis" },
+			{ "frame_analysis_store", "off", "input.source_analysis" },   // WP-23: Bill's own decodes only
 			{ "source_resolution_latch_fixes", "off", "input.source_analysis" },
 			{ "source_resolution_cut_fixes", "off", "input.source_analysis" },
 			{ "deband_vp", "off", "repair.deband" },

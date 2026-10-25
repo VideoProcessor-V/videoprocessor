@@ -28,14 +28,15 @@
 // [[vp-general-not-fixed]]).
 
 #include <DisplayRefreshRatePolicy.h>
-#include <MotionValidity.h>
+#include <VP-V/modules/motion/estimation/MotionValidity.h>
 #include <vprenderer/AlphaQueuePolicy.h>
+#include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
 #include <vprenderer/CaptureTimestampGap.h>
-#include <vprenderer/DejudderPolicy.h>
-#include <vprenderer/InterpolationTimeline.h>
-#include <vprenderer/OpenLoopDisplayRate.h>
-#include <vprenderer/PulldownDetector.h>
-#include <vprenderer/RenderAheadPolicy.h>
+#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
+#include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
+#include <VP-V/modules/output/presentation/OpenLoopDisplayRate.h>
+#include <VP-V/modules/input/queue_timing/PulldownDetector.h>
+#include <VP-V/modules/output/presentation/RenderAheadPolicy.h>
 
 #include <algorithm>
 #include <cmath>

@@ -6,6 +6,7 @@
 #include <VP-V/core/OriginalPathway.h>
 #include <RendererProfileConfig.h>
 #include <vprenderer/AlphaQueuePolicy.h>
+#include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
 #include <VP-V/core/EntranceStages.h>
 #include <VP-V/core/OutputHookOrder.h>
 #include <VP-V/core/SlotRegistry.h>
@@ -648,6 +649,33 @@ namespace PipelineSkeletonTestsNs
 			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::OutputDither));   // S3 PrepareDither honours it (segments)
 			Assert::IsFalse(PipelineSlots::SwitchHonoured(Id::ScalingGeometry));
 			Assert::IsFalse(PipelineSlots::SwitchHonoured(Id::ColourToneGamut));
+			// WP-13: extended range, dither and output scaling honour pipeline_slots_off.
+			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::ColourExtendedRange));
+			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::OutputDither));
+			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::ScalingOutput));
+			// Owner 2026-10-25: the motion and queue/timing slots are switchable (SlotSwitchSettings).
+			for (Id id : { Id::InputQueueTiming, Id::MotionEstimation, Id::MotionVectorDelivery, Id::MotionConsumers,
+				Id::OutputPresentation })
+				Assert::IsTrue(PipelineSlots::SwitchHonoured(id), W(PipelineSlots::Get(id).name).c_str());
+		}
+
+		TEST_METHOD(MotionAndQueueSlotsOffAreHonouredAndOriginalIsUpstream)
+		{
+			// A switched-off motion/queue slot stops running in the registry (zero-cost rule), and the
+			// Original pathway puts input.queue_timing in its upstream form (Bill's queue policy).
+			for (Id id : { Id::InputQueueTiming, Id::MotionEstimation, Id::MotionVectorDelivery, Id::MotionConsumers,
+				Id::OutputPresentation })
+			{
+				PipelineSlots::Registry registry;
+				Assert::IsTrue(registry.Runs(id), W(PipelineSlots::Get(id).name).c_str());
+				registry.SetEnabled(id, false);
+				Assert::IsFalse(registry.Runs(id), W(PipelineSlots::Get(id).name).c_str());
+			}
+			PipelineSlots::Registry original;
+			original.ApplyOriginalPathway();
+			Assert::IsTrue(original.UpstreamForm(Id::InputQueueTiming));
+			Assert::IsFalse(original.Runs(Id::MotionEstimation));
+			Assert::IsFalse(original.Runs(Id::MotionConsumers));
 		}
 
 		TEST_METHOD(OriginalPathwayOverridesAreRealKeysAndValues)
@@ -668,7 +696,7 @@ namespace PipelineSkeletonTestsNs
 			// Settings audit 2026-10-24: the VP additions the first table missed are switched off too.
 			for (const char* key : { "active_picture_startup_hold", "low_bitrate_handling", "ssim_residual_stabilise",
 				"cnn_residual_stabilise", "residual_stabilise_grain_guard", "dejudder_estimate_ahead", "interpolation_fallback",
-				"output_segments_merged", "dejudder_est_still_zero", "entrance_gpu_drain" })
+				"output_segments_merged", "dejudder_est_still_zero", "entrance_gpu_drain", "frame_analysis_store" })
 				Assert::IsTrue(keys.count(key) == 1, W(std::string(key) + " is not in the Original pathway").c_str());
 		}
 

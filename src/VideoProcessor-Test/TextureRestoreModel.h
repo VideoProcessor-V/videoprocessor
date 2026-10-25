@@ -1,7 +1,7 @@
 #pragma once
 
 // CPU reference model of texture_restore (docs/VP-detail-restore.md; the algorithm and its
-// constants: src/VideoProcessor-Lib/vprenderer/TextureRestore.h). Mirrors the shader passes of
+// constants: src/VP-V/modules/repair/texture_restore/TextureRestore.h). Mirrors the shader passes of
 // TextureRestore.cpp in double precision on one luma plane in the signal's codes (the shader
 // works in normalised units: every energy, floor and allowance scales with one code, so the
 // results agree up to float precision). Positions in pixels, texel centres at +0.5, edges
@@ -10,7 +10,7 @@
 // Usage: one Model per stream; Frame() per presented source frame (with the frame's sequence
 // and optionally the de-judder field), Forget() at discontinuities.
 
-#include <vprenderer/TextureRestore.h>
+#include <VP-V/modules/repair/texture_restore/TextureRestore.h>
 
 #include <algorithm>
 #include <cmath>
