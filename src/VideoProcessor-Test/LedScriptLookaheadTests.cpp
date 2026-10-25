@@ -4,6 +4,7 @@
 #include <VP-V/modules/drive/projector_control/LedController.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
 #include <vprenderer/AlphaQueuePolicy.h>
+#include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
 
 #include <algorithm>
 #include <cmath>

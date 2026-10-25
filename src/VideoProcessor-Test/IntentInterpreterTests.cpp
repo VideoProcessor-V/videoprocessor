@@ -17,6 +17,7 @@
 #include <ConfigFile.h>
 #include <RendererProfileConfig.h>
 #include <vprenderer/AlphaQueuePolicy.h>
+#include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
 #include <chrono>
 #include <cstdlib>
 #include <Windows.h>

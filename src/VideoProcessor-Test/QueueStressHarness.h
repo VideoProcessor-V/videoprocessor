@@ -30,6 +30,7 @@
 #include <DisplayRefreshRatePolicy.h>
 #include <VP-V/modules/motion/estimation/MotionValidity.h>
 #include <vprenderer/AlphaQueuePolicy.h>
+#include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
 #include <vprenderer/CaptureTimestampGap.h>
 #include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
 #include <VP-V/modules/motion/consumers/InterpolationTimeline.h>

@@ -6,6 +6,7 @@
 #include <VP-V/core/OriginalPathway.h>
 #include <RendererProfileConfig.h>
 #include <vprenderer/AlphaQueuePolicy.h>
+#include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
 #include <VP-V/core/EntranceStages.h>
 #include <VP-V/core/OutputHookOrder.h>
 #include <VP-V/core/SlotRegistry.h>
@@ -651,6 +652,29 @@ namespace PipelineSkeletonTestsNs
 			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::ColourExtendedRange));
 			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::OutputDither));
 			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::ScalingOutput));
+			// Owner 2026-10-25: the motion and queue/timing slots are switchable (SlotSwitchSettings).
+			for (Id id : { Id::InputQueueTiming, Id::MotionEstimation, Id::MotionVectorDelivery, Id::MotionConsumers,
+				Id::OutputPresentation })
+				Assert::IsTrue(PipelineSlots::SwitchHonoured(id), W(PipelineSlots::Get(id).name).c_str());
+		}
+
+		TEST_METHOD(MotionAndQueueSlotsOffAreHonouredAndOriginalIsUpstream)
+		{
+			// A switched-off motion/queue slot stops running in the registry (zero-cost rule), and the
+			// Original pathway puts input.queue_timing in its upstream form (Bill's queue policy).
+			for (Id id : { Id::InputQueueTiming, Id::MotionEstimation, Id::MotionVectorDelivery, Id::MotionConsumers,
+				Id::OutputPresentation })
+			{
+				PipelineSlots::Registry registry;
+				Assert::IsTrue(registry.Runs(id), W(PipelineSlots::Get(id).name).c_str());
+				registry.SetEnabled(id, false);
+				Assert::IsFalse(registry.Runs(id), W(PipelineSlots::Get(id).name).c_str());
+			}
+			PipelineSlots::Registry original;
+			original.ApplyOriginalPathway();
+			Assert::IsTrue(original.UpstreamForm(Id::InputQueueTiming));
+			Assert::IsFalse(original.Runs(Id::MotionEstimation));
+			Assert::IsFalse(original.Runs(Id::MotionConsumers));
 		}
 
 		TEST_METHOD(OriginalPathwayOverridesAreRealKeysAndValues)

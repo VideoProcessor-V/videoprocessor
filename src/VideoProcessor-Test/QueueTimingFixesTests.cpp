@@ -12,6 +12,7 @@
 #include <TimingClock.h>
 #include <vprenderer/AlphaCadenceCorrectionPolicy.h>
 #include <vprenderer/AlphaQueuePolicy.h>
+#include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
 #include <VP-V/modules/output/presentation/OpenLoopDisplayRate.h>
 
 #include <algorithm>
@@ -615,6 +616,10 @@ namespace Tests
 				const std::string name = path.substr(path.rfind('\\') + 1);
 				if (name == "DisplayRefreshRatePolicy.h")
 					continue;   // the bounds themselves
+				// Upstream's file, kept byte-identical to billslack2 (motion-timing extraction 2026-10-24): its
+				// 10..240 literal equals CaptureRateBounds (QueueTimingPolicy.UpstreamRateBoundEqualsCaptureRateBounds).
+				if (name == "AlphaQueuePolicy.h")
+					continue;
 				std::ifstream file(path, std::ios::binary);
 				std::string line;
 				int number = 0;

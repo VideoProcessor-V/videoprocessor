@@ -13,6 +13,8 @@
 #include <vprenderer/PulldownDetector.h>
 #include <vprenderer/CaptureTimestampGap.h>
 #include <vprenderer/FileFrameSlotGate.h>
+#include <vprenderer/QueueTimingPolicy.h>
+#include <VP-V/modules/input/queue_timing/VpFixedBudgetPolicy.h>
 #include <video_frame_formatter/IVideoFrameFormatter.h>
 
 #include <atomic>
@@ -404,20 +406,20 @@ private:
 	std::atomic<int> m_queueDelayBudgetMs{0};
 	// One coherent hold (audit B2): written together by UpdateQueueDelayHold, read together under
 	// m_queueHoldMutex (lock order: m_queueMutex, then m_queueHoldMutex).
-	struct QueueHold
-	{
-		bool active = false;
-		double holdMs = 0.0;
-		double transferMs = 0.0;   // the capture transfer before the hold (timestamps mark a frame's start)
-		double fraction = 0.0;
-		size_t targetFrames = 0;
-	};
+	// The policy's hold plan (same fields as before: active, holdMs, transferMs, fraction, targetFrames).
+	using QueueHold = QueueTimingPolicy::HoldPlan;
 	mutable std::mutex m_queueHoldMutex;
 	QueueHold m_queueHold;
 	QueueHold CurrentQueueHold() const;
 	std::string m_queueHoldLogged;
-	unsigned m_heldExcessRun = 0;
-	bool m_enqueueArrivalIsFrameStart = false;   // OnVideoFrame -> EnqueueFrame (capture callbacks are serial)   // consecutive held heads a frame late (AlphaQueuePolicy::ShouldShedHeldExcess)
+	// Queue/timing policy (either/or, owner 2026-10-24): VP's fixed total delay (default) or upstream's.
+	// Commit (a): the VP policy serves both pathways (its options mirror the Original pathway and
+	// queue_timing_fixes, refreshed before each call from the same sources as before the move).
+	VpQueueTiming::VpFixedBudgetPolicy m_vpQueuePolicy;
+	QueueTimingPolicy::BillQueuePolicy m_upstreamQueuePolicy;
+	const QueueTimingPolicy::IQueueTimingPolicy& QueuePolicy() const;
+	QueueTimingPolicy::BacklogRunState m_backlogRun;   // was m_heldExcessRun
+	bool m_enqueueArrivalIsFrameStart = false;   // OnVideoFrame -> EnqueueFrame (capture callbacks are serial; re-audit MED 1)
 	std::atomic<uint64_t> m_droppedFrames{0};
 	std::atomic<uint64_t> m_conversionFailures{0};
 	std::atomic<size_t> m_activePictureLookaheadFrames{0};
