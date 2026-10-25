@@ -1,9 +1,27 @@
 # WP-24: captured-repeat render reuse (DRAFT, revised after audit)
 
 Branch `feat/repeat-reuse`, rebased onto integ/batch1 **dc149284** on 2026-10-25 (worktree
-`D:\codex\videoprocessor\repeat-reuse`). The branch adds VP files and the upstream contract.
-`RenderedWarp.h` (a VP file) gains `Cache::Armed` and a comment fix. Every edit to the host and test
-project is in `repeat-reuse-callsites.patch`, which passes `git apply --check` on dc149284.
+`D:\codex\videoprocessor\repeat-reuse`). The branch adds VP files and the upstream contract only.
+`RenderedWarp.h` is untouched: it becomes an M2 forwarder, and `Cache::Armed` was dropped. Every
+edit to an existing file is in `repeat-reuse-callsites.patch`:
+- the host;
+- the Original-pathway table and the validator;
+- slots.json and the presentation manifest;
+- the test vcxproj.
+
+The patch passes `git apply --check` on dc149284 and on integ-batch1 64ab319b.
+
+**Additional review fixes** (modularity note and M2-interaction note):
+- **Registry fingerprint.** `RepeatReuseRegistryKey.h` hashes every slot's on/off state,
+  component, order, the Original pathway and B3 into `extension`, so any registry change refuses
+  the reuse.
+- **Slot switch.** The `output.presentation` switch (`Runs`) turns the reuse off.
+- **Original pathway.** It sets `repeat_render_reuse` off (`OriginalPathway.h`, the renderer's
+  Original settings, slots.json); `Active()` also checks it.
+- **LED measurement.** While it runs on every refresh it refuses the reuse
+  (`ledMeasurePerRefresh`), until the LED drive is shown to work per source frame or is fed the
+  cached measurement.
+- **Glue wiring.** The Glue is wired by the regenerated patch.
 
 Audit: `skeleton-notes/audit-feat-repeat-reuse.md` (HIGH 2, MED 6, LOW 8). Section 8 maps each
 finding to its fix.
@@ -38,7 +56,8 @@ R3 must still measure copy cost against saved cost on the laptop and the 3090, a
 | `src/VP-V/modules/output/presentation/TemporalShaders.h` | VP-only, pure | mpv shader text scan (`frame`, `random`, `//!BUFFER`), registry noted by the loaders, shader-set generation |
 | `src/VP-V/modules/output/presentation/RepeatReuseAdapter.h` | VP-only, libplacebo | `ClassifyHooks` (pure: multi-stage and temporal hooks are opaque), `DrawFromCache` (6d path, zero warp) |
 | `src/VP-V/modules/output/presentation/RepeatReuseGlue.h` | VP-only | **VP's `IRepeatReuse` implementation**: all logic the host used to carry (audit M5); fallback entries (M4) |
-| `src/VP-V/tests/RepeatReusePolicyTests.cpp` | CPU tests | 21 tests |
+| `src/VP-V/modules/output/presentation/RepeatReuseRegistryKey.h` | VP-only, pure | slot registry fingerprint |
+| `src/VP-V/tests/RepeatReusePolicyTests.cpp` | CPU tests | 19 test methods (some loop over cases) |
 | `src/VP-V/tests/gpu/RepeatReuseGpuTests.inc` | GPU, written, not run | R1-R3 byte-identity/timing design |
 | `docs/design/repeat-reuse-callsites.patch` | host patch | `LibplaceboVideoRenderer.cpp` + test vcxproj |
 
