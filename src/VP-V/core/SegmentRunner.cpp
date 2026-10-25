@@ -127,10 +127,7 @@ namespace SegmentRunner
 		StageInfo repair;
 		repair.name = "encoding_repair";   // libplacebo 7.360 workaround; Needed() decides per frame
 		repair.needs.light = Light::Any;
-		repair.gives.light = Light::Codes;
-		repair.gives.res = 0;
-		repair.gives.format = 0;
-		repair.gives.range = 0;   // the repair encodes the range: BTB/WTW stay outside the nominal codes
+		repair.gives.light = Light::Codes;   // the repair encodes the range: BTB/WTW stay outside the nominal codes
 		s.push_back(repair);
 		StageInfo mask;
 		mask.name = "occlusion_mask";   // writes alpha for the dither (de-judder 6c / grain map)

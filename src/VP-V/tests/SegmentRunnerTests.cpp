@@ -333,7 +333,47 @@ namespace SegmentRunnerTestsNs
 			Assert::IsTrue(s.Configure(registry, true, 3, fallbacks) == Mode::Separate);
 			// A settings change re-checks and recovers.
 			Assert::IsTrue(s.Configure(registry, true, 4, fallbacks) == Mode::Merged);
+			Assert::IsTrue(s.Rechecked());
 			Assert::IsFalse(fallbacks.Engaged(kS3FallbackId));
+		}
+
+		TEST_METHOD(FailedCheckWithMergeOffIsNotAFallback)
+		{
+			// Audit L4: the separate form is today's behaviour, so with the merged form off a failed
+			// check engages nothing (the reason stays readable in LastCheck()).
+			PipelineSlots::Registry registry;
+			FallbackStatus::Registry fallbacks;
+			std::vector<StageInfo> bad = OutputColourStages();
+			bad[0].gives.range = Range::Clipped;
+			Segment s(kS2FallbackId, bad, OutputColourEntry());
+			Assert::IsTrue(s.Configure(registry, false, 1, fallbacks) == Mode::Separate);
+			Assert::IsFalse(s.LastCheck().ok);
+			Assert::AreEqual(std::string("Fallbacks engaged: none"), fallbacks.Heading());
+			Assert::IsTrue(s.Configure(registry, true, 2, fallbacks) == Mode::Separate);
+			Assert::IsTrue(s.FallbackChanged());
+			Assert::IsTrue(fallbacks.Engaged(kS2FallbackId));
+		}
+
+		TEST_METHOD(UnsetGivesKeepTheFlow)
+		{
+			// m2-entrance audit #1: a stage that changes nothing must not reset the flow. After the
+			// repair (gives codes) and the mask (gives nothing), a stage needing codes still gets them.
+			std::vector<StageInfo> stages = OutputFinishStages();
+			StageInfo needsCodes;
+			needsCodes.name = "needs codes";
+			needsCodes.needs.light = PipelineSlots::Light::Codes;
+			stages.insert(stages.begin() + 2, needsCodes);   // repair, mask, needs codes, dither
+			Flow entry = OutputFinishEntry();
+			entry.light = PipelineSlots::Light::Target;      // the 7.360 path: unencoded until the repair
+			const Check c = CheckContracts(stages, entry);
+			Assert::IsTrue(c.ok, W(c.reason).c_str());
+			// And a clip is never silently re-marked as carried by a later stage.
+			stages = OutputFinishStages();
+			StageInfo clips;
+			clips.name = "clip";
+			clips.gives.range = Range::Clipped;
+			stages.insert(stages.begin() + 1, clips);
+			Assert::IsFalse(CheckContracts(stages, OutputFinishEntry()).ok);
 		}
 
 		TEST_METHOD(TimingSamplesOneInNAndIgnoresPendingResults)
