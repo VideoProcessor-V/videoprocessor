@@ -13,17 +13,20 @@
 //   - temporal per-RENDER state the policy refuses anyway (peak detection, frame mixing,
 //     deinterlacing, crossfades): covered as "refused, rendered in full", not compared.
 //
-// R1 (unit, this file): one libplacebo renderer, synthetic 4K P010 source, target 2560x1600 (FL35)
+// R1 (unit, this file): synthetic 4K P010 source, target 2560x1600 (FL35)
 //    and 3840x2160; for each case: render the first present with the cache armed, then refresh 2
-//    (a) in full and (b) via VpRepeatReuse::Adapter::DrawFromCache, each into its own target texture;
+//    (a) in full and (b) via VpRepeatReuse::Adapter::DrawFromCache, each into its own target texture
+//    (two renderers, each with exactly one prior render, so both are at the same dither phase);
 //    download both; require 0 differing bytes.
 //    Cases (each must be identical): SDR BT.709 limited; HDR10 PQ -> SDR tone map (peak detect OFF);
 //    target LUT on (cache already carries it: the reuse clears target.lut); integer and FRACTIONAL
-//    target crops (Rounded rects: the black-border edge pixels must match); NLS on (warped geometry);
-//    a target overlay (OSD/subtitle overlay drawn on both); sigma-delta OUTPUT hook with
-//    static_refresh = 1 on both; OutputEncodingRepair needed (7.360) and not needed (377);
-//    fbo_float32 on and off (the cache format follows the FBO format); BTB/WTW probes (codes 4..64,
-//    940..1019) unchanged.
+//    target crops (Rounded rects: the black-border edge pixels must match); a target overlay (drawn on
+//    both); sigma-delta OUTPUT hook with static_refresh = 1 on both; fbo_float32 on and off (NOTE: the
+//    cache is rgba32f wherever renderable, independent of fbo_float32 - audit L8).
+//    STILL TO BUILD before R1 counts as complete (audit L8): NLS on (warped geometry); BTB/WTW probes
+//    (codes 4..64, 940..1019); limited-range output on libplacebo 7.360 with the encoding repair
+//    (audit L1: the full path encodes through the repair shader, the reuse draw natively - expect at
+//    most LSB differences, or refuse reuse while the repair is active); deband with grain 0.
 // R2 (renderer harness, capture): 24-in-30 and 30-in-60 clips (Apple TV recordings), repeat_render_reuse
 //    on vs off: all presented frames byte-identical; the status line shows "Repeats reused: N of M"
 //    with N/M >= 0.95 on steady content (refusals only at cuts/start/overlay changes), 0 draw failures;
@@ -48,6 +51,18 @@ namespace RepeatReuseGpu
 		pl_frame source = MakeP010Frame(gpu, g, 3840, 2160, c.hdrSource);
 		pl_frame targetFull = MakeTarget(g, c.targetW, c.targetH, c.lut, c.fbo32);
 		pl_frame targetReuse = MakeTarget(g, c.targetW, c.targetH, c.lut, c.fbo32);
+		if (c.overlay)
+		{
+			// A target overlay: drawn again by both paths (target overlays are not in the cache).
+			static pl_overlay_part part{ { 100, 100, 400, 160 }, { 100, 1400, 400, 1460 }, { 1, 1, 1, 1 } };
+			static pl_overlay overlay{};
+			overlay.tex = MakeOverlayTexture(g, 300, 60);
+			overlay.mode = PL_OVERLAY_NORMAL;
+			overlay.parts = &part;
+			overlay.num_parts = 1;
+			targetFull.overlays = targetReuse.overlays = &overlay;
+			targetFull.num_overlays = targetReuse.num_overlays = 1;
+		}
 		if (c.fractionalCrop)
 		{
 			targetFull.crop = { 10.4f, 6.6f, c.targetW - 9.7f, c.targetH - 5.2f };
