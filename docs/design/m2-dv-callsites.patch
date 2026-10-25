@@ -1,5 +1,5 @@
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index 78096f51..9262eb91 100644
+index 395b11a0..7b803246 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 @@ -57,11 +57,7 @@
@@ -148,7 +148,7 @@ index 78096f51..9262eb91 100644
  				pl_tex_destroy(d3d11->gpu, &rgbIngestLuma);
  				if (earlyUpload->IsOpen())
  				{
-@@ -18565,22 +18510,8 @@ struct LibplaceboVideoRenderer::Impl
+@@ -18579,22 +18524,8 @@ struct LibplaceboVideoRenderer::Impl
  		// BT.2020): every SDR gate (input transfer, gamma, LUT domain, luminance) uses it.
  		const bool inputIsSdr = state.eotf == EOTF::SDR || tunnelRgbFallback;
  		dejudderDolbyVisionTunnel = state.dolbyVisionTunnel;   // Bug hunt 2026-10-17
@@ -173,7 +173,7 @@ index 78096f51..9262eb91 100644
  		if (tunnelActive && (!convertedPayload ||
  			!convertedPayload->dolby.valid || convertedPayload->dolby.requiresBlackFrame))
  		{
-@@ -19746,8 +19677,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -19760,8 +19691,7 @@ struct LibplaceboVideoRenderer::Impl
  				case VideoFrameEncoding::R10b:
  				case VideoFrameEncoding::R10l:
  					setIngressStatus(std::string(convertedPayload->dvTunnelRaw ? "Dolby Vision RGB tunnel (12-bit 4:2:2, GPU unpack)" :
@@ -183,7 +183,7 @@ index 78096f51..9262eb91 100644
  					break;
  				case VideoFrameEncoding::V210:
  					setIngressStatus(convertedPayload->Raw() ? "P210 (lossless v210 4:2:2, GPU unpack)" : "P210 (lossless v210 4:2:2)");
-@@ -23457,16 +23387,9 @@ struct LibplaceboVideoRenderer::Impl
+@@ -23471,16 +23401,10 @@ struct LibplaceboVideoRenderer::Impl
  			debandThreshold = 0.0;
  			vpDebandParams = VpDebander::Params();
  			std::string debandState;
@@ -197,13 +197,14 @@ index 78096f51..9262eb91 100644
 -			}
 -			else
 -				ReleaseFallback("VP deband");
-+			// VP's debander skipped on the raw DV tunnel planes, visibly (DvHostStage, WP-14).
++			// VP's debander skipped on the raw DV tunnel planes, visibly (DvHostStage, WP-14); nothing to
++			// skip (or list) while the repair.deband slot is off (modularity sweep).
 +			const bool dvVpDebandSkipped = dvStage.SkipVpDeband(renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION,
-+				activeSettings.debandVp != "off", debandState);
++				activeSettings.debandVp != "off" && pipelineSlots.Runs(PipelineSlots::Id::RepairDeband), debandState);
  			if (activeSettings.debandVp != "off" && luma && !dvVpDebandSkipped)
  			{
  				const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
-@@ -24135,139 +24058,13 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24149,139 +24073,15 @@ struct LibplaceboVideoRenderer::Impl
                      activeSettings.sdrTone.recovery < 0.0 ? "auto" : std::to_string(activeSettings.sdrTone.recovery).c_str());
              }
          }
@@ -342,26 +343,30 @@ index 78096f51..9262eb91 100644
 -                std::exchange(dvTrimsEvaluated, false) ? &dvTrimsSelection : nullptr, dvTrimsTargetNits);
 +        // WP-14: the Dolby-style curve hook (dv_tone_mapping), the L8 / L2 trims (dv_trims) at PRE_OUTPUT
 +        // before the LED stages, the reference conditions, the DV comparison capture (DvHostStage).
++        const size_t dvTrimsStart = frameHooks.size();
 +        dvStage.OnPreOutput({ activeSettings.dvToneMapping, activeSettings.dvTrims, activeSettings.toneMapping,
 +            activeSettings.dvCompareCaptureFolder, pipelineSlots.Runs(PipelineSlots::Id::ColourSdrToneShape), renderImage, target,
 +            convertedPayload ? &convertedPayload->dolby : nullptr, LedDisplayGamma(target.color.transfer), state,
 +            convertedPayload ? convertedPayload->rawFrame.get() : nullptr, videoFrame.GetCounter() },
 +            colorMapParams, hookTemplates, frameHooks);
++        TagSlotHooks(dvTrimsStart, PipelineSlots::Id::ColourSdrToneShape);   // the trims move with their slot
          // Automatic calibration phase 2 (HDR verify): VP's own tone curve for this
          // frame's colour mapping, rebuilt only when that changes (a hash per frame).
          if (target.color.transfer == PL_COLOR_TRC_PQ)
-@@ -24983,17 +24780,9 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24997,18 +24797,10 @@ struct LibplaceboVideoRenderer::Impl
          }
          else
              yieldedDebandLogged = false;
 -        // feat/dv-l8 WIP (DvTunnelPolicy.h): no libplacebo plane deband on the raw DV tunnel planes (opponent
 -        // codes before the decode; its fp16 plane pass moved saturated near-zero channels by up to 3.6 codes).
--        dvDebandSkipped = DvTunnelPolicy::SkipPlaneDeband(renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION) &&
+-        dvDebandSkipped = activeSettings.dvTunnelFixes &&   // integ/batch1: Original pathway keeps Bill's deband
+-            DvTunnelPolicy::SkipPlaneDeband(renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION) &&
 -            frameParams.deband_params != nullptr;
 -        if (dvDebandSkipped)
 -        {
-+        // No libplacebo plane deband on the raw DV tunnel planes (DvHostStage, WP-14).
-+        if (dvStage.SkipPlaneDeband(renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION, frameParams.deband_params != nullptr))
++        // No libplacebo plane deband on the raw DV tunnel planes with dv_tunnel_fixes (DvHostStage, WP-14).
++        if (dvStage.SkipPlaneDeband(activeSettings.dvTunnelFixes, renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION,
++            frameParams.deband_params != nullptr))
              frameParams.deband_params = nullptr;
 -            if (!dvDebandSkipLogged)
 -                DebugLog::Log("libplacebo deband: off on Dolby Vision tunnel pictures (12-bit opponent planes before the decode; DvTunnelPolicy.h)");
@@ -370,7 +375,7 @@ index 78096f51..9262eb91 100644
          // Stage 8-1: a downscaling frame in gamma light when chosen (the de-
          // judder extras reuse these parameters).
          {
-@@ -29356,7 +29145,7 @@ bool LibplaceboVideoRenderer::ToggleDvCompareCapture(CString& status)
+@@ -29371,7 +29163,7 @@ bool LibplaceboVideoRenderer::ToggleDvCompareCapture(CString& status)
  	status.Empty();
  	if (!m_impl)
  		return false;

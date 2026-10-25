@@ -23,7 +23,7 @@ index 45cd6e49..87d463dc 100644
  		if (m_options.scalarUnpack)
  			m_formatter->SetConversionMethod(CR210DolbyVisionTunnelFormatter::ConversionMethod::SCALAR);
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index 78096f51..e9b8a542 100644
+index 395b11a0..2042aa76 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 @@ -130,6 +130,7 @@

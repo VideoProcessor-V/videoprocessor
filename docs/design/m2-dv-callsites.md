@@ -10,8 +10,9 @@ git apply --check --cached docs/design/m2-dv-callsites.patch   # clean against t
 git apply docs/design/m2-dv-callsites.patch                    # then build VPRenderer + VPRendererBeta
 ```
 
-The patch only touches `src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp`: about
-243 lines out, 32 in. It is a **behaviour-free move** (two-commit rule, commit 1): the moved code is
+Cut against `integ/batch1` 43ebff50 (renderer blob 395b11a0, which carries dc149284's dv_tunnel_fixes
+gate on the plane-deband skip). The patch only touches `src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp`:
+about 244 lines out, 36 in. Apart from the two slot fixes below it is a **behaviour-free move** (two-commit rule, commit 1): the moved code is
 textually the same apart from member renames (`dvTrims*` -> `m_trims*` and so on), the host's
 `LedDisplayGamma(target.color.transfer)` passed in as a value, and one comment put back on the
 member it describes. No setting, log line, status text or fallback entry changes. UPSTREAMABLE: no
@@ -38,9 +39,9 @@ the CPU tests compile them too; no project-file change is needed for the host).
 | 5 | device teardown | `dvTrimsHook.Clear(); dvTrimsConfigured = false;` and `dvUnpack.reset(); ... dvGpuLogged = false;` | `dvStage.ReleaseHooks();` and `dvUnpack.Reset();` |
 | 6 | `RenderLocked`, tunnel state | DV metadata fallback + tunnel releases (13 lines) | `dvStage.OnTunnelState(tunnelActive, dm)` |
 | 7 | `RenderLocked`, ingress status | `"; " + dvTrimsStatus + "; " + dvToneStatus + StatusSuffix + DebandStatus` | `dvStage.IngressSuffix(dm)` |
-| 8 | `RenderLocked`, VP deband | skip + debandState + fallback (10 lines) | `const bool dvVpDebandSkipped = dvStage.SkipVpDeband(...)` |
-| 9 | `RenderLocked`, PRE_OUTPUT after the SDR tone shape | Dolby-style curve, trims, reference conditions, compare capture (~130 lines) | `dvStage.OnPreOutput({...}, colorMapParams, hookTemplates, frameHooks)` |
-| 10 | `RenderLocked`, libplacebo deband | plane deband skip + one log line (11 lines) | `if (dvStage.SkipPlaneDeband(...)) frameParams.deband_params = nullptr;` |
+| 8 | `RenderLocked`, VP deband | skip + debandState + fallback (10 lines) | `const bool dvVpDebandSkipped = dvStage.SkipVpDeband(isDV, deband_vp on && pipelineSlots.Runs(RepairDeband), debandState)` (FIX, modularity sweep: nothing listed while repair.deband is off) |
+| 9 | `RenderLocked`, PRE_OUTPUT after the SDR tone shape | Dolby-style curve, trims, reference conditions, compare capture (~130 lines) | `dvStage.OnPreOutput({...}, colorMapParams, hookTemplates, frameHooks)` + `TagSlotHooks(dvTrimsStart, ColourSdrToneShape)` (FIX, modularity sweep: the trims hook moves with its slot; default order unchanged, stable sort) |
+| 10 | `RenderLocked`, libplacebo deband | plane deband skip + one log line (12 lines, gated on dv_tunnel_fixes since dc149284) | `if (dvStage.SkipPlaneDeband(activeSettings.dvTunnelFixes, isDV, deband requested)) frameParams.deband_params = nullptr;` (gate kept) |
 | 11 | `ToggleDvCompareCapture` | `m_impl->dvCompare.Toggle()` | `m_impl->dvStage.ToggleCompareCapture()` |
 
 Order inside the frame is unchanged: OnTunnelState (6) before the ingress line (7); the VP deband
@@ -95,7 +96,7 @@ need host changes, so they come as their own patch (behaviour change, NOT part o
 **Order: apply WP-4's `silent-fallbacks-callsites.patch` first** (it defines `SyncFallback` and the
 early-upload engage); this patch was cut against that state (audit X2).
 
-Stacks with the call-site patch in either order (checked: WP-4, then this, then the call-site patch). Tests to run with it (GPU, coordinator): the renderer capture harness fallback test
+Checked on integ 43ebff50: WP-4, then this, then the call-site patch (temporary index). Tests to run with it (GPU, coordinator): the renderer capture harness fallback test
 (prefix "capture GPU unpack (CPU formatters" still matches), and an early-upload open failure
 check (none exists yet; candidate: force `EarlyUpload::Open` to fail via a test environment switch).
 
@@ -143,3 +144,10 @@ Tests: `DvTunnelMetadataExtensionTests` (CPU, the extension alone, on the branch
 Out of scope here (finding F-11): the formatter still differs from origin/v1.4.02-beta by about
 1100 lines of earlier VP changes (bug-hunt fixes, DV input fixes, AVX2 work); they predate this
 batch and need their own inventory and hook plan.
+
+## Patch files and line endings
+
+`docs/design/.gitattributes` marks `m2-dv-*.patch` as `-text`, so the patches stay LF in every
+checkout and `git apply --cached` works on this Windows laptop (with core.autocrlf the CRLF working
+copy of a patch no longer matched the LF index). Apply order on integ/batch1: call sites, formatter
+hook, formatter install (any order among these; disjoint hunks), and the fix patch after WP-4.

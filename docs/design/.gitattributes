@@ -1,0 +1,2 @@
+# WP-14 call-site patches: stored and checked out byte-exact (LF), so `git apply --cached` works on Windows checkouts.
+m2-dv-*.patch -text
