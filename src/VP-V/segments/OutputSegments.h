@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace CustomHookChain { class Chain; }
@@ -47,11 +48,10 @@ namespace OutputSegments
 {
 	// ---- S2 -------------------------------------------------------------------------------
 	struct ToneShapeParams { double headroom = 0, kneeStart = 0, strength = 0, eotf = 2.2, recovery = 0; };
-	struct DvTrimParams
-	{
-		double slope = 1, offset = 0, power = 1, chromaWeight = 0, saturationGain = 1;
-		double signalPq = 0, gamma = 2.2, peakNits = 100, kr = 0.2126, kb = 0.0722;
-	};
+	// The DV trims' shader parameters in the order the host sets them (feat/dv-l8: the selection's
+	// list, the ICtCp/output-primaries list, then signal PQ, gamma, peak, kr, kb). Names are string
+	// literals (DvTrimSelection / DvDolbyStyle ShaderParameters).
+	using ParameterList = std::vector<std::pair<const char*, double>>;
 	struct CompensationParams
 	{
 		double gain = 1, knee = 0.08, gainDomain = 0, eotf = 2.2, boost = 1, boostKnee = 0, boostKneeWidth = 0.05;
@@ -65,7 +65,7 @@ namespace OutputSegments
 		bool toneShape = false;
 		ToneShapeParams tone;
 		bool dvTrims = false;
-		DvTrimParams dv;
+		ParameterList dv;
 		bool ledMeasure = false;        // led && pipelineSlots.Runs(DriveLedMeasure)
 		bool ledBlock = false;          // led || boost != 1 || shadow lift > 0 (the compensation block)
 		bool ledCompensation = false;   // pipelineSlots.Runs(DriveLedCompensation)
@@ -87,7 +87,9 @@ namespace OutputSegments
 
 		// Separate form: appends today's S2 hooks to `hooks` (tagging slot hooks through `tag`, the
 		// host's TagSlotHooks) and records them as this frame's S2 members.
-		ColourCounts Collect(const ColourFrame& frame, std::vector<const pl_hook*>& hooks, const TagFn& tag);
+		// The stages follow the registry's effective order and run only when their slot runs.
+		ColourCounts Collect(const ColourFrame& frame, const PipelineSlots::Registry& registry,
+			std::vector<const pl_hook*>& hooks, const TagFn& tag);
 		bool Member(const pl_hook* hook) const;
 		// The slot a member hook belongs to (Id::Count = not a member), for per-slot timing.
 		PipelineSlots::Id SlotOf(const pl_hook* hook) const;
@@ -116,7 +118,9 @@ namespace OutputSegments
 		void BeginFrame() { members.clear(); }
 		// 1. The dither's code domain (today 24539-24567); an unsupported domain removes it.
 		//    Returns true when a dither hook was found.
-		bool PrepareDither(std::vector<const pl_hook*>& hooks, const SigmaDeltaDomain::Domain& domain, bool outputFloat32);
+		//    output.dither off in the registry removes it the same way.
+		bool PrepareDither(std::vector<const pl_hook*>& hooks, const SigmaDeltaDomain::Domain& domain, bool outputFloat32,
+			const PipelineSlots::Registry& registry);
 		// 2. The dither runs last at OUTPUT (24572-24593). Returns true when it was moved.
 		bool KeepDitherLast(std::vector<const pl_hook*>& hooks, bool levelsFull);
 		// 3. The mask parameters (24637-24644): returns the dither's index (hooks.size() = none).
@@ -127,6 +131,8 @@ namespace OutputSegments
 		bool Repair(std::vector<const pl_hook*>& hooks, const pl_render_errors* errors, enum pl_lut_type targetLut,
 			const pl_color_repr& targetRepr);
 		bool Member(const pl_hook* hook) const;
+		// The stage a member hook is ("encoding_repair", "occlusion_mask", "sigma_delta").
+		const char* StageName(const pl_hook* hook) const;
 		SegmentRunner::Segment& Segment() { return segment; }
 
 	private:
