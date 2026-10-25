@@ -319,20 +319,44 @@
         "lookahead": "motion_ahead (time-based, falls back to the matcher on a short queue)"
       },
       "settings_keys": [
-        "motion_engine",
-        "motion_ahead_frames",
-        "motion_history_fixes",
-        "dejudder_est",
+        "dejudder_consistency_px",
+        "dejudder_cut_histogram",
+        "dejudder_est_candidates",
+        "dejudder_est_gate",
+        "dejudder_est_lambda",
+        "dejudder_est_qpel",
+        "dejudder_est_split",
+        "dejudder_est_split_sad",
         "dejudder_estimate_ahead",
-        "dejudder_search_range"
+        "dejudder_fade_floor",
+        "dejudder_fade_match",
+        "dejudder_global_prior",
+        "dejudder_global_two",
+        "dejudder_low_res",
+        "dejudder_match_tolerance",
+        "dejudder_regional_hold",
+        "dejudder_search_range",
+        "dejudder_texture_tolerance",
+        "dejudder_vector_smooth",
+        "dejudder_verify",
+        "dejudder_verify_share",
+        "general_rate_fixes",
+        "motion_ahead_frames",
+        "motion_engine",
+        "motion_history_fixes",
+        "optical_flow",
+        "optical_flow_cost_trust",
+        "optical_flow_fb_check",
+        "optical_flow_global",
+        "optical_flow_global_fallback"
       ],
       "planned_keys": [
         "motion_ahead_ms"
       ],
       "tiers": "Classic off .. Upper full (NVOF + matcher)",
       "fallback": {
-        "entry": "Motion: matcher only (NVOF unavailable: <reason>)",
-        "behaviour": "NVOF rejected/absent -> VP's matcher; vectors invalid -> every consumer falls back to its no-motion form."
+        "entry": "motion: matcher only (optical flow failed: <error>) / no optical-flow look-ahead (producer stopped: <error>)",
+        "behaviour": "NVOF failed or the look-ahead producer stopped -> VP's matcher (entry from FallbackCatalog::Motion, wired by WP-4's silent-fallbacks patch; log-only until it lands); vectors invalid -> every consumer takes its no-motion form (by design, no entry)."
       },
       "upstream": [
         "input.queue_timing",
@@ -1657,8 +1681,8 @@
       "planned_keys": [],
       "tiers": "not tiered",
       "fallback": {
-        "entry": "Presentation: open loop (no display statistics)",
-        "behaviour": "Window / iGPU panel -> open loop."
+        "entry": "presentation: open loop: no display statistics, estimated rate / de-judder held: display rate not known",
+        "behaviour": "Window / iGPU panel without DXGI statistics -> render-ahead open loop on an estimated rate (entry from FallbackCatalog::Presentation, wired by WP-4's silent-fallbacks patch; log-only until it lands)."
       },
       "upstream": [
         "output.dither"

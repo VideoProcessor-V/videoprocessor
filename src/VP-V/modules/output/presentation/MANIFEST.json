@@ -36,6 +36,6 @@
       "output.dither"
     ]
   },
-  "fallback_when_missing": "Window / iGPU panel -> open loop.",
-  "fallback_entry": "Presentation: open loop (no display statistics)"
+  "fallback_when_missing": "Window / iGPU panel without DXGI statistics -> render-ahead open loop on an estimated rate (entry from FallbackCatalog::Presentation, wired by WP-4's silent-fallbacks patch; log-only until it lands).",
+  "fallback_entry": "presentation: open loop: no display statistics, estimated rate / de-judder held: display rate not known"
 }

@@ -175,7 +175,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Tiers: not tiered.
 - VP-V page, Output tab: tiers Classic / Low / Mid; tier keys `temporal_dither`.
 - Plain-language guide: [docs/settings/VP-settings-reference.md#8-output](../../../../../docs/settings/VP-settings-reference.md#8-output).
-- Fallback entry ("Fallbacks engaged"): `Presentation: open loop (no display statistics)`.
+- Fallback entry ("Fallbacks engaged"): `presentation: open loop: no display statistics, estimated rate / de-judder held: display rate not known`.
 
 ## Tests
 
