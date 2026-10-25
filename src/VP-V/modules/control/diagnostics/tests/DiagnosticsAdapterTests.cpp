@@ -328,7 +328,7 @@ namespace
 		}
 	};
 
-	// LogEntranceCounters (with the interval and clock injected).
+	// LogEntranceCounters (with the interval and clock injected; text as the S1 entrance segment wrote it).
 	void OldEntrance(GeneralRate::LogInterval& entranceLog, unsigned long long& entranceCostLoggedAt,
 		const VpDiagnostics::EntranceCounters& c, GeneralRate::LogInterval::Clock::time_point now)
 	{
@@ -339,8 +339,8 @@ namespace
 			DebugLog::Log("Entrance cost: %llu input-side runs for %llu source frames", c.stageRuns, c.sourceFrames);
 			if (c.once)
 				DebugLog::Log("Entrance stages: %llu runs, %llu repeats reused (once per source frame); entrance once (B3): "
-					"A %llu, B ahead %llu, ring reuses %llu, pictures from processed planes %llu, fallbacks %llu",
-					c.runs, c.reuses, c.onceA, c.onceB, c.onceReused, c.oncePictures, c.onceFallbacks);
+					"A %llu, B ahead %llu, ring reuses %llu, pictures from processed planes %llu, fallbacks %llu, history breaks %llu",
+					c.runs, c.reuses, c.onceA, c.onceB, c.onceReused, c.oncePictures, c.onceFallbacks, c.statefulBreaks);
 			else
 				DebugLog::Log("Entrance stages: %llu runs, %llu repeats reused (once per source frame)", c.runs, c.reuses);
 		}
@@ -600,12 +600,12 @@ namespace VideoProcessorTest
 			unsigned long long oldAt = 0, newAt = 0;
 			struct Step { VpDiagnostics::EntranceCounters c; int ms; };
 			const Step steps[] = {
-				{ { 1, 1, 1, 0, 0, 0, 0, 0, 0, false }, 0 },
-				{ { 60, 30, 30, 30, 0, 0, 0, 0, 0, false }, 500 },
-				{ { 121, 61, 61, 60, 0, 0, 0, 0, 0, false }, 900 },
-				{ { 200, 100, 100, 100, 50, 40, 30, 20, 1, true }, 1200 },
-				{ { 260, 130, 130, 130, 60, 50, 40, 30, 2, true }, 200000 },
-				{ { 400, 200, 200, 200, 90, 80, 70, 60, 3, true }, 200100 },
+				{ { 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, false }, 0 },
+				{ { 60, 30, 30, 30, 0, 0, 0, 0, 0, 0, false }, 500 },
+				{ { 121, 61, 61, 60, 0, 0, 0, 0, 0, 0, false }, 900 },
+				{ { 200, 100, 100, 100, 50, 40, 30, 20, 1, 0, true }, 1200 },
+				{ { 260, 130, 130, 130, 60, 50, 40, 30, 2, 1, true }, 200000 },
+				{ { 400, 200, 200, 200, 90, 80, 70, 60, 3, 2, true }, 200100 },
 			};
 			LogCapture::Take();
 			for (const Step& s : steps)
