@@ -2,8 +2,8 @@
 
 #include "StateReport.h"
 
-#include <DiagnosticHistory.h>
-#include <StoreZipWriter.h>
+#include <VP-V/modules/control/diagnostics/DiagnosticHistory.h>
+#include <VP-V/modules/control/diagnostics/StoreZipWriter.h>
 
 #include <algorithm>
 #include <bcrypt.h>

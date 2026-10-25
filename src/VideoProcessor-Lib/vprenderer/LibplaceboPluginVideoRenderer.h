@@ -117,6 +117,8 @@ public:
 	bool GetFallbacksStatus(CString& status) const override;
 	bool ToggleDvCompareCapture(CString& status) override;   // feat/dv-l8 WIP (plugin API 43)
 	void SetQueueDelayBudget(int totalMs) override;
+	bool GetModuleStatus(const char* module, CString& status) const override;
+	bool InvokeModuleCommand(const char* module, const char* command, CString& reply) override;
 	bool SuspendLedDriveForTest(CString& reason) override;
 	void SetPostStallResetTelemetrySuppressedUntil(uint64_t untilMs) override;
 	bool StopLedDriveForShutdown() override;

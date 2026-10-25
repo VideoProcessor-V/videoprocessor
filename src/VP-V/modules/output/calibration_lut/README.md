@@ -31,15 +31,18 @@ The module also holds the automatic calibration (the `calibration/` sub-folder).
 - Compatibility keys: `calibration_lut_input_transfer` (accepted alias for `hdr_tone_map_target_gamma`); `calibration_lut_input_gamma` (retired: accepted and logged, no effect).
 - `calibration_lut_stage` = `libplacebo` | `vp` (default `libplacebo`): implemented, global, read from `[vpv]` first, then `[vprenderer]`. Config: VP-V page, Expert. An invalid value is refused under "Fallbacks engaged" (`pipeline settings`).
 - `pipeline_slots_off` containing `output.calibration_lut` stops the VP stage only; the LUT then runs as libplacebo's target LUT (the LUT is not switched off).
-- There is no key named `calibration_lut` (slots.json lists one; it is only the renderer's change label).
+- There is no key named `calibration_lut` (it is only the renderer's change label in its settings-change log).
+- Planned (not read yet): `calibration_lut_reload` = `auto` | `apply`. `auto` is VP's reload (the selected LUT file is probed once a second and reloaded when it changes; today's behaviour); `apply` is Bill's upstream rule (files are read once per Config Apply), which arrives with the Bill merge. Either/or (owner rule); the Original pathway will select `apply`. VP's own calibration may load the LUT it has just written without a Config Apply, with a notice, in both modes. The policy is built and tested (`CalibrationLutHost::ReloadPolicy`); the key is wired with the Bill merge (WP-21) and the settings readers (WP-18).
 - Automatic calibration: the `[calibration]` section (see "How the code works").
 - Tiers: not tiered
 
 ## Fallbacks
 
-- "Fallbacks engaged" entry (implemented): `calibration LUT (the VP stage failed; libplacebo's target LUT (before the LED compensation))`. It engages when the VP hook fails or libplacebo disables it, and lasts for the renderer instance. The slots.json wording `Calibration LUT: libplacebo target LUT (VP stage unavailable)` is not used by the code.
-- Behaviour: the LUT runs as libplacebo's target LUT (the old order).
-- Status only, no "Fallbacks engaged" entry (Ctrl+I `LUT:` line, Config's Color / Output page): LUT file rejected (`Rejected: <reason>`, no LUT); no LUT for the gamut (`Inactive: <reason>`); a changed file that fails to reload keeps the last good LUT (`Active (reload rejected: ...)`); a libplacebo render failure with the target LUT drops the LUT for the renderer instance (`Rejected: render error`).
+- "Fallbacks engaged" entries (implemented; each with the GUI's one-time notice, Ctrl+I, Config status and Ctrl+Alt+D):
+  - `calibration LUT (the VP stage failed; libplacebo's target LUT (before the LED compensation))`: the VP hook failed or libplacebo disabled it (`Adapter::AfterRender`). The LUT then runs as libplacebo's target LUT (the old order) for the renderer instance.
+  - `calibration LUT (dropped after a render error: <file>; no projector LUT for this renderer)`: a libplacebo render with the target LUT failed and Bill's `RejectDisplayLutAfterRenderFailure` dropped the LUT for the renderer instance (`Adapter::LutDropped`, WP-12; it used to be log-only).
+  - `calibration patch (full field (window unavailable: <why>); LCD/OLED readings are affected)`: during a calibration run the surface could not take the windowed patch, so the patch is shown full field (`Adapter::Present`, WP-12; it used to be log-only). Released when the patterns end.
+- Status only, no "Fallbacks engaged" entry (Ctrl+I `LUT:` line, Config's Color / Output page), because none is an automatic downgrade of a working LUT: LUT file rejected (`Rejected: <reason>`, no LUT); no LUT for the gamut (`Inactive: <reason>`); a changed file that fails to reload keeps the last good LUT (`Active (reload rejected: ...)`, or `Active (VP stage; reload rejected: ...)` while the VP stage applies it: WP-12 fix, the VP stage used to overwrite it every frame); after a render error `Rejected: render error` (plus the entry above).
 
 ## Net fingerprint / upstream
 
@@ -58,6 +61,7 @@ Isolation tests:
 
 Contract tests:
 - applied after LED compensation: `PipelineSkeletonTests::OutputHooksTakeTheCorrectedOrder` (order only; no test runs `CalibrationLutStage::Hook` yet)
+- the host adapter's decisions (stage choice, status text incl. a kept reload rejection, attached, reload policy both modes, output facts, the fallback entries): `CalibrationLutHostPolicyTests` (tests/CalibrationLutHostTests.cpp, CPU)
 
 Chain tests:
 - BTB/WTW probes with the LUT: the GPU cases in `LibplaceboLutParserTests` (libplacebo stage only)
@@ -65,19 +69,22 @@ Chain tests:
 ## Known issues / open items
 
 - The move into VP's LAST output hook (pl_shader_custom_lut + BTB/WTW carried; barrier R1; owner agreed) is built behind `calibration_lut_stage = vp`; the default is still `libplacebo`. Open: a GPU test of the hook, the OutputEncodingRepair check, and switching the default after measurement (LED measurement then sees target light, not projector codes).
+- WP-12: the renderer side of the adapter is a patch for the integrator (docs/design/wp12-calib-callsites.patch); until it is applied the renderer still carries the old inline glue, and the WP-12 fixes in the adapter (kept reload rejection, attached with the VP stage, the two new fallback entries, the output-query wait) are not live.
+- `calibration_lut_reload` (planned, see Settings): wire with the Bill merge.
+- A windowed-patch fallback is visible as a "Fallbacks engaged" entry, but the session does not yet record it per patch: that needs a field in `PatternOutputInfo` (a plugin ABI change, "API: next"), left for the integrator.
 
 ## How the code works
 
 ### a) The LUT at render time
 
-Files: `CalibrationLutStage.h/.cpp` (this folder); `LibplaceboDisplayLut.h/.cpp` and `LibplaceboCalibrationLutPolicy.h` (src/VideoProcessor-Lib/vprenderer); caller `LibplaceboVideoRenderer.cpp`.
+Files: `CalibrationLutStage.h/.cpp` (the hook), `CalibrationLutHost.h/.cpp` and `CalibrationLutHostPolicy.h` (the host adapter, WP-12) in this folder; Bill's `LibplaceboDisplayLut.h/.cpp` and `LibplaceboCalibrationLutPolicy.h` (src/VideoProcessor-Lib/vprenderer; not ours, never moved); caller `LibplaceboVideoRenderer.cpp`, one call per hook point into `CalibrationLutHost::Adapter` (docs/design/wp12-calib-callsites.md).
 
 - Load: the renderer's `LoadDisplayLut` picks the slot with `LibplaceboCalibrationLut::Select` and parses the `.cube` with `LibplaceboDisplayLut::Load` (3D only, at most 65^3 and 64 MB, the path must stay under the configuration's base folder). The result is one `pl_custom_lut`.
-- Reload: `MaybeReloadDisplayLut` checks the file version once a second and reloads transactionally. A failed reload with the same input contract keeps the last good LUT.
-- Per frame: `ConfigureDisplayLutForTarget` either sets `target.lut` (libplacebo stage) or calls `CalibrationLutStage::Hook::SetLut` (VP stage). The VP stage needs `calibration_lut_stage = vp`, the Original pathway off, the slot running, and no earlier failure.
+- Reload: `MaybeReloadDisplayLut` asks the adapter (`LutReloadDue`, `ReloadPolicy` in auto mode) once per frame; the file version is probed once a second and a changed file is reloaded transactionally. A failed reload with the same input contract keeps the last good LUT. `LoadDisplayLut` reports the version it read (`NoteLutFileVersion`).
+- Per frame: `ConfigureDisplayLutForTarget` calls `Adapter::TakeLut` first. It sets the stage's LUT (VP stage) or clears it; the VP stage needs `calibration_lut_stage = vp`, the Original pathway off, the slot running, and no earlier failure. Otherwise Bill's branch sets `target.lut` (libplacebo stage). `TakeLut` writes the VP-stage status only when it changes.
 - The hook: `Hook::Apply` samples the PRE_OUTPUT texture (nearest), keeps the part outside 0..1 in a shader global, clamps, runs `pl_shader_custom_lut`, adds the excess back, and returns a new texture of the same size. It counts `Applied()` and `Failures()`.
-- The renderer pushes the hook after the LED compensation and the user shaders and tags it with the slot id; `OutputHookOrder::OrderSlotsInPlace` keeps the slot order.
-- Failure: after each render the renderer checks `Failures()` and libplacebo's disabled hooks. On a failure it sets `calibrationLutStageFailed` and engages the fallback above.
+- The renderer pushes `Adapter::HookForFrame()` after the LED compensation and the user shaders and tags it with the slot id; `OutputHookOrder::OrderSlotsInPlace` keeps the slot order. With the segment runner (WP-6) S2 pushes the same stage (`Adapter::Stage()`) as its last stage.
+- Failure: after each render `Adapter::AfterRender` checks `Failures()` and libplacebo's disabled hooks. On a failure the stage stays off for the renderer instance and the renderer engages the fallback above. "Attached" (`Adapter::LutAttached`) counts the target LUT or the VP stage.
 - GPU resources: `Hook::Release` frees the LUT shader object with the renderer's other GPU resources.
 - Threading: all of this runs on the render thread. No locks.
 
@@ -102,12 +109,12 @@ Data flow (LUT run):
 7. Outputs: `<vp>\luts\calibration\index.json` and `<vp>\luts\calibration\<display>\<timestamp>\` (`raw.jsonl`, `display_profile.cfg`, `calibration_<slot>.cube` x3, `verify.json`, `report.html`, `before\`).
 
 Threading:
-- The thread that serves the RPC calls `Handle`. It answers at once, but `start` does its setup there (config read, spotread search, meter and session construction).
-- Session worker (`CalibrationController::worker`): calls `Step()` until the run finishes; one bounded unit per step (one patch, one reading, one second of warm-up). It cancels the run when Config has not polled for 60 s during a measuring step.
+- The thread that serves the RPC calls `Handle`. It answers at once. `start` does only quick checks there (the kind, a fresh read and validation of the configuration, the LED run's protocol and port clashes) and returns the status `starting` (WP-12; it used to search for spotread and open the devices there).
+- Session worker (`CalibrationController::RunWorker`): opens the projector, the fast sensor and the meter (the spotread search), builds the run and starts it; a failure there is the status (Failed) until the next start. Then it calls `Step()` until the run finishes; one bounded unit per step (one patch, one reading, one second of warm-up). It cancels the run when Config has not polled for 60 s during a measuring step. A cancel sent while the run is starting is applied when it starts.
 - Probe thread: `detect` runs `spotread -?` (`ProbeArgyll`, 20 s bound).
 - spotread runs as a child process under a pseudo-console (ConPTY) inside a job object. `IMeter::Abort` (any thread) ends a wait in progress.
-- Render thread: presents the patch (`PresentCalibrationPattern`); the sink calls only store the request under a mutex. While patterns show, the video is paused and the renderer stops VP's Dynamic Drive at full light.
-- Each run keeps its state behind one mutex; commands set a pending command that the worker takes.
+- Render thread: presents the patch (`PresentCalibrationPattern` -> `CalibrationLutHost::Adapter::Present`); the sink calls only store the request under the adapter's mutex. While patterns show, the video is paused and the renderer stops VP's Dynamic Drive at full light. `GetCalibrationOutput` refreshes the facts under `renderMutex`: up to 100 try-locks 2 ms apart, but while patterns show and the cache is filled only one try-lock without sleeping (a busy renderer answers from the cache; a free one still refreshes, so a swapchain rebuilt mid-run is seen).
+- Each run keeps its state behind one mutex; commands set a pending command that the worker takes. The controller's `worker`, `currentVpRoot` and start state are guarded by its `mutex`.
 
 Config keys (`[calibration]`, CalibrationConfig.h; validated by `Calibration::ValidateConfig`, called from MainConfigSchema.h): `argyll_path`, `meter_model`, `meter_port`, `display_type`, `spectral_correction`, `refresh_mode`, `display_kind`, `display_name`, `plan`, `patch_window_percent`, `background_percent`, `settle_ms`, `near_black_max_reads`, `repeat_tolerance_percent`, `read_timeout_s`, `warmup_minutes`, `drift_interval`, `target_transfer`, `target_gamma`, `target_white_percent`, `lut_size`, `verify_after`; phase 2: `record_transcripts`, `transcript_folder`, `led_flux_step`, `led_dwell_ms`, `led_reads_per_level`, `led_cntr_sweep_max`, `led_cntr_dwell_ms`, `led_sensor_port`, `led_sensor_baud`, `led_step_repeats`, `hdr_verify_source_peak`, `hdr_verify_tone_curve`. The LED run also reads `[projector.default]` (protocol `barco_ascii`, port) and `[led_drive]`; the ambient check reads `[ambient]`.
 
@@ -120,7 +127,7 @@ What the user sees (wizard status in Config, plus the VP log; none is a "Fallbac
 - A `.ccss` file for a meter that takes only `.ccmx`: refused.
 - Meter timeout: the spotread process is ended and reopened, never waited on forever.
 - An interrupted LED run (VP crashed) leaves a marker; at the next start `RecoverInterruptedLedRun` restores full light, CNTR 50 and LDMM 0 before anything else opens the port.
-- Windowed patch impossible on the surface: the renderer shows full field and only logs it.
+- Windowed patch impossible on the surface: the renderer shows full field and engages `calibration patch` under "Fallbacks engaged" (WP-12; it was log-only). This one is an automatic downgrade, so it is the exception to the heading above.
 
 External tools:
 - ArgyllCMS `spotread.exe` (AGPLv3; a separate process, never linked). Search order: `argyll_path`, `ARGYLL_PATH`, `PATH`, then `Argyll*` folders under the usual install roots (ArgyllInstall.h). Argyll 3.0 or newer is recommended.
@@ -129,9 +136,9 @@ External tools:
 
 Dependencies needed to lift it:
 - Windows (ConPTY, job objects, `MultiByteToWideChar`), the project's `pch.h`, `DebugLog`.
-- VideoProcessor-Lib: `ConfigFile.h`, `ConfigSchema.h`, `DisplayRuleExpression.h`, `DisplayProfile.h`, `AmbientConfig.h`, `IRenderer.h`, `led/LedDriveConfig.h`.
+- VideoProcessor-Lib: `ConfigFile.h`, `ConfigSchema.h`, `DisplayRuleExpression.h`, `DisplayProfile.h`, `AmbientConfig.h`, `IRenderer.h`, `VP-V/modules/drive/led_compensation/LedDriveConfig.h`.
 - VideoProcessor-ConfigCore: `ConfigEditorCore.h` (key-only edits, validation, `SaveSafely`).
-- VP-V: `modules/drive/projector_control/ProjectorDriver.h` and `SerialPort.h` (LED run).
+- VP-V: `modules/drive/projector_control/ProjectorDriver.h` and `SerialPort.h` (LED run); `VP-V/modules/drive/led_compensation/LedRawTransfer.h` (the HDR-verify tone curve in `CalibrationLutHost`; WP-15 moves it to `modules/drive/led_compensation/`, switch the include at the rebase).
 - The pure core (ColorMath.h, PatternPlan, PatternCodes, DisplayModel, LedCharacterize, the Spotread text parser, Simulated*) needs only the C++ standard library.
 
 ### Test it standalone
@@ -140,7 +147,7 @@ Build x64 Release (the AGENTS.md command), including `VideoProcessor-FakeSpotrea
 
 `vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /TestCaseFilter:"FullyQualifiedName~<Class>" /Logger:"trx;LogFileName=x.trx"`
 
-- CPU, no hardware: `CalibrationCoreTests`, `CalibrationSpotreadTextTests`, `CalibrationMeterStateTests`, `CalibrationPatternTests`, `CalibrationSessionTests`, `CalibrationConfigTests`, `CalibrationPhase2Tests` (src/VideoProcessor-Test/Calibration*Tests.cpp; helpers in CalibrationTestSupport.h; scripted terminals replay src/VideoProcessor-Test/data/spotread).
+- CPU, no hardware: `CalibrationCoreTests`, `CalibrationSpotreadTextTests`, `CalibrationMeterStateTests`, `CalibrationPatternTests`, `CalibrationSessionTests`, `CalibrationConfigTests`, `CalibrationPhase2Tests` (this module's `tests/Calibration*Tests.cpp`, compiled by VideoProcessor-Test; helpers in `tests/CalibrationTestSupport.h`; scripted terminals replay `tests/data/spotread`).
 - Real ConPTY with the fake meter: `CalibrationMeterTests`, `CalibrationTranscriptConPtyTests` (need fake_spotread.exe).
 - Hardware, skipped unless set: `CalibrationHardwareTests` and `CalibrationTranscriptHardwareTests` (`VP_TEST_METER=1`; optional `VP_TEST_ARGYLL`, `VP_TEST_METER_PORT`, `VP_TEST_METER_CALIBRATED=1`); `CalibrationLedHardwareTests` (`VP_TEST_PROJECTOR=COMn`, VP not running).
 - Render-time LUT: `LibplaceboLutParserTests` (GPU cases only with `VP_TEST_GPU=hardware`), `LibplaceboOutputPolicyTests`, `ExtendedRangeCarryTests`, `PipelineSkeletonTests`.
@@ -149,10 +156,10 @@ Build x64 Release (the AGENTS.md command), including `VideoProcessor-FakeSpotrea
 
 Reading-only review, 2026-10-24 (no builds, no runs; estimates, not measurements). Ranked by saving.
 
-1. **Pattern-shown wait during a calibration run (wall time per patch).** `CalibrationSession::ShowPatch` (and `MeterRun`) poll `GetOutput` every 10 ms; `LibplaceboVideoRenderer::GetCalibrationOutput` try-locks `renderMutex` up to 100 times with `Sleep(2)` between tries, but the pattern loop holds `renderMutex` across `PresentCalibrationPattern` including the vsync-paced `Present` and re-locks at once. So almost every poll waits 100 x Sleep(2) before it falls back to the cache. How estimated: 100 tries x 2 ms (1 ms timer) to 15.6 ms (default timer) = about 0.2 to 1.6 s per patch; a few hundred patches = minutes per run. Fix: let the wait loop read only the generation atomics (a light query, or skip the locked refresh when patterns are active and the cache is filled). Byte-identical: yes (same codes; the settle still runs after the confirmation). Risk: low. Confirm the hold time with a timing log first.
+1. **Pattern-shown wait during a calibration run (wall time per patch).** Fixed in WP-12 (`FreshOutputAttempts`: one try-lock without sleeping while patterns show); the timing log confirmation is still open. `CalibrationSession::ShowPatch` (and `MeterRun`) poll `GetOutput` every 10 ms; `LibplaceboVideoRenderer::GetCalibrationOutput` try-locks `renderMutex` up to 100 times with `Sleep(2)` between tries, but the pattern loop holds `renderMutex` across `PresentCalibrationPattern` including the vsync-paced `Present` and re-locks at once. So almost every poll waits 100 x Sleep(2) before it falls back to the cache. How estimated: 100 tries x 2 ms (1 ms timer) to 15.6 ms (default timer) = about 0.2 to 1.6 s per patch; a few hundred patches = minutes per run. Fix: let the wait loop read only the generation atomics (a light query, or skip the locked refresh when patterns are active and the cache is filled). Byte-identical: yes (same codes; the settle still runs after the confirmation). Risk: low. Confirm the hold time with a timing log first.
 2. **VP stage (`calibration_lut_stage = vp`): one extra full-frame pass on the GPU.** `Hook::Apply` reads the PRE_OUTPUT texture and writes a new same-size FBO texture (normally rgba16f); libplacebo's target LUT is fused into its colour pass at no extra pass. How estimated: 2560x1600 x 8 B read + write = 65 MB per frame, about 0.07 ms on the 3090 (936 GB/s) and 0.34 ms on the 3050 Ti (192 GB/s); 3840x2160 = 133 MB, about 0.14 / 0.7 ms; plus about 10-20 us CPU for the dispatch. The LUT fetches (4 texelFetch per pixel, tetrahedral) are the same in both paths. Fix: fold the clamp/LUT/restore into the shader of the hook directly before it (LED compensation) when the slots are adjacent. Byte-identical: no (one fp16 rounding fewer, at most 0.5 fp16 ulp, about 0.25 LSB at 10 bits, before the dither). Risk: medium (couples two slots; pipeline_order can move this slot).
 3. **LUT load on the render thread (per load: renderer start, a live apply that changes a LUT key, a file change).** `LibplaceboDisplayLut::Load` reads the whole file, scans it for `LUT_1D_SIZE` (`ContainsOneDimensionalCubeDirective`), then `HasUnsupportedDomainDirective` copies the text into a `std::istringstream` and builds one more `std::istringstream` per line; then `pl_lut_parse_cube` hashes and parses it; the first frame builds the texture. How estimated: VP writes `%.7f %.7f %.7f` = 30 B per line; 65^3 = 274,625 lines = 8.2 MB, 33^3 (default) = 35,937 lines = 1.1 MB; one stream per line at about 0.5-1.5 us (MSVC locale set-up) = about 0.15-0.4 s for 65^3 and 20-50 ms for 33^3; the read, the 1D scan, the hash and libplacebo's float parse add about 30-60 ms for 65^3; the texture is RGBA32F, 65^3 x 16 B = 4.4 MB. Fix: one hand-written pass for both directive checks (no streams); also skip the re-read when only the input-contract key changed and the file version is unchanged; optionally parse on a worker and swap on the render thread. Byte-identical: yes (same bytes, same signature, same texture; a hand-written scan of the whole file keeps today's accept/reject exactly). Risk: low (worker parse: medium).
-4. **Per-frame status strings.** VP stage: `ConfigureDisplayLutForTarget` assigns `displayLutStatus = "Active (VP stage): " + LutFileName(...)` every frame (1-2 heap allocations; it also overwrites an "Active (reload rejected: ...)" status, so a rejected reload is not shown in the VP stage). libplacebo stage: builds an `std::ostringstream` label every frame only to compare it. How estimated: about 0.3-3 us per frame, under 0.2 ms per second at 60 fps. Fix: rebuild the label only when the LUT, path or stage changes. Byte-identical: yes. Risk: low (and fixes the hidden reload rejection).
+4. **Per-frame status strings.** VP stage fixed in WP-12 (written only on a change; the reload rejection kept); the libplacebo-stage label is Bill's code (a note for him). VP stage: `ConfigureDisplayLutForTarget` assigns `displayLutStatus = "Active (VP stage): " + LutFileName(...)` every frame (1-2 heap allocations; it also overwrites an "Active (reload rejected: ...)" status, so a rejected reload is not shown in the VP stage). libplacebo stage: builds an `std::ostringstream` label every frame only to compare it. How estimated: about 0.3-3 us per frame, under 0.2 ms per second at 60 fps. Fix: rebuild the label only when the LUT, path or stage changes. Byte-identical: yes. Risk: low (and fixes the hidden reload rejection).
 5. **Pattern presentation per refresh (calibration only, video paused).** On VP's own swapchain each refresh does `GetBuffer`, `pl_d3d11_wrap`, clears (background, patch texture), a blit, `pl_gpu_flush` and `pl_tex_destroy`, although the patch is unchanged. How estimated: about 20-50 us CPU per refresh (texture wrap and views), GPU under 0.02 ms (one full-surface clear, 16 MB). Fix: keep the wrapped texture while the backbuffer is the same. Byte-identical: yes. Risk: low-medium (flip-model buffer rotation). The `PatternReadback` full-frame copy runs only for tests.
 6. **File-version probe once a second.** `MaybeReloadDisplayLut` opens a handle and queries size and time on the render thread. How estimated: about 10-30 us per second on a local disk. Fix: `GetFileAttributesExA` (no handle) or a change notification on a worker. Byte-identical: yes. Risk: low.
 
@@ -166,6 +173,9 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 
 - `src/VP-V/modules/output/calibration_lut/CalibrationLutStage.h`
 - `src/VP-V/modules/output/calibration_lut/CalibrationLutStage.cpp`
+- `src/VP-V/modules/output/calibration_lut/CalibrationLutHost.h`
+- `src/VP-V/modules/output/calibration_lut/CalibrationLutHost.cpp`
+- `src/VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h`
 - `src/VP-V/modules/output/calibration_lut/calibration`
 - `src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.cpp`
 - `src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.h`
@@ -179,7 +189,7 @@ Forwarding headers at the legacy path (early migration, removed in M2; they only
 - `src/VideoProcessor-Lib/calibration/CalibrationSimulation.h`
 - `src/VideoProcessor-Lib/calibration/PatternCodes.h`
 
-The automatic-calibration code (meter, ArgyllCMS, session, patterns; `calibration/`) moved here early. `LibplaceboDisplayLut.*` and `LibplaceboCalibrationLutPolicy.h` stay at their legacy paths for now (`VideoProcessor-Test.vcxproj`, changed by active branches, compiles `LibplaceboDisplayLut.cpp`; the renderer includes both).
+The automatic-calibration code (meter, ArgyllCMS, session, patterns; `calibration/`) moved here early; its tests moved to `tests/` in M2 step 3 (WP-12). `LibplaceboDisplayLut.*` and `LibplaceboCalibrationLutPolicy.h` are Bill's files (present in his upstream beta): they never move; the slot uses them (listed in `live_files`, not owned). The renderer's calibration glue moved into `CalibrationLutHost` (WP-12, option (d)); the forwarding headers go in M2 step 0.
 
 ## Migration directive
 
@@ -195,12 +205,12 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 
 ## Settings
 
-- Keys: `calibration_lut`, `calibration_lut_enabled`, `calibration_lut_input_gamma`, `calibration_lut_input_transfer`.
-- Planned keys (not yet implemented): `calibration_lut_stage`.
+- Keys: `calibration_lut_bt2020`, `calibration_lut_bt709`, `calibration_lut_enabled`, `calibration_lut_input_transfer`, `calibration_lut_p3_d65`, `calibration_lut_stage`.
+- Planned keys (not yet implemented): `calibration_lut_reload`.
 - Tiers: not tiered.
 - VP-V page, Output tab: tiers Classic / Low / Mid; tier keys `temporal_dither`.
 - Plain-language guide: [docs/settings/VP-settings-reference.md#8-output](../../../../../docs/settings/VP-settings-reference.md#8-output).
-- Fallback entry ("Fallbacks engaged"): `Calibration LUT: libplacebo target LUT (VP stage unavailable)`.
+- Fallback entry ("Fallbacks engaged"): `calibration LUT (the VP stage failed; libplacebo's target LUT (before the LED compensation))`.
 
 ## Tests
 

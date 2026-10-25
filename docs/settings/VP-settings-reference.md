@@ -391,7 +391,7 @@ CNTR change. Not yet implemented.
 | `repeat_render_reuse` | Draft (WP-24): a captured repeat (24p in 30, 30p in 60) is drawn from the first present's cached picture with only the output stage; anything that changes the picture refuses it (Ctrl+I, Fallbacks engaged). Off in the Original pathway and with output.presentation off. | Saves GPU time on repeats; the picture stays the same (the dither keeps moving). | off | low |
 | `dither_grain_tolerance_scale` | The sigma-delta's motion match tolerates grain this many times more. | Keeps the 10-bit averaging alive on grain. | 3 | none |
 | `dither_vectors` | The dither takes the de-judder's motion on in-between pictures (auto) or always searches itself (own). | Saves about 1 ms per in-between. | auto | saves time |
-| Calibration LUT (Color / Output page) | The projector calibration LUT. | Today libplacebo applies it before VP's output hooks; the design moves it to VP's last step (planned `calibration_lut_stage`). | | low |
+| Calibration LUT (Color / Output page) | The projector calibration LUT. | By default libplacebo applies it before VP's output hooks; `calibration_lut_stage vp` (Pipeline, expert) moves it to VP's last step. A LUT file edited in place is reloaded automatically; planned `calibration_lut_reload` (`auto` or `apply`: reload only on a Config Apply, as upstream does) makes that a choice. | | low |
 | `render_ahead` and its companions | See 3.3. | | off | |
 
 ---

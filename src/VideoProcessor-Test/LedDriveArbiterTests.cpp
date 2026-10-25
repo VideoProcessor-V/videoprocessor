@@ -5,7 +5,7 @@
 // are independent; with no other owner the wrapper is transparent.
 #include "pch.h"
 #include "CppUnitTest.h"
-#include <VP-V/modules/drive/led_compensation/LedDriveArbiter.h>
+#include <VP-V/modules/drive/projector_control/LedDriveArbiter.h>
 #include <Windows.h>
 #include <atomic>
 #include <memory>

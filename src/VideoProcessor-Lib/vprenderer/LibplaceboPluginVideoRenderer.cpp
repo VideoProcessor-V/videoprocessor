@@ -709,6 +709,18 @@ void LibplaceboPluginVideoRenderer::SetQueueDelayBudget(int totalMs)
 		m_renderer->SetQueueDelayBudget(totalMs);
 }
 
+bool LibplaceboPluginVideoRenderer::GetModuleStatus(const char* module, CString& status) const
+{
+	status.Empty();
+	return m_renderer && m_renderer->GetModuleStatus(module, status);
+}
+
+bool LibplaceboPluginVideoRenderer::InvokeModuleCommand(const char* module, const char* command, CString& reply)
+{
+	reply.Empty();
+	return m_renderer && m_renderer->InvokeModuleCommand(module, command, reply);
+}
+
 bool LibplaceboPluginVideoRenderer::GetSourceResolutionStatus(CString& status) const
 {
 	status.Empty();

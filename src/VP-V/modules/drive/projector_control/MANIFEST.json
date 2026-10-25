@@ -6,22 +6,23 @@
   "status": "built",
   "code_location": "partly migrated",
   "live_files": [
-    "src/VP-V/modules/drive/projector_control/LedController.cpp",
     "src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.cpp",
     "src/VP-V/modules/drive/projector_control/ProjectorDriver.cpp",
     "src/VP-V/modules/drive/projector_control/SerialPort.cpp",
-    "src/VP-V/modules/drive/projector_control/LedController.h",
     "src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.h",
     "src/VP-V/modules/drive/projector_control/ProjectorDriver.h",
     "src/VP-V/modules/drive/projector_control/SerialPort.h",
     "src/VP-V/modules/drive/projector_control/ConnectionTest.cpp",
     "src/VP-V/modules/drive/projector_control/ConnectionTest.h",
     "src/VP-V/modules/drive/projector_control/LedClock.h",
-    "src/VP-V/modules/drive/projector_control/LedShutdownRestore.h"
+    "src/VP-V/modules/drive/projector_control/LedShutdownRestore.h",
+    "src/VP-V/modules/drive/projector_control/LedDriveArbiter.cpp",
+    "src/VP-V/modules/drive/projector_control/LedDriveArbiter.h"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/led/ConnectionTest.h",
-    "src/VideoProcessor-Lib/led/SerialPort.h"
+    "src/VideoProcessor-Lib/led/SerialPort.h",
+    "src/VideoProcessor-Lib/led/LedDriveArbiter.h"
   ],
   "components": {
     "files": {
@@ -36,10 +37,10 @@
     },
     "tools": [],
     "config_keys": [
-      "led_compensation"
+      "projector"
     ],
     "upstream_modules": []
   },
-  "fallback_when_missing": "No serial projector -> drive off.",
-  "fallback_entry": "Projector: not connected (LED drive off)"
+  "fallback_when_missing": "No serial projector (or another process owns the port) -> dry run: the LED is not driven and the picture is not compensated.",
+  "fallback_entry": "projector (not connected: <error>; LED drive off (dry run))"
 }

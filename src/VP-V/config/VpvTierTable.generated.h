@@ -82,13 +82,13 @@ namespace Vpv
             t.slotList.push_back({ "colour.extended_range", "BTB/WTW preservation", "colour", "built", 175, "BTB/WTW: clipped (<reason>)" });
             t.slotList.push_back({ "colour.sdr_tone_shape", "SDR tone shape + DV trims", "colour", "built", 200, "SDR tone shape: not applied (shader did not load)" });
             t.slotList.push_back({ "colour.appearance", "Stage 13 appearance (CAM16)", "colour", "placeholder", 210, "Appearance: off (shader failed)" });
-            t.slotList.push_back({ "drive.led_measure", "LED measurement", "drive", "built", 220, "LED: drive held (measurement unavailable)" });
-            t.slotList.push_back({ "drive.led_compensation", "LED compensation (adaptive gamma)", "drive", "built", 230, "LED compensation: off (shader did not load)" });
+            t.slotList.push_back({ "drive.led_measure", "LED measurement", "drive", "built", 220, "LED measurement (<reason>; the LED follows the last statistics)" });
+            t.slotList.push_back({ "drive.led_compensation", "LED compensation (adaptive gamma)", "drive", "built", 230, "LED drive (held at full: picture compensation unavailable (<reason>))" });
             t.slotList.push_back({ "drive.black_level", "Black level correction", "drive", "placeholder", 240, "Black level: off (<reason>)" });
-            t.slotList.push_back({ "output.calibration_lut", "Projector calibration LUT", "output", "partial", 250, "Calibration LUT: libplacebo target LUT (VP stage unavailable)" });
+            t.slotList.push_back({ "output.calibration_lut", "Projector calibration LUT", "output", "partial", 250, "calibration LUT (the VP stage failed; libplacebo's target LUT (before the LED compensation))" });
             t.slotList.push_back({ "output.dither", "Dither / sigma-delta", "output", "built", 260, "Dither: libplacebo (sigma-delta dropped: <reason>)" });
             t.slotList.push_back({ "output.presentation", "Presentation", "output", "built", 270, "Presentation: open loop (no display statistics)" });
-            t.slotList.push_back({ "drive.projector_control", "Projector control", "drive", "built", 900, "Projector: not connected (LED drive off)" });
+            t.slotList.push_back({ "drive.projector_control", "Projector control", "drive", "built", 900, "projector (not connected: <error>; LED drive off (dry run))" });
             t.slotList.push_back({ "control.net_runtime", "Net runtime + fingerprints", "control", "placeholder", 910, "Nets: bypassed (<net>: <reason>)" });
             t.slotList.push_back({ "control.diagnostics", "Status, fallbacks + diagnostics", "control", "partial", 920, nullptr });
             t.slotList.push_back({ "control.config", "Config + tiers", "control", "partial", 930, nullptr });

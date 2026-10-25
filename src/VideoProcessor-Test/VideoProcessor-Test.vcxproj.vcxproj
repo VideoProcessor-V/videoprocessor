@@ -197,6 +197,7 @@
     <ClCompile Include="FileHostTests.cpp" />
     <ClCompile Include="LedDriveArbiterTests.cpp" />
     <ClCompile Include="LedDriveHoldoverTests.cpp" />
+    <ClCompile Include="DynamicDriveAdapterTests.cpp" />
     <ClCompile Include="DolbyVisionTunnelFormatterTests.cpp" />
     <ClCompile Include="DvTunnelLoopbackTests.cpp" />
     <ClCompile Include="DvIncomingHdrModeTests.cpp" />
@@ -252,11 +253,15 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\VideoProcessor-Lib\led\LedMeasurementHook.cpp">
+    <ClCompile Include="..\VP-V\modules\drive\led_measure\LedMeasurementHook.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\VideoProcessor-Lib\led\LedRawTransfer.cpp">
+    <ClCompile Include="..\VP-V\modules\drive\led_compensation\DynamicDriveFrame.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\drive\led_compensation\LedRawTransfer.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -364,10 +369,13 @@
     <ClCompile Include="..\VP-V\tests\PassTimersTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="CalibrationCoreTests.cpp" />
-    <ClCompile Include="CalibrationRemainderTests.cpp" />
-    <ClCompile Include="CalibrationMeterTests.cpp" />
-    <ClCompile Include="CalibrationPhase2Tests.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationCoreTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationRemainderTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationMeterTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationPhase2Tests.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationLutHostTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="SdrToneShapeWtwTests.cpp" />
     <ClCompile Include="BugHunt20261017CaptureTests.cpp" />
     <ClCompile Include="BugHunt2GuiTests.cpp" />
@@ -433,6 +441,7 @@
     <ClCompile Include="LedScriptCorrelationTests.cpp" />
     <ClCompile Include="CrashStateTests.cpp" />
     <ClCompile Include="DiagnosticHistoryTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\control\diagnostics\tests\DiagnosticsAdapterTests.cpp" />
     <ClCompile Include="StateReportTests.cpp" />
     <ClCompile Include="RendererCaptureHarnessTests.cpp" />
     <ClCompile Include="VpScaleRenderMotionTests.cpp" />
@@ -513,6 +522,11 @@
     <ClCompile Include="..\VP-V\nets\CpuNetExecutor.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\VP-V\tests\StatusTextTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\tests\VpStatusAdapterTests.cpp" />
+    <ClCompile Include="ModuleStatusTextTests.cpp" />
     <ClCompile Include="QueueStressLaneTests.cpp" />
     <ClCompile Include="RendererPostStallResetAdvisorTests.cpp" />
     <ClCompile Include="MadVRShaderRuntimeStateTests.cpp" />

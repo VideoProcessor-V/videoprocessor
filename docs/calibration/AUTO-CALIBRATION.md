@@ -652,7 +652,7 @@ VP's meter code was built against modelled spotread output. With
 wizard and the other runs) is saved, when the meter closes, as
 `recorded_<meter>_<timestamp>.txt` in the transcript folder. The file is
 in the same script format as the test transcripts in
-`src\VideoProcessor-Test\data\spotread` (README there): the output lines,
+`src\VP-V\modules\output\calibration_lut\tests\data\spotread` (README there): the output lines,
 prompts, the keys VP sent, the meter's time per reading and spotread's
 exit code, with the meter, the Argyll version and spotread's arguments
 in the header. The install folder is not recorded. Send or commit one

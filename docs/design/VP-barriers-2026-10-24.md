@@ -63,7 +63,7 @@ Efforts are in agent wall-clock hours.
 **R1. The calibration LUT is applied in the wrong place.**
 - Evidence:
   - It is libplacebo's `target.lut`, PL_LUT_NORMALIZED (LVR:10477-10486). libplacebo applies it during colour management, before PRE_OUTPUT (renderer.c:2432 runs before :2863).
-  - As a result, the LED measurement hook at PRE_OUTPUT (VideoProcessor-Lib/led/LedMeasurementHook.cpp:158) already measures projector codes.
+  - As a result, the LED measurement hook at PRE_OUTPUT (VP-V/modules/drive/led_measure/LedMeasurementHook.cpp:158) already measures projector codes.
   - The agreed order needs the LUT as VP's last PRE_OUTPUT hook.
 - Resolution:
   - Apply the LUT with pl_shader_custom_lut inside a VP hook, plus the BTB/WTW late restore.

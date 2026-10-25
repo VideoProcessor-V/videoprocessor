@@ -58,6 +58,9 @@
     <ClCompile Include="LedDriveHoldoverTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="DynamicDriveAdapterTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="DolbyVisionTunnelFormatterTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -102,10 +105,11 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="ExtendedRangeCarryTests.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="CalibrationCoreTests.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="CalibrationRemainderTests.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="CalibrationMeterTests.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="CalibrationPhase2Tests.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationCoreTests.cpp"><Filter>VP-V</Filter></ClCompile>
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationRemainderTests.cpp"><Filter>VP-V</Filter></ClCompile>
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationMeterTests.cpp"><Filter>VP-V</Filter></ClCompile>
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationPhase2Tests.cpp"><Filter>VP-V</Filter></ClCompile>
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationLutHostTests.cpp"><Filter>VP-V</Filter></ClCompile>
     <ClCompile Include="SdrToneShapeWtwTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="BugHunt20261017CaptureTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="BugHunt2GuiTests.cpp"><Filter>Source Files</Filter></ClCompile>
@@ -242,6 +246,7 @@
   <ItemGroup><ClCompile Include="..\VP-V\nets\NetPackage.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\nets\GlslMini.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\nets\CpuNetExecutor.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\tests\StatusTextTests.cpp"><Filter>VP-V</Filter></ClCompile><ClCompile Include="..\VP-V\tests\VpStatusAdapterTests.cpp"><Filter>VP-V</Filter></ClCompile><ClCompile Include="ModuleStatusTextTests.cpp" /></ItemGroup>
   <ItemGroup><ClCompile Include="TextureRestoreTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvTrimSelectionTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvDolbyStyleTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>

@@ -8,7 +8,7 @@
 #include <VP-V/modules/output/calibration_lut/calibration/SimulatedDisplay.h>
 #include <VP-V/modules/output/calibration_lut/calibration/SimulatedMeter.h>
 #include <ConfigEditorCore.h>
-#include <led/LedDriveConfig.h>
+#include <VP-V/modules/drive/led_compensation/LedDriveConfig.h>
 #include <vprenderer/ExtendedRange.h>
 #include <vprenderer/LibplaceboDisplayLut.h>
 

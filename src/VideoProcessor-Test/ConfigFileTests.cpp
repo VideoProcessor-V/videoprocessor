@@ -5470,7 +5470,8 @@ namespace VideoProcessorTest
 			// F2, integration round 5); 41: GetFallbacksStatus (r6 fix 7); 42: SetQueueDelayBudget
 			// (VP-V delay budget, ADR-0020).
 			// 43: ToggleDvCompareCapture (feat/dv-l8, the DV comparison capture shortcut).
-			Assert::AreEqual(static_cast<uint32_t>(43),
+			// 44: GetModuleStatus / InvokeModuleCommand (WP-11, integration group C).
+			Assert::AreEqual(static_cast<uint32_t>(44),
 				VP_LIBPLACEBO_PLUGIN_API_VERSION);
 		}
 

@@ -2,10 +2,10 @@
 #include "CppUnitTest.h"
 
 #include <ConfigFile.h>
-#include <DiagnosticHistory.h>
+#include <VP-V/modules/control/diagnostics/DiagnosticHistory.h>
 #include <VP-V/modules/control/diagnostics/StateReport.h>
 #include <VP-V/modules/control/diagnostics/StateReportSettings.h>
-#include <StoreZipWriter.h>
+#include <VP-V/modules/control/diagnostics/StoreZipWriter.h>
 
 #include <algorithm>
 #include <fstream>

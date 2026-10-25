@@ -4,7 +4,7 @@ Unit: **drive** | side: output | order: 230 | status: **built** | hook point: PR
 
 ## Purpose / why
 
-The Dynamic Drive core (`LedDriveModule`) and the picture compensation it drives. The module runs the controllers and the projector driver, and gives each frame a gain. The renderer applies that gain with shaders/LED compensation.glsl at PRE_OUTPUT so content light stays constant while the LED (and CNTR) move; CNTR never above need. The same hook also carries the gamma boost (even with the drive off), the ANSI shadow lift (veil) and the script-mode CNTR smoothing. This folder also holds the drive-ownership mutex (`LedDriveArbiter`) and the between-files hold (`LedDriveHoldover`).
+The Dynamic Drive control side: the core (`LedDriveModule`), the controllers that decide the LED/CNTR commands (`LedController`), the drive's config schema (`LedDriveConfig.h`), the look-ahead's raw-to-output transfer (`LedRawTransfer`), the between-files hold (`LedDriveHoldover`) and, since WP-15, the Dynamic Drive host adapter (`DynamicDriveHost` / `DynamicDriveShared` / `DynamicDriveFrame`) that holds all the LED glue the renderer host used to carry. The module runs the controllers and the projector driver, and gives each frame a gain. `DynamicDriveFrame` applies that gain with shaders/LED compensation.glsl at PRE_OUTPUT so content light stays constant while the LED (and CNTR) move; CNTR never above need. The same hook also carries the gamma boost (even with the drive off), the ANSI shadow lift (veil) and the script-mode CNTR smoothing. The port mutex (`LedDriveArbiter`) moved to `drive.projector_control` (transport).
 
 ## Contract
 
@@ -24,16 +24,25 @@ The Dynamic Drive core (`LedDriveModule`) and the picture compensation it drives
   - Look-ahead: `Lookahead()` (the observer to subscribe to the queued-frame walk), `WantsPredictions`, `WantedLookaheadFrames`, `SubmitPrediction`, `ResetLookahead`.
   - Intent limits: `SetIntentLimits` (LED floor from `intent_black: led_protect` and ambient adaptation).
   - Diagnostics: `ProjectorStatus`, `DrivingProjector`, `CurrentGain`, `ModelledLight`, `AssistContrast`, `Recovering`, `MsSinceLastFrame`, `Config`.
+  - Compensation availability (module findings item 1): `SetCompensationAvailable(available, reason)`, `CompensationAvailable`, `HoldingFullForCompensation`, `CompensationUnavailableReason(slotOn, shaderLoaded, shaderEnabled)`; `FallbackEntries()` (`kHoldFallbackId` "LED drive", `kDryRunFallbackId` "projector").
+  - `IPredictionSink` (`drive.led_measure`, LedLookahead.h): the module is the look-ahead's sink.
 - `CompensationGain`: `active`, `gain`, `domain` (encoded / linear), `knee`, `eotf`, `veil`. The renderer copies these, plus the gamma boost and passthrough flags, into the hook parameters (`gain`, `knee`, `gain_domain`, `compensation_eotf`, `boost`, `boost_knee`, `boost_knee_width`, `shadow_lift`, `veil`, `wtw_passthrough`, `btb_passthrough`).
 - shaders/LED compensation.glsl: an mpv-style PREOUTPUT hook loaded by the renderer as rule `led_compensation`. It applies the boost first, then the shadow lift, then the gain with a soft knee below white; sign-preserving; negatives pass through when `btb_passthrough` is on.
-- `ArbitratedSerialPort` / `ArbitratedSerialPortFactory` (LedDriveArbiter.h): wraps the serial port so `Open` first takes the machine-wide mutex `Global\VideoProcessorLedDrive`. A second owner (VP.exe vs the VP Renderer filter) fails `Open` and runs as a dry run.
+- Controllers (LedController.h, pure, no I/O, no clock; moved here from `drive.projector_control` in the WP-15 re-cut): `ScriptController` (beta_22 port: light curve, step tables, CNTR bands), `PlanScriptLookahead`, `PaceScriptTick`, `CompensateController` (per-frame LED target, rate law, deadband, highlight protection), `CntrPairing` (CNTR assist, never above the need), `CutRecovery`, `FluxModel` (`flux_table`), `SettleModel`, and the gain helpers (`LedGain`, `CompensationGainFor*`).
+- `LedDriveConfig.h`: `ProjectorConfig`, `LedDriveConfig`, `ProjectorRules` / `LedDriveRules`, `Read*`, `Validate`, the `[dynamic_drive.*]` alias, LED profiles, `BoostExponent`. (WP-18 may move the schema to `control.config`.)
+- `BuildRawTransfer` / `RawTransferSignature` / `SampleToneCurve` (LedRawTransfer.*, libplacebo): the look-ahead's raw-to-output transfer from the frame's colour mapping; the tone-curve samples serve automatic calibration (phase 2).
+- Dynamic Drive host adapter (WP-15; the renderer keeps one call per hook point, docs/design/wp15-led-callsites.md):
+  - `DynamicDriveHost` (outer renderer, CPU): `ApplySnapshot` (UpdateLedDrive: settings signature, alias conflict, LED profile, validation, gamma-boost parameters, live `Reconfigure` or a new module through the arbitrated port factory or the hold-over), `Attach` (Build), `ParkForHoldover` (destructor), `SuspendForTest` / `ResumeAfterTest`, `StopForShutdown`, `SuspendForCalibration` / `ResumeAfterCalibration`, `StatusText`. It takes the renderer's state mutex by reference, with the old lock scopes.
+  - `DynamicDriveShared` (no GPU types): what the outer host publishes to the render side: `PublishModule`, `PublishObserver`, `Clear`, `PublishParams`, `Module`, `WantedLookaheadFrames`.
+  - `DynamicDriveFrame` (render thread, libplacebo; derives from `DynamicDriveShared`): `PrepareFrame(inputs, hooks, tagSlot)`, `OnHookErrors`, `CollectMeasurements`, `SendIntentLimits`, `MeasurementHookPointer`, `Release`; statics `PictureOnlyMasks`, `CompensationUnavailable`.
+- The arbitrated port factory (`ArbitratedSerialPortFactory`, `drive.projector_control`) is what `DynamicDriveHost` hands a new module.
 - `Holdover<Drive>` / `ProcessLedDriveHoldover()` / `EndHeldLedDrive` (LedDriveHoldover.h): in the filter process (`source=file`) the outgoing renderer parks its running drive for `file_led_holdover_ms`. The next renderer adopts it when its LED settings match; otherwise it is stopped (full light).
 
 ### Data flow
 
-1. The renderer (`UpdateLedDrive` in LibplaceboVideoRenderer.cpp) builds the module with the arbitrated port factory (or adopts a held one), starts it, and subscribes its look-ahead observer.
+1. Settings apply: `DynamicDriveHost::ApplySnapshot` builds the module with the arbitrated port factory (or adopts a held one), starts it, and publishes it and its look-ahead observer through `DynamicDriveShared`.
 2. Each frame: `BeginFrame` lands the driver's writes into the LED/CNTR models, steps `CompensateController` + `CntrPairing` + cut recovery + custom-dim fade (compensate), posts `SetLight` / `SetContrastAsync`, and returns the gain.
-3. The renderer sets the hook parameters and pushes the hook after the measurement hook (if slot `drive.led_compensation` runs). After the render it feeds `SubmitMeasurement`.
+3. `DynamicDriveFrame::PrepareFrame` sets the hook parameters and pushes the hook after the measurement hook (if slot `drive.led_compensation` runs), then tells the module whether the compensation runs this frame (`SetCompensationAvailable`) and merges the module's fallback entries into the renderer's registry. After the render, `CollectMeasurements` feeds `SubmitMeasurement`.
 4. Script mode decides on the module thread (`Run`) every `tick_ms`, or in the script's own pacing, and sends with `SendScript`.
 
 ### Threading
@@ -43,11 +52,12 @@ The Dynamic Drive core (`LedDriveModule`) and the picture compensation it drives
 - One `mutex` guards the module state. Render-thread calls take it briefly and never wait on I/O: serial sends happen outside it, and compensate only posts asynchronous driver calls.
 - Atomics: `compensating`, `applyGain`, `displayGamma`, `sourceRange`, `lookaheadEpoch`.
 - `Reconfigure` and `SetIntentLimits` may come from any thread.
-- The driver has its own worker thread (`drive.projector_control`). The arbiter holds its mutex on a thread of its own. The holdover runs one process-wide thread that stops a parked drive at its deadline.
+- The driver has its own worker thread (`drive.projector_control`), as does the arbiter. The holdover runs one process-wide thread that stops a parked drive at its deadline.
+- Adapter: `DynamicDriveFrame` on the render thread (its `DynamicDriveShared` part is atomics, any thread); `DynamicDriveHost` on the settings-apply / GUI / RPC / shutdown threads, under the renderer's state mutex where the renderer took it before (`StopForShutdown` only try-locks).
 
 ### Config keys actually read
 
-- `[led_drive.default]` (alias `[dynamic_drive.default]`; validated by `LedDriveRules` in led/LedDriveConfig.h):
+- `[led_drive.default]` (alias `[dynamic_drive.default]`; validated by `LedDriveRules` in LedDriveConfig.h, this folder):
   - Mode: `enabled` (off), `mode` (compensate | script | log_only | picture_only; `listen` retired), `command_source` (internal_script | compensate | none; `python` retired), `adaptive_gamma` (picture gain on/off; LED drive unaffected).
   - Look-ahead and timing: `lookahead` (on), `led_lookahead_ms` (0), `led_landing_ms` (on), `led_idle_restore_s` (10).
   - Controller: `led_floor` / `led_floor_reactive` / `led_floor_black` / `led_ceiling`, `rate_*`, `rate_preset`, `deadband`, `early_ramp`, `cut_jump`, `bright_cut_dump`, `highlight_tolerance_stops`, `highlight_area_small` / `_large`, `highlight_release_ms`.
@@ -59,34 +69,36 @@ The Dynamic Drive core (`LedDriveModule`) and the picture compensation it drives
 - `[projector.default]`: `led_latency_ms`, `led_settle_ms`, `cntr_latency_ms`, `cntr_settle_ms`, `cntr_max_usable`, `dmd_clip_cntr`, `flux_table`.
 - `[general] file_led_holdover_ms` (3000; VP Renderer filter only).
 - Renderer profile: `intent_black: led_protect` and ambient adaptation set the floor through `SetIntentLimits`.
-- Mismatch: `led_compensation` (Settings below, slots.json, MANIFEST) is not a config key; it is only the shader rule name in LibplaceboVideoRenderer.cpp.
+- slots.json / MANIFEST list (WP-15): `led_drive` (the `[led_drive.default]` group), `adaptive_gamma`, `gamma_boost`, `shadow_lift_ansi`, `intent_black`. The old `led_compensation` (a shader rule name) is gone.
 
 ### What the user sees when it falls back
 
-- The shader does not load, or libplacebo disables it: no "Fallbacks engaged" entry. Only when the gamma boost is on, a log warning: "Dynamic Drive: WARNING gamma boost NOT applied - shaders\LED compensation.glsl did not load or was disabled".
-  - The module is not told. In compensate it keeps dimming the LED with no picture compensation, so the picture goes dark.
-  - The listed entry `LED compensation: off (shader did not load)` and the behaviour "drive held at full" are not implemented.
-- Slot `drive.led_compensation` off while `drive.projector_control` runs: the same (LED dimmed, no compensation), with no notice.
-- Dry run (no port, or the drive mutex is held by another owner): `applyGain` is off, so no picture gain; log only.
+- With the WP-15 call-site patch applied (`DynamicDriveFrame`):
+  - The shader does not load, libplacebo disables it, or slot `drive.led_compensation` is off while a module runs: compensate holds the LED at `led_ceiling` (a jump, not a ramp) and "Fallbacks engaged: LED drive (held at full: picture compensation unavailable (<reason>))" shows. Script mode is not held (its dimming is paired with CNTR; only `script_smoothing` is lost).
+  - A configured gamma boost that cannot apply: "Fallbacks engaged: gamma boost (not applied: <reason>; the picture is plain output_gamma)" plus the log warning.
+  - Dry run (no port, or the drive mutex held by another owner): "Fallbacks engaged: projector (not connected: <error>; LED drive off (dry run))"; no picture gain.
+- Before that patch lands, the renderer's inline code still runs: none of the entries above is shown, and compensate keeps dimming without compensation (the module's default is "available").
 - Invalid `[led_drive]` / `[projector]` settings: log "Dynamic Drive: configuration rejected (...); module and gamma boost off". An invalid LED profile is ignored with a log warning.
 - Look-ahead starved (frames queued but no predictions): log "Dynamic Drive: WARNING - ... every cut and exit from black is reactive". Low Latency (no queue) is logged as reactive, not as a fault.
 - Hold-over park, adopt and stop: log lines only ("LED drive: ... holding the LED drive for N ms", "adopted", "ending the held LED drive").
 
 ### Dependencies (to lift it)
 
-- `drive.projector_control`: ProjectorDriver, SerialPort, LedController, LedClock.
-- `drive.led_measure`: LedMeasurement, LedLookahead.
-- led/LedDriveConfig.h; DebugLog.h; Win32 (arbiter mutex, `GetTickCount64` in the holdover).
-- The renderer builds the look-ahead transfer with led/LedRawTransfer.* (legacy path).
-- The shader file shaders/LED compensation.glsl and the renderer's hook chain (`CustomHookChain`, `GlslHookLoader`) to apply the gain. The module itself has no libplacebo dependency.
-- Callers: LibplaceboVideoRenderer.cpp (`UpdateLedDrive`, the per-frame block), LibplaceboPluginExports.cpp (`EndHeldLedDrive`), VideoProcessorDlg.cpp (shutdown restore, connection test).
+- `drive.projector_control`: ProjectorDriver, SerialPort, LedClock, LedDriveArbiter (port factory).
+- `drive.led_measure`: LedMeasurement, LedLookahead (`IPredictionSink`), FrameStats, LedMeasurementHook (the adapter).
+- LedDriveConfig.h (here; pulls in ConfigFile.h, ConfigSchema.h, DisplayRuleExpression.h); DebugLog.h; Win32 (`GetTickCount64` in the holdover and the adapter).
+- LedRawTransfer and DynamicDriveFrame need libplacebo and the renderer's helper types (CustomHookChain, SubtitleBoxDetector / SubtitleCutPaste, HdrPeakAnalysisCrop, NlsMaskMapping; Bill's headers are read, not owned). They compile in VideoProcessor-VPRenderer, -VPRendererBeta and -Test; DynamicDriveHost and the module compile in VideoProcessor-Lib.
+- The shader file shaders/LED compensation.glsl, loaded through the renderer's `GlslHookLoader` (passed to `DynamicDriveFrame`). The module itself has no libplacebo dependency.
+- Callers: LibplaceboVideoRenderer.cpp through the adapter (one call per hook point once the WP-15 patch is applied; today still the inline code), LibplaceboPluginExports.cpp (`EndHeldLedDrive`), VideoProcessorDlg.cpp (shutdown restore, connection test, through the renderer's IVideoRenderer calls).
 
 ### Test it standalone
 
 - `LedDriveCompensateTests`, `LedDriveDelta1Tests` (compensate controller, CNTR pairing never above the need, cut recovery, flux table, config reading).
 - `LedDriveHunt2Tests`, `LedDriveHunt3Tests` (resends, render-ahead landing, stream restarts, mode switches with the thread running).
 - `LedIntentLimitsTests`.
-- `LedDriveArbiterTests`, `LedDriveHoldoverTests`.
+- `LedDriveHoldoverTests`.
+- `LedDriveControllerTests` (`ScriptController` against beta_22, tick for tick), `LedScriptCorrelationTests` (a no-op unless `VP_TEST_LED_CORRELATION=1` and `VP_TEST_REAL_FOOTAGE` are set).
+- `DynamicDriveAdapterTests` (CPU): the host's settings / suspend / hold-over paths, the compensation-unavailable hold (compensate held, script not), the gamma-boost and dry-run entries, picture-only masks.
 - `LedScriptLookaheadTests`.
 - Shader (GPU, in `LibplaceboLutParserTests`): `LedCompensationShaderAppliesGainWithASoftKnee`, `LedCompensationKeepsBelowBlackAndLightExact`, `LedBoostToeAndShadowLift`. They run on WARP; `VP_TEST_GPU=hardware` uses the real GPU.
 - Module tests use a fake port and `ManualClock` (LedDriveTestSupport.h); no projector needed.
@@ -99,21 +111,22 @@ Efficiency review 2026-10-24 (code reading only, nothing measured). Ranked by es
 1. **Identity compensation pass.** In log_only, dry run, script without smoothing, adaptive_gamma off, or any frame with gain 1, boost 1 and no lift, the hook still runs a full-screen PREOUTPUT pass that returns its input (the shader's own early-out). That is 2560x1600 x (8 B read + 8 B write) with an FP16 intermediate assumed, about 66 MB: roughly 0.07 ms on the 3090 and 0.35 ms on the 3050 Ti, double at a 4K output. Fix: do not push the hook when gain == 1, boost == 1 and shadow_lift x veil == 0. Byte-identical: yes while the measurement hook still runs (the PRE_OUTPUT intermediate stays); without it libplacebo may drop the FP16 intermediate, so not guaranteed. Risk low.
 2. **Hook parameters through strings.** 11 `SetHookParameter` calls per frame. Each does `snprintf` "%.9g", builds a `std::map` node, scans the 11 parameters, runs `strtod` and returns a `std::vector`. `Ensure` also rebuilds 6 built-in strings and scans the ~8 KB shader for each token. Estimated 15-35 µs per frame on the render thread, at about 1-2 µs per call. Fix: resolve the `pl_hook_par` pointers once per hook; record at read time that the shader uses no built-ins. Byte-identical: yes if the "%.9g" + `strtod` conversion is kept (a direct double-to-float cast could differ in the last bit). Risk low.
 3. **Compensate log built every step.** `StepCompensateLocked` builds an `ostringstream` (with `driver->Status()`) whenever a command goes out or no log is pending. The module thread prints it only when a command was sent or every 10 s. A few µs inside the module mutex. Fix: keep the fields; format them on the module thread when logged. Byte-identical: yes (picture; same log text). Risk low.
-4. **`Config()` copies.** `LedDriveModule::Config()` returns the whole `LedDriveConfig` under the mutex: the curve, 3 step tables and a string, about 5 allocations per copy. The renderer copies it 4 times per frame, the look-ahead twice per observed frame. About 5-8 µs per frame (estimated). Fix: one snapshot per frame, or accessors for the few fields. Byte-identical: yes. Risk low.
+4. **`Config()` copies.** `LedDriveModule::Config()` returns the whole `LedDriveConfig` under the mutex (about 5 allocations per copy). The render side now takes one snapshot per frame (`DynamicDriveFrame::PrepareFrame`, was 4); the look-ahead still copies twice per observed frame. Fix the rest with accessors for the few fields. Byte-identical: yes. Risk low.
+6. **Controller log string and flux scans (moved here with LedController).** `CompensateController::Tick` formats `out.log` with an `ostringstream` every frame (3-8 µs, render thread, inside the module mutex); `FluxModel::LevelFor` scans linearly. Fix: format only when logged; a 256-entry flux table per configuration. Byte-identical: yes. Risk low.
 5. **Small per-frame allocations.** `LedLandingsLocked` allocates a vector (`cntr_pair_predict`). `Corrected()` copies a 1 KB histogram and re-bins it twice per step (plus once per queued frame while the custom dim checks for light ahead). A few µs. Fix: reuse buffers. Byte-identical: yes. Risk low.
 
 When off: LED disabled, gamma_boost off and no shadow lift cost nothing (two atomic loads, `BoostExponent`). LED enabled but not compensating (log_only, dry run) costs the identity pass and the parameter writes above every frame.
 
 ## Settings
 
-- Existing keys: the `[led_drive.default]` and `[projector.default]` keys listed in "Config keys actually read", plus `[general] file_led_holdover_ms`. The listed `led_compensation` is not a config key.
+- Existing keys: `led_drive` (the `[led_drive.default]` group), `adaptive_gamma`, `gamma_boost`, `shadow_lift_ansi`, `intent_black`; details in "Config keys actually read" (plus `[projector.default]` timing keys and `[general] file_led_holdover_ms`).
 - Planned keys: (none)
 - Tiers: not tiered
 
 ## Fallbacks
 
-- "Fallbacks engaged" entry: LED compensation: off (shader did not load). Not implemented in code (no `EngageFallback` call).
-- Behaviour: Designed: failure -> drive held at full, no compensation. Actual: the drive keeps dimming the LED with no compensation; a log warning appears only when the gamma boost is on.
+- "Fallbacks engaged" entry: LED drive (held at full: picture compensation unavailable (<reason>)). Produced by the module, merged by `DynamicDriveFrame` (WP-15 patch). Related: "gamma boost (not applied: ...)".
+- Behaviour: compensation unavailable -> compensate holds the LED at full drive (led_ceiling); script mode is not held.
 
 ## Net fingerprint / upstream
 
@@ -138,28 +151,33 @@ Chain tests:
 
 ## Known issues / open items
 
-- Shader failure or the slot switched off leaves the LED dimming without compensation, with no "Fallbacks engaged" entry (see Fallbacks).
-- `LedDriveArbiter.*` is projector-port ownership and `LedDriveHoldover.*` is host lifetime; both live here for now.
+- The hold and the entries need the WP-15 call-site patch (docs/design/wp15-led-callsites.md) applied by the integrator; until then the renderer's inline code runs without them.
+- GPU checks owed (coordinator): shader missing / disabled on the real chain (LED held, entry shown), byte identity with the LED off and with compensate running.
+- `LedDriveHoldover.*` is host lifetime (the filter's between-files hold); it stays here with the adapter that parks and adopts.
 
 ## Where the code lives (live file list)
 
 Code location: **partly migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
 - `src/VP-V/modules/drive/led_compensation/LedDriveModule.cpp`
-- `src/VP-V/modules/drive/led_compensation/LedDriveArbiter.cpp`
 - `src/VP-V/modules/drive/led_compensation/LedDriveModule.h`
-- `src/VP-V/modules/drive/led_compensation/LedDriveArbiter.h`
 - `src/VP-V/modules/drive/led_compensation/LedDriveHoldover.cpp`
 - `src/VP-V/modules/drive/led_compensation/LedDriveHoldover.h`
+- `src/VP-V/modules/drive/led_compensation/LedController.cpp`
+- `src/VP-V/modules/drive/led_compensation/LedController.h`
+- `src/VP-V/modules/drive/led_compensation/LedRawTransfer.cpp`
+- `src/VP-V/modules/drive/led_compensation/LedRawTransfer.h`
+- `src/VP-V/modules/drive/led_compensation/LedDriveConfig.h`
 - `shaders/LED compensation.glsl`
 
 Forwarding headers at the legacy path (early migration, removed in M2; they only keep files on active branches building, new code includes the `<VP-V/...>` path):
 
-- `src/VideoProcessor-Lib/led/LedDriveArbiter.h`
 - `src/VideoProcessor-Lib/led/LedDriveHoldover.h`
 - `src/VideoProcessor-Lib/led/LedDriveModule.h`
+- `src/VideoProcessor-Lib/led/LedRawTransfer.h`
+- `src/VideoProcessor-Lib/led/LedDriveConfig.h`
 
-`LedRawTransfer.*` stays at the legacy path for now (`VideoProcessor-Test.vcxproj`, changed by active branches, compiles its `.cpp`); `shaders/LED compensation.glsl` stays in the runtime shader folder.
+`shaders/LED compensation.glsl` stays in the runtime shader folder.
 
 ## Migration directive
 
@@ -175,17 +193,17 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 
 ## Settings
 
-- Keys: `led_compensation`.
+- Keys: `adaptive_gamma`, `gamma_boost`, `intent_black`, `led_drive`, `shadow_lift_ansi`.
 - Tiers: not tiered.
 - VP-V page, Dynamic Drive tab: not tiered (Not a quality/cost choice: Dynamic Drive is set up on its own page (projector, script/compensate).).
 - Plain-language guide: [docs/settings/VP-settings-reference.md#7-dynamic-drive](../../../../../docs/settings/VP-settings-reference.md#7-dynamic-drive).
-- Fallback entry ("Fallbacks engaged"): `LED compensation: off (shader did not load)`.
+- Fallback entry ("Fallbacks engaged"): `LED drive (held at full: picture compensation unavailable (<reason>))`.
 
 ## Tests
 
 - Placeholder (byte-identity on/off, zero cost): n/a.
-- Isolation (fixed inputs, expected outputs, cost): LED compensation shader tests.
-- Contract (formats, geometry, fallback entry): CNTR never above need.
+- Isolation (fixed inputs, expected outputs, cost): LED compensation shader tests; LedController tests; Dynamic Drive adapter tests.
+- Contract (formats, geometry, fallback entry): CNTR never above need; compensation unavailable holds full drive, visibly.
 - Chain (total delay at the 4/3/2-frame budgets): LED + Stage 13 + LUT + black level.
 - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
 

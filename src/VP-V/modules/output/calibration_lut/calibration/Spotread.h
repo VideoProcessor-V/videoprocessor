@@ -14,7 +14,7 @@
 // spotread's wording differs between Argyll versions; the parser keys on
 // short, long-stable phrases ("Result is XYZ:", "any key to continue",
 // "to take a reading" / "space to read", "Error -") and the unit tests run
-// recorded transcripts of each case (VideoProcessor-Test/data/spotread).
+// recorded transcripts of each case (src/VP-V/modules/output/calibration_lut/tests/data/spotread).
 
 #include "ColorMath.h"
 

@@ -1,0 +1,3 @@
+# Call-site patches are applied with git apply: keep their LF line endings on checkout (core.autocrlf
+# would otherwise turn them into CRLF and the patches would no longer apply).
+*.patch -text

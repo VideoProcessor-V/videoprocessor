@@ -47,13 +47,16 @@
 // GetFallbacksStatus in the vtable.
 // 43: ToggleDvCompareCapture (feat/dv-l8 DV comparison capture shortcut, 2026-10-24), after
 // SetQueueDelayBudget in the vtable.
+// 44: GetModuleStatus / InvokeModuleCommand (WP-11, integration group C, 2026-10-25): the
+// generic module status and command entries (ModuleStatusText.h), after ToggleDvCompareCapture
+// in the vtable. New status lines and module commands use them and need no further version change.
 //
 // The counter is maintained by hand and can collide across branches or miss
 // a layout change. The build ID is the
 // mechanical check: the loader refuses any DLL whose
 // VP_LIBPLACEBO_BUILD_ID_EXPORT differs from the executable's own build ID
 // (VpBuildIdentity.h), so only a DLL from the same build loads.
-static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 43;
+static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 44;
 static constexpr const char* VP_LIBPLACEBO_BUILD_ID_EXPORT =
 	"VideoProcessorLibplaceboGetBuildId";
 // Returns the DLL's 32-hex-digit build ID (static storage); never throws.

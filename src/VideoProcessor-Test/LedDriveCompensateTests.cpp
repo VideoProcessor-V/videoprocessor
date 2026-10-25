@@ -3,7 +3,7 @@
 
 #include <ConfigFile.h>
 #include <VP-V/modules/drive/projector_control/BarcoAsciiDriver.h>
-#include <VP-V/modules/drive/projector_control/LedController.h>
+#include <VP-V/modules/drive/led_compensation/LedController.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
 #include <VP-V/modules/drive/led_measure/LedMeasurement.h>
 

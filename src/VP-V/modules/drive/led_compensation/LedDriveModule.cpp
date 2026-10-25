@@ -163,7 +163,7 @@ namespace LedDrive
 		// never above led_ceiling (the peak drive is never raised).
 		intentFloorLevel = intentFloorShare > 0.0 ? flux.LevelFor(intentFloorShare, 0, led.ledCeiling) : 0;
 		// No picture compensation: compensate holds full drive (SetCompensationAvailable).
-		holdingFull = !compensationAvailable && led.mode == Mode::Compensate;
+		holdingFull = (!compensationAvailable || !measurementAvailable) && led.mode == Mode::Compensate;
 		if (holdingFull)
 		{
 			intentFloorShare = 1.0;
@@ -175,15 +175,22 @@ namespace LedDrive
 
 	void LedDriveModule::UpdateHoldFallbackLocked()
 	{
-		if (holdingFull)
+		if (holdingFull && !compensationAvailable)
 		{
 			if (fallbacks.Engage(kHoldFallbackId, "held at full: picture compensation unavailable (" +
 				(compensationUnavailableReason.empty() ? std::string("unknown") : compensationUnavailableReason) + ")"))
 				DebugLog::Log("Dynamic Drive: LED held at full drive; picture compensation unavailable (%s)",
 					compensationUnavailableReason.c_str());
 		}
+		else if (holdingFull)
+		{
+			if (fallbacks.Engage(kHoldFallbackId, "held at full: measurement off (" +
+				(measurementUnavailableReason.empty() ? std::string("unknown") : measurementUnavailableReason) + ")"))
+				DebugLog::Log("Dynamic Drive: LED held at full drive; measurement off (%s)",
+					measurementUnavailableReason.c_str());
+		}
 		else if (fallbacks.Release(kHoldFallbackId))
-			DebugLog::Log("Dynamic Drive: picture compensation available again; the LED hold at full drive ends");
+			DebugLog::Log("Dynamic Drive: picture compensation and measurement available again; the LED hold at full drive ends");
 	}
 
 	void LedDriveModule::SetCompensationAvailable(bool available, const std::string& reason)
@@ -196,6 +203,11 @@ namespace LedDrive
 		compensationAvailable = available;
 		compensationUnavailableReason = why;
 		ApplyIntentLimitsLocked();
+		StartHoldJumpLocked(wasHolding);
+	}
+
+	void LedDriveModule::StartHoldJumpLocked(bool wasHolding)
+	{
 		// The hold starts at once: straight to full drive (a jump), not up the ramp, so the
 		// uncompensated picture is dark for no longer than the LED's latency.
 		if (holdingFull && !wasHolding && started && driver && applyGain)
@@ -204,6 +216,25 @@ namespace LedDrive
 			driver->SetLightJump(led.ledCeiling);
 			queuedLight = led.ledCeiling;
 		}
+	}
+
+	void LedDriveModule::SetMeasurementAvailable(bool available, const std::string& reason)
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		const std::string why = available ? std::string() : reason;
+		if (available == measurementAvailable && why == measurementUnavailableReason)
+			return;
+		const bool wasHolding = holdingFull;
+		measurementAvailable = available;
+		measurementUnavailableReason = why;
+		ApplyIntentLimitsLocked();
+		StartHoldJumpLocked(wasHolding);
+	}
+
+	bool LedDriveModule::MeasurementAvailable() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return measurementAvailable;
 	}
 
 	bool LedDriveModule::CompensationAvailable() const

@@ -746,4 +746,27 @@ public:
 		return false;
 	}
 
+	// Generic module status (plugin API 44, WP-11). ONE
+	// versioned entry for every status line a renderer module publishes, so a new line needs no
+	// new virtual and no ABI change. `status` is key/value text, one "key=value" per line
+	// (ModuleStatusText.h documents the format); `module` "" asks for the index of module ids.
+	// False: the renderer has no such module (status empty).
+	virtual bool GetModuleStatus(const char* module, CString& status) const
+	{
+		(void)module;
+		status.Empty();
+		return false;
+	}
+
+	// Generic module command, the counterpart of GetModuleStatus: a shortcut or host action a
+	// renderer module handles (e.g. a capture toggle) without a new virtual. `reply` uses the
+	// same key/value format; its "status" key is the line to show. False: not handled.
+	virtual bool InvokeModuleCommand(const char* module, const char* command, CString& reply)
+	{
+		(void)module;
+		(void)command;
+		reply.Empty();
+		return false;
+	}
+
 };

@@ -1,0 +1,706 @@
+diff --git a/src/VideoProcessor-GUI/VideoProcessorDlg.cpp b/src/VideoProcessor-GUI/VideoProcessorDlg.cpp
+index ff3586b7..66a5659b 100644
+--- a/src/VideoProcessor-GUI/VideoProcessorDlg.cpp
++++ b/src/VideoProcessor-GUI/VideoProcessorDlg.cpp
+@@ -41,7 +41,7 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
+ #include <ShortcutChord.h>
+ #include <VP-V/modules/control/diagnostics/CrashState.h>
+ #include <DiagnosticHistory.h>
+-#include <VP-V/modules/control/diagnostics/StateReport.h>
++#include <VP-V/modules/control/diagnostics/DiagnosticsReportRun.h>
+ #include <VP-V/modules/control/diagnostics/StateReportSettings.h>
+ #include <AmbientConfig.h>
+ #include <IntentInterpreterSupport.h>
+@@ -8820,22 +8820,8 @@ void CVideoProcessorDlg::ShowStateReportToast(const std::string& value)
+ 
+ void CVideoProcessorDlg::MaybeAutoReport(const char* reason)
+ {
+-	if (!m_stateReportSettings.autoReport)
+-		return;
+-	// Bug hunt 3 (SH11): a report already being written spends no slot.
+-	if (m_stateReportBusy.load())
+-	{
+-		DebugLog::Log("Automatic problem report skipped (a report is being saved): reason=%s "
+-			"saved_this_run=%d", reason, m_autoReportLimiter.Count());
+-		return;
+-	}
+-	if (!m_autoReportLimiter.Allow(GetTickCount64(), m_stateReportBusy.load()))
+-	{
+-		DebugLog::Log("Automatic problem report skipped (rate limit): reason=%s saved_this_run=%d",
+-			reason, m_autoReportLimiter.Count());
+-		return;
+-	}
+-	SaveStateReport((std::string("auto:") + reason).c_str());
++	if (m_reportRun.AllowAutomatic(m_stateReportSettings.autoReport, reason, GetTickCount64()))
++		SaveStateReport((std::string("auto:") + reason).c_str());
+ }
+ 
+ void CVideoProcessorDlg::RecordDiagnosticStats(double sourceHz, double displayHz)
+@@ -8871,66 +8857,15 @@ void CVideoProcessorDlg::RecordDiagnosticStats(double sourceHz, double displayHz
+ 	DiagnosticHistory::Global().RecordStats(record);
+ }
+ 
+-namespace
+-{
+-	std::wstring ExecutableFolder()
+-	{
+-		std::vector<wchar_t> buffer(32768);
+-		const DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+-		if (length == 0 || length >= buffer.size())
+-			return std::wstring();
+-		std::wstring path(buffer.data(), length);
+-		const size_t separator = path.find_last_of(L"\\/");
+-		return separator == std::wstring::npos ? std::wstring() : path.substr(0, separator);
+-	}
+-
+-	std::wstring WidenAnsi(const std::string& text)
+-	{
+-		return std::wstring(CStringW(CStringA(text.c_str())).GetString());
+-	}
+-
+-	// The newest .png in `folder` written at or after `since`, empty if none.
+-	std::wstring NewestScreenshotSince(const std::wstring& folder, const FILETIME& since)
+-	{
+-		WIN32_FIND_DATAW data;
+-		HANDLE find = FindFirstFileW((folder + L"\\*.png").c_str(), &data);
+-		if (find == INVALID_HANDLE_VALUE)
+-			return std::wstring();
+-		std::wstring best;
+-		FILETIME bestTime = since;
+-		do
+-		{
+-			if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
+-				CompareFileTime(&data.ftLastWriteTime, &bestTime) >= 0)
+-			{
+-				bestTime = data.ftLastWriteTime;
+-				best = folder + L"\\" + data.cFileName;
+-			}
+-		} while (FindNextFileW(find, &data));
+-		FindClose(find);
+-		return best;
+-	}
+-}
+-
+ void CVideoProcessorDlg::SaveStateReport(const char* trigger)
+ {
+-	// Bug hunt 3 (C10): a report whose completion never came back (its post
+-	// failed) frees the flag after two minutes; a real report takes seconds.
+-	const ULONGLONG busyNow = GetTickCount64();
+-	if (m_stateReportBusy.exchange(true) &&
+-		!(m_stateReportBusySince != 0 && busyNow - m_stateReportBusySince > 120000))
++	// The run, the shared inputs and the worker: VP diagnostics adapter (DiagnosticsReportRun.h).
++	if (!m_reportRun.TryBegin(GetTickCount64()))
+ 	{
+ 		ShowStateReportToast("already saving");
+ 		return;
+ 	}
+-	m_stateReportBusySince = busyNow;
+-	const int64_t referenceQpc = DiagnosticHistory::NowQpc();
+-	DiagnosticHistory::Global().RecordDecision("state-report", trigger);
+-
+-	auto inputs = std::make_shared<StateReport::Inputs>();
+-	inputs->trigger = trigger;
+-	inputs->vpRoot = ExecutableFolder();
+-	inputs->reportsDirectory = inputs->vpRoot + L"\\logs\\reports";
++	auto inputs = m_reportRun.NewInputs(trigger, m_videoRenderer.get());
+ 	inputs->buildId = VpBuildIdentity::Id();
+ 	inputs->commit = VpBuildIdentity::Commit();
+ 	inputs->version = std::string(CStringA(VERSION_DESCRIBE).GetString()) + " (" +
+@@ -8938,32 +8873,6 @@ void CVideoProcessorDlg::SaveStateReport(const char* trigger)
+ 	inputs->pluginApi = VP_LIBPLACEBO_PLUGIN_API_VERSION;
+ 	inputs->rendererName = !m_videoRenderer ? "none" :
+ 		(m_activeRendererIsDirectShow ? "DirectShow" : "VP Renderer");
+-	inputs->binaries.push_back({ "VideoProcessor.exe", inputs->vpRoot + L"\\VideoProcessor.exe" });
+-	for (const bool beta : { false, true })
+-	{
+-		const std::wstring plugin = OptionalRendererLayout::PluginPath(inputs->vpRoot, beta);
+-		if (GetFileAttributesW(plugin.c_str()) == INVALID_FILE_ATTRIBUTES)
+-			continue;
+-		std::wstring relative = plugin.size() > inputs->vpRoot.size() + 1 ?
+-			plugin.substr(inputs->vpRoot.size() + 1) : plugin;
+-		std::replace(relative.begin(), relative.end(), L'\\', L'/');
+-		inputs->binaries.push_back({ std::string(CStringA(relative.c_str()).GetString()), plugin });
+-	}
+-
+-	// The rings, at the moment of the key press.
+-	inputs->historyExe = DiagnosticHistory::ToJsonl(DiagnosticHistory::Global(), "exe", referenceQpc);
+-	if (m_videoRenderer)
+-		inputs->rendererContributed = m_videoRenderer->WriteDiagnosticHistory(
+-			&DiagnosticHistory::AppendToStringSink, &inputs->historyRenderer, referenceQpc);
+-
+-	CrashState::Recorder& crashState = CrashState::Global();
+-	inputs->crashStateLive = crashState.Text();
+-	{
+-		std::string live = crashState.LivePath();
+-		const size_t separator = live.find_last_of("\\/");
+-		if (separator != std::string::npos)
+-			inputs->crashStateDirectory = WidenAnsi(live.substr(0, separator));
+-	}
+ 
+ 	// Live settings: the effective choices now (values are redacted on write).
+ 	auto& settings = inputs->liveSettings;
+@@ -8997,131 +8906,19 @@ void CVideoProcessorDlg::SaveStateReport(const char* trigger)
+ 			settings.emplace_back("profile." + selection.first, selection.second);
+ 	VpvGui::AppendBundleSettings(settings, m_videoRenderer.get());   // VP-V (WP-11)
+ 
+-	// Configuration files VP reads (full paths stay local; the bundle gets names).
+-	{
+-		ConfigFile main;
+-		if (main.Load())
+-			inputs->configFiles.push_back(WidenAnsi(main.GetLoadedPath()));
+-		ConfigFile renderer;
+-		if (renderer.Load(ConfigFile::RENDERER_FILENAME) && !renderer.GetLoadedPath().empty() &&
+-			(inputs->configFiles.empty() || WidenAnsi(renderer.GetLoadedPath()) != inputs->configFiles.front()))
+-			inputs->configFiles.push_back(WidenAnsi(renderer.GetLoadedPath()));
+-	}
+-	const std::wstring logPath = WidenAnsi(DebugLog::GetLogFilePath());
+-	std::string recentLog;
+-	for (const std::string& line : DebugLog::RecentLines(~0ull, 600))
+-		recentLog += line + "\n";
+-
+-	// Optional picture (off by default): the next rendered frame via the
+-	// existing screenshot path, scaled down by the worker.
+-	bool thumbnailRequested = false;
+-	FILETIME requestTime = {};
+-	GetSystemTimeAsFileTime(&requestTime);
+-	inputs->thumbnailEnabled = m_stateReportSettings.thumbnail;
+-	if (inputs->thumbnailEnabled)
+-	{
+-		CString status;
+-		thumbnailRequested = m_videoRenderer && m_videoRenderer->RequestRenderedOutputCapture(status);
+-		if (!thumbnailRequested)
+-			inputs->thumbnailNote = status.IsEmpty() ? std::string("no active VP Renderer") :
+-				std::string(CStringA(status).GetString());
+-	}
+-	std::wstring screenshotFolder = inputs->vpRoot + L"\\screenshots";
+-	{
+-		wchar_t overrideDir[1024] = {};
+-		const DWORD overrideLength = GetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", overrideDir, 1024);
+-		if (overrideLength > 0 && overrideLength < 1024)
+-			screenshotFolder.assign(overrideDir, overrideLength);
+-	}
++	// Optional picture (report_thumbnail, off by default).
++	m_reportRun.RequestThumbnail(*inputs, m_stateReportSettings.thumbnail, m_videoRenderer.get());
+ 
+ 	ShowStateReportToast("saving...");
+-	const HWND window = GetSafeHwnd();
+-	auto worker = std::make_shared<StateReportWorkerState>();
+-	std::atomic_store_explicit(&m_stateReportWorker, worker, std::memory_order_release);
+-	try
+-	{
+-		std::thread([inputs, window, logPath, recentLog, thumbnailRequested, requestTime, screenshotFolder, worker]()
+-		{
+-			const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+-			auto* result = new StateReport::Result();
+-			try
+-			{
+-				std::string log = StateReport::ReadFileTail(logPath, 512 * 1024);
+-				inputs->logExcerpt = log.empty() ? recentLog : log;
+-				if (thumbnailRequested)
+-				{
+-					std::wstring shot;
+-					for (int attempt = 0; attempt < 40 && shot.empty() && !worker->cancel.load(); ++attempt)
+-					{
+-						Sleep(100);
+-						shot = NewestScreenshotSince(screenshotFolder, requestTime);
+-					}
+-					std::string error;
+-					if (shot.empty())
+-						inputs->thumbnailNote = "the rendered frame did not arrive within 4 s";
+-					else
+-					{
+-						Sleep(200);   // let the screenshot writer finish the file
+-						if (!StateReport::MakeThumbnailPng(shot, 480, inputs->thumbnailPng, &error))
+-							inputs->thumbnailNote = error;
+-					}
+-				}
+-				*result = StateReport::Write(*inputs);
+-			}
+-			catch (const std::exception& exception)
+-			{
+-				result->ok = false;
+-				result->error = exception.what();
+-			}
+-			if (SUCCEEDED(com))
+-				CoUninitialize();
+-			// Bug hunt 3 (C10): a failed post (a full message queue) used to leave
+-			// the busy flag set for good, refusing every later report. The post is
+-			// retried while the window lives; only a closed window drops it.
+-			bool posted = false;
+-			for (int attempt = 0; attempt < 100 && !posted && ::IsWindow(window); ++attempt)
+-			{
+-				posted = ::PostMessageW(window, WM_MESSAGE_STATE_REPORT_DONE, 0,
+-					reinterpret_cast<LPARAM>(result)) != FALSE;
+-				if (!posted)
+-					Sleep(50);
+-			}
+-			if (!posted)
+-				delete result;
+-			{
+-				std::lock_guard<std::mutex> lock(worker->mutex);
+-				worker->done = true;
+-			}
+-			worker->doneChanged.notify_all();
+-		}).detach();
+-	}
+-	catch (const std::exception& exception)
+-	{
+-		m_stateReportBusy.store(false);
+-		DebugLog::Log("Problem report could not start: %s", exception.what());
++	if (!m_reportRun.Start(inputs, GetSafeHwnd(), WM_MESSAGE_STATE_REPORT_DONE))
+ 		ShowStateReportToast("failed");
+-	}
+ }
+ 
+ LRESULT CVideoProcessorDlg::OnStateReportDone(WPARAM, LPARAM lParam)
+ {
+-	std::unique_ptr<StateReport::Result> result(reinterpret_cast<StateReport::Result*>(lParam));
+-	m_stateReportBusy.store(false);
+-	if (!result)
+-		return 0;
+-	if (result->ok)
+-	{
+-		DebugLog::Log("Problem report saved: logs\\reports\\%s bytes=%zu files=%zu removed_old=%zu",
+-			result->fileName.c_str(), result->bytes, result->entries.size(), result->removed.size());
+-		DiagnosticHistory::Global().RecordDecision("state-report-saved", result->fileName.c_str(),
+-			static_cast<int64_t>(result->bytes));
+-		ShowStateReportToast("saved " + result->fileName);
+-	}
+-	else
+-	{
+-		DebugLog::Log("Problem report failed: %s", result->error.c_str());
+-		ShowStateReportToast("failed (" + result->error + ")");
+-	}
++	const std::string toast = m_reportRun.Finish(lParam);
++	if (!toast.empty())
++		ShowStateReportToast(toast);
+ 	return 0;
+ }
+ 
+@@ -10554,18 +10351,7 @@ bool CVideoProcessorDlg::WaitForShutdownWorkers(DWORD timeoutMs)
+ 	}
+ 	// Bug hunt 3 (SH11): a problem report being written is finished (its
+ 	// thumbnail wait cut short), not killed mid-write.
+-	bool reportDone = true;
+-	if (const auto worker = std::atomic_load_explicit(&m_stateReportWorker, std::memory_order_acquire))
+-	{
+-		worker->cancel.store(true);
+-		const ULONGLONG now = GetTickCount64();
+-		const DWORD remaining = now >= deadline ? 0 : static_cast<DWORD>(deadline - now);
+-		std::unique_lock<std::mutex> lock(worker->mutex);
+-		reportDone = worker->doneChanged.wait_for(lock, std::chrono::milliseconds(remaining),
+-			[&worker] { return worker->done; });
+-		if (!reportDone)
+-			DebugLog::Log("Problem report still being written at exit (timeout_ms=%lu)", timeoutMs);
+-	}
++	const bool reportDone = m_reportRun.WaitForExit(deadline, timeoutMs);
+ 	if (!retirementDone || !resetDone || !livenessDone || !unifiedDone || !projectorTestDone || !reportDone)
+ 	{
+ 		DebugLog::Log(
+diff --git a/src/VideoProcessor-GUI/VideoProcessorDlg.h b/src/VideoProcessor-GUI/VideoProcessorDlg.h
+index c73f119f..ed0f5e8f 100644
+--- a/src/VideoProcessor-GUI/VideoProcessorDlg.h
++++ b/src/VideoProcessor-GUI/VideoProcessorDlg.h
+@@ -29,7 +29,7 @@
+ #include <PixelValueRange.h>
+ #include <OutputReadinessController.h>
+ #include <ShortcutRepeatGuard.h>
+-#include <VP-V/modules/control/diagnostics/StateReport.h>
++#include <VP-V/modules/control/diagnostics/DiagnosticsReportRun.h>
+ #include <VP-V/modules/control/diagnostics/StateReportSettings.h>
+ #include <CCie1931Control.h>
+ #include <IRenderer.h>
+@@ -690,20 +690,7 @@ protected:
+ 	StagedRuntimeSettings m_stagedRuntimeSettings;
+ 	// Report-a-problem (owner 2026-10-17).
+ 	StateReportSettings::Settings m_stateReportSettings;
+-	StateReport::AutoReportLimiter m_autoReportLimiter;
+-	std::atomic<bool> m_stateReportBusy{ false };
+-	ULONGLONG m_stateReportBusySince = 0;   // UI thread (bug hunt 3 C10)
+-	// Bug hunt 3 (SH11): the report worker stays detached (it never touches
+-	// the dialog) but signals `done`, so the exit waits for it (bounded)
+-	// instead of killing it mid-write; `cancel` skips its thumbnail wait.
+-	struct StateReportWorkerState
+-	{
+-		std::mutex mutex;
+-		std::condition_variable doneChanged;
+-		bool done = false;
+-		std::atomic<bool> cancel{ false };
+-	};
+-	std::shared_ptr<StateReportWorkerState> m_stateReportWorker;
++	VpDiagnostics::ReportRun m_reportRun;   // the report-a-problem run (VP diagnostics adapter)
+ 	std::atomic<uint64_t> m_diagnosticCapturedFrames{ 0 };
+ 	std::atomic<uint64_t> m_diagnosticRejectedFrames{ 0 };
+ 	uint64_t m_diagnosticLastCapturedFrames = 0;
+diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+index dc4dbfb9..3d43c426 100644
+--- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+@@ -61,7 +61,7 @@
+ #include <vprenderer/GpuDolbyVisionTunnelUnpack.h>
+ #include <vprenderer/DolbyVisionTrims.h>
+ #include <VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h>   // feat/dv-l8: the L8 / L2 trim choice
+-#include <VP-V/modules/input/signal/DvCompareCapture.h>          // feat/dv-l8: DV comparison capture (diagnostic)
++#include <VP-V/modules/input/signal/DvCompareCaptureSink.h>      // feat/dv-l8: DV comparison capture (diagnostic; WP-17 adapter)
+ #include <VP-V/modules/input/signal/DvTunnelPolicy.h>            // feat/dv-l8: no plane deband on the tunnel
+ #include <vprenderer/EarlyUpload.h>
+ #include <vprenderer/DejudderPolicy.h>
+@@ -70,7 +70,7 @@
+ #include <vprenderer/RenderAheadPolicy.h>
+ #include <vprenderer/UploadReuse.h>
+ #include <vprenderer/OpenLoopDisplayRate.h>
+-#include <vprenderer/RendererDiagnosticCodes.h>
++#include <VP-V/modules/control/diagnostics/DiagnosticsAdapter.h>   // WP-17: VP diagnostics/captures adapter
+ #include <vprenderer/FrameInterpolator.h>
+ #include <vprenderer/GrainPreserve.h>
+ #include <vprenderer/OcclusionMaskHook.h>
+@@ -239,11 +239,9 @@ namespace
+ 		// Tests only: a writable folder when the process lives somewhere
+ 		// read-only (the test runner in Program Files). Unset: beside the exe.
+ 		{
+-			// The process environment (a test sets it in-process; the CRT's copy may be the DLL's own).
+-			wchar_t overrideDir[1024] = {};
+-			const DWORD overrideLength = GetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", overrideDir, 1024);
+-			if (overrideLength > 0 && overrideLength < 1024)
+-				return std::wstring(overrideDir, overrideLength);
++			std::wstring testFolder;
++			if (VpDiagnostics::TestFolderOverride(VpDiagnostics::TestFolder::Screenshots, testFolder))
++				return testFolder;
+ 		}
+ 		std::vector<wchar_t> buffer(32768);
+ 		const DWORD length = GetModuleFileNameW(
+@@ -455,10 +453,9 @@ namespace
+ 		// runner's executable lives elsewhere). Unset: beside the exe, as always.
+ 		std::string executablePath = CurrentExecutablePath();
+ 		{
+-			char overrideDir[1024] = {};
+-			const DWORD overrideLength = GetEnvironmentVariableA("VP_TEST_SHADER_DIR", overrideDir, 1024);
+-			if (overrideLength > 0 && overrideLength < 1024)
+-				executablePath = std::string(overrideDir, overrideLength) + "\\VideoProcessor.exe";
++			std::string testFolder;
++			if (VpDiagnostics::TestFolderOverride(VpDiagnostics::TestFolder::Shaders, testFolder))
++				executablePath = testFolder + "\\VideoProcessor.exe";
+ 		}
+ 		if (!MadVRShaderLoader::ResolveShaderFilename(
+ 			filename, executablePath, resolvedPath, reason))
+@@ -666,11 +663,10 @@ namespace
+ 	// the exe, as always.
+ 	bool ShaderCacheTestFolder(const char* relative, std::string& path)
+ 	{
+-		char overrideDir[1024] = {};
+-		const DWORD overrideLength = GetEnvironmentVariableA("VP_TEST_SHADER_CACHE_DIR", overrideDir, 1024);
+-		if (overrideLength == 0 || overrideLength >= 1024)
++		std::string testFolder;
++		if (!VpDiagnostics::TestFolderOverride(VpDiagnostics::TestFolder::ShaderCache, testFolder))
+ 			return false;
+-		path = std::string(overrideDir, overrideLength) + "\\" + relative;
++		path = testFolder + "\\" + relative;
+ 		return true;
+ 	}
+ 
+@@ -6852,11 +6848,7 @@ struct LibplaceboVideoRenderer::Impl
+ 	CComPtr<IDXGIOutput> dejudderOutput;
+ 	IDXGISwapChain* dejudderOutputSwapchain = nullptr;   // identity only, not owned
+ 	IDXGISwapChain* dejudderOutputFailedSwapchain = nullptr;   // GetContainingOutput failed (identity only)
+-	ULONGLONG dejudderHoldLogTick = 0;
+-	unsigned long long dejudderHoldsNotLogged = 0;
+-	// The holds since the last hold lines, per reason (render-ahead follow-up 2026-10-17:
+-	// one line per reason, so a count is never put on a reason it does not belong to).
+-	std::vector<std::pair<std::string, unsigned long long>> dejudderHoldsPending;
++	VpDiagnostics::HoldLog dejudderHoldLog;   // "De-judder: hold" lines (WP-17 adapter)
+ 	double dejudderPredictedVsync = 0.0;   // where the frame after extras should show (s)
+ 	uint64_t dejudderPredictedGeneration = 0;
+ 	uint64_t dejudderPredictedSequence = 0;   // the source frame the prediction is for
+@@ -7926,7 +7918,7 @@ struct LibplaceboVideoRenderer::Impl
+ 	DvTrimSelection::Selection dvTrimsSelection;
+ 	bool dvTrimsEvaluated = false;
+ 	double dvTrimsTargetNits = 0.0;
+-	DvCompareCapture::Recorder dvCompare{ DvCompareCapture::Options::FromEnvironment() };
++	VpDiagnostics::RenderedFrameCaptures captures = DvCompareCapture::RendererCaptures();   // rendered-frame captures (WP-17)
+ 	// feat/dv-l8 task 5: the Dolby-style DV tone mapping (dv_tone_mapping), its status, and the
+ 	// reference viewing conditions of the last DV picture (for the later CAM16 stage).
+ 	DvDolbyStyle::ToneSwitch dvToneSwitch;
+@@ -9496,10 +9488,8 @@ struct LibplaceboVideoRenderer::Impl
+ 				", \"source_max_nits\": " << sourceImage.color.hdr.max_luma <<
+ 				", \"scene_peak_pq\": " << sourceImage.color.hdr.max_pq_y <<
+ 				", \"scene_average_pq\": " << sourceImage.color.hdr.avg_pq_y <<
+-				", \"scene_min_present\": " <<
+-				(captureDolbyVision && captureDvLuminance.sceneMinAvailable ? "true" : "false") <<
+-				", \"scene_min_nits\": " <<
+-				(captureDolbyVision && captureDvLuminance.sceneMinAvailable ? captureDvLuminance.sceneMin : 0.0f) << "},\n"
++				VpDiagnostics::DvSceneMinFields{ captureDolbyVision,
++					captureDvLuminance.sceneMinAvailable, captureDvLuminance.sceneMin } << "},\n"
+ 			<< "  \"source_levels\": \"" <<
+ 				(sourceImage.repr.levels == PL_COLOR_LEVELS_LIMITED ?
+ 					"limited" : "full") << "\",\n"
+@@ -11757,29 +11747,7 @@ struct LibplaceboVideoRenderer::Impl
+ 		// (e.g. Intel, the laptop screen's own GPU, for real display timing);
+ 		// unset = libplacebo's choice, as always.
+ 		CComPtr<IDXGIAdapter1> testAdapter;
+-		{
+-			char* v = nullptr;
+-			size_t n = 0;
+-			if (_dupenv_s(&v, &n, "VP_TEST_ADAPTER") == 0 && v && v[0])
+-			{
+-				const std::wstring want(v, v + std::strlen(v));
+-				CComPtr<IDXGIFactory1> factory;
+-				if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))))
+-					for (UINT i = 0; !testAdapter; ++i)
+-					{
+-						CComPtr<IDXGIAdapter1> candidate;
+-						if (factory->EnumAdapters1(i, &candidate) == DXGI_ERROR_NOT_FOUND)
+-							break;
+-						DXGI_ADAPTER_DESC1 desc{};
+-						if (SUCCEEDED(candidate->GetDesc1(&desc)) && std::wstring(desc.Description).find(want) != std::wstring::npos)
+-						{
+-							testAdapter = candidate;
+-							DebugLog::Log("libplacebo: VP_TEST_ADAPTER selects %ls", desc.Description);
+-						}
+-					}
+-			}
+-			std::free(v);
+-		}
++		VpDiagnostics::TestAdapterFromEnvironment(&testAdapter);
+ 		if (testAdapter)
+ 			deviceParams.adapter = testAdapter;
+ 		d3d11 = pl_d3d11_create(log, &deviceParams);
+@@ -16989,57 +16957,20 @@ struct LibplaceboVideoRenderer::Impl
+ 
+ 	void DejudderHold(const char* why)
+ 	{
+-		// Report-a-problem: one repeated-stage frame row per hold (code in
+-		// RendererDiagnosticCodes.h), and a decision when the reason changes.
+-		{
+-			const uint32_t code = RendererDiagnostics::ClassifyDejudderHold(why);
+-			DiagnosticHistory::FrameRecord record;
+-			record.stage = DiagnosticHistory::StageRepeated;
+-			record.counter = diagExtrasCounter;
+-			record.holdReason = code;
+-			record.flags = RenderAheadActive() ? DiagnosticHistory::FlagRenderAhead : 0u;
+-			if (RenderAheadActive() && dejudderDisplayRate.openLoop)
+-				record.flags |= DiagnosticHistory::FlagOpenLoop;
+-			record.rendererGeneration = diagRendererGeneration;
+-			record.repeatedTotal = dejudderExtraStats.holds + 1;
+-			DiagnosticHistory::Global().RecordFrame(record);
+-			if (code != diagLastHoldCode)
+-			{
+-				diagLastHoldCode = code;
+-				DiagnosticHistory::Global().RecordDecision("dejudder-hold", why, code,
+-					static_cast<int64_t>(diagExtrasSequence));
+-			}
+-		}
++		// Report-a-problem: one repeated-stage frame row per hold and a decision when the
++		// reason changes; the hold lines (VP diagnostics adapter).
++		VpDiagnostics::RecordDejudderHold({ why, diagExtrasCounter, diagExtrasSequence, RenderAheadActive(),
++			dejudderDisplayRate.openLoop, diagRendererGeneration, dejudderExtraStats.holds }, diagLastHoldCode);
+ 		++dejudderExtraStats.holds;
+ 		dejudderExtraStats.lastHold = why;
+-		++dejudderHoldsNotLogged;
+-		auto pending = std::find_if(dejudderHoldsPending.begin(), dejudderHoldsPending.end(),
+-			[why](const std::pair<std::string, unsigned long long>& p) { return p.first == why; });
+-		if (pending == dejudderHoldsPending.end())
+-			dejudderHoldsPending.emplace_back(why, 1);
+-		else
+-			++pending->second;
+-		const ULONGLONG now = GetTickCount64();
+-		if (dejudderHoldLogTick == 0 || now - dejudderHoldLogTick >= 5000)
+-		{
+-			FlushDejudderHolds();
+-			dejudderHoldLogTick = now;
+-		}
++		dejudderHoldLog.OnHold(why, dejudderExtraStats.holds);
+ 		// Render-ahead: every hold also shows on the "Render-ahead:" line with the gate's level.
+ 		if (RenderAheadActive())
+ 			LogRenderAhead(dejudderExtraStats.cadenceRatio, renderAheadGate.Level(), why);
+ 	}
+ 
+-	// One "De-judder: hold" line per reason held since the last lines (also at teardown, so
+-	// the last holds are never lost).
+-	void FlushDejudderHolds()
+-	{
+-		for (const auto& pending : dejudderHoldsPending)
+-			DebugLog::Log("De-judder: hold (%s; %llu holds since the last line, %llu in total)",
+-				pending.first.c_str(), pending.second, dejudderExtraStats.holds);
+-		dejudderHoldsPending.clear();
+-		dejudderHoldsNotLogged = 0;
+-	}
++	// The last hold lines at teardown, so the last holds are never lost.
++	void FlushDejudderHolds() { dejudderHoldLog.Flush(dejudderExtraStats.holds); }
+ 
+ 	bool PresentDejudderExtras(const DejudderExtrasFrame& f)
+ 	{
+@@ -24018,11 +23949,13 @@ struct LibplaceboVideoRenderer::Impl
+                 DebugLog::Log("Dolby Vision trims (non-certified): %s", params.c_str());
+             }
+         }
+-        dvCompare.Configure(activeSettings.dvCompareCaptureFolder);   // feat/dv-l8 WIP: the Config folder
+-        if (dvCompare.Enabled())   // feat/dv-l8: DV comparison capture (diagnostic; VP_DV_COMPARE_PATH)
+-            dvCompare.OnRender(state, convertedPayload ? convertedPayload->rawFrame.get() : nullptr, videoFrame.GetCounter(),
++        // Rendered-frame captures (DV comparison capture; VP diagnostics adapter). The context is
++        // built only while one is on (it consumes the trim selection, as before).
++        captures.Configure(DvCompareCapture::kCommand, activeSettings.dvCompareCaptureFolder);
++        if (captures.AnyEnabled())
++            captures.OnFrameRendered({ &state, convertedPayload ? convertedPayload->rawFrame.get() : nullptr, videoFrame.GetCounter(),
+                 convertedPayload && state.dolbyVisionTunnel ? &convertedPayload->dolby : nullptr, activeSettings.dvTrims,
+-                std::exchange(dvTrimsEvaluated, false) ? &dvTrimsSelection : nullptr, dvTrimsTargetNits);
++                std::exchange(dvTrimsEvaluated, false) ? &dvTrimsSelection : nullptr, dvTrimsTargetNits });
+         // Automatic calibration phase 2 (HDR verify): VP's own tone curve (PQ targets).
+         calibrationHost.NoteToneCurve(renderImage.color, target.color, renderParams.color_map_params);
+         // S2 Dynamic Drive (WP-15 host adapter): gain in, then the LED measurement and compensation
+@@ -25290,48 +25223,37 @@ struct LibplaceboVideoRenderer::Impl
+ 					presentationTargetTimingKnown = true;
+ 				}
+ 			}
+-			// Report-a-problem (DiagnosticHistory): one presented row per frame from
+-			// values already at hand. No locks, allocation, strings or GPU queries.
++			// Report-a-problem: one presented row per frame from values already at hand
++			// (VP diagnostics adapter; no locks, allocation, strings or GPU queries).
+ 			{
+-				DiagnosticHistory::FrameRecord diag;
+-				diag.qpc = swapEndQpc;
+-				diag.stage = DiagnosticHistory::StagePresented;
++				VpDiagnostics::PresentedFacts diag;
++				diag.swapEndQpc = swapEndQpc;
+ 				diag.counter = record.sourceFrameNumber;
+ 				diag.sourceTimestamp = record.captureTimestamp;
+ 				diag.captureTimestamp = videoFrame.GetCaptureTimingTimestamp();
+-				const double qpcPerMs = static_cast<double>(qpcFrequency.QuadPart) / 1000.0;
+-				if (presentationTargetTimingKnown && qpcPerMs > 0.0)
+-				{
+-					diag.presentQpc = swapEndQpc + static_cast<int64_t>(presentationTargetLeadMs * qpcPerMs);
+-					diag.leadMs = static_cast<float>(presentationTargetLeadMs);
+-				}
+-				diag.queueDepth = static_cast<uint32_t>(queueDepthAfterDequeue);
+-				diag.renderMs = static_cast<float>(renderMs);
+-				diag.uploadMs = static_cast<float>(sourceUploadCpuLastMs);
+-				diag.waitMs = static_cast<float>(swapBlockMs);
+-				diag.intervalMs = static_cast<float>(submitGapMs);
+-				if (qpcPerMs > 0.0 && callbackQpc > 0 && swapEndQpc > callbackQpc)
+-					diag.latencyMs = static_cast<float>(static_cast<double>(swapEndQpc - callbackQpc) / qpcPerMs);
+-				uint32_t flags = 0;
+-				if (temporalRenderer.Active()) flags |= DiagnosticHistory::FlagInterpolated;
+-				if (RenderAheadActive())
+-				{
+-					flags |= DiagnosticHistory::FlagRenderAhead;
+-					if (dejudderDisplayRate.openLoop) flags |= DiagnosticHistory::FlagOpenLoop;
+-					diag.phase = renderAheadPendingMainInterval;   // the main present's SyncInterval
+-				}
+-				if (dejudder && sourceSequence != 0 && dejudderEstimatedSequence == sourceSequence &&
+-					motionValidity.Current(dejudderEstimatedEpoch))
+-					flags |= DiagnosticHistory::FlagVectorsValid;
+-				if (pl_color_space_is_hdr(&image.color)) flags |= DiagnosticHistory::FlagHdr;
+-				if (videoFrame.IsSourceDiscontinuity()) flags |= DiagnosticHistory::FlagDiscontinuity;
+-				diag.flags = flags;
+-				diag.repeatCount = cadenceRepeat ? 1 : 0;
+-				diag.width = width > 0 ? static_cast<uint32_t>(width) : 0u;
+-				diag.height = height > 0 ? static_cast<uint32_t>(height) : 0u;
+-				diag.repeatedTotal = dejudderExtraStats.holds;
++				diag.qpcFrequency = qpcFrequency.QuadPart;
++				diag.targetTimingKnown = presentationTargetTimingKnown;
++				diag.targetLeadMs = presentationTargetLeadMs;
++				diag.queueDepth = queueDepthAfterDequeue;
++				diag.renderMs = renderMs;
++				diag.uploadMs = sourceUploadCpuLastMs;
++				diag.waitMs = swapBlockMs;
++				diag.intervalMs = submitGapMs;
++				diag.callbackQpc = callbackQpc;
++				diag.interpolated = temporalRenderer.Active();
++				diag.renderAhead = RenderAheadActive();
++				diag.openLoop = dejudderDisplayRate.openLoop;
++				diag.mainInterval = renderAheadPendingMainInterval;   // the main present's SyncInterval
++				diag.vectorsValid = dejudder && sourceSequence != 0 && dejudderEstimatedSequence == sourceSequence &&
++					motionValidity.Current(dejudderEstimatedEpoch);
++				diag.hdr = pl_color_space_is_hdr(&image.color);
++				diag.discontinuity = videoFrame.IsSourceDiscontinuity();
++				diag.cadenceRepeat = cadenceRepeat;
++				diag.width = width;
++				diag.height = height;
++				diag.holds = dejudderExtraStats.holds;
+ 				diag.rendererGeneration = diagRendererGeneration;
+-				DiagnosticHistory::Global().RecordFrame(diag);
++				VpDiagnostics::RecordPresented(diag);
+ 			}
+ 
+ 			const uint64_t nowTick = GetTickCount64();
+@@ -25909,27 +25831,8 @@ bool LibplaceboVideoRenderer::OnVideoState(VideoStateComPtr& videoState)
+ }
+ 
+ 
+-namespace
+-{
+-	// Report-a-problem (DiagnosticHistory): a renderer frame row outside
+-	// RenderLocked (ingest, drops). Lock-free, no allocation.
+-	void RecordRendererFrame(uint32_t stage, uint64_t counter, int64_t sourceTimestamp,
+-		size_t queueDepth, uint32_t reason, uint64_t droppedTotal, uint32_t rendererGeneration,
+-		uint32_t flags = 0, int64_t qpc = 0) noexcept
+-	{
+-		DiagnosticHistory::FrameRecord record;
+-		record.qpc = qpc;
+-		record.stage = stage;
+-		record.counter = counter;
+-		record.sourceTimestamp = sourceTimestamp;
+-		record.queueDepth = static_cast<uint32_t>(queueDepth);
+-		record.holdReason = reason;
+-		record.droppedTotal = droppedTotal;
+-		record.rendererGeneration = rendererGeneration;
+-		record.flags = flags;
+-		DiagnosticHistory::Global().RecordFrame(record);
+-	}
+-}
++// Report-a-problem: a renderer frame row outside RenderLocked (ingest, drops): VP diagnostics adapter.
++using VpDiagnostics::RecordRendererFrame;
+ 
+ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
+ {
+@@ -28649,7 +28552,10 @@ bool LibplaceboVideoRenderer::ToggleDvCompareCapture(CString& status)
+ 	status.Empty();
+ 	if (!m_impl)
+ 		return false;
+-	status = CString(m_impl->dvCompare.Toggle().c_str());
++	std::string reply;
++	if (!m_impl->captures.Invoke(DvCompareCapture::kCommand, reply))
++		return false;
++	status = CString(reply.c_str());
+ 	return true;
+ }
+ 
+@@ -31814,17 +31720,8 @@ void LibplaceboVideoRenderer::RenderLoop()
+ 					m_sceneCorrectionRepeatCount.load(
+ 						std::memory_order_relaxed);
+ 				// Report-a-problem: a drift-correction repeat queued (shown twice).
+-				{
+-					DiagnosticHistory::FrameRecord diag;
+-					diag.stage = DiagnosticHistory::StageRepeated;
+-					diag.counter = frame.GetCounter();
+-					diag.sourceTimestamp = frame.GetTimingTimestamp();
+-					diag.queueDepth = static_cast<uint32_t>(repeatQueueDepth);
+-					diag.holdReason = RendererDiagnostics::RepeatCadenceCorrection;
+-					diag.repeatedTotal = repeatCount;
+-					diag.rendererGeneration = m_callbackGeneration;
+-					DiagnosticHistory::Global().RecordFrame(diag);
+-				}
++				VpDiagnostics::RecordCadenceRepeat(frame.GetCounter(), frame.GetTimingTimestamp(),
++					repeatQueueDepth, repeatCount, m_callbackGeneration);
+ 				{
+ 					std::lock_guard<std::mutex> renderGuard(
+ 						m_impl->renderMutex);
+@@ -32325,17 +32222,8 @@ void LibplaceboVideoRenderer::SetAmbientLux(double lux, bool valid, double nowSe
+ bool LibplaceboVideoRenderer::WriteDiagnosticHistory(
+ 	VpDiagnosticHistorySink sink, void* context, int64_t referenceQpc) const
+ {
+-	// Report-a-problem: this module's rings, tagged "renderer". Nothing may
+-	// cross the plugin boundary as an exception.
+-	try
+-	{
+-		return DiagnosticHistory::WriteJsonlToSink(
+-			DiagnosticHistory::Global(), "renderer", referenceQpc, sink, context);
+-	}
+-	catch (...)
+-	{
+-		return false;
+-	}
++	// Report-a-problem: this module's rings, tagged "renderer" (VP diagnostics adapter).
++	return VpDiagnostics::WriteRendererHistory(sink, context, referenceQpc);
+ }
+ 
+ bool LibplaceboVideoRenderer::GetSceneDescriptor(

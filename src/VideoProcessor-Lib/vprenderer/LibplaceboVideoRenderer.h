@@ -19,7 +19,7 @@
 #include <memory>
 #include <string>
 
-namespace LedDrive { class LedDriveModule; }
+#include <VP-V/modules/drive/led_compensation/DynamicDriveHost.h>
 #include <condition_variable>
 #include <deque>
 #include <memory>
@@ -154,6 +154,8 @@ public:
 	bool GetFallbacksStatus(CString& status) const override;
 	bool ToggleDvCompareCapture(CString& status) override;   // feat/dv-l8 WIP (plugin API 43)
 	void SetQueueDelayBudget(int totalMs) override;
+	// VP-V (WP-11): VP's status lines through the generic entry (module "vp").
+	bool GetModuleStatus(const char* module, CString& status) const override;
 	bool GetLedDriveStatus(CString& status) const override;
 	bool GetSourceResolutionStatus(CString& status) const override;
 	bool SuspendLedDriveForTest(CString& reason) override;
@@ -521,38 +523,18 @@ private:
 	// One manual selection per independent unified profile group. This state is
 	// copied into rebuilt renderer instances only after the selection is accepted.
 	std::map<std::string, std::string> m_manualUnifiedProfiles;
-	// The LED drive module (brief Stage 7) lives here rather than in Impl, so
-	// internal renderer resets neither restart it nor return the projector to
-	// full light. Recreated only when its configuration sections change.
-	std::shared_ptr<LedDrive::LedDriveModule> m_ledDrive;
-	std::string m_ledDriveSignature;
-	std::string m_ledDriveAliasConflict;   // [led_drive*] and [dynamic_drive*] both present (logged once)
-	// RS-232 connection test: the configuration the LED drive is restarted
-	// from, and whether it is stopped for a test.
-	std::shared_ptr<const ConfigFile> m_ledDriveConfiguration;
-	bool m_ledDriveSuspended = false;
-	// VP Renderer filter (2026-10-17): file_led_holdover_ms while the applied
-	// snapshot says source=file (the DirectShow filter's FileHost); 0 for the
-	// capture app, whose LED drive is never parked (LedDriveHoldover.h).
-	uint32_t m_ledHoldoverMs = 0;
-	// gamma_boost (and the hook's knee/EOTF) as last published, for new Impls.
-	double m_ledGammaBoost = 0.0;   // the gamma_boost setting (0 = off)
-	double m_ledCompensationEotf = 2.2;
-	double m_ledKnee = 0.08;
-	double m_ledBoostKnee = 0.0;        // delta 11
-	double m_ledBoostKneeWidth = 0.05;
-	bool m_ledWtwPassthrough = true;   // led_wtw_passthrough
-	bool m_ledBtbPassthrough = true;   // led_btb_passthrough
-	double m_ledShadowLift = 0.0;
+	// Dynamic Drive host adapter (WP-15, src/VP-V/modules/drive/led_compensation): the LED drive
+	// module's lifetime, suspend/resume, hold-over and status. It lives here rather than in Impl,
+	// so internal renderer resets neither restart it nor return the projector to full light.
+	LedDrive::DynamicDriveHost m_dynamicDrive{ m_stateMutex };
+	LedDrive::HostContext DynamicDriveContext() const;
 	// The Low_Latency queue as last applied (2026-10-16): kept here so a Build, which makes a
 	// new Impl, starts in the right path (it was lost until the next snapshot apply).
 	bool m_lowLatencyQueue = false;
-	void UpdateLedDrive(const ConfigFile& configuration);
 	// Automatic calibration: a patch replaces video while this is set (the render
 	// loop presents it each refresh; incoming frames are dropped). The LED drive
-	// is stopped (full light) for the patches and restarted after them.
+	// is stopped (full light) for the patches and restarted after them (m_dynamicDrive).
 	std::atomic_bool m_calibrationPatternActive{false};
-	bool m_calibrationLedSuspended = false;
 };
 
 // Tests only (planner Q4): see LibplaceboVideoRenderer.cpp.

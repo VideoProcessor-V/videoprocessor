@@ -3,11 +3,11 @@
 
 #include <ConfigFile.h>
 #include <MainConfigSchema.h>
-#include <VP-V/modules/drive/projector_control/LedController.h>
+#include <VP-V/modules/drive/led_compensation/LedController.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
 #include <VP-V/modules/drive/led_measure/LedLookahead.h>
 #include <VP-V/modules/drive/led_measure/LedMeasurement.h>
-#include <led/LedRawTransfer.h>
+#include <VP-V/modules/drive/led_compensation/LedRawTransfer.h>
 #include <VP-V/modules/drive/projector_control/LedShutdownRestore.h>
 #include <vprenderer/AlphaQueuePolicy.h>
 

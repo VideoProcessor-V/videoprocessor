@@ -115,6 +115,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\HookSegment.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutHost.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OcclusionMaskHook.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\ExtendedRange.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\RenderedWarp.cpp" />
@@ -130,8 +131,9 @@
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\CrossfadeMix.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\TextureRestore.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\CustomHookChain.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\led\LedMeasurementHook.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\led\LedRawTransfer.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\led_measure\LedMeasurementHook.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\led_compensation\DynamicDriveFrame.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\led_compensation\LedRawTransfer.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\VideoProcessor-Lib\VideoProcessor-Lib.vcxproj">

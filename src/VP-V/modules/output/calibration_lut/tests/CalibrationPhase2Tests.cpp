@@ -16,7 +16,7 @@
 #include <VP-V/modules/output/calibration_lut/calibration/TranscriptRecorder.h>
 #include <ConfigEditorCore.h>
 #include <ConfigFile.h>
-#include <led/LedDriveConfig.h>
+#include <VP-V/modules/drive/led_compensation/LedDriveConfig.h>
 #include <VP-V/modules/drive/projector_control/SerialPort.h>
 
 #include <algorithm>

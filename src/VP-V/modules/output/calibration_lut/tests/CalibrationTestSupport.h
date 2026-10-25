@@ -28,7 +28,7 @@ namespace CalibrationTest
 
 	inline std::string TranscriptPath(const std::string& name)
 	{
-		return RepositoryRoot() + "\\src\\VideoProcessor-Test\\data\\spotread\\" + name;
+		return RepositoryRoot() + "\\src\\VP-V\\modules\\output\\calibration_lut\\tests\\data\\spotread\\" + name;
 	}
 
 	inline std::string FakeSpotreadPath()
