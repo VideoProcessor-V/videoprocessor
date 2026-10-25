@@ -361,7 +361,7 @@ CNTR change. Not yet implemented.
 | `occlusion_mask` | Tells the sigma-delta where new picture appears, so it does not carry a residual into it. | No smears at edges of moving objects. | off | low |
 | `dither_grain_tolerance_scale` | The sigma-delta's motion match tolerates grain this many times more. | Keeps the 10-bit averaging alive on grain. | 3 | none |
 | `dither_vectors` | The dither takes the de-judder's motion on in-between pictures (auto) or always searches itself (own). | Saves about 1 ms per in-between. | auto | saves time |
-| Calibration LUT (Color / Output page) | The projector calibration LUT. | Today libplacebo applies it before VP's output hooks; the design moves it to VP's last step (planned `calibration_lut_stage`). | | low |
+| Calibration LUT (Color / Output page) | The projector calibration LUT. | By default libplacebo applies it before VP's output hooks; `calibration_lut_stage vp` (Pipeline, expert) moves it to VP's last step. A LUT file edited in place is reloaded automatically; planned `calibration_lut_reload` (`auto` or `apply`: reload only on a Config Apply, as upstream does) makes that a choice. | | low |
 | `render_ahead` and its companions | See 3.3. | | off | |
 
 ---
