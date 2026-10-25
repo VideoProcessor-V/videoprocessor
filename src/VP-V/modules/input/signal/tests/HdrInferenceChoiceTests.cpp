@@ -160,6 +160,9 @@ namespace Tests
 			r = FromText("[vpv]\nhdr_inference: vp\npipeline_original_pathway: on\n");
 			Assert::IsTrue(r.setting == HdrInferenceChoice::Mode::Vp && r.effective == HdrInferenceChoice::Mode::Original && r.originalPathway);
 			Assert::IsTrue(HdrInferenceChoice::Describe(r).find("Original pathway") != std::string::npos);
+			Assert::IsTrue(HdrInferenceChoice::StartupLine(true, r).find("Original pathway") != std::string::npos,
+				L"the override is logged at start-up");
+			Assert::IsTrue(HdrInferenceChoice::StartupLine(false, r).find("command line") != std::string::npos);
 			r = FromText("[vpv]\nhdr_inference: maybe\n");
 			Assert::IsTrue(r.effective == HdrInferenceChoice::Mode::Vp && !r.problem.empty(), L"invalid: kept vp, reported");
 		}

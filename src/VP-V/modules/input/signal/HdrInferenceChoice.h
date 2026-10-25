@@ -92,4 +92,23 @@ namespace HdrInferenceChoice
 			text += "; invalid " + r.problem + ", kept vp";
 		return text;
 	}
+
+	// From VideoProcessor.cfg in the working directory (the GUI start-up).
+	inline Resolved Load()
+	{
+		ConfigFile config;
+		config.Load();
+		return FromConfig(config);
+	}
+
+	// The start-up log line (no silent override, audit 3): what runs, and why when the selection on
+	// the command line differs from the configuration or the Original pathway overrode the key.
+	inline std::string StartupLine(bool selectedOriginal, const Resolved& fromConfig)
+	{
+		const Mode selected = selectedOriginal ? Mode::Original : Mode::Vp;
+		if (selected == fromConfig.effective)
+			return Describe(fromConfig);
+		return std::string("HDR inference: ") + (selectedOriginal ? "Bill's candidate decision (original newlldv heuristic)" :
+			"VP inference") + " (/hdr_inference on the command line; the configuration says " + Name(fromConfig.effective) + ")";
+	}
 }
