@@ -95,6 +95,25 @@ namespace VpRepeatReuse
 		}
 	};
 
+	// What VP changes in the picture before OUTPUT outside the hook list (audit H2): the source
+	// re-base (factors recomputed every refresh: a pause can end, the monitor can change the kernel),
+	// the display/calibration LUT identity (hot reload in place), the subtitle composition (its glyph
+	// mapping, background and the temporal-fill donor, decided per refresh), and the engaged fallbacks
+	// (a sticky entrance/slot shed mid-stream). Any change refuses as ExtensionChanged.
+	struct VpExtension
+	{
+		double rebaseFactor = 1.0, rebaseFactorX = 1.0;
+		int rebaseKernel = -1;
+		uint64_t lutSignature = 0;
+		uint64_t subtitleSignature = 0;
+		uint64_t fallbacksSignature = 0;
+		uint64_t Signature() const
+		{
+			return RepeatRenderReuse::Signature().Add(rebaseFactor).Add(rebaseFactorX).Add(rebaseKernel).Add(lutSignature)
+				.Add(subtitleSignature).Add(fallbacksSignature).Value();
+		}
+	};
+
 	struct Options
 	{
 		bool enabled = false;            // repeat_render_reuse (draft default off)

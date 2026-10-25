@@ -355,6 +355,27 @@ vec4 hook() { return vec4(random); }";
 				Policy::Complete(Key(5, true), VpTemporal{}, plain).hookState);
 		}
 
+		// Audit H2: VP state outside the hook list joins the key.
+		TEST_METHOD(VpExtensionCoversRebaseLutSubtitlesAndFallbacks)
+		{
+			const VpExtension base;
+			VpExtension e = base;
+			e.rebaseFactor = 0.5;   // a re-base pause ended on a repeat
+			Assert::AreNotEqual(base.Signature(), e.Signature());
+			e = base; e.rebaseKernel = 2;
+			Assert::AreNotEqual(base.Signature(), e.Signature());
+			e = base; e.lutSignature = 9;   // LUT reloaded in place
+			Assert::AreNotEqual(base.Signature(), e.Signature());
+			e = base; e.subtitleSignature = 3;   // donor flipped / glyph mapping moved
+			Assert::AreNotEqual(base.Signature(), e.Signature());
+			e = base; e.fallbacksSignature = 4;   // a sticky shed engaged
+			Assert::AreNotEqual(base.Signature(), e.Signature());
+			RepeatFrameKey cached = Key(5, false), now = Key(5, true);
+			cached.extension = base.Signature();
+			now.extension = e.Signature();
+			Assert::IsTrue(RepeatReuseRules::Compare(cached, true, now).refusal == Refusal::ExtensionChanged);
+		}
+
 		TEST_METHOD(SignatureIsExactOnFloats)
 		{
 			const float a = 1.0f, b = 1.0000001f;
