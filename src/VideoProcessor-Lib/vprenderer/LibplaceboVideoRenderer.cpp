@@ -4925,7 +4925,7 @@ namespace
 				m_displayDeviceName, paths, modes, pathCount, modeCount, pathIndex))
 			{
 				DebugLog::Log("libplacebo refresh-rate switch: active display path not found");
-				ReportKept(state.displayMode->RefreshRateHz(), \"active display path not found\");
+				ReportKept(state.displayMode->RefreshRateHz(), "active display path not found");
 				return;
 			}
 
@@ -4966,7 +4966,7 @@ namespace
 				DebugLog::Log(
 					"libplacebo refresh-rate switch: DXGI rational mode enumeration failed; retaining %.6f Hz",
 					RefreshRateHz(m_originalRefreshRate));
-				ReportKept(contentRate, \"DXGI mode enumeration failed\");
+				ReportKept(contentRate, "DXGI mode enumeration failed");
 				return;
 			}
 			const std::vector<RankedDisplayRefreshRate> rankedRates =
@@ -4977,7 +4977,7 @@ namespace
 					"libplacebo refresh-rate switch: no safe DXGI candidate for input=%.6f Hz target=%.6f Hz candidates=%zu; retaining %.6f Hz",
 					contentRate, RefreshRateHz(targetRefreshRate), supportedRates.size(),
 					RefreshRateHz(m_originalRefreshRate));
-				ReportKept(contentRate, \"no matching display mode\");
+				ReportKept(contentRate, "no matching display mode");
 				return;
 			}
 
@@ -5065,7 +5065,7 @@ namespace
 				{
 					DebugLog::Log(
 						"libplacebo refresh-rate candidate rollback failed; retaining unverified display state");
-					ReportKept(contentRate, \"rollback failed; display state unverified\");
+					ReportKept(contentRate, "rollback failed; display state unverified");
 					return;
 				}
 			}
@@ -5073,7 +5073,7 @@ namespace
 			DebugLog::Log(
 				"libplacebo refresh-rate switch: all %zu ranked DXGI candidates failed verification; retaining %.6f Hz",
 				rankedRates.size(), RefreshRateHz(m_originalRefreshRate));
-			ReportKept(contentRate, \"every candidate failed verification\");
+			ReportKept(contentRate, "every candidate failed verification");
 		}
 
 		void ReportKept(double inputHz, const char* why)
