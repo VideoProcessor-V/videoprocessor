@@ -97,43 +97,68 @@ namespace HookSegment
 		uint64_t runs = 0;
 	};
 
-	// Which member hooks get merged (pure form of Runner::Fuse's grouping, for the tests).
-	// stages[i] = the hook's stage bits, member[i] = may join a merged run, disabled[i] = the
-	// renderer disabled it (left alone). Returns, per input index, the run id it belongs to
-	// (-1 = left as is); runs with fewer than two hooks are not merged. Hooks of other stages
-	// between two members do not split a run (they do not run at that stage); a non-member hook
-	// AT the stage does (it must still run between them).
-	inline std::vector<int> GroupRuns(const std::vector<uint32_t>& stages, const std::vector<bool>& member,
-		const std::vector<bool>& disabled)
+	// Which member hooks get merged (pure form of Runner::Fuse's grouping, CPU-tested).
+	// stages[i] = the hook's stage bits; member[i] = may join a merged run (false for a hook that
+	// failed inside a merged hook: it then runs separately at its own place and splits the run);
+	// transparent[i] = libplacebo disabled it (left in place, skipped by libplacebo, does not split).
+	// Writes, per input index, the run id it belongs to (-1 = left as is); runs with fewer than two
+	// hooks are not merged. Hooks of other stages between two members do not split a run (they do
+	// not run at that stage); a non-member hook AT the stage does (it must still run between them).
+	inline void GroupRuns(const std::vector<uint32_t>& stages, const std::vector<bool>& member,
+		const std::vector<bool>& transparent, std::vector<int>& run)
 	{
 		const size_t n = stages.size();
-		std::vector<int> run(n, -1);
+		run.assign(n, -1);
+		uint32_t present = 0;
+		for (uint32_t s : stages)
+			present |= s;
 		int next = 0;
-		for (uint32_t bit = 1; bit != 0; bit <<= 1)
+		for (uint32_t bit = 1; bit != 0 && present; bit <<= 1)
 		{
-			std::vector<size_t> current;
-			auto close = [&]()
+			if (!(present & bit))
+				continue;
+			present &= ~bit;
+			size_t first = n, count = 0;
+			auto close = [&](size_t end)
 			{
-				if (current.size() >= 2)
+				if (count >= 2)
 				{
-					for (size_t i : current)
-						run[i] = next;
+					for (size_t i = first; i < end; ++i)
+						if (run[i] == -2)
+							run[i] = next;
 					++next;
 				}
-				current.clear();
+				else
+					for (size_t i = first; i < end && i < n; ++i)
+						if (run[i] == -2)
+							run[i] = -1;
+				first = n;
+				count = 0;
 			};
 			for (size_t i = 0; i < n; ++i)
 			{
-				if (!(stages[i] & bit) || disabled[i])
+				if (!(stages[i] & bit) || transparent[i])
 					continue;
 				const bool single = stages[i] == bit;   // a member must run at exactly one stage
-				if (member[i] && single && run[i] < 0)
-					current.push_back(i);
+				if (member[i] && single && run[i] == -1)
+				{
+					if (first == n)
+						first = i;
+					run[i] = -2;   // pending in the current run
+					++count;
+				}
 				else
-					close();
+					close(i);
 			}
-			close();
+			close(n);
 		}
+	}
+
+	inline std::vector<int> GroupRuns(const std::vector<uint32_t>& stages, const std::vector<bool>& member,
+		const std::vector<bool>& transparent)
+	{
+		std::vector<int> run;
+		GroupRuns(stages, member, transparent, run);
 		return run;
 	}
 }
