@@ -38,8 +38,7 @@ namespace OutputSegments
 			}
 		};
 
-		// colour.sdr_tone_shape (delta 13) and the DV trims (same slot switch; the trims are not
-		// tagged today, so not tagged here).
+		// colour.sdr_tone_shape (delta 13) and the DV trims (same slot switch and tag).
 		auto toneStage = [&]()
 		{
 			if (f.toneShape)
@@ -62,6 +61,7 @@ namespace OutputSegments
 			{
 				const size_t start = hooks.size();
 				dvTrims.Collect(false, hooks);
+				tag(start, Id::ColourSdrToneShape);   // as the host since 38badcb0: the trims follow the colour slot
 				for (size_t i = start; i < hooks.size(); ++i)
 					for (const auto& parameter : f.dv)
 						SetHookParameter(hooks[i], parameter.first, parameter.second);
@@ -139,8 +139,10 @@ namespace OutputSegments
 		struct Stage { Id slot; int order; int kind; };
 		Stage stages[] = {
 			{ Id::ColourSdrToneShape, registry.Order(Id::ColourSdrToneShape), 0 },
+			{ Id::ColourAppearance, registry.Order(Id::ColourAppearance), 4 },   // placeholder (Stage 13)
 			{ Id::DriveLedMeasure, registry.Order(Id::DriveLedMeasure), 1 },
 			{ Id::DriveLedCompensation, registry.Order(Id::DriveLedCompensation), 2 },
+			{ Id::DriveBlackLevel, registry.Order(Id::DriveBlackLevel), 4 },     // placeholder
 			{ Id::OutputCalibrationLut, registry.Order(Id::OutputCalibrationLut), 3 },
 		};
 		std::stable_sort(std::begin(stages), std::end(stages), [](const Stage& x, const Stage& y) { return x.order < y.order; });
@@ -157,7 +159,12 @@ namespace OutputSegments
 			case 0: toneStage(); break;
 			case 1: measureStage(); break;
 			case 2: compensationStage(); break;
-			default: lutStage(); break;
+			case 3: lutStage(); break;
+			default:
+				// A placeholder slot with a component but no S2 stage yet: counted for the host to report
+				// (it never runs silently, and never runs half-wired).
+				++counts.unhandled;
+				break;
 			}
 		}
 		edge();
@@ -189,20 +196,24 @@ namespace OutputSegments
 			members.push_back(hook);
 	}
 
-	bool OutputFinishSegment::PrepareDither(std::vector<const pl_hook*>& hooks, const SigmaDeltaDomain::Domain& domain,
+	DitherPrep OutputFinishSegment::PrepareDither(std::vector<const pl_hook*>& hooks, const SigmaDeltaDomain::Domain& domain,
 		bool outputFloat32, const PipelineSlots::Registry& registry)
 	{
-		// output.dither off (pipeline_slots_off): the sigma-delta is not submitted, exactly as for a
-		// code domain it does not support; libplacebo's own dither then runs as configured.
+		// output.dither off (pipeline_slots_off): the sigma-delta is not submitted, as for a code
+		// domain it does not support; libplacebo's own dither then runs as configured. Only the
+		// domain case is reported as a fallback (DitherPrep).
 		const bool ditherRuns = registry.Runs(Id::OutputDither);
-		bool any = false;
+		DitherPrep prep;
+		prep.slotOff = !ditherRuns;
 		for (size_t i = 0; i < hooks.size();)
 		{
 			const pl_hook* hook = hooks[i];
 			const bool sigma = SetHookParameter(hook, "levels_full", domain.full ? 1.0 : 0.0);
-			any = any || sigma;
+			prep.found = prep.found || sigma;
 			if (sigma && (!domain.supported || !ditherRuns))
 			{
+				if (ditherRuns)
+					prep.domainDropped = true;
 				hooks.erase(hooks.begin() + static_cast<std::ptrdiff_t>(i));
 				continue;
 			}
@@ -213,7 +224,7 @@ namespace OutputSegments
 			SetHookParameter(hook, "output_float32", outputFloat32 ? 1.0 : 0.0);
 			++i;
 		}
-		return any;
+		return prep;
 	}
 
 	bool OutputFinishSegment::KeepDitherLast(std::vector<const pl_hook*>& hooks, bool levelsFull)

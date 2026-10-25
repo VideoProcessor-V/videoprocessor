@@ -191,12 +191,27 @@ namespace SegmentRunner
 		const Check& LastCheck() const { return last; }
 
 		// The stages whose slot runs (zero-cost rule); edges and slot-less stages always listed.
+		// Slot stages take the registry's effective order among their own positions (a validated
+		// custom order is accepted, not refused); edges, slot-less stages and the quantiser keep
+		// their places (modularity sweep LOW: the list is not a second ordering list).
 		std::vector<StageInfo> Active(const PipelineSlots::Registry& registry) const
 		{
 			std::vector<StageInfo> out;
 			for (const StageInfo& s : stages)
 				if (s.role == Role::Edge || s.slot == Id::Count || registry.Runs(s.slot))
 					out.push_back(s);
+			std::vector<size_t> positions;
+			std::vector<StageInfo> movable;
+			for (size_t i = 0; i < out.size(); ++i)
+				if (out[i].role == Role::Vp && out[i].slot != Id::Count)
+				{
+					positions.push_back(i);
+					movable.push_back(out[i]);
+				}
+			std::stable_sort(movable.begin(), movable.end(), [&registry](const StageInfo& a, const StageInfo& b)
+				{ return registry.Order(a.slot) < registry.Order(b.slot); });
+			for (size_t k = 0; k < positions.size(); ++k)
+				out[positions[k]] = movable[k];
 			return out;
 		}
 

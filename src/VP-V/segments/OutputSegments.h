@@ -75,7 +75,23 @@ namespace OutputSegments
 	};
 
 	// How many hooks each stage contributed (the host's "NOT applied" states read these).
-	struct ColourCounts { size_t toneShape = 0, dvTrims = 0, ledMeasure = 0, ledCompensation = 0, user = 0, lut = 0; };
+	// unhandled = slots that run but have no S2 stage yet (a component registered in a placeholder
+	// slot before its stage is written): the host reports them, never silently skipped.
+	struct ColourCounts { size_t toneShape = 0, dvTrims = 0, ledMeasure = 0, ledCompensation = 0, user = 0, lut = 0, unhandled = 0; };
+
+	// What PrepareDither did. A domain drop (the sigma-delta cannot quantise this target) is a
+	// fallback; the slot switched off is a choice and never engages one (merge audit 2026-10-25).
+	struct DitherPrep
+	{
+		bool found = false;          // a sigma-delta hook was in the list
+		bool domainDropped = false;  // removed: unsupported code domain (slot on)
+		bool slotOff = false;        // removed: output.dither switched off
+	};
+	// The "requested" argument for FallbackCatalog::Dither: never with the slot off.
+	inline bool DitherFallbackRequested(const DitherPrep& prep, bool quantiserProblem)
+	{
+		return !prep.slotOff && (prep.found || quantiserProblem);
+	}
 
 	using TagFn = std::function<void(size_t start, PipelineSlots::Id slot)>;
 
@@ -119,7 +135,7 @@ namespace OutputSegments
 		// 1. The dither's code domain (today 24539-24567); an unsupported domain removes it.
 		//    Returns true when a dither hook was found.
 		//    output.dither off in the registry removes it the same way.
-		bool PrepareDither(std::vector<const pl_hook*>& hooks, const SigmaDeltaDomain::Domain& domain, bool outputFloat32,
+		DitherPrep PrepareDither(std::vector<const pl_hook*>& hooks, const SigmaDeltaDomain::Domain& domain, bool outputFloat32,
 			const PipelineSlots::Registry& registry);
 		// 2. The dither runs last at OUTPUT (24572-24593). Returns true when it was moved.
 		bool KeepDitherLast(std::vector<const pl_hook*>& hooks, bool levelsFull);

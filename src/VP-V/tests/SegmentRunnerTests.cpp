@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/OutputHookOrder.h>
 #include <VP-V/core/SegmentRunner.h>
 #include <VP-V/segments/OutputSegments.h>
@@ -170,6 +171,7 @@ namespace SegmentRunnerTestsNs
 		{
 			const size_t start = frameHooks.size();
 			m.dv.Collect(false, frameHooks);
+			TagSlotHooks(start, Id::ColourSdrToneShape);   // 38badcb0: trims follow the colour slot order
 			for (size_t i = start; i < frameHooks.size(); ++i)
 			{
 				for (const auto& parameter : f.dv)   // dc149284: the selection's list, ICtCp list, then the fixed five
@@ -678,11 +680,8 @@ namespace SegmentRunnerTestsNs
 			// LED measurement and compensation before the SDR tone shape (Stage 13 keeps following it).
 			Assert::IsTrue(registry.SetOrder({ Id::DriveLedMeasure, Id::DriveLedCompensation, Id::ColourSdrToneShape, Id::ColourAppearance }, &reason),
 				W(reason).c_str());
-			// Without the DV trims the segment equals today's host reorder exactly. With them it differs on
-			// purpose: today the untagged DV trims hook stays in place and would land BETWEEN the LED
-			// measurement and compensation (against OrderValidator rule 3b); the segment keeps it with its
-			// slot (the SDR tone shape).
-			CompareWithLegacy(registry, L"custom order", 63 & ~2);
+			// Equal to today's host reorder (38badcb0 tags the DV trims, so they move with their slot).
+			CompareWithLegacy(registry, L"custom order");
 			Modules m(false);
 			OutputSegments::ColourFrame f = Frame(1 | 2 | 4 | 8 | 16 | 32);
 			std::vector<const pl_hook*> hooks;
@@ -709,13 +708,88 @@ namespace SegmentRunnerTestsNs
 			OcclusionMask::Hook mask;
 			OutputSegments::OutputFinishSegment s3(repair, mask);
 			SigmaDeltaDomain::Domain domain;
-			Assert::IsTrue(s3.PrepareDither(hooks, domain, true, registry), L"found");
+			const OutputSegments::DitherPrep prep = s3.PrepareDither(hooks, domain, true, registry);
+			Assert::IsTrue(prep.found && prep.slotOff && !prep.domainDropped, L"found; removed because the slot is off");
 			Assert::AreEqual<size_t>(before - 1, hooks.size(), L"not submitted while off");
 			PipelineSlots::Registry on;
 			std::vector<const pl_hook*> again;
 			m.user.Collect(false, again);
 			s3.PrepareDither(again, domain, true, on);
 			Assert::AreEqual<size_t>(before, again.size());
+		}
+
+		// Merge audit (4): a domain drop engages "dither"; output.dither switched off never does.
+		TEST_METHOD(DitherFallbackOnlyForDomainOrShaderNotForSlotOff)
+		{
+			Modules m(false);
+			OutputEncodingRepair::Hook repair;
+			OcclusionMask::Hook mask;
+			OutputSegments::OutputFinishSegment s3(repair, mask);
+			SigmaDeltaDomain::Domain unsupported;
+			unsupported.supported = false;
+			auto run = [&](bool slotOn, const SigmaDeltaDomain::Domain& domain)
+			{
+				PipelineSlots::Registry registry;
+				registry.SetEnabled(Id::OutputDither, slotOn);
+				std::vector<const pl_hook*> hooks;
+				m.user.Collect(false, hooks);
+				return s3.PrepareDither(hooks, domain, true, registry);
+			};
+			auto engaged = [](const OutputSegments::DitherPrep& prep, bool quantiserProblem)
+			{
+				const FallbackCatalog::Decision d = FallbackCatalog::Dither(OutputSegments::DitherFallbackRequested(prep, quantiserProblem),
+					prep.domainDropped ? FallbackCatalog::DitherDrop::UnsupportedDomain :
+					quantiserProblem ? FallbackCatalog::DitherDrop::ShaderNotLoaded : FallbackCatalog::DitherDrop::None);
+				FallbackStatus::Registry fallbacks;
+				FallbackCatalog::Sync(fallbacks, d);
+				return fallbacks.Engaged("dither");
+			};
+			// Slot on, unsupported domain: dropped and engaged.
+			const OutputSegments::DitherPrep domainDrop = run(true, unsupported);
+			Assert::IsTrue(domainDrop.domainDropped && !domainDrop.slotOff);
+			Assert::IsTrue(engaged(domainDrop, false), L"a domain drop is a fallback");
+			// Slot on, shader problem: engaged.
+			const OutputSegments::DitherPrep fine = run(true, SigmaDeltaDomain::Domain());
+			Assert::IsFalse(fine.domainDropped);
+			Assert::IsFalse(engaged(fine, false));
+			Assert::IsTrue(engaged(fine, true), L"a shader problem is a fallback");
+			// Slot off (any domain, even a shader problem): a choice, never a fallback.
+			const OutputSegments::DitherPrep off = run(false, unsupported);
+			Assert::IsTrue(off.slotOff && !off.domainDropped);
+			Assert::IsFalse(engaged(off, false), L"output.dither off is not a fallback");
+			Assert::IsFalse(engaged(off, true), L"output.dither off is not a fallback");
+		}
+
+		// Modularity LOW: the merged form accepts a validated custom order instead of refusing it.
+		TEST_METHOD(MergedFormAcceptsAValidatedCustomOrder)
+		{
+			PipelineSlots::Registry registry;
+			FallbackStatus::Registry fallbacks;
+			std::string reason;
+			Assert::IsTrue(registry.SetOrder({ Id::DriveLedMeasure, Id::DriveLedCompensation, Id::ColourSdrToneShape, Id::ColourAppearance }, &reason),
+				W(reason).c_str());
+			Segment s2(kS2FallbackId, OutputColourStages(), OutputColourEntry());
+			Assert::IsTrue(s2.Configure(registry, true, 1, fallbacks) == Mode::Merged, W(s2.LastCheck().reason).c_str());
+			const std::vector<StageInfo> active = s2.Active(registry);
+			Assert::IsTrue(active.front().slot == Id::DriveLedMeasure, L"Active follows the registry order");
+			Assert::AreEqual(std::string("Fallbacks engaged: none"), fallbacks.Heading());
+		}
+
+		// Modularity LOW: a placeholder slot with a component but no S2 stage is counted, not skipped silently.
+		TEST_METHOD(PlaceholderWithAComponentIsCountedNotSilent)
+		{
+			Modules m(false);
+			PipelineSlots::Registry registry;
+			registry.SetComponent(Id::ColourAppearance, true);
+			registry.SetEnabled(Id::ColourAppearance, true);
+			std::vector<const pl_hook*> hooks, plain;
+			OutputSegments::OutputColourSegment s2(m.tone, m.dv, m.measure, m.comp, m.lut);
+			const OutputSegments::ColourCounts c = s2.Collect(Frame(63), registry, hooks, [](size_t, Id) {});
+			Assert::AreEqual<size_t>(1, c.unhandled);
+			PipelineSlots::Registry designed;
+			const OutputSegments::ColourCounts d = s2.Collect(Frame(63), designed, plain, [](size_t, Id) {});
+			Assert::AreEqual<size_t>(0, d.unhandled);
+			Assert::IsTrue(hooks == plain, L"no hook added for it");
 		}
 	};
 }
