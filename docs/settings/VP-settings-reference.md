@@ -38,12 +38,32 @@ Config now has one **VP-V** page that holds everything VP adds.
 
 | Part | What it does |
 |---|---|
-| **Pathway** | *VP-V pathway* (default): the VP-V page owns the settings it lists, and the same controls on the other pages are greyed with "Managed by VP-V". *Original pathway*: the VP-V page is disabled and the other pages behave exactly as upstream. It is stored as `[vpv] pipeline_original_pathway` (on = Original). In the renderer, Original switches every VP addition off and runs the mixed stages in their upstream form (ADR-0019). |
+| **Pathway** | *VP-V pathway* (default): the VP-V page is the one place for VP's settings. *Original pathway*: every VP addition is off in the renderer, so the whole VP-V page is disabled (it says so); Bill's settings stay on his pages, exactly as upstream. Stored as `[vpv] pipeline_original_pathway` (on = Original; written explicitly either way). In the renderer, Original runs the mixed stages in their upstream form (ADR-0019). |
 | **Profile** | The renderer profile the tiers edit. A named profile inherits everything it does not set from the first (default) profile, and profile rules pick the profile, for example per frame rate. |
 | **Global tier** | Classic / Low / Mid / Upper for every unit at once. If a unit has no step at that level, it uses its nearest lower step. Change one unit afterwards and the global tier shows *Custom (per unit)*. |
 | **Fallbacks engaged** | The running VP's list of automatic downgrades, for example "Fallbacks engaged: capture GPU unpack (CPU 4:2:0 ...)", or "none". It is the same line as Ctrl+I and Ctrl+Alt+D. |
-| **Unit tabs** | Each tab has the unit's tier slider, the settings listed under it, its planned settings (greyed, "not yet implemented"), and its stages in pipeline order with the text each one shows if it falls back. |
+| **Unit tabs** | Each tab has two sub-pages. **Main**: the unit's tier slider, its taste slider where it has one, and small cards of switches. **Advanced**: the settings a master on Main sets (greyed "Set by ..." until you tick *Custom* on that card; unticking puts the master's values back), tuning used only while its feature is on ("Used only when ... is on"), the measured internals (collapsed), the planned settings and the unit's stages with their fallback text. The layout map is `docs/settings/organisation.md`. |
 | **Pipeline (expert)** | For testing only: where the calibration LUT runs (`calibration_lut_stage`: libplacebo today, or VP's last colour step after Dynamic Drive), the module order (`pipeline_order`, checked with the renderer's own rules; an order it would reject is shown with the reason and not saved), and stages switched off entirely (`pipeline_slots_off`). |
+| **Proposed retirement** | The section-12 candidates below, by group, with where each control is and the value in use. The same note is added to each control's tooltip. Nothing is removed until you approve. Each unit tab also ends with "More settings of this unit", naming the pages that hold the rest (coverage audit: `docs/settings/coverage-audit.md`). |
+
+**One control per key.** Every VP setting has exactly one live control. VP's own settings that used
+to be on the VP Renderer > Rendering page moved to the VP-V page (the Rendering page keeps Bill's:
+quality, tone mapping, Processing); the old duplicate controls are hidden. The proposed retirements
+have their controls on the Proposed retirement tab.
+
+**Masters and what they set** (full table in `docs/settings/organisation.md`):
+- each unit's **tier** sets its tier keys (Advanced > Set by the tier);
+- the **de-judder amount** slider (Motion > Main) sets its eight fields (Advanced > Set by the de-judder
+  amount); the de-judder's other shaping is a separate card and is not set by it;
+- the **picture slider** (Scaling > Main) sets the re-base evidence (Advanced > Re-base evidence);
+- one slider per unit: the Classic Motion tier greys the de-judder amount, and below the Mid Scaling
+  tier the picture slider is greyed (re-base is off) and never offers its own Off;
+- a feature switch (render ahead, per-shot easing, SDR tone shape, room light, content labels) frees
+  its tuning on Advanced only while it is on;
+- **Proven fixes: all on** (Proposed retirement) sets the 14 renderer fix switches;
+- on the Dynamic Drive page (Main | Advanced): the **LED speeds preset** sets the nine speeds,
+  **Advanced LED values** sets the five advanced LED groups, **LED fixes under test** sets the nine
+  LED fix switches.
 
 **Where VP-V keys live.**
 - The global VP-V keys are in a `[vpv]` section: `pipeline_original_pathway`, `pipeline_order`,
@@ -62,14 +82,16 @@ Config now has one **VP-V** page that holds everything VP adds.
 
 | Unit | Classic | Low | Mid | Upper |
 |---|---|---|---|---|
-| Motion | no motion processing | de-judder with VP's matcher only | NVIDIA engine + matcher, 4 ahead | + split poorly matched blocks |
+| Motion | VP's basic matcher (whole-pixel, nothing ahead) | VP's matcher at quarter-pixel | NVIDIA engine + matcher, 4 ahead (shipped) | + split poorly matched blocks |
 | Repair | libplacebo deband only | + breathing reduction (today's default) | VP's grain-safe debander | + texture restore |
-| Scaling | no re-base, plain scaling | hybrid SSIM downscale (w 0.2) | re-base + hybrid | *not yet: refine net / D (uses Mid)* |
-| Output | libplacebo dither | sigma-delta dither | *same as Low* | *same as Low* |
+| Scaling | no re-base, plain scaling | re-base, plain scaling (shipped) | re-base + hybrid SSIM downscale (w 0.2) | *not yet: refine net / D (uses Mid)* |
+| Output | libplacebo dither | as shipped: the shader list decides (the cinema list loads the sigma-delta) | always VP's sigma-delta | *same as Mid* |
 | Input, Colour, Dynamic Drive | not tiered (paths and set-up, not quality steps) | | | |
 
-Leaving Motion's Classic step restores the default motion taste (Cinema, strength 0.25). The motion
-taste slider itself is never part of a tier, because it is your taste, not a cost choice.
+The motion taste slider (the de-judder amount, Motion > Main) is never part of a tier and no tier
+writes it: it is your taste, not a cost choice (As shot = no motion processing). The shipped values
+are a tier of every unit (Motion Mid, Repair Low, Scaling Low, Output Low); when values match no
+tier the unit shows Custom and no tier is written unless you choose one.
 
 ---
 
@@ -84,7 +106,8 @@ for the fixed delay.*
 - **Why:** the AVR delays the sound by a fixed amount. If VP's delay changed between titles, lip
   sync would drift. VP therefore holds ONE total delay, the same at every frame rate. Faster rates
   are padded.
-- **Recommended: 250 ms.** That gives 4 queued frames at 23.976p, the slowest rate. The queued
+- **Recommended: about 267 ms** (measured: 4 queued frames at 23.976p, the slowest rate, on a 60 Hz
+  display, including the display's phase; the earlier estimate was 250 ms; a faster display needs less). The queued
   frames are what the look-ahead features (motion ahead, Dynamic Drive's look-ahead, crop and
   subtitle look-ahead, hiccup repair) work from.
 - **When to change:** only to match an AVR or soundbar that cannot delay the audio by 250 ms plus
@@ -106,7 +129,7 @@ for the fixed delay.*
 | `lead_frames`, `startup_preroll_frames`, `active_picture_lookahead_frames` | How many queued frames the start-up and the crop detector use. | auto (follows the queue) | Diagnostics only. |
 | `reset_queue_too_large_percent`, `reset_after_render_restart_seconds` | When an over-full queue is reset, and how long after a renderer restart. | 5 s / profile's value | Only if the queue keeps resetting. |
 | `low_latency_path` | Games / 50-60p live. **Why:** the de-judder and motion look-ahead are switched off and frames upload early to get the lowest delay. | on only for a queue named Low_Latency | For a gaming queue profile. |
-| `queue_timing_fixes` (Fixes under test) | Drops frames to catch up only when really behind. | on | Never; A/B only. |
+| `queue_timing_fixes` (Proposed retirement > Proven fixes) | Drops frames to catch up only when really behind. | on | Never; A/B only. |
 
 ### 2.3 Capture (VP-V page, Input tab)
 | Key | What it does | Why it exists | Default | Cost |
@@ -169,7 +192,7 @@ These were tuned on real footage, and Config already marks them "measured - leav
 one decides when a block's motion is trusted, how far the search looks, and how held and moved
 areas meet. Change one only to reproduce a bug report.
 
-### 3.2 De-judder (the motion taste, VP Renderer page slider)
+### 3.2 De-judder (the motion taste: VP-V > Motion > Main, "De-judder amount"; its fields on Advanced)
 | Key | What / why | Default |
 |---|---|---|
 | **Motion slider** (As shot, Film, **Cinema**, Natural, Smooth, Max) | One question: how much should motion change from what was shot? Each step sets the keys below. | Cinema |
@@ -316,7 +339,11 @@ kept (owner rule). Stage 13 appearance is planned.*
 ## 7. Dynamic Drive
 
 *Projector LED and contrast (CNTR) control from the picture. It is set up on the Dynamic Drive
-page, not tiered.*
+page, not tiered.* The page has **Main** (Dynamic Drive on/off and its command source, the LED
+profile, the LED speeds preset, the projector connection) and **Advanced** (the speeds' values, set
+by the preset until Custom; Contrast and cuts; the Advanced LED masters and its five groups, each a
+small card set by "Advanced LED values" until Custom; projector response and limits; Experimental).
+Cards a command source does not use stay hidden.
 
 **Command source** (`command_source`):
 - *internal_script*: VP's copy of your script, used as an intent reference rather than for its

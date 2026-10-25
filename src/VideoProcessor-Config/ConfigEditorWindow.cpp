@@ -122,6 +122,14 @@
 #include <sstream>
 #include <VP-V/config/VpvSection.h>   // VP-V section hook (src/VP-V/config/README.md)
 
+// Settings preview (queue item 23): VideoProcessorConfig.exe --sandbox edits only its --config
+// file. It never signals, queries or commands a running VP (no live apply, no live status, no
+// profile/action/calibration/projector commands) and never searches the LAN for targets.
+static bool sandboxPreview()
+{
+    return qApp && qApp->property("vpSandboxPreview").toBool();
+}
+
 namespace
 {
 // RS-232 connection test: whether VideoProcessor.exe runs on this computer
@@ -1498,6 +1506,7 @@ ConfigEditorWindow::ConfigEditorWindow(QString configPath, quintptr ownerHandle,
     }
     setWindowTitle(remoteClient_ ?
 		QStringLiteral("VideoProcessor Configuration · %1").arg(remoteName_) :
+		sandboxPreview() ? QStringLiteral("VideoProcessor Configuration · Settings preview (sandbox file)") :
 		QStringLiteral("VideoProcessor Configuration"));
     setAccessibleName(QStringLiteral("VideoProcessor Configuration"));
     setObjectName(QStringLiteral("root"));
@@ -3264,6 +3273,11 @@ void ConfigEditorWindow::installActionContextMenu(QListWidget* list)
 void ConfigEditorWindow::runTargetCommand(const QString& group,
 	const QString& name, bool enabled, bool action)
 {
+	if (sandboxPreview())
+	{
+		setStatus(QStringLiteral("Settings preview: VP is not connected, so profiles and actions cannot be run."), true);
+		return;
+	}
 	if (noTarget_ || manualCommandThread_) return;
 	const QString host = remoteClient_ ? remoteHost_ : QStringLiteral("127.0.0.1");
 	const quint16 port = remoteClient_ ? remotePort_ : 41686;
@@ -3367,7 +3381,7 @@ void ConfigEditorWindow::refreshActiveProfileIndicators()
     const uint32_t expectedProcessId = nativeOwnerIsValid() ?
         ownerProcessId_ : 0;
     ActiveProfileStatus::Snapshot active;
-    const bool available = ActiveProfileStatus::Read(expectedProcessId, active);
+    const bool available = !sandboxPreview() && ActiveProfileStatus::Read(expectedProcessId, active);
     const QString renderer = available ? QString::fromLocal8Bit(active.renderer) : QString();
     const QString color = available ? QString::fromLocal8Bit(active.color) : QString();
     const QString scaling = available ? QString::fromLocal8Bit(active.scaling) : QString();
@@ -4609,7 +4623,7 @@ bool ConfigEditorWindow::hasActiveOwnedPopup() const
 
 bool ConfigEditorWindow::notifyVideoProcessor()
 {
-	if (remoteClient_) return false;
+	if (remoteClient_ || sandboxPreview()) return false;
     // Test-mode editors represent the normal VP-absent standalone case. This
     // also prevents a UI test from disturbing a developer's running VP.
     if (testMode_) return false;
@@ -7696,7 +7710,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "(e.g. a 24p profile at Cinema, a 30p profile at Natural). Film-like sources only; off for 50p/60p "
             "video, in the low-latency queue and for interlaced input. The Motion page's Motion handling chooses "
             "VP's de-judder or libplacebo's smooth motion - one or the other, never both."));
-        auto* motionReset = new QPushButton(QStringLiteral("Reset to preset"));
+        auto* motionReset = new QPushButton(QStringLiteral("Reset"))   /* one word for every slider's reset (organisation audit 2026-10-24) */;
         motionReset->setObjectName(controlName(sectionPrefix, QStringLiteral("motion_preset_reset")));
         motionReset->setToolTip(QStringLiteral("Puts the fields below back to the slider position's values."));
         motionRow->addWidget(new QLabel(QStringLiteral("As shot")));
@@ -7859,7 +7873,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                         return;
                     }
                 motionName->setText(QStringLiteral("Custom"));
-                motionDescription->setText(QStringLiteral("The fields below differ from %1. Reset to preset puts them back.")
+                motionDescription->setText(QStringLiteral("The fields below differ from %1. Reset puts them back.")
                     .arg(QString::fromLatin1(kPositions[motionSlider->value()].name)));
             };
             auto apply = [=](int p) {
@@ -8215,7 +8229,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "upscale clarity; the values appear in the fields below and can be edited (Custom). Real detail above the "
             "detected size, a seek or a source change always returns to native at once. Subtitles the player draws "
             "itself are softened (to about the detected size) when a stream is re-based; they stay legible."));
-        auto* pictureReset = new QPushButton(QStringLiteral("Reset to preset"));
+        auto* pictureReset = new QPushButton(QStringLiteral("Reset"))   /* one word for every slider's reset (organisation audit 2026-10-24) */;
         pictureReset->setObjectName(controlName(sectionPrefix, QStringLiteral("picture_preset_reset")));
         pictureReset->setToolTip(QStringLiteral("Puts the fields below back to the slider position's values."));
         auto* pictureDefault = new QPushButton(QStringLiteral("Default"));
@@ -8360,7 +8374,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                         return;
                     }
                 pictureName->setText(QStringLiteral("Custom"));
-                pictureDescription->setText(QStringLiteral("The fields below differ from %1. Reset to preset puts them back.")
+                pictureDescription->setText(QStringLiteral("The fields below differ from %1. Reset puts them back.")
                     .arg(QString::fromLatin1(kPositions[pictureSlider->value()].name)));
             };
             auto apply = [=](int p) {
@@ -8768,7 +8782,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             // Render-ahead 2026-10-17: the renderer decides the fill independently of
             // interpolation, so hiccup repair works with motion smoothing off.
             form->addRow(QString(), helpLabel(QStringLiteral(
-                "Works with motion smoothing on or off (on by default; owner 2026-10-18).")));
+                "Works with motion smoothing on or off (on by default).")));
         }
         // Owner 2026-10-18: hiccup repair is on by default; motion smoothing (interpolation) stays off.
         auto* fillGaps = addChoice(QStringLiteral("Fill dropped frames"), QStringLiteral("interpolation_fill_gaps"),
@@ -9542,7 +9556,16 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             auto update = [=]()
             {
                 const bool active = number(dejudderStrength) > 0.0 || number(strengthEven) > 0.0;
-                auto showIn = [](QFormLayout* layout, QWidget* row, bool visible) { layout->setRowVisible(row, visible); };
+                // VP-V organisation pass 2 (2026-10-24, src/VP-V/config/VpvOrganisation.h): the VP-V page may
+                // move a row to a form of its own; show or hide it in the form that holds it now. The row's
+                // label, when VP-V stacked it above the field, goes with it (property vpvRowLabel).
+                auto showIn = [](QFormLayout* layout, QWidget* row, bool visible) {
+                    if (auto* current = row->parentWidget() ? qobject_cast<QFormLayout*>(row->parentWidget()->layout()) : nullptr)
+                        layout = current;
+                    layout->setRowVisible(row, visible);
+                    if (auto* label = qobject_cast<QWidget*>(row->property("vpvRowLabel").value<QObject*>()))
+                        layout->setRowVisible(label, visible);
+                };
                 showIn(dejudderTasteForm, evenRates, number(strengthEven) > 0.0);
                 for (QWidget* row : { static_cast<QWidget*>(rolloff), static_cast<QWidget*>(objectStrength),
                         static_cast<QWidget*>(fadeMatch) })
@@ -11300,6 +11323,17 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 				controlName(sectionPrefix, QStringLiteral("target_mode_refresh"))))
 				refresh->trigger();
 		}
+		// VP-V organisation pass (2026-10-24, src/VP-V/config/VpvOrganisation.h): the VP-V page moves some
+		// of this profile's sections and rows onto its unit tabs (still bound to this profile), so a
+		// lookup that misses profileFields also searches the whole editor (the names are unique there).
+		const auto findProfileWidget = [this, profileFields](const QString& objectName) -> QWidget* {
+			QWidget* found = profileFields->findChild<QWidget*>(objectName);
+			return found ? found : findChild<QWidget*>(objectName);
+		};
+		const auto findProfileAction = [this, profileFields](const QString& objectName) -> QAction* {
+			QAction* found = profileFields->findChild<QAction*>(objectName);
+			return found ? found : findChild<QAction*>(objectName);
+		};
 		// The motion slider follows the loaded fields (loading blocks their own
 		// change signals).
 		static const QStringList kContentGateKeys = { QStringLiteral("intent_content"),
@@ -11310,7 +11344,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 			// Hunt 3 (CFG5): undo the previous profile's content-gate greying first,
 			// so the refreshes below set the state they own.
 			for (const QString& key : kContentGateKeys)
-				if (QWidget* widget = profileFields->findChild<QWidget*>(controlName(sectionPrefix, key)))
+				if (QWidget* widget = findProfileWidget(controlName(sectionPrefix, key)))
 					if (widget->property("contentGateIgnored").toBool())
 					{
 						widget->setProperty("contentGateIgnored", false);
@@ -11318,34 +11352,34 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 						widget->setEnabled(true);
 						widget->setToolTip(widget->property("contentGateTooltip").toString());
 					}
-			if (auto* refresh = profileFields->findChild<QAction*>(
+			if (auto* refresh = findProfileAction(
 				controlName(sectionPrefix, QStringLiteral("motion_preset_refresh"))))
 				refresh->trigger();
-			if (auto* refresh = profileFields->findChild<QAction*>(
+			if (auto* refresh = findProfileAction(
 				controlName(sectionPrefix, QStringLiteral("picture_preset_refresh"))))
 				refresh->trigger();
-			if (auto* refresh = profileFields->findChild<QAction*>(
+			if (auto* refresh = findProfileAction(
 				controlName(sectionPrefix, QStringLiteral("adaptive_faithful_refresh"))))
 				refresh->trigger();
-			if (auto* refresh = profileFields->findChild<QAction*>(
+			if (auto* refresh = findProfileAction(
 				controlName(sectionPrefix, QStringLiteral("optical_flow_refresh"))))
 				refresh->trigger();
-			if (auto* refresh = profileFields->findChild<QAction*>(
+			if (auto* refresh = findProfileAction(
 				controlName(sectionPrefix, QStringLiteral("interpolation_refresh"))))
 				refresh->trigger();
-			if (auto* refresh = profileFields->findChild<QAction*>(
+			if (auto* refresh = findProfileAction(
 				controlName(sectionPrefix, QStringLiteral("temporal_dither_refresh"))))
 				refresh->trigger();
-			if (auto* refresh = profileFields->findChild<QAction*>(
+			if (auto* refresh = findProfileAction(
 				controlName(sectionPrefix, QStringLiteral("intent_content_refresh"))))
 				refresh->trigger();
-			if (auto* refresh = profileFields->findChild<QAction*>(
+			if (auto* refresh = findProfileAction(
 				controlName(sectionPrefix, QStringLiteral("detail_restore_refresh"))))
 				refresh->trigger();
-			if (auto* refresh = profileFields->findChild<QAction*>(
+			if (auto* refresh = findProfileAction(
 				controlName(sectionPrefix, QStringLiteral("intent_adaptive_refresh"))))
 				refresh->trigger();
-			if (auto* refresh = profileFields->findChild<QAction*>(
+			if (auto* refresh = findProfileAction(
 				controlName(sectionPrefix, QStringLiteral("greyed_state_refresh"))))
 				refresh->trigger();
 			// Hunt 3 (CFG5): in a profile whose when: rule reads $content, the
@@ -11360,12 +11394,12 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 					std::string error;
 					contentGated = expression.Compile(when, error, true) && expression.Variables().count("content") != 0;
 				}
-				const QString cadenceFixes = effectiveChoiceValue(profileFields->findChild<QComboBox*>(
-					controlName(sectionPrefix, QStringLiteral("cadence_class_fixes"))));
+				const QString cadenceFixes = effectiveChoiceValue(qobject_cast<QComboBox*>(findProfileWidget(
+					controlName(sectionPrefix, QStringLiteral("cadence_class_fixes")))));
 				const bool ignored = contentGated && cadenceFixes != QStringLiteral("off");
 				for (const QString& key : kContentGateKeys)
 				{
-					QWidget* widget = profileFields->findChild<QWidget*>(controlName(sectionPrefix, key));
+					QWidget* widget = findProfileWidget(controlName(sectionPrefix, key));
 					if (!widget || !ignored) continue;
 					widget->setProperty("contentGateTooltip", widget->toolTip());
 					widget->setProperty("contentGateIgnored", true);
@@ -14109,6 +14143,11 @@ QWidget* ConfigEditorWindow::createLedDrivePage()
         label = QPointer<QLabel>(testResult)]
     {
         if (noTarget_ || !button || !label) return;
+        if (sandboxPreview())
+        {
+            label->setText(QStringLiteral("Settings preview: VP is not connected, so the projector cannot be tested."));
+            return;
+        }
         if (projectorTestThread_)
         {
             label->setStyleSheet(QString());
@@ -15350,6 +15389,11 @@ QWidget* ConfigEditorWindow::createCalibrationPage()
 
 void ConfigEditorWindow::runCalibrationCommand(const QString& command, const QString& arguments)
 {
+    if (sandboxPreview())
+    {
+        applyCalibrationStatus(QString(), QStringLiteral("Settings preview: VP is not connected."), command);
+        return;
+    }
     if (noTarget_ || calibrationRpcThread_) return;
     const bool remote = remoteClient_ != nullptr;
     const QString host = remote ? remoteHost_ : QStringLiteral("127.0.0.1");
@@ -15930,7 +15974,8 @@ void ConfigEditorWindow::showUpdates()
 
 void ConfigEditorWindow::setupTray()
 {
-    if (!QSystemTrayIcon::isSystemTrayAvailable()) return;
+    // The settings preview has no tray icon: closing its window ends it.
+    if (sandboxPreview() || !QSystemTrayIcon::isSystemTrayAvailable()) return;
     tray_ = new QSystemTrayIcon(windowIcon(), this);
     tray_->setToolTip(QStringLiteral("VideoProcessor Configuration"));
     auto* menu = new QMenu(this);

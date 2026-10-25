@@ -30,6 +30,8 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 #include <vector>
 #include <cstring>
 #include <RendererConfigView.h>
+#include <RetiredSettings.h>
+#include <ToneMappingTuning.h>
 
 #include <QApplication>
 #include <QAccessible>
@@ -70,6 +72,7 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 #include <QPushButton>
 #include <QRect>
 #include <QScrollArea>
+#include <QTabWidget>
 #include <QScrollBar>
 #include <QSettings>
 #include <QShortcut>
@@ -81,6 +84,7 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 #include <QTableWidget>
 #include <QTabBar>
 #include <QTemporaryDir>
+#include <QTextStream>
 #include <QDoubleSpinBox>
 #include <QThread>
 #include <QTimer>
@@ -1451,6 +1455,9 @@ void testPictureSliderPresets()
     auto* clarity = requireControl<QLineEdit>(window, "config.vprenderer.source_resolution_auto_min_confidence");
     auto* seconds = requireControl<QLineEdit>(window, "config.vprenderer.source_resolution_evidence_seconds");
     auto* shots = requireControl<QLineEdit>(window, "config.vprenderer.source_resolution_evidence_shots");
+    // Organisation pass 2: the Scaling tier owns re-base on/off (source_resolution native / auto), so the
+    // slider has no Off of its own; its positions set how much evidence re-base needs.
+    require(slider->minimum() == 1, "the picture slider offers its own Off (the Scaling tier owns it)");
     profiles->setCurrentRow(1);
     QCoreApplication::processEvents();
     require(name->text() == "Custom", (QByteArray("A fixed 1080 is not shown as Custom: ") + name->text().toUtf8()).constData());
@@ -1462,8 +1469,7 @@ void testPictureSliderPresets()
     const Row rows[] = {
         { 1, "auto", "0.9", "20", "4", "Cautious" },
         { 2, "auto", "0.8", "10", "3", "Standard" },
-        { 3, "auto", "0.7", "5", "2", "Fast" },
-        { 0, "native", "0.8", "10", "3", "Off" } };
+        { 3, "auto", "0.7", "5", "2", "Fast" } };
     for (const Row& r : rows)
     {
         slider->setValue(r.position);
@@ -1474,10 +1480,6 @@ void testPictureSliderPresets()
             (at + "evidence " + clarity->text().toUtf8() + " " + seconds->text().toUtf8() + " " + shots->text().toUtf8()).constData());
         require(name->text().startsWith(r.label), (at + "label " + name->text().toUtf8()).constData());
     }
-    // Off is the source size alone: an edited evidence field under native still reads Off.
-    seconds->setText("30");
-    QCoreApplication::processEvents();
-    require(name->text().startsWith("Off"), (QByteArray("Off with other evidence is not Off: ") + name->text().toUtf8()).constData());
     // Standard, then an edit: Custom without moving the slider; reset restores.
     slider->setValue(2);
     shots->setText("5");
@@ -1516,7 +1518,8 @@ void testPictureSliderPresets()
     apply->click();
     QCoreApplication::processEvents();
     const QByteArray saved = readBytes(path);
-    for (const char* expected : { "source_resolution: auto", "source_resolution_auto_min_confidence: 0.7",
+    // source_resolution stays unset (auto is the shipped value; the Scaling tier owns it).
+    for (const char* expected : { "source_resolution_auto_min_confidence: 0.7",
         "source_resolution_evidence_seconds: 5", "source_resolution_evidence_shots: 2", "source_resolution: 1080" })
         require(saved.contains(expected), (QByteArray("Picture setting not saved: ") + expected).constData());
     ConfigEditorWindow reopened(path, 0, true);
@@ -1577,6 +1580,11 @@ void testExclusiveButtonsForLedSourceAndMotionSource()
     auto* matcher = requireControl<QRadioButton>(window, "config.vprenderer.optical_flow.matcher");
     auto* flow = requireControl<QComboBox>(window, "config.vprenderer.optical_flow");
     require(engine->isChecked() && !matcher->isChecked(), "the engine (default) is not shown selected");
+    // Organisation pass 2: optical_flow is a Motion tier key (VP-V > Motion > Advanced > Set by the Motion
+    // tier), greyed until Custom.
+    require(!matcher->isEnabled(), "the motion source is not set by the Motion tier");
+    requireControl<QCheckBox>(window, "vpv.motion.card.tier_keys.custom")->setChecked(true);
+    QCoreApplication::processEvents();
     matcher->click();
     QCoreApplication::processEvents();
     require(flow->currentData().toString() == "off" && !engine->isChecked(), "VP's matcher only did not set optical_flow off");
@@ -1609,6 +1617,9 @@ void testTemporalDitherButtons()
     require(!off->isChecked() && !libplacebo->isChecked() && !sigma->isChecked() &&
         requireControl<QRadioButton>(window, "config.vprenderer.temporal_dither.auto")->isChecked(),
         "an unset profile does not show Auto");
+    // Organisation pass 2: temporal_dither is the Output tier's key, greyed until Custom.
+    requireControl<QCheckBox>(window, "vpv.output.card.tier_keys.custom")->setChecked(true);
+    QCoreApplication::processEvents();
     sigma->click();
     QCoreApplication::processEvents();
     require(value->currentData().toString() == "sigma_delta" && !libplacebo->isChecked(), "VP temporal did not set sigma_delta");
@@ -1731,9 +1742,16 @@ void testDetailRestoreControls()
     auto* restore = requireControl<QComboBox>(window, "config.vprenderer.texture_restore");
     auto* restoreCap = requireControl<QLineEdit>(window, "config.vprenderer.texture_restore_cap");
     auto* pulseFast = requireControl<QComboBox>(window, "config.vprenderer.detail_pulse_fast");   // 2026-10-18
+    // Organisation passes 2026-10-24: the caps are in VP-V > Repair > Advanced > Limits, the stage
+    // switches (the Repair tier's keys) in Advanced > Set by the Repair tier; the fast path (a VP-V
+    // toggle on the retirement tab) keeps its hidden row in the content-adaptive group.
+    auto* texture = requireControl<QWidget>(window, "vpv.repair.card.limits.body");
+    auto* tierKeys = requireControl<QWidget>(window, "vpv.repair.card.tier_keys.body");
     for (QWidget* control : std::initializer_list<QWidget*>{ pulse, pulseCap, pulseFast, restore, restoreCap })
     {
-        require(content->isAncestorOf(control), "a detail control is outside the content-adaptive group");
+        const bool cap = control == pulseCap || control == restoreCap;
+        const bool stage = control == pulse || control == restore;
+        require((cap ? texture : stage ? tierKeys : content)->isAncestorOf(control), "a detail control is outside its group");
         require(!control->toolTip().trimmed().isEmpty(), "a detail control has no tooltip");
     }
     require(pulse->toolTip().contains("never averaged") || pulse->toolTip().contains("nothing is copied", Qt::CaseInsensitive),
@@ -1922,8 +1940,15 @@ void testInheritedButtonsAndReorganisedSections()
         return widget && content && content->isAncestorOf(widget);
     };
     require(inSection("config.vprenderer.capture_path", QStringLiteral("captureSource")), "capture_path not under Capture & source");
-    require(inSection("config.vprenderer.picture_preset_box", QStringLiteral("sourceRebase")), "Picture not under Source resolution & re-base");
-    require(inSection("config.vprenderer.deband_vp", QStringLiteral("sourceRebase")), "VP deband not under Source resolution & re-base");
+    // Organisation pass 2 (2026-10-24): the picture slider is the master on VP-V > Scaling > Main, VP
+    // deband a Repair tier key (VP-V > Repair > Advanced > Set by the Repair tier).
+    auto inCard = [&window](const char* control, const char* card) {
+        auto* widget = window.findChild<QWidget*>(QString::fromLatin1(control));
+        auto* body = window.findChild<QWidget*>(QString::fromLatin1(card));
+        return widget && body && body->isAncestorOf(widget);
+    };
+    require(inCard("config.vprenderer.picture_preset_box", "vpv.scaling.card.rebase.body"), "Picture not the Scaling master");
+    require(inCard("config.vprenderer.deband_vp", "vpv.repair.card.tier_keys.body"), "VP deband not set by the Repair tier");
     require(inSection("config.vprenderer.ssim_residual_stabilise", QStringLiteral("adaptiveDownscale")), "SSIM steadiness not with the downscale blend");
     // Pruning 2026-10-17: the retired switches have no control any more.
     for (const char* retired : { "config.vprenderer.dither_vectors_new_frame", "config.vprenderer.fix_scene_cooldown",
@@ -2288,6 +2313,10 @@ void testLedDrivePageAndLiveSwitches()
     auto* pictureOnly = requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.led_picture_only"));
     require(fullPeak->isChecked() && pictureOnly->isChecked(),
         "led_peak_full_coverage / led_picture_only are not on by default");
+    // Organisation pass 2: the LED fixes under test have one master (Advanced LED card), all on until Custom.
+    require(!fullPeak->isEnabled(), "the LED fixes are not set by their master");
+    requireControl<QCheckBox>(window, "vpv.drive.led_fixes")->setChecked(true);
+    QCoreApplication::processEvents();
     require(fullPeak->isVisibleTo(&window) && pictureOnly->isVisibleTo(&window) && fullPeak->isEnabled() &&
         pictureOnly->isEnabled(), "The Dynamic Drive measurement switches are not offered");
     require(fullPeak->toolTip().contains(QStringLiteral("Dynamic Drive")) &&
@@ -9108,6 +9137,9 @@ void testClearedChoiceShowsTheInheritedValue()
     profiles->setCurrentRow(1);
     QCoreApplication::processEvents();
     require(engine->isChecked(), "fixture: the profile's own engine choice");
+    // Organisation pass 2: optical_flow is the Motion tier's key, greyed until Custom.
+    requireControl<QCheckBox>(window, "vpv.motion.card.tier_keys.custom")->setChecked(true);
+    QCoreApplication::processEvents();
     unset->click();
     QCoreApplication::processEvents();
     require(matcher->isChecked() && !engine->isChecked(), "Not set still shows the profile's old value");
@@ -9130,6 +9162,8 @@ void testClearedChoiceShowsTheInheritedValue()
     writeFixture(path2, "[vprenderer.Cinema]\nquality: high\n[vprenderer.Other]\noptical_flow: off\n");
     ConfigEditorWindow second(path2, 0, true);
     requireControl<QListWidget>(second, "config.vprenderer.profiles")->setCurrentRow(1);
+    QCoreApplication::processEvents();
+    requireControl<QCheckBox>(second, "vpv.motion.card.tier_keys.custom")->setChecked(true);
     QCoreApplication::processEvents();
     requireControl<QToolButton>(second, "config.vprenderer.optical_flow.unset")->click();
     QCoreApplication::processEvents();
@@ -9243,33 +9277,10 @@ static std::set<std::string> RendererValidatedKeys()
     return keys;
 }
 
-void testEverySchemaKeyHasAConfigControl()
+// The schema sources the coverage test (and the settings inventory, --inventory) walk.
+struct CoverageSource { const char* name; std::vector<std::string> sections; std::vector<std::string> keys; };
+static std::vector<CoverageSource> CoverageSources()
 {
-    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
-    writeFixture(path, "[general]\nfullscreen: false\n[vprenderer]\nquality: high\n"
-        "[led_drive.Default]\nenabled: true\ncommand_source: compensate\n"
-        "[projector.Default]\nprotocol: barco_ascii\nport: COM1\n");
-    ConfigEditorWindow window(path, 0, true);
-    // Hunt 2 (2026-10-17): coverage is per section. A control named
-    // "config.<section>.<key>" covers <key> only for the schema whose section it
-    // belongs to, so a same-named control elsewhere (a shader's "curve", the
-    // Actions page's "enabled") cannot hide a missing one.
-    std::map<std::string, std::set<std::string>> controlSections; // key -> sections
-    for (QObject* object : window.findChildren<QObject*>())
-    {
-        const QString name = object->objectName();
-        if (!name.startsWith(QStringLiteral("config."))) continue;
-        QStringList parts = name.mid(7).split(QLatin1Char('.'));
-        // A key edited through several widgets names them "<key>.auto" / "<key>.value";
-        // a combo's reset button is "<key>.unset", a unit label "<key>.unit".
-        if (parts.size() > 2 && QStringList({ QStringLiteral("auto"), QStringLiteral("value"),
-            QStringLiteral("unset"), QStringLiteral("unit") }).contains(parts.last()))
-            parts.removeLast();
-        if (parts.size() < 2) continue;
-        const QString key = parts.takeLast();
-        controlSections[key.toStdString()].insert(parts.join(QLatin1Char('.')).toStdString());
-    }
-    struct Source { const char* name; std::vector<std::string> sections; std::vector<std::string> keys; };
     auto keysOf = [](const std::vector<ConfigSchema::KeyRule>& rules)
     {
         std::vector<std::string> keys;
@@ -9277,8 +9288,13 @@ void testEverySchemaKeyHasAConfigControl()
         return keys;
     };
     const std::set<std::string> rendererKeySet = RendererValidatedKeys();
-    require(rendererKeySet.size() > 100, "the renderer validators' keys were not found");
-    std::vector<Source> sources = {
+    std::vector<std::string> toneKeys;
+    for (const auto& spec : ToneMappingTuning::Specs())
+        if (!rendererKeySet.count(spec.key)) toneKeys.push_back(spec.key);
+    std::vector<std::string> retiredKeys;
+    for (const char* key : { "fix_scene_cooldown", "dejudder_picture_area", "dither_vectors_new_frame" })
+        if (RetiredSettings::FindKey(key) && !rendererKeySet.count(key)) retiredKeys.push_back(key);
+    return {
         { "led_drive", { "led_drive" }, keysOf(LedDrive::LedDriveRules()) },
         { "projector", { "projector" }, keysOf(LedDrive::ProjectorRules()) },
         { "general", { "general", "command_line" }, keysOf(MainConfigSchema::GeneralRules()) },
@@ -9298,7 +9314,15 @@ void testEverySchemaKeyHasAConfigControl()
         { "logging", { "logging" }, keysOf(MainConfigSchema::LoggingRules()) },
         // RendererProfileConfig's validators also own the [queue.*] and [lldv.*] profile groups.
         { "renderer", { "vprenderer", "queue", "lldv" }, std::vector<std::string>(rendererKeySet.begin(), rendererKeySet.end()) },
+        // Coverage audit 2026-10-24: the renderer also accepts keys through tables that the
+        // `key == "x"` scan cannot see: the tone-mapping tuning table and the retired keys.
+        { "renderer", { "vprenderer" }, toneKeys },
+        { "renderer", { "vprenderer" }, retiredKeys },
     };
+}
+
+static const std::map<std::string, const char*>& CoverageAllowList()
+{
     // Keys that intentionally have no control of their own, "<source>:<key>" with the
     // reason. Only retired, alias, legacy-location and diagnostic-only keys; a live
     // key never belongs here (hunt 2: subtitle_hold_ms / subtitle_near_bar_px were
@@ -9349,6 +9373,10 @@ void testEverySchemaKeyHasAConfigControl()
             "but never read at runtime" },
         // Renderer keys.
         { "renderer:deband", "legacy toggle; deband_strength has the control" },
+        // RetiredSettings.h (pruning 2026-10-17): accepted with any value and ignored.
+        { "renderer:fix_scene_cooldown", "retired (RetiredSettings.h): accepted with any value, ignored" },
+        { "renderer:dejudder_picture_area", "retired (RetiredSettings.h): accepted with any value, ignored" },
+        { "renderer:dither_vectors_new_frame", "retired (RetiredSettings.h): accepted with any value, ignored" },
         { "renderer:sdr_target_primaries", "legacy spelling of target_primaries" },
         { "renderer:calibration_lut_input_gamma", "retired: accepted but no longer controls LUT / HDR encoding "
             "(hdr_tone_map_target_gamma has the control)" },
@@ -9384,9 +9412,42 @@ void testEverySchemaKeyHasAConfigControl()
         { "renderer:calibration_lut_stage", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.calibration_lut_stage); also read from [vprenderer]" },
         { "renderer:pipeline_entrance_once", "hidden diagnostic/test key (ADR-0024): B3 is the default and the pre-B3 path is retired; no Config control" },
     };
+    return allowList;
+}
+
+void testEverySchemaKeyHasAConfigControl()
+{
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[general]\nfullscreen: false\n[vprenderer]\nquality: high\n"
+        "[led_drive.Default]\nenabled: true\ncommand_source: compensate\n"
+        "[projector.Default]\nprotocol: barco_ascii\nport: COM1\n");
+    ConfigEditorWindow window(path, 0, true);
+    // Hunt 2 (2026-10-17): coverage is per section. A control named
+    // "config.<section>.<key>" covers <key> only for the schema whose section it
+    // belongs to, so a same-named control elsewhere (a shader's "curve", the
+    // Actions page's "enabled") cannot hide a missing one.
+    std::map<std::string, std::set<std::string>> controlSections; // key -> sections
+    for (QObject* object : window.findChildren<QObject*>())
+    {
+        const QString name = object->objectName();
+        if (!name.startsWith(QStringLiteral("config."))) continue;
+        QStringList parts = name.mid(7).split(QLatin1Char('.'));
+        // A key edited through several widgets names them "<key>.auto" / "<key>.value";
+        // a combo's reset button is "<key>.unset", a unit label "<key>.unit".
+        if (parts.size() > 2 && QStringList({ QStringLiteral("auto"), QStringLiteral("value"),
+            QStringLiteral("unset"), QStringLiteral("unit") }).contains(parts.last()))
+            parts.removeLast();
+        if (parts.size() < 2) continue;
+        const QString key = parts.takeLast();
+        controlSections[key.toStdString()].insert(parts.join(QLatin1Char('.')).toStdString());
+    }
+    const std::vector<CoverageSource> sources = CoverageSources();
+    require(RendererValidatedKeys().size() > 100, "the renderer validators' keys were not found");
+    const std::map<std::string, const char*>& allowList = CoverageAllowList();
+
     std::set<std::string> usedAllowList;
     std::vector<std::string> missing;
-    for (const Source& source : sources)
+    for (const CoverageSource& source : sources)
         for (const std::string& key : source.keys)
         {
             const auto found = controlSections.find(key);
@@ -9415,6 +9476,197 @@ void testEverySchemaKeyHasAConfigControl()
     for (const auto& entry : allowList)
         if (!usedAllowList.count(entry.first)) stale += " " + entry.first;
     require(stale.empty(), ("Allow-list entries for keys no schema validates (remove them):" + stale).c_str());
+}
+
+// Settings coverage audit (docs/settings/coverage-audit.md; tools/settings_coverage_audit.py).
+// `VideoProcessorConfigTests.exe --inventory <file>` writes, as tab-separated lines:
+//   K <source> <sections> <key> <allow-list reason>   every schema key the coverage test walks;
+//   C <object> <class> <shown> <tooltip?> <enabled> <tooltip>   every config. / vpv. control, with
+//     what it shows when its key is unset (the default Config presents);
+//   S <action> <chord>   the compiled shortcut defaults.
+// It is not a test: it only reads, and exits 0 once the file is written.
+static QString inventoryField(QString text)
+{
+    text.replace(QLatin1Char('\t'), QLatin1Char(' ')).replace(QLatin1Char('\r'), QLatin1Char(' '))
+        .replace(QLatin1Char('\n'), QLatin1Char(' '));
+    return text.trimmed();
+}
+
+int writeSettingsInventory(const QString& outPath)
+{
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[general]\nfullscreen: false\n[vprenderer]\nquality: high\n"
+        "[led_drive.Default]\nenabled: true\ncommand_source: compensate\n"
+        "[projector.Default]\nprotocol: barco_ascii\nport: COM1\n");
+    ConfigEditorWindow window(path, 0, true);
+    QFile out(outPath);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) return 1;
+    QTextStream stream(&out);
+    stream.setEncoding(QStringConverter::Utf8);
+    const auto& allowList = CoverageAllowList();
+    for (const CoverageSource& source : CoverageSources())
+    {
+        QStringList sections;
+        for (const std::string& s : source.sections) sections << QString::fromStdString(s);
+        for (const std::string& key : source.keys)
+        {
+            const auto reason = allowList.find(std::string(source.name) + ":" + key);
+            stream << "K\t" << source.name << '\t' << sections.join(QLatin1Char('|')) << '\t'
+                << QString::fromStdString(key) << '\t'
+                << (reason == allowList.end() ? QString() : inventoryField(QString::fromUtf8(reason->second))) << '\n';
+        }
+    }
+    for (const char* key : { "pipeline_original_pathway", "pipeline_order", "pipeline_slots_off", "calibration_lut_stage" })
+        stream << "K\tvpv\tvpv\t" << key << "\t\n";
+    for (QWidget* w : window.findChildren<QWidget*>())
+    {
+        const QString name = w->objectName();
+        if (!name.startsWith(QStringLiteral("config.")) && !name.startsWith(QStringLiteral("vpv."))) continue;
+        QString shown;
+        if (auto* combo = qobject_cast<QComboBox*>(w)) shown = combo->currentText();
+        else if (auto* line = qobject_cast<QLineEdit*>(w)) shown = line->text().isEmpty() ? line->placeholderText() : line->text();
+        else if (auto* spin = qobject_cast<QAbstractSpinBox*>(w)) shown = spin->text();
+        else if (auto* slider = qobject_cast<QSlider*>(w)) shown = QString::number(slider->value());
+        else if (auto* button = qobject_cast<QAbstractButton*>(w))
+            shown = button->isCheckable() ? (button->isChecked() ? QStringLiteral("checked") : QStringLiteral("unchecked")) : QString();
+        else if (auto* label = qobject_cast<QLabel*>(w)) shown = label->text().left(80);
+        // Where it is: the page (createPage's viewport, "<title> settings") and the nearest tab,
+        // else the nearest card (createCard: a "card" frame with a "cardTitle" label).
+        QString page, tab, group;
+        for (QWidget* parent = w->parentWidget(); parent; parent = parent->parentWidget())
+        {
+            // The innermost labelled group (organisation pass 2026-10-24): a collapsible section
+            // ("<x>Section.<id>.content", titled by its toggle) or a card with a vpvCardTitle property.
+            if (group.isEmpty())
+            {
+                const QString pn = parent->objectName();
+                if (!parent->property("vpvCardTitle").toString().isEmpty())
+                    group = parent->property("vpvCardTitle").toString();
+                else if (pn.endsWith(QStringLiteral(".content")) && pn.contains(QStringLiteral("Section.")) && parent->parentWidget())
+                {
+                    if (auto* toggle = parent->parentWidget()->findChild<QToolButton*>(pn.chopped(8), Qt::FindDirectChildrenOnly))
+                        group = toggle->text();
+                }
+            }
+            if (tab.isEmpty())
+            {
+                if (auto* tabs = qobject_cast<QTabWidget*>(parent))
+                {
+                    for (int i = 0; i < tabs->count(); ++i)
+                        if (tabs->widget(i) == w || tabs->widget(i)->isAncestorOf(w)) tab = tabs->tabText(i);
+                }
+                else if (parent->property("card").toBool())
+                {
+                    for (QLabel* title : parent->findChildren<QLabel*>(QString(), Qt::FindDirectChildrenOnly))
+                        if (title->property("cardTitle").toBool()) { tab = title->text(); break; }
+                }
+            }
+            if (parent->objectName() == QStringLiteral("pageViewport") && qobject_cast<QScrollArea*>(parent))
+            {
+                page = parent->accessibleName();
+                if (page.endsWith(QStringLiteral(" settings"))) page.chop(9);
+                break;
+            }
+        }
+        stream << "C\t" << name << '\t' << w->metaObject()->className() << '\t' << inventoryField(shown) << '\t'
+            << (w->toolTip().trimmed().isEmpty() ? 0 : 1) << '\t' << (w->isEnabled() ? 1 : 0) << '\t'
+            << inventoryField(w->toolTip()).left(240) << '\t' << inventoryField(page) << '\t' << inventoryField(tab)
+            << '\t' << inventoryField(group) << '\n';
+    }
+    for (const ShortcutDefault& d : kShortcutDefaults)
+        stream << "S\t" << d.key << '\t' << d.chord << '\n';
+    stream.flush();
+    return stream.status() == QTextStream::Ok ? 0 : 1;
+}
+
+// `VideoProcessorConfigTests.exe --resave <file>` (tools/build_settings_preview.ps1): opens the file
+// in a test-mode editor (no VP contact) and applies Config's own load-time migrations, so the
+// settings preview's sandbox opens clean. Exit 0 = saved (or nothing to migrate), 1 = not saved.
+// `VideoProcessorConfigTests.exe --screens <config> <folder>` (tools/settings_preview_screens.ps1, for
+// the usability audit): opens a COPY of the configuration in a test-mode editor at the default window
+// size (1040x700) and saves a PNG of every VP-V unit tab's Main and Advanced page, the Pipeline
+// (expert) and Proposed retirement tabs, the Dynamic Drive page's Main and Advanced, and the
+// Rendering page, in the VP-V and the Original pathway. Each picture is the visible window and,
+// beside it ("-full"), the whole scrolled page at that width. Nothing is saved to any configuration.
+int writeSettingsScreens(const QString& configPath, const QString& outDir)
+{
+    QTemporaryDir dir;
+    const QString path = dir.filePath(QStringLiteral("VideoProcessor.cfg"));
+    if (!QFile::copy(configPath, path)) return 1;
+    QDir().mkpath(outDir);
+    ConfigEditorWindow window(path, 0, true);
+    window.resize(1040, 700);
+    window.show();
+    QCoreApplication::processEvents();
+    auto* pages = window.findChild<QStackedWidget*>(QStringLiteral("settingsPages"));
+    if (!pages) return 1;
+    auto pageOf = [pages](QWidget* w) { for (int i = 0; i < pages->count(); ++i) if (pages->widget(i)->isAncestorOf(w)) return i; return -1; };
+    auto scrollOf = [](QWidget* w) { QScrollArea* s = nullptr; for (QWidget* p = w; p && !s; p = p->parentWidget()) s = qobject_cast<QScrollArea*>(p); return s; };
+    int count = 0;
+    auto shoot = [&](const QString& name, QWidget* inPage)
+    {
+        QCoreApplication::processEvents();
+        window.grab().save(QDir(outDir).filePath(name + QStringLiteral(".png")));
+        if (QScrollArea* scroll = scrollOf(inPage))
+            if (QWidget* content = scroll->widget()) content->grab().save(QDir(outDir).filePath(name + QStringLiteral("-full.png")));
+        ++count;
+    };
+    auto* pathway = window.findChild<QComboBox*>(QStringLiteral("vpv.pathway"));
+    auto* units = window.findChild<QTabWidget*>(QStringLiteral("vpv.units"));
+    auto* drive = window.findChild<QTabWidget*>(QStringLiteral("vpv.drivepage.pages"));
+    auto* rendering = window.findChild<QWidget*>(QStringLiteral("config.vprenderer.profiles"));
+    if (!pathway || !units) return 1;
+    for (int p = 0; p < 2; ++p)
+    {
+        pathway->setCurrentIndex(p);
+        const QString tag = p == 0 ? QStringLiteral("vpv") : QStringLiteral("original");
+        window.selectPage(pageOf(units));
+        for (int u = 0; u < units->count(); ++u)
+        {
+            units->setCurrentIndex(u);
+            const QString unit = units->tabText(u).toLower().replace(QLatin1Char(' '), QLatin1Char('-')).remove(QLatin1Char('(')).remove(QLatin1Char(')'));
+            auto clean = [](QString t) { return t.toLower().replace(QLatin1Char(' '), QLatin1Char('-')).remove(QLatin1Char('(')).remove(QLatin1Char(')')); };
+            QTabWidget* sub = nullptr;
+            for (QTabWidget* t : units->widget(u)->findChildren<QTabWidget*>())
+                if (t->objectName().endsWith(QStringLiteral(".pages")) || t->objectName().endsWith(QStringLiteral(".more"))) sub = t;
+            if (!sub) { shoot(QStringLiteral("%1-%2-%3").arg(tag).arg(u, 2, 10, QLatin1Char('0')).arg(unit), units); continue; }
+            for (int s2 = 0; s2 < sub->count(); ++s2)
+            {
+                sub->setCurrentIndex(s2);
+                shoot(QStringLiteral("%1-%2-%3-%4").arg(tag).arg(u, 2, 10, QLatin1Char('0')).arg(unit, clean(sub->tabText(s2))), units);
+            }
+        }
+        if (drive)
+        {
+            window.selectPage(pageOf(drive));
+            for (int t = 0; t < drive->count(); ++t)
+            {
+                drive->setCurrentIndex(t);
+                shoot(QStringLiteral("%1-dynamic-drive-%2").arg(tag, drive->tabText(t).toLower()), drive);
+            }
+        }
+        if (rendering)
+        {
+            window.selectPage(pageOf(rendering));
+            shoot(QStringLiteral("%1-rendering").arg(tag), rendering);
+        }
+    }
+    window.hide();
+    std::cout << "screens: " << count << " pictures in " << outDir.toStdString() << std::endl;
+    return count > 0 ? 0 : 1;
+}
+
+int resaveConfiguration(const QString& path)
+{
+    ConfigEditorWindow window(path, 0, true);
+    auto* apply = window.findChild<QPushButton*>(QStringLiteral("applyConfiguration"));
+    if (!apply) return 1;
+    if (!apply->isEnabled()) return 0;
+    apply->click();
+    QCoreApplication::processEvents();
+    auto* status = window.findChild<QLabel*>(QStringLiteral("configurationStatus"));
+    std::cout << "resave: " << (status ? status->text().toStdString() : std::string()) << std::endl;
+    return apply->isEnabled() ? 1 : 0;
 }
 
 void testHunt2StartupControlsWriteParserSpellings()
@@ -10056,6 +10308,9 @@ void testHunt3ContentGatedProfileGreysClassifierInputs()
             (std::string(key) + " is not greyed with the reason in a content-gated profile").c_str());
     }
     profiles->setCurrentRow(0);
+    // Organisation pass 2: the proven fixes (cadence_class_fixes among them) are set by their master
+    // (Proposed retirement tab) until Custom.
+    requireControl<QCheckBox>(window, "vpv.retirement.card.fixes.custom")->setChecked(true);
     QCoreApplication::processEvents();
     for (const char* key : { "intent_content.check", "dejudder_pulldown", "cadence_class_fixes" })
     {
@@ -10292,6 +10547,26 @@ int main(int argc, char** argv)
         }
     }
     QApplication application(argc, argv);
+    // Not tests: the settings coverage inventory (--inventory <file>) and the preview's re-save (--resave <file>).
+    for (int i = 1; i + 1 < argc; ++i)
+        if (QString::fromLocal8Bit(argv[i]) == QStringLiteral("--inventory"))
+        {
+            QApplication::setStyle(VpTheme::CreateStyle());
+            application.setStyleSheet(VpTheme::StyleSheet());
+            return writeSettingsInventory(QString::fromLocal8Bit(argv[i + 1]));
+        }
+        else if (QString::fromLocal8Bit(argv[i]) == QStringLiteral("--screens") && i + 2 < argc)
+        {
+            QApplication::setStyle(VpTheme::CreateStyle());
+            application.setStyleSheet(VpTheme::StyleSheet());
+            return writeSettingsScreens(QString::fromLocal8Bit(argv[i + 1]), QString::fromLocal8Bit(argv[i + 2]));
+        }
+        else if (QString::fromLocal8Bit(argv[i]) == QStringLiteral("--resave"))
+        {
+            QApplication::setStyle(VpTheme::CreateStyle());
+            application.setStyleSheet(VpTheme::StyleSheet());
+            return resaveConfiguration(QString::fromLocal8Bit(argv[i + 1]));
+        }
     if (!qEnvironmentVariable("VP_CONFIG_REVIEW_IMAGES").isEmpty())
         QFontDatabase::addApplicationFont(QStringLiteral("C:/Windows/Fonts/segoeui.ttf"));
     QApplication::setStyle(VpTheme::CreateStyle());

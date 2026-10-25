@@ -76,6 +76,27 @@ for ($i = 0; $i -lt $Shards; ++$i) {
     $emptyMatchShard = $Match -and $code -eq 2 -and @($shardLines | Where-Object { $_ -like "START *" }).Count -eq 0
     if (($null -eq $code -or $code -ne 0) -and -not $emptyMatchShard) { $shardProblems += "shard $i exited with code $code" }
 }
+# Off screen Qt has no fonts, so text measures as placeholder boxes; the layout-fit test (the VP-V page
+# must not scroll sideways at the default window size) skips its check then. It runs once more here
+# with the Windows fonts, so it measures what the owner sees (organisation pass 2, 2026-10-24).
+if (-not $OnScreen -and (-not $Match -or "VP-V: masters, derived settings, one control per key, fits the window" -match $Match)) {
+    $fontLog = Join-Path $OutDir "fonts.txt"
+    $previousFontDir = $env:QT_QPA_FONTDIR
+    $env:QT_QPA_PLATFORM = "offscreen"
+    $env:QT_QPA_FONTDIR = Join-Path $env:WINDIR "Fonts"
+    try {
+        $fp = Start-Process -FilePath $Exe -WorkingDirectory (Split-Path $Exe) -ArgumentList @("--match", "`"fits the window`"") `
+            -RedirectStandardOutput $fontLog -RedirectStandardError "$fontLog.err" -PassThru -NoNewWindow
+        $null = $fp.Handle
+        $fp.WaitForExit()
+        if ($fp.ExitCode -ne 0) { $shardProblems += "fonts pass exited with code $($fp.ExitCode)" }
+        $lines += @(Get-Content $fontLog, "$fontLog.err" -ErrorAction SilentlyContinue)
+    }
+    finally {
+        if ($null -eq $previousFontDir) { Remove-Item Env:QT_QPA_FONTDIR -ErrorAction SilentlyContinue } else { $env:QT_QPA_FONTDIR = $previousFontDir }
+        if ($null -eq $previousPlatform) { Remove-Item Env:QT_QPA_PLATFORM -ErrorAction SilentlyContinue } else { $env:QT_QPA_PLATFORM = $previousPlatform }
+    }
+}
 $passed = @($lines | Where-Object { $_ -like "PASS *" })
 $failed = @($lines | Where-Object { $_ -like "FAIL *" })
 $skipped = @($lines | Where-Object { $_ -like "SKIP *" })

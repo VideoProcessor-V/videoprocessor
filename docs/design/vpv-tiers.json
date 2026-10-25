@@ -9,7 +9,8 @@
     "A unit lists only the tiers it can really distinguish today (owner: fewer tiers where a unit lacks the granularity). The global tier maps to each unit's highest listed tier at or below it; 'planned_tiers' are shown as 'not yet implemented'.",
     "'set' keys define AND write a tier. 'on_enter' keys are written only when the current value equals 'from' (e.g. leaving Classic restores the default motion taste); they never decide which tier is shown.",
     "'taste' keys (the motion slider) are never greyed in upstream pages; 'managed' keys are greyed there with 'managed by VP-V' while the VP-V pathway is on.",
-    "Defaults are the renderer's built-in values when the key is absent (LibplaceboVideoRenderer / RendererProfileConfig parsers, checked 2026-10-24)."
+    "Defaults are the renderer's built-in values when the key is absent (LibplaceboVideoRenderer / RendererProfileConfig parsers, checked 2026-10-24).",
+    "Coverage audit 2026-10-24 (docs/settings/coverage-audit.md): toggles added for VP's own per-profile keys that had a control only on the Rendering page; 'more_settings' names where the rest of a unit's settings are; 'proposed_retirement' lists the guide's section-12 candidates, shown on the VP-V page and marked on their upstream controls (visible, never removed) until the owner approves."
   ],
   "vpv_section": {
     "section": "vpv",
@@ -64,9 +65,25 @@
     "capture_path": "gpu",
     "capture_upload": "auto",
     "native_rgb_ingest": "on",
-    "dv_tunnel_gpu_unpack": "off",
+    "dv_tunnel_gpu_unpack": "on",
     "preserve_extended_range": "on",
-    "sdr_tone_shape": "off"
+    "sdr_tone_shape": "off",
+    "source_range": "auto",
+    "dv_trims": "on",
+    "intent_content": "off",
+    "interpolation_fallback": "hold",
+    "intent_motion": "off",
+    "low_bitrate_handling": "auto",
+    "source_resolution_text_guard": "on",
+    "source_resolution_mixed_guard": "on",
+    "adaptive_upscale": "off",
+    "adaptive_grain_map": "on",
+    "ssim_bitrate_aware": "on",
+    "ssim_residual_stabilise": "on",
+    "cnn_residual_stabilise": "on",
+    "fbo_float32": "auto",
+    "ambient_adapt": "off",
+    "occlusion_mask": "off"
   },
   "units": [
     {
@@ -119,6 +136,25 @@
             "off"
           ],
           "slot": "input.signal"
+        },
+        {
+          "key": "source_range",
+          "label": "Source range (when the source mislabels it)",
+          "values": [
+            "auto",
+            "full",
+            "limited"
+          ],
+          "slot": "input.signal"
+        },
+        {
+          "key": "intent_content",
+          "label": "Content labels for profile rules (film / video / sports)",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "input.source_analysis"
         }
       ],
       "planned": [
@@ -127,7 +163,8 @@
           "label": "Label-detector net (codec family, film grain)",
           "slot": "input.source_analysis"
         }
-      ]
+      ],
+      "more_settings": "Total delay and queue profiles: Queue page. Signal detection (DV tunnel hand-off, new LLDV): DV page. Capture card and packing: General page."
     },
     {
       "id": "motion",
@@ -146,30 +183,23 @@
       ],
       "presets": {
         "Classic": {
-          "description": "No motion processing: frames shown as delivered (VP's de-judder off, no motion search).",
-          "cost": "none",
-          "set": {
-            "dejudder_strength": "0",
-            "dejudder_strength_even": "0",
-            "optical_flow": "off",
-            "motion_ahead_frames": "0"
-          }
-        },
-        "Low": {
-          "description": "De-judder with VP's own motion search only (no NVIDIA engine, nothing computed ahead): cheapest working motion.",
+          "description": "VP's basic motion search only: whole-pixel matching, no NVIDIA engine, nothing computed ahead. Your de-judder amount still applies (choose As shot for no motion processing).",
           "cost": "low",
           "set": {
             "optical_flow": "off",
             "motion_ahead_frames": "0",
-            "dejudder_est_split": "off"
-          },
-          "on_enter": [
-            {
-              "key": "dejudder_strength",
-              "from": "0",
-              "to": "0.25"
-            }
-          ]
+            "dejudder_est_qpel": "off"
+          }
+        },
+        "Low": {
+          "description": "VP's own motion search at quarter-pixel precision (no NVIDIA engine, nothing computed ahead).",
+          "cost": "low",
+          "set": {
+            "optical_flow": "off",
+            "motion_ahead_frames": "0",
+            "dejudder_est_split": "off",
+            "dejudder_est_qpel": "on"
+          }
         },
         "Mid": {
           "description": "NVIDIA optical-flow engine plus VP's matcher, vectors computed 4 frames ahead (the default motion engine).",
@@ -177,15 +207,9 @@
           "set": {
             "optical_flow": "on",
             "motion_ahead_frames": "4",
-            "dejudder_est_split": "off"
-          },
-          "on_enter": [
-            {
-              "key": "dejudder_strength",
-              "from": "0",
-              "to": "0.25"
-            }
-          ]
+            "dejudder_est_split": "off",
+            "dejudder_est_qpel": "on"
+          }
         },
         "Upper": {
           "description": "As Mid, and poorly matched blocks are searched again as quarter blocks (small objects on moving backgrounds get their own motion).",
@@ -193,15 +217,9 @@
           "set": {
             "optical_flow": "on",
             "motion_ahead_frames": "4",
-            "dejudder_est_split": "on"
-          },
-          "on_enter": [
-            {
-              "key": "dejudder_strength",
-              "from": "0",
-              "to": "0.25"
-            }
-          ]
+            "dejudder_est_split": "on",
+            "dejudder_est_qpel": "on"
+          }
         }
       },
       "taste": [
@@ -254,6 +272,24 @@
             "on"
           ],
           "slot": "output.presentation"
+        },
+        {
+          "key": "interpolation_fallback",
+          "label": "Where motion is not trusted: hold or blend",
+          "values": [
+            "hold",
+            "blend"
+          ],
+          "slot": "motion.consumers"
+        },
+        {
+          "key": "intent_motion",
+          "label": "Ease the de-judder per shot (only ever lower)",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "motion.consumers"
         }
       ],
       "planned": [
@@ -262,7 +298,8 @@
           "label": "Motion look-ahead in milliseconds (time-based)",
           "slot": "motion.estimation"
         }
-      ]
+      ],
+      "more_settings": "Smooth motion (libplacebo) vs VP's de-judder, and deinterlacing: VP Renderer > Motion. Everything else of this unit is on Main and Advanced here."
     },
     {
       "id": "repair",
@@ -345,6 +382,16 @@
             "off"
           ],
           "slot": "repair.texture_restore"
+        },
+        {
+          "key": "low_bitrate_handling",
+          "label": "Deband reacts to compression",
+          "values": [
+            "auto",
+            "off",
+            "on"
+          ],
+          "slot": "repair.deband"
         }
       ],
       "planned": [
@@ -353,7 +400,8 @@
           "label": "Encoding repair (net A or VP restore)",
           "slot": "repair.encoding"
         }
-      ]
+      ],
+      "more_settings": "libplacebo's own debander (Deband strength): VP Renderer > Rendering > Processing."
     },
     {
       "id": "scaling",
@@ -385,16 +433,15 @@
           }
         },
         "Low": {
-          "description": "No re-base; the hybrid SSIM/faithful downscale (weight 0.2) to the projector size.",
+          "description": "Re-base: a picture upscaled before VP is worked from its real size; plain scaling to the projector size. The shipped default.",
           "cost": "low",
           "set": {
-            "source_resolution": "native",
-            "adaptive_downscale": "on",
-            "adaptive_w_base": "0.2"
+            "source_resolution": "auto",
+            "adaptive_downscale": "off"
           }
         },
         "Mid": {
-          "description": "Re-base first (the player's upscale undone, kernel-matched), then the hybrid downscale.",
+          "description": "Re-base, then VP's grain-true downscale blend (weight 0.2) to the projector size.",
           "cost": "medium",
           "set": {
             "source_resolution": "auto",
@@ -421,6 +468,69 @@
             "ortho"
           ],
           "slot": "scaling.output"
+        },
+        {
+          "key": "source_resolution_text_guard",
+          "label": "Re-base ignores the player's own subtitles",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "scaling.rebase"
+        },
+        {
+          "key": "source_resolution_mixed_guard",
+          "label": "Never re-base a mixed screen (menu, picture-in-picture)",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "scaling.rebase"
+        },
+        {
+          "key": "adaptive_grain_map",
+          "label": "Grain map steers the downscale",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "scaling.output"
+        },
+        {
+          "key": "ssim_bitrate_aware",
+          "label": "Gentler sharpening on poor streams",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "scaling.output"
+        },
+        {
+          "key": "ssim_residual_stabilise",
+          "label": "Steady the downscaler's added detail along motion",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "scaling.output"
+        },
+        {
+          "key": "cnn_residual_stabilise",
+          "label": "Steady the upscaler's added detail along motion",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "scaling.output"
+        },
+        {
+          "key": "adaptive_upscale",
+          "label": "Grain-aware upscale for small sources",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "scaling.output"
         }
       ],
       "planned": [
@@ -444,7 +554,8 @@
           "label": "D refine add-on under the hybrid scaler",
           "slot": "scaling.output"
         }
-      ]
+      ],
+      "more_settings": "The upscaler, downscaler and chroma filters (libplacebo): VP Renderer > Scaling."
     },
     {
       "id": "colour",
@@ -460,6 +571,15 @@
       "untiered_reason": "libplacebo does the colour in every tier; the cheaper combined HDR->SDR LUT for Classic/Low is not yet implemented.",
       "presets": {},
       "toggles": [
+        {
+          "key": "dv_trims",
+          "label": "Dolby Vision trims for your display",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "colour.sdr_tone_shape"
+        },
         {
           "key": "preserve_extended_range",
           "label": "Keep below-black and above-white (SDR)",
@@ -477,6 +597,25 @@
             "knee"
           ],
           "slot": "colour.sdr_tone_shape"
+        },
+        {
+          "key": "fbo_float32",
+          "label": "Full precision for every tier (32-bit float intermediates)",
+          "values": [
+            "auto",
+            "on",
+            "off"
+          ],
+          "slot": "colour.tone_gamut"
+        },
+        {
+          "key": "ambient_adapt",
+          "label": "Room-light adaptation (experimental)",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "colour.appearance"
         }
       ],
       "planned": [
@@ -490,7 +629,8 @@
           "label": "Stage 13 appearance (dim screen)",
           "slot": "colour.appearance"
         }
-      ]
+      ],
+      "more_settings": "Tone mapping, HDR target, gamut and output gamma: VP Renderer > Rendering and Color / Output. The calibration LUT file: Color / Output."
     },
     {
       "id": "drive",
@@ -512,7 +652,8 @@
           "label": "Black level correction",
           "slot": "drive.black_level"
         }
-      ]
+      ],
+      "more_settings": "Everything Dynamic Drive does is set on the Dynamic Drive page: the projector connection, the command source (script / compensate / none), the LED and contrast tuning and its fixes under test."
     },
     {
       "id": "output",
@@ -525,11 +666,11 @@
       ],
       "tiers": [
         "Classic",
-        "Low"
+        "Low",
+        "Mid"
       ],
       "planned_tiers": {
-        "Mid": "no extra output step yet (Mid uses Low)",
-        "Upper": "no extra output step yet (Upper uses Low)"
+        "Upper": "no extra output step yet (Upper uses Mid)"
       },
       "presets": {
         "Classic": {
@@ -540,21 +681,278 @@
           }
         },
         "Low": {
-          "description": "VP's sigma-delta temporal dither: the finest steps through the 8-bit projector link.",
+          "description": "As shipped: the shader list decides the dither (the cinema list uses VP's own motion-aware dither).",
+          "cost": "low",
+          "set": {
+            "temporal_dither": "auto"
+          }
+        },
+        "Mid": {
+          "description": "Always VP's own motion-aware dither: the finest steps through the 8-bit projector link.",
           "cost": "low",
           "set": {
             "temporal_dither": "sigma_delta"
           }
         }
       },
-      "toggles": [],
-      "planned": [
+      "toggles": [
         {
-          "key": "calibration_lut_stage",
-          "label": "Calibration LUT applied by VP (last colour step)",
-          "slot": "output.calibration_lut"
+          "key": "occlusion_mask",
+          "label": "Dither: no smear where new picture appears",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "output.dither"
         }
-      ]
+      ],
+      "planned": [],
+      "more_settings": "Display bit depth and libplacebo's dithering: VP Renderer > Rendering > Processing. Where the calibration LUT runs: the Pipeline (expert) tab."
     }
-  ]
+  ],
+  "proposed_retirement": {
+    "note": "Switches proposed for retirement. Each still works as before until you decide; retiring one keeps today's default behaviour. Groups: A proven fixes (kept on), B experiments that lost, C superseded, D keep but hide as diagnostics.",
+    "groups": {
+      "A": "Fixes under test that are proven",
+      "B": "Experiments that lost",
+      "C": "Superseded by the new design",
+      "D": "Keep, but hide as diagnostics"
+    },
+    "keys": [
+      {
+        "section": "vprenderer",
+        "key": "pulldown_fixes",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "vprenderer",
+        "key": "timing_continuity_fixes",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "vprenderer",
+        "key": "cadence_class_fixes",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "vprenderer",
+        "key": "motion_history_fixes",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "vprenderer",
+        "key": "queue_timing_fixes",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "vprenderer",
+        "key": "general_rate_fixes",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "vprenderer",
+        "key": "efficiency_fixes",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "vprenderer",
+        "key": "source_coding_fixes",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "vprenderer",
+        "key": "source_resolution_latch_fixes",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "vprenderer",
+        "key": "source_resolution_cut_fixes",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "vprenderer",
+        "key": "active_picture_startup_hold",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "vprenderer",
+        "key": "extended_range_more_cases",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "vprenderer",
+        "key": "dv_tunnel_fixes",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "vprenderer",
+        "key": "residual_stabilise_grain_guard",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "general",
+        "key": "magewell_recover_faults",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "general",
+        "key": "capture_display_fixes",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "led_drive",
+        "key": "led_peak_full_coverage",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "led_drive",
+        "key": "led_picture_only",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "led_drive",
+        "key": "script_resend_failed_writes",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "led_drive",
+        "key": "correction_weight_by_time",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "led_drive",
+        "key": "preposition_black_only",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "led_drive",
+        "key": "led_landing_ms",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "led_drive",
+        "key": "led_wtw_passthrough",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "led_drive",
+        "key": "led_btb_passthrough",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "led_drive",
+        "key": "cntr_pair_predict",
+        "group": "A",
+        "reason": "Fix under test that is proven: fold the fix in (keep its ON behaviour) and drop the switch, after one clean chain gate."
+      },
+      {
+        "section": "vprenderer",
+        "key": "optical_flow_cost_trust",
+        "group": "B",
+        "reason": "Experiment that lost: no measurable difference."
+      },
+      {
+        "section": "vprenderer",
+        "key": "dejudder_warp_stage",
+        "group": "B",
+        "reason": "Experiment that lost: the 'source' value is the old path, kept only for A/B."
+      },
+      {
+        "section": "vprenderer",
+        "key": "dejudder_occlusion_fill",
+        "group": "B",
+        "reason": "Experiment that lost: off and experimental."
+      },
+      {
+        "section": "vprenderer",
+        "key": "dejudder_block_taper",
+        "group": "B",
+        "reason": "Experiment that lost: off and experimental."
+      },
+      {
+        "section": "vprenderer",
+        "key": "dejudder_taper_sad",
+        "group": "B",
+        "reason": "Experiment that lost: off and experimental."
+      },
+      {
+        "section": "vprenderer",
+        "key": "interpolation_grain",
+        "group": "B",
+        "reason": "Experiment that lost: the 'blend' value loses grain."
+      },
+      {
+        "section": "vprenderer",
+        "key": "dejudder_source_warp_filter",
+        "group": "B",
+        "reason": "Experiment that lost: the 'bilinear' value loses grain."
+      },
+      {
+        "section": "vprenderer",
+        "key": "nls_sampling",
+        "group": "B",
+        "reason": "Experiment that lost: the 'bilinear' value loses grain."
+      },
+      {
+        "section": "vprenderer",
+        "key": "deband_grain",
+        "group": "B",
+        "reason": "Experiment that lost: VP's dither does that job."
+      },
+      {
+        "section": "vprenderer",
+        "key": "detail_pulse_fast",
+        "group": "C",
+        "reason": "Superseded: the picture is identical, so the fast path can always be on."
+      },
+      {
+        "section": "vprenderer",
+        "key": "dither_vectors",
+        "group": "C",
+        "reason": "Superseded: auto always does the right thing."
+      },
+      {
+        "section": "queue",
+        "key": "target_frames",
+        "group": "C",
+        "reason": "Superseded for normal profiles: one total delay (target_latency_ms) replaces it."
+      },
+      {
+        "section": "vprenderer",
+        "key": "dejudder_verify",
+        "group": "D",
+        "reason": "Keep, but hide as a diagnostic (testing only)."
+      },
+      {
+        "section": "vprenderer",
+        "key": "dejudder_verify_share",
+        "group": "D",
+        "reason": "Keep, but hide as a diagnostic (testing only)."
+      }
+    ]
+  }
 }
