@@ -76,7 +76,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 
 ## Settings
 
-- Keys: `render_ahead`, `render_ahead_queue_credit`, `render_ahead_utilisation`.
+- Keys: `render_ahead`, `render_ahead_queue_credit`, `render_ahead_utilisation`, `repeat_render_reuse`.
 - Tiers: not tiered.
 - VP-V page, Output tab: tiers Classic / Low / Mid; tier keys `temporal_dither`.
 - Plain-language guide: [docs/settings/VP-settings-reference.md#8-output](../../../../../docs/settings/VP-settings-reference.md#8-output).
