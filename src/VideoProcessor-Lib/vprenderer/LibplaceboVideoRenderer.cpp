@@ -7375,7 +7375,11 @@ struct LibplaceboVideoRenderer::Impl
 		Interpolator::Motion motion;
 		// B3 (i): after B's field was estimated ahead, A's (A, B) inputs are the snapshot.
 		const bool snapshot = !DejudderLiveFieldFor(sourceSequence) && EntranceOnce() && EntranceOnceSnapshotFor(sourceSequence);
-		const bool vectors = DejudderLiveFieldFor(sourceSequence) || snapshot;
+		// WIP DEBUG (near-black residual, 2026-10-24): VP_DEBUG_PHASE_NOVECTORS=1 forces the no-vector path.
+		char noVectorsFlag[4] = {};
+		const bool forceNoVectors = GetEnvironmentVariableA("VP_DEBUG_PHASE_NOVECTORS", noVectorsFlag, sizeof(noVectorsFlag)) > 0 &&
+			noVectorsFlag[0] == '1';
+		const bool vectors = (DejudderLiveFieldFor(sourceSequence) || snapshot) && !forceNoVectors;
 		vpPhaseVectors = vectors;
 		if (vectors)
 		{
