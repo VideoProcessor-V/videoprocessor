@@ -140,30 +140,53 @@ namespace NetRunnerTestsNs
 			bp.src = tex;
 			bp.dst = readable;
 			pl_tex_blit(gpu, &bp);
-			const bool half = tex->params.format->component_depth[0] == 16;
-			std::vector<uint8_t> raw(static_cast<size_t>(w) * h * tex->params.format->texel_size);
+			// The HOST layout decides the decoding: D3D11 "r16f"/"rgba16f" are emulated (R16_FLOAT on the
+			// GPU, fp32 on the host), so component_depth (16) must not be used here (fix/net-fp16-gate).
+			const pl_fmt f = tex->params.format;
+			const int hostBits = f->host_bits[0] ? f->host_bits[0] : static_cast<int>(f->texel_size * 8 / comps);
+			Assert::IsTrue(hostBits == 16 || hostBits == 32, W(std::string("unexpected host layout of ") + f->name).c_str());
+			Assert::AreEqual(static_cast<size_t>(comps) * hostBits / 8, f->texel_size, W(std::string("texel size of ") + f->name).c_str());
+			std::vector<uint8_t> raw(static_cast<size_t>(w) * h * f->texel_size);
 			pl_tex_transfer_params d{};
 			d.tex = readable;
 			d.ptr = raw.data();
 			Assert::IsTrue(pl_tex_download(gpu, &d));
 			pl_tex_destroy(gpu, &readable);
-			CpuTexture out(w, h, comps);
-			for (size_t i = 0; i < static_cast<size_t>(w) * h; ++i)
-				for (int c = 0; c < comps; ++c)
+			return DecodeHostTexels(raw.data(), w, h, comps, hostBits);
+		}
+
+		// Values into a texture of the named format through its host layout (fp32 or IEEE half; a
+		// half host layout needs values exactly representable in half).
+		pl_tex UploadNamed(const char* name, int w, int h, const std::vector<float>& values) const
+		{
+			const pl_fmt f = pl_find_named_fmt(gpu, name);
+			if (!f) return nullptr;
+			const int comps = f->num_components;
+			const int hostBits = f->host_bits[0] ? f->host_bits[0] : static_cast<int>(f->texel_size * 8 / comps);
+			std::vector<uint8_t> raw(static_cast<size_t>(w) * h * f->texel_size);
+			for (size_t i = 0; i < values.size() && i < static_cast<size_t>(w) * h * comps; ++i)
+			{
+				if (hostBits == 32) { std::memcpy(&raw[i * 4], &values[i], 4); continue; }
+				const float v = values[i], a = std::fabs(v);
+				uint16_t hb = v < 0 ? 0x8000 : 0;
+				if (a >= 6.103515625e-05f)
 				{
-					float v;
-					if (half)
-					{
-						uint16_t hb;
-						std::memcpy(&hb, &raw[(i * comps + c) * 2], 2);
-						const int e = (hb >> 10) & 31, m = hb & 1023;
-						v = e == 0 ? std::ldexp(static_cast<float>(m), -24) : e == 31 ? INFINITY : std::ldexp(static_cast<float>(m + 1024), e - 25);
-						if (hb & 0x8000) v = -v;
-					}
-					else std::memcpy(&v, &raw[(i * comps + c) * 4], 4);
-					out.rgba[i * 4 + c] = v;
+					int e = 0;
+					const float m = std::frexp(a, &e);                       // a = m * 2^e, m in [0.5, 1)
+					hb |= static_cast<uint16_t>(((e + 14) << 10) + (static_cast<int>(std::lround(m * 2048.0f)) - 1024));
 				}
-			return out;
+				else hb |= static_cast<uint16_t>(std::lround(a / 5.9604644775390625e-08f));
+				std::memcpy(&raw[i * 2], &hb, 2);
+			}
+			pl_tex_params p{};
+			p.w = w;
+			p.h = h;
+			p.format = f;
+			p.sampleable = true;
+			p.blit_src = (f->caps & PL_FMT_CAP_BLITTABLE) != 0;
+			p.renderable = (f->caps & PL_FMT_CAP_RENDERABLE) != 0;
+			p.initial_data = raw.data();
+			return pl_tex_create(gpu, &p);
 		}
 	};
 
@@ -181,6 +204,82 @@ namespace NetRunnerTestsNs
 	{
 		if (p.contract.usesLinearSampling) return 0.05;
 		return intermediate == TexFormat::Rgba16f ? 0.01 : 0.005;
+	}
+
+	// A tile-gated net's gate branch on the GPU vs the CPU reference at the same intermediate format:
+	// the gate-branch inputs (VPNNAGP_*, VPNNAG2_*), the logits (VPNNGATE) and the decision the gated
+	// layers use (VPNNGATED, a 3x3 max of the logit signs). The net OUTPUT cannot be trusted to catch a
+	// gate defect: GATED's dilation and near-zero smoke output weights hide a flipped tile.
+	// Restores the hard assert that 328b6d29 relaxed to logging (fix/net-fp16-gate): the "implausible"
+	// fp16 logits were the readback decoding emulated-fp16 (fp32 host) bytes as halves.
+	inline void CheckGateBranch(const NetGpu& g, const std::string& name, TexFormat fmt, const CpuNetExecutor& cpu, const PlNetRunner& gpu)
+	{
+		const bool half = fmt == TexFormat::Rgba16f;
+		for (const char* n : { "VPNNAGP_0", "VPNNAGP_1", "VPNNAG2_0", "VPNNAG2_1", "VPNNGATE" })
+		{
+			const CpuTexture* ct = cpu.Texture(n);
+			void* gt = gpu.Intermediate(n);
+			if (!ct) continue;
+			Assert::IsNotNull(gt, W(name + ": GPU intermediate " + n + " missing").c_str());
+			const CpuTexture got = g.Download(static_cast<pl_tex>(gt));
+			Assert::IsTrue(got.width == ct->width && got.height == ct->height, W(name + ": " + n + " size differs").c_str());
+			double maxAbs = 0.0, maxDiff = 0.0;
+			for (int y = 0; y < ct->height; ++y)
+				for (int x = 0; x < ct->width; ++x)
+					for (int ch = 0; ch < ct->components && ch < 4; ++ch)
+					{
+						maxAbs = (std::max)(maxAbs, static_cast<double>(std::fabs(ct->At(x, y, ch))));
+						maxDiff = (std::max)(maxDiff, static_cast<double>(std::fabs(ct->At(x, y, ch) - got.At(x, y, ch))));
+					}
+			// A few half ulps of the texture's scale at fp16 (rounding at each stored layer, tie
+			// rounding); summation order only at fp32.
+			const double tol = (half ? 8e-3 : 2e-4) * (std::max)(1.0, maxAbs);
+			char line[220];
+			snprintf(line, sizeof line, "%-27s %s: %-9s max |gpu - cpu| %.6f (max |cpu| %.4f, tolerance %.6f)", name.c_str(), FormatName(fmt), n, maxDiff, maxAbs, tol);
+			Log(line);
+			Assert::IsTrue(maxDiff <= tol, W(name + " " + FormatName(fmt) + ": gate-branch texture " + n + " differs from the CPU reference").c_str());
+		}
+		// Decisions. A logit within 0.05 of zero may round either way at fp16 (GPU vs the CPU's
+		// round-to-nearest-even emulation): counted and logged, never at fp32.
+		const CpuTexture gate = g.Download(static_cast<pl_tex>(gpu.Intermediate("VPNNGATE")));
+		const CpuTexture& cg = *cpu.Texture("VPNNGATE");
+		int nearFlips = 0;
+		for (int y = 0; y < cg.height; ++y)
+			for (int x = 0; x < cg.width; ++x)
+			{
+				const bool same = (cg.At(x, y) > 0.0f) == (gate.At(x, y) > 0.0f);
+				if (!same && half && std::fabs(cg.At(x, y)) < 0.05f)
+				{
+					++nearFlips;
+					Log(name + ": near-threshold fp16 gate tile (" + std::to_string(x) + "," + std::to_string(y) + ") cpu " + std::to_string(cg.At(x, y)) +
+						", gpu " + std::to_string(gate.At(x, y)));
+					continue;
+				}
+				Assert::IsTrue(same, W(name + " " + FormatName(fmt) + ": a gate tile flipped (cpu " + std::to_string(cg.At(x, y)) + ", gpu " +
+					std::to_string(gate.At(x, y)) + ")").c_str());
+			}
+		const CpuTexture* cd = cpu.Texture("VPNNGATED");
+		void* gdt = gpu.Intermediate("VPNNGATED");
+		if (!cd) return;
+		Assert::IsNotNull(gdt, W(name + ": GPU VPNNGATED missing").c_str());
+		const CpuTexture gd = g.Download(static_cast<pl_tex>(gdt));
+		for (int y = 0; y < cd->height; ++y)
+			for (int x = 0; x < cd->width; ++x)
+			{
+				// GATED must be the 3x3 dilation of the GPU's own logit signs, and the CPU's where no
+				// near-threshold tile flipped.
+				float m = -1.0f;
+				for (int dy = -1; dy <= 1; ++dy)
+					for (int dx = -1; dx <= 1; ++dx)
+					{
+						const int sx = (std::min)((std::max)(x + dx, 0), gate.width - 1), sy = (std::min)((std::max)(y + dy, 0), gate.height - 1);
+						if (gate.At(sx, sy) > 0.0f) m = 1.0f;
+					}
+				Assert::AreEqual(m, gd.At(x, y), W(name + ": VPNNGATED is not the dilation of the GPU gate").c_str());
+				if (!nearFlips)
+					Assert::AreEqual(cd->At(x, y), gd.At(x, y), W(name + " " + FormatName(fmt) + ": VPNNGATED differs from the CPU reference").c_str());
+			}
+		if (nearFlips) Log(name + ": " + std::to_string(nearFlips) + " near-threshold gate tile(s) rounded differently at fp16");
 	}
 
 	TEST_CLASS(PlNetRunnerGpuTests)
@@ -225,6 +324,55 @@ namespace NetRunnerTestsNs
 			pl_tex_destroy(g.gpu, &tin);
 		}
 
+		// The fp16 readback in isolation: known values into r16f (emulated on D3D11: fp32 host layout)
+		// and r16hf (half host layout), back through the same blit + download the net checks use.
+		TEST_METHOD(R16fRoundTripReadback)
+		{
+			NetGpu g;
+			// Exactly representable in half: the logits of the 2026-10-24 report, signs, a subnormal,
+			// the smallest normal and the largest half.
+			const std::vector<float> exact = { 22.859375f, 22.84375f, 23.375f, -0.625f, 2.0f, -512.0f, -0.0078125f, 1.98046875f,
+				6.103515625e-05f, 3.0f * 5.9604644775390625e-08f, 65504.0f, -1.0f };
+			const int w = 4, h = 3;
+			int formats = 0;
+			for (const char* fmtName : { "r16f", "r16hf" })
+			{
+				const pl_fmt f = pl_find_named_fmt(g.gpu, fmtName);
+				if (!f) { Log(std::string(fmtName) + ": not offered by this backend"); continue; }
+				char info[160];
+				snprintf(info, sizeof info, "%s: component_depth %d, host_bits %d, texel_size %zu, emulated %d", fmtName, f->component_depth[0], f->host_bits[0],
+					f->texel_size, f->emulated ? 1 : 0);
+				Log(info);
+				pl_tex t = g.UploadNamed(fmtName, w, h, exact);
+				Assert::IsNotNull(t, W(std::string(fmtName) + ": upload").c_str());
+				const CpuTexture got = g.Download(t);
+				for (int i = 0; i < w * h; ++i)
+					Assert::AreEqual(exact[i], got.At(i % w, i / w), W(std::string(fmtName) + ": value " + std::to_string(i) + " did not round-trip").c_str());
+				pl_tex_destroy(g.gpu, &t);
+				// Non-representable values through an fp32 host layout: the GPU's half store, within one
+				// half ulp of round-to-nearest-even (a store may truncate).
+				if (f->host_bits[0] == 32)
+				{
+					const std::vector<float> rough = { 0.1f, -0.3f, 22.86f, 1.0f / 3.0f, 1000.7f, -7.77e-5f, 0.0f, 3.14159f, -2.71828f, 0.5f, 12345.6f, -0.05f };
+					pl_tex r = g.UploadNamed(fmtName, w, h, rough);
+					Assert::IsNotNull(r);
+					const CpuTexture gr = g.Download(r);
+					for (int i = 0; i < w * h; ++i)
+					{
+						const float want = RoundToHalf(rough[i]), v = gr.At(i % w, i / w);
+						int e = 0;
+						std::frexp((std::max)(std::fabs(want), 6.103515625e-05f), &e);
+						const float ulp = std::ldexp(1.0f, e - 11);
+						Assert::IsTrue(std::fabs(v - want) <= ulp, W(std::string(fmtName) + ": " + std::to_string(rough[i]) + " read back as " + std::to_string(v)).c_str());
+						Assert::AreEqual(RoundToHalf(v), v, W(std::string(fmtName) + ": the stored value is not a half").c_str());
+					}
+					pl_tex_destroy(g.gpu, &r);
+				}
+				++formats;
+			}
+			Assert::IsTrue(formats > 0, L"no fp16 format to test");
+		}
+
 		TEST_METHOD(GpuMatchesCpuOnTheSmokeExports)
 		{
 			NetGpu g;
@@ -263,30 +411,9 @@ namespace NetRunnerTestsNs
 							FormatName(fmt), d, tol, MaxDiffCodes(got, c.expected, c.outW, c.outH));
 						Log(line);
 						Assert::IsTrue(d <= tol, W(name + ": GPU vs CPU beyond the tolerance").c_str());
-						// Gate decisions: identical per tile at fp32. At fp16 the r16f gate texture reads back
-						// with implausible values (2.0, -512) while the net OUTPUTS agree to 0.00000 code:
-						// the test's half readback of 1-component textures is suspect (open item), so fp16
-						// differences are logged, not failed.
+						// The gate branch, value by value, and the decisions (hard asserts at fp32 AND fp16).
 						if (c.pkg.contract.tileGated && cpu.Texture("VPNNGATE"))
-						{
-							const CpuTexture gate = g.Download(static_cast<pl_tex>(gpu.Intermediate("VPNNGATE")));
-							const CpuTexture& cg = *cpu.Texture("VPNNGATE");
-							int nearFlips = 0;
-							for (int y = 0; y < cg.height; ++y)
-								for (int x = 0; x < cg.width; ++x)
-								{
-									const bool same = (cg.At(x, y) > 0.0f) == (gate.At(x, y) > 0.0f);
-									if (!same && fmt == TexFormat::Rgba16f)
-									{
-										++nearFlips;
-										Log(name + ": fp16 gate tile (" + std::to_string(x) + "," + std::to_string(y) + ") cpu logit " + std::to_string(cg.At(x, y)) +
-											", gpu " + std::to_string(gate.At(x, y)));
-										continue;
-									}
-									Assert::IsTrue(same, W(name + ": a gate tile flipped").c_str());
-								}
-							if (nearFlips) Log(name + ": " + std::to_string(nearFlips) + " gate tile(s) differ at fp16 (output compared above)");
-						}
+							CheckGateBranch(g, name, fmt, cpu, gpu);
 						gpu.Release();
 					}
 					for (pl_tex& t : uploaded) pl_tex_destroy(g.gpu, &t);

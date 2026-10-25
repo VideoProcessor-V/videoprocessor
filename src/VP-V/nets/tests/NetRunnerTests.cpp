@@ -212,6 +212,65 @@ namespace NetRunnerTestsNs
 			Assert::AreEqual(0.0f, RoundToHalf(1e-9f));
 		}
 
+		// The fp16 gate "implausible values" of 2026-10-24 (2.0, -0.0078, -2, -512) reproduced on the CPU:
+		// libplacebo's D3D11 "r16f" is emulated (R16_FLOAT on the GPU, fp32 on the host). Its downloaded
+		// bytes decoded as IEEE halves give, at even half-word positions, the LOW 16 bits of an fp32 that
+		// holds a half value: only the half's three lowest mantissa bits survive, so exactly the eight
+		// values {0, +-2^-7, +-2, +-512} (and +-0) appear; odd positions are the fp32's high word, which
+		// keeps the sign (why most tiles still "agreed"). Not precision, not overflow: a readback decode.
+		TEST_METHOD(EmulatedFp16ReadbackDecodeReproducesTheGateValues)
+		{
+			auto lowWordAsHalf = [](float v)
+			{
+				uint32_t bits;
+				std::memcpy(&bits, &v, 4);
+				return HalfBitsToFloat(static_cast<uint16_t>(bits & 0xFFFF));
+			};
+			// CPU half logits from the report -> the GPU values the old decode printed.
+			Assert::AreEqual(-512.0f, lowWordAsHalf(22.859375f));
+			Assert::AreEqual(-2.0f, lowWordAsHalf(22.84375f));
+			Assert::AreEqual(0.0f, lowWordAsHalf(23.375f));
+			Assert::AreEqual(-0.0078125f, lowWordAsHalf(RoundToHalf(1.567383f)));
+
+			// A 4x3 gate texture of half logits (the CPU executor's fp16 emulation where the smoke export
+			// is present, else synthetic halves), as the D3D11 download delivers it: fp32 per texel.
+			const int w = 4, h = 3;
+			std::vector<float> logits(static_cast<size_t>(w) * h);
+			for (int i = 0; i < w * h; ++i) logits[i] = RoundToHalf((i % 2 ? -1.0f : 1.0f) * (0.37f + 2.113f * i));
+			RefCase c;
+			std::string skip, err;
+			if (LoadCase("smoke/A_single_small_open", c, &skip))
+			{
+				CpuNetExecutor cpu;
+				Assert::IsTrue(RunCase(c, TexFormat::Rgba16f, cpu, &err), W(err).c_str());
+				const CpuTexture* g = cpu.Texture("VPNNGATE");
+				Assert::IsNotNull(g);
+				Assert::IsTrue(g->width == w && g->height == h, L"A_single_small_open: 4x3 gate tiles");
+				for (int i = 0; i < w * h; ++i) logits[i] = g->At(i % w, i / w);
+			}
+			std::vector<uint8_t> host(logits.size() * 4);
+			std::memcpy(host.data(), logits.data(), host.size());
+
+			const CpuTexture right = DecodeHostTexels(host.data(), w, h, 1, 32);
+			const CpuTexture wrong = DecodeHostTexels(host.data(), w, h, 1, 16);   // the 328b6d29 readback
+			const float lowSet[] = { 0.0f, 0.0078125f, 2.0f, 512.0f };
+			int implausible = 0;
+			for (int i = 0; i < w * h; ++i)
+			{
+				Assert::AreEqual(logits[i], right.At(i % w, i / w), L"fp32 host layout decodes exactly");
+				const float v = wrong.At(i % w, i / w), src = logits[i / 2];
+				if (i % 2 == 0)
+				{
+					Assert::AreEqual(lowWordAsHalf(src), v);
+					Assert::IsTrue(std::find(std::begin(lowSet), std::end(lowSet), std::fabs(v)) != std::end(lowSet), L"only the eight low-word values");
+				}
+				else
+					Assert::AreEqual(src > 0.0f, v > 0.0f, L"the high word keeps the sign");
+				if (v != logits[i]) ++implausible;
+			}
+			Assert::IsTrue(implausible > 0, L"the half decode of fp32 host bytes is wrong");
+		}
+
 		TEST_METHOD(TimingHookRecordsAgainstTheSlot)
 		{
 			const NetPackage pkg = SyntheticPackage();
