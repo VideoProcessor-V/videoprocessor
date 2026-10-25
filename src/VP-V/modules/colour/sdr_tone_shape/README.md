@@ -97,9 +97,10 @@ index 1, and the curve's mid adaptation constants are VP assumptions, to calibra
   formatter logs the first L8 block per title with its raw bytes; dv-frames.jsonl records L10).
 - GPU 2026-10-24: the shader matches its C++ references on the NVIDIA GPU (L2, L8 and ICtCp
   paths: DolbyVisionTrimShaderMatchesItsReference, DolbyVisionTrimShaderL8AndIctcpPathsMatchTheirReferences).
-- OPEN - FIX PENDING GPU CONFIRMATION (fix/dv-dolby-style-dark, 2026-10-25; dv_tone_mapping
-  stays default libplacebo). Close it only after the GPU re-run (`run_dv_synth.py jobs <root>
-  <file> -dolby_`, then DvSynthGpuRendersJobs) shows the wedge on the curve. Diagnosis (CPU and
+- RESOLVED 2026-10-25 (fix/dv-dolby-style-dark; GPU confirmation on integ/batch1, RTX 3050 Ti:
+  DvSynthGpuRendersJobs with the regenerated jobs, trims off = on the curve within 1%: dim scene
+  1 -> 1.12, 20 -> 16.6, 200 -> 100 nits; with the corpus L2 the picture is 1.28-1.45x the curve,
+  to be judged against LLDV). dv_tone_mapping stays default libplacebo. Diagnosis (CPU and
   the captures): the "one stop dark" Dolby-style report
   (200 -> 98.5, 20 -> 9.7, 5 -> ~2, 1 -> 0.21 nits at 100 nits) was a broken test, not the mode.
   The hand-edited Dolby-style jobs had a REAL new line after `tone_mapping: bt2390`, so the
