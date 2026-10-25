@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Synthetic DV tunnel validation: writes the GPU render jobs and runs the analysis.
 
-  python -I run_dv_synth.py jobs    <corpus-root> <jobs.txt>
+  python -I run_dv_synth.py jobs    <corpus-root> <jobs.txt> [id-substring]
   python -I run_dv_synth.py analyze <corpus-root> <jobs.txt> <render-out> <report.json>
 
 The jobs (DvSynthGpuRendersJobs renders them through VP's whole renderer):
@@ -46,13 +46,17 @@ NO_TM = ("[vprenderer.Default]\\n" + FAITHFUL + "tone_mapping: spline\\npeak_det
          "target_primaries: BT2020\\noutput_range: full\\n")
 
 
-def cinema(target, tm="spline", faithful=True):
+def cinema(target, tm="spline", faithful=True, dolby_style=False):
     # docs/cinema/VideoProcessor-test.cfg: spline, peak_detection off, gamut auto, contrast
     # recovery 0.3, P3 D65 target, 2.2 power, 100 nits. Dither off for measurement.
+    # dolby_style: dv_tone_mapping dolby_style (DvDolbyStyle.h). Settings use "\\n" escapes only: a
+    # real new line ends the job line (2026-10-24 the Dolby-style jobs lost every setting after
+    # tone_mapping that way and rendered bt2390 at the 203-nit sRGB default; the harness now rejects it).
     return ("[vprenderer.Default]\\n" + (FAITHFUL if faithful else "dithering: off\\n") +
-            "tone_mapping: %s\\npeak_detection: off\\n"
+            "tone_mapping: %s\\n%speak_detection: off\\n"
             "gamut_mapping: auto\\ncontrast_recovery: 0.3\\nsdr_target_nits: %g\\nsdr_black_nits: 0\\n"
-            "output_gamma: 2.2\\ntarget_primaries: p3_d65\\noutput_range: full\\n" % (tm, target))
+            "output_gamma: 2.2\\ntarget_primaries: p3_d65\\noutput_range: full\\n" %
+            (tm, "dv_tone_mapping: dolby_style\\n" if dolby_style else "", target))
 
 
 # The separate, later, clearly labelled FULL-PIPELINE check (VP's stages at their defaults).
@@ -86,6 +90,12 @@ def jobs(root):
                     out.append(("pol_%d_%s%s_%s" % (target, label, "" if tm == "spline" else "-bt2390", scene), seg(segname),
                                 "frame=%d seconds=3.0 capture=2.2" % k,
                                 "dv_tunnel_gpu_unpack: on\\ndv_trims: %s\\n" % ("on" if trims_on else "off") + cinema(target, tm)))
+    # The Dolby-style DV tone mapping (fix/dv-dolby-style-dark): the policy scenes at 100 nits, trims off and on.
+    for trims_on, label in ((False, "L1only"), (True, "blend")):
+        for k, scene in enumerate(("bright", "mid", "dim")):
+            out.append(("pol_100_%s-dolby_%s" % (label, scene), seg("policy-1080p24-real"), "frame=%d seconds=3.0 capture=2.2" % k,
+                        "dv_tunnel_gpu_unpack: on\\ndv_trims: %s\\n" % ("on" if trims_on else "off") +
+                        cinema(100, "bt2390", dolby_style=True)))
     # The tunnel's SDR passthrough (plain RGB8 in r210 before any DV lock): it must be shown.
     robust = load_truth(seg("robust-1080p24"))
     sdr_frame = next(f["index"] for f in robust["frames"] if f["expect"] == "sdr")
@@ -107,9 +117,13 @@ def jobs(root):
     return out
 
 
-def write_jobs(root, path):
+def write_jobs(root, path, only=None):
+    # only: keep the job ids containing this text (e.g. "-dolby_" for the Dolby-style confirmation).
     with open(path, "w", newline="\n") as f:
         for jid, folder, keys, settings in jobs(root):
+            if only and only not in jid:
+                continue
+            assert "\n" not in settings and "\r" not in settings, jid + ": a real new line inside the settings"
             faithful = not jid.startswith("full_") and jid != "sdr_passthrough"
             f.write("job id=%s segment=%s %s%s settings=%s\n" % (jid, folder, keys, " faithful=1" if faithful else "", settings))
     print("wrote", path)
@@ -319,7 +333,7 @@ def summarize(r):
 
 if __name__ == "__main__":
     if len(sys.argv) >= 4 and sys.argv[1] == "jobs":
-        write_jobs(sys.argv[2], sys.argv[3])
+        write_jobs(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) >= 5 else None)
     elif len(sys.argv) >= 6 and sys.argv[1] == "analyze":
         analyze(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
     else:

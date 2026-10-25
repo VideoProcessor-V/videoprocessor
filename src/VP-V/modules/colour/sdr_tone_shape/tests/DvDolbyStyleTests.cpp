@@ -289,6 +289,63 @@ namespace Tests
 			Assert::IsTrue(worst < 1e-4, L"libplacebo's generated LUT is the curve");
 		}
 
+		// fix/dv-dolby-style-dark (2026-10-25): the "one stop dark" report (100-nit target: 200 -> 98.5,
+		// 20 -> 9.7, 5 -> ~2, 1 -> 0.21 nits) suspected the ICtCp trims of darkening on top of the
+		// curve. The whole CPU chain here - the curve (as libplacebo runs it) then the ICtCp trims on
+		// the display-referred intensity - keeps a grey wedge on the curve: neutral trims exactly, the
+		// corpus's own L2 trim (policy-1080p24-real, 100 nits) within the trim's own small,
+		// brightening change. (The report's numbers are bt2390 at the default 203-nit sRGB target
+		// read as a 100-nit 2.2 picture: the GPU jobs lost their settings to a literal new line.)
+		TEST_METHOD(CurveThenIctcpTrimsKeepTheWedgeOnTheCurve)
+		{
+			using namespace DvDolby;
+			const double p3r[2] = { 0.680, 0.320 }, p3g[2] = { 0.265, 0.690 }, p3b[2] = { 0.150, 0.060 }, d65[2] = { 0.3127, 0.3290 };
+			DolbyVisionTunnelFrameMetadata::Trim corpus;   // the corpus's first L2 (log: target 100 nits)
+			corpus.level = 2;
+			corpus.targetMaxPq = 2081;
+			corpus.slope = 2208; corpus.offset = 2088; corpus.power = 1848; corpus.chromaWeight = 1928; corpus.saturationGain = 1888;
+			const DvTrimSelection::ExtParams neutral, l2 = DvTrimSelection::FromL2(corpus);
+			for (double target : { 100.0, 600.0, 1000.0 })
+			{
+				DolbyVisionTrims::Signal sig;
+				sig.pq = target > 100.0;   // the 100-nit cinema target is a 2.2 output, the others PQ
+				sig.gamma = 2.2;
+				sig.peakNits = target;
+				DolbyVisionTrims::LuminanceWeights(p3r, p3g, p3b, d65, sig.kr, sig.kg, sig.kb);
+				const DvDolbyStyle::IctcpSignal s = DvDolbyStyle::MakeSignal(sig, p3r, p3g, p3b, d65);
+				// The corpus's dim scene at 100 nits (L1 0 / 5 / 200 nits); a 4000-nit master above.
+				const DvDolbyStyle::Curve c = DvDolbyStyle::Build(Pq(0.0), Pq(5.0), Pq(target > 100.0 ? 4000.0 : 200.21), Pq(0.0), Pq(target));
+				Assert::IsFalse(c.identity);
+				for (double nits : { 200.0, 100.0, 20.0, 5.0, 1.0, 0.2 })
+				{
+					const double curveNits = DolbyVisionTrims::NitsFromPq(c.Map(Pq(nits)));   // the curve alone
+					for (int withTrims = 0; withTrims < 2; ++withTrims)
+					{
+						double px[3];
+						for (int k = 0; k < 3; ++k) px[k] = DolbyVisionTrims::FromNits(curveNits, sig);
+						DvDolbyStyle::ApplyPixelIctcp(px, withTrims ? l2 : neutral, s);
+						const double out = DolbyVisionTrims::ToNits(px[1], sig), ratio = out / curveNits;
+						char msg[200];
+						sprintf_s(msg, "target %.0f, %s: %.3f nits -> curve %.4f, after trims %.4f (x%.4f)\n", target,
+							withTrims ? "corpus L2" : "neutral trims", nits, curveNits, out, ratio);
+						Logger::WriteMessage(msg);
+						if (!withTrims)
+							Assert::AreEqual(1.0, ratio, 1e-4, L"neutral trims: the curve exactly");
+						else
+						{
+							// The trim's own change (slope 1.04, offset +0.01, power 0.95: brighter), never darker.
+							Assert::IsTrue(ratio >= 0.999 && ratio < 2.0, L"corpus L2: brighter than the curve by the trim alone, never darker, under one stop");
+							const double peakPq = Pq(target), i = Pq(curveNits);
+							const double want = DolbyVisionTrims::NitsFromPq(DvTrimSelection::Curve(i / peakPq, l2, DolbyVisionTrims::kOffsetFadePq / peakPq) * peakPq);
+							Assert::AreEqual(want, out, want * 2e-3 + 1e-6, L"a grey's intensity is the trim curve of the curve's output");
+						}
+						for (int k = 0; k < 3; ++k)
+							Assert::AreEqual(out, DolbyVisionTrims::ToNits(px[k], sig), out * 1e-4 + 1e-7, L"grey stays grey");
+					}
+				}
+			}
+		}
+
 		TEST_METHOD(ReferenceConditionsDescribeWhatTheGradeAssumed)
 		{
 			using namespace DvDolby;
