@@ -158,12 +158,12 @@
       "slot": "input.source_analysis",
       "order": 40,
       "status": "partial",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/SourceResolutionDetector.cpp",
-        "src/VideoProcessor-Lib/SourceResolutionDetector.h",
-        "src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.cpp",
-        "src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.h",
+        "src/VP-V/modules/input/source_analysis/SourceResolutionDetector.cpp",
+        "src/VP-V/modules/input/source_analysis/SourceResolutionDetector.h",
+        "src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.cpp",
+        "src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.h",
         "src/VP-V/modules/scaling/rebase/KernelInverse.cpp",
         "src/VideoProcessor-Lib/ActivePictureAnalyzer.cpp",
         "src/VideoProcessor-Lib/SceneDetector.cpp",
@@ -186,9 +186,18 @@
         "config_keys": [
           "frame_analysis_store",
           "label_detector",
-          "rebase_kernel_match",
           "source_coding_fixes",
           "source_resolution",
+          "source_resolution_auto_min_confidence",
+          "source_resolution_crossfade_s",
+          "source_resolution_cut_fixes",
+          "source_resolution_engage_max_wait_s",
+          "source_resolution_evidence_seconds",
+          "source_resolution_evidence_shots",
+          "source_resolution_latch_fixes",
+          "source_resolution_mixed_guard",
+          "source_resolution_release_fade_s",
+          "source_resolution_text_guard",
           "subtitle_fit",
           "subtitle_reposition",
           "subtitle_type"
@@ -274,12 +283,14 @@
       "slot": "scaling.rebase",
       "order": 60,
       "status": "built",
-      "code_location": "partly migrated",
+      "code_location": "migrated",
       "live_files": [
         "src/VP-V/modules/scaling/rebase/KernelInverse.cpp",
         "src/VP-V/modules/scaling/rebase/KernelInverse.h",
-        "src/VideoProcessor-Lib/vprenderer/SourceRebase.cpp",
-        "src/VideoProcessor-Lib/vprenderer/SourceRebase.h",
+        "src/VP-V/modules/scaling/rebase/SourceRebase.cpp",
+        "src/VP-V/modules/scaling/rebase/SourceRebase.h",
+        "src/VP-V/segments/EntranceSegment.cpp",
+        "src/VP-V/segments/EntranceSegment.h",
         "src/VP-V/modules/scaling/rebase/EntranceGpuDrain.h",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
       ],
@@ -338,10 +349,12 @@
       "slot": "repair.deband",
       "order": 80,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/VpDebander.cpp",
-        "src/VideoProcessor-Lib/vprenderer/VpDebander.h",
+        "src/VP-V/modules/repair/deband/VpDebander.cpp",
+        "src/VP-V/modules/repair/deband/VpDebander.h",
+        "src/VP-V/segments/EntranceSegment.cpp",
+        "src/VP-V/segments/EntranceSegment.h",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
       ],
       "components": {
@@ -360,7 +373,8 @@
           "deband_strength",
           "deband_vp",
           "deband_vp_exclusive",
-          "deband_vp_grain_guard"
+          "deband_vp_grain_guard",
+          "low_bitrate_handling"
         ],
         "upstream_modules": [
           "repair.encoding"
@@ -372,12 +386,14 @@
       "slot": "repair.texture_restore",
       "order": 90,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/TextureRestore.cpp",
-        "src/VideoProcessor-Lib/vprenderer/TextureRestore.h",
-        "src/VideoProcessor-Lib/vprenderer/DetailPulse.cpp",
-        "src/VideoProcessor-Lib/vprenderer/DetailPulse.h",
+        "src/VP-V/modules/repair/texture_restore/DetailPulse.cpp",
+        "src/VP-V/modules/repair/texture_restore/DetailPulse.h",
+        "src/VP-V/modules/repair/texture_restore/TextureRestore.cpp",
+        "src/VP-V/modules/repair/texture_restore/TextureRestore.h",
+        "src/VP-V/segments/EntranceSegment.cpp",
+        "src/VP-V/segments/EntranceSegment.h",
         "docs/VP-detail-restore.md"
       ],
       "components": {

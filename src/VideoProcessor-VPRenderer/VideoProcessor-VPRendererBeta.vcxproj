@@ -118,12 +118,12 @@
     <ClCompile Include="..\VP-V\modules\input\capture\EarlyUpload.cpp" />
     <ClCompile Include="..\VP-V\modules\scaling\output\AdaptiveDownscale.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\led_compensation\DynamicDriveFrame.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\SourceRebase.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\SourceResolutionMonitor.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\VpDebander.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\DetailPulse.cpp" />
+    <ClCompile Include="..\VP-V\modules\scaling\rebase\SourceRebase.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\SourceResolutionMonitor.cpp" />
+    <ClCompile Include="..\VP-V\modules\repair\deband\VpDebander.cpp" />
+    <ClCompile Include="..\VP-V\modules\repair\texture_restore\DetailPulse.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\CrossfadeMix.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\TextureRestore.cpp" />
+    <ClCompile Include="..\VP-V\modules\repair\texture_restore\TextureRestore.cpp" />
     <ClCompile Include="..\VP-V\modules\output\dither\OutputEncodingRepair.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutStage.cpp" />
     <ClCompile Include="..\VP-V\segments\OutputSegmentsMerge.cpp" />

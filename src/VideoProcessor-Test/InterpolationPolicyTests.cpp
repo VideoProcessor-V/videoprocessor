@@ -3,7 +3,7 @@
 
 #include <VP-V/modules/motion/consumers/InterpolationPolicy.h>
 #include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
-#include <vprenderer/VpDebander.h>
+#include <VP-V/modules/repair/deband/VpDebander.h>
 
 #include <algorithm>
 #include <cmath>

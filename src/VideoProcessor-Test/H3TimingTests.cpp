@@ -15,7 +15,7 @@
 #include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
 #include <VP-V/modules/motion/estimation/MotionEngineIdle.h>
 #include <VP-V/modules/input/queue_timing/PulldownDetector.h>
-#include <vprenderer/SourceResolutionMonitor.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
 
 #include <cmath>
 #include <cstdint>

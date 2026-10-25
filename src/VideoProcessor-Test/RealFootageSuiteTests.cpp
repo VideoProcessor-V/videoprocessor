@@ -50,14 +50,14 @@
 #include <ContentClassifier.h>
 #include <ContentIntentObserver.h>
 #include <VP-V/modules/motion/estimation/MotionValidity.h>
-#include <SourceResolutionDetector.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
 #include <vprenderer/AlphaQueuePolicy.h>
 #include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
 #include <vprenderer/CaptureTimestampGap.h>
 #include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
 #include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
 #include <VP-V/modules/input/queue_timing/PulldownDetector.h>
-#include <vprenderer/SourceResolutionMonitor.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
 #include <vprenderer/StartupCropHold.h>
 
 #include <algorithm>

@@ -164,7 +164,7 @@
     "re-base x A-lens/NLS x vectors (high-risk combo)"
    ]
   },
-  "fallback_entry": "Re-base: off (<reason>)",
+  "fallback_entry": "re-base precision: <the re-base's float-intermediate note>",
   "missing": []
  },
  {
@@ -221,7 +221,7 @@
     "deband + re-base + 4K route"
    ]
   },
-  "fallback_entry": "Deband: libplacebo deband (VP debander idle: <reason>)",
+  "fallback_entry": "VP deband: off on the DV tunnel planes (no deband after decode yet)",
   "missing": []
  },
  {

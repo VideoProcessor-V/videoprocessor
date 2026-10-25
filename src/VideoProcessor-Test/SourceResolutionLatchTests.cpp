@@ -4,9 +4,9 @@
 #include <atomic>
 #include <future>
 
-#include <SourceResolutionDetector.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
 #include <VP-V/modules/scaling/rebase/KernelInverse.h>
-#include <vprenderer/SourceResolutionMonitor.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
 #include "SubtitleTextTestPattern.h"
 
 #include <algorithm>

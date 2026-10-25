@@ -457,6 +457,7 @@ if (b.x < size.x && b.y < size.y) {
 		const float thr = static_cast<float>(params.thresholdCodes * codeUnit);
 
 		pl_frame frame = source;
+		bool anyHeld = false;   // a plane really read the previous weights (finding D5)
 		for (int plane = 0; plane < source.num_planes; ++plane)
 		{
 			const pl_tex in = source.planes[plane].texture;
@@ -500,6 +501,7 @@ if (b.x < size.x && b.y < size.y) {
 					weightIn = weight[readIndex][plane];
 			}
 			const bool useHold = weightIn != nullptr;
+			anyHeld = anyHeld || useHold;
 			// deband_vp_grain_guard split: grain passes by construction, so neither veto runs
 			// (the vector grain veto read band pumping on a starved stream as grain: H1).
 			const bool useSplit = params.grainGuard && params.grainSplit;
@@ -676,7 +678,7 @@ if (b.x < size.x && b.y < size.y) {
 				curIndex = next;
 				weightSequence = params.sequence;
 			}
-			if (hold) ++held;
+			if (anyHeld) ++held;
 		}
 		result = frame;
 		return true;

@@ -6,7 +6,7 @@
 #include <vprenderer/CrossfadeMix.h>
 #include <VP-V/modules/colour/extended_range/ExtendedRange.h>
 #include <VP-V/modules/output/dither/OutputEncodingRepair.h>
-#include <vprenderer/SourceResolutionMonitor.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
 
 #include <libplacebo/d3d11.h>
 
