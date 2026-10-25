@@ -7698,7 +7698,7 @@ struct LibplaceboVideoRenderer::Impl
 		const VpRepeatReuse::KnownHook known[] = {
 			{ dynamicDrive.MeasurementHookPointer(), K::PictureNeutral, 0, "LED measurement" },
 			{ dejudderCache.Hook(), K::PictureNeutral, 0, "rendered-picture cache" },
-			{ calibrationLutStage.Get(), K::Generation, lut, "calibration LUT stage" },
+			{ calibrationHost.Stage().Get(), K::Generation, lut, "calibration LUT stage" },
 			{ outputEncodingRepair.Get(), K::Static, 0, "output encoding repair" },
 			// Extended Range: a function of the source frame, the colours, the LUT and the settings
 			// (all in the key) - static per source frame (audit H1).
