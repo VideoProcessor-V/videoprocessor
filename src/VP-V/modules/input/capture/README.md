@@ -22,7 +22,7 @@ Bring frames in from DeckLink/Magewell (or a file source) without losing precisi
 
 ## Fallbacks
 
-- "Fallbacks engaged" entries: `capture GPU unpack: CPU formatters ... for the session: <error>`, `native RGB GPU unpack: CPU conversion to 10-bit 4:2:0 for the session: <error>`; `early upload: the render upload (<error>)` (WP-4's `FallbackCatalog::EarlyUpload`; releases in `m2-dv-fixes.patch`, F-4)
+- "Fallbacks engaged" entries: `capture GPU unpack: CPU formatters ... for the session: <error>`, `native RGB GPU unpack: CPU conversion to 10-bit 4:2:0 for the session: <error>`; `early upload: the render upload (<error>)` (WP-4 / perf's `FallbackCatalog::EarlyUpload`, engaged and released)
 - Behaviour: a GPU unpack failure switches to the CPU formatters for the session (visible since r6); early upload unavailable takes the render upload.
 
 ## Net fingerprint / upstream
@@ -91,8 +91,8 @@ auto), `native_rgb_ingest` (default on). Original pathway: `capture_path standar
 - `native RGB GPU unpack: CPU conversion to 10-bit 4:2:0 for the session: <error>`.
 - Early upload "not available" (the second device or the shared textures cannot be made):
   TODAY LOG-ONLY ("Early upload: not available (...); the render upload") - finding F-4, fix patch
-  WP-4's `silent-fallbacks-callsites.patch` engages `early upload: the render upload (<error>)`;
-  `m2-dv-fixes.patch` (applied after it) adds the releases (opened, or no longer wanted).
+  WP-4 / perf engage `early upload: the render upload (<error>)` and release it when the pool opens
+  or early upload is no longer wanted (F-4 resolved there).
 
 **To lift the module:** the host's capture upload glue (`UnpackRawPayload`, the route text, the
 early-upload sync and slot handling, the raw/convert decision in the frame preparation) moved

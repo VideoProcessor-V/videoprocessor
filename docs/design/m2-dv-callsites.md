@@ -10,9 +10,9 @@ git apply --check --cached docs/design/m2-dv-callsites.patch   # clean against t
 git apply docs/design/m2-dv-callsites.patch                    # then build VPRenderer + VPRendererBeta
 ```
 
-Cut against `integ/batch1` 43ebff50 (renderer blob 395b11a0, which carries dc149284's dv_tunnel_fixes
-gate on the plane-deband skip). The patch only touches `src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp`:
-about 244 lines out, 36 in. Apart from the two slot fixes below it is a **behaviour-free move** (two-commit rule, commit 1): the moved code is
+Cut against **integ-group-d fc16b39e** (group A's S2/S3 output segments, perf's timers and moved EarlyUpload, WP-4,
+feat/m2-dv 27f56b0c, the formatter patches) plus `feat/m2-dv-group-d` f0723f78 (DvHostStage two-phase). The patch only
+touches `src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp`: about 272 lines out, 37 in. Apart from the two slot fixes below it is a **behaviour-free move** (two-commit rule, commit 1): the moved code is
 textually the same apart from member renames (`dvTrims*` -> `m_trims*` and so on), the host's
 `LedDisplayGamma(target.color.transfer)` passed in as a value, and one comment put back on the
 member it describes. No setting, log line, status text or fallback entry changes. UPSTREAMABLE: no
@@ -34,13 +34,13 @@ the CPU tests compile them too; no project-file change is needed for the host).
 |---|---|---|---|
 | 1 | includes | `GpuDolbyVisionTunnelUnpack.h`, `DolbyVisionTrims.h`, `DvTrimSelection.h`, `DvCompareCapture.h`, `DvTunnelPolicy.h`, `DvDolbyStyle.h` | `DvGpuUnpackSession.h`, `DvHostStage.h` (the latter inside the libplacebo `#pragma warning` block, where `DvDolbyStyle.h` was) |
 | 2 | Impl members (capture unpack group) | `unique_ptr<GpuDolbyVisionTunnelUnpack> dvUnpack`, `dvGpuLogged`, `dvDejudderFailures`, `dvDejudderFailureLogTick` | `DvGpuUnpackSession dvUnpack` (the atomics `dvGpuWanted` / `dvGpuFailed` stay: the frame preparation reads them on another thread) |
-| 3 | `UnpackDolbyVisionPayload` | 45 lines: create, unpack, retry, log, count, fallback | `dvUnpack.Unpacker(...)`, the early-upload slot handling (host's), `dvUnpack.Finish(...)` |
-| 4 | Impl members (output hooks group) | 22 DV members (trims hook, statuses, selection, compare recorder, tone switch, flags) | `DvHostStage dvStage{ GlslHookLoader(), engage, release }` |
+| 3 | `UnpackDolbyVisionPayload` | create, log, count, fallback (perf's timers and `SyncEarlyUpload(bytes)` stay) | `dvUnpack.Unpacker(...)`, the early-upload slot handling and timers (host's), `dvUnpack.Finish(...)` |
+| 4 | Impl members (output hooks group) | 22 DV members (trims hook, statuses, selection, compare recorder, tone switch, flags) | `DvHostStage dvStage{ GlslHookLoader(), engage, release }`; group A's `outputColour{ sdrToneShape, dvStage.TrimsHook(), ... }` (declared after `dvStage`) |
 | 5 | device teardown | `dvTrimsHook.Clear(); dvTrimsConfigured = false;` and `dvUnpack.reset(); ... dvGpuLogged = false;` | `dvStage.ReleaseHooks();` and `dvUnpack.Reset();` |
 | 6 | `RenderLocked`, tunnel state | DV metadata fallback + tunnel releases (13 lines) | `dvStage.OnTunnelState(tunnelActive, dm)` |
 | 7 | `RenderLocked`, ingress status | `"; " + dvTrimsStatus + "; " + dvToneStatus + StatusSuffix + DebandStatus` | `dvStage.IngressSuffix(dm)` |
-| 8 | `RenderLocked`, VP deband | skip + debandState + fallback (10 lines) | `const bool dvVpDebandSkipped = dvStage.SkipVpDeband(isDV, deband_vp on && pipelineSlots.Runs(RepairDeband), debandState)` (FIX, modularity sweep: nothing listed while repair.deband is off) |
-| 9 | `RenderLocked`, PRE_OUTPUT after the SDR tone shape | Dolby-style curve, trims, reference conditions, compare capture (~130 lines) | `dvStage.OnPreOutput({...}, colorMapParams, hookTemplates, frameHooks)` + `TagSlotHooks(dvTrimsStart, ColourSdrToneShape)` (FIX, modularity sweep: the trims hook moves with its slot; default order unchanged, stable sort) |
+| 8 | `RenderLocked`, VP deband | skip + debandState + fallback (10 lines, already slot-gated on group A) | `const bool dvVpDebandSkipped = dvStage.SkipVpDeband(isDV, deband_vp on && pipelineSlots.Runs(RepairDeband), debandState)` |
+| 9 | `RenderLocked`, PRE_OUTPUT around the S2 segment | the `DvTrimsFrame` struct, the Dolby-style curve + trims decision filling `colourFrame.dvTrims` / `dv` (~110 lines), the `finishDvTrims` lambda, the compare capture | `dvStage.PrepareToneAndTrims({...}, colorMapParams, hookTemplates, colourFrame.dvTrims, colourFrame.dv)` before `outputColour.Collect`, `dvStage.FinishTrims(colourCounts.dvTrims)` after it. The S2 segment is the ONE emitter of the trims hook: it collects it from `dvStage.TrimsHook()`, tags it to colour.sdr_tone_shape and sets the parameters; DvHostStage pushes nothing |
 | 10 | `RenderLocked`, libplacebo deband | plane deband skip + one log line (12 lines, gated on dv_tunnel_fixes since dc149284) | `if (dvStage.SkipPlaneDeband(activeSettings.dvTunnelFixes, isDV, deband requested)) frameParams.deband_params = nullptr;` (gate kept) |
 | 11 | `ToggleDvCompareCapture` | `m_impl->dvCompare.Toggle()` | `m_impl->dvStage.ToggleCompareCapture()` |
 
@@ -81,24 +81,11 @@ Threading: every DvHostStage call is on the render thread (`RenderLocked`), as t
 
 ## Fix patch (separate, after the move): m2-dv-fixes.patch
 
-Findings F-3 and F-4 ([module-findings-2026-10-25-m2-dv.md](module-findings-2026-10-25-m2-dv.md))
-need host changes, so they come as their own patch (behaviour change, NOT part of the move):
-
-- F-3: the `capture GPU unpack` entry reads "CPU formatters for the session: <error>" (it claimed
-  4:2:0; the CPU formatters keep P210 4:2:2 for V210 / UYVY / HDYC unless P010 is forced).
-- F-4: WP-4's `silent-fallbacks-callsites.patch` already engages `early upload: the render upload
-  (<error>)` (`FallbackCatalog::EarlyUpload`) when early upload cannot open, but never releases it.
-  This patch adds the releases through the same builder: when the pool opens, and when early upload
-  is no longer wanted. (A failed open is not retried while it stays wanted - `earlyOpenFailed`,
-  pre-existing - so after a device loss the entry is released only once early upload stops being
-  wanted or the device is null at a raw frame.)
-
-**Order: apply WP-4's `silent-fallbacks-callsites.patch` first** (it defines `SyncFallback` and the
-early-upload engage); this patch was cut against that state (audit X2).
-
-Checked on integ 43ebff50: WP-4, then this, then the call-site patch (temporary index). Tests to run with it (GPU, coordinator): the renderer capture harness fallback test
-(prefix "capture GPU unpack (CPU formatters" still matches), and an early-upload open failure
-check (none exists yet; candidate: force `EarlyUpload::Open` to fail via a test environment switch).
+On group D only F-3 is left: the `capture GPU unpack` entry reads "CPU formatters for the session:
+<error>" (it claimed 4:2:0; the CPU formatters keep P210 4:2:2 for V210 / UYVY / HDYC unless P010 is
+forced). F-4 is DROPPED: WP-4 + perf already engage `early upload` through
+`FallbackCatalog::EarlyUpload` and release it when the pool opens or early upload is not wanted.
+Applies alone or after the call-site patch (checked with `git apply --cached` on group D).
 
 ## Pending dependency: the compare-capture toggle (audit M-2)
 
@@ -149,5 +136,4 @@ batch and need their own inventory and hook plan.
 
 `docs/design/.gitattributes` marks `m2-dv-*.patch` as `-text`, so the patches stay LF in every
 checkout and `git apply --cached` works on this Windows laptop (with core.autocrlf the CRLF working
-copy of a patch no longer matched the LF index). Apply order on integ/batch1: call sites, formatter
-hook, formatter install (any order among these; disjoint hunks), and the fix patch after WP-4.
+copy of a patch no longer matched the LF index). Group D already carries the formatter patches; apply the call-site patch, then the fix patch.

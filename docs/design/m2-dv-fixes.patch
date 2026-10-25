@@ -1,28 +1,8 @@
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index cc9aef8f..f13b26b5 100644
+index 44759155..9bf2efb8 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-@@ -5512,6 +5512,7 @@ struct LibplaceboVideoRenderer::Impl
- 					static_cast<unsigned long long>(earlyUsed), static_cast<unsigned long long>(earlyFallback));
- 			}
- 			earlyOpenFailed = false;
-+			SyncFallback(FallbackCatalog::EarlyUpload(false, false, std::string()));   // F-4: not wanted: released
- 			return;
- 		}
- 		if (earlyUpload->IsOpen() || earlyOpenFailed)
-@@ -5522,8 +5523,11 @@ struct LibplaceboVideoRenderer::Impl
- 		// follows the queue target (hunt 2 13-timing L4).
- 		const int slots = AlphaQueuePolicy::EarlyUploadSlots(earlyUploadQueueTarget.load(std::memory_order_acquire));
- 		if (earlyUpload->Open(d3d11->device, d3d11->gpu, slots))
-+		{
- 			DebugLog::Log("Early upload: on (%d slots, up to %zu MB; frames uploaded as they arrive on a second device)", slots,
- 				earlyUpload->CapBytes() >> 20);
-+			SyncFallback(FallbackCatalog::EarlyUpload(true, true, std::string()));   // F-4: open: released
-+		}
- 		else
- 		{
- 			earlyOpenFailed = true;
-@@ -6793,7 +6797,9 @@ struct LibplaceboVideoRenderer::Impl
+@@ -6862,7 +6862,9 @@ struct LibplaceboVideoRenderer::Impl
  		{
  			DebugLog::Log("Capture path gpu: the GPU unpack failed (%s); the CPU formatters for the rest of the session",
  				captureUnpack->Error().c_str());

@@ -106,7 +106,7 @@ Checked against the code 2026-10-25 (WP-14 / M2 step 6, `feat/m2-dv`).
   tone-mapping function), ICtCp helpers, `CannotRun`, `ShaderParameters`, `ToneSwitch`,
   `StatusText`, `Conditions` (the `ReferenceConditions` record).
 - `DvHostStage.h` (WP-14) - the renderer's DV glue in one object: `OnTunnelState`,
-  `IngressSuffix`, `SkipVpDeband`, `OnPreOutput`, `SkipPlaneDeband`, `ReleaseHooks`,
+  `IngressSuffix`, `SkipVpDeband`, `PrepareToneAndTrims` / `FinishTrims` (around the S2 output segment, the one emitter of the trims hook via `TrimsHook()`), `SkipPlaneDeband`, `ReleaseHooks`,
   `ToggleCompareCapture`, `ReferenceConditions()`. The host calls it once per hook point
   ([m2-dv-callsites.md](../../../../../docs/design/m2-dv-callsites.md)); until that patch is
   applied the same code still runs inline in `LibplaceboVideoRenderer.cpp`.
