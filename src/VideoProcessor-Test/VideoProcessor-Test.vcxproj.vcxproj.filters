@@ -227,6 +227,8 @@
   <ItemGroup><ClCompile Include="VpScaleRenderMotionTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><Filter Include="VP-V"><UniqueIdentifier>{6f1b7a52-4c3e-4f6a-9d1e-5a0c2b7e9d41}</UniqueIdentifier></Filter></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\tests\PipelineSkeletonTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VideoProcessor-Lib\vprenderer\HookSegment.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="HookSegmentTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\nets\NetFusion.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\nets\PlNetRunner.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\nets\tests\PlNetRunnerGpuTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
