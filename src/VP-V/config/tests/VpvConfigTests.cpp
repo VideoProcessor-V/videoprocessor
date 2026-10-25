@@ -1090,6 +1090,15 @@ namespace
 		require(tiered == 4, "motion, repair, scaling and output are the tiered units");
 		// The global tier has the same four steps, Upper included.
 		require(control<QSlider>(window, Vpv::ObjectName("global_tier"))->maximum() == 3, "the global tier has four steps");
+		// A control the Original pathway greys says why (the frame analysis store).
+		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);
+		QCoreApplication::processEvents();
+		auto* analysis = control<QCheckBox>(window, Vpv::ObjectName("expert.frame_analysis_store"));
+		require(!analysis->isEnabled() && analysis->toolTip().contains(QStringLiteral("Greyed: the Original pathway is on")),
+			"the frame analysis store is greyed in the Original pathway and says why");
+		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(0);
+		QCoreApplication::processEvents();
+		require(analysis->isEnabled() && !analysis->toolTip().contains(QStringLiteral("Greyed")), "back on the VP-V pathway the reason is gone");
 		save(window);
 		requireVpReads(path);
 	}
@@ -1108,6 +1117,8 @@ namespace
 		control<QCheckBox>(window, Vpv::ObjectName("scaling.card.tier_keys.custom"))->setChecked(true);
 		set("source_resolution", "native");   // Classic's value ...
 		set("adaptive_downscale", "on");      // ... with Mid's: no tier matches
+		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);   // a round trip re-reads the tiers
+		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(0);
 		QCoreApplication::processEvents();
 		require(control<QLabel>(window, Vpv::ObjectName("scaling.tier.name"))->text() == QStringLiteral("Custom"), "the unit reads Custom");
 		auto snapshot = [&]()

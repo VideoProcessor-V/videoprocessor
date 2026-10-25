@@ -234,7 +234,7 @@ namespace Vpv
                     p.set.push_back({ "adaptive_w_base", "0.2" });
                     u.presets.push_back(p);
                 }
-                u.plannedTiers.push_back({ "Upper", "the 4K refine net and the D refine add-on are not built yet" });
+                u.plannedTiers.push_back({ "Upper", "a sharper 4K scaling step is not built yet" });
                 u.toggles.push_back({ "rebase_kernel_match", "Re-base: undo the player's upscaler", { "on", "off" }, "scaling.rebase" });
                 u.toggles.push_back({ "adaptive_faithful", "Grain-true downscale filter", { "auto", "ortho" }, "scaling.output" });
                 u.toggles.push_back({ "source_resolution_text_guard", "Re-base ignores the player's own subtitles", { "on", "off" }, "scaling.rebase" });
@@ -247,7 +247,7 @@ namespace Vpv
                 u.planned.push_back({ "entrance_route_4k", "4K route (fixed 1-D steps to 4K)", "scaling.route_4k" });
                 u.planned.push_back({ "refine_net", "4K refine net", "scaling.refine" });
                 u.planned.push_back({ "chroma_upscale_vp", "VP chroma upscale", "scaling.chroma_upscale" });
-                u.planned.push_back({ "hybrid_refine_d", "D refine add-on under the hybrid scaler", "scaling.output" });
+                u.planned.push_back({ "hybrid_refine_d", "Extra detail-recovery step under the hybrid scaler", "scaling.output" });
                 t.units.push_back(u);
             }
             {

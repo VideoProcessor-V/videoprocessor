@@ -1208,6 +1208,15 @@ namespace Vpv
 			return page;
 		}
 
+		// A reason in a greyed control's tooltip, ahead of its own tooltip (cleared again when it is usable).
+		void SetGreyReason(QWidget* w, const QString& reason)
+		{
+			if (!w) return;
+			if (!w->property("vpvGreyBase").isValid()) w->setProperty("vpvGreyBase", w->toolTip());
+			const QString base = w->property("vpvGreyBase").toString();
+			w->setToolTip(reason.isEmpty() ? base : base.isEmpty() ? reason : reason + QStringLiteral("\n\n") + base);
+		}
+
 		// The expert page: the skeleton's global pipeline keys (ADR-0019/0021, R1), stored in [vpv]
 		// so Config's renderer-profile migrations never move them. The order is checked with the
 		// renderer's own validator (SlotRegistry / OrderValidator) and its plain-language reason is
@@ -1371,7 +1380,9 @@ namespace Vpv
 				{
 					const QSignalBlocker blocker(analysis);
 					analysis->setChecked(get("frame_analysis_store").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0);
-					analysis->setEnabled(get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) != 0);
+					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
+					analysis->setEnabled(!original);
+					SetGreyReason(analysis, original ? QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).") : QString());
 				}
 				{
 					const QSignalBlocker blocker(hdrInference);
@@ -1775,15 +1786,6 @@ namespace Vpv
 				for (QLabel* label : card->findChildren<QLabel*>(QString(), Qt::FindDirectChildrenOnly))
 					if (label->property("cardTitle").toBool() && label->text() == title) return card;
 			return nullptr;
-		}
-
-		// A reason in a greyed control's tooltip, ahead of its own tooltip (cleared again when it is usable).
-		void SetGreyReason(QWidget* w, const QString& reason)
-		{
-			if (!w) return;
-			if (!w->property("vpvGreyBase").isValid()) w->setProperty("vpvGreyBase", w->toolTip());
-			const QString base = w->property("vpvGreyBase").toString();
-			w->setToolTip(reason.isEmpty() ? base : base.isEmpty() ? reason : reason + QStringLiteral("\n\n") + base);
 		}
 
 		// The Dynamic Drive page in the same scheme as the VP-V units (organisation pass 2): Main holds the
