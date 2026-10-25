@@ -125,11 +125,11 @@ namespace VpvTests
 
 		TEST_METHOD(VpTemporalStagesRefuse)
 		{
-			for (int i = 0; i < 8; ++i)
+			for (int i = 0; i < 9; ++i)
 			{
 				VpTemporal t;
 				bool* flags[] = { &t.phasePicture, &t.dejudderExtras, &t.crossfade, &t.startupHoldBlack, &t.calibrationPattern,
-					&t.deinterlacing, &t.frameMixing, &t.peakDetection };
+					&t.deinterlacing, &t.frameMixing, &t.peakDetection, &t.ledMeasurePerRefresh };
 				*flags[i] = true;
 				Policy p = OnPolicy();
 				p.NoteFullRender(Policy::Complete(Key(5, false), VpTemporal{}, Hooks(1)), true);

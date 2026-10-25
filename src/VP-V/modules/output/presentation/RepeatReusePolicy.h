@@ -88,10 +88,14 @@ namespace VpRepeatReuse
 		bool deinterlacing = false;      // upstream's temporal renderer (history per render)
 		bool frameMixing = false;        // libplacebo smooth motion / temporal mixer
 		bool peakDetection = false;      // libplacebo HDR peak detection smooths per render
+		// drive.led_measure runs on every refresh today, repeats included; a reused repeat cannot run it
+		// (a PRE_OUTPUT hook). Until the LED drive is shown to be per source frame (or is fed the cached
+		// measurement on a reused repeat), its running refuses the reuse (modularity review, LOW).
+		bool ledMeasurePerRefresh = false;
 		bool Any() const
 		{
 			return phasePicture || dejudderExtras || crossfade || startupHoldBlack || calibrationPattern || deinterlacing ||
-				frameMixing || peakDetection;
+				frameMixing || peakDetection || ledMeasurePerRefresh;
 		}
 	};
 
