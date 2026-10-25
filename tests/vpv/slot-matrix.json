@@ -689,7 +689,9 @@
   "tests": {
    "placeholder": [],
    "isolation": [
-    "SigmaDeltaDomain tests"
+    "SigmaDeltaDomain tests",
+    "SegmentRunnerTests.DitherSlotOffRemovesTheSigmaDelta (switch honoured: output.dither off submits no sigma-delta)",
+    "SegmentRunnerTests.DitherFallbackOnlyForDomainOrShaderNotForSlotOff"
    ],
    "contract": [
     "the quantiser is the last OUTPUT hook"
