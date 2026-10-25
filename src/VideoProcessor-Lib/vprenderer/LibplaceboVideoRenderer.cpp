@@ -1045,6 +1045,7 @@ namespace
 		bool dejudderEstCandidates = true;        // E1
 		double dejudderEstLambda = 0.5;           // E1 smoothness penalty, codes per source px
 		bool dejudderEstQpel = true;              // E3
+		bool dejudderEstStillZero = true;         // identical blocks: exactly the zero vector (bug hunt 2026-10-25)
 		bool dejudderEstGate = true;              // E4
 		bool dejudderEstSplit = false;            // E2 (off from 2026-10-14: with the 4.5 tolerance and M6 it costs benefit)
 		double dejudderEstSplitSad = 0.0;         // E2 threshold (0 = the match tolerance)
@@ -1504,7 +1505,7 @@ namespace
 			<< settings.dejudderMotionScaleHi << '|' << settings.dejudderVectorSmooth << '|'
 			<< settings.dejudderTrustScale << '|' << settings.dejudderOcclusionFill << '|'
 			<< settings.dejudderEstCandidates << '|' << settings.dejudderEstLambda << '|'
-			<< settings.dejudderEstQpel << '|' << settings.dejudderEstGate << '|'
+			<< settings.dejudderEstQpel << '|' << settings.dejudderEstStillZero << '|' << settings.dejudderEstGate << '|'
 			<< settings.dejudderEstSplit << '|' << settings.dejudderEstSplitSad << '|' << settings.dejudderLowRes << '|' << settings.dejudderEstimateAhead << '|' << settings.capturePath << '|' << settings.dejudderMotionRolloff << '|' << settings.dejudderRollLo << '|'
 			<< settings.dejudderRollHi << '|' << settings.dejudderRollFloor << '|' << settings.dejudderObjectStrength << '|'
 			<< settings.dejudderTextureTolerance << '|' << settings.dejudderGlobalTwo << '|' << settings.dejudderRegionalHold << '|'
@@ -2725,6 +2726,7 @@ namespace
 			std::make_pair("dejudder_occlusion_fill", &settings.dejudderOcclusionFill),
 			std::make_pair("dejudder_est_candidates", &settings.dejudderEstCandidates),
 			std::make_pair("dejudder_est_qpel", &settings.dejudderEstQpel),
+			std::make_pair("dejudder_est_still_zero", &settings.dejudderEstStillZero),
 			std::make_pair("dejudder_est_gate", &settings.dejudderEstGate),
 			std::make_pair("dejudder_est_split", &settings.dejudderEstSplit),
 			std::make_pair("dejudder_block_taper", &settings.dejudderBlockTaper),
@@ -3476,6 +3478,7 @@ namespace
 		settings.opticalFlowFbCheck = profile.opticalFlowFbCheck;
 		settings.estLambda = static_cast<float>(profile.dejudderEstLambda);
 		settings.estQpel = profile.dejudderEstQpel;
+		settings.estStillZero = profile.dejudderEstStillZero;
 		settings.estGate = profile.dejudderEstGate;
 		settings.estSplit = profile.dejudderEstSplit;
 		settings.estSplitSad = static_cast<float>(profile.dejudderEstSplitSad);
@@ -3546,6 +3549,7 @@ namespace
 		settings.interpolation = InterpolationPolicy::Mode::Off;   // key=interpolation
 		settings.interpolationFillGaps = false;            // key=interpolation_fill_gaps
 		settings.occlusionMask = false;                    // key=occlusion_mask
+		settings.dejudderEstStillZero = false;             // key=dejudder_est_still_zero
 		settings.opticalFlow = false;                      // key=optical_flow
 		settings.motionAheadFrames = 0;                    // key=motion_ahead_frames
 		settings.motionHistoryFixes = false;               // key=motion_history_fixes
@@ -12465,6 +12469,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.dejudderEstCandidates = next.dejudderEstCandidates;
 		currentTransport.dejudderEstLambda = next.dejudderEstLambda;
 		currentTransport.dejudderEstQpel = next.dejudderEstQpel;
+		currentTransport.dejudderEstStillZero = next.dejudderEstStillZero;
 		currentTransport.dejudderEstGate = next.dejudderEstGate;
 		currentTransport.dejudderEstSplit = next.dejudderEstSplit;
 		currentTransport.dejudderEstSplitSad = next.dejudderEstSplitSad;
@@ -12656,6 +12661,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.dejudderOcclusionFill != next.dejudderOcclusionFill, "dejudder_occlusion_fill");
 		changed(current.dejudderEstCandidates != next.dejudderEstCandidates ||
 			current.dejudderEstLambda != next.dejudderEstLambda || current.dejudderEstQpel != next.dejudderEstQpel ||
+			current.dejudderEstStillZero != next.dejudderEstStillZero ||
 			current.dejudderEstGate != next.dejudderEstGate || current.dejudderEstSplit != next.dejudderEstSplit ||
 			current.dejudderEstSplitSad != next.dejudderEstSplitSad, "dejudder_est");
 		changed(current.dejudderLowRes != next.dejudderLowRes, "dejudder_low_res");
@@ -16937,7 +16943,7 @@ struct LibplaceboVideoRenderer::Impl
 				current.motionScaleLo != next.motionScaleLo || current.motionScaleHi != next.motionScaleHi ||
 				current.trustScaleFull != next.trustScaleFull || current.occlusionFill != next.occlusionFill ||
 				current.estCandidates != next.estCandidates || current.estLambda != next.estLambda ||
-				current.estQpel != next.estQpel || current.estGate != next.estGate ||
+				current.estQpel != next.estQpel || current.estStillZero != next.estStillZero || current.estGate != next.estGate ||
 				current.estSplit != next.estSplit || current.estSplitSad != next.estSplitSad ||
 				current.lowRes != next.lowRes || current.lowResAll != next.lowResAll ||
 				current.holdFeatherPx != next.holdFeatherPx || current.holdHysteresis != next.holdHysteresis ||

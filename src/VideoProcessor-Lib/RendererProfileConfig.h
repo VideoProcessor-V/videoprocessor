@@ -705,7 +705,7 @@ namespace RendererProfileConfig
 			// strength (share at full strength, 0 = off); S1 the sigma-delta's
 			// tolerance on grain (1 = off).
 			if (key == "dejudder_global_prior" || key == "dejudder_vector_smooth" || key == "dejudder_occlusion_fill" ||
-				key == "dejudder_est_candidates" || key == "dejudder_est_qpel" || key == "dejudder_est_gate" ||
+				key == "dejudder_est_candidates" || key == "dejudder_est_qpel" || key == "dejudder_est_still_zero" || key == "dejudder_est_gate" ||
 				key == "dejudder_est_split" || key == "dejudder_block_taper" || key == "dejudder_estimate_ahead" ||
 				key == "dejudder_motion_rolloff" || key == "dejudder_global_two" || key == "dejudder_regional_hold" ||
 				key == "dejudder_fade_match" || key == "dejudder_verify" || key == "dejudder_pixel_trust" ||
