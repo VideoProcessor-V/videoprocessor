@@ -1091,6 +1091,10 @@ namespace RendererProfileConfig
 		if (key == "pipeline_entrance_once") return IsChoice(value, { "on", "off" });   // B3 (ADR-0024)
 		if (key == "frame_analysis_store") return IsChoice(value, { "on", "off" });     // WP-23
 		if (key == "entrance_gpu_drain") return IsChoice(value, { "off", "flush", "finish" });   // expert workaround
+		// Config usability (2026-10-25): the owner's Approve / Keep decision per retirement group (A-D; keys retirement_a .. retirement_d, names are case-insensitive), recorded by the VP-V page's
+		// Proposed retirement tab. A UI-only record: nothing in the renderer reads it and nothing is hidden or removed by it.
+		if (key == "retirement_a" || key == "retirement_b" || key == "retirement_c" || key == "retirement_d")
+			return IsChoice(value, { "approve", "keep" });
 		if (key == "pipeline_order" || key == "pipeline_slots_off")
 			return value.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_.,;> ") == std::string::npos;
 		if (key == "calibration_lut_stage") return IsChoice(value, { "libplacebo", "vp" });
@@ -2119,6 +2123,7 @@ namespace RendererProfileConfig
 					"pipeline_slots_off", "calibration_lut_stage", "pipeline_entrance_once", "output_segments_merged", "frame_analysis_store", "entrance_gpu_drain", "hdr_inference" };
 				bool known = false;
 				for (const char* key : vpvKeys) known = known || value.first == key;
+				for (const char* key : { "retirement_a", "retirement_b", "retirement_c", "retirement_d" }) known = known || value.first == key;   // UI-only decisions
 				if (!known)
 				{
 					error = "[vpv] unknown key '" + value.first + "'";

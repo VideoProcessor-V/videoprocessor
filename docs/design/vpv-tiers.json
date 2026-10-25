@@ -421,7 +421,7 @@
         "Mid"
       ],
       "planned_tiers": {
-        "Upper": "the 4K refine net and the D refine add-on (not yet implemented; Upper uses Mid)"
+        "Upper": "a sharper 4K scaling step is not built yet"
       },
       "presets": {
         "Classic": {
@@ -551,7 +551,7 @@
         },
         {
           "key": "hybrid_refine_d",
-          "label": "D refine add-on under the hybrid scaler",
+          "label": "Extra detail-recovery step under the hybrid scaler",
           "slot": "scaling.output"
         }
       ],
@@ -670,7 +670,7 @@
         "Mid"
       ],
       "planned_tiers": {
-        "Upper": "no extra output step yet (Upper uses Mid)"
+        "Upper": "there is no extra output step yet"
       },
       "presets": {
         "Classic": {
@@ -711,7 +711,7 @@
     }
   ],
   "proposed_retirement": {
-    "note": "Switches proposed for retirement. Each still works as before until you decide; retiring one keeps today's default behaviour. Groups: A proven fixes (kept on), B experiments that lost, C superseded, D keep but hide as diagnostics.",
+    "note": "These settings are proposed for retirement. Every one still works exactly as before. For each group below, choose Approve or Keep: your choice is only RECORDED here. Nothing is hidden, turned off or removed until a later clean-up run, which reads your choice. Groups: A proven fixes (kept on), B experiments that lost, C superseded by the new design, D kept but hidden as diagnostics.",
     "groups": {
       "A": "Fixes under test that are proven",
       "B": "Experiments that lost",

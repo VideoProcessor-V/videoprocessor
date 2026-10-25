@@ -16,8 +16,18 @@ setting is still there, once. Details: `organisation.md` (the map) and `VP-setti
   those set, the contrast and cut tuning, the projector's limits. The old 56-control "Advanced LED"
   card is now five small cards.
 - **Proposed retirement** tab: the 39 switches proposed for retirement, still working until you
-  decide. Two were taken off the list because they are still in use (render-ahead queue credit,
+  decide. Each of the four groups has **Approve** and **Keep**; your choice is only recorded (nothing
+  is hidden or removed until a later clean-up run). Two were taken off the list because they are still in use (render-ahead queue credit,
   motion look-ahead frames).
+
+## Added 2026-10-25 (Config usability)
+
+- **Dynamic Drive Main** shows only those five things; everything else, including adaptive gamma,
+  look-ahead and the two projector response times, is on Advanced. A greyed control now says why.
+- **Four steps on every tier slider.** A step that is not built yet (Upper for Scaling and Output) is
+  shown as "planned - uses Mid for now"; the handle will not stay on it and nothing is written.
+- **"Set by" under every setting**: where its value comes from (a tier, your own entry, a profile
+  rule, the default profile, the Original pathway or VP's built-in default).
 
 ## How the controls work
 

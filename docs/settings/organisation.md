@@ -53,12 +53,20 @@ appears only while it holds a shown control; after this pass it holds none (ever
 home on VP-V), so it is not shown.
 
 **Dynamic Drive** (ours, its own page) now uses the same scheme, **Main | Advanced**:
-- Main: Dynamic Drive (on/off, the command source - your script, VP's compensate or none - adaptive
-  gamma, look-ahead, floors), LED profile, LED speeds (the preset), Projector connection.
-- Advanced: LED speeds: values (set by the preset until Custom); Contrast and cuts; Advanced LED (its
+- Main (owner decision 2026-10-25): ONLY on/off and the command source (your script, VP's compensate
+  or none), the LED profile, the LED speeds preset and the projector link (protocol, port, test
+  button). The list is `DriveMainKeys()` in `VpvOrganisation.h`, and a test checks the page holds
+  nothing else.
+- Advanced: Dynamic Drive: behaviour and tuning (adaptive gamma, look-ahead, how low the LED may
+  dim, the gamma boost, shadow lift, script pacing); Projector link: timing and replies (the two
+  response times, reading the replies); LED speeds: values (set by the preset until Custom); Contrast and cuts; Advanced LED (its
   two masters); Light curve, steps and ramps; Highlights; Cuts and fades; Script mode only; Compensate
   mode only (each its own small card, set by "Advanced LED values" until Custom); Projector response;
   Advanced projector; Experimental. Cards the chosen source does not use stay hidden, as before.
+- Every greyed control says why: a banner above the tabs while Dynamic Drive is off, a reason in the
+  tooltip of each greyed control ("Greyed: used only when Adaptive gamma is on ..."), and a line in
+  the behaviour card listing what is greyed. "Contrast where white clips" and "Highest useful
+  contrast" stay visible with another command source, greyed, saying they are for Compensate.
 
 ## Master -> derived groups
 

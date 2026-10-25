@@ -6,6 +6,7 @@
 #include <VP-V/config/VpvSection.h>
 #include <VP-V/config/VpvTierTable.generated.h>
 #include <VP-V/config/VpvOrganisation.h>
+#include <VP-V/config/VpvSetBy.h>
 
 #include <ConfigFile.h>
 #include <VP-V/core/DelayBudgetLadder.h>
@@ -18,6 +19,7 @@
 #include <QFontDatabase>
 #include <QLabel>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QSet>
 #include <QTabWidget>
 #include <QStackedWidget>
@@ -320,8 +322,8 @@ namespace
 		auto* planned = control<QCheckBox>(window, Vpv::ObjectName("repair.planned.encoding_repair"));
 		require(!planned->isEnabled() && planned->text().contains(QStringLiteral("not yet implemented")),
 			"an unbuilt slot's setting is shown disabled as not yet implemented");
-		require(control<QLabel>(window, Vpv::ObjectName("scaling.tier.planned"))->text().contains(QStringLiteral("Upper: not yet implemented")),
-			"a unit's missing tier is listed as not yet implemented");
+		require(control<QLabel>(window, Vpv::ObjectName("scaling.tier.planned"))->text().contains(QStringLiteral("Upper is planned")),
+			"a unit's missing tier is listed as planned");
 		require(control<QLabel>(window, Vpv::ObjectName("repair.slots"))->text().contains(QStringLiteral("not yet implemented")),
 			"placeholder slots are listed as not yet implemented");
 		require(control<QLabel>(window, Vpv::ObjectName("fallbacks"))->text().startsWith(QStringLiteral("Fallbacks engaged:")),
@@ -431,10 +433,12 @@ namespace
 					(std::string("each unit names where the rest of its settings are: ") + unit).c_str());
 			require(!window.findChild<QCheckBox*>(Vpv::ObjectName("output.planned.calibration_lut_stage")),
 				"the LUT stage is not listed as not yet implemented (the expert tab sets it)");
-			const QString list = control<QLabel>(window, Vpv::ObjectName("retirement.list"))->text();
-			require(list.contains(QStringLiteral("pulldown_fixes")) && list.contains(QStringLiteral("VP-V &gt; Proposed retirement")) &&
-				list.contains(QStringLiteral("General page")) &&
-				list.contains(QStringLiteral("magewell_recover_faults")) && list.contains(QStringLiteral("dejudder_verify_share")),
+			// The candidates are listed per group in plain words (no key names, no docs paths), each with its page.
+			QString list;
+			for (const char* group : { "A", "B", "C", "D" })
+				list += control<QLabel>(window, Vpv::ObjectName(QStringLiteral("retirement.group.") + QString::fromLatin1(group) + QStringLiteral(".list")))->text();
+			require(list.contains(QStringLiteral("VP-V &gt; Proposed retirement")) && list.contains(QStringLiteral("General page")) &&
+				list.contains(QStringLiteral("Queue page")),
 				"the Proposed retirement tab lists the candidates with their pages");
 			require(!list.contains(QStringLiteral("no control found")), "every retirement candidate's control is found");
 			require(control<QWidget>(window, QStringLiteral("config.vprenderer.pulldown_fixes"))->toolTip().contains(QStringLiteral("Proposed retirement")) &&
@@ -861,6 +865,375 @@ namespace
 	}
 }
 
+namespace
+{
+	// ---- Config usability package (2026-10-25) ----
+
+	// "Set by" wording and order (pure: VpvSetBy.h).
+	void testSetByWording()
+	{
+		Vpv::SetByQuery q;
+		q.key = "deband_vp";
+		q.builtInDefault = "off";
+		Vpv::SetByResult r = Vpv::SetBy(q);
+		require(r.source == Vpv::ValueSource::BuiltInDefault && r.text == "Set by VP's built-in default: Off", ("built-in default: " + r.text).c_str());
+		q.master = "the Repair tier (Low)";
+		r = Vpv::SetBy(q);
+		require(r.source == Vpv::ValueSource::Master && r.text == "Set by the Repair tier (Low): Off", ("master: " + r.text).c_str());
+		q.master.clear();
+		q.ownValue = "on";
+		r = Vpv::SetBy(q);
+		require(r.source == Vpv::ValueSource::ThisProfile && r.text == "Set by you: On", ("you: " + r.text).c_str());
+		q.defaultProfileOnScreen = false;
+		q.profileName = "Film24";
+		r = Vpv::SetBy(q);
+		require(r.source == Vpv::ValueSource::ThisProfile && r.text == "Set by you, in profile \"Film24\": On", ("you in a profile: " + r.text).c_str());
+		q.profileRule = "$source_rate < 25";
+		r = Vpv::SetBy(q);
+		require(r.source == Vpv::ValueSource::RuleProfile && r.text.find("used when its rule matches") != std::string::npos, ("rule profile: " + r.text).c_str());
+		q.ownValue.clear();
+		q.inheritedValue = "on";
+		r = Vpv::SetBy(q);
+		require(r.source == Vpv::ValueSource::DefaultProfile && r.text == "Set by the default profile: On", ("default profile: " + r.text).c_str());
+		q.notUsedBecause = "VP's debander is off";
+		r = Vpv::SetBy(q);
+		require(r.text == "Set by the default profile: On. Not used now: VP's debander is off", ("not used: " + r.text).c_str());
+		q.originalPathway = true;
+		r = Vpv::SetBy(q);
+		require(r.source == Vpv::ValueSource::OriginalPathway && r.text.find("Original pathway") != std::string::npos &&
+			r.text.find(": Off") != std::string::npos, ("Original pathway: " + r.text).c_str());
+		q.key = "quality";   // Bill's key: the baseline does not override it
+		r = Vpv::SetBy(q);
+		require(r.source != Vpv::ValueSource::OriginalPathway, "a key the Original pathway does not set is unaffected by it");
+		std::string value;
+		for (char group : { 'A', 'B', 'C', 'D' })
+			require(!Vpv::OriginalPathwayValue(Vpv::DecisionKey(group), value), "a retirement decision has no render effect, so no Original-pathway entry");
+	}
+
+	// Every setting on a VP-V unit tab says where its value comes from, and every setting a lock greys says why.
+	void testSetByOnThePage()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir,
+			"[vprenderer]\nquality: high\ntexture_restore_cap: 1.5\nadaptive_upscale: on\n"
+			"[vprenderer.Film24]\nwhen: $source_rate < 25\nquality: high\ntexture_restore_cap: 2\n"
+			"[queue]\ntarget_latency_ms: 250\n");
+		ConfigEditorWindow window(path, 0, true);
+		auto note = [&](const char* key) { return control<QLabel>(window, Vpv::ObjectName(QStringLiteral("setby.line.") + QString::fromLatin1(key)))->text(); };
+		// A tier-locked setting names its master and the value.
+		require(note("deband_vp") == QStringLiteral("Set by the Repair tier (Low): Off"), ("tier-locked: " + S(note("deband_vp"))).c_str());
+		// A setting nothing sets: the built-in default; one the profile writes: you.
+		require(note("adaptive_upscale") == QStringLiteral("Set by you: On"), ("you (toggle): " + S(note("adaptive_upscale"))).c_str());
+		require(note("rebase_kernel_match").startsWith(QStringLiteral("Set by VP's built-in default: ")), ("built-in: " + S(note("rebase_kernel_match"))).c_str());
+		require(note("texture_restore_cap") == QStringLiteral("Set by you: 1.5"), ("you: " + S(note("texture_restore_cap"))).c_str());
+		// A feature's tuning that its switch leaves unused says so.
+		require(note("intent_content_hold_seconds").contains(QStringLiteral("Not used now: Content labels is off")),
+			("feature off: " + S(note("intent_content_hold_seconds"))).c_str());
+		// Every row a card places has its line, and no line shows a Qt placeholder or an empty string.
+		int lines = 0;
+		for (QLabel* label : window.findChildren<QLabel*>(QRegularExpression(QStringLiteral("^vpv\\.setby\\.line\\."))))
+		{
+			++lines;
+			require(label->text().startsWith(QStringLiteral("Set by ")), ("a Set by line: " + S(label->objectName()) + " = " + S(label->text())).c_str());
+		}
+		require(lines > 40, "the unit tabs carry a Set by line for their settings");
+		// A named profile: its own value under its rule, the default profile's value when it sets nothing.
+		auto* picker = control<QComboBox>(window, Vpv::ObjectName("profile"));
+		picker->setCurrentIndex(picker->findData(QStringLiteral("vprenderer.Film24")));
+		QCoreApplication::processEvents();
+		require(note("texture_restore_cap") == QStringLiteral("Set by you, in profile \"Film24\" (used when its rule matches): 2"),
+			("rule profile: " + S(note("texture_restore_cap"))).c_str());
+		require(note("adaptive_upscale") == QStringLiteral("Set by the default profile: On"), ("inherited: " + S(note("adaptive_upscale"))).c_str());
+		picker->setCurrentIndex(0);
+		QCoreApplication::processEvents();
+		// The Original pathway: the baseline's value, whatever the profile says.
+		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);
+		QCoreApplication::processEvents();
+		require(note("deband_vp") == QStringLiteral("Set by the Original pathway (VP's additions are off): Off"), ("Original pathway: " + S(note("deband_vp"))).c_str());
+		require(note("texture_restore_cap").startsWith(QStringLiteral("Set by you")), "a key the Original pathway does not set keeps its own line");
+		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(0);
+		QCoreApplication::processEvents();
+		// Custom: the setting is yours, not the tier's.
+		control<QCheckBox>(window, Vpv::ObjectName("repair.card.tier_keys.custom"))->setChecked(true);
+		auto* deband = control<QComboBox>(window, QStringLiteral("config.vprenderer.deband_vp"));
+		deband->setCurrentIndex(deband->findData(QStringLiteral("on")));
+		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);
+		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(0);
+		QCoreApplication::processEvents();
+		require(note("deband_vp") == QStringLiteral("Set by you: On"), ("Custom: " + S(note("deband_vp"))).c_str());
+	}
+
+	// The Dynamic Drive page's Main holds only on / off, the command source, the LED profile, the speeds preset and
+	// the projector link; every greyed control says why; the white-clips control is always there.
+	void testDynamicDriveMainPage()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir,
+			"[vprenderer]\nquality: high\n[queue]\ntarget_latency_ms: 250\n"
+			"[led_drive.Default]\nenabled: true\ncommand_source: compensate\n"
+			"[projector.Default]\nprotocol: barco_ascii\nport: COM1\n");
+		ConfigEditorWindow window(path, 0, true);
+		auto* main = control<QWidget>(window, Vpv::ObjectName("drivepage.main"));
+		auto* advanced = control<QWidget>(window, Vpv::ObjectName("drivepage.advanced"));
+		std::set<std::string> allowed;
+		for (const char* key : Vpv::DriveMainKeys()) allowed.insert(key);
+		int onMain = 0;
+		for (QWidget* w : main->findChildren<QWidget*>(QRegularExpression(QStringLiteral("^config\\.(led_drive|projector)\\.default\\."))))
+		{
+			++onMain;
+			const std::string key = S(w->objectName().section(QLatin1Char('.'), 3, 3));
+			require(allowed.count(key) != 0, ("not a Dynamic Drive Main control: " + S(w->objectName())).c_str());
+		}
+		require(onMain > 0, "the Main page holds the Dynamic Drive controls");
+		for (const char* key : Vpv::DriveMainKeys())
+		{
+			const bool projector = std::string(key) == "protocol" || std::string(key) == "port" || std::string(key) == "connection_test";
+			auto* w = control<QWidget>(window, QStringLiteral("config.%1.default.%2").arg(QLatin1String(projector ? "projector" : "led_drive"), QString::fromLatin1(key)));
+			require(main->isAncestorOf(w), (std::string("on the Dynamic Drive Main page: ") + key).c_str());
+		}
+		for (const char* name : { "config.led_drive.default.adaptive_gamma", "config.led_drive.default.lookahead", "config.led_drive.default.gamma_boost",
+			"config.led_drive.default.shadow_lift_ansi", "config.led_drive.default.led_floor", "config.led_drive.default.script_pacing",
+			"config.projector.default.led_latency_ms", "config.projector.default.cntr_latency_ms", "config.projector.default.read_back",
+			"config.projector.default.dmd_clip_cntr", "config.projector.default.cntr_max_usable", "config.led_drive.default.cntr_assist",
+			"config.led_drive.default.ftb_experimental" })
+			require(advanced->isAncestorOf(control<QWidget>(window, QString::fromLatin1(name))), (std::string("on Advanced, not Main: ") + name).c_str());
+		// "Contrast where white clips" always has its control; with another source it is greyed and says why.
+		auto* whiteClips = control<QWidget>(window, QStringLiteral("config.projector.default.dmd_clip_cntr"));
+		require(whiteClips->isEnabled() && RowShown(whiteClips), "Compensate: the white-clips control is usable");
+		control<QRadioButton>(window, QStringLiteral("config.led_drive.default.command_source.internal_script"))->click();
+		QCoreApplication::processEvents();
+		require(RowShown(whiteClips) && !whiteClips->isEnabled() && whiteClips->toolTip().contains(QStringLiteral("Compensate")),
+			"another source: the white-clips control stays, greyed, saying it is for Compensate");
+		// "No LED commands": the LED profile and the speeds preset stay on Main, greyed with the reason (not hidden).
+		control<QRadioButton>(window, QStringLiteral("config.led_drive.default.command_source.none"))->click();
+		QCoreApplication::processEvents();
+		for (const char* key : { "profile_file", "rate_preset" })
+		{
+			auto* w = control<QWidget>(window, QStringLiteral("config.led_drive.default.") + QString::fromLatin1(key));
+			require(w->isVisibleTo(main) && !w->isEnabled(), (std::string("greyed, not hidden, with another source: ") + key).c_str());
+			bool reason = false;
+			for (QWidget* p = w; p && p != main; p = p->parentWidget()) reason = reason || p->toolTip().contains(QStringLiteral("Greyed: used only with"));
+			require(reason, (std::string("the greyed control says why: ") + key).c_str());
+		}
+		control<QRadioButton>(window, QStringLiteral("config.led_drive.default.command_source.compensate"))->click();
+		QCoreApplication::processEvents();
+		require(control<QWidget>(window, QStringLiteral("config.led_drive.default.rate_preset"))->isEnabled(), "Compensate: the speeds preset is usable");
+		// Greyed controls say why: adaptive gamma off greys the shadow lift; Dynamic Drive off greys the rest.
+		auto* adaptive = control<QCheckBox>(window, QStringLiteral("config.led_drive.default.adaptive_gamma"));
+		adaptive->setChecked(false);
+		QCoreApplication::processEvents();
+		auto* lift = control<QWidget>(window, QStringLiteral("config.led_drive.default.shadow_lift_ansi"));
+		require(lift->toolTip().contains(QStringLiteral("Adaptive gamma")), "the shadow lift says it needs Adaptive gamma");
+		require(!control<QLabel>(window, Vpv::ObjectName("drive.reason.behaviour"))->isHidden() &&
+			control<QLabel>(window, Vpv::ObjectName("drive.reason.behaviour"))->text().contains(QStringLiteral("Adaptive gamma")),
+			"the behaviour card lists why the shadow lift is greyed");
+		auto* drive = control<QCheckBox>(window, QStringLiteral("config.led_drive.default.enabled"));
+		drive->setChecked(false);
+		QCoreApplication::processEvents();
+		require(!control<QLabel>(window, Vpv::ObjectName("drivepage.off_note"))->isHidden() &&
+			control<QLabel>(window, Vpv::ObjectName("drivepage.off_note"))->text().contains(QStringLiteral("Dynamic Drive is off")),
+			"Dynamic Drive off: the page says why the rest is greyed");
+		require(adaptive->toolTip().contains(QStringLiteral("Greyed: Dynamic Drive is off")), "a greyed control names Dynamic Drive being off");
+		drive->setChecked(true);
+		QCoreApplication::processEvents();
+		require(control<QLabel>(window, Vpv::ObjectName("drivepage.off_note"))->isHidden() &&
+			!adaptive->toolTip().contains(QStringLiteral("Greyed: Dynamic Drive is off")), "switching it on removes the reason");
+		save(window);
+		requireVpReads(path);
+	}
+
+	// Four tier steps on every tiered unit; a planned step is shown, marked, and writes nothing.
+	void testFourTierSteps()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir);
+		ConfigEditorWindow window(path, 0, true);
+		int tiered = 0;
+		for (const Vpv::Unit& u : Vpv::TierTable().units)
+		{
+			const QString id = QString::fromLatin1(u.id);
+			if (!u.Tiered())
+			{
+				require(window.findChild<QLabel*>(Vpv::ObjectName(id + QStringLiteral(".untiered"))) != nullptr,
+					(std::string("an untiered unit keeps its explanation: ") + u.id).c_str());
+				require(!window.findChild<QSlider*>(Vpv::ObjectName(id + QStringLiteral(".tier"))), (std::string("no slider on an untiered unit: ") + u.id).c_str());
+				continue;
+			}
+			++tiered;
+			auto* slider = control<QSlider>(window, Vpv::ObjectName(id + QStringLiteral(".tier")));
+			require(slider->minimum() == 0 && slider->maximum() == 3, (std::string("four tier steps: ") + u.id).c_str());
+			const QString steps = control<QLabel>(window, Vpv::ObjectName(id + QStringLiteral(".tier.steps")))->text();
+			for (const char* tier : { "Classic", "Low", "Mid", "Upper" })
+				require(steps.contains(QString::fromLatin1(tier)), (std::string("the steps name ") + tier + " on " + u.id).c_str());
+			if (u.plannedTiers.empty()) continue;
+			// A planned Upper: marked, and the slider refuses to stay on it; nothing is written.
+			require(steps.contains(QStringLiteral("Upper (planned - uses Mid for now)")), (std::string("Upper is marked planned: ") + u.id).c_str());
+			const QString before = control<QLabel>(window, Vpv::ObjectName(id + QStringLiteral(".tier.name")))->text();
+			const int position = slider->value();
+			std::map<std::string, std::string> keys;
+			for (const Vpv::Preset& p : u.presets)
+				for (const Vpv::KeyValue& kv : p.set)
+					if (auto* combo = window.findChild<QComboBox*>(QStringLiteral("config.vprenderer.") + QString::fromLatin1(kv.key)))
+						keys[kv.key] = S(combo->currentData().toString());
+			slider->setValue(3);
+			QCoreApplication::processEvents();
+			require(slider->value() == position, (std::string("the handle goes back from a planned step: ") + u.id).c_str());
+			require(control<QLabel>(window, Vpv::ObjectName(id + QStringLiteral(".tier.name")))->text() == before,
+				(std::string("a planned step changes no tier: ") + u.id).c_str());
+			for (const auto& kv : keys)
+				if (auto* combo = window.findChild<QComboBox*>(QStringLiteral("config.vprenderer.") + QString::fromStdString(kv.first)))
+					require(S(combo->currentData().toString()) == kv.second, ("a planned step writes nothing: " + kv.first).c_str());
+			const QString planned = control<QLabel>(window, Vpv::ObjectName(id + QStringLiteral(".tier.planned")))->text();
+			require(planned.contains(QStringLiteral("Upper is planned")) && planned.contains(QStringLiteral("uses Mid for now")) &&
+				planned.contains(QStringLiteral("Nothing was changed")), (std::string("the planned step explains itself: ") + u.id).c_str());
+		}
+		require(tiered == 4, "motion, repair, scaling and output are the tiered units");
+		// The global tier has the same four steps, Upper included.
+		require(control<QSlider>(window, Vpv::ObjectName("global_tier"))->maximum() == 3, "the global tier has four steps");
+		// A control the Original pathway greys says why (the frame analysis store).
+		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);
+		QCoreApplication::processEvents();
+		auto* analysis = control<QCheckBox>(window, Vpv::ObjectName("expert.frame_analysis_store"));
+		require(!analysis->isEnabled() && analysis->toolTip().contains(QStringLiteral("Greyed: the Original pathway is on")),
+			"the frame analysis store is greyed in the Original pathway and says why");
+		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(0);
+		QCoreApplication::processEvents();
+		require(analysis->isEnabled() && !analysis->toolTip().contains(QStringLiteral("Greyed")), "back on the VP-V pathway the reason is gone");
+		save(window);
+		requireVpReads(path);
+	}
+
+	// Dragging the handle from Custom onto the planned Upper and letting go changes nothing (audit 2026-10-25, MEDIUM).
+	void testPlannedDragFromCustomWritesNothing()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir);
+		ConfigEditorWindow window(path, 0, true);
+		auto set = [&](const char* key, const char* value)
+		{
+			auto* combo = control<QComboBox>(window, QStringLiteral("config.vprenderer.") + QString::fromLatin1(key));
+			combo->setCurrentIndex(combo->findData(QString::fromLatin1(value)));
+		};
+		control<QCheckBox>(window, Vpv::ObjectName("scaling.card.tier_keys.custom"))->setChecked(true);
+		set("source_resolution", "native");   // Classic's value ...
+		set("adaptive_downscale", "on");      // ... with Mid's: no tier matches
+		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);   // a round trip re-reads the tiers
+		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(0);
+		QCoreApplication::processEvents();
+		require(control<QLabel>(window, Vpv::ObjectName("scaling.tier.name"))->text() == QStringLiteral("Custom"), "the unit reads Custom");
+		auto snapshot = [&]()
+		{
+			std::map<std::string, std::string> keys;
+			for (const char* key : { "source_resolution", "adaptive_downscale", "adaptive_w_base" })
+				if (auto* w = window.findChild<QWidget*>(QStringLiteral("config.vprenderer.") + QString::fromLatin1(key)))
+				{
+					if (auto* combo = qobject_cast<QComboBox*>(w)) keys[key] = S(combo->currentData().toString());
+					else if (auto* edit = qobject_cast<QLineEdit*>(w)) keys[key] = S(edit->text());
+				}
+			return keys;
+		};
+		const auto before = snapshot();
+		auto* slider = control<QSlider>(window, Vpv::ObjectName("scaling.tier"));
+		slider->setSliderDown(true);
+		slider->setValue(3);
+		slider->setSliderDown(false);   // releases: emits sliderReleased
+		QCoreApplication::processEvents();
+		require(snapshot() == before, "a drag from Custom onto the planned Upper and release writes no key");
+		require(control<QLabel>(window, Vpv::ObjectName("scaling.tier.name"))->text() == QStringLiteral("Custom"), "the unit is still Custom");
+	}
+
+	// Approve / Keep per retirement group: only recorded; nothing is hidden; stored as [vpv] retirement_a..d.
+	void testRetirementDecisions()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir);
+		// The validator: approve / keep (any case) only, and only groups A-D.
+		{
+			QTemporaryDir bad;
+			const QString badPath = WriteFixture(bad, "[vprenderer]\nquality: high\n[vpv]\nretirement_a: maybe\n");
+			ConfigFile config;
+			require(config.Load(badPath.toStdString()), "load");
+			RendererProfileConfig::Model model;
+			std::string error;
+			require(!RendererProfileConfig::Read(config, model, error) && error.find("retirement_a") != std::string::npos, "a decision other than approve or keep is refused");
+			const QString unknownPath = WriteFixture(bad, "[vprenderer]\nquality: high\n[vpv]\nretirement_e: keep\n");
+			ConfigFile unknown;
+			require(unknown.Load(unknownPath.toStdString()), "load");
+			require(!RendererProfileConfig::Read(unknown, model, error), "an unknown retirement group is refused");
+			const QString goodPath = WriteFixture(bad, "[vprenderer]\nquality: high\n[vpv]\nretirement_a: Approve\nretirement_d: keep\n");
+			requireVpReads(goodPath);
+		}
+		auto liveCandidates = [](ConfigEditorWindow& window)
+		{
+			std::set<std::string> live;
+			for (const Vpv::Retirement& r : Vpv::TierTable().retirements)
+				if (std::string(r.section) == "vprenderer")
+					if (auto* w = window.findChild<QWidget*>(QStringLiteral("config.vprenderer.") + QString::fromLatin1(r.key)))
+						if (RowShown(w)) live.insert(r.key);
+			return live;
+		};
+		std::set<std::string> before;
+		{
+			ConfigEditorWindow window(path, 0, true);
+			before = liveCandidates(window);
+			require(before.size() > 10, "the retirement candidates have shown controls");
+			for (char group : { 'A', 'B', 'C', 'D' })
+			{
+				const QString g = QString(QLatin1Char(group));
+				require(control<QRadioButton>(window, Vpv::ObjectName(QStringLiteral("retirement.decision_") + g + QStringLiteral(".none")))->isChecked(),
+					"no decision is recorded at first");
+				require(control<QLabel>(window, Vpv::ObjectName(QStringLiteral("retirement.group.") + g + QStringLiteral(".status")))->text().contains(QStringLiteral("No decision")),
+					"the group says nothing is decided");
+			}
+			control<QRadioButton>(window, Vpv::ObjectName("retirement.decision_A.approve"))->click();
+			control<QRadioButton>(window, Vpv::ObjectName("retirement.decision_B.keep"))->click();
+			QCoreApplication::processEvents();
+			const QString status = control<QLabel>(window, Vpv::ObjectName("retirement.group.A.status"))->text();
+			require(status.contains(QStringLiteral("Recorded: Approve")) && status.contains(QStringLiteral("Nothing is hidden")), "Approve says it only records");
+			require(control<QLabel>(window, Vpv::ObjectName("retirement.group.B.status"))->text().contains(QStringLiteral("Recorded: Keep")), "Keep is recorded");
+			// Approve hides nothing: every candidate's control and its listing are still there.
+			require(liveCandidates(window) == before, "approving a group hides no control");
+			for (char group : { 'A', 'B', 'C', 'D' })
+			{
+				const QString list = control<QLabel>(window, Vpv::ObjectName(QStringLiteral("retirement.group.") + QString(QLatin1Char(group)) + QStringLiteral(".list")))->text();
+				require(!list.isEmpty() && !list.contains(QStringLiteral("no control found")), "each group still lists its settings");
+				require(!list.contains(QStringLiteral("docs/")) && !list.contains(QStringLiteral(".md")) && !list.contains(QStringLiteral("_fixes")) &&
+					!list.contains(QStringLiteral("dither_vectors")), "the listing uses plain names (no key names, no docs paths)");
+			}
+			// The control of dither_vectors is where the listing says it is (not on the Rendering page).
+			const QString groupC = control<QLabel>(window, Vpv::ObjectName("retirement.group.C.list"))->text();
+			require(groupC.contains(QStringLiteral("VP-V &gt; ")), ("group C names the VP-V tab: " + S(groupC)).c_str());
+			// The Original pathway keeps the record and greys the controls with the rest of the page.
+			control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);
+			QCoreApplication::processEvents();
+			require(control<QRadioButton>(window, Vpv::ObjectName("retirement.decision_A.approve"))->isChecked() &&
+				!control<QRadioButton>(window, Vpv::ObjectName("retirement.decision_A.approve"))->isEnabled(),
+				"the Original pathway keeps the recorded decision and greys the choice with the page");
+			control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(0);
+			save(window);
+		}
+		ConfigFile config;
+		std::string v;
+		require(config.Load(path.toStdString()), "reload");
+		require(config.TryGetString("vpv", "retirement_a", v) && v == "approve", "Approve is stored in [vpv] retirement_a");
+		require(config.TryGetString("vpv", "retirement_b", v) && v == "keep", "Keep is stored in [vpv] retirement_b");
+		require(!config.TryGetString("vpv", "retirement_c", v) && !config.TryGetString("vpv", "retirement_d", v), "an undecided group writes nothing");
+		requireVpReads(path);
+		{
+			ConfigEditorWindow window(path, 0, true);
+			require(control<QRadioButton>(window, Vpv::ObjectName("retirement.decision_A.approve"))->isChecked() &&
+				control<QRadioButton>(window, Vpv::ObjectName("retirement.decision_B.keep"))->isChecked() &&
+				control<QRadioButton>(window, Vpv::ObjectName("retirement.decision_C.none"))->isChecked(), "the decisions read back after reopening");
+			require(liveCandidates(window) == before, "after reopening with an Approve recorded, nothing is hidden");
+			control<QRadioButton>(window, Vpv::ObjectName("retirement.decision_A.none"))->click();
+			save(window);
+		}
+		ConfigFile cleared;
+		require(cleared.Load(path.toStdString()) && !cleared.TryGetString("vpv", "retirement_a", v), "Not decided yet removes the stored decision");
+		requireVpReads(path);
+	}
+}
+
 int RunVpvConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
 	const std::function<void(bool, const char*)>& requireHelper, const std::function<void(ConfigEditorWindow&)>& saveHelper)
 {
@@ -878,5 +1251,11 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: organisation cards, raw group, picker and reload", testOrganisation);
 	failures += run("VP-V: masters, derived settings, one control per key, fits the window", testMastersAndFit);
 	failures += run("VP-V: logic audit fixes", testLogicAuditFixes);
+	failures += run("VP-V: Set by wording and order", testSetByWording);
+	failures += run("VP-V: every setting says where its value comes from (Set by)", testSetByOnThePage);
+	failures += run("VP-V: Dynamic Drive main page contents and greyed reasons", testDynamicDriveMainPage);
+	failures += run("VP-V: four tier steps, Upper shown as planned", testFourTierSteps);
+	failures += run("VP-V: a drag from Custom onto the planned step writes nothing", testPlannedDragFromCustomWritesNothing);
+	failures += run("VP-V: retirement Approve and Keep are recorded without hiding", testRetirementDecisions);
 	return failures;
 }

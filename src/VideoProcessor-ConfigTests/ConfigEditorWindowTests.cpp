@@ -2173,6 +2173,8 @@ void testLedDrivePageAndLiveSwitches()
         !requireControl<QComboBox>(window, QStringLiteral("config.led_drive.default.highlight_tolerance_stops"))->isVisibleTo(&window),
         "Compensate's settings show with no command source");
     selectData(mode, QStringLiteral("internal_script"));
+    // Config usability 2026-10-25: the script pacing is on the Dynamic Drive page's Advanced tab (Main holds only the five masters).
+    if (auto* driveTabs = window.findChild<QTabWidget*>(QStringLiteral("vpv.drivepage.pages"))) driveTabs->setCurrentIndex(1);
     require(requireControl<QComboBox>(window, QStringLiteral("config.led_drive.default.script_pacing"))->isVisibleTo(&window) &&
         requireControl<QSpinBox>(window, QStringLiteral("config.led_drive.default.script_measure_ms"))->isVisibleTo(&window),
         "VP's copy of the script does not show its pacing");
@@ -9412,6 +9414,10 @@ static const std::map<std::string, const char*>& CoverageAllowList()
         { "renderer:subtitle_fit", "retired Screen setting (ignored)" },
         { "renderer:temporal_fill", "alias: legacy Subtitles switch for cleanup_fill temporal (cleanup_fill has the control)" },
         { "renderer:pipeline_original_pathway", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.pathway); also read from [vprenderer]" },
+        { "renderer:retirement_a", "VP-V section (ADR-0023): the owner's Approve / Keep decision for retirement group A, stored in [vpv] by the VP-V page (vpv.retirement.decision_A); a UI-only record the renderer never reads" },
+        { "renderer:retirement_b", "VP-V section (ADR-0023): the owner's Approve / Keep decision for retirement group B, stored in [vpv] by the VP-V page (vpv.retirement.decision_B); a UI-only record the renderer never reads" },
+        { "renderer:retirement_c", "VP-V section (ADR-0023): the owner's Approve / Keep decision for retirement group C, stored in [vpv] by the VP-V page (vpv.retirement.decision_C); a UI-only record the renderer never reads" },
+        { "renderer:retirement_d", "VP-V section (ADR-0023): the owner's Approve / Keep decision for retirement group D, stored in [vpv] by the VP-V page (vpv.retirement.decision_D); a UI-only record the renderer never reads" },
         { "renderer:pipeline_order", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.pipeline_order); also read from [vprenderer]" },
         { "renderer:pipeline_slots_off", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.pipeline_slots_off); also read from [vprenderer]" },
         { "renderer:calibration_lut_stage", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.calibration_lut_stage); also read from [vprenderer]" },
