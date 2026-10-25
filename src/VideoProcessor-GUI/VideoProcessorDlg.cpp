@@ -3352,6 +3352,14 @@ ConfigurationRpcProtocol::Frame CVideoProcessorDlg::HandleCalibrationRpc(
 		};
 		const HWND window = GetSafeHwnd();
 		hooks.applied = [window]() { ::PostMessageW(window, WM_MESSAGE_CALIBRATION_APPLIED, 0, 0); };
+		// WP-12 (module findings item 7): the configuration file VP itself resolved (next to the
+		// executable, or --config), as an absolute path; never a name relative to the working folder.
+		hooks.configPath = []()
+		{
+			ConfigFile active;
+			return active.Load(ConfigFile::DEFAULT_FILENAME, ConfigFile::ReadPolicy::Fresh) ?
+				active.GetLoadedPath() : std::string();
+		};
 		// Phase 2 (ambient-light check): the room light sensor's newest reading.
 		hooks.roomLux = [this](double& lux)
 		{
