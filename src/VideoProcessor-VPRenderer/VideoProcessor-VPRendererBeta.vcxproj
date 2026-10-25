@@ -122,6 +122,7 @@
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\TextureRestore.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OutputEncodingRepair.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutStage.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutHost.cpp" />
     <ClCompile Include="LibplaceboPluginExports.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\LibplaceboDisplayLut.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\LibplaceboRenderParameters.cpp" />

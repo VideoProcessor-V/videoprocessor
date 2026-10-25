@@ -363,6 +363,9 @@
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationRemainderTests.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationMeterTests.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationPhase2Tests.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationLutHostTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="SdrToneShapeWtwTests.cpp" />
     <ClCompile Include="BugHunt20261017CaptureTests.cpp" />
     <ClCompile Include="BugHunt2GuiTests.cpp" />
