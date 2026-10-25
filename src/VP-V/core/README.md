@@ -11,6 +11,7 @@ Header-only and pure: no libplacebo, no Windows, C++14. The renderer and the CPU
 | `SlotContracts.h` | What each slot needs and gives (resolution, light, plane layout, vectors, original frame), its zone, and the hard precede rules (ADR-0021) |
 | `OrderValidator.h` | `Validate(order, &reason)`: accepts or rejects a whole order, with a plain reason |
 | `SlotRegistry.h` | THE registry the renderer consults: which slots run (slot switches, the zero-cost rule), the Original pathway (ADR-0019), the current order (`SetOrderByNames`), and the net fingerprint key (`UpstreamKey`) |
+| `SlotSwitchSettings.h` | Slot switches for `input.queue_timing`, the three motion slots and `output.presentation`: a slot off runs in its upstream form (its Original pathway overrides from `OriginalPathway.h`), `motion.consumers` follows its vectors (SlotContracts), and the Original pathway or `input.queue_timing` off select Bill's queue policy (`UsesUpstreamQueuePolicy`). Tests: `SlotSwitchSettings` |
 | `EntranceStages.h` | The input side as one stage list plus the per-source-frame cache (barrier B3). Generic over the frame type, so it is tested on the CPU |
 | `OutputHookOrder.h` | The corrected output-hook order (ADR-0013). The renderer uses `OrderSlotsInPlace`, which moves only slot hooks |
 | `VectorScale.h` | Per-axis vector scaling (ADR-0006) |

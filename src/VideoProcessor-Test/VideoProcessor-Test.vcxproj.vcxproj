@@ -458,6 +458,9 @@
     <ClCompile Include="..\VP-V\tests\CombinationRunnerTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\VP-V\tests\SlotSwitchSettingsTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\nets\NetFusion.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
