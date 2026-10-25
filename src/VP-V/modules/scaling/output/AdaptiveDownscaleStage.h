@@ -58,6 +58,9 @@ namespace AdaptiveDownscaleStage
 		// The slot switch (pipeline_slots_off, Original pathway): off = adaptive_downscale and
 		// adaptive_upscale off (no hooks): byte-identical to those switches off.
 		bool slotRuns = true;
+		// Motion vectors can run (motion.estimation and motion.vector_delivery on; feat/m2-motion's
+		// MotionVectorsRun()): false = the grain map never asks for an estimate (zero-cost rule).
+		bool vectorsRun = true;
 	};
 
 	// What the stage asks the host for, only where today's code asked (each one is a pure read

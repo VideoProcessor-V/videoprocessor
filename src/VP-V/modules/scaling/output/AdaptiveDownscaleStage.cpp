@@ -122,7 +122,7 @@ namespace AdaptiveDownscaleStage
 				if (known)
 					module.SetGrainField(field);
 			}
-			state.grainMapWanted = adaptive.grainMap && module.Active();
+			state.grainMapWanted = adaptive.grainMap && module.Active() && frame.vectorsRun;
 			hooks.insert(hooks.begin(), module.Measure());
 			// The blend before SSimSuperRes (both POST_KERNEL): SuperRes refines the blended picture
 			// with its strength scaled by the grain term.
@@ -186,7 +186,7 @@ namespace AdaptiveDownscaleStage
 				}
 				// The next source frame's estimate runs for the map when the blend acts on this
 				// picture (a downscale; Active() is the last measured frame's).
-				state.grainMapWanted = adaptive.grainMap && module.Active();
+				state.grainMapWanted = adaptive.grainMap && module.Active() && frame.vectorsRun;
 				hooks.insert(hooks.begin(), module.Measure());
 				hooks.push_back(module.Blend());
 				state.noSsimLogged = false;

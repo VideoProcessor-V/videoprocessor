@@ -426,6 +426,22 @@ namespace VideoProcessorTest
 			}
 		}
 
+		TEST_METHOD(GrainMapNeverAsksForVectorsThatDoNotRun)
+		{
+			// feat/m2-motion: with motion.estimation or motion.vector_delivery off the grain map must not
+			// start an estimate (Frame::vectorsRun = MotionVectorsRun()). Default: today's request.
+			AdaptiveFixture x;
+			x.ssim = true;
+			std::vector<const pl_hook*> hooks;
+			AdaptiveDownscaleStage::Frame f = x.Frame(2160, 1080);
+			f.adaptiveDownscale = true;
+			f.vectorsRun = false;
+			x.grainWanted = true;
+			x.Run(f, hooks);
+			Assert::IsFalse(x.grainWanted);
+			Assert::AreEqual(size_t(2), hooks.size());   // the blend itself still runs
+		}
+
 		TEST_METHOD(DitherSlotOffRemovesOnlyTheQuantiser)
 		{
 			const pl_hook a{}, quantiser{}, b{};
