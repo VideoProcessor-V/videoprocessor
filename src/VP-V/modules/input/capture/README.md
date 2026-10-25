@@ -22,7 +22,7 @@ Bring frames in from DeckLink/Magewell (or a file source) without losing precisi
 
 ## Fallbacks
 
-- "Fallbacks engaged" entries: `capture GPU unpack: CPU formatters ... for the session: <error>`, `native RGB GPU unpack: CPU conversion to 10-bit 4:2:0 for the session: <error>`; early upload unavailable is log-only today (F-4)
+- "Fallbacks engaged" entries: `capture GPU unpack: CPU formatters ... for the session: <error>`, `native RGB GPU unpack: CPU conversion to 10-bit 4:2:0 for the session: <error>`; `early upload: the render upload (<error>)` (WP-4's `FallbackCatalog::EarlyUpload`; releases in `m2-dv-fixes.patch`, F-4)
 - Behaviour: a GPU unpack failure switches to the CPU formatters for the session (visible since r6); early upload unavailable takes the render upload.
 
 ## Net fingerprint / upstream
@@ -91,7 +91,8 @@ auto), `native_rgb_ingest` (default on). Original pathway: `capture_path standar
 - `native RGB GPU unpack: CPU conversion to 10-bit 4:2:0 for the session: <error>`.
 - Early upload "not available" (the second device or the shared textures cannot be made):
   TODAY LOG-ONLY ("Early upload: not available (...); the render upload") - finding F-4, fix patch
-  `m2-dv-fixes.patch` adds `early upload: render upload (<error>)`.
+  WP-4's `silent-fallbacks-callsites.patch` engages `early upload: the render upload (<error>)`;
+  `m2-dv-fixes.patch` (applied after it) adds the releases (opened, or no longer wanted).
 
 **To lift the module:** the host's capture upload glue (`UnpackRawPayload`, the route text, the
 early-upload sync and slot handling, the raw/convert decision in the frame preparation) moved
@@ -159,7 +160,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - VP-V page, Input tab: not tiered (Always on: capture and timing have no quality steps, only paths (the toggles below).).
 - Listed under the tier: `capture_path`, `capture_upload`, `native_rgb_ingest`.
 - Plain-language guide: [docs/settings/VP-settings-reference.md#2-input](../../../../../docs/settings/VP-settings-reference.md#2-input).
-- Fallback entry ("Fallbacks engaged"): `capture GPU unpack: CPU formatters for the session: <error> | native RGB GPU unpack: CPU conversion to 10-bit 4:2:0 for the session: <error> | early upload: render upload (<error>)`.
+- Fallback entry ("Fallbacks engaged"): `capture GPU unpack: CPU formatters for the session: <error> | native RGB GPU unpack: CPU conversion to 10-bit 4:2:0 for the session: <error> | early upload: the render upload (<error>)`.
 
 ## Tests
 

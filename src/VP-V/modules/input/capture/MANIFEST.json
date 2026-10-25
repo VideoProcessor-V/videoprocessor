@@ -48,6 +48,6 @@
     ],
     "upstream_modules": []
   },
-  "fallback_when_missing": "A GPU unpack failure switches to the CPU formatters for the session; early upload unavailable takes the render upload (entry added by m2-dv-fixes.patch).",
-  "fallback_entry": "capture GPU unpack: CPU formatters for the session: <error> | native RGB GPU unpack: CPU conversion to 10-bit 4:2:0 for the session: <error> | early upload: render upload (<error>)"
+  "fallback_when_missing": "A GPU unpack failure switches to the CPU formatters for the session; early upload unavailable takes the render upload (entry: WP-4 FallbackCatalog::EarlyUpload; releases: m2-dv-fixes.patch).",
+  "fallback_entry": "capture GPU unpack: CPU formatters for the session: <error> | native RGB GPU unpack: CPU conversion to 10-bit 4:2:0 for the session: <error> | early upload: the render upload (<error>)"
 }

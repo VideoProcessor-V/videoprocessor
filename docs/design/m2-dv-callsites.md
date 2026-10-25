@@ -85,12 +85,17 @@ need host changes, so they come as their own patch (behaviour change, NOT part o
 
 - F-3: the `capture GPU unpack` entry reads "CPU formatters for the session: <error>" (it claimed
   4:2:0; the CPU formatters keep P210 4:2:2 for V210 / UYVY / HDYC unless P010 is forced).
-- F-4: early upload that cannot open (capture_upload early, or auto in the low-latency path) engages
-  `early upload: render upload (<error>)` instead of only logging; released when it opens or is no
-  longer wanted (including after a device loss, on the next raw frame).
+- F-4: WP-4's `silent-fallbacks-callsites.patch` already engages `early upload: the render upload
+  (<error>)` (`FallbackCatalog::EarlyUpload`) when early upload cannot open, but never releases it.
+  This patch adds the releases through the same builder: when the pool opens, and when early upload
+  is no longer wanted. (A failed open is not retried while it stays wanted - `earlyOpenFailed`,
+  pre-existing - so after a device loss the entry is released only once early upload stops being
+  wanted or the device is null at a raw frame.)
 
-Independent of the call-site patch (`git apply --check --cached` clean on its own, and stacked on
-top of it). Tests to run with it (GPU, coordinator): the renderer capture harness fallback test
+**Order: apply WP-4's `silent-fallbacks-callsites.patch` first** (it defines `SyncFallback` and the
+early-upload engage); this patch was cut against that state (audit X2).
+
+Stacks with the call-site patch in either order (checked: WP-4, then this, then the call-site patch). Tests to run with it (GPU, coordinator): the renderer capture harness fallback test
 (prefix "capture GPU unpack (CPU formatters" still matches), and an early-upload open failure
 check (none exists yet; candidate: force `EarlyUpload::Open` to fail via a test environment switch).
 
