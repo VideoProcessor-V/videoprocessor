@@ -101,6 +101,15 @@ namespace LedDrive
 		return LedDriveModule::CompensationUnavailableReason(slotRuns, shaderLoaded, shaderEnabled);
 	}
 
+	std::string DynamicDriveFrame::MeasurementUnavailable(bool slotRuns, bool passDisabled)
+	{
+		if (!slotRuns)
+			return "slot drive.led_measure is off";
+		if (passDisabled)
+			return "the measurement pass is disabled by libplacebo";
+		return std::string();
+	}
+
 	void DynamicDriveFrame::PrepareFrame(const DynamicDriveFrameInputs& in, std::vector<const pl_hook*>& hooks,
 		const std::function<void(size_t, PipelineSlots::Id)>& tagSlot)
 	{
@@ -234,7 +243,12 @@ namespace LedDrive
 		const std::string unavailable = CompensationUnavailable(in.compensationSlotRuns,
 			hooks.size() - compensationStart, compensationRuntimeDisabled);
 		if (led)
+		{
 			led->SetCompensationAvailable(unavailable.empty(), unavailable);
+			// Owner decision 2026-10-25: compensate holds full drive while its measurement is off.
+			const std::string measurementOff = MeasurementUnavailable(in.measureSlotRuns, measurementDisabledLogged);
+			led->SetMeasurementAvailable(measurementOff.empty(), measurementOff);
+		}
 		if (boostExponent != 1.0 && hooks.size() == compensationStart)
 		{
 			if (!boostMissingLogged)

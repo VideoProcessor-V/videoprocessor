@@ -122,6 +122,9 @@ namespace LedDrive
 		// (empty = it runs). collected: hooks the chain submitted; runtimeDisabled: libplacebo
 		// disabled the chain's hook.
 		static std::string CompensationUnavailable(bool slotRuns, size_t collected, bool runtimeDisabled);
+		// Owner decision 2026-10-25: the reason compensate holds full drive for its measurement
+		// (empty = the measurement runs).
+		static std::string MeasurementUnavailable(bool slotRuns, bool passDisabled);
 
 		// Fallback ids this adapter engages in the host's registry.
 		static constexpr const char* kMeasurementFallbackId = "LED measurement";

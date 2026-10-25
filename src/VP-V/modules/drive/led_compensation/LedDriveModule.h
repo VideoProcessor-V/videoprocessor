@@ -227,6 +227,13 @@ namespace LedDrive
 		bool CompensationAvailable() const;
 		// True while compensate is holding the LED at full drive for that reason.
 		bool HoldingFullForCompensation() const;
+		// Owner decision 2026-10-25: compensate also holds full drive while its measurement is
+		// unavailable (slot drive.led_measure off, or the pass disabled by libplacebo): without
+		// exact statistics the LED would act on stale ones. Same hold, same jump, same "LED drive"
+		// entry, reason "held at full: measurement off (<reason>)". Script mode is not held. Any
+		// thread; available by default.
+		void SetMeasurementAvailable(bool available, const std::string& reason = std::string());
+		bool MeasurementAvailable() const;
 		// The reason for SetCompensationAvailable(false, ...) from the renderer's facts; empty
 		// when the compensation can run.
 		static std::string CompensationUnavailableReason(bool slotOn, bool shaderLoaded, bool shaderEnabled);
@@ -432,8 +439,11 @@ namespace LedDrive
 		// SetCompensationAvailable: the hold at full drive and the module's fallback entries.
 		bool compensationAvailable = true;
 		std::string compensationUnavailableReason;
+		bool measurementAvailable = true;
+		std::string measurementUnavailableReason;
 		bool holdingFull = false;
 		FallbackStatus::Registry fallbacks;
 		void UpdateHoldFallbackLocked();
+		void StartHoldJumpLocked(bool wasHolding);
 	};
 }

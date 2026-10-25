@@ -379,6 +379,62 @@ namespace VideoProcessorTest
             module.Stop();
         }
 
+        // Owner decision 2026-10-25: compensate holds full drive while its measurement is off.
+        TEST_METHOD(MeasurementOffHoldsFullDriveAndResumes)
+        {
+            auto projector = std::make_shared<FakeProjector>();
+            projector->contrast = 50;
+            LedDriveConfig config = CompensateDefaults();
+            config.cntrAssist = false;
+            config.rateGainUp = config.rateGainDown = 0.0;
+            config.maxCutDip = 0.0;
+            config.shapedRecovery = false;
+            config.blackPreliftMax = 255;
+            ProjectorConfig port;
+            port.protocol = "barco_ascii";
+            port.ackTimeoutMs = 60;
+            port.minCommandGapMs = 0;
+            port.readBack = true;
+            port.ledLatencyMs = 80;
+            port.ledSettleMs = 0;
+            LedDriveModule module(port, config, [projector] { return std::make_unique<FakePort>(projector); });
+            Assert::IsTrue(module.CompensationAvailable(), L"available by default");
+            Assert::IsTrue(module.FallbackEntries().empty());
+            module.SetMeasurementAvailable(false, "slot drive.led_measure is off");
+            Assert::IsTrue(module.HoldingFullForCompensation());
+            Assert::AreEqual(config.ledCeiling, module.IntentFloorLevel(), L"the hold is a floor at led_ceiling");
+            const auto entries = module.FallbackEntries();
+            Assert::AreEqual(size_t(1), entries.size());
+            Assert::AreEqual(std::string(LedDriveModule::kHoldFallbackId), entries[0].id);
+            Assert::IsTrue(entries[0].reason.find("held at full: measurement off (slot drive.led_measure is off)") != std::string::npos);
+            module.Start();
+            Assert::IsTrue(WaitUntilTrue([&] { return module.DrivingProjector() && projector->light == 255; }),
+                L"compensate started");
+            double time = 0.0;
+            for (int frame = 0; frame < 240; ++frame)   // dark frames: compensate would dim to the floor
+            {
+                module.SubmitMeasurement(IntentFrame(16.0));
+                time += 1000.0 / 60.0;
+                module.BeginFrameAt(0, time);
+                WaitUntilTrue([&] { return !module.ProjectorStatus().busy; }, 500);
+            }
+            for (int level : LightWrites(*projector))
+                Assert::AreEqual(255, level, L"never dimmed while the measurement is off");
+            module.SetMeasurementAvailable(true);
+            Assert::IsFalse(module.HoldingFullForCompensation());
+            Assert::IsTrue(module.FallbackEntries().empty(), L"released when available again");
+            Assert::AreEqual(0, module.IntentFloorLevel());
+            for (int frame = 0; frame < 240; ++frame)
+            {
+                module.SubmitMeasurement(IntentFrame(16.0));
+                time += 1000.0 / 60.0;
+                module.BeginFrameAt(0, time);
+                WaitUntilTrue([&] { return !module.ProjectorStatus().busy; }, 500);
+            }
+            Assert::IsTrue(WaitUntilTrue([&] { return projector->light < 255; }), L"dims again once compensated");
+            module.Stop();
+        }
+
         TEST_METHOD(CompensationLostWhileDimmedJumpsToFullDrive)
         {
             auto projector = std::make_shared<FakeProjector>();

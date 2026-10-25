@@ -57,7 +57,7 @@ Measure the picture's light for the LED drive: the rendered picture at PRE_OUTPU
 - libplacebo disables the measurement pass: "Fallbacks engaged: LED measurement (libplacebo disabled the measurement pass; the LED follows the last statistics)" plus the log warning (DynamicDriveFrame::OnHookErrors; once the WP-15 call-site patch is applied). Reset when the renderer's GPU state is rebuilt.
 - Slot `drive.led_measure` off (`pipeline_slots_off`): no measurement. Compensate never steps before its first stats, and after that keeps acting on the last ones; script mode keeps ticking on the last stats. Nothing is shown.
 - Readbacks running late, or frames not measured (`MeasurementHook::LateNote`): "Fallbacks engaged: LED measurement (readbacks late: ... / readbacks behind: frames not measured; ...)", held until no note for 2 s (DynamicDriveFrame::CollectMeasurements). This replaces WP-4's inline LED hunk (see docs/design/wp15-led-callsites.md).
-- Slot `drive.led_measure` off (`pipeline_slots_off`): a deliberate choice, no entry; compensate keeps acting on the last statistics and script mode keeps ticking on them. (Open item: should compensate hold full drive here too? Owner question.)
+- Slot `drive.led_measure` off (`pipeline_slots_off`), or the pass disabled by libplacebo: compensate holds the LED at full drive, "Fallbacks engaged: LED drive (held at full: measurement off (<reason>))" (owner decision 2026-10-25; `LedDriveModule::SetMeasurementAvailable`, set every frame by `DynamicDriveFrame`). Script mode keeps ticking on the last statistics (not held).
 
 ### Dependencies (to lift it)
 

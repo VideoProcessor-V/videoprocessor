@@ -275,6 +275,43 @@ namespace VideoProcessorTest
 			Assert::IsFalse(f.fallbacks.Engaged(LedDrive::LedDriveModule::kHoldFallbackId));
 		}
 
+		// Owner decision 2026-10-25: slot drive.led_measure off -> compensate held at full, visibly;
+		// slot back on -> normal.
+		TEST_METHOD(MeasurementSlotOffHoldsFullDrive)
+		{
+			static pl_hook dummy{};   // a loaded "LED compensation.glsl" stand-in: the compensation runs
+			dummy.stages = PL_HOOK_PRE_OUTPUT;   // a known stage (the chain rejects a stageless hook)
+			CustomHookChain::Loader loader{
+				[](const std::string&, std::string& source, std::string&) { source = "//!HOOK PREOUTPUT\n"; return true; },
+				[](const std::string&) -> const pl_hook* { return &dummy; },
+				[](const pl_hook*& hook) { hook = nullptr; } };
+			std::shared_ptr<QueuedFrameStatistics::IObserver> observer;
+			FallbackStatus::Registry fallbacks;
+			LedDrive::DynamicDriveFrame frame(observer, fallbacks, loader);
+			auto projector = std::make_shared<FakeProjector>();
+			LedDrive::LedDriveConfig config;
+			config.enabled = true;
+			config.mode = LedDrive::Mode::Compensate;
+			LedDrive::ProjectorConfig port;
+			port.protocol = "barco_ascii";
+			auto module = std::make_shared<LedDrive::LedDriveModule>(port, config,
+				[projector] { return std::make_unique<FakePort>(projector); });
+			frame.PublishModule(module);
+			FrameFacts facts;
+			facts.in.measureSlotRuns = false;
+			std::vector<const pl_hook*> hooks;
+			frame.PrepareFrame(facts.in, hooks, NoTag);
+			Assert::AreEqual(size_t{ 1 }, hooks.size(), L"the compensation hook runs");
+			Assert::IsTrue(module->HoldingFullForCompensation());
+			Assert::IsTrue(ReasonOf(fallbacks, LedDrive::LedDriveModule::kHoldFallbackId).find("held at full: measurement off") != std::string::npos);
+			facts.in.measureSlotRuns = true;
+			hooks.clear();
+			frame.PrepareFrame(facts.in, hooks, NoTag);
+			Assert::AreEqual(size_t{ 2 }, hooks.size(), L"measurement + compensation");
+			Assert::IsFalse(module->HoldingFullForCompensation());
+			Assert::IsFalse(fallbacks.Engaged(LedDrive::LedDriveModule::kHoldFallbackId));
+		}
+
 		TEST_METHOD(ScriptModeIsNotHeld)
 		{
 			auto projector = std::make_shared<FakeProjector>();

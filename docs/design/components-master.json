@@ -762,7 +762,7 @@
           "colour.appearance"
         ]
       },
-      "fallback_when_missing": "The controllers keep acting on the last statistics. Shown when libplacebo disables the measurement pass, or while readbacks run late / frames go unmeasured (not the between-files LedDriveHoldover)."
+      "fallback_when_missing": "Compensate holds the LED at full drive while its measurement is off (slot off or the pass disabled by libplacebo): 'LED drive (held at full: measurement off (...))' (owner 2026-10-25). Readbacks late or frames not measured: the controllers keep the last statistics, shown as 'LED measurement (...)'."
     },
     {
       "slot": "drive.led_compensation",
