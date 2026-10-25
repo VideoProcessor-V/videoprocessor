@@ -38,6 +38,7 @@ namespace CalibrationLutHost
 		if (stageLogged)
 			DebugLog::Log("display calibration LUT: libplacebo target LUT (calibration_lut_stage libplacebo)");
 		stageLogged = false;
+		result.statusChanged = LibplaceboStageStatus(status);
 		return result;
 	}
 
@@ -64,9 +65,14 @@ namespace CalibrationLutHost
 			"the VP stage failed; libplacebo's target LUT (before the LED compensation)");
 	}
 
+	FallbackCatalog::Decision Adapter::LutDropped(const std::string& path) const
+	{
+		return FallbackCatalog::CalibrationLutDropped(true, FileName(path));
+	}
+
 	bool Adapter::LutAttached(bool rendered, bool targetLutApplied) const
 	{
-		return CalibrationLutHost::LutAttached(rendered, targetLutApplied, stage.Lut() != nullptr);
+		return CalibrationLutHost::LutAttached(rendered, targetLutApplied, stage.Lut() != nullptr && !stageFailed);
 	}
 
 	void Adapter::NoteLutFileVersion(const LibplaceboDisplayLut::FileVersion& version, uint64_t nowMs)
@@ -292,7 +298,10 @@ namespace CalibrationLutHost
 		}
 		presentsOfGeneration.fetch_add(1, std::memory_order_acq_rel);
 		result.presented = true;
-		(void)windowFallback;
+		// ADR-0001: a windowed patch shown full field is engaged under "Fallbacks engaged" (LCD/OLED
+		// readings depend on the window size); the renderer releases it when the patterns end.
+		if (windowFallback)
+			result.patchWindow = FallbackCatalog::CalibrationPatchFullField(true, why);
 		return result;
 	}
 

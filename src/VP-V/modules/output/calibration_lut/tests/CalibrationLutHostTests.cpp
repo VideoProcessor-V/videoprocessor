@@ -1,5 +1,6 @@
 #include "CppUnitTest.h"
 
+#include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h>
 
 #include <string>
@@ -41,6 +42,59 @@ namespace CalibrationLutHostTests
 			Assert::IsFalse(VpStageStatus(status, "cal_bt709.cube"), L"unchanged: no rewrite every frame");
 			Assert::IsTrue(VpStageStatus(status, "cal_p3.cube"));
 			Assert::AreEqual(std::string("Active (VP stage): cal_p3.cube"), status);
+		}
+
+		// Module findings 2026-10-24 part 3: the VP stage overwrote "Active (reload rejected: ...)"
+		// every frame, so a rejected reload was never shown in the VP stage.
+		TEST_METHOD(VpStageKeepsAReloadRejection)
+		{
+			std::string status = "Active (reload rejected: invalid cube)";
+			Assert::IsTrue(VpStageStatus(status, "a.cube"));
+			Assert::AreEqual(std::string("Active (VP stage; reload rejected: invalid cube)"), status);
+			Assert::IsFalse(VpStageStatus(status, "a.cube"), L"kept on the next frames");
+			Assert::AreEqual(std::string("Active (VP stage; reload rejected: invalid cube)"), status);
+			// Back on libplacebo's target LUT: Bill's text again (his branch keeps it).
+			Assert::IsTrue(LibplaceboStageStatus(status));
+			Assert::AreEqual(std::string("Active (reload rejected: invalid cube)"), status);
+			Assert::IsFalse(LibplaceboStageStatus(status));
+			// A successful (re)load writes "Loaded": the VP stage text returns.
+			status = "Loaded";
+			Assert::IsTrue(VpStageStatus(status, "a.cube"));
+			Assert::AreEqual(std::string("Active (VP stage): a.cube"), status);
+			std::string plain = "Active: a.cube (33^3)";
+			Assert::IsFalse(LibplaceboStageStatus(plain));
+		}
+
+		// Module findings 2026-10-24 part 3: "attached" read only libplacebo's target.lut, which the
+		// VP stage leaves empty on purpose.
+		TEST_METHOD(AttachedCountsTheVpStage)
+		{
+			Assert::IsTrue(LutAttached(true, true, false), L"libplacebo's target LUT");
+			Assert::IsTrue(LutAttached(true, false, true), L"the VP stage");
+			Assert::IsFalse(LutAttached(true, false, false));
+			Assert::IsFalse(LutAttached(false, true, true), L"nothing rendered");
+		}
+
+		// Module README "Cost" item 1: while patterns show, a filled cache answers the output query
+		// (the format cannot change with video paused); otherwise the renderer is asked.
+		TEST_METHOD(OutputQueryUsesTheCacheWhilePatternsShow)
+		{
+			Assert::IsTrue(WantFreshOutputFacts(false, 10));
+			Assert::IsTrue(WantFreshOutputFacts(true, 0), L"nothing cached yet");
+			Assert::IsFalse(WantFreshOutputFacts(true, 10));
+		}
+
+		// ADR-0001: the two calibration downgrades the adapter reports (the renderer engages them).
+		TEST_METHOD(CalibrationFallbackEntriesNameWhatRunsInstead)
+		{
+			const FallbackCatalog::Decision dropped = FallbackCatalog::CalibrationLutDropped(true, FileName("C:/vp/a.cube"));
+			Assert::IsTrue(dropped.engaged);
+			Assert::AreEqual(std::string("calibration LUT"), dropped.id);
+			Assert::AreEqual(std::string("dropped after a render error: a.cube; no projector LUT for this renderer"), dropped.reason);
+			const FallbackCatalog::Decision patch = FallbackCatalog::CalibrationPatchFullField(true, "the surface takes no blit");
+			Assert::IsTrue(patch.engaged);
+			Assert::AreEqual(std::string("calibration patch"), patch.id);
+			Assert::IsTrue(patch.reason.find("full field") == 0);
 		}
 
 		TEST_METHOD(FileNameTakesTheLastComponent)

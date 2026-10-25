@@ -34,12 +34,28 @@ branch's module files and the two renderer project entries (`CalibrationLutHost.
 | HDR verify tone curve | 16 lines | `calibrationHost.NoteToneCurve(...)` |
 | PRE_OUTPUT hook push | `calibrationLutStage.Lut()/Get()` | `calibrationHost.HookForFrame()` (same position, same slot tag) |
 | after `pl_renderer_get_errors` | stage failure scan | `calibrationHost.AfterRender(hookErrors)` -> `EngageFallback` |
-| after the render | `calibrationLutAttached = rendered && targetLutApplied` | `calibrationHost.LutAttached(rendered, targetLutApplied)` |
+| after the render | `RejectDisplayLutAfterRenderFailure()` only logged; `calibrationLutAttached = rendered && targetLutApplied` | adds `calibrationHost.LutDropped(path)` -> `EngageFallback` (fix); `calibrationHost.LutAttached(rendered, targetLutApplied)` |
 | `GetCalibrationOutput` | format derivation, cache, generations, readback, tone copy | try-lock loop publishes `OutputFacts`; `calibrationHost.FillOutputInfo(...)` |
-| `SetCalibrationPattern` | request under the mutex; log-flag resets; end | `SetPattern`, `ResetPatternLogs`, `EndPattern` |
+| `SetCalibrationPattern` | request under the mutex; log-flag resets; end | `SetPattern`, `ResetPatternLogs`, `EndPattern`; at the end `ReleaseFallback("calibration patch")` (fix) |
+| `VideoProcessorDlg.cpp` `HandleCalibrationRpc` (GUI host) | `hooks.configPath` never set | set to the configuration VP itself resolved, absolute (fix) |
 
 Byte identity: the picture path is unchanged (same hook, same position and tag, same stage choice,
-same LUT). Status and log text are unchanged in this version.
+same LUT, same patch codes). The patch is otherwise behaviour-free except for these fixes (module
+findings 2026-10-24; the decisions live in the module, CPU-tested):
+
+- the VP-stage LUT status keeps a rejected reload (`Active (VP stage; reload rejected: ...)`) and is
+  written only when it changes;
+- "calibration LUT attached" counts the VP stage (status text, ActiveProfileStatus, Config);
+- `calibration LUT (dropped after a render error: ...)` and `calibration patch (full field ...)`
+  engage under "Fallbacks engaged" (they were log-only);
+- `GetCalibrationOutput` answers from the cache while patterns show (README cost item 1: no 0.2-1.6 s
+  wait per patch); the presented-generation counters stay live;
+- the calibration controller gets the absolute configuration path.
+
+`EngageFallback`/`ReleaseFallback` are this renderer's own. Where WP-4's `SyncFallback(Decision)`
+has landed, `if (d.engaged) EngageFallback(d.id.c_str(), d.reason);` may become `SyncFallback(d)`
+for `LutDropped` and the patch window, but NOT for `AfterRender` (its "released" answer must not
+release the shared `calibration LUT` id).
 
 ## Bill's code (untouched)
 

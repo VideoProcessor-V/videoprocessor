@@ -31,6 +31,12 @@ namespace CalibrationLutHost
 	}
 
 	constexpr const char* kVpStagePrefix = "Active (VP stage): ";
+	// The renderer's LoadDisplayLut writes this when a changed file fails to reload and the last good
+	// LUT stays (Bill's text; his ConfigureDisplayLutForTarget keeps it on the libplacebo stage).
+	constexpr const char* kReloadRejectedPrefix = "Active (reload rejected: ";
+	// The same state while the VP stage applies the LUT (module findings 2026-10-24 part 3: the VP
+	// stage used to overwrite the rejection every frame, so it was never shown).
+	constexpr const char* kVpReloadRejectedPrefix = "Active (VP stage; reload rejected: ";
 
 	inline bool StartsWith(const std::string& text, const char* prefix)
 	{
@@ -38,9 +44,18 @@ namespace CalibrationLutHost
 	}
 
 	// The LUT status while the VP stage applies the LUT. Changes `status` only when it differs (no
-	// per-frame allocation once set). Returns true when it changed.
+	// per-frame allocation once set). A rejected reload stays visible ("Active (VP stage; reload
+	// rejected: <reason>)") until the next successful load replaces the status. Returns true when it
+	// changed.
 	inline bool VpStageStatus(std::string& status, const std::string& fileName)
 	{
+		if (StartsWith(status, kVpReloadRejectedPrefix))
+			return false;
+		if (StartsWith(status, kReloadRejectedPrefix))
+		{
+			status = kVpReloadRejectedPrefix + status.substr(std::char_traits<char>::length(kReloadRejectedPrefix));
+			return true;
+		}
 		const std::string::size_type prefix = std::char_traits<char>::length(kVpStagePrefix);
 		if (status.size() == prefix + fileName.size() && StartsWith(status, kVpStagePrefix) &&
 			status.compare(prefix, std::string::npos, fileName) == 0)
@@ -49,12 +64,24 @@ namespace CalibrationLutHost
 		return true;
 	}
 
+	// Back on libplacebo's target LUT (stage switched, failed, Original pathway): a rejection shown
+	// for the VP stage goes back to Bill's text, which his libplacebo branch keeps.
+	inline bool LibplaceboStageStatus(std::string& status)
+	{
+		if (!StartsWith(status, kVpReloadRejectedPrefix))
+			return false;
+		status = kReloadRejectedPrefix + status.substr(std::char_traits<char>::length(kVpReloadRejectedPrefix));
+		return true;
+	}
+
 	// The status "calibration LUT attached" (Ctrl+I limited-range text, "(inactive: calibration LUT)",
 	// ActiveProfileStatus, Config's usable-LUT check).
-	inline bool LutAttached(bool rendered, bool targetLutApplied, bool vpStagePushed)
+	// Module findings 2026-10-24 part 3: it used to read only libplacebo's target.lut, so with the VP
+	// stage (target.lut empty on purpose) the LUT read as not attached. vpStageApplied = the VP stage
+	// hook was in this frame's hooks and has not failed.
+	inline bool LutAttached(bool rendered, bool targetLutApplied, bool vpStageApplied)
 	{
-		(void)vpStagePushed;
-		return rendered && targetLutApplied;
+		return rendered && (targetLutApplied || vpStageApplied);
 	}
 
 	inline std::string FileName(const std::string& path)
@@ -159,11 +186,13 @@ namespace CalibrationLutHost
 	}
 
 	// GetCalibrationOutput refreshes the render-thread format facts under renderMutex (try-lock with
-	// short sleeps). True = try for fresh facts now.
+	// short sleeps). While patterns show, the render loop holds renderMutex across each vsync-paced
+	// Present and re-locks at once, so nearly every poll used to wait 100 tries x Sleep(2) (about
+	// 0.2-1.6 s per patch; module README "Cost" item 1). The format does not change while patterns
+	// show (video is paused), so a filled cache answers then. The presented-generation counters the
+	// session waits on are atomics and stay live. True = try for fresh facts now.
 	inline bool WantFreshOutputFacts(bool patternsActive, uint32_t cachedContainerBits)
 	{
-		(void)patternsActive;
-		(void)cachedContainerBits;
-		return true;
+		return !(patternsActive && cachedContainerBits != 0);
 	}
 }

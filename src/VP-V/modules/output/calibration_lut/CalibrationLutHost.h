@@ -108,6 +108,10 @@ namespace CalibrationLutHost
 		// (it falls back to libplacebo's target LUT for this renderer instance).
 		FallbackCatalog::Decision AfterRender(const pl_render_errors& errors);
 
+		// After RejectDisplayLutAfterRenderFailure (Bill's: the LUT is dropped for the renderer
+		// instance): the "Fallbacks engaged" entry, so the drop is never log-only (ADR-0001).
+		FallbackCatalog::Decision LutDropped(const std::string& path) const;
+
 		// The "calibration LUT attached" status for this frame.
 		bool LutAttached(bool rendered, bool targetLutApplied) const;
 

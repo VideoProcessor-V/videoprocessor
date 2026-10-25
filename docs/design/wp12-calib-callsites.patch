@@ -1,5 +1,24 @@
+diff --git a/src/VideoProcessor-GUI/VideoProcessorDlg.cpp b/src/VideoProcessor-GUI/VideoProcessorDlg.cpp
+index b8803648..67d3dc3c 100644
+--- a/src/VideoProcessor-GUI/VideoProcessorDlg.cpp
++++ b/src/VideoProcessor-GUI/VideoProcessorDlg.cpp
+@@ -3350,6 +3350,14 @@ ConfigurationRpcProtocol::Frame CVideoProcessorDlg::HandleCalibrationRpc(
+ 		};
+ 		const HWND window = GetSafeHwnd();
+ 		hooks.applied = [window]() { ::PostMessageW(window, WM_MESSAGE_CALIBRATION_APPLIED, 0, 0); };
++		// WP-12 (module findings item 7): the configuration file VP itself resolved (next to the
++		// executable, or --config), as an absolute path; never a name relative to the working folder.
++		hooks.configPath = []()
++		{
++			ConfigFile active;
++			return active.Load(ConfigFile::DEFAULT_FILENAME, ConfigFile::ReadPolicy::Fresh) ?
++				active.GetLoadedPath() : std::string();
++		};
+ 		// Phase 2 (ambient-light check): the room light sensor's newest reading.
+ 		hooks.roomLux = [this](double& lux)
+ 		{
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index c27f40d0..a273a3f5 100644
+index c27f40d0..f130f217 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 @@ -81,7 +81,7 @@
@@ -402,8 +421,15 @@ index c27f40d0..a273a3f5 100644
              }
              for (int i = 0; led && !ledMeasurementDisabledLogged && i < hookErrors.num_disabled_hooks; ++i)
                  if (hookErrors.disabled_hooks[i] == ledMeasurement.Hook()->signature)
-@@ -25006,7 +24761,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25003,10 +24758,14 @@ struct LibplaceboVideoRenderer::Impl
+ 		const double renderMs = std::chrono::duration<double, std::milli>(
+ 			SteadyClock::now() - renderStart).count();
+         if (!rendered && targetLutApplied)
++        {
              RejectDisplayLutAfterRenderFailure();
++            const FallbackCatalog::Decision dropped = calibrationHost.LutDropped(displayLutPath);
++            if (dropped.engaged) EngageFallback(dropped.id.c_str(), dropped.reason);
++        }
          calibrationStatusAvailable = rendered;
          if (rendered) lastRenderedTargetTransfer = ToSdrTransfer(baseTarget.color.transfer);
 -        calibrationLutAttached = rendered && targetLutApplied;
@@ -411,7 +437,7 @@ index c27f40d0..a273a3f5 100644
  		// h3-latch (K3): held black until the first crop decision (the frame was rendered as usual).
  		if (rendered && startupHoldBlack)
  			pl_frame_clear(d3d11->gpu, &baseTarget, black);
-@@ -28739,7 +28494,8 @@ bool LibplaceboVideoRenderer::GetCalibrationOutput(Calibration::PatternOutputInf
+@@ -28739,7 +28498,8 @@ bool LibplaceboVideoRenderer::GetCalibrationOutput(Calibration::PatternOutputInf
  	// The format fields are render-thread state: read under renderMutex, which
  	// the loop releases between refreshes; a cached copy answers when it stays busy.
  	bool fresh = false;
@@ -421,7 +447,7 @@ index c27f40d0..a273a3f5 100644
  	{
  		std::unique_lock<std::mutex> guard(m_impl->renderMutex, std::try_to_lock);
  		if (!guard.owns_lock())
-@@ -28747,75 +28503,14 @@ bool LibplaceboVideoRenderer::GetCalibrationOutput(Calibration::PatternOutputInf
+@@ -28747,75 +28507,14 @@ bool LibplaceboVideoRenderer::GetCalibrationOutput(Calibration::PatternOutputInf
  			Sleep(2);
  			continue;
  		}
@@ -501,7 +527,7 @@ index c27f40d0..a273a3f5 100644
  }
  
  bool LibplaceboVideoRenderer::SetCalibrationPattern(const Calibration::PatternRequest& request, CString& reason)
-@@ -28833,10 +28528,7 @@ bool LibplaceboVideoRenderer::SetCalibrationPattern(const Calibration::PatternRe
+@@ -28833,10 +28532,7 @@ bool LibplaceboVideoRenderer::SetCalibrationPattern(const Calibration::PatternRe
  			reason = TEXT("the VP Renderer is not rendering (start VP with any source)");
  			return false;
  		}
@@ -513,7 +539,7 @@ index c27f40d0..a273a3f5 100644
  		if (!m_calibrationPatternActive.load(std::memory_order_acquire))
  		{
  			// The LED drive stops (Stop() restores full light: LDMM 0, LPW1 to the
-@@ -28857,8 +28549,7 @@ bool LibplaceboVideoRenderer::SetCalibrationPattern(const Calibration::PatternRe
+@@ -28857,8 +28553,7 @@ bool LibplaceboVideoRenderer::SetCalibrationPattern(const Calibration::PatternRe
  			}
  			if (module)
  				module->Stop();
@@ -523,7 +549,7 @@ index c27f40d0..a273a3f5 100644
  			m_calibrationPatternActive.store(true, std::memory_order_release);
  			BeginQueueGeneration("calibration patterns");
  			DebugLog::Log("Calibration patterns: started (video paused, Dynamic Drive %s)",
-@@ -28869,10 +28560,7 @@ bool LibplaceboVideoRenderer::SetCalibrationPattern(const Calibration::PatternRe
+@@ -28869,10 +28564,7 @@ bool LibplaceboVideoRenderer::SetCalibrationPattern(const Calibration::PatternRe
  	}
  	if (!m_calibrationPatternActive.exchange(false, std::memory_order_acq_rel))
  		return true;
@@ -535,3 +561,11 @@ index c27f40d0..a273a3f5 100644
  	BeginQueueGeneration("calibration patterns ended");
  	m_queueChanged.notify_all();
  	if (m_calibrationLedSuspended)
+@@ -28880,6 +28572,7 @@ bool LibplaceboVideoRenderer::SetCalibrationPattern(const Calibration::PatternRe
+ 		m_calibrationLedSuspended = false;
+ 		ResumeLedDriveAfterTest();
+ 	}
++	m_impl->ReleaseFallback("calibration patch");   // WP-12: the full-field fallback lasts for the run
+ 	DebugLog::Log("Calibration patterns: ended (video resumes)");
+ 	return true;
+ }
