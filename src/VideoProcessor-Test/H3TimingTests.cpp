@@ -13,7 +13,7 @@
 #include <vprenderer/AlphaCadenceCorrectionPolicy.h>
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/InterpolationTimeline.h>
-#include <vprenderer/MotionEngineIdle.h>
+#include <VP-V/modules/motion/estimation/MotionEngineIdle.h>
 #include <vprenderer/PulldownDetector.h>
 #include <vprenderer/SourceResolutionMonitor.h>
 

@@ -414,11 +414,11 @@
     <ClCompile Include="Hunt2CadenceClassTests.cpp" />
     <ClCompile Include="GeneralRateMatrixTests.cpp" />
     <ClCompile Include="BugHunt20261017Tests.cpp" />
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\NvOpticalFlow.cpp">
+    <ClCompile Include="..\VP-V\modules\motion\estimation\NvOpticalFlow.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\VideoProcessor-Lib\vprenderer\MotionAheadProducer.cpp">
+    <ClCompile Include="..\VP-V\modules\motion\estimation\MotionAheadProducer.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>

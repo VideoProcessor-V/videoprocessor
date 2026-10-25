@@ -82,7 +82,7 @@ latency from the first frame; stream faults fall back and recover; exclusive wit
 
 ## Step 1 wiring
 
-`src/VideoProcessor-Lib/MotionValidity.h` (pure, header-only) and
+`src/VP-V/modules/motion/estimation/MotionValidity.h` (pure, header-only) and
 `src/VideoProcessor-Test/MotionValidityTests.cpp` exist; nothing calls them yet. Line numbers are in
 `LibplaceboVideoRenderer.cpp` (LVR) as of 2026-10-16 in the shared tree, and they move as others edit.
 

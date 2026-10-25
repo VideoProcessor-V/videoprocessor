@@ -54,17 +54,25 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **partly migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
-- `src/VideoProcessor-Lib/vprenderer/NvOpticalFlow.cpp`
-- `src/VideoProcessor-Lib/vprenderer/NvOpticalFlow.h`
+- `src/VP-V/modules/motion/estimation/NvOpticalFlow.cpp`
+- `src/VP-V/modules/motion/estimation/NvOpticalFlow.h`
 - `src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp`
-- `src/VideoProcessor-Lib/vprenderer/MotionAheadProducer.cpp`
-- `src/VideoProcessor-Lib/MotionAhead.h`
-- `src/VideoProcessor-Lib/VectorStore.h`
-- `src/VideoProcessor-Lib/MotionValidity.h`
-- `src/VideoProcessor-Lib/OpticalFlowTrust.h`
+- `src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp`
+- `src/VP-V/modules/motion/estimation/MotionAhead.h`
+- `src/VP-V/modules/motion/estimation/VectorStore.h`
+- `src/VP-V/modules/motion/estimation/MotionValidity.h`
+- `src/VP-V/modules/motion/estimation/OpticalFlowTrust.h`
 - `src/VideoProcessor-Lib/MotionConfig.h`
+- `src/VP-V/modules/motion/estimation/MotionEngineIdle.h`
+- `src/VP-V/modules/motion/estimation/MotionAheadProducer.h`
+
+Forwarding headers (old paths kept for Bill's files, the renderer host and RendererCaptureHarnessTests.cpp; removed at M2 step 0):
+
+- `src/VideoProcessor-Lib/MotionAhead.h`
+- `src/VideoProcessor-Lib/MotionValidity.h`
+- `src/VideoProcessor-Lib/vprenderer/MotionAheadProducer.h`
 - `src/VideoProcessor-Lib/vprenderer/MotionEngineIdle.h`
 
 ## Migration directive

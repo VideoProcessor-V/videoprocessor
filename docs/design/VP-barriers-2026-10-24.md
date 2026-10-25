@@ -35,7 +35,7 @@ Efforts are in agent wall-clock hours.
   - Add a **total-delay budget** that queue frames are derived from: frames = floor((budget - fixed overheads) / period), with a 4 / 3 / 2 fallback ladder.
   - Count render-ahead and the swapchain depth inside the budget.
   - Remove the minimum (update the 5 in VideoProcessor-ConfigTests/ConfigFileTests.cpp:782).
-  - Make motion_ahead time-based (VideoProcessor-Lib/MotionAhead.h:20-33).
+  - Make motion_ahead time-based (VP-V/modules/motion/estimation/MotionAhead.h:20-33).
   - See owner decision O1 for what the 200 ms covers.
 - Effort: 5-8 h.
 

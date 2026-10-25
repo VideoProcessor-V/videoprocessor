@@ -5,7 +5,7 @@
 #include <libplacebo/dispatch.h>
 
 #include <map>
-#include <vprenderer/NvOpticalFlow.h>
+#include <VP-V/modules/motion/estimation/NvOpticalFlow.h>
 #include <GeneralRate.h>
 
 namespace MotionAhead { struct Flow; }

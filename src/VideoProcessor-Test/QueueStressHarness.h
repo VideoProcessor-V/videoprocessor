@@ -28,7 +28,7 @@
 // [[vp-general-not-fixed]]).
 
 #include <DisplayRefreshRatePolicy.h>
-#include <MotionValidity.h>
+#include <VP-V/modules/motion/estimation/MotionValidity.h>
 #include <vprenderer/AlphaQueuePolicy.h>
 #include <vprenderer/CaptureTimestampGap.h>
 #include <vprenderer/DejudderPolicy.h>

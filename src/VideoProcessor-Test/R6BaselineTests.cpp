@@ -7,7 +7,7 @@
 
 #include <ConfigFile.h>
 #include <VP-V/core/FallbackStatus.h>
-#include <MotionAhead.h>
+#include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <RendererProfileConfig.h>
 #include <vprenderer/RenderAheadPolicy.h>
 

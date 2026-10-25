@@ -49,7 +49,7 @@
 
 #include <ContentClassifier.h>
 #include <ContentIntentObserver.h>
-#include <MotionValidity.h>
+#include <VP-V/modules/motion/estimation/MotionValidity.h>
 #include <SourceResolutionDetector.h>
 #include <vprenderer/AlphaQueuePolicy.h>
 #include <vprenderer/CaptureTimestampGap.h>

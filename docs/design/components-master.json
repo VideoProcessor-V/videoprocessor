@@ -180,18 +180,19 @@
       "slot": "motion.estimation",
       "order": 50,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/vprenderer/NvOpticalFlow.cpp",
-        "src/VideoProcessor-Lib/vprenderer/NvOpticalFlow.h",
+        "src/VP-V/modules/motion/estimation/NvOpticalFlow.cpp",
+        "src/VP-V/modules/motion/estimation/NvOpticalFlow.h",
         "src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp",
-        "src/VideoProcessor-Lib/vprenderer/MotionAheadProducer.cpp",
-        "src/VideoProcessor-Lib/MotionAhead.h",
-        "src/VideoProcessor-Lib/VectorStore.h",
-        "src/VideoProcessor-Lib/MotionValidity.h",
-        "src/VideoProcessor-Lib/OpticalFlowTrust.h",
+        "src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp",
+        "src/VP-V/modules/motion/estimation/MotionAhead.h",
+        "src/VP-V/modules/motion/estimation/VectorStore.h",
+        "src/VP-V/modules/motion/estimation/MotionValidity.h",
+        "src/VP-V/modules/motion/estimation/OpticalFlowTrust.h",
         "src/VideoProcessor-Lib/MotionConfig.h",
-        "src/VideoProcessor-Lib/vprenderer/MotionEngineIdle.h"
+        "src/VP-V/modules/motion/estimation/MotionEngineIdle.h",
+        "src/VP-V/modules/motion/estimation/MotionAheadProducer.h"
       ],
       "components": {
         "files": {

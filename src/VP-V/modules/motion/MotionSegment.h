@@ -24,7 +24,7 @@
 // motion (vp-motion-engine-exclusive) is enforced by Engage(): while smooth motion runs the segment
 // is disengaged and every fetch falls back.
 
-#include <MotionValidity.h>
+#include <VP-V/modules/motion/estimation/MotionValidity.h>
 
 #include <array>
 #include <cstddef>
