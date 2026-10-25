@@ -25,6 +25,14 @@
 //   motion.vector_delivery  -> the consumers
 //   motion.consumers    off -> de-judder strength 0, interpolation off (hold), fill gaps, mask off
 //
+// THE RULE for these slots (audit 2026-10-25 item 4): off = the slot's upstream form (its Original
+// pathway overrides) AND no pass of its own. For estimation / vector delivery the renderer also
+// gates the one estimate user the overrides do not reach - scaling.output's grain map
+// (MotionVectorsRun() in the host) - so no estimate pass runs at all (zero cost); every vector
+// reader (scaling.output residual motion + grain field, texture restore, VP deband, output.dither's
+// VPVEC) then sees no field and takes its no-vector form. output.dither's own motion search is that
+// slot's pass, not motion.estimation's.
+//
 // The template takes the renderer's RendererSettings (fields named as in the host's
 // ApplyOriginalPathwaySettings); CPU tests use a stand-in with the same fields. The key -> field
 // table below is checked against OriginalPathway::Overrides() by the tests, so the two lists

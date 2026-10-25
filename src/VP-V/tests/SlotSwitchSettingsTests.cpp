@@ -80,6 +80,49 @@ namespace VpvTests
 			}
 		}
 
+		TEST_METHOD(ValuesAreTheOriginalPathwayValues)
+		{
+			// Audit 2026-10-25 item 3: not only the keys - every value Apply sets is the value the
+			// Original pathway table names for that key (read with the same meaning the renderer's
+			// parser gives it: on/off, numbers, bilinear = no Catmull-Rom, hold).
+			FakeSettings s;
+			::SlotSwitchSettings::Apply(::SlotSwitchSettings::Resolve(true, true, true, true, true), s);
+			size_t checked = 0;
+			for (const OriginalPathway::Override& o : OriginalPathway::Overrides())
+			{
+				const PipelineSlots::Id slot = PipelineSlots::FromName(o.slot);
+				if (!::SlotSwitchSettings::IsSwitched(slot))
+					continue;
+				const std::string k = o.key, v = o.value;
+				auto flag = [&](bool field) { Assert::IsTrue(v == "off" && !field, W(k + " = " + v).c_str()); };
+				auto number = [&](double field) { Assert::AreEqual(std::stod(v), field, W(k).c_str()); };
+				if (k == "queue_timing_fixes") flag(s.queueTimingFixes);
+				else if (k == "pulldown_fixes") flag(s.pulldownFixes);
+				else if (k == "timing_continuity_fixes") flag(s.timingContinuityFixes);
+				else if (k == "cadence_class_fixes") flag(s.cadenceClassFixes);
+				else if (k == "general_rate_fixes") flag(s.generalRateFixes);
+				else if (k == "optical_flow") flag(s.opticalFlow);
+				else if (k == "motion_ahead_frames") number(s.motionAheadFrames);
+				else if (k == "motion_history_fixes") flag(s.motionHistoryFixes);
+				else if (k == "dejudder_estimate_ahead") flag(s.dejudderEstimateAhead);
+				else if (k == "dejudder_strength") number(s.dejudderStrength);
+				else if (k == "dejudder_strength_even") number(s.dejudderStrengthEven);
+				else if (k == "interpolation")
+					Assert::IsTrue(InterpolationPolicy::ParseMode(v) == s.interpolation, W(k).c_str());
+				else if (k == "interpolation_fill_gaps") flag(s.interpolationFillGaps);
+				else if (k == "occlusion_mask") flag(s.occlusionMask);
+				else if (k == "dejudder_source_warp_filter")
+					Assert::IsTrue(v == "bilinear" && !s.dejudderSourceWarpCatmull, W(k + " = " + v).c_str());
+				else if (k == "interpolation_fallback")
+					Assert::IsTrue(v == "hold" && s.interpolationFallback == InterpolationPolicy::Fallback::Hold, W(k).c_str());
+				else if (k == "render_ahead") flag(s.renderAhead);
+				else
+					Assert::Fail(W("no value check for " + k).c_str());
+				++checked;
+			}
+			Assert::AreEqual(size_t{ 17 }, checked);
+		}
+
 		TEST_METHOD(NothingOffChangesNothing)
 		{
 			FakeSettings s;
