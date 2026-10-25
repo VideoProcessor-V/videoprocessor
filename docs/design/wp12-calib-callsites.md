@@ -95,3 +95,11 @@ just written without a Config Apply, with a notice). At the Bill merge:
 No GPU test was run (WP-12 rule). Listed for the coordinator: the calibration harness case (patterns
 present/readback through the adapter), the `calibration_lut_stage = vp` GPU case, byte identity
 frozen-b3base with the patch applied.
+
+## Interaction with WP-15 (feat/wp15-led-glue, `wp15-led-callsites.patch`)
+
+Both patches edit the `pl_renderer_get_errors` block and `SetCalibrationPattern` (WP-15: the LED
+suspend/resume blocks; WP-12: the pattern request, log-flag resets, end flag and the
+`calibration patch` release). Apply WP-15 first, then this patch with `git apply -3` or by hand;
+the hunks are independent in meaning. After both, the host's `LedRawTransfer.h` include (kept by
+WP-15 only for the tone-curve block) can go: `CalibrationLutHost` owns that block now.
