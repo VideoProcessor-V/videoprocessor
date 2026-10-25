@@ -6664,8 +6664,10 @@ struct LibplaceboVideoRenderer::Impl
 		if (!frameInterpolator)
 			frameInterpolator = std::make_unique<Interpolator::FrameInterpolator>(log, d3d11->gpu);
 		frameInterpolator->SetGrain(activeSettings.interpolationGrain);
-		if (!frameInterpolator->Run(vpPhaseA, vpPhaseB, vpPhaseMotion, vpPhaseT, activeSettings.interpolationFallback,
-			vpPhasePlanes))
+		const bool ran = frameInterpolator->Run(vpPhaseA, vpPhaseB, vpPhaseMotion, vpPhaseT, activeSettings.interpolationFallback,
+			vpPhasePlanes);
+		SyncFallback(motionConsumerFailures.Note(GetTickCount64(), ran ? nullptr : "interpolation failed"));   // D3
+		if (!ran)
 		{
 			if (++interpolationFailures == 1 || interpolationFailures % 2400 == 0)
 				DebugLog::Log("Interpolation: failed (%s; %llu failures); the source frame is shown",
@@ -7482,6 +7484,8 @@ struct LibplaceboVideoRenderer::Impl
 		if (FallbackCatalog::Sync(fallbacks, decision))
 			DebugLog::Log("%s", fallbacks.Heading().c_str());
 	}
+	// motion.consumers (group D audit D3): failed warp / interpolation passes, visible while recent.
+	FallbackCatalog::MotionConsumerFailures motionConsumerFailures;
 	// The de-judder held this frame because the display rate is not known (presentation entry).
 	bool dejudderHeldNoDisplayRate = false;
 	// Pipeline skeleton (design freeze 2026-10-24): the ONE slot registry (VP-V/core/SlotRegistry.h). It
@@ -17534,6 +17538,7 @@ struct LibplaceboVideoRenderer::Impl
 		dejudderExtraStats.lastExtrasPerFrame = extras;
 		if (extras > 0)
 			++dejudderExtraStats.sourceFrames;
+		SyncFallback(motionConsumerFailures.Note(GetTickCount64(), failure));   // D3: warp / interpolation failures listed
 		if (failure)
 			DejudderHold(failure);
 		else if (!queuedMode && extras == 0 && stop != DejudderPolicy::Stop::NextFrameArrived)
