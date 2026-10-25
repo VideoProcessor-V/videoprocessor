@@ -263,8 +263,10 @@ namespace
 
 	std::string LoadBundledShader(const char* fileName)
 	{
+		// src/VP-V/tests/<this file> -> the repository root (four levels; three when it lived in
+		// src/VideoProcessor-Test before feat/lut-tests-out moved it).
 		std::string path = __FILE__;
-		for (int level = 0; level < 3; ++level)
+		for (int level = 0; level < 4; ++level)
 		{
 			const size_t separator = path.find_last_of("\\/");
 			if (separator == std::string::npos)
