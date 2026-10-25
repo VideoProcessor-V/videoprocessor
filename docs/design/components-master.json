@@ -921,7 +921,8 @@
         "config_keys": [
           "render_ahead",
           "render_ahead_queue_credit",
-          "render_ahead_utilisation"
+          "render_ahead_utilisation",
+          "repeat_render_reuse"
         ],
         "upstream_modules": [
           "output.dither"

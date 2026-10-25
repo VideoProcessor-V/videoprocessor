@@ -672,6 +672,7 @@ void testEveryNewRendererControlReachesVp()
         { "dejudder_hold_hysteresis", "3", false }, { "dejudder_taper_sad", "9", false },
         { "dejudder_block_taper", "on", true }, { "dejudder_warp_stage", "source", true },
         { "dejudder_occlusion_fill", "on", true }, { "occlusion_mask", "on", true },
+        { "repeat_render_reuse", "on", true },
         { "dither_grain_tolerance_scale", "2", false }, { "dither_vectors", "own", true },
         { "sdr_tone_shape", "knee", true }, { "sdr_white_headroom", "0.1", false }, { "sdr_knee_start", "0.7", false },
         { "sdr_knee_strength", "0.6", false }, { "sdr_contrast_recovery", "1.2", false },

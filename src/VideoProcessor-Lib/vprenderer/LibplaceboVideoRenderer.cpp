@@ -8,6 +8,8 @@
 #include <GeneralRateLog.h>
 #include <RefreshKey.h>
 #include <MotionValidity.h>
+#include <VP-V/modules/output/presentation/RepeatReuseGlue.h>
+#include <VP-V/modules/output/presentation/RepeatReuseRegistryKey.h>
 #include <KernelInverse.h>
 #include <vprenderer/MotionAheadProducer.h>
 #include "../SubtitleProfileUpdatePolicy.h"
@@ -1046,6 +1048,7 @@ namespace
 		double dejudderMatchTolerance = 4.5;   // owner 2026-10-14: with the fade match (planner Q8's condition met)
 		double dejudderFrameTrust = 0.25;   // 6b-2: whole-frame hold below this share
 		bool occlusionMask = false;         // 6c: the de-judder's occlusion mask for the sigma-delta
+		bool repeatRenderReuse = false;     // WP-24: captured repeats drawn from the rendered-picture cache (draft: off)
 		// Refinements (docs/VP-build-plan-refinements.md); inert while the
 		// de-judder and the grain map are off.
 		bool dejudderGlobalPrior = true;          // D1
@@ -2739,6 +2742,7 @@ namespace
 					settings.fboFloat32 < 0 ? "auto" : (settings.fboFloat32 ? "on" : "off"));
 		}
 		for (const auto& toggle : { std::make_pair("occlusion_mask", &settings.occlusionMask),
+			std::make_pair("repeat_render_reuse", &settings.repeatRenderReuse),
 			std::make_pair("dejudder_global_prior", &settings.dejudderGlobalPrior),
 			std::make_pair("dejudder_vector_smooth", &settings.dejudderVectorSmooth),
 			std::make_pair("dejudder_occlusion_fill", &settings.dejudderOcclusionFill),
@@ -3567,6 +3571,7 @@ namespace
 		settings.interpolation = InterpolationPolicy::Mode::Off;   // key=interpolation
 		settings.interpolationFillGaps = false;            // key=interpolation_fill_gaps
 		settings.occlusionMask = false;                    // key=occlusion_mask
+		settings.repeatRenderReuse = false;                // key=repeat_render_reuse
 		settings.opticalFlow = false;                      // key=optical_flow
 		settings.motionAheadFrames = 0;                    // key=motion_ahead_frames
 		settings.motionHistoryFixes = false;               // key=motion_history_fixes
@@ -7643,6 +7648,61 @@ struct LibplaceboVideoRenderer::Impl
 	OcclusionMask::Hook occlusionMaskHook;
 	// Stage 6d: A's PRE_OUTPUT picture for the extras, and its warp.
 	DejudderRendered::Cache dejudderCache;
+	// WP-24 captured-repeat render reuse (VP: src/VP-V/modules/output/presentation/RepeatReuseGlue.h).
+	uint64_t activeSettingsGeneration = 0;
+	bool repeatNextQueued = false;   // the render loop: the queue holds a repeat of the frame being drawn
+	VpRepeatReuse::Glue repeatReuse{ [this](const char* id, const std::string& reason) { EngageFallback(id, reason); },
+		[this](const char* id) { ReleaseFallback(id); } };
+	VpRepeatReuse::VpContext RepeatReuseContext(const pl_frame& image, const pl_frame& target)
+	{
+		VpRepeatReuse::VpContext c;
+		c.temporal.phasePicture = interpolating || VpPhaseDrawn(image);
+		c.temporal.dejudderExtras = dejudderReason == DejudderPolicy::Reason::Active && dejudderExtrasAllowed;
+		c.temporal.crossfade = rebaseFade < 1.0;
+		c.temporal.startupHoldBlack = startupHoldBlack;
+		c.temporal.deinterlacing = temporalRenderer.Active();
+		c.temporal.frameMixing = smoothMotionEngine || temporalRenderer.Mixing();
+		c.temporal.ledMeasurePerRefresh = std::find(frameHooks.begin(), frameHooks.end(), ledMeasurement.Hook()) != frameHooks.end();
+		c.cache = &dejudderCache;
+		c.gpu = d3d11 ? d3d11->gpu : nullptr;
+		c.encodingRepair = outputEncodingRepair.Get();
+		c.image = &image;
+		c.target = &target;
+		const uint64_t lut = DisplayLutSignature();
+		c.extension = { rebaseFactor, rebaseFactorX, sourceRebase.Kernel(), lut, 0,
+			RepeatRenderReuse::Signature().Add(fallbacks.Heading()).Value(), VpRepeatReuse::RegistryFingerprint(pipelineSlots) };
+		using K = VpRepeatReuse::HookKind;
+		const VpRepeatReuse::KnownHook known[] = {
+			{ ledMeasurement.Hook(), K::PictureNeutral, 0, "LED measurement" },
+			{ dejudderCache.Hook(), K::PictureNeutral, 0, "rendered-picture cache" },
+			{ calibrationLutStage.Get(), K::Generation, lut, "calibration LUT stage" },
+			{ outputEncodingRepair.Get(), K::Static, 0, "output encoding repair" },
+			// Extended Range: a function of the source frame, the colours, the LUT and the settings
+			// (all in the key) - static per source frame (audit H1).
+			{ extendedRangeHooks.Carry(), K::Static, 0, "Extended Range carry" },
+			{ extendedRangeHooks.LateRestore(), K::Static, 0, "Extended Range late restore" },
+			{ extendedRangeHooks.Restore(false), K::Static, 0, "Extended Range restore" },
+			{ extendedRangeHooks.Restore(true), K::Static, 0, "Extended Range restore" },
+			// AdaptiveDownscale smooths its grain map over time: opaque until it exposes a state generation.
+			{ adaptiveDownscale.Measure(), K::Opaque, 0, "AdaptiveDownscale" },
+			{ adaptiveDownscale.Blend(), K::Opaque, 0, "AdaptiveDownscale" },
+		};
+		for (const auto& k : known)
+			if (c.knownCount < static_cast<int>(c.known.size()))
+				c.known[c.knownCount++] = k;
+		// Left out of the reuse draw: picture-neutral only. The occlusion mask hook stays (audit M3): on a
+		// repeat it carries the sigma-delta's grain-tolerance map.
+		c.exclude[c.excludeCount++] = ledMeasurement.Hook();
+		c.exclude[c.excludeCount++] = dejudderCache.Hook();
+		return c;
+	}
+	// The display LUT's identity (observed file version + parsed state): moves on a hot reload or a
+	// reject without touching the LUT code (audit H2).
+	uint64_t DisplayLutSignature() const
+	{
+		return RepeatRenderReuse::Signature().Add(displayLutObservedBytes).Add(displayLutObservedWriteTime)
+			.Add(displayLutParsed).Add(displayLut != nullptr).Value();
+	}
 	std::unique_ptr<DejudderRendered::Warp> dejudderRenderedWarp;
 	DejudderRendered::Geometry dejudderGeometry;
 	bool dejudderGeometryValid = false;   // this frame's geometry (both warp paths; delta 8 R1)
@@ -7766,6 +7826,8 @@ struct LibplaceboVideoRenderer::Impl
 				text += ", motion: " + motionSourceLogged;
 		}
 		std::lock_guard<std::mutex> guard(dejudderStatusMutex);
+		if (repeatReuse.Active())
+			text += (text.empty() ? std::string() : std::string("; ")) + repeatReuse.StatusLine();
 		dejudderStatus = std::move(text);
 	}
 	void ReleaseDejudder()
@@ -7778,6 +7840,7 @@ struct LibplaceboVideoRenderer::Impl
 		// 6d: the cache and the rendered warp hold textures (and a dispatch)
 		// of this device (audit stage10-6d blocker 1).
 		dejudderCache.Release();
+		repeatReuse.Release();   // WP-24: its probe hook while the GPU exists; its fallback entry
 		dejudderRenderedWarp.reset();
 		dejudderVectorField.reset();
 		for (pl_tex& tex : dejudderNextTextures)
@@ -7990,8 +8053,9 @@ struct LibplaceboVideoRenderer::Impl
 			},
 			[this](const std::string& source) -> const pl_hook*
 			{
-				return d3d11 ? pl_mpv_user_shader_parse(d3d11->gpu, source.data(), source.size()) :
-					nullptr;
+				const pl_hook* hook = d3d11 ? pl_mpv_user_shader_parse(d3d11->gpu, source.data(), source.size()) : nullptr;
+				VpRepeatReuse::TemporalShaderRegistry::Global().Note(hook, source.data(), source.size());   // WP-24 M2
+				return hook;
 			},
 			[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } };
 	}
@@ -12106,6 +12170,7 @@ struct LibplaceboVideoRenderer::Impl
 		if (settings.renderAhead && !activeSettings.renderAhead)
 			renderAheadEpoch.Invalidate();   // render_ahead switched on: the gate starts again (bug hunt 05 H3)
 		activeSettings = settings;
+		++activeSettingsGeneration;   // WP-24: the repeat key's settings generation
 		UpdatePipelineSlots(settings);
 		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
 		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
@@ -13266,6 +13331,7 @@ struct LibplaceboVideoRenderer::Impl
 		if (settings.renderAhead && !activeSettings.renderAhead)
 			renderAheadEpoch.Invalidate();   // render_ahead switched on: the gate starts again (bug hunt 05 H3)
 		activeSettings = settings;
+		++activeSettingsGeneration;   // WP-24: the repeat key's settings generation
 		UpdatePipelineSlots(settings);
 		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
 		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
@@ -13617,6 +13683,7 @@ struct LibplaceboVideoRenderer::Impl
 			return false;
 		hook = pl_mpv_user_shader_parse(
 			d3d11->gpu, source.data(), source.size());
+		VpRepeatReuse::TemporalShaderRegistry::Global().Note(hook, source.data(), source.size());   // WP-24 M2
 		if (!hook)
 		{
 			reason = "libplacebo could not parse shader";
@@ -20793,6 +20860,7 @@ struct LibplaceboVideoRenderer::Impl
                             }
                             subtitleComposedImage=composed;
                             relocatedSubtitle=move;
+                            repeatReuse.NoteSubtitleComposition(move, subtitleCutPasteBackground, donorReady);   // WP-24
                             subtitleCompositionSucceeded=true;
                         }
                         else DebugLog::Log("SUBTITLE COMPOSITION: failed; preserving normal viewport");
@@ -25146,6 +25214,16 @@ struct LibplaceboVideoRenderer::Impl
                     "De-judder extras: NLS shader map not known; warping the source instead");
             }
         }
+        // WP-24 repeat reuse, call 1 of 3: decide this refresh; arm the cache for a first present the
+        // queue holds a repeat of (before the encoding-repair check, which looks at PRE_OUTPUT hooks).
+        repeatReuse.SetOptions({ activeSettings.repeatRenderReuse, pipelineSlots.OriginalPathway(),
+            pipelineSlots.Runs(PipelineSlots::Id::OutputPresentation) });
+        if (repeatReuse.Active())
+        {
+            repeatReuse.SetContext(RepeatReuseContext(renderImage, target));
+            repeatReuse.PrepareFirstPresent(RepeatRenderReuse::KeyFrom(sourceSequence, cadenceRepeat, repeatNextQueued,
+                frameGeneration, activeSettingsGeneration, renderImage, target, renderParams, DisplayLutSignature()), frameHooks);
+        }
         // libplacebo 7.360.1 drops the output encoding (limited range) after
         // a texture-input PRE_OUTPUT hook; the repair runs first at OUTPUT,
         // before any OUTPUT-stage shader such as the sigma-delta.
@@ -25320,6 +25398,9 @@ struct LibplaceboVideoRenderer::Impl
             }, [&](const pl_frame& source, const pl_frame& destination, pl_render_params& parameters) {
                 // output_segments_merged: S2/S3 as one hook each for this draw only (restored after).
                 OutputSegments::Merger::Scope mergedOutput(outputMerger.get(), parameters, &renderErrors);
+                // WP-24 repeat reuse, call 2 of 3 (upstreamable): a reusable repeat runs the OUTPUT stage only.
+                if (repeatReuse.TryDrawRepeat(repeatReuse.Key(), renderer, destination, parameters))
+                    return true;
                 // Stage 12 step A: the planes libplacebo samples, re-based.
                 pl_frame frame = source;
                 // Stage B: the picture at this refresh's phase in place of A's planes (a
@@ -25439,6 +25520,7 @@ struct LibplaceboVideoRenderer::Impl
                     extendedRangeRelabelled ? &source.color : nullptr);
             });
         bool rendered = hookRender.rendered;
+        repeatReuse.NoteRendered(repeatReuse.Key(), rendered && !hookRender.retried);   // WP-24 call 3 of 3
         // Bug hunt 2026-10-17: B's carried vectors are for this present only;
         // released here so the de-judder extras below never see them bound.
         nextVectorGuard.Release();
@@ -31718,6 +31800,9 @@ void LibplaceboVideoRenderer::RenderLoop()
 			if (state)
 				motionLastState = state;
 			m_frameQueue.pop_front();
+			if (m_impl)   // WP-24: arm the repeat cache only for a frame the queue holds a repeat of
+				m_impl->repeatNextQueued = !m_frameQueue.empty() && m_frameQueue.front().cadenceRepeat &&
+					m_frameQueue.front().sourceSequence == sourceSequence;
 			nextConvertedPayload.reset();
 			nextSourceSequence = 0;
 			nextPts = 0.0;

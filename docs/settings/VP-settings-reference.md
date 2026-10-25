@@ -388,6 +388,7 @@ CNTR change. Not yet implemented.
 | `dithering` | libplacebo's dither pattern (blue noise etc.), used when libplacebo dithers. | Upstream option. | auto | tiny |
 | `display_bit_depth` | Dither target depth (8/10). | Clamped to the surface depth. | auto | none |
 | `occlusion_mask` | Tells the sigma-delta where new picture appears, so it does not carry a residual into it. | No smears at edges of moving objects. | off | low |
+| `repeat_render_reuse` | Draft (WP-24): a captured repeat (24p in 30, 30p in 60) is drawn from the first present's cached picture with only the output stage; anything that changes the picture refuses it (Ctrl+I, Fallbacks engaged). Off in the Original pathway and with output.presentation off. | Saves GPU time on repeats; the picture stays the same (the dither keeps moving). | off | low |
 | `dither_grain_tolerance_scale` | The sigma-delta's motion match tolerates grain this many times more. | Keeps the 10-bit averaging alive on grain. | 3 | none |
 | `dither_vectors` | The dither takes the de-judder's motion on in-between pictures (auto) or always searches itself (own). | Saves about 1 ms per in-between. | auto | saves time |
 | Calibration LUT (Color / Output page) | The projector calibration LUT. | Today libplacebo applies it before VP's output hooks; the design moves it to VP's last step (planned `calibration_lut_stage`). | | low |

@@ -9519,6 +9519,17 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "does not carry its sub-code residual into it. Works with the de-judder off too "
             "(the motion matcher then runs for the mask alone). Needs the temporal sigma-delta: Dither set to VP's "
             "motion-aware dither, or the sigma-delta shader selected in the shader list."));   // audit 2026-10-16
+        // WP-24 (draft, default off until its GPU byte-identity check passes): captured repeats drawn from
+        // the rendered-picture cache with the OUTPUT stage only. The renderer forces it off in the Original
+        // pathway and with output.presentation switched off.
+        auto* repeatReuse = addChoice(QStringLiteral("Reuse the picture on captured repeats (draft)"),
+            QStringLiteral("repeat_render_reuse"), { QStringLiteral("on"), QStringLiteral("off") });
+        repeatReuse->setToolTip(QStringLiteral(
+            "Key repeat_render_reuse. When the capture repeats a frame (24p in 30, 30p in 60), draw the "
+            "repeat from the first present's cached picture and run only the output stage (dither keeps "
+            "running), instead of rendering the whole chain again. Draft: off until its GPU check passes. "
+            "Anything that would change the picture refuses the reuse (shown in Ctrl+I and Fallbacks "
+            "engaged). Always off in the Original pathway and with output.presentation switched off."));
         auto* grainTolerance = addText(QStringLiteral("Dither carry on grain (1 to 8)"),
             QStringLiteral("dither_grain_tolerance_scale"));
         grainTolerance->setValidator(new QDoubleValidator(1.0, 8.0, 2, grainTolerance));

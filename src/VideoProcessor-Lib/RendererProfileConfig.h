@@ -697,6 +697,8 @@ namespace RendererProfileConfig
 			// 6c: the de-judder's occlusion mask for the sigma-delta (works
 			// with dejudder_strength 0: mask-only mode).
 			if (key == "occlusion_mask") return IsChoice(value, { "on", "off" });
+			// WP-24: captured repeats drawn from the rendered-picture cache (OUTPUT stage only).
+			if (key == "repeat_render_reuse") return IsChoice(value, { "on", "off" });
 			// 6d: the extras warp A's rendered picture, or a warped source.
 			if (key == "dejudder_warp_stage") return IsChoice(value, { "rendered", "source" });
 			// Refinements (docs/VP-build-plan-refinements.md): D1 global prior,
