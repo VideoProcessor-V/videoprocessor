@@ -53,6 +53,17 @@ Status: **fixed** (commit named in the history), **open** (needs a host call sit
 | T3 | "Texture restore / Detail pulse stabilise: inactive (...)" is a status-list line only, no Fallbacks entry or notice. | open (host: FallbackStatus) |
 | T4 | Host ~22828: the inactive text lags a frame. | open (host) |
 
+## S1 entrance segment (audit audit-feat-m2-entrance.md, 2026-10-25)
+
+| # | Finding | Status |
+|---|---|---|
+| F1 | No segment-level on/off test for the moved slots. | fixed: `EntranceSegmentTests` with a fake host and null module pointers (slots off, Original pathway: frame unchanged, no pass, no module call, no fallback; each slot off alone; placeholders pass through) |
+| F2 | The branch carries the feat/segment-runner WIP merge. | noted: S1 uses only the public SegmentRunner types (`StageInfo`, `Flow`, `StageContract`, `Role`, `Format`, `Range`); rebase onto the fixed segment-runner when it lands |
+| F3 | "re-base precision" stays engaged when the re-base slot is switched off. | fixed: released in `RunStages` (Main) when `scaling.rebase` does not run |
+| F4 | slot matrix stale after the fallback-entry edits. | fixed (regenerated) |
+| F5 | Host adapter ~70 lines (above the ~50-line guide). | accepted for commit 1; shrinks when module ownership moves |
+| F6 | Three stale host comments. | fixed in the patch |
+
 ## S1 entrance segment (commit 1)
 
 - Behaviour-free by construction (the host's code moved verbatim). GPU byte identity not run (agents run no GPU

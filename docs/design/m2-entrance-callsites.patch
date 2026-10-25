@@ -1,5 +1,5 @@
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index 78096f51..bac8ac13 100644
+index 78096f51..ede42073 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 @@ -83,6 +83,7 @@
@@ -750,10 +750,12 @@ index 78096f51..bac8ac13 100644
  			return false;
  		}
  		processedA = a;
-@@ -6317,259 +5843,6 @@ struct LibplaceboVideoRenderer::Impl
+@@ -6315,260 +5841,7 @@ struct LibplaceboVideoRenderer::Impl
+ 		processedFrame = &entranceOnceExtraFrame;
+ 		return true;
  	}
- 	pl_frame entranceOnceExtraFrame{};   // the extra's processed A as drawn (EntranceOwnedFrame)
- 
+-	pl_frame entranceOnceExtraFrame{};   // the extra's processed A as drawn (EntranceOwnedFrame)
+-
 -	// scaling.rebase
 -	void EntranceRebase(EntranceRun& run, pl_frame& frame)
 -	{
@@ -1006,10 +1008,19 @@ index 78096f51..bac8ac13 100644
 -		RunEntrance(run, from);
 -		return run.ready;
 -	}
--
++	pl_frame entranceOnceExtraFrame{};   // the extra's processed A as drawn (EntranceSegment::OwnedFrame)
+ 
  	// Hunt 3 F1: the crossfade mixed in the output signal domain (CrossfadeMix.h): `from` (the
  	// path being left) rendered with the picture-stage hooks and captured at PRE_OUTPUT, then
- 	// `to` rendered with the mix hook right after the extended-range late restore. BTB/WTW are
+@@ -8059,7 +7332,7 @@ struct LibplaceboVideoRenderer::Impl
+ 			DebugLog::Log("%s", fallbacks.Heading().c_str());
+ 	}
+ 	// Pipeline skeleton (design freeze 2026-10-24): the ONE slot registry (VP-V/core/SlotRegistry.h). It
+-	// decides which slots run and in which order: the entrance stage list (RunEntrance) and the
++	// decides which slots run and in which order: the entrance stage list (S1, EntranceSegment) and the
+ 	// output hooks follow it. Rebuilt from the settings on every settings apply.
+ 	PipelineSlots::Registry pipelineSlots;
+ 	std::string pipelineStateLogged;
 @@ -8107,8 +7380,7 @@ struct LibplaceboVideoRenderer::Impl
  		next.SetEntranceOnce(settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway);   // B3: consumers after the entrance
  		(void)next.ActiveEntrance();   // warm the kept list here, so the render thread only reads it
@@ -1069,7 +1080,8 @@ index 78096f51..bac8ac13 100644
 +					(void)entrance.Run(rq, image);
  				}
  				// Hunt 3 F3: the extra's path being left (the crossfade runs on every present of the
- 				// fade, not only on A's), with the same stages (EntranceCrossfadeFrom).
+-				// fade, not only on A's), with the same stages (EntranceCrossfadeFrom).
++				// fade, not only on A's), with the same stages (S1 CrossfadeFrom).
  				if (!processedFrame && rebaseFade < 1.0 && !temporalRenderer.Active())
  				{
  					extraFrom = warpedNative;

@@ -140,10 +140,11 @@ namespace EntranceSegment
 		bool perPicture = false;
 	};
 
-	// The S1 stage list for the segment runner's order/contract checks (source size, source light,
-	// float or unorm planes, BTB/WTW carried). Placeholders (repair A, 4K route, refine, chroma) are listed; the
-	// zero-cost rule skips them until a component is wired.
-	std::vector<SegmentRunner::StageInfo> EntranceStageInfo();
+	// The S1 stage list for the segment runner's order/contract checks, in the registry's CURRENT
+	// order (validated by OrderValidator when it was set; nothing here hard-codes an order), with each
+	// slot's contract from SlotContracts (source size, coded planes, BTB/WTW carried). Every entrance
+	// slot is listed, placeholders included (repair A, 4K route, refine, chroma).
+	std::vector<SegmentRunner::StageInfo> EntranceStageInfo(const PipelineSlots::Registry& registry);
 	SegmentRunner::Flow EntranceEntry();
 	constexpr const char* kS1FallbackId = "entrance segment S1";
 
@@ -152,6 +153,14 @@ namespace EntranceSegment
 	Stage StageFor(PipelineSlots::Id id);
 	// Whether the stage has a component wired in commit 1 (repair A, 4K route, refine, chroma: not yet).
 	bool Wired(Stage stage);
+	// The stages the walk calls for this registry, in order: the registry's active entrance slots
+	// (enabled, with a component, Original pathway and pipeline_slots_off applied) in its validated
+	// order. A switched-off slot is absent: no pass, the picture passes unchanged (zero cost).
+	std::vector<Stage> Plan(const PipelineSlots::Registry& registry);
+	// A placeholder stage (repair A until the net runner is wired, 4K route, refine, chroma): reached
+	// only if a component registered its slot without a stage; passes the picture through unchanged
+	// (no pass, no texture) and reports that it did not apply.
+	inline bool Placeholder(const pl_frame& in, pl_frame& out) { out = in; return false; }
 
 	class Segment
 	{

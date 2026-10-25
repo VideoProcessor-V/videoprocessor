@@ -57,35 +57,40 @@ namespace EntranceSegment
 		return stage == Stage::Rebase || stage == Stage::Deband || stage == Stage::Detail;
 	}
 
-	std::vector<SegmentRunner::StageInfo> EntranceStageInfo()
+	std::vector<Stage> Plan(const PipelineSlots::Registry& registry)
 	{
-		namespace Res = PipelineSlots::Res;
-		namespace Light = PipelineSlots::Light;
+		std::vector<Stage> plan;
+		for (Id id : registry.ActiveEntrance())
+		{
+			const Stage stage = StageFor(id);
+			if (stage != Stage::None)
+				plan.push_back(stage);
+		}
+		return plan;
+	}
+
+	std::vector<SegmentRunner::StageInfo> EntranceStageInfo(const PipelineSlots::Registry& registry)
+	{
 		using SegmentRunner::StageInfo;
 		std::vector<StageInfo> s;
-		auto add = [&s](Id slot, const char* name, uint8_t needRes, uint8_t giveRes)
+		for (Id id : registry.CurrentOrder())
 		{
+			if (!PipelineSlots::IsEntranceStage(id))
+				continue;
+			const PipelineSlots::Contract c = PipelineSlots::ContractOf(id);
 			StageInfo info;
-			info.slot = slot;
-			info.name = name;
+			info.slot = id;
+			info.name = "";
 			info.role = SegmentRunner::Role::Vp;
-			info.needs.res = needRes;
-			info.needs.light = Light::Codes;
+			info.needs.res = c.needRes;
+			info.needs.light = PipelineSlots::Light::Codes;   // S1 works on the coded source planes
 			info.needs.format = SegmentRunner::Format::Any;
 			info.needs.range = SegmentRunner::Range::Any;
 			info.needs.vectors = false;     // every S1 stage uses vectors when valid, else runs without
-			info.gives = SegmentRunner::StageContract{ giveRes, 0, 0, 0, false };
-			info.modifies = true;
+			info.gives = SegmentRunner::StageContract{ c.giveRes, 0, 0, 0, false };   // 0 = unchanged
+			info.modifies = c.modifies;
 			s.push_back(info);
-		};
-		const uint8_t inputRes = Res::Delivered | Res::Encoded;
-		add(Id::ScalingRebase, "rebase", Res::Delivered, Res::Encoded);
-		add(Id::RepairEncoding, "repair_a", inputRes, 0);          // placeholder until the net runner is wired
-		add(Id::RepairDeband, "deband", inputRes, 0);
-		add(Id::RepairTextureRestore, "detail_pulse_texture_restore", inputRes, 0);
-		add(Id::ScalingRoute4k, "route_4k", inputRes, Res::Processing);   // placeholder
-		add(Id::ScalingRefine, "refine", Res::Processing, 0);   // placeholder (after the 4K route)
-		add(Id::ScalingChromaUpscale, "chroma", Res::Any, 0);   // placeholder
+		}
 		return s;
 	}
 
@@ -143,11 +148,16 @@ namespace EntranceSegment
 		run.nextSequence = request.nextSequence;
 		run.image = request.image;
 		run.aFrame = *request.source;
-		const bool historyNeeded = (detailPulseRuns() && b.detailPulse->HistorySequence() != request.sequence) ||
-			(textureRestoreRuns() && b.textureRestore->HistorySequence() != request.sequence);
+		// The same decision as before; the slot switches are tested first, so a switched-off slot's
+		// module is not even asked (pure getters: the result is unchanged).
+		auto historyNeeded = [&]()
+		{
+			return (detailPulseRuns() && b.detailPulse->HistorySequence() != request.sequence) ||
+				(textureRestoreRuns() && b.textureRestore->HistorySequence() != request.sequence);
+		};
 		run.aNeeded = request.phasePicture && !request.cadenceRepeat &&
 			((debandThreshold() > 0.0 && slots().Runs(Id::RepairDeband)) ||
-			 (historyNeeded && slots().Runs(Id::RepairTextureRestore)));
+			 (slots().Runs(Id::RepairTextureRestore) && historyNeeded()));
 		RunMain(run, frame);
 		return run.ready;
 	}
@@ -212,6 +222,13 @@ namespace EntranceSegment
 		}
 		if (run.path != Path::Main || run.phasePicture)
 			++entranceGeneration;   // the modules' output textures are about to change
+		// The re-base slot switched off (pipeline_slots_off, Original pathway): its float-intermediate
+		// note no longer applies (audit F3; Rebase() is not called then).
+		if (run.path == Path::Main && !rebaseFormatNoteLogged.empty() && !slots().Runs(Id::ScalingRebase))
+		{
+			rebaseFormatNoteLogged.clear();
+			host.ReleaseFallback("re-base precision");
+		}
 		for (Id id : slots().ActiveEntrance())
 		{
 			switch (StageFor(id))
@@ -219,7 +236,19 @@ namespace EntranceSegment
 			case Stage::Rebase: Rebase(run, frame); break;
 			case Stage::Deband: Deband(run, frame); break;
 			case Stage::Detail: Detail(run, frame); break;
-			default: break;   // slots without a component yet (repair A, 4K route, refine, chroma): never active (zero cost)
+			case Stage::RepairA:   // the held repair (A) slot: a placeholder until the net runner is wired
+			case Stage::Route4k:
+			case Stage::Refine:
+			case Stage::Chroma:
+			{
+				// Placeholders: never active without a component (zero cost); if one registers its slot
+				// before its stage exists, the picture passes through unchanged (byte-identical).
+				pl_frame passed{};
+				(void)Placeholder(frame, passed);
+				frame = passed;
+				break;
+			}
+			default: break;
 			}
 			if (!run.ready)
 				return;

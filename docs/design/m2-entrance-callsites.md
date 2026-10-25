@@ -21,6 +21,20 @@ S1 = re-base -> [repair A: placeholder until the net runner is wired] -> deband 
 (+ detail pulse) -> [4K route] -> [refine] -> [chroma]. Placeholders have no component, so the
 registry's zero-cost rule never lists them in `ActiveEntrance()` and the walk never reaches them.
 
+Owner requirements (2026-10-25) and how S1 meets them:
+
+- **Every slot switchable, off = byte-identical:** the walk visits only `Registry::ActiveEntrance()`
+  (enabled + component; `pipeline_slots_off` and the Original pathway applied by the registry). A
+  switched-off slot is never called, so the picture passes unchanged (no pass). `EntranceSegment::Plan`
+  is the same mapping, tested per slot (`EntranceSegmentTests`: each S1 slot off alone, all off, Original
+  pathway, on again).
+- **No hard-coded order:** the order is the registry's, set through `SetOrderByNames` and validated by
+  `OrderValidator` (domains from `SlotContracts`); a rejected order changes nothing. `EntranceStageInfo`
+  builds the S1 stage list from `registry.CurrentOrder()` and `PipelineSlots::ContractOf`.
+- **Held repair (A) slot and the other placeholders stay stages:** `Stage::RepairA` (and the 4K route,
+  refine, chroma) are cases of the walk that pass the picture through (`Placeholder`): zero cost while
+  the slot has no component, byte-identical if a component registers before its stage exists.
+
 Moved verbatim from the host into `EntranceSegment::Segment` (names kept for review:
 `RunEntrance`->`RunStages`, `RunMainEntrance`->`RunMain`, `EntranceRebase/Deband/Detail`->`Rebase/Deband/
 Detail`, `EntranceDetailLookAhead`->`DetailLookAhead`, `StoreEntranceOwned`->`StoreOwned`,
