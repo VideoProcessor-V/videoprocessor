@@ -1098,6 +1098,19 @@ namespace Vpv
 				state->host.setValue(section, QStringLiteral("entrance_gpu_drain"), drain->itemData(i).toString());
 			});
 
+			// frame_analysis_store (WP-23): VP's per-source-frame analysis record and the one shared luma
+			// decode its readers use; off until the big test; disabled in the Original pathway.
+			auto* analysis = new QCheckBox(QStringLiteral("On (one luma decode per frame for every analyser)"));
+			analysis->setObjectName(ObjectName(QStringLiteral("expert.frame_analysis_store")));
+			analysis->setToolTip(QStringLiteral("Key frame_analysis_store. Decodes each captured frame's luma once and shares it "
+				"with every analyser (same results, less CPU); off until the full test round has checked it."));
+			form->addRow(QStringLiteral("Frame analysis store"), analysis);
+			QObject::connect(analysis, &QCheckBox::toggled, analysis, [state, section](bool on)
+			{
+				if (state->refreshing || !state->host.setValue) return;
+				state->host.setValue(section, QStringLiteral("frame_analysis_store"), on ? QStringLiteral("on") : QStringLiteral("off"));
+			});
+
 			// The module order: slot names moved within their zone.
 			auto* order = new QLineEdit;
 			order->setObjectName(ObjectName(QStringLiteral("expert.pipeline_order")));
@@ -1168,6 +1181,11 @@ namespace Vpv
 					const QSignalBlocker blocker(drain);
 					const QString value = get("entrance_gpu_drain").toLower();
 					drain->setCurrentIndex(value == QStringLiteral("finish") ? 2 : value == QStringLiteral("flush") ? 1 : 0);
+				}
+				{
+					const QSignalBlocker blocker(analysis);
+					analysis->setChecked(get("frame_analysis_store").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0);
+					analysis->setEnabled(get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) != 0);
 				}
 				if (!order->hasFocus()) order->setText(get("pipeline_order"));
 				if (!slotsOff->hasFocus()) slotsOff->setText(get("pipeline_slots_off"));
