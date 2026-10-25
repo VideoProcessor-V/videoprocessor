@@ -1,6 +1,6 @@
 #pragma once
 /*
- * Copyright(C) 2026 Bill Slack
+ * Copyright(C) 2026 VP-V contributors
  * SPDX-License-Identifier: GPL-3.0-only
  */
 // The newlldv inference input built from a capture state (moved out of

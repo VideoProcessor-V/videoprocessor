@@ -1,7 +1,7 @@
 #pragma once
 /*
- * Copyright(C) 2026 Victor McPherson
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright(C) 2026 VP-V contributors
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 // Dolby Vision trims with CM v4.0 Level 8 (feat/dv-l8, 2026-10-24), behind dv_trims.
 // Header-only and pure (C++14): the renderer, the tests and (later) the "display adaptation"

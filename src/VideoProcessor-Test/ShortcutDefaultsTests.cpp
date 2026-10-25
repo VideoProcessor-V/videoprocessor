@@ -1,5 +1,5 @@
 /*
- * Copyright(C) 2026 Bill Slack
+ * Copyright(C) 2026 VP-V contributors
  * SPDX-License-Identifier: GPL-3.0-only
  */
 // VP's compiled [shortcuts] defaults (ShortcutDefaults.h, 2026-10-18): one

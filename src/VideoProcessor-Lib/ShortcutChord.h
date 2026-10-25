@@ -1,6 +1,6 @@
 #pragma once
 /*
- * Copyright(C) 2026 Bill Slack
+ * Copyright(C) 2026 VP-V contributors
  * SPDX-License-Identifier: GPL-3.0-only
  */
 // Bug hunt 3 (SH10, 2026-10-18): one shortcut grammar for Config and the

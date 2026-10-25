@@ -1,7 +1,7 @@
 #pragma once
 /*
- * Copyright(C) 2026 Victor McPherson
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright(C) 2026 VP-V contributors
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 // Dolby Vision DM levels L9 and L10 (feat/dv-l8, 2026-10-24): what an L8 trim's
 // target_display_index refers to. Header-only and pure (C++14): the tunnel formatter

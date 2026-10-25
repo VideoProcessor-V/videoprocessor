@@ -1,6 +1,6 @@
 #pragma once
 /*
- * Copyright(C) 2026 Bill Slack
+ * Copyright(C) 2026 VP-V contributors
  * SPDX-License-Identifier: GPL-3.0-only
  */
 // VPV packer (DV tunnel loopback, 2026-10-17): 12-bit IPT 4:2:2 + display-

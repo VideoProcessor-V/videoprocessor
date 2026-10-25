@@ -1,6 +1,6 @@
 /*
- * Copyright(C) 2026 Victor McPherson
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright(C) 2026 VP-V contributors
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 // feat/dv-l8 task 5 (2026-10-24): the Dolby-style DV tone mapping (DvDolbyStyle.h). The L1-driven
 // intensity curve (monotonic, hits its anchors, follows scene changes, identity when the scene

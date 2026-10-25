@@ -143,7 +143,7 @@
  *   cleared while it runs; other OUTPUT hooks keep the dither.
  *
  * Copyright (C) 2026 Victor McPherson
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
 //!PARAM enabled

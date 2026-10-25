@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# Copyright(C) 2026 Victor McPherson
-# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright(C) 2026 VP-V contributors
+# SPDX-License-Identifier: GPL-3.0-only
 """DV comparison capture: pair an LLDV clip with a DV tunnel clip and score them (feat/dv-l8).
 
 The owner records the same scene twice with VP's DV comparison capture (VP_DV_COMPARE_PATH,

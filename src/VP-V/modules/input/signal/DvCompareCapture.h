@@ -1,7 +1,7 @@
 #pragma once
 /*
- * Copyright(C) 2026 Victor McPherson
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright(C) 2026 VP-V contributors
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 // DV comparison capture (feat/dv-l8, 2026-10-24; diagnostic, OFF by default).
 //

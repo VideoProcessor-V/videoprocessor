@@ -1,8 +1,8 @@
 #pragma once
 #include <string>
 /*
- * Copyright(C) 2026 Victor McPherson
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright(C) 2026 VP-V contributors
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 // Dolby Vision tunnel: which generic plane stages may touch the raw tunnel planes (feat/dv-l8,
 // 2026-10-24; WIP until the GPU check below has run). Header-only, pure.

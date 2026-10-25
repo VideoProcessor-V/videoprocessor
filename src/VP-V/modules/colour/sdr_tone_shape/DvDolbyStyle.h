@@ -1,7 +1,7 @@
 #pragma once
 /*
- * Copyright(C) 2026 Victor McPherson
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright(C) 2026 VP-V contributors
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 // "Dolby-style" tone mapping for Dolby Vision content (feat/dv-l8 task 5, 2026-10-24), behind
 // the renderer key dv_tone_mapping (libplacebo | dolby_style; default libplacebo until the LLDV

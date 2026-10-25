@@ -24,6 +24,9 @@ each an `#include <VP-V/...>` with a comment naming the folder.
 - **Small focused units:** one job per header.
 - **No magic numbers:** derive from measured rates (ADR-0018).
 - **One fallback pattern:** "Fallbacks engaged" (`core/FallbackStatus.h`).
+- **File header (owner 2026-10-25):** new VP-written files carry
+  `Copyright(C) 2026 VP-V contributors` and `SPDX-License-Identifier: GPL-3.0-only`. Files that
+  exist in Bill's upstream beta keep their own header and are never edited for this.
 - **Slot data:** `docs/design/slots.json` is authoritative for slot ids, order, zones and keys.
   `core/PipelineSlots.h` mirrors it, and `python tools/check_module_manifests.py` fails on any
   drift.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright(C) 2026 Bill Slack
+# Copyright(C) 2026 VP-V contributors
 # SPDX-License-Identifier: GPL-3.0-only
 """Synthetic Dolby Vision tunnel corpus: content, DM metadata, tunnel packing, capture
 containers, truth and an independent reference decode (2026-10-24, test/dv-synthetic).

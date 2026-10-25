@@ -1,6 +1,6 @@
 #pragma once
 /*
- * Copyright(C) 2026 Bill Slack
+ * Copyright(C) 2026 VP-V contributors
  * SPDX-License-Identifier: GPL-3.0-only
  */
 // DV input fixes 2026-10-18 ([general] dv_tunnel_handoff, default on): the

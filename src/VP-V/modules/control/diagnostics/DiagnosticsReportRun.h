@@ -1,7 +1,7 @@
 #pragma once
 /*
- * Copyright(C) 2026 Victor McPherson
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright(C) 2026 VP-V contributors
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 // VP diagnostics adapter, GUI half (WP-17): the report-a-problem run out of
 // VideoProcessorDlg.cpp (Bill's file). The dialog keeps the facts only it has (build identity,

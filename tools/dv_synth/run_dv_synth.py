@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright(C) 2026 Bill Slack
+# Copyright(C) 2026 VP-V contributors
 # SPDX-License-Identifier: GPL-3.0-only
 """Synthetic DV tunnel validation: writes the GPU render jobs and runs the analysis.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright(C) 2026 Bill Slack
+# Copyright(C) 2026 VP-V contributors
 # SPDX-License-Identifier: GPL-3.0-only
 """Real RPU metadata -> per-frame DM field lines (DV autotest Tier 2, 2026-10-17).
 

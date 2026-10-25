@@ -1,6 +1,6 @@
 #pragma once
 /*
- * Copyright(C) 2026 Bill Slack
+ * Copyright(C) 2026 VP-V contributors
  * SPDX-License-Identifier: GPL-3.0-only
  */
 // When VP routes a capture through the Dolby Vision tunnel formatter (moved

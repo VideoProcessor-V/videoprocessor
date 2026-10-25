@@ -1,6 +1,6 @@
 /*
- * Copyright(C) 2026 Victor McPherson
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright(C) 2026 VP-V contributors
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 // feat/dv-l8 (2026-10-24): DV trims with L8 (DvTrimSelection.h). The level order (L8, else L2,
 // else none), L8 targets from L10 / the predefined list, selection and interpolation by the

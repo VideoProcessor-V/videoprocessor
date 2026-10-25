@@ -1,5 +1,5 @@
 /*
- * Copyright(C) 2026 Bill Slack
+ * Copyright(C) 2026 VP-V contributors
  * SPDX-License-Identifier: GPL-3.0-only
  */
 // External anchors for the DV harness (2026-10-17): real Dolby Vision RPU

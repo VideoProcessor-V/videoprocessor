@@ -1,7 +1,7 @@
 #pragma once
 /*
- * Copyright(C) 2026 Victor McPherson
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright(C) 2026 VP-V contributors
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 // The DV comparison capture (DvCompareCapture.h, feat/dv-l8) as one of the renderer's
 // rendered-frame captures (VP diagnostics adapter, WP-17). The renderer holds one

@@ -1,7 +1,7 @@
 #pragma once
 /*
- * Copyright(C) 2026 Victor McPherson
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright(C) 2026 VP-V contributors
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 // WP-14 / audit M-1 (2026-10-25): VP's additions to the DV tunnel formatter's DM handling, moved
 // out of Bill's CR210DolbyVisionTunnelFormatter into VP-V behind the upstreamable

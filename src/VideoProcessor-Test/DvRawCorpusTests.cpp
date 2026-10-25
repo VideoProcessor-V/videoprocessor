@@ -1,5 +1,5 @@
 /*
- * Copyright(C) 2026 Bill Slack
+ * Copyright(C) 2026 VP-V contributors
  * SPDX-License-Identifier: GPL-3.0-only
  */
 // Raw capture corpus (DV autotest Tier 3, 2026-10-17): the recorder writes a

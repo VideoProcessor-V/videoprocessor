@@ -1,5 +1,5 @@
 /*
- * Copyright(C) 2026 Bill Slack
+ * Copyright(C) 2026 VP-V contributors
  * SPDX-License-Identifier: GPL-3.0-only
  */
 // Every incoming HDR mode the DV harness covers (2026-10-17): the DV tunnel

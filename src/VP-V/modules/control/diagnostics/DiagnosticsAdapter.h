@@ -1,7 +1,7 @@
 #pragma once
 /*
- * Copyright(C) 2026 Victor McPherson
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright(C) 2026 VP-V contributors
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 // VP diagnostics adapter (WP-17, integration batch 1): VP's diagnostic captures, frame rows,
 // trace lines and test switches behind ONE adapter, so the host (LibplaceboVideoRenderer.cpp,

@@ -1,5 +1,5 @@
 /*
- * Copyright(C) 2026 Bill Slack
+ * Copyright(C) 2026 VP-V contributors
  * SPDX-License-Identifier: GPL-3.0-only
  */
 // Synthetic DV tunnel validation (test/dv-synthetic, 2026-10-24): VP's tunnel decode

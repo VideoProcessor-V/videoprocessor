@@ -1,6 +1,6 @@
 /*
- * Copyright(C) 2026 Victor McPherson
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright(C) 2026 VP-V contributors
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 // WP-14 (2026-10-25): the DV glue moved out of the renderer host (DvHostStage.h,
 // DvGpuUnpackSession.h). CPU only, no GPU device: the fallback entries each hook point engages

@@ -116,7 +116,7 @@
  *   trust that stale state on its first refresh (gate 2026-10-13).
  *
  * Copyright (C) 2026 Victor McPherson
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 
 //!PARAM enabled
