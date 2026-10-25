@@ -1,8 +1,8 @@
 diff --git a/docs/design/components-master.json b/docs/design/components-master.json
-index 0b9ac3f1..6272af1a 100644
+index b100ee2e..315cc1d1 100644
 --- a/docs/design/components-master.json
 +++ b/docs/design/components-master.json
-@@ -920,7 +920,8 @@
+@@ -921,7 +921,8 @@
          "config_keys": [
            "render_ahead",
            "render_ahead_queue_credit",
@@ -13,10 +13,10 @@ index 0b9ac3f1..6272af1a 100644
          "upstream_modules": [
            "output.dither"
 diff --git a/docs/design/slots.json b/docs/design/slots.json
-index 8c3b4cd5..34cd8d6f 100644
+index 7c0ddbfd..a1670033 100644
 --- a/docs/design/slots.json
 +++ b/docs/design/slots.json
-@@ -1607,7 +1607,8 @@
+@@ -1611,7 +1611,8 @@
        "settings_keys": [
          "render_ahead",
          "render_ahead_queue_credit",
@@ -26,7 +26,7 @@ index 8c3b4cd5..34cd8d6f 100644
        ],
        "planned_keys": [],
        "tiers": "not tiered",
-@@ -1640,7 +1641,8 @@
+@@ -1644,7 +1645,8 @@
        "original_pathway": {
          "mode": "upstream form",
          "settings": {
@@ -37,18 +37,18 @@ index 8c3b4cd5..34cd8d6f 100644
        },
        "zone": "present",
 diff --git a/src/VP-V/core/OriginalPathway.h b/src/VP-V/core/OriginalPathway.h
-index a20eab56..73785b79 100644
+index fad9f9db..e3a6f59c 100644
 --- a/src/VP-V/core/OriginalPathway.h
 +++ b/src/VP-V/core/OriginalPathway.h
 @@ -25,9 +25,9 @@ namespace OriginalPathway
  		const char* slot;   // the slot whose VP additions it removes (slots.json id)
  	};
  
--	inline const std::array<Override, 56>& Overrides()
-+	inline const std::array<Override, 57>& Overrides()
+-	inline const std::array<Override, 57>& Overrides()
++	inline const std::array<Override, 58>& Overrides()
  	{
--		static const std::array<Override, 56> table = { {
-+		static const std::array<Override, 57> table = { {
+-		static const std::array<Override, 57> table = { {
++		static const std::array<Override, 58> table = { {
  			{ "capture_path", "standard", "input.capture" },
  			{ "capture_upload", "render", "input.capture" },
  			{ "native_rgb_ingest", "off", "input.capture" },
@@ -75,7 +75,7 @@ index 7b268123..2ab10813 100644
      "upstream_modules": [
        "output.dither"
 diff --git a/src/VideoProcessor-Lib/RendererProfileConfig.h b/src/VideoProcessor-Lib/RendererProfileConfig.h
-index 919bb7f5..618a090c 100644
+index 132d26e3..98af14e6 100644
 --- a/src/VideoProcessor-Lib/RendererProfileConfig.h
 +++ b/src/VideoProcessor-Lib/RendererProfileConfig.h
 @@ -697,6 +697,8 @@ namespace RendererProfileConfig
@@ -88,10 +88,10 @@ index 919bb7f5..618a090c 100644
  			if (key == "dejudder_warp_stage") return IsChoice(value, { "rendered", "source" });
  			// Refinements (docs/VP-build-plan-refinements.md): D1 global prior,
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index 395b11a0..a7839971 100644
+index 9a22280f..387a597a 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-@@ -4,6 +4,8 @@
+@@ -8,6 +8,8 @@
  #include <GeneralRateLog.h>
  #include <RefreshKey.h>
  #include <MotionValidity.h>
@@ -100,7 +100,7 @@ index 395b11a0..a7839971 100644
  #include <KernelInverse.h>
  #include <vprenderer/MotionAheadProducer.h>
  #include "../SubtitleProfileUpdatePolicy.h"
-@@ -1039,6 +1041,7 @@ namespace
+@@ -1046,6 +1048,7 @@ namespace
  		double dejudderMatchTolerance = 4.5;   // owner 2026-10-14: with the fade match (planner Q8's condition met)
  		double dejudderFrameTrust = 0.25;   // 6b-2: whole-frame hold below this share
  		bool occlusionMask = false;         // 6c: the de-judder's occlusion mask for the sigma-delta
@@ -108,7 +108,7 @@ index 395b11a0..a7839971 100644
  		// Refinements (docs/VP-build-plan-refinements.md); inert while the
  		// de-judder and the grain map are off.
  		bool dejudderGlobalPrior = true;          // D1
-@@ -2730,6 +2733,7 @@ namespace
+@@ -2739,6 +2742,7 @@ namespace
  					settings.fboFloat32 < 0 ? "auto" : (settings.fboFloat32 ? "on" : "off"));
  		}
  		for (const auto& toggle : { std::make_pair("occlusion_mask", &settings.occlusionMask),
@@ -116,7 +116,7 @@ index 395b11a0..a7839971 100644
  			std::make_pair("dejudder_global_prior", &settings.dejudderGlobalPrior),
  			std::make_pair("dejudder_vector_smooth", &settings.dejudderVectorSmooth),
  			std::make_pair("dejudder_occlusion_fill", &settings.dejudderOcclusionFill),
-@@ -3558,6 +3562,7 @@ namespace
+@@ -3567,6 +3571,7 @@ namespace
  		settings.interpolation = InterpolationPolicy::Mode::Off;   // key=interpolation
  		settings.interpolationFillGaps = false;            // key=interpolation_fill_gaps
  		settings.occlusionMask = false;                    // key=occlusion_mask
@@ -124,7 +124,7 @@ index 395b11a0..a7839971 100644
  		settings.opticalFlow = false;                      // key=optical_flow
  		settings.motionAheadFrames = 0;                    // key=motion_ahead_frames
  		settings.motionHistoryFixes = false;               // key=motion_history_fixes
-@@ -7534,6 +7539,61 @@ struct LibplaceboVideoRenderer::Impl
+@@ -7643,6 +7648,61 @@ struct LibplaceboVideoRenderer::Impl
  	OcclusionMask::Hook occlusionMaskHook;
  	// Stage 6d: A's PRE_OUTPUT picture for the extras, and its warp.
  	DejudderRendered::Cache dejudderCache;
@@ -186,7 +186,7 @@ index 395b11a0..a7839971 100644
  	std::unique_ptr<DejudderRendered::Warp> dejudderRenderedWarp;
  	DejudderRendered::Geometry dejudderGeometry;
  	bool dejudderGeometryValid = false;   // this frame's geometry (both warp paths; delta 8 R1)
-@@ -7657,6 +7717,8 @@ struct LibplaceboVideoRenderer::Impl
+@@ -7766,6 +7826,8 @@ struct LibplaceboVideoRenderer::Impl
  				text += ", motion: " + motionSourceLogged;
  		}
  		std::lock_guard<std::mutex> guard(dejudderStatusMutex);
@@ -195,7 +195,7 @@ index 395b11a0..a7839971 100644
  		dejudderStatus = std::move(text);
  	}
  	void ReleaseDejudder()
-@@ -7669,6 +7731,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -7778,6 +7840,7 @@ struct LibplaceboVideoRenderer::Impl
  		// 6d: the cache and the rendered warp hold textures (and a dispatch)
  		// of this device (audit stage10-6d blocker 1).
  		dejudderCache.Release();
@@ -203,7 +203,7 @@ index 395b11a0..a7839971 100644
  		dejudderRenderedWarp.reset();
  		dejudderVectorField.reset();
  		for (pl_tex& tex : dejudderNextTextures)
-@@ -7881,8 +7944,9 @@ struct LibplaceboVideoRenderer::Impl
+@@ -7990,8 +8053,9 @@ struct LibplaceboVideoRenderer::Impl
  			},
  			[this](const std::string& source) -> const pl_hook*
  			{
@@ -215,7 +215,7 @@ index 395b11a0..a7839971 100644
  			},
  			[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } };
  	}
-@@ -11975,6 +12039,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -12106,6 +12170,7 @@ struct LibplaceboVideoRenderer::Impl
  		if (settings.renderAhead && !activeSettings.renderAhead)
  			renderAheadEpoch.Invalidate();   // render_ahead switched on: the gate starts again (bug hunt 05 H3)
  		activeSettings = settings;
@@ -223,7 +223,7 @@ index 395b11a0..a7839971 100644
  		UpdatePipelineSlots(settings);
  		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
  		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
-@@ -13133,6 +13198,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -13266,6 +13331,7 @@ struct LibplaceboVideoRenderer::Impl
  		if (settings.renderAhead && !activeSettings.renderAhead)
  			renderAheadEpoch.Invalidate();   // render_ahead switched on: the gate starts again (bug hunt 05 H3)
  		activeSettings = settings;
@@ -231,7 +231,7 @@ index 395b11a0..a7839971 100644
  		UpdatePipelineSlots(settings);
  		captureGpuWanted.store(settings.capturePath == "gpu", std::memory_order_release);
  		rgbGpuWanted.store(settings.nativeRgbIngest, std::memory_order_release);
-@@ -13483,6 +13549,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -13617,6 +13683,7 @@ struct LibplaceboVideoRenderer::Impl
  			return false;
  		hook = pl_mpv_user_shader_parse(
  			d3d11->gpu, source.data(), source.size());
@@ -239,7 +239,7 @@ index 395b11a0..a7839971 100644
  		if (!hook)
  		{
  			reason = "libplacebo could not parse shader";
-@@ -20638,6 +20705,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -20793,6 +20860,7 @@ struct LibplaceboVideoRenderer::Impl
                              }
                              subtitleComposedImage=composed;
                              relocatedSubtitle=move;
@@ -247,7 +247,7 @@ index 395b11a0..a7839971 100644
                              subtitleCompositionSucceeded=true;
                          }
                          else DebugLog::Log("SUBTITLE COMPOSITION: failed; preserving normal viewport");
-@@ -24962,6 +25030,16 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25146,6 +25214,16 @@ struct LibplaceboVideoRenderer::Impl
                      "De-judder extras: NLS shader map not known; warping the source instead");
              }
          }
@@ -264,17 +264,17 @@ index 395b11a0..a7839971 100644
          // libplacebo 7.360.1 drops the output encoding (limited range) after
          // a texture-input PRE_OUTPUT hook; the repair runs first at OUTPUT,
          // before any OUTPUT-stage shader such as the sigma-delta.
-@@ -25123,6 +25201,9 @@ struct LibplaceboVideoRenderer::Impl
-                 occlusionMaskHook.SetFrame(nullptr, renderImage.crop, linearFallbackCrop);
-                 assembleOverlays();
+@@ -25320,6 +25398,9 @@ struct LibplaceboVideoRenderer::Impl
              }, [&](const pl_frame& source, const pl_frame& destination, pl_render_params& parameters) {
+                 // output_segments_merged: S2/S3 as one hook each for this draw only (restored after).
+                 OutputSegments::Merger::Scope mergedOutput(outputMerger.get(), parameters, &renderErrors);
 +                // WP-24 repeat reuse, call 2 of 3 (upstreamable): a reusable repeat runs the OUTPUT stage only.
 +                if (repeatReuse.TryDrawRepeat(repeatReuse.Key(), renderer, destination, parameters))
 +                    return true;
                  // Stage 12 step A: the planes libplacebo samples, re-based.
                  pl_frame frame = source;
                  // Stage B: the picture at this refresh's phase in place of A's planes (a
-@@ -25242,6 +25323,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25439,6 +25520,7 @@ struct LibplaceboVideoRenderer::Impl
                      extendedRangeRelabelled ? &source.color : nullptr);
              });
          bool rendered = hookRender.rendered;
@@ -282,7 +282,7 @@ index 395b11a0..a7839971 100644
          // Bug hunt 2026-10-17: B's carried vectors are for this present only;
          // released here so the de-judder extras below never see them bound.
          nextVectorGuard.Release();
-@@ -31492,6 +31574,9 @@ void LibplaceboVideoRenderer::RenderLoop()
+@@ -31718,6 +31800,9 @@ void LibplaceboVideoRenderer::RenderLoop()
  			if (state)
  				motionLastState = state;
  			m_frameQueue.pop_front();
@@ -293,10 +293,10 @@ index 395b11a0..a7839971 100644
  			nextSourceSequence = 0;
  			nextPts = 0.0;
 diff --git a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
-index fbca4f0d..b86d33fe 100644
+index efee968a..fbe6db00 100644
 --- a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
 +++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
-@@ -458,6 +458,9 @@
+@@ -489,6 +489,9 @@
      <ClCompile Include="..\VP-V\tests\CombinationRunnerTests.cpp">
        <PrecompiledHeader>NotUsing</PrecompiledHeader>
      </ClCompile>
