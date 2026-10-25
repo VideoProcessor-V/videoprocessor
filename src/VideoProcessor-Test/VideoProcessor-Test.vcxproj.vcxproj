@@ -407,6 +407,7 @@
     <ClCompile Include="DiagnosticHistoryTests.cpp" />
     <ClCompile Include="StateReportTests.cpp" />
     <ClCompile Include="RendererCaptureHarnessTests.cpp" />
+    <ClCompile Include="VpScaleRenderMotionTests.cpp" />
     <ClCompile Include="NvOpticalFlowTests.cpp" />
     <ClCompile Include="PulldownReliabilityTests.cpp" />
     <ClCompile Include="PulldownCorpusTests.cpp" />
