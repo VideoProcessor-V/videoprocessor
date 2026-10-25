@@ -47,3 +47,14 @@ branch: `backup/m2-dv-pre-rebase` (local). No pushes.
 - F-8 (newlldv either/or), F-11 (older VP changes in Bill's formatter): owner / later WPs.
 - input.signal / input.capture stay non-switchable host slots (SwitchHonoured); their VP parts are
   switched by their keys and the Original pathway.
+
+## Final verification (2026-10-25, 19:20)
+
+- Branch state, `/p:VpCiNoMagewell=true`, whole solution: rc=0 (build6); DV / skeleton subset
+  214/214 (TRX D:\codex\videoprocessor\m2-dv-trx\branch-nomw).
+- With the call-site + formatter patches applied, Magewell SDK: rc=0 (build5); targeted classes
+  457/461 (patched2; the 4 are Bill's formatter timing tests under two concurrent builds).
+- F-4 vs WP-4: WP-4's silent-fallbacks patch is not on integ 43ebff50 (no SyncFallback there).
+  m2-dv-fixes.patch does not engage its own entry; it only adds the two releases through
+  FallbackCatalog::EarlyUpload (the auditor's preferred option) plus F-3. If WP-4 gains the
+  releases itself, drop those hunks.
