@@ -69,6 +69,10 @@ namespace HookSegment
 		std::vector<Failure> TakeFailures();
 		// The last polled GPU time of an inner hook in nanoseconds (0 = none yet).
 		uint64_t LastNs(const pl_hook* inner) const;
+		// The timer results that arrived since the last call (inner hook, ns). Only stages that
+		// return a shader are timed here: a texture-returning hook dispatches inside itself, so
+		// its time comes from the renderer's pass information (pl_render_params::info_callback).
+		std::vector<std::pair<const pl_hook*, uint64_t>> TakeTimings();
 		// Frees textures and timers (before the GPU goes away).
 		void Release();
 
@@ -88,5 +92,6 @@ namespace HookSegment
 		std::set<uint64_t> disabled;
 		std::vector<Failure> failures;
 		std::vector<std::pair<const pl_hook*, uint64_t>> lastNs;
+		std::vector<std::pair<const pl_hook*, uint64_t>> fresh;
 	};
 }
