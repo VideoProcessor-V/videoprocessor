@@ -53,9 +53,9 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **none (placeholder)**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **module (SdrAmbientLift helper only; slot placeholder)**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
-- (none yet)
+- `src/VP-V/modules/colour/appearance/SdrAmbientLift.h` (M2 step 7: the SDR ambient black-lift `SdrAmbientLift` / `ApplySdrAmbientLift`, extracted unchanged from Bill-owned `LibplaceboRenderParameters.*`, which now forwards to it; pure double math, namespace `SdrAmbientLiftModule`)
 
 ## Migration directive
 

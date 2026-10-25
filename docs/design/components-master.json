@@ -833,8 +833,10 @@
       "slot": "colour.appearance",
       "order": 210,
       "status": "placeholder",
-      "code_location": "none (placeholder)",
-      "live_files": [],
+      "code_location": "module (SdrAmbientLift helper only; slot placeholder)",
+      "live_files": [
+        "src/VP-V/modules/colour/appearance/SdrAmbientLift.h"
+      ],
       "components": {
         "files": {
           "required": [],

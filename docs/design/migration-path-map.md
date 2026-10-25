@@ -170,7 +170,7 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/vprenderer/DetailPulse.h` | `src/VP-V/modules/repair/texture_restore/DetailPulse.h` | 0a93e340 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/TextureRestore.cpp` | `src/VP-V/modules/repair/texture_restore/TextureRestore.cpp` | 0a93e340 |  |
 | `src/VideoProcessor-Lib/vprenderer/TextureRestore.h` | `src/VP-V/modules/repair/texture_restore/TextureRestore.h` | 0a93e340 | fwd |
-| `src/VideoProcessor-Lib/vprenderer/NlsMaskMapping.h` | `src/VP-V/modules/scaling/geometry/NlsMaskMapping.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/NlsMaskMapping.h` | `src/VP-V/modules/scaling/geometry/NlsMaskMapping.h` | efcd7756 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.cpp` | `src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp` | f45b4b00 |  |
 | `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h` | `src/VP-V/modules/scaling/output/AdaptiveDownscale.h` | f45b4b00 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/DownscaleLight.h` | `src/VP-V/modules/scaling/output/DownscaleLight.h` | f45b4b00 | fwd |
