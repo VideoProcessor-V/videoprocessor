@@ -542,6 +542,13 @@ namespace SegmentRunnerTestsNs
 			s3.InsertMask(hooks, s3.MarkMask(hooks, true, false, 1.0));
 			OutputSegments::Merger merger(nullptr, s2, s3);
 			Assert::IsFalse(merger.Configure(registry, false, 0, fallbacks), L"switch off: nothing merges");
+			{
+				// The Original pathway never merges, whatever output_segments_merged says.
+				PipelineSlots::Registry original;
+				original.ApplyOriginalPathway();
+				OutputSegments::Merger originalMerger(nullptr, s2, s3);
+				Assert::IsFalse(originalMerger.Configure(original, true, 0, fallbacks), L"Original pathway: separate hooks");
+			}
 			Assert::IsTrue(merger.Configure(registry, true, 0, fallbacks));
 			pl_render_params params{};
 			params.hooks = hooks.data();
