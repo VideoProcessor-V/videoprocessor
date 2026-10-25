@@ -6,7 +6,8 @@
 
 // Queue/timing policy (2026-10-24 draft, branch feat/motion-timing-extract). CPU only.
 //
-//  - VpFixedBudgetPolicy == a FROZEN copy of the renderer host's d0212534 code (UpdateQueueDelayHold,
+//  - VpFixedBudgetPolicy == a FROZEN copy of the renderer host's code at integ/batch1 2f75d36d (d0212534
+//    plus the re-audit MED 1 frame-start rule, e9f27487) (UpdateQueueDelayHold,
 //    PrefillTargetLocked, HoldTicksUntilDueLocked, the RenderLoop backlog block) over a sweep:
 //    commit (a) is a byte-identical move of the decisions.
 //  - the 4/3/2 ladder, the capacity cap, the held shed (exact late frames, run of late heads), the
@@ -33,7 +34,7 @@ using namespace QueueTimingPolicy;
 
 namespace
 {
-	// ---- FROZEN host code (d0212534), reduced to its inputs; do not edit -----------------------
+	// ---- FROZEN host code (2f75d36d), reduced to its inputs; do not edit -----------------------
 	struct FrozenHold { bool active = false; double holdMs = 0, transferMs = 0, fraction = 0; size_t targetFrames = 0; std::string note; int queueFrames = 0; bool degraded = false; };
 
 	FrozenHold FrozenUpdateQueueDelayHold(int budgetMs, bool originalPathway, bool lowLatency, double sourceRateHz,
@@ -101,7 +102,8 @@ namespace
 		return AlphaQueuePolicy::CombineQueueTarget(desired, credit, floor, fixes);
 	}
 
-	int64_t FrozenTicks(const FrozenHold& hold, bool timeline, bool fileFrame, int64_t arrival, int64_t enqueue, int64_t now, int64_t freq)
+	int64_t FrozenTicks(const FrozenHold& hold, bool timeline, bool fileFrame, int64_t arrival, bool arrivalIsFrameStart, int64_t enqueue,
+		int64_t now, int64_t freq)
 	{
 		if (!hold.active || timeline)
 			return 0;
@@ -110,14 +112,15 @@ namespace
 			return 0;
 		if (freq <= 0)
 			return 0;
-		const int64_t due = since + static_cast<int64_t>((hold.transferMs + hold.holdMs) * static_cast<double>(freq) / 1000.0);
+		const double waitMs = DelayBudget::WaitAfterTimestampMs(hold.holdMs, hold.transferMs, arrival != 0 && arrivalIsFrameStart);
+		const int64_t due = since + static_cast<int64_t>(waitMs * static_cast<double>(freq) / 1000.0);
 		return due > now ? due - now : 0;
 	}
 
 	struct FrozenBacklog { bool recovered = false, held = false; size_t heldDrop = 0; };
 
 	FrozenBacklog FrozenBacklogBlock(size_t queueBefore, size_t target, double oldestMs, double cycleMs, double captureRateHz,
-		double signalRateHz, double frontFilmHz, bool fixes, bool file, bool qpc, const FrozenHold& hold, double headAgeMs, unsigned& run)
+		double signalRateHz, double frontFilmHz, bool fixes, bool file, bool qpc, const FrozenHold& hold, double headAgeMs, bool headIsFrameStart, unsigned& run)
 	{
 		FrozenBacklog r;
 		const double queueRateHz = fixes ? AlphaQueuePolicy::QueueFrameRateHz(frontFilmHz, signalRateHz) : captureRateHz;
@@ -127,7 +130,7 @@ namespace
 			run = 0;
 		if (heldEvaluated)
 		{
-			const double heldMs = hold.transferMs + hold.holdMs;
+			const double heldMs = DelayBudget::WaitAfterTimestampMs(hold.holdMs, hold.transferMs, headIsFrameStart);
 			r.held = AlphaQueuePolicy::ShouldShedHeldBacklog(queueBefore, target, headAgeMs, heldMs, queueRateHz) ||
 				AlphaQueuePolicy::ShouldShedHeldExcess(queueBefore, target, headAgeMs, heldMs, queueRateHz, run, hold.holdMs);
 			if (r.held)
@@ -230,16 +233,19 @@ namespace VpvTests
 				d.hold = hold; d.timelineActive = n(0, 4) == 0; d.fileFrame = n(0, 9) == 0;
 				d.qpcFrequency = n(0, 9) ? 10000000 : 0; d.nowQpc = 1000000000LL + n(0, 5000000);
 				d.arrivalQpc = n(0, 2) ? d.nowQpc - n(0, 4000000) : 0; d.enqueueQpc = n(0, 4) ? d.nowQpc - n(0, 3000000) : 0;
-				Assert::AreEqual(FrozenTicks(fh, d.timelineActive, d.fileFrame, d.arrivalQpc, d.enqueueQpc, d.nowQpc, d.qpcFrequency),
+				d.arrivalIsFrameStart = n(0, 2) != 0;
+				Assert::AreEqual(FrozenTicks(fh, d.timelineActive, d.fileFrame, d.arrivalQpc, d.arrivalIsFrameStart, d.enqueueQpc, d.nowQpc,
+					d.qpcFrequency),
 					policy.TicksUntilDue(d));
 
 				BacklogContext b;
 				b.queueBefore = n(0, 20); b.target = n(1, 12); b.oldestQueuedAgeMs = u(0, 600); b.renderCycleMs = u(0, 120);
 				b.captureRateHz = rate; b.measuredSignalRateHz = n(0, 1) ? rate : 0.0; b.frontFilmHz = n(0, 3) ? 0.0 : 23.976;
 				b.fileSource = n(0, 19) == 0; b.qpcAvailable = n(0, 19) != 0; b.hold = hold; b.headArrivalAgeMs = u(0, 600);
+				b.headArrivalIsFrameStart = n(0, 2) != 0;
 				const BacklogDecision got = policy.EvaluateBacklog(b, run);
 				const FrozenBacklog want = FrozenBacklogBlock(b.queueBefore, b.target, b.oldestQueuedAgeMs, b.renderCycleMs, b.captureRateHz,
-					b.measuredSignalRateHz, b.frontFilmHz, fixes, b.fileSource, b.qpcAvailable, fh, b.headArrivalAgeMs, frozenRun);
+					b.measuredSignalRateHz, b.frontFilmHz, fixes, b.fileSource, b.qpcAvailable, fh, b.headArrivalAgeMs, b.headArrivalIsFrameStart, frozenRun);
 				Assert::AreEqual(want.recovered, got.recover);
 				Assert::AreEqual(frozenRun, run.heldExcessRun);
 				if (want.recovered)
@@ -286,6 +292,7 @@ namespace VpvTests
 			b.hold.active = true; b.hold.holdMs = 100.0; b.hold.transferMs = 1000.0 / 24.0;
 			b.captureRateHz = 24.0; b.measuredSignalRateHz = 24.0; b.queueBefore = 9; b.target = 4;
 			b.oldestQueuedAgeMs = 0.0; b.renderCycleMs = 1.0;
+			b.headArrivalIsFrameStart = true;   // a hardware frame-start time: the transfer counts
 			b.headArrivalAgeMs = b.hold.transferMs + b.hold.holdMs + 3.4 * (1000.0 / 24.0);   // 3.4 frames late
 			const BacklogDecision d = policy.EvaluateBacklog(b, run);
 			Assert::IsTrue(d.recover);
@@ -322,9 +329,13 @@ namespace VpvTests
 			d.qpcFrequency = 10000000; d.nowQpc = 50000000;
 			d.arrivalQpc = d.nowQpc - 1000000;   // started 100 ms ago
 			d.enqueueQpc = d.nowQpc;             // enqueued now: must NOT be used when the arrival is known
+			d.arrivalIsFrameStart = true;        // a hardware frame-start time: transfer, then hold
 			const int64_t ticks = policy.TicksUntilDue(d);
 			const double expectMs = 150.0 + 1000.0 / 24.0 - 100.0;
 			Assert::AreEqual(expectMs, static_cast<double>(ticks) / 10000.0, 0.001);
+			// A callback / enqueue time (re-audit MED 1): the frame is already received - the hold alone.
+			d.arrivalIsFrameStart = false;
+			Assert::AreEqual(150.0 - 100.0, static_cast<double>(policy.TicksUntilDue(d)) / 10000.0, 0.001);
 			d.timelineActive = true;   // the timeline realises the hold by steering, never an age gate
 			Assert::AreEqual(int64_t{ 0 }, policy.TicksUntilDue(d));
 		}

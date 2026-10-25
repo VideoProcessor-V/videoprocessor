@@ -7,7 +7,8 @@
 //
 // Commit (a) - byte-identical move: every decision below is the text of the renderer's
 //   UpdateQueueDelayHold (pure part), PrefillTargetLocked, HoldTicksUntilDueLocked and the backlog
-//   block of RenderLoop at d0212534, in the same order (including the || short-circuit that leaves
+//   block of RenderLoop at d0212534 (with the re-audit MED 1 frame-start rule of integ/batch1
+//   e9f27487), in the same order (including the || short-circuit that leaves
 //   the excess run untouched when the backlog rule fires). The host keeps acting on the result
 //   (EngageFallback/ReleaseFallback, logs, drops). QueueTimingPolicyTests compares it against a
 //   frozen copy of that host code over a parameter sweep.
@@ -132,7 +133,7 @@ namespace VpQueueTiming
 				m_queueTimingFixes.load(std::memory_order_relaxed));
 		}
 
-		// HoldTicksUntilDueLocked, d0212534 26978-26997 (the host checks the empty queue / no Impl).
+		// HoldTicksUntilDueLocked, d0212534 26978-26997 + e9f27487 (the host checks the empty queue / no Impl).
 		int64_t TicksUntilDue(const DueContext& c) const override
 		{
 			if (!c.hold.active || c.timelineActive)
@@ -142,12 +143,14 @@ namespace VpQueueTiming
 				return 0;
 			if (c.qpcFrequency <= 0)
 				return 0;
-			// The timestamp marks the frame's START (audit MED 7): the transfer counted once.
-			const int64_t due = since + static_cast<int64_t>((c.hold.transferMs + c.hold.holdMs) * static_cast<double>(c.qpcFrequency) / 1000.0);
+			// A hardware FRAME-START time (audit MED 7): the frame arrives after the transfer, then waits the
+			// hold - the transfer counted once. A callback or enqueue time (re-audit MED 1): the hold alone.
+			const double waitMs = DelayBudget::WaitAfterTimestampMs(c.hold.holdMs, c.hold.transferMs, c.arrivalQpc != 0 && c.arrivalIsFrameStart);
+			const int64_t due = since + static_cast<int64_t>(waitMs * static_cast<double>(c.qpcFrequency) / 1000.0);
 			return due > c.nowQpc ? due - c.nowQpc : 0;
 		}
 
-		// RenderLoop backlog block, d0212534 31877-31914. measuredSignalRateHz: the host's resolved
+		// RenderLoop backlog block, d0212534 31877-31914 + e9f27487. measuredSignalRateHz: the host's resolved
 		// signal rate (measured, else the display mode's, else the nominal capture rate).
 		BacklogDecision EvaluateBacklog(const BacklogContext& c, BacklogRunState& run) const override
 		{
@@ -167,7 +170,8 @@ namespace VpQueueTiming
 			if (heldEvaluated)
 			{
 				const double headAgeMs = c.headArrivalAgeMs > 0.0 ? c.headArrivalAgeMs : 0.0;
-				const double heldMs = c.hold.transferMs + c.hold.holdMs;
+				// The transfer only for a hardware frame-start time (re-audit MED 1).
+				const double heldMs = DelayBudget::WaitAfterTimestampMs(c.hold.holdMs, c.hold.transferMs, c.headArrivalIsFrameStart);
 				heldBacklog = VpQueueRules::ShouldShedHeldBacklog(c.queueBefore, c.target, headAgeMs, heldMs, queueRateHz) ||
 					VpQueueRules::ShouldShedHeldExcess(c.queueBefore, c.target, headAgeMs, heldMs, queueRateHz,
 						run.heldExcessRun, c.hold.holdMs);
