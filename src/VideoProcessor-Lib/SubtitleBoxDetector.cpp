@@ -65,9 +65,9 @@ namespace
                 return supported*100>=unsigned(run)*85;
             };
             for(int x=interior.left+1;x<interior.right-1;++x) {
-                AnalysisLumaSample value;if(!source.Sample(x,sourceY,value))return false;
+                uint16_t luma=0;if(!source.SampleLuma(x,sourceY,luma))return false; // WP-23 shared luma
                 ++tested;
-                if(value.luma<=darkLimit) {
+                if(luma<=darkLimit) {
                     if(!supportedRun(x))return false;
                     ++black;run=0;continue;
                 }
@@ -386,9 +386,9 @@ bool SubtitleBoxDetector::Detect(const AnalysisLumaSource& source, int pictureTo
         if(r.top<top || r.bottom>bottom)return true;
         auto black=[&](int x,int y) {
             if(x<0 || x>=w || y<top || y>=bottom)return false;
-            AnalysisLumaSample p;
-            return source.Sample((std::min)(source.width-1,x*step),evidence.sourceRows[y],p) &&
-                p.luma<=componentCardLimit;
+            uint16_t luma=0; // WP-23 shared luma
+            return source.SampleLuma((std::min)(source.width-1,x*step),evidence.sourceRows[y],luma) &&
+                luma<=componentCardLimit;
         };
         for(int x=r.left;x<r.right;++x)
             if(black(x,r.top-2) || black(x,r.bottom+1))return true;
@@ -555,9 +555,9 @@ bool SubtitleBoxDetector::Detect(const AnalysisLumaSource& source, int pictureTo
         unsigned samples[4]{},black[4]{};
         auto sample=[&](int side,int x,int y) {
             if(x<0 || x>=w || y<top || y>=bottom) return;
-            AnalysisLumaSample pixel;
-            if(!source.Sample((std::min)(source.width-1,x*step),evidence.sourceRows[y],pixel)) return;
-            ++samples[side];black[side]+=pixel.luma<=componentCardLimit;
+            uint16_t luma=0; // WP-23 shared luma
+            if(!source.SampleLuma((std::min)(source.width-1,x*step),evidence.sourceRows[y],luma)) return;
+            ++samples[side];black[side]+=luma<=componentCardLimit;
         };
         for(int x=r.left;x<r.right;++x) {
             sample(0,x,r.top-2);sample(1,x,r.bottom+1);
@@ -1221,9 +1221,9 @@ bool SubtitleBoxDetector::Detect(const AnalysisLumaSource& source, int pictureTo
             unsigned tested=0,dark=0;
             for(int y:{marks.top-2,marks.bottom+1}) for(int x=marks.left;x<marks.right;++x) {
                 if(x<0 || x>=w || y<0 || y>=h) continue;
-                AnalysisLumaSample pixel;
-                if(!source.Sample((std::min)(source.width-1,x*step),evidence.sourceRows[y],pixel))continue;
-                ++tested;dark+=pixel.luma<=componentCardLimit;
+                uint16_t luma=0; // WP-23 shared luma
+                if(!source.SampleLuma((std::min)(source.width-1,x*step),evidence.sourceRows[y],luma))continue;
+                ++tested;dark+=luma<=componentCardLimit;
             }
             if(!tested || dark*100<tested*85) continue;
             for(const auto* c:cluster) {
@@ -1393,10 +1393,10 @@ bool SubtitleBoxDetector::Detect(const AnalysisLumaSource& source, int pictureTo
     // a letter's dark hole or outline is not evidence of a black background.
     const int cardDarkLimit=bar+(std::max)(24,(ink-bar)/12);
     auto darkSample=[&](int x,int y) {
-        AnalysisLumaSample sample;
+        uint16_t luma=0; // WP-23 shared luma
         return x>=0 && x<w && y>=0 && y<h &&
-            source.Sample((std::min)(source.width-1,x*step),
-                evidence.sourceRows[y],sample) && sample.luma<=cardDarkLimit;
+            source.SampleLuma((std::min)(source.width-1,x*step),
+                evidence.sourceRows[y],luma) && luma<=cardDarkLimit;
     };
     auto onOpaqueCard=[&](const Line& candidate,size_t index) {
         const auto& r=candidate.box;
@@ -1582,9 +1582,9 @@ bool SubtitleBoxDetector::Detect(const AnalysisLumaSource& source, int pictureTo
     }
     const int edgeDarkLimit=bar+(std::max)(8,(ink-bar)/64);
     auto cardEdgePixel=[&](int x,int y) {
-        AnalysisLumaSample sample;
-        return source.Sample((std::min)(source.width-1,x*step),evidence.sourceRows[y],sample) &&
-            sample.luma<=edgeDarkLimit;
+        uint16_t luma=0; // WP-23 shared luma
+        return source.SampleLuma((std::min)(source.width-1,x*step),evidence.sourceRows[y],luma) &&
+            luma<=edgeDarkLimit;
     };
     auto recordBackingDistance=[&](int unpaddedTop,int unpaddedBottom,bool topInferred,bool bottomInferred) {
         auto record=[&](int gap,bool inferred) {
@@ -1643,9 +1643,9 @@ bool SubtitleBoxDetector::Detect(const AnalysisLumaSource& source, int pictureTo
         auto nativeBlackRow=[&](int y) {
             unsigned count=0,black=0;
             for(int x=r.left;x<r.right;++x) {
-                AnalysisLumaSample value;
-                if(!source.Sample((std::min)(source.width-1,x*step),y,value))return false;
-                ++count;black+=value.luma<=cardDarkLimit;
+                uint16_t luma=0; // WP-23 shared luma
+                if(!source.SampleLuma((std::min)(source.width-1,x*step),y,luma))return false;
+                ++count;black+=luma<=cardDarkLimit;
             }
             return count>=3 && black*100>=count*85;
         };

@@ -395,6 +395,31 @@ bool AnalysisLumaSource::Sample(int x, int y, AnalysisLumaSample& result) const
 	return SampleUnchecked(x, y, result);
 }
 
+bool AnalysisLumaSource::SampleLuma(int x, int y, uint16_t& luma) const
+{
+	if (x >= 0 && x < width)
+		if (const uint16_t* row = SharedLumaRow(y))
+		{
+			luma = row[x];
+			return true;
+		}
+	AnalysisLumaSample sample;
+	if (!Sample(x, y, sample))
+		return false;
+	luma = sample.luma;
+	return true;
+}
+
+const uint16_t* AnalysisLumaSource::SharedLumaRow(int y) const
+{
+	const AnalysisLumaPlane* plane = sharedLuma.get();
+	if (!plane || y < 0 || y >= height || !plane->Ready() ||
+		plane->width != width || plane->height != height ||
+		plane->codes.size() != static_cast<size_t>(width) * static_cast<size_t>(height))
+		return nullptr;
+	return plane->codes.data() + static_cast<size_t>(y) * static_cast<size_t>(width);
+}
+
 bool AnalysisLumaSource::SampleLumaRow(int x0, int y, int count, uint16_t* out) const
 {
 	if (!out || count < 0 || !IsValid() || x0 < 0 || y < 0 || y >= height || count > width - x0)

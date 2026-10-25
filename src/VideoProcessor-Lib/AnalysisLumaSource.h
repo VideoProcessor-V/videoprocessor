@@ -1,8 +1,10 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include <ColorSpace.h>
 #include <VideoFrameEncoding.h>
@@ -39,6 +41,32 @@ struct AnalysisLumaSample
 	uint16_t chromaV = 512;
 };
 
+// Optional shared per-frame luma product (WP-23, offered upstream): the
+// Sample(x, y).luma of every pixel of ONE frame, decoded once by whichever
+// producer owns the frame and then read by every analyser. Readers never wait:
+// until Publish() the plane is ignored and Sample() decodes as before, so every
+// value, and every decision built on it, is identical with or without it.
+struct AnalysisLumaPlane
+{
+	int width = 0;
+	int height = 0;
+	std::vector<uint16_t> codes; // row-major, `width` per row: Sample(x, y).luma
+
+	// One producer fills `codes` after a successful TryClaim(), then calls
+	// Publish(); nothing writes the plane after that.
+	bool TryClaim()
+	{
+		bool expected = false;
+		return claimed.compare_exchange_strong(expected, true, std::memory_order_acq_rel);
+	}
+	void Publish() { ready.store(true, std::memory_order_release); }
+	bool Ready() const { return ready.load(std::memory_order_acquire); }
+
+private:
+	std::atomic<bool> claimed{ false };
+	std::atomic<bool> ready{ false };
+};
+
 struct AnalysisLumaSource
 {
 	const uint8_t* data = nullptr;
@@ -57,9 +85,18 @@ struct AnalysisLumaSource
 	// native 4:2:2) carry full-range codes; Sample() maps them to the limited
 	// domain. RGB formats derive their range from the encoding instead.
 	bool fullRangeYuv = false;
+	// WP-23: the optional shared luma plane (see AnalysisLumaPlane); copies of
+	// the source share it.
+	std::shared_ptr<AnalysisLumaPlane> sharedLuma;
 
 	bool IsValid() const;
 	bool Sample(int x, int y, AnalysisLumaSample& result) const;
+	// WP-23: Sample(x, y).luma, read from the published shared plane when
+	// there is one (same value, same failures).
+	bool SampleLuma(int x, int y, uint16_t& luma) const;
+	// WP-23: row y of the published shared plane (Sample().luma per pixel), or
+	// null (no plane, not published yet, another size, outside the picture).
+	const uint16_t* SharedLumaRow(int y) const;
 	// Hunt 2 (look-ahead full-coverage peak): Sample(x, y).luma for `count`
 	// pixels of row y from x0, decoded a row at a time (plane formats read
 	// the row directly; others decode each pixel without re-validating the
