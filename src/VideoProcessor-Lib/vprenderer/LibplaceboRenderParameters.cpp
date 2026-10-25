@@ -1,5 +1,7 @@
 #include "LibplaceboRenderParameters.h"
 
+#include <VP-V/modules/colour/appearance/SdrAmbientLift.h>
+
 #include <Windows.h>
 
 #include <cmath>
@@ -151,43 +153,13 @@ namespace LibplaceboRenderParameters
 	bool SdrAmbientLift(double ownerBlackNits, double effectiveBlackNits, double whiteNits,
 		enum pl_color_transfer sourceTransfer, float& contrast, float& brightness)
 	{
-		// The exponent of the source's power-law curve (BT.1886 is the 2.4 law with the display
-		// black in it; the pure gammas are the same form with their own exponent).
-		double gamma = 0.0;
-		switch (sourceTransfer)
-		{
-		case PL_COLOR_TRC_BT_1886: gamma = 2.4; break;
-		case PL_COLOR_TRC_GAMMA18: gamma = 1.8; break;
-		case PL_COLOR_TRC_GAMMA20: gamma = 2.0; break;
-		case PL_COLOR_TRC_GAMMA22: gamma = 2.2; break;
-		case PL_COLOR_TRC_GAMMA24: gamma = 2.4; break;
-		case PL_COLOR_TRC_GAMMA26: gamma = 2.6; break;
-		case PL_COLOR_TRC_GAMMA28: gamma = 2.8; break;
-		default: return false;
-		}
-		if (!std::isfinite(ownerBlackNits) || !std::isfinite(effectiveBlackNits) || !std::isfinite(whiteNits) ||
-			!(whiteNits > 0.0) || ownerBlackNits < 0.0 || !(effectiveBlackNits > ownerBlackNits) ||
-			!(effectiveBlackNits < whiteNits))
-			return false;
-		const double lw = std::pow(whiteNits, 1.0 / gamma);
-		const double lb = std::pow(ownerBlackNits, 1.0 / gamma);
-		const double le = std::pow(effectiveBlackNits, 1.0 / gamma);
-		if (!(lw > lb))
-			return false;
-		const double s = (lw - le) / (lw - lb);
-		const double o = (le - lb) / (lw - lb);
-		if (!(s > 0.0) || !(o > 0.0))
-			return false;
-		contrast = static_cast<float>(s);
-		brightness = static_cast<float>(o);
-		return true;
+		return SdrAmbientLiftModule::SdrAmbientLift(ownerBlackNits, effectiveBlackNits, whiteNits,
+			sourceTransfer, contrast, brightness);
 	}
 
 	void ApplySdrAmbientLift(float contrast, float brightness, pl_color_adjustment& adjustment)
 	{
-		// libplacebo's decode: RGB = contrast * M (YCbCr - black) + brightness.
-		adjustment.brightness = adjustment.brightness * contrast + brightness;
-		adjustment.contrast *= contrast;
+		SdrAmbientLiftModule::ApplySdrAmbientLift(contrast, brightness, adjustment);
 	}
 
 	pl_color_space MakeSwapchainColorHint(const pl_color_space& output)

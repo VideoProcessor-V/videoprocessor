@@ -7,12 +7,15 @@
   "code_location": "legacy",
   "live_files": [
     "src/VideoProcessor-Lib/NlsGeometryPolicy.cpp",
-    "src/VideoProcessor-Lib/vprenderer/NlsMaskMapping.h",
+    "src/VP-V/modules/scaling/geometry/NlsMaskMapping.h",
     "src/VideoProcessor-Lib/vprenderer/NlsHookRecovery.h",
     "src/VideoProcessor-Lib/vprenderer/AnamorphicPresentation.h",
     "src/VideoProcessor-Lib/vprenderer/AlphaSourceCropPolicy.cpp",
     "shaders/NLS.glsl",
     "shaders/NLSPlus.glsl"
+  ],
+  "forwarding_headers": [
+    "src/VideoProcessor-Lib/vprenderer/NlsMaskMapping.h"
   ],
   "components": {
     "files": {
@@ -28,11 +31,13 @@
     },
     "tools": [],
     "config_keys": [
+      "anamorphic_scale",
       "nls",
       "nls_active",
       "nls_curve",
       "nls_geometry",
       "nls_protect",
+      "nls_sampling",
       "nls_scale"
     ],
     "upstream_modules": [

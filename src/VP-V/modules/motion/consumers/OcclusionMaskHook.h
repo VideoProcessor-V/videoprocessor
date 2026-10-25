@@ -2,7 +2,7 @@
 
 #include <libplacebo/renderer.h>
 
-#include <vprenderer/NlsMaskMapping.h>
+#include <VP-V/modules/scaling/geometry/NlsMaskMapping.h>
 
 // Stage 6c (M1′): the de-judder's occlusion mask, handed to the OUTPUT-stage
 // sigma-delta through the alpha channel of the OUTPUT texture.

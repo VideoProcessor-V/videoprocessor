@@ -1033,11 +1033,13 @@
         "lookahead": "active-picture decisions use queued frames"
       },
       "settings_keys": [
+        "anamorphic_scale",
         "nls",
         "nls_active",
         "nls_curve",
         "nls_geometry",
         "nls_protect",
+        "nls_sampling",
         "nls_scale"
       ],
       "planned_keys": [],

@@ -3,7 +3,7 @@
 #include <libplacebo/renderer.h>
 #include <libplacebo/shaders.h>
 
-#include <vprenderer/NlsMaskMapping.h>
+#include <VP-V/modules/scaling/geometry/NlsMaskMapping.h>
 
 #include <algorithm>
 #include <cmath>
