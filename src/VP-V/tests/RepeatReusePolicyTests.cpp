@@ -117,7 +117,7 @@ namespace VpvTests
 			Policy p = OnPolicy();
 			p.NoteFullRender(Policy::Complete(Key(5, false), VpTemporal{}, Hooks(1, true)), true);
 			Assert::IsTrue(p.Decide(Policy::Complete(Key(5, true), VpTemporal{}, Hooks(1, true)), true, 1.0).refusal ==
-				Refusal::HookStateChanged);
+				Refusal::HookStateOpaque);
 		}
 
 		TEST_METHOD(VpTemporalStagesRefuse)
@@ -215,12 +215,47 @@ namespace VpvTests
 
 		TEST_METHOD(UpstreamDefaultNeverReuses)
 		{
-			struct FakeFrame {};
-			NeverReuse<FakeFrame> upstream;
-			FakeFrame f;
-			Assert::IsFalse(upstream.TryDrawRepeat(Key(5, true), f));
+			NeverReuse upstream;
+			std::vector<const pl_hook*> hooks;
+			upstream.PrepareFirstPresent(Key(5, true), hooks);
+			Assert::IsTrue(hooks.empty());   // never arms a capture
+			pl_frame destination{};
+			pl_render_params params = pl_render_default_params;
+			Assert::IsFalse(upstream.TryDrawRepeat(Key(5, true), nullptr, destination, params));
 			Assert::AreEqual(uint64_t{ 1 }, upstream.GetStats().repeats);
 			Assert::AreEqual(uint64_t{ 0 }, upstream.GetStats().reused);
+		}
+
+		TEST_METHOD(KeyFromHashesImageOverlaysAndFlagsTemporalParams)
+		{
+			pl_frame image{}, target{};
+			image.crop = { 0, 0, 3840, 2160 };
+			target.crop = { 0, 0, 2560, 1600 };
+			pl_render_params params = pl_render_default_params;
+			params.peak_detect_params = nullptr;
+			params.deband_params = nullptr;
+			params.frame_mixer = nullptr;
+			const RepeatFrameKey a = KeyFrom(5, true, false, 1, 1, image, target, params, 7);
+			Assert::IsFalse(a.temporalRenderState);
+			// A target overlay (drawn again every refresh) does not change the key.
+			pl_overlay ov{};
+			target.overlays = &ov;
+			target.num_overlays = 1;
+			Assert::AreEqual(a.overlays, KeyFrom(5, true, false, 1, 1, image, target, params, 7).overlays);
+			// An image overlay (baked into the cached picture) does.
+			image.overlays = &ov;
+			image.num_overlays = 1;
+			Assert::AreNotEqual(a.overlays, KeyFrom(5, true, false, 1, 1, image, target, params, 7).overlays);
+			// The LUT by generation, not by pointer.
+			Assert::AreNotEqual(a.colour, KeyFrom(5, true, false, 1, 1, pl_frame{ image }, target, params, 8).colour);
+			// Temporal per-render state.
+			pl_deband_params deband = pl_deband_default_params;
+			deband.grain = 4.0f;
+			params.deband_params = &deband;
+			Assert::IsTrue(KeyFrom(5, true, false, 1, 1, image, target, params, 7).temporalRenderState);
+			params.deband_params = nullptr;
+			params.peak_detect_params = &pl_peak_detect_default_params;
+			Assert::IsTrue(KeyFrom(5, true, false, 1, 1, image, target, params, 7).temporalRenderState);
 		}
 
 		TEST_METHOD(SignatureIsExactOnFloats)
