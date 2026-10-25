@@ -94,19 +94,24 @@
       "slot": "input.queue_timing",
       "order": 30,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
         "src/VP-V/core/DelayBudget.h",
-        "src/VideoProcessor-Lib/QueueLatency.h",
+        "src/VP-V/modules/input/queue_timing/QueueLatency.h",
         "src/VideoProcessor-Lib/QueueConfiguration.h",
-        "src/VideoProcessor-Lib/QueueLookahead.h",
+        "src/VP-V/modules/input/queue_timing/QueueLookahead.h",
         "src/VideoProcessor-Lib/CaptureFrameQueue.h",
         "src/VideoProcessor-Lib/VideoTimingController.cpp",
         "src/VideoProcessor-Lib/TimingClock.cpp",
         "src/VideoProcessor-Lib/UnifiedProfileRuntime.cpp",
-        "src/VideoProcessor-Lib/vprenderer/PulldownDetector.h",
+        "src/VP-V/modules/input/queue_timing/PulldownDetector.h",
         "src/VideoProcessor-Lib/vprenderer/AlphaQueuePolicy.h",
-        "src/VideoProcessor-GUI/VideoProcessorDlg.cpp"
+        "src/VideoProcessor-GUI/VideoProcessorDlg.cpp",
+        "src/VP-V/modules/input/queue_timing/VpQueueRules.h",
+        "src/VP-V/modules/input/queue_timing/VpFixedBudgetPolicy.h",
+        "src/VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h",
+        "src/VideoProcessor-Lib/vprenderer/QueueTimingPolicy.h",
+        "src/VideoProcessor-Lib/vprenderer/QueueLookaheadWalk.h"
       ],
       "components": {
         "files": {

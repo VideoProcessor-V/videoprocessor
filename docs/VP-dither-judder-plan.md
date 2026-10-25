@@ -554,7 +554,7 @@ low confidence ⇒ existing gate. Budget ≈1 ms. Reference: FFmpeg
 **Status (2026-10-10): built, not yet on the projector.** Built on
 `stage7-step5-delta1`, before the planned rebase onto rc2, at the owner's
 request. Where it lives:
-- `src/VideoProcessor-Lib/QueueLatency.h`: the derived count and its order of
+- `src/VP-V/modules/input/queue_timing/QueueLatency.h`: the derived count and its order of
   precedence.
 - `CVideoProcessorDlg::ApplyUnifiedProfileSnapshot`: re-evaluated with every profile
   snapshot, which changes when `${cadence}` does.

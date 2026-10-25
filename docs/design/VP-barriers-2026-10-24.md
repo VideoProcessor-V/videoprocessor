@@ -25,7 +25,7 @@ Efforts are in agent wall-clock hours.
 
 **B2. 200 ms is unreachable at 24p even after the 5-frame minimum is removed.**
 - Evidence:
-  - The queue time target rounds UP: `ceil(ms x rate)` (VideoProcessor-Lib/QueueLatency.h:27-35). 200 ms x 23.976 = 4.8, which becomes 5 frames, which is 208.5 ms of queue alone.
+  - The queue time target rounds UP: `ceil(ms x rate)` (VP-V/modules/input/queue_timing/QueueLatency.h:27-35). 200 ms x 23.976 = 4.8, which becomes 5 frames, which is 208.5 ms of queue alone.
   - On top of that:
     - libplacebo `max_frame_latency = 2` (LVR:10550): up to about 33 ms at 60 Hz;
     - render-ahead (LVR:9708-9713);

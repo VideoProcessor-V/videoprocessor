@@ -57,19 +57,30 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **partly migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
 - `src/VP-V/core/DelayBudget.h`
-- `src/VideoProcessor-Lib/QueueLatency.h`
+- `src/VP-V/modules/input/queue_timing/QueueLatency.h`
 - `src/VideoProcessor-Lib/QueueConfiguration.h`
-- `src/VideoProcessor-Lib/QueueLookahead.h`
+- `src/VP-V/modules/input/queue_timing/QueueLookahead.h`
 - `src/VideoProcessor-Lib/CaptureFrameQueue.h`
 - `src/VideoProcessor-Lib/VideoTimingController.cpp`
 - `src/VideoProcessor-Lib/TimingClock.cpp`
 - `src/VideoProcessor-Lib/UnifiedProfileRuntime.cpp`
-- `src/VideoProcessor-Lib/vprenderer/PulldownDetector.h`
+- `src/VP-V/modules/input/queue_timing/PulldownDetector.h`
 - `src/VideoProcessor-Lib/vprenderer/AlphaQueuePolicy.h`
 - `src/VideoProcessor-GUI/VideoProcessorDlg.cpp`
+- `src/VP-V/modules/input/queue_timing/VpQueueRules.h`
+- `src/VP-V/modules/input/queue_timing/VpFixedBudgetPolicy.h`
+- `src/VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h`
+- `src/VideoProcessor-Lib/vprenderer/QueueTimingPolicy.h`
+- `src/VideoProcessor-Lib/vprenderer/QueueLookaheadWalk.h`
+
+Forwarding headers (old paths kept for Bill's files, the renderer host and RendererCaptureHarnessTests.cpp; removed at M2 step 0):
+
+- `src/VideoProcessor-Lib/QueueLatency.h`
+- `src/VideoProcessor-Lib/QueueLookahead.h`
+- `src/VideoProcessor-Lib/vprenderer/PulldownDetector.h`
 
 ## Migration directive
 

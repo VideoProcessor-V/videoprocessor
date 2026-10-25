@@ -19,7 +19,7 @@
 #include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <GeneralRate.h>
-#include <QueueLatency.h>
+#include <VP-V/modules/input/queue_timing/QueueLatency.h>
 #include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <RefreshKey.h>
 #include <LiveEpochConvergenceController.h>

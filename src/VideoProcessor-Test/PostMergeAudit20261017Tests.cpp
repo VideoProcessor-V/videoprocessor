@@ -5,7 +5,7 @@
 #include <video_frame_formatter/IVideoFrameFormatter.h>
 #include <vprenderer/AdaptiveDownscale.h>
 #include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
-#include <vprenderer/PulldownDetector.h>
+#include <VP-V/modules/input/queue_timing/PulldownDetector.h>
 
 #include <cmath>
 #include <string>

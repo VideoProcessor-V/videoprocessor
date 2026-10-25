@@ -14,7 +14,7 @@
 // Pure: no renderer, GPU or capture types (the observer feeds it).
 
 #include <IntentDescriptor.h>
-#include <vprenderer/PulldownDetector.h>
+#include <VP-V/modules/input/queue_timing/PulldownDetector.h>
 
 #include <algorithm>
 #include <cmath>
