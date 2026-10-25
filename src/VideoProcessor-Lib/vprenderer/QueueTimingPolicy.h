@@ -86,6 +86,9 @@ namespace QueueTimingPolicy
 		bool timelineActive = false;       // a presentation timeline steers the queue itself
 		bool fileFrame = false;            // the head is a file frame (paced by its own due time)
 		int64_t arrivalQpc = 0;            // capture arrival, normalised to the frame's START (0 = unknown)
+		// arrivalQpc is a capture card's FRAME-START time: the frame is fully received one transfer
+		// later. False for a callback / enqueue / derived time (the frame is already received).
+		bool arrivalIsFrameStart = false;
 		int64_t enqueueQpc = 0;
 		int64_t nowQpc = 0;
 		int64_t qpcFrequency = 0;
@@ -117,6 +120,7 @@ namespace QueueTimingPolicy
 		size_t target = 0;                 // QueueTarget()
 		double oldestQueuedAgeMs = 0.0;    // front frame's age since ENQUEUE
 		double headArrivalAgeMs = -1.0;    // front frame's age since its START (arrival); < 0 unknown
+		bool headArrivalIsFrameStart = false;   // the front frame's arrival is a hardware frame-start time
 		double renderCycleMs = 0.0;
 		double captureRateHz = 0.0;        // the signal's nominal rate (upstream's input)
 		double measuredSignalRateHz = 0.0; // measured signal rate (0 = unknown)
