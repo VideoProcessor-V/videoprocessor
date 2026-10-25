@@ -1,5 +1,104 @@
+diff --git a/docs/design/components-master.json b/docs/design/components-master.json
+index 0b9ac3f1..b100ee2e 100644
+--- a/docs/design/components-master.json
++++ b/docs/design/components-master.json
+@@ -887,6 +887,7 @@
+           "dither_grain_tolerance_scale",
+           "dither_vectors",
+           "dithering",
++          "output_segments_merged",
+           "sigma_delta"
+         ],
+         "upstream_modules": [
+diff --git a/docs/design/slots.json b/docs/design/slots.json
+index 8c3b4cd5..b221d765 100644
+--- a/docs/design/slots.json
++++ b/docs/design/slots.json
+@@ -1554,7 +1554,8 @@
+         "sigma_delta",
+         "dithering",
+         "dither_vectors",
+-        "dither_grain_tolerance_scale"
++        "dither_grain_tolerance_scale",
++        "output_segments_merged"
+       ],
+       "planned_keys": [],
+       "tiers": "Classic libplacebo dither; Low..Upper sigma-delta",
+@@ -1582,7 +1583,8 @@
+       "original_pathway": {
+         "mode": "upstream form",
+         "settings": {
+-          "temporal_dither": "libplacebo"
++          "temporal_dither": "libplacebo",
++          "output_segments_merged": "off"
+         }
+       },
+       "zone": "quantise",
+diff --git a/src/VP-V/core/OriginalPathway.h b/src/VP-V/core/OriginalPathway.h
+index a20eab56..fad9f9db 100644
+--- a/src/VP-V/core/OriginalPathway.h
++++ b/src/VP-V/core/OriginalPathway.h
+@@ -25,9 +25,9 @@ namespace OriginalPathway
+ 		const char* slot;   // the slot whose VP additions it removes (slots.json id)
+ 	};
+ 
+-	inline const std::array<Override, 56>& Overrides()
++	inline const std::array<Override, 57>& Overrides()
+ 	{
+-		static const std::array<Override, 56> table = { {
++		static const std::array<Override, 57> table = { {
+ 			{ "capture_path", "standard", "input.capture" },
+ 			{ "capture_upload", "render", "input.capture" },
+ 			{ "native_rgb_ingest", "off", "input.capture" },
+@@ -75,6 +75,7 @@ namespace OriginalPathway
+ 			{ "intent_black", "off", "control.config" },
+ 			{ "ambient_adapt", "off", "control.config" },
+ 			{ "temporal_dither", "libplacebo", "output.dither" },
++			{ "output_segments_merged", "off", "output.dither" },   // VP's merged output hooks: never in Bill's pathway
+ 			{ "render_ahead", "off", "output.presentation" },
+ 			{ "calibration_lut_stage", "libplacebo", "output.calibration_lut" },
+ 			// Settings audit 2026-10-24: VP additions the first table missed (absent from Bill's v1.4.02-beta).
+diff --git a/src/VP-V/modules/output/dither/MANIFEST.json b/src/VP-V/modules/output/dither/MANIFEST.json
+index 15ba4fd5..9356cfa2 100644
+--- a/src/VP-V/modules/output/dither/MANIFEST.json
++++ b/src/VP-V/modules/output/dither/MANIFEST.json
+@@ -27,6 +27,7 @@
+       "dither_grain_tolerance_scale",
+       "dither_vectors",
+       "dithering",
++      "output_segments_merged",
+       "sigma_delta"
+     ],
+     "upstream_modules": [
+diff --git a/src/VP-V/tests/PipelineSkeletonTests.cpp b/src/VP-V/tests/PipelineSkeletonTests.cpp
+index 2ed3092e..0ce6a525 100644
+--- a/src/VP-V/tests/PipelineSkeletonTests.cpp
++++ b/src/VP-V/tests/PipelineSkeletonTests.cpp
+@@ -665,7 +665,8 @@ namespace PipelineSkeletonTestsNs
+ 			}
+ 			// Settings audit 2026-10-24: the VP additions the first table missed are switched off too.
+ 			for (const char* key : { "active_picture_startup_hold", "low_bitrate_handling", "ssim_residual_stabilise",
+-				"cnn_residual_stabilise", "residual_stabilise_grain_guard", "dejudder_estimate_ahead", "interpolation_fallback" })
++				"cnn_residual_stabilise", "residual_stabilise_grain_guard", "dejudder_estimate_ahead", "interpolation_fallback",
++				"output_segments_merged" })
+ 				Assert::IsTrue(keys.count(key) == 1, W(std::string(key) + " is not in the Original pathway").c_str());
+ 		}
+ 
+diff --git a/src/VideoProcessor-Lib/RendererProfileConfig.h b/src/VideoProcessor-Lib/RendererProfileConfig.h
+index 919bb7f5..fc638523 100644
+--- a/src/VideoProcessor-Lib/RendererProfileConfig.h
++++ b/src/VideoProcessor-Lib/RendererProfileConfig.h
+@@ -699,6 +699,8 @@ namespace RendererProfileConfig
+ 			if (key == "occlusion_mask") return IsChoice(value, { "on", "off" });
+ 			// 6d: the extras warp A's rendered picture, or a warped source.
+ 			if (key == "dejudder_warp_stage") return IsChoice(value, { "rendered", "source" });
++			// Output segments S2/S3 as one PRE_OUTPUT + one OUTPUT hook (draft, default off).
++			if (key == "output_segments_merged") return IsChoice(value, { "on", "off" });
+ 			// Refinements (docs/VP-build-plan-refinements.md): D1 global prior,
+ 			// D3 vector smoothing, D5 occlusion fill; D2 motion-scaled strength
+ 			// (source px per source frame, hi 0 = off); D4 trust-adaptive
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index 421901fb..fdd468c9 100644
+index 421901fb..5fde9c75 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 @@ -86,6 +86,7 @@
@@ -36,7 +135,15 @@ index 421901fb..fdd468c9 100644
  		{
  			if (!tryChoice(toggle.first, raw))
  				continue;
-@@ -8030,6 +8034,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -3578,6 +3582,7 @@ namespace
+ 		settings.intentBlack = BlackIntentMode::Off;       // key=intent_black
+ 		settings.ambientAdapt = false;                     // key=ambient_adapt
+ 		settings.temporalDither = "libplacebo";            // key=temporal_dither
++		settings.outputSegmentsMerged = false;             // key=output_segments_merged
+ 		settings.renderAhead = false;                      // key=render_ahead
+ 		settings.calibrationLutStage = "libplacebo";       // key=calibration_lut_stage
+ 		// Settings audit 2026-10-24: VP additions the first table missed (absent from Bill's v1.4.02-beta).
+@@ -8030,6 +8035,7 @@ struct LibplaceboVideoRenderer::Impl
  	OutputSegments::OutputColourSegment outputColour{ sdrToneShape, dvTrimsHook, ledMeasurement, ledCompensation, calibrationLutStage };
  	OutputSegments::OutputFinishSegment outputFinish{ outputEncodingRepair, occlusionMaskHook };
  	std::vector<const pl_hook*> userFrameHooks;   // the S2 edge: the user's shaders this frame
@@ -44,7 +151,7 @@ index 421901fb..fdd468c9 100644
  	bool calibrationLutStageLogged = false;
  	bool calibrationLutStageFailed = false;   // the VP stage failed once: libplacebo's target LUT for the session
  	std::vector<std::string> activeCustomShaders;
-@@ -8969,6 +8974,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -8969,6 +8975,7 @@ struct LibplaceboVideoRenderer::Impl
  				if (rebaseDispatch) pl_dispatch_destroy(&rebaseDispatch);
  				extendedRangeHooks.Release();   // Stage 10: its textures
  				calibrationLutStage.Release();  // R1: the VP calibration stage's LUT texture
@@ -52,7 +159,7 @@ index 421901fb..fdd468c9 100644
  				dejudderOutput.Release();
  				dejudderOutputSwapchain = nullptr;
  				dejudderExtraIds.clear();
-@@ -18089,6 +18095,10 @@ struct LibplaceboVideoRenderer::Impl
+@@ -18089,6 +18096,10 @@ struct LibplaceboVideoRenderer::Impl
  			timedParams.info_callback = DitherExtraPassCallback;
  			timedParams.info_priv = &ditherTotals;
  			extraParams = &timedParams;
@@ -63,7 +170,7 @@ index 421901fb..fdd468c9 100644
  			pl_frame target = *f.target;
  			if (renderedCrop)
  			{
-@@ -25084,6 +25094,13 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25084,6 +25095,13 @@ struct LibplaceboVideoRenderer::Impl
          // Bug hunt 2026-10-17: the retry withdraws the failed NLS hook from
          // frameHooks itself (a member), so frameParams - read again by the
          // de-judder extras - never points at a list local to the recovery.
@@ -77,7 +184,7 @@ index 421901fb..fdd468c9 100644
          const auto hookRender = NlsHookRecovery::RenderOwned(renderer, d3d11->gpu,
              renderImage, target, baseTarget, frameParams, frameHooks, submittedNls, [&]()
              {
-@@ -25108,6 +25125,8 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25108,6 +25126,8 @@ struct LibplaceboVideoRenderer::Impl
                  occlusionMaskHook.SetFrame(nullptr, renderImage.crop, linearFallbackCrop);
                  assembleOverlays();
              }, [&](const pl_frame& source, const pl_frame& destination, pl_render_params& parameters) {
@@ -86,7 +193,7 @@ index 421901fb..fdd468c9 100644
                  // Stage 12 step A: the planes libplacebo samples, re-based.
                  pl_frame frame = source;
                  // Stage B: the picture at this refresh's phase in place of A's planes (a
-@@ -25236,7 +25255,20 @@ struct LibplaceboVideoRenderer::Impl
+@@ -25236,7 +25256,20 @@ struct LibplaceboVideoRenderer::Impl
              renderParams.num_hooks = 0;
          }
          {
