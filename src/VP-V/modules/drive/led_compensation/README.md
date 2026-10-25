@@ -160,21 +160,15 @@ Chain tests:
 Code location: **partly migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
 - `src/VP-V/modules/drive/led_compensation/LedDriveModule.cpp`
-- `src/VP-V/modules/drive/led_compensation/LedDriveModule.h`
 - `src/VP-V/modules/drive/led_compensation/LedDriveHoldover.cpp`
-- `src/VP-V/modules/drive/led_compensation/LedDriveHoldover.h`
 - `src/VP-V/modules/drive/led_compensation/LedController.cpp`
 - `src/VP-V/modules/drive/led_compensation/LedController.h`
 - `src/VP-V/modules/drive/led_compensation/LedRawTransfer.cpp`
-- `src/VP-V/modules/drive/led_compensation/LedRawTransfer.h`
 - `src/VP-V/modules/drive/led_compensation/LedDriveConfig.h`
 - `shaders/LED compensation.glsl`
 
 Forwarding headers at the legacy path (early migration, removed in M2; they only keep files on active branches building, new code includes the `<VP-V/...>` path):
 
-- `src/VP-V/modules/drive/led_compensation/LedDriveHoldover.h`
-- `src/VP-V/modules/drive/led_compensation/LedDriveModule.h`
-- `src/VP-V/modules/drive/led_compensation/LedRawTransfer.h`
 - `src/VideoProcessor-Lib/led/LedDriveConfig.h`
 
 `shaders/LED compensation.glsl` stays in the runtime shader folder.
