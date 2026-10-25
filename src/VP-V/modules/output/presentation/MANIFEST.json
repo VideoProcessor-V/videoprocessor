@@ -27,6 +27,7 @@
     },
     "tools": [],
     "config_keys": [
+      "dejudder_gate",
       "render_ahead",
       "render_ahead_queue_credit",
       "render_ahead_utilisation"

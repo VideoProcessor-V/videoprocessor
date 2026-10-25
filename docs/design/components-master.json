@@ -124,20 +124,27 @@
         },
         "tools": [],
         "config_keys": [
-          "low_latency",
+          "active_picture_lookahead_frames",
+          "cadence_class_fixes",
+          "general_rate_fixes",
           "low_latency_path",
           "pulldown_fixes",
           "queue_auto_reset",
-          "queue_recovery",
           "queue_size",
           "queue_timing_fixes",
-          "target_latency_ms"
+          "reset_after_render_restart_seconds",
+          "reset_queue_too_large_percent",
+          "startup_preroll_frames",
+          "target_frames",
+          "target_latency_ms",
+          "timing_continuity_fixes",
+          "use_frame_queue"
         ],
         "upstream_modules": [
           "input.capture"
         ]
       },
-      "fallback_when_missing": "With 2-3 frames available, every look-ahead consumer shortens its look-ahead or falls back; the delay never changes."
+      "fallback_when_missing": "The 4/3/2 ladder shortens the look-ahead when the budget cannot hold 4 frames (\"look-ahead\"); an infeasible budget, unknown display refresh or a queue_size cut falls back to the frame-count queue (\"delay budget\"). The total delay never changes silently."
     },
     {
       "slot": "input.source_analysis",
@@ -465,7 +472,16 @@
           "optional": []
         },
         "tools": [],
-        "config_keys": [],
+        "config_keys": [
+          "dejudder_even_rates",
+          "dejudder_strength",
+          "dejudder_strength_even",
+          "general_rate_fixes",
+          "motion_engine",
+          "motion_history_fixes",
+          "occlusion_mask",
+          "timing_continuity_fixes"
+        ],
         "upstream_modules": [
           "motion.estimation",
           "scaling.rebase",
@@ -473,7 +489,7 @@
           "scaling.geometry"
         ]
       },
-      "fallback_when_missing": "Invalid geometry map -> vectors invalid -> consumers fall back."
+      "fallback_when_missing": "No entry of its own: invalid vectors make every consumer take its no-motion form (by design, not a downgrade). Engine/matcher downgrades are motion.estimation's entry."
     },
     {
       "slot": "motion.consumers",
@@ -505,19 +521,47 @@
         },
         "tools": [],
         "config_keys": [
-          "dejudder_hold",
+          "cadence_class_fixes",
+          "dejudder_block_taper",
+          "dejudder_estimate_ahead",
+          "dejudder_even_rates",
+          "dejudder_frame_trust",
+          "dejudder_hold_feather_px",
+          "dejudder_hold_hysteresis",
+          "dejudder_landing_check",
+          "dejudder_motion_rolloff",
+          "dejudder_motion_scale_hi",
+          "dejudder_motion_scale_lo",
+          "dejudder_object_strength",
+          "dejudder_occlusion_fill",
+          "dejudder_pixel_trust",
+          "dejudder_pixel_trust_hi",
+          "dejudder_pixel_trust_lo",
+          "dejudder_roll_floor",
+          "dejudder_roll_hi",
+          "dejudder_roll_lo",
+          "dejudder_source_warp_filter",
           "dejudder_strength",
+          "dejudder_strength_even",
+          "dejudder_taper_sad",
+          "dejudder_trust_scale",
+          "dejudder_warp_stage",
           "dither_vectors",
           "frame_mixer",
+          "general_rate_fixes",
           "interpolation",
           "interpolation_fallback",
-          "smooth_motion"
+          "interpolation_fill_gaps",
+          "interpolation_grain",
+          "occlusion_mask",
+          "smooth_motion",
+          "source_class"
         ],
         "upstream_modules": [
           "motion.vector_delivery"
         ]
       },
-      "fallback_when_missing": "Each consumer falls back as the vector rules say."
+      "fallback_when_missing": "Each consumer falls back as the vector rules say; the visible entries today are \"entrance once fill\" / \"entrance once\" (B3) and \"look-ahead\" (short queue). Warp/interpolation failures are log/status only (findings doc)."
     },
     {
       "slot": "scaling.geometry",
@@ -929,6 +973,7 @@
         },
         "tools": [],
         "config_keys": [
+          "dejudder_gate",
           "render_ahead",
           "render_ahead_queue_credit",
           "render_ahead_utilisation"

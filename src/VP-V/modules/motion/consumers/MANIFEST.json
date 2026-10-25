@@ -38,18 +38,46 @@
     },
     "tools": [],
     "config_keys": [
-      "dejudder_hold",
+      "cadence_class_fixes",
+      "dejudder_block_taper",
+      "dejudder_estimate_ahead",
+      "dejudder_even_rates",
+      "dejudder_frame_trust",
+      "dejudder_hold_feather_px",
+      "dejudder_hold_hysteresis",
+      "dejudder_landing_check",
+      "dejudder_motion_rolloff",
+      "dejudder_motion_scale_hi",
+      "dejudder_motion_scale_lo",
+      "dejudder_object_strength",
+      "dejudder_occlusion_fill",
+      "dejudder_pixel_trust",
+      "dejudder_pixel_trust_hi",
+      "dejudder_pixel_trust_lo",
+      "dejudder_roll_floor",
+      "dejudder_roll_hi",
+      "dejudder_roll_lo",
+      "dejudder_source_warp_filter",
       "dejudder_strength",
+      "dejudder_strength_even",
+      "dejudder_taper_sad",
+      "dejudder_trust_scale",
+      "dejudder_warp_stage",
       "dither_vectors",
       "frame_mixer",
+      "general_rate_fixes",
       "interpolation",
       "interpolation_fallback",
-      "smooth_motion"
+      "interpolation_fill_gaps",
+      "interpolation_grain",
+      "occlusion_mask",
+      "smooth_motion",
+      "source_class"
     ],
     "upstream_modules": [
       "motion.vector_delivery"
     ]
   },
-  "fallback_when_missing": "Each consumer falls back as the vector rules say.",
-  "fallback_entry": "Motion consumers: no-motion form (vectors invalid / short queue)"
+  "fallback_when_missing": "Each consumer falls back as the vector rules say; the visible entries today are \"entrance once fill\" / \"entrance once\" (B3) and \"look-ahead\" (short queue). Warp/interpolation failures are log/status only (findings doc).",
+  "fallback_entry": null
 }
