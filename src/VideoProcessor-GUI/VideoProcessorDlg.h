@@ -331,13 +331,13 @@ public:
 	void OnCommandCaptureRenderedOutput();
 	// Report-a-problem (StateReport.h): the state_report shortcut and the
 	// system-menu item. trigger: "hotkey", "menu" or "auto:<reason>".
-	void OnCommandStateReport();
 	void SaveStateReport(const char* trigger);
+	// VP-V (WP-11): VP's shortcuts, dispatched by src/VP-V/gui/VpStatusAdapter.h.
+	afx_msg void OnVpCommand(UINT commandId);
 	// auto_report: a report on a recovery reset or render stall, rate-limited.
 	void MaybeAutoReport(const char* reason);
 	void RecordDiagnosticStats(double sourceHz, double displayHz);
 	void ShowStateReportToast(const std::string& value);
-	void OnCommandRawCaptureToggle();
 	void OnCommandDvCompareCapture();   // feat/dv-l8 WIP
 	void OnCommandCaptureAnalysisDiagnostics(bool includeFrames);
 	void OnCommandConfigEditor();
@@ -736,7 +736,7 @@ protected:
 	// and the ids already announced by a one-time notice this session.
 	std::string m_lastFallbacksHeading;
 	FallbackStatus::Notices m_fallbackNotices;
-	void UpdateFallbacksStatus();
+	void UpdateFallbacksStatus(const std::string& heading);
 	void ShowFallbackNotice(const std::string& id, const std::string& heading);
 	std::string m_intentLogKeys[4];             // the last logged state per function
 	void UpdateIntentInterpreter();

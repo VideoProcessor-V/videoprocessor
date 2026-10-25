@@ -246,6 +246,7 @@
   <ItemGroup><ClCompile Include="..\VP-V\nets\NetPackage.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\nets\GlslMini.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\nets\CpuNetExecutor.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\tests\StatusTextTests.cpp"><Filter>VP-V</Filter></ClCompile><ClCompile Include="..\VP-V\tests\VpStatusAdapterTests.cpp"><Filter>VP-V</Filter></ClCompile><ClCompile Include="ModuleStatusTextTests.cpp" /></ItemGroup>
   <ItemGroup><ClCompile Include="TextureRestoreTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvTrimSelectionTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvDolbyStyleTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>

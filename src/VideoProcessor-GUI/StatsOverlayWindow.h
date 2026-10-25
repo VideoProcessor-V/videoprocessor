@@ -14,6 +14,15 @@
 #include <mutex>
 #include <vector>
 
+// A row added to the overlay without a dedicated field (a renderer module's or a plug-in's status
+// line): drawn as `label` in the label column and `value` beside it, or `value` alone when the
+// label is empty.
+struct StatsExtraRow
+{
+	CString label;
+	CString value;
+};
+
 // Simple stats data structure - no complex types that need initialization
 struct StatsData
 {
@@ -29,13 +38,9 @@ struct StatsData
 	CString colorspace;        // e.g., "BT.2020"
 	CString pixelFormat;       // e.g., "P010"
 	CString viewport;          // e.g., "cinema (2.35:1)"
-	CString keyOverrides;      // delta 6: what a key changed against the saved settings
-	CString room;              // Stage 9: room lights (empty when off)
-	CString content;           // content intent: class and source (empty when off)
-	CString motionIntent;      // intent interpreter items 2-5 (empty when off)
-	CString ambientIntent;
-	CString blackIntent;
-	CString displayIntent;
+	// Extension rows, in order: after "Shader Rule:" and after the active shader list.
+	std::vector<StatsExtraRow> extraRowsAfterShaderRule;
+	std::vector<StatsExtraRow> extraRowsAfterShaders;
 	CString rendererName;      // selected presentation backend
 	CString surfaceMode;       // actual presentation host: fullscreen or windowed
 
@@ -87,8 +92,6 @@ struct StatsData
 	double scheduledLatencyMs = 0.0;
 	bool presentationTargetTimingKnown = false;
 	CString presentationTimingStatus;
-	CString dejudderStatus;    // VP Renderer de-judder / occlusion mask line (empty = off)
-	CString fallbacksStatus;   // r6 fix 7: "Fallbacks engaged: <list> / none" (empty = renderer without it)
 	double presentationTargetLeadMs = 0.0;
 	double captureToPresentationTargetMs = 0.0;
 

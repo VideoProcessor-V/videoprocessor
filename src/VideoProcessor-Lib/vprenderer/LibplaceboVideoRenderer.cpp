@@ -5,6 +5,7 @@
 #include <vprenderer/FeatureTextureIdle.h>  // VP: efficiency audit 2026-10-24 #8b
 #include <vprenderer/PassTimerHook.h>       // VP: efficiency timers (audit 2026-10-24 section 4)
 #include <vprenderer/GpuSpanTimers.h>       // VP: efficiency timers T2 (entrance stages)
+#include <VP-V/core/StatusText.h>       // VP-V: the generic module status, module "vp" (WP-11)
 #include <GeneralRateLog.h>
 #include <RefreshKey.h>
 #include <MotionValidity.h>
@@ -28854,6 +28855,25 @@ bool LibplaceboVideoRenderer::GetFallbacksStatus(CString& status) const
 		return false;
 	status = CString(m_impl->fallbacks.Heading().c_str());
 	return true;
+}
+
+// VP-V (WP-11): the renderer's VP lines through the generic module status entry; the keys and
+// format live in src/VP-V/core/StatusText.h, the lines come from the getters above.
+bool LibplaceboVideoRenderer::GetModuleStatus(const char* module, CString& status) const
+{
+	std::wstring text;
+	const bool answered = VpStatusText::RendererModuleStatus<wchar_t>(module,
+		[this](VpStatusText::RendererLines<wchar_t>& lines)
+		{
+			CString line;   // read after each getter (argument order is unspecified)
+			const auto take = [&line](VpStatusText::Line<wchar_t>& to, bool known) { to.Set(known, line.GetString()); };
+			take(lines.dejudder, GetDejudderStatus(line));
+			take(lines.fallbacks, GetFallbacksStatus(line));
+			take(lines.ledDrive, GetLedDriveStatus(line));
+			take(lines.sourceResolution, GetSourceResolutionStatus(line));
+		}, text);
+	status = text.c_str();
+	return answered;
 }
 
 // feat/dv-l8 WIP (plugin API 43): the dv_compare_capture shortcut (DvCompareCapture.h).

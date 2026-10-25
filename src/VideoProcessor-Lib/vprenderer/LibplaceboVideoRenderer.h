@@ -154,6 +154,8 @@ public:
 	bool GetFallbacksStatus(CString& status) const override;
 	bool ToggleDvCompareCapture(CString& status) override;   // feat/dv-l8 WIP (plugin API 43)
 	void SetQueueDelayBudget(int totalMs) override;
+	// VP-V (WP-11): VP's status lines through the generic entry (module "vp").
+	bool GetModuleStatus(const char* module, CString& status) const override;
 	bool GetLedDriveStatus(CString& status) const override;
 	bool GetSourceResolutionStatus(CString& status) const override;
 	bool SuspendLedDriveForTest(CString& reason) override;
