@@ -76,11 +76,11 @@ Markers: `TODO`, `WIP` (branch + last commit + the resume step), `VERIFY` (code 
 | WP-2c | Verify chore/early-migrations | TODO | chore/early-migrations (migrate) | 5d5390bd | step 1 |
 | WP-2d | Verify fix/vpscalerender-motion | TODO | fix/vpscalerender-motion (motion-harness) | 2f8fb24c | step 1 |
 | WP-2e | Verify feat/net-runner (PlNetRunner, fused) | TODO | feat/net-runner (nets) | 5805e928 | step 1 |
-| WP-3 | Merge helpers into `integ/batch1` | WIP | integ/batch1 (integ-batch1) | - | merge 1 (feat/dv-l8 f22d9f19) |
-| WP-4 | Silent-fallback call sites | TODO | integ/batch1 | - | step 1 |
-| WP-5 | Byte-identical efficiency fixes + timers | TODO | perf/byte-identical (efficiency-fixes) | af7a8985 + uncommitted | step 1 |
-| WP-6 | Output segments S2/S3 | TODO | feat/segment-runner (segments) | d0212534 + uncommitted | step 1 |
-| WP-7 | Motion/timing extraction + queue policy interface | TODO | feat/motion-timing-extract (motion-timing) | c3e45812 + uncommitted | step 1 |
+| WP-3 | Merge helpers into `integ/batch1` | VERIFY | integ/batch1 (integ-batch1) | 43ebff50 | merges 1-5 + follow-ups built (x64 Release 0 errors); targeted 575/576 (the 1 = GPU test VpScaleRenderMotionGpu, owed quiet rerun); full filtered suite running; held: fix/dv-dolby-style-dark (1e3bfd5d) + fix/net-fp16-gate (183251a5) until their GPU checks |
+| WP-4 | Silent-fallback call sites | VERIFY | integ/batch1 | 64ab319b (+ modularity fixes 38badcb0) | group A merge audit, then build + targeted + full suite with perf + segments |
+| WP-5 | Byte-identical efficiency fixes + timers | BLOCKED | perf/byte-identical (efficiency-fixes) | c245c003 | modularity FIX FIRST (efficiency_fixes gating); then merge + efficiency-callsites.patch in group A |
+| WP-6 | Output segments S2/S3 | BLOCKED | feat/segment-runner (segments) | 8a6d2045 | modularity LOWs + patches regenerated on 38badcb0; then group A |
+| WP-7 | Motion/timing extraction + queue policy interface | TODO | feat/m2-motion supersedes feat/motion-timing-extract (retired) | - | group B |
 | WP-23 | VP frame analysis store (FAS): interface, producer, consumer migration | TODO | feat/frame-analysis-store (fas) | - | step 1 |
 | WP-8 | S1 entrance segment + small B3 closures | TODO | integ/batch1 | - | step 1 |
 | WP-9 | B3 fallback closure (rest), pre-B3 deletion | TODO | integ/batch1 | - | step 1 |
@@ -774,6 +774,7 @@ so verification is against the batch base.
 | 11b | Frame analysis store: GPU reductions vs CPU reference on captured frames; per-consumer decision equivalence (LED correlation clips, intent set) | 20-30 min | identical decisions; histogram exact; cost recorded |
 | 12 | Timers + VRAM report (efficiency): SlotTiming per stage before/after for S2/S3 merged, early upload, ER one pass; VRAM on the laptop | 20 min | recorded (no pass/fail; owner information); no GPU waits from timers |
 | 13 | On-screen checks needing the coordinator: Ctrl+I/Config status "Fallbacks engaged" surfaces (forced cases), Config click-path for new keys | 20 min | text matches snapshots |
+| 14 | **Slot ON/OFF matrix** (owner 2026-10-25: everything stays modular): every slots.json slot switched off vs on via `pipeline_slots_off`, one at a time, plus the Original pathway; order changes through OrderValidator/SlotContracts; held/placeholder slots (repair A in S1, D in S4/POST_KERNEL, chroma, 8K, any slots.json placeholder) present in the registry and the Config pipeline page | 45-60 min | slot off = byte-identical to the chain without it (frozen-b3base for the default chain); placeholders byte-identical and zero cost (SlotTiming 0 passes); Original pathway byte-identical to the Original reference; invalid orders refused visibly |
 
 - **Total:** ~8-11 h wall clock, serial, one laptop. Split across two sessions if needed: steps
   1-7 (no timing) can run on one day, steps 8-13 on another, provided no code changes between them
