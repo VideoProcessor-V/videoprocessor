@@ -1085,6 +1085,7 @@ namespace RendererProfileConfig
 		// order never runs), slot-level switches and where the calibration LUT runs (R1).
 		if (key == "pipeline_original_pathway") return IsChoice(value, { "on", "off" });
 		if (key == "pipeline_entrance_once") return IsChoice(value, { "on", "off" });   // B3 (ADR-0024)
+		if (key == "entrance_gpu_drain") return IsChoice(value, { "off", "flush", "finish" });   // expert workaround
 		if (key == "pipeline_order" || key == "pipeline_slots_off")
 			return value.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_.,;> ") == std::string::npos;
 		if (key == "calibration_lut_stage") return IsChoice(value, { "libplacebo", "vp" });
@@ -2108,7 +2109,7 @@ namespace RendererProfileConfig
 			for (const auto& value : *vpvValues)
 			{
 				static const char* const vpvKeys[] = { "pipeline_original_pathway", "pipeline_order",
-					"pipeline_slots_off", "calibration_lut_stage", "pipeline_entrance_once" };
+					"pipeline_slots_off", "calibration_lut_stage", "pipeline_entrance_once", "entrance_gpu_drain" };
 				bool known = false;
 				for (const char* key : vpvKeys) known = known || value.first == key;
 				if (!known)
