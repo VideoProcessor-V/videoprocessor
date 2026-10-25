@@ -22,9 +22,6 @@
     "src/VP-V/modules/drive/led_compensation/DynamicDriveFrame.h"
   ],
   "forwarding_headers": [
-    "src/VideoProcessor-Lib/led/LedDriveHoldover.h",
-    "src/VideoProcessor-Lib/led/LedDriveModule.h",
-    "src/VideoProcessor-Lib/led/LedRawTransfer.h",
     "src/VideoProcessor-Lib/led/LedDriveConfig.h"
   ],
   "components": {

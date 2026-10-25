@@ -172,9 +172,9 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 
 Forwarding headers at the legacy path (early migration, removed in M2; they only keep files on active branches building, new code includes the `<VP-V/...>` path):
 
-- `src/VideoProcessor-Lib/led/LedDriveHoldover.h`
-- `src/VideoProcessor-Lib/led/LedDriveModule.h`
-- `src/VideoProcessor-Lib/led/LedRawTransfer.h`
+- `src/VP-V/modules/drive/led_compensation/LedDriveHoldover.h`
+- `src/VP-V/modules/drive/led_compensation/LedDriveModule.h`
+- `src/VP-V/modules/drive/led_compensation/LedRawTransfer.h`
 - `src/VideoProcessor-Lib/led/LedDriveConfig.h`
 
 `shaders/LED compensation.glsl` stays in the runtime shader folder.

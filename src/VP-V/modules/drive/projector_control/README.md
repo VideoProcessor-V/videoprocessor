@@ -148,7 +148,7 @@ Forwarding headers at the legacy path (early migration, removed in M2; they only
 
 - `src/VideoProcessor-Lib/led/ConnectionTest.h`
 - `src/VideoProcessor-Lib/led/SerialPort.h`
-- `src/VideoProcessor-Lib/led/LedDriveArbiter.h`
+- `src/VP-V/modules/drive/projector_control/LedDriveArbiter.h`
 
 ## Migration directive
 

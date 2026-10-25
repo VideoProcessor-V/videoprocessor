@@ -16,8 +16,8 @@
 #include "RepeatReusePolicy.h"
 #include "TemporalShaders.h"
 
-#include <vprenderer/RenderedWarp.h>
-#include <vprenderer/OutputEncodingRepair.h>
+#include <VP-V/modules/motion/consumers/RenderedWarp.h>
+#include <VP-V/modules/output/dither/OutputEncodingRepair.h>
 
 #include <libplacebo/renderer.h>
 #include <libplacebo/shaders/custom.h>

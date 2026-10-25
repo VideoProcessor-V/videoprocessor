@@ -25,29 +25,23 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/StateReport.cpp` | `src/VP-V/modules/control/diagnostics/StateReport.cpp` | 259cfa50 |  |
 | `src/VideoProcessor-Lib/StateReport.h` | `src/VP-V/modules/control/diagnostics/StateReport.h` | 259cfa50 |  |
 | `src/VideoProcessor-Lib/StateReportSettings.h` | `src/VP-V/modules/control/diagnostics/StateReportSettings.h` | 259cfa50 |  |
-| `src/VideoProcessor-Lib/StoreZipWriter.h` | `src/VP-V/modules/control/diagnostics/StoreZipWriter.h` | 270a593e | fwd |
 | `src/VideoProcessor-Lib/led/LedController.cpp` | `src/VP-V/modules/drive/led_compensation/LedController.cpp` | c543f69a |  |
 | `src/VideoProcessor-Lib/led/LedController.h` | `src/VP-V/modules/drive/led_compensation/LedController.h` | c543f69a |  |
 | `src/VideoProcessor-Lib/led/LedDriveConfig.h` | `src/VP-V/modules/drive/led_compensation/LedDriveConfig.h` | c543f69a | fwd |
 | `src/VideoProcessor-Lib/led/LedDriveHoldover.cpp` | `src/VP-V/modules/drive/led_compensation/LedDriveHoldover.cpp` | 9e055034 |  |
-| `src/VideoProcessor-Lib/led/LedDriveHoldover.h` | `src/VP-V/modules/drive/led_compensation/LedDriveHoldover.h` | 9e055034 | fwd |
 | `src/VideoProcessor-Lib/led/LedDriveModule.cpp` | `src/VP-V/modules/drive/led_compensation/LedDriveModule.cpp` | 9e055034 |  |
-| `src/VideoProcessor-Lib/led/LedDriveModule.h` | `src/VP-V/modules/drive/led_compensation/LedDriveModule.h` | 9e055034 | fwd |
 | `src/VideoProcessor-Lib/led/LedRawTransfer.cpp` | `src/VP-V/modules/drive/led_compensation/LedRawTransfer.cpp` | c543f69a |  |
-| `src/VideoProcessor-Lib/led/LedRawTransfer.h` | `src/VP-V/modules/drive/led_compensation/LedRawTransfer.h` | c543f69a | fwd |
 | `src/VideoProcessor-Lib/led/LedLookahead.cpp` | `src/VP-V/modules/drive/led_measure/LedLookahead.cpp` | 9bfb55d6 |  |
 | `src/VideoProcessor-Lib/led/LedLookahead.h` | `src/VP-V/modules/drive/led_measure/LedLookahead.h` | 9bfb55d6 |  |
 | `src/VideoProcessor-Lib/led/LedMeasurement.cpp` | `src/VP-V/modules/drive/led_measure/LedMeasurement.cpp` | 9bfb55d6 |  |
 | `src/VideoProcessor-Lib/led/LedMeasurement.h` | `src/VP-V/modules/drive/led_measure/LedMeasurement.h` | 9bfb55d6 |  |
 | `src/VideoProcessor-Lib/led/LedMeasurementHook.cpp` | `src/VP-V/modules/drive/led_measure/LedMeasurementHook.cpp` | b1fb1c75 |  |
-| `src/VideoProcessor-Lib/led/LedMeasurementHook.h` | `src/VP-V/modules/drive/led_measure/LedMeasurementHook.h` | b1fb1c75 | fwd |
 | `src/VideoProcessor-Lib/led/BarcoAsciiDriver.cpp` | `src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.cpp` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/BarcoAsciiDriver.h` | `src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.h` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/ConnectionTest.cpp` | `src/VP-V/modules/drive/projector_control/ConnectionTest.cpp` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/ConnectionTest.h` | `src/VP-V/modules/drive/projector_control/ConnectionTest.h` | 570b1ee8 | fwd |
 | `src/VideoProcessor-Lib/led/LedClock.h` | `src/VP-V/modules/drive/projector_control/LedClock.h` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/LedDriveArbiter.cpp` | `src/VP-V/modules/drive/projector_control/LedDriveArbiter.cpp` | a5005696 |  |
-| `src/VideoProcessor-Lib/led/LedDriveArbiter.h` | `src/VP-V/modules/drive/projector_control/LedDriveArbiter.h` | a5005696 | fwd |
 | `src/VideoProcessor-Lib/led/LedShutdownRestore.h` | `src/VP-V/modules/drive/projector_control/LedShutdownRestore.h` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/ProjectorDriver.cpp` | `src/VP-V/modules/drive/projector_control/ProjectorDriver.cpp` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/ProjectorDriver.h` | `src/VP-V/modules/drive/projector_control/ProjectorDriver.h` | 570b1ee8 |  |
@@ -72,10 +66,10 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/HdrInference.h` | `src/VP-V/modules/input/signal/HdrInference.h` | a177e22a | fwd |
 | `src/VideoProcessor-Lib/HdrInferenceSignalBuilder.h` | `src/VP-V/modules/input/signal/HdrInferenceSignalBuilder.h` | a177e22a | fwd |
 | `src/VideoProcessor-Lib/HdrVetoCaptureGate.h` | `src/VP-V/modules/input/signal/HdrVetoCaptureGate.h` | a177e22a | fwd |
-| `src/VideoProcessor-Lib/SourceResolutionDetector.cpp` | `src/VP-V/modules/input/source_analysis/SourceResolutionDetector.cpp` | staged |  |
-| `src/VideoProcessor-Lib/SourceResolutionDetector.h` | `src/VP-V/modules/input/source_analysis/SourceResolutionDetector.h` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.cpp` | `src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.h` | `src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.h` | ? | fwd |
+| `src/VideoProcessor-Lib/SourceResolutionDetector.cpp` | `src/VP-V/modules/input/source_analysis/SourceResolutionDetector.cpp` | 14e3962a |  |
+| `src/VideoProcessor-Lib/SourceResolutionDetector.h` | `src/VP-V/modules/input/source_analysis/SourceResolutionDetector.h` | 14e3962a |  |
+| `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.cpp` | `src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.cpp` | 14e3962a |  |
+| `src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.h` | `src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.h` | 14e3962a | fwd |
 | `src/VideoProcessor-Lib/vprenderer/DejudderAhead.h` | `src/VP-V/modules/motion/consumers/DejudderAhead.h` | c64ec0ca | fwd |
 | `src/VideoProcessor-Lib/vprenderer/DejudderWarp.cpp` | `src/VP-V/modules/motion/consumers/DejudderWarp.cpp` | c64ec0ca |  |
 | `src/VideoProcessor-Lib/vprenderer/FrameInterpolator.cpp` | `src/VP-V/modules/motion/consumers/FrameInterpolator.cpp` | c64ec0ca |  |
@@ -103,7 +97,6 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/calibration/ArgyllInstall.h` | `src/VP-V/modules/output/calibration_lut/calibration/ArgyllInstall.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/CalibrationConfig.h` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationConfig.h` | d2517eb1 | fwd |
 | `src/VideoProcessor-Lib/calibration/CalibrationController.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationController.cpp` | d2517eb1 |  |
-| `src/VideoProcessor-Lib/calibration/CalibrationController.h` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationController.h` | d2517eb1 | fwd |
 | `src/VideoProcessor-Lib/calibration/CalibrationOutputs.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationOutputs.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/CalibrationOutputs.h` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationOutputs.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/CalibrationPattern.h` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationPattern.h` | d2517eb1 | fwd |
@@ -114,7 +107,6 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/calibration/CalibrationSession.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationSession.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/CalibrationSession.h` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationSession.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/CalibrationSimulation.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationSimulation.cpp` | d2517eb1 |  |
-| `src/VideoProcessor-Lib/calibration/CalibrationSimulation.h` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationSimulation.h` | d2517eb1 | fwd |
 | `src/VideoProcessor-Lib/calibration/ColorMath.h` | `src/VP-V/modules/output/calibration_lut/calibration/ColorMath.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/ConPtyTerminal.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/ConPtyTerminal.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/DisplayModel.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/DisplayModel.cpp` | d2517eb1 |  |
@@ -130,7 +122,6 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/calibration/MeterCatalog.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/MeterCatalog.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/MeterCatalog.h` | `src/VP-V/modules/output/calibration_lut/calibration/MeterCatalog.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/PatternCodes.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/PatternCodes.cpp` | d2517eb1 |  |
-| `src/VideoProcessor-Lib/calibration/PatternCodes.h` | `src/VP-V/modules/output/calibration_lut/calibration/PatternCodes.h` | d2517eb1 | fwd |
 | `src/VideoProcessor-Lib/calibration/PatternPlan.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/PatternPlan.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/PatternPlan.h` | `src/VP-V/modules/output/calibration_lut/calibration/PatternPlan.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/SimulatedDisplay.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/SimulatedDisplay.cpp` | d2517eb1 |  |
@@ -164,16 +155,16 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/vprenderer/SigmaDeltaDomain.h` | `src/VP-V/modules/output/dither/SigmaDeltaDomain.h` | 4799f96f | fwd |
 | `src/VideoProcessor-Lib/vprenderer/OpenLoopDisplayRate.h` | `src/VP-V/modules/output/presentation/OpenLoopDisplayRate.h` | 05d2a6e4 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/RenderAheadPolicy.h` | `src/VP-V/modules/output/presentation/RenderAheadPolicy.h` | 05d2a6e4 | fwd |
-| `src/VideoProcessor-Lib/vprenderer/VpDebander.cpp` | `src/VP-V/modules/repair/deband/VpDebander.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/VpDebander.h` | `src/VP-V/modules/repair/deband/VpDebander.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/DetailPulse.cpp` | `src/VP-V/modules/repair/texture_restore/DetailPulse.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/DetailPulse.h` | `src/VP-V/modules/repair/texture_restore/DetailPulse.h` | ? | fwd |
-| `src/VideoProcessor-Lib/vprenderer/TextureRestore.cpp` | `src/VP-V/modules/repair/texture_restore/TextureRestore.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/TextureRestore.h` | `src/VP-V/modules/repair/texture_restore/TextureRestore.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/VpDebander.cpp` | `src/VP-V/modules/repair/deband/VpDebander.cpp` | 090b87cf |  |
+| `src/VideoProcessor-Lib/vprenderer/VpDebander.h` | `src/VP-V/modules/repair/deband/VpDebander.h` | 090b87cf | fwd |
+| `src/VideoProcessor-Lib/vprenderer/DetailPulse.cpp` | `src/VP-V/modules/repair/texture_restore/DetailPulse.cpp` | 0a93e340 |  |
+| `src/VideoProcessor-Lib/vprenderer/DetailPulse.h` | `src/VP-V/modules/repair/texture_restore/DetailPulse.h` | 0a93e340 | fwd |
+| `src/VideoProcessor-Lib/vprenderer/TextureRestore.cpp` | `src/VP-V/modules/repair/texture_restore/TextureRestore.cpp` | 0a93e340 |  |
+| `src/VideoProcessor-Lib/vprenderer/TextureRestore.h` | `src/VP-V/modules/repair/texture_restore/TextureRestore.h` | 0a93e340 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.cpp` | `src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp` | f45b4b00 |  |
 | `src/VideoProcessor-Lib/vprenderer/AdaptiveDownscale.h` | `src/VP-V/modules/scaling/output/AdaptiveDownscale.h` | f45b4b00 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/DownscaleLight.h` | `src/VP-V/modules/scaling/output/DownscaleLight.h` | f45b4b00 | fwd |
 | `src/VideoProcessor-Lib/KernelInverse.cpp` | `src/VP-V/modules/scaling/rebase/KernelInverse.cpp` | 648da813 |  |
 | `src/VideoProcessor-Lib/KernelInverse.h` | `src/VP-V/modules/scaling/rebase/KernelInverse.h` | 648da813 | fwd |
-| `src/VideoProcessor-Lib/vprenderer/SourceRebase.cpp` | `src/VP-V/modules/scaling/rebase/SourceRebase.cpp` | staged |  |
-| `src/VideoProcessor-Lib/vprenderer/SourceRebase.h` | `src/VP-V/modules/scaling/rebase/SourceRebase.h` | ? | fwd |
+| `src/VideoProcessor-Lib/vprenderer/SourceRebase.cpp` | `src/VP-V/modules/scaling/rebase/SourceRebase.cpp` | 17536bbc |  |
+| `src/VideoProcessor-Lib/vprenderer/SourceRebase.h` | `src/VP-V/modules/scaling/rebase/SourceRebase.h` | 17536bbc | fwd |

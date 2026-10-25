@@ -14,7 +14,7 @@
 #include <vprenderer/LibplaceboRendererPluginApi.h>
 #include <ConfigFile.h>
 #include <UnifiedProfileRuntime.h>
-#include <QueueLookahead.h>
+#include <VP-V/modules/input/queue_timing/QueueLookahead.h>
 
 #include <algorithm>
 #include <chrono>
@@ -39,9 +39,9 @@
 #include <VP-V/modules/control/diagnostics/RawCaptureCorpus.h>
 #include <DolbyVisionTunnelSourceState.h>
 #include <HDRData.h>
-#include <calibration/CalibrationController.h>
-#include <calibration/CalibrationSimulation.h>
-#include <calibration/PatternCodes.h>
+#include <VP-V/modules/output/calibration_lut/calibration/CalibrationController.h>
+#include <VP-V/modules/output/calibration_lut/calibration/CalibrationSimulation.h>
+#include <VP-V/modules/output/calibration_lut/calibration/PatternCodes.h>
 #include "RealClipLibrary.h"   // B3 real-clip acceptance (decoded clip frames into the harness)
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 

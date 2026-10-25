@@ -28,7 +28,6 @@
     "src/VideoProcessor-Lib/DiagnosticHistory.h",
     "src/VideoProcessor-Lib/vprenderer/RendererDiagnosticCodes.h",
     "src/VideoProcessor-Lib/RawCaptureRecorder.h",
-    "src/VideoProcessor-Lib/StoreZipWriter.h",
     "src/VideoProcessor-Lib/RawCaptureCorpus.h"
   ],
   "components": {

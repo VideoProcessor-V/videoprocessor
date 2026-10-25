@@ -18,10 +18,7 @@
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/calibration/CalibrationConfig.h",
-    "src/VideoProcessor-Lib/calibration/CalibrationController.h",
-    "src/VideoProcessor-Lib/calibration/CalibrationPattern.h",
-    "src/VideoProcessor-Lib/calibration/CalibrationSimulation.h",
-    "src/VideoProcessor-Lib/calibration/PatternCodes.h"
+    "src/VideoProcessor-Lib/calibration/CalibrationPattern.h"
   ],
   "components": {
     "files": {

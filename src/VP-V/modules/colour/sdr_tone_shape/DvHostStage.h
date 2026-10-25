@@ -41,7 +41,7 @@
 #include <VideoFrame.h>
 #include <VideoState.h>
 #include <microsoft_directshow/MadVRShaderLoader.h>
-#include <vprenderer/CustomHookChain.h>
+#include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h>
 #include <VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h>
 #include <VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h>
