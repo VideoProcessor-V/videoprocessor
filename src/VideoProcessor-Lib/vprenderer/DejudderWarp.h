@@ -125,6 +125,9 @@ namespace Dejudder
 		bool estCandidates = false;
 		float estLambda = 0.5f;
 		bool estQpel = false;
+		// Identical blocks (A and B bit-identical) get exactly the zero vector, trusted
+		// (dejudder_est_still_zero; bug hunt 2026-10-25). false: the searches' vectors as before.
+		bool estStillZero = false;
 		bool estGate = false;
 		// E2: blocks whose best search SAD (per sample) exceeds estSplitSad
 		// (0 = matchTolerance) split into four 8x8-source-pixel sub-blocks,
@@ -570,6 +573,7 @@ namespace Dejudder
 		void CollectTimer(const std::string& description, pl_timer timer);
 		bool passDrain = true;
 		MotionWarp* timingParent = nullptr;   // lowRes inner: its passes counted in the outer's maps
+		bool StillZero(pl_tex& fieldTex, pl_tex& scratch, const Planes& a, const Planes& b, int w, int h, int blockPixels, bool subField);
 		bool Dispatch(const char* description, const char* header, const char* body,
 			const struct pl_shader_desc* descriptors, int numDescriptors,
 			const struct pl_shader_var* variables, int numVariables,
@@ -651,6 +655,7 @@ namespace Dejudder
 		pl_tex snapMask = nullptr;
 		pl_tex snapVectorOk = nullptr;
 		bool snapMaskValid = false;
+		pl_tex stillField = nullptr, stillSub = nullptr;   // the identical-block pass's scratch outputs (copied back)
 		pl_tex verifyField = nullptr;   // M5's output, swapped with the field
 		bool holdResetPending = false;  // H2's state cleared at the next Estimate
 		pl_tex pixelMask = nullptr;     // M6: A's half-resolution weights

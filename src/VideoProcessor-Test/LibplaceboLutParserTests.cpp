@@ -5625,6 +5625,89 @@ namespace VideoProcessorTest
 			return settings;
 		}
 
+		TEST_METHOD(DejudderIdenticalFramesGiveExactZeroVectors)
+		{
+			// Bug hunt 2026-10-25: a repeated frame (A and B bit-identical, separate textures) must give
+			// exactly the zero vector in every block, trusted - the estimate left sub-pixel noise vectors
+			// (up to 1.26 px) which the interpolator resampled. A block that changes keeps its search.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 256, height = 128;
+			auto luma = [](int x, int y) { return DejudderTexture(x, y); };
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height, luma, chroma);
+			const DejudderFrame b = MakeDejudderFrame(width, height, luma, chroma);
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			std::string log;
+			fixture.CaptureLog(&log);
+			Dejudder::Settings settings = DejudderTestSettings();
+			settings.estStillZero = true;   // dejudder_est_still_zero (the renderer's default)
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+			Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes), std::wstring(warp.LastError().begin(), warp.LastError().end()).c_str());
+			const DejudderField field = DownloadField(gpu, warp);
+			int nonZero = 0, untrusted = 0;
+			for (int by = 0; by < field.blocksY; ++by)
+				for (int bx = 0; bx < field.blocksX; ++bx)
+				{
+					nonZero += (field.vx(bx, by) != 0.0f || field.vy(bx, by) != 0.0f) ? 1 : 0;
+					untrusted += field.trusted(bx, by) ? 0 : 1;
+				}
+			char line[160];
+			snprintf(line, sizeof(line), "identical frames: %d of %d blocks with a non-zero vector, %d untrusted\n", nonZero, field.blocksX * field.blocksY, untrusted);
+			Logger::WriteMessage(line);
+			Assert::AreEqual(0, nonZero, L"identical blocks give exactly the zero vector");
+			Assert::AreEqual(0, untrusted, L"identical blocks are trusted");
+
+			// Audit F1: one 8x8 sub-block of a 16x16 block changes, its three sibling sub-blocks are
+			// identical. With the split on, the siblings must read exactly (0, 0) through the consumers'
+			// rule (w > 0.5: the sub-block's own vector, else the parent block's).
+			DejudderFrame moved = b;
+			const int bx0 = 64, by0 = 32;   // block (4, 2); its top-left sub-block changes
+			for (int y = by0; y < by0 + 8; ++y)
+				for (int x = bx0; x < bx0 + 8; ++x)
+					moved.luma[static_cast<size_t>(y) * width + x] = static_cast<uint16_t>(DejudderTexture(x + 5, y + 3));
+			DejudderGpuPlanes planesMoved;
+			UploadDejudderFrame(gpu, moved, planesMoved);
+			Dejudder::Settings split = settings;
+			split.estSplit = true;
+			Dejudder::MotionWarp splitWarp(fixture.Log(), gpu, split);
+			Assert::IsTrue(splitWarp.Estimate(planesA.planes, planesMoved.planes), std::wstring(splitWarp.LastError().begin(), splitWarp.LastError().end()).c_str());
+			pl_tex sub = splitWarp.SubField();
+			Assert::IsNotNull(sub, L"the sub-field (est_split)");
+			std::vector<uint16_t> subHalf(static_cast<size_t>(sub->params.w) * sub->params.h * 4);
+			pl_tex_transfer_params subDownload{};
+			subDownload.tex = sub;
+			subDownload.ptr = subHalf.data();
+			Assert::IsTrue(pl_tex_download(gpu, &subDownload), L"sub-field readable");
+			const DejudderField parent = DownloadField(gpu, splitWarp);
+			auto halfToFloat = [](uint16_t h) {
+				const int sign = (h >> 15) & 1, exponent = (h >> 10) & 31, mantissa = h & 1023;
+				const float v = exponent == 0 ? std::ldexp(static_cast<float>(mantissa), -24) :
+					std::ldexp(static_cast<float>(mantissa | 1024), exponent - 25);
+				return sign ? -v : v; };
+			int siblingsWrong = 0;
+			for (int sy = 0; sy < 2; ++sy)
+				for (int sx = 0; sx < 2; ++sx)
+				{
+					if (sx == 0 && sy == 0) continue;   // the changed sub-block
+					const size_t at = (static_cast<size_t>(4 + sy) * sub->params.w + (8 + sx)) * 4;   // sub-block (8 + sx, 4 + sy)
+					const bool own = halfToFloat(subHalf[at + 3]) > 0.5f;
+					const float vx = own ? halfToFloat(subHalf[at]) : parent.vx(4, 2);
+					const float vy = own ? halfToFloat(subHalf[at + 1]) : parent.vy(4, 2);
+					if (vx != 0.0f || vy != 0.0f || !own) ++siblingsWrong;
+				}
+			Assert::AreEqual(0, siblingsWrong, L"identical sub-blocks of a changed block read exactly (0, 0) as their own vector");
+
+			// dejudder_est_still_zero off: the pass does not run (the searches' vectors as before).
+			Dejudder::Settings off = settings;
+			off.estStillZero = false;
+			Dejudder::MotionWarp offWarp(fixture.Log(), gpu, off);
+			Assert::IsTrue(offWarp.Estimate(planesA.planes, planesB.planes), L"the estimate with the switch off");
+		}
+
 		TEST_METHOD(DejudderFollowsAMovingPictureAndWarpsBySDelta)
 		{
 			TargetLutGpuFixture fixture;

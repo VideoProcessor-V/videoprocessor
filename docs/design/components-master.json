@@ -232,6 +232,7 @@
         "src/VP-V/modules/scaling/rebase/KernelInverse.h",
         "src/VideoProcessor-Lib/vprenderer/SourceRebase.cpp",
         "src/VideoProcessor-Lib/vprenderer/SourceRebase.h",
+        "src/VP-V/modules/scaling/rebase/EntranceGpuDrain.h",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
       ],
       "components": {
@@ -246,6 +247,7 @@
         "tools": [],
         "config_keys": [
           "entrance_rebase",
+          "entrance_gpu_drain",
           "rebase_kernel_match",
           "source_resolution"
         ],

@@ -1081,6 +1081,23 @@ namespace Vpv
 				state->host.setValue(section, QStringLiteral("output_segments_merged"), on ? QStringLiteral("on") : QStringLiteral("off"));
 			});
 
+			// entrance_gpu_drain (bug hunt 2026-10-25, root cause open): drain the GPU after the entrance
+			// stages so pictures between frames match plain draws exactly; off by default.
+			auto* drain = new QComboBox;
+			drain->setObjectName(ObjectName(QStringLiteral("expert.entrance_gpu_drain")));
+			drain->addItem(QStringLiteral("Off (default)"), QString());
+			drain->addItem(QStringLiteral("Flush the GPU queue after the entrance stages"), QStringLiteral("flush"));
+			drain->addItem(QStringLiteral("Wait for the GPU after the entrance stages"), QStringLiteral("finish"));
+			drain->setToolTip(QStringLiteral("Key entrance_gpu_drain. A workaround: pictures between frames then match the "
+				"source frame's own picture exactly (otherwise +-1 of 16 bits on scattered pixels). Wait costs CPU time "
+				"each draw; shown under 'engaged' while it is on."));
+			form->addRow(QStringLiteral("GPU drain after the entrance"), drain);
+			QObject::connect(drain, qOverload<int>(&QComboBox::currentIndexChanged), drain, [state, drain, section](int i)
+			{
+				if (state->refreshing || i < 0 || !state->host.setValue) return;
+				state->host.setValue(section, QStringLiteral("entrance_gpu_drain"), drain->itemData(i).toString());
+			});
+
 			// The module order: slot names moved within their zone.
 			auto* order = new QLineEdit;
 			order->setObjectName(ObjectName(QStringLiteral("expert.pipeline_order")));
@@ -1135,7 +1152,7 @@ namespace Vpv
 			layout->addLayout(form);
 			layout->addStretch();
 
-			state->refreshers.push_back([state, lutStage, merged, order, slotsOff, section]()
+			state->refreshers.push_back([state, lutStage, merged, drain, order, slotsOff, section]()
 			{
 				const auto get = [&](const char* key) { return state->host.value ? state->host.value(section, QString::fromLatin1(key)).trimmed() : QString(); };
 				{
@@ -1146,6 +1163,9 @@ namespace Vpv
 					const QSignalBlocker blocker(merged);
 					merged->setChecked(get("output_segments_merged").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0);
 					merged->setEnabled(get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) != 0);
+					const QSignalBlocker blocker(drain);
+					const QString value = get("entrance_gpu_drain").toLower();
+					drain->setCurrentIndex(value == QStringLiteral("finish") ? 2 : value == QStringLiteral("flush") ? 1 : 0);
 				}
 				if (!order->hasFocus()) order->setText(get("pipeline_order"));
 				if (!slotsOff->hasFocus()) slotsOff->setText(get("pipeline_slots_off"));

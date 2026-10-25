@@ -6,6 +6,7 @@
 #include <vprenderer/PassTimerHook.h>       // VP: efficiency timers (audit 2026-10-24 section 4)
 #include <vprenderer/GpuSpanTimers.h>       // VP: efficiency timers T2 (entrance stages)
 #include <VP-V/core/StatusText.h>       // VP-V: the generic module status, module "vp" (WP-11)
+#include <VP-V/modules/scaling/rebase/EntranceGpuDrain.h>   // entrance_gpu_drain (scaling.rebase)
 #include <GeneralRateLog.h>
 #include <RefreshKey.h>
 #include <MotionValidity.h>
@@ -1053,6 +1054,7 @@ namespace
 		bool dejudderEstCandidates = true;        // E1
 		double dejudderEstLambda = 0.5;           // E1 smoothness penalty, codes per source px
 		bool dejudderEstQpel = true;              // E3
+		bool dejudderEstStillZero = true;         // identical blocks: exactly the zero vector (bug hunt 2026-10-25)
 		bool dejudderEstGate = true;              // E4
 		bool dejudderEstSplit = false;            // E2 (off from 2026-10-14: with the 4.5 tolerance and M6 it costs benefit)
 		double dejudderEstSplitSad = 0.0;         // E2 threshold (0 = the match tolerance)
@@ -1270,6 +1272,12 @@ namespace
 		// default (owner accepted 2026-10-24); off = the per-picture stages (a diagnostic). The
 		// Original pathway never uses it.
 		bool pipelineEntranceOnce = true;
+		// entrance_gpu_drain (expert; bug hunt 2026-10-25, root cause open): after the entrance stages
+		// ran on a draw, "flush" submits the GPU queue and "finish" waits for it before libplacebo's
+		// render. Pictures between frames then match plain draws byte for byte (without it libplacebo's
+		// scaling passes vary by +-1 of 16 bits on scattered textured pixels with the GPU's timing).
+		// off = today's path (the default until it is costed on the 3090); Original pathway: off.
+		std::string entranceGpuDrain = "off";
 		std::string pipelineSettingsProblems;   // refused values, shown under "Fallbacks engaged" (audit item 4)
 		// Kernel-matched re-base (docs/VP-stage12-build-plan.md; owner 2026-10-16: optimise
 		// 1080p): the identified player kernel's inverse for an exact 2:1 luma re-base.
@@ -1515,7 +1523,7 @@ namespace
 			<< settings.dejudderMotionScaleHi << '|' << settings.dejudderVectorSmooth << '|'
 			<< settings.dejudderTrustScale << '|' << settings.dejudderOcclusionFill << '|'
 			<< settings.dejudderEstCandidates << '|' << settings.dejudderEstLambda << '|'
-			<< settings.dejudderEstQpel << '|' << settings.dejudderEstGate << '|'
+			<< settings.dejudderEstQpel << '|' << settings.dejudderEstStillZero << '|' << settings.dejudderEstGate << '|'
 			<< settings.dejudderEstSplit << '|' << settings.dejudderEstSplitSad << '|' << settings.dejudderLowRes << '|' << settings.dejudderEstimateAhead << '|' << settings.capturePath << '|' << settings.dejudderMotionRolloff << '|' << settings.dejudderRollLo << '|'
 			<< settings.dejudderRollHi << '|' << settings.dejudderRollFloor << '|' << settings.dejudderObjectStrength << '|'
 			<< settings.dejudderTextureTolerance << '|' << settings.dejudderGlobalTwo << '|' << settings.dejudderRegionalHold << '|'
@@ -1536,7 +1544,7 @@ namespace
 			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.sourceResolutionEvidenceShots << '|'
 			<< settings.sourceResolutionEvidenceSeconds << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
 			<< settings.pipelineOriginalPathway << '|' << settings.pipelineOrder << '|' << settings.pipelineSlotsOff << '|'
-			<< settings.calibrationLutStage << '|' << settings.pipelineEntranceOnce << '|'
+			<< settings.calibrationLutStage << '|' << settings.pipelineEntranceOnce << '|' << settings.entranceGpuDrain << '|'
 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
 			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.opticalFlowGlobal << '|'
 			<< settings.opticalFlowGlobalFallback << '|' << settings.opticalFlowCostTrust << '|' << settings.opticalFlowFbCheck << '|'
@@ -2740,6 +2748,7 @@ namespace
 			std::make_pair("dejudder_occlusion_fill", &settings.dejudderOcclusionFill),
 			std::make_pair("dejudder_est_candidates", &settings.dejudderEstCandidates),
 			std::make_pair("dejudder_est_qpel", &settings.dejudderEstQpel),
+			std::make_pair("dejudder_est_still_zero", &settings.dejudderEstStillZero),
 			std::make_pair("dejudder_est_gate", &settings.dejudderEstGate),
 			std::make_pair("dejudder_est_split", &settings.dejudderEstSplit),
 			std::make_pair("dejudder_block_taper", &settings.dejudderBlockTaper),
@@ -3491,6 +3500,7 @@ namespace
 		settings.opticalFlowFbCheck = profile.opticalFlowFbCheck;
 		settings.estLambda = static_cast<float>(profile.dejudderEstLambda);
 		settings.estQpel = profile.dejudderEstQpel;
+		settings.estStillZero = profile.dejudderEstStillZero;
 		settings.estGate = profile.dejudderEstGate;
 		settings.estSplit = profile.dejudderEstSplit;
 		settings.estSplitSad = static_cast<float>(profile.dejudderEstSplitSad);
@@ -3564,6 +3574,7 @@ namespace
 		settings.interpolationFillGaps = false;            // key=interpolation_fill_gaps
 		settings.occlusionMask = false;                    // key=occlusion_mask
 		settings.repeatRenderReuse = false;                // key=repeat_render_reuse
+		settings.dejudderEstStillZero = false;             // key=dejudder_est_still_zero
 		settings.opticalFlow = false;                      // key=optical_flow
 		settings.motionAheadFrames = 0;                    // key=motion_ahead_frames
 		settings.motionHistoryFixes = false;               // key=motion_history_fixes
@@ -3596,6 +3607,7 @@ namespace
 		settings.interpolationFallback = InterpolationPolicy::Fallback::Hold; // key=interpolation_fallback
 		settings.pipelineOrder.clear();                    // the designed order
 		settings.pipelineEntranceOnce = false;             // B3: per-picture stages, as upstream
+		settings.entranceGpuDrain = "off";                 // key=entrance_gpu_drain
 	}
 
 	// Pipeline skeleton settings (global: [vpv] first, then [vprenderer]); see RendererSettings.
@@ -3643,6 +3655,14 @@ namespace
 				settings.pipelineEntranceOnce = value == "on";
 			else
 				settings.pipelineSettingsProblems += "pipeline_entrance_once '" + raw + "' (on|off); ";
+		}
+		if (TryGetPipelineString(config, "entrance_gpu_drain", raw))
+		{
+			const std::string value = ConfigFile::NormalizeName(raw);
+			if (value == "off" || value == "flush" || value == "finish")
+				settings.entranceGpuDrain = value;
+			else
+				settings.pipelineSettingsProblems += "entrance_gpu_drain '" + raw + "' (off|flush|finish); ";
 		}
 		if (settings.pipelineOriginalPathway)
 			ApplyOriginalPathwaySettings(settings);
@@ -5797,10 +5817,25 @@ struct LibplaceboVideoRenderer::Impl
 			++entranceSourceFrames;
 		}
 	}
+	// entrance_gpu_drain (VP-V/modules/scaling/rebase/EntranceGpuDrain.h): call sites only.
+	EntranceGpuDrain::Drain entranceDrain;
+	void DrainEntranceBeforeRender()
+	{
+		EntranceGpuDrain::Mode mode = EntranceGpuDrain::Mode::Off;
+		if (!pipelineSlots.OriginalPathway()) EntranceGpuDrain::Parse(activeSettings.entranceGpuDrain, mode);
+		pl_gpu gpu = d3d11 ? d3d11->gpu : nullptr;
+		std::string summary;
+		entranceDrain.BeforeRender(gpu ? mode : EntranceGpuDrain::Mode::Off, pipelineSlots.Runs(PipelineSlots::Id::ScalingRebase),
+			[gpu]() { pl_gpu_flush(gpu); }, [gpu]() { pl_gpu_finish(gpu); }, &summary);
+		if (!summary.empty()) DebugLog::Log("%s", summary.c_str());
+	}
 	void RunEntrance(EntranceRun& run, pl_frame& frame)
 	{
 		if (!pipelineSlots.ActiveEntrance().empty())
+		{
 			++entranceStageRuns;
+			entranceDrain.NoteEntranceRun();
+		}
 		if (run.path == EntrancePath::Main && !EntranceStatelessNow())
 		{
 			const unsigned long long before = entranceStatefulBreaks;
@@ -8272,6 +8307,18 @@ struct LibplaceboVideoRenderer::Impl
 		state += "; entrance: " + (entrance.empty() ? std::string("none") : entrance);
 		state += settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway ?
 			"; entrance once (B3) on: motion pictures from the processed A and B" : "; entrance once (B3) off";
+		// entrance_gpu_drain: visible while it is on (Ctrl+I "engaged" line, Config status), never silent.
+		// Listed only when it can act: on, not the Original pathway, and scaling.rebase runs.
+		EntranceGpuDrain::Mode drainMode = EntranceGpuDrain::Mode::Off;
+		EntranceGpuDrain::Parse(settings.entranceGpuDrain, drainMode);
+		if (drainMode != EntranceGpuDrain::Mode::Off && !settings.pipelineOriginalPathway &&
+			pipelineSlots.Runs(PipelineSlots::Id::ScalingRebase))
+		{
+			state += std::string("; entrance GPU drain: ") + EntranceGpuDrain::Name(drainMode);
+			EngageFallback("entrance GPU drain", EntranceGpuDrain::StatusReason(drainMode));   // a mode change updates the reason
+		}
+		else
+			ReleaseFallback("entrance GPU drain");
 		if (!settings.pipelineEntranceOnce || settings.pipelineOriginalPathway)
 		{
 			entranceOnceNote.clear();
@@ -12426,6 +12473,7 @@ struct LibplaceboVideoRenderer::Impl
 		currentTransport.dejudderEstCandidates = next.dejudderEstCandidates;
 		currentTransport.dejudderEstLambda = next.dejudderEstLambda;
 		currentTransport.dejudderEstQpel = next.dejudderEstQpel;
+		currentTransport.dejudderEstStillZero = next.dejudderEstStillZero;
 		currentTransport.dejudderEstGate = next.dejudderEstGate;
 		currentTransport.dejudderEstSplit = next.dejudderEstSplit;
 		currentTransport.dejudderEstSplitSad = next.dejudderEstSplitSad;
@@ -12545,6 +12593,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.calibrationLutStage != next.calibrationLutStage, "calibration_lut_stage");
 		changed(current.pipelineEntranceOnce != next.pipelineEntranceOnce, "pipeline_entrance_once");
 		changed(current.outputSegmentsMerged != next.outputSegmentsMerged, "output_segments_merged");
+		changed(current.entranceGpuDrain != next.entranceGpuDrain, "entrance_gpu_drain");
 		changed(current.adaptive.cnnResidualStabilise != next.adaptive.cnnResidualStabilise ||
 			current.adaptive.ssimResidualStabilise != next.adaptive.ssimResidualStabilise, "residual_stabilise");
 		changed(current.ssimBitrateAware != next.ssimBitrateAware || current.ssimBitrateFloor != next.ssimBitrateFloor, "ssim_bitrate_aware");
@@ -12618,6 +12667,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.dejudderOcclusionFill != next.dejudderOcclusionFill, "dejudder_occlusion_fill");
 		changed(current.dejudderEstCandidates != next.dejudderEstCandidates ||
 			current.dejudderEstLambda != next.dejudderEstLambda || current.dejudderEstQpel != next.dejudderEstQpel ||
+			current.dejudderEstStillZero != next.dejudderEstStillZero ||
 			current.dejudderEstGate != next.dejudderEstGate || current.dejudderEstSplit != next.dejudderEstSplit ||
 			current.dejudderEstSplitSad != next.dejudderEstSplitSad, "dejudder_est");
 		changed(current.dejudderLowRes != next.dejudderLowRes, "dejudder_low_res");
@@ -16894,7 +16944,7 @@ struct LibplaceboVideoRenderer::Impl
 				current.motionScaleLo != next.motionScaleLo || current.motionScaleHi != next.motionScaleHi ||
 				current.trustScaleFull != next.trustScaleFull || current.occlusionFill != next.occlusionFill ||
 				current.estCandidates != next.estCandidates || current.estLambda != next.estLambda ||
-				current.estQpel != next.estQpel || current.estGate != next.estGate ||
+				current.estQpel != next.estQpel || current.estStillZero != next.estStillZero || current.estGate != next.estGate ||
 				current.estSplit != next.estSplit || current.estSplitSad != next.estSplitSad ||
 				current.lowRes != next.lowRes || current.lowResAll != next.lowResAll ||
 				current.holdFeatherPx != next.holdFeatherPx || current.holdHysteresis != next.holdHysteresis ||
@@ -17891,6 +17941,7 @@ struct LibplaceboVideoRenderer::Impl
 					extraFade = EntranceCrossfadeFrom(extraFrom, f.sourceSequence);
 				}
 			}
+			DrainEntranceBeforeRender();   // entrance_gpu_drain: after the extra's last entrance run
 			// Delta 8 R1: the sigma-delta takes the motion since the previous
 			// present (A or the last extra: the shift step) from the de-judder's
 			// field instead of searching. The guard restores the hooks (own
@@ -24985,6 +25036,7 @@ struct LibplaceboVideoRenderer::Impl
                     // own bands), so none drops out in one step when the fade starts.
                     pl_frame from = unrebased;
                     const bool fromReady = EntranceCrossfadeFrom(from, sourceSequence);
+                    DrainEntranceBeforeRender();   // entrance_gpu_drain: after the last entrance run (the path left)
                     if (fromReady)
                     {
                         // Hunt 3 F1: mixed in the output signal domain by VP's PRE_OUTPUT hooks
@@ -25020,6 +25072,7 @@ struct LibplaceboVideoRenderer::Impl
                         }
                     }
                 }
+                DrainEntranceBeforeRender();   // entrance_gpu_drain: once, after the draw's last entrance run
                 return temporalRenderer.Render(renderer,frame,destination,parameters,
                     extendedRangeRelabelled ? &source.color : nullptr);
             });
@@ -32433,6 +32486,8 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "matcher.opticalFlow=" << m.opticalFlow << "\n"
 		<< "matcher.estLambda=" << m.estLambda << "\n"
 		<< "matcher.estQpel=" << m.estQpel << "\n"
+		<< "dejudder_est_still_zero=" << m.estStillZero << "\n"
+		<< "entrance_gpu_drain=" << s.entranceGpuDrain << "\n"
 		<< "matcher.estGate=" << m.estGate << "\n"
 		<< "matcher.estSplit=" << m.estSplit << "\n"
 		<< "matcher.estSplitSad=" << m.estSplitSad << "\n"
