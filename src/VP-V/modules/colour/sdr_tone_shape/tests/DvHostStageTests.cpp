@@ -138,13 +138,17 @@ namespace Tests
 			Assert::IsFalse(stage.SkipVpDeband(false, true, debandState));
 			Assert::IsTrue(debandState.empty());
 			Assert::IsFalse(reg.Has("VP deband"));
-			Assert::IsFalse(stage.SkipVpDeband(true, false, debandState));   // VP deband off: nothing to skip
+			Assert::IsFalse(stage.SkipVpDeband(true, false, debandState));   // VP deband off, or repair.deband off
+			Assert::IsTrue(debandState.empty() && !reg.Has("VP deband"), L"slot / deband off: no entry, no state");
 			Assert::IsTrue(stage.SkipVpDeband(true, true, debandState));
 			Assert::IsTrue(reg.Has("VP deband"));
 			Assert::IsFalse(debandState.empty());
-			Assert::IsFalse(stage.SkipPlaneDeband(true, false));   // no deband requested
-			Assert::IsFalse(stage.SkipPlaneDeband(false, true));
-			Assert::IsTrue(stage.SkipPlaneDeband(true, true));
+			Assert::IsFalse(stage.SkipPlaneDeband(true, true, false));   // no deband requested
+			Assert::IsFalse(stage.SkipPlaneDeband(true, false, true));
+			Assert::IsFalse(stage.SkipPlaneDeband(false, true, true), L"dv_tunnel_fixes off (Original pathway): Bill's deband kept");
+			Assert::AreEqual(std::string("; DV trims: off; DV tone mapping: libplacebo; VP deband off on the tunnel (12-bit IPT; no deband after decode yet)"),
+				stage.IngressSuffix(dm), L"fixes off: no plane-deband note");
+			Assert::IsTrue(stage.SkipPlaneDeband(true, true, true));
 			const std::string tail = stage.IngressSuffix(dm);
 			Assert::IsTrue(tail.find("libplacebo and VP deband off on the tunnel") != std::string::npos);
 			Assert::IsFalse(stage.SkipVpDeband(false, true, debandState));

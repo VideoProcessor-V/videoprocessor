@@ -112,7 +112,9 @@ public:
 
 	// feat/dv-l8 (owner 2026-10-24, DvTunnelPolicy.h): VP's debander works on the source planes, which
 	// for the DV tunnel are the 12-bit opponent planes before libplacebo's decode - skipped there,
-	// visibly. Sets debandState when skipped; returns whether it is.
+	// visibly. Sets debandState when skipped; returns whether it is. vpDebandOn: deband_vp is on AND
+	// the repair.deband slot runs (host: pipelineSlots.Runs(RepairDeband)) - with the slot off there
+	// is nothing to skip and nothing is listed.
 	bool SkipVpDeband(bool dolbyVisionPicture, bool vpDebandOn, std::string& debandState)
 	{
 		m_vpDebandSkipped = DvTunnelPolicy::SkipVpDeband(dolbyVisionPicture, vpDebandOn);
@@ -129,9 +131,11 @@ public:
 	// feat/dv-l8 WIP (DvTunnelPolicy.h): no libplacebo plane deband on the raw DV tunnel planes
 	// (opponent codes before the decode; its fp16 plane pass moved saturated near-zero channels by
 	// up to 3.6 codes). Returns true when the host must drop this frame's deband parameters.
-	bool SkipPlaneDeband(bool dolbyVisionPicture, bool debandRequested)
+	// tunnelFixes (dv_tunnel_fixes; integ/batch1 dc149284): off - and so on the Original pathway -
+	// Bill's deband is kept.
+	bool SkipPlaneDeband(bool tunnelFixes, bool dolbyVisionPicture, bool debandRequested)
 	{
-		m_debandSkipped = DvTunnelPolicy::SkipPlaneDeband(dolbyVisionPicture) && debandRequested;
+		m_debandSkipped = tunnelFixes && DvTunnelPolicy::SkipPlaneDeband(dolbyVisionPicture) && debandRequested;
 		if (m_debandSkipped)
 		{
 			if (!m_debandSkipLogged)
@@ -159,7 +163,9 @@ public:
 	const std::string& TrimsStatus() const { return m_trimsStatus; }
 	const std::string& ToneStatus() const { return m_toneStatus; }
 
-	// PRE_OUTPUT, after the SDR tone shape and before the LED stages.
+	// PRE_OUTPUT, after the SDR tone shape and before the LED stages. Appends only the DV trims hook(s)
+	// to frameHooks; the host tags them to colour.sdr_tone_shape (TagSlotHooks) so they move with
+	// the slot when it is reordered.
 	void OnPreOutput(const Frame& f, pl_color_map_params& colorMapParams,
 		const CustomHookChain::TemplateValues& hookTemplates, std::vector<const pl_hook*>& frameHooks)
 	{

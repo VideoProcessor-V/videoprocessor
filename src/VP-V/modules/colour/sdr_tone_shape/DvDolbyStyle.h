@@ -463,6 +463,7 @@ namespace DvDolbyStyle
 			return "a calibration LUT is active";
 		if (!OutputSupported(trc))
 			return "unsupported output transfer";
+		// DvHostStage pre-gates the slot (F-12: off is off, not a fallback); kept for other callers.
 		if (!colourStageRuns)
 			return "the colour tone-shape slot is off";
 		if (trimsShaderMissing)
