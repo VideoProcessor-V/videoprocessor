@@ -1,6 +1,6 @@
 /*
- * Copyright(C) 2026 Victor McPherson
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright(C) 2026 VP-V contributors
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 // F-8 (2026-10-25): the either/or between VP's HDR inference and Bill's original newlldv heuristic.
 // The original rule (BT.2020 + SDR + no HDR InfoFrame, nothing else), the tracker in original

@@ -1,7 +1,7 @@
 #pragma once
 /*
- * Copyright(C) 2026 Victor McPherson
- * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright(C) 2026 VP-V contributors
+ * SPDX-License-Identifier: GPL-3.0-only
  */
 // F-8 (m2-dv findings, owner rule vp-either-or-overlaps): the either/or between VP's HDR inference
 // (HdrInferenceTracker: BT.2020 at 10/12-bit or 8-bit with an LLDV indication, DV-tunnel and
