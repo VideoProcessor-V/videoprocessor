@@ -11,7 +11,7 @@
 #include <MotionIntent.h>
 #include <QueueLookahead.h>
 #include <vprenderer/AlphaCadenceCorrectionPolicy.h>
-#include <vprenderer/DejudderPolicy.h>
+#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
 #include <vprenderer/InterpolationTimeline.h>
 #include <VP-V/modules/motion/estimation/MotionEngineIdle.h>
 #include <vprenderer/PulldownDetector.h>

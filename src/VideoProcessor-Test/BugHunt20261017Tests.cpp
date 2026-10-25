@@ -3,7 +3,7 @@
 
 #include <vprenderer/CaptureTimestampGap.h>
 #include <vprenderer/DisplayRateHold.h>
-#include <vprenderer/DejudderPolicy.h>
+#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
 #include <vprenderer/InterpolationTimeline.h>
 #include <vprenderer/NlsHookRecovery.h>
 #include <vprenderer/PulldownDetector.h>

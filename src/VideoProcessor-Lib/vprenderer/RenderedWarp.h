@@ -4,7 +4,7 @@
 #include <libplacebo/renderer.h>
 
 #include <vprenderer/NlsMaskMapping.h>
-#include <vprenderer/DejudderWarp.h>
+#include <VP-V/modules/motion/vector_delivery/DejudderWarp.h>
 
 #include <array>
 #include <string>

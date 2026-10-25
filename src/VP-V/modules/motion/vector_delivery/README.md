@@ -52,9 +52,15 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **legacy**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **partly migrated**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
 - `src/VP-V/core/VectorScale.h`
+- `src/VP-V/modules/motion/vector_delivery/DejudderPolicy.h`
+- `src/VP-V/modules/motion/vector_delivery/DejudderWarp.h`
+- `src/VP-V/modules/motion/vector_delivery/MotionSegment.h`
+
+Forwarding headers (old paths kept for Bill's files, the renderer host and RendererCaptureHarnessTests.cpp; removed at M2 step 0):
+
 - `src/VideoProcessor-Lib/vprenderer/DejudderPolicy.h`
 - `src/VideoProcessor-Lib/vprenderer/DejudderWarp.h`
 

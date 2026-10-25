@@ -13,7 +13,7 @@
 #include "CppUnitTest.h"
 
 #include <DisplayRefreshRatePolicy.h>
-#include <vprenderer/DejudderPolicy.h>
+#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
 #include <vprenderer/GrainPreserve.h>
 #include <vprenderer/InterpolationPolicy.h>
 #include <vprenderer/InterpolationTimeline.h>

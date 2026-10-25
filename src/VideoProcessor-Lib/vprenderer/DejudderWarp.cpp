@@ -1,9 +1,9 @@
 ﻿#include <pch.h>
-#include "DejudderWarp.h"
+#include <VP-V/modules/motion/vector_delivery/DejudderWarp.h>
 #include <vprenderer/GrainPreserve.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
-#include <vprenderer/DejudderPolicy.h>
+#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
 
 #include <chrono>
 

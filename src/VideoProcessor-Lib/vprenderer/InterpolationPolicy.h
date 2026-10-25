@@ -1,6 +1,6 @@
 #pragma once
 
-#include <vprenderer/DejudderPolicy.h>
+#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
 
 #include <algorithm>
 #include <cmath>

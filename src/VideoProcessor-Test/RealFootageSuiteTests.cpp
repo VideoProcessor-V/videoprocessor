@@ -53,7 +53,7 @@
 #include <SourceResolutionDetector.h>
 #include <vprenderer/AlphaQueuePolicy.h>
 #include <vprenderer/CaptureTimestampGap.h>
-#include <vprenderer/DejudderPolicy.h>
+#include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>
 #include <vprenderer/InterpolationTimeline.h>
 #include <vprenderer/PulldownDetector.h>
 #include <vprenderer/SourceResolutionMonitor.h>

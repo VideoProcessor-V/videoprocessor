@@ -632,7 +632,7 @@ override the sketch below where they differ.
 - **Build order:** 6a standalone component with WARP tests → 6b ring,
   presents, phase, flag, stats, Config → 6c mask.
 
-**6a status (2026-10-10): built, not connected.** `vprenderer/DejudderWarp.h/.cpp`
+**6a status (2026-10-10): built, not connected.** `VP-V/modules/motion/vector_delivery/DejudderWarp.h` / `VP-V/modules/motion/consumers/DejudderWarp.cpp`
 holds `Dejudder::MotionWarp`, a native compute component with its own
 `pl_dispatch`.
 

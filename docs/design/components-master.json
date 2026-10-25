@@ -443,11 +443,12 @@
       "slot": "motion.vector_delivery",
       "order": 130,
       "status": "partial",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
         "src/VP-V/core/VectorScale.h",
-        "src/VideoProcessor-Lib/vprenderer/DejudderPolicy.h",
-        "src/VideoProcessor-Lib/vprenderer/DejudderWarp.h"
+        "src/VP-V/modules/motion/vector_delivery/DejudderPolicy.h",
+        "src/VP-V/modules/motion/vector_delivery/DejudderWarp.h",
+        "src/VP-V/modules/motion/vector_delivery/MotionSegment.h"
       ],
       "components": {
         "files": {

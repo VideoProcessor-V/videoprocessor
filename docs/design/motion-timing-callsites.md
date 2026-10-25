@@ -23,7 +23,7 @@ from our implementation, and depend on nothing in `src/VP-V`.
 | `src/VP-V/modules/input/queue_timing/VpQueueRules.h` | VP-only | upstream header | our additions to `AlphaQueuePolicy.h`, moved verbatim |
 | `src/VP-V/modules/input/queue_timing/VpFixedBudgetPolicy.h` | VP-only | interface, `DelayBudget.h` | fixed total delay, 4/3/2 ladder, capacity cap, held shed, start-based age gate |
 | `src/VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h` | VP-only, transitional | `VpQueueRules.h` | keeps the `AlphaQueuePolicy::X` names for the host and ~10 tests |
-| `src/VP-V/modules/motion/MotionSegment.h` | VP-only | `MotionValidity.h` | S0: one vectors-valid state, published fields, consumers fetch directly |
+| `src/VP-V/modules/motion/vector_delivery/MotionSegment.h` | VP-only | `MotionValidity.h` | S0: one vectors-valid state, published fields, consumers fetch directly |
 | `src/VP-V/modules/motion/SampledPassTimers.h` | VP-only | std | GPU timers sampled 1 in N and polled; never drained |
 | `src/VP-V/tests/QueueTimingPolicyTests.cpp`, `MotionSegmentTests.cpp` | VP tests | | CPU |
 | `src/VP-V/tests/gpu/MotionTimingGpuTests.inc` | VP tests | BetaGpuTests helpers | written, not run |

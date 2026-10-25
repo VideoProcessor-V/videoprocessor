@@ -39,7 +39,7 @@ default **on**; Config: Fixes under test, "General frame-rate rules"). Pure corr
 changes have no switch.
 
 1. **Film / video class without fixed bands** (sweep #3, B2) - behaviour, switched.
-   - `DejudderPolicy::IsFilmLike(hz, generalRates)` (vprenderer/DejudderPolicy.h:107) replaces the
+   - `DejudderPolicy::IsFilmLike(hz, generalRates)` (VP-V/modules/motion/vector_delivery/DejudderPolicy.h:107) replaces the
      fixed bands `<= 30.5` and `47.5-48.5` (kept as the legacy `IsFilmLike(hz)`, :88) with one
      standard constant: video starts at the lowest broadcast video picture rate, 50 Hz (the 625/50
      family), less a 2% relative measurement tolerance (`VideoRateFloorHz()` = 49 Hz, :101-106).

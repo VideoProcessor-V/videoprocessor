@@ -4,7 +4,7 @@
 #include <libplacebo/gpu.h>
 #include <libplacebo/log.h>
 
-#include <vprenderer/DejudderWarp.h>
+#include <VP-V/modules/motion/vector_delivery/DejudderWarp.h>
 #include <vprenderer/InterpolationPolicy.h>
 
 #include <string>
