@@ -11,11 +11,11 @@ Status: **fixed** (commit named in the history), **open** (needs a host call sit
 
 | # | Finding | Status |
 |---|---|---|
-| R1 | `SourceRebase.cpp` ~242: `formatNote` is never cleared, so "Fallbacks engaged: re-base precision" stays after the format recovers. | fixed (`fix: re-base precision note clears when the r16 path is used again`) |
+| R1 | `SourceRebase.cpp` ~242: `formatNote` is never cleared, so "Fallbacks engaged: re-base precision" stays after the format recovers. | fixed (fd79b91f) |
 | R2 | `SourceRebase.cpp` ~257-261: a failed kernel-matched `InversePlane` fails the whole re-base (native frame + pause) instead of falling back to the polar path for that plane. | open (behaviour change; needs the GPU byte-identity subset) |
 | R3 | Host ~22703: the re-base failure pause (5-60 s) and "not applied while smooth motion/deinterlacing" are log-only (ADR-0001). | open (host call site: EngageFallback("Re-base", ...)) |
 | R4 | `EntranceSegment.cpp` Rebase: "Re-base failed" logged only when `Failures()==1` (once per session). | open (with R3) |
-| R5 | `SourceRebase.cpp:6`, `SourceResolutionMonitor.cpp:3` include the legacy `<KernelInverse.h>` (a forwarder removed at M2 step 0). | fixed (`fix: re-base and monitor include KernelInverse from its module path`) |
+| R5 | `SourceRebase.cpp:6`, `SourceResolutionMonitor.cpp:3` include the legacy `<KernelInverse.h>` (a forwarder removed at M2 step 0). | fixed (see `fix: re-base and monitor include KernelInverse ...`) |
 | R6 | Stale comment `SourceRebase.h` ~23-25 ("auto is native until step B exists"). | fixed (with R5) |
 | R7 | Listed fallback "Re-base: off (<reason>)" is never produced; the real entry is "re-base precision". | fixed in slots.json/manifest (README pass commit) |
 
@@ -39,8 +39,8 @@ Status: **fixed** (commit named in the history), **open** (needs a host call sit
 | D1 | Host ~2254 `LibplaceboDebandYieldsToVp`: after a VP debander failure libplacebo's deband stays off, so the frame has no deband; `FallbackCatalog::PlanDeband` exists but is not wired. | open (host call site; WP-4 silent-fallbacks patch covers PlanDeband) |
 | D2 | `EntranceSegment.cpp` Deband: main-path failure logged only when the total failure count is 1 (other slots count too). | open (with D1) |
 | D3 | Extra / crossfade / look-ahead deband failures and the detail extra/crossfade/A-advance `(void)` results are silent. | open (with D1) |
-| D4 | `VpDebander.cpp` ~627-635: a main-slot failure after a partial weight write leaves `prevValid` true, so a later repeat holds against partly overwritten weights. | fixed (`fix: debander forgets its hold after a partial main-slot failure`) |
-| D5 | `VpDebander.cpp` ~814: `++held` counts frames where no plane used the hold. | fixed (`fix: debander counts held frames only when a plane held`) |
+| D4 | `VpDebander.cpp` ~627-635: a main-slot failure after a partial weight write leaves `prevValid` true, so a later repeat holds against partly overwritten weights. | not a bug (checked): a new frame writes the OTHER weight set and `curIndex`/`prevValid` advance only on success; a repeat rewrites the current set from the same inputs, so a partial failure leaves identical values. No fix. |
+| D5 | `VpDebander.cpp` ~814: `++held` counts frames where no plane used the hold. | fixed (027814a5) |
 | D6 | `low_bitrate_handling` read by the threshold but missing from the key lists; listed fallback "Deband: libplacebo deband (...)" never produced. | fixed (README pass commit) |
 | D7 | Host status ~12669: deband/detail shown "on" when the slot is switched off. | open (host) |
 
@@ -48,7 +48,7 @@ Status: **fixed** (commit named in the history), **open** (needs a host call sit
 
 | # | Finding | Status |
 |---|---|---|
-| T1 | `TextureRestore.cpp` ~732: `if (repeat && !m.have)` can never be true. | fixed (`fix: texture restore drops an unreachable repeat check`) |
+| T1 | `TextureRestore.cpp` ~732: `if (repeat && !m.have)` can never be true. | fixed (ddfed07e) |
 | T2 | `TextureRestore.cpp` ~693 rejects RGB (DetailPulse handles it): inactive on every RGB picture. | open (feature; port the luma-of-RGB path) |
 | T3 | "Texture restore / Detail pulse stabilise: inactive (...)" is a status-list line only, no Fallbacks entry or notice. | open (host: FallbackStatus) |
 | T4 | Host ~22828: the inactive text lags a frame. | open (host) |
