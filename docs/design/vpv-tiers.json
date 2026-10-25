@@ -548,13 +548,7 @@
         }
       },
       "toggles": [],
-      "planned": [
-        {
-          "key": "calibration_lut_stage",
-          "label": "Calibration LUT applied by VP (last colour step)",
-          "slot": "output.calibration_lut"
-        }
-      ]
+      "planned": []
     }
   ]
 }

@@ -69,7 +69,7 @@ namespace Vpv
             t.slotList.push_back({ "drive.led_measure", "LED measurement", "drive", "built", 220, "LED: drive held (measurement unavailable)" });
             t.slotList.push_back({ "drive.led_compensation", "LED compensation (adaptive gamma)", "drive", "built", 230, "LED compensation: off (shader did not load)" });
             t.slotList.push_back({ "drive.black_level", "Black level correction", "drive", "placeholder", 240, "Black level: off (<reason>)" });
-            t.slotList.push_back({ "output.calibration_lut", "Projector calibration LUT", "output", "partial", 250, "Calibration LUT: libplacebo target LUT (VP stage unavailable)" });
+            t.slotList.push_back({ "output.calibration_lut", "Projector calibration LUT", "output", "partial", 250, "calibration LUT (the VP stage failed; libplacebo's target LUT (before the LED compensation))" });
             t.slotList.push_back({ "output.dither", "Dither / sigma-delta", "output", "built", 260, "Dither: libplacebo (sigma-delta dropped: <reason>)" });
             t.slotList.push_back({ "output.presentation", "Presentation", "output", "built", 270, "Presentation: open loop (no display statistics)" });
             t.slotList.push_back({ "drive.projector_control", "Projector control", "drive", "built", 900, "Projector: not connected (LED drive off)" });
@@ -264,7 +264,6 @@ namespace Vpv
                 }
                 u.plannedTiers.push_back({ "Mid", "no extra output step yet (Mid uses Low)" });
                 u.plannedTiers.push_back({ "Upper", "no extra output step yet (Upper uses Low)" });
-                u.planned.push_back({ "calibration_lut_stage", "Calibration LUT applied by VP (last colour step)", "output.calibration_lut" });
                 t.units.push_back(u);
             }
             return t;
