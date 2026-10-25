@@ -1,8 +1,6 @@
-// Built without the test project's precompiled header: keep windows.h from defining min/max.
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
+// Uses the test project's precompiled header (CustomHookChain.h needs MFC's CString via the
+// madVR shader loader).
+#include "pch.h"
 #include "CppUnitTest.h"
 
 #include <ExtendedRangeGpuProbe.h>
