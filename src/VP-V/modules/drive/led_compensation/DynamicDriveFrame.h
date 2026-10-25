@@ -7,12 +7,13 @@
 // LED compensation hook chain, the hook parameters, the once-only log latches) and does the
 // per-frame work that used to sit inline in the render function:
 //
-//   PrepareFrame     gain in: BeginFrame / BeginFrameAhead, the look-ahead's raw transfer,
+//   DecideFrame      gain in: BeginFrame / BeginFrameAhead, the look-ahead's raw transfer,
 //                    the measurement geometry (active picture, peak boxes, picture-only masks,
-//                    grain map), then the measurement and compensation hooks with this
-//                    frame's parameters, and (module findings 2026-10-24 item 1) whether the
-//                    compensation runs this frame: compensate holds full drive while nothing
-//                    compensates, visibly ("Fallbacks engaged: LED drive ...");
+//                    grain map) and this frame's S2 decisions (which LED stages run, the
+//                    compensation parameters). The S2 segment emits the hooks (merge audit C1);
+//   AfterCollect     with S2's compensation-hook count: whether the compensation ran (module
+//                    findings item 1; compensate holds full drive while nothing compensates or
+//                    nothing measures, visibly: "Fallbacks engaged: LED drive ...");
 //   OnHookErrors     libplacebo's disabled hooks (the compensation chain, the measurement pass);
 //   CollectMeasurements  stats out: finished readbacks to the module.
 //
@@ -24,6 +25,7 @@
 
 #include <VP-V/core/FallbackStatus.h>
 #include <VP-V/core/PipelineSlots.h>
+#include <VP-V/segments/OutputSegments.h>
 #include <VP-V/modules/drive/led_compensation/DynamicDriveHost.h>
 #include <VP-V/modules/drive/led_measure/LedMeasurementHook.h>
 #include <vprenderer/CustomHookChain.h>
@@ -101,10 +103,18 @@ namespace LedDrive
 		// The intent interpreter's LED limits; true when they reached a module (the caller then
 		// records them as sent).
 		bool SendIntentLimits(double shadowMinimumShare, double ambientBlackNits, double displayBlackNits);
-		// Gain in and the S2 LED hooks for this frame, appended to `hooks`. tagSlot(start, id) is
-		// the host's slot tagging (all hooks from `start` to the end belong to slot `id`).
-		void PrepareFrame(const DynamicDriveFrameInputs& in, std::vector<const pl_hook*>& hooks,
-			const std::function<void(size_t, PipelineSlots::Id)>& tagSlot);
+		// Gain in and this frame's LED decisions for the S2 segment (integration group C, merge
+		// audit C1): fills colour.ledBlock / ledMeasure / ledCompensation and the compensation
+		// parameters. The S2 segment (OutputSegments::OutputColourSegment, built on Measurement()
+		// and Compensation()) is the ONLY emitter of the measurement and compensation hooks.
+		void DecideFrame(const DynamicDriveFrameInputs& in, OutputSegments::ColourFrame& colour);
+		// After S2's Collect, with the compensation hooks it pushed (ColourCounts::ledCompensation):
+		// the compensation-unavailable / measurement-off holds, the gamma-boost entry and the
+		// module's fallback entries.
+		void AfterCollect(const DynamicDriveFrameInputs& in, size_t compensationHooks);
+		// The hook objects the S2 segment holds by reference.
+		MeasurementHook& Measurement() { return measurement; }
+		CustomHookChain::Chain& Compensation() { return compensation; }
 		// libplacebo's disabled hooks after the render (pl_renderer_get_errors).
 		void OnHookErrors(const uint64_t* disabledSignatures, int count);
 		// Stats out: finished measurements (a few frames old; never waits).
@@ -149,7 +159,11 @@ namespace LedDrive
 		std::string readbacksReason;             // that note, without counts
 		std::string readbacksEngagedReason;      // the text the entry shows now
 		bool readbacksLosing = false;
-		bool boostEngaged = false;             // the gamma boost entry is engaged (audit N1)
+		bool boostEngaged = false;
+		// DecideFrame -> AfterCollect (render thread, one frame).
+		std::shared_ptr<LedDriveModule> frameModule;
+		double frameBoostExponent = 1.0;
+		bool frameBlock = false;             // the gamma boost entry is engaged (audit N1)
 		bool moduleEntriesEngaged = false;     // a module entry was engaged last frame (audit N1)
 	};
 }

@@ -9,6 +9,12 @@
 #include <ConfigFile.h>
 #include <MainConfigSchema.h>
 #include "LedDriveTestSupport.h"
+#include <VP-V/segments/OutputSegments.h>
+#include <VP-V/segments/OutputSegmentsMerge.h>
+#include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
+#include <vprenderer/OcclusionMaskHook.h>
+#include <vprenderer/OutputEncodingRepair.h>
+#include <algorithm>
 #include <Windows.h>
 #include <chrono>
 #include <fstream>
@@ -90,6 +96,32 @@ namespace
 	}
 
 	const auto NoTag = [](size_t, PipelineSlots::Id) {};
+
+	// Integration group C (merge audit C1): the LED hooks reach the frame only through the S2
+	// segment. One frame the way the host runs it: DecideFrame -> S2 Collect -> AfterCollect.
+	struct S2Rig
+	{
+		CustomHookChain::Chain tone{ CustomHookChain::Loader{} };
+		CustomHookChain::Chain dv{ CustomHookChain::Loader{} };
+		CalibrationLutStage::Hook lut;
+		PipelineSlots::Registry registry;
+	};
+
+	OutputSegments::ColourCounts RunS2(LedDrive::DynamicDriveFrame& frame, const LedDrive::DynamicDriveFrameInputs& in,
+		std::vector<const pl_hook*>& hooks, const OutputSegments::TagFn& tag, S2Rig* rigIn = nullptr)
+	{
+		S2Rig local;
+		S2Rig& rig = rigIn ? *rigIn : local;
+		rig.registry.SetEnabled(PipelineSlots::Id::DriveLedMeasure, in.measureSlotRuns);
+		rig.registry.SetEnabled(PipelineSlots::Id::DriveLedCompensation, in.compensationSlotRuns);
+		OutputSegments::OutputColourSegment s2(rig.tone, rig.dv, frame.Measurement(), frame.Compensation(), rig.lut);
+		OutputSegments::ColourFrame colour;
+		frame.DecideFrame(in, colour);
+		colour.calibrationLut = rig.lut.Lut() != nullptr;
+		const OutputSegments::ColourCounts counts = s2.Collect(colour, rig.registry, hooks, tag);
+		frame.AfterCollect(in, counts.ledCompensation);
+		return counts;
+	}
 
 	bool WaitFor(const std::function<bool()>& condition, int timeoutMs = 4000)
 	{
@@ -259,19 +291,19 @@ namespace VideoProcessorTest
 			f.frame.PublishModule(module);
 			FrameFacts facts;
 			std::vector<const pl_hook*> hooks;
-			f.frame.PrepareFrame(facts.in, hooks, NoTag);
+			RunS2(f.frame, facts.in, hooks, NoTag);
 			Assert::IsTrue(hooks.empty(), L"the shader could not load");
 			Assert::IsTrue(module->HoldingFullForCompensation());
 			Assert::IsTrue(ReasonOf(f.fallbacks, LedDrive::LedDriveModule::kHoldFallbackId).find("did not load") != std::string::npos);
 			// The slot switched off is a reason of its own.
 			facts.in.compensationSlotRuns = false;
 			hooks.clear();
-			f.frame.PrepareFrame(facts.in, hooks, NoTag);
+			RunS2(f.frame, facts.in, hooks, NoTag);
 			Assert::IsTrue(ReasonOf(f.fallbacks, LedDrive::LedDriveModule::kHoldFallbackId).find("slot drive.led_compensation is off") != std::string::npos);
 			// The module gone: its entries leave the heading.
 			f.frame.Clear();
 			hooks.clear();
-			f.frame.PrepareFrame(facts.in, hooks, NoTag);
+			RunS2(f.frame, facts.in, hooks, NoTag);
 			Assert::IsFalse(f.fallbacks.Engaged(LedDrive::LedDriveModule::kHoldFallbackId));
 		}
 
@@ -306,7 +338,7 @@ namespace VideoProcessorTest
 				for (size_t i = start; i < hooks.size(); ++i)
 					tags.emplace_back(hooks[i], id);
 			};
-			frame.PrepareFrame(facts.in, hooks, record);
+			RunS2(frame, facts.in, hooks, record);
 			Assert::AreEqual(size_t{ 1 }, hooks.size(), L"the compensation hook runs, no measurement hook");
 			Assert::AreEqual(size_t{ 1 }, tags.size());
 			Assert::IsTrue(tags[0].second == PipelineSlots::Id::DriveLedCompensation, L"no DriveLedMeasure tag with the slot off");
@@ -315,7 +347,7 @@ namespace VideoProcessorTest
 			facts.in.measureSlotRuns = true;
 			hooks.clear();
 			tags.clear();
-			frame.PrepareFrame(facts.in, hooks, record);
+			RunS2(frame, facts.in, hooks, record);
 			Assert::AreEqual(size_t{ 2 }, hooks.size(), L"measurement + compensation");
 			Assert::IsTrue(hooks[0] == frame.MeasurementHookPointer(), L"measurement first");
 			Assert::AreEqual(size_t{ 2 }, tags.size());
@@ -323,6 +355,93 @@ namespace VideoProcessorTest
 			Assert::IsTrue(tags[1].second == PipelineSlots::Id::DriveLedCompensation);
 			Assert::IsFalse(module->HoldingFullForCompensation());
 			Assert::IsFalse(fallbacks.Engaged(LedDrive::LedDriveModule::kHoldFallbackId));
+		}
+
+		// Merge audit C1: each of the LED measurement, LED compensation and VP calibration LUT hooks
+		// is emitted exactly once per frame (S2 is its only emitter), with output_segments_merged
+		// off and on, and zero times with its slot off.
+		TEST_METHOD(S2EmitsEachLedAndLutHookExactlyOnce)
+		{
+			static pl_hook dummy{};
+			dummy.stages = PL_HOOK_PRE_OUTPUT;
+			CustomHookChain::Loader loader{
+				[](const std::string&, std::string& source, std::string&) { source = "//!HOOK PREOUTPUT\n"; return true; },
+				[](const std::string&) -> const pl_hook* { return &dummy; },
+				[](const pl_hook*& hook) { hook = nullptr; } };
+			std::shared_ptr<QueuedFrameStatistics::IObserver> observer;
+			FallbackStatus::Registry fallbacks;
+			LedDrive::DynamicDriveFrame frame(observer, fallbacks, loader);
+			auto projector = std::make_shared<FakeProjector>();
+			LedDrive::LedDriveConfig config;
+			config.enabled = true;
+			config.mode = LedDrive::Mode::Compensate;
+			LedDrive::ProjectorConfig port;
+			port.protocol = "barco_ascii";
+			frame.PublishModule(std::make_shared<LedDrive::LedDriveModule>(port, config,
+				[projector] { return std::make_unique<FakePort>(projector); }));
+			pl_custom_lut lutData{};
+			for (const bool merged : { false, true })
+				for (int off = 0; off < 4; ++off)   // 0 none, 1 measure, 2 compensation, 3 LUT
+				{
+					S2Rig rig;
+					rig.lut.SetLut(off == 3 ? nullptr : &lutData);   // TakeLut leaves the stage empty with its slot off
+					rig.registry.SetEnabled(PipelineSlots::Id::OutputCalibrationLut, off != 3);
+					FrameFacts facts;
+					facts.in.measureSlotRuns = off != 1;
+					facts.in.compensationSlotRuns = off != 2;
+					std::vector<const pl_hook*> hooks;
+					RunS2(frame, facts.in, hooks, NoTag, &rig);
+					// The list libplacebo gets: the separate hooks, or (merged) the S2 merged hook.
+					std::vector<const pl_hook*> drawn = hooks;
+					if (merged)
+					{
+						OutputSegments::OutputColourSegment seg(rig.tone, rig.dv, frame.Measurement(), frame.Compensation(), rig.lut);
+						OutputSegments::ColourFrame colour;
+						FrameFacts again;
+						again.in.measureSlotRuns = facts.in.measureSlotRuns;
+						again.in.compensationSlotRuns = facts.in.compensationSlotRuns;
+						std::vector<const pl_hook*> segHooks;
+						frame.DecideFrame(again.in, colour);
+						colour.calibrationLut = rig.lut.Lut() != nullptr;
+						const auto counts = seg.Collect(colour, rig.registry, segHooks, NoTag);
+						frame.AfterCollect(again.in, counts.ledCompensation);
+						Assert::IsTrue(segHooks == hooks, L"the same S2 list each frame");
+						OutputEncodingRepair::Hook repair;
+						OcclusionMask::Hook mask;
+						OutputSegments::OutputFinishSegment s3(repair, mask);
+						s3.BeginFrame();
+						OutputSegments::Merger merger(nullptr, seg, s3);
+						merger.Configure(rig.registry, true, 0, fallbacks);
+						pl_render_params params{};
+						params.hooks = segHooks.data();
+						params.num_hooks = static_cast<int>(segHooks.size());
+						OutputSegments::Merger::Scope scope(&merger, params, nullptr);
+						drawn.assign(params.hooks, params.hooks + params.num_hooks);
+						std::vector<uint64_t> signatures;
+						for (const pl_hook* h : drawn)
+							if (std::find(segHooks.begin(), segHooks.end(), h) == segHooks.end())
+								signatures.push_back(h->signature);
+						if (!signatures.empty())
+						{
+							pl_render_errors errors{};
+							errors.disabled_hooks = signatures.data();
+							errors.num_disabled_hooks = static_cast<int>(signatures.size());
+							// The inner hooks of each merged hook stand in its place for the count.
+							std::vector<const pl_hook*> expanded;
+							for (const auto& run : merger.Runner().DisabledRuns(&errors))
+								expanded.insert(expanded.end(), run.begin(), run.end());
+							for (const pl_hook* h : drawn)
+								if (std::find(segHooks.begin(), segHooks.end(), h) != segHooks.end())
+									expanded.push_back(h);
+							drawn = expanded;
+						}
+					}
+					const auto count = [&](const pl_hook* h) { return std::count(drawn.begin(), drawn.end(), h); };
+					const std::wstring where = std::wstring(merged ? L"merged" : L"separate") + L", slot off " + std::to_wstring(off);
+					Assert::AreEqual<long long>(off == 1 ? 0 : 1, count(frame.MeasurementHookPointer()), (L"measure: " + where).c_str());
+					Assert::AreEqual<long long>(off == 2 ? 0 : 1, count(&dummy), (L"compensation: " + where).c_str());
+					Assert::AreEqual<long long>(off == 3 ? 0 : 1, count(rig.lut.Get()), (L"LUT: " + where).c_str());
+				}
 		}
 
 		TEST_METHOD(ScriptModeIsNotHeld)
@@ -339,7 +458,7 @@ namespace VideoProcessorTest
 			f.frame.PublishModule(module);
 			FrameFacts facts;
 			std::vector<const pl_hook*> hooks;
-			f.frame.PrepareFrame(facts.in, hooks, NoTag);
+			RunS2(f.frame, facts.in, hooks, NoTag);
 			Assert::IsFalse(module->HoldingFullForCompensation());
 			Assert::IsFalse(f.fallbacks.Engaged(LedDrive::LedDriveModule::kHoldFallbackId));
 		}
@@ -352,11 +471,11 @@ namespace VideoProcessorTest
 			f.frame.PublishParams(params);
 			FrameFacts facts;
 			std::vector<const pl_hook*> hooks;
-			f.frame.PrepareFrame(facts.in, hooks, NoTag);
+			RunS2(f.frame, facts.in, hooks, NoTag);
 			Assert::IsTrue(ReasonOf(f.fallbacks, LedDrive::DynamicDriveFrame::kBoostFallbackId).find("did not load") != std::string::npos);
 			params.gammaBoost = 0.0;
 			f.frame.PublishParams(params);
-			f.frame.PrepareFrame(facts.in, hooks, NoTag);
+			RunS2(f.frame, facts.in, hooks, NoTag);
 			Assert::IsFalse(f.fallbacks.Engaged(LedDrive::DynamicDriveFrame::kBoostFallbackId));
 		}
 
@@ -378,7 +497,7 @@ namespace VideoProcessorTest
 			f.frame.PublishModule(module);
 			FrameFacts facts;
 			std::vector<const pl_hook*> hooks;
-			f.frame.PrepareFrame(facts.in, hooks, NoTag);
+			RunS2(f.frame, facts.in, hooks, NoTag);
 			Assert::IsTrue(ReasonOf(f.fallbacks, LedDrive::LedDriveModule::kDryRunFallbackId).find("dry run") != std::string::npos);
 			module->Stop();
 		}

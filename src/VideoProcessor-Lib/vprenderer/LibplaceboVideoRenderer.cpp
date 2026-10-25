@@ -104,13 +104,9 @@
 #include <vprenderer/NlsMaskMapping.h>
 #include <vprenderer/MotionEngineIdle.h>
 #include <QueueLookahead.h>
-#include <led/LedDriveModule.h>
-#include <led/LedDriveArbiter.h>
-#include <led/LedDriveHoldover.h>
-#include <filesource/FileHostSettings.h>
+#include <VP-V/modules/drive/led_compensation/DynamicDriveFrame.h>
 #include <calibration/CalibrationPattern.h>
-#include <led/LedMeasurementHook.h>
-#include <led/LedRawTransfer.h>
+#include <VP-V/modules/drive/led_compensation/LedRawTransfer.h>
 #include <QueuedFrameStatistics.h>
 #include <ContentIntentObserver.h>
 #include <IntentInterpreterObserver.h>
@@ -7996,15 +7992,6 @@ struct LibplaceboVideoRenderer::Impl
 			[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } };
 	}
 	CustomHookChain::Chain customHooks{ GlslHookLoader() };
-	// LED drive (owned by the outer renderer). Per frame: the measurement hook
-	// and the compensation hook run first at PRE_OUTPUT; the module is touched
-	// only by BeginFrame (before rendering) and SubmitMeasurement (after).
-	std::shared_ptr<LedDrive::LedDriveModule> ledDrive;
-	uint64_t ledRawTransferSignature = 0;
-	// The gamma boost lives in the compensation hook: say so loudly when it
-	// is configured but the hook is not running.
-	bool ledBoostMissingLogged = false;
-	bool ledMeasurementDisabledLogged = false;
 	// Statistics consumers of the queued-frame walk (read-only).
 	std::shared_ptr<QueuedFrameStatistics::IObserver> queuedFrameObserver;
 	// Content recognition (intent interpreter item 1, 2026-10-17): its own
@@ -8036,12 +8023,10 @@ struct LibplaceboVideoRenderer::Impl
 	std::chrono::steady_clock::time_point blackShareTime;  // render thread
 	int blackIntentLogged = -1;                           // render thread: steps below last logged
 	std::string displayIntentLogged;                      // render thread
-	LedDrive::MeasurementHook ledMeasurement;
 	// Re-applies the output encoding libplacebo drops after a texture-input
 	// PRE_OUTPUT hook (the LED measurement and compensation hooks).
 	OutputEncodingRepair::Hook outputEncodingRepair;
 	bool outputEncodingRepairLogged = false;
-	CustomHookChain::Chain ledCompensation{ GlslHookLoader() };
 	CustomHookChain::Chain sdrToneShape{ GlslHookLoader() };   // delta 13
 	CustomHookChain::Chain dvTrimsHook{ GlslHookLoader() };    // DV L2 trims (dv_trims)
 	bool dvTrimsConfigured = false;
@@ -8068,11 +8053,6 @@ struct LibplaceboVideoRenderer::Impl
 	int dvToneL1Logged = -1;             // audit 7: L1 reaching libplacebo, logged on change
 	bool sdrToneShapeConfigured = false;
 	int sdrToneShapeLogged = -1;
-	bool ledCompensationConfigured = false;
-	// [led_drive] gamma_boost applies whether or not the module drives the
-	// LED; published by the outer renderer from the configuration.
-	std::atomic<double> ledGammaBoost{ 0.0 };   // the gamma_boost setting (0 = off)
-	double lastLoggedBoostExponent = 1.0;
 	// The gamma an SDR output transfer encodes for: the gamma boost's base
 	// (delta 4). Pure powers as given; BT.1886 as 2.4 and sRGB as 2.2; anything
 	// else (HDR) keeps 2.2, the value the boost has always used.
@@ -8091,14 +8071,6 @@ struct LibplaceboVideoRenderer::Impl
 		default: return 2.2;
 		}
 	}
-	std::atomic<double> ledCompensationEotf{ 2.2 };
-	std::atomic<double> ledKnee{ 0.08 };
-	// Delta 11: the boost toe and the ANSI lift's strength (module or not).
-	std::atomic<double> ledBoostKnee{ 0.0 };
-	std::atomic<double> ledBoostKneeWidth{ 0.05 };
-	std::atomic<bool> ledWtwPassthrough{ true };   // led_wtw_passthrough ([led_drive], default on)
-	std::atomic<bool> ledBtbPassthrough{ true };   // led_btb_passthrough ([led_drive], default on)
-	std::atomic<double> ledShadowLift{ 0.0 };
 	std::vector<const pl_hook*> frameHooks;
 	// Pipeline skeleton (R2): which of this frame's hooks belong to a pipeline slot (by pointer,
 	// since plumbing hooks are inserted in front later); OutputHookOrder::OrderSlotsInPlace
@@ -8135,7 +8107,7 @@ struct LibplaceboVideoRenderer::Impl
 	CalibrationLutStage::Hook calibrationLutStage;
 	// The output segments (S2 PRE_OUTPUT colour + drive, S3 OUTPUT finish): one owner of their
 	// stages, order and parameters; the host keeps the decisions and calls each segment.
-	OutputSegments::OutputColourSegment outputColour{ sdrToneShape, dvTrimsHook, ledMeasurement, ledCompensation, calibrationLutStage };
+	OutputSegments::OutputColourSegment outputColour{ sdrToneShape, dvTrimsHook, dynamicDrive.Measurement(), dynamicDrive.Compensation(), calibrationLutStage };
 	OutputSegments::OutputFinishSegment outputFinish{ outputEncodingRepair, occlusionMaskHook };
 	std::vector<const pl_hook*> userFrameHooks;   // the S2 edge: the user's shaders this frame
 	std::unique_ptr<OutputSegments::Merger> outputMerger;   // output_segments_merged
@@ -8161,6 +8133,9 @@ struct LibplaceboVideoRenderer::Impl
 	// r6 fix 7 (owner rule vp-no-silent-fallbacks): the renderer's automatic fallbacks, published
 	// as "Fallbacks engaged: <list> / none" (GetFallbacksStatus: Ctrl+I, Config status, Ctrl+Alt+D).
 	FallbackStatus::Registry fallbacks;
+	// Dynamic Drive, render side (WP-15): the LED module the outer renderer publishes, the S2 LED
+	// measurement and compensation hooks and their per-frame set-up (DynamicDriveFrame.h).
+	LedDrive::DynamicDriveFrame dynamicDrive{ queuedFrameObserver, fallbacks, GlslHookLoader() };
 	// Efficiency timer plan (audit 2026-10-24 section 4; vprenderer/PassTimerHook.h).
 	PassTimerHook::Hook passTimerHook;
 	GpuSpanTimers entranceSpans;   // T2: entrance stages (polled D3D11 timestamps, never waited for)
@@ -9036,13 +9011,11 @@ struct LibplaceboVideoRenderer::Impl
 			captureWorkers.clear();
 			pl_mpv_user_shader_destroy(&nlsHook);
 			customHooks.Clear();
-			ledMeasurement.Release();
-			ledCompensation.Clear();
+			dynamicDrive.Release();
 			sdrToneShape.Clear();
 			sdrToneShapeConfigured = false;
 			dvTrimsHook.Clear();
 			dvTrimsConfigured = false;
-			ledCompensationConfigured = false;
             pl_mpv_user_shader_destroy(&subtitleCutPasteHook);
             subtitleCutPasteHookFailed = false;
             subtitleCutPastePresentation.Reset(); subtitleLayoutAnchor.Reset();
@@ -16460,19 +16433,9 @@ struct LibplaceboVideoRenderer::Impl
 			displayIntentStatus = mapping;
 		}
 		limits.shadowMinimumShare = share;
-		if (IntentInterpreter::LedLimitsDiffer(limits, ledIntentLimitsSent))
-		{
-			const std::shared_ptr<LedDrive::LedDriveModule> led = std::atomic_load(&ledDrive);
-			if (led)
-			{
-				// The display black at full drive lets the LED drive derive the
-				// ambient share floor (LedDriveModule::SetIntentLimits).
-				led->SetIntentLimits(limits.shadowMinimumShare, limits.ambientBlackNits, sdrBlackNits);
-				DebugLog::Log("Intent interpreter: LED intent limits shadow minimum share %.3f, ambient black %.5f nits, display black %.5f nits",
-					limits.shadowMinimumShare, limits.ambientBlackNits, sdrBlackNits);
-				ledIntentLimitsSent = limits;
-			}
-		}
+		if (IntentInterpreter::LedLimitsDiffer(limits, ledIntentLimitsSent) &&
+			dynamicDrive.SendIntentLimits(limits.shadowMinimumShare, limits.ambientBlackNits, sdrBlackNits))
+			ledIntentLimitsSent = limits;
 	}
 
 	// The caller holds renderMutex. Queue-generation validation and rendering
@@ -24495,177 +24458,37 @@ struct LibplaceboVideoRenderer::Impl
                 calibrationSentHdr = target.color.hdr;
             }
         }
-        // LED drive, gain in: measurement first (it must see the picture before
-        // the gain), then the compensation hook with this frame's parameters.
-        const std::shared_ptr<LedDrive::LedDriveModule> led = std::atomic_load(&ledDrive);
-        // The gamma boost's base is the gamma this frame's output is encoded
-        // for (delta 4), not the projector's compensation_eotf.
-        const double displayGamma = LedDisplayGamma(target.color.transfer);
-        if (led)
-            led->SetDisplayGamma(displayGamma);
-        const double boostExponent = LedDrive::BoostExponent(
-            ledGammaBoost.load(std::memory_order_acquire), displayGamma);
-        if (boostExponent != lastLoggedBoostExponent)
+        // S2 Dynamic Drive (WP-15 host adapter): gain in and this frame's LED decisions for the S2
+        // segment, the only emitter of the LED hooks (DynamicDriveFrame::DecideFrame; merge audit C1).
+        LedDrive::DynamicDriveFrameInputs led;
         {
-            lastLoggedBoostExponent = boostExponent;
-            DebugLog::Log("Dynamic Drive: gamma boost %s (exponent %.4f on output gamma %.2f)",
-                boostExponent != 1.0 ? "on" : "off", boostExponent, displayGamma);
-        }
-        if (led || boostExponent != 1.0 || ledShadowLift.load(std::memory_order_acquire) > 0.0)
-        {
-            if (!ledCompensationConfigured)
-            {
-                ConfiguredShaderRule compensationRule;
-                compensationRule.name = "led_compensation";
-                compensationRule.filename = "LED compensation.glsl";
-                ledCompensation.Configure({ compensationRule });
-                ledCompensationConfigured = true;
-            }
-            ledCompensation.Ensure(hookTemplates);
-            LedDrive::CompensationGain compensation;
-            compensation.knee = ledKnee.load(std::memory_order_acquire);
-            compensation.eotf = ledCompensationEotf.load(std::memory_order_acquire);
-            if (led)
-            {
-                // The look-ahead reads the captured frame: its range as the picture's.
-                led->SetSourceRange(activeSettings.sourceRange == "full" ? 1 : activeSettings.sourceRange == "limited" ? 0 : -1);
-                // Integration 2026-10-17 (owner: measured, not nominal): the source rate the LED
-                // look-ahead converts led_lookahead_ms with is the measured one (the film rate
-                // when pulldown is locked, else the measured capture rate); nominal only when
-                // nothing is measured yet.
-                const double ledSourceRateHz = CaptureRateBounds::Accepts(captureRateHz) ?
-                    captureRateHz : nominalSourceRateHz;
-                // Render-ahead (design step 6): this frame is rendered ahead of its display,
-                // so the gain and the projector drive use the planned refresh it lands on
-                // (the chain's next refresh) instead of the wall clock.
-                double ledAheadMs = 0.0;
-                if (RenderAheadActive() && renderAheadSchedule.Active())
-                {
-                    LARGE_INTEGER ledQpcFrequency{};
-                    if (QueryPerformanceFrequency(&ledQpcFrequency) && ledQpcFrequency.QuadPart > 0)
-                        ledAheadMs = (renderAheadSchedule.NextVsync() - static_cast<double>(PerformanceCounterNow()) /
-                            static_cast<double>(ledQpcFrequency.QuadPart)) * 1000.0;
-                }
-                compensation = ledAheadMs > 0.0 && ledAheadMs < 1000.0 ?
-                    led->BeginFrameAhead(sourceSequence, ledAheadMs, ledSourceRateHz) :
-                    led->BeginFrame(sourceSequence, ledSourceRateHz);
-                if (led->WantsPredictions())
-                {
-                    // The lookahead's raw-to-output transfer follows this frame's
-                    // colour mapping; rebuilt only when that changes.
-                    const pl_color_map_params* colorMap = renderParams.color_map_params ?
-                        renderParams.color_map_params : &pl_color_map_default_params;
-                    const uint64_t transferSignature =
-                        LedDrive::RawTransferSignature(renderImage.color, target.color, colorMap);
-                    if (transferSignature != ledRawTransferSignature)
-                    {
-                        ledRawTransferSignature = transferSignature;
-                        led->SetRawTransfer(std::make_shared<const LedDrive::RawTransfer>(
-                            LedDrive::BuildRawTransfer(renderImage.color, target.color, colorMap)));
-                    }
-                }
-                ledMeasurement.SetFrame(LedDrive::ActivePictureRect(hdrTrustedPicture.available,
-                    hdrTrustedPicture.left, hdrTrustedPicture.top, hdrTrustedPicture.right,
-                    hdrTrustedPicture.bottom, renderImage.crop.x0, renderImage.crop.y0,
-                    renderImage.crop.x1, renderImage.crop.y1), led->Config().aplWeights, boostExponent,
-                    sourceSequence);
-                // Bug hunt 2 (owner 2026-10-17, led_peak_full_coverage): the peak over every
-                // pixel, in boxes the share of the screen of the script's full-screen
-                // downscale. The screen is the whole output (the script's screenshot).
-                const double ledScreenW = baseTarget.crop.x1 - baseTarget.crop.x0;
-                const double ledScreenH = baseTarget.crop.y1 - baseTarget.crop.y0;
-                ledMeasurement.SetPeak(led->Config().peakFullCoverage, ledScreenW, ledScreenH);
-                // Bug hunt 2 (owner 2026-10-17, led_picture_only): measure the PICTURE ONLY. The
-                // detected subtitle (padded box and card), and a moved subtitle's place, cover
-                // and cleanup fill, are left out of every LED statistic. Detection runs only with
-                // a subtitle style that moves cues (Black / Generated gray) or the box test; with
-                // no detection nothing is masked. VP's own overlays (stats, OSD, profile panel,
-                // the subtitle test box) are target overlays libplacebo draws after the output
-                // pass, so this PRE_OUTPUT measurement never sees them.
-                LedDrive::MeasurementRect ledMasks[LedDrive::MAX_MASK_RECTS];
-                LedDrive::PixelRect ledSourceMasks[LedDrive::MAX_MASK_RECTS];
-                int ledMaskCount = 0;
-                if (led->Config().pictureOnly)
-                {
-                    std::vector<SubtitleBoxRect> boxes;
-                    if (subtitleBoxResult.detected && subtitleBoxResult.bounds.Valid())
-                    {
-                        boxes.push_back(ExpandSubtitleBox(subtitleBoxResult.bounds, width, height, safeSubtitlePadding));
-                        boxes.push_back(subtitleBoxResult.sourcePanel);
-                    }
-                    if (subtitleCompositionSucceeded)
-                        for (const SubtitleBoxRect& r : { relocatedSubtitle.destination, relocatedSubtitle.layoutCoverage,
-                            relocatedSubtitle.generatedCleanup, relocatedSubtitle.source })
-                            boxes.push_back(r);
-                    // NLS warps the picture before the scaler: a box follows the NLS map (the
-                    // shader's output-to-source curve, inverted per edge). An NLS shader whose map
-                    // is not known masks the box's rows across the whole width, a little taller.
-                    const NlsMaskMapping::Mapping ledNls = submittedNls ? KnownNlsMapping() : NlsMaskMapping::Mapping();
-                    auto outputOf = [&](double source, bool vertical)
-                    {
-                        const double scale = vertical ? ledNls.yScale : ledNls.xScale;
-                        const double protect = vertical ? ledNls.yProtect : ledNls.xProtect;
-                        double lo = 0.0, hi = 1.0;
-                        for (int i = 0; i < 40; ++i)
-                        {
-                            const double mid = 0.5 * (lo + hi);
-                            if (NlsMaskMapping::MapCoordinate(mid, scale, ledNls.curve, ledNls.geometry, protect) < source)
-                                lo = mid;
-                            else
-                                hi = mid;
-                        }
-                        return 0.5 * (lo + hi);
-                    };
-                    for (const SubtitleBoxRect& box : boxes)
-                    {
-                        if (!box.Valid() || ledMaskCount >= LedDrive::MAX_MASK_RECTS) continue;
-                        LedDrive::MeasurementRect m = LedDrive::SourceRectInCrop(box.left, box.top, box.right,
-                            box.bottom, renderImage.crop.x0, renderImage.crop.y0, renderImage.crop.x1, renderImage.crop.y1);
-                        if (LedDrive::Empty(m)) continue;
-                        ledSourceMasks[ledMaskCount] = { static_cast<double>(box.left), static_cast<double>(box.top),
-                            static_cast<double>(box.right), static_cast<double>(box.bottom) };
-                        if (submittedNls && ledNls.valid)
-                            m = { outputOf(m.x0, false), outputOf(m.y0, true), outputOf(m.x1, false), outputOf(m.y1, true) };
-                        else if (submittedNls)
-                            m = { 0.0, std::max(0.0, m.y0 - 0.02), 1.0, std::min(1.0, m.y1 + 0.02) };
-                        ledMasks[ledMaskCount++] = m;
-                    }
-                }
-                ledMeasurement.SetMask(ledMasks, ledMaskCount);
-                // The look-ahead measures queued raw frames (source raster): the screen in
-                // source pixels for the box size, and the current subtitle for their masks.
-                {
-                    const double cropW = renderImage.crop.x1 - renderImage.crop.x0;
-                    const double cropH = renderImage.crop.y1 - renderImage.crop.y0;
-                    const double shownW = target.crop.x1 - target.crop.x0;
-                    const double shownH = target.crop.y1 - target.crop.y0;
-                    static_cast<LedDrive::LookaheadObserver&>(led->Lookahead()).SetPictureGeometry(
-                        shownW > 0.0 && cropW > 0.0 ? ledScreenW * cropW / shownW : 0.0,
-                        shownH > 0.0 && cropH > 0.0 ? ledScreenH * cropH / shownH : 0.0,
-                        ledSourceMasks, ledMaskCount);
-                }
-                // Delta 8 R2: the grain map (the previous source frame's, as
-                // for S1) for grain-suppressed highlight statistics.
-                ledMeasurement.SetGrain(led->Config().highlightGrainSuppress && adaptiveDownscale.Active() &&
-                    adaptiveDownscale.LastMapState() == AdaptiveDownscale::MapState::Used ?
-                    adaptiveDownscale.GrainMap() : nullptr, static_cast<float>(activeSettings.adaptive.grainFloor),
-                    renderImage.crop);
-                colourFrame.ledMeasure = pipelineSlots.Runs(PipelineSlots::Id::DriveLedMeasure);
-            }
-            colourFrame.ledBlock = true;
-            colourFrame.ledCompensation = pipelineSlots.Runs(PipelineSlots::Id::DriveLedCompensation);
-            OutputSegments::CompensationParams& c = colourFrame.compensation;
-            c.gain = compensation.active ? compensation.gain : 1.0;
-            c.knee = compensation.knee;
-            c.gainDomain = compensation.domain == LedDrive::GainDomain::Linear ? 1.0 : 0.0;
-            c.eotf = compensation.eotf;
-            c.boost = boostExponent;
-            c.boostKnee = ledBoostKnee.load(std::memory_order_acquire);
-            c.boostKneeWidth = ledBoostKneeWidth.load(std::memory_order_acquire);
-            c.shadowLift = ledShadowLift.load(std::memory_order_acquire);
-            c.veil = compensation.veil;
-            c.wtwPassthrough = ledWtwPassthrough.load(std::memory_order_acquire) ? 1.0 : 0.0;
-            c.btbPassthrough = ledBtbPassthrough.load(std::memory_order_acquire) ? 1.0 : 0.0;
+            led.image = &renderImage;
+            led.target = &target;
+            led.screen = &baseTarget;
+            led.params = &renderParams;
+            led.hookTemplates = &hookTemplates;
+            led.sourceRange = &activeSettings.sourceRange;
+            led.displayGamma = LedDisplayGamma(target.color.transfer);
+            led.captureRateHz = captureRateHz;
+            led.nominalSourceRateHz = nominalSourceRateHz;
+            led.renderAheadActive = RenderAheadActive() && renderAheadSchedule.Active();
+            led.renderAheadNextVsyncSeconds = led.renderAheadActive ? renderAheadSchedule.NextVsync() : 0.0;
+            led.sourceSequence = sourceSequence;
+            led.trustedPicture = &hdrTrustedPicture;
+            led.subtitle = &subtitleBoxResult;
+            led.sourceWidth = width;
+            led.sourceHeight = height;
+            led.subtitlePadding = safeSubtitlePadding;
+            led.subtitleComposed = subtitleCompositionSucceeded;
+            led.relocatedSubtitle = &relocatedSubtitle;
+            led.nlsSubmitted = submittedNls != nullptr;
+            led.nlsMapping = [this] { return KnownNlsMapping(); };
+            led.grainMap = adaptiveDownscale.Active() && adaptiveDownscale.LastMapState() ==
+                AdaptiveDownscale::MapState::Used ? adaptiveDownscale.GrainMap() : nullptr;
+            led.grainFloor = static_cast<float>(activeSettings.adaptive.grainFloor);
+            led.measureSlotRuns = pipelineSlots.Runs(PipelineSlots::Id::DriveLedMeasure);
+            led.compensationSlotRuns = pipelineSlots.Runs(PipelineSlots::Id::DriveLedCompensation);
+            dynamicDrive.DecideFrame(led, colourFrame);
         }
         // The user's shaders (the S2 edge) and VP's calibration LUT stage; then S2 adds this
         // frame's hooks in the segment's order, exactly as the separate blocks did.
@@ -24680,22 +24503,7 @@ struct LibplaceboVideoRenderer::Impl
         SyncFallback(colourCounts.unhandled ? FallbackCatalog::Engaged("S2 placeholder stage",
             "a placeholder slot has a component but no output-segment stage yet (not run)") :
             FallbackCatalog::Released("S2 placeholder stage"));
-        if (colourFrame.ledBlock)
-        {
-            if (boostExponent != 1.0 && colourCounts.ledCompensation == 0)
-            {
-                if (!ledBoostMissingLogged)
-                    DebugLog::Log("Dynamic Drive: WARNING gamma boost NOT applied - shaders\\LED compensation.glsl did not load or was disabled; the picture is plain output_gamma (exponent %.4f missing)",
-                        boostExponent);
-                ledBoostMissingLogged = true;
-            }
-            else if (colourCounts.ledCompensation > 0)
-            {
-                if (ledBoostMissingLogged)
-                    DebugLog::Log("Dynamic Drive: gamma boost applied again (compensation hook running)");
-                ledBoostMissingLogged = false;
-            }
-        }
+        dynamicDrive.AfterCollect(led, colourCounts.ledCompensation);
         // A cadence repeat shows the previous picture again: the sigma-delta
         // skips its motion search (zero motion; owner 2026-10-13 efficiency).
         for (const pl_hook* hook : frameHooks)
@@ -25465,8 +25273,7 @@ struct LibplaceboVideoRenderer::Impl
             if (customHooks.MarkRuntimeFailures(hookErrors.disabled_hooks,
                 hookErrors.num_disabled_hooks))
                 PublishCustomShaderStatus();
-            ledCompensation.MarkRuntimeFailures(hookErrors.disabled_hooks,
-                hookErrors.num_disabled_hooks);
+            dynamicDrive.OnHookErrors(hookErrors.disabled_hooks, hookErrors.num_disabled_hooks);
             for (int i = 0; !extendedRangeHookFailed && i < hookErrors.num_disabled_hooks; ++i)
                 if (extendedRangeHooks.Owns(hookErrors.disabled_hooks[i]))
                 {
@@ -25486,27 +25293,9 @@ struct LibplaceboVideoRenderer::Impl
                     EngageFallback("calibration LUT", "the VP stage failed; libplacebo's target LUT (before the LED compensation)");
                 }
             }
-            for (int i = 0; led && !ledMeasurementDisabledLogged && i < hookErrors.num_disabled_hooks; ++i)
-                if (hookErrors.disabled_hooks[i] == ledMeasurement.Hook()->signature)
-                {
-                    DebugLog::Log("Dynamic Drive: WARNING libplacebo disabled the measurement pass; the LED keeps its last statistics");
-                    ledMeasurementDisabledLogged = true;
-                }
         }
-        // LED drive, stats out: finished measurements (a few frames old; the
-        // render thread never waits for them).
-        if (led)
-        {
-            std::vector<LedDrive::RawMeasurement> measured;
-            std::vector<uint64_t> measuredSequences;
-            ledMeasurement.Collect(measured, 0, &measuredSequences);
-            for (size_t i = 0; i < measured.size(); ++i)
-                led->SubmitMeasurement(measured[i], measuredSequences[i]);
-            // Silent-fallbacks batch: measurement results running late (or frames not measured) are visible.
-            const std::string measureNote = ledMeasurement.LateNote();
-            SyncFallback(measureNote.empty() ? FallbackCatalog::Released("LED measurement") :
-                FallbackCatalog::Engaged("LED measurement", measureNote));
-        }
+        // Dynamic Drive, stats out: finished measurements (a few frames old; never waits).
+        dynamicDrive.CollectMeasurements();
         if (hookRender.retried)
             DebugLog::Log("VP anamorphic hook recovery: schema=1 sequence=%llu generation=%llu hook=%llu errors=0x%x retry=1 rendered=%d lens=%.6f latch=until_shader_selection_change",
                 sourceSequence, frameGeneration, hookRender.failedSignature, hookRender.errors,
@@ -26285,7 +26074,7 @@ struct LibplaceboVideoRenderer::Impl
 			extrasFrame.image = &renderImage;
 			extrasFrame.target = &target;
 			extrasFrame.params = &frameParams;
-			extrasFrame.ledMeasurementHook = ledMeasurement.Hook();
+			extrasFrame.ledMeasurementHook = dynamicDrive.MeasurementHookPointer();
 			extrasFrame.lossless422 = lossless422Upload;
 			extrasFrame.cadenceRepeat = cadenceRepeat;
 			extrasFrame.frameGeneration = frameGeneration;
@@ -26449,17 +26238,9 @@ LibplaceboVideoRenderer::~LibplaceboVideoRenderer()
 	if (m_conversionThread.joinable())
 		m_conversionThread.join();
 	ClearQueue("renderer destruction");
-	// VP Renderer filter (2026-10-17): in the filter process (source=file) the
-	// running LED drive is held for the next graph instead of returning the
-	// projector to full light; the capture app never gets here with a hold-over.
-	if (m_ledHoldoverMs > 0 && m_ledDrive && !m_ledDriveSuspended)
-	{
-		std::shared_ptr<LedDrive::LedDriveModule> held = m_ledDrive;
-		m_ledDrive.reset();
-		if (m_impl)
-			std::atomic_store(&m_impl->ledDrive, std::shared_ptr<LedDrive::LedDriveModule>());
-		LedDrive::ProcessLedDriveHoldover().Park(held, m_ledDriveSignature, m_ledHoldoverMs);
-	}
+	// VP Renderer filter (2026-10-17): in the filter process the running LED drive is parked
+	// for the next graph (DynamicDriveHost::ParkForHoldover).
+	m_dynamicDrive.ParkForHoldover(DynamicDriveContext());
 	m_impl.reset();
 }
 
@@ -27629,18 +27410,7 @@ void LibplaceboVideoRenderer::Build()
 		static_cast<int64_t>(m_callbackGeneration));
 	// The queue path as last applied (the snapshot may have been applied before this Build).
 	m_impl->lowLatencyQueueActive.store(lowLatencyQueue, std::memory_order_release);
-	std::atomic_store(&m_impl->ledDrive, m_ledDrive);
-	if (m_ledDrive && m_ledDrive->WantsPredictions())
-		std::atomic_store(&m_impl->queuedFrameObserver, std::shared_ptr<QueuedFrameStatistics::IObserver>(
-			m_ledDrive, &m_ledDrive->Lookahead()));
-	m_impl->ledGammaBoost.store(m_ledGammaBoost, std::memory_order_release);
-	m_impl->ledCompensationEotf.store(m_ledCompensationEotf, std::memory_order_release);
-	m_impl->ledKnee.store(m_ledKnee, std::memory_order_release);
-	m_impl->ledBoostKnee.store(m_ledBoostKnee, std::memory_order_release);
-	m_impl->ledBoostKneeWidth.store(m_ledBoostKneeWidth, std::memory_order_release);
-	m_impl->ledShadowLift.store(m_ledShadowLift, std::memory_order_release);
-	m_impl->ledWtwPassthrough.store(m_ledWtwPassthrough, std::memory_order_release);
-	m_impl->ledBtbPassthrough.store(m_ledBtbPassthrough, std::memory_order_release);
+	m_dynamicDrive.Attach(DynamicDriveContext());
 	m_impl->displayRefreshRate.SetFallbackSink(
 		[this](const FallbackCatalog::Decision& decision) { if (m_impl) m_impl->SyncFallback(decision); });
 	m_impl->displayRefreshRate.SetEventSink(
@@ -27904,126 +27674,18 @@ bool LibplaceboVideoRenderer::RefreshShaderRule(
 }
 
 
-void LibplaceboVideoRenderer::UpdateLedDrive(const ConfigFile& configuration)
+// Dynamic Drive (WP-15): what the host adapter needs from this renderer, built per call.
+LedDrive::HostContext LibplaceboVideoRenderer::DynamicDriveContext() const
 {
-	// Only [projector.default] and [led_drive.default] (or its alias
-	// [dynamic_drive.default]) matter; any other configuration change leaves
-	// a running module alone.
-	std::string signature;
-	const std::string ledSection = LedDrive::ResolveLedDriveSection(configuration);
-	for (const std::string& section : { std::string(LedDrive::PROJECTOR_SECTION), ledSection })
-		if (const auto* values = configuration.GetSectionValues(section))
-			for (const auto& value : *values)
-				signature += section + "." + value.first + "=" + value.second + "\n";
-	// Both spellings in one file: [led_drive.*] wins; said once per change.
-	const std::string aliasConflict = LedDrive::LedDriveAliasConflict(configuration);
-	if (aliasConflict != m_ledDriveAliasConflict && !aliasConflict.empty())
-		DebugLog::Log("Dynamic Drive: WARNING %s", aliasConflict.c_str());
-	m_ledDriveAliasConflict = aliasConflict;
-	// An LED profile file is part of the settings: editing it applies too.
-	const std::string ledProfilePath = LedDrive::LedProfilePath(configuration);
-	if (!ledProfilePath.empty())
-	{
-		std::ifstream profile(ledProfilePath, std::ios::binary);
-		signature += "profile=" + std::string((std::istreambuf_iterator<char>(profile)),
-			std::istreambuf_iterator<char>());
-	}
-	std::string validationError;
-	const bool valid = LedDrive::Validate(configuration, validationError);
-	// The gamma boost applies even with the module off or in log_only.
-	const LedDrive::LedDriveConfig boostConfig = valid ?
-		LedDrive::ReadLedDriveConfig(configuration) : LedDrive::LedDriveConfig();
-	// The exponent is output gamma / gamma_boost, worked out per frame from
-	// the frame's output transfer; the renderer logs it when it changes.
-	if (boostConfig.gammaBoost != m_ledGammaBoost)
-		DebugLog::Log("Dynamic Drive: gamma boost setting %s (%.2f)",
-			boostConfig.gammaBoost > 0.0 ? "on" : "off", boostConfig.gammaBoost);
-	m_ledGammaBoost = boostConfig.gammaBoost;
-	m_ledCompensationEotf = boostConfig.compensationEotf;
-	m_ledKnee = boostConfig.knee;
-	m_ledBoostKnee = boostConfig.gammaBoostKnee;
-	m_ledBoostKneeWidth = boostConfig.gammaBoostKneeWidth;
-	m_ledWtwPassthrough = boostConfig.wtwPassthrough;
-	m_ledBtbPassthrough = boostConfig.btbPassthrough;
-	// The shadow lift is part of adaptive gamma (owner 2026-10-14).
-	m_ledShadowLift = boostConfig.adaptiveGamma ? boostConfig.shadowLiftAnsi : 0.0;
+	LedDrive::HostContext context;
 	if (m_impl)
 	{
-		m_impl->ledGammaBoost.store(m_ledGammaBoost, std::memory_order_release);
-		m_impl->ledCompensationEotf.store(m_ledCompensationEotf, std::memory_order_release);
-		m_impl->ledKnee.store(m_ledKnee, std::memory_order_release);
-		m_impl->ledBoostKnee.store(m_ledBoostKnee, std::memory_order_release);
-		m_impl->ledBoostKneeWidth.store(m_ledBoostKneeWidth, std::memory_order_release);
-		m_impl->ledShadowLift.store(m_ledShadowLift, std::memory_order_release);
-		m_impl->ledWtwPassthrough.store(m_ledWtwPassthrough, std::memory_order_release);
-		m_impl->ledBtbPassthrough.store(m_ledBtbPassthrough, std::memory_order_release);
+		context.frame = &m_impl->dynamicDrive;
+		// VP-V: slot drive.projector_control (off in the Original pathway, ADR-0019, or at slot level).
+		context.projectorAllowed = m_impl->pipelineSlots.Runs(PipelineSlots::Id::DriveProjectorControl);
+		context.lastRenderStartedTick = m_impl->libplaceboRenderStartedTick.load(std::memory_order_acquire);
 	}
-	// VP-V: slot drive.projector_control (off in the Original pathway, ADR-0019, or at slot level):
-	// the RS-232 LED/CNTR drive is not started.
-	const bool projectorAllowed = !m_impl || m_impl->pipelineSlots.Runs(PipelineSlots::Id::DriveProjectorControl);
-	if (signature == m_ledDriveSignature && (m_ledDrive != nullptr) ==
-		(valid && projectorAllowed && LedDrive::ReadLedDriveConfig(configuration).enabled))
-		return;
-	// A broken LED profile never stops VP: it is left out (built-in values
-	// plus the main settings) and said once per change.
-	std::string profileProblem;
-	if (!LedDrive::ValidateLedProfile(configuration, profileProblem))
-		DebugLog::Log("Dynamic Drive: WARNING LED profile ignored (%s); using the built-in values",
-			profileProblem.c_str());
-	// Tuning and script/compensate switches go to the running module, so the
-	// LED carries on from its level instead of restoring full light.
-	if (valid && m_ledDrive && m_ledDrive->Reconfigure(LedDrive::ReadProjectorConfig(configuration),
-		LedDrive::ReadLedDriveConfig(configuration)))
-	{
-		m_ledDriveSignature = signature;
-		if (m_impl)
-			std::atomic_store(&m_impl->queuedFrameObserver, m_ledDrive->WantsPredictions() ?
-				std::shared_ptr<QueuedFrameStatistics::IObserver>(m_ledDrive, &m_ledDrive->Lookahead()) :
-				std::shared_ptr<QueuedFrameStatistics::IObserver>());
-		return;
-	}
-	m_ledDriveSignature = signature;
-	std::shared_ptr<LedDrive::LedDriveModule> previous = m_ledDrive;
-	m_ledDrive.reset();
-	if (m_impl)
-	{
-		std::atomic_store(&m_impl->ledDrive, std::shared_ptr<LedDrive::LedDriveModule>());
-		std::atomic_store(&m_impl->queuedFrameObserver, std::shared_ptr<QueuedFrameStatistics::IObserver>());
-	}
-	if (previous) previous->Stop();
-	if (!valid)
-	{
-		DebugLog::Log("Dynamic Drive: configuration rejected (%s); module and gamma boost off",
-			validationError.c_str());
-		return;
-	}
-	const LedDrive::LedDriveConfig led = LedDrive::ReadLedDriveConfig(configuration);
-	if (!led.enabled || !projectorAllowed)
-	{
-		if (previous || (led.enabled && !projectorAllowed))
-			DebugLog::Log("Dynamic Drive: disabled%s", projectorAllowed ? "" : " (slot drive.projector_control off: Original pathway or pipeline_slots_off)");
-		return;
-	}
-	// VP Renderer filter (2026-10-17): a drive the previous file's renderer
-	// held (same LED settings) carries on; nothing is held in the capture app.
-	m_ledDrive = LedDrive::ProcessLedDriveHoldover().Adopt(signature);
-	if (!m_ledDrive)
-	{
-		// The serial port goes through the LED drive arbiter: VideoProcessor.exe
-		// and the filter never drive the projector at the same time.
-		m_ledDrive = std::make_shared<LedDrive::LedDriveModule>(
-			LedDrive::ReadProjectorConfig(configuration), led, LedDrive::ArbitratedSerialPortFactory());
-		m_ledDrive->Start();
-	}
-	if (m_impl)
-	{
-		std::atomic_store(&m_impl->ledDrive, m_ledDrive);
-		// The module's lookahead watches the queued-frame walk; the aliasing
-		// pointer keeps the module alive while the walk holds it.
-		if (m_ledDrive->WantsPredictions())
-			std::atomic_store(&m_impl->queuedFrameObserver, std::shared_ptr<QueuedFrameStatistics::IObserver>(
-				m_ledDrive, &m_ledDrive->Lookahead()));
-	}
+	return context;
 }
 
 std::vector<CString> LibplaceboVideoRenderer::ActiveShaders() const
@@ -28099,13 +27761,11 @@ bool LibplaceboVideoRenderer::ApplyApplicationState(
 	};
 	if (snapshot.configuration)
 	{
-		// VP Renderer filter (2026-10-17): the LED hold-over is for file playback only.
+		// Dynamic Drive (WP-15): the LED drive's settings; the hold-over is for file playback only.
 		std::string sourceKind;
-		m_ledHoldoverMs = snapshot.LookupVariable("source", sourceKind) && sourceKind == "file" ?
-			FileSource::ReadFileHostSettings(*snapshot.configuration).ledHoldoverMs : 0;
-		m_ledDriveConfiguration = snapshot.configuration;
-		if (!m_ledDriveSuspended)
-			UpdateLedDrive(*snapshot.configuration);
+		if (!snapshot.LookupVariable("source", sourceKind))
+			sourceKind.clear();
+		m_dynamicDrive.ApplySnapshot(snapshot.configuration, sourceKind, DynamicDriveContext());
 	}
 	VideoStateComPtr state = m_videoState;
 	auto candidateConfiguration = m_rendererConfiguration;
@@ -29429,30 +29089,14 @@ bool LibplaceboVideoRenderer::SetCalibrationPattern(const Calibration::PatternRe
 		}
 		if (!m_calibrationPatternActive.load(std::memory_order_acquire))
 		{
-			// The LED drive stops (Stop() restores full light: LDMM 0, LPW1 to the
-			// ceiling, CNTR 50) so no APL command moves the light between patches.
-			std::shared_ptr<LedDrive::LedDriveModule> module;
-			{
-				std::unique_lock<std::mutex> guard(m_stateMutex);
-				module = m_ledDrive;
-				if (module)
-				{
-					m_ledDrive.reset();
-					m_ledDriveSignature.clear();
-					m_ledDriveSuspended = true;
-					m_calibrationLedSuspended = true;
-					std::atomic_store(&m_impl->ledDrive, std::shared_ptr<LedDrive::LedDriveModule>());
-					std::atomic_store(&m_impl->queuedFrameObserver, std::shared_ptr<QueuedFrameStatistics::IObserver>());
-				}
-			}
-			if (module)
-				module->Stop();
+			// The LED drive stops at full light for the patches (DynamicDriveHost::SuspendForCalibration).
+			const bool ledStopped = m_dynamicDrive.SuspendForCalibration(DynamicDriveContext());
 			m_impl->calibrationWindowFallbackLogged = false;
 			m_impl->calibrationFailureLogged = false;
 			m_calibrationPatternActive.store(true, std::memory_order_release);
 			BeginQueueGeneration("calibration patterns");
 			DebugLog::Log("Calibration patterns: started (video paused, Dynamic Drive %s)",
-				module ? "stopped at full light" : "not running");
+				ledStopped ? "stopped at full light" : "not running");
 		}
 		m_queueChanged.notify_all();
 		return true;
@@ -29465,11 +29109,7 @@ bool LibplaceboVideoRenderer::SetCalibrationPattern(const Calibration::PatternRe
 	}
 	BeginQueueGeneration("calibration patterns ended");
 	m_queueChanged.notify_all();
-	if (m_calibrationLedSuspended)
-	{
-		m_calibrationLedSuspended = false;
-		ResumeLedDriveAfterTest();
-	}
+	m_dynamicDrive.ResumeAfterCalibration(DynamicDriveContext());
 	DebugLog::Log("Calibration patterns: ended (video resumes)");
 	return true;
 }
@@ -29477,97 +29117,29 @@ bool LibplaceboVideoRenderer::SetCalibrationPattern(const Calibration::PatternRe
 bool LibplaceboVideoRenderer::SuspendLedDriveForTest(CString& reason)
 {
 	reason.Empty();
-	std::shared_ptr<LedDrive::LedDriveModule> module;
-	{
-		std::unique_lock<std::mutex> guard(m_stateMutex);
-		bool playing = false;
-		if (m_ledDrive)
-			playing = m_ledDrive->MsSinceLastFrame() < 2000.0;
-		else if (m_impl)
-		{
-			const ULONGLONG last = m_impl->libplaceboRenderStartedTick.load(std::memory_order_acquire);
-			playing = last != 0 && GetTickCount64() - last < 2000;
-		}
-		if (playing)
-		{
-			reason = TEXT("Not run: video is playing. Stop playback and try again.");
-			return false;
-		}
-		module = m_ledDrive;
-		m_ledDrive.reset();
-		m_ledDriveSignature.clear();
-		m_ledDriveSuspended = true;
-		if (m_impl)
-		{
-			std::atomic_store(&m_impl->ledDrive, std::shared_ptr<LedDrive::LedDriveModule>());
-			std::atomic_store(&m_impl->queuedFrameObserver, std::shared_ptr<QueuedFrameStatistics::IObserver>());
-		}
-	}
-	if (module)
-	{
-		module->Stop();
-		DebugLog::Log("Dynamic Drive: stopped for the RS-232 connection test");
-	}
-	return true;
+	std::string why;
+	const bool suspended = m_dynamicDrive.SuspendForTest(DynamicDriveContext(), why);
+	if (!suspended)
+		reason = CString(why.c_str());
+	return suspended;
 }
 
 // Integration 2026-10-17: the forced shutdown's LED stop. The render state lock may be
 // held by the blocked retirement, so the module comes from the render loop's atomic copy
-// (or m_ledDrive when the lock is free at once). Stop() restores full light.
+// (or the host adapter's when the lock is free at once). Stop() restores full light.
 bool LibplaceboVideoRenderer::StopLedDriveForShutdown()
 {
-	std::shared_ptr<LedDrive::LedDriveModule> module;
+	// Only the render side's module copy and a lock that is free at once (never pipelineSlots:
+	// the render thread may be rebuilding it while a blocked retirement holds the state lock).
+	LedDrive::HostContext context;
 	if (m_impl)
-		module = std::atomic_load(&m_impl->ledDrive);
-	if (!module)
-	{
-		std::unique_lock<std::mutex> guard(m_stateMutex, std::try_to_lock);
-		if (guard.owns_lock())
-			module = m_ledDrive;
-	}
-	if (!module)
-		return true;
-	DebugLog::Log("Dynamic Drive: stopping for the forced shutdown (restoring full light)");
-	// Bug hunt 2 2026-10-17: the restore's result (light, and LDMM / CNTR
-	// when sent), so the caller can say "not confirmed" when it was not.
-	const bool confirmed = module->Stop();
-	DebugLog::Log("Dynamic Drive: stopped for the forced shutdown%s",
-		confirmed ? "" : " (restore not confirmed)");
-	return confirmed;
+		context.frame = &m_impl->dynamicDrive;
+	return m_dynamicDrive.StopForShutdown(context);
 }
 
 void LibplaceboVideoRenderer::ResumeLedDriveAfterTest()
 {
-	// A renderer created during the test (a restart, a new signal) started
-	// its own LED drive while the test held the port: that drive found the
-	// port busy and runs as a dry run. Restart it too (audit stage8-rs232
-	// item 1); the dialog calls this after every test.
-	std::shared_ptr<LedDrive::LedDriveModule> stale;
-	{
-		std::unique_lock<std::mutex> guard(m_stateMutex);
-		if (!m_ledDriveSuspended && m_ledDrive)
-		{
-			stale = m_ledDrive;
-			m_ledDrive.reset();
-			m_ledDriveSignature.clear();
-			if (m_impl)
-			{
-				std::atomic_store(&m_impl->ledDrive, std::shared_ptr<LedDrive::LedDriveModule>());
-				std::atomic_store(&m_impl->queuedFrameObserver, std::shared_ptr<QueuedFrameStatistics::IObserver>());
-			}
-		}
-	}
-	if (stale)
-		stale->Stop();   // closes the port before the new drive opens it
-	std::unique_lock<std::mutex> guard(m_stateMutex);
-	const bool wasSuspended = m_ledDriveSuspended;
-	m_ledDriveSuspended = false;
-	if ((wasSuspended || stale) && m_ledDriveConfiguration)
-	{
-		UpdateLedDrive(*m_ledDriveConfiguration);
-		DebugLog::Log(wasSuspended ? "Dynamic Drive: restarted after the RS-232 connection test" :
-			"Dynamic Drive: restarted after the RS-232 connection test (renderer created during the test)");
-	}
+	m_dynamicDrive.ResumeAfterTest(DynamicDriveContext());
 }
 
 bool LibplaceboVideoRenderer::GetDejudderStatus(CString& status) const
@@ -29603,29 +29175,7 @@ bool LibplaceboVideoRenderer::ToggleDvCompareCapture(CString& status)
 
 bool LibplaceboVideoRenderer::GetLedDriveStatus(CString& status) const
 {
-	status.Empty();
-	const std::shared_ptr<LedDrive::LedDriveModule> led = m_ledDrive;
-	if (!led)
-	{
-		status = TEXT("off");
-		return true;
-	}
-	const LedDrive::LedDriveConfig config = led->Config();
-	const LedDrive::DriverStatus driver = led->ProjectorStatus();
-	const LedDrive::CompensationGain gain = led->CurrentGain();
-	const char* mode = config.mode == LedDrive::Mode::Compensate ? "compensate" :
-		config.mode == LedDrive::Mode::Script ? "script" :
-		config.mode == LedDrive::Mode::PictureOnly ? "picture_only" : "log_only";
-	char text[512];
-	snprintf(text, sizeof(text),
-		"source %s (mode %s%s), %s, light last sent %d (confirmed %d), contrast last sent %d, commands %d, timeouts %d, "
-		"picture gain %s %.3f",
-		config.commandSource.empty() ? "(from mode)" : config.commandSource.c_str(), mode,
-		config.mode == LedDrive::Mode::Script ? (config.scriptPacing ? ", script pacing" : ", tick loop") : "",
-		led->DrivingProjector() ? "driving the projector" : "not driving the projector (dry run)",
-		driver.lastSentLight, driver.lastLight, driver.lastSentContrast, driver.commands, driver.timeouts,
-		gain.active ? "on" : "off", gain.gain);
-	status = CString(text);
+	status = CString(m_dynamicDrive.StatusText().c_str());
 	return true;
 }
 
@@ -31356,13 +30906,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 		// wait for extra proof frames: a short window keeps the normal live fallback.
 		// led_lookahead_ms (2026-10-17): the LED's own depth extends the walk (its
 		// statistics observer only); read before the queue lock (the LED's own lock).
-		size_t ledWantedLookahead = 0;
-		if (m_impl && std::atomic_load(&m_impl->queuedFrameObserver))
-		{
-			const std::shared_ptr<LedDrive::LedDriveModule> led = std::atomic_load(&m_impl->ledDrive);
-			if (led)
-				ledWantedLookahead = led->WantedLookaheadFrames();
-		}
+		const size_t ledWantedLookahead = m_impl ? m_impl->dynamicDrive.WantedLookaheadFrames() : 0;
 		// Hunt 2 (cadence_class_fixes, 02-dv M4): content intent needs each queued frame once;
 		// with no active-picture look-ahead and no LED it walks the current frame and the next.
 		const bool contentWantsWalk = m_impl && m_impl->activeSettings.cadenceClassFixes &&

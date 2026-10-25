@@ -110,8 +110,7 @@ namespace LedDrive
 		return std::string();
 	}
 
-	void DynamicDriveFrame::PrepareFrame(const DynamicDriveFrameInputs& in, std::vector<const pl_hook*>& hooks,
-		const std::function<void(size_t, PipelineSlots::Id)>& tagSlot)
+	void DynamicDriveFrame::DecideFrame(const DynamicDriveFrameInputs& in, OutputSegments::ColourFrame& colour)
 	{
 		const pl_frame& image = *in.image;
 		const pl_frame& target = *in.target;
@@ -136,11 +135,11 @@ namespace LedDrive
 			ReleaseFallback(kBoostFallbackId);
 			boostEngaged = false;
 		}
-		if (!(led || boostExponent != 1.0 || shadowLift.load(std::memory_order_acquire) > 0.0))
-		{
-			MergeModuleFallbacks(led);
+		frameModule = led;
+		frameBoostExponent = boostExponent;
+		frameBlock = led || boostExponent != 1.0 || shadowLift.load(std::memory_order_acquire) > 0.0;
+		if (!frameBlock)
 			return;
-		}
 		// Slot drive.led_compensation off (pipeline_slots_off, Original pathway): no hook state is
 		// built at all (modularity sweep: off = no state change).
 		if (in.compensationSlotRuns && !compensationConfigured)
@@ -228,23 +227,44 @@ namespace LedDrive
 			// Delta 8 R2: the grain map (the previous source frame's, as for S1) for
 			// grain-suppressed highlight statistics.
 			measurement.SetGrain(config.highlightGrainSuppress ? in.grainMap : nullptr, in.grainFloor, image.crop);
-			if (in.measureSlotRuns)
-			{
-				hooks.push_back(measurement.Hook());
-				tagSlot(hooks.size() - 1, PipelineSlots::Id::DriveLedMeasure);
-			}
+			// S2 pushes the measurement hook (and tags it) when its slot runs.
+			colour.ledMeasure = in.measureSlotRuns;
 		}
-		const size_t compensationStart = hooks.size();
-		if (in.compensationSlotRuns)
-			compensation.Collect(false, hooks);
-		tagSlot(compensationStart, PipelineSlots::Id::DriveLedCompensation);
+		// S2's compensation stage collects the chain (when its slot runs) with these parameters;
+		// it is the only emitter of both LED hooks (merge audit C1).
+		colour.ledBlock = true;
+		colour.ledCompensation = in.compensationSlotRuns;
+		OutputSegments::CompensationParams& p = colour.compensation;
+		p.gain = gain.active ? gain.gain : 1.0;
+		p.knee = gain.knee;
+		p.gainDomain = gain.domain == GainDomain::Linear ? 1.0 : 0.0;
+		p.eotf = gain.eotf;
+		p.boost = boostExponent;
+		p.boostKnee = boostKnee.load(std::memory_order_acquire);
+		p.boostKneeWidth = boostKneeWidth.load(std::memory_order_acquire);
+		p.shadowLift = shadowLift.load(std::memory_order_acquire);
+		p.veil = gain.veil;
+		p.wtwPassthrough = wtwPassthrough.load(std::memory_order_acquire) ? 1.0 : 0.0;
+		p.btbPassthrough = btbPassthrough.load(std::memory_order_acquire) ? 1.0 : 0.0;
+	}
+
+	void DynamicDriveFrame::AfterCollect(const DynamicDriveFrameInputs& in, size_t compensationHooks)
+	{
+		const std::shared_ptr<LedDriveModule> led = std::move(frameModule);
+		frameModule.reset();
+		const double boostExponent = frameBoostExponent;
+		if (!frameBlock)
+		{
+			MergeModuleFallbacks(led);
+			return;
+		}
 		// Module findings 2026-10-24 item 1: compensate dims the LED only because this hook
 		// brightens the picture by the same amount. When it does not run this frame (slot off,
 		// shader not loaded, or disabled by libplacebo) the module holds full drive and shows
 		// "Fallbacks engaged: LED drive (held at full: ...)"; cheap when unchanged. Also when the
 		// hook is skipped, not only when it is pushed.
 		const std::string unavailable = CompensationUnavailable(in.compensationSlotRuns,
-			hooks.size() - compensationStart, compensationRuntimeDisabled);
+			compensationHooks, compensationRuntimeDisabled);
 		if (led)
 		{
 			led->SetCompensationAvailable(unavailable.empty(), unavailable);
@@ -252,7 +272,7 @@ namespace LedDrive
 			const std::string measurementOff = MeasurementUnavailable(in.measureSlotRuns, measurementDisabledLogged);
 			led->SetMeasurementAvailable(measurementOff.empty(), measurementOff);
 		}
-		if (boostExponent != 1.0 && hooks.size() == compensationStart)
+		if (boostExponent != 1.0 && compensationHooks == 0)
 		{
 			if (!boostMissingLogged)
 				DebugLog::Log("Dynamic Drive: WARNING gamma boost NOT applied - shaders\\LED compensation.glsl did not load or was disabled; the picture is plain output_gamma (exponent %.4f missing)",
@@ -271,7 +291,7 @@ namespace LedDrive
 				boostEngaged = false;
 			}
 		}
-		else if (hooks.size() > compensationStart)
+		else if (compensationHooks > 0)
 		{
 			if (boostMissingLogged)
 				DebugLog::Log("Dynamic Drive: gamma boost applied again (compensation hook running)");
@@ -280,22 +300,6 @@ namespace LedDrive
 			boostEngaged = false;
 		}
 		MergeModuleFallbacks(led);
-		for (size_t i = compensationStart; i < hooks.size(); ++i)
-		{
-			CustomHookChain::SetHookParameter(hooks[i], "gain", gain.active ? gain.gain : 1.0);
-			CustomHookChain::SetHookParameter(hooks[i], "knee", gain.knee);
-			CustomHookChain::SetHookParameter(hooks[i], "gain_domain", gain.domain == GainDomain::Linear ? 1.0 : 0.0);
-			CustomHookChain::SetHookParameter(hooks[i], "compensation_eotf", gain.eotf);
-			CustomHookChain::SetHookParameter(hooks[i], "boost", boostExponent);
-			CustomHookChain::SetHookParameter(hooks[i], "boost_knee", boostKnee.load(std::memory_order_acquire));
-			CustomHookChain::SetHookParameter(hooks[i], "boost_knee_width", boostKneeWidth.load(std::memory_order_acquire));
-			CustomHookChain::SetHookParameter(hooks[i], "shadow_lift", shadowLift.load(std::memory_order_acquire));
-			CustomHookChain::SetHookParameter(hooks[i], "veil", gain.veil);
-			CustomHookChain::SetHookParameter(hooks[i], "wtw_passthrough",
-				wtwPassthrough.load(std::memory_order_acquire) ? 1.0 : 0.0);
-			CustomHookChain::SetHookParameter(hooks[i], "btb_passthrough",
-				btbPassthrough.load(std::memory_order_acquire) ? 1.0 : 0.0);
-		}
 	}
 
 	void DynamicDriveFrame::OnHookErrors(const uint64_t* disabledSignatures, int count)
