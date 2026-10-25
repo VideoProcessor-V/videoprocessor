@@ -52,7 +52,7 @@ namespace AdaptiveDownscaleStage
 		const bool downscaleOn = frame.slotRuns && frame.adaptiveDownscale;   // slot off: as adaptive_downscale off
 		upscaleThisFrame = upscaleBlend;
 		// Findings 2026-10-25 #1: what Fallback() reports (no effect on the picture).
-		newFailures = module.Failures() - failuresSeen;
+		NoteFailures(module.Failures() - failuresSeen, GetTickCount64());
 		failuresSeen = module.Failures();
 		requested = upscaleBlend || downscaleOn;
 		ssimMissing = false;

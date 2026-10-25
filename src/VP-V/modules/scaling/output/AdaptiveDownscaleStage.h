@@ -102,12 +102,23 @@ namespace AdaptiveDownscaleStage
 
 		bool UpscaleThisFrame() const { return upscaleThisFrame; }
 
+		// New module failures seen at `nowMs` (Register calls it each frame; tests drive it directly).
+		void NoteFailures(unsigned long long newFailures, unsigned long long nowMs)
+		{
+			if (newFailures > 0)
+				lastFailureTick = nowMs;
+			failureHeld = lastFailureTick != 0 && nowMs - lastFailureTick < kFailureHoldMs;
+		}
+
 		// ADR-0001 (findings 2026-10-25 #1): the "output scaling" entry for the frame just registered:
 		// the blend asked for but SSimDownscaler not in the shader list (libplacebo's downscaler), or
-		// the blend failed on the GPU during the previous render (plain SSIM / the unblended picture).
+		// the blend failed on the GPU (plain SSIM / the unblended picture). A GPU failure holds the
+		// entry for kFailureHoldMs after the last failing frame, so a one-off failure does not flicker
+		// in the status and is still listed when a problem report is taken (audit 2026-10-25 M-2).
+		static constexpr unsigned long long kFailureHoldMs = 5000;
 		FallbackCatalog::Decision Fallback() const
 		{
-			return FallbackCatalog::OutputScaling(requested, newFailures, ssimMissing);
+			return FallbackCatalog::OutputScaling(requested, failureHeld ? 1u : 0u, ssimMissing);
 		}
 
 	private:
@@ -120,6 +131,7 @@ namespace AdaptiveDownscaleStage
 		bool requested = false;          // the blend asked for on this frame (downscale on, or the upscale form)
 		bool ssimMissing = false;        // downscale on without SSimDownscaler in the chain
 		unsigned long long failuresSeen = 0;
-		unsigned long long newFailures = 0;   // module failures during the previous render
+		unsigned long long lastFailureTick = 0;   // GetTickCount64() of the last frame with new failures
+		bool failureHeld = false;          // a failure within kFailureHoldMs
 	};
 }

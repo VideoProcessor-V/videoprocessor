@@ -245,6 +245,24 @@ namespace VideoProcessorTest
 			Assert::IsFalse(x.stage.Fallback().engaged);
 		}
 
+		TEST_METHOD(AdaptiveGpuFailureIsHeldThenReleased)
+		{
+			// Audit M-2: a one-off GPU failure stays listed for kFailureHoldMs, then is released.
+			AdaptiveFixture x;
+			std::vector<const pl_hook*> hooks;
+			AdaptiveDownscaleStage::Frame f = x.Frame(2160, 1080);
+			f.adaptiveDownscale = true;
+			x.ssim = true;
+			x.Run(f, hooks);
+			Assert::IsFalse(x.stage.Fallback().engaged);
+			x.stage.NoteFailures(1, 100000);
+			Assert::IsTrue(x.stage.Fallback().engaged);
+			x.stage.NoteFailures(0, 100000 + AdaptiveDownscaleStage::Stage::kFailureHoldMs - 1);
+			Assert::IsTrue(x.stage.Fallback().engaged);
+			x.stage.NoteFailures(0, 100000 + AdaptiveDownscaleStage::Stage::kFailureHoldMs);
+			Assert::IsFalse(x.stage.Fallback().engaged);
+		}
+
 		TEST_METHOD(AdaptiveUpscaleTakesTheUpscaleFormAndItsLight)
 		{
 			AdaptiveFixture x;
