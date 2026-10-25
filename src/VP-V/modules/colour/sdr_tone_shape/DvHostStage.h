@@ -171,7 +171,11 @@ public:
 		// the trims in ICtCp; when it cannot run: bt2390 + the luminance trims, under "Fallbacks engaged".
 		const pl_frame& renderImage = f.image;
 		const pl_frame& target = f.target;
-		const bool dvToneDolby = DvDolbyStyle::ParseMode(f.toneMappingMode) == DvDolbyStyle::Mode::DolbyStyle;
+		// F-12 (owner rule, 2026-10-25): the slot switched off (pipeline_slots_off / Original pathway)
+		// is OFF, not a fallback: the configured libplacebo curve runs and nothing is listed, exactly
+		// as without the slot. (Before: "DV tone mapping: the colour tone-shape slot is off: bt2390".)
+		const bool dvToneDolby = f.colourStageRuns &&
+			DvDolbyStyle::ParseMode(f.toneMappingMode) == DvDolbyStyle::Mode::DolbyStyle;
 		const bool dvTonePicture = renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION && f.dm && f.dm->valid;
 		const std::string dvToneFallback = DvDolbyStyle::CannotRun(dvToneDolby && dvTonePicture, target.lut != nullptr,
 			target.color.transfer, f.colourStageRuns, f.trims && m_trimsShaderMissing);

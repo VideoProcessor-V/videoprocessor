@@ -267,6 +267,39 @@ namespace Tests
 			Assert::IsTrue(stage.ReferenceConditions().valid);
 		}
 
+		// Owner rule (2026-10-25): colour.sdr_tone_shape switched off (pipeline_slots_off, Original
+		// pathway) = byte-identical to no slot: no hook, the configured curve, nothing listed - with
+		// dolby_style and dv_trims requested on a DV picture. On again: both act again.
+		TEST_METHOD(SlotOffIsOffNotAFallback)
+		{
+			using namespace DvHost;
+			Registry reg;
+			DvHostStage stage(NoShaders(), reg.Engage(), reg.Release());
+			Run run;
+			run.mode = "dolby_style";
+			run.trims = true;
+			run.colourRuns = false;
+			pl_color_map_params params = pl_color_map_default_params;
+			params.tone_mapping_function = &pl_tone_map_spline;
+			std::vector<const pl_hook*> hooks;
+			const DolbyVisionTunnelFrameMetadata dm = TrimmedDm();
+			const pl_frame image = Picture(true);
+			for (int k = 0; k < 3; ++k)
+				run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
+			Assert::IsTrue(params.tone_mapping_function == &pl_tone_map_spline, L"slot off: the configured curve");
+			Assert::IsTrue(hooks.empty(), L"slot off: no hook");
+			Assert::IsTrue(reg.engaged.empty(), L"slot off: nothing under Fallbacks engaged");
+			Assert::AreEqual(std::string("DV tone mapping: libplacebo (bt2390)"), stage.ToneStatus());
+			run.colourRuns = true;
+			run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
+			Assert::IsTrue(reg.Has("Dolby Vision trims"), L"slot on: the trims act (here: shader missing, listed)");
+			run.colourRuns = false;
+			hooks.clear();
+			run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
+			Assert::IsTrue(reg.engaged.empty() && hooks.empty(), L"off again: released");
+			Assert::IsTrue(params.tone_mapping_function == &pl_tone_map_spline);
+		}
+
 		TEST_METHOD(GpuUnpackSessionLogsOnceAndSwitchesTheSessionToTheCpuOnce)
 		{
 			DvGpuUnpackSession session;
