@@ -3,7 +3,7 @@
 #include "CalibrationRun.h"
 
 #include "Spotread.h"
-#include "../../VideoProcessor-ConfigCore/ConfigEditorCore.h"
+#include <VideoProcessor-ConfigCore/ConfigEditorCore.h>
 
 #include <algorithm>
 #include <cctype>

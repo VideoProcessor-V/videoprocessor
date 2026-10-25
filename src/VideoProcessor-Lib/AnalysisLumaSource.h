@@ -29,7 +29,7 @@ enum class AnalysisLumaFormat
 // sources (8-bit and 12-bit RGB, the DV SDR-tunnel RGB, and full-range YCbCr
 // planes flagged by fullRangeYuv) are mapped Y = 64 + 876/1023 * Y',
 // C = 512 + 896/1023 * C'. Consumers must not apply a second full-range
-// interpretation to these codes (see led/LedLookahead LumaIsFullRange).
+// interpretation to these codes (see VP-V/modules/drive/led_measure/LedLookahead LumaIsFullRange).
 constexpr bool kAnalysisLumaSampleLimitedDomain = true;
 
 struct AnalysisLumaSample

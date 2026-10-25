@@ -1,6 +1,6 @@
 #pragma once
 
-#include "LedLookahead.h"
+#include <VP-V/modules/drive/led_measure/LedLookahead.h>
 
 #include <libplacebo/colorspace.h>
 #include <libplacebo/shaders/colorspace.h>

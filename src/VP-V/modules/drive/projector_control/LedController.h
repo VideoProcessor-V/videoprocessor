@@ -1,6 +1,6 @@
 #pragma once
 
-#include "LedDriveConfig.h"
+#include <led/LedDriveConfig.h>
 
 #include <algorithm>
 #include <array>

@@ -76,7 +76,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Planned keys (not yet implemented): `refine_net`.
 - Tiers: Upper only (Mid optional if cheap).
 - VP-V page, Scaling tab: tiers Classic / Low / Mid; tier keys `adaptive_downscale`, `adaptive_w_base`, `source_resolution`.
-- Plain-language guide: [docs/settings/VP-settings-reference.md#5-scaling](../../../../docs/settings/VP-settings-reference.md#5-scaling).
+- Plain-language guide: [docs/settings/VP-settings-reference.md#5-scaling](../../../../../docs/settings/VP-settings-reference.md#5-scaling).
 - Fallback entry ("Fallbacks engaged"): `Refine: bypassed (fingerprint mismatch / group underperforms / low latency)`.
 
 ## Tests

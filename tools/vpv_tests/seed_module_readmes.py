@@ -38,7 +38,7 @@ def block(slot, unit, matrix):
             lines.append("- Listed under the tier: " + ", ".join(f"`{k}`" for k in toggles) + ".")
         anchor = GUIDE_SECTION.get(unit["id"])
         if anchor:
-            lines.append(f"- Plain-language guide: [{GUIDE}#{anchor}](../../../../{GUIDE}#{anchor}).")
+            lines.append(f"- Plain-language guide: [{GUIDE}#{anchor}](../../../../../{GUIDE}#{anchor}).")
     fb = (slot.get("fallback") or {}).get("entry")
     lines.append(f"- Fallback entry (\"Fallbacks engaged\"): {('`' + fb + '`') if fb else 'none (control slot)'}.")
     lines += ["", "## Tests", ""]

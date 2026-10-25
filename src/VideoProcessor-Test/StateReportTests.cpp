@@ -3,8 +3,8 @@
 
 #include <ConfigFile.h>
 #include <DiagnosticHistory.h>
-#include <StateReport.h>
-#include <StateReportSettings.h>
+#include <VP-V/modules/control/diagnostics/StateReport.h>
+#include <VP-V/modules/control/diagnostics/StateReportSettings.h>
 #include <StoreZipWriter.h>
 
 #include <algorithm>

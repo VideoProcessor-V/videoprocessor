@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include <KernelInverse.h>
+#include <VP-V/modules/scaling/rebase/KernelInverse.h>
 
 #include <algorithm>
 #include <cmath>

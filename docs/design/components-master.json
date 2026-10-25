@@ -144,7 +144,7 @@
         "src/VideoProcessor-Lib/SourceResolutionDetector.h",
         "src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.cpp",
         "src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.h",
-        "src/VideoProcessor-Lib/KernelInverse.cpp",
+        "src/VP-V/modules/scaling/rebase/KernelInverse.cpp",
         "src/VideoProcessor-Lib/ActivePictureAnalyzer.cpp",
         "src/VideoProcessor-Lib/SceneDetector.cpp",
         "src/VideoProcessor-Lib/SubtitleBoxDetector.cpp",
@@ -225,12 +225,12 @@
       "slot": "scaling.rebase",
       "order": 60,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
+        "src/VP-V/modules/scaling/rebase/KernelInverse.cpp",
+        "src/VP-V/modules/scaling/rebase/KernelInverse.h",
         "src/VideoProcessor-Lib/vprenderer/SourceRebase.cpp",
         "src/VideoProcessor-Lib/vprenderer/SourceRebase.h",
-        "src/VideoProcessor-Lib/KernelInverse.cpp",
-        "src/VideoProcessor-Lib/KernelInverse.h",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
       ],
       "components": {
@@ -727,11 +727,14 @@
       "slot": "drive.led_measure",
       "order": 220,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/led/LedMeasurement.cpp",
-        "src/VideoProcessor-Lib/led/LedMeasurementHook.cpp",
-        "src/VideoProcessor-Lib/led/LedLookahead.cpp"
+        "src/VP-V/modules/drive/led_measure/LedMeasurement.cpp",
+        "src/VP-V/modules/drive/led_measure/LedLookahead.cpp",
+        "src/VP-V/modules/drive/led_measure/LedMeasurement.h",
+        "src/VP-V/modules/drive/led_measure/LedLookahead.h",
+        "src/VP-V/modules/drive/led_measure/ReadbackRing.h",
+        "src/VideoProcessor-Lib/led/LedMeasurementHook.cpp"
       ],
       "components": {
         "files": {
@@ -759,11 +762,15 @@
       "slot": "drive.led_compensation",
       "order": 230,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
-        "shaders/LED compensation.glsl",
-        "src/VideoProcessor-Lib/led/LedDriveModule.cpp",
-        "src/VideoProcessor-Lib/led/LedDriveArbiter.cpp"
+        "src/VP-V/modules/drive/led_compensation/LedDriveModule.cpp",
+        "src/VP-V/modules/drive/led_compensation/LedDriveArbiter.cpp",
+        "src/VP-V/modules/drive/led_compensation/LedDriveModule.h",
+        "src/VP-V/modules/drive/led_compensation/LedDriveArbiter.h",
+        "src/VP-V/modules/drive/led_compensation/LedDriveHoldover.cpp",
+        "src/VP-V/modules/drive/led_compensation/LedDriveHoldover.h",
+        "shaders/LED compensation.glsl"
       ],
       "components": {
         "files": {
@@ -821,10 +828,10 @@
       "live_files": [
         "src/VP-V/modules/output/calibration_lut/CalibrationLutStage.h",
         "src/VP-V/modules/output/calibration_lut/CalibrationLutStage.cpp",
+        "src/VP-V/modules/output/calibration_lut/calibration",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.cpp",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.h",
-        "src/VideoProcessor-Lib/vprenderer/LibplaceboCalibrationLutPolicy.h",
-        "src/VideoProcessor-Lib/calibration"
+        "src/VideoProcessor-Lib/vprenderer/LibplaceboCalibrationLutPolicy.h"
       ],
       "components": {
         "files": {
@@ -925,12 +932,20 @@
       "slot": "drive.projector_control",
       "order": 900,
       "status": "built",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
-        "src/VideoProcessor-Lib/led/LedController.cpp",
-        "src/VideoProcessor-Lib/led/BarcoAsciiDriver.cpp",
-        "src/VideoProcessor-Lib/led/ProjectorDriver.cpp",
-        "src/VideoProcessor-Lib/led/SerialPort.cpp"
+        "src/VP-V/modules/drive/projector_control/LedController.cpp",
+        "src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.cpp",
+        "src/VP-V/modules/drive/projector_control/ProjectorDriver.cpp",
+        "src/VP-V/modules/drive/projector_control/SerialPort.cpp",
+        "src/VP-V/modules/drive/projector_control/LedController.h",
+        "src/VP-V/modules/drive/projector_control/BarcoAsciiDriver.h",
+        "src/VP-V/modules/drive/projector_control/ProjectorDriver.h",
+        "src/VP-V/modules/drive/projector_control/SerialPort.h",
+        "src/VP-V/modules/drive/projector_control/ConnectionTest.cpp",
+        "src/VP-V/modules/drive/projector_control/ConnectionTest.h",
+        "src/VP-V/modules/drive/projector_control/LedClock.h",
+        "src/VP-V/modules/drive/projector_control/LedShutdownRestore.h"
       ],
       "components": {
         "files": {
@@ -980,12 +995,15 @@
       "slot": "control.diagnostics",
       "order": 920,
       "status": "partial",
-      "code_location": "legacy",
+      "code_location": "partly migrated",
       "live_files": [
+        "src/VP-V/modules/control/diagnostics/StateReport.cpp",
+        "src/VP-V/modules/control/diagnostics/CrashState.cpp",
+        "src/VP-V/modules/control/diagnostics/CrashState.h",
+        "src/VP-V/modules/control/diagnostics/StateReport.h",
+        "src/VP-V/modules/control/diagnostics/StateReportSettings.h",
         "src/VP-V/core/SlotTiming.h",
         "src/VP-V/core/FallbackStatus.h",
-        "src/VideoProcessor-Lib/StateReport.cpp",
-        "src/VideoProcessor-Lib/CrashState.cpp",
         "src/VideoProcessor-GUI/StatsOverlayWindow.cpp",
         "src/VideoProcessor-Lib/DebugLog.h"
       ],

@@ -16,7 +16,7 @@
 
 #include "DisplayModel.h"
 #include "LedCharacterize.h"
-#include "../DisplayProfile.h"
+#include <DisplayProfile.h>
 
 #include <string>
 #include <vector>

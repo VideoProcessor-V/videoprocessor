@@ -75,7 +75,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Tiers: always on.
 - VP-V page, Colour tab: not tiered (libplacebo does the colour in every tier; the cheaper combined HDR->SDR LUT for Classic/Low is not yet implemented.).
 - Listed under the tier: `preserve_extended_range`.
-- Plain-language guide: [docs/settings/VP-settings-reference.md#6-colour](../../../../docs/settings/VP-settings-reference.md#6-colour).
+- Plain-language guide: [docs/settings/VP-settings-reference.md#6-colour](../../../../../docs/settings/VP-settings-reference.md#6-colour).
 - Fallback entry ("Fallbacks engaged"): `BTB/WTW: clipped (<reason>)`.
 
 ## Tests

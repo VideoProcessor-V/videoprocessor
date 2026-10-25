@@ -10,16 +10,16 @@
 
 #include <ConfigFile.h>
 #include <ConfigurationLiveApply.h>
-#include <CrashState.h>
+#include <VP-V/modules/control/diagnostics/CrashState.h>
 #include <DebugLog.h>
 #include <MainConfigSchema.h>
 #include <RendererProfileConfig.h>
 #include <SessionEndShutdown.h>
 #include <ShortcutChord.h>
 #include <ShortcutDefaults.h>
-#include <led/ConnectionTest.h>
-#include <led/LedShutdownRestore.h>
-#include <led/ProjectorDriver.h>
+#include <VP-V/modules/drive/projector_control/ConnectionTest.h>
+#include <VP-V/modules/drive/projector_control/LedShutdownRestore.h>
+#include <VP-V/modules/drive/projector_control/ProjectorDriver.h>
 
 #include "LedDriveTestSupport.h"
 

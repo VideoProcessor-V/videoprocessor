@@ -54,12 +54,12 @@ New files:
 
 | File | Purpose |
 |---|---|
-| calibration/Meter.h | IMeter; Argyll spotread / simulated / ambient lux meters |
-| calibration/PatternPlan.h | Patch sets and time estimates |
-| calibration/DisplayModel.h | Fit, inverse, dE2000, .cube writer |
-| calibration/LedCharacterize.h | Flux table, CNTR curve, latency/settle fit |
-| calibration/CalibrationSession.h | Step machine, per-patch journal, resume, safety snapshot/restore |
-| calibration/CalibrationOutputs.h | Versioned run folder, key-only config edits |
+| VP-V/modules/output/calibration_lut/calibration/Meter.h | IMeter; Argyll spotread / simulated / ambient lux meters |
+| VP-V/modules/output/calibration_lut/calibration/PatternPlan.h | Patch sets and time estimates |
+| VP-V/modules/output/calibration_lut/calibration/DisplayModel.h | Fit, inverse, dE2000, .cube writer |
+| VP-V/modules/output/calibration_lut/calibration/LedCharacterize.h | Flux table, CNTR curve, latency/settle fit |
+| VP-V/modules/output/calibration_lut/calibration/CalibrationSession.h | Step machine, per-patch journal, resume, safety snapshot/restore |
+| VP-V/modules/output/calibration_lut/calibration/CalibrationOutputs.h | Versioned run folder, key-only config edits |
 | vprenderer/CalibrationPatternSource | Pattern frames and bypass parameters |
 | VideoProcessor-Config/CalibrationWizard | The wizard UI |
 

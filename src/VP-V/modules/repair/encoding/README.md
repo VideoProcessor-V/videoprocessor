@@ -77,7 +77,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Planned keys (not yet implemented): `encoding_repair`.
 - Tiers: Classic off; Low VP restore or small A; Mid A; Upper A_motion.
 - VP-V page, Repair tab: tiers Classic / Low / Mid / Upper; tier keys `deband_vp`, `detail_pulse_stabilise`, `texture_restore`.
-- Plain-language guide: [docs/settings/VP-settings-reference.md#4-repair](../../../../docs/settings/VP-settings-reference.md#4-repair).
+- Plain-language guide: [docs/settings/VP-settings-reference.md#4-repair](../../../../../docs/settings/VP-settings-reference.md#4-repair).
 - Fallback entry ("Fallbacks engaged"): `Repair: bypassed (net fingerprint mismatch / missing weights / DV IPT input)`.
 
 ## Tests

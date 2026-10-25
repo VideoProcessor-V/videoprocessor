@@ -2,9 +2,10 @@
 #include "CppUnitTest.h"
 
 #include <AnalysisLumaSource.h>
-#include <led/LedDriveModule.h>
-#include <led/LedLookahead.h>
-#include <led/LedMeasurement.h>
+#include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
+#include <VP-V/modules/drive/led_measure/LedLookahead.h>
+#include <VP-V/modules/drive/led_measure/LedMeasurement.h>
+#include <VP-V/modules/drive/led_measure/ReadbackRing.h>
 
 #include "LedDriveTestSupport.h"
 
@@ -786,6 +787,62 @@ namespace VideoProcessorTest
 			Assert::IsFalse(module.CurrentGain().active, L"Without the LED dimming, no compensating gain");
 			module.Stop();
 			Assert::IsTrue(projector->Writes().empty());
+		}
+
+		// Module findings 2026-10-24 part 3 item 1: the measurement readback schedule never waits:
+		// slots are claimed in turn, a full ring drops the frame, results come out in frame order and
+		// only when ready, and a result pending too long is reported as late (visibly).
+		TEST_METHOD(ReadbackRingNeverWaitsAndKeepsFrameOrder)
+		{
+			ReadbackRing ring(4, 3);
+			bool ready[4] = {};
+			auto isReady = [&](int slot) { return ready[slot]; };
+			Assert::AreEqual(0, ring.Claim(1));
+			Assert::AreEqual(1, ring.Claim(2));
+			Assert::AreEqual(2, ring.Claim(3));
+			Assert::AreEqual(3, ring.Claim(4));
+			Assert::AreEqual(-1, ring.Claim(5), L"every slot unread: the frame is dropped, never waited for");
+			Assert::AreEqual(1ull, static_cast<unsigned long long>(ring.Dropped()));
+			// Slot 1 ready before slot 0: nothing is handed out (frame order).
+			ready[1] = true;
+			Assert::IsTrue(ring.Collect(2, isReady).empty());
+			ready[0] = true;
+			const std::vector<int> first = ring.Collect(2, isReady);
+			Assert::AreEqual(size_t(2), first.size());
+			Assert::AreEqual(0, first[0]);
+			Assert::AreEqual(1, first[1]);
+			for (int slot : first) ring.Release(slot);
+			Assert::AreEqual(2, ring.Pending());
+			Assert::AreEqual(0, ring.Claim(6), L"freed slots are reused in turn");
+			Assert::AreEqual(1, ring.Claim(7));
+		}
+
+		TEST_METHOD(ReadbackRingReportsLateResultsOnce)
+		{
+			ReadbackRing ring(4, 3);
+			auto never = [](int) { return false; };
+			auto always = [](int) { return true; };
+			Assert::AreEqual(0, ring.Claim(10));
+			Assert::IsTrue(ring.Collect(11, never).empty());
+			Assert::IsFalse(ring.RunningLate(), L"one frame old: not late yet");
+			Assert::AreEqual(std::string(), ring.Note());
+			ring.Collect(13, never);
+			Assert::IsTrue(ring.RunningLate(), L"3 frames old: late");
+			ring.Collect(14, never);
+			Assert::AreEqual(1ull, static_cast<unsigned long long>(ring.LateResults()), L"counted once per result");
+			Assert::IsTrue(ring.Note().find("late") != std::string::npos);
+			for (int slot : ring.Collect(15, always)) ring.Release(slot);
+			Assert::IsFalse(ring.RunningLate());
+			Assert::AreEqual(std::string(), ring.Note(), L"in time again: no note");
+			// Drops are reported once, then cleared.
+			ReadbackRing single(1, 3);
+			Assert::AreEqual(0, single.Claim(1));
+			Assert::AreEqual(-1, single.Claim(2));
+			Assert::IsTrue(single.Note().find("not measured") != std::string::npos);
+			Assert::AreEqual(std::string(), single.Note());
+			single.Reset();
+			Assert::AreEqual(0, single.Pending());
+			Assert::AreEqual(0, single.Claim(3));
 		}
 	};
 }

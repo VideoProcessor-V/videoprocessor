@@ -226,8 +226,8 @@ Licence and ToS, stated neutrally: some interfaces are unofficial and can change
 Delete `BarcoAsciiDriver` one release after the golden tests pass.
 
 ### Critical files for implementation
-- src\VideoProcessor-Lib\led\BarcoAsciiDriver.cpp
-- src\VideoProcessor-Lib\led\ProjectorDriver.h
+- src\VP-V\modules\drive\projector_control\BarcoAsciiDriver.cpp
+- src\VP-V\modules\drive\projector_control\ProjectorDriver.h
 - src\VideoProcessor-Lib\led\LedDriveConfig.h
-- src\VideoProcessor-Lib\led\SerialPort.h
+- src\VP-V\modules\drive\projector_control\SerialPort.h
 - src\VideoProcessor-Test\LedDriveTestSupport.h

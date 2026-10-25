@@ -1,12 +1,12 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include <calibration/CalibrationOutputs.h>
-#include <calibration/DisplayModel.h>
-#include <calibration/LedCharacterize.h>
-#include <calibration/PatternPlan.h>
-#include <calibration/SimulatedDisplay.h>
-#include <calibration/SimulatedMeter.h>
+#include <VP-V/modules/output/calibration_lut/calibration/CalibrationOutputs.h>
+#include <VP-V/modules/output/calibration_lut/calibration/DisplayModel.h>
+#include <VP-V/modules/output/calibration_lut/calibration/LedCharacterize.h>
+#include <VP-V/modules/output/calibration_lut/calibration/PatternPlan.h>
+#include <VP-V/modules/output/calibration_lut/calibration/SimulatedDisplay.h>
+#include <VP-V/modules/output/calibration_lut/calibration/SimulatedMeter.h>
 #include <ConfigEditorCore.h>
 #include <led/LedDriveConfig.h>
 #include <vprenderer/ExtendedRange.h>

@@ -1,7 +1,7 @@
 #include <pch.h>
 #include "LedLookahead.h"
 
-#include "LedDriveModule.h"
+#include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
 
 #include <algorithm>
 #include <cmath>

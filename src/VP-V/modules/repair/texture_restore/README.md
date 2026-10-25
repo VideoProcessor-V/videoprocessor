@@ -80,7 +80,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Tiers: Upper only (after the efficiency pass).
 - VP-V page, Repair tab: tiers Classic / Low / Mid / Upper; tier keys `deband_vp`, `detail_pulse_stabilise`, `texture_restore`.
 - Listed under the tier: `detail_pulse_fast`.
-- Plain-language guide: [docs/settings/VP-settings-reference.md#4-repair](../../../../docs/settings/VP-settings-reference.md#4-repair).
+- Plain-language guide: [docs/settings/VP-settings-reference.md#4-repair](../../../../../docs/settings/VP-settings-reference.md#4-repair).
 - Fallback entry ("Fallbacks engaged"): `Texture restore: inactive (<reason>)`.
 
 ## Tests

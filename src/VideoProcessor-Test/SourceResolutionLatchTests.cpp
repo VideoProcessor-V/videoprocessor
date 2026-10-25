@@ -2,7 +2,7 @@
 #include "CppUnitTest.h"
 
 #include <SourceResolutionDetector.h>
-#include <KernelInverse.h>
+#include <VP-V/modules/scaling/rebase/KernelInverse.h>
 #include <vprenderer/SourceResolutionMonitor.h>
 #include "SubtitleTextTestPattern.h"
 

@@ -2,10 +2,10 @@
 #include "CppUnitTest.h"
 
 #include <ConfigFile.h>
-#include <led/BarcoAsciiDriver.h>
-#include <led/LedController.h>
-#include <led/LedDriveModule.h>
-#include <led/LedMeasurement.h>
+#include <VP-V/modules/drive/projector_control/BarcoAsciiDriver.h>
+#include <VP-V/modules/drive/projector_control/LedController.h>
+#include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
+#include <VP-V/modules/drive/led_measure/LedMeasurement.h>
 
 #include "LedDriveTestSupport.h"
 

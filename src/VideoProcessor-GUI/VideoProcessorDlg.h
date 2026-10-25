@@ -29,8 +29,8 @@
 #include <PixelValueRange.h>
 #include <OutputReadinessController.h>
 #include <ShortcutRepeatGuard.h>
-#include <StateReport.h>
-#include <StateReportSettings.h>
+#include <VP-V/modules/control/diagnostics/StateReport.h>
+#include <VP-V/modules/control/diagnostics/StateReportSettings.h>
 #include <CCie1931Control.h>
 #include <IRenderer.h>
 #include <ProcessCpuUsageMeter.h>
@@ -70,7 +70,7 @@
 #include <HdrVetoCaptureGate.h>
 #include <ConfigEditorCore.h>
 #include "ConfigurationRpcServer.h"
-#include <calibration/CalibrationController.h>
+#include <VP-V/modules/output/calibration_lut/calibration/CalibrationController.h>
 #include "ModernOperatorView.h"
 
 #include "resource.h"

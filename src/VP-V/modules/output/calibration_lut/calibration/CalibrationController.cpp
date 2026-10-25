@@ -6,16 +6,27 @@
 #include "HdrVerify.h"
 #include "TranscriptRecorder.h"
 
-#include "../AmbientConfig.h"
-#include "../led/SerialPort.h"
+#include <AmbientConfig.h>
+#include <VP-V/modules/drive/projector_control/SerialPort.h>
 
-#include "../ConfigFile.h"
-#include "../IRenderer.h"
+#include <ConfigFile.h>
+#include <IRenderer.h>
 
+#include <cctype>
 #include <sstream>
 
 namespace Calibration
 {
+	bool IsSpectralSampleFile(const std::string& path)
+	{
+		if (path.size() < 5)
+			return false;
+		std::string extension = path.substr(path.size() - 5);
+		for (char& c : extension)
+			c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		return extension == ".ccss";
+	}
+
 	namespace
 	{
 		std::string Escape(const std::string& text)
@@ -274,9 +285,7 @@ namespace Calibration
 		options.instrumentName = model ? model->label : description.empty() ? std::string("ArgyllCMS meter") : description;
 		if (!settings.spectralCorrection.empty() && model && !model->acceptsCcss)
 		{
-			const std::string lower = settings.spectralCorrection.size() >= 5 ?
-				settings.spectralCorrection.substr(settings.spectralCorrection.size() - 5) : std::string();
-			if (lower == ".ccss" || lower == ".CCSS")
+			if (IsSpectralSampleFile(settings.spectralCorrection))
 			{
 				error = std::string(model->label) + " takes a .ccmx correction matrix, not a .ccss spectral sample set.";
 				return nullptr;

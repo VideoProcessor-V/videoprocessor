@@ -75,7 +75,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Planned keys (not yet implemented): `appearance_adaptation`, `appearance_strength`, `appearance_reference_white_nits`, `appearance_reference_surround`, `appearance_screen_white_nits`, `appearance_screen_surround`.
 - Tiers: every tier when on (cost ~0).
 - VP-V page, Colour tab: not tiered (libplacebo does the colour in every tier; the cheaper combined HDR->SDR LUT for Classic/Low is not yet implemented.).
-- Plain-language guide: [docs/settings/VP-settings-reference.md#6-colour](../../../../docs/settings/VP-settings-reference.md#6-colour).
+- Plain-language guide: [docs/settings/VP-settings-reference.md#6-colour](../../../../../docs/settings/VP-settings-reference.md#6-colour).
 - Fallback entry ("Fallbacks engaged"): `Appearance: off (shader failed)`.
 
 ## Tests

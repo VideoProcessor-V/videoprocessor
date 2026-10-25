@@ -40,9 +40,9 @@
 
 #include "CalibrationRunBase.h"
 #include "LedCharacterize.h"
-#include "../led/LedDriveConfig.h"
-#include "../led/ProjectorDriver.h"
-#include "../led/SerialPort.h"
+#include <led/LedDriveConfig.h>
+#include <VP-V/modules/drive/projector_control/ProjectorDriver.h>
+#include <VP-V/modules/drive/projector_control/SerialPort.h>
 
 #include <functional>
 #include <memory>

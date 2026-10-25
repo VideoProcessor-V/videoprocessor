@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../QueuedFrameStatistics.h"
+#include <QueuedFrameStatistics.h>
 #include "LedMeasurement.h"
 
 #include <array>

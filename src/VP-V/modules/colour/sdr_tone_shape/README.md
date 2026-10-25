@@ -132,7 +132,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Tiers: not tiered.
 - VP-V page, Colour tab: not tiered (libplacebo does the colour in every tier; the cheaper combined HDR->SDR LUT for Classic/Low is not yet implemented.).
 - Listed under the tier: `sdr_tone_shape`.
-- Plain-language guide: [docs/settings/VP-settings-reference.md#6-colour](../../../../docs/settings/VP-settings-reference.md#6-colour).
+- Plain-language guide: [docs/settings/VP-settings-reference.md#6-colour](../../../../../docs/settings/VP-settings-reference.md#6-colour).
 - Fallback entry ("Fallbacks engaged"): `SDR tone shape: not applied (shader did not load)`.
 
 ## Tests

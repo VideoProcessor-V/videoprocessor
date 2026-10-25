@@ -101,7 +101,7 @@ Efforts are in agent wall-clock hours.
   - There is no "Fallbacks engaged" registry anywhere (grep finds nothing).
   - About 59 log-only failure or fallback lines in LVR.
   - The Ctrl+I overlay pulls renderer getters (VideoProcessor-GUI/VideoProcessorDlg.cpp:18156).
-  - The state report is VideoProcessor-Lib/StateReport.cpp.
+  - The state report is VP-V/modules/control/diagnostics/StateReport.cpp.
 - Resolution:
   - Build a FallbackRegistry (atomic flags plus reason) in the renderer, exposed through one getter that feeds Ctrl+I, the Config status (RPC) and Ctrl+Alt+D.
   - Migrate the sites.

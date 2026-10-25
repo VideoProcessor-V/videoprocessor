@@ -88,7 +88,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Keys: `target_latency_ms`, `queue_size`, `queue_timing_fixes`, `queue_recovery`, `queue_auto_reset`, `pulldown_fixes`, `low_latency`, `low_latency_path`.
 - Tiers: not tiered; one user-set total delay (recommended = 4 frames at the slowest rate).
 - VP-V page, Input tab: not tiered (Always on: capture and timing have no quality steps, only paths (the toggles below).).
-- Plain-language guide: [docs/settings/VP-settings-reference.md#2-input](../../../../docs/settings/VP-settings-reference.md#2-input).
+- Plain-language guide: [docs/settings/VP-settings-reference.md#2-input](../../../../../docs/settings/VP-settings-reference.md#2-input).
 - Fallback entry ("Fallbacks engaged"): `Queue: short look-ahead (<n> of 4 frames)`.
 
 ## Tests

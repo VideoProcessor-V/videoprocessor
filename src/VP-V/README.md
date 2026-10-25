@@ -30,6 +30,10 @@ each an `#include <VP-V/...>` with a comment naming the folder.
   Each move is a `git mv` plus the project, include, manifest and master-list updates in the
   same commit.
 
+- **Moved files:** [`docs/design/migration-path-map.md`](../../docs/design/migration-path-map.md)
+  maps every migrated file's old path to its new one (dated agent reports and audits keep the old
+  paths).
+
 ## Where to start reading
 
 1. `docs/design/VP-pipeline-final.md`: the design, by units.

@@ -76,7 +76,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Keys: `sigma_delta`, `dithering`, `dither_vectors`, `dither_grain_tolerance_scale`.
 - Tiers: Classic libplacebo dither; Low..Upper sigma-delta.
 - VP-V page, Output tab: tiers Classic / Low; tier keys `temporal_dither`.
-- Plain-language guide: [docs/settings/VP-settings-reference.md#8-output](../../../../docs/settings/VP-settings-reference.md#8-output).
+- Plain-language guide: [docs/settings/VP-settings-reference.md#8-output](../../../../../docs/settings/VP-settings-reference.md#8-output).
 - Fallback entry ("Fallbacks engaged"): `Dither: libplacebo (sigma-delta dropped: <reason>)`.
 
 ## Tests

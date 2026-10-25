@@ -3,12 +3,12 @@
 
 #include <ConfigFile.h>
 #include <MainConfigSchema.h>
-#include <led/LedController.h>
-#include <led/LedDriveModule.h>
-#include <led/LedLookahead.h>
-#include <led/LedMeasurement.h>
+#include <VP-V/modules/drive/projector_control/LedController.h>
+#include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
+#include <VP-V/modules/drive/led_measure/LedLookahead.h>
+#include <VP-V/modules/drive/led_measure/LedMeasurement.h>
 #include <led/LedRawTransfer.h>
-#include <led/LedShutdownRestore.h>
+#include <VP-V/modules/drive/projector_control/LedShutdownRestore.h>
 #include <vprenderer/AlphaQueuePolicy.h>
 
 #include "LedDriveTestSupport.h"
@@ -1575,6 +1575,44 @@ namespace VideoProcessorTest
 			module.Lookahead().ObserveFrame(1, 0, luma, rect);
 			Assert::AreEqual(1.0, module.CorrectionRatio(), 1e-12);
 			Assert::IsTrue(LedDriveModule(ProjectorConfig(), Compensate()).WantsPredictions());
+		}
+
+		// Module findings 2026-10-24 item 7: compensate with lookahead: off reads no prediction, so the
+		// queued-frame walk is not asked to measure raw frames for it.
+		// Module findings 2026-10-24 part 3 item 3: the full-coverage peak (FrameStats::maximum) is only
+		// read by the script controllers, so Config() reports led_peak_full_coverage off elsewhere and the
+		// GPU hook and the look-ahead skip it; the configured value is kept.
+		TEST_METHOD(FullCoveragePeakOnlyWhereItIsRead)
+		{
+			LedDriveConfig compensate = Compensate();
+			Assert::IsTrue(compensate.peakFullCoverage, L"on by default");
+			LedDriveModule module(ProjectorConfig(), compensate);
+			Assert::IsFalse(module.Config().peakFullCoverage, L"compensate never reads the peak");
+			Assert::IsTrue(module.ConfiguredSettings().peakFullCoverage, L"the configured value is kept");
+			LedDriveConfig script = compensate;
+			script.mode = Mode::Script;
+			Assert::IsTrue(module.Reconfigure(ProjectorConfig(), script));
+			Assert::IsTrue(module.Config().peakFullCoverage, L"the script reads it");
+			LedDriveConfig logOnly = compensate;
+			logOnly.mode = Mode::LogOnly;
+			Assert::IsTrue(LedDriveModule(ProjectorConfig(), logOnly).Config().peakFullCoverage, L"log_only runs the script controller");
+			LedDriveConfig pictureOnly = compensate;
+			pictureOnly.mode = Mode::PictureOnly;
+			Assert::IsFalse(LedDriveModule(ProjectorConfig(), pictureOnly).Config().peakFullCoverage);
+			script.peakFullCoverage = false;
+			Assert::IsFalse(LedDriveModule(ProjectorConfig(), script).Config().peakFullCoverage, L"off stays off");
+		}
+
+		TEST_METHOD(CompensateWithoutLookaheadWantsNoPredictions)
+		{
+			LedDriveConfig off = Compensate();
+			off.lookahead = false;
+			Assert::IsFalse(LedDriveModule(ProjectorConfig(), off).WantsPredictions());
+			LedDriveModule module(ProjectorConfig(), off);
+			LedDriveConfig on = off;
+			on.lookahead = true;
+			Assert::IsTrue(module.Reconfigure(ProjectorConfig(), on));
+			Assert::IsTrue(module.WantsPredictions(), L"switching the look-ahead on asks for predictions again");
 		}
 
 		// Review 2026-10-17: the new keys, their defaults and validation.

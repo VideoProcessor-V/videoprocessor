@@ -1,7 +1,7 @@
 #include <pch.h>
 #include "CalibrationOutputs.h"
 
-#include "../../VideoProcessor-ConfigCore/ConfigEditorCore.h"
+#include <VideoProcessor-ConfigCore/ConfigEditorCore.h>
 
 #include <algorithm>
 #include <cctype>

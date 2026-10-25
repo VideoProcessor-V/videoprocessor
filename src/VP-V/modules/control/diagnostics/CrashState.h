@@ -56,10 +56,17 @@ namespace CrashState
 		Recorder(const Recorder&) = delete;
 		Recorder& operator=(const Recorder&) = delete;
 
-		// Starts writing `directory`\crash-state.txt every `periodMs`; `recent`
-		// supplies the recent log lines (it is called on the writer thread).
-		// instanceId names the live files (0 = this process's ID); tests run
-		// two "instances" in one process with distinct IDs.
+		// Starts writing `directory`\crash-state-<instance>.txt every `periodMs`;
+		// `recent` supplies the recent log lines (called on the writer thread, and
+		// also on the caller's thread by Text() and by Stop()'s final write, so it
+		// must be thread-safe). instanceId names the live files (0 = this
+		// process's ID); tests run two "instances" in one process with distinct IDs.
+		// If the instance lock (crash-state-<instance>.lock, SH12) cannot be taken,
+		// the live files are named crash-state-<instance>.unlocked.txt / .dmp
+		// instead: another instance's PreserveLeftover never takes an unlocked
+		// instance's live file for a crash (that was the false "crash state (N)"),
+		// at the cost that this instance's own crash is not kept as one.
+		// InstanceLocked() tells which; the failure is logged.
 		bool Start(const std::string& directory, LinesSource recent, int periodMs = 1000,
 			unsigned long instanceId = 0);
 		// A named value shown in the state section (replaces an earlier value).
@@ -73,6 +80,8 @@ namespace CrashState
 		std::string LivePath() const;
 		std::string LiveDumpPath() const;
 		unsigned long InstanceId() const { return instanceId; }
+		// False when Start could not take the instance lock (see Start).
+		bool InstanceLocked() const { return !unlocked; }
 		std::string Text() const;   // what the next write would contain (tests)
 
 		// Unhandled exceptions and std::terminate: a final write and a minidump
@@ -93,6 +102,7 @@ namespace CrashState
 		std::string directory;
 		unsigned long instanceId = 0;
 		void* instanceLock = nullptr;   // HANDLE of crash-state-<id>.lock
+		bool unlocked = false;          // Start could not take the lock: ".unlocked" live names
 		LinesSource recent;
 		int periodMs = 1000;
 		unsigned long long startedTick = 0;

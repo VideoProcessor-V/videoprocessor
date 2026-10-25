@@ -25,7 +25,7 @@
 #include <RawCaptureCorpus.h>
 #include <vprenderer/EarlyUpload.h>
 #include <vprenderer/SourceRebase.h>
-#include <KernelInverse.h>
+#include <VP-V/modules/scaling/rebase/KernelInverse.h>
 #include <vprenderer/SourceResolutionMonitor.h>
 #include <vprenderer/VpDebander.h>
 #include <chrono>

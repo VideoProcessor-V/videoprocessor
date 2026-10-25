@@ -12,8 +12,10 @@
 // projector codes instead of target light. The agreed order is ... LED measurement -> LED
 // compensation -> black level -> calibration LUT -> dither. With calibration_lut_stage = vp the
 // renderer stops handing the LUT to libplacebo and appends this hook as the last colour hook at
-// PRE_OUTPUT (OutputHookOrder ranks it after the user shaders and before the de-judder
-// rendered-picture cache, so the de-judder extras show the LUT-mapped picture too).
+// PRE_OUTPUT. Its place after the user shaders and before the de-judder rendered-picture cache
+// (so the de-judder extras show the LUT-mapped picture too) comes from the order the render path
+// pushes the hooks; the registry's OrderSlotsInPlace only orders the slot hooks among themselves,
+// so a pipeline_order that moves this (movable) slot can put it ahead of LED compensation.
 //
 // The LUT itself is applied with libplacebo's own pl_shader_custom_lut (the same sampling as
 // libplacebo's target-LUT path). Values outside 0..1 (BTB/WTW carried by ExtendedRange, owner

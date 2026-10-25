@@ -78,7 +78,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Keys: `render_ahead`, `render_ahead_queue_credit`, `render_ahead_utilisation`.
 - Tiers: not tiered.
 - VP-V page, Output tab: tiers Classic / Low; tier keys `temporal_dither`.
-- Plain-language guide: [docs/settings/VP-settings-reference.md#8-output](../../../../docs/settings/VP-settings-reference.md#8-output).
+- Plain-language guide: [docs/settings/VP-settings-reference.md#8-output](../../../../../docs/settings/VP-settings-reference.md#8-output).
 - Fallback entry ("Fallbacks engaged"): `Presentation: open loop (no display statistics)`.
 
 ## Tests
