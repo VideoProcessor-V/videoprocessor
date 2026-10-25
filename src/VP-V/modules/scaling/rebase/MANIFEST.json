@@ -10,6 +10,8 @@
     "src/VP-V/modules/scaling/rebase/KernelInverse.h",
     "src/VP-V/modules/scaling/rebase/SourceRebase.cpp",
     "src/VP-V/modules/scaling/rebase/SourceRebase.h",
+    "src/VP-V/segments/EntranceSegment.cpp",
+    "src/VP-V/segments/EntranceSegment.h",
     "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
   ],
   "forwarding_headers": [
@@ -36,5 +38,5 @@
     ]
   },
   "fallback_when_missing": "A failed pass renders the native frame (already in code); unknown kernel -> Lanczos; off -> straight to output scaling.",
-  "fallback_entry": "Re-base: off (<reason>)"
+  "fallback_entry": "re-base precision: <the re-base's float-intermediate note>"
 }

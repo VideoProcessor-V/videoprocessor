@@ -240,7 +240,16 @@
       },
       "settings_keys": [
         "source_resolution",
-        "rebase_kernel_match",
+        "source_resolution_auto_min_confidence",
+        "source_resolution_evidence_shots",
+        "source_resolution_evidence_seconds",
+        "source_resolution_text_guard",
+        "source_resolution_mixed_guard",
+        "source_resolution_latch_fixes",
+        "source_resolution_cut_fixes",
+        "source_resolution_engage_max_wait_s",
+        "source_resolution_crossfade_s",
+        "source_resolution_release_fade_s",
         "subtitle_fit",
         "subtitle_reposition",
         "subtitle_type",
@@ -391,7 +400,7 @@
       ],
       "tiers": "Classic off; Low off; Mid/Upper on",
       "fallback": {
-        "entry": "Re-base: off (<reason>)",
+        "entry": "re-base precision: <the re-base's float-intermediate note>",
         "behaviour": "A failed pass renders the native frame (already in code); unknown kernel -> Lanczos; off -> straight to output scaling."
       },
       "upstream": [
@@ -514,12 +523,13 @@
         "deband_vp_grain_guard",
         "deband",
         "deband_strength",
-        "deband_grain"
+        "deband_grain",
+        "low_bitrate_handling"
       ],
       "planned_keys": [],
       "tiers": "Classic libplacebo deband; Low..Upper VP deband",
       "fallback": {
-        "entry": "Deband: libplacebo deband (VP debander idle: <reason>)",
+        "entry": "VP deband: off on the DV tunnel planes (no deband after decode yet)",
         "behaviour": "VP debander failure renders without it; temporal frames keep libplacebo's deband."
       },
       "upstream": [

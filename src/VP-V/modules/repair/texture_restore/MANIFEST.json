@@ -10,6 +10,8 @@
     "src/VP-V/modules/repair/texture_restore/DetailPulse.h",
     "src/VP-V/modules/repair/texture_restore/TextureRestore.cpp",
     "src/VP-V/modules/repair/texture_restore/TextureRestore.h",
+    "src/VP-V/segments/EntranceSegment.cpp",
+    "src/VP-V/segments/EntranceSegment.h",
     "docs/VP-detail-restore.md"
   ],
   "forwarding_headers": [

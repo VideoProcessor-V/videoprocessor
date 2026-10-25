@@ -8,6 +8,8 @@
   "live_files": [
     "src/VP-V/modules/repair/deband/VpDebander.cpp",
     "src/VP-V/modules/repair/deband/VpDebander.h",
+    "src/VP-V/segments/EntranceSegment.cpp",
+    "src/VP-V/segments/EntranceSegment.h",
     "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
   ],
   "forwarding_headers": [
@@ -29,12 +31,13 @@
       "deband_strength",
       "deband_vp",
       "deband_vp_exclusive",
-      "deband_vp_grain_guard"
+      "deband_vp_grain_guard",
+      "low_bitrate_handling"
     ],
     "upstream_modules": [
       "repair.encoding"
     ]
   },
   "fallback_when_missing": "VP debander failure renders without it; temporal frames keep libplacebo's deband.",
-  "fallback_entry": "Deband: libplacebo deband (VP debander idle: <reason>)"
+  "fallback_entry": "VP deband: off on the DV tunnel planes (no deband after decode yet)"
 }

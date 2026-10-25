@@ -162,9 +162,18 @@
         "tools": [],
         "config_keys": [
           "label_detector",
-          "rebase_kernel_match",
           "source_coding_fixes",
           "source_resolution",
+          "source_resolution_auto_min_confidence",
+          "source_resolution_crossfade_s",
+          "source_resolution_cut_fixes",
+          "source_resolution_engage_max_wait_s",
+          "source_resolution_evidence_seconds",
+          "source_resolution_evidence_shots",
+          "source_resolution_latch_fixes",
+          "source_resolution_mixed_guard",
+          "source_resolution_release_fade_s",
+          "source_resolution_text_guard",
           "subtitle_fit",
           "subtitle_reposition",
           "subtitle_type"
@@ -231,6 +240,8 @@
         "src/VP-V/modules/scaling/rebase/KernelInverse.h",
         "src/VP-V/modules/scaling/rebase/SourceRebase.cpp",
         "src/VP-V/modules/scaling/rebase/SourceRebase.h",
+        "src/VP-V/segments/EntranceSegment.cpp",
+        "src/VP-V/segments/EntranceSegment.h",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
       ],
       "components": {
@@ -291,6 +302,8 @@
       "live_files": [
         "src/VP-V/modules/repair/deband/VpDebander.cpp",
         "src/VP-V/modules/repair/deband/VpDebander.h",
+        "src/VP-V/segments/EntranceSegment.cpp",
+        "src/VP-V/segments/EntranceSegment.h",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
       ],
       "components": {
@@ -309,7 +322,8 @@
           "deband_strength",
           "deband_vp",
           "deband_vp_exclusive",
-          "deband_vp_grain_guard"
+          "deband_vp_grain_guard",
+          "low_bitrate_handling"
         ],
         "upstream_modules": [
           "repair.encoding"
@@ -327,6 +341,8 @@
         "src/VP-V/modules/repair/texture_restore/DetailPulse.h",
         "src/VP-V/modules/repair/texture_restore/TextureRestore.cpp",
         "src/VP-V/modules/repair/texture_restore/TextureRestore.h",
+        "src/VP-V/segments/EntranceSegment.cpp",
+        "src/VP-V/segments/EntranceSegment.h",
         "docs/VP-detail-restore.md"
       ],
       "components": {
