@@ -25,7 +25,7 @@ Bill's behaviour back.
 | Master switch | `[general] newlldv` (Bill's key) for both; `newlldv_sdr_veto` only acts in `vp` (the original heuristic has no veto) |
 | When it applies | GUI start-up (`VideoProcessorApp` passes `/hdr_inference <effective>`); Config tooltip says so |
 | Config control | VP-V page, Pipeline (expert) tab: "HDR inference (newlldv)" (`vpv.expert.hdr_inference`) |
-| Status / dump | the dialog logs `hdr_inference: ...`; the renderer's settings dump has `hdr_inference=` and the key is in the live-apply fingerprint |
+| Status / dump | start-up log line (`HdrInferenceChoice::StartupLine`: what runs, the Original-pathway override, a command-line override, an unreadable value); the LLDV decision line and the raw-capture note carry `hdr_inference=` (and `hdr_inference_problem=`); the main window EOTF reads "PQ (inferred, original)" and the HDR overlay item "PQ inferred (no HDR flag; original heuristic)" (", hdr_inference invalid" when the key was unreadable); the renderer's settings dump has `hdr_inference=` and the key is in the live-apply fingerprint; `/help` lists `/hdr_inference` |
 
 ## How it is built
 
@@ -70,16 +70,21 @@ Bill's behaviour back.
 
 - No live switch: the choice is read at start-up, like `newlldv` itself (both are command-line
   switches built from the configuration).
-- "Original" is Bill's candidate DECISION. The dialog code around it is still VP's: the HDR mode
-  checks (`HdrModesPermitInference`), the restart scheduling, and the veto capture gate (inert with
-  no veto). Restoring his full dialog flow would mean reverting VP's changes inside his file, which
-  is out of scope for option (d).
+- "Original" is **Bill's candidate decision**: BT.2020 + SDR + no InfoFrame, confirmed after 1.5 s,
+  and (audit 2) both HDR modes "Follow input (LLDV)" - his `IsNewLldvModeSelected`, restored as
+  `LldvModesSelected()` and passed in the signal, so an explicit BT.2020 hdr_colorspace rejects as
+  upstream. It gates eligibility (a mode change restarts the stabilisation; upstream gated the use).
+  The dialog flow around it stays VP's (restart scheduling, the veto capture gate - inert with no
+  veto). Restoring his full dialog flow would mean reverting VP's changes inside his file.
 - GUI start-up has no automated test (Bill's App/dialog). `HdrInferenceChoice::FromConfig` is
   tested instead.
 
-## Test plan (targeted, after the audit)
+## Verification (2026-10-25, after the audit fixes)
 
-Build with the patch applied (Magewell SDK). CPU classes: HdrInferenceChoiceTests,
-HdrInferenceChoiceWiringTests, HdrInferenceTests, DvIncomingHdrModeTests, PipelineSkeletonTests,
-ConfigFileTests. Config tests: VpvConfigTests and the ConfigEditorWindowTests coverage group, off
-screen.
+- Patch applied, Magewell SDK, whole solution: rc=0 (D:\codexideoprocessor\hdr-choice-build5.log).
+- CPU classes HdrInferenceChoiceTests, HdrInferenceChoiceWiringTests, HdrInferenceTests,
+  DvIncomingHdrModeTests, PipelineSkeletonTests, ConfigFileTests: 231/231
+  (D:\codexideoprocessor\hdr-choice-trx8).
+- Config tests, off screen, `-Match "VP-V|every schema key|inventory"`: 13/13, gate passed
+  (D:\codexideoprocessor\hdr-choice-trx\config).
+- Not run: GPU / on-screen; the GUI start-up path (Bill's App / dialog) has no automated test.
