@@ -1,0 +1,525 @@
+diff --git a/docs/design/slot-test-matrix.md b/docs/design/slot-test-matrix.md
+index 6a7aaf98..50f87d3f 100644
+--- a/docs/design/slot-test-matrix.md
++++ b/docs/design/slot-test-matrix.md
+@@ -30,7 +30,7 @@ Kinds: placeholder = byte-identity on/off + zero cost (required for placeholder/
+ | 230 | drive.led_compensation | built | PRE_OUTPUT | not required | LED compensation shader tests | CNTR never above need | LED + Stage 13 + LUT + black level | LED compensation: off (shader did not load) |
+ | 240 | drive.black_level | placeholder | PRE_OUTPUT | byte-identical with the slot off<br>zero hooks when off | MISSING | dark-hair scene check | MISSING | Black level: off (<reason>) |
+ | 250 | output.calibration_lut | partial | PRE_OUTPUT | byte-identical while the VP stage is off (libplacebo LUT path unchanged) | LibplaceboDisplayLut tests | applied after LED compensation | BTB/WTW probes with the LUT | Calibration LUT: libplacebo target LUT (VP stage unavailable) |
+-| 260 | output.dither | built | OUTPUT | not required | SigmaDeltaDomain tests | the quantiser is the last OUTPUT hook | MISSING | Dither: libplacebo (sigma-delta dropped: <reason>) |
++| 260 | output.dither | built | OUTPUT | not required | SigmaDeltaDomain tests<br>SegmentRunnerTests.DitherSlotOffRemovesTheSigmaDelta (switch honoured: output.dither off submits no sigma-delta)<br>SegmentRunnerTests.DitherFallbackOnlyForDomainOrShaderNotForSlotOff | the quantiser is the last OUTPUT hook | MISSING | Dither: libplacebo (sigma-delta dropped: <reason>) |
+ | 270 | output.presentation | built | present | not required | RenderAheadPolicy tests<br>AlphaPresentationTelemetry tests | render-ahead at 24p fits 200 ms | delay gate | Presentation: open loop (no display statistics) |
+ | 900 | drive.projector_control | built | host | n/a (control slot) | BarcoAsciiDriver tests<br>LedController tests | MISSING | n/a (control slot) | Projector: not connected (LED drive off) |
+ | 910 | control.net_runtime | placeholder | host | n/a (control slot) | fingerprint match/mismatch unit tests | MISSING | n/a (control slot) | Nets: bypassed (<net>: <reason>) |
+diff --git a/docs/design/slots.json b/docs/design/slots.json
+index 8c3b4cd5..6324542a 100644
+--- a/docs/design/slots.json
++++ b/docs/design/slots.json
+@@ -1569,7 +1569,9 @@
+       "tests": {
+         "placeholder": null,
+         "isolation": [
+-          "SigmaDeltaDomain tests"
++          "SigmaDeltaDomain tests",
++          "SegmentRunnerTests.DitherSlotOffRemovesTheSigmaDelta (switch honoured: output.dither off submits no sigma-delta)",
++          "SegmentRunnerTests.DitherFallbackOnlyForDomainOrShaderNotForSlotOff"
+         ],
+         "contract": [
+           "the quantiser is the last OUTPUT hook"
+diff --git a/src/VP-V/core/SlotRegistry.h b/src/VP-V/core/SlotRegistry.h
+index 3bbaf192..e363d28d 100644
+--- a/src/VP-V/core/SlotRegistry.h
++++ b/src/VP-V/core/SlotRegistry.h
+@@ -25,7 +25,7 @@ namespace PipelineSlots
+ 		{
+ 		case Id::ScalingRebase: case Id::RepairDeband: case Id::RepairTextureRestore:
+ 		case Id::ColourSdrToneShape: case Id::DriveLedMeasure: case Id::DriveLedCompensation:
+-		case Id::OutputCalibrationLut: case Id::DriveProjectorControl:
++		case Id::OutputCalibrationLut: case Id::OutputDither: case Id::DriveProjectorControl:
+ 			return true;
+ 		default:
+ 			return false;
+diff --git a/src/VP-V/modules/output/dither/README.md b/src/VP-V/modules/output/dither/README.md
+index 73fd5b81..ed257f26 100644
+--- a/src/VP-V/modules/output/dither/README.md
++++ b/src/VP-V/modules/output/dither/README.md
+@@ -83,7 +83,7 @@ Code moves into this folder only when this slot is touched (opportunistic until
+ ## Tests
+ 
+ - Placeholder (byte-identity on/off, zero cost): n/a.
+-- Isolation (fixed inputs, expected outputs, cost): SigmaDeltaDomain tests.
++- Isolation (fixed inputs, expected outputs, cost): SigmaDeltaDomain tests; SegmentRunnerTests.DitherSlotOffRemovesTheSigmaDelta (switch honoured: output.dither off submits no sigma-delta); SegmentRunnerTests.DitherFallbackOnlyForDomainOrShaderNotForSlotOff.
+ - Contract (formats, geometry, fallback entry): the quantiser is the last OUTPUT hook.
+ - Chain (total delay at the 4/3/2-frame budgets): MISSING.
+ - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
+diff --git a/src/VP-V/tests/PipelineSkeletonTests.cpp b/src/VP-V/tests/PipelineSkeletonTests.cpp
+index 2ed3092e..bed93f19 100644
+--- a/src/VP-V/tests/PipelineSkeletonTests.cpp
++++ b/src/VP-V/tests/PipelineSkeletonTests.cpp
+@@ -644,6 +644,7 @@ namespace PipelineSkeletonTestsNs
+ 			// Audit item 4: a switch for a slot the renderer never consults would be silently ignored.
+ 			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::RepairDeband));
+ 			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::DriveProjectorControl));
++			Assert::IsTrue(PipelineSlots::SwitchHonoured(Id::OutputDither));   // S3 PrepareDither honours it (segments)
+ 			Assert::IsFalse(PipelineSlots::SwitchHonoured(Id::ScalingGeometry));
+ 			Assert::IsFalse(PipelineSlots::SwitchHonoured(Id::ColourToneGamut));
+ 		}
+diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+index c6c61773..a818e4eb 100644
+--- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+@@ -89,6 +89,7 @@
+ #include <VP-V/core/EntranceEpoch.h>
+ #include <VP-V/core/OutputHookOrder.h>
+ #include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
++#include <VP-V/segments/OutputSegments.h>   // S2/S3 output segments (central-migration-needs.md §6)
+ #include <VP-V/core/FallbackCatalog.h>   // VP-V: the silent-fallbacks batch (src/VP-V/core)
+ #include <vprenderer/DownscaleLight.h>
+ #include <vprenderer/SourceRebase.h>
+@@ -8120,6 +8121,11 @@ struct LibplaceboVideoRenderer::Impl
+ 	}
+ 	// output.calibration_lut in VP's output hooks (calibration_lut_stage = vp; R1).
+ 	CalibrationLutStage::Hook calibrationLutStage;
++	// The output segments (S2 PRE_OUTPUT colour + drive, S3 OUTPUT finish): one owner of their
++	// stages, order and parameters; the host keeps the decisions and calls each segment.
++	OutputSegments::OutputColourSegment outputColour{ sdrToneShape, dvTrimsHook, ledMeasurement, ledCompensation, calibrationLutStage };
++	OutputSegments::OutputFinishSegment outputFinish{ outputEncodingRepair, occlusionMaskHook };
++	std::vector<const pl_hook*> userFrameHooks;   // the S2 edge: the user's shaders this frame
+ 	bool calibrationLutStageLogged = false;
+ 	bool calibrationLutStageFailed = false;   // the VP stage failed once: libplacebo's target LUT for the session
+ 	std::vector<std::string> activeCustomShaders;
+@@ -24245,6 +24251,16 @@ struct LibplaceboVideoRenderer::Impl
+         }
+         frameHooks.clear();
+         frameSlotHooks.clear();
++        // S2 (output colour + drive): the blocks below decide; outputColour.Collect adds the hooks.
++        OutputSegments::ColourFrame colourFrame;
++        int sdrToneShapeState = 0;
++        struct DvTrimsFrame
++        {
++            bool ran = false, pending = false, dvPicture = false, pq = false, gammaSignal = false;
++            std::string state, params;
++            float peak = 0.0f;
++            DvTrimSelection::Selection selection;
++        } dvFrame;
+         // Delta 13: the SDR tone shape and headroom, first at PRE_OUTPUT
+         // (before the LED measurement and compensation). SDR source and
+         // output only; off installs nothing.
+@@ -24266,23 +24282,19 @@ struct LibplaceboVideoRenderer::Impl
+                     sdrToneShapeConfigured = true;
+                 }
+                 sdrToneShape.Ensure(hookTemplates);
+-                const size_t start = frameHooks.size();
+-                sdrToneShape.Collect(false, frameHooks);
+-                TagSlotHooks(start, PipelineSlots::Id::ColourSdrToneShape);
+                 const pl_color_map_params* colorMap = renderParams.color_map_params ?
+                     renderParams.color_map_params : &pl_color_map_default_params;
+-                for (size_t i = start; i < frameHooks.size(); ++i)
+-                {
+-                    CustomHookChain::SetHookParameter(frameHooks[i], "headroom", activeSettings.sdrTone.headroom);
+-                    CustomHookChain::SetHookParameter(frameHooks[i], "knee_start", activeSettings.sdrTone.kneeStart);
+-                    CustomHookChain::SetHookParameter(frameHooks[i], "strength", SdrToneShape::EffectiveStrength(activeSettings.sdrTone));
+-                    CustomHookChain::SetHookParameter(frameHooks[i], "eotf", LedDisplayGamma(target.color.transfer));
+-                    CustomHookChain::SetHookParameter(frameHooks[i], "recovery",
+-                        SdrToneShape::EffectiveRecovery(activeSettings.sdrTone, colorMap->contrast_recovery));
+-                }
+-                if (frameHooks.size() == start)
+-                    state = 3;
++                colourFrame.toneShape = true;
++                colourFrame.tone.headroom = activeSettings.sdrTone.headroom;
++                colourFrame.tone.kneeStart = activeSettings.sdrTone.kneeStart;
++                colourFrame.tone.strength = SdrToneShape::EffectiveStrength(activeSettings.sdrTone);
++                colourFrame.tone.eotf = LedDisplayGamma(target.color.transfer);
++                colourFrame.tone.recovery = SdrToneShape::EffectiveRecovery(activeSettings.sdrTone, colorMap->contrast_recovery);
+             }
++            sdrToneShapeState = state;
++        }
++        auto logSdrToneShape = [&](int state)
++        {
+             SyncFallback(FallbackCatalog::SdrToneShape(state == 1 || state == 3, state == 1,
+                 state == 3 ? "the shader did not load" : ""));
+             if (state != sdrToneShapeLogged)
+@@ -24294,7 +24306,7 @@ struct LibplaceboVideoRenderer::Impl
+                     activeSettings.sdrTone.kneeStart, activeSettings.sdrTone.kneeStrength,
+                     activeSettings.sdrTone.recovery < 0.0 ? "auto" : std::to_string(activeSettings.sdrTone.recovery).c_str());
+             }
+-        }
++        };
+         // dv_trims (owner 2026-10-17; default on since the DV synthetic validation 2026-10-24): the Dolby Vision L2 trim for the
+         // display's peak, after libplacebo's tone mapping (PRE_OUTPUT, before
+         // the LED stages). Tunnel pictures with DM only; not after a
+@@ -24322,6 +24334,7 @@ struct LibplaceboVideoRenderer::Impl
+             dvToneDolbyRunning, activeSettings.toneMapping, dvToneFallback, activeSettings.dvTrims, dvToneL1Missing);
+         if (activeSettings.dvTrims || !dvTrimsLogged.empty())
+         {
++            dvFrame.ran = true;
+             std::string state;
+             const bool dvPicture = state.empty() && renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION &&
+                 convertedPayload && convertedPayload->dolby.valid;
+@@ -24363,9 +24376,6 @@ struct LibplaceboVideoRenderer::Impl
+                         dvTrimsConfigured = true;
+                     }
+                     dvTrimsHook.Ensure(hookTemplates);
+-                    const size_t start = frameHooks.size();
+-                    dvTrimsHook.Collect(false, frameHooks);
+-                    TagSlotHooks(start, PipelineSlots::Id::ColourSdrToneShape);   // modularity: trims follow the colour slot order
+                     // Review C4: the luminance coefficients of the output's own primaries.
+                     const pl_raw_primaries* prim = pl_raw_primaries_get(display.primaries);
+                     double kr = 0.2126, kg = 0.7152, kb = 0.0722;
+@@ -24376,24 +24386,41 @@ struct LibplaceboVideoRenderer::Impl
+                         DolbyVisionTrims::LuminanceWeights(red, green, blue, white, kr, kg, kb);
+                     }
+                     const auto ictcp = DvDolbyStyle::ShaderParameters(dvToneDolbyRunning, prim);   // dv_space + output RGB -> LMS
+-                    for (size_t i = start; i < frameHooks.size(); ++i)
+-                    {
+-                        for (const auto& parameter : DvTrimSelection::ShaderParameters(selection.params))
+-                            CustomHookChain::SetHookParameter(frameHooks[i], parameter.first, parameter.second);
+-                        for (const auto& parameter : ictcp)
+-                            CustomHookChain::SetHookParameter(frameHooks[i], parameter.first, parameter.second);
+-                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_signal_pq", pq ? 1.0 : 0.0);
+-                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_gamma", LedDisplayGamma(target.color.transfer));
+-                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_peak_nits", display.hdr.max_luma);
+-                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_kr", kr);
+-                        CustomHookChain::SetHookParameter(frameHooks[i], "dv_kb", kb);
+-                    }
+-                    state = frameHooks.size() == start ? "NOT applied (shaders\\DV trims.glsl did not load)" :
+-                        std::string("active: ") + selection.reason;
+-                    if (frameHooks.size() > start)
+-                        params = DvTrimSelection::Describe(selection);
++                    // The parameters in today's order (selection, ICtCp, then the fixed five); S2 sets them.
++                    colourFrame.dvTrims = true;
++                    colourFrame.dv = DvTrimSelection::ShaderParameters(selection.params);
++                    colourFrame.dv.insert(colourFrame.dv.end(), ictcp.begin(), ictcp.end());
++                    colourFrame.dv.push_back({ "dv_signal_pq", pq ? 1.0 : 0.0 });
++                    colourFrame.dv.push_back({ "dv_gamma", LedDisplayGamma(target.color.transfer) });
++                    colourFrame.dv.push_back({ "dv_peak_nits", display.hdr.max_luma });
++                    colourFrame.dv.push_back({ "dv_kr", kr });
++                    colourFrame.dv.push_back({ "dv_kb", kb });
++                    dvFrame.pending = true;   // state and params once the segment has collected
+                 }
+             }
++            dvFrame.state = state;
++            dvFrame.params = params;
++            dvFrame.selection = selection;
++            dvFrame.dvPicture = dvPicture;
++            dvFrame.pq = pq;
++            dvFrame.gammaSignal = gammaSignal;
++            dvFrame.peak = display.hdr.max_luma;
++        }
++        auto finishDvTrims = [&](size_t collected)
++        {
++            if (!dvFrame.ran)
++                return;
++            std::string& state = dvFrame.state;
++            std::string& params = dvFrame.params;
++            const DvTrimSelection::Selection& selection = dvFrame.selection;
++            const bool dvPicture = dvFrame.dvPicture, pq = dvFrame.pq, gammaSignal = dvFrame.gammaSignal;
++            if (dvFrame.pending)
++            {
++                state = collected == 0 ? "NOT applied (shaders\\DV trims.glsl did not load)" :
++                    std::string("active: ") + selection.reason;
++                if (collected > 0)
++                    params = DvTrimSelection::Describe(selection);
++            }
+             // test/dv-synthetic 2026-10-24 (no silent fallbacks): dv_trims on, a DV picture with DM,
+             // but the trim cannot act (a calibration LUT, an unsupported output transfer, the shader
+             // missing): listed. Neutral (no L2 for this picture) is the trims' own answer, not a fallback.
+@@ -24415,7 +24442,7 @@ struct LibplaceboVideoRenderer::Impl
+             {
+                 dvTrimsLogged = activeSettings.dvTrims ? state : std::string();
+                 DebugLog::Log("Dolby Vision trims (non-certified): %s (display peak %.1f nits)", state.c_str(),
+-                    static_cast<double>(display.hdr.max_luma));
++                    static_cast<double>(dvFrame.peak));
+             }
+             const ULONGLONG trimsNow = GetTickCount64();
+             if (!params.empty() && params != dvTrimsParamsLogged &&
+@@ -24425,7 +24452,7 @@ struct LibplaceboVideoRenderer::Impl
+                 dvTrimsParamsTick = trimsNow;
+                 DebugLog::Log("Dolby Vision trims (non-certified): %s", params.c_str());
+             }
+-        }
++        };
+         dvCompare.Configure(activeSettings.dvCompareCaptureFolder);   // feat/dv-l8 WIP: the Config folder
+         if (dvCompare.Enabled())   // feat/dv-l8: DV comparison capture (diagnostic; VP_DV_COMPARE_PATH)
+             dvCompare.OnRender(state, convertedPayload ? convertedPayload->rawFrame.get() : nullptr, videoFrame.GetCounter(),
+@@ -24604,57 +24631,51 @@ struct LibplaceboVideoRenderer::Impl
+                     adaptiveDownscale.LastMapState() == AdaptiveDownscale::MapState::Used ?
+                     adaptiveDownscale.GrainMap() : nullptr, static_cast<float>(activeSettings.adaptive.grainFloor),
+                     renderImage.crop);
+-                if (pipelineSlots.Runs(PipelineSlots::Id::DriveLedMeasure))
+-                {
+-                    frameHooks.push_back(ledMeasurement.Hook());
+-                    TagSlotHooks(frameHooks.size() - 1, PipelineSlots::Id::DriveLedMeasure);
+-                }
++                colourFrame.ledMeasure = pipelineSlots.Runs(PipelineSlots::Id::DriveLedMeasure);
+             }
+-            const size_t compensationStart = frameHooks.size();
+-            if (pipelineSlots.Runs(PipelineSlots::Id::DriveLedCompensation))
+-                ledCompensation.Collect(false, frameHooks);
+-            TagSlotHooks(compensationStart, PipelineSlots::Id::DriveLedCompensation);
+-            if (boostExponent != 1.0 && frameHooks.size() == compensationStart)
++            colourFrame.ledBlock = true;
++            colourFrame.ledCompensation = pipelineSlots.Runs(PipelineSlots::Id::DriveLedCompensation);
++            OutputSegments::CompensationParams& c = colourFrame.compensation;
++            c.gain = compensation.active ? compensation.gain : 1.0;
++            c.knee = compensation.knee;
++            c.gainDomain = compensation.domain == LedDrive::GainDomain::Linear ? 1.0 : 0.0;
++            c.eotf = compensation.eotf;
++            c.boost = boostExponent;
++            c.boostKnee = ledBoostKnee.load(std::memory_order_acquire);
++            c.boostKneeWidth = ledBoostKneeWidth.load(std::memory_order_acquire);
++            c.shadowLift = ledShadowLift.load(std::memory_order_acquire);
++            c.veil = compensation.veil;
++            c.wtwPassthrough = ledWtwPassthrough.load(std::memory_order_acquire) ? 1.0 : 0.0;
++            c.btbPassthrough = ledBtbPassthrough.load(std::memory_order_acquire) ? 1.0 : 0.0;
++        }
++        // The user's shaders (the S2 edge) and VP's calibration LUT stage; then S2 adds this
++        // frame's hooks in the segment's order, exactly as the separate blocks did.
++        userFrameHooks.clear();
++        customHooks.Collect(lowLatencyQueue, userFrameHooks);
++        colourFrame.userPreOutput = &userFrameHooks;
++        colourFrame.calibrationLut = calibrationLutStage.Lut() != nullptr;
++        const OutputSegments::ColourCounts colourCounts = outputColour.Collect(colourFrame, pipelineSlots, frameHooks,
++            [this](size_t start, PipelineSlots::Id slot) { TagSlotHooks(start, slot); });
++        logSdrToneShape(sdrToneShapeState == 1 && colourCounts.toneShape == 0 ? 3 : sdrToneShapeState);
++        finishDvTrims(colourCounts.dvTrims);
++        SyncFallback(colourCounts.unhandled ? FallbackCatalog::Engaged("S2 placeholder stage",
++            "a placeholder slot has a component but no output-segment stage yet (not run)") :
++            FallbackCatalog::Released("S2 placeholder stage"));
++        if (colourFrame.ledBlock)
++        {
++            if (boostExponent != 1.0 && colourCounts.ledCompensation == 0)
+             {
+                 if (!ledBoostMissingLogged)
+                     DebugLog::Log("Dynamic Drive: WARNING gamma boost NOT applied - shaders\\LED compensation.glsl did not load or was disabled; the picture is plain output_gamma (exponent %.4f missing)",
+                         boostExponent);
+                 ledBoostMissingLogged = true;
+             }
+-            else if (frameHooks.size() > compensationStart)
++            else if (colourCounts.ledCompensation > 0)
+             {
+                 if (ledBoostMissingLogged)
+                     DebugLog::Log("Dynamic Drive: gamma boost applied again (compensation hook running)");
+                 ledBoostMissingLogged = false;
+             }
+-            for (size_t i = compensationStart; i < frameHooks.size(); ++i)
+-            {
+-                CustomHookChain::SetHookParameter(frameHooks[i], "gain",
+-                    compensation.active ? compensation.gain : 1.0);
+-                CustomHookChain::SetHookParameter(frameHooks[i], "knee", compensation.knee);
+-                CustomHookChain::SetHookParameter(frameHooks[i], "gain_domain",
+-                    compensation.domain == LedDrive::GainDomain::Linear ? 1.0 : 0.0);
+-                CustomHookChain::SetHookParameter(frameHooks[i], "compensation_eotf", compensation.eotf);
+-                CustomHookChain::SetHookParameter(frameHooks[i], "boost", boostExponent);
+-                CustomHookChain::SetHookParameter(frameHooks[i], "boost_knee", ledBoostKnee.load(std::memory_order_acquire));
+-                CustomHookChain::SetHookParameter(frameHooks[i], "boost_knee_width",
+-                    ledBoostKneeWidth.load(std::memory_order_acquire));
+-                CustomHookChain::SetHookParameter(frameHooks[i], "shadow_lift", ledShadowLift.load(std::memory_order_acquire));
+-                CustomHookChain::SetHookParameter(frameHooks[i], "veil", compensation.veil);
+-                CustomHookChain::SetHookParameter(frameHooks[i], "wtw_passthrough",
+-                    ledWtwPassthrough.load(std::memory_order_acquire) ? 1.0 : 0.0);
+-                CustomHookChain::SetHookParameter(frameHooks[i], "btb_passthrough",
+-                    ledBtbPassthrough.load(std::memory_order_acquire) ? 1.0 : 0.0);
+-            }
+-        }
+-        customHooks.Collect(lowLatencyQueue, frameHooks);
+-        // output.calibration_lut with calibration_lut_stage = vp (R1): VP's last colour hook, after
+-        // the LED compensation (and black level, when built) and the user's PRE_OUTPUT shaders; the
+-        // de-judder rendered-picture cache, pushed later, keeps the LUT-mapped picture for the extras.
+-        if (calibrationLutStage.Lut())
+-        {
+-            frameHooks.push_back(calibrationLutStage.Get());
+-            TagSlotHooks(frameHooks.size() - 1, PipelineSlots::Id::OutputCalibrationLut);
+         }
+         // A cadence repeat shows the previous picture again: the sigma-delta
+         // skips its motion search (zero motion; owner 2026-10-13 efficiency).
+@@ -24866,24 +24887,10 @@ struct LibplaceboVideoRenderer::Impl
+ #endif
+         {
+             const SigmaDeltaDomain::Domain domain = SigmaDeltaDomain::FromTarget(target.repr);
+-            bool any = false;
+-            bool sigmaDomainDropped = false;
+-            for (size_t i = 0; i < frameHooks.size();)
+-            {
+-                const pl_hook* hook = frameHooks[i];
+-                const bool sigma = CustomHookChain::SetHookParameter(hook, "levels_full", domain.full ? 1.0 : 0.0);
+-                any = any || sigma;
+-                if (sigma && !domain.supported)
+-                {
+-                    sigmaDomainDropped = true;
+-                    frameHooks.erase(frameHooks.begin() + static_cast<std::ptrdiff_t>(i));
+-                    continue;
+-                }
+-                CustomHookChain::SetHookParameter(hook, "swapchain_bits", static_cast<double>(domain.sample));
+-                CustomHookChain::SetHookParameter(hook, "color_bits", static_cast<double>(domain.color));
+-                CustomHookChain::SetHookParameter(hook, "output_float32", outputFloat32 ? 1.0 : 0.0);
+-                ++i;
+-            }
++            outputFinish.BeginFrame();   // S3 (output finish), step 1: the dither's code domain
++            const OutputSegments::DitherPrep ditherPrep = outputFinish.PrepareDither(frameHooks, domain, outputFloat32, pipelineSlots);
++            const bool any = ditherPrep.found && !ditherPrep.slotOff;
++            const bool sigmaDomainDropped = ditherPrep.domainDropped;
+             const int signature = (domain.full ? 1 : 0) | (domain.sample << 1) | (domain.color << 8);
+             if (any && signature != sigmaDeltaDomainLogged)
+             {
+@@ -24897,7 +24904,7 @@ struct LibplaceboVideoRenderer::Impl
+             }
+             // Silent-fallbacks batch: the sigma-delta asked for but not running is visible (ADR-0001).
+             const std::string quantiserProblem = customHooks.QuantizerProblem();
+-            SyncFallback(FallbackCatalog::Dither(any || !quantiserProblem.empty(),
++            SyncFallback(FallbackCatalog::Dither(OutputSegments::DitherFallbackRequested(ditherPrep, !quantiserProblem.empty()),
+                 sigmaDomainDropped ? FallbackCatalog::DitherDrop::UnsupportedDomain :
+                 quantiserProblem == CustomHookChain::Chain::kQuantizerNotLoaded ? FallbackCatalog::DitherDrop::ShaderNotLoaded :
+                 !quantiserProblem.empty() ? FallbackCatalog::DitherDrop::DisabledByLibplacebo : FallbackCatalog::DitherDrop::None,
+@@ -24909,22 +24916,9 @@ struct LibplaceboVideoRenderer::Impl
+         // sigma-delta is moved to the end (logged once). The occlusion mask
+         // and the encoding repair are placed relative to it below.
+         {
+-            std::vector<const pl_hook*> sigmaHooks;
+-            bool otherOutputAfterSigma = false;
+-            for (const pl_hook* hook : frameHooks)
+-            {
+-                const bool sigma = CustomHookChain::SetHookParameter(hook, "levels_full",
+-                    pl_color_levels_guess(&target.repr) == PL_COLOR_LEVELS_FULL ? 1.0 : 0.0);
+-                if (sigma)
+-                    sigmaHooks.push_back(hook);
+-                else if (!sigmaHooks.empty() && hook && (hook->stages & PL_HOOK_OUTPUT))
+-                    otherOutputAfterSigma = true;
+-            }
+-            if (otherOutputAfterSigma)
++            // S3 step 2.
++            if (outputFinish.KeepDitherLast(frameHooks, pl_color_levels_guess(&target.repr) == PL_COLOR_LEVELS_FULL))
+             {
+-                for (const pl_hook* hook : sigmaHooks)
+-                    frameHooks.erase(std::find(frameHooks.begin(), frameHooks.end(), hook));
+-                frameHooks.insert(frameHooks.end(), sigmaHooks.begin(), sigmaHooks.end());
+                 if (!sigmaDeltaReorderLogged)
+                     DebugLog::Log("Sigma-delta: another OUTPUT-stage shader was configured after it; the sigma-delta now runs last");
+                 sigmaDeltaReorderLogged = true;
+@@ -24972,14 +24966,9 @@ struct LibplaceboVideoRenderer::Impl
+                     grainInstall = false;
+                 }
+             }
+-            size_t sigmaIndex = frameHooks.size();
+-            for (size_t i = 0; i < frameHooks.size(); ++i)
+-                if (CustomHookChain::SetHookParameter(frameHooks[i], "occlusion_mask", install ? 1.0 : 0.0) &&
+-                    sigmaIndex == frameHooks.size())
+-                    sigmaIndex = i;
+-            for (size_t i = 0; i < frameHooks.size(); ++i)
+-                CustomHookChain::SetHookParameter(frameHooks[i], "grain_tolerance_scale",
+-                    grainInstall && sigmaIndex < frameHooks.size() ? activeSettings.ditherGrainToleranceScale : 1.0);
++            // S3 step 3: the mask's parameters and its place just before the dither.
++            const size_t sigmaIndex = outputFinish.MarkMask(frameHooks, install, grainInstall,
++                activeSettings.ditherGrainToleranceScale);
+             if (sigmaIndex == frameHooks.size())
+                 grainInstall = false;
+             grainToleranceParamSet = grainInstall;
+@@ -25006,7 +24995,7 @@ struct LibplaceboVideoRenderer::Impl
+                 // MAIN-stage texture libplacebo hooks is the cropped picture).
+                 if (submittedNls)
+                     occlusionMaskHook.SetNls(nlsMapping, renderImage.crop);
+-                frameHooks.insert(frameHooks.begin() + static_cast<std::ptrdiff_t>(sigmaIndex), occlusionMaskHook.Get());
++                outputFinish.InsertMask(frameHooks, sigmaIndex);
+             }
+             if (install)
+             {
+@@ -25142,11 +25131,9 @@ struct LibplaceboVideoRenderer::Impl
+         // a texture-input PRE_OUTPUT hook; the repair runs first at OUTPUT,
+         // before any OUTPUT-stage shader such as the sigma-delta.
+         const pl_render_errors renderErrors = pl_renderer_get_errors(renderer);
+-        if (OutputEncodingRepair::Needed(frameHooks, &renderErrors,
+-            target.lut ? target.lut_type : PL_LUT_UNKNOWN))
++        // S3 step 4.
++        if (outputFinish.Repair(frameHooks, &renderErrors, target.lut ? target.lut_type : PL_LUT_UNKNOWN, target.repr))
+         {
+-            outputEncodingRepair.SetTarget(target.repr);
+-            frameHooks.insert(frameHooks.begin(), outputEncodingRepair.Get());
+             if (!outputEncodingRepairLogged)
+                 DebugLog::Log("libplacebo output encoding repair active (PRE_OUTPUT hook in the chain; target levels=%d)",
+                     static_cast<int>(target.repr.levels));
+diff --git a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
+index 0df27666..e791ab07 100644
+--- a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
++++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
+@@ -389,6 +389,20 @@
+     <ClCompile Include="..\VP-V\tests\PipelineSkeletonTests.cpp">
+       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+     </ClCompile>
++    <ClCompile Include="..\VP-V\tests\SegmentRunnerTests.cpp" />
++    <ClCompile Include="..\VP-V\tests\OutputSegmentsGpuTests.cpp" />
++    <ClCompile Include="..\VP-V\core\SegmentRunner.cpp">
++      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
++      <PrecompiledHeader>NotUsing</PrecompiledHeader>
++    </ClCompile>
++    <ClCompile Include="..\VP-V\segments\OutputSegments.cpp">
++      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
++      <PrecompiledHeader>NotUsing</PrecompiledHeader>
++    </ClCompile>
++    <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutStage.cpp">
++      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
++      <PrecompiledHeader>NotUsing</PrecompiledHeader>
++    </ClCompile>
+     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\HookSegment.cpp">
+       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+diff --git a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj.filters b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj.filters
+index 04aa16a2..3539c698 100644
+--- a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj.filters
++++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj.filters
+@@ -227,6 +227,11 @@
+   <ItemGroup><ClCompile Include="VpScaleRenderMotionTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+   <ItemGroup><Filter Include="VP-V"><UniqueIdentifier>{6f1b7a52-4c3e-4f6a-9d1e-5a0c2b7e9d41}</UniqueIdentifier></Filter></ItemGroup>
+   <ItemGroup><ClCompile Include="..\VP-V\tests\PipelineSkeletonTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
++  <ItemGroup><ClCompile Include="..\VP-V\tests\SegmentRunnerTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
++  <ItemGroup><ClCompile Include="..\VP-V\tests\OutputSegmentsGpuTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
++  <ItemGroup><ClCompile Include="..\VP-V\core\SegmentRunner.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
++  <ItemGroup><ClCompile Include="..\VP-V\segments\OutputSegments.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
++  <ItemGroup><ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutStage.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+   <ItemGroup><ClCompile Include="..\VideoProcessor-Lib\vprenderer\HookSegment.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+   <ItemGroup><ClCompile Include="HookSegmentTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+   <ItemGroup><ClCompile Include="..\VP-V\nets\NetFusion.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+diff --git a/src/VideoProcessor-VPRenderer/VideoProcessor-VPRenderer.vcxproj b/src/VideoProcessor-VPRenderer/VideoProcessor-VPRenderer.vcxproj
+index a107ea6e..6c042971 100644
+--- a/src/VideoProcessor-VPRenderer/VideoProcessor-VPRenderer.vcxproj
++++ b/src/VideoProcessor-VPRenderer/VideoProcessor-VPRenderer.vcxproj
+@@ -109,6 +109,10 @@
+     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\MotionAheadProducer.cpp" />
+     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OutputEncodingRepair.cpp" />
+     <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutStage.cpp" />
++    <ClCompile Include="..\VP-V\segments\OutputSegments.cpp" />
++    <ClCompile Include="..\VP-V\core\SegmentRunner.cpp">
++      <PrecompiledHeader>NotUsing</PrecompiledHeader>
++    </ClCompile>
+     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\HookSegment.cpp" />
+     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OcclusionMaskHook.cpp" />
+     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\ExtendedRange.cpp" />
+diff --git a/src/VideoProcessor-VPRenderer/VideoProcessor-VPRendererBeta.vcxproj b/src/VideoProcessor-VPRenderer/VideoProcessor-VPRendererBeta.vcxproj
+index 241beabc..a0b925f7 100644
+--- a/src/VideoProcessor-VPRenderer/VideoProcessor-VPRendererBeta.vcxproj
++++ b/src/VideoProcessor-VPRenderer/VideoProcessor-VPRendererBeta.vcxproj
+@@ -122,6 +122,10 @@
+     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\TextureRestore.cpp" />
+     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OutputEncodingRepair.cpp" />
+     <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutStage.cpp" />
++    <ClCompile Include="..\VP-V\segments\OutputSegments.cpp" />
++    <ClCompile Include="..\VP-V\core\SegmentRunner.cpp">
++      <PrecompiledHeader>NotUsing</PrecompiledHeader>
++    </ClCompile>
+     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\HookSegment.cpp" />
+     <ClCompile Include="LibplaceboPluginExports.cpp" />
+     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\LibplaceboDisplayLut.cpp" />
+diff --git a/tests/vpv/slot-matrix.json b/tests/vpv/slot-matrix.json
+index 7246d38c..434194b4 100644
+--- a/tests/vpv/slot-matrix.json
++++ b/tests/vpv/slot-matrix.json
+@@ -689,7 +689,9 @@
+   "tests": {
+    "placeholder": [],
+    "isolation": [
+-    "SigmaDeltaDomain tests"
++    "SigmaDeltaDomain tests",
++    "SegmentRunnerTests.DitherSlotOffRemovesTheSigmaDelta (switch honoured: output.dither off submits no sigma-delta)",
++    "SegmentRunnerTests.DitherFallbackOnlyForDomainOrShaderNotForSlotOff"
+    ],
+    "contract": [
+     "the quantiser is the last OUTPUT hook"

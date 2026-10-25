@@ -1,0 +1,412 @@
+diff --git a/docs/design/components-master.json b/docs/design/components-master.json
+index 0b9ac3f1..b100ee2e 100644
+--- a/docs/design/components-master.json
++++ b/docs/design/components-master.json
+@@ -887,6 +887,7 @@
+           "dither_grain_tolerance_scale",
+           "dither_vectors",
+           "dithering",
++          "output_segments_merged",
+           "sigma_delta"
+         ],
+         "upstream_modules": [
+diff --git a/docs/design/slots.json b/docs/design/slots.json
+index 6324542a..7c0ddbfd 100644
+--- a/docs/design/slots.json
++++ b/docs/design/slots.json
+@@ -1554,7 +1554,8 @@
+         "sigma_delta",
+         "dithering",
+         "dither_vectors",
+-        "dither_grain_tolerance_scale"
++        "dither_grain_tolerance_scale",
++        "output_segments_merged"
+       ],
+       "planned_keys": [],
+       "tiers": "Classic libplacebo dither; Low..Upper sigma-delta",
+@@ -1584,7 +1585,8 @@
+       "original_pathway": {
+         "mode": "upstream form",
+         "settings": {
+-          "temporal_dither": "libplacebo"
++          "temporal_dither": "libplacebo",
++          "output_segments_merged": "off"
+         }
+       },
+       "zone": "quantise",
+diff --git a/docs/settings/VP-settings-reference.md b/docs/settings/VP-settings-reference.md
+index 587607b5..e59b6c54 100644
+--- a/docs/settings/VP-settings-reference.md
++++ b/docs/settings/VP-settings-reference.md
+@@ -43,7 +43,7 @@ Config now has one **VP-V** page that holds everything VP adds.
+ | **Global tier** | Classic / Low / Mid / Upper for every unit at once. If a unit has no step at that level, it uses its nearest lower step. Change one unit afterwards and the global tier shows *Custom (per unit)*. |
+ | **Fallbacks engaged** | The running VP's list of automatic downgrades, for example "Fallbacks engaged: capture GPU unpack (CPU 4:2:0 ...)", or "none". It is the same line as Ctrl+I and Ctrl+Alt+D. |
+ | **Unit tabs** | Each tab has two sub-pages. **Main**: the unit's tier slider, its taste slider where it has one, and small cards of switches. **Advanced**: the settings a master on Main sets (greyed "Set by ..." until you tick *Custom* on that card; unticking puts the master's values back), tuning used only while its feature is on ("Used only when ... is on"), the measured internals (collapsed), the planned settings and the unit's stages with their fallback text. The layout map is `docs/settings/organisation.md`. |
+-| **Pipeline (expert)** | For testing only: where the calibration LUT runs (`calibration_lut_stage`: libplacebo today, or VP's last colour step after Dynamic Drive), the module order (`pipeline_order`, checked with the renderer's own rules; an order it would reject is shown with the reason and not saved), and stages switched off entirely (`pipeline_slots_off`). |
++| **Pipeline (expert)** | For testing only: where the calibration LUT runs (`calibration_lut_stage`: libplacebo today, or VP's last colour step after Dynamic Drive), the module order (`pipeline_order`, checked with the renderer's own rules; an order it would reject is shown with the reason and not saved), stages switched off entirely (`pipeline_slots_off`), and the output chain as one hook per stage (`output_segments_merged`, draft: off until its GPU check passes; disabled in the Original pathway). |
+ | **Proposed retirement** | The section-12 candidates below, by group, with where each control is and the value in use. The same note is added to each control's tooltip. Nothing is removed until you approve. Each unit tab also ends with "More settings of this unit", naming the pages that hold the rest (coverage audit: `docs/settings/coverage-audit.md`). |
+ 
+ **One control per key.** Every VP setting has exactly one live control. VP's own settings that used
+diff --git a/src/VP-V/config/VpvSection.cpp b/src/VP-V/config/VpvSection.cpp
+index df28258a..aabdc50b 100644
+--- a/src/VP-V/config/VpvSection.cpp
++++ b/src/VP-V/config/VpvSection.cpp
+@@ -1068,6 +1068,19 @@ namespace Vpv
+ 
+ 			// pipeline_entrance_once (B3, ADR-0024) is a hidden diagnostic/test key with no Config control (skeleton b76571c1).
+ 
++			// Output segments S2/S3 as one hook each (draft): off until the GPU check passes; never in the
++			// Original pathway (the renderer also forces it off there).
++			auto* merged = new QCheckBox(QStringLiteral("Merge the output chain into one hook per stage"));
++			merged->setObjectName(ObjectName(QStringLiteral("expert.output_segments_merged")));
++			merged->setToolTip(QStringLiteral("Key output_segments_merged. Run each output chain as one hook \u2014 off until its "
++				"GPU check passes."));
++			form->addRow(QStringLiteral("Output chain"), merged);
++			QObject::connect(merged, &QCheckBox::toggled, merged, [state, section](bool on)
++			{
++				if (state->refreshing || !state->host.setValue) return;
++				state->host.setValue(section, QStringLiteral("output_segments_merged"), on ? QStringLiteral("on") : QStringLiteral("off"));
++			});
++
+ 			// The module order: slot names moved within their zone.
+ 			auto* order = new QLineEdit;
+ 			order->setObjectName(ObjectName(QStringLiteral("expert.pipeline_order")));
+@@ -1122,13 +1135,18 @@ namespace Vpv
+ 			layout->addLayout(form);
+ 			layout->addStretch();
+ 
+-			state->refreshers.push_back([state, lutStage, order, slotsOff, section]()
++			state->refreshers.push_back([state, lutStage, merged, order, slotsOff, section]()
+ 			{
+ 				const auto get = [&](const char* key) { return state->host.value ? state->host.value(section, QString::fromLatin1(key)).trimmed() : QString(); };
+ 				{
+ 					const QSignalBlocker blocker(lutStage);
+ 					lutStage->setCurrentIndex(get("calibration_lut_stage").compare(QStringLiteral("vp"), Qt::CaseInsensitive) == 0 ? 1 : 0);
+ 				}
++				{
++					const QSignalBlocker blocker(merged);
++					merged->setChecked(get("output_segments_merged").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0);
++					merged->setEnabled(get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) != 0);
++				}
+ 				if (!order->hasFocus()) order->setText(get("pipeline_order"));
+ 				if (!slotsOff->hasFocus()) slotsOff->setText(get("pipeline_slots_off"));
+ 			});
+diff --git a/src/VP-V/config/tests/VpvConfigTests.cpp b/src/VP-V/config/tests/VpvConfigTests.cpp
+index a62f3bb8..d399f97d 100644
+--- a/src/VP-V/config/tests/VpvConfigTests.cpp
++++ b/src/VP-V/config/tests/VpvConfigTests.cpp
+@@ -364,6 +364,10 @@ namespace
+ 			QMetaObject::invokeMethod(off, "editingFinished", Qt::DirectConnection);
+ 			auto* lut = control<QComboBox>(window, Vpv::ObjectName("expert.calibration_lut_stage"));
+ 			lut->setCurrentIndex(1);
++			auto* merged = control<QCheckBox>(window, Vpv::ObjectName("expert.output_segments_merged"));
++			require(!merged->isChecked(), "the merged output chain is off by default");
++			require(merged->toolTip().contains(QStringLiteral("off until its GPU check passes")), "the merged output chain says why it is off");
++			merged->setChecked(true);
+ 			save(window);
+ 		}
+ 		ConfigFile config;
+@@ -373,7 +377,16 @@ namespace
+ 		require(config.TryGetString("vpv", "pipeline_slots_off", v) && v == "repair.texture_restore, colour.appearance",
+ 			"the stages switched off are stored in [vpv]");
+ 		require(config.TryGetString("vpv", "calibration_lut_stage", v) && v == "vp", "the LUT stage is stored in [vpv]");
++		require(config.TryGetString("vpv", "output_segments_merged", v) && v == "on", "the merged output chain is stored in [vpv]");
+ 		requireVpReads(path);
++		{
++			ConfigEditorWindow window(path, 0, true);
++			auto* pathway = control<QComboBox>(window, Vpv::ObjectName("pathway"));
++			pathway->setCurrentIndex(1);
++			QCoreApplication::processEvents();
++			require(!control<QCheckBox>(window, Vpv::ObjectName("expert.output_segments_merged"))->isEnabled(),
++				"the merged output chain is disabled in the Original pathway");
++		}
+ 	}
+ }
+ 
+diff --git a/src/VP-V/core/OriginalPathway.h b/src/VP-V/core/OriginalPathway.h
+index a20eab56..fad9f9db 100644
+--- a/src/VP-V/core/OriginalPathway.h
++++ b/src/VP-V/core/OriginalPathway.h
+@@ -25,9 +25,9 @@ namespace OriginalPathway
+ 		const char* slot;   // the slot whose VP additions it removes (slots.json id)
+ 	};
+ 
+-	inline const std::array<Override, 56>& Overrides()
++	inline const std::array<Override, 57>& Overrides()
+ 	{
+-		static const std::array<Override, 56> table = { {
++		static const std::array<Override, 57> table = { {
+ 			{ "capture_path", "standard", "input.capture" },
+ 			{ "capture_upload", "render", "input.capture" },
+ 			{ "native_rgb_ingest", "off", "input.capture" },
+@@ -75,6 +75,7 @@ namespace OriginalPathway
+ 			{ "intent_black", "off", "control.config" },
+ 			{ "ambient_adapt", "off", "control.config" },
+ 			{ "temporal_dither", "libplacebo", "output.dither" },
++			{ "output_segments_merged", "off", "output.dither" },   // VP's merged output hooks: never in Bill's pathway
+ 			{ "render_ahead", "off", "output.presentation" },
+ 			{ "calibration_lut_stage", "libplacebo", "output.calibration_lut" },
+ 			// Settings audit 2026-10-24: VP additions the first table missed (absent from Bill's v1.4.02-beta).
+diff --git a/src/VP-V/modules/output/dither/MANIFEST.json b/src/VP-V/modules/output/dither/MANIFEST.json
+index 15ba4fd5..9356cfa2 100644
+--- a/src/VP-V/modules/output/dither/MANIFEST.json
++++ b/src/VP-V/modules/output/dither/MANIFEST.json
+@@ -27,6 +27,7 @@
+       "dither_grain_tolerance_scale",
+       "dither_vectors",
+       "dithering",
++      "output_segments_merged",
+       "sigma_delta"
+     ],
+     "upstream_modules": [
+diff --git a/src/VP-V/modules/output/dither/README.md b/src/VP-V/modules/output/dither/README.md
+index ed257f26..2af4aa5f 100644
+--- a/src/VP-V/modules/output/dither/README.md
++++ b/src/VP-V/modules/output/dither/README.md
+@@ -73,7 +73,7 @@ Code moves into this folder only when this slot is touched (opportunistic until
+ 
+ ## Settings
+ 
+-- Keys: `sigma_delta`, `dithering`, `dither_vectors`, `dither_grain_tolerance_scale`.
++- Keys: `sigma_delta`, `dithering`, `dither_vectors`, `dither_grain_tolerance_scale`, `output_segments_merged`.
+ - Tiers: Classic libplacebo dither; Low..Upper sigma-delta.
+ - VP-V page, Output tab: tiers Classic / Low / Mid; tier keys `temporal_dither`.
+ - Listed under the tier: `occlusion_mask`.
+diff --git a/src/VP-V/tests/PipelineSkeletonTests.cpp b/src/VP-V/tests/PipelineSkeletonTests.cpp
+index bed93f19..f65e24bd 100644
+--- a/src/VP-V/tests/PipelineSkeletonTests.cpp
++++ b/src/VP-V/tests/PipelineSkeletonTests.cpp
+@@ -666,7 +666,8 @@ namespace PipelineSkeletonTestsNs
+ 			}
+ 			// Settings audit 2026-10-24: the VP additions the first table missed are switched off too.
+ 			for (const char* key : { "active_picture_startup_hold", "low_bitrate_handling", "ssim_residual_stabilise",
+-				"cnn_residual_stabilise", "residual_stabilise_grain_guard", "dejudder_estimate_ahead", "interpolation_fallback" })
++				"cnn_residual_stabilise", "residual_stabilise_grain_guard", "dejudder_estimate_ahead", "interpolation_fallback",
++				"output_segments_merged" })
+ 				Assert::IsTrue(keys.count(key) == 1, W(std::string(key) + " is not in the Original pathway").c_str());
+ 		}
+ 
+diff --git a/src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp b/src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp
+index acbc8011..7bf9d392 100644
+--- a/src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp
++++ b/src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp
+@@ -9413,6 +9413,7 @@ static const std::map<std::string, const char*>& CoverageAllowList()
+         { "renderer:pipeline_order", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.pipeline_order); also read from [vprenderer]" },
+         { "renderer:pipeline_slots_off", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.pipeline_slots_off); also read from [vprenderer]" },
+         { "renderer:calibration_lut_stage", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.calibration_lut_stage); also read from [vprenderer]" },
++        { "renderer:output_segments_merged", "VP-V section (ADR-0023): stored in [vpv] by the VP-V page (vpv.expert.output_segments_merged); also read from [vprenderer]" },
+         { "renderer:pipeline_entrance_once", "hidden diagnostic/test key (ADR-0024): B3 is the default and the pre-B3 path is retired; no Config control" },
+     };
+     return allowList;
+@@ -9519,7 +9520,7 @@ int writeSettingsInventory(const QString& outPath)
+                 << (reason == allowList.end() ? QString() : inventoryField(QString::fromUtf8(reason->second))) << '\n';
+         }
+     }
+-    for (const char* key : { "pipeline_original_pathway", "pipeline_order", "pipeline_slots_off", "calibration_lut_stage" })
++    for (const char* key : { "pipeline_original_pathway", "pipeline_order", "pipeline_slots_off", "calibration_lut_stage", "output_segments_merged" })
+         stream << "K\tvpv\tvpv\t" << key << "\t\n";
+     for (QWidget* w : window.findChildren<QWidget*>())
+     {
+diff --git a/src/VideoProcessor-Lib/RendererProfileConfig.h b/src/VideoProcessor-Lib/RendererProfileConfig.h
+index 919bb7f5..132d26e3 100644
+--- a/src/VideoProcessor-Lib/RendererProfileConfig.h
++++ b/src/VideoProcessor-Lib/RendererProfileConfig.h
+@@ -1090,6 +1090,7 @@ namespace RendererProfileConfig
+ 		if (key == "pipeline_order" || key == "pipeline_slots_off")
+ 			return value.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_.,;> ") == std::string::npos;
+ 		if (key == "calibration_lut_stage") return IsChoice(value, { "libplacebo", "vp" });
++		if (key == "output_segments_merged") return IsChoice(value, { "on", "off" });   // output segments S2/S3 (draft)
+ 		if (key == "video_conversion")
+ 			return IsChoice(value, { "none", "off", "v210_to_p010", "uyvy_to_p010" });
+ 		if (key == "container_colorspace")
+@@ -2110,7 +2111,7 @@ namespace RendererProfileConfig
+ 			for (const auto& value : *vpvValues)
+ 			{
+ 				static const char* const vpvKeys[] = { "pipeline_original_pathway", "pipeline_order",
+-					"pipeline_slots_off", "calibration_lut_stage", "pipeline_entrance_once" };
++					"pipeline_slots_off", "calibration_lut_stage", "pipeline_entrance_once", "output_segments_merged" };
+ 				bool known = false;
+ 				for (const char* key : vpvKeys) known = known || value.first == key;
+ 				if (!known)
+diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+index a818e4eb..9a22280f 100644
+--- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
++++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
+@@ -90,6 +90,7 @@
+ #include <VP-V/core/OutputHookOrder.h>
+ #include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
+ #include <VP-V/segments/OutputSegments.h>   // S2/S3 output segments (central-migration-needs.md §6)
++#include <VP-V/segments/OutputSegmentsMerge.h>   // output_segments_merged (default off)
+ #include <VP-V/core/FallbackCatalog.h>   // VP-V: the silent-fallbacks batch (src/VP-V/core)
+ #include <vprenderer/DownscaleLight.h>
+ #include <vprenderer/SourceRebase.h>
+@@ -1366,6 +1367,7 @@ namespace
+ 		bool extendedRangeMoreCases = true;   // GPU tests pass (2026-10-17 night); owner: BTB/WTW in all cases
+ 		SdrToneShape::Settings sdrTone;     // delta 13: SDR tone shape and headroom (off)
+ 		bool dejudderWarpRendered = true;   // 6d: extras warp A's rendered picture (false: a warped source)
++		bool outputSegmentsMerged = false;   // S2/S3 as one PRE_OUTPUT + one OUTPUT hook (draft; tolerance gate)
+ 		std::string upscaler = "auto";
+ 		std::string chromaUpscaler = "auto";   // owner 2026-10-13: plane_upscaler (auto = Catmull-Rom, upscaler = the upscaler)
+ 		std::string downscaler = "auto";
+@@ -1532,6 +1534,7 @@ namespace
+ 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
+ 			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
+ 			<< settings.preserveExtendedRange << '|' << settings.extendedRangeMoreCases << '|' << settings.dejudderWarpRendered << '|'
++			<< settings.outputSegmentsMerged << '|'
+ 			// Settings applied live must change the fingerprint, or a profile edit
+ 			// touching only them is not applied until something else changes.
+ 			<< settings.captureUpload << '|' << settings.sourceRange << '|' << settings.sourceResolution << '|' << settings.dvToneMapping << '|' << settings.dvCompareCaptureFolder << '|'
+@@ -3583,6 +3586,7 @@ namespace
+ 		settings.intentBlack = BlackIntentMode::Off;       // key=intent_black
+ 		settings.ambientAdapt = false;                     // key=ambient_adapt
+ 		settings.temporalDither = "libplacebo";            // key=temporal_dither
++		settings.outputSegmentsMerged = false;             // key=output_segments_merged
+ 		settings.renderAhead = false;                      // key=render_ahead
+ 		settings.calibrationLutStage = "libplacebo";       // key=calibration_lut_stage
+ 		// Settings audit 2026-10-24: VP additions the first table missed (absent from Bill's v1.4.02-beta).
+@@ -3627,6 +3631,14 @@ namespace
+ 			else
+ 				settings.pipelineSettingsProblems += "calibration_lut_stage '" + raw + "' (libplacebo|vp); ";
+ 		}
++		if (TryGetPipelineString(config, "output_segments_merged", raw))
++		{
++			const std::string value = ConfigFile::NormalizeName(raw);
++			if (value == "on" || value == "off")
++				settings.outputSegmentsMerged = value == "on";
++			else
++				settings.pipelineSettingsProblems += "output_segments_merged '" + raw + "' (on|off); ";
++		}
+ 		if (TryGetPipelineString(config, "pipeline_entrance_once", raw))
+ 		{
+ 			const std::string value = ConfigFile::NormalizeName(raw);
+@@ -8126,6 +8138,7 @@ struct LibplaceboVideoRenderer::Impl
+ 	OutputSegments::OutputColourSegment outputColour{ sdrToneShape, dvTrimsHook, ledMeasurement, ledCompensation, calibrationLutStage };
+ 	OutputSegments::OutputFinishSegment outputFinish{ outputEncodingRepair, occlusionMaskHook };
+ 	std::vector<const pl_hook*> userFrameHooks;   // the S2 edge: the user's shaders this frame
++	std::unique_ptr<OutputSegments::Merger> outputMerger;   // output_segments_merged
+ 	bool calibrationLutStageLogged = false;
+ 	bool calibrationLutStageFailed = false;   // the VP stage failed once: libplacebo's target LUT for the session
+ 	std::vector<std::string> activeCustomShaders;
+@@ -9080,6 +9093,7 @@ struct LibplaceboVideoRenderer::Impl
+ 				if (rebaseDispatch) pl_dispatch_destroy(&rebaseDispatch);
+ 				extendedRangeHooks.Release();   // Stage 10: its textures
+ 				calibrationLutStage.Release();  // R1: the VP calibration stage's LUT texture
++				if (outputMerger) { outputMerger->Release(); outputMerger.reset(); }
+ 				dejudderOutput.Release();
+ 				dejudderOutputSwapchain = nullptr;
+ 				dejudderExtraIds.clear();
+@@ -12745,6 +12759,7 @@ struct LibplaceboVideoRenderer::Impl
+ 		changed(current.pipelineSlotsOff != next.pipelineSlotsOff, "pipeline_slots_off");
+ 		changed(current.calibrationLutStage != next.calibrationLutStage, "calibration_lut_stage");
+ 		changed(current.pipelineEntranceOnce != next.pipelineEntranceOnce, "pipeline_entrance_once");
++		changed(current.outputSegmentsMerged != next.outputSegmentsMerged, "output_segments_merged");
+ 		changed(current.adaptive.cnnResidualStabilise != next.adaptive.cnnResidualStabilise ||
+ 			current.adaptive.ssimResidualStabilise != next.adaptive.ssimResidualStabilise, "residual_stabilise");
+ 		changed(current.ssimBitrateAware != next.ssimBitrateAware || current.ssimBitrateFloor != next.ssimBitrateFloor, "ssim_bitrate_aware");
+@@ -18217,6 +18232,10 @@ struct LibplaceboVideoRenderer::Impl
+ 			timedParams.info_priv = &ditherTotals;
+ 			passTimerHook.Install(timedParams);   // efficiency timers T1/T5 (chains the R1 callback)
+ 			extraParams = &timedParams;
++			// output_segments_merged: the extras draw through the same S2/S3 segment objects (merged
++			// for these draws only; the fallback draw of A keeps the separate list).
++			const pl_render_errors extraErrors = pl_renderer_get_errors(renderer);
++			OutputSegments::Merger::Scope mergedExtra(outputMerger.get(), timedParams, &extraErrors);
+ 			pl_frame target = *f.target;
+ 			if (renderedCrop)
+ 			{
+@@ -25268,6 +25287,13 @@ struct LibplaceboVideoRenderer::Impl
+         // Bug hunt 2026-10-17: the retry withdraws the failed NLS hook from
+         // frameHooks itself (a member), so frameParams - read again by the
+         // de-judder extras - never points at a list local to the recovery.
++        // output_segments_merged: the segments' checks rerun only when the module order or switches
++        // change (a cheap signature, no string building per frame).
++        if (!outputMerger)
++            outputMerger = std::make_unique<OutputSegments::Merger>(d3d11->gpu, outputColour, outputFinish);
++        outputMerger->Configure(pipelineSlots, activeSettings.outputSegmentsMerged, 30, fallbacks);
++        if (outputMerger->FallbacksChanged())
++            DebugLog::Log("%s", fallbacks.Heading().c_str());
+         const auto hookRender = NlsHookRecovery::RenderOwned(renderer, d3d11->gpu,
+             renderImage, target, baseTarget, frameParams, frameHooks, submittedNls, [&]()
+             {
+@@ -25292,6 +25318,8 @@ struct LibplaceboVideoRenderer::Impl
+                 occlusionMaskHook.SetFrame(nullptr, renderImage.crop, linearFallbackCrop);
+                 assembleOverlays();
+             }, [&](const pl_frame& source, const pl_frame& destination, pl_render_params& parameters) {
++                // output_segments_merged: S2/S3 as one hook each for this draw only (restored after).
++                OutputSegments::Merger::Scope mergedOutput(outputMerger.get(), parameters, &renderErrors);
+                 // Stage 12 step A: the planes libplacebo samples, re-based.
+                 pl_frame frame = source;
+                 // Stage B: the picture at this refresh's phase in place of A's planes (a
+@@ -25420,7 +25448,20 @@ struct LibplaceboVideoRenderer::Impl
+             renderParams.num_hooks = 0;
+         }
+         {
+-            const auto hookErrors = pl_renderer_get_errors(renderer);
++            pl_render_errors hookErrors = pl_renderer_get_errors(renderer);
++            // output_segments_merged (audit M4): a stage that failed inside a merged hook takes the
++            // same path as a hook libplacebo disabled; a disabled merged hook falls back visibly.
++            const std::vector<uint64_t> mergedFailed = outputMerger->Report(&hookErrors);
++            if (outputMerger->FallbacksChanged())
++                DebugLog::Log("%s", fallbacks.Heading().c_str());
++            std::vector<uint64_t> allDisabled;
++            if (!mergedFailed.empty())
++            {
++                allDisabled.assign(hookErrors.disabled_hooks, hookErrors.disabled_hooks + hookErrors.num_disabled_hooks);
++                allDisabled.insert(allDisabled.end(), mergedFailed.begin(), mergedFailed.end());
++                hookErrors.disabled_hooks = allDisabled.data();
++                hookErrors.num_disabled_hooks = static_cast<int>(allDisabled.size());
++            }
+             if (customHooks.MarkRuntimeFailures(hookErrors.disabled_hooks,
+                 hookErrors.num_disabled_hooks))
+                 PublishCustomShaderStatus();
+diff --git a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
+index e791ab07..efee968a 100644
+--- a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
++++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj
+@@ -389,6 +389,10 @@
+     <ClCompile Include="..\VP-V\tests\PipelineSkeletonTests.cpp">
+       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+     </ClCompile>
++    <ClCompile Include="..\VP-V\segments\OutputSegmentsMerge.cpp">
++      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
++      <PrecompiledHeader>NotUsing</PrecompiledHeader>
++    </ClCompile>
+     <ClCompile Include="..\VP-V\tests\SegmentRunnerTests.cpp" />
+     <ClCompile Include="..\VP-V\tests\OutputSegmentsGpuTests.cpp" />
+     <ClCompile Include="..\VP-V\core\SegmentRunner.cpp">
+diff --git a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj.filters b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj.filters
+index 3539c698..9e9e3760 100644
+--- a/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj.filters
++++ b/src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj.filters
+@@ -227,6 +227,7 @@
+   <ItemGroup><ClCompile Include="VpScaleRenderMotionTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+   <ItemGroup><Filter Include="VP-V"><UniqueIdentifier>{6f1b7a52-4c3e-4f6a-9d1e-5a0c2b7e9d41}</UniqueIdentifier></Filter></ItemGroup>
+   <ItemGroup><ClCompile Include="..\VP-V\tests\PipelineSkeletonTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
++  <ItemGroup><ClCompile Include="..\VP-V\segments\OutputSegmentsMerge.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+   <ItemGroup><ClCompile Include="..\VP-V\tests\SegmentRunnerTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+   <ItemGroup><ClCompile Include="..\VP-V\tests\OutputSegmentsGpuTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+   <ItemGroup><ClCompile Include="..\VP-V\core\SegmentRunner.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+diff --git a/src/VideoProcessor-VPRenderer/VideoProcessor-VPRenderer.vcxproj b/src/VideoProcessor-VPRenderer/VideoProcessor-VPRenderer.vcxproj
+index 6c042971..4553f026 100644
+--- a/src/VideoProcessor-VPRenderer/VideoProcessor-VPRenderer.vcxproj
++++ b/src/VideoProcessor-VPRenderer/VideoProcessor-VPRenderer.vcxproj
+@@ -109,6 +109,7 @@
+     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\MotionAheadProducer.cpp" />
+     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OutputEncodingRepair.cpp" />
+     <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutStage.cpp" />
++    <ClCompile Include="..\VP-V\segments\OutputSegmentsMerge.cpp" />
+     <ClCompile Include="..\VP-V\segments\OutputSegments.cpp" />
+     <ClCompile Include="..\VP-V\core\SegmentRunner.cpp">
+       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+diff --git a/src/VideoProcessor-VPRenderer/VideoProcessor-VPRendererBeta.vcxproj b/src/VideoProcessor-VPRenderer/VideoProcessor-VPRendererBeta.vcxproj
+index a0b925f7..85a33e95 100644
+--- a/src/VideoProcessor-VPRenderer/VideoProcessor-VPRendererBeta.vcxproj
++++ b/src/VideoProcessor-VPRenderer/VideoProcessor-VPRendererBeta.vcxproj
+@@ -122,6 +122,7 @@
+     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\TextureRestore.cpp" />
+     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\OutputEncodingRepair.cpp" />
+     <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutStage.cpp" />
++    <ClCompile Include="..\VP-V\segments\OutputSegmentsMerge.cpp" />
+     <ClCompile Include="..\VP-V\segments\OutputSegments.cpp" />
+     <ClCompile Include="..\VP-V\core\SegmentRunner.cpp">
+       <PrecompiledHeader>NotUsing</PrecompiledHeader>
