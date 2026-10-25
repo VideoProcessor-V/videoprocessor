@@ -887,6 +887,7 @@
           "dither_grain_tolerance_scale",
           "dither_vectors",
           "dithering",
+          "output_segments_merged",
           "sigma_delta"
         ],
         "upstream_modules": [

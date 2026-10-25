@@ -1090,6 +1090,7 @@ namespace RendererProfileConfig
 		if (key == "pipeline_order" || key == "pipeline_slots_off")
 			return value.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_.,;> ") == std::string::npos;
 		if (key == "calibration_lut_stage") return IsChoice(value, { "libplacebo", "vp" });
+		if (key == "output_segments_merged") return IsChoice(value, { "on", "off" });   // output segments S2/S3 (draft)
 		if (key == "video_conversion")
 			return IsChoice(value, { "none", "off", "v210_to_p010", "uyvy_to_p010" });
 		if (key == "container_colorspace")
@@ -2110,7 +2111,7 @@ namespace RendererProfileConfig
 			for (const auto& value : *vpvValues)
 			{
 				static const char* const vpvKeys[] = { "pipeline_original_pathway", "pipeline_order",
-					"pipeline_slots_off", "calibration_lut_stage", "pipeline_entrance_once" };
+					"pipeline_slots_off", "calibration_lut_stage", "pipeline_entrance_once", "output_segments_merged" };
 				bool known = false;
 				for (const char* key : vpvKeys) known = known || value.first == key;
 				if (!known)

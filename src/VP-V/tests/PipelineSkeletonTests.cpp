@@ -666,7 +666,8 @@ namespace PipelineSkeletonTestsNs
 			}
 			// Settings audit 2026-10-24: the VP additions the first table missed are switched off too.
 			for (const char* key : { "active_picture_startup_hold", "low_bitrate_handling", "ssim_residual_stabilise",
-				"cnn_residual_stabilise", "residual_stabilise_grain_guard", "dejudder_estimate_ahead", "interpolation_fallback" })
+				"cnn_residual_stabilise", "residual_stabilise_grain_guard", "dejudder_estimate_ahead", "interpolation_fallback",
+				"output_segments_merged" })
 				Assert::IsTrue(keys.count(key) == 1, W(std::string(key) + " is not in the Original pathway").c_str());
 		}
 

@@ -389,6 +389,10 @@
     <ClCompile Include="..\VP-V\tests\PipelineSkeletonTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\VP-V\segments\OutputSegmentsMerge.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\tests\SegmentRunnerTests.cpp" />
     <ClCompile Include="..\VP-V\tests\OutputSegmentsGpuTests.cpp" />
     <ClCompile Include="..\VP-V\core\SegmentRunner.cpp">

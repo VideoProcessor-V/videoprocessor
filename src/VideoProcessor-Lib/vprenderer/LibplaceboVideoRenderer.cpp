@@ -90,6 +90,7 @@
 #include <VP-V/core/OutputHookOrder.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
 #include <VP-V/segments/OutputSegments.h>   // S2/S3 output segments (central-migration-needs.md §6)
+#include <VP-V/segments/OutputSegmentsMerge.h>   // output_segments_merged (default off)
 #include <VP-V/core/FallbackCatalog.h>   // VP-V: the silent-fallbacks batch (src/VP-V/core)
 #include <vprenderer/DownscaleLight.h>
 #include <vprenderer/SourceRebase.h>
@@ -1366,6 +1367,7 @@ namespace
 		bool extendedRangeMoreCases = true;   // GPU tests pass (2026-10-17 night); owner: BTB/WTW in all cases
 		SdrToneShape::Settings sdrTone;     // delta 13: SDR tone shape and headroom (off)
 		bool dejudderWarpRendered = true;   // 6d: extras warp A's rendered picture (false: a warped source)
+		bool outputSegmentsMerged = false;   // S2/S3 as one PRE_OUTPUT + one OUTPUT hook (draft; tolerance gate)
 		std::string upscaler = "auto";
 		std::string chromaUpscaler = "auto";   // owner 2026-10-13: plane_upscaler (auto = Catmull-Rom, upscaler = the upscaler)
 		std::string downscaler = "auto";
@@ -1532,6 +1534,7 @@ namespace
 			<< settings.dejudderBlockTaper << '|' << settings.dejudderTaperSad << '|'
 			<< settings.ditherGrainToleranceScale << '|' << settings.ditherVectorsOwn << '|' << settings.fboFloat32 << '|'
 			<< settings.preserveExtendedRange << '|' << settings.extendedRangeMoreCases << '|' << settings.dejudderWarpRendered << '|'
+			<< settings.outputSegmentsMerged << '|'
 			// Settings applied live must change the fingerprint, or a profile edit
 			// touching only them is not applied until something else changes.
 			<< settings.captureUpload << '|' << settings.sourceRange << '|' << settings.sourceResolution << '|' << settings.dvToneMapping << '|' << settings.dvCompareCaptureFolder << '|'
@@ -3583,6 +3586,7 @@ namespace
 		settings.intentBlack = BlackIntentMode::Off;       // key=intent_black
 		settings.ambientAdapt = false;                     // key=ambient_adapt
 		settings.temporalDither = "libplacebo";            // key=temporal_dither
+		settings.outputSegmentsMerged = false;             // key=output_segments_merged
 		settings.renderAhead = false;                      // key=render_ahead
 		settings.calibrationLutStage = "libplacebo";       // key=calibration_lut_stage
 		// Settings audit 2026-10-24: VP additions the first table missed (absent from Bill's v1.4.02-beta).
@@ -3626,6 +3630,14 @@ namespace
 				settings.calibrationLutStage = value;
 			else
 				settings.pipelineSettingsProblems += "calibration_lut_stage '" + raw + "' (libplacebo|vp); ";
+		}
+		if (TryGetPipelineString(config, "output_segments_merged", raw))
+		{
+			const std::string value = ConfigFile::NormalizeName(raw);
+			if (value == "on" || value == "off")
+				settings.outputSegmentsMerged = value == "on";
+			else
+				settings.pipelineSettingsProblems += "output_segments_merged '" + raw + "' (on|off); ";
 		}
 		if (TryGetPipelineString(config, "pipeline_entrance_once", raw))
 		{
@@ -8126,6 +8138,7 @@ struct LibplaceboVideoRenderer::Impl
 	OutputSegments::OutputColourSegment outputColour{ sdrToneShape, dvTrimsHook, ledMeasurement, ledCompensation, calibrationLutStage };
 	OutputSegments::OutputFinishSegment outputFinish{ outputEncodingRepair, occlusionMaskHook };
 	std::vector<const pl_hook*> userFrameHooks;   // the S2 edge: the user's shaders this frame
+	std::unique_ptr<OutputSegments::Merger> outputMerger;   // output_segments_merged
 	bool calibrationLutStageLogged = false;
 	bool calibrationLutStageFailed = false;   // the VP stage failed once: libplacebo's target LUT for the session
 	std::vector<std::string> activeCustomShaders;
@@ -9080,6 +9093,7 @@ struct LibplaceboVideoRenderer::Impl
 				if (rebaseDispatch) pl_dispatch_destroy(&rebaseDispatch);
 				extendedRangeHooks.Release();   // Stage 10: its textures
 				calibrationLutStage.Release();  // R1: the VP calibration stage's LUT texture
+				if (outputMerger) { outputMerger->Release(); outputMerger.reset(); }
 				dejudderOutput.Release();
 				dejudderOutputSwapchain = nullptr;
 				dejudderExtraIds.clear();
@@ -12745,6 +12759,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.pipelineSlotsOff != next.pipelineSlotsOff, "pipeline_slots_off");
 		changed(current.calibrationLutStage != next.calibrationLutStage, "calibration_lut_stage");
 		changed(current.pipelineEntranceOnce != next.pipelineEntranceOnce, "pipeline_entrance_once");
+		changed(current.outputSegmentsMerged != next.outputSegmentsMerged, "output_segments_merged");
 		changed(current.adaptive.cnnResidualStabilise != next.adaptive.cnnResidualStabilise ||
 			current.adaptive.ssimResidualStabilise != next.adaptive.ssimResidualStabilise, "residual_stabilise");
 		changed(current.ssimBitrateAware != next.ssimBitrateAware || current.ssimBitrateFloor != next.ssimBitrateFloor, "ssim_bitrate_aware");
@@ -18217,6 +18232,10 @@ struct LibplaceboVideoRenderer::Impl
 			timedParams.info_priv = &ditherTotals;
 			passTimerHook.Install(timedParams);   // efficiency timers T1/T5 (chains the R1 callback)
 			extraParams = &timedParams;
+			// output_segments_merged: the extras draw through the same S2/S3 segment objects (merged
+			// for these draws only; the fallback draw of A keeps the separate list).
+			const pl_render_errors extraErrors = pl_renderer_get_errors(renderer);
+			OutputSegments::Merger::Scope mergedExtra(outputMerger.get(), timedParams, &extraErrors);
 			pl_frame target = *f.target;
 			if (renderedCrop)
 			{
@@ -25268,6 +25287,13 @@ struct LibplaceboVideoRenderer::Impl
         // Bug hunt 2026-10-17: the retry withdraws the failed NLS hook from
         // frameHooks itself (a member), so frameParams - read again by the
         // de-judder extras - never points at a list local to the recovery.
+        // output_segments_merged: the segments' checks rerun only when the module order or switches
+        // change (a cheap signature, no string building per frame).
+        if (!outputMerger)
+            outputMerger = std::make_unique<OutputSegments::Merger>(d3d11->gpu, outputColour, outputFinish);
+        outputMerger->Configure(pipelineSlots, activeSettings.outputSegmentsMerged, 30, fallbacks);
+        if (outputMerger->FallbacksChanged())
+            DebugLog::Log("%s", fallbacks.Heading().c_str());
         const auto hookRender = NlsHookRecovery::RenderOwned(renderer, d3d11->gpu,
             renderImage, target, baseTarget, frameParams, frameHooks, submittedNls, [&]()
             {
@@ -25292,6 +25318,8 @@ struct LibplaceboVideoRenderer::Impl
                 occlusionMaskHook.SetFrame(nullptr, renderImage.crop, linearFallbackCrop);
                 assembleOverlays();
             }, [&](const pl_frame& source, const pl_frame& destination, pl_render_params& parameters) {
+                // output_segments_merged: S2/S3 as one hook each for this draw only (restored after).
+                OutputSegments::Merger::Scope mergedOutput(outputMerger.get(), parameters, &renderErrors);
                 // Stage 12 step A: the planes libplacebo samples, re-based.
                 pl_frame frame = source;
                 // Stage B: the picture at this refresh's phase in place of A's planes (a
@@ -25420,7 +25448,20 @@ struct LibplaceboVideoRenderer::Impl
             renderParams.num_hooks = 0;
         }
         {
-            const auto hookErrors = pl_renderer_get_errors(renderer);
+            pl_render_errors hookErrors = pl_renderer_get_errors(renderer);
+            // output_segments_merged (audit M4): a stage that failed inside a merged hook takes the
+            // same path as a hook libplacebo disabled; a disabled merged hook falls back visibly.
+            const std::vector<uint64_t> mergedFailed = outputMerger->Report(&hookErrors);
+            if (outputMerger->FallbacksChanged())
+                DebugLog::Log("%s", fallbacks.Heading().c_str());
+            std::vector<uint64_t> allDisabled;
+            if (!mergedFailed.empty())
+            {
+                allDisabled.assign(hookErrors.disabled_hooks, hookErrors.disabled_hooks + hookErrors.num_disabled_hooks);
+                allDisabled.insert(allDisabled.end(), mergedFailed.begin(), mergedFailed.end());
+                hookErrors.disabled_hooks = allDisabled.data();
+                hookErrors.num_disabled_hooks = static_cast<int>(allDisabled.size());
+            }
             if (customHooks.MarkRuntimeFailures(hookErrors.disabled_hooks,
                 hookErrors.num_disabled_hooks))
                 PublishCustomShaderStatus();

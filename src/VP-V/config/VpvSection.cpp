@@ -1068,6 +1068,19 @@ namespace Vpv
 
 			// pipeline_entrance_once (B3, ADR-0024) is a hidden diagnostic/test key with no Config control (skeleton b76571c1).
 
+			// Output segments S2/S3 as one hook each (draft): off until the GPU check passes; never in the
+			// Original pathway (the renderer also forces it off there).
+			auto* merged = new QCheckBox(QStringLiteral("Merge the output chain into one hook per stage"));
+			merged->setObjectName(ObjectName(QStringLiteral("expert.output_segments_merged")));
+			merged->setToolTip(QStringLiteral("Key output_segments_merged. Run each output chain as one hook \u2014 off until its "
+				"GPU check passes."));
+			form->addRow(QStringLiteral("Output chain"), merged);
+			QObject::connect(merged, &QCheckBox::toggled, merged, [state, section](bool on)
+			{
+				if (state->refreshing || !state->host.setValue) return;
+				state->host.setValue(section, QStringLiteral("output_segments_merged"), on ? QStringLiteral("on") : QStringLiteral("off"));
+			});
+
 			// The module order: slot names moved within their zone.
 			auto* order = new QLineEdit;
 			order->setObjectName(ObjectName(QStringLiteral("expert.pipeline_order")));
@@ -1122,12 +1135,17 @@ namespace Vpv
 			layout->addLayout(form);
 			layout->addStretch();
 
-			state->refreshers.push_back([state, lutStage, order, slotsOff, section]()
+			state->refreshers.push_back([state, lutStage, merged, order, slotsOff, section]()
 			{
 				const auto get = [&](const char* key) { return state->host.value ? state->host.value(section, QString::fromLatin1(key)).trimmed() : QString(); };
 				{
 					const QSignalBlocker blocker(lutStage);
 					lutStage->setCurrentIndex(get("calibration_lut_stage").compare(QStringLiteral("vp"), Qt::CaseInsensitive) == 0 ? 1 : 0);
+				}
+				{
+					const QSignalBlocker blocker(merged);
+					merged->setChecked(get("output_segments_merged").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0);
+					merged->setEnabled(get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) != 0);
 				}
 				if (!order->hasFocus()) order->setText(get("pipeline_order"));
 				if (!slotsOff->hasFocus()) slotsOff->setText(get("pipeline_slots_off"));

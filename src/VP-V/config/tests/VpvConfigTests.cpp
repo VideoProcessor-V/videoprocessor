@@ -364,6 +364,10 @@ namespace
 			QMetaObject::invokeMethod(off, "editingFinished", Qt::DirectConnection);
 			auto* lut = control<QComboBox>(window, Vpv::ObjectName("expert.calibration_lut_stage"));
 			lut->setCurrentIndex(1);
+			auto* merged = control<QCheckBox>(window, Vpv::ObjectName("expert.output_segments_merged"));
+			require(!merged->isChecked(), "the merged output chain is off by default");
+			require(merged->toolTip().contains(QStringLiteral("off until its GPU check passes")), "the merged output chain says why it is off");
+			merged->setChecked(true);
 			save(window);
 		}
 		ConfigFile config;
@@ -373,7 +377,16 @@ namespace
 		require(config.TryGetString("vpv", "pipeline_slots_off", v) && v == "repair.texture_restore, colour.appearance",
 			"the stages switched off are stored in [vpv]");
 		require(config.TryGetString("vpv", "calibration_lut_stage", v) && v == "vp", "the LUT stage is stored in [vpv]");
+		require(config.TryGetString("vpv", "output_segments_merged", v) && v == "on", "the merged output chain is stored in [vpv]");
 		requireVpReads(path);
+		{
+			ConfigEditorWindow window(path, 0, true);
+			auto* pathway = control<QComboBox>(window, Vpv::ObjectName("pathway"));
+			pathway->setCurrentIndex(1);
+			QCoreApplication::processEvents();
+			require(!control<QCheckBox>(window, Vpv::ObjectName("expert.output_segments_merged"))->isEnabled(),
+				"the merged output chain is disabled in the Original pathway");
+		}
 	}
 }
 

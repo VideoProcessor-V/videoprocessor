@@ -1554,7 +1554,8 @@
         "sigma_delta",
         "dithering",
         "dither_vectors",
-        "dither_grain_tolerance_scale"
+        "dither_grain_tolerance_scale",
+        "output_segments_merged"
       ],
       "planned_keys": [],
       "tiers": "Classic libplacebo dither; Low..Upper sigma-delta",
@@ -1584,7 +1585,8 @@
       "original_pathway": {
         "mode": "upstream form",
         "settings": {
-          "temporal_dither": "libplacebo"
+          "temporal_dither": "libplacebo",
+          "output_segments_merged": "off"
         }
       },
       "zone": "quantise",
