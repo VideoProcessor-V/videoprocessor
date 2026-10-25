@@ -5517,6 +5517,41 @@ namespace VideoProcessorTest
 			return settings;
 		}
 
+		TEST_METHOD(DejudderIdenticalFramesGiveExactZeroVectors)
+		{
+			// Bug hunt 2026-10-25: a repeated frame (A and B bit-identical, separate textures) must give
+			// exactly the zero vector in every block, trusted - the estimate left sub-pixel noise vectors
+			// (up to 1.26 px) which the interpolator resampled. A block that changes keeps its search.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int width = 256, height = 128;
+			auto luma = [](int x, int y) { return DejudderTexture(x, y); };
+			auto chroma = [](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); };
+			const DejudderFrame a = MakeDejudderFrame(width, height, luma, chroma);
+			const DejudderFrame b = MakeDejudderFrame(width, height, luma, chroma);
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+			std::string log;
+			fixture.CaptureLog(&log);
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, DejudderTestSettings());
+			Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes), std::wstring(warp.LastError().begin(), warp.LastError().end()).c_str());
+			const DejudderField field = DownloadField(gpu, warp);
+			int nonZero = 0, untrusted = 0;
+			for (int by = 0; by < field.blocksY; ++by)
+				for (int bx = 0; bx < field.blocksX; ++bx)
+				{
+					nonZero += (field.vx(bx, by) != 0.0f || field.vy(bx, by) != 0.0f) ? 1 : 0;
+					untrusted += field.trusted(bx, by) ? 0 : 1;
+				}
+			char line[160];
+			snprintf(line, sizeof(line), "identical frames: %d of %d blocks with a non-zero vector, %d untrusted\n", nonZero, field.blocksX * field.blocksY, untrusted);
+			Logger::WriteMessage(line);
+			Assert::AreEqual(0, nonZero, L"identical blocks give exactly the zero vector");
+			Assert::AreEqual(0, untrusted, L"identical blocks are trusted");
+		}
+
 		TEST_METHOD(DejudderFollowsAMovingPictureAndWarpsBySDelta)
 		{
 			TargetLutGpuFixture fixture;

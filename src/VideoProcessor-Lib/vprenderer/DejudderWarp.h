@@ -553,6 +553,7 @@ namespace Dejudder
 		void CollectTimer(const std::string& description, pl_timer timer);
 		bool passDrain = true;
 		MotionWarp* timingParent = nullptr;   // lowRes inner: its passes counted in the outer's maps
+		bool StillZero(pl_tex& fieldTex, pl_tex& scratch, const Planes& a, const Planes& b, int w, int h);
 		bool Dispatch(const char* description, const char* header, const char* body,
 			const struct pl_shader_desc* descriptors, int numDescriptors,
 			const struct pl_shader_var* variables, int numVariables,

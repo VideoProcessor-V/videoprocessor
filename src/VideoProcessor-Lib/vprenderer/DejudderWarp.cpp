@@ -1118,6 +1118,30 @@ if (b.x < size.x && b.y < size.y) {
 }
 )GLSL";
 
+		// Identical blocks are still (bug hunt 2026-10-25): a block whose pixels A and B hold
+		// bit-identically gets exactly the zero vector, trusted, error 0. The searches (and the
+		// optical-flow engine) left sub-pixel noise vectors on a repeated frame (mean 0.03 px, up
+		// to 1.26 px), which the interpolator resampled. Block size from the plane / field sizes.
+		const char* const STILL_ZERO_BODY = R"GLSL(
+ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+ivec2 size = imageSize(dst);
+if (b.x < size.x && b.y < size.y) {
+    vec4 f = texelFetch(src_field, b, 0);
+    ivec2 psz = textureSize(luma_a, 0);
+    ivec2 bs = (psz + size - ivec2(1)) / size;
+    ivec2 o = b * bs;
+    bool same = true;
+    for (int y = 0; y < bs.y && same; y++)
+        for (int x = 0; x < bs.x; x++) {
+            ivec2 p = o + ivec2(x, y);
+            if (p.x >= psz.x || p.y >= psz.y)
+                continue;
+            if (texelFetch(luma_a, p, 0).r != texelFetch(luma_b, p, 0).r) { same = false; break; }
+        }
+    imageStore(dst, b, same ? vec4(0.0, 0.0, 1.0, 0.0) : f);
+}
+)GLSL";
+
 		const char* const COPY_BODY = R"GLSL(
 ivec2 b = ivec2(gl_GlobalInvocationID.xy);
 ivec2 size = imageSize(dst);
@@ -2553,6 +2577,28 @@ if (q.x < size.x && q.y < size.y) {
 		return true;
 	}
 
+	// Identical blocks get the exact zero vector: `fieldTex` through `scratch` (swapped).
+	bool MotionWarp::StillZero(pl_tex& fieldTex, pl_tex& scratch, const Planes& a, const Planes& b, int w, int h)
+	{
+		if (!fieldTex || !a.luma || !b.luma)
+			return true;
+		pl_tex_params params = fieldTex->params;
+		if (!pl_tex_recreate(gpu, &scratch, &params))
+		{
+			error = "cannot create the still-block field";
+			return false;
+		}
+		const bool same = a.luma == b.luma;   // one texture bound once (libplacebo rejects it twice)
+		const pl_shader_desc desc[4] = { Sampled("src_field", fieldTex, false), Sampled("luma_a", a.luma, false),
+			Sampled("luma_b", b.luma, false), Storage("dst", scratch) };
+		const pl_shader_desc descSame[3] = { desc[0], desc[1], desc[3] };
+		if (!Dispatch("VideoProcessor de-judder: identical blocks still", same ? "#define luma_b luma_a\n" : nullptr, STILL_ZERO_BODY,
+			same ? descSame : desc, same ? 3 : 4, nullptr, 0, w, h, 8))
+			return false;
+		std::swap(fieldTex, scratch);
+		return true;
+	}
+
 	bool MotionWarp::Dispatch(const char* description, const char* header, const char* body,
 		const pl_shader_desc* descriptors, int numDescriptors,
 		const pl_shader_var* variables, int numVariables, int w, int h, int group)
@@ -3800,6 +3846,9 @@ if (b.x < blocks.x && b.y < blocks.y) {
 					return false;
 				std::swap(field, verifyField);
 			}
+			// Identical blocks: exactly the zero vector (before the split and the frame trust).
+			if (!StillZero(field, verifyField, a, b, blocksX, blocksY))
+				return false;
 			if (settings.estSplit)
 			{
 				// Both directions split (the sub-search, as a function: four
@@ -3822,6 +3871,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 					Sampled("field", field, false), Storage("dst", subField) };
 				if (!Dispatch("VideoProcessor de-judder: sub-block trust (11a E2)", nullptr, SUB_TRUST_BODY,
 					trustDesc2, 4, variables, 2, blocksX * 2, blocksY * 2, 8))
+					return false;
+				if (!StillZero(subField, hystSub, a, b, blocksX * 2, blocksY * 2))
 					return false;
 			}
 			const float motionLo = settings.motionScaleLo;
