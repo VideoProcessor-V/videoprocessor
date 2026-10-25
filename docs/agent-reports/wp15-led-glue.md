@@ -18,7 +18,11 @@ Base: chore/early-migrations ac49a1de. Worktree D:\codex\videoprocessor\wp15-led
 
 - Builds: full x64 Release solution green after every commit (logs D:\codex\videoprocessor\wp15-led-logs\build*.log);
   patched renderer (both VPRenderer DLLs) compiled and linked (build7-patched.log), then restored.
-- Tests: DynamicDriveAdapterTests 13/13, LedIntentLimitsTests green; filtered CPU suite runs: see the report.
+- Tests (HEAD 9d4bd615, targeted per the coordinator's policy): 306/306 passed (LED classes, DynamicDriveAdapterTests,
+  PipelineSkeleton, fallback catalog/heading, efficiency, render-ahead policy, calibration core/phase 2, the WARP LED hook
+  tests); TRX wp15-led-logs	argeted-head.trx. Full filtered suites were stopped by policy (partial runs: 2857 and 1350
+  passed; the only failure both times was the load-sensitive DeckLinkConvertersSustained4K60PerformanceComparison).
+- Audit: skeleton-notes/audit-feat-wp15-led-glue.md; N1/N5 fixed (9d4bd615), I3 listed, I1/I2 integration notes.
 - Forwarding headers left (removed at M2 step 0): led/LedMeasurementHook.h, LedRawTransfer.h, LedDriveConfig.h,
   LedDriveArbiter.h (+ the earlier LedDriveModule.h, LedDriveHoldover.h, SerialPort.h, ConnectionTest.h).
 - Next: rebase onto integ/batch1 when the lead gives the hash; regenerate the call-site patch there.
