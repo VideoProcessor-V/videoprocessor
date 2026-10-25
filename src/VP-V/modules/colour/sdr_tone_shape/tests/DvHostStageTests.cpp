@@ -243,6 +243,30 @@ namespace Tests
 			Assert::AreEqual(std::string("DV trims: off"), stage.TrimsStatus());
 		}
 
+		// Audit M-3 (2026-10-25): the reference conditions follow every DV picture with DM, with the
+		// trims off too (the CAM16 stage needs the curve and the mastering display either way).
+		TEST_METHOD(ReferenceConditionsFollowDolbyVisionPicturesWithTrimsOff)
+		{
+			using namespace DvHost;
+			Registry reg;
+			DvHostStage stage(NoShaders(), reg.Engage(), reg.Release());
+			Assert::IsFalse(stage.ReferenceConditions().valid);
+			Run run;
+			run.trims = false;
+			pl_color_map_params params = pl_color_map_default_params;
+			std::vector<const pl_hook*> hooks;
+			const DolbyVisionTunnelFrameMetadata dm = TrimmedDm();
+			run.Frame(stage, Picture(true), Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
+			const DvDolbyStyle::ReferenceConditions& rc = stage.ReferenceConditions();
+			Assert::IsTrue(rc.valid);
+			Assert::IsFalse(rc.trimApplied);
+			Assert::AreEqual(std::string("bt2390"), rc.curve);
+			Assert::IsTrue(rc.masteringPeakNits > 1000.0, L"the DM's source range (L0) when there is no L6");
+			// A non-DV picture leaves the last DV picture's record (as before).
+			run.Frame(stage, Picture(false), Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
+			Assert::IsTrue(stage.ReferenceConditions().valid);
+		}
+
 		TEST_METHOD(GpuUnpackSessionLogsOnceAndSwitchesTheSessionToTheCpuOnce)
 		{
 			DvGpuUnpackSession session;

@@ -185,6 +185,8 @@ public:
 		}
 		m_toneStatus = DvDolbyStyle::StatusText(dvToneDolby ? DvDolbyStyle::Mode::DolbyStyle : DvDolbyStyle::Mode::Libplacebo,
 			m_toneDolbyRunning, f.libplaceboCurve, dvToneFallback, f.trims, dvToneL1Missing);
+		// The trim choice the reference conditions report: this frame's when the trims were evaluated.
+		DvTrimSelection::Selection conditionsSelection;
 		if (f.trims || !m_trimsLogged.empty())
 		{
 			std::string state;
@@ -262,8 +264,7 @@ public:
 			// but the trim cannot act (a calibration LUT, an unsupported output transfer, the shader
 			// missing): listed. Neutral (no L2 for this picture) is the trims' own answer, not a fallback.
 			m_trimsStatus = DvTrimSelection::StatusText(f.trims, selection);
-			if (dvPicture)
-				m_referenceConditions = DvDolbyStyle::Conditions(*f.dm, selection, m_toneDolbyRunning, f.libplaceboCurve);
+			conditionsSelection = selection;
 			m_trimsShaderMissing = state.compare(0, 11, "NOT applied") == 0;
 			// Audit 5: L8 present but every L8 target unknown and no L2: nothing applies - listed too.
 			const bool dvTrimsUnknownTargets = dvPicture && selection.level == DvTrimSelection::Level::None && selection.l8Unresolved > 0;
@@ -290,6 +291,11 @@ public:
 				DebugLog::Log("Dolby Vision trims (non-certified): %s", params.c_str());
 			}
 		}
+		// Audit M-3 (2026-10-25): the reference conditions (curve, L6 / L0 mastering, L9, L11, the
+		// trims when they ran) for EVERY DV picture with DM - the CAM16 stage needs them with or
+		// without dv_trims; they were refreshed only inside the trims block before.
+		if (dvTonePicture)
+			m_referenceConditions = DvDolbyStyle::Conditions(*f.dm, conditionsSelection, m_toneDolbyRunning, f.libplaceboCurve);
 		m_compare.Configure(f.compareFolder);   // feat/dv-l8 WIP: the Config folder
 		if (m_compare.Enabled())   // feat/dv-l8: DV comparison capture (diagnostic; VP_DV_COMPARE_PATH)
 			m_compare.OnRender(f.state, f.rawFrame, f.counter,
