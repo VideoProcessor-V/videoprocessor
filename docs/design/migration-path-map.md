@@ -36,8 +36,8 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/led/ConnectionTest.cpp` | `src/VP-V/modules/drive/projector_control/ConnectionTest.cpp` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/ConnectionTest.h` | `src/VP-V/modules/drive/projector_control/ConnectionTest.h` | 570b1ee8 | fwd |
 | `src/VideoProcessor-Lib/led/LedClock.h` | `src/VP-V/modules/drive/projector_control/LedClock.h` | 570b1ee8 |  |
-| `src/VideoProcessor-Lib/led/LedDriveArbiter.cpp` | `src/VP-V/modules/drive/projector_control/LedDriveArbiter.cpp` | 9cf37b77 |  |
-| `src/VideoProcessor-Lib/led/LedDriveArbiter.h` | `src/VP-V/modules/drive/projector_control/LedDriveArbiter.h` | 9cf37b77 | fwd |
+| `src/VideoProcessor-Lib/led/LedDriveArbiter.cpp` | `src/VP-V/modules/drive/projector_control/LedDriveArbiter.cpp` | a5005696 |  |
+| `src/VideoProcessor-Lib/led/LedDriveArbiter.h` | `src/VP-V/modules/drive/projector_control/LedDriveArbiter.h` | a5005696 | fwd |
 | `src/VideoProcessor-Lib/led/LedShutdownRestore.h` | `src/VP-V/modules/drive/projector_control/LedShutdownRestore.h` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/ProjectorDriver.cpp` | `src/VP-V/modules/drive/projector_control/ProjectorDriver.cpp` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/ProjectorDriver.h` | `src/VP-V/modules/drive/projector_control/ProjectorDriver.h` | 570b1ee8 |  |
@@ -88,5 +88,20 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/calibration/Terminal.h` | `src/VP-V/modules/output/calibration_lut/calibration/Terminal.h` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/TranscriptRecorder.cpp` | `src/VP-V/modules/output/calibration_lut/calibration/TranscriptRecorder.cpp` | d2517eb1 |  |
 | `src/VideoProcessor-Lib/calibration/TranscriptRecorder.h` | `src/VP-V/modules/output/calibration_lut/calibration/TranscriptRecorder.h` | d2517eb1 |  |
+| `src/VideoProcessor-Test/CalibrationCoreTests.cpp` | `src/VP-V/modules/output/calibration_lut/tests/CalibrationCoreTests.cpp` | staged |  |
+| `src/VideoProcessor-Test/CalibrationMeterTests.cpp` | `src/VP-V/modules/output/calibration_lut/tests/CalibrationMeterTests.cpp` | staged |  |
+| `src/VideoProcessor-Test/CalibrationPhase2Tests.cpp` | `src/VP-V/modules/output/calibration_lut/tests/CalibrationPhase2Tests.cpp` | staged |  |
+| `src/VideoProcessor-Test/CalibrationRemainderTests.cpp` | `src/VP-V/modules/output/calibration_lut/tests/CalibrationRemainderTests.cpp` | staged |  |
+| `src/VideoProcessor-Test/CalibrationTestSupport.h` | `src/VP-V/modules/output/calibration_lut/tests/CalibrationTestSupport.h` | staged |  |
+| `src/VideoProcessor-Test/data/spotread/README.txt` | `src/VP-V/modules/output/calibration_lut/tests/data/spotread/README.txt` | staged |  |
+| `src/VideoProcessor-Test/data/spotread/crash.txt` | `src/VP-V/modules/output/calibration_lut/tests/data/spotread/crash.txt` | staged |  |
+| `src/VideoProcessor-Test/data/spotread/hang.txt` | `src/VP-V/modules/output/calibration_lut/tests/data/spotread/hang.txt` | staged |  |
+| `src/VideoProcessor-Test/data/spotread/hang_now.txt` | `src/VP-V/modules/output/calibration_lut/tests/data/spotread/hang_now.txt` | staged |  |
+| `src/VideoProcessor-Test/data/spotread/i1d3_session.txt` | `src/VP-V/modules/output/calibration_lut/tests/data/spotread/i1d3_session.txt` | staged |  |
+| `src/VideoProcessor-Test/data/spotread/i1pro_calibration.txt` | `src/VP-V/modules/output/calibration_lut/tests/data/spotread/i1pro_calibration.txt` | staged |  |
+| `src/VideoProcessor-Test/data/spotread/init_failed.txt` | `src/VP-V/modules/output/calibration_lut/tests/data/spotread/init_failed.txt` | staged |  |
+| `src/VideoProcessor-Test/data/spotread/no_instrument.txt` | `src/VP-V/modules/output/calibration_lut/tests/data/spotread/no_instrument.txt` | staged |  |
+| `src/VideoProcessor-Test/data/spotread/read_failure.txt` | `src/VP-V/modules/output/calibration_lut/tests/data/spotread/read_failure.txt` | staged |  |
+| `src/VideoProcessor-Test/data/spotread/redraw.txt` | `src/VP-V/modules/output/calibration_lut/tests/data/spotread/redraw.txt` | staged |  |
 | `src/VideoProcessor-Lib/KernelInverse.cpp` | `src/VP-V/modules/scaling/rebase/KernelInverse.cpp` | 648da813 |  |
 | `src/VideoProcessor-Lib/KernelInverse.h` | `src/VP-V/modules/scaling/rebase/KernelInverse.h` | 648da813 | fwd |

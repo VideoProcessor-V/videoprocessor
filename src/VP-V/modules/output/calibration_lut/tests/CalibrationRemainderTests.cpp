@@ -19,6 +19,7 @@
 #include <MainConfigSchema.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <fstream>
 #include <map>
@@ -1084,10 +1085,64 @@ namespace VideoProcessorTest
 			SessionStatus s;
 			Assert::IsTrue(ParseStatus(controller.Handle("status", ""), s));
 			Assert::IsTrue(s.step == SessionStep::Idle);
+			// WP-12 (module findings item 7): the meter is opened on the worker, so a missing
+			// ArgyllCMS arrives as the run's status (Failed), not as the start answer.
 			const std::string started = controller.Handle("start", "");
-			Assert::IsTrue(started.find("error: ArgyllCMS was not found") == 0);
+			Assert::IsTrue(started.find("error:") == std::string::npos, std::wstring(started.begin(), started.end()).c_str());
+			for (int i = 0; i < 300; ++i)
+			{
+				Assert::IsTrue(ParseStatus(controller.Handle("status", ""), s));
+				if (IsFinal(s.step)) break;
+				Sleep(10);
+			}
+			Assert::IsTrue(s.step == SessionStep::Failed);
+			Assert::IsTrue(s.message.find("ArgyllCMS was not found") == 0, std::wstring(s.message.begin(), s.message.end()).c_str());
 			Assert::IsTrue(controller.Handle("continue", "").find("error: No calibration is running.") == 0);
 			Assert::IsTrue(controller.Handle("bogus", "").find("error:") == 0);
+			Assert::IsFalse(controller.Active());
+			controller.Shutdown();
+		}
+
+		// WP-12 (module findings item 7): `start` answers at once while the worker searches for
+		// spotread and opens the meter; the RPC thread never waits for it. A cancel sent while the
+		// run is still starting is kept and applied when it starts.
+		TEST_METHOD(ControllerStartDoesNotBlockTheRpcThread)
+		{
+			Calibration::CalibrationController::Hooks hooks;
+			const std::string folder = TempFolder("controller-async");
+			const std::string path = folder + "\\VideoProcessor.cfg";
+			WriteFile(path, kConfig);
+			hooks.configPath = [path]() { return path; };
+			hooks.renderer = []() { return std::shared_ptr<IVideoRenderer>(); };
+			auto release = std::make_shared<std::atomic<bool>>(false);
+			hooks.meterFactory = [release](const CalibrationSettings&, IPatternSink&, double&, std::string& error)
+			{
+				for (int i = 0; i < 500 && !release->load(); ++i) Sleep(10);   // a slow spotread search
+				error = "no meter (test)";
+				return std::unique_ptr<IMeter>();
+			};
+			ManualClock clock;
+			hooks.clock = &clock;
+			Calibration::CalibrationController controller(hooks);
+			const ULONGLONG before = GetTickCount64();
+			const std::string started = controller.Handle("start", "");
+			Assert::IsTrue(GetTickCount64() - before < 1000, L"start returned without waiting for the meter");
+			SessionStatus s;
+			Assert::IsTrue(ParseStatus(started, s));
+			Assert::IsTrue(s.step == SessionStep::OpeningMeter);
+			Assert::AreEqual(std::string("starting"), s.message);
+			Assert::IsTrue(controller.Active());
+			Assert::IsTrue(controller.Handle("start", "").find("error: A calibration is already running.") == 0);
+			Assert::IsTrue(controller.Handle("continue", "").find("error: The calibration is still starting.") == 0);
+			release->store(true);
+			for (int i = 0; i < 300; ++i)
+			{
+				Assert::IsTrue(ParseStatus(controller.Handle("status", ""), s));
+				if (IsFinal(s.step)) break;
+				Sleep(10);
+			}
+			Assert::IsTrue(s.step == SessionStep::Failed);
+			Assert::AreEqual(std::string("no meter (test)"), s.message);
 			Assert::IsFalse(controller.Active());
 			controller.Shutdown();
 		}

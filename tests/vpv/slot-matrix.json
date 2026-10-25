@@ -676,7 +676,7 @@
     "BTB/WTW probes with the LUT"
    ]
   },
-  "fallback_entry": "Calibration LUT: libplacebo target LUT (VP stage unavailable)",
+  "fallback_entry": "calibration LUT (the VP stage failed; libplacebo's target LUT (before the LED compensation))",
   "missing": []
  },
  {

@@ -6,7 +6,7 @@
 // wrapped in a RecordingTerminal: everything spotread prints and every key VP
 // sends are kept with their times, and when the meter closes the session is
 // saved as a script in the test-data format that fake_spotread.exe and the
-// CPU tests' ScriptedTerminal play (src/VideoProcessor-Test/data/spotread,
+// CPU tests' ScriptedTerminal play (src/VP-V/modules/output/calibration_lut/tests/data/spotread,
 // README.txt there):
 //
 //   OUT <line>      a complete output line (\e ESC, \r, \t, \\ escaped)

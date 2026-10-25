@@ -853,6 +853,9 @@
       "live_files": [
         "src/VP-V/modules/output/calibration_lut/CalibrationLutStage.h",
         "src/VP-V/modules/output/calibration_lut/CalibrationLutStage.cpp",
+        "src/VP-V/modules/output/calibration_lut/CalibrationLutHost.h",
+        "src/VP-V/modules/output/calibration_lut/CalibrationLutHost.cpp",
+        "src/VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h",
         "src/VP-V/modules/output/calibration_lut/calibration",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.cpp",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboDisplayLut.h",
@@ -873,17 +876,19 @@
           "ArgyllCMS (optional, building the LUT)"
         ],
         "config_keys": [
-          "calibration_lut",
+          "calibration_lut_bt2020",
+          "calibration_lut_bt709",
           "calibration_lut_enabled",
-          "calibration_lut_input_gamma",
           "calibration_lut_input_transfer",
+          "calibration_lut_p3_d65",
+          "calibration_lut_reload",
           "calibration_lut_stage"
         ],
         "upstream_modules": [
           "drive.black_level"
         ]
       },
-      "fallback_when_missing": "Until the VP stage exists, libplacebo's target LUT (current behaviour)."
+      "fallback_when_missing": "The VP stage fails: the LUT runs as libplacebo's target LUT (the old order, before the LED compensation) for the renderer instance. A LUT dropped after a libplacebo render error engages the same id (no projector LUT for the renderer instance)."
     },
     {
       "slot": "output.dither",

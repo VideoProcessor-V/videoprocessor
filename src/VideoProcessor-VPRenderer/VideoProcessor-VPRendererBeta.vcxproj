@@ -129,6 +129,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\HookSegment.cpp" />
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutHost.cpp" />
     <ClCompile Include="LibplaceboPluginExports.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\LibplaceboDisplayLut.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\vprenderer\LibplaceboRenderParameters.cpp" />
