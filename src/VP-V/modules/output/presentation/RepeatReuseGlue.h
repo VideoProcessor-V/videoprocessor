@@ -13,6 +13,7 @@
 
 #include "RepeatReuseAdapter.h"
 
+// Old path: a forwarder after M2 (src/VP-V/modules/motion/consumers/RenderedWarp.h); switch at M2 step 0.
 #include <vprenderer/RenderedWarp.h>
 #include <SubtitleCutPaste.h>
 
@@ -112,7 +113,10 @@ namespace VpRepeatReuse
 					SetFallback(std::string("repeats render in full (") + RepeatRenderReuse::Describe(m_decision.refusal) +
 						(m_key.opaqueDetail.empty() || m_decision.refusal != Refusal::HookStateOpaque ? std::string() : ": " + m_key.opaqueDetail) + ")");
 			}
-			if (m_key.sourceSequence != 0 && !m_ctx.cache->Armed(m_key.sourceSequence) && m_policy.WantArm(m_key, now))
+			// The de-judder arms the same cache only for frames with extras - temporal state, for which
+			// WantArm is false - so the two never arm the same frame (no Cache::Armed needed: keeps
+			// RenderedWarp.h, moved by M2, untouched).
+			if (m_key.sourceSequence != 0 && m_policy.WantArm(m_key, now))
 			{
 				m_ctx.cache->Arm(m_key.sourceSequence);
 				hooks.push_back(m_ctx.cache->Hook());

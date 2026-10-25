@@ -16,7 +16,7 @@
 // - Cache: a native PRE_OUTPUT hook, last in the frame's list, copies A's
 //   picture at PRE_OUTPUT (after tone map, scaling, SSIM, LED compensation
 //   and the Stage 10 restore; target colour space, not yet encoded) into a
-//   persistent texture (rgba32f where renderable, else rgba16f: StorageFormat). libplacebo's stage order is scale -> colour
+//   persistent rgba16f texture. libplacebo's stage order is scale -> colour
 //   conversion -> PRE_OUTPUT -> encoding -> OUTPUT -> target overlays, so
 //   subtitles and the stats overlay are not in the cache.
 // - Warp: each output pixel maps back to the source position it shows (the
@@ -61,7 +61,6 @@ namespace DejudderRendered
 		// Arm before A's render: the hook then copies A's PRE_OUTPUT picture.
 		void Arm(uint64_t sequence) { armed = sequence; valid = 0; }
 		void Disarm() { armed = 0; }
-		bool Armed(uint64_t sequence) const { return sequence != 0 && armed == sequence; }   // WP-24 repeat reuse
 		// Hunt 2 10-layout M1: a picture copied from a draw that was then redrawn (the NLS
 		// hook recovery) is not A's: no copy, and the extras find none.
 		void Invalidate() { armed = 0; valid = 0; }
