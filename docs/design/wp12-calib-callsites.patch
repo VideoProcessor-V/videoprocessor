@@ -18,7 +18,7 @@ index b8803648..67d3dc3c 100644
  		hooks.roomLux = [this](double& lux)
  		{
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index c27f40d0..f130f217 100644
+index c27f40d0..b2d3f29d 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 @@ -81,7 +81,7 @@
@@ -437,18 +437,19 @@ index c27f40d0..f130f217 100644
  		// h3-latch (K3): held black until the first crop decision (the frame was rendered as usual).
  		if (rendered && startupHoldBlack)
  			pl_frame_clear(d3d11->gpu, &baseTarget, black);
-@@ -28739,7 +28498,8 @@ bool LibplaceboVideoRenderer::GetCalibrationOutput(Calibration::PatternOutputInf
+@@ -28739,83 +28498,23 @@ bool LibplaceboVideoRenderer::GetCalibrationOutput(Calibration::PatternOutputInf
  	// The format fields are render-thread state: read under renderMutex, which
  	// the loop releases between refreshes; a cached copy answers when it stays busy.
  	bool fresh = false;
 -	for (int attempt = 0; attempt < 100 && !fresh; ++attempt)
-+	for (int attempt = 0; attempt < 100 && !fresh &&
-+		m_impl->calibrationHost.WantFreshOutputFacts(m_calibrationPatternActive.load(std::memory_order_acquire)); ++attempt)
++	const int attempts = m_impl->calibrationHost.FreshOutputAttempts(m_calibrationPatternActive.load(std::memory_order_acquire));
++	for (int attempt = 0; attempt < attempts && !fresh; ++attempt)
  	{
  		std::unique_lock<std::mutex> guard(m_impl->renderMutex, std::try_to_lock);
  		if (!guard.owns_lock())
-@@ -28747,75 +28507,14 @@ bool LibplaceboVideoRenderer::GetCalibrationOutput(Calibration::PatternOutputInf
- 			Sleep(2);
+ 		{
+-			Sleep(2);
++			if (attempts > 1) Sleep(2);
  			continue;
  		}
 -		Calibration::PatternOutputInfo current;

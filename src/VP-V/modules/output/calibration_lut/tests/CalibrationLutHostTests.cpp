@@ -79,9 +79,9 @@ namespace CalibrationLutHostTests
 		// (the format cannot change with video paused); otherwise the renderer is asked.
 		TEST_METHOD(OutputQueryUsesTheCacheWhilePatternsShow)
 		{
-			Assert::IsTrue(WantFreshOutputFacts(false, 10));
-			Assert::IsTrue(WantFreshOutputFacts(true, 0), L"nothing cached yet");
-			Assert::IsFalse(WantFreshOutputFacts(true, 10));
+			Assert::AreEqual(100, FreshOutputAttempts(false, 10));
+			Assert::AreEqual(100, FreshOutputAttempts(true, 0), L"nothing cached yet");
+			Assert::AreEqual(1, FreshOutputAttempts(true, 10), L"one try-lock, no sleep: a free lock still refreshes");
 		}
 
 		// ADR-0001: the two calibration downgrades the adapter reports (the renderer engages them).

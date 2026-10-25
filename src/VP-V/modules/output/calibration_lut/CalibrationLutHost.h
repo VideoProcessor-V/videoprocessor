@@ -148,7 +148,7 @@ namespace CalibrationLutHost
 
 		// GetCalibrationOutput: whether to try the render-thread facts now (patternsActive = a patch
 		// is being shown), the facts read under renderMutex, and the answer.
-		bool WantFreshOutputFacts(bool patternsActive) const;
+		int FreshOutputAttempts(bool patternsActive) const;
 		void PublishOutputFacts(const OutputFacts& facts);
 		// Fills info from the cache and the atomics. fresh = facts were published by this call.
 		// False with a reason when nothing is known yet; otherwise info.available.

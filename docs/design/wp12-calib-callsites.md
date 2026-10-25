@@ -45,11 +45,14 @@ findings 2026-10-24; the decisions live in the module, CPU-tested):
 
 - the VP-stage LUT status keeps a rejected reload (`Active (VP stage; reload rejected: ...)`) and is
   written only when it changes;
-- "calibration LUT attached" counts the VP stage (status text, ActiveProfileStatus, Config);
+- "calibration LUT attached" counts the VP stage. Its readers, all intended by the module finding:
+  the Ctrl+I limited-range text (`DescribeLimitedTransfer`), the "(inactive: calibration LUT)"
+  display-gamma marker, `ActiveProfileStatus` / Config's usable-LUT check;
 - `calibration LUT (dropped after a render error: ...)` and `calibration patch (full field ...)`
   engage under "Fallbacks engaged" (they were log-only);
-- `GetCalibrationOutput` answers from the cache while patterns show (README cost item 1: no 0.2-1.6 s
-  wait per patch); the presented-generation counters stay live;
+- `GetCalibrationOutput` makes one try-lock without sleeping while patterns show and the cache is
+  filled (README cost item 1: no 0.2-1.6 s wait per patch; a free renderMutex still refreshes, so a
+  swapchain rebuilt mid-run is seen; audit item 3); the presented-generation counters stay live;
 - the calibration controller gets the absolute configuration path.
 
 `EngageFallback`/`ReleaseFallback` are this renderer's own. Where WP-4's `SyncFallback(Decision)`
@@ -98,8 +101,10 @@ frozen-b3base with the patch applied.
 
 ## Interaction with WP-15 (feat/wp15-led-glue, `wp15-led-callsites.patch`)
 
-Both patches edit the `pl_renderer_get_errors` block and `SetCalibrationPattern` (WP-15: the LED
+Both patches edit the `pl_renderer_get_errors` block, `SetCalibrationPattern` (WP-15: the LED
 suspend/resume blocks; WP-12: the pattern request, log-flag resets, end flag and the
-`calibration patch` release). Apply WP-15 first, then this patch with `git apply -3` or by hand;
+`calibration patch` release) and the area after the HDR-verify tone curve (WP-15 replaces the inline
+LED block that is this patch's trailing context: keep `calibrationHost.NoteToneCurve(...)` just
+before `dynamicDrive.PrepareFrame`). The WP-15 auditor measured 3 trivial `--3way` conflicts. Apply WP-15 first, then this patch with `git apply -3` or by hand;
 the hunks are independent in meaning. After both, the host's `LedRawTransfer.h` include (kept by
 WP-15 only for the tone-curve block) can go: `CalibrationLutHost` owns that block now.

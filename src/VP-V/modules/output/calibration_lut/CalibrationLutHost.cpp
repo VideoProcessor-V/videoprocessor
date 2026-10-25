@@ -320,14 +320,14 @@ namespace CalibrationLutHost
 		sentHdr = target.hdr;
 	}
 
-	bool Adapter::WantFreshOutputFacts(bool patternsActive) const
+	int Adapter::FreshOutputAttempts(bool patternsActive) const
 	{
 		uint32_t cached = 0;
 		{
 			std::lock_guard<std::mutex> guard(outputCacheMutex);
 			cached = outputCache.containerBits;
 		}
-		return CalibrationLutHost::WantFreshOutputFacts(patternsActive, cached);
+		return CalibrationLutHost::FreshOutputAttempts(patternsActive, cached);
 	}
 
 	void Adapter::PublishOutputFacts(const OutputFacts& facts)

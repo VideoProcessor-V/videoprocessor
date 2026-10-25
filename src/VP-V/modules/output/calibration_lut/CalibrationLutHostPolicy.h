@@ -189,10 +189,13 @@ namespace CalibrationLutHost
 	// short sleeps). While patterns show, the render loop holds renderMutex across each vsync-paced
 	// Present and re-locks at once, so nearly every poll used to wait 100 tries x Sleep(2) (about
 	// 0.2-1.6 s per patch; module README "Cost" item 1). The format does not change while patterns
-	// show (video is paused), so a filled cache answers then. The presented-generation counters the
-	// session waits on are atomics and stay live. True = try for fresh facts now.
-	inline bool WantFreshOutputFacts(bool patternsActive, uint32_t cachedContainerBits)
+	// show (video is paused) unless the swapchain is rebuilt mid-run (display mode change, the TV
+	// toggling HDR), so then one try-lock per poll, without sleeping: a free renderMutex still
+	// refreshes the facts, a busy one answers from the cache at once (audit 2026-10-25 item 3).
+	// The presented-generation counters the session waits on are atomics and stay live.
+	// Returns how many try-lock attempts (2 ms apart) the query makes.
+	inline int FreshOutputAttempts(bool patternsActive, uint32_t cachedContainerBits)
 	{
-		return !(patternsActive && cachedContainerBits != 0);
+		return patternsActive && cachedContainerBits != 0 ? 1 : 100;
 	}
 }
