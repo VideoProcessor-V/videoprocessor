@@ -1,3 +1,16 @@
+diff --git a/docs/settings/VP-settings-reference.md b/docs/settings/VP-settings-reference.md
+index e55abf29..016eb23e 100644
+--- a/docs/settings/VP-settings-reference.md
++++ b/docs/settings/VP-settings-reference.md
+@@ -43,7 +43,7 @@ Config now has one **VP-V** page that holds everything VP adds.
+ | **Global tier** | Classic / Low / Mid / Upper for every unit at once. If a unit has no step at that level, it uses its nearest lower step. Change one unit afterwards and the global tier shows *Custom (per unit)*. |
+ | **Fallbacks engaged** | The running VP's list of automatic downgrades, for example "Fallbacks engaged: capture GPU unpack (CPU 4:2:0 ...)", or "none". It is the same line as Ctrl+I and Ctrl+Alt+D. |
+ | **Unit tabs** | Each tab has two sub-pages. **Main**: the unit's tier slider, its taste slider where it has one, and small cards of switches. **Advanced**: the settings a master on Main sets (greyed "Set by ..." until you tick *Custom* on that card; unticking puts the master's values back), tuning used only while its feature is on ("Used only when ... is on"), the measured internals (collapsed), the planned settings and the unit's stages with their fallback text. The layout map is `docs/settings/organisation.md`. |
+-| **Pipeline (expert)** | For testing only: where the calibration LUT runs (`calibration_lut_stage`: libplacebo today, or VP's last colour step after Dynamic Drive), the module order (`pipeline_order`, checked with the renderer's own rules; an order it would reject is shown with the reason and not saved), and stages switched off entirely (`pipeline_slots_off`). |
++| **Pipeline (expert)** | For testing only: where the calibration LUT runs (`calibration_lut_stage`: libplacebo today, or VP's last colour step after Dynamic Drive), the module order (`pipeline_order`, checked with the renderer's own rules; an order it would reject is shown with the reason and not saved), and stages switched off entirely (`pipeline_slots_off`). Switching off `input.queue_timing`, `motion.estimation`, `motion.vector_delivery`, `motion.consumers` or `output.presentation` runs that stage in its upstream form (the Original pathway's settings for it): `input.queue_timing` off = Bill's frame-count queue policy (also what the Original pathway uses), `output.presentation` off = render-ahead off, the motion consumers go off with their vectors. The pipeline status line names what is off. |
+ | **Proposed retirement** | The section-12 candidates below, by group, with where each control is and the value in use. The same note is added to each control's tooltip. Nothing is removed until you approve. Each unit tab also ends with "More settings of this unit", naming the pages that hold the rest (coverage audit: `docs/settings/coverage-audit.md`). |
+ 
+ **One control per key.** Every VP setting has exactly one live control. VP's own settings that used
 diff --git a/src/VP-V/core/SlotRegistry.h b/src/VP-V/core/SlotRegistry.h
 index 3bbaf192..f8654d62 100644
 --- a/src/VP-V/core/SlotRegistry.h
@@ -48,7 +61,7 @@ index 6158c5fc..f9116cd5 100644
  
  		TEST_METHOD(OriginalPathwayOverridesAreRealKeysAndValues)
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index e2dd4ddf..60bb2133 100644
+index e2dd4ddf..1b967915 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 @@ -82,6 +82,7 @@
@@ -68,7 +81,20 @@ index e2dd4ddf..60bb2133 100644
  	}
  
  	RendererSettings LoadRendererSettings(const ConfigFile& config,
-@@ -8117,6 +8120,10 @@ struct LibplaceboVideoRenderer::Impl
+@@ -7557,6 +7560,12 @@ struct LibplaceboVideoRenderer::Impl
+ 	// 8-3: the grain map wants the matcher (set where the hooks are chosen,
+ 	// read by the next source frame's estimate: the blend ran on a downscale).
+ 	bool adaptiveGrainMapWanted = false;
++	// Owner 2026-10-25 (zero-cost rule): with motion.estimation or motion.vector_delivery switched off no
++	// estimate pass runs at all; every vector reader then takes its no-vector form (SlotSwitchSettings.h).
++	bool MotionVectorsRun() const
++	{
++		return pipelineSlots.Runs(PipelineSlots::Id::MotionEstimation) && pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery);
++	}
+ 	ULONGLONG adaptiveStatsTick = 0;
+ 	// Stage 10: the BTB/WTW carry and VP's SDR conversion.
+ 	ExtendedRange::Hooks extendedRangeHooks;
+@@ -8117,6 +8126,10 @@ struct LibplaceboVideoRenderer::Impl
  		for (PipelineSlots::Id id : pipelineSlots.ActiveEntrance())
  			entrance += (entrance.empty() ? "" : " > ") + std::string(PipelineSlots::Get(id).name);
  		state += "; entrance: " + (entrance.empty() ? std::string("none") : entrance);
@@ -79,7 +105,25 @@ index e2dd4ddf..60bb2133 100644
  		state += settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway ?
  			"; entrance once (B3) on: motion pictures from the processed A and B" : "; entrance once (B3) off";
  		if (!settings.pipelineEntranceOnce || settings.pipelineOriginalPathway)
-@@ -27065,11 +27072,14 @@ LibplaceboVideoRenderer::QueueHold LibplaceboVideoRenderer::CurrentQueueHold() c
+@@ -24603,7 +24616,7 @@ struct LibplaceboVideoRenderer::Impl
+                 if (known)
+                     adaptiveDownscale.SetGrainField(field);
+             }
+-            adaptiveGrainMapWanted = activeSettings.adaptive.grainMap && adaptiveDownscale.Active();
++            adaptiveGrainMapWanted = activeSettings.adaptive.grainMap && adaptiveDownscale.Active() && MotionVectorsRun();
+             frameHooks.insert(frameHooks.begin(), adaptiveDownscale.Measure());
+             // The blend before SSimSuperRes (both POST_KERNEL): SuperRes refines
+             // the blended picture with its strength scaled by the grain term.
+@@ -24682,7 +24695,7 @@ struct LibplaceboVideoRenderer::Impl
+                 // The next source frame's estimate runs for the map when the
+                 // blend acts on this picture (a downscale; Active() is the
+                 // last measured frame's).
+-                adaptiveGrainMapWanted = activeSettings.adaptive.grainMap && adaptiveDownscale.Active();
++                adaptiveGrainMapWanted = activeSettings.adaptive.grainMap && adaptiveDownscale.Active() && MotionVectorsRun();
+                 frameHooks.insert(frameHooks.begin(), adaptiveDownscale.Measure());
+                 frameHooks.push_back(adaptiveDownscale.Blend());
+                 adaptiveNoSsimLogged = false;
+@@ -27065,11 +27078,14 @@ LibplaceboVideoRenderer::QueueHold LibplaceboVideoRenderer::CurrentQueueHold() c
  
  const QueueTimingPolicy::IQueueTimingPolicy& LibplaceboVideoRenderer::QueuePolicy() const
  {
@@ -98,16 +142,3 @@ index e2dd4ddf..60bb2133 100644
  	return m_vpQueuePolicy;
  }
  
-diff --git a/docs/settings/VP-settings-reference.md b/docs/settings/VP-settings-reference.md
-index e55abf29..016eb23e 100644
---- a/docs/settings/VP-settings-reference.md
-+++ b/docs/settings/VP-settings-reference.md
-@@ -43,7 +43,7 @@ Config now has one **VP-V** page that holds everything VP adds.
- | **Global tier** | Classic / Low / Mid / Upper for every unit at once. If a unit has no step at that level, it uses its nearest lower step. Change one unit afterwards and the global tier shows *Custom (per unit)*. |
- | **Fallbacks engaged** | The running VP's list of automatic downgrades, for example "Fallbacks engaged: capture GPU unpack (CPU 4:2:0 ...)", or "none". It is the same line as Ctrl+I and Ctrl+Alt+D. |
- | **Unit tabs** | Each tab has two sub-pages. **Main**: the unit's tier slider, its taste slider where it has one, and small cards of switches. **Advanced**: the settings a master on Main sets (greyed "Set by ..." until you tick *Custom* on that card; unticking puts the master's values back), tuning used only while its feature is on ("Used only when ... is on"), the measured internals (collapsed), the planned settings and the unit's stages with their fallback text. The layout map is `docs/settings/organisation.md`. |
--| **Pipeline (expert)** | For testing only: where the calibration LUT runs (`calibration_lut_stage`: libplacebo today, or VP's last colour step after Dynamic Drive), the module order (`pipeline_order`, checked with the renderer's own rules; an order it would reject is shown with the reason and not saved), and stages switched off entirely (`pipeline_slots_off`). |
-+| **Pipeline (expert)** | For testing only: where the calibration LUT runs (`calibration_lut_stage`: libplacebo today, or VP's last colour step after Dynamic Drive), the module order (`pipeline_order`, checked with the renderer's own rules; an order it would reject is shown with the reason and not saved), and stages switched off entirely (`pipeline_slots_off`). Switching off `input.queue_timing`, `motion.estimation`, `motion.vector_delivery`, `motion.consumers` or `output.presentation` runs that stage in its upstream form (the Original pathway's settings for it): `input.queue_timing` off = Bill's frame-count queue policy (also what the Original pathway uses), `output.presentation` off = render-ahead off, the motion consumers go off with their vectors. The pipeline status line names what is off. |
- | **Proposed retirement** | The section-12 candidates below, by group, with where each control is and the value in use. The same note is added to each control's tooltip. Nothing is removed until you approve. Each unit tab also ends with "More settings of this unit", naming the pages that hold the rest (coverage audit: `docs/settings/coverage-audit.md`). |
- 
- **One control per key.** Every VP setting has exactly one live control. VP's own settings that used
