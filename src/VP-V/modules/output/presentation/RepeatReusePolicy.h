@@ -180,6 +180,8 @@ namespace VpRepeatReuse
 			m_cachedValid = cacheCaptured;
 		}
 
+		bool ArmingBackedOff(double nowSeconds) const { return nowSeconds < m_armBackoffUntil; }
+
 		void Reset() { m_cachedValid = false; m_cached = RepeatFrameKey{}; m_persistentRun = 0; m_armBackoffUntil = 0.0; }
 		const Stats& GetStats() const { return m_stats; }
 

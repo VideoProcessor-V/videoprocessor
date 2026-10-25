@@ -19,6 +19,8 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <functional>
+#include <string>
 #include <vector>
 
 namespace VpRepeatReuse
@@ -42,6 +44,14 @@ namespace VpRepeatReuse
 	class Glue final : public RepeatRenderReuse::IRepeatReuse
 	{
 	public:
+		// The host's "Fallbacks engaged" registry (vp-no-silent-fallbacks, audit M4): a failed reuse draw
+		// and a switched-on reuse that cannot work (a persistent refusal) are visible there, with the
+		// GUI's one-time notice, not only as a ratio on the status line.
+		using EngageFn = std::function<void(const char* id, const std::string& reason)>;
+		using ReleaseFn = std::function<void(const char* id)>;
+		static constexpr const char* kFallbackId = "repeat reuse";
+		Glue(EngageFn engage = nullptr, ReleaseFn release = nullptr) : m_engage(std::move(engage)), m_release(std::move(release)) {}
+
 		void SetOptions(const Options& o) { m_policy.SetOptions(o); }
 		bool Active() const { return m_policy.Active(); }
 		void SetContext(const VpContext& c) { m_ctx = c; }
@@ -51,6 +61,7 @@ namespace VpRepeatReuse
 
 		void Release()
 		{
+			SetFallback(std::string());
 			m_adapter.Release();
 			m_policy.Reset();
 			m_decision = Decision{};
@@ -87,7 +98,20 @@ namespace VpRepeatReuse
 			extension.subtitleSignature = m_subtitleSignature;
 			m_key.extension = extension.Signature();
 			const double now = NowSeconds();
+			if (m_key.frameGeneration != m_generation)
+			{
+				m_generation = m_key.frameGeneration;   // sticky per stream: a new stream starts clean
+				SetFallback(std::string());
+			}
 			m_decision = m_policy.Decide(m_key, m_ctx.cache->Texture(m_key.sourceSequence) != nullptr, now);
+			if (m_key.cadenceRepeat && !m_drawFailedThisStream)
+			{
+				if (m_decision.reuse)
+					SetFallback(std::string());
+				else if (m_policy.ArmingBackedOff(now) && Persistent(m_decision.refusal))
+					SetFallback(std::string("repeats render in full (") + RepeatRenderReuse::Describe(m_decision.refusal) +
+						(m_key.opaqueDetail.empty() || m_decision.refusal != Refusal::HookStateOpaque ? std::string() : ": " + m_key.opaqueDetail) + ")");
+			}
 			if (m_key.sourceSequence != 0 && !m_ctx.cache->Armed(m_key.sourceSequence) && m_policy.WantArm(m_key, now))
 			{
 				m_ctx.cache->Arm(m_key.sourceSequence);
@@ -112,6 +136,8 @@ namespace VpRepeatReuse
 				return true;
 			m_failed = true;
 			m_policy.NoteDrawFailed();
+			m_drawFailedThisStream = true;
+			SetFallback("reuse draw failed; repeats render in full");
 			return false;
 		}
 
@@ -124,6 +150,20 @@ namespace VpRepeatReuse
 		}
 
 	private:
+		void SetFallback(const std::string& reason)
+		{
+			if (reason == m_fallbackReason)
+				return;
+			if (reason.empty())
+			{
+				m_drawFailedThisStream = false;
+				if (m_release) m_release(kFallbackId);
+			}
+			else if (m_engage)
+				m_engage(kFallbackId, reason);
+			m_fallbackReason = reason;
+		}
+
 		static double NowSeconds()
 		{
 			return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -136,6 +176,11 @@ namespace VpRepeatReuse
 		Decision m_decision;
 		bool m_failed = false;
 		uint64_t m_subtitleSignature = 0;
+		EngageFn m_engage;
+		ReleaseFn m_release;
+		std::string m_fallbackReason;
+		uint64_t m_generation = 0;
+		bool m_drawFailedThisStream = false;
 		std::vector<const pl_hook*>* m_hooks = nullptr;
 		pl_rect2df m_cacheTargetCrop{};
 	};
