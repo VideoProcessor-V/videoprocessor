@@ -175,7 +175,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - VP-V page, Motion tab: tiers Classic / Low / Mid / Upper; tier keys `dejudder_est_qpel`, `dejudder_est_split`, `motion_ahead_frames`, `optical_flow`.
 - Listed under the tier: `interpolation_fill_gaps`, `interpolation`, `dither_vectors`, `interpolation_fallback`, `intent_motion`.
 - Plain-language guide: [docs/settings/VP-settings-reference.md#3-motion](../../../../../docs/settings/VP-settings-reference.md#3-motion).
-- Fallback entry ("Fallbacks engaged"): none (control slot).
+- Fallback entry ("Fallbacks engaged"): `motion consumers: <warp failed | rendered warp failed | interpolation failed>: the source frame is shown instead`.
 
 ## Tests
 

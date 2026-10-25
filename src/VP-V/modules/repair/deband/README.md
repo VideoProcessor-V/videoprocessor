@@ -157,7 +157,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - VP-V page, Repair tab: tiers Classic / Low / Mid / Upper; tier keys `deband_vp`, `detail_pulse_stabilise`, `texture_restore`.
 - Listed under the tier: `deband_vp_grain_guard`, `deband_vp_exclusive`, `low_bitrate_handling`.
 - Plain-language guide: [docs/settings/VP-settings-reference.md#4-repair](../../../../../docs/settings/VP-settings-reference.md#4-repair).
-- Fallback entry ("Fallbacks engaged"): `VP deband: off on the DV tunnel planes (no deband after decode yet)`.
+- Fallback entry ("Fallbacks engaged"): `deband: libplacebo deband (VP debander failed: <error>) / VP deband: off on the DV tunnel planes (no deband after decode yet)`.
 
 ## Tests
 
