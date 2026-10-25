@@ -63,6 +63,8 @@ redo it from this worktree with d0212534 built separately.
    output sizes 1280x720, 1919x1079, 2560x1600, 2561x1601, 3840x2160. Output textures bit-equal
    on every refresh.
 2. Renderer: the sigma-delta on a de-judder clip (extras and mains), capture harness 0 codes.
+   Include edge blanking + NLS + a non-filling aspect (the OUTPUT image smaller than the target):
+   the new sizes assume HOOKED <= {{output_width}} x {{output_height}} (audit 2026-10-25 #4).
 3. VRAM: `LQPREV` + `MVPREV` at 3840x2160 drop from 2 x 66 MB to ~4.2 MB + ~0.3 MB.
 
 ## G3: early upload in every mode

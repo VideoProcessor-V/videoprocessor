@@ -36,6 +36,10 @@ namespace CustomHookChain
                 // Efficiency audit 2026-10-24 #8a: the sigma-delta's quarter-resolution and
                 // block grids (ceil((n + 1.5) / 4), ceil((n + 7.5) / 16)): never smaller than
                 // libplacebo's size of the matching (n + 1.5) / 4 and (n + 7.5) / 16 passes.
+                // ASSUMES the OUTPUT stage's HOOKED size <= {{output_width}} x {{output_height}}
+                // (the target crop only shrinks from the output; audit 2026-10-25 #4). The old
+                // full-size textures had 4x / 16x slack; these have none, so a larger HOOKED would
+                // drop writes beyond the grid. GPU test G8a covers edge blanking + NLS.
                 { "output_width_q4", std::to_string(QuarterGrid(values.outputWidth)), values.outputWidth > 0 },
                 { "output_height_q4", std::to_string(QuarterGrid(values.outputHeight)), values.outputHeight > 0 },
                 { "output_width_b16", std::to_string(BlockGrid(values.outputWidth)), values.outputWidth > 0 },

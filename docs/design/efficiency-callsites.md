@@ -1,24 +1,40 @@
 # Efficiency fixes: host call sites (2026-10-24)
 
 `LibplaceboVideoRenderer.cpp` is Bill's file (present on `origin/v1.4.02-beta`), so the branch
-does **not** edit it (vp-host-call-sites-only). Its changes are patches here, checked with
-`git apply --check --cached` against d0212534:
+does **not** edit it (vp-host-call-sites-only). Its changes are patches here.
+
+**Order and base (2026-10-25, regenerated after the audit
+`skeleton-notes/audit-perf-byte-identical.md`):** `efficiency-callsites.patch` is generated against
+`integ/batch1` 43ebff50 (renderer identical to dc149284) **with
+`docs/design/silent-fallbacks-callsites.patch` already applied**, the order the lead applies them:
+
+```
+git apply docs/design/silent-fallbacks-callsites.patch
+git apply docs/design/efficiency-callsites.patch
+```
+
+Verified with `git apply --cached` in sequence on a 43ebff50 index (it does not apply without the
+silent-fallbacks patch first). The early-upload fallback uses the silent-fallbacks batch's
+`FallbackCatalog::EarlyUpload` entry (id "early upload") through `SyncFallback`: the catalog's line
+in the open-failure branch is kept, and the VRAM-guard refusal, the open success and "not
+requested" go through the same builder. It also needs this branch's VP headers
+(EarlyUploadPolicy.h, FeatureTextureIdle.h, PassTimerHook.h, GpuSpanTimers.h, PassTimers.h).
 
 | Patch | Applies to | Kind | Contents |
 |---|---|---|---|
-| `efficiency-callsites.patch` | d0212534 (`feat/skeleton`) | **VP-only** call sites | #3, #7 visibility, #8b (ER), timers |
+| `efficiency-callsites.patch` | integ/batch1 43ebff50 + silent-fallbacks patch | **VP-only** call sites | #3, #7 visibility, #8b (ER), timers T1-T5 |
 | `efficiency-upstreamable-churn.patch` | d0212534 | **Upstreamable** | #10 change keys |
 | `efficiency-upstreamable-churn.bill-v1.4.02.patch` | `origin/v1.4.02-beta` | **Upstreamable** (for a PR to Bill) | the same #10 hunks against Bill's tree |
 
-The two d0212534 patches touch different hunks and apply in either order. The logic they call
-lives in VP files committed on the branch: `vprenderer/EarlyUploadPolicy.h`,
-`vprenderer/FeatureTextureIdle.h`, `vprenderer/PassTimerHook.h`, `VP-V/core/PassTimers.h`,
-`ExtendedRange.h` (`HoldsTextures`, `CarryPasses`), and for #10 `src/VideoProcessor-Lib/ChangeKey.h`
-(a new generic header with no VP-V dependency, so it can go to Bill with the patch, with
-`ChangeKeyTests.cpp`).
+The 2026-10-24 version (against d0212534, compiled in the renderer DLL there) is in this file's
+history (commit 6804868c). The regenerated one has not been compiled on the integ base (it needs
+this branch merged into integ first).
 
-**Compiled**: with both d0212534 patches applied, the x64 Release renderer DLL
-(VideoProcessor-VPRenderer) builds (2026-10-24 15:27, then the host file was reverted). Not run.
+Audit LOWs fixed 2026-10-25: `SyncEarlyUpload` has no default argument and a frame size of 0 is
+"not known yet" (no pool, no entry, asked again on the next raw frame) instead of "needs nothing";
+the stats route says "uploaded early" only while the pool is open; #8a's assumption (HOOKED <=
+output size) is commented at the templates and added to G8a. The ER hunk stays two statements
+(overlaps WP-13: whichever lands second folds it into `ExtendedRangeStage`'s `CarryHooks()`).
 
 ## Upstreamable vs VP-only
 

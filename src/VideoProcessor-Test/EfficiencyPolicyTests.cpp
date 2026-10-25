@@ -48,7 +48,7 @@ namespace VideoProcessorTest
 			Assert::IsFalse(d.early);
 			Assert::IsTrue(d.reason == EarlyUploadPolicy::Reason::MemoryShort);
 			const std::string why = d.FallbackReason();
-			Assert::IsTrue(why.find("render upload: video memory short, needs 330 MB") == 0);
+			Assert::IsTrue(why.find("video memory short, needs 330 MB") == 0);
 			// An open pool's own bytes are in the usage: it is not counted against itself.
 			in.usageBytes = 2200 * MB + 330 * MB;
 			in.poolBytesHeld = 330 * MB;
@@ -76,7 +76,14 @@ namespace VideoProcessorTest
 			d = EarlyUploadPolicy::Decide(in);
 			Assert::IsFalse(d.early);
 			Assert::IsFalse(d.FallbackReason().empty());
+			// Audit 2026-10-25: a frame size not known yet decides nothing (no pool, no entry).
 			in.openFailed = false;
+			in.frameBytes = 0;
+			d = EarlyUploadPolicy::Decide(in);
+			Assert::IsFalse(d.early);
+			Assert::IsTrue(d.reason == EarlyUploadPolicy::Reason::FrameSizeUnknown);
+			Assert::IsTrue(d.FallbackReason().empty());
+			in.frameBytes = 12 * MB;
 			in.device = false;
 			Assert::IsTrue(EarlyUploadPolicy::Decide(in).reason == EarlyUploadPolicy::Reason::NoDevice);
 		}

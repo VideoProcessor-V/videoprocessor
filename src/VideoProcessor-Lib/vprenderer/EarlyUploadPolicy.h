@@ -17,15 +17,17 @@
 // VRAM guard (the 4 GB laptop): the pool is sized by need - the slots the queue needs (frames in
 // flight plus the margin, AlphaQueuePolicy::EarlyUploadSlots) x one raw frame - and opened only
 // when that fits in the free budget with a reserve left over. Otherwise the render upload is kept
-// and the reason is VISIBLE (owner rule vp-no-silent-fallbacks): "Fallbacks engaged: early upload
-// (render upload: video memory short, needs N MB, M MB free)". An explicit "early" setting is
+// and the reason is VISIBLE (owner rule vp-no-silent-fallbacks), through FallbackCatalog's
+// "early upload" entry: "early upload (the render upload (video memory short, needs N MB, M MB
+// free))". A frame size not known yet (0) decides nothing: no pool, no entry, asked again
+// (audit 2026-10-25: 0 used to mean "needs nothing" and bypassed the guard). An explicit "early" setting is
 // guarded the same way (it cannot work without the memory). "render" is never a fallback.
 //
 // Pure, CPU-tested; the renderer supplies the DXGI budget reading and the frame size.
 namespace EarlyUploadPolicy
 {
 	enum class Mode { Render, Early, Auto };
-	enum class Reason { Active, SettingRender, NoDevice, NoBudget, MemoryShort, OpenFailed };
+	enum class Reason { Active, SettingRender, NoDevice, NoBudget, MemoryShort, OpenFailed, FrameSizeUnknown };
 
 	struct Input
 	{
@@ -50,18 +52,19 @@ namespace EarlyUploadPolicy
 		Reason reason = Reason::SettingRender;
 		uint64_t needBytes = 0;   // the pool by need
 		uint64_t freeBytes = 0;   // budget - usage - reserve (+ the pool's own bytes when open)
-		// A fallback to list under "Fallbacks engaged" (empty: none).
+		// Why the render upload is kept, for FallbackCatalog::EarlyUpload's error text (empty: no
+		// fallback - early, the "render" setting, or a frame size not known yet).
 		std::string FallbackReason() const
 		{
 			char text[160];
 			switch (reason)
 			{
 			case Reason::MemoryShort:
-				std::snprintf(text, sizeof(text), "render upload: video memory short, needs %llu MB, %llu MB free",
+				std::snprintf(text, sizeof(text), "video memory short, needs %llu MB, %llu MB free",
 					static_cast<unsigned long long>(needBytes >> 20), static_cast<unsigned long long>(freeBytes >> 20));
 				return text;
-			case Reason::NoDevice: return "render upload: no D3D11 device";
-			case Reason::OpenFailed: return "render upload: the second upload device could not be opened";
+			case Reason::NoDevice: return "no D3D11 device";
+			case Reason::OpenFailed: return "the second upload device could not be opened";
 			default: return std::string();
 			}
 		}
@@ -73,6 +76,7 @@ namespace EarlyUploadPolicy
 		if (in.mode == Mode::Render) { d.reason = Reason::SettingRender; return d; }
 		if (!in.device) { d.reason = Reason::NoDevice; return d; }
 		if (in.openFailed) { d.reason = Reason::OpenFailed; return d; }
+		if (in.frameBytes == 0) { d.reason = Reason::FrameSizeUnknown; return d; }
 		d.needBytes = static_cast<uint64_t>(in.slots > 0 ? in.slots : 0) * static_cast<uint64_t>(in.frameBytes);
 		if (in.budgetBytes == 0)
 		{
