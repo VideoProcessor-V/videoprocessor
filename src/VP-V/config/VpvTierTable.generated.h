@@ -62,7 +62,7 @@ namespace Vpv
             t.defaults.push_back({ "fbo_float32", "auto" });
             t.defaults.push_back({ "ambient_adapt", "off" });
             t.defaults.push_back({ "occlusion_mask", "off" });
-            t.slotList.push_back({ "input.capture", "Capture", "input", "built", 10, "capture GPU unpack: CPU formatters for the session: <error> | native RGB GPU unpack: CPU conversion to 10-bit 4:2:0 for the session: <error> | early upload: render upload (<error>)" });
+            t.slotList.push_back({ "input.capture", "Capture", "input", "built", 10, "capture GPU unpack: CPU formatters for the session: <error> | native RGB GPU unpack: CPU conversion to 10-bit 4:2:0 for the session: <error> | early upload: the render upload (<error>)" });
             t.slotList.push_back({ "input.signal", "Signal", "input", "built", 20, "Dolby Vision GPU unpack: CPU unpack for the session: <error> | DV metadata: <held | static>" });
             t.slotList.push_back({ "input.queue_timing", "Queue + timing", "input", "built", 30, "Queue: short look-ahead (<n> of 4 frames)" });
             t.slotList.push_back({ "input.source_analysis", "Source analysis", "input", "partial", 40, "Source analysis: labels unknown (<reason>)" });
