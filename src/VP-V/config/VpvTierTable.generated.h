@@ -62,8 +62,8 @@ namespace Vpv
             t.defaults.push_back({ "fbo_float32", "auto" });
             t.defaults.push_back({ "ambient_adapt", "off" });
             t.defaults.push_back({ "occlusion_mask", "off" });
-            t.slotList.push_back({ "input.capture", "Capture", "input", "built", 10, "Capture: CPU 4:2:0 (GPU unpack failed: <reason>)" });
-            t.slotList.push_back({ "input.signal", "Signal", "input", "built", 20, "Signal: DV tunnel unpack on the CPU (<reason>)" });
+            t.slotList.push_back({ "input.capture", "Capture", "input", "built", 10, "capture GPU unpack: CPU formatters for the session: <error> | native RGB GPU unpack: CPU conversion to 10-bit 4:2:0 for the session: <error> | early upload: render upload (<error>)" });
+            t.slotList.push_back({ "input.signal", "Signal", "input", "built", 20, "Dolby Vision GPU unpack: CPU unpack for the session: <error> | DV metadata: <held | static>" });
             t.slotList.push_back({ "input.queue_timing", "Queue + timing", "input", "built", 30, "Queue: short look-ahead (<n> of 4 frames)" });
             t.slotList.push_back({ "input.source_analysis", "Source analysis", "input", "partial", 40, "Source analysis: labels unknown (<reason>)" });
             t.slotList.push_back({ "motion.estimation", "Motion estimation + vector store", "motion", "built", 50, "Motion: matcher only (NVOF unavailable: <reason>)" });
@@ -80,7 +80,7 @@ namespace Vpv
             t.slotList.push_back({ "scaling.output", "Output scaling (hybrid SSIM + D)", "scaling", "partial", 160, "Output scaling: Lanczos (hybrid unavailable: <reason>)" });
             t.slotList.push_back({ "colour.tone_gamut", "Tone + gamut map", "colour", "built", 170, "Tone map: libplacebo (combined LUT missing)" });
             t.slotList.push_back({ "colour.extended_range", "BTB/WTW preservation", "colour", "built", 175, "BTB/WTW: clipped (<reason>)" });
-            t.slotList.push_back({ "colour.sdr_tone_shape", "SDR tone shape + DV trims", "colour", "built", 200, "SDR tone shape: not applied (shader did not load)" });
+            t.slotList.push_back({ "colour.sdr_tone_shape", "SDR tone shape + DV trims", "colour", "built", 200, "DV tone mapping: <why>: bt2390[ + trims] | Dolby Vision trims: <state> | SDR tone shape: not applied (<why>)" });
             t.slotList.push_back({ "colour.appearance", "Stage 13 appearance (CAM16)", "colour", "placeholder", 210, "Appearance: off (shader failed)" });
             t.slotList.push_back({ "drive.led_measure", "LED measurement", "drive", "built", 220, "LED: drive held (measurement unavailable)" });
             t.slotList.push_back({ "drive.led_compensation", "LED compensation (adaptive gamma)", "drive", "built", 230, "LED compensation: off (shader did not load)" });
