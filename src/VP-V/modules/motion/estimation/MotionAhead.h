@@ -20,6 +20,7 @@ namespace MotionAhead
 {
 	constexpr int kMaxDepth = 4;
 	constexpr int kDefaultDepth = 4;
+	// HISTORY (superseded by r6 fix 3 below; kept for kMaxGeneralDepth):
 	// Fixed-constant batch B3 (2026-10-18, sweep #7, general_rate_fixes): the depth is a time with
 	// a frame floor. motion_ahead_frames (0..4) is the depth at and below 60 Hz, unchanged (4 frames:
 	// 167 ms at 24p, 67 ms at 60p); above 60 Hz the depth keeps the 60 Hz time (4 frames at 60 Hz =
