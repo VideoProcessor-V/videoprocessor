@@ -109,6 +109,80 @@ namespace FrameAnalysisProducerTestsNs
 			Assert::IsTrue(cropped.SharedLumaRow(0) == nullptr);
 		}
 
+		TEST_METHOD(PlaneIsBoundToItsView)
+		{
+			// Audit M2: a source describing other pixels or another decode at the SAME size never reads it.
+			Frame frame = Make(Kind::R210, 0);
+			VpFrameAnalysis::AttachSharedLuma(frame.source);
+			Assert::IsTrue(VpFrameAnalysis::DecodeSharedLuma(frame.source));
+			Assert::IsNotNull(frame.source.SharedLumaRow(0));
+			AnalysisLumaSource other = frame.source;
+			other.colorspace = ColorSpace::BT_2020;          // another luma matrix
+			Assert::IsTrue(other.SharedLumaRow(0) == nullptr);
+			other = frame.source;
+			other.encoding = VideoFrameEncoding::R10b;        // another word layout
+			Assert::IsTrue(other.SharedLumaRow(0) == nullptr);
+			Frame second = Make(Kind::R210, 1);
+			other = second.source;                            // other pixels
+			other.sharedLuma = frame.source.sharedLuma;
+			Assert::IsTrue(other.SharedLumaRow(0) == nullptr);
+			uint16_t a = 0;
+			AnalysisLumaSample s;
+			Assert::IsTrue(other.SampleLuma(5, 100, a) && other.Sample(5, 100, s) && a == s.luma);
+		}
+
+		TEST_METHOD(PlanesAreRecycledWithoutReallocation)
+		{
+			// Audit M1: a plane nothing holds any more is reused (same storage, no zero-fill).
+			VpFrameAnalysis::ReleasePlanePool();
+			const uint16_t* storage = nullptr;
+			{
+				Frame frame = Make(Kind::V210, 0);
+				VpFrameAnalysis::AttachSharedLuma(frame.source);
+				Assert::IsTrue(VpFrameAnalysis::DecodeSharedLuma(frame.source));
+				storage = frame.source.SharedLumaRow(0);
+			}
+			Assert::AreEqual(size_t(1), VpFrameAnalysis::PlanePoolSize());
+			Frame next = Make(Kind::V210, 4);
+			VpFrameAnalysis::AttachSharedLuma(next.source);
+			Assert::IsTrue(next.source.SharedLumaRow(0) == nullptr, L"recycled planes start unpublished");
+			Assert::IsTrue(VpFrameAnalysis::DecodeSharedLuma(next.source));
+			Assert::IsTrue(next.source.SharedLumaRow(0) == storage, L"same storage reused");
+			for (int y = 0; y < kHeight; y += 7)
+				for (int x = 0; x < kWidth; x += 5)
+				{
+					AnalysisLumaSample s;
+					Assert::IsTrue(next.source.Sample(x, y, s));
+					Assert::AreEqual(s.luma, next.source.SharedLumaRow(y)[x]);
+				}
+			// A plane still held is never handed out again.
+			Frame third = Make(Kind::V210, 5);
+			VpFrameAnalysis::AttachSharedLuma(third.source);
+			Assert::IsTrue(third.source.sharedLuma != next.source.sharedLuma);
+			VpFrameAnalysis::ReleasePlanePool();
+			Assert::AreEqual(size_t(0), VpFrameAnalysis::PlanePoolSize());
+		}
+
+		TEST_METHOD(NoPlaneWithoutAFullLumaReader)
+		{
+			// Audit M1: only sparse readers -> no shared decode; the record is still measured.
+			VpFrameAnalysis::Host host;
+			host.Configure(true, false);
+			host.Worker().Stop();
+			Frame frame = Make(Kind::Uyvy, 1);
+			VpFrameAnalysis::Host::AttachIfEnabled(frame.source);
+			Assert::IsTrue(frame.source.sharedLuma == nullptr);
+			host.OnArrival(1, frame.source, FrameAnalysis::Rect{}, 0, false);
+			host.Worker().Drain();
+			FrameAnalysis::Record record;
+			Assert::IsTrue(host.Store().Read(1, FrameAnalysis::Use::SingleFrame, FrameAnalysis::kLuma, record) ==
+				FrameAnalysis::ReadStatus::Ok);
+			host.Configure(true, true);
+			VpFrameAnalysis::Host::AttachIfEnabled(frame.source);
+			Assert::IsTrue(frame.source.sharedLuma != nullptr);
+			host.Configure(false);
+		}
+
 		TEST_METHOD(RangeModelIsOneStudioMapping)
 		{
 			// Our sampler already emits studio codes: the VP map is the identity (no second

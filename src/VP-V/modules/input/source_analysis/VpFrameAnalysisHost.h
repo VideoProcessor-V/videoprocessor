@@ -32,15 +32,24 @@ namespace VpFrameAnalysis
 		Host& operator=(const Host&) = delete;
 
 		// frame_analysis_store (default off until the big test; the Original pathway never runs it).
-		void Configure(bool enabled)
+		// fullLumaReaders: some reader reads every pixel's luma (optical flow's half luma, the
+		// source-resolution look-ahead, LED full coverage). Only then is the shared plane decoded
+		// (audit M1): sparse readers alone (scene, HDR, intent grids, subtitle probes) are cheaper
+		// decoding their own samples. The records are measured either way.
+		void Configure(bool enabled, bool fullLumaReaders = true)
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
+			m_fullLumaReaders = fullLumaReaders;
+			SharedFlag().store(enabled && fullLumaReaders, std::memory_order_release);
 			if (enabled == m_enabled) return;
 			m_enabled = enabled;
-			SharedFlag().store(enabled, std::memory_order_release);
 			m_store.SetEnabled(enabled);
 			if (enabled) m_producer.Start();
-			else m_producer.Stop();
+			else
+			{
+				m_producer.Stop();
+				ReleasePlanePool();
+			}
 			m_lastUnique = 0;
 			m_haveUnique = false;
 		}
@@ -71,13 +80,15 @@ namespace VpFrameAnalysis
 		// decision when known (read only), else empty = the full raster. A captured repeat points at
 		// the last unique frame (no re-measure). Never waits for the worker.
 		void OnArrival(uint64_t seq, const AnalysisLumaSource& source, const FrameAnalysis::Rect& picture,
-			int64_t captureQpc, bool captureRepeat, bool decodePlane = true)
+			int64_t captureQpc, bool captureRepeat)
 		{
 			uint64_t original = 0;
 			bool repeat = false;
+			bool decodePlane = false;
 			{
 				std::lock_guard<std::mutex> lock(m_mutex);
 				if (!m_enabled || !source.IsValid()) return;
+				decodePlane = m_fullLumaReaders;
 				repeat = captureRepeat && m_haveUnique;
 				original = m_lastUnique;
 				if (!captureRepeat)
@@ -165,6 +176,7 @@ namespace VpFrameAnalysis
 		FrameAnalysis::Store m_store;
 		Producer m_producer;
 		bool m_enabled = false;
+		bool m_fullLumaReaders = true;
 		uint64_t m_lastUnique = 0;
 		bool m_haveUnique = false;
 	};

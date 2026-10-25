@@ -20,7 +20,7 @@ index 4f381460..67ff1620 100644
  				for (const char* key : vpvKeys) known = known || value.first == key;
  				if (!known)
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index c27f40d0..1dd38244 100644
+index c27f40d0..be030fc3 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 @@ -60,6 +60,7 @@
@@ -82,15 +82,16 @@ index c27f40d0..1dd38244 100644
  	// test/dv-synthetic 2026-10-24: the DV tunnel's SDR passthrough repacked to BGRA8 (tunnelSdrRepack).
  	std::vector<uint32_t> tunnelSdrBgra;
  	void EngageFallback(const char* id, const std::string& reason)
-@@ -7858,6 +7873,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -7858,6 +7873,8 @@ struct LibplaceboVideoRenderer::Impl
  			ReleaseFallback("pipeline order");
  		(void)next.ActiveEntrance();   // warm the kept list here, so the render thread only reads it
  		pipelineSlots = next;
-+		frameAnalysis.Configure(settings.frameAnalysisStore && !settings.pipelineOriginalPathway);   // WP-23
++		frameAnalysis.Configure(settings.frameAnalysisStore && !settings.pipelineOriginalPathway,   // WP-23
++			settings.opticalFlow || settings.sourceResolution == "auto");   // full-luma readers (WP-15 adds LED)
  		entranceCache.Invalidate();
  		entranceRing.Invalidate();
  		std::string state = settings.pipelineOriginalPathway ? "Original pathway (every VP addition off)" :
-@@ -12675,6 +12691,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -12675,6 +12692,7 @@ struct LibplaceboVideoRenderer::Impl
              prepared.profile = profile;
              prepared.source.generation = generation;
          }
@@ -98,7 +99,7 @@ index c27f40d0..1dd38244 100644
          stored = prepared;
          if (profile == AnalysisSourceProfile::LiveRenderer) {
              cache->liveNative = rendererUsesNative;
-@@ -13596,6 +13613,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -13596,6 +13614,7 @@ struct LibplaceboVideoRenderer::Impl
  	void RequestMotionInvalidate(MotionValidity::Cause cause)
  	{
  		motionValidity.Invalidate(cause);
@@ -106,7 +107,7 @@ index c27f40d0..1dd38244 100644
  	}
  	// The render thread's apply point: everything built from vectors of an older
  	// epoch is forgotten (each consumer also checks the epoch it was made in).
-@@ -26780,6 +26798,9 @@ void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz, double s
+@@ -26780,6 +26799,9 @@ void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz, double s
  			m_impl->ReleaseFallback("delay budget");
  		else
  			m_impl->EngageFallback("delay budget", budgetNote);
@@ -116,7 +117,7 @@ index c27f40d0..1dd38244 100644
  		// The frame fallback ladder (owner 2026-10-20/24): below the design depth every look-ahead
  		// consumer uses what is queued (shorter look-ahead, never waiting, never adding delay);
  		// visible, not silent.
-@@ -30564,6 +30585,8 @@ void LibplaceboVideoRenderer::ConversionLoop()
+@@ -30564,6 +30586,8 @@ void LibplaceboVideoRenderer::ConversionLoop()
  		const double conversionUs = converted ?
  			converted->conversionCpuMs * 1000.0 : 0.0;
  		bool published = false;
@@ -125,7 +126,7 @@ index c27f40d0..1dd38244 100644
  		{
  			std::lock_guard<std::mutex> guard(m_queueMutex);
  			if (!m_stopRequested && generation == m_queueGeneration)
-@@ -30579,6 +30602,12 @@ void LibplaceboVideoRenderer::ConversionLoop()
+@@ -30579,6 +30603,12 @@ void LibplaceboVideoRenderer::ConversionLoop()
  					queued->conversionInProgress = false;
  					queued->conversionFailed = !error.empty();
  					queued->converted = std::move(converted);
@@ -138,7 +139,7 @@ index c27f40d0..1dd38244 100644
  					if (error.empty())
  					{
  						std::lock_guard<std::mutex> timingGuard(m_conversionTimingMutex);
-@@ -30602,6 +30631,32 @@ void LibplaceboVideoRenderer::ConversionLoop()
+@@ -30602,6 +30632,32 @@ void LibplaceboVideoRenderer::ConversionLoop()
  			}
  			m_queueChanged.notify_all();
  		}
@@ -171,7 +172,7 @@ index c27f40d0..1dd38244 100644
  	}
  	DebugLog::Log("Alpha conversion worker stopped");
  }
-@@ -30999,8 +31054,8 @@ void LibplaceboVideoRenderer::RenderLoop()
+@@ -30999,8 +31055,8 @@ void LibplaceboVideoRenderer::RenderLoop()
  					if (!luma.IsValid()) continue;
  					m_impl->sourceMonitor.LookAheadFrame(ahead.sourceSequence, luma.width, luma.height,
  						[&luma](int x, int y) {

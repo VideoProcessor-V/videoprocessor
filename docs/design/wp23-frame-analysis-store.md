@@ -36,8 +36,14 @@ VP-ONLY except the Bill-file hook (`wp23-bill-analysers.md`, UPSTREAMABLE).
   luma, so those formats keep their own decode (vectors unchanged). It reads the plane for
   limited 4:2:2 and the sampler's formats (packed DV, SDR tunnel). Switching RGB to the shared luma
   would change the vectors: listed as an owner option, not done.
-- Memory: 2 bytes x pixels per decoded frame (16.6 MB at 4K), released with the frame's analysis
-  cache. Off: nothing allocated.
+- Memory: 2 bytes x pixels per decoded frame (16.6 MB at 4K). Planes are recycled from a pool of
+  at most 12 once nothing holds them (no per-frame allocation or zero-fill, audit M1); the pool is
+  emptied when the store is switched off. Off: nothing allocated.
+- Decoded only when a full-luma reader exists (`Host::Configure(enabled, fullLumaReaders)`; the
+  call site passes optical flow on or source_resolution auto; WP-15 adds LED full coverage). Sparse
+  readers alone (scene, HDR, intent grids, subtitle probes) keep their cheaper own samples. The
+  record is measured either way (its own row pass).
+- The plane is bound to the view it was decoded from (`Bind`/`Matches`, audit M2).
 
 ## Range model (explicit decision)
 
@@ -132,6 +138,14 @@ reads `SampleLuma`. With the key off nothing runs and nothing is allocated.
 4. Arrival hook cost on the conversion thread (PrepareFrameAnalysis moved earlier) and the timing
    gate with the key on.
 5. GPU reductions == CPU reference on captured frames; <= 0.2 ms 3090-projected per source frame.
+
+## Owner decision points
+
+- `frame_analysis_store` has no Config control yet (hidden `[vpv]` key, like
+  `pipeline_entrance_once`). It needs the control, the settings reference and the slots.json entry
+  before it becomes default-on (audit L3).
+- NVOF on RGB sources: keep its own `(R + 2G + B) / 4` luma (today), or read the shared `Sample()`
+  luma (saves a decode, changes the vectors; needs the GPU check).
 
 ## Open
 

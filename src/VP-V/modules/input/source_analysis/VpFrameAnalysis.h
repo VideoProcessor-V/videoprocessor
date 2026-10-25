@@ -58,6 +58,9 @@ namespace VpFrameAnalysis
 	// Fills and publishes the shared plane once (the first caller that claims it). False when there
 	// is nothing to do (no plane, already claimed, a format that cannot be read).
 	bool DecodeSharedLuma(const AnalysisLumaSource& source);
+	// Planes are recycled from a small pool once nothing holds them; the store's switch-off empties it.
+	void ReleasePlanePool();
+	size_t PlanePoolSize();
 
 	// Sample().luma for [x0, x0 + count) of row y, in the sampler's domain: the shared plane, the
 	// 16-bit plane read in place, the row decoder, or the per-pixel sampler (in that order).

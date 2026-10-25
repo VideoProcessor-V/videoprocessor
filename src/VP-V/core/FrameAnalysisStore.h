@@ -107,7 +107,11 @@ namespace FrameAnalysis
 		double btb = 0.0;               // share of samples below black (code < 64)
 		double wtw = 0.0;               // share above white (code > 940)
 		double nearBlack = 0.0;         // share at or below kNearBlackMax (BTB included)
-		double clipped = 0.0;           // share at or above kClippedMin
+		// Share of LUMA at or above kClippedMin. Luma only: an RGB source (native RGB, the DV tunnel's
+		// r210 container) can clip one channel, or reach RGB 1019 at a luma below 1019 (r210's
+		// 64..960 scaling), without counting here. A consumer that needs "the picture clips" for RGB
+		// needs a max(R, G, B) group (not built; audit L1).
+		double clipped = 0.0;
 	};
 
 	struct GrainEstimate

@@ -1,5 +1,9 @@
 # WP-23: shared luma decode for Bill's analysers (UPSTREAMABLE patch)
 
+**Integrator: merge the branch; do NOT apply `wp23-bill-analysers.patch` on top — it is the same
+change as the branch's UPSTREAMABLE commits (1597709f, 07ce5f78 and the audit-fix commit). The patch
+files are for the patch-set record and for the PR to Bill.**
+
 Status: built and CPU-tested on `feat/wp23-fas` (2026-10-25). **UPSTREAMABLE**: no `src/VP-V`
 dependency; offer to Bill as one small PR only with the owner's approval for that PR (D7). Never
 against enchywastaken.
@@ -16,6 +20,9 @@ frame. The patch lets it carry ONE decoded luma plane per frame:
 - `AnalysisLumaSource::sharedLuma` — an optional `shared_ptr` to it; copies of the source share it.
 - `SampleLuma(x, y, luma)` — `Sample(x, y).luma`, from the published plane when there is one.
 - `SharedLumaRow(y)` — the published plane's row, or null.
+- `Bind(source)` / `Matches(source)` — the plane records the view it was decoded from (pixels,
+  strides, format, encoding, colorspace, range, tunnel alignment); a source describing anything
+  else, even at the same size, never reads it (audit M2). `Recycle()` lets a producer pool planes.
 - His luma-only reads switch from `Sample()` to `SampleLuma()`: `SceneDetector::Analyze` (1),
   `ActivePictureEvidence` (`Luma()` helper and the inner-row mean: 2), `SubtitleBoxDetector` (6
   luma-only scans: card and edge darkness probes). Reads that also use

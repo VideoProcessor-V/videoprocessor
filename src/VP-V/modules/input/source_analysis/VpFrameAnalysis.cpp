@@ -61,10 +61,54 @@ namespace VpFrameAnalysis
 		return source.IsValid() && !(PlaneFormat(source) && !source.fullRangeYuv);
 	}
 
+	namespace
+	{
+		// Recycled planes (audit M1): a plane nobody else holds any more is reused, so a frame's
+		// decode neither allocates nor zero-fills 2 bytes per pixel. Bounded; emptied when the store
+		// is switched off (ReleasePlanePool).
+		constexpr size_t kPlanePoolSize = 12;
+		std::mutex& PoolMutex() { static std::mutex mutex; return mutex; }
+		std::vector<std::shared_ptr<AnalysisLumaPlane>>& Pool()
+		{
+			static std::vector<std::shared_ptr<AnalysisLumaPlane>> pool;
+			return pool;
+		}
+
+		std::shared_ptr<AnalysisLumaPlane> AcquirePlane()
+		{
+			std::lock_guard<std::mutex> lock(PoolMutex());
+			for (const auto& plane : Pool())
+				if (plane.use_count() == 1)
+				{
+					// Only the pool holds it: every reader has let go (their reads happen before
+					// their release of the last reference).
+					std::atomic_thread_fence(std::memory_order_acquire);
+					plane->Recycle();
+					return plane;
+				}
+			auto plane = std::make_shared<AnalysisLumaPlane>();
+			if (Pool().size() < kPlanePoolSize)
+				Pool().push_back(plane);
+			return plane;
+		}
+	}
+
+	void ReleasePlanePool()
+	{
+		std::lock_guard<std::mutex> lock(PoolMutex());
+		Pool().clear();
+	}
+
+	size_t PlanePoolSize()
+	{
+		std::lock_guard<std::mutex> lock(PoolMutex());
+		return Pool().size();
+	}
+
 	void AttachSharedLuma(AnalysisLumaSource& source)
 	{
 		if (!source.sharedLuma && NeedsDecode(source))
-			source.sharedLuma = std::make_shared<AnalysisLumaPlane>();
+			source.sharedLuma = AcquirePlane();
 	}
 
 	bool DecodeSharedLuma(const AnalysisLumaSource& source)
@@ -73,9 +117,10 @@ namespace VpFrameAnalysis
 		if (!plane || !source.IsValid() || plane->Ready() || !plane->TryClaim())
 			return false;
 		const int width = source.width, height = source.height;
-		plane->width = width;
-		plane->height = height;
-		plane->codes.assign(static_cast<size_t>(width) * static_cast<size_t>(height), 0);
+		plane->Bind(source);
+		// resize, not assign: a recycled plane of the same size keeps its storage and is not
+		// zero-filled (every element is written below).
+		plane->codes.resize(static_cast<size_t>(width) * static_cast<size_t>(height));
 		for (int y = 0; y < height; ++y)
 		{
 			uint16_t* row = plane->codes.data() + static_cast<size_t>(y) * static_cast<size_t>(width);
