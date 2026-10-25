@@ -84,8 +84,9 @@ Notes:
   narrow them with `CStringA`, as before.
 - The content line is built narrow and converted with `%hs`, as the old `Format("%hs")` did. The
   room line and key overrides convert as before (ANSI code page for narrow parts).
-- A newline inside a renderer status value would become a space in the module text. No current
-  line contains one (each is one overlay row).
+- Values are escaped in the module text (backslash, newline, carriage return) and restored
+  exactly by Parse, so a reason holding an error string with a newline is unchanged (audit
+  LOW-1; test `NewlinesAndBackslashesInRendererLinesAreIdentical`).
 
 ## Lines that stay where they are (and why)
 

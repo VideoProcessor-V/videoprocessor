@@ -536,6 +536,17 @@ namespace VpStatusAdapterTest
 			AssertIdentical(&r, true, d);
 		}
 
+		TEST_METHOD(NewlinesAndBackslashesInRendererLinesAreIdentical)
+		{
+			// Audit LOW-1: a reason built from an error string may hold a newline; the module
+			// text escapes it, so the GUI still gets the old text exactly.
+			FakeRenderer r;
+			r.dejudder = { true, CString(L"on\r\nsecond line") };
+			r.fallbacks = { true, CString(L"Fallbacks engaged: early upload (not available (D3D11: E_FAIL\nat C:\\x\\))") };
+			r.source = { true, CString(L"trailing backslash \\") };
+			AssertIdentical(&r, true, DialogState());
+		}
+
 		TEST_METHOD(ModuleIndexAndUnknownModules)
 		{
 			FakeRenderer r;

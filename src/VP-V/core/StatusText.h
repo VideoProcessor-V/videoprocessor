@@ -89,6 +89,8 @@ namespace VpStatusText
 	}
 
 	// ASCII literal to either character type.
+	// Only for this file's ASCII constants (keys, labels): bytes map one to one (Latin-1). Never
+	// use it for renderer or ANSI text; that goes through CString / CStringA as before.
 	template <class Char>
 	std::basic_string<Char> Widen(const char* text)
 	{
