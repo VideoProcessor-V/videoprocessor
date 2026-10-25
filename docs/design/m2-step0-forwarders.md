@@ -66,3 +66,19 @@ Commit A of M2 step 0 (generator: a one-off include sweep; re-runnable idea in W
 | `src/VideoProcessor-Lib/vprenderer/VpDebander.h` | `src/VP-V/modules/repair/deband/VpDebander.h` | 2 | 2 | 0 | no |
 
 Forwarders: 60; deleted in commit A: 9; kept for commit B: 51 (Bill include lines: 92).
+
+## Removed forwarders
+
+Deleted in commit A (no Bill file included them); old paths in dated records resolve to:
+
+| Old path | Target |
+|---|---|
+| `src/VideoProcessor-Lib/StoreZipWriter.h` | `src/VP-V/modules/control/diagnostics/StoreZipWriter.h` |
+| `src/VideoProcessor-Lib/calibration/CalibrationController.h` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationController.h` |
+| `src/VideoProcessor-Lib/calibration/CalibrationSimulation.h` | `src/VP-V/modules/output/calibration_lut/calibration/CalibrationSimulation.h` |
+| `src/VideoProcessor-Lib/calibration/PatternCodes.h` | `src/VP-V/modules/output/calibration_lut/calibration/PatternCodes.h` |
+| `src/VideoProcessor-Lib/led/LedDriveArbiter.h` | `src/VP-V/modules/drive/projector_control/LedDriveArbiter.h` |
+| `src/VideoProcessor-Lib/led/LedDriveHoldover.h` | `src/VP-V/modules/drive/led_compensation/LedDriveHoldover.h` |
+| `src/VideoProcessor-Lib/led/LedDriveModule.h` | `src/VP-V/modules/drive/led_compensation/LedDriveModule.h` |
+| `src/VideoProcessor-Lib/led/LedMeasurementHook.h` | `src/VP-V/modules/drive/led_measure/LedMeasurementHook.h` |
+| `src/VideoProcessor-Lib/led/LedRawTransfer.h` | `src/VP-V/modules/drive/led_compensation/LedRawTransfer.h` |

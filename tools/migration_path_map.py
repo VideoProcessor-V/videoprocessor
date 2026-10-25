@@ -29,6 +29,7 @@ EXCLUDED_FILES = {
     "docs/design/migration-path-map.md",        # the map itself
     "docs/design/migration-early-inventory.md",  # describes the moves, names the old paths on purpose
     "docs/design/migration-m2-plan.md",          # names the forwarding headers (old paths) on purpose
+    "docs/design/m2-step0-forwarders.md",        # lists the forwarders (old paths) on purpose
 }
 LIVING_EXT = {".md", ".txt", ".py", ".ps1", ".psm1", ".cmd", ".bat", ".sh", ".yml", ".yaml", ".json",
               ".html", ".cpp", ".h", ".hpp", ".inl", ".c", ".glsl", ".hlsl"}
