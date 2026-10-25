@@ -1140,6 +1140,7 @@ const FixedShortcutField kCaptureShortcutFields[] = {
     { "Video conversion off", "video_conversion_off", ShortcutDefaultChord("video_conversion_off") },
     { "V210 to P010 conversion", "video_conversion_p010", ShortcutDefaultChord("video_conversion_p010") },
     { "Raw capture recording (needs VP_RAW_CAPTURE_PATH)", "raw_capture", ShortcutDefaultChord("raw_capture") },
+    { "DV comparison capture (needs its Diagnostics folder)", "dv_compare_capture", ShortcutDefaultChord("dv_compare_capture") },
     // Bug hunt 3 (SH8): it had no field. VP reads it from this file's
     // [shortcuts] (the separate renderer file stays the legacy fallback) and
     // uses it only for a configuration that is not unified.
@@ -9009,6 +9010,21 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "your display's peak (interpolated between the grader's trims) after VP's tone mapping: slope, offset, "
             "power, chroma weight and saturation. Not certified and not Dolby display management. "
             "Not used with a calibration 3D LUT."));
+        auto* dvTone = addChoice(QStringLiteral("VP's interpretation of DV metadata: tone mapping"),
+            QStringLiteral("dv_tone_mapping"), { QStringLiteral("libplacebo"), QStringLiteral("dolby_style") });
+        dvTone->setItemText(dvTone->findData(QStringLiteral("dolby_style")), QStringLiteral("Dolby-style (approx.)"));
+        dvTone->setToolTip(QStringLiteral(
+            "Under test (default libplacebo). dolby_style: for Dolby Vision pictures, a Dolby-style curve driven by the "
+            "scene metadata (L1) and your tone-mapping target, with the L2/L8 trims applied in ICtCp. An approximation of "
+            "the published structure, not certified and not Dolby display management; to be judged against LLDV. "
+            "When it cannot run (e.g. a calibration 3D LUT) VP uses bt2390 + trims and lists it under Fallbacks engaged."));
+        auto* dvCompare = addText(QStringLiteral("DV comparison capture folder (diagnostic; empty = off)"),
+            QStringLiteral("dv_compare_capture_folder"));
+        dvCompare->setToolTip(QStringLiteral(
+            "Diagnostic, off when empty. A folder on a large drive (never a source folder): the dv_compare_capture "
+            "shortcut (default Ctrl+Alt+Shift+W) or a RECORD file there records a short labelled clip (raw frames plus the "
+            "decoded Dolby Vision metadata and the trims VP chose) for the LLDV-vs-tunnel comparison "
+            "(docs/dv/LLDV-vs-tunnel-check.md). Clips are never uploaded or committed."));
         auto* dvGpu = addChoice(QStringLiteral("Dolby Vision tunnel: GPU unpack"),
             QStringLiteral("dv_tunnel_gpu_unpack"), { QStringLiteral("on"), QStringLiteral("off") });
         dvGpu->setToolTip(QStringLiteral(
@@ -10867,7 +10883,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_gate", "on" },
                     { "dejudder_est_split", "off" }, { "dejudder_motion_rolloff", "off" }, { "dejudder_global_two", "on" },
                     { "dejudder_regional_hold", "on" }, { "dejudder_pixel_trust", "on" }, { "dejudder_verify", "off" },
-                    { "dejudder_landing_check", "on" }, { "native_rgb_ingest", "on" }, { "dv_tunnel_gpu_unpack", "on" }, { "dv_trims", "on" }, { "dejudder_pulldown", "off" },
+                    { "dejudder_landing_check", "on" }, { "native_rgb_ingest", "on" }, { "dv_tunnel_gpu_unpack", "on" }, { "dv_trims", "on" }, { "dv_tone_mapping", "libplacebo" }, { "dejudder_pulldown", "off" },
                     { "dejudder_fade_match", "on" }, { "dejudder_low_res", "all" }, { "dejudder_estimate_ahead", "on" },
                     { "dejudder_block_taper", "off" }, { "dither_vectors", "auto" }, { "adaptive_downscale", "off" },
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "auto" }, { "adaptive_grain_map", "on" },

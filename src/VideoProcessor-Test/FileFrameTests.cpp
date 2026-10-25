@@ -120,10 +120,11 @@ namespace VideoProcessorTest
 		// GetCalibrationOutput / SetCalibrationPattern (integration round 4; claimed
 		// 36 on its branch); 40 since SetActivePictureLookaheadAutomatic (bug hunt 3 F2,
 		// integration round 5); 41 since GetFallbacksStatus (r6 fix 7); 42 since SetQueueDelayBudget
-		// (VP-V delay budget, ADR-0020). The version check is equality.
-		TEST_METHOD(PluginApiVersionIs42)
+		// (VP-V delay budget, ADR-0020); 43 since ToggleDvCompareCapture (feat/dv-l8,
+		// assigned at the integ/batch1 merge). The version check is equality.
+		TEST_METHOD(PluginApiVersionIs43)
 		{
-			Assert::AreEqual(static_cast<uint32_t>(42), VP_LIBPLACEBO_PLUGIN_API_VERSION);
+			Assert::AreEqual(static_cast<uint32_t>(43), VP_LIBPLACEBO_PLUGIN_API_VERSION);
 		}
 	};
 

@@ -697,6 +697,12 @@ bool LibplaceboPluginVideoRenderer::GetFallbacksStatus(CString& status) const
 	return m_renderer && m_renderer->GetFallbacksStatus(status);
 }
 
+bool LibplaceboPluginVideoRenderer::ToggleDvCompareCapture(CString& status)
+{
+	status.Empty();
+	return m_renderer && m_renderer->ToggleDvCompareCapture(status);
+}
+
 void LibplaceboPluginVideoRenderer::SetQueueDelayBudget(int totalMs)
 {
 	if (m_renderer)

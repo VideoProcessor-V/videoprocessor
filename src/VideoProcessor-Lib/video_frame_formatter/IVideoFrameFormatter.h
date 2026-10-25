@@ -138,6 +138,29 @@ struct DolbyVisionTunnelFrameMetadata
     // (missing, CRC-invalid or malformed) and the previous DM is being reused within the loss
     // limit. The renderer lists it under "Fallbacks engaged" while it lasts.
     bool reusedPreviousDm = false;
+
+    // feat/dv-l8 (2026-10-24): CM v4.0 L9 (source primaries) and L10 (custom target
+    // displays), needed to interpret an L8 trim's target_display_index. Parsed by
+    // VP-V/modules/input/signal/DvSignalLevels.h (16-bit containers like L1/L2, or the
+    // RPU's packed form). The first block per target index wins.
+    struct TargetDisplay
+    {
+        uint8_t index = 0;          // target_display_index (what L8 refers to)
+        uint16_t maxPq = 0;         // 12-bit PQ code
+        uint16_t minPq = 0;         // 12-bit PQ code
+        uint8_t primaryIndex = 0;
+    };
+    static constexpr uint8_t kMaxTargetDisplays = 8;
+    uint8_t targetDisplayCount = 0;
+    TargetDisplay targetDisplays[kMaxTargetDisplays] = {};
+    bool hasL9 = false;
+    uint8_t l9SourcePrimaryIndex = 0;
+    // feat/dv-l8 (no silent fallbacks): the bounded hold of a rejected DM
+    // (VP-V/modules/input/signal/DvMetadataHold.h). 0 = this picture's own DM; 1 = the
+    // previous DM held (within the hold); 2 = beyond the hold: static/base metadata only
+    // (matrices, source range, L5/L6/L9/L10/L11 kept; L1 scene values and trims dropped).
+    uint8_t dmHoldPhase = 0;
+    uint32_t dmRejectedPictures = 0;   // pictures whose DM was rejected since the signal started
 };
 
 /**

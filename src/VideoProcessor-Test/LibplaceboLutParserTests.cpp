@@ -39,6 +39,8 @@
 #include <VideoFrame.h>
 #include <VideoState.h>
 #include <vprenderer/OutputEncodingRepair.h>
+#include <libplacebo/shaders/colorspace.h>
+#include <VP-V/modules/colour/sdr_tone_shape/DvDolbyStyle.h>   // feat/dv-l8: L8 / ICtCp shader parity
 #include <vprenderer/OcclusionMaskHook.h>
 #include <vprenderer/SigmaDeltaDomain.h>
 #include <vprenderer/ExtendedRange.h>
@@ -3899,6 +3901,112 @@ namespace VideoProcessorTest
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
 			Logger::WriteMessage(("DV trims shader: " + std::to_string(checked) + " pixels matched the reference\n").c_str());
+		}
+
+		// feat/dv-l8 (audit 2026-10-24): DV trims.glsl's L8 path (dv_ext = 1: mid contrast, clip
+		// trim, per-hue saturation / hue) matches DvTrimSelection::ApplyPixel, and its ICtCp path
+		// (dv_space = 1, the Dolby-style mode) matches DvDolbyStyle::ApplyPixelIctcp, on the GPU,
+		// PQ and gamma outputs, with the same tolerance rule as the L2 test above.
+		TEST_METHOD(DolbyVisionTrimShaderL8AndIctcpPathsMatchTheirReferences)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			std::string cleanLog;
+			fixture.CaptureLog(&cleanLog);
+			const std::vector<RgbaPixel> baseline = fixture.RenderCoordinateField(nullptr);
+			CustomHookChain::Chain chain({
+				[](const std::string& file, std::string& source, std::string& reason)
+				{
+					source = LoadBundledShader(file.c_str());
+					reason = "bundled shader not found";
+					return !source.empty();
+				},
+				[&fixture](const std::string& source) -> const pl_hook*
+				{
+					return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+				},
+				[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } });
+			ConfiguredShaderRule rule;
+			rule.name = "dv_trims";
+			rule.filename = "DV trims.glsl";
+			chain.Configure({ rule });
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = values.outputHeight = 64;
+			chain.Ensure(values);
+			std::vector<const pl_hook*> hooks;
+			chain.Collect(false, hooks);
+			Assert::AreEqual(size_t{ 1 }, hooks.size(), L"libplacebo rejected DV trims.glsl");
+			const pl_hook* hook = hooks[0];
+			DvTrimSelection::ExtParams ext;
+			ext.base.slope = 1.1; ext.base.offset = 0.02; ext.base.power = 0.95; ext.base.chromaWeight = 0.15; ext.base.saturationGain = 1.1;
+			ext.midContrast = 0.2; ext.clipTrim = -0.15;
+			const double sat[6] = { 1.2, 1.0, 0.85, 1.0, 1.15, 1.0 }, hue[6] = { 0.0, 8.0, 0.0, -6.0, 0.0, 4.0 };
+			for (int k = 0; k < 6; ++k) { ext.saturation[k] = sat[k]; ext.hueDegrees[k] = hue[k]; }
+			int checked = 0;
+			for (const bool ictcp : { false, true })
+				for (const bool pq : { true, false })
+				{
+					DolbyVisionTrims::Signal signal;
+					signal.pq = pq;
+					signal.peakNits = pq ? 600.0 : 100.0;
+					const pl_raw_primaries* prim = pl_raw_primaries_get(pq ? PL_COLOR_PRIM_BT_2020 : PL_COLOR_PRIM_BT_709);
+					const double r[2] = { prim->red.x, prim->red.y }, g[2] = { prim->green.x, prim->green.y };
+					const double b[2] = { prim->blue.x, prim->blue.y }, w[2] = { prim->white.x, prim->white.y };
+					DolbyVisionTrims::LuminanceWeights(r, g, b, w, signal.kr, signal.kg, signal.kb);
+					for (const auto& kv : DvTrimSelection::ShaderParameters(ext))
+						Assert::IsTrue(CustomHookChain::SetHookParameter(hook, kv.first, kv.second));
+					for (const auto& kv : DvDolbyStyle::ShaderParameters(ictcp, prim))
+						Assert::IsTrue(CustomHookChain::SetHookParameter(hook, kv.first, kv.second));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_signal_pq", pq ? 1.0 : 0.0));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_gamma", signal.gamma));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_peak_nits", signal.peakNits));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_kr", signal.kr));
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "dv_kb", signal.kb));
+					const DvDolbyStyle::IctcpSignal is = DvDolbyStyle::MakeSignal(signal, r, g, b, w);
+					const auto trimmed = fixture.RenderCoordinateField(hook);
+					int changed = 0, loose = 0;
+					for (size_t i = 0; i < trimmed.size(); ++i)
+					{
+						auto half = [](double x)
+						{
+							if (x == 0.0) return 0.0;
+							int e = 0;
+							const double m = std::frexp(x, &e);
+							return std::ldexp(std::round(m * 2048.0) / 2048.0, e);
+						};
+						double v[3] = { half(baseline[i].r / 255.0), half(baseline[i].g / 255.0), half(baseline[i].b / 255.0) };
+						double scale = 0.0;
+						for (int c = 0; c < 3; ++c)
+							scale = (std::max)(scale, std::fabs(DolbyVisionTrims::ToNits(v[c], signal)));
+						if (ictcp)
+							DvDolbyStyle::ApplyPixelIctcp(v, ext, is);
+						else
+							DvTrimSelection::ApplyPixel(v, ext, signal);
+						const uint8_t got[3] = { trimmed[i].r, trimmed[i].g, trimmed[i].b };
+						for (int c = 0; c < 3; ++c)
+						{
+							const double expected = 255.0 * (std::min)(1.0, (std::max)(0.0, v[c]));
+							const double diff = std::fabs(expected - static_cast<double>(got[c]));
+							if (diff <= 1.5)
+								continue;
+							const double nitsDiff = std::fabs(DolbyVisionTrims::ToNits(expected / 255.0, signal) -
+								DolbyVisionTrims::ToNits(got[c] / 255.0, signal));
+							Assert::IsTrue(nitsDiff <= 2e-3 * scale + 1e-3, (std::wstring(ictcp ? L"ICtCp " : L"L8 ") + (pq ? L"PQ" : L"gamma") +
+								L" pixel " + std::to_wstring(i) + L" channel " + std::to_wstring(c) + L": " +
+								std::to_wstring(expected) + L" vs " + std::to_wstring(got[c])).c_str());
+							++loose;
+						}
+						changed += got[0] != baseline[i].r || got[1] != baseline[i].g || got[2] != baseline[i].b;
+						++checked;
+					}
+					Assert::IsTrue(changed > static_cast<int>(trimmed.size()) / 2, L"the trim changes the picture");
+					Assert::IsTrue(loose * 100 <= static_cast<int>(trimmed.size()) * 3 * 5, L"at most 5% of samples beyond 1.5 codes");
+					Logger::WriteMessage((std::string(ictcp ? "ICtCp " : "L8 ") + (pq ? "PQ" : "gamma") + ": " + std::to_string(loose) +
+						" samples beyond 1.5 codes\n").c_str());
+				}
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
+			Logger::WriteMessage(("DV trims shader (L8 / ICtCp): " + std::to_string(checked) + " pixels matched the references\n").c_str());
 		}
 
 		// Delta 13: the shader matches its reference on the GPU.

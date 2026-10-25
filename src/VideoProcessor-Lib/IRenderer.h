@@ -737,4 +737,13 @@ public:
 		(void)totalMs;
 	}
 
+	// feat/dv-l8 WIP (plugin API 43; unverified): the dv_compare_capture shortcut - start a DV
+	// comparison clip, or stop one early (VP-V/modules/input/signal/DvCompareCapture.h). status =
+	// the line to show on screen. False: not supported.
+	virtual bool ToggleDvCompareCapture(CString& status)
+	{
+		status.Empty();
+		return false;
+	}
+
 };

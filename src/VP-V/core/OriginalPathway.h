@@ -25,15 +25,17 @@ namespace OriginalPathway
 		const char* slot;   // the slot whose VP additions it removes (slots.json id)
 	};
 
-	inline const std::array<Override, 54>& Overrides()
+	inline const std::array<Override, 56>& Overrides()
 	{
-		static const std::array<Override, 54> table = { {
+		static const std::array<Override, 56> table = { {
 			{ "capture_path", "standard", "input.capture" },
 			{ "capture_upload", "render", "input.capture" },
 			{ "native_rgb_ingest", "off", "input.capture" },
 			{ "dv_tunnel_gpu_unpack", "off", "input.signal" },
 			{ "dv_tunnel_fixes", "off", "input.signal" },
+			{ "dv_compare_capture_folder", "", "input.signal" },   // feat/dv-l8: the diagnostic off
 			{ "dv_trims", "off", "colour.sdr_tone_shape" },
+			{ "dv_tone_mapping", "libplacebo", "colour.sdr_tone_shape" },   // feat/dv-l8
 			{ "queue_timing_fixes", "off", "input.queue_timing" },
 			{ "pulldown_fixes", "off", "input.queue_timing" },
 			{ "timing_continuity_fixes", "off", "input.queue_timing" },

@@ -39,7 +39,7 @@ def base_dm(rep, l1=None, trims=(), extra=(), source=(62, 3696), refresh=1):
 def expected_dm(dm):
     """What VP must decode from an authored (well-formed) DM, as plain JSON."""
     out = {"valid": True, "source_min_pq": dm.get("source_min_pq", 62), "source_max_pq": dm.get("source_max_pq", 3696),
-           "l1": None, "l2": [], "l8": [], "l5": None, "l6": None, "l11": None,
+           "l1": None, "l2": [], "l8": [], "l10": [], "l5": None, "l6": None, "l11": None,
            "ycc": dm.get("ycc", dm["rep"].ycc), "off": dm.get("off", dm["rep"].off), "lms": dm.get("lms", dm["rep"].lms)}
     for level, payload in dm["ext"]:
         vals = [int.from_bytes(payload[k:k + 2], "big") for k in range(0, len(payload) - 1, 2)]
@@ -48,7 +48,19 @@ def expected_dm(dm):
         elif level == 2:
             out["l2"].append(vals[:7])
         elif level == 8:
-            out["l8"].append([payload[0]] + [int.from_bytes(payload[1 + k:3 + k], "big") for k in range(0, 12, 2)])
+            t = [payload[0]] + [int.from_bytes(payload[1 + k:3 + k], "big") for k in range(0, 12, 2)]
+            if len(payload) >= 17:   # feat/dv-l8: mid_contrast, clip_trim (+ the vectors)
+                t += [int.from_bytes(payload[13:15], "big"), int.from_bytes(payload[15:17], "big")]
+                t += list(payload[17:29])
+            out["l8"].append(t)
+        elif level == 10 and len(payload) in (5, 6, 21, 22) and all(t[0] != payload[0] for t in out["l10"]):
+            if len(payload) in (6, 22):
+                mx, mn, prim = int.from_bytes(payload[1:3], "big"), int.from_bytes(payload[3:5], "big"), payload[5]
+            else:
+                bits = int.from_bytes(payload[:5], "big")
+                mx, mn, prim = (bits >> 20) & 0xFFF, (bits >> 8) & 0xFFF, bits & 0xFF
+            if 0 < mx <= 4095 and mn < mx and len(out["l10"]) < 8:
+                out["l10"].append([payload[0], mx, mn, prim])
         elif level == 5 and out["l5"] is None:
             out["l5"] = vals[:4]
         elif level == 6 and out["l6"] is None:
@@ -79,6 +91,9 @@ def truth_line(fr):
         words.append("l8n=%d" % len(dm["l8"]))
         for k, t in enumerate(dm["l8"]):
             words.append("l8_%d=%s" % (k, j(t)))
+        words.append("l10n=%d" % len(dm.get("l10", [])))
+        for k, t in enumerate(dm.get("l10", [])):
+            words.append("l10_%d=%s" % (k, j(t)))
         words.append("l5=%s" % (j(dm["l5"]) if dm["l5"] else "-"))
         words.append("l6=%s" % (j(dm["l6"]) if dm["l6"] else "-"))
         words.append("l11=%s" % (j(dm["l11"]) if dm["l11"] else "-"))
@@ -266,6 +281,32 @@ def seg_metadata(root, name, rep=dv.REP_P5):
     dms.append(("40 L8 blocks (long DM)", base_dm(rep, l1=(0, PQ(1000), PQ(30)), trims=[real_l2] + many)))
     # Profiles alternating (the matrices change): p8 YCbCr matrices on a p5 picture are still a valid DM.
     dms.append(("p8 matrices", dict(base_dm(dv.REP_P8, l1=(0, PQ(1000), PQ(30))), rep=dv.REP_P8)))
+    for k, (label, dm) in enumerate(dms):
+        s.add("pic", 0, 0, dm, header={"current_id": k & 15}, note=label)
+    s.finish({"labels": [d[0] for d in dms]})
+
+
+def seg_l8(root, name, rep=dv.REP_P5):
+    """feat/dv-l8: CM v4.0 trims - L8 with every optional field, L10 custom targets (both
+    forms), L9, L8 targets VP cannot resolve, and L8 beside L2 (VP must prefer L8)."""
+    s = Segment(root, name, 1920, 1080, (24000, 1001), "r210", "low8", rep,
+                note="L8/L9/L10 coverage (one authored DM per frame)")
+    l1 = (0, PQ(4000), PQ(50))
+    l2_100 = dv.ext_l2(PQ(100), 2300, 2048, 2048, 2048, 2048, 2048)
+    full = dv.ext_l8(1, 2200, 2000, 2100, 2148, 2248, 2048, mid_clip=(2148, 1948),
+                     sat_vector=[150, 128, 110, 128, 140, 128], hue_vector=[128, 136, 128, 120, 128, 128])
+    l8_600 = dv.ext_l8(27, 1900, 2048, 2048, 2048, 2048, 2048, mid_clip=(2048, 2048))
+    l8_1000 = dv.ext_l8(48, 1800, 2048, 2048, 2048, 2048, 2048)
+    dms = [
+        ("L8 100-nit (predefined index 1), every optional field", base_dm(rep, l1=l1, trims=[full], source=(62, PQ(4000)))),
+        ("L8 + L2 (L8 preferred)", base_dm(rep, l1=l1, trims=[l2_100, full], source=(62, PQ(4000)))),
+        ("L8 x3 with L10 600/1000 (container form) + L9", base_dm(rep, l1=l1, trims=[full, l8_600, l8_1000], source=(62, PQ(4000)),
+                                                          extra=[dv.ext_l10(27, PQ(600)), dv.ext_l10(48, PQ(1000)), dv.ext_l9(2)])),
+        ("L8 x2 with L10 600 (RPU packed form)", base_dm(rep, l1=l1, trims=[full, l8_600], source=(62, PQ(4000)),
+                                                    extra=[dv.ext_l10(27, PQ(600), packed=True)])),
+        ("L8 with an unresolvable target (index 77) + L2", base_dm(rep, l1=l1, trims=[l2_100, dv.ext_l8(77, 2400)], source=(62, PQ(4000)))),
+        ("L8 mid/clip only (no vectors)", base_dm(rep, l1=l1, trims=[dv.ext_l8(1, mid_clip=(2400, 1700))], source=(62, PQ(4000)))),
+    ]
     for k, (label, dm) in enumerate(dms):
         s.add("pic", 0, 0, dm, header={"current_id": k & 15}, note=label)
     s.finish({"labels": [d[0] for d in dms]})
@@ -484,6 +525,7 @@ def recipes(root):
     r["cuts-1080p60-same"] = lambda: seg_cuts(root, "cuts-1080p60-same", (60000, 1001), "same")
     r["meta-1080p24-p5"] = lambda: seg_metadata(root, "meta-1080p24-p5")
     r["robust-1080p24"] = lambda: seg_robustness(root, "robust-1080p24")
+    r["meta-l8-1080p24"] = lambda: seg_l8(root, "meta-l8-1080p24")
     r["policy-1080p24-real"] = lambda: seg_policy(root, "policy-1080p24-real", trims="real")
     r["policy-1080p24-none"] = lambda: seg_policy(root, "policy-1080p24-none", trims="none")
     r["policy-1080p24-100only"] = lambda: seg_policy(root, "policy-1080p24-100only", trims="100only")

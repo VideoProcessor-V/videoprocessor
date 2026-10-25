@@ -105,7 +105,8 @@
       "settings_keys": [
         "dv_tunnel_handoff",
         "dv_tunnel_fixes",
-        "dv_trims"
+        "dv_trims",
+        "dv_compare_capture_folder"
       ],
       "planned_keys": [],
       "tiers": "not tiered",
@@ -139,7 +140,8 @@
         "mode": "upstream form",
         "settings": {
           "dv_tunnel_gpu_unpack": "off",
-          "dv_tunnel_fixes": "off"
+          "dv_tunnel_fixes": "off",
+          "dv_compare_capture_folder": ""
         }
       },
       "zone": "host",
@@ -1199,7 +1201,8 @@
       },
       "settings_keys": [
         "sdr_tone_shape",
-        "dv_trims"
+        "dv_trims",
+        "dv_tone_mapping"
       ],
       "planned_keys": [],
       "tiers": "not tiered",
@@ -1231,6 +1234,7 @@
         "mode": "off",
         "settings": {
           "dv_trims": "off",
+          "dv_tone_mapping": "libplacebo",
           "sdr_tone_shape": "off"
         }
       },

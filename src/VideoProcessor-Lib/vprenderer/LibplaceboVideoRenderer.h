@@ -152,6 +152,7 @@ public:
 	bool GetPresentationTimingStatus(CString& status) const override;
 	bool GetDejudderStatus(CString& status) const override;
 	bool GetFallbacksStatus(CString& status) const override;
+	bool ToggleDvCompareCapture(CString& status) override;   // feat/dv-l8 WIP (plugin API 43)
 	void SetQueueDelayBudget(int totalMs) override;
 	bool GetLedDriveStatus(CString& status) const override;
 	bool GetSourceResolutionStatus(CString& status) const override;
