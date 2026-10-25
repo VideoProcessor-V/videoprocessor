@@ -14,6 +14,20 @@
 // Header-only, pure; render thread.
 namespace DitherSlot
 {
+	// The sigma-delta's vector producers (the de-judder's vectors on the extras, the per-pixel
+	// displacement, B's next-frame vectors, render-ahead's L1 level) run only for a quantiser that
+	// can run: the slot on and the libplacebo fork's set-texture call present (modularity sweep
+	// 2026-10-25: with the slot off no pass may run for it).
+	inline bool VectorsWanted(bool slotRuns, bool setTextureSupported) { return slotRuns && setTextureSupported; }
+
+	// libplacebo's own dither is cleared only for a quantiser in the frame, or for
+	// temporal_dither: off while the slot runs. With the slot off the upstream renderer dithers
+	// (temporal_dither is a VP key; its Original pathway value is libplacebo).
+	inline bool ClearsLibplaceboDither(bool quantiserInFrame, bool temporalDitherOff, bool slotRuns)
+	{
+		return quantiserInFrame || (temporalDitherOff && slotRuns);
+	}
+
 	// Removes every hook `isQuantiser` accepts, keeping the order of the rest. Returns how many.
 	template <class IsQuantiser>
 	size_t RemoveQuantisers(std::vector<const pl_hook*>& hooks, IsQuantiser isQuantiser)

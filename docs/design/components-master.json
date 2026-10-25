@@ -597,6 +597,7 @@
           "adaptive_w_base",
           "cnn_residual_stabilise",
           "downscale_light",
+          "fbo_float32",
           "hybrid_refine_d",
           "residual_stabilise_grain_guard",
           "ssim_bitrate_aware",

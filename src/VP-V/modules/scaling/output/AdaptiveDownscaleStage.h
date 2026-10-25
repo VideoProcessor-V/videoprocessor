@@ -89,6 +89,11 @@ namespace AdaptiveDownscaleStage
 		bool slotRuns = true;          // scaling.output's slot switch: off = libplacebo's linear light
 	};
 
+	// libplacebo's fbo_float32 (every FBO in rgba32f) is a scaling.output VP addition (Original
+	// pathway: off): with the slot off the frame keeps libplacebo's default (modularity sweep
+	// 2026-10-25).
+	inline bool FboFloat32(int setting, bool slotRuns) { return setting != 0 && slotRuns; }
+
 	class Stage
 	{
 	public:

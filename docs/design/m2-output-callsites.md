@@ -42,14 +42,16 @@ switch is accepted only together with the host checks; `PipelineSkeletonTests` a
 | Slot | Off means | Byte-identical to |
 |---|---|---|
 | `colour.extended_range` (VP; off in the Original pathway) | `ExtendedRangeStage::Frame::slotRuns = false`: no relabel, no hooks; no fallback entry (a choice) | `preserve_extended_range: off` |
-| `scaling.output` (mixed) | `AdaptiveDownscaleStage` `slotRuns = false`: no measure/blend, no grain-map request, linear light | `adaptive_downscale`/`adaptive_upscale` off, `downscale_light`/`upscale_light: linear` |
-| `output.dither` (mixed) | `DitherSlot::RemoveQuantisers` drops the output quantiser hook (the sigma-delta) right after the adaptive stage; libplacebo's dither runs | the shader list without the sigma-delta (`temporal_dither: libplacebo`) |
+| `scaling.output` (mixed) | `AdaptiveDownscaleStage` `slotRuns = false`: no measure/blend, no grain-map request, no bitrate weighting, linear light, libplacebo's default FBO format (`FboFloat32`) | `adaptive_downscale`/`adaptive_upscale` off, `downscale_light`/`upscale_light: linear` |
+| `output.dither` (mixed) | `DitherSlot::RemoveQuantisers` drops the output quantiser hook (the sigma-delta) right after the adaptive stage; no vector producer runs (`DitherVectorsSupported()`: the extras' vector field, the per-pixel displacement, B's next vectors, render-ahead L1); libplacebo's dither runs, also with `temporal_dither: off` (`ClearsLibplaceboDither`) | the shader list without the sigma-delta (`temporal_dither: libplacebo`) |
 
 Order: unchanged. The dither stays last whenever it runs (the host's dither-last step, S3's
 `KeepDitherLast`, `OutputHookOrder`'s `kQuantiser` rank, `OrderValidator`'s designed order); the
 stages add hooks at today's positions only. No placeholder slot is touched. CPU tests:
 `ExtendedRangeSlotOffIsPreserveOff`, `OutputScalingSlotOffIsAdaptiveOff`,
-`DitherSlotOffRemovesOnlyTheQuantiser`, `OriginalPathwayTurnsTheExtendedRangeSlotOff`.
+`DitherSlotOffRemovesOnlyTheQuantiser`, `SlotOffStopsTheSlotsOtherPasses`, `OriginalPathwayTurnsTheExtendedRangeSlotOff`.
+
+The "output scaling" entry stays engaged while the downgrade is in force: SSimDownscaler missing is re-evaluated every frame; a GPU failure of the blend is re-counted on every failing frame and held for 5 s after the last one (`kFailureHoldMs`), so a persistent failure stays listed until it recovers and a one-off one does not flicker (FallbackStatus gives the one-time notice).
 
 ## Why it is byte-identical (two-commit rule: this is commit 1, behaviour-free)
 

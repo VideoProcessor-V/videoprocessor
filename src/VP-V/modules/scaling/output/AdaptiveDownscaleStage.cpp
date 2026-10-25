@@ -73,7 +73,7 @@ namespace AdaptiveDownscaleStage
 		adaptiveNow.float32Picture = frame.fboFloat32 != 0;
 #endif
 		state.bitrateWeightScale = 1.0;
-		if (!frame.lowBitrateOff && (upscaleBlend || frame.ssimBitrateAware))
+		if (frame.slotRuns && !frame.lowBitrateOff && (upscaleBlend || frame.ssimBitrateAware))
 		{
 			double reading = 1.0;
 			double quality = host.bitrate(reading) ? reading : 1.0;

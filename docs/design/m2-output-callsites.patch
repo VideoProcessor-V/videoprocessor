@@ -27,7 +27,7 @@ index 4a5cc586..bbf4c7ba 100644
  
  		TEST_METHOD(OriginalPathwayOverridesAreRealKeysAndValues)
 diff --git a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
-index 5c24cd7c..068262d8 100644
+index 5c24cd7c..df2e2323 100644
 --- a/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 +++ b/src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp
 @@ -74,6 +74,12 @@
@@ -84,6 +84,15 @@ index 5c24cd7c..068262d8 100644
  // Delta 8 R1 timing (planner 2026-10-13): the GPU time of an extra's
  // sigma-delta passes (libplacebo's per-pass timers; `last` is the most recent
  // completed measurement of that pass).
+@@ -7120,7 +7092,7 @@ struct LibplaceboVideoRenderer::Impl
+ 		// The frame latency the VP-owned chain was made with (bug hunt 05 M6: today's 2
+ 		// without extras or in low latency).
+ 		g.queueDepth = vpOwnedSwapchain ? static_cast<int>(renderAheadChainDepth.latency) : 2;
+-		g.l1Available = activeSettings.ditherVectorsOwn && SigmaDeltaVectorsSupported();
++		g.l1Available = activeSettings.ditherVectorsOwn && DitherVectorsSupported();
+ 		g.costs.newFrameMs = renderAheadNewFrameCost.P95();
+ 		g.costs.estimateMs = renderAheadEstimateCost.Current();
+ 		// X per vector mode, each level priced with its own (M7). A degraded level renders
 @@ -7419,8 +7391,6 @@ struct LibplaceboVideoRenderer::Impl
  	bool dejudderFillIgnoredLogged = false;   // D5 with the rendered warp (logged once)
  	float dejudderEffectiveStrength = 0.0f;   // delta 10: uneven or even strength for this source
@@ -101,7 +110,7 @@ index 5c24cd7c..068262d8 100644
  	ULONGLONG dejudderMaskUsedTick = 0;    // last refresh the mask was used on
  	std::string dejudderMaskState;         // why the mask is not used, for the stats line
  	bool dejudderMaskRateLogged = false;
-@@ -7450,21 +7419,20 @@ struct LibplaceboVideoRenderer::Impl
+@@ -7450,21 +7419,25 @@ struct LibplaceboVideoRenderer::Impl
  	std::unique_ptr<DejudderRendered::VectorField> dejudderVectorField;
  	unsigned long long ditherVectorsExternal = 0;
  	int ditherVectorsLogged = -1;
@@ -122,6 +131,11 @@ index 5c24cd7c..068262d8 100644
 -	std::string extendedRangeDescribed;    // the last logged description (audit 2026-10-16)
 -	bool extendedRangeHookFailed = false;  // libplacebo disabled a hook: off until restart
 -	bool extendedRangeMixLogged = false;   // hunt 2 (08 #2): BTB lost in libplacebo's frame mix, logged
++	// output.dither's vector producers run only while the slot runs (WP-13, DitherSlot.h).
++	bool DitherVectorsSupported() const
++	{
++		return DitherSlot::VectorsWanted(pipelineSlots.Runs(PipelineSlots::Id::OutputDither), SigmaDeltaVectorsSupported());
++	}
 +	// Stage 8-1 / 8-2 / 8b registration (WP-13: VP-V/modules/scaling/output/AdaptiveDownscaleStage.h).
 +	AdaptiveDownscaleStage::Stage adaptiveStage{ adaptiveDownscale };
 +	// Stage 10: the BTB/WTW carry and VP's SDR conversion (WP-13: VP-V/modules/colour/
@@ -131,7 +145,34 @@ index 5c24cd7c..068262d8 100644
  	// 6b-2b: the stats overlay line, published by the render thread at most
  	// twice a second and read by the UI under its own small lock.
  	std::mutex dejudderStatusMutex;
-@@ -24332,194 +24300,62 @@ struct LibplaceboVideoRenderer::Impl
+@@ -17760,7 +17733,7 @@ struct LibplaceboVideoRenderer::Impl
+ 			// With M6 the picture moves per pixel: the sigma-delta follows the
+ 			// warp's own per-pixel displacement (the step since the previous
+ 			// present) instead of block vectors.
+-			const bool pixelVectors = warpMask != nullptr && !ditherOwnOnExtras && SigmaDeltaVectorsSupported() &&
++			const bool pixelVectors = warpMask != nullptr && !ditherOwnOnExtras && DitherVectorsSupported() &&
+ 				shift > 0.0f;
+ 			if (cached && dejudderRenderedWarp)
+ 			{
+@@ -17894,7 +17867,7 @@ struct LibplaceboVideoRenderer::Impl
+ 				~VectorGuard() { Release(); }
+ 			} vectorGuard;
+ 			{
+-				const bool patch = SigmaDeltaVectorsSupported();
++				const bool patch = DitherVectorsSupported();
+ 				const bool use = DejudderRendered::UseExternalVectors(ditherOwnOnExtras, patch,
+ 					warpField != nullptr, dejudderGeometryValid);
+ 				pl_tex vectors = nullptr;
+@@ -18164,7 +18137,7 @@ struct LibplaceboVideoRenderer::Impl
+ 		// Hunt 2 09-L4: not after a failed extra. The fallback showed A at shift 0 (or
+ 		// nothing was presented), so vectors from previousShift would carry from the
+ 		// wrong place; the sigma-delta's own search covers B (vector validity rule).
+-		if (!failure && !activeSettings.ditherVectorsOwn && SigmaDeltaVectorsSupported() &&
++		if (!failure && !activeSettings.ditherVectorsOwn && DitherVectorsSupported() &&
+ 			warpField && warpTrust &&
+ 			dejudderGeometryValid && f.nextSourceSequence != 0)
+ 		{
+@@ -24332,194 +24305,62 @@ struct LibplaceboVideoRenderer::Impl
          // skips its motion search (zero motion; owner 2026-10-13 efficiency).
          for (const pl_hook* hook : frameHooks)
              CustomHookChain::SetHookParameter(hook, "static_refresh", cadenceRepeat ? 1.0 : 0.0);
@@ -163,7 +204,10 @@ index 5c24cd7c..068262d8 100644
 -#endif
 -        bitrateWeightScale = 1.0;
 -        if (activeSettings.lowBitrateHandling != "off" && (upscaleBlend || activeSettings.ssimBitrateAware))
--        {
++        // Stage 8-2 / 8b (scaling.output): the adaptive blend's measure and blend hooks, its
++        // bitrate weighting, residual motion and grain field (VP-V/modules/scaling/output/
++        // AdaptiveDownscaleStage.h; WP-13).
+         {
 -            const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
 -            double quality = snap.reading ? snap.bitrateQuality : 1.0;
 -            if (activeSettings.lowBitrateHandling == "on") quality = (std::min)(quality, 0.4);
@@ -177,10 +221,7 @@ index 5c24cd7c..068262d8 100644
 -        // noise the bitrate reading implies (no reading: no limit).
 -        adaptiveNow.residualCodingNoiseCodes = 0.0f;
 -        if (adaptiveNow.residualGrainGuard)
-+        // Stage 8-2 / 8b (scaling.output): the adaptive blend's measure and blend hooks, its
-+        // bitrate weighting, residual motion and grain field (VP-V/modules/scaling/output/
-+        // AdaptiveDownscaleStage.h; WP-13).
-         {
+-        {
 -            const SourceResolutionMonitor::Snapshot snap = sourceMonitor.Read();
 -            if (snap.reading)
 -                adaptiveNow.residualCodingNoiseCodes = static_cast<float>(GrainPreserve::CodingNoiseCodes(snap.bitrateQuality));
@@ -378,7 +419,7 @@ index 5c24cd7c..068262d8 100644
          // Delta 5 (D5-1): the sigma-delta's code domain comes from this
          // frame's target, never from the shader rule: range, swapchain sample
          // depth and the colour depth it quantises to. A float or 16-bit
-@@ -24689,99 +24525,39 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24689,99 +24530,39 @@ struct LibplaceboVideoRenderer::Impl
          // frame is converted twice (TemporalRenderer::Render historyColor).
          bool extendedRangeRelabelled = false;
          {
@@ -507,7 +548,7 @@ index 5c24cd7c..068262d8 100644
          }
          // libplacebo 7.360.1 drops the output encoding (limited range) after
          // a texture-input PRE_OUTPUT hook; the repair runs first at OUTPUT,
-@@ -24820,65 +24596,23 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24820,65 +24601,23 @@ struct LibplaceboVideoRenderer::Impl
              yieldedDebandLogged = false;
          // Stage 8-1: a downscaling frame in gamma light when chosen (the de-
          // judder extras reuse these parameters).
@@ -581,7 +622,25 @@ index 5c24cd7c..068262d8 100644
              {
                  ++ditherVectorsNextUsed;
                  if (!ditherVectorsNextLogged)
-@@ -25066,12 +24800,7 @@ struct LibplaceboVideoRenderer::Impl
+@@ -24894,13 +24633,15 @@ struct LibplaceboVideoRenderer::Impl
+         // S2: every FBO in rgba32f (exact highlights; +bandwidth). Auto: on everywhere, the
+         // low-latency path too (owner 2026-10-16: higher precision is the default; half-float
+         // there was never agreed). Off by hand only.
+-        frameParams.fbo_float32 = activeSettings.fboFloat32 != 0;
++        frameParams.fbo_float32 = AdaptiveDownscaleStage::FboFloat32(activeSettings.fboFloat32,
++            pipelineSlots.Runs(PipelineSlots::Id::ScalingOutput));
+ #endif
+         // Only a quantiser submitted with this frame replaces libplacebo's dither (audit 2026-10-16:
+         // a sigma-delta left out of the frame for its domain still cleared the dither).
+         const bool quantiserInFrame = std::any_of(frameHooks.begin(), frameHooks.end(),
+             [&](const pl_hook* h) { return customHooks.IsQuantizerHook(h); });
+-        if (quantiserInFrame || activeSettings.temporalDither == "off")
++        if (DitherSlot::ClearsLibplaceboDither(quantiserInFrame, activeSettings.temporalDither == "off",
++            pipelineSlots.Runs(PipelineSlots::Id::OutputDither)))
+         {
+             frameParams.dither_params = nullptr;
+             frameParams.error_diffusion = nullptr;
+@@ -25066,12 +24807,7 @@ struct LibplaceboVideoRenderer::Impl
                  PublishCustomShaderStatus();
              ledCompensation.MarkRuntimeFailures(hookErrors.disabled_hooks,
                  hookErrors.num_disabled_hooks);

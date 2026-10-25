@@ -436,6 +436,23 @@ namespace VideoProcessorTest
 			Assert::IsTrue(hooks[0] == &a && hooks[1] == &b);   // the rest keep their order
 		}
 
+		TEST_METHOD(SlotOffStopsTheSlotsOtherPasses)
+		{
+			// Modularity sweep 2026-10-25: with output.dither off no vector producer runs for it and
+			// libplacebo keeps its dither (also with temporal_dither: off); with scaling.output off
+			// libplacebo's FBOs keep their default format.
+			Assert::IsTrue(DitherSlot::VectorsWanted(true, true));
+			Assert::IsFalse(DitherSlot::VectorsWanted(false, true));
+			Assert::IsFalse(DitherSlot::VectorsWanted(true, false));
+			Assert::IsTrue(DitherSlot::ClearsLibplaceboDither(true, false, true));
+			Assert::IsTrue(DitherSlot::ClearsLibplaceboDither(false, true, true));    // temporal_dither off, slot on
+			Assert::IsFalse(DitherSlot::ClearsLibplaceboDither(false, true, false));  // slot off: upstream dithers
+			Assert::IsFalse(DitherSlot::ClearsLibplaceboDither(false, false, true));
+			Assert::IsTrue(AdaptiveDownscaleStage::FboFloat32(-1, true));    // auto = on
+			Assert::IsFalse(AdaptiveDownscaleStage::FboFloat32(-1, false));  // slot off
+			Assert::IsFalse(AdaptiveDownscaleStage::FboFloat32(0, true));
+		}
+
 		TEST_METHOD(OriginalPathwayTurnsTheExtendedRangeSlotOff)
 		{
 			// colour.extended_range is a VP addition: the Original pathway switches it off; dither and
