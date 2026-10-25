@@ -1,7 +1,7 @@
 # Output segments S2/S3: segment runner, call sites and patches (DRAFT 2026-10-24)
 
 Status: **draft code, not integrated.** Branch `feat/segment-runner`, rebased 2026-10-25 onto
-`integ/batch1` dc149284, with the two audits' HIGH/MED findings fixed
+`integ/batch1` 38badcb0 (silent-fallbacks + modularity fixes), with the two audits' HIGH/MED findings fixed
 (skeleton-notes/audit-feat-segment-runner*.md). No GPU test has been run (written only). The
 fixes are not yet build-verified (audit first, then the verification build). Read with
 `central-migration-needs.md` section 6 and `efficiency-audit-2026-10-24.md` findings #1 and #5.
@@ -18,8 +18,8 @@ Patch files (none applied; each checked with `git apply --check --cached`):
 
 | Patch | Kind | Applies to | Contents |
 |---|---|---|---|
-| `segments-upstream.patch` | upstreamable | dc149284 (3-way at 43ebff50) | project entries for `HookSegment.cpp` (renderer, renderer Beta, tests) and `HookSegmentTests.cpp` |
-| `segments-callsites.patch` | VP-only | dc149284 + the upstream patch | `LibplaceboVideoRenderer.cpp` call sites for S2/S3 (feat/dv-l8's DV trims block included); project and filters entries; `SlotRegistry.h`: `output.dither` switch honoured (true only together with these call sites) |
+| `segments-upstream.patch` | upstreamable | 38badcb0 | project entries for `HookSegment.cpp` (renderer, renderer Beta, tests) and `HookSegmentTests.cpp` |
+| `segments-callsites.patch` | VP-only | 38badcb0 + the upstream patch | `LibplaceboVideoRenderer.cpp` call sites for S2/S3 (feat/dv-l8's DV trims block included); project and filters entries; `SlotRegistry.h`: `output.dither` switch honoured (true only together with these call sites) |
 | `segments-merge-callsites.patch` | VP-only | the two above | the switch, the merger, a `Scope` around the main draw and each extra, `Report` feeding the host's disabled-hook handling |
 
 To offer A to Bill: commit A plus `segments-upstream.patch` are self-contained. A generic host
@@ -63,12 +63,28 @@ downscale measure/blend, the de-judder cache, user shaders.
 - **S4 (POST_KERNEL, hybrid scaler / D) stays reserved:** the merge touches only hooks the S2/S3
   segments emitted; POST_KERNEL hooks are never members.
 
+## Silent-fallbacks integration (38badcb0)
+
+- The SDR tone shape's `SyncFallback` stays in its logging block (now run after S2 collected, so
+  "the shader did not load" is known).
+- The DV trims are tagged with `colour.sdr_tone_shape` by S2, as the host does since 38badcb0.
+- `PrepareDither` returns `DitherPrep {found, domainDropped, slotOff}`: `FallbackCatalog::Dither`
+  engages for an unsupported domain or a shader problem, never for `output.dither` switched off
+  (`DitherFallbackRequested`; test `DitherFallbackOnlyForDomainOrShaderNotForSlotOff`).
+- A placeholder slot (Stage 13, black level) with a registered component but no S2 stage is
+  counted (`ColourCounts::unhandled`) and listed as "S2 placeholder stage", never skipped silently.
+- The callsites patch flips `SwitchHonoured(output.dither)` together with the call sites and
+  records it in PipelineSkeletonTests, slots.json (tests) and the regenerated slot matrix.
+- The merge patch adds `output_segments_merged` (validator, Original pathway = off, slots.json,
+  manifest); `Merger::Configure` also never merges in the Original pathway.
+
 ## Core API changes for S1 (m2-entrance)
 
 - `StageInfo::gives` now defaults to all zero (a zero field keeps the input's value). Set the
   fields a stage really changes.
 - `Segment::Configure` no longer engages a fallback when the merged form is not wanted; new
   `Rechecked()` and `FallbackChanged()`. `Downgrade` holds until the next settings change.
+- `Segment::Active` orders slot stages by the registry (a validated custom order is accepted).
 - Unchanged: `StageContract`, `Flow`, `CheckOrder`, `CheckContracts`, `TimingSampler`. S1 (no
   libplacebo hooks) uses the check functions directly, not `Segment::Configure`.
 
@@ -154,7 +170,7 @@ before/after (the earlier ~1-1.5 ms estimate does not apply to texture-in/out ho
 - 2026-10-24 (before the audit fixes): build of the test and renderer projects with all three
   patches applied, 0 errors; CPU tests 54/54.
 - 2026-10-25 (audit fixes): NOT build-verified yet (re-audit first). Patches regenerated:
-  `git apply --check --cached` clean against dc149284 in order upstream -> callsites ->
-  merge-callsites (3-way also clean at integ/batch1 43ebff50).
+  `git apply --check --cached` clean against 38badcb0 in order upstream -> callsites ->
+  merge-callsites; drift check and slot matrix clean with all three applied.
 - NOT done: any GPU test (OutputSegmentsGpuTests written only), renderer harness, chain gate,
   timing measurement, Beta (377) project build.
