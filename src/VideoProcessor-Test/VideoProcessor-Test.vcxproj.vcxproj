@@ -510,6 +510,11 @@
     <ClCompile Include="..\VP-V\nets\CpuNetExecutor.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\VP-V\tests\FrameAnalysisStoreTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\tests\FrameAnalysisProducerTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\SharedLumaEquivalenceTests.cpp" />
     <ClCompile Include="QueueStressLaneTests.cpp" />
     <ClCompile Include="RendererPostStallResetAdvisorTests.cpp" />
     <ClCompile Include="MadVRShaderRuntimeStateTests.cpp" />

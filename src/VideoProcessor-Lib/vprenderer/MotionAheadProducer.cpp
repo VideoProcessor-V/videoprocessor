@@ -35,7 +35,21 @@ namespace MotionAhead
 		const bool planar16 = format == AnalysisLumaFormat::P010 || format == AnalysisLumaFormat::P210;
 		const bool yuv422 = format == AnalysisLumaFormat::NativeYuv422;
 		const bool rgb = format == AnalysisLumaFormat::NativeRgb;
+		// WP-23: the frame's shared luma decode (Sample().luma) replaces this decode where the
+		// codes are the same - native 4:2:2 at limited range, and the sampler's own formats
+		// (packed / decoded DV, SDR tunnel). RGB keeps its (R + 2G + B) / 4 structure luma and
+		// full-range 4:2:2 its raw codes (the shared plane holds mapped codes): vectors unchanged.
+		const bool rgbOwnDecode = rgb && (encoding == VideoFrameEncoding::R12B || encoding == VideoFrameEncoding::R12L ||
+			encoding == VideoFrameEncoding::R210 || encoding == VideoFrameEncoding::R10b || encoding == VideoFrameEncoding::R10l ||
+			encoding == VideoFrameEncoding::BGRA_8BIT || encoding == VideoFrameEncoding::ARGB_8BIT);
+		const bool sharedSameCodes = !planar16 && !rgbOwnDecode && !(yuv422 && source.fullRangeYuv);
 		auto decodeRow = [&](int y, uint16_t* codes) {
+			if (sharedSameCodes)
+				if (const uint16_t* shared = source.SharedLumaRow(y))
+				{
+					std::memcpy(codes, shared, static_cast<size_t>(w) * sizeof(uint16_t));
+					return;
+				}
 			const uint8_t* row = source.data + static_cast<size_t>(y) * source.rowBytes;
 			if (planar16)
 			{
