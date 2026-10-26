@@ -105,3 +105,10 @@ repair LAST (strictest threshold, hold policy stays). LED/DTM look-ahead dropped
 Tests added: static logo over a pan; credits over a static picture; letterbox + pan; zoom edge vectors;
 handheld shake; 3:2 source (no refresh pairs); NLS mapping for output consumers; blend continuity at the
 threshold; forward/backward inverse; run-twice determinism with a fixed IRLS reduction order.
+
+## Interaction with the nets (owner 2026-10-26)
+Feeding the camera model into Stage 8/8b changes the hybrid downscale's output that net D (and B-refine
+on 8b) were trained on. Rules: the nets' fingerprints include the grain-map/motion configuration (camera
+model on/off, motion engine version) → a mismatch bypasses the net visibly; the study measures D with and
+without the model; wire the model into Stage 8 BEFORE the round-3 D (and B-refine) training so the nets
+train on their final input.
