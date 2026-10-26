@@ -82,3 +82,16 @@ use (owner's call).
 2. The chain gate runs every phase-1 per-merge tier after each merge group; nightly tier unattended.
 3. Phase 2 when the rig is built; phase 2b when convenient; phase 3 after phase 2 passes.
 4. Every failure: diagnosis note in skeleton-notes, fix with an audit, the test kept as a regression.
+
+## Planner adjustments (pack 4, adopted)
+Order: 1.3 and 1.1 first, then 1.4-1.7; stabilise the EntranceOnce fallback flake before 1.5.
+Criteria: 1.6 bounded wait ≤10 s else the lowest-global-motion frame, run on a virtual clock; 1.7 every
+source frame presented exactly once except scheduled slips, presented-time error ≤ ½ refresh (needs DXGI
+stats → HTPC); 1.8 re-init budget per change type; 1.9 simulated teardown vs one real driver reset on the
+3090; 1.14 not worse than direct by >0.05 dB PSNR, no added overshoot, plus a perceptual score; 1.15 slope
+by regression over hours 1-4 with CI < 1 MB/h; 2.5 within ±1 frame of the stated delay; 3.1 every
+fallback event carries a reason code.
+Added: thermal hot-run variant of 1.16 (laptop + 3090); sleep/resume and display off in 1.9; FL35 RS-232
+emulator on a USB-serial loopback before phase 3; blind A/B (randomised toggle, hidden label logged);
+grain/bypass checks on real phase-2 captures; Bill's installer/updater over an overlaid VP-V in 1.17.
+Shadow phase: watch madVR's dropped/repeated counters (VP-V shares the 3090); lighten or stop VP-V if they rise.
