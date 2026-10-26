@@ -103,6 +103,23 @@
    "source": "toggle:input"
   },
   {
+   "name": "source_range",
+   "values": [
+    "auto",
+    "full",
+    "limited"
+   ],
+   "source": "toggle:input"
+  },
+  {
+   "name": "intent_content",
+   "values": [
+    "on",
+    "off"
+   ],
+   "source": "toggle:input"
+  },
+  {
    "name": "motion.tier",
    "values": [
     "Classic",
@@ -154,6 +171,22 @@
    "source": "toggle:motion"
   },
   {
+   "name": "interpolation_fallback",
+   "values": [
+    "hold",
+    "blend"
+   ],
+   "source": "toggle:motion"
+  },
+  {
+   "name": "intent_motion",
+   "values": [
+    "on",
+    "off"
+   ],
+   "source": "toggle:motion"
+  },
+  {
    "name": "repair.tier",
    "values": [
     "Classic",
@@ -189,6 +222,15 @@
    "source": "toggle:repair"
   },
   {
+   "name": "low_bitrate_handling",
+   "values": [
+    "auto",
+    "off",
+    "on"
+   ],
+   "source": "toggle:repair"
+  },
+  {
    "name": "scaling.tier",
    "values": [
     "Classic",
@@ -214,6 +256,70 @@
    "source": "toggle:scaling"
   },
   {
+   "name": "source_resolution_text_guard",
+   "values": [
+    "on",
+    "off"
+   ],
+   "source": "toggle:scaling"
+  },
+  {
+   "name": "source_resolution_mixed_guard",
+   "values": [
+    "on",
+    "off"
+   ],
+   "source": "toggle:scaling"
+  },
+  {
+   "name": "adaptive_grain_map",
+   "values": [
+    "on",
+    "off"
+   ],
+   "source": "toggle:scaling"
+  },
+  {
+   "name": "ssim_bitrate_aware",
+   "values": [
+    "on",
+    "off"
+   ],
+   "source": "toggle:scaling"
+  },
+  {
+   "name": "ssim_residual_stabilise",
+   "values": [
+    "on",
+    "off"
+   ],
+   "source": "toggle:scaling"
+  },
+  {
+   "name": "cnn_residual_stabilise",
+   "values": [
+    "on",
+    "off"
+   ],
+   "source": "toggle:scaling"
+  },
+  {
+   "name": "adaptive_upscale",
+   "values": [
+    "on",
+    "off"
+   ],
+   "source": "toggle:scaling"
+  },
+  {
+   "name": "dv_trims",
+   "values": [
+    "on",
+    "off"
+   ],
+   "source": "toggle:colour"
+  },
+  {
    "name": "preserve_extended_range",
    "values": [
     "on",
@@ -230,12 +336,38 @@
    "source": "toggle:colour"
   },
   {
+   "name": "fbo_float32",
+   "values": [
+    "auto",
+    "on",
+    "off"
+   ],
+   "source": "toggle:colour"
+  },
+  {
+   "name": "ambient_adapt",
+   "values": [
+    "on",
+    "off"
+   ],
+   "source": "toggle:colour"
+  },
+  {
    "name": "output.tier",
    "values": [
     "Classic",
-    "Low"
+    "Low",
+    "Mid"
    ],
    "source": "tiers"
+  },
+  {
+   "name": "occlusion_mask",
+   "values": [
+    "on",
+    "off"
+   ],
+   "source": "toggle:output"
   }
  ]
 }
