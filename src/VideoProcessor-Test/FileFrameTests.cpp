@@ -10,7 +10,7 @@
 #include <VideoFrameEncoding.h>
 #include <FileFrameTiming.h>
 #include <video_frame_formatter/CNoopVideoFrameFormatter.h>
-#include <video_frame_formatter/CTwoPlane420VideoFrameFormatter.h>
+#include <VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.h>
 #include "../VideoProcessor-Lib/vprenderer/FileFrameClock.h"
 #include "../VideoProcessor-Lib/vprenderer/FileFrameSlotGate.h"
 #include "../VideoProcessor-Lib/vprenderer/LibplaceboRendererPluginApi.h"

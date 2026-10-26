@@ -10,7 +10,7 @@
 //   off or its strength is 0 (bit-identical rendering);
 // - change detection for the LED intent limits.
 
-#include <AmbientAdaptation.h>
+#include <VP-V/modules/colour/appearance/AmbientAdaptation.h>
 #include <AmbientState.h>
 
 #include <cmath>

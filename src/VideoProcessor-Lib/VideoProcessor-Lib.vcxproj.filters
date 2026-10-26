@@ -185,7 +185,7 @@
     <ClInclude Include="video_frame_formatter\CNoopVideoFrameFormatter.h">
       <Filter>Header Files\video_frame_formatter</Filter>
     </ClInclude>
-    <ClInclude Include="video_frame_formatter\CTwoPlane420VideoFrameFormatter.h">
+    <ClInclude Include="..\VP-V\modules\input\capture\CTwoPlane420VideoFrameFormatter.h">
       <Filter>Header Files\video_frame_formatter</Filter>
     </ClInclude>
     <ClInclude Include="ACaptureDevice.h">
@@ -506,7 +506,7 @@
     <ClCompile Include="video_frame_formatter\CNoopVideoFrameFormatter.cpp">
       <Filter>Source Files\video_frame_formatter</Filter>
     </ClCompile>
-    <ClCompile Include="video_frame_formatter\CTwoPlane420VideoFrameFormatter.cpp">
+    <ClCompile Include="..\VP-V\modules\input\capture\CTwoPlane420VideoFrameFormatter.cpp">
       <Filter>Source Files\video_frame_formatter</Filter>
     </ClCompile>
     <ClCompile Include="ACaptureDevice.cpp">

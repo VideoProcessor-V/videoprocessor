@@ -4,9 +4,11 @@
   "unit": "colour",
   "order": 210,
   "status": "placeholder",
-  "code_location": "module (SdrAmbientLift helper only; slot placeholder)",
+  "code_location": "module (ambient adaptation config/logic, SdrAmbientLift; slot placeholder)",
   "live_files": [
-    "src/VP-V/modules/colour/appearance/SdrAmbientLift.h"
+    "src/VP-V/modules/colour/appearance/SdrAmbientLift.h",
+    "src/VP-V/modules/colour/appearance/AmbientAdaptation.h",
+    "src/VP-V/modules/colour/appearance/AmbientConfig.h"
   ],
   "components": {
     "files": {
@@ -34,5 +36,9 @@
     ]
   },
   "fallback_when_missing": "Failure -> off, previous gamma boost/saturation restored.",
-  "fallback_entry": "Appearance: off (shader failed)"
+  "fallback_entry": "Appearance: off (shader failed)",
+  "forwarding_headers": [
+    "src/VideoProcessor-Lib/AmbientAdaptation.h",
+    "src/VideoProcessor-Lib/AmbientConfig.h"
+  ]
 }

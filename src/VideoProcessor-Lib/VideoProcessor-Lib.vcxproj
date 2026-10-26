@@ -193,7 +193,7 @@
     <ClInclude Include="ConfigFile.h" />
     <ClInclude Include="..\VP-V\modules\drive\led_compensation\LedDriveConfig.h" />
     <ClInclude Include="AmbientState.h" />
-    <ClInclude Include="AmbientConfig.h" />
+    <ClInclude Include="..\VP-V\modules\colour\appearance\AmbientConfig.h" />
     <ClInclude Include="AmbientSensor.h" />
     <ClInclude Include="..\VP-V\modules\drive\projector_control\SerialPort.h" />
     <ClInclude Include="..\VP-V\modules\drive\projector_control\ProjectorDriver.h" />
@@ -301,7 +301,7 @@
     <ClInclude Include="IntentInterpreterObserver.h" />
     <ClInclude Include="IntentInterpreterSupport.h" />
     <ClInclude Include="..\VP-V\modules\input\queue_timing\QueueLookahead.h" />
-    <ClInclude Include="AmbientAdaptation.h" />
+    <ClInclude Include="..\VP-V\modules\colour\appearance\AmbientAdaptation.h" />
     <ClInclude Include="BlackIntent.h" />
     <ClInclude Include="DisplayIntent.h" />
     <ClInclude Include="DisplayProfile.h" />
@@ -440,7 +440,7 @@
     <ClInclude Include="dv_loopback\DvLoopbackHarness.h" />
     <ClInclude Include="video_frame_formatter\CR12BtoRGB48VideoFrameFormatter.h" />
     <ClInclude Include="video_frame_formatter\CNoopVideoFrameFormatter.h" />
-    <ClInclude Include="video_frame_formatter\CTwoPlane420VideoFrameFormatter.h" />
+    <ClInclude Include="..\VP-V\modules\input\capture\CTwoPlane420VideoFrameFormatter.h" />
     <ClInclude Include="vprenderer\FileFrameClock.h" />
     <ClInclude Include="vprenderer\FileFrameSlotGate.h" />
     <ClInclude Include="video_frame_formatter\CUYVYtoP010VideoFrameFormatter.h" />
@@ -627,7 +627,7 @@
     <ClCompile Include="..\VP-V\modules\control\diagnostics\RawCaptureRecorder.cpp" />
     <ClCompile Include="video_frame_formatter\CR12BtoRGB48VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CNoopVideoFrameFormatter.cpp" />
-    <ClCompile Include="video_frame_formatter\CTwoPlane420VideoFrameFormatter.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\capture\CTwoPlane420VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CUYVYtoP010VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CUYVYtoP210VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CV210toP010VideoFrameFormatter.cpp" />
