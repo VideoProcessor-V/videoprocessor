@@ -34,7 +34,7 @@ encoded deliveries (D:\testclips), the DV synthetic corpus, synthetic frames, re
 | 1.17 | Install / overlay | clean-machine install (VM); overlay install onto Bill's version, uninstall restores Bill's files by hash; config migration from Bill's settings; Bill's build loads our settings file after uninstall | exact restore; no lost user settings | before the loop |
 | 1.18 | Diagnostics | report-a-problem dump and crash-state ring exercised (forced fault) | the dump contains what a diagnosis needs | before the loop |
 
-## Phase 2 — the bench-rig loop (laptop + DeckLink Mini Recorder 4K in the Ugreen enclosure; Apple TV → Integral 2 (custom EDID) → EZCOO splitter → capture; laptop output via USB-C → HDMI 2.0)
+## Phase 2 — the bench-rig loop (laptop + DeckLink Mini Recorder 4K in the Ugreen enclosure; Apple TV → Integral 2 (custom EDID) → capture, direct; the EZCOO only to watch at the same time or for the shadow deploy; laptop output via USB-C → HDMI 2.0). The same suite reruns on the HTPC + Quad for 4K50/60.
 
 Limits: the Mini Recorder captures up to 2160p30 / 1080p60; laptop ports are Intel-driven (no NVIDIA DV
 output mode). 4K50/60 and DV output go to the HTPC step.
