@@ -95,3 +95,12 @@ Added: thermal hot-run variant of 1.16 (laptop + 3090); sleep/resume and display
 emulator on a USB-serial loopback before phase 3; blind A/B (randomised toggle, hidden label logged);
 grain/bypass checks on real phase-2 captures; Bill's installer/updater over an overlaid VP-V in 1.17.
 Shadow phase: watch madVR's dropped/repeated counters (VP-V shares the 3090); lighten or stop VP-V if they rise.
+
+## Resync / discontinuity rule (owner 2026-10-26)
+Every resync is one discontinuity event that all stateful parts honour. FULL (format, rate, resolution,
+HDR/DV mode, signal loss/return, device reset): clock re-latched to the new source; queue rebuilt; B3 ring,
+repeat-reuse cache and analysis history cleared; motion history and vectors invalid until a fresh pair;
+cadence/pulldown detector reset; DTM/LED look-ahead reset as at a cut; render-ahead re-anchored. MINOR (one
+drift slip): vectors across the slipped pair invalid or time-corrected; no clock re-latch; queue kept.
+1.4 and 1.6 assert it: no inherited state after any event, no vector used across a discontinuity, the reset
+and its reason visible in the status.
