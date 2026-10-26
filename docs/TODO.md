@@ -83,6 +83,7 @@ interference, content variety, clock drift (correct at scene cuts), thermal thro
 uninstall/config migration, nets on real material, blind A/B vs madVR, diagnostics used for real.
 HTPC overnight test pack (3090 + Quad, no install) as the step between loop and shadow deploy.
 Full plan: docs/plans/2026-10-26/test-plan-synthetic-loop-shadow.md.
+Kick-off for the week of 2026-10-31: docs/plans/2026-10-26/kickoff-2026-10-31.md.
 
 ## Long-term design basis (owner 2026-10-26)
 - Build toward an 8K basis (years away: 8K capture + GPUs able to process it). Keep every module
