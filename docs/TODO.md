@@ -42,6 +42,24 @@ plan changes.
 11. WP-20 big test (CPU + Config suites, GPU legs, slot on/off matrix, GPU tests on WARP and hardware).
 12. After WP-20: Bill merge (WP-21), M1 deploy prep.
 
+## Planner review 2026-10-26 (docs/audit/planner-review-2026-10-26.md) — adopted
+- Frozen r6/b3base references, byte-identity tests and the chain gate run with `entrance_gpu_drain` ON;
+  drain default on in cinema profiles if the 3090 cost is < ~0.3 ms/frame (off in Low_Latency).
+- Stage 8b one-axis package before WP-20; lane B only in disjoint host regions; one slack day before WP-20.
+- Weekly rehearsal Bill merge (record hunks); merge first if extraction slips past two weeks or > ~200 hunks;
+  post-merge qualification = diff against frozen references.
+- B-refine: motion-engine version in the fingerprint, grain-map perturbation, temporal consistency term,
+  one net conditioned on the per-axis factors. Colour repair = chroma head on A's trunk (siting/matrix labels,
+  hue penalty).
+- New tests: run-twice determinism (WARP + hardware, per slot), live capture via the DeckLink bench rig,
+  mid-stream transitions, multi-hour soak, net bypass coverage, Original = Bill byte-identity test,
+  structural settings fingerprint, per-slot timing budget gate (fullscreen, DXGI stats).
+- Re-check / add: DeckLink 12-bit route verified end to end; DV scene-descriptor interface; Stage 13 seat in
+  colour.appearance; Stage 12 items (bounded auto-disengage, structural fingerprint, crash-state redaction);
+  detection stress items (G1, text guard, G19); delay gate per cinema mode with Low_Latency exempt.
+- Owner measurements (when at the cinema PC; none blocks): LED/CNTR step response (Slo-Mo), no-tile Argyll
+  patch, screen-white, Stage 3 ramp test.
+
 ## TrainKit round 3 requests
 A colour branch; B-refine on Stage 8b output (per-axis variants); half-resolution-trunk D and D_small
 (only if quality holds); exporter fields; fp32 by default; D fine-tune after the timing numbers.
