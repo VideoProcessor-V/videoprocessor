@@ -68,7 +68,7 @@ plan changes.
   analysis store (either/or with libplacebo peak detection and static; Original = Bill).
 - First deploy (M1) after the Bill merge (WP-21) and after the DeckLink Mini Recorder bench tests.
 - Argyll patch: skip the white-tile check (keep dark calibration) for the i1Display Pro / ES-1000.
-- Offer Bill the registered fixes that help him now (each PR only with the owner's approval).
+- Offer Bill the registered fixes that help him (standing owner OK; list shown when opened) — AFTER our Bill merge (WP-21).
 
 ## TrainKit round 3 requests
 A colour branch; B-refine on Stage 8b output (per-axis variants); half-resolution-trunk D and D_small
