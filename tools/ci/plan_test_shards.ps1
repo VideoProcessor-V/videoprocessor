@@ -19,8 +19,13 @@ lowest shard). A unit's weight is the sum of its tests' seconds from -Weights (J
 "Namespace::Class::Method" -> seconds, measured on the hosted runner by summarize_test_shards.ps1
 -WeightsOut); a test without a weight counts -DefaultSecondsPerTest.
 
-Classes whose name contains an -Exclude entry are left out (the GPU harness: every test there is
-GpuHardware/GpuOnScreen, which vstest's native adapter cannot select by trait).
+The tests that must not run in the CPU CI (GpuHardware, GpuOnScreen, MeterHardware, ProjectorHardware, by
+manifest tools/test-categories.json and Category attribute) come from tools/gen_test_filters.py via
+tools/test_filters.ps1: they are left out of the plan, and every shard filter is "(units)&<generated CPU
+filter>", so a partly excluded class never runs its excluded tests. There is no fallback: when python or the
+generator fails, the script stops. Category= clauses of the generated GPU filter cannot be evaluated against
+a test list; the generator also lists every attribute-categorised method by name, so the name clauses are
+complete. -Exclude adds further class-name exclusions (substring of the class); none by default.
 
 The plan is verified before it is written, and the script fails (exit 1) unless:
   - every included test is matched by exactly one shard's filter (complete and disjoint);
@@ -31,7 +36,7 @@ param(
     [Parameter(Mandatory)][string]$TestList,
     [Parameter(Mandatory)][int]$Shards,
     [Parameter(Mandatory)][string]$OutFile,
-    [string[]]$Exclude = @('RendererCaptureHarnessTests'),
+    [string[]]$Exclude = @(),
     [string]$Weights = '',
     [double]$DefaultSecondsPerTest = 0.5,
     [double]$SplitAboveFraction = 0.25,
@@ -49,10 +54,25 @@ function ClassOf([string]$test) {
     $test.Substring(0, $i)
 }
 
+. (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) '..\test_filters.ps1')
+$cpuFilter = Get-VpTestFilter -Kind cpu
+$gpuClauses = @((Get-VpTestFilter -Kind gpu) -split '\|' | Where-Object { $_ -notlike 'Category=*' })
+function GeneratorExcludes([string]$test) {
+    $method = $test.Substring($test.LastIndexOf('::') + 2)
+    foreach ($c in $gpuClauses) {
+        if ($c.StartsWith('FullyQualifiedName~')) { if ($test.Contains($c.Substring(19))) { return $true } }
+        elseif ($c.StartsWith('Name~')) { if ($method.Contains($c.Substring(5))) { return $true } }
+        else { throw "unrecognised clause in the generated GPU filter: $c" }
+    }
+    $false
+}
+
 $all = @(Get-Content $TestList | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '::' } | Sort-Object -Unique)
 if ($all.Count -eq 0) { throw "No tests in $TestList" }
 $excludedSet = New-Object 'System.Collections.Generic.HashSet[string]'
 foreach ($t in $all) { $c = ClassOf $t; if (@($Exclude | Where-Object { $c -like "*$_*" }).Count -gt 0) { [void]$excludedSet.Add($t) } }
+$genExcluded = New-Object 'System.Collections.Generic.HashSet[string]'
+foreach ($t in $all) { if (GeneratorExcludes $t) { [void]$genExcluded.Add($t); [void]$excludedSet.Add($t) } }
 $excludedTests = @($all | Where-Object { $excludedSet.Contains($_) })
 # -ClassesFile (affected tier, select_ci_scope.ps1): only these classes (one per line, "Class" or
 # "Namespace::Class"); every other test must then be matched by no shard.
@@ -67,7 +87,7 @@ if ($ClassesFile) {
     }
     # A selected class's clause can also match another class (Tests::X:: inside UnitTests::X::):
     # that class is selected too, never left matched-but-unplanned.
-    $hardExcluded = @($all | Where-Object { $c = ClassOf $_; @($Exclude | Where-Object { $c -like "*$_*" }).Count -gt 0 })
+    $hardExcluded = @($all | Where-Object { $genExcluded.Contains($_) -or (& { $c = ClassOf $_; @($Exclude | Where-Object { $c -like "*$_*" }).Count -gt 0 }) })
     do {
         $grown = $false
         $selectedClauses = @($all | Where-Object { -not $excludedSet.Contains($_) } | ForEach-Object { (ClassOf $_) + '::' } | Sort-Object -Unique)
@@ -76,7 +96,7 @@ if ($ClassesFile) {
             foreach ($cl in $selectedClauses) {
                 if ($t.Contains($cl)) {
                     $cls = ClassOf $t
-                    foreach ($u in @($excludedSet | Where-Object { (ClassOf $_) -eq $cls })) { [void]$excludedSet.Remove($u) }
+                    foreach ($u in @($excludedSet | Where-Object { (ClassOf $_) -eq $cls -and -not $genExcluded.Contains($_) })) { [void]$excludedSet.Remove($u) }
                     $grown = $true; break
                 }
             }
@@ -168,7 +188,7 @@ $plan = @(for ($i = 0; $i -lt $Shards; ++$i) {
         index   = $i
         classes = $cls
         exact   = $exact
-        filter  = ($clauses -join '|')
+        filter  = "($($clauses -join '|'))&$cpuFilter"
         tests   = ($assigned[$i] | Measure-Object Tests -Sum).Sum
         weight  = [math]::Round($load[$i], 1)
     }
@@ -183,7 +203,8 @@ foreach ($t in $all) {
     for ($i = 0; $i -lt $Shards; ++$i) {
         $hit = $shardExact[$i].Contains($t)
         if (-not $hit) { foreach ($cl in $shardClauses[$i]) { if ($t.Contains($cl)) { $hit = $true; break } } }
-        if ($hit) { ++$hits }
+        # The "&<generated CPU filter>" part of the shard filter removes the generator-excluded tests.
+        if ($hit -and -not $genExcluded.Contains($t)) { ++$hits }
     }
     $want = if ($excludedSet.Contains($t)) { 0 } else { 1 }
     if ($hits -ne $want) { $problems.Add("$t matched by $hits shard(s), expected $want") }
@@ -204,7 +225,7 @@ if ($problems.Count -gt 0) { $problems | Select-Object -First 50 | ForEach-Objec
 } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 $OutFile
 
 "Planned $($included.Count) tests in $($classes.Count) classes ($($unitList.Count) units; split per test: $(if ($splitClasses.Count) { $splitClasses -join ', ' } else { 'none' })) over $Shards shards."
-"Weights: $weighted of $($included.Count) tests measured ($Weights); total $([math]::Round($total)) s. Excluded $($excludedTests.Count) ($($Exclude -join ', '))."
+"Weights: $weighted of $($included.Count) tests measured ($Weights); total $([math]::Round($total)) s. Excluded $($excludedTests.Count) ($($genExcluded.Count) by the generated filter$(if ($Exclude.Count) { ", -Exclude $($Exclude -join ', ')" }))."
 $plan | ForEach-Object { "  shard $($_.index): $($_.classes.Count) classes + $($_.exact.Count) single tests, $($_.tests) tests, weight $($_.weight) s, filter $($_.filter.Length) chars" }
-"Verified: every included test is matched by exactly one shard; no excluded test is matched."
+"Verified: every included test is matched by exactly one shard; no excluded test is matched; shard filters carry the generated CPU filter."
 exit 0
