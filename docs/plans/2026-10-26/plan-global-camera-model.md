@@ -75,3 +75,33 @@ Each consumer uses the model only above its own confidence threshold and otherwi
 3. Module implementation + confidence + diagnostics + tests — ~6–8 h, Opus.
 4. Consumers wired one at a time, each measured and audited — ~1–2 h each.
 5. Chain gate + nightly; defaults decided per consumer from the measurements.
+
+## Planner audit 2026-10-26 — adopted (must-change before phase 3)
+1. The model is a PRIOR and FILLER, never an override: trusted block vectors stay the truth; the model's
+   predicted vector is used for untrusted/low-texture blocks and for camera/object labels. The PREVIOUS
+   frame's model feeds E1 as the global candidate (replacing D1's search when confident), SAD-verified —
+   no same-frame model↔vectors loop.
+2. Exclude static-by-construction areas before fitting: the black-bar rectangle, blanked edges and the
+   text-guard tiles (burned-in text, logos, credits). A dominant zero-motion cluster during a confident pan
+   = overlay label, not camera; rolling credits over a static picture are not camera motion.
+3. Parameters in SOURCE active-picture coordinates, per SOURCE-FRAME pair (after cadence detection), per
+   unit time (pulldown and MINOR slips don't change them). Output-space consumers map per pixel through
+   crop/re-base/NLS; never map the homography through NLS.
+4. Intermediate times: interpolate similarity parameters (log-scale, angle, translation linearly); for
+   affine/homography interpolate the four corner displacements and refit.
+5. Consumers BLEND smoothly by confidence (hysteresis, rate limit), hard fallback only below a floor.
+6. Calibrated confidence: a small logistic model fitted on the corpus predicting "block's model vector
+   within tolerance of the reference" from the six signals + FORWARD/BACKWARD agreement (fits should be
+   inverses); consumer thresholds are probabilities.
+7. Temporal filter only for prediction/consistency, process noise grows with measured motion (handheld,
+   whip pans); warps use the current frame's fit (no lag).
+Should: inlier threshold relative to predicted magnitude (zoom edges); lens distortion/parallax = known
+limits via lower confidence; second-object model deferred past phase 5; RAFT masked by its own fwd/bwd
+consistency on real clips, true geometry on synthetic; decision gate in numbers (global error reduced by a
+stated fraction vs today's D1/NVOF global, ≥1 consumer metric beyond noise, < 1 ms CPU at 4K on the laptop).
+Wiring order: diagnostics only → Stage 8/8b grain map + residual stabilisation → detail pulse/texture
+restore → sigma-delta dither_vectors → trust/occlusion filler → E1 global candidate → de-judder/hiccup
+repair LAST (strictest threshold, hold policy stays). LED/DTM look-ahead dropped unless a concrete use.
+Tests added: static logo over a pan; credits over a static picture; letterbox + pan; zoom edge vectors;
+handheld shake; 3:2 source (no refresh pairs); NLS mapping for output consumers; blend continuity at the
+threshold; forward/backward inverse; run-twice determinism with a fixed IRLS reduction order.
