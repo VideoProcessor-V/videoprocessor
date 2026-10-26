@@ -70,6 +70,12 @@ plan changes.
 - Argyll patch: skip the white-tile check (keep dark calibration) for the i1Display Pro / ES-1000.
 - Offer Bill the registered fixes that help him (standing owner OK; list shown when opened) — AFTER our Bill merge (WP-21).
 
+## Long-term design basis (owner 2026-10-26)
+- Build toward an 8K basis (years away: 8K capture + GPUs able to process it). Keep every module
+  resolution-general now: derived processing size, VRAM-aware pools, nets/shaders with tile + cost gates,
+  motion at reduced resolution (same engine input as 4K), budgets scaling with pixels, synthetic 8K tests.
+  The intent audits check for hidden 4K assumptions; the 8K bypass is a performance fallback only.
+
 ## TrainKit round 3 requests
 A colour branch; B-refine on Stage 8b output (per-axis variants); half-resolution-trunk D and D_small
 (only if quality holds); exporter fields; fp32 by default; D fine-tune after the timing numbers.
