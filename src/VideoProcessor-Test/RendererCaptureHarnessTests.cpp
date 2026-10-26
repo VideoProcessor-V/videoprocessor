@@ -3321,7 +3321,7 @@ namespace Tests
 			{
 				RunResult trims;
 				const std::string trimHash = hashOf("dv_tunnel_gpu_unpack: on\ndv_trims: on\n", L"GPU unpack + dv_trims", trims);
-				Assert::IsTrue(trims.Logged("Dolby Vision trims (non-certified): neutral: no L2 trim"),
+				Assert::IsTrue(trims.Logged("Dolby Vision trims (non-certified): neutral: no L2/L8 trim"),
 					(L"dv_trims: neutral without L2\n" + trims.Tail()).c_str());
 				Assert::AreEqual(cpuHash, trimHash, L"dv_trims without L2: unchanged");
 			}
