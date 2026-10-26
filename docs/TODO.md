@@ -90,6 +90,7 @@ RANSAC-type fit of pan + zoom + rotation to the existing block vectors (inliers 
 objects). Measure first: CPU prototype on recorded vector fields scored against the earlier RAFT reference
 (global-motion error, camera/object separation, cost per frame); integrate in motion.estimation /
 vector_delivery if it wins (slot-gated, Original unchanged, model state visible).
+Plan: docs/plans/2026-10-26/plan-global-camera-model.md.
 
 ## Long-term design basis (owner 2026-10-26)
 - Build toward an 8K basis (years away: 8K capture + GPUs able to process it). Keep every module
