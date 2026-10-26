@@ -85,6 +85,12 @@ HTPC overnight test pack (3090 + Quad, no install) as the step between loop and 
 Full plan: docs/plans/2026-10-26/test-plan-synthetic-loop-shadow.md.
 Kick-off for the week of 2026-10-31: docs/plans/2026-10-26/kickoff-2026-10-31.md.
 
+## Motion: robust global camera model (owner 2026-10-26, high value)
+RANSAC-type fit of pan + zoom + rotation to the existing block vectors (inliers = camera, residuals =
+objects). Measure first: CPU prototype on recorded vector fields scored against the earlier RAFT reference
+(global-motion error, camera/object separation, cost per frame); integrate in motion.estimation /
+vector_delivery if it wins (slot-gated, Original unchanged, model state visible).
+
 ## Long-term design basis (owner 2026-10-26)
 - Build toward an 8K basis (years away: 8K capture + GPUs able to process it). Keep every module
   resolution-general now: derived processing size, VRAM-aware pools, nets/shaders with tile + cost gates,
