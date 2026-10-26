@@ -4416,7 +4416,11 @@ namespace Tests
 					plan.step = [gap](int n) { FrameStep f; f.content = n; f.send = n != gap; return f; };
 				if (c.forceEvery)
 					SetEnvironmentVariableA("VP_TEST_ENTRANCE_ONCE_FALLBACK_EVERY", std::to_string(c.forceEvery).c_str());
-				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", c.gap ? 8.5 : 7.0, c.film, c.extra, false, &plan);
+				// Diagnostic A/B (2026-10-26): VP_TEST_EO_UPLOAD = render | early pins capture_upload for every
+				// case (prepended, so it stays in the renderer section before the [vpv] lines).
+				const std::string upload = RealClip::Env("VP_TEST_EO_UPLOAD");
+				const std::string extra = upload.empty() ? c.extra : "capture_upload: " + upload + "\n" + c.extra;
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", c.gap ? 8.5 : 7.0, c.film, extra, false, &plan);
 				if (c.forceEvery)
 					SetEnvironmentVariableA("VP_TEST_ENTRANCE_ONCE_FALLBACK_EVERY", nullptr);
 				const EntranceOnceCounters k = ReadEntranceOnce(r);
