@@ -70,6 +70,10 @@ plan changes.
 - Argyll patch: skip the white-tile check (keep dark calibration) for the i1Display Pro / ES-1000.
 - Offer Bill the registered fixes that help him (standing owner OK; list shown when opened) — AFTER our Bill merge (WP-21).
 
+## Planner design notes (2026-10-26)
+- HDR10+ / VP dynamic tone mapping design, Argyll no-tile patch plan, test-suite tiers (per merge / nightly /
+  WP-20): docs/plans/2026-10-26/planner-notes-pack3.md.
+
 ## Long-term design basis (owner 2026-10-26)
 - Build toward an 8K basis (years away: 8K capture + GPUs able to process it). Keep every module
   resolution-general now: derived processing size, VRAM-aware pools, nets/shaders with tile + cost gates,
