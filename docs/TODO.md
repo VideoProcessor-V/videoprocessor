@@ -14,6 +14,9 @@ plan changes.
   `feat/test-filters-wiring`.
 
 ## Standing rules
+- VP-V is a parallel add-on (owner told Bill 2026-10-26): Bill's code carries only generic hooks that are inert
+  when VP-V is absent. Test: Bill's tree + hooks-only patch, without VP-V modules → builds and behaves
+  byte-identically to Bill (part of the final Bill-code gate).
 - Audit before every verification build and every merge; cheaper-model drafts get an Opus audit.
 - Bill's code: every behaviour change must be a PR-worthy bug fix (registered), or an either/or with the
   Original pathway = Bill's behaviour, or it reverts. Host = call sites only; Bill's files never moved.
