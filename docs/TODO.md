@@ -60,6 +60,16 @@ plan changes.
 - Owner measurements (when at the cinema PC; none blocks): LED/CNTR step response (Slo-Mo), no-tile Argyll
   patch, screen-white, Stage 3 ramp test.
 
+## Near-term additions (owner 2026-10-26)
+- HDR10+ (SMPTE ST 2094-40): full parse + per-scene curve and target-display selection on the DV trim
+  framework (metadata hold, scene descriptor, Dolby-style curve, trim selection); synthetic fixtures from
+  the published spec. Delivery: check a newer DeckLink SDK for dynamic HDR metadata; ready for file
+  playback / other capture paths. Fallback when no metadata: VP dynamic tone mapping from the frame
+  analysis store (either/or with libplacebo peak detection and static; Original = Bill).
+- First deploy (M1) after the Bill merge (WP-21) and after the DeckLink Mini Recorder bench tests.
+- Argyll patch: skip the white-tile check (keep dark calibration) for the i1Display Pro / ES-1000.
+- Offer Bill the registered fixes that help him now (each PR only with the owner's approval).
+
 ## TrainKit round 3 requests
 A colour branch; B-refine on Stage 8b output (per-axis variants); half-resolution-trunk D and D_small
 (only if quality holds); exporter fields; fp32 by default; D fine-tune after the timing numbers.
