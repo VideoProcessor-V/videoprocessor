@@ -113,7 +113,7 @@ model on/off, motion engine version) → a mismatch bypasses the net visibly; th
 without the model; wire the model into Stage 8 BEFORE the round-3 D (and B-refine) training so the nets
 train on their final input.
 
-## Refinements to measure after the first build (owner questions 2026-10-27)
+## Refinements — IN THE FIRST BUILD (owner 2026-10-27: include all projected-beneficial parts now; goal = motion engine usable for sports at 60p/low queue; a small accuracy cost is acceptable for large efficiency gains, each saving with escalation/fallback, its own switch, and measured quality-vs-time per content type)
 - Cuts with look-ahead: skip the matcher on the pair across a cut (its vectors are discarded by the reset);
   seed the new scene's model from the first post-cut pair already in the queue (no zero-confidence ramp).
 - Fades: geometry is unchanged — when a fade is flagged ahead, match with brightness-normalised costs
@@ -121,4 +121,4 @@ train on their final input.
 - Flashes: treat the flash frame as an outlier; bridge the model from the frames either side.
 - Independent motion: a per-block temporal seed (the block's previous vector) → narrow window when it agrees
   with the NVOF seed, escalating on failure, so moving objects get the saving too; sequential RANSAC for
-  1-3 coherent object models and persistent object labels only if the corpus shows a gain.
+  1-3 coherent object models and persistent object labels (in the first build; switch-gated, measured).
