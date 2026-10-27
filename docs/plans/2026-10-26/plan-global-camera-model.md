@@ -112,3 +112,13 @@ on 8b) were trained on. Rules: the nets' fingerprints include the grain-map/moti
 model on/off, motion engine version) → a mismatch bypasses the net visibly; the study measures D with and
 without the model; wire the model into Stage 8 BEFORE the round-3 D (and B-refine) training so the nets
 train on their final input.
+
+## Refinements to measure after the first build (owner questions 2026-10-27)
+- Cuts with look-ahead: skip the matcher on the pair across a cut (its vectors are discarded by the reset);
+  seed the new scene's model from the first post-cut pair already in the queue (no zero-confidence ramp).
+- Fades: geometry is unchanged — when a fade is flagged ahead, match with brightness-normalised costs
+  (zero-mean SAD / NCC, gain-offset compensation) and keep the camera fit valid through the fade.
+- Flashes: treat the flash frame as an outlier; bridge the model from the frames either side.
+- Independent motion: a per-block temporal seed (the block's previous vector) → narrow window when it agrees
+  with the NVOF seed, escalating on failure, so moving objects get the saving too; sequential RANSAC for
+  1-3 coherent object models and persistent object labels only if the corpus shows a gain.
