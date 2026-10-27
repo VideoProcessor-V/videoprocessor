@@ -67,6 +67,10 @@ output mode). 4K50/60 and DV output go to the HTPC step.
    (1080↔4K↔720, H-only and V-only upscales, anamorphic, native↔upscaled, letterbox changes altering the active
    area) — checked against the per-axis re-base stamp: only the changed axis re-latches and crossfades, per-axis
    caches reset, no false re-base on native, motion reset only on geometry change, A-lens/NLS/aspect correct.
+   Crossfades must be minimally noticeable: per-frame change of detail (high-band energy) and mean luminance
+   through the crossfade within the surrounding content's natural frame-to-frame variation (no pop, no visible
+   step), no ghosting/double image, bounded duration; switch aligned to a nearby scene cut when the queue sees
+   one; a few judged by the owner on the FL35 during the shadow phase.
    Test reels: segments long enough for each latch to settle and be observed (detection + latch time, crossfade,
    motion/camera-model warm-up, cadence lock, DTM adaptation) — ≥ 30-60 s per segment; minutes-long segments and
    30+ min continuous runs for drift and soak; reels spliced from the masters/deliveries (short sources looped
