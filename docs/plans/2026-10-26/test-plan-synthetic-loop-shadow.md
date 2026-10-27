@@ -59,7 +59,11 @@ output mode). 4K50/60 and DV output go to the HTPC step.
    Competitive), motion engine / camera model, deband, scalers/blend, dither, LED log-only, profile rules —
    each: no crash or stutter beyond the documented re-init, the effect visible in the capture, a clean return
    when switched off (byte-identical to never-on where that rule applies), status shown.
-3. Then the Apple TV → Integral 2 → capture input tests (2.1-2.10).
+3. HDMI resyncs during real playback: output mode/refresh changes from the laptop (resolution, 59.94↔60,
+   24/30/60, SDR↔HDR, 4:2:2↔RGB / bit depth where the adapter allows), cable unplug/replug, capture re-lock,
+   EDID re-read — each checked against the unified resync event (FULL stamp, clock re-latch, all resets, no
+   inherited state, recovery time within budget, visible reason).
+4. Then the Apple TV → Integral 2 → capture input tests (2.1-2.10).
 
 ## Phase 2b — HTPC overnight test pack (optional, before shadow; RTX 3090 + DeckLink Quad; nothing installed, madVR untouched)
 
