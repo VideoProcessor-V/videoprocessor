@@ -52,6 +52,15 @@ output mode). 4K50/60 and DV output go to the HTPC step.
 | 2.9 | Soak live: overnight loop on a looping source | as 1.15, plus capture/display clock drift behaviour (1.6) on real clocks |
 | 2.10 | Desktop interference: notifications, focus changes, Windows HDR toggle, another app using the GPU | recovers; visible notices |
 
+### Phase 2 order and content (owner 2026-10-27)
+1. Output loop first: laptop HDMI out → Mini Recorder (Ugreen), patterns AND real video (masters, deliveries,
+   sports clips) captured back and compared; 1080p60 and 4K30.
+2. On-the-fly toggles during real playback in every loop: slot on/off, presets (queue depth incl. Sports/
+   Competitive), motion engine / camera model, deband, scalers/blend, dither, LED log-only, profile rules —
+   each: no crash or stutter beyond the documented re-init, the effect visible in the capture, a clean return
+   when switched off (byte-identical to never-on where that rule applies), status shown.
+3. Then the Apple TV → Integral 2 → capture input tests (2.1-2.10).
+
 ## Phase 2b — HTPC overnight test pack (optional, before shadow; RTX 3090 + DeckLink Quad; nothing installed, madVR untouched)
 
 Self-contained zip (VP build + test DLL + portable vstest + scripts + small fixtures), one
