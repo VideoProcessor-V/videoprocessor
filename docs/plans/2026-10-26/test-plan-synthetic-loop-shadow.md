@@ -63,7 +63,11 @@ output mode). 4K50/60 and DV output go to the HTPC step.
    24/30/60, SDR↔HDR, 4:2:2↔RGB / bit depth where the adapter allows), cable unplug/replug, capture re-lock,
    EDID re-read — each checked against the unified resync event (FULL stamp, clock re-latch, all resets, no
    inherited state, recovery time within budget, visible reason).
-4. Then the Apple TV → Integral 2 → capture input tests (2.1-2.10).
+4. Re-base changes during real playback: spliced clips whose source resolution or player kernel changes
+   (1080↔4K↔720, H-only and V-only upscales, anamorphic, native↔upscaled, letterbox changes altering the active
+   area) — checked against the per-axis re-base stamp: only the changed axis re-latches and crossfades, per-axis
+   caches reset, no false re-base on native, motion reset only on geometry change, A-lens/NLS/aspect correct.
+5. Then the Apple TV → Integral 2 → capture input tests (2.1-2.10).
 
 ## Phase 2b — HTPC overnight test pack (optional, before shadow; RTX 3090 + DeckLink Quad; nothing installed, madVR untouched)
 
