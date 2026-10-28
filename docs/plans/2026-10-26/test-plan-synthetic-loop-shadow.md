@@ -75,6 +75,11 @@ output mode). 4K50/60 and DV output go to the HTPC step.
    motion/camera-model warm-up, cadence lock, DTM adaptation) — ≥ 30-60 s per segment; minutes-long segments and
    30+ min continuous runs for drift and soak; reels spliced from the masters/deliveries (short sources looped
    seamlessly) with documented segment boundaries.
+   Streaming quality drops (ABR): reels simulating adaptive-bitrate ladders (4K→1080→720→back, bitrate-only
+   drops, short blips vs sustained drops, switches at segment boundaries not scene cuts): re-base re-latches
+   correctly with hysteresis (no thrash on quick up/down); the stream-quality-drop notice appears once after a
+   sustained drop (transient message + Ctrl+I line + log, suggesting a stream restart) and clears on recovery;
+   no notice for content that is genuinely low-res from the start.
 5. Then the Apple TV → Integral 2 → capture input tests (2.1-2.10).
 
 ## Phase 2b — HTPC overnight test pack (optional, before shadow; RTX 3090 + DeckLink Quad; nothing installed, madVR untouched)
