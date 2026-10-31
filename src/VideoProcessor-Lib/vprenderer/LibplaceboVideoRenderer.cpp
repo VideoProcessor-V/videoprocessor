@@ -7486,6 +7486,7 @@ struct LibplaceboVideoRenderer::Impl
 	VpResync::Drive resyncDrive;
 	VpResync::Drive::Cursor pulldownResyncCursor;
 	uint64_t pulldownResyncSeq = 0;
+	unsigned long long resyncLibplaceboFlushes = 0;   // L1
 	// Dynamic Drive, render side (WP-15): the LED module the outer renderer publishes, the S2 LED
 	// measurement and compensation hooks and their per-frame set-up (DynamicDriveFrame.h).
 	LedDrive::DynamicDriveFrame dynamicDrive{ queuedFrameObserver, fallbacks, GlslHookLoader() };
@@ -13141,6 +13142,24 @@ struct LibplaceboVideoRenderer::Impl
 		motionValidity.Invalidate(cause);
 		frameAnalysis.OnDiscontinuity(static_cast<int>(cause));   // WP-23: the one shared epoch
 	}
+	// L1 (resync_event on, VP pathway only; Original and off/shadow keep Bill's behaviour): on the
+	// frame that carries a FULL resync, before the temporal mixer takes it, libplacebo's frame-mix
+	// textures and detected peak are dropped (pl_renderer_flush_cache: no shader rebuild) with the
+	// retained mix frames, so the old source's peak history does not tone-map the new one.
+	// Render thread, renderMutex held. Divergence register: VP-only.
+	void ApplyResyncLibplaceboFlush(uint64_t sourceSequence)
+	{
+		if ((VpResync::TakeIfDriving(resync, resyncDrive, VpResync::Reader::Libplacebo) & VpIndicator::Bit(VpIndicator::kFull)) == 0 ||
+			!renderer || activeSettings.pipelineOriginalPathway)
+			return;
+		pl_renderer_flush_cache(renderer);
+		temporalRenderer.Clear();   // retained frames borrow the flushed cache (as the DV matrix recycle)
+		++resyncLibplaceboFlushes;
+		if (resyncLibplaceboFlushes <= 20 || (resyncLibplaceboFlushes & (resyncLibplaceboFlushes - 1)) == 0)
+			DebugLog::Log("Resync (on): FULL at source frame %llu - libplacebo frame-mix cache and detected peak flushed (%llu so far)",
+				static_cast<unsigned long long>(sourceSequence), static_cast<unsigned long long>(resyncLibplaceboFlushes));
+	}
+
 	// The render thread's apply point: everything built from vectors of an older
 	// epoch is forgotten (each consumer also checks the epoch it was made in).
 	void ApplyMotionInvalidate()
@@ -30449,6 +30468,7 @@ void LibplaceboVideoRenderer::RenderLoop()
                 // ABI 37: a file frame shown without motion (playback rate != 1, paused)
                 // is not mixed by smooth motion either.
                 if(currentFileMotionOff)motionSettings.smoothMotion="off";
+                m_impl->ApplyResyncLibplaceboFlush(sourceSequence);   // L1 (resync_event on)
                 m_impl->temporalRenderer.Begin(motionSettings,captureRateHz,
                     m_impl->renderLoadDisplayRefreshHz.load(std::memory_order_acquire),
                     state&&state->displayMode&&state->displayMode->IsInterlaced(),
