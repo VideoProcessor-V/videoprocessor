@@ -9,7 +9,7 @@
 // report-a-problem run) is DiagnosticsReportRun.h; both are namespace VpDiagnostics.
 //
 // Hook points (docs/design/wp17-callsites.md lists every host line):
-//   1. env-gated test/debug switches   TestFolderOverride, TestAdapterFromEnvironment
+//   1. env-gated test/debug switches   TestFolderOverride, TestAdapterFromEnvironment, D3D11DebugFromEnvironment
 //   2. capture requested               DvSceneMinFields (rendered-output capture sidecar),
 //                                      RenderedFrameCaptures::Invoke (a capture command)
 //   3. frame rendered                  RecordPresented, RecordDejudderHold, RecordCadenceRepeat,
@@ -89,6 +89,22 @@ namespace VpDiagnostics
 			return false;
 		path.assign(value, length);
 		return true;
+	}
+
+	// VP_D3D11_DEBUG=1 asks for the D3D11 debug layer on libplacebo's device (needs the Windows
+	// Graphics Tools feature). Only the exact text "1" enables it; unset leaves device creation as is.
+	inline bool D3D11DebugRequested(const char* value)
+	{
+		return value != nullptr && std::strcmp(value, "1") == 0;
+	}
+
+	inline bool D3D11DebugFromEnvironment()
+	{
+		char* v = nullptr;
+		size_t n = 0;
+		const bool on = _dupenv_s(&v, &n, "VP_D3D11_DEBUG") == 0 && D3D11DebugRequested(v);
+		free(v);
+		return on;
 	}
 
 	// VP_TEST_ADAPTER=<text> picks the GPU whose description contains it (e.g. Intel, the laptop

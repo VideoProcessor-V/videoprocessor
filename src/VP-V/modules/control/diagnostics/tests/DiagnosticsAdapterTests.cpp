@@ -450,6 +450,24 @@ namespace VideoProcessorTest
 			}
 		}
 
+		TEST_METHOD(D3D11DebugOnlyExactlyOne)
+		{
+			Assert::IsFalse(VpDiagnostics::D3D11DebugRequested(nullptr));
+			Assert::IsFalse(VpDiagnostics::D3D11DebugRequested(""));
+			Assert::IsFalse(VpDiagnostics::D3D11DebugRequested("0"));
+			Assert::IsFalse(VpDiagnostics::D3D11DebugRequested("11"));
+			Assert::IsFalse(VpDiagnostics::D3D11DebugRequested(" 1"));
+			Assert::IsFalse(VpDiagnostics::D3D11DebugRequested("true"));
+			Assert::IsTrue(VpDiagnostics::D3D11DebugRequested("1"));
+			const EnvRestore restore("VP_D3D11_DEBUG");
+			SetEnvironmentVariableA("VP_D3D11_DEBUG", nullptr);
+			Assert::IsFalse(VpDiagnostics::D3D11DebugFromEnvironment());
+			SetEnvironmentVariableA("VP_D3D11_DEBUG", "1");
+			Assert::IsTrue(VpDiagnostics::D3D11DebugFromEnvironment());
+			SetEnvironmentVariableA("VP_D3D11_DEBUG", "2");
+			Assert::IsFalse(VpDiagnostics::D3D11DebugFromEnvironment());
+		}
+
 		TEST_METHOD(TestAdapterUnsetLeavesLibplacebosChoice)
 		{
 			const EnvRestore restore("VP_TEST_ADAPTER");

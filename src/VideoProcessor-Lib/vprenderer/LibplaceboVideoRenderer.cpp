@@ -11276,6 +11276,7 @@ struct LibplaceboVideoRenderer::Impl
 		VpDiagnostics::TestAdapterFromEnvironment(&testAdapter);
 		if (testAdapter)
 			deviceParams.adapter = testAdapter;
+		if (VpDiagnostics::D3D11DebugFromEnvironment()) deviceParams.debug = true;
 		d3d11 = pl_d3d11_create(log, &deviceParams);
 		if (!d3d11)
 			throw std::runtime_error("Failed to create libplacebo D3D11 device");
@@ -11288,12 +11289,13 @@ struct LibplaceboVideoRenderer::Impl
 				"Paired libplacebo timing comparison API is unavailable");
 		}
 		DebugLog::Log(
-			"libplacebo D3D11 device: feature_level=0x%04X software=%d allow_software=%d no_compute=%d max_frame_latency=%d internal_pass_timers=alternating",
+			"libplacebo D3D11 device: feature_level=0x%04X software=%d allow_software=%d no_compute=%d max_frame_latency=%d debug=%d internal_pass_timers=alternating",
 			static_cast<unsigned int>(d3d11->device->GetFeatureLevel()),
 			d3d11->software ? 1 : 0,
 			deviceParams.allow_software ? 1 : 0,
 			deviceParams.no_compute ? 1 : 0,
-			deviceParams.max_frame_latency);
+			deviceParams.max_frame_latency,
+			deviceParams.debug ? 1 : 0);
 		d3d11->device->GetImmediateContext(&renderTimingContext);
 		const bool gpuFrameTimingAvailable = renderTimingContext &&
 			gpuFrameTimer.Initialize(d3d11->device);
