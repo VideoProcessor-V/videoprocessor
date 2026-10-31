@@ -268,7 +268,9 @@
         "frame_analysis_store"
       ],
       "planned_keys": [
-        "label_detector"
+        "label_detector",
+        "source_id_abr_notice",
+        "source_id_consensus"
       ],
       "tiers": "not tiered; label-detector net optional",
       "fallback": {

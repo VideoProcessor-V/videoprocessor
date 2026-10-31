@@ -1,5 +1,7 @@
 # Source analysis (`input.source_analysis`)
 
+Sub-module: [identity/](identity/README.md) (source-ID consensus, ABR step detector, quality-drop notice; header-only, not wired).
+
 Unit: **input** | side: input | order: 40 | status: **partial** | hook point: host
 
 ## Purpose / why
