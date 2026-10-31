@@ -1,0 +1,186 @@
+<!-- Copyright(C) 2026 VP-V contributors -->
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+
+# Prototype summary: mosquito family, default `repair_none`
+
+Suite `proto_mosquito`. Key metrics per case; flags are the harness verdicts vs the default (full rows in `<candidate>.md`).
+
+## Means over cases
+
+| metric | default | mosquito_mc | mosquito_spatial | mosquito_naive_mc |
+|---|---|---|---|---|
+| ringing_energy_ratio_Y | 1 | 0.975648 | 0.998018 | 0.96581 |
+| psnr_band_Y | 37.2302 | 37.2687 | 37.2317 | 37.2745 |
+| psnr_Y | 40.2511 | 40.2547 | 40.2513 | 40.255 |
+| ssim_Y | 0.934023 | 0.934057 | 0.934024 | 0.93406 |
+| lpips | NA | NA | NA | NA |
+| halo_overshoot_Y | 8.21182e-05 | 8.12922e-05 | 8.20434e-05 | 8.11601e-05 |
+| edge_keep_vs_input_Y | 1 | 0.998502 | 1.00005 | 0.998437 |
+| grain_keep_vs_input_Y | 1 | 0.999183 | 0.999994 | 0.999037 |
+| grain_lag1_vs_input_Y | 0 | 1.73421e-05 | -5.60866e-07 | 2.61836e-05 |
+| grain_hf_ratio_Y | 0.986708 | 0.98623 | 0.986709 | 0.986116 |
+| grain_rms_ratio_Y | 0.395871 | 0.395298 | 0.395867 | 0.395193 |
+| ghost_coeff_Y | 0.123581 | 0.123852 | 0.123577 | 0.123879 |
+| smear_Y | 0.695465 | 0.69349 | 0.695467 | 0.693351 |
+| flicker_excess_Y | 0.0662489 | 0.0635082 | 0.0662499 | 0.0632163 |
+| btb_kept_vs_input_Y | NA | NA | NA | NA |
+| wtw_kept_vs_input_Y | 1 | 1 | 1 | 1 |
+| cost_ms_per_frame_pyref | 0.00528333 | 2776.25 | 1656.2 | 1894.81 |
+
+## Per case
+
+| content_type | clip | case | metric | default | mosquito_mc | mosquito_spatial | mosquito_naive_mc | flags |
+|---|---|---|---|---|---|---|---|---|
+| sports50_60 | Bosphorus | native_x264_crf28 | psnr_Y | 38.085 | 38.0927 | 38.085 | 38.0932 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Bosphorus | native_x264_crf28 | ssim_Y | 0.932067 | 0.932123 | 0.932068 | 0.932127 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Bosphorus | native_x264_crf28 | lpips | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| sports50_60 | Bosphorus | native_x264_crf28 | grain_rms_ratio_Y | 0.225393 | 0.225393 | 0.225393 | 0.225393 | mosquito_mc:LIMIT mosquito_spatial:LIMIT mosquito_naive_mc:LIMIT |
+| sports50_60 | Bosphorus | native_x264_crf28 | grain_hf_ratio_Y | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| sports50_60 | Bosphorus | native_x264_crf28 | grain_keep_vs_input_Y | 1 | 1 | 1 | 1 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Bosphorus | native_x264_crf28 | grain_lag1_vs_input_Y | 0 | 0 | 0 | 0 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Bosphorus | native_x264_crf28 | btb_kept_vs_input_Y | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| sports50_60 | Bosphorus | native_x264_crf28 | wtw_kept_vs_input_Y | 1 | 1 | 1 | 1 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Bosphorus | native_x264_crf28 | flicker_excess_Y | 0.343094 | 0.337086 | 0.343113 | 0.337602 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Bosphorus | native_x264_crf28 | ghost_coeff_Y | 0.214583 | 0.214664 | 0.214582 | 0.214665 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Bosphorus | native_x264_crf28 | smear_Y | 0.692724 | 0.691544 | 0.692739 | 0.69151 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Bosphorus | native_x264_crf28 | halo_overshoot_Y | 3.32458e-05 | 3.28547e-05 | 3.32326e-05 | 3.28373e-05 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Bosphorus | native_x264_crf28 | ringing_energy_ratio_Y | 1 | 0.95459 | 0.9995 | 0.952227 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| sports50_60 | Bosphorus | native_x264_crf28 | psnr_band_Y | 35.2985 | 35.3706 | 35.2991 | 35.3744 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Bosphorus | native_x264_crf28 | edge_keep_vs_input_Y | 1 | 0.999494 | 1.00003 | 0.999506 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| sports50_60 | Bosphorus | native_x264_crf28 | cost_ms_per_frame_pyref | 0.00455 | 2329.33 | 1623.39 | 1619.52 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| sports50_60 | ShakeNDry | native_x265_crf32 | psnr_Y | 33.9916 | 33.9917 | 33.9916 | 33.9917 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | ShakeNDry | native_x265_crf32 | ssim_Y | 0.846727 | 0.846728 | 0.846727 | 0.846728 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | ShakeNDry | native_x265_crf32 | lpips | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| sports50_60 | ShakeNDry | native_x265_crf32 | grain_rms_ratio_Y | 0.245633 | 0.245633 | 0.245633 | 0.245633 | mosquito_mc:LIMIT mosquito_spatial:LIMIT mosquito_naive_mc:LIMIT |
+| sports50_60 | ShakeNDry | native_x265_crf32 | grain_hf_ratio_Y | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| sports50_60 | ShakeNDry | native_x265_crf32 | grain_keep_vs_input_Y | 1 | 1 | 1 | 1 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | ShakeNDry | native_x265_crf32 | grain_lag1_vs_input_Y | 0 | 0 | 0 | 0 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | ShakeNDry | native_x265_crf32 | btb_kept_vs_input_Y | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| sports50_60 | ShakeNDry | native_x265_crf32 | wtw_kept_vs_input_Y | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| sports50_60 | ShakeNDry | native_x265_crf32 | flicker_excess_Y | 0.177958 | 0.177916 | 0.177958 | 0.177914 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | ShakeNDry | native_x265_crf32 | ghost_coeff_Y | 0.252882 | 0.252882 | 0.252882 | 0.252882 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | ShakeNDry | native_x265_crf32 | smear_Y | 0.316016 | 0.31601 | 0.316016 | 0.31601 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | ShakeNDry | native_x265_crf32 | halo_overshoot_Y | 0.000164828 | 0.000164813 | 0.000164828 | 0.000164812 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | ShakeNDry | native_x265_crf32 | ringing_energy_ratio_Y | 1 | 1.00013 | 1.00004 | 1.00015 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| sports50_60 | ShakeNDry | native_x265_crf32 | psnr_band_Y | 28.0034 | 28.0034 | 28.0033 | 28.0034 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | ShakeNDry | native_x265_crf32 | edge_keep_vs_input_Y | 1 | 1 | 1 | 1 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| sports50_60 | ShakeNDry | native_x265_crf32 | cost_ms_per_frame_pyref | 0.0042 | 2200.53 | 1552.14 | 1575.18 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| sports50_60 | Jockey | native_x265_crf32 | psnr_Y | 38.2716 | 38.2727 | 38.2717 | 38.2728 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Jockey | native_x265_crf32 | ssim_Y | 0.922317 | 0.922325 | 0.922317 | 0.922328 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Jockey | native_x265_crf32 | lpips | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| sports50_60 | Jockey | native_x265_crf32 | grain_rms_ratio_Y | 0.115777 | 0.115777 | 0.115777 | 0.115777 | mosquito_mc:LIMIT mosquito_spatial:LIMIT mosquito_naive_mc:LIMIT |
+| sports50_60 | Jockey | native_x265_crf32 | grain_hf_ratio_Y | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| sports50_60 | Jockey | native_x265_crf32 | grain_keep_vs_input_Y | 1 | 1 | 1 | 1 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Jockey | native_x265_crf32 | grain_lag1_vs_input_Y | 0 | 0 | 0 | 0 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Jockey | native_x265_crf32 | btb_kept_vs_input_Y | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| sports50_60 | Jockey | native_x265_crf32 | wtw_kept_vs_input_Y | 1 | 1 | 1 | 1 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Jockey | native_x265_crf32 | flicker_excess_Y | -0.00487077 | -0.00487494 | -0.00487084 | -0.00487504 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Jockey | native_x265_crf32 | ghost_coeff_Y | 0.0154427 | 0.0154614 | 0.0154417 | 0.0154624 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Jockey | native_x265_crf32 | smear_Y | 0.612221 | 0.611942 | 0.612229 | 0.611928 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Jockey | native_x265_crf32 | halo_overshoot_Y | 1.40403e-05 | 1.39161e-05 | 1.4026e-05 | 1.3901e-05 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Jockey | native_x265_crf32 | ringing_energy_ratio_Y | 1 | 0.994671 | 0.999613 | 0.992544 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| sports50_60 | Jockey | native_x265_crf32 | psnr_band_Y | 36.2829 | 36.2997 | 36.2842 | 36.3028 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Jockey | native_x265_crf32 | edge_keep_vs_input_Y | 1 | 0.999143 | 1.00004 | 0.999096 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| sports50_60 | Jockey | native_x265_crf32 | cost_ms_per_frame_pyref | 0.00825 | 2288.8 | 1566.29 | 1580.18 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | psnr_Y | 40.5978 | 40.6046 | 40.5982 | 40.6066 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | ssim_Y | 0.946944 | 0.946984 | 0.946946 | 0.946999 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | lpips | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | grain_rms_ratio_Y | 0.603347 | 0.603347 | 0.603347 | 0.603347 | mosquito_mc:LIMIT mosquito_spatial:LIMIT mosquito_naive_mc:LIMIT |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | grain_hf_ratio_Y | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | grain_keep_vs_input_Y | 1 | 1 | 1 | 1 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | grain_lag1_vs_input_Y | 0 | 0 | 0 | 0 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | btb_kept_vs_input_Y | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | wtw_kept_vs_input_Y | 1 | 1 | 1 | 1 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | flicker_excess_Y | 0.255071 | 0.242766 | 0.25505 | 0.240251 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | ghost_coeff_Y | 0.151758 | 0.152113 | 0.151748 | 0.152141 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | smear_Y | 0.807639 | 0.806132 | 0.807707 | 0.805878 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | halo_overshoot_Y | 2.46664e-05 | 2.41607e-05 | 2.45694e-05 | 2.39545e-05 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | ringing_energy_ratio_Y | 1 | 0.950938 | 0.9964 | 0.921732 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | psnr_band_Y | 39.2097 | 39.3353 | 39.2161 | 39.3734 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | edge_keep_vs_input_Y | 1 | 0.99892 | 1.00027 | 0.998828 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | cost_ms_per_frame_pyref | 0.00795 | 2189.71 | 1522.58 | 1495.95 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| film24 | tos4k | x265_2160p_6000k_w2400 | psnr_Y | 37.8682 | 37.8727 | 37.8687 | 37.8728 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | x265_2160p_6000k_w2400 | ssim_Y | 0.941934 | 0.941971 | 0.94194 | 0.941974 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | x265_2160p_6000k_w2400 | lpips | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| film24 | tos4k | x265_2160p_6000k_w2400 | grain_rms_ratio_Y | 0.801284 | 0.797744 | 0.801254 | 0.797037 | mosquito_mc:LIMIT mosquito_spatial:LIMIT mosquito_naive_mc:LIMIT |
+| film24 | tos4k | x265_2160p_6000k_w2400 | grain_hf_ratio_Y | 1.02844 | 1.02687 | 1.02843 | 1.02636 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | x265_2160p_6000k_w2400 | grain_keep_vs_input_Y | 1 | 0.995581 | 0.999961 | 0.9947 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | x265_2160p_6000k_w2400 | grain_lag1_vs_input_Y | 0 | 8.46922e-05 | -3.53288e-06 | 0.000132073 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | x265_2160p_6000k_w2400 | btb_kept_vs_input_Y | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| film24 | tos4k | x265_2160p_6000k_w2400 | wtw_kept_vs_input_Y | 1 | 1 | 1 | 1 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | x265_2160p_6000k_w2400 | flicker_excess_Y | -0.0480265 | -0.0496693 | -0.0480316 | -0.0497369 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | x265_2160p_6000k_w2400 | ghost_coeff_Y | 0.0749679 | 0.0756414 | 0.0749788 | 0.0756768 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | x265_2160p_6000k_w2400 | smear_Y | 0.735623 | 0.731343 | 0.735559 | 0.731129 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | x265_2160p_6000k_w2400 | halo_overshoot_Y | 0.000136667 | 0.000134452 | 0.000136367 | 0.000134107 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | x265_2160p_6000k_w2400 | ringing_energy_ratio_Y | 1 | 0.949025 | 0.992026 | 0.930316 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| film24 | tos4k | x265_2160p_6000k_w2400 | psnr_band_Y | 35.7173 | 35.7514 | 35.7191 | 35.7531 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | x265_2160p_6000k_w2400 | edge_keep_vs_input_Y | 1 | 0.99704 | 0.99999 | 0.996939 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| film24 | tos4k | x265_2160p_6000k_w2400 | cost_ms_per_frame_pyref | 0.0081 | 2867.94 | 1609.62 | 1806.53 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| film24 | sintel4k | svtav1_2160p_6000k_w1200 | psnr_Y | 52.0852 | 52.0834 | 52.0851 | 52.0828 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | sintel4k | svtav1_2160p_6000k_w1200 | ssim_Y | 0.996568 | 0.996568 | 0.996568 | 0.996568 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | sintel4k | svtav1_2160p_6000k_w1200 | lpips | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| film24 | sintel4k | svtav1_2160p_6000k_w1200 | grain_rms_ratio_Y | 0.318042 | 0.318042 | 0.318042 | 0.318042 | mosquito_mc:LIMIT mosquito_spatial:LIMIT mosquito_naive_mc:LIMIT |
+| film24 | sintel4k | svtav1_2160p_6000k_w1200 | grain_hf_ratio_Y | 0.849859 | 0.849859 | 0.849859 | 0.849859 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | sintel4k | svtav1_2160p_6000k_w1200 | grain_keep_vs_input_Y | 1 | 1 | 1 | 1 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | sintel4k | svtav1_2160p_6000k_w1200 | grain_lag1_vs_input_Y | 0 | 0 | 0 | 0 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | sintel4k | svtav1_2160p_6000k_w1200 | btb_kept_vs_input_Y | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| film24 | sintel4k | svtav1_2160p_6000k_w1200 | wtw_kept_vs_input_Y | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| film24 | sintel4k | svtav1_2160p_6000k_w1200 | flicker_excess_Y | 0.00895573 | 0.00809072 | 0.0089592 | 0.00787081 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | sintel4k | svtav1_2160p_6000k_w1200 | ghost_coeff_Y | 0.00252922 | 0.00242732 | 0.00250502 | 0.00240779 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | sintel4k | svtav1_2160p_6000k_w1200 | smear_Y | 0.953912 | 0.953739 | 0.953897 | 0.95369 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | sintel4k | svtav1_2160p_6000k_w1200 | halo_overshoot_Y | 1.21607e-05 | 1.18825e-05 | 1.20986e-05 | 1.17052e-05 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | sintel4k | svtav1_2160p_6000k_w1200 | ringing_energy_ratio_Y | 1 | 1.01986 | 0.999948 | 1.02328 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| film24 | sintel4k | svtav1_2160p_6000k_w1200 | psnr_band_Y | 47.9986 | 47.9244 | 47.996 | 47.9027 | mosquito_mc:FLAG mosquito_spatial:PASS mosquito_naive_mc:FLAG |
+| film24 | sintel4k | svtav1_2160p_6000k_w1200 | edge_keep_vs_input_Y | 1 | 1.0004 | 1.00002 | 1.00049 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| film24 | sintel4k | svtav1_2160p_6000k_w1200 | cost_ms_per_frame_pyref | 0.00385 | 2862.33 | 1578.18 | 1791.27 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| film24 | breathing | enc32_12f | psnr_Y | 38.9044 | 38.9089 | 38.9044 | 38.909 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | breathing | enc32_12f | ssim_Y | 0.937418 | 0.937456 | 0.937419 | 0.937457 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | breathing | enc32_12f | lpips | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| film24 | breathing | enc32_12f | grain_rms_ratio_Y | 0.381719 | 0.381719 | 0.381719 | 0.381719 | mosquito_mc:LIMIT mosquito_spatial:LIMIT mosquito_naive_mc:LIMIT |
+| film24 | breathing | enc32_12f | grain_hf_ratio_Y | 0.881974 | 0.881974 | 0.881974 | 0.881974 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | breathing | enc32_12f | grain_keep_vs_input_Y | 1 | 1 | 1 | 1 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | breathing | enc32_12f | grain_lag1_vs_input_Y | 0 | 0 | 0 | 0 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | breathing | enc32_12f | btb_kept_vs_input_Y | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| film24 | breathing | enc32_12f | wtw_kept_vs_input_Y | 1 | 1 | 1 | 1 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | breathing | enc32_12f | flicker_excess_Y | -0.126336 | -0.126107 | -0.126331 | -0.126124 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | breathing | enc32_12f | ghost_coeff_Y | 0.154427 | 0.15478 | 0.154425 | 0.154781 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | breathing | enc32_12f | smear_Y | 0.74558 | 0.742999 | 0.745592 | 0.742988 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | breathing | enc32_12f | halo_overshoot_Y | 3.81693e-05 | 3.74851e-05 | 3.81446e-05 | 3.7456e-05 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | breathing | enc32_12f | ringing_energy_ratio_Y | 1 | 0.952493 | 0.998897 | 0.948081 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| film24 | breathing | enc32_12f | psnr_band_Y | 36.9593 | 37.0235 | 36.9602 | 37.0249 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | breathing | enc32_12f | edge_keep_vs_input_Y | 1 | 0.997071 | 1.00003 | 0.997071 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| film24 | breathing | enc32_12f | cost_ms_per_frame_pyref | 0.0036 | 4675.56 | 2350.39 | 3007.8 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| dark | meridian4k | x265_2160p_6000k_w1800 | psnr_Y | 48.277 | 48.2786 | 48.2771 | 48.2791 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| dark | meridian4k | x265_2160p_6000k_w1800 | ssim_Y | 0.989348 | 0.98935 | 0.989348 | 0.989351 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| dark | meridian4k | x265_2160p_6000k_w1800 | lpips | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| dark | meridian4k | x265_2160p_6000k_w1800 | grain_rms_ratio_Y | 0.319742 | 0.319742 | 0.319742 | 0.319742 | mosquito_mc:LIMIT mosquito_spatial:LIMIT mosquito_naive_mc:LIMIT |
+| dark | meridian4k | x265_2160p_6000k_w1800 | grain_hf_ratio_Y | 1.2542 | 1.2542 | 1.2542 | 1.2542 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| dark | meridian4k | x265_2160p_6000k_w1800 | grain_keep_vs_input_Y | 1 | 1 | 1 | 1 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| dark | meridian4k | x265_2160p_6000k_w1800 | grain_lag1_vs_input_Y | 0 | 0 | 0 | 0 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| dark | meridian4k | x265_2160p_6000k_w1800 | btb_kept_vs_input_Y | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| dark | meridian4k | x265_2160p_6000k_w1800 | wtw_kept_vs_input_Y | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| dark | meridian4k | x265_2160p_6000k_w1800 | flicker_excess_Y | -0.0541334 | -0.0567687 | -0.0541323 | -0.0570266 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| dark | meridian4k | x265_2160p_6000k_w1800 | ghost_coeff_Y | 0.0809106 | 0.0815418 | 0.0808975 | 0.0816875 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| dark | meridian4k | x265_2160p_6000k_w1800 | smear_Y | 0.831391 | 0.826609 | 0.831408 | 0.826169 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| dark | meridian4k | x265_2160p_6000k_w1800 | halo_overshoot_Y | 1.9809e-05 | 1.93971e-05 | 1.97781e-05 | 1.92841e-05 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| dark | meridian4k | x265_2160p_6000k_w1800 | ringing_energy_ratio_Y | 1 | 0.997566 | 0.998023 | 0.977172 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| dark | meridian4k | x265_2160p_6000k_w1800 | psnr_band_Y | 43.832 | 43.9149 | 43.8365 | 43.9394 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| dark | meridian4k | x265_2160p_6000k_w1800 | edge_keep_vs_input_Y | 1 | 0.997239 | 1.00009 | 0.997067 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| dark | meridian4k | x265_2160p_6000k_w1800 | cost_ms_per_frame_pyref | 0.0037 | 2920.55 | 1551.42 | 2052.37 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | psnr_Y | 34.1794 | 34.1868 | 34.1796 | 34.1871 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | ssim_Y | 0.892883 | 0.893006 | 0.892886 | 0.893012 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | lpips | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | grain_rms_ratio_Y | 0.551906 | 0.550285 | 0.551896 | 0.550048 | mosquito_mc:LIMIT mosquito_spatial:LIMIT mosquito_naive_mc:LIMIT |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | grain_hf_ratio_Y | 0.919069 | 0.918248 | 0.919084 | 0.918189 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | grain_keep_vs_input_Y | 1 | 0.997062 | 0.999981 | 0.996634 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | grain_lag1_vs_input_Y | 0 | 7.13864e-05 | -1.51491e-06 | 0.000103579 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | btb_kept_vs_input_Y | NA | NA | NA | NA | mosquito_mc:NA mosquito_spatial:NA mosquito_naive_mc:NA |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | wtw_kept_vs_input_Y | 1 | 1 | 1 | 1 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | flicker_excess_Y | 0.0445284 | 0.0431348 | 0.0445344 | 0.0430711 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | ghost_coeff_Y | 0.164726 | 0.16516 | 0.164729 | 0.165204 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | smear_Y | 0.564078 | 0.561095 | 0.564058 | 0.560859 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | halo_overshoot_Y | 0.000295477 | 0.000292669 | 0.000295346 | 0.000292384 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | ringing_energy_ratio_Y | 1 | 0.961557 | 0.997712 | 0.946784 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | psnr_band_Y | 31.7704 | 31.7948 | 31.7708 | 31.7962 | mosquito_mc:PASS mosquito_spatial:PASS mosquito_naive_mc:PASS |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | edge_keep_vs_input_Y | 1 | 0.997213 | 1 | 0.996934 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | cost_ms_per_frame_pyref | 0.00335 | 2651.48 | 1551.83 | 2124.52 | mosquito_mc:INFO mosquito_spatial:INFO mosquito_naive_mc:INFO |

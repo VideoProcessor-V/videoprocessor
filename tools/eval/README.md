@@ -179,6 +179,28 @@ flag counts per metric). `run_log.txt` records versions, candidates and timings.
 2160p window, 1 48-frame breathing GOP clip so temporal / GOP metrics have data). G18 cases have 4
 frames: temporal metrics show NA there by design.
 
+Optional case key `crop` = `{"x","y","w","h"}` (master luma coordinates, multiples of 4) crops master and
+coded frames before the protocol (a half-size coded rung is cropped at the scaled window), so Python
+reference candidates fit the CPU budget.
+
+## Python reference prototypes (chroma, mosquito)
+
+`candidates_chroma.py` (JBU, KrigBilateral-style, chroma-from-luma, motion-vector temporal chroma) and
+`candidates_mosquito.py` (ringing-zone MC repair with grain split and guard, spatial and naive
+variants) are offline Python REFERENCE candidates, not product code. `run_prototypes.py` scores several
+of them against one default in one pass (each case loaded once, default run once:
+`evaluate_suite(cache=..., extra=...)`) and adds family-specific rows (chroma: `psnr_edge_Cb/Cr`,
+`flicker_excess_Cb/Cr`; mosquito: `ringing_energy_ratio_Y`, `psnr_band_Y`, `edge_keep_*`). Suites
+`suites/proto_chroma.json`, `suites/proto_mosquito.json`; committed results in `prototypes/`; findings in
+`findings-chroma-mosquito.md`. The motion candidates use OpenCV DIS flow (`opencv-python-headless`) as a
+documented stand-in for VP's vector engine; their tests skip without OpenCV.
+
+```
+D:\hfr\venv\Scripts\python.exe -I tools/eval/run_prototypes.py --family chroma --suite tools/eval/suites/proto_chroma.json ^
+    --baseline chroma_bicubic --candidates chroma_jbu,chroma_krig,chroma_cfl,chroma_mv,chroma_mv_cfl,chroma_lanczos3 ^
+    --out D:\codex\videoprocessor\eval-scratch\proto-chroma --lpips
+```
+
 ## Candidate list (planned) and the metrics that gate each
 
 | candidate | what it must beat | gating metrics | guards (must not regress) |

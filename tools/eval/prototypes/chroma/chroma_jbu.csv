@@ -1,0 +1,433 @@
+content_type,clip,case,metric,candidate,default,delta,trend,flag,note
+sports50_60,Bosphorus,native_x265_crf26,psnr_Y,41.0019,41.0019,0,same,PASS,
+sports50_60,Bosphorus,native_x265_crf26,psnr_Cb,44.147,43.9154,0.231625,better,PASS,
+sports50_60,Bosphorus,native_x265_crf26,psnr_Cr,43.5138,43.5937,-0.0799522,worse,FLAG,
+sports50_60,Bosphorus,native_x265_crf26,ssim_Y,0.959528,0.959528,0,same,PASS,
+sports50_60,Bosphorus,native_x265_crf26,ssim_Cb,0.975628,0.973853,0.00177492,better,PASS,
+sports50_60,Bosphorus,native_x265_crf26,ssim_Cr,0.974539,0.973357,0.00118125,better,PASS,
+sports50_60,Bosphorus,native_x265_crf26,lpips,0.0494551,0.0464757,0.00297939,worse,FLAG,
+sports50_60,Bosphorus,native_x265_crf26,grain_tiles_Y,16,16,0,NA,INFO,
+sports50_60,Bosphorus,native_x265_crf26,grain_rms_ratio_Y,0.506753,0.506753,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+sports50_60,Bosphorus,native_x265_crf26,grain_hf_ratio_Y,NA,NA,NA,NA,NA,needs >= 8 frames (4 available)
+sports50_60,Bosphorus,native_x265_crf26,grain_lag1_delta_Y,0.215182,0.215182,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+sports50_60,Bosphorus,native_x265_crf26,grain_tiles_Cb,16,16,0,NA,INFO,
+sports50_60,Bosphorus,native_x265_crf26,grain_rms_ratio_Cb,0.0628044,0.124143,-0.0613387,worse,FAIL,default also fails and the candidate is worse
+sports50_60,Bosphorus,native_x265_crf26,grain_hf_ratio_Cb,NA,NA,NA,NA,NA,needs >= 8 frames (4 available)
+sports50_60,Bosphorus,native_x265_crf26,grain_lag1_delta_Cb,0.33698,0.259766,0.0772141,worse,FAIL,default also fails and the candidate is worse
+sports50_60,Bosphorus,native_x265_crf26,grain_keep_vs_input_Y,1,1,0,same,PASS,
+sports50_60,Bosphorus,native_x265_crf26,grain_lag1_vs_input_Y,0,0,0,same,PASS,
+sports50_60,Bosphorus,native_x265_crf26,grain_keep_vs_input_Cb,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+sports50_60,Bosphorus,native_x265_crf26,grain_lag1_vs_input_Cb,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+sports50_60,Bosphorus,native_x265_crf26,btb_kept_vs_input_Y,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+sports50_60,Bosphorus,native_x265_crf26,wtw_kept_vs_input_Y,1,1,0,same,PASS,
+sports50_60,Bosphorus,native_x265_crf26,btb_kept_vs_input_C,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+sports50_60,Bosphorus,native_x265_crf26,wtw_kept_vs_input_C,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+sports50_60,Bosphorus,native_x265_crf26,flicker_excess_Y,0.0760045,0.0760045,0,same,PASS,
+sports50_60,Bosphorus,native_x265_crf26,gop_ratio_gop,NA,NA,NA,NA,NA,GOP 250 longer than half the window (4 frames)
+sports50_60,Bosphorus,native_x265_crf26,gop_ratio_minigop,NA,NA,NA,NA,NA,GOP 250 longer than half the window (4 frames)
+sports50_60,Bosphorus,native_x265_crf26,ghost_coeff_Y,0.143044,0.143044,0,same,PASS,
+sports50_60,Bosphorus,native_x265_crf26,smear_Y,0.882012,0.882012,0,same,PASS,
+sports50_60,Bosphorus,native_x265_crf26,duplicate_rate_Y,0,0,0,same,PASS,
+sports50_60,Bosphorus,native_x265_crf26,halo_overshoot_Y,8.10893e-05,8.10893e-05,0,same,PASS,
+sports50_60,Bosphorus,native_x265_crf26,lc_ratio_s1_Y,0.860571,0.860571,0,same,PASS,
+sports50_60,Bosphorus,native_x265_crf26,lc_ratio_s2_Y,0.915079,0.915079,0,same,PASS,
+sports50_60,Bosphorus,native_x265_crf26,lc_ratio_s3_Y,0.948825,0.948825,0,same,PASS,
+sports50_60,Bosphorus,native_x265_crf26,lc_boost_fraction_Y,0,0,0,same,PASS,
+sports50_60,Bosphorus,native_x265_crf26,btb_kept_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,Bosphorus,native_x265_crf26,wtw_kept_Y,0.527821,0.527821,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+sports50_60,Bosphorus,native_x265_crf26,clip_detect_Y,0,0,0,same,PASS,
+sports50_60,Bosphorus,native_x265_crf26,btb_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,Bosphorus,native_x265_crf26,wtw_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,Bosphorus,native_x265_crf26,clip_detect_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,Bosphorus,native_x265_crf26,psnr_edge_Cb,41.0628,41.0159,0.0469095,same,PASS,
+sports50_60,Bosphorus,native_x265_crf26,flicker_excess_Cb,-0.0848331,-0.0857659,0.000932804,same,PASS,
+sports50_60,Bosphorus,native_x265_crf26,psnr_edge_Cr,39.6094,40.3065,-0.697084,worse,FLAG,
+sports50_60,Bosphorus,native_x265_crf26,flicker_excess_Cr,-0.146417,-0.142884,-0.00353298,same,PASS,
+sports50_60,Bosphorus,native_x265_crf26,edge_band_share,0.156062,0.156062,0,NA,INFO,
+sports50_60,Bosphorus,native_x265_crf26,cost_ms_per_frame_pyref,2156.26,16.7173,2139.54,worse,INFO,"py-ref: CPU numpy wall-clock, not GPU-representative"
+sports50_60,Bosphorus,native_x265_crf26,cost_gpu_ms_laptop,NA,NA,NA,NA,NA,capture sidecar gpu_ms (laptop GPU)
+sports50_60,Bosphorus,native_x265_crf26,cost_est_3090_ms,NA,NA,NA,NA,NA,ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json)
+sports50_60,Jockey,native_x264_crf23,psnr_Y,42.0854,42.0854,0,same,PASS,
+sports50_60,Jockey,native_x264_crf23,psnr_Cb,43.1012,43.1536,-0.0523678,worse,FLAG,
+sports50_60,Jockey,native_x264_crf23,psnr_Cr,42.7312,42.7496,-0.018392,same,PASS,
+sports50_60,Jockey,native_x264_crf23,ssim_Y,0.964841,0.964841,0,same,PASS,
+sports50_60,Jockey,native_x264_crf23,ssim_Cb,0.967699,0.966972,0.000727916,better,PASS,
+sports50_60,Jockey,native_x264_crf23,ssim_Cr,0.962064,0.961442,0.000622357,better,PASS,
+sports50_60,Jockey,native_x264_crf23,lpips,0.105195,0.1013,0.00389479,worse,FLAG,
+sports50_60,Jockey,native_x264_crf23,grain_tiles_Y,16,16,0,NA,INFO,
+sports50_60,Jockey,native_x264_crf23,grain_rms_ratio_Y,0.542623,0.542623,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+sports50_60,Jockey,native_x264_crf23,grain_hf_ratio_Y,NA,NA,NA,NA,NA,needs >= 8 frames (4 available)
+sports50_60,Jockey,native_x264_crf23,grain_lag1_delta_Y,-0.00351741,-0.00351741,0,same,PASS,
+sports50_60,Jockey,native_x264_crf23,grain_tiles_Cb,16,16,0,NA,INFO,
+sports50_60,Jockey,native_x264_crf23,grain_rms_ratio_Cb,0.12093,0.203272,-0.0823419,worse,FAIL,default also fails and the candidate is worse
+sports50_60,Jockey,native_x264_crf23,grain_hf_ratio_Cb,NA,NA,NA,NA,NA,needs >= 8 frames (4 available)
+sports50_60,Jockey,native_x264_crf23,grain_lag1_delta_Cb,-0.00525912,-0.00701917,0.00176005,worse,PASS,
+sports50_60,Jockey,native_x264_crf23,grain_keep_vs_input_Y,1,1,0,same,PASS,
+sports50_60,Jockey,native_x264_crf23,grain_lag1_vs_input_Y,0,0,0,same,PASS,
+sports50_60,Jockey,native_x264_crf23,grain_keep_vs_input_Cb,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+sports50_60,Jockey,native_x264_crf23,grain_lag1_vs_input_Cb,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+sports50_60,Jockey,native_x264_crf23,btb_kept_vs_input_Y,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+sports50_60,Jockey,native_x264_crf23,wtw_kept_vs_input_Y,1,1,0,same,PASS,
+sports50_60,Jockey,native_x264_crf23,btb_kept_vs_input_C,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+sports50_60,Jockey,native_x264_crf23,wtw_kept_vs_input_C,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+sports50_60,Jockey,native_x264_crf23,flicker_excess_Y,0.00922671,0.00922671,0,same,PASS,
+sports50_60,Jockey,native_x264_crf23,gop_ratio_gop,NA,NA,NA,NA,NA,GOP 250 longer than half the window (4 frames)
+sports50_60,Jockey,native_x264_crf23,gop_ratio_minigop,NA,NA,NA,NA,NA,GOP 250 longer than half the window (4 frames)
+sports50_60,Jockey,native_x264_crf23,ghost_coeff_Y,0.00504856,0.00504856,0,same,PASS,
+sports50_60,Jockey,native_x264_crf23,smear_Y,0.92589,0.92589,0,same,PASS,
+sports50_60,Jockey,native_x264_crf23,duplicate_rate_Y,0,0,0,same,PASS,
+sports50_60,Jockey,native_x264_crf23,halo_overshoot_Y,3.18976e-05,3.18976e-05,0,same,PASS,
+sports50_60,Jockey,native_x264_crf23,lc_ratio_s1_Y,0.851052,0.851052,0,same,PASS,
+sports50_60,Jockey,native_x264_crf23,lc_ratio_s2_Y,0.932868,0.932868,0,same,PASS,
+sports50_60,Jockey,native_x264_crf23,lc_ratio_s3_Y,0.973031,0.973031,0,same,PASS,
+sports50_60,Jockey,native_x264_crf23,lc_boost_fraction_Y,0,0,0,same,PASS,
+sports50_60,Jockey,native_x264_crf23,btb_kept_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,Jockey,native_x264_crf23,wtw_kept_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,Jockey,native_x264_crf23,clip_detect_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,Jockey,native_x264_crf23,btb_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,Jockey,native_x264_crf23,wtw_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,Jockey,native_x264_crf23,clip_detect_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,Jockey,native_x264_crf23,psnr_edge_Cb,40.3317,40.8862,-0.554538,worse,FLAG,
+sports50_60,Jockey,native_x264_crf23,flicker_excess_Cb,-0.00188743,0.00282487,-0.0047123,same,PASS,
+sports50_60,Jockey,native_x264_crf23,psnr_edge_Cr,40.6834,41.0336,-0.350141,worse,FLAG,
+sports50_60,Jockey,native_x264_crf23,flicker_excess_Cr,-0.0301679,-0.0258829,-0.00428503,same,PASS,
+sports50_60,Jockey,native_x264_crf23,edge_band_share,0.133898,0.133898,0,NA,INFO,
+sports50_60,Jockey,native_x264_crf23,cost_ms_per_frame_pyref,1948.12,17.4326,1930.69,worse,INFO,"py-ref: CPU numpy wall-clock, not GPU-representative"
+sports50_60,Jockey,native_x264_crf23,cost_gpu_ms_laptop,NA,NA,NA,NA,NA,capture sidecar gpu_ms (laptop GPU)
+sports50_60,Jockey,native_x264_crf23,cost_est_3090_ms,NA,NA,NA,NA,NA,ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json)
+sports50_60,YachtRide,native_x265_crf20,psnr_Y,44.4982,44.4982,0,same,PASS,
+sports50_60,YachtRide,native_x265_crf20,psnr_Cb,45.1919,45.3728,-0.180847,worse,FLAG,
+sports50_60,YachtRide,native_x265_crf20,psnr_Cr,43.8813,44.4217,-0.540413,worse,FLAG,
+sports50_60,YachtRide,native_x265_crf20,ssim_Y,0.983093,0.983093,0,same,PASS,
+sports50_60,YachtRide,native_x265_crf20,ssim_Cb,0.979526,0.979763,-0.00023748,same,PASS,
+sports50_60,YachtRide,native_x265_crf20,ssim_Cr,0.974638,0.97538,-0.000741735,worse,FLAG,
+sports50_60,YachtRide,native_x265_crf20,lpips,0.0174823,0.0131008,0.00438144,worse,FLAG,
+sports50_60,YachtRide,native_x265_crf20,grain_tiles_Y,16,16,0,NA,INFO,
+sports50_60,YachtRide,native_x265_crf20,grain_rms_ratio_Y,0.157251,0.157251,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+sports50_60,YachtRide,native_x265_crf20,grain_hf_ratio_Y,NA,NA,NA,NA,NA,needs >= 8 frames (4 available)
+sports50_60,YachtRide,native_x265_crf20,grain_lag1_delta_Y,0.157801,0.157801,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+sports50_60,YachtRide,native_x265_crf20,grain_tiles_Cb,16,16,0,NA,INFO,
+sports50_60,YachtRide,native_x265_crf20,grain_rms_ratio_Cb,0.0338903,0.0720717,-0.0381814,worse,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+sports50_60,YachtRide,native_x265_crf20,grain_hf_ratio_Cb,NA,NA,NA,NA,NA,needs >= 8 frames (4 available)
+sports50_60,YachtRide,native_x265_crf20,grain_lag1_delta_Cb,0.185369,0.156404,0.0289653,worse,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+sports50_60,YachtRide,native_x265_crf20,grain_keep_vs_input_Y,1,1,0,same,PASS,
+sports50_60,YachtRide,native_x265_crf20,grain_lag1_vs_input_Y,0,0,0,same,PASS,
+sports50_60,YachtRide,native_x265_crf20,grain_keep_vs_input_Cb,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+sports50_60,YachtRide,native_x265_crf20,grain_lag1_vs_input_Cb,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+sports50_60,YachtRide,native_x265_crf20,btb_kept_vs_input_Y,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+sports50_60,YachtRide,native_x265_crf20,wtw_kept_vs_input_Y,1,1,0,same,PASS,
+sports50_60,YachtRide,native_x265_crf20,btb_kept_vs_input_C,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+sports50_60,YachtRide,native_x265_crf20,wtw_kept_vs_input_C,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+sports50_60,YachtRide,native_x265_crf20,flicker_excess_Y,-0.0205148,-0.0205148,0,same,PASS,
+sports50_60,YachtRide,native_x265_crf20,gop_ratio_gop,NA,NA,NA,NA,NA,GOP 250 longer than half the window (4 frames)
+sports50_60,YachtRide,native_x265_crf20,gop_ratio_minigop,NA,NA,NA,NA,NA,GOP 250 longer than half the window (4 frames)
+sports50_60,YachtRide,native_x265_crf20,ghost_coeff_Y,0.0300594,0.0300594,0,same,PASS,
+sports50_60,YachtRide,native_x265_crf20,smear_Y,0.944454,0.944454,0,same,PASS,
+sports50_60,YachtRide,native_x265_crf20,duplicate_rate_Y,0,0,0,same,PASS,
+sports50_60,YachtRide,native_x265_crf20,halo_overshoot_Y,6.70254e-05,6.70254e-05,0,same,PASS,
+sports50_60,YachtRide,native_x265_crf20,lc_ratio_s1_Y,0.899376,0.899376,0,same,PASS,
+sports50_60,YachtRide,native_x265_crf20,lc_ratio_s2_Y,0.937185,0.937185,0,same,PASS,
+sports50_60,YachtRide,native_x265_crf20,lc_ratio_s3_Y,0.961791,0.961791,0,same,PASS,
+sports50_60,YachtRide,native_x265_crf20,lc_boost_fraction_Y,0,0,0,same,PASS,
+sports50_60,YachtRide,native_x265_crf20,btb_kept_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,YachtRide,native_x265_crf20,wtw_kept_Y,0.576987,0.576987,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+sports50_60,YachtRide,native_x265_crf20,clip_detect_Y,0,0,0,same,PASS,
+sports50_60,YachtRide,native_x265_crf20,btb_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,YachtRide,native_x265_crf20,wtw_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,YachtRide,native_x265_crf20,clip_detect_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,YachtRide,native_x265_crf20,psnr_edge_Cb,40.5494,41.2737,-0.724293,worse,FLAG,
+sports50_60,YachtRide,native_x265_crf20,flicker_excess_Cb,-0.117082,-0.117444,0.000362033,same,PASS,
+sports50_60,YachtRide,native_x265_crf20,psnr_edge_Cr,39.3764,40.9725,-1.59617,worse,FLAG,
+sports50_60,YachtRide,native_x265_crf20,flicker_excess_Cr,-0.0411769,-0.042726,0.00154914,same,PASS,
+sports50_60,YachtRide,native_x265_crf20,edge_band_share,0.161606,0.161606,0,NA,INFO,
+sports50_60,YachtRide,native_x265_crf20,cost_ms_per_frame_pyref,2031.76,16.7209,2015.03,worse,INFO,"py-ref: CPU numpy wall-clock, not GPU-representative"
+sports50_60,YachtRide,native_x265_crf20,cost_gpu_ms_laptop,NA,NA,NA,NA,NA,capture sidecar gpu_ms (laptop GPU)
+sports50_60,YachtRide,native_x265_crf20,cost_est_3090_ms,NA,NA,NA,NA,NA,ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json)
+sports50_60,park_joy,native_x265_crf26,psnr_Y,35.8906,35.8906,0,same,PASS,
+sports50_60,park_joy,native_x265_crf26,psnr_Cb,34.4779,34.4287,0.0492521,same,PASS,
+sports50_60,park_joy,native_x265_crf26,psnr_Cr,36.757,37.0213,-0.264245,worse,FLAG,
+sports50_60,park_joy,native_x265_crf26,ssim_Y,0.958194,0.958194,0,same,PASS,
+sports50_60,park_joy,native_x265_crf26,ssim_Cb,0.84673,0.849414,-0.00268466,worse,FLAG,
+sports50_60,park_joy,native_x265_crf26,ssim_Cr,0.859636,0.867244,-0.00760862,worse,FLAG,
+sports50_60,park_joy,native_x265_crf26,lpips,0.0249677,0.017048,0.00791969,worse,FLAG,
+sports50_60,park_joy,native_x265_crf26,grain_tiles_Y,16,16,0,NA,INFO,
+sports50_60,park_joy,native_x265_crf26,grain_rms_ratio_Y,0.892158,0.892158,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+sports50_60,park_joy,native_x265_crf26,grain_hf_ratio_Y,NA,NA,NA,NA,NA,needs >= 8 frames (4 available)
+sports50_60,park_joy,native_x265_crf26,grain_lag1_delta_Y,0.00142003,0.00142003,0,same,PASS,
+sports50_60,park_joy,native_x265_crf26,grain_tiles_Cb,16,16,0,NA,INFO,
+sports50_60,park_joy,native_x265_crf26,grain_rms_ratio_Cb,0.10162,0.178564,-0.0769443,worse,FAIL,default also fails and the candidate is worse
+sports50_60,park_joy,native_x265_crf26,grain_hf_ratio_Cb,NA,NA,NA,NA,NA,needs >= 8 frames (4 available)
+sports50_60,park_joy,native_x265_crf26,grain_lag1_delta_Cb,0.130312,0.061866,0.0684455,worse,FAIL,default also fails and the candidate is worse
+sports50_60,park_joy,native_x265_crf26,grain_keep_vs_input_Y,1,1,0,same,PASS,
+sports50_60,park_joy,native_x265_crf26,grain_lag1_vs_input_Y,0,0,0,same,PASS,
+sports50_60,park_joy,native_x265_crf26,grain_keep_vs_input_Cb,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+sports50_60,park_joy,native_x265_crf26,grain_lag1_vs_input_Cb,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+sports50_60,park_joy,native_x265_crf26,btb_kept_vs_input_Y,1,1,0,same,PASS,
+sports50_60,park_joy,native_x265_crf26,wtw_kept_vs_input_Y,1,1,0,same,PASS,
+sports50_60,park_joy,native_x265_crf26,btb_kept_vs_input_C,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+sports50_60,park_joy,native_x265_crf26,wtw_kept_vs_input_C,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+sports50_60,park_joy,native_x265_crf26,flicker_excess_Y,-0.0915965,-0.0915965,0,same,PASS,
+sports50_60,park_joy,native_x265_crf26,gop_ratio_gop,NA,NA,NA,NA,NA,GOP 250 longer than half the window (4 frames)
+sports50_60,park_joy,native_x265_crf26,gop_ratio_minigop,NA,NA,NA,NA,NA,GOP 250 longer than half the window (4 frames)
+sports50_60,park_joy,native_x265_crf26,ghost_coeff_Y,0.0285201,0.0285201,0,same,PASS,
+sports50_60,park_joy,native_x265_crf26,smear_Y,0.907398,0.907398,0,same,PASS,
+sports50_60,park_joy,native_x265_crf26,duplicate_rate_Y,0,0,0,same,PASS,
+sports50_60,park_joy,native_x265_crf26,halo_overshoot_Y,0.000127289,0.000127289,0,same,PASS,
+sports50_60,park_joy,native_x265_crf26,lc_ratio_s1_Y,0.935053,0.935053,0,same,PASS,
+sports50_60,park_joy,native_x265_crf26,lc_ratio_s2_Y,0.955565,0.955565,0,same,PASS,
+sports50_60,park_joy,native_x265_crf26,lc_ratio_s3_Y,0.968907,0.968907,0,same,PASS,
+sports50_60,park_joy,native_x265_crf26,lc_boost_fraction_Y,0,0,0,same,PASS,
+sports50_60,park_joy,native_x265_crf26,btb_kept_Y,0,0,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+sports50_60,park_joy,native_x265_crf26,wtw_kept_Y,0.609091,0.609091,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+sports50_60,park_joy,native_x265_crf26,clip_detect_Y,0,0,0,same,PASS,
+sports50_60,park_joy,native_x265_crf26,btb_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,park_joy,native_x265_crf26,wtw_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,park_joy,native_x265_crf26,clip_detect_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,park_joy,native_x265_crf26,psnr_edge_Cb,33.1896,33.1453,0.0443137,same,PASS,
+sports50_60,park_joy,native_x265_crf26,flicker_excess_Cb,-0.239491,-0.211614,-0.0278764,same,PASS,
+sports50_60,park_joy,native_x265_crf26,psnr_edge_Cr,35.6221,35.9398,-0.317732,worse,FLAG,
+sports50_60,park_joy,native_x265_crf26,flicker_excess_Cr,-0.408852,-0.39377,-0.0150818,same,PASS,
+sports50_60,park_joy,native_x265_crf26,edge_band_share,0.674721,0.674721,0,NA,INFO,
+sports50_60,park_joy,native_x265_crf26,cost_ms_per_frame_pyref,1946.97,20.2072,1926.77,worse,INFO,"py-ref: CPU numpy wall-clock, not GPU-representative"
+sports50_60,park_joy,native_x265_crf26,cost_gpu_ms_laptop,NA,NA,NA,NA,NA,capture sidecar gpu_ms (laptop GPU)
+sports50_60,park_joy,native_x265_crf26,cost_est_3090_ms,NA,NA,NA,NA,NA,ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json)
+film24,tos4k,x265_2160p_6000k_w2400,psnr_Y,39.132,39.132,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,psnr_Cb,44.9771,44.6618,0.315295,better,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,psnr_Cr,45.0241,45.1137,-0.0895752,worse,FLAG,
+film24,tos4k,x265_2160p_6000k_w2400,ssim_Y,0.961872,0.961872,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,ssim_Cb,0.984302,0.982645,0.00165765,better,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,ssim_Cr,0.985798,0.985053,0.000745357,better,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,lpips,0.04318,0.0400135,0.00316657,worse,FLAG,
+film24,tos4k,x265_2160p_6000k_w2400,grain_tiles_Y,16,16,0,NA,INFO,
+film24,tos4k,x265_2160p_6000k_w2400,grain_rms_ratio_Y,0.85289,0.85289,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+film24,tos4k,x265_2160p_6000k_w2400,grain_hf_ratio_Y,0.952946,0.952946,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,grain_lag1_delta_Y,0.0534701,0.0534701,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+film24,tos4k,x265_2160p_6000k_w2400,grain_tiles_Cb,16,16,0,NA,INFO,
+film24,tos4k,x265_2160p_6000k_w2400,grain_rms_ratio_Cb,0.321909,0.54944,-0.227531,worse,FAIL,default also fails and the candidate is worse
+film24,tos4k,x265_2160p_6000k_w2400,grain_hf_ratio_Cb,0.315832,0.348264,-0.0324314,worse,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,grain_lag1_delta_Cb,0.451689,0.322787,0.128902,worse,FAIL,default also fails and the candidate is worse
+film24,tos4k,x265_2160p_6000k_w2400,grain_keep_vs_input_Y,1,1,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,grain_lag1_vs_input_Y,0,0,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,grain_keep_vs_input_Cb,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+film24,tos4k,x265_2160p_6000k_w2400,grain_lag1_vs_input_Cb,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+film24,tos4k,x265_2160p_6000k_w2400,btb_kept_vs_input_Y,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+film24,tos4k,x265_2160p_6000k_w2400,wtw_kept_vs_input_Y,1,1,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,btb_kept_vs_input_C,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+film24,tos4k,x265_2160p_6000k_w2400,wtw_kept_vs_input_C,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+film24,tos4k,x265_2160p_6000k_w2400,flicker_excess_Y,-0.0511641,-0.0511641,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,gop_ratio_gop,NA,NA,NA,NA,NA,GOP 48 longer than half the window (8 frames)
+film24,tos4k,x265_2160p_6000k_w2400,gop_ratio_minigop,NA,NA,NA,NA,NA,GOP 48 longer than half the window (8 frames)
+film24,tos4k,x265_2160p_6000k_w2400,ghost_coeff_Y,0.0553219,0.0553219,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,smear_Y,0.87703,0.87703,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,duplicate_rate_Y,0,0,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,halo_overshoot_Y,0.00016182,0.00016182,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,lc_ratio_s1_Y,0.9273,0.9273,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,lc_ratio_s2_Y,0.951077,0.951077,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,lc_ratio_s3_Y,0.968673,0.968673,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,lc_boost_fraction_Y,0,0,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,btb_kept_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,tos4k,x265_2160p_6000k_w2400,wtw_kept_Y,0.773504,0.773504,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+film24,tos4k,x265_2160p_6000k_w2400,clip_detect_Y,0,0,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,btb_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,tos4k,x265_2160p_6000k_w2400,wtw_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,tos4k,x265_2160p_6000k_w2400,clip_detect_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,tos4k,x265_2160p_6000k_w2400,psnr_edge_Cb,43.8664,43.6176,0.248791,better,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,flicker_excess_Cb,-0.340998,-0.33667,-0.00432841,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,psnr_edge_Cr,44.1021,44.3017,-0.199629,worse,FLAG,
+film24,tos4k,x265_2160p_6000k_w2400,flicker_excess_Cr,-0.48504,-0.479652,-0.00538843,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,edge_band_share,0.43306,0.43306,0,NA,INFO,
+film24,tos4k,x265_2160p_6000k_w2400,cost_ms_per_frame_pyref,1877.2,15.8502,1861.35,worse,INFO,"py-ref: CPU numpy wall-clock, not GPU-representative"
+film24,tos4k,x265_2160p_6000k_w2400,cost_gpu_ms_laptop,NA,NA,NA,NA,NA,capture sidecar gpu_ms (laptop GPU)
+film24,tos4k,x265_2160p_6000k_w2400,cost_est_3090_ms,NA,NA,NA,NA,NA,ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json)
+film24,tos4k,ffv1_master_no_codec_w2400,psnr_Y,inf,inf,0,same,PASS,
+film24,tos4k,ffv1_master_no_codec_w2400,psnr_Cb,50.7542,54.7967,-4.04247,worse,FLAG,
+film24,tos4k,ffv1_master_no_codec_w2400,psnr_Cr,49.6209,55.5848,-5.96393,worse,FLAG,
+film24,tos4k,ffv1_master_no_codec_w2400,ssim_Y,1,1,0,same,PASS,
+film24,tos4k,ffv1_master_no_codec_w2400,ssim_Cb,0.992767,0.996807,-0.00403982,worse,FLAG,
+film24,tos4k,ffv1_master_no_codec_w2400,ssim_Cr,0.992931,0.997518,-0.00458697,worse,FLAG,
+film24,tos4k,ffv1_master_no_codec_w2400,lpips,0.00383408,0.000124715,0.00370936,worse,FLAG,
+film24,tos4k,ffv1_master_no_codec_w2400,grain_tiles_Y,16,16,0,NA,INFO,
+film24,tos4k,ffv1_master_no_codec_w2400,grain_rms_ratio_Y,1,1,0,same,PASS,
+film24,tos4k,ffv1_master_no_codec_w2400,grain_hf_ratio_Y,1,1,0,same,PASS,
+film24,tos4k,ffv1_master_no_codec_w2400,grain_lag1_delta_Y,0,0,0,same,PASS,
+film24,tos4k,ffv1_master_no_codec_w2400,grain_tiles_Cb,16,16,0,NA,INFO,
+film24,tos4k,ffv1_master_no_codec_w2400,grain_rms_ratio_Cb,0.381324,0.681802,-0.300477,worse,FAIL,default also fails and the candidate is worse
+film24,tos4k,ffv1_master_no_codec_w2400,grain_hf_ratio_Cb,0.547725,0.666408,-0.118683,worse,FLAG,
+film24,tos4k,ffv1_master_no_codec_w2400,grain_lag1_delta_Cb,0.250153,0.11806,0.132093,worse,FAIL,default also fails and the candidate is worse
+film24,tos4k,ffv1_master_no_codec_w2400,grain_keep_vs_input_Y,1,1,0,same,PASS,
+film24,tos4k,ffv1_master_no_codec_w2400,grain_lag1_vs_input_Y,0,0,0,same,PASS,
+film24,tos4k,ffv1_master_no_codec_w2400,grain_keep_vs_input_Cb,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+film24,tos4k,ffv1_master_no_codec_w2400,grain_lag1_vs_input_Cb,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+film24,tos4k,ffv1_master_no_codec_w2400,btb_kept_vs_input_Y,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+film24,tos4k,ffv1_master_no_codec_w2400,wtw_kept_vs_input_Y,1,1,0,same,PASS,
+film24,tos4k,ffv1_master_no_codec_w2400,btb_kept_vs_input_C,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+film24,tos4k,ffv1_master_no_codec_w2400,wtw_kept_vs_input_C,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+film24,tos4k,ffv1_master_no_codec_w2400,flicker_excess_Y,0,0,0,same,PASS,
+film24,tos4k,ffv1_master_no_codec_w2400,gop_ratio_gop,NA,NA,NA,NA,NA,GOP 48 longer than half the window (8 frames)
+film24,tos4k,ffv1_master_no_codec_w2400,gop_ratio_minigop,NA,NA,NA,NA,NA,GOP 48 longer than half the window (8 frames)
+film24,tos4k,ffv1_master_no_codec_w2400,ghost_coeff_Y,0,0,0,same,PASS,
+film24,tos4k,ffv1_master_no_codec_w2400,smear_Y,1,1,0,same,PASS,
+film24,tos4k,ffv1_master_no_codec_w2400,duplicate_rate_Y,0,0,0,same,PASS,
+film24,tos4k,ffv1_master_no_codec_w2400,halo_overshoot_Y,0,0,0,same,PASS,
+film24,tos4k,ffv1_master_no_codec_w2400,lc_ratio_s1_Y,1,1,0,same,PASS,
+film24,tos4k,ffv1_master_no_codec_w2400,lc_ratio_s2_Y,1,1,0,same,PASS,
+film24,tos4k,ffv1_master_no_codec_w2400,lc_ratio_s3_Y,1,1,0,same,PASS,
+film24,tos4k,ffv1_master_no_codec_w2400,lc_boost_fraction_Y,0,0,0,same,PASS,
+film24,tos4k,ffv1_master_no_codec_w2400,btb_kept_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,tos4k,ffv1_master_no_codec_w2400,wtw_kept_Y,1,1,0,same,PASS,
+film24,tos4k,ffv1_master_no_codec_w2400,clip_detect_Y,0,0,0,same,PASS,
+film24,tos4k,ffv1_master_no_codec_w2400,btb_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,tos4k,ffv1_master_no_codec_w2400,wtw_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,tos4k,ffv1_master_no_codec_w2400,clip_detect_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,tos4k,ffv1_master_no_codec_w2400,psnr_edge_Cb,48.9469,52.8594,-3.91247,worse,FLAG,
+film24,tos4k,ffv1_master_no_codec_w2400,flicker_excess_Cb,-0.00738133,-0.000917751,-0.00646358,same,PASS,
+film24,tos4k,ffv1_master_no_codec_w2400,psnr_edge_Cr,48.1627,53.9324,-5.76973,worse,FLAG,
+film24,tos4k,ffv1_master_no_codec_w2400,flicker_excess_Cr,-0.00554337,0.000130259,-0.00567363,same,PASS,
+film24,tos4k,ffv1_master_no_codec_w2400,edge_band_share,0.434521,0.434521,0,NA,INFO,
+film24,tos4k,ffv1_master_no_codec_w2400,cost_ms_per_frame_pyref,1963.1,17.7011,1945.4,worse,INFO,"py-ref: CPU numpy wall-clock, not GPU-representative"
+film24,tos4k,ffv1_master_no_codec_w2400,cost_gpu_ms_laptop,NA,NA,NA,NA,NA,capture sidecar gpu_ms (laptop GPU)
+film24,tos4k,ffv1_master_no_codec_w2400,cost_est_3090_ms,NA,NA,NA,NA,NA,ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json)
+film24,sintel4k,svtav1_2160p_6000k_w1200,psnr_Y,53.2548,53.2548,0,same,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,psnr_Cb,58.3426,58.6046,-0.261998,worse,FLAG,
+film24,sintel4k,svtav1_2160p_6000k_w1200,psnr_Cr,56.8304,57.0807,-0.250309,worse,FLAG,
+film24,sintel4k,svtav1_2160p_6000k_w1200,ssim_Y,0.997368,0.997368,0,same,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,ssim_Cb,0.999004,0.999074,-7.00865e-05,same,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,ssim_Cr,0.998662,0.998756,-9.42562e-05,same,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,lpips,0.00463442,0.00429423,0.000340187,same,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,grain_tiles_Y,16,16,0,NA,INFO,
+film24,sintel4k,svtav1_2160p_6000k_w1200,grain_rms_ratio_Y,0.389306,0.389306,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+film24,sintel4k,svtav1_2160p_6000k_w1200,grain_hf_ratio_Y,0.924005,0.924005,0,same,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,grain_lag1_delta_Y,0.0880063,0.0880063,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+film24,sintel4k,svtav1_2160p_6000k_w1200,grain_tiles_Cb,16,16,0,NA,INFO,
+film24,sintel4k,svtav1_2160p_6000k_w1200,grain_rms_ratio_Cb,0.59549,1.28624,-0.690749,worse,FAIL,default also fails and the candidate is worse
+film24,sintel4k,svtav1_2160p_6000k_w1200,grain_hf_ratio_Cb,0.832831,0.793942,0.0388895,better,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,grain_lag1_delta_Cb,0.0308868,0.0298279,0.00105884,worse,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,grain_keep_vs_input_Y,1,1,0,same,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,grain_lag1_vs_input_Y,0,0,0,same,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,grain_keep_vs_input_Cb,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+film24,sintel4k,svtav1_2160p_6000k_w1200,grain_lag1_vs_input_Cb,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+film24,sintel4k,svtav1_2160p_6000k_w1200,btb_kept_vs_input_Y,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+film24,sintel4k,svtav1_2160p_6000k_w1200,wtw_kept_vs_input_Y,1,1,0,same,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,btb_kept_vs_input_C,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+film24,sintel4k,svtav1_2160p_6000k_w1200,wtw_kept_vs_input_C,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+film24,sintel4k,svtav1_2160p_6000k_w1200,flicker_excess_Y,0.0213057,0.0213057,0,same,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,gop_ratio_gop,NA,NA,NA,NA,NA,GOP 48 longer than half the window (8 frames)
+film24,sintel4k,svtav1_2160p_6000k_w1200,gop_ratio_minigop,NA,NA,NA,NA,NA,GOP 48 longer than half the window (8 frames)
+film24,sintel4k,svtav1_2160p_6000k_w1200,ghost_coeff_Y,0.000445088,0.000445088,0,same,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,smear_Y,0.993363,0.993363,0,same,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,duplicate_rate_Y,0,0,0,same,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,halo_overshoot_Y,2.89153e-05,2.89153e-05,0,same,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,lc_ratio_s1_Y,0.877822,0.877822,0,same,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,lc_ratio_s2_Y,0.923059,0.923059,0,same,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,lc_ratio_s3_Y,0.9602,0.9602,0,same,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,lc_boost_fraction_Y,0,0,0,same,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,btb_kept_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,sintel4k,svtav1_2160p_6000k_w1200,wtw_kept_Y,0.307692,0.307692,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+film24,sintel4k,svtav1_2160p_6000k_w1200,clip_detect_Y,0,0,0,same,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,btb_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,sintel4k,svtav1_2160p_6000k_w1200,wtw_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,sintel4k,svtav1_2160p_6000k_w1200,clip_detect_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,sintel4k,svtav1_2160p_6000k_w1200,psnr_edge_Cb,50.5555,52.3701,-1.8146,worse,FLAG,
+film24,sintel4k,svtav1_2160p_6000k_w1200,flicker_excess_Cb,0.103527,0.103162,0.000365474,same,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,psnr_edge_Cr,49.8215,51.1054,-1.28389,worse,FLAG,
+film24,sintel4k,svtav1_2160p_6000k_w1200,flicker_excess_Cr,0.18546,0.186639,-0.00117844,same,PASS,
+film24,sintel4k,svtav1_2160p_6000k_w1200,edge_band_share,0.0239045,0.0239045,0,NA,INFO,
+film24,sintel4k,svtav1_2160p_6000k_w1200,cost_ms_per_frame_pyref,1926.93,21.1154,1905.81,worse,INFO,"py-ref: CPU numpy wall-clock, not GPU-representative"
+film24,sintel4k,svtav1_2160p_6000k_w1200,cost_gpu_ms_laptop,NA,NA,NA,NA,NA,capture sidecar gpu_ms (laptop GPU)
+film24,sintel4k,svtav1_2160p_6000k_w1200,cost_est_3090_ms,NA,NA,NA,NA,NA,ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json)
+film24,breathing,enc24_12f,psnr_Y,43.8462,43.8462,0,same,PASS,
+film24,breathing,enc24_12f,psnr_Cb,45.4375,45.6703,-0.232804,worse,FLAG,
+film24,breathing,enc24_12f,psnr_Cr,44.8523,45.4337,-0.581469,worse,FLAG,
+film24,breathing,enc24_12f,ssim_Y,0.977426,0.977426,0,same,PASS,
+film24,breathing,enc24_12f,ssim_Cb,0.979051,0.979362,-0.0003108,same,PASS,
+film24,breathing,enc24_12f,ssim_Cr,0.978348,0.979269,-0.000920755,worse,FLAG,
+film24,breathing,enc24_12f,lpips,0.027619,0.0219237,0.0056953,worse,FLAG,
+film24,breathing,enc24_12f,grain_tiles_Y,16,16,0,NA,INFO,
+film24,breathing,enc24_12f,grain_rms_ratio_Y,0.844445,0.844445,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+film24,breathing,enc24_12f,grain_hf_ratio_Y,0.900241,0.900241,0,same,PASS,
+film24,breathing,enc24_12f,grain_lag1_delta_Y,0.0609991,0.0609991,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+film24,breathing,enc24_12f,grain_tiles_Cb,16,16,0,NA,INFO,
+film24,breathing,enc24_12f,grain_rms_ratio_Cb,0.146113,0.268159,-0.122046,worse,FAIL,default also fails and the candidate is worse
+film24,breathing,enc24_12f,grain_hf_ratio_Cb,0.168428,0.347176,-0.178748,worse,FLAG,
+film24,breathing,enc24_12f,grain_lag1_delta_Cb,0.566289,0.382041,0.184248,worse,FAIL,default also fails and the candidate is worse
+film24,breathing,enc24_12f,grain_keep_vs_input_Y,1,1,0,same,PASS,
+film24,breathing,enc24_12f,grain_lag1_vs_input_Y,0,0,0,same,PASS,
+film24,breathing,enc24_12f,grain_keep_vs_input_Cb,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+film24,breathing,enc24_12f,grain_lag1_vs_input_Cb,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+film24,breathing,enc24_12f,btb_kept_vs_input_Y,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+film24,breathing,enc24_12f,wtw_kept_vs_input_Y,1,1,0,same,PASS,
+film24,breathing,enc24_12f,btb_kept_vs_input_C,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+film24,breathing,enc24_12f,wtw_kept_vs_input_C,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+film24,breathing,enc24_12f,flicker_excess_Y,-0.0554141,-0.0554141,0,same,PASS,
+film24,breathing,enc24_12f,gop_ratio_gop,NA,NA,NA,NA,NA,GOP 24 longer than half the window (12 frames)
+film24,breathing,enc24_12f,gop_ratio_minigop,NA,NA,NA,NA,NA,GOP 24 longer than half the window (12 frames)
+film24,breathing,enc24_12f,ghost_coeff_Y,0.0605233,0.0605233,0,same,PASS,
+film24,breathing,enc24_12f,smear_Y,0.946423,0.946423,0,same,PASS,
+film24,breathing,enc24_12f,duplicate_rate_Y,0,0,0,same,PASS,
+film24,breathing,enc24_12f,halo_overshoot_Y,5.20243e-05,5.20243e-05,0,same,PASS,
+film24,breathing,enc24_12f,lc_ratio_s1_Y,0.922675,0.922675,0,same,PASS,
+film24,breathing,enc24_12f,lc_ratio_s2_Y,0.95581,0.95581,0,same,PASS,
+film24,breathing,enc24_12f,lc_ratio_s3_Y,0.975537,0.975537,0,same,PASS,
+film24,breathing,enc24_12f,lc_boost_fraction_Y,0,0,0,same,PASS,
+film24,breathing,enc24_12f,btb_kept_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,breathing,enc24_12f,wtw_kept_Y,0.591401,0.591401,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+film24,breathing,enc24_12f,clip_detect_Y,0,0,0,same,PASS,
+film24,breathing,enc24_12f,btb_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,breathing,enc24_12f,wtw_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,breathing,enc24_12f,clip_detect_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,breathing,enc24_12f,psnr_edge_Cb,43.1147,43.9161,-0.801473,worse,FLAG,
+film24,breathing,enc24_12f,flicker_excess_Cb,-0.117221,-0.106372,-0.0108491,same,PASS,
+film24,breathing,enc24_12f,psnr_edge_Cr,42.0807,43.6199,-1.53918,worse,FLAG,
+film24,breathing,enc24_12f,flicker_excess_Cr,-0.179712,-0.169967,-0.00974555,same,PASS,
+film24,breathing,enc24_12f,edge_band_share,0.190094,0.190094,0,NA,INFO,
+film24,breathing,enc24_12f,cost_ms_per_frame_pyref,1480.45,13.1766,1467.27,worse,INFO,"py-ref: CPU numpy wall-clock, not GPU-representative"
+film24,breathing,enc24_12f,cost_gpu_ms_laptop,NA,NA,NA,NA,NA,capture sidecar gpu_ms (laptop GPU)
+film24,breathing,enc24_12f,cost_est_3090_ms,NA,NA,NA,NA,NA,ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json)
+dark,meridian4k,x265_2160p_6000k_w1800,psnr_Y,50.3844,50.3844,0,same,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,psnr_Cb,55.7385,55.3471,0.391393,better,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,psnr_Cr,57.0885,56.6386,0.449887,better,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,ssim_Y,0.992657,0.992657,0,same,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,ssim_Cb,0.99837,0.998195,0.000174758,same,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,ssim_Cr,0.998876,0.998729,0.000146676,same,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,lpips,0.018967,0.0177066,0.00126044,same,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,grain_tiles_Y,16,16,0,NA,INFO,
+dark,meridian4k,x265_2160p_6000k_w1800,grain_rms_ratio_Y,0.58004,0.58004,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+dark,meridian4k,x265_2160p_6000k_w1800,grain_hf_ratio_Y,0.934351,0.934351,0,same,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,grain_lag1_delta_Y,0.0532603,0.0532603,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+dark,meridian4k,x265_2160p_6000k_w1800,grain_tiles_Cb,16,16,0,NA,INFO,
+dark,meridian4k,x265_2160p_6000k_w1800,grain_rms_ratio_Cb,1.21081,2.26495,-1.05415,better,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+dark,meridian4k,x265_2160p_6000k_w1800,grain_hf_ratio_Cb,1.9099,1.92511,-0.0152051,better,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,grain_lag1_delta_Cb,0.103134,-0.00644587,0.109579,worse,FAIL,
+dark,meridian4k,x265_2160p_6000k_w1800,grain_keep_vs_input_Y,1,1,0,same,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,grain_lag1_vs_input_Y,0,0,0,same,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,grain_keep_vs_input_Cb,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+dark,meridian4k,x265_2160p_6000k_w1800,grain_lag1_vs_input_Cb,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+dark,meridian4k,x265_2160p_6000k_w1800,btb_kept_vs_input_Y,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+dark,meridian4k,x265_2160p_6000k_w1800,wtw_kept_vs_input_Y,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+dark,meridian4k,x265_2160p_6000k_w1800,btb_kept_vs_input_C,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+dark,meridian4k,x265_2160p_6000k_w1800,wtw_kept_vs_input_C,NA,NA,NA,NA,NA,input/output geometry differs (or no input given)
+dark,meridian4k,x265_2160p_6000k_w1800,flicker_excess_Y,-0.0575861,-0.0575861,0,same,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,gop_ratio_gop,NA,NA,NA,NA,NA,GOP 120 longer than half the window (8 frames)
+dark,meridian4k,x265_2160p_6000k_w1800,gop_ratio_minigop,NA,NA,NA,NA,NA,GOP 120 longer than half the window (8 frames)
+dark,meridian4k,x265_2160p_6000k_w1800,ghost_coeff_Y,0.0560969,0.0560969,0,same,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,smear_Y,0.930265,0.930265,0,same,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,duplicate_rate_Y,0,0,0,same,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,halo_overshoot_Y,2.51987e-05,2.51987e-05,0,same,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,lc_ratio_s1_Y,0.850117,0.850117,0,same,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,lc_ratio_s2_Y,0.905164,0.905164,0,same,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,lc_ratio_s3_Y,0.946763,0.946763,0,same,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,lc_boost_fraction_Y,0,0,0,same,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,btb_kept_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+dark,meridian4k,x265_2160p_6000k_w1800,wtw_kept_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+dark,meridian4k,x265_2160p_6000k_w1800,clip_detect_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+dark,meridian4k,x265_2160p_6000k_w1800,btb_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+dark,meridian4k,x265_2160p_6000k_w1800,wtw_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+dark,meridian4k,x265_2160p_6000k_w1800,clip_detect_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+dark,meridian4k,x265_2160p_6000k_w1800,psnr_edge_Cb,51.8317,51.8664,-0.034654,same,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,flicker_excess_Cb,-0.00113318,-0.00067741,-0.000455773,same,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,psnr_edge_Cr,52.5844,52.7353,-0.150921,worse,FLAG,
+dark,meridian4k,x265_2160p_6000k_w1800,flicker_excess_Cr,-0.00443013,-0.00346717,-0.000962959,same,PASS,
+dark,meridian4k,x265_2160p_6000k_w1800,edge_band_share,0.0156498,0.0156498,0,NA,INFO,
+dark,meridian4k,x265_2160p_6000k_w1800,cost_ms_per_frame_pyref,1162.69,13.8463,1148.84,worse,INFO,"py-ref: CPU numpy wall-clock, not GPU-representative"
+dark,meridian4k,x265_2160p_6000k_w1800,cost_gpu_ms_laptop,NA,NA,NA,NA,NA,capture sidecar gpu_ms (laptop GPU)
+dark,meridian4k,x265_2160p_6000k_w1800,cost_est_3090_ms,NA,NA,NA,NA,NA,ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json)
