@@ -11,3 +11,4 @@ see src/VP-V/core/README.md for how the skeleton runs them.
 | 70 | [encoding](encoding/README.md) | placeholder | front_end | Remove codec damage (blocking, ringing, mosquito, smear) at the ENCODED resolution, where the damage lives. |
 | 80 | [deband](deband/README.md) | built | front_end | Remove banding at source resolution, after repair (cheaper and correct for source-resolution bands). |
 | 90 | [texture_restore](texture_restore/README.md) | built | front_end | Long-memory add-on on A's output: texture restore (~2 s peak-hold fine-band reference along vectors) and breathing reduction (detail_pulse_stabilise, the GOP pulse). |
+| 90 (draft) | [temporal_detail](temporal_detail/README.md) | draft | none yet | Successor of texture_restore (reference-based structure transfer for breathing and detail, grain untouched); a draft CPU model with tests, no slot, no call sites, not in slots.json. |
