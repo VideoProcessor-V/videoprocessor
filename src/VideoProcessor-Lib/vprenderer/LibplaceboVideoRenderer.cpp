@@ -1344,6 +1344,7 @@ namespace
 		// or motion source change invalidates the vectors; a repeat-preserving queue drop
 		// marks a gap; off = the behaviour before.
 		bool motionHistoryFixes = true;
+		bool vectorDemand = true;
 		// Hunt 2 group 5 (13-timing, 05-renderahead M5): the backlog flush measures
 		// staleness beyond the queue target, the timeline steering is in seconds, the cadence
 		// correction measures the capture rate on QPC with constants in seconds and
@@ -1572,7 +1573,7 @@ namespace
 			<< settings.nlsSamplingCatmull << '|' << settings.sourceCodingFixes << '|'
 			<< settings.debandVpGrainGuard << '|' << settings.debandVpGrainSplit << '|' << settings.debandVpExclusive << '|' << settings.detailPulseStabilise << '|' << settings.detailPulseCap << '|' << settings.detailPulseFast << '|' << settings.textureRestore << '|' << settings.textureRestoreCap << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
 			<< static_cast<int>(settings.interpolation) << '|' << static_cast<int>(settings.interpolationFallback) << '|'
-			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.intentMotion << '|' << static_cast<int>(settings.intentMotionPolicy) << '|' << settings.intentMotionMin << '|' << settings.intentMotionMinShotSeconds << '|' << settings.intentEaseSeconds << '|' << settings.ambientAdapt << '|' << settings.ambientAdaptStrength << '|' << settings.ambientScreenReflect << '|' << settings.ambientMaxBlackNits << '|' << settings.ambientTauUpSeconds << '|' << settings.ambientTauDownSeconds << '|' << static_cast<int>(settings.intentBlack) << '|' << settings.intentDisplay << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.sourceResolutionLatchFixes << '|' << settings.sourceResolutionCutFixes << '|' << settings.activePictureStartupHold << '|' << settings.sourceResolutionEngageMaxWait << '|' << settings.sourceResolutionCrossfade << '|' << settings.sourceResolutionReleaseFade << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|' << settings.cadenceClassFixes << '|' << settings.motionHistoryFixes << '|' << settings.queueTimingFixes << '|' << settings.generalRateFixes << '|' << settings.efficiencyFixes << '|'
+			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.intentMotion << '|' << static_cast<int>(settings.intentMotionPolicy) << '|' << settings.intentMotionMin << '|' << settings.intentMotionMinShotSeconds << '|' << settings.intentEaseSeconds << '|' << settings.ambientAdapt << '|' << settings.ambientAdaptStrength << '|' << settings.ambientScreenReflect << '|' << settings.ambientMaxBlackNits << '|' << settings.ambientTauUpSeconds << '|' << settings.ambientTauDownSeconds << '|' << static_cast<int>(settings.intentBlack) << '|' << settings.intentDisplay << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.sourceResolutionLatchFixes << '|' << settings.sourceResolutionCutFixes << '|' << settings.activePictureStartupHold << '|' << settings.sourceResolutionEngageMaxWait << '|' << settings.sourceResolutionCrossfade << '|' << settings.sourceResolutionReleaseFade << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|' << settings.cadenceClassFixes << '|' << settings.motionHistoryFixes << '|' << settings.vectorDemand << '|' << settings.queueTimingFixes << '|' << settings.generalRateFixes << '|' << settings.efficiencyFixes << '|'
 			<< settings.renderAhead << '|' << settings.dejudderGate << '|' << settings.renderAheadUtilisation << '|' << settings.renderAheadQueueCredit << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
@@ -2912,6 +2913,14 @@ namespace
 				DebugLog::Log("profile '%s': invalid motion_history_fixes '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.motionHistoryFixes ? "on" : "off");
 		}
+		if (tryChoice("vector_demand", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.vectorDemand = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid vector_demand '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.vectorDemand ? "on" : "off");
+		}
 		if (tryChoice("queue_timing_fixes", raw))
 		{
 			if (raw == "on" || raw == "off")
@@ -3596,6 +3605,7 @@ namespace
 		settings.opticalFlow = false;                      // key=optical_flow
 		settings.motionAheadFrames = 0;                    // key=motion_ahead_frames
 		settings.motionHistoryFixes = false;               // key=motion_history_fixes
+		settings.vectorDemand = false;                     // key=vector_demand
 		settings.dejudderSourceWarpCatmull = false;        // key=dejudder_source_warp_filter
 		settings.nlsSamplingCatmull = false;               // key=nls_sampling
 		settings.adaptiveDownscale = false;                // key=adaptive_downscale
@@ -11919,6 +11929,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.timingContinuityFixes != next.timingContinuityFixes, "timing_continuity_fixes");
 		changed(current.cadenceClassFixes != next.cadenceClassFixes, "cadence_class_fixes");
 		changed(current.motionHistoryFixes != next.motionHistoryFixes, "motion_history_fixes");
+		changed(current.vectorDemand != next.vectorDemand, "vector_demand");
 		changed(current.queueTimingFixes != next.queueTimingFixes, "queue_timing_fixes");
 		changed(current.generalRateFixes != next.generalRateFixes, "general_rate_fixes");
 		changed(current.efficiencyFixes != next.efficiencyFixes, "efficiency_fixes");

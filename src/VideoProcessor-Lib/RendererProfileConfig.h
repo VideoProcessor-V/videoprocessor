@@ -818,6 +818,7 @@ namespace RendererProfileConfig
 			if (key == "timing_continuity_fixes") return IsChoice(value, { "on", "off" });   // Bug hunt 2026-10-17
 			if (key == "cadence_class_fixes") return IsChoice(value, { "on", "off" });   // Hunt 2 2026-10-17
 			if (key == "motion_history_fixes") return IsChoice(value, { "on", "off" });   // Hunt 2 fix group 5
+			if (key == "vector_demand") return IsChoice(value, { "on", "off" });   // vector engine on demand
 			if (key == "queue_timing_fixes") return IsChoice(value, { "on", "off" });   // Hunt 2 group 5 (queue/cadence timing)
 			if (key == "general_rate_fixes") return IsChoice(value, { "on", "off" });   // fixed-constant batch 2026-10-18
 			if (key == "efficiency_fixes") return IsChoice(value, { "on", "off" });   // efficiency round 2026-10-18
