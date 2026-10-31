@@ -6169,7 +6169,7 @@ namespace Tests
 				Assert::IsTrue(r.presented, (name + L": frames presented\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.Logged("Vector engine: on"), (name + L": the vector engine is on\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.Logged("Vector engine: vectors delivered"), (name + L": vectors delivered\n" + r.Tail()).c_str());
-				Assert::IsFalse(r.Logged("De-judder: motion estimated"), (name + L": no de-judder estimate ran\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("De-judder extras: warping"), (name + L": no extras ran\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("De-judder: active"), (name + L": the de-judder never active\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("Interpolation: interpolating"), (name + L": no interpolation ran\n" + r.Tail()).c_str());
 			}
