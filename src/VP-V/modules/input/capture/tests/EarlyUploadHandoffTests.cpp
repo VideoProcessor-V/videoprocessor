@@ -3,13 +3,17 @@
 //
 // capture_upload early: the conversion/render hand-off (CPU only, no GPU).
 #include "pch.h"
+#include "CppUnitTest.h"
 #include <VP-V/modules/input/capture/EarlyUploadHandoff.h>
 
 #include <atomic>
 #include <chrono>
 #include <future>
 #include <memory>
+#include <stdexcept>
 #include <thread>
+
+using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 namespace VideoProcessorTest
 {
