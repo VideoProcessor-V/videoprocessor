@@ -9,6 +9,7 @@
 #include <VP-V/modules/input/signal/ResyncShadow.h>
 
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -157,6 +158,28 @@ namespace Tests
 			Assert::AreEqual(std::string("shadow: FULL 607 s ago (start); minor x6 / 10 min; timing x0"), r.Status(607.0));
 		}
 
+		TEST_METHOD(MinorCountSaturatesAtTheRingSize)
+		{
+			Rig r;
+			r.shadow.Configure(Shadow::Mode::Shadow, 100);
+			r.Push(0.0);
+			for (int i = 0; i < 300; ++i)
+				r.PushGap(1.0 + 0.01 * i, "missed frames", 1);
+			Assert::AreEqual(std::string("shadow: FULL 5 s ago (start); minor x256+ / 10 min; timing x0"), r.Status(5.0));
+		}
+
+		TEST_METHOD(AThrowingLoggerDoesNotPropagateAndShowsTheErrorCount)
+		{
+			Rig r;
+			r.shadow.SetLogger([](const std::string&) { throw std::runtime_error("log sink"); });
+			r.shadow.Configure(Shadow::Mode::Shadow, 8);
+			r.Push(1.0);   // FULL start -> logged -> throws inside the logger
+			Assert::AreEqual(uint32_t(1), r.shadow.Errors());
+			Assert::AreEqual(uint32_t(1), r.shadow.GetIndicator()->Total(VpIndicator::kFull), L"the verdict is still recorded");
+			Assert::AreEqual(std::string("shadow: FULL 0 s ago (start); minor x0 / 10 min; timing x0; shadow error x1"), r.Status(1.0));
+			Assert::IsTrue(r.shadow.Active());
+		}
+
 		TEST_METHOD(TimingStepIsCountedAndLoggedOnce)
 		{
 			Rig r;
@@ -246,7 +269,7 @@ namespace Tests
 			r.shadow.Configure(Shadow::Mode::Shadow, 8);
 			const std::shared_ptr<VpIndicator::Indicator> ind = r.shadow.GetIndicator();
 			const std::string prefix = "era=" + std::to_string(ind->Era()) + " capacity=" +
-				std::to_string(ind->Capacity()) + " ancient_below=0; ";
+				std::to_string(ind->Capacity()) + " ancient_below=0 premature_folds=0 clamped=0; ";
 			Assert::AreEqual(prefix, r.Events());
 			r.Push(0.0);
 			r.PushGap(1.0, "missed frames", 2);

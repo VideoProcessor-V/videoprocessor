@@ -72,3 +72,5 @@ S2 (PRE_OUTPUT): SDR tone shape, DV trims, [Stage 13], LED measurement, LED comp
 [black level], | user shaders |, calibration LUT. S3 (OUTPUT): encoding repair, occlusion mask,
 sigma-delta last. The calibration LUT stays in S2 while libplacebo owns the output encoding
 (see `docs/design/segments-callsites.md`).
+
+`Indicator.h`, `Ancestry.h` and `ResyncCause.h` stay in `src/VP-V/core/` because they are skeleton-owned shared headers, not a pipeline slot (a module folder would need a fake slot). The resync detector and its shadow live in `src/VP-V/modules/input/signal`.

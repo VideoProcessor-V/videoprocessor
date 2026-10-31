@@ -25573,7 +25573,7 @@ void LibplaceboVideoRenderer::EnqueueFrame(VideoFrame& videoFrame,
 			const int64_t diagEnqueueQpc = queuedFrame.enqueueQpc;
 			m_frameQueue.push_back(std::move(queuedFrame));
 			m_repeatPreservingDrops = 0;   // carried by this frame
-			if (m_impl)   // R1: resync shadow (read-only facts)
+			if (m_impl && m_impl->resync.Active())   // R1: resync shadow (read-only facts); Off builds no facts
 			{
 				VpResync::EnqueueFacts facts;
 				facts.sequence = sourceSequence;

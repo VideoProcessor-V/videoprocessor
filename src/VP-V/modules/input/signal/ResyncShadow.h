@@ -56,6 +56,9 @@ public:
         m_mode.store(static_cast<uint8_t>(mode), std::memory_order_release);
     }
 
+    // Relaxed load: true in Shadow mode. The renderer gates its whole facts block on this.
+    bool Active() const { return IsShadow(); }
+
     Mode GetMode() const { return static_cast<Mode>(m_mode.load(std::memory_order_relaxed)); }
 
     ArmBox& Arms() { return m_arms; }
@@ -87,16 +90,20 @@ public:
     {
         if (!IsShadow())
             return;
-        if (m_restart.exchange(false, std::memory_order_acq_rel)) {
-            m_detector.Restart();
-            ResetSummary();
+        try {
+            if (m_restart.exchange(false, std::memory_order_acq_rel)) {
+                m_detector.Restart();
+                ResetSummary();
+            }
+            const std::shared_ptr<VpIndicator::Indicator> indicator = std::atomic_load(&m_indicator);
+            if (!indicator)
+                return;
+            const Decision decision = m_detector.OnEnqueue(facts, m_arms);
+            for (uint8_t i = 0; i < decision.count; ++i)
+                Record(*indicator, decision.events[i], nowSeconds);
+        } catch (...) {
+            m_errors.fetch_add(1, std::memory_order_relaxed);   // never propagates into the renderer; shown in the status line
         }
-        const std::shared_ptr<VpIndicator::Indicator> indicator = std::atomic_load(&m_indicator);
-        if (!indicator)
-            return;
-        const Decision decision = m_detector.OnEnqueue(facts, m_arms);
-        for (uint8_t i = 0; i < decision.count; ++i)
-            Record(*indicator, decision.events[i], nowSeconds);
     }
 
     // Display text. False in Off (the line is unknown: no row anywhere).
@@ -104,6 +111,44 @@ public:
     {
         if (!IsShadow())
             return false;
+        try {
+            return BuildStatus(out, nowSeconds);
+        } catch (...) {
+            const uint32_t n = m_errors.fetch_add(1, std::memory_order_relaxed) + 1u;
+            try { out = "shadow: status unavailable; shadow error x" + std::to_string(n); } catch (...) {}
+            return true;
+        }
+    }
+
+    // The Indicator's last 64 events, one item each, joined with " | ". False in Off.
+    bool EventLines(std::string& out) const
+    {
+        if (!IsShadow())
+            return false;
+        try {
+            return BuildEvents(out);
+        } catch (...) {
+            const uint32_t n = m_errors.fetch_add(1, std::memory_order_relaxed) + 1u;
+            try { out = "shadow: events unavailable; shadow error x" + std::to_string(n); } catch (...) {}
+            return true;
+        }
+    }
+
+    // Before frames flow (or from the render thread); safe against a concurrent OnEnqueue.
+    void SetLogger(std::function<void(const std::string&)> logger)
+    {
+        std::atomic_store(&m_logger, std::make_shared<const std::function<void(const std::string&)>>(std::move(logger)));
+    }
+
+    // The current Indicator (shadow only), for tests and later consumers.
+    std::shared_ptr<VpIndicator::Indicator> GetIndicator() const { return std::atomic_load(&m_indicator); }
+
+    // Exceptions swallowed so far (OnEnqueue, StatusLine, EventLines, logger).
+    uint32_t Errors() const { return m_errors.load(std::memory_order_relaxed); }
+
+private:
+    bool BuildStatus(std::string& out, double nowSeconds) const
+    {
         std::string text = "shadow: ";
         if (m_lastFullValid.load(std::memory_order_acquire)) {
             const double age = nowSeconds - m_lastFullTime.load(std::memory_order_relaxed);
@@ -114,7 +159,8 @@ public:
         } else {
             text += "no FULL yet";
         }
-        text += "; minor x" + std::to_string(MinorInWindow(nowSeconds)) + " / 10 min";
+        const uint32_t minors = MinorInWindow(nowSeconds);
+        text += "; minor x" + std::to_string(minors) + (minors >= kMinorRing ? "+" : "") + " / 10 min";
         text += "; timing x" + std::to_string(m_timingCount.load(std::memory_order_relaxed));
         int storm = 0;
         bool engaged = false;
@@ -125,15 +171,20 @@ public:
         }
         if (engaged)
             text += "; storm: " + std::to_string(storm) + " FULL in 10 s (would hold safe settings)";
+        if (const std::shared_ptr<VpIndicator::Indicator> indicator = std::atomic_load(&m_indicator)) {
+            const uint32_t early = indicator->PrematureFolds();
+            if (early > 0)
+                text += "; indicator ring too small (" + std::to_string(early) + " early folds)";
+        }
+        const uint32_t errors = m_errors.load(std::memory_order_relaxed);
+        if (errors > 0)
+            text += "; shadow error x" + std::to_string(errors);
         out = text;
         return true;
     }
 
-    // The Indicator's last 64 events, one item each, joined with " | ". False in Off.
-    bool EventLines(std::string& out) const
+    bool BuildEvents(std::string& out) const
     {
-        if (!IsShadow())
-            return false;
         const std::shared_ptr<VpIndicator::Indicator> indicator = std::atomic_load(&m_indicator);
         if (!indicator)
             return false;
@@ -141,7 +192,9 @@ public:
         const size_t n = indicator->Snapshot(events, VpIndicator::Indicator::kMinCapacity);
         std::string text = "era=" + std::to_string(indicator->Era()) +
             " capacity=" + std::to_string(indicator->Capacity()) +
-            " ancient_below=" + std::to_string(indicator->AncientBelow()) + "; ";
+            " ancient_below=" + std::to_string(indicator->AncientBelow()) +
+            " premature_folds=" + std::to_string(indicator->PrematureFolds()) +
+            " clamped=" + std::to_string(indicator->ClampedAdvances()) + "; ";
         for (size_t i = 0; i < n; ++i) {
             const VpIndicator::Event& e = events[i];
             if (i != 0)
@@ -169,16 +222,7 @@ public:
         return true;
     }
 
-    // Before frames flow (or from the render thread); safe against a concurrent OnEnqueue.
-    void SetLogger(std::function<void(const std::string&)> logger)
-    {
-        std::atomic_store(&m_logger, std::make_shared<const std::function<void(const std::string&)>>(std::move(logger)));
-    }
 
-    // The current Indicator (shadow only), for tests and later consumers.
-    std::shared_ptr<VpIndicator::Indicator> GetIndicator() const { return std::atomic_load(&m_indicator); }
-
-private:
     static constexpr size_t kMinorRing = 256;
     static constexpr double kMinorWindowSeconds = 600.0;
 
@@ -241,8 +285,13 @@ private:
     void Log(const std::string& text) const
     {
         const std::shared_ptr<const std::function<void(const std::string&)>> logger = std::atomic_load(&m_logger);
-        if (logger && *logger)
+        if (!logger || !*logger)
+            return;
+        try {
             (*logger)(text);
+        } catch (...) {
+            m_errors.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 
     void Record(VpIndicator::Indicator& indicator, const Event& e, double nowSeconds)
@@ -313,6 +362,7 @@ private:
     std::atomic<uint32_t> m_minorCount{0};
     std::atomic<uint32_t> m_timingCount{0};
     std::atomic<uint32_t> m_minorNext{0};
+    mutable std::atomic<uint32_t> m_errors{0};
     std::atomic<double> m_minorTimes[kMinorRing];
 };
 
