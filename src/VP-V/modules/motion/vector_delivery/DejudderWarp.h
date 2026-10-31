@@ -9,6 +9,7 @@
 #include <GeneralRate.h>
 
 namespace MotionAhead { struct Flow; }
+namespace CameraModel { struct GuidanceFrame; }
 #include <memory>
 #include <string>
 #include <vector>
@@ -595,7 +596,8 @@ namespace Dejudder
 		int keptLevels = 0;
 		bool keptFullRange = false;
 		bool Search(pl_tex fromHalf, pl_tex toHalf, pl_tex fromL1, pl_tex toL1,
-			pl_tex fromL2, pl_tex toL2, pl_tex global, pl_tex previous, pl_tex out, pl_tex globalTwo = nullptr);
+			pl_tex fromL2, pl_tex toL2, pl_tex global, pl_tex previous, pl_tex out, pl_tex globalTwo = nullptr,
+			pl_tex cameraKeep = nullptr, bool cameraStatic = false);
 		bool Global(pl_tex fromL1, pl_tex toL1, pl_tex fromL2, pl_tex toL2, pl_tex out, pl_tex second = nullptr);
 		// Both directions (A to B into out[0], B to A into out[1]) in the same
 		// four dispatches instead of eight (2026-10-15; each direction's sums,
@@ -604,7 +606,7 @@ namespace Dejudder
 		// Two same-size copies in one dispatch (2026-10-15).
 		bool CopyPair(pl_tex src0, pl_tex dst0, pl_tex src1, pl_tex dst1);
 		bool Refine(pl_tex fromHalf, pl_tex toHalf, pl_tex sweep, pl_tex previous, pl_tex global, pl_tex out,
-			pl_tex opticalFlowVectors = nullptr);
+			pl_tex opticalFlowVectors = nullptr, pl_tex cameraKeep = nullptr, bool cameraStatic = false);
 		bool Copy(pl_tex src, pl_tex dst);
 
 		pl_log log = nullptr;
@@ -717,6 +719,28 @@ namespace Dejudder
 		// producer (null = none). Used when it matches the half size; then no engine
 		// work happens at render time. Cleared by each Estimate.
 		void SetExternalFlow(std::shared_ptr<const MotionAhead::Flow> flow) { externalFlow = std::move(flow); }
+		// Plan 19 phase 2 (global camera model, global_model/CameraGuidanceGpu.h): the measurement plan's
+		// guidance for the NEXT Estimate (null or inactive = today's matcher exactly; nothing bound or
+		// dispatched). Cleared by each Estimate. A low-resolution inner receives it scaled.
+		void SetCameraGuidance(std::shared_ptr<const CameraModel::GuidanceFrame> guidance) { cameraGuidance = std::move(guidance); }
+		// What the last Estimate did with it (visible diagnostics; the per-block accept/escalate counts are
+		// the CPU plan's, the GPU result is not read back).
+		struct CameraGuidanceUse
+		{
+			bool modelGlobal = false, staticFromModel = false, matcherSkipped = false, narrowPass = false, e1Pass = false,
+				fadeNormalised = false;
+			bool narrowDroppedEngine = false;   // narrow planned but the engine seeds / replaces the searches
+			const char* rejected = "";          // non-empty: the per-block guidance was not used (reason)
+			const char* gpuNotApplied = "";     // plan parts the GPU matcher does not do yet (GuidanceFrame)
+		};
+		// The guided passes' accepted block counts of the last guided Estimate (1x1 rgba32f, host-readable
+		// where the format allows): r/g = narrow accepted fwd/bwd, b/a = E1 skipped fwd/bwd (-1 = not run).
+		// Read it late (a frame after), as FrameTrust; escalated = planned (plan counters) - accepted.
+		pl_tex CameraGuidanceCounts() const { return HalvesForSearch() && inner ? inner->cgCounts : cgCounts; }
+		CameraGuidanceUse CameraGuidanceUsed() const
+		{
+			return HalvesForSearch() && inner ? inner->cameraGuidanceUse : cameraGuidanceUse;
+		}
 		bool ExternalFlowUsed() const { return externalFlowUsed || (inner && HalvesForSearch() && inner->ExternalFlowUsed()); }
 		// The last Estimate's D1 came from the engine's field (planner Q1).
 		bool GlobalFromEngine() const { return globalFromEngine || (inner && HalvesForSearch() && inner->GlobalFromEngine()); }
@@ -737,6 +761,14 @@ namespace Dejudder
 		std::string opticalFlowError;
 		bool opticalFlowUsed = false;
 		std::shared_ptr<const MotionAhead::Flow> externalFlow;
+		std::shared_ptr<const CameraModel::GuidanceFrame> cameraGuidance;
+		CameraGuidanceUse cameraGuidanceUse;
+		float cgInputScale = 1.0f;   // this instance's input px per original source px (a lowRes inner: 0.5)
+		pl_tex cgGuide = nullptr, cgCode = nullptr, cgKeep[2] = { nullptr, nullptr }, cgCounts = nullptr;
+		bool CameraGuidanceCount(bool narrow, bool e1);
+		bool CameraGuidanceUpload(const CameraModel::GuidanceFrame& g);
+		bool CameraGuidedPass(const CameraModel::GuidanceFrame& g, int dir, bool e1, pl_tex fromHalf, pl_tex toHalf, pl_tex sweepIn);
+		bool CameraSkipSearches();
 		bool externalFlowUsed = false;
 	};
 }

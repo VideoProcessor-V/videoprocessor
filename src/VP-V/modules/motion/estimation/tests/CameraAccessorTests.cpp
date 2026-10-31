@@ -352,6 +352,104 @@ namespace VideoProcessorTest
 			state.Reset();
 			Assert::AreEqual(0.0, state.Weight(), L"reset");
 		}
+
+		// ---- blend curves ----
+		static double WeightAfterOneUpdate(const CameraModel::Policy& p, double confidence)
+		{
+			using namespace CameraTestSupport;
+			auto rec = PanRecord(confidence);
+			BlendState s;
+			return s.Update(p, rec.get());
+		}
+
+		TEST_METHOD(DefaultCurveIsSmoothstepAndUnchanged)
+		{
+			using namespace CameraTestSupport;
+			using namespace CameraModel;
+			Policy p = On();
+			Assert::IsTrue(p.curve == BlendCurve::Smoothstep, L"default curve");
+			p.rateLimit = 1.0;   // reach the target in one Update
+			const double sweep[] = { 0.5, 0.55, 0.69, 0.7, 0.71, 0.72, 0.75, 0.78, 0.79, 0.8, 0.85, 0.95, 1.0 };
+			for (double c : sweep)
+			{
+				double t = (c - p.threshold) / p.blendWidth;
+				t = (std::min)(1.0, (std::max)(0.0, t));
+				const double expected = t * t * (3.0 - 2.0 * t);
+				Assert::AreEqual(expected, WeightAfterOneUpdate(p, c), 1e-12, L"smoothstep weight");
+			}
+		}
+
+		TEST_METHOD(LinearAndStepCurves)
+		{
+			using namespace CameraTestSupport;
+			using namespace CameraModel;
+			Policy lin = On();
+			lin.rateLimit = 1.0;
+			lin.curve = BlendCurve::Linear;
+			Policy step = lin;
+			step.curve = BlendCurve::Step;
+			const double sweep[] = { 0.5, 0.55, 0.69, 0.71, 0.72, 0.75, 0.78, 0.79, 0.81, 0.85, 0.95, 1.0 };
+			for (double c : sweep)
+			{
+				double t = (c - lin.threshold) / lin.blendWidth;
+				t = (std::min)(1.0, (std::max)(0.0, t));
+				Assert::AreEqual(t, WeightAfterOneUpdate(lin, c), 1e-12, L"linear weight");
+				Assert::AreEqual(t >= 1.0 ? 1.0 : 0.0, WeightAfterOneUpdate(step, c), 1e-12, L"step weight");
+			}
+			// Step: weight 0 just below threshold + blendWidth, 1 at/above it; the rate limit still applies.
+			Assert::AreEqual(0.0, WeightAfterOneUpdate(step, 0.79), 0.0, L"step below the upper edge");
+			Assert::AreEqual(1.0, WeightAfterOneUpdate(step, 0.81), 0.0, L"step above the upper edge");
+			step.rateLimit = 0.25;
+			auto rec = PanRecord(0.95);
+			BlendState s;
+			Assert::AreEqual(0.25, s.Update(step, rec.get()), 1e-12, L"step is rate limited");
+			Settle(s, step, rec.get());
+			Assert::AreEqual(1.0, s.Weight(), L"step reaches 1");
+			// The hard floor and the disabled switch are curve independent.
+			Assert::AreEqual(0.0, WeightAfterOneUpdate(lin, 0.4), 0.0, L"below the floor");
+			Policy off = lin;
+			off.enabled = false;
+			Assert::AreEqual(0.0, WeightAfterOneUpdate(off, 0.95), 0.0, L"disabled");
+		}
+
+		// ---- consumer presets ----
+		TEST_METHOD(ConsumerPresets)
+		{
+			using namespace CameraModel;
+			const Consumer all[] = { Consumer::Debander, Consumer::DitherVectors, Consumer::GrainMap, Consumer::ResidualStabilise,
+				Consumer::TextureRestore, Consumer::OcclusionMask, Consumer::DejudderWarp, Consumer::RollOff, Consumer::CameraObjectSplit };
+			const Policy standard;
+			const Policy dejudder = PolicyFor(Consumer::DejudderWarp);
+			for (Consumer c : all)
+			{
+				const Policy p = PolicyFor(c);
+				Assert::IsFalse(p.enabled, L"every preset is disabled");
+				Assert::IsTrue(p.curve == BlendCurve::Smoothstep, L"preset curve");
+				Assert::IsTrue(p.preferModelWhenAgrees == (c == Consumer::TextureRestore), L"only TextureRestore prefers the model");
+				if (c == Consumer::DejudderWarp)
+					continue;
+				Assert::AreEqual(0.7, p.threshold, 0.0, L"standard threshold");
+				Assert::AreEqual(standard.floor, p.floor, 0.0, L"standard floor");
+				Assert::AreEqual(standard.blendWidth, p.blendWidth, 0.0, L"standard width");
+				Assert::AreEqual(standard.hysteresis, p.hysteresis, 0.0, L"standard hysteresis");
+				Assert::AreEqual(standard.rateLimit, p.rateLimit, 0.0, L"standard rate");
+				Assert::IsTrue(dejudder.threshold > p.threshold && dejudder.floor > p.floor && dejudder.blendWidth < p.blendWidth &&
+					dejudder.rateLimit < p.rateLimit, L"DejudderWarp is the strictest");
+			}
+			Assert::AreEqual(0.85, dejudder.threshold, 0.0, L"dejudder threshold");
+			Assert::AreEqual(0.7, dejudder.floor, 0.0, L"dejudder floor");
+			Assert::AreEqual(0.05, dejudder.blendWidth, 0.0, L"dejudder width");
+			Assert::AreEqual(0.2, dejudder.rateLimit, 0.0, L"dejudder rate");
+			// A preset enabled by its consumer behaves like any enabled policy; as shipped it is the identity.
+			using namespace CameraTestSupport;
+			auto rec = PanRecord(0.95);
+			BlendState s;
+			const Policy shipped = PolicyFor(Consumer::TextureRestore);
+			Settle(s, shipped, rec.get());
+			float ox = 0, oy = 0;
+			Assert::IsTrue(FieldVector(shipped, s, rec.get(), 3, 3, false, 1.0f, 2.0f, ox, oy) == Choice::Hold && ox == 1.0f && oy == 2.0f,
+				L"a disabled preset returns the input");
+		}
 	};
 
 	TEST_CLASS(CameraHintsTests)
@@ -598,6 +696,38 @@ namespace VideoProcessorTest
 			const SearchHints h = Build(HintConfig(), rec.get(), f.x.data(), f.y.data(), f.x.data(), f.y.data());
 			Assert::IsTrue(h.hint[0] == static_cast<uint8_t>(BlockHint::NarrowAroundPrediction), L"known object narrow");
 			Assert::IsTrue(h.hint[1] == static_cast<uint8_t>(BlockHint::FullSearch), L"unknown object full");
+		}
+
+		TEST_METHOD(ObjectBlockSeedAndReferenceAreTheObjectModelNotTheCameraVector)
+		{
+			using namespace CameraTestSupport;
+			using namespace CameraModel;
+			auto blocks = PanBlocks();
+			blocks->label[0] = static_cast<uint8_t>(Label::Object);
+			blocks->objectId[0] = 3;
+			auto rec = PanRecord(0.95, blocks);
+			ObjectModel obj;
+			obj.id = 3;
+			obj.type = ModelType::Translation;
+			obj.h[2] = 12.0;   // the object moves (+12, 0) while the camera pans (-20, 0)
+			rec->objects.push_back(obj);
+			Field f;
+			std::vector<float> nx(f.x.size(), -20.0f), ny(f.y.size(), 0.0f);
+			nx[0] = 12.0f;   // NVOF agrees with the object, not with the camera
+			HintConfig cfg;
+			cfg.temporalSeed = false;
+			SearchHints h = Build(cfg, rec.get(), f.x.data(), f.y.data(), nx.data(), ny.data());
+			Assert::IsTrue(h.hint[0] == static_cast<uint8_t>(BlockHint::NarrowAroundPrediction), L"object block agrees with its own model");
+			Assert::AreEqual(12.0f, h.seedX[0], L"seed is the object prediction at the block centre");
+			Assert::AreEqual(-20.0f, h.seedX[1], L"camera blocks keep the camera vector");
+			// No NVOF at all: the reference is the object model too (not the camera vector), so it still narrows.
+			h = Build(cfg, rec.get(), nullptr, nullptr, nullptr, nullptr);
+			Assert::IsTrue(h.hint[0] == static_cast<uint8_t>(BlockHint::NarrowAroundPrediction), L"no NVOF: object model reference");
+			Assert::AreEqual(12.0f, h.seedX[0], L"seed without NVOF");
+			// NVOF disagreeing with the object model: full search.
+			nx[0] = -20.0f;
+			h = Build(cfg, rec.get(), nullptr, nullptr, nx.data(), ny.data());
+			Assert::IsTrue(h.hint[0] == static_cast<uint8_t>(BlockHint::FullSearch), L"NVOF follows the camera: disagreement");
 		}
 
 		TEST_METHOD(DefaultPrecisionScalesWithTheBlockSize)

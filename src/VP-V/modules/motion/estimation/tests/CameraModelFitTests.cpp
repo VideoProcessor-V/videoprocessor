@@ -608,5 +608,116 @@ namespace VideoProcessorTest
 			const CameraMotion r = off.Fit(f.Input(kPairSeconds, 5));
 			Require(r.objects.empty(), Fmt("objects off", r));
 		}
+
+		// ---- model type step-down on the early-exit path ----
+		TEST_METHOD(HomographyStepsDownWhenTheMotionBecomesAPurePan)
+		{
+			// Perspective strength fades out over a few pairs (so every pair's previous model is a good start and the
+			// early-exit path is taken), then the motion is a pure pan: the model must relax by one type per pair.
+			const GridSpec g = Grid4K();
+			const double W = g.w * g.blockSize;
+			auto model = [&](double a)
+			{
+				const double h[9] = { 1, 0, 3.0, 0, 1, -2.0, 0.04 / W * a, 0.02 / W * a, 1 };
+				return MakeParams(a > 0 ? ModelType::Homography : ModelType::Translation, h);
+			};
+			const double strength[] = { 1.0, 0.6, 0.3, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+			Fitter fitter;
+			std::string types;
+			int firstLow = -1, firstZero = -1, sawHomography = 0;
+			for (int i = 0; i < 10; ++i)
+			{
+				Field f(g);
+				f.FromModel(model(strength[i]));
+				f.AddNoise(0.05, 300 + i);
+				const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5 + i));
+				const std::string tag = "pair " + std::to_string(i);
+				Require(r.valid && r.confidence >= 0.5, Fmt(tag.c_str(), r));
+				Require(ModelError(r, model(strength[i]), f.picture) < kTol, Fmt(tag.c_str(), r));
+				types += std::to_string(static_cast<int>(r.params.type));
+				if (r.params.type == ModelType::Homography) sawHomography = 1;
+				if (strength[i] == 0.0)
+				{
+					if (firstZero < 0) firstZero = i;
+					if (firstLow < 0 && static_cast<int>(r.params.type) <= kSim) firstLow = i;
+				}
+			}
+			Logger::WriteMessage(("CAMERA_STEPDOWN model types per pair (1 trans, 2 sim, 3 affine, 4 homography): " + types + "\n").c_str());
+			Require(sawHomography == 1, "the sequence never reached a homography: " + types);
+			Require(firstLow >= 0 && firstLow - firstZero <= 3, "the model did not relax to Similarity or Translation within 4 pure-pan pairs: " + types);
+		}
+
+		// ---- recycled block data while an earlier record is held ----
+		struct Snapshot
+		{
+			double h[9];
+			double confidence;
+			std::vector<uint8_t> label, objectId, tinyMover, excluded;
+			std::vector<float> resX, resY, modelX, modelY;
+			float absThr, relThr;
+			explicit Snapshot(const CameraMotion& r)
+			{
+				std::memcpy(h, r.params.h, sizeof(h));
+				confidence = r.confidence;
+				const BlockData& b = *r.blocks;
+				label = b.label; objectId = b.objectId; tinyMover = b.tinyMover; excluded = b.excluded;
+				resX = b.resX; resY = b.resY; modelX = b.modelX; modelY = b.modelY;
+				absThr = b.absThresholdPx; relThr = b.relThreshold;
+			}
+			bool operator==(const Snapshot& o) const
+			{
+				return std::memcmp(h, o.h, sizeof(h)) == 0 && std::memcmp(&confidence, &o.confidence, sizeof(confidence)) == 0 &&
+					label == o.label && objectId == o.objectId && tinyMover == o.tinyMover && excluded == o.excluded &&
+					resX == o.resX && resY == o.resY && modelX == o.modelX && modelY == o.modelY &&
+					std::memcmp(&absThr, &o.absThr, 4) == 0 && std::memcmp(&relThr, &o.relThr, 4) == 0;
+			}
+		};
+
+		static Field PairFor(int i)
+		{
+			Field f(Grid4K());
+			f.FromModel(PanModel(10.0 + 0.7 * i, -4.0 + 0.3 * i));
+			f.AddNoise(0.05, 400 + i);
+			if (i % 2 == 1) f.AddObject(100 + i, 60, 6, 4, -20, 15);
+			if (i % 3 == 0) f.AddLogo(10, 8, 4, 4, false);
+			return f;
+		}
+
+		TEST_METHOD(HeldRecordSurvivesPoolRecyclingAndRefitIsBitwiseEqual)
+		{
+			std::vector<Snapshot> first;
+			Fitter fitter;
+			CameraMotion held;
+			std::vector<const BlockData*> addresses;
+			for (int i = 0; i < 6; ++i)
+			{
+				Field f = PairFor(i);
+				CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5 + i));
+				Require(r.valid && r.blocks != nullptr, Fmt("pair", r));
+				first.push_back(Snapshot(r));
+				if (i == 0)
+					held = r;   // HOLD pair 1's record (keeps its BlockData alive); the rest are dropped
+				else
+					addresses.push_back(r.blocks.get());
+			}
+			Require(held.blocks != nullptr, "held record has blocks");
+			for (const BlockData* a : addresses)
+				Require(a != held.blocks.get(), "a held BlockData was recycled");
+			// Pool recycling happened for the unheld records: fewer distinct buffers than records.
+			std::set<const BlockData*> distinct(addresses.begin(), addresses.end());
+			Require(distinct.size() < addresses.size(), "no BlockData was recycled (" + std::to_string(distinct.size()) + " distinct of " +
+				std::to_string(addresses.size()) + ")");
+			// The held record is bitwise what it was right after fitting.
+			Require(Snapshot(held) == first[0], "the held record's blocks changed after pool recycling");
+
+			// A fresh Fitter over the same sequence gives bitwise-equal records for every pair.
+			Fitter again;
+			for (int i = 0; i < 6; ++i)
+			{
+				Field f = PairFor(i);
+				const CameraMotion r = again.Fit(f.Input(kPairSeconds, 5 + i));
+				Require(Snapshot(r) == first[static_cast<size_t>(i)], "refit differs at pair " + std::to_string(i));
+			}
+		}
 	};
 }

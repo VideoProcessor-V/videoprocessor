@@ -184,8 +184,9 @@ namespace CameraModel
 				q.type = p.type;
 				if (IsDegenerate(q, f.pic))
 					break;
-				// Converged: the step moved no picture corner by more than 1% of the vector precision; the
-				// next reweighting would reproduce the same set, so further iterations are skipped.
+				// Converged: the step moved no picture corner by more than 1% of the vector precision; further
+				// iterations would change the model by less than that, so they are skipped (a stopping rule,
+				// not a fixed point).
 				const bool converged = MaxCornerDifference(q, p, f.pic) * f.diag <= 0.01 * f.prec;
 				p = q;
 				any = true;
@@ -695,6 +696,34 @@ namespace CameraModel
 					chosenCost = cost;
 				}
 			}
+			// Early exit, step down: the loop above only tries one step UP from H0's type, so a model that was a
+			// homography would never relax when the motion becomes a pure pan. When the type is still H0's and
+			// above Translation, fit ONE type down from the same weighted set; the lower type wins when the
+			// higher one does not earn its extra parameters under the same complexity-penalty test.
+			if (c.stepDownOnEarlyExit && earlyExit && haveChosen && chosen.type == w.type && chosen.type > ModelType::Translation)
+			{
+				const ModelType lowerTy = kAll[static_cast<int>(chosen.type) - static_cast<int>(ModelType::Translation) - 1];
+				Params lp;
+				if (static_cast<int>(wbuf.size()) >= MinimalCount(lowerTy) &&
+					FitWeighted(lowerTy, wbuf.data(), static_cast<int>(wbuf.size()), f.halfDiag, lp))
+				{
+					lp.type = lowerTy;
+					if (!IsDegenerate(lp, f.pic))
+					{
+						Refine(f, f.s, lp, irls);
+						if (!IsDegenerate(lp, f.pic))
+						{
+							const double costLower = supportCost(lp);
+							const double extra = ParamCount(chosen.type) - ParamCount(lowerTy);
+							if ((costLower - chosenCost) / std::max(chosenCost, tiny) <= c.complexityPenaltyPerParam * extra)
+							{
+								chosen = lp;
+								chosenCost = costLower;
+							}
+						}
+					}
+				}
+			}
 			if (!haveChosen)
 			{
 				rec.reason = Reason::Degenerate;
@@ -1001,6 +1030,24 @@ namespace CameraModel
 			bd->gridW = gw;
 			bd->gridH = gh;
 			bd->blockSize = in.blockSize;
+			if (!c.cpuLabels && !c.objects)
+			{
+				// The GPU label pass produces label / residual / model / tiny; the arrays stay empty (size 0), which
+				// the accessor and the search hints treat as "no model for this block" (today's behaviour).
+				bd->label.clear();
+				bd->resX.clear();
+				bd->resY.clear();
+				bd->modelX.clear();
+				bd->modelY.clear();
+				bd->objectId.clear();
+				bd->tinyMover.clear();
+				bd->excluded = f.excluded;
+				bd->absThresholdPx = static_cast<float>(f.absThr);
+				bd->relThreshold = static_cast<float>(f.rel);
+				rec.labelsOnGpu = true;
+				rec.blocks = bd;
+				return;
+			}
 			bd->label.resize(nb);                   // all written by labelRow
 			bd->resX.resize(nb);                    // resX/resY/modelX/modelY/tinyMover: all written below
 			bd->resY.resize(nb);
