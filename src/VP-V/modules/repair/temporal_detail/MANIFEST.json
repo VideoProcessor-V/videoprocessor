@@ -1,0 +1,44 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "repair.temporal_detail",
+  "unit": "repair",
+  "order": 90,
+  "status": "draft",
+  "successor_of": "repair.texture_restore",
+  "code_location": "migrated",
+  "live_files": [
+    "src/VP-V/modules/repair/temporal_detail/TemporalDetail.h",
+    "src/VP-V/modules/repair/temporal_detail/TemporalDetailMotion.h",
+    "src/VP-V/modules/repair/temporal_detail/TemporalDetailProducts.h",
+    "src/VP-V/modules/repair/temporal_detail/TemporalDetailModel.h",
+    "src/VP-V/modules/repair/temporal_detail/TemporalDetailShaders.h",
+    "src/VP-V/modules/repair/temporal_detail/README.md",
+    "src/VP-V/modules/repair/temporal_detail/tests/TemporalDetailModelTests.cpp"
+  ],
+  "forwarding_headers": [],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [
+      "temporal_detail",
+      "temporal_detail_boost_max",
+      "temporal_detail_max_age",
+      "temporal_detail_strength"
+    ],
+    "upstream_modules": [
+      "repair.encoding",
+      "repair.deband",
+      "repair.grain_split",
+      "motion.estimation"
+    ]
+  },
+  "fallback_when_missing": "Draft: not wired; when wired, failure renders without it and is counted in the status.",
+  "fallback_entry": "Temporal detail: inactive (<reason>)"
+}
