@@ -6,6 +6,7 @@
   "status": "built",
   "code_location": "partly migrated",
   "live_files": [
+    "src/VP-V/modules/motion/estimation/ProducerRecovery.h",
     "src/VP-V/modules/motion/estimation/NvOpticalFlow.cpp",
     "src/VP-V/modules/motion/estimation/NvOpticalFlow.h",
     "src/VP-V/modules/motion/consumers/DejudderWarp.cpp",

@@ -167,6 +167,18 @@ namespace FallbackCatalog
 		return Engaged("motion", reason + (error.empty() ? std::string() : ": " + error) + ")");
 	}
 
+	// ---- motion.estimation: the vector producer's restarts (bug hunt 35 #1) -----------------------
+	// The look-ahead producer stopped after three failed jobs in a row and restarts itself with a
+	// back-off (MotionAhead::ProducerRecovery). Engaged while it is wanted and waiting to restart,
+	// for every vector consumer (the "motion" entry above covers only the de-judder's view).
+	inline Decision VectorProducer(bool wanted, bool recovering, unsigned stops, const std::string& error = std::string())
+	{
+		if (!wanted || !recovering)
+			return Released("vector producer");
+		return Engaged("vector producer", "render-time motion estimate; the look-ahead stopped" +
+			(error.empty() ? std::string() : ": " + error) + "; restarting with back-off (stop " + std::to_string(stops) + ")");
+	}
+
 	// ---- motion.consumers -----------------------------------------------------------------------
 	// A picture between frames could not be made on the GPU (the de-judder warp, the rendered warp
 	// or the interpolation failed): the source frame is shown instead (the de-judder holds). Engaged

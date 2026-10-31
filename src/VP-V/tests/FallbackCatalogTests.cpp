@@ -9,6 +9,7 @@
 // otherwise, keeps its stable id, and Sync() changes the heading only on a real change.
 
 #include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/modules/motion/estimation/ProducerRecovery.h>
 
 #include <string>
 
@@ -165,6 +166,52 @@ namespace FallbackCatalogTest
 			Assert::AreEqual(std::string("texture restore"), restore.id);
 			Assert::IsFalse(TextureRestoreFailed(false, "x").engaged);
 			Assert::AreEqual(std::string("texture restore"), TextureRestoreFailed(false, "x").id);
+		}
+
+		// Bug hunt 35 #1: the vector producer restarts with a back-off instead of stopping for the
+		// session, and the stop is visible to every vector consumer while it waits.
+		TEST_METHOD(VectorProducerRestartBackOffAndEntry)
+		{
+			using MotionAhead::ProducerRecovery;
+			const unsigned long long first = ProducerRecovery::kFirstDelayMs, later = ProducerRecovery::kLaterDelayMs,
+				healthy = ProducerRecovery::kHealthyMs;
+			ProducerRecovery r;
+			Assert::IsFalse(r.Recovering());
+			Assert::AreEqual(first, static_cast<unsigned long long>(r.OnStopped(1000)));
+			Assert::IsTrue(r.Recovering());
+			Assert::AreEqual(first - 1000, static_cast<unsigned long long>(r.RemainingMs(2000)));
+			r.OnRestarted(6000);
+			Assert::IsFalse(r.Recovering());
+			Assert::AreEqual(0ull, static_cast<unsigned long long>(r.RemainingMs(6000)));
+			// Failing again soon after the restart: the long wait, and it stays long.
+			Assert::AreEqual(later, static_cast<unsigned long long>(r.OnStopped(7000)));
+			r.OnRestarted(67000);
+			Assert::AreEqual(later, static_cast<unsigned long long>(r.OnStopped(67000 + healthy - 1)));
+			// A restart that ran healthy for the healthy interval forgives: the short wait again.
+			const uint64_t t = 200000;
+			r.OnRestarted(t);
+			Assert::AreEqual(first, static_cast<unsigned long long>(r.OnStopped(t + healthy)));
+			Assert::AreEqual(4u, r.Stops());
+			Assert::AreEqual(3u, r.Restarts());
+			// A stop that never restarted (no device) keeps growing the wait.
+			ProducerRecovery n;
+			n.OnStopped(0);
+			Assert::AreEqual(later, static_cast<unsigned long long>(n.OnStopped(first)));
+
+			const Decision off = VectorProducer(false, true, 1, "x");
+			Assert::IsFalse(off.engaged);
+			Assert::AreEqual(std::string("vector producer"), off.id);
+			Assert::IsFalse(VectorProducer(true, false, 3, "x").engaged);   // running again: released
+			const Decision on = VectorProducer(true, true, 2, "cannot create its textures");
+			Assert::IsTrue(on.engaged);
+			Assert::AreEqual(std::string("vector producer"), on.id);
+			Assert::IsTrue(Has(on, "cannot create its textures"));
+			Assert::IsTrue(Has(on, "restarting with back-off (stop 2)"));
+			FallbackStatus::Registry registry;
+			Assert::IsTrue(Sync(registry, on));
+			Assert::IsFalse(Sync(registry, on));   // the same stop: no heading churn
+			Assert::IsTrue(Sync(registry, VectorProducer(true, false, 2)));
+			Assert::IsFalse(registry.Engaged("vector producer"));
 		}
 
 		TEST_METHOD(MotionConsumerGpuFailuresAreVisibleWhileRecent)
