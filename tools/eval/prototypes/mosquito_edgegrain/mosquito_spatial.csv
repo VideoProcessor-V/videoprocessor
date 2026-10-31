@@ -1,0 +1,197 @@
+content_type,clip,case,metric,candidate,default,delta,trend,flag,note
+sports50_60,Bosphorus,native_x264_crf28,psnr_Y,38.085,38.085,4.57075e-05,same,PASS,
+sports50_60,Bosphorus,native_x264_crf28,psnr_Cb,43.3014,43.3014,0,same,PASS,
+sports50_60,Bosphorus,native_x264_crf28,psnr_Cr,42.9608,42.9608,0,same,PASS,
+sports50_60,Bosphorus,native_x264_crf28,ssim_Y,0.932068,0.932067,4.91433e-07,same,PASS,
+sports50_60,Bosphorus,native_x264_crf28,ssim_Cb,0.970557,0.970557,0,same,PASS,
+sports50_60,Bosphorus,native_x264_crf28,ssim_Cr,0.970481,0.970481,0,same,PASS,
+sports50_60,Bosphorus,native_x264_crf28,lpips,NA,NA,NA,NA,NA,"lpips NA (not requested, or torch/lpips unavailable)"
+sports50_60,Bosphorus,native_x264_crf28,grain_tiles_Y,16,16,0,NA,INFO,
+sports50_60,Bosphorus,native_x264_crf28,grain_rms_ratio_Y,0.225393,0.225393,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+sports50_60,Bosphorus,native_x264_crf28,grain_hf_ratio_Y,NA,NA,NA,NA,NA,needs >= 8 frames (4 available)
+sports50_60,Bosphorus,native_x264_crf28,grain_lag1_delta_Y,0.198603,0.198603,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+sports50_60,Bosphorus,native_x264_crf28,grain_tiles_Cb,16,16,0,NA,INFO,
+sports50_60,Bosphorus,native_x264_crf28,grain_rms_ratio_Cb,0.223676,0.223676,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+sports50_60,Bosphorus,native_x264_crf28,grain_hf_ratio_Cb,NA,NA,NA,NA,NA,needs >= 8 frames (4 available)
+sports50_60,Bosphorus,native_x264_crf28,grain_lag1_delta_Cb,0.18438,0.18438,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+sports50_60,Bosphorus,native_x264_crf28,grain_keep_vs_input_Y,1,1,0,same,PASS,
+sports50_60,Bosphorus,native_x264_crf28,grain_lag1_vs_input_Y,0,0,0,same,PASS,
+sports50_60,Bosphorus,native_x264_crf28,grain_keep_vs_input_Cb,1,1,0,same,PASS,
+sports50_60,Bosphorus,native_x264_crf28,grain_lag1_vs_input_Cb,0,0,0,same,PASS,
+sports50_60,Bosphorus,native_x264_crf28,btb_kept_vs_input_Y,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+sports50_60,Bosphorus,native_x264_crf28,wtw_kept_vs_input_Y,1,1,0,same,PASS,
+sports50_60,Bosphorus,native_x264_crf28,btb_kept_vs_input_C,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+sports50_60,Bosphorus,native_x264_crf28,wtw_kept_vs_input_C,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+sports50_60,Bosphorus,native_x264_crf28,flicker_excess_Y,0.343113,0.343094,1.92157e-05,same,PASS,
+sports50_60,Bosphorus,native_x264_crf28,gop_ratio_gop,NA,NA,NA,NA,NA,GOP 250 longer than half the window (4 frames)
+sports50_60,Bosphorus,native_x264_crf28,gop_ratio_minigop,NA,NA,NA,NA,NA,GOP 250 longer than half the window (4 frames)
+sports50_60,Bosphorus,native_x264_crf28,ghost_coeff_Y,0.214582,0.214583,-1.44245e-06,same,PASS,
+sports50_60,Bosphorus,native_x264_crf28,smear_Y,0.692739,0.692724,1.49618e-05,better,PASS,
+sports50_60,Bosphorus,native_x264_crf28,duplicate_rate_Y,0,0,0,same,PASS,
+sports50_60,Bosphorus,native_x264_crf28,halo_overshoot_Y,3.32326e-05,3.32458e-05,-1.32125e-08,same,PASS,
+sports50_60,Bosphorus,native_x264_crf28,lc_ratio_s1_Y,0.683738,0.683742,-3.79882e-06,better,PASS,
+sports50_60,Bosphorus,native_x264_crf28,lc_ratio_s2_Y,0.794985,0.794984,1.76159e-06,worse,PASS,
+sports50_60,Bosphorus,native_x264_crf28,lc_ratio_s3_Y,0.876648,0.876645,2.94763e-06,worse,PASS,
+sports50_60,Bosphorus,native_x264_crf28,lc_boost_fraction_Y,0,0,0,same,PASS,
+sports50_60,Bosphorus,native_x264_crf28,btb_kept_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,Bosphorus,native_x264_crf28,wtw_kept_Y,0.492153,0.480854,0.0112994,better,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+sports50_60,Bosphorus,native_x264_crf28,clip_detect_Y,0,0,0,same,PASS,
+sports50_60,Bosphorus,native_x264_crf28,btb_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,Bosphorus,native_x264_crf28,wtw_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,Bosphorus,native_x264_crf28,clip_detect_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,Bosphorus,native_x264_crf28,ringing_energy_ratio_Y,0.9995,1,-0.00050042,NA,INFO,
+sports50_60,Bosphorus,native_x264_crf28,ringing_band_share,0.00638994,0.00638994,0,NA,INFO,
+sports50_60,Bosphorus,native_x264_crf28,psnr_band_Y,35.2991,35.2985,0.000574076,same,PASS,
+sports50_60,Bosphorus,native_x264_crf28,edge_keep_vs_input_Y,1.00003,1,2.53596e-05,NA,INFO,
+sports50_60,Bosphorus,native_x264_crf28,edge_keep_vs_master_Y,0.944816,0.944792,2.39596e-05,NA,INFO,
+sports50_60,Bosphorus,native_x264_crf28,grain_probe_keep_edge_vs_input_Y,0.994672,1,-0.00532812,worse,PASS,
+sports50_60,Bosphorus,native_x264_crf28,grain_probe_lag1_edge_vs_input_Y,0.000201016,0,0.000201016,worse,PASS,
+sports50_60,Bosphorus,native_x264_crf28,grain_probe_keep_flat_vs_input_Y,0.999953,1,-4.74063e-05,worse,PASS,
+sports50_60,Bosphorus,native_x264_crf28,grain_probe_lag1_flat_vs_input_Y,-2.81794e-07,0,-2.81794e-07,better,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,psnr_Y,40.5982,40.5978,0.000382101,same,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,psnr_Cb,45.6546,45.6546,0,same,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,psnr_Cr,44.8121,44.8121,0,same,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,ssim_Y,0.946946,0.946944,2.49488e-06,same,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,ssim_Cb,0.978396,0.978396,0,same,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,ssim_Cr,0.974858,0.974858,0,same,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,lpips,NA,NA,NA,NA,NA,"lpips NA (not requested, or torch/lpips unavailable)"
+sports50_60,Bosphorus,native_av1fgs_crf35,grain_tiles_Y,16,16,0,NA,INFO,
+sports50_60,Bosphorus,native_av1fgs_crf35,grain_rms_ratio_Y,0.603347,0.603347,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+sports50_60,Bosphorus,native_av1fgs_crf35,grain_hf_ratio_Y,NA,NA,NA,NA,NA,needs >= 8 frames (4 available)
+sports50_60,Bosphorus,native_av1fgs_crf35,grain_lag1_delta_Y,0.0203852,0.0203852,0,same,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,grain_tiles_Cb,16,16,0,NA,INFO,
+sports50_60,Bosphorus,native_av1fgs_crf35,grain_rms_ratio_Cb,0.637128,0.637128,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+sports50_60,Bosphorus,native_av1fgs_crf35,grain_hf_ratio_Cb,NA,NA,NA,NA,NA,needs >= 8 frames (4 available)
+sports50_60,Bosphorus,native_av1fgs_crf35,grain_lag1_delta_Cb,-0.018765,-0.018765,0,same,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,grain_keep_vs_input_Y,1,1,0,same,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,grain_lag1_vs_input_Y,0,0,0,same,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,grain_keep_vs_input_Cb,1,1,0,same,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,grain_lag1_vs_input_Cb,0,0,0,same,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,btb_kept_vs_input_Y,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+sports50_60,Bosphorus,native_av1fgs_crf35,wtw_kept_vs_input_Y,1,1,0,same,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,btb_kept_vs_input_C,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+sports50_60,Bosphorus,native_av1fgs_crf35,wtw_kept_vs_input_C,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+sports50_60,Bosphorus,native_av1fgs_crf35,flicker_excess_Y,0.25505,0.255071,-2.11666e-05,same,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,gop_ratio_gop,NA,NA,NA,NA,NA,GOP 250 longer than half the window (4 frames)
+sports50_60,Bosphorus,native_av1fgs_crf35,gop_ratio_minigop,NA,NA,NA,NA,NA,GOP 250 longer than half the window (4 frames)
+sports50_60,Bosphorus,native_av1fgs_crf35,ghost_coeff_Y,0.151748,0.151758,-1.06985e-05,same,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,smear_Y,0.807707,0.807639,6.84345e-05,better,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,duplicate_rate_Y,0,0,0,same,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,halo_overshoot_Y,2.45694e-05,2.46664e-05,-9.697e-08,same,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,lc_ratio_s1_Y,0.838332,0.838357,-2.42481e-05,better,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,lc_ratio_s2_Y,0.902801,0.902798,2.31519e-06,worse,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,lc_ratio_s3_Y,0.944736,0.944728,7.59006e-06,worse,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,lc_boost_fraction_Y,0,0,0,same,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,btb_kept_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,Bosphorus,native_av1fgs_crf35,wtw_kept_Y,0.572191,0.567483,0.0047081,better,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+sports50_60,Bosphorus,native_av1fgs_crf35,clip_detect_Y,0,0,0,same,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,btb_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,Bosphorus,native_av1fgs_crf35,wtw_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,Bosphorus,native_av1fgs_crf35,clip_detect_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,Bosphorus,native_av1fgs_crf35,ringing_energy_ratio_Y,0.9964,1,-0.00359961,NA,INFO,
+sports50_60,Bosphorus,native_av1fgs_crf35,ringing_band_share,0.00638994,0.00638994,0,NA,INFO,
+sports50_60,Bosphorus,native_av1fgs_crf35,psnr_band_Y,39.2161,39.2097,0.00641299,same,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,edge_keep_vs_input_Y,1.00027,1,0.000272256,NA,INFO,
+sports50_60,Bosphorus,native_av1fgs_crf35,edge_keep_vs_master_Y,0.971946,0.971682,0.000264546,NA,INFO,
+sports50_60,Bosphorus,native_av1fgs_crf35,grain_probe_keep_edge_vs_input_Y,0.993268,1,-0.00673225,worse,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,grain_probe_lag1_edge_vs_input_Y,3.01554e-05,0,3.01554e-05,worse,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,grain_probe_keep_flat_vs_input_Y,0.999967,1,-3.29691e-05,worse,PASS,
+sports50_60,Bosphorus,native_av1fgs_crf35,grain_probe_lag1_flat_vs_input_Y,1.15722e-06,0,1.15722e-06,worse,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,psnr_Y,37.7131,37.7127,0.000450295,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,psnr_Cb,44.8414,44.8414,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,psnr_Cr,44.788,44.788,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,ssim_Y,0.939924,0.939918,5.7841e-06,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,ssim_Cb,0.983823,0.983823,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,ssim_Cr,0.983633,0.983633,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,lpips,NA,NA,NA,NA,NA,"lpips NA (not requested, or torch/lpips unavailable)"
+film24,tos4k,x265_2160p_6000k_w2400,grain_tiles_Y,16,16,0,NA,INFO,
+film24,tos4k,x265_2160p_6000k_w2400,grain_rms_ratio_Y,0.823371,0.823402,-3.12786e-05,worse,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+film24,tos4k,x265_2160p_6000k_w2400,grain_hf_ratio_Y,NA,NA,NA,NA,NA,needs >= 8 frames (6 available)
+film24,tos4k,x265_2160p_6000k_w2400,grain_lag1_delta_Y,0.0279666,0.0279679,-1.34628e-06,better,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,grain_tiles_Cb,16,16,0,NA,INFO,
+film24,tos4k,x265_2160p_6000k_w2400,grain_rms_ratio_Cb,0.628659,0.628659,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+film24,tos4k,x265_2160p_6000k_w2400,grain_hf_ratio_Cb,NA,NA,NA,NA,NA,needs >= 8 frames (6 available)
+film24,tos4k,x265_2160p_6000k_w2400,grain_lag1_delta_Cb,0.0755582,0.0755582,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+film24,tos4k,x265_2160p_6000k_w2400,grain_keep_vs_input_Y,0.999962,1,-3.7987e-05,worse,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,grain_lag1_vs_input_Y,-1.34628e-06,0,-1.34628e-06,better,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,grain_keep_vs_input_Cb,1,1,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,grain_lag1_vs_input_Cb,0,0,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,btb_kept_vs_input_Y,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+film24,tos4k,x265_2160p_6000k_w2400,wtw_kept_vs_input_Y,1,1,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,btb_kept_vs_input_C,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+film24,tos4k,x265_2160p_6000k_w2400,wtw_kept_vs_input_C,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+film24,tos4k,x265_2160p_6000k_w2400,flicker_excess_Y,-0.104278,-0.104273,-4.40829e-06,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,gop_ratio_gop,NA,NA,NA,NA,NA,GOP 48 longer than half the window (6 frames)
+film24,tos4k,x265_2160p_6000k_w2400,gop_ratio_minigop,NA,NA,NA,NA,NA,GOP 48 longer than half the window (6 frames)
+film24,tos4k,x265_2160p_6000k_w2400,ghost_coeff_Y,0.074812,0.0748002,1.17871e-05,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,smear_Y,0.72584,0.72591,-6.98944e-05,worse,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,duplicate_rate_Y,0,0,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,halo_overshoot_Y,0.000125009,0.000125298,-2.89331e-07,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,lc_ratio_s1_Y,0.875939,0.875992,-5.25093e-05,better,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,lc_ratio_s2_Y,0.920753,0.920775,-2.29123e-05,better,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,lc_ratio_s3_Y,0.950349,0.950362,-1.28377e-05,better,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,lc_boost_fraction_Y,0,0,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,btb_kept_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,tos4k,x265_2160p_6000k_w2400,wtw_kept_Y,0.556818,0.556818,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+film24,tos4k,x265_2160p_6000k_w2400,clip_detect_Y,0,0,0,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,btb_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,tos4k,x265_2160p_6000k_w2400,wtw_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,tos4k,x265_2160p_6000k_w2400,clip_detect_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,tos4k,x265_2160p_6000k_w2400,ringing_energy_ratio_Y,0.991672,1,-0.00832795,NA,INFO,
+film24,tos4k,x265_2160p_6000k_w2400,ringing_band_share,0.00778813,0.00778813,0,NA,INFO,
+film24,tos4k,x265_2160p_6000k_w2400,psnr_band_Y,35.5798,35.5782,0.00167532,same,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,edge_keep_vs_input_Y,0.999984,1,-1.56371e-05,NA,INFO,
+film24,tos4k,x265_2160p_6000k_w2400,edge_keep_vs_master_Y,0.879315,0.879329,-1.37502e-05,NA,INFO,
+film24,tos4k,x265_2160p_6000k_w2400,grain_probe_keep_edge_vs_input_Y,0.994163,1,-0.00583678,worse,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,grain_probe_lag1_edge_vs_input_Y,-0.000245358,0,-0.000245358,better,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,grain_probe_keep_flat_vs_input_Y,0.999668,1,-0.000331783,worse,PASS,
+film24,tos4k,x265_2160p_6000k_w2400,grain_probe_lag1_flat_vs_input_Y,4.79715e-06,0,4.79715e-06,worse,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,psnr_Y,33.9453,33.9452,0.000133733,same,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,psnr_Cb,43.2314,43.2314,0,same,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,psnr_Cr,42.8618,42.8618,0,same,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,ssim_Y,0.886869,0.886866,2.62378e-06,same,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,ssim_Cb,0.980302,0.980302,0,same,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,ssim_Cr,0.978427,0.978427,0,same,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,lpips,NA,NA,NA,NA,NA,"lpips NA (not requested, or torch/lpips unavailable)"
+film24,tos4k,stress_x264_crf36_crop1024_w2400,grain_tiles_Y,16,16,0,NA,INFO,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,grain_rms_ratio_Y,0.610486,0.610493,-7.08327e-06,worse,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+film24,tos4k,stress_x264_crf36_crop1024_w2400,grain_hf_ratio_Y,NA,NA,NA,NA,NA,needs >= 8 frames (6 available)
+film24,tos4k,stress_x264_crf36_crop1024_w2400,grain_lag1_delta_Y,0.0714889,0.0714873,1.62018e-06,worse,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+film24,tos4k,stress_x264_crf36_crop1024_w2400,grain_tiles_Cb,16,16,0,NA,INFO,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,grain_rms_ratio_Cb,0.76933,0.76933,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+film24,tos4k,stress_x264_crf36_crop1024_w2400,grain_hf_ratio_Cb,NA,NA,NA,NA,NA,needs >= 8 frames (6 available)
+film24,tos4k,stress_x264_crf36_crop1024_w2400,grain_lag1_delta_Cb,0.121976,0.121976,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+film24,tos4k,stress_x264_crf36_crop1024_w2400,grain_keep_vs_input_Y,0.999988,1,-1.16025e-05,worse,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,grain_lag1_vs_input_Y,1.62018e-06,0,1.62018e-06,worse,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,grain_keep_vs_input_Cb,1,1,0,same,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,grain_lag1_vs_input_Cb,0,0,0,same,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,btb_kept_vs_input_Y,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+film24,tos4k,stress_x264_crf36_crop1024_w2400,wtw_kept_vs_input_Y,1,1,0,same,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,btb_kept_vs_input_C,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+film24,tos4k,stress_x264_crf36_crop1024_w2400,wtw_kept_vs_input_C,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+film24,tos4k,stress_x264_crf36_crop1024_w2400,flicker_excess_Y,-0.343329,-0.343343,1.36101e-05,same,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,gop_ratio_gop,NA,NA,NA,NA,NA,GOP 48 longer than half the window (6 frames)
+film24,tos4k,stress_x264_crf36_crop1024_w2400,gop_ratio_minigop,NA,NA,NA,NA,NA,GOP 48 longer than half the window (6 frames)
+film24,tos4k,stress_x264_crf36_crop1024_w2400,ghost_coeff_Y,0.164913,0.16491,3.36208e-06,same,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,smear_Y,0.551324,0.551346,-2.18193e-05,worse,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,duplicate_rate_Y,0,0,0,same,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,halo_overshoot_Y,0.000255876,0.000255999,-1.23764e-07,same,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,lc_ratio_s1_Y,0.750456,0.750483,-2.68219e-05,better,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,lc_ratio_s2_Y,0.829882,0.829894,-1.18386e-05,better,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,lc_ratio_s3_Y,0.894276,0.894283,-6.87e-06,better,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,lc_boost_fraction_Y,0,0,0,same,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,btb_kept_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,tos4k,stress_x264_crf36_crop1024_w2400,wtw_kept_Y,0.340909,0.340909,0,same,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+film24,tos4k,stress_x264_crf36_crop1024_w2400,clip_detect_Y,0,0,0,same,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,btb_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,tos4k,stress_x264_crf36_crop1024_w2400,wtw_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,tos4k,stress_x264_crf36_crop1024_w2400,clip_detect_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,tos4k,stress_x264_crf36_crop1024_w2400,ringing_energy_ratio_Y,0.997782,1,-0.00221799,NA,INFO,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,ringing_band_share,0.00782522,0.00782522,0,NA,INFO,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,psnr_band_Y,31.6541,31.6537,0.000453289,same,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,edge_keep_vs_input_Y,0.999992,1,-8.48059e-06,NA,INFO,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,edge_keep_vs_master_Y,0.738395,0.738401,-6.26207e-06,NA,INFO,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,grain_probe_keep_edge_vs_input_Y,0.995194,1,-0.00480556,worse,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,grain_probe_lag1_edge_vs_input_Y,-0.00072938,0,-0.00072938,better,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,grain_probe_keep_flat_vs_input_Y,0.999789,1,-0.000211028,worse,PASS,
+film24,tos4k,stress_x264_crf36_crop1024_w2400,grain_probe_lag1_flat_vs_input_Y,8.54117e-07,0,8.54117e-07,worse,PASS,

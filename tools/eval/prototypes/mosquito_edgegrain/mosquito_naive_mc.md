@@ -1,0 +1,317 @@
+<!-- Copyright(C) 2026 VP-V contributors -->
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+
+# VP-V prototype evaluation: mosquito_naive_mc vs repair_none (default)
+
+Suite: `proto_mosquito_edgegrain` (4 cases). Candidate `mosquito_naive_mc` (CONTRAST ONLY: MC temporal average of Y in the zone, no grain split, no guard (the original idea)), default `repair_none`. LPIPS not requested (NA). Cost: omitted.
+
+## Per-content-type summary
+
+### film24  (FAIL 2, INFO 12, LIMIT 9, NA 24, PASS 51)
+
+| metric | candidate (mean) | default (mean) | delta | n | NA | flags |
+|---|---|---|---|---|---|---|
+| btb_kept_C | NA | NA | NA | 2 | 2 | NA:2 |
+| btb_kept_Y | NA | NA | NA | 2 | 2 | NA:2 |
+| btb_kept_vs_input_C | NA | NA | NA | 2 | 2 | NA:2 |
+| btb_kept_vs_input_Y | NA | NA | NA | 2 | 2 | NA:2 |
+| clip_detect_C | NA | NA | NA | 2 | 2 | NA:2 |
+| clip_detect_Y | 0 | 0 | 0 | 2 | 0 | PASS:2 |
+| duplicate_rate_Y | 0 | 0 | 0 | 2 | 0 | PASS:2 |
+| edge_keep_vs_input_Y | 0.99638 | 1 | -0.00362046 | 2 | 0 | INFO:2 |
+| edge_keep_vs_master_Y | 0.805947 | 0.808865 | -0.00291813 | 2 | 0 | INFO:2 |
+| flicker_excess_Y | -0.229871 | -0.223808 | -0.00606285 | 2 | 0 | PASS:2 |
+| ghost_coeff_Y | 0.120518 | 0.119855 | 0.000663341 | 2 | 0 | PASS:2 |
+| gop_ratio_gop | NA | NA | NA | 2 | 2 | NA:2 |
+| gop_ratio_minigop | NA | NA | NA | 2 | 2 | NA:2 |
+| grain_hf_ratio_Cb | NA | NA | NA | 2 | 2 | NA:2 |
+| grain_hf_ratio_Y | NA | NA | NA | 2 | 2 | NA:2 |
+| grain_keep_vs_input_Cb | 1 | 1 | 0 | 2 | 0 | PASS:2 |
+| grain_keep_vs_input_Y | 0.995138 | 1 | -0.0048622 | 2 | 0 | PASS:2 |
+| grain_lag1_delta_Cb | 0.0987671 | 0.0987671 | 0 | 2 | 0 | LIMIT:2 |
+| grain_lag1_delta_Y | 0.0498245 | 0.0497276 | 9.68599e-05 | 2 | 0 | LIMIT:1 PASS:1 |
+| grain_lag1_vs_input_Cb | 0 | 0 | 0 | 2 | 0 | PASS:2 |
+| grain_lag1_vs_input_Y | 9.68599e-05 | 0 | 9.68599e-05 | 2 | 0 | PASS:2 |
+| grain_probe_keep_edge_vs_input_Y | 0.839388 | 1 | -0.160612 | 2 | 0 | FAIL:2 |
+| grain_probe_keep_flat_vs_input_Y | 0.99173 | 1 | -0.0082698 | 2 | 0 | PASS:2 |
+| grain_probe_lag1_edge_vs_input_Y | -0.00148958 | 0 | -0.00148958 | 2 | 0 | PASS:2 |
+| grain_probe_lag1_flat_vs_input_Y | 0.000144493 | 0 | 0.000144493 | 2 | 0 | PASS:2 |
+| grain_rms_ratio_Cb | 0.698995 | 0.698995 | 0 | 2 | 0 | LIMIT:2 |
+| grain_rms_ratio_Y | 0.71333 | 0.716947 | -0.0036175 | 2 | 0 | LIMIT:2 |
+| grain_tiles_Cb | 16 | 16 | 0 | 2 | 0 | INFO:2 |
+| grain_tiles_Y | 16 | 16 | 0 | 2 | 0 | INFO:2 |
+| halo_overshoot_Y | 0.000187509 | 0.000190649 | -3.13919e-06 | 2 | 0 | PASS:2 |
+| lc_boost_fraction_Y | 0 | 0 | 0 | 2 | 0 | PASS:2 |
+| lc_ratio_s1_Y | 0.811562 | 0.813237 | -0.00167497 | 2 | 0 | PASS:2 |
+| lc_ratio_s2_Y | 0.874345 | 0.875335 | -0.000989104 | 2 | 0 | PASS:2 |
+| lc_ratio_s3_Y | 0.921681 | 0.922322 | -0.000640826 | 2 | 0 | PASS:2 |
+| lpips | NA | NA | NA | 2 | 2 | NA:2 |
+| psnr_Cb | 44.0364 | 44.0364 | 0 | 2 | 0 | PASS:2 |
+| psnr_Cr | 43.8249 | 43.8249 | 0 | 2 | 0 | PASS:2 |
+| psnr_Y | 35.8356 | 35.8289 | 0.00664958 | 2 | 0 | PASS:2 |
+| psnr_band_Y | 33.6498 | 33.6159 | 0.0339011 | 2 | 0 | PASS:2 |
+| ringing_band_share | 0.00780667 | 0.00780667 | 0 | 2 | 0 | INFO:2 |
+| ringing_energy_ratio_Y | 0.927577 | 1 | -0.0724228 | 2 | 0 | INFO:2 |
+| smear_Y | 0.634337 | 0.638628 | -0.00429132 | 2 | 0 | PASS:2 |
+| ssim_Cb | 0.982062 | 0.982062 | 0 | 2 | 0 | PASS:2 |
+| ssim_Cr | 0.98103 | 0.98103 | 0 | 2 | 0 | PASS:2 |
+| ssim_Y | 0.913482 | 0.913392 | 9.00327e-05 | 2 | 0 | PASS:2 |
+| wtw_kept_C | NA | NA | NA | 2 | 2 | NA:2 |
+| wtw_kept_Y | 0.450758 | 0.448864 | 0.00189394 | 2 | 0 | LIMIT:2 |
+| wtw_kept_vs_input_C | NA | NA | NA | 2 | 2 | NA:2 |
+| wtw_kept_vs_input_Y | 1 | 1 | 0 | 2 | 0 | PASS:2 |
+
+### sports50_60  (FAIL 4, INFO 12, LIMIT 8, NA 24, PASS 50)
+
+| metric | candidate (mean) | default (mean) | delta | n | NA | flags |
+|---|---|---|---|---|---|---|
+| btb_kept_C | NA | NA | NA | 2 | 2 | NA:2 |
+| btb_kept_Y | NA | NA | NA | 2 | 2 | NA:2 |
+| btb_kept_vs_input_C | NA | NA | NA | 2 | 2 | NA:2 |
+| btb_kept_vs_input_Y | NA | NA | NA | 2 | 2 | NA:2 |
+| clip_detect_C | NA | NA | NA | 2 | 2 | NA:2 |
+| clip_detect_Y | 0 | 0 | 0 | 2 | 0 | PASS:2 |
+| duplicate_rate_Y | 0 | 0 | 0 | 2 | 0 | PASS:2 |
+| edge_keep_vs_input_Y | 0.999167 | 1 | -0.000832911 | 2 | 0 | INFO:2 |
+| edge_keep_vs_master_Y | 0.957434 | 0.958237 | -0.000802689 | 2 | 0 | INFO:2 |
+| flicker_excess_Y | 0.288927 | 0.299082 | -0.0101558 | 2 | 0 | PASS:2 |
+| ghost_coeff_Y | 0.183403 | 0.183171 | 0.000232161 | 2 | 0 | PASS:2 |
+| gop_ratio_gop | NA | NA | NA | 2 | 2 | NA:2 |
+| gop_ratio_minigop | NA | NA | NA | 2 | 2 | NA:2 |
+| grain_hf_ratio_Cb | NA | NA | NA | 2 | 2 | NA:2 |
+| grain_hf_ratio_Y | NA | NA | NA | 2 | 2 | NA:2 |
+| grain_keep_vs_input_Cb | 1 | 1 | 0 | 2 | 0 | PASS:2 |
+| grain_keep_vs_input_Y | 1 | 1 | 0 | 2 | 0 | PASS:2 |
+| grain_lag1_delta_Cb | 0.0828073 | 0.0828073 | 0 | 2 | 0 | LIMIT:1 PASS:1 |
+| grain_lag1_delta_Y | 0.109494 | 0.109494 | 0 | 2 | 0 | LIMIT:1 PASS:1 |
+| grain_lag1_vs_input_Cb | 0 | 0 | 0 | 2 | 0 | PASS:2 |
+| grain_lag1_vs_input_Y | 0 | 0 | 0 | 2 | 0 | PASS:2 |
+| grain_probe_keep_edge_vs_input_Y | 0.84563 | 1 | -0.15437 | 2 | 0 | FAIL:2 |
+| grain_probe_keep_flat_vs_input_Y | 0.998297 | 1 | -0.00170296 | 2 | 0 | PASS:2 |
+| grain_probe_lag1_edge_vs_input_Y | 0.0585138 | 0 | 0.0585138 | 2 | 0 | FAIL:2 |
+| grain_probe_lag1_flat_vs_input_Y | 0.000296103 | 0 | 0.000296103 | 2 | 0 | PASS:2 |
+| grain_rms_ratio_Cb | 0.430402 | 0.430402 | 0 | 2 | 0 | LIMIT:2 |
+| grain_rms_ratio_Y | 0.41437 | 0.41437 | 0 | 2 | 0 | LIMIT:2 |
+| grain_tiles_Cb | 16 | 16 | 0 | 2 | 0 | INFO:2 |
+| grain_tiles_Y | 16 | 16 | 0 | 2 | 0 | INFO:2 |
+| halo_overshoot_Y | 2.83959e-05 | 2.89561e-05 | -5.60209e-07 | 2 | 0 | PASS:2 |
+| lc_boost_fraction_Y | 0 | 0 | 0 | 2 | 0 | PASS:2 |
+| lc_ratio_s1_Y | 0.760584 | 0.761049 | -0.000465543 | 2 | 0 | PASS:2 |
+| lc_ratio_s2_Y | 0.848593 | 0.848891 | -0.000297728 | 2 | 0 | PASS:2 |
+| lc_ratio_s3_Y | 0.910458 | 0.910686 | -0.000228558 | 2 | 0 | PASS:2 |
+| lpips | NA | NA | NA | 2 | 2 | NA:2 |
+| psnr_Cb | 44.478 | 44.478 | 0 | 2 | 0 | PASS:2 |
+| psnr_Cr | 43.8865 | 43.8865 | 0 | 2 | 0 | PASS:2 |
+| psnr_Y | 39.3499 | 39.3414 | 0.00853245 | 2 | 0 | PASS:2 |
+| psnr_band_Y | 37.3739 | 37.2541 | 0.119834 | 2 | 0 | PASS:2 |
+| ringing_band_share | 0.00638994 | 0.00638994 | 0 | 2 | 0 | INFO:2 |
+| ringing_energy_ratio_Y | 0.936979 | 1 | -0.0630205 | 2 | 0 | INFO:2 |
+| smear_Y | 0.748694 | 0.750181 | -0.0014876 | 2 | 0 | PASS:2 |
+| ssim_Cb | 0.974476 | 0.974476 | 0 | 2 | 0 | PASS:2 |
+| ssim_Cr | 0.972669 | 0.972669 | 0 | 2 | 0 | PASS:2 |
+| ssim_Y | 0.939563 | 0.939505 | 5.74677e-05 | 2 | 0 | PASS:2 |
+| wtw_kept_C | NA | NA | NA | 2 | 2 | NA:2 |
+| wtw_kept_Y | 0.543471 | 0.524168 | 0.0193032 | 2 | 0 | LIMIT:2 |
+| wtw_kept_vs_input_C | NA | NA | NA | 2 | 2 | NA:2 |
+| wtw_kept_vs_input_Y | 1 | 1 | 0 | 2 | 0 | PASS:2 |
+
+## All rows
+
+| content_type | clip | case | metric | candidate | default | delta | trend | flag | note |
+|---|---|---|---|---|---|---|---|---|---|
+| sports50_60 | Bosphorus | native_x264_crf28 | psnr_Y | 38.0932 | 38.085 | 0.0082351 | same | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | psnr_Cb | 43.3014 | 43.3014 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | psnr_Cr | 42.9608 | 42.9608 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | ssim_Y | 0.932127 | 0.932067 | 5.99313e-05 | same | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | ssim_Cb | 0.970557 | 0.970557 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | ssim_Cr | 0.970481 | 0.970481 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | lpips | NA | NA | NA | NA | NA | lpips NA (not requested, or torch/lpips unavailable) |
+| sports50_60 | Bosphorus | native_x264_crf28 | grain_tiles_Y | 16 | 16 | 0 | NA | INFO |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | grain_rms_ratio_Y | 0.225393 | 0.225393 | 0 | same | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| sports50_60 | Bosphorus | native_x264_crf28 | grain_hf_ratio_Y | NA | NA | NA | NA | NA | needs >= 8 frames (4 available) |
+| sports50_60 | Bosphorus | native_x264_crf28 | grain_lag1_delta_Y | 0.198603 | 0.198603 | 0 | same | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| sports50_60 | Bosphorus | native_x264_crf28 | grain_tiles_Cb | 16 | 16 | 0 | NA | INFO |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | grain_rms_ratio_Cb | 0.223676 | 0.223676 | 0 | same | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| sports50_60 | Bosphorus | native_x264_crf28 | grain_hf_ratio_Cb | NA | NA | NA | NA | NA | needs >= 8 frames (4 available) |
+| sports50_60 | Bosphorus | native_x264_crf28 | grain_lag1_delta_Cb | 0.18438 | 0.18438 | 0 | same | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| sports50_60 | Bosphorus | native_x264_crf28 | grain_keep_vs_input_Y | 1 | 1 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | grain_lag1_vs_input_Y | 0 | 0 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | grain_keep_vs_input_Cb | 1 | 1 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | grain_lag1_vs_input_Cb | 0 | 0 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | btb_kept_vs_input_Y | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| sports50_60 | Bosphorus | native_x264_crf28 | wtw_kept_vs_input_Y | 1 | 1 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | btb_kept_vs_input_C | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| sports50_60 | Bosphorus | native_x264_crf28 | wtw_kept_vs_input_C | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| sports50_60 | Bosphorus | native_x264_crf28 | flicker_excess_Y | 0.337602 | 0.343094 | -0.00549204 | same | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | gop_ratio_gop | NA | NA | NA | NA | NA | GOP 250 longer than half the window (4 frames) |
+| sports50_60 | Bosphorus | native_x264_crf28 | gop_ratio_minigop | NA | NA | NA | NA | NA | GOP 250 longer than half the window (4 frames) |
+| sports50_60 | Bosphorus | native_x264_crf28 | ghost_coeff_Y | 0.214665 | 0.214583 | 8.18756e-05 | same | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | smear_Y | 0.69151 | 0.692724 | -0.00121388 | worse | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | duplicate_rate_Y | 0 | 0 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | halo_overshoot_Y | 3.28373e-05 | 3.32458e-05 | -4.0855e-07 | same | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | lc_ratio_s1_Y | 0.683336 | 0.683742 | -0.000406023 | better | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | lc_ratio_s2_Y | 0.794729 | 0.794984 | -0.000254964 | better | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | lc_ratio_s3_Y | 0.876457 | 0.876645 | -0.000187697 | better | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | lc_boost_fraction_Y | 0 | 0 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | btb_kept_Y | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| sports50_60 | Bosphorus | native_x264_crf28 | wtw_kept_Y | 0.498431 | 0.480854 | 0.0175769 | better | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| sports50_60 | Bosphorus | native_x264_crf28 | clip_detect_Y | 0 | 0 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | btb_kept_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| sports50_60 | Bosphorus | native_x264_crf28 | wtw_kept_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| sports50_60 | Bosphorus | native_x264_crf28 | clip_detect_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| sports50_60 | Bosphorus | native_x264_crf28 | ringing_energy_ratio_Y | 0.952227 | 1 | -0.0477731 | NA | INFO |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | ringing_band_share | 0.00638994 | 0.00638994 | 0 | NA | INFO |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | psnr_band_Y | 35.3744 | 35.2985 | 0.0759558 | better | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | edge_keep_vs_input_Y | 0.999506 | 1 | -0.000493562 | NA | INFO |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | edge_keep_vs_master_Y | 0.944325 | 0.944792 | -0.000466313 | NA | INFO |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | grain_probe_keep_edge_vs_input_Y | 0.840593 | 1 | -0.159407 | worse | FAIL |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | grain_probe_lag1_edge_vs_input_Y | 0.0624631 | 0 | 0.0624631 | worse | FAIL |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | grain_probe_keep_flat_vs_input_Y | 0.997962 | 1 | -0.00203798 | worse | PASS |  |
+| sports50_60 | Bosphorus | native_x264_crf28 | grain_probe_lag1_flat_vs_input_Y | 0.000347225 | 0 | 0.000347225 | worse | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | psnr_Y | 40.6066 | 40.5978 | 0.0088298 | same | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | psnr_Cb | 45.6546 | 45.6546 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | psnr_Cr | 44.8121 | 44.8121 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | ssim_Y | 0.946999 | 0.946944 | 5.5004e-05 | same | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | ssim_Cb | 0.978396 | 0.978396 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | ssim_Cr | 0.974858 | 0.974858 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | lpips | NA | NA | NA | NA | NA | lpips NA (not requested, or torch/lpips unavailable) |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | grain_tiles_Y | 16 | 16 | 0 | NA | INFO |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | grain_rms_ratio_Y | 0.603347 | 0.603347 | 0 | same | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | grain_hf_ratio_Y | NA | NA | NA | NA | NA | needs >= 8 frames (4 available) |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | grain_lag1_delta_Y | 0.0203852 | 0.0203852 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | grain_tiles_Cb | 16 | 16 | 0 | NA | INFO |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | grain_rms_ratio_Cb | 0.637128 | 0.637128 | 0 | same | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | grain_hf_ratio_Cb | NA | NA | NA | NA | NA | needs >= 8 frames (4 available) |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | grain_lag1_delta_Cb | -0.018765 | -0.018765 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | grain_keep_vs_input_Y | 1 | 1 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | grain_lag1_vs_input_Y | 0 | 0 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | grain_keep_vs_input_Cb | 1 | 1 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | grain_lag1_vs_input_Cb | 0 | 0 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | btb_kept_vs_input_Y | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | wtw_kept_vs_input_Y | 1 | 1 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | btb_kept_vs_input_C | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | wtw_kept_vs_input_C | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | flicker_excess_Y | 0.240251 | 0.255071 | -0.0148196 | same | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | gop_ratio_gop | NA | NA | NA | NA | NA | GOP 250 longer than half the window (4 frames) |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | gop_ratio_minigop | NA | NA | NA | NA | NA | GOP 250 longer than half the window (4 frames) |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | ghost_coeff_Y | 0.152141 | 0.151758 | 0.000382446 | same | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | smear_Y | 0.805878 | 0.807639 | -0.00176132 | worse | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | duplicate_rate_Y | 0 | 0 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | halo_overshoot_Y | 2.39545e-05 | 2.46664e-05 | -7.11868e-07 | same | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | lc_ratio_s1_Y | 0.837831 | 0.838357 | -0.000525062 | better | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | lc_ratio_s2_Y | 0.902458 | 0.902798 | -0.000340492 | better | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | lc_ratio_s3_Y | 0.944459 | 0.944728 | -0.000269419 | better | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | lc_boost_fraction_Y | 0 | 0 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | btb_kept_Y | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | wtw_kept_Y | 0.588512 | 0.567483 | 0.0210295 | better | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | clip_detect_Y | 0 | 0 | 0 | same | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | btb_kept_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | wtw_kept_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | clip_detect_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | ringing_energy_ratio_Y | 0.921732 | 1 | -0.0782679 | NA | INFO |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | ringing_band_share | 0.00638994 | 0.00638994 | 0 | NA | INFO |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | psnr_band_Y | 39.3734 | 39.2097 | 0.163712 | better | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | edge_keep_vs_input_Y | 0.998828 | 1 | -0.00117226 | NA | INFO |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | edge_keep_vs_master_Y | 0.970542 | 0.971682 | -0.00113906 | NA | INFO |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | grain_probe_keep_edge_vs_input_Y | 0.850667 | 1 | -0.149333 | worse | FAIL |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | grain_probe_lag1_edge_vs_input_Y | 0.0545645 | 0 | 0.0545645 | worse | FAIL |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | grain_probe_keep_flat_vs_input_Y | 0.998632 | 1 | -0.00136793 | worse | PASS |  |
+| sports50_60 | Bosphorus | native_av1fgs_crf35 | grain_probe_lag1_flat_vs_input_Y | 0.000244981 | 0 | 0.000244981 | worse | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | psnr_Y | 37.718 | 37.7127 | 0.00537214 | same | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | psnr_Cb | 44.8414 | 44.8414 | 0 | same | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | psnr_Cr | 44.788 | 44.788 | 0 | same | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | ssim_Y | 0.939966 | 0.939918 | 4.72626e-05 | same | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | ssim_Cb | 0.983823 | 0.983823 | 0 | same | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | ssim_Cr | 0.983633 | 0.983633 | 0 | same | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | lpips | NA | NA | NA | NA | NA | lpips NA (not requested, or torch/lpips unavailable) |
+| film24 | tos4k | x265_2160p_6000k_w2400 | grain_tiles_Y | 16 | 16 | 0 | NA | INFO |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | grain_rms_ratio_Y | 0.818381 | 0.823402 | -0.0050211 | worse | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| film24 | tos4k | x265_2160p_6000k_w2400 | grain_hf_ratio_Y | NA | NA | NA | NA | NA | needs >= 8 frames (6 available) |
+| film24 | tos4k | x265_2160p_6000k_w2400 | grain_lag1_delta_Y | 0.0280613 | 0.0279679 | 9.34252e-05 | worse | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | grain_tiles_Cb | 16 | 16 | 0 | NA | INFO |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | grain_rms_ratio_Cb | 0.628659 | 0.628659 | 0 | same | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| film24 | tos4k | x265_2160p_6000k_w2400 | grain_hf_ratio_Cb | NA | NA | NA | NA | NA | needs >= 8 frames (6 available) |
+| film24 | tos4k | x265_2160p_6000k_w2400 | grain_lag1_delta_Cb | 0.0755582 | 0.0755582 | 0 | same | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| film24 | tos4k | x265_2160p_6000k_w2400 | grain_keep_vs_input_Y | 0.993902 | 1 | -0.006098 | worse | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | grain_lag1_vs_input_Y | 9.34252e-05 | 0 | 9.34252e-05 | worse | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | grain_keep_vs_input_Cb | 1 | 1 | 0 | same | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | grain_lag1_vs_input_Cb | 0 | 0 | 0 | same | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | btb_kept_vs_input_Y | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| film24 | tos4k | x265_2160p_6000k_w2400 | wtw_kept_vs_input_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | btb_kept_vs_input_C | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| film24 | tos4k | x265_2160p_6000k_w2400 | wtw_kept_vs_input_C | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| film24 | tos4k | x265_2160p_6000k_w2400 | flicker_excess_Y | -0.112458 | -0.104273 | -0.0081848 | same | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | gop_ratio_gop | NA | NA | NA | NA | NA | GOP 48 longer than half the window (6 frames) |
+| film24 | tos4k | x265_2160p_6000k_w2400 | gop_ratio_minigop | NA | NA | NA | NA | NA | GOP 48 longer than half the window (6 frames) |
+| film24 | tos4k | x265_2160p_6000k_w2400 | ghost_coeff_Y | 0.0755844 | 0.0748002 | 0.00078419 | same | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | smear_Y | 0.720946 | 0.72591 | -0.0049633 | worse | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | duplicate_rate_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | halo_overshoot_Y | 0.000122385 | 0.000125298 | -2.91308e-06 | same | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | lc_ratio_s1_Y | 0.874169 | 0.875992 | -0.0018228 | better | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | lc_ratio_s2_Y | 0.919734 | 0.920775 | -0.00104122 | better | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | lc_ratio_s3_Y | 0.949708 | 0.950362 | -0.000653133 | better | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | lc_boost_fraction_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | btb_kept_Y | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | tos4k | x265_2160p_6000k_w2400 | wtw_kept_Y | 0.556818 | 0.556818 | 0 | same | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| film24 | tos4k | x265_2160p_6000k_w2400 | clip_detect_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | btb_kept_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | tos4k | x265_2160p_6000k_w2400 | wtw_kept_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | tos4k | x265_2160p_6000k_w2400 | clip_detect_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | tos4k | x265_2160p_6000k_w2400 | ringing_energy_ratio_Y | 0.921322 | 1 | -0.0786777 | NA | INFO |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | ringing_band_share | 0.00778813 | 0.00778813 | 0 | NA | INFO |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | psnr_band_Y | 35.6181 | 35.5782 | 0.0399467 | same | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | edge_keep_vs_input_Y | 0.996526 | 1 | -0.00347387 | NA | INFO |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | edge_keep_vs_master_Y | 0.876274 | 0.879329 | -0.00305467 | NA | INFO |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | grain_probe_keep_edge_vs_input_Y | 0.834313 | 1 | -0.165687 | worse | FAIL |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | grain_probe_lag1_edge_vs_input_Y | -0.00293324 | 0 | -0.00293324 | better | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | grain_probe_keep_flat_vs_input_Y | 0.989943 | 1 | -0.0100572 | worse | PASS |  |
+| film24 | tos4k | x265_2160p_6000k_w2400 | grain_probe_lag1_flat_vs_input_Y | 0.000229175 | 0 | 0.000229175 | worse | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | psnr_Y | 33.9531 | 33.9452 | 0.00792703 | same | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | psnr_Cb | 43.2314 | 43.2314 | 0 | same | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | psnr_Cr | 42.8618 | 42.8618 | 0 | same | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | ssim_Y | 0.886999 | 0.886866 | 0.000132803 | same | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | ssim_Cb | 0.980302 | 0.980302 | 0 | same | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | ssim_Cr | 0.978427 | 0.978427 | 0 | same | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | lpips | NA | NA | NA | NA | NA | lpips NA (not requested, or torch/lpips unavailable) |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | grain_tiles_Y | 16 | 16 | 0 | NA | INFO |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | grain_rms_ratio_Y | 0.608279 | 0.610493 | -0.00221389 | worse | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | grain_hf_ratio_Y | NA | NA | NA | NA | NA | needs >= 8 frames (6 available) |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | grain_lag1_delta_Y | 0.0715876 | 0.0714873 | 0.000100294 | worse | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | grain_tiles_Cb | 16 | 16 | 0 | NA | INFO |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | grain_rms_ratio_Cb | 0.76933 | 0.76933 | 0 | same | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | grain_hf_ratio_Cb | NA | NA | NA | NA | NA | needs >= 8 frames (6 available) |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | grain_lag1_delta_Cb | 0.121976 | 0.121976 | 0 | same | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | grain_keep_vs_input_Y | 0.996374 | 1 | -0.0036264 | worse | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | grain_lag1_vs_input_Y | 0.000100294 | 0 | 0.000100294 | worse | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | grain_keep_vs_input_Cb | 1 | 1 | 0 | same | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | grain_lag1_vs_input_Cb | 0 | 0 | 0 | same | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | btb_kept_vs_input_Y | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | wtw_kept_vs_input_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | btb_kept_vs_input_C | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | wtw_kept_vs_input_C | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | flicker_excess_Y | -0.347284 | -0.343343 | -0.0039409 | same | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | gop_ratio_gop | NA | NA | NA | NA | NA | GOP 48 longer than half the window (6 frames) |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | gop_ratio_minigop | NA | NA | NA | NA | NA | GOP 48 longer than half the window (6 frames) |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | ghost_coeff_Y | 0.165452 | 0.16491 | 0.000542491 | same | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | smear_Y | 0.547727 | 0.551346 | -0.00361933 | worse | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | duplicate_rate_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | halo_overshoot_Y | 0.000252634 | 0.000255999 | -3.36529e-06 | same | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | lc_ratio_s1_Y | 0.748956 | 0.750483 | -0.00152714 | better | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | lc_ratio_s2_Y | 0.828957 | 0.829894 | -0.000936985 | better | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | lc_ratio_s3_Y | 0.893654 | 0.894283 | -0.000628518 | better | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | lc_boost_fraction_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | btb_kept_Y | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | wtw_kept_Y | 0.344697 | 0.340909 | 0.00378788 | better | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | clip_detect_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | btb_kept_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | wtw_kept_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | clip_detect_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | ringing_energy_ratio_Y | 0.933832 | 1 | -0.066168 | NA | INFO |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | ringing_band_share | 0.00782522 | 0.00782522 | 0 | NA | INFO |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | psnr_band_Y | 31.6815 | 31.6537 | 0.0278555 | same | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | edge_keep_vs_input_Y | 0.996233 | 1 | -0.00376706 | NA | INFO |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | edge_keep_vs_master_Y | 0.735619 | 0.738401 | -0.0027816 | NA | INFO |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | grain_probe_keep_edge_vs_input_Y | 0.844462 | 1 | -0.155538 | worse | FAIL |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | grain_probe_lag1_edge_vs_input_Y | -4.59195e-05 | 0 | -4.59195e-05 | better | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | grain_probe_keep_flat_vs_input_Y | 0.993518 | 1 | -0.00648239 | worse | PASS |  |
+| film24 | tos4k | stress_x264_crf36_crop1024_w2400 | grain_probe_lag1_flat_vs_input_Y | 5.98115e-05 | 0 | 5.98115e-05 | worse | PASS |  |

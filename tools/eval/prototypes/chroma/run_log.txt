@@ -1,0 +1,114 @@
+# command: D:/hfr/venv/Scripts/python.exe -I tools/eval/run_prototypes.py --family chroma --suite tools/eval/suites/proto_chroma.json --baseline chroma_bicubic --candidates chroma_jbu,chroma_jbu_res,chroma_krig,chroma_cfl,chroma_mv --out <scratch> --lpips
+# laptop CPU, 2026-10-31; cost rows are wall-clock (non-deterministic); all other values deterministic
+run_prototypes  harness v1  python 3.14.8  numpy 2.5.2
+suite proto_chroma (9 cases)  family chroma  default chroma_bicubic (default: Catmull-Rom (a=-0.5) chroma upsampling, left siting)
+== candidate chroma_jbu: joint-bilateral luma-guided chroma upsampler, +-2 chroma taps, siting-correct
+case sports50_60 / Bosphorus / native_x265_crf26: loading
+  done in 28.6 s
+case sports50_60 / Jockey / native_x264_crf23: loading
+  done in 19.0 s
+case sports50_60 / YachtRide / native_x265_crf20: loading
+  done in 20.1 s
+case sports50_60 / park_joy / native_x265_crf26: loading
+  done in 19.7 s
+case film24 / tos4k / x265_2160p_6000k_w2400: loading
+  done in 41.6 s
+case film24 / tos4k / ffv1_master_no_codec_w2400: loading
+  done in 43.0 s
+case film24 / sintel4k / svtav1_2160p_6000k_w1200: loading
+  done in 43.7 s
+case film24 / breathing / enc24_12f: loading
+  done in 47.4 s
+case dark / meridian4k / x265_2160p_6000k_w1800: loading
+  done in 27.3 s
+   chroma_jbu: rows 432 flags {"FAIL": 13, "FLAG": 41, "INFO": 36, "LIMIT": 24, "NA": 128, "PASS": 190}  290.6 s
+== candidate chroma_jbu_res: residual JBU: Catmull-Rom + luma-guided correction (JBU minus same-kernel Gaussian)
+case sports50_60 / Bosphorus / native_x265_crf26: cached inputs and default
+  done in 9.9 s
+case sports50_60 / Jockey / native_x264_crf23: cached inputs and default
+  done in 10.6 s
+case sports50_60 / YachtRide / native_x265_crf20: cached inputs and default
+  done in 10.2 s
+case sports50_60 / park_joy / native_x265_crf26: cached inputs and default
+  done in 10.1 s
+case film24 / tos4k / x265_2160p_6000k_w2400: cached inputs and default
+  done in 20.3 s
+case film24 / tos4k / ffv1_master_no_codec_w2400: cached inputs and default
+  done in 22.9 s
+case film24 / sintel4k / svtav1_2160p_6000k_w1200: cached inputs and default
+  done in 22.1 s
+case film24 / breathing / enc24_12f: cached inputs and default
+  done in 27.5 s
+case dark / meridian4k / x265_2160p_6000k_w1800: cached inputs and default
+  done in 34.8 s
+   chroma_jbu_res: rows 432 flags {"FAIL": 1, "FLAG": 31, "INFO": 36, "LIMIT": 36, "NA": 128, "PASS": 200}  168.5 s
+== candidate chroma_krig: KrigBilateral-style ordinary kriging, 12 samples, spatial x luma covariance (idea reimplemented)
+case sports50_60 / Bosphorus / native_x265_crf26: cached inputs and default
+  done in 12.3 s
+case sports50_60 / Jockey / native_x264_crf23: cached inputs and default
+  done in 10.0 s
+case sports50_60 / YachtRide / native_x265_crf20: cached inputs and default
+  done in 9.9 s
+case sports50_60 / park_joy / native_x265_crf26: cached inputs and default
+  done in 9.1 s
+case film24 / tos4k / x265_2160p_6000k_w2400: cached inputs and default
+  done in 18.2 s
+case film24 / tos4k / ffv1_master_no_codec_w2400: cached inputs and default
+  done in 20.5 s
+case film24 / sintel4k / svtav1_2160p_6000k_w1200: cached inputs and default
+  done in 20.3 s
+case film24 / breathing / enc24_12f: cached inputs and default
+  done in 22.8 s
+case dark / meridian4k / x265_2160p_6000k_w1800: cached inputs and default
+  done in 19.8 s
+   chroma_krig: rows 432 flags {"FAIL": 8, "FLAG": 28, "INFO": 36, "LIMIT": 29, "NA": 128, "PASS": 203}  143.1 s
+== candidate chroma_cfl: chroma-from-luma: guided-filter local linear regression, correlation-mixed with Catmull-Rom
+case sports50_60 / Bosphorus / native_x265_crf26: cached inputs and default
+  done in 4.0 s
+case sports50_60 / Jockey / native_x264_crf23: cached inputs and default
+  done in 3.6 s
+case sports50_60 / YachtRide / native_x265_crf20: cached inputs and default
+  done in 3.4 s
+case sports50_60 / park_joy / native_x265_crf26: cached inputs and default
+  done in 3.7 s
+case film24 / tos4k / x265_2160p_6000k_w2400: cached inputs and default
+  done in 7.3 s
+case film24 / tos4k / ffv1_master_no_codec_w2400: cached inputs and default
+  done in 7.2 s
+case film24 / sintel4k / svtav1_2160p_6000k_w1200: cached inputs and default
+  done in 6.9 s
+case film24 / breathing / enc24_12f: cached inputs and default
+  done in 8.3 s
+case dark / meridian4k / x265_2160p_6000k_w1800: cached inputs and default
+  done in 7.8 s
+   chroma_cfl: rows 432 flags {"FAIL": 2, "FLAG": 24, "INFO": 36, "LIMIT": 35, "NA": 128, "PASS": 207}  52.2 s
+== candidate chroma_mv: MV temporal chroma: neighbour chroma samples along DIS flow (stand-in for VP vectors), validated per sample, confidence-mixed with residual JBU
+case sports50_60 / Bosphorus / native_x265_crf26: cached inputs and default
+  done in 14.1 s
+case sports50_60 / Jockey / native_x264_crf23: cached inputs and default
+  done in 13.7 s
+case sports50_60 / YachtRide / native_x265_crf20: cached inputs and default
+  done in 13.3 s
+case sports50_60 / park_joy / native_x265_crf26: cached inputs and default
+  done in 14.0 s
+case film24 / tos4k / x265_2160p_6000k_w2400: cached inputs and default
+  done in 28.2 s
+case film24 / tos4k / ffv1_master_no_codec_w2400: cached inputs and default
+  done in 28.6 s
+case film24 / sintel4k / svtav1_2160p_6000k_w1200: cached inputs and default
+  done in 27.3 s
+case film24 / breathing / enc24_12f: cached inputs and default
+  done in 31.9 s
+case dark / meridian4k / x265_2160p_6000k_w1800: cached inputs and default
+  done in 25.9 s
+   chroma_mv: rows 432 flags {"FAIL": 1, "FLAG": 24, "INFO": 36, "LIMIT": 35, "NA": 128, "PASS": 208}  197.0 s
+stats chroma_mv case-start-index 140: mean 0.819
+stats chroma_mv case-start-index 140: mean 0.7581
+stats chroma_mv case-start-index 140: mean 0.6591
+stats chroma_mv case-start-index 70: mean 0.4765
+stats chroma_mv case-start-index 2400: mean 0.6133
+stats chroma_mv case-start-index 2400: mean 0.592
+stats chroma_mv case-start-index 1200: mean 0.4951
+stats chroma_mv case-start-index 0: mean 0.7847
+stats chroma_mv case-start-index 1800: mean 0.9564
+total 851.3 s

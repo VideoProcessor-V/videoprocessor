@@ -1,0 +1,26 @@
+{
+ "name": "sample_chroma",
+ "description": "Chroma reconstruction (true 4:4:4 truth at half raster) on real-codec material: 3 G18 4K cases (HFR sports proxies), one nn-corpus film24 4K x265 encode, one 48-frame GOP-breathing clip (temporal metrics apply; breathing is a proxy of UNKNOWN content type, filed under film24 only because it is 24 fps).",
+ "cases": [
+  {"id": "g18-bosphorus-x265-crf26", "content_type": "sports50_60", "clip": "Bosphorus", "case": "native_x265_crf26",
+   "protocol": "chroma444", "frames": 4, "gop": 250, "minigop": 5,
+   "master": {"kind": "raw", "path": "D:/hfr/Bosphorus_3840x2160_120fps_420_10bit_YUV.yuv", "width": 3840, "height": 2160, "pix_fmt": "yuv420p10le", "fps": 120.0, "start": 140},
+   "coded": {"kind": "raw", "path": "D:/hfr/coded/Bosphorus_native_x265_crf26.yuv", "width": 3840, "height": 2160, "pix_fmt": "yuv420p10le", "fps": 120.0, "start": 0}},
+  {"id": "g18-jockey-x264-crf23", "content_type": "sports50_60", "clip": "Jockey", "case": "native_x264_crf23",
+   "protocol": "chroma444", "frames": 4, "gop": 250, "minigop": 4,
+   "master": {"kind": "raw", "path": "D:/hfr/Jockey_3840x2160_120fps_420_10bit_YUV.yuv", "width": 3840, "height": 2160, "pix_fmt": "yuv420p10le", "fps": 120.0, "start": 140},
+   "coded": {"kind": "raw", "path": "D:/hfr/coded/Jockey_native_x264_crf23.yuv", "width": 3840, "height": 2160, "pix_fmt": "yuv420p10le", "fps": 120.0, "start": 0}},
+  {"id": "g18-park_joy-x265-crf26", "content_type": "sports50_60", "clip": "park_joy", "case": "native_x265_crf26",
+   "protocol": "chroma444", "frames": 4, "gop": 250, "minigop": 5,
+   "master": {"kind": "y4m", "path": "D:/hfr/park_joy_2160p50.y4m", "start": 70},
+   "coded": {"kind": "raw", "path": "D:/hfr/coded/park_native_x265_crf26.yuv", "width": 3840, "height": 2160, "pix_fmt": "yuv420p10le", "fps": 50.0, "start": 0}},
+  {"id": "nn-tos4k-x265-2160p-6000k", "content_type": "film24", "clip": "tos4k", "case": "x265_2160p_6000k_w2400",
+   "protocol": "chroma444", "frames": 4, "gop": 48, "minigop": 5,
+   "master": {"kind": "ffmpeg", "path": "D:/nn-corpus/trimmed/tos4k/reference_ffv1.mkv", "width": 3840, "height": 1714, "pix_fmt": "yuv420p", "fps": 24.0, "start": 2400},
+   "coded": {"kind": "ffmpeg", "path": "D:/nn-corpus/pairs/tos4k/tos4k__x265__2160p__6000k.mp4", "width": 3840, "height": 1714, "pix_fmt": "yuv420p10le", "fps": 24.0, "start": 2400}},
+  {"id": "breathing-qp24", "content_type": "film24", "clip": "breathing", "case": "enc24_48f", "note": "proxy of unknown content type (24 fps => film24 by the fps rule); used for its 48 frames / 2 GOPs",
+   "protocol": "chroma444", "frames": 48, "gop": 24, "minigop": 5,
+   "master": {"kind": "raw", "path": "D:/hfr/breathing/orig.yuv", "width": 1536, "height": 768, "pix_fmt": "yuv420p10le", "fps": 24.0, "start": 0},
+   "coded": {"kind": "raw", "path": "D:/hfr/breathing/dec24.yuv", "width": 1536, "height": 768, "pix_fmt": "yuv420p10le", "fps": 24.0, "start": 0}}
+ ]
+}

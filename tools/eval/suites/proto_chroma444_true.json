@@ -1,0 +1,201 @@
+{
+ "name": "proto_chroma444_true",
+ "description": "Chroma prototypes against GENUINE 4:4:4 truth (Netflix Sol Levante HDR10 ProRes XQ 4:4:4 12-bit, animation) and a partial 4:2:2 check (Nocturne, film grain). Work in PQ code values (no linearisation / tone mapping). SCRATCH sources (regenerate before use; commands in tools/eval/prototypes/chroma444_true/run_log.txt): ffmpeg crops 1536x1024 at (1152,568) of the 4K masters, pixel format unchanged; the 4:2:0 inputs are made by chroma444_true_pair (Lanczos-3, left siting) and written as yuv420p10le; x265 -crf 22 -preset fast 10-bit encodes of those.",
+ "cases": [
+  {
+   "id": "sol-t40-master420",
+   "content_type": "film24",
+   "clip": "sol_levante",
+   "case": "t40_f48_420_no_codec",
+   "protocol": "chroma444_true",
+   "frames": 6,
+   "gop": null,
+   "minigop": null,
+   "crop": {
+    "x": 256,
+    "y": 128,
+    "w": 1024,
+    "h": 768
+   },
+   "master": {
+    "kind": "raw",
+    "path": "D:/codex/videoprocessor/eval-scratch/feat-eval-prototypes-444/sol_t40_f48.yuv",
+    "width": 1536,
+    "height": 1024,
+    "pix_fmt": "yuv444p12le",
+    "fps": 24.0,
+    "start": 0,
+    "matrix": "2020",
+    "transfer": "pq"
+   },
+   "coded": {
+    "kind": "raw",
+    "path": "D:/codex/videoprocessor/eval-scratch/feat-eval-prototypes-444/sol_t40_f48.yuv",
+    "width": 1536,
+    "height": 1024,
+    "pix_fmt": "yuv444p12le",
+    "fps": 24.0,
+    "start": 0,
+    "matrix": "2020",
+    "transfer": "pq"
+   },
+   "note": "true 4:4:4 truth; input = Lanczos-3 4:2:0 (left siting) of it, no codec; PQ code values"
+  },
+  {
+   "id": "sol-t40-x265",
+   "content_type": "film24",
+   "clip": "sol_levante",
+   "case": "t40_f48_x265_crf22",
+   "protocol": "chroma444_true",
+   "frames": 6,
+   "gop": null,
+   "minigop": null,
+   "crop": {
+    "x": 256,
+    "y": 128,
+    "w": 1024,
+    "h": 768
+   },
+   "master": {
+    "kind": "raw",
+    "path": "D:/codex/videoprocessor/eval-scratch/feat-eval-prototypes-444/sol_t40_f48.yuv",
+    "width": 1536,
+    "height": 1024,
+    "pix_fmt": "yuv444p12le",
+    "fps": 24.0,
+    "start": 0,
+    "matrix": "2020",
+    "transfer": "pq"
+   },
+   "coded": {
+    "kind": "raw",
+    "path": "D:/codex/videoprocessor/eval-scratch/feat-eval-prototypes-444/sol_t40_f48_x265_crf22.yuv",
+    "width": 1536,
+    "height": 1024,
+    "pix_fmt": "yuv420p10le",
+    "fps": 24.0,
+    "start": 0,
+    "matrix": "2020",
+    "transfer": "pq"
+   },
+   "note": "true 4:4:4 truth; input = x265 crf22 encode of the left-sited 4:2:0"
+  },
+  {
+   "id": "sol-t150-master420",
+   "content_type": "film24",
+   "clip": "sol_levante",
+   "case": "t150_f120_420_no_codec",
+   "protocol": "chroma444_true",
+   "frames": 6,
+   "gop": null,
+   "minigop": null,
+   "crop": {
+    "x": 256,
+    "y": 128,
+    "w": 1024,
+    "h": 768
+   },
+   "master": {
+    "kind": "raw",
+    "path": "D:/codex/videoprocessor/eval-scratch/feat-eval-prototypes-444/sol_t150_f120.yuv",
+    "width": 1536,
+    "height": 1024,
+    "pix_fmt": "yuv444p12le",
+    "fps": 24.0,
+    "start": 0,
+    "matrix": "2020",
+    "transfer": "pq"
+   },
+   "coded": {
+    "kind": "raw",
+    "path": "D:/codex/videoprocessor/eval-scratch/feat-eval-prototypes-444/sol_t150_f120.yuv",
+    "width": 1536,
+    "height": 1024,
+    "pix_fmt": "yuv444p12le",
+    "fps": 24.0,
+    "start": 0,
+    "matrix": "2020",
+    "transfer": "pq"
+   },
+   "note": "true 4:4:4 truth; input = Lanczos-3 4:2:0 (left siting) of it, no codec; PQ code values"
+  },
+  {
+   "id": "sol-t150-x265",
+   "content_type": "film24",
+   "clip": "sol_levante",
+   "case": "t150_f120_x265_crf22",
+   "protocol": "chroma444_true",
+   "frames": 6,
+   "gop": null,
+   "minigop": null,
+   "crop": {
+    "x": 256,
+    "y": 128,
+    "w": 1024,
+    "h": 768
+   },
+   "master": {
+    "kind": "raw",
+    "path": "D:/codex/videoprocessor/eval-scratch/feat-eval-prototypes-444/sol_t150_f120.yuv",
+    "width": 1536,
+    "height": 1024,
+    "pix_fmt": "yuv444p12le",
+    "fps": 24.0,
+    "start": 0,
+    "matrix": "2020",
+    "transfer": "pq"
+   },
+   "coded": {
+    "kind": "raw",
+    "path": "D:/codex/videoprocessor/eval-scratch/feat-eval-prototypes-444/sol_t150_f120_x265_crf22.yuv",
+    "width": 1536,
+    "height": 1024,
+    "pix_fmt": "yuv420p10le",
+    "fps": 24.0,
+    "start": 0,
+    "matrix": "2020",
+    "transfer": "pq"
+   },
+   "note": "true 4:4:4 truth; input = x265 crf22 encode of the left-sited 4:2:0"
+  },
+  {
+   "id": "nocturne-t300-422",
+   "content_type": "film24",
+   "clip": "nocturne",
+   "case": "t300_f60_422_partial",
+   "protocol": "chroma444_true",
+   "frames": 6,
+   "gop": null,
+   "minigop": null,
+   "crop": {
+    "x": 256,
+    "y": 128,
+    "w": 1024,
+    "h": 768
+   },
+   "master": {
+    "kind": "raw",
+    "path": "D:/codex/videoprocessor/eval-scratch/feat-eval-prototypes-444/noct_t300_f60.yuv",
+    "width": 1536,
+    "height": 1024,
+    "pix_fmt": "yuv422p10le",
+    "fps": 60.0,
+    "start": 0,
+    "matrix": "709",
+    "transfer": "pq"
+   },
+   "coded": {
+    "kind": "raw",
+    "path": "D:/codex/videoprocessor/eval-scratch/feat-eval-prototypes-444/noct_t300_f60.yuv",
+    "width": 1536,
+    "height": 1024,
+    "pix_fmt": "yuv422p10le",
+    "fps": 60.0,
+    "start": 0,
+    "matrix": "709",
+    "transfer": "pq"
+   },
+   "note": "PARTIAL: 4:2:2 master -> half-width 4:4:4 truth (horizontal chroma genuine); synthetic film grain; 60p (content_type film24 only as a grain/film stand-in); matrix as tagged (709)"
+  }
+ ]
+}
