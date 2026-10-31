@@ -57,6 +57,25 @@ namespace CustomHookChain
             return "{{" + name + "}}";
         }
 
+        // Bit i of the mask is BuiltIns()[i].
+        unsigned UsedBuiltInMask(const std::string& source, const std::vector<BuiltIn>& builtIns)
+        {
+            unsigned mask = 0;
+            for (size_t i = 0; i < builtIns.size(); ++i)
+                if (source.find(Token(builtIns[i].name)) != std::string::npos)
+                    mask |= 1u << i;
+            return mask;
+        }
+
+        std::string KeyFromMask(unsigned mask, const std::vector<BuiltIn>& builtIns)
+        {
+            std::string key;
+            for (size_t i = 0; i < builtIns.size(); ++i)
+                if (mask & (1u << i))
+                    key += std::string(builtIns[i].name) + "=" + builtIns[i].value + ";";
+            return key;
+        }
+
         bool ReplaceAll(std::string& source, const std::string& token,
             const std::string& value)
         {
@@ -227,11 +246,14 @@ namespace CustomHookChain
         for (Entry& entry : entries)
             DestroyHook(entry);
         entries.clear();
+        settled = false;
     }
 
     bool Chain::Ensure(const TemplateValues& values)
     {
+        if (settled && values == lastValues) return false;
         bool changed = false;
+        std::vector<BuiltIn> builtIns;   // built at most once per call
         for (Entry& entry : entries)
         {
             if (entry.runtimeFailed) continue;
@@ -248,9 +270,14 @@ namespace CustomHookChain
                 }
                 entry.quantizer = IsOutputQuantizer(entry.rule.filename, entry.source);
                 entry.prescaler = IsLumaPrescaler(entry.source);
+                if (builtIns.empty()) builtIns = BuiltIns(values);
+                entry.usedBuiltIns = UsedBuiltInMask(entry.source, builtIns);
             }
             if (entry.source.empty()) continue;
-            const std::string key = TemplateKey(entry.source, values);
+            if (builtIns.empty()) builtIns = BuiltIns(values);
+            entry.evaluated = true;
+            entry.pending = false;
+            const std::string key = KeyFromMask(entry.usedBuiltIns, builtIns);
             if (key == entry.key && (entry.hook || entry.loadFailed)) continue;
             if (entry.hook) changed = true;
             DestroyHook(entry);
@@ -265,6 +292,7 @@ namespace CustomHookChain
                 if (reason.find("not known yet") != std::string::npos)
                 {
                     entry.key.clear();
+                    entry.pending = true;
                     continue;
                 }
                 entry.loadFailed = true;
@@ -308,6 +336,12 @@ namespace CustomHookChain
                 applied.size(), key.c_str(), entry.rule.cinemaOnly ? " cinema_only=1" : "",
                 unused.empty() ? "" : " unused_params=", unused.c_str());
         }
+        settled = std::all_of(entries.begin(), entries.end(), [](const Entry& entry)
+            {
+                return entry.runtimeFailed || (entry.sourceRead && entry.source.empty()) ||
+                    (entry.evaluated && !entry.pending);
+            });
+        lastValues = values;
         return changed;
     }
 
@@ -409,6 +443,7 @@ namespace CustomHookChain
     bool Chain::MarkRuntimeFailures(const uint64_t* signatures, int count)
     {
         bool changed = false;
+        settled = false;
         for (Entry& entry : entries)
         {
             if (!entry.hook || entry.runtimeFailed) continue;

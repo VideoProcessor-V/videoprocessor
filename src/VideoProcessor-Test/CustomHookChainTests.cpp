@@ -2,6 +2,7 @@
 #include "CppUnitTest.h"
 
 #include <cmath>
+#include <cstdio>
 
 #include <VP-V/modules/output/dither/CustomHookChain.h>
 
@@ -360,5 +361,68 @@ namespace VideoProcessorTest
 			Assert::AreEqual(size_t{ 0 }, chain.ConfiguredCount());
 			Assert::IsTrue(shaders.parsed.empty());
 		}
+
+		TEST_METHOD(EnsureSettledSkipsRepeatedCallsAndReloadsOnUsedValuesOnly)
+		{
+			FakeShaders shaders;
+			shaders.files["a.glsl"] = "OUTPUT {{output_width}} {{refresh_hz}}";
+			auto loader = shaders.Loader();
+			int reads = 0;
+			const auto read = loader.read;
+			loader.read = [&](const std::string& file, std::string& source, std::string& reason)
+			{
+				++reads;
+				return read(file, source, reason);
+			};
+			CustomHookChain::Chain chain(loader);
+			chain.Configure({ CustomRule("a", "a.glsl", 1) });
+			auto values = Output2560x1600();
+			Assert::IsTrue(chain.Ensure(values));
+			Assert::IsFalse(chain.Ensure(values));
+			Assert::IsFalse(chain.Ensure(values));
+			Assert::AreEqual(1, reads);
+			Assert::AreEqual(size_t{ 1 }, shaders.parsed.size());
+			values.sourceFps = 50.0;   // not used by the source
+			Assert::IsFalse(chain.Ensure(values));
+			Assert::AreEqual(size_t{ 1 }, shaders.parsed.size());
+			values.refreshHz = 50.0;   // used
+			Assert::IsTrue(chain.Ensure(values));
+			Assert::AreEqual(size_t{ 2 }, shaders.parsed.size());
+			Assert::AreEqual(std::string("OUTPUT 2560 50"), shaders.parsed.back());
+			// Configure invalidates the fast exit.
+			chain.Configure({ CustomRule("a", "a.glsl", 1) });
+			Assert::IsTrue(chain.Ensure(values));
+			Assert::AreEqual(size_t{ 3 }, shaders.parsed.size());
+		}
+
+		TEST_METHOD(EnsureRetriesANotKnownYetEntryOnTheNextCall)
+		{
+			FakeShaders shaders;
+			shaders.files["a.glsl"] = "OUTPUT {{output_width}}";
+			shaders.files["b.glsl"] = "CHROMA";
+			CustomHookChain::Chain chain(shaders.Loader());
+			chain.Configure({ CustomRule("a", "a.glsl", 1), CustomRule("b", "b.glsl", 2) });
+			CustomHookChain::TemplateValues values;
+			Assert::IsTrue(chain.Ensure(values));   // b loads, a waits
+			Assert::AreEqual(size_t{ 1 }, shaders.parsed.size());
+			Assert::IsFalse(chain.Ensure(values));
+			Assert::AreEqual(size_t{ 1 }, shaders.parsed.size());
+			values.outputWidth = 1280;
+			Assert::IsTrue(chain.Ensure(values));
+			Assert::AreEqual(std::string("OUTPUT 1280"), shaders.parsed.back());
+			Assert::IsFalse(chain.Ensure(values));
+			Assert::AreEqual(size_t{ 2 }, shaders.parsed.size());
+		}
+
+		TEST_METHOD(TemplateKeyListsUsedBuiltInsInOrder)
+		{
+			auto values = Output2560x1600();
+			values.sigmaDeltaGrids = true;
+			const std::string source = "{{source_fps}} {{output_height_q4}} {{output_width}} {{output_width_b16}}";
+			const std::string key = CustomHookChain::TemplateKey(source, values);
+			Assert::AreEqual(std::string("output_width=2560;output_height_q4=401;output_width_b16=161;source_fps=23.976;"), key);
+			Assert::AreEqual(std::string(), CustomHookChain::TemplateKey("none", values));
+		}
+
 	};
 }

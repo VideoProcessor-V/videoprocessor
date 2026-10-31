@@ -30,6 +30,15 @@ namespace CustomHookChain
         // (and heights) are the sigma-delta's quarter / block grids only with efficiency_fixes
         // on; off (the default, the Original pathway) they are the full output size as before.
         bool sigmaDeltaGrids = false;
+
+        bool operator==(const TemplateValues& other) const
+        {
+            return outputWidth == other.outputWidth && outputHeight == other.outputHeight &&
+                sourceWidth == other.sourceWidth && sourceHeight == other.sourceHeight &&
+                refreshHz == other.refreshHz && sourceFps == other.sourceFps &&
+                sigmaDeltaGrids == other.sigmaDeltaGrids;
+        }
+        bool operator!=(const TemplateValues& other) const { return !(*this == other); }
     };
 
     // Rules this chain owns, in execution order. Like the madVR path, the
@@ -153,6 +162,9 @@ namespace CustomHookChain
             bool prescaler = false;   // IsLumaPrescaler (Stage 8b one-axis)
             bool loadFailed = false;
             bool runtimeFailed = false;
+            unsigned usedBuiltIns = 0;   // bit i set: source contains built-in i's {{token}}
+            bool evaluated = false;      // key check reached for the current source
+            bool pending = false;        // a used built-in is not known yet: retry next frame
         };
 
         bool Submitted(const Entry& entry, bool lowLatency) const;
@@ -160,5 +172,8 @@ namespace CustomHookChain
 
         Loader loader;
         std::vector<Entry> entries;
+        // Fast exit for Ensure: the values of the last call and whether every entry settled.
+        TemplateValues lastValues;
+        bool settled = false;
     };
 }
