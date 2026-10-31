@@ -67,6 +67,8 @@ namespace TemporalDetail
 			// Reference-store tier: past slots kept (1 .. kSlots). Small cards keep fewer (SlotsForBudget); the status says
 			// "store N of 5 slots (memory tier)" whenever it is below kSlots. The CPU model's Tuning::slots matches it.
 			int slots = kSlots;
+			GateTuning gates;              // the gate thresholds (the model's Tuning::gates)
+			bool autoEngaged = false;      // temporal_detail = auto: the host's AutoGate decision (idle = the input, no pass)
 		};
 
 		struct Counters

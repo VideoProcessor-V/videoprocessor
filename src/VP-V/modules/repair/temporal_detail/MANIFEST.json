@@ -31,6 +31,7 @@
     "tools": [],
     "config_keys": [
       "temporal_detail",
+      "temporal_detail_boost",
       "temporal_detail_boost_max",
       "temporal_detail_max_age",
       "temporal_detail_strength"

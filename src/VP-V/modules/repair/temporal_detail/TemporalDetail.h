@@ -123,14 +123,68 @@ namespace TemporalDetail
 		int Height() const { return bottom - top; }
 	};
 
-	enum class Mode { Off, Steady };
+	// off; steady (always on); auto (on only while the source-ID consensus says the stream is low quality: AutoGate).
+	enum class Mode { Off, Steady, Auto };
 
 	struct Settings
 	{
 		Mode mode = Mode::Off;
 		double strength = 1.0;       // 0 .. 1
 		double maxAgeSeconds = 2.0;  // 0.25 .. 4
-		double boostMax = 0.15;      // 0 .. 0.3
+		bool boost = false;          // the fallback boost (owner 2026-10-31: off unless re-validated on real encodes)
+		double boostMax = 0.15;      // 0 .. 0.3 (used when boost is on)
+	};
+
+	// The gate thresholds real B-frames will re-tune (owner 2026-10-31): defaults are the model's constants.
+	struct GateTuning
+	{
+		double strongerMargin = kStrongerMargin;     // reference stronger: E1(S_w) > (1 + m) E1(S)
+		double significanceLo = kSignificanceLo;     // reference fine energy over the grain level: zero at
+		double significanceHi = kSignificanceHi;     // ... full at
+		double baseNoiseCodes = kBaseNoiseCodes;     // base match allowance: coding noise ...
+		double baseGrainSigmas = kBaseGrainSigmas;   // ... plus this many grain RMS (of the base band: / 4)
+		double uncertaintyPx = kUncertaintyPx;       // motion uncertainty limit (x Scale)
+	};
+
+	// AUTO mode (temporal_detail = auto): engages only while the source-ID consensus (input.source_analysis identity,
+	// SourceIdConsensus Result.value.qualityTier: 0 = lowest .. 3, -1 = unknown; already latched with its own dwell) says
+	// the stream is low quality, with hysteresis in time on top: engage after the tier has been <= engageTier for
+	// engageSeconds, release after it has been above engageTier (or unknown) for releaseSeconds. Frame counts follow the
+	// measured content rate. Status() is the visible line ("auto: on (stream quality tier 1)", ...).
+	class AutoGate
+	{
+	public:
+		struct Params
+		{
+			int engageTier = 1;            // tiers 0..1 = bitrate quality below 0.5 (SourceIdVote qualityTierEdges)
+			double engageSeconds = 1.0;
+			double releaseSeconds = 3.0;
+		};
+		AutoGate() = default;
+		explicit AutoGate(const Params& p) : m_p(p) {}
+		// One presented source frame; returns whether temporal detail runs on it.
+		bool Update(int qualityTier, double hz)
+		{
+			const bool low = qualityTier >= 0 && qualityTier <= m_p.engageTier;
+			m_tier = qualityTier;
+			if (low == m_on) m_run = 0;
+			else if (++m_run >= Frames(m_on ? m_p.releaseSeconds : m_p.engageSeconds, hz)) { m_on = low; m_run = 0; }
+			return m_on;
+		}
+		bool On() const { return m_on; }
+		void Reset() { m_on = false; m_run = 0; m_tier = -1; }
+		std::string Status() const
+		{
+			if (m_tier < 0) return m_on ? "auto: on (stream quality unknown, releasing)" : "auto: idle (no stream quality estimate)";
+			const std::string t = std::to_string(m_tier);
+			if (m_on) return "auto: on (stream quality tier " + t + ")";
+			return "auto: idle (stream quality tier " + t + (m_tier <= m_p.engageTier ? ", engaging)" : ")");
+		}
+
+	private:
+		Params m_p;
+		bool m_on = false;
+		int m_run = 0, m_tier = -1;
 	};
 
 	inline std::string ToLower(std::string s)
@@ -149,8 +203,8 @@ namespace TemporalDetail
 		return true;
 	}
 
-	// Keys temporal_detail (off|steady), temporal_detail_strength (0..1), temporal_detail_max_age (0.25..4),
-	// temporal_detail_boost_max (0..0.3). An invalid value adds a message to errors and keeps the previous
+	// Keys temporal_detail (off|steady|auto), temporal_detail_strength (0..1), temporal_detail_max_age (0.25..4),
+	// temporal_detail_boost (on|off, default off), temporal_detail_boost_max (0..0.3). An invalid value adds a message to errors and keeps the previous
 	// value of inOut; unknown keys are ignored. Returns true when every present key was valid.
 	inline bool ParseSettings(const std::map<std::string, std::string>& kv, Settings& inOut, std::vector<std::string>* errors)
 	{
@@ -166,7 +220,16 @@ namespace TemporalDetail
 			const std::string v = ToLower(it->second);
 			if (v == "off") inOut.mode = Mode::Off;
 			else if (v == "steady") inOut.mode = Mode::Steady;
-			else fail(it->first, "expected off or steady, got '" + it->second + "'");
+			else if (v == "auto") inOut.mode = Mode::Auto;
+			else fail(it->first, "expected off, steady or auto, got '" + it->second + "'");
+		}
+		it = kv.find("temporal_detail_boost");
+		if (it != kv.end())
+		{
+			const std::string v = ToLower(it->second);
+			if (v == "on") inOut.boost = true;
+			else if (v == "off") inOut.boost = false;
+			else fail(it->first, "expected on or off, got '" + it->second + "'");
 		}
 		auto number = [&](const char* key, double lo, double hi, double& target)
 		{

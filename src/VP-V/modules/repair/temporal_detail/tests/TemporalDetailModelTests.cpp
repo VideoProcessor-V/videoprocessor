@@ -242,10 +242,13 @@ namespace
 		}
 		return r;
 	}
+	// The designed behaviour these tests measure includes the fallback boost; the product default has it off (owner
+	// 2026-10-31, TemporalDetailBoostAndAutoDefaults covers the default).
 	Settings Steady()
 	{
 		Settings s;
 		s.mode = Mode::Steady;
+		s.boost = true;
 		return s;
 	}
 	Run GoSteady(const std::vector<Plane>& frames, const IMotionSource* motion, const Settings& s = Steady(), int future = 0, double hz = kHz)
@@ -1349,6 +1352,73 @@ namespace VideoProcessorTest
 			Assert::IsTrue(PolicyOf(Counter::Full) == ReaderPolicy::Reset && PolicyOf(Counter::Timing) == ReaderPolicy::Ignore, L"reader policies");
 			Assert::AreEqual(3, static_cast<int>(sizeof(kProducts) / sizeof(kProducts[0])), L"three products");
 			Assert::IsTrue(Shaders::kMeasBody != nullptr && Shaders::kCleanBody != nullptr && Shaders::kWeightBody != nullptr && Shaders::kTransferBody != nullptr, L"shaders declared");
+		}
+
+		TEST_METHOD(TemporalDetailBoostAndAutoDefaults)
+		{
+			// Owner 2026-10-31: the fallback boost is off by default (it was the only part acting on real encodes and cost
+			// PSNR); temporal_detail = auto runs only while the source-ID consensus says the stream is low quality, with
+			// hysteresis, and is the input itself (bit-exact) while idle.
+			Settings def;
+			Assert::IsFalse(def.boost, L"boost off by default");
+			std::map<std::string, std::string> kv = { { "temporal_detail", "AUTO" }, { "temporal_detail_boost", "on" } };
+			Settings p;
+			Assert::IsTrue(ParseSettings(kv, p, nullptr) && p.mode == Mode::Auto && p.boost, L"auto and the boost switch parse");
+			std::map<std::string, std::string> bad = { { "temporal_detail_boost", "maybe" } };
+			Assert::IsFalse(ParseSettings(bad, p, nullptr) || !p.boost, L"an invalid boost value keeps the previous one");
+
+			const int n = 32;
+			const Stream st = BuildPan(Pattern("IBBBPBBB", n), 0.0);
+			FieldMotionSource motion;
+			SetPan(motion, n, 0.0, 0.0);
+			Settings steadyDefault;
+			steadyDefault.mode = Mode::Steady;   // boost off
+			Model m(steadyDefault);
+			double boostSum = 0.0;
+			for (int t = 0; t < n; ++t)
+			{
+				Model::FrameIn in;
+				in.luma = st.frames[static_cast<size_t>(t)];
+				in.seq = static_cast<uint64_t>(t);
+				in.contentHz = kHz;
+				in.motion = &motion;
+				m.Process(in);
+				for (double b : m.Diag().boost) boostSum += b;
+			}
+			Assert::AreEqual(0.0, boostSum, L"no boost with the default settings");
+
+			// The gate: tier 1 (low) engages after 1 s, tier 3 releases after 3 s, unknown does not engage.
+			AutoGate gate;
+			int engagedAt = -1, releasedAt = -1;
+			for (int t = 0; t < 200; ++t)
+			{
+				const int tier = t < 10 ? -1 : (t < 100 ? 1 : 3);
+				const bool on = gate.Update(tier, kHz);
+				if (on && engagedAt < 0) engagedAt = t;
+				if (!on && engagedAt >= 0 && releasedAt < 0) releasedAt = t;
+			}
+			LogF("auto gate: engaged at frame %.0f, released at frame %.0f", engagedAt, releasedAt);
+			Log(gate.Status().c_str());
+			Assert::AreEqual(10 + Frames(1.0, kHz) - 1, engagedAt, L"engages after the dwell");
+			Assert::AreEqual(100 + Frames(3.0, kHz) - 1, releasedAt, L"releases after the longer dwell");
+			// Model in auto: idle frames are the input bit-exact; engaged frames process.
+			Settings a = Steady();
+			a.mode = Mode::Auto;
+			Model ma(a);
+			bool changedWhileEngaged = false;
+			for (int t = 0; t < n; ++t)
+			{
+				Model::FrameIn in;
+				in.luma = st.frames[static_cast<size_t>(t)];
+				in.seq = static_cast<uint64_t>(t);
+				in.contentHz = kHz;
+				in.motion = &motion;
+				in.autoEngaged = t >= 8;
+				const Plane o = ma.Process(in);
+				if (t < 8) Assert::IsTrue(Same(o, in.luma), L"auto idle = the input");
+				else if (!Same(o, in.luma)) changedWhileEngaged = true;
+			}
+			Assert::IsTrue(changedWhileEngaged, L"auto engaged processes");
 		}
 
 		TEST_METHOD(TemporalDetailMotionSourceIsBounded)

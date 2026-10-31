@@ -381,6 +381,7 @@ namespace TemporalDetail
 			std::vector<FutureFrame> future;   // queued modes: seq + 1, seq + 2, ... (the referee and future slot)
 			std::vector<double> quality;       // optional per-block bitrate quality 0..1 on the active picture's block grid (empty = neutral 1)
 			ActiveRect active;                 // the active picture (empty = the whole plane)
+			bool autoEngaged = false;          // temporal_detail = auto: the host's AutoGate decision for this frame
 		};
 
 		// Model-only knobs for measurement and the guard's own test (not user settings, never in the config):
@@ -396,6 +397,7 @@ namespace TemporalDetail
 			bool guard = true;
 			double forceDrop = 0.0, forceFreeze = 0.0;
 			int slots = kSlots;                  // reference-store tier: past slots kept (1 .. kSlots; small cards keep fewer)
+			GateTuning gates;                    // the gate thresholds (re-tuned on real B-frames)
 		};
 
 		explicit Model(const Settings& settings) : m_set(settings) {}
@@ -692,10 +694,11 @@ namespace TemporalDetail
 		const double e2c = c2 / n, e2w = w2 / n;
 		e.corr = dot / std::sqrt(cs * ws + 1e-12);
 		e.corrGate = Smoothstep(0.5 * kCorrMin, kCorrMin, e.corr);
-		e.strongerGate = Smoothstep(1.0 + kStrongerMargin, 1.0 + 3.0 * kStrongerMargin, (e.e1w + fl) / (e.e1c + fl)) *
-			Smoothstep(kSignificanceLo, kSignificanceHi, e.e1w / (A.N[bi] + fl));
+		const GateTuning& gt = m_tune.gates;
+		e.strongerGate = Smoothstep(1.0 + gt.strongerMargin, 1.0 + 3.0 * gt.strongerMargin, (e.e1w + fl) / (e.e1c + fl)) *
+			Smoothstep(gt.significanceLo, gt.significanceHi, e.e1w / (A.N[bi] + fl));
 		// A reference clearly weaker than the current block would soften it: that veto is instant.
-		e.harmGate = Smoothstep(1.0 - 3.0 * kStrongerMargin, 1.0 - kStrongerMargin, (e.e1w + fl) / (e.e1c + fl));
+		e.harmGate = Smoothstep(1.0 - 3.0 * gt.strongerMargin, 1.0 - gt.strongerMargin, (e.e1w + fl) / (e.e1c + fl));
 		e.hbGate = Smoothstep(kRho2Lo, kRho2Hi, (e2c + fl) / (e2w + fl));
 		// Focus: the source block's F at the composed block centre.
 		{
@@ -707,10 +710,10 @@ namespace TemporalDetail
 			e.focusGate = Smoothstep(kPullLo, kPullHi, A.F[bi] / (Fw + 1e-6));
 			e.u = Detail::GridAt(src.u, bw, bh, B, cx, cy);
 		}
-		const double uMax = kUncertaintyPx * m_scale;
+		const double uMax = gt.uncertaintyPx * m_scale;
 		e.uncGate = 1.0 - Smoothstep(0.3 * uMax, uMax, e.u);
 		e.baseDiff = bd / n;
-		const double allow = kBaseNoiseCodes + kBaseGrainSigmas * std::sqrt((std::max)(0.0, A.N[bi])) / 4.0;
+		const double allow = gt.baseNoiseCodes + gt.baseGrainSigmas * std::sqrt((std::max)(0.0, A.N[bi])) / 4.0;
 		e.baseGate = 1.0 - Smoothstep(allow, 2.0 * allow, e.baseDiff);
 		const double hzv = hz > 0.0 ? hz : kReferenceHz;
 		const double ageFrames = src.future ? static_cast<double>(src.seq) - static_cast<double>(m_prevSeq + 1) : static_cast<double>(m_prevSeq + 1) - static_cast<double>(src.seq);
@@ -762,6 +765,13 @@ namespace TemporalDetail
 		if (m_set.mode == Mode::Off)
 		{
 			m_diag.status = "off";
+			return in.luma;
+		}
+		if (m_set.mode == Mode::Auto && !in.autoEngaged)
+		{
+			// auto, idle: the input itself; the store restarts when it engages again (the sequence breaks meanwhile).
+			m_diag.status = "auto: idle";
+			m_haveFrame = false;
 			return in.luma;
 		}
 		const ActiveRect r = in.active.Resolve(in.luma.w, in.luma.h);
@@ -1177,7 +1187,8 @@ namespace TemporalDetail
 				const size_t u = static_cast<size_t>(i);
 				const double q = A.q[u];
 				const double raw = std::sqrt((std::max)(st.qPeak, q) / q) - 1.0;
-				double bn = m_set.boostMax > 0.0 ? Clamp(raw / m_set.boostMax, 0.0, 1.0) : 0.0;
+				const double boostMax = m_set.boost ? m_set.boostMax : 0.0;   // the boost switch (off by default)
+				double bn = boostMax > 0.0 ? Clamp(raw / boostMax, 0.0, 1.0) : 0.0;
 				const double hbP = Smoothstep(kRho2Lo, kRho2Hi, (A.e2[u] + kEnergyFloor) / (st.e2Peak + kEnergyFloor));
 				const double fP = Smoothstep(kPullLo, kPullHi, A.F[u] / (st.fPeak + 1e-6));
 				const double noRef = 1.0 - Smoothstep(0.0, 0.5, weight);
@@ -1187,7 +1198,7 @@ namespace TemporalDetail
 				if (!st.bOn && bn >= kEnterWeight) st.bOn = true;
 				else if (st.bOn && bn < kLeaveWeight) st.bOn = false;
 				st.bLim += Clamp((st.bOn ? bn : 0.0) - st.bLim, -fall, rise);
-				boost = m_set.boostMax * st.bLim;
+				boost = boostMax * st.bLim;
 			}
 			Contribution& c = contrib[static_cast<size_t>(i)];
 			// the output-vs-input grain guard (step 10) scales what this block may contribute

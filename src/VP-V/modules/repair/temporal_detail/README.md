@@ -149,10 +149,20 @@ removed-energy grid) would drop the raw bands and make it ~0.
 
 | Key | Values | Default |
 |---|---|---|
-| `temporal_detail` | off, steady | off (draft) |
+| `temporal_detail` | off, steady, auto | off (draft) |
+| `temporal_detail_boost` | on, off (the fallback boost) | off (owner 2026-10-31: re-validate on real encodes first) |
 | `temporal_detail_strength` | 0.0 .. 1.0 | 1.0 |
 | `temporal_detail_max_age` | 0.25 .. 4.0 s | 2.0 |
 | `temporal_detail_boost_max` | 0.0 .. 0.3 | 0.15 |
+
+**auto** (owner 2026-10-31): `AutoGate` (TemporalDetail.h) reads the source-ID consensus quality tier
+(input.source_analysis identity, `SourceIdConsensus` Result.value.qualityTier, 0 = lowest .. 3, -1 unknown) and engages
+after the tier has been <= 1 (bitrate quality below 0.5) for 1 s, releases after 3 s above it or unknown; idle = the input
+bit-exact, no pass; `Status()` is the visible line ("auto: on (stream quality tier 1)", "auto: idle (...)"). The host
+calls `Update(tier, contentHz)` per presented frame and passes `autoEngaged` (FrameIn / Gpu::Params); the store restarts
+on each engagement. Gate thresholds that real B-frames will re-tune are tunables (`GateTuning`: reference-stronger margin,
+significance band, base-match noise and grain allowance, motion-uncertainty limit) in `Model::Tuning::gates` and
+`Gpu::Params::gates`, defaults = the constants above.
 
 `TemporalDetail::ParseSettings` validates them (an invalid value keeps the previous one). They are not in
 RendererProfileConfig, slots.json, the tier table or the Config editor yet.
@@ -193,7 +203,7 @@ part of the guard; the grain boost is dropped.
 Integration: rename the slot to `repair.temporal_detail`; map `detail_pulse_stabilise = on` to `temporal_detail =
 steady` and `detail_pulse_cap` to `_boost_max = cap - 1` (clamped 0.3); drop `texture_restore*` with a logged
 notice; Original pathway sets `temporal_detail = off`; reuse the host plumbing (crossfade, Forget triggers,
-DetailLookAhead, status strings). Old keys are read for one release. A repeat (same
+DetailLookAhead, status strings). Old keys are read for one release. `detail_pulse_stabilise = on` maps to `temporal_detail = steady` with `temporal_detail_boost = off` until the boost is re-validated. A repeat (same
 sequence) returns the last output (repeat/foreign/phase pictures come at integration); `CameraModelMotionSource` stays uncompiled until feat/camera-model merges.
 
 ## GPU implementation (TemporalDetailGpu.h/.cpp, TemporalDetailShaders.h)

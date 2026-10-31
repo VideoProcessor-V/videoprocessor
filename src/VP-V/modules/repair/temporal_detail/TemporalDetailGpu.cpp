@@ -187,6 +187,14 @@ namespace TemporalDetail
 				result = source;
 				return true;
 			}
+			if (set.mode == Mode::Auto && !params.autoEngaged)
+			{
+				// auto, idle: the input itself, no pass; the store restarts when it engages again.
+				m_status = "auto: idle";
+				if (m_impl) m_impl->haveFrame = false;
+				result = source;
+				return true;
+			}
 			if (!gpu || !dispatch || source.num_planes <= 0)
 			{
 				m_error = "temporal detail: nothing to process";
@@ -333,10 +341,11 @@ namespace TemporalDetail
 				Define("TD_SB_LOAD", m.baseUnorm ? 1.0 / cu : 1.0) + Define("TD_SB_STORE", m.baseUnorm ? cu : 1.0) + rectDefs;
 			std::string law;
 			law += Define("TD_FLOOR", kEnergyFloor);
-			law += Define("TD_CORR_MIN", kCorrMin) + Define("TD_STRONGER_MARGIN", kStrongerMargin);
-			law += Define("TD_SIG_LO", kSignificanceLo) + Define("TD_SIG_HI", kSignificanceHi);
+			const GateTuning& gt = params.gates;
+			law += Define("TD_CORR_MIN", kCorrMin) + Define("TD_STRONGER_MARGIN", gt.strongerMargin);
+			law += Define("TD_SIG_LO", gt.significanceLo) + Define("TD_SIG_HI", gt.significanceHi);
 			law += Define("TD_RHO2_LO", kRho2Lo) + Define("TD_RHO2_HI", kRho2Hi) + Define("TD_PULL_LO", kPullLo) + Define("TD_PULL_HI", kPullHi);
-			law += Define("TD_UMAX", kUncertaintyPx * g.scale) + Define("TD_BASE_NOISE", kBaseNoiseCodes) + Define("TD_BASE_GRAIN_SIGMAS", kBaseGrainSigmas);
+			law += Define("TD_UMAX", gt.uncertaintyPx * g.scale) + Define("TD_BASE_NOISE", gt.baseNoiseCodes) + Define("TD_BASE_GRAIN_SIGMAS", gt.baseGrainSigmas);
 			law += Define("TD_AGE_FADE", kAgeFadeShare) + Define("TD_REBOUND_TAU", kReboundTau) + Define("TD_REBOUND_MIN", kReboundMinEnergy);
 			law += Define("TD_SOFT_STEP", kSoftStep) + Define("TD_RETIRE_MIN", kRetireMinEnergy) + Define("TD_EV_LO", kEvidenceLo) + Define("TD_EV_HI", kEvidenceHi);
 			law += Define("TD_EVICT_WEIGHT", kEvictWeight) + Define("TD_TEMPLATE_CLEAN", params.templateClean ? 1.0 : 0.0);
@@ -362,7 +371,7 @@ namespace TemporalDetail
 			const float vPeak = static_cast<float>(std::pow(0.5, 1.0 / Frames(set.maxAgeSeconds, hz)));
 			const float vInvXf = static_cast<float>(1.0 / fXf), vRun = static_cast<float>(fRun);
 			const float vRise = static_cast<float>(1.0 / fRise), vFall = static_cast<float>(1.0 / fFall);
-			const float vStrength = static_cast<float>(set.strength), vBoost = static_cast<float>(set.boostMax);
+			const float vStrength = static_cast<float>(set.strength), vBoost = static_cast<float>(set.boost ? set.boostMax : 0.0);
 			const float vAlpha = static_cast<float>(1.0 - 1.0 / Frames(kGuardStatsSeconds, hz));
 			const float vGFall = static_cast<float>(1.0 / Frames(kGuardFallSeconds, hz)), vGRise = static_cast<float>(1.0 / Frames(kGuardRiseSeconds, hz));
 			const float vBwdBpx = static_cast<float>(params.backward.blockPx > 0.0 ? params.backward.blockPx : 16.0);
