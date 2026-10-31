@@ -87,8 +87,8 @@ namespace VpQueueRules
 	// beyond the target's own wait, so target+1 and target+2 (arrival jitter, the
 	// timeline steering's margin, a ppm step) are left to the steering and the
 	// cadence correction, and only a real backlog (about 3 periods or 100 ms more
-	// than the target holds) is flushed. Off: the age from zero (the old rule, which
-	// at 24-50 Hz flushed every depth above the target).
+	// than the target holds) is flushed. Off: upstream's rule (see ShouldRecoverBacklog; its old
+	// 83b7ffea form flushed every depth above the target at 24-50 Hz).
 	inline double StaleBacklogExcessAgeMs(double oldestQueuedAgeMs,
 		size_t desiredDepth, double frameRateHz)
 	{
@@ -111,11 +111,19 @@ namespace VpQueueRules
 		double oldestQueuedAgeMs, double renderCycleMs, double frameRateHz,
 		bool staleBeyondTarget = false)
 	{
+		// queue_timing_fixes off (and the Original pathway): upstream's own rule, whatever its
+		// current thresholds are (v1.4.02: the stale age scales with the target depth). The merge
+		// of v1.4.02 changed this branch from VP's 83b7ffea copy to the call, so the Original
+		// pathway decides exactly like BillQueuePolicy (OriginalPathwayDecidesLikeUpstream...).
+		if (!staleBeyondTarget)
+			return AlphaQueuePolicy::ShouldRecoverBacklog(queueDepth, desiredDepth, oldestQueuedAgeMs,
+				renderCycleMs, frameRateHz);
 		if (queueDepth <= NormalizeDesiredDepth(desiredDepth))
 			return false;
-		const double staleAgeMs = staleBeyondTarget ?
-			StaleBacklogExcessAgeMs(oldestQueuedAgeMs, desiredDepth, frameRateHz) :
-			oldestQueuedAgeMs;
+		// With the fixes the age is measured beyond the target's own wait. That is never
+		// stricter than upstream's depth-scaled threshold, so the fixes only ever flush less.
+		const double staleAgeMs =
+			StaleBacklogExcessAgeMs(oldestQueuedAgeMs, desiredDepth, frameRateHz);
 		return renderCycleMs >= RenderStallThresholdMs(frameRateHz) ||
 			staleAgeMs >= StaleBacklogAgeThresholdMs(frameRateHz);
 	}

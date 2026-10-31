@@ -10,7 +10,6 @@
 #include <pch.h>
 
 #include "DirectShowTimingClock.h"
-#include <IntegerMath.h>
 
 
 DirectShowTimingClock::DirectShowTimingClock(ITimingClock& timingClock, HRESULT& result) :

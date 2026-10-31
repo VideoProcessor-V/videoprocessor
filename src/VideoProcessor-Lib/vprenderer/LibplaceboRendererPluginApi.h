@@ -52,7 +52,11 @@
 // generic module status and command entries (ModuleStatusText.h), after ToggleDvCompareCapture
 // in the vtable. New status lines and module commands use them and need no further version change.
 // 45: v1.4.02-beta merge (rehearsal 2026-10-31): Bill's API 34 (base 28) and VP-V 44 together;
-// provisional number, max+1, recorded in rehearsal-notes c-list (ABI).
+// provisional number, max+1, recorded in rehearsal-notes c-list (ABI). Bill's own counter went
+// 28 -> 34 on his side (submitted and detected picture aspect snapshots at 34; his per-number
+// history is in git log of this file). The union keeps every export and vtable entry of both
+// sides: Bill's HDR-status, startup-readiness and diagnostic-sink exports, RequestCalibrationLutReload,
+// and VP-V's build-ID and held-LED exports and the vtable entries of 30-44.
 //
 // The counter is maintained by hand and can collide across branches or miss
 // a layout change. The build ID is the

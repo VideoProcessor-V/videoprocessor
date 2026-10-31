@@ -64,8 +64,20 @@ namespace Tests
 		// 24p); before that, arrival jitter at the gate's own depth can hold a refresh.
 		constexpr double kSettleSeconds = 200.0;
 
+		// The 83b7ffea stale rule (before v1.4.02 scaled the stale age with the target depth), kept here
+		// only so TheOldRulesFlush... can still document the reported bug: age from zero against
+		// max(100 ms, 3 periods).
+		inline bool LegacyShouldRecoverBacklog(size_t depth, size_t target, double ageMs, double cycleMs, double rateHz)
+		{
+			if (depth <= AlphaQueuePolicy::NormalizeDesiredDepth(target))
+				return false;
+			const double periodMs = 1000.0 / AlphaQueuePolicy::ValidFrameRateOrDefault(rateHz);
+			return cycleMs >= AlphaQueuePolicy::RenderStallThresholdMs(rateHz) ||
+				ageMs >= (std::max)(AlphaQueuePolicy::MINIMUM_STALE_BACKLOG_AGE_MS, periodMs * 3.0);
+		}
+
 		inline Result Run(double rateHz, double ppm, double jitterMs, bool fixes, double seconds,
-			size_t target = 5, double signalHz = 0.0, double flushRateHz = 0.0)
+			size_t target = 5, double signalHz = 0.0, double flushRateHz = 0.0, bool legacyStaleRule = false)
 		{
 			Result result;
 			const double period = 1.0 / rateHz;
@@ -126,8 +138,10 @@ namespace Tests
 				pushUntil(now);
 				result.maxDepth = (std::max)(result.maxDepth, queue.size());
 				const double oldestAgeMs = queue.empty() ? 0.0 : (now - queue.front()) * 1000.0;
-				if (AlphaQueuePolicy::ShouldRecoverBacklog(queue.size(), target, oldestAgeMs,
-					cycle * 1000.0, flushRateHz, fixes))
+				if (legacyStaleRule ?
+					LegacyShouldRecoverBacklog(queue.size(), target, oldestAgeMs, cycle * 1000.0, flushRateHz) :
+					AlphaQueuePolicy::ShouldRecoverBacklog(queue.size(), target, oldestAgeMs,
+						cycle * 1000.0, flushRateHz, fixes))
 				{
 					while (queue.size() > target)
 						queue.pop_front();
@@ -197,7 +211,8 @@ namespace Tests
 			// The reported bug (documents the off switch, the old behaviour).
 			for (double rate : { 24.0, 25.0, 30.0, 50.0 })
 			{
-				const QueueTimingSim::Result old = QueueTimingSim::Run(rate, 0.0, 2.0, false, 900.0);
+				const QueueTimingSim::Result old = QueueTimingSim::Run(rate, 0.0, 2.0, false, 900.0,
+					5, 0.0, 0.0, true);   // the 83b7ffea rule: v1.4.02's depth scaling already flushes less
 				const std::wstring what = L"rate " + std::to_wstring(rate);
 				Assert::IsTrue(old.flushes >= 3, (L"the old rule flushes repeatedly: " + what).c_str());
 				Assert::IsTrue(old.firstFlushSeconds > 10.0 && old.firstFlushSeconds < 400.0,
@@ -229,8 +244,11 @@ namespace Tests
 					AlphaQueuePolicy::RenderStallThresholdMs(rate), rate, true),
 					(L"a render stall at " + std::to_wstring(rate)).c_str());
 			}
-			// The old rule at 24 Hz: target+1 was already stale.
-			Assert::IsTrue(AlphaQueuePolicy::ShouldRecoverBacklog(6, 5, 5.5 * 1000.0 / 24.0, 41.7, 24.0, false));
+			// Fixes off = upstream's rule. At 83b7ffea target+1 at 24 Hz was already stale at 5.5 periods;
+			// v1.4.02 (merged 2026-10-31) scales the stale age with the target depth ((5 + 1) periods), so
+			// that age is no longer stale and 6.01 periods is.
+			Assert::IsFalse(AlphaQueuePolicy::ShouldRecoverBacklog(6, 5, 5.5 * 1000.0 / 24.0, 41.7, 24.0, false));
+			Assert::IsTrue(AlphaQueuePolicy::ShouldRecoverBacklog(6, 5, 6.01 * 1000.0 / 24.0, 41.7, 24.0, false));
 			Assert::IsFalse(AlphaQueuePolicy::ShouldRecoverBacklog(5, 5, 1000.0, 41.7, 24.0, true), L"at the target: never");
 		}
 
@@ -606,6 +624,19 @@ namespace Tests
 			// observed display rate compared with a literal bound.
 			const std::regex periodBound(R"((qpc|frequency|ticks)\w*\s*/\s*(10|240|480|500)\b)");
 			const std::regex expectedBound(R"(\b(expected|observed)\w*\s*[<>]=?\s*(10|240|480|500)(\.0+)?\b)");
+			// Bill's v1.4.02 files keep their own plausibility gates (display cadence health/recovery,
+			// vsync clock, analysis budget, display-mode text); VP-V does not edit them (call sites only),
+			// so exactly these lines are exempt. A new copy anywhere else, or in these files on another
+			// line, still fails. Matched on file name + the line's text, not the line number.
+			struct UpstreamGate { const char* file; const char* text; };
+			const UpstreamGate upstreamGates[] = {
+				{ "DisplayRefreshRatePolicy.cpp", "hz >= 20.0 && hz <= 240.0" },
+				{ "DisplayCadenceHealth.h", "kminimumplausiblehz = 10.0" },
+				{ "DisplayCadenceHealth.h", "kmaximumplausiblehz = 500.0" },
+				{ "DisplayCadenceRecovery.h", "hz >= 10.0 && hz <= 500.0" },
+				{ "DisplayVsyncClock.h", "hz >= 10.0 && hz <= 360.0" },
+				{ "PresentationAnalysisBudget.h", "hz<10 || hz>240" },
+			};
 			std::vector<std::string> offenders;
 			std::vector<std::string> files;
 			for (const char* folder : { "VideoProcessor-Lib", "VideoProcessor-GUI", "VideoProcessor-Config", "VideoProcessor-VPRenderer" })
@@ -632,10 +663,17 @@ namespace Tests
 					const size_t comment = lower.find("//");
 					if (comment != std::string::npos)
 						lower.resize(comment);
-					const bool offends =
+					bool offends =
 						(std::regex_search(lower, comparison) && std::regex_search(lower, rateWord)) ||
 						std::regex_search(lower, constant) || std::regex_search(lower, returned) ||
 						std::regex_search(lower, periodBound) || std::regex_search(lower, expectedBound);
+					if (offends)
+						for (const UpstreamGate& gate : upstreamGates)
+							if (name == gate.file && lower.find(gate.text) != std::string::npos)
+							{
+								offends = false;
+								break;
+							}
 					if (offends)
 						offenders.push_back(name + ":" + std::to_string(number));
 				}

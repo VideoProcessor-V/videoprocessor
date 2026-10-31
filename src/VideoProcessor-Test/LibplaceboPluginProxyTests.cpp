@@ -652,7 +652,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue((std::is_same_v<
 				decltype(&LibplaceboPluginVideoRenderer::CancelFileFrameWait),
 				void (LibplaceboPluginVideoRenderer::*)()>));
-			Assert::AreEqual(static_cast<uint32_t>(44), VP_LIBPLACEBO_PLUGIN_API_VERSION);
+			Assert::AreEqual(static_cast<uint32_t>(45), VP_LIBPLACEBO_PLUGIN_API_VERSION);
 		}
 
 		TEST_METHOD(IntentAndCalibrationHaveExplicitProxyOverrides)
@@ -696,7 +696,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue((std::is_same_v<
 				decltype(&LibplaceboPluginVideoRenderer::InvokeModuleCommand),
 				bool (LibplaceboPluginVideoRenderer::*)(const char*, const char*, CString&)>));
-			Assert::AreEqual(static_cast<uint32_t>(44), VP_LIBPLACEBO_PLUGIN_API_VERSION);
+			Assert::AreEqual(static_cast<uint32_t>(45), VP_LIBPLACEBO_PLUGIN_API_VERSION);
 		}
 
 		TEST_METHOD(ShutdownFinalizationHasExplicitProxyOverride)

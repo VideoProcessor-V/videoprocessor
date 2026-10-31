@@ -34,7 +34,9 @@ static double DeliveryModeFps(BMDTimeValue frameDuration, BMDTimeScale timeScale
 {
 	if (frameDuration > 0 && timeScale > 0)
 		return (double)timeScale / (double)frameDuration;
-	return FPS(mode);
+	// The table fallback can throw too, and this runs in a driver callback: 0 = unknown.
+	try { return FPS(mode); }
+	catch (...) { return 0.0; }
 }
 
 static double DeliveryNowSeconds()

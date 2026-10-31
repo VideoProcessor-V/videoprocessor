@@ -56,8 +56,9 @@ public:
 	static void Log(const char* format, Args... args)
 	{
 		ExternalSink sink = GetExternalSink().load(std::memory_order_acquire);
-		if (!sink && !GetLoggingEnabled().load(std::memory_order_acquire))
-			return;
+		// VP-V (DIV-LOG-01): the crash state's recent lines are kept even with
+		// file logging off (owner 2026-10-15), so a disabled log still formats
+		// the message for the recent-lines ring (QueueMessage).
 		// Preserve printf and plugin callback lifetimes: pointer arguments cannot
 		// be deferred safely. Formatted output is capped at 4096 bytes; timestamp
 		// formatting and every file operation belong to the writer thread.
@@ -255,6 +256,7 @@ private:
 		bool reopenPending = false;
 		unsigned long long nextReopenTick = 0;
 		unsigned long long reopenBackoffMs = 250;
+		unsigned long long droppedWhileClosed = 0;
 		explicit FileSink(std::ofstream& output, const std::string& logPath)
 			: file(output), path(logPath)
 		{
@@ -267,7 +269,24 @@ private:
 			if (!reopenPending || GetTickCount64() < nextReopenTick) return;
 			file.clear();
 			file.open(path, std::ios::app);
-			if (file.is_open()) { reopenPending = false; reopenBackoffMs = 250; }
+			if (file.is_open())
+			{
+				// Bug hunt 2 (2026-10-17, L3): log the gap once the file reopens.
+				char gap[128];
+				const int length = std::snprintf(gap, sizeof(gap),
+					"Log reopened after a failed rollover reopen; %llu message(s) were not written",
+					droppedWhileClosed);
+				const std::time_t now = std::time(nullptr);
+				struct tm local{};
+				localtime_s(&local, &now);
+				char stamp[32]{};
+				std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &local);
+				file << stamp << " | " << (length > 0 ? gap : "") << '\n';
+				bytesWritten += std::strlen(stamp) + 3 + (length > 0 ? static_cast<size_t>(length) : 0) + 1;
+				reopenPending = false;
+				reopenBackoffMs = 250;
+				droppedWhileClosed = 0;
+			}
 			else
 			{
 				nextReopenTick = GetTickCount64() + reopenBackoffMs;
@@ -302,7 +321,11 @@ private:
 		size_t WriteBatch(const Transport::Record* records, size_t count)
 		{
 			TryReopen();
-			if (!file.is_open()) return 0;
+			if (!file.is_open())
+			{
+				if (reopenPending) droppedWhileClosed += count;
+				return 0;
+			}
 			size_t used = 0;
 			for (size_t index = 0; index < count; ++index)
 			{

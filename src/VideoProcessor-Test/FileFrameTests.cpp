@@ -91,7 +91,7 @@ namespace VideoProcessorTest
 		TEST_METHOD(ToStringFourCCAndBitsPerPixel)
 		{
 			Assert::AreEqual(L"YUV 4:2:0 8-bit (NV12)", ToString(VideoFrameEncoding::NV12));
-			Assert::AreEqual(L"YUV 4:2:0 10-bit (P010)", ToString(VideoFrameEncoding::P010));
+			Assert::AreEqual(L"YUV 10-bit (P010 4:2:0)", ToString(VideoFrameEncoding::P010));   // Bill's text (one P010)
 			Assert::AreEqual(L"YUV 4:2:0 16-bit (P016)", ToString(VideoFrameEncoding::P016));
 			Assert::AreEqual(static_cast<uint32_t>(MAKEFOURCC('N', 'V', '1', '2')), VideoFrameEncodingFourCC(VideoFrameEncoding::NV12));
 			Assert::AreEqual(static_cast<uint32_t>(MAKEFOURCC('P', '0', '1', '0')), VideoFrameEncodingFourCC(VideoFrameEncoding::P010));
@@ -109,8 +109,12 @@ namespace VideoProcessorTest
 			Assert::IsFalse(VideoFrameEncodingIsTwoPlane420(VideoFrameEncoding::V210));
 			Assert::IsFalse(VideoFrameEncodingIsTwoPlane420(VideoFrameEncoding::UYVY));
 			Assert::IsFalse(VideoFrameEncodingIsTwoPlane420(VideoFrameEncoding::UNKNOWN));
-			Assert::AreEqual(static_cast<int>(VideoFrameEncoding::DNxHR) + 1, static_cast<int>(VideoFrameEncoding::NV12));
-			Assert::AreEqual(static_cast<int>(VideoFrameEncoding::DNxHR) + 3, static_cast<int>(VideoFrameEncoding::P016));
+			// Bill v1.4.02 merge: P210 and P010 keep Bill's numbers (DNxHR + 1, + 2); VP-V's NV12
+			// and P016 follow them (one P010; proposed DIV-CAP-08).
+			Assert::AreEqual(static_cast<int>(VideoFrameEncoding::DNxHR) + 1, static_cast<int>(VideoFrameEncoding::P210));
+			Assert::AreEqual(static_cast<int>(VideoFrameEncoding::DNxHR) + 2, static_cast<int>(VideoFrameEncoding::P010));
+			Assert::AreEqual(static_cast<int>(VideoFrameEncoding::P010) + 1, static_cast<int>(VideoFrameEncoding::NV12));
+			Assert::AreEqual(static_cast<int>(VideoFrameEncoding::P010) + 2, static_cast<int>(VideoFrameEncoding::P016));
 		}
 
 		// Claimed 35 on the filter branch; 37 after integ's build ID (35) and the
@@ -122,10 +126,11 @@ namespace VideoProcessorTest
 		// integration round 5); 41 since GetFallbacksStatus (r6 fix 7); 42 since SetQueueDelayBudget
 		// (VP-V delay budget, ADR-0020); 43 since ToggleDvCompareCapture (feat/dv-l8,
 		// assigned at the integ/batch1 merge); 44 since GetModuleStatus / InvokeModuleCommand
-		// (WP-11, integration group C). The version check is equality.
-		TEST_METHOD(PluginApiVersionIs44)
+		// (WP-11, integration group C); 45 since the v1.4.02-beta merge (Bill's API 34 and
+		// VP-V 44 together). The version check is equality.
+		TEST_METHOD(PluginApiVersionIs45)
 		{
-			Assert::AreEqual(static_cast<uint32_t>(44), VP_LIBPLACEBO_PLUGIN_API_VERSION);
+			Assert::AreEqual(static_cast<uint32_t>(45), VP_LIBPLACEBO_PLUGIN_API_VERSION);
 		}
 	};
 

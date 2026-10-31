@@ -1400,7 +1400,12 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
         flushRgb24(false);
         const bool hadState = haveState;
         haveState = false;
-        if (hadState) PublishInvalidVideoState(captureRunToken);
+        // VP-V (DIV-CAP-02): Bill's quiet recovery keeps its tiers and no-popup rule, but the valid
+        // state returns with the first complete frame (validPending) instead of at the restart, so a
+        // locked source that sends no frames does not flap invalid/valid (each flip restarts the
+        // renderer), and an invalid state already published is not published again.
+        if (hadState && !validPending) PublishInvalidVideoState(captureRunToken);
+        validPending = true;
         buffers.clear();
         healthySince = {};
         stallAttempts = (std::min)(stallAttempts + 1, 3u);
@@ -1623,7 +1628,7 @@ void MagewellCaptureDevice::CaptureThreadBody(CaptureRunToken captureRunToken)
 					m_sdkInstance->Api().MWStopVideoCapture(channel);
 					capturing = false;
 				}
-				if (haveState) PublishInvalidVideoState(captureRunToken);
+				if (haveState && !validPending) PublishInvalidVideoState(captureRunToken);
 				buffers.clear();
 				if (signal.rawRgbTunnel) rgbTunnelRange.Enable();
 				else if (!rgbTunnelRange.Restore())
