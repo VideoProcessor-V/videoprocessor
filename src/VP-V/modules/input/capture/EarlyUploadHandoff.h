@@ -13,6 +13,10 @@
 // always released. A payload the render reaches before the upload has started
 // is marked Abandoned: the conversion thread then skips its upload and the
 // render uploads (the "late" fallback, counted and shown).
+//
+// Lifetime: the conversion thread holds its own shared_ptr to the handoff for
+// the whole RunUpload call (the notify after the unlock in Finish relies on
+// the object still being alive even if the render has dropped the payload).
 #pragma once
 
 #include <condition_variable>
@@ -92,6 +96,28 @@ public:
 		EarlyUploadHandoff& h;
 		bool done = false;
 	};
+
+	// Conversion thread: runs `upload` (returns the slot handle, null for none)
+	// when the render has not abandoned the payload; Finish runs on every path,
+	// including an exception. Returns false when the upload was skipped.
+	template <class F>
+	bool RunUpload(F&& upload) noexcept
+	{
+		if (!BeginUpload())
+			return false;
+		UploadScope scope(*this);
+		std::shared_ptr<void> s;
+		try
+		{
+			s = upload();
+		}
+		catch (...)
+		{
+			s = nullptr;
+		}
+		scope.Finish(std::move(s));
+		return true;
+	}
 
 	// Render thread: the slot (a copy; a payload may be drawn several times) or
 	// null. Never blocks unless an upload is running.

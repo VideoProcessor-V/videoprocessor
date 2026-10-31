@@ -131,5 +131,35 @@ namespace VideoProcessorTest
 			Assert::IsTrue(seen == H::State::Abandoned);
 			Assert::IsTrue(h.Peek() == H::State::Abandoned);
 		}
+
+		TEST_METHOD(RunUploadAttachesTheSlot)
+		{
+			H h;
+			auto slot = std::make_shared<int>(9);
+			Assert::IsTrue(h.RunUpload([&] { return std::shared_ptr<void>(slot); }));
+			H::Outcome o{};
+			Assert::IsTrue(h.Take(&o) == slot);
+			Assert::IsTrue(o == H::Outcome::Early);
+		}
+
+		TEST_METHOD(RunUploadAfterTakeWhilePendingIsSkipped)
+		{
+			H h;
+			H::Outcome o{};
+			h.Take(&o);
+			bool called = false;
+			Assert::IsFalse(h.RunUpload([&] { called = true; return std::shared_ptr<void>(); }));
+			Assert::IsFalse(called);
+		}
+
+		TEST_METHOD(RunUploadWithAThrowingLambdaLeavesNone)
+		{
+			H h;
+			Assert::IsTrue(h.RunUpload([&]() -> std::shared_ptr<void> { throw std::runtime_error("x"); }));
+			Assert::IsTrue(h.Peek() == H::State::None);
+			H::Outcome o{};
+			Assert::IsTrue(h.Take(&o) == nullptr);
+			Assert::IsTrue(o == H::Outcome::NoSlot);
+		}
 	};
 }
