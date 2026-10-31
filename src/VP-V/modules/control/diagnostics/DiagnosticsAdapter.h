@@ -100,11 +100,10 @@ namespace VpDiagnostics
 
 	inline bool D3D11DebugFromEnvironment()
 	{
-		char* v = nullptr;
-		size_t n = 0;
-		const bool on = _dupenv_s(&v, &n, "VP_D3D11_DEBUG") == 0 && D3D11DebugRequested(v);
-		free(v);
-		return on;
+		// The Win32 environment (not the CRT copy), so a test's SetEnvironmentVariable is seen too.
+		char value[8] = {};
+		const DWORD length = GetEnvironmentVariableA("VP_D3D11_DEBUG", value, static_cast<DWORD>(sizeof(value)));
+		return length > 0 && length < sizeof(value) && D3D11DebugRequested(value);
 	}
 
 	// VP_TEST_ADAPTER=<text> picks the GPU whose description contains it (e.g. Intel, the laptop
