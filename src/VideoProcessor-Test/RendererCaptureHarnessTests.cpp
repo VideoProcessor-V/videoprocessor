@@ -6118,11 +6118,18 @@ namespace Tests
 		// neighbouring motion tests' probe); without it the vector tests log SKIP-NO-ENGINE.
 		static bool VectorTestEngineHere()
 		{
-			const RunResult probe = Run(VideoFrameEncoding::V210, "gpu", 3.0, true, "dejudder_strength: 0.25\n");
+			// As the neighbouring look-ahead test: queue target 5 and 8 s (a cold shader cache can need more than 3 s
+			// to reach the first estimate); the answer is kept for the other vector tests.
+			static int engineHere = -1;
+			if (engineHere >= 0) return engineHere != 0;
+			g_harnessQueueTarget = 5;
+			const RunResult probe = Run(VideoFrameEncoding::V210, "gpu", 8.0, true, "dejudder_strength: 0.25\n");
+			g_harnessQueueTarget = 0;
+			engineHere = 0;
 			for (const std::string& line : probe.log)
 				if (line.find("De-judder motion:") != std::string::npos && line.find("optical-flow engine") != std::string::npos)
-					return true;
-			return false;
+					engineHere = 1;
+			return engineHere != 0;
 		}
 
 		static std::string VectorTestLines(const RunResult& r)
@@ -6169,7 +6176,7 @@ namespace Tests
 				Assert::IsTrue(r.presented, (name + L": frames presented\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.Logged("Vector engine: on"), (name + L": the vector engine is on\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.Logged("Vector engine: vectors delivered"), (name + L": vectors delivered\n" + r.Tail()).c_str());
-				Assert::IsFalse(r.Logged("De-judder extras: warping"), (name + L": no extras ran\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("De-judder extras:"), (name + L": no extras ran\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("De-judder: active"), (name + L": the de-judder never active\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("Interpolation: interpolating"), (name + L": no interpolation ran\n" + r.Tail()).c_str());
 			}
@@ -6186,9 +6193,11 @@ namespace Tests
 			if (!RequireHardwareOrSkip("VectorEngineGamesDepthOneEngagesAtOneAhead")) return;
 			if (VectorTestSkip("VectorEngineGamesDepthOneEngagesAtOneAhead")) return;
 			g_harnessApplySnapshot = true;
+			g_harnessQueueTarget = 2;   // the harness sets the target itself after the snapshot (SetQueueFramePolicy)
 			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
 				"deband_vp: on\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 2\n");
 			g_harnessApplySnapshot = false;
+			g_harnessQueueTarget = 0;
 			Logger::WriteMessage(VectorTestLines(r).c_str());
 			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
 			Assert::IsTrue(r.Logged("Motion ahead: engaged"), (L"the look-ahead engaged at one ahead\n" + r.Tail()).c_str());
@@ -6206,9 +6215,11 @@ namespace Tests
 			if (!RequireHardwareOrSkip("VectorEngineCompetitiveDepthZeroPublishesBackwardPairs")) return;
 			if (VectorTestSkip("VectorEngineCompetitiveDepthZeroPublishesBackwardPairs")) return;
 			g_harnessApplySnapshot = true;
+			g_harnessQueueTarget = 1;   // the harness overrides the snapshot's target_frames after it applies
 			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
 				"deband_vp: on\nsource_resolution: auto\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 1\n");
 			g_harnessApplySnapshot = false;
+			g_harnessQueueTarget = 0;
 			Logger::WriteMessage(VectorTestLines(r).c_str());
 			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
 			Assert::IsTrue(r.Logged("vectors delivered (backward"), (L"backward pairs delivered\n" + r.Tail()).c_str());
@@ -6271,7 +6282,7 @@ namespace Tests
 			if (VectorTestSkip("VectorEngineSmoothMotionKeepsAnalysis")) return;
 			const FramePlan plan = RatePlan(HarnessMonitorHz() * 5.0 / 6.0);
 			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
-				"deband_vp: on\n[vprenderer.motion]\nmotion_engine: smooth_motion\nsmooth_motion: always\n", false, &plan);
+				"deband_vp: on\ntemporal_dither: sigma_delta\n[vprenderer.motion]\nmotion_engine: smooth_motion\nsmooth_motion: always\n", false, &plan);
 			Logger::WriteMessage(VectorTestLines(r).c_str());
 			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
 			Assert::IsTrue(r.Logged("Motion engine: libplacebo smooth motion"), (L"smooth motion is the engine\n" + r.Tail()).c_str());

@@ -7042,7 +7042,8 @@ struct LibplaceboVideoRenderer::Impl
 		in.queueAheadCapacity = queueAheadCapacity.load(std::memory_order_acquire);
 		in.smoothMotion = smoothMotionEngine || temporalRenderer.Mixing();
 		in.interlaced = interlaced;
-		const bool temporal = temporalRenderer.Active();
+		// Stable while smooth motion mixes (Active() flips with each drawn mix); interlaced-only temporal frames count.
+		const bool temporal = smoothMotionEngine || (temporalRenderer.Active() && !temporalRenderer.Mixing());
 		auto want = [&in](C c, bool on) { in.wants[static_cast<int>(c)] = on; };
 		want(C::DejudderExtras, activeSettings.dejudderStrength > 0.0 || activeSettings.dejudderStrengthEven > 0.0);
 		want(C::Interpolator, activeSettings.interpolation != InterpolationPolicy::Mode::Off);
@@ -29974,7 +29975,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 					DebugLog::Log("Motion ahead: waiting for %zu frames queued ahead (%s)", engageAhead,
 						queuedAhead == 0 ? "the queue holds none" : "the sequence broke: skip, seek or reset");
 				}
-				else if (!m_impl->motionAheadEngaged && queuedAhead >= engageAhead)
+				else if (!m_impl->motionAheadEngaged && queuedAhead >= engageAhead && !backwardPairs)
 				{
 					m_impl->motionAheadEngaged = true;
 					m_impl->motionAheadEngagedGeneration = generation;
