@@ -500,6 +500,7 @@
     <ClCompile Include="..\VP-V\modules\input\signal\tests\DvSignalL8HoldTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncEventTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncShadowTests.cpp" />
     <ClCompile Include="..\VP-V\tests\IndicatorTests.cpp" />
     <ClCompile Include="..\VP-V\tests\AncestryTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceWiringTests.cpp" />

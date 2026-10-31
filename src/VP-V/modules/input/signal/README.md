@@ -17,7 +17,7 @@ Identify the signal (SDR / HDR10 / LLDV / DV tunnel), its metadata and its color
 ## Settings
 
 - Existing keys: `newlldv` (Bill's key, enables VP's inference), `newlldv_sdr_veto`, `dv_tunnel_handoff` (all `[general]`), `dv_tunnel_gpu_unpack`, `dv_tunnel_fixes`, `dv_compare_capture_folder` (renderer profile)
-- Planned keys: (none)
+- Planned keys: `resync_event` (off | shadow; R1 shadow mode, no behaviour change)
 - Tiers: not tiered
 
 ## Fallbacks
@@ -90,6 +90,8 @@ Checked against the code 2026-10-25 (WP-14 / M2 step 14, `feat/m2-dv`).
 - `HdrVetoCaptureGate.h` - moves the veto switch onto the capture thread and the cut frame.
 - `ResyncEvent.h` - the resync detector (pure): classifies each enqueued frame as FULL / MINOR / timing
   (`Detector::OnEnqueue`), the lock-free arm box, the refusal note and the storm window.
+- `ResyncShadow.h` - resync shadow mode (R1): feeds the detector, writes the central Indicator, and summarises
+  it as the Ctrl+I "Resync:" line and the Ctrl+Alt+D `resync` / `resync_events` lines; Off costs one atomic load.
 - `DolbyVisionTunnelGate.h`, `DolbyVisionTunnelHandoff.h` - which captured signals the DV tunnel
   formatter may claim (`dv_tunnel_handoff`), and the hand-off of an RGB LLDV signal to the tunnel.
 - `GpuDolbyVisionTunnelUnpack.h/.cpp` - the tunnel's RGB8-in-r210 container unpacked to 12-bit

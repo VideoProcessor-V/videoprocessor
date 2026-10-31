@@ -51,6 +51,7 @@ namespace VpStatusAdapterTest
 		public:
 			bool moduleEntry = true;
 			FakeLine dejudder, fallbacks, led, source, presentation, stall, output;
+			FakeLine resync, resyncEvents;   // keys of the newer renderer; unknown = an old renderer
 
 			size_t GetConvertedQueueSize() override { return 0; }
 			bool OnVideoState(VideoStateComPtr&) override { return true; }
@@ -92,6 +93,8 @@ namespace VpStatusAdapterTest
 						take(lines.fallbacks, GetFallbacksStatus(line));
 						take(lines.ledDrive, GetLedDriveStatus(line));
 						take(lines.sourceResolution, GetSourceResolutionStatus(line));
+						lines.resync.Set(resync.known, resync.text.GetString());
+						lines.resyncEvents.Set(resyncEvents.known, resyncEvents.text.GetString());
 					}, text);
 				status = text.c_str();
 				return answered;
@@ -461,6 +464,51 @@ namespace VpStatusAdapterTest
 			r.stall = { true, CString() };
 			r.output = { true, CString() };
 			AssertIdentical(&r, true, DialogState());
+		}
+
+		TEST_METHOD(ResyncKeysAbsentGiveTheSameOutputAsBefore)
+		{
+			// The renderer is the older kind: no resync keys. Everything stays identical to the
+			// legacy text and no Resync row or bundle key appears.
+			FakeRenderer r;
+			SetAllRendererLines(r);
+			AssertIdentical(&r, true, EverythingOn());
+			const VpvGui::Snapshot snapshot = VpvGui::Poll(&r);
+			Assert::IsFalse(snapshot.vp.resync.known);
+			Assert::IsFalse(snapshot.vp.resyncEvents.known);
+			std::vector<std::pair<std::string, std::string>> bundle;
+			VpvGui::AppendBundleSettings(bundle, &r);
+			for (const auto& item : bundle)
+				Assert::IsTrue(item.first != "resync" && item.first != "resync_events");
+		}
+
+		TEST_METHOD(ResyncLinesAppearAfterDejudderAndInTheBundle)
+		{
+			FakeRenderer r;
+			SetAllRendererLines(r);
+			r.resync = { true, TEXT("shadow: no FULL yet; minor x0 / 10 min; timing x0") };
+			r.resyncEvents = { true, TEXT("era=1 capacity=64 ancient_below=0; #1 seq=1 full start") };
+			const VpvGui::Snapshot snapshot = VpvGui::Poll(&r);
+			Assert::IsTrue(snapshot.vp.resync.Shown());
+			Assert::IsTrue(snapshot.vp.resyncEvents.Shown());
+
+			std::vector<Row> rowsA, rowsB;
+			VpvGui::FillCtrlIRows(rowsA, rowsB, snapshot, NewDialogLines(EverythingOn()), true);
+			const std::vector<CString> drawn = NewDraw(rowsB);
+			Assert::AreEqual(size_t(3), drawn.size());
+			Assert::AreEqual(std::wstring(L"Resync:           shadow: no FULL yet; minor x0 / 10 min; timing x0"),
+				std::wstring(drawn[1].GetString()));
+			Assert::IsTrue(rowsB[0].label == TEXT("De-judder:"));
+			Assert::IsTrue(rowsB[2].label.IsEmpty());   // the fallbacks heading stays last
+
+			std::vector<std::pair<std::string, std::string>> bundle;
+			VpvGui::AppendBundleSettings(bundle, &r);
+			Assert::IsTrue(bundle.size() >= 2);
+			Assert::AreEqual(std::string("output_mode"), bundle[bundle.size() - 3].first);
+			Assert::AreEqual(std::string("resync"), bundle[bundle.size() - 2].first);
+			Assert::AreEqual(std::string("shadow: no FULL yet; minor x0 / 10 min; timing x0"),
+				bundle[bundle.size() - 2].second);
+			Assert::AreEqual(std::string("resync_events"), bundle[bundle.size() - 1].first);
 		}
 
 		TEST_METHOD(NonAlphaRendererHidesTheDejudderLine)

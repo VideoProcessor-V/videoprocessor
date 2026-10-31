@@ -99,6 +99,65 @@ namespace StatusTextTest
 			Assert::AreEqual(std::string("Fallbacks engaged: none"), FormatRow(rows.afterShaders[1]));
 		}
 
+		TEST_METHOD(ResyncKeysRoundTripAndAreOptional)
+		{
+			RendererLines<char> lines;
+			lines.dejudder.Set(true, "on");
+			lines.resync.Set(true, "shadow: no FULL yet; minor x0 / 10 min; timing x0");
+			lines.resyncEvents.Set(true, "era=1 capacity=64 ancient_below=0; #1 seq=1 full start");
+			const std::string text = ComposeRendererModule(lines);
+			Assert::AreEqual(std::string("dejudder=on\n"
+				"resync=shadow: no FULL yet; minor x0 / 10 min; timing x0\n"
+				"resync_events=era=1 capacity=64 ancient_below=0; #1 seq=1 full start"), text);
+			const RendererLines<char> back = ReadRendererModule(text);
+			Assert::IsTrue(back.resync.known && back.resync.text == lines.resync.text);
+			Assert::IsTrue(back.resyncEvents.known && back.resyncEvents.text == lines.resyncEvents.text);
+
+			// Absent keys (an old renderer): unknown, and the old text is unchanged.
+			RendererLines<char> old;
+			old.dejudder.Set(true, "on");
+			Assert::AreEqual(std::string("dejudder=on"), ComposeRendererModule(old));
+			const RendererLines<char> oldBack = ReadRendererModule(std::string("dejudder=on"));
+			Assert::IsFalse(oldBack.resync.known);
+			Assert::IsFalse(oldBack.resyncEvents.known);
+		}
+
+		TEST_METHOD(ResyncRowFollowsDejudderAndPrecedesFallbacks)
+		{
+			CtrlILines<char> lines;
+			lines.dejudder = "on";
+			lines.resync = "shadow: no FULL yet; minor x0 / 10 min; timing x0";
+			lines.fallbacks = "Fallbacks engaged: none";
+			const CtrlIRows<char> rows = BuildCtrlIRows(lines);
+			Assert::AreEqual(size_t(3), rows.afterShaders.size());
+			Assert::AreEqual(std::string("De-judder:        on"), FormatRow(rows.afterShaders[0]));
+			Assert::AreEqual(std::string("Resync:           shadow: no FULL yet; minor x0 / 10 min; timing x0"),
+				FormatRow(rows.afterShaders[1]));
+			Assert::AreEqual(std::string("Fallbacks engaged: none"), FormatRow(rows.afterShaders[2]));
+
+			lines.resync.clear();   // empty = no row, as every other line
+			Assert::AreEqual(size_t(2), BuildCtrlIRows(lines).afterShaders.size());
+		}
+
+		TEST_METHOD(BundleEmitsResyncKeysAfterOutputModeOnlyWhenKnown)
+		{
+			BundleInputs<char> in;
+			in.outputMode.Set(true, "Target");
+			Assert::AreEqual(size_t(1), BundleRendererSettings(in, Narrow).size());
+			in.resync.Set(true, "shadow: no FULL yet; minor x0 / 10 min; timing x0");
+			in.resyncEvents.Set(true, "era=2 capacity=64 ancient_below=0; ");
+			const auto settings = BundleRendererSettings(in, Narrow);
+			Assert::AreEqual(size_t(3), settings.size());
+			Assert::AreEqual(std::string("output_mode"), settings[0].first);
+			Assert::AreEqual(std::string("resync"), settings[1].first);
+			Assert::AreEqual(std::string("resync_events"), settings[2].first);
+		}
+
+		TEST_METHOD(CrashStateKeysAreUnchangedByResync)
+		{
+			Assert::AreEqual(size_t(11), sizeof(kCrashStateRendererKeys) / sizeof(kCrashStateRendererKeys[0]));
+		}
+
 		TEST_METHOD(EmptyLinesGiveNoRows)
 		{
 			CtrlILines<wchar_t> lines;

@@ -48,6 +48,7 @@ namespace OriginalPathway
 			{ "entrance_gpu_drain", "off", "scaling.rebase" },
 			{ "source_coding_fixes", "off", "input.source_analysis" },
 			{ "frame_analysis_store", "off", "input.source_analysis" },   // WP-23: Bill's own decodes only
+			{ "resync_event", "off", "input.signal" },   // R1: no resync shadow
 			{ "source_resolution_latch_fixes", "off", "input.source_analysis" },
 			{ "source_resolution_cut_fixes", "off", "input.source_analysis" },
 			{ "deband_vp", "off", "repair.deband" },

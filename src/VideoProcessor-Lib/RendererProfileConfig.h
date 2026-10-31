@@ -1090,6 +1090,7 @@ namespace RendererProfileConfig
 		if (key == "pipeline_original_pathway") return IsChoice(value, { "on", "off" });
 		if (key == "pipeline_entrance_once") return IsChoice(value, { "on", "off" });   // B3 (ADR-0024)
 		if (key == "frame_analysis_store") return IsChoice(value, { "on", "off" });     // WP-23
+		if (key == "resync_event") return IsChoice(value, { "off", "shadow" });         // R1
 		if (key == "entrance_gpu_drain") return IsChoice(value, { "off", "flush", "finish" });   // expert workaround
 		// Config usability (2026-10-25): the owner's Approve / Keep decision per retirement group (A-D; keys retirement_a .. retirement_d, names are case-insensitive), recorded by the VP-V page's
 		// Proposed retirement tab. A UI-only record: nothing in the renderer reads it and nothing is hidden or removed by it.
@@ -2120,7 +2121,7 @@ namespace RendererProfileConfig
 			for (const auto& value : *vpvValues)
 			{
 				static const char* const vpvKeys[] = { "pipeline_original_pathway", "pipeline_order",
-					"pipeline_slots_off", "calibration_lut_stage", "pipeline_entrance_once", "output_segments_merged", "frame_analysis_store", "entrance_gpu_drain", "hdr_inference" };
+					"pipeline_slots_off", "calibration_lut_stage", "pipeline_entrance_once", "output_segments_merged", "frame_analysis_store", "resync_event", "entrance_gpu_drain", "hdr_inference" };
 				bool known = false;
 				for (const char* key : vpvKeys) known = known || value.first == key;
 				for (const char* key : { "retirement_a", "retirement_b", "retirement_c", "retirement_d" }) known = known || value.first == key;   // UI-only decisions

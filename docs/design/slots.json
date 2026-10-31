@@ -110,7 +110,7 @@
         "dv_compare_capture_folder",
         "hdr_inference"
       ],
-      "planned_keys": [],
+      "planned_keys": ["resync_event"],
       "tiers": "not tiered",
       "fallback": {
         "entry": "Dolby Vision GPU unpack: CPU unpack for the session: <error> | DV metadata: <held | static>",

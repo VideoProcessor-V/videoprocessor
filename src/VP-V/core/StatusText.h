@@ -27,6 +27,8 @@ namespace VpStatusText
 	constexpr const char* kFallbacks = "fallbacks";
 	constexpr const char* kLedDrive = "led_drive";
 	constexpr const char* kSourceResolution = "source_resolution";
+	constexpr const char* kResync = "resync";
+	constexpr const char* kResyncEvents = "resync_events";
 
 	inline bool IsRendererModule(const char* module)
 	{
@@ -53,6 +55,8 @@ namespace VpStatusText
 		Line<Char> fallbacks;
 		Line<Char> ledDrive;
 		Line<Char> sourceResolution;
+		Line<Char> resync;         // resync indicator status (shadow mode); absent from an old renderer
+		Line<Char> resyncEvents;   // the last events, for the Ctrl+Alt+D bundle
 	};
 
 	// Renderer side: only the known lines, in a fixed order. A known but empty line is kept
@@ -63,7 +67,8 @@ namespace VpStatusText
 		std::basic_string<Char> text;
 		const std::pair<const char*, const Line<Char>*> order[] = {
 			{ kDejudder, &lines.dejudder }, { kFallbacks, &lines.fallbacks },
-			{ kLedDrive, &lines.ledDrive }, { kSourceResolution, &lines.sourceResolution } };
+			{ kLedDrive, &lines.ledDrive }, { kSourceResolution, &lines.sourceResolution },
+			{ kResync, &lines.resync }, { kResyncEvents, &lines.resyncEvents } };
 		for (const auto& item : order)
 			if (item.second->known)
 				ModuleStatusText::Append(text, item.first, item.second->text);
@@ -81,7 +86,9 @@ namespace VpStatusText
 				ModuleStatusText::KeyEquals(entry.key, kDejudder) ? &lines.dejudder :
 				ModuleStatusText::KeyEquals(entry.key, kFallbacks) ? &lines.fallbacks :
 				ModuleStatusText::KeyEquals(entry.key, kLedDrive) ? &lines.ledDrive :
-				ModuleStatusText::KeyEquals(entry.key, kSourceResolution) ? &lines.sourceResolution : nullptr;
+				ModuleStatusText::KeyEquals(entry.key, kSourceResolution) ? &lines.sourceResolution :
+				ModuleStatusText::KeyEquals(entry.key, kResync) ? &lines.resync :
+				ModuleStatusText::KeyEquals(entry.key, kResyncEvents) ? &lines.resyncEvents : nullptr;
 			if (line && !line->known)
 				line->Set(true, entry.value);
 		}
@@ -156,6 +163,7 @@ namespace VpStatusText
 		std::basic_string<Char> blackIntent;
 		std::basic_string<Char> displayIntent;
 		std::basic_string<Char> dejudder;       // renderer de-judder line (VP Renderer only)
+		std::basic_string<Char> resync;         // resync indicator (shadow mode)
 		std::basic_string<Char> fallbacks;      // "Fallbacks engaged: ..." heading
 	};
 
@@ -183,6 +191,7 @@ namespace VpStatusText
 		add(rows.afterShaderRule, "Black:", lines.blackIntent);
 		add(rows.afterShaderRule, "Display:", lines.displayIntent);
 		add(rows.afterShaders, "De-judder:", lines.dejudder);
+		add(rows.afterShaders, "Resync:", lines.resync);
 		add(rows.afterShaders, "", lines.fallbacks);   // the heading carries its own label
 		return rows;
 	}
@@ -242,6 +251,7 @@ namespace VpStatusText
 	struct BundleInputs
 	{
 		Line<Char> presentation, dejudder, fallbacks, renderStall, outputMode;
+		Line<Char> resync, resyncEvents;   // after output_mode, only when known
 	};
 
 	template <class Char, class Narrow>
@@ -258,6 +268,8 @@ namespace VpStatusText
 		add("fallbacks", in.fallbacks);
 		add("render_stall", in.renderStall);
 		add("output_mode", in.outputMode);
+		add("resync", in.resync);
+		add("resync_events", in.resyncEvents);
 		return settings;
 	}
 

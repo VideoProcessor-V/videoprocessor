@@ -2195,6 +2195,60 @@ namespace Tests
 			g_harnessHeight = savedH;
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(ResyncShadowIsPixelIdentical)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(ResyncShadowIsPixelIdentical)
+		{
+			const HarnessScope harnessScope;
+			// R1 (resync_event): the shadow only observes. The exact output codes (raw_r10_sha256) of a
+			// still picture are identical with no key, resync_event off and resync_event shadow; the
+			// shadow run logs the start FULL event ("Resync (shadow): FULL at seq"), the others do not.
+			if (!RequireHardwareOrSkip("ResyncShadowIsPixelIdentical")) return;
+			const int savedW = g_harnessWidth, savedH = g_harnessHeight;
+			g_harnessWidth = 3840;
+			g_harnessHeight = 2160;
+			wchar_t tempPath[MAX_PATH] = {};
+			GetTempPathW(MAX_PATH, tempPath);
+			const std::wstring shots = std::wstring(tempPath) + L"vp-resync-identity";
+			CreateDirectoryW(shots.c_str(), nullptr);
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			FramePlan plan;
+			plan.captureAtSeconds = 2.5;
+			plan.step = [](int) { return FrameStep{ true, 0, 0 }; };   // one still picture
+			bool fullLogged = false;
+			auto hashOf = [&](const char* extra, const wchar_t* name) {
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 3.5, false, std::string(extra) + "[vprenderer.Default]
+dithering: off
+deband: off
+", false, &plan);
+				fullLogged = r.Logged("Resync (shadow): FULL at seq");
+				Assert::IsFalse(r.captureMetadata.empty(), (std::wstring(name) + L": capture written
+" + r.Tail()).c_str());
+				std::ifstream in(std::wstring(r.captureMetadata.begin(), r.captureMetadata.end()));
+				std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+				const size_t k = text.find("\"raw_r10_sha256\": \"");
+				Assert::IsTrue(k != std::string::npos, (std::wstring(name) + L": hash in the sidecar").c_str());
+				const std::string hash = text.substr(k + 19, 64);
+				Logger::WriteMessage((std::string(name, name + wcslen(name)) + ": " + hash + "
+").c_str());
+				return hash;
+			};
+			const std::string base = hashOf("", L"no key");
+			Assert::IsFalse(fullLogged, L"no key: no shadow event is logged");
+			Assert::AreEqual(base, hashOf("[vpv]
+resync_event: off
+", L"resync_event off"), L"off: identical");
+			Assert::IsFalse(fullLogged, L"off: no shadow event is logged");
+			Assert::AreEqual(base, hashOf("[vpv]
+resync_event: shadow
+", L"resync_event shadow"), L"shadow: identical pixels");
+			Assert::IsTrue(fullLogged, L"shadow: the start FULL event is logged");
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
+			g_harnessWidth = savedW;
+			g_harnessHeight = savedH;
+		}
+
 		BEGIN_TEST_METHOD_ATTRIBUTE(EfficiencyFixesArePixelIdentical)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()
