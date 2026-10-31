@@ -6290,14 +6290,34 @@ namespace Tests
 			// The sigma-delta shader is found through VP_TEST_SHADER_DIR (as TemporalDitherChoiceControlsTheSigmaDelta does).
 			const std::string here = Here();
 			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", here.substr(0, here.size() - 1).c_str());
+			auto ditherLines = [](const RunResult& run) {
+				std::string out;
+				for (const std::string& line : run.log)
+					if (line.find("ither") != std::string::npos || line.find("igma-delta") != std::string::npos ||
+						line.find("custom hook") != std::string::npos || line.find("Vector engine: on") != std::string::npos ||
+						line.find("Vector engine: off") != std::string::npos)
+						out += "  " + line.substr(0, 300) + "\n";
+				return out;
+			};
+			// Control: the same run without smooth motion. The sigma-delta must run in this harness and be
+			// served (so the smooth-motion run's output-dither fallback means something).
+			const RunResult control = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
+				"deband_vp: on\ntemporal_dither: sigma_delta\n", false, &plan);
+			Logger::WriteMessage(("control (no smooth motion):\n" + ditherLines(control)).c_str());
 			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
 				"deband_vp: on\ntemporal_dither: sigma_delta\n[vprenderer.motion]\nmotion_engine: smooth_motion\nsmooth_motion: always\n", false, &plan);
 			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", nullptr);
-			Logger::WriteMessage(VectorTestLines(r).c_str());
+			Logger::WriteMessage(("smooth motion:\n" + ditherLines(r) + VectorTestLines(r)).c_str());
+			bool controlServed = false;
+			for (const std::string& line : control.log)
+				if (line.find("Vector engine: on") != std::string::npos && line.find("output dither") != std::string::npos &&
+					line.find("output dither without vectors") == std::string::npos)
+					controlServed = true;
+			Assert::IsTrue(controlServed, (L"control: the sigma-delta ran and is served (check the Sigma-delta lines above)\n" + control.Tail()).c_str());
 			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
 			Assert::IsTrue(r.Logged("Motion engine: libplacebo smooth motion"), (L"smooth motion is the engine\n" + r.Tail()).c_str());
 			Assert::IsTrue(r.Logged("Vector engine: on (forward)"), (L"a source consumer is served\n" + r.Tail()).c_str());
-			Assert::IsTrue(r.Logged("output dither") || r.fallbacksStatus.find("output dither") != std::string::npos,
+			Assert::IsTrue(r.Logged("output dither without vectors") || r.fallbacksStatus.find("output dither") != std::string::npos,
 				(L"output dither is named as without vectors\n" + r.Tail() + HarnessWide(r.fallbacksStatus)).c_str());
 		}
 	};
