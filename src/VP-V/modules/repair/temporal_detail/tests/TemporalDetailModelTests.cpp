@@ -1242,6 +1242,40 @@ namespace VideoProcessorTest
 			Assert::IsTrue(seconds[0] > 0 && seconds[1] > 0 && seconds[1] / seconds[0] > 0.7 && seconds[1] / seconds[0] < 1.4, L"the age-out takes the same seconds at 24 and 60 Hz");
 		}
 
+		TEST_METHOD(TemporalDetailCameraSourcePruneAndViewLifetime)
+		{
+#ifdef TEMPORAL_DETAIL_HAVE_CAMERA_MODEL
+			CameraModel::Policy policy;
+			policy.enabled = true;
+			policy.threshold = 0.5;
+			auto record = [](uint8_t labelValue)
+			{
+				auto blocks = std::make_shared<CameraModel::BlockData>();
+				blocks->gridW = 4; blocks->gridH = 3; blocks->blockSize = 16.0;
+				blocks->label.assign(12, labelValue);
+				auto r = std::make_shared<CameraModel::CameraMotion>();
+				r->valid = true;
+				r->reason = CameraModel::Reason::Ok;
+				r->confidence = 1.0;
+				r->blocks = blocks;
+				return std::shared_ptr<const CameraModel::CameraMotion>(r);
+			};
+			CameraModelMotionSource src(policy);
+			for (uint64_t q = 1; q <= 5; ++q) src.SetCamera(q, record(1));
+			src.Prune(3);
+			Assert::AreEqual(size_t{ 3 }, src.CameraCount(), L"seqs 3..5 kept");
+			CameraPairView v;
+			Assert::IsFalse(src.Camera(2, v), L"old seq pruned");
+			Assert::IsTrue(src.Camera(3, v) && src.Camera(5, v), L"newer seqs kept");
+			// The view stays valid after its seq is replaced and after a prune.
+			Assert::IsTrue(src.Camera(4, v) && v.label != nullptr);
+			src.SetCamera(4, record(0));
+			src.Prune(100);
+			Assert::AreEqual(size_t{ 0 }, src.CameraCount());
+			for (int i = 0; i < 12; ++i) Assert::AreEqual(1, static_cast<int>(v.label[i]), L"view's labels intact");
+#endif
+		}
+
 		TEST_METHOD(TemporalDetailCameraAdapterFallback)
 		{
 			// A test source that adds a camera view (the real adapter needs the camera branch's header).

@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <vector>
 
 #if __has_include(<VP-V/modules/motion/estimation/global_model/CameraAccessor.h>)
@@ -53,6 +54,7 @@ namespace TemporalDetail
 		int gridW = 0, gridH = 0;
 		double blockSize = 0.0;
 		const uint8_t* label = nullptr;                 // gridW x gridH, 1 = Camera
+		std::shared_ptr<const void> keepAlive;          // owns the storage behind label: keeps it valid while the view lives
 		double pictureCx = 0.0, pictureCy = 0.0;        // picture centre, plane pixels
 	};
 
@@ -89,11 +91,15 @@ namespace TemporalDetail
 #ifdef TEMPORAL_DETAIL_HAVE_CAMERA_MODEL
 	// Wraps a FieldMotionSource and adds the camera model's per-pair record. Compiled only where the
 	// camera model's header exists (branch feat/camera-model); without it the module runs on the field.
+	// Single-threaded: SetCamera/Prune/Camera must all be called from one thread (the host adapter's).
 	class CameraModelMotionSource : public FieldMotionSource
 	{
 	public:
 		explicit CameraModelMotionSource(const CameraModel::Policy& policy) : m_policy(policy) {}
 		void SetCamera(uint64_t seq, std::shared_ptr<const CameraModel::CameraMotion> record) { m_cam[seq] = std::move(record); }
+		// Drops the records of every sequence below oldestNeeded (each holds a block-data buffer).
+		void Prune(uint64_t oldestNeeded) { m_cam.erase(m_cam.begin(), m_cam.lower_bound(oldestNeeded)); }
+		size_t CameraCount() const { return m_cam.size(); }
 
 		bool Camera(uint64_t seq, CameraPairView& out) const override
 		{
@@ -111,6 +117,7 @@ namespace TemporalDetail
 			out.gridH = r.blocks->gridH;
 			out.blockSize = r.blocks->blockSize;
 			out.label = r.blocks->label.empty() ? nullptr : r.blocks->label.data();
+			out.keepAlive = r.blocks;   // the view outlives a SetCamera replacement or a Prune of this seq
 			out.pictureCx = r.picture.CentreX();
 			out.pictureCy = r.picture.CentreY();
 			return true;
