@@ -24,6 +24,11 @@ public:
 	// Optional DM extension (extra extension levels, a rejected-DM policy); null = none.
 	void SetMetadataExtension(std::shared_ptr<IDolbyVisionMetadataExtension> extension) { m_metadataExtension = std::move(extension); }
 	bool BugHuntFixes() const { return m_bugHuntFixes; }
+	// DIV-DV-08 (either/or; default on like dv_tunnel_fixes; off = Bill's admission exactly): also accept the DeckLink R10b/R10l
+	// containers, proven only by a CRC-valid packet. The renderer sets it from dv_tunnel_fixes (the
+	// Original pathway has that off).
+	void SetAcceptR10Containers(bool on) { m_acceptR10Containers = on; }
+	bool AcceptR10Containers() const { return m_acceptR10Containers; }
 	CRGBDolbyVisionTunnelFormatter();
 	~CRGBDolbyVisionTunnelFormatter() override;
 	CRGBDolbyVisionTunnelFormatter(const CRGBDolbyVisionTunnelFormatter&) = delete;
@@ -137,6 +142,7 @@ private:
 	// loss run (the loss limit counts source pictures, not analysed ones).
 	bool m_hasPacketLoss = false;
 	bool m_bugHuntFixes = true;   // dv_tunnel_fixes
+	bool m_acceptR10Containers = true;    // DIV-DV-08
 	uint64_t m_packetLossStartCounter = 0;
 	bool m_tunnelConfirmed = false;
 	bool m_currentPictureHasValidHeader = false;

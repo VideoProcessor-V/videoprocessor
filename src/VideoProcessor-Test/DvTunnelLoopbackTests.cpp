@@ -318,7 +318,10 @@ namespace Tests
 					Assert::AreEqual<uint64_t>(30, r.pictures, (name + L": every frame shown as a DV picture").c_str());
 					Assert::AreEqual<uint64_t>(0, r.dropped);
 					Assert::AreEqual<uint64_t>(0, r.repeated);
-					Assert::IsTrue(r.Logged("CRC-validated r210 RGB8 alignment"), name.c_str());
+					// Bill generalised the formatter's log to name the container (merge with v1.4.02-beta).
+					Assert::IsTrue(r.Logged(encoding == VideoFrameEncoding::R210 ? "CRC-validated r210 RGB8 alignment" :
+						encoding == VideoFrameEncoding::R10b ? "CRC-validated R10b RGB8 alignment" :
+						"CRC-validated R10l RGB8 alignment"), name.c_str());
 				}
 		}
 
@@ -581,10 +584,19 @@ namespace Tests
 			{ auto g = in; g.captureStateValid = false; Assert::IsTrue(closed(g), L"invalid state"); }
 			{ auto g = in; g.eotf = EOTF::PQ; Assert::IsTrue(closed(g), L"PQ capture (HDR10)"); }
 			for (const VideoFrameEncoding e : { VideoFrameEncoding::V210, VideoFrameEncoding::UYVY, VideoFrameEncoding::R12B,
-				VideoFrameEncoding::R10b, VideoFrameEncoding::R10l, VideoFrameEncoding::ARGB_8BIT })
+				VideoFrameEncoding::R10b, VideoFrameEncoding::R10l })
 			{
 				auto g = in; g.encoding = e;
 				Assert::IsTrue(closed(g), L"non-r210 container");
+			}
+			// Merge with v1.4.02-beta (W4 #4): Bill's byte-preserving RGB8 layouts are tunnel containers too,
+			// and only while the capture proves the bytes arrive unconverted.
+			for (const VideoFrameEncoding e : { VideoFrameEncoding::ARGB_8BIT, VideoFrameEncoding::BGRA_8BIT })
+			{
+				auto g = in; g.encoding = e;
+				Assert::IsTrue(DolbyVisionTunnelGateOpen(g), L"RGB8 tunnel container");
+				g.bytesPreserved = false;
+				Assert::IsTrue(closed(g), L"RGB8 without byte-preserving capture");
 			}
 			Assert::IsTrue(DolbyVisionTunnelOwnsSignal([] { DolbyVisionTunnelGateInput g; g.profileForcesTunnel = true; return g; }()),
 				L"a profile forcing the tunnel owns the signal");

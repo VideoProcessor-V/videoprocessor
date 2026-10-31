@@ -7,7 +7,7 @@
 // out of VideoProcessorDlg unchanged, 2026-10-17, so the DV loopback harness
 // and the HDR-mode tests apply the GUI's own rule): the tunnel switch (or a
 // profile that forces it) is on, the renderer is libplacebo, the capture state
-// is valid, the container is r210 and the capture reports SDR (DeckLink
+// is valid, the container is r210 (or Bill's byte-preserving ARGB/BGRA RGB8) and the capture reports SDR (DeckLink
 // reports the tunnel's RGB wrapper as SDR / Rec.709).
 //
 // The gate cannot look at the wire bit depth: an 8-bit tunnel padded to 10
@@ -44,7 +44,20 @@ struct DolbyVisionTunnelGateInput
 	bool handedOff = false;
 	// [general] dv_tunnel_handoff: YCbCr is never claimed (see above).
 	bool declineYCbCr = true;
+	// Bill's raw RGB8 layouts (ARGB / BGRA) are a tunnel container only while the capture proves it
+	// delivers the bytes unconverted (VideoState::rgbTunnelBytesPreserved); r210 is judged by its
+	// CRC alone, as before.
+	bool bytesPreserved = true;
 };
+
+// The containers the gate takes: r210 and Bill's byte-preserving RGB8 layouts (merge with
+// v1.4.02-beta, W4 #4; the same set as DolbyVisionTunnelEncodingSupported in DolbyVisionTunnelInput.h).
+inline bool DolbyVisionTunnelGateContainer(const DolbyVisionTunnelGateInput& in)
+{
+	return in.encoding == VideoFrameEncoding::R210 ||
+		((in.encoding == VideoFrameEncoding::ARGB_8BIT || in.encoding == VideoFrameEncoding::BGRA_8BIT) &&
+			in.bytesPreserved);
+}
 
 // A capture the HDMI tunnel can never arrive in (YCbCr 4:2:2).
 inline bool DolbyVisionTunnelImpossibleEncoding(VideoFrameEncoding encoding)
@@ -58,7 +71,7 @@ inline bool DolbyVisionTunnelImpossibleEncoding(VideoFrameEncoding encoding)
 inline bool DolbyVisionTunnelGateWouldOpen(const DolbyVisionTunnelGateInput& in)
 {
 	return in.tunnelSwitch && in.libplaceboRenderer && in.captureStateValid &&
-		in.encoding == VideoFrameEncoding::R210 && in.eotf == EOTF::SDR;
+		DolbyVisionTunnelGateContainer(in) && in.eotf == EOTF::SDR;
 }
 
 // The capture goes through CRGBDolbyVisionTunnelFormatter (VideoState::
@@ -76,5 +89,5 @@ inline bool DolbyVisionTunnelOwnsSignal(const DolbyVisionTunnelGateInput& in)
 	if (in.declineYCbCr && DolbyVisionTunnelImpossibleEncoding(in.encoding))
 		return false;
 	return !in.handedOff && (in.profileForcesTunnel || (in.tunnelSwitch && in.libplaceboRenderer &&
-		in.encoding == VideoFrameEncoding::R210 && in.eotf == EOTF::SDR));
+		DolbyVisionTunnelGateContainer(in) && in.eotf == EOTF::SDR));
 }

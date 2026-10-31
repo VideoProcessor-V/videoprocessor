@@ -471,8 +471,13 @@ namespace Tests
                         value = content;
                         return true;
                     }, automatic, selectError), std::wstring(selectError.begin(), selectError.end()).c_str());
-                Assert::AreEqual(static_cast<size_t>(1), automatic.size());
-                return automatic.front().profiles.front();
+                // Merge with v1.4.02-beta: `quality: high` now migrates into a Scaling profile, so the
+                // Rendering (display) group is one of several automatic selections.
+                for (const auto& selection : automatic)
+                    if (selection.group == "display")
+                        return selection.profiles.front();
+                Assert::Fail(L"no Rendering selection");
+                return std::string();
             };
             Assert::AreEqual("match_day", pick("sports").c_str());
             Assert::AreEqual("cartoons", pick("animation").c_str());

@@ -765,6 +765,10 @@ namespace VideoProcessorTest
                 settings.downscaler = value("downscaler");
                 settings.sigmoid = value("sigmoid") == "on" ? Toggle::On : Toggle::Off;
                 settings.debandStrength = value("deband_strength");
+                // The comparison is with libplacebo's own presets, so the Original pathway's
+                // deband_grain on (libplacebo's grain kept); VP-V's default (off, grain audit
+                // 2026-10-17) zeroes the grain on purpose.
+                settings.debandGrain = true;
                 settings.dithering = value("dithering");
                 settings.peakDetection = value("peak_detection") == "off" ? PeakDetection::Off :
                     value("peak_detection") == "on" ? PeakDetection::Standard : PeakDetection::HighQuality;

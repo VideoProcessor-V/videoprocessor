@@ -5665,6 +5665,9 @@ void CVideoProcessorDlg::SelectOriginalNewLldvHeuristic(bool original, const Hdr
 	options.originalHeuristic = original;
 	m_hdrInference.SetOptions(options);
 	m_hdrInferenceProblem = fromConfig.problem;
+	m_dvTunnelOriginalPathway = fromConfig.originalPathway;
+	if (m_dvTunnelOriginalPathway)
+		DebugLog::Log("dv_tunnel_handoff: not used (the Original pathway keeps Bill's tunnel gate)");
 	DebugLog::Log("hdr_inference: %s", HdrInferenceChoice::StartupLine(original, fromConfig).c_str());
 }
 
@@ -5702,13 +5705,13 @@ bool CVideoProcessorDlg::ProfileTunnelClaimsSignal() const
 	if (m_profileDolbyVisionTunnelOverride != 1 || DvTunnelHandedOff())
 		return false;
 	const VideoState* state = m_captureDeviceVideoState;
-	return !(m_dvTunnelHandoffEnabled && state &&
+	return !(DvTunnelHandoffActive() && state &&
 		DolbyVisionTunnelImpossibleEncoding(state->videoFrameEncoding));
 }
 
 bool CVideoProcessorDlg::DvTunnelHandedOff() const
 {
-	return m_dvTunnelHandoffEnabled && m_dvTunnelHandedOff &&
+	return DvTunnelHandoffActive() && m_dvTunnelHandedOff &&
 		m_dvTunnelHandedOffGeneration ==
 			m_dvTunnelHandoffGeneration.load(std::memory_order_acquire);
 }
@@ -13144,7 +13147,7 @@ HdrInferenceSignal CVideoProcessorDlg::BuildHdrInferenceSignal()
 	tunnelGate.libplaceboRenderer = rendererId &&
 		rendererId->backend == RendererBackend::LIBPLACEBO;
 	tunnelGate.handedOff = DvTunnelHandedOff();   // DV input fixes 2026-10-18
-	tunnelGate.declineYCbCr = m_dvTunnelHandoffEnabled;
+	tunnelGate.declineYCbCr = DvTunnelHandoffActive();
 	const VideoState* state = m_captureDeviceVideoState;
 	return BuildHdrInferenceSignalFromState(state, m_useNewLldvHeuristic,
 		m_captureInputBitDepth, tunnelGate,
@@ -13488,7 +13491,7 @@ LRESULT CVideoProcessorDlg::OnMessageDvTunnelHandoff(WPARAM wParam, LPARAM)
 	// it accepts the state in place). A take-back that changes nothing here
 	// releases them at once.
 	const bool takeBack = message && message->event == DolbyVisionTunnelHandoffEvent::TakeBack;
-	if (!message || !m_dvTunnelHandoffEnabled ||
+	if (!message || !DvTunnelHandoffActive() ||
 		message->generation != m_dvTunnelHandoffGeneration.load(std::memory_order_acquire))
 	{
 		if (takeBack)
@@ -13912,6 +13915,7 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
 	tunnelGate.captureStateValid = m_captureDeviceVideoState->valid;
 	tunnelGate.encoding = m_captureDeviceVideoState->videoFrameEncoding;
 	tunnelGate.eotf = m_captureDeviceVideoState->eotf;
+	tunnelGate.bytesPreserved = m_captureDeviceVideoState->rgbTunnelBytesPreserved;
 	tunnelGate.handedOff = DvTunnelHandedOff();   // DV input fixes 2026-10-18
 	// (c) rehearsal 2026-10-31: Bill's gate (raw RGB8 layouts) AND VP-V's DV hand-off veto.
 	videoState->dolbyVisionTunnel = DolbyVisionTunnelCanEnable(
@@ -13923,7 +13927,7 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
 	// hand-off ends with it, and a new generation makes the capture thread's
 	// probe start again from "not handed off" when probing resumes.
 	// A veto preview (BuildHdrVetoSdrState, bug hunt 3 C2) leaves the hand-off probe alone.
-	const bool probeHandoff = m_dvTunnelHandoffEnabled &&
+	const bool probeHandoff = DvTunnelHandoffActive() &&
 		DolbyVisionTunnelGateWouldOpen(tunnelGate);
 	if (!m_hdrVetoPreviewing)
 	{

@@ -123,8 +123,16 @@ for the GUI toggle.
 - `[general]` (passed to the GUI as switches, `ConfigBoolSwitches.h`): `newlldv` (Bill's key; it
   enables VP's `HdrInferenceTracker`, which replaced his heuristic in his dialog - see the
   findings), `newlldv_sdr_veto`, `dv_tunnel_handoff`.
-  These GUI-side switches are outside the renderer's Original pathway (`OriginalPathway.h`
-  lists renderer keys only); they get overrides when WP-16/18 move the signal decisions into VP-V.
+  These GUI-side switches are outside the renderer's Original pathway table (`OriginalPathway.h`
+  lists renderer keys only). `dv_tunnel_handoff` is the exception handled in the GUI: with
+  `pipeline_original_pathway` on, `CVideoProcessorDlg::SelectOriginalNewLldvHeuristic` (via
+  `HdrInferenceChoice::Resolved::originalPathway`) makes the hand-off inactive
+  (`DvTunnelHandoffActive()`), so the tunnel gate is Bill's `DolbyVisionTunnelCanEnable` over the
+  byte-preserving R210 / ARGB / BGRA layouts exactly (no probe, no YCbCr decline). With the
+  Original pathway off, the VP-V gate (`DolbyVisionTunnelGate.h`) also takes the RGB8 layouts
+  (while `rgbTunnelBytesPreserved`), ANDed with Bill's predicate, and the hand-off probe runs on
+  them. `CRGBDolbyVisionTunnelFormatter::SetAcceptR10Containers` (DIV-DV-08, wired from
+  `dv_tunnel_fixes`) admits R10b/R10l only on the VP-V side.
 - Renderer profile sections (`[vprenderer.*]`, host settings reader until WP-18):
   `dv_tunnel_gpu_unpack` (default on), `dv_tunnel_fixes` (default on; switches the formatter's
   bug-hunt fixes and the metadata hold), `dv_compare_capture_folder` ("" = `VP_DV_COMPARE_PATH`

@@ -444,6 +444,10 @@ protected:
 	// counts material capture states (capture thread); a hand-off belongs to
 	// the generation it was decided in.
 	bool m_dvTunnelHandoffEnabled = true;
+	// W4 #4 either/or: the Original pathway uses Bill's tunnel gate exactly (no hand-off probe,
+	// no YCbCr decline); set from the configuration at start-up (SelectOriginalNewLldvHeuristic).
+	bool m_dvTunnelOriginalPathway = false;
+	bool DvTunnelHandoffActive() const { return m_dvTunnelHandoffEnabled && !m_dvTunnelOriginalPathway; }
 	bool m_dvTunnelHandedOff = false;
 	uint64_t m_dvTunnelHandedOffGeneration = 0;
 	std::atomic<bool> m_dvTunnelHandoffProbe{ false };

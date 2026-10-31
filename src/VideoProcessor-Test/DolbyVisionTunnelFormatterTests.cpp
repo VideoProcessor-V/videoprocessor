@@ -434,11 +434,35 @@ namespace Tests
                 state->displayMode = std::make_shared<DisplayMode>(130, 128, false, 24, 1);
                 state->dolbyVisionTunnel = true;
                 Formatter formatter;
-                // VP-V (DIV-DV-08): the formatter also accepts the R10b/R10l DeckLink
-                // containers (CRC-proven packets), so only the other encodings throw.
-                if (encoding == VideoFrameEncoding::R10b || encoding == VideoFrameEncoding::R10l)
-                    continue;
+                // Original pathway (Bill's admission exactly): DIV-DV-08 off, so R10b/R10l throw too.
+                formatter.SetAcceptR10Containers(false);
                 Assert::ExpectException<std::runtime_error>([&] { formatter.OnVideoState(state); });
+            }
+        }
+
+        // VP-V side of DIV-DV-08: the R10b/R10l DeckLink containers are admitted (proven only by a
+        // CRC-valid packet); every other non-tunnel encoding still throws.
+        TEST_METHOD(VpvTunnelAdmissionAddsR10ContainersBehindTheSwitch)
+        {
+            VideoStateComPtr state = new VideoState();
+            state->valid = true; state->eotf = EOTF::SDR;
+            state->displayMode = std::make_shared<DisplayMode>(130, 128, false, 24, 1);
+            state->dolbyVisionTunnel = true;
+            for (const auto encoding : { VideoFrameEncoding::R10b, VideoFrameEncoding::R10l })
+            {
+                state->videoFrameEncoding = encoding;
+                Formatter vpv;
+                Assert::IsTrue(vpv.AcceptR10Containers());
+                vpv.OnVideoState(state);
+                Formatter original;
+                original.SetAcceptR10Containers(false);
+                Assert::ExpectException<std::runtime_error>([&] { original.OnVideoState(state); });
+            }
+            for (const auto encoding : { VideoFrameEncoding::UNKNOWN, VideoFrameEncoding::V210, VideoFrameEncoding::R12B })
+            {
+                state->videoFrameEncoding = encoding;
+                Formatter vpv;
+                Assert::ExpectException<std::runtime_error>([&] { vpv.OnVideoState(state); });
             }
         }
 

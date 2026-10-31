@@ -524,15 +524,22 @@ namespace VideoProcessorTest
                             value = eotf;
                             return true;
                         }, automatic, selectError));
+                    // Merge with v1.4.02-beta (VP-0215): Scaling owns debanding; the migration moves a
+                    // Rendering profile's legacy `deband` to deband_strength in the Scaling profile that
+                    // carries the same `when`. A Rendering profile that kept `deband` still counts.
+                    std::string found = "none";
                     for (const auto& selection : automatic)
-                        if (selection.group == "display")
+                        if (selection.group == "scaling" || selection.group == "display")
                         {
-                            const auto profile = model.profiles.find("display." + selection.profiles.front());
+                            const std::string key = selection.group == "scaling" ? "deband_strength" : "deband";
+                            const auto profile = model.profiles.find(selection.group + "." + selection.profiles.front());
                             Assert::IsTrue(profile != model.profiles.end());
-                            const auto deband = profile->second.settings.find("deband");
-                            return deband == profile->second.settings.end() ? std::string("auto") : deband->second;
+                            const auto deband = profile->second.settings.find(key);
+                            if (deband != profile->second.settings.end())
+                                return deband->second;
+                            found = "auto";
                         }
-                    return std::string("none");
+                    return found;
                 };
                 const std::wstring which(relative, relative + strlen(relative));
                 Assert::AreEqual(std::string("off"), debandFor("pq"), (which + L": PQ").c_str());
@@ -1924,8 +1931,13 @@ namespace VideoProcessorTest
                         value = ambient;
                         return true;
                     }, automatic, selectError));
-                Assert::AreEqual(static_cast<size_t>(1), automatic.size());
-                return automatic.front().profiles.front();
+                // Merge with v1.4.02-beta: `quality: high` now migrates into a Scaling profile, so the
+                // Rendering (display) group is one of several automatic selections.
+                for (const auto& selection : automatic)
+                    if (selection.group == "display")
+                        return selection.profiles.front();
+                Assert::Fail(L"no Rendering selection");
+                return std::string();
             };
             Assert::AreEqual("lit_room", pick("lit").c_str());
             Assert::AreEqual("dark_room", pick("dark").c_str());

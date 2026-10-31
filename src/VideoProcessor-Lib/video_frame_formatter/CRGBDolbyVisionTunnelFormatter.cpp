@@ -743,15 +743,15 @@ void CRGBDolbyVisionTunnelFormatter::OnVideoState(VideoStateComPtr& state)
 	// audit 2026-10-16: R10b/R10l hold the same 10-bit RGB fields as r210,
 	// two bits higher. Only a CRC-valid packet proves that the card stored
 	// the tunnel's RGB8 bytes exactly; otherwise DV never locks.
+	// DIV-DV-08: R10b/R10l only when SetAcceptR10Containers(true); otherwise Bill's admission exactly.
+	const bool r10Container = m_acceptR10Containers &&
+		(state && (state->videoFrameEncoding == VideoFrameEncoding::R10b ||
+			state->videoFrameEncoding == VideoFrameEncoding::R10l));
 	if (!state || !state->displayMode ||
-		!(DolbyVisionTunnelEncodingSupported(state->videoFrameEncoding) ||
-			state->videoFrameEncoding == VideoFrameEncoding::R10b ||
-			state->videoFrameEncoding == VideoFrameEncoding::R10l) ||
+		!(DolbyVisionTunnelEncodingSupported(state->videoFrameEncoding) || r10Container) ||
 		// Bill's capture sets rgbTunnelBytesPreserved for his encodings; the
 		// R10b/R10l containers are proven only by a CRC-valid packet.
-		((state->videoFrameEncoding != VideoFrameEncoding::R10b &&
-			state->videoFrameEncoding != VideoFrameEncoding::R10l) &&
-			!state->rgbTunnelBytesPreserved) ||
+		(!r10Container && !state->rgbTunnelBytesPreserved) ||
 		!state->dolbyVisionTunnel)
 		throw std::runtime_error("Dolby Vision tunnel requires enabled byte-preserving ARGB, BGRA or R210 capture (or R10b/R10l)");
 	const auto width = state->displayMode->FrameWidth();
