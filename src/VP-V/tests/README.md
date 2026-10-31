@@ -57,11 +57,20 @@ committed, never built inside a source tree you are working in, and never deploy
 4. Record internally (not in the repository): the commit, and the SHA256 of
    `VideoProcessorVPRenderer.dll`.
 5. Environment variables for the GPU tests (run on the GPU machine only):
-   - `VP_TEST_BASELINE_RENDERER_DLL` = the r6 renderer DLL.
-   - `VP_TEST_BILL_RENDERER_DLL` = the Bill v1.4.02 renderer DLL.
+   - `VP_TEST_BASELINE_RENDERER_DLL` = the r6 renderer DLL (used by
+     `ByteIdenticalToTheR6BaselineWithThePlaceholdersOff`).
+   - `VP_TEST_BILL_RENDERER_DLL` = the Bill v1.4.02 renderer DLL (used only by
+     `OriginalPathwayByteIdenticalToBill`; see the limitation below).
    - `VP_TEST_ENTRANCE_ONCE=1` = run the harness test with `[vpv] pipeline_entrance_once: on` (B3-on);
      the B3-on reference is the picture hash set recorded with it.
    - `VP_TEST_DETERMINISM_SUBSET=1` = per-merge subset of the determinism run-twice test.
 6. Regenerate a reference only deliberately: r6 and Bill never (they are frozen); the B3-on reference
    only after an owner-accepted picture change. Without a variable the matching test logs
    `SKIP-NO-BASELINE` and passes.
+
+**Limitation (open work for the coordinator).** Bill's `v1.4.02-beta` renderer has plugin API version 34;
+this build's is 44 (r6 is 41), and Bill's config schema has no `capture_path` or `$source_rate`. The in-process
+`OriginalPathwayByteIdenticalToBill` reads the DLL's `VideoProcessorLibplaceboGetApiVersion` first and, unless it
+equals this build's `VP_LIBPLACEBO_PLUGIN_API_VERSION`, logs `SKIP-INCOMPATIBLE-BASELINE` and passes. Original = Bill
+byte identity therefore needs a Bill-ABI harness or an app-level capture. The test is ready for a compatible build
+(it renders both sides with a plain configuration: no input-profile section, no `capture_path`).

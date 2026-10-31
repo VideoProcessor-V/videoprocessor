@@ -317,6 +317,9 @@ namespace
 	// Another renderer DLL to run instead of this build's (the byte-identity test against the r6
 	// baseline build); empty = this build's.
 	std::string g_harnessRendererDll;
+	// Plain configuration: Run writes only [general] and `extra` (no input-profile section, no capture_path
+	// line, no $source_rate rule), for a renderer whose config schema predates them (Original = Bill test).
+	bool g_harnessPlainConfig = false;
 	// Bug hunt 3 F7: the active-picture look-ahead given to the renderer after Build, as the
 	// app does (-1: not called; the renderer's own 0). g_harnessLookaheadAutomatic: told as automatic.
 	int g_harnessActivePictureLookahead = -1;
@@ -379,6 +382,7 @@ namespace
 		int delayBudgetMs = 0;
 		size_t queueCapacity = 8;
 		std::string rendererDll;
+		bool plainConfig = false;
 		int activePictureLookahead = -1;
 		bool lookaheadAutomatic = false;
 		bool applySnapshot = false;
@@ -406,6 +410,7 @@ namespace
 		g.delayBudgetMs = g_harnessDelayBudgetMs;
 		g.queueCapacity = g_harnessQueueCapacity;
 		g.rendererDll = g_harnessRendererDll;
+		g.plainConfig = g_harnessPlainConfig;
 		g.activePictureLookahead = g_harnessActivePictureLookahead;
 		g.lookaheadAutomatic = g_harnessLookaheadAutomatic;
 		g.applySnapshot = g_harnessApplySnapshot;
@@ -433,6 +438,7 @@ namespace
 		g_harnessDelayBudgetMs = g.delayBudgetMs;
 		g_harnessQueueCapacity = g.queueCapacity;
 		g_harnessRendererDll = g.rendererDll;
+		g_harnessPlainConfig = g.plainConfig;
 		g_harnessActivePictureLookahead = g.activePictureLookahead;
 		g_harnessLookaheadAutomatic = g.lookaheadAutomatic;
 		g_harnessApplySnapshot = g.applySnapshot;
@@ -722,9 +728,12 @@ namespace
 		const std::string configPath = folder + "vp-capture-harness.cfg";
 		{
 			std::ofstream config(configPath, std::ios::trunc);
-			config << "[general]\npersist_profile_selection: false\n"
-				"[vprenderer.input.low_latency]\nwhen: $source_rate > " << (film || plan ? 0 : 59) << "\ncapture_path: " << capturePath << "\n"
-				<< extra;
+			if (g_harnessPlainConfig)
+				config << "[general]\npersist_profile_selection: false\n" << extra;
+			else
+				config << "[general]\npersist_profile_selection: false\n"
+					"[vprenderer.input.low_latency]\nwhen: $source_rate > " << (film || plan ? 0 : 59) << "\ncapture_path: " << capturePath << "\n"
+					<< extra;
 			// B3 acceptance (ADR-0024): VP_TEST_ENTRANCE_ONCE=1 runs any harness test with the
 			// motion pictures from the processed frames (criteria 4, 8, 9 with the existing tests).
 			char* once = nullptr;
@@ -1045,7 +1054,9 @@ namespace
 	}
 
 	// The keys the [vpv] section owns (RendererProfileConfig.h vpvKeys); every other key lives in a
-	// [vprenderer.*] profile section.
+	// [vprenderer.*] profile section. THIS LIST DUPLICATES the vpvKeys array in RendererProfileConfig.h;
+	// SettingsFingerprintStructureTests (CPU) parses that array and asserts it equals these 9 keys, so a new
+	// [vpv] key fails there until this function is updated too.
 	bool IsVpvSectionKey(const std::string& key)
 	{
 		static const char* const keys[] = { "pipeline_original_pathway", "pipeline_order", "pipeline_slots_off",
@@ -1603,8 +1614,10 @@ namespace Tests
 			const HarnessScope harnessScope;
 			// ADR-0019: with pipeline_original_pathway on, the output equals Bill's v1.4.02 build's.
 			// VP_TEST_BILL_RENDERER_DLL names that build's renderer DLL; the same still picture is
-			// rendered by both (Bill's with the configuration minus the [vpv] section and VP-only
-			// keys). When VP_TEST_BASELINE_RENDERER_DLL (the r6 build) is set, ours is compared with it too.
+			// rendered by both with a PLAIN configuration (no input-profile section, no capture_path;
+			// Bill's schema predates them), Bill's minus the [vpv] section and VP-only keys.
+			// The harness drives the renderer through this build's plugin ABI, so only a Bill build
+			// with the SAME API version can be driven (the forks number their versions independently).
 			if (!RequireHardwareOrSkip("OriginalPathwayByteIdenticalToBill")) return;
 			const std::string bill = HarnessEnvText("VP_TEST_BILL_RENDERER_DLL");
 			if (bill.empty() || GetFileAttributesA(bill.c_str()) == INVALID_FILE_ATTRIBUTES)
@@ -1612,11 +1625,27 @@ namespace Tests
 				Logger::WriteMessage("SKIP-NO-BASELINE OriginalPathwayByteIdenticalToBill (set VP_TEST_BILL_RENDERER_DLL)\n");
 				return;
 			}
-			const std::string r6 = HarnessEnvText("VP_TEST_BASELINE_RENDERER_DLL");
-			const bool haveR6 = !r6.empty() && GetFileAttributesA(r6.c_str()) != INVALID_FILE_ATTRIBUTES;
+			{
+				uint32_t billApi = 0;
+				HMODULE probe = LoadLibraryExA(bill.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+				if (probe)
+				{
+					const auto getApi = reinterpret_cast<VideoProcessorLibplaceboGetApiVersionFn>(
+						GetProcAddress(probe, "VideoProcessorLibplaceboGetApiVersion"));
+					if (getApi) billApi = getApi();
+					FreeLibrary(probe);
+				}
+				if (billApi != VP_LIBPLACEBO_PLUGIN_API_VERSION)
+				{
+					Logger::WriteMessage(("SKIP-INCOMPATIBLE-BASELINE OriginalPathwayByteIdenticalToBill (renderer API " +
+						std::to_string(billApi) + ", harness " + std::to_string(VP_LIBPLACEBO_PLUGIN_API_VERSION) +
+						"): Original = Bill needs a Bill-ABI harness or an app-level capture; see src\\VP-V\\tests\\README.md\n").c_str());
+					return;
+				}
+			}
 			// A mismatch is allowed ONLY for a registered fix. Every entry needs a divergence-register id
-			// registered by the owner (testCase is "<case name> vs bill" or "<case name> vs r6"); the list
-			// is empty on purpose. Never add an entry without that id.
+			// registered by the owner (testCase is "<case name> vs bill"); the list is empty on purpose.
+			// Never add an entry without that id.
 			struct AllowedMismatch { const char* testCase; const char* divergenceId; const char* reason; };
 			static const std::array<AllowedMismatch, 0> kRegisteredFixes = {};
 			auto allowed = [&](const std::string& testCase) {
@@ -1627,39 +1656,28 @@ namespace Tests
 			const ScratchCaptureFolder shots(L"vp-original-vs-bill");
 			const std::string ours = std::string(kStillPictureSettings) + "[vpv]\npipeline_original_pathway: on\n";
 			const std::string theirs = StripVpOnlyConfig(ours);
-			struct Case { const char* name; VideoFrameEncoding encoding; const char* path; bool film; };
-			const Case cases[] = { { "v210 standard 59.94", VideoFrameEncoding::V210, "standard", false },
-				{ "v210 standard 23.976", VideoFrameEncoding::V210, "standard", true } };
+			struct Case { const char* name; VideoFrameEncoding encoding; bool film; };
+			const Case cases[] = { { "v210 59.94", VideoFrameEncoding::V210, false },
+				{ "v210 23.976", VideoFrameEncoding::V210, true } };
+			g_harnessPlainConfig = true;   // restored by HarnessScope
 			std::string failures;
 			for (const Case& c : cases)
 			{
 				g_harnessRendererDll.clear();
-				const std::string a = StillPictureHash(c.encoding, c.path, c.film, ours);
+				const std::string a = StillPictureHash(c.encoding, "standard", c.film, ours);
 				// The harness adds a [vpv] section itself when VP_TEST_ENTRANCE_ONCE=1: not for Bill's build.
 				const std::string savedOnce = HarnessEnvText("VP_TEST_ENTRANCE_ONCE");
 				_putenv_s("VP_TEST_ENTRANCE_ONCE", "");
 				g_harnessRendererDll = bill;
-				const std::string b = StillPictureHash(c.encoding, c.path, c.film, theirs);
-				std::string r6Hash;
-				if (haveR6)
-				{
-					g_harnessRendererDll = r6;
-					r6Hash = StillPictureHash(c.encoding, c.path, c.film, theirs);
-				}
+				const std::string b = StillPictureHash(c.encoding, "standard", c.film, theirs);
 				g_harnessRendererDll.clear();
 				_putenv_s("VP_TEST_ENTRANCE_ONCE", savedOnce.c_str());
-				Logger::WriteMessage((std::string("== ") + c.name + ": ours (original) " + a + ", bill " + b +
-					(haveR6 ? ", r6 " + r6Hash : std::string()) + "\n").c_str());
-				const std::string vsBill = std::string(c.name) + " vs bill", vsR6 = std::string(c.name) + " vs r6";
-				if (a.empty() || b.empty() || (haveR6 && r6Hash.empty()))
+				Logger::WriteMessage((std::string("== ") + c.name + ": ours (original) " + a + ", bill " + b + "\n").c_str());
+				const std::string vsBill = std::string(c.name) + " vs bill";
+				if (a.empty() || b.empty())
 					failures += std::string(c.name) + ": a capture is missing; ";
-				else
-				{
-					if (a != b && !allowed(vsBill))
-						failures += vsBill + ": the Original pathway output differs (" + a + " vs " + b + "); ";
-					if (haveR6 && a != r6Hash && !allowed(vsR6))
-						failures += vsR6 + ": the Original pathway output differs (" + a + " vs " + r6Hash + "); ";
-				}
+				else if (a != b && !allowed(vsBill))
+					failures += vsBill + ": the Original pathway output differs (" + a + " vs " + b + "); ";
 			}
 			Assert::IsTrue(failures.empty(), WideOf(failures).c_str());
 		}
@@ -1672,21 +1690,25 @@ namespace Tests
 			const HarnessScope harnessScope;
 			// The slot switch's promise (ADR-0019): switching a slot off equals writing that slot's
 			// Original-pathway overrides (OriginalPathway::Overrides()) explicitly, and all slots off
-			// equals pipeline_original_pathway on. Keys that [vpv] owns go to [vpv], the others to
-			// [vprenderer.Default]; capture_path is the run's capture path. entrance_gpu_drain stays
-			// "finish" in every run (the Original table's own "off" for scaling.rebase is not written,
-			// so the drain does not differ between the two sides). Failures are collected, asserted once.
+			// equals pipeline_original_pathway on. Keys that [vpv] owns go to [vpv]; the others go FIRST
+			// in `extra`, before kStillPictureSettings, so they land in the harness's active input profile
+			// ([vprenderer.input.low_latency], where Run puts capture_path), as the existing tests place
+			// the settings under test; capture_path is the run's capture path. The slot-off side has
+			// "finish" in [vpv] and the slot switch then applies the slot's overrides, including
+			// entrance_gpu_drain: off for scaling.rebase; the explicit side writes the drain line once,
+			// with the slot's own override value when it has one, else "finish". Failures are collected
+			// and asserted once.
 			if (!RequireHardwareOrSkip("EverySlotOffEqualsItsOriginalOverrides")) return;
 			const ScratchCaptureFolder shots(L"vp-slot-overrides");
 			const std::vector<std::string> slots = SwitchableSlotNames();
 			const std::string drain = "[vpv]\nentrance_gpu_drain: finish\n";
 			std::string failures;
 			auto compare = [&](const std::string& name, const std::string& capturePath, const std::string& offVpv,
-				const std::string& explicitDefault, const std::string& explicitVpv) {
+				const std::string& explicitDefault, const std::string& explicitVpv, const std::string& explicitDrain) {
 				const std::string slotOff = StillPictureHash(VideoFrameEncoding::V210, "gpu", true,
 					std::string(kStillPictureSettings) + drain + offVpv);
 				const std::string written = StillPictureHash(VideoFrameEncoding::V210, capturePath, true,
-					std::string(kStillPictureSettings) + explicitDefault + drain + explicitVpv);
+					explicitDefault + kStillPictureSettings + "[vpv]\nentrance_gpu_drain: " + explicitDrain + "\n" + explicitVpv);
 				Logger::WriteMessage(("== " + name + ": off " + slotOff + ", overrides " + written + "\n").c_str());
 				if (slotOff.empty() || written.empty())
 					failures += name + ": a capture is missing; ";
@@ -1695,15 +1717,16 @@ namespace Tests
 			};
 			for (const std::string& slot : slots)
 			{
-				std::string defaultKeys, vpvKeys, capturePath = "gpu";
+				std::string defaultKeys, vpvKeys, capturePath = "gpu", explicitDrain = "finish";
 				for (const OriginalPathway::Override& o : OriginalPathway::Overrides())
 				{
-					if (slot != o.slot || !o.value[0] || std::string(o.key) == "entrance_gpu_drain") continue;
-					if (std::string(o.key) == "capture_path") capturePath = o.value;
+					if (slot != o.slot || !o.value[0]) continue;
+					if (std::string(o.key) == "entrance_gpu_drain") explicitDrain = o.value;
+					else if (std::string(o.key) == "capture_path") capturePath = o.value;
 					else if (IsVpvSectionKey(o.key)) vpvKeys += std::string(o.key) + ": " + o.value + "\n";
 					else defaultKeys += std::string(o.key) + ": " + o.value + "\n";
 				}
-				compare("slot " + slot, capturePath, "pipeline_slots_off: " + slot + "\n", defaultKeys, vpvKeys);
+				compare("slot " + slot, capturePath, "pipeline_slots_off: " + slot + "\n", defaultKeys, vpvKeys, explicitDrain);
 			}
 			std::string all;
 			for (const std::string& slot : slots) all += (all.empty() ? "" : ", ") + slot;

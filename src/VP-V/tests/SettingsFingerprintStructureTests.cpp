@@ -273,6 +273,12 @@ namespace SettingsFingerprintStructureTest
 			Logger::WriteMessage(("keys: " + std::to_string(keys.size()) + " validated + " + std::to_string(vpv.size()) + " [vpv]\n").c_str());
 			Assert::IsTrue(all.size() > 100, L"more than 100 keys");
 			Assert::IsTrue(vpv.size() >= 5, L"the [vpv] key list was parsed");
+			// Guard for the GPU harness: IsVpvSectionKey() in RendererCaptureHarnessTests.cpp duplicates this list.
+			const std::set<std::string> expected = { "pipeline_original_pathway", "pipeline_order", "pipeline_slots_off",
+				"calibration_lut_stage", "pipeline_entrance_once", "output_segments_merged", "frame_analysis_store",
+				"entrance_gpu_drain", "hdr_inference" };
+			Assert::IsTrue(std::set<std::string>(vpv.begin(), vpv.end()) == expected,
+				L"the [vpv] keys in RendererProfileConfig.h changed: update IsVpvSectionKey() in RendererCaptureHarnessTests.cpp and this list");
 		}
 
 		// 2b: a validator-accepted probe changes the fingerprint (a live edit of the key is applied).
