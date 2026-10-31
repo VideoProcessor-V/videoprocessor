@@ -1,14 +1,19 @@
 <#
 The GPU part of the chain gate (test hardening 2026-10-17): runs the renderer capture harness
 (Tests.RendererCaptureHarnessTests, every test there carries TEST_METHOD_ATTRIBUTE Category
-GpuHardware except the opt-in on-screen ones) plus the libplacebo GPU tests whose names match
+GpuHardware except the opt-in on-screen ones, selected with the other GpuHardware/GpuOnScreen tests by
+tools/gen_test_filters.py --gpu) plus the libplacebo GPU tests whose names match
 -Names, on the hardware GPU, with VP_TEST_REQUIRE_GPU=1 so a hardware test fails instead of
 skipping. vstest's native adapter does not filter on TEST_METHOD_ATTRIBUTE traits, so the
-harness is selected by its class.
+generator lists the name clauses too. Owner rule: the GpuWarp tests run on WARP (CPU run) and on the
+real GPU (-GpuWarp here).
 
   run_chain_gate.ps1                                  # harness + ExtendedRange|SigmaDelta|Interpolator|DolbyVision
   run_chain_gate.ps1 -Names "DolbyVision"             # harness + only the DV GPU tests
   run_chain_gate.ps1 -NoHarness -Names "SigmaDelta"   # GPU tests only
+
+  run_chain_gate.ps1 -GpuWarp                         # + every GpuWarp test, on the hardware GPU
+  run_chain_gate.ps1 -PrintFilter                     # show the generated /TestCaseFilter and stop
 
   run_chain_gate.ps1 -OnScreen                        # + the opt-in on-screen tests, windowed
   run_chain_gate.ps1 -OnScreen -Fullscreen both       # windowed, then fullscreen (reported apart)
@@ -25,7 +30,9 @@ param(
     [string]$Names = "ExtendedRange|SigmaDelta|Interpolator|DolbyVision|DelayGate|CombinationRunner|PipelineSkeletonTests",
     [switch]$NoSettingsChecks,   # skip the VP-V data checks (settings agent 2026-10-24)
     [switch]$AllowBattery,       # GPU runs need mains power (owner rule); this overrides the check
-    [switch]$NoHarness,
+    [switch]$NoHarness,          # skip the generated hardware set (harness and the other GpuHardware/GpuOnScreen tests)
+    [switch]$GpuWarp,            # also run every GpuWarp test (manifest set) on the hardware GPU (VP_TEST_GPU=hardware)
+    [switch]$PrintFilter,        # print the /TestCaseFilter and exit (no run, no power or vstest checks)
     [switch]$OnScreen,
     [string]$Fullscreen = "",   # VP_TEST_HARNESS_FULLSCREEN for the on-screen tests: 0, 1 or both
     [string]$Adapter = "NVIDIA",
@@ -36,6 +43,16 @@ param(
     [switch]$LenientDelay        # the delay gate reports instead of failing (VP_DELAY_GATE_STRICT off)
 )
 $ErrorActionPreference = "Stop"
+# The hardware set comes from tools/gen_test_filters.py (manifest tools/test-categories.json), never
+# from a copy here; a generator failure stops the gate. -Names still narrows by name on top.
+. (Join-Path $PSScriptRoot "test_filters.ps1")
+$clauses = @()
+if (-not $NoHarness) { $clauses += Get-VpTestFilter -Kind gpu -Categories GpuHardware, GpuOnScreen }
+if ($GpuWarp) { $clauses += Get-VpTestFilter -Kind gpuwarp }
+foreach ($name in ($Names -split '\|')) { if ($name) { $clauses += "FullyQualifiedName~$name" } }
+if ($clauses.Count -eq 0) { throw "nothing selected" }
+$filter = $clauses -join '|'
+if ($PrintFilter) { $filter; exit 0 }
 # GPU tests only on mains power (BatteryStatus 2 = on AC; no battery = a desktop).
 $battery = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue
 if ($battery -and $battery.BatteryStatus -ne 2 -and -not $AllowBattery) { throw "on battery: the GPU chain gate runs on mains only (-AllowBattery overrides)" }
@@ -57,11 +74,6 @@ New-Item -ItemType Directory -Force $OutDir | Out-Null
 $vstest = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse -Filter vstest.console.exe -ErrorAction SilentlyContinue |
     Where-Object { $_.FullName -like "*TestPlatform*" } | Select-Object -First 1
 if (-not $vstest) { throw "vstest.console.exe not found" }
-$clauses = @()
-if (-not $NoHarness) { $clauses += "FullyQualifiedName~RendererCaptureHarnessTests" }
-foreach ($name in ($Names -split '\|')) { if ($name) { $clauses += "FullyQualifiedName~$name" } }
-if ($clauses.Count -eq 0) { throw "nothing selected" }
-$filter = $clauses -join '|'
 $trx = Join-Path $OutDir "chain-gate.trx"
 Remove-Item $trx -ErrorAction SilentlyContinue
 $saved = @{}

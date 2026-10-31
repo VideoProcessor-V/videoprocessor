@@ -272,6 +272,16 @@ jobs:
 
       # As many shards (at most TEST_SHARDS) as the measured load of the selected tests needs at
       # about five minutes each; the full tier plans every test.
+      # Every test that uses the GPU needs a Category attribute or a manifest entry
+      # (tools/test-categories.json); the shard plan below takes its exclusions from the generator
+      # tools/gen_test_filters.py (tools/test_filters.ps1) and stops when python or the generator fails.
+      - name: Check test categories
+        if: steps.scope.outputs.cpu == 'true'
+        shell: pwsh
+        run: |
+          python tools/check_test_categories.py
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Plan test shards
         id: plan
         if: steps.scope.outputs.cpu == 'true'
