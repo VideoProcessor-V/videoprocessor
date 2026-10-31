@@ -30,6 +30,8 @@ namespace TemporalDetail
 			t += d("TD_SIGMA_LOW", kSigmaLow * s);
 			t += d("TD_GRAIN_CAL", kGrainCal);
 			t += d("TD_WIENER_KAPPA", kWienerKappa);
+			t += d("TD_KAPPA_TRANSFER", kKappaTransfer);
+			t += d("TD_KAPPA_DELTA", kKappaDelta);
 			t += d("TD_ENERGY_FLOOR", kEnergyFloor);
 			t += d("TD_RHO2_LO", kRho2Lo);
 			t += d("TD_RHO2_HI", kRho2Hi);
@@ -86,6 +88,8 @@ void split_pixel(ivec2 p, out float y, out float base, out float d1, out float d
     e /= 9.0;
     float N = texelFetch(tdN, p / int(TD_BLOCK), 0).r;
     f = clamp(1.0 - TD_WIENER_KAPPA * N / max(e, TD_ENERGY_FLOOR), 0.0, 1.0);
+    // ft = clamp(1.0 - TD_KAPPA_TRANSFER * N / max(e, TD_ENERGY_FLOOR), 0.0, 1.0): the strict share; st = ft * D is
+    // the plane stored in the slot and the only structure that is transferred or boosted.
 }
 )GLSL";
 
@@ -194,6 +198,12 @@ float td_sample(sampler2D tex, vec2 pos)
     return a;
 }
 
+// delta Wiener (pass B): d is the weight-normalised g S_t,w - S; e3 = mean3x3(d^2); grain-sized differences pass nothing
+float td_delta_phi(float e3, float Ncur, float Nref)
+{
+    return clamp(1.0 - TD_KAPPA_DELTA * (Ncur + Nref) / max(e3, TD_ENERGY_FLOOR), 0.0, 1.0);
+}
+
 float td_transfer_pixel(ivec2 p, float S, float base, vec4 w4, vec4 b4, vec4 om)
 {
     // w4 / b4: the weights and boosts of the four nearest blocks; om: their bilinear weights.
@@ -203,12 +213,12 @@ float td_transfer_pixel(ivec2 p, float S, float base, vec4 w4, vec4 b4, vec4 om)
         if (o <= 0.0 || (w <= 0.0 && b <= 0.0)) continue;
         if (w > 0.0) {
             vec2 pos = vec2(p) + td_composed(k, p);                    // composed map of the block's slot
-            float sw = td_sample(td_slot_s, pos), bw = td_sample(td_slot_base, pos);
+            float sw = td_sample(td_slot_st, pos), bw = td_sample(td_slot_base, pos);
             float g = (bw > 1e-3 && base > 1e-3) ? clamp(base / bw, TD_GAIN_LO, TD_GAIN_HI) : 1.0;
             delta += o * w * (g * sw - S);
             refMax = max(refMax, abs(g * sw));
         }
-        delta += o * b * S;
+        delta += o * b * St;                                           // boost on f_t D only
         bsum += o * b;
     }
     if (delta == 0.0) return 0.0;                                       // bit-exact copy of Y

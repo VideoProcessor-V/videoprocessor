@@ -29,6 +29,8 @@ namespace TemporalDetail
 	constexpr double kSigmaLow = 6.0;           // E3 band = G(base) - G(kSigmaLow x Scale)
 	constexpr double kGrainCal = 2.2;           // pure grain reads about its own energy (quiet sub-blocks read low)
 	constexpr double kWienerKappa = 2.0;        // f = clamp(1 - kappa N / e3x3, 0, 1)
+	constexpr double kKappaTransfer = 6.0;      // stricter Wiener share of the transferred reference structure (grain never travels)
+	constexpr double kKappaDelta = 3.0;         // delta Wiener: grain-sized differences (Ncur + Nref) pass nothing
 	constexpr double kEnergyFloor = 1e-3;       // codes^2, added to q and to divisions
 	constexpr int kSlots = 3;                   // K past slots (one more, the future slot, in queued modes)
 	constexpr int kMaxFutureFrames = 8;         // future frames the model looks at

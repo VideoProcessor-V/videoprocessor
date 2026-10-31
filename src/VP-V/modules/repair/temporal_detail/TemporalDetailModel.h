@@ -151,7 +151,7 @@ namespace TemporalDetail
 		struct Analysis
 		{
 			int w = 0, h = 0, bw = 0, bh = 0, B = 16;
-			Plane y, base, s1, s2, s, d;
+			Plane y, base, s1, s2, s, st, d;   // st = f_t D: the strict structure that is transferred / boosted
 			std::vector<double> e1, e2, e3, F, q, N;
 		};
 
@@ -210,6 +210,7 @@ namespace TemporalDetail
 			a.s1 = Plane(y.w, y.h);
 			a.s2 = Plane(y.w, y.h);
 			a.s = Plane(y.w, y.h);
+			a.st = Plane(y.w, y.h);
 			for (int yy = 0; yy < y.h; ++yy)
 				for (int xx = 0; xx < y.w; ++xx)
 				{
@@ -222,6 +223,8 @@ namespace TemporalDetail
 					a.s1.at(xx, yy) = f * d1.at(xx, yy);
 					a.s2.at(xx, yy) = f * d2.at(xx, yy);
 					a.s.at(xx, yy) = a.s1.at(xx, yy) + a.s2.at(xx, yy);
+					const double ft = Clamp(1.0 - kKappaTransfer * N / (std::max)(e, kEnergyFloor), 0.0, 1.0);
+					a.st.at(xx, yy) = ft * a.d.at(xx, yy);
 				}
 			a.e1.assign(nb, 0.0); a.e2.assign(nb, 0.0); a.e3.assign(nb, 0.0); a.F.assign(nb, 0.0); a.q.assign(nb, 0.0);
 			for (int by = 0; by < a.bh; ++by)
@@ -252,7 +255,8 @@ namespace TemporalDetail
 			int id = -1;
 			uint64_t seq = 0;
 			bool future = false;
-			Plane s1, s2, s, base;
+			Plane s1, s2, s, st, base;
+			std::vector<double> N;          // the source frame's block grain level
 			std::vector<double> F, q;       // the source frame's own block maps
 			std::vector<double> cx, cy, u;  // composed displacement (px) and uncertainty (px) per current-frame block
 			double hc[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };   // composed homography current -> source (picture-centred)
@@ -420,6 +424,7 @@ namespace TemporalDetail
 
 		Settings m_set;
 		Diagnostics m_diag;
+		Plane m_lastOut;
 		std::vector<Source> m_slots;
 		std::vector<BlockState> m_blocks;
 		int m_nextId = 0;
@@ -548,6 +553,8 @@ namespace TemporalDetail
 			return in.luma;
 		}
 		const int w = in.luma.w, h = in.luma.h;
+		// A repeat (same sequence, same size): the last output again, no state advanced.
+		if (m_haveFrame && in.seq == m_prevSeq && w == m_w && h == m_h && m_lastOut.w == w && m_lastOut.h == h) return m_lastOut;
 		const double scale = Scale(in.planeLines);
 		const int B = (std::max)(1, static_cast<int>(std::floor(kBlockPx * scale + 0.5)));
 		const double hz = in.contentHz > 0.0 ? in.contentHz : kReferenceHz;
@@ -659,7 +666,7 @@ namespace TemporalDetail
 				Source s;
 				s.id = -2 - static_cast<int>(k);
 				s.seq = ff.seq; s.future = true;
-				s.s1 = fa.s1; s.s2 = fa.s2; s.s = fa.s; s.base = fa.base; s.F = fa.F; s.q = fa.q;
+				s.s1 = fa.s1; s.s2 = fa.s2; s.s = fa.s; s.st = fa.st; s.N = fa.N; s.base = fa.base; s.F = fa.F; s.q = fa.q;
 				s.cx.resize(px.size()); s.cy.resize(px.size()); s.u = pu;
 				for (size_t i = 0; i < px.size(); ++i) { s.cx[i] = px[i] - ox[i]; s.cy[i] = py[i] - oy[i]; }
 				s.camChain = false;
@@ -804,7 +811,7 @@ namespace TemporalDetail
 				Source s;
 				s.id = curId = m_nextId++;
 				s.seq = in.seq;
-				s.s1 = A.s1; s.s2 = A.s2; s.s = A.s; s.base = A.base; s.F = A.F; s.q = A.q;
+				s.s1 = A.s1; s.s2 = A.s2; s.s = A.s; s.st = A.st; s.N = A.N; s.base = A.base; s.F = A.F; s.q = A.q;
 				s.cx.assign(static_cast<size_t>(nb), 0.0); s.cy.assign(static_cast<size_t>(nb), 0.0); s.u.assign(static_cast<size_t>(nb), 0.0);
 				m_slots.push_back(std::move(s));
 				admitted = true;
@@ -935,6 +942,10 @@ namespace TemporalDetail
 		d.base = A.base;
 		d.grain = Plane(w, h);
 		for (size_t i = 0; i < d.grain.v.size(); ++i) d.grain.v[i] = A.d.v[i] - A.s.v[i];
+		// Pass A: per pixel the weight-normalised raw delta d = g S_t,w - S (strict reference structure), the
+		// reference's grain level, and the boost on the strict structure. Pass B: the delta Wiener and the cap.
+		const size_t np = static_cast<size_t>(w) * static_cast<size_t>(h);
+		std::vector<double> dRaw(np, 0.0), wSum(np, 0.0), nRef(np, 0.0), refMax(np, 0.0), bSum(np, 0.0), bDelta(np, 0.0);
 		for (int y = 0; y < h; ++y)
 			for (int x = 0; x < w; ++x)
 			{
@@ -942,8 +953,9 @@ namespace TemporalDetail
 				const double fx = std::floor(gx), fy = std::floor(gy);
 				const double tx = gx - fx, ty = gy - fy;
 				const int i0 = static_cast<int>(fx), j0 = static_cast<int>(fy);
-				double delta = 0.0, refMax = 0.0, bsum = 0.0, wsum = 0.0;
-				const double S = A.s.at(x, y), bs = A.base.at(x, y);
+				const size_t pi = static_cast<size_t>(y) * w + x;
+				double sumGs = 0.0, sumN = 0.0, ws = 0.0, rm = 0.0, bs2 = 0.0, bd = 0.0;
+				const double S = A.s.at(x, y), St = A.st.at(x, y), bs = A.base.at(x, y);
 				for (int k = 0; k < 4; ++k)
 				{
 					const int ii = (std::max)(0, (std::min)(bw - 1, i0 + (k & 1))), jj = (std::max)(0, (std::min)(bh - 1, j0 + (k >> 1)));
@@ -952,42 +964,69 @@ namespace TemporalDetail
 					if (om <= 0.0 || (c.w <= 0.0 && c.boost <= 0.0)) continue;
 					if (c.w > 0.0 && c.a)
 					{
-						auto warp = [&](const Source& s, double& sw, double& bwv)
+						auto warp = [&](const Source& s, double& sw, double& bwv, double& nv)
 						{
 							double sx, sy;
 							Position(s, c.cam, x, y, sx, sy);
 							const Detail::Taps t = Detail::MakeTaps(sx, sy);
-							sw = Detail::SampleTaps(s.s, t);
+							sw = Detail::SampleTaps(s.st, t);
 							bwv = Detail::SampleTaps(s.base, t);
+							const int sbx = (std::max)(0, (std::min)(bw - 1, static_cast<int>(std::floor((sx + 0.5) / B)))), sby = (std::max)(0, (std::min)(bh - 1, static_cast<int>(std::floor((sy + 0.5) / B))));
+							nv = s.N[static_cast<size_t>(sby) * bw + sbx];
 						};
-						double sw, bwv;
-						warp(*c.a, sw, bwv);
+						double sw, bwv, nv;
+						warp(*c.a, sw, bwv, nv);
 						if (c.prev)
 						{
-							double sp, bp;
-							warp(*c.prev, sp, bp);
+							double sp, bp, np2;
+							warp(*c.prev, sp, bp, np2);
 							sw = c.xf * sw + (1.0 - c.xf) * sp;
 							bwv = c.xf * bwv + (1.0 - c.xf) * bp;
+							nv = c.xf * nv + (1.0 - c.xf) * np2;
 						}
 						const double g = (bwv > 1e-3 && bs > 1e-3) ? Clamp(bs / bwv, kGainLo, kGainHi) : 1.0;
 						const double gs = g * sw;
-						delta += om * c.w * (gs - S);
-						refMax = (std::max)(refMax, std::fabs(gs));
-						wsum += om * c.w;
+						sumGs += om * c.w * gs;
+						sumN += om * c.w * nv;
+						rm = (std::max)(rm, std::fabs(gs));
+						ws += om * c.w;
 					}
-					delta += om * c.boost * S;
-					bsum += om * c.boost;
+					bd += om * c.boost * St;
+					bs2 += om * c.boost;
+				}
+				wSum[pi] = ws; refMax[pi] = rm; bSum[pi] = bs2; bDelta[pi] = bd;
+				if (ws > 0.0) { dRaw[pi] = sumGs / ws - S; nRef[pi] = sumN / ws; }
+			}
+		for (int y = 0; y < h; ++y)
+			for (int x = 0; x < w; ++x)
+			{
+				const size_t pi = static_cast<size_t>(y) * w + x;
+				double delta = bDelta[pi];
+				if (wSum[pi] > 0.0)
+				{
+					double e = 0.0;
+					for (int j = -1; j <= 1; ++j)
+						for (int i = -1; i <= 1; ++i)
+						{
+							const int xx = (std::max)(0, (std::min)(w - 1, x + i)), yy = (std::max)(0, (std::min)(h - 1, y + j));
+							const double dv = dRaw[static_cast<size_t>(yy) * w + xx];
+							e += dv * dv;
+						}
+					e /= 9.0;
+					const double Ncur = Detail::GridAt(A.N, bw, bh, B, x, y);
+					const double phi = Clamp(1.0 - kKappaDelta * (Ncur + nRef[pi]) / (std::max)(e, kEnergyFloor), 0.0, 1.0);
+					delta += wSum[pi] * phi * dRaw[pi];
 				}
 				if (delta != 0.0)
 				{
+					const double S = A.s.at(x, y);
 					double sOut = S + delta;
-					const double k = (std::max)(kPixelCap, 1.0 + bsum);
-					const double cap = k * (std::max)(std::fabs(S), refMax);
+					const double k = (std::max)(kPixelCap, 1.0 + bSum[pi]);
+					const double cap = k * (std::max)(std::fabs(S), refMax[pi]);
 					sOut = Clamp(sOut, -cap, cap);
 					out.at(x, y) = in.luma.at(x, y) + (sOut - S);
 					d.structureOut.at(x, y) = sOut;
 				}
-				(void)wsum;
 			}
 
 		// --- Finish ---
@@ -996,6 +1035,7 @@ namespace TemporalDetail
 		m_prevSeq = in.seq;
 		m_stamps = in.stamps;
 		m_haveFrame = true;
+		m_lastOut = out;
 		return out;
 	}
 }
