@@ -35,6 +35,7 @@
 class ConfigFile;
 struct SceneDescriptor;
 struct DisplayProfile;
+class EarlyUploadHandoff;
 
 // In-process D3D11 renderer. HDR input is color-managed and tone-mapped to
 // an SDR Rec.709 swapchain; this backend deliberately does not emit HDR.
@@ -200,9 +201,15 @@ private:
 			// alike (post-merge audit 2026-10-17: the DV pair rule needs r210 for
 			// non-raw SDR fallback payloads).
 			VideoFrameEncoding captureEncoding = VideoFrameEncoding::UNKNOWN;
-			// capture_upload: early - the raw frame already uploaded on the
-			// conversion thread (an EarlyUpload::Slot; null: the render uploads).
+			// capture_upload: early (legacy): no longer set by the conversion
+			// thread, which uses earlyHandoff below.
 			std::shared_ptr<void> early;
+			// capture_upload: early - the hand-off of the slot the conversion
+			// thread uploads AFTER it has published this payload. Set on the
+			// conversion thread BEFORE the payload is published, never
+			// reassigned after (the render reads it without a lock; the
+			// handoff's own mutex guards its state). Null: the render uploads.
+			std::shared_ptr<EarlyUploadHandoff> earlyHandoff;
 			// dv_tunnel_gpu_unpack: the raw frame is a Dolby Vision tunnel
 			// picture (dolby holds its checked DM); the render unpacks it with
 			// GpuDolbyVisionTunnelUnpack, RGB8 in the high (true) or low eight
