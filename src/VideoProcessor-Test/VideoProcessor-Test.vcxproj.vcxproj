@@ -569,6 +569,15 @@
     <ClCompile Include="..\VP-V\tests\DelayGateTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\VP-V\tests\SettingsFingerprintStructureTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\tests\SettingsDefaultsGoldenTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\tests\CpuDeterminismTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\tests\FallbackCatalogTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -675,6 +684,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\VP-V\tests\VpLutGpuTestSupport.h" />
+    <ClInclude Include="..\VP-V\tests\SettingsTestSupport.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="RealClipLibrary.h" />
   </ItemGroup>
