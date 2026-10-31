@@ -23,6 +23,7 @@
 #pragma once
 
 #include <VP-V/modules/scaling/chroma_upscale/ChromaCfl.h>
+#include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>
 
 #include <libplacebo/renderer.h>
 
@@ -40,6 +41,11 @@ namespace ChromaUpscale
 			double lumaLines = 0.0;        // the picture's luma lines (sets the grain split's Scale); 0 = the luma plane's height
 			ActiveRect active;             // the active picture in luma pixels (empty = whole plane); bars get the plain upsample
 			CflParams cfl;
+			// The shared grain.split products (one producer, many readers): luma and the two chroma planes, each on its own
+			// active-picture crop with the module's scale and block. Null or not fitting: the module computes its own (status).
+			const GrainSplit::Gpu::Frame* lumaSplit = nullptr;
+			const GrainSplit::Gpu::Frame* cbSplit = nullptr;
+			const GrainSplit::Gpu::Frame* crSplit = nullptr;
 		};
 
 		class CflModule

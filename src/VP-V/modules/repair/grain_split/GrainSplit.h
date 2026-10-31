@@ -182,6 +182,27 @@ namespace GrainSplit
 		int history;
 		const char* readers;
 	};
-	constexpr ProductInfo kProduct = { "grain.split", "rebased.luma (lag 0)", "GpuCompute", 1,
-		"repair.temporal_detail (today); chroma, mosquito repair, scaling (intended)" };
+	constexpr ProductInfo kProduct = { "grain.split", "source frame (decoded, active picture; lag 0)", "GpuCompute", 0,
+		"repair.temporal_detail, scaling.chroma_upscale (CfL chroma-grain guard); deband, contrast, mosquito repair (intended)" };
+
+	// The skeleton descriptor (design doc 25 B1; maps 1:1 onto VpSkeleton::ProductDecl in core/Products.h, which is on the
+	// integration branch but not in this package's base: registering it there is an integration step). Owner rule
+	// 2026-10-31: computed ONCE, EARLY, on the decoded source before any processing; every repair reads the same product;
+	// the exact original grain is added back once at the end of the source-domain block (pre-scale).
+	struct SkeletonDecl
+	{
+		const char* token;
+		const char* name;
+		bool sourceFrame;              // reads the source frame itself
+		const char* backend;           // VpSkeleton::Backend
+		int history;
+		int fullResBytesPerPixel;      // SizeRule term, shift 0 (split rgba32f; the transient band plane is the producer's)
+		int blockBytesPerBlock;        // SizeRule term on the block grid (rgba32f N, e3)
+		const char* tier;
+		const char* reads;             // Indicator counters it honours
+		bool rebasedPlane;             // sized on the plane it is computed on
+		const char* variants;          // its in-render fallback: the same passes, bit-identical
+	};
+	constexpr SkeletonDecl kProductDecl = { "grain.split", "Grain map / grain-free picture", true, "GpuCompute", 0, 16, 16, "T0",
+		"full, continuity, rebaseH, rebaseV", true, "Identical" };
 }

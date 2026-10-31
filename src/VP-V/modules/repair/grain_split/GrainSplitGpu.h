@@ -33,6 +33,10 @@ namespace GrainSplit
 	namespace Gpu
 	{
 		// The product of one frame of one plane (valid until the next Compute of the same Splitter).
+		// Owner rule (2026-10-31): ONE producer, many readers. The host computes it once, early, on the decoded source
+		// (its active picture), publishes it as the shared `grain.split` product (GrainSplit::kProductDecl), and every repair
+		// reads the same Frame; the exact original grain is added back once, at the end of the source-domain block. A reader
+		// never re-estimates grain from a processed frame; its own Splitter is only a visible fallback.
 		struct Frame
 		{
 			pl_tex split = nullptr;    // w x h rgba32f: s1 = f d1, s2 = f d2, f, base (codes)
@@ -40,6 +44,12 @@ namespace GrainSplit
 			int w = 0, h = 0, bw = 0, bh = 0, B = 16;
 			double scale = 1.0;
 		};
+
+		// Whether a published product fits a reader's plane (same size, block and scale): else the reader falls back visibly.
+		inline bool Fits(const Frame* f, int w, int h, int B, double scale)
+		{
+			return f && f->split && f->blocks && f->w == w && f->h == h && f->B == B && f->scale == scale;
+		}
 
 		class Splitter
 		{

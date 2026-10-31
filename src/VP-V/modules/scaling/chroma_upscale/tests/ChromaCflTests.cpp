@@ -530,7 +530,7 @@ namespace VideoProcessorTest
 		{
 			const GpuOut g = RunGpu(dev, sc, sx, sy, rect);
 			Assert::IsTrue(g.ok, Wide(g.error).c_str());
-			Assert::AreEqual(std::string("ok"), g.status);
+			Assert::IsTrue(g.status == "ok" || g.status == "ok; own grain split", Wide(g.status).c_str());
 			const ChromaUpscale::Result m = RunModel(sc, sx, sy, rect);
 			Assert::IsTrue(g.texW == sc.y.w && g.texH == sc.y.h, L"output chroma is luma size");
 			const double wcb = MaxDiff(g.cb, m.cb), wcr = MaxDiff(g.cr, m.cr);

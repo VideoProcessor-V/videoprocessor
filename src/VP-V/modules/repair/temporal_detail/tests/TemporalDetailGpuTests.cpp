@@ -568,6 +568,55 @@ namespace VideoProcessorTest
 			pl_tex_destroy(gpu, &bwdTex);
 		}
 
+		TEST_METHOD(TemporalDetailGpuReadsTheSharedGrainSplit)
+		{
+			// Owner rule (one producer, many readers): with the shared grain.split product of the frame the module computes no
+			// split of its own and the output is bit-identical to its own-split output; a product that does not fit (another
+			// block size) falls back visibly.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			const std::vector<Plane> frames = Stream(10, "IBBBPBBB", 0.3, 0.0, 29u, 1.2);
+			pl_tex bwdTex = UploadPair(gpu, MotionPair::Uniform(kW, kH, 16.0, -0.3, 0.0));
+			Gpu::Module own, reader;
+			GrainSplit::Gpu::Splitter producer, wrong;
+			for (size_t t = 0; t < frames.size(); ++t)
+			{
+				pl_tex tex = UploadLuma(gpu, frames[t]);
+				Gpu::Params gp;
+				gp.settings = Steady();
+				gp.seq = t;
+				gp.planeLines = 1080.0;
+				gp.backward.tex = bwdTex;
+				pl_frame a{}, b{};
+				Assert::IsTrue(own.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, a), Wide(own.LastError()).c_str());
+				const Plane pa = DownloadLuma(gpu, a.planes[0].texture);
+				Assert::IsTrue(own.Status().find("own grain split") != std::string::npos, L"no product: the module's own split, visible");
+				Assert::IsTrue(producer.Compute(gpu, dev.dispatch, tex, 0, 64.0 / 65535.0, 1.0, 16), Wide(producer.LastError()).c_str());
+				gp.split = &producer.Out();
+				Assert::IsTrue(reader.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, b), Wide(reader.LastError()).c_str());
+				const Plane pb = DownloadLuma(gpu, b.planes[0].texture);
+				Assert::IsTrue(reader.Status().find("own grain split") == std::string::npos, L"the shared product is read");
+				Assert::IsTrue(pa.v == pb.v, L"bit-identical to the module's own split");
+				pl_tex_destroy(gpu, &tex);
+			}
+			{
+				pl_tex tex = UploadLuma(gpu, frames[0]);
+				Assert::IsTrue(wrong.Compute(gpu, dev.dispatch, tex, 0, 64.0 / 65535.0, 1.0, 32));
+				Gpu::Module m;
+				Gpu::Params gp;
+				gp.settings = Steady();
+				gp.split = &wrong.Out();
+				pl_frame o{};
+				Assert::IsTrue(m.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, o), Wide(m.LastError()).c_str());
+				Assert::IsTrue(m.Status().find("does not fit") != std::string::npos, L"a product that does not fit falls back visibly");
+				m.Release(gpu);
+				pl_tex_destroy(gpu, &tex);
+			}
+			own.Release(gpu); reader.Release(gpu); producer.Release(gpu); wrong.Release(gpu);
+			pl_tex_destroy(gpu, &bwdTex);
+		}
+
 		TEST_METHOD(TemporalDetailGpuKeepsGrain)
 		{
 			// The owner's grain bounds on the GPU output (two-seed grain isolate of the static KeepsGrain scene, textured

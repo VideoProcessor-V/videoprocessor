@@ -2,6 +2,13 @@
 
 Unit: **scaling** | side: input | order: 120 | status: **candidate** | hook point: prepass (before libplacebo renders the source frame)
 
+
+**Grain map: one producer, many readers (owner rule 2026-10-31).** `Gpu::Params::lumaSplit / cbSplit / crSplit` take the
+shared `grain.split` products (luma and both chroma planes, computed once early on the decoded source's active picture);
+without them, or when they do not fit, the module computes its own and the status says "ok; own grain split". The
+chroma grain is added back exactly (through the Original kernel) in this module's output, which is the end of its
+source-domain work; no later stage re-estimates grain from it.
+
 ## Purpose / why
 
 libplacebo upsamples 4:2:0 / 4:2:2 chroma with a generic kernel. This module predicts the missing chroma detail from the

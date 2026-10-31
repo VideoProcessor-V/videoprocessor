@@ -208,6 +208,14 @@ sequence) returns the last output (repeat/foreign/phase pictures come at integra
 
 ## GPU implementation (TemporalDetailGpu.h/.cpp, TemporalDetailShaders.h)
 
+**Grain map: one producer, many readers (owner rule 2026-10-31).** `Gpu::Params::split` takes the shared `grain.split`
+product (GrainSplit::kProductDecl), computed once, early, on the decoded source's active picture by the host; the module
+then computes no split (bit-identical output, `TemporalDetailGpuReadsTheSharedGrainSplit`). Without it, or when it does not
+fit (size / block / scale), the module computes its own and the status says "own grain split". The module's output is
+`Y + delta` = the shared clean picture's repair plus the ORIGINAL grain; a later repair must read the same published
+product, never a split of this output. Open point for the coordinator: the product is computed on the plane the readers
+work on (today the re-based plane); if the re-base changes geometry, the published split must follow it (re-based once).
+
 Every model step runs as libplacebo compute passes, nothing read back within a frame (the per-block controller lives in
 GPU textures): grain split (repair.grain_split, GrainSplitGpu) -> MEAS -> COMPOSE -> EVAL (per slot x block) -> TRACK
 -> ADMIT (one workgroup) -> CLEAN (4 parity classes of DCT patches; work only on admission frames) -> store slot ->

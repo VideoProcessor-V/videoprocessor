@@ -386,11 +386,24 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			const double cuOut = cuC;
 			const double lines = params.lumaLines > 0.0 ? params.lumaLines : static_cast<double>(H);
 			const double linesC = lines / fy;
+			// The shared grain.split products when they fit (one producer, many readers), else this module's own (visible).
+			const GrainSplit::Gpu::Frame* gL = nullptr;
+			const GrainSplit::Gpu::Frame* gB = nullptr;
+			const GrainSplit::Gpu::Frame* gR = nullptr;
+			bool ownSplit = false;
 			if (guard)
 			{
-				if (!m.splitL.Compute(gpu, dispatch, lumaIn, 0, cuL, Scale(lines), BlockPx(lines))) return fail(m.splitL.LastError());
-				if (!m.splitB.Compute(gpu, dispatch, cbIn, cbComp, cuC, Scale(linesC), BlockPx(linesC))) return fail(m.splitB.LastError());
-				if (!m.splitR.Compute(gpu, dispatch, crIn, crComp, cuC, Scale(linesC), BlockPx(linesC))) return fail(m.splitR.LastError());
+				auto pick = [&](const GrainSplit::Gpu::Frame* shared, GrainSplit::Gpu::Splitter& own, pl_tex tex, int comp, double cu, double ln,
+					const GrainSplit::Gpu::Frame*& outF) {
+					if (GrainSplit::Gpu::Fits(shared, tex->params.w, tex->params.h, BlockPx(ln), Scale(ln))) { outF = shared; return true; }
+					ownSplit = true;
+					if (!own.Compute(gpu, dispatch, tex, comp, cu, Scale(ln), BlockPx(ln))) return false;
+					outF = &own.Out();
+					return true;
+				};
+				if (!pick(params.lumaSplit, m.splitL, lumaIn, 0, cuL, lines, gL)) return fail(m.splitL.LastError());
+				if (!pick(params.cbSplit, m.splitB, cbIn, cbComp, cuC, linesC, gB)) return fail(m.splitB.LastError());
+				if (!pick(params.crSplit, m.splitR, crIn, crComp, cuC, linesC, gR)) return fail(m.splitR.LastError());
 			}
 
 			// --- Headers ---
@@ -409,7 +422,7 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			const std::string lumaReader = guard ?
 				"float cfl_yc(ivec2 p)\n{\n    vec4 s = texelFetch(ysrc, p, 0);\n    return s.w + s.x + s.y;\n}\n" :
 				"float cfl_yc(ivec2 p)\n{\n    return texelFetch(ysrc, p, 0).x * CFL_INV_CU_L;\n}\n";
-			const pl_tex ysrc = guard ? m.splitL.Out().split : lumaIn;
+			const pl_tex ysrc = guard ? gL->split : lumaIn;
 
 			const int cgx = Groups(pcw), cgy = Groups(pch);
 
@@ -423,8 +436,8 @@ if (p.x < CFL_W && p.y < CFL_H) {
 				d.push_back(Sampled("ysrc", ysrc));
 				if (guard)
 				{
-					d.push_back(Sampled("csB", m.splitB.Out().split));
-					d.push_back(Sampled("csR", m.splitR.Out().split));
+					d.push_back(Sampled("csB", gB->split));
+					d.push_back(Sampled("csR", gR->split));
 				}
 				d.push_back(Sampled("craw0", cbIn));
 				if (!sameTex) d.push_back(Sampled("craw1", crIn));
@@ -476,7 +489,7 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			up.shift_y = 0.0f;
 			frame.planes[1] = up;
 			result = frame;
-			m_status = "ok";
+			m_status = ownSplit ? "ok; own grain split" : "ok";
 			return true;
 		}
 	}

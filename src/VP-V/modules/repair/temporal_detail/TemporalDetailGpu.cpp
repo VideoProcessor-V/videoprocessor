@@ -332,8 +332,11 @@ namespace TemporalDetail
 					cd, 2, nullptr, 0, (w + 15) / 16, (h + 15) / 16, 0))
 					return fail("active picture pass failed");
 			}
-			if (!m.split.Compute(gpu, dispatch, work, 0, cu, g.scale, g.B, sp)) return fail(m.split.LastError().c_str());
-			const pl_tex splitTex = m.split.Out().split, gblocks = m.split.Out().blocks;
+			// The shared product when it fits (one producer, many readers), else this module's own split (visible).
+			const bool shared = GrainSplit::Gpu::Fits(params.split, w, h, g.B, g.scale);
+			if (!shared && !m.split.Compute(gpu, dispatch, work, 0, cu, g.scale, g.B, sp)) return fail(m.split.LastError().c_str());
+			const GrainSplit::Gpu::Frame& gs = shared ? *params.split : m.split.Out();
+			const pl_tex splitTex = gs.split, gblocks = gs.blocks;
 
 			// --- Headers ---
 			const std::string geo = DefineInt("TD_W", w) + DefineInt("TD_H", h) + DefineInt("TD_B", g.B) + DefineInt("TD_BW", g.bw) +
@@ -524,6 +527,7 @@ if (g.x < TD_BW * TD_K && g.y < TD_BH) imageStore(mot_out, g, vec4(0.0));
 			m.prevSeq = params.seq;
 			m.stamps = params.stamps;
 			m_status = reason ? std::string("reset: ") + reason : (motionLost ? std::string("motion lost") : std::string("ok"));
+			if (!shared) m_status += params.split ? "; own grain split (the shared product does not fit)" : "; own grain split";
 			if (K < kSlots) m_status += "; store " + std::to_string(K) + " of " + std::to_string(kSlots) + " slots (memory tier)";
 			if (params.lookAheadAvailable || params.cameraAvailable)
 				m_status += std::string("; not on GPU:") + (params.lookAheadAvailable ? " look-ahead" : "") +
