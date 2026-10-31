@@ -138,6 +138,7 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 - `src/VP-V/modules/drive/led_measure/LedMeasurement.h`
 - `src/VP-V/modules/drive/led_measure/LedLookahead.h`
 - `src/VP-V/modules/drive/led_measure/ReadbackRing.h`
+- `src/VP-V/modules/drive/led_measure/NativeReadback.h` (the D3D11 non-blocking staging readback, shared with adaptive scaling's statistics and the source-resolution tiles; bug hunt 34 item 1)
 - `src/VP-V/modules/drive/led_measure/LedMeasurementHook.cpp`
 - `src/VP-V/modules/drive/led_measure/LedMeasurementHook.h`
 - `src/VP-V/modules/drive/led_measure/FrameStats.h`

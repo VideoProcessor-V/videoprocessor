@@ -4,10 +4,12 @@
 #include <libplacebo/shaders.h>
 
 #include <VP-V/modules/scaling/geometry/NlsMaskMapping.h>
+#include <VP-V/modules/drive/led_measure/ReadbackRing.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <string>
 
 // Stage 8-2 (docs/VP-stage8-build-plan.md): adaptive downscale — a per-pixel
@@ -46,6 +48,8 @@
 // the content along the block's vector; a cut resets it. In the blend it is
 // bilinear between block centres; untrusted blocks, and frames without a
 // field, take the scalar.
+namespace LedDrive { class NativeTexReadback; }
+
 namespace AdaptiveDownscale
 {
 	struct Settings
@@ -397,6 +401,11 @@ namespace AdaptiveDownscale
 		bool Active() const { return active; }
 		// The newest finished statistics (read back a few frames late).
 		Stats LastStats() const { return stats; }
+		// Bug hunt 34 item 1: true while the statistics are read back without waiting (the
+		// D3D11 staging ring); false on another API (libplacebo's poll works there) or when the
+		// ring could not be made on D3D11 (then libplacebo's readback, which waits there).
+		bool NativeStatsReadback() const;
+		uint64_t StatsDropped() const { return statsSchedule.Dropped(); }
 		unsigned long long Failures() const { return failures; }
 		// Frees every texture and shader object while the device exists.
 		void Release();
@@ -446,6 +455,14 @@ namespace AdaptiveDownscale
 		MotionState motionState = MotionState::Off;
 		pl_buf readback = nullptr;
 		bool readbackPending = false;
+		// Bug hunt 34 item 1 (2026-10-31): on D3D11 pl_buf_poll never says "busy" and pl_buf_read
+		// blocks, so the statistics go through a native staging ring instead (NativeReadback.h),
+		// scheduled by ReadbackRing; read a few frames late (the value is smoothed anyway).
+		static constexpr int kStatsSlots = 3;
+		std::unique_ptr<LedDrive::NativeTexReadback> statsNative;
+		bool statsNativeTried = false;
+		LedDrive::ReadbackRing statsSchedule{ kStatsSlots, 8 };
+		uint64_t statsFrames = 0;
 		pl_shader_obj polarLut = nullptr;
 		pl_shader_obj orthoLut[2] = { nullptr, nullptr };
 		bool active = false;

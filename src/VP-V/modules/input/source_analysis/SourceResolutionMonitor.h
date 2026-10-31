@@ -4,6 +4,8 @@
 
 #include <libplacebo/renderer.h>
 
+#include <memory>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -284,6 +286,13 @@ namespace SourceResolutionMonitor
 		pl_gpu gpu = nullptr;
 		pl_buf ring[2] = {};
 		bool busy[2] = {};
+		// Bug hunt 34 item 1 (2026-10-31): on D3D11 pl_buf_poll never says "busy" and pl_buf_read
+		// blocks (a GPU-frame stall twice a second), so the tiles go through a native staging
+		// pair there (NativeReadback.h: kReadbackWidth-wide R32F rows); libplacebo's buffers
+		// elsewhere.
+		static constexpr int kReadbackWidth = 1024;
+		std::shared_ptr<void> nativeHolder;   // LedDrive::NativeTexReadback (kept out of this header)
+		bool nativeTried = false;
 		Job pendingMeta[2];
 		int nextSlot = 0;
 		double lastSubmit = -1e9;

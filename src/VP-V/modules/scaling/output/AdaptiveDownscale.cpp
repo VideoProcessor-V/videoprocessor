@@ -9,6 +9,7 @@
 
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <VP-V/modules/repair/texture_restore/DetailPulse.h>
+#include <VP-V/modules/drive/led_measure/NativeReadback.h>
 
 #include <algorithm>
 #include <vector>
@@ -134,8 +135,13 @@ if (li == 0u && advance > 0.5) {
     float scale = cut ? target : mix(prev.r, target, smooth_alpha);
     // a: 1 initialised, 2 = a cut on this frame (the grain map resets too).
     imageStore(state_io, ivec2(0), vec4(scale, free_mean, luma_mean, cut ? 2.0 : 1.0));
-    if (write_stats > 0.5)
+    if (write_stats > 0.5) {
+#ifdef AD_STATS_IMG
+        imageStore(ad_stats_img, ivec2(0), vec4(scale, free_mean, luma_mean, 1.0));
+#else
         ad_out = vec4(scale, free_mean, luma_mean, 1.0);
+#endif
+    }
 }
 )GLSL";
 
@@ -522,7 +528,12 @@ float rs_slope(float y)
 					pl_tex_destroy(gpu, tex);
 			if (readback)
 				pl_buf_destroy(gpu, &readback);
+			if (statsNative)
+				statsNative->Release(gpu);
 		}
+		statsNative.reset();
+		statsNativeTried = false;
+		statsSchedule.Reset();
 		if (polarLut)
 			pl_shader_obj_destroy(&polarLut);
 		for (pl_shader_obj& lut : orthoLut)
@@ -645,18 +656,39 @@ float rs_slope(float y)
 		return static_cast<Module*>(priv)->Blending(params);
 	}
 
+	bool Module::NativeStatsReadback() const
+	{
+		return statsNative && statsNative->Active();
+	}
+
 	void Module::PollStats()
 	{
-		if (!readbackPending || !gpu || !readback || pl_buf_poll(gpu, readback, 0))
-			return;
-		float values[4] = {};
-		if (pl_buf_read(gpu, readback, 0, values, sizeof(values)))
+		auto take = [this](const float values[4])
 		{
 			stats.valid = true;
 			stats.grainScale = values[0];
 			stats.meanW = upscale.on ? upscale.wBase * values[0] : settings.wBase * values[1] * values[0];
 			stats.meanLuma = values[2];
+		};
+		if (NativeStatsReadback())
+		{
+			// Never waits: a slot is read only once its copy's query reports done, oldest first.
+			const std::vector<int> slots = statsSchedule.Collect(statsFrames, [this](int slot) { return statsNative->Ready(slot); });
+			for (int slot : slots)
+			{
+				float values[4] = {};
+				if (!statsNative->Read(slot, values, sizeof(values), 1))
+					break;   // still drawing after all: the next frame takes it
+				take(values);
+				statsSchedule.Release(slot);
+			}
+			return;
 		}
+		if (!readbackPending || !gpu || !readback || pl_buf_poll(gpu, readback, 0))
+			return;
+		float values[4] = {};
+		if (pl_buf_read(gpu, readback, 0, values, sizeof(values)))
+			take(values);
 		readbackPending = false;
 	}
 
@@ -698,6 +730,15 @@ float rs_slope(float y)
 		if (gpu && gpu != p->gpu)
 			Release();
 		gpu = p->gpu;
+		if (!statsNativeTried)
+		{
+			// D3D11: the non-blocking statistics ring (once per GPU); elsewhere libplacebo's
+			// buffer readback, whose poll reports "busy" there.
+			statsNativeTried = true;
+			statsNative.reset(new LedDrive::NativeTexReadback());
+			if (!statsNative->Create(gpu, kStatsSlots, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT))
+				statsNative.reset();
+		}
 		PollStats();
 		pl_tex base = p->tex;
 		if (ratio == 2)
@@ -735,7 +776,7 @@ float rs_slope(float y)
 			++failures;
 			return unchanged;
 		}
-		if (!readback)
+		if (!readback && !NativeStatsReadback())
 		{
 			// The final pass writes the statistics straight into this storage
 			// buffer (the LED measurement's pattern); polled frames later.
@@ -855,7 +896,11 @@ float rs_slope(float y)
 		// 3. The frame's grain term into the state (once per source frame).
 		{
 			const float advance = sequence != advancedSequence ? 1.0f : 0.0f;
-			const bool writeStats = advance > 0.5f && readback && !readbackPending;
+			const bool native = NativeStatsReadback();
+			// Native: a ring slot for this source frame's statistics (none free: skipped, never
+			// waited for); otherwise the one libplacebo buffer when it is free.
+			const int statsSlot = native && advance > 0.5f ? statsSchedule.Claim(++statsFrames) : -1;
+			const bool writeStats = native ? statsSlot >= 0 : advance > 0.5f && readback && !readbackPending;
 			const float writeStatsF = writeStats ? 1.0f : 0.0f;
 			const float total = static_cast<float>(w) * static_cast<float>(h);
 			const float alpha = settings.grainSmoothMs > 0.0f ?
@@ -866,7 +911,14 @@ float rs_slope(float y)
 			pl_shader_desc d[3] = { Sampled("partial_in", partial, false),
 				Storage("state_io", state, PL_DESC_ACCESS_READWRITE), pl_shader_desc{} };
 			int numDescriptors = 2;
-			if (readback)
+			if (native)
+			{
+				// The image is always bound (the shader text stays one); written only when a slot
+				// was claimed (write_stats).
+				d[2] = Storage("ad_stats_img", statsNative->Target(statsSlot >= 0 ? statsSlot : 0));
+				numDescriptors = 3;
+			}
+			else if (readback)
 			{
 				d[2].desc.name = "ad_stats";
 				d[2].desc.type = PL_DESC_BUF_STORAGE;
@@ -885,16 +937,21 @@ float rs_slope(float y)
 				{ pl_var_float("grain_hi"), &settings.grainHi, true },
 				{ pl_var_float("grain_floor"), &settings.grainFloor, true },
 				{ pl_var_float("smooth_alpha"), &alpha, true } };
+			static const std::string finalImgHeader = std::string("#define AD_STATS_IMG 1\n") + FINAL_HEADER;
 			if (numDescriptors != 3 || !Compute(p->dispatch, "VideoProcessor adaptive downscale: grain",
-				FINAL_HEADER, FINAL_BODY, d, numDescriptors, v, 7, 1, 1))
+				native ? finalImgHeader.c_str() : FINAL_HEADER, FINAL_BODY, d, numDescriptors, v, 7, 1, 1))
 			{
+				if (statsSlot >= 0)
+					statsSchedule.Release(statsSlot);
 				++failures;
 				return unchanged;
 			}
+			if (statsSlot >= 0)
+				statsNative->Queue(statsSlot);
 			if (advance > 0.5f)
 			{
 				advancedSequence = sequence;
-				if (writeStats)
+				if (writeStats && !native)
 					readbackPending = true;
 			}
 			// 4. 8-3: the map, after the scalar (it reads the cut flag).
