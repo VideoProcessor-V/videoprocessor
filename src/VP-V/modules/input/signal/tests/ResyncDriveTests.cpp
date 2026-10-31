@@ -15,6 +15,7 @@
 #include <VP-V/modules/input/signal/ResyncShadow.h>
 #include <VP-V/modules/input/queue_timing/PulldownDetector.h>
 #include <VP-V/modules/motion/consumers/InterpolationTimeline.h>
+#include <VP-V/modules/scaling/rebase/RebaseDecision.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveConfig.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
 
@@ -355,5 +356,122 @@ namespace Tests
 			Assert::AreEqual(20.0, module.FramePeriodMsForTest(), 1e-9);
 		}
 
+		// R4a: P0, the re-base decision product.
+		TEST_METHOD(P0HorizontalOnlyFadesOnlyH)
+		{
+			VpRebase::DecisionTracker t;
+			const double period = 1.0e6 / 24.0, fade = 10 * period;   // a 10-frame fade
+			t.Update(1, period, 1.0, 1.0, -1, 0, 0);
+			const VpRebase::Decision d = t.Update(2, period, 0.75, 1.0, -1, fade, fade);
+			Assert::IsTrue(d.axis[VpRebase::kH].changed && !d.axis[VpRebase::kV].changed);
+			Assert::IsTrue(d.StampH() && !d.StampV());
+			Assert::AreEqual(0.0, d.axis[VpRebase::kH].weight, 1e-12, L"the fade starts on the change");
+			Assert::AreEqual(1.0, d.axis[VpRebase::kV].weight);
+			const VpRebase::Decision mid = t.Update(7, period, 0.75, 1.0, -1, fade, fade);
+			Assert::AreEqual(0.5, mid.axis[VpRebase::kH].weight, 1e-12, L"5 of 10 source frames");
+			const auto blend = mid.TwoPicture();
+			Assert::AreEqual(1.0, blend.fromX, 1e-12);
+			Assert::AreEqual(1.0, blend.fromY, 1e-12);
+			Assert::AreEqual(0.5, blend.weight, 1e-12);
+			Assert::IsFalse(t.Update(12, period, 0.75, 1.0, -1, fade, fade).TwoPicture().Active(), L"done after 10 frames");
+		}
+
+		TEST_METHOD(P0VerticalOnlyFadesOnlyV)
+		{
+			VpRebase::DecisionTracker t;
+			const double period = 1.0e6 / 60.0, fade = 4 * period;
+			t.Update(1, period, 1.0, 1.0, -1, 0, 0);
+			const VpRebase::Decision d = t.Update(2, period, 1.0, 0.5, -1, fade, fade);
+			Assert::IsTrue(!d.StampH() && d.StampV());
+			const auto b = t.Update(4, period, 1.0, 0.5, -1, fade, fade).TwoPicture();
+			Assert::AreEqual(0.5, b.weight, 1e-12);
+			Assert::AreEqual(1.0, b.fromY, 1e-12);
+			Assert::AreEqual(1.0, b.fromX, 1e-12, L"H not fading: from = its factor");
+		}
+
+		TEST_METHOD(P0BothAxesTogether)
+		{
+			VpRebase::DecisionTracker t;
+			const double period = 1.0e6 / 24.0, fade = 8 * period;
+			t.Update(1, period, 1.0, 1.0, -1, 0, 0);
+			const VpRebase::Decision d = t.Update(2, period, 0.5, 0.5, -1, fade, fade);
+			Assert::IsTrue(d.StampH() && d.StampV());
+			const auto b = t.Update(6, period, 0.5, 0.5, -1, fade, fade).TwoPicture();
+			Assert::AreEqual(0.5, b.weight, 1e-12);
+			Assert::AreEqual(1.0, b.fromX, 1e-12);
+			Assert::AreEqual(1.0, b.fromY, 1e-12);
+		}
+
+		TEST_METHOD(P0AnamorphicIndependentFades)
+		{
+			VpRebase::DecisionTracker t;
+			const double period = 1.0e6 / 24.0, fade = 10 * period;
+			t.Update(1, period, 1.0, 1.0, -1, 0, 0);
+			t.Update(2, period, 0.75, 1.0, -1, fade, fade);        // H starts at 2
+			const VpRebase::Decision d = t.Update(6, period, 0.75, 0.5, -1, fade, fade);   // V starts at 6
+			Assert::IsFalse(d.axis[VpRebase::kH].changed, L"H is not re-latched by V's change");
+			Assert::AreEqual(0.4, d.axis[VpRebase::kH].weight, 1e-12);
+			Assert::AreEqual(0.0, d.axis[VpRebase::kV].weight, 1e-12);
+			const VpRebase::Decision later = t.Update(12, period, 0.75, 0.5, -1, fade, fade);
+			Assert::AreEqual(1.0, later.axis[VpRebase::kH].weight, L"H done at 12");
+			Assert::AreEqual(0.6, later.axis[VpRebase::kV].weight, 1e-12, L"V runs on its own clock");
+			const auto b = later.TwoPicture();
+			Assert::AreEqual(0.75, b.fromX, 1e-12, L"H done: from = its factor");
+			Assert::AreEqual(1.0, b.fromY, 1e-12);
+		}
+
+		TEST_METHOD(P0FullResetRepeatsAndDeterminism)
+		{
+			const double period = 1.0e6 / 24.0, fade = 10 * period;
+			std::vector<double> first, second;
+			for (std::vector<double>* out : { &first, &second })
+			{
+				VpRebase::DecisionTracker t;
+				t.Update(1, period, 1.0, 1.0, -1, 0, 0);
+				for (uint64_t s = 2; s < 20; ++s)
+				{
+					const double f = s >= 3 ? 0.75 : 1.0;
+					out->push_back(t.Update(s, period, f, f, -1, fade, fade).TwoPicture().weight);
+					// A cadence repeat of the same frame: same weights, no change.
+					const VpRebase::Decision rep = t.Update(s, period, f, f, -1, fade, fade);
+					Assert::IsFalse(rep.StampH() || rep.StampV());
+				}
+			}
+			Assert::IsTrue(first == second, L"the same frames give the same weights");
+			VpRebase::DecisionTracker t;
+			t.Update(1, period, 1.0, 1.0, -1, 0, 0);
+			t.Update(2, period, 0.5, 0.5, -1, fade, fade);
+			t.Reset();   // FULL
+			const VpRebase::Decision d = t.Update(3, period, 1.0, 1.0, 2, fade, fade);
+			Assert::IsFalse(d.TwoPicture().Active(), L"native, no fade after a FULL");
+			const VpRebase::Decision& k = d;
+			const VpRebase::Decision k2 = t.Update(5, period, 1.0, 1.0, 3, 0, 0);
+			Assert::IsFalse(k.kernelChanged, L"the first kernel after a reset is a latch");
+			Assert::IsTrue(k2.StampH() && k2.StampV(), L"a kernel change stamps both axes");
+		}
+
+		TEST_METHOD(P0ReversalMidFadeLeavesNothingToFade)
+		{
+			VpRebase::DecisionTracker t;
+			const double period = 1.0e6 / 24.0, fade = 10 * period;
+			t.Update(1, period, 1.0, 1.0, -1, 0, 0);
+			t.Update(2, period, 0.5, 1.0, -1, fade, fade);
+			const VpRebase::Decision back = t.Update(4, period, 1.0, 1.0, -1, fade, fade);
+			Assert::IsTrue(back.axis[VpRebase::kH].changed);
+			Assert::IsFalse(back.TwoPicture().Active(), L"back to the path being left: a hard switch");
+		}
+
+		TEST_METHOD(P0StatusLine)
+		{
+			VpRebase::StatusCell cell;
+			std::string text;
+			Assert::IsFalse(cell.Text(text));
+			VpRebase::DecisionTracker t;
+			const double period = 1.0e6 / 24.0;
+			t.Update(1, period, 1.0, 1.0, -1, 0, 0);
+			cell.Publish(t.Update(2, period, 0.75, 1.0, -1, 10 * period, 0));
+			Assert::IsTrue(cell.Text(text));
+			Assert::AreEqual(std::string("re-base H x0.750 (fading 0%), V native (source-time fade)"), text);
+		}
 	};
 }

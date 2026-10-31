@@ -75,6 +75,7 @@
 #include <VP-V/modules/input/signal/ResyncCallSites.h>   // R1 call-site helpers
 #include <VP-V/modules/input/signal/ResyncShadow.h>   // resync_event shadow (R1)
 #include <VP-V/modules/input/signal/ResyncDrive.h>    // resync_event on: the Indicator's readers (R3)
+#include <VP-V/modules/scaling/rebase/RebaseDecision.h>   // R4a: the re-base decision product P0
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/InterpolationPolicy.h>
 #include <vprenderer/InterpolationTimeline.h>
@@ -7486,6 +7487,9 @@ struct LibplaceboVideoRenderer::Impl
 	VpResync::Drive resyncDrive;
 	VpResync::Drive::Cursor pulldownResyncCursor;
 	uint64_t pulldownResyncSeq = 0;
+	// R4a (resync_event on): the re-base decision product P0 (per-axis source-time fades).
+	VpRebase::DecisionTracker rebaseDecision;
+	VpRebase::StatusCell rebaseP0Status;   // R4a: the last frame's P0, for the source-resolution status line
 	unsigned long long resyncLibplaceboFlushes = 0;   // L1
 	// Dynamic Drive, render side (WP-15): the LED module the outer renderer publishes, the S2 LED
 	// measurement and compensation hooks and their per-frame set-up (DynamicDriveFrame.h).
@@ -22740,6 +22744,40 @@ struct LibplaceboVideoRenderer::Impl
 					rebaseFromFactorX = tr.fromX;
 				}
 			}
+			// R4a (resync_event on): the re-base decision product P0. The factors are decided as above;
+			// P0 times each axis's crossfade in SOURCE time (frames x the source period: the same frames
+			// give the same weights), re-latches only the axis that changed, goes native without a fade
+			// on a FULL, and writes the per-axis re-base stamps through the Indicator (from the next
+			// frame: never retroactive). Off/shadow: the monitor's wall-clock fade above, unchanged.
+			if (resync.Driving())
+			{
+				if ((resyncDrive.Take(VpResync::Reader::RebaseDecision) & VpIndicator::Bit(VpIndicator::kFull)) != 0)
+					rebaseDecision.Reset();
+				const bool fadeAllowed = activeSettings.sourceResolution == "auto" && activeSettings.sourceResolutionLatchFixes &&
+					!temporal && !rebasePaused;
+				double fadeUs = 0.0;
+				if (fadeAllowed)
+				{
+					const SourceResolutionMonitor::Monitor::Transition tr = sourceMonitor.AutoTransition();
+					if (tr.Active() && std::fabs(tr.toX - rebaseFactorX) < 1e-9 && std::fabs(tr.toY - rebaseFactor) < 1e-9)
+						fadeUs = tr.duration * 1.0e6;   // the length the monitor asks for; its clock is not used
+				}
+				const double p0RateHz = SourceRateHz(state) > 0.0 ? SourceRateHz(state) : captureRateHz;
+				const VpRebase::Decision p0 = rebaseDecision.Update(sourceSequence, p0RateHz > 0.0 ? 1.0e6 / p0RateHz : 0.0,
+					rebaseFactorX, rebaseFactor, sourceRebase.Kernel(), fadeUs, fadeUs);
+				resync.OnRebaseDecision(p0.StampH(), p0.StampV(), sourceSequence + 1);
+				const VpRebase::Decision::Blend blend = p0.TwoPicture();
+				rebaseFade = 1.0;
+				if (fadeAllowed && blend.Active())
+				{
+					rebaseFade = blend.weight;
+					rebaseFromFactor = blend.fromY;
+					rebaseFromFactorX = blend.fromX;
+				}
+				rebaseP0Status.Publish(p0);
+			}
+			else
+				rebaseP0Status.Clear();
 			// MotionValidity step 1 (RebaseChange): the motion field belongs to the native
 			// frame and survives a factor change, but VP deband's hold weights are
 			// plane-sized: they start over (no motion invalidation, so this frame's
@@ -27928,6 +27966,9 @@ bool LibplaceboVideoRenderer::GetSourceResolutionStatus(CString& status) const
 	const std::string selection = m_impl->sourceMonitor.Selection();
 	std::string line = SourceResolutionMonitor::Describe(m_impl->sourceMonitor.Read(), m_impl->sourceMonitor.AutoRatio(), selection == "auto");
 	line += "; source_resolution " + selection;
+	std::string p0Line;   // R4a (resync_event on): the per-axis re-base and its source-time fades
+	if (m_impl->rebaseP0Status.Text(p0Line))
+		line += "; " + p0Line;
 	status = CString(line.c_str());
 	return true;
 }

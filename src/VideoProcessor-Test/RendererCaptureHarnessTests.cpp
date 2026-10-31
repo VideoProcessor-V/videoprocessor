@@ -2240,6 +2240,69 @@ namespace Tests
 			g_harnessHeight = savedH;
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(ResyncOnStillAndRebaseAxes)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(ResyncOnStillAndRebaseAxes)
+		{
+			const HarnessScope harnessScope;
+			// R3 / L1 / R4a (resync_event on). On a still picture the readers act only at the start FULL
+			// (nothing to reset yet, libplacebo's flush has no history), so the exact output codes equal
+			// off; the on run logs "Resync (on): FULL at seq". The Original pathway ignores on. With a
+			// fixed per-axis re-base (no fade), on equals off for H-only, V-only, both and anamorphic, and
+			// logs exactly the axes whose stamp moved at the first frame.
+			if (!RequireHardwareOrSkip("ResyncOnStillAndRebaseAxes")) return;
+			const int savedW = g_harnessWidth, savedH = g_harnessHeight;
+			g_harnessWidth = 3840;
+			g_harnessHeight = 2160;
+			wchar_t tempPath[MAX_PATH] = {};
+			GetTempPathW(MAX_PATH, tempPath);
+			const std::wstring shots = std::wstring(tempPath) + L"vp-resync-on";
+			CreateDirectoryW(shots.c_str(), nullptr);
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			FramePlan plan;
+			plan.captureAtSeconds = 2.5;
+			plan.step = [](int) { return FrameStep{ true, 0, 0 }; };   // one still picture
+			RunResult last;
+			auto hashOf = [&](const std::string& extra, const wchar_t* name, const std::string& defaults = std::string()) {
+				last = Run(VideoFrameEncoding::V210, "gpu", 3.5, false, extra + "[vprenderer.Default]\ndithering: off\ndeband: off\n" + defaults, false, &plan);
+				Assert::IsFalse(last.captureMetadata.empty(), (std::wstring(name) + L": capture written\n" + last.Tail()).c_str());
+				std::ifstream in(std::wstring(last.captureMetadata.begin(), last.captureMetadata.end()));
+				std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+				const size_t k = text.find("\"raw_r10_sha256\": \"");
+				Assert::IsTrue(k != std::string::npos, (std::wstring(name) + L": hash in the sidecar").c_str());
+				const std::string hash = text.substr(k + 19, 64);
+				Logger::WriteMessage((std::string(name, name + wcslen(name)) + ": " + hash + "\n").c_str());
+				return hash;
+			};
+			const std::string off = hashOf("[vpv]\nresync_event: off\n", L"off");
+			Assert::IsFalse(last.Logged("Resync (on)"), L"off: nothing from the readers");
+			Assert::AreEqual(off, hashOf("[vpv]\nresync_event: on\n", L"on"), L"on: a still picture is identical");
+			Assert::IsTrue(last.Logged("Resync (on): FULL at seq"), L"on: the start FULL is logged");
+			const std::string original = hashOf("[vpv]\npipeline_original_pathway: on\n", L"original");
+			Assert::AreEqual(original, hashOf("[vpv]\npipeline_original_pathway: on\nresync_event: on\n", L"original + on"),
+				L"the Original pathway ignores resync_event");
+			Assert::IsFalse(last.Logged("Resync (on)"), L"Original: no reader acts");
+			struct Axis { const char* setting; const char* logged; const wchar_t* name; };
+			const Axis axes[] = {
+				{ "1920x2160", "Resync (on): re-base H stamp", L"H only" },
+				{ "3840x1080", "Resync (on): re-base V stamp", L"V only" },
+				{ "1920x1080", "Resync (on): re-base H+V stamp", L"both" },
+				{ "1440x1080", "Resync (on): re-base H+V stamp", L"anamorphic" },
+			};
+			for (const Axis& a : axes)
+			{
+				const std::string key = std::string("source_resolution: ") + a.setting + "\n";
+				const std::string baseHash = hashOf("[vpv]\nresync_event: off\n", a.name, key);
+				Assert::AreEqual(baseHash, hashOf("[vpv]\nresync_event: on\n", a.name, key),
+					(std::wstring(a.name) + L": a fixed re-base is identical with on").c_str());
+				Assert::IsTrue(last.Logged(a.logged), (std::wstring(a.name) + L": the moved axes are stamped\n" + last.Tail()).c_str());
+			}
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
+			g_harnessWidth = savedW;
+			g_harnessHeight = savedH;
+		}
+
 		BEGIN_TEST_METHOD_ATTRIBUTE(EfficiencyFixesArePixelIdentical)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()

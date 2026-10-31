@@ -13,6 +13,7 @@
     "src/VP-V/segments/EntranceSegment.cpp",
     "src/VP-V/segments/EntranceSegment.h",
     "src/VP-V/modules/scaling/rebase/EntranceGpuDrain.h",
+    "src/VP-V/modules/scaling/rebase/RebaseDecision.h",
     "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
   ],
   "forwarding_headers": [
