@@ -203,16 +203,13 @@ namespace VideoProcessorTest
 			Assert::IsFalse(src.empty(), L"bundled DV trims.glsl not found");
 			auto def = [&src](const std::string& name)
 			{
-				const size_t at = src.find("//!PARAM " + name + "
-");
-				const size_t at2 = at == std::string::npos ? src.find("//!PARAM " + name + "
-") : at;
+				const size_t at = src.find("//!PARAM " + name + "\r\n");
+				const size_t at2 = at == std::string::npos ? src.find("//!PARAM " + name + "\n") : at;
 				Assert::IsTrue(at2 != std::string::npos, L"PARAM missing");
 				size_t pos = at2;
 				for (;;)
 				{
-					pos = src.find('
-', pos) + 1;
+					pos = src.find('\n', pos) + 1;
 					Assert::IsTrue(pos != 0 && pos < src.size(), L"default missing");
 					if (src.compare(pos, 3, "//!") != 0)
 						break;
