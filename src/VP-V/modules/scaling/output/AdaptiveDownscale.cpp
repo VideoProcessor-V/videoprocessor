@@ -8,6 +8,7 @@
 #include <libplacebo/shaders/sampling.h>
 
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
+#include <VP-V/modules/repair/texture_restore/DetailPulse.h>
 
 #include <algorithm>
 #include <vector>
@@ -24,13 +25,32 @@ namespace AdaptiveDownscale
 		// is a fixed reference domain for the edge / grain thresholds (they were tuned in
 		// it), not a claim about the source; the residual guard's noise limit, which is in
 		// the source's own codes, uses the source transfer (GuardTransfer).
+		// Bug hunt 33 F3 / F4: AD_KW = the source's luma weights; AD_HDR = a PQ / HLG picture
+		// decoded to relative linear first (MeasureDomain; CPU mirror MeasureLumaCode).
 		const char* const MEASURE_HEADER = R"GLSL(
 shared vec4 ad_sum[256];
+#ifdef AD_HDR
+float ad_lin(float c)
+{
+    c = max(c, 0.0);
+    if (ad_trc < 1.5) {
+        float e = pow(c, 1.0 / 78.84375);
+        float n = max(e - 0.8359375, 0.0) / (18.8515625 - 18.6875 * e);
+        return pow(n, 1.0 / 0.1593017578125) * (10000.0 / 203.0);
+    }
+    float x = (1.0 - ad_b) * c + ad_b;
+    float s = (x <= 0.5 ? 4.0 * x * x : exp((x - 0.55991073) / 0.17883277) + 0.28466892) / 12.0;
+    return ad_a * pow(max(s, 0.0), ad_g);
+}
+#endif
 float ad_luma(ivec2 p)
 {
     ivec2 sz = textureSize(src, 0);
     vec3 c = texelFetch(src, clamp(p, ivec2(0), sz - ivec2(1)), 0).rgb;
-    float y = dot(c, vec3(0.2126, 0.7152, 0.0722));
+#ifdef AD_HDR
+    c = vec3(ad_lin(c.r), ad_lin(c.g), ad_lin(c.b));
+#endif
+    float y = dot(c, AD_KW);
     if (linear_in > 0.5)
         y = sign(y) * pow(abs(y), 1.0 / 2.2);
     return y * 255.0;
@@ -245,7 +265,7 @@ if (q.x < size.x && q.y < size.y) {
     w = 0.0;
     ga = 0.0;
 #endif
-    const vec3 ku = vec3(0.2126, 0.7152, 0.0722);
+    const vec3 ku = AD_KW;
     vec4 o = ss;
     o.rgb = ss.rgb + vec3((1.0 - w) * (dot(fa.rgb, ku) - dot(ss.rgb, ku)));
 #ifdef AD_SUPERRES_ALPHA
@@ -261,7 +281,7 @@ if (q.x < size.x && q.y < size.y) {
     if (chroma_ssim > 0.5) {
         o = mix(fa, ss, w);
     } else {
-        const vec3 k = vec3(0.2126, 0.7152, 0.0722);
+        const vec3 k = AD_KW;
         o.rgb = fa.rgb + vec3(w * (dot(ss.rgb, k) - dot(fa.rgb, k)));
         o.a = fa.a;   // passed through (Stage 10b does not use alpha)
     }
@@ -278,7 +298,7 @@ if (q.x < size.x && q.y < size.y) {
 		// residual: this frame's own.
 		const char* const STABILISE_DEFINE = R"GLSL(
 #define STABILISE_AND_STORE { \
-    const vec3 kr = vec3(0.2126, 0.7152, 0.0722); \
+    const vec3 kr = AD_KW; \
     float r = dot(o.rgb, kr) - dot(fa.rgb, kr); \
     float rs = r; \
     vec2 sps = rs_crop.xy + (s - src_origin) / src_size * rs_crop.zw; \
@@ -345,7 +365,7 @@ float rs_slope(float y)
     return (rs_lin(hi) - rs_lin(lo)) / (hi - lo);
 }
 #define STABILISE_AND_STORE { \
-    const vec3 kr = vec3(0.2126, 0.7152, 0.0722); \
+    const vec3 kr = AD_KW; \
     float r = dot(o.rgb, kr) - dot(fa.rgb, kr); \
     float rs = r; \
     vec2 sps = rs_crop.xy + (s - src_origin) / src_size * rs_crop.zw; \
@@ -588,6 +608,33 @@ float rs_slope(float y)
 		return t;
 	}
 
+	MeasureDomain MeasureDomainFor(const pl_color_space& hooked, enum pl_color_system system,
+		enum pl_color_primaries primaries)
+	{
+		MeasureDomain d;
+		double k[3];
+		DetailPulse::LumaWeights(system, primaries, k);
+		for (int i = 0; i < 3; ++i) d.w[i] = static_cast<float>(k[i]);
+		d.bt709 = k[0] == 0.2126 && k[2] == 0.0722;
+		if (hooked.transfer == PL_COLOR_TRC_LINEAR)
+			d.mode = 1.0f;
+		else if (hooked.transfer == PL_COLOR_TRC_PQ || hooked.transfer == PL_COLOR_TRC_HLG)
+		{
+			d.mode = 2.0f;
+			d.transfer = GuardTransfer(hooked);
+		}
+		return d;
+	}
+
+	std::string LumaWeightsGlsl(const MeasureDomain& d)
+	{
+		if (d.bt709)
+			return "vec3(0.2126, 0.7152, 0.0722)";
+		char text[96];
+		snprintf(text, sizeof(text), "vec3(%.9g, %.9g, %.9g)", d.w[0], d.w[1], d.w[2]);
+		return text;
+	}
+
 	pl_hook_res Module::RunMeasure(void* priv, const pl_hook_params* params)
 	{
 		return static_cast<Module*>(priv)->Measuring(params);
@@ -772,22 +819,33 @@ float rs_slope(float y)
 			}
 		}
 
-		// 2. Edges and the per-workgroup grain sums.
-		const float linearIn = p->color.transfer == PL_COLOR_TRC_LINEAR ? 1.0f : 0.0f;
+		// 2. Edges and the per-workgroup grain sums (bug hunt 33 F3 / F4: the source's luma
+		// weights; HDR decoded to relative linear, then the 2.2 reference as a linear picture).
+		const pl_color_system lumaSystem = p->orig_repr ? p->orig_repr->sys : p->repr.sys;
+		const pl_color_primaries lumaPrimaries = p->orig_color ? p->orig_color->primaries : p->color.primaries;
+		domain = MeasureDomainFor(p->color, lumaSystem, lumaPrimaries);
+		const float linearIn = domain.mode > 0.5f ? 1.0f : 0.0f;
+		const bool hdrDecode = domain.mode > 1.5f;
+		const std::string measureHeader = "#define AD_KW " + LumaWeightsGlsl(domain) + "\n" +
+			(hdrDecode ? "#define AD_HDR 1\n" : "") + MEASURE_HEADER;
 		const float origin[2] = { static_cast<float>(ox), static_cast<float>(oy) };
 		const float region[2] = { static_cast<float>(w), static_cast<float>(h) };
 		{
 			const pl_shader_desc d[3] = { Sampled("src", base, false), Storage("edge_out", edge),
 				Storage("partial_out", partial) };
-			const pl_shader_var v[6] = {
+			const pl_shader_var v[10] = {
 				{ pl_var_float("linear_in"), &linearIn, true },
 				{ pl_var_vec2("origin"), origin, true },
 				{ pl_var_vec2("region"), region, true },
 				{ pl_var_float("edge_lo"), &settings.edgeLo, true },
 				{ pl_var_float("edge_hi"), &settings.edgeHi, true },
-				{ pl_var_float("shadow_bias"), &settings.shadowBias, true } };
-			if (!Compute(p->dispatch, "VideoProcessor adaptive downscale: measure", MEASURE_HEADER, MEASURE_BODY,
-				d, 3, v, 6, gx, gy))
+				{ pl_var_float("shadow_bias"), &settings.shadowBias, true },
+				{ pl_var_float("ad_trc"), &domain.transfer.mode, true },
+				{ pl_var_float("ad_a"), &domain.transfer.a, true },
+				{ pl_var_float("ad_b"), &domain.transfer.b, true },
+				{ pl_var_float("ad_g"), &domain.transfer.g, true } };
+			if (!Compute(p->dispatch, "VideoProcessor adaptive downscale: measure", measureHeader.c_str(), MEASURE_BODY,
+				d, 3, v, hdrDecode ? 10 : 6, gx, gy))
 			{
 				++failures;
 				return unchanged;
@@ -1078,7 +1136,8 @@ float rs_slope(float y)
 			(upscale.superresAlpha ? "#define AD_SUPERRES_ALPHA 1\n" : "") +
 			(upscale.oneAxis ? "#define AD_FAITHFUL_ONLY 1\n" : "") : std::string();
 		const bool guard = stabilise && settings.residualGrainGuard;
-		const std::string header = upHeader + (useMotion ? std::string("#define AD_MOTION 1\n") : std::string()) +
+		const std::string header = "#define AD_KW " + LumaWeightsGlsl(domain) + "\n" + upHeader +
+			(useMotion ? std::string("#define AD_MOTION 1\n") : std::string()) +
 			(useMap ? mapHeader : std::string()) +
 			(stabilise ? (guard ? STABILISE_GUARD_DEFINE : STABILISE_DEFINE) : PLAIN_DEFINE);
 		const float wBase = upscale.on ? upscale.wBase : settings.wBase;

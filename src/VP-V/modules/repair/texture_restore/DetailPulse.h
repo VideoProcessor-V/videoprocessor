@@ -166,8 +166,26 @@ namespace DetailPulse
 		bool fast = kDefaultFast;
 	};
 
-	// Hunt 3 F8: Kr, Kg, Kb of a YCbCr system (the luma of an RGB picture).
-	void LumaWeights(enum pl_color_system system, enum pl_color_primaries primaries, double out[3]);
+	// Hunt 3 F8: Kr, Kg, Kb of a YCbCr system (the luma of an RGB picture). Inline: adaptive
+	// scaling uses it too (bug hunt 33 F3).
+	inline void LumaWeights(enum pl_color_system system, enum pl_color_primaries primaries, double out[3])
+	{
+		double kr = 0.2126, kb = 0.0722;
+		switch (system)
+		{
+		case PL_COLOR_SYSTEM_BT_601: kr = 0.299; kb = 0.114; break;
+		case PL_COLOR_SYSTEM_BT_2020_NC:
+		case PL_COLOR_SYSTEM_BT_2020_C: kr = 0.2627; kb = 0.0593; break;
+		case PL_COLOR_SYSTEM_SMPTE_240M: kr = 0.212; kb = 0.087; break;
+		case PL_COLOR_SYSTEM_BT_709: break;
+		default:
+			if (primaries == PL_COLOR_PRIM_BT_2020) { kr = 0.2627; kb = 0.0593; }
+			break;
+		}
+		out[0] = kr;
+		out[1] = 1.0 - kr - kb;
+		out[2] = kb;
+	}
 
 	// Diagnostics (tests, one GPU at a time): GPU time per pass kind - 0 measure, 1 reduce,
 	// 2 apply, 3 low band (detail_pulse_fast; look-ahead and other-geometry passes are not
