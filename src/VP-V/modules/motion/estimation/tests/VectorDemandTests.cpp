@@ -54,10 +54,21 @@ namespace VectorDemandTest
 				Assert::IsTrue(d.mode == Mode::Forward, L"forward");
 				Assert::IsTrue(d.Serves(c), L"served");
 				Assert::AreEqual(0u, d.unserved);
-				Assert::IsTrue(d.estimate, L"estimate");
+				const bool statistics = DomainOf(c) == Domain::SourceStatistics;
+				Assert::AreEqual(!statistics, d.estimate, L"estimate only for field consumers");
 				Assert::IsTrue(d.producer, L"producer");
 				Assert::IsTrue(d.reason == Reason::Forward, L"reason");
 			}
+		}
+
+		TEST_METHOD(StatisticsOnlyForwardHasNoEstimateAndFieldConsumerAddsOne)
+		{
+			const Decision stats = Decide(Make({ Consumer::SourceMonitorPan, Consumer::MotionIntent }));
+			Assert::IsTrue(stats.mode == Mode::Forward, L"forward");
+			Assert::IsFalse(stats.estimate, L"no render-time estimate");
+			Assert::IsTrue(stats.producer, L"producer");
+			const Decision both = Decide(Make({ Consumer::SourceMonitorPan, Consumer::GrainMap }));
+			Assert::IsTrue(both.estimate && both.producer, L"a field consumer brings the estimate");
 		}
 
 		TEST_METHOD(StatisticsConsumersAloneAtDepthZeroRunBackward)

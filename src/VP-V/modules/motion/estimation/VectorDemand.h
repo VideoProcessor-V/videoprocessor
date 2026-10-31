@@ -178,7 +178,13 @@ namespace VectorDemand
 			d.reason = Reason::ForwardShallow;
 			d.lowLatencyAllowed = true;
 		}
-		d.estimate = served != 0;
+		// A render-time estimate only for the consumers that need a GPU field (source field, output);
+		// the statistics consumers take the producer's whole-frame motion and cost no matcher run.
+		unsigned fieldMask = 0;
+		for (int i = 0; i < kConsumerCount; ++i)
+			if (DomainOf(ConsumerAt(i)) == Domain::SourceField || DomainOf(ConsumerAt(i)) == Domain::Output)
+				fieldMask |= 1u << i;
+		d.estimate = (served & fieldMask) != 0;
 		d.producer = served != 0;
 		return d;
 	}

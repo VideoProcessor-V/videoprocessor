@@ -7130,6 +7130,7 @@ struct LibplaceboVideoRenderer::Impl
 		dejudderNextVectorsSequence = 0;
 		ditherNextGate.Clear();
 		if (!vectorDemand.Serves(VectorDemand::Consumer::SigmaDelta) || !dejudder || sourceSequence == 0 || nextSourceSequence == 0 ||
+			interpolating || vpTimelineActive ||   // the timeline / hiccup repair drew refreshes: A was not at shift 0
 			!DejudderLiveFieldFor(sourceSequence) || !dejudderGeometryValid || activeSettings.ditherVectorsOwn ||
 			!DitherVectorsSupported() || !d3d11 || !d3d11->gpu)
 			return;
@@ -7172,9 +7173,17 @@ struct LibplaceboVideoRenderer::Impl
 	}
 	// Backward pairs (no frame ahead): once per new source frame the statistics consumers read the pair
 	// (n-1, n) if the producer has it, else the frame-old (n-2, n-1); statistics only, never a field.
-	void ServeBackwardStatistics(uint64_t sequence, int width, int height)
+	// Forward without a render-time estimate: statistics consumers only, and no de-judder / interpolator
+	// estimate takes this frame's pair (the legacy producer-consumer expression); the pair (n, n+1) comes from
+	// the producer. Never published to the motion segment: Forward there means the live matcher field.
+	void ServeStatistics(uint64_t sequence, uint64_t nextSequence, int width, int height)
 	{
-		if (vectorDemand.mode != VectorDemand::Mode::Backward || !motionProducer || !motionProducer->Running() ||
+		const bool backward = vectorDemand.mode == VectorDemand::Mode::Backward;
+		const bool legacyConsumer = (dejudder && (dejudderReason == DejudderPolicy::Reason::Active ||
+			dejudderReason == DejudderPolicy::Reason::NoNextFrame || dejudderReason == DejudderPolicy::Reason::NextFrameDiffers)) || interpolating;
+		const bool forwardStats = vectorDemand.mode == VectorDemand::Mode::Forward && !vectorDemand.estimate && !legacyConsumer &&
+			(vectorDemand.Serves(VectorDemand::Consumer::SourceMonitorPan) || vectorDemand.Serves(VectorDemand::Consumer::MotionIntent));
+		if ((!backward && !forwardStats) || !motionProducer || !motionProducer->Running() ||
 			sequence == 0 || sequence == vectorBackwardSequence)
 			return;
 		vectorBackwardSequence = sequence;
@@ -7183,23 +7192,33 @@ struct LibplaceboVideoRenderer::Impl
 		motionProducer->SetTargetSize(engineW, engineH);
 		MotionAhead::FlowPtr flow;
 		uint64_t from = 0, to = 0;
-		for (int age = 0; age < 2 && !flow && sequence > static_cast<uint64_t>(age + 1); ++age)
+		if (forwardStats)
 		{
-			from = sequence - 1 - age;
-			to = sequence - age;
-			if (motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))
+			from = sequence;
+			to = nextSequence;
+			if (nextSequence == sequence + 1 &&
+				motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))
 				flow = motionProducer->Take(from, to);
+			NoteGlobalPair(flow != nullptr);
 		}
+		else
+			for (int age = 0; age < 2 && !flow && sequence > static_cast<uint64_t>(age + 1); ++age)
+			{
+				from = sequence - 1 - age;
+				to = sequence - age;
+				if (motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))
+					flow = motionProducer->Take(from, to);
+			}
 		if (!flow)
 		{
 			++motionAheadMisses;
-			motionProducer->Prune(sequence > 2 ? sequence - 2 : 0);
+			motionProducer->Prune(forwardStats ? sequence : (sequence > 2 ? sequence - 2 : 0));
 			return;
 		}
 		++motionAheadHits;
-		++vectorBackwardPairs;
+		if (backward) ++vectorBackwardPairs;
 		++vectorPairs;
-		NoteVectorsDelivered(true, "engine");
+		NoteVectorsDelivered(backward, backward ? "engine" : "engine ahead");
 		const int pictureHeight = dejudderPicture.available && dejudderPicture.rasterHeight == height &&
 			dejudderPicture.bottom > dejudderPicture.top ? dejudderPicture.bottom - dejudderPicture.top : height;
 		const VectorDemand::GlobalSample g = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(
@@ -7216,10 +7235,10 @@ struct LibplaceboVideoRenderer::Impl
 			vectors.heightsPerFrame = g.heightsPerFrame;
 			intentInterpreter->NoteVectors(vectors);
 		}
-		if (pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery))
+		if (backward && pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery))
 			motionSegment.Publish(VpMotion::Direction::Backward, from, to, MotionShadowField{ from, to },
 				VpMotion::Source::EngineAhead, motionValidity.Epoch(), 0, false);
-		motionProducer->Prune(sequence > 2 ? sequence - 2 : 0);
+		motionProducer->Prune(forwardStats ? sequence : (sequence > 2 ? sequence - 2 : 0));
 	}
 	// output.dither's vector producers run only while the slot runs (WP-13, DitherSlot.h).
 	bool DitherVectorsSupported() const
@@ -15825,8 +15844,8 @@ struct LibplaceboVideoRenderer::Impl
 		dejudderSourceHz = sourceHz;
 		// Vector engine on demand: what wants vectors this frame (previous-frame state), and backward pairs.
 		UpdateVectorEngine(interlaced);
-		if (vectorDemand.mode == VectorDemand::Mode::Backward && !cadenceRepeat)
-			ServeBackwardStatistics(sourceSequence, width, height);
+		if (vectorDemand.mode != VectorDemand::Mode::Off && !cadenceRepeat)
+			ServeStatistics(sourceSequence, nextSourceSequence, width, height);
 		// Off and settled: today's path, nothing else is done.
 		if (!(activeSettings.dejudderStrength > 0.0) && !(activeSettings.dejudderStrengthEven > 0.0) &&
 			!activeSettings.occlusionMask && !adaptiveGrainMapWanted && !vectorDemand.estimate &&
@@ -23945,7 +23964,7 @@ struct LibplaceboVideoRenderer::Impl
             cacheFrame.extrasMayFollow = dejudderReason == DejudderPolicy::Reason::Active &&
                 dejudderExtrasAllowed && dejudder && !cadenceRepeat && sourceSequence != 0;
             cacheFrame.geometryForVectors = !cacheFrame.extrasMayFollow && vectorDemand.Serves(VectorDemand::Consumer::SigmaDelta) &&
-                dejudder && !cadenceRepeat && sourceSequence != 0;   // vector engine: the sigma-delta's vectors need the geometry
+                dejudder && !cadenceRepeat && sourceSequence != 0 && !interpolating && !vpTimelineActive;   // vector engine: the sigma-delta's vectors need the geometry
             cacheFrame.sourceSequence = sourceSequence;
             cacheFrame.sourceCrop = renderImage.crop;
             cacheFrame.targetCrop = target.crop;
