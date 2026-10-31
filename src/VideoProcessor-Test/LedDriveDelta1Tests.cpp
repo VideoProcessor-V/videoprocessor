@@ -1467,6 +1467,7 @@ namespace VideoProcessorTest
 				luma.format = AnalysisLumaFormat::NativeRgb;
 				luma.encoding = VideoFrameEncoding::BGRA_8BIT;
 				luma.colorspace = ColorSpace::REC_709;
+				luma.limitedDomain = true;   // the VP-V pathway's analysis domain (DIV-AN-01 either/or, merge 2026-10-31)
 				Assert::IsTrue(luma.IsValid());
 				Assert::IsFalse(LumaIsFullRange(luma), L"Sample() returns limited codes");
 				Assert::IsTrue(SampleRemapsFullRange(luma));

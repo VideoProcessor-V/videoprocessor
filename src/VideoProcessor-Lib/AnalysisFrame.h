@@ -59,6 +59,11 @@ struct AnalysisFrameInput
     // bits). Zero: the CPU formatter's planes (converted).
     uint8_t dolbyTunnelPackedAlignment = 0;
     TunnelSdrRgbRange tunnelSdrRgbRange = TunnelSdrRgbRange::Full;
+    // VP-V DIV-AN-01 (either/or): the prepared source samples in the limited
+    // analysis code domain (AnalysisLumaSource::limitedDomain, fullRangeYuv for
+    // full-range DV planes). The renderer sets it from source_coding_fixes
+    // (Original pathway: off); false = Bill's range-tagged delivered codes.
+    bool vpLimitedDomain = false;
 };
 
 // The prepared source retains the selected frame pixels while sampling them
@@ -72,8 +77,9 @@ struct PreparedAnalysisFrame
     AnalysisSourceProfile profile = AnalysisSourceProfile::QueuedCapture;
     uint32_t transferKey = 0;
     // Describe the encoded storage contract selected for the frame. They do
-    // not rescale AnalysisLumaSample: Sample emits 10-bit evidence codes in
-    // the limited domain, mapping full-range sources itself (audit 2026-10-16).
+    // not rescale AnalysisLumaSample: Sample emits the established 10-bit
+    // evidence codes using format-specific unpacking and rounding (Bill), or,
+    // with vpLimitedDomain, codes in the limited domain (VP-V DIV-AN-01).
     VideoFrameSampleRange sampleRange = VideoFrameSampleRange::UNKNOWN;
     uint8_t colorDepth = 0;
     uint8_t bitShift = 0;

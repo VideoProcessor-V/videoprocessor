@@ -24,9 +24,8 @@ namespace
     uint64_t DomainKey(const PreparedAnalysisFrame& result)
     {
         uint64_t hash = 14695981039346656037ull;
-        // evidence sampling contract version; 2 = range-aware (Bill) and full-range
-        // sources mapped to the limited code domain (audit 2026-10-16, DIV-AN-01)
-        hash = Mix(hash, 2);
+        hash = Mix(hash, 2); // range-aware evidence sampling contract version (Bill; the
+                             // VP-V limited-domain map is mixed in below, DIV-AN-01)
         hash = Mix(hash, static_cast<uint64_t>(result.domain));
         hash = Mix(hash, static_cast<uint64_t>(result.source.width));
         hash = Mix(hash, static_cast<uint64_t>(result.source.height));
@@ -44,6 +43,10 @@ namespace
         hash = Mix(hash, result.dolbyFullRange ? 1 : 0);
         hash = Mix(hash, decodedDv ? 0 : result.source.rowBytes);
         hash = Mix(hash, decodedDv ? 0 : result.source.chromaRowBytes);
+        // VP-V DIV-AN-01: limited-domain codes are other evidence than Bill's
+        // delivered codes (mixed only when set: Original keys are unchanged).
+        if (result.source.limitedDomain)
+            hash = Mix(hash, 0x5650u);
         return hash ? hash : 1;
     }
 
@@ -147,7 +150,7 @@ PreparedAnalysisFrame PrepareAnalysisFrame(const AnalysisFrameInput& input)
             backing = native(AnalysisLumaFormat::PackedDolbyVision422,
                 input.colorspace);
             backing.rgbBitAlignment = input.dolbyTunnelPackedAlignment;
-            backing.fullRangeYuv = input.dolby.fullRange;   // as the decoded planes
+            backing.fullRangeYuv = input.vpLimitedDomain && input.dolby.fullRange;   // as the decoded planes
             result.domain = AnalysisFrameDomain::DecodedDolbyVision422;
             result.sourceOwner = input.nativeOwner;
             result.sampleRange = input.convertedContract.sampleRange;
@@ -171,9 +174,9 @@ PreparedAnalysisFrame PrepareAnalysisFrame(const AnalysisFrameInput& input)
                         VideoFrameSampleRange::LIMITED))
                 return result;
             backing = converted(AnalysisLumaFormat::DecodedDolbyVision422);
-            // audit 2026-10-16: full-range DV codes are mapped to the limited
-            // analysis domain by the sampler (contract validated above).
-            backing.fullRangeYuv = input.dolby.fullRange;
+            // audit 2026-10-16 (VP-V DIV-AN-01): full-range DV codes are mapped
+            // to the limited analysis domain by the sampler (contract validated above).
+            backing.fullRangeYuv = input.vpLimitedDomain && input.dolby.fullRange;
             result.domain = AnalysisFrameDomain::DecodedDolbyVision422;
             result.sourceOwner = input.convertedOwner;
             result.sampleRange = input.convertedContract.sampleRange;
@@ -238,6 +241,7 @@ PreparedAnalysisFrame PrepareAnalysisFrame(const AnalysisFrameInput& input)
     if (!result.sourceOwner || !backing.IsValid())
         return {};
     backing.backingOwner = result.sourceOwner;
+    backing.limitedDomain = input.vpLimitedDomain;   // VP-V DIV-AN-01 (Original: false)
     switch (result.sampleRange)
     {
     case VideoFrameSampleRange::LIMITED:

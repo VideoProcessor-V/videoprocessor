@@ -241,6 +241,25 @@ namespace FrameAnalysisProducerTestsNs
 				Assert::AreEqual(static_cast<uint16_t>(code), map[code]);
 		}
 
+		TEST_METHOD(OriginalDomainIsMappedOnceToStudio)
+		{
+			// DIV-AN-01 either/or (merge 2026-10-31): an Original-pathway source carries Bill's
+			// delivered full-range codes; the VP map converts them once, so the store's studio
+			// statistics agree with the VP-V pathway's (one rounding apart).
+			const Frame vp = Make(Kind::Bgra, 0);
+			Frame original = Make(Kind::Bgra, 0);
+			original.source.limitedDomain = false;
+			Assert::IsFalse(VpFrameAnalysis::SamplerCodesAreFullRange(vp.source));
+			Assert::IsTrue(VpFrameAnalysis::SamplerCodesAreFullRange(original.source));
+			const auto map = VpFrameAnalysis::StudioLumaMap(original.source);
+			Assert::AreEqual(64, static_cast<int>(map[0]));
+			Assert::AreEqual(940, static_cast<int>(map[1023]));
+			const Rect picture{ 0, 0, kWidth, kHeight };
+			const auto a = Reference(vp.source, picture);
+			const auto b = Reference(original.source, picture);
+			Assert::IsTrue(std::fabs(a.luma.mean - b.luma.mean) <= 1.0);
+		}
+
 		TEST_METHOD(ReductionsMatchTheReferenceIncludingBtbWtw)
 		{
 			const Rect picture{ 0, kBar, kWidth, kHeight - kBar };

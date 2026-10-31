@@ -40,10 +40,10 @@ namespace VpFrameAnalysis
 
 	bool SamplerCodesAreFullRange(const AnalysisLumaSource& source)
 	{
-		// Our sampler maps full-range sources to studio codes itself (audit 2026-10-16). WP-21
-		// (Bill's AnalysisLumaRange model): `return source.range == AnalysisLumaRange::Full;`.
-		(void)source;
-		return !kAnalysisLumaSampleLimitedDomain;
+		// WP-21 (merge 2026-10-31): the source says which domain its codes are in. VP-V
+		// pathway (limitedDomain, DIV-AN-01): the sampler already mapped full-range levels to
+		// studio codes; Original pathway (Bill's model): delivered full-range codes.
+		return source.CodesFullRange();
 	}
 
 	std::array<uint16_t, 1024> StudioLumaMap(const AnalysisLumaSource& source)

@@ -110,6 +110,7 @@ namespace SyntheticAnalysisFrames
 		s.height = kHeight;
 		s.colorspace = ColorSpace::REC_709;
 		s.generation = 1;
+		s.limitedDomain = true;   // the VP-V pathway's analysis domain (DIV-AN-01, source_coding_fixes on)
 		const int w = kWidth, h = kHeight;
 		int r, g, b, yy, u, v;
 		switch (kind)

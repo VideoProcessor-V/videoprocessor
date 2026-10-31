@@ -4,6 +4,8 @@
 // VP-V GPU hook tests (moved out of Bill's LibplaceboLutParserTests.cpp; test names unchanged).
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
+#include <vprenderer/StartupCropHold.h>
+#include <cmath>
 
 namespace VideoProcessorTest
 {
@@ -765,6 +767,122 @@ namespace VideoProcessorTest
 			pl_tex_destroy(gpu, &chromaTex);
 			pl_dispatch_destroy(&dispatch);
 			Assert::AreEqual(0, failures, L"no re-base variant rings into the bars or below black inside the crop");
+		}
+	};
+
+	// Bill v1.4.02 merge (2026-10-31, worker geo): pure CPU, no GPU. Pins the geometry authority
+	// between Bill's presentation (crop, A-lens, NLS: all in native pixels, decided before the
+	// draw) and VP-V's re-base (inside the draw, on a copy of the frame: planes and crop scaled per
+	// axis). The aspect and the lens are applied ONCE, in the final per-axis scale.
+	TEST_CLASS(MergeGeometryAuthorityTests)
+	{
+		struct Crop { double left, top, right, bottom; };
+		static double Aspect(const Crop& c) { return (c.right - c.left) / (c.bottom - c.top); }
+		// SourceRebase::Module::Apply's crop rule (the GPU-free part): each edge times its axis' factor.
+		static Crop Rebased(const Crop& c, double fx, double fy) { return { c.left * fx, c.top * fy, c.right * fx, c.bottom * fy }; }
+
+	public:
+		TEST_METHOD(RebaseNeverChangesThePresentedAspectWithOrWithoutALens)
+		{
+			const AlphaSourceCrop::PresentationRect panel = { 0.0, 0.0, 3840.0, 2160.0 };
+			const Crop crops[] = {
+				{ 0, 0, 1920, 1080 },        // full raster
+				{ 0, 140, 1920, 940 },       // 2.40 letterbox
+				{ 240, 0, 1680, 1080 },      // 4:3 pillarbox
+				{ 0, 276, 3840, 1884 } };    // 4K letterbox
+			const double lenses[] = { 1.0, 1.25, 1.33, 4.0 / 3.0 };
+			// None, uniform, per axis (anamorphic 1440x1080 across; a vertical-only upscale), 720p class.
+			const double factors[][2] = { { 1.0, 1.0 }, { 0.5, 0.5 }, { 0.75, 1.0 }, { 1.0, 0.5 }, { 720.0 / 1080.0, 720.0 / 1080.0 } };
+			// The re-base factors from the setting strings (per axis) agree with the table above.
+			Assert::AreEqual(0.75, SourceRebase::FactorX("1440x1080", 1920, 1080), 1e-12);
+			Assert::AreEqual(1.0, SourceRebase::Factor("1440x1080", 1080), 1e-12);
+			for (const double lens : lenses)
+				for (const bool configured : { false, true })
+				{
+					const auto screen = AnamorphicPresentation::FitScreen(configured, 2.35, lens, panel,
+						AlphaSourceCrop::VerticalPictureAlignment::CENTER, 0);
+					Assert::IsTrue(screen.valid);
+					for (const Crop& crop : crops)
+					{
+						// Bill's fit: the native crop's aspect, the lens divided out once.
+						const auto fit = AnamorphicPresentation::FitPicture(Aspect(crop), lens, screen,
+							AlphaSourceCrop::VerticalPictureAlignment::CENTER);
+						Assert::IsTrue(fit.valid);
+						const double pw = fit.picture.right - fit.picture.left, ph = fit.picture.bottom - fit.picture.top;
+						for (const auto& f : factors)
+						{
+							// The draw maps the re-based crop onto the same target rectangle, per axis.
+							const Crop r = Rebased(crop, f[0], f[1]);
+							const double sx = pw / (r.right - r.left), sy = ph / (r.bottom - r.top);
+							// Physical picture = native pixels x re-base x final scale x lens.
+							const double physical = (crop.right - crop.left) * f[0] * sx * lens /
+								((crop.bottom - crop.top) * f[1] * sy);
+							Assert::AreEqual(Aspect(crop), physical, 1e-9, L"DAR restored by the lens, independent of the re-base");
+							// The target never depends on the re-base: re-fitting on the re-based crop would
+							// apply the per-axis factor a second time (wrong whenever fx != fy).
+							const auto refit = AnamorphicPresentation::FitPicture(Aspect(r), lens, screen,
+								AlphaSourceCrop::VerticalPictureAlignment::CENTER);
+							const double refitAspect = (refit.picture.right - refit.picture.left) / (refit.picture.bottom - refit.picture.top);
+							if (std::fabs(f[0] - f[1]) > 1e-12)
+								Assert::IsTrue(std::fabs(refitAspect - pw / ph) > 1e-3, L"a fit after the re-base would double-apply the axis factor");
+							else
+								Assert::AreEqual(pw / ph, refitAspect, 1e-6);
+						}
+					}
+				}
+		}
+
+		TEST_METHOD(NlsDecisionUsesNativeGeometryAndThePhysicalTarget)
+		{
+			// NLS is decided on the native active picture against the physical (lens-included) target; the
+			// re-base later scales only the texture the NLS hook samples (normalised coordinates), so it
+			// is never an input of the policy.
+			const int W = 1920, H = 1080;
+			const NlsSourceGeometry native = ResolveNlsSourceGeometry(true, 0, 140, W, 940, W, H);
+			Assert::IsTrue(native.valid);
+			Assert::AreEqual(2.4, native.aspect, 1e-9);
+			for (const double lens : { 1.25, 1.33 })
+			{
+				const double physical = AnamorphicPresentation::PhysicalTarget(false, 0.0, 16.0 / 9.0, lens);
+				Assert::AreEqual(16.0 / 9.0 * lens, physical, 1e-12);
+				const auto decision = EvaluateNlsMapping(true, native.aspect, physical, 1.0, 1.0,
+					NlsAspectDirection::ANY, NLS_SHADER_MAXIMUM_STRETCH_RATIO);
+				// The raster (pre-lens) aspect as the target would double-apply the lens (Bill's rule in
+				// AnamorphicPresentation.h): a different, larger stretch.
+				const auto raster = EvaluateNlsMapping(true, native.aspect, 16.0 / 9.0, 1.0, 1.0,
+					NlsAspectDirection::ANY, NLS_SHADER_MAXIMUM_STRETCH_RATIO);
+				Assert::IsTrue(decision.mode == NlsMappingMode::ACTIVE || decision.mode == NlsMappingMode::LINEAR_PASSTHROUGH);
+				Assert::IsTrue(decision.stretchRatio < raster.stretchRatio || raster.mode != decision.mode);
+			}
+		}
+
+		TEST_METHOD(StartupHoldOffIsBillsPresentationExactly)
+		{
+			// Original pathway: active_picture_startup_hold off - every frame presents as Bill's renderer
+			// decided it (no black, no remembered crop), whatever the crop state.
+			StartupCropHold hold;
+			hold.SetEnabled(false);
+			StartupCropHold::Key key;
+			key.width = 1920; key.height = 1080; key.format = 3;
+			StartupCropHold::Rect crop;
+			crop.left = 0; crop.top = 140; crop.right = 1920; crop.bottom = 940;
+			hold.Begin(1.0);
+			Assert::IsFalse(hold.Holding());
+			for (double t = 1.0; t < 4.0; t += 0.25)
+				for (const bool decided : { false, true })
+					Assert::IsTrue(hold.Frame(key, t, true, decided, decided, crop) == StartupCropHold::Action::Present);
+			// On: Bill's decisions always win - a decision (crop or trusted full raster) ends the hold at
+			// once and is what is presented; the hold never replaces a decided crop.
+			StartupCropHold on;
+			on.Begin(10.0);
+			Assert::IsTrue(on.Frame(key, 10.0, true, true, true, crop) == StartupCropHold::Action::Present);
+			on.Begin(20.0);
+			Assert::IsTrue(on.Frame(key, 20.0, true, false, false, StartupCropHold::Rect()) == StartupCropHold::Action::Remembered);
+			const StartupCropHold::Rect released;   // Bill released the crop (a trusted full raster)
+			Assert::IsTrue(on.Frame(key, 20.1, true, true, false, released) == StartupCropHold::Action::Present);
+			on.Begin(30.0);
+			Assert::IsTrue(on.Frame(key, 30.0, true, false, false, StartupCropHold::Rect()) == StartupCropHold::Action::Present,
+				L"a crop Bill released is not brought back by the next hold");
 		}
 	};
 }

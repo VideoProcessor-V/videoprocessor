@@ -87,6 +87,20 @@ namespace VpFrameAnalysis
 				AttachSharedLuma(source);
 		}
 
+		// VP-V DIV-AN-01 either/or (merge 2026-10-31): the analysis code domain of the static
+		// PrepareFrameAnalysis (AnalysisFrameInput::vpLimitedDomain). Settings apply sets it from
+		// source_coding_fixes (Original pathway: off = Bill's delivered codes). Per module (the
+		// renderer DLL and the GUI each link the library); default on = the VP-V default, which
+		// the GUI's VP-only HDR veto grid keeps.
+		static void SetLimitedDomain(bool limited)
+		{
+			LimitedDomainFlag().store(limited, std::memory_order_release);
+		}
+		static bool LimitedDomain()
+		{
+			return LimitedDomainFlag().load(std::memory_order_acquire);
+		}
+
 		// From the delay budget (queue frames; the look-ahead window walks the queue). Resizing
 		// forgets the records (a new epoch), so it happens only when the depth changes.
 		void SetRingDepth(int queueFrames, int lookaheadFrames)
@@ -193,6 +207,11 @@ namespace VpFrameAnalysis
 		static std::atomic<bool>& SharedFlag()
 		{
 			static std::atomic<bool> flag{ false };
+			return flag;
+		}
+		static std::atomic<bool>& LimitedDomainFlag()
+		{
+			static std::atomic<bool> flag{ true };
 			return flag;
 		}
 

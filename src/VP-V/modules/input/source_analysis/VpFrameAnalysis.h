@@ -41,10 +41,10 @@
 namespace VpFrameAnalysis
 {
 	// ---- Range model (WP-23 decision; docs/design/wp23-frame-analysis-store.md) ----
-	// VP's analysis domain is 10-bit studio codes. Our tree's sampler already emits them
-	// (kAnalysisLumaSampleLimitedDomain); Bill's v1.4.02 sampler emits the delivered codes with
-	// an AnalysisLumaRange tag. At the WP-21 merge this ONE function becomes
-	// `return source.range == AnalysisLumaRange::Full;` and our full->limited edit leaves his file.
+	// VP's analysis domain is 10-bit studio codes. With AnalysisLumaSource::limitedDomain (VP-V
+	// pathway, source_coding_fixes) the sampler already emits them; Bill's v1.4.02 sampler
+	// (Original pathway) emits the delivered codes with an AnalysisLumaRange tag. This ONE
+	// function answers from the source (AnalysisLumaSource::CodesFullRange, merge 2026-10-31).
 	bool SamplerCodesAreFullRange(const AnalysisLumaSource& source);
 	// Sampler luma code (0..1023) -> studio code, the single conversion for every VP consumer.
 	std::array<uint16_t, 1024> StudioLumaMap(const AnalysisLumaSource& source);

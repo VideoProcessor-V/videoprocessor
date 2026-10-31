@@ -472,6 +472,26 @@ bool AnalysisLumaSource::RowWithinLimits(int y, uint16_t lumaMax,
     return true;
 }
 
+bool AnalysisLumaSource::FullRangeLevels() const
+{
+	// The levels Sample()'s RGB paths treat as full range (its limitedRgb rule), or a
+	// YCbCr source flagged / tagged full range.
+	if (format == AnalysisLumaFormat::NativeRgb)
+		return !(encoding == VideoFrameEncoding::R210 || encoding == VideoFrameEncoding::R10b ||
+			encoding == VideoFrameEncoding::R10l);
+	if (format == AnalysisLumaFormat::SdrTunnelRgb)
+		return range != AnalysisLumaRange::Limited;
+	return fullRangeYuv || range == AnalysisLumaRange::Full;
+}
+
+bool AnalysisLumaSource::MapsToLimitedDomain() const
+{
+	// VP-V DIV-AN-01: RGB under limitedDomain; YCbCr planes flagged fullRangeYuv.
+	if (format == AnalysisLumaFormat::NativeRgb || format == AnalysisLumaFormat::SdrTunnelRgb)
+		return limitedDomain && FullRangeLevels();
+	return fullRangeYuv;
+}
+
 bool AnalysisLumaSource::Sample(int x, int y, AnalysisLumaSample& result) const
 {
 	if (!IsValid() || x < 0 || y < 0 || x >= width || y >= height)
@@ -504,7 +524,8 @@ void AnalysisLumaPlane::Bind(const AnalysisLumaSource& source)
 	boundFormat = static_cast<int>(source.format);
 	boundEncoding = static_cast<int>(source.encoding);
 	boundColorspace = static_cast<int>(source.colorspace);
-	boundRange = (source.fullRangeYuv ? 1 : 0) | (static_cast<int>(source.range) << 1);
+	boundRange = (source.fullRangeYuv ? 1 : 0) | (static_cast<int>(source.range) << 1) |
+		(source.limitedDomain ? 8 : 0);
 	boundAlignment = source.rgbBitAlignment;
 }
 
@@ -513,7 +534,8 @@ bool AnalysisLumaPlane::Matches(const AnalysisLumaSource& source) const
 	return width == source.width && height == source.height && boundData == source.data &&
 		boundRowBytes == source.rowBytes && boundChromaRowBytes == source.chromaRowBytes &&
 		boundFormat == static_cast<int>(source.format) && boundEncoding == static_cast<int>(source.encoding) &&
-		boundColorspace == static_cast<int>(source.colorspace) && boundRange == ((source.fullRangeYuv ? 1 : 0) | (static_cast<int>(source.range) << 1)) &&
+		boundColorspace == static_cast<int>(source.colorspace) && boundRange == ((source.fullRangeYuv ? 1 : 0) | (static_cast<int>(source.range) << 1) |
+			(source.limitedDomain ? 8 : 0)) &&
 		boundAlignment == source.rgbBitAlignment;
 }
 
@@ -586,7 +608,7 @@ bool AnalysisLumaSource::SampleLumaRow(int x0, int y, int count, uint16_t* out) 
 	{
 		// Sample()'s luma arithmetic without the chroma.
 		const bool bt2020 = colorspace == ColorSpace::BT_2020;
-		const bool bt601 = IsBt601(colorspace);
+		const bool bt601 = limitedDomain && IsBt601(colorspace); // VP-V DIV-AN-01; Bill: BT.709
 		const bool tunnel = format == AnalysisLumaFormat::SdrTunnelRgb;
 		uint16_t red = 0, green = 0, blue = 0;
 		if (!tunnel && (encoding == VideoFrameEncoding::R210 || encoding == VideoFrameEncoding::R10b ||
@@ -642,6 +664,15 @@ bool AnalysisLumaSource::SampleLumaRow(int x0, int y, int count, uint16_t* out) 
 			return true;
 		}
 		const FullRgbCoefficients& f = bt2020 ? BT2020_FULL : (bt601 ? BT601_FULL : BT709_FULL);
+		// Sample()'s full-range luma: the VP-V limited-domain map, or Bill's Q16 rounding
+		// of the delivered codes (Original pathway).
+		const bool mapLimited = limitedDomain;
+		auto fullLuma = [&f, mapLimited](int64_t r, int64_t g, int64_t b)
+		{
+			const int64_t sum = f.yR * r + f.yG * g + f.yB * b;
+			return mapLimited ? FullLumaToLimited(sum, 65536) :
+				Clamp10(static_cast<int>((sum + 32768) >> 16));
+		};
 		const uint8_t* row = data + static_cast<size_t>(y) * rowBytes;
 		const bool high = rgbBitAlignment == 1;
 		auto channel = [high](uint32_t code)
@@ -658,8 +689,7 @@ bool AnalysisLumaSource::SampleLumaRow(int x0, int y, int count, uint16_t* out) 
 				red = Expand8To10(pixel[bgra ? 2 : 1]);
 				green = Expand8To10(pixel[bgra ? 1 : 2]);
 				blue = Expand8To10(pixel[bgra ? 0 : 3]);
-				out[i] = FullLumaToLimited(f.yR * static_cast<int64_t>(red) + f.yG * static_cast<int64_t>(green) +
-					f.yB * static_cast<int64_t>(blue), 65536);
+				out[i] = fullLuma(red, green, blue);
 			}
 			return true;
 		}
@@ -674,8 +704,7 @@ bool AnalysisLumaSource::SampleLumaRow(int x0, int y, int count, uint16_t* out) 
 			}
 			else if (!ReadRgb10(*this, x0 + i, y, red, green, blue))
 				return false;
-			out[i] = FullLumaToLimited(f.yR * static_cast<int64_t>(red) + f.yG * static_cast<int64_t>(green) +
-				f.yB * static_cast<int64_t>(blue), 65536);
+			out[i] = fullLuma(red, green, blue);
 		}
 		return true;
 	}
@@ -794,7 +823,7 @@ bool AnalysisLumaSource::SampleUnchecked(int x, int y, AnalysisLumaSample& resul
 	else if (!ReadRgb10(*this, x, y, red, green, blue))
 		return false;
 	const bool bt2020 = colorspace == ColorSpace::BT_2020;
-	const bool bt601 = IsBt601(colorspace); // audit 2026-10-16
+	const bool bt601 = limitedDomain && IsBt601(colorspace); // audit 2026-10-16 (VP-V DIV-AN-01; Bill: BT.709)
 	const bool limitedRgb = (format == AnalysisLumaFormat::SdrTunnelRgb && range == AnalysisLumaRange::Limited) ||
         (format != AnalysisLumaFormat::SdrTunnelRgb &&
 		(encoding == VideoFrameEncoding::R210 ||
@@ -832,6 +861,23 @@ bool AnalysisLumaSource::SampleUnchecked(int x, int y, AnalysisLumaSample& resul
 	// Q16 full-range Y'CbCr sums are mapped straight to the limited code
 	// domain with a single rounding (previously emitted as 0..1023 / +-511,
 	// which every darkness threshold misread as studio codes).
+	if (!limitedDomain)
+	{
+		// Bill v1.4.02 (Original pathway): the delivered full-range codes, Q16 rounded.
+		const int yRed = bt2020 ? 17218 : 13933;
+		const int yGreen = bt2020 ? 44444 : 46871;
+		const int yBlue = bt2020 ? 3886 : 4732;
+		const int cbRed = bt2020 ? -9147 : -7508;
+		const int cbGreen = bt2020 ? -23621 : -25259;
+		const int cbBlue = 32768;
+		const int crRed = 32768;
+		const int crGreen = bt2020 ? -30134 : -29763;
+		const int crBlue = bt2020 ? -2634 : -3005;
+		result.luma = Clamp10((yRed * red + yGreen * green + yBlue * blue + 32768) >> 16);
+		result.chromaU = Clamp10(((cbRed * red + cbGreen * green + cbBlue * blue + 32768) >> 16) + 512);
+		result.chromaV = Clamp10(((crRed * red + crGreen * green + crBlue * blue + 32768) >> 16) + 512);
+		return true;
+	}
 	const FullRgbCoefficients& full = bt2020 ? BT2020_FULL :
 		(bt601 ? BT601_FULL : BT709_FULL);
 	const int64_t r = red;
