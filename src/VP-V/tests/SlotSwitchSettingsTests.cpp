@@ -123,7 +123,7 @@ namespace VpvTests
 					Assert::Fail(W("no value check for " + k).c_str());
 				++checked;
 			}
-			Assert::AreEqual(size_t{ 19 }, checked);
+			Assert::AreEqual(size_t{ 20 }, checked);
 		}
 
 		TEST_METHOD(NothingOffChangesNothing)
