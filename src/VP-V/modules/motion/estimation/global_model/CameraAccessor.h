@@ -8,7 +8,11 @@
 // having the model.
 //
 // Shader mirror: keep the branch order of FieldVector exactly; it uses only float-friendly
-// operations (no recursion, no containers) so that it ports 1:1 to HLSL.
+// operations (no recursion, no containers) so that it ports 1:1 to HLSL. CameraAccessorGlsl.h holds the
+// GLSL port (camera_field_vector). Lifetime rule: a consumer must keep its own copy of the CameraMotion record
+// (or at least `record.blocks`, a shared_ptr) alive for as long as it calls FieldVector with it. The Fitter
+// recycles a pooled BlockData only when use_count() == 1, so a held record is never overwritten. Never keep a
+// raw BlockData pointer past the record.
 #pragma once
 
 #include <algorithm>
@@ -20,6 +24,12 @@
 
 namespace CameraModel
 {
+	// Shape of the confidence -> target-weight ramp above the threshold.
+	//  Smoothstep: t*t*(3-2t) (today's). Linear: t. Step: 1 once confidence >= threshold + blendWidth
+	//  (t >= 1), else 0 - a hard switch with the ramp's upper edge as the switching point (the rate limit
+	//  still applies to the weight).
+	enum class BlendCurve : uint8_t { Smoothstep, Linear, Step };
+
 	struct Policy
 	{
 		double threshold = 0.7;      // confidence at/above which the model may supply a vector
@@ -29,7 +39,33 @@ namespace CameraModel
 		double rateLimit = 0.25;     // maximum weight change per Update (per source frame)
 		bool enabled = false;        // internal test switch; false = measured/hold value exactly
 		bool preferModelWhenAgrees = false;
+		BlendCurve curve = BlendCurve::Smoothstep;
 	};
+
+	// The consumers of the camera model; PolicyFor() gives each its preset. Every preset has enabled = false:
+	// the per-consumer test switch is `enabled`, set by the consumer's own configuration, never by a preset.
+	enum class Consumer { Debander, DitherVectors, GrainMap, ResidualStabilise, TextureRestore, OcclusionMask, DejudderWarp, RollOff, CameraObjectSplit };
+
+	inline Policy PolicyFor(Consumer c)
+	{
+		Policy p;                          // standard: threshold 0.7, floor 0.5, width 0.1, hysteresis 0.05, rate 0.25
+		p.enabled = false;
+		switch (c)
+		{
+		case Consumer::TextureRestore:
+			p.preferModelWhenAgrees = true;
+			break;
+		case Consumer::DejudderWarp:       // strictest: a wrong vector here tears the picture
+			p.threshold = 0.85;
+			p.floor = 0.7;
+			p.blendWidth = 0.05;
+			p.rateLimit = 0.2;
+			break;
+		default:
+			break;
+		}
+		return p;
+	}
 
 	enum class Choice { Measured, Model, Blend, Hold };
 
@@ -67,7 +103,12 @@ namespace CameraModel
 				const double width = policy.blendWidth > 0.0 ? policy.blendWidth : 1e-9;
 				double t = (record->confidence - threshold) / width;
 				t = (std::min)(1.0, (std::max)(0.0, t));
-				target = t * t * (3.0 - 2.0 * t);
+				switch (policy.curve)
+				{
+				case BlendCurve::Linear: target = t; break;
+				case BlendCurve::Step: target = t >= 1.0 ? 1.0 : 0.0; break;
+				default: target = t * t * (3.0 - 2.0 * t); break;
+				}
 			}
 			const double step = (std::max)(0.0, policy.rateLimit);
 			const double delta = target - m_weight;

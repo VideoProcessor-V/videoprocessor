@@ -129,6 +129,9 @@ namespace CameraModel
 		Reason reason = Reason::NoInput;
 		Signals signals;
 		bool seededFromNext = false, bridged = false, inFade = false, smoothed = false;
+		// true = the per-block label/residual/model arrays of `blocks` are empty on purpose: the GPU label pass
+		// (CameraModelGpu.h) computes them from the record's params and the thresholds in `blocks`.
+		bool labelsOnGpu = false;
 		Params smoothedParams;
 		double fadeGain = 1, fadeOffset = 0;
 		uint32_t samples = 0, hypotheses = 0;

@@ -27,6 +27,8 @@ texture), and to narrow the matcher's search.
 | `PixelResidualReference.h/.cpp` | CPU reference / shader-mirror spec of the tiny-mover measure (not on the runtime path yet) |
 | `CameraAccessor.h` | per-consumer policy, blend state, `FieldVector` (pure, header-only) |
 | `GlobalModelSearchHints.h/.cpp` | phase-2 matcher hints (data API only, nothing wired) |
+| `CameraModelGpu.h/.cpp` | GPU label pass: constants, GLSL, CPU float mirror, `LabelPass` (libplacebo) |
+| `CameraAccessorGlsl.h` | GLSL `camera_field_vector` + `AccessorConstants` |
 | `../../core/FrameAnalysisStore.h` | `kCamera` group, `Record::camera`, `PublishCamera` |
 
 ## Inputs and outputs
@@ -87,6 +89,24 @@ NLS) happens after the choice, as today.
 `PixelResidualReference` is the spec of the per-block share of pixels with
 `|cur(x) - prev(H^-1 x)| > k * noiseRms` (bilinear previous-frame sample, clamp at borders).
 
+## Record lifetime (hold-the-shared_ptr rule)
+A consumer must keep its own copy of the `CameraMotion` record (or at least `record.blocks`, a
+`shared_ptr<const BlockData>`) alive for as long as it calls `FieldVector` with it. The Fitter recycles a
+pooled `BlockData` only when `use_count() == 1`, so a record that is held is never overwritten. Never keep a
+raw `BlockData` pointer past the record. A `Fitter` is not thread-safe (one per motion worker); the records it
+returns are immutable and may be shared across threads.
+
+## GPU label pass (phase 2 prep)
+`CameraModelGpu.h/.cpp`: `LabelConstants` (the constant buffer), the two GLSL passes (`LabelPassGlsl`,
+`ZeroClusterGlsl`), a float CPU mirror (`LabelBlockMirror`, `ZeroClusterMirror`) that performs the shader's
+arithmetic in the same order, and `LabelPass` (libplacebo dispatch). Output texture per block:
+(modelX, modelY, |residual|, code) with code = label + 4 * tinyMover + 8 * zeroCandidate (small exact
+integers). `Config::cpuLabels = false` (objects off) makes the fitter leave the per-block arrays empty and set
+`CameraMotion::labelsOnGpu`; the accessor and `BuildHints` already treat short arrays as "no model" (caller's
+value / full search). `CameraAccessorGlsl.h` is the GLSL port of `FieldVector` (`camera_field_vector`). The CPU
+accessor and the shader compare the same float |residual| (`sqrtf(rx*rx + ry*ry)`).
+Policies: `Policy::curve` (Smoothstep / Linear / Step) and `PolicyFor(Consumer)` presets (all `enabled = false`).
+
 ## Search hints (phase 2 data API)
 `BuildHints(..., precisionPx, nextPairSeconds)`: seeds (model and previous forward vectors) are scaled by
 `nextPairSeconds / prev->pairSeconds` for uneven cadences (3:2); `<= 0` means no scaling. Only bar and
@@ -97,7 +117,7 @@ text-guard blocks (`BlockData::excluded`) are `Excluded`; a static-logo Overlay 
 Per-step cost is profiled by a test-only harness: building the tests with `CAMERA_MODEL_PROFILE` defined
 makes `GlobalModelFit.cpp` accumulate per-step milliseconds in `CameraModel::g_profileMs[8]` (field,
 hypotheses, local optimisation + ladder, signals, ambiguity, backward, temporal, labels). The macro is not
-defined in the product build. The early-exit path keeps H0's type and tries one step up only.
+defined in the product build. The early-exit path keeps H0's type, tries one step up, and (when the type is still H0's and above Translation) one step down from the same weighted set: the lower type wins when the higher one does not earn its extra parameters (same complexity-penalty test), so a model that was a homography relaxes by one type per pair when the motion becomes a pure pan.
 
 The fit runs on a CPU worker, off the render path (render-path cost: zero). Two full-grid passes are
 inherent on the CPU: the stratified field scan (before the fit) and the per-block model/residual/label
