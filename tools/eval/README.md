@@ -36,6 +36,10 @@ Files: `eval_io.py` (Frame, readers, resamplers) - `eval_material.py` (discovery
 metrics) - `eval_candidates.py` (contract + built-ins) - `eval_protocols.py` - `eval_synth.py` -
 `eval_report.py` - `eval_harness.py` (CLI) - `cost_ratios.json` - `alignment_g18.json` -
 `material_catalog.json` - `suites/` - `sample/`.
+Round 2 (Python reference, scratch pixels outside the worktree): `artefact_headroom.py` (banding / dark
+blocking / texture headroom per codec x rate in SDR, HDR-PQ and HDR->SDR) - `tonemap_ref.py` (libplacebo
+spline reproduction, contrast recovery, local tone mapping incl. MC) - `ltm_eval.py` - `test_tonemap_ref.py`;
+results in `findings-round2.md`.
 
 ## Candidate contract
 
