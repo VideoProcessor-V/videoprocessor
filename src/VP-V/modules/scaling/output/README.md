@@ -122,6 +122,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 ## Settings
 
 - Keys: `adaptive_downscale`, `adaptive_w_base`, `adaptive_edge_lo`, `adaptive_edge_hi`, `adaptive_grain_lo`, `adaptive_grain_hi`, `adaptive_grain_floor`, `adaptive_grain_smooth_ms`, `adaptive_grain_shadow_bias`, `adaptive_chroma_ssim`, `adaptive_grain_map`, `adaptive_grain_map_smooth_ms`, `adaptive_faithful`, `adaptive_upscale`, `adaptive_upscale_w_base`, `adaptive_upscale_superres_scale`, `downscale_light`, `upscale_light`, `ssim_bitrate_aware`, `ssim_bitrate_floor`, `cnn_residual_stabilise`, `ssim_residual_stabilise`, `residual_stabilise_grain_guard`, `fbo_float32`.
+- Planned keys (not yet implemented): `hybrid_refine_d`.
 - Tiers: Classic Lanczos; Low..Upper hybrid; Upper + D.
 - VP-V page, Scaling tab: tiers Classic / Low / Mid; tier keys `adaptive_downscale`, `adaptive_w_base`, `source_resolution`.
 - Listed under the tier: `adaptive_faithful`, `adaptive_grain_map`, `ssim_bitrate_aware`, `ssim_residual_stabilise`, `cnn_residual_stabilise`, `adaptive_upscale`.

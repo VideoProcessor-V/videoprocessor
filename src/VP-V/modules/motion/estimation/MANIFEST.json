@@ -60,6 +60,7 @@
       "dejudder_verify_share",
       "general_rate_fixes",
       "motion_ahead_frames",
+      "motion_ahead_ms",
       "motion_engine",
       "motion_history_fixes",
       "optical_flow",

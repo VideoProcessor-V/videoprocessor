@@ -166,6 +166,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 ## Settings
 
 - Keys: `dejudder_consistency_px`, `dejudder_cut_histogram`, `dejudder_est_candidates`, `dejudder_est_gate`, `dejudder_est_lambda`, `dejudder_est_qpel`, `dejudder_est_split`, `dejudder_est_split_sad`, `dejudder_estimate_ahead`, `dejudder_fade_floor`, `dejudder_fade_match`, `dejudder_global_prior`, `dejudder_global_two`, `dejudder_low_res`, `dejudder_match_tolerance`, `dejudder_regional_hold`, `dejudder_search_range`, `dejudder_texture_tolerance`, `dejudder_vector_smooth`, `dejudder_verify`, `dejudder_verify_share`, `general_rate_fixes`, `motion_ahead_frames`, `motion_engine`, `motion_history_fixes`, `optical_flow`, `optical_flow_cost_trust`, `optical_flow_fb_check`, `optical_flow_global`, `optical_flow_global_fallback`.
+- Planned keys (not yet implemented): `motion_ahead_ms`.
 - Tiers: Classic off .. Upper full (NVOF + matcher).
 - VP-V page, Motion tab: tiers Classic / Low / Mid / Upper; tier keys `dejudder_est_qpel`, `dejudder_est_split`, `motion_ahead_frames`, `optical_flow`.
 - Listed under the tier: `dejudder_estimate_ahead`.

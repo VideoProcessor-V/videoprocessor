@@ -292,7 +292,13 @@
           "slot": "motion.consumers"
         }
       ],
-      "planned": [],
+      "planned": [
+        {
+          "key": "motion_ahead_ms",
+          "label": "Motion look-ahead in milliseconds (time-based)",
+          "slot": "motion.estimation"
+        }
+      ],
       "more_settings": "Smooth motion (libplacebo) vs VP's de-judder, and deinterlacing: VP Renderer > Motion. Everything else of this unit is on Main and Advanced here."
     },
     {
@@ -542,6 +548,11 @@
           "key": "chroma_upscale_vp",
           "label": "VP chroma upscale",
           "slot": "scaling.chroma_upscale"
+        },
+        {
+          "key": "hybrid_refine_d",
+          "label": "Extra detail-recovery step under the hybrid scaler",
+          "slot": "scaling.output"
         }
       ],
       "more_settings": "The upscaler, downscaler and chroma filters (libplacebo): VP Renderer > Scaling."
