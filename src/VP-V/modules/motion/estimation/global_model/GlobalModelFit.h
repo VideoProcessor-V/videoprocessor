@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "CameraMotion.h"
 #include "GlobalModelGeometry.h"
@@ -92,6 +93,14 @@ namespace CameraModel
 		uint64_t m_resyncGeneration = 0, m_rebaseGeneration = 0;
 		bool m_haveGenerations = false;
 		bool m_seedPending = false;                 // previous call published a post-cut seed
+		// Reused buffers (cost only; never part of the output). Fresh multi-100 KB allocations every pair
+		// cost hundreds of first-touch page faults, so the per-block record and the per-pair scratch are
+		// recycled. A pooled BlockData is rewritten only when no record still holds it (use_count == 1);
+		// every element is overwritten on reuse, so the output does not depend on the pool.
+		std::vector<std::shared_ptr<BlockData>> m_blockPool;
+		std::vector<Sample> m_scratchSamples;
+		std::vector<int> m_scratchBlk;
+		std::vector<uint8_t> m_scratchExcluded, m_scratchZero;
 		friend struct Impl;
 	};
 }

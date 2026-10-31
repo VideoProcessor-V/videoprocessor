@@ -7,6 +7,7 @@
 #include "GlobalModelFit.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -34,7 +35,7 @@ namespace CameraModel
 	{
 		const double kSqrt2 = 1.4142135623730951;
 
-		inline bool FiniteF(float v) { return std::isfinite(v); }
+		inline bool FiniteF(float v) { return IsFiniteBits(v); }
 		inline double Clamp01(double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
 
 		// The usable, stratified sample set of one pair (picture-centred positions).
@@ -69,40 +70,77 @@ namespace CameraModel
 			return a.cost < b.cost;
 		}
 
-		inline double Threshold(const Field& f, double predMag)
+		// Squared agreement threshold from the squared predicted magnitude: max(abs, rel * |pred|)^2.
+		inline double Threshold2(const Field& f, double pm2)
 		{
-			return std::max(f.absThr, f.rel * predMag);
+			return std::max(f.absThr * f.absThr, f.rel * f.rel * pm2);
 		}
 
-		inline void Residual(const Params& p, const Sample& s, double* r, double* predMag)
+		// True when p has no perspective row (h6 = h7 = 0, h8 = 1): the division by w is skipped.
+		inline bool AffineRow(const Params& p) { return p.h[6] == 0.0 && p.h[7] == 0.0 && p.h[8] == 1.0; }
+
+		// Model displacement at a point (Displacement(); the affine-row case skips the 1/w).
+		inline void Disp(const Params& p, bool affine, double x, double y, double* dx, double* dy)
 		{
-			double dx = 0, dy = 0;
-			Displacement(p, s.x, s.y, &dx, &dy);
+			if (affine)
+			{
+				*dx = p.h[0] * x + p.h[1] * y + p.h[2] - x;
+				*dy = p.h[3] * x + p.h[4] * y + p.h[5] - y;
+			}
+			else
+				Displacement(p, x, y, dx, dy);
+		}
+
+		// Squared residual and squared predicted magnitude (no square roots).
+		inline void ResidualSq(const Params& p, bool affine, const Sample& s, double* r2, double* pm2)
+		{
+			double dx, dy;
+			Disp(p, affine, s.x, s.y, &dx, &dy);
 			const double ex = s.dx - dx, ey = s.dy - dy;
-			*r = std::sqrt(ex * ex + ey * ey);
-			*predMag = std::sqrt(dx * dx + dy * dy);
+			*r2 = ex * ex + ey * ey;
+			*pm2 = dx * dx + dy * dy;
 		}
 
-		// MAGSAC++-style sigma-marginalised weight: 1 at 0, 0 beyond 3 sigma.
-		inline double MagW(double r, double sigma)
+		// erfc on [0, 3/sqrt(2)] from a fixed table with linear interpolation (abs error < 1e-6; built once,
+		// deterministic). The MAGSAC++-style weight only needs it below 3 sigma.
+		const int kErfcTable = 4096;
+		const double kErfcMax = 3.0 / kSqrt2;
+		struct ErfcTable
 		{
-			if (!(r < 3.0 * sigma))
+			double v[kErfcTable + 2];
+			ErfcTable() { for (int i = 0; i <= kErfcTable + 1; ++i) v[i] = std::erfc(kErfcMax * i / kErfcTable); }
+		};
+		inline double ErfcFast(double x)
+		{
+			static const ErfcTable t;
+			const double u = x * (kErfcTable / kErfcMax);
+			if (!(u < kErfcTable))
+				return t.v[kErfcTable];
+			const int i = static_cast<int>(u);
+			const double a = u - i;
+			return t.v[i] + a * (t.v[i + 1] - t.v[i]);
+		}
+
+		// MAGSAC++-style sigma-marginalised weight: 1 at 0, 0 beyond 3 sigma (squared inputs).
+		inline double MagW2(double r2, double sigma2)
+		{
+			if (!(r2 < 9.0 * sigma2))
 				return 0.0;
-			return std::erfc(r / (kSqrt2 * sigma));
+			return ErfcFast(std::sqrt(r2 / (2.0 * sigma2)));
 		}
 
 		Score ScoreOn(const Field& f, const Params& p, const int* idx, int n)
 		{
 			Score sc;
+			const bool aff = AffineRow(p);
 			const int count = idx ? n : static_cast<int>(f.s.size());
 			for (int k = 0; k < count; ++k)
 			{
 				const Sample& s = f.s[idx ? idx[k] : k];
-				double r, pm;
-				Residual(p, s, &r, &pm);
-				const double t = Threshold(f, pm);
-				const double r2 = r * r, t2 = t * t;
-				if (r <= t)
+				double r2, pm2;
+				ResidualSq(p, aff, s, &r2, &pm2);
+				const double t2 = Threshold2(f, pm2);
+				if (r2 <= t2)
 					++sc.inliers;
 				sc.cost += s.w * ((r2 < t2) ? r2 : t2);
 			}
@@ -112,11 +150,12 @@ namespace CameraModel
 		void BuildWeighted(const Field& f, const std::vector<Sample>& samples, const Params& p, std::vector<Sample>& out)
 		{
 			out.clear();
+			const bool aff = AffineRow(p);
 			for (size_t i = 0; i < samples.size(); ++i)
 			{
-				double r, pm;
-				Residual(p, samples[i], &r, &pm);
-				const double w = samples[i].w * MagW(r, Threshold(f, pm));
+				double r2, pm2;
+				ResidualSq(p, aff, samples[i], &r2, &pm2);
+				const double w = samples[i].w * MagW2(r2, Threshold2(f, pm2));
 				if (w > 0.0)
 				{
 					Sample q = samples[i];
@@ -145,8 +184,13 @@ namespace CameraModel
 				q.type = p.type;
 				if (IsDegenerate(q, f.pic))
 					break;
+				// Converged: the step moved no picture corner by more than 1% of the vector precision; the
+				// next reweighting would reproduce the same set, so further iterations are skipped.
+				const bool converged = MaxCornerDifference(q, p, f.pic) * f.diag <= 0.01 * f.prec;
 				p = q;
 				any = true;
+				if (converged)
+					break;
 			}
 			return any;
 		}
@@ -180,6 +224,10 @@ namespace CameraModel
 			f.halfDiag = 0.5 * f.diag;
 			f.absThr = c.absThresholdSigmas * f.prec;
 			f.rel = c.relThreshold;
+			f.s.clear();
+			f.blk.clear();
+			f.trustSum = 0;
+			f.cellsWithSample = 0;
 
 			const int nb = in.gridW * in.gridH;
 			const double bs = in.blockSize;
@@ -230,20 +278,32 @@ namespace CameraModel
 				const double fy = (by + 0.5) * bs - in.picture.top;
 				const int cy = std::min(std::max(static_cast<int>(std::floor(fy / ch)), 0), cellsY - 1);
 				const int rowCell = cy * cellsX;
+				const int rowBase = by * in.gridW;
+				uint8_t* const exRow = f.excluded.data() + rowBase;
+				const uint8_t* const guardRow = in.textGuard != nullptr ? in.textGuard + rowBase : nullptr;
+				const float* const trustRow = in.fwdTrust + rowBase;
+				const int* const cc = colCell.data();
+				int* const bestP = best.data();
+				float* const bestT = bestTrust.data();
 				for (int bx = bx0; bx < bx1; ++bx)
 				{
-					const int b = by * in.gridW + bx;
-					if (in.textGuard != nullptr && in.textGuard[b] == 1)
+					if (guardRow != nullptr && guardRow[bx] == 1)
 						continue;                              // excluded stays 1
-					f.excluded[static_cast<size_t>(b)] = 0;
-					const float tr = in.fwdTrust[b];
-					if (!FiniteF(tr) || !(tr > 0.0f) || !FiniteF(in.fwdX[b]) || !FiniteF(in.fwdY[b]))
-						continue;
-					const int ci = rowCell + colCell[static_cast<size_t>(bx - bx0)];
-					if (best[static_cast<size_t>(ci)] < 0 || tr > bestTrust[static_cast<size_t>(ci)])
+					exRow[bx] = 0;
+					const float tr = trustRow[bx];
+					if (!(tr > 0.0f))
+						continue;                              // also rejects NaN
+					const int ci = rowCell + cc[bx - bx0];
+					// Validity (finite trust and vector) is tested only for a block that would win its cell;
+					// an invalid block never wins, so the chosen samples are the same as testing every block.
+					if ((bestP[ci] < 0 || tr > bestT[ci]) && FiniteF(tr))
 					{
-						best[static_cast<size_t>(ci)] = b;
-						bestTrust[static_cast<size_t>(ci)] = tr;
+						const int b = rowBase + bx;
+						if (FiniteF(in.fwdX[b]) && FiniteF(in.fwdY[b]))
+						{
+							bestP[ci] = b;
+							bestT[ci] = tr;
+						}
 					}
 				}
 			}
@@ -366,6 +426,23 @@ namespace CameraModel
 
 			CM_PROF_RESET();
 			Field f;
+			struct ScratchGuard
+			{
+				Fitter& F;
+				Field& f;
+				ScratchGuard(Fitter& fitter, Field& field) : F(fitter), f(field)
+				{
+					f.s.swap(F.m_scratchSamples);
+					f.blk.swap(F.m_scratchBlk);
+					f.excluded.swap(F.m_scratchExcluded);
+				}
+				~ScratchGuard()
+				{
+					f.s.swap(F.m_scratchSamples);
+					f.blk.swap(F.m_scratchBlk);
+					f.excluded.swap(F.m_scratchExcluded);
+				}
+			} scratchGuard(F, f);
 			if (!BuildField(in, c, f))
 				return rec;
 			CM_PROF_MARK(0);
@@ -390,7 +467,6 @@ namespace CameraModel
 
 			// ---- Hypotheses ----
 			int count = 0;
-			std::vector<Params> pool;           // every scored hypothesis (competitor candidates)
 			bool haveWinner = false;
 			Params winner;
 			Score winnerScore;
@@ -414,7 +490,6 @@ namespace CameraModel
 				Params h0r = *h0;
 				Refine(f, f.s, h0r, 3);
 				const Score s0 = ScoreOn(f, h0r, nullptr, 0);
-				pool.push_back(h0r);
 				consider(h0r, s0);
 				// H1 below is scored first for the early-exit comparison.
 				if (in.haveEngineGlobal && std::isfinite(in.engineGx) && std::isfinite(in.engineGy))
@@ -425,7 +500,6 @@ namespace CameraModel
 					h1Score = ScoreOn(f, h1, nullptr, 0);
 					haveH1 = true;
 					++count;
-					pool.push_back(h1);
 					consider(h1, h1Score);
 				}
 				const double floorCost = f.trustSum * (0.25 * f.prec) * (0.25 * f.prec);
@@ -444,7 +518,6 @@ namespace CameraModel
 				h1Score = ScoreOn(f, h1, nullptr, 0);
 				haveH1 = true;
 				++count;
-				pool.push_back(h1);
 				consider(h1, h1Score);
 			}
 
@@ -514,8 +587,6 @@ namespace CameraModel
 					const Params& p = hyps[static_cast<size_t>(bi)].p;
 					consider(p, ScoreOn(f, p, nullptr, 0));
 				}
-				for (size_t i = 0; i < hyps.size(); ++i)
-					pool.push_back(hyps[i].p);
 			}
 			rec.hypotheses = static_cast<uint32_t>(count);
 			CM_PROF_MARK(1);
@@ -538,11 +609,12 @@ namespace CameraModel
 			// Support set of the winner (for the cost comparison) and its quadrant mass.
 			std::vector<uint8_t> support(f.s.size(), 0);
 			double tiny = 0;
+			const bool wAff = AffineRow(w);
 			for (size_t i = 0; i < f.s.size(); ++i)
 			{
-				double r, pm;
-				Residual(w, f.s[i], &r, &pm);
-				if (r <= 3.0 * Threshold(f, pm))
+				double r2, pm2;
+				ResidualSq(w, wAff, f.s[i], &r2, &pm2);
+				if (r2 <= 9.0 * Threshold2(f, pm2))
 				{
 					support[i] = 1;
 					tiny += f.s[i].w * (0.5 * f.prec) * (0.5 * f.prec);
@@ -562,13 +634,13 @@ namespace CameraModel
 			auto supportCost = [&](const Params& p)
 			{
 				double cost = 0;
+				const bool aff = AffineRow(p);
 				for (size_t i = 0; i < f.s.size(); ++i)
 					if (support[i])
 					{
-						double r, pm;
-						Residual(p, f.s[i], &r, &pm);
-						const double t3 = 3.0 * Threshold(f, pm);
-						const double r2 = r * r, t2 = t3 * t3;
+						double r2, pm2;
+						ResidualSq(p, aff, f.s[i], &r2, &pm2);
+						const double t2 = 9.0 * Threshold2(f, pm2);
 						cost += f.s[i].w * ((r2 < t2) ? r2 : t2);
 					}
 				return cost;
@@ -635,16 +707,17 @@ namespace CameraModel
 			std::vector<uint8_t> inl(f.s.size(), 0);
 			double inlierMass = 0, resSq = 0;
 			int inlierCount = 0;
+			const bool mAff = AffineRow(model);
 			for (size_t i = 0; i < f.s.size(); ++i)
 			{
-				double r, pm;
-				Residual(model, f.s[i], &r, &pm);
-				if (r <= Threshold(f, pm))
+				double r2, pm2;
+				ResidualSq(model, mAff, f.s[i], &r2, &pm2);
+				if (r2 <= Threshold2(f, pm2))
 				{
 					inl[i] = 1;
 					++inlierCount;
 					inlierMass += f.s[i].w;
-					resSq += f.s[i].w * r * r;
+					resSq += f.s[i].w * r2;
 				}
 			}
 			Signals sg;
@@ -718,11 +791,12 @@ namespace CameraModel
 				auto evalCand = [&](const Params& p, int* support, int* overlap)
 				{
 					int sup = 0, ov = 0;
+					const bool aff = AffineRow(p);
 					for (size_t i = 0; i < f.s.size(); ++i)
 					{
-						double r, pm;
-						Residual(p, f.s[i], &r, &pm);
-						if (r <= Threshold(f, pm))
+						double r2, pm2;
+						ResidualSq(p, aff, f.s[i], &r2, &pm2);
+						if (r2 <= Threshold2(f, pm2))
 						{
 							++sup;
 							if (inl[i])
@@ -745,12 +819,13 @@ namespace CameraModel
 				{
 					int sup = 0, ov = 0;
 					const int cnt = csub.empty() ? N : static_cast<int>(csub.size());
+					const bool aff = AffineRow(p);
 					for (int k = 0; k < cnt; ++k)
 					{
 						const size_t i = static_cast<size_t>(csub.empty() ? k : csub[static_cast<size_t>(k)]);
-						double r, pm;
-						Residual(p, f.s[i], &r, &pm);
-						if (r <= Threshold(f, pm))
+						double r2, pm2;
+						ResidualSq(p, aff, f.s[i], &r2, &pm2);
+						if (r2 <= Threshold2(f, pm2))
 						{
 							++sup;
 							if (inl[i])
@@ -843,11 +918,12 @@ namespace CameraModel
 					else
 					{
 						double inMass = 0;
+						const bool iAff = AffineRow(inv);
 						for (size_t i = 0; i < bs.size(); ++i)
 						{
-							double r, pm;
-							Residual(inv, bs[i], &r, &pm);
-							if (r <= Threshold(f, pm))
+							double r2, pm2;
+							ResidualSq(inv, iAff, bs[i], &r2, &pm2);
+							if (r2 <= Threshold2(f, pm2))
 								inMass += bs[i].w;
 						}
 						const double bShare = bTrust > 0 ? inMass / bTrust : 0.0;
@@ -904,86 +980,76 @@ namespace CameraModel
 			const Config& c = F.m_config;
 			const int gw = in.gridW, gh = in.gridH;
 			const size_t nb = static_cast<size_t>(gw) * static_cast<size_t>(gh);
-			auto bd = std::make_shared<BlockData>();
+			// A pooled buffer is reused only when the pool holds the sole reference (no record, consumer or
+			// copy still points at it; nothing takes weak references). The acquire fence orders our writes
+			// after the last holder's reads. Every element below is overwritten.
+			std::shared_ptr<BlockData> bd;
+			for (size_t i = 0; i < F.m_blockPool.size(); ++i)
+				if (F.m_blockPool[i].use_count() == 1)
+				{
+					std::atomic_thread_fence(std::memory_order_acquire);
+					bd = F.m_blockPool[i];
+					break;
+				}
+			if (!bd)
+			{
+				bd = std::make_shared<BlockData>();
+				const size_t kPool = 4;
+				if (F.m_blockPool.size() < kPool)
+					F.m_blockPool.push_back(bd);
+			}
 			bd->gridW = gw;
 			bd->gridH = gh;
 			bd->blockSize = in.blockSize;
-			bd->label.assign(nb, static_cast<uint8_t>(Label::Unknown));
-			bd->resX.assign(nb, 0.0f);
-			bd->resY.assign(nb, 0.0f);
-			bd->modelX.assign(nb, 0.0f);
-			bd->modelY.assign(nb, 0.0f);
+			bd->label.resize(nb);                   // all written by labelRow
+			bd->resX.resize(nb);                    // resX/resY/modelX/modelY/tinyMover: all written below
+			bd->resY.resize(nb);
+			bd->modelX.resize(nb);
+			bd->modelY.resize(nb);
 			bd->objectId.assign(nb, 0);
-			bd->tinyMover.assign(nb, 0);
+			bd->tinyMover.resize(nb);
 			bd->excluded = f.excluded;
 			bd->absThresholdPx = static_cast<float>(f.absThr);
 			bd->relThreshold = static_cast<float>(f.rel);
 
-			// One pass over the blocks (labels lag the model/residual pass by one row because the
-			// zero-motion cluster test needs the next row's candidates). All distance tests use squares.
-			std::vector<uint8_t> zeroCand(nb, 0);
-			std::vector<uint8_t> trustedRow(static_cast<size_t>(gw) * 2, 0);
-			std::vector<double> thr2Row(static_cast<size_t>(gw) * 2, 0.0);
+			// One pass over the blocks computes the model, residual and label of every block. The zero-motion
+			// cluster test (Overlay, which takes precedence over every other label) needs the neighbours'
+			// candidacy, so candidates are listed and resolved after the pass; a candidate that is not an
+			// overlay keeps the label the pass gave it. All distance tests use squares.
+			std::vector<uint8_t>& zeroCand = F.m_scratchZero;
+			zeroCand.assign(nb, 0);
+			std::vector<int> zeroList;
 			const bool confident = rec.confidence >= 0.5;
 			const double absThr2 = f.absThr * f.absThr, rel2 = f.rel * f.rel;
 			const Params& P = rec.params;
-			const bool persp = P.type == ModelType::Homography;
+			const bool persp = !AffineRow(P);
 			const double bs = in.blockSize;
 			const double cx0 = 0.5 * bs - in.picture.CentreX(), cy0 = 0.5 * bs - in.picture.CentreY();
 
-			auto labelRow = [&](int by)
-			{
-				const size_t rowOff = static_cast<size_t>(by & 1) * static_cast<size_t>(gw);
-				for (int bx = 0; bx < gw; ++bx)
-				{
-					const size_t b = static_cast<size_t>(by) * gw + bx;
-					if (f.excluded[b])
-					{
-						bd->label[b] = static_cast<uint8_t>(Label::Overlay);
-						continue;
-					}
-					if (zeroCand[b])
-					{
-						int nbrs = 0;
-						if (bx > 0 && zeroCand[b - 1]) ++nbrs;
-						if (bx + 1 < gw && zeroCand[b + 1]) ++nbrs;
-						if (by > 0 && zeroCand[b - gw]) ++nbrs;
-						if (by + 1 < gh && zeroCand[b + gw]) ++nbrs;
-						if (nbrs >= c.overlayZeroClusterMin)
-						{
-							bd->label[b] = static_cast<uint8_t>(Label::Overlay);
-							continue;
-						}
-					}
-					if (in.pixelResidual != nullptr && FiniteF(in.pixelResidual[b]) && in.pixelResidual[b] >= c.pixelResidualMinShare)
-					{
-						bd->label[b] = static_cast<uint8_t>(Label::Object);
-						bd->tinyMover[b] = 1;
-						continue;
-					}
-					const double thr2 = thr2Row[rowOff + bx];
-					if (trustedRow[rowOff + bx])
-					{
-						const double rx = bd->resX[b], ry = bd->resY[b];
-						bd->label[b] = static_cast<uint8_t>(rx * rx + ry * ry <= thr2 ? Label::Camera : Label::Object);
-						continue;
-					}
-					bool cam = in.texture != nullptr && FiniteF(in.texture[b]) && in.texture[b] <= c.flatTexture;
-					if (!cam && FiniteF(in.fwdX[b]) && FiniteF(in.fwdY[b]))
-					{
-						const double rx = in.fwdX[b] - bd->modelX[b], ry = in.fwdY[b] - bd->modelY[b];
-						cam = rx * rx + ry * ry <= thr2;
-					}
-					bd->label[b] = static_cast<uint8_t>(cam ? Label::Camera : Label::Unknown);
-				}
-			};
+			// Raw pointers hoisted out of the loop: byte stores would otherwise force the compiler to reload
+			// every vector's data pointer after each label write (uint8_t aliases everything).
+			uint8_t* const lab = bd->label.data();
+			uint8_t* const tiny = bd->tinyMover.data();
+			float* const resX = bd->resX.data();
+			float* const resY = bd->resY.data();
+			float* const modX = bd->modelX.data();
+			float* const modY = bd->modelY.data();
+			uint8_t* const zc = zeroCand.data();
+			const uint8_t* const excl = f.excluded.data();
+			const float* const fx = in.fwdX;
+			const float* const fy = in.fwdY;
+			const float* const ft = in.fwdTrust;
+			const float* const pres = in.pixelResidual;
+			const float* const tex = in.texture;
+			const double pixMin = c.pixelResidualMinShare, flat = c.flatTexture;
+			const size_t gws = static_cast<size_t>(gw);
 
 			for (int by = 0; by < gh; ++by)
 			{
-				const size_t rowOff = static_cast<size_t>(by & 1) * static_cast<size_t>(gw);
+				const size_t row = static_cast<size_t>(by) * gws;
 				// Row start: numerators u, v and denominator w of the model at the first block centre; the
-				// per-block step along the row is constant (translation/similarity/affine) or applied to the
-				// numerators and the denominator (homography: one division per block).
+				// per-block step along the row is constant (no perspective row) or applied to the numerators
+				// and the denominator (perspective: one division per block).
 				const double y = cy0 + by * bs;
 				double x = cx0;
 				double u = P.h[0] * x + P.h[1] * y + P.h[2];
@@ -992,7 +1058,7 @@ namespace CameraModel
 				const double du = P.h[0] * bs, dv = P.h[3] * bs, dw = P.h[6] * bs;
 				for (int bx = 0; bx < gw; ++bx, x += bs, u += du, v += dv, w += dw)
 				{
-					const size_t b = static_cast<size_t>(by) * gw + bx;
+					const size_t b = row + static_cast<size_t>(bx);
 					double dx, dy;
 					if (persp)
 					{
@@ -1005,30 +1071,74 @@ namespace CameraModel
 						dx = u - x;
 						dy = v - y;
 					}
-					if (!std::isfinite(dx) || !std::isfinite(dy))
+					if (!IsFiniteBits(dx) || !IsFiniteBits(dy))
 						dx = dy = 0;
-					bd->modelX[b] = static_cast<float>(dx);
-					bd->modelY[b] = static_cast<float>(dy);
+					const float mxf = static_cast<float>(dx), myf = static_cast<float>(dy);
+					modX[b] = mxf;
+					modY[b] = myf;
 					const double mm2 = dx * dx + dy * dy;
 					const double thr2 = std::max(absThr2, rel2 * mm2);
-					thr2Row[rowOff + bx] = thr2;
-					const bool tr = !f.excluded[b] && FiniteF(in.fwdTrust[b]) && in.fwdTrust[b] > 0.0f
-						&& FiniteF(in.fwdX[b]) && FiniteF(in.fwdY[b]);
-					trustedRow[rowOff + bx] = tr ? 1 : 0;
+					const float vx = fx[b], vy = fy[b], vt = ft[b];
+					const bool ex = excl[b] != 0;
+					const bool tr = !ex && vt > 0.0f && FiniteF(vt) && FiniteF(vx) && FiniteF(vy);
+					float rxf = 0.0f, ryf = 0.0f;
 					if (tr)
 					{
-						bd->resX[b] = static_cast<float>(in.fwdX[b] - dx);
-						bd->resY[b] = static_cast<float>(in.fwdY[b] - dy);
-						const double vm2 = static_cast<double>(in.fwdX[b]) * in.fwdX[b] + static_cast<double>(in.fwdY[b]) * in.fwdY[b];
+						rxf = static_cast<float>(vx - dx);
+						ryf = static_cast<float>(vy - dy);
+						const double vm2 = static_cast<double>(vx) * vx + static_cast<double>(vy) * vy;
 						if (confident && vm2 <= absThr2 && mm2 > thr2)
-							zeroCand[b] = 1;
+						{
+							zc[b] = 1;
+							zeroList.push_back(static_cast<int>(b));
+						}
 					}
+					resX[b] = rxf;
+					resY[b] = ryf;
+
+					uint8_t l, t = 0;
+					if (ex)
+						l = static_cast<uint8_t>(Label::Overlay);
+					else if (pres != nullptr && FiniteF(pres[b]) && pres[b] >= pixMin)
+					{
+						l = static_cast<uint8_t>(Label::Object);
+						t = 1;
+					}
+					else if (tr)
+					{
+						const double rx = rxf, ry = ryf;
+						l = static_cast<uint8_t>(rx * rx + ry * ry <= thr2 ? Label::Camera : Label::Object);
+					}
+					else
+					{
+						bool cam = tex != nullptr && FiniteF(tex[b]) && tex[b] <= flat;
+						if (!cam && FiniteF(vx) && FiniteF(vy))
+						{
+							const double rx = vx - mxf, ry = vy - myf;
+							cam = rx * rx + ry * ry <= thr2;
+						}
+						l = static_cast<uint8_t>(cam ? Label::Camera : Label::Unknown);
+					}
+					lab[b] = l;
+					tiny[b] = t;
 				}
-				if (by > 0)
-					labelRow(by - 1);
 			}
-			if (gh > 0)
-				labelRow(gh - 1);
+			// Zero-motion clusters (static logos): 4-neighbour candidates; raster order, decisions read only zc.
+			for (size_t k = 0; k < zeroList.size(); ++k)
+			{
+				const size_t b = static_cast<size_t>(zeroList[k]);
+				const int bx = static_cast<int>(b % gws), by = static_cast<int>(b / gws);
+				int nbrs = 0;
+				if (bx > 0 && zc[b - 1]) ++nbrs;
+				if (bx + 1 < gw && zc[b + 1]) ++nbrs;
+				if (by > 0 && zc[b - gws]) ++nbrs;
+				if (by + 1 < gh && zc[b + gws]) ++nbrs;
+				if (nbrs >= c.overlayZeroClusterMin)
+				{
+					lab[b] = static_cast<uint8_t>(Label::Overlay);
+					tiny[b] = 0;
+				}
+			}
 
 			if (c.objects && runObjects)
 			{

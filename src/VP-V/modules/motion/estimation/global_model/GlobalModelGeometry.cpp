@@ -148,7 +148,7 @@ namespace CameraModel
 				dx[i] = s[i].x + s[i].dx;
 				dy[i] = s[i].y + s[i].dy;
 				w[i] = minimal ? 1.0 : (s[i].w > 0 ? s[i].w : 0.0);
-				if (!std::isfinite(sx[i]) || !std::isfinite(sy[i]) || !std::isfinite(dx[i]) || !std::isfinite(dy[i]) || !std::isfinite(w[i]))
+				if (!IsFiniteBits(sx[i]) || !IsFiniteBits(sy[i]) || !IsFiniteBits(dx[i]) || !IsFiniteBits(dy[i]) || !IsFiniteBits(w[i]))
 					return false;
 				if (w[i] > 0)
 				{

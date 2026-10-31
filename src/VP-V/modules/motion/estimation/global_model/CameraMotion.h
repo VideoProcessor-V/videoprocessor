@@ -19,11 +19,16 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <vector>
 
 namespace CameraModel
 {
+	// Finiteness by exponent bits (exact, inline; std::isfinite is an out-of-line call on MSVC).
+	inline bool IsFiniteBits(float v) { uint32_t u; std::memcpy(&u, &v, sizeof(u)); return (u & 0x7F800000u) != 0x7F800000u; }
+	inline bool IsFiniteBits(double v) { uint64_t u; std::memcpy(&u, &v, sizeof(u)); return (u & 0x7FF0000000000000ull) != 0x7FF0000000000000ull; }
+
 	enum class ModelType : uint8_t { None, Translation, Similarity, Affine, Homography };
 
 	enum class Label : uint8_t { Unknown = 0, Camera = 1, Object = 2, Overlay = 3 };

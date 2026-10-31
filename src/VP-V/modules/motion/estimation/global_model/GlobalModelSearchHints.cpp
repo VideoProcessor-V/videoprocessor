@@ -122,10 +122,10 @@ namespace CameraModel
 				if (y + 1 > roi.by1) roi.by1 = y + 1;
 				const int nx[4] = { x - 1, x + 1, x, x };
 				const int ny[4] = { y, y, y - 1, y + 1 };
-				for (int k = 0; k < 4; ++k)
+				for (int d = 0; d < 4; ++d)
 				{
-					if (nx[k] < 0 || ny[k] < 0 || nx[k] >= b.gridW || ny[k] >= b.gridH) continue;
-					const size_t ni = static_cast<size_t>(ny[k]) * gw + static_cast<size_t>(nx[k]);
+					if (nx[d] < 0 || ny[d] < 0 || nx[d] >= b.gridW || ny[d] >= b.gridH) continue;
+					const size_t ni = static_cast<size_t>(ny[d]) * gw + static_cast<size_t>(nx[d]);
 					if (seen[ni] || out.hint[ni] != static_cast<uint8_t>(BlockHint::FinerGrid)) continue;
 					seen[ni] = 1;
 					stack.push_back(ni);

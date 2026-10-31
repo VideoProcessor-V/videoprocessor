@@ -72,7 +72,7 @@ namespace CameraModel
 				const int i = by * in.gridW + bx;
 				if (in.label[i] != static_cast<uint8_t>(Label::Object)) continue;
 				if (!(in.trust[i] > 0)) continue;
-				if (!std::isfinite(in.fwdX[i]) || !std::isfinite(in.fwdY[i])) continue;
+				if (!IsFiniteBits(in.fwdX[i]) || !IsFiniteBits(in.fwdY[i])) continue;
 				Candidate c;
 				c.index = i; c.bx = bx; c.by = by; c.x = x; c.y = y;
 				c.dx = in.fwdX[i]; c.dy = in.fwdY[i]; c.w = in.trust[i];
