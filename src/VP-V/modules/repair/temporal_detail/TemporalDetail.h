@@ -101,6 +101,28 @@ namespace TemporalDetail
 	// GrainScale (vprenderer/GrainPreserve.h): 1 at <= 2160 lines, lines / 2160 above.
 	inline double Scale(double planeLines) { return planeLines > 2160.0 ? planeLines / 2160.0 : 1.0; }
 
+	// The active picture (the renderer's trusted black-bar / picture rect, scaled to this plane; right/bottom exclusive).
+	// Everything (band splits, statistics, gates, templates, transfer, boost, cleaner, grain guard and add-back) runs
+	// inside it with its border treated as the plane edge (taps clamp there, never reach into a bar); pixels outside are
+	// copied unchanged. Empty (right <= left or bottom <= top) = the whole plane.
+	struct ActiveRect
+	{
+		int left = 0, top = 0, right = 0, bottom = 0;
+		bool operator==(const ActiveRect& o) const { return left == o.left && top == o.top && right == o.right && bottom == o.bottom; }
+		bool operator!=(const ActiveRect& o) const { return !(*this == o); }
+		// Clamped to a w x h plane; the whole plane when empty or degenerate.
+		ActiveRect Resolve(int w, int h) const
+		{
+			ActiveRect r;
+			r.left = (std::max)(0, (std::min)(w, left)); r.right = (std::max)(0, (std::min)(w, right));
+			r.top = (std::max)(0, (std::min)(h, top)); r.bottom = (std::max)(0, (std::min)(h, bottom));
+			if (r.right <= r.left || r.bottom <= r.top) { r.left = 0; r.top = 0; r.right = w; r.bottom = h; }
+			return r;
+		}
+		int Width() const { return right - left; }
+		int Height() const { return bottom - top; }
+	};
+
 	enum class Mode { Off, Steady };
 
 	struct Settings

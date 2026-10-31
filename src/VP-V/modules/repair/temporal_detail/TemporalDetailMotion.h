@@ -28,6 +28,7 @@ namespace TemporalDetail
 		int gridW = 0, gridH = 0;
 		double blockPx = 16.0;
 		std::vector<float> vx, vy, trust;   // gridW x gridH, raster; trust 0..1
+		double originX = 0.0, originY = 0.0; // the reader's coordinate origin in the grid's plane (an active-picture crop)
 
 		static MotionPair Uniform(int imageW, int imageH, double blockPx, double dx, double dy, double trust = 1.0)
 		{
@@ -54,6 +55,7 @@ namespace TemporalDetail
 		double blockSize = 0.0;
 		const uint8_t* label = nullptr;                 // gridW x gridH, 1 = Camera
 		double pictureCx = 0.0, pictureCy = 0.0;        // picture centre, plane pixels
+		double originX = 0.0, originY = 0.0;            // the reader's origin in the label grid's plane (an active-picture crop)
 	};
 
 	class IMotionSource
@@ -66,14 +68,43 @@ namespace TemporalDetail
 	};
 
 	// Per-sequence pairs fed by the caller (host adapter or tests). Camera() is always false.
+	// Bounded: the model reads only the presented frame's pairs and those of the queued frames ahead of it (composition
+	// is incremental, nothing older is read again), so entries are pruned (a) older than the newest stored sequence minus
+	// the retention window (a frame count, not a rate: it covers the deepest queue ahead of the presented frame), (b) older
+	// than the presented frame when the host calls Prune(presented), and (c) all at Clear() (resets, stamp changes).
 	class FieldMotionSource : public IMotionSource
 	{
 	public:
-		void SetBackward(uint64_t seq, const MotionPair& pair) { m_backward[seq] = pair; }
-		void SetForward(uint64_t seq, const MotionPair& pair) { m_forward[seq] = pair; }
-		void Clear() { m_backward.clear(); m_forward.clear(); }
+		static constexpr uint64_t kDefaultRetention = 128;  // frames kept behind the newest pair (the host also calls Prune per presented frame)
+		void SetRetention(uint64_t frames) { m_retention = frames < 1 ? 1 : frames; Trim(); }
+		uint64_t Retention() const { return m_retention; }
+		void SetBackward(uint64_t seq, const MotionPair& pair) { m_backward[seq] = pair; Note(seq); }
+		void SetForward(uint64_t seq, const MotionPair& pair) { m_forward[seq] = pair; Note(seq); }
+		virtual void Clear() { m_backward.clear(); m_forward.clear(); m_newest = 0; m_haveNewest = false; }
+		// Pairs older than the presented frame are never read again.
+		virtual void Prune(uint64_t presented) { Drop(m_backward, presented); Drop(m_forward, presented); }
+		virtual size_t Size() const { return m_backward.size() + m_forward.size(); }
 		bool Backward(uint64_t seq, MotionPair& out) const override { return Find(m_backward, seq, out); }
 		bool Forward(uint64_t seq, MotionPair& out) const override { return Find(m_forward, seq, out); }
+
+	protected:
+		template <typename M>
+		static void Drop(M& m, uint64_t from) { m.erase(m.begin(), m.lower_bound(from)); }
+		uint64_t Floor() const { return m_haveNewest && m_newest >= m_retention ? m_newest - m_retention + 1 : 0; }
+		uint64_t Ceiling() const { return m_newest + m_retention; }
+		virtual void Trim()
+		{
+			const uint64_t f = Floor(), c = Ceiling();
+			Drop(m_backward, f); Drop(m_forward, f); DropAbove(m_backward, c); DropAbove(m_forward, c);
+		}
+		void Note(uint64_t seq)
+		{
+			// A sequence far behind the newest (a seek back, a restart) starts the window again from it.
+			if (!m_haveNewest || seq > m_newest || m_newest - seq >= m_retention) { m_newest = seq; m_haveNewest = true; }
+			Trim();
+		}
+		template <typename M>
+		static void DropAbove(M& m, uint64_t above) { m.erase(m.upper_bound(above), m.end()); }
 
 	private:
 		static bool Find(const std::map<uint64_t, MotionPair>& m, uint64_t seq, MotionPair& out)
@@ -84,6 +115,8 @@ namespace TemporalDetail
 			return true;
 		}
 		std::map<uint64_t, MotionPair> m_backward, m_forward;
+		uint64_t m_retention = kDefaultRetention, m_newest = 0;
+		bool m_haveNewest = false;
 	};
 
 #ifdef TEMPORAL_DETAIL_HAVE_CAMERA_MODEL
@@ -93,7 +126,10 @@ namespace TemporalDetail
 	{
 	public:
 		explicit CameraModelMotionSource(const CameraModel::Policy& policy) : m_policy(policy) {}
-		void SetCamera(uint64_t seq, std::shared_ptr<const CameraModel::CameraMotion> record) { m_cam[seq] = std::move(record); }
+		void SetCamera(uint64_t seq, std::shared_ptr<const CameraModel::CameraMotion> record) { m_cam[seq] = std::move(record); Note(seq); }
+		void Clear() override { FieldMotionSource::Clear(); m_cam.clear(); }
+		void Prune(uint64_t presented) override { FieldMotionSource::Prune(presented); Drop(m_cam, presented); }
+		size_t Size() const override { return FieldMotionSource::Size() + m_cam.size(); }
 
 		bool Camera(uint64_t seq, CameraPairView& out) const override
 		{
@@ -115,6 +151,9 @@ namespace TemporalDetail
 			out.pictureCy = r.picture.CentreY();
 			return true;
 		}
+
+	protected:
+		void Trim() override { FieldMotionSource::Trim(); Drop(m_cam, Floor()); DropAbove(m_cam, Ceiling()); }
 
 	private:
 		CameraModel::Policy m_policy;

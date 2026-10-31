@@ -239,7 +239,7 @@ namespace TemporalDetail
 
 		inline double PairAt(const MotionPair& m, const std::vector<float>& g, double x, double y)
 		{
-			const double gx = (x + 0.5) / m.blockPx - 0.5, gy = (y + 0.5) / m.blockPx - 0.5;
+			const double gx = (x + m.originX + 0.5) / m.blockPx - 0.5, gy = (y + m.originY + 0.5) / m.blockPx - 0.5;
 			const double fx = std::floor(gx), fy = std::floor(gy);
 			const double tx = gx - fx, ty = gy - fy;
 			auto at = [&](int i, int j) { return static_cast<double>(g[static_cast<size_t>((std::max)(0, (std::min)(m.gridH - 1, j))) * m.gridW + (std::max)(0, (std::min)(m.gridW - 1, i))]); };
@@ -379,7 +379,8 @@ namespace TemporalDetail
 			bool cut = false, fade = false;
 			const IMotionSource* motion = nullptr;
 			std::vector<FutureFrame> future;   // queued modes: seq + 1, seq + 2, ... (the referee and future slot)
-			std::vector<double> quality;       // optional per-block bitrate quality 0..1 (empty = neutral 1)
+			std::vector<double> quality;       // optional per-block bitrate quality 0..1 on the active picture's block grid (empty = neutral 1)
+			ActiveRect active;                 // the active picture (empty = the whole plane)
 		};
 
 		// Model-only knobs for measurement and the guard's own test (not user settings, never in the config):
@@ -394,6 +395,7 @@ namespace TemporalDetail
 			double guardTemplateShare = kGuardTemplateShare;   // <= 0: the guard reads every low-f pixel (no structure mask)
 			bool guard = true;
 			double forceDrop = 0.0, forceFreeze = 0.0;
+			int slots = kSlots;                  // reference-store tier: past slots kept (1 .. kSlots; small cards keep fewer)
 		};
 
 		explicit Model(const Settings& settings) : m_set(settings) {}
@@ -423,6 +425,8 @@ namespace TemporalDetail
 
 		const Diagnostics& Diag() const { return m_diag; }
 
+		// Processes the active picture (in.active) as the whole plane: its border is the plane edge for every filter,
+		// statistic and warp; pixels outside it are copied unchanged (bit-exact).
 		Plane Process(const FrameIn& in);
 
 	private:
@@ -444,6 +448,7 @@ namespace TemporalDetail
 		void TemplateAt(const Contribution& c, int x, int y, double baseCur, double& t1, double& t2) const;
 		void CleanSlot(Source& s, const Analysis& A, const std::vector<const Source*>& mem, const std::vector<uint8_t>& memValid, const std::vector<uint8_t>& camBlock);
 		double Rho2At(const Source& s, bool cam, int bx, int by) const;
+		Plane ProcessActive(const FrameIn& in);
 
 		Settings m_set;
 		Detail::CleanBasis m_basis;
@@ -461,6 +466,9 @@ namespace TemporalDetail
 		int m_w = 0, m_h = 0, m_B = 16;
 		double m_scale = 1.0;
 		double m_camCx = 0.0, m_camCy = 0.0;
+		ActiveRect m_rect;                // the last frame's resolved active picture (plane coordinates)
+		bool m_rectMoved = false;         // its origin moved at equal size: a geometry reset
+		Plane m_lastFull;                 // the last full-plane output (repeats)
 	};
 
 	inline void Model::Position(const Source& s, bool cam, int px, int py, double& x, double& y) const
@@ -707,7 +715,89 @@ namespace TemporalDetail
 		return e;
 	}
 
+	namespace Detail
+	{
+		// The motion source seen from an active-picture crop at (ox, oy): same pairs, grids read at the plane position.
+		class OffsetMotionSource : public IMotionSource
+		{
+		public:
+			OffsetMotionSource(const IMotionSource* inner, double ox, double oy) : m_inner(inner), m_ox(ox), m_oy(oy) {}
+			bool Backward(uint64_t seq, MotionPair& out) const override { return Shift(m_inner && m_inner->Backward(seq, out), out); }
+			bool Forward(uint64_t seq, MotionPair& out) const override { return Shift(m_inner && m_inner->Forward(seq, out), out); }
+			bool Camera(uint64_t seq, CameraPairView& out) const override
+			{
+				if (!m_inner || !m_inner->Camera(seq, out)) return false;
+				out.pictureCx -= m_ox; out.pictureCy -= m_oy;   // picture-centred homographies: the centre in crop pixels
+				out.originX += m_ox; out.originY += m_oy;
+				return true;
+			}
+
+		private:
+			bool Shift(bool ok, MotionPair& m) const
+			{
+				if (ok) { m.originX += m_ox; m.originY += m_oy; }
+				return ok;
+			}
+			const IMotionSource* m_inner;
+			double m_ox, m_oy;
+		};
+
+		inline Plane Crop(const Plane& p, const ActiveRect& r)
+		{
+			Plane c(r.Width(), r.Height());
+			for (int y = 0; y < c.h; ++y)
+				for (int x = 0; x < c.w; ++x) c.at(x, y) = p.at(r.left + x, r.top + y);
+			return c;
+		}
+	}
+
 	inline Plane Model::Process(const FrameIn& in)
+	{
+		if (m_set.mode == Mode::Off)
+		{
+			m_diag.status = "off";
+			return in.luma;
+		}
+		const ActiveRect r = in.active.Resolve(in.luma.w, in.luma.h);
+		const bool whole = r.left == 0 && r.top == 0 && r.right == in.luma.w && r.bottom == in.luma.h;
+		// A repeat (same sequence, plane and picture): the last output again, no state advanced.
+		if (m_haveFrame && in.seq == m_prevSeq && r == m_rect && m_lastFull.w == in.luma.w && m_lastFull.h == in.luma.h) return m_lastFull;
+		m_rectMoved = m_haveFrame && r != m_rect && r.Width() == m_rect.Width() && r.Height() == m_rect.Height();
+		m_rect = r;
+		if (whole)
+		{
+			m_lastFull = ProcessActive(in);
+			return m_lastFull;
+		}
+		FrameIn c;
+		c.luma = Detail::Crop(in.luma, r);
+		c.seq = in.seq; c.contentHz = in.contentHz; c.planeLines = in.planeLines; c.stamps = in.stamps;
+		c.cut = in.cut; c.fade = in.fade; c.quality = in.quality;
+		const Detail::OffsetMotionSource shifted(in.motion, r.left, r.top);
+		c.motion = in.motion ? &shifted : nullptr;
+		std::vector<Plane> futures;
+		futures.reserve(in.future.size());
+		for (const FutureFrame& f : in.future)
+		{
+			if (!f.luma || f.luma->w != in.luma.w || f.luma->h != in.luma.h) break;
+			futures.push_back(Detail::Crop(*f.luma, r));
+		}
+		for (size_t k = 0; k < futures.size(); ++k)
+		{
+			FutureFrame ff;
+			ff.luma = &futures[k];
+			ff.seq = in.future[k].seq;
+			c.future.push_back(ff);
+		}
+		const Plane o = ProcessActive(c);
+		Plane full = in.luma;   // bars: the input, bit-exact
+		for (int y = 0; y < o.h; ++y)
+			for (int x = 0; x < o.w; ++x) full.at(r.left + x, r.top + y) = o.at(x, y);
+		m_lastFull = full;
+		return full;
+	}
+
+	inline Plane Model::ProcessActive(const FrameIn& in)
 	{
 		if (m_set.mode == Mode::Off)
 		{
@@ -716,7 +806,7 @@ namespace TemporalDetail
 		}
 		const int w = in.luma.w, h = in.luma.h;
 		// A repeat (same sequence, same size): the last output again, no state advanced.
-		if (m_haveFrame && in.seq == m_prevSeq && w == m_w && h == m_h && m_lastOut.w == w && m_lastOut.h == h) return m_lastOut;
+		if (m_haveFrame && !m_rectMoved && in.seq == m_prevSeq && w == m_w && h == m_h && m_lastOut.w == w && m_lastOut.h == h) return m_lastOut;
 		const double scale = Scale(in.planeLines);
 		const int B = (std::max)(1, static_cast<int>(std::floor(kBlockPx * scale + 0.5)));
 		const double hz = in.contentHz > 0.0 ? in.contentHz : kReferenceHz;
@@ -725,7 +815,7 @@ namespace TemporalDetail
 		const char* reason = nullptr;
 		if (m_haveFrame)
 		{
-			if (w != m_w || h != m_h || B != m_B) reason = "geometry";
+			if (w != m_w || h != m_h || B != m_B || m_rectMoved) reason = "geometry";
 			else if (in.seq != m_prevSeq + 1) reason = "sequence";
 			else if (in.stamps.full != m_stamps.full && PolicyOf(Counter::Full) == ReaderPolicy::Reset) reason = "stamp full";
 			else if (in.stamps.continuity != m_stamps.continuity && PolicyOf(Counter::Continuity) == ReaderPolicy::Reset) reason = "stamp continuity";
@@ -766,8 +856,8 @@ namespace TemporalDetail
 					for (int by = 0; by < bh; ++by)
 						for (int bx = 0; bx < bw; ++bx)
 						{
-							const int cbx = (std::min)(camView.gridW - 1, static_cast<int>(((bx + 0.5) * B) / camView.blockSize));
-							const int cby = (std::min)(camView.gridH - 1, static_cast<int>(((by + 0.5) * B) / camView.blockSize));
+							const int cbx = (std::min)(camView.gridW - 1, static_cast<int>(((bx + 0.5) * B + camView.originX) / camView.blockSize));
+							const int cby = (std::min)(camView.gridH - 1, static_cast<int>(((by + 0.5) * B + camView.originY) / camView.blockSize));
 							camBlock[static_cast<size_t>(by) * bw + bx] = camView.label[static_cast<size_t>(cby) * camView.gridW + cbx] == 1 ? 1 : 0;
 						}
 			}
@@ -944,7 +1034,8 @@ namespace TemporalDetail
 					if ((st.slot == id || st.prevSlot == id) && (!onlyFaded || st.wLim * st.hSm >= kEvictWeight)) return true;
 				return false;
 			};
-			if (static_cast<int>(m_slots.size()) >= kSlots)
+			const int slotCap = (std::max)(1, (std::min)(kSlots, m_tune.slots));
+			if (static_cast<int>(m_slots.size()) >= slotCap)
 			{
 				int victim = -1;
 				for (size_t k = 0; k < m_slots.size(); ++k)
@@ -968,7 +1059,7 @@ namespace TemporalDetail
 					m_slots.erase(m_slots.begin() + victim);
 				}
 			}
-			if (static_cast<int>(m_slots.size()) < kSlots)
+			if (static_cast<int>(m_slots.size()) < slotCap)
 			{
 				Source s;
 				s.id = curId = m_nextId++;

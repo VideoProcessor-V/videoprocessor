@@ -79,7 +79,8 @@
         "src/VP-V/modules/input/signal/HdrInferenceChoice.h",
         "src/VP-V/modules/input/signal/ResyncEvent.h",
         "src/VP-V/modules/input/signal/ResyncShadow.h",
-        "src/VP-V/modules/input/signal/ResyncCallSites.h"
+        "src/VP-V/modules/input/signal/ResyncCallSites.h",
+        "src/VP-V/modules/input/signal/ResyncDrive.h"
       ],
       "components": {
         "files": {
@@ -324,6 +325,7 @@
         "src/VP-V/segments/EntranceSegment.cpp",
         "src/VP-V/segments/EntranceSegment.h",
         "src/VP-V/modules/scaling/rebase/EntranceGpuDrain.h",
+        "src/VP-V/modules/scaling/rebase/RebaseDecision.h",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
       ],
       "components": {
@@ -510,16 +512,19 @@
     {
       "slot": "scaling.chroma_upscale",
       "order": 120,
-      "status": "placeholder",
-      "code_location": "legacy",
+      "status": "partial",
+      "code_location": "migrated",
       "live_files": [
-        "shaders/CfL_Prediction.glsl"
+        "src/VP-V/modules/scaling/chroma_upscale/ChromaCfl.h",
+        "src/VP-V/modules/scaling/chroma_upscale/ChromaCflGpu.h",
+        "src/VP-V/modules/scaling/chroma_upscale/ChromaCflGpu.cpp",
+        "src/VP-V/modules/scaling/chroma_upscale/README.md",
+        "src/VP-V/modules/scaling/chroma_upscale/tests/ChromaCflTests.cpp",
+        "src/VP-V/modules/scaling/chroma_upscale/tests/README.md"
       ],
       "components": {
         "files": {
-          "required": [
-            "shaders/CfL_Prediction.glsl"
-          ],
+          "required": [],
           "optional": []
         },
         "hardware": {

@@ -1,6 +1,6 @@
 # TemporalDetail (`repair.temporal_detail`, DRAFT)
 
-Unit **repair** | replaces `repair.texture_restore` (order 90) | status **draft**, no call sites | hook: prepass
+Unit **repair** | replaces `repair.texture_restore` (order 90) | status **draft**: CPU model + GPU passes (WARP-matched), no call sites | hook: prepass
 
 ## Purpose
 
@@ -17,6 +17,14 @@ correlation increase <= 0.05.
 - Motion: an `IMotionSource`: today's vector field, or the camera model through an adapter compiled only when its header exists.
 - Output: same size and format, delay 0; look-ahead optional (queued modes).
 - Off (`temporal_detail = off`): the module does not run, output = input byte-identical.
+- Active picture (owner 2026-10-31, after the detail pulse's bar halos): `FrameIn::active` / `Gpu::Params::active` is the
+  renderer's trusted black-bar / picture rect scaled to the plane. Everything (split, statistics, gates, templates,
+  transfer, boost, cleaner, grain guard, add-back) runs on that rect with its border as the plane edge (no tap reaches
+  into a bar; bar blocks do not exist for the statistics); bar pixels are copied bit-exact. Moving the rect at equal size
+  resets the store (geometry). Motion grids stay in plane coordinates (`MotionPair::originX/Y`).
+- Motion sources are bounded (long-run hunt 2026-10-31): `FieldMotionSource` keeps a 128-frame window behind its newest
+  pair, `Prune(presented)` drops everything older than the presented frame (the model never re-reads an older pair:
+  composition is incremental), `Clear()` at resets; the camera adapter prunes its records with them.
 
 ## Algorithm (CPU reference model `TemporalDetailModel.h`; shaders mirror it)
 
@@ -128,7 +136,7 @@ Descriptors mirror doc 25 §B1 (map 1:1 onto `core/Products.h`).
 | Product | Inputs | Backend | History | Size at 4K |
 |---|---|---|---|---|
 | `td.analysis` (S/G split, block maps, rebounds, softening run) | re-based luma, P4 cut/fade, bitrate quality (optional) | GpuCompute | 1 | ~1 MB |
-| `td.refstore` (K past + 1 future slots, per-block state) | analysis, P3/P2 motion, camera model (optional), queue frames (+d) | GpuCompute | K | ~16 MB R16F S + 4 MB base + 33 MB cleaned bands (RG16F) per slot |
+| `td.refstore` (K past slots in one atlas, per-block state) | analysis, P3/P2 motion, camera model (optional), queue frames (+d) | GpuCompute | K | 83 MB per slot at 4K (RGBA16F raw + cleaned bands, R16 base) |
 
 Cleaner cost (estimate, RTX 3090 at 4K, not dispatched): only on admission frames (a refresh, e.g. 2 of 8 frames in IBBBPBBB):
 ~0.52 M half-step 8 x 8 patches x (2 + M <= 4 forward, 2 inverse) separable DCTs ~ 4 GMAC plus one sample of each aligned
@@ -188,10 +196,43 @@ notice; Original pathway sets `temporal_detail = off`; reuse the host plumbing (
 DetailLookAhead, status strings). Old keys are read for one release. A repeat (same
 sequence) returns the last output (repeat/foreign/phase pictures come at integration); `CameraModelMotionSource` stays uncompiled until feat/camera-model merges.
 
+## GPU implementation (TemporalDetailGpu.h/.cpp, TemporalDetailShaders.h)
+
+Every model step runs as libplacebo compute passes, nothing read back within a frame (the per-block controller lives in
+GPU textures): grain split (repair.grain_split, GrainSplitGpu) -> MEAS -> COMPOSE -> EVAL (per slot x block) -> TRACK
+-> ADMIT (one workgroup) -> CLEAN (4 parity classes of DCT patches; work only on admission frames) -> store slot ->
+WEIGHT -> PROJ -> TRANSFER -> GUARD sums / EMA / pool -> counters -> APPLY. Deterministic (fixed reduction trees, no
+atomics, no barrier in varying flow). Matches the model to 1/64 code (the output's quantisation) on WARP over I/B pans,
+both template variants, resets / repeats / motion loss, the 2-slot tier and letterbox / pillarbox pictures. Not on the GPU
+yet: the queued-mode future slot / referee and the camera homography chain (the model without them is what runs).
+
+Memory (TextureBytes, exact for the allocation): 3840x2160 **945 MiB** at 5 slots (grain split 253 MiB, slot atlas 396,
+cleaner accumulators 127, delta / previous grain / output 142, block grids ~24), **701 MiB** at 2 slots; 1920x1080 about a
+quarter. The store is tier-able: `Params::slots` (1..5, model `Tuning::slots`), `SlotsForBudget(bytes, w, h)` picks the
+largest that fits; below 5 the status says "store N of 5 slots (memory tier)". Further savings (not done): aliasing the
+cleaner accumulators onto the split's band texture (-127 MiB), half-resolution base (README plan).
+
+Time (estimates; TemporalDetailGpuTiming measures on hardware): ~1.3 G texel reads per 4K frame at 5 slots worst case
+(EVAL, PROJ and TRANSFER each sample every live slot with 4x4 Catmull-Rom), plus the grain split (~0.7 G) and, on
+admission frames, the cleaner (~4 GMAC). RTX 3090: ~5-8 ms at 4K (~1.5-2 ms at 1080p); RTX 3050 Ti laptop: ~20-35 ms at
+4K (~5-9 ms at 1080p) - not real-time at 4K on the laptop with 5 slots. Next optimisation: shared-memory slot tiles per
+block (the warp is near a translation per block, ~10x fewer reads).
+
+Renderer call sites needed (after the Bill merge; none made): (1) add GrainSplitGpu.cpp and TemporalDetailGpu.cpp to
+VideoProcessor-VPRenderer(.Beta).vcxproj; (2) in the prepass after the re-base (texture_restore's position), when
+`temporal_detail = steady`: `Module::Apply(gpu, dispatch, rebasedFrame, params, out)` with seq / content rate / plane lines
+/ Indicator stamps / cut-fade flags / the active picture rect / backward (and forward) vector textures scaled to the
+re-based plane; on false render the frame as it was and show "Temporal detail: inactive (<reason>)"; (3) `Forget()` on the
+existing Forget triggers; (4) `FieldMotionSource::Prune(presented)` (or the host's own vector ring) per presented frame;
+(5) the memory tier from the card profile (`SlotsForBudget`); (6) settings keys into RendererProfileConfig / Config /
+slots.json with the migration in "Migration" below.
+
 ## Tests and shaders
 
-`TemporalDetailShaders.h` holds the draft GLSL (not dispatched). `tests/TemporalDetailModelTests.cpp` (CPU, model only): off identity, I/B pulse, sub-pixel pans, focus pulls,
+`TemporalDetailShaders.h` holds the GLSL; `tests/TemporalDetailGpuTests.cpp` (GpuWarp; timing GpuHardware) checks the
+split and the module against the models. `tests/TemporalDetailModelTests.cpp` (CPU, model only): off identity, I/B pulse, sub-pixel pans, focus pulls,
 rack focus, motion blur, occlusion, cuts and stamps, determinism, grain (owner bounds on a two-seed grain isolate; the
 current grain untouched), the grain guard against forced damage, the gain decomposition (structure vs grain), the grain
 split's exact add-back, flicker, future referee, irregular patterns, scale and rate, camera-adapter fallback, boost
-fallback, settings parsing.
+fallback, settings parsing, the active picture (letterbox / pillarbox with a pan: bars bit-exact, output independent of the
+bar level and identical to the picture processed alone), the bounded motion source (10,000 frames).

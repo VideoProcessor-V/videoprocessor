@@ -1348,7 +1348,143 @@ namespace VideoProcessorTest
 			// Declared tables are consistent (compile-time data the host will map onto core/Products.h).
 			Assert::IsTrue(PolicyOf(Counter::Full) == ReaderPolicy::Reset && PolicyOf(Counter::Timing) == ReaderPolicy::Ignore, L"reader policies");
 			Assert::AreEqual(3, static_cast<int>(sizeof(kProducts) / sizeof(kProducts[0])), L"three products");
-			Assert::IsTrue(Shaders::kSplit != nullptr && Shaders::kBlockMeasures != nullptr && Shaders::kValidate != nullptr && Shaders::kTransfer != nullptr, L"draft shaders declared");
+			Assert::IsTrue(Shaders::kMeasBody != nullptr && Shaders::kCleanBody != nullptr && Shaders::kWeightBody != nullptr && Shaders::kTransferBody != nullptr, L"shaders declared");
+		}
+
+		TEST_METHOD(TemporalDetailMotionSourceIsBounded)
+		{
+			// Long-run hunt (2026-10-31): the per-sequence pair maps were never pruned. Over 10,000 frames the source stays
+			// bounded by its retention window without the host's help, stays at the queue depth when the host prunes the
+			// presented frame, survives a seek back, and Clear() empties it; the model keeps working on a pruned source.
+			FieldMotionSource m;
+			const MotionPair pair = MotionPair::Uniform(kW, kH, 16.0, -0.25, 0.0);
+			size_t worst = 0;
+			for (uint64_t t = 0; t < 10000; ++t)
+			{
+				m.SetBackward(t, pair);
+				m.SetForward(t, pair);
+				worst = (std::max)(worst, m.Size());
+			}
+			LogF("unpruned host: worst size %.0f entries (retention %.0f frames)", static_cast<double>(worst), static_cast<double>(m.Retention()));
+			Assert::IsTrue(worst <= 2 * m.Retention(), L"bounded by the retention window");
+			m.SetBackward(5, pair);   // a seek back restarts the window
+			Assert::IsTrue(m.Size() <= 2 * m.Retention(), L"bounded after a seek back");
+			MotionPair got;
+			Assert::IsTrue(m.Backward(5, got), L"the seek target is kept");
+			m.Clear();
+			Assert::AreEqual(static_cast<size_t>(0), m.Size(), L"Clear empties it");
+			// A host that prunes the presented frame (queue 4 ahead) keeps about the queue depth, and the model runs on it.
+			const int ahead = 4;
+			const Stream s = BuildPan(Pattern("IBBBPBBB", 48), 0.25, 0.0);
+			Model model(Steady());
+			size_t worstPruned = 0;
+			for (uint64_t t = 0; t < 10000; ++t)
+			{
+				m.SetBackward(t + ahead, pair);
+				m.SetForward(t + ahead, pair);
+				if (t == 0)
+					for (uint64_t k = 0; k < static_cast<uint64_t>(ahead); ++k) { m.SetBackward(k, pair); m.SetForward(k, pair); }
+				if (t < 48)
+				{
+					Model::FrameIn in;
+					in.luma = s.frames[static_cast<size_t>(t)];
+					in.seq = t;
+					in.contentHz = kHz;
+					in.motion = &m;
+					model.Process(in);
+					Assert::IsTrue(model.Diag().status.find("motion lost") == std::string::npos, L"the presented pair is still there");
+				}
+				m.Prune(t);
+				worstPruned = (std::max)(worstPruned, m.Size());
+			}
+			LogF("pruning host: worst size %.0f entries", static_cast<double>(worstPruned));
+			Assert::IsTrue(worstPruned <= static_cast<size_t>(2 * (ahead + 1)), L"the queue depth only");
+		}
+
+		TEST_METHOD(TemporalDetailActivePictureKeepsBarsAndEdges)
+		{
+			// Owner 2026-10-31 (the detail pulse's bar halos): with an active picture (letterbox, pillarbox), bar pixels stay
+			// bit-exact, no filter tap reaches across the bar boundary (the picture's output does not depend on the bar's
+			// level), and no undershoot / overshoot appears within 8 px of the boundary; a pan runs next to the bar.
+			struct Case { const char* name; int pw, ph; ActiveRect rect; };
+			const Case cases[] = { { "letterbox", kW, kH + 32, { 0, 16, kW, kH + 16 } }, { "pillarbox", kW + 32, kH, { 16, 0, kW + 16, kH } } };
+			for (const Case& c : cases)
+			{
+				const int n = 24;
+				const Stream s = BuildPan(Pattern("IBBBPBBB", n), 0.6, 0.0);
+				FieldMotionSource motion;
+				for (int t = 0; t < n; ++t)
+				{
+					motion.SetBackward(static_cast<uint64_t>(t), MotionPair::Uniform(c.pw, c.ph, 16.0, -0.6, 0.0));
+					motion.SetForward(static_cast<uint64_t>(t), MotionPair::Uniform(c.pw, c.ph, 16.0, 0.6, 0.0));
+				}
+				Plane outs[2][n], alone[n];
+				{
+					// The picture alone as a plane: the active picture must be processed exactly like it.
+					Model m(Steady());
+					for (int t = 0; t < n; ++t)
+					{
+						Model::FrameIn in;
+						in.luma = s.frames[static_cast<size_t>(t)];
+						in.seq = static_cast<uint64_t>(t);
+						in.contentHz = kHz;
+						in.motion = &motion;
+						alone[t] = m.Process(in);
+					}
+				}
+				for (int bar = 0; bar < 2; ++bar)
+				{
+					Model m(Steady());
+					for (int t = 0; t < n; ++t)
+					{
+						Model::FrameIn in;
+						in.luma = Plane(c.pw, c.ph, bar ? 900.0 : 16.0);
+						for (int y = 0; y < kH; ++y)
+							for (int x = 0; x < kW; ++x) in.luma.at(c.rect.left + x, c.rect.top + y) = s.frames[static_cast<size_t>(t)].at(x, y);
+						in.seq = static_cast<uint64_t>(t);
+						in.contentHz = kHz;
+						in.motion = &motion;
+						in.active = c.rect;
+						outs[bar][t] = m.Process(in);
+						const Plane& o = outs[bar][t];
+						for (int y = 0; y < c.ph; ++y)
+							for (int x = 0; x < c.pw; ++x)
+							{
+								const bool inside = x >= c.rect.left && x < c.rect.right && y >= c.rect.top && y < c.rect.bottom;
+								if (!inside) Assert::IsTrue(o.at(x, y) == in.luma.at(x, y), L"bar pixels bit-exact");
+							}
+					}
+				}
+				double worstDep = 0.0, worstEdge = 0.0, worstAlone = 0.0, edgeAlone = 0.0, changed = 0.0;
+				for (int t = 0; t < n; ++t)
+				{
+					const Plane& f = s.frames[static_cast<size_t>(t)];
+					double lo = 1e30, hi = -1e30;
+					for (double v : f.v) { lo = (std::min)(lo, v); hi = (std::max)(hi, v); }
+					for (int y = 0; y < kH; ++y)
+						for (int x = 0; x < kW; ++x)
+						{
+							const double a = outs[0][t].at(c.rect.left + x, c.rect.top + y), b = outs[1][t].at(c.rect.left + x, c.rect.top + y);
+							worstDep = (std::max)(worstDep, std::fabs(a - b));
+							worstAlone = (std::max)(worstAlone, std::fabs(a - alone[t].at(x, y)));
+							changed += std::fabs(a - f.at(x, y)) > 0.05 ? 1.0 : 0.0;
+							const bool nearEdge = (c.rect.top > 0 && (y < 8 || y >= kH - 8)) || (c.rect.left > 0 && (x < 8 || x >= kW - 8));
+							if (nearEdge)
+							{
+								worstEdge = (std::max)(worstEdge, (std::max)(lo - a, a - hi));
+								edgeAlone = (std::max)(edgeAlone, (std::max)(lo - alone[t].at(x, y), alone[t].at(x, y) - hi));
+							}
+						}
+				}
+				char line[200];
+				std::snprintf(line, sizeof line, "%s: vs bar level %.3g, vs the picture alone %.3g codes; beyond the frame's range near the boundary %.3g (picture alone %.3g); changed %.0f px",
+					c.name, worstDep, worstAlone, worstEdge, edgeAlone, changed);
+				Log(line);
+				Assert::IsTrue(worstDep == 0.0, L"the picture does not depend on the bars (no tap across the boundary)");
+				// The boundary behaves exactly as a plane edge: no undershoot or overshoot the bars add (the detail pulse's halos).
+				Assert::IsTrue(worstAlone == 0.0 && worstEdge <= edgeAlone, L"the bar boundary is a plane edge");
+				Assert::IsTrue(changed > 0.0, L"the transfer runs inside the picture");
+			}
 		}
 	};
 }
