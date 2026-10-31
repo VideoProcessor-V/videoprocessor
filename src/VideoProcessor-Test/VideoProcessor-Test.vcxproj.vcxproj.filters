@@ -235,6 +235,7 @@
   <ItemGroup><ClCompile Include="..\VP-V\modules\drive\led_compensation\tests\LedCompensationHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\drive\led_measure\tests\LedMeasureHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\input\capture\tests\CaptureUnpackHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\input\capture\tests\EarlyUploadHandoffTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\input\signal\tests\DvTunnelUnpackHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\input\source_analysis\tests\SourceResolutionHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\consumers\tests\DejudderHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>

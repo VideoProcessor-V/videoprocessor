@@ -8192,15 +8192,17 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "DeckLink v210 / UYVY frames are uploaded as they arrive and unpacked on the GPU: the same picture byte for "
             "byte, about half the time at 4K and no CPU conversion. CPU = the old conversion. RGB formats follow the "
             "'Native 10/12-bit RGB capture' choice (in Fixes under test)."));   // audit 2026-10-16: was "below"
-        // audit 2026-10-16: the default is Auto (on only in the low-latency
-        // path), so the label no longer says experimental.
+        // The default is Auto: early upload in every mode, guarded by free video
+        // memory (efficiency fixes off: the low-latency path only), so the label
+        // no longer says experimental.
         auto* captureUpload = addChoice(QStringLiteral("Upload frames as they arrive"), QStringLiteral("capture_upload"),
             { QStringLiteral("auto"), QStringLiteral("render"), QStringLiteral("early") });
-        captureUpload->setItemText(captureUpload->findData(QStringLiteral("auto")), QStringLiteral("Auto (early in the low-latency path)"));
+        captureUpload->setItemText(captureUpload->findData(QStringLiteral("auto")), QStringLiteral("Auto (early in every mode)"));
         captureUpload->setItemText(captureUpload->findData(QStringLiteral("render")), QStringLiteral("Off (the render thread uploads)"));
         captureUpload->setItemText(captureUpload->findData(QStringLiteral("early")), QStringLiteral("On (early, second device)"));
         captureUpload->setToolTip(QStringLiteral(
-            "Auto (default): on only in the low-latency path, off otherwise. On: each captured frame is copied to the "
+            "Auto (default): early in every mode, guarded by free video memory (the render upload, shown under Fallbacks "
+            "engaged, when memory is short); with efficiency fixes off, only in the low-latency path. On: each captured frame is copied to the "
             "GPU on its own thread as it arrives, instead of by the render thread when it is shown: about 5 ms less work "
             "for the render thread per 4K 12-bit frame, and the copy overlaps the previous frame's rendering. A frame "
             "with no free upload slot simply takes the normal path. Off: the render thread uploads every frame."));

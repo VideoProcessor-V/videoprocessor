@@ -14,6 +14,7 @@
     "src/VP-V/modules/input/capture/UploadReuse.h",
     "src/VP-V/modules/input/capture/EarlyUpload.cpp",
     "src/VP-V/modules/input/capture/EarlyUpload.h",
+    "src/VP-V/modules/input/capture/EarlyUploadHandoff.h",
     "src/VideoProcessor-Lib/CaptureInput.cpp",
     "src/VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.cpp",
     "src/VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.h",

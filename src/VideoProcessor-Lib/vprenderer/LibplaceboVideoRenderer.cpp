@@ -71,6 +71,7 @@
 #include <VP-V/modules/input/signal/DvGpuUnpackSession.h>   // WP-14: the DV tunnel GPU unpack glue
 #include <VP-V/modules/input/signal/DvCompareCaptureSink.h>      // feat/dv-l8: DV comparison capture (diagnostic; WP-17 adapter)
 #include <vprenderer/EarlyUpload.h>
+#include <VP-V/modules/input/capture/EarlyUploadHandoff.h>
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h>   // WP-23 frame analysis store
 #include <VP-V/modules/input/signal/ResyncCallSites.h>   // R1 call-site helpers
 #include <VP-V/modules/input/signal/ResyncShadow.h>   // resync_event shadow (R1)
@@ -1152,7 +1153,7 @@ namespace
 		// early = each raw frame uploaded on the conversion thread as it arrives
 		// (EarlyUpload, a second device and shared textures); render = the
 		// render thread uploads it (today).
-		std::string captureUpload = "auto";   // auto (2026-10-16): early upload in the low-latency path
+		std::string captureUpload = "auto";   // auto: early upload in every mode (VRAM-guarded); efficiency_fixes off: low-latency path only
 		// Planner Q4 (2026-10-16): every key and value of the profile sections applied, so a
 		// profile edit always changes the effective fingerprint (and is applied live) - also
 		// for keys added later, without anyone having to list them in the fingerprint.
@@ -5561,6 +5562,7 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<size_t> earlyUploadQueueTarget{ AlphaQueuePolicy::DEFAULT_DESIRED_DEPTH + 1 };   // the queue target (L4)
 	uint64_t rawAnalysisLoggedGeneration = 0;
 	uint64_t earlyUsed = 0, earlyFallback = 0;
+	uint64_t earlyLate = 0, earlyWaited = 0;   // render thread: render upload because the early upload had not started / waits on a running upload
 	// Render thread, each raw frame: the pool open when wanted (closed when not).
 	// Efficiency audit 2026-10-24 #3: the decision is EarlyUploadPolicy's (VRAM guard by need,
 	// re-checked every 5 s while closed); a guard refusal is listed under "Fallbacks engaged".
@@ -5572,15 +5574,19 @@ struct LibplaceboVideoRenderer::Impl
 			if (earlyUpload->IsOpen())
 			{
 				earlyUpload->Close();
-				DebugLog::Log("Early upload: off (%llu frames read early, %llu took the render upload)",
-					static_cast<unsigned long long>(earlyUsed), static_cast<unsigned long long>(earlyFallback));
+				DebugLog::Log("Early upload: off (%llu frames read early, %llu took the render upload (%llu before the early upload started), %llu waited for a running upload)",
+					static_cast<unsigned long long>(earlyUsed), static_cast<unsigned long long>(earlyFallback),
+					static_cast<unsigned long long>(earlyLate), static_cast<unsigned long long>(earlyWaited));
 			}
 			earlyOpenFailed = false;
 			earlyGuardChecked = false;
 			earlyGuardBlocked.store(false, std::memory_order_release);
 			SyncFallback(FallbackCatalog::EarlyUpload(false, false, std::string()));
+			earlyRenderUploads = FallbackCatalog::EarlyUploadRenderUploads();
+			SyncFallback(earlyRenderUploads.last);
 			return;
 		}
+		SyncFallback(earlyRenderUploads.Current(GetTickCount64()));   // ages out with no eligible payloads
 		if (earlyUpload->IsOpen())
 			return;
 		const SteadyClock::time_point now = SteadyClock::now();
@@ -5636,14 +5642,44 @@ struct LibplaceboVideoRenderer::Impl
 	}
 	// Render thread: the early-uploaded texture of a payload (with its GPU wait
 	// queued), or nullptr (the unpack uploads from the frame).
-	pl_tex EarlyTexture(const QueuedFrame::ConvertedPayload& payload, EarlyUpload::Slot*& slot)
+	// late: the render uploads because the early upload had not started; waitedMs: time blocked on
+	// a running conversion-thread upload (timed apart from the unpack submit).
+	struct EarlyTake { bool late = false; double waitedMs = 0.0; };
+	FallbackCatalog::EarlyUploadRenderUploads earlyRenderUploads;   // "Fallbacks engaged: early upload frames"
+	pl_tex EarlyTexture(const QueuedFrame::ConvertedPayload& payload, EarlyUpload::Slot*& slot, EarlyTake* take = nullptr)
 	{
-		slot = payload.early ? static_cast<EarlyUpload::Slot*>(payload.early.get()) : nullptr;
+		std::shared_ptr<void> handle = payload.early;
+		EarlyUploadHandoff::Outcome outcome = EarlyUploadHandoff::Outcome::NoSlot;
+		bool first = false;
+		const double takeStart = PassTimerHook::Hook::NowMs();
+		if (!handle && payload.earlyHandoff)
+			handle = payload.earlyHandoff->Take(&outcome, &first);   // the slot stays alive through the handoff the payload holds
+		const bool waited = outcome == EarlyUploadHandoff::Outcome::WaitedThenEarly || outcome == EarlyUploadHandoff::Outcome::WaitedThenNone;
+		slot = handle ? static_cast<EarlyUpload::Slot*>(handle.get()) : nullptr;
 		pl_tex tex = slot && earlyUpload->IsOpen() ? earlyUpload->Acquire(*slot) : nullptr;
 		if (!tex)
 			slot = nullptr;
 		++(tex ? earlyUsed : earlyFallback);
+		const bool late = outcome == EarlyUploadHandoff::Outcome::Late;   // once per payload (Pending -> Abandoned)
+		earlyLate += late ? 1 : 0;
+		earlyWaited += waited ? 1 : 0;
+		if (first)   // once per early-eligible payload: the visible share of render uploads
+			SyncFallback(earlyRenderUploads.Note(GetTickCount64(), late, !tex && !late, waited));
+		if (take)
+		{
+			take->late = late || outcome == EarlyUploadHandoff::Outcome::AbandonedAgain;
+			take->waitedMs = waited ? PassTimerHook::Hook::NowMs() - takeStart : 0.0;
+		}
 		return tex;
+	}
+	// The upload timers of one raw payload (efficiency timers T4), the wait booked apart.
+	void BookUploadTimers(pl_tex early, const EarlyTake& take, double startMs)
+	{
+		if (take.waitedMs > 0.0)
+			passTimerHook.AddCpu("upload: waited for the conversion-thread upload", PassTimers::Kind::CpuWait, take.waitedMs);
+		passTimerHook.AddCpu(early ? "upload: unpack submit (early slot)" : take.late ?
+			"upload: CPU copy + unpack submit (render thread, early upload not started)" : "upload: CPU copy + unpack submit (render thread)",
+			PassTimers::Kind::CpuWork, PassTimerHook::Hook::NowMs() - startMs - take.waitedMs);
 	}
 	std::atomic<int> rawBuffersPeak{ 0 };
 	std::atomic<bool> rgbGpuFailed{ false };
@@ -6042,13 +6078,13 @@ struct LibplaceboVideoRenderer::Impl
 		SyncEarlyUpload(payload.rawBytes);
 		EarlyUpload::Slot* slot = nullptr;
 		const double uploadCpuStart = PassTimerHook::Hook::NowMs();   // efficiency timers T4
-		const pl_tex early = EarlyTexture(payload, slot);
+		EarlyTake take;
+		const pl_tex early = EarlyTexture(payload, slot, &take);
 		bool unpacked = rgbUnpack->Unpack(payload.rawEncoding, bt2020, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
 			rgb, luma, false, early);
 		if (slot)
 			earlyUpload->Used(*slot);
-		passTimerHook.AddCpu(early ? "upload: unpack submit (early slot)" : "upload: CPU copy + unpack submit (render thread)",
-			PassTimers::Kind::CpuWork, PassTimerHook::Hook::NowMs() - uploadCpuStart);
+		BookUploadTimers(early, take, uploadCpuStart);
 		if (!unpacked && early)
 			unpacked = rgbUnpack->Unpack(payload.rawEncoding, bt2020, payload.rawFrame->GetData(), payload.rawRowBytes, width, height, rgb, luma);
 		if (unpacked)
@@ -6108,13 +6144,13 @@ struct LibplaceboVideoRenderer::Impl
 		SyncEarlyUpload(payload.rawBytes);
 		EarlyUpload::Slot* slot = nullptr;
 		const double uploadCpuStart = PassTimerHook::Hook::NowMs();   // efficiency timers T4
-		const pl_tex early = EarlyTexture(payload, slot);
+		EarlyTake take;
+		const pl_tex early = EarlyTexture(payload, slot, &take);
 		bool unpacked = unpack.Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
 			payload.dvTunnelHighAligned, planes, early);
 		if (slot)
 			earlyUpload->Used(*slot);
-		passTimerHook.AddCpu(early ? "upload: unpack submit (early slot)" : "upload: CPU copy + unpack submit (render thread)",
-			PassTimers::Kind::CpuWork, PassTimerHook::Hook::NowMs() - uploadCpuStart);
+		BookUploadTimers(early, take, uploadCpuStart);
 		if (!unpacked && early)   // the early texture refused: the frame itself
 			unpacked = unpack.Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
 				payload.dvTunnelHighAligned, planes);
@@ -6135,13 +6171,13 @@ struct LibplaceboVideoRenderer::Impl
 		SyncEarlyUpload(payload.rawBytes);
 		EarlyUpload::Slot* slot = nullptr;
 		const double uploadCpuStart = PassTimerHook::Hook::NowMs();   // efficiency timers T4
-		const pl_tex early = EarlyTexture(payload, slot);
+		EarlyTake take;
+		const pl_tex early = EarlyTexture(payload, slot, &take);
 		bool unpacked = captureUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
 			planes, early);
 		if (slot)
 			earlyUpload->Used(*slot);
-		passTimerHook.AddCpu(early ? "upload: unpack submit (early slot)" : "upload: CPU copy + unpack submit (render thread)",
-			PassTimers::Kind::CpuWork, PassTimerHook::Hook::NowMs() - uploadCpuStart);
+		BookUploadTimers(early, take, uploadCpuStart);
 		if (!unpacked && early)   // the early texture refused: the frame itself
 			unpacked = captureUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height, planes);
 		if (unpacked)
@@ -8434,8 +8470,9 @@ struct LibplaceboVideoRenderer::Impl
 				if (earlyUpload->IsOpen())
 				{
 					const EarlyUpload::Stats es = earlyUpload->GetStats();
-					DebugLog::Log("Early upload: closed (%llu frames read early, %llu took the render upload; %llu uploads, %llu with no free slot (held %llu, GPU release pending %llu), %llu failed)",
+					DebugLog::Log("Early upload: closed (%llu frames read early, %llu took the render upload (%llu before the early upload started), %llu waited for a running upload; %llu uploads, %llu with no free slot (held %llu, GPU release pending %llu), %llu failed)",
 						static_cast<unsigned long long>(earlyUsed), static_cast<unsigned long long>(earlyFallback),
+						static_cast<unsigned long long>(earlyLate), static_cast<unsigned long long>(earlyWaited),
 						static_cast<unsigned long long>(es.uploads), static_cast<unsigned long long>(es.noFreeSlot),
 						static_cast<unsigned long long>(es.noFreeHeld), static_cast<unsigned long long>(es.noFreeGpu),
 						static_cast<unsigned long long>(es.failures));
@@ -18068,7 +18105,7 @@ struct LibplaceboVideoRenderer::Impl
 				rawAnalysisLoggedGeneration = frameGeneration;
 				DebugLog::Log("Alpha raw-frame analysis: the CPU reads the captured frame (format=%d path=%s %dx%d, upload %s, generation=%llu)",
 					static_cast<int>(state.videoFrameEncoding), AnalysisLumaFormatName(analysisSource), width, height,
-					convertedPayload->early ? "early" : "by the render", static_cast<unsigned long long>(frameGeneration));
+					convertedPayload->early || convertedPayload->earlyHandoff ? "early" : "by the render", static_cast<unsigned long long>(frameGeneration));
 			}
 			if (nativeRgbUpload &&
 				(nativeRgbAnalysisLoggedGeneration != frameGeneration ||
@@ -29177,6 +29214,10 @@ void LibplaceboVideoRenderer::ConversionLoop()
 			sequence = queued->sourceSequence;
 		}
 		std::shared_ptr<QueuedFrame::ConvertedPayload> converted;
+		std::shared_ptr<EarlyUploadHandoff> earlyHandoff;   // capture_upload: early, uploaded after the publish
+		std::shared_ptr<VideoFrame> earlyFrame;
+		size_t earlyRowBytes = 0;
+		int earlyHeight = 0;
 		std::string error;
 		try
 		{
@@ -29224,11 +29265,17 @@ void LibplaceboVideoRenderer::ConversionLoop()
 				raw->rawRowBytes = static_cast<size_t>(state->BytesPerRow());
 				raw->rawBytes = static_cast<size_t>(state->BytesPerFrame());
 				raw->rawEncoding = state->videoFrameEncoding;
-				// capture_upload: early - the frame onto the GPU now, on this
-				// thread (no free slot or no pool: the render uploads it).
+				// capture_upload: early - the upload runs after the payload is
+				// published (EarlyUploadHandoff::RunUpload below); the frame is
+				// held here so the upload can read it.
 				if (m_impl->EarlyActive() && m_impl->earlyUpload->IsOpen() && state->displayMode)
-					raw->early = m_impl->earlyUpload->Upload(raw->rawFrame->GetData(), raw->rawRowBytes,
-						static_cast<int>(state->displayMode->FrameHeight()));
+				{
+					raw->earlyHandoff = std::make_shared<EarlyUploadHandoff>();
+					earlyHandoff = raw->earlyHandoff;
+					earlyFrame = raw->rawFrame;
+					earlyRowBytes = raw->rawRowBytes;
+					earlyHeight = static_cast<int>(state->displayMode->FrameHeight());
+				}
 				return raw;
 			};
 			// dv_tunnel_gpu_unpack: the DV formatter finds and checks the DM
@@ -29402,6 +29449,13 @@ void LibplaceboVideoRenderer::ConversionLoop()
 			}
 			m_queueChanged.notify_all();
 		}
+		// capture_upload: early - after the notify, so readiness waiters wake first;
+		// the render takes the slot (or abandons it and uploads itself).
+		if (published && error.empty() && earlyHandoff)
+			earlyHandoff->RunUpload([&] { return m_impl->EarlyActive() && m_impl->earlyUpload->IsOpen() ?
+				std::shared_ptr<void>(m_impl->earlyUpload->Upload(earlyFrame->GetData(), earlyRowBytes, earlyHeight)) : std::shared_ptr<void>(); });
+		earlyHandoff.reset();
+		earlyFrame.reset();
 		if (analyse)
 		{
 			// WP-23: prepared once here (the cache every later walk reuses), measured off this thread.
