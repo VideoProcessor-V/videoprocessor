@@ -1,7 +1,7 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// TemporalDetail CPU reference model (README.md steps 1-9). One luma plane in codes (doubles),
+// TemporalDetail CPU reference model (README.md steps 1-10). One luma plane in codes (doubles),
 // positions in plane pixels with pixel i at index coordinate i, edges clamped. Deterministic: raster
 // loops, double sums, no threads, no unordered containers, no random numbers. Header-only, C++14-compatible.
 //
@@ -13,6 +13,7 @@
 // Reset() at discontinuities; UpdateSettings() for a settings change (it knows which fields changed).
 #pragma once
 
+#include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetail.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetailMotion.h>
 
@@ -24,16 +25,8 @@
 
 namespace TemporalDetail
 {
-	struct Plane
-	{
-		int w = 0, h = 0;
-		std::vector<double> v;
-		Plane() = default;
-		Plane(int width, int height, double fill = 0.0) : w(width), h(height), v(static_cast<size_t>(width) * static_cast<size_t>(height), fill) {}
-		double& at(int x, int y) { return v[static_cast<size_t>(y) * w + x]; }
-		double at(int x, int y) const { return v[static_cast<size_t>(y) * w + x]; }
-		double get(int x, int y) const { return at((std::max)(0, (std::min)(w - 1, x)), (std::max)(0, (std::min)(h - 1, y))); }
-	};
+	// The shared grain-free picture's plane type (repair.grain_split).
+	using Plane = GrainSplit::Plane;
 
 	struct Diagnostics
 	{
@@ -44,9 +37,17 @@ namespace TemporalDetail
 		// per block, raster
 		std::vector<double> weight, boost, target, ageSeconds, uncertainty, baseMatch, corr, corrGate, stronger,
 			highBand, focus, referee, evidence, rebounds, q, qref, hard;
+		// grain-free transfer: per-band transfer share (1 - lambda) x coherence, template members, template grain level
+		std::vector<double> tau1, tau2, templateGrain;
+		std::vector<int> templateSlots;
+		// output-vs-input grain guard: factor applied to the weight, measured violation, current grain added back
+		std::vector<double> guard, guardViolation, addBack;
+		std::vector<uint8_t> guardOn;
+		int guardTrips = 0, guardActive = 0, addBackBlocks = 0;
 		std::vector<int> slotId;                  // -1 none
 		std::vector<uint8_t> retired, refreshed, usedFuture, camera;
-		Plane grain, structure, structureOut, base;   // input grain G, input structure S, output structure, base band
+		// input grain G (the shared split), input structure S, output structure, output grain (G plus any guard add-back), base band
+		Plane grain, structure, structureOut, grainOut, base;
 
 		bool operator==(const Diagnostics& o) const
 		{
@@ -58,46 +59,16 @@ namespace TemporalDetail
 				evidence == o.evidence && rebounds == o.rebounds && q == o.q && qref == o.qref && hard == o.hard &&
 				slotId == o.slotId && retired == o.retired && refreshed == o.refreshed && usedFuture == o.usedFuture &&
 				camera == o.camera && grain.v == o.grain.v && structure.v == o.structure.v &&
-				structureOut.v == o.structureOut.v && base.v == o.base.v;
+				structureOut.v == o.structureOut.v && grainOut.v == o.grainOut.v && base.v == o.base.v &&
+				tau1 == o.tau1 && tau2 == o.tau2 && templateGrain == o.templateGrain && templateSlots == o.templateSlots &&
+				guard == o.guard && guardViolation == o.guardViolation && addBack == o.addBack && guardOn == o.guardOn &&
+				guardTrips == o.guardTrips && guardActive == o.guardActive && addBackBlocks == o.addBackBlocks;
 		}
 	};
 
 	namespace Detail
 	{
-		inline Plane Gauss(const Plane& in, double sigma)
-		{
-			if (!(sigma > 0.0)) return in;
-			const int r = (std::max)(1, static_cast<int>(std::ceil(3.0 * sigma)));
-			std::vector<double> k(static_cast<size_t>(2 * r + 1));
-			double sum = 0.0;
-			for (int i = -r; i <= r; ++i) sum += k[static_cast<size_t>(i + r)] = std::exp(-0.5 * i * i / (sigma * sigma));
-			for (double& x : k) x /= sum;
-			// Horizontal pass on a row padded by edge replication, then a vertical pass accumulating whole rows
-			// (the same sums, in the same order, as a clamped per-tap read).
-			Plane t(in.w, in.h), o(in.w, in.h);
-			std::vector<double> pad(static_cast<size_t>(in.w + 2 * r));
-			for (int y = 0; y < in.h; ++y)
-			{
-				for (int x = -r; x < in.w + r; ++x) pad[static_cast<size_t>(x + r)] = in.get(x, y);
-				for (int x = 0; x < in.w; ++x)
-				{
-					double a = 0.0;
-					for (int i = -r; i <= r; ++i) a += k[static_cast<size_t>(i + r)] * pad[static_cast<size_t>(x + r + i)];
-					t.at(x, y) = a;
-				}
-			}
-			for (int y = 0; y < in.h; ++y)
-			{
-				double* dst = &o.v[static_cast<size_t>(y) * in.w];
-				for (int i = -r; i <= r; ++i)
-				{
-					const double* src = &t.v[static_cast<size_t>((std::max)(0, (std::min)(in.h - 1, y + i))) * in.w];
-					const double kk = k[static_cast<size_t>(i + r)];
-					for (int x = 0; x < in.w; ++x) dst[x] += kk * src[x];
-				}
-			}
-			return o;
-		}
+		using GrainSplit::Gauss;
 
 		// The 4-tap Catmull-Rom of README step 5, separable.
 		struct Taps
@@ -147,85 +118,38 @@ namespace TemporalDetail
 			return a;
 		}
 
-		// One frame's analysis (README steps 1-2).
+		// One frame's analysis (README steps 1-2) on the shared grain split.
 		struct Analysis
 		{
 			int w = 0, h = 0, bw = 0, bh = 0, B = 16;
-			Plane y, base, s1, s2, s, st, d;   // st = f_t D: the strict structure that is transferred / boosted
+			Plane y, base, s1, s2, s, grain, f;   // s = s1 + s2 = f D (the grain-free structure), grain = Y - clean
 			std::vector<double> e1, e2, e3, F, q, N;
 		};
 
+		inline GrainSplit::Params SplitParams()
+		{
+			GrainSplit::Params p;
+			p.sigmaFine = kSigmaFine; p.sigmaBase = kSigmaBase; p.sigmaLow = kSigmaLow;
+			p.subBlocks = kSubBlocks; p.quietSubBlocks = kQuietSubBlocks; p.neighbourhood = kGrainNeighbourhood;
+			p.grainCal = kGrainCal; p.kappa = kWienerKappa; p.energyFloor = kEnergyFloor;
+			return p;
+		}
+
 		inline Analysis Analyse(const Plane& y, double scale, int B)
 		{
+			GrainSplit::Split sp = GrainSplit::Compute(y, scale, B, SplitParams());
 			Analysis a;
-			a.w = y.w; a.h = y.h; a.B = B;
-			a.bw = (y.w + B - 1) / B; a.bh = (y.h + B - 1) / B;
+			a.w = y.w; a.h = y.h; a.B = B; a.bw = sp.bw; a.bh = sp.bh;
 			a.y = y;
-			const Plane g1 = Gauss(y, kSigmaFine * scale), gb = Gauss(y, kSigmaBase * scale), g6 = Gauss(y, kSigmaLow * scale);
-			a.base = gb;
-			a.d = Plane(y.w, y.h);
-			Plane d1(y.w, y.h), d2(y.w, y.h), d3(y.w, y.h);
-			for (size_t i = 0; i < y.v.size(); ++i)
-			{
-				d1.v[i] = y.v[i] - g1.v[i];
-				d2.v[i] = g1.v[i] - gb.v[i];
-				d3.v[i] = gb.v[i] - g6.v[i];
-				a.d.v[i] = d1.v[i] + d2.v[i];
-			}
-			const size_t nb = static_cast<size_t>(a.bw) * a.bh;
-			// Grain level N per block: the quietest sub-blocks of D, minimum over the neighbourhood.
-			std::vector<double> quiet(nb, 0.0);
-			for (int by = 0; by < a.bh; ++by)
-				for (int bx = 0; bx < a.bw; ++bx)
-				{
-					std::vector<double> e;
-					for (int sj = 0; sj < kSubBlocks; ++sj)
-						for (int si = 0; si < kSubBlocks; ++si)
-						{
-							const int x0 = bx * B + si * B / kSubBlocks, x1 = (std::min)(y.w, bx * B + (si + 1) * B / kSubBlocks);
-							const int y0 = by * B + sj * B / kSubBlocks, y1 = (std::min)(y.h, by * B + (sj + 1) * B / kSubBlocks);
-							if (x1 <= x0 || y1 <= y0) continue;
-							double sum = 0.0;
-							for (int yy = y0; yy < y1; ++yy)
-								for (int xx = x0; xx < x1; ++xx) sum += a.d.at(xx, yy) * a.d.at(xx, yy);
-							e.push_back(sum / ((x1 - x0) * (y1 - y0)));
-						}
-					std::sort(e.begin(), e.end());
-					const size_t n = (std::min)(e.size(), static_cast<size_t>(kQuietSubBlocks));
-					double m = 0.0;
-					for (size_t i = 0; i < n; ++i) m += e[i];
-					quiet[static_cast<size_t>(by) * a.bw + bx] = n ? kGrainCal * m / static_cast<double>(n) : 0.0;
-				}
-			a.N.assign(nb, 0.0);
-			for (int by = 0; by < a.bh; ++by)
-				for (int bx = 0; bx < a.bw; ++bx)
-				{
-					double m = 1e300;
-					for (int j = -kGrainNeighbourhood; j <= kGrainNeighbourhood; ++j)
-						for (int i = -kGrainNeighbourhood; i <= kGrainNeighbourhood; ++i)
-							m = (std::min)(m, quiet[static_cast<size_t>((std::max)(0, (std::min)(a.bh - 1, by + j))) * a.bw + (std::max)(0, (std::min)(a.bw - 1, bx + i))]);
-					a.N[static_cast<size_t>(by) * a.bw + bx] = m;
-				}
-			// Wiener share per pixel and the structure bands.
-			a.s1 = Plane(y.w, y.h);
-			a.s2 = Plane(y.w, y.h);
+			a.base = std::move(sp.base);
+			a.s1 = std::move(sp.s1);
+			a.s2 = std::move(sp.s2);
+			a.grain = std::move(sp.grain);
+			a.f = std::move(sp.f);
+			a.N = std::move(sp.N);
 			a.s = Plane(y.w, y.h);
-			a.st = Plane(y.w, y.h);
-			for (int yy = 0; yy < y.h; ++yy)
-				for (int xx = 0; xx < y.w; ++xx)
-				{
-					double e = 0.0;
-					for (int j = -1; j <= 1; ++j)
-						for (int i = -1; i <= 1; ++i) { const double dv = a.d.get(xx + i, yy + j); e += dv * dv; }
-					e /= 9.0;
-					const double N = a.N[static_cast<size_t>(yy / B) * a.bw + (xx / B)];
-					const double f = Clamp(1.0 - kWienerKappa * N / (std::max)(e, kEnergyFloor), 0.0, 1.0);
-					a.s1.at(xx, yy) = f * d1.at(xx, yy);
-					a.s2.at(xx, yy) = f * d2.at(xx, yy);
-					a.s.at(xx, yy) = a.s1.at(xx, yy) + a.s2.at(xx, yy);
-					const double ft = Clamp(1.0 - kKappaTransfer * N / (std::max)(e, kEnergyFloor), 0.0, 1.0);
-					a.st.at(xx, yy) = ft * a.d.at(xx, yy);
-				}
+			for (size_t i = 0; i < a.s.v.size(); ++i) a.s.v[i] = a.s1.v[i] + a.s2.v[i];
+			const size_t nb = static_cast<size_t>(a.bw) * a.bh;
 			a.e1.assign(nb, 0.0); a.e2.assign(nb, 0.0); a.e3.assign(nb, 0.0); a.F.assign(nb, 0.0); a.q.assign(nb, 0.0);
 			for (int by = 0; by < a.bh; ++by)
 				for (int bx = 0; bx < a.bw; ++bx)
@@ -237,7 +161,7 @@ namespace TemporalDetail
 						{
 							s1 += a.s1.at(xx, yy) * a.s1.at(xx, yy);
 							s2 += a.s2.at(xx, yy) * a.s2.at(xx, yy);
-							s3 += d3.at(xx, yy) * d3.at(xx, yy);
+							s3 += sp.d3.at(xx, yy) * sp.d3.at(xx, yy);
 							++n;
 						}
 					const size_t i = static_cast<size_t>(by) * a.bw + bx;
@@ -255,7 +179,7 @@ namespace TemporalDetail
 			int id = -1;
 			uint64_t seq = 0;
 			bool future = false;
-			Plane s1, s2, s, st, base;
+			Plane s1, s2, s, base, grain;   // grain-free structure bands, base, and the frame's grain (test damage only)
 			std::vector<double> N;          // the source frame's block grain level
 			std::vector<double> F, q;       // the source frame's own block maps
 			std::vector<double> cx, cy, u;  // composed displacement (px) and uncertainty (px) per current-frame block
@@ -342,6 +266,11 @@ namespace TemporalDetail
 			int softRun = 0, vetoRun = 0;
 			bool retired = false;
 			double qPeak = 0.0, e2Peak = 0.0, fPeak = 0.0;
+			// output-vs-input grain guard: factor, hysteresis flag, EMA of the tile sums
+			// (Ein, Eout, cross, Lin, Lout, Pin, Pout: see Model::Process step 10)
+			double guard = 1.0;
+			bool guardOn = false;
+			double ema[7] = { 0, 0, 0, 0, 0, 0, 0 };
 		};
 
 		struct Eval
@@ -352,12 +281,24 @@ namespace TemporalDetail
 			double hard = 0;   // unc * base * corr * harm * hb * focus (instant fall); strongerGate is soft
 		};
 
+		// One template member: a source and its coefficient (README step 8).
+		struct Member
+		{
+			const Source* s = nullptr;
+			double coef = 0.0;
+		};
+
 		struct Contribution
 		{
-			const Source* a = nullptr;
+			const Source* a = nullptr;       // the block's selected reference
 			const Source* prev = nullptr;
 			double xf = 1.0, w = 0.0, boost = 0.0;
 			bool cam = false;
+			Member mem[kSlots + 1];          // the template: every valid slot (or the future source), warped once each
+			int nm = 0;
+			double tau1 = 0.0, tau2 = 0.0;   // per-band (1 - lambda) x coherence
+			double lam1 = 0.0, lam2 = 0.0;   // per-band projection of the current grain-free structure onto the template
+			double nT = 0.0;                 // the template's relative grain energy: sum coef_k^2 (1 = one member frame's grain)
 		};
 	}
 
@@ -379,7 +320,20 @@ namespace TemporalDetail
 			std::vector<double> quality;       // optional per-block bitrate quality 0..1 (empty = neutral 1)
 		};
 
+		// Model-only knobs for measurement and the guard's own test (not user settings, never in the config):
+		// the template grain budget, the output-vs-input grain guard switch, and deliberate damage that the guard
+		// must catch (forceDrop removes that share of the current frame's grain, forceFreeze adds that share of the
+		// selected reference's warped grain, both scaled by the block weight).
+		struct Tuning
+		{
+			double grainBudget = kGrainBudget;   // <= 0: no budget (the transfer at its designed strength)
+			bool guard = true;
+			double forceDrop = 0.0, forceFreeze = 0.0;
+		};
+
 		explicit Model(const Settings& settings) : m_set(settings) {}
+
+		void SetTuning(const Tuning& t) { m_tune = t; }
 
 		const Settings& GetSettings() const { return m_set; }
 
@@ -397,6 +351,7 @@ namespace TemporalDetail
 			m_blocks.clear();
 			m_nextId = 0;
 			m_haveFrame = false;
+			m_havePrevG = false;
 			++m_diag.resets;
 			m_diag.status = std::string("reset: ") + (reason ? reason : "");
 		}
@@ -421,9 +376,13 @@ namespace TemporalDetail
 		Eval EvaluateBlock(int bx, int by, const Analysis& A, const Source& src, bool cam, double hz) const;
 		void Compose(Source& s, const MotionPair& bwd, const MotionPair* fwd, const CameraPairView* cam, const Analysis& A, const std::vector<uint8_t>& camBlock);
 		void Position(const Source& s, bool cam, int px, int py, double& x, double& y) const;
+		void TemplateAt(const Contribution& c, int x, int y, double baseCur, double& t1, double& t2) const;
 
 		Settings m_set;
+		Tuning m_tune;
 		Diagnostics m_diag;
+		Plane m_prevGin, m_prevGout;   // the previous frame's input and output grain on the shared map (guard lag-1)
+		bool m_havePrevG = false;
 		Plane m_lastOut;
 		std::vector<Source> m_slots;
 		std::vector<BlockState> m_blocks;
@@ -454,6 +413,25 @@ namespace TemporalDetail
 		Detail::GridAt2(s.cx, s.cy, bw, bh, m_B, px, py, dx, dy);
 		x = px + dx;
 		y = py + dy;
+	}
+
+	// The block's reference template at pixel (x, y), per band: T_b = sum_k coef_k g_k S_b,k(p + C_k(p)), each member
+	// sampled once from its unwarped slot (warp once), g_k = base / base_w (lighting).
+	inline void Model::TemplateAt(const Contribution& c, int x, int y, double baseCur, double& t1, double& t2) const
+	{
+		t1 = 0.0; t2 = 0.0;
+		for (int k = 0; k < c.nm; ++k)
+		{
+			const Source& s = *c.mem[k].s;
+			double sx, sy;
+			Position(s, c.cam && !s.future, x, y, sx, sy);
+			const Detail::Taps t = Detail::MakeTaps(sx, sy);
+			const double bwv = Detail::SampleTaps(s.base, t);
+			const double g = (bwv > 1e-3 && baseCur > 1e-3) ? Clamp(baseCur / bwv, kGainLo, kGainHi) : 1.0;
+			const double cg = c.mem[k].coef * g;
+			t1 += cg * Detail::SampleTaps(s.s1, t);
+			t2 += cg * Detail::SampleTaps(s.s2, t);
+		}
 	}
 
 	// One backward hop (frame n -> n-1) for a stored source: C_n(p) = Vb(p) + C_{n-1}(p + Vb(p)),
@@ -666,7 +644,7 @@ namespace TemporalDetail
 				Source s;
 				s.id = -2 - static_cast<int>(k);
 				s.seq = ff.seq; s.future = true;
-				s.s1 = fa.s1; s.s2 = fa.s2; s.s = fa.s; s.st = fa.st; s.N = fa.N; s.base = fa.base; s.F = fa.F; s.q = fa.q;
+				s.s1 = fa.s1; s.s2 = fa.s2; s.s = fa.s; s.grain = fa.grain; s.N = fa.N; s.base = fa.base; s.F = fa.F; s.q = fa.q;
 				s.cx.resize(px.size()); s.cy.resize(px.size()); s.u = pu;
 				for (size_t i = 0; i < px.size(); ++i) { s.cx[i] = px[i] - ox[i]; s.cy[i] = py[i] - oy[i]; }
 				s.camChain = false;
@@ -811,7 +789,7 @@ namespace TemporalDetail
 				Source s;
 				s.id = curId = m_nextId++;
 				s.seq = in.seq;
-				s.s1 = A.s1; s.s2 = A.s2; s.s = A.s; s.st = A.st; s.N = A.N; s.base = A.base; s.F = A.F; s.q = A.q;
+				s.s1 = A.s1; s.s2 = A.s2; s.s = A.s; s.grain = A.grain; s.N = A.N; s.base = A.base; s.F = A.F; s.q = A.q;
 				s.cx.assign(static_cast<size_t>(nb), 0.0); s.cy.assign(static_cast<size_t>(nb), 0.0); s.u.assign(static_cast<size_t>(nb), 0.0);
 				m_slots.push_back(std::move(s));
 				admitted = true;
@@ -827,6 +805,10 @@ namespace TemporalDetail
 		sized(d.weight); sized(d.boost); sized(d.target); sized(d.ageSeconds); sized(d.uncertainty); sized(d.baseMatch); sized(d.corr);
 		sized(d.corrGate); sized(d.stronger); sized(d.highBand); sized(d.focus); sized(d.referee); sized(d.evidence); sized(d.rebounds);
 		sized(d.q); sized(d.qref); sized(d.hard);
+		sized(d.tau1); sized(d.tau2); sized(d.templateGrain); sized(d.guard); sized(d.guardViolation); sized(d.addBack);
+		d.templateSlots.assign(static_cast<size_t>(nb), 0);
+		d.guardOn.assign(static_cast<size_t>(nb), 0);
+		d.guardTrips = m_diag.guardTrips;
 		d.slotId.assign(static_cast<size_t>(nb), -1);
 		d.retired.assign(static_cast<size_t>(nb), 0); d.refreshed.assign(static_cast<size_t>(nb), 0);
 		d.usedFuture.assign(static_cast<size_t>(nb), 0); d.camera.assign(static_cast<size_t>(nb), 0);
@@ -910,8 +892,10 @@ namespace TemporalDetail
 				boost = m_set.boostMax * st.bLim;
 			}
 			Contribution& c = contrib[static_cast<size_t>(i)];
-			c.w = refreshNow ? 0.0 : weight;
-			c.boost = boost;
+			// the output-vs-input grain guard (step 10) scales what this block may contribute
+			const double guard = m_tune.guard ? st.guard : 1.0;
+			c.w = refreshNow ? 0.0 : weight * guard;
+			c.boost = boost * guard;
 			if (!refreshNow && chosen)
 			{
 				if (useFuture) { c.a = wk.fut; c.prev = nullptr; c.xf = 1.0; }
@@ -924,10 +908,68 @@ namespace TemporalDetail
 				c.cam = camBlock[static_cast<size_t>(i)] != 0 && !useFuture;
 				if (!c.a) c.w = 0.0;
 			}
+			// The reference template (step 8): every valid stored slot's grain-free structure (or the future source alone),
+			// q-weighted (best linear estimate of a common structure under independent grain), scaled to the selected
+			// reference's amplitude. Then the current block's per-band projection onto it: lambda_b = <S_b, T_b> / <T_b, T_b>.
+			if (c.w > 0.0 && c.a)
+			{
+				const int bx = i % bw, by = i / bw;
+				double aw[kSlots + 1], om[kSlots + 1];
+				const Eval& selE = useFuture ? wk.fe : wk.pe;
+				const double aSel = std::sqrt(selE.e1w + kEnergyFloor);
+				c.nm = 0;
+				auto add = [&](const Source* src, double a, double omega)
+				{
+					if (c.nm >= kSlots + 1 || !(omega > 0.0)) return;
+					c.mem[c.nm].s = src; aw[c.nm] = a; om[c.nm] = omega; ++c.nm;
+				};
+				if (useFuture) add(c.a, aSel, 1.0);
+				else
+				{
+					for (const Source& sl : m_slots)
+					{
+						if (sl.id == c.a->id) { add(&sl, aSel, c.prev ? c.xf : 1.0); continue; }
+						if (sl.id == curId) continue;   // the current frame (admitted this frame) never serves itself
+						const Eval e = EvaluateBlock(bx, by, A, sl, c.cam, hz);
+						const bool valid = e.hard >= kTemplateMinHard && e.ageGate > 0.0;
+						const double omega = (c.prev && sl.id == c.prev->id) ? (std::max)(1.0 - c.xf, valid ? 1.0 : 0.0) : (valid ? 1.0 : 0.0);
+						add(&sl, std::sqrt(e.e1w + kEnergyFloor), omega);
+					}
+				}
+				double den = 0.0;
+				for (int k = 0; k < c.nm; ++k) den += om[k] * aw[k] * aw[k];
+				c.nT = 0.0;
+				for (int k = 0; k < c.nm; ++k)
+				{
+					c.mem[k].coef = den > 0.0 ? aSel * om[k] * aw[k] / den : 0.0;
+					c.nT += c.mem[k].coef * c.mem[k].coef;
+				}
+				double st1 = 0, tt1 = 0, ss1 = 0, st2 = 0, tt2 = 0, ss2 = 0;
+				for (int y = by * B; y < (std::min)(h, (by + 1) * B); ++y)
+					for (int x = bx * B; x < (std::min)(w, (bx + 1) * B); ++x)
+					{
+						double t1, t2;
+						TemplateAt(c, x, y, A.base.at(x, y), t1, t2);
+						const double s1 = A.s1.at(x, y), s2 = A.s2.at(x, y);
+						st1 += s1 * t1; tt1 += t1 * t1; ss1 += s1 * s1;
+						st2 += s2 * t2; tt2 += t2 * t2; ss2 += s2 * s2;
+					}
+				auto share = [](double sxt, double txt, double sxs, double& lambda)
+				{
+					lambda = txt > 1e-9 ? Clamp(sxt / txt, 0.0, 1.0) : 1.0;
+					if (!(txt > 1e-9)) return 0.0;
+					const double rho = sxt / std::sqrt(txt * sxs + 1e-12);
+					return (1.0 - lambda) * Smoothstep(kCoherenceLo, kCoherenceHi, rho);
+				};
+				c.tau1 = share(st1, tt1, ss1, c.lam1);
+				c.tau2 = share(st2, tt2, ss2, c.lam2);
+				if (c.tau1 <= 0.0 && c.tau2 <= 0.0) c.w = 0.0;
+			}
 			const size_t u = static_cast<size_t>(i);
 			d.weight[u] = weight; d.boost[u] = boost; d.target[u] = soft; d.hard[u] = hardTarget;
 			d.rebounds[u] = st.rebounds; d.evidence[u] = wk.evidence; d.q[u] = A.q[u]; d.qref[u] = st.qref;
 			d.slotId[u] = st.slot; d.retired[u] = st.retired ? 1 : 0; d.usedFuture[u] = useFuture ? 1 : 0; d.camera[u] = camBlock[u];
+			d.tau1[u] = c.tau1; d.tau2[u] = c.tau2; d.templateGrain[u] = c.nT; d.templateSlots[u] = c.nm; d.guard[u] = guard;
 			if (chosen)
 			{
 				d.ageSeconds[u] = chosen->ageSeconds; d.uncertainty[u] = chosen->u; d.baseMatch[u] = chosen->baseGate; d.corr[u] = chosen->corr;
@@ -935,17 +977,18 @@ namespace TemporalDetail
 			}
 		}
 
-		// --- Transfer and recompose: Y_out = Y + (S_out - S); weights bilinear between block centres ---
+		// --- Transfer on the grain-free picture, then the current grain added back exactly (steps 8-9) ---
+		// TD(clean) = clean + delta, Y_out = TD(clean) + G = Y + delta. delta = sum over the four nearest blocks of
+		// om w (tau1 T1 + tau2 T2): only the template (other frames' grain-free structure) moves; the current frame enters
+		// through its block projections lambda_b only, so its own grain is never averaged, scaled or replaced.
 		Plane out = in.luma;
 		d.structure = A.s;
 		d.structureOut = A.s;
 		d.base = A.base;
-		d.grain = Plane(w, h);
-		for (size_t i = 0; i < d.grain.v.size(); ++i) d.grain.v[i] = A.d.v[i] - A.s.v[i];
-		// Pass A: per pixel the weight-normalised raw delta d = g S_t,w - S (strict reference structure), the
-		// reference's grain level, and the boost on the strict structure. Pass B: the delta Wiener and the cap.
+		d.grain = A.grain;
+		d.grainOut = A.grain;
 		const size_t np = static_cast<size_t>(w) * static_cast<size_t>(h);
-		std::vector<double> dRaw(np, 0.0), wSum(np, 0.0), nRef(np, 0.0), refMax(np, 0.0), bSum(np, 0.0), bDelta(np, 0.0);
+		std::vector<double> delta(np, 0.0);
 		for (int y = 0; y < h; ++y)
 			for (int x = 0; x < w; ++x)
 			{
@@ -954,80 +997,174 @@ namespace TemporalDetail
 				const double tx = gx - fx, ty = gy - fy;
 				const int i0 = static_cast<int>(fx), j0 = static_cast<int>(fy);
 				const size_t pi = static_cast<size_t>(y) * w + x;
-				double sumGs = 0.0, sumN = 0.0, ws = 0.0, rm = 0.0, bs2 = 0.0, bd = 0.0;
-				const double S = A.s.at(x, y), St = A.st.at(x, y), bs = A.base.at(x, y);
+				double raw = 0.0, pred = 0.0, amp = 0.0, refMax = 0.0, bsum = 0.0, wpix = 0.0, frozen = 0.0;
+				const double S = A.s.at(x, y), bs = A.base.at(x, y);
 				for (int k = 0; k < 4; ++k)
 				{
 					const int ii = (std::max)(0, (std::min)(bw - 1, i0 + (k & 1))), jj = (std::max)(0, (std::min)(bh - 1, j0 + (k >> 1)));
 					const double om = ((k & 1) ? tx : 1.0 - tx) * ((k >> 1) ? ty : 1.0 - ty);
 					const Contribution& c = contrib[static_cast<size_t>(jj) * bw + ii];
 					if (om <= 0.0 || (c.w <= 0.0 && c.boost <= 0.0)) continue;
-					if (c.w > 0.0 && c.a)
+					if (c.w > 0.0 && c.nm > 0)
 					{
-						auto warp = [&](const Source& s, double& sw, double& bwv, double& nv)
+						double t1, t2;
+						TemplateAt(c, x, y, bs, t1, t2);
+						raw += om * c.w * (c.tau1 * t1 + c.tau2 * t2);
+						pred += om * c.w * (c.lam1 * t1 + c.lam2 * t2);
+						amp += om * c.w * (std::max)(c.tau1, c.tau2) * std::sqrt((std::max)(0.0, c.nT));
+						refMax = (std::max)(refMax, std::fabs(t1 + t2));
+						wpix += om * c.w;
+						if (m_tune.forceFreeze > 0.0 && c.a)
 						{
 							double sx, sy;
-							Position(s, c.cam, x, y, sx, sy);
-							const Detail::Taps t = Detail::MakeTaps(sx, sy);
-							sw = Detail::SampleTaps(s.st, t);
-							bwv = Detail::SampleTaps(s.base, t);
-							const int sbx = (std::max)(0, (std::min)(bw - 1, static_cast<int>(std::floor((sx + 0.5) / B)))), sby = (std::max)(0, (std::min)(bh - 1, static_cast<int>(std::floor((sy + 0.5) / B))));
-							nv = s.N[static_cast<size_t>(sby) * bw + sbx];
-						};
-						double sw, bwv, nv;
-						warp(*c.a, sw, bwv, nv);
-						if (c.prev)
-						{
-							double sp, bp, np2;
-							warp(*c.prev, sp, bp, np2);
-							sw = c.xf * sw + (1.0 - c.xf) * sp;
-							bwv = c.xf * bwv + (1.0 - c.xf) * bp;
-							nv = c.xf * nv + (1.0 - c.xf) * np2;
+							Position(*c.a, c.cam && !c.a->future, x, y, sx, sy);
+							frozen += om * c.w * Detail::SampleTaps(c.a->grain, Detail::MakeTaps(sx, sy));
 						}
-						const double g = (bwv > 1e-3 && bs > 1e-3) ? Clamp(bs / bwv, kGainLo, kGainHi) : 1.0;
-						const double gs = g * sw;
-						sumGs += om * c.w * gs;
-						sumN += om * c.w * nv;
-						rm = (std::max)(rm, std::fabs(gs));
-						ws += om * c.w;
 					}
-					bd += om * c.boost * St;
-					bs2 += om * c.boost;
+					bsum += om * c.boost;
 				}
-				wSum[pi] = ws; refMax[pi] = rm; bSum[pi] = bs2; bDelta[pi] = bd;
-				if (ws > 0.0) { dRaw[pi] = sumGs / ws - S; nRef[pi] = sumN / ws; }
+				if (wpix <= 0.0 && bsum <= 0.0) continue;
+				// Template grain budget: the template's residual grain (sum coef^2 of one member frame's grain, the same grain
+				// level as the current frame within a shot) carried into the output stays <= grainBudget x the current grain
+				// RMS. Block quantities only (no noisy per-frame level estimate), bilinear. grainBudget <= 0: designed strength.
+				double beta = 1.0;
+				if (m_tune.grainBudget > 0.0 && amp > 0.0) beta = (std::min)(1.0, m_tune.grainBudget / amp);
+				// Fallback boost on the current structure: it scales that pixel's grain share f by at most kBoostGrainShare.
+				// Amplitude limit on the grain-free prediction: the current structure's projection P (lambda T) plus the
+				// transfer stays within kPixelCap x max(|P|, |T|). The current pixel's own value (its grain) is never clamped.
+				double dv = beta * raw;
+				if (wpix > 0.0 && dv != 0.0)
+				{
+					const double P = pred / wpix, t = dv / wpix;
+					const double cap = kPixelCap * (std::max)(std::fabs(P), refMax);
+					dv = (Clamp(P + t, -cap, cap) - P) * wpix;
+				}
+				// Fallback boost on the current structure: it scales that pixel's grain share f by at most kBoostGrainShare.
+				const double f = A.f.at(x, y);
+				const double bEff = (std::min)(bsum, kBoostGrainShare / (std::max)(f, 1e-6));
+				if (bEff > 0.0)
+				{
+					const double cap = (1.0 + bsum) * std::fabs(S);
+					dv += Clamp(S * (1.0 + bEff), -cap, cap) - S;
+				}
+				// deliberate damage (Tuning, the guard's own test only), after the cap so nothing hides it
+				dv += -m_tune.forceDrop * wpix * A.grain.at(x, y) + m_tune.forceFreeze * frozen;
+				delta[pi] = dv;
 			}
-		for (int y = 0; y < h; ++y)
-			for (int x = 0; x < w; ++x)
+
+		// --- Step 10: output-vs-input grain guard on the shared grain map (tile statistics, pooled over 3 x 3 blocks) ---
+		// G_in = Y - clean (the split); G_out = the same map applied to the output = G_in + (1 - f) delta. Per block:
+		// energies, the cross term <(1 - f) delta, G_in> (current grain removed when negative) and the lag-1 sums against
+		// the previous frame's G_in / G_out warped one hop along the backward vectors (measurement only, never output).
+		{
+			const bool lagOk = m_havePrevG && haveBwd && !reason && m_prevGin.w == w && m_prevGin.h == h;
+			std::vector<double> sums(static_cast<size_t>(nb) * 7, 0.0);
+			for (int y = 0; y < h; ++y)
+				for (int x = 0; x < w; ++x)
+				{
+					const size_t pi = static_cast<size_t>(y) * w + x;
+					// grain-dominated pixels of the map only (f < kGuardMaxShare): structure the transfer adds legitimately lives where f is high
+					if (A.f.v[pi] >= kGuardMaxShare) continue;
+					const double gin = A.grain.v[pi], dd = (1.0 - A.f.v[pi]) * delta[pi], gout = gin + dd;
+					double* sb = &sums[(static_cast<size_t>(y / B) * bw + (x / B)) * 7];
+					sb[0] += gin * gin; sb[1] += gout * gout; sb[2] += dd * gin;
+					if (lagOk)
+					{
+						const double vx = Detail::PairAt(bwd, bwd.vx, x, y), vy = Detail::PairAt(bwd, bwd.vy, x, y);
+						const Detail::Taps t = Detail::MakeTaps(x + vx, y + vy);
+						const double pin = Detail::SampleTaps(m_prevGin, t), pout = Detail::SampleTaps(m_prevGout, t);
+						sb[3] += gin * pin; sb[4] += gout * pout; sb[5] += pin * pin; sb[6] += pout * pout;
+					}
+				}
+			auto pooled = [&](const std::vector<double>& v, int bx, int by, double* o)
 			{
-				const size_t pi = static_cast<size_t>(y) * w + x;
-				double delta = bDelta[pi];
-				if (wSum[pi] > 0.0)
+				for (int q = 0; q < 7; ++q) o[q] = 0.0;
+				for (int j = -1; j <= 1; ++j)
+					for (int ii = -1; ii <= 1; ++ii)
+					{
+						const int xx = (std::max)(0, (std::min)(bw - 1, bx + ii)), yy = (std::max)(0, (std::min)(bh - 1, by + j));
+						const double* sb = &v[(static_cast<size_t>(yy) * bw + xx) * 7];
+						for (int q = 0; q < 7; ++q) o[q] += sb[q];
+					}
+			};
+			// (a) immediate: add back the measured missing current-frame grain (this frame's pooled projection)
+			std::vector<double> kBack(static_cast<size_t>(nb), 0.0);
+			bool anyBack = false;
+			for (int by = 0; by < bh; ++by)
+				for (int bx = 0; bx < bw; ++bx)
 				{
-					double e = 0.0;
-					for (int j = -1; j <= 1; ++j)
-						for (int i = -1; i <= 1; ++i)
-						{
-							const int xx = (std::max)(0, (std::min)(w - 1, x + i)), yy = (std::max)(0, (std::min)(h - 1, y + j));
-							const double dv = dRaw[static_cast<size_t>(yy) * w + xx];
-							e += dv * dv;
-						}
-					e /= 9.0;
-					const double Ncur = Detail::GridAt(A.N, bw, bh, B, x, y);
-					const double phi = Clamp(1.0 - kKappaDelta * (Ncur + nRef[pi]) / (std::max)(e, kEnergyFloor), 0.0, 1.0);
-					delta += wSum[pi] * phi * dRaw[pi];
+					double o[7];
+					pooled(sums, bx, by, o);
+					const double k = o[0] > 1e-9 ? -o[2] / o[0] : 0.0;
+					const size_t u = static_cast<size_t>(by) * bw + bx;
+					if (m_tune.guard && k > kGuardAddBackMin) { kBack[u] = (std::min)(1.0, k); anyBack = true; ++d.addBackBlocks; }
+					d.addBack[u] = kBack[u];
 				}
-				if (delta != 0.0)
-				{
-					const double S = A.s.at(x, y);
-					double sOut = S + delta;
-					const double k = (std::max)(kPixelCap, 1.0 + bSum[pi]);
-					const double cap = k * (std::max)(std::fabs(S), refMax[pi]);
-					sOut = Clamp(sOut, -cap, cap);
-					out.at(x, y) = in.luma.at(x, y) + (sOut - S);
-					d.structureOut.at(x, y) = sOut;
-				}
+			if (anyBack)
+				for (int y = 0; y < h; ++y)
+					for (int x = 0; x < w; ++x)
+					{
+						const double k = Detail::GridAt(kBack, bw, bh, B, x, y);
+						if (k <= 0.0) continue;
+						const size_t pi = static_cast<size_t>(y) * w + x;
+						delta[pi] += k * A.grain.v[pi];
+						d.grainOut.v[pi] = A.grain.v[pi] + k * A.grain.v[pi];
+					}
+			// (b) the weight: EMA of the sums, pooled; trip / release with hysteresis; fast fall, slow rise
+			const double alpha = 1.0 - 1.0 / Frames(kGuardStatsSeconds, hz);
+			const double gFall = 1.0 / Frames(kGuardFallSeconds, hz), gRise = 1.0 / Frames(kGuardRiseSeconds, hz);
+			for (int u = 0; u < nb; ++u)
+			{
+				BlockState& st = m_blocks[static_cast<size_t>(u)];
+				const double* sb = &sums[static_cast<size_t>(u) * 7];
+				for (int q = 0; q < 7; ++q) st.ema[q] = alpha * st.ema[q] + sb[q];
 			}
+			std::vector<double> emaAll(static_cast<size_t>(nb) * 7);
+			for (int u = 0; u < nb; ++u)
+				for (int q = 0; q < 7; ++q) emaAll[static_cast<size_t>(u) * 7 + q] = m_blocks[static_cast<size_t>(u)].ema[q];
+			for (int by = 0; by < bh; ++by)
+				for (int bx = 0; bx < bw; ++bx)
+				{
+					const size_t u = static_cast<size_t>(by) * bw + bx;
+					BlockState& st = m_blocks[u];
+					double o[7];
+					pooled(emaAll, bx, by, o);
+					double v = 0.0;
+					if (o[0] > 1e-9)
+					{
+						const double L = std::sqrt(o[1] / o[0]);
+						const double drop = (std::max)(1.0 - L, -o[2] / o[0]);
+						v = (std::max)(drop / kGuardDropTrip, (L - 1.0) / kGuardRiseTrip);
+						if (o[5] > 1e-9 && o[6] > 1e-9 && o[1] > 1e-9)
+						{
+							const double freeze = o[4] / std::sqrt(o[1] * o[6]) - o[3] / std::sqrt(o[0] * o[5]);
+							v = (std::max)(v, freeze / kGuardFreezeTrip);
+						}
+					}
+					d.guardViolation[u] = v;
+					if (!m_tune.guard) continue;
+					if (!st.guardOn && v > 1.0) { st.guardOn = true; ++d.guardTrips; }
+					else if (st.guardOn && v < kGuardRelease) st.guardOn = false;
+					const double target = st.guardOn ? (v > 1.0 ? st.guard / v : st.guard) : 1.0;
+					st.guard += Clamp(target - st.guard, -gFall, gRise);
+					d.guardOn[u] = st.guardOn ? 1 : 0;
+					if (st.guardOn) ++d.guardActive;
+				}
+			if (d.guardActive > 0 || d.addBackBlocks > 0)
+				d.status += "; grain guard: " + std::to_string(d.guardActive) + " blocks, add-back " + std::to_string(d.addBackBlocks);
+		}
+
+		// --- Recompose: a pixel with nothing to add is copied unchanged (bit-exact) ---
+		m_prevGin = A.grain;
+		m_prevGout = A.grain;
+		for (size_t pi = 0; pi < np; ++pi)
+		{
+			if (delta[pi] == 0.0) continue;
+			out.v[pi] = in.luma.v[pi] + delta[pi];
+			d.structureOut.v[pi] = A.s.v[pi] + delta[pi] - (d.grainOut.v[pi] - A.grain.v[pi]);
+			m_prevGout.v[pi] = A.grain.v[pi] + (1.0 - A.f.v[pi]) * delta[pi];
+		}
+		m_havePrevG = true;
 
 		// --- Finish ---
 		d.liveSlots = static_cast<int>(m_slots.size());

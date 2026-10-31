@@ -35,6 +35,7 @@
     "upstream_modules": [
       "repair.encoding",
       "repair.deband",
+      "repair.grain_split",
       "motion.estimation"
     ]
   },

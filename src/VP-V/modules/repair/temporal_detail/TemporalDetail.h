@@ -29,10 +29,8 @@ namespace TemporalDetail
 	constexpr double kSigmaLow = 6.0;           // E3 band = G(base) - G(kSigmaLow x Scale)
 	constexpr double kGrainCal = 2.2;           // pure grain reads about its own energy (quiet sub-blocks read low)
 	constexpr double kWienerKappa = 2.0;        // f = clamp(1 - kappa N / e3x3, 0, 1)
-	constexpr double kKappaTransfer = 6.0;      // stricter Wiener share of the transferred reference structure (grain never travels)
-	constexpr double kKappaDelta = 3.0;         // delta Wiener: grain-sized differences (Ncur + Nref) pass nothing
 	constexpr double kEnergyFloor = 1e-3;       // codes^2, added to q and to divisions
-	constexpr int kSlots = 3;                   // K past slots (one more, the future slot, in queued modes)
+	constexpr int kSlots = 5;                   // K past slots (one more, the future slot, in queued modes)
 	constexpr int kMaxFutureFrames = 8;         // future frames the model looks at
 
 	// Guard (README step 3)
@@ -60,7 +58,22 @@ namespace TemporalDetail
 	constexpr double kEvictWeight = 0.02;                // slot eviction: its blocks have faded below this
 	// Transfer (step 8)
 	constexpr double kGainLo = 0.8, kGainHi = 1.25;      // lighting gain clamp
-	constexpr double kPixelCap = 1.1;                    // |S_out| <= k max(|S|, |g S_w|)
+	constexpr double kPixelCap = 1.1;                    // |S_out| <= k max(|S|, |T|)
+	// Grain-free transfer (step 8): the reference template is the q-weighted average of every valid slot's clean
+	// structure (warped once each); the current frame's structure enters only as its per-band projection onto it.
+	constexpr double kTemplateMinHard = 0.5;             // a non-selected slot joins the template when its hard gates reach this
+	constexpr double kCoherenceLo = 0.3, kCoherenceHi = 0.6;   // per-band corr(S_cur, T): misaligned / doubled bands pass nothing
+	constexpr double kGrainBudget = 0.07;                // template grain carried into the output <= this x the current grain RMS (KeepsGrain bands bind)
+	constexpr double kBoostGrainShare = 0.04;            // fallback boost: the current grain is scaled by at most 1 + this
+	// Output-vs-input grain guard (step 10): tile statistics on the shared grain map, pooled over 3 x 3 blocks
+	constexpr double kGuardStatsSeconds = 0.25;          // EMA time constant of the tile sums
+	constexpr double kGuardDropTrip = 0.04;              // current-grain loss (projection or level) that trips
+	constexpr double kGuardRiseTrip = 0.05;              // output grain level above the input's that trips
+	constexpr double kGuardFreezeTrip = 0.05;            // lag-1 grain correlation increase that trips
+	constexpr double kGuardRelease = 0.5;                // hysteresis: released below this share of the trip level
+	constexpr double kGuardFallSeconds = 0.1, kGuardRiseSeconds = 0.5;   // guard factor rate limits
+	constexpr double kGuardAddBackMin = 0.01;            // measured current-grain loss below this is not added back
+	constexpr double kGuardMaxShare = 0.2;               // guard statistics use grain-dominated pixels only (Wiener share f below this)
 	constexpr double kCameraMinConfidence = 0.5;         // the model ignores a camera view below this
 
 	inline double Clamp(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }

@@ -5,8 +5,11 @@ Unit **repair** | replaces `repair.texture_restore` (order 90) | status **draft*
 ## Purpose
 
 I/reference frames carry more real fine structure than the B-frames around them. TemporalDetail
-**transfers** the best recent frame's real structure forward along the motion, warped once. It never invents
-detail or touches grain, and never undoes intended softness (focus, motion blur).
+**transfers** the best recent frames' real structure forward along the motion, warped once. It works on the shared
+grain-free picture (`repair.grain_split`) and adds the current frame's own grain back exactly, so it never invents
+detail, never averages, scales, freezes or replaces the current grain, and never undoes intended softness (focus, motion blur).
+Owner grain bounds (asserted): grain RMS within 5%, whole-field grain temporal bands within 0.95-1.05, frozen-grain lag-1
+correlation increase <= 0.05.
 
 ## Contract
 
@@ -20,10 +23,10 @@ detail or touches grain, and never undoes intended softness (focus, motion blur)
 Scale `s = GrainScale(planeLines)` (1 at <= 2160 lines, lines/2160 above). Block = 16 px x s. Every
 frame count follows the measured content rate (`Frames(seconds, hz)`); no GOP, cadence or resolution is assumed.
 
-1. **Split.** `base = G(2.5 s) Y` (half resolution in the shader, full in the model), `D = Y - base`, fine band
-   `D1 = Y - G(1 s) Y`, mid band `D2 = D - D1`. Per block a grain level `N` (texture_restore's
-   quietest sub-blocks, minimum over 5 x 5 blocks) and per pixel the Wiener share
-   `f = clamp(1 - kappa N / e3x3, 0, 1)` (on D = fine + mid). **Structure `S = f D`, grain `G = (1 - f) D`.** Only S is ever changed.
+1. **Split (shared product `grain.split`, repair.grain_split).** `base = G(2.5 s) Y`, `D = Y - base`, fine band
+   `D1 = Y - G(1 s) Y`, mid band `D2 = D - D1`, block grain level `N`, Wiener share `f = clamp(1 - kappa N / e3x3, 0, 1)`:
+   **grain-free structure `S = f D` (bands `S1 = f D1`, `S2 = f D2`), `clean = base + S`, grain `G = Y - clean`.**
+   Computed once per frame and shared; TemporalDetail reads it, never recomputes it.
 2. **Block measures.** Structure energies `E1`, `E2` (fine, mid), focus/acutance `F = E2 / (E2 + E3)`
    (E3 = the low-mid band), quality `q = E1 + e` (fine structure energy), and
    optional hints (per-block bitrate quality); absent = neutral.
@@ -40,7 +43,7 @@ frame count follows the measured content rate (`Frames(seconds, hz)`); no GOP, c
    - *retire*: `q` and `E2` both falling for `Frames(0.2 s)` consecutive frames, or the guard vetoing the
      reference for `Frames(0.2 s)`, retires the
      block's reference (gradual fade, below).
-4. **Reference store** (product `td.refstore`). A ring of `K = 3` unwarped past slots (S and the
+4. **Reference store** (product `td.refstore`). A ring of `K = 5` unwarped past slots (the grain-free bands S1/S2 and the
    half-resolution base of a selected frame) plus one future slot in queued modes. Per block: the slot
    index, `qref`, age, accumulated uncertainty `u`, retire flag and crossfade state. Per slot: a composed
    motion map (block grid) from the current frame back to that slot. A block **refreshes** to the current frame
@@ -65,14 +68,31 @@ frame count follows the measured content rate (`Frames(seconds, hz)`); no GOP, c
    (rise `<= 1 / Frames(0.15 s)`, fall `<= 1 / Frames(0.3 s)` per frame). Age-out and retire fade through the
    limiter, never a step. Hard vetoes (base match/occlusion, uncertainty, correlation, reference weaker than the
    current block, high-band loss, focus, referee) multiply the result: instant fall, limited rise.
-8. **Transfer.** Only a strict structure `S_t = f_t D` (`kappa_t` = 2.5 x kappa) is stored and warped, and the delta
-   `d = g S_t,w - S` is Wiener-shrunk by `phi = clamp(1 - kd (Ncur + Nref) / mean3x3(d^2), 0, 1)`, so grain-sized
-   differences pass nothing and the reference's grain does not travel. `S_out = S + w phi (g S_t,w - S)`, `g = clamp(base / base_w, 0.8, 1.25)` (lighting),
-   per pixel `|S_out| <= k max(|S|, |g S_w|)`, `k = 1.1`. Weights bilinear between block centres.
-   **Fallback boost** where no valid reference exists but the guard (referee included) holds:
-   `S_out = S + b S_t`, `b <= boost_max` (0.15), same limiter.
-9. **Recompose.** `Y_out = base + S_out + G` (own grain untouched). A pixel whose weight and boost are
-   0 is copied unchanged (bit-exact).
+8. **Transfer on the grain-free picture.** Per block a **template** `T_b = sum_k c_k g_k S_b,k(p + C_k(p))` over every
+   valid stored slot (hard gates >= 0.5, within max_age; the selected reference always, crossfading from the previous one)
+   or the future source alone; each member is sampled once from its unwarped slot (warp once), `g_k = clamp(base / base_w,k,
+   0.8, 1.25)` (lighting), `c_k` the q-weighted best linear estimate of a common structure under independent grain, scaled to
+   the selected reference's amplitude (`c_k = a_sel a_k / sum a_j^2`, `a_k = sqrt(E1 of slot k)`). The current frame enters
+   only as its per-band **projection** `lambda_b = <S_b, T_b> / <T_b, T_b>` (block sums, clamped 0..1) and coherence
+   `rho_b = corr(S_b, T_b)`: `tau_b = (1 - lambda_b) smoothstep(0.3, 0.6, rho_b)`. Then
+   `delta = beta sum_blocks om w (tau_1 T_1 + tau_2 T_2)` (weights bilinear between block centres).
+   **Template grain budget:** the template keeps `sum c_k^2` of one member's grain (grain-free S still holds the grain the
+   split reads as texture); `beta = min(1, kGrainBudget / sum om w max(tau) sqrt(sum c^2))` keeps that foreign grain
+   <= 0.07 x the current grain RMS (Model::Tuning::grainBudget = 0 runs the designed strength, for measurement).
+   **Amplitude limit** on the grain-free prediction: `|P + delta| <= 1.1 max(|P|, |T|)`, `P = lambda T` (the current
+   pixel's own value is never clamped). **Fallback boost** where no valid reference exists but the guard (referee included)
+   holds: `+ b S`, `b <= boost_max` (0.15), with `b f <= kBoostGrainShare` (0.04) so the current grain scales by at most 4%.
+9. **Recompose: add the current grain back exactly.** `Y_out = TD(clean) + G = Y + delta`. A pixel with nothing to add is
+   copied unchanged (bit-exact). Diagnostics: `structureOut = S + delta`, `grainOut = G` (plus any guard add-back).
+10. **Output-vs-input grain guard** (safety net on top of 8-9). On the same grain map, per block (pooled 3 x 3, EMA over
+   `Frames(0.25 s)`), over grain-dominated pixels (`f < 0.2`): `G_out = G_in + (1 - f) delta`, the level ratio, the
+   projection `<(1 - f) delta, G_in> / <G_in, G_in>` (current grain removed) and the lag-1 correlation of `G_out` / `G_in`
+   against the previous frame's, one hop back along the backward vectors (measurement only). (a) A measured loss of current
+   grain above 1% is added back at once (`delta += k G`). (b) A violation (loss > 0.04, rise > 0.05, lag-1 increase > 0.05)
+   trips the block (hysteresis: released below half), its weight factor falls to `guard / v` (rate `1 / Frames(0.1 s)`)
+   and recovers over `Frames(0.5 s)`. Counted (`guardTrips`, `addBackBlocks`) and visible in the status
+   (`; grain guard: N blocks, add-back M`). The guard cannot see grain hidden in dense texture (no spatial map can); the
+   template budget covers that.
 
 Two-sided: in queued modes the future slot is the best frame in the queue window, warped once by composed
 forward vectors; it serves as referee (step 3) and as a reference for the last B-frames of a group and for
@@ -110,16 +130,24 @@ RendererProfileConfig, slots.json, the tier table or the Config editor yet.
 ## Determinism, generality, known limits
 
 Fixed-order loops and double sums; shaders reduce in a fixed tree. No hard-coded rates,
-cadences or resolutions; tests cover 1080-4320-line scales and 24-60 Hz. Limits (model-measured): some grain on strong texture still follows the transfer (G untouched, flat areas
-unchanged; high temporal bands 0.74/0.75, lag-1 grain correlation +0.14);
-the grain level needs quiet areas within 80 px (dense texture everywhere raises N, f falls, transfer fails safe);
-block weights reach half a block past an edge of a soft region.
+cadences or resolutions; tests cover 1080-4320-line scales and 24-60 Hz.
+
+Measured (model, synthetic I/B scene, grain isolate of two seeds; README of the tests): default **3.0 dB** B-frame PSNR gain,
+all of it structure (own-grain retention 1.003, foreign grain 0.6% of the grain energy); grain RMS 1.013, lag-1 +0.017,
+whole-field grain bands 1.042/0.998/1.006/1.005. At the designed strength (no budget) the gain is 7.5 dB (6.0 dB with the
+guard) but the bands reach 1.13 and lag-1 +0.06-0.08: the frozen residual of template grain in dense texture is what the
+budget trades against. The pre-fix draft's 10.5 dB was 9.8 dB structure plus a grain swap (own grain kept 31%, 73% of the
+grain energy foreign/frozen); the first fix's 2.9 dB kept 80% own grain with 25% foreign.
+
+Limits: grain the split reads as texture stays in the template (budgeted, not removed); more slots lower it (K = 8: +0.2 dB
+at the same budget, more memory); the grain level needs quiet areas within 80 px (dense texture everywhere raises N, f
+falls, transfer fails safe); block weights reach half a block past an edge of a soft region.
 
 ## Migration (retiring detail_pulse_stabilise / texture_restore)
 
 `detail_pulse_stabilise`: its gain law survives only as the bounded fallback boost; history/look-ahead plumbing is
-reused. `texture_restore`: its grain level + Wiener split become the S/G separator, its focus gate part of the
-guard; the grain boost is dropped.
+reused. `texture_restore`: its grain level + Wiener split become the shared `repair.grain_split` product, its focus gate
+part of the guard; the grain boost is dropped.
 
 Integration: rename the slot to `repair.temporal_detail`; map `detail_pulse_stabilise = on` to `temporal_detail =
 steady` and `detail_pulse_cap` to `_boost_max = cap - 1` (clamped 0.3); drop `texture_restore*` with a logged
@@ -130,5 +158,7 @@ sequence) returns the last output (repeat/foreign/phase pictures come at integra
 ## Tests and shaders
 
 `TemporalDetailShaders.h` holds the draft GLSL (not dispatched). `tests/TemporalDetailModelTests.cpp` (CPU, model only): off identity, I/B pulse, sub-pixel pans, focus pulls,
-rack focus, motion blur, occlusion, cuts and stamps, determinism, grain, flicker, future referee, irregular
-patterns, scale and rate, camera-adapter fallback, boost fallback, settings parsing.
+rack focus, motion blur, occlusion, cuts and stamps, determinism, grain (owner bounds on a two-seed grain isolate; the
+current grain untouched), the grain guard against forced damage, the gain decomposition (structure vs grain), the grain
+split's exact add-back, flicker, future referee, irregular patterns, scale and rate, camera-adapter fallback, boost
+fallback, settings parsing.

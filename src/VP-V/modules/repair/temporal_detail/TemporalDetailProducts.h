@@ -44,8 +44,9 @@ namespace TemporalDetail
 	{
 		// Block maps only: ~ (w/16)(h/16) blocks x 12 floats.
 		constexpr uint64_t AnalysisBytes(int w, int h, int) { return static_cast<uint64_t>((w + 15) / 16) * static_cast<uint64_t>((h + 15) / 16) * 12u * 4u; }
-		// K slots of R16F structure (2 B/px) plus a half-resolution R16F base (0.5 B/px), plus the future slot.
-		constexpr uint64_t RefstoreBytes(int w, int h, int K) { return static_cast<uint64_t>(K + 1) * static_cast<uint64_t>(w) * static_cast<uint64_t>(h) * 5u / 2u; }
+		// K slots of RG16F grain-free structure bands s1/s2 (4 B/px) plus a half-resolution R16F base (0.5 B/px), plus the
+		// future slot (K = 5: ~224 MB at 3840 x 2160).
+		constexpr uint64_t RefstoreBytes(int w, int h, int K) { return static_cast<uint64_t>(K + 1) * static_cast<uint64_t>(w) * static_cast<uint64_t>(h) * 9u / 2u; }
 		// The output luma plane (R16F).
 		constexpr uint64_t OutBytes(int w, int h, int) { return static_cast<uint64_t>(w) * static_cast<uint64_t>(h) * 2u; }
 	}
@@ -53,10 +54,10 @@ namespace TemporalDetail
 	constexpr uint32_t kReadsAnalysis = Bit(Counter::Full) | Bit(Counter::Continuity) | Bit(Counter::RebaseH) | Bit(Counter::RebaseV);
 	constexpr uint32_t kReadsRefstore = kReadsAnalysis | Bit(Counter::SettingsRepair);
 
-	// td.analysis: S/G split, E1/E2/F/q block maps, rebound counters, softening run. Block maps only.
+	// td.analysis: E1/E2/F/q block maps on the shared grain split (repair.grain_split), rebound counters, softening run.
 	constexpr ProductDecl kAnalysis = {
 		"td.analysis",
-		{ { "rebased.luma", 0, false }, { "p4.cut_fade", 0, false }, { "bitrate.quality", 0, true } }, 3,
+		{ { "rebased.luma", 0, false }, { "grain.split", 0, false }, { "p4.cut_fade", 0, false }, { "bitrate.quality", 0, true } }, 4,
 		Backend::GpuCompute, 1, &Detail::AnalysisBytes, kReadsAnalysis, 1, Residency::Ring, Variants::Identical };
 
 	// td.refstore: K past slots + 1 future slot (S, half-resolution base) and per-block state.
@@ -65,7 +66,7 @@ namespace TemporalDetail
 		{ { "td.analysis", 0, false }, { "motion.p3_p2", 0, false }, { "camera.model", 0, true }, { "queue.frames", 1, true } }, 4,
 		Backend::GpuCompute, kSlots, &Detail::RefstoreBytes, kReadsRefstore, 1, Residency::Ring, Variants::Identical };
 
-	// td.out: the output luma plane (structure transferred, grain untouched).
+	// td.out: the output luma plane: TD(clean) + G (the current grain added back exactly), plus the grain guard's tile sums.
 	constexpr ProductDecl kOut = {
 		"td.out",
 		{ { "td.analysis", 0, false }, { "td.refstore", 0, false } }, 2,

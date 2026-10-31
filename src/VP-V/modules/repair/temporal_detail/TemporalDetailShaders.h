@@ -30,8 +30,10 @@ namespace TemporalDetail
 			t += d("TD_SIGMA_LOW", kSigmaLow * s);
 			t += d("TD_GRAIN_CAL", kGrainCal);
 			t += d("TD_WIENER_KAPPA", kWienerKappa);
-			t += d("TD_KAPPA_TRANSFER", kKappaTransfer);
-			t += d("TD_KAPPA_DELTA", kKappaDelta);
+			t += d("TD_COHERENCE_LO", kCoherenceLo);
+			t += d("TD_COHERENCE_HI", kCoherenceHi);
+			t += d("TD_GRAIN_BUDGET", kGrainBudget);
+			t += d("TD_BOOST_GRAIN_SHARE", kBoostGrainShare);
 			t += d("TD_ENERGY_FLOOR", kEnergyFloor);
 			t += d("TD_RHO2_LO", kRho2Lo);
 			t += d("TD_RHO2_HI", kRho2Hi);
@@ -88,8 +90,8 @@ void split_pixel(ivec2 p, out float y, out float base, out float d1, out float d
     e /= 9.0;
     float N = texelFetch(tdN, p / int(TD_BLOCK), 0).r;
     f = clamp(1.0 - TD_WIENER_KAPPA * N / max(e, TD_ENERGY_FLOOR), 0.0, 1.0);
-    // ft = clamp(1.0 - TD_KAPPA_TRANSFER * N / max(e, TD_ENERGY_FLOOR), 0.0, 1.0): the strict share; st = ft * D is
-    // the plane stored in the slot and the only structure that is transferred or boosted.
+    // s1 = f d1, s2 = f d2 and clean = base + s1 + s2 are the shared grain.split product (repair.grain_split);
+    // grain = Y - clean is added back unchanged at the end of the transfer pass.
 }
 )GLSL";
 
@@ -198,34 +200,38 @@ float td_sample(sampler2D tex, vec2 pos)
     return a;
 }
 
-// delta Wiener (pass B): d is the weight-normalised g S_t,w - S; e3 = mean3x3(d^2); grain-sized differences pass nothing
-float td_delta_phi(float e3, float Ncur, float Nref)
+// The block template: T_b = sum_k coef_k g_k S_b,k(p + C_k(p)) over the block's members (every valid slot, or the
+// future source), each sampled once from its unwarped slot. tau_b = (1 - lambda_b) smoothstep(coherence) per block
+// (lambda_b = <S_b, T_b> / <T_b, T_b>, a block reduction in the validate pass), nT = sum coef_k^2 N_k.
+// Y_out = TD(clean) + G = Y + delta: the current frame's grain is never read by the transfer.
+float td_transfer_pixel(ivec2 p, float S, float f, float base, float Ncur, vec4 w4, vec4 b4, vec4 om)
 {
-    return clamp(1.0 - TD_KAPPA_DELTA * (Ncur + Nref) / max(e3, TD_ENERGY_FLOOR), 0.0, 1.0);
-}
-
-float td_transfer_pixel(ivec2 p, float S, float base, vec4 w4, vec4 b4, vec4 om)
-{
-    // w4 / b4: the weights and boosts of the four nearest blocks; om: their bilinear weights.
-    float delta = 0.0, refMax = 0.0, bsum = 0.0;
+    float raw = 0.0, amp = 0.0, refMax = 0.0, bsum = 0.0, wpix = 0.0;
     for (int k = 0; k < 4; k++) {
         float w = w4[k], b = b4[k], o = om[k];
         if (o <= 0.0 || (w <= 0.0 && b <= 0.0)) continue;
         if (w > 0.0) {
-            vec2 pos = vec2(p) + td_composed(k, p);                    // composed map of the block's slot
-            float sw = td_sample(td_slot_st, pos), bw = td_sample(td_slot_base, pos);
-            float g = (bw > 1e-3 && base > 1e-3) ? clamp(base / bw, TD_GAIN_LO, TD_GAIN_HI) : 1.0;
-            delta += o * w * (g * sw - S);
-            refMax = max(refMax, abs(g * sw));
+            vec2 T = td_template(k, p, base);                         // (T1, T2): members of block k, warped once each
+            vec3 tb = td_block_tau(k);                                 // (tau1, tau2, nT)
+            raw += o * w * (tb.x * T.x + tb.y * T.y);
+            amp += o * w * max(tb.x, tb.y) * sqrt(max(tb.z, 0.0));
+            refMax = max(refMax, abs(T.x + T.y));
+            wpix += o * w;
         }
-        delta += o * b * St;                                           // boost on f_t D only
         bsum += o * b;
     }
-    if (delta == 0.0) return 0.0;                                       // bit-exact copy of Y
-    float sOut = S + delta;
+    if (wpix <= 0.0 && bsum <= 0.0) return 0.0;                        // bit-exact copy of Y
+    float beta = amp > 0.0 ? min(1.0, TD_GRAIN_BUDGET * sqrt(max(Ncur, TD_ENERGY_FLOOR)) / amp) : 1.0;
+    float bEff = min(bsum, TD_BOOST_GRAIN_SHARE / max(f, 1e-6));       // the boost scales the grain share by <= this
+    float d = beta * raw + bEff * S;
+    if (d == 0.0) return 0.0;
     float cap = max(TD_PIXEL_CAP, 1.0 + bsum) * max(abs(S), refMax);
-    return clamp(sOut, -cap, cap) - S;                                  // Y_out = Y + this
+    return clamp(S + d, -cap, cap) - S;                                 // Y_out = Y + this (+ the guard's add-back)
 }
+
+// Grain guard (step 10): per block sums of G_in^2, G_out^2, (1 - f) delta G_in and the lag-1 products against the
+// previous frame's G_in / G_out one hop back; fixed-tree reduction like block_measures; EMA, 3 x 3 pooling, trip and
+// add-back on the CPU side of the dispatch (block grid only).
 )GLSL";
 	}
 }
