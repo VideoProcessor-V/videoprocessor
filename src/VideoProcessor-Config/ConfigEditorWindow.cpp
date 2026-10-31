@@ -8837,6 +8837,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "estimated ahead follows the same timing and Dolby Vision rules as the next frame, and Dolby Vision frames "
             "pair only under the same colour matrices; changing a motion setting or the motion source restarts the "
             "motion; a frame dropped to keep a queued repeat counts as a gap. Off: the earlier behaviour."));
+        auto* vectorDemand = addChoice(QStringLiteral("Vector engine on demand"), QStringLiteral("vector_demand"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        vectorDemand->setToolTip(QStringLiteral(
+            "Runs the vector engine only when a feature that needs motion vectors is active, at any frame rate. "
+            "Off keeps the old behaviour."));
         // Hunt 2 group 5 (13-timing).
         auto* queueTiming = addChoice(QStringLiteral("Queue timing fixes"), QStringLiteral("queue_timing_fixes"),
             { QStringLiteral("on"), QStringLiteral("off") });
@@ -10930,7 +10935,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                     { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "auto" }, { "adaptive_grain_map", "on" },
                     { "adaptive_upscale", "off" }, { "adaptive_upscale_superres_scale", "on" }, { "upscale_light", "linear" },
                     { "downscale_light", "linear" }, { "preserve_extended_range", "on" }, { "extended_range_more_cases", "on" }, { "sdr_tone_shape", "off" },
-                    { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "source_resolution_latch_fixes", "on" }, { "source_resolution_cut_fixes", "on" }, { "active_picture_startup_hold", "on" }, { "pulldown_fixes", "on" }, { "timing_continuity_fixes", "on" }, { "cadence_class_fixes", "on" }, { "motion_history_fixes", "on" }, { "queue_timing_fixes", "on" }, { "general_rate_fixes", "on" }, { "efficiency_fixes", "on" },
+                    { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "source_resolution_latch_fixes", "on" }, { "source_resolution_cut_fixes", "on" }, { "active_picture_startup_hold", "on" }, { "pulldown_fixes", "on" }, { "timing_continuity_fixes", "on" }, { "cadence_class_fixes", "on" }, { "motion_history_fixes", "on" }, { "vector_demand", "on" }, { "queue_timing_fixes", "on" }, { "general_rate_fixes", "on" }, { "efficiency_fixes", "on" },
                     // Render-ahead (docs/VP-render-ahead-design.md).
                     { "render_ahead", "off" }, { "dejudder_gate", "auto" }, { "render_ahead_queue_credit", "off" },
                     // 2026-10-17: the engine's extras, the grain switches, the DV tunnel restore switch.

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <VP-V/core/FallbackStatus.h>
+#include <VP-V/modules/motion/estimation/VectorDemand.h>
 
 #include <cmath>
 #include <cstdio>
@@ -335,4 +336,24 @@ namespace FallbackCatalog
 			return last;
 		}
 	};
+	// ---- motion.estimation: Vector engine on demand ---------------------------------------------
+	// Engaged while a wanted consumer goes without vectors; the reason names each and why.
+	inline Decision VectorEngine(const VectorDemand::Decision& demand)
+	{
+		if (demand.unserved == 0)
+			return Released("vector_engine");
+		return Engaged("vector_engine", VectorDemand::UnservedText(demand));
+	}
+	inline Decision VectorEngineProducer(bool sizeSkipSustained)
+	{
+		return sizeSkipSustained ? Engaged("vector_engine_producer",
+			"Vector engine look-ahead stores nothing for this size (render-time estimate runs)") :
+			Released("vector_engine_producer");
+	}
+	inline Decision VectorEngineGlobal(bool sustainedMiss)
+	{
+		return sustainedMiss ? Engaged("vector_engine_global",
+			"source monitor fast-pan / intent without whole-frame motion (vector engine pair missed)") :
+			Released("vector_engine_global");
+	}
 }

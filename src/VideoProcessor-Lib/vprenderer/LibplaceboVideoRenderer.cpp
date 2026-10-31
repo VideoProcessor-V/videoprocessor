@@ -1350,6 +1350,7 @@ namespace
 		// or motion source change invalidates the vectors; a repeat-preserving queue drop
 		// marks a gap; off = the behaviour before.
 		bool motionHistoryFixes = true;
+		bool vectorDemand = true;
 		// Hunt 2 group 5 (13-timing, 05-renderahead M5): the backlog flush measures
 		// staleness beyond the queue target, the timeline steering is in seconds, the cadence
 		// correction measures the capture rate on QPC with constants in seconds and
@@ -1578,7 +1579,7 @@ namespace
 			<< settings.nlsSamplingCatmull << '|' << settings.sourceCodingFixes << '|'
 			<< settings.debandVpGrainGuard << '|' << settings.debandVpGrainSplit << '|' << settings.debandVpExclusive << '|' << settings.detailPulseStabilise << '|' << settings.detailPulseCap << '|' << settings.detailPulseFast << '|' << settings.textureRestore << '|' << settings.textureRestoreCap << '|' << settings.debandGrain << '|' << settings.adaptive.residualGrainGuard << '|'
 			<< static_cast<int>(settings.interpolation) << '|' << static_cast<int>(settings.interpolationFallback) << '|'
-			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.intentMotion << '|' << static_cast<int>(settings.intentMotionPolicy) << '|' << settings.intentMotionMin << '|' << settings.intentMotionMinShotSeconds << '|' << settings.intentEaseSeconds << '|' << settings.ambientAdapt << '|' << settings.ambientAdaptStrength << '|' << settings.ambientScreenReflect << '|' << settings.ambientMaxBlackNits << '|' << settings.ambientTauUpSeconds << '|' << settings.ambientTauDownSeconds << '|' << static_cast<int>(settings.intentBlack) << '|' << settings.intentDisplay << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.sourceResolutionLatchFixes << '|' << settings.sourceResolutionCutFixes << '|' << settings.activePictureStartupHold << '|' << settings.sourceResolutionEngageMaxWait << '|' << settings.sourceResolutionCrossfade << '|' << settings.sourceResolutionReleaseFade << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|' << settings.cadenceClassFixes << '|' << settings.motionHistoryFixes << '|' << settings.queueTimingFixes << '|' << settings.generalRateFixes << '|' << settings.efficiencyFixes << '|'
+			<< settings.interpolationFillGaps << '|' << static_cast<int>(settings.sourceClass) << '|' << settings.intentContent << '|' << settings.intentContentHoldSeconds << '|' << settings.intentMotion << '|' << static_cast<int>(settings.intentMotionPolicy) << '|' << settings.intentMotionMin << '|' << settings.intentMotionMinShotSeconds << '|' << settings.intentEaseSeconds << '|' << settings.ambientAdapt << '|' << settings.ambientAdaptStrength << '|' << settings.ambientScreenReflect << '|' << settings.ambientMaxBlackNits << '|' << settings.ambientTauUpSeconds << '|' << settings.ambientTauDownSeconds << '|' << static_cast<int>(settings.intentBlack) << '|' << settings.intentDisplay << '|' << settings.temporalDither << '|' << settings.rebaseKernelMatch << '|' << settings.sourceResolutionTextGuard << '|' << settings.sourceResolutionMixedGuard << '|' << settings.sourceResolutionLatchFixes << '|' << settings.sourceResolutionCutFixes << '|' << settings.activePictureStartupHold << '|' << settings.sourceResolutionEngageMaxWait << '|' << settings.sourceResolutionCrossfade << '|' << settings.sourceResolutionReleaseFade << '|' << settings.pulldownFixes << '|' << settings.timingContinuityFixes << '|' << settings.cadenceClassFixes << '|' << settings.motionHistoryFixes << '|' << settings.vectorDemand << '|' << settings.queueTimingFixes << '|' << settings.generalRateFixes << '|' << settings.efficiencyFixes << '|'
 			<< settings.renderAhead << '|' << settings.dejudderGate << '|' << settings.renderAheadUtilisation << '|' << settings.renderAheadQueueCredit << '|'
 			<< settings.sdrTone.knee << '|' << settings.sdrTone.headroom << '|' << settings.sdrTone.kneeStart << '|'
 			<< settings.sdrTone.kneeStrength << '|' << settings.sdrTone.recovery << '|'
@@ -2921,6 +2922,14 @@ namespace
 				DebugLog::Log("profile '%s': invalid motion_history_fixes '%s'; keeping %s",
 					rule.section.c_str(), raw.c_str(), settings.motionHistoryFixes ? "on" : "off");
 		}
+		if (tryChoice("vector_demand", raw))
+		{
+			if (raw == "on" || raw == "off")
+				settings.vectorDemand = raw == "on";
+			else
+				DebugLog::Log("profile '%s': invalid vector_demand '%s'; keeping %s",
+					rule.section.c_str(), raw.c_str(), settings.vectorDemand ? "on" : "off");
+		}
 		if (tryChoice("queue_timing_fixes", raw))
 		{
 			if (raw == "on" || raw == "off")
@@ -3605,6 +3614,7 @@ namespace
 		settings.opticalFlow = false;                      // key=optical_flow
 		settings.motionAheadFrames = 0;                    // key=motion_ahead_frames
 		settings.motionHistoryFixes = false;               // key=motion_history_fixes
+		settings.vectorDemand = false;                     // key=vector_demand
 		settings.dejudderSourceWarpCatmull = false;        // key=dejudder_source_warp_filter
 		settings.nlsSamplingCatmull = false;               // key=nls_sampling
 		settings.adaptiveDownscale = false;                // key=adaptive_downscale
@@ -6830,9 +6840,7 @@ struct LibplaceboVideoRenderer::Impl
 		// B3 (i): after B's field was estimated ahead, A's (A, B) inputs are the snapshot.
 		const bool snapshot = !DejudderLiveFieldFor(sourceSequence) && EntranceOnce() && EntranceOnceSnapshotFor(sourceSequence);
 		// WIP DEBUG (near-black residual, 2026-10-24): VP_DEBUG_PHASE_NOVECTORS=1 forces the no-vector path.
-		char noVectorsFlag[4] = {};
-		const bool forceNoVectors = GetEnvironmentVariableA("VP_DEBUG_PHASE_NOVECTORS", noVectorsFlag, sizeof(noVectorsFlag)) > 0 &&
-			noVectorsFlag[0] == '1';
+		const bool forceNoVectors = debugPhaseNoVectors;   // C10: read once at construction
 		const bool vectors = (DejudderLiveFieldFor(sourceSequence) || snapshot) && !forceNoVectors;
 		MotionShadowCheck(sourceSequence, nextSourceSequence, DejudderLiveFieldFor(sourceSequence));
 		vpPhaseVectors = vectors;
@@ -6851,8 +6859,7 @@ struct LibplaceboVideoRenderer::Impl
 		// samples and the field's first vector for the first 40 pictures between frames.
 		{
 			static int debugCount = 0;
-			char flag[4] = {};
-			if (debugCount < 40 && GetEnvironmentVariableA("VP_DEBUG_PHASE_AB", flag, sizeof(flag)) > 0 && flag[0] == '1' &&
+			if (debugCount < 40 && debugPhaseAb &&
 				a.luma && b.luma && a.luma->params.w == b.luma->params.w && a.luma->params.h == b.luma->params.h)
 			{
 				++debugCount;
@@ -7057,6 +7064,248 @@ struct LibplaceboVideoRenderer::Impl
 	{
 		return pipelineSlots.Runs(PipelineSlots::Id::MotionEstimation) && pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery);
 	}
+
+	// ---- Vector engine on demand (VP-V/modules/motion/estimation/VectorDemand.h) --------------------
+	// The engine (producer + render-time estimate) runs for the consumers that want vectors, at any rate.
+	// The decision uses the previous frame's state (one frame of latency); with vector_demand off it is
+	// the default-constructed Decision and every use below reduces to the old expression.
+	VectorDemand::Decision vectorDemand;
+	std::atomic<int> queueAheadCapacity{ 0 };         // frames the queue holds after the current one (queue pass)
+	std::atomic<bool> motionAheadBackward{ false };   // backward pairs: the producer is fed the current frame
+	bool sigmaDeltaRanLast = false;                   // the sigma-delta quantiser ran in the last frame's output pass
+	std::string vectorEngineLogged;
+	int vectorDeliveredLogged = -1;
+	int vectorDitherKeyLogged = -1;
+	unsigned long long vectorPairs = 0, vectorBackwardPairs = 0;
+	ULONGLONG vectorStatsTick = 0;
+	uint64_t vectorBackwardSequence = 0;
+	bool vectorGlobalMissSustained = false;
+	unsigned vectorGlobalMisses = 0;
+	uint64_t vectorProducerFirstSubmit = 0;
+	bool vectorProducerSkipSustained = false;
+	// C10: the debug switches are read once, not per frame.
+	const bool debugPhaseNoVectors = [] { char f[4] = {}; return GetEnvironmentVariableA("VP_DEBUG_PHASE_NOVECTORS", f, sizeof(f)) > 0 && f[0] == '1'; }();
+	const bool debugPhaseAb = [] { char f[4] = {}; return GetEnvironmentVariableA("VP_DEBUG_PHASE_AB", f, sizeof(f)) > 0 && f[0] == '1'; }();
+	VectorDemand::Input VectorDemandInput(bool interlaced) const
+	{
+		using C = VectorDemand::Consumer;
+		VectorDemand::Input in;
+		in.enabled = activeSettings.vectorDemand;
+		in.slotsRun = MotionVectorsRun();
+		in.lowLatency = lowLatencyQueueActive.load(std::memory_order_acquire);
+		in.queueAheadCapacity = queueAheadCapacity.load(std::memory_order_acquire);
+		in.smoothMotion = smoothMotionEngine || temporalRenderer.Mixing();
+		in.interlaced = interlaced;
+		// Stable while smooth motion mixes (Active() flips with each drawn mix); interlaced-only temporal frames count.
+		const bool temporal = smoothMotionEngine || (temporalRenderer.Active() && !temporalRenderer.Mixing());
+		auto want = [&in](C c, bool on) { in.wants[static_cast<int>(c)] = on; };
+		want(C::DejudderExtras, activeSettings.dejudderStrength > 0.0 || activeSettings.dejudderStrengthEven > 0.0);
+		want(C::Interpolator, activeSettings.interpolation != InterpolationPolicy::Mode::Off);
+		want(C::HiccupRepair, activeSettings.interpolationFillGaps);
+		want(C::OcclusionMask, activeSettings.occlusionMask);
+		want(C::SigmaDelta, sigmaDeltaRanLast && !activeSettings.ditherVectorsOwn && DitherVectorsSupported());
+		want(C::GrainMap, adaptiveGrainMapWanted);
+		want(C::DebandHold, activeSettings.debandVp != "off" && pipelineSlots.Runs(PipelineSlots::Id::RepairDeband) && !temporal);
+		want(C::DetailPulse, (activeSettings.detailPulseStabilise || activeSettings.textureRestore) && !temporal);
+		want(C::EntranceSegment, EntranceOnce());
+		want(C::SourceMonitorPan, activeSettings.sourceResolution == "auto");
+		want(C::MotionIntent, intentInterpreter && intentInterpreter->Active());
+		return in;
+	}
+	// Decides for this source frame, then keeps the engine's state visible: fallback entry, status line,
+	// Ctrl+Alt+D record and the logs (on change, once per mode, every 5 s while on).
+	void UpdateVectorEngine(bool interlaced)
+	{
+		vectorDemand = VectorDemand::Decide(VectorDemandInput(interlaced));
+		const ULONGLONG now = GetTickCount64();
+		if (!activeSettings.vectorDemand)
+		{
+			if (!vectorEngineLogged.empty())
+			{
+				vectorEngineLogged.clear();
+				SyncFallback(FallbackCatalog::Released("vector_engine"));
+				SyncFallback(FallbackCatalog::Released("vector_engine_producer"));
+				SyncFallback(FallbackCatalog::Released("vector_engine_global"));
+			}
+			return;
+		}
+		// What decides the output dither's want, logged when it changes (a dither that runs but is not served
+		// is explained by one of the three).
+		{
+			const int ditherKey = (sigmaDeltaRanLast ? 1 : 0) | (activeSettings.ditherVectorsOwn ? 2 : 0) | (DitherVectorsSupported() ? 4 : 0);
+			if (ditherKey != vectorDitherKeyLogged)
+			{
+				vectorDitherKeyLogged = ditherKey;
+				DebugLog::Log("Vector engine: output dither inputs: sigma-delta ran %s, own search requested %s, vectors supported %s",
+					(ditherKey & 1) ? "yes" : "no", (ditherKey & 2) ? "yes" : "no", (ditherKey & 4) ? "yes" : "no");
+			}
+		}
+		const std::string line = VectorDemand::StatusLine(vectorDemand);
+		if (line != vectorEngineLogged)
+		{
+			vectorEngineLogged = line;
+			DebugLog::Log("%s", line.c_str());
+			DiagnosticHistory::Global().RecordDecision("vector-engine", line.c_str(),
+				static_cast<int64_t>(vectorDemand.mode), static_cast<int64_t>(vectorDemand.served),
+				static_cast<double>(vectorDemand.unserved), 0.0);
+			PublishDejudderStatus(true);
+		}
+		// The look-ahead stores nothing for this size while pairs are submitted: sustained = visible.
+		if (motionProducer && motionProducer->Running() && vectorDemand.producer)
+		{
+			const uint64_t last = motionProducer->LastSubmitted();
+			if (vectorProducerFirstSubmit == 0 && last != 0) vectorProducerFirstSubmit = last;
+			const auto ps = motionProducer->GetStats();
+			if (ps.pairs > 0) vectorProducerSkipSustained = false;
+			else if (vectorProducerFirstSubmit != 0 && last >= vectorProducerFirstSubmit + 48) vectorProducerSkipSustained = true;
+		}
+		else
+		{
+			vectorProducerFirstSubmit = 0;
+			vectorProducerSkipSustained = false;
+		}
+		SyncFallback(FallbackCatalog::VectorEngine(vectorDemand));
+		SyncFallback(FallbackCatalog::VectorEngineProducer(vectorProducerSkipSustained));
+		SyncFallback(FallbackCatalog::VectorEngineGlobal(vectorGlobalMissSustained));
+		if (vectorDemand.mode != VectorDemand::Mode::Off && (vectorStatsTick == 0 || now - vectorStatsTick >= 5000))
+		{
+			vectorStatsTick = now;
+			DebugLog::Log("Vector engine: %llu pairs (ahead hits %llu, misses %llu, backward %llu)", vectorPairs,
+				static_cast<unsigned long long>(motionAheadHits), static_cast<unsigned long long>(motionAheadMisses), vectorBackwardPairs);
+		}
+	}
+	// Whole-frame motion for the statistics consumers: a producer pair (hit) or none (miss). A miss run
+	// is visible (never log-only): hysteresis, so a single missed pair does not flap the entry.
+	unsigned vectorGlobalHits = 0;
+	void NoteGlobalPair(bool hit)
+	{
+		if (!vectorDemand.Serves(VectorDemand::Consumer::SourceMonitorPan) && !vectorDemand.Serves(VectorDemand::Consumer::MotionIntent))
+		{
+			vectorGlobalMisses = vectorGlobalHits = 0;
+			vectorGlobalMissSustained = false;
+			return;
+		}
+		constexpr unsigned kRun = 24;   // consecutive pairs, either way, before the entry changes
+		if (hit) { ++vectorGlobalHits; vectorGlobalMisses = 0; if (vectorGlobalHits >= kRun) vectorGlobalMissSustained = false; }
+		else { ++vectorGlobalMisses; vectorGlobalHits = 0; if (vectorGlobalMisses >= kRun) vectorGlobalMissSustained = true; }
+	}
+	// The sigma-delta's vectors on a frame whose extras do not run: B's first present takes the pair's field
+	// at the full vector (previousShift 0), exactly as the extras path builds them (payback of the 4.2 ms own search).
+	void BuildSigmaDeltaVectorsWithoutExtras(uint64_t sourceSequence, uint64_t nextSourceSequence)
+	{
+		dejudderNextVectorsSequence = 0;
+		ditherNextGate.Clear();
+		if (!vectorDemand.Serves(VectorDemand::Consumer::SigmaDelta) || !dejudder || sourceSequence == 0 || nextSourceSequence == 0 ||
+			interpolating || vpTimelineActive ||   // the timeline / hiccup repair drew refreshes: A was not at shift 0
+			!DejudderLiveFieldFor(sourceSequence) || !dejudderGeometryValid || activeSettings.ditherVectorsOwn ||
+			!DitherVectorsSupported() || !d3d11 || !d3d11->gpu)
+			return;
+		const int w = static_cast<int>(std::lround(std::fabs(dejudderGeometry.targetCrop.x1 - dejudderGeometry.targetCrop.x0)));
+		const int h = static_cast<int>(std::lround(std::fabs(dejudderGeometry.targetCrop.y1 - dejudderGeometry.targetCrop.y0)));
+		if (w <= 0 || h <= 0)
+			return;
+		if (!dejudderNextVectorField)
+			dejudderNextVectorField = std::make_unique<DejudderRendered::VectorField>(log, d3d11->gpu);
+		const Dejudder::Settings matcher = RenderedWarpSettings(h);
+		pl_tex next = nullptr;
+		if (dejudderNextVectorField->Run(dejudder->Field(), dejudder->FrameTrust(), dejudder->GetSettings().minTrustedShare, 0.0f,
+				dejudderGeometry, w, h, next, dejudder->SubField(), &matcher, dejudder->Camera(), true) && next)
+		{
+			dejudderNextVectors = next;
+			dejudderNextVectorsSequence = nextSourceSequence;
+			ditherNextGate.Bind(sourceSequence, nextSourceSequence, dejudderEstimatedEpoch);
+			dejudderNextVectorsGeometry = dejudderGeometry;
+			dejudderNextVectorsW = w;
+			dejudderNextVectorsH = h;
+		}
+	}
+	// Once per mode: the first vectors the engine delivered and where they came from.
+	void NoteVectorsDelivered(bool backward, const char* source)
+	{
+		const int mode = backward ? 1 : 0;
+		if (vectorDeliveredLogged == mode)
+			return;
+		vectorDeliveredLogged = mode;
+		DebugLog::Log("Vector engine: vectors delivered (%s, source %s)", backward ? "backward" : "forward", source);
+	}
+	// Engine size the producer works at for a picture of this size, as the matcher would use it
+	// (halvings of the search input), and the halvings themselves for the pixel scaling.
+	void VectorEngineSizeFor(int width, int height, int& engineW, int& engineH, int& halvings) const
+	{
+		halvings = DejudderPolicy::SearchHalvingsFor(activeSettings.dejudderLowRes != "off", height);
+		engineW = (width + 1) / 2;
+		engineH = (height + 1) / 2;
+		for (int i = 0; i < halvings; ++i) { engineW = (engineW + 1) / 2; engineH = (engineH + 1) / 2; }
+	}
+	// Backward pairs (no frame ahead): once per new source frame the statistics consumers read the pair
+	// (n-1, n) if the producer has it, else the frame-old (n-2, n-1); statistics only, never a field.
+	// Forward without a render-time estimate: statistics consumers only, and no de-judder / interpolator
+	// estimate takes this frame's pair (the legacy producer-consumer expression); the pair (n, n+1) comes from
+	// the producer. Never published to the motion segment: Forward there means the live matcher field.
+	void ServeStatistics(uint64_t sequence, uint64_t nextSequence, int width, int height)
+	{
+		const bool backward = vectorDemand.mode == VectorDemand::Mode::Backward;
+		const bool legacyConsumer = (dejudder && (dejudderReason == DejudderPolicy::Reason::Active ||
+			dejudderReason == DejudderPolicy::Reason::NoNextFrame || dejudderReason == DejudderPolicy::Reason::NextFrameDiffers)) || interpolating;
+		const bool forwardStats = vectorDemand.mode == VectorDemand::Mode::Forward && !vectorDemand.estimate && !legacyConsumer &&
+			(vectorDemand.Serves(VectorDemand::Consumer::SourceMonitorPan) || vectorDemand.Serves(VectorDemand::Consumer::MotionIntent));
+		if ((!backward && !forwardStats) || !motionProducer || !motionProducer->Running() ||
+			sequence == 0 || sequence == vectorBackwardSequence)
+			return;
+		vectorBackwardSequence = sequence;
+		int engineW = 0, engineH = 0, halvings = 0;
+		VectorEngineSizeFor(width, height, engineW, engineH, halvings);
+		motionProducer->SetTargetSize(engineW, engineH);
+		MotionAhead::FlowPtr flow;
+		uint64_t from = 0, to = 0;
+		if (forwardStats)
+		{
+			from = sequence;
+			to = nextSequence;
+			if (nextSequence == sequence + 1 &&
+				motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))
+				flow = motionProducer->Take(from, to);
+			NoteGlobalPair(flow != nullptr);
+		}
+		else
+			for (int age = 0; age < 2 && !flow && sequence > static_cast<uint64_t>(age + 1); ++age)
+			{
+				from = sequence - 1 - age;
+				to = sequence - age;
+				if (motionValidity.PairValid(from, to, motionValidity.EpochOfLastKept(), motionValidity.Epoch()))
+					flow = motionProducer->Take(from, to);
+			}
+		if (!flow)
+		{
+			++motionAheadMisses;
+			motionProducer->Prune(forwardStats ? sequence : (sequence > 2 ? sequence - 2 : 0));
+			return;
+		}
+		++motionAheadHits;
+		if (backward) ++vectorBackwardPairs;
+		++vectorPairs;
+		NoteVectorsDelivered(backward, backward ? "engine" : "engine ahead");
+		const int pictureHeight = dejudderPicture.available && dejudderPicture.rasterHeight == height &&
+			dejudderPicture.bottom > dejudderPicture.top ? dejudderPicture.bottom - dejudderPicture.top : height;
+		const VectorDemand::GlobalSample g = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(
+			static_cast<double>(flow->global[0][0]), static_cast<double>(flow->global[0][1]), halvings),
+			flow->global[0][2], flow->global[0][3], pictureHeight);
+		if (g.usable && vectorDemand.Serves(VectorDemand::Consumer::SourceMonitorPan))
+			sourceMonitor.SetMotion(g.sourcePixels, to);
+		if (vectorDemand.Serves(VectorDemand::Consumer::MotionIntent) && intentInterpreter->Active())
+		{
+			IntentInterpreter::VectorSample vectors;
+			vectors.from = from;
+			vectors.to = to;
+			vectors.valid = g.intentValid;
+			vectors.heightsPerFrame = g.heightsPerFrame;
+			intentInterpreter->NoteVectors(vectors);
+		}
+		if (backward && pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery))
+			motionSegment.Publish(VpMotion::Direction::Backward, from, to, MotionShadowField{ from, to },
+				VpMotion::Source::EngineAhead, motionValidity.Epoch(), 0, false);
+		motionProducer->Prune(forwardStats ? sequence : (sequence > 2 ? sequence - 2 : 0));
+	}
 	// output.dither's vector producers run only while the slot runs (WP-13, DitherSlot.h).
 	bool DitherVectorsSupported() const
 	{
@@ -7162,6 +7411,12 @@ struct LibplaceboVideoRenderer::Impl
 			if (!motionSourceLogged.empty())
 				text += ", motion: " + motionSourceLogged;
 		}
+		if (activeSettings.vectorDemand)
+		{
+			const std::string vectorLine = VectorDemand::StatusLine(vectorDemand);
+			if (!vectorLine.empty())
+				text += (text.empty() ? std::string() : std::string("; ")) + vectorLine;
+		}
 		std::lock_guard<std::mutex> guard(dejudderStatusMutex);
 		if (repeatReuse.Active())
 			text += (text.empty() ? std::string() : std::string("; ")) + repeatReuse.StatusLine();
@@ -7181,6 +7436,12 @@ struct LibplaceboVideoRenderer::Impl
 		repeatReuse.Release();   // WP-24: its probe hook while the GPU exists; its fallback entry
 		dejudderRenderedWarp.reset();
 		dejudderVectorField.reset();
+		// The next-frame vector field owns a texture of this device too (the sigma-delta's vectors on B's first
+		// present): released with the device, never left for ~Impl (access violation after the GPU was gone).
+		dejudderNextVectorField.reset();
+		dejudderNextVectors = nullptr;
+		dejudderNextVectorsSequence = 0;
+		ditherNextGate.Clear();
 		for (pl_tex& tex : dejudderNextTextures)
 			if (tex && d3d11) pl_tex_destroy(d3d11->gpu, &tex);
 		dejudderNextUploadedSequence = 0;
@@ -11996,6 +12257,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.timingContinuityFixes != next.timingContinuityFixes, "timing_continuity_fixes");
 		changed(current.cadenceClassFixes != next.cadenceClassFixes, "cadence_class_fixes");
 		changed(current.motionHistoryFixes != next.motionHistoryFixes, "motion_history_fixes");
+		changed(current.vectorDemand != next.vectorDemand, "vector_demand");
 		changed(current.queueTimingFixes != next.queueTimingFixes, "queue_timing_fixes");
 		changed(current.generalRateFixes != next.generalRateFixes, "general_rate_fixes");
 		changed(current.efficiencyFixes != next.efficiencyFixes, "efficiency_fixes");
@@ -15678,15 +15940,21 @@ struct LibplaceboVideoRenderer::Impl
 		motionValidity.NoteKept(sourceSequence, MotionValidity::Cause::DriftDrop);
 		ApplyMotionInvalidate();
 		dejudderSourceHz = sourceHz;
+		// Vector engine on demand: what wants vectors this frame (previous-frame state), and backward pairs.
+		UpdateVectorEngine(interlaced);
+		if (vectorDemand.mode != VectorDemand::Mode::Off && !cadenceRepeat)
+			ServeStatistics(sourceSequence, nextSourceSequence, width, height);
 		// Off and settled: today's path, nothing else is done.
 		if (!(activeSettings.dejudderStrength > 0.0) && !(activeSettings.dejudderStrengthEven > 0.0) &&
-			!activeSettings.occlusionMask && !adaptiveGrainMapWanted &&
+			!activeSettings.occlusionMask && !adaptiveGrainMapWanted && !vectorDemand.estimate &&
 			activeSettings.interpolation == InterpolationPolicy::Mode::Off && !interpolating && !vpGapFillStandalone &&
 			dejudderReason == DejudderPolicy::Reason::Off &&
 			dejudderReasonChangesNotLogged == 0 && !dejudder && !dejudderNextTextures[0] &&
 			!(activeSettings.interpolationFillGaps && motionEngineWarmPending))   // H3 F4: load the idle engine first
 		{
-			if (dejudderStatusTick != 0)
+			if (activeSettings.vectorDemand && vectorDemand.mode != VectorDemand::Mode::Off)
+				PublishDejudderStatus();   // the vector engine's line stays on the stats
+			else if (dejudderStatusTick != 0)
 			{
 				dejudderStatusTick = 0;
 				std::lock_guard<std::mutex> guard(dejudderStatusMutex);
@@ -15821,6 +16089,15 @@ struct LibplaceboVideoRenderer::Impl
 				in.sourceHz);
 			dejudderMaskRateLogged = true;
 		}
+		// Vector engine on demand: a forward estimate for an analysis consumer although the de-judder's own
+		// policy says the extras do not run. dejudderReason / dejudderExtrasAllowed stay as decided above.
+		const bool analysisEstimate = vectorDemand.estimate && vectorDemand.mode == VectorDemand::Mode::Forward &&
+			in.planeFormatsUsable && in.haveNext && in.nextMatches &&
+			(reason == DejudderPolicy::Reason::Off || reason == DejudderPolicy::Reason::VideoRateMaskOnly ||
+			reason == DejudderPolicy::Reason::IneligibleCadence ||
+			(reason == DejudderPolicy::Reason::LowLatency && vectorDemand.lowLatencyAllowed) ||
+			reason == DejudderPolicy::Reason::SmoothMotion ||
+			(reason == DejudderPolicy::Reason::NativeRgb && dejudderRgbLuma));
 		PublishDejudderStatus(reason != dejudderReason);
 		// A reason that flips (e.g. the queue running low) logs at most one
 		// line per 5 s; once the 5 s pass, the reason then current is logged
@@ -15857,10 +16134,10 @@ struct LibplaceboVideoRenderer::Impl
 				dejudderReasonChangesNotLogged = 0;
 			}
 		}
-		if (reason == DejudderPolicy::Reason::Off || reason == DejudderPolicy::Reason::LowLatency ||
+		if (!analysisEstimate && (reason == DejudderPolicy::Reason::Off || reason == DejudderPolicy::Reason::LowLatency ||
 			reason == DejudderPolicy::Reason::Interlaced || reason == DejudderPolicy::Reason::VideoRateMaskOnly ||
 			reason == DejudderPolicy::Reason::IneligibleCadence || reason == DejudderPolicy::Reason::NativeRgb ||
-			reason == DejudderPolicy::Reason::SmoothMotion)
+			reason == DejudderPolicy::Reason::SmoothMotion))
 		{
 			// Bug hunt 3 F4 (owner 2026-10-18): with hiccup repair on, the motion engine stays
 			// loaded and idle for every reason a gap pair can still be repaired under (the
@@ -15894,7 +16171,7 @@ struct LibplaceboVideoRenderer::Impl
 			}
 			return;
 		}
-		if (reason != DejudderPolicy::Reason::Active || cadenceRepeat ||
+		if ((reason != DejudderPolicy::Reason::Active && !analysisEstimate) || cadenceRepeat ||
 			sourceSequence == dejudderEstimatedSequence)
 			return;
 		// MotionValidity step 1 D: (A, B) only as adjacent frames of the current epoch
@@ -16383,9 +16660,15 @@ struct LibplaceboVideoRenderer::Impl
 			// source_resolution auto's fast-pan switch. Bug hunt 3 F1: one cell is 8 source px
 			// per halving of the search input (4K 16, 8K 32), not 8 at every size.
 			const int searchHalvings = dejudder->SearchHalvings();
-			if (flow && flow->global[0][2] < 0.9f)
-				sourceMonitor.SetMotion(DejudderPolicy::EngineGlobalSourcePixels(static_cast<double>(flow->global[0][0]),
-					static_cast<double>(flow->global[0][1]), searchHalvings), bSequence);
+			NoteGlobalPair(flow != nullptr);   // vector engine: a missed pair is counted and, sustained, visible
+			if (flow)
+			{
+				const VectorDemand::GlobalSample sample = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(
+					static_cast<double>(flow->global[0][0]), static_cast<double>(flow->global[0][1]), searchHalvings),
+					flow->global[0][2], flow->global[0][3], 0);
+				if (sample.usable)
+					sourceMonitor.SetMotion(sample.sourcePixels, bSequence);
+			}
 			// Motion intent (2026-10-17): the same whole-frame motion for this valid pair (the
 			// vectors-valid state accepted it above), in picture heights per frame; read-only.
 			if (flow && intentInterpreter->Active())
@@ -16395,10 +16678,11 @@ struct LibplaceboVideoRenderer::Impl
 				IntentInterpreter::VectorSample vectors;
 				vectors.from = aSequence;
 				vectors.to = bSequence;
-				vectors.valid = flow->global[0][3] > 0.5f && flow->global[0][2] < 0.9f && pictureHeight > 0;
-				vectors.heightsPerFrame = pictureHeight > 0 ? DejudderPolicy::EngineGlobalSourcePixels(
-					static_cast<double>(flow->global[0][0]), static_cast<double>(flow->global[0][1]), searchHalvings) /
-					pictureHeight : 0.0;
+				const VectorDemand::GlobalSample sample = VectorDemand::SampleGlobal(DejudderPolicy::EngineGlobalSourcePixels(
+					static_cast<double>(flow->global[0][0]), static_cast<double>(flow->global[0][1]), searchHalvings),
+					flow->global[0][2], flow->global[0][3], pictureHeight);
+				vectors.valid = sample.intentValid;
+				vectors.heightsPerFrame = sample.heightsPerFrame;
 				intentInterpreter->NoteVectors(vectors);
 			}
 			dejudder->SetExternalFlow(std::move(flow));
@@ -16457,6 +16741,11 @@ struct LibplaceboVideoRenderer::Impl
 			const bool producerStopped = motionProducer && !motionProducer->Running();
 			SyncFallback(FallbackCatalog::Motion(dejudder->GetSettings().opticalFlow, flowFailed, producerStopped,
 				flowFailed ? dejudder->OpticalFlowError() : producerStopped ? motionProducer->Error() : std::string()));
+		}
+		if (vectorDemand.estimate)
+		{
+			++vectorPairs;
+			NoteVectorsDelivered(false, dejudder->ExternalFlowUsed() ? "engine ahead" : dejudder->OpticalFlowUsed() ? "engine" : "matcher");
 		}
 		static GeneralRate::LogInterval motionAheadStatsLog = GeneralRate::LogInterval::ForFrames(2400);   // fixed-constant batch B7 2026-10-18: seconds, not frames
 		if (motionProducer && dejudderEstimates + 1 >= 24 && motionAheadStatsLog.DueOr((dejudderEstimates + 1) == 24))   // as the other periodic logs (audit 2026-10-16)
@@ -22561,7 +22850,10 @@ struct LibplaceboVideoRenderer::Impl
 			// Owner 2026-10-16: the producer stays alive once wanted (starting it again would cost a
 			// device on every queue refill); with no frames queued ahead it gets no frames (below),
 			// so it computes nothing it could not use - the startup fill and an emptied queue alike.
-			const bool wantProducer = dejudder && activeSettings.opticalFlow && activeSettings.motionAheadFrames > 0 && !lowLatency;
+			// Vector engine on demand: also while a consumer of vectors is served (forward, or backward pairs).
+			const bool vectorProducer = vectorDemand.producer && activeSettings.opticalFlow && activeSettings.motionAheadFrames > 0 &&
+				(!lowLatency || vectorDemand.lowLatencyAllowed);
+			const bool wantProducer = (dejudder && activeSettings.opticalFlow && activeSettings.motionAheadFrames > 0 && !lowLatency) || vectorProducer;
 			if (wantProducer && !motionProducer && !motionProducerFailedLogged && d3d11 && d3d11->gpu)
 			{
 				pl_d3d11 d3d = pl_d3d11_get(d3d11->gpu);
@@ -22607,14 +22899,19 @@ struct LibplaceboVideoRenderer::Impl
 			motionEngineReady.store(motionProducer && motionProducer->Running() && motionProducer->EngineReady(), std::memory_order_release);
 			// Frames are submitted only while a motion estimate runs for this source (the de-judder or
 			// the interpolator); otherwise the producer stays alive, idle.
-			const bool motionConsumer = dejudder && (dejudderReason == DejudderPolicy::Reason::Active ||
-				dejudderReason == DejudderPolicy::Reason::NoNextFrame || dejudderReason == DejudderPolicy::Reason::NextFrameDiffers);
+			const bool motionConsumer = (dejudder && (dejudderReason == DejudderPolicy::Reason::Active ||
+				dejudderReason == DejudderPolicy::Reason::NoNextFrame || dejudderReason == DejudderPolicy::Reason::NextFrameDiffers)) ||
+				vectorDemand.producer;
 			// Fixed-constant batch B3 2026-10-18 (general_rate_fixes): the depth as a time with a frame floor.
 			const MotionAhead::Decision ahead = MotionAhead::Decide(
 				MotionAhead::DepthAt(activeSettings.motionAheadFrames, dejudderSourceHz, activeSettings.generalRateFixes),
-				lowLatency, motionProducer && motionProducer->Running(),
-				queuedFutureFrames.load(std::memory_order_acquire), activeSettings.opticalFlow, motionConsumer);
+				lowLatency && (!vectorDemand.lowLatencyAllowed || vectorDemand.mode == VectorDemand::Mode::Backward),
+				motionProducer && motionProducer->Running(),
+				queuedFutureFrames.load(std::memory_order_acquire), activeSettings.opticalFlow, motionConsumer,
+				vectorDemand.mode == VectorDemand::Mode::Backward);
 			motionAheadDepth.store(motionProducer && motionProducer->Running() ? ahead.depth : 0, std::memory_order_release);
+			motionAheadBackward.store(motionProducer && motionProducer->Running() && ahead.reason == MotionAhead::Reason::BackwardPairs,
+				std::memory_order_release);
 			motionAheadConfigured.store((std::max)(1, ahead.configured), std::memory_order_release);
 			if (motionProducer)   // fixed-constant batch B3/B4 2026-10-18
 			{
@@ -23619,6 +23916,7 @@ struct LibplaceboVideoRenderer::Impl
             const OutputSegments::DitherPrep ditherPrep = outputFinish.PrepareDither(frameHooks, domain, outputFloat32, pipelineSlots);
             const bool any = ditherPrep.found && !ditherPrep.slotOff;
             const bool sigmaDomainDropped = ditherPrep.domainDropped;
+            sigmaDeltaRanLast = any && domain.supported && !sigmaDomainDropped;   // vector engine: the output consumer's want
             const int signature = (domain.full ? 1 : 0) | (domain.sample << 1) | (domain.color << 8);
             if (any && signature != sigmaDeltaDomainLogged)
             {
@@ -23780,6 +24078,8 @@ struct LibplaceboVideoRenderer::Impl
             DejudderCacheStage::Frame cacheFrame;
             cacheFrame.extrasMayFollow = dejudderReason == DejudderPolicy::Reason::Active &&
                 dejudderExtrasAllowed && dejudder && !cadenceRepeat && sourceSequence != 0;
+            cacheFrame.geometryForVectors = !cacheFrame.extrasMayFollow && vectorDemand.Serves(VectorDemand::Consumer::SigmaDelta) &&
+                dejudder && !cadenceRepeat && sourceSequence != 0 && !interpolating && !vpTimelineActive;   // vector engine: the sigma-delta's vectors need the geometry
             cacheFrame.sourceSequence = sourceSequence;
             cacheFrame.sourceCrop = renderImage.crop;
             cacheFrame.targetCrop = target.crop;
@@ -24888,6 +25188,8 @@ struct LibplaceboVideoRenderer::Impl
 			dejudderPredictedVsync = 0.0;   // no stale prediction across a skipped frame
 			if (rendered && submitted)
 				RenderAheadBreak();
+			if (rendered && submitted && vectorDemand.mode != VectorDemand::Mode::Off)
+				BuildSigmaDeltaVectorsWithoutExtras(sourceSequence, nextSourceSequence);   // vector engine, no extras
 		}
 		return rendered && submitted;
 	}
@@ -29734,6 +30036,9 @@ void LibplaceboVideoRenderer::RenderLoop()
             if (m_impl)
             {
                 m_impl->queuedFutureFrames.store(window.availableFutureFrames, std::memory_order_release);
+                // Vector engine: the frames the active queue holds after the current one (its target, derived).
+                m_impl->queueAheadCapacity.store(static_cast<int>(PrefillTargetLocked() > 1 ? PrefillTargetLocked() - 1 : 0),
+                    std::memory_order_release);
                 m_impl->queuedAheadCounts[(std::min)(window.availableFutureFrames, size_t{ 9 })].fetch_add(1, std::memory_order_relaxed);
             }
             for (const size_t index : window.indices)
@@ -29748,7 +30053,8 @@ void LibplaceboVideoRenderer::RenderLoop()
             // Optical flow ahead (docs/VP-nvof-ahead.md): the current frame and up to the
             // depth after it, each once (only frames already queued: an empty or short
             // queue gives fewer).
-            if (m_impl && m_impl->motionProducer && m_impl->motionAheadDepth.load(std::memory_order_acquire) > 0)
+            if (m_impl && m_impl->motionProducer && (m_impl->motionAheadDepth.load(std::memory_order_acquire) > 0 ||
+                m_impl->motionAheadBackward.load(std::memory_order_acquire)))
             {
                 const size_t depth = static_cast<size_t>(m_impl->motionAheadDepth.load(std::memory_order_acquire));
                 const uint64_t last = m_impl->motionProducer->LastSubmitted();
@@ -29823,7 +30129,11 @@ void LibplaceboVideoRenderer::RenderLoop()
 				// generation: skip, seek, reset) and waits for 4 again; disengaged, the producer gets
 				// no work (no pair could be used before its frames are shown).
 				const size_t queuedAhead = m_impl->queuedFutureFrames.load(std::memory_order_acquire);
-				const size_t engageAhead = static_cast<size_t>((std::max)(1, m_impl->motionAheadConfigured.load(std::memory_order_acquire)));
+				const size_t engageAhead = m_impl->activeSettings.vectorDemand ?
+					static_cast<size_t>(VectorDemand::EngageAhead(m_impl->motionAheadConfigured.load(std::memory_order_acquire),
+						m_impl->queueAheadCapacity.load(std::memory_order_acquire))) :
+					static_cast<size_t>((std::max)(1, m_impl->motionAheadConfigured.load(std::memory_order_acquire)));
+				const bool backwardPairs = m_impl->motionAheadBackward.load(std::memory_order_acquire);   // vector engine: engaged while it runs
 				// A break always disengages and the next pass must see 4 queued ahead again (a re-engage
 				// in the same pass would skip the refill wait: the reset test, 2026-10-16).
 				if (m_impl->motionAheadEngaged &&
@@ -29833,13 +30143,14 @@ void LibplaceboVideoRenderer::RenderLoop()
 					DebugLog::Log("Motion ahead: waiting for %zu frames queued ahead (%s)", engageAhead,
 						queuedAhead == 0 ? "the queue holds none" : "the sequence broke: skip, seek or reset");
 				}
-				else if (!m_impl->motionAheadEngaged && queuedAhead >= engageAhead)
+				else if (!m_impl->motionAheadEngaged && queuedAhead >= engageAhead && !backwardPairs)
 				{
 					m_impl->motionAheadEngaged = true;
 					m_impl->motionAheadEngagedGeneration = generation;
-					DebugLog::Log("Motion ahead: engaged (%zu frames queued ahead)", queuedAhead);
+					DebugLog::Log("Motion ahead: engaged (%zu frames queued ahead%s)", queuedAhead,
+						m_impl->vectorDemand.lowLatencyAllowed ? "; vector engine: shallow queue" : "");
 				}
-				const bool framesAhead = m_impl->motionAheadEngaged;
+				const bool framesAhead = m_impl->motionAheadEngaged || backwardPairs;
 				// A frame's time as the dequeue reads it (the film clock when pulldown is locked,
 				// else the capture timestamp; 0 = not known).
 				LARGE_INTEGER aheadQpcFrequency{};

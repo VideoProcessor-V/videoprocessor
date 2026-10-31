@@ -19,6 +19,7 @@ namespace Vpv
             t.delaySection = "queue"; t.delayKey = "target_latency_ms"; t.recommendedFrames = 4;
             t.defaults.push_back({ "optical_flow", "on" });
             t.defaults.push_back({ "motion_ahead_frames", "4" });
+            t.defaults.push_back({ "vector_demand", "on" });
             t.defaults.push_back({ "interpolation", "off" });
             t.defaults.push_back({ "interpolation_fill_gaps", "on" });
             t.defaults.push_back({ "dejudder_est_split", "off" });
@@ -154,6 +155,7 @@ namespace Vpv
                 u.toggles.push_back({ "interpolation_fill_gaps", "Fill dropped frames (hiccup repair)", { "on", "off" }, "motion.consumers" });
                 u.toggles.push_back({ "interpolation", "Frame interpolation (50/60p)", { "off", "auto", "always" }, "motion.consumers" });
                 u.toggles.push_back({ "dejudder_estimate_ahead", "Estimate motion ahead", { "on", "off" }, "motion.estimation" });
+                u.toggles.push_back({ "vector_demand", "Vector engine on demand", { "on", "off" }, "motion.estimation" });
                 u.toggles.push_back({ "dither_vectors", "Dither reuses the de-judder's motion", { "auto", "own" }, "motion.consumers" });
                 u.toggles.push_back({ "render_ahead", "De-judder: render ahead (under test)", { "off", "on" }, "output.presentation" });
                 u.toggles.push_back({ "interpolation_fallback", "Where motion is not trusted: hold or blend", { "hold", "blend" }, "motion.consumers" });

@@ -6506,5 +6506,220 @@ namespace Tests
 				Assert::IsTrue(info.toneCurveOutputNits[i] <= info.targetPeakNits * 1.01f + 0.01f);
 			}
 		}
+
+		// ---- Vector engine on demand (vector_demand). The renderer logs "Vector engine: <status>"
+		// on change, "Vector engine: vectors delivered (...)" once per mode and a 5 s statistics line.
+
+		// The optical-flow engine is there when a de-judder run reports it as its motion source (the
+		// neighbouring motion tests' probe); without it the vector tests log SKIP-NO-ENGINE.
+		static bool VectorTestEngineHere()
+		{
+			// As the neighbouring look-ahead test: queue target 5 and 8 s (a cold shader cache can need more than 3 s
+			// to reach the first estimate); the answer is kept for the other vector tests.
+			static int engineHere = -1;
+			if (engineHere >= 0) return engineHere != 0;
+			g_harnessQueueTarget = 5;
+			const RunResult probe = Run(VideoFrameEncoding::V210, "gpu", 8.0, true, "dejudder_strength: 0.25\n");
+			g_harnessQueueTarget = 0;
+			engineHere = 0;
+			for (const std::string& line : probe.log)
+				if (line.find("De-judder motion:") != std::string::npos && line.find("optical-flow engine") != std::string::npos)
+					engineHere = 1;
+			return engineHere != 0;
+		}
+
+		static std::string VectorTestLines(const RunResult& r)
+		{
+			std::string out;
+			for (const std::string& line : r.log)
+				if (line.find("Vector engine:") != std::string::npos || line.find("Motion ahead") != std::string::npos)
+					out += "  " + line + "\n";
+			return out;
+		}
+
+		static bool VectorTestSkip(const char* name)
+		{
+			if (VectorTestEngineHere()) return false;
+			Assert::IsFalse(RequireGpu(), L"VP_TEST_REQUIRE_GPU=1: no optical-flow engine, the vector engine was not tested");
+			Logger::WriteMessage((std::string("SKIP-NO-ENGINE ") + name + "\n").c_str());
+			return true;
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineDeliversAtEveryRate)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(VectorEngineDeliversAtEveryRate)
+		{
+			const HarnessScope harnessScope;
+			// Shipped defaults (no de-judder), VP's debander on as the vector consumer: the vector
+			// engine runs on demand at every source rate and delivers vectors; no de-judder extras ran.
+			// The signal rate is the source rate; the display is the machine's own (the engine keys on
+			// the source, never on the display: 30p on 60 Hz and 24p on 24 Hz are source-rate cases).
+			if (!RequireHardwareOrSkip("VectorEngineDeliversAtEveryRate")) return;
+			if (VectorTestSkip("VectorEngineDeliversAtEveryRate")) return;
+			struct Rate { const char* name; int numerator; int denominator; bool film; };
+			const Rate rates[] = { { "24p", 24000, 1001, true }, { "30p", 30000, 1001, false }, { "50p", 50000, 1000, false },
+				{ "60p", 60000, 1000, false }, { "59.94p", 60000, 1001, false } };
+			for (const Rate& rate : rates)
+			{
+				FramePlan plan;
+				plan.rateNumerator = rate.numerator;
+				plan.rateDenominator = rate.denominator;
+				plan.step = [](int n) { FrameStep f; f.content = n; return f; };
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, rate.film, "deband_vp: on\n", false, &plan);
+				const std::wstring name = HarnessWide(rate.name);
+				Logger::WriteMessage((std::string(rate.name) + ":\n" + VectorTestLines(r)).c_str());
+				Assert::IsTrue(r.presented, (name + L": frames presented\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("Vector engine: on"), (name + L": the vector engine is on\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("Vector engine: vectors delivered"), (name + L": vectors delivered\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("De-judder extras:"), (name + L": no extras ran\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("De-judder: active"), (name + L": the de-judder never active\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Interpolation: interpolating"), (name + L": no interpolation ran\n" + r.Tail()).c_str());
+			}
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineGamesDepthOneEngagesAtOneAhead)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(VectorEngineGamesDepthOneEngagesAtOneAhead)
+		{
+			const HarnessScope harnessScope;
+			// A games queue (queue_size 4, target_frames 2) keeps one frame ahead: the look-ahead engages
+			// at one ahead and the vectors are forward.
+			if (!RequireHardwareOrSkip("VectorEngineGamesDepthOneEngagesAtOneAhead")) return;
+			if (VectorTestSkip("VectorEngineGamesDepthOneEngagesAtOneAhead")) return;
+			g_harnessApplySnapshot = true;
+			g_harnessQueueTarget = 2;   // the harness sets the target itself after the snapshot (SetQueueFramePolicy)
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
+				"deband_vp: on\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 2\n");
+			g_harnessApplySnapshot = false;
+			g_harnessQueueTarget = 0;
+			Logger::WriteMessage(VectorTestLines(r).c_str());
+			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
+			Assert::IsTrue(r.Logged("Motion ahead: engaged"), (L"the look-ahead engaged at one ahead\n" + r.Tail()).c_str());
+			Assert::IsTrue(r.Logged("vectors delivered (forward"), (L"forward vectors delivered\n" + r.Tail()).c_str());
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineCompetitiveDepthZeroPublishesBackwardPairs)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(VectorEngineCompetitiveDepthZeroPublishesBackwardPairs)
+		{
+			const HarnessScope harnessScope;
+			// A competitive queue (target_frames 1) has no frame ahead: the backward pairs are published
+			// and the consumer that needs a frame ahead (the debander hold) is named as without vectors.
+			if (!RequireHardwareOrSkip("VectorEngineCompetitiveDepthZeroPublishesBackwardPairs")) return;
+			if (VectorTestSkip("VectorEngineCompetitiveDepthZeroPublishesBackwardPairs")) return;
+			g_harnessApplySnapshot = true;
+			g_harnessQueueTarget = 1;   // the harness overrides the snapshot's target_frames after it applies
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
+				"deband_vp: on\nsource_resolution: auto\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 1\n");
+			g_harnessApplySnapshot = false;
+			g_harnessQueueTarget = 0;
+			Logger::WriteMessage(VectorTestLines(r).c_str());
+			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
+			Assert::IsTrue(r.Logged("vectors delivered (backward"), (L"backward pairs delivered\n" + r.Tail()).c_str());
+			// The status lists the unserved consumers together: "...; deband hold, detail pulse, ... without vectors (needs a frame ahead)".
+			bool named = false;
+			for (const std::string& line : r.log)
+				if (line.find("Vector engine: backward pairs") != std::string::npos && line.find("deband hold") != std::string::npos &&
+					line.find("without vectors (needs a frame ahead)") != std::string::npos)
+					named = true;
+			Assert::IsTrue(named, (L"the status names the deband hold as without vectors\n" + r.Tail()).c_str());
+			Assert::IsFalse(r.Logged("Motion ahead: engaged"), (L"no look-ahead at depth zero\n" + r.Tail()).c_str());
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineOffIsTodaysPath)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(VectorEngineOffIsTodaysPath)
+		{
+			const HarnessScope harnessScope;
+			// vector_demand: off logs no "Vector engine:" line even with a consumer on, and its picture is
+			// identical to a default run with no vector consumer active (the capture's raw hash).
+			if (!RequireHardwareOrSkip("VectorEngineOffIsTodaysPath")) return;
+			if (VectorTestSkip("VectorEngineOffIsTodaysPath")) return;
+			const RunResult off = Run(VideoFrameEncoding::V210, "gpu", 4.0, false, "vector_demand: off\ndeband_vp: on\n");
+			Logger::WriteMessage(VectorTestLines(off).c_str());
+			Assert::IsTrue(off.presented, (L"frames presented\n" + off.Tail()).c_str());
+			Assert::IsFalse(off.Logged("Vector engine:"), (L"vector_demand off: no Vector engine line\n" + off.Tail()).c_str());
+			const int savedW = g_harnessWidth, savedH = g_harnessHeight;
+			g_harnessWidth = 3840;
+			g_harnessHeight = 2160;
+			wchar_t tempPath[MAX_PATH] = {};
+			GetTempPathW(MAX_PATH, tempPath);
+			const std::wstring shots = std::wstring(tempPath) + L"vp-vector-demand-identity";
+			CreateDirectoryW(shots.c_str(), nullptr);
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			FramePlan plan;
+			plan.captureAtSeconds = 2.5;
+			plan.step = [](int) { return FrameStep{ true, 0, 0 }; };   // one still picture
+			auto hashOf = [&](const char* extra, const wchar_t* name) {
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 3.5, false, std::string(extra) + "[vprenderer.Default]\ndithering: off\ndeband: off\n", false, &plan);
+				Assert::IsFalse(r.captureMetadata.empty(), (std::wstring(name) + L": capture written\n" + r.Tail()).c_str());
+				std::ifstream in(std::wstring(r.captureMetadata.begin(), r.captureMetadata.end()));
+				std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+				const size_t k = text.find("\"raw_r10_sha256\": \"");
+				Assert::IsTrue(k != std::string::npos, (std::wstring(name) + L": hash in the sidecar").c_str());
+				return text.substr(k + 19, 64);
+			};
+			// No vector consumer in either run (the debander off): demand off and on are the same picture.
+			const std::string demandOff = hashOf("vector_demand: off\ndeband_vp: off\ndetail_pulse_stabilise: off\nlow_bitrate_handling: off\n", L"vector_demand off");
+			const std::string demandOn = hashOf("vector_demand: on\ndeband_vp: off\ndetail_pulse_stabilise: off\nlow_bitrate_handling: off\n", L"vector_demand on, no consumer");
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
+			g_harnessWidth = savedW;
+			g_harnessHeight = savedH;
+			Assert::AreEqual(demandOff, demandOn, L"vector_demand off is pixel-identical to a default run with no vector consumer");
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineSmoothMotionKeepsAnalysis)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(VectorEngineSmoothMotionKeepsAnalysis)
+		{
+			const HarnessScope harnessScope;
+			// With libplacebo's smooth motion as the motion engine the analysis consumers are still served
+			// (forward) and the output dither is named as without vectors.
+			if (!RequireHardwareOrSkip("VectorEngineSmoothMotionKeepsAnalysis")) return;
+			if (VectorTestSkip("VectorEngineSmoothMotionKeepsAnalysis")) return;
+			const FramePlan plan = RatePlan(HarnessMonitorHz() * 5.0 / 6.0);
+			// The sigma-delta shader is found through VP_TEST_SHADER_DIR (as TemporalDitherChoiceControlsTheSigmaDelta does).
+			const std::string here = Here();
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", here.substr(0, here.size() - 1).c_str());
+			auto ditherLines = [](const RunResult& run) {
+				std::string out;
+				for (const std::string& line : run.log)
+					if (line.find("ither") != std::string::npos || line.find("igma-delta") != std::string::npos ||
+						line.find("custom hook") != std::string::npos || line.find("Vector engine:") != std::string::npos ||
+						line.find("Vector engine: off") != std::string::npos)
+						out += "  " + line.substr(0, 300) + "\n";
+				return out;
+			};
+			// The sigma-delta takes the engine's vectors only where libplacebo has the set-texture call (the Beta
+			// flavour, libplacebo 377); the default flavour (360) searches itself, so no vectors are asked of the
+			// engine there and this test must run on the Beta renderer.
+			_putenv_s("VP_TEST_HARNESS_BETA", "1");
+			// Control: the same run without smooth motion. The sigma-delta must run in this harness and be
+			// served (so the smooth-motion run's output-dither fallback means something).
+			const RunResult control = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
+				"deband_vp: on\ntemporal_dither: sigma_delta\n", false, &plan);
+			Logger::WriteMessage(("control (no smooth motion):\n" + ditherLines(control)).c_str());
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
+				"deband_vp: on\ntemporal_dither: sigma_delta\n[vprenderer.motion]\nmotion_engine: smooth_motion\nsmooth_motion: always\n", false, &plan);
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", nullptr);
+			_putenv_s("VP_TEST_HARNESS_BETA", "");
+			Logger::WriteMessage(("smooth motion:\n" + ditherLines(r) + VectorTestLines(r)).c_str());
+			bool controlServed = false;
+			for (const std::string& line : control.log)
+				if (line.find("Vector engine: on") != std::string::npos && line.find("output dither") != std::string::npos &&
+					line.find("output dither without vectors") == std::string::npos)
+					controlServed = true;
+			Assert::IsTrue(controlServed, (L"control: the sigma-delta ran and is served (check the Sigma-delta lines above)\n" + control.Tail()).c_str());
+			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
+			Assert::IsTrue(r.Logged("Motion engine: libplacebo smooth motion"), (L"smooth motion is the engine\n" + r.Tail()).c_str());
+			Assert::IsTrue(r.Logged("Vector engine: on (forward)"), (L"a source consumer is served\n" + r.Tail()).c_str());
+			Assert::IsTrue(r.Logged("output dither without vectors") || r.fallbacksStatus.find("output dither") != std::string::npos,
+				(L"output dither is named as without vectors\n" + r.Tail() + HarnessWide(r.fallbacksStatus)).c_str());
+		}
 	};
 }

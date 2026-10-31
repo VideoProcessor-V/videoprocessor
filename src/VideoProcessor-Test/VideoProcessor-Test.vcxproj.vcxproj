@@ -278,6 +278,9 @@
     <ClCompile Include="..\VP-V\modules\motion\consumers\tests\OcclusionMaskHookTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\tests\VectorDemandTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\motion\estimation\tests\EstimatorHookTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>

@@ -17,7 +17,7 @@ namespace DejudderCacheStage
 		geometryValid = false;
 		// Only when extras may follow. The geometry is kept on the source path too: the
 		// sigma-delta's vectors on the extras need it (delta 8 R1).
-		if (!frame.extrasMayFollow)
+		if (!frame.extrasMayFollow && !frame.geometryForVectors)
 			return;
 		DejudderRendered::Geometry next;
 		const DejudderRendered::Rects rounded = DejudderRendered::Rounded(frame.sourceCrop, frame.targetCrop,
@@ -45,13 +45,13 @@ namespace DejudderCacheStage
 			geometry = next;
 			geometryValid = true;
 		}
-		if (mapped && frame.warpRendered && !frame.interpolating)
+		if (mapped && frame.extrasMayFollow && frame.warpRendered && !frame.interpolating)
 		{
 			cache.Arm(frame.sourceSequence);
 			hooks.push_back(cache.Hook());
 		}
 		const int stage = mapped ? 1 : 0;
-		if (frame.warpRendered && stage != warpStageLogged)
+		if (frame.extrasMayFollow && frame.warpRendered && stage != warpStageLogged)
 		{
 			warpStageLogged = stage;
 			DebugLog::Log(mapped ? "De-judder extras: warping the rendered picture (6d)" :
