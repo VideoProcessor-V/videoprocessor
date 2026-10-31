@@ -25,9 +25,9 @@ namespace OriginalPathway
 		const char* slot;   // the slot whose VP additions it removes (slots.json id)
 	};
 
-	inline const std::array<Override, 66>& Overrides()
+	inline const std::array<Override, 69>& Overrides()
 	{
-		static const std::array<Override, 66> table = { {
+		static const std::array<Override, 69> table = { {
 			{ "capture_path", "standard", "input.capture" },
 			{ "capture_upload", "render", "input.capture" },
 			{ "native_rgb_ingest", "off", "input.capture" },
@@ -53,7 +53,11 @@ namespace OriginalPathway
 			{ "source_resolution_cut_fixes", "off", "input.source_analysis" },
 			{ "deband_vp", "off", "repair.deband" },
 			{ "deband_vp_exclusive", "off", "repair.deband" },
-			{ "deband_grain", "on", "repair.deband" },   // Bill merge 2026-10-31: Bill's deband keeps libplacebo's grain
+			{ "deband_grain", "on", "repair.deband" },
+			// Bill merge 2026-10-31 (settings bug hunt 32 items 1 and 4): Bill's chroma default, VP-only overrides neutral.
+			{ "chroma_upscaler", "bicubic", "scaling.chroma_upscale" },
+			{ "source_range", "auto", "input.signal" },
+			{ "upscale_light", "linear", "scaling.output" },   // Bill merge 2026-10-31: Bill's deband keeps libplacebo's grain
 			{ "detail_pulse_stabilise", "off", "repair.texture_restore" },
 			{ "texture_restore", "off", "repair.texture_restore" },
 			{ "dejudder_strength", "0", "motion.consumers" },

@@ -3780,6 +3780,9 @@ namespace
 		settings.debandVp = "off";                         // key=deband_vp
 		settings.debandVpExclusive = false;                // key=deband_vp_exclusive
 		settings.debandGrain = true;                       // key=deband_grain
+		settings.chromaUpscaler = "bicubic";               // key=chroma_upscaler
+		settings.sourceRange = "auto";                     // key=source_range
+		settings.upscaleLight = "linear";                  // key=upscale_light
 		settings.detailPulseStabilise = false;             // key=detail_pulse_stabilise
 		settings.textureRestore = false;                   // key=texture_restore
 		settings.dejudderStrength = 0.0;                   // key=dejudder_strength
@@ -21640,8 +21643,11 @@ struct LibplaceboVideoRenderer::Impl
         subtitleSourceProcessing.float32=SubtitleQuality().float32;
         auto subtitleLegacyProcessing=subtitleSourceProcessing;
         subtitleLegacyProcessing.debandEnabled=false;
+        // Bill merge (either/or, c-item 8): outside his temporal composition Bill passes no options
+        // (fast params); VP-V keeps the configured chroma upscaler/anti-ringing and float32 there
+        // (audit 2026-10-16). The Original pathway is Bill's exactly.
         const auto* subtitleSourceProcessingOptions=temporalSubtitleComposition?
-            &subtitleSourceProcessing:&subtitleLegacyProcessing;
+            &subtitleSourceProcessing:(pipelineSlots.OriginalPathway()?nullptr:&subtitleLegacyProcessing);
         const auto measureSubtitlePreparation=[&](auto&& prepare) {
             if (!OsdTimingPolicy::ProcessingPerformanceEnabled) return prepare();
             const auto before=subtitlePreparationRenderer.RenderCallCount();
@@ -30651,7 +30657,7 @@ void LibplaceboVideoRenderer::EnqueueFrame(VideoFrame& videoFrame,
 			RecordRendererFrame(DiagnosticHistory::StageDropped, dropCandidate->frame.GetCounter(),
 				dropCandidate->frame.GetTimingTimestamp(), m_frameQueue.size(),
 				RendererDiagnostics::DropQueueOverflow,
-				m_droppedFrames.load(std::memory_order_relaxed) + 1, m_callbackGeneration);
+				droppedTotal, m_callbackGeneration);   // merge 2026-10-31: counted once (Bill's droppedTotal)
 			dropCandidate->frame.SourceBufferRelease();
 			// The dropped frame's own gap is merged into its successor's (hunt 2
 			// 13-timing L1, queue_timing_fixes): a no-fill gap survives the drop.
@@ -30681,7 +30687,6 @@ void LibplaceboVideoRenderer::EnqueueFrame(VideoFrame& videoFrame,
 				if (!mergeDroppedGap || !nextNoFill)
 					gapCause = droppedNoFill && droppedCause ? droppedCause : "queue overflow drop";
 			}
-			m_droppedFrames.fetch_add(1, std::memory_order_relaxed);
 		}
 		if (m_repeatPreservingDrops > 0)
 		{
