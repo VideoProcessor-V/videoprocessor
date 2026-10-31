@@ -32,7 +32,19 @@ The historical translated ROI patch is retained as provenance and is already
 committed in this source; do not apply it again. Full source includes submodules.
 Library tests are not live player/HDMI or perceptual gamut qualification.
 
-VP-V note: source/fl35-patches 0001-0004 (FL35 output-clamp, rgba32f FBOs,
-pl_mpv_user_shader_set_texture) are NOT yet in this 388 binary; port pending.
-The 377 FL35 source zip is kept as provenance. Fork-only API used by VP-V is
-guarded in code until the patched 388 build lands (REHEARSAL guards).
+VP-V FL35 build (2026-10-31): bin/libplacebo-388.dll is NOT Bill's binary.
+It is Bill's 388 source (a89f8241, the archive above) plus source/fl35-patches
+0001-0004 (FL35 limited-range output clamp keeping BTB/WTW on all channels;
+optional rgba32f FBOs output_fbo_float32/fbo_float32; the fork export
+pl_mpv_user_shader_set_texture). Fork branch vp-fl35-388 (local D:\codex\libplacebo-388fl35).
+Build: MSYS2 mingw64 GCC 16.2.0; Meson 1.12.1; Ninja 1.13.2; tools/build-windows.sh
+(options as in VP-FORK.md). 16 library tests passed (d3d11.c not run on this
+machine: GPU reserved; the coordinator runs the GPU clamp check).
+Exports: Bill's 539 + pl_mpv_user_shader_set_texture (540; the .def lists it).
+Every import resolves in the bundled runtime DLLs, which are Bill's, unchanged.
+lib/libplacebo-388.lib regenerated: lib.exe /nologo /def:libplacebo-388.def /machine:x64 /out:libplacebo-388.lib
+DLL SHA256: b1952e5453473b2697e55051bfd4709d1c611ccd1113b82379c8baa515f43577
+Complete patched source: source/libplacebo-7.388.0-vp-fl35-source.zip
+Source archive SHA256: 1c835fe2d853ce76cb3d02fdc24256d44997f9680fc5500ec7bb8a368c89eedc
+API 388 fixed the output encoding after PRE_OUTPUT hooks, so VP's
+OutputEncodingRepair stays off. GPU check (pending, coordinator): BetaGpuTests code 40 -> 40, 980 -> 980.

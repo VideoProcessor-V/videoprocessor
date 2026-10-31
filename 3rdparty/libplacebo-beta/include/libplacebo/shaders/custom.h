@@ -336,6 +336,17 @@ pl_mpv_user_shader_parse(pl_gpu gpu, const char *shader_text, size_t shader_len)
 
 PL_API void pl_mpv_user_shader_destroy(const struct pl_hook **hook);
 
+// VP fork (VideoProcessor delta 8 R1): point a texture the shader declares
+// itself (`//!TEXTURE NAME`, sampled, not `//!STORAGE`) at a texture owned by
+// the caller, e.g. a per-frame vector field, for every pass that binds NAME.
+// `tex` must be sampleable and outlive its use; NULL restores the shader's
+// own texture. The shader's own texture is kept and restored before
+// `pl_mpv_user_shader_destroy`, which never destroys a caller's texture.
+// Returns false if the shader declares no such sampled texture.
+#define PL_VP_MPV_USER_SHADER_SET_TEXTURE 1
+PL_API bool pl_mpv_user_shader_set_texture(const struct pl_hook *hook,
+                                           const char *name, pl_tex tex);
+
 PL_API_END
 
 #endif // LIBPLACEBO_SHADERS_CUSTOM_H_
