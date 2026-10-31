@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <regex>
 #include <sstream>
 
@@ -203,10 +204,55 @@ namespace CustomHookChain
 
     bool SetHookParameter(const pl_hook* hook, const char* name, double value)
     {
-        char text[64];
-        std::snprintf(text, sizeof(text), "%.9g", value);
-        const auto applied = ApplyHookParameters(hook, { { name, text } });
-        return !applied.empty();
+        if (!std::isfinite(value) || value != std::floor(value) || std::fabs(value) >= 1e9)
+        {
+            // Non-integral or large values keep the "%.9g" text round trip.
+            char text[64];
+            std::snprintf(text, sizeof(text), "%.9g", value);
+            const auto applied = ApplyHookParameters(hook, { { name, text } });
+            return !applied.empty();
+        }
+        if (!hook || !name) return false;
+        // Integral and below 1e9: the "%.9g" text parses back to exactly this value.
+        bool applied = false;
+        for (int i = 0; i < hook->num_parameters; ++i)
+        {
+            const pl_hook_par& parameter = hook->parameters[i];
+            if (!parameter.name || !parameter.data || std::strcmp(parameter.name, name) != 0)
+                continue;
+            switch (parameter.type)
+            {
+            case PL_VAR_FLOAT:
+            {
+                const float next = static_cast<float>(Bounded(value,
+                    static_cast<double>(parameter.minimum.f),
+                    static_cast<double>(parameter.maximum.f)));
+                if (parameter.data->f != next) parameter.data->f = next;
+                break;
+            }
+            case PL_VAR_SINT:
+            {
+                const int next = static_cast<int>(Bounded(std::llround(value),
+                    static_cast<long long>(parameter.minimum.i),
+                    static_cast<long long>(parameter.maximum.i)));
+                if (parameter.data->i != next) parameter.data->i = next;
+                break;
+            }
+            case PL_VAR_UINT:
+            {
+                const unsigned next = static_cast<unsigned>(Bounded(
+                    std::llround(std::max(value, 0.0)),
+                    static_cast<long long>(parameter.minimum.u),
+                    static_cast<long long>(parameter.maximum.u)));
+                if (parameter.data->u != next) parameter.data->u = next;
+                break;
+            }
+            default:
+                continue;
+            }
+            applied = true;
+        }
+        return applied;
     }
 
     Chain::Chain(Loader loaderIn) : loader(std::move(loaderIn))

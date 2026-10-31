@@ -424,5 +424,47 @@ namespace VideoProcessorTest
 			Assert::AreEqual(std::string(), CustomHookChain::TemplateKey("none", values));
 		}
 
+
+		TEST_METHOD(SetHookParameterMatchesTheTextRoundTrip)
+		{
+			struct Params
+			{
+				pl_var_data data[3]{};
+				pl_hook_par par[3]{};
+				pl_hook hook{};
+				Params()
+				{
+					par[0].name = "f"; par[0].type = PL_VAR_FLOAT; par[0].data = &data[0];
+					par[0].minimum.f = -2.0f; par[0].maximum.f = 10.0f;
+					par[1].name = "s"; par[1].type = PL_VAR_SINT; par[1].data = &data[1];
+					par[1].minimum.i = -5; par[1].maximum.i = 7;
+					par[2].name = "u"; par[2].type = PL_VAR_UINT; par[2].data = &data[2];
+					par[2].minimum.u = 1; par[2].maximum.u = 9;
+					hook.parameters = par;
+					hook.num_parameters = 3;
+				}
+			};
+			const double nan = std::nan("");
+			const double inputs[] = { 0.0, 3.0, -3.0, 2.5, -2.5, 100.0, -100.0, 1e12, -1e12, 0.3, nan, INFINITY };
+			for (const char* name : { "f", "s", "u", "unknown" })
+			{
+				for (const double value : inputs)
+				{
+					Params direct, reference;
+					char text[64];
+					std::snprintf(text, sizeof(text), "%.9g", value);
+					const bool expected = !CustomHookChain::ApplyHookParameters(&reference.hook, { { name, text } }).empty();
+					const bool actual = CustomHookChain::SetHookParameter(&direct.hook, name, value);
+					Assert::AreEqual(expected, actual);
+					Assert::AreEqual(reference.data[0].f, direct.data[0].f);
+					Assert::AreEqual(reference.data[1].i, direct.data[1].i);
+					Assert::AreEqual(reference.data[2].u, direct.data[2].u);
+				}
+			}
+			Params unnamed;
+			unnamed.par[0].name = nullptr;
+			Assert::IsFalse(CustomHookChain::SetHookParameter(&unnamed.hook, "f", 1.0));
+			Assert::IsFalse(CustomHookChain::SetHookParameter(nullptr, "f", 1.0));
+		}
 	};
 }
