@@ -88,6 +88,8 @@ Checked against the code 2026-10-25 (WP-14 / M2 step 14, `feat/m2-dv`).
 - `HdrInferenceSignalBuilder.h` - `BuildHdrInferenceSignalFromState` (the GUI's signal builder,
   shared with the tests).
 - `HdrVetoCaptureGate.h` - moves the veto switch onto the capture thread and the cut frame.
+- `ResyncEvent.h` - the resync detector (pure): classifies each enqueued frame as FULL / MINOR / timing
+  (`Detector::OnEnqueue`), the lock-free arm box, the refusal note and the storm window.
 - `DolbyVisionTunnelGate.h`, `DolbyVisionTunnelHandoff.h` - which captured signals the DV tunnel
   formatter may claim (`dv_tunnel_handoff`), and the hand-off of an RGB LLDV signal to the tunnel.
 - `GpuDolbyVisionTunnelUnpack.h/.cpp` - the tunnel's RGB8-in-r210 container unpacked to 12-bit
