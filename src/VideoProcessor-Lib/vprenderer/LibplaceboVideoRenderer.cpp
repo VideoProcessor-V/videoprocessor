@@ -7383,6 +7383,12 @@ struct LibplaceboVideoRenderer::Impl
 		repeatReuse.Release();   // WP-24: its probe hook while the GPU exists; its fallback entry
 		dejudderRenderedWarp.reset();
 		dejudderVectorField.reset();
+		// The next-frame vector field owns a texture of this device too (the sigma-delta's vectors on B's first
+		// present): released with the device, never left for ~Impl (access violation after the GPU was gone).
+		dejudderNextVectorField.reset();
+		dejudderNextVectors = nullptr;
+		dejudderNextVectorsSequence = 0;
+		ditherNextGate.Clear();
 		for (pl_tex& tex : dejudderNextTextures)
 			if (tex && d3d11) pl_tex_destroy(d3d11->gpu, &tex);
 		dejudderNextUploadedSequence = 0;
