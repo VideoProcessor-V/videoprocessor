@@ -175,7 +175,11 @@
         "src/VideoProcessor-Lib/AnalysisFrame.cpp",
         "src/VP-V/modules/input/source_analysis/VpFrameAnalysis.cpp",
         "src/VP-V/modules/input/source_analysis/VpFrameAnalysis.h",
-        "src/VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h"
+        "src/VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h",
+        "src/VP-V/modules/input/source_analysis/identity/SourceIdVote.h",
+        "src/VP-V/modules/input/source_analysis/identity/SourceIdConsensus.h",
+        "src/VP-V/modules/input/source_analysis/identity/AbrStepDetector.h",
+        "src/VP-V/modules/input/source_analysis/identity/AbrNoticePolicy.h"
       ],
       "components": {
         "files": {
@@ -191,6 +195,8 @@
           "frame_analysis_store",
           "label_detector",
           "source_coding_fixes",
+          "source_id_abr_notice",
+          "source_id_consensus",
           "source_resolution",
           "source_resolution_auto_min_confidence",
           "source_resolution_crossfade_s",

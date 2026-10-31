@@ -2,15 +2,15 @@
  * Copyright(C) 2026 VP-V contributors
  * SPDX-License-Identifier: GPL-3.0-only
  */
-// Source-ID consensus (input.source_identity): agreement latches after the dwell, disagreement
+// Source-ID consensus (input.source_analysis (identity/)): agreement latches after the dwell, disagreement
 // holds, flapping votes do not flap the state, stale votes are ignored, the safety veto is
 // immediate, the Indicator port is the only stamp path (per axis), the net's trust profile,
 // minHold, the ABR dwell, discontinuity, and determinism.
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include <VP-V/modules/input/source_identity/SourceIdConsensus.h>
-#include <VP-V/modules/input/source_identity/SourceIdVote.h>
+#include <VP-V/modules/input/source_analysis/identity/SourceIdConsensus.h>
+#include <VP-V/modules/input/source_analysis/identity/SourceIdVote.h>
 
 #include <algorithm>
 #include <cstdint>

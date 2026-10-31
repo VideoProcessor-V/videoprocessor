@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-// Source-ID consensus, part 4: the one-time "stream quality dropped" notice (input.source_identity).
+// Source-ID consensus, part 4: the one-time "stream quality dropped" notice (input.source_analysis (identity/)).
 //
 // When the streaming player switches to a lower-quality rendition mid-title, the picture gets worse
 // for reasons nothing in VP can repair. Restarting playback on the player usually brings full
@@ -18,8 +18,8 @@
 // knows them (NoticeContext), otherwise the wording carries no numbers.
 // Header-only, standard library only, C++14, no clock.
 #include <VP-V/core/FallbackCatalog.h>
-#include <VP-V/modules/input/source_identity/AbrStepDetector.h>
-#include <VP-V/modules/input/source_identity/SourceIdConsensus.h>
+#include <VP-V/modules/input/source_analysis/identity/AbrStepDetector.h>
+#include <VP-V/modules/input/source_analysis/identity/SourceIdConsensus.h>
 
 #include <cstdint>
 #include <string>
@@ -53,6 +53,7 @@ namespace SourceIdentity
 			double minConfidence = 0.5;   // of the Drop event
 			int minTierDrop = 1;          // quality tiers the consensus must have dropped by
 			double minRatioDrop = 0.1;    // delivered-ratio drop the consensus must have latched
+			int64_t maxLatchDelayUs = 15000000; // the latch must follow the Drop event within this (source time)
 		};
 
 		NoticePolicy() {}
@@ -74,6 +75,9 @@ namespace SourceIdentity
 			if (!s_.enabled || fired_)
 				return false;
 			if (event.direction != AbrDirection::Drop || event.confidence < s_.minConfidence)
+				return false;
+			// A stale remembered event must not be paired with a later, unrelated latch.
+			if (after.timeUs < event.timeUs || after.timeUs - event.timeUs > s_.maxLatchDelayUs)
 				return false;
 			bool latchedLower = false;
 			if (after.Changed(Field::Quality) && after.before.qualityTier >= 0 &&

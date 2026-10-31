@@ -499,8 +499,8 @@
     <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvHostStageTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\DvSignalL8HoldTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceTests.cpp" />
-    <ClCompile Include="..\VP-V\modules\input\source_identity\tests\SourceIdConsensusTests.cpp" />
-    <ClCompile Include="..\VP-V\modules\input\source_identity\tests\AbrStepDetectorTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdConsensusTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\AbrStepDetectorTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceWiringTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\DvTunnelMetadataExtensionTests.cpp" />
     <ClCompile Include="DetailRestoreConfigTests.cpp" />

@@ -1,4 +1,4 @@
-# Tests for `input.source_identity`
+# Tests for `input.source_analysis (identity/)`
 
 CPU-only unit tests, registered in `src/VideoProcessor-Test/VideoProcessor-Test.vcxproj.vcxproj`:
 

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-// Source-ID consensus, part 3: ABR boundary timing and quality-step evidence (input.source_identity).
+// Source-ID consensus, part 3: ABR boundary timing and quality-step evidence (input.source_analysis (identity/)).
 //
 // Adaptive-bitrate players switch renditions at segment boundaries. A rendition switch shows up as
 // a STEP in the frame-level quality reading (and sometimes in the delivered resolution). This
@@ -94,7 +94,10 @@ namespace SourceIdentity
 			int64_t segmentMaxUs = 10000000;
 			int64_t gridToleranceUs = 400000;  // agreement of intervals / distance from the grid
 			int64_t minEventGapUs = 1000000;   // boundaries closer than this are one boundary
-			int minSamples = 4;                // valid samples needed in each window
+			// Valid samples needed in each window. The source-resolution monitor currently analyses
+			// about 2 frames per second (interval 0.5 s), so a 1.5 s window holds 3 samples: this is the
+			// observed cadence, not an assumption (windows and confirm time are Settings too).
+			int minSamples = 3;
 			size_t maxHistory = 16;            // accepted boundaries kept for the period estimate
 			size_t maxSamples = 4096;          // hard cap on the buffer
 		};

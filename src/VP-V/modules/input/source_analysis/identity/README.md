@@ -1,4 +1,4 @@
-# Source identity (`input.source_identity`)
+# Source identity (`input.source_analysis (identity/)`)
 
 Unit: **input** | order: 45 | status: **draft** | header-only, not wired into the renderer
 
@@ -35,6 +35,8 @@ Votes sit in slots indexed by `VoterId`, so the order of `Submit` calls never ma
 
 A pending candidate is kept while its dissent stays at or below `exitDissent`, a lower bar than entering (hysteresis). A safety veto (detail above the re-based size) sets the voted axes native at once, bypassing dwell and hold; votes from any other voter cannot veto.
 
+A pending candidate's dwell restarts when it is held for disagreement (intentional: only a steady candidate latches).
+
 After an ABR boundary (`NoteAbrBoundary`) the dwell is shortened to `abrDwellUs` for `abrWindowUs`, because a rendition switch is sudden.
 
 ## ABR step detector
@@ -57,11 +59,11 @@ The central Indicator (resync design 25 A2/A4, package I0) does not exist yet. `
 
 ## Latch and crossfade
 
-Consensus decides WHAT the source is. The source-resolution latch (cut, black, pan, crossfade in source time) still decides WHEN the switch is shown. The consensus output feeds the re-base target; the crossfade is armed by the Indicator's re-base stamp (R4a).
+Consensus decides WHAT the source is. The source-resolution latch (cut, black, pan, crossfade in source time) still decides WHEN the switch is shown.
 
 ## Determinism
 
-Same votes give the same results: fixed voter slots, fixed group order, no unordered containers, no clock, no random source. The tests compare serialised result traces and shuffled submission orders.
+Fixed voter slots and group order, no unordered containers, no clock, no random source. Tests compare serialised traces and shuffled submission orders.
 
 ## Config keys (draft, NOT wired)
 
@@ -77,6 +79,7 @@ Same votes give the same results: fixed voter slots, fixed group order, no unord
 5. A fired notice goes to the FallbackStatus registry and the GUI's one-time notice.
 6. Ctrl+I line and the Ctrl+Alt+D dump print `Stats` and the per-field reasons.
 7. SRM history CSV gets the consensus columns.
-8. Later: the ID-net runtime calls `IdNetVote` on its events.
+8. Later: the ID-net runtime calls `IdNetVote` on its events. The net is event driven, so the call site must trigger it on an ABR event or a consensus candidate; otherwise its old, disagreeing vote holds a real switch until its maximum evidence age.
+9. `BitrateQualityVote` reads the SMOOTHED `Snapshot.bitrateQuality` and therefore lags. The detector needs FRAME-level quality, which needs a new Snapshot field (the SRM worker must publish it).
 
 Fallback entry when consensus is off or unavailable: "Source identity: classical only (<reason>)". The measurement plan is in `MEASUREMENT-PLAN.md`.

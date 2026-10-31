@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-// Source-ID consensus, part 1: the vote types and the voter adapters (input.source_identity).
+// Source-ID consensus, part 1: the vote types and the voter adapters (input.source_analysis (identity/)).
 //
 // A "vote" is one voter's opinion about what the delivered source IS: how much of the native
 // resolution it carries on each axis, the player's upscale kernel, the codec family and a quality

@@ -3,7 +3,7 @@
 #pragma once
 
 // Source-ID consensus, part 2: the consensus with hysteresis, and the Indicator port
-// (input.source_identity).
+// (input.source_analysis (identity/)).
 //
 // The voters (SourceIdVote.h) each hold at most ONE current vote (a later Submit of the same voter
 // replaces it; the slots are indexed by VoterId so the order of Submit calls within a tick never
@@ -33,8 +33,8 @@
 //
 // Latch / crossfade: consensus decides WHAT the source is; the source-resolution latch (cut, black,
 // pan, crossfade in source time) still decides WHEN the switch is shown.
-#include <VP-V/modules/input/source_identity/AbrStepDetector.h>
-#include <VP-V/modules/input/source_identity/SourceIdVote.h>
+#include <VP-V/modules/input/source_analysis/identity/AbrStepDetector.h>
+#include <VP-V/modules/input/source_analysis/identity/SourceIdVote.h>
 
 #include <algorithm>
 #include <cmath>

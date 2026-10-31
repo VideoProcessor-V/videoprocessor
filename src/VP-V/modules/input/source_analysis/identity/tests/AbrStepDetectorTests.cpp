@@ -2,15 +2,15 @@
  * Copyright(C) 2026 VP-V contributors
  * SPDX-License-Identifier: GPL-3.0-only
  */
-// ABR boundary detection and the one-time notice (input.source_identity). All series are
+// ABR boundary detection and the one-time notice (input.source_analysis (identity/)). All series are
 // synthetic, built with a fixed-seed LCG at 4 samples per second of SOURCE time (never a random
 // device, never a clock).
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include <VP-V/modules/input/source_identity/AbrNoticePolicy.h>
-#include <VP-V/modules/input/source_identity/AbrStepDetector.h>
-#include <VP-V/modules/input/source_identity/SourceIdConsensus.h>
+#include <VP-V/modules/input/source_analysis/identity/AbrNoticePolicy.h>
+#include <VP-V/modules/input/source_analysis/identity/AbrStepDetector.h>
+#include <VP-V/modules/input/source_analysis/identity/SourceIdConsensus.h>
 
 #include <cstdint>
 #include <string>
@@ -244,6 +244,23 @@ namespace Tests
 			Assert::IsTrue(e[1].direction == AbrDirection::Rise && e[1].timeUs == 20000000);
 		}
 
+		TEST_METHOD(ASingleDropIsDetectedOnceAtTwoSamplesPerSecond)
+		{
+			using namespace AbrSynth;
+			Lcg g(61u);
+			std::vector<QualitySample> v;
+			for (int i = 0; i < 60; ++i)              // 30 s at 2 samples per second (the monitor's cadence)
+			{
+				QualitySample s = Sample(i, (i < 24 ? 0.85 : 0.55) + g.Noise(0.02));
+				s.timeUs = static_cast<int64_t>(i) * 500000;
+				v.push_back(s);
+			}
+			AbrStepDetector d;
+			const std::vector<AbrEvent> e = Run(d, v);
+			Assert::IsTrue(e.size() == 1);
+			Assert::IsTrue(e[0].direction == AbrDirection::Drop && e[0].timeUs == 12000000);
+		}
+
 		TEST_METHOD(TheSameSamplesGiveTheSameEvents)
 		{
 			using namespace AbrSynth;
@@ -289,6 +306,18 @@ namespace Tests
 			Assert::IsTrue(!p.Consider(Drop(0.9), Latched(), text), L"the same title key does not re-arm");
 			p.NewTitle(2);
 			Assert::IsTrue(p.Consider(Drop(0.9), Latched(), text), L"a new title re-arms");
+		}
+
+		TEST_METHOD(AStaleDropEventDoesNotPairWithALaterLatch)
+		{
+			SourceIdentity::NoticePolicy p;
+			std::string text;
+			SourceIdentity::Result late = Latched();
+			late.timeUs = 60000000;
+			Assert::IsTrue(!p.Consider(Drop(0.9), late, text), L"a drop remembered from a minute ago");
+			SourceIdentity::Result soon = Latched();
+			soon.timeUs = 5000000;
+			Assert::IsTrue(p.Consider(Drop(0.9), soon, text), L"a latch within the allowed delay");
 		}
 
 		TEST_METHOD(AFlickerThatNeverLatchedNeverFires)
