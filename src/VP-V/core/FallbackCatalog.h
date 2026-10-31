@@ -179,6 +179,39 @@ namespace FallbackCatalog
 			(error.empty() ? std::string() : ": " + error) + "; restarting with back-off (stop " + std::to_string(stops) + ")");
 	}
 
+	// ---- look-ahead workers (bug hunt 31 H3) ----------------------------------------------------
+	// A look-ahead batch threw (the motion-ahead hand-off, the source-resolution look-ahead): its
+	// frames went without that work. Engaged at the failure with the exception text, released after
+	// `releaseAfterGood` batches in a row without one (the next batches retry on their own).
+	struct LookAheadFailures
+	{
+		const char* id = "look-ahead";
+		const char* without = "frames skipped";
+		unsigned long long failures = 0;
+		unsigned goodSince = 0;
+		bool engaged = false;
+		std::string what;
+		LookAheadFailures(const char* idIn, const char* withoutIn) : id(idIn), without(withoutIn) {}
+		Decision Note(bool failed, const std::string& whatIn = std::string(), unsigned releaseAfterGood = 8)
+		{
+			if (failed)
+			{
+				++failures;
+				goodSince = 0;
+				engaged = true;
+				what = whatIn;
+			}
+			else if (engaged && ++goodSince >= releaseAfterGood)
+				engaged = false;
+			if (!engaged)
+				return Released(id);
+			return Engaged(id, std::string(without) + " (worker exception" + (what.empty() ? std::string() : ": " + what) +
+				"); retrying each batch");
+		}
+	};
+	inline LookAheadFailures MotionAheadWorker() { return LookAheadFailures("motion look-ahead", "no optical-flow look-ahead for some frames"); }
+	inline LookAheadFailures SourceResolutionWorker() { return LookAheadFailures("source resolution look-ahead", "resolution judged on arrival only"); }
+
 	// ---- motion.consumers -----------------------------------------------------------------------
 	// A picture between frames could not be made on the GPU (the de-judder warp, the rendered warp
 	// or the interpolation failed): the source frame is shown instead (the de-judder holds). Engaged

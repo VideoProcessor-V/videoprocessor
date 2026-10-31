@@ -214,6 +214,28 @@ namespace FallbackCatalogTest
 			Assert::IsFalse(registry.Engaged("vector producer"));
 		}
 
+		// Bug hunt 31 H3: a look-ahead worker exception is visible at once and released after a run of
+		// good batches (each batch retries on its own).
+		TEST_METHOD(LookAheadWorkerExceptionsAreVisibleThenRecover)
+		{
+			LookAheadFailures motion = MotionAheadWorker();
+			Assert::IsFalse(motion.Note(false).engaged);
+			const Decision failed = motion.Note(true, "bad allocation");
+			Assert::IsTrue(failed.engaged);
+			Assert::AreEqual(std::string("motion look-ahead"), failed.id);
+			Assert::IsTrue(Has(failed, "worker exception: bad allocation"));
+			for (int i = 0; i < 7; ++i)
+				Assert::IsTrue(motion.Note(false).engaged, L"held through seven good batches");
+			Assert::IsFalse(motion.Note(false).engaged, L"released after eight");
+			Assert::IsTrue(motion.Note(true).engaged);
+			Assert::IsTrue(motion.Note(false).engaged, L"a new failure restarts the count");
+			LookAheadFailures source = SourceResolutionWorker();
+			const Decision s = source.Note(true, "x");
+			Assert::AreEqual(std::string("source resolution look-ahead"), s.id);
+			Assert::IsTrue(Has(s, "resolution judged on arrival only"));
+			Assert::IsFalse(source.Note(false, std::string(), 1).engaged);
+		}
+
 		TEST_METHOD(MotionConsumerGpuFailuresAreVisibleWhileRecent)
 		{
 			// Group D audit D3: warp / interpolation failures are listed, timing reasons are not.
