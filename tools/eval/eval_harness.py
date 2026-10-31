@@ -1,0 +1,307 @@
+# Copyright(C) 2026 VP-V contributors
+# SPDX-License-Identifier: GPL-3.0-only
+"""VP-V common evaluation harness CLI.
+
+  python -I tools/eval/eval_harness.py run --suite tools/eval/suites/sample_chroma.json \
+         --candidate chroma_lanczos3 --baseline chroma_bicubic --out <dir> [--max-frames N] [--lpips] [--no-cost]
+  python -I tools/eval/eval_harness.py catalog [--out tools/eval/material_catalog.json]
+  python -I tools/eval/eval_harness.py align --suite <suite.json> [--case ID]
+
+See tools/eval/README.md.  CPU only; large scratch output belongs outside the worktree.
+"""
+import argparse
+import json
+import os
+import platform
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import numpy as np  # noqa: E402
+
+import eval_candidates as ec  # noqa: E402
+import eval_io as eio  # noqa: E402
+import eval_metrics as em  # noqa: E402
+import eval_protocols as ep  # noqa: E402
+import eval_report as er  # noqa: E402
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+HARNESS_VERSION = 1
+
+
+# ------------------------------------------------------------------ loading
+def load_source(spec, count, start=None):
+    """Frames from a suite source spec.  kind: raw | y4m | ffmpeg.  `start` overrides spec['start']."""
+    start = spec.get("start", 0) if start is None else start
+    kw = dict(range=spec.get("range", "limited"), matrix=spec.get("matrix", "709"),
+              transfer=spec.get("transfer", "sdr"), siting=spec.get("siting", "left"))
+    k = spec["kind"]
+    if k == "raw":
+        fr = eio.read_raw_frames(spec["path"], spec["width"], spec["height"], spec["pix_fmt"], start, count,
+                                 fps=spec.get("fps", 24.0), **kw)
+    elif k == "y4m":
+        fr = eio.read_y4m_frames(spec["path"], start, count, **kw)
+    elif k == "ffmpeg":
+        fr = eio.ffmpeg_decode_window(spec["path"], start, count, spec["width"], spec["height"], spec["pix_fmt"],
+                                      spec["fps"], spec.get("ffmpeg", eio.DEFAULT_FFMPEG), **kw)
+    else:
+        raise ValueError("unknown source kind " + k)
+    if len(fr) < count:
+        raise ValueError("%s: only %d of %d frames available at %d" % (spec.get("path"), len(fr), count, start))
+    return fr
+
+
+# ------------------------------------------------------------------ metrics for one (truth, output) sequence
+def _stack(frames, name):
+    return np.stack([getattr(f, name) for f in frames])
+
+
+def compute_metrics(truth, out, case, use_lpips=False):
+    """Flat ordered dict metric -> value (None = NA) for a sequence of truth/output Frames."""
+    for t, o in zip(truth, out):
+        for n in ("Y", "Cb", "Cr"):
+            if getattr(t, n).shape != getattr(o, n).shape:
+                raise ValueError("output plane %s is %s, reference %s" % (n, getattr(o, n).shape, getattr(t, n).shape))
+    bd = truth[0].bitdepth
+    rng = truth[0].range
+    R = {n: _stack(truth, n) for n in ("Y", "Cb", "Cr")}
+    O = {n: _stack(out, n) for n in ("Y", "Cb", "Cr")}
+    m = {}
+    for n in ("Y", "Cb", "Cr"):
+        m["psnr_" + n] = em.psnr(R[n], O[n], bd)
+    for n in ("Y", "Cb", "Cr"):
+        m["ssim_" + n] = em.ssim(R[n], O[n], bd)
+    lp = None
+    if use_lpips and R["Cb"].shape == R["Y"].shape and O["Cb"].shape == O["Y"].shape:
+        vals = []
+        for t, o in zip(truth, out):
+            a = em.ycbcr_to_rgb(t.Y, t.Cb, t.Cr, bd, rng, t.matrix)
+            b = em.ycbcr_to_rgb(o.Y, o.Cb, o.Cr, bd, rng, o.matrix)
+            v = em.lpips_score(a, b)
+            if v is None:
+                vals = None
+                break
+            vals.append(v)
+        lp = float(np.mean(np.array(vals, dtype=np.float64))) if vals else None
+    m["lpips"] = lp
+    for n in ("Y", "Cb"):
+        tiles = em.select_flat_tiles(R[n], bd)
+        ratio, _ = em.grain_rms_ratio(R[n], O[n], tiles)
+        m["grain_tiles_" + n] = float(len(tiles))
+        m["grain_rms_ratio_" + n] = ratio
+        sp = em.grain_temporal_spectrum(R[n], O[n], tiles)
+        m["grain_hf_ratio_" + n] = sp["ratio"] if sp else None
+        l1 = em.grain_lag1(R[n], O[n], tiles)
+        m["grain_lag1_delta_" + n] = l1["delta"] if l1 else None
+    m["flicker_excess_Y"] = em.flicker_excess(R["Y"], O["Y"], bd)
+    g = em.gop_spectrum(R["Y"], O["Y"], case.get("gop"), case.get("minigop")) if case.get("gop") else None
+    m["gop_ratio_gop"] = g.get("gop_ratio") if g else None
+    m["gop_ratio_minigop"] = g.get("minigop_ratio") if g else None
+    m["ghost_coeff_Y"] = em.ghost_coeff(R["Y"], O["Y"], bd)
+    m["smear_Y"] = em.smear(R["Y"], O["Y"], bd)
+    m["duplicate_rate_Y"] = em.duplicate_rate(R["Y"], O["Y"], bd)
+    m["halo_overshoot_Y"] = em.halo_overshoot(R["Y"], O["Y"], bd)
+    lc = em.local_contrast_ratio(R["Y"], O["Y"], bd)
+    for k in ("ratio_s1", "ratio_s2", "ratio_s3"):
+        m["lc_" + k + "_Y"] = lc[k] if lc else None
+    m["lc_boost_fraction_Y"] = lc["boost_fraction"] if lc else None
+    bw = em.btb_wtw(R["Y"], O["Y"], bd, "luma", rng)
+    m["btb_kept_Y"] = bw["btb_kept"] if bw else None
+    m["wtw_kept_Y"] = bw["wtw_kept"] if bw else None
+    m["clip_detect_Y"] = bw["clip_detect"] if (bw and (bw["btb_n"] or bw["wtw_n"])) else None
+    bc = em.btb_wtw(np.concatenate([R["Cb"], R["Cr"]]), np.concatenate([O["Cb"], O["Cr"]]), bd, "chroma", rng)
+    m["btb_kept_C"] = bc["btb_kept"] if bc else None
+    m["wtw_kept_C"] = bc["wtw_kept"] if bc else None
+    m["clip_detect_C"] = bc["clip_detect"] if (bc and (bc["btb_n"] or bc["wtw_n"])) else None
+    return m
+
+
+# ------------------------------------------------------------------ cases
+def build_case_inputs(case, max_frames=None):
+    n = case.get("frames", 4)
+    if max_frames:
+        n = min(n, max_frames)
+    proto = ep.PROTOCOLS[case.get("protocol", "chroma444")]
+    ms = load_source(case["master"], n)
+    cs = load_source(case["coded"], n)
+    base = case["master"].get("start", 0)
+    inputs, truth = [], []
+    for i, (mf, cf) in enumerate(zip(ms, cs)):
+        mf.index = cf.index = base + i
+        a, t = proto(mf, cf)
+        a.index = t.index = base + i
+        inputs.append(a)
+        truth.append(t)
+    return inputs, truth
+
+
+def run_candidate(cand, inputs, truth):
+    """-> (output frames, ms per frame list, kind-specific cost dict)"""
+    if cand.kind == "python":
+        outs, ms = ec.run_python_candidate(cand, inputs)
+        return outs, dict(ms=ms, gpu_ms=None)
+    outs, gms = [], []
+    for t in truth:
+        if t.index not in cand.index:
+            raise KeyError("capture has no source_frame_index %d" % t.index)
+        fr, g = cand.frame(t.index)
+        outs.append(fr)
+        gms.append(g)
+    have = [g for g in gms if g is not None]
+    return outs, dict(ms=None, gpu_ms=have if len(have) == len(gms) else None)
+
+
+def load_cost_ratio():
+    with open(os.path.join(HERE, "cost_ratios.json"), "r", encoding="utf8") as f:
+        return json.load(f)
+
+
+def evaluate_suite(suite, cand, base, max_frames=None, use_lpips=False, with_cost=True, log=print):
+    rows = []
+    ratio = load_cost_ratio()["gpu_ms_ratio"]
+    for case in suite["cases"]:
+        ct, clip, cname = case["content_type"], case["clip"], case["case"]
+        t0 = time.time()
+        log("case %s / %s / %s: loading" % (ct, clip, cname))
+        inputs, truth = build_case_inputs(case, max_frames)
+        res = {}
+        for label, c in (("candidate", cand), ("default", base)):
+            try:
+                outs, cost = run_candidate(c, inputs, truth)
+                res[label] = (compute_metrics(truth, outs, case, use_lpips), cost, None)
+            except Exception as e:  # visible, never silent
+                res[label] = (None, None, "%s: %s" % (type(e).__name__, e))
+                log("  %s FAILED: %s" % (label, res[label][2]))
+        names = None
+        for label in ("candidate", "default"):
+            if res[label][0] is not None:
+                names = list(res[label][0])
+                break
+        for k in names or []:
+            note = ""
+            if k == "lpips" and res["candidate"][0] and res["candidate"][0][k] is None:
+                note = "lpips NA (not requested, or torch/lpips unavailable)"
+            if k.startswith(("grain_hf", "grain_lag1")) and len(truth) < 8 and k.startswith("grain_hf"):
+                note = "needs >= 8 frames (%d available)" % len(truth)
+            if k.startswith("gop_") and not case.get("gop"):
+                note = "no GOP metadata"
+            rows.append(dict(content_type=ct, clip=clip, case=cname, metric=k,
+                             candidate=res["candidate"][0][k] if res["candidate"][0] else None,
+                             default=res["default"][0][k] if res["default"][0] else None, note=note))
+        for label in ("candidate", "default"):
+            if res[label][2]:
+                rows.append(dict(content_type=ct, clip=clip, case=cname, metric="error_" + label,
+                                 candidate=None, default=None, note=res[label][2]))
+        if with_cost:
+            def cost_vals(label):
+                cost = res[label][1]
+                if not cost:
+                    return None, None, None
+                if cost["ms"] is not None:
+                    return em.median_ms(cost["ms"]), None, None
+                g = em.median_ms(cost["gpu_ms"]) if cost["gpu_ms"] else None
+                return None, g, em.est_3090_ms(g, ratio)
+            cc, bb = cost_vals("candidate"), cost_vals("default")
+            rows.append(dict(content_type=ct, clip=clip, case=cname, metric="cost_ms_per_frame_pyref",
+                             candidate=cc[0], default=bb[0], note="py-ref: CPU numpy wall-clock, not GPU-representative"))
+            rows.append(dict(content_type=ct, clip=clip, case=cname, metric="cost_gpu_ms_laptop",
+                             candidate=cc[1], default=bb[1], note="capture sidecar gpu_ms (laptop GPU)"))
+            rows.append(dict(content_type=ct, clip=clip, case=cname, metric="cost_est_3090_ms",
+                             candidate=cc[2], default=bb[2], note="ESTIMATE: laptop gpu_ms x %.2f (cost_ratios.json)" % ratio))
+        log("  done in %.1f s" % (time.time() - t0))
+    return rows
+
+
+# ------------------------------------------------------------------ CLI
+def cmd_run(a):
+    with open(a.suite, "r", encoding="utf8") as f:
+        suite = json.load(f)
+    os.makedirs(a.out, exist_ok=True)
+    lines = []
+
+    def log(s):
+        print(s, flush=True)
+        lines.append(s)
+    cand, base = ec.load_candidate(a.candidate), ec.load_candidate(a.baseline)
+    log("harness v%d  python %s  numpy %s" % (HARNESS_VERSION, platform.python_version(), np.__version__))
+    log("suite %s  candidate %s (%s)  baseline %s (%s)" % (suite.get("name"), cand.name, cand.description,
+                                                         base.name, base.description))
+    t0 = time.time()
+    rows = evaluate_suite(suite, cand, base, a.max_frames, a.lpips, not a.no_cost, log)
+    scored = er.score_rows(rows)
+    csv_text = er.to_csv(scored)
+    extra = ["Suite: `%s` (%d cases). Candidate `%s`, default `%s`. LPIPS %s. Cost: %s." % (
+        suite.get("name"), len(suite["cases"]), cand.name, base.name, "requested" if a.lpips else "not requested (NA)",
+        "py-ref wall-clock on CPU (not GPU-representative)" if not a.no_cost else "omitted")]
+    md = er.to_markdown(scored, cand.name, base.name, extra_lines=extra)
+    with open(os.path.join(a.out, "results.csv"), "w", encoding="utf8", newline="") as f:
+        f.write(csv_text)
+    with open(os.path.join(a.out, "results.md"), "w", encoding="utf8", newline="\n") as f:
+        f.write(md)
+    counts = {}
+    for r in scored:
+        counts[r["flag"]] = counts.get(r["flag"], 0) + 1
+    log("rows %d  flags %s  total %.1f s" % (len(scored), json.dumps(counts, sort_keys=True), time.time() - t0))
+    with open(os.path.join(a.out, "run_log.txt"), "w", encoding="utf8", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
+    return 0
+
+
+def cmd_catalog(a):
+    import eval_material
+    cat = eval_material.discover()
+    out = a.out or os.path.join(HERE, "material_catalog.json")
+    with open(out, "w", encoding="utf8", newline="\n") as f:
+        json.dump(cat, f, indent=1, sort_keys=True)
+        f.write("\n")
+    print("catalog: %d entries -> %s" % (len(cat["entries"]), out))
+    return 0
+
+
+def cmd_align(a):
+    with open(a.suite, "r", encoding="utf8") as f:
+        suite = json.load(f)
+    for case in suite["cases"]:
+        if a.case and case["case"] != a.case and case.get("id") != a.case:
+            continue
+        ms = case["master"]
+        s0 = ms.get("start", 0)
+        lo = max(0, s0 - a.span)
+        n = (s0 - lo) + a.span + 1
+        cf = load_source(case["coded"], 1)[0]
+        mf = load_source(ms, n, start=lo)
+        r = ep.verify_alignment(cf, mf, lo)
+        print(json.dumps(dict(clip=case["clip"], case=case["case"], coded_first_frame=case["coded"].get("start", 0),
+                              suite_master_start=s0, best_master_offset=r["best_offset"],
+                              psnr_by_offset={str(o): ("inf" if p == float("inf") else round(p, 2))
+                                              for o, p in zip(r["offsets"], r["psnr"])}), sort_keys=True))
+    return 0
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("run")
+    r.add_argument("--suite", required=True)
+    r.add_argument("--candidate", required=True)
+    r.add_argument("--baseline", required=True)
+    r.add_argument("--out", required=True)
+    r.add_argument("--max-frames", type=int, default=None)
+    r.add_argument("--lpips", action="store_true")
+    r.add_argument("--no-cost", action="store_true", help="omit the (non-deterministic) cost rows")
+    r.set_defaults(fn=cmd_run)
+    c = sub.add_parser("catalog")
+    c.add_argument("--out", default=None)
+    c.set_defaults(fn=cmd_catalog)
+    al = sub.add_parser("align")
+    al.add_argument("--suite", required=True)
+    al.add_argument("--case", default=None)
+    al.add_argument("--span", type=int, default=6, help="master offsets scanned: start-span .. start+span")
+    al.set_defaults(fn=cmd_align)
+    a = ap.parse_args(argv)
+    return a.fn(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
