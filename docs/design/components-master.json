@@ -227,7 +227,21 @@
         "src/VP-V/modules/motion/estimation/OpticalFlowTrust.h",
         "src/VideoProcessor-Lib/MotionConfig.h",
         "src/VP-V/modules/motion/estimation/MotionEngineIdle.h",
-        "src/VP-V/modules/motion/estimation/MotionAheadProducer.h"
+        "src/VP-V/modules/motion/estimation/MotionAheadProducer.h",
+        "src/VP-V/modules/motion/estimation/global_model/CameraMotion.h",
+        "src/VP-V/modules/motion/estimation/global_model/GlobalModelGeometry.h",
+        "src/VP-V/modules/motion/estimation/global_model/GlobalModelGeometry.cpp",
+        "src/VP-V/modules/motion/estimation/global_model/GlobalModelFit.h",
+        "src/VP-V/modules/motion/estimation/global_model/GlobalModelFit.cpp",
+        "src/VP-V/modules/motion/estimation/global_model/GlobalModelTemporal.h",
+        "src/VP-V/modules/motion/estimation/global_model/GlobalModelTemporal.cpp",
+        "src/VP-V/modules/motion/estimation/global_model/GlobalModelObjects.h",
+        "src/VP-V/modules/motion/estimation/global_model/GlobalModelObjects.cpp",
+        "src/VP-V/modules/motion/estimation/global_model/PixelResidualReference.h",
+        "src/VP-V/modules/motion/estimation/global_model/PixelResidualReference.cpp",
+        "src/VP-V/modules/motion/estimation/global_model/CameraAccessor.h",
+        "src/VP-V/modules/motion/estimation/global_model/GlobalModelSearchHints.h",
+        "src/VP-V/modules/motion/estimation/global_model/GlobalModelSearchHints.cpp"
       ],
       "components": {
         "files": {
