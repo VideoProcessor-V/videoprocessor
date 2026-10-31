@@ -364,9 +364,7 @@
         "optical_flow_global",
         "optical_flow_global_fallback"
       ],
-      "planned_keys": [
-        "motion_ahead_ms"
-      ],
+      "planned_keys": [],
       "tiers": "Classic off .. Upper full (NVOF + matcher)",
       "fallback": {
         "entry": "motion: matcher only (optical flow failed: <error>) / no optical-flow look-ahead (producer stopped: <error>)",
@@ -1119,9 +1117,7 @@
         "residual_stabilise_grain_guard",
         "fbo_float32"
       ],
-      "planned_keys": [
-        "hybrid_refine_d"
-      ],
+      "planned_keys": [],
       "tiers": "Classic Lanczos; Low..Upper hybrid; Upper + D",
       "fallback": {
         "entry": "Output scaling: Lanczos (hybrid unavailable: <reason>)",

@@ -9,7 +9,8 @@
 //
 // The hybrid scaler runs inside libplacebo BEFORE its PRE_OUTPUT hooks, so every VP output hook
 // runs at the output size. Within a libplacebo stage, hooks run in the order they are handed
-// over, so the renderer tags each hook it collected and hands libplacebo Order(tagged):
+// over, so the renderer tags each hook it collected, calls OrderSlotsInPlace(tagged, rank) and hands
+// libplacebo the result:
 //
 //   libplacebo output-encoding repair (workaround; first whenever a PRE_OUTPUT hook runs)
 //   -> 200 SDR tone shape + DV trims -> 210 Stage 13 appearance -> 220 LED measurement

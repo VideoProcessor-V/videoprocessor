@@ -130,8 +130,8 @@ for the fixed delay.*
 | Key | What / why | Default | Change it when |
 |---|---|---|---|
 | `target_frames` | The queue length in frames, used when no delay is set. | profile's value | Prefer the total delay; frames give a different delay at every rate. |
-| `queue_size` | The queue's capacity (an upper bound, not the delay). | auto | Never, normally. |
-| `lead_frames`, `startup_preroll_frames`, `active_picture_lookahead_frames` | How many queued frames the start-up and the crop detector use. | auto (follows the queue) | Diagnostics only. |
+| `queue_size` | The queue's capacity (an upper bound, not the delay). | 32 | Never, normally. |
+| `lead_frames`, `startup_preroll_frames`, `active_picture_lookahead_frames` | How many queued frames the start-up and the crop detector use. | `lead_frames` 1; the other two auto (follow the queue) | Diagnostics only. |
 | `reset_queue_too_large_percent`, `reset_after_render_restart_seconds` | When an over-full queue is reset, and how long after a renderer restart. | 5 s / profile's value | Only if the queue keeps resetting. |
 | `low_latency_path` | Games / 50-60p live. **Why:** the de-judder and motion look-ahead are switched off and frames upload early to get the lowest delay. | on only for a queue named Low_Latency | For a gaming queue profile. |
 | `queue_timing_fixes` (Proposed retirement > Proven fixes) | Drops frames to catch up only when really behind. | on | Never; A/B only. |
@@ -142,7 +142,7 @@ for the fixed delay.*
 | `capture_path` | Unpacks DeckLink v210/UYVY on the GPU (`gpu`) or the CPU (`standard`). | The GPU path is byte-identical and about twice as fast at 4K, with no CPU conversion. | gpu | saves CPU |
 | `capture_upload` | Uploads each frame on its own thread as it arrives (`early`), or at render (`render`). `auto` = early only in low latency. | It takes about 5 ms per 4K 12-bit frame off the render thread. | auto | none |
 | `native_rgb_ingest` | DeckLink 12-bit RGB (R12B/R12L) and 10-bit r210 reach the renderer as full RGB 4:4:4, unpacked on the GPU. | The old path squeezed RGB to 10-bit 4:2:0 on the CPU, which loses colour detail. | on | low |
-| `dv_tunnel_gpu_unpack` | Unpacks the Dolby Vision tunnel's 12-bit picture on the GPU (bit-exact with the CPU). | It saves CPU time. | off (under test) | low |
+| `dv_tunnel_gpu_unpack` | Unpacks the Dolby Vision tunnel's 12-bit picture on the GPU (bit-exact with the CPU). | It saves CPU time. | on (under test) | low |
 | `source_range` | The range the source sends (auto / full / limited). | Some sources mislabel their range. | auto | none |
 
 **When to change:** never, unless the "Fallbacks engaged" line names capture. That line means the
@@ -153,7 +153,7 @@ GPU unpack failed and VP fell back to the CPU path.
 |---|---|---|
 | `dv_tunnel_handoff` | A tunnel with no metadata for about 1 s (LLDV/HDR10 sent as RGB) goes to the normal path. | on |
 | `dv_tunnel_fixes` (under test) | Tunnel menu/letterbox probe, metadata-loss counting, L2 before L8. | on |
-| `dv_trims` (under test) | VP applies the DV Level 2 trims for your display's peak after its tone mapping. | off |
+| `dv_trims` (under test) | VP applies the DV Level 2 trims for your display's peak after its tone mapping. | on |
 | `dv_tone_mapping` (under test) | Dolby Vision pictures: libplacebo's curve, or `dolby_style` (approx.): a Dolby-style curve from the scene metadata (L1) with the trims in ICtCp. Not certified; shown as "Dolby-style (approx.)". Colour unit, Dolby Vision card. | libplacebo |
 | `dv_compare_capture_folder` (diagnostic) | A folder on a large drive; the DV comparison capture shortcut (Ctrl+Alt+Shift+W) records a short labelled clip there. Empty = off; the Original pathway clears it. Input unit, Readouts (diagnostics). | empty (off) |
 | `newlldv`, `newlldv_sdr_veto` | BT.2020 without an HDR flag is treated as HDR after 1.5 s; real SDR returns to SDR. | off / on |

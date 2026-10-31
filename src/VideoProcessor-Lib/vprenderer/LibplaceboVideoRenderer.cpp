@@ -5514,14 +5514,14 @@ struct LibplaceboVideoRenderer::Impl
 	// (A later optimisation could reuse B's upload when B becomes current.)
 	pl_tex dejudderNextTextures[2] = { nullptr, nullptr };
 	// capture_path: gpu. The conversion thread reads the two flags; a failed
-	// unpack turns the session back to the CPU formatters (logged once).
+	// unpack turns the session back to the CPU formatters (the fallback is shown: Ctrl+I line, one-time notice, Config status).
 	std::atomic<bool> captureGpuWanted{ true };
 	std::atomic<bool> captureGpuFailed{ false };
 	std::unique_ptr<GpuCaptureUnpack> captureUnpack;
 	bool captureGpuLogged = false;
 	// native_rgb_ingest (roadmap item 2): R12B/R12L/r210 go on raw and are
 	// unpacked to native RGB (rgba16) plus the matcher's luma; a failed unpack
-	// turns the session back to the CPU formatter (logged once).
+	// turns the session back to the CPU formatter (the fallback is shown: Ctrl+I line, one-time notice, Config status).
 	std::atomic<bool> rgbGpuWanted{ true };
 	std::shared_ptr<std::atomic<int>> rawBuffersHeld = std::make_shared<std::atomic<int>>(0);
 	// capture_upload: early. The pool exists for the renderer's life (the
@@ -5638,7 +5638,7 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<bool> rgbGpuFailed{ false };
 	std::unique_ptr<GpuRgbUnpack> rgbUnpack;
 	// dv_tunnel_gpu_unpack: the conversion thread reads the two flags; a
-	// failed unpack turns the session back to the CPU unpack (logged once).
+	// failed unpack turns the session back to the CPU unpack (the fallback is shown: Ctrl+I line, one-time notice, Config status).
 	std::atomic<bool> dvGpuWanted{ false };
 	std::atomic<bool> dvGpuFailed{ false };
 	DvGpuUnpackSession dvUnpack;   // WP-14 (VP-V input.signal): the unpack object, its log lines
@@ -6085,7 +6085,7 @@ struct LibplaceboVideoRenderer::Impl
 	}
 	// dv_tunnel_gpu_unpack: a Dolby Vision tunnel picture's planes (the CPU
 	// formatter's, exactly) unpacked on the GPU, or false (and the session back
-	// to the CPU unpack, logged once) when it fails.
+	// to the CPU unpack, with the fallback shown: Ctrl+I line, one-time notice, Config status) when it fails.
 	bool UnpackDolbyVisionPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, pl_tex (&planes)[2],
 		bool sessionFallback)
 	{
@@ -22794,7 +22794,8 @@ struct LibplaceboVideoRenderer::Impl
 					// film rate, else the measured capture rate, else the nominal rate; 0 = unknown.
 					double contentHz = pulldownFilmHz > 0.0 ? pulldownFilmHz : vpCaptureRateHz > 0.0 ? vpCaptureRateHz : nominalSourceRateHz;
 					if (!std::isfinite(contentHz) || contentHz <= 0.0) contentHz = 0.0;
-					// The de-judder's vectors only under exactly the debander's validity condition.
+					// The de-judder's vectors only under the debander's validity condition: this source frame's
+					// live field (DejudderLiveFieldFor: the current motion epoch, and with motion_history_fixes the live-field sequence).
 					pl_tex field = nullptr;
 					if (dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && sourceSequence != 0)
 						field = dejudder->Field();

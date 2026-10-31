@@ -158,7 +158,6 @@ namespace Vpv
                 u.toggles.push_back({ "render_ahead", "De-judder: render ahead (under test)", { "off", "on" }, "output.presentation" });
                 u.toggles.push_back({ "interpolation_fallback", "Where motion is not trusted: hold or blend", { "hold", "blend" }, "motion.consumers" });
                 u.toggles.push_back({ "intent_motion", "Ease the de-judder per shot (only ever lower)", { "on", "off" }, "motion.consumers" });
-                u.planned.push_back({ "motion_ahead_ms", "Motion look-ahead in milliseconds (time-based)", "motion.estimation" });
                 t.units.push_back(u);
             }
             {
@@ -247,7 +246,6 @@ namespace Vpv
                 u.planned.push_back({ "entrance_route_4k", "4K route (fixed 1-D steps to 4K)", "scaling.route_4k" });
                 u.planned.push_back({ "refine_net", "4K refine net", "scaling.refine" });
                 u.planned.push_back({ "chroma_upscale_vp", "VP chroma upscale", "scaling.chroma_upscale" });
-                u.planned.push_back({ "hybrid_refine_d", "Extra detail-recovery step under the hybrid scaler", "scaling.output" });
                 t.units.push_back(u);
             }
             {
