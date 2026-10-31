@@ -547,10 +547,8 @@ namespace VideoProcessorTest
 			PairInput in = f.Input(kPairSeconds, 5);
 			in.deadlineMicros = 1;
 
-			// The fitter checks the clock inside the hypothesis loop; with a winner already found it
-			// stops searching and returns the best model so far (DeadlineMissed is reserved for the case
-			// where the deadline passes before any hypothesis was scored, which a Translation draw
-			// always prevents on a real field). So: the search is truncated, not the answer discarded.
+			// A deadline that has passed when the fit completes yields no model (valid=false,
+			// DeadlineMissed); the hypothesis search is also truncated once the deadline has passed.
 			Config cfg;
 			cfg.clock = &FakeClock;
 			g_fakeNow = 0;
