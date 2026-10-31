@@ -22,6 +22,11 @@ Header-only and pure: no libplacebo, no Windows, C++14. The renderer and the CPU
 | `ResyncCause.h` | Resync vocabulary: `Level`, `Cause` (with tokens and plain text), `RefusalReason` |
 | `Indicator.h` | The central Indicator: counters, stamps derived from a ring of events, readers (`Observe`) |
 | `Ancestry.h` | Ancestor references, headers and the pure validator for derived products |
+| `Products.h` | Skeleton S0 registry: product declarations (inputs with lag, backend, history, size, honoured counters, tier, residency, variants) and the first products P0-P6 (+ P2m matcher pair); component consumer declarations |
+| `ProductGraph.h` | Skeleton S0 graph: the closure of what active consumers need (each product once, topological, deterministic), fixed ring and live-pool counts, rebuild triggers, `GraphOwner` (advances the Indicator's `graph` counter), Indicator ring sizing (N6) |
+| `ProductSlots.h` | Skeleton S1 slots: the 64-bit state word, ABA-proof generation-tagged claim, lane/live headers, lane-owned rejected buffers, live pool for every backend, lane input pins, the seal (stamps, span, ancestry cgens) and the cascade (`SlotTable::Resolve`) |
+| `CardProfile.h` | Skeleton S2: card profile (cached per adapter LUID + driver), adaptive VRAM headroom, system-RAM rules, the T0/T1/T2 lane grant by ms saved per MB |
+| `VramGovernor.h` | Skeleton S2: the one VRAM governor. Every VRAM user (early-upload pool, render-ahead, vector engine, TemporalDetail, camera model, interpolator, enhancers, fixed libplacebo/capture memory, and the skeleton products via `AddProductUsers`) registers levels + tier; over budget it steps users down by tier and order with one status line each |
 | `StatusText.h` | VP's status text: the renderer's `vp` module lines (generic `GetModuleStatus` entry), the Ctrl+I rows, crash-state and report lines, content/room/key-override/nets wording (WP-11) |
 
 ## How a frame runs through the skeleton
@@ -72,5 +77,12 @@ S2 (PRE_OUTPUT): SDR tone shape, DV trims, [Stage 13], LED measurement, LED comp
 [black level], | user shaders |, calibration LUT. S3 (OUTPUT): encoding repair, occlusion mask,
 sigma-delta last. The calibration LUT stays in S2 while libplacebo owns the output encoding
 (see `docs/design/segments-callsites.md`).
+
+The skeleton packages (S0-S2) are core library only: no renderer call sites yet. Vector demand
+states its consumers in registry terms in `modules/motion/estimation/VectorDemandProducts.h`
+(VectorDemand's decision is unchanged). Slot sizing departs from design doc 25 B3 in one place:
+the live pool is history + 1 + R (+ span) + one spare per input reference held by lane readers,
+not R + 1, because every frame the render holds may be a live fill and a late lane reader may pin a
+released live buffer; ring and live pool are separate memory (a lane costs its whole ring).
 
 `Indicator.h`, `Ancestry.h` and `ResyncCause.h` stay in `src/VP-V/core/` because they are skeleton-owned shared headers, not a pipeline slot (a module folder would need a fake slot). The resync detector and its shadow live in `src/VP-V/modules/input/signal`.

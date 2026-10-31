@@ -32,7 +32,9 @@
     "src/VP-V/modules/motion/estimation/global_model/GlobalModelSearchHints.h",
     "src/VP-V/modules/motion/estimation/global_model/GlobalModelSearchHints.cpp",
     "src/VP-V/modules/motion/estimation/VectorDemand.h",
-    "src/VP-V/modules/motion/estimation/tests/VectorDemandTests.cpp"
+    "src/VP-V/modules/motion/estimation/tests/VectorDemandTests.cpp",
+    "src/VP-V/modules/motion/estimation/VectorDemandProducts.h",
+    "src/VP-V/modules/motion/estimation/tests/VectorDemandProductsTests.cpp"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/MotionAhead.h",

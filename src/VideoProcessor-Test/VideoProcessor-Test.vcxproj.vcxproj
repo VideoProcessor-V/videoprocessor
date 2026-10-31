@@ -562,6 +562,21 @@
     <ClCompile Include="..\VP-V\tests\AncestryTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\VP-V\tests\ProductGraphTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\tests\ProductSlotsTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\tests\CardProfileTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\tests\VramGovernorTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\tests\VectorDemandProductsTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdConsensusTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\AbrStepDetectorTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceWiringTests.cpp" />
