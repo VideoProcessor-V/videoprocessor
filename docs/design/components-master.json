@@ -79,7 +79,8 @@
         "src/VP-V/modules/input/signal/HdrInferenceChoice.h",
         "src/VP-V/modules/input/signal/ResyncEvent.h",
         "src/VP-V/modules/input/signal/ResyncShadow.h",
-        "src/VP-V/modules/input/signal/ResyncCallSites.h"
+        "src/VP-V/modules/input/signal/ResyncCallSites.h",
+        "src/VP-V/modules/input/signal/ResyncDrive.h"
       ],
       "components": {
         "files": {
@@ -324,6 +325,7 @@
         "src/VP-V/segments/EntranceSegment.cpp",
         "src/VP-V/segments/EntranceSegment.h",
         "src/VP-V/modules/scaling/rebase/EntranceGpuDrain.h",
+        "src/VP-V/modules/scaling/rebase/RebaseDecision.h",
         "src/VideoProcessor-Lib/vprenderer/LibplaceboVideoRenderer.cpp"
       ],
       "components": {
@@ -584,6 +586,7 @@
       "status": "built",
       "code_location": "partly migrated",
       "live_files": [
+        "src/VP-V/modules/motion/consumers/TemporalHistoryPolicy.h",
         "src/VP-V/modules/motion/consumers/DejudderWarp.cpp",
         "src/VP-V/modules/motion/consumers/DejudderAhead.h",
         "src/VP-V/modules/motion/consumers/RenderedWarp.cpp",
@@ -1117,6 +1120,7 @@
       "status": "built",
       "code_location": "partly migrated",
       "live_files": [
+        "src/VP-V/modules/output/presentation/PresentationOwner.h",
         "src/VP-V/modules/output/presentation/RenderAheadPolicy.h",
         "src/VideoProcessor-Lib/vprenderer/AlphaPresentationTelemetry.cpp",
         "src/VP-V/modules/output/presentation/OpenLoopDisplayRate.h",

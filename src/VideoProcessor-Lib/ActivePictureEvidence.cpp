@@ -400,7 +400,7 @@ ActivePictureEdgeEvidence InspectHorizontalEdge(SampleContext& samples, bool top
 	int black = 0;
 	int neutral = 0;
 	int continuousLines = 0;
-    const bool inspectMatte = samples.source.range == AnalysisLumaRange::Full && blackFloor > 0;
+    const bool inspectMatte = samples.source.CodesRange() == AnalysisLumaRange::Full && blackFloor > 0;
     std::array<int, kEdgeDepthSamples * kLineSamples> matteU{}, matteV{};
 	double texture = 0.0;
 	for (int d = 0; d < kEdgeDepthSamples; ++d)
@@ -499,7 +499,7 @@ ActivePictureEdgeEvidence InspectVerticalEdge(SampleContext& samples, bool left,
 	int black = 0;
 	int neutral = 0;
 	int continuousLines = 0;
-    const bool inspectMatte = samples.source.range == AnalysisLumaRange::Full && blackFloor > 0;
+    const bool inspectMatte = samples.source.CodesRange() == AnalysisLumaRange::Full && blackFloor > 0;
     std::array<int, kEdgeDepthSamples * kLineSamples> matteU{}, matteV{};
 	double texture = 0.0;
 	for (int d = 0; d < kEdgeDepthSamples; ++d)
@@ -1182,7 +1182,7 @@ ActivePictureEvidence ExtractActivePictureEvidence(
 		perimeter.push_back(samples.Luma(source.width - 1, y));
 	}
 	const int observedLow = static_cast<int>(Percentile(perimeter, 0.10));
-	const bool fullRange = source.range == AnalysisLumaRange::Full;
+	const bool fullRange = source.CodesRange() == AnalysisLumaRange::Full;
     const int blackFloor = observedLow < 32 ? 0 :
         fullRange ? std::min(observedLow, 80) : Bounded(observedLow, 48, 80);
     const int blackThreshold = std::min(104, blackFloor + 24);
@@ -2294,7 +2294,7 @@ ActivePictureGlobalNearBlackEvidence EvaluateActivePictureGlobalNearBlack(
 		}
 	}
 	result.lumaP90 = Percentile(globalLuma, 0.90);
-	result.lumaCutoff = source.range == AnalysisLumaRange::Full ?
+	result.lumaCutoff = source.CodesRange() == AnalysisLumaRange::Full ?
 		kFullRangeNearBlackP90 : kGlobalNearBlackP90;
 	result.nearBlack = result.lumaP90 <= result.lumaCutoff;
 	result.lumaSamples = samples.lumaSamples;

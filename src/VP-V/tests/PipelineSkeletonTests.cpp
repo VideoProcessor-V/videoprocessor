@@ -2,6 +2,7 @@
 
 #include <VP-V/core/ChromaSiting.h>
 #include <VP-V/core/DelayBudget.h>
+#include <VP-V/core/DelayBudgetLadder.h>
 #include <VP-V/core/EntranceEpoch.h>
 #include <VP-V/core/OriginalPathway.h>
 #include <RendererProfileConfig.h>
@@ -13,6 +14,8 @@
 #include <VP-V/core/SlotTiming.h>
 #include <VP-V/core/VectorScale.h>
 #include <VP-V/modules/scaling/rebase/EntranceGpuDrain.h>
+#include <VP-V/modules/output/presentation/PresentationOwner.h>
+#include <VP-V/modules/motion/consumers/TemporalHistoryPolicy.h>
 
 #include <cstring>
 #include <set>
@@ -758,6 +761,48 @@ namespace PipelineSkeletonTestsNs
 			Assert::AreEqual(-0.5f, ChromaSiting::ShiftAfterResample(-0.5f, 1.0));
 			Assert::AreEqual(0.0f, ChromaSiting::ShiftAfterResample(0.0f, 0.75));
 			Assert::AreEqual(-0.375f, ChromaSiting::ShiftAfterResample(-0.5f, 0.75));   // 1440 -> 1080 class
+		}
+	};
+
+	// Bill v1.4.02 merge (owner decisions 1 and 2): the either/or decisions, CPU-pinned.
+	TEST_CLASS(BillMergeEitherOrTests)
+	{
+	public:
+		TEST_METHOD(PresentationIsBillsUnlessRenderAheadOwnsIt)
+		{
+			const auto bill = PresentationOwner::Decide(false, true);   // render_ahead off (Original always)
+			Assert::IsFalse(bill.vpOwns);
+			Assert::IsTrue(bill.presentEveryVsync);
+			Assert::IsFalse(bill.presentEveryVsyncWithheld);
+			const auto vp = PresentationOwner::Decide(true, true);
+			Assert::IsTrue(vp.vpOwns);
+			Assert::IsFalse(vp.presentEveryVsync);
+			Assert::IsTrue(vp.presentEveryVsyncWithheld);   // shown under Fallbacks engaged
+			Assert::IsFalse(PresentationOwner::Decide(true, false).presentEveryVsyncWithheld);
+		}
+		TEST_METHOD(LatencyAndDelayBudgetFollowThePresentationOwner)
+		{
+			Assert::AreEqual(4u, PresentationOwner::MaximumFrameLatency(false, 2u, 4u));   // Bill's configured depth
+			Assert::AreEqual(3u, PresentationOwner::MaximumFrameLatency(true, 3u, 4u));    // VP's chain
+			Assert::AreEqual(2u, PresentationOwner::MaximumFrameLatency(false, 2u, 0u));   // device not made yet
+			Assert::AreEqual(4, PresentationOwner::DelaySwapchainFrames(false, 2u, 4u));
+			DelayBudget::Model a, b;
+			a.swapchainFrames = 2; b.swapchainFrames = 4;
+			const double fa = DelayBudget::FixedCostsMs(DelayBudget::InputsFor(250.0, 24.0, a));
+			const double fb = DelayBudget::FixedCostsMs(DelayBudget::InputsFor(250.0, 24.0, b));
+			Assert::IsTrue(fb > fa);   // a deeper presentation queue is counted inside the total
+		}
+		TEST_METHOD(TemporalHistoryOwnsItsDrawsAndThePauseIsVisible)
+		{
+			const auto temporal = TemporalHistoryPolicy::Decide(true, true);
+			Assert::IsFalse(temporal.runEntrance);
+			Assert::IsTrue(temporal.showPause);
+			const auto noStages = TemporalHistoryPolicy::Decide(true, false);   // Original: no entrance stages
+			Assert::IsFalse(noStages.runEntrance);
+			Assert::IsFalse(noStages.showPause);
+			const auto vp = TemporalHistoryPolicy::Decide(false, true);
+			Assert::IsTrue(vp.runEntrance);
+			Assert::IsFalse(vp.showPause);
 		}
 	};
 }

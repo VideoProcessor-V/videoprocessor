@@ -74,6 +74,9 @@ namespace VpQueueTiming
 				if (displayHz > 0.0)
 				{
 					model.refreshHz = displayHz;
+					// Owner decision 2 (Bill merge): the configured presentation depth, never a fixed 2.
+					if (c.presentationFrames > 0)
+						model.swapchainFrames = c.presentationFrames;
 					if (c.renderAheadActive)
 					{
 						const double ps = 1.0 / c.sourceRateHz;

@@ -49,6 +49,9 @@ namespace QueueTimingPolicy
 		double renderAheadLeadSeconds = 0.0;   // its planned lead (0 when off)
 		size_t renderAheadCreditFrames = 0;    // frames the queue target gives back for it
 		size_t queueCapacity = 1;          // the FIFO cap (queue_size; 1 without a frame queue)
+		// Swapchain frames inside the total delay: the presentation owner's latency (Bill's configured
+		// presentation_queue_depth unless render-ahead owns presentation; PresentationOwner.h).
+		int presentationFrames = 2;
 	};
 
 	struct HoldPlan

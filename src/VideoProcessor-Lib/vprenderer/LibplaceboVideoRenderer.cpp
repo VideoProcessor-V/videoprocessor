@@ -91,6 +91,8 @@
 #include <vprenderer/InterpolationPolicy.h>
 #include <vprenderer/InterpolationTimeline.h>
 #include <vprenderer/RenderAheadPolicy.h>
+#include <VP-V/modules/output/presentation/PresentationOwner.h>   // Bill merge: owner decision 2
+#include <VP-V/modules/motion/consumers/TemporalHistoryPolicy.h>   // Bill merge: owner decision 1
 #include <vprenderer/UploadReuse.h>
 #include <vprenderer/OpenLoopDisplayRate.h>
 #include <VP-V/modules/control/diagnostics/DiagnosticsAdapter.h>   // WP-17: VP diagnostics/captures adapter
@@ -1153,6 +1155,7 @@ namespace
 		ProfileUpdateMode profileUpdateMode = ProfileUpdateMode::REBUILD;
 		bool switchRefreshRate = true;
         bool presentEveryVsync = false;
+        bool presentEveryVsyncWithheld = false;   // VP-V PresentationOwner: requested, render-ahead owns presentation
         int presentationQueueDepth = PresentationConfig::DefaultDepth;
 		RefreshRateSwitchMode refreshRateSwitchMode =
 			RefreshRateSwitchMode::FullscreenOnly;
@@ -3776,6 +3779,7 @@ namespace
 		settings.sourceResolutionCutFixes = false;         // key=source_resolution_cut_fixes
 		settings.debandVp = "off";                         // key=deband_vp
 		settings.debandVpExclusive = false;                // key=deband_vp_exclusive
+		settings.debandGrain = true;                       // key=deband_grain
 		settings.detailPulseStabilise = false;             // key=detail_pulse_stabilise
 		settings.textureRestore = false;                   // key=texture_restore
 		settings.dejudderStrength = 0.0;                   // key=dejudder_strength
@@ -3907,6 +3911,12 @@ namespace
 			ApplyOriginalPathwaySettings(settings);
 		// Motion + queue/timing slots switched off run in their upstream form (owner 2026-10-25).
 		SlotSwitchSettings::Apply(SlotSwitchSettings::FromText(settings.pipelineSlotsOff), settings);
+		// Bill merge (owner decision 2): Bill's presentation vs VP-V's render-ahead, either/or on
+		// render_ahead (off on the Original pathway = Bill's presentation exactly).
+		const PresentationOwner::Decision presentation =
+			PresentationOwner::Decide(settings.renderAhead, settings.presentEveryVsync);
+		settings.presentEveryVsync = presentation.presentEveryVsync;
+		settings.presentEveryVsyncWithheld = presentation.presentEveryVsyncWithheld;
 	}
 
 	RendererSettings LoadRendererSettings(const ConfigFile& config,
@@ -7062,6 +7072,9 @@ struct LibplaceboVideoRenderer::Impl
 	RenderAhead::SustainedLateness renderAheadDriftLateness; // open-loop drift corrections (M5)
 	RenderAhead::CreditLatch renderAheadCredit;              // render_ahead_queue_credit, latched (M4)
 	RenderAhead::ChainDepth renderAheadChainDepth;           // the VP-owned chain as created (M6)
+	// PresentationOwner (owner decision 2): the swapchain frames the delay budget counts, written where
+	// the device / VP-owned chain latency is set, read by the queue-hold planner (another thread).
+	std::atomic<int> delaySwapchainFrames{ DelayBudget::kSwapchainFrames };
 	double renderAheadChainWantedSince = -1.0;               // another depth wanted since (RenderAheadNow)
 	unsigned long long renderAheadGateResets = 0;
 	AlphaD3D11FrameGpuTimer renderAheadExtraTimer, renderAheadEstimateTimer;   // X and E on the GPU
@@ -8791,9 +8804,14 @@ struct LibplaceboVideoRenderer::Impl
 			EngageFallback("pipeline order", "designed order kept: " + reason);   // an invalid order never runs
 		else
 			ReleaseFallback("pipeline order");
+		if (settings.presentEveryVsyncWithheld)   // PresentationOwner (owner decision 2): visible, never log-only
+			EngageFallback(PresentationOwner::FallbackId(), PresentationOwner::WithheldText());
+		else
+			ReleaseFallback(PresentationOwner::FallbackId());
 		next.SetEntranceOnce(settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway);   // B3: consumers after the entrance
 		(void)next.ActiveEntrance();   // warm the kept list here, so the render thread only reads it
 		pipelineSlots = next;
+		VpFrameAnalysis::Host::SetLimitedDomain(settings.sourceCodingFixes);   // DIV-AN-01 either/or (Original: off = Bill's codes)
 		frameAnalysis.Configure(settings.frameAnalysisStore && !settings.pipelineOriginalPathway,   // WP-23
 			VpFrameAnalysis::Host::FullLumaReaders(pipelineSlots, settings.opticalFlow, settings.motionAheadFrames,
 				settings.sourceResolution == "auto"));   // running full-luma readers; record readers: none yet
@@ -11767,8 +11785,8 @@ struct LibplaceboVideoRenderer::Impl
 		const double renderAheadRatio = RenderAheadChainRatio();
 		const RenderAhead::ChainDepth chainDepth = RenderAhead::ChainDepthFor(RenderAheadActive() && !blit,
 			lowLatencyQueueActive.load(std::memory_order_acquire), renderAheadRatio);
-		// REHEARSAL (c): Bill's presentation depth (PresentationConfig) vs VP-V's render-ahead
-		// chain depth. Render-ahead active = VP-V's depth; otherwise Bill's (Original).
+		// Bill merge (owner decision 2, PresentationOwner): render-ahead active = VP-V's chain
+		// depth; otherwise Bill's presentation depth (PresentationConfig), as on the Original pathway.
 		desc.BufferCount = blit ? 1 : (RenderAheadActive()
 			? static_cast<UINT>(chainDepth.buffers)
 			: PresentationConfig::BufferCount(appliedPresentationDepth, blit));
@@ -11799,8 +11817,13 @@ struct LibplaceboVideoRenderer::Impl
 		renderAheadChainWantedSince = -1.0;
 		{
 			CComQIPtr<IDXGIDevice1> latencyDevice(d3d11->device);
-			const UINT latency = chainDepth.latency;
+			// Bill merge (owner decision 2): VP's chain latency only while render-ahead owns
+			// presentation; otherwise the depth Bill's code requested and verified (device-wide).
+			const UINT latency = PresentationOwner::MaximumFrameLatency(RenderAheadActive() && !blit,
+				chainDepth.latency, appliedPresentationDepth);
 			const HRESULT latencyResult = latencyDevice ? latencyDevice->SetMaximumFrameLatency(latency) : E_NOINTERFACE;
+			if (SUCCEEDED(latencyResult))
+				delaySwapchainFrames.store(static_cast<int>(latency), std::memory_order_release);
 			if (RenderAheadActive() || renderAheadSwapchainLogged)
 			{
 				renderAheadSwapchainLogged = true;
@@ -12759,7 +12782,7 @@ struct LibplaceboVideoRenderer::Impl
 			LibplaceboExportedData<pl_d3d11_params>("pl_d3d11_default_params");
 		deviceParams.allow_software = false;
 		deviceParams.min_feature_level = D3D_FEATURE_LEVEL_10_0;
-		deviceParams.max_frame_latency = settings.presentationQueueDepth;   // REHEARSAL (c): Bill's setting; ours was DelayBudget::kSwapchainFrames (fixed)
+		deviceParams.max_frame_latency = settings.presentationQueueDepth;   // Bill's setting (owner decision 2); the delay budget reads it (PresentationOwner)
 		deviceParams.no_compute = settings.diagnosticDisableCompute;
 		nlsPreparationNoCompute = deviceParams.no_compute;
 		// Tests: VP_TEST_ADAPTER=<text> picks the GPU whose name contains it
@@ -12781,6 +12804,7 @@ struct LibplaceboVideoRenderer::Impl
             FAILED(latencyDevice->GetMaximumFrameLatency(&appliedPresentationDepth)) ||
             appliedPresentationDepth != static_cast<UINT>(settings.presentationQueueDepth))
             throw std::runtime_error("D3D11 could not apply the presentation queue depth");
+        delaySwapchainFrames.store(static_cast<int>(appliedPresentationDepth), std::memory_order_release);   // PresentationOwner
         DebugLog::Log("VP presentation queue: requested=%d applied_device_limit=%u scope=device occupancy=unknown flip_buffers_if_flip_model=%u pacing=dxgi_sync_interval_1",
             settings.presentationQueueDepth, appliedPresentationDepth,
             PresentationConfig::BufferCount(appliedPresentationDepth, false));
@@ -13049,7 +13073,10 @@ struct LibplaceboVideoRenderer::Impl
 			formatter = CreateAlphaFormatter(state->videoFrameEncoding,
 				videoConversionOverride, state->dolbyVisionTunnel);
 			if (auto* dv = dynamic_cast<CRGBDolbyVisionTunnelFormatter*>(formatter.get()))
+			{
 				dv->SetBugHuntFixes(settings.dvTunnelFixes);   // dv_tunnel_fixes
+				dv->SetAcceptR10Containers(settings.dvTunnelFixes);   // DIV-DV-08: R10b/R10l with dv_tunnel_fixes (Original: off)
+			}
 			formatter->OnVideoState(state);
 			formatterState = state;
 		}
@@ -13698,6 +13725,7 @@ struct LibplaceboVideoRenderer::Impl
         input.encoding = state.videoFrameEncoding;
         input.colorspace = state.colorspace;
         input.transferKey = static_cast<uint32_t>(state.eotf);
+        input.vpLimitedDomain = VpFrameAnalysis::Host::LimitedDomain();   // DIV-AN-01 either/or
         input.sourceGeneration = generation;
         input.profile = profile;
         input.rendererUsesNative = rendererUsesNative;
@@ -13984,6 +14012,7 @@ struct LibplaceboVideoRenderer::Impl
 				if (dv->BugHuntFixes() != settings.dvTunnelFixes)
 				{
 					dv->SetBugHuntFixes(settings.dvTunnelFixes);
+					dv->SetAcceptR10Containers(settings.dvTunnelFixes);   // DIV-DV-08
 					DebugLog::Log("Dolby Vision RGB tunnel: bug-hunt fixes %s (dv_tunnel_fixes)", settings.dvTunnelFixes ? "on" : "off");
 				}
 		}
@@ -21523,6 +21552,10 @@ struct LibplaceboVideoRenderer::Impl
 				actualOutput.targetTransfer);
         // Resolve the active LUT before interpreting SDR. Missing/disabled LUTs
         // always fall back to physical display encoding, never a stale LUT domain.
+        // Bill merge (either/or, c-item 3): VP-V also reloads a changed LUT file by itself (WP-12);
+        // the Original pathway keeps Bill's explicit Apply only (ApplyPendingDisplayLutReloadLocked).
+        if (!activeSettings.pipelineOriginalPathway)
+            MaybeReloadDisplayLut();
         const auto calibrationTransfer = LibplaceboOutput::ResolveCalibrationTransfers(
             inputIsSdr, actualOutput.safeToRender, displayLutParsed && displayLut,
             sdrAdjustGamma, LibplaceboOutput::ParseGamma(activeSettings.outputGamma),
@@ -28170,6 +28203,12 @@ releaseDriftBaseRetention =
         outputMerger->Configure(pipelineSlots, activeSettings.outputSegmentsMerged, 30, fallbacks);
         if (outputMerger->FallbacksChanged())
             DebugLog::Log("%s", fallbacks.Heading().c_str());
+        const TemporalHistoryPolicy::Decision temporalEntrance = TemporalHistoryPolicy::Decide(
+            temporalRenderer.Active(), !pipelineSlots.ActiveEntrance().empty());
+        if (temporalEntrance.showPause)
+            EngageFallback(TemporalHistoryPolicy::FallbackId(), TemporalHistoryPolicy::PauseText());
+        else
+            ReleaseFallback(TemporalHistoryPolicy::FallbackId());
         const auto hookRender = NlsHookRecovery::RenderOwned(temporalRenderer.ProcessingRenderer(renderer), d3d11->gpu,   // Bill: the processing renderer keeps source peak-detection history
             renderImage, target, baseTarget, frameParams, frameHooks, submittedNls, [&]()
             {
@@ -28202,6 +28241,14 @@ releaseDriftBaseRetention =
                     return true;
                 // Stage 12 step A: the planes libplacebo samples, re-based.
                 pl_frame frame = source;
+                // Bill merge (owner decision 1, TemporalHistoryPolicy): Bill's temporal renderer
+                // renders its own captured history; the entrance stages do not run on its draws and
+                // it gets the captured picture's own crop (never a re-based one).
+                if (!temporalEntrance.runEntrance)
+                {
+                    return temporalRenderer.Render(renderer,frame,destination,parameters,pictureProcessingEpoch,
+                        extendedRangeRelabelled ? &source.color : nullptr);
+                }
                 // Stage B: the picture at this refresh's phase in place of A's planes (a
                 // composed picture keeps A: hold). Everything after runs on it unchanged.
                 entrance.NoteSourceFrame(sourceSequence);
@@ -28415,7 +28462,11 @@ releaseDriftBaseRetention =
         if (rendered) lastRenderedTargetTransfer = ToSdrTransfer(baseTarget.color.transfer);
         calibrationLutAttached = calibrationHost.LutAttached(rendered, targetLutApplied);
 		// h3-latch (K3): held black until the first crop decision (the frame was rendered as usual).
+		// Merge 2026-10-31 (geo): the clear was lost, leaving the hold guarding Bill's
+		// CacheDisplayFrame/else below (no repeat cache, a stale displayRepeatValid). The
+		// clear comes first, so a cached repeat of a held frame stays black.
 		if (rendered && startupHoldBlack)
+			pl_frame_clear(d3d11->gpu, &baseTarget, black);
         if (rendered)
             CacheDisplayFrame(baseTarget.planes[0].texture, frameGeneration,
                 viewportRequestSerial, startupFrameRevision);
@@ -28533,6 +28584,11 @@ releaseDriftBaseRetention =
 		{
             const double usedWidth = std::abs(double(renderImage.crop.x1)-renderImage.crop.x0);
             const double usedHeight = std::abs(double(renderImage.crop.y1)-renderImage.crop.y0);
+            // VP-V start-up hold (active_picture_startup_hold, off on the Original pathway): a
+            // held frame is a black clear, published like Bill's black fallback.
+            if (startupHoldBlack)
+                aspectTelemetry.ClearPresentation();
+            else
             aspectTelemetry.Submitted(frameGeneration,
                 temporalRenderer.Active() ? temporalRenderer.SelectedPacketSequence() : sourceSequence,
                 usedHeight > 0.0 ? usedWidth/usedHeight : 0.0,
@@ -30922,6 +30978,9 @@ void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz, double s
 		if (context.renderAheadActive && context.displayHz > 0.0 && sourceRateHz > 0.0)
 			context.renderAheadLeadSeconds = RenderAhead::PlannedLead(1.0 / sourceRateHz, 1.0 / context.displayHz);
 		context.renderAheadCreditFrames = m_impl->renderAheadCreditFrames.load(std::memory_order_acquire);
+		// Owner decision 2: the swapchain frames of whichever owner presents (Bill's configured
+		// depth unless render-ahead owns presentation), never a fixed 2.
+		context.presentationFrames = m_impl->delaySwapchainFrames.load(std::memory_order_acquire);
 	}
 	{
 		std::lock_guard<std::mutex> guard(m_queueMutex);
@@ -33544,6 +33603,9 @@ bool LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
         uint64_t selected=0,ready=0,required=1,retained=0;
         bool cancelled=false;
         ~AttemptMetrics() {
+            // VP-V observers-only walk (no active-picture frames; Bill never calls with
+            // none): Bill's look-ahead counters are left untouched.
+            if (selected==0) return;
             perf.ObserveDepth(selected,ready,required);
             perf.RecordRetainedMeasurements(retained,cancelled);
         }
@@ -33551,7 +33613,7 @@ bool LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
     auto currentStage=LookaheadPerf::Stage::Measurements;
     bool cancelledStageRecorded=false;
     const bool cachedOnly=deadlineQpc<=0;
-    if (cachedOnly)
+    if (cachedOnly && activePictureFrames > 0)
         m_impl->lookaheadPerformance.RecordStop(LookaheadPerf::Stage::Measurements,
             LookaheadPerf::StopReason::ZeroAdmission);
     const auto expired=[&] { return !cachedOnly && PerformanceCounterNow()>=deadlineQpc; };
@@ -33587,7 +33649,8 @@ bool LibplaceboVideoRenderer::AnalyzeActivePictureLookahead(
     }, &deadlineQpc);
     const char* budgetStage="entry";
     try {
-    if(expired()) return abort("entry");
+    // An observers-only walk (LED / content / intent) is not bounded by the active picture's deadline.
+    if(activePictureFrames > 0 && expired()) return abort("entry");
     uint8_t availableLookahead = static_cast<uint8_t>((std::min)(
         queuedFutureFrames, size_t{UINT8_MAX}));
     // Statistics observers see every frame this walk decodes, current first.
@@ -35699,16 +35762,21 @@ void LibplaceboVideoRenderer::RenderLoop()
 		if (!activePicturePreviewFrames.empty() && (activePictureLookaheadWanted || observersWantWalk))
 		{
 			const auto lookaheadStarted = SteadyClock::now();
-            lookaheadAttempted=true;
+			// Merge 2026-10-31 (geo): the active-picture frames only when Bill's gate admits them
+			// (else an observers-only walk ran Bill's analysis on a repeat / discontinuity /
+			// backlog / resize head he refuses); Bill's attempt statistics only for his attempt.
+            lookaheadAttempted=activePictureLookaheadWanted;
 			try
 			{
-				lookaheadCompleted=AnalyzeActivePictureLookahead(
+				const bool walkCompleted=AnalyzeActivePictureLookahead(
 					activePicturePreviewFrames,
 					activePictureAvailableLookahead,
 					activePictureLookaheadPolicyGeneration,
 					activePictureContinuityGeneration, lookaheadTicket.deadlineQpc,
-					activePictureWalkNow,
+					activePictureLookaheadWanted ? activePictureWalkNow : 0,
 					ledWantedLookahead);
+				if (activePictureLookaheadWanted)
+					lookaheadCompleted=walkCompleted;
 			}
 			catch (const std::exception& e)
 			{
@@ -35721,11 +35789,14 @@ void LibplaceboVideoRenderer::RenderLoop()
 				DebugLog::Log(
 					"Alpha active-picture look-ahead preview failed: unknown exception");
 			}
+			if (activePictureLookaheadWanted)
+			{
 			lookaheadMs = std::chrono::duration<double, std::milli>(
 				SteadyClock::now() - lookaheadStarted).count();
             lookaheadLateMs=lookaheadTicket.deadlineQpc>0
                 ? (std::max)(0.0,double(PerformanceCounterNow()-lookaheadTicket.deadlineQpc)*1000.0/analysisQpcFrequency.QuadPart)
                 : 0.0;
+			}
 		}
         if (!lookaheadAttempted && !activePicturePreviewFrames.empty())
             m_impl->lookaheadPerformance.RecordStop(LookaheadPerf::Stage::Measurements,
@@ -36642,11 +36713,19 @@ void LibplaceboVideoRenderer::RenderLoop()
                     m_impl->vpTimelineLogged=m_impl->vpTimelineActive;
                     m_impl->LogVpTimeline(m_impl->vpTimelineActive?"engaged (one picture per display refresh)":"released");
                 }
-                // REHEARSAL (c): Bill's display repeat cadence (present_every_vsync) and VP's per-vsync timeline
-                // both schedule every refresh: the timeline owns it while active.
-                const bool effectiveRepeatCadence=!m_impl->displayCadenceRecovery.Fallback() && !m_impl->vpTimelineActive &&
+                // Bill merge (c-item 11): Bill's display repeat cadence (present_every_vsync) and VP's
+                // per-vsync timeline or de-judder extras would both schedule refreshes: VP's own owns
+                // them while active (VP-V only: the Original pathway has neither), visibly.
+                const bool vpSchedulesRefreshes=m_impl->vpTimelineActive ||
+                    (m_impl->dejudderReason==DejudderPolicy::Reason::Active && m_impl->dejudderExtrasAllowed);
+                const bool requestedRepeatCadence=!m_impl->displayCadenceRecovery.Fallback() &&
                     PresentationConfig::UseRepeatCadence(
                         m_impl->activeSettings.presentEveryVsync,m_impl->temporalRenderer.Mixing());
+                const bool effectiveRepeatCadence=requestedRepeatCadence && !vpSchedulesRefreshes;
+                if (requestedRepeatCadence && vpSchedulesRefreshes)
+                    m_impl->EngageFallback("display repeat", "present_every_vsync paused: VP's per-refresh timeline / de-judder extras schedule the refreshes");
+                else
+                    m_impl->ReleaseFallback("display repeat");
                 const int cadenceOwner=m_impl->temporalRenderer.Mixing()?2:effectiveRepeatCadence?1:0;
                 if (cadenceOwner!=m_impl->displayCadenceOwner) {
                     m_impl->displayCadenceOwner=cadenceOwner;

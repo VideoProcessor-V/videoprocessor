@@ -13282,6 +13282,7 @@ VideoStateComPtr CVideoProcessorDlg::MeasureHdrVetoPicture(const VideoStateComPt
 	input.encoding = state->videoFrameEncoding;
 	input.colorspace = state->colorspace;
 	input.transferKey = static_cast<uint32_t>(state->eotf);
+	input.vpLimitedDomain = true;   // VP-only HDR veto grid: its thresholds are in the VP-V (limited) domain
 	input.sourceGeneration = generation;
 	const PreparedAnalysisFrame prepared = PrepareAnalysisFrame(input);
 	if (prepared.IsValid() &&

@@ -37,10 +37,8 @@ namespace LedDrive
 		// audit 2026-10-16: Sample() maps natively full-range sources (8-bit
 		// and 12-bit RGB, the DV SDR-tunnel RGB, full-range YCbCr planes) to
 		// the limited code domain: Y = 64 + 876/1023 * Y'.
-		if (!kAnalysisLumaSampleLimitedDomain) return false;
-		if (luma.format == AnalysisLumaFormat::SdrTunnelRgb) return true;
-		if (luma.format == AnalysisLumaFormat::NativeRgb) return FullRangeRgbEncoding(luma.encoding);
-		return luma.fullRangeYuv;
+		// Merge 2026-10-31: the source says whether it mapped (DIV-AN-01 is an either/or now).
+		return luma.MapsToLimitedDomain();
 	}
 
 	bool LumaIsFullRange(const AnalysisLumaSource& luma)
@@ -48,8 +46,7 @@ namespace LedDrive
 		// audit 2026-10-16: with the limited-domain sampler, Sample() never
 		// returns full-range codes (reading them as 0-1023 again was a double
 		// conversion: full-range RGB black read ~6%).
-		if (kAnalysisLumaSampleLimitedDomain) return false;
-		return FullRangeRgbEncoding(luma.encoding);
+		return luma.CodesFullRange();
 	}
 
 	LumaValueTable PeakValueTable(const AnalysisLumaSource& luma, const std::vector<float>& transfer, int range)
