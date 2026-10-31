@@ -23,6 +23,7 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 #include <set>
 #include <iterator>
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <regex>
@@ -748,12 +749,17 @@ void testConfigKeysActivateTheRendererAndMatcherSettings()
     require(describe != nullptr, "the renderer DLL has no settings description");
     auto read = [&](const std::string& body)
     {
-        const std::string path = folder + "vp-settings-activation.cfg";
+        // ConfigFile caches a load by file index, size and file times, so a same-size rewrite of one path inside a
+        // file-time tick can return the previous parse: write a fresh path per call and delete it after use.
+        static std::atomic<int> freshConfig{ 0 };
+        const std::string path = folder + "vp-settings-activation-" + std::to_string(freshConfig++) + ".cfg";
         // The base rendering profile (every real configuration has it; a file
         // with only a named profile selects none).
         std::ofstream(path, std::ios::trunc) << "[vprenderer]\nquality: high\n" << body;
         std::vector<char> text(16384);
-        require(describe(path.c_str(), text.data(), static_cast<int>(text.size())) > 0, "the renderer could not describe the settings");
+        const int described = describe(path.c_str(), text.data(), static_cast<int>(text.size()));
+        { std::error_code removeError; std::filesystem::remove(path, removeError); }
+        require(described > 0, "the renderer could not describe the settings");
         std::map<std::string, std::string> values;
         std::istringstream in(text.data());
         for (std::string line; std::getline(in, line);)

@@ -2532,6 +2532,9 @@ namespace
 				value = ConfigFile::NormalizeName(value);
 				if (value == "native" || value == "auto" || SourceRebase::ClassHeight(value) > 0)
 					settings.sourceResolution = value;
+				else
+					DebugLog::Log("display rule '%s': invalid source_resolution '%s'; retaining base setting",
+						rule.name.c_str(), value.c_str());
 			}
 			if (config.TryGetString(rule.section, "source_resolution_auto_min_confidence", value))
 			{
@@ -5526,14 +5529,14 @@ struct LibplaceboVideoRenderer::Impl
 	// (A later optimisation could reuse B's upload when B becomes current.)
 	pl_tex dejudderNextTextures[2] = { nullptr, nullptr };
 	// capture_path: gpu. The conversion thread reads the two flags; a failed
-	// unpack turns the session back to the CPU formatters (logged once).
+	// unpack turns the session back to the CPU formatters (the fallback is shown: Ctrl+I line, one-time notice, Config status).
 	std::atomic<bool> captureGpuWanted{ true };
 	std::atomic<bool> captureGpuFailed{ false };
 	std::unique_ptr<GpuCaptureUnpack> captureUnpack;
 	bool captureGpuLogged = false;
 	// native_rgb_ingest (roadmap item 2): R12B/R12L/r210 go on raw and are
 	// unpacked to native RGB (rgba16) plus the matcher's luma; a failed unpack
-	// turns the session back to the CPU formatter (logged once).
+	// turns the session back to the CPU formatter (the fallback is shown: Ctrl+I line, one-time notice, Config status).
 	std::atomic<bool> rgbGpuWanted{ true };
 	std::shared_ptr<std::atomic<int>> rawBuffersHeld = std::make_shared<std::atomic<int>>(0);
 	// capture_upload: early. The pool exists for the renderer's life (the
@@ -5685,7 +5688,7 @@ struct LibplaceboVideoRenderer::Impl
 	std::atomic<bool> rgbGpuFailed{ false };
 	std::unique_ptr<GpuRgbUnpack> rgbUnpack;
 	// dv_tunnel_gpu_unpack: the conversion thread reads the two flags; a
-	// failed unpack turns the session back to the CPU unpack (logged once).
+	// failed unpack turns the session back to the CPU unpack (the fallback is shown: Ctrl+I line, one-time notice, Config status).
 	std::atomic<bool> dvGpuWanted{ false };
 	std::atomic<bool> dvGpuFailed{ false };
 	DvGpuUnpackSession dvUnpack;   // WP-14 (VP-V input.signal): the unpack object, its log lines
@@ -6132,7 +6135,7 @@ struct LibplaceboVideoRenderer::Impl
 	}
 	// dv_tunnel_gpu_unpack: a Dolby Vision tunnel picture's planes (the CPU
 	// formatter's, exactly) unpacked on the GPU, or false (and the session back
-	// to the CPU unpack, logged once) when it fails.
+	// to the CPU unpack, with the fallback shown: Ctrl+I line, one-time notice, Config status) when it fails.
 	bool UnpackDolbyVisionPayload(const QueuedFrame::ConvertedPayload& payload, int width, int height, pl_tex (&planes)[2],
 		bool sessionFallback)
 	{
@@ -7197,6 +7200,8 @@ struct LibplaceboVideoRenderer::Impl
 	uint64_t sourceUploadCpuIntervalSamples = 0;
 	pl_tex subtitleBoxTexture = nullptr;
 	SubtitleMeasurementWorker subtitleMeasurementWorker;
+	bool subtitleCueLossInWindow = false;   // silent-fallbacks: an unresolved cue inside the current 5 s window
+	bool subtitleWorkerLoss = false;   // silent-fallbacks: the last 5 s window dropped or failed measurement jobs
     SubtitlePendingMeasurementGuard subtitlePendingGuard;
     struct SubtitlePerfWindow {
         uint64_t frames=0,pending=0,recovered=0,compose[2]{},gpuSamples[2]{};
@@ -11028,9 +11033,17 @@ struct LibplaceboVideoRenderer::Impl
 
 	void EnsureAutoLimitedFallback(const char* trigger)
 	{
-		if (swapchainBlit ||
-			!LibplaceboOutput::ShouldFallbackToComposed(outputPlan, actualOutput))
+		if (!(outputPlan.request.presentation == LibplaceboOutput::PresentationRequest::AUTO &&
+			outputPlan.request.range == LibplaceboOutput::RangeRequest::LIMITED))
+			SyncFallback(FallbackCatalog::OutputRangeComposed(false, std::string()));   // silent-fallbacks: request no longer AUTO+LIMITED
+		if (swapchainBlit)
 			return;
+		if (!LibplaceboOutput::ShouldFallbackToComposed(outputPlan, actualOutput))
+		{
+			SyncFallback(FallbackCatalog::OutputRangeComposed(false, std::string()));   // silent-fallbacks: flip chain kept
+			return;
+		}
+		SyncFallback(FallbackCatalog::OutputRangeComposed(true, trigger ? trigger : ""));
 
 		DebugLog::Log(
 			"libplacebo output negotiation (%s): AUTO Limited unavailable; recreating the stable composed Full/sRGB swapchain",
@@ -11324,6 +11337,7 @@ struct LibplaceboVideoRenderer::Impl
 		VpDiagnostics::TestAdapterFromEnvironment(&testAdapter);
 		if (testAdapter)
 			deviceParams.adapter = testAdapter;
+		if (VpDiagnostics::D3D11DebugFromEnvironment()) deviceParams.debug = true;
 		d3d11 = pl_d3d11_create(log, &deviceParams);
 		if (!d3d11)
 			throw std::runtime_error("Failed to create libplacebo D3D11 device");
@@ -11336,12 +11350,13 @@ struct LibplaceboVideoRenderer::Impl
 				"Paired libplacebo timing comparison API is unavailable");
 		}
 		DebugLog::Log(
-			"libplacebo D3D11 device: feature_level=0x%04X software=%d allow_software=%d no_compute=%d max_frame_latency=%d internal_pass_timers=alternating",
+			"libplacebo D3D11 device: feature_level=0x%04X software=%d allow_software=%d no_compute=%d max_frame_latency=%d debug=%d internal_pass_timers=alternating",
 			static_cast<unsigned int>(d3d11->device->GetFeatureLevel()),
 			d3d11->software ? 1 : 0,
 			deviceParams.allow_software ? 1 : 0,
 			deviceParams.no_compute ? 1 : 0,
-			deviceParams.max_frame_latency);
+			deviceParams.max_frame_latency,
+			deviceParams.debug ? 1 : 0);
 		d3d11->device->GetImmediateContext(&renderTimingContext);
 		const bool gpuFrameTimingAvailable = renderTimingContext &&
 			gpuFrameTimer.Initialize(d3d11->device);
@@ -11417,6 +11432,11 @@ struct LibplaceboVideoRenderer::Impl
 		else if (reportBt2020ToDisplay)
 			DebugLog::Log("libplacebo: report_bt2020_to_display ignored because target primaries are Rec.709");
 		requestedOutputPlan = LibplaceboOutput::MakePlan(outputRequest);
+		SyncFallback(FallbackCatalog::OutputRequestRejected(
+			outputRequest.gamma == LibplaceboOutput::GammaRequest::UNSUPPORTED || !requestedOutputPlan.valid,
+			outputRequest.gamma == LibplaceboOutput::GammaRequest::UNSUPPORTED ?
+				settings.outputGamma : settings.outputPresentation + "/" + settings.outputRange + "/" + settings.outputGamma,
+			requestedOutputPlan.reason));
 		if (outputRequest.gamma == LibplaceboOutput::GammaRequest::UNSUPPORTED)
 		{
 			DebugLog::Log(
@@ -12640,6 +12660,7 @@ struct LibplaceboVideoRenderer::Impl
 		if (none != selection.end())
 		{
 			SetShaderStatus("NLS: Off");
+			SyncFallback(FallbackCatalog::GeometrySafeFit(false));   // silent-fallbacks: NLS off releases a stale safe-fit entry
 			MadVRShaderLoader::SetRuntimeShaderSelection(
 				requestedShaderSelector, requestedShaderSelector,
 				NlsMappingMode::OFF);
@@ -12655,6 +12676,7 @@ struct LibplaceboVideoRenderer::Impl
 		{
 			// Custom GLSL hooks without NLS: ordinary lens-aware presentation.
 			SetShaderStatus("NLS: Off, custom: " + std::to_string(customCount));
+			SyncFallback(FallbackCatalog::GeometrySafeFit(false));   // silent-fallbacks: NLS off releases a stale safe-fit entry
 			MadVRShaderLoader::SetRuntimeShaderSelection(
 				requestedShaderSelector, requestedShaderSelector,
 				NlsMappingMode::OFF);
@@ -19705,8 +19727,13 @@ struct LibplaceboVideoRenderer::Impl
             if(!currentSubtitlePreview.available) {
                 ++subtitlePerf.pending;
                 if(subtitlePendingGuard.Resolve(currentSubtitlePreview,analysisSource,subtitleFrameMs,activeSettings.subtitleHoldMs))++subtitlePerf.recovered;
-                else if(subtitlePerf.pending-subtitlePerf.recovered<=4)
-                    DebugLog::Log("SUBTITLE PENDING: frame=%llu reason=%s",sourceSequence,subtitlePendingGuard.DecisionReason());
+                else
+                {
+                    if(subtitlePerf.pending-subtitlePerf.recovered<=4)
+                        DebugLog::Log("SUBTITLE PENDING: frame=%llu reason=%s",sourceSequence,subtitlePendingGuard.DecisionReason());
+                    SyncFallback(FallbackCatalog::SubtitleDetection(FallbackCatalog::SubtitleLoss::CueDropped));   // silent-fallbacks
+                    subtitleCueLossInWindow=true;
+                }
             }
             subtitleBoxPresentation.RefreshReferencePixels(currentSubtitlePreview,analysisSource);
             subtitlePreview=&currentSubtitlePreview;
@@ -20043,6 +20070,15 @@ struct LibplaceboVideoRenderer::Impl
             const double seconds=(subtitlePerfNow-subtitlePerfTick)/1000.0;
             const auto worker=subtitleMeasurementWorker.TakeDiagnostics();
             const auto jobs=worker.fullScans+worker.refreshes+worker.failed;
+            subtitleWorkerLoss=worker.failed>0||worker.dropped>0;   // silent-fallbacks: visible, released when a whole window is clean
+            if(subtitleWorkerLoss)
+                SyncFallback(FallbackCatalog::SubtitleDetection(worker.failed>0 ?
+                    FallbackCatalog::SubtitleLoss::WorkerError : FallbackCatalog::SubtitleLoss::JobsDropped));
+            else if(subtitleCueLossInWindow)
+                SyncFallback(FallbackCatalog::SubtitleDetection(FallbackCatalog::SubtitleLoss::CueDropped));
+            else
+                SyncFallback(FallbackCatalog::SubtitleDetection(FallbackCatalog::SubtitleLoss::None));
+            subtitleCueLossInWindow=false;
             DebugLog::Log("SUBTITLE PERFORMANCE CPU: optimization=%s window_s=%.3f frames=%llu consume_avg_ms=%.3f consume_peak_ms=%.3f pending_frames=%llu verified_pending=%llu full_scans=%llu full_scan_hz=%.2f full_avg_ms=%.3f full_peak_ms=%.3f refreshes=%llu refresh_hz=%.2f refresh_avg_ms=%.3f refresh_peak_ms=%.3f worker_busy_ms=%.3f queue_wait_avg_ms=%.3f queue_wait_peak_ms=%.3f queued=%zu active=%d ready=%zu dropped_jobs=%llu failed_jobs=%llu request_misses=%llu",
                 SubtitleDetectionOptimizationName(activeSettings.subtitleDetectionOptimization),seconds,subtitlePerf.frames,subtitlePerf.frames?subtitlePerf.consumeMs/subtitlePerf.frames:0,subtitlePerf.consumePeak,
                 subtitlePerf.pending,subtitlePerf.recovered,worker.fullScans,worker.fullScans/seconds,
@@ -22425,10 +22461,12 @@ struct LibplaceboVideoRenderer::Impl
 				{
 				case NlsMappingMode::ACTIVE:
 					SetShaderStatus("NLS: Active");
+					SyncFallback(FallbackCatalog::GeometrySafeFit(false));
 					break;
 				case NlsMappingMode::LINEAR_PASSTHROUGH:
 					SetShaderStatus(nlsPresentationCrop.applied ?
 						"NLS: Crop only" : "NLS: Passthrough");
+					SyncFallback(FallbackCatalog::GeometrySafeFit(false));
 					break;
 				case NlsMappingMode::SAFE_FIT:
 					SetShaderStatus("NLS: Safe fit");
@@ -22823,7 +22861,8 @@ struct LibplaceboVideoRenderer::Impl
 					// film rate, else the measured capture rate, else the nominal rate; 0 = unknown.
 					double contentHz = pulldownFilmHz > 0.0 ? pulldownFilmHz : vpCaptureRateHz > 0.0 ? vpCaptureRateHz : nominalSourceRateHz;
 					if (!std::isfinite(contentHz) || contentHz <= 0.0) contentHz = 0.0;
-					// The de-judder's vectors only under exactly the debander's validity condition.
+					// The de-judder's vectors only under the debander's validity condition: this source frame's
+					// live field (DejudderLiveFieldFor: the current motion epoch, and with motion_history_fixes the live-field sequence).
 					pl_tex field = nullptr;
 					if (dejudder && dejudderEstimatedSequence == sourceSequence && motionValidity.Current(dejudderEstimatedEpoch) && sourceSequence != 0)
 						field = dejudder->Field();
@@ -23876,6 +23915,7 @@ struct LibplaceboVideoRenderer::Impl
                 MadVRShaderLoader::SetRuntimeShaderSelection(requestedShaderSelector,
                     requestedShaderSelector, nlsDecision.mode);
                 SetShaderStatus("NLS: Safe fit (hook failure)");
+                SyncFallback(FallbackCatalog::GeometrySafeFit(true));   // silent-fallbacks: visible beyond the shader status
                 // Hunt 2 10-layout M1: the de-judder geometry, the rendered-picture cache and
                 // the occlusion mask's NLS map were made for the failed draw (the NLS screen
                 // rectangle and map). The redraw copies nothing, the extras of this frame hold,
