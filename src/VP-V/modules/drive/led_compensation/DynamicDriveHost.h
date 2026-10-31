@@ -67,6 +67,11 @@ namespace LedDrive
 		void Clear();
 		void PublishParams(const DynamicDriveParams& params);
 		DynamicDriveParams PublishedParams() const;
+		// Bug hunt 31 H1: the reason the configuration was rejected ("" = accepted). The render
+		// side shows it as the "Dynamic Drive" fallback entry (module and gamma boost off).
+		void PublishRejection(const std::string& reason);
+		std::string PublishedRejection() const;
+		uint64_t RejectionGeneration() const { return rejectionGeneration.load(std::memory_order_acquire); }
 		std::shared_ptr<LedDriveModule> Module() const;
 		// led_lookahead_ms: the LED's own walk depth (0 without a module or an observer).
 		size_t WantedLookaheadFrames() const;
@@ -82,6 +87,9 @@ namespace LedDrive
 		std::atomic<bool> wtwPassthrough{ true };
 		std::atomic<bool> btbPassthrough{ true };
 		std::atomic<double> shadowLift{ 0.0 };
+		mutable std::mutex rejectionMutex;
+		std::string rejection;                            // rejectionMutex
+		std::atomic<uint64_t> rejectionGeneration{ 0 };   // bumped when the reason changes
 	};
 
 	// What the host knows that the adapter needs; built by the host per call (cheap).
@@ -140,6 +148,7 @@ namespace LedDrive
 		bool Suspended() const { return suspended; }
 		uint32_t HoldoverMs() const { return holdoverMs; }
 		const DynamicDriveParams& Params() const { return params; }
+		const std::string& Rejection() const { return rejection; }
 
 	private:
 		void Update(const ConfigFile& configuration, const HostContext& context);
@@ -164,5 +173,7 @@ namespace LedDrive
 		DynamicDriveParams params;
 		// The calibration patterns stopped the drive (restarted when they end).
 		bool calibrationSuspended = false;
+		// Bug hunt 31 H1: the last validation error ("" = valid), published to the render side.
+		std::string rejection;
 	};
 }

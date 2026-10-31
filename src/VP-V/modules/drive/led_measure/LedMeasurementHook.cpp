@@ -429,11 +429,12 @@ if (i < READBACK_WORDS) {
 		}
 		if (nativeReadback && !QueueNativeCopy(params, slot))
 		{
-			// The non-blocking path failed: back to libplacebo's readback for the session (visible
-			// through LateNote only if results then run late).
+			// The non-blocking path failed: back to libplacebo's readback for the session. Bug hunt 31
+			// M1: shown as the "LED measurement" entry (NativeReadbackFailed), not only when late.
 			DebugLog::Log("Dynamic Drive: the non-blocking measurement readback failed; libplacebo's readback for the session");
 			ReleaseNative();
 			nativeTried = true;
+			nativeFailed = true;
 		}
 		slotSequence[slot] = sequence;
 		guard.queued = true;
@@ -611,5 +612,6 @@ if (i < READBACK_WORDS) {
 				pl_buf_destroy(gpu, &buf);
 		schedule.Reset();
 		gpu = nullptr;
+		nativeFailed = false;   // a new GPU tries the non-blocking readback again
 	}
 }

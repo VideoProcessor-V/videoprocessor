@@ -468,6 +468,21 @@ namespace LedDrive
 		// earlier fade_frames / fade_min_step are read as frames at 24p.
 		int fadeMs = 250;
 		double fadeMinSlope = 12.0;
+		// Bug hunt 31 (hard-coded rates): the earlier frame-based keys as written (0 / -1 = not
+		// used). They are SOURCE frames: converted at the measured source period at run time
+		// (EffectiveFadeMs / EffectiveFadeMinSlope), not at a fixed 24 Hz. fadeMs / fadeMinSlope
+		// above keep their 24p values for an unmeasured source. A time-based key clears them.
+		int fadeFrames = 0;
+		double fadeMinStepPerFrame = -1.0;
+		// The fade window and minimum slope at a source frame period (ms; <= 0 = unmeasured).
+		double EffectiveFadeMs(double sourcePeriodMs) const
+		{
+			return fadeFrames > 0 && sourcePeriodMs > 0.0 ? fadeFrames * sourcePeriodMs : static_cast<double>(fadeMs);
+		}
+		double EffectiveFadeMinSlope(double sourcePeriodMs) const
+		{
+			return fadeMinStepPerFrame >= 0.0 && sourcePeriodMs > 0.0 ? fadeMinStepPerFrame * 1000.0 / sourcePeriodMs : fadeMinSlope;
+		}
 		double cutThreshold = 24.0;
 		// Experimental (owner 2026-10-10): once the picture has been black for
 		// ftb_black_ms with the LED at led_floor_black, switch to the custom
@@ -1153,7 +1168,13 @@ namespace LedDrive
 				result.fadeMs = static_cast<int>(std::lround(fadeFrames * 1000.0 / 24.0));
 			if (fadeMinStep >= 0.0)
 				result.fadeMinSlope = fadeMinStep * 24.0;
+			result.fadeFrames = fadeFrames;
+			result.fadeMinStepPerFrame = fadeMinStep;
 		}
+		if (config.TryGetString(section, "fade_ms", value))
+			result.fadeFrames = 0;              // the time-based key wins
+		if (config.TryGetString(section, "fade_min_slope", value))
+			result.fadeMinStepPerFrame = -1.0;
 		readInt("fade_ms", 20, 5000, result.fadeMs);
 		readNumber("fade_min_slope", result.fadeMinSlope);
 		readNumber("cut_threshold", result.cutThreshold);
