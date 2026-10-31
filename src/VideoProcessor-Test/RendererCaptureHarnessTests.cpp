@@ -6294,7 +6294,7 @@ namespace Tests
 				std::string out;
 				for (const std::string& line : run.log)
 					if (line.find("ither") != std::string::npos || line.find("igma-delta") != std::string::npos ||
-						line.find("custom hook") != std::string::npos || line.find("Vector engine: on") != std::string::npos ||
+						line.find("custom hook") != std::string::npos || line.find("Vector engine:") != std::string::npos ||
 						line.find("Vector engine: off") != std::string::npos)
 						out += "  " + line.substr(0, 300) + "\n";
 				return out;

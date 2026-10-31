@@ -7022,6 +7022,7 @@ struct LibplaceboVideoRenderer::Impl
 	bool sigmaDeltaRanLast = false;                   // the sigma-delta quantiser ran in the last frame's output pass
 	std::string vectorEngineLogged;
 	int vectorDeliveredLogged = -1;
+	int vectorDitherKeyLogged = -1;
 	unsigned long long vectorPairs = 0, vectorBackwardPairs = 0;
 	ULONGLONG vectorStatsTick = 0;
 	uint64_t vectorBackwardSequence = 0;
@@ -7074,6 +7075,17 @@ struct LibplaceboVideoRenderer::Impl
 				SyncFallback(FallbackCatalog::Released("vector_engine_global"));
 			}
 			return;
+		}
+		// What decides the output dither's want, logged when it changes (a dither that runs but is not served
+		// is explained by one of the three).
+		{
+			const int ditherKey = (sigmaDeltaRanLast ? 1 : 0) | (activeSettings.ditherVectorsOwn ? 2 : 0) | (DitherVectorsSupported() ? 4 : 0);
+			if (ditherKey != vectorDitherKeyLogged)
+			{
+				vectorDitherKeyLogged = ditherKey;
+				DebugLog::Log("Vector engine: output dither inputs: sigma-delta ran %s, own search requested %s, vectors supported %s",
+					(ditherKey & 1) ? "yes" : "no", (ditherKey & 2) ? "yes" : "no", (ditherKey & 4) ? "yes" : "no");
+			}
 		}
 		const std::string line = VectorDemand::StatusLine(vectorDemand);
 		if (line != vectorEngineLogged)
