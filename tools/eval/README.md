@@ -42,7 +42,8 @@ spline reproduction, contrast recovery, local tone mapping incl. MC) - `ltm_eval
 results in `findings-round2.md`.
 Also `cr_grainsafe_eval.py` (grain-safe contrast recovery), `texture_dither.py` (texture loss vs banding),
 `deband_stack.py` (texture oracle x deband x tone stage; `--projection-only` = deband vs master texture) and
-`ringing_stack.py` (mosquito repair placements in the stack).
+`ringing_stack.py` (mosquito repair placements in the stack), `adaptive_mosquito.py` (adaptive grain-safe
+ringing repair, standalone + stack) and `ringing_usecases.py` (upscale / sharpen / chroma / credits / low rungs).
 
 **External vectors (camera model).** `vector_source.py` defines the contract: `<dir>/flow_<a>_<b>.npy`, (H,W,2)
 float, channel 0 = dx, 1 = dy, `frame_b(p + F(p)) ~ frame_a(p)`, 6-digit frame indices (a divisor-size field

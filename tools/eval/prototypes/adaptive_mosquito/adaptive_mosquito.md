@@ -1,0 +1,41 @@
+<!-- Copyright(C) 2026 VP-V contributors -->
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+
+# Adaptive grain-safe mosquito / ringing repair (see adaptive_mosquito.py)
+
+ring_ratio = near-edge smooth-band ringing energy after / before the repair (same domain, reference = master through the same stage); ring_abs = before (codes^2); dpsnr = PSNR change; keep = two-seed grain probe through the repair (gate +-5 %); lc_delta = post-TM local-contrast change.
+
+| context | case | placement | stage | ring_ratio | ring_abs | dpsnr | keep_edge | keep_flat | lag1 | lc_delta | py_ms |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| SDR standalone | tos4k_text x264 crf28 | - | - | 0.9177 | 19.55 | 0.0123 | 0.9669 | 0.998 | 0.0004102 | - | 770.3 |
+| SDR standalone | tos4k_text x264 crf35 | - | - | 0.937 | 22.95 | 0.00758 | 0.975 | 0.9991 | 0.001028 | - | 768.5 |
+| SDR standalone | sintel_sky x264 crf28 | - | - | 0.4688 | 1.611 | 0.006519 | 0.9453 | 1 | 0.006605 | - | 764.7 |
+| SDR standalone | sintel_sky x264 crf35 | - | - | 0.4144 | 2.963 | 0.00363 | 0.9512 | 1 | 0.002706 | - | 744.2 |
+| HDR-PQ standalone | sol_dark x265-10_crf30 | early | - | 0.6722 | 9.354 | 0.01718 | 0.9529 | 0.9988 | 0.009016 | - | 789.4 |
+| HDR->SDR stack | sol_dark x265-10_crf30 | early | plain | 0.7552 | 7.503 | 0.01712 | - | - | - | -0.002053 | - |
+| HDR->SDR stack | sol_dark x265-10_crf30 | late | plain | 0.6409 | 7.503 | 0.01527 | - | - | - | -0.002876 | - |
+| HDR->SDR stack | sol_dark x265-10_crf30 | both | plain | 0.5657 | 7.503 | 0.01626 | - | - | - | -0.004443 | - |
+| HDR->SDR stack | sol_dark x265-10_crf30 | early | crgs 0.30 | 0.7645 | 8.723 | 0.01694 | - | - | - | -0.002182 | - |
+| HDR->SDR stack | sol_dark x265-10_crf30 | late | crgs 0.30 | 0.6579 | 8.723 | 0.01525 | - | - | - | -0.002979 | - |
+| HDR->SDR stack | sol_dark x265-10_crf30 | both | crgs 0.30 | 0.572 | 8.723 | 0.01798 | - | - | - | -0.004675 | - |
+| HDR-PQ standalone | sol_dark aom-10_crf40 | early | - | 0.706 | 3.448 | -0.003711 | 0.9522 | 0.9986 | 0.005626 | - | 790.7 |
+| HDR->SDR stack | sol_dark aom-10_crf40 | early | plain | 0.7564 | 3.393 | -0.005398 | - | - | - | -0.001853 | - |
+| HDR->SDR stack | sol_dark aom-10_crf40 | late | plain | 0.6878 | 3.393 | -0.007754 | - | - | - | -0.002687 | - |
+| HDR->SDR stack | sol_dark aom-10_crf40 | both | plain | 0.6258 | 3.393 | -0.03403 | - | - | - | -0.004087 | - |
+| HDR->SDR stack | sol_dark aom-10_crf40 | early | crgs 0.30 | 0.7524 | 4.264 | -0.004957 | - | - | - | -0.001973 | - |
+| HDR->SDR stack | sol_dark aom-10_crf40 | late | crgs 0.30 | 0.6969 | 4.264 | -0.005676 | - | - | - | -0.00277 | - |
+| HDR->SDR stack | sol_dark aom-10_crf40 | both | crgs 0.30 | 0.6114 | 4.264 | -0.02879 | - | - | - | -0.004286 | - |
+| HDR-PQ standalone | nocturne_mid x265-10_crf30 | early | - | 0.9916 | 73.67 | 0.004413 | 0.9863 | 1 | 0.0005896 | - | 788.7 |
+| HDR->SDR stack | nocturne_mid x265-10_crf30 | early | plain | 0.9905 | 56.29 | 0.002617 | - | - | - | -0.00021 | - |
+| HDR->SDR stack | nocturne_mid x265-10_crf30 | late | plain | 0.9903 | 56.29 | 0.004779 | - | - | - | -0.0003149 | - |
+| HDR->SDR stack | nocturne_mid x265-10_crf30 | both | plain | 0.9926 | 56.29 | 0.005298 | - | - | - | -0.0004242 | - |
+| HDR->SDR stack | nocturne_mid x265-10_crf30 | early | crgs 0.30 | 0.9902 | 62.47 | 0.002601 | - | - | - | -0.0002249 | - |
+| HDR->SDR stack | nocturne_mid x265-10_crf30 | late | crgs 0.30 | 0.9844 | 62.47 | 0.006084 | - | - | - | -0.0003843 | - |
+| HDR->SDR stack | nocturne_mid x265-10_crf30 | both | crgs 0.30 | 0.986 | 62.47 | 0.006756 | - | - | - | -0.000501 | - |
+| HDR-PQ standalone | nocturne_mid aom-10_crf40 | early | - | 1.003 | 65.47 | -0.0004366 | 0.9869 | 0.9999 | 7.495e-05 | - | 822.4 |
+| HDR->SDR stack | nocturne_mid aom-10_crf40 | early | plain | 1.002 | 51.88 | -0.001827 | - | - | - | -3.419e-05 | - |
+| HDR->SDR stack | nocturne_mid aom-10_crf40 | late | plain | 1.007 | 51.88 | -0.00113 | - | - | - | -6.464e-05 | - |
+| HDR->SDR stack | nocturne_mid aom-10_crf40 | both | plain | 1.014 | 51.88 | -0.00423 | - | - | - | -6.27e-05 | - |
+| HDR->SDR stack | nocturne_mid aom-10_crf40 | early | crgs 0.30 | 1.004 | 56.71 | -0.002315 | - | - | - | -3.237e-05 | - |
+| HDR->SDR stack | nocturne_mid aom-10_crf40 | late | crgs 0.30 | 1.005 | 56.71 | -0.0005552 | - | - | - | -0.000104 | - |
+| HDR->SDR stack | nocturne_mid aom-10_crf40 | both | crgs 0.30 | 1.013 | 56.71 | -0.003971 | - | - | - | -9.828e-05 | - |

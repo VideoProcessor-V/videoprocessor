@@ -197,6 +197,37 @@ places.
 **C5. External vectors.** `vector_source.py`. MC-LTM (`ltm_eval.py --vectors`) and chroma_mv / CfL+MV
 (`VP_EVAL_VECTORS`) can now take the camera model's fields; see the README. Missing fields raise.
 
+**C6. Adaptive ringing repair** (`adaptive_mosquito.py`, `ringing_usecases.py`)
+
+The repair is grain-safe and works region by region. Its strength comes from the ringing it measures
+near each edge, the edge contrast, the brightness after tone mapping, and the bitrate class; it is
+zero where no ringing is found.
+
+| case (domain the viewer sees) | ringing removed | ringing before (10-bit rms) | PSNR gain | near-edge grain kept |
+|---|---|---|---|---|
+| tos4k text-like, x264 CRF 28 / 35 (SDR) | 8 / 6 % | 4.4 / 4.8 | +0.01 | 0.97 / 0.98 |
+| Sintel sky, x264 CRF 28 / 35 | 53 / 59 % | 1.3 / 1.7 | +0.005 | 0.945 / 0.951 (borderline) |
+| Sol dark HDR→SDR, early / late / both | 24 / 36 / 43 % | 2.7 | ±0.02 | 0.953 |
+| Nocturne (grain) | 0 to 1 % (correctly does nothing) | 7.5 | 0 | 0.99 |
+| (4) synthetic credits, CRF 28 / 35 / 40 | 6 / 7 / 4 % | 2.8 / 3.2 / 5.3 | ≤ +0.007 | 0.95 |
+| (1)(2) ×2 upscale + unsharp k 0 / 0.5 / 1 | 2 to 10 %, the same at every k | rises 1.5× at k = 1 | ≤ +0.007 | - |
+| (5) 720p rung CRF 38, shown ×2 | 5 to 7 % | 4.1 to 7.6 | ≤ +0.004 | 0.93 (credits: **fail**) |
+| (3) chroma | none found in 5 of 6 planes; Sol Cr 66 % | 1.3 | +0.03 | 0.94 (**fail**) |
+
+**Findings:**
+* **Where the ringing is visible, the repair barely touches it.** That is text, credits and
+  low-rung rungs, around 1 eight-bit step rms.
+* **Where it removes a lot, there is little to remove.** Clean animation (Sol, Sintel) sits below
+  1 eight-bit step.
+* **Sharpening:** a pre-repair does not let it run sharper. The ringing it removes is worth less than
+  0.1 of unsharp gain.
+* **Lower-rung cases:** the grain gate is borderline or failing there.
+* **Untested:** VP's actual kernel-inverse / CNN / SuperRes stages could not run in Python. The
+  unsharp step is a linear stand-in.
+
+**Verdict:** the adaptive version earns no place, not even as a low-bitrate auto mode. DROP stands.
+Re-test only if a GPU run of the real sharpening stages shows ringing they create themselves.
+
 ## Caveats
 
 * **Tone curve:** luma only. The spline matches libplacebo 7.360 line for line.
