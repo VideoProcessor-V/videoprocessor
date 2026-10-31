@@ -7218,7 +7218,7 @@ struct LibplaceboVideoRenderer::Impl
 		}
 		if (pipelineSlots.Runs(PipelineSlots::Id::MotionVectorDelivery))
 			motionSegment.Publish(VpMotion::Direction::Backward, from, to, MotionShadowField{ from, to },
-				VpMotion::Source::EngineAhead, motionShadowEpoch, 0, false);
+				VpMotion::Source::EngineAhead, motionValidity.Epoch(), 0, false);
 		motionProducer->Prune(sequence > 2 ? sequence - 2 : 0);
 	}
 	// output.dither's vector producers run only while the slot runs (WP-13, DitherSlot.h).
