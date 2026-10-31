@@ -201,8 +201,10 @@ private:
 			// alike (post-merge audit 2026-10-17: the DV pair rule needs r210 for
 			// non-raw SDR fallback payloads).
 			VideoFrameEncoding captureEncoding = VideoFrameEncoding::UNKNOWN;
-			// capture_upload: early (legacy): no longer set by the conversion
-			// thread, which uses earlyHandoff below.
+			// capture_upload: early (legacy, always null now): the conversion
+			// thread never sets it (it publishes earlyHandoff below and uploads
+			// after the publish); the render still reads it first, so a slot
+			// placed here before publication would be used as before.
 			std::shared_ptr<void> early;
 			// capture_upload: early - the hand-off of the slot the conversion
 			// thread uploads AFTER it has published this payload. Set on the

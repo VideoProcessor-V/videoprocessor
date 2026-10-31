@@ -158,5 +158,32 @@ namespace FallbackCatalogTest
 			Assert::IsTrue(f.Note(9100, "warp failed").engaged);
 			Assert::IsFalse(f.Current(14100).engaged);
 		}
+
+		TEST_METHOD(EarlyUploadRenderUploadsAreVisibleAboveTheShare)
+		{
+			FallbackCatalog::EarlyUploadRenderUploads f;
+			// Window 1 (0..2000 ms): 100 payloads, 1 late: at or below 5 %, and below the 2-frame floor.
+			for (int i = 0; i < 100; ++i)
+				Assert::IsFalse(f.Note(static_cast<unsigned long long>(i) * 20 + (i == 99 ? 100 : 0), i == 10, false, false).engaged);
+			// Window 2: 40 payloads, 3 late + 2 no slot + 1 waited: 5 of 40 > 5 %: engaged at the window's end.
+			FallbackCatalog::Decision d;
+			for (int i = 0; i < 40; ++i)
+				d = f.Note(2100 + static_cast<unsigned long long>(i) * 50 + (i == 39 ? 100 : 0), i < 3, i == 5 || i == 6, i == 9);
+			Assert::IsTrue(d.engaged);
+			Assert::AreEqual(std::string("early upload frames"), d.id);
+			Assert::IsTrue(d.reason.find("5 of 40 frames took the render upload (3 before the early upload started, 2 no slot), 1 waited") == 0,
+				std::wstring(d.reason.begin(), d.reason.end()).c_str());
+			// Still engaged between windows; released after a clean window.
+			Assert::IsTrue(f.Note(4300, false, false, false).engaged);
+			for (int i = 0; i < 50; ++i)
+				d = f.Note(4400 + static_cast<unsigned long long>(i) * 50, false, false, false);
+			Assert::IsFalse(d.engaged);
+			// Engaged again, then no eligible payloads for two windows: released by Current.
+			for (int i = 0; i < 10; ++i)
+				d = f.Note(7000 + static_cast<unsigned long long>(i) * 250, true, false, false);
+			Assert::IsTrue(d.engaged);
+			Assert::IsTrue(f.Current(10000).engaged);
+			Assert::IsFalse(f.Current(14000).engaged);
+		}
 	};
 }

@@ -5568,8 +5568,11 @@ struct LibplaceboVideoRenderer::Impl
 			earlyGuardChecked = false;
 			earlyGuardBlocked.store(false, std::memory_order_release);
 			SyncFallback(FallbackCatalog::EarlyUpload(false, false, std::string()));
+			earlyRenderUploads = FallbackCatalog::EarlyUploadRenderUploads();
+			SyncFallback(earlyRenderUploads.last);
 			return;
 		}
+		SyncFallback(earlyRenderUploads.Current(GetTickCount64()));   // ages out with no eligible payloads
 		if (earlyUpload->IsOpen())
 			return;
 		const SteadyClock::time_point now = SteadyClock::now();
@@ -5625,24 +5628,44 @@ struct LibplaceboVideoRenderer::Impl
 	}
 	// Render thread: the early-uploaded texture of a payload (with its GPU wait
 	// queued), or nullptr (the unpack uploads from the frame).
-	pl_tex EarlyTexture(const QueuedFrame::ConvertedPayload& payload, EarlyUpload::Slot*& slot, bool* late = nullptr)
+	// late: the render uploads because the early upload had not started; waitedMs: time blocked on
+	// a running conversion-thread upload (timed apart from the unpack submit).
+	struct EarlyTake { bool late = false; double waitedMs = 0.0; };
+	FallbackCatalog::EarlyUploadRenderUploads earlyRenderUploads;   // "Fallbacks engaged: early upload frames"
+	pl_tex EarlyTexture(const QueuedFrame::ConvertedPayload& payload, EarlyUpload::Slot*& slot, EarlyTake* take = nullptr)
 	{
 		std::shared_ptr<void> handle = payload.early;
 		EarlyUploadHandoff::Outcome outcome = EarlyUploadHandoff::Outcome::NoSlot;
+		bool first = false;
+		const double takeStart = PassTimerHook::Hook::NowMs();
 		if (!handle && payload.earlyHandoff)
-			handle = payload.earlyHandoff->Take(&outcome);   // the slot stays alive through the handoff the payload holds
+			handle = payload.earlyHandoff->Take(&outcome, &first);   // the slot stays alive through the handoff the payload holds
+		const bool waited = outcome == EarlyUploadHandoff::Outcome::WaitedThenEarly || outcome == EarlyUploadHandoff::Outcome::WaitedThenNone;
 		slot = handle ? static_cast<EarlyUpload::Slot*>(handle.get()) : nullptr;
 		pl_tex tex = slot && earlyUpload->IsOpen() ? earlyUpload->Acquire(*slot) : nullptr;
 		if (!tex)
 			slot = nullptr;
 		++(tex ? earlyUsed : earlyFallback);
-		if (outcome == EarlyUploadHandoff::Outcome::Late)
-			++earlyLate;
-		else if (outcome == EarlyUploadHandoff::Outcome::WaitedThenEarly || outcome == EarlyUploadHandoff::Outcome::WaitedThenNone)
-			++earlyWaited;
-		if (late)
-			*late = outcome == EarlyUploadHandoff::Outcome::Late;
+		const bool late = outcome == EarlyUploadHandoff::Outcome::Late;   // once per payload (Pending -> Abandoned)
+		earlyLate += late ? 1 : 0;
+		earlyWaited += waited ? 1 : 0;
+		if (first)   // once per early-eligible payload: the visible share of render uploads
+			SyncFallback(earlyRenderUploads.Note(GetTickCount64(), late, !tex && !late, waited));
+		if (take)
+		{
+			take->late = late || outcome == EarlyUploadHandoff::Outcome::AbandonedAgain;
+			take->waitedMs = waited ? PassTimerHook::Hook::NowMs() - takeStart : 0.0;
+		}
 		return tex;
+	}
+	// The upload timers of one raw payload (efficiency timers T4), the wait booked apart.
+	void BookUploadTimers(pl_tex early, const EarlyTake& take, double startMs)
+	{
+		if (take.waitedMs > 0.0)
+			passTimerHook.AddCpu("upload: waited for the conversion-thread upload", PassTimers::Kind::CpuWait, take.waitedMs);
+		passTimerHook.AddCpu(early ? "upload: unpack submit (early slot)" : take.late ?
+			"upload: CPU copy + unpack submit (render thread, early upload not started)" : "upload: CPU copy + unpack submit (render thread)",
+			PassTimers::Kind::CpuWork, PassTimerHook::Hook::NowMs() - startMs - take.waitedMs);
 	}
 	std::atomic<int> rawBuffersPeak{ 0 };
 	std::atomic<bool> rgbGpuFailed{ false };
@@ -6041,14 +6064,13 @@ struct LibplaceboVideoRenderer::Impl
 		SyncEarlyUpload(payload.rawBytes);
 		EarlyUpload::Slot* slot = nullptr;
 		const double uploadCpuStart = PassTimerHook::Hook::NowMs();   // efficiency timers T4
-		bool lateUpload = false;
-		const pl_tex early = EarlyTexture(payload, slot, &lateUpload);
+		EarlyTake take;
+		const pl_tex early = EarlyTexture(payload, slot, &take);
 		bool unpacked = rgbUnpack->Unpack(payload.rawEncoding, bt2020, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
 			rgb, luma, false, early);
 		if (slot)
 			earlyUpload->Used(*slot);
-		passTimerHook.AddCpu(early ? "upload: unpack submit (early slot)" : lateUpload ? "upload: CPU copy + unpack submit (render thread, early upload not started)" : "upload: CPU copy + unpack submit (render thread)",
-			PassTimers::Kind::CpuWork, PassTimerHook::Hook::NowMs() - uploadCpuStart);
+		BookUploadTimers(early, take, uploadCpuStart);
 		if (!unpacked && early)
 			unpacked = rgbUnpack->Unpack(payload.rawEncoding, bt2020, payload.rawFrame->GetData(), payload.rawRowBytes, width, height, rgb, luma);
 		if (unpacked)
@@ -6108,14 +6130,13 @@ struct LibplaceboVideoRenderer::Impl
 		SyncEarlyUpload(payload.rawBytes);
 		EarlyUpload::Slot* slot = nullptr;
 		const double uploadCpuStart = PassTimerHook::Hook::NowMs();   // efficiency timers T4
-		bool lateUpload = false;
-		const pl_tex early = EarlyTexture(payload, slot, &lateUpload);
+		EarlyTake take;
+		const pl_tex early = EarlyTexture(payload, slot, &take);
 		bool unpacked = unpack.Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
 			payload.dvTunnelHighAligned, planes, early);
 		if (slot)
 			earlyUpload->Used(*slot);
-		passTimerHook.AddCpu(early ? "upload: unpack submit (early slot)" : lateUpload ? "upload: CPU copy + unpack submit (render thread, early upload not started)" : "upload: CPU copy + unpack submit (render thread)",
-			PassTimers::Kind::CpuWork, PassTimerHook::Hook::NowMs() - uploadCpuStart);
+		BookUploadTimers(early, take, uploadCpuStart);
 		if (!unpacked && early)   // the early texture refused: the frame itself
 			unpacked = unpack.Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
 				payload.dvTunnelHighAligned, planes);
@@ -6136,14 +6157,13 @@ struct LibplaceboVideoRenderer::Impl
 		SyncEarlyUpload(payload.rawBytes);
 		EarlyUpload::Slot* slot = nullptr;
 		const double uploadCpuStart = PassTimerHook::Hook::NowMs();   // efficiency timers T4
-		bool lateUpload = false;
-		const pl_tex early = EarlyTexture(payload, slot, &lateUpload);
+		EarlyTake take;
+		const pl_tex early = EarlyTexture(payload, slot, &take);
 		bool unpacked = captureUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height,
 			planes, early);
 		if (slot)
 			earlyUpload->Used(*slot);
-		passTimerHook.AddCpu(early ? "upload: unpack submit (early slot)" : lateUpload ? "upload: CPU copy + unpack submit (render thread, early upload not started)" : "upload: CPU copy + unpack submit (render thread)",
-			PassTimers::Kind::CpuWork, PassTimerHook::Hook::NowMs() - uploadCpuStart);
+		BookUploadTimers(early, take, uploadCpuStart);
 		if (!unpacked && early)   // the early texture refused: the frame itself
 			unpacked = captureUnpack->Unpack(payload.rawEncoding, payload.rawFrame->GetData(), payload.rawRowBytes, width, height, planes);
 		if (unpacked)

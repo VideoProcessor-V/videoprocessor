@@ -33,8 +33,9 @@ public:
 		Early,            // the slot was attached before the render asked
 		WaitedThenEarly,  // the upload was running; the render waited and got the slot
 		WaitedThenNone,   // the upload was running; it produced no slot (no free slot / failed)
-		Late,             // the upload had not started; abandoned, the render uploads
-		NoSlot            // the upload ran or was skipped and produced no slot
+		Late,             // the upload had not started; abandoned now (once), the render uploads
+		AbandonedAgain,   // a later draw of a payload abandoned earlier: the render uploads (not re-counted)
+		NoSlot            // the upload ran and produced no slot
 	};
 
 	EarlyUploadHandoff() = default;
@@ -120,10 +121,14 @@ public:
 	}
 
 	// Render thread: the slot (a copy; a payload may be drawn several times) or
-	// null. Never blocks unless an upload is running.
-	std::shared_ptr<void> Take(Outcome* outcome)
+	// null. Never blocks unless an upload is running. firstTake: true on the
+	// payload's first Take only (count per payload, not per draw).
+	std::shared_ptr<void> Take(Outcome* outcome, bool* firstTake = nullptr)
 	{
 		std::unique_lock<std::mutex> lock(m);
+		if (firstTake)
+			*firstTake = !taken;
+		taken = true;
 		bool waited = false;
 		if (state == State::Pending)
 		{
@@ -144,7 +149,7 @@ public:
 			return slot;
 		}
 		if (outcome)
-			*outcome = waited ? Outcome::WaitedThenNone : (state == State::Abandoned ? Outcome::Late : Outcome::NoSlot);
+			*outcome = waited ? Outcome::WaitedThenNone : (state == State::Abandoned ? Outcome::AbandonedAgain : Outcome::NoSlot);
 		return nullptr;
 	}
 
@@ -159,4 +164,5 @@ private:
 	std::condition_variable cv;
 	State state = State::Pending;
 	std::shared_ptr<void> slot;
+	bool taken = false;   // render thread, under m
 };

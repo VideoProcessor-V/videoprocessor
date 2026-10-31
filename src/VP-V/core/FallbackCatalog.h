@@ -264,4 +264,56 @@ namespace FallbackCatalog
 		return requested && !open ? Engaged("early upload", "the render upload" +
 			(error.empty() ? std::string() : " (" + error + ")")) : Released("early upload");
 	}
+
+	// The early upload is open but frames still take the render upload: the render reached the
+	// payload before the conversion thread started its upload (late), or the slot was missing /
+	// refused (no free slot, failed). Noted once per early-eligible payload (its first draw) and
+	// evaluated per window of windowMs: engaged while a window's render-upload share is above
+	// kShare with at least kMinFrames such frames; released after a window at or below it, or
+	// when no eligible payload arrived for two windows. Waits on a running upload are reported.
+	struct EarlyUploadRenderUploads
+	{
+		static constexpr double kShare = 0.05;
+		static constexpr unsigned long long kMinFrames = 2;
+		unsigned long long windowStartMs = 0, lastNoteMs = 0;
+		unsigned long long frames = 0, late = 0, noSlot = 0, waited = 0;   // the current window
+		bool started = false;
+		Decision last = Released("early upload frames");
+		Decision Note(unsigned long long nowMs, bool isLate, bool isNoSlot, bool isWaited, unsigned long long windowMs = 2000)
+		{
+			if (!started)
+			{
+				started = true;
+				windowStartMs = nowMs;
+			}
+			lastNoteMs = nowMs;
+			++frames;
+			late += isLate ? 1 : 0;
+			noSlot += isNoSlot ? 1 : 0;
+			waited += isWaited ? 1 : 0;
+			if (nowMs - windowStartMs >= windowMs)
+			{
+				const unsigned long long render = late + noSlot;
+				if (render >= kMinFrames && static_cast<double>(render) > kShare * static_cast<double>(frames))
+				{
+					char text[200];
+					std::snprintf(text, sizeof(text), "%llu of %llu frames took the render upload (%llu before the early upload "
+						"started, %llu no slot), %llu waited for a running upload", render, frames, late, noSlot, waited);
+					last = Engaged("early upload frames", text);
+				}
+				else
+					last = Released("early upload frames");
+				windowStartMs = nowMs;
+				frames = late = noSlot = waited = 0;
+			}
+			return last;
+		}
+		// No eligible payload for two windows (another route, paused, pool closed): released.
+		Decision Current(unsigned long long nowMs, unsigned long long windowMs = 2000)
+		{
+			if (started && nowMs - lastNoteMs >= 2 * windowMs)
+				*this = EarlyUploadRenderUploads();
+			return last;
+		}
+	};
 }
