@@ -2218,31 +2218,22 @@ namespace Tests
 			plan.step = [](int) { return FrameStep{ true, 0, 0 }; };   // one still picture
 			bool fullLogged = false;
 			auto hashOf = [&](const char* extra, const wchar_t* name) {
-				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 3.5, false, std::string(extra) + "[vprenderer.Default]
-dithering: off
-deband: off
-", false, &plan);
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 3.5, false, std::string(extra) + "[vprenderer.Default]\ndithering: off\ndeband: off\n", false, &plan);
 				fullLogged = r.Logged("Resync (shadow): FULL at seq");
-				Assert::IsFalse(r.captureMetadata.empty(), (std::wstring(name) + L": capture written
-" + r.Tail()).c_str());
+				Assert::IsFalse(r.captureMetadata.empty(), (std::wstring(name) + L": capture written\n" + r.Tail()).c_str());
 				std::ifstream in(std::wstring(r.captureMetadata.begin(), r.captureMetadata.end()));
 				std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 				const size_t k = text.find("\"raw_r10_sha256\": \"");
 				Assert::IsTrue(k != std::string::npos, (std::wstring(name) + L": hash in the sidecar").c_str());
 				const std::string hash = text.substr(k + 19, 64);
-				Logger::WriteMessage((std::string(name, name + wcslen(name)) + ": " + hash + "
-").c_str());
+				Logger::WriteMessage((std::string(name, name + wcslen(name)) + ": " + hash + "\n").c_str());
 				return hash;
 			};
 			const std::string base = hashOf("", L"no key");
 			Assert::IsFalse(fullLogged, L"no key: no shadow event is logged");
-			Assert::AreEqual(base, hashOf("[vpv]
-resync_event: off
-", L"resync_event off"), L"off: identical");
+			Assert::AreEqual(base, hashOf("[vpv]\nresync_event: off\n", L"resync_event off"), L"off: identical");
 			Assert::IsFalse(fullLogged, L"off: no shadow event is logged");
-			Assert::AreEqual(base, hashOf("[vpv]
-resync_event: shadow
-", L"resync_event shadow"), L"shadow: identical pixels");
+			Assert::AreEqual(base, hashOf("[vpv]\nresync_event: shadow\n", L"resync_event shadow"), L"shadow: identical pixels");
 			Assert::IsTrue(fullLogged, L"shadow: the start FULL event is logged");
 			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
 			g_harnessWidth = savedW;

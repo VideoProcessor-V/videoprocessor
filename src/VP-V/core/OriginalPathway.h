@@ -25,9 +25,9 @@ namespace OriginalPathway
 		const char* slot;   // the slot whose VP additions it removes (slots.json id)
 	};
 
-	inline const std::array<Override, 62>& Overrides()
+	inline const std::array<Override, 63>& Overrides()
 	{
-		static const std::array<Override, 62> table = { {
+		static const std::array<Override, 63> table = { {
 			{ "capture_path", "standard", "input.capture" },
 			{ "capture_upload", "render", "input.capture" },
 			{ "native_rgb_ingest", "off", "input.capture" },
