@@ -64,17 +64,35 @@ namespace CameraModel
 			else if (confident)
 			{
 				bool eligible = label == static_cast<uint8_t>(Label::Camera);
+				const ObjectModel* object = nullptr;
 				if (!eligible && label == static_cast<uint8_t>(Label::Object) && b.objectId.size() > i && b.objectId[i] != 0)
 					for (const ObjectModel& obj : prev->objects)
-						if (obj.id == b.objectId[i]) { eligible = true; break; }
+						if (obj.id == b.objectId[i]) { object = &obj; eligible = true; break; }
+				// The model vector this block should follow: the camera model, or for a tracked object block the
+				// OBJECT model's prediction at the block centre (never the camera vector).
+				bool haveRef = haveModel;
+				double mx = haveModel ? k * b.modelX[i] : 0.0, my = haveModel ? k * b.modelY[i] : 0.0;
+				if (object != nullptr)
+				{
+					double cx = 0, cy = 0, dx = 0, dy = 0;
+					BlockCentre(static_cast<int>(i % static_cast<size_t>(b.gridW)), static_cast<int>(i / static_cast<size_t>(b.gridW)),
+						b.blockSize, prev->picture, &cx, &cy);
+					Params p;
+					p.type = object->type;
+					for (int j = 0; j < 9; ++j) p.h[j] = object->h[j];
+					Displacement(p, cx, cy, &dx, &dy);
+					mx = k * dx;
+					my = k * dy;
+					haveRef = true;
+				}
 				// The seed comes from the previous forward vectors, else the model; the reference it
 				// must agree with is the engine vector, else the model vector.
-				if (eligible && (useFwd || haveModel) && (haveNvof || haveModel))
+				if (eligible && (useFwd || haveRef) && (haveNvof || haveRef))
 				{
-					const double sx = k * (useFwd ? prevFwdX[i] : b.modelX[i]);
-					const double sy = k * (useFwd ? prevFwdY[i] : b.modelY[i]);
-					const double rx = haveNvof ? nvofX[i] : k * b.modelX[i];
-					const double ry = haveNvof ? nvofY[i] : k * b.modelY[i];
+					const double sx = useFwd ? k * prevFwdX[i] : mx;
+					const double sy = useFwd ? k * prevFwdY[i] : my;
+					const double rx = haveNvof ? nvofX[i] : mx;
+					const double ry = haveNvof ? nvofY[i] : my;
 					if (std::hypot(sx - rx, sy - ry) <= agree)
 					{
 						h = static_cast<uint8_t>(BlockHint::NarrowAroundPrediction);

@@ -247,6 +247,8 @@
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelObjects.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelFit.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelSearchHints.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelMeasurement.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\ReferenceMatcher.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\PixelResidualReference.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\CameraModelGpu.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraModelGpuMirrorTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
@@ -254,6 +256,7 @@
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraModelGeometryTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraModelTemporalTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraAccessorTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraMeasurementTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraModelStoreTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraModelFitTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraModelCostTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>

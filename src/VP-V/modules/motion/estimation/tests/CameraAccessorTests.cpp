@@ -698,6 +698,38 @@ namespace VideoProcessorTest
 			Assert::IsTrue(h.hint[1] == static_cast<uint8_t>(BlockHint::FullSearch), L"unknown object full");
 		}
 
+		TEST_METHOD(ObjectBlockSeedAndReferenceAreTheObjectModelNotTheCameraVector)
+		{
+			using namespace CameraTestSupport;
+			using namespace CameraModel;
+			auto blocks = PanBlocks();
+			blocks->label[0] = static_cast<uint8_t>(Label::Object);
+			blocks->objectId[0] = 3;
+			auto rec = PanRecord(0.95, blocks);
+			ObjectModel obj;
+			obj.id = 3;
+			obj.type = ModelType::Translation;
+			obj.h[2] = 12.0;   // the object moves (+12, 0) while the camera pans (-20, 0)
+			rec->objects.push_back(obj);
+			Field f;
+			std::vector<float> nx(f.x.size(), -20.0f), ny(f.y.size(), 0.0f);
+			nx[0] = 12.0f;   // NVOF agrees with the object, not with the camera
+			HintConfig cfg;
+			cfg.temporalSeed = false;
+			SearchHints h = Build(cfg, rec.get(), f.x.data(), f.y.data(), nx.data(), ny.data());
+			Assert::IsTrue(h.hint[0] == static_cast<uint8_t>(BlockHint::NarrowAroundPrediction), L"object block agrees with its own model");
+			Assert::AreEqual(12.0f, h.seedX[0], L"seed is the object prediction at the block centre");
+			Assert::AreEqual(-20.0f, h.seedX[1], L"camera blocks keep the camera vector");
+			// No NVOF at all: the reference is the object model too (not the camera vector), so it still narrows.
+			h = Build(cfg, rec.get(), nullptr, nullptr, nullptr, nullptr);
+			Assert::IsTrue(h.hint[0] == static_cast<uint8_t>(BlockHint::NarrowAroundPrediction), L"no NVOF: object model reference");
+			Assert::AreEqual(12.0f, h.seedX[0], L"seed without NVOF");
+			// NVOF disagreeing with the object model: full search.
+			nx[0] = -20.0f;
+			h = Build(cfg, rec.get(), nullptr, nullptr, nx.data(), ny.data());
+			Assert::IsTrue(h.hint[0] == static_cast<uint8_t>(BlockHint::FullSearch), L"NVOF follows the camera: disagreement");
+		}
+
 		TEST_METHOD(DefaultPrecisionScalesWithTheBlockSize)
 		{
 			using namespace CameraTestSupport;

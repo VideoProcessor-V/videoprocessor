@@ -27,6 +27,8 @@ texture), and to narrow the matcher's search.
 | `PixelResidualReference.h/.cpp` | CPU reference / shader-mirror spec of the tiny-mover measure (not on the runtime path yet) |
 | `CameraAccessor.h` | per-consumer policy, blend state, `FieldVector` (pure, header-only) |
 | `GlobalModelSearchHints.h/.cpp` | phase-2 matcher hints (data API only, nothing wired) |
+| `GlobalModelMeasurement.h/.cpp` | phase-2 measurement plan: switches, `BuildMeasurementPlan`, verification / escalation, diagnostics, GPU guide texels |
+| `ReferenceMatcher.h/.cpp` | CPU reference of the matcher semantics (tests and cost measurement only, not on the runtime path) |
 | `CameraModelGpu.h/.cpp` | GPU label pass: constants, GLSL, CPU float mirror, `LabelPass` (libplacebo) |
 | `CameraAccessorGlsl.h` | GLSL `camera_field_vector` + `AccessorConstants` |
 | `../../core/FrameAnalysisStore.h` | `kCamera` group, `Record::camera`, `PublishCamera` |
@@ -112,6 +114,29 @@ Policies: `Policy::curve` (Smoothstep / Linear / Step) and `PolicyFor(Consumer)`
 `nextPairSeconds / prev->pairSeconds` for uneven cadences (3:2); `<= 0` means no scaling. Only bar and
 text-guard blocks (`BlockData::excluded`) are `Excluded`; a static-logo Overlay stays searchable
 (`FullSearch`).
+
+## Measurement plan (phase 2)
+`BuildMeasurementPlan(switches, config, input)` turns the PREVIOUS pair's causal record (never the queued smoother),
+the scene flags and the switches into a per-frame, per-block plan for the matcher. All switches default off; no
+switch (or an unusable record) gives an inactive / empty plan and today's search, byte for byte. Records after a cut,
+a flash, a resync, a missed deadline, with low confidence or with labels only on the GPU give no model-driven saving and
+name the reason in `fallbackReason` (status line). Vectors are source px over the pair about to be searched, scaled by
+`nextPairSeconds / prev->pairSeconds`. `ReferenceMatcher` is the CPU mirror used by `CameraMeasurementTests`
+(`CAMERA_MEAS_COST ...` lines).
+
+| Switch | Saves | Escalation / fallback |
+|---|---|---|
+| `modelGlobal` | D1's global search: the model's centre displacement (fwd and bwd) is the global start | no usable record: today's D1 |
+| `guidedCandidate` | the model prediction is the first candidate of the full search and of the second sweep | none needed (an extra candidate only) |
+| `narrowWindow` | camera blocks searched +-r (>= `narrowMinRadiusPx`) around the prediction | block fails the SAD tolerance: full search in the same frame (`ApplyVerification`) |
+| `e1Skip` | second sweep skipped where the first-sweep vector agrees with the prediction | disagreement: the sweep runs as today (counted escalated) |
+| `staticGate` | E4 from the model: confident, `Ok`, all four picture corners within `staticSigmas` precision | otherwise the field is searched |
+| `cutSkip` | no search across a cut; `seedFromNext` when a queued pair exists | switch off: normal search, no guidance from the old scene |
+| `fadeNormalised` | zero-mean cost for the narrow pass in a fade | failing blocks fall back to today's plain-SAD search |
+| `flashBridge` | the flash pair is not searched; a bridged record stays usable but never seeds temporally | none |
+| `temporalSeed` | previous forward vector as the seed when it agrees with NVOF | disagreement: full search; bridged record: model seed |
+| `tinyMoverRoi` | tiny movers get `FinerGrid` (never narrowed); ROIs limited to `roiBudgetShare` of the grid | over budget: raster-order `FullSearch`, `roiOverBudget` counted |
+| `objects` | object blocks with a tracked model narrowed around the OBJECT model (seed and agreement reference) | switch off: those blocks are `FullSearch` |
 
 ## Cost
 Per-step cost is profiled by a test-only harness: building the tests with `CAMERA_MODEL_PROFILE` defined
