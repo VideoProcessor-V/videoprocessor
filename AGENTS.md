@@ -149,7 +149,9 @@
 
 ## Required release downloads
 
-- Include docs/edid/vertex2-lg-dv30-hdr10bit.bin as a separate asset in every
-  GitHub Release, alongside Setup/portable packages and signed vp-update.json.
-  It is an optional manual Vertex2 EDID; installation must not apply it.
+- VP-V (owner rule, Bill merge 2026-10-31): the publishing rule above is unchanged and
+  wins: publish only installer EXEs, portable ZIPs and the signed vp-update.json.
+  Upstream (Bill) also attaches docs/edid/vertex2-lg-dv30-hdr10bit.bin as a separate
+  release asset; VP-V does not. The EDID stays in the repository (docs/edid) as an
+  optional manual Vertex2 EDID; installation must not apply it.
 - Keep checksum sidecars, inventories and build receipts as internal evidence.
