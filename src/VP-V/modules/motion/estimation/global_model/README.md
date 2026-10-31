@@ -99,6 +99,15 @@ makes `GlobalModelFit.cpp` accumulate per-step milliseconds in `CameraModel::g_p
 hypotheses, local optimisation + ladder, signals, ambiguity, backward, temporal, labels). The macro is not
 defined in the product build. The early-exit path keeps H0's type and tries one step up only.
 
+The fit runs on a CPU worker, off the render path (render-path cost: zero). Two full-grid passes are
+inherent on the CPU: the stratified field scan (before the fit) and the per-block model/residual/label
+pass (after it). On a 4K grid (240x135 blocks) each costs about as much as a plain memory pass over the
+vector field, so the label pass is the largest step of a typical (early-exit) pair. Phase 2 can move the
+per-block label pass to the GPU (it is a natural pass over the vector texture), leaving the CPU with the
+field scan and the fit on ~1300 samples. Buffers: the per-block record (`BlockData`) is recycled from a
+small pool when no record still holds it, and the per-pair scratch is reused, so steady state allocates
+nothing large (no first-touch page faults).
+
 ## Tests
 `../tests/Camera*Tests.cpp`, CPU tier, all synthetic: geometry, temporal / objects / residual,
 accessor + hints, store record, fitter behaviour (pan, zoom, rotation, perspective, noise, objects,
