@@ -81,6 +81,8 @@ private:
             RendererHdrStatus hdrStatus{};
             pl_tex texture=nullptr;
             uint64_t inputSignature=0,signature=0,prevSignature=0,nextSignature=0;
+            // VP-V (Hunt 2 08 #1): the history colour the picture was processed with (null = captured).
+            bool vpColorOverride=false;pl_color_space vpColor{};
         };
         // Records an actual successful output of this complete packet. It is
         // not a processed texture or a claim about libplacebo's internal cache.
@@ -894,7 +896,9 @@ public:
             SameCrop(cached.peakCrop,peakCrop)&&cached.hooks==hookSignatures&&
             pl_color_space_equal(&cached.targetColor,&target.color)&&
             pl_color_repr_equal(&cached.targetRepr,&target.repr)&&cached.targetLut==target.lut&&
-            cached.targetIcc==target.icc&&cached.profileSignature==target.profile.signature) {
+            cached.targetIcc==target.icc&&cached.profileSignature==target.profile.signature&&
+            cached.vpColorOverride==(historyColorOverride!=nullptr)&&   // VP-V: keyed on the history colour
+            (!historyColorOverride||pl_color_space_equal(&cached.vpColor,historyColorOverride))) {
             ++processingStatistics.sourceReuses;result=&cached;return true;
         }
         cached.valid=false;
@@ -972,6 +976,7 @@ public:
         cached.epoch=epoch;cached.inputSignature=inputSignature;
         cached.prevSignature=prevSignature;cached.nextSignature=nextSignature;
         cached.hooks=std::move(hookSignatures);cached.signature=this->nextSignature++;
+        cached.vpColorOverride=historyColorOverride!=nullptr;if(historyColorOverride)cached.vpColor=*historyColorOverride;
         cached.valid=true;++processingStatistics.sourceRenders;result=&cached;return true;
     }
     static void RecordOutputContract(Stored::OutputContract& receipt,

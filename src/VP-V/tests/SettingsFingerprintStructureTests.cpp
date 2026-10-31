@@ -76,6 +76,16 @@ namespace SettingsFingerprintStructure
 			{ "text_reduction_percent", "NO_ACCEPTED_PROBE", "subtitle profile key, not probed through [vprenderer.Default]" },
 			{ "type", "NO_ACCEPTED_PROBE", "subtitle profile key, not probed through [vprenderer.Default]" },
 			{ "subtitle_detection_optimization", "NO_ACCEPTED_PROBE", "subtitle key with a mode parser (no generic probe); not probed" },
+			// Bill v1.4.02 merge: his new subtitle profile keys and his Display (output_display) profile keys.
+			{ "background_fallback_side_pixels", "NO_ACCEPTED_PROBE", "Bill v1.4.02 subtitle profile key, not probed through [vprenderer.Default]" },
+			{ "background_fallback_top_pixels", "NO_ACCEPTED_PROBE", "Bill v1.4.02 subtitle profile key, not probed through [vprenderer.Default]" },
+			{ "background_sanity_guard", "NO_ACCEPTED_PROBE", "Bill v1.4.02 subtitle profile key, not probed through [vprenderer.Default]" },
+			{ "off_zoom_hold_seconds", "NO_ACCEPTED_PROBE", "Bill v1.4.02 subtitle profile key, not probed through [vprenderer.Default]" },
+			{ "allowed_modes", "NO_ACCEPTED_PROBE", "Bill v1.4.02 output_display profile key (GUI display mode), not a renderer setting" },
+			{ "mode_policy", "NO_ACCEPTED_PROBE", "Bill v1.4.02 output_display profile key (GUI display mode), not a renderer setting" },
+			{ "monitor", "NO_ACCEPTED_PROBE", "Bill v1.4.02 output_display profile key (GUI display mode), not a renderer setting" },
+			{ "restore_previous_mode", "NO_ACCEPTED_PROBE", "Bill v1.4.02 output_display profile key (GUI display mode), not a renderer setting" },
+			{ "downscaler", "FINGERPRINT_UNCHANGED", "Bill v1.4.02 merge: scaling keys belong to the Scaling profile; the probe value resolves to the preset default (re-check in the post-merge batch)" },
 			// Display-metadata (lldv) keys and the zoom crop: their own validator groups.
 			{ "dolby_vision_tunnel", "NO_ACCEPTED_PROBE", "lldv group key (display/DV metadata), not probed through [vprenderer.Default]" },
 			{ "mastering_max_luminance", "NO_ACCEPTED_PROBE", "lldv group key (display/DV metadata), not probed through [vprenderer.Default]" },
