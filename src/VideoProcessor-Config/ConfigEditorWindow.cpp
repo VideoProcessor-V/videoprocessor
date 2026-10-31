@@ -7908,11 +7908,10 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         // Settings guide audit 2026-10-24 (ADR-0020): one total delay, 4 frames recommended.
         latencySpin->setToolTip(QStringLiteral(
             "The total delay from capture to screen: ONE value, the same at every frame rate, so the AVR's "
-            "fixed audio delay always matches. Recommended: 250 ms (4 queued frames at 23.976p, the slowest "
+            "fixed audio delay always matches. Recommended: 267 ms (4 queued frames at 23.976p, the slowest "
             "rate). Shorter still works: the look-ahead features (motion ahead, Dynamic Drive, crop and "
             "subtitle look-ahead, hiccup repair) fall back to 3 or 2 frames. The VP-V page's Input tab shows "
-            "the frames and padding at every rate. Until the total-delay budget lands in the renderer this "
-            "value is the queue's time. Off uses Target frames."));
+            "the frames and padding at every rate. Off uses Target frames."));
         auto* latencyNote = helpLabel(QString());
         latencyNote->setObjectName(QStringLiteral("config.queue.target_latency_note"));
         form->addRow(QString(), latencyNote);
@@ -9365,15 +9364,17 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "DeckLink v210 / UYVY frames are uploaded as they arrive and unpacked on the GPU: the same picture byte for "
             "byte, about half the time at 4K and no CPU conversion. CPU = the old conversion. RGB formats follow the "
             "'Native 10/12-bit RGB capture' choice (in Fixes under test)."));   // audit 2026-10-16: was "below"
-        // audit 2026-10-16: the default is Auto (on only in the low-latency
-        // path), so the label no longer says experimental.
+        // The default is Auto: early upload in every mode, guarded by free video
+        // memory (efficiency fixes off: the low-latency path only), so the label
+        // no longer says experimental.
         auto* captureUpload = addChoice(QStringLiteral("Upload frames as they arrive"), QStringLiteral("capture_upload"),
             { QStringLiteral("auto"), QStringLiteral("render"), QStringLiteral("early") });
-        captureUpload->setItemText(captureUpload->findData(QStringLiteral("auto")), QStringLiteral("Auto (early in the low-latency path)"));
+        captureUpload->setItemText(captureUpload->findData(QStringLiteral("auto")), QStringLiteral("Auto (early in every mode)"));
         captureUpload->setItemText(captureUpload->findData(QStringLiteral("render")), QStringLiteral("Off (the render thread uploads)"));
         captureUpload->setItemText(captureUpload->findData(QStringLiteral("early")), QStringLiteral("On (early, second device)"));
         captureUpload->setToolTip(QStringLiteral(
-            "Auto (default): on only in the low-latency path, off otherwise. On: each captured frame is copied to the "
+            "Auto (default): early in every mode, guarded by free video memory (the render upload, shown under Fallbacks "
+            "engaged, when memory is short); with efficiency fixes off, only in the low-latency path. On: each captured frame is copied to the "
             "GPU on its own thread as it arrives, instead of by the render thread when it is shown: about 5 ms less work "
             "for the render thread per 4K 12-bit frame, and the copy overlaps the previous frame's rendering. A frame "
             "with no free upload slot simply takes the normal path. Off: the render thread uploads every frame."));
@@ -10009,6 +10010,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "estimated ahead follows the same timing and Dolby Vision rules as the next frame, and Dolby Vision frames "
             "pair only under the same colour matrices; changing a motion setting or the motion source restarts the "
             "motion; a frame dropped to keep a queued repeat counts as a gap. Off: the earlier behaviour."));
+        auto* vectorDemand = addChoice(QStringLiteral("Vector engine on demand"), QStringLiteral("vector_demand"),
+            { QStringLiteral("on"), QStringLiteral("off") });
+        vectorDemand->setToolTip(QStringLiteral(
+            "Runs the vector engine only when a feature that needs motion vectors is active, at any frame rate. "
+            "Off keeps the old behaviour."));
         // Hunt 2 group 5 (13-timing).
         auto* queueTiming = addChoice(QStringLiteral("Queue timing fixes"), QStringLiteral("queue_timing_fixes"),
             { QStringLiteral("on"), QStringLiteral("off") });
@@ -10931,6 +10937,38 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         adaptiveMapSmooth->setPlaceholderText(QStringLiteral("500"));
         adaptiveMapSmooth->setToolTip(QStringLiteral(
             "Time constant of the per-block grain map (it follows the content along the vectors); a cut resets it."));
+        // VP-V scaling.output (owner 2026-10-31): the motion-adapted blend, a candidate (off by default).
+        auto* adaptiveMotion = addChoice(QStringLiteral("Motion-adapted blend (candidate)"),
+            QStringLiteral("adaptive_motion"), { QStringLiteral("off"), QStringLiteral("on") });
+        adaptiveMotion->setToolTip(QStringLiteral(
+            "On: the sharper scaler (SSIM down, the CNN up) is kept on steady, confidently tracked areas and eased "
+            "toward the faithful scaler on fast or uncertain motion, smoothed over time so motion edges do not "
+            "flicker. Uses the de-judder's motion vectors (asks for them like the grain map); without vectors the "
+            "plain blend runs and the status says so. Applies to the downscale and the upscale blend."));
+        MarkGpuCost(form, adaptiveMotion, 1);
+        const AdaptiveField motionFields[] = {
+            { "Motion: full sharp below (heights/s)", "adaptive_motion_speed_lo", 0.0, 10.0, "0.1", "Motion slower than this (picture heights per second) keeps the sharper scaler's full weight." },
+            { "Motion: safe above (heights/s)", "adaptive_motion_speed_hi", 0.0, 10.0, "0.4", "Motion faster than this uses the floor below." },
+            { "Motion: weight on fast motion (0 to 1)", "adaptive_motion_floor", 0.0, 1.0, "0", "The sharper scaler's share kept on fast or untracked motion (0 = the faithful scaler only)." },
+            { "Motion: smoothing (ms)", "adaptive_motion_smooth_ms", 0.0, 10000.0, "250", "Time constant of the per-block weight (it follows the content along the vectors); a cut resets it." } };
+        std::vector<QWidget*> motionRows;
+        for (const AdaptiveField& field : motionFields)
+        {
+            auto* edit = addText(QString::fromLatin1(field.label), QString::fromLatin1(field.key));
+            motionRows.push_back(edit);
+            edit->setValidator(new QDoubleValidator(field.lo, field.hi, 3, edit));
+            edit->setPlaceholderText(QString::fromLatin1(field.placeholder));
+            edit->setToolTip(QString::fromLatin1(field.tip));
+        }
+        {
+            auto greyMotion = [adaptiveMotion, motionRows]()
+            {
+                const bool on = adaptiveMotion->currentData().toString() == QStringLiteral("on");
+                for (QWidget* row : motionRows) { row->setProperty("greyedOff", !on); row->setEnabled(on); }
+            };
+            connect(adaptiveMotion, qOverload<int>(&QComboBox::currentIndexChanged), this, [greyMotion](int) { greyMotion(); });
+            greyMotion();
+        }
         MarkGpuCost(form, adaptiveOn, 2);
         MarkGpuCost(form, adaptiveMap, 1);
         {

@@ -4,11 +4,14 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
 #include "FallbackStatus.h"
+
+namespace CameraModel { struct CameraMotion; }
 
 // THE VP FRAME ANALYSIS STORE (WP-23, owner 2026-10-24; integration-batch-plan.md WP-23 + addendum).
 //
@@ -45,6 +48,8 @@
 // thread (render loop, look-ahead walks). One mutex; every critical section is a slot copy, never
 // a computation, so a reader is never held up by the producer's work.
 //
+// The kCamera group carries the global camera model record (Plan 19) as a shared pointer only.
+//
 // Header-only and pure (no Windows, no clock), C++14 like the other core types.
 namespace FrameAnalysis
 {
@@ -69,6 +74,7 @@ namespace FrameAnalysis
 		kCadence = 1u << 6,   // repeat-of-previous, cadence phase, film clock
 		kScene = 1u << 7,     // cut / fade (VP's own, or copied from Bill's decision, labelled)
 		kLabels = 1u << 8,    // ID-net / encoding labels v1 (placeholder: not produced yet)
+		kCamera = 1u << 9,    // global camera model record (Plan 19), written by the motion segment
 	};
 	constexpr uint32_t kMeasuredGroups = kLuma | kRange | kGrain;
 
@@ -178,6 +184,7 @@ namespace FrameAnalysis
 		Cadence cadence;
 		Scene scene;
 		Labels labels;
+		std::shared_ptr<const CameraModel::CameraMotion> camera;
 		uint32_t valid = 0;             // Group bits written
 		uint32_t expected = 0;          // Group bits the producer was asked for
 		uint64_t epoch = 0;             // the discontinuity epoch at Begin()
@@ -322,6 +329,9 @@ namespace FrameAnalysis
 					slot.record.valid &= ~static_cast<uint32_t>(kMotion);
 					slot.record.expected &= ~static_cast<uint32_t>(kMotion);
 					slot.record.motion = MotionSummary{};
+					slot.record.valid &= ~static_cast<uint32_t>(kCamera);
+					slot.record.expected &= ~static_cast<uint32_t>(kCamera);
+					slot.record.camera.reset();
 				}
 			return m_epoch;
 		}
@@ -374,6 +384,16 @@ namespace FrameAnalysis
 			if (!slot || slot->record.epoch != m_epoch) return false;
 			slot->record.motion = motion;
 			slot->record.valid |= kMotion;
+			return true;
+		}
+
+		bool PublishCamera(uint64_t seq, std::shared_ptr<const CameraModel::CameraMotion> camera)
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			Slot* slot = FindLocked(seq);
+			if (!slot || slot->record.epoch != m_epoch) return false;
+			slot->record.camera = std::move(camera);
+			slot->record.valid |= kCamera;
 			return true;
 		}
 

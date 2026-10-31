@@ -1,0 +1,33 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "repair.grain_split",
+  "unit": "repair",
+  "order": 85,
+  "status": "draft",
+  "successor_of": "repair.texture_restore",
+  "code_location": "migrated",
+  "live_files": [
+    "src/VP-V/modules/repair/grain_split/GrainSplit.h",
+    "src/VP-V/modules/repair/grain_split/README.md",
+    "src/VP-V/modules/repair/grain_split/tests/README.md"
+  ],
+  "forwarding_headers": [],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [],
+    "upstream_modules": [
+      "repair.encoding",
+      "repair.deband"
+    ]
+  },
+  "fallback_when_missing": "Draft: not wired; when wired, a reader without the split product runs without its grain-free path and says so in its status.",
+  "fallback_entry": "Grain split: inactive (<reason>)"
+}

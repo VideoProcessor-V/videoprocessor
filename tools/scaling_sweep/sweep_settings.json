@@ -1,0 +1,52 @@
+{
+ "_comment": "Baseline VpScaleRender renderer settings, copied from the TrainKit r2 tools/scaling_render.json (locked set) so the sweep never reads the kit at run time. 'down'/'up' are the hybrid scalers' settings; 'shaders' are the shader profiles selected after Build.",
+ "adapter": "NVIDIA",
+ "common": {
+  "quality": "high",
+  "dithering": "off",
+  "deband": "off",
+  "deband_vp": "off",
+  "temporal_dither": "off",
+  "source_resolution": "native",
+  "adaptive_grain_map": "on",
+  "adaptive_chroma_ssim": "off",
+  "interpolation": "off",
+  "interpolation_fill_gaps": "off",
+  "dejudder_strength": "0",
+  "fbo_float32": "on",
+  "deband_strength": "off",
+  "deband_grain": "off"
+ },
+ "down": {
+  "downscaler": "lanczos",
+  "downscale_light": "linear",
+  "adaptive_downscale": "on",
+  "adaptive_w_base": "0.2",
+  "adaptive_faithful": "ortho",
+  "shaders": [
+   "standard.ssim_downscaler"
+  ]
+ },
+ "up": {
+  "upscaler": "auto",
+  "upscale_light": "linear",
+  "sigmoid": "auto",
+  "adaptive_upscale": "on",
+  "adaptive_upscale_w_base": "1.0",
+  "adaptive_upscale_superres_scale": "on",
+  "shaders": [
+   "standard.fsrcnnx",
+   "standard.ssim_superres"
+  ]
+ },
+ "require_hooks": {
+  "down": [
+   "SSimDownscaler.glsl"
+  ],
+  "up": [
+   "FSRCNNX_x2_16-0-4-1.glsl",
+   "SSimSuperRes.glsl"
+  ]
+ },
+ "shader_sections": "[shader.standard]\ntype: multi\nlabel: Off\n[shader.standard.ssim_downscaler]\nshader_type: custom\nlabel: SSimDownscaler\nstage: post_resize\norder: 20\nglsl_file: SSimDownscaler.glsl\n[shader.standard.fsrcnnx]\nshader_type: custom\nlabel: FSRCNNX upscaler\nstage: pre_resize\norder: 15\nglsl_file: FSRCNNX_x2_16-0-4-1.glsl\n[shader.standard.ssim_superres]\nshader_type: custom\nlabel: SSimSuperRes (upscale refinement)\nstage: post_resize\norder: 25\nglsl_file: SSimSuperRes.glsl\n"
+}

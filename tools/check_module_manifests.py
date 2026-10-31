@@ -3,7 +3,8 @@
 
 Checks that docs/design/slots.json, every src/VP-V/modules/<unit>/<slot>/MANIFEST.json and the
 master component list docs/design/components-master.json agree, that every live file exists,
-and that no source file exists both inside src/VP-V/modules and in a legacy location (no duplicate
+that a module folder without a slot is only allowed as a draft (MANIFEST.json status "draft" with a
+"successor_of" naming an existing slot, README.md, tests/; not in components-master), and that no source file exists both inside src/VP-V/modules and in a legacy location (no duplicate
 source during the migration). A moved header may leave a pure forwarding header at its legacy
 path while other active branches still include that path; it must be listed in its module's
 "forwarding_headers" and is removed in M2 (docs/design/migration-early-inventory.md). It also runs
@@ -77,6 +78,34 @@ def forwarder_problem(path, target):
     if code != ["#pragma once", f"#include <{want}>"]:
         return f"must contain only '#pragma once' and '#include <{want}>' (plus comments)"
     return None
+
+
+def draft_problem(unit, slot, ids):
+    """Why a module folder without a slot is not an allowed draft (None when it is).
+
+    A draft has MANIFEST.json with status "draft" and a "successor_of" naming an existing slot id,
+    plus README.md and tests/. Its slot is "<unit>.<folder>" and its live files must exist. Drafts
+    are not in slots.json and not in components-master (build_master only sees real slots).
+    """
+    folder = os.path.join(MODULES, unit, slot)
+    path = os.path.join(folder, "MANIFEST.json")
+    if not os.path.exists(path):
+        return "no slot in slots.json"
+    m = load(path)
+    if m.get("status") != "draft":
+        return "no slot in slots.json (a folder without a slot must be a draft manifest)"
+    problems = []
+    if m.get("successor_of") not in ids:
+        problems.append(f"draft successor_of {m.get('successor_of')!r} is not an existing slot id")
+    for required in ("README.md", "tests"):
+        if not os.path.exists(os.path.join(folder, required)):
+            problems.append(f"draft is missing {required}")
+    if m.get("slot") != f"{unit}.{slot}":
+        problems.append(f"draft manifest slot={m.get('slot')!r}, want '{unit}.{slot}'")
+    for f in m.get("live_files", []):
+        if not os.path.exists(os.path.join(ROOT, f)):
+            problems.append(f"draft live file missing: {f}")
+    return "; ".join(problems) if problems else None
 
 
 def check(write):
@@ -178,7 +207,9 @@ def check(write):
                 continue
             for slot in os.listdir(unit_dir):
                 if os.path.isdir(os.path.join(unit_dir, slot)) and f"{unit}.{slot}" not in ids:
-                    errors.append(f"src/VP-V/modules/{unit}/{slot}: no slot in slots.json")
+                    problem = draft_problem(unit, slot, ids)
+                    if problem:
+                        errors.append(f"src/VP-V/modules/{unit}/{slot}: {problem}")
 
     # No duplicate source: a source file name inside src/VP-V/modules must not also exist elsewhere.
     moved = {}

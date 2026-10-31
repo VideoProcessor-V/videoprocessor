@@ -73,6 +73,9 @@ namespace AdaptiveDownscaleStage
 		std::function<bool()> ssimInChain;                       // customHooks.SubmitsFile("SSimDownscaler.glsl", lowLatency)
 		std::function<MotionSource()> motion;
 		std::function<void()> publishStatus;                     // PublishCustomShaderStatus()
+		// Stage 8b one-axis: true for a LUMA prescaler hook (customHooks.IsPrescalerHook); null =
+		// none known (a doubler then stays in the list; the blend is still faithful-only).
+		std::function<bool(const pl_hook*)> isPrescaler;
 	};
 
 	// Host members other host code still reads (status line, the de-judder's grain-map request).
@@ -109,6 +112,15 @@ namespace AdaptiveDownscaleStage
 		void ApplyLight(pl_render_params& params, const Light& light);
 
 		bool UpscaleThisFrame() const { return upscaleThisFrame; }
+		// Stage 8b on a one-axis upscale this frame (faithful only; the prescaler dropped).
+		bool OneAxisThisFrame() const { return oneAxisThisFrame; }
+		// Prescaler hooks dropped from this frame's list (one-axis upscale).
+		int DroppedPrescalers() const { return droppedPrescalers; }
+
+		// The stage's own status lines (no silent fallbacks): the 8b form on the last registered
+		// frame and the motion-adapted blend's state; empty when neither applies. The host adds
+		// them to the custom-shader status.
+		std::vector<std::string> StatusLines() const;
 
 		// New module failures seen at `nowMs` (Register calls it each frame; tests drive it directly).
 		void NoteFailures(unsigned long long newFailures, unsigned long long nowMs)
@@ -132,6 +144,11 @@ namespace AdaptiveDownscaleStage
 	private:
 		AdaptiveDownscale::Module& module;
 		bool upscaleThisFrame = false;   // Stage 8b on the frame being built
+		bool oneAxisThisFrame = false;   // ... upscaled on one axis only (faithful only)
+		int droppedPrescalers = 0;
+		bool motionAdaptiveOn = false;   // adaptive_motion on this frame (the blend registered)
+		bool oneAxisLogged = false;
+		std::string statusPublished;     // the StatusLines last published
 		int upscaleRatioLogged = -1;
 		bool mapNlsLogged = false;       // 8-3
 		unsigned long long statsTick = 0;

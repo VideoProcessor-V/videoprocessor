@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -2171,14 +2172,18 @@ namespace Tests
 			using Fingerprint = int(__cdecl*)(const char*, char*, int);
 			const auto fingerprintOf = reinterpret_cast<Fingerprint>(GetProcAddress(dll, "VideoProcessorLibplaceboSettingsFingerprintForTest"));
 			Assert::IsNotNull(reinterpret_cast<void*>(fingerprintOf), L"the test export");
-			const std::string path = folder + "vp-fingerprint-test.cfg";
+			static std::atomic<int> freshConfig{ 0 };
+			// ConfigFile caches a load by file index, size and file times, so a same-size rewrite of one path inside a
+			// file-time tick can return the previous parse: write a fresh path per call and delete it after use.
 			auto fingerprint = [&](const std::string& extra) {
+				const std::string path = folder + "vp-fingerprint-test-" + std::to_string(freshConfig++) + ".cfg";
 				{
 					std::ofstream config(path, std::ios::trunc);
 					config << "[general]\npersist_profile_selection: false\n[vprenderer.Default]\nquality: high\n" << extra;
 				}
 				std::vector<char> buffer(1 << 20);
 				const int length = fingerprintOf(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
+				DeleteFileA(path.c_str());
 				Assert::IsTrue(length > 0, L"fingerprint computed");
 				return std::string(buffer.data());
 			};
@@ -2201,7 +2206,6 @@ namespace Tests
 			for (const char* change : changes)
 				Assert::AreNotEqual(base, fingerprint(change),
 					(L"no fingerprint change for: " + std::wstring(change, change + strlen(change))).c_str());
-			DeleteFileA(path.c_str());
 		}
 
 		// Integration 2026-10-17: the keys the merge brought (the engine's extras, the
@@ -2220,14 +2224,18 @@ namespace Tests
 			const auto describe = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboDescribeSettingsForTest"));
 			Assert::IsNotNull(reinterpret_cast<void*>(fingerprintOf), L"the fingerprint export");
 			Assert::IsNotNull(reinterpret_cast<void*>(describe), L"the describe export");
-			const std::string path = folder + "vp-integration-keys-test.cfg";
+			static std::atomic<int> freshConfig{ 0 };
+			// ConfigFile caches a load by file index, size and file times, so a same-size rewrite of one path inside a
+			// file-time tick can return the previous parse: write a fresh path per call and delete it after use.
 			auto call = [&](Export function, const std::string& text) {
+				const std::string path = folder + "vp-integration-keys-test-" + std::to_string(freshConfig++) + ".cfg";
 				{
 					std::ofstream config(path, std::ios::trunc | std::ios::binary);
 					config << text;
 				}
 				std::vector<char> buffer(1 << 20);
 				const int length = function(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
+				DeleteFileA(path.c_str());
 				Assert::IsTrue(length > 0, L"the export ran");
 				return std::string(buffer.data());
 			};
@@ -2284,7 +2292,6 @@ namespace Tests
 			const std::string motion = line(call(describe, changed), "motion");
 			Assert::IsTrue(motion.find("|always|") != std::string::npos,
 				(L"the motion profile's smooth_motion was read: " + std::wstring(motion.begin(), motion.end())).c_str());
-			DeleteFileA(path.c_str());
 		}
 
 		// Hunt 2 (picture C): nls_sampling and source_coding_fixes are parsed and dumped, default
@@ -2300,14 +2307,18 @@ namespace Tests
 			const auto describe = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboDescribeSettingsForTest"));
 			Assert::IsNotNull(reinterpret_cast<void*>(fingerprintOf), L"the fingerprint export");
 			Assert::IsNotNull(reinterpret_cast<void*>(describe), L"the describe export");
-			const std::string path = folder + "vp-hunt2-picture-keys-test.cfg";
+			static std::atomic<int> freshConfig{ 0 };
+			// ConfigFile caches a load by file index, size and file times, so a same-size rewrite of one path inside a
+			// file-time tick can return the previous parse: write a fresh path per call and delete it after use.
 			auto call = [&](Export function, const std::string& text) {
+				const std::string path = folder + "vp-hunt2-picture-keys-test-" + std::to_string(freshConfig++) + ".cfg";
 				{
 					std::ofstream config(path, std::ios::trunc | std::ios::binary);
 					config << text;
 				}
 				std::vector<char> buffer(1 << 20);
 				const int length = function(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
+				DeleteFileA(path.c_str());
 				Assert::IsTrue(length > 0, L"the export ran");
 				return std::string(buffer.data());
 			};
@@ -2330,7 +2341,6 @@ namespace Tests
 				Assert::AreEqual(std::string(flip.second), line(call(describe, text), flip.first), (L"parsed: " + name).c_str());
 				Assert::AreNotEqual(baseFingerprint, call(fingerprintOf, text), (L"fingerprint: " + name).c_str());
 			}
-			DeleteFileA(path.c_str());
 		}
 
 		// docs/VP-detail-restore.md (2026-10-17): detail_pulse_stabilise / detail_pulse_cap /
@@ -2347,14 +2357,18 @@ namespace Tests
 			const auto describe = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboDescribeSettingsForTest"));
 			Assert::IsNotNull(reinterpret_cast<void*>(fingerprintOf), L"the fingerprint export");
 			Assert::IsNotNull(reinterpret_cast<void*>(describe), L"the describe export");
-			const std::string path = folder + "vp-detail-restore-keys-test.cfg";
+			static std::atomic<int> freshConfig{ 0 };
+			// ConfigFile caches a load by file index, size and file times, so a same-size rewrite of one path inside a
+			// file-time tick can return the previous parse: write a fresh path per call and delete it after use.
 			auto call = [&](Export function, const std::string& text) {
+				const std::string path = folder + "vp-detail-restore-keys-test-" + std::to_string(freshConfig++) + ".cfg";
 				{
 					std::ofstream config(path, std::ios::trunc | std::ios::binary);
 					config << text;
 				}
 				std::vector<char> buffer(1 << 20);
 				const int length = function(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
+				DeleteFileA(path.c_str());
 				Assert::IsTrue(length > 0, L"the export ran");
 				return std::string(buffer.data());
 			};
@@ -2387,7 +2401,6 @@ namespace Tests
 			Assert::AreEqual(std::string("1.35"), line(call(describe, head + "detail_pulse_cap: 1.9\n"), "detail_pulse_cap"), L"cap above the range");
 			Assert::AreEqual(std::string("1.5"), line(call(describe, head + "texture_restore_cap: 0.5\n"), "texture_restore_cap"), L"cap below the range");
 			Assert::AreEqual(std::string("off"), line(call(describe, head + "texture_restore: neural\n"), "texture_restore"), L"not a choice");
-			DeleteFileA(path.c_str());
 		}
 
 		// For the lead's lead (never run by the plumbing agent): the source-resolution monitor reads the
@@ -2544,6 +2557,69 @@ namespace Tests
 			Assert::IsFalse(fullLogged, L"off: no shadow event is logged");
 			Assert::AreEqual(base, hashOf("[vpv]\nresync_event: shadow\n", L"resync_event shadow"), L"shadow: identical pixels");
 			Assert::IsTrue(fullLogged, L"shadow: the start FULL event is logged");
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
+			g_harnessWidth = savedW;
+			g_harnessHeight = savedH;
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(ResyncOnStillAndRebaseAxes)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(ResyncOnStillAndRebaseAxes)
+		{
+			const HarnessScope harnessScope;
+			// R3 / L1 / R4a (resync_event on). On a still picture the readers act only at the start FULL
+			// (nothing to reset yet, libplacebo's flush has no history), so the exact output codes equal
+			// off; the on run logs "Resync (on): FULL at seq". The Original pathway ignores on. With a
+			// fixed per-axis re-base (no fade), on equals off for H-only, V-only, both and anamorphic, and
+			// logs exactly the axes whose stamp moved at the first frame.
+			if (!RequireHardwareOrSkip("ResyncOnStillAndRebaseAxes")) return;
+			const int savedW = g_harnessWidth, savedH = g_harnessHeight;
+			g_harnessWidth = 3840;
+			g_harnessHeight = 2160;
+			wchar_t tempPath[MAX_PATH] = {};
+			GetTempPathW(MAX_PATH, tempPath);
+			const std::wstring shots = std::wstring(tempPath) + L"vp-resync-on";
+			CreateDirectoryW(shots.c_str(), nullptr);
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			FramePlan plan;
+			plan.captureAtSeconds = 2.5;
+			plan.step = [](int) { return FrameStep{ true, 0, 0 }; };   // one still picture
+			RunResult last;
+			auto hashOf = [&](const std::string& extra, const wchar_t* name, const std::string& defaults = std::string()) {
+				last = Run(VideoFrameEncoding::V210, "gpu", 3.5, false, extra + "[vprenderer.Default]\ndithering: off\ndeband: off\n" + defaults, false, &plan);
+				Assert::IsFalse(last.captureMetadata.empty(), (std::wstring(name) + L": capture written\n" + last.Tail()).c_str());
+				std::ifstream in(std::wstring(last.captureMetadata.begin(), last.captureMetadata.end()));
+				std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+				const size_t k = text.find("\"raw_r10_sha256\": \"");
+				Assert::IsTrue(k != std::string::npos, (std::wstring(name) + L": hash in the sidecar").c_str());
+				const std::string hash = text.substr(k + 19, 64);
+				Logger::WriteMessage((std::string(name, name + wcslen(name)) + ": " + hash + "\n").c_str());
+				return hash;
+			};
+			const std::string off = hashOf("[vpv]\nresync_event: off\n", L"off");
+			Assert::IsFalse(last.Logged("Resync (on)"), L"off: nothing from the readers");
+			Assert::AreEqual(off, hashOf("[vpv]\nresync_event: on\n", L"on"), L"on: a still picture is identical");
+			Assert::IsTrue(last.Logged("Resync (on): FULL at seq"), L"on: the start FULL is logged");
+			const std::string original = hashOf("[vpv]\npipeline_original_pathway: on\n", L"original");
+			Assert::AreEqual(original, hashOf("[vpv]\npipeline_original_pathway: on\nresync_event: on\n", L"original + on"),
+				L"the Original pathway ignores resync_event");
+			Assert::IsFalse(last.Logged("Resync (on)"), L"Original: no reader acts");
+			struct Axis { const char* setting; const char* logged; const wchar_t* name; };
+			const Axis axes[] = {
+				{ "1920x2160", "Resync (on): re-base H stamp", L"H only" },
+				{ "3840x1080", "Resync (on): re-base V stamp", L"V only" },
+				{ "1920x1080", "Resync (on): re-base H+V stamp", L"both" },
+				{ "1440x1080", "Resync (on): re-base H+V stamp", L"anamorphic" },
+			};
+			for (const Axis& a : axes)
+			{
+				const std::string key = std::string("source_resolution: ") + a.setting + "\n";
+				const std::string baseHash = hashOf("[vpv]\nresync_event: off\n", a.name, key);
+				Assert::AreEqual(baseHash, hashOf("[vpv]\nresync_event: on\n", a.name, key),
+					(std::wstring(a.name) + L": a fixed re-base is identical with on").c_str());
+				Assert::IsTrue(last.Logged(a.logged), (std::wstring(a.name) + L": the moved axes are stamped\n" + last.Tail()).c_str());
+			}
 			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
 			g_harnessWidth = savedW;
 			g_harnessHeight = savedH;
@@ -3103,22 +3179,29 @@ namespace Tests
 		TEST_METHOD(LowLatencyPathPropertyAndAutoEarlyUpload)
 		{
 			const HarnessScope harnessScope;
-			// Owner 2026-10-16: low_latency_path on any queue profile takes the low-latency path; with
-			// capture_upload auto (the default) early upload opens there and not on the regular path.
+			// Owner 2026-10-16: low_latency_path on any queue profile takes the low-latency path. With
+			// capture_upload auto (the default) and efficiency_fixes on (the default, EarlyUploadPolicy::Requested)
+			// early upload opens in EVERY mode (VRAM-guarded); with efficiency_fixes off the old rule holds:
+			// early upload only in the low-latency path, not on the regular one.
 			if (!RequireHardwareOrSkip("LowLatencyPathPropertyAndAutoEarlyUpload")) return;
 			g_harnessApplySnapshot = true;
 			const RunResult game = Run(VideoFrameEncoding::V210, "gpu", 4.0, true,
 				"dejudder_strength: 0.25\n[queue.Game]\nqueue_size: 4\ntarget_frames: 1\nlow_latency_path: on\n");
 			const RunResult normal = Run(VideoFrameEncoding::V210, "gpu", 4.0, true,
 				"dejudder_strength: 0.25\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n");
+			const RunResult normalOff = Run(VideoFrameEncoding::V210, "gpu", 4.0, true,
+				"dejudder_strength: 0.25\nefficiency_fixes: off\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n");
 			g_harnessApplySnapshot = false;
 			Assert::IsTrue(game.Logged("low-latency queue"), (L"low_latency_path on: the low-latency path\n" + game.Tail()).c_str());
 			Assert::IsTrue(game.Logged("Early upload: on"), (L"capture_upload auto: early upload in low latency\n" + game.Tail()).c_str());
 			// Anchor: the regular run presented and its de-judder ran.
 			Assert::IsTrue(normal.presented, (L"the Normal run presented\n" + normal.Tail()).c_str());
 			Assert::IsTrue(normal.Logged("De-judder: motion estimated"), (L"the Normal queue runs the de-judder\n" + normal.Tail()).c_str());
-			Assert::IsFalse(normal.Logged("Early upload: on"), (L"auto: no early upload on the regular path\n" + normal.Tail()).c_str());
+			Assert::IsTrue(normal.Logged("Early upload: on"), (L"auto + efficiency_fixes on: early upload on the regular path too\n" + normal.Tail()).c_str());
 			Assert::IsFalse(normal.Logged("low-latency queue"), (L"the Normal queue is regular\n" + normal.Tail()).c_str());
+			// efficiency_fixes off: the old rule (auto = early only in the low-latency path).
+			Assert::IsTrue(normalOff.presented, (L"the Normal run (efficiency_fixes off) presented\n" + normalOff.Tail()).c_str());
+			Assert::IsFalse(normalOff.Logged("Early upload: on"), (L"efficiency_fixes off: no early upload on the regular path\n" + normalOff.Tail()).c_str());
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(RebaseDebandAndCnnBlendKeepTheRecoveredDetail)
@@ -3428,14 +3511,19 @@ namespace Tests
 					}
 				Assert::IsTrue(readEarly, (std::wstring(c.name) + L": frames were read early\n" + r.Tail()).c_str());
 			}
-			// Off (the default): the pool never opens.
+			// Default (capture_upload auto): the pool opens (early upload in every mode, VRAM-guarded).
 			{
 				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 2.0);
-				Assert::IsFalse(r.Logged("Early upload: on"), (L"default: no early upload\n" + r.Tail()).c_str());
-				Assert::IsFalse(r.Logged("Alpha analysis unavailable"), (L"default: the CPU analysis ran\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("Early upload: on"), (L"default: the pool opened\n" + r.Tail()).c_str());
+			}
+			// capture_upload: render - the pool never opens; the render uploads.
+			{
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 2.0, false, "capture_upload: render\n");
+				Assert::IsFalse(r.Logged("Early upload: on"), (L"render: no early upload\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Alpha analysis unavailable"), (L"render: the CPU analysis ran\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.Logged("Alpha raw-frame analysis: the CPU reads the captured frame"),
-					(L"default: the CPU analysis read the captured frame\n" + r.Tail()).c_str());
-				Assert::IsTrue(r.presented, (L"default: frames presented\n" + r.Tail()).c_str());
+					(L"render: the CPU analysis read the captured frame\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.presented, (L"render: frames presented\n" + r.Tail()).c_str());
 			}
 		}
 
@@ -4859,10 +4947,23 @@ namespace Tests
 					const bool strictExtras = _dupenv_s(&onScreen, &length, "VP_TEST_HARNESS_ONSCREEN") == 0 && onScreen &&
 						std::string(onScreen) == "1";
 					std::free(onScreen);
+					// The run itself shows the renderer knew the display's rate: the de-judder logs its
+					// "De-judder phase: cadence ... display X Hz" line only after the timing checks passed
+					// (source rate, display rate from the statistics or the open loop, arrival), with X > 0.
+					// A known rate means extras must be rendered: strict. Unknown (the line absent, as on
+					// an off-screen window without DXGI statistics): reported as PENDING-ONSCREEN below.
+					bool displayRateKnown = false;
+					for (const std::string& line : r.log)
+					{
+						const size_t at = line.find("De-judder phase: cadence");
+						const size_t hz = at == std::string::npos ? std::string::npos : line.find(", display ", at);
+						if (hz != std::string::npos && std::atof(line.c_str() + hz + 10) > 0.0)
+							displayRateKnown = true;
+					}
 					// Render-ahead plans its extras open loop from the monitor's rate: strict everywhere. The
 					// closed-loop extras need DXGI statistics, which this laptop's panel never gives (an
 					// iGPU-driven panel: windowed or fullscreen) - strict only where they exist.
-					if (strictExtras || name.find("render-ahead") != std::string::npos)
+					if (strictExtras || displayRateKnown || name.find("render-ahead") != std::string::npos)
 						failures += name + ": no extra from the processed A; ";
 					else
 						Logger::WriteMessage(("   PENDING-ONSCREEN " + name + ": no extra rendered off screen (" + r.dejudderStatus + ")\n").c_str());
@@ -6467,6 +6568,221 @@ namespace Tests
 				Assert::IsTrue(info.toneCurveOutputNits[i] >= info.toneCurveOutputNits[i - 1]);
 				Assert::IsTrue(info.toneCurveOutputNits[i] <= info.targetPeakNits * 1.01f + 0.01f);
 			}
+		}
+
+		// ---- Vector engine on demand (vector_demand). The renderer logs "Vector engine: <status>"
+		// on change, "Vector engine: vectors delivered (...)" once per mode and a 5 s statistics line.
+
+		// The optical-flow engine is there when a de-judder run reports it as its motion source (the
+		// neighbouring motion tests' probe); without it the vector tests log SKIP-NO-ENGINE.
+		static bool VectorTestEngineHere()
+		{
+			// As the neighbouring look-ahead test: queue target 5 and 8 s (a cold shader cache can need more than 3 s
+			// to reach the first estimate); the answer is kept for the other vector tests.
+			static int engineHere = -1;
+			if (engineHere >= 0) return engineHere != 0;
+			g_harnessQueueTarget = 5;
+			const RunResult probe = Run(VideoFrameEncoding::V210, "gpu", 8.0, true, "dejudder_strength: 0.25\n");
+			g_harnessQueueTarget = 0;
+			engineHere = 0;
+			for (const std::string& line : probe.log)
+				if (line.find("De-judder motion:") != std::string::npos && line.find("optical-flow engine") != std::string::npos)
+					engineHere = 1;
+			return engineHere != 0;
+		}
+
+		static std::string VectorTestLines(const RunResult& r)
+		{
+			std::string out;
+			for (const std::string& line : r.log)
+				if (line.find("Vector engine:") != std::string::npos || line.find("Motion ahead") != std::string::npos)
+					out += "  " + line + "\n";
+			return out;
+		}
+
+		static bool VectorTestSkip(const char* name)
+		{
+			if (VectorTestEngineHere()) return false;
+			Assert::IsFalse(RequireGpu(), L"VP_TEST_REQUIRE_GPU=1: no optical-flow engine, the vector engine was not tested");
+			Logger::WriteMessage((std::string("SKIP-NO-ENGINE ") + name + "\n").c_str());
+			return true;
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineDeliversAtEveryRate)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(VectorEngineDeliversAtEveryRate)
+		{
+			const HarnessScope harnessScope;
+			// Shipped defaults (no de-judder), VP's debander on as the vector consumer: the vector
+			// engine runs on demand at every source rate and delivers vectors; no de-judder extras ran.
+			// The signal rate is the source rate; the display is the machine's own (the engine keys on
+			// the source, never on the display: 30p on 60 Hz and 24p on 24 Hz are source-rate cases).
+			if (!RequireHardwareOrSkip("VectorEngineDeliversAtEveryRate")) return;
+			if (VectorTestSkip("VectorEngineDeliversAtEveryRate")) return;
+			struct Rate { const char* name; int numerator; int denominator; bool film; };
+			const Rate rates[] = { { "24p", 24000, 1001, true }, { "30p", 30000, 1001, false }, { "50p", 50000, 1000, false },
+				{ "60p", 60000, 1000, false }, { "59.94p", 60000, 1001, false } };
+			for (const Rate& rate : rates)
+			{
+				FramePlan plan;
+				plan.rateNumerator = rate.numerator;
+				plan.rateDenominator = rate.denominator;
+				plan.step = [](int n) { FrameStep f; f.content = n; return f; };
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, rate.film, "deband_vp: on\n", false, &plan);
+				const std::wstring name = HarnessWide(rate.name);
+				Logger::WriteMessage((std::string(rate.name) + ":\n" + VectorTestLines(r)).c_str());
+				Assert::IsTrue(r.presented, (name + L": frames presented\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("Vector engine: on"), (name + L": the vector engine is on\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("Vector engine: vectors delivered"), (name + L": vectors delivered\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("De-judder extras:"), (name + L": no extras ran\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("De-judder: active"), (name + L": the de-judder never active\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Interpolation: interpolating"), (name + L": no interpolation ran\n" + r.Tail()).c_str());
+			}
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineGamesDepthOneEngagesAtOneAhead)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(VectorEngineGamesDepthOneEngagesAtOneAhead)
+		{
+			const HarnessScope harnessScope;
+			// A games queue (queue_size 4, target_frames 2) keeps one frame ahead: the look-ahead engages
+			// at one ahead and the vectors are forward.
+			if (!RequireHardwareOrSkip("VectorEngineGamesDepthOneEngagesAtOneAhead")) return;
+			if (VectorTestSkip("VectorEngineGamesDepthOneEngagesAtOneAhead")) return;
+			g_harnessApplySnapshot = true;
+			g_harnessQueueTarget = 2;   // the harness sets the target itself after the snapshot (SetQueueFramePolicy)
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
+				"deband_vp: on\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 2\n");
+			g_harnessApplySnapshot = false;
+			g_harnessQueueTarget = 0;
+			Logger::WriteMessage(VectorTestLines(r).c_str());
+			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
+			Assert::IsTrue(r.Logged("Motion ahead: engaged"), (L"the look-ahead engaged at one ahead\n" + r.Tail()).c_str());
+			Assert::IsTrue(r.Logged("vectors delivered (forward"), (L"forward vectors delivered\n" + r.Tail()).c_str());
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineCompetitiveDepthZeroPublishesBackwardPairs)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(VectorEngineCompetitiveDepthZeroPublishesBackwardPairs)
+		{
+			const HarnessScope harnessScope;
+			// A competitive queue (target_frames 1) has no frame ahead: the backward pairs are published
+			// and the consumer that needs a frame ahead (the debander hold) is named as without vectors.
+			if (!RequireHardwareOrSkip("VectorEngineCompetitiveDepthZeroPublishesBackwardPairs")) return;
+			if (VectorTestSkip("VectorEngineCompetitiveDepthZeroPublishesBackwardPairs")) return;
+			g_harnessApplySnapshot = true;
+			g_harnessQueueTarget = 1;   // the harness overrides the snapshot's target_frames after it applies
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
+				"deband_vp: on\nsource_resolution: auto\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 1\n");
+			g_harnessApplySnapshot = false;
+			g_harnessQueueTarget = 0;
+			Logger::WriteMessage(VectorTestLines(r).c_str());
+			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
+			Assert::IsTrue(r.Logged("vectors delivered (backward"), (L"backward pairs delivered\n" + r.Tail()).c_str());
+			// The status lists the unserved consumers together: "...; deband hold, detail pulse, ... without vectors (needs a frame ahead)".
+			bool named = false;
+			for (const std::string& line : r.log)
+				if (line.find("Vector engine: backward pairs") != std::string::npos && line.find("deband hold") != std::string::npos &&
+					line.find("without vectors (needs a frame ahead)") != std::string::npos)
+					named = true;
+			Assert::IsTrue(named, (L"the status names the deband hold as without vectors\n" + r.Tail()).c_str());
+			Assert::IsFalse(r.Logged("Motion ahead: engaged"), (L"no look-ahead at depth zero\n" + r.Tail()).c_str());
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineOffIsTodaysPath)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(VectorEngineOffIsTodaysPath)
+		{
+			const HarnessScope harnessScope;
+			// vector_demand: off logs no "Vector engine:" line even with a consumer on, and its picture is
+			// identical to a default run with no vector consumer active (the capture's raw hash).
+			if (!RequireHardwareOrSkip("VectorEngineOffIsTodaysPath")) return;
+			if (VectorTestSkip("VectorEngineOffIsTodaysPath")) return;
+			const RunResult off = Run(VideoFrameEncoding::V210, "gpu", 4.0, false, "vector_demand: off\ndeband_vp: on\n");
+			Logger::WriteMessage(VectorTestLines(off).c_str());
+			Assert::IsTrue(off.presented, (L"frames presented\n" + off.Tail()).c_str());
+			Assert::IsFalse(off.Logged("Vector engine:"), (L"vector_demand off: no Vector engine line\n" + off.Tail()).c_str());
+			const int savedW = g_harnessWidth, savedH = g_harnessHeight;
+			g_harnessWidth = 3840;
+			g_harnessHeight = 2160;
+			wchar_t tempPath[MAX_PATH] = {};
+			GetTempPathW(MAX_PATH, tempPath);
+			const std::wstring shots = std::wstring(tempPath) + L"vp-vector-demand-identity";
+			CreateDirectoryW(shots.c_str(), nullptr);
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", shots.c_str());
+			FramePlan plan;
+			plan.captureAtSeconds = 2.5;
+			plan.step = [](int) { return FrameStep{ true, 0, 0 }; };   // one still picture
+			auto hashOf = [&](const char* extra, const wchar_t* name) {
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 3.5, false, std::string(extra) + "[vprenderer.Default]\ndithering: off\ndeband: off\n", false, &plan);
+				Assert::IsFalse(r.captureMetadata.empty(), (std::wstring(name) + L": capture written\n" + r.Tail()).c_str());
+				std::ifstream in(std::wstring(r.captureMetadata.begin(), r.captureMetadata.end()));
+				std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+				const size_t k = text.find("\"raw_r10_sha256\": \"");
+				Assert::IsTrue(k != std::string::npos, (std::wstring(name) + L": hash in the sidecar").c_str());
+				return text.substr(k + 19, 64);
+			};
+			// No vector consumer in either run (the debander off): demand off and on are the same picture.
+			const std::string demandOff = hashOf("vector_demand: off\ndeband_vp: off\ndetail_pulse_stabilise: off\nlow_bitrate_handling: off\n", L"vector_demand off");
+			const std::string demandOn = hashOf("vector_demand: on\ndeband_vp: off\ndetail_pulse_stabilise: off\nlow_bitrate_handling: off\n", L"vector_demand on, no consumer");
+			SetEnvironmentVariableW(L"VP_TEST_SCREENSHOT_DIR", nullptr);
+			g_harnessWidth = savedW;
+			g_harnessHeight = savedH;
+			Assert::AreEqual(demandOff, demandOn, L"vector_demand off is pixel-identical to a default run with no vector consumer");
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineSmoothMotionKeepsAnalysis)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(VectorEngineSmoothMotionKeepsAnalysis)
+		{
+			const HarnessScope harnessScope;
+			// With libplacebo's smooth motion as the motion engine the analysis consumers are still served
+			// (forward) and the output dither is named as without vectors.
+			if (!RequireHardwareOrSkip("VectorEngineSmoothMotionKeepsAnalysis")) return;
+			if (VectorTestSkip("VectorEngineSmoothMotionKeepsAnalysis")) return;
+			const FramePlan plan = RatePlan(HarnessMonitorHz() * 5.0 / 6.0);
+			// The sigma-delta shader is found through VP_TEST_SHADER_DIR (as TemporalDitherChoiceControlsTheSigmaDelta does).
+			const std::string here = Here();
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", here.substr(0, here.size() - 1).c_str());
+			auto ditherLines = [](const RunResult& run) {
+				std::string out;
+				for (const std::string& line : run.log)
+					if (line.find("ither") != std::string::npos || line.find("igma-delta") != std::string::npos ||
+						line.find("custom hook") != std::string::npos || line.find("Vector engine:") != std::string::npos ||
+						line.find("Vector engine: off") != std::string::npos)
+						out += "  " + line.substr(0, 300) + "\n";
+				return out;
+			};
+			// The sigma-delta takes the engine's vectors only where libplacebo has the set-texture call (the Beta
+			// flavour, libplacebo 377); the default flavour (360) searches itself, so no vectors are asked of the
+			// engine there and this test must run on the Beta renderer.
+			_putenv_s("VP_TEST_HARNESS_BETA", "1");
+			// Control: the same run without smooth motion. The sigma-delta must run in this harness and be
+			// served (so the smooth-motion run's output-dither fallback means something).
+			const RunResult control = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
+				"deband_vp: on\ntemporal_dither: sigma_delta\n", false, &plan);
+			Logger::WriteMessage(("control (no smooth motion):\n" + ditherLines(control)).c_str());
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
+				"deband_vp: on\ntemporal_dither: sigma_delta\n[vprenderer.motion]\nmotion_engine: smooth_motion\nsmooth_motion: always\n", false, &plan);
+			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", nullptr);
+			_putenv_s("VP_TEST_HARNESS_BETA", "");
+			Logger::WriteMessage(("smooth motion:\n" + ditherLines(r) + VectorTestLines(r)).c_str());
+			bool controlServed = false;
+			for (const std::string& line : control.log)
+				if (line.find("Vector engine: on") != std::string::npos && line.find("output dither") != std::string::npos &&
+					line.find("output dither without vectors") == std::string::npos)
+					controlServed = true;
+			Assert::IsTrue(controlServed, (L"control: the sigma-delta ran and is served (check the Sigma-delta lines above)\n" + control.Tail()).c_str());
+			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
+			Assert::IsTrue(r.Logged("Motion engine: libplacebo smooth motion"), (L"smooth motion is the engine\n" + r.Tail()).c_str());
+			Assert::IsTrue(r.Logged("Vector engine: on (forward)"), (L"a source consumer is served\n" + r.Tail()).c_str());
+			Assert::IsTrue(r.Logged("output dither without vectors") || r.fallbacksStatus.find("output dither") != std::string::npos,
+				(L"output dither is named as without vectors\n" + r.Tail() + HarnessWide(r.fallbacksStatus)).c_str());
 		}
 	};
 }

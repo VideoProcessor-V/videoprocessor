@@ -119,7 +119,7 @@ namespace SlotSwitchSettings
 	{
 		static const char* const queue[] = { "queue_timing_fixes", "pulldown_fixes", "timing_continuity_fixes",
 			"cadence_class_fixes", "general_rate_fixes" };
-		static const char* const estimation[] = { "optical_flow", "motion_ahead_frames", "motion_history_fixes",
+		static const char* const estimation[] = { "optical_flow", "motion_ahead_frames", "motion_history_fixes", "vector_demand",
 			"dejudder_estimate_ahead", "dejudder_est_still_zero" };
 		static const char* const consumers[] = { "dejudder_strength", "dejudder_strength_even", "interpolation",
 			"interpolation_fill_gaps", "occlusion_mask", "dejudder_source_warp_filter", "interpolation_fallback" };
@@ -152,6 +152,7 @@ namespace SlotSwitchSettings
 			settings.opticalFlow = false;                 // optical_flow
 			settings.motionAheadFrames = 0;               // motion_ahead_frames
 			settings.motionHistoryFixes = false;          // motion_history_fixes
+			settings.vectorDemand = false;                // vector_demand
 			settings.dejudderEstimateAhead = false;       // dejudder_estimate_ahead
 			settings.dejudderEstStillZero = false;        // dejudder_est_still_zero (group E, bug hunt 2026-10-25)
 		}

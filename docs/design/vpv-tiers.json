@@ -41,6 +41,7 @@
   "defaults": {
     "optical_flow": "on",
     "motion_ahead_frames": "4",
+    "vector_demand": "on",
     "interpolation": "off",
     "interpolation_fill_gaps": "on",
     "dejudder_est_split": "off",
@@ -249,6 +250,15 @@
         {
           "key": "dejudder_estimate_ahead",
           "label": "Estimate motion ahead",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "motion.estimation"
+        },
+        {
+          "key": "vector_demand",
+          "label": "Vector engine on demand",
           "values": [
             "on",
             "off"

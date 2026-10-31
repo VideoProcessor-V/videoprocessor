@@ -82,6 +82,26 @@ Run single-threaded:
 
 `vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /TestCaseFilter:"FullyQualifiedName~VectorStoreTests|FullyQualifiedName~MotionAhead|FullyQualifiedName~OpticalFlowTrustTests|FullyQualifiedName~MotionValidityTests|FullyQualifiedName~Hunt2MotionHistoryTests|FullyQualifiedName~H3TimingTests" /Logger:"trx;LogFileName=motion-estimation.trx"`
 
+## Vector engine on demand
+
+`VectorDemand.h` (header-only, pure, CPU-tested) decides when the Vector engine runs and which consumers it serves.
+Synthesis consumers (dejudder extras, interpolator, hiccup repair, occlusion mask) keep their own policies and are never counted as served or unserved.
+
+`Decide` rules, in order:
+
+1. Not enabled: nothing (no status line). Slots off: "off (slot off)", nothing served or unserved.
+2. No consumer wants vectors, or only synthesis consumers do: mode Off, idle.
+3. Interlaced: no vectors, every wanting consumer is unserved (visible fallback).
+4. libplacebo smooth motion: see the exception below.
+5. Low latency with no frame ahead (queue capacity 0): Backward pairs. Source statistics consumers (source monitor, intent) are served; source-field consumers (grain map, deband hold, detail pulse, entrance segment) and output dither are unserved ("needs a frame ahead").
+6. Otherwise Forward (ForwardShallow in low latency with capacity of at least 1). Every wanting consumer is served; the estimate and producer run when anything is served. `EngageAhead(configured, capacity)` is max(1, min(configured, capacity)).
+
+`MotionAhead::Decide(..., backwardPairs)` gives depth 0 with reason BackwardPairs for the backward mode in low latency (engine available, consumer present); without the flag nothing changes.
+
+DELIBERATE exception: while libplacebo smooth motion runs, source-domain analysis consumers (source field and source statistics) keep the VP vectors, and output-domain consumers (output dither) fall back visibly ("libplacebo smooth motion owns output"). This is analysis only: no VP interpolation or de-judder synthesis runs alongside smooth motion. Revert with `VectorDemand::kAnalysisUnderSmoothMotion = false`, which makes smooth motion exclusive (every consumer falls back visibly).
+
+Fallback entries (`FallbackCatalog`): `vector_engine` (unserved consumers and why), `vector_engine_producer` (look-ahead stores nothing for this size), `vector_engine_global` (fast-pan / intent without whole-frame motion).
+
 ## Contract
 
 - Input: original frame luma at the delivered source size (before re-base/repair); queued next frames for the look-ahead

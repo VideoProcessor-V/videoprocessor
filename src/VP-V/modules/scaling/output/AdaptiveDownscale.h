@@ -89,6 +89,21 @@ namespace AdaptiveDownscale
 		// effective state (fbo_float32); falls back to 16-bit float when the
 		// GPU has no suitable rgba32f format. Precision only, no switch.
 		bool float32Picture = true;
+		// Motion-adapted blend (owner 2026-10-31; candidate, off by default until the sweep):
+		// the sharper branch's weight (SSIM on a downscale, the CNN on an upscale) kept where
+		// the content is steady and confidently tracked and lowered towards the faithful branch
+		// on fast or untrusted motion. Per 16x16 block of the de-judder's field, once per source
+		// frame: target = floor + (1 - floor) x confidence x (1 - smoothstep(speed_lo, speed_hi,
+		// speed)) for a trusted block of a trusted frame, else floor; speed in picture heights
+		// per second (general over sizes and rates); a one-pole over motionSmoothMs that follows
+		// the block's vector (no flicker at motion boundaries); bilinear between block centres
+		// in the blend; w x= the map. Lowering w only moves towards the faithful branch, which
+		// keeps the grain. No vectors (or NLS): the factor is 1 (today's blend), shown in status.
+		bool motionAdaptive = false;
+		float motionSpeedLo = 0.1f;      // picture heights per second: full sharper-branch weight below
+		float motionSpeedHi = 0.4f;      // picture heights per second: the floor above
+		float motionFloor = 0.0f;        // the factor on fast / untrusted motion (0 = faithful only)
+		float motionSmoothMs = 250.0f;
 	};
 
 	inline bool operator==(const Settings& a, const Settings& b)
@@ -99,7 +114,9 @@ namespace AdaptiveDownscale
 			a.grainMap == b.grainMap && a.grainMapSmoothMs == b.grainMapSmoothMs && a.faithfulOrtho == b.faithfulOrtho && a.faithfulAuto == b.faithfulAuto &&
 			a.cnnResidualStabilise == b.cnnResidualStabilise && a.ssimResidualStabilise == b.ssimResidualStabilise &&
 			a.residualGrainGuard == b.residualGrainGuard &&
-			a.float32Picture == b.float32Picture;
+			a.float32Picture == b.float32Picture &&
+			a.motionAdaptive == b.motionAdaptive && a.motionSpeedLo == b.motionSpeedLo && a.motionSpeedHi == b.motionSpeedHi &&
+			a.motionFloor == b.motionFloor && a.motionSmoothMs == b.motionSmoothMs;
 	}
 
 	// 8-3: the de-judder's field for the source frame being rendered.
@@ -197,6 +214,40 @@ namespace AdaptiveDownscale
 		return static_cast<float>(antiring + (1.0 - antiring) * 0.5 * (t > 1.0 ? 1.0 : t));
 	}
 
+	// Motion-adapted blend: CPU mirrors of the motion-map shader (tests; the shader computes the
+	// same in float). `speed` in picture heights per second; `confidence` 0..1 is 1 today (the
+	// camera model's per-block confidence multiplies in when it lands).
+	inline float MotionSmoothstep(float lo, float hi, float x)
+	{
+		if (!(hi > lo)) return x < lo ? 0.0f : 1.0f;
+		float t = (x - lo) / (hi - lo);
+		t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+		return t * t * (3.0f - 2.0f * t);
+	}
+	inline float MotionTarget(bool frameTrusted, bool blockTrusted, float speed, float confidence, const Settings& s)
+	{
+		const float floor = s.motionFloor < 0.0f ? 0.0f : s.motionFloor > 1.0f ? 1.0f : s.motionFloor;
+		if (!frameTrusted || !blockTrusted) return floor;
+		const float c = confidence < 0.0f ? 0.0f : confidence > 1.0f ? 1.0f : confidence;
+		return floor + (1.0f - floor) * c * (1.0f - MotionSmoothstep(s.motionSpeedLo, s.motionSpeedHi, speed));
+	}
+	// The block's vector (source pixels per frame) as picture heights per second.
+	inline float MotionSpeed(float vx, float vy, float cropHeight, float frameSeconds)
+	{
+		if (!(cropHeight > 0.0f) || !(frameSeconds > 0.0f)) return 0.0f;
+		return std::sqrt(vx * vx + vy * vy) / cropHeight / frameSeconds;
+	}
+	// The one-pole's coefficient per source frame (1 = no smoothing).
+	inline float MotionAlpha(float frameSeconds, float smoothMs)
+	{
+		return smoothMs > 0.0f ? 1.0f - std::exp(-frameSeconds * 1000.0f / smoothMs) : 1.0f;
+	}
+	// One source frame of the map for one block: reset (first map, a cut, a resize) takes the target.
+	inline float MotionStep(float previousAlongVector, float target, float alpha, bool reset)
+	{
+		return reset ? target : previousAlongVector + (target - previousAlongVector) * alpha;
+	}
+
 	// Matcher error (mean absolute residual of half-resolution luma between
 	// two frames) to the scalar's Laplacian energy units, for white noise of
 	// one code per source pixel: the Laplacian's mean absolute value is
@@ -233,7 +284,35 @@ namespace AdaptiveDownscale
 		float wBase = 1.0f;
 		bool superresAlpha = false; // SSimSuperRes reads the grain term from alpha
 		float nativeHeight = 0.0f;  // the source crop's height (the doubler test)
+		// Stage 8b one-axis (N9-P12): the source crop's width (0 = not given: the height decides
+		// alone, as before) and a frame upscaled on one axis only: faithful branch only (w = 0;
+		// with superresAlpha the grain term handed to SSimSuperRes is 0, so it adds nothing).
+		float nativeWidth = 0.0f;
+		bool oneAxis = false;
 	};
+
+	// The motion-adapted blend on the last blended frame (status, tests).
+	enum class MotionState { Off, NoVectors, Used };
+
+	// Stage 8b's gate and its one-axis form, from the re-based source crop and the destination
+	// (half a pixel tolerance). The upscale form: the height upscaled (today's gate, whatever the
+	// width does), or the width upscaled with the height 1:1 (new: the height-only gate missed it).
+	// One axis = one axis upscaled and the other 1:1. A mixed frame (one axis up, the other down)
+	// keeps today's routing: height up = the two-axis upscale blend; width up with the height
+	// shrinking = the downscale form. No width given (0): the height decides alone.
+	struct UpscaleAxes { bool any = false; bool oneAxis = false; };
+	inline UpscaleAxes UpscaleAxesOf(float sourceW, float sourceH, float targetW, float targetH)
+	{
+		const bool haveW = sourceW > 0.0f;
+		const bool upW = haveW && sourceW + 0.5f < targetW;
+		const bool upH = sourceH > 0.0f && sourceH + 0.5f < targetH;
+		const bool sameW = haveW && std::fabs(sourceW - targetW) <= 0.5f;
+		const bool sameH = sourceH > 0.0f && std::fabs(sourceH - targetH) <= 0.5f;
+		UpscaleAxes a;
+		a.any = upH || (upW && sameH);
+		a.oneAxis = (upH && sameW) || (upW && sameH);
+		return a;
+	}
 
 	// Whether the map was used on the last rendered frame (for the stats line).
 	enum class MapState { Off, NoField, Used };
@@ -267,10 +346,14 @@ namespace AdaptiveDownscale
 		void ClearMotion() { motion = Motion(); }
 		// Frames whose residual was held along the vectors (stats line, tests).
 		unsigned long long StabilisedFrames() const { return stabilised; }
+		// Motion-adapted blend: its state on the last blended frame, and the newest map
+		// (r = factor per block, g = trusted); tests.
+		MotionState LastMotionState() const { return motionState; }
+		pl_tex MotionMap() const { return motionReady ? motionMap[motionIndex] : nullptr; }
 		MapState LastMapState() const { return mapState; }
 		// Stream robustness (owner 2026-10-14): a discontinuity - the map no
 		// longer follows the content and starts over (consumers see NoField).
-		void ForgetMap() { mapReady = false; mapSequence = 0; mapState = MapState::NoField; residualSequence = 0; residualPrevValid = false; }
+		void ForgetMap() { mapReady = false; mapSequence = 0; mapState = MapState::NoField; residualSequence = 0; residualPrevValid = false; motionReady = false; motionSequence = 0; }
 		// The newest map (r = grain scale per block, g = trusted); tests.
 		pl_tex GrainMap() const { return mapReady ? map[mapIndex] : nullptr; }
 		bool hostReadableMap = false;   // tests: the map can be downloaded
@@ -291,6 +374,7 @@ namespace AdaptiveDownscale
 		pl_hook_res Blending(const pl_hook_params* params);
 		void PollStats();
 		bool UpdateMap(pl_dispatch dispatch, bool advance);
+		bool UpdateMotionMap(pl_dispatch dispatch, bool advance);
 
 		pl_hook measure{};
 		pl_hook blend{};
@@ -321,6 +405,11 @@ namespace AdaptiveDownscale
 		uint64_t residualSequence = 0;
 		int residualW = 0, residualH = 0;              // the residual textures' size (audit 2026-10-16)
 		unsigned long long stabilised = 0;
+		pl_tex motionMap[2] = { nullptr, nullptr };   // motion-adapted blend: factor per block
+		int motionIndex = 0;
+		bool motionReady = false;                      // motionMap[motionIndex] belongs to motionSequence
+		uint64_t motionSequence = 0;
+		MotionState motionState = MotionState::Off;
 		pl_buf readback = nullptr;
 		bool readbackPending = false;
 		pl_shader_obj polarLut = nullptr;

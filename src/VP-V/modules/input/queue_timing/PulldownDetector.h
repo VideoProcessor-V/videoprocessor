@@ -314,7 +314,7 @@ namespace Pulldown
 	private:
 		Decision Decide(bool repeat, bool gap, double signalHz, int missedFrames)
 		{
-			if (m_signalHz > 0.0 && signalHz > 0.0 && std::fabs(signalHz - m_signalHz) > m_signalHz * 0.005)
+			if (!m_timingRelatch && m_signalHz > 0.0 && signalHz > 0.0 && std::fabs(signalHz - m_signalHz) > m_signalHz * 0.005)
 				ResetState();
 			else if (gap && !SkipMissed(missedFrames))
 				ResetState();
@@ -448,6 +448,35 @@ namespace Pulldown
 
 	public:
 		bool Locked() const { return m_locked; }
+
+		// R3 (resync_event on): the Indicator's `timing` counter re-latches the signal rate in
+		// place of the fixed 0.5% rule (which is off while this is set). Off = the rule as before.
+		void SetTimingRelatch(bool on) { m_timingRelatch = on; }
+		bool TimingRelatch() const { return m_timingRelatch; }
+		double SignalHz() const { return m_signalHz; }
+		// R3: a timing event (a measured-rate step without a slip, e.g. an unannounced 59.94/60
+		// move). The history's rate becomes signalHz. The lock is dropped only when the cadence
+		// class changes: the move exceeds the lock's own resolution, one signal frame over the
+		// frames a lock of this cycle needs (FramesToLock: derived from the cycle and the rate,
+		// nothing fixed). Returns true when the lock and history were dropped.
+		bool RelatchSignalHz(double signalHz)
+		{
+			if (!(signalHz > 0.0))
+				return false;
+			if (m_signalHz > 0.0 && m_locked && !m_pattern.empty())
+			{
+				const double tolerance = 1.0 / static_cast<double>(FramesToLock(static_cast<int>(m_pattern.size()), m_signalHz));
+				if (std::fabs(signalHz - m_signalHz) > m_signalHz * tolerance)
+				{
+					ResetState();
+					m_signalHz = signalHz;
+					m_pendingDiscontinuity = true;   // as a lock change in Next (D1): the next kept frame carries it
+					return true;
+				}
+			}
+			m_signalHz = signalHz;
+			return false;
+		}
 		int Cycle() const { return m_locked ? static_cast<int>(m_pattern.size()) : 0; }
 		int Unique() const { return m_locked ? m_unique : 0; }
 
@@ -697,6 +726,7 @@ namespace Pulldown
 		int m_unique = 0;
 		uint64_t m_filmIndex = 0;
 		double m_signalHz = 0.0;   // the rate the history was built at
+		bool m_timingRelatch = false;   // R3: the rate re-latch is driven by the Indicator's timing counter
 	};
 
 	// The even film clock for kept frames: time(n) = anchor + n / filmHz, the

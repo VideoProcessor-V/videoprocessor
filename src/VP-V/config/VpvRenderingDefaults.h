@@ -28,6 +28,7 @@ inline bool IsVpvChoiceKey(const QString& key)
         "adaptive_downscale",
         "adaptive_faithful",
         "adaptive_grain_map",
+        "adaptive_motion",
         "adaptive_upscale",
         "adaptive_upscale_superres_scale",
         "cadence_class_fixes",
@@ -115,6 +116,7 @@ inline bool IsVpvChoiceKey(const QString& key)
         "texture_restore",
         "timing_continuity_fixes",
         "upscale_light",
+        "vector_demand",
     };
     const QByteArray latin = key.toLatin1();
     return std::binary_search(std::begin(keys), std::end(keys), latin.constData(),
@@ -144,7 +146,7 @@ inline bool VpvRenderingDefault(const QString& key, QString& out)
             { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "auto" }, { "adaptive_grain_map", "on" },
             { "adaptive_upscale", "off" }, { "adaptive_upscale_superres_scale", "on" }, { "upscale_light", "linear" },
             { "downscale_light", "linear" }, { "preserve_extended_range", "on" }, { "extended_range_more_cases", "on" }, { "sdr_tone_shape", "off" },
-            { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "source_resolution_latch_fixes", "on" }, { "source_resolution_cut_fixes", "on" }, { "active_picture_startup_hold", "on" }, { "pulldown_fixes", "on" }, { "timing_continuity_fixes", "on" }, { "cadence_class_fixes", "on" }, { "motion_history_fixes", "on" }, { "queue_timing_fixes", "on" }, { "general_rate_fixes", "on" }, { "efficiency_fixes", "on" },
+            { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "source_resolution_latch_fixes", "on" }, { "source_resolution_cut_fixes", "on" }, { "active_picture_startup_hold", "on" }, { "pulldown_fixes", "on" }, { "timing_continuity_fixes", "on" }, { "cadence_class_fixes", "on" }, { "motion_history_fixes", "on" }, { "vector_demand", "on" }, { "queue_timing_fixes", "on" }, { "general_rate_fixes", "on" }, { "efficiency_fixes", "on" },
             // Render-ahead (docs/VP-render-ahead-design.md).
             { "render_ahead", "off" }, { "dejudder_gate", "auto" }, { "render_ahead_queue_credit", "off" },
             // 2026-10-17: the engine's extras, the grain switches, the DV tunnel restore switch.

@@ -16,6 +16,7 @@
         "src/VP-V/modules/input/capture/UploadReuse.h",
         "src/VP-V/modules/input/capture/EarlyUpload.cpp",
         "src/VP-V/modules/input/capture/EarlyUpload.h",
+        "src/VP-V/modules/input/capture/EarlyUploadHandoff.h",
         "src/VideoProcessor-Lib/CaptureInput.cpp",
         "src/VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.cpp",
         "src/VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.h",
@@ -239,7 +240,23 @@
         "src/VP-V/modules/motion/estimation/OpticalFlowTrust.h",
         "src/VideoProcessor-Lib/MotionConfig.h",
         "src/VP-V/modules/motion/estimation/MotionEngineIdle.h",
-        "src/VP-V/modules/motion/estimation/MotionAheadProducer.h"
+        "src/VP-V/modules/motion/estimation/MotionAheadProducer.h",
+        "src/VP-V/modules/motion/estimation/global_model/CameraMotion.h",
+        "src/VP-V/modules/motion/estimation/global_model/GlobalModelGeometry.h",
+        "src/VP-V/modules/motion/estimation/global_model/GlobalModelGeometry.cpp",
+        "src/VP-V/modules/motion/estimation/global_model/GlobalModelFit.h",
+        "src/VP-V/modules/motion/estimation/global_model/GlobalModelFit.cpp",
+        "src/VP-V/modules/motion/estimation/global_model/GlobalModelTemporal.h",
+        "src/VP-V/modules/motion/estimation/global_model/GlobalModelTemporal.cpp",
+        "src/VP-V/modules/motion/estimation/global_model/GlobalModelObjects.h",
+        "src/VP-V/modules/motion/estimation/global_model/GlobalModelObjects.cpp",
+        "src/VP-V/modules/motion/estimation/global_model/PixelResidualReference.h",
+        "src/VP-V/modules/motion/estimation/global_model/PixelResidualReference.cpp",
+        "src/VP-V/modules/motion/estimation/global_model/CameraAccessor.h",
+        "src/VP-V/modules/motion/estimation/global_model/GlobalModelSearchHints.h",
+        "src/VP-V/modules/motion/estimation/global_model/GlobalModelSearchHints.cpp",
+        "src/VP-V/modules/motion/estimation/VectorDemand.h",
+        "src/VP-V/modules/motion/estimation/tests/VectorDemandTests.cpp"
       ],
       "components": {
         "files": {
@@ -284,7 +301,8 @@
           "optical_flow_cost_trust",
           "optical_flow_fb_check",
           "optical_flow_global",
-          "optical_flow_global_fallback"
+          "optical_flow_global_fallback",
+          "vector_demand"
         ],
         "upstream_modules": [
           "input.queue_timing",
@@ -548,7 +566,8 @@
           "motion_engine",
           "motion_history_fixes",
           "occlusion_mask",
-          "timing_continuity_fixes"
+          "timing_continuity_fixes",
+          "vector_demand"
         ],
         "upstream_modules": [
           "motion.estimation",
@@ -715,6 +734,11 @@
           "adaptive_grain_map_smooth_ms",
           "adaptive_grain_shadow_bias",
           "adaptive_grain_smooth_ms",
+          "adaptive_motion",
+          "adaptive_motion_floor",
+          "adaptive_motion_smooth_ms",
+          "adaptive_motion_speed_hi",
+          "adaptive_motion_speed_lo",
           "adaptive_upscale",
           "adaptive_upscale_superres_scale",
           "adaptive_upscale_w_base",

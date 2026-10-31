@@ -29,7 +29,7 @@ namespace
 			generalRateFixes = true;
 		bool opticalFlow = true;
 		int motionAheadFrames = 4;
-		bool motionHistoryFixes = true, dejudderEstimateAhead = true, dejudderEstStillZero = true;
+		bool motionHistoryFixes = true, vectorDemand = true, dejudderEstimateAhead = true, dejudderEstStillZero = true;
 		double dejudderStrength = 1.0, dejudderStrengthEven = 0.5;
 		InterpolationPolicy::Mode interpolation = InterpolationPolicy::Mode::Auto;
 		bool interpolationFillGaps = true, occlusionMask = true, dejudderSourceWarpCatmull = true;
@@ -39,8 +39,8 @@ namespace
 
 		bool QueueOn() const { return queueTimingFixes && pulldownFixes && timingContinuityFixes && cadenceClassFixes && generalRateFixes; }
 		bool QueueOff() const { return !queueTimingFixes && !pulldownFixes && !timingContinuityFixes && !cadenceClassFixes && !generalRateFixes; }
-		bool EstimationOn() const { return opticalFlow && motionAheadFrames == 4 && motionHistoryFixes && dejudderEstimateAhead && dejudderEstStillZero; }
-		bool EstimationOff() const { return !opticalFlow && motionAheadFrames == 0 && !motionHistoryFixes && !dejudderEstimateAhead && !dejudderEstStillZero; }
+		bool EstimationOn() const { return opticalFlow && motionAheadFrames == 4 && motionHistoryFixes && vectorDemand && dejudderEstimateAhead && dejudderEstStillZero; }
+		bool EstimationOff() const { return !opticalFlow && motionAheadFrames == 0 && !motionHistoryFixes && !vectorDemand && !dejudderEstimateAhead && !dejudderEstStillZero; }
 		bool ConsumersOn() const
 		{
 			return dejudderStrength == 1.0 && dejudderStrengthEven == 0.5 && interpolation == InterpolationPolicy::Mode::Auto &&
@@ -104,6 +104,7 @@ namespace VpvTests
 				else if (k == "optical_flow") flag(s.opticalFlow);
 				else if (k == "motion_ahead_frames") number(s.motionAheadFrames);
 				else if (k == "motion_history_fixes") flag(s.motionHistoryFixes);
+				else if (k == "vector_demand") flag(s.vectorDemand);
 				else if (k == "dejudder_estimate_ahead") flag(s.dejudderEstimateAhead);
 				else if (k == "dejudder_est_still_zero") flag(s.dejudderEstStillZero);
 				else if (k == "dejudder_strength") number(s.dejudderStrength);
@@ -122,7 +123,7 @@ namespace VpvTests
 					Assert::Fail(W("no value check for " + k).c_str());
 				++checked;
 			}
-			Assert::AreEqual(size_t{ 19 }, checked);
+			Assert::AreEqual(size_t{ 20 }, checked);
 		}
 
 		TEST_METHOD(NothingOffChangesNothing)

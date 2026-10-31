@@ -352,6 +352,7 @@ Flags: **NO CONTROL** = no Config control and no allow-list reason; **allow-list
 | `ssim_bitrate_floor` | vprenderer | VP-V > Advanced | - | - | 0.4 | s5 |  |
 | `ssim_residual_stabilise` | vprenderer | VP-V > Advanced | Advanced | - | On | s5 | DUAL (managed) |
 | `upscale_light` | vprenderer | VP-V > Advanced | - | - | linear | s5 |  |
+| `vector_demand` | vprenderer | VP-V > Advanced | Main | - | On | s3 |  |
 
 ### Colour (14)
 

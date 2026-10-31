@@ -33,7 +33,8 @@
       "motion_engine",
       "motion_history_fixes",
       "occlusion_mask",
-      "timing_continuity_fixes"
+      "timing_continuity_fixes",
+      "vector_demand"
     ],
     "upstream_modules": [
       "motion.estimation",

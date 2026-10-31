@@ -1,6 +1,7 @@
 #pragma once
 
 #include <VP-V/core/FallbackStatus.h>
+#include <VP-V/modules/motion/estimation/VectorDemand.h>
 
 #include <cmath>
 #include <cstdio>
@@ -106,6 +107,25 @@ namespace FallbackCatalog
 		std::snprintf(buffer, sizeof(buffer), "%.0f s", pauseSeconds);
 		return Engaged("re-base", std::string("paused after a failure: native frames for ") + buffer +
 			(error.empty() ? std::string() : " (" + error + ")"));
+	}
+	// A failed re-base on the EXTRA path (the de-judder's extra pictures): the extra shows the native
+	// frame. Same id as RebasePaused ("re-base"): the renderer's next RebasePaused sync (the failure
+	// count moved, so a pause follows) takes the entry over and releases it with the pause.
+	inline Decision RebaseExtraNative(const std::string& error)
+	{
+		return Engaged("re-base", std::string("extra picture: native frame") +
+			(error.empty() ? std::string() : " (" + error + ")"));
+	}
+	// Detail pulse stabilise / texture restore: a failed pass renders the frame without it.
+	inline Decision DetailPulseFailed(bool failed, const std::string& error)
+	{
+		return failed ? Engaged("detail pulse", "not applied" + (error.empty() ? std::string() : " (" + error + ")") +
+			"; the frame is rendered without it") : Released("detail pulse");
+	}
+	inline Decision TextureRestoreFailed(bool failed, const std::string& error)
+	{
+		return failed ? Engaged("texture restore", "not applied" + (error.empty() ? std::string() : " (" + error + ")") +
+			"; the frame is rendered without it") : Released("texture restore");
 	}
 
 	// ---- repair.deband --------------------------------------------------------------------------
@@ -263,5 +283,77 @@ namespace FallbackCatalog
 	{
 		return requested && !open ? Engaged("early upload", "the render upload" +
 			(error.empty() ? std::string() : " (" + error + ")")) : Released("early upload");
+	}
+
+	// The early upload is open but frames still take the render upload: the render reached the
+	// payload before the conversion thread started its upload (late), or the slot was missing /
+	// refused (no free slot, failed). Noted once per early-eligible payload (its first draw) and
+	// evaluated per window of windowMs: engaged while a window's render-upload share is above
+	// kShare with at least kMinFrames such frames; released after a window at or below it, or
+	// when no eligible payload arrived for two windows. Waits on a running upload are reported.
+	struct EarlyUploadRenderUploads
+	{
+		static constexpr double kShare = 0.05;
+		static constexpr unsigned long long kMinFrames = 2;
+		unsigned long long windowStartMs = 0, lastNoteMs = 0;
+		unsigned long long frames = 0, late = 0, noSlot = 0, waited = 0;   // the current window
+		bool started = false;
+		Decision last = Released("early upload frames");
+		Decision Note(unsigned long long nowMs, bool isLate, bool isNoSlot, bool isWaited, unsigned long long windowMs = 2000)
+		{
+			if (!started)
+			{
+				started = true;
+				windowStartMs = nowMs;
+			}
+			lastNoteMs = nowMs;
+			++frames;
+			late += isLate ? 1 : 0;
+			noSlot += isNoSlot ? 1 : 0;
+			waited += isWaited ? 1 : 0;
+			if (nowMs - windowStartMs >= windowMs)
+			{
+				const unsigned long long render = late + noSlot;
+				if (render >= kMinFrames && static_cast<double>(render) > kShare * static_cast<double>(frames))
+				{
+					char text[200];
+					std::snprintf(text, sizeof(text), "%llu of %llu frames took the render upload (%llu before the early upload "
+						"started, %llu no slot), %llu waited for a running upload", render, frames, late, noSlot, waited);
+					last = Engaged("early upload frames", text);
+				}
+				else
+					last = Released("early upload frames");
+				windowStartMs = nowMs;
+				frames = late = noSlot = waited = 0;
+			}
+			return last;
+		}
+		// No eligible payload for two windows (another route, paused, pool closed): released.
+		Decision Current(unsigned long long nowMs, unsigned long long windowMs = 2000)
+		{
+			if (started && nowMs - lastNoteMs >= 2 * windowMs)
+				*this = EarlyUploadRenderUploads();
+			return last;
+		}
+	};
+	// ---- motion.estimation: Vector engine on demand ---------------------------------------------
+	// Engaged while a wanted consumer goes without vectors; the reason names each and why.
+	inline Decision VectorEngine(const VectorDemand::Decision& demand)
+	{
+		if (demand.unserved == 0)
+			return Released("vector_engine");
+		return Engaged("vector_engine", VectorDemand::UnservedText(demand));
+	}
+	inline Decision VectorEngineProducer(bool sizeSkipSustained)
+	{
+		return sizeSkipSustained ? Engaged("vector_engine_producer",
+			"Vector engine look-ahead stores nothing for this size (render-time estimate runs)") :
+			Released("vector_engine_producer");
+	}
+	inline Decision VectorEngineGlobal(bool sustainedMiss)
+	{
+		return sustainedMiss ? Engaged("vector_engine_global",
+			"source monitor fast-pan / intent without whole-frame motion (vector engine pair missed)") :
+			Released("vector_engine_global");
 	}
 }

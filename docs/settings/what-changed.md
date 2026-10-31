@@ -72,3 +72,11 @@ setting is still there, once. Details: `organisation.md` (the map) and `VP-setti
 - The Original pathway also needs a few more VP keys switched off in the renderer (startup hold,
   compression-aware deband, the residual steadiers, motion estimate-ahead, hold-or-blend); listed for
   the renderer lead.
+
+## 2026-10-31: one-axis upscales (adaptive_upscale on only)
+
+- With `adaptive_upscale` on, a picture upscaled on one axis while the other stays 1:1 now takes the faithful
+  upscale only (the CNN doubler is skipped for that frame, so the 1:1 axis is no longer doubled and blended),
+  and a width-only upscale (e.g. anamorphic) now goes through the adaptive upscale. Shown on the status line.
+  Off by default and off in the Original pathway, so Bill's behaviour is unchanged.
+- New `adaptive_motion` (off until the sweep sets its values): motion-adapted scaler blend.

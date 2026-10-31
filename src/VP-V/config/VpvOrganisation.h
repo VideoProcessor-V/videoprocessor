@@ -93,7 +93,7 @@ namespace Vpv
 			{ "motion", "engine", "Motion engine and hiccup repair",
 				"How dropped or repeated frames are repaired, and how motion is estimated.", false, false, {
 				{ K::Toggle, "interpolation_fill_gaps" }, { K::Toggle, "interpolation" }, { K::Toggle, "interpolation_fallback" },
-				{ K::Toggle, "dejudder_estimate_ahead" } } },
+				{ K::Toggle, "dejudder_estimate_ahead" }, { K::Toggle, "vector_demand" } } },
 			{ "motion", "render_ahead", "Render ahead (under test)", "Draws de-judder frames early to absorb timing hiccups.", false, false, {
 				{ K::Toggle, "render_ahead" } } },
 			{ "motion", "easing", "Per-shot easing", "Lowers the de-judder on shots that need less (never raises it).", false, false, {

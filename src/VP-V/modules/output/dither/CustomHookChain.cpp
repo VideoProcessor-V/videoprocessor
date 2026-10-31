@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <regex>
+#include <sstream>
 
 namespace CustomHookChain
 {
@@ -246,6 +247,7 @@ namespace CustomHookChain
                     continue;
                 }
                 entry.quantizer = IsOutputQuantizer(entry.rule.filename, entry.source);
+                entry.prescaler = IsLumaPrescaler(entry.source);
             }
             if (entry.source.empty()) continue;
             const std::string key = TemplateKey(entry.source, values);
@@ -338,6 +340,50 @@ namespace CustomHookChain
             {
                 return entry.hook == hook && entry.quantizer && HooksOutput(entry.hook);
             });
+    }
+
+    bool Chain::IsPrescalerHook(const pl_hook* hook) const
+    {
+        return hook && std::any_of(entries.begin(), entries.end(), [&](const Entry& entry)
+            {
+                return entry.hook == hook && entry.prescaler;
+            });
+    }
+
+    bool IsLumaPrescaler(const std::string& source)
+    {
+        // Pass by pass (a pass starts at its //!HOOK line): LUMA hooked and a size directive
+        // of the form "LUMA.<w|h> <k> *" (or HOOKED.<w|h>, the same texture) with k > 1.
+        bool hooksLuma = false;
+        std::istringstream text(source);
+        std::string line;
+        while (std::getline(text, line))
+        {
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t'))
+                line.pop_back();
+            if (line.compare(0, 3, "//!") != 0) continue;
+            std::istringstream words(line.substr(3));
+            std::string directive;
+            words >> directive;
+            if (directive == "HOOK")
+            {
+                std::string stage;
+                words >> stage;
+                hooksLuma = stage == "LUMA";
+            }
+            else if (hooksLuma && (directive == "WIDTH" || directive == "HEIGHT"))
+            {
+                std::string base, factor, op, extra;
+                words >> base >> factor >> op;
+                if (words >> extra) continue;   // a longer expression: not the plain prescale form
+                if ((base != "LUMA.w" && base != "LUMA.h" && base != "HOOKED.w" && base != "HOOKED.h") || op != "*") continue;
+                char* parsedEnd = nullptr;
+                const double k = std::strtod(factor.c_str(), &parsedEnd);
+                if (parsedEnd && *parsedEnd == '\0' && k > 1.0 + 1e-6)
+                    return true;
+            }
+        }
+        return false;
     }
 
     bool IsOutputQuantizer(const std::string& filename, const std::string& source)

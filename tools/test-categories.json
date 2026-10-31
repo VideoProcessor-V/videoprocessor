@@ -75,6 +75,13 @@
   },
   {
    "kind": "class",
+   "value": "AdaptiveScalingMotionHookTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/scaling/output/tests/AdaptiveScalingOneAxisMotionTests.cpp",
+   "note": "Motion-adapted blend and Stage 8b one-axis hook tests; WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture). The CPU class in the same file is AdaptiveScalingOneAxisMotionTests."
+  },
+  {
+   "kind": "class",
    "value": "CaptureUnpackHookTests",
    "category": "GpuWarp",
    "file": "src/VP-V/modules/input/capture/tests/CaptureUnpackHookTests.cpp",

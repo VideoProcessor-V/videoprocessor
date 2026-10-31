@@ -17,7 +17,7 @@ Identify the signal (SDR / HDR10 / LLDV / DV tunnel), its metadata and its color
 ## Settings
 
 - Existing keys: `newlldv` (Bill's key, enables VP's inference), `newlldv_sdr_veto`, `dv_tunnel_handoff` (all `[general]`), `dv_tunnel_gpu_unpack`, `dv_tunnel_fixes`, `dv_compare_capture_folder` (renderer profile)
-- Planned keys: `resync_event` (off | shadow; R1 shadow mode, no behaviour change)
+- Keys: `resync_event` (off | shadow | on; R1 shadow mode, no behaviour change; R3/L1/R4a `on`: the Indicator drives the readers' resets, expert until the R5 gate)
 - Tiers: not tiered
 
 ## Fallbacks
@@ -92,6 +92,10 @@ Checked against the code 2026-10-25 (WP-14 / M2 step 14, `feat/m2-dv`).
   (`Detector::OnEnqueue`), the lock-free arm box, the refusal note and the storm window.
 - `ResyncShadow.h` - resync shadow mode (R1): feeds the detector, writes the central Indicator, and summarises
   it as the Ctrl+I "Resync:" line and the Ctrl+Alt+D `resync` / `resync_events` lines; Off costs one atomic load.
+- `ResyncDrive.h` - resync_event `on` (R3): the readers the Indicator drives (render-ahead, timeline, sigma-delta carry,
+  scene detector, source-resolution monitor, Dynamic Drive, libplacebo flush, re-base P0) with their per-counter
+  policies, sealed and observed at the render loop's dequeue; the capture-thread Cursor for the pulldown detector.
+- `ResyncCallSites.h` - the renderer's call-site glue (reader generation key, carry validity, mode from the setting).
 - `DolbyVisionTunnelGate.h`, `DolbyVisionTunnelHandoff.h` - which captured signals the DV tunnel
   formatter may claim (`dv_tunnel_handoff`), and the hand-off of an RGB LLDV signal to the tunnel.
 - `GpuDolbyVisionTunnelUnpack.h/.cpp` - the tunnel's RGB8-in-r210 container unpacked to 12-bit

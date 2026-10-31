@@ -135,7 +135,14 @@ namespace InterpolationTimeline
 		{
 			initialized = false;
 			outputs.clear();
+			reanchorPending = false;
 		}
+
+		// R3 (resync_event on): a continuity slip or a timing event (Indicator MINOR / timing). The
+		// next planned frame re-anchors the source clock at its own time (no restart: the display's
+		// cadence is kept, a gap within the span is still filled); a restart wins over it.
+		void Reanchor() { reanchorPending = initialized; }
+		bool ReanchorPending() const { return reanchorPending; }
 
 		// generation: the queue generation; sequence: the source sequence; pts: A's time
 		// (seconds); nextPts: B's time when B is known (0 = not known); rates in Hz.
@@ -179,6 +186,7 @@ namespace InterpolationTimeline
 				sequence <= lastSequence || sequence - lastSequence > static_cast<uint64_t>(maxSpan) ||
 				rateChanged || !(pts > lastPts) ||
 				pts - lastPts > (maxSpan + 0.5) * period;
+			reanchorPending = reanchorPending && !restart;
 			if (restart)
 			{
 				if (initialized) ++restarts;
@@ -191,13 +199,14 @@ namespace InterpolationTimeline
 				const double frames = (std::max)(1.0, std::round((pts - lastPts) / period));
 				const double predicted = clock + frames * period;
 				const double error = pts - predicted;
-				if (std::abs(error) > 0.25 * period)
+				if (reanchorPending || std::abs(error) > 0.25 * period)
 				{
 					clock = pts;
 					++reanchors;
 				}
 				else
 					clock = predicted + 0.05 * error;
+				reanchorPending = false;
 				// Time the display spent on A while no frame came (a gap without a pair): the
 				// schedule keeps the display's cadence and resumes at the first refresh at or
 				// after this frame's time.
@@ -269,5 +278,6 @@ namespace InterpolationTimeline
 		unsigned long long restarts = 0, reanchors = 0, skipped = 0, repeats = 0, updates = 0;
 		double trim = 1.0;
 		bool spanInTime = true;
+		bool reanchorPending = false;   // R3: consumed by the next planned (non-repeat, non-update) frame
 	};
 }

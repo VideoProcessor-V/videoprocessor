@@ -37,7 +37,7 @@ Note 2026-10-17: detail accumulation (both rows above, and step 6 below) was REJ
    - **Pruning:** pairs older than the frame being rendered are dropped.
    - **Bounded:** about 16 pairs.
 5. **Consume.** At render time each consumer asks the store for its pair:
-   - **Hit:** it uses the waiting field. It waits on that slot's fence and runs the same trust layers as today: consistency, landing check, M6 pixel trust.
+   - **Hit:** it uses the waiting field. The producer uses its own device with a blocking staging Map; the render reads CPU vectors from the VectorStore, with no fence. It runs the same trust layers as today: consistency, landing check, M6 pixel trust.
    - **Miss** (no engine, an error, not ready yet, a non-NVIDIA GPU): the matcher runs exactly as today. It stays the default path and is tested on every build.
 
 ## Why this pays

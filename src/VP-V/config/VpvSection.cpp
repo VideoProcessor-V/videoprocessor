@@ -1306,16 +1306,23 @@ namespace Vpv
 				state->host.setValue(section, QStringLiteral("frame_analysis_store"), on ? QStringLiteral("on") : QStringLiteral("off"));
 			});
 
-			// resync_event (R1): shadow detection of resync/discontinuity events; no picture change.
-			auto* resync = new QCheckBox(QStringLiteral("Resync event (shadow)"));
+			// resync_event (R1 shadow; R3/L1/R4a on): the central resync Indicator. Shadow only detects and
+			// shows; on lets it drive the resets of the timing family, libplacebo's cache and the re-base fade.
+			auto* resync = new QComboBox;
 			resync->setObjectName(ObjectName(QStringLiteral("expert.resync_event")));
+			resync->addItem(QStringLiteral("Off (default)"), QStringLiteral("off"));
+			resync->addItem(QStringLiteral("Shadow (detect and show only)"), QStringLiteral("shadow"));
+			resync->addItem(QStringLiteral("On (drives the resets; expert, before its gate)"), QStringLiteral("on"));
 			resync->setToolTip(QStringLiteral("Key resync_event. shadow: detects resync and discontinuity events and shows them on the "
-				"Resync status line and in the problem report, without changing the picture. off: not computed."));
+				"Resync status line and in the problem report, without changing the picture. on: the same events drive the resets of "
+				"pulldown, render-ahead, the interpolation timeline, Dynamic Drive (look-ahead, gain, CNTR to its baseline), the "
+				"source-resolution evidence, the scene detector and the sigma-delta carry; a full resync also flushes libplacebo's "
+				"frame-mix cache and detected peak; the re-base crossfade runs in source time per axis. off: not computed."));
 			form->addRow(QStringLiteral("Resync event"), resync);
-			QObject::connect(resync, &QCheckBox::toggled, resync, [state, section](bool on)
+			QObject::connect(resync, qOverload<int>(&QComboBox::currentIndexChanged), resync, [state, resync, section](int i)
 			{
-				if (state->refreshing || !state->host.setValue) return;
-				state->host.setValue(section, QStringLiteral("resync_event"), on ? QStringLiteral("shadow") : QStringLiteral("off"));
+				if (state->refreshing || i < 0 || !state->host.setValue) return;
+				state->host.setValue(section, QStringLiteral("resync_event"), resync->itemData(i).toString());
 			});
 
 			// The module order: slot names moved within their zone.
@@ -1391,7 +1398,8 @@ namespace Vpv
 				}
 				{
 					const QSignalBlocker blocker(resync);
-					resync->setChecked(get("resync_event").compare(QStringLiteral("shadow"), Qt::CaseInsensitive) == 0);
+					const QString value = get("resync_event").toLower();
+					resync->setCurrentIndex(value == QStringLiteral("on") ? 2 : value == QStringLiteral("shadow") ? 1 : 0);
 					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
 					resync->setEnabled(!original);
 					SetGreyReason(resync, original ? QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).") : QString());

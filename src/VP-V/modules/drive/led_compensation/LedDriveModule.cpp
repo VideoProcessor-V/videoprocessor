@@ -696,6 +696,8 @@ namespace LedDrive
 		// A source frame shown again (24p in a 60 Hz output) adds nothing and
 		// would hide fades (APL "unchanged" on every repeat).
 		if (sequence != 0 && sequence == lastMeasuredSequence) return;
+		// R3: a readback of the old source after a FULL resync (resync_event on only; 0 otherwise).
+		if (sequence != 0 && restartSequence != 0 && sequence < restartSequence) return;
 		lastMeasuredSequence = sequence;
 		const FrameStats stats = statsBuilder.Build(raw, NowMs());
 		if (stats.blocks == 0) return;
@@ -769,7 +771,62 @@ namespace LedDrive
 		predictions.clear();
 		lastMeasuredSequence = 0;
 		lastFrameSequence = 0;
+		restartSequence = 0;
 		lookaheadEpoch.fetch_add(1, std::memory_order_acq_rel);
+	}
+
+	void LedDriveModule::OnSourceRestart(uint64_t sequence, double sourceFpsIn)
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		ResetLookaheadLocked();
+		restartSequence = sequence;
+		ResetPeriodSmoothingLocked(sourceFpsIn);
+		// The gain: held (GainLocked returns the last confirmed gain) until a measurement of the new
+		// source arrives; the controller does not step on the old source's statistics.
+		haveStats = false;
+		pendingCut = pendingFade = false;
+		lastMeasuredSequence = 0;
+		if (!compensating)
+			return;
+		// CNTR: the safe baseline at once; never the old source's level held above the new need.
+		if (driver)
+		{
+			const DriverStatus status = driver->Status();
+			if (pairing.Contrast() != 50 || status.contrastBusy ||
+				(status.lastSentContrast >= 0 && status.lastSentContrast != 50))
+				driver->SetContrastAsync(50);
+		}
+		pairing.Reset(50);
+		pairing.SetCeiling(-1);
+		pairing.SetBias(0.0);
+		pairing.SetHold(-1);
+		recovery.Stop();
+		pendingRecovery = false;
+		pendingRecoverySequence = 0;
+		recoveryLimit = 1e9;
+		DebugLog::Log("Dynamic Drive: resync (FULL) at source frame %llu: look-ahead reset, gain held until the new "
+			"source's first measurement, CNTR to its baseline (50)", static_cast<unsigned long long>(sequence));
+	}
+
+	void LedDriveModule::ResetPeriodSmoothing(double sourceFpsIn)
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		ResetPeriodSmoothingLocked(sourceFpsIn);
+	}
+
+	void LedDriveModule::ResetPeriodSmoothingLocked(double sourceFpsIn)
+	{
+		// The next BeginFrame takes no interval from across the change; a known rate seeds the period
+		// (BeginFrame's own 10..1000 frames per second bounds).
+		lastFrameMs = -1.0;
+		if (sourceFpsIn > 0.0 && sourceFpsIn < 1000.0)
+			framePeriodMs = std::max(1.0, std::min(1000.0 / sourceFpsIn, 100.0));
+	}
+
+	int LedDriveModule::PairedContrastForTest() const
+	{
+		std::lock_guard<std::mutex> guard(mutex);
+		return pairing.Contrast();
 	}
 
 	bool LedDriveModule::PredictionFor(uint64_t sequence, FrameStats& out) const

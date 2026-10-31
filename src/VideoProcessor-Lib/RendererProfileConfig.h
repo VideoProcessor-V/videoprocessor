@@ -838,6 +838,7 @@ namespace RendererProfileConfig
 			if (key == "timing_continuity_fixes") return IsChoice(value, { "on", "off" });   // Bug hunt 2026-10-17
 			if (key == "cadence_class_fixes") return IsChoice(value, { "on", "off" });   // Hunt 2 2026-10-17
 			if (key == "motion_history_fixes") return IsChoice(value, { "on", "off" });   // Hunt 2 fix group 5
+			if (key == "vector_demand") return IsChoice(value, { "on", "off" });   // vector engine on demand
 			if (key == "queue_timing_fixes") return IsChoice(value, { "on", "off" });   // Hunt 2 group 5 (queue/cadence timing)
 			if (key == "general_rate_fixes") return IsChoice(value, { "on", "off" });   // fixed-constant batch 2026-10-18
 			if (key == "efficiency_fixes") return IsChoice(value, { "on", "off" });   // efficiency round 2026-10-18
@@ -878,6 +879,11 @@ namespace RendererProfileConfig
 			if (key == "adaptive_grain_lo" || key == "adaptive_grain_hi") return IsNumberInRange(value, 0.0, 64.0);
 			if (key == "adaptive_grain_smooth_ms" || key == "adaptive_grain_map_smooth_ms")
 				return IsNumberInRange(value, 0.0, 10000.0);
+			// The motion-adapted blend (VP-V scaling.output, owner 2026-10-31; candidate, off).
+			if (key == "adaptive_motion") return IsChoice(value, { "on", "off" });
+			if (key == "adaptive_motion_speed_lo" || key == "adaptive_motion_speed_hi") return IsNumberInRange(value, 0.0, 10.0);
+			if (key == "adaptive_motion_floor") return IsNumberInRange(value, 0.0, 1.0);
+			if (key == "adaptive_motion_smooth_ms") return IsNumberInRange(value, 0.0, 10000.0);
 			// Stage 10: BTB/WTW kept through libplacebo's scaling (SDR).
 			if (key == "preserve_extended_range") return IsChoice(value, { "on", "off" });
 			if (key == "extended_range_more_cases") return IsChoice(value, { "on", "off" });
@@ -1130,7 +1136,7 @@ namespace RendererProfileConfig
 		if (key == "pipeline_original_pathway") return IsChoice(value, { "on", "off" });
 		if (key == "pipeline_entrance_once") return IsChoice(value, { "on", "off" });   // B3 (ADR-0024)
 		if (key == "frame_analysis_store") return IsChoice(value, { "on", "off" });     // WP-23
-		if (key == "resync_event") return IsChoice(value, { "off", "shadow" });         // R1
+		if (key == "resync_event") return IsChoice(value, { "off", "shadow", "on" });   // R1 shadow; R3/L1/R4a on
 		if (key == "entrance_gpu_drain") return IsChoice(value, { "off", "flush", "finish" });   // expert workaround
 		// Config usability (2026-10-25): the owner's Approve / Keep decision per retirement group (A-D; keys retirement_a .. retirement_d, names are case-insensitive), recorded by the VP-V page's
 		// Proposed retirement tab. A UI-only record: nothing in the renderer reads it and nothing is hidden or removed by it.
