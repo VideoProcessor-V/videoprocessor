@@ -141,6 +141,32 @@ namespace FallbackCatalogTest
 			Assert::IsFalse(EarlyUpload(true, true, "").engaged);
 		}
 
+		TEST_METHOD(ExtraRebaseAndDetailFailuresAreVisible)
+		{
+			const Decision extra = RebaseExtraNative("no format");
+			Assert::IsTrue(extra.engaged);
+			Assert::AreEqual(std::string("re-base"), extra.id, L"shares RebasePaused's id");
+			Assert::AreEqual(std::string("extra picture: native frame (no format)"), extra.reason);
+			Assert::AreEqual(std::string("extra picture: native frame"), RebaseExtraNative("").reason);
+			FallbackStatus::Registry registry;
+			Assert::IsTrue(Sync(registry, extra));
+			Assert::IsTrue(Sync(registry, RebasePaused(true, 5.0, "no format")), L"the pause takes the entry over");
+			Assert::IsTrue(Sync(registry, RebasePaused(false, 5.0, "")));
+			Assert::IsFalse(registry.Engaged("re-base"));
+
+			const Decision pulse = DetailPulseFailed(true, "gpu");
+			Assert::IsTrue(pulse.engaged);
+			Assert::AreEqual(std::string("detail pulse"), pulse.id);
+			Assert::IsTrue(Has(pulse, "(gpu)"));
+			Assert::IsFalse(DetailPulseFailed(false, "gpu").engaged);
+			Assert::AreEqual(std::string("detail pulse"), DetailPulseFailed(false, "").id);
+			const Decision restore = TextureRestoreFailed(true, "");
+			Assert::IsTrue(restore.engaged);
+			Assert::AreEqual(std::string("texture restore"), restore.id);
+			Assert::IsFalse(TextureRestoreFailed(false, "x").engaged);
+			Assert::AreEqual(std::string("texture restore"), TextureRestoreFailed(false, "x").id);
+		}
+
 		TEST_METHOD(MotionConsumerGpuFailuresAreVisibleWhileRecent)
 		{
 			// Group D audit D3: warp / interpolation failures are listed, timing reasons are not.

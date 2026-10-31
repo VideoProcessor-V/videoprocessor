@@ -2,6 +2,7 @@
 #include "EntranceSegment.h"
 
 #include <VP-V/core/EntranceEpoch.h>
+#include <VP-V/core/FallbackCatalog.h>
 
 #include <VP-V/modules/control/diagnostics/DiagnosticsAdapter.h>
 #include <DebugLog.h>
@@ -717,6 +718,12 @@ namespace EntranceSegment
 				pl_frame rebased{};
 				if (sourceRebase.Apply(host.Gpu(), dispatch, frame, rebaseFactorX(), rebaseFactor(), rebased, 1))
 					frame = rebased;
+				else
+				{
+					// Silent-fallbacks: the extra renders native; same id as RebasePaused (released with the pause).
+					const FallbackCatalog::Decision d = FallbackCatalog::RebaseExtraNative(sourceRebase.LastError());
+					host.EngageFallback(d.id, d.reason);
+				}
 			}
 			return;
 		}
@@ -866,6 +873,7 @@ namespace EntranceSegment
 			{
 				frame = pulsed;
 				b.detailPulseInactive->clear();
+				host.ReleaseFallback("detail pulse");
 			}
 			else
 			{
@@ -876,8 +884,12 @@ namespace EntranceSegment
 						detailPulse.LastError().c_str(), detailPulse.Failures());
 				detailPulseFailLogged = detailPulse.LastError();
 				*b.detailPulseInactive = detailPulse.LastError();
+				const FallbackCatalog::Decision d = FallbackCatalog::DetailPulseFailed(true, detailPulse.LastError());
+				host.EngageFallback(d.id, d.reason);
 			}
 		}
+		else
+			host.ReleaseFallback("detail pulse");   // switched off or not applicable: nothing failed
 		if (textureRestoreRuns())
 		{
 			pl_frame restored{};
@@ -885,6 +897,7 @@ namespace EntranceSegment
 			{
 				frame = restored;
 				b.textureRestoreInactive->clear();
+				host.ReleaseFallback("texture restore");
 			}
 			else
 			{
@@ -893,8 +906,12 @@ namespace EntranceSegment
 						textureRestore.LastError().c_str(), textureRestore.Failures());
 				textureRestoreFailLogged = textureRestore.LastError();
 				*b.textureRestoreInactive = textureRestore.LastError();
+				const FallbackCatalog::Decision d = FallbackCatalog::TextureRestoreFailed(true, textureRestore.LastError());
+				host.EngageFallback(d.id, d.reason);
 			}
 		}
+		else
+			host.ReleaseFallback("texture restore");
 	}
 
 	// detail_pulse_stabilise's look-ahead (optional): the next source frame's band energies when

@@ -107,6 +107,25 @@ namespace FallbackCatalog
 		return Engaged("re-base", std::string("paused after a failure: native frames for ") + buffer +
 			(error.empty() ? std::string() : " (" + error + ")"));
 	}
+	// A failed re-base on the EXTRA path (the de-judder's extra pictures): the extra shows the native
+	// frame. Same id as RebasePaused ("re-base"): the renderer's next RebasePaused sync (the failure
+	// count moved, so a pause follows) takes the entry over and releases it with the pause.
+	inline Decision RebaseExtraNative(const std::string& error)
+	{
+		return Engaged("re-base", std::string("extra picture: native frame") +
+			(error.empty() ? std::string() : " (" + error + ")"));
+	}
+	// Detail pulse stabilise / texture restore: a failed pass renders the frame without it.
+	inline Decision DetailPulseFailed(bool failed, const std::string& error)
+	{
+		return failed ? Engaged("detail pulse", "not applied" + (error.empty() ? std::string() : " (" + error + ")") +
+			"; the frame is rendered without it") : Released("detail pulse");
+	}
+	inline Decision TextureRestoreFailed(bool failed, const std::string& error)
+	{
+		return failed ? Engaged("texture restore", "not applied" + (error.empty() ? std::string() : " (" + error + ")") +
+			"; the frame is rendered without it") : Released("texture restore");
+	}
 
 	// ---- repair.deband --------------------------------------------------------------------------
 	// libplacebo's automatic deband yields to VP's debander (deband_vp_exclusive). Before this, a
