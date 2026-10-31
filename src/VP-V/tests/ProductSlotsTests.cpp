@@ -33,7 +33,7 @@ namespace ProductSlotsTestsNs
 	constexpr ProductId kC = 2;   // reads B(N)
 	constexpr uint64_t kNoFence = ~uint64_t(0);
 
-	Registry Chain()
+	Registry Chain(bool bMissingForm = true)
 	{
 		using namespace VpIndicator;
 		const CounterMask content = Bit(kFull) | Bit(kContinuity);
@@ -44,13 +44,14 @@ namespace ProductSlotsTestsNs
 		detail::AddInput(d[kB], kA, 0);
 		detail::AddInput(d[kB], kA, 1);
 		d[kB].spanMask = content;
+		d[kB].missingInputForm = bMissingForm;   // B(0) has no A(-1): a declared single-frame form
 		detail::AddInput(d[kC], kB, 0);
 		for (ProductDecl& p : d)
 			p.size.fixedBytes = 64;
 		return Registry(std::move(d));
 	}
 
-	Graph ChainGraph(ProductId top)
+	Graph ChainGraph(ProductId top, bool bMissingForm = true)
 	{
 		ConsumerDecl c;
 		c.id = 1;
@@ -60,7 +61,7 @@ namespace ProductSlotsTestsNs
 		gs.dims.height = 64;
 		gs.renderAhead = 0;
 		gs.laneLead = 1;
-		return BuildGraph(Chain(), { c }, gs);
+		return BuildGraph(Chain(bMissingForm), { c }, gs);
 	}
 
 	uint8_t Pattern(uint64_t seq, ProductId p, bool live) { return uint8_t(seq * 31u + p * 7u + (live ? 128u : 0u)); }
@@ -82,8 +83,8 @@ namespace ProductSlotsTestsNs
 		uint32_t declineMask = 0;   // products whose live fill declines
 		uint64_t fills = 0;
 
-		explicit Harness(ProductId top, uint32_t era = 11)
-			: graph(ChainGraph(top))
+		explicit Harness(ProductId top, uint32_t era = 11, bool bMissingForm = true)
+			: graph(ChainGraph(top, bMissingForm))
 			, table(graph)
 			, ind(era, 64)
 		{
@@ -588,6 +589,75 @@ namespace ProductSlotsTestsNs
 			Assert::IsTrue(s.BeginLive(1) == 0, L"freed on release");
 		}
 
+		TEST_METHOD(MissingInputIsAVisibleFallbackOrUnavailable)
+		{
+			Harness with(kB);
+			const auto& r = with.Resolve(0);
+			Assert::IsTrue(with.Result(r, kB).final == SealOutcome::Sealed);
+			Assert::AreEqual(2u, with.Result(r, kB).missingInputs, L"input 1 (A at lag 1) missing");
+			const Header* hb = with.Set(kB).Read(0).header;
+			Assert::IsTrue(hb->prov == Provenance::LiveFallback);
+			Assert::AreEqual(2, int(hb->ancestorCount), L"positional ancestors");
+			Assert::AreEqual(0u, hb->ancestors[1].cgen);
+			Assert::IsTrue(hb->ancestors[0].cgen != 0);
+			Assert::AreEqual(uint64_t(1), with.Set(kB).Counters().liveMissingInputs.load());
+
+			Harness without(kB, 11, false);
+			const auto& r2 = without.Resolve(0);
+			Assert::IsTrue(without.Result(r2, kB).final == SealOutcome::Unavailable);
+			Assert::IsTrue(without.Result(r2, kB).finalReason == SealReason::InputMissing);
+			Assert::AreEqual(uint64_t(1), without.Set(kB).Counters().inputMissing.load());
+			Assert::AreEqual(uint64_t(0), without.fills - 1, L"only A was filled");
+		}
+
+		TEST_METHOD(AbandonWaitsForTheProducerFence)
+		{
+			Harness h(kA);
+			SlotSet& s = h.Set(kA);
+			LaneTicket t;
+			Assert::IsTrue(s.Claim(0, Provenance::AheadOfa, kNoFence, &t) == ClaimResult::Claimed);
+			h.Resolve(0);   // late: rejected, live
+			Assert::IsFalse(s.LaneContinue(t));
+			Assert::IsFalse(s.Abandon(t, 9, 8), L"submitted engine work has not landed");
+			s.Release(0);
+			Assert::IsTrue(s.StateOf(0) == SlotState::ReleasedLaneOwned);
+			Assert::IsTrue(s.Claim(3, Provenance::AheadOfa, kNoFence, nullptr) == ClaimResult::TooEarly,
+				L"no second writer while the engine may still write");
+			Assert::IsTrue(s.Abandon(t, 9, 9));
+			Assert::IsTrue(s.Claim(3, Provenance::AheadOfa, kNoFence, nullptr) == ClaimResult::Claimed);
+		}
+
+		TEST_METHOD(StaleTicketCopyNeverTouchesTheCurrentHeader)
+		{
+			Harness h(kA);
+			SlotSet& s = h.Set(kA);
+			LaneTicket t;
+			s.Claim(0, Provenance::AheadLane, kNoFence, &t);
+			s.LaneHeader(t).honoured = h.ind.StampOf(0);
+			s.LaneHeader(t).reads = h.graph.nodes[0].reads;
+			const LaneTicket copy = t;
+			Assert::IsTrue(s.Publish(t) == PublishResult::Published);
+			h.Resolve(0);
+			const uint32_t cgen = s.Read(0).header->cgen;
+			LaneTicket stale = copy;
+			Assert::IsTrue(s.Publish(stale) == PublishResult::Late);
+			Assert::AreEqual(cgen, s.Read(0).header->cgen);
+			Assert::IsTrue(s.StateOf(0) == SlotState::Sealed);
+		}
+
+		TEST_METHOD(ReleaseAfterKeepsEachHistory)
+		{
+			Harness h(kB);   // A history 1, B history 0
+			h.Resolve(0);
+			h.table.ReleaseAfter(0);
+			Assert::IsTrue(h.Set(kB).StateOf(0) == SlotState::Released);
+			Assert::IsTrue(h.Set(kA).StateOf(0) == SlotState::Live, L"A(0) is B(1)'s lag-1 input");
+			h.Resolve(1);
+			h.table.ReleaseAfter(1);
+			Assert::IsTrue(h.Set(kA).StateOf(0) == SlotState::Released);
+			Assert::IsTrue(h.Set(kA).StateOf(1) == SlotState::Live);
+		}
+
 		TEST_METHOD(FillDeclinedLeavesTheProductUnavailable)
 		{
 			Harness h(kB);
@@ -747,13 +817,12 @@ namespace ProductSlotsTestsNs
 					const uint8_t* prev = h.ReadBytes(kA, n - 1, &live);
 					if (!prev || !Filled(prev, bytes, Pattern(n - 1, kA, live)))
 						++corrupt;
-					a.Release(n - 1);
 				}
 				bool live = false;
 				const uint8_t* cur = h.ReadBytes(kB, n, &live);
 				if (cur && !Filled(cur, bytes, Pattern(n, kB, live)))
 					++corrupt;
-				b.Release(n);
+				h.table.ReleaseAfter(n);   // A(n-1) and B(n): the N2 rule
 			}
 			done.store(true);
 			lane.join();
@@ -768,10 +837,13 @@ namespace ProductSlotsTestsNs
 				Assert::AreEqual(uint64_t(0), c.overruns.load());
 				Assert::AreEqual(uint64_t(0), c.orderErrors.load());
 				Assert::AreEqual(uint64_t(0), c.noLiveBuffer.load());
+				Assert::AreEqual(uint64_t(0), c.inputMissing.load());
 				Assert::AreEqual(frames, c.sealed.load() + c.live.load());
 				Assert::IsTrue(c.live.load() > 0);
 			}
 			Assert::IsTrue(a.Counters().sealed.load() > 0, L"the on-time path is exercised");
+			Assert::IsTrue(b.Counters().sealed.load() > 0);
+			Assert::AreEqual(uint64_t(1), b.Counters().liveMissingInputs.load(), L"only B(0) lacks A(-1)");
 			Logger::WriteMessage((std::string("stress: A sealed ") + std::to_string(a.Counters().sealed.load())
 				+ " live " + std::to_string(a.Counters().live.load()) + " late " + std::to_string(a.Counters().late.load())
 				+ " lateDiscards " + std::to_string(a.Counters().lateDiscards.load()) + "; B sealed "

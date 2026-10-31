@@ -11,7 +11,7 @@
 // under free VRAM x headroom), system-RAM rules, the optical-flow load, the profile cache, the
 // adaptive headroom and determinism. CPU only.
 
-#include <VP-V/core/CardProfile.h>
+#include <VP-V/core/VramGovernor.h>
 
 #include <string>
 #include <vector>
@@ -154,7 +154,8 @@ namespace CardProfileTestsNs
 			Assert::IsFalse(p.Laned(kP6EntranceAhead));
 			Assert::IsTrue(p.Find(kP6EntranceAhead)->why == GrantWhy::OverBudget);
 			Assert::IsFalse(p.t0OverBudget);
-			Assert::IsTrue(p.notice.empty());
+			Assert::AreNotEqual(std::string::npos, p.notice.find("entrance output ahead computed in the render"),
+				L"the cutback is visible");
 			// The 3090 keeps it.
 			Assert::IsTrue(PlanTiers(reg, g, Rtx3090(), TierInput()).Laned(kP6EntranceAhead));
 		}
@@ -173,9 +174,11 @@ namespace CardProfileTestsNs
 			card.vramBudgetBytes = budget * 2;
 			const TierPlan p = PlanTiers(reg, g, card, in);
 			Assert::AreEqual(budget, p.budgetBytes);
+			// One shed order: T1 first, then T0 readers before their inputs (P3, P2, then P1).
 			Assert::IsTrue(p.Find(kP1HalfLuma)->why == GrantWhy::OverBudget);
-			Assert::IsTrue(p.Find(kP2VectorPair)->why == GrantWhy::InputInRender);
-			Assert::IsTrue(p.Find(kP3AnalysisField)->why == GrantWhy::InputInRender);
+			Assert::IsTrue(p.Find(kP2VectorPair)->why == GrantWhy::OverBudget);
+			Assert::IsTrue(p.Find(kP3AnalysisField)->why == GrantWhy::OverBudget);
+			Assert::IsTrue(p.Laned(kP0RebaseDecision), L"the smallest T0 input keeps its lane");
 			Assert::IsTrue(p.t0OverBudget);
 			Assert::IsFalse(p.notice.empty());
 			Assert::IsTrue(p.vramBytes <= p.budgetBytes);
@@ -189,6 +192,39 @@ namespace CardProfileTestsNs
 			const TierPlan p = PlanTiers(R4bProducts(), Graph4k(), tiny, TierInput());
 			Assert::IsTrue(p.liveOverBudget);
 			Assert::AreNotEqual(std::string::npos, p.notice.find("not enough free video memory"));
+		}
+
+		TEST_METHOD(OwnUsageDoesNotShrinkTheGrantBetweenRebuilds)
+		{
+			const Registry reg = FirstProducts();
+			CardProfile small = Laptop();
+			small.vramBudgetBytes = 1000 * kMB;
+			small.vramUsageBytes = 700 * kMB;
+			const TierPlan first = PlanTiers(R4bProducts(), Graph4k(), small, TierInput());
+			// The granted memory is now allocated and shows up in CurrentUsage as VP's own.
+			CardProfile running = small;
+			running.vramUsageBytes += first.vramBytes;
+			TierInput in;
+			in.ownUsageBytes = first.vramBytes;
+			const TierPlan second = PlanTiers(R4bProducts(), Graph4k(), running, in);
+			Assert::AreEqual(first.budgetBytes, second.budgetBytes);
+			for (const TierEntry& e : first.entries)
+				Assert::IsTrue(e.grant == second.Find(e.id)->grant, L"no flapping");
+			(void)reg;
+		}
+
+		TEST_METHOD(LaneGrantsReachTheSlots)
+		{
+			const Registry reg = R4bProducts();
+			const Graph g = Graph4k();
+			CardProfile small = Laptop();
+			small.vramBudgetBytes = 1000 * kMB;
+			small.vramUsageBytes = 700 * kMB;
+			const TierPlan p = PlanTiers(reg, g, small, TierInput());
+			SlotTable table(g);
+			ApplyLaneGrants(p, table);
+			Assert::IsFalse(table.Find(kP6EntranceAhead)->LaneGranted());
+			Assert::IsTrue(table.Find(kP3AnalysisField)->LaneGranted());
 		}
 
 		TEST_METHOD(SystemRamRules)
@@ -255,8 +291,8 @@ namespace CardProfileTestsNs
 			const TierPlan p = PlanTiers(reg, Graph4k(), Rtx3090(), in);
 			Assert::IsTrue(p.Find(kP6EntranceAhead)->why == GrantWhy::NoGain, L"no saving, no lane memory");
 			// The compute scale divides the estimate.
-			const double laptop = RenderMsOf(reg.Get(kP3AnalysisField), Graph4k(), Laptop(), TierInput());
-			const double big = RenderMsOf(reg.Get(kP3AnalysisField), Graph4k(), Rtx3090(), TierInput());
+			const double laptop = RenderMsOf(reg.Get(kP3AnalysisField), Graph4k(), Laptop(), {});
+			const double big = RenderMsOf(reg.Get(kP3AnalysisField), Graph4k(), Rtx3090(), {});
 			Assert::AreEqual(laptop / 4.0, big, 1e-9);
 		}
 

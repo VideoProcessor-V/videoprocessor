@@ -21,7 +21,8 @@
 //          every lane backend; 0 for render-only) + 1 only when a consumer holds the next frame's
 //          product through the presentation span (a pair consumer, audit 25a N8)
 //   live pool = history + 1 + R (+1 for a held span product) + one spare per input reference held
-//               by lane readers (a late lane reader may pin a released live buffer for one job):
+//               by lane readers x lane jobs in flight (a late lane reader may pin a released live
+//               buffer until its job ends):
 //               every frame the render holds may be
 //               a live fill (design B3 says R + 1; that leaves no live buffer for a history frame
 //               that was itself filled live, so an in-render-only history product could not run)
@@ -43,6 +44,7 @@ struct GraphSettings {
     QueueMode queueMode = QueueMode::Normal;
     bool ofaPresent = true;       // the card has an optical-flow engine
     uint64_t cardProfileKey = 0;  // CardProfile identity (adapter LUID + driver), a rebuild trigger
+    uint8_t laneJobsInFlight = 1; // jobs one lane producer may hold pins for at once (OFA: up to its fence)
 };
 
 struct Node {
@@ -58,6 +60,7 @@ struct Node {
     std::array<InputRef, kMaxInputs> inputs{};   // substituted ids
     VpIndicator::CounterMask reads = 0;          // the product's reads plus `graph`
     VpIndicator::CounterMask spanMask = 0;
+    bool missingInputForm = false;
     uint64_t bufferBytes = 0;
     uint64_t ringBytes = 0;   // lane ring buffers (0 for render-only)
     uint64_t liveBytes = 0;   // live pool, separate memory
@@ -146,7 +149,8 @@ inline uint32_t RebuildReasons(const GraphKey& before, const GraphKey& after, bo
     const GraphSettings& a = before.gs;
     const GraphSettings& b = after.gs;
     if (a.renderAhead != b.renderAhead || a.laneLead != b.laneLead || a.queueDepth != b.queueDepth
-        || a.lookAheadWalk != b.lookAheadWalk || a.queueMode != b.queueMode)
+        || a.lookAheadWalk != b.lookAheadWalk || a.queueMode != b.queueMode
+        || a.laneJobsInFlight != b.laneJobsInFlight)
         r |= kRebuildQueue;
     if (a.cardProfileKey != b.cardProfileKey || a.ofaPresent != b.ofaPresent)
         r |= kRebuildCard;
@@ -307,7 +311,8 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
         const unsigned q = lane ? 1u : 0u;
         const unsigned ring = unsigned(node.history) + 1u + R + L + q + (node.holdsSpan ? 1u : 0u);
         node.ring = uint8_t(ring > 255u ? 255u : ring);
-        const unsigned live = unsigned(node.history) + 1u + R + (node.holdsSpan ? 1u : 0u) + laneReadRefs[p];
+        const unsigned live = unsigned(node.history) + 1u + R + (node.holdsSpan ? 1u : 0u)
+                              + laneReadRefs[p] * unsigned(gs.laneJobsInFlight == 0 ? 1u : gs.laneJobsInFlight);
         node.livePool = uint8_t(live > 255u ? 255u : live);
         node.inputCount = d.inputCount;
         for (size_t k = 0; k < d.inputCount; ++k) {
@@ -316,6 +321,7 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
         }
         node.reads = d.reads | VpIndicator::Bit(VpIndicator::kGraph);
         node.spanMask = d.spanMask;
+        node.missingInputForm = d.missingInputForm;
         node.bufferBytes = BytesOf(d.size, gs.dims);
         // Ring buffers only for a lane (a render-only product's slots hold headers; its data is in
         // the live pool). The live pool is separate memory.

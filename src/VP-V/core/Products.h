@@ -138,6 +138,9 @@ struct ProductDecl {
     bool rebasedPlane = false;                // sized on the re-based plane: an axis change rebuilds
     bool rarelyTouched = false;               // read rarely: may live in system RAM (doc 21 item 3)
     ProductId noOfaSubstitute = kNoProduct;   // used instead on cards without an optical-flow engine
+    // A declared form for a live fill with an input missing (e.g. no previous frame after a reset).
+    // Without it such a fill is refused: the product is unavailable for that frame (visible).
+    bool missingInputForm = false;
     float refRenderMs = 0.0f;                 // estimated in-render cost on the reference card, 1080p
 };
 
@@ -318,6 +321,7 @@ inline Registry FirstProducts()
     AddInput(p4, kP1HalfLuma, 0);
     p4.size.fixedBytes = 8192;
     p4.residency = Residency::SystemRam;
+    p4.missingInputForm = true;   // stats of a frame need no history to start
     p4.refRenderMs = 0.4f;
     d.push_back(p4);
 

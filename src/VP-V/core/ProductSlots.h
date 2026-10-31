@@ -158,6 +158,7 @@ enum class SealReason : uint8_t {
     AlreadySealed,       // a second seal of the same frame (idempotent)
     NoLiveBuffer,
     FillDeclined,
+    InputMissing,        // a live fill lacks an input and the product declares no form for that
 };
 
 inline const char* Token(SealReason r)
@@ -179,6 +180,7 @@ inline const char* Token(SealReason r)
     case SealReason::AlreadySealed: return "already_sealed";
     case SealReason::NoLiveBuffer: return "no_live_buffer";
     case SealReason::FillDeclined: return "fill_declined";
+    case SealReason::InputMissing: return "input_missing";
     }
     return "?";
 }
@@ -221,6 +223,10 @@ struct SlotCounters {
     std::atomic<uint64_t> noLiveBuffer{ 0 };
     std::atomic<uint64_t> refusedRelive{ 0 };
     std::atomic<uint64_t> pinnedLiveSkips{ 0 };   // a free live buffer skipped under a lane pin
+    std::atomic<uint64_t> pinGiveUps{ 0 };        // PinRef gave up on a word changing under it
+    std::atomic<uint64_t> liveMissingInputs{ 0 }; // live fills made in the declared missing-input form
+    std::atomic<uint64_t> inputMissing{ 0 };      // live fills refused: an input missing, no form
+    std::atomic<uint64_t> spanUnknown{ 0 };       // the span check had no sealed stamp (not N2)
 };
 
 class SlotSet {
@@ -250,9 +256,10 @@ public:
     uint16_t LivePool() const { return livePool_; }
     uint16_t SlotOf(uint64_t seq) const { return uint16_t(seq % ring_); }
     const SlotCounters& Counters() const { return counters_; }
+    SlotCounters& MutableCounters() { return counters_; }
     // The tier plan's grant: without a lane, a missing result is expected, not counted.
-    void SetLaneGranted(bool granted) { laneGranted_ = granted; }
-    bool LaneGranted() const { return laneGranted_; }
+    void SetLaneGranted(bool granted) { laneGranted_.store(granted, std::memory_order_relaxed); }
+    bool LaneGranted() const { return laneGranted_.load(std::memory_order_relaxed); }
 
     // Any thread: the decoded word of the slot that frame `seq` maps to (diagnostics, tests).
     SlotWord WordFor(uint64_t seq) const { return Unpack(slots_[SlotOf(seq)].word.load(std::memory_order_acquire)); }
@@ -337,6 +344,13 @@ public:
         if (producerCompleted < producerSignal)
             return PublishResult::NotComplete;
         Slot& s = slots_[t.slot];
+        if (!LaneContinue(t)) {
+            // Rejected (or a stale/copied ticket): never touch the header of the slot's current
+            // tenant. The render only reads laneHdr in Published/Sealed, which this ticket cannot be.
+            counters_.lateDiscards.fetch_add(1, std::memory_order_relaxed);
+            Ack(t);
+            return PublishResult::Late;
+        }
         const uint32_t cgen = NewCgen(s);
         s.laneHdr.seq = t.seq;
         s.laneHdr.prov = t.prov;
@@ -361,14 +375,18 @@ public:
         return PublishResult::Late;
     }
 
-    // Lane: stop without publishing (cancelled at a chunk boundary, or after the producer fence of
-    // submitted GPU/OFA work). Returns the buffer.
-    void Abandon(LaneTicket& t)
+    // Lane: stop without publishing (cancelled at a chunk boundary). Submitted GPU/OFA work must
+    // land first: with producerCompleted < producerSignal nothing is returned (false; poll again),
+    // so the ring buffer never has two writers. CPU: the defaults.
+    bool Abandon(LaneTicket& t, uint64_t producerSignal = 0, uint64_t producerCompleted = ~uint64_t(0))
     {
         if (!t.valid)
-            return;
+            return true;
+        if (producerCompleted < producerSignal)
+            return false;
         counters_.abandoned.fetch_add(1, std::memory_order_relaxed);
         Ack(t);
+        return true;
     }
 
     // Any thread (the lane recording ancestors): the reference to frame `seq`'s current content,
@@ -415,6 +433,7 @@ public:
                 *liveIndex = live;
             return true;
         }
+        counters_.pinGiveUps.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
 
@@ -515,7 +534,7 @@ public:
             }
             if (reason == SealReason::LaneLate)
                 counters_.late.fetch_add(1, std::memory_order_relaxed);
-            else if (reason == SealReason::LaneMissing && !laneGranted_)
+            else if (reason == SealReason::LaneMissing && !LaneGranted())
                 reason = SealReason::InRenderOnly;
             else if (reason == SealReason::LaneMissing)
                 counters_.missing.fetch_add(1, std::memory_order_relaxed);
@@ -805,7 +824,7 @@ private:
     std::vector<uint64_t> liveOwner_;   // render-only: biased seq holding each live buffer, 0 = free
     std::vector<std::atomic<uint32_t>> livePins_;   // lane readers pinning each live buffer (PinRef)
     SlotCounters counters_;
-    bool laneGranted_ = true;
+    std::atomic<bool> laneGranted_{ true };
 };
 
 // A lane job's pinned inputs (one per declared input), released by Unpin.
@@ -831,6 +850,7 @@ struct ProductFrameResult {
     SealOutcome final = SealOutcome::Unavailable;  // after the live fill: Sealed (ahead or live) or Unavailable
     bool liveFilled = false;
     SealReason finalReason = SealReason::OrderError;
+    uint32_t missingInputs = 0;   // bit k: input k had no valid content for the live fill
 };
 
 // All products of one graph: preallocated SlotSets in topological order, the frozen sealed stamps
@@ -916,6 +936,18 @@ public:
         return true;
     }
 
+    // Render, after frame `seq` is done (presented, or its render-ahead slot retired): releases, for
+    // every product, the frame that just left its history (seq - history). This is the N2 rule:
+    // an ancestor stays until every descendant that may record it has been sealed.
+    void ReleaseAfter(uint64_t seq, uint64_t releaseValue = 0)
+    {
+        for (size_t i = 0; i < nodes_.size(); ++i) {
+            const uint64_t h = nodes_[i].history;
+            if (seq >= h)
+                sets_[i]->Release(seq - h, releaseValue);
+        }
+    }
+
     uint64_t LiveFills() const { return liveFills_; }
     uint64_t FillDeclines() const { return fillDeclines_; }
 
@@ -923,8 +955,10 @@ public:
     // Seals every product in topological order; a product the seal rejects is live-filled at once
     // (so its descendants, sealed after it, see the new cgen: the cascade). fill(const Node&,
     // uint64_t seq, int liveIndex, Header& hdr, uint32_t missingInputs) writes the live buffer, sets
-    // hdr.prov / hdr.costUs and returns false to decline (e.g. a pair with no previous frame);
-    // hdr.reads/honoured/ancestors are prepared here. Returns one result per node.
+    // hdr.prov / hdr.costUs and returns false to decline; hdr.reads/honoured/ancestors are prepared
+    // here. With an input missing, fill runs only for a product that declares a missing-input form,
+    // and the result is marked LiveFallback (counted); otherwise it is unavailable (InputMissing).
+    // Returns one result per node.
     template <class Fill>
     const std::vector<ProductFrameResult>& Resolve(uint64_t seq, const VpIndicator::Stamp& stampN, Fill fill)
     {
@@ -953,11 +987,16 @@ public:
             h.reads = n.reads;
             h.honoured = stampN;
             h.prov = Provenance::LiveRender;
+            // Ancestors stay positional (index k = input k); a missing input keeps an empty ref
+            // (cgen 0, provenance None).
             uint32_t missing = 0;
-            uint8_t count = 0;
             for (size_t k = 0; k < n.inputCount; ++k) {
                 const InputRef& in = n.inputs[k];
                 SlotSet* src = Find(in.product);
+                AncestorRef& r = h.ancestors[k];
+                r = AncestorRef();
+                r.productId = in.product;
+                r.seq = seq >= in.lag ? seq - in.lag : 0;
                 bool ok = src != nullptr && seq >= in.lag;
                 VpAncestry::SlotView v;
                 if (ok) {
@@ -968,20 +1007,30 @@ public:
                     missing |= 1u << k;
                     continue;
                 }
-                AncestorRef& r = h.ancestors[count++];
-                r.productId = in.product;
                 r.slotIndex = src->SlotOf(seq - in.lag);
-                r.seq = seq - in.lag;
                 r.cgen = v.cgen;
                 r.prov = src->WordFor(seq - in.lag).prov;
             }
-            h.ancestorCount = count;
+            h.ancestorCount = uint8_t(n.inputCount);
+            out.missingInputs = missing;
+            if (missing != 0 && !n.missingInputForm) {
+                set.CancelLive(seq);
+                set.MutableCounters().inputMissing.fetch_add(1, std::memory_order_relaxed);
+                out.final = SealOutcome::Unavailable;
+                out.finalReason = SealReason::InputMissing;
+                continue;
+            }
             if (!fill(n, seq, live, h, missing)) {
                 set.CancelLive(seq);
                 ++fillDeclines_;
                 out.final = SealOutcome::Unavailable;
                 out.finalReason = SealReason::FillDeclined;
                 continue;
+            }
+            if (missing != 0) {
+                // The declared reduced form: visible as a fallback, never as a full live result.
+                h.prov = Provenance::LiveFallback;
+                set.MutableCounters().liveMissingInputs.fetch_add(1, std::memory_order_relaxed);
             }
             if (set.CommitLive(seq, h)) {
                 ++liveFills_;
@@ -1031,8 +1080,10 @@ private:
                 return SealReason::AncestorInvalid;
             if (in.lag > 0 && n.spanMask != 0) {
                 VpIndicator::Stamp past;
-                if (!SealedStamp(ref.seq, &past))
+                if (!SealedStamp(ref.seq, &past)) {
+                    src->MutableCounters().spanUnknown.fetch_add(1, std::memory_order_relaxed);
                     return SealReason::AncestorGone;
+                }
                 if (!VpIndicator::SameFor(past, stampN, n.spanMask))
                     return SealReason::SpanBroken;
             }
