@@ -43,7 +43,7 @@
   {
    "attrs": {
     "encode": "D:\\hfr\\breathing\\enc24.mkv",
-    "note": "GOP-breathing test clip: 48 frames, >= 2 GOPs, temporal metrics apply"
+    "note": "GOP-breathing test clip, proxy of UNKNOWN content type (film24 by the fps rule only): 48 frames, >= 2 GOPs, temporal metrics apply"
    },
    "available": true,
    "content_types": [
@@ -89,7 +89,7 @@
   {
    "attrs": {
     "encode": "D:\\hfr\\breathing\\enc32.mkv",
-    "note": "GOP-breathing test clip: 48 frames, >= 2 GOPs, temporal metrics apply"
+    "note": "GOP-breathing test clip, proxy of UNKNOWN content type (film24 by the fps rule only): 48 frames, >= 2 GOPs, temporal metrics apply"
    },
    "available": true,
    "content_types": [

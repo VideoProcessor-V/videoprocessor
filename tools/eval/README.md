@@ -90,7 +90,7 @@ the gap list are embedded.
 Sources: G18 real-codec corpus `D:\hfr\coded` (126 decoded 4-frame cases of UVG Bosphorus, Jockey,
 ReadySetGo, ShakeNDry, YachtRide and park_joy, crowd_run; masters in `D:\hfr`), UVG HFR masters, nn-corpus
 FFV1 4K masters (`trimmed/<id>/reference_ffv1.mkv`) + `pairs/` encodes (`.done` = complete; 77 of the
-manifest's 410 exist), `D:\hfr\breathing` (48-frame GOP clip), `D:\testclips` film y4m and variants.
+manifest's 410 exist), `D:\hfr\breathing` (48-frame GOP clip; proxy of UNKNOWN content type, filed under film24 only by its 24 fps), `D:\testclips` film y4m and variants.
 Short windows are decoded through an ffmpeg pipe (`-ss` half a frame early, explicit `-pix_fmt`).
 
 Content-type rules (explicit; every matching rule applies; fps is the MEASURED rate):
@@ -104,7 +104,7 @@ Content-type rules (explicit; every matching rule applies; fps is the MEASURED r
 
 Pulldown / cadence variants (`_32_`, `_22_`, 50i...) get NO fidelity type (they are cadence tests).
 `proxy: true` marks stand-ins: all UVG and park_joy/crowd_run material (sports proxies: fast motion,
-no ball), meridian (30p/60p), boat4k/foodmarket4k, breathing.
+no ball), meridian (30p/60p), boat4k/foodmarket4k, breathing (unknown content type).
 
 **Alignment (G18) - verified:** G18 coded frame 0 is NOT master frame 20. `make_codec_corpus.py` seeks
 1 s into the master (`-ss 1`), encodes, then decodes coded frames 20..23, so coded frame k is master
@@ -119,8 +119,20 @@ best neighbouring offset; see `alignment_g18.json`). nn-corpus encodes share the
 All metrics are pure functions; planes are code values; tile sizes, windows and scales derive from the
 picture size; `NA` = insufficient data / not applicable (explicit, never 0). Rows are named
 `<metric>_<plane>`; "default" is the baseline run through the identical path. Flag rule = the report's
-verdict (`eval_report.RULES`): PASS / FLAG (worse than default beyond tol) / FAIL (hard rule broken) /
-NA / INFO.
+verdict (`eval_report.RULES`):
+
+| flag | meaning |
+|---|---|
+| PASS | rule met |
+| FLAG | soft rule: worse than the default beyond tolerance |
+| FAIL | hard rule broken and the default does NOT already break it, or the candidate is worse than the default beyond SLACK (band/max_abs 0.05, kept 0.01, zero 0) |
+| LIMIT | absolute-vs-reference hard rule broken, but the default breaks it too and the candidate is not worse than the default beyond SLACK: input/codec-limited, not the candidate's fault (note kept) |
+| NA | cannot be judged (reason in `note`: frames < 8 for grain_hf, < 3 for lag1 / flicker, no GOP metadata, GOP longer than half the window, no flat tiles, no excursions, geometry differs) |
+| INFO | reported, not gated |
+
+A candidate is judged against the default AND against its own input: the `*_vs_input` metrics below
+are THE "grain never averaged away" and "BTB/WTW preserved" gates; the vs-reference rows mostly measure
+what the codec already destroyed.
 
 | # | metric (row name) | definition | units | pass rule |
 |---|---|---|---|---|
@@ -130,6 +142,8 @@ NA / INFO.
 | 3 | `grain_rms_ratio_Y/Cb` | residual = plane - gaussian_lowpass(sigma 2) on FLAT tiles chosen from the REFERENCE (tile ~ min/16 px; low-passed mean 20-80 % of range; mean low-passed gradient <= 0.4 % of peak/px; the 16 flattest); ratio = rms(out)/rms(ref) | ratio | PASS iff within +-5 % (hard) |
 | 3 | `grain_hf_ratio_*` | share of temporal-DFT energy of the residual above 0.25 cyc/frame, out / ref (needs >= 8 frames) | ratio | not farther from 1 than default + 0.10 |
 | 3 | `grain_lag1_delta_*` | per-pixel lag-1 temporal correlation of the residual, out minus ref (needs >= 3 frames); temporal averaging raises it | corr. | <= +0.05 (hard) |
+| 3 | `grain_keep_vs_input_Y/Cb` | rms(out residual) / rms(candidate INPUT residual) on the same reference-chosen flat tiles; only where input and output have the same geometry (Y in chroma444; all planes in `same`), else NA + note | ratio | PASS iff within +-5 % (hard; **the grain gate**) |
+| 3 | `grain_lag1_vs_input_Y/Cb` | lag-1 temporal correlation of the residual, out minus INPUT (same geometry only) | corr. | <= +0.05 (hard) |
 | 3 | `grain_tiles_*` | number of flat tiles found (0 -> grain rows NA) | count | INFO |
 | 4 | `flicker_excess_Y` | (V_out - V_ref)/(V_ref + 0.01): V = mean over tiles of var(diff over time of tile mean), 8-bit-equivalent codes^2; needs >= 3 frames | rel. | <= default + 0.05 |
 | 4 | `gop_ratio_gop`, `gop_ratio_minigop` | rss over 3 harmonics of the DFT amplitude of the normalised tile-detail-energy series at f = 1/GOP and 1/miniGOP (frames, from metadata), out / ref; NA if shorter than 2 periods or no metadata | ratio | not farther from 1 than default + 0.10 |
@@ -139,13 +153,14 @@ NA / INFO.
 | 6 | `halo_overshoot_Y` | mean amount out leaves the reference's local [min,max] envelope (odd window ~ min/120) in the near-edge band (local range > 5 % of peak) | share of range | <= default + 0.002 |
 | 6 | `lc_ratio_s1/s2/s3_Y`, `lc_boost_fraction_Y` | local std out/ref at sigma = min/540 x {1,2,4}; share of tiles whose averaged ratio > 1.05 ("restore lost local contrast only, no boost") | ratio / share | ratio <= 1.05 (hard); boost share <= default + 0.05 |
 | 7 | `btb_kept_Y/C`, `wtw_kept_Y/C` | share of reference pixels below nominal black (16<<(bd-8); chroma 16..240) / above nominal white (235<<(bd-8)) still beyond in the output; limited range only; NA when the reference has none | share | >= 0.99 (hard) |
+| 7 | `btb_kept_vs_input_Y/C`, `wtw_kept_vs_input_Y/C` | same, but against the candidate's INPUT: share of the input's beyond-limit pixels still beyond in the output (same-geometry planes only; NA otherwise) | share | >= 0.99 (hard; **the BTB/WTW gate**) |
 | 7 | `clip_detect_Y/C` | 1 if the output extremum sits exactly at a nominal limit while the reference exceeds it | 0/1 | must be 0 (hard) |
 | 8 | `cost_ms_per_frame_pyref` | median wall-clock ms/frame of a Python candidate, label **py-ref** | ms | INFO |
 | 8 | `cost_gpu_ms_laptop`, `cost_est_3090_ms` | capture sidecar `gpu_ms` (median) and `x gpu_ms_ratio` from `cost_ratios.json` | ms | INFO |
 
-Hard rules are judged on the candidate alone; when the default fails them too the row says
-"default also fails (input/codec-limited)" (e.g. the codec itself removes grain, so grain ratio and
-WTW kept fail for both). **3090 ratio:** RTX 3050 Ti Laptop -> RTX 3090 = **~0.2** (FP32 TFLOPS 5.3 ->
+Hard rules are judged on the candidate alone; when the default breaks them too and the candidate is
+not worse, the flag is LIMIT with the note "default also fails: input/codec-limited, candidate not worse"
+(e.g. the codec itself removes grain, so the vs-reference grain ratio and WTW kept fail for both). **3090 ratio:** RTX 3050 Ti Laptop -> RTX 3090 = **~0.2** (FP32 TFLOPS 5.3 ->
 35.6 = 0.15; memory bandwidth 192 -> 936 GB/s = 0.205), flagged **ESTIMATE**; it applies to GPU
 milliseconds only, never to py-ref wall-clock; 3090 runs confirm/tune, they never gate.
 

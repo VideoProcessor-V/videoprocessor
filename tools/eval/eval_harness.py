@@ -57,8 +57,12 @@ def _stack(frames, name):
     return np.stack([getattr(f, name) for f in frames])
 
 
-def compute_metrics(truth, out, case, use_lpips=False):
-    """Flat ordered dict metric -> value (None = NA) for a sequence of truth/output Frames."""
+def compute_metrics(truth, out, case, use_lpips=False, inputs=None, notes=None):
+    """Flat ordered dict metric -> value (None = NA) for a sequence of truth/output Frames.
+    `inputs` = the candidate INPUT frames (same for candidate and default): enables the input-relative
+    metrics (*_vs_input) on planes whose input and output geometry match.  `notes` (dict) receives the
+    reason for every NA value."""
+    notes = {} if notes is None else notes
     for t, o in zip(truth, out):
         for n in ("Y", "Cb", "Cr"):
             if getattr(t, n).shape != getattr(o, n).shape:
@@ -94,6 +98,29 @@ def compute_metrics(truth, out, case, use_lpips=False):
         m["grain_hf_ratio_" + n] = sp["ratio"] if sp else None
         l1 = em.grain_lag1(R[n], O[n], tiles)
         m["grain_lag1_delta_" + n] = l1["delta"] if l1 else None
+    # input-relative gates: "grain never averaged away" and BTB/WTW preserved relative to what the candidate got
+    I = {n: _stack(inputs, n) for n in ("Y", "Cb", "Cr")} if inputs else None
+    for n in ("Y", "Cb"):
+        k1, k2 = "grain_keep_vs_input_" + n, "grain_lag1_vs_input_" + n
+        if I is None or I[n].shape != O[n].shape:
+            m[k1] = m[k2] = None
+            notes[k1] = notes[k2] = "input/output geometry differs (or no input given)"
+            continue
+        tiles = em.select_flat_tiles(R[n], bd)
+        r, _ = em.grain_rms_ratio(I[n], O[n], tiles)
+        m[k1] = r
+        l1 = em.grain_lag1(I[n], O[n], tiles)
+        m[k2] = l1["delta"] if l1 else None
+    for n, planes in (("Y", ("Y",)), ("C", ("Cb", "Cr"))):
+        kb, kw = "btb_kept_vs_input_" + n, "wtw_kept_vs_input_" + n
+        if I is None or any(I[p].shape != O[p].shape for p in planes):
+            m[kb] = m[kw] = None
+            notes[kb] = notes[kw] = "input/output geometry differs (or no input given)"
+            continue
+        bwi = em.btb_wtw(np.concatenate([I[p] for p in planes]), np.concatenate([O[p] for p in planes]), bd,
+                         "luma" if n == "Y" else "chroma", rng)
+        m[kb] = bwi["btb_kept"] if bwi else None
+        m[kw] = bwi["wtw_kept"] if bwi else None
     m["flicker_excess_Y"] = em.flicker_excess(R["Y"], O["Y"], bd)
     g = em.gop_spectrum(R["Y"], O["Y"], case.get("gop"), case.get("minigop")) if case.get("gop") else None
     m["gop_ratio_gop"] = g.get("gop_ratio") if g else None
@@ -114,7 +141,40 @@ def compute_metrics(truth, out, case, use_lpips=False):
     m["btb_kept_C"] = bc["btb_kept"] if bc else None
     m["wtw_kept_C"] = bc["wtw_kept"] if bc else None
     m["clip_detect_C"] = bc["clip_detect"] if (bc and (bc["btb_n"] or bc["wtw_n"])) else None
+    _na_reasons(m, notes, len(truth), case, rng)
     return m
+
+
+def _na_reasons(m, notes, n, case, rng):
+    """Attach a correct reason to every NA metric that has none yet."""
+    gop = case.get("gop")
+    longest = max(gop or 0, case.get("minigop") or 0)
+    for k, v in m.items():
+        if v is not None or k in notes:
+            continue
+        if k.startswith("grain_hf"):
+            notes[k] = "needs >= 8 frames (%d available)" % n if n < 8 else "no flat tiles / no reference grain"
+        elif k.startswith("grain_lag1"):
+            notes[k] = "needs >= 3 frames (%d available)" % n if n < 3 else "no flat tiles"
+        elif k.startswith("flicker"):
+            notes[k] = "needs >= 3 frames (%d available)" % n
+        elif k.startswith("gop_"):
+            if not gop:
+                notes[k] = "no GOP metadata"
+            elif n < 2 * longest:
+                notes[k] = "GOP %d longer than half the window (%d frames)" % (longest, n)
+            else:
+                notes[k] = "no usable energy series"
+        elif k.startswith("grain_rms") or k.startswith("grain_keep"):
+            notes[k] = "no flat tiles in the reference"
+        elif k.startswith(("btb_", "wtw_", "clip_detect")):
+            notes[k] = "candidate input has no excursions beyond nominal limits" if "vs_input" in k else "full-range material" if rng != "limited" else "reference has no excursions beyond nominal limits"
+        elif k.startswith(("ghost", "smear")):
+            notes[k] = "no moving pixels / needs >= 2 frames"
+        elif k.startswith("duplicate"):
+            notes[k] = "needs >= 2 frames with reference change"
+        elif k.startswith("lc_"):
+            notes[k] = "featureless reference"
 
 
 # ------------------------------------------------------------------ cases
@@ -166,10 +226,11 @@ def evaluate_suite(suite, cand, base, max_frames=None, use_lpips=False, with_cos
         log("case %s / %s / %s: loading" % (ct, clip, cname))
         inputs, truth = build_case_inputs(case, max_frames)
         res = {}
+        na_notes = {}
         for label, c in (("candidate", cand), ("default", base)):
             try:
                 outs, cost = run_candidate(c, inputs, truth)
-                res[label] = (compute_metrics(truth, outs, case, use_lpips), cost, None)
+                res[label] = (compute_metrics(truth, outs, case, use_lpips, inputs, na_notes), cost, None)
             except Exception as e:  # visible, never silent
                 res[label] = (None, None, "%s: %s" % (type(e).__name__, e))
                 log("  %s FAILED: %s" % (label, res[label][2]))
@@ -182,10 +243,9 @@ def evaluate_suite(suite, cand, base, max_frames=None, use_lpips=False, with_cos
             note = ""
             if k == "lpips" and res["candidate"][0] and res["candidate"][0][k] is None:
                 note = "lpips NA (not requested, or torch/lpips unavailable)"
-            if k.startswith(("grain_hf", "grain_lag1")) and len(truth) < 8 and k.startswith("grain_hf"):
-                note = "needs >= 8 frames (%d available)" % len(truth)
-            if k.startswith("gop_") and not case.get("gop"):
-                note = "no GOP metadata"
+            cv, bv = (res["candidate"][0] or {}).get(k), (res["default"][0] or {}).get(k)
+            if not note and (cv is None or bv is None) and k in na_notes:
+                note = na_notes[k]
             rows.append(dict(content_type=ct, clip=clip, case=cname, metric=k,
                              candidate=res["candidate"][0][k] if res["candidate"][0] else None,
                              default=res["default"][0][k] if res["default"][0] else None, note=note))

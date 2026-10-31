@@ -6,7 +6,11 @@ A result row is a dict(content_type, clip, case, metric, candidate, default, not
 `default` are numbers, bools, 'inf' strings or None (= NA).  judge() adds delta, trend and flag.
 
 flag values: PASS, FLAG (worse than the default beyond tolerance / outside a soft rule), FAIL (a hard
-rule of the metric is broken), NA (cannot be judged: missing data), INFO (reported, not gated).
+rule of the metric is broken and the default does not already break it, or the candidate is worse than
+the default), LIMIT (an absolute-vs-reference hard rule is broken but the default breaks it too and the
+candidate is not worse than the default beyond SLACK: input/codec-limited, not the candidate's fault),
+NA (cannot be judged: missing data), INFO (reported, not gated).
+The *_vs_input metrics (candidate output vs its own INPUT) are the real "do no harm" gates.
 """
 import csv
 import io
@@ -53,6 +57,8 @@ RULES = [
     ("grain_rms_ratio_", ("band", 0.05)),
     ("grain_hf_ratio_", ("near1", 0.10)),
     ("grain_lag1_delta_", ("max_abs", 0.05)),
+    ("grain_keep_vs_input_", ("band", 0.05)),
+    ("grain_lag1_vs_input_", ("max_abs", 0.05)),
     ("flicker_excess", ("lower", 0.05)),
     ("gop_", ("near1", 0.10)),
     ("ghost_coeff", ("lower", 0.01)),
@@ -66,6 +72,29 @@ RULES = [
     ("clip_detect", ("zero", 0.0)),
     ("cost_", ("info_lower", 0.0)),
 ]
+
+
+# how much worse than the default a candidate may be on a hard rule and still count as LIMIT
+SLACK = {"band": 0.05, "max_abs": 0.05, "kept": 0.01, "zero": 0.0}
+
+
+def _hard_fail(kind, tol, x):
+    if kind == "band":
+        return abs(x - 1.0) > tol
+    if kind == "max_abs":
+        return x > tol
+    if kind == "kept":
+        return x < tol
+    return x != 0.0
+
+
+def _not_worse(kind, c, b):
+    s = SLACK[kind]
+    if kind == "band":
+        return abs(c - 1.0) <= abs(b - 1.0) + s
+    if kind == "kept":
+        return c >= b - s
+    return c <= b + s
 
 
 def rule_for(metric):
@@ -90,14 +119,13 @@ def judge(metric, cand, base):
         return delta, "NA", "INFO"
     if kind == "info_lower":
         return delta, "NA" if delta is None else _trend(delta, 0.0, False), "INFO"
-    if kind == "band":
-        return delta, _trend_to1(c, b), ("PASS" if abs(c - 1.0) <= tol else "FAIL")
-    if kind == "max_abs":
-        return delta, _trend(delta, 0.0, False), ("PASS" if c <= tol else "FAIL")
-    if kind == "kept":
-        return delta, _trend(delta, 0.0, True), ("PASS" if c >= tol else "FAIL")
-    if kind == "zero":
-        return delta, _trend(delta, 0.0, False), ("PASS" if c == 0.0 else "FAIL")
+    if kind in ("band", "max_abs", "kept", "zero"):
+        tr = _trend_to1(c, b) if kind == "band" else _trend(delta, 0.0, kind == "kept")
+        if not _hard_fail(kind, tol, c):
+            return delta, tr, "PASS"
+        if b is not None and _hard_fail(kind, tol, b) and _not_worse(kind, c, b):
+            return delta, tr, "LIMIT"
+        return delta, tr, "FAIL"
     if b is None:
         return None, "NA", "NA"
     if kind == "higher":
@@ -136,8 +164,10 @@ def score_rows(rows):
         o = dict(r)
         o.update(delta=d, trend=t, flag=f)
         o.setdefault("note", "")
-        if f == "FAIL" and rule_for(r["metric"])[0] in ("band", "max_abs", "kept", "zero")                 and judge(r["metric"], r["default"], r["default"])[2] == "FAIL":
-            o["note"] = (o["note"] + "; " if o["note"] else "") + "default also fails (input/codec-limited)"
+        if rule_for(r["metric"])[0] in ("band", "max_abs", "kept", "zero") and f in ("LIMIT", "FAIL")                 and _num(r["default"]) is not None                 and _hard_fail(*rule_for(r["metric"]), _num(r["default"])):
+            txt = ("default also fails: input/codec-limited, candidate not worse" if f == "LIMIT"
+                   else "default also fails and the candidate is worse")
+            o["note"] = (o["note"] + "; " if o["note"] else "") + txt
         out.append(o)
     return out
 

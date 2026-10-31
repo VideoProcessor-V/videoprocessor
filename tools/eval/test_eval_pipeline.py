@@ -249,7 +249,7 @@ class Report(unittest.TestCase):
         self.assertEqual(by["psnr_Cb"][8], "FLAG")               # 0.5 dB worse than the default
         self.assertEqual(by["lpips"][4], "NA")
         self.assertEqual(by["lpips"][8], "NA")
-        self.assertEqual(by["grain_rms_ratio_Y"][8], "FAIL")
+        self.assertEqual(by["grain_rms_ratio_Y"][8], "LIMIT")
         self.assertIn("default also fails", by["grain_rms_ratio_Y"][9])
         self.assertEqual(by["btb_kept_Y"][8], "NA")
         self.assertEqual(by["clip_detect_Y"][8], "FAIL")
@@ -336,6 +336,85 @@ class EndToEnd(Base):
         self.assertEqual(by["grain_hf_ratio_Y"][4], "NA")
         self.assertEqual(by["gop_ratio_gop"][4], "NA")
         self.assertNotEqual(by["psnr_Y"][4], "NA")
+
+
+class InputRelativeGates(unittest.TestCase):
+    """Candidate judged against the default AND against its own input."""
+
+    @classmethod
+    def setUpClass(cls):
+        from scipy import ndimage
+        cls.nd = ndimage
+        cls.truth = es.tiny_clip(n=12, w=128, h=96, seed=31, grain=3.0)
+        # "codec-blurred" input: grain mostly gone relative to the reference
+        cls.inp = [f.with_planes(Y=ndimage.gaussian_filter(f.Y, 1.5)) for f in cls.truth]
+        cls.case = {}
+
+    def metrics(self, out):
+        return eh.compute_metrics(self.truth, out, self.case, False, self.inp)
+
+    def test_identity_is_limit_on_reference_ratio_and_pass_vs_input(self):
+        m = self.metrics(self.inp)
+        self.assertIsNotNone(m["grain_rms_ratio_Y"])
+        self.assertEqual(er.judge("grain_rms_ratio_Y", m["grain_rms_ratio_Y"], m["grain_rms_ratio_Y"])[2], "LIMIT")
+        self.assertAlmostEqual(m["grain_keep_vs_input_Y"], 1.0, places=9)
+        self.assertEqual(er.judge("grain_keep_vs_input_Y", m["grain_keep_vs_input_Y"], 1.0)[2], "PASS")
+        self.assertEqual(er.judge("grain_lag1_vs_input_Y", m["grain_lag1_vs_input_Y"], 0.0)[2], "PASS")
+
+    def test_chroma444_style_geometry_is_na_with_note(self):
+        small = [f.with_planes(Cb=f.Cb[::2, ::2], Cr=f.Cr[::2, ::2]) for f in self.inp]
+        notes = {}
+        m = eh.compute_metrics(self.truth, self.inp, self.case, False, small, notes)
+        self.assertIsNone(m["grain_keep_vs_input_Cb"])
+        self.assertIn("geometry", notes["grain_keep_vs_input_Cb"])
+        self.assertIsNotNone(m["grain_keep_vs_input_Y"])
+        self.assertIsNone(m["btb_kept_vs_input_C"])
+
+    def test_blurring_candidate_fails_keep_vs_input(self):
+        out = [f.with_planes(Y=self.nd.uniform_filter(f.Y, 3)) for f in self.inp]
+        m = self.metrics(out)
+        self.assertLess(m["grain_keep_vs_input_Y"], 0.95)
+        self.assertEqual(er.judge("grain_keep_vs_input_Y", m["grain_keep_vs_input_Y"], 1.0)[2], "FAIL")
+
+    def test_temporal_average_fails_lag1_vs_input(self):
+        out = []
+        for t, f in enumerate(self.inp):
+            lo, hi = max(t - 1, 0), min(t + 1, len(self.inp) - 1)
+            out.append(f.with_planes(Y=(self.inp[lo].Y + f.Y + self.inp[hi].Y) / 3.0))
+        m = self.metrics(out)
+        self.assertGreater(m["grain_lag1_vs_input_Y"], 0.05)
+        self.assertEqual(er.judge("grain_lag1_vs_input_Y", m["grain_lag1_vs_input_Y"], 0.0)[2], "FAIL")
+
+    def test_clipping_fails_wtw_kept_vs_input(self):
+        rng = np.random.default_rng(8)
+        fr = []
+        for t in range(3):
+            y = np.clip(np.rint(rng.normal(120, 70, (64, 96))), 0, 255)
+            fr.append(eio.Frame(y, np.full((32, 48), 128.0), np.full((32, 48), 128.0)))
+        out = [f.with_planes(Y=np.clip(f.Y, 16, 235)) for f in fr]
+        m = eh.compute_metrics(fr, out, {}, False, fr)
+        self.assertEqual(m["wtw_kept_vs_input_Y"], 0.0)
+        self.assertEqual(er.judge("wtw_kept_vs_input_Y", 0.0, 1.0)[2], "FAIL")
+        ident = eh.compute_metrics(fr, fr, {}, False, fr)
+        self.assertEqual(ident["wtw_kept_vs_input_Y"], 1.0)
+
+    def test_limit_vs_fail_rules(self):
+        j = lambda c, b: er.judge("grain_rms_ratio_Y", c, b)[2]  # noqa: E731
+        self.assertEqual(j(0.5, 0.5), "LIMIT")
+        self.assertEqual(j(0.8, 0.5), "LIMIT")    # candidate better than a failing default
+        self.assertEqual(j(0.5, 0.8), "FAIL")     # default fails and candidate is worse
+        self.assertEqual(j(0.5, 0.98), "FAIL")    # default passes
+        self.assertEqual(j(0.98, 0.5), "PASS")
+
+    def test_na_reasons(self):
+        notes = {}
+        m = eh.compute_metrics(self.truth[:2], self.inp[:2], {"gop": 24}, False, self.inp[:2], notes)
+        self.assertIn("needs >= 8 frames", notes["grain_hf_ratio_Y"])
+        self.assertIn("needs >= 3 frames", notes["flicker_excess_Y"])
+        self.assertIn("GOP 24 longer than half", notes["gop_ratio_gop"])
+        notes = {}
+        eh.compute_metrics(self.truth, self.inp, {}, False, self.inp, notes)
+        self.assertEqual(notes["gop_ratio_gop"], "no GOP metadata")
 
 
 if __name__ == "__main__":

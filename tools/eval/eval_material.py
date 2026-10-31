@@ -198,7 +198,7 @@ def _breathing():
                                     format=_fmt("raw", 1536, 768, "yuv420p10le", 24.0, n)),
                         available=os.path.exists(dec) and os.path.exists(os.path.join(d, "orig.yuv")),
                         gop=dict(gop=gop, minigop=mini, source="types%s.txt (parsed frame types)" % tag),
-                        attrs=dict(note="GOP-breathing test clip: %d frames, >= 2 GOPs, temporal metrics apply" % (n or 0),
+                        attrs=dict(note="GOP-breathing test clip, proxy of UNKNOWN content type (film24 by the fps rule only): %d frames, >= 2 GOPs, temporal metrics apply" % (n or 0),
                                    encode=os.path.join(d, enc))))
     return out
 
