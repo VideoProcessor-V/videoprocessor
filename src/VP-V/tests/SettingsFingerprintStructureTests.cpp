@@ -276,7 +276,7 @@ namespace SettingsFingerprintStructureTest
 			// Guard for the GPU harness: IsVpvSectionKey() in RendererCaptureHarnessTests.cpp duplicates this list.
 			const std::set<std::string> expected = { "pipeline_original_pathway", "pipeline_order", "pipeline_slots_off",
 				"calibration_lut_stage", "pipeline_entrance_once", "output_segments_merged", "frame_analysis_store",
-				"entrance_gpu_drain", "hdr_inference" };
+				"resync_event", "entrance_gpu_drain", "hdr_inference" };
 			Assert::IsTrue(std::set<std::string>(vpv.begin(), vpv.end()) == expected,
 				L"the [vpv] keys in RendererProfileConfig.h changed: update IsVpvSectionKey() in RendererCaptureHarnessTests.cpp and this list");
 		}

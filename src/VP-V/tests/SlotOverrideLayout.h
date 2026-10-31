@@ -26,7 +26,7 @@ namespace SlotOverrideLayout
 	{
 		static const char* const keys[] = { "pipeline_original_pathway", "pipeline_order", "pipeline_slots_off",
 			"calibration_lut_stage", "pipeline_entrance_once", "output_segments_merged", "frame_analysis_store",
-			"entrance_gpu_drain", "hdr_inference" };
+			"resync_event", "entrance_gpu_drain", "hdr_inference" };
 		for (const char* k : keys)
 			if (key == k) return true;
 		return false;
