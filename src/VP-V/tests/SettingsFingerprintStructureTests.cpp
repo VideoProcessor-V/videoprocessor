@@ -389,3 +389,63 @@ namespace SettingsFingerprintStructureTest
 		}
 	};
 }
+
+#include <VP-V/core/SlotRegistry.h>
+#include "SlotOverrideLayout.h"
+
+namespace SlotOverrideLayoutTest
+{
+	using namespace SettingsTestSupport;
+
+	// T4 pre-check on the CPU (RTX run 2026-10-31): the configurations EverySlotOffEqualsItsOriginalOverrides
+	// renders must load as the harness's input profile, with every override applied. Written into the input
+	// profile, downscale_light made the loader reject the file and the GPU test compared against the
+	// fallback configuration. This replicates Run's own header lines (RendererCaptureHarnessTests.cpp).
+	TEST_CLASS(SlotOverrideLayoutTests)
+	{
+	public:
+		TEST_METHOD(EverySlotsWrittenOverridesLoadAndApply)
+		{
+			Renderer renderer;
+			Assert::IsTrue(renderer.Ready(), L"the renderer DLL and its settings exports");
+			const std::string rendering = "[vprenderer.Default]\ndithering: off\ndeband: off\n";
+			auto head = [](const std::string& capturePath) {
+				return "[general]\npersist_profile_selection: false\n[vprenderer.input.low_latency]\nwhen: $source_rate > 0\ncapture_path: " +
+					capturePath + "\n";
+			};
+			std::string problems;
+			int slots = 0, checked = 0;
+			for (const PipelineSlots::Info& info : PipelineSlots::Slots())
+			{
+				if (!PipelineSlots::SwitchHonoured(info.id)) continue;
+				++slots;
+				const std::string slot = info.name;
+				const SlotOverrideLayout::Layout layout = SlotOverrideLayout::ForSlot(slot, "gpu", "finish");
+				const Evaluation off = renderer.Evaluate(head("gpu") + rendering + "[vpv]\nentrance_gpu_drain: finish\npipeline_slots_off: " + slot + "\n");
+				const Evaluation written = renderer.Evaluate(head(layout.capturePath) + SlotOverrideLayout::Extra(layout, rendering));
+				if (!off.ok || DescribeValue(off.describe, "rule").find("input/low_latency") == std::string::npos)
+					problems += "\n  " + slot + ": the slot-off configuration does not load as the input profile";
+				if (!written.ok || DescribeValue(written.describe, "rule").find("input/low_latency") == std::string::npos)
+				{
+					problems += "\n  " + slot + ": the written overrides do not load as the input profile (rule '" +
+						DescribeValue(written.describe, "rule") + "')";
+					continue;
+				}
+				for (const OriginalPathway::Override& o : OriginalPathway::Overrides())
+				{
+					if (slot != o.slot || !o.value[0]) continue;
+					bool present = false;
+					const std::string rendered = DescribeValue(written.describe, o.key, &present);
+					if (!present) continue;
+					++checked;
+					const std::string asSwitch = rendered == "1" ? "on" : rendered == "0" ? "off" : rendered;
+					if (!Vpv::SameValue(rendered, o.value) && !Vpv::SameValue(asSwitch, o.value))
+						problems += "\n  " + slot + ": " + o.key + " written '" + o.value + "' but loaded '" + rendered + "'";
+				}
+			}
+			Logger::WriteMessage(("slots: " + std::to_string(slots) + ", override values checked: " + std::to_string(checked) + "\n").c_str());
+			Assert::IsTrue(slots > 5, L"the switchable slots were found");
+			Assert::IsTrue(problems.empty(), std::wstring(problems.begin(), problems.end()).c_str());
+		}
+	};
+}

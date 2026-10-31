@@ -2,6 +2,7 @@
 #include <VP-V/core/DelayBudgetLadder.h>   // VP-V delay budget (the ladder test)
 #include <VP-V/core/OriginalPathway.h>   // the Original pathway override table (slot-off test)
 #include <VP-V/core/SlotRegistry.h>   // the slot table and which switches are honoured
+#include <VP-V/tests/SlotOverrideLayout.h>   // where the slot-off test writes each override (CPU-checked)
 #include <FileFrameTiming.h>
 #include <wincodec.h>
 #include <atlbase.h>
@@ -353,6 +354,9 @@ namespace
 		unsigned fileRateDenominator = 1;
 		double resetAtSeconds = -1.0;    // an HDMI resync (renderer Reset) at this time
 		double captureAtSeconds = -1.0;  // a rendered-output capture (VP-0133) at this time
+		// T4 (2026-10-31): a captureAtSeconds request the renderer refuses ("requires an active VP
+		// Renderer": start-up not finished) is asked again every 0.25 s until accepted or the run ends.
+		bool retryRefusedCapture = false;
 		// test/dv-synthetic 2026-10-24: more captures, one at each of these times (seconds); the
 		// sidecars come back in RunResult::captureMetadataList.
 		std::vector<double> captureTimes;
@@ -865,6 +869,7 @@ namespace
 				1e6 * rateDenominator / rateNumerator * (plan ? plan->paceScale : 1.0)));
 			const double ticksPerUs = static_cast<double>(clock.TimingClockTicksPerSecond()) / 1e6;
 			bool resetDone = false, captureRequested = false;
+			double captureRetryAt = -1.0;   // retryRefusedCapture: the next attempt (seconds); < 0 = none
 			size_t capturesRequested = 0, nextCaptureTime = 0;
 			const timingclocktime_t startTicks = clock.TimingClockNow();
 			// test/dv-synthetic 2026-10-24: a capture is taken at the next MAIN render; a still picture
@@ -894,13 +899,18 @@ namespace
 					resetDone = true;
 				}
 				if (plan && !captureRequested && plan->captureAtSeconds >= 0.0 &&
-					std::chrono::steady_clock::now() - start >= std::chrono::duration<double>(plan->captureAtSeconds))
+					std::chrono::steady_clock::now() - start >= std::chrono::duration<double>(
+						captureRetryAt >= 0.0 ? captureRetryAt : plan->captureAtSeconds))
 				{
 					CString captureStatus;
 					const bool accepted = renderer->RequestRenderedOutputCapture(captureStatus);
 					Logger::WriteMessage(("capture request: " + std::string(accepted ? "accepted - " : "refused - ") +
 						CStringA(captureStatus).GetString() + "\n").c_str());
-					captureRequested = true;
+					const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+					if (!accepted && plan->retryRefusedCapture && now + 0.25 < seconds)
+						captureRetryAt = now + 0.25;   // asked again (logged each time), until accepted or the run ends
+					else
+						captureRequested = true;
 				}
 				while (plan && nextCaptureTime < plan->captureTimes.size() &&
 					std::chrono::steady_clock::now() - start >= std::chrono::duration<double>(plan->captureTimes[nextCaptureTime]))
@@ -1053,18 +1063,11 @@ namespace
 		return names;
 	}
 
-	// The keys the [vpv] section owns (RendererProfileConfig.h vpvKeys); every other key lives in a
-	// [vprenderer.*] profile section. THIS LIST DUPLICATES the vpvKeys array in RendererProfileConfig.h;
-	// SettingsFingerprintStructureTests (CPU) parses that array and asserts it equals these 9 keys, so a new
-	// [vpv] key fails there until this function is updated too.
+	// The keys the [vpv] section owns: one list, SlotOverrideLayout::IsVpvSectionKey (src/VP-V/tests/
+	// SlotOverrideLayout.h; SettingsFingerprintStructureTests checks it against RendererProfileConfig.h).
 	bool IsVpvSectionKey(const std::string& key)
 	{
-		static const char* const keys[] = { "pipeline_original_pathway", "pipeline_order", "pipeline_slots_off",
-			"calibration_lut_stage", "pipeline_entrance_once", "output_segments_merged", "frame_analysis_store",
-			"entrance_gpu_drain", "hdr_inference" };
-		for (const char* k : keys)
-			if (key == k) return true;
-		return false;
+		return SlotOverrideLayout::IsVpvSectionKey(key);
 	}
 
 	// The configuration text without VP-only content, for Bill's renderer DLL: the [vpv] / [vpv.*]
@@ -1132,15 +1135,24 @@ namespace
 		std::wstring path;
 	};
 
-	// One still-picture run (3.5 s, capture at 2.5 s) and the capture's raw R10 hash ("" = no capture).
+	// One still-picture run (5 s, capture from 2.5 s) and the capture's raw R10 hash ("" = no capture).
+	// RTX run 2026-10-31: a start-up slower than 2.5 s refused the request ("requires an active VP
+	// Renderer"); the request is now asked again every 0.25 s (retryRefusedCapture), and a run that still
+	// has no capture is repeated once (logged RETRY), so only a persistent failure reports "missing".
 	std::string StillPictureHash(VideoFrameEncoding encoding, const std::string& capturePath, bool film,
 		const std::string& extra)
 	{
 		FramePlan plan;
 		plan.captureAtSeconds = 2.5;
+		plan.retryRefusedCapture = true;
 		plan.step = [](int) { return FrameStep{ true, 0, 0 }; };
-		const RunResult r = Run(encoding, capturePath, 3.5, film, extra, false, &plan);
-		return CaptureHash(r);
+		std::string hash = CaptureHash(Run(encoding, capturePath, 5.0, film, extra, false, &plan));
+		if (hash.empty())
+		{
+			Logger::WriteMessage("RETRY still picture: no capture in the first run, running once more\n");
+			hash = CaptureHash(Run(encoding, capturePath, 5.0, film, extra, false, &plan));
+		}
+		return hash;
 	}
 
 	// Dithering and deband off: VP's dither is temporal, so only then are two captures comparable.
@@ -1690,10 +1702,10 @@ namespace Tests
 			const HarnessScope harnessScope;
 			// The slot switch's promise (ADR-0019): switching a slot off equals writing that slot's
 			// Original-pathway overrides (OriginalPathway::Overrides()) explicitly, and all slots off
-			// equals pipeline_original_pathway on. Keys that [vpv] owns go to [vpv]; the others go FIRST
-			// in `extra`, before kStillPictureSettings, so they land in the harness's active input profile
-			// ([vprenderer.input.low_latency], where Run puts capture_path), as the existing tests place
-			// the settings under test; capture_path is the run's capture path. The slot-off side has
+			// equals pipeline_original_pathway on. Where each override is written is
+			// SlotOverrideLayout::ForSlot (input-profile keys first, rendering-profile keys such as
+			// downscale_light in [vprenderer.Default], [vpv] keys in [vpv]); SlotOverrideLayoutTests (CPU)
+			// proves every slot's layout loads with the overrides applied. The slot-off side has
 			// "finish" in [vpv] and the slot switch then applies the slot's overrides, including
 			// entrance_gpu_drain: off for scaling.rebase; the explicit side writes the drain line once,
 			// with the slot's own override value when it has one, else "finish". Failures are collected
@@ -1703,30 +1715,19 @@ namespace Tests
 			const std::vector<std::string> slots = SwitchableSlotNames();
 			const std::string drain = "[vpv]\nentrance_gpu_drain: finish\n";
 			std::string failures;
-			auto compare = [&](const std::string& name, const std::string& capturePath, const std::string& offVpv,
-				const std::string& explicitDefault, const std::string& explicitVpv, const std::string& explicitDrain) {
+			for (const std::string& slot : slots)
+			{
+				const std::string name = "slot " + slot;
+				const SlotOverrideLayout::Layout layout = SlotOverrideLayout::ForSlot(slot, "gpu", "finish");
 				const std::string slotOff = StillPictureHash(VideoFrameEncoding::V210, "gpu", true,
-					std::string(kStillPictureSettings) + drain + offVpv);
-				const std::string written = StillPictureHash(VideoFrameEncoding::V210, capturePath, true,
-					explicitDefault + kStillPictureSettings + "[vpv]\nentrance_gpu_drain: " + explicitDrain + "\n" + explicitVpv);
+					std::string(kStillPictureSettings) + drain + "pipeline_slots_off: " + slot + "\n");
+				const std::string written = StillPictureHash(VideoFrameEncoding::V210, layout.capturePath, true,
+					SlotOverrideLayout::Extra(layout, kStillPictureSettings));
 				Logger::WriteMessage(("== " + name + ": off " + slotOff + ", overrides " + written + "\n").c_str());
 				if (slotOff.empty() || written.empty())
 					failures += name + ": a capture is missing; ";
 				else if (slotOff != written)
 					failures += name + ": the switched-off output differs from the written overrides; ";
-			};
-			for (const std::string& slot : slots)
-			{
-				std::string defaultKeys, vpvKeys, capturePath = "gpu", explicitDrain = "finish";
-				for (const OriginalPathway::Override& o : OriginalPathway::Overrides())
-				{
-					if (slot != o.slot || !o.value[0]) continue;
-					if (std::string(o.key) == "entrance_gpu_drain") explicitDrain = o.value;
-					else if (std::string(o.key) == "capture_path") capturePath = o.value;
-					else if (IsVpvSectionKey(o.key)) vpvKeys += std::string(o.key) + ": " + o.value + "\n";
-					else defaultKeys += std::string(o.key) + ": " + o.value + "\n";
-				}
-				compare("slot " + slot, capturePath, "pipeline_slots_off: " + slot + "\n", defaultKeys, vpvKeys, explicitDrain);
 			}
 			std::string all;
 			for (const std::string& slot : slots) all += (all.empty() ? "" : ", ") + slot;
