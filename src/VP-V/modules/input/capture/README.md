@@ -65,6 +65,10 @@ formatters are Bill's and are used as they are.
   uploaded on the conversion thread by a second D3D11 device into a ring of shared textures,
   with "uploaded" / "released" fences; `Open`, `Close`, `Upload` (conversion thread), `Acquire` /
   `Used` (render thread), counters, `CapBytes`.
+- `EarlyUploadHandoff` - the slot hand-off for `EarlyUpload`: the conversion thread publishes the
+  payload first, then `RunUpload` (Pending -> Uploading -> Attached / None); the render's `Take`
+  returns the slot, waits only while an upload is running, or marks a not-started upload Abandoned
+  and uploads itself (counted as "before the early upload started"). One mutex + condition variable.
 - `UploadReuse` - the pure decision whether the de-judder's already uploaded next-frame planes
   can be taken as the shown frame's planes (one upload and unpack per new frame saved).
 
