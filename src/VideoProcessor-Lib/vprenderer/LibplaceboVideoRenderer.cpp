@@ -1584,6 +1584,8 @@ namespace
 			<< settings.adaptive.grainFloor << '|' << settings.adaptive.grainSmoothMs << '|'
 			<< settings.adaptive.shadowBias << '|' << settings.adaptive.chromaSsim << '|' << settings.adaptive.faithfulOrtho << '|' << settings.adaptive.faithfulAuto << '|'
 			<< settings.adaptive.grainMap << '|' << settings.adaptive.grainMapSmoothMs << '|'
+			<< settings.adaptive.motionAdaptive << '|' << settings.adaptive.motionSpeedLo << '|' << settings.adaptive.motionSpeedHi << '|'
+			<< settings.adaptive.motionFloor << '|' << settings.adaptive.motionSmoothMs << '|'
             << settings.motion.Fingerprint() << '|'
 			<< settings.debandStrength << '|'
 			<< static_cast<int>(settings.deband) << '|'
@@ -2811,7 +2813,12 @@ namespace
 			std::make_tuple("adaptive_grain_floor", 0.0, 1.0, &settings.adaptive.grainFloor),
 			std::make_tuple("adaptive_grain_smooth_ms", 0.0, 10000.0, &settings.adaptive.grainSmoothMs),
 			std::make_tuple("adaptive_grain_map_smooth_ms", 0.0, 10000.0, &settings.adaptive.grainMapSmoothMs),
-			std::make_tuple("adaptive_grain_shadow_bias", 0.0, 1.0, &settings.adaptive.shadowBias) })
+			std::make_tuple("adaptive_grain_shadow_bias", 0.0, 1.0, &settings.adaptive.shadowBias),
+			// The motion-adapted blend (VP-V scaling.output; owner 2026-10-31).
+			std::make_tuple("adaptive_motion_speed_lo", 0.0, 10.0, &settings.adaptive.motionSpeedLo),
+			std::make_tuple("adaptive_motion_speed_hi", 0.0, 10.0, &settings.adaptive.motionSpeedHi),
+			std::make_tuple("adaptive_motion_floor", 0.0, 1.0, &settings.adaptive.motionFloor),
+			std::make_tuple("adaptive_motion_smooth_ms", 0.0, 10000.0, &settings.adaptive.motionSmoothMs) })
 		{
 			if (!config.TryGetString(rule.section, std::get<0>(numeric), raw))
 				continue;
@@ -2827,6 +2834,8 @@ namespace
 			settings.adaptive.edgeHi = settings.adaptive.edgeLo + 1.0f;
 		if (settings.adaptive.grainHi <= settings.adaptive.grainLo)
 			settings.adaptive.grainHi = settings.adaptive.grainLo + 0.5f;
+		if (settings.adaptive.motionSpeedHi <= settings.adaptive.motionSpeedLo)
+			settings.adaptive.motionSpeedHi = settings.adaptive.motionSpeedLo + 0.05f;
 		if (tryChoice("adaptive_faithful", raw))
 		{
 			// "polar" retired 2026-10-17 (owner: Auto or 1D): runs as auto (RetiredSettings).
@@ -3173,7 +3182,8 @@ namespace
 			std::make_pair("adaptive_chroma_ssim", &settings.adaptive.chromaSsim),
 			std::make_pair("adaptive_grain_map", &settings.adaptive.grainMap),
 			std::make_pair("adaptive_upscale", &settings.adaptiveUpscale),
-			std::make_pair("adaptive_upscale_superres_scale", &settings.adaptiveUpscaleSuperresScale) })
+			std::make_pair("adaptive_upscale_superres_scale", &settings.adaptiveUpscaleSuperresScale),
+			std::make_pair("adaptive_motion", &settings.adaptive.motionAdaptive) })
 		{
 			if (!tryChoice(toggle.first, raw))
 				continue;
@@ -3622,6 +3632,7 @@ namespace
 		settings.adaptive.ssimResidualStabilise = false;   // key=ssim_residual_stabilise
 		settings.adaptive.cnnResidualStabilise = false;    // key=cnn_residual_stabilise
 		settings.adaptive.residualGrainGuard = false;      // key=residual_stabilise_grain_guard
+		settings.adaptive.motionAdaptive = false;          // key=adaptive_motion
 		settings.dejudderEstimateAhead = false;            // key=dejudder_estimate_ahead
 		settings.interpolationFallback = InterpolationPolicy::Fallback::Hold; // key=interpolation_fallback
 		settings.pipelineOrder.clear();                    // the designed order
@@ -11889,6 +11900,7 @@ struct LibplaceboVideoRenderer::Impl
 		changed(current.textureRestore != next.textureRestore, "texture_restore");
 		changed(current.textureRestoreCap != next.textureRestoreCap, "texture_restore_cap");
 		changed(current.adaptive.residualGrainGuard != next.adaptive.residualGrainGuard, "residual_stabilise_grain_guard");
+		changed(current.adaptive.motionAdaptive != next.adaptive.motionAdaptive, "adaptive_motion");
 		changed(current.interpolation != next.interpolation, "interpolation");
 		changed(current.interpolationFallback != next.interpolationFallback, "interpolation_fallback");
 		changed(current.interpolationFillGaps != next.interpolationFillGaps, "interpolation_fill_gaps");
@@ -12654,6 +12666,9 @@ struct LibplaceboVideoRenderer::Impl
 					bitrateWeightScale < 1.0 ? (", low bitrate x" + std::to_string(bitrateWeightScale).substr(0, 4)).c_str() : "");
 			descriptions.push_back(line);
 		}
+		// Stage 8b's form and the motion-adapted blend (VP-V scaling.output: its own lines).
+		for (const std::string& stageLine : adaptiveStage.StatusLines())
+			descriptions.push_back(stageLine);
 		// Stage 12: the source's effective resolution, bitrate quality and bit depth.
 		descriptions.push_back(SourceResolutionMonitor::Describe(sourceMonitor.Read(), sourceMonitor.AutoRatio(),
 			activeSettings.sourceResolution == "auto"));
@@ -23491,6 +23506,7 @@ struct LibplaceboVideoRenderer::Impl
                 return m;
             };
             adaptiveHost.publishStatus = [this]() { PublishCustomShaderStatus(); };
+            adaptiveHost.isPrescaler = [this](const pl_hook* hook) { return customHooks.IsPrescalerHook(hook); };
             adaptiveStage.Register(adaptiveFrame, adaptiveHost,
                 { bitrateWeightScale, adaptiveGrainMapWanted, adaptiveNoSsimLogged }, frameHooks);
             // ADR-0001 (findings 2026-10-25 #1): SSimDownscaler missing or a GPU failure is visible.
@@ -31272,6 +31288,11 @@ extern "C" __declspec(dllexport) int __cdecl VideoProcessorLibplaceboDescribeSet
 		<< "texture_restore_cap=" << s.textureRestoreCap << "\n"
 		<< "deband_grain=" << (s.debandGrain ? "on" : "off") << "\n"
 		<< "residual_stabilise_grain_guard=" << (s.adaptive.residualGrainGuard ? "on" : "off") << "\n"
+		<< "adaptive_motion=" << (s.adaptive.motionAdaptive ? "on" : "off") << "\n"
+		<< "adaptive_motion_speed_lo=" << s.adaptive.motionSpeedLo << "\n"
+		<< "adaptive_motion_speed_hi=" << s.adaptive.motionSpeedHi << "\n"
+		<< "adaptive_motion_floor=" << s.adaptive.motionFloor << "\n"
+		<< "adaptive_motion_smooth_ms=" << s.adaptive.motionSmoothMs << "\n"
 		<< "interpolation=" << InterpolationPolicy::Name(s.interpolation) << "\n"
 		<< "interpolation_fallback=" << InterpolationPolicy::Name(s.interpolationFallback) << "\n"
 		<< "interpolation_fill_gaps=" << (s.interpolationFillGaps ? "on" : "off") << "\n"

@@ -9758,6 +9758,38 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         adaptiveMapSmooth->setPlaceholderText(QStringLiteral("500"));
         adaptiveMapSmooth->setToolTip(QStringLiteral(
             "Time constant of the per-block grain map (it follows the content along the vectors); a cut resets it."));
+        // VP-V scaling.output (owner 2026-10-31): the motion-adapted blend, a candidate (off by default).
+        auto* adaptiveMotion = addChoice(QStringLiteral("Motion-adapted blend (candidate)"),
+            QStringLiteral("adaptive_motion"), { QStringLiteral("off"), QStringLiteral("on") });
+        adaptiveMotion->setToolTip(QStringLiteral(
+            "On: the sharper scaler (SSIM down, the CNN up) is kept on steady, confidently tracked areas and eased "
+            "toward the faithful scaler on fast or uncertain motion, smoothed over time so motion edges do not "
+            "flicker. Uses the de-judder's motion vectors (asks for them like the grain map); without vectors the "
+            "plain blend runs and the status says so. Applies to the downscale and the upscale blend."));
+        MarkGpuCost(form, adaptiveMotion, 1);
+        const AdaptiveField motionFields[] = {
+            { "Motion: full sharp below (heights/s)", "adaptive_motion_speed_lo", 0.0, 10.0, "0.1", "Motion slower than this (picture heights per second) keeps the sharper scaler's full weight." },
+            { "Motion: safe above (heights/s)", "adaptive_motion_speed_hi", 0.0, 10.0, "0.4", "Motion faster than this uses the floor below." },
+            { "Motion: weight on fast motion (0 to 1)", "adaptive_motion_floor", 0.0, 1.0, "0", "The sharper scaler's share kept on fast or untracked motion (0 = the faithful scaler only)." },
+            { "Motion: smoothing (ms)", "adaptive_motion_smooth_ms", 0.0, 10000.0, "250", "Time constant of the per-block weight (it follows the content along the vectors); a cut resets it." } };
+        std::vector<QWidget*> motionRows;
+        for (const AdaptiveField& field : motionFields)
+        {
+            auto* edit = addText(QString::fromLatin1(field.label), QString::fromLatin1(field.key));
+            motionRows.push_back(edit);
+            edit->setValidator(new QDoubleValidator(field.lo, field.hi, 3, edit));
+            edit->setPlaceholderText(QString::fromLatin1(field.placeholder));
+            edit->setToolTip(QString::fromLatin1(field.tip));
+        }
+        {
+            auto greyMotion = [adaptiveMotion, motionRows]()
+            {
+                const bool on = adaptiveMotion->currentData().toString() == QStringLiteral("on");
+                for (QWidget* row : motionRows) { row->setProperty("greyedOff", !on); row->setEnabled(on); }
+            };
+            connect(adaptiveMotion, qOverload<int>(&QComboBox::currentIndexChanged), this, [greyMotion](int) { greyMotion(); });
+            greyMotion();
+        }
         MarkGpuCost(form, adaptiveOn, 2);
         MarkGpuCost(form, adaptiveMap, 1);
         {

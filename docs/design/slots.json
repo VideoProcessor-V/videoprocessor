@@ -1117,7 +1117,12 @@
         "cnn_residual_stabilise",
         "ssim_residual_stabilise",
         "residual_stabilise_grain_guard",
-        "fbo_float32"
+        "fbo_float32",
+        "adaptive_motion",
+        "adaptive_motion_speed_lo",
+        "adaptive_motion_speed_hi",
+        "adaptive_motion_floor",
+        "adaptive_motion_smooth_ms"
       ],
       "planned_keys": [
         "hybrid_refine_d"
@@ -1164,7 +1169,8 @@
           "fbo_float32": "off",
           "ssim_residual_stabilise": "off",
           "cnn_residual_stabilise": "off",
-          "residual_stabilise_grain_guard": "off"
+          "residual_stabilise_grain_guard": "off",
+          "adaptive_motion": "off"
         }
       },
       "zone": "libplacebo",

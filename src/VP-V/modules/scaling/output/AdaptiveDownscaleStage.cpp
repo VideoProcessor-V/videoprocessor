@@ -48,7 +48,17 @@ namespace AdaptiveDownscaleStage
 		// Stage 12: the height libplacebo will sample (re-based when the factor is below 1).
 		const float sourceCropH = std::fabs(frame.sourceCrop.y1 - frame.sourceCrop.y0) * static_cast<float>(frame.rebaseFactor);
 		const float targetCropH = std::fabs(frame.targetCrop.y1 - frame.targetCrop.y0);
-		const bool upscaleBlend = frame.slotRuns && frame.adaptiveUpscale && sourceCropH + 0.5f < targetCropH;
+		// N9-P12: either axis upscaled (a width-only upscale, e.g. an anamorphic squeeze, was missed
+		// by the height-only gate); exactly one axis upscaled = the one-axis form (faithful only).
+		const float sourceCropW = std::fabs(frame.sourceCrop.x1 - frame.sourceCrop.x0) * static_cast<float>(frame.rebaseFactorX);
+		const float targetCropW = std::fabs(frame.targetCrop.x1 - frame.targetCrop.x0);
+		const AdaptiveDownscale::UpscaleAxes axes = AdaptiveDownscale::UpscaleAxesOf(sourceCropW, sourceCropH, targetCropW, targetCropH);
+		const bool upscaleBlend = frame.slotRuns && frame.adaptiveUpscale && axes.any;
+		const bool oneAxis = upscaleBlend && axes.oneAxis;
+		oneAxisThisFrame = oneAxis;
+		droppedPrescalers = 0;
+		motionAdaptiveOn = frame.slotRuns && frame.adaptive && frame.adaptive->motionAdaptive &&
+			(upscaleBlend || frame.adaptiveDownscale);
 		const bool downscaleOn = frame.slotRuns && frame.adaptiveDownscale;   // slot off: as adaptive_downscale off
 		upscaleThisFrame = upscaleBlend;
 		// Findings 2026-10-25 #1: what Fallback() reports (no effect on the picture).
@@ -58,11 +68,21 @@ namespace AdaptiveDownscaleStage
 		ssimMissing = false;
 		// SSimSuperRes takes the grain term through alpha only when the blend runs (its
 		// vp_grain_strength; 0 otherwise).
+		// One-axis: SuperRes takes the (zero) grain term through alpha whatever the setting, so it
+		// adds nothing on the faithful-only picture.
 		const pl_hook* superresHook = nullptr;
 		for (const pl_hook* hook : hooks)
 			if (CustomHookChain::SetHookParameter(hook, "vp_grain_strength",
-				upscaleBlend && frame.upscaleSuperresScale ? 1.0 : 0.0))
+				upscaleBlend && (frame.upscaleSuperresScale || oneAxis) ? 1.0 : 0.0))
 				superresHook = hook;
+		// One-axis: the CNN doubler would invent detail on the axis that is not upscaled (and
+		// costs a full doubling): dropped from this frame's hooks, so PRE_KERNEL is the source.
+		if (oneAxis && host.isPrescaler)
+		{
+			const auto end = std::remove_if(hooks.begin(), hooks.end(), [&](const pl_hook* hook) { return host.isPrescaler(hook); });
+			droppedPrescalers = static_cast<int>(hooks.end() - end);
+			hooks.erase(end, hooks.end());
+		}
 		const bool superresFound = superresHook != nullptr;
 		const AdaptiveDownscale::Settings& adaptive = *frame.adaptive;
 		// Stage 12 §2c / delta 15 S8-2: at a low bitrate quality the CNN's and SSIM's weights fall
@@ -99,8 +119,16 @@ namespace AdaptiveDownscaleStage
 			AdaptiveDownscale::Upscale up;
 			up.on = true;
 			up.wBase = static_cast<float>(frame.upscaleWBase * state.bitrateWeightScale);
-			up.superresAlpha = frame.upscaleSuperresScale && superresFound;
+			up.superresAlpha = (frame.upscaleSuperresScale || oneAxis) && superresFound;
 			up.nativeHeight = sourceCropH;
+			up.nativeWidth = sourceCropW;
+			up.oneAxis = oneAxis;
+			if (oneAxis != oneAxisLogged)
+			{
+				oneAxisLogged = oneAxis;
+				DebugLog::Log("Adaptive upscale: %s", oneAxis ?
+					"faithful only (one-axis upscale; CNN doubler skipped)" : "both axes (CNN + faithful blend)");
+			}
 			module.SetUpscale(up);
 			module.ClearGrainField();
 			const MotionSource m = host.motion();
@@ -122,7 +150,7 @@ namespace AdaptiveDownscaleStage
 				if (known)
 					module.SetGrainField(field);
 			}
-			state.grainMapWanted = adaptive.grainMap && module.Active() && frame.vectorsRun;
+			state.grainMapWanted = (adaptive.grainMap || adaptive.motionAdaptive) && module.Active() && frame.vectorsRun;
 			hooks.insert(hooks.begin(), module.Measure());
 			// The blend before SSimSuperRes (both POST_KERNEL): SuperRes refines the blended picture
 			// with its strength scaled by the grain term.
@@ -186,7 +214,8 @@ namespace AdaptiveDownscaleStage
 				}
 				// The next source frame's estimate runs for the map when the blend acts on this
 				// picture (a downscale; Active() is the last measured frame's).
-				state.grainMapWanted = adaptive.grainMap && module.Active() && frame.vectorsRun;
+				// The motion-adapted blend needs this frame's vectors as much as the map does.
+				state.grainMapWanted = (adaptive.grainMap || adaptive.motionAdaptive) && module.Active() && frame.vectorsRun;
 				hooks.insert(hooks.begin(), module.Measure());
 				hooks.push_back(module.Blend());
 				state.noSsimLogged = false;
@@ -209,6 +238,44 @@ namespace AdaptiveDownscaleStage
 		}
 		if (!downscaleOn && !upscaleBlend)
 			state.grainMapWanted = false;
+		// The stage's own status lines are republished when they change (the 8b form, the
+		// motion-adapted state), not only on the downscale's once-a-second tick.
+		std::string status;
+		for (const std::string& line : StatusLines())
+			status += line + "\n";
+		if (status != statusPublished)
+		{
+			statusPublished = status;
+			if (host.publishStatus)
+				host.publishStatus();
+		}
+	}
+
+	std::vector<std::string> Stage::StatusLines() const
+	{
+		std::vector<std::string> lines;
+		// The module's readouts are the last measured frame's (audit: never claim a blend that did not run).
+		if (upscaleThisFrame)
+		{
+			if (!module.Active() || module.LastUpscaleRatio() == 0)
+				lines.push_back(oneAxisThisFrame && droppedPrescalers > 0 ?
+					"Adaptive upscale: not applied on the last frame (no picture yet or prescale ratio not 1 or 2; CNN doubler skipped: one-axis)" :
+					"Adaptive upscale: not applied on the last frame (no picture yet or prescale ratio not 1 or 2)");
+			else
+				lines.push_back(oneAxisThisFrame ?
+					(droppedPrescalers > 0 ? "Adaptive upscale: faithful only (one-axis upscale; CNN doubler skipped)" :
+						"Adaptive upscale: faithful only (one-axis upscale)") :
+					"Adaptive upscale: CNN + faithful blend");
+		}
+		if (motionAdaptiveOn)
+		{
+			const AdaptiveDownscale::MotionState m = module.LastMotionState();
+			lines.push_back(m == AdaptiveDownscale::MotionState::Used ?
+				"Motion-adapted blend: on (vectors; untracked or fast motion uses the faithful scaler)" :
+				m == AdaptiveDownscale::MotionState::NoVectors ? "Motion-adapted blend: no vectors on this frame (plain blend)" :
+				"Motion-adapted blend: idle (the blend did not run on the last frame)");
+		}
+		return lines;
 	}
 
 	void Stage::ApplyLight(pl_render_params& params, const Light& light)
