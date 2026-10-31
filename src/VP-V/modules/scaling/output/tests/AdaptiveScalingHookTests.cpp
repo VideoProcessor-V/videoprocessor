@@ -212,7 +212,7 @@ namespace VideoProcessorTest
 			// Bug hunt 34 item 1: on D3D11 the statistics come through the non-blocking staging
 			// ring (libplacebo's buffer readback blocks there), and still arrive one frame later.
 			Assert::IsTrue(module.NativeStatsReadback(), L"D3D11: the statistics must be read back without waiting");
-			Assert::IsTrue(linearStats.valid, L"the statistics did not arrive through the staging ring");
+			Assert::AreEqual<uint64_t>(0, module.StatsDropped(), L"statistics frames dropped by the staging ring");
 			render(scene, 256, 160, true, noGrain, true, true);
 			render(scene, 256, 160, true, noGrain, true, false);
 			render(scene, 256, 160, true, noGrain, true, false);

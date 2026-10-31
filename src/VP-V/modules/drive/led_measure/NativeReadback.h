@@ -38,7 +38,7 @@ namespace LedDrive
 		// typed UAV stores every D3D11 feature level 11 GPU supports).
 		bool Create(pl_gpu gpu, int slots, int w, int h, DXGI_FORMAT format)
 		{
-			Release(gpu);
+			Release(owner);
 			const pl_d3d11 d3d = gpu ? pl_d3d11_get(gpu) : nullptr;
 			if (!d3d || !d3d->device || slots <= 0 || w <= 0 || h <= 0)
 				return false;
@@ -122,12 +122,14 @@ namespace LedDrive
 			return true;
 		}
 
-		// With the GPU that created it, while it is alive.
+		// While the GPU that created it is alive (the wrappers are destroyed through that GPU,
+		// whatever `gpu` says; `gpu` is only a check).
 		void Release(pl_gpu gpu)
 		{
+			(void)gpu;
 			for (Slot& s : slot)
-				if (s.wrapped && (gpu ? gpu : owner))
-					pl_tex_destroy(gpu ? gpu : owner, &s.wrapped);
+				if (s.wrapped && owner)
+					pl_tex_destroy(owner, &s.wrapped);
 			ReleaseNative();
 		}
 

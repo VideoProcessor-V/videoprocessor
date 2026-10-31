@@ -206,7 +206,7 @@ namespace DetailPulseModel
 				else if (prev) wt = DetailPulse::VetoWeight(change, veto);
 				if (pic.on && n == 0.0)
 				{
-					// Wholly in the bars: out of the frame's statistics, full weight.
+					// Wholly in the bars: out of the frame's statistics, weight 1 (no veto).
 					wt = 1.0;
 					change = 0.0;
 					t.untrusted.at(bx, by) = 0.0;

@@ -119,7 +119,6 @@ namespace CalibrationLutStage
 		// excess unchanged) only when the LUT cannot be carried (shaper matrices, a side over 256,
 		// no 3D texture): counted in SlopeFallbacks().
 		const bool slope = EnsureSlopeTexture(params->gpu);
-		if (slope) ++slopeApplied; else ++slopeFallbacks;
 		pl_custom_shader keep{};
 		keep.prelude = "vec3 vp_calibration_excess;\nvec3 vp_calibration_clamped;";
 		keep.body = "vp_calibration_clamped = clamp(color.rgb, 0.0, 1.0);\n"
@@ -181,6 +180,7 @@ namespace CalibrationLutStage
 		if (!pl_dispatch_finish(params->dispatch, &dispatch))
 			return failed();
 		++applied;
+		if (slope) ++slopeApplied; else ++slopeFallbacks;
 		pl_hook_res res{};
 		res.output = PL_HOOK_SIG_TEX;
 		res.tex = out;

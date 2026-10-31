@@ -236,8 +236,9 @@ if (li == 0u) {
 #endif
 #ifdef PICT
     if (TILE_PIXELS == 0.0) {
-        // A tile wholly in the bars: not in the frame's statistics; full weight, so the
-        // picture pixels beside it interpolate towards their own tiles only.
+        // A tile wholly in the bars: not in the frame's statistics. Weight 1 (no veto: its
+        // change is not picture evidence), so the picture pixels beside it interpolate between
+        // their own tiles' weights and 1, as when bar tiles measured as static before.
         w = 1.0;
         u = 0.0;
         change = 0.0;
@@ -726,8 +727,9 @@ if (li == 0u) {
 #endif
 #ifdef PICT
     if (TILE_PIXELS == 0.0) {
-        // A tile wholly in the bars: not in the frame's statistics; full weight, so the
-        // picture pixels beside it interpolate towards their own tiles only.
+        // A tile wholly in the bars: not in the frame's statistics. Weight 1 (no veto: its
+        // change is not picture evidence), so the picture pixels beside it interpolate between
+        // their own tiles' weights and 1, as when bar tiles measured as static before.
         w = 1.0;
         u = 0.0;
         change = 0.0;

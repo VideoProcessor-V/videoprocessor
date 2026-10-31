@@ -102,6 +102,10 @@ namespace SourceResolutionMonitor
 		// Copies and jobs dropped that way (diagnostics, tests).
 		unsigned long long StaleJobsDropped() const { return staleJobsDropped.load(std::memory_order_relaxed); }
 		Snapshot Read() const;
+		// Bug hunt 34 item 1: true while the tiles are read back without waiting (D3D11 staging);
+		// false before the first frame, on another API, or when the staging could not be made on
+		// D3D11 (then libplacebo's readback, which waits there: the renderer can show it).
+		bool NativeReadback() const { return nativeHolder != nullptr; }
 
 		// Render thread: the re-base factor auto wants for a native height
 		// (1 = native), and why ("" when unchanged). Planner Q2 (2026-10-16): back to
