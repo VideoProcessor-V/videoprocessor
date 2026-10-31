@@ -13118,7 +13118,7 @@ struct LibplaceboVideoRenderer::Impl
 				gpuName = CStringA(desc.Description).GetString();
 		}
 		DebugLog::Log(
-			"libplacebo initialized: D3D11 on %s, upload: %s, SDR target request=%s %.1f nits",
+			"libplacebo initialized: D3D11 on %s, %s upload, SDR target request=%s %.1f nits",   // Bill's "<route> upload" wording (his tests read it)
 			gpuName.c_str(), route.c_str(),
 			TargetPrimariesName(),
 			sdrTargetNits);
@@ -21273,6 +21273,10 @@ struct LibplaceboVideoRenderer::Impl
 				((cadenceRepeat && vpUploadedSequence == sourceSequence && vpUploadedGeneration == frameGeneration) ||
 				 vpSkipOutput);
 			// efficiency_fixes: this frame was the last frame's B, uploaded for its motion estimate.
+			// Merge 2026-10-31: Bill's native P010/P210 capture upload has no converted payload
+			// (convertedPayload null): VP's raw / DV-raw checks below must not dereference it.
+			const bool payloadRaw = convertedPayload && convertedPayload->Raw();
+			const bool payloadDvRaw = convertedPayload && convertedPayload->dvTunnelRaw;
 			const bool reuseNext = !reuseUpload && TakeNextPlanes(convertedPayload, sourceSequence, width, height,
 				chromaHeight, p010RowBytes, state.invertedVertical, image.planes);
 			if (reuseUpload)
@@ -21285,7 +21289,7 @@ struct LibplaceboVideoRenderer::Impl
 			{
 				// image.planes are set; nothing is uploaded or unpacked.
 			}
-			else if (convertedPayload->Raw())
+			else if (payloadRaw)
 			{
 				// capture_path: gpu: the raw frame up as it is, unpacked into
 				// the same two planes.
@@ -21312,7 +21316,7 @@ struct LibplaceboVideoRenderer::Impl
 						image.planes[plane].flipped = state.invertedVertical;
 				}
 			}
-			if (!reuseUpload && !reuseNext && (!convertedPayload->Raw() || dvCpuFallback))
+			if (!reuseUpload && !reuseNext && (!payloadRaw || dvCpuFallback))
 				for (int plane = 0; plane < 2; ++plane)
 				{
 					sourceUploaded = pl_upload_plane(d3d11->gpu,
@@ -21324,7 +21328,7 @@ struct LibplaceboVideoRenderer::Impl
 					image.planes[plane].flipped = state.invertedVertical;
 				}
 			frameGpuTiming.EndStage();
-			if (!sourceUploaded && convertedPayload->dvTunnelRaw && !dvCpuFallback)
+			if (!sourceUploaded && payloadDvRaw && !dvCpuFallback)
 			{
 				// A tunnel picture neither the GPU nor the CPU could unpack (e.g. a
 				// mode change with raw payloads queued): black, never the last
@@ -21372,13 +21376,13 @@ struct LibplaceboVideoRenderer::Impl
 					setIngressStatus("P210 (native capture; no CPU repack)");
 					break;
 				case VideoFrameEncoding::V210:
-					setIngressStatus(convertedPayload->Raw() ? "P210 (lossless v210 4:2:2, GPU unpack)" : "P210 (lossless v210 4:2:2)");
+					setIngressStatus(payloadRaw ? "P210 (lossless v210 4:2:2, GPU unpack)" : "P210 (lossless v210 4:2:2)");
 					break;
 				case VideoFrameEncoding::HDYC:
-					setIngressStatus(convertedPayload->Raw() ? "P210 (lossless HDYC 4:2:2, GPU unpack)" : "P210 (lossless HDYC 4:2:2)");
+					setIngressStatus(payloadRaw ? "P210 (lossless HDYC 4:2:2, GPU unpack)" : "P210 (lossless HDYC 4:2:2)");
 					break;
 				default:
-					setIngressStatus(convertedPayload->Raw() ? "P210 (lossless UYVY 4:2:2, GPU unpack)" : "P210 (lossless UYVY 4:2:2)");
+					setIngressStatus(payloadRaw ? "P210 (lossless UYVY 4:2:2, GPU unpack)" : "P210 (lossless UYVY 4:2:2)");
 					break;
 				}
 			}
