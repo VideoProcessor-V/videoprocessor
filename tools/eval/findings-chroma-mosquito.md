@@ -33,8 +33,30 @@ VP's vectors.
 * GPU cost classes: JBU, residual JBU and CfL **low**; Krig **medium** (a 13x13 solve per cell); MV
   **medium** plus vectors.
 
-**Recommendation:** keep Catmull-Rom. EVALUATE ON GPU: none now. Re-test CfL (cheap) and MV once a
-true-4:4:4 truth set exists.
+**Recommendation (this protocol):** keep Catmull-Rom. Superseded for CfL by A2 below.
+
+### A2. Follow-up: GENUINE 4:4:4 truth (verdict change for CfL)
+
+New protocol `chroma444_true`: Netflix Sol Levante (ProRes XQ 4:4:4 12-bit HDR10, animation), two scenes,
+each with no codec and with x265 crf22 of the left-sited 4:2:0; Nocturne ProRes 4:2:2 film grain as a
+partial check (horizontal only). PQ code values (no linearisation), 1024x768 crops, 6 frames
+(`prototypes/chroma444_true/`).
+
+| means over 5 cases | PSNR Cb / Cr | edge Cb / Cr | LPIPS | grain FAIL |
+|---|---|---|---|---|
+| Catmull-Rom | 52.70 / 51.31 | 43.79 / 44.30 | 0.0159 | - |
+| JBU | 51.77 / 50.23 | 44.41 / 43.82 | 0.0201 | 7 |
+| residual JBU | 52.68 / 51.36 | 44.00 / 44.48 | 0.0160 | 0 |
+| **CfL** | **53.33 / 51.55** | **45.86 / 44.30** | 0.0164 | 1 (Sol x265 Cb grain 0.44 vs 0.49) |
+| MV + residual JBU | 52.74 / 51.39 | 44.22 / 44.64 | 0.0161 | 0 |
+
+* With a real 4:4:4 truth, CfL wins: +0.6 / +0.2 dB on average, +2.4 / +1.2 dB on the Sol t150 scene, and
+  +2 dB Cb at edges. It loses on Sol t40 without a codec (-0.6 Cb) and slightly on Nocturne (grain, -0.1).
+* MV adds only +0.05 to +0.08 dB at about 3x the cost of the spatial methods. JBU still smooths grain.
+
+**Revised:** CfL is **EVALUATE ON GPU** (cost class low). Gate it by local luma/chroma correlation, as
+it already does, and add a chroma-grain guard for grainy content. JBU, residual JBU, Krig and MV stay
+DROP.
 
 ## B. Mosquito repair (default: none)
 
@@ -55,8 +77,27 @@ structure layer only, BTB/WTW untouched, and a per-tile grain guard (≤ 5 % in-
   edges; only the guard statistics show in-zone loss. Add a near-edge grain gate.
 * Cost class **medium** (bilateral, 2 warps, validation, plus vectors).
 
-**Recommendation:** DROP spatial and naive. DROP FOR NOW the MC repair: it is rule-compliant but gives
-no material gain. Revisit with low-bitrate SD or broadcast material.
+### B2. Follow-up: near-edge grain gate (verdict confirmed, stricter)
+
+New harness gate (case key `grain_probe`): the candidate is re-run on its input plus synthetic grain of two
+fixed seeds. out_A - out_B is the grain it passed, so structure cancels and the gate works next to edges.
+Rows `grain_probe_keep/lag1_{edge,flat}_vs_input_Y` (keep within ±5 %, lag-1 ≤ +0.05). Results on 4
+cases (`prototypes/mosquito_edgegrain/`):
+
+| candidate | keep, near edges | keep, flat | lag-1, near edges |
+|---|---|---|---|
+| MC (the design) | **0.906 (FAIL, 4/4)** | 0.997 | +0.010 |
+| spatial | 0.994 (PASS) | 1.000 | 0.000 |
+| naive MC | **0.843 (FAIL, 4/4)** | 0.995 | +0.029 |
+
+The MC design removes about 9 % of the near-edge grain. Its per-tile guard measures against the split's
+grain layer, not the total, so part of the grain kept in the structure layer is averaged away. The old
+flat-tile gates could not see this.
+
+**Recommendation (after B2):** DROP spatial and naive. DROP the MC repair as designed: it fails the
+grain rule near edges and gains little. A redesign would need its guard to measure total grain (for
+example a two-seed self-check per zone).
 
 CPU time: scored runs 28 min, tuning 8 min (on crops that differ from the scored ones), aborted first
 passes about 35 min.
+Follow-ups A2/B2: about 20 min of CPU (true 4:4:4 suite 10 min, edge-grain suite 10 min).

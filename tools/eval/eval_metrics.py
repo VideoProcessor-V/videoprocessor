@@ -261,6 +261,65 @@ def grain_lag1(ref, out, tiles, tol=GRAIN_LAG1_TOL, min_frames=3):
     return dict(ref=a, out=b, delta=b - a, flag=(b - a) > tol)
 
 
+# ------------------------------------------------------------------ 3b. near-edge grain gate (two-seed probe)
+PROBE_SEEDS = (1031, 2053)       # fixed: the probe is deterministic
+PROBE_SIGMA = 0.006              # probe grain RMS as a share of peak (~6 10-bit codes)
+EDGE_GRAD = 0.06                 # strong edge: Sobel/8 of the low-passed reference > 6 % of peak per px
+
+
+def probe_grain(shape, seed, frame_index, bitdepth):
+    """Deterministic synthetic grain for the two-seed probe: white Gaussian noise, lightly low-passed
+    (sigma 0.7 px, film-like correlation), scaled to PROBE_SIGMA * peak RMS; a new field per frame."""
+    rng = np.random.default_rng([seed, int(frame_index) & 0x7FFFFFFF])
+    g = ndimage.gaussian_filter(rng.standard_normal(shape), 0.7, mode="wrap")
+    return g * (PROBE_SIGMA * peak(bitdepth) / max(float(np.sqrt(np.mean(g * g))), 1e-12))
+
+
+def near_edge_zone(ref, bitdepth):
+    """Near-edge band from the REFERENCE: pixels within r of a strong edge (low-passed Sobel/8 >
+    EDGE_GRAD * peak) minus the edge core (1 px).  r ~ min(h, w)/128 (>= 4 px), i.e. the reach of codec
+    ringing and of repair zones.  Returns (zone, flat): flat = farther than 2r from any strong edge."""
+    lp = ndimage.gaussian_filter(np.asarray(ref, np.float64), 1.0, mode="nearest")
+    g = np.hypot(ndimage.sobel(lp, 0, mode="nearest"), ndimage.sobel(lp, 1, mode="nearest")) / 8.0
+    edges = g > EDGE_GRAD * peak(bitdepth)
+    r = max(4, int(round(min(ref.shape) / 128.0)))
+    if not edges.any():
+        z = np.zeros(ref.shape, bool)
+        return z, ~z
+    core = ndimage.binary_dilation(edges, iterations=1)
+    zone = ndimage.binary_dilation(edges, iterations=r) & ~core
+    flat = ~ndimage.binary_dilation(edges, iterations=2 * r)
+    return zone, flat
+
+
+def grain_probe(d_in, d_out, masks, min_frames=3):
+    """Two-seed probe.  d_in = input_A - input_B (= the probe grain difference, the scene cancels),
+    d_out = out_A - out_B (what the candidate passed of it).  Over each frame's mask:
+      keep = rms(d_out) / rms(d_in)        (1 = grain passed intact; < 1 = averaged / smoothed away)
+      lag1 = per-pixel lag-1 temporal correlation of d_out minus that of d_in (needs >= 3 frames;
+             temporal averaging raises it).
+    Structure is removed by construction (it is identical in A and B), so the gate works next to
+    edges where a residual-based grain measure is dominated by structure.  -> dict or None."""
+    di, do = _seq(d_in), _seq(d_out)
+    m = np.stack(masks)
+    if not m.any():
+        return None
+    keep = float(np.sqrt(np.sum(do[m] ** 2) / max(np.sum(di[m] ** 2), 1e-300)))
+    lag = None
+    if di.shape[0] >= min_frames:
+        mm = m.all(axis=0)
+        if mm.any():
+            def l1(a):
+                b = a[:, mm]
+                b = b - b.mean(axis=0, keepdims=True)
+                den = np.sum(b[:-1] ** 2, axis=0) + np.sum(b[1:] ** 2, axis=0)
+                num = 2.0 * np.sum(b[:-1] * b[1:], axis=0)
+                ok = den > 0
+                return float(np.mean(np.where(ok, num / np.where(ok, den, 1.0), 0.0)))
+            lag = l1(do) - l1(di)
+    return dict(keep=keep, lag1=lag)
+
+
 # ------------------------------------------------------------------ 4. temporal stability
 
 

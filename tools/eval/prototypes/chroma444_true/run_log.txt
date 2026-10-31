@@ -1,0 +1,65 @@
+# command: D:/hfr/venv/Scripts/python.exe -I tools/eval/run_prototypes.py --family chroma --suite tools/eval/suites/proto_chroma444_true.json --baseline chroma_bicubic --candidates chroma_jbu,chroma_jbu_res,chroma_cfl,chroma_mv --lpips --out <scratch>
+# laptop CPU, 2026-10-31; cost rows are wall-clock (non-deterministic); all other values deterministic
+run_prototypes  harness v1  python 3.14.8  numpy 2.5.2
+suite proto_chroma444_true (5 cases)  family chroma  default chroma_bicubic (default: Catmull-Rom (a=-0.5) chroma upsampling, left siting)
+== candidate chroma_jbu: joint-bilateral luma-guided chroma upsampler, +-2 chroma taps, siting-correct
+case film24 / sol_levante / t40_f48_420_no_codec: loading
+  done in 40.6 s
+case film24 / sol_levante / t40_f48_x265_crf22: loading
+  done in 35.3 s
+case film24 / sol_levante / t150_f120_420_no_codec: loading
+  done in 35.6 s
+case film24 / sol_levante / t150_f120_x265_crf22: loading
+  done in 34.9 s
+case film24 / nocturne / t300_f60_422_partial: loading
+  done in 15.7 s
+   chroma_jbu: rows 240 flags {"FAIL": 7, "FLAG": 17, "INFO": 20, "LIMIT": 2, "NA": 91, "PASS": 103}  162.1 s
+== candidate chroma_jbu_res: residual JBU: Catmull-Rom + luma-guided correction (JBU minus same-kernel Gaussian)
+case film24 / sol_levante / t40_f48_420_no_codec: cached inputs and default
+  done in 32.4 s
+case film24 / sol_levante / t40_f48_x265_crf22: cached inputs and default
+  done in 32.9 s
+case film24 / sol_levante / t150_f120_420_no_codec: cached inputs and default
+  done in 33.9 s
+case film24 / sol_levante / t150_f120_x265_crf22: cached inputs and default
+  done in 32.2 s
+case film24 / nocturne / t300_f60_422_partial: cached inputs and default
+  done in 15.0 s
+   chroma_jbu_res: rows 240 flags {"FLAG": 5, "INFO": 20, "LIMIT": 8, "NA": 91, "PASS": 116}  146.5 s
+== candidate chroma_cfl: chroma-from-luma: guided-filter local linear regression, correlation-mixed with Catmull-Rom
+case film24 / sol_levante / t40_f48_420_no_codec: cached inputs and default
+  done in 13.7 s
+case film24 / sol_levante / t40_f48_x265_crf22: cached inputs and default
+  done in 12.9 s
+case film24 / sol_levante / t150_f120_420_no_codec: cached inputs and default
+  done in 14.1 s
+case film24 / sol_levante / t150_f120_x265_crf22: cached inputs and default
+  done in 13.6 s
+case film24 / nocturne / t300_f60_422_partial: cached inputs and default
+  done in 5.7 s
+   chroma_cfl: rows 240 flags {"FAIL": 1, "FLAG": 7, "INFO": 20, "LIMIT": 7, "NA": 91, "PASS": 114}  60.0 s
+== candidate chroma_mv: MV temporal chroma: neighbour chroma samples along DIS flow (stand-in for VP vectors), validated per sample, confidence-mixed with residual JBU
+case film24 / sol_levante / t40_f48_420_no_codec: cached inputs and default
+  done in 50.8 s
+case film24 / sol_levante / t40_f48_x265_crf22: cached inputs and default
+  done in 49.7 s
+case film24 / sol_levante / t150_f120_420_no_codec: cached inputs and default
+  done in 59.8 s
+case film24 / sol_levante / t150_f120_x265_crf22: cached inputs and default
+  done in 66.1 s
+case film24 / nocturne / t300_f60_422_partial: cached inputs and default
+  done in 26.7 s
+   chroma_mv: rows 240 flags {"FAIL": 1, "FLAG": 3, "INFO": 20, "LIMIT": 6, "NA": 91, "PASS": 119}  253.2 s
+stats chroma_mv case-start-index 0: mean 0.2925
+stats chroma_mv case-start-index 0: mean 0.2923
+stats chroma_mv case-start-index 0: mean 0.5498
+stats chroma_mv case-start-index 0: mean 0.5967
+stats chroma_mv case-start-index 0: mean 0.03612
+total 621.7 s
+
+# scratch source preparation (D:/codex/videoprocessor/eval-scratch/feat-eval-prototypes-444/):
+#   ffmpeg -ss 1.979 -i hdr/sol_levante_hdr10_24p_t40/sol_levante_hdr10_24p_t40.mov  -frames:v 8 -vf crop=1536:1024:1152:568 -pix_fmt yuv444p12le -f rawvideo sol_t40_f48.yuv
+#   ffmpeg -ss 4.979 -i hdr/sol_levante_hdr10_24p_t150/sol_levante_hdr10_24p_t150.mov -frames:v 8 -vf crop=1536:1024:1152:568 -pix_fmt yuv444p12le -f rawvideo sol_t150_f120.yuv
+#   ffmpeg -ss 0.9917 -i hdr_film_grain/nocturne_filmgrain_hdr_60p_t300/nocturne_filmgrain_hdr_60p_t300.mov -frames:v 8 -vf crop=1536:1024:1152:568 -pix_fmt yuv422p10le -f rawvideo noct_t300_f60.yuv
+#   4:2:0 inputs: eval_protocols.chroma444_true_pair(to_bitdepth(master,10), same) -> eval_io.write_raw -> <name>_420p10_left.yuv
+#   ffmpeg -f rawvideo -pix_fmt yuv420p10le -s 1536x1024 -r 24 -i <name>_420p10_left.yuv -c:v libx265 -x265-params crf=22 -preset fast -pix_fmt yuv420p10le <name>_x265_crf22.mp4 ; decoded to yuv420p10le raw

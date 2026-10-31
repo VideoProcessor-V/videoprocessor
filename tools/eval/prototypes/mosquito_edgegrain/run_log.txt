@@ -1,0 +1,71 @@
+# command: D:/hfr/venv/Scripts/python.exe -I tools/eval/run_prototypes.py --family mosquito --suite tools/eval/suites/proto_mosquito_edgegrain.json --baseline repair_none --candidates mosquito_mc,mosquito_spatial,mosquito_naive_mc --no-cost --out <scratch>
+# laptop CPU, 2026-10-31; cost rows are wall-clock (non-deterministic); all other values deterministic
+run_prototypes  harness v1  python 3.14.8  numpy 2.5.2
+suite proto_mosquito_edgegrain (4 cases)  family mosquito  default repair_none (default: no mosquito repair (identity))
+== candidate mosquito_mc: mosquito repair: ringing zones near strong edges, MC temporal filter of the structure layer only, exact grain add-back, output grain guard (DIS flow = vector stand-in)
+case sports50_60 / Bosphorus / native_x264_crf28: loading
+  done in 43.3 s
+case sports50_60 / Bosphorus / native_av1fgs_crf35: loading
+  done in 42.6 s
+case film24 / tos4k / x265_2160p_6000k_w2400: loading
+  done in 69.1 s
+case film24 / tos4k / stress_x264_crf36_crop1024_w2400: loading
+  done in 69.1 s
+   mosquito_mc: rows 196 flags {"FAIL": 4, "INFO": 24, "LIMIT": 17, "NA": 48, "PASS": 103}  224.1 s
+== candidate mosquito_spatial: mosquito repair, spatial only: zone bilateral of the structure layer, exact grain add-back, guard
+case sports50_60 / Bosphorus / native_x264_crf28: cached inputs and default
+  done in 32.2 s
+case sports50_60 / Bosphorus / native_av1fgs_crf35: cached inputs and default
+  done in 30.4 s
+case film24 / tos4k / x265_2160p_6000k_w2400: cached inputs and default
+  done in 47.8 s
+case film24 / tos4k / stress_x264_crf36_crop1024_w2400: cached inputs and default
+  done in 53.2 s
+   mosquito_spatial: rows 196 flags {"INFO": 24, "LIMIT": 17, "NA": 48, "PASS": 107}  163.5 s
+== candidate mosquito_naive_mc: CONTRAST ONLY: MC temporal average of Y in the zone, no grain split, no guard (the original idea)
+case sports50_60 / Bosphorus / native_x264_crf28: cached inputs and default
+  done in 33.6 s
+case sports50_60 / Bosphorus / native_av1fgs_crf35: cached inputs and default
+  done in 33.8 s
+case film24 / tos4k / x265_2160p_6000k_w2400: cached inputs and default
+  done in 56.8 s
+case film24 / tos4k / stress_x264_crf36_crop1024_w2400: cached inputs and default
+  done in 69.5 s
+   mosquito_naive_mc: rows 196 flags {"FAIL": 6, "INFO": 24, "LIMIT": 17, "NA": 48, "PASS": 101}  193.6 s
+stats mosquito_mc case-start-index 140: conf mean 0.6754, guarded mean 8, sigma_n mean 1, zone mean 0.03147
+stats mosquito_mc case-start-index 140: conf mean 0.6973, guarded mean 22.25, sigma_n mean 3.753, zone mean 0.02915
+stats mosquito_mc case-start-index 140: conf mean 0.705, guarded mean 23.25, sigma_n mean 3.751, zone mean 0.02899
+stats mosquito_mc case-start-index 140: conf mean 0.7725, guarded mean 12.75, sigma_n mean 3.02, zone mean 0.02507
+stats mosquito_mc case-start-index 140: conf mean 0.7555, guarded mean 18.75, sigma_n mean 4.767, zone mean 0.02367
+stats mosquito_mc case-start-index 140: conf mean 0.7584, guarded mean 19.75, sigma_n mean 4.751, zone mean 0.02398
+stats mosquito_mc case-start-index 2400: conf mean 0.5606, guarded mean 10.33, sigma_n mean 1.541, zone mean 0.08687
+stats mosquito_mc case-start-index 2400: conf mean 0.659, guarded mean 68.5, sigma_n mean 4.465, zone mean 0.08184
+stats mosquito_mc case-start-index 2400: conf mean 0.6571, guarded mean 70.17, sigma_n mean 4.463, zone mean 0.08175
+stats mosquito_mc case-start-index 0: conf mean 0.6728, guarded mean 13.83, sigma_n mean 0.372, zone mean 0.06777
+stats mosquito_mc case-start-index 0: conf mean 0.6973, guarded mean 67.67, sigma_n mean 1.028, zone mean 0.0626
+stats mosquito_mc case-start-index 0: conf mean 0.6973, guarded mean 66.5, sigma_n mean 1.027, zone mean 0.06301
+stats mosquito_spatial case-start-index 140: conf mean 0, guarded mean 61.75, sigma_n mean 1, zone mean 0.03147
+stats mosquito_spatial case-start-index 140: conf mean 0, guarded mean 63.5, sigma_n mean 3.753, zone mean 0.02915
+stats mosquito_spatial case-start-index 140: conf mean 0, guarded mean 63.75, sigma_n mean 3.751, zone mean 0.02899
+stats mosquito_spatial case-start-index 140: conf mean 0, guarded mean 54, sigma_n mean 3.02, zone mean 0.02507
+stats mosquito_spatial case-start-index 140: conf mean 0, guarded mean 57, sigma_n mean 4.767, zone mean 0.02367
+stats mosquito_spatial case-start-index 140: conf mean 0, guarded mean 57.25, sigma_n mean 4.751, zone mean 0.02398
+stats mosquito_spatial case-start-index 2400: conf mean 0, guarded mean 128.7, sigma_n mean 1.541, zone mean 0.08687
+stats mosquito_spatial case-start-index 2400: conf mean 0, guarded mean 133.5, sigma_n mean 4.465, zone mean 0.08184
+stats mosquito_spatial case-start-index 2400: conf mean 0, guarded mean 130.7, sigma_n mean 4.463, zone mean 0.08175
+stats mosquito_spatial case-start-index 0: conf mean 0, guarded mean 119, sigma_n mean 0.372, zone mean 0.06777
+stats mosquito_spatial case-start-index 0: conf mean 0, guarded mean 125.8, sigma_n mean 1.028, zone mean 0.0626
+stats mosquito_spatial case-start-index 0: conf mean 0, guarded mean 127, sigma_n mean 1.027, zone mean 0.06301
+stats mosquito_naive_mc case-start-index 140: conf mean 0.6751, guarded mean 0, sigma_n mean 1, zone mean 0.03147
+stats mosquito_naive_mc case-start-index 140: conf mean 0.6943, guarded mean 0, sigma_n mean 3.753, zone mean 0.02915
+stats mosquito_naive_mc case-start-index 140: conf mean 0.702, guarded mean 0, sigma_n mean 3.751, zone mean 0.02899
+stats mosquito_naive_mc case-start-index 140: conf mean 0.7714, guarded mean 0, sigma_n mean 3.02, zone mean 0.02507
+stats mosquito_naive_mc case-start-index 140: conf mean 0.7517, guarded mean 0, sigma_n mean 4.767, zone mean 0.02367
+stats mosquito_naive_mc case-start-index 140: conf mean 0.7547, guarded mean 0, sigma_n mean 4.751, zone mean 0.02398
+stats mosquito_naive_mc case-start-index 2400: conf mean 0.5606, guarded mean 0, sigma_n mean 1.541, zone mean 0.08687
+stats mosquito_naive_mc case-start-index 2400: conf mean 0.6568, guarded mean 0, sigma_n mean 4.465, zone mean 0.08184
+stats mosquito_naive_mc case-start-index 2400: conf mean 0.655, guarded mean 0, sigma_n mean 4.463, zone mean 0.08175
+stats mosquito_naive_mc case-start-index 0: conf mean 0.6728, guarded mean 0, sigma_n mean 0.372, zone mean 0.06777
+stats mosquito_naive_mc case-start-index 0: conf mean 0.6945, guarded mean 0, sigma_n mean 1.028, zone mean 0.0626
+stats mosquito_naive_mc case-start-index 0: conf mean 0.6944, guarded mean 0, sigma_n mean 1.027, zone mean 0.06301
+total 581.3 s

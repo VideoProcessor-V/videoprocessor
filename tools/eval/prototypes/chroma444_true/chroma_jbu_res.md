@@ -1,0 +1,306 @@
+<!-- Copyright(C) 2026 VP-V contributors -->
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+
+# VP-V prototype evaluation: chroma_jbu_res vs chroma_bicubic (default)
+
+Suite: `proto_chroma444_true` (5 cases). Candidate `chroma_jbu_res` (residual JBU: Catmull-Rom + luma-guided correction (JBU minus same-kernel Gaussian)), default `chroma_bicubic`. LPIPS requested (CPU, tile crops). Cost: py-ref wall-clock on CPU (not GPU-representative).
+
+## Per-content-type summary
+
+### film24  (FLAG 5, INFO 20, LIMIT 8, NA 91, PASS 116)
+
+| metric | candidate (mean) | default (mean) | delta | n | NA | flags |
+|---|---|---|---|---|---|---|
+| btb_kept_C | NA | NA | NA | 5 | 5 | NA:5 |
+| btb_kept_Y | 1 | 1 | 0 | 5 | 4 | NA:4 PASS:1 |
+| btb_kept_vs_input_C | NA | NA | NA | 5 | 5 | NA:5 |
+| btb_kept_vs_input_Y | 1 | 1 | 0 | 5 | 4 | NA:4 PASS:1 |
+| clip_detect_C | NA | NA | NA | 5 | 5 | NA:5 |
+| clip_detect_Y | 0 | 0 | 0 | 5 | 4 | NA:4 PASS:1 |
+| cost_est_3090_ms | NA | NA | NA | 5 | 5 | NA:5 |
+| cost_gpu_ms_laptop | NA | NA | NA | 5 | 5 | NA:5 |
+| cost_ms_per_frame_pyref | 3324.09 | 19.2901 | 3304.8 | 5 | 0 | INFO:5 |
+| duplicate_rate_Y | 0 | 0 | 0 | 5 | 0 | PASS:5 |
+| edge_band_share | 0.0224445 | 0.0224445 | 0 | 5 | 0 | INFO:5 |
+| flicker_excess_Cb | 0.00211771 | 0.0014834 | 0.000634305 | 5 | 0 | PASS:5 |
+| flicker_excess_Cr | -0.0241093 | -0.0259475 | 0.00183817 | 5 | 0 | PASS:5 |
+| flicker_excess_Y | -0.000366472 | -0.000366472 | 0 | 5 | 0 | PASS:5 |
+| ghost_coeff_Y | 0.00847372 | 0.00847372 | 0 | 5 | 0 | PASS:5 |
+| gop_ratio_gop | NA | NA | NA | 5 | 5 | NA:5 |
+| gop_ratio_minigop | NA | NA | NA | 5 | 5 | NA:5 |
+| grain_hf_ratio_Cb | NA | NA | NA | 5 | 5 | NA:5 |
+| grain_hf_ratio_Y | NA | NA | NA | 5 | 5 | NA:5 |
+| grain_keep_vs_input_Cb | NA | NA | NA | 5 | 5 | NA:5 |
+| grain_keep_vs_input_Y | 1 | 1 | 0 | 5 | 1 | NA:1 PASS:4 |
+| grain_lag1_delta_Cb | 0.0204343 | 0.0194471 | 0.00098715 | 5 | 0 | LIMIT:1 PASS:4 |
+| grain_lag1_delta_Y | 0.00838519 | 0.00838519 | 0 | 5 | 1 | NA:1 PASS:4 |
+| grain_lag1_vs_input_Cb | NA | NA | NA | 5 | 5 | NA:5 |
+| grain_lag1_vs_input_Y | 0 | 0 | 0 | 5 | 1 | NA:1 PASS:4 |
+| grain_rms_ratio_Cb | 0.519127 | 0.508896 | 0.0102305 | 5 | 0 | LIMIT:5 |
+| grain_rms_ratio_Y | 0.825842 | 0.825842 | 0 | 5 | 1 | LIMIT:2 NA:1 PASS:2 |
+| grain_tiles_Cb | 16 | 16 | 0 | 5 | 0 | INFO:5 |
+| grain_tiles_Y | 12.8 | 12.8 | 0 | 5 | 0 | INFO:5 |
+| halo_overshoot_Y | 2.66404e-05 | 2.66404e-05 | 0 | 5 | 0 | PASS:5 |
+| lc_boost_fraction_Y | 0 | 0 | 0 | 5 | 0 | PASS:5 |
+| lc_ratio_s1_Y | 0.949446 | 0.949446 | 0 | 5 | 0 | PASS:5 |
+| lc_ratio_s2_Y | 0.966764 | 0.966764 | 0 | 5 | 0 | PASS:5 |
+| lc_ratio_s3_Y | 0.980425 | 0.980425 | 0 | 5 | 0 | PASS:5 |
+| lpips | 0.0160185 | 0.0159145 | 0.000104054 | 5 | 0 | PASS:5 |
+| psnr_Cb | 52.679 | 52.6964 | -0.017359 | 5 | 0 | FLAG:1 PASS:4 |
+| psnr_Cr | 51.3644 | 51.3082 | 0.0561907 | 5 | 0 | PASS:5 |
+| psnr_Y | 46.92 | 46.92 | 0 | 5 | 0 | PASS:5 |
+| psnr_edge_Cb | 43.9962 | 43.7946 | 0.201616 | 5 | 0 | FLAG:2 PASS:3 |
+| psnr_edge_Cr | 44.4818 | 44.3019 | 0.179878 | 5 | 0 | FLAG:2 PASS:3 |
+| smear_Y | 0.891571 | 0.891571 | 0 | 5 | 0 | PASS:5 |
+| ssim_Cb | 0.991268 | 0.991072 | 0.000196045 | 5 | 0 | PASS:5 |
+| ssim_Cr | 0.991643 | 0.991413 | 0.000230068 | 5 | 0 | PASS:5 |
+| ssim_Y | 0.995481 | 0.995481 | 0 | 5 | 0 | PASS:5 |
+| wtw_kept_C | NA | NA | NA | 5 | 5 | NA:5 |
+| wtw_kept_Y | NA | NA | NA | 5 | 5 | NA:5 |
+| wtw_kept_vs_input_C | NA | NA | NA | 5 | 5 | NA:5 |
+| wtw_kept_vs_input_Y | NA | NA | NA | 5 | 5 | NA:5 |
+
+## All rows
+
+| content_type | clip | case | metric | candidate | default | delta | trend | flag | note |
+|---|---|---|---|---|---|---|---|---|---|
+| film24 | sol_levante | t40_f48_420_no_codec | psnr_Y | inf | inf | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | psnr_Cb | 59.6026 | 59.6438 | -0.0411145 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | psnr_Cr | 64.0148 | 63.9971 | 0.017761 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | ssim_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | ssim_Cb | 0.998978 | 0.998899 | 7.87957e-05 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | ssim_Cr | 0.999565 | 0.99956 | 5.23735e-06 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | lpips | 0.000211829 | 0.000126307 | 8.55216e-05 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | grain_tiles_Y | 16 | 16 | 0 | NA | INFO |  |
+| film24 | sol_levante | t40_f48_420_no_codec | grain_rms_ratio_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | grain_hf_ratio_Y | NA | NA | NA | NA | NA | needs >= 8 frames (6 available) |
+| film24 | sol_levante | t40_f48_420_no_codec | grain_lag1_delta_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | grain_tiles_Cb | 16 | 16 | 0 | NA | INFO |  |
+| film24 | sol_levante | t40_f48_420_no_codec | grain_rms_ratio_Cb | 0.459994 | 0.431328 | 0.028666 | better | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| film24 | sol_levante | t40_f48_420_no_codec | grain_hf_ratio_Cb | NA | NA | NA | NA | NA | needs >= 8 frames (6 available) |
+| film24 | sol_levante | t40_f48_420_no_codec | grain_lag1_delta_Cb | 0.0282068 | 0.0262379 | 0.00196898 | worse | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | grain_keep_vs_input_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | grain_lag1_vs_input_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | grain_keep_vs_input_Cb | NA | NA | NA | NA | NA | input/output geometry differs (or no input given) |
+| film24 | sol_levante | t40_f48_420_no_codec | grain_lag1_vs_input_Cb | NA | NA | NA | NA | NA | input/output geometry differs (or no input given) |
+| film24 | sol_levante | t40_f48_420_no_codec | btb_kept_vs_input_Y | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| film24 | sol_levante | t40_f48_420_no_codec | wtw_kept_vs_input_Y | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| film24 | sol_levante | t40_f48_420_no_codec | btb_kept_vs_input_C | NA | NA | NA | NA | NA | input/output geometry differs (or no input given) |
+| film24 | sol_levante | t40_f48_420_no_codec | wtw_kept_vs_input_C | NA | NA | NA | NA | NA | input/output geometry differs (or no input given) |
+| film24 | sol_levante | t40_f48_420_no_codec | flicker_excess_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | gop_ratio_gop | NA | NA | NA | NA | NA | no GOP metadata |
+| film24 | sol_levante | t40_f48_420_no_codec | gop_ratio_minigop | NA | NA | NA | NA | NA | no GOP metadata |
+| film24 | sol_levante | t40_f48_420_no_codec | ghost_coeff_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | smear_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | duplicate_rate_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | halo_overshoot_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | lc_ratio_s1_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | lc_ratio_s2_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | lc_ratio_s3_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | lc_boost_fraction_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | btb_kept_Y | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t40_f48_420_no_codec | wtw_kept_Y | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t40_f48_420_no_codec | clip_detect_Y | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t40_f48_420_no_codec | btb_kept_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t40_f48_420_no_codec | wtw_kept_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t40_f48_420_no_codec | clip_detect_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t40_f48_420_no_codec | psnr_edge_Cb | 50.574 | 50.4937 | 0.0803276 | better | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | flicker_excess_Cb | 0.000192135 | -1.92025e-05 | 0.000211337 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | psnr_edge_Cr | 61.4526 | 61.1061 | 0.346499 | better | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | flicker_excess_Cr | 0.000368639 | 1.68291e-05 | 0.00035181 | same | PASS |  |
+| film24 | sol_levante | t40_f48_420_no_codec | edge_band_share | 0.0387616 | 0.0387616 | 0 | NA | INFO |  |
+| film24 | sol_levante | t40_f48_420_no_codec | cost_ms_per_frame_pyref | 3622.6 | 22.5361 | 3600.06 | worse | INFO | py-ref: CPU numpy wall-clock, not GPU-representative |
+| film24 | sol_levante | t40_f48_420_no_codec | cost_gpu_ms_laptop | NA | NA | NA | NA | NA | capture sidecar gpu_ms (laptop GPU) |
+| film24 | sol_levante | t40_f48_420_no_codec | cost_est_3090_ms | NA | NA | NA | NA | NA | ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json) |
+| film24 | sol_levante | t40_f48_x265_crf22 | psnr_Y | 46.2879 | 46.2879 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | psnr_Cb | 48.7696 | 48.668 | 0.101628 | better | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | psnr_Cr | 52.7727 | 52.7808 | -0.00813932 | same | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | ssim_Y | 0.988677 | 0.988677 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | ssim_Cb | 0.994695 | 0.994454 | 0.000240526 | same | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | ssim_Cr | 0.99843 | 0.998437 | -7.76416e-06 | same | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | lpips | 0.0482555 | 0.0482932 | -3.76736e-05 | same | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | grain_tiles_Y | 16 | 16 | 0 | NA | INFO |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | grain_rms_ratio_Y | 0.753681 | 0.753681 | 0 | same | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| film24 | sol_levante | t40_f48_x265_crf22 | grain_hf_ratio_Y | NA | NA | NA | NA | NA | needs >= 8 frames (6 available) |
+| film24 | sol_levante | t40_f48_x265_crf22 | grain_lag1_delta_Y | 0.00110804 | 0.00110804 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | grain_tiles_Cb | 16 | 16 | 0 | NA | INFO |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | grain_rms_ratio_Cb | 0.3898 | 0.383592 | 0.00620741 | better | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| film24 | sol_levante | t40_f48_x265_crf22 | grain_hf_ratio_Cb | NA | NA | NA | NA | NA | needs >= 8 frames (6 available) |
+| film24 | sol_levante | t40_f48_x265_crf22 | grain_lag1_delta_Cb | -0.00390714 | -0.00487881 | 0.000971664 | worse | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | grain_keep_vs_input_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | grain_lag1_vs_input_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | grain_keep_vs_input_Cb | NA | NA | NA | NA | NA | input/output geometry differs (or no input given) |
+| film24 | sol_levante | t40_f48_x265_crf22 | grain_lag1_vs_input_Cb | NA | NA | NA | NA | NA | input/output geometry differs (or no input given) |
+| film24 | sol_levante | t40_f48_x265_crf22 | btb_kept_vs_input_Y | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| film24 | sol_levante | t40_f48_x265_crf22 | wtw_kept_vs_input_Y | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| film24 | sol_levante | t40_f48_x265_crf22 | btb_kept_vs_input_C | NA | NA | NA | NA | NA | input/output geometry differs (or no input given) |
+| film24 | sol_levante | t40_f48_x265_crf22 | wtw_kept_vs_input_C | NA | NA | NA | NA | NA | input/output geometry differs (or no input given) |
+| film24 | sol_levante | t40_f48_x265_crf22 | flicker_excess_Y | -0.00220901 | -0.00220901 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | gop_ratio_gop | NA | NA | NA | NA | NA | no GOP metadata |
+| film24 | sol_levante | t40_f48_x265_crf22 | gop_ratio_minigop | NA | NA | NA | NA | NA | no GOP metadata |
+| film24 | sol_levante | t40_f48_x265_crf22 | ghost_coeff_Y | 0.00219387 | 0.00219387 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | smear_Y | 0.745294 | 0.745294 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | duplicate_rate_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | halo_overshoot_Y | 7.90835e-05 | 7.90835e-05 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | lc_ratio_s1_Y | 0.92179 | 0.92179 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | lc_ratio_s2_Y | 0.944679 | 0.944679 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | lc_ratio_s3_Y | 0.965379 | 0.965379 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | lc_boost_fraction_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | btb_kept_Y | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t40_f48_x265_crf22 | wtw_kept_Y | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t40_f48_x265_crf22 | clip_detect_Y | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t40_f48_x265_crf22 | btb_kept_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t40_f48_x265_crf22 | wtw_kept_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t40_f48_x265_crf22 | clip_detect_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t40_f48_x265_crf22 | psnr_edge_Cb | 43.0097 | 42.4159 | 0.593808 | better | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | flicker_excess_Cb | -0.0023257 | -0.00262072 | 0.000295022 | same | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | psnr_edge_Cr | 48.9564 | 49.0125 | -0.0561139 | worse | FLAG |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | flicker_excess_Cr | -0.160249 | -0.160345 | 9.67509e-05 | same | PASS |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | edge_band_share | 0.0388109 | 0.0388109 | 0 | NA | INFO |  |
+| film24 | sol_levante | t40_f48_x265_crf22 | cost_ms_per_frame_pyref | 3709.97 | 23.0745 | 3686.9 | worse | INFO | py-ref: CPU numpy wall-clock, not GPU-representative |
+| film24 | sol_levante | t40_f48_x265_crf22 | cost_gpu_ms_laptop | NA | NA | NA | NA | NA | capture sidecar gpu_ms (laptop GPU) |
+| film24 | sol_levante | t40_f48_x265_crf22 | cost_est_3090_ms | NA | NA | NA | NA | NA | ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json) |
+| film24 | sol_levante | t150_f120_420_no_codec | psnr_Y | inf | inf | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | psnr_Cb | 59.044 | 59.5685 | -0.524477 | worse | FLAG |  |
+| film24 | sol_levante | t150_f120_420_no_codec | psnr_Cr | 47.3044 | 47.2061 | 0.0982377 | better | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | ssim_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | ssim_Cb | 0.999043 | 0.999002 | 4.18869e-05 | same | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | ssim_Cr | 0.991434 | 0.990948 | 0.000486227 | same | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | lpips | 0.00102771 | 0.000329739 | 0.000697976 | same | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | grain_tiles_Y | 16 | 16 | 0 | NA | INFO |  |
+| film24 | sol_levante | t150_f120_420_no_codec | grain_rms_ratio_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | grain_hf_ratio_Y | NA | NA | NA | NA | NA | needs >= 8 frames (6 available) |
+| film24 | sol_levante | t150_f120_420_no_codec | grain_lag1_delta_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | grain_tiles_Cb | 16 | 16 | 0 | NA | INFO |  |
+| film24 | sol_levante | t150_f120_420_no_codec | grain_rms_ratio_Cb | 0.69373 | 0.681075 | 0.0126552 | better | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| film24 | sol_levante | t150_f120_420_no_codec | grain_hf_ratio_Cb | NA | NA | NA | NA | NA | needs >= 8 frames (6 available) |
+| film24 | sol_levante | t150_f120_420_no_codec | grain_lag1_delta_Cb | 0.0134048 | 0.0132764 | 0.000128401 | worse | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | grain_keep_vs_input_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | grain_lag1_vs_input_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | grain_keep_vs_input_Cb | NA | NA | NA | NA | NA | input/output geometry differs (or no input given) |
+| film24 | sol_levante | t150_f120_420_no_codec | grain_lag1_vs_input_Cb | NA | NA | NA | NA | NA | input/output geometry differs (or no input given) |
+| film24 | sol_levante | t150_f120_420_no_codec | btb_kept_vs_input_Y | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| film24 | sol_levante | t150_f120_420_no_codec | wtw_kept_vs_input_Y | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| film24 | sol_levante | t150_f120_420_no_codec | btb_kept_vs_input_C | NA | NA | NA | NA | NA | input/output geometry differs (or no input given) |
+| film24 | sol_levante | t150_f120_420_no_codec | wtw_kept_vs_input_C | NA | NA | NA | NA | NA | input/output geometry differs (or no input given) |
+| film24 | sol_levante | t150_f120_420_no_codec | flicker_excess_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | gop_ratio_gop | NA | NA | NA | NA | NA | no GOP metadata |
+| film24 | sol_levante | t150_f120_420_no_codec | gop_ratio_minigop | NA | NA | NA | NA | NA | no GOP metadata |
+| film24 | sol_levante | t150_f120_420_no_codec | ghost_coeff_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | smear_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | duplicate_rate_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | halo_overshoot_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | lc_ratio_s1_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | lc_ratio_s2_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | lc_ratio_s3_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | lc_boost_fraction_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | btb_kept_Y | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t150_f120_420_no_codec | wtw_kept_Y | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t150_f120_420_no_codec | clip_detect_Y | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t150_f120_420_no_codec | btb_kept_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t150_f120_420_no_codec | wtw_kept_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t150_f120_420_no_codec | clip_detect_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t150_f120_420_no_codec | psnr_edge_Cb | 44.7415 | 46.2733 | -1.53189 | worse | FLAG |  |
+| film24 | sol_levante | t150_f120_420_no_codec | flicker_excess_Cb | 0.00167196 | 0.000210043 | 0.00146192 | same | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | psnr_edge_Cr | 34.6181 | 34.9074 | -0.289214 | worse | FLAG |  |
+| film24 | sol_levante | t150_f120_420_no_codec | flicker_excess_Cr | 0.00435817 | 0.000486792 | 0.00387138 | same | PASS |  |
+| film24 | sol_levante | t150_f120_420_no_codec | edge_band_share | 0.0171195 | 0.0171195 | 0 | NA | INFO |  |
+| film24 | sol_levante | t150_f120_420_no_codec | cost_ms_per_frame_pyref | 3817.37 | 19.8538 | 3797.52 | worse | INFO | py-ref: CPU numpy wall-clock, not GPU-representative |
+| film24 | sol_levante | t150_f120_420_no_codec | cost_gpu_ms_laptop | NA | NA | NA | NA | NA | capture sidecar gpu_ms (laptop GPU) |
+| film24 | sol_levante | t150_f120_420_no_codec | cost_est_3090_ms | NA | NA | NA | NA | NA | ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json) |
+| film24 | sol_levante | t150_f120_x265_crf22 | psnr_Y | 47.5521 | 47.5521 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | psnr_Cb | 51.6036 | 51.2516 | 0.351996 | better | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | psnr_Cr | 43.9491 | 43.7938 | 0.15534 | better | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | ssim_Y | 0.988729 | 0.988729 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | ssim_Cb | 0.997015 | 0.99659 | 0.00042458 | same | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | ssim_Cr | 0.981994 | 0.981383 | 0.000610355 | better | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | lpips | 0.0289801 | 0.0291738 | -0.000193633 | same | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | grain_tiles_Y | 16 | 16 | 0 | NA | INFO |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | grain_rms_ratio_Y | 0.549688 | 0.549688 | 0 | same | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| film24 | sol_levante | t150_f120_x265_crf22 | grain_hf_ratio_Y | NA | NA | NA | NA | NA | needs >= 8 frames (6 available) |
+| film24 | sol_levante | t150_f120_x265_crf22 | grain_lag1_delta_Y | 0.0324327 | 0.0324327 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | grain_tiles_Cb | 16 | 16 | 0 | NA | INFO |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | grain_rms_ratio_Cb | 0.492754 | 0.490709 | 0.00204476 | better | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| film24 | sol_levante | t150_f120_x265_crf22 | grain_hf_ratio_Cb | NA | NA | NA | NA | NA | needs >= 8 frames (6 available) |
+| film24 | sol_levante | t150_f120_x265_crf22 | grain_lag1_delta_Cb | 0.066099 | 0.0642722 | 0.00182678 | worse | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| film24 | sol_levante | t150_f120_x265_crf22 | grain_keep_vs_input_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | grain_lag1_vs_input_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | grain_keep_vs_input_Cb | NA | NA | NA | NA | NA | input/output geometry differs (or no input given) |
+| film24 | sol_levante | t150_f120_x265_crf22 | grain_lag1_vs_input_Cb | NA | NA | NA | NA | NA | input/output geometry differs (or no input given) |
+| film24 | sol_levante | t150_f120_x265_crf22 | btb_kept_vs_input_Y | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| film24 | sol_levante | t150_f120_x265_crf22 | wtw_kept_vs_input_Y | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| film24 | sol_levante | t150_f120_x265_crf22 | btb_kept_vs_input_C | NA | NA | NA | NA | NA | input/output geometry differs (or no input given) |
+| film24 | sol_levante | t150_f120_x265_crf22 | wtw_kept_vs_input_C | NA | NA | NA | NA | NA | input/output geometry differs (or no input given) |
+| film24 | sol_levante | t150_f120_x265_crf22 | flicker_excess_Y | 0.000376651 | 0.000376651 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | gop_ratio_gop | NA | NA | NA | NA | NA | no GOP metadata |
+| film24 | sol_levante | t150_f120_x265_crf22 | gop_ratio_minigop | NA | NA | NA | NA | NA | no GOP metadata |
+| film24 | sol_levante | t150_f120_x265_crf22 | ghost_coeff_Y | 0.0401747 | 0.0401747 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | smear_Y | 0.71256 | 0.71256 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | duplicate_rate_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | halo_overshoot_Y | 5.41187e-05 | 5.41187e-05 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | lc_ratio_s1_Y | 0.82544 | 0.82544 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | lc_ratio_s2_Y | 0.889141 | 0.889141 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | lc_ratio_s3_Y | 0.936748 | 0.936748 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | lc_boost_fraction_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | btb_kept_Y | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t150_f120_x265_crf22 | wtw_kept_Y | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t150_f120_x265_crf22 | clip_detect_Y | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t150_f120_x265_crf22 | btb_kept_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t150_f120_x265_crf22 | wtw_kept_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t150_f120_x265_crf22 | clip_detect_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | sol_levante | t150_f120_x265_crf22 | psnr_edge_Cb | 42.7539 | 40.7436 | 2.0103 | better | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | flicker_excess_Cb | 0.0170251 | 0.0149912 | 0.00203388 | same | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | psnr_edge_Cr | 33.602 | 32.9588 | 0.643192 | better | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | flicker_excess_Cr | 0.0436077 | 0.0389533 | 0.00465442 | same | PASS |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | edge_band_share | 0.0171522 | 0.0171522 | 0 | NA | INFO |  |
+| film24 | sol_levante | t150_f120_x265_crf22 | cost_ms_per_frame_pyref | 3646.79 | 23.3328 | 3623.46 | worse | INFO | py-ref: CPU numpy wall-clock, not GPU-representative |
+| film24 | sol_levante | t150_f120_x265_crf22 | cost_gpu_ms_laptop | NA | NA | NA | NA | NA | capture sidecar gpu_ms (laptop GPU) |
+| film24 | sol_levante | t150_f120_x265_crf22 | cost_est_3090_ms | NA | NA | NA | NA | NA | ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json) |
+| film24 | nocturne | t300_f60_422_partial | psnr_Y | inf | inf | 0 | same | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | psnr_Cb | 44.3753 | 44.3502 | 0.0251726 | same | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | psnr_Cr | 48.7808 | 48.7631 | 0.0177545 | same | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | ssim_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | ssim_Cb | 0.966611 | 0.966416 | 0.000194434 | same | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | ssim_Cr | 0.986791 | 0.986735 | 5.62861e-05 | same | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | lpips | 0.00161746 | 0.00164938 | -3.19201e-05 | same | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | grain_tiles_Y | 0 | 0 | 0 | NA | INFO |  |
+| film24 | nocturne | t300_f60_422_partial | grain_rms_ratio_Y | NA | NA | NA | NA | NA | no flat tiles in the reference |
+| film24 | nocturne | t300_f60_422_partial | grain_hf_ratio_Y | NA | NA | NA | NA | NA | needs >= 8 frames (6 available) |
+| film24 | nocturne | t300_f60_422_partial | grain_lag1_delta_Y | NA | NA | NA | NA | NA | no flat tiles |
+| film24 | nocturne | t300_f60_422_partial | grain_tiles_Cb | 16 | 16 | 0 | NA | INFO |  |
+| film24 | nocturne | t300_f60_422_partial | grain_rms_ratio_Cb | 0.559355 | 0.557776 | 0.00157942 | better | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| film24 | nocturne | t300_f60_422_partial | grain_hf_ratio_Cb | NA | NA | NA | NA | NA | needs >= 8 frames (6 available) |
+| film24 | nocturne | t300_f60_422_partial | grain_lag1_delta_Cb | -0.00163219 | -0.00167212 | 3.99279e-05 | worse | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | grain_keep_vs_input_Y | NA | NA | NA | NA | NA | no flat tiles in the reference |
+| film24 | nocturne | t300_f60_422_partial | grain_lag1_vs_input_Y | NA | NA | NA | NA | NA | no flat tiles |
+| film24 | nocturne | t300_f60_422_partial | grain_keep_vs_input_Cb | NA | NA | NA | NA | NA | input/output geometry differs (or no input given) |
+| film24 | nocturne | t300_f60_422_partial | grain_lag1_vs_input_Cb | NA | NA | NA | NA | NA | input/output geometry differs (or no input given) |
+| film24 | nocturne | t300_f60_422_partial | btb_kept_vs_input_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | wtw_kept_vs_input_Y | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| film24 | nocturne | t300_f60_422_partial | btb_kept_vs_input_C | NA | NA | NA | NA | NA | input/output geometry differs (or no input given) |
+| film24 | nocturne | t300_f60_422_partial | wtw_kept_vs_input_C | NA | NA | NA | NA | NA | input/output geometry differs (or no input given) |
+| film24 | nocturne | t300_f60_422_partial | flicker_excess_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | gop_ratio_gop | NA | NA | NA | NA | NA | no GOP metadata |
+| film24 | nocturne | t300_f60_422_partial | gop_ratio_minigop | NA | NA | NA | NA | NA | no GOP metadata |
+| film24 | nocturne | t300_f60_422_partial | ghost_coeff_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | smear_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | duplicate_rate_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | halo_overshoot_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | lc_ratio_s1_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | lc_ratio_s2_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | lc_ratio_s3_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | lc_boost_fraction_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | btb_kept_Y | 1 | 1 | 0 | same | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | wtw_kept_Y | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | nocturne | t300_f60_422_partial | clip_detect_Y | 0 | 0 | 0 | same | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | btb_kept_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | nocturne | t300_f60_422_partial | wtw_kept_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | nocturne | t300_f60_422_partial | clip_detect_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| film24 | nocturne | t300_f60_422_partial | psnr_edge_Cb | 38.9021 | 39.0465 | -0.144467 | worse | FLAG |  |
+| film24 | nocturne | t300_f60_422_partial | flicker_excess_Cb | -0.00597497 | -0.00514434 | -0.000830632 | same | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | psnr_edge_Cr | 43.7798 | 43.5248 | 0.255028 | better | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | flicker_excess_Cr | -0.00863245 | -0.00884893 | 0.000216476 | same | PASS |  |
+| film24 | nocturne | t300_f60_422_partial | edge_band_share | 0.000378503 | 0.000378503 | 0 | NA | INFO |  |
+| film24 | nocturne | t300_f60_422_partial | cost_ms_per_frame_pyref | 1823.72 | 7.65345 | 1816.07 | worse | INFO | py-ref: CPU numpy wall-clock, not GPU-representative |
+| film24 | nocturne | t300_f60_422_partial | cost_gpu_ms_laptop | NA | NA | NA | NA | NA | capture sidecar gpu_ms (laptop GPU) |
+| film24 | nocturne | t300_f60_422_partial | cost_est_3090_ms | NA | NA | NA | NA | NA | ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json) |

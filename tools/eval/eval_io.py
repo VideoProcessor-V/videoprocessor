@@ -46,6 +46,7 @@ class Frame:
 # pix_fmt -> (bitdepth, chroma subsampling factors (fy, fx))
 PIX_FMTS = {
     "yuv420p": (8, (2, 2)), "yuv420p10le": (10, (2, 2)), "yuv420p12le": (12, (2, 2)), "yuv420p16le": (16, (2, 2)),
+    "yuv422p": (8, (1, 2)), "yuv422p10le": (10, (1, 2)), "yuv422p12le": (12, (1, 2)),
     "yuv444p": (8, (1, 1)), "yuv444p10le": (10, (1, 1)), "yuv444p12le": (12, (1, 1)), "yuv444p16le": (16, (1, 1)),
 }
 

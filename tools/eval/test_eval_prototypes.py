@@ -233,6 +233,58 @@ class Mosquito(unittest.TestCase):
         self.assertAlmostEqual(ex["edge_keep_vs_input_Y"], 1.0)
 
 
+class TrueChromaProtocolAndEdgeGrainGate(unittest.TestCase):
+    def test_chroma444_true_geometry(self):
+        import eval_protocols as ep
+        rng = np.random.default_rng(8)
+        m = frame420(rng.normal(2000, 100, (32, 48)), rng.normal(2048, 50, (32, 48)), rng.normal(2048, 50, (32, 48)), bitdepth=12)
+        inp, truth = ep.chroma444_true_pair(m, m)
+        self.assertEqual(truth.Cb.shape, (32, 48))
+        self.assertEqual(inp.Cb.shape, (16, 24))
+        np.testing.assert_array_equal(inp.Y, m.Y)
+        c10 = eio.to_bitdepth(inp, 10)
+        inp2, truth2 = ep.chroma444_true_pair(m, c10)              # an "encode" of the 4:2:0
+        self.assertEqual(truth2.bitdepth, 10)
+        self.assertEqual(inp2.Cb.shape, (16, 24))
+        m422 = frame420(rng.normal(500, 50, (32, 48)), rng.normal(512, 30, (32, 24)), rng.normal(512, 30, (32, 24)))
+        inp3, truth3 = ep.chroma444_true_pair(m422, m422)
+        self.assertEqual(truth3.Y.shape, (32, 24))
+        self.assertEqual(truth3.Cb.shape, (32, 24))
+        self.assertEqual(inp3.Cb.shape, (16, 12))
+
+    def test_near_edge_zone(self):
+        xx = np.tile(np.arange(128), (96, 1))
+        z, flat = em.near_edge_zone(np.where(xx >= 64, 800.0, 200.0), 10)
+        self.assertTrue(z[:, 58].all() and not z[:, 64].any() and not z[:, 20].any())
+        self.assertTrue(flat[:, 10].all() and not flat[:, 60].any())
+
+    def test_probe_identity_and_temporal_average(self):
+        shape, bd = (64, 64), 10
+        d = np.stack([em.probe_grain(shape, 1, t, bd) - em.probe_grain(shape, 2, t, bd) for t in range(5)])
+        masks = [np.ones(shape, bool)] * 5
+        r = em.grain_probe(d, d, masks)
+        self.assertAlmostEqual(r["keep"], 1.0)
+        self.assertAlmostEqual(r["lag1"], 0.0)
+        avg = np.stack([(d[max(t - 1, 0)] + d[t] + d[min(t + 1, 4)]) / 3 for t in range(5)])
+        r2 = em.grain_probe(d, avg, masks)
+        self.assertLess(r2["keep"], 0.8)
+        self.assertGreater(r2["lag1"], 0.05)
+        np.testing.assert_array_equal(em.probe_grain(shape, 1, 3, bd), em.probe_grain(shape, 1, 3, bd))
+
+    @unittest.skipUnless(HAVE_CV2, "OpenCV not installed")
+    def test_probe_rows_separate_naive_from_designed_repair(self):
+        rng = np.random.default_rng(3)
+        yy, xx = np.mgrid[0:96, 0:128]
+        fr = [frame420(np.where(xx >= 64, 700.0, 300.0) + rng.normal(0, 2, xx.shape), np.full((48, 64), 512.0),
+                       np.full((48, 64), 512.0), index=t) for t in range(4)]
+        none = eh.grain_probe_rows(cm.RepairNone(), fr, fr, {})
+        self.assertAlmostEqual(none["grain_probe_keep_edge_vs_input_Y"], 1.0)
+        naive = eh.grain_probe_rows(cm.RepairMosquitoNaiveMC(), fr, fr, {})
+        mc = eh.grain_probe_rows(cm.RepairMosquitoMC(), fr, fr, {})
+        self.assertLess(naive["grain_probe_keep_edge_vs_input_Y"], mc["grain_probe_keep_edge_vs_input_Y"] + 1e-9)
+        self.assertAlmostEqual(mc["grain_probe_keep_flat_vs_input_Y"], 1.0)
+
+
 class HarnessHooks(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="vp_eval_proto_")

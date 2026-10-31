@@ -239,6 +239,39 @@ def run_candidate(cand, inputs, truth):
     return outs, dict(ms=None, gpu_ms=have if len(have) == len(gms) else None)
 
 
+def grain_probe_rows(cand, inputs, truth, notes):
+    """Near-edge grain gate (case key "grain_probe": true; Python candidates only).  The candidate is run
+    twice more, on its inputs plus synthetic probe grain of two fixed seeds (luma only); out_A - out_B
+    is the part of the probe grain it passed.  Rows (all *_vs_input: never LIMIT):
+      grain_probe_keep_edge_vs_input_Y / grain_probe_lag1_edge_vs_input_Y   near strong edges
+      grain_probe_keep_flat_vs_input_Y / grain_probe_lag1_flat_vs_input_Y   far from edges"""
+    names = ("grain_probe_keep_edge_vs_input_Y", "grain_probe_lag1_edge_vs_input_Y",
+             "grain_probe_keep_flat_vs_input_Y", "grain_probe_lag1_flat_vs_input_Y")
+    if getattr(cand, "kind", "python") != "python":
+        for k in names:
+            notes[k] = "grain probe needs a Python candidate (capture candidates cannot be re-run)"
+        return {k: None for k in names}
+    bd = inputs[0].bitdepth
+    ins = []
+    for seed in em.PROBE_SEEDS:
+        ins.append([f.with_planes(Y=f.Y + em.probe_grain(f.Y.shape, seed, f.index, bd)) for f in inputs])
+    outs = [ec.run_python_candidate(cand, x)[0] for x in ins]
+    d_in = np.stack([a.Y - b.Y for a, b in zip(*ins)])
+    d_out = np.stack([a.Y - b.Y for a, b in zip(*outs)])
+    zones = [em.near_edge_zone(t.Y, bd) for t in truth]
+    m = {}
+    for tag, idx in (("edge", 0), ("flat", 1)):
+        r = em.grain_probe(d_in, d_out, [z[idx] for z in zones])
+        kk, kl = "grain_probe_keep_%s_vs_input_Y" % tag, "grain_probe_lag1_%s_vs_input_Y" % tag
+        m[kk] = r["keep"] if r else None
+        m[kl] = r["lag1"] if r else None
+        if r is None:
+            notes[kk] = notes[kl] = "no %s pixels in the reference" % ("near-edge" if tag == "edge" else "far-from-edge")
+        elif r["lag1"] is None:
+            notes[kl] = "needs >= 3 frames (%d available)" % len(truth)
+    return m
+
+
 def load_cost_ratio():
     with open(os.path.join(HERE, "cost_ratios.json"), "r", encoding="utf8") as f:
         return json.load(f)
@@ -279,6 +312,8 @@ def evaluate_suite(suite, cand, base, max_frames=None, use_lpips=False, with_cos
                 m = compute_metrics(truth, outs, case, use_lpips, inputs, notes_by[label])
                 if extra is not None:
                     m.update(extra(truth, outs, inputs, case, notes_by[label]))
+                if case.get("grain_probe"):
+                    m.update(grain_probe_rows(c, inputs, truth, notes_by[label]))
                 res[label] = (m, cost, None)
             except Exception as e:  # visible, never silent
                 res[label] = (None, None, "%s: %s" % (type(e).__name__, e))

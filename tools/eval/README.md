@@ -192,7 +192,10 @@ of them against one default in one pass (each case loaded once, default run once
 `evaluate_suite(cache=..., extra=...)`) and adds family-specific rows (chroma: `psnr_edge_Cb/Cr`,
 `flicker_excess_Cb/Cr`; mosquito: `ringing_energy_ratio_Y`, `psnr_band_Y`, `edge_keep_*`). Suites
 `suites/proto_chroma.json`, `suites/proto_mosquito.json`; committed results in `prototypes/`; findings in
-`findings-chroma-mosquito.md`. The motion candidates use OpenCV DIS flow (`opencv-python-headless`) as a
+`findings-chroma-mosquito.md`. Protocol `chroma444_true` scores chroma against a GENUINE 4:4:4 master
+(4:2:2 masters: horizontal-only partial check); case key `grain_probe: true` adds the near-edge grain gate
+(two-seed probe: the candidate is re-run on its input plus fixed-seed synthetic grain, rows
+`grain_probe_keep/lag1_{edge,flat}_vs_input_Y`; Python candidates only). The motion candidates use OpenCV DIS flow (`opencv-python-headless`) as a
 documented stand-in for VP's vector engine; their tests skip without OpenCV.
 
 ```

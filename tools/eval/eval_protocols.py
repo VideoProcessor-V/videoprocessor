@@ -66,7 +66,42 @@ def same_pair(master, coded):
     return coded, eio.to_bitdepth(master, coded.bitdepth)
 
 
-PROTOCOLS = {"chroma444": chroma444_pair, "same": same_pair}
+def chroma444_true_pair(master, coded):
+    """Chroma reconstruction against a GENUINE 4:4:4 master (e.g. ProRes 4444), at the master raster.
+    truth: the master itself (4:4:4).  A 4:2:2 master (partial check) is first made 4:4:4 at half width
+    by downscaling luma horizontally with the siting-aligned Lanczos-3 (the chroma444 trick, horizontal
+    only): its horizontal chroma detail is genuine, its vertical is the master's.
+    input: if `coded` is 4:4:4 on the truth raster (coded = the master), its chroma is subsampled to 4:2:0
+    with Lanczos-3 at the frame's siting (left: chroma j on luma column 2j, vertically centred); if
+    `coded` is already 4:2:0 on the truth raster (an encode of that 4:2:0), it is the input as is.
+    Code values stay in the master's transfer (PQ for HDR10): no linearisation or tone mapping, so
+    PSNR/SSIM are in PQ code values (perceptually spaced).  Master depth is matched to the coded depth."""
+    master = eio.to_bitdepth(master, coded.bitdepth)
+    h, w = master.Y.shape
+    if master.Cb.shape == (h, w):
+        truth = master
+    elif master.Cb.shape == (h, (w + 1) // 2):
+        cw = master.Cb.shape[1]
+        y = _even_pad(master.Y, h, 2 * cw)
+        _, sx = eio.chroma_down_shifts(1, 2, master.siting)
+        truth = master.with_planes(Y=eio.resample_plane(y, h, cw, LUMA_DOWN_KERNEL, 0.0, sx))
+    else:
+        raise ValueError("chroma444_true needs a 4:4:4 or 4:2:2 master, got luma %s chroma %s" % ((h, w), master.Cb.shape))
+    th, tw = truth.Y.shape
+    if coded.Y.shape == master.Y.shape and coded.Cb.shape == master.Cb.shape:
+        # coded = the master itself: subsample the (4:4:4) truth chroma to 4:2:0
+        sy, sx = eio.chroma_down_shifts(2, 2, coded.siting)
+        h2, w2 = (th + 1) // 2, (tw + 1) // 2
+        cb = eio.resample_plane(_even_pad(truth.Cb, 2 * h2, 2 * w2), h2, w2, CHROMA_SUB_KERNEL, sy, sx)
+        cr = eio.resample_plane(_even_pad(truth.Cr, 2 * h2, 2 * w2), h2, w2, CHROMA_SUB_KERNEL, sy, sx)
+        return truth.with_planes(Cb=cb, Cr=cr), truth
+    if coded.Y.shape == (th, tw) and coded.Cb.shape == ((th + 1) // 2, (tw + 1) // 2):
+        return coded.with_planes(), truth
+    raise ValueError("chroma444_true: coded %s/%s fits neither the master nor a 4:2:0 of the truth %s"
+                     % (coded.Y.shape, coded.Cb.shape, (th, tw)))
+
+
+PROTOCOLS = {"chroma444": chroma444_pair, "same": same_pair, "chroma444_true": chroma444_true_pair}
 
 
 def verify_alignment(coded_frame, master_frames, first_offset):

@@ -58,6 +58,8 @@ RULES = [
     ("grain_hf_ratio_", ("near1", 0.10)),
     ("grain_lag1_delta_", ("max_abs", 0.05)),
     ("grain_keep_vs_input_", ("band", 0.05)),
+    ("grain_probe_keep_", ("band", 0.05)),
+    ("grain_probe_lag1_", ("max_abs", 0.05)),
     ("grain_lag1_vs_input_", ("max_abs", 0.05)),
     ("flicker_excess", ("lower", 0.05)),
     ("gop_", ("near1", 0.10)),
