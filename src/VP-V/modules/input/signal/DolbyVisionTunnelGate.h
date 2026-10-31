@@ -61,7 +61,7 @@ inline bool DolbyVisionTunnelGateWouldOpen(const DolbyVisionTunnelGateInput& in)
 		in.encoding == VideoFrameEncoding::R210 && in.eotf == EOTF::SDR;
 }
 
-// The capture goes through CR210DolbyVisionTunnelFormatter (VideoState::
+// The capture goes through CRGBDolbyVisionTunnelFormatter (VideoState::
 // dolbyVisionTunnel).
 inline bool DolbyVisionTunnelGateOpen(const DolbyVisionTunnelGateInput& in)
 {

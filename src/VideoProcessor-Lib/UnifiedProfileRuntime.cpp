@@ -1159,11 +1159,11 @@ namespace UnifiedProfileRuntime
 				viewport, error))
 			return false;
         // Subtitle policy is independent of Screen and Zoom. Old controls are ignored.
-        viewport.subtitleFit = true;
+        viewport.subtitleFit = false;
         viewport.subtitleHoldMilliseconds = RendererProfileConfig::DEFAULT_CLASSIC_SUBTITLE_HOLD_MS;
         viewport.subtitleEngageDriftMilliseconds = RendererProfileConfig::DEFAULT_CLASSIC_SUBTITLE_ENGAGE_DRIFT_MS;
         viewport.subtitleReleaseDriftMilliseconds = RendererProfileConfig::DEFAULT_CLASSIC_SUBTITLE_RELEASE_DRIFT_MS;
-        viewport.subtitlePaddingPixels = RendererProfileConfig::DEFAULT_CLASSIC_SUBTITLE_PADDING_PIXELS;
+        viewport.subtitlePaddingPixels = 0;
         viewport.subtitleTargetBufferPixels = RendererProfileConfig::DEFAULT_SUBTITLE_TARGET_BUFFER_PIXELS;
         const auto selectedSubtitles = effective.find("subtitles");
         if (selectedSubtitles != effective.end() && !selectedSubtitles->second.empty()) {
@@ -1172,7 +1172,7 @@ namespace UnifiedProfileRuntime
                 RendererProfileConfig::ApplySubtitleHdrAnalysisSettings(p->second,viewport);
                 const auto type=p->second.settings.find("type");
                 viewport.subtitleFit = type==p->second.settings.end() || ConfigFile::NormalizeName(type->second)=="classic";
-                if (!viewport.subtitleFit) viewport.subtitlePaddingPixels = 0;
+                if (viewport.subtitleFit) viewport.subtitlePaddingPixels = RendererProfileConfig::DEFAULT_CLASSIC_SUBTITLE_PADDING_PIXELS;
                 const auto offset=p->second.settings.find("offset_pixels");
                 if(offset!=p->second.settings.end()) RendererProfileConfig::ParseInteger(offset->second,0,500,viewport.subtitlePaddingPixels);
                 if(viewport.subtitleFit) {
@@ -1346,6 +1346,10 @@ namespace UnifiedProfileRuntime
 		next->lldv = lldv;
 		next->lookAheadQueueFrames = lookAheadQueueFrames;
 		next->generalRateFixes = generalRateFixes;
+        const auto selectedDisplay = effective.find("output_display");
+        if (selectedDisplay != effective.end() && !selectedDisplay->second.empty())
+            next->outputDisplayMonitor = RendererProfileConfig::ResolveOutputDisplayMonitor(
+                m_model, selectedDisplay->second.front());
 		next->variables = StateVariables::Snapshot(
 			generation, variables);
 		snapshot = next;

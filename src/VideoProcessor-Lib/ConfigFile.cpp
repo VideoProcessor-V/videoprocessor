@@ -16,6 +16,7 @@
 #include "ColorOutputProfileMigration.h"
 #include "CalibrationProfileMigration.h"
 #include "RefreshKey.h"
+#include "QualityProfileMigration.h"
 
 #include <algorithm>
 #include <cctype>
@@ -191,6 +192,7 @@ bool ConfigFile::Load(const std::string& filename, ReadPolicy policy)
 	m_sections.clear();
 	m_sectionOrder.clear();
 	m_warnings.clear();
+	m_migrationWarnings.clear();
 	m_loadedPath.clear();
 	m_loaded = false;
     m_contentIdentity = ConfigurationIdentity::Seed;
@@ -400,6 +402,7 @@ bool ConfigFile::Load(const std::string& filename, ReadPolicy policy)
 	ColorOutputProfileMigration::Apply(m_sections, m_sectionOrder);
 	RefreshKey::Apply(m_sections);   // fixed-constant batch B7 2026-10-18: one refresh-key convention
     CalibrationProfileMigration::Apply(m_sections, m_sectionOrder);
+	m_migrationWarnings = QualityProfileMigration::Apply(m_sections, m_sectionOrder);
 	m_loaded = true;
 	FileRevision after{};
 	if (revisionAvailable && ReadFileRevision(m_loadedPath, after) && before == after)

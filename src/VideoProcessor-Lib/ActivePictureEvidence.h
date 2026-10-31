@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "AnalysisLumaSource.h"
+#include "AnalysisEvaluationBudget.h"
 #include "ActivePictureTransitionModel.h"
 #include "ActivePictureDecisionTimeline.h"
 
@@ -32,8 +33,40 @@ struct P010PlaneView
 };
 
 
+// A low perimeter percentile nominates a possible matte, never a calibrated
+// black reference by itself. These summaries reuse the six existing depth lines.
+enum class ActivePictureMatteReferenceState : uint8_t
+{
+    NOT_EVALUATED, REJECTED, QUALIFIED, UNRESOLVED
+};
+struct ActivePictureMatteReference
+{
+    ActivePictureMatteReferenceState state = ActivePictureMatteReferenceState::NOT_EVALUATED;
+    int y = 0, u = 512, v = 512;
+};
+enum class ActivePictureBlackReferenceMode : uint8_t
+{
+    LEGACY, FULL_NOMINAL, FULL_QUALIFIED_RAISED, FULL_UNRESOLVED_RAISED,
+    FULL_REJECTED_RAISED
+};
+struct ActivePictureBlackReference
+{
+    bool evaluated = false;
+    ActivePictureBlackReferenceMode mode = ActivePictureBlackReferenceMode::LEGACY;
+    int observedFloor = 0, observedThreshold = 24;
+    int floor = 0, threshold = 24;
+    // Edge bits: left1, top2, right4, bottom8. Axis bits: top/bottom1, left/right2.
+    uint8_t qualifiedEdgeMask = 0, unresolvedEdgeMask = 0, qualifiedAxes = 0;
+    uint8_t nominalFullExtentAxes = 0;
+    bool nominalReclassified = false;
+    ActivePictureBounds adaptiveCandidate;
+};
+
+const char* ActivePictureBlackReferenceModeName(ActivePictureBlackReferenceMode mode);
+
 struct ActivePictureEdgeEvidence
 {
+    ActivePictureMatteReference matteReference;
 	int barPixels = 0;
 	// For each of four equal along-edge quartiles, the low six bits identify
 	// sampled depth rows with at least half their samples above the source-aware
@@ -78,6 +111,9 @@ struct ActivePictureVerticalBarProfile
 	double referenceY = 0.0, referenceU = 0.0, referenceV = 0.0;
 	int firstMismatchX = -1, firstMismatchY = -1;
 	int maxLumaDelta = 0, maxChromaDelta = 0;
+	// Boundary/deep counts retain the original one-step diagnostic split.
+	// Per-edge extrema bound any additional rows retained by a guarded crop;
+	// the guarded profile must independently prove the remaining bars clean.
 	int mismatchSamples = 0, boundaryMismatchSamples = 0, deepMismatchSamples = 0;
 	int topFirstMismatchY = -1, topLastMismatchY = -1;
 	int bottomFirstMismatchY = -1, bottomLastMismatchY = -1;
@@ -86,6 +122,7 @@ struct ActivePictureVerticalBarProfile
 
 struct ActivePictureEvidence
 {
+    ActivePictureBlackReference blackReference;
 	bool available = false;
 	ActivePictureClassification classification =
 		ActivePictureClassification::UNAVAILABLE;
@@ -100,6 +137,8 @@ struct ActivePictureEvidence
 	ActivePictureVerticalBarProfile verticalBarProfile;
 	// Separate raw-profile diagnostics from the conservatively expanded recheck.
 	ActivePictureVerticalBarProfile verticalBarGuardProfile;
+    // Both native boundaries independently measured against their flat bars.
+    bool lowContrastBoundaryProof = false;
 	size_t lumaSamples = 0;
 	size_t chromaSamples = 0;
 	std::string reason;
@@ -153,6 +192,8 @@ struct ActivePictureGlobalNearBlackEvidence
 {
 	bool evaluated = false;
 	double lumaP90 = 0.0;
+	// Raw ten-bit code cutoff used for this source range.
+	double lumaCutoff = 96.0;
 	bool nearBlack = false;
 	size_t lumaSamples = 0;
 };
@@ -210,6 +251,7 @@ struct ActivePictureVisibleExtentDiagnostic
 // requirement; this never creates authority for a new crop.
 struct ActivePicturePresentationRetentionEvidence
 {
+    ActivePictureBlackReference blackReference;
 	bool analysisValid = false;
 	bool presentationValid = false;
 	double globalLumaP90 = 0.0;
@@ -286,17 +328,21 @@ ActivePictureEvidence ExtractP010ActivePictureEvidence(
 // point remains above for callers with a planar frame; native RGB callers use
 // this bounded source sampler and retain source-raster coordinates.
 ActivePictureEvidence ExtractActivePictureEvidence(
-	const AnalysisLumaSource& source);
+	const AnalysisLumaSource& source,
+    const AnalysisEvaluationBudget* budget = nullptr);
 
 ActivePictureGlobalNearBlackEvidence EvaluateActivePictureGlobalNearBlack(
-	const AnalysisLumaSource& source);
+	const AnalysisLumaSource& source,
+    const AnalysisEvaluationBudget* budget = nullptr);
 
 ActivePictureArDarknessEvidence EvaluateActivePictureArDarkness(
 	const AnalysisLumaSource& source, const ActivePictureEvidence& currentNative,
-	const ActivePictureGlobalNearBlackEvidence& global);
+	const ActivePictureGlobalNearBlackEvidence& global,
+    const AnalysisEvaluationBudget* budget = nullptr);
 
 ActivePictureArDarknessEvidence EvaluateActivePictureArDarkness(
-	const AnalysisLumaSource& source, const ActivePictureEvidence& currentNative);
+	const AnalysisLumaSource& source, const ActivePictureEvidence& currentNative,
+    const AnalysisEvaluationBudget* budget = nullptr);
 
 ActivePictureGlobalNearBlackEvidence EvaluateP010ActivePictureGlobalNearBlack(
 	const P010PlaneView& view);
@@ -311,7 +357,8 @@ ActivePictureGlobalNearBlackEvidence EvaluateP010ActivePictureGlobalNearBlack(
 ActivePictureEvidence EvaluateSymmetricVerticalBarHypothesis(
 	const AnalysisLumaSource& source,
 	const ActivePictureEvidence& observed,
-    bool allowRejectedAlignedEdge = false);
+    bool allowRejectedAlignedEdge = false,
+    const AnalysisEvaluationBudget* budget = nullptr);
 
 // Startup-only: independently proved flank bars nominate a native-coordinate
 // pair when a sparse subtitle makes the raw vertical axis asymmetric. The
@@ -384,7 +431,29 @@ SubtitleAssistedVerticalBarProof EvaluateSubtitleAssistedVerticalBarProof(
 // visible or colored pixels outside it still fail open.
 ActivePicturePresentationRetentionEvidence EvaluateActivePicturePresentationRetention(
 	const AnalysisLumaSource& source,
-	const ActivePictureBounds& trustedPresentation);
+	const ActivePictureBounds& trustedPresentation,
+    const AnalysisEvaluationBudget* budget = nullptr);
+
+// The supplied measurements must come from this exact immutable source frame,
+// before caption or temporal-policy refinement. Sample totals retain the direct
+// wrapper's logical accounting even though those measurements are reused.
+ActivePicturePresentationRetentionEvidence EvaluateActivePicturePresentationRetention(
+    const AnalysisLumaSource& source, const ActivePictureBounds& trustedPresentation,
+    const ActivePictureEvidence& raw,
+    const ActivePictureGlobalNearBlackEvidence& global,
+    const ActivePictureArDarknessEvidence& arDarkness,
+    const AnalysisEvaluationBudget* budget = nullptr);
+
+// Remeasure only the expansion strips for a corrected, exact candidate on the
+// same decoded source that produced currentRetention. This keeps the raw
+// active-picture result, excluded-band safety and visible extents unchanged.
+// Retention evidence has no frame identity; the caller must pair it with the
+// exact current source frame. On failure currentRetention is unchanged.
+bool ResampleActivePictureExpansionStrips(
+	const AnalysisLumaSource& source,
+	const ActivePictureBounds& trustedPresentation,
+	const ActivePictureBounds& candidate,
+	ActivePicturePresentationRetentionEvidence& currentRetention);
 
 ActivePicturePresentationRetentionEvidence
 	EvaluateP010ActivePicturePresentationRetention(
@@ -470,7 +539,8 @@ struct RelativeBarContrastEvidence
     const char* reason = "not-evaluated";
 };
 RelativeBarContrastEvidence InspectRelativeBarContrast(const AnalysisLumaSource& source,
-    const ActivePictureEvidence& raw, const ActivePictureBounds& base);
+    const ActivePictureEvidence& raw, const ActivePictureBounds& base,
+    const AnalysisEvaluationBudget* budget = nullptr);
 
 // Caller must certify successful current-frame composition, background-safe erasure,
 // and a relocated destination inside trustedPresentation. Only the erased top/bottom

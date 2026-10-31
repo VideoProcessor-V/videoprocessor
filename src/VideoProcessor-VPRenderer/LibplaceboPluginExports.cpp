@@ -129,6 +129,17 @@ VideoProcessorLibplaceboEndHeldLedDrive()
 	}
 }
 
+// Every renderer this plugin creates is a LibplaceboVideoRenderer.
+extern "C" __declspec(dllexport) bool __cdecl
+VideoProcessorLibplaceboGetHdrStatus(
+	const IVideoRenderer* renderer,
+	RendererHdrStatus* status)
+{
+	if (!renderer || !status || !status->Supported())
+		return false;
+	return static_cast<const LibplaceboVideoRenderer*>(renderer)->GetHdrStatus(*status);
+}
+
 extern "C" __declspec(dllexport) bool __cdecl VideoProcessorLibplaceboIsBeta()
 {
 #if defined(VP_LIBPLACEBO_BETA)
@@ -152,4 +163,20 @@ VideoProcessorLibplaceboConfigureAnalysisDiagnosticSink(void* context,
     {
         DebugLog::Log("libplacebo plugin analysis diagnostic sink configuration failed");
     }
+}
+
+extern "C" __declspec(dllexport) uint32_t __cdecl
+VideoProcessorLibplaceboGetStartupPresentationReadinessV1(
+    IVideoRenderer* renderer, StartupPresentation::SnapshotV1* snapshot)
+{
+    using namespace StartupPresentation;
+    if (!renderer || !snapshot || !Supported(*snapshot))
+        return static_cast<uint32_t>(QueryStatus::Unsupported);
+    auto* vp = dynamic_cast<LibplaceboVideoRenderer*>(renderer);
+    if (!vp) return static_cast<uint32_t>(QueryStatus::Unsupported);
+    SnapshotV1 current;
+    if (!vp->GetStartupPresentationReadiness(current))
+        return static_cast<uint32_t>(QueryStatus::Busy);
+    *snapshot = current;
+    return static_cast<uint32_t>(QueryStatus::Available);
 }

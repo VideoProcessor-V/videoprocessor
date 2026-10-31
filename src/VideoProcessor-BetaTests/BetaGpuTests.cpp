@@ -38,6 +38,10 @@
 #include <sstream>
 #include <string>
 #include <vector>
+// REHEARSAL-ONLY guard: Bill's 388 headers lack the fork-only pl_mpv_user_shader_set_texture (patch 0004).
+#ifndef PL_VP_MPV_USER_SHADER_SET_TEXTURE
+static inline bool pl_mpv_user_shader_set_texture(const struct pl_hook*, const char*, pl_tex) { return false; }
+#endif
 
 namespace
 {

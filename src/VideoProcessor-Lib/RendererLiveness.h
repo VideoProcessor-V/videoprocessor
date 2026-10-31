@@ -4,6 +4,26 @@
 #include <cstdint>
 #include <limits>
 
+// A visible child can have no drawable area, or DXGI can report occlusion
+// even though its window styles still say visible. Neither is GPU failure.
+inline bool IsExpectedRendererPresentationPause(bool gpuFailed, bool visible,
+    bool iconic, int clientWidth, int clientHeight, bool renderedButOccluded)
+{
+    return !gpuFailed && (!visible || iconic || clientWidth <= 0 ||
+        clientHeight <= 0 || renderedButOccluded);
+}
+
+struct RendererPresentationAttempt
+{
+    bool occluded=false;
+    void Begin() { occluded=false; }
+    void Presented(bool wasOccluded) { occluded=wasOccluded; }
+    bool Deferred(bool rendered, bool submitted) const
+    {
+        return rendered && !submitted && occluded;
+    }
+};
+
 // Lock-free progress evidence published by renderer hot paths. Tick values use
 // GetTickCount64() and are zero until that stage has made progress.
 struct RendererLivenessSnapshot
@@ -98,6 +118,19 @@ struct RendererRenderLoadStat
 };
 
 
+// A completed two-second CPU submission/wait window. Counts are independent:
+// subtitle preparation calls, new-source draws, and inserted/cadence-repeat draws.
+// Draws include active analysis/upload/preparation/render submission and driver
+// waiting. Preparation is a subset of draw cost, not an additional cost to sum.
+// None of these CPU wall times is a GPU timestamp or a Present/VSync duration.
+struct RendererProcessingPerformance
+{
+    bool available = false;
+    uint64_t windowMilliseconds = 0;
+    uint64_t preparationCalls = 0, sourceDraws = 0, reusedDraws = 0;
+    RendererRenderLoadStat preparationCpu, sourceDrawCpu, reusedDrawCpu;
+};
+
 // How much of each submitted source-frame period the renderer is consuming.
 //
 // The three costs are NOT interchangeable and must never be summed:
@@ -122,6 +155,7 @@ struct RendererRenderLoad
 	RendererRenderLoadStat gpu;
 	RendererRenderLoadStat render;
 	RendererRenderLoadStat swap;
+    RendererProcessingPerformance processing;
 	bool gpuValid = false;      // false until GPU timer queries resolve
 	size_t gpuFrames = 0;       // exact matched GPU samples in the window
 	// GPU timestamps resolve asynchronously. These fields prove which source

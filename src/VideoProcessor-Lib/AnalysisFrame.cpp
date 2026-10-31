@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "AnalysisFrame.h"
+#include <DolbyVisionTunnelInput.h>
 #include "vprenderer/DolbyVisionTunnelUnpackReference.h"
 
 #include <algorithm>
@@ -23,8 +24,8 @@ namespace
     uint64_t DomainKey(const PreparedAnalysisFrame& result)
     {
         uint64_t hash = 14695981039346656037ull;
-        // evidence sampling contract version; 2 = full-range sources mapped
-        // to the limited code domain (audit 2026-10-16)
+        // evidence sampling contract version; 2 = range-aware (Bill) and full-range
+        // sources mapped to the limited code domain (audit 2026-10-16, DIV-AN-01)
         hash = Mix(hash, 2);
         hash = Mix(hash, static_cast<uint64_t>(result.domain));
         hash = Mix(hash, static_cast<uint64_t>(result.source.width));
@@ -50,7 +51,8 @@ namespace
     {
         return encoding == VideoFrameEncoding::UYVY ||
             encoding == VideoFrameEncoding::HDYC ||
-            encoding == VideoFrameEncoding::V210;
+            encoding == VideoFrameEncoding::V210 ||
+            encoding == VideoFrameEncoding::P210 || encoding == VideoFrameEncoding::P010;
     }
 
     void NativeContract(PreparedAnalysisFrame& result,
@@ -63,7 +65,7 @@ namespace
         const bool yuv8 = encoding == VideoFrameEncoding::UYVY ||
             encoding == VideoFrameEncoding::HDYC;
         result.colorDepth = rgb12 ? 12 : ((rgb8 || yuv8) ? 8 : 10);
-        result.bitShift = 0;
+        result.bitShift = (encoding == VideoFrameEncoding::P210 || encoding == VideoFrameEncoding::P010) ? 6 : 0;
         result.sampleRange = (rgb8 || rgb12) ? VideoFrameSampleRange::FULL :
             VideoFrameSampleRange::LIMITED;
     }
@@ -157,8 +159,9 @@ PreparedAnalysisFrame PrepareAnalysisFrame(const AnalysisFrameInput& input)
         else if (input.dolby.valid)
         {
             // Bug hunt 2026-10-17: the CPU formatter's decoded planes, from any
-            // tunnel container it unpacks (r210, R10b, R10l), not r210 only.
-            if (!DolbyVisionTunnelUnpackReference::SupportsContainer(input.encoding) ||
+            // tunnel container it unpacks (r210, R10b, R10l, RGB8), not r210 only.
+            if (!(DolbyVisionTunnelEncodingSupported(input.encoding) ||
+                    DolbyVisionTunnelUnpackReference::SupportsContainer(input.encoding)) ||
                 !input.convertedOwner || !input.converted422 ||
                 !input.convertedContract.IsValid() ||
                 input.convertedContract.colorDepth != 12 ||
@@ -183,13 +186,12 @@ PreparedAnalysisFrame PrepareAnalysisFrame(const AnalysisFrameInput& input)
         {
             // A missing/invalid packet cannot unlock the packed RGB transport.
             // The formatter alone can authorize a proven SDR alignment.
-            // r210 only (Bug hunt 2026-10-17): the SDR sampler reads r210 words,
-            // and the render's SDR fallback has no R10b/R10l upload (no D3D11
-            // format for [R10 G10 B10 00]); such frames are presented black.
-            if (!input.dolby.allowSdrFallback ||
+            // Bill's gate (R210 / ARGB / BGRA only) excludes R10b/R10l, which the
+            // render's SDR fallback cannot upload (Bug hunt 2026-10-17).
+            if (!input.dolby.allowSdrFallback || input.tunnelSdrRgbRange == TunnelSdrRgbRange::Unknown ||
                 (input.dolby.rgbBitAlignment != 1 &&
                     input.dolby.rgbBitAlignment != 2) ||
-                input.encoding != VideoFrameEncoding::R210 ||
+                !DolbyVisionTunnelEncodingSupported(input.encoding) ||
                 !input.nativeOwner)
                 return result;
             backing = native(AnalysisLumaFormat::SdrTunnelRgb,
@@ -197,7 +199,8 @@ PreparedAnalysisFrame PrepareAnalysisFrame(const AnalysisFrameInput& input)
             backing.rgbBitAlignment = input.dolby.rgbBitAlignment;
             result.domain = AnalysisFrameDomain::SdrTunnelRgb;
             result.sourceOwner = input.nativeOwner;
-            result.sampleRange = VideoFrameSampleRange::FULL;
+            result.sampleRange = input.tunnelSdrRgbRange == TunnelSdrRgbRange::Limited ?
+                VideoFrameSampleRange::LIMITED : VideoFrameSampleRange::FULL;
             result.colorDepth = 8;
             result.rgbBitAlignment = input.dolby.rgbBitAlignment;
         }
@@ -220,9 +223,13 @@ PreparedAnalysisFrame PrepareAnalysisFrame(const AnalysisFrameInput& input)
         }
         else
         {
-            backing = native(AnalysisLumaFormat::NativeYuv422,
+            backing = native(input.encoding == VideoFrameEncoding::P210 ? AnalysisLumaFormat::P210 :
+                input.encoding == VideoFrameEncoding::P010 ? AnalysisLumaFormat::P010 : AnalysisLumaFormat::NativeYuv422,
                 input.colorspace);
-            result.domain = AnalysisFrameDomain::NativeYuv422;
+            if (input.encoding == VideoFrameEncoding::P210 || input.encoding == VideoFrameEncoding::P010)
+                backing.chromaRowBytes = input.nativeRowBytes;
+            result.domain = input.encoding == VideoFrameEncoding::P010 ?
+                AnalysisFrameDomain::NativeYuv420 : AnalysisFrameDomain::NativeYuv422;
         }
         result.sourceOwner = input.nativeOwner;
         NativeContract(result, input.encoding);
@@ -231,6 +238,18 @@ PreparedAnalysisFrame PrepareAnalysisFrame(const AnalysisFrameInput& input)
     if (!result.sourceOwner || !backing.IsValid())
         return {};
     backing.backingOwner = result.sourceOwner;
+    switch (result.sampleRange)
+    {
+    case VideoFrameSampleRange::LIMITED:
+        backing.range = AnalysisLumaRange::Limited;
+        break;
+    case VideoFrameSampleRange::FULL:
+        backing.range = AnalysisLumaRange::Full;
+        break;
+    default:
+        backing.range = AnalysisLumaRange::Unknown;
+        break;
+    }
     result.source = std::move(backing);
     if (!result.source.IsValid())
         return {};

@@ -10,6 +10,8 @@
 #include <ConfigurationLiveApply.h>
 #include <AmbientState.h>
 #include <AmbientSensor.h>
+#include <StartupPresentationReadiness.h>
+#include <FullscreenActivation.h>
 
 
 
@@ -42,6 +44,7 @@
 #include <RendererRetirementService.h>
 #include <RendererTransitionModel.h>
 #include <EotfTransitionStabilizer.h>
+#include <OsdInputColorInfo.h>
 #include <InvalidCaptureStateGrace.h>
 #include <RendererQueueLaunchContractModel.h>
 #include <QueueProfileRestartPolicy.h>
@@ -134,6 +137,7 @@ static_assert(WM_MESSAGE_RENDERER_ACTION_EVENT !=
 #define PROFILE_CHANGE_OVERLAY_TIMER_ID 15
 #define ASPECT_OSD_TIMER_ID 16
 #define ANALYSIS_DIAGNOSTIC_STATUS_TIMER_ID 17
+#define FULLSCREEN_ACTIVATION_TIMER_ID 20
 #define CONFIGURATION_EDITOR_HOTKEY_ID 0x5650
 #define SHADER_RULE_REFRESH_INTERVAL_MS 25
 #define CONFIGURATION_LIVE_APPLY_INTERVAL_MS 250
@@ -761,6 +765,7 @@ protected:
 	std::map<WORD, unsigned int> m_rendererShortcutIndices;
 
 	FullscreenVideoWindow* m_fullScreenVideoWindow = nullptr;
+	FullscreenActivation::Session m_fullscreenActivation;
 
 	//
 	// Program data
@@ -776,6 +781,7 @@ protected:
 	VideoStateComPtr m_captureDeviceVideoState = nullptr;  // This is what we get from the capture card
 
 	VideoStateComPtr m_builtVideoState = nullptr;  // This is what we make of it
+	OsdInputColorInfo::AcceptedState m_osdAcceptedInputColor;
 
 
 	// Startup options
@@ -928,6 +934,7 @@ protected:
 	RendererState m_rendererState = RendererState::RENDERSTATE_UNKNOWN;
 	RendererTransitionWindow m_rendererTransitionWindow;
 	ShaderLoadingWindow m_shaderLoadingWindow;
+	ULONGLONG m_shaderLoadingPendingTick = 0;
 	ULONGLONG m_shaderLoadingPopupShownTick = 0;
 	HWND m_rendererTargetHwnd = nullptr;
 	bool m_preserveFullscreenHostForProfileRestart = false;
@@ -986,6 +993,8 @@ protected:
 	uint32_t m_rendererFirstFrameRevealPendingGeneration = 0;
 	HWND m_rendererFirstFrameRevealTargetHwnd = nullptr;
 	std::atomic_bool m_transitionRevealPosted{false};
+	StartupPresentation::RevealGate m_startupPresentationRevealGate;
+	StartupPresentation::RevealReason m_startupPresentationRevealReason = StartupPresentation::RevealReason::AlreadyReleased;
 	RendererTransitionModel m_rendererTransitionModel;
 	bool m_rendererResetTransitionActive = false;
 	RendererQueueLaunchContractModel m_queueLaunchContractModel;
@@ -1123,11 +1132,11 @@ protected:
 	static constexpr double CPU_PEAK_LOG_STEP_PERCENT = 5.0;
 
 	StatsOverlayWindow* m_statsOverlay = nullptr;
-	AspectRatioOsd m_aspectRatioOsd;
 	InputLocked m_cadenceInputLocked = InputLocked::UNKNOWN;
 	CadenceIntervalEstimate m_cadenceIntervalEstimate;
 	ULONGLONG m_lastCadenceIntervalLogTick = 0;
 	StatsData* m_lastStatsData = nullptr;
+	AspectRatioOsd m_aspectRatioOsd;
 	// Renderer telemetry getters are deliberately nonblocking. Retain their
 	// last valid values only within the same renderer/host generation when a
 	// periodic OSD read loses the render-lock race.
@@ -1140,8 +1149,10 @@ protected:
 		m_profileChangeOverlayEffectiveSelections;
 	std::map<std::string, std::string> m_profileChangeOverlaySelections;
 	std::vector<ProfileChangeOverlay::Item> m_profileChangeOverlayItems;
+    CString m_profileShaderStatus;
 	unsigned int m_profileChangeDisplaySeconds =
 		ProfileChangeOverlay::DefaultDisplaySeconds;
+	ULONGLONG m_profileChangeOverlayShowAfter = 0;
 	ULONGLONG m_profileChangeOverlayHoldUntil = 0;
 	ULONGLONG m_profileChangeOverlayFadeUntil = 0;
 
@@ -1244,6 +1255,7 @@ protected:
 	bool TryStartFullscreenRetarget();
 	void ClearFullscreenRetarget(bool restorePreviousTarget);
 	void FullScreenVideoWindowConstruct();
+	void ScheduleFullscreenActivation();
 	void FullScreenVideoWindowDestroy();
 	HMONITOR SelectFullscreenMonitor();
 	HWND GetRenderWindow();
@@ -1349,6 +1361,7 @@ protected:
 
 	bool BuildPushVideoState();
 	bool BuildPushVideoStateCore();
+	bool PushRendererVideoState();
 	void BuildPushRestartVideoState();
 	void ScheduleNewLldvRendererRestart();
 	void ObserveEotfTransition(EOTF observed, bool valid, const char* source);

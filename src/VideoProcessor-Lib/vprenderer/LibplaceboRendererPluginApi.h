@@ -1,6 +1,7 @@
 #pragma once
 
 #include <IRenderer.h>
+#include <StartupPresentationReadiness.h>
 #include <AnalysisDiagnosticTrace.h>
 #include <ITimingClock.h>
 #include <VideoConversionOverride.h>
@@ -50,13 +51,15 @@
 // 44: GetModuleStatus / InvokeModuleCommand (WP-11, integration group C, 2026-10-25): the
 // generic module status and command entries (ModuleStatusText.h), after ToggleDvCompareCapture
 // in the vtable. New status lines and module commands use them and need no further version change.
+// 45: v1.4.02-beta merge (rehearsal 2026-10-31): Bill's API 34 (base 28) and VP-V 44 together;
+// provisional number, max+1, recorded in rehearsal-notes c-list (ABI).
 //
 // The counter is maintained by hand and can collide across branches or miss
 // a layout change. The build ID is the
 // mechanical check: the loader refuses any DLL whose
 // VP_LIBPLACEBO_BUILD_ID_EXPORT differs from the executable's own build ID
 // (VpBuildIdentity.h), so only a DLL from the same build loads.
-static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 44;
+static constexpr uint32_t VP_LIBPLACEBO_PLUGIN_API_VERSION = 45;
 static constexpr const char* VP_LIBPLACEBO_BUILD_ID_EXPORT =
 	"VideoProcessorLibplaceboGetBuildId";
 // Returns the DLL's 32-hex-digit build ID (static storage); never throws.
@@ -98,3 +101,30 @@ static constexpr const char* VP_LIBPLACEBO_DIAGNOSTIC_EXPORT = "VideoProcessorLi
 using VideoProcessorLibplaceboConfigureDiagnosticFn = void (__cdecl *)(void*,
     AnalysisDiagnosticTrace::RecordSink, AnalysisDiagnosticTrace::FrameSink,
     AnalysisDiagnosticTrace::FrameCaptureActiveCallback);
+
+// Optional V1 side-channel. Its absence preserves API-29 reveal behavior; it
+// changes neither the factory nor any existing shared interface/snapshot.
+static constexpr const char* VP_LIBPLACEBO_STARTUP_READINESS_EXPORT =
+    "VideoProcessorLibplaceboGetStartupPresentationReadinessV1";
+using VideoProcessorLibplaceboGetStartupReadinessFn = uint32_t (__cdecl *)(
+    IVideoRenderer*, StartupPresentation::SnapshotV1*);
+
+inline StartupPresentation::QueryStatus QueryOptionalStartupReadiness(
+    VideoProcessorLibplaceboGetStartupReadinessFn query, IVideoRenderer* renderer,
+    StartupPresentation::SnapshotV1& snapshot)
+{
+    snapshot = {};
+    if (!query || !renderer) return StartupPresentation::QueryStatus::Unsupported;
+    const auto status = static_cast<StartupPresentation::QueryStatus>(query(renderer, &snapshot));
+    if (status == StartupPresentation::QueryStatus::Busy) return status;
+    return status == StartupPresentation::QueryStatus::Available && StartupPresentation::Supported(snapshot)
+        ? status : StartupPresentation::QueryStatus::Unsupported;
+}
+// Optional, outside the API version: the executable looks it up by name and
+// shows no renderer HDR status when a plugin lacks it. The status checks its
+// own layout through RendererHdrStatus::size.
+static constexpr const char* VP_LIBPLACEBO_HDR_STATUS_EXPORT =
+	"VideoProcessorLibplaceboGetHdrStatus";
+using VideoProcessorLibplaceboGetHdrStatusFn = bool (__cdecl *)(
+	const IVideoRenderer* renderer,
+	RendererHdrStatus* status);

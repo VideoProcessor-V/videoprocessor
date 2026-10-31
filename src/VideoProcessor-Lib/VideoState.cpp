@@ -9,6 +9,7 @@
 #include <pch.h>
 
 #include "VideoState.h"
+#include <P210FrameLayout.h>
 
 
 VideoState::VideoState(const VideoState& other):
@@ -23,6 +24,8 @@ VideoState::VideoState(const VideoState& other):
 	dolbyVisionTunnel = other.dolbyVisionTunnel;
 	hdrInferred = other.hdrInferred;
 	dolbyVisionVsif = other.dolbyVisionVsif;   // DV input fixes 2026-10-18
+	rgbTunnelBytesPreserved = other.rgbTunnelBytesPreserved;
+	tunnelSdrRgbRange = other.tunnelSdrRgbRange;
 
 	// Deepcopy
 	if (other.hdrData)
@@ -84,6 +87,22 @@ uint32_t VideoState::BytesPerRow() const
 
 	case VideoFrameEncoding::V210:
 		return ((displayMode->FrameWidth() + 47) / 48) * 128;
+	case VideoFrameEncoding::P210:
+	{
+		P210FrameLayout layout;
+		if (!displayMode || !GetP210FrameLayout(displayMode->FrameWidth(), displayMode->FrameHeight(), layout))
+			throw std::runtime_error("Invalid native P210 frame geometry");
+		return static_cast<uint32_t>(layout.rowBytes);
+	}
+	case VideoFrameEncoding::P010:
+	{
+		// Bill's layout for even geometry (same row bytes as the VP-V two-plane
+		// formula); odd file-source widths keep the rounded-even row below.
+		P210FrameLayout layout;
+		if (displayMode && GetP010FrameLayout(displayMode->FrameWidth(), displayMode->FrameHeight(), layout))
+			return static_cast<uint32_t>(layout.rowBytes);
+		return ((displayMode->FrameWidth() + 1) & ~1u) * 2;
+	}
 
 	case VideoFrameEncoding::ARGB_8BIT:
 	case VideoFrameEncoding::BGRA_8BIT:
@@ -103,7 +122,6 @@ uint32_t VideoState::BytesPerRow() const
 	case VideoFrameEncoding::NV12:
 		return ((displayMode->FrameWidth() + 1) & ~1u);
 
-	case VideoFrameEncoding::P010:
 	case VideoFrameEncoding::P016:
 		return ((displayMode->FrameWidth() + 1) & ~1u) * 2;
 	}
@@ -114,7 +132,22 @@ uint32_t VideoState::BytesPerRow() const
 
 uint32_t VideoState::BytesPerFrame() const
 {
-	// Two-plane 4:2:0: luma rows plus ceil(height / 2) CbCr rows.
+	if (videoFrameEncoding == VideoFrameEncoding::P210)
+	{
+		P210FrameLayout layout;
+		if (!displayMode || !GetP210FrameLayout(displayMode->FrameWidth(), displayMode->FrameHeight(), layout))
+			throw std::runtime_error("Invalid native P210 frame geometry");
+		return static_cast<uint32_t>(layout.frameBytes);
+	}
+	if (videoFrameEncoding == VideoFrameEncoding::P010)
+	{
+		// Bill's strict even-geometry layout when it applies; file sources with
+		// odd sizes keep VP-V's rounded two-plane size (identical for even sizes).
+		P210FrameLayout layout;
+		if (displayMode && GetP010FrameLayout(displayMode->FrameWidth(), displayMode->FrameHeight(), layout))
+			return static_cast<uint32_t>(layout.frameBytes);
+	}
+	// VP-V: two-plane 4:2:0 (NV12/P010/P016): luma rows plus ceil(height / 2) CbCr rows.
 	if (VideoFrameEncodingIsTwoPlane420(videoFrameEncoding))
 		return BytesPerRow() * (displayMode->FrameHeight() +
 			(displayMode->FrameHeight() + 1) / 2);

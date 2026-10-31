@@ -16,7 +16,7 @@ namespace VideoProcessorTest
 		{
 			// dv_tunnel_gpu_unpack (owner 2026-10-16): the Dolby Vision tunnel's
 			// 12-bit IPT 4:2:2 planes unpacked on the GPU from the raw r210 frame
-			// equal CR210DolbyVisionTunnelFormatter's planes sample for sample,
+			// equal CRGBDolbyVisionTunnelFormatter's planes sample for sample,
 			// for both RGB8 placements, several widths (row padding filled, every
 			// pixel after the DM packet an arbitrary 32-bit word), in the r210,
 			// R10b and R10l containers (each against the CPU's own decode of that
@@ -80,14 +80,14 @@ namespace VideoProcessorTest
 							std::memcpy(picture.input.data() + row * rowBytes + byte, &word, 4);
 						}
 					const VideoFrame frame(picture.input.data(), 1, 0, nullptr);
-					CR210DolbyVisionTunnelFormatter cpu;
+					CRGBDolbyVisionTunnelFormatter cpu;
 					cpu.OnVideoState(picture.state);
 					std::vector<BYTE> expected(static_cast<size_t>(cpu.GetOutFrameSize()));
 					Assert::IsTrue(cpu.FormatVideoFrame(frame, expected.data()), L"CPU unpack failed");
 					Assert::IsTrue(cpu.GetDolbyVisionTunnelMetadata().valid, L"the sender picture did not lock");
-					CR210DolbyVisionTunnelFormatter analyzed;
+					CRGBDolbyVisionTunnelFormatter analyzed;
 					analyzed.OnVideoState(picture.state);
-					Assert::IsTrue(analyzed.AnalyzeFrame(frame) == CR210DolbyVisionTunnelFormatter::FrameResult::PICTURE);
+					Assert::IsTrue(analyzed.AnalyzeFrame(frame) == CRGBDolbyVisionTunnelFormatter::FrameResult::PICTURE);
 					Assert::AreEqual(high8, analyzed.PlanesHighAligned());
 					const std::wstring name = std::wstring(container == VideoFrameEncoding::R210 ? L"r210 " :
 						container == VideoFrameEncoding::R10b ? L"R10b " : L"R10l ") +
@@ -149,7 +149,7 @@ namespace VideoProcessorTest
 			{
 				Tests::DvSender::SenderPicture picture(true, 3840, 2160);
 				picture.Embed(Tests::DvSender::Packetize(Tests::DvSender::DmBody()));
-				CR210DolbyVisionTunnelFormatter cpu, analyzed;
+				CRGBDolbyVisionTunnelFormatter cpu, analyzed;
 				cpu.OnVideoState(picture.state);
 				analyzed.OnVideoState(picture.state);
 				std::vector<BYTE> out(static_cast<size_t>(cpu.GetOutFrameSize()));
@@ -339,19 +339,19 @@ namespace VideoProcessorTest
 			const size_t rowBytes = picture.state->BytesPerRow();
 			const size_t planePixels = static_cast<size_t>(width) * height;
 			// The renderer's route for one frame; returns the planes it would render.
-			struct Routed { CR210DolbyVisionTunnelFormatter::FrameResult result; std::vector<uint16_t> intensity, chroma; };
-			auto route = [&](CR210DolbyVisionTunnelFormatter& analyzed, CR210DolbyVisionTunnelFormatter& cpu,
+			struct Routed { CRGBDolbyVisionTunnelFormatter::FrameResult result; std::vector<uint16_t> intensity, chroma; };
+			auto route = [&](CRGBDolbyVisionTunnelFormatter& analyzed, CRGBDolbyVisionTunnelFormatter& cpu,
 				const std::vector<BYTE>& input, uint64_t counter, const wchar_t* name)
 			{
 				Routed out;
 				const VideoFrame frame(const_cast<BYTE*>(input.data()), counter, 0, nullptr);
 				out.result = analyzed.AnalyzeFrame(frame);
-				Assert::IsTrue(out.result != CR210DolbyVisionTunnelFormatter::FrameResult::REJECTED,
+				Assert::IsTrue(out.result != CRGBDolbyVisionTunnelFormatter::FrameResult::REJECTED,
 					(std::wstring(name) + L": frame rejected").c_str());
 				std::vector<BYTE> expected(static_cast<size_t>(cpu.GetOutFrameSize()));
 				Assert::IsTrue(cpu.FormatVideoFrame(frame, expected.data()), (std::wstring(name) + L": CPU unpack failed").c_str());
 				const uint16_t* want = reinterpret_cast<const uint16_t*>(expected.data());
-				if (out.result == CR210DolbyVisionTunnelFormatter::FrameResult::PICTURE)
+				if (out.result == CRGBDolbyVisionTunnelFormatter::FrameResult::PICTURE)
 				{
 					Assert::IsTrue(unpack.Unpack(VideoFrameEncoding::R210, input.data(), rowBytes, static_cast<int>(width),
 						static_cast<int>(height), analyzed.PlanesHighAligned(), planes),
@@ -382,10 +382,10 @@ namespace VideoProcessorTest
 			// The packed pixels of the damaged frame, unpacked anyway: not black (what the route
 			// must never show).
 			{
-				CR210DolbyVisionTunnelFormatter probe;
+				CRGBDolbyVisionTunnelFormatter probe;
 				probe.OnVideoState(picture.state);
 				const VideoFrame frame(picture.input.data(), 1, 0, nullptr);
-				Assert::IsTrue(probe.AnalyzeFrame(frame) == CR210DolbyVisionTunnelFormatter::FrameResult::PICTURE);
+				Assert::IsTrue(probe.AnalyzeFrame(frame) == CRGBDolbyVisionTunnelFormatter::FrameResult::PICTURE);
 				Assert::IsTrue(unpack.Unpack(VideoFrameEncoding::R210, damaged.input.data(), rowBytes, static_cast<int>(width),
 					static_cast<int>(height), probe.PlanesHighAligned(), planes));
 				const std::vector<uint16_t> garbage = download(planes[0]);
@@ -394,17 +394,17 @@ namespace VideoProcessorTest
 				Assert::IsTrue(nonZero > planePixels / 2, L"precondition: the damaged frame's packed pixels are not black");
 			}
 			// Locked, then the DM lost, then a fresh DM.
-			CR210DolbyVisionTunnelFormatter analyzed, cpu;
+			CRGBDolbyVisionTunnelFormatter analyzed, cpu;
 			analyzed.OnVideoState(picture.state);
 			cpu.OnVideoState(picture.state);
 			uint64_t counter = 1;
 			Assert::IsTrue(route(analyzed, cpu, picture.input, counter++, L"locked").result ==
-				CR210DolbyVisionTunnelFormatter::FrameResult::PICTURE, L"the sender picture locks");
+				CRGBDolbyVisionTunnelFormatter::FrameResult::PICTURE, L"the sender picture locks");
 			int blackAt = -1;
 			for (int lost = 0; lost < 60 && blackAt < 0; ++lost)
 			{
 				const Routed r = route(analyzed, cpu, damaged.input, counter++, L"DM lost");
-				if (r.result == CR210DolbyVisionTunnelFormatter::FrameResult::BLACK)
+				if (r.result == CRGBDolbyVisionTunnelFormatter::FrameResult::BLACK)
 				{
 					Assert::IsTrue(black(r), L"DM lost: black planes");
 					blackAt = lost;
@@ -423,18 +423,18 @@ namespace VideoProcessorTest
 			bool restored = false;
 			for (int k = 0; k < 10 && !restored; ++k)
 				restored = route(analyzed, cpu, fresh.input, counter++, L"fresh DM").result ==
-					CR210DolbyVisionTunnelFormatter::FrameResult::PICTURE;
+					CRGBDolbyVisionTunnelFormatter::FrameResult::PICTURE;
 			Assert::IsTrue(restored, L"a fresh DM brings the GPU picture back");
 			// A stream whose first frame already has a damaged DM: zero DV planes from the start (before
 			// any lock the renderer may still choose the SDR passthrough - allowSdrFallback, reported).
 			{
-				CR210DolbyVisionTunnelFormatter coldAnalyzed, coldCpu;
+				CRGBDolbyVisionTunnelFormatter coldAnalyzed, coldCpu;
 				coldAnalyzed.OnVideoState(picture.state);
 				coldCpu.OnVideoState(picture.state);
 				for (uint64_t n = 1; n <= 3; ++n)
 				{
 					const Routed r = route(coldAnalyzed, coldCpu, damaged.input, n, L"never locked");
-					Assert::IsTrue(r.result == CR210DolbyVisionTunnelFormatter::FrameResult::BLACK && black(r),
+					Assert::IsTrue(r.result == CRGBDolbyVisionTunnelFormatter::FrameResult::BLACK && black(r),
 						L"never locked with a damaged DM: zero planes, not the packed pixels");
 				}
 				Logger::WriteMessage(coldAnalyzed.GetDolbyVisionTunnelMetadata().allowSdrFallback ?

@@ -2,11 +2,13 @@
 #include "CppUnitTest.h"
 
 #include <ActivePictureEvidence.h>
+#include <LocalBoundaryDiagnostics.h>
 #include <vprenderer/AlphaSourceCropPolicy.h>
 #include <AnalysisFrame.h>
 #include <SubtitleBoxDetector.h>
 #include <SubtitleBoxLookahead.h>
 #include <SubtitleMeasurementWorker.h>
+#include <vprenderer/SubtitleBarRecovery.h>
 #include <VideoFrame.h>
 #include <VideoState.h>
 #include <video_frame_formatter/CUYVYtoP010VideoFrameFormatter.h>
@@ -256,6 +258,20 @@ namespace Tests
             fixture.rowBytes = fixture.state->BytesPerRow();
             fixture.pixels = std::make_shared<std::vector<uint8_t>>(
                 fixture.rowBytes * Height, 0);
+
+            if (encoding == VideoFrameEncoding::P210)
+            {
+                fixture.pixels->resize(fixture.state->BytesPerFrame());
+                auto* ys = reinterpret_cast<uint16_t*>(fixture.pixels->data());
+                auto* uv = ys + Width * Height;
+                for (int y = 0; y < Height; ++y)
+                    for (int x = 0; x < Width; ++x)
+                    {
+                        ys[y*Width+x] = static_cast<uint16_t>(Luma(scene, x, y, topSide, phase) << 6);
+                        uv[y*Width+x] = static_cast<uint16_t>(Chroma(scene, y, phase, (x&1) != 0) << 6);
+                    }
+                return fixture;
+            }
 
             if (IsEightBitYuv(encoding))
             {
@@ -561,9 +577,18 @@ namespace Tests
             std::ifstream metadata(fixture + ".txt");
             AnalysisLumaSource source;
             int format = 0, encoding = 0, colorspace = 0, top = 0, bottom = 0, script = 0;
-            metadata >> source.width >> source.height >> source.rowBytes >> source.chromaRowBytes
+            std::string headerLine;
+            Assert::IsTrue(bool(std::getline(metadata, headerLine)));
+            std::istringstream header(headerLine);
+            header >> source.width >> source.height >> source.rowBytes >> source.chromaRowBytes
                 >> format >> encoding >> colorspace >> top >> bottom >> script;
-            Assert::IsTrue(bool(metadata));
+            Assert::IsTrue(bool(header));
+            int rangeCode = 0; // Old ten-token captures retain historical behavior.
+            if (header >> rangeCode)
+            {
+                Assert::IsTrue(rangeCode >= 0 && rangeCode <= 2);
+                source.range = static_cast<AnalysisLumaRange>(rangeCode);
+            }
             std::ifstream input(fixture, std::ios::binary | std::ios::ate);
             Assert::IsTrue(bool(input));
             const auto bytes = input.tellg();
@@ -609,6 +634,21 @@ namespace Tests
                 std::chrono::steady_clock::now()-proofStarted).count();
             SubtitleMeasurementSampler sampler;
             const auto sampledWorker = sampler.Measure(source, worker, {}, 23.976, raw);
+            char* expectedInspection=nullptr;size_t inspectionLength=0;
+            _dupenv_s(&expectedInspection,&inspectionLength,"VP_NATIVE_EXPECTED_WORKER_INSPECTION");
+            const bool requireWorkerInspection=expectedInspection && std::string(expectedInspection)=="1";
+            std::free(expectedInspection);
+            if(requireWorkerInspection) {
+                Assert::IsTrue(sampledWorker.subtitleArProof.accepted);
+                const auto& proof=sampledWorker.subtitleArProof;
+                const auto recovered=RecoverSubtitleInspectionBarsFromWorkerProof(source,proof.candidate,
+                    source.generation,proof.evidence.classification,proof,identity,0,0,
+                    static_cast<SubtitleScriptHint>(script),true,false);
+                Assert::AreEqual(source.width,recovered.rasterWidth,
+                    L"Exact current worker bars must recover inspection for the guarded native aperture.");
+                Assert::AreEqual(proof.candidate.top,recovered.top);
+                Assert::AreEqual(proof.candidate.bottom,recovered.bottom);
+            }
             const auto darkness = EvaluateActivePictureGlobalNearBlack(source);
             const auto arStarted = std::chrono::steady_clock::now();
             const auto arDarkness = EvaluateActivePictureArDarkness(source, raw, darkness);
@@ -675,7 +715,10 @@ namespace Tests
                 << " near=" << worker.text.nearBarEligibilityMeasured << worker.text.nearBarEligible
                 << " raw_ink=" << bool(worker.ink && worker.ink->rawEvidenceComplete)
                 << " distributed_bars=" << bars.topDistributedBoundary << bars.bottomDistributedBoundary
-                << " global_p90=" << darkness.lumaP90 << " global_near_black=" << darkness.nearBlack
+                << " global_p90=" << darkness.lumaP90
+                << " global_cutoff=" << darkness.lumaCutoff
+                << " sample_range=" << static_cast<int>(source.range)
+                << " global_near_black=" << darkness.nearBlack
                 << " ar_near_black=" << arDarkness.EffectiveNearBlack()
                 << " distributed_picture=" << arDarkness.distributedDarkPicture
                 << " textured_tiles=" << arDarkness.texturedTiles
@@ -717,6 +760,17 @@ namespace Tests
                 << " box=" << measurement.text.bounds.left << "," << measurement.text.bounds.top
                 << "-" << measurement.text.bounds.right << "," << measurement.text.bounds.bottom;
             Logger::WriteMessage(out.str().c_str());
+            char* expectedDarkText = nullptr;
+            size_t expectedDarkLength = 0;
+            _dupenv_s(&expectedDarkText, &expectedDarkLength,
+                "VP_NATIVE_EXPECTED_RAW_NEAR_BLACK");
+            const std::string expectedDark = expectedDarkText ? expectedDarkText : "";
+            std::free(expectedDarkText);
+            if (!expectedDark.empty())
+            {
+                Assert::IsTrue(expectedDark == "0" || expectedDark == "1");
+                Assert::AreEqual(expectedDark == "1", darkness.nearBlack);
+            }
 
             // The paused scene may contain no caption. Check native AR and
             // explicit negative glyph expectations without granting a subtitle
@@ -920,6 +974,105 @@ namespace Tests
             }
         }
 
+        TEST_METHOD(NativeP210MatchesV210PictureAndCaptionEvidenceForLiveAndQueuedConsumers)
+        {
+            const std::array<Scene, 6> scenes = {Scene::OneLineCue, Scene::TwoLineCue,
+                Scene::ThreeLineCard, Scene::MidPictureText, Scene::MovingTexture, Scene::ChromaEdge};
+            for (const auto scene : scenes)
+            for (const bool top : {false, true})
+            for (const int phase : {0, 1})
+            {
+                auto packed = MakeFixture(VideoFrameEncoding::V210, scene, top, phase);
+                auto planar = MakeFixture(VideoFrameEncoding::P210, scene, top, phase);
+                auto converted = Convert(packed, false);
+                auto input = InputFor(planar, converted, AnalysisSourceProfile::LiveRenderer, true);
+                // A deliberately unusable render conversion cannot affect native analysis.
+                input.convertedData = nullptr; input.convertedBytes = 0; input.convertedOwner.reset();
+                input.rendererUsesNative = true;
+                const auto live = PrepareAnalysisFrame(input);
+                input.profile = AnalysisSourceProfile::QueuedCapture;
+                const auto queued = PrepareAnalysisFrame(input);
+                Assert::IsTrue(live.IsValid() && queued.IsValid());
+                Assert::AreEqual(live.domainKey, queued.domainKey);
+                const auto reference = LegacyNativeSource(packed);
+                for (const auto* prepared : {&live, &queued})
+                {
+                    Assert::IsFalse(prepared->usesConverted);
+                    Assert::IsTrue(prepared->source.data == planar.pixels->data());
+                    Assert::AreEqual(10, static_cast<int>(prepared->colorDepth));
+                    Assert::AreEqual(6, static_cast<int>(prepared->bitShift));
+                    Assert::IsTrue(prepared->sampleRange == VideoFrameSampleRange::LIMITED);
+                    AssertSameSamples(reference, prepared->source);
+                    AssertSameActivePicture(reference, prepared->source);
+                    const auto referenceColor = EvaluateFullRasterColorEvidence(reference);
+                    const auto nativeColor = EvaluateFullRasterColorEvidence(prepared->source);
+                    Assert::IsTrue(nativeColor.precisionSupported);
+                    Assert::AreEqual(referenceColor.evaluated, nativeColor.evaluated);
+                    Assert::AreEqual(referenceColor.candidateSupported, nativeColor.candidateSupported);
+                    Assert::AreEqual(referenceColor.sampleCount, nativeColor.sampleCount);
+                    const auto referenceBoundary = SampleLocalBoundaryDiagnostics(reference);
+                    const auto nativeBoundary = SampleLocalBoundaryDiagnostics(prepared->source);
+                    Assert::IsTrue(nativeBoundary.precisionSupported);
+                    Assert::AreEqual(referenceBoundary.top, nativeBoundary.top);
+                    Assert::AreEqual(referenceBoundary.bottom, nativeBoundary.bottom);
+                    const int lines = scene == Scene::OneLineCue ? 1 : scene == Scene::TwoLineCue ? 2 :
+                        scene == Scene::ThreeLineCard ? 3 : scene == Scene::MidPictureText ? -1 : 0;
+                    if (lines >= 0) AssertSameSubtitleResult(reference, prepared->source, lines, top);
+                }
+            }
+        }
+
+        TEST_METHOD(NativeP210PreservesEveryTenBitCodeAndEveryChromaRow)
+        {
+            auto fixture = MakeFixture(VideoFrameEncoding::P210, Scene::ChromaEdge);
+            auto* words = reinterpret_cast<uint16_t*>(fixture.pixels->data());
+            for (int i = 0; i < Width*Height; ++i)
+            {
+                words[i] = static_cast<uint16_t>((i%1024) << 6);
+                words[Width*Height+i] = static_cast<uint16_t>(((i*7+17)%1024) << 6);
+            }
+            AnalysisFrameInput input;
+            input.nativeData = fixture.pixels->data(); input.nativeBytes = fixture.pixels->size();
+            input.nativeOwner = fixture.pixels; input.nativeRowBytes = fixture.rowBytes;
+            input.width = Width; input.height = Height; input.encoding = fixture.encoding;
+            const auto prepared = PrepareAnalysisFrame(input);
+            Assert::IsTrue(prepared.IsValid());
+            for (int y = 0; y < Height; ++y)
+                for (int x = 0; x < Width; ++x)
+                {
+                    AnalysisLumaSample sample;
+                    Assert::IsTrue(prepared.source.Sample(x, y, sample));
+                    const int i = y*Width+x, pair = y*Width+(x&~1);
+                    Assert::AreEqual(i%1024, int(sample.luma));
+                    Assert::AreEqual((pair*7+17)%1024, int(sample.chromaU));
+                    Assert::AreEqual(((pair+1)*7+17)%1024, int(sample.chromaV));
+                }
+        }
+
+        TEST_METHOD(NativeP210RejectsShortPlanesAndRetainsSourceThroughAnalysisCopies)
+        {
+            auto fixture = MakeFixture(VideoFrameEncoding::P210, Scene::OneLineCue);
+            AnalysisFrameInput input;
+            input.nativeData = fixture.pixels->data(); input.nativeBytes = fixture.pixels->size();
+            input.nativeOwner = fixture.pixels; input.nativeRowBytes = fixture.rowBytes;
+            input.width = Width; input.height = Height; input.encoding = fixture.encoding;
+            --input.nativeBytes;
+            Assert::IsFalse(PrepareAnalysisFrame(input).IsValid());
+            ++input.nativeBytes; --input.nativeRowBytes;
+            Assert::IsFalse(PrepareAnalysisFrame(input).IsValid());
+            ++input.nativeRowBytes;
+            auto prepared = PrepareAnalysisFrame(input);
+            std::weak_ptr<std::vector<uint8_t>> owner = fixture.pixels;
+            input.nativeOwner.reset(); fixture.pixels.reset();
+            Assert::IsFalse(owner.expired());
+            auto source = prepared.source; prepared = {};
+            Assert::IsFalse(owner.expired());
+            AnalysisLumaSample sample;
+            Assert::IsTrue(source.Sample(0, 0, sample));
+            source = {};
+            Assert::IsTrue(owner.expired());
+        }
+
         TEST_METHOD(P010AndP210UploadChoicesKeepOneNativeAnalysisDomain)
         {
             const std::array<VideoFrameEncoding, 3> encodings = {
@@ -987,6 +1140,111 @@ namespace Tests
                     }
                 }
             }
+        }
+
+        TEST_METHOD(PreparedSourcesCarryAuthoritativeRangeWithoutChangingSamples)
+        {
+            constexpr int width = 4;
+            constexpr int height = 2;
+            auto dvPixels = std::make_shared<std::vector<uint8_t>>(
+                static_cast<size_t>(width) * height * 4, 0);
+            auto* dvWords = reinterpret_cast<uint16_t*>(dvPixels->data());
+            for (int pixel = 0; pixel < width * height; ++pixel)
+            {
+                dvWords[pixel] = static_cast<uint16_t>(200 << 4);
+                dvWords[width * height + pixel] = static_cast<uint16_t>(2048 << 4);
+            }
+            AnalysisFrameInput dv;
+            dv.convertedData = dvPixels->data();
+            dv.convertedBytes = dvPixels->size();
+            dv.convertedRowBytes = width * 2;
+            dv.convertedChromaRowBytes = width * 2;
+            dv.convertedOwner = dvPixels;
+            dv.converted422 = true;
+            dv.dolbyVisionTunnel = true;
+            dv.dolby.valid = true;
+            dv.width = width;
+            dv.height = height;
+            dv.encoding = VideoFrameEncoding::R210;
+            dv.colorspace = ColorSpace::BT_2020;
+            dv.sourceGeneration = 17;
+            dv.convertedContract = { VideoFrameSampleRange::FULL, 12, 4 };
+            dv.dolby.fullRange = true;
+            dv.profile = AnalysisSourceProfile::LiveRenderer;
+            const auto fullLive = PrepareAnalysisFrame(dv);
+            dv.profile = AnalysisSourceProfile::QueuedCapture;
+            const auto fullQueued = PrepareAnalysisFrame(dv);
+            Assert::IsTrue(fullLive.IsValid() && fullQueued.IsValid());
+            Assert::AreEqual(static_cast<int>(AnalysisLumaRange::Full),
+                static_cast<int>(fullLive.source.range));
+            Assert::AreEqual(fullLive.domainKey, fullQueued.domainKey);
+            Assert::AreEqual(static_cast<int>(fullLive.source.range),
+                static_cast<int>(fullQueued.source.range));
+            AnalysisLumaSample fullSample;
+            Assert::IsTrue(fullLive.source.Sample(2, 1, fullSample));
+            Assert::AreEqual(50, static_cast<int>(fullSample.luma));
+            Assert::AreEqual(512, static_cast<int>(fullSample.chromaU));
+            Assert::AreEqual(512, static_cast<int>(fullSample.chromaV));
+
+            dv.convertedContract.sampleRange = VideoFrameSampleRange::LIMITED;
+            dv.dolby.fullRange = false;
+            dv.profile = AnalysisSourceProfile::LiveRenderer;
+            const auto limitedLive = PrepareAnalysisFrame(dv);
+            dv.profile = AnalysisSourceProfile::QueuedCapture;
+            const auto limitedQueued = PrepareAnalysisFrame(dv);
+            Assert::IsTrue(limitedLive.IsValid() && limitedQueued.IsValid());
+            Assert::AreEqual(static_cast<int>(AnalysisLumaRange::Limited),
+                static_cast<int>(limitedLive.source.range));
+            Assert::AreEqual(limitedLive.domainKey, limitedQueued.domainKey);
+            Assert::AreNotEqual(fullLive.domainKey, limitedLive.domainKey);
+            AnalysisLumaSample limitedSample;
+            Assert::IsTrue(limitedLive.source.Sample(2, 1, limitedSample));
+            Assert::AreEqual(static_cast<int>(fullSample.luma),
+                static_cast<int>(limitedSample.luma));
+            Assert::AreEqual(static_cast<int>(fullSample.chromaU),
+                static_cast<int>(limitedSample.chromaU));
+            Assert::AreEqual(static_cast<int>(fullSample.chromaV),
+                static_cast<int>(limitedSample.chromaV));
+            dv.convertedContract.sampleRange = VideoFrameSampleRange::FULL;
+            Assert::IsFalse(PrepareAnalysisFrame(dv).IsValid());
+
+            auto nativePixels = std::make_shared<std::vector<uint8_t>>(
+                static_cast<size_t>(width) * height * 4, 0);
+            AnalysisFrameInput native;
+            native.nativeData = nativePixels->data();
+            native.nativeBytes = nativePixels->size();
+            native.nativeRowBytes = width * 4;
+            native.nativeOwner = nativePixels;
+            native.width = width;
+            native.height = height;
+            native.sourceGeneration = 17;
+            for (const auto encoding : { VideoFrameEncoding::BGRA_8BIT,
+                VideoFrameEncoding::R210, VideoFrameEncoding::UYVY })
+            {
+                native.encoding = encoding;
+                native.nativeRowBytes = encoding == VideoFrameEncoding::UYVY
+                    ? width * 2 : width * 4;
+                native.profile = AnalysisSourceProfile::LiveRenderer;
+                const auto live = PrepareAnalysisFrame(native);
+                native.profile = AnalysisSourceProfile::QueuedCapture;
+                const auto queued = PrepareAnalysisFrame(native);
+                Assert::IsTrue(live.IsValid() && queued.IsValid());
+                const auto expectedRange = encoding == VideoFrameEncoding::BGRA_8BIT
+                    ? AnalysisLumaRange::Full : AnalysisLumaRange::Limited;
+                Assert::AreEqual(static_cast<int>(expectedRange),
+                    static_cast<int>(live.source.range));
+                Assert::AreEqual(static_cast<int>(expectedRange),
+                    static_cast<int>(queued.source.range));
+                Assert::AreEqual(live.domainKey, queued.domainKey);
+                AnalysisLumaSample a, b;
+                Assert::IsTrue(live.source.Sample(2, 1, a));
+                Assert::IsTrue(queued.source.Sample(2, 1, b));
+                Assert::AreEqual(static_cast<int>(a.luma),
+                    static_cast<int>(b.luma));
+            }
+            AnalysisLumaSource manual;
+            Assert::AreEqual(static_cast<int>(AnalysisLumaRange::Unknown),
+                static_cast<int>(manual.range));
         }
 
         TEST_METHOD(MissingOrUnsupportedCapturePixelsCannotBorrowRenderConversion)

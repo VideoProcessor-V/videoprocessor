@@ -1,0 +1,136 @@
+# VP Renderer presentation controls
+
+Config's Display page has two independent global VP Renderer controls:
+
+- **Presentation queue depth**: `[general] presentation_queue_depth`, integer
+  1 through 8, default 2. Bounds pending device presentations, including repeated
+  pictures. Higher values can absorb short stalls but add latency. This does not
+  change the source FIFO's Queue profile, target, capacity or lookahead.
+- **Present on every display refresh**: `[general] present_every_vsync`, Boolean,
+  default false. Repeats final processed output between new due pictures without
+  enabling Smooth Motion or changing the speed of valid source timestamps.
+
+Apply restarts VP Renderer. Both settings are shared across Display profiles.
+DirectShow/madVR retain their own presentation policy. Absent keys preserve the
+old device-latency request of two and ordinary source-paced presentation.
+
+The D3D11 device limit is set and read back before swapchain creation. Normal
+flip chains allocate that limit plus one buffers, matching bundled libplacebo;
+diagnostic bitblt uses one. `VP presentation queue` records the requested and
+applied device limit. Neither the limit nor buffer count reports queue occupancy.
+A rejected limit fails initialization rather than silently claiming it applied.
+
+Every-refresh mode uses interval-1 DXGI presentation and its bounded queue for
+backpressure. Several calls can fill the queue before a call blocks: this is not
+a per-vblank callback. An interruptible emergency wait caps software workahead
+at the configured depth when Present returns too quickly. It releases render
+and queue locks and rechecks the scheduling lifetime; it is not a vblank event
+or a replacement for normal Present pacing. Valid, stable DXGI statistics can
+discipline the next queued-slot estimate using mpv's guarded queue-tail calculation.
+Missing, zero, disjoint, stale, future or implausible statistics are rejected.
+
+Cadence classification compares paired DXGI sync-count/QPC deltas with the
+selected display rate, never with source FPS. A minimum 200 ms window, at least
+five unique intervals and 80% agreement outside a 3% tolerance identify a
+reported mismatch. These are VP heuristics. Microsoft warns that frame
+statistics can be unreliable on multiple monitors; agreement does not certify
+physical scanout. Absolute sample age must be no more than the larger of
+250 ms and three target periods, and sample timestamps cannot be in the future.
+The guarded DXGI queue-tail phase estimate applies the same age limit. Invalid
+ages clear its accumulated qualification, so fresh observations must establish
+agreement again before feedback can shift the local clock.
+
+A mismatch suppresses cached repeats and returns to source-paced capture.
+Swapchain recreation additionally requires three distinct successful-submission
+serials that each needed a workahead wait greater than a quarter target period.
+They must span at least one period and all be within 500 ms. Repeated CV wakeups
+cannot add evidence. Output, source, profile, depth or clock reanchors retire
+this evidence; only the mismatch's own fallback reset preserves a qualified
+request. The current containing output must also match the negotiated monitor.
+Each attempt consumes its evidence. At most two attempts are allowed per
+persistent episode, with a two-second cooldown; further stats-only mismatches
+continue source-paced playback. With a deep queue, fallback can occur before
+three clamps, deliberately avoiding an uncorroborated rebuild.
+
+Repeats resume after 500 ms of fresh DXGI agreement; five seconds of agreement
+replenish the attempt budget. A rebuild is logged with timing_verified=0 until
+later observations arrive. This local recovery policy is experimental: neither
+upstream player code nor the CPU tests establish that rebuilding repairs the
+Windows compositor or physical HDMI timing. User settings and capture PTS
+remain unchanged.
+
+The host continuously estimates the selected output's rate from QPC timestamps
+after `IDXGIOutput::WaitForVBlank`. These timestamps include worker wake latency;
+they support a filtered rate estimate, not exact scanout phase. The estimator is
+seeded from the selected target's nominal rate. DWM composition timing is not
+used to seed or timestamp this output-specific measurement. A failed wait or an
+unusable successive wake interval invalidates the measurement generation and
+backs off for 100 ms, with an earlier wake on target changes. Wakes from an old
+target generation cannot publish timestamps or rate evidence for the new one.
+
+Source PTS chooses pictures; a separate output-slot estimate controls repeats.
+For nominal 24 fps at 120 Hz there are five slots per picture; 24 at 60 Hz keeps
+3:2 cadence. Clock drift and late sources can retire due source frames while
+preserving the configured source-queue reserve. Elapsed slots are not repaid with
+a catch-up burst. Frozen/backward/implausible timestamps use a monotonic
+sequence/rate estimate anchored once per source generation; raw capture ticks
+remain available in telemetry. If neither timestamp nor rate can be estimated,
+repeat pacing falls back to the ordinary source path rather than starving it.
+
+Final output is copied to owned GPU storage, independent of capture/backbuffers.
+Repeats preserve pixels, overlays and dithering without repeating conversion,
+tone mapping or source/subtitle analysis. Smooth Motion still chooses temporal
+pixels; deinterlacing keeps its nominal field/frame processing cadence. One slot
+clock also repeats final temporal pictures between due fields or missing inputs.
+It never enables blending or expands expensive deinterlacing to display Hz.
+
+When Smooth Motion actually engages mixing, it already produces display-rate
+outputs and owns cadence. The every-refresh preference stays saved/checked but
+its separate repeat clock, cache and source-retirement policy are bypassed.
+Selecting Auto alone does not disable repeats: they resume when Auto bypasses
+mixing. Deinterlace-only output also remains eligible. Presentation queue depth
+continues to apply independently in both cases. The log names the active cadence
+owner and requested/effective every-refresh states.
+
+Resets, resize/output changes, pending profile/shader/LUT changes and visibility
+changes retire the cached repeat path. Already submitted frames may drain from
+the bounded driver queue. During a source stall, an output change can stop new
+repeat submissions until a new source can be processed; the displayed image can
+remain held by scanout. Queued output can cover a short future-render stall only
+within the available queue lead; no finite depth covers arbitrary rendering stalls.
+
+`VP display refresh` logs repeat/source-retirement counts, feedback acceptance
+and timestamp-fallback state. Successful Present and software slot cadence are
+not proof of HDMI scanout or source-to-display latency. See
+[the source comparison and qualification report](VP-0211_PRESENTATION_REVIEW.md).
+
+
+Source eligibility includes a small timestamp precision allowance: the larger
+of one capture-clock tick and 10 microseconds, capped at 100 microseconds.
+The 10-microsecond minimum covers the observed DeckLink hardware PTS grid even
+when its API timebase is 1 MHz. This prevents rounding at a refresh boundary
+from inserting a cached repeat followed by discarding the adjacent source.
+It preserves cadence phase and genuine rate drift; it is not a half-refresh
+advance or a video speed adjustment. The same allowance applies to source
+selection, stale-source retirement and nonmixing temporal output checks.
+Repeat diagnostics include `next_pts_lead_ms`, `pts_tolerance_us` and
+`queued_sources`. These CPU submission records do not prove HDMI scanout.
+
+
+Live profile-change testing showed that precision alone was insufficient: raw
+capture phase moved by up to about 1.14ms, causing an eligible successor to be
+used as evidence for dropping its predecessor. Source selection now uses two
+boundaries around the unchanged slot clock. A source is eligible up to 3ms after
+the nominal slot; its successor may justify retirement only when it is more than
+3ms before that slot. At high refresh rates this band is capped at one quarter
+of the refresh interval. The separate 10-100us timestamp precision value remains
+reported, while `decision_band_ms` reports the actual selection/retirement band.
+This permits at most the bounded band of early selection, preserves the 24-to-60
+3/2 phase, and leaves true long-run source/display drift visible.
+
+After an output profile change, one successful changed output pays shader/driver
+warmup, then VP resets its internal repeat clock and cache eligibility once.
+The following source anchors the replacement cadence. The log reports
+`VP display cadence restart ... hdmi_resync=0`; no display-mode change is requested.
+Failed presentation does not consume the pending restart. Subtitle packet data,
+source PTS, capture Queue/lookahead and NLS pixels remain unchanged.

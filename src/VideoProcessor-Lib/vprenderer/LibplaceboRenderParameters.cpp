@@ -21,7 +21,7 @@ namespace
 	const T* ReadLibplaceboData(const char* exportName, std::string& error)
 	{
 #if defined(VP_LIBPLACEBO_BETA)
-        HMODULE module = GetModuleHandleW(L"libplacebo-377.dll");
+        HMODULE module = GetModuleHandleW(L"libplacebo-388.dll");
 #else
         HMODULE module = GetModuleHandleW(L"libplacebo-360.dll");
 #endif
@@ -358,7 +358,7 @@ namespace LibplaceboRenderParameters
 				projection.renderParams.error_diffusion = kernel;
 				return true;
 			}
-			if (settings.dithering != "auto")
+			// Retired Auto and On select Blue noise independently of quality.
 			{
 				const pl_dither_params* defaults =
 					ReadLibplaceboData<pl_dither_params>(
@@ -379,12 +379,6 @@ namespace LibplaceboRenderParameters
 				projection.renderParams.error_diffusion = nullptr;
 				return true;
 			}
-			if (projection.renderParams.dither_params)
-			{
-				projection.ditherParams = *projection.renderParams.dither_params;
-				projection.renderParams.dither_params = &projection.ditherParams;
-			}
-			return true;
 		};
 
 		if (!setToggle(settings.sigmoid, "pl_sigmoid_default_params",

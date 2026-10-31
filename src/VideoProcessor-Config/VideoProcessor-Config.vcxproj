@@ -45,11 +45,11 @@
       <LanguageStandard>stdcpp17</LanguageStandard><RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <AdditionalOptions>/utf-8 /Zc:__cplusplus /bigobj %(AdditionalOptions)</AdditionalOptions>
       <PreprocessorDefinitions>_DEBUG;_WINDOWS;VP_CONFIGFILE_STANDALONE;QT_WIDGETS_LIB;QT_GUI_LIB;QT_CORE_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(ProjectDir)standalone;$(QtRoot)\include;$(QtRoot)\include\QtWidgets;$(QtRoot)\include\QtGui;$(QtRoot)\include\QtCore;$(QtRoot)\include\QtNetwork;..\VideoProcessor-Lib;..\VideoProcessor-ConfigCore;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(VCInstallDir)Tools\MSVC\14.29.30133\atlmfc\include;$(ProjectDir)standalone;$(QtRoot)\include;$(QtRoot)\include\QtWidgets;$(QtRoot)\include\QtGui;$(QtRoot)\include\QtCore;$(QtRoot)\include\QtNetwork;..\VideoProcessor-Lib;..\VideoProcessor-ConfigCore;..\..\3rdparty\libplacebo-beta\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem><GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>$(QtRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(VCInstallDir)Tools\MSVC\14.29.30133\atlmfc\lib\x64;$(QtRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>Qt6Widgetsd.lib;Qt6Guid.lib;Qt6Cored.lib;Qt6Networkd.lib;Ws2_32.lib;shell32.lib;user32.lib;ole32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
@@ -62,11 +62,11 @@
       <LanguageStandard>stdcpp17</LanguageStandard><RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary><FunctionLevelLinking>true</FunctionLevelLinking>
       <AdditionalOptions>/utf-8 /Zc:__cplusplus /bigobj %(AdditionalOptions)</AdditionalOptions>
       <PreprocessorDefinitions>NDEBUG;_WINDOWS;VP_CONFIGFILE_STANDALONE;QT_NO_DEBUG;QT_WIDGETS_LIB;QT_GUI_LIB;QT_CORE_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(ProjectDir)standalone;$(QtRoot)\include;$(QtRoot)\include\QtWidgets;$(QtRoot)\include\QtGui;$(QtRoot)\include\QtCore;$(QtRoot)\include\QtNetwork;..\VideoProcessor-Lib;..\VideoProcessor-ConfigCore;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(VCInstallDir)Tools\MSVC\14.29.30133\atlmfc\include;$(ProjectDir)standalone;$(QtRoot)\include;$(QtRoot)\include\QtWidgets;$(QtRoot)\include\QtGui;$(QtRoot)\include\QtCore;$(QtRoot)\include\QtNetwork;..\VideoProcessor-Lib;..\VideoProcessor-ConfigCore;..\..\3rdparty\libplacebo-beta\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem><GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>$(QtRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(VCInstallDir)Tools\MSVC\14.29.30133\atlmfc\lib\x64;$(QtRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>Qt6Widgets.lib;Qt6Gui.lib;Qt6Core.lib;Qt6Network.lib;Ws2_32.lib;shell32.lib;user32.lib;ole32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
@@ -83,6 +83,12 @@ copy /Y "$(ProjectDir)..\VideoProcessor-ConfigDiscovery\x64\$(Configuration)\Vid
     <ClCompile Include="ConfigEditorWindow.cpp" />
     <ClCompile Include="VpTheme.cpp" />
     <ClCompile Include="..\VP-V\config\VpvSection.cpp" />
+    <ClCompile Include="..\VideoProcessor-ChartCore\ToneCurveModel.cpp">
+      <ObjectFileName>$(IntDir)ToneCurveModel.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\VideoProcessor-ChartCore\ToneCurveRuntime.cpp">
+      <ObjectFileName>$(IntDir)ToneCurveRuntime.obj</ObjectFileName>
+    </ClCompile>
     <ClCompile Include="..\VideoProcessor-ConfigCore\ConfigEditorCore.cpp">
       <ObjectFileName>$(IntDir)ConfigEditorCore.obj</ObjectFileName>
     </ClCompile>
@@ -94,6 +100,10 @@ copy /Y "$(ProjectDir)..\VideoProcessor-ConfigDiscovery\x64\$(Configuration)\Vid
     </ClCompile>
     <ClCompile Include="..\VideoProcessor-Lib\ConfigFile.cpp">
       <ObjectFileName>$(IntDir)ConfigFileStandalone.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\VideoProcessor-Lib\DisplayRefreshRatePolicy.cpp">
+      <ObjectFileName>$(IntDir)DisplayRefreshRatePolicy.obj</ObjectFileName>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\drive\projector_control\SerialPort.cpp">
       <ObjectFileName>$(IntDir)LedSerialPortStandalone.obj</ObjectFileName>
@@ -110,13 +120,27 @@ copy /Y "$(ProjectDir)..\VideoProcessor-ConfigDiscovery\x64\$(Configuration)\Vid
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ToneMappingControl.h" />
+    <ClInclude Include="AdaptiveWorkspace.h" />
+    <ClInclude Include="ToneChartPanel.h" />
+    <ClInclude Include="ToneChartWork.h" />
+    <ClInclude Include="FlowLayout.h" />
+    <ClInclude Include="ToneGuiRules.h" />
+    <ClInclude Include="ToneProfileFile.h" />
     <ClInclude Include="InlineColorPicker.h" />
     <ClInclude Include="UpdatePanel.h" />
     <ClInclude Include="ConfigEditorWindow.h" />
+    <ClInclude Include="ConfigWheelGuard.h" />
+    <ClInclude Include="SettingsNavigationIcons.h" />
     <ClInclude Include="ProfileListController.h" />
     <ClInclude Include="Resource.h" />
     <ClInclude Include="VpTheme.h" />
     <ClInclude Include="..\VideoProcessor-ConfigCore\ConfigEditorCore.h" />
+    <ClInclude Include="..\VideoProcessor-ChartCore\ChartData.h" />
+    <ClInclude Include="..\VideoProcessor-ChartCore\ColourChart.h" />
+    <ClInclude Include="..\VideoProcessor-ChartCore\ToneCurveChart.h" />
+    <ClInclude Include="..\VideoProcessor-ChartCore\ToneCurveProvider.h" />
+    <ClInclude Include="..\VideoProcessor-ChartCore\ToneCurveRuntime.h" />
+    <ClInclude Include="..\VideoProcessor-ChartCore\ToneProfileRequest.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="VideoProcessorConfig.rc" />

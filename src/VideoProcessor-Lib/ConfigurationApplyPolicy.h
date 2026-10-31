@@ -55,7 +55,8 @@ namespace ConfigurationApplyPolicy
 		// viewport, and shader profiles. Keep this list aligned with the profile
 		// families accepted by the configuration model; an unknown section that
 		// happens to contain a key named "shortcut" remains save-only.
-		return HasPrefix(section, "queue") || HasPrefix(section, "lldv") ||
+		return HasPrefix(section, "output_display") ||
+			HasPrefix(section, "queue") || HasPrefix(section, "lldv") ||
 			HasPrefix(section, "vprenderer") || HasPrefix(section, "viewport") ||
 			HasPrefix(section, "shader") || HasPrefix(section, "shaders") ||
 			HasPrefix(section, "profiles.queue") ||
@@ -146,6 +147,7 @@ namespace ConfigurationApplyPolicy
 	{
 		const std::string section = NormalizeSection(rawSection);
 		if (section == "vprenderer.input_processing") return {};
+		if (HasPrefix(section, "output_display")) return "output_display";
 		if (HasPrefix(section, "queue")) return "queue";
 		if (HasPrefix(section, "lldv")) return "lldv";
 		if (HasPrefix(section, "shader.nls")) return "shader.nls";
@@ -196,7 +198,8 @@ namespace ConfigurationApplyPolicy
 				Action::SaveOnly;
 		if (HasPrefix(normalized, "vprenderer.output"))
 			return Action::RestartCapture;
-		if (IsRenderingProfileSection(normalized) ||
+		if (HasPrefix(normalized, "output_display") ||
+			IsRenderingProfileSection(normalized) ||
 			IsViewportProfileSection(normalized) ||
 			IsScalingProfileSection(normalized))
 			return Action::ApplyProfiles;
@@ -235,6 +238,10 @@ namespace ConfigurationApplyPolicy
 			NormalizeSection(change.section) == "command_line") &&
 			NormalizeSection(change.key) == "profile_change_display_seconds")
 			return Action::ApplyInterface;
+        if (NormalizeSection(change.section) == "general" &&
+            (NormalizeSection(change.key) == "present_every_vsync" ||
+             NormalizeSection(change.key) == "presentation_queue_depth"))
+            return directShowRendererActive ? Action::SaveOnly : Action::RestartRenderer;
 		if (IsShortcutAffectingChange(change)) return Action::ReloadShortcuts;
 		if (IsOutputExperimentChange(change)) return Action::RestartCapture;
 		const std::string section = NormalizeSection(change.section);

@@ -9,7 +9,7 @@
 
 // dv_tunnel_gpu_unpack (owner 2026-10-16, docs/audit/dv-extension-ranking-2026-10-16.md
 // item 7): the Dolby Vision RGB tunnel's picture unpacked on the GPU. The CPU
-// formatter (CR210DolbyVisionTunnelFormatter::AnalyzeFrame) still finds and
+// formatter (CRGBDolbyVisionTunnelFormatter::AnalyzeFrame) still finds and
 // CRC-checks the DM packet, reading only the packet's pixels; the raw r210
 // frame is uploaded as it is and one compute pass writes the formatter's two
 // planes exactly (P216: r16 12-bit intensity << 4, rg16 alternating chroma

@@ -8,6 +8,9 @@
 
 #include <pch.h>
 #include <MotionAhead.h>
+#include <OsdTelemetryText.h>
+#include <DisplayMonitorInventory.h>
+#include <DisplayWindowGeometry.h>
 #include "BackendInputConfig.h"
 #include <ApplicationShutdownPolicy.h>
 #include <AnalysisDiagnosticTrace.h>
@@ -17,6 +20,7 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <ModernOperatorLayout.h>
 #include <WindowResizeLayout.h>
 #include <ModernOperatorStatusPolicy.h>
+#include <HdrOsdFormatting.h>
 
 #include <atlstr.h>
 #include <algorithm>
@@ -75,6 +79,7 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <ConfigurationLiveApply.h>
 #include <ConfigurationRpcProtocol.h>
 #include <CaptureVideoStatePolicy.h>
+#include <DolbyVisionTunnelInput.h>
 #include <ActiveProfileStatus.h>
 #include <ActiveOutputSweepPolicy.h>
 #include <EventActionLauncher.h>
@@ -149,6 +154,12 @@ CString FormatHdrLuminance(double value)
 	if (text[text.GetLength() - 1] == _T('.'))
 		text += _T('0');
 	return text;
+}
+
+CString FormatOsdHdr10(double maxCll, double maxFall,
+    double masteringMin, double masteringMax)
+{
+    return HdrOsdFormatting::Hdr10(maxCll, maxFall, masteringMin, masteringMax);
 }
 
 void LogRendererResourceCensus(uint32_t generation, const CString& renderer,
@@ -723,97 +734,6 @@ std::vector<std::string> SplitConfiguredList(const std::string& value)
 	}
 	return items;
 }
-
-struct ActiveMonitorCandidate
-{
-	HMONITOR monitor = nullptr;
-	CString sourceName;
-	CString friendlyName;
-};
-
-BOOL CALLBACK EnumerateActiveMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM parameter)
-{
-	auto* candidates = reinterpret_cast<std::vector<ActiveMonitorCandidate>*>(parameter);
-	MONITORINFOEXW monitorInfo = {};
-	monitorInfo.cbSize = sizeof(monitorInfo);
-	if (!GetMonitorInfoW(monitor, &monitorInfo))
-		return TRUE;
-
-	ActiveMonitorCandidate candidate;
-	candidate.monitor = monitor;
-	candidate.sourceName = monitorInfo.szDevice;
-	candidates->push_back(candidate);
-	return TRUE;
-}
-
-bool PopulateActiveMonitorFriendlyNames(std::vector<ActiveMonitorCandidate>& candidates)
-{
-	std::vector<DISPLAYCONFIG_PATH_INFO> paths;
-	std::vector<DISPLAYCONFIG_MODE_INFO> modes;
-	UINT32 pathCount = 0;
-	UINT32 modeCount = 0;
-	LONG result = ERROR_SUCCESS;
-	do
-	{
-		result = GetDisplayConfigBufferSizes(
-			QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount);
-		if (result != ERROR_SUCCESS)
-			return false;
-		paths.resize(pathCount);
-		modes.resize(modeCount);
-		result = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount,
-			paths.data(), &modeCount, modes.data(), nullptr);
-	} while (result == ERROR_INSUFFICIENT_BUFFER);
-	if (result != ERROR_SUCCESS)
-		return false;
-	paths.resize(pathCount);
-	modes.resize(modeCount);
-
-	for (UINT32 index = 0; index < pathCount; ++index)
-	{
-		const DISPLAYCONFIG_PATH_INFO& path = paths[index];
-		DISPLAYCONFIG_SOURCE_DEVICE_NAME source = {};
-		source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-		source.header.size = sizeof(source);
-		source.header.adapterId = path.sourceInfo.adapterId;
-		source.header.id = path.sourceInfo.id;
-		if (DisplayConfigGetDeviceInfo(&source.header) != ERROR_SUCCESS)
-			return false;
-
-		DISPLAYCONFIG_TARGET_DEVICE_NAME target = {};
-		target.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
-		target.header.size = sizeof(target);
-		target.header.adapterId = path.targetInfo.adapterId;
-		target.header.id = path.targetInfo.id;
-		if (DisplayConfigGetDeviceInfo(&target.header) != ERROR_SUCCESS)
-			return false;
-
-		for (ActiveMonitorCandidate& candidate : candidates)
-			if (_wcsicmp(candidate.sourceName, source.viewGdiDeviceName) == 0)
-			{
-				candidate.friendlyName = target.monitorFriendlyDeviceName;
-				break;
-			}
-	}
-
-	return true;
-}
-
-CString DescribeMonitorCandidates(const std::vector<ActiveMonitorCandidate>& candidates)
-{
-	CString description;
-	for (const ActiveMonitorCandidate& candidate : candidates)
-	{
-		if (!description.IsEmpty())
-			description += L"; ";
-		CString entry;
-		entry.Format(L"%s=%s", candidate.sourceName.GetString(),
-			candidate.friendlyName.IsEmpty() ? L"(unnamed)" : candidate.friendlyName.GetString());
-		description += entry;
-	}
-	return description.IsEmpty() ? CString(L"(none)") : description;
-}
-
 
 HACCEL CreateConfiguredAccelerators(
 	std::map<WORD, CString>& shaderShortcutRules,
@@ -1811,6 +1731,38 @@ private:
 		m_refreshPeriodQpc.store(0, std::memory_order_release);
 	}
 
+	uint64_t InvalidateMeasurementGeneration(
+		uint64_t expectedGeneration, bool& invalidatedCurrentGeneration)
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		invalidatedCurrentGeneration = m_targetGeneration == expectedGeneration;
+		if (invalidatedCurrentGeneration)
+		{
+			++m_targetGeneration;
+			ClearMeasurementLocked();
+		}
+		return m_targetGeneration;
+	}
+
+	void WaitForGenerationChangeOrTimeout(
+		uint64_t generation, std::chrono::milliseconds timeout)
+	{
+		std::unique_lock<std::mutex> lock(m_mutex);
+		m_wake.wait_for(lock, timeout, [this, generation] {
+			return m_targetGeneration != generation;
+		});
+	}
+
+	void InvalidateAndBackoff(uint64_t expectedGeneration)
+	{
+		bool invalidatedCurrentGeneration = false;
+		const uint64_t retryGeneration = InvalidateMeasurementGeneration(
+			expectedGeneration, invalidatedCurrentGeneration);
+		if (invalidatedCurrentGeneration)
+			WaitForGenerationChangeOrTimeout(
+				retryGeneration, std::chrono::milliseconds(100));
+	}
+
 	static bool FindOutput(HMONITOR monitor, ComPtr<IDXGIOutput>& result)
 	{
 		ComPtr<IDXGIFactory1> factory;
@@ -1854,14 +1806,12 @@ private:
 		for (;;)
 		{
 			HMONITOR monitor = nullptr;
-			HWND window = nullptr;
 			double nominalRateHz = 0.0;
 			uint64_t targetGeneration = 0;
 			{
 				std::unique_lock<std::mutex> lock(m_mutex);
 				m_wake.wait(lock, [this] { return m_monitor != nullptr; });
 				monitor = m_monitor;
-				window = m_window;
 				nominalRateHz = m_nominalRateHz;
 				targetGeneration = m_targetGeneration;
 			}
@@ -1876,12 +1826,12 @@ private:
 				continue;
 			}
 
-			// Measure a long set of physical vblank intervals. WaitForVBlank is
-			// tied to the output, but the worker can be descheduled across more
-			// than one vblank at 24 Hz. Compensate for multi-period QPC gaps rather
-			// than assuming every wake-up represents exactly one refresh. DWM's
-			// cRefresh is a compositor wake count and can miss a vblank too, so use
-			// its period only as the initial interval estimate for this sampler.
+			// Estimate the selected output's cadence from successive QPC timestamps
+			// taken after WaitForVBlank returns. These are worker wake observations,
+			// not exact physical-vblank phase timestamps. The worker can be descheduled
+			// across multiple refreshes, so compensate for plausible multi-period gaps.
+			// Seed the interval estimate from the selected target's nominal rate; keep
+			// DWM timing out of this independent output-wake measurement.
 			// The estimator keeps three deliberately distinct evidence products:
 			// a post-transition quarantine, a clean current rate for readiness,
 			// and a longer recency-weighted rate for phase correction.
@@ -1902,33 +1852,36 @@ private:
 			for (;;)
 			{
 				if (output->WaitForVBlank() != S_OK)
+				{
+					InvalidateAndBackoff(targetGeneration);
 					break;
+				}
 
 				LARGE_INTEGER now = {};
 				QueryPerformanceCounter(&now);
-
-				DWM_TIMING_INFO timing = {};
-				timing.cbSize = sizeof(timing);
-				const bool hasDwmTiming = window &&
-					SUCCEEDED(DwmGetCompositionTimingInfo(window, &timing)) &&
-					timing.qpcRefreshPeriod > 0 && timing.qpcVBlank > 0;
-				const int64_t observedVBlankQpc = hasDwmTiming ?
-					static_cast<int64_t>(timing.qpcVBlank) : now.QuadPart;
-				m_lastVBlankQpc.store(observedVBlankQpc, std::memory_order_release);
+				int64_t elapsedSincePreviousQpc = 0;
 				if (samples == 0)
 				{
 					first = now;
 					previous = now;
-					if (hasDwmTiming)
-						estimatedRefreshPeriodQpc =
-							static_cast<long double>(timing.qpcRefreshPeriod);
-					std::lock_guard<std::mutex> lock(m_mutex);
-					if (m_targetGeneration == targetGeneration)
-						m_measurementStartedQpc = first.QuadPart;
 				}
 				else
 				{
-					const int64_t elapsedSincePreviousQpc = now.QuadPart - previous.QuadPart;
+					elapsedSincePreviousQpc = now.QuadPart - previous.QuadPart;
+					const long double targetPeriodQpc = nominalRateHz > 0.0 ?
+						static_cast<long double>(frequency.QuadPart) / nominalRateHz :
+						estimatedRefreshPeriodQpc;
+					const long double maximumGapQpc = std::max(
+						0.5L * frequency.QuadPart, targetPeriodQpc * 8.0L);
+					const int64_t minimumWakeIntervalQpc = std::max<int64_t>(
+						1, frequency.QuadPart / 1000);
+					if (elapsedSincePreviousQpc <= 0 ||
+						elapsedSincePreviousQpc < minimumWakeIntervalQpc ||
+						static_cast<long double>(elapsedSincePreviousQpc) > maximumGapQpc)
+					{
+						InvalidateAndBackoff(targetGeneration);
+						break;
+					}
 					if (estimatedRefreshPeriodQpc <= 0.0L)
 						estimatedRefreshPeriodQpc =
 							static_cast<long double>(elapsedSincePreviousQpc);
@@ -1953,6 +1906,14 @@ private:
 							(observedPeriod - estimatedRefreshPeriodQpc) * weight;
 					}
 					previous = now;
+				}
+				{
+					std::lock_guard<std::mutex> lock(m_mutex);
+					if (m_targetGeneration != targetGeneration)
+						break;
+					m_lastVBlankQpc.store(now.QuadPart, std::memory_order_release);
+					if (samples == 0)
+						m_measurementStartedQpc = first.QuadPart;
 				}
 				last = now;
 				++samples;
@@ -3615,6 +3576,9 @@ bool CVideoProcessorDlg::ApplySavedConfiguration(bool alreadyStaged)
 {
 	if (!alreadyStaged && !StageSavedConfiguration("editor-apply", false))
 		return false;
+    // Preserve explicit intent before publication clears the staging fields.
+    const bool reloadCalibrationLut = m_stagedEditorApply;
+    const auto acceptedAction = m_stagedConfigurationAction;
 	// The target is read when a fullscreen host is created, so publish an
 	// accepted monitor change before any renderer transition. This preserves the
 	// current presentation state while making the next fullscreen entry use the
@@ -3667,6 +3631,10 @@ bool CVideoProcessorDlg::ApplySavedConfiguration(bool alreadyStaged)
 		ClearStagedConfiguration();
 		break;
 	}
+    if (reloadCalibrationLut && m_videoRenderer &&
+        acceptedAction != ConfigurationApplyPolicy::Action::RestartRenderer &&
+        acceptedAction != ConfigurationApplyPolicy::Action::RestartCapture)
+        m_videoRenderer->RequestCalibrationLutReload();
 	return true;
 }
 
@@ -6355,6 +6323,13 @@ void CVideoProcessorDlg::OnBnClickedRendererFullScreenCheck()
 	else
 	{
 		m_fullscreenEntryTransitionPending = false;
+		KillTimer(FULLSCREEN_ACTIVATION_TIMER_ID);
+		m_fullscreenActivation.Cancel();
+	}
+	if (m_rendererFullscreenCheck.GetCheck())
+	{
+		m_fullscreenActivation.Arm(GetTickCount64());
+		ScheduleFullscreenActivation();
 	}
 
 	if (m_fullscreenRetargetPending)
@@ -7075,6 +7050,9 @@ LRESULT CVideoProcessorDlg::OnMessageRendererStateChange(WPARAM wParam, LPARAM l
 	assert(m_rendererState != newRendererState);
 	const RendererState oldRendererState = m_rendererState;
 	m_rendererState = newRendererState;
+	if (newRendererState == RendererState::RENDERSTATE_STOPPED ||
+		newRendererState == RendererState::RENDERSTATE_FAILED)
+		m_osdAcceptedInputColor.Reset();
 
 	switch (newRendererState)
 	{
@@ -10628,6 +10606,8 @@ void CVideoProcessorDlg::CaptureStart()
 	assert(!m_videoRenderer);
 	assert(m_rendererState == RendererState::RENDERSTATE_UNKNOWN);
 
+	m_startupPresentationRevealGate.BeginSession();
+
 	// A new capture session is an initial lifecycle start, never a continuation
 	// of a profile-only replacement from the preceding session.
 	m_postRendererStartRequiresGraph = true;
@@ -10655,6 +10635,16 @@ void CVideoProcessorDlg::CaptureStart()
 		captureRunToken = m_captureVideoStateSourceEpoch;
 	}
 
+    const int captureRendererIndex = m_rendererCombo.GetCurSel();
+    const RendererId* captureRenderer = captureRendererIndex >= 0 ?
+        reinterpret_cast<const RendererId*>(m_rendererCombo.GetItemData(captureRendererIndex)) : nullptr;
+    m_captureDevice->SetNativeP210Capture(captureRenderer &&
+        captureRenderer->backend == RendererBackend::LIBPLACEBO &&
+        m_vpRendererVideoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE);
+    m_captureDevice->SetRawRgbTunnelCapture(captureRenderer &&
+        captureRenderer->backend == RendererBackend::LIBPLACEBO &&
+        (m_profileDolbyVisionTunnelOverride >= 0 ?
+            m_profileDolbyVisionTunnelOverride != 0 : m_enableDolbyVisionTunnel));
 	m_captureDevice->StartCapture(captureRunToken);
 
 	// Update GUI
@@ -10940,6 +10930,15 @@ void CVideoProcessorDlg::RenderStart()
 	m_directShowGraphRecoveryGeneration = rendererGeneration;
 	m_directShowGraphRecoveryEpoch = 0;
 	m_directShowGraphRecoveryStartedTick = 0;
+    // Window DPI awareness is fixed at creation. Recreate only when changing
+    // between VP Renderer and a legacy child renderer, after retirement has
+    // released the old host. Ordinary source/profile restarts retain the HWND.
+    if (m_fullScreenVideoWindow &&
+        m_fullScreenVideoWindow->UsesPhysicalCoordinates() != !m_activeRendererIsDirectShow)
+    {
+        FullScreenVideoWindowDestroy();
+        m_preserveFullscreenHostForProfileRestart = false;
+    }
 	if (m_preserveFullscreenHostForProfileRestart &&
 		m_fullScreenVideoWindow &&
 		IsWindow(m_fullScreenVideoWindow->GetHWND()))
@@ -11001,6 +11000,8 @@ void CVideoProcessorDlg::RenderStart()
 	// exact renderer generation and target instead of popup visibility.
 	m_rendererFirstFrameRevealPendingGeneration = rendererGeneration;
 	m_rendererFirstFrameRevealTargetHwnd = m_rendererTargetHwnd;
+	m_startupPresentationRevealGate.Arm(rendererGeneration);
+	m_startupPresentationRevealReason = StartupPresentation::RevealReason::AlreadyReleased;
 
 	// Get user-selectable options
 	i = m_rendererDirectShowStartStopTimeMethodCombo.GetCurSel();
@@ -11045,6 +11046,7 @@ void CVideoProcessorDlg::RenderStart()
 
 	m_windowedVideoWindow.SetWindowTextW(TEXT("Starting..."));
 	m_rendererState = RendererState::RENDERSTATE_STARTING;
+	m_osdAcceptedInputColor.Reset();
 	// Internal renderers are deliberately listed beside registered renderers,
 	// but do not construct or register a DirectShow graph.
 #if defined(_WIN64)
@@ -11086,7 +11088,7 @@ void CVideoProcessorDlg::RenderStart()
 			ApplyUnifiedProfileSnapshot(profileSnapshot, false);
 
 			if (m_captureDeviceVideoState)
-				m_videoRenderer->OnVideoState(m_builtVideoState);
+				PushRendererVideoState();
 
 			m_videoRenderer->Build();
 			m_videoRenderer->SetQueueFramePolicy(
@@ -11261,7 +11263,7 @@ void CVideoProcessorDlg::RenderStart()
 		ApplyUnifiedProfileSnapshot(profileSnapshot, false);
 
 		if (m_captureDeviceVideoState)
-			m_videoRenderer->OnVideoState(m_builtVideoState);
+			PushRendererVideoState();
 
 		m_videoRenderer->Build();
 		m_videoRenderer->SetQueueFramePolicy(
@@ -11379,7 +11381,7 @@ void CVideoProcessorDlg::RenderStart()
 			}
 
 			if (m_captureDeviceVideoState)
-				m_videoRenderer->OnVideoState(m_builtVideoState);
+				PushRendererVideoState();
 
 			m_videoRenderer->Build();
 			m_videoRenderer->SetQueueFramePolicy(
@@ -11504,6 +11506,7 @@ void CVideoProcessorDlg::RenderStop()
 
 	// Update internal state before call to StartCapture as that might be synchronous
 	m_rendererState = RendererState::RENDERSTATE_STOPPING;
+	m_osdAcceptedInputColor.Reset();
 
 	const std::shared_ptr<RendererIngressState> ingress =
 		m_rendererIngressState;
@@ -11563,6 +11566,7 @@ void CVideoProcessorDlg::RenderRemove()
 void CVideoProcessorDlg::DestroyVideoRenderer()
 {
 	m_shaderLoadingWindow.Hide();
+	m_shaderLoadingPendingTick = 0;
 	m_shaderLoadingPopupShownTick = 0;
 	m_freshRendererProfileConstruction = false;
 	m_freshRendererProfileRendererGeneration = 0;
@@ -12342,6 +12346,30 @@ void CVideoProcessorDlg::TryRevealRendererTransition(uint32_t generation)
 			return;
 		}
 	}
+    // Only the initial renderer-start shield waits for automatic-AR geometry.
+    // Delivery, analysis, graph/queue readiness, and playback clocks keep running.
+    StartupPresentation::RevealInput startupReveal;
+    startupReveal.rendererGeneration = generation;
+    startupReveal.now = GetTickCount64();
+    startupReveal.existingFrameReady = currentFrameReady;
+#if defined(_WIN64)
+    const auto vpStartup = std::dynamic_pointer_cast<LibplaceboPluginVideoRenderer>(m_videoRenderer);
+    if (vpStartup)
+        startupReveal.queryStatus = vpStartup->GetStartupPresentationReadiness(startupReveal.snapshot);
+#endif
+    const auto startupDecision = m_startupPresentationRevealGate.Evaluate(startupReveal);
+    if (startupDecision.reason != m_startupPresentationRevealReason) {
+        m_startupPresentationRevealReason = startupDecision.reason;
+        DebugLog::Log("Renderer startup geometry: generation=%u release=%d reason=%u elapsed_ms=%llu required=%d selected=%llu source_generation=%llu viewport=%llu",
+            generation, startupDecision.release ? 1 : 0, static_cast<unsigned>(startupDecision.reason),
+            static_cast<unsigned long long>(startupDecision.elapsedMs),
+            (startupReveal.snapshot.flags & StartupPresentation::Required) ? 1 : 0,
+            static_cast<unsigned long long>(startupReveal.snapshot.selectedSequence),
+            static_cast<unsigned long long>(startupReveal.snapshot.sourceGeneration),
+            static_cast<unsigned long long>(startupReveal.snapshot.viewportEpoch));
+    }
+    if (!startupDecision.release) return;
+
 	if (coordinatedReset)
 	{
 		if (m_rendererTransitionModel.State() !=
@@ -12402,6 +12430,7 @@ void CVideoProcessorDlg::TryRevealRendererTransition(uint32_t generation)
 			: 0;
 	m_windowedVideoWindow.ShowLogo(false);
 	m_rendererTransitionWindow.Hide();
+	m_startupPresentationRevealGate.MarkRevealed();
 	m_rendererFirstFrameRevealPendingGeneration = 0;
 	m_rendererFirstFrameRevealTargetHwnd = nullptr;
 	HWND configurationEditor = VisibleAssociatedConfigurationEditor();
@@ -12431,6 +12460,15 @@ void CVideoProcessorDlg::TryRevealRendererTransition(uint32_t generation)
 		{
 			m_rendererResetTransitionActive = false;
 		}
+	}
+    // Begin focus retries when the current fullscreen picture actually appears,
+    // including startup that took longer than the retry window.
+	if (m_rendererFullscreenCheck.GetCheck() && m_fullScreenVideoWindow &&
+		m_rendererTargetHwnd == m_fullScreenVideoWindow->GetHWND())
+	{
+		m_fullscreenActivation.OnRevealed(
+			reinterpret_cast<uintptr_t>(m_rendererTargetHwnd), generation, GetTickCount64());
+		ScheduleFullscreenActivation();
 	}
 	DebugLog::Log(
 		"Renderer transition: process=%lu generation=%u event=first-live-frame-reveal "
@@ -12608,6 +12646,7 @@ void CVideoProcessorDlg::RefreshPresentationLayoutAfterSessionToggle(
 
 void CVideoProcessorDlg::FullScreenVideoWindowConstruct()
 {
+    DisplayWindowGeometry::PhysicalCoordinates physicalCoordinates(!m_activeRendererIsDirectShow);
 	assert(!m_fullScreenVideoWindow);
 
 	HMONITOR hmon = SelectFullscreenMonitor();
@@ -12616,9 +12655,9 @@ void CVideoProcessorDlg::FullScreenVideoWindowConstruct()
 	if (!m_fullScreenVideoWindow)
 		FatalError(TEXT("Failed to create full screen renderer window"));
 	if (m_windowedFullScreenMode == false)
-		m_fullScreenVideoWindow->Create(hmon, this->GetSafeHwnd());
+		m_fullScreenVideoWindow->Create(hmon, this->GetSafeHwnd(), !m_activeRendererIsDirectShow);
 	if (m_windowedFullScreenMode == true)
-		m_fullScreenVideoWindow->CreateWindowedFullscreen(hmon, this->GetSafeHwnd());
+		m_fullScreenVideoWindow->CreateWindowedFullscreen(hmon, this->GetSafeHwnd(), !m_activeRendererIsDirectShow);
 
 	const HWND fullscreenHwnd = m_fullScreenVideoWindow->GetHWND();
 	HWND configurationEditor = VisibleAssociatedConfigurationEditor();
@@ -12664,81 +12703,38 @@ void CVideoProcessorDlg::FullScreenVideoWindowConstruct()
 		monitorInfo.rcMonitor.left, monitorInfo.rcMonitor.top,
 		monitorInfo.rcMonitor.right, monitorInfo.rcMonitor.bottom,
 		rectAfter.left, rectAfter.top, rectAfter.right, rectAfter.bottom);
-	// Fullscreen is an explicit VP presentation transition. Activate its native
-	// surface now, while the transition is current, so keyboard shortcuts keep
-	// working immediately after the video expands. The later placement timer is
-	// intentionally passive; it must not steal focus after the operator has
-	// moved to another application.
-	if ((!configurationEditor || !::IsWindowVisible(configurationEditor)) &&
-		fullscreenHwnd && ::IsWindow(fullscreenHwnd))
-	{
-		::ShowWindow(fullscreenHwnd, SW_RESTORE);
-		::BringWindowToTop(fullscreenHwnd);
-		const BOOL activated = ::SetForegroundWindow(fullscreenHwnd);
-		::SetFocus(fullscreenHwnd);
-		DebugLog::Log(
-			"Fullscreen presentation activation: target=%p requested=%d foreground=%p acquired=%d",
-			reinterpret_cast<void*>(fullscreenHwnd), activated ? 1 : 0,
-			reinterpret_cast<void*>(::GetForegroundWindow()),
-			::GetForegroundWindow() == fullscreenHwnd ? 1 : 0);
-	}
-
-	// One normal delayed focus pass gives the renderer and the shell time to
-	// finish fullscreen creation. It corrects placement only; activation above
-	// remains the one user-initiated fullscreen focus handoff.
+    // Arm immediate-on-reveal focus, then one-second retries for ten attempts.
+    // Display-change placement uses a separate timer and cannot restart retries.
+	m_fullscreenActivation.Arm(GetTickCount64());
+	ScheduleFullscreenActivation();
 	SetTimer(FULLSCREEN_FOCUS_TIMER_ID, 5000, nullptr);
 }
 
 HMONITOR CVideoProcessorDlg::SelectFullscreenMonitor()
 {
-	const HMONITOR fallback = MonitorFromWindow(
-		this->GetSafeHwnd(), MONITOR_DEFAULTTONEAREST);
-	if (m_fullscreenMonitorName.IsEmpty())
-		return fallback;
+    const HMONITOR fallback = MonitorFromWindow(GetSafeHwnd(), MONITOR_DEFAULTTONEAREST);
+    if (m_fullscreenMonitorName.IsEmpty()) return fallback;
+    const auto monitors = DisplayMonitorInventory::Enumerate();
+    const auto* selected = DisplayMonitorInventory::Resolve(monitors, m_fullscreenMonitorName.GetString());
+    if (selected) return selected->handle;
+    const ULONGLONG now = GetTickCount64();
+    if (!m_lastFullscreenMonitorSelectionLogTick || now - m_lastFullscreenMonitorSelectionLogTick >= 5000)
+    {
+        m_lastFullscreenMonitorSelectionLogTick = now;
+        DebugLog::Log("Fullscreen monitor unavailable or ambiguous: requested='%S'; keeping fallback placement",
+            m_fullscreenMonitorName.GetString());
+    }
+    return fallback;
+}
 
-	std::vector<ActiveMonitorCandidate> candidates;
-	if (!EnumDisplayMonitors(nullptr, nullptr, EnumerateActiveMonitor,
-		reinterpret_cast<LPARAM>(&candidates)) ||
-		!PopulateActiveMonitorFriendlyNames(candidates))
-	{
-		const ULONGLONG now = GetTickCount64();
-		if (m_lastFullscreenMonitorSelectionLogTick == 0 ||
-			now - m_lastFullscreenMonitorSelectionLogTick >= 5000)
-		{
-			m_lastFullscreenMonitorSelectionLogTick = now;
-			DebugLog::Log(
-				"Fullscreen monitor selection: requested='%S' fallback=existing reason=configured monitor unavailable (active monitor enumeration failed)",
-				m_fullscreenMonitorName.GetString());
-		}
-		return fallback;
-	}
-
-	std::vector<const ActiveMonitorCandidate*> matches;
-	for (const ActiveMonitorCandidate& candidate : candidates)
-		if (!candidate.friendlyName.IsEmpty() &&
-			_wcsicmp(candidate.friendlyName, m_fullscreenMonitorName) == 0)
-			matches.push_back(&candidate);
-
-	const ULONGLONG now = GetTickCount64();
-	if (m_lastFullscreenMonitorSelectionLogTick == 0 ||
-		now - m_lastFullscreenMonitorSelectionLogTick >= 5000)
-	{
-		m_lastFullscreenMonitorSelectionLogTick = now;
-		const CString candidateDescription = DescribeMonitorCandidates(candidates);
-		if (matches.size() == 1)
-			DebugLog::Log(
-				"Fullscreen monitor selection: requested='%S' candidates=[%S] selected=%S (%S)",
-				m_fullscreenMonitorName.GetString(), candidateDescription.GetString(),
-				matches.front()->sourceName.GetString(), matches.front()->friendlyName.GetString());
-		else
-			DebugLog::Log(
-				"Fullscreen monitor selection: requested='%S' candidates=[%S] fallback=existing reason=%s",
-				m_fullscreenMonitorName.GetString(), candidateDescription.GetString(),
-				matches.empty() ? "configured monitor unavailable" :
-				"configured monitor name is ambiguous");
-	}
-
-	return matches.size() == 1 ? matches.front()->monitor : fallback;
+void CVideoProcessorDlg::ScheduleFullscreenActivation()
+{
+	if (!m_fullscreenActivation.Pending())
+		return;
+	const UINT delay = static_cast<UINT>(
+		m_fullscreenActivation.DelayMs(GetTickCount64()));
+	if (!SetTimer(FULLSCREEN_ACTIVATION_TIMER_ID, delay, nullptr))
+		DebugLog::Log("Fullscreen focus retry: event=timer-failed error=%lu", GetLastError());
 }
 
 
@@ -12750,6 +12746,11 @@ void CVideoProcessorDlg::FullScreenVideoWindowDestroy()
 		return;
 	if (m_rendererTargetHwnd == m_fullScreenVideoWindow->GetHWND())
 		m_rendererTargetHwnd = nullptr;
+	if (!m_rendererFullscreenCheck.GetCheck())
+	{
+		KillTimer(FULLSCREEN_ACTIVATION_TIMER_ID);
+		m_fullscreenActivation.Cancel();
+	}
 	delete m_fullScreenVideoWindow;
 	m_fullScreenVideoWindow = nullptr;
 }
@@ -13451,7 +13452,7 @@ DolbyVisionTunnelHandoffEvent CVideoProcessorDlg::ProbeDvTunnelHandoff(const Vid
 		m_dvTunnelHandoffCaptureGeneration = generation;
 		m_dvTunnelHandoffCaptureActive = true;
 	}
-	CR210DolbyVisionTunnelFormatter::RasterView raster;
+	CRGBDolbyVisionTunnelFormatter::RasterView raster;
 	raster.data = frame.GetData();
 	raster.width = static_cast<uint32_t>(state->displayMode->FrameWidth());
 	raster.height = static_cast<uint32_t>(state->displayMode->FrameHeight());
@@ -13549,6 +13550,20 @@ void CVideoProcessorDlg::ApplyHdrInferenceVeto(const HdrInferenceUpdate& update,
 		m_wantToRestartRenderer = true;
 		UpdateState();
 	}
+}
+
+bool CVideoProcessorDlg::PushRendererVideoState()
+{
+    if (!m_videoRenderer || m_rendererState == RendererState::RENDERSTATE_STOPPING)
+    {
+        m_osdAcceptedInputColor.Reset();
+        return false;
+    }
+    VideoStateComPtr submitted = m_builtVideoState;
+    m_osdAcceptedInputColor.Reset();
+    const bool accepted = m_videoRenderer->OnVideoState(submitted);
+    m_osdAcceptedInputColor.Publish(submitted, accepted);
+    return accepted;
 }
 
 bool CVideoProcessorDlg::BuildPushVideoState()
@@ -13865,13 +13880,29 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
 			throw std::runtime_error("Unknown HdrLuminanceOptions");
 	}
 
-	// The opt-in path is limited to R210 carrying an RGB8 Dolby tunnel.
+	// The opt-in path accepts byte-preserving raw RGB8 tunnel layouts.
 	// DeckLink reports the tunnel's wrapper as SDR/Rec.709, so use the
 	// recovered picture's PQ/BT.2020 state for output negotiation.
 	const int rendererIndex = m_rendererCombo.GetCurSel();
 	const RendererId* rendererId = rendererIndex >= 0 ?
 		reinterpret_cast<const RendererId*>(
 			m_rendererCombo.GetItemData(rendererIndex)) : nullptr;
+	if (m_captureDevice) m_captureDevice->SetRawRgbTunnelCapture(enableDolbyVisionTunnel &&
+        rendererId && rendererId->backend == RendererBackend::LIBPLACEBO);
+    const bool nativeP210Allowed = rendererId &&
+        rendererId->backend == RendererBackend::LIBPLACEBO &&
+        m_vpRendererVideoConversionOverride == VideoConversionOverride::VIDEOCONVERSION_NONE;
+    if (m_captureDevice) m_captureDevice->SetNativeP210Capture(nativeP210Allowed);
+    if ((videoState->videoFrameEncoding == VideoFrameEncoding::P210 ||
+        videoState->videoFrameEncoding == VideoFrameEncoding::P010) && !nativeP210Allowed)
+    {
+        // Do not hand the previous consumer's planar layout to a legacy or
+        // forced-P010 renderer while the capture thread negotiates v210.
+        videoState->valid = false;
+        m_builtVideoState = videoState;
+        DebugLog::Log("Native P210 capture: waiting for compatible v210 delivery");
+        return PushRendererVideoState();
+    }
 	// DolbyVisionTunnelGate.h (2026-10-17: the same predicate, shared with the
 	// DV loopback harness and the HDR-mode tests).
 	DolbyVisionTunnelGateInput tunnelGate;
@@ -13882,7 +13913,11 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
 	tunnelGate.encoding = m_captureDeviceVideoState->videoFrameEncoding;
 	tunnelGate.eotf = m_captureDeviceVideoState->eotf;
 	tunnelGate.handedOff = DvTunnelHandedOff();   // DV input fixes 2026-10-18
-	videoState->dolbyVisionTunnel = DolbyVisionTunnelGateOpen(tunnelGate);
+	// (c) rehearsal 2026-10-31: Bill's gate (raw RGB8 layouts) AND VP-V's DV hand-off veto.
+	videoState->dolbyVisionTunnel = DolbyVisionTunnelCanEnable(
+		enableDolbyVisionTunnel,
+		rendererId && rendererId->backend == RendererBackend::LIBPLACEBO,
+		*m_captureDeviceVideoState) && !tunnelGate.handedOff;
 	// The capture thread probes the pictures while the gate would take them.
 	// When probing stops (switch, profile, renderer or an invalid state), a
 	// hand-off ends with it, and a new generation makes the capture thread's
@@ -13904,13 +13939,15 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
 	}
 	if (videoState->dolbyVisionTunnel)
 	{
-		// DolbyVisionTunnelSourceState.h (test/dv-synthetic 2026-10-24: the same rule, shared with
-		// the renderer capture harness).
+		// DolbyVisionTunnelSourceState.h (VP-V extraction of the same source-state rule Bill
+		// has inline; shared with the renderer capture harness).
 		ApplyDolbyVisionTunnelSourceState(*videoState);
-		DebugLog::Log("Dolby Vision RGB tunnel: effective source R210/12-bit 4:2:2 PQ BT.2020");
+		DebugLog::Log("Dolby Vision RGB tunnel: effective source %s/12-bit 4:2:2 PQ BT.2020",
+			CStringA(ToString(videoState->videoFrameEncoding)).GetString());
 	}
 	else if (enableDolbyVisionTunnel && !tunnelGate.handedOff)
-		DebugLog::Log("Dolby Vision RGB tunnel: waiting for R210 SDR capture state");
+		DebugLog::Log("Dolby Vision RGB tunnel: requires VP Renderer and byte-preserving ARGB/BGRA/R210 SDR capture (bytes_preserved=%d)",
+			m_captureDeviceVideoState->rgbTunnelBytesPreserved ? 1 : 0);
 
 	if (m_hdrVetoPreviewing)
 	{
@@ -14109,6 +14146,7 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
 	{
 		DbgLog((LOG_TRACE, 1,
 			TEXT("CVideoProcessorDlg::BuildPushVideoState(): Renderer stopping; state retained for next graph")));
+		m_osdAcceptedInputColor.Reset();
 		logLldvEffectiveState("state-retained-while-stopping");
 		return true;
 	}
@@ -14117,7 +14155,7 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
 	if (m_videoRenderer)
 	{
 		const bool rendererAcceptedState =
-			m_videoRenderer->OnVideoState(m_builtVideoState);
+			PushRendererVideoState();
 		PublishActiveProfileStatus();
 
 		if (!rendererAcceptedState)
@@ -14143,6 +14181,7 @@ bool CVideoProcessorDlg::BuildPushVideoStateCore()
 	{
 		DbgLog((LOG_TRACE, 1,
 			TEXT("CVideoProcessorDlg::BuildPushVideoState(): Renderer unavailable; state retained for next graph")));
+		m_osdAcceptedInputColor.Reset();
 		logLldvEffectiveState("state-retained-renderer-unavailable");
 		return true;
 	}
@@ -14432,8 +14471,13 @@ void CVideoProcessorDlg::ShowProfileOverlayItems(
 	const ULONGLONG now = GetTickCount64();
 	const auto timing = ProfileChangeOverlay::ResolveTiming(
 		m_profileChangeDisplaySeconds);
-	m_profileChangeOverlayHoldUntil = now + timing.holdMilliseconds;
-	m_profileChangeOverlayFadeUntil = now + timing.totalMilliseconds;
+	// Profile changes have their own settling delay, independent of shader
+	// preparation. Explicitly requesting the current profiles stays immediate.
+	constexpr ULONGLONG profileChangeNoticeDelayMs = 250;
+	m_profileChangeOverlayShowAfter = now +
+		(replaceExisting ? 0 : profileChangeNoticeDelayMs);
+	m_profileChangeOverlayHoldUntil = m_profileChangeOverlayShowAfter + timing.holdMilliseconds;
+	m_profileChangeOverlayFadeUntil = m_profileChangeOverlayShowAfter + timing.totalMilliseconds;
 	KillTimer(PROFILE_CHANGE_OVERLAY_TIMER_ID);
 	SetTimer(PROFILE_CHANGE_OVERLAY_TIMER_ID, 50, nullptr);
 	UpdateProfileChangeOverlay(now);
@@ -14444,8 +14488,8 @@ void CVideoProcessorDlg::ShowProfileOverlayItems(
 		summary << items[index].label << '=' << items[index].value;
 	}
 	DebugLog::Log(
-		"Profile overlay shown: reason=%s duration_ms=%llu hold_ms=%llu fade_ms=%llu selections=%s",
-		reason ? reason : "unknown", timing.totalMilliseconds,
+		"Profile overlay scheduled: reason=%s delay_ms=%llu duration_ms=%llu hold_ms=%llu fade_ms=%llu selections=%s",
+		reason ? reason : "unknown", m_profileChangeOverlayShowAfter - now, timing.totalMilliseconds,
 		timing.holdMilliseconds, timing.fadeMilliseconds,
 		summary.str().c_str());
 }
@@ -14495,8 +14539,8 @@ void CVideoProcessorDlg::PublishProfileChangeOverlay(
 
 void CVideoProcessorDlg::UpdateProfileChangeOverlay(ULONGLONG now)
 {
-	if (m_profileChangeOverlayItems.empty() ||
-		now >= m_profileChangeOverlayFadeUntil)
+	if (m_profileShaderStatus.IsEmpty() && (m_profileChangeOverlayItems.empty() ||
+		now >= m_profileChangeOverlayFadeUntil))
 	{
 		ClearProfileChangeOverlay();
 		return;
@@ -14506,7 +14550,7 @@ void CVideoProcessorDlg::UpdateProfileChangeOverlay(ULONGLONG now)
 		return;
 
 	uint8_t opacity = 255;
-	if (now > m_profileChangeOverlayHoldUntil)
+	if (m_profileShaderStatus.IsEmpty() && now > m_profileChangeOverlayHoldUntil)
 	{
 		const ULONGLONG fadeDuration = m_profileChangeOverlayFadeUntil -
 			m_profileChangeOverlayHoldUntil;
@@ -14518,8 +14562,21 @@ void CVideoProcessorDlg::UpdateProfileChangeOverlay(ULONGLONG now)
 	int width = 0;
 	int height = 0;
 	int stride = 0;
+	// Hide pending profile rows, but let the independently timed shader status
+	// render normally in the shared banner.
+	const std::vector<ProfileChangeOverlay::Item> noProfiles;
+	const auto& visibleProfiles = now < m_profileChangeOverlayShowAfter ?
+		noProfiles : m_profileChangeOverlayItems;
+    const auto items = ProfileChangeOverlay::WithShaderStatus(visibleProfiles,
+        m_profileShaderStatus == TEXT("Preparing shaders..."), !m_profileShaderStatus.IsEmpty() &&
+        m_profileShaderStatus != TEXT("Preparing shaders..."));
+	if (items.empty())
+	{
+		m_videoRenderer->SetNativeProfileOverlay(nullptr, 0, 0, 0, 0);
+		return;
+	}
 	if (m_statsOverlay->RenderProfileChangesBgra(
-		m_profileChangeOverlayItems, opacity, pixels, width, height, stride))
+		items, opacity, pixels, width, height, stride, now))
 	{
 		m_videoRenderer->SetNativeProfileOverlay(
 			pixels.data(), pixels.size(), width, height, stride);
@@ -14532,6 +14589,8 @@ void CVideoProcessorDlg::ClearProfileChangeOverlay()
 	if (m_videoRenderer)
 		m_videoRenderer->SetNativeProfileOverlay(nullptr, 0, 0, 0, 0);
 	m_profileChangeOverlayItems.clear();
+    m_profileShaderStatus.Empty();
+	m_profileChangeOverlayShowAfter = 0;
 	m_profileChangeOverlayHoldUntil = 0;
 	m_profileChangeOverlayFadeUntil = 0;
 }
@@ -14544,6 +14603,30 @@ void CVideoProcessorDlg::ApplyUnifiedProfileSnapshot(
 		return;
 	PublishActiveProfileStatus();
 	PublishProfileChangeOverlay(snapshot);
+
+    if (!snapshot->outputDisplayMonitor.empty())
+    {
+        const CString requested(snapshot->outputDisplayMonitor.c_str());
+        if (requested.CompareNoCase(m_fullscreenMonitorName) != 0)
+        {
+            FullscreenMonitorName(requested);
+            DisplayWindowGeometry::PhysicalCoordinates physicalCoordinates(
+                m_fullScreenVideoWindow && m_fullScreenVideoWindow->UsesPhysicalCoordinates());
+            // Use the existing fullscreen window and normal resize coordination.
+            // Config live apply must preserve keyboard focus.
+            const auto monitors = DisplayMonitorInventory::Enumerate();
+            const auto* selected = DisplayMonitorInventory::Resolve(monitors, requested.GetString());
+            if (selected && m_fullScreenVideoWindow && !m_fullscreenRetargetPending)
+            {
+                MONITORINFO info{sizeof(info)};
+                const HWND window = m_fullScreenVideoWindow->GetHWND();
+                if (::IsWindow(window) && GetMonitorInfoW(selected->handle, &info))
+                    ::SetWindowPos(window, nullptr, info.rcMonitor.left, info.rcMonitor.top,
+                        info.rcMonitor.right - info.rcMonitor.left, info.rcMonitor.bottom - info.rcMonitor.top,
+                        SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER);
+            }
+        }
+    }
 
 	// Capture validated shader intent before any renderer-transition or missing-
 	// renderer early return below. Config apply can publish the new profile
@@ -17061,6 +17144,24 @@ void CVideoProcessorDlg::OnDisplayChange(UINT bitsPerPixel, int width, int heigh
 		return;
 	}
 
+    if (m_fullScreenVideoWindow && m_fullScreenVideoWindow->UsesPhysicalCoordinates() &&
+        ::IsWindow(m_fullScreenVideoWindow->GetHWND()))
+    {
+        DisplayWindowGeometry::PhysicalCoordinates physicalCoordinates;
+        MONITORINFO info{sizeof(info)};
+        const HWND window = m_fullScreenVideoWindow->GetHWND();
+        if (GetMonitorInfoW(SelectFullscreenMonitor(), &info))
+        {
+            ::SetWindowPos(window, nullptr, info.rcMonitor.left, info.rcMonitor.top,
+                info.rcMonitor.right - info.rcMonitor.left, info.rcMonitor.bottom - info.rcMonitor.top,
+                SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER);
+            RECT client{};
+            DisplayWindowGeometry::ClientRect(window, &client);
+            DebugLog::Log("Fullscreen display-change physical geometry: monitor=%ldx%ld client=%ldx%ld",
+                info.rcMonitor.right - info.rcMonitor.left, info.rcMonitor.bottom - info.rcMonitor.top,
+                client.right - client.left, client.bottom - client.top);
+        }
+    }
 	if (g_displayRefreshRateSampler)
 		g_displayRefreshRateSampler->ResetMeasurement();
 
@@ -17179,6 +17280,8 @@ void CVideoProcessorDlg::OnClose()
 	if (m_calibration)
 		m_calibration->Shutdown();
 	KillTimer(FULLSCREEN_FOCUS_TIMER_ID);
+	KillTimer(FULLSCREEN_ACTIVATION_TIMER_ID);
+	m_fullscreenActivation.Cancel();
 	if (m_fullscreenRetargetPending)
 		ClearFullscreenRetarget(false);
 	DebugLog::Log(
@@ -17479,34 +17582,40 @@ void CVideoProcessorDlg::OnTimer(UINT_PTR nIDEvent)
 
 	if (nIDEvent == SHADER_RULE_REFRESH_TIMER_ID)
 	{
-		// Use the existing top-level VP status popup while the renderer is
-		// compiling its internal GPU pipeline. A native renderer/profile OSD
-		// cannot paint until that pipeline is ready.
-		constexpr bool showRenderStallOverlay = true;
-		CString renderStallStatus;
-		const bool rendererCanReportStall =
-			m_rendererState == RendererState::RENDERSTATE_STARTING ||
-			m_rendererState == RendererState::RENDERSTATE_READY ||
-			m_rendererState == RendererState::RENDERSTATE_RENDERING;
-		const bool renderStalled =
-			showRenderStallOverlay && rendererCanReportStall &&
-			m_videoRenderer && !m_wantToRestartRenderer &&
-			m_videoRenderer->GetRenderStallStatus(renderStallStatus);
-		if (renderStalled && m_rendererTargetHwnd && GetSafeHwnd())
-		{
-			const bool wasVisible = m_shaderLoadingWindow.IsVisible();
-			const bool shown = m_shaderLoadingWindow.Show(
-				m_rendererTargetHwnd, GetSafeHwnd(), renderStallStatus);
-			if (shown && !wasVisible && m_shaderLoadingWindow.IsVisible())
-				m_shaderLoadingPopupShownTick = GetTickCount64();
-		}
-		else if (m_shaderLoadingWindow.IsVisible() &&
-			(!rendererCanReportStall ||
-			 GetTickCount64() - m_shaderLoadingPopupShownTick >= 300))
-		{
-			m_shaderLoadingWindow.Hide();
-			m_shaderLoadingPopupShownTick = 0;
-		}
+        // Preparation is a column in the same profile banner, never a competing popup.
+        CString status;
+        const bool canReport = m_videoRenderer && !m_wantToRestartRenderer &&
+            (m_rendererState == RendererState::RENDERSTATE_STARTING ||
+             m_rendererState == RendererState::RENDERSTATE_READY ||
+             m_rendererState == RendererState::RENDERSTATE_RENDERING);
+        if (canReport) m_videoRenderer->GetRenderStallStatus(status);
+        // Delay the shared status notice, never shader preparation itself.
+        // Keep timing across preparation phases, and reset when work finishes.
+        constexpr ULONGLONG preparationNoticeDelayMs = 750;
+        const ULONGLONG now = GetTickCount64();
+        if (status.IsEmpty())
+            m_shaderLoadingPendingTick = 0;
+        else {
+            if (m_shaderLoadingPendingTick == 0)
+                m_shaderLoadingPendingTick = now;
+            if (now - m_shaderLoadingPendingTick < preparationNoticeDelayMs)
+                status.Empty();
+        }
+        if (status != m_profileShaderStatus) {
+            const bool finished = !m_profileShaderStatus.IsEmpty() && status.IsEmpty();
+            m_profileShaderStatus = status;
+
+            if (finished && !m_profileChangeOverlayItems.empty()) {
+                const auto timing = ProfileChangeOverlay::ResolveTiming(m_profileChangeDisplaySeconds);
+                const ULONGLONG visibleFrom = std::max(now, m_profileChangeOverlayShowAfter);
+                m_profileChangeOverlayHoldUntil = visibleFrom + timing.holdMilliseconds;
+                m_profileChangeOverlayFadeUntil = visibleFrom + timing.totalMilliseconds;
+            }
+            if (!status.IsEmpty()) SetTimer(PROFILE_CHANGE_OVERLAY_TIMER_ID, 50, nullptr);
+            UpdateProfileChangeOverlay(now);
+        }
+        m_shaderLoadingWindow.Hide();
+
 
 		// Bug hunt 2 (2026-10-17, M6): the content class switches at a cut;
 		// consume that published change here (a cheap status read) instead of
@@ -17584,11 +17693,90 @@ void CVideoProcessorDlg::OnTimer(UINT_PTR nIDEvent)
 		return;
 	}
 	
-	// Correct fullscreen placement after the shell/display settles. The direct
-	// fullscreen transition already activated the presentation target; this
-	// host-only timer must never take keyboard focus later.
+	if (nIDEvent == FULLSCREEN_ACTIVATION_TIMER_ID)
+	{
+		KillTimer(FULLSCREEN_ACTIVATION_TIMER_ID);
+		const HWND target = m_fullScreenVideoWindow ?
+			m_fullScreenVideoWindow->GetHWND() : nullptr;
+		const uint32_t generation = m_rendererGeneration.load();
+		const bool ready = target && ::IsWindow(target) &&
+			m_rendererTargetHwnd == target && m_videoRenderer &&
+			m_rendererState == RendererState::RENDERSTATE_RENDERING &&
+			m_videoRenderer->HasPresentedLiveFrame() &&
+			!m_fullscreenRetargetPending && !m_rendererRetirementPending &&
+			!m_wantToRestartRenderer && !m_rendererResetTransitionActive &&
+			!m_rendererFirstFrameRevealPendingGeneration &&
+			!m_rendererTransitionWindow.IsVisible();
+		const auto decision = m_fullscreenActivation.Evaluate(GetTickCount64(),
+			m_rendererFullscreenCheck.GetCheck() != FALSE, m_wantToTerminate,
+			reinterpret_cast<uintptr_t>(target), generation, ready);
+        if (decision == FullscreenActivation::Decision::WaitDelay ||
+            decision == FullscreenActivation::Decision::WaitReady)
+            ScheduleFullscreenActivation();
+		if (decision == FullscreenActivation::Decision::WaitReady)
+		{
+			// Poll readiness at the retry interval; never target a stale host.
+			DebugLog::Log(
+				"Fullscreen focus retry: event=await-reveal target=%p generation=%u "
+				"ready=%d retarget=%d shield=%d reveal_pending=%u",
+				target, generation, ready ? 1 : 0, m_fullscreenRetargetPending ? 1 : 0,
+				m_rendererTransitionWindow.IsVisible() ? 1 : 0,
+				m_rendererFirstFrameRevealPendingGeneration);
+		}
+		if (decision != FullscreenActivation::Decision::Activate)
+			return;
+		const HWND foregroundBefore = ::GetForegroundWindow();
+		DWORD foregroundProcess = 0;
+		::GetWindowThreadProcessId(foregroundBefore, &foregroundProcess);
+		::ShowWindow(target, SW_RESTORE);
+		::BringWindowToTop(target);
+        BOOL activated = ::SetForegroundWindow(target);
+        UINT unlockInputs = 0;
+        if (!activated && ::GetForegroundWindow() != target)
+        {
+            // Windows unlocks foreground activation on ALT input. A background
+            // launch (e.g. Explorer retaining foreground) can otherwise deny all
+            // ten retries. Keep this fallback inside the bounded entry session,
+            // and never combine it with modifiers the user is currently holding.
+            bool modifierHeld = false;
+            for (const int key : {VK_MENU, VK_CONTROL, VK_SHIFT, VK_LWIN, VK_RWIN})
+                modifierHeld = modifierHeld || (::GetAsyncKeyState(key) & 0x8000) != 0;
+            if (!modifierHeld)
+            {
+                INPUT input[2] = {};
+                input[0].type = input[1].type = INPUT_KEYBOARD;
+                input[0].ki.wVk = input[1].ki.wVk = VK_MENU;
+                input[1].ki.dwFlags = KEYEVENTF_KEYUP;
+                unlockInputs = ::SendInput(2, input, sizeof(INPUT));
+                if (unlockInputs == 1)
+                    ::SendInput(1, &input[1], sizeof(INPUT));
+                if (unlockInputs == 2)
+                    activated = ::SetForegroundWindow(target);
+            }
+        }
+        ::SetActiveWindow(target);
+		::SetFocus(target);
+		const HWND foregroundAfter = ::GetForegroundWindow();
+        const uint64_t attemptTick = GetTickCount64();
+		DebugLog::Log(
+			"Fullscreen focus retry: event=attempt target=%p generation=%u "
+			"requested=%d foreground_before=%p foreground_process=%lu "
+			"foreground=%p acquired=%d focus=%p unlock_inputs=%u attempt=%u max_attempts=%u remaining_ms=%llu",
+			target, generation, activated ? 1 : 0, foregroundBefore, foregroundProcess,
+			foregroundAfter, foregroundAfter == target ? 1 : 0, ::GetFocus(),
+            unlockInputs, m_fullscreenActivation.Attempts(), FullscreenActivation::MaximumAttempts,
+            static_cast<unsigned long long>(attemptTick < m_fullscreenActivation.Deadline()
+                ? m_fullscreenActivation.Deadline() - attemptTick : 0));
+        ScheduleFullscreenActivation();
+		return;
+	}
+
+	// Correct fullscreen placement after the shell/display settles. This
+	// display-change timer never takes keyboard focus.
 	if (nIDEvent == FULLSCREEN_FOCUS_TIMER_ID)
 	{
+        DisplayWindowGeometry::PhysicalCoordinates physicalCoordinates(
+            m_fullScreenVideoWindow && m_fullScreenVideoWindow->UsesPhysicalCoordinates());
 		KillTimer(FULLSCREEN_FOCUS_TIMER_ID);
 		HWND configurationEditor = VisibleAssociatedConfigurationEditor();
 		if (!configurationEditor)
@@ -17961,13 +18149,13 @@ void CVideoProcessorDlg::PollAspectRatioOsd()
 	DetectedPictureAspect detected;
 	if (!m_videoRenderer->GetDetectedPictureAspect(detected))
 		return;
-	const auto& label = m_aspectRatioOsd.Update(detected, GetTickCount64());
-	if (m_lastStatsData->aspectRatio == label.ratio.c_str() &&
-		m_lastStatsData->aspectName == label.name.c_str())
+	const auto label = m_aspectRatioOsd.Update(detected);
+	if (m_lastStatsData->aspectInUse == label.inUse.c_str() &&
+		m_lastStatsData->aspectDetected == label.detected.c_str())
 		return;
 
-	m_lastStatsData->aspectRatio = label.ratio.c_str();
-	m_lastStatsData->aspectName = label.name.c_str();
+	m_lastStatsData->aspectInUse = label.inUse.c_str();
+	m_lastStatsData->aspectDetected = label.detected.c_str();
 	m_statsOverlay->UpdateStats(*m_lastStatsData);
 	std::vector<uint8_t> pixels;
 	int width = 0;
@@ -18846,7 +19034,6 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 	{
 		m_processCpuUsage.Reset();
 		m_cadenceIntervalEstimate.Reset();
-		m_aspectRatioOsd.Reset();
 		m_cpuUsageRenderer = statsRenderer;
 		m_cpuUsageRendererGeneration = m_transitionGeneration;
 		m_loggedCpuPeakPercent = 0.0;
@@ -18942,6 +19129,8 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 	const bool sameStatsTelemetryGeneration = statsRenderer != nullptr &&
 		statsRenderer == m_lastStatsTelemetryRenderer &&
 		m_transitionGeneration == m_lastStatsTelemetryGeneration;
+	if (!sameStatsTelemetryGeneration)
+		m_aspectRatioOsd.Reset();
 
 	// Video format info
 	if (m_captureDeviceVideoState && m_captureDeviceVideoState->valid)
@@ -18975,14 +19164,46 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 		stats.sceneTimingElapsedSeconds = sceneTimingElapsedSeconds;
 		stats.sceneTimingReady = sceneTimingReady;
 
-		// EOTF
-		stats.eotf = ToString(m_captureDeviceVideoState->eotf);
+		// Candidates retained for a replacement graph are not the live input.
+		// During a rejected update or teardown keep the wire observation explicit
+		// while marking effective renderer color information unavailable.
+		const auto inputColor = m_osdAcceptedInputColor.Describe(
+			m_captureDeviceVideoState,
+			m_videoRenderer && m_rendererState == RendererState::RENDERSTATE_RENDERING);
+		stats.eotf = inputColor.eotf.c_str();
+		stats.colorspace = inputColor.colorspace.c_str();
 
-		// Colorspace
-		stats.colorspace = ToString(m_captureDeviceVideoState->colorspace);
+        // Older plugins lack the optional per-frame HDR export. Their fallback
+        // must come from the same accepted input as EOTF/colorspace, never a
+        // pending/rejected candidate renderer configuration.
+        const HDRData* acceptedHdr = m_osdAcceptedInputColor.Hdr(
+            m_videoRenderer && m_rendererState == RendererState::RENDERSTATE_RENDERING);
+        if (acceptedHdr)
+            stats.hdr10 = FormatOsdHdr10(acceptedHdr->maxCll, acceptedHdr->maxFall,
+                acceptedHdr->masteringDisplayMinLuminance,
+                acceptedHdr->masteringDisplayMaxLuminance);
 
 		// Pixel Format
 		stats.pixelFormat = ToString(m_captureDeviceVideoState->videoFrameEncoding);
+	}
+
+	// Active Rendering / DTM profile ("display" group, [vprenderer.<name>]),
+	// shown by its configured label when it has one, as the profile overlay does.
+	if (const auto snapshot = m_profileRuntime.GetSnapshot())
+	{
+		const auto display = snapshot->effectiveSelections.find("display");
+		if (display != snapshot->effectiveSelections.end() &&
+			!display->second.empty())
+		{
+			std::string name = RendererProfileConfig::FormatSelection(display->second);
+			std::string label;
+			if (snapshot->configuration &&
+				snapshot->configuration->TryGetString(
+					"vprenderer." + name, "label", label) &&
+				!ConfigFile::Trim(label).empty())
+				name = ConfigFile::Trim(label);
+			stats.dtmProfile = CString(name.c_str());
+		}
 	}
 
 	// Renderer settings and capture metrics
@@ -19057,15 +19278,15 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 			DetectedPictureAspect detected;
 			if (m_videoRenderer->GetDetectedPictureAspect(detected))
 			{
-				const auto& label = m_aspectRatioOsd.Update(detected, GetTickCount64());
-				stats.aspectRatio = label.ratio.c_str();
-				stats.aspectName = label.name.c_str();
+				const auto label = m_aspectRatioOsd.Update(detected);
+				stats.aspectInUse = label.inUse.c_str();
+				stats.aspectDetected = label.detected.c_str();
 			}
 			else if (sameStatsTelemetryGeneration && m_lastStatsData)
 			{
 				// A busy render lock cannot blank the last displayed label.
-				stats.aspectRatio = m_lastStatsData->aspectRatio;
-				stats.aspectName = m_lastStatsData->aspectName;
+				stats.aspectInUse = m_lastStatsData->aspectInUse;
+				stats.aspectDetected = m_lastStatsData->aspectDetected;
 			}
 		}
 		stats.rawQueueSize = m_videoRenderer->GetFrameQueueSize();
@@ -19106,10 +19327,23 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 			m_videoRenderer->GetPresentationTimingStatus(
 				stats.presentationTimingStatus);
 		}
+		// HDR10 and Measured from the frame libplacebo last tone mapped. A
+		// frame with Dolby Vision metadata has no CLL/FALL; its scene values
+		// (L1) are appended to libplacebo's own detection, which may still
+		// run beside them.
+		RendererHdrStatus hdrStatus;
+		const auto* libplaceboRenderer =
+			dynamic_cast<const LibplaceboPluginVideoRenderer*>(m_videoRenderer.get());
+		if (libplaceboRenderer && libplaceboRenderer->GetHdrStatus(hdrStatus))
+		{
+            stats.hdr10 = HdrOsdFormatting::Static(hdrStatus);
+            stats.measuredHdr = HdrOsdFormatting::Measured(hdrStatus);
+		}
 		RendererRenderLoad renderLoad;
 		if (m_videoRenderer->GetRenderLoad(renderLoad))
 		{
 			stats.renderLoadKnown = true;
+            stats.processingPerformance = renderLoad.processing;
 			stats.renderLoadGpuValid = renderLoad.gpuValid;
 			stats.renderLoadSettling = renderLoad.settling;
 			stats.renderLoadFrames = renderLoad.frames;
@@ -19153,16 +19387,7 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 				m_processCpuUsage.WindowPeakPercent();
 		}
 		stats.queueDroppedFrames = m_videoRenderer->DroppedFrameCount();
-		if (!m_videoRenderer->GetOutputModeInfo(stats.outputMode) &&
-			sameStatsTelemetryGeneration)
-		{
-			stats.outputMode = m_lastStatsData->outputMode;
-		}
-		if (!m_videoRenderer->GetDisplayLutInfo(stats.displayLut) &&
-			sameStatsTelemetryGeneration)
-		{
-			stats.displayLut = m_lastStatsData->displayLut;
-		}
+
 		stats.sceneDetectCorrectionDrops = m_videoRenderer->SceneAwareCorrectionDropCount();
 		stats.sceneDetectCorrectionRepeats = m_videoRenderer->SceneAwareCorrectionRepeatCount();
 		stats.sceneDetectDetected = m_videoRenderer->SceneAwareDetectedCount();
@@ -19192,11 +19417,17 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 			vpDialogLines(), stats.isAlphaRenderer);
 		stats.activeShaders = m_videoRenderer->ActiveShaders();
 	}
-	// A graph reset can briefly make the renderer non-rendering while the same
-	// renderer and host generation still own the output contract. Do not let
-	// that diagnostics-only interval erase the last negotiated OSD value.
-	if (stats.outputMode.IsEmpty() && sameStatsTelemetryGeneration)
-		stats.outputMode = m_lastStatsData->outputMode;
+	// These getters read renderer-owned cached telemetry even while a graph
+	// temporarily stops rendering. A handled empty result is authoritative
+	// invalidation; only unsupported getters may use same-generation fallback.
+	const bool outputHandled = m_videoRenderer &&
+		m_videoRenderer->GetOutputModeInfo(stats.outputMode);
+	const bool lutHandled = m_videoRenderer &&
+		m_videoRenderer->GetDisplayLutInfo(stats.displayLut);
+	OsdTelemetryText::ApplyFallback(stats.outputMode, outputHandled,
+		sameStatsTelemetryGeneration, m_lastStatsData ? &m_lastStatsData->outputMode : nullptr);
+	OsdTelemetryText::ApplyFallback(stats.displayLut, lutHandled,
+		sameStatsTelemetryGeneration, m_lastStatsData ? &m_lastStatsData->displayLut : nullptr);
 
 	// Capture device frame counts
 	if (m_captureDeviceState == CaptureDeviceState::CAPTUREDEVICESTATE_CAPTURING && m_captureDevice)
@@ -19210,6 +19441,7 @@ void CVideoProcessorDlg::UpdateStatsOverlay()
 			? totalCapturedFrames - m_rendererStartCapturedFrameCount
 			: 0;
 		stats.capturedDroppedFrames = m_captureDevice->VideoFrameMissedCount();
+        stats.captureDeliverySupported = m_captureDevice->GetCaptureDeliveryStats(stats.captureDelivery);
 	}
 
 	// Video conversion

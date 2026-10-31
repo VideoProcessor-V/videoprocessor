@@ -111,6 +111,7 @@ void SubtitleBoxDetector::Reset()
     m_generation = m_viewport = m_sequence = 0;
     m_width = m_height = m_top = m_bottom = m_misses = 0;
     m_hasSequence = m_workLimit = false;
+    m_topSearchComplete=m_bottomSearchComplete=false;
 }
 
 bool SubtitleBoxDetector::Detect(const AnalysisLumaSource& source, int pictureTop,
@@ -120,8 +121,12 @@ bool SubtitleBoxDetector::Detect(const AnalysisLumaSource& source, int pictureTo
     // Inspect every source frame. Spatial sampling bounds cost without an idle
     // frame cadence that could postpone subtitle onset. Full line search remains
     // active throughout a cue, so an initially missed companion can be recovered.
+    m_topSearchComplete=m_bottomSearchComplete=false;
     m_diagnosticReason="no-backed-anchor";m_diagnosticComponentCount=0;
     m_diagnosticNearBarGap=-1;m_diagnosticNearBarGapInferred=false;
+    m_diagnosticPictureGlyphProofRequired=false;m_diagnosticCoreGlyphCount=0;
+    m_diagnosticCoreGlyphHeight=0;m_diagnosticInkDensityBasisPoints=0;
+    m_diagnosticBaselineSupportBasisPoints=0;m_diagnosticGlyphTopology="not-required";
     m_nearBarEligibilityMeasured=false;m_nearBarEligible=false;
     m_currentBarAnchor = {};
     m_currentSourcePanel = {}; m_currentProvenSourcePanel = {}; m_currentLinePanels = {}; m_currentCapturePanel = {}; m_currentLineCapturePanels = {};
@@ -198,6 +203,10 @@ bool SubtitleBoxDetector::Detect(const AnalysisLumaSource& source, int pictureTo
         }
     }
     if(share)for(int y=0;y<h;++y)if(y<topEnd || y>=bottomStart)m_sampledRows[y]=1;
+    // The raw luma/chroma loop above sampled every row in each configured
+    // edge band. Publish completion only for sides that physically exist.
+    m_topSearchComplete=pictureTop>0;
+    m_bottomSearchComplete=pictureBottom<source.height;
     if(!barSamples) return false;
     uint32_t cumulative=0; int bar=0;
     for(;bar<1023;++bar) { cumulative+=barHistogram[bar]; if(cumulative>=barSamples/2) break; }
@@ -2055,6 +2064,8 @@ bool SubtitleBoxDetector::Detect(const AnalysisLumaSource& source, int pictureTo
     // Keep row seeds immutable until every row has finished recovery.
     std::vector<uint8_t> recoveredOwners(area,0);
     std::array<bool,3> recoveredRows{};
+    std::array<bool,3> strongRecoveredRows{};
+    std::array<SubtitleBoxRect,3> certifiedTerminalCapture{};
     size_t nativeSamples=0;
     constexpr size_t NativeSampleLimit=65536;
     // Finish ordinary recovery for every row first. Strong recovery consumes
@@ -2207,6 +2218,80 @@ bool SubtitleBoxDetector::Detect(const AnalysisLumaSource& source, int pictureTo
             // The extra pass authorizes only detached, strongly proved ink.
             // Its wider search must not enlarge the legacy attached path or
             // fall back to ordinary punctuation rules on ambiguous evidence.
+            // A native component that extends one terminal edge of a measured
+            // line can be part of its last glyph. The ordinary attached path
+            // includes its bounds, but not its sampled pixels in ownedInk.
+            // Require independent finite glyph shape, palette, backing and
+            // unambiguous line ownership before publishing those pixels.
+            const bool extendsLeft=component.left<seed.left && component.right>seed.left &&
+                component.right<=seed.right;
+            const bool extendsRight=component.right>seed.right && component.left<seed.right &&
+                component.left>=seed.left;
+            const int terminalExtension=extendsLeft ? seed.left-component.left :
+                extendsRight ? component.right-seed.right : 0;
+            const bool terminalInMeasuredBar =
+                (seed.bottom<=pictureTop && component.bottom<=pictureTop) ||
+                (seed.top>=pictureBottom && component.top>=pictureBottom);
+            bool terminalAttachedGlyph=!strongSearch && attached && terminalInMeasuredBar &&
+                (extendsLeft!=extendsRight) && terminalExtension>0 &&
+                terminalExtension<=(std::max)(2*step,seedHeight/4) &&
+                component.top>=seed.top && component.bottom<=seed.bottom &&
+                cw<=seedHeight && ch<=seedHeight && rowOverlap>=ch/2 &&
+                m_flood.size()>=size_t((std::max)(3,ch/2)) &&
+                m_flood.size()*100>=size_t(cw)*ch*2 &&
+                m_flood.size()*100<=size_t(cw)*ch*75;
+            unsigned ringSamples=0,ringBlack=0,matchingColor=0;
+            if(terminalAttachedGlyph) {
+                for(int index:m_flood) {
+                    const auto& value=m_nativeCardSamples[index];
+                    matchingColor+=std::abs(int(value.chromaU)-inkU)<=32 &&
+                        std::abs(int(value.chromaV)-inkV)<=32;
+                    const int sx=roi.left+index%rw,sy=roi.top+index/rw;
+                    if(sx%step)continue;
+                    const auto row=std::lower_bound(evidence.sourceRows.begin(),evidence.sourceRows.end(),sy);
+                    if(row==evidence.sourceRows.end() || *row!=sy)continue;
+                    const size_t pixel=size_t(row-evidence.sourceRows.begin())*w+sx/step;
+                    const auto label=m_labels[pixel];
+                    if(recoveredOwners[pixel] && recoveredOwners[pixel]!=selected+1) {
+                        terminalAttachedGlyph=false;
+                    }
+                    // Provisional component groups are not accepted caption
+                    // rows. Refuse a mark owned by another accepted row, while
+                    // allowing this independently certified terminal glyph to
+                    // join the sole selected line.
+                    for(int other=0;other<lineCount;++other)if(other!=selected &&
+                        label && componentOwners[label]==lineIndices[other]+1)
+                        terminalAttachedGlyph=false;
+                }
+                terminalAttachedGlyph=terminalAttachedGlyph &&
+                    matchingColor*100>=m_flood.size()*90;
+                constexpr int halo=2;
+                for(int yy=component.top-halo;yy<component.bottom+halo && terminalAttachedGlyph;++yy)
+                    for(int xx=component.left-halo;xx<component.right+halo;++xx) {
+                        if(xx>component.left-halo && xx<component.right+halo-1 &&
+                            yy>component.top-halo && yy<component.bottom+halo-1)continue;
+                        const int index=read(xx,yy);
+                        if(index<0){terminalAttachedGlyph=false;break;}
+                        ++ringSamples;ringBlack+=m_nativeCardSamples[index].luma<=componentCardLimit;
+                    }
+                terminalAttachedGlyph=terminalAttachedGlyph && ringSamples &&
+                    ringBlack*100>=ringSamples*85;
+                // A terminal mark must belong uniquely to this measured line.
+                for(int other=0;other<lineCount && terminalAttachedGlyph;++other)if(other!=selected) {
+                    const auto& row=lineBoxes[other];
+                    const int overlap=(std::min)(component.bottom,row.bottom*step)-
+                        (std::max)(component.top,row.top*step);
+                    const int otherHorizontalGap=(std::max)({0,row.left*step-component.right,
+                        component.left-row.right*step});
+                    const int otherVerticalGap=(std::max)({0,row.top*step-component.bottom,
+                        component.top-row.bottom*step});
+                    const int distance=verticalGap*2+horizontalGap;
+                    const int otherDistance=otherVerticalGap*2+otherHorizontalGap;
+                    if(otherDistance<=distance+(std::max)(2,step) ||
+                        (overlap>0 && overlap*3>=(std::min)(ch,Height(row)*step)))
+                        terminalAttachedGlyph=false;
+                }
+            }
             if(strongSearch && !strongGlyph)return;
             // Standalone marks need surrounding black and a bounded footprint.
             // Strong local evidence may override the usual 1.5x height / 2x
@@ -2228,8 +2313,12 @@ bool SubtitleBoxDetector::Detect(const AnalysisLumaSource& source, int pictureTo
                 if(!count || black*100<count*85)return;
             }
             nativeCapture[selected]=Union(nativeCapture[selected],component);
-            if(strongGlyph) {
+            if(strongGlyph || terminalAttachedGlyph) {
                 recoveredRows[selected]=true;
+                if(strongGlyph) strongRecoveredRows[selected]=true;
+                if(terminalAttachedGlyph) certifiedTerminalCapture[selected]=
+                    certifiedTerminalCapture[selected].Valid() ?
+                    Union(certifiedTerminalCapture[selected],component) : component;
                 // Earlier shape filtering may have cleared these grid pixels.
                 // Restore only actual native ink, never a rectangular fill.
                 for(int index:m_flood) {
@@ -2267,10 +2356,143 @@ bool SubtitleBoxDetector::Detect(const AnalysisLumaSource& source, int pictureTo
     // bounds as well as native capture. Otherwise a later mask can clip a
     // component that this pass has already accepted.
     for(int i=0;i<lineCount;++i)if(recoveredRows[i]) {
-        const auto& r=nativeCapture[i];
+        // Terminal ownership certifies its own sampled component, not every
+        // ordinary attached fragment accumulated while exploring this row.
+        // Keep the legacy strong-card extent when that independent route won.
+        const auto& r=strongRecoveredRows[i] ? nativeCapture[i] : certifiedTerminalCapture[i];
         lineBoxes[i]=Union(lineBoxes[i],{r.left/step,r.top/step,
             (r.right+step-1)/step,(r.bottom+step-1)/step});
         box=Union(box,lineBoxes[i]);
+    }
+    // A dark scene can join a picture-side candidate to the physical bar.
+    // That is backing, not a finite card edge or a glyph-row certificate.
+    // In this one ambiguous acquisition path, measure scale from the original
+    // accepted components rather than the growing line union: sparse stars
+    // can otherwise chain vertically and teach themselves a very large font.
+    bool selectedHasPhysicalBarInk=false;
+    for(const auto& component:m_components) {
+        if(!component.actualBarInk)continue;
+        for(int selected=0;selected<lineCount;++selected)
+            if(componentOwners[component.label]==lineIndices[selected]+1)
+                selectedHasPhysicalBarInk=true;
+    }
+    const bool anchorWhollyInPicture=a.box.top*step>=pictureTop &&
+        a.box.bottom*step<=pictureBottom && !selectedHasPhysicalBarInk;
+    m_diagnosticPictureGlyphProofRequired=anchorWhollyInPicture &&
+        !m_currentProvenSourcePanel.Valid();
+    if(m_diagnosticPictureGlyphProofRequired) {
+        const auto& row=a.box;
+        const unsigned rowArea=unsigned(Width(row))*unsigned(Height(row));
+        unsigned acceptedInk=0;
+        std::vector<const Line*> accepted,cores;
+        for(const auto& component:m_components) {
+            if(componentOwners[component.label]!=anchor+1 || !component.hasTextCore)continue;
+            accepted.push_back(&component);acceptedInk+=unsigned(component.ink);
+            const int cw=Width(component.box),ch=Height(component.box);
+            const unsigned area=unsigned(cw)*unsigned(ch);
+            // The same finite-stroke density range used by native glyph
+            // recovery rejects filled highlights, while keeping hollow letters
+            // and a single connected Arabic word. Marks remain attached but
+            // cannot establish the body scale on their own.
+            if(ch>=minimumHeight && component.ink>=(std::max)(6,ch) &&
+                cw<=ch*JoinedWordMaxGlyphHeights &&
+                unsigned(component.ink)*100>=area*2 &&
+                unsigned(component.ink)*100<=area*85)
+                cores.push_back(&component);
+        }
+        m_diagnosticInkDensityBasisPoints=rowArea ? unsigned(uint64_t(acceptedInk)*10000/rowArea) : 0;
+        auto rejectGlyphRow=[&](const char* topology) {
+            m_diagnosticGlyphTopology=topology;
+            m_diagnosticReason="picture-glyph-row-rejected";
+            return false;
+        };
+        // An ellipsis or another short compact punctuation cluster has no
+        // letter body. Preserve it only as a small, consistently sized row;
+        // staggered points and tall star flares cannot use this exception.
+        bool compactPunctuation=accepted.size()>=2 && accepted.size()<=6;
+        int compactHeight=0,compactMinimumHeight=(std::numeric_limits<int>::max)();
+        int compactFirstBottom=(std::numeric_limits<int>::max)(),compactLastBottom=0;
+        for(const auto* component:accepted) {
+            const int cw=Width(component->box),ch=Height(component->box);
+            compactPunctuation &= component->ink>=3 && ch>=2 &&
+                ch<=minimumHeight*2 && cw<=ch*2 && cw*2>=ch;
+            compactHeight=(std::max)(compactHeight,ch);
+            compactMinimumHeight=(std::min)(compactMinimumHeight,ch);
+            compactFirstBottom=(std::min)(compactFirstBottom,component->box.bottom);
+            compactLastBottom=(std::max)(compactLastBottom,component->box.bottom);
+        }
+        compactPunctuation &= compactHeight>0 && compactHeight<=compactMinimumHeight*2 &&
+            Width(row)<=compactHeight*12 && Height(row)<=compactHeight*3/2+1 &&
+            compactLastBottom-compactFirstBottom<=(std::max)(1,compactHeight/3);
+        if(compactPunctuation) {
+            m_diagnosticCoreGlyphCount=unsigned(accepted.size());
+            m_diagnosticCoreGlyphHeight=compactHeight*step;
+            m_diagnosticBaselineSupportBasisPoints=10000;
+            m_diagnosticGlyphTopology="compact-punctuation";
+        } else {
+            if(cores.empty())return rejectGlyphRow("no-body-core");
+            std::sort(cores.begin(),cores.end(),[](const Line* left,const Line* right) {
+                return Height(left->box)<Height(right->box);
+            });
+            unsigned bodyInk=0;for(const auto* component:cores)bodyInk+=unsigned(component->ink);
+            unsigned accumulated=0;int bodyHeight=Height(cores.back()->box);
+            for(const auto* component:cores) {
+                accumulated+=unsigned(component->ink);
+                if(accumulated*2>=bodyInk){bodyHeight=Height(component->box);break;}
+            }
+            m_diagnosticCoreGlyphHeight=bodyHeight*step;
+            if(Height(row)>bodyHeight*2+2)return rejectGlyphRow("body-scale");
+            if(m_diagnosticInkDensityBasisPoints<200)return rejectGlyphRow("sparse-ink");
+            // Detached Thai vowels and Arabic marks can sit outside the body.
+            // They do not vote on its baseline; joined words need only one
+            // coherent body and retain their existing script width allowance.
+            std::vector<const Line*> bodies;
+            for(const auto* component:cores)
+                if(Height(component->box)*3>=bodyHeight*2 &&
+                    Height(component->box)<=bodyHeight*2+1)bodies.push_back(component);
+            std::sort(bodies.begin(),bodies.end(),[](const Line* left,const Line* right) {
+                return left->box.bottom<right->box.bottom;
+            });
+            unsigned baselineInk=0;
+            for(const auto* component:bodies)baselineInk+=unsigned(component->ink);
+            accumulated=0;int baseline=bodies.back()->box.bottom;
+            for(const auto* component:bodies) {
+                accumulated+=unsigned(component->ink);
+                if(accumulated*2>=baselineInk){baseline=component->box.bottom;break;}
+            }
+            unsigned coherentInk=0;SubtitleBoxRect bodyBounds;
+            const int baselineTolerance=(std::max)(1,bodyHeight/2);
+            for(const auto* component:bodies) {
+                if(std::abs(component->box.bottom-baseline)>baselineTolerance)continue;
+                coherentInk+=unsigned(component->ink);++m_diagnosticCoreGlyphCount;
+                bodyBounds=bodyBounds.Valid()?Union(bodyBounds,component->box):component->box;
+            }
+            m_diagnosticBaselineSupportBasisPoints=baselineInk ? unsigned(uint64_t(coherentInk)*10000/baselineInk) : 0;
+            if(m_diagnosticBaselineSupportBasisPoints<7500)return rejectGlyphRow("baseline");
+            // Punctuation may extend a body by a bounded amount. A lone flare
+            // cannot lend its height/baseline to distant unrelated points.
+            if(!bodyBounds.Valid() || bodyBounds.left-row.left>bodyHeight*2 ||
+                row.right-bodyBounds.right>bodyHeight*2)return rejectGlyphRow("body-extent");
+            m_diagnosticGlyphTopology="body-row";
+        }
+        // Repair only an unwitnessed zero-gap junction with the physical
+        // bar. Finite positive edges and the established opposite-inset or
+        // verified-support inference retain their original distance contract.
+        // A dark run alone cannot lend the growing row union's full height as
+        // padding. Use the independent body scale and closest selected row.
+        if(m_diagnosticNearBarGap==0 && !m_diagnosticNearBarGapInferred) {
+            const int inferredMargin=(std::max)(step,m_diagnosticCoreGlyphHeight/2);
+            int inferredGap=(std::numeric_limits<int>::max)();
+            for(int selected=0;selected<lineCount;++selected) {
+                const auto& selectedRow=lineBoxes[selected];
+                if(pictureTop>0)inferredGap=(std::min)(inferredGap,
+                    (std::max)(0,selectedRow.top*step-pictureTop-inferredMargin));
+                if(pictureBottom<source.height)inferredGap=(std::min)(inferredGap,
+                    (std::max)(0,pictureBottom-selectedRow.bottom*step-inferredMargin));
+            }
+            m_diagnosticNearBarGap=inferredGap;
+            m_diagnosticNearBarGapInferred=true;
+        }
     }
     const bool actuallyCrosses=box.top*step<pictureTop || box.bottom*step>pictureBottom;
     m_nearBarEligibilityMeasured=true;
@@ -2391,15 +2613,30 @@ SubtitleBoxResult SubtitleBoxDetector::Analyze(const AnalysisLumaSource& source,
     // Preserve the established overlap detector. Only widen nomination when
     // that detector finds no valid cue; near-picture noise cannot displace it.
     bool detected=Detect(source,top,bottom,box,lines,signature,0);
-    if(!detected && m_nearBarDistance>0)
+    bool topSearchComplete=!m_workLimit && m_topSearchComplete;
+    bool bottomSearchComplete=!m_workLimit && m_bottomSearchComplete;
+    if(!detected && m_nearBarDistance>0) {
         detected=Detect(source,top,bottom,box,lines,signature,m_nearBarDistance);
+        // The widened pass is the final configured search result. Do not let
+        // a complete narrower attempt mask an incomplete widened scan.
+        topSearchComplete=!m_workLimit && m_topSearchComplete;
+        bottomSearchComplete=!m_workLimit && m_bottomSearchComplete;
+    }
     auto diagnostics=[&]() {
         m_result.diagnosticReason=detected?"detected":m_diagnosticReason;
         m_result.diagnosticComponentCount=m_diagnosticComponentCount;
+        m_result.diagnosticPictureGlyphProofRequired=m_diagnosticPictureGlyphProofRequired;
+        m_result.diagnosticCoreGlyphCount=m_diagnosticCoreGlyphCount;
+        m_result.diagnosticCoreGlyphHeight=m_diagnosticCoreGlyphHeight;
+        m_result.diagnosticInkDensityBasisPoints=m_diagnosticInkDensityBasisPoints;
+        m_result.diagnosticBaselineSupportBasisPoints=m_diagnosticBaselineSupportBasisPoints;
+        m_result.diagnosticGlyphTopology=m_diagnosticGlyphTopology;
         m_result.diagnosticNearBarGap=m_diagnosticNearBarGap;
         m_result.diagnosticNearBarGapInferred=m_diagnosticNearBarGapInferred;
         m_result.nearBarEligibilityMeasured=m_nearBarEligibilityMeasured;
         m_result.nearBarEligible=m_nearBarEligible;
+        m_result.topSearchComplete=!m_workLimit && topSearchComplete;
+        m_result.bottomSearchComplete=!m_workLimit && bottomSearchComplete;
     };
     if(!detected)
     {

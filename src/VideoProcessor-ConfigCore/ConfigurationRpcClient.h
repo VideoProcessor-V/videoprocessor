@@ -41,6 +41,8 @@ public:
 		std::string& error) const;
 	bool SelectProfile(const std::string& group, const std::string& profile,
 		bool enabled, std::string& error) const;
+    bool GetDisplayModes(const std::string& monitor,
+        ConfigurationRpcProtocol::DisplayModes& modes, std::string& error) const;
 	bool RunAction(const std::string& action, std::string& error) const;
 	// RS-232 connection test on the VP side (about 8 s). False with error when
 	// VP could not be asked; otherwise the test's own pass/refused/summary.

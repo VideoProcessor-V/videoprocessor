@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-only
  */
 // WP-14 / audit M-1 (2026-10-25): VP's additions to the DV tunnel formatter's DM handling, moved
-// out of Bill's CR210DolbyVisionTunnelFormatter into VP-V behind the upstreamable
+// out of Bill's CRGBDolbyVisionTunnelFormatter into VP-V behind the upstreamable
 // IDolbyVisionMetadataExtension hook (video_frame_formatter/DolbyVisionMetadataExtension.h):
 //   - L9 (source primaries) and L10 (custom target displays), so L8 trims can be resolved
 //     (DvSignalLevels.h);

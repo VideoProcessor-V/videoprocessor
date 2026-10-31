@@ -168,6 +168,15 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="FullscreenActivation.h" />
+    <ClInclude Include="StartupPresentationReadiness.h" />
+    <ClInclude Include="PresentationConfig.h" />
+    <ClInclude Include="vprenderer\DisplayVsyncClock.h" />
+    <ClInclude Include="vprenderer\DisplayCadenceHealth.h" />
+    <ClInclude Include="vprenderer\DisplayCadenceRecovery.h" />
+    <ClInclude Include="vprenderer\SwapchainOutputProbe.h" />
+    <ClInclude Include="vprenderer\DisplayFrameCache.h" />
+    <ClInclude Include="vprenderer\QueueNativeContinuity.h" />
     <ClInclude Include="ToneMappingTuning.h" />
     <ClInclude Include="WindowsDisplayDiagnostics.h" />
     <ClInclude Include="ACaptureDevice.h" />
@@ -179,11 +188,14 @@
     <ClInclude Include="AspectRatio.h" />
     <ClInclude Include="BitDepth.h" />
     <ClInclude Include="blackmagic_decklink\BlackMagicDeckLinkCaptureDevice.h" />
+    <ClInclude Include="blackmagic_decklink\DeckLinkCaptureDelivery.h" />
     <ClInclude Include="magewell\MagewellSdkInstance.h" />
     <ClInclude Include="magewell\MagewellSdkApi.h" />
     <ClInclude Include="magewell\MagewellBackend.h" />
     <ClInclude Include="magewell\MagewellInput.h" />
     <ClInclude Include="magewell\MagewellCaptureDevice.h" />
+    <ClInclude Include="magewell\MagewellRgb24Packing.h" />
+    <ClInclude Include="magewell\MagewellPackingWorker.h" />
     <ClInclude Include="magewell\MagewellCaptureDeviceDiscoverer.h" />
     <ClInclude Include="blackmagic_decklink\BlackMagicDeckLinkCaptureDeviceDiscoverer.h" />
     <ClInclude Include="blackmagic_decklink\BlackMagicDeckLinkTranslate.h" />
@@ -257,9 +269,14 @@
     <ClInclude Include="..\VP-V\modules\control\diagnostics\StateReportSettings.h" />
     <ClInclude Include="..\VP-V\modules\control\diagnostics\StoreZipWriter.h" />
     <ClInclude Include="VpBuildIdentity.h" />
+    <ClInclude Include="DebugLogAsync.h" />
+    <ClInclude Include="vprenderer\Bt2020SignalWorker.h" />
     <ClInclude Include="DebugLogRetention.h" />
     <ClInclude Include="DisplayMode.h" />
     <ClInclude Include="DisplayRefreshRatePolicy.h" />
+    <ClInclude Include="DisplayMonitorInventory.h" />
+    <ClInclude Include="DisplayWindowGeometry.h" />
+    <ClInclude Include="DisplayRasterInfo.h" />
 	<ClInclude Include="DisplayRefreshRateEstimator.h" />
 	<ClInclude Include="DisplayRefreshRateWindow.h" />
 	<ClInclude Include="CadenceIntervalEstimate.h" />
@@ -338,10 +355,16 @@
     <ClInclude Include="AnalysisDiagnosticHooks.h" />
     <ClInclude Include="SubtitleBoxDetector.h" />
     <ClInclude Include="SubtitleOpaqueCardRefinement.h" />
+    <ClInclude Include="SubtitleBackgroundGuard.h" />
     <ClInclude Include="SubtitleBoxLookahead.h" />
+    <ClInclude Include="SubtitleCueContinuation.h" />
+    <ClInclude Include="SubtitleCueContinuationProof.h" />
     <ClInclude Include="SubtitleCutPaste.h" />
+    <ClInclude Include="SubtitleBackingLip.h" />
+    <ClInclude Include="SubtitleBackingPresentation.h" />
     <ClInclude Include="SubtitleCutPasteShader.h" />
     <ClInclude Include="SubtitleBarEvidence.h" />
+    <ClInclude Include="SubtitleLocalGlyphProof.h" />
 	<ClInclude Include="ActivePictureAnalyzer.h" />
     <ClInclude Include="ActivePictureEvidence.h" />
     <ClInclude Include="LocalBoundaryDiagnostics.h" />
@@ -370,6 +393,7 @@
 	<ClInclude Include="microsoft_directshow\MadVRExternalPixelShaders.h" />
 	<ClInclude Include="microsoft_directshow\MadVROsdServices.h" />
 	<ClInclude Include="microsoft_directshow\MadVRRuntimeInterfaces.h" />
+	<ClInclude Include="microsoft_directshow\MadVRNlsSourceGeometry.h" />
 	<ClInclude Include="microsoft_directshow\MadVRShaderLoader.h" />
 	<ClInclude Include="microsoft_directshow\MadVRShaderRuntimeState.h" />
 	<ClInclude Include="NlsGeometryPolicy.h" />
@@ -419,11 +443,12 @@
     <ClInclude Include="VideoConversionOverride.h" />
     <ClInclude Include="VideoFrame.h" />
     <ClInclude Include="VideoFrameEncoding.h" />
+    <ClInclude Include="P210FrameLayout.h" />
+    <ClInclude Include="CaptureDeliveryStats.h" />
     <ClInclude Include="VideoState.h" />
     <ClInclude Include="video_frame_formatter\CARGBtoP010VideoFrameFormatter.h" />
     <ClInclude Include="video_frame_formatter\CDeckLinkRGBToP010VideoFrameFormatter.h" />
     <ClInclude Include="video_frame_formatter\CR210toRGB48VideoFrameFormatter.h" />
-    <ClInclude Include="video_frame_formatter\CR210DolbyVisionTunnelFormatter.h" />
     <ClInclude Include="..\VP-V\modules\input\signal\DolbyVisionTunnelGate.h" />
     <ClInclude Include="DolbyVisionTunnelPresentation.h" />
     <ClInclude Include="..\VP-V\modules\input\signal\HdrInferenceSignalBuilder.h" />
@@ -441,6 +466,10 @@
     <ClInclude Include="dv_loopback\DvLoopbackAnalyzer.h" />
     <ClInclude Include="dv_loopback\DvSimulatedLoop.h" />
     <ClInclude Include="dv_loopback\DvLoopbackHarness.h" />
+    <ClInclude Include="magewell\MagewellRgbTunnelRange.h" />
+    <ClInclude Include="magewell\MagewellCaptureFormatPolicy.h" />
+    <ClInclude Include="DolbyVisionTunnelInput.h" />
+    <ClInclude Include="video_frame_formatter\CRGBDolbyVisionTunnelFormatter.h" />
     <ClInclude Include="video_frame_formatter\CR12BtoRGB48VideoFrameFormatter.h" />
     <ClInclude Include="video_frame_formatter\CNoopVideoFrameFormatter.h" />
     <ClInclude Include="..\VP-V\modules\input\capture\CTwoPlane420VideoFrameFormatter.h" />
@@ -487,13 +516,19 @@
     <ClCompile Include="magewell\MagewellBackend.cpp" />
     <ClCompile Include="magewell\MagewellCaptureDevice.cpp" Condition="'$(VpCiNoMagewell)' != 'true'" />
     <ClCompile Include="magewell\MagewellCaptureDeviceDiscoverer.cpp" Condition="'$(VpCiNoMagewell)' != 'true'" />
+    <ClCompile Include="magewell\MagewellRgb24Packing.cpp" />
+    <ClCompile Include="magewell\MagewellRgb24Packing.AVX2.cpp">
+      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="blackmagic_decklink\BlackMagicDeckLinkCaptureDeviceDiscoverer.cpp" />
     <ClCompile Include="blackmagic_decklink\BlackMagicDeckLinkTranslate.cpp" />
     <ClCompile Include="CaptureInput.cpp" />
     <ClCompile Include="cie.cpp" />
     <ClCompile Include="ColorSpace.cpp" />
     <ClCompile Include="DisplayMode.cpp" />
-    <ClCompile Include="DisplayRefreshRatePolicy.cpp" />
+    <ClCompile Include="DisplayRefreshRatePolicy.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
 	<ClCompile Include="DisplayRefreshRateEstimator.cpp" />
 	<ClCompile Include="DisplayRefreshRateWindow.cpp" />
 	<ClCompile Include="DirectShowFrameDeliverer.cpp" />
@@ -625,9 +660,9 @@
     <ClCompile Include="video_frame_formatter\CARGBtoP010VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CDeckLinkRGBToP010VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CR210toRGB48VideoFrameFormatter.cpp" />
-    <ClCompile Include="video_frame_formatter\CR210DolbyVisionTunnelFormatter.cpp" />
     <ClCompile Include="dv_loopback\DvLoopbackAnalyzer.cpp" />
     <ClCompile Include="..\VP-V\modules\control\diagnostics\RawCaptureRecorder.cpp" />
+    <ClCompile Include="video_frame_formatter\CRGBDolbyVisionTunnelFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CR12BtoRGB48VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CNoopVideoFrameFormatter.cpp" />
     <ClCompile Include="..\VP-V\modules\input\capture\CTwoPlane420VideoFrameFormatter.cpp" />
@@ -742,7 +777,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClInclude Include="video_frame_formatter\CR210toRGB48VideoFrameFormatter.Common.h" />
-    <ClCompile Include="video_frame_formatter\CR210DolbyVisionTunnelFormatter.AVX2.cpp">
+    <ClCompile Include="video_frame_formatter\CRGBDolbyVisionTunnelFormatter.AVX2.cpp">
       <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
       <WholeProgramOptimization>false</WholeProgramOptimization>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -797,4 +832,27 @@
     <ClCompile Include="RememberedEdgeReturn.cpp" />
   </ItemGroup>
   <ItemGroup><ClInclude Include="LocalBoundaryRefinement.h" /><ClCompile Include="LocalBoundaryRefinement.cpp" /></ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="vprenderer\OutputOsdTelemetryCache.h" />
+    <ClInclude Include="vprenderer\FrameHdrStatus.h" />
+    <ClInclude Include="HdrOsdFormatting.h" />
+    <ClInclude Include="StatsOverlayLayout.h" />
+    <ClInclude Include="OsdInputColorInfo.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="OsdTelemetryText.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="microsoft_directshow\video_renderers\MadVROsdSizing.h" />
+    <ClInclude Include="microsoft_directshow\video_renderers\MadVROsdRefresh.h" />
+  </ItemGroup>
+  <ItemGroup><ClInclude Include="vprenderer\StatsOsdSettings.h" /></ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="AnalysisEvaluationBudget.h" />
+    <ClInclude Include="vprenderer\PreparedPictureEvidence.h" />
+    <ClInclude Include="vprenderer\LookaheadPerformanceWindow.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="vprenderer\PreparedOutwardWindow.h" />
+  </ItemGroup>
 </Project>

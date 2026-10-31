@@ -7,7 +7,7 @@
 //
 // Written directly from ETSI GS CCM 001 V1.1.1 (sections 6.2-6.4, Tables 3-14)
 // and the HDMI 12-bit YCbCr 4:2:2 channel mapping, without calling or copying
-// VP's decoder (CR210DolbyVisionTunnelFormatter), VP's VPV packer
+// VP's decoder (CRGBDolbyVisionTunnelFormatter), VP's VPV packer
 // (dv_loopback/DvTunnelPacker.h) or the older test sender
 // (DolbyVisionTunnelSender.h). It is deliberately built differently:
 //   - the DM body is assembled from a field table (name, byte width, value)

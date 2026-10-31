@@ -1,6 +1,7 @@
 #include "pch.h"
 
 #include "AnalysisLumaSource.h"
+#include <DolbyVisionTunnelInput.h>
 #include "vprenderer/DolbyVisionTunnelUnpackReference.h"
 
 #include <algorithm>
@@ -353,8 +354,9 @@ bool AnalysisLumaSource::IsValid() const
 			(rgbBitAlignment == 1 || rgbBitAlignment == 2) &&
 			rowBytes >= static_cast<size_t>(width) * 4;
 	if (format == AnalysisLumaFormat::SdrTunnelRgb)
-		return encoding == VideoFrameEncoding::R210 &&
-			(rgbBitAlignment == 1 || rgbBitAlignment == 2) &&
+		return DolbyVisionTunnelEncodingSupported(encoding) &&
+			(rgbBitAlignment == 2 ||
+				(encoding == VideoFrameEncoding::R210 && rgbBitAlignment == 1)) &&
 			rowBytes >= static_cast<size_t>(width) * 4;
 	if (format == AnalysisLumaFormat::NativeRgb)
 	{
@@ -386,6 +388,88 @@ bool AnalysisLumaSource::IsValid() const
 	return CheckedMultiply(chromaRowBytes, chromaHeight, chromaBytes) &&
 		requiredBytes <= std::numeric_limits<size_t>::max() - chromaBytes &&
 		requiredBytes + chromaBytes <= dataBytes;
+}
+
+bool AnalysisLumaSource::MeasureLumaRowContent(int y, int x0, int x1, int step,
+    uint16_t threshold, AnalysisLumaRowContent& result) const
+{
+    result = {};
+    if (!IsValid() || y < 0 || y >= height || x0 < 0 || x1 > width ||
+        x0 >= x1 || step <= 0 || threshold > 1023)
+        return false;
+    result.left = width;
+    const auto record = [&](int x, uint16_t code) {
+        if (code <= threshold) return;
+        ++result.samples;
+        result.left = (std::min)(result.left, x);
+        result.right = x;
+    };
+    // VP-V: full-range planes go through Sample() so the limited-domain map applies.
+    if (!fullRangeYuv && (format == AnalysisLumaFormat::P010 || format == AnalysisLumaFormat::P210 ||
+        format == AnalysisLumaFormat::DecodedDolbyVision422)) {
+        const auto* row = data + static_cast<size_t>(y) * rowBytes;
+        // All three formats use the same upper ten bits, including exact DV
+        // truncation. Keep byte reads valid for unaligned/padded source rows.
+        for (int x = x0; x < x1; ) {
+            record(x, P010Code(row + static_cast<size_t>(x) * 2));
+            if (step >= x1 - x) break;
+            x += step;
+        }
+    } else {
+        for (int x = x0; x < x1; ) {
+            AnalysisLumaSample sample;
+            if (!Sample(x, y, sample)) return false;
+            record(x, sample.luma);
+            if (step >= x1 - x) break;
+            x += step;
+        }
+    }
+    return true;
+}
+
+bool AnalysisLumaSource::RowWithinLimits(int y, uint16_t lumaMax,
+    uint16_t chromaDeviation, bool& withinLimits, size_t& samplesChecked) const
+{
+    withinLimits = false;
+    samplesChecked = 0;
+    if (!IsValid() || y < 0 || y >= height || lumaMax > 1023 || chromaDeviation > 512)
+        return false;
+    const auto inside = [=](const AnalysisLumaSample& sample) {
+        return sample.luma <= lumaMax &&
+            sample.chromaU >= 512 - chromaDeviation &&
+            sample.chromaU <= 512 + chromaDeviation &&
+            sample.chromaV >= 512 - chromaDeviation &&
+            sample.chromaV <= 512 + chromaDeviation;
+    };
+    if (!fullRangeYuv && (format == AnalysisLumaFormat::P010 || format == AnalysisLumaFormat::P210 ||
+        format == AnalysisLumaFormat::DecodedDolbyVision422)) {
+        // Same code readers and chroma footprint as Sample. Validate the
+        // immutable source once per row, not again for every native pixel.
+        const auto* luma = data + static_cast<size_t>(y) * rowBytes;
+        const size_t chromaLine = format == AnalysisLumaFormat::P010 ?
+            static_cast<size_t>(y / 2) : static_cast<size_t>(y);
+        const auto* chroma = data + rowBytes * static_cast<size_t>(height) +
+            chromaLine * chromaRowBytes;
+        const auto readCode = format == AnalysisLumaFormat::DecodedDolbyVision422 ?
+            DecodedDolbyVisionCode : P010Code;
+        for (int x = 0; x < width; ++x) {
+            const auto* pair = chroma + static_cast<size_t>(x / 2) * 4;
+            const AnalysisLumaSample sample = { readCode(luma + static_cast<size_t>(x) * 2),
+                readCode(pair), readCode(pair + 2) };
+            ++samplesChecked;
+            if (!inside(sample)) return true;
+        }
+    } else {
+        // Packed/RGB inputs retain the canonical format conversion path.
+        for (int x = 0; x < width; ++x) {
+            AnalysisLumaSample sample;
+            if (!Sample(x, y, sample)) return false;
+            ++samplesChecked;
+            if (!inside(sample)) return true;
+        }
+    }
+    withinLimits = true;
+    return true;
 }
 
 bool AnalysisLumaSource::Sample(int x, int y, AnalysisLumaSample& result) const
@@ -420,7 +504,7 @@ void AnalysisLumaPlane::Bind(const AnalysisLumaSource& source)
 	boundFormat = static_cast<int>(source.format);
 	boundEncoding = static_cast<int>(source.encoding);
 	boundColorspace = static_cast<int>(source.colorspace);
-	boundRange = (source.fullRangeYuv ? 1 : 0);
+	boundRange = (source.fullRangeYuv ? 1 : 0) | (static_cast<int>(source.range) << 1);
 	boundAlignment = source.rgbBitAlignment;
 }
 
@@ -429,7 +513,7 @@ bool AnalysisLumaPlane::Matches(const AnalysisLumaSource& source) const
 	return width == source.width && height == source.height && boundData == source.data &&
 		boundRowBytes == source.rowBytes && boundChromaRowBytes == source.chromaRowBytes &&
 		boundFormat == static_cast<int>(source.format) && boundEncoding == static_cast<int>(source.encoding) &&
-		boundColorspace == static_cast<int>(source.colorspace) && boundRange == (source.fullRangeYuv ? 1 : 0) &&
+		boundColorspace == static_cast<int>(source.colorspace) && boundRange == ((source.fullRangeYuv ? 1 : 0) | (static_cast<int>(source.range) << 1)) &&
 		boundAlignment == source.rgbBitAlignment;
 }
 
@@ -496,7 +580,9 @@ bool AnalysisLumaSource::SampleLumaRow(int x0, int y, int count, uint16_t* out) 
 		}
 		return true;
 	}
-	if (format == AnalysisLumaFormat::NativeRgb || format == AnalysisLumaFormat::SdrTunnelRgb)
+	// SdrTunnelRgb takes the generic loop below: Sample() applies Bill's
+	// AnalysisLumaRange and the encoding-specific tunnel word reader.
+	if (format == AnalysisLumaFormat::NativeRgb)
 	{
 		// Sample()'s luma arithmetic without the chroma.
 		const bool bt2020 = colorspace == ColorSpace::BT_2020;
@@ -694,12 +780,12 @@ bool AnalysisLumaSource::SampleUnchecked(int x, int y, AnalysisLumaSample& resul
 	{
 		const uint8_t* pixel = data + static_cast<size_t>(y) * rowBytes +
 			static_cast<size_t>(x) * 4;
-		const uint32_t word = ReadBigEndian32(pixel);
+		const uint32_t word = ReadDolbyVisionTunnelWord(pixel, encoding);
 		auto channel = [this](uint16_t code)
 		{
 			const uint8_t byte = static_cast<uint8_t>(rgbBitAlignment == 1 ?
 				(code >> 2) : (code & 0xff));
-			return Expand8To10(byte);
+			return range == AnalysisLumaRange::Limited ? uint16_t(byte) << 2 : Expand8To10(byte);
 		};
 		red = channel(static_cast<uint16_t>((word >> 20) & 0x3ff));
 		green = channel(static_cast<uint16_t>((word >> 10) & 0x3ff));
@@ -709,17 +795,22 @@ bool AnalysisLumaSource::SampleUnchecked(int x, int y, AnalysisLumaSample& resul
 		return false;
 	const bool bt2020 = colorspace == ColorSpace::BT_2020;
 	const bool bt601 = IsBt601(colorspace); // audit 2026-10-16
-	const bool limitedRgb = format != AnalysisLumaFormat::SdrTunnelRgb &&
+	const bool limitedRgb = (format == AnalysisLumaFormat::SdrTunnelRgb && range == AnalysisLumaRange::Limited) ||
+        (format != AnalysisLumaFormat::SdrTunnelRgb &&
 		(encoding == VideoFrameEncoding::R210 ||
 		encoding == VideoFrameEncoding::R10b ||
-		encoding == VideoFrameEncoding::R10l);
+		encoding == VideoFrameEncoding::R10l));
 	if (limitedRgb)
 	{
-		const bool r210 = encoding == VideoFrameEncoding::R210;
+        // SDR tunnel bytes use the RGB8 16-235 interval even inside r210.
+        // The distinct native DeckLink r210 64-960 convention applies only
+        // to ordinary ten-bit capture, not this eight-bit carrier.
+        const bool nativeR210Range = format != AnalysisLumaFormat::SdrTunnelRgb &&
+            encoding == VideoFrameEncoding::R210;
 		const LimitedRgbCoefficients& coefficients = bt2020 ?
-			(r210 ? BT2020_R210 : BT2020_R10) :
-			(bt601 ? (r210 ? BT601_R210 : BT601_R10) :
-			(r210 ? BT709_R210 : BT709_R10));
+			(nativeR210Range ? BT2020_R210 : BT2020_R10) :
+			(bt601 ? (nativeR210Range ? BT601_R210 : BT601_R10) :
+			(nativeR210Range ? BT709_R210 : BT709_R10));
 		const int r = static_cast<int>(red) - 64;
 		const int g = static_cast<int>(green) - 64;
 		const int b = static_cast<int>(blue) - 64;

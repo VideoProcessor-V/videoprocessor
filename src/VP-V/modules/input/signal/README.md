@@ -107,7 +107,7 @@ Checked against the code 2026-10-25 (WP-14 / M2 step 14, `feat/m2-dv`).
 **Data flow.** In: the capture `VideoState` (colorimetry, EOTF, InfoFrames, bit depth, DV VSIF) and,
 for the tunnel, the raw r210 / R10b / R10l frame. Out: the signal decision the GUI pushes to the
 renderer (PQ inferred or not; tunnel claimed or handed off), the tunnel's DM per picture
-(parsed by Bill's `CR210DolbyVisionTunnelFormatter`, which calls `DvSignalLevels` and
+(parsed by Bill's `CRGBDolbyVisionTunnelFormatter`, which calls `DvSignalLevels` and
 `DvMetadataHold::Tracker` from inside his file) and, with `dv_tunnel_gpu_unpack`, the tunnel planes
 unpacked on the GPU instead of by the CPU formatter.
 

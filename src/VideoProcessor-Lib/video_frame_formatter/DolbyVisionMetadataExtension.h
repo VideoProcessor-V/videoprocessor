@@ -3,7 +3,7 @@
  * This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 3.
  * This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
  */
-// An optional extension of CR210DolbyVisionTunnelFormatter's display-management (DM) handling.
+// An optional extension of CRGBDolbyVisionTunnelFormatter's display-management (DM) handling.
 // UPSTREAMABLE hook (WP-14, 2026-10-25): it lets an application add DM extension levels the
 // formatter does not parse and a policy for rejected DM, without changing the formatter itself.
 // No extension installed (the default) = the formatter's own behaviour, unchanged.

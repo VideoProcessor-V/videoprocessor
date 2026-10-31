@@ -1,5 +1,6 @@
 #pragma once
 #include "ProfileSectionIdentity.h"
+#include "ProfileGroups.h"
 #include "SubtitleDetectionOptimization.h"
 #include "SubtitleGeneratedGrayStyle.h"
 
@@ -8,6 +9,7 @@
 #include "CalibrationProfileMigration.h"
 #include "ConfigSchema.h"
 #include "MainConfigSchema.h"
+#include "PresentationConfig.h"
 #include "RendererConfigView.h"
 #include "DisplayRuleExpression.h"
 #include "AspectRatio.h"
@@ -15,6 +17,7 @@
 #include "ToneMappingTuning.h"
 #include "MotionConfig.h"
 #include "RetiredSettings.h"
+#include "DisplayRefreshRatePolicy.h"
 
 #include <algorithm>
 #include <cctype>
@@ -41,6 +44,7 @@ namespace RendererProfileConfig
 	constexpr double MAX_SUBTITLE_HOLD_SECONDS = 30.0;
 	// Defaults for the independent Classic subtitle profile; explicit zero remains valid.
 	constexpr uint64_t DEFAULT_CLASSIC_SUBTITLE_HOLD_MS = 2000;
+    constexpr uint64_t DEFAULT_OFF_ZOOM_HOLD_MS = 2000;
 	constexpr uint64_t DEFAULT_CLASSIC_SUBTITLE_ENGAGE_DRIFT_MS = 500;
 	constexpr uint64_t DEFAULT_CLASSIC_SUBTITLE_RELEASE_DRIFT_MS = 2000;
 	constexpr int DEFAULT_CLASSIC_SUBTITLE_PADDING_PIXELS = 20;
@@ -61,6 +65,8 @@ namespace RendererProfileConfig
 			section == "profiles.scaling" ||
 			section == "profiles.display" ||
 			section == "profiles.viewport" ||
+			section == "output_display" ||
+			section.rfind("output_display.", 0) == 0 ||
 			section == "event_actions" ||
 			section == "display_rules" ||
 			section == "refresh_rate_commands" ||
@@ -595,6 +601,17 @@ namespace RendererProfileConfig
 		return true;
 	}
 
+    // Off owns its independent release timer; Classic/moved profiles do not use it.
+    inline uint64_t ResolveOffZoomHoldMs(const std::map<std::string,std::string>& settings)
+    {
+        const auto found=settings.find("off_zoom_hold_seconds");
+        double seconds=0.0;
+        if(found==settings.end() || !DisplayRuleExpression::ParseNumber(ConfigFile::Trim(found->second),seconds) ||
+            !std::isfinite(seconds) || seconds<0.0 || seconds>MAX_SUBTITLE_HOLD_SECONDS)
+            return DEFAULT_OFF_ZOOM_HOLD_MS;
+        return static_cast<uint64_t>(std::llround(seconds*1000.0));
+    }
+
     // Reduction belongs only to moved profiles. Invalid/missing values keep
     // the original size; Classic and Off never inherit a moved-mode setting.
     inline int ResolveSubtitleTextReduction(const std::map<std::string,std::string>& settings)
@@ -640,13 +657,16 @@ namespace RendererProfileConfig
             if (key == "hdr_peak_analysis_picture_only" || key == "hdr_peak_analysis_motion_compensation") return IsBoolean(value);
             if (key == "hdr_peak_analysis_height_percent") { int n=0; return ParseInteger(value,MIN_HDR_PEAK_ANALYSIS_HEIGHT_PERCENT,MAX_HDR_PEAK_ANALYSIS_HEIGHT_PERCENT,n); }
             if (key == "hdr_peak_analysis_position") return IsChoice(value,{"top","center","bottom"});
-            if (key == "rounded_corners" || key == "temporal_fill") return IsBoolean(value);
-            if (key == "cleanup_fill") return IsChoice(value, { "mirror", "stretch", "temporal" });
+            // Retired trial settings remain readable for compatibility; runtime ignores them.
+            if (key == "background_fallback_top_pixels" || key == "background_fallback_side_pixels") { int n=0; return ParseInteger(value,0,200,n); }
+            if (key == "background_sanity_guard" || key == "rounded_corners" || key == "temporal_fill") return IsBoolean(value);
+            if (key == "cleanup_fill") return IsChoice(value, { "mirror", "stretch", "temporal", "surround", "stable_surround" });
             if (key == "background_edge") return IsChoice(value, { "extend", "float" });
             if (key == "text_reduction_percent") { int n=0; return ParseInteger(value,0,75,n); }
             if (key == "minimum_headroom_pixels") { int n=0; return ParseInteger(value,0,200,n); }
             if (key == "offset_pixels") { int n=0; return ParseInteger(value,0,500,n); }
             if (key == "subtitle_hold_seconds") return IsNumberInRange(value, MIN_SUBTITLE_HOLD_SECONDS, MAX_SUBTITLE_HOLD_SECONDS);
+            if (key == "off_zoom_hold_seconds") return IsNumberInRange(value,0.0,MAX_SUBTITLE_HOLD_SECONDS);
             if (key == "subtitle_engage_drift_ms" || key == "subtitle_release_drift_ms") { int n=0; return ParseInteger(value,0,30000,n); }
             if (key == "subtitle_target_buffer_pixels") { int n=0; return ParseInteger(value,0,MAX_SUBTITLE_TARGET_BUFFER_PIXELS,n); }
             // offset_pixels is the Classic padding as well as the moved-mode inset.
@@ -876,7 +896,7 @@ namespace RendererProfileConfig
             // other (owner 2026-10-15); auto = whichever is configured, VP's when both.
             if(key=="motion_engine")return IsChoice(value,{"auto","vp","smooth_motion"});
             if(key=="smooth_motion")return IsChoice(value,{"off","auto","always"});
-            if(key=="frame_mixer")return IsChoice(value,{"oversample","hermite","linear","cubic"});
+            if(key=="frame_mixer")return IsChoice(value,{"oversample","hermite","linear","cubic","mitchell_clamp"});
             if(key=="deinterlace")return IsChoice(value,{"auto","off","force"});
             if(key=="deinterlace_algorithm")return IsChoice(value,{"weave","bob","yadif","bwdif"});
             if(key=="field_order")return IsChoice(value,{"auto","top","bottom"});
@@ -917,6 +937,9 @@ namespace RendererProfileConfig
 			if (key == "deband_strength") return IsChoice(value, { "auto", "off", "light", "default" });
 			// Owner 2026-10-17 (grain audit): libplacebo's deband adds grain (off: none; VP's dither).
 			if (key == "deband_grain") return IsChoice(value, { "on", "off" });
+			// Dither precision moved here with dithering; Rendering profiles still
+			// accept it so older configurations load.
+			if (key == "display_bit_depth") return IsChoice(value, { "auto", "output", "8", "10" });
 			expected = "a scaling-owned setting"; return false;
 		}
 		if (group == "display")
@@ -951,7 +974,7 @@ namespace RendererProfileConfig
 				return normalized == "none" || (normalized.size() > 5 &&
 					normalized.substr(normalized.size() - 5) == ".cube");
 			}
-			if (key == "display_bit_depth") return IsChoice(value, { "auto", "8", "10" });
+			if (key == "display_bit_depth") return IsChoice(value, { "auto", "output", "8", "10" });
 			if (key == "sdr_target_nits")
 			{
 				expected = "a finite HDR-to-SDR target above 0.000001 and at most 10000 nits (and above target black; SDR input is unaffected)";
@@ -966,6 +989,23 @@ namespace RendererProfileConfig
 			if (key == "target_primaries" || key == "sdr_target_primaries") return IsChoice(value, { "rec709", "p3_d65", "bt2020" });
 			if (key == "report_bt2020_to_display") return IsBoolean(value);
 			expected = "a display-owned setting"; return false;
+		}
+		if (group == "output_display")
+		{
+            if (key == "monitor") return !ConfigFile::Trim(value).empty() && value.size() <= 1024 &&
+                std::none_of(value.begin(), value.end(), [](unsigned char c) { return c < 32; });
+			if (key == "mode_policy") return IsChoice(value, { "auto", "advanced" });
+			if (key == "restore_previous_mode") return IsBoolean(value);
+			if (key == "allowed_modes")
+			{
+				std::vector<DisplayOutputMode> modes;
+				std::string detail;
+				const bool valid = ParseDisplayOutputModeList(value, modes, detail);
+				expected = valid ? "an ordered list of complete display modes" : detail;
+				return valid;
+			}
+			expected = "monitor, mode_policy, allowed_modes, or restore_previous_mode";
+			return false;
 		}
 		if (group == "output")
 		{
@@ -1237,6 +1277,7 @@ namespace RendererProfileConfig
 		for (const std::string& section : config.GetSectionNames())
 			if (section.rfind("vprenderer.", 0) == 0 ||
 				section == "queue" || section.rfind("queue.", 0) == 0 ||
+				section == "output_display" || section.rfind("output_display.", 0) == 0 ||
 				section == "lldv" || section.rfind("lldv.", 0) == 0 ||
 				section == "directshow" || section.rfind("directshow.", 0) == 0 ||
 				section.rfind("shader.", 0) == 0 ||
@@ -1528,6 +1569,8 @@ namespace RendererProfileConfig
 			return false;
 		}
 
+        if (!PresentationConfig::Validate(config, error)) return false;
+
         // Valid legacy Output profiles have already migrated during Load.
         // Any remaining member is malformed and must not disappear silently.
         for (const auto& section : config.GetSectionNames())
@@ -1567,25 +1610,6 @@ namespace RendererProfileConfig
 				return false;
 			}
 
-		struct GroupSpec
-		{
-			const char* name;
-			const char* section;
-			bool inheritRoot;
-		};
-		const GroupSpec specs[] = {
-			{ "input", "vprenderer.input", true },
-			{ "scaling", "vprenderer.scaling", true },
-            { "motion", "vprenderer.motion", true },
-			{ "display", "vprenderer", false },
-			{ "color", "vprenderer.color", true },
-
-			{ "viewport", "vprenderer.viewport", true },
-			{ "zoom", "vprenderer.zoom", true },
-            { "subtitles", "vprenderer.subtitles", true },
-			{ "queue", "queue", true },
-			{ "lldv", "lldv", true }
-		};
 		const std::set<std::string> expressionVariables = {
 			"eotf", "transfer", "colorspace", "primaries", "format",
 			"hdr_metadata", "hdr_inferred", "interlaced", "scan", "source_rate",
@@ -1593,8 +1617,9 @@ namespace RendererProfileConfig
 			"key", "ambient", "content", "source"
 		};
 
-		for (const GroupSpec& spec : specs)
+		for (const auto& spec : ProfileGroups::Definitions())
 		{
+            if (!spec.targetModel) continue;
 			const std::string section(spec.section);
             if (!ProfileSectionIdentity::Validate(config, section, error)) return false;
 			const auto* rootValues = config.GetSectionValues(section);
@@ -1764,7 +1789,28 @@ namespace RendererProfileConfig
 				 !ValidateExpressionVariables(base.whenExpression,
 					expressionVariables, "[" + prefix + baselineName + "] when=", error)))
 				return false;
-            const auto validateToneProfile = [&](const Profile& candidate, const std::string& owner) {
+            const auto validateOutputDisplayProfile = [&](const Profile& candidate, const std::string& owner) {
+				if (group.name != "output_display") return true;
+				const auto policy = candidate.settings.find("mode_policy");
+				const bool advanced = policy != candidate.settings.end() &&
+					ConfigFile::NormalizeName(policy->second) == "advanced";
+				const auto modesValue = candidate.settings.find("allowed_modes");
+				std::vector<DisplayOutputMode> modes;
+				std::string detail;
+				if (modesValue != candidate.settings.end() &&
+					!ParseDisplayOutputModeList(modesValue->second, modes, detail))
+				{
+					error = "[" + owner + "] allowed_modes is invalid: " + detail;
+					return false;
+				}
+				if (advanced && modes.empty())
+				{
+					error = "[" + owner + "] Advanced mode requires at least one allowed mode";
+					return false;
+				}
+				return true;
+			};
+			const auto validateToneProfile = [&](const Profile& candidate, const std::string& owner) {
                 if (group.name != "display" && group.name != "input") return true;
                 std::string key, detail;
                 const bool valid = ToneMappingTuning::Validate([&](const char* name) {
@@ -1777,7 +1823,8 @@ namespace RendererProfileConfig
                 if (!valid) error = "[" + owner + "] " + detail;
                 return valid;
             };
-            if (!validateToneProfile(base, namedBaseline ? prefix + baselineName : section)) return false;
+            if (!validateToneProfile(base, namedBaseline ? prefix + baselineName : section) ||
+				!validateOutputDisplayProfile(base, namedBaseline ? prefix + baselineName : section)) return false;
 			model.profiles.emplace(group.name + "." + baselineName, base);
 
 			for (const std::string& variant : variants)
@@ -1878,7 +1925,8 @@ namespace RendererProfileConfig
 					 !ValidateExpressionVariables(profile.whenExpression,
 						expressionVariables, "[" + variantSection + "] when=", error)))
 					return false;
-                if (!validateToneProfile(profile, variantSection)) return false;
+                if (!validateToneProfile(profile, variantSection) ||
+				!validateOutputDisplayProfile(profile, variantSection)) return false;
 				group.profiles.push_back(variant);
 				model.profiles.emplace(group.name + "." + variant,
 					std::move(profile));
@@ -1890,18 +1938,9 @@ namespace RendererProfileConfig
 		// profile families, but shader files are never inherited.  A root
 		// section, when present, is one ordinary selectable profile (and may
 		// intentionally contain no files, which is unconfigured/off at runtime).
-		const struct ShaderGroupSpec
-		{
-			const char* name;
-			const char* section;
-			bool multiSelection;
-			const char* expectedShaderType;
-		} shaderSpecs[] = {
-			{ "nls", "shader.nls", false, "nls" },
-			{ "standard_shaders", "shader.standard", true, "custom" }
-		};
-		for (const ShaderGroupSpec& spec : shaderSpecs)
-		{
+        for (const auto& spec : ProfileGroups::Definitions())
+        {
+            if (!spec.shader) continue;
 			const std::string rootSection(spec.section);
             if (!ProfileSectionIdentity::Validate(config, rootSection, error)) return false;
 			const std::string prefix = rootSection + ".";
@@ -2140,6 +2179,7 @@ namespace RendererProfileConfig
 		for (const std::string& section : config.GetSectionNames())
 			if (!MainConfigSchema::OwnsSection(section) &&
 				!RendererConfigView::OwnsSection(section) &&
+				section != "output_display" && section.rfind("output_display.", 0) != 0 &&
                 !ColorOutputProfileMigration::IsArchive(section) &&
                 !CalibrationProfileMigration::IsArchive(section) &&
 				section.rfind("actions.", 0) != 0 &&
@@ -2182,6 +2222,8 @@ namespace RendererProfileConfig
 			return ReadTarget(config, model, error);
 		model = {};
 		error.clear();
+        if (!PresentationConfig::Validate(config, error)) return false;
+
         // Valid legacy Output profiles have already migrated during Load.
         // Any remaining member is malformed and must not disappear silently.
         for (const auto& section : config.GetSectionNames())
@@ -2231,6 +2273,8 @@ namespace RendererProfileConfig
 		std::string value;
 		const std::vector<ConfigSchema::KeyRule> generalRules = {
 			ConfigSchema::Boolean("persist_profile_selection"),
+			ConfigSchema::Boolean("present_every_vsync"),
+            ConfigSchema::Integer("presentation_queue_depth", 1, PresentationConfig::MaximumDepth),
 			ConfigSchema::Choice("profile_update_mode",
 				{ "rebuild", "live", "never" }),
 			ConfigSchema::Boolean("live_profile_updates"),
@@ -2605,6 +2649,7 @@ namespace RendererProfileConfig
 			if (expectedSections.find(section) == expectedSections.end() &&
 				!MainConfigSchema::OwnsSection(section) &&
 				!RendererConfigView::OwnsSection(section) &&
+				section != "output_display" && section.rfind("output_display.", 0) != 0 &&
                 !ColorOutputProfileMigration::IsArchive(section) &&
                 !CalibrationProfileMigration::IsArchive(section))
 			{
@@ -3237,6 +3282,16 @@ namespace RendererProfileConfig
 		}
 		return true;
 	}
+
+    // Profiles already contain inherited settings after Read. An absent key
+    // preserves the legacy global target until Config migrates it on Save.
+    inline std::string ResolveOutputDisplayMonitor(const Model& model, const std::string& profileName)
+    {
+        const auto profile = model.profiles.find("output_display." + ConfigFile::NormalizeName(profileName));
+        if (profile == model.profiles.end()) return {};
+        const auto monitor = profile->second.settings.find("monitor");
+        return monitor == profile->second.settings.end() ? std::string() : ConfigFile::Trim(monitor->second);
+    }
 
 	inline bool ResolveLldv(const Model& model, const std::string& profileName,
 		ResolvedLldv& lldv, std::string& error)

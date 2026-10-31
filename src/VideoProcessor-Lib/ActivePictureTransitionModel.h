@@ -182,8 +182,8 @@ struct ActivePictureAxisEvidenceSet
 	int leftPictureNonBlackMinimum = -1, rightPictureNonBlackMinimum = -1;
 	bool verticalCropProfileEvaluated = false, verticalCropProfileClean = false;
     // Exact-current glyph exclusions are independently proved by the subtitle
-    // worker. Their strict profile retains two scan steps for filtered chroma;
-    // the ordinary unmasked profile keeps its existing one-step contract.
+    // worker. Both masked and ordinary strict profiles retain two scan steps
+    // for boundary uncertainty; ordinary evidence never gains glyph ownership.
     bool verticalCropGlyphExclusions = false;
 	// Outward padding retains uncertainty rows; it is never extra inward crop.
 	int verticalCropGuardTop = 0, verticalCropGuardBottom = 0;
@@ -195,7 +195,7 @@ struct ActivePictureAxisEvidenceSet
 	bool HasFailedBar() const { return horizontal.FailedBar() || vertical.FailedBar(); }
 	bool SupportsVerticalCropDespiteSideAmbiguity(const ActivePictureBounds& bounds) const
 	{
-        const int maxGuard=std::max(2,bounds.rasterHeight/540)*(verticalCropGlyphExclusions?2:1);
+        const int maxGuard=2*std::max(2,bounds.rasterHeight/540);
 		return horizontal.FailedBar() && horizontal.scanComplete &&
 			horizontal.reason == ActivePictureAxisReason::BAR_EDGE_REJECTED &&
 			vertical.state == ActivePictureAxisState::TRUSTED_BARS && vertical.scanComplete &&
@@ -337,6 +337,11 @@ public:
     // Presentation-only changes discard authority and votes exactly like Reset,
     // while retaining source-bound independent native facts for revalidation.
     void ResetPresentationState();
+    // Call only after a queue-only boundary has independently revalidated the
+    // exact native rectangle on the new source packet. Preserve native format
+    // facts, never pending votes, source identities or remembered-edge leases.
+    bool ResetForNativeQueueContinuity(const ActivePictureBounds& exactNativeBounds);
+
 	// Scene edits invalidate in-flight proof, not the last affirmative geometry.
 	// This prevents confirmations from straddling a cut while keeping the stable
 	// same-generation reference available to the frame-local presentation policy.

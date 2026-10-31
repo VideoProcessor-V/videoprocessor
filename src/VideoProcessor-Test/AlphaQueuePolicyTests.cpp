@@ -1,4 +1,4 @@
-#include "pch.h"
+﻿#include "pch.h"
 #include "CppUnitTest.h"
 
 #include <vprenderer/AlphaQueuePolicy.h>
@@ -118,6 +118,79 @@ namespace Tests
 			}
 		}
 
+		TEST_METHOD(PreparationIncludesOutwardTailBeyondConfiguredTwoFrameHorizon)
+		{
+			struct Frame { bool cadenceRepeat = false; };
+			const std::deque<Frame> queue(8);
+			const auto indices = AlphaQueuePolicy::SelectActivePicturePreparation(queue, 2, 8, 3);
+			Assert::IsTrue((indices == std::vector<size_t>{0, 1, 2, 3}));
+			const auto admission = AlphaQueuePolicy::SelectActivePicturePreview(queue, 2, 8);
+			Assert::AreEqual<size_t>(2, admission.effectiveFutureFrames);
+			Assert::IsTrue((admission.indices == std::vector<size_t>{0, 1, 2}));
+			Assert::AreEqual<size_t>(8, queue.size());
+		}
+
+		TEST_METHOD(PreparationWithDisabledArHorizonStillSelectsIndependentFutureSources)
+		{
+			struct Frame { bool cadenceRepeat = false; };
+			const std::deque<Frame> queue(5);
+			const auto indices = AlphaQueuePolicy::SelectActivePicturePreparation(queue, 0, 8, 3);
+			Assert::IsTrue((indices == std::vector<size_t>{1, 2, 3}));
+			Assert::IsTrue(AlphaQueuePolicy::SelectActivePicturePreview(queue, 0, 8).indices.empty());
+		}
+
+		TEST_METHOD(PreparationWithRepeatedHeadUsesOnlyNonrepeatFutureEntries)
+		{
+			struct Frame { bool cadenceRepeat = false; };
+			const std::deque<Frame> queue = {{true}, {false}, {true}, {false}, {false}, {false}};
+			const auto indices = AlphaQueuePolicy::SelectActivePicturePreparation(queue, 5, 8, 3);
+			Assert::IsTrue((indices == std::vector<size_t>{1, 3, 4}));
+			Assert::IsTrue(AlphaQueuePolicy::SelectActivePicturePreview(queue, 5, 8).indices.empty());
+		}
+
+		TEST_METHOD(PreparationDeduplicatesOverlappingPreviewAndOutwardWindows)
+		{
+			struct Frame { bool cadenceRepeat = false; };
+			const std::deque<Frame> queue(8);
+			const auto indices = AlphaQueuePolicy::SelectActivePicturePreparation(queue, 5, 8, 3);
+			Assert::IsTrue((indices == std::vector<size_t>{0, 1, 2, 3, 4, 5}));
+			Assert::AreEqual<size_t>(6, indices.size());
+		}
+
+		TEST_METHOD(PreparationShortQueuesNeverInventMissingFutureFrames)
+		{
+			struct Frame { bool cadenceRepeat = false; };
+			const std::deque<Frame> empty;
+			Assert::IsTrue(AlphaQueuePolicy::SelectActivePicturePreparation(empty, 2, 8, 3).empty());
+			const std::deque<Frame> currentOnly(1);
+			Assert::IsTrue((AlphaQueuePolicy::SelectActivePicturePreparation(currentOnly, 2, 8, 3) ==
+				std::vector<size_t>{0}));
+			Assert::IsTrue(AlphaQueuePolicy::SelectActivePicturePreparation(currentOnly, 0, 8, 3).empty());
+			const std::deque<Frame> shortQueue = {{false}, {true}, {false}};
+			Assert::IsTrue((AlphaQueuePolicy::SelectActivePicturePreparation(shortQueue, 2, 8, 3) ==
+				std::vector<size_t>{0, 2}));
+		}
+
+		TEST_METHOD(PreparationWithoutOutwardRequirementKeepsPreviewClamping)
+		{
+			struct Frame { bool cadenceRepeat = false; };
+			const std::deque<Frame> queue(12);
+			Assert::IsTrue((AlphaQueuePolicy::SelectActivePicturePreparation(queue, 99, 2, 0) ==
+				std::vector<size_t>{0, 1, 2}));
+			Assert::IsTrue(AlphaQueuePolicy::SelectActivePicturePreparation(queue, 0, 8, 0).empty());
+		}
+
+		TEST_METHOD(PreparationCountsFutureSourcesRatherThanRepeatQueuePositions)
+		{
+			struct Frame { bool cadenceRepeat = false; };
+			const std::deque<Frame> queue = {{false}, {true}, {false}, {true}, {false}, {false}};
+			const auto indices = AlphaQueuePolicy::SelectActivePicturePreparation(queue, 1, 8, 3);
+			Assert::IsTrue((indices == std::vector<size_t>{0, 2, 4, 5}));
+			const auto admission = AlphaQueuePolicy::SelectActivePicturePreview(queue, 1, 8);
+			Assert::IsTrue((admission.indices == std::vector<size_t>{0, 2}));
+			Assert::AreEqual<size_t>(1, admission.effectiveFutureFrames);
+		}
+
 		TEST_METHOD(OmittedOverrideUsesSafeAlphaDefault)
 		{
 			Assert::AreEqual<size_t>(4,
@@ -216,6 +289,45 @@ namespace Tests
 			Assert::IsTrue(AlphaQueuePolicy::ShouldRecoverBacklog(
 				8, 2, 140.0, 20.0, 23.976));
 		}
+
+        TEST_METHOD(MotionOutputGroupingDoesNotRetireHealthyReserve)
+        {
+            const double sourceHz = 24000.0 / 1001.0;
+            const double sourcePeriod = 1000.0 / sourceHz;
+            const double displayPeriod = 1000.0 / (60000.0 / 1001.0);
+            // Long/short display groups alternate. The long group can have a
+            // transient sixth source; the next short group consumes the excess.
+            for (int cycle = 0; cycle < 60; ++cycle) {
+                const bool longGroup = (cycle % 2) == 0;
+                Assert::IsFalse(AlphaQueuePolicy::ShouldRecoverBacklog(
+                    longGroup ? 6 : 5, 5,
+                    (longGroup ? 5.1 : 4.9) * sourcePeriod,
+                    (longGroup ? 3 : 2) * displayPeriod, sourceHz));
+            }
+        }
+
+        TEST_METHOD(ReserveAwareRecoveryStillBoundsSustainedAgeAndRealStalls)
+        {
+            const double hz = 24000.0 / 1001.0;
+            const double limit = AlphaQueuePolicy::StaleBacklogAgeThresholdMs(hz, 5);
+            Assert::AreEqual(250.25, limit, 0.001);
+            Assert::IsFalse(AlphaQueuePolicy::ShouldRecoverBacklog(6, 5, limit-0.01, 50.05, hz));
+            Assert::IsTrue(AlphaQueuePolicy::ShouldRecoverBacklog(6, 5, limit, 50.05, hz));
+            Assert::IsTrue(AlphaQueuePolicy::ShouldRecoverBacklog(6, 5, 210.0,
+                AlphaQueuePolicy::RenderStallThresholdMs(hz), hz));
+            Assert::IsFalse(AlphaQueuePolicy::ShouldRecoverBacklog(5, 5, 1000.0, 1000.0, hz));
+        }
+
+        TEST_METHOD(StaleAgeAccountsForReserveAtAllSourceRates)
+        {
+            Assert::AreEqual(125.125, AlphaQueuePolicy::StaleBacklogAgeThresholdMs(24000.0/1001.0, 2), 0.001);
+            Assert::AreEqual(100.0, AlphaQueuePolicy::StaleBacklogAgeThresholdMs(60.0, 5), 0.001);
+            Assert::AreEqual(180.0, AlphaQueuePolicy::StaleBacklogAgeThresholdMs(50.0, 8), 0.001);
+            Assert::AreEqual(150.0, AlphaQueuePolicy::StaleBacklogAgeThresholdMs(0.0, 8), 0.001);
+            Assert::AreEqual(100.0, AlphaQueuePolicy::StaleBacklogAgeThresholdMs(60.0, 0), 0.001);
+            Assert::AreEqual<size_t>(6, AlphaQueuePolicy::HardCapacity(6));
+            Assert::AreEqual<size_t>(5, AlphaQueuePolicy::ResolveDesiredDepth(5));
+        }
 
 		TEST_METHOD(ConfigValueRequiresPositiveDecimalInteger)
 		{

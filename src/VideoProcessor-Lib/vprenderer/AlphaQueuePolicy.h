@@ -45,6 +45,27 @@ namespace AlphaQueuePolicy
 		return result;
 	}
 
+	// Preparation may cover the independent next-source outward certificate even
+	// when the configured AR admission horizon is shorter or disabled. This is
+	// only a union of already buffered entries: no extra queue wait or proof vote.
+	template<typename Queue>
+	std::vector<size_t> SelectActivePicturePreparation(const Queue& queue,
+		size_t configured, size_t maxLookahead, size_t requiredOutwardFutureFrames)
+	{
+		auto indices = SelectActivePicturePreview(queue, configured, maxLookahead).indices;
+		size_t outwardFrames = 0;
+		for (size_t index = 1; index < queue.size() &&
+			outwardFrames < requiredOutwardFutureFrames; ++index)
+		{
+			if (queue[index].cadenceRepeat) continue;
+			indices.push_back(index);
+			++outwardFrames;
+		}
+		std::sort(indices.begin(), indices.end());
+		indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+		return indices;
+	}
+
 	inline size_t NormalizeDesiredDepth(size_t value)
 	{
 		return std::max<size_t>(1, value);
@@ -123,11 +144,18 @@ namespace AlphaQueuePolicy
 		return std::max(MINIMUM_RENDER_STALL_MS, framePeriodMs * 2.0);
 	}
 
-	inline double StaleBacklogAgeThresholdMs(double frameRateHz)
+	inline double StaleBacklogAgeThresholdMs(double frameRateHz, size_t desiredDepth = 1)
 	{
 		const double framePeriodMs =
 			1000.0 / ValidFrameRateOrDefault(frameRateHz);
-		return std::max(MINIMUM_STALE_BACKLOG_AGE_MS, framePeriodMs * 3.0);
+		// Age includes the intentional lookahead reserve. A normal 24-to-60 Hz
+        // three-output cycle can temporarily leave one extra queued source.
+        // Permit that bounded phase excursion without changing the target depth;
+        // a genuine two-source-period render stall still recovers immediately.
+        const double reserveAgeMs =
+            (static_cast<double>(NormalizeDesiredDepth(desiredDepth)) + 1.0) * framePeriodMs;
+        return std::max(std::max(MINIMUM_STALE_BACKLOG_AGE_MS, framePeriodMs * 3.0),
+            reserveAgeMs);
 	}
 
 	inline bool ShouldRecoverBacklog(size_t queueDepth, size_t desiredDepth,
@@ -136,7 +164,7 @@ namespace AlphaQueuePolicy
 		if (queueDepth <= NormalizeDesiredDepth(desiredDepth))
 			return false;
 		return renderCycleMs >= RenderStallThresholdMs(frameRateHz) ||
-			oldestQueuedAgeMs >= StaleBacklogAgeThresholdMs(frameRateHz);
+			oldestQueuedAgeMs >= StaleBacklogAgeThresholdMs(frameRateHz, desiredDepth);
 	}
 
 	inline bool TryParsePositiveSize(const std::string& value, size_t& parsedValue)

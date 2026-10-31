@@ -9,6 +9,7 @@
 #pragma once
 
 #include "DebugLogRetention.h"
+#include "DebugLogAsync.h"
 
 #include <algorithm>
 #include <chrono>
@@ -23,8 +24,8 @@
 #include <deque>
 #include <vector>
 #include <thread>
-#include <condition_variable>
 #include <atomic>
+#include <cstdio>
 
 
 /**
@@ -54,22 +55,26 @@ public:
 	template<typename... Args>
 	static void Log(const char* format, Args... args)
 	{
-			
-		if (true) {  // Changed from false to enable logging during HDMI resync debugging
-			// Format message immediately (fast operation)
-			char buffer[4096];
-			snprintf(buffer, sizeof(buffer), format, args...);
-			ExternalSink sink = GetExternalSink().load(std::memory_order_acquire);
-			if (sink)
-			{
-				sink(buffer);
-				return;
-			}
-
-			// Queue for background writing (non-blocking)
-			QueueMessage(buffer);
+		ExternalSink sink = GetExternalSink().load(std::memory_order_acquire);
+		if (!sink && !GetLoggingEnabled().load(std::memory_order_acquire))
+			return;
+		// Preserve printf and plugin callback lifetimes: pointer arguments cannot
+		// be deferred safely. Formatted output is capped at 4096 bytes; timestamp
+		// formatting and every file operation belong to the writer thread.
+		char buffer[4096];
+		const int length = std::snprintf(buffer, sizeof(buffer), format, args...);
+		buffer[sizeof(buffer) - 1] = '\0';
+		if (length < 0) buffer[0] = '\0';
+		if (sink)
+		{
+			sink(buffer);
+			return;
 		}
+		QueueMessage(buffer, length >= static_cast<int>(sizeof(buffer)));
 	}
+
+	using Metrics = DebugLogAsync::Metrics;
+	static Metrics GetMetrics() { return GetTransport().Snapshot(); }
 
 	/**
 	 * The most recent messages (newest last), each with its local time, no
@@ -122,9 +127,13 @@ public:
 			"VP log retention: using default 10 total files",
 		bool enhancedLogging = false)
 	{
-		std::lock_guard<std::mutex> lock(GetQueueMutex());
+		std::lock_guard<std::mutex> lock(GetLifecycleMutex());
 		if (!GetWriterThread().joinable())
 		{
+			GetLoggingEnabled().store(false, std::memory_order_release);
+			// Allocate/initialize bounded storage during startup, before producers
+			// can observe logging enabled and before any session file I/O.
+			auto& transport = GetTransport();
 			GetEnhancedLoggingEnabled().store(
 				enhancedLogging, std::memory_order_release);
 			std::vector<std::string> initializationDiagnostics;
@@ -160,8 +169,6 @@ public:
 				GetLoggingEnabled().store(false, std::memory_order_release);
 				return;
 			}
-			GetLoggingEnabled().store(true, std::memory_order_release);
-
 			std::ofstream file(logPath, std::ios::app);
 			if (file.is_open())
 			{
@@ -183,16 +190,19 @@ public:
 				file.close();
 			}
 			else
-				GetLoggingEnabled().store(false, std::memory_order_release);
+				return;
 
-			// Clear any pending messages from previous run
-			std::queue<LogMessage> emptyQueue;
-			std::swap(GetMessageQueue(), emptyQueue);
-
-			if (GetLoggingEnabled().load(std::memory_order_acquire))
+			transport.Open();
+			GetLoggingEnabled().store(true, std::memory_order_release);
+			try
 			{
-				GetShutdownFlag() = false;
 				GetWriterThread() = std::thread(WriterThreadProc);
+			}
+			catch (...)
+			{
+				GetLoggingEnabled().store(false, std::memory_order_release);
+				transport.Close();
+				throw;
 			}
 		}
 	}
@@ -202,16 +212,13 @@ public:
 	 */
 	static void Shutdown()
 	{
-		{
-			std::lock_guard<std::mutex> lock(GetQueueMutex());
-			GetShutdownFlag() = true;
-		}
-		GetConditionVariable().notify_one();
-
-		if (GetWriterThread().joinable())
-		{
-			GetWriterThread().join();
-		}
+		// Lifecycle callers may wait for disk completion. Producers never take
+		// this mutex, and closing admission guarantees every accepted record is
+		// drained before the writer exits.
+		std::lock_guard<std::mutex> lock(GetLifecycleMutex());
+		GetLoggingEnabled().store(false, std::memory_order_release);
+		GetTransport().Close();
+		if (GetWriterThread().joinable()) GetWriterThread().join();
 	}
 
 	// Extra telemetry artifacts are intentionally opt-in. Normal logging writes
@@ -222,39 +229,139 @@ public:
 	}
 
 private:
-	struct LogMessage
-	{
-		std::string message;
-		std::time_t timestamp;
-		
-		LogMessage(const std::string& msg) : message(msg), timestamp(std::time(nullptr)) {}
-	};
+	friend struct DebugLogTestAccess;
+	using Transport = DebugLogAsync::Transport<>;
 
-	// Batch configuration
-	static constexpr size_t BATCH_SIZE = 50;              // Flush after 50 messages
-	static constexpr int FLUSH_INTERVAL_MS = 100;         // Or every 100ms, whichever comes first
-
-	static void QueueMessage(const std::string& message)
+	static void QueueMessage(const char* message, bool truncated)
 	{
 		// The crash state's recent lines are kept even with file logging off
-		// (owner 2026-10-15: a crash report is most useful exactly then).
+		// (owner 2026-10-15). VP-V: kept on top of Bill's async transport.
 		RememberRecent(message);
-		if (!GetLoggingEnabled().load(std::memory_order_acquire))
-			return;
-
-		{
-			std::lock_guard<std::mutex> lock(GetQueueMutex());
-			
-			// Prevent queue from growing too large (drop oldest messages)
-			if (GetMessageQueue().size() >= 1000)
-			{
-				GetMessageQueue().pop();
-			}
-			
-			GetMessageQueue().emplace(message);
-		}
-		GetConditionVariable().notify_one();
+		if (!GetLoggingEnabled().load(std::memory_order_acquire)) return;
+		GetTransport().TryPublish(message, std::time(nullptr), truncated);
 	}
+
+	struct FileSink
+	{
+		std::ofstream& file;
+		std::unique_ptr<char[]> buffer{std::make_unique<char[]>(Transport::WriterBufferBytes)};
+		std::time_t cachedTimestamp = static_cast<std::time_t>(-1);
+		char timestampText[32]{};
+		bool haveTimestamp = false;
+		// VP-V (bug hunt 2026-10-17, kept on top of Bill's transport): in-session size
+		// rollover (DebugLogRetention::RollOver) and a back-off reopen after a failed rollover.
+		std::string path;
+		unsigned long long bytesWritten = 0;
+		bool reopenPending = false;
+		unsigned long long nextReopenTick = 0;
+		unsigned long long reopenBackoffMs = 250;
+		explicit FileSink(std::ofstream& output, const std::string& logPath)
+			: file(output), path(logPath)
+		{
+			WIN32_FILE_ATTRIBUTE_DATA data = {};
+			if (GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &data))
+				bytesWritten = (static_cast<unsigned long long>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+		}
+		void TryReopen()
+		{
+			if (!reopenPending || GetTickCount64() < nextReopenTick) return;
+			file.clear();
+			file.open(path, std::ios::app);
+			if (file.is_open()) { reopenPending = false; reopenBackoffMs = 250; }
+			else
+			{
+				nextReopenTick = GetTickCount64() + reopenBackoffMs;
+				reopenBackoffMs = (std::min)(reopenBackoffMs * 2, 30000ULL);
+			}
+		}
+		void MaybeRollOver()
+		{
+			if (bytesWritten < DebugLogRetention::ROLLOVER_BYTES ||
+				GetEnhancedLoggingEnabled().load(std::memory_order_acquire))
+				return;
+			file.flush();
+			file.close();
+			std::vector<std::string> diagnostics;
+			DebugLogRetention::RollOver(path, DebugLogRetention::ROLLOVER_KEEP, diagnostics);
+			file.clear();
+			file.open(path, std::ios::app);
+			bytesWritten = 0;
+			if (!file.is_open())
+			{
+				reopenPending = true;
+				nextReopenTick = GetTickCount64() + reopenBackoffMs;
+				return;
+			}
+			for (const std::string& diagnostic : diagnostics)
+			{
+				file << diagnostic << '\n';
+				bytesWritten += diagnostic.size() + 1;
+			}
+			file.flush();
+		}
+		size_t WriteBatch(const Transport::Record* records, size_t count)
+		{
+			TryReopen();
+			if (!file.is_open()) return 0;
+			size_t used = 0;
+			for (size_t index = 0; index < count; ++index)
+			{
+				const auto& record = records[index];
+				if (!haveTimestamp || record.timestamp != cachedTimestamp)
+				{
+					struct tm local{};
+					localtime_s(&local, &record.timestamp);
+					std::strftime(timestampText, sizeof(timestampText), "%Y-%m-%d %H:%M:%S", &local);
+					cachedTimestamp = record.timestamp;
+					haveTimestamp = true;
+				}
+				const size_t timestampLength = std::strlen(timestampText);
+				std::memcpy(buffer.get() + used, timestampText, timestampLength);
+				used += timestampLength;
+				std::memcpy(buffer.get() + used, " | ", 3); used += 3;
+				std::memcpy(buffer.get() + used, record.message, record.length); used += record.length;
+				buffer[used++] = '\n';
+			}
+			file.write(buffer.get(), static_cast<std::streamsize>(used));
+			if (!file.good()) return 0;
+			bytesWritten += used;
+			MaybeRollOver();
+			return used;
+		}
+		void Flush() { file.flush(); }
+		size_t Report(const Metrics& metrics)
+		{
+			Transport::Record record;
+			record.timestamp = std::time(nullptr);
+			const int length = std::snprintf(record.message, sizeof(record.message),
+				"VP async log telemetry: process=%lu transport=%p enqueued=%llu processed=%llu "
+				"dropped_full=%llu dropped_contended=0 truncated=%llu queue=%llu high_water=%llu "
+				"capacity=%llu memory_bytes=%llu pool_in_use=%llu pool_high_water=%llu "
+				"write_calls=%llu write_bytes=%llu write_failures=%llu write_total_us=%llu write_peak_us=%llu "
+				"flushes=%llu flush_total_us=%llu flush_peak_us=%llu overflow=drop_newest admission=atomic_pool batch=256 flush_interval_ms=250",
+				GetCurrentProcessId(), static_cast<void*>(&GetTransport()),
+				static_cast<unsigned long long>(metrics.enqueued),
+				static_cast<unsigned long long>(metrics.processed),
+				static_cast<unsigned long long>(metrics.droppedFull),
+				static_cast<unsigned long long>(metrics.truncated),
+				static_cast<unsigned long long>(metrics.queueDepth),
+				static_cast<unsigned long long>(metrics.highWater),
+				static_cast<unsigned long long>(metrics.capacity),
+				static_cast<unsigned long long>(metrics.memoryBytes),
+				static_cast<unsigned long long>(metrics.poolInUse),
+				static_cast<unsigned long long>(metrics.poolHighWater),
+				static_cast<unsigned long long>(metrics.writeCount),
+				static_cast<unsigned long long>(metrics.writeBytes),
+				static_cast<unsigned long long>(metrics.writeFailures),
+				static_cast<unsigned long long>(metrics.writeTotalUs),
+				static_cast<unsigned long long>(metrics.writePeakUs),
+				static_cast<unsigned long long>(metrics.flushCount),
+				static_cast<unsigned long long>(metrics.flushTotalUs),
+				static_cast<unsigned long long>(metrics.flushPeakUs));
+			record.length = length > 0 ? static_cast<uint32_t>((std::min)(length, static_cast<int>(sizeof(record.message) - 1))) : 0;
+			return WriteBatch(&record, 1);
+		}
+	};
 
 	struct RecentLine
 	{
@@ -289,189 +396,34 @@ private:
 
 	static void WriterThreadProc()
 	{
-		std::string logPath = GetLogFilePath();
-		
-		// Open file once for the entire session (append mode after initialization truncate)
-		std::ofstream file(logPath, std::ios::app);
+		std::ofstream file(GetLogFilePath(), std::ios::app);
 		if (!file.is_open())
 		{
-			// Can't write to log, just return
+			GetLoggingEnabled().store(false, std::memory_order_release);
+			GetTransport().Close();
 			return;
 		}
-
-		auto lastFlushTime = std::chrono::steady_clock::now();
-		size_t messagesSinceFlush = 0;
-		// Bug hunt 2026-10-17: size of the active log, for the rollover.
-		unsigned long long bytesWritten = 0;
-		// Bug hunt 2 (2026-10-17, L3): a failed reopen after the rollover (an
-		// antivirus or indexer holding the file) used to drop every later
-		// message for the rest of the session. Retry with a doubling back-off
-		// and log the gap once the file reopens.
-		bool reopenPending = false;
-		unsigned long long droppedWhileClosed = 0;
-		auto nextReopenAttempt = std::chrono::steady_clock::now();
-		long long reopenBackoffMs = FLUSH_INTERVAL_MS;
-		{
-			WIN32_FILE_ATTRIBUTE_DATA data = {};
-			if (GetFileAttributesExA(logPath.c_str(), GetFileExInfoStandard, &data))
-				bytesWritten = (static_cast<unsigned long long>(data.nFileSizeHigh) << 32) |
-					data.nFileSizeLow;
-		}
-
-		while (true)
-		{
-			std::unique_lock<std::mutex> lock(GetQueueMutex());
-			
-			// Wait for messages or shutdown signal with timeout for periodic flushing
-			auto waitResult = GetConditionVariable().wait_for(
-				lock,
-				std::chrono::milliseconds(FLUSH_INTERVAL_MS),
-				[]() {
-					return !GetMessageQueue().empty() || GetShutdownFlag();
-				}
-			);
-
-			// Process all pending messages
-			while (!GetMessageQueue().empty())
-			{
-				LogMessage msg = GetMessageQueue().front();
-				GetMessageQueue().pop();
-				
-				// Release lock while writing to file
-				lock.unlock();
-				
-				if (reopenPending && !file.is_open() &&
-					std::chrono::steady_clock::now() >= nextReopenAttempt)
-				{
-					file.clear();
-					file.open(logPath, std::ios::app);
-					if (file.is_open())
-					{
-						struct tm reopenTm;
-						localtime_s(&reopenTm, &msg.timestamp);
-						file << std::put_time(&reopenTm, "%Y-%m-%d %H:%M:%S") <<
-							" | Log reopened after a failed rollover reopen; " <<
-							droppedWhileClosed << " message(s) were not written" << std::endl;
-						reopenPending = false;
-						droppedWhileClosed = 0;
-						reopenBackoffMs = FLUSH_INTERVAL_MS;
-					}
-					else
-					{
-						nextReopenAttempt = std::chrono::steady_clock::now() +
-							std::chrono::milliseconds(reopenBackoffMs);
-						reopenBackoffMs = (std::min)(reopenBackoffMs * 2, 30000LL);
-					}
-				}
-				if (reopenPending && !file.is_open())
-					++droppedWhileClosed;
-
-				// Write to file (file is already open)
-				if (file.is_open())
-				{
-					struct tm tm;
-					localtime_s(&tm, &msg.timestamp);
-					
-					file << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << " | " << msg.message << "\n";
-					messagesSinceFlush++;
-					bytesWritten += msg.message.size() + 23;  // timestamp, separator, newline
-
-					// Bug hunt 2026-10-17: in-session size rollover (see
-					// DebugLogRetention::RollOver). Enhanced logging keeps its
-					// no-rotation forensic contract.
-					if (bytesWritten >= DebugLogRetention::ROLLOVER_BYTES &&
-						!GetEnhancedLoggingEnabled().load(std::memory_order_acquire))
-					{
-						file.flush();
-						file.close();
-						std::vector<std::string> diagnostics;
-						DebugLogRetention::RollOver(
-							logPath, DebugLogRetention::ROLLOVER_KEEP, diagnostics);
-						file.open(logPath, std::ios::app);
-						bytesWritten = 0;
-						messagesSinceFlush = 0;
-						lastFlushTime = std::chrono::steady_clock::now();
-						if (!file.is_open())
-						{
-							reopenPending = true;
-							nextReopenAttempt = lastFlushTime +
-								std::chrono::milliseconds(reopenBackoffMs);
-						}
-						if (file.is_open())
-						{
-							for (const std::string& diagnostic : diagnostics)
-								file << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") <<
-									" | " << diagnostic << "\n";
-							file.flush();
-						}
-					}
-
-					// Flush periodically to ensure data is written
-					if (file.is_open() && messagesSinceFlush >= BATCH_SIZE)
-					{
-						file.flush();
-						messagesSinceFlush = 0;
-						lastFlushTime = std::chrono::steady_clock::now();
-					}
-				}
-				
-				// Re-acquire lock for next iteration
-				lock.lock();
-			}
-
-			// Flush if timeout occurred (periodic flush interval)
-			auto now = std::chrono::steady_clock::now();
-			if (file.is_open() && messagesSinceFlush > 0 &&
-				std::chrono::duration_cast<std::chrono::milliseconds>(now - lastFlushTime).count() >= FLUSH_INTERVAL_MS)
-			{
-				file.flush();
-				messagesSinceFlush = 0;
-				lastFlushTime = now;
-			}
-
-			// Exit if shutdown requested and queue is empty
-			if (GetShutdownFlag() && GetMessageQueue().empty())
-			{
-				// Final flush and close
-				if (file.is_open())
-				{
-					file.flush();
-					file.close();
-				}
-				break;
-			}
-		}
+		FileSink sink{file, GetLogFilePath()};
+		GetTransport().Run(sink);
+		file.close(); // Also outside every producer bookkeeping section.
 	}
 
-	// Static member accessors (function-local statics for initialization safety)
-	static std::mutex& GetQueueMutex()
+	static Transport& GetTransport()
 	{
-		static std::mutex s_queueMutex;
-		return s_queueMutex;
+		static Transport transport;
+		return transport;
 	}
 
-	static std::queue<LogMessage>& GetMessageQueue()
+	static std::mutex& GetLifecycleMutex()
 	{
-		static std::queue<LogMessage> s_messageQueue;
-		return s_messageQueue;
-	}
-
-	static std::condition_variable& GetConditionVariable()
-	{
-		static std::condition_variable s_condVar;
-		return s_condVar;
+		static std::mutex mutex;
+		return mutex;
 	}
 
 	static std::thread& GetWriterThread()
 	{
-		static std::thread s_writerThread;
-		return s_writerThread;
-	}
-
-	static std::atomic<bool>& GetShutdownFlag()
-	{
-		static std::atomic<bool> s_shutdownFlag(false);
-		return s_shutdownFlag;
+		static std::thread writer;
+		return writer;
 	}
 
 	static std::atomic<ExternalSink>& GetExternalSink()

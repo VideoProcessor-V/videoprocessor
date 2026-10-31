@@ -4,6 +4,9 @@
 #include <libplacebo/shaders/custom.h>
 #include <cstring>
 #include <string>
+#include <array>
+#include <unordered_map>
+#include <functional>
 #include <libplacebo/renderer.h>
 #include <libplacebo/colorspace.h>
 
@@ -16,12 +19,17 @@ inline SubtitleGaussianRegion ComputeSubtitleGaussianRegion(const SubtitleCutPas
     SubtitleGaussianRegion r;
     if(!g.valid || mode!=5 || !std::isfinite(radius) || radius<=0)return r;
     radius=(std::min)(radius,30.0f);r.active=true;r.step=radius>=4?2.0f:1.0f;
+    const bool selectedPicture=g.displayPictureRight>g.displayPictureLeft &&
+        g.displayPictureBottom>g.displayPictureTop;
+    const int displayTop=selectedPicture?g.displayPictureTop:g.pictureTop;
+    const int displayBottom=selectedPicture?g.displayPictureBottom:g.pictureBottom;
     float left=float(g.destination.left)-6,right=float(g.destination.right)+6;
-    float top=float(g.extendToBar && g.fromTopBar ? (std::min)(g.destination.top,g.pictureTop) : g.destination.top);
-    float bottom=float(g.extendToBar && !g.fromTopBar ? (std::max)(g.destination.bottom,g.pictureBottom) : g.destination.bottom);
-    if(g.generatedCleanup.Valid()) {
-        left=(std::min)(left,float(g.generatedCleanup.left));right=(std::max)(right,float(g.generatedCleanup.right));
-        top=(std::min)(top,float(g.generatedCleanup.top));bottom=(std::max)(bottom,float(g.generatedCleanup.bottom));
+    float top=float(g.extendToBar && g.fromTopBar ? (std::min)(g.destination.top,displayTop) : g.destination.top);
+    float bottom=float(g.extendToBar && !g.fromTopBar ? (std::max)(g.destination.bottom,displayBottom) : g.destination.bottom);
+    const auto cleanup=g.generatedCleanupExclusion.Valid()?g.generatedCleanupExclusion:g.generatedCleanup;
+    if(cleanup.Valid()) {
+        left=(std::min)(left,float(cleanup.left));right=(std::max)(right,float(cleanup.right));
+        top=(std::min)(top,float(cleanup.top));bottom=(std::max)(bottom,float(cleanup.bottom));
     }
     const float halo=std::ceil(radius)+2;
     r.left=std::floor((left-halo)/r.step)*r.step;r.top=std::floor((top-halo)/r.step)*r.step;
@@ -29,6 +37,25 @@ inline SubtitleGaussianRegion ComputeSubtitleGaussianRegion(const SubtitleCutPas
     return r;
 }
 
+inline pl_rect2d ComputeSubtitleLayerBounds(const SubtitleCutPasteGeometry& g,
+    int width,int height)
+{
+    pl_rect2d bounds{};
+    if(!g.valid || !g.destination.Valid() || width<=0 || height<=0)return bounds;
+    const bool selectedPicture=g.displayPictureRight>g.displayPictureLeft &&
+        g.displayPictureBottom>g.displayPictureTop;
+    const int displayTop=selectedPicture?g.displayPictureTop:g.pictureTop;
+    const int displayBottom=selectedPicture?g.displayPictureBottom:g.pictureBottom;
+    // The shader extends six pixels horizontally and antialiases the panel.
+    // Include the two-pixel bar-facing sampling overlap as well as panel AA.
+    bounds.x0=(std::max)(0,g.destination.left-8);
+    bounds.x1=(std::min)(width,g.destination.right+8);
+    bounds.y0=(std::max)(0,(g.extendToBar && g.fromTopBar?
+        (std::min)(g.destination.top,displayTop):g.destination.top)-2);
+    bounds.y1=(std::min)(height,(g.extendToBar && !g.fromTopBar?
+        (std::max)(g.destination.bottom,displayBottom):g.destination.bottom)+2);
+    return bounds;
+}
 // MAIN is libplacebo's combined RGB stage, before scaling and output color
 // management. Relocation reads the complete raster before restoring the viewport crop.
 // The caller owns this parsed hook and destroys it with pl_mpv_user_shader_destroy.
@@ -39,6 +66,11 @@ inline const pl_hook* CreateSubtitleCutPasteHook(pl_gpu gpu)
 //!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
+0.0
+//!PARAM composition_phase
+//!TYPE DYNAMIC float
+//!MINIMUM 0.0
+//!MAXIMUM 2.0
 0.0
 //!PARAM source_left
 //!TYPE DYNAMIC float
@@ -125,6 +157,16 @@ inline const pl_hook* CreateSubtitleCutPasteHook(pl_gpu gpu)
 //!MINIMUM 0.0
 //!MAXIMUM 65536.0
 0.0
+//!PARAM display_picture_top
+//!TYPE DYNAMIC float
+//!MINIMUM 0.0
+//!MAXIMUM 65536.0
+0.0
+//!PARAM display_picture_bottom
+//!TYPE DYNAMIC float
+//!MINIMUM 0.0
+//!MAXIMUM 65536.0
+0.0
 //!PARAM content_left
 //!TYPE DYNAMIC float
 //!MINIMUM 0.0
@@ -148,7 +190,7 @@ inline const pl_hook* CreateSubtitleCutPasteHook(pl_gpu gpu)
 //!PARAM cleanup_fill_mode
 //!TYPE DYNAMIC float
 //!MINIMUM 0.0
-//!MAXIMUM 1.0
+//!MAXIMUM 3.0
 0.0
 //!PARAM generated_clean_left
 //!TYPE DYNAMIC float
@@ -351,6 +393,52 @@ inline const pl_hook* CreateSubtitleCutPasteHook(pl_gpu gpu)
 //!MAXIMUM 2.0
 1.0
 )GLSL";
+    // Fixed source for every geometry. Native y selects one of 128 bounded
+    // row slots through a balanced tree (seven branches, no per-pixel scan).
+    const auto contourParameter=[](const std::string& name) {
+        return "\n//!PARAM "+name+"\n//!TYPE DYNAMIC float\n//!MINIMUM 0.0\n//!MAXIMUM 65536.0\n0.0\n";
+    };
+    std::string contourParameters;
+    for(const char* name:{"cleanup_row_top","cleanup_row_count","cleanup_exclusion_left",
+        "cleanup_exclusion_top","cleanup_exclusion_right","cleanup_exclusion_bottom"})
+        contourParameters+=contourParameter(name);
+    for(unsigned row=0;row<128;++row)for(const char* side:{"left","right"})
+        contourParameters+=contourParameter("cleanup_row_"+std::to_string(row)+"_"+side);
+    std::function<std::string(unsigned,unsigned)> rowBranch;
+    rowBranch=[&](unsigned first,unsigned count)->std::string {
+        if(count==1)return "return vec2(cleanup_row_"+std::to_string(first)+"_left,cleanup_row_"+
+            std::to_string(first)+"_right);\n";
+        const unsigned middle=first+count/2;
+        return "if(row<"+std::to_string(middle)+") {"+rowBranch(first,count/2)+"} else {"+
+            rowBranch(middle,count/2)+"}\n";
+    };
+    const std::string contourFunctions="vec2 subtitleCleanupRow(int row) {"+rowBranch(0,128)+R"GLSL(
+}
+bool subtitleInGeneratedCleanup(vec2 p) {
+    if(cleanup_row_count>0.5) {
+        int row=int(floor(p.y)-cleanup_row_top);
+        if(row<0 || float(row)>=cleanup_row_count)return false;
+        vec2 span=subtitleCleanupRow(row);
+        return span.y>span.x && p.x>=span.x && p.x<span.y;
+    }
+    return p.x>=generated_clean_left && p.x<generated_clean_right &&
+        p.y>=generated_clean_top && p.y<generated_clean_bottom;
+}
+bool subtitleCleanupTouchesSample(vec2 p) {
+    if(cleanup_row_count>0.5) {
+        for(int tap=0;tap<2;++tap) {
+            int row=int(floor(p.y+(tap==0?-0.5:0.5))-cleanup_row_top);
+            if(row<0 || float(row)>=cleanup_row_count)continue;
+            vec2 span=subtitleCleanupRow(row);
+            if(span.y>span.x && p.x>span.x-0.5 && p.x<span.y+0.5)return true;
+        }
+        return false;
+    }
+    return generated_clean_right>generated_clean_left && generated_clean_bottom>generated_clean_top &&
+        p.x>generated_clean_left-0.5 && p.x<generated_clean_right+0.5 &&
+        p.y>generated_clean_top-0.5 && p.y<generated_clean_bottom+0.5;
+}
+)GLSL";
     static const char commonPrefix[]=R"GLSL(
 // SDR linear values use reference white=1; PQ uses 203 nits=1.
 // HLG uses scene-linear values with nominal reference white at signal 0.75.
@@ -409,7 +497,7 @@ float subtitleGlyphAlpha(vec3 rgb) {
 // an upright strip outside all measured card and glyph bounds; mirror remains
 // the fallback. Preserve the black bar and feather the footprint's edges.
 float subtitleSafeDonorEdge(bool fromTop) {
-    float edge=fromTop ? generated_clean_bottom : generated_clean_top;
+    float edge=fromTop ? cleanup_exclusion_bottom : cleanup_exclusion_top;
     edge=fromTop ? max(edge,source_bottom) : min(edge,source_top);
     edge=fromTop ? max(edge,content_bottom) : min(edge,content_top);
 
@@ -422,7 +510,7 @@ float subtitleSafeDonorEdge(bool fromTop) {
     return clamp(edge+(fromTop ? 2.0 : -2.0),picture_top,picture_bottom);
 }
 float subtitleSafeDonorLeft() {
-    float edge=generated_clean_left;
+    float edge=cleanup_exclusion_left;
     if(source_right>source_left && source_bottom>source_top) edge=min(edge,source_left);
     if(content_right>content_left && content_bottom>content_top) edge=min(edge,content_left);
 
@@ -432,7 +520,7 @@ float subtitleSafeDonorLeft() {
     return edge;
 }
 float subtitleSafeDonorRight() {
-    float edge=generated_clean_right;
+    float edge=cleanup_exclusion_right;
     if(source_right>source_left && source_bottom>source_top) edge=max(edge,source_right);
     if(content_right>content_left && content_bottom>content_top) edge=max(edge,content_right);
 
@@ -448,20 +536,20 @@ bool subtitleStretchAvailable() {
     float height=picture_bottom-picture_top;
     float safeEdge=subtitleSafeDonorEdge(fromTop);
     float clean=fromTop ? picture_bottom-safeEdge : safeEdge-picture_top;
-    float edgeGap=fromTop ? generated_clean_top-picture_top : picture_bottom-generated_clean_bottom;
-    float donorGap=fromTop ? safeEdge-generated_clean_bottom : generated_clean_top-safeEdge;
-    float fillHeight=min(picture_bottom,generated_clean_bottom)-
-        max(picture_top,generated_clean_top);
-    return cleanup_fill_mode>0.5 && height>1.0 && fillHeight>2.0 &&
+    float edgeGap=fromTop ? cleanup_exclusion_top-picture_top : picture_bottom-cleanup_exclusion_bottom;
+    float donorGap=fromTop ? safeEdge-cleanup_exclusion_bottom : cleanup_exclusion_top-safeEdge;
+    float fillHeight=min(picture_bottom,cleanup_exclusion_bottom)-
+        max(picture_top,cleanup_exclusion_top);
+    return cleanup_fill_mode>0.5 && cleanup_fill_mode<1.5 && height>1.0 && fillHeight>2.0 &&
         clean>=0.5*height && edgeGap<=0.1*height &&
         donorGap<=max(64.0,2.0*fillHeight) &&
-        generated_clean_right>generated_clean_left &&
-        generated_clean_bottom>generated_clean_top;
+        cleanup_exclusion_right>cleanup_exclusion_left &&
+        cleanup_exclusion_bottom>cleanup_exclusion_top;
 }
 vec3 subtitleStretchedPicture(vec2 p) {
     bool fromTop=source_top+source_bottom<picture_top+picture_bottom;
-    float fillTop=max(picture_top,generated_clean_top);
-    float fillBottom=min(picture_bottom,generated_clean_bottom);
+    float fillTop=max(picture_top,cleanup_exclusion_top);
+    float fillBottom=min(picture_bottom,cleanup_exclusion_bottom);
     float fillHeight=max(fillBottom-fillTop,1.0);
     float safeEdge=subtitleSafeDonorEdge(fromTop);
     float clean=fromTop ? picture_bottom-safeEdge : safeEdge-picture_top;
@@ -476,12 +564,90 @@ vec3 subtitleStretchedPicture(vec2 p) {
     float fromEdge=fromTop ? fillBottom-p.y : p.y-fillTop;
     return mix(edge,stretched,smoothstep(0.0,min(20.0,0.25*fillHeight),fromEdge));
 }
-bool subtitleInGeneratedCleanup(vec2 p) {
-    return p.x>=generated_clean_left && p.x<generated_clean_right &&
-        p.y>=generated_clean_top && p.y<generated_clean_bottom;
+// Bounded spatial reconstruction: at most two samples per usable edge.
+// Both taps remain beyond ALL removal/glyph bounds. Blend in linear light;
+// the outer edge gets most weight so it joins its neighbouring real picture.
+// No frame history, search iterations, or geometry-specific shader source.
+vec3 subtitleSurroundingPicture(vec2 p) {
+    vec4 edges=vec4(subtitleSafeDonorLeft()-1.5,subtitleSafeDonorRight()+1.5,
+        subtitleSafeDonorEdge(false)-0.5,subtitleSafeDonorEdge(true)+0.5);
+    vec3 sum=vec3(0.0);float weights=0.0;
+    // Uniform loop bound (always eight in this mode) keeps texture sampling
+    // and transfer decoding at ONE compiled call site, not eight expanded ones.
+    int count=4*int(clamp(cleanup_fill_mode,0.0,2.0));
+    for(int tap=0;tap<count;tap++) {
+        int side=tap/2;bool mirrored=(tap-2*side)!=0;
+        vec2 edge=p,dir=vec2(0.0);float d=0.0,available=-1.0;
+        if(side==0) {
+            edge.x=edges.x;dir.x=-1.0;d=p.x-cleanup_exclusion_left;available=edges.x-0.5;
+        } else if(side==1) {
+            edge.x=edges.y;dir.x=1.0;d=cleanup_exclusion_right-p.x;available=HOOKED_size.x-0.5-edges.y;
+        } else if(side==2) {
+            edge.y=edges.z;dir.y=-1.0;d=p.y-cleanup_exclusion_top;available=edges.z-picture_top-0.5;
+        } else {
+            edge.y=edges.w;dir.y=1.0;d=cleanup_exclusion_bottom-p.y;available=picture_bottom-0.5-edges.w;
+        }
+        if(available<0.0)continue;
+        edge=clamp(edge,vec2(0.5,picture_top+0.5),vec2(HOOKED_size.x-0.5,picture_bottom-0.5));
+        d=max(0.0,d);float w=1.0/((d+2.0)*(d+2.0));
+        w*=mirrored?0.35:0.65;
+        vec2 donor=edge+dir*min(available,(mirrored?1.0:0.35)*d);
+        sum+=w*subtitleLinear(HOOKED_tex(donor*HOOKED_pt).rgb);weights+=w;
+    }
+    return weights>0.0 ? sum/weights : vec3(0.0);
+}
+// Fixed, current-frame reconstruction. Donor positions and normalized weights
+// depend only on geometry, never on image gradients or color comparisons. This
+// keeps small frame changes from moving the sampling pattern and causing shimmer.
+vec3 subtitleStableSurroundingPicture(vec2 p) {
+    vec4 edges=vec4(subtitleSafeDonorLeft()-1.5,subtitleSafeDonorRight()+1.5,
+        subtitleSafeDonorEdge(false)-0.5,subtitleSafeDonorEdge(true)+0.5);
+    vec2 lo=vec2(0.5,picture_top+0.5),hi=vec2(HOOKED_size.x-0.5,picture_bottom-0.5);
+    float seam=clamp(0.20*min(cleanup_exclusion_right-cleanup_exclusion_left,
+        cleanup_exclusion_bottom-cleanup_exclusion_top),6.0,20.0);
+    vec3 sum=vec3(0.0);float weights=0.0;
+    int count=2*int(clamp(cleanup_fill_mode,0.0,2.0));
+    for(int side=0;side<count;side++) {
+        vec2 edge=p,dir=vec2(0.0);float d=0.0,available=-1.0;
+        if(side==0) {
+            edge.x=edges.x;dir.x=-1.0;d=p.x-cleanup_exclusion_left;available=edges.x-0.5;
+        } else if(side==1) {
+            edge.x=edges.y;dir.x=1.0;d=cleanup_exclusion_right-p.x;available=HOOKED_size.x-0.5-edges.y;
+        } else if(side==2) {
+            edge.y=edges.z;dir.y=-1.0;d=p.y-cleanup_exclusion_top;available=edges.z-picture_top-0.5;
+        } else {
+            edge.y=edges.w;dir.y=1.0;d=cleanup_exclusion_bottom-p.y;available=picture_bottom-0.5-edges.w;
+        }
+        if(available<0.0)continue;
+        edge=clamp(edge,lo,hi);d=max(0.0,d);
+        vec2 tangent=vec2(-dir.y,dir.x);
+        float radius=min(2.0,0.25*d);
+        vec3 boundary=vec3(0.0),filled=vec3(0.0);
+        // One transfer-decoding site, five fixed taps per available edge.
+        // Positive, normalized weights make this a non-amplifying linear
+        // operator in scene light while the accepted geometry is unchanged.
+        int taps=2*int(clamp(cleanup_fill_mode,0.0,2.0))+1;
+        for(int tap=0;tap<taps;tap++) {
+            vec2 donor=edge;
+            if(tap==1)donor-=tangent*radius;
+            else if(tap==2)donor+=tangent*radius;
+            else if(tap>=3)donor+=dir*min(available,(tap==3?0.35:1.0)*d);
+            vec3 color=subtitleLinear(HOOKED_tex(clamp(donor,lo,hi)*HOOKED_pt).rgb);
+            if(tap<3)boundary+=(tap==0?0.5:0.25)*color;
+            else filled+=(tap==3?0.65:0.35)*color;
+        }
+        // A slightly wider transition joins the clean boundary to the fixed
+        // interior fill. Never blend the original subtitle/card pixels back in.
+        filled=mix(boundary,filled,smoothstep(0.0,seam,d));
+        float w=1.0/((d+0.5)*(d+0.5));
+        sum+=w*filled;weights+=w;
+    }
+    return weights>0.0 ? sum/weights : vec3(0.0);
 }
 vec3 subtitleGeneratedRawFill(vec2 p) {
     if(p.y<picture_top || p.y>=picture_bottom) return vec3(0.0);
+    if(cleanup_fill_mode>2.5) return subtitleStableSurroundingPicture(p);
+    if(cleanup_fill_mode>1.5) return subtitleSurroundingPicture(p);
     bool fromTop=source_top+source_bottom<picture_top+picture_bottom;
     float safeEdge=subtitleSafeDonorEdge(fromTop);
     bool stretched=subtitleStretchAvailable();
@@ -504,20 +670,17 @@ vec3 subtitleGeneratedRawFill(vec2 p) {
     if(hasRight) b=subtitleLinear(HOOKED_tex(vec2(donorRight,p.y)*HOOKED_pt).rgb);
     if(!hasLeft) a=b;
     if(!hasRight) b=a;
-    vec3 side=mix(a,b,clamp((p.x-generated_clean_left)/max(generated_clean_right-generated_clean_left,1.0),0.0,1.0));
+    vec3 side=mix(a,b,clamp((p.x-cleanup_exclusion_left)/max(cleanup_exclusion_right-cleanup_exclusion_left,1.0),0.0,1.0));
     if(!stretched && !mirrorAvailable)return side;
-    float edge=min(p.x-generated_clean_left,generated_clean_right-p.x);
-    return mix(side,filled,smoothstep(0.0,24.0,edge)*(fromTop ? step(generated_clean_bottom+1.0,picture_bottom) : step(picture_top+1.0,generated_clean_top)));
+    float edge=min(p.x-cleanup_exclusion_left,cleanup_exclusion_right-p.x);
+    return mix(side,filled,smoothstep(0.0,24.0,edge)*(fromTop ? step(cleanup_exclusion_bottom+1.0,picture_bottom) : step(picture_top+1.0,cleanup_exclusion_top)));
 }
 // Reconstruct first, then filter the combined real/generated scene. Testing
 // the footprint as well as the center prevents bilinear samples just outside
 // a card edge from pulling its black backing or glyphs into the overlay.
 vec3 subtitleCleanBackdropSample(vec2 p) {
     p=clamp(p,vec2(0.5,picture_top+0.5),vec2(HOOKED_size.x-0.5,picture_bottom-0.5));
-    bool touchesCard=generated_clean_right>generated_clean_left && generated_clean_bottom>generated_clean_top &&
-        p.x>generated_clean_left-0.5 && p.x<generated_clean_right+0.5 &&
-        p.y>generated_clean_top-0.5 && p.y<generated_clean_bottom+0.5;
-    if(touchesCard)return subtitleGeneratedRawFill(p);
+    if(subtitleCleanupTouchesSample(p))return subtitleGeneratedRawFill(p);
     return subtitleLinear(HOOKED_tex(p*HOOKED_pt).rgb);
 }
 vec3 subtitleCappedBacking(vec3 backing) {
@@ -546,21 +709,31 @@ float subtitlePanelSideExtension() {
 float subtitlePanelTop() {
     bool attached=mod(floor(panel_flags/2.0),2.0)>0.5 && (background_mode>4.5 || (background_mode>2.5 && background_mode<3.5));
     bool fromTop=source_top+source_bottom<picture_top+picture_bottom;
-    return attached && fromTop ? min(destination_top,picture_top) : destination_top;
+    // Two source pixels overlap the bar so fractional crop/scaling samples
+    // cannot interpolate an opaque panel edge with transparent layer pixels.
+    // This is display backing only; glyph placement and cleanup stay unchanged.
+    return attached && fromTop ? min(destination_top,display_picture_top)-2.0 : destination_top;
 }
 float subtitlePanelBottom() {
     bool attached=mod(floor(panel_flags/2.0),2.0)>0.5 && (background_mode>4.5 || (background_mode>2.5 && background_mode<3.5));
     bool fromTop=source_top+source_bottom<picture_top+picture_bottom;
-    return attached && !fromTop ? max(destination_bottom,picture_bottom) : destination_bottom;
+    return attached && !fromTop ? max(destination_bottom,display_picture_bottom)+2.0 : destination_bottom;
 }
 float subtitleRoundedPanelDistance(vec2 p) {
     float radius=mod(panel_flags,2.0)>0.5 ? min(28.0,min(destination_right-destination_left,
         destination_bottom-destination_top)*0.18) : 0.0;
     bool attached=mod(floor(panel_flags/2.0),2.0)>0.5;
-    // Square the bar-facing corners; round only the picture-facing corners.
+    // Square bar-facing corners and any picture-facing edge clipped by the
+    // selected viewport. Keep inPanel bounded; this only makes the visible edge
+    // opaque instead of exposing cleanup through a clipped rounded/AA corner.
     bool fromTop=source_top+source_bottom<picture_top+picture_bottom;
-    vec2 lo=vec2(destination_left-subtitlePanelSideExtension(),subtitlePanelTop()-(attached && fromTop ? 2.0*radius : 0.0));
-    vec2 hi=vec2(destination_right+subtitlePanelSideExtension(),subtitlePanelBottom()+(attached && !fromTop ? 2.0*radius : 0.0));
+    bool clippedTop=!fromTop && destination_top<=display_picture_top;
+    bool clippedBottom=fromTop && destination_bottom>=display_picture_bottom;
+    float squareExtension=max(2.0*radius,2.0);
+    vec2 lo=vec2(destination_left-subtitlePanelSideExtension(),subtitlePanelTop()-
+        ((attached && fromTop) || clippedTop ? squareExtension : 0.0));
+    vec2 hi=vec2(destination_right+subtitlePanelSideExtension(),subtitlePanelBottom()+
+        ((attached && !fromTop) || clippedBottom ? squareExtension : 0.0));
     vec2 halfSize=(hi-lo)*0.5;
     vec2 center=(lo+hi)*0.5;
     vec2 q=abs(p-center)-(halfSize-vec2(radius));
@@ -635,20 +808,33 @@ vec4 subtitleReducedGlyph(vec2 center) {
     return vec4(premultiplied/max(coverage,0.000001),coverage/(footprint*footprint));
 }
 )GLSL";
-    const std::string common=std::string(commonPrefix)+commonMiddle+commonSuffix;
+    const std::string common=contourFunctions+commonPrefix+commonMiddle+commonSuffix;
     static const char composition[]=R"GLSL(
 vec4 hook() {
     vec2 p=HOOKED_pos*HOOKED_size;
     if(enabled>0.5) {
+        bool cleanupOnly=composition_phase>0.5 && composition_phase<1.5;
+        bool layerOnly=composition_phase>1.5;
+        // Reconstruction's neutral settings are the UI's transparent style.
+        // Keep deliberately blurred or brightness-limited backdrops separate.
+        bool transparentBackground=(background_mode>0.5 && background_mode<1.5) ||
+            (background_mode>4.5 && generated_opacity<=0.0 && generated_blur_px<=0.0 &&
+             generated_max_luminance>=1.0 &&
+             (generated_border_width<=0.0 || generated_border_opacity<=0.0));
         bool inPanel=p.x>=destination_left-subtitlePanelSideExtension() && p.x<destination_right+subtitlePanelSideExtension() &&
             p.y>=subtitlePanelTop() && p.y<subtitlePanelBottom();
         bool inCleanup=subtitleInGeneratedCleanup(p);
         // One evaluation and one compiled call site, shared by composition
         // and source cleanup. The default also clears original bar glyphs.
         vec3 generatedBackdrop=vec3(0.0);
-        if(background_mode>4.5 && (inPanel || inCleanup))
+        // Black uses the unblurred pass. Its cleanup coordinate is inside the
+        // mask, so the common clean sampler reaches the same raw fill. Share
+        // that call site instead of compiling another complete spatial kernel.
+        if((background_mode>4.5 && (inPanel || inCleanup)) ||
+            (background_mode>2.5 && background_mode<3.5 && inCleanup && !layerOnly))
             generatedBackdrop=subtitleGeneratedFill(p);
-        if(inPanel) {
+        if(layerOnly && !inPanel)return vec4(0.0);
+        if(inPanel && !cleanupOnly) {
             vec2 sourcePos=HOOKED_pos+vec2(source_left-destination_left,
                 source_top-destination_top)*HOOKED_pt;
             if(glyph_scale<0.9999 || panel_flags>=4.0)
@@ -660,13 +846,11 @@ vec4 hook() {
             if(!filterGlyph || background_mode<0.5)source=HOOKED_tex(sourcePos);
             if(background_mode<0.5) return source;
             vec3 original=subtitleLinear(HOOKED_tex(HOOKED_pos).rgb);
-            if(background_mode>4.5 && subtitleInGeneratedCleanup(p)) {
+            if(inCleanup && (background_mode>4.5 ||
+                (background_mode>2.5 && background_mode<3.5 && !layerOnly)))
                 original=generatedBackdrop;
-            }
-            // Source removal precedes rounded destination composition. Its
-            // antialiased corners must not reveal an old glyph underneath.
-            if(background_mode>2.5 && background_mode<3.5 && subtitleInGeneratedCleanup(p))
-                original=vec3(0.0);
+            // Cleanup precedes rounded destination composition, so its
+            // antialiased corners reveal only the repaired current picture.
             vec3 backing=original;
             // Use the same smooth current-frame cleanup in overlap and vacated
             // source pixels, avoiding a black seam through the moved line.
@@ -713,21 +897,47 @@ vec4 hook() {
             // antialiased edge reveals the live destination pixels beneath it.
             float panelMask=background_mode>1.5 ? subtitleRoundedPanelMask(p) : 1.0;
             vec3 canvas=mix(original,backing,panelMask);
+            float borderAlpha=0.0;
+            vec3 borderColor=vec3(generated_border_r,generated_border_g,generated_border_b);
             if((background_mode>4.5 || (background_mode>2.5 && background_mode<3.5)) && generated_border_width>0.0) {
                 float inner=1.0-smoothstep(-0.75,0.75,
                     subtitleRoundedPanelDistance(p)+generated_border_width);
-                canvas=mix(canvas,vec3(generated_border_r,generated_border_g,generated_border_b),
-                    max(panelMask-inner,0.0)*generated_border_opacity);
+                borderAlpha=max(panelMask-inner,0.0)*generated_border_opacity;
+                canvas=mix(canvas,borderColor,borderAlpha);
+            }
+            if(transparentBackground) {
+                // Transparent output carries glyphs only. Copying the live
+                // picture as an opaque tile lets overlay color management and
+                // temporal blending expose a rectangular one-pixel seam.
+                // MAIN receives premultiplied signal RGB. libplacebo converts
+                // the finished layer back to independent alpha afterward.
+                if(layerOnly)return vec4(alpha>0.0?subtitleSignal(glyphColor)*alpha:vec3(0.0),alpha);
+                // Avoid a transfer-function round trip on untouched picture.
+                // Overlap with the old glyph footprint still needs its fill.
+                if(alpha<=0.0 && !inCleanup && !(p.x>=content_left && p.x<content_right &&
+                    p.y>=content_top && p.y<content_bottom))return HOOKED_tex(HOOKED_pos);
+                if(background_mode>4.5)canvas=original;
+            }
+            if(layerOnly) {
+                // MAIN's internal contract is premultiplied signal RGB;
+                // independent-alpha output conversion follows this hook. Return
+                // signal-space premultiplication so fractional edges are not
+                // unpremultiplied twice. The retained texture stays independent.
+                float opacity=1.0-(1.0-panelMask)*(1.0-borderAlpha)*(1.0-alpha);
+                vec3 premultiplied=((backing*panelMask)*(1.0-borderAlpha)+
+                    borderColor*borderAlpha)*(1.0-alpha)+glyphColor*alpha;
+                return vec4(subtitleSignal(premultiplied/max(opacity,0.000001))*opacity,opacity);
             }
             return vec4(subtitleSignal(mix(canvas,glyphColor,alpha)),1.0);
         }
+        if(layerOnly)return vec4(0.0);
         // The original card can extend beyond display padding and beyond the
         // copied glyph rectangle. Remove it before testing the sampling extent.
         if(background_mode>4.5 && subtitleInGeneratedCleanup(p)) {
             return vec4(subtitleSignal(generatedBackdrop),1.0);
         }
-        if(background_mode>2.5 && background_mode<3.5 && subtitleInGeneratedCleanup(p))
-            return vec4(0.0,0.0,0.0,1.0);
+        if(background_mode>2.5 && background_mode<3.5 && inCleanup)
+            return vec4(subtitleSignal(generatedBackdrop),1.0);
         if(p.x>=source_left && p.x<source_right && p.y>=source_top && p.y<source_bottom) {
             // Measured-card modes already handled every authorized picture
             // cleanup above. Glyph-envelope fringe must keep its live picture.
@@ -742,7 +952,7 @@ vec4 hook() {
             return vec4(0.0,0.0,0.0,1.0);
         }
     }
-    return HOOKED_tex(HOOKED_pos);
+    return composition_phase>1.5 ? vec4(0.0) : HOOKED_tex(HOOKED_pos);
 }
 )GLSL";
     // Saved textures cover only the subtitle ROI plus its Gaussian halo.
@@ -761,10 +971,12 @@ vec4 hook() {
     vec2 p=vec2(blur_roi_left,blur_roi_top)+HOOKED_pos*vec2(blur_roi_w,blur_roi_h)*blur_step;
     if(blur_step<1.5)return vec4(subtitleCleanBackdropSample(p),1.0);
     // Exact 2x2 area reduction, not four widely spaced blur taps.
-    vec3 sum=subtitleCleanBackdropSample(p+vec2(-0.5,-0.5))+
-        subtitleCleanBackdropSample(p+vec2(0.5,-0.5))+
-        subtitleCleanBackdropSample(p+vec2(-0.5,0.5))+
-        subtitleCleanBackdropSample(p+vec2(0.5,0.5));
+    vec3 sum=vec3(0.0);
+    int count=2*int(clamp(blur_step,1.0,2.0)); // four when this branch runs
+    for(int tap=0;tap<count;tap++) {
+        vec2 delta=vec2(float(tap-2*(tap/2)),float(tap/2))-vec2(0.5);
+        sum+=subtitleCleanBackdropSample(p+delta);
+    }
     return vec4(sum*0.25,1.0);
 }
 )GLSL";
@@ -783,6 +995,7 @@ vec4 hook() {
 //!BIND HOOKED
 //!BIND VP_SUB_GAUSS
 //!WHEN blur_active
+//!COMPONENTS 4
 //!DESC Subtitle composition with smooth Gaussian background
 )GLSL"+std::string(common)+R"GLSL(
 vec3 subtitleGeneratedFill(vec2 p) {
@@ -794,6 +1007,7 @@ vec3 subtitleGeneratedFill(vec2 p) {
 //!HOOK MAIN
 //!BIND HOOKED
 //!WHEN blur_active !
+//!COMPONENTS 4
 //!DESC Subtitle composition without background blur
 )GLSL"+std::string(common)+R"GLSL(
 vec3 subtitleGeneratedFill(vec2 p) {
@@ -801,22 +1015,54 @@ vec3 subtitleGeneratedFill(vec2 p) {
     return subtitleCleanBackdropSample(p);
 }
 )GLSL"+composition;
-    const std::string shader=std::string(parameters)+prepare+
+    const std::string shader=std::string(parameters)+contourParameters+prepare+
         gaussian("VP_SUB_CLEAN","VP_SUB_H","1.0,0.0")+
         gaussian("VP_SUB_H","VP_SUB_GAUSS","0.0,1.0")+blurred+unblurred;
     return pl_mpv_user_shader_parse(gpu,shader.data(),shader.size());
 }
 
+// Source-plane options are snapshotted per packet. In particular, debanding
+// must run on native YUV planes before normalization, not on the mixed RGB
+// picture during the final viewport pass. Preset filter pointers are libplacebo
+// static data; deband values are copied because renderer settings can change.
+struct SubtitleSourceProcessingOptions {
+    const pl_filter_config* planeUpscaler=nullptr;
+    const pl_filter_config* planeDownscaler=nullptr;
+    float antiringingStrength=0.0f;
+    bool debandEnabled=false;
+    pl_deband_params debandParams{};
+    bool float32=false;   // VP-V audit 2026-10-16: rgba32f composite when the float32 FBOs are in effect
+};
+
+inline SubtitleSourceProcessingOptions CaptureSubtitleSourceProcessingOptions(
+    const pl_render_params& settings)
+{
+    SubtitleSourceProcessingOptions options;
+    options.planeUpscaler=settings.plane_upscaler;
+    options.planeDownscaler=settings.plane_downscaler;
+    options.antiringingStrength=settings.antiringing_strength;
+    options.debandEnabled=settings.deband_params!=nullptr;
+    if(options.debandEnabled)options.debandParams=*settings.deband_params;
+    return options;
+}
+
+enum class SubtitleCompositionPhase : int {
+    All = 0,
+    CleanupOnly = 1,
+    LayerOnly = 2,
+};
+
 inline bool BindSubtitleCutPasteHook(const pl_hook* hook,
     const SubtitleCutPasteGeometry& geometry, int backgroundMode,
     pl_color_transfer transfer,
-    const SubtitleGeneratedGrayStyle& generated,bool stretchFill=false)
+    const SubtitleGeneratedGrayStyle& generated,int spatialFill=0,
+    SubtitleCompositionPhase phase=SubtitleCompositionPhase::All)
 {
     if (!hook || backgroundMode<0 || backgroundMode>5) return false;
-    const char* names[]={"enabled","source_left","source_top","source_right","source_bottom",
+    static const char* names[]={"enabled","composition_phase","source_left","source_top","source_right","source_bottom",
         "destination_left","destination_top","destination_right","destination_bottom","background_mode",
         "glyph_scale","glyph_translate_x","glyph_translate_y","panel_flags",
-        "transfer_mode","picture_top","picture_bottom","transfer_gamma",
+        "transfer_mode","picture_top","picture_bottom","display_picture_top","display_picture_bottom","transfer_gamma",
         "content_left","content_top","content_right","content_bottom",
         "cleanup_fill_mode","generated_clean_left","generated_clean_top","generated_clean_right","generated_clean_bottom",
         "text_color_r","text_color_g","text_color_b",
@@ -824,22 +1070,60 @@ inline bool BindSubtitleCutPasteHook(const pl_hook* hook,
         "generated_max_luminance","generated_blur_px","blur_active","blur_roi_left","blur_roi_top","blur_roi_w","blur_roi_h","blur_step",
         "generated_border_r","generated_border_g","generated_border_b",
         "generated_border_opacity","generated_border_width",
-        "picture_capture_left","picture_capture_top","picture_capture_right","picture_capture_bottom","glyph_0_left","glyph_0_top","glyph_0_right","glyph_0_bottom","glyph_1_left","glyph_1_top","glyph_1_right","glyph_1_bottom","glyph_2_left","glyph_2_top","glyph_2_right","glyph_2_bottom"};
+        "picture_capture_left","picture_capture_top","picture_capture_right","picture_capture_bottom","glyph_0_left","glyph_0_top","glyph_0_right","glyph_0_bottom","glyph_1_left","glyph_1_top","glyph_1_right","glyph_1_bottom","glyph_2_left","glyph_2_top","glyph_2_right","glyph_2_bottom",
+        "cleanup_row_top","cleanup_row_count","cleanup_exclusion_left","cleanup_exclusion_top",
+        "cleanup_exclusion_right","cleanup_exclusion_bottom"};
     const float transferMode=transfer==PL_COLOR_TRC_PQ?2.0f:transfer==PL_COLOR_TRC_HLG?3.0f:
         transfer==PL_COLOR_TRC_SRGB?1.0f:0.0f;
     const float gamma=transfer==PL_COLOR_TRC_LINEAR?1.0f:
         transfer==PL_COLOR_TRC_GAMMA18?1.8f:transfer==PL_COLOR_TRC_GAMMA20?2.0f:
         transfer==PL_COLOR_TRC_GAMMA22?2.2f:transfer==PL_COLOR_TRC_GAMMA26?2.6f:
         transfer==PL_COLOR_TRC_GAMMA28?2.8f:2.4f;
+    if(geometry.generatedCleanupRowCount>geometry.generatedCleanupRows.size())return false;
+    const auto& exclusion=geometry.generatedCleanupExclusion.Valid()?
+        geometry.generatedCleanupExclusion:geometry.generatedCleanup;
+    std::array<float,256> rowValues{};
+    int rowTop=65536,rowBottom=0;
+    for(unsigned n=0;n<geometry.generatedCleanupRowCount;++n) {
+        const auto& row=geometry.generatedCleanupRows[n];
+        if(!row.Valid() || row.bottom!=row.top+1 || row.left<0 || row.top<0 ||
+            row.right>65536 || row.bottom>65536 || !exclusion.Valid() ||
+            row.left<exclusion.left || row.right>exclusion.right ||
+            row.top<exclusion.top || row.bottom>exclusion.bottom)return false;
+        rowTop=(std::min)(rowTop,row.top);rowBottom=(std::max)(rowBottom,row.bottom);
+    }
+    if(geometry.generatedCleanupRowCount) {
+        const auto& common=geometry.generatedCleanup;
+        if(!geometry.valid || !common.Valid() || !exclusion.Valid() ||
+            geometry.pictureTop<0 || geometry.pictureBottom>65536 ||
+            geometry.pictureTop>=geometry.pictureBottom ||
+            exclusion.left<0 || exclusion.right>65536 ||
+            exclusion.top<geometry.pictureTop || exclusion.bottom>geometry.pictureBottom ||
+            common.left<exclusion.left || common.right>exclusion.right ||
+            common.top!=rowTop || common.bottom!=rowBottom ||
+            rowBottom-rowTop!=int(geometry.generatedCleanupRowCount) || rowBottom-rowTop>128)return false;
+    }
+    for(unsigned n=0;n<geometry.generatedCleanupRowCount;++n) {
+        const auto& row=geometry.generatedCleanupRows[n];
+        if(row.left>geometry.generatedCleanup.left || row.right<geometry.generatedCleanup.right)return false;
+        const auto index=unsigned(row.top-rowTop)*2;
+        if(rowValues[index+1]>rowValues[index])return false;
+        rowValues[index]=float(row.left);rowValues[index+1]=float(row.right);
+    }
+    if(!geometry.generatedCleanupRowCount)rowTop=0;
     const auto& s=geometry.source;const auto& d=geometry.destination;
+    const bool selectedPicture=geometry.displayPictureRight>geometry.displayPictureLeft &&
+        geometry.displayPictureBottom>geometry.displayPictureTop;
+    const int displayTop=selectedPicture?geometry.displayPictureTop:geometry.pictureTop;
+    const int displayBottom=selectedPicture?geometry.displayPictureBottom:geometry.pictureBottom;
     const auto roi=ComputeSubtitleGaussianRegion(geometry,backgroundMode,generated.blurPixels);
-    const float values[]={geometry.valid?1.0f:0.0f,float(s.left),float(s.top),float(s.right),float(s.bottom),
+    const float values[]={geometry.valid?1.0f:0.0f,float(static_cast<int>(phase)),float(s.left),float(s.top),float(s.right),float(s.bottom),
         float(d.left),float(d.top),float(d.right),float(d.bottom),float(backgroundMode),
         geometry.glyphScale,geometry.glyphTranslateX,geometry.glyphTranslateY,
         float((geometry.roundedCorners?1:0)+(geometry.extendToBar?2:0)+(geometry.centeredGlyphMapping?4:0)),transferMode,
-        float(geometry.pictureTop),float(geometry.pictureBottom),gamma,
+        float(geometry.pictureTop),float(geometry.pictureBottom),float(displayTop),float(displayBottom),gamma,
         float(geometry.content.left),float(geometry.content.top),float(geometry.content.right),float(geometry.content.bottom),
-        stretchFill?1.0f:0.0f,float(geometry.generatedCleanup.left),float(geometry.generatedCleanup.top),
+        float((std::max)(0,(std::min)(3,spatialFill))),float(geometry.generatedCleanup.left),float(geometry.generatedCleanup.top),
         float(geometry.generatedCleanup.right),float(geometry.generatedCleanup.bottom),
         generated.textColor[0],generated.textColor[1],generated.textColor[2],
         generated.color[0],generated.color[1],generated.color[2],generated.opacity,
@@ -847,20 +1131,49 @@ inline bool BindSubtitleCutPasteHook(const pl_hook* hook,
         generated.borderColor[0],generated.borderColor[1],generated.borderColor[2],
         generated.borderOpacity,generated.borderWidth,
         float(geometry.pictureCapture.left),float(geometry.pictureCapture.top),
-        float(geometry.pictureCapture.right),float(geometry.pictureCapture.bottom),float(geometry.glyphLines[0].left),float(geometry.glyphLines[0].top),float(geometry.glyphLines[0].right),float(geometry.glyphLines[0].bottom),float(geometry.glyphLines[1].left),float(geometry.glyphLines[1].top),float(geometry.glyphLines[1].right),float(geometry.glyphLines[1].bottom),float(geometry.glyphLines[2].left),float(geometry.glyphLines[2].top),float(geometry.glyphLines[2].right),float(geometry.glyphLines[2].bottom)};
+        float(geometry.pictureCapture.right),float(geometry.pictureCapture.bottom),float(geometry.glyphLines[0].left),float(geometry.glyphLines[0].top),float(geometry.glyphLines[0].right),float(geometry.glyphLines[0].bottom),float(geometry.glyphLines[1].left),float(geometry.glyphLines[1].top),float(geometry.glyphLines[1].right),float(geometry.glyphLines[1].bottom),float(geometry.glyphLines[2].left),float(geometry.glyphLines[2].top),float(geometry.glyphLines[2].right),float(geometry.glyphLines[2].bottom),
+        float(rowTop),float(geometry.generatedCleanupRowCount),float(exclusion.left),float(exclusion.top),
+        float(exclusion.right),float(exclusion.bottom)};
     constexpr unsigned parameterCount=sizeof(names)/sizeof(names[0]);
-    static_assert(parameterCount<64,"parameter presence mask overflow");
     static_assert(sizeof(values)/sizeof(values[0])==parameterCount,"subtitle parameter mismatch");
-    uint64_t found=0;
+    static const auto rowNames=[] {
+        std::array<std::string,256> result;
+        for(unsigned row=0;row<128;++row)for(unsigned side=0;side<2;++side)
+            result[2*row+side]="cleanup_row_"+std::to_string(row)+(side?"_right":"_left");
+        return result;
+    }();
+    struct ParameterNameHash {
+        size_t operator()(const char* name) const noexcept {
+            size_t hash=14695981039346656037ull;
+            for(;*name;++name) {hash^=static_cast<unsigned char>(*name);hash*=1099511628211ull;}
+            return hash;
+        }
+    };
+    struct ParameterNameEqual {
+        bool operator()(const char* a,const char* b) const noexcept {return std::strcmp(a,b)==0;}
+    };
+    static const auto parameterIndices=[] {
+        // Keys refer only to static literal/owned row-name storage. Binding
+        // performs no temporary string construction or per-frame allocation.
+        constexpr unsigned count=sizeof(names)/sizeof(names[0]);
+        std::unordered_map<const char*,unsigned,ParameterNameHash,ParameterNameEqual> indices;
+        indices.reserve(count+rowNames.size());
+        for(unsigned n=0;n<count;++n)indices.emplace(names[n],n);
+        for(unsigned n=0;n<rowNames.size();++n)indices.emplace(rowNames[n].c_str(),count+n);
+        return indices;
+    }();
+    std::array<bool,parameterCount+256> found{};
     for(int i=0;i<hook->num_parameters;++i) {
         const auto& parameter=hook->parameters[i];
         if(!parameter.name || !parameter.data || parameter.type!=PL_VAR_FLOAT ||
             parameter.mode!=PL_HOOK_PAR_DYNAMIC) continue;
-        for(unsigned n=0;n<parameterCount;++n) if(std::strcmp(parameter.name,names[n])==0) {
-            parameter.data->f=values[n];found|=uint64_t{1}<<n;break;
-        }
+        const auto entry=parameterIndices.find(parameter.name);
+        if(entry==parameterIndices.end())continue;
+        const auto n=entry->second;
+        parameter.data->f=n<parameterCount?values[n]:rowValues[n-parameterCount];found[n]=true;
     }
-    return found==((uint64_t{1}<<parameterCount)-1);
+    for(bool present:found)if(!present)return false;
+    return true;
 }
 
 // Preserve the historical exact-black default for callers without explicit style.
@@ -879,26 +1192,54 @@ inline bool BindSubtitleCutPasteHook(const pl_hook* hook,
 // effective state of its rgba32f FBOs (fbo_float32 / output_fbo_float32) and
 // its configured render params, so the composite carries the picture at the
 // same precision and with the same chroma upscaler as the main render.
+// REHEARSAL: Bill's SubtitleSourceProcessingOptions now carries the chroma
+// upscaler/antiringing/deband; only the float32 flag of this audit item is
+// still applied (SubtitleSourceProcessingOptions::float32). The struct is kept
+// for the renderer's SubtitleQuality() bookkeeping.
 struct SubtitleRasterQuality {
     bool float32=false;                         // rgba32f surface (falls back to rgba16f if missing)
     const pl_render_params* configured=nullptr; // plane_upscaler/downscaler + antiringing source
 };
 
+// Preparation disables peak detection. Sharing the output renderer would reset
+// its HDR history on each new source packet but not on repeated display frames.
+class SubtitlePreparationRenderer {
+    pl_renderer renderer=nullptr;
+    pl_gpu owner=nullptr;
+    uint64_t renderCalls=0;
+public:
+    SubtitlePreparationRenderer()=default;
+    SubtitlePreparationRenderer(const SubtitlePreparationRenderer&)=delete;
+    SubtitlePreparationRenderer& operator=(const SubtitlePreparationRenderer&)=delete;
+    ~SubtitlePreparationRenderer() { Reset(); }
+    void Reset() { pl_renderer_destroy(&renderer);owner=nullptr; }
+    uint64_t RenderCallCount() const { return renderCalls; }
+    void RecordRenderCall() { ++renderCalls; }
+    pl_renderer Get(pl_gpu gpu) {
+        if(owner!=gpu)Reset();
+        if(!renderer && gpu) { renderer=pl_renderer_create(nullptr,gpu);owner=gpu; }
+        return renderer;
+    }
+};
+
 // Compose before the main renderer crops away letterbox pixels. Reuse a
 // full-resolution floating-point surface and retain the input transfer function;
 // output tone mapping, scaling, NLS and viewport placement occur only afterward.
-inline bool RenderSubtitleFullRaster(pl_renderer renderer,pl_gpu gpu,
+inline bool RenderSubtitleFullRaster(SubtitlePreparationRenderer& preparation,pl_gpu gpu,
     const pl_frame& source,const pl_hook* hook,pl_tex* surface,pl_frame& composed,
-    bool blitSource,bool blitDestination,const SubtitleRasterQuality* quality=nullptr)
+    bool blitSource,bool blitDestination,bool independentAlpha=false,
+    const pl_deinterlace_params* deinterlaceParams=nullptr,
+    const SubtitleSourceProcessingOptions* sourceProcessing=nullptr)
 {
-    if(source.num_planes<1 || !source.planes[0].texture)return false;
+    const auto renderer=preparation.Get(gpu);
+    if(!renderer || source.num_planes<1 || !source.planes[0].texture)return false;
     const auto texture=source.planes[0].texture;
     pl_tex_params storage{};
     storage.w=texture->params.w;storage.h=texture->params.h;
     // Audit 2026-10-16: rgba32f first when the caller's float32 FBOs are in
     // effect (float carries BTB/WTW either way; 32-bit drops the float16
     // rounding), then the historical rgba16f.
-    const int depths[]={(quality && quality->float32)?32:16,16};
+    const int depths[]={(sourceProcessing && sourceProcessing->float32)?32:16,16};
     for(int depth : depths) {
         bool blit=blitDestination;
         storage.format=pl_find_fmt(gpu,PL_FMT_FLOAT,4,depth,0,
@@ -920,27 +1261,43 @@ inline bool RenderSubtitleFullRaster(pl_renderer renderer,pl_gpu gpu,
     if(!storage.format || !pl_tex_recreate(gpu,surface,&storage))return false;
     auto input=source;input.crop={0,0,float(storage.w),float(storage.h)};
     input.rotation=PL_ROTATION_0;input.overlays=nullptr;input.num_overlays=0;
+    // MPV hooks inherit the input alpha mode. The layer hook replaces alpha
+    // completely, but needs independent-alpha metadata through libplacebo.
+    if(independentAlpha)input.repr.alpha=PL_ALPHA_INDEPENDENT;
     pl_frame target{};target.num_planes=1;
     target.planes[0].texture=*surface;target.planes[0].components=4;
     for(int i=0;i<4;++i)target.planes[0].component_mapping[i]=i;
     target.repr.sys=PL_COLOR_SYSTEM_RGB;target.repr.levels=PL_COLOR_LEVELS_FULL;
-    target.repr.alpha=PL_ALPHA_NONE;target.color=source.color;
+    target.repr.alpha=independentAlpha?PL_ALPHA_INDEPENDENT:PL_ALPHA_NONE;target.color=source.color;
     auto params=pl_render_fast_params;
+    params.dynamic_constants=true; // Cue geometry must not introduce cold shader variants.
     params.dither_params=nullptr;params.peak_detect_params=nullptr;
-    if(quality && quality->configured) {
-        // Audit 2026-10-16: the configured chroma upscaler (libplacebo uses
-        // the main upscaler for planes when plane_upscaler is unset) and its
-        // anti-ringing, not fast params' bilinear. Luma is not scaled here.
-        const auto& configured=*quality->configured;
-        params.plane_upscaler=configured.plane_upscaler?configured.plane_upscaler:configured.upscaler;
-        params.plane_downscaler=configured.plane_downscaler?configured.plane_downscaler:configured.downscaler;
-        params.antiringing_strength=configured.antiringing_strength;
+    // Native-plane deinterlacing runs before the MAIN subtitle hook. Keep the
+    // caller's field, first_field, prev and next on the copied source frame.
+    params.deinterlace_params=deinterlaceParams;
+    if(sourceProcessing) {
+        params.plane_upscaler=sourceProcessing->planeUpscaler;
+        params.plane_downscaler=sourceProcessing->planeDownscaler;
+        params.antiringing_strength=sourceProcessing->antiringingStrength;
+        params.deband_params=sourceProcessing->debandEnabled?
+            &sourceProcessing->debandParams:nullptr;
     }
+    if(independentAlpha) {
+        // The default opaque clear forces alpha to one even for an RGBA hook.
+        // Every pixel is written by this full-raster pass.
+        params.background=PL_CLEAR_SKIP;
+        params.background_transparency=1.0f;
+    } else if(source.color.transfer==PL_COLOR_TRC_HLG && source.repr.alpha==PL_ALPHA_NONE) {
+        // Every pixel is written, and opaque source alpha is one. Avoid the
+        // beta renderer's undefined HLG encoding of a redundant black background.
+        params.background=PL_CLEAR_SKIP;
+    }
+    // VP-V audit 2026-10-16 (bit depth): the MAIN-stage hook passes in rgba32f as well.
 #if defined(PL_RENDER_PARAMS_FBO_FLOAT32)
-    // Audit 2026-10-16: the MAIN-stage hook passes in rgba32f as well.
-    if(quality && quality->float32)params.fbo_float32=true;
+    if(sourceProcessing && sourceProcessing->float32)params.fbo_float32=true;
 #endif
     params.hooks=hook?&hook:nullptr;params.num_hooks=hook?1:0;
+    preparation.RecordRenderCall();
     if(!pl_render_image(renderer,&input,&target,&params))return false;
     if(hook) {
         const auto errors=pl_renderer_get_errors(renderer);
@@ -952,20 +1309,47 @@ inline bool RenderSubtitleFullRaster(pl_renderer renderer,pl_gpu gpu,
     return true;
 }
 
-// Audit 2026-10-16: pass the same quality to both calls so the temporal
-// background and the composition surface keep one format (they are blitted).
-inline bool ComposeSubtitleBeforeCrop(pl_renderer renderer,pl_gpu gpu,
-    const pl_frame& source,const pl_hook* hook,pl_tex* surface,pl_frame& composed,
-    bool temporalBlit=false,const SubtitleRasterQuality* quality=nullptr)
+// Progressive Smooth Motion retains this complete source presentation as one
+// immutable packet. The picture, repair, background and glyphs are prepared
+// together, matching the non-motion composition order.
+inline bool PrepareCompleteSubtitleSourcePacket(SubtitlePreparationRenderer& preparation,pl_gpu gpu,
+    const pl_frame& source,const pl_hook* hook,const SubtitleCutPasteGeometry& geometry,
+    int backgroundMode,const SubtitleGeneratedGrayStyle& style,int spatialFill,
+    pl_tex* surface,pl_frame& composed,
+    const SubtitleSourceProcessingOptions* sourceProcessing=nullptr)
 {
-    return hook && RenderSubtitleFullRaster(renderer,gpu,source,hook,surface,
-        composed,false,temporalBlit,quality);
+    composed={};
+    return geometry.valid &&
+        BindSubtitleCutPasteHook(hook,geometry,backgroundMode,source.color.transfer,
+            style,spatialFill,SubtitleCompositionPhase::All) &&
+        RenderSubtitleFullRaster(preparation,gpu,source,hook,surface,composed,
+            true,false,false,nullptr,sourceProcessing);
 }
 
-inline bool CaptureSubtitleTemporalBackground(pl_renderer renderer,pl_gpu gpu,
-    const pl_frame& source,pl_tex* surface,const SubtitleRasterQuality* quality=nullptr)
+inline bool ComposeSubtitleBeforeCrop(SubtitlePreparationRenderer& preparation,pl_gpu gpu,
+    const pl_frame& source,const pl_hook* hook,pl_tex* surface,pl_frame& composed,
+    bool temporalBlit=false,
+    const SubtitleSourceProcessingOptions* sourceProcessing=nullptr)
+{
+    return hook && RenderSubtitleFullRaster(preparation,gpu,source,hook,surface,
+        composed,false,temporalBlit,false,nullptr,sourceProcessing);
+}
+
+// The layer carries straight RGB in source transfer and independent alpha.
+inline bool ComposeSubtitleLayerBeforeCrop(SubtitlePreparationRenderer& preparation,pl_gpu gpu,
+    const pl_frame& source,const pl_hook* hook,pl_tex* surface,pl_frame& layer,
+    const pl_deinterlace_params* deinterlaceParams=nullptr,
+    const SubtitleSourceProcessingOptions* sourceProcessing=nullptr)
+{
+    return hook && RenderSubtitleFullRaster(preparation,gpu,source,hook,surface,
+        layer,true,false,true,deinterlaceParams,sourceProcessing);
+}
+
+inline bool CaptureSubtitleTemporalBackground(SubtitlePreparationRenderer& preparation,pl_gpu gpu,
+    const pl_frame& source,pl_tex* surface,
+    const SubtitleSourceProcessingOptions* sourceProcessing=nullptr)
 {
     pl_frame captured{};
-    return RenderSubtitleFullRaster(renderer,gpu,source,nullptr,surface,
-        captured,true,false,quality);
+    return RenderSubtitleFullRaster(preparation,gpu,source,nullptr,surface,
+        captured,true,false,false,nullptr,sourceProcessing);
 }

@@ -283,7 +283,7 @@ namespace MotionIntent
     }
 
     // DV L11 frame-rate-conversion hint (2 bits; the decoding is an assumption
-    // until a live packet confirms it, see CR210DolbyVisionTunnelFormatter):
+    // until a live packet confirms it, see CRGBDolbyVisionTunnelFormatter):
     // 0 = no hint (unchanged), 1 = conversion off (the judder is intended: the
     // minimum), 2 = low (halfway), 3 = high (full strength).
     inline bool L11FrameRateConversionScale(uint8_t hint, double minScale, double& scale)

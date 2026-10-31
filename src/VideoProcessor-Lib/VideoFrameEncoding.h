@@ -60,15 +60,22 @@ enum class VideoFrameEncoding
 	H265,
 	DNxHR,
 
-	// ABI 37 (VP Renderer filter, file sources). Two-plane 4:2:0 in system
-	// memory: a full-resolution luma plane followed immediately by an
+	// P210: 10-bit 4:2:2 in two full-height 16-bit planes (Y, then UV).
+	// Appended to preserve all existing encoding identifiers across the ABI.
+	P210,
+
+	// Native 10-bit 4:2:0, appended without renumbering existing encodings.
+	// Also the P010 of the VP Renderer filter / file sources (ABI 37): 16-bit
+	// little-endian samples carrying 10 significant bits in the high bits.
+	P010,
+
+	// VP-V (ABI 37, VP Renderer filter, file sources). Two-plane 4:2:0 in
+	// system memory: a full-resolution luma plane followed immediately by an
 	// interleaved CbCr plane of ceil(height / 2) rows, both with the stride
 	// VideoState::BytesPerRow() (tightly packed: even width * bytes per sample).
-	// NV12: 8-bit samples. P010: 16-bit little-endian samples carrying 10
-	// significant bits in the high bits. P016: 16 significant bits.
-	// Appended so every earlier value keeps its number.
+	// NV12: 8-bit samples. P016: 16 significant bits. Appended after Bill's
+	// values so every Bill value keeps his number.
 	NV12,
-	P010,
 	P016
 };
 
@@ -79,6 +86,9 @@ inline bool VideoFrameEncodingIsTwoPlane420(VideoFrameEncoding e)
 		e == VideoFrameEncoding::P016;
 }
 
+
+// SDR interpretation of raw RGB carrier bytes; independent of decoded DV range.
+enum class TunnelSdrRgbRange { Unknown, Full, Limited };
 
 // Return the VideoFrameEncoding as a human-readable string
 const TCHAR* ToString(const VideoFrameEncoding);

@@ -1,10 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
+    <ClCompile Include="FullscreenActivationTests.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="StartupPresentationReadinessTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="QueueNativeContinuityTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="CpuFeaturesTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="FileSourceHelpersTests.cpp">
+    <ClCompile Include="FileSourceHelpersTests.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="SubtitleHandoffTests.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="SubtitleBackingLipTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="SubtitleCutPasteTests.cpp">
@@ -120,7 +129,11 @@
     <ClCompile Include="CaptureLayerAuditTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="DisplayRuleExpressionAuditTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="GuiAuditTests.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="MixedScreenSourceResolutionTests.cpp">
+    <ClCompile Include="MixedScreenSourceResolutionTests.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="RetainedScopeUnknownPresentationTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="SubmittedNativeFillRetentionTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="AlphaSourceCropPolicyTests.cpp">
@@ -151,6 +164,15 @@
     </ClCompile>
     <ClCompile Include="RendererIdTests.cpp">
       <Filter>Resource Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\VideoProcessor-GUI\StatsOverlayWindow.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="DisplayRasterInfoTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="DisplayWindowGeometryTests.cpp">
+      <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="DisplayRefreshRatePolicyTests.cpp">
       <Filter>Resource Files</Filter>
@@ -292,4 +314,33 @@
   <ItemGroup><ClCompile Include="RenderAheadPolicyTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="QueueStressTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="QueueStressLaneTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="ActivePictureMeasurementCacheTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="OutputOsdTelemetryCacheTests.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="HdrStatusTests.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="OsdInputColorInfoTests.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="StatsOverlayLayoutTests.cpp"><Filter>Source Files</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="MadVROsdSizingTests.cpp"><Filter>Source Files</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="CaptureClockConversionTests.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="DirectShowTimingClockTests.cpp"><Filter>Source Files</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="ActivePictureBlackReferenceTests.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="AnalysisEvaluationBudgetTests.cpp" />
+    <ClCompile Include="DebugLogAsyncTests.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="LookaheadPerformanceWindowTests.cpp" />
+    <ClCompile Include="PreparedPictureEvidenceTests.cpp" />
+    <ClCompile Include="OptionalAnalysisWorkerTests.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="PreparedOutwardWindowTests.cpp" />
+  </ItemGroup>
+  <ItemGroup><ClCompile Include="ReconstructionMotionTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="ProcessingPerformanceWindowTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
 </Project>

@@ -48,6 +48,106 @@ namespace VideoProcessorTest
 	{
 	public:
 
+        TEST_METHOD(DisplayRefreshPresentationRoundTripsAndValidatesWithoutChangingComments)
+        {
+            const std::wstring path = MakeTemporaryConfigPath(L"vpv");
+            WriteBytes(path, "[general]\nrenderer: VP Renderer\n# keep display preferences\npresent_every_vsync: false\n"
+                "[vprenderer.primary]\nquality: high\n");
+            ConfigEditorCore::ConfigDocument document;
+            std::wstring error;
+            Assert::IsTrue(document.Load(path, error), error.c_str());
+            document.SetKnown("general", "present_every_vsync", "true");
+            const bool valid = ConfigEditorCore::ValidateCandidate(document, error);
+            Assert::IsTrue(valid, error.c_str());
+            ConfigEditorCore::SaveResult saved;
+            Assert::IsTrue(ConfigEditorCore::SaveSafely(document, saved, error), error.c_str());
+            ConfigEditorCore::ConfigDocument reloaded;
+            Assert::IsTrue(reloaded.Load(path, error), error.c_str());
+            Assert::AreEqual(std::string("true"), reloaded.Get("general", "present_every_vsync"));
+            Assert::IsTrue(ReadBytes(path).find("# keep display preferences") != std::string::npos);
+            reloaded.SetKnown("general", "present_every_vsync", "sometimes");
+            Assert::IsFalse(ConfigEditorCore::ValidateCandidate(reloaded, error));
+            using ConfigurationApplyPolicy::Action;
+            Assert::AreEqual(static_cast<int>(Action::RestartRenderer),
+                static_cast<int>(ConfigurationApplyPolicy::ClassifyChange({"general", "present_every_vsync"}, false)));
+            Assert::AreEqual(static_cast<int>(Action::SaveOnly),
+                static_cast<int>(ConfigurationApplyPolicy::ClassifyChange({"general", "present_every_vsync"}, true)));
+            DeleteFileW(path.c_str());
+        }
+
+        TEST_METHOD(PresentationDepthIsIndependentValidatedAndRestartsOnlyVpRenderer)
+        {
+            const auto path=MakeTemporaryConfigPath(L"vpp");
+            WriteBytes(path,"[general]\nrenderer: VP Renderer\n# presentation comment\n"
+                "[vprenderer.primary]\nquality: high\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 3\n");
+            ConfigEditorCore::ConfigDocument document;
+            std::wstring error;
+            Assert::IsTrue(document.Load(path,error),error.c_str());
+            for(int depth=1;depth<=8;++depth) {
+                document.SetKnown("general","presentation_queue_depth",std::to_string(depth));
+                Assert::IsTrue(ConfigEditorCore::ValidateCandidate(document,error),error.c_str());
+            }
+            for(const auto* invalid:{"0","9","-1","1.5","broken"}) {
+                document.SetKnown("general","presentation_queue_depth",invalid);
+                Assert::IsFalse(ConfigEditorCore::ValidateCandidate(document,error));
+            }
+            document.SetKnown("general","presentation_queue_depth","4");
+            ConfigEditorCore::SaveResult saved;
+            Assert::IsTrue(ConfigEditorCore::SaveSafely(document,saved,error),error.c_str());
+            ConfigEditorCore::ConfigDocument reopened;
+            Assert::IsTrue(reopened.Load(path,error),error.c_str());
+            Assert::AreEqual(std::string("4"),reopened.Get("general","presentation_queue_depth"));
+            Assert::AreEqual(std::string("3"),reopened.Get("queue.Normal","target_frames"));
+            Assert::IsTrue(ReadBytes(path).find("# presentation comment")!=std::string::npos);
+            using ConfigurationApplyPolicy::Action;
+            Assert::AreEqual(int(Action::RestartRenderer),int(ConfigurationApplyPolicy::ClassifyChange({"general","presentation_queue_depth"},false)));
+            Assert::AreEqual(int(Action::SaveOnly),int(ConfigurationApplyPolicy::ClassifyChange({"general","presentation_queue_depth"},true)));
+            DeleteFileW(path.c_str());
+        }
+        TEST_METHOD(OutputDisplayProfilesRoundTripAndRejectInvalidAdvancedModes)
+        {
+            const std::wstring path = MakeTemporaryConfigPath(L"vpd");
+            WriteBytes(path, "[output_display.Default]\nmode_policy: auto\n"
+                "restore_previous_mode: true\nallowed_modes: 1920x1080p60\n"
+                "[output_display.Film]\nmode_policy: advanced\n"
+                "allowed_modes: 3840x2160p23.976,1920x1080p24\n");
+            ConfigEditorCore::ConfigDocument document;
+            std::wstring error;
+            Assert::IsTrue(document.Load(path, error), error.c_str());
+            Assert::IsTrue(ConfigEditorCore::ValidateCandidate(document, error), error.c_str());
+            ConfigEditorCore::SaveResult saved;
+            Assert::IsTrue(ConfigEditorCore::SaveSafely(document, saved, error), error.c_str());
+            ConfigEditorCore::ConfigDocument reloaded;
+            Assert::IsTrue(reloaded.Load(path, error), error.c_str());
+            Assert::AreEqual(std::string("auto"), reloaded.Get("output_display.Default", "mode_policy"));
+            Assert::AreEqual(std::string("1920x1080p60"), reloaded.Get("output_display.Default", "allowed_modes"));
+            Assert::AreEqual(std::string("3840x2160p23.976,1920x1080p24"),
+                reloaded.Get("output_display.Film", "allowed_modes"));
+            reloaded.SetKnown("output_display.Film", "allowed_modes", "");
+            Assert::IsFalse(ConfigEditorCore::ValidateCandidate(reloaded, error));
+            reloaded.SetKnown("output_display.Film", "mode_policy", "auto");
+            Assert::IsTrue(ConfigEditorCore::ValidateCandidate(reloaded, error), error.c_str());
+            reloaded.SetKnown("output_display.Film", "allowed_modes",
+                "1920x1080p59.94,1920x1080p60000/1001");
+            Assert::IsFalse(ConfigEditorCore::ValidateCandidate(reloaded, error));
+            DeleteFileW(path.c_str());
+        }
+
+        TEST_METHOD(ConfigurationApplyPolicyAppliesOutputDisplayEditsAndReordersLive)
+        {
+            using ConfigurationApplyPolicy::Action;
+            using ConfigurationApplyPolicy::ClassifyChanges;
+            Assert::AreEqual(static_cast<int>(Action::ApplyProfiles),
+                static_cast<int>(ClassifyChanges({{"output_display.Film", "allowed_modes"}})));
+            Assert::AreEqual(static_cast<int>(Action::ApplyProfiles),
+                static_cast<int>(ClassifyChanges({{"output_display.Default", "mode_policy"}})));
+            Assert::AreEqual(static_cast<int>(Action::ApplyProfiles),
+                static_cast<int>(ClassifyChanges({{"output_display.Film", "profile_section_order"}})));
+            Assert::AreEqual(static_cast<int>(Action::ReloadShortcuts),
+                static_cast<int>(ClassifyChanges({{"output_display.Film", "shortcut"}})));
+            Assert::AreEqual(std::string("output_display"),
+                ConfigurationApplyPolicy::OrderedProfileGroup("output_display.Film"));
+        }
         TEST_METHOD(SubstringRuleConfigRoundTripAndValidation)
         {
             const std::wstring path = MakeTemporaryConfigPath(L"vps");

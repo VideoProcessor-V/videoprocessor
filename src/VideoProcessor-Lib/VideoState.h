@@ -47,7 +47,10 @@ public:
 	EOTF eotf = EOTF::UNKNOWN;
 	ColorSpace colorspace = ColorSpace::UNKNOWN;
 	bool invertedVertical = false;
-	// TV-led Dolby Vision HDMI RGB tunnel in DeckLink R210.
+	// Capture must clear this when its processing can remap RGB tunnel bytes.
+	bool rgbTunnelBytesPreserved = true;
+	TunnelSdrRgbRange tunnelSdrRgbRange = TunnelSdrRgbRange::Full;
+	// TV-led Dolby Vision HDMI RGB tunnel in a supported raw RGB layout.
 	bool dolbyVisionTunnel = false;
 
 	// [general] newlldv: PQ / BT.2020 was inferred for a BT.2020, 10/12-bit

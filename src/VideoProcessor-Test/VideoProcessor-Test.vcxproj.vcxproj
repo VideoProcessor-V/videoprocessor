@@ -79,6 +79,24 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <!-- Exercise the same GPU tests against either shipped renderer dependency.
+       Keep beta objects and DLLs separate to prevent mixed-header ABI builds. -->
+  <PropertyGroup>
+    <VPTestLibplacebo Condition="'$(VPTestLibplacebo)'==''">standard</VPTestLibplacebo>
+    <VPTestLibplaceboDirectory Condition="'$(VPTestLibplacebo)'=='standard'">$(ProjectDir)..\..\3rdparty\libplacebo</VPTestLibplaceboDirectory>
+    <VPTestLibplaceboLibrary Condition="'$(VPTestLibplacebo)'=='standard'">libplacebo-360.lib</VPTestLibplaceboLibrary>
+    <VPTestLibplaceboDirectory Condition="'$(VPTestLibplacebo)'=='beta'">$(ProjectDir)..\..\3rdparty\libplacebo-beta</VPTestLibplaceboDirectory>
+    <VPTestLibplaceboLibrary Condition="'$(VPTestLibplacebo)'=='beta'">libplacebo-388.lib</VPTestLibplaceboLibrary>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(VPTestLibplacebo)'=='beta'">
+    <OutDir>$(ProjectDir)..\..\$(Platform)\$(Configuration)\tests-beta\</OutDir>
+    <IntDir>$(ProjectDir)..\..\$(Platform)\$(Configuration)\obj-tests-beta\</IntDir>
+    <TargetName>VideoProcessor-TestBeta</TargetName>
+  </PropertyGroup>
+  <Target Name="ValidateVpTestLibplacebo" BeforeTargets="PrepareForBuild">
+    <Error Condition="'$(VPTestLibplacebo)'!='standard' and '$(VPTestLibplacebo)'!='beta'" Text="VPTestLibplacebo must be standard or beta." />
+    <Error Condition="'$(VPTestLibplacebo)'=='beta' and '$(Platform)'!='x64'" Text="Beta GPU tests require x64." />
+  </Target>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <LinkIncremental>false</LinkIncremental>
   </PropertyGroup>
@@ -93,6 +111,9 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <LinkIncremental>false</LinkIncremental>
   </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(VPTestLibplacebo)'=='beta'">
+    <ClCompile><PreprocessorDefinitions>VP_LIBPLACEBO_BETA;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <PrecompiledHeader>Use</PrecompiledHeader>
@@ -100,22 +121,23 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>.;$(MagewellSdkRoot)\Include;..\..\3rdparty\blackmagic_decklink;..\..\3rdparty\microsoft_directshow_baseclasses;..\..\3rdparty\lavfilters;..\..\3rdparty\mpc_video_renderer;..\..\3rdparty\libplacebo\include;..\VideoProcessor-Lib;..\VideoProcessor-ConfigCore;$(VCInstallDir)UnitTest\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>.;$(MagewellSdkRoot)\Include;..\..\3rdparty\blackmagic_decklink;..\..\3rdparty\microsoft_directshow_baseclasses;..\..\3rdparty\lavfilters;..\..\3rdparty\mpc_video_renderer;$(VPTestLibplaceboDirectory)\include;..\VideoProcessor-Lib;..\VideoProcessor-ConfigCore;$(VCInstallDir)UnitTest\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <UseFullPaths>true</UseFullPaths>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <DebugInformationFormat>OldStyle</DebugInformationFormat>
+      <!-- Embedded /Z7 records in the large schema tests can fail with LNK1103. -->
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
-      <AdditionalLibraryDirectories>..\..\3rdparty\libplacebo\lib;$(VCInstallDir)UnitTest\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>libplacebo-360.lib;Ws2_32.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;opengl32.lib;strmiids.lib;winmm.lib;bcrypt.lib;Propsys.lib;d3d11.lib;dxgi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(VPTestLibplaceboDirectory)\lib;$(VCInstallDir)UnitTest\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>$(VPTestLibplaceboLibrary);Ws2_32.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;opengl32.lib;strmiids.lib;winmm.lib;bcrypt.lib;Propsys.lib;d3d11.lib;dxgi.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /D /Y &quot;$(ProjectDir)..\..\3rdparty\libplacebo\bin\*.dll&quot; &quot;$(OutDir)&quot; &gt;nul</Command>
+      <Command>xcopy /D /Y &quot;$(VPTestLibplaceboDirectory)\bin\*.dll&quot; &quot;$(OutDir)&quot; &gt;nul</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -138,18 +160,18 @@
       <PrecompiledHeader>Use</PrecompiledHeader>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>.;$(MagewellSdkRoot)\Include;..\..\3rdparty\blackmagic_decklink;..\..\3rdparty\microsoft_directshow_baseclasses;..\..\3rdparty\lavfilters;..\..\3rdparty\mpc_video_renderer;..\..\3rdparty\libplacebo\include;..\VideoProcessor-Lib;..\VideoProcessor-ConfigCore;$(VCInstallDir)UnitTest\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>.;$(MagewellSdkRoot)\Include;..\..\3rdparty\blackmagic_decklink;..\..\3rdparty\microsoft_directshow_baseclasses;..\..\3rdparty\lavfilters;..\..\3rdparty\mpc_video_renderer;$(VPTestLibplaceboDirectory)\include;..\VideoProcessor-Lib;..\VideoProcessor-ConfigCore;$(VCInstallDir)UnitTest\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <UseFullPaths>true</UseFullPaths>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalLibraryDirectories>..\..\3rdparty\libplacebo\lib;$(VCInstallDir)UnitTest\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>libplacebo-360.lib;Ws2_32.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;opengl32.lib;strmiids.lib;winmm.lib;bcrypt.lib;Propsys.lib;d3d11.lib;dxgi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(VPTestLibplaceboDirectory)\lib;$(VCInstallDir)UnitTest\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>$(VPTestLibplaceboLibrary);Ws2_32.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;opengl32.lib;strmiids.lib;winmm.lib;bcrypt.lib;Propsys.lib;d3d11.lib;dxgi.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /D /Y &quot;$(ProjectDir)..\..\3rdparty\libplacebo\bin\*.dll&quot; &quot;$(OutDir)&quot; &gt;nul</Command>
+      <Command>xcopy /D /Y &quot;$(VPTestLibplaceboDirectory)\bin\*.dll&quot; &quot;$(OutDir)&quot; &gt;nul</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -172,6 +194,17 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="DolbyVisionTunnelTestSender.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="FullscreenActivationTests.cpp" />
+    <ClCompile Include="NativeP010CaptureTests.cpp" />
+    <ClCompile Include="StartupPresentationReadinessTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="QueueNativeContinuityTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="Bt2020SignalControllerTests.cpp" />
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
@@ -210,6 +243,8 @@
     <ClCompile Include="SubtitleBoxDetectorTests.cpp" />
     <ClCompile Include="SubtitleOpaqueCardRefinementTests.cpp" />
     <ClCompile Include="SubtitleBoxLookaheadTests.cpp" />
+    <ClCompile Include="SubtitleHandoffTests.cpp" />
+    <ClCompile Include="SubtitleBackingLipTests.cpp" />
     <ClCompile Include="AnalysisRecoveryParityTests.cpp" />
     <ClCompile Include="AnalysisRecoveryDvTests.cpp" />
     <ClCompile Include="SubtitleMeasurementWorkerTests.cpp" />
@@ -230,6 +265,12 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="SubtitleTranslationReversalTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="RetainedScopeUnknownPresentationTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="SubmittedNativeFillRetentionTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="AlphaSourceCropPolicyTests.cpp">
@@ -296,6 +337,7 @@
     <ClCompile Include="..\VP-V\tests\WholeHookChainHookTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="RendererDependencyTests.cpp"><ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild></ClCompile>
     <ClCompile Include="MotionRendererTests.cpp"><ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild></ClCompile>
     <ClCompile Include="LibplaceboRenderParametersTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
@@ -549,6 +591,7 @@
     <ClCompile Include="LedDriveDelta1Tests.cpp" />
     <ClCompile Include="LedDriveHunt2Tests.cpp" />
     <ClCompile Include="LedDriveHunt3Tests.cpp" />
+    <ClCompile Include="QualityProfileMigrationTests.cpp" />
     <ClCompile Include="ConfigEditorCoreTests.cpp" />
     <ClCompile Include="ConfigurationRpcServerTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
@@ -565,9 +608,16 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="DebugLogRetentionTests.cpp" />
+    <ClCompile Include="DebugLogAsyncTests.cpp" />
     <ClCompile Include="AnalysisDiagnosticTraceTests.cpp" />
     <ClCompile Include="AnalysisDiagnosticReplayTests.cpp"><LanguageStandard>stdcpp17</LanguageStandard><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="DisplayRefreshRatePolicyTests.cpp" />
+    <ClCompile Include="DisplayVsyncClockTests.cpp" />
+    <ClCompile Include="DisplayCadenceHealthTests.cpp" />
+    <ClCompile Include="DisplayCadenceRecoveryTests.cpp" />
+    <ClCompile Include="DisplayWindowGeometryTests.cpp" />
+    <ClCompile Include="DisplayRasterInfoTests.cpp" />
+    <ClCompile Include="..\VideoProcessor-GUI\StatsOverlayWindow.cpp" />
 	<ClCompile Include="DisplayRefreshRateEstimatorTests.cpp" />
 	<ClCompile Include="DisplayRefreshRateWindowTests.cpp" />
     <ClCompile Include="CadenceIntervalEstimateTests.cpp" />
@@ -648,6 +698,10 @@
     <ClCompile Include="ActivePictureTransitionModelTests.cpp" />
 	<ClCompile Include="ActivePictureAnalyzerTests.cpp" />
     <ClCompile Include="ActivePictureEvidenceTests.cpp" />
+    <ClCompile Include="ActivePictureBlackReferenceTests.cpp" />
+    <ClCompile Include="ActivePictureMeasurementCacheTests.cpp" />
+    <ClCompile Include="ReconstructionMotionTests.cpp"><ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild></ClCompile>
+    <ClCompile Include="ProcessingPerformanceWindowTests.cpp" />
     <ClCompile Include="LocalBoundaryDiagnosticsTests.cpp" />
     <ClCompile Include="LocalBoundaryRefinementTests.cpp" />
     <ClCompile Include="SparseEntryEpisodeRecoveryTests.cpp" />
@@ -675,6 +729,8 @@
 	<ClCompile Include="DirectShowEpochPrimePolicyTests.cpp" />
     <ClCompile Include="LiveOutputTraceTests.cpp" />
     <ClCompile Include="VideoTimingControllerTests.cpp" />
+	<ClCompile Include="CaptureClockConversionTests.cpp" />
+	<ClCompile Include="DirectShowTimingClockTests.cpp" />
 	<ClCompile Include="DirectShowVideoTimingAdapterTests.cpp" />
 	<ClCompile Include="DirectShowFrameDelivererTests.cpp" />
 	<ClCompile Include="DirectShowDeliveryOutcomeTests.cpp" />
@@ -688,6 +744,7 @@
 	<ClCompile Include="LiveEpochConvergenceControllerTests.cpp" />
 	<ClCompile Include="LiveFrameCounterTrackerTests.cpp" />
 	<ClCompile Include="OutputReadinessControllerTests.cpp" />
+    <ClCompile Include="TemporalPresentationLedgerTests.cpp" />
     <ClCompile Include="Magewell*.cpp" Condition="'$(VpCiNoMagewell)' != 'true'" />
 	<ClCompile Include="RationalLiveOutputSequencerTests.cpp" />
 	<ClCompile Include="ConsecutiveFrameDurationHistoryTests.cpp" />
@@ -714,5 +771,23 @@
   </ImportGroup>
   <ItemGroup>
     <ClCompile Include="RememberedEdgeReturnTests.cpp"></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="OutputOsdTelemetryCacheTests.cpp"><LanguageStandard>stdcpp17</LanguageStandard><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="HdrStatusTests.cpp"><LanguageStandard>stdcpp17</LanguageStandard><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="OsdInputColorInfoTests.cpp"><LanguageStandard>stdcpp17</LanguageStandard><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="StatsOverlayLayoutTests.cpp"><LanguageStandard>stdcpp17</LanguageStandard><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="MadVROsdSizingTests.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="AnalysisEvaluationBudgetTests.cpp" />
+    <ClCompile Include="LookaheadPerformanceWindowTests.cpp" />
+    <ClCompile Include="PreparedPictureEvidenceTests.cpp" />
+    <ClCompile Include="OptionalAnalysisWorkerTests.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="PreparedOutwardWindowTests.cpp" />
   </ItemGroup>
 </Project>

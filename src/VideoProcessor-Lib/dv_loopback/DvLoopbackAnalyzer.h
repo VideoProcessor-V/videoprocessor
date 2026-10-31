@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: GPL-3.0-only
  */
 // DV tunnel loopback (2026-10-17): the receiving side. Captured frames go
-// through VP's own tunnel formatter (CR210DolbyVisionTunnelFormatter, the
+// through VP's own tunnel formatter (CRGBDolbyVisionTunnelFormatter, the
 // decode the renderer runs) and the renderer's presentation decision
 // (DolbyVisionTunnelPresentation.h); each frame is identified from its
 // stamp in the raw RGB8 bytes, aligned to what was sent, and compared bit for
@@ -17,7 +17,7 @@
 #include "DvMetadataModel.h"
 #include <VideoFrame.h>
 #include <VideoState.h>
-#include <video_frame_formatter/CR210DolbyVisionTunnelFormatter.h>
+#include <video_frame_formatter/CRGBDolbyVisionTunnelFormatter.h>
 #include <VP-V/modules/input/signal/DolbyVisionTunnelHandoff.h>
 #include <functional>
 #include <memory>
@@ -128,7 +128,7 @@ namespace DvLoopback
 		void Issue(const std::string& text);
 		AnalyzerOptions m_options;
 		VideoStateComPtr m_state;
-		std::unique_ptr<CR210DolbyVisionTunnelFormatter> m_formatter;
+		std::unique_ptr<CRGBDolbyVisionTunnelFormatter> m_formatter;
 		std::vector<uint8_t> m_output;
 		std::vector<uint16_t> m_planes;
 		std::vector<uint8_t> m_rgb;

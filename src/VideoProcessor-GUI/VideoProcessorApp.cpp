@@ -607,6 +607,8 @@ void ValidateRendererConfigRules()
 	}
 	for (const std::string& warning : unifiedModel.warnings)
 		DebugLog::Log("configuration migration warning: %s", warning.c_str());
+	for (const std::string& warning : rendererConfig.GetMigrationWarnings())
+		DebugLog::Log("configuration migration warning: %s", warning.c_str());
 
 	auto validateOwnedSections = [](const ConfigFile& config)
 	{
@@ -932,9 +934,17 @@ std::wstring LoadConfiguredFullscreenMonitorName()
 {
 	ConfigFile config;
 	std::string value;
-	if (!config.Load() ||
-		!config.TryGetString("general", "fullscreen_monitor_name", value))
-		return {};
+    if (!config.Load()) return {};
+    RendererProfileConfig::Model model;
+    std::string error;
+    if (RendererProfileConfig::Read(config, model, error))
+        for (const auto& group : model.groups)
+            if (group.name == "output_display")
+            {
+                value = RendererProfileConfig::ResolveOutputDisplayMonitor(model, group.defaultSelection);
+                break;
+            }
+    if (value.empty()) config.TryGetString("general", "fullscreen_monitor_name", value);
 
 	value = ConfigFile::Trim(value);
 	return value.empty() ? std::wstring() : StringToWideString(value);

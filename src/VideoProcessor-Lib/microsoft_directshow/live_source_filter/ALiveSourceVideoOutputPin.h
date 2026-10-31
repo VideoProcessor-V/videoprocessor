@@ -451,11 +451,10 @@ protected:
 		if (ticksPerSecond == 0)
 			return 0;
 
-		// Bug hunt 2 (M2): exact rounded conversion with a 128-bit
-		// intermediate for every tick count. The earlier fallback past
-		// INT64_MAX / 1e7 ticks (~10.7 days at 1 MHz, ~25.6 h at 10 MHz)
-		// truncated to whole seconds, so 24-60 frames shared one timestamp.
-		return I64_MulDivRoundSaturating(timestamp, REFERENCE_TIME_TICKS_PER_SECOND, ticksPerSecond);
+		// U64_MulDiv uses a 128-bit product and preserves the established nearest-
+		// tick rounding even after the hardware clock has run for many days.
+		// Do not fall back to whole seconds when a 64-bit product would overflow.
+		return U64_MulDiv(timestamp, REFERENCE_TIME_TICKS_PER_SECOND, ticksPerSecond);
 	}
 
 	static bool IsMonotonicProgression(REFERENCE_TIME current, REFERENCE_TIME previous)

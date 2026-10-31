@@ -1,6 +1,7 @@
 #pragma once
 
 #include <IRenderer.h>
+#include <StartupPresentationReadiness.h>
 #include <ITimingClock.h>
 #include <VideoConversionOverride.h>
 
@@ -38,6 +39,8 @@ public:
 	void CancelFileFrameWait() override;
 	bool HasPresentedLiveFrame() const override;
 	const char* PresentedLiveFrameEvidence() const override;
+	StartupPresentation::QueryStatus GetStartupPresentationReadiness(
+		StartupPresentation::SnapshotV1& snapshot) const;
 	HRESULT OnWindowsEvent(LONG_PTR param1, LONG_PTR param2) override;
 	void Build() override;
 	void Start() override;
@@ -89,6 +92,7 @@ public:
 		bool& liveResetRequired) override;
 	bool CycleSubtitlePreviewMode(SubtitlePreviewMode& mode) override;
 	void ResetSubtitlePreviewMode() override;
+	void RequestCalibrationLutReload() override;
 	size_t GetFrameQueueSize() override;
 	double EntryLatencyMs() const override;
 	double ExitLatencyMs() const override;
@@ -136,7 +140,13 @@ public:
 	bool GetCalibrationOutput(Calibration::PatternOutputInfo& info) const override;
 	bool SetCalibrationPattern(const Calibration::PatternRequest& request, CString& reason) override;
 
+	// HDR luminance for the stats OSD, through the plugin's optional export.
+	// False when the plugin lacks it or has not rendered a frame yet.
+	bool GetHdrStatus(RendererHdrStatus& status) const;
+
 private:
 	IVideoRenderer* m_renderer = nullptr;
 	void (__cdecl *m_destroyRenderer)(IVideoRenderer*) = nullptr;
+	uint32_t (__cdecl *m_startupReadiness)(IVideoRenderer*, StartupPresentation::SnapshotV1*) = nullptr;
+	bool (__cdecl *m_getHdrStatus)(const IVideoRenderer*, RendererHdrStatus*) = nullptr;
 };

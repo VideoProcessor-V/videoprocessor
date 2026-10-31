@@ -15,7 +15,7 @@
 //     BT.709 / BT.1886, a PQ picture shown as SDR.
 // This probe watches the captured pictures on the capture thread while the
 // gate is open (or the signal is handed off) and applies the formatter's own
-// rules (CR210DolbyVisionTunnelFormatter's static probes):
+// rules (CRGBDolbyVisionTunnelFormatter's static probes):
 //   tunnel evidence  a CRC-valid header (the only proof of a tunnel), or
 //                    tunnel-like content (the SDR exit's cue: noisy low
 //                    nibbles in B, neutral R) - a damaged or range-converted
@@ -52,7 +52,7 @@
 // The GUI defines BLACK as a colour macro (WindowedVideoWindow.h).
 #pragma push_macro("BLACK")
 #undef BLACK
-#include <video_frame_formatter/CR210DolbyVisionTunnelFormatter.h>
+#include <video_frame_formatter/CRGBDolbyVisionTunnelFormatter.h>
 #pragma pop_macro("BLACK")
 
 #include <algorithm>
@@ -76,8 +76,8 @@ public:
 	// A tunnel carries a CRC-valid header in every picture.
 	static constexpr double kHandoffSeconds = 1.0;
 
-	using Raster = CR210DolbyVisionTunnelFormatter::RasterView;
-	using Content = CR210DolbyVisionTunnelFormatter::RgbContent;
+	using Raster = CRGBDolbyVisionTunnelFormatter::RasterView;
+	using Content = CRGBDolbyVisionTunnelFormatter::RgbContent;
 
 	void Reset(const DolbyVisionTunnelHandoffSignal& signal)
 	{
@@ -102,7 +102,7 @@ public:
 		{
 			// Only a CRC-valid header takes the signal back (content cues are
 			// not proof, and the hand-off was decided on content already).
-			if (CR210DolbyVisionTunnelFormatter::HasTunnelHeader(raster))
+			if (CRGBDolbyVisionTunnelFormatter::HasTunnelHeader(raster))
 			{
 				m_handedOff = false;
 				m_hasCandidate = false;
@@ -116,17 +116,17 @@ public:
 			m_reason = "Dolby VSIF says TV-led (tunnel)";
 			return DolbyVisionTunnelHandoffEvent::None;
 		}
-		if (CR210DolbyVisionTunnelFormatter::HasTunnelHeader(raster))
+		if (CRGBDolbyVisionTunnelFormatter::HasTunnelHeader(raster))
 		{
 			ClearCandidate("CRC-valid tunnel header");
 			return DolbyVisionTunnelHandoffEvent::None;
 		}
-		if (CR210DolbyVisionTunnelFormatter::LooksLikeTunnelContent(raster))
+		if (CRGBDolbyVisionTunnelFormatter::LooksLikeTunnelContent(raster))
 		{
 			ClearCandidate("tunnel-like content (damaged or converted tunnel stays with the tunnel path)");
 			return DolbyVisionTunnelHandoffEvent::None;
 		}
-		const Content content = CR210DolbyVisionTunnelFormatter::ClassifyRgbContent(raster);
+		const Content content = CRGBDolbyVisionTunnelFormatter::ClassifyRgbContent(raster);
 		m_lastContent = content;
 		if (content == Content::UNKNOWN)
 			return DolbyVisionTunnelHandoffEvent::None;   // dark / undecided: no evidence either way
@@ -187,13 +187,13 @@ private:
 	uint64_t m_analysed = 0;
 };
 
-inline const char* ToString(CR210DolbyVisionTunnelFormatter::RgbContent content)
+inline const char* ToString(CRGBDolbyVisionTunnelFormatter::RgbContent content)
 {
 	switch (content)
 	{
-	case CR210DolbyVisionTunnelFormatter::RgbContent::HIGH8: return "RGB8 high8";
-	case CR210DolbyVisionTunnelFormatter::RgbContent::LOW8: return "RGB8 low8 (or dark 10-bit)";
-	case CR210DolbyVisionTunnelFormatter::RgbContent::TEN_BIT: return "10-bit RGB";
+	case CRGBDolbyVisionTunnelFormatter::RgbContent::HIGH8: return "RGB8 high8";
+	case CRGBDolbyVisionTunnelFormatter::RgbContent::LOW8: return "RGB8 low8 (or dark 10-bit)";
+	case CRGBDolbyVisionTunnelFormatter::RgbContent::TEN_BIT: return "10-bit RGB";
 	default: return "undecided";
 	}
 }

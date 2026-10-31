@@ -1,7 +1,11 @@
 #pragma once
+#include "PreparedPictureEvidence.h"
+#include "PreparedOutwardWindow.h"
 
 #include <IRenderer.h>
+#include <StartupPresentationReadiness.h>
 #include <AnalysisFrame.h>
+#include <vprenderer/OptionalAnalysisWorker.h>
 #include <ITimingClock.h>
 #include <VideoConversionOverride.h>
 #include <ActivePictureDecisionTimeline.h>
@@ -9,6 +13,7 @@
 #include <CropDiagnosticThrottle.h>
 #include <RememberedEdgeReturn.h>
 #include <vprenderer/BufferedPictureExpansion.h>
+#include <vprenderer/AsyncOutwardWindow.h>
 #include <vprenderer/AlphaConversionTimingWindow.h>
 #include <vprenderer/PulldownDetector.h>
 #include <vprenderer/CaptureTimestampGap.h>
@@ -17,6 +22,7 @@
 #include <VP-V/modules/input/queue_timing/VpFixedBudgetPolicy.h>
 #include <video_frame_formatter/IVideoFrameFormatter.h>
 
+#include <array>
 #include <atomic>
 #include <memory>
 #include <string>
@@ -70,6 +76,8 @@ public:
 	{
 		return "swapchain-submitted";
 	}
+	// Optional export only; deliberately not part of IVideoRenderer's vtable.
+	bool GetStartupPresentationReadiness(StartupPresentation::SnapshotV1& snapshot) const;
 	HRESULT OnWindowsEvent(LONG_PTR param1, LONG_PTR param2) override;
 	void Build() override;
 	void Start() override;
@@ -126,6 +134,7 @@ public:
 		bool& liveResetRequired) override;
 	bool CycleSubtitlePreviewMode(SubtitlePreviewMode& mode) override;
 	void ResetSubtitlePreviewMode() override;
+	void RequestCalibrationLutReload() override;
 	size_t GetFrameQueueSize() override;
 	double EntryLatencyMs() const override;
 	double ExitLatencyMs() const override;
@@ -164,6 +173,8 @@ public:
 	bool StopLedDriveForShutdown() override;
 	void ResumeLedDriveAfterTest() override;
 	bool GetRenderLoad(RendererRenderLoad& load) const override;
+	// Reached through the plugin's HDR status export, not IRenderer.
+	bool GetHdrStatus(RendererHdrStatus& status) const;
 	void SetRenderLoadDisplayRefreshRate(double refreshRateHz) override;
 	bool SupportsNativeStatsOverlay() const override { return true; }
 	bool SetNativeStatsOverlay(const uint8_t* pixels, size_t byteCount,
@@ -212,8 +223,23 @@ private:
 			bool Raw() const { return rawFrame != nullptr; }
 			size_t Bytes() const { return Raw() ? rawBytes : pixels.size(); }
 		};
+        struct LookaheadMeasurement {
+            AnalysisLumaSource source;
+            ActivePictureFrameIdentity identity;
+            uint64_t domainKey=0;
+            ActivePictureEvidence evidence;
+            ActivePictureArDarknessEvidence darkness;
+        };
+        using LookaheadWorker = OptionalAnalysisWorker<LookaheadMeasurement>;
+        using OutwardWindowResult = PreparedOutwardWindowResult;
+        using OutwardWindowWorker = OptionalAnalysisWorker<OutwardWindowResult, 4>;
         struct AnalysisPayload
         {
+            std::shared_ptr<LookaheadWorker::Slot> lookahead = std::make_shared<LookaheadWorker::Slot>();
+            std::shared_ptr<OutwardWindowWorker::Slot> outwardWindow;
+            AlphaSourceCrop::AsyncOutwardWindowContext outwardContext;
+            bool outwardRequested=false;
+            PreparedPictureEvidenceCache pictureProof;
             std::mutex mutex;
             std::shared_ptr<const void> nativeOwner;
             PreparedAnalysisFrame live;
@@ -286,16 +312,25 @@ private:
 	};
 
 	void RenderLoop();
+    bool WaitForDisplaySlot(std::unique_lock<std::mutex>& renderGuard, uint64_t sourceGeneration);
 	void ConversionLoop();
 	bool HasConversionWorkLocked() const;
 	std::shared_ptr<QueuedFrame::ConvertedPayload> AcquireConversionPayload();
 	void StopInternal(const std::function<void()>& drainAfterGraphStop);
-	void AnalyzeActivePictureLookahead(
+    void PrimeSubtitleMeasurements(const std::vector<QueuedFrame>& frames,
+        uint64_t policyGeneration, uint64_t continuityGeneration);
+    void PrimePictureProofMeasurements(const std::vector<QueuedFrame>& frames,
+        uint64_t policyGeneration, uint64_t continuityGeneration);
+    void PrimeActivePictureMeasurements(const std::vector<QueuedFrame>& frames,
+        uint64_t policyGeneration, uint64_t continuityGeneration);
+    void PrimeBufferedOutwardWindow(const std::vector<QueuedFrame>& futureFrames,
+        uint64_t policyGeneration, uint64_t continuityGeneration);
+	bool AnalyzeActivePictureLookahead(
 		std::vector<QueuedFrame>& previewFrames,
 		size_t queuedFutureFrames,
 		uint64_t lookaheadPolicyGeneration,
-		uint64_t continuityGeneration,
-		size_t activePictureFrames,    // the leading frames for the active picture; the rest feed the LED only
+		uint64_t continuityGeneration, int64_t deadlineQpc,
+		size_t activePictureFrames = static_cast<size_t>(-1),   // VP-V: the leading frames for the active picture; the rest feed the LED/intent observers only
 		// The statistics observer's (LED's) own depth: frames beyond it are walked for the
 		// intent observer only (2026-10-17, queue-fed intent observer).
 		size_t statisticsFutureFrames = static_cast<size_t>(-1));
@@ -338,6 +373,8 @@ private:
 	bool FileFrameSlotFreeLocked() const;
 	void ResetFrameRateAndPPM();
 	void ApplyPendingShaderSelectionLocked();
+	bool FormatOutputModeInfoLocked(CString& details) const;
+	void RefreshOsdCacheLocked();
 	IRendererCallback& m_callback;
 	const uint32_t m_callbackGeneration;
 	HWND m_videoHwnd = nullptr;
@@ -423,6 +460,7 @@ private:
 	QueueTimingPolicy::BacklogRunState m_backlogRun;   // was m_heldExcessRun
 	bool m_enqueueArrivalIsFrameStart = false;   // OnVideoFrame -> EnqueueFrame (capture callbacks are serial; re-audit MED 1)
 	std::atomic<uint64_t> m_droppedFrames{0};
+	std::atomic<uint64_t> m_queueCapacityDrops{0};
 	std::atomic<uint64_t> m_conversionFailures{0};
 	std::atomic<size_t> m_activePictureLookaheadFrames{0};
 	// Bug hunt 3 F2: the look-ahead above follows the queue (no locked-film floor).

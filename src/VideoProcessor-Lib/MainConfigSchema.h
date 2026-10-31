@@ -147,7 +147,12 @@ namespace MainConfigSchema
 			// long the filter process keeps the LED drive between graphs (0 = stop at
 			// once). Kept last: Validate() indexes the rules above by position.
 			ConfigSchema::Integer("file_av_offset_ms", FileAvOffsetMinMs, FileAvOffsetMaxMs),
-			ConfigSchema::Integer("file_led_holdover_ms", FileLedHoldoverMinMs, FileLedHoldoverMaxMs)
+			ConfigSchema::Integer("file_led_holdover_ms", FileLedHoldoverMinMs, FileLedHoldoverMaxMs),
+			ConfigSchema::Boolean("scale_osd"),
+            ConfigSchema::Number("stats_osd_size_percent", 37.5, 375.0),
+            // Append startup fields: backend input rules below reuse fixed indices.
+            ConfigSchema::Boolean("present_every_vsync"),
+            ConfigSchema::Integer("presentation_queue_depth", 1, 8)
 		};
 	}
 

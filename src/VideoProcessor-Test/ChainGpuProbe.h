@@ -949,7 +949,8 @@ namespace ChainGpuProbe
 				pl_frame_set_chroma_location(&source, PL_CHROMA_LEFT);
 				source.crop = { crop[0], crop[1], crop[2], crop[3] };
 				pl_frame composed{};
-				if (!ComposeSubtitleBeforeCrop(renderer, gpu, source, subtitleHook, &surface, composed))
+				SubtitlePreparationRenderer preparation;
+				if (!ComposeSubtitleBeforeCrop(preparation, gpu, source, subtitleHook, &surface, composed))
 					return fail("subtitle: the composition pass failed");
 				sequence = static_cast<uint64_t>(60 + f);
 				const Result r = render(a, true, sequence, blank, crop, &composed);

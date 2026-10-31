@@ -51,8 +51,9 @@ bool IsSubtitlePresentationOnlyUpdate(const Settings& current, const Settings& n
     normalized.subtitleTextReductionPercent = current.subtitleTextReductionPercent;
     normalized.subtitleRoundedCorners = current.subtitleRoundedCorners;
     normalized.subtitleFloatBackground = current.subtitleFloatBackground;
+    normalized.subtitleBackgroundGuard = current.subtitleBackgroundGuard;
     normalized.subtitleTemporalFill = current.subtitleTemporalFill;
-    normalized.subtitleStretchFill = current.subtitleStretchFill;
+    normalized.subtitleSpatialFill = current.subtitleSpatialFill;
     normalized.scopeSubtitleFit = current.scopeSubtitleFit;
     // These presets affect subtitle placement and tone-map metering, not source AR.
     normalized.scopeSubtitleHoldMs = current.scopeSubtitleHoldMs;

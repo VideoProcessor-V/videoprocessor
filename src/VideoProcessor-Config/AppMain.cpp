@@ -6,12 +6,16 @@
 #include <UpdateLauncher.h>
 
 #include "ConfigEditorWindow.h"
+#include "ConfigWheelGuard.h"
 #include "Resource.h"
 #include "VpTheme.h"
 #include <ConfigurationRpcProtocol.h>
 #include <ConfigurationLiveApply.h>
 
 #include <QApplication>
+#include <QComboBox>
+#include <QAbstractItemView>
+#include <QPushButton>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFileInfo>
@@ -333,6 +337,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     int argc = __argc;
     QApplication app(argc, __argv);
+    ConfigWheelGuard::install();
     if (UpdateLauncher::InstallationPending())
     {
         MessageBoxW(nullptr, L"An update is being installed. Please wait for setup to finish.", L"VideoProcessor updates", MB_OK | MB_ICONINFORMATION);
@@ -359,6 +364,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 	bool sandbox = false;
 	bool explicitConfig = false;
     QString screenshotPath;
+    QSize screenshotSize;
+    bool screenshotAddMode = false;
+    QString screenshotSourceRate;
     int initialPage = 0;
     quintptr owner = 0;
     DWORD ownerProcessId = 0;
@@ -408,6 +416,20 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         }
         else if (arguments[index] == QStringLiteral("--screenshot") && index + 1 < arguments.size())
             screenshotPath = arguments[++index];
+        else if (arguments[index] == QStringLiteral("--screenshot-add-mode"))
+            screenshotAddMode = true;
+        else if (arguments[index] == QStringLiteral("--screenshot-source-rate") && index + 1 < arguments.size())
+            screenshotSourceRate = arguments[++index];
+        else if (arguments[index] == QStringLiteral("--screenshot-size") && index + 1 < arguments.size())
+        {
+            const auto dimensions = arguments[++index].split(u'x');
+            bool widthOk = false, heightOk = false;
+            const int width = dimensions.value(0).toInt(&widthOk);
+            const int height = dimensions.value(1).toInt(&heightOk);
+            if (dimensions.size() != 2 || !widthOk || !heightOk || width < 760 ||
+                height < 540 || width > 4096 || height > 4096) return 2;
+            screenshotSize = QSize(width, height);
+        }
         else if (arguments[index] == QStringLiteral("--updates"))
             showUpdates = true;
         else if (arguments[index] == QStringLiteral("--restore-tray"))
@@ -538,16 +560,41 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     QObject::connect(&app, &QGuiApplication::screenRemoved, &window,
         [&window](QScreen*) { window.refreshMonitorDiscovery(); });
     window.selectPage(initialPage);
+    if (!screenshotPath.isEmpty() && screenshotSize.isValid()) window.resize(screenshotSize);
+    if (!screenshotPath.isEmpty() && !screenshotSourceRate.isEmpty())
+        if (auto* rate = window.findChild<QComboBox*>(QStringLiteral("config.output_display.preview_rate")))
+        {
+            const int index = rate->findData(screenshotSourceRate);
+            if (index >= 0) rate->setCurrentIndex(index);
+        }
+    if (!screenshotPath.isEmpty() && screenshotAddMode)
+    {
+        QTimer::singleShot(1000, &window, [&window]
+        {
+            if (auto* button = window.findChild<QPushButton*>(QStringLiteral("config.output_display.add_mode"))) button->click();
+        });
+        QTimer::singleShot(1250, &window, []
+        {
+            if (auto* modal = QApplication::activeModalWidget())
+                if (auto* entry = modal->findChild<QComboBox*>(QStringLiteral("config.output_display.mode_entry"))) entry->showPopup();
+        });
+    }
     if (!startInTray)
         // Enter the Qt event loop before exposing the native window. This
         // lets Qt complete the first style/layout/paint pass rather than
         // briefly showing an empty Win32 frame during startup.
         QTimer::singleShot(0, &window, [&window] { window.reveal(); });
     if (!screenshotPath.isEmpty())
-		QTimer::singleShot(watcher ? 2500 : 400, &window,
+		QTimer::singleShot(watcher ? 2500 : 1500, &window,
 			[&window, screenshotPath]
         {
-            window.grab().save(screenshotPath);
+            if (auto* modal = QApplication::activeModalWidget())
+            {
+                modal->grab().save(screenshotPath);
+                if (auto* entry = modal->findChild<QComboBox*>(QStringLiteral("config.output_display.mode_entry")))
+                    if (entry->view()->isVisible()) entry->view()->window()->grab().save(screenshotPath + QStringLiteral(".choices.png"));
+            }
+            else window.grab().save(screenshotPath);
             QCoreApplication::quit();
         });
     const int result = app.exec();

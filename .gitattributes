@@ -3,3 +3,4 @@
 *.png binary
 *.patch -text
 *.diff -text
+3rdparty/libplacebo-beta/source/translated-roi-copy-with-regression.patch text eol=lf

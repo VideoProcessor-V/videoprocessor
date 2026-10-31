@@ -24,6 +24,7 @@
 #include <CaptureInput.h>
 #include <VideoFrame.h>
 #include <VideoState.h>
+#include <CaptureDeliveryStats.h>
 
 
 typedef std::vector<CaptureInput> CaptureInputs;
@@ -162,6 +163,14 @@ public:
 	// Will throw if CanCapture() is false
 	virtual void StartCapture(CaptureRunToken captureRunToken) = 0;
 
+	// Request byte-preserving RGB8 capture for an explicitly selected DV tunnel.
+	// Backends without capture-side processing keep their existing behavior.
+	virtual void SetRawRgbTunnelCapture(bool enabled) {}
+
+	// Consumer capability: request native P210 instead of legacy v210 delivery.
+	// The default preserves every other backend's existing behavior.
+	virtual void SetNativeP210Capture(bool enabled) {}
+
 	// Stop capturing
 	// Idempotent
 	virtual void StopCapture() = 0;
@@ -212,6 +221,9 @@ public:
 	// Some hardware supports this, sometimes directly and sometimes it can be derived from
 	// gaps in the the hardware clock timestamps
 	virtual uint64_t VideoFrameMissedCount() const = 0;
+
+	// Optional measured throughput; unsupported backends keep their existing OSD.
+	virtual bool GetCaptureDeliveryStats(CaptureDeliveryStats& stats) const { return false; }
 };
 
 

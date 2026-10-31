@@ -25,7 +25,7 @@
 #include <vprenderer/GpuRgbUnpack.h>
 #include <vprenderer/GpuDolbyVisionTunnelUnpack.h>
 #include <vprenderer/DolbyVisionTunnelUnpackReference.h>
-#include <video_frame_formatter/CR210DolbyVisionTunnelFormatter.h>
+#include <video_frame_formatter/CRGBDolbyVisionTunnelFormatter.h>
 #include "DolbyVisionTunnelSender.h"
 #include <RawCaptureCorpus.h>
 #include <vprenderer/EarlyUpload.h>
@@ -1017,9 +1017,10 @@ namespace
 			auto target=MakeRgbFrame(targetTexture);target.color=image.color;
 			auto params=pl_render_fast_params;params.dither_params=nullptr;params.peak_detect_params=nullptr;
             pl_tex compositionTexture=nullptr;
+            SubtitlePreparationRenderer preparation;
             if(sourceCrop && hook) {
                 pl_frame composed{};
-                Assert::IsTrue(ComposeSubtitleBeforeCrop(m_renderer,gpu,image,hook,&compositionTexture,composed));
+                Assert::IsTrue(ComposeSubtitleBeforeCrop(preparation,gpu,image,hook,&compositionTexture,composed));
                 image=composed;
             }
             const pl_hook* hooks[2]={sourceCrop ? additionalHook : hook,additionalHook};

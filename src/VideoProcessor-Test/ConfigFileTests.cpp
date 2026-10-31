@@ -17,6 +17,7 @@
 #include <MainConfigSchema.h>
 #include <AmbientConfig.h>
 #include <AmbientSensor.h>
+#include <vprenderer/StatsOsdSettings.h>
 #include <QueueConfiguration.h>
 #include <ConfigBoolSwitches.h>
 #include <HdrInference.h>
@@ -2079,6 +2080,28 @@ namespace VideoProcessorTest
             Assert::AreEqual(std::string("vp_low_rate"), selected.snapshot->queue.profile);
         }
 
+        TEST_METHOD(ShaderPreparationSharesProfileBannerAcrossSelectionChanges) {
+            using namespace ProfileChangeOverlay;
+            const std::vector<Item> initial{{"subtitles", "Subtitles", "Clear / Yellow"}};
+            auto items = WithShaderStatus(initial, true);
+            Assert::AreEqual(size_t(2), items.size());
+            Assert::AreEqual(std::string("Shaders"), items.back().label);
+            Assert::IsTrue(items.back().indicator == Item::Indicator::Preparing);
+            items = WithShaderStatus(items, true); // Repeated poll cannot duplicate a column.
+            Assert::AreEqual(size_t(2), items.size());
+            const std::vector<Item> changed{{"nls", "NLS", "NLS+", Item::Indicator::On}};
+            items = WithShaderStatus(changed, true);
+            Assert::AreEqual(std::string("NLS+"), items.front().value);
+            Assert::AreEqual(size_t(2), items.size());
+            items = WithShaderStatus(items, false);
+            Assert::AreEqual(size_t(1), items.size());
+            Assert::AreEqual(size_t(1), WithShaderStatus({}, true).size());
+            Assert::AreEqual(size_t(0), WithShaderStatus({}, false).size());
+            items = WithShaderStatus(changed, false, true);
+            Assert::IsTrue(items.back().indicator == Item::Indicator::None);
+            Assert::AreEqual(std::string("Unavailable"), items.back().value);
+        }
+
 		TEST_METHOD(ManualQueueSelectionUsesSavedSectionIdWithoutShortcut)
 		{
 			CachedConfigTestFile file;
@@ -2099,6 +2122,60 @@ namespace VideoProcessorTest
 			Assert::AreEqual(std::string("vp_60"),
 				selected.snapshot->queue.profile);
 		}
+
+        TEST_METHOD(AllProfileGroupsPublishThroughSharedStatus)
+        {
+            std::map<std::string, std::string> selections;
+            std::set<std::string> expected;
+            for (const auto& group : ProfileGroups::Definitions())
+            {
+                Assert::IsTrue(ProfileGroups::ForSection(group.section) == &group);
+                if (group.shader) continue;
+                selections[group.name] = "chosen";
+                expected.insert(std::string(group.section) + ".chosen");
+            }
+            ActiveProfileStatus::Publish(GetCurrentProcessId(), 100, selections, 1, false, {});
+            ActiveProfileStatus::Snapshot active;
+            Assert::IsTrue(ActiveProfileStatus::Read(GetCurrentProcessId(), active));
+            Assert::AreEqual(expected.size(), size_t(active.profileCount));
+            std::set<std::string> actual;
+            for (uint32_t index = 0; index < active.profileCount; ++index)
+                actual.insert(active.profiles[index]);
+            Assert::IsTrue(expected == actual);
+            Assert::IsTrue(actual.count("lldv.chosen") == 1);
+            Assert::IsTrue(actual.count("vprenderer.input.chosen") == 1);
+        }
+
+        TEST_METHOD(ManualMotionSelectionOverridesRulesAndPublishesSavedSection)
+        {
+            CachedConfigTestFile file;
+            std::ofstream(file.path) <<
+                "[general]\npersist_profile_selection: false\n"
+                "[vprenderer.motion.Default]\nsmooth_motion: auto\nframe_mixer: oversample\n"
+                "[vprenderer.motion.Test]\nsmooth_motion: always\nframe_mixer: linear\ndeinterlace: off\n";
+            ConfigFile config;
+            Assert::IsTrue(config.Load(file.path));
+            UnifiedProfileRuntime::Runtime runtime;
+            std::string error;
+            Assert::IsTrue(runtime.Initialize(config, {}, error));
+            Assert::AreEqual(std::string("default"),
+                runtime.GetSnapshot()->effectiveSelections.at("motion").front());
+            UnifiedProfileRuntime::SelectionResult selected;
+            Assert::IsTrue(runtime.SelectProfile("motion", "Test", true, {}, selected, error));
+            Assert::IsTrue(selected.changed);
+            Assert::AreEqual(std::string("test"),
+                selected.snapshot->effectiveSelections.at("motion").front());
+            const auto selections = RendererProfileConfig::FormatSelections(selected.snapshot->effectiveSelections);
+            Assert::AreEqual(std::string("test"), selections.at("motion"));
+            ActiveProfileStatus::Publish(GetCurrentProcessId(), selected.snapshot->generation,
+                selections, 1, false, {}, {}, {}, {}, false, false, 0, {}, &config);
+            ActiveProfileStatus::Snapshot active;
+            Assert::IsTrue(ActiveProfileStatus::Read(GetCurrentProcessId(), active));
+            Assert::AreEqual(std::string("vprenderer.motion.test"), std::string(active.motion));
+            Assert::IsTrue(runtime.SelectProfile("motion", "Default", true, {}, selected, error));
+            Assert::AreEqual(std::string("default"),
+                selected.snapshot->effectiveSelections.at("motion").front());
+        }
 
 		TEST_METHOD(ManualProfileAndActionCommandsUseSavedRuntimeModel)
 		{
@@ -4131,7 +4208,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(RendererProfileConfig::Read(config, model, error),
 				std::wstring(error.begin(), error.end()).c_str());
 			Assert::IsTrue(model.persistSelection);
-			Assert::AreEqual(static_cast<size_t>(4), model.groups.size());
+			Assert::AreEqual(static_cast<size_t>(5), model.groups.size());
 
 			std::vector<RendererProfileConfig::KeySelection> selections;
 			Assert::IsTrue(RendererProfileConfig::SelectForKey(model, "Shift+L",
@@ -4543,6 +4620,14 @@ namespace VideoProcessorTest
             }
         }
 
+        TEST_METHOD(SubtitleSpatialCleanupModesValidateWithoutChangingLegacyChoices)
+        {
+            std::string expected;
+            for(const auto value:{"mirror","stretch","temporal","surround"})
+                Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("subtitles","cleanup_fill",value,expected));
+            for(const auto value:{"","unknown","surrounding","2"})
+                Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("subtitles","cleanup_fill",value,expected));
+        }
         TEST_METHOD(SubtitleBackgroundLayoutDefaultsValidationAndLiveProfilePolicy)
         {
             std::string expected;
@@ -4575,6 +4660,27 @@ namespace VideoProcessorTest
             }
             for(const char* key:{"rounded_corners","background_edge"})
                 Assert::IsTrue(ConfigurationApplyPolicy::ClassifyChange({"vprenderer.subtitles.Shape",key})==ConfigurationApplyPolicy::Action::ApplyProfiles);
+        }
+
+        TEST_METHOD(OffZoomHoldIsIndependentBoundedAndDefaultsToTwoSeconds)
+        {
+            std::string expected;
+            Assert::AreEqual(uint64_t(2000),RendererProfileConfig::ResolveOffZoomHoldMs({}));
+            for(const char* value:{"0","0.25","2","5.5","30"}) {
+                Assert::IsTrue(RendererProfileConfig::ValidateProfileSetting("subtitles","off_zoom_hold_seconds",value,expected));
+                CachedConfigTestFile fixture;
+                { std::ofstream file(fixture.path);file<<"[vprenderer.subtitles.Off]\ntype: off\noff_zoom_hold_seconds: "<<value<<"\nsubtitle_hold_seconds: 7\n"; }
+                ConfigFile config;Assert::IsTrue(config.Load(fixture.path));RendererProfileConfig::Model model;std::string error;
+                Assert::IsTrue(RendererProfileConfig::Read(config,model,error));
+                const auto& settings=model.profiles.at("subtitles.off").settings;
+                double seconds=0;Assert::IsTrue(DisplayRuleExpression::ParseNumber(value,seconds));
+                Assert::AreEqual(uint64_t(std::llround(seconds*1000)),RendererProfileConfig::ResolveOffZoomHoldMs(settings));
+            }
+            for(const char* value:{"-1","31","nan","inf","two",""}) {
+                Assert::IsFalse(RendererProfileConfig::ValidateProfileSetting("subtitles","off_zoom_hold_seconds",value,expected));
+                Assert::AreEqual(uint64_t(2000),RendererProfileConfig::ResolveOffZoomHoldMs({{"off_zoom_hold_seconds",value}}));
+            }
+            Assert::IsTrue(ConfigurationApplyPolicy::ClassifyChange({"vprenderer.subtitles.Off","off_zoom_hold_seconds"})==ConfigurationApplyPolicy::Action::ApplyProfiles);
         }
 
         TEST_METHOD(SubtitleTextReductionIsOptionalBoundedAndMovedProfileOnly)
@@ -5450,7 +5556,7 @@ namespace VideoProcessorTest
 				true, selections, selections, true));
 		}
 
-		TEST_METHOD(LibplaceboPluginApiVersionCoversConfigurationSnapshotsAndDiagnostics)
+		TEST_METHOD(LibplaceboPluginApiVersionCoversSnapshotsDiagnosticsAndExplicitLutReload)
 		{
 			// 25: IVideoRenderer::GetDejudderStatus (stage 6b-2b) or rc4's Beta
 			// flavor export; 26: both (rc4 merge); 27: the LED drive's
@@ -5471,10 +5577,93 @@ namespace VideoProcessorTest
 			// (VP-V delay budget, ADR-0020).
 			// 43: ToggleDvCompareCapture (feat/dv-l8, the DV comparison capture shortcut).
 			// 44: GetModuleStatus / InvokeModuleCommand (WP-11, integration group C).
-			Assert::AreEqual(static_cast<uint32_t>(44),
+			// 45: v1.4.02-beta merge (rehearsal): Bill's API 34 (separate submitted and detected
+			// picture aspect snapshots) and VP-V 44 together; provisional max+1.
+			Assert::AreEqual(static_cast<uint32_t>(45),
 				VP_LIBPLACEBO_PLUGIN_API_VERSION);
+            using LutApplyMethod=void (IVideoRenderer::*)();
+            const LutApplyMethod apply=&IVideoRenderer::RequestCalibrationLutReload;
+            Assert::IsTrue(apply!=nullptr);
 		}
 
+        TEST_METHOD(ScaleOsdBooleanIsValidatedAndRestartsEitherRenderer)
+        {
+            CachedConfigTestFile temporaryFile;
+            for (const char* value : { "true", "false", "on", "off", "2", "screen" })
+            {
+                {
+                    std::ofstream file(temporaryFile.path, std::ios::out | std::ios::trunc);
+                    Assert::IsTrue(file.is_open());
+                    file << "[general]\nscale_osd: " << value << "\n[vprenderer]\nquality: high\n";
+                    file.close();
+                    Assert::IsFalse(file.fail());
+                }
+                ConfigFile config;
+                Assert::IsTrue(config.Load(temporaryFile.path, ConfigFile::ReadPolicy::Fresh));
+                std::string error;
+                const bool valid = std::string(value) != "2" && std::string(value) != "screen";
+                Assert::AreEqual(valid, MainConfigSchema::Validate(config, error));
+                if (!valid)
+                    Assert::IsTrue(error.find("scale_osd") != std::string::npos);
+            }
+            for (const bool directShow : { false, true })
+                Assert::IsTrue(ConfigurationApplyPolicy::Action::RestartRenderer ==
+                    ConfigurationApplyPolicy::ClassifyChange({ "general", "scale_osd" }, directShow));
+        }
+        TEST_METHOD(StatsOsdSizePercentValidatesSharedRendererIngressAndRestarts)
+        {
+            Assert::AreEqual(150.0f, StatsOsdSettings::ReadSizePercent(nullptr));
+            CachedConfigTestFile temporaryFile;
+            struct Sample { const char* value; bool valid; float expected; };
+            const Sample samples[] = {
+                {nullptr, true, 150.0f}, {"100", true, 100.0f},
+                {"132.1875", true, 132.1875f}, {"125", true, 125.0f},
+                {"50", true, 50.0f}, {"250", true, 250.0f}, {"150.0000", true, 150.0f},
+                {"37.5", true, 37.5f}, {"375", true, 375.0f}, {"187.5", true, 187.5f},
+                {"37.499999", false, 150.0f}, {"375.000001", false, 150.0f},
+                {"-1", false, 150.0f}, {"nan", false, 150.0f},
+                {"inf", false, 150.0f}, {"large", false, 150.0f}
+            };
+            for (const auto& sample : samples)
+            {
+                {
+                    std::ofstream file(temporaryFile.path, std::ios::out | std::ios::trunc);
+                    Assert::IsTrue(file.is_open());
+                    file << "[general]\nscale_osd: true\n";
+                    if (sample.value) file << "stats_osd_size_percent: " << sample.value << "\n";
+                    file << "[vprenderer]\nquality: high\n";
+                    file.close();
+                    Assert::IsFalse(file.fail());
+                }
+                ConfigFile config;
+                Assert::IsTrue(config.Load(temporaryFile.path, ConfigFile::ReadPolicy::Fresh));
+                std::string error;
+                Assert::AreEqual(sample.valid, MainConfigSchema::Validate(config, error),
+                    std::wstring(error.begin(), error.end()).c_str());
+                Assert::AreEqual(sample.expected, StatsOsdSettings::ReadSizePercent(&config), 0.00001f);
+                if (!sample.valid)
+                    Assert::IsTrue(error.find("stats_osd_size_percent") != std::string::npos);
+            }
+            for (const bool directShow : {false, true})
+                Assert::IsTrue(ConfigurationApplyPolicy::Action::RestartRenderer ==
+                    ConfigurationApplyPolicy::ClassifyChange({"general", "stats_osd_size_percent"}, directShow));
+        }
+        TEST_METHOD(StatsOsdWholePercentUiUsesRebasedDefaultAndSharedParsing)
+        {
+            Assert::AreEqual(100, StatsOsdSettings::UiPercentFromCalibration(150.0f));
+            Assert::AreEqual(67, StatsOsdSettings::UiPercentFromCalibration(100.0f));
+            Assert::AreEqual(88, StatsOsdSettings::UiPercentFromCalibration(132.1875f));
+            Assert::AreEqual(25, StatsOsdSettings::UiPercentFromCalibration(37.5f));
+            Assert::AreEqual(250, StatsOsdSettings::UiPercentFromCalibration(375.0f));
+            Assert::AreEqual(150.0f, StatsOsdSettings::CalibrationFromUiPercent(100));
+            Assert::AreEqual(187.5f, StatsOsdSettings::CalibrationFromUiPercent(125));
+            Assert::AreEqual(37.5f, StatsOsdSettings::CalibrationFromUiPercent(25));
+            Assert::AreEqual(375.0f, StatsOsdSettings::CalibrationFromUiPercent(250));
+            Assert::AreEqual(150.0f, StatsOsdSettings::ParseSizePercent(""));
+            Assert::AreEqual(150.0f, StatsOsdSettings::ParseSizePercent("invalid"));
+            Assert::AreEqual(150.0f, StatsOsdSettings::ParseSizePercent("300:2"));
+            Assert::AreEqual(132.1875f, StatsOsdSettings::ParseSizePercent(" 132.1875 "));
+        }
 		TEST_METHOD(ProfileChangeDisplayDurationIsBoundedAndLive)
 		{
 			CachedConfigTestFile temporaryFile;
@@ -5704,7 +5893,7 @@ namespace VideoProcessorTest
 			ConfigFile config;
 			Assert::IsTrue(config.Load(path));
 			const std::vector<std::string> sections = config.GetSectionNames();
-			Assert::AreEqual(static_cast<size_t>(4), sections.size());
+			Assert::AreEqual(static_cast<size_t>(5), sections.size());
 			Assert::AreEqual("general", sections[0].c_str());
 			Assert::AreEqual("vprenderer.rec709", sections[1].c_str());
 			Assert::AreEqual("vprenderer.bt2020", sections[2].c_str());
@@ -5716,8 +5905,8 @@ namespace VideoProcessorTest
 			RendererProfileConfig::Model model;
 			Assert::IsTrue(RendererProfileConfig::Read(config, model, error),
 				std::wstring(error.begin(), error.end()).c_str());
-			Assert::AreEqual(static_cast<size_t>(1), model.groups.size());
-			const RendererProfileConfig::Group& display = model.groups.front();
+			Assert::AreEqual(static_cast<size_t>(2), model.groups.size());
+			const RendererProfileConfig::Group& display = *std::find_if(model.groups.begin(), model.groups.end(), [](const auto& group) { return group.name == "display"; });
 			Assert::AreEqual("display", display.name.c_str());
 			Assert::AreEqual("rec709", display.defaultSelection.c_str());
 			Assert::AreEqual("rec709", display.profiles[0].c_str());
@@ -5725,7 +5914,8 @@ namespace VideoProcessorTest
 
 			const auto bt2020 = model.profiles.find("display.bt2020");
 			Assert::IsTrue(bt2020 != model.profiles.end());
-			Assert::AreEqual("high", bt2020->second.settings.at("quality").c_str());
+			Assert::IsTrue(bt2020->second.settings.count("quality") == 0);
+            Assert::AreEqual("ewa_lanczossharp", model.profiles.at("scaling.default").settings.at("upscaler").c_str());
 			Assert::AreEqual("bt2020",
 				ConfigFile::NormalizeName(
 					bt2020->second.settings.at("target_primaries")).c_str());
@@ -5737,9 +5927,9 @@ namespace VideoProcessorTest
 			Assert::IsTrue(RendererProfileConfig::SelectAutomatic(model,
 				[](const std::string&, std::string&) { return false; },
 				automatic, error));
-			Assert::AreEqual(static_cast<size_t>(1), automatic.size());
-			Assert::AreEqual("rec709", automatic.front().profiles.front().c_str());
-			Assert::IsTrue(automatic.front().configuredDefault);
+			Assert::AreEqual(static_cast<size_t>(2), automatic.size());
+			Assert::AreEqual("rec709", (*std::find_if(automatic.begin(), automatic.end(), [](const auto& selection) { return selection.group == "display"; })).profiles.front().c_str());
+			Assert::IsTrue((*std::find_if(automatic.begin(), automatic.end(), [](const auto& selection) { return selection.group == "display"; })).configuredDefault);
 
 			std::vector<RendererProfileConfig::KeySelection> selections;
 			Assert::IsTrue(RendererProfileConfig::SelectForKey(model, "F4",

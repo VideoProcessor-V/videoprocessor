@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QMainWindow>
+#include <QRect>
 #include <QList>
 #include <QMap>
 #include <QString>
@@ -73,7 +74,11 @@ public:
         const QString& renderer, const QString& color, const QString& viewport,
         const QStringList& shaders, bool shaderAvailable = true,
         const QString& zoom = {}, const QString& scaling = {},
-        const QString& output = {}, const QString& subtitles = {});
+        const QString& output = {}, const QString& subtitles = {},
+        const QString& outputDisplay = {}, const QString& motion = {});
+    void setActiveProfileSectionsForTesting(const QStringList& profiles,
+        const QStringList& shaders = {}, bool available = true,
+        bool shaderAvailable = true);
     void setCalibrationStatusForTesting(bool available, bool attached,
         quint64 configIdentity, const QString& configPath,
         const QString& renderer, const QString& color, bool hdrSource = false);
@@ -84,6 +89,7 @@ public:
     void setPromptsForTesting(bool enabled) { promptsForTesting_ = enabled; }
     // The tray menu's Exit: asks about unsaved edits first.
     void requestExit();
+    void setApplyNotificationEventForTesting(const QString& eventName);
 
 protected:
     bool event(QEvent* event) override;
@@ -97,6 +103,7 @@ protected:
 private:
     QWidget* createShell();
     QWidget* createStartupPage();
+    QWidget* createDisplayPage();
     QWidget* createQueuePage();
     QWidget* createRendererPage();
 	QWidget* createScalingPage();
@@ -166,6 +173,7 @@ private:
 	bool saveChanges(std::function<void()> afterRemoteApply = {});
 	void setRemoteApplyBusy(bool busy);
 	void rebuildConfigurationShell();
+    void setAdvancedToneMappingWindow(bool active);
     void applyRendererVisibilityFilter(bool hideLegacyRenderers);
     bool notifyVideoProcessor();
     void refreshShaderCacheStatus();
@@ -173,7 +181,9 @@ private:
     void migrateLldvInputPolicy();
     void migrateSharedRefreshRate();
 	void migrateRefreshRateSwitchMode();
+    void migrateOutputDisplayProfiles();
     void migrateSeparatedRendererProfiles();
+    void migrateProcessingToScaling();
     void migrateUnifiedColorOutputProfiles();
     void migrateCalibrationProfiles();
     void migrateViewportZoomProfiles();
@@ -237,11 +247,8 @@ private:
     void installActionContextMenu(QListWidget* list);
     void runTargetCommand(const QString& group, const QString& name,
         bool enabled, bool action);
-    void applyActiveProfileIndicators(bool available, const QString& queue,
-        const QString& renderer, const QString& color, const QString& viewport,
-        const QStringList& shaders, bool shaderAvailable,
-        const QString& zoom = {}, const QString& scaling = {},
-        const QString& output = {}, const QString& subtitles = {});
+    void applyActiveProfileIndicators(bool available, const QStringList& profiles,
+        const QStringList& shaders, bool shaderAvailable);
     void refreshRendererAutoStatus();
     void refreshCalibrationControls();
     void seedCalibratedProfile(const QString& root, const QString& section);
@@ -315,6 +322,7 @@ private:
     bool returnFocusAfterHide_ = false;
     bool exitRequested_ = false;
     bool updateExitPending_ = false;
+    QString applyNotificationEventForTesting_;
     bool configurationLoaded_ = false;
     bool dirty_ = false;
     bool validationValid_ = true;
@@ -360,6 +368,8 @@ private:
     QPushButton* applyButton_ = nullptr;
     QPushButton* saveButton_ = nullptr;
     QWidget* configurationHost_ = nullptr;
+    QRect basicWindowGeometry_;
+    Qt::WindowStates basicWindowState_ = Qt::WindowNoState;
     QLabel* shaderCacheStatus_ = nullptr;
     QSystemTrayIcon* tray_ = nullptr;
     QWidget* updatePanel_ = nullptr;
@@ -380,6 +390,9 @@ private:
     bool activeProfileSnapshotAvailable_ = false;
     QString subtitleHdrFallbackSelection_;
     std::function<void()> refreshSubtitleHdrFallback_;
+    // Rendering / DTM: before Save or Apply, writes every rendering profile's
+    // settings explicitly so none inherits from the default profile.
+    std::function<void()> freezeRenderingProfiles_;
     struct RendererAutoStatusBinding
     {
         QString sectionPrefix;

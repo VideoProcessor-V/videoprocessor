@@ -2,6 +2,7 @@
 #include "CppUnitTest.h"
 
 #include <vprenderer/LibplaceboDisplayLut.h>
+#include <vprenderer/SwapchainOutputProbe.h>
 #include <vprenderer/LibplaceboRenderParameters.h>
 #include <vprenderer/LibplaceboCalibrationLutPolicy.h>
 #include <vprenderer/LibplaceboOutputPolicy.h>
@@ -335,7 +336,7 @@ namespace
 				pl_log_destroy(&m_log);
 		}
 
-		bool Create()
+		bool Create(bool forceSoftware = true)
 		{
 			pl_log_params logParams{};
 			logParams.log_level = PL_LOG_NONE;
@@ -344,8 +345,9 @@ namespace
 				return false;
 
 			pl_d3d11_params deviceParams{};
-			deviceParams.force_software = true;
-			deviceParams.allow_software = true;
+			m_forceSoftware = forceSoftware;
+			deviceParams.force_software = forceSoftware;
+			deviceParams.allow_software = forceSoftware;
 			m_d3d11 = pl_d3d11_create(m_log, &deviceParams);
 			if (!m_d3d11)
 				return false;
@@ -791,10 +793,11 @@ namespace
 			pl_tex targetTexture=pl_tex_create(gpu,&output);Assert::IsNotNull(targetTexture);
 			auto target=MakeRgbFrame(targetTexture);target.color=image.color;
 			auto params=pl_render_fast_params;params.dither_params=nullptr;params.peak_detect_params=nullptr;
+            SubtitlePreparationRenderer preparation;
             pl_tex compositionTexture=nullptr;
             if(sourceCrop && hook) {
                 pl_frame composed{};
-                Assert::IsTrue(ComposeSubtitleBeforeCrop(m_renderer,gpu,image,hook,&compositionTexture,composed));
+                Assert::IsTrue(ComposeSubtitleBeforeCrop(preparation,gpu,image,hook,&compositionTexture,composed));
                 image=composed;
             }
             const pl_hook* hooks[2]={sourceCrop ? additionalHook : hook,additionalHook};
@@ -808,6 +811,74 @@ namespace
             pl_tex_destroy(gpu,&targetTexture);pl_tex_destroy(gpu,&textures[0]);pl_tex_destroy(gpu,&textures[1]);
 			return result;
 		}
+
+        void CheckRecoverySwapchain(bool retainOldProbe)
+        {
+            std::vector<HMONITOR> monitors;
+            EnumDisplayMonitors(nullptr, nullptr,
+                [](HMONITOR monitor, HDC, LPRECT, LPARAM data) -> BOOL {
+                    reinterpret_cast<std::vector<HMONITOR>*>(data)->push_back(monitor);
+                    return TRUE;
+                }, reinterpret_cast<LPARAM>(&monitors));
+            Assert::IsFalse(monitors.empty());
+            for (HMONITOR monitor : monitors)
+            {
+                MONITORINFO info{sizeof(info)};
+                Assert::IsTrue(GetMonitorInfoW(monitor, &info) != FALSE);
+                HWND window = CreateWindowExW(0, L"STATIC", L"VP cadence recovery test", WS_POPUP,
+                    info.rcMonitor.left + 32, info.rcMonitor.top + 32, 64, 64,
+                    nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+                Assert::IsNotNull(window);
+                struct WindowCleanup { HWND hwnd; ~WindowCleanup() { DestroyWindow(hwnd); } } windowCleanup{window};
+                pl_d3d11_swapchain_params params{}; params.window = window;
+                pl_swapchain sw = pl_d3d11_create_swapchain(m_d3d11, &params);
+                struct ChainCleanup { pl_swapchain& chain; ~ChainCleanup() { pl_swapchain_destroy(&chain); } } chainCleanup{sw};
+                Assert::IsNotNull(sw);
+                auto effect = [&]() {
+                    CComPtr<IDXGISwapChain> native;
+                    native.Attach(pl_d3d11_swapchain_unwrap(sw));
+                    DXGI_SWAP_CHAIN_DESC desc{};
+                    Assert::IsTrue(SUCCEEDED(native->GetDesc(&desc)));
+                    return desc.SwapEffect;
+                };
+                const auto initialEffect = effect();
+                Assert::IsTrue(initialEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL ||
+                    initialEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD);
+                for (int iteration = 0; iteration < 3; ++iteration)
+                {
+                    int width = 64, height = 64;
+                    Assert::IsTrue(pl_swapchain_resize(sw, &width, &height));
+                    pl_swapchain_frame frame{};
+                    Assert::IsTrue(pl_swapchain_start_frame(sw, &frame));
+                    const float color[4] = {iteration / 3.0f, 0.25f, 0.5f, 1.0f};
+                    pl_tex_clear(m_d3d11->gpu, frame.fbo, color);
+                    Assert::IsTrue(pl_swapchain_submit_frame(sw));
+                    pl_swapchain_swap_buffers(sw);
+                    // Exercise both ownership branches of the production probe.
+                    // WARP cannot report a physical containing output; hardware must.
+                    Assert::AreEqual(!m_forceSoftware, SwapchainOutputProbe::Matches(sw, nullptr, monitor));
+                    Assert::IsFalse(SwapchainOutputProbe::Matches(sw, nullptr, nullptr));
+                    for (HMONITOR other : monitors) if (other != monitor)
+                        Assert::IsFalse(SwapchainOutputProbe::Matches(sw, nullptr, other));
+                    CComPtr<IDXGISwapChain> retained;
+                    retained.Attach(pl_d3d11_swapchain_unwrap(sw));
+                    Assert::AreEqual(!m_forceSoftware, SwapchainOutputProbe::Matches(nullptr, retained, monitor));
+                    if (!retainOldProbe) retained.Release();
+                    pl_swapchain_destroy(&sw);
+                    sw = pl_d3d11_create_swapchain(m_d3d11, &params);
+                    Assert::IsNotNull(sw);
+                    if (retainOldProbe)
+                    {
+                        Assert::AreEqual(int(DXGI_SWAP_EFFECT_DISCARD), int(effect()),
+                            L"The old recovery lifetime reproduces silent bitblt fallback");
+                        retained.Release();
+                        break;
+                    }
+                    Assert::AreEqual(int(initialEffect), int(effect()),
+                        L"Recovery must preserve flip presentation on the same HWND");
+                }
+            }
+        }
 
 		void CheckSdrSwapchain(float nits, bool force8bit)
 		{
@@ -865,6 +936,7 @@ namespace
 			return frame;
 		}
 
+		bool m_forceSoftware = true;
 		pl_log m_log = nullptr;
 		pl_d3d11 m_d3d11 = nullptr;
 		pl_renderer m_renderer = nullptr;
@@ -1306,6 +1378,25 @@ namespace VideoProcessorTest
 			}
 		}
 
+        TEST_METHOD(CadenceRecoveryOutputProbeReleasesOldSwapchainBeforeRecreation)
+        {
+            for (bool software : {true, false})
+            {
+                TargetLutGpuFixture fixture;
+                Assert::IsTrue(fixture.Create(software));
+                fixture.CheckRecoverySwapchain(false);
+            }
+        }
+        TEST_METHOD(RetainedCadenceRecoveryProbeReproducesBitbltFallback)
+        {
+            for (bool software : {true, false})
+            {
+                TargetLutGpuFixture fixture;
+                Assert::IsTrue(fixture.Create(software));
+                fixture.CheckRecoverySwapchain(true);
+            }
+        }
+
 		TEST_METHOD(SdrLuminanceD3D11HintKeepsSdrAndForced8BitTransport)
 		{
 			TargetLutGpuFixture fixture; Assert::IsTrue(fixture.Create());
@@ -1436,7 +1527,7 @@ namespace VideoProcessorTest
 			Assert::IsNull(result.lut);
 		}
 
-		TEST_METHOD(PartialSamePathReplacementRetainsThenRetriesFinalCube)
+		TEST_METHOD(RawLoaderReportsPartialAndCompletedSamePathVersionsForDiagnostics)
 		{
 			TemporaryFile file;
 			file.Write(Valid3dCube);
@@ -1459,7 +1550,7 @@ namespace VideoProcessorTest
 			file.Write(Green3dCube);
 			const FileVersion completed = ProbeFileVersion(file.Path());
 			Assert::IsFalse(SameFileVersion(partial.fileVersion, completed),
-				L"Completion after a partial write must schedule another reload");
+				L"File versions describe parsed bytes for diagnostics; they do not schedule automatic reloads");
 			LoadResult replacement = Load(nullptr, file.Path());
 			Assert::AreEqual(static_cast<int>(Status::ACTIVE),
 				static_cast<int>(replacement.status));
@@ -1469,6 +1560,175 @@ namespace VideoProcessorTest
 			Free(initial);
 		}
 
+        TEST_METHOD(AppliedCacheKeepsSamePathSnapshotUntilExplicitApplyEvenWithSameFileVersion)
+        {
+            TemporaryFile file;
+            file.Write(Valid3dCube);
+            AppliedCache cache;
+            const auto accepted = cache.Get(nullptr, file.Path());
+            Assert::AreEqual(static_cast<int>(Status::ACTIVE), static_cast<int>(accepted->result.status));
+            Assert::IsNotNull(accepted->owner.get());
+            Assert::IsTrue(accepted->result.lut == accepted->owner.get());
+            const uint64_t signature = accepted->owner->signature;
+            const FileVersion originalVersion = ProbeFileVersion(file.Path());
+            Assert::IsTrue(originalVersion.available);
+
+            // Keep both file length and modification time unchanged: Apply must
+            // still read replacement bytes, and ordinary selection must not.
+            std::string replacement = Valid3dCube;
+            const size_t sample = replacement.find("0.0 0.0 0.0\n");
+            Assert::IsTrue(sample != std::string::npos);
+            replacement.replace(sample, strlen("0.0 0.0 0.0\n"), "0.0 1.0 0.0\n");
+            file.Write(replacement.c_str());
+            HANDLE handle = CreateFileA(file.Path().c_str(), FILE_WRITE_ATTRIBUTES,
+                0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            Assert::IsTrue(handle != INVALID_HANDLE_VALUE);
+            FILETIME originalWriteTime{};
+            originalWriteTime.dwLowDateTime = static_cast<DWORD>(originalVersion.fileWriteTime);
+            originalWriteTime.dwHighDateTime = static_cast<DWORD>(originalVersion.fileWriteTime >> 32);
+            const bool restored = SetFileTime(handle, nullptr, nullptr, &originalWriteTime) != FALSE;
+            CloseHandle(handle);
+            Assert::IsTrue(restored);
+            Assert::IsTrue(SameFileVersion(originalVersion, ProbeFileVersion(file.Path())));
+
+            const auto ordinarySelection = cache.Get(nullptr, file.Path());
+            Assert::IsTrue(ordinarySelection == accepted,
+                L"Ordinary profile selection must keep the accepted immutable snapshot");
+            Assert::AreEqual(signature, ordinarySelection->owner->signature);
+            cache.Clear(); // Explicit configuration Apply begins a new snapshot epoch.
+            const auto applied = cache.Get(nullptr, file.Path());
+            Assert::AreEqual(static_cast<int>(Status::ACTIVE), static_cast<int>(applied->result.status));
+            Assert::IsTrue(applied != accepted);
+            Assert::AreNotEqual(signature, applied->owner->signature,
+                L"Explicit Apply must read replacement bytes without relying on version changes");
+            Assert::AreEqual(signature, accepted->owner->signature,
+                L"A retained active snapshot must outlive cache replacement");
+        }
+
+        TEST_METHOD(AppliedCacheReusesBothPathsWhenProfilesReturnToEarlierSelection)
+        {
+            TemporaryFile first;
+            TemporaryFile second;
+            first.Write(Valid3dCube);
+            second.Write(Green3dCube);
+            AppliedCache cache;
+            const auto firstSelection = cache.Get(nullptr, first.Path());
+            const auto secondSelection = cache.Get(nullptr, second.Path());
+            Assert::AreEqual(static_cast<int>(Status::ACTIVE), static_cast<int>(firstSelection->result.status));
+            Assert::AreEqual(static_cast<int>(Status::ACTIVE), static_cast<int>(secondSelection->result.status));
+            Assert::AreNotEqual(firstSelection->owner->signature, secondSelection->owner->signature);
+
+            first.Write("incomplete edited first LUT");
+            second.Write("incomplete edited second LUT");
+            Assert::IsTrue(cache.Get(nullptr, first.Path()) == firstSelection,
+                L"A to B to A must reuse the previously accepted A bytes");
+            Assert::IsTrue(cache.Get(nullptr, second.Path()) == secondSelection,
+                L"Returning to B must not implicitly reload edited bytes either");
+        }
+
+        TEST_METHOD(AppliedCacheInvalidExplicitReloadDoesNotDestroyActiveLastGoodSnapshot)
+        {
+            TemporaryFile file;
+            file.Write(Valid3dCube);
+            AppliedCache cache;
+            auto active = cache.Get(nullptr, file.Path());
+            Assert::AreEqual(static_cast<int>(Status::ACTIVE), static_cast<int>(active->result.status));
+            const uint64_t signature = active->owner->signature;
+            std::weak_ptr<pl_custom_lut> activeOwner = active->owner;
+
+            file.Write("incomplete replacement");
+            cache.Clear();
+            const auto rejected = cache.Get(nullptr, file.Path());
+            Assert::AreEqual(static_cast<int>(Status::REJECTED), static_cast<int>(rejected->result.status));
+            Assert::IsNull(rejected->result.lut);
+            Assert::IsNull(rejected->owner.get());
+            Assert::IsFalse(activeOwner.expired());
+            Assert::AreEqual(signature, active->owner->signature,
+                L"The renderer may retain the exact-contract active Cube after reload rejection");
+            Assert::IsTrue(cache.Get(nullptr, file.Path()) == rejected,
+                L"A different contract must see the latest rejected outcome, not stale accepted bytes");
+            active.reset();
+            Assert::IsTrue(activeOwner.expired(),
+                L"The old Cube must be released when its final active snapshot is released");
+        }
+
+        TEST_METHOD(AppliedCacheRepairedRejectedFileRequiresAnotherExplicitApply)
+        {
+            TemporaryFile file;
+            file.Write("unfinished cube");
+            AppliedCache cache;
+            const auto rejected = cache.Get(nullptr, file.Path());
+            Assert::AreEqual(static_cast<int>(Status::REJECTED), static_cast<int>(rejected->result.status));
+            file.Write(Valid3dCube);
+            const auto ordinarySelection = cache.Get(nullptr, file.Path());
+            Assert::IsTrue(ordinarySelection == rejected,
+                L"Repairing a file must not make ordinary profile changes retry a rejected load");
+            Assert::IsNull(ordinarySelection->owner.get());
+            cache.Clear();
+            const auto applied = cache.Get(nullptr, file.Path());
+            Assert::AreEqual(static_cast<int>(Status::ACTIVE), static_cast<int>(applied->result.status));
+            Assert::IsNotNull(applied->owner.get());
+        }
+
+        TEST_METHOD(AppliedCacheSeparatesPathContainmentContracts)
+        {
+            TemporaryDirectory containingDirectory;
+            TemporaryDirectory unrelatedDirectory;
+            const std::string path = containingDirectory.Write("calibration.cube", Valid3dCube);
+            AppliedCache cache;
+            const auto unconstrained = cache.Get(nullptr, path);
+            Assert::AreEqual(static_cast<int>(Status::ACTIVE), static_cast<int>(unconstrained->result.status));
+            const auto rejected = cache.Get(nullptr, path, unrelatedDirectory.Path());
+            Assert::AreEqual(static_cast<int>(Status::REJECTED), static_cast<int>(rejected->result.status));
+            Assert::AreEqual(static_cast<int>(Rejection::PATH_OUTSIDE_BASE), static_cast<int>(rejected->result.rejection));
+            Assert::IsNull(rejected->owner.get());
+            const auto constrained = cache.Get(nullptr, path, containingDirectory.Path());
+            Assert::AreEqual(static_cast<int>(Status::ACTIVE), static_cast<int>(constrained->result.status));
+            Assert::AreEqual(unconstrained->owner->signature, constrained->owner->signature);
+            Assert::IsTrue(cache.Get(nullptr, path) == unconstrained);
+            Assert::IsTrue(cache.Get(nullptr, path, unrelatedDirectory.Path()) == rejected,
+                L"A cached acceptance under another base must not bypass the rejected containment contract");
+        }
+
+        TEST_METHOD(AppliedCacheRenderRejectionRequiresExplicitApplyAndKeepsOldSnapshotsAlive)
+        {
+            TemporaryFile file;
+            file.Write(Valid3dCube);
+            AppliedCache cache;
+            const auto oldSnapshot = cache.Get(nullptr, file.Path());
+            Assert::AreEqual(static_cast<int>(Status::ACTIVE), static_cast<int>(oldSnapshot->result.status));
+            const uint64_t signature = oldSnapshot->owner->signature;
+            file.Write(Green3dCube);
+            cache.RejectRender(file.Path(), {});
+            const auto rejected = cache.Get(nullptr, file.Path());
+            Assert::AreEqual(static_cast<int>(Status::REJECTED), static_cast<int>(rejected->result.status));
+            Assert::AreEqual(static_cast<int>(Rejection::RENDER_FAILED), static_cast<int>(rejected->result.rejection));
+            Assert::IsNull(rejected->result.lut);
+            Assert::IsNull(rejected->owner.get());
+            Assert::AreEqual(signature, oldSnapshot->owner->signature,
+                L"Replacing a cache outcome must not mutate or free an existing frame snapshot");
+            Assert::IsTrue(cache.Get(nullptr, file.Path()) == rejected);
+            cache.Clear();
+            const auto retried = cache.Get(nullptr, file.Path());
+            Assert::AreEqual(static_cast<int>(Status::ACTIVE), static_cast<int>(retried->result.status));
+            Assert::AreNotEqual(signature, retried->owner->signature);
+        }
+
+        TEST_METHOD(AppliedCacheRenderRejectionDoesNotLoadAnUnseenPath)
+        {
+            TemporaryDirectory directory;
+            const std::string path = directory.Path() + "\\not-yet-created.cube";
+            AppliedCache cache;
+            cache.RejectRender(path, directory.Path());
+            const auto rejected = cache.Get(nullptr, path, directory.Path());
+            Assert::AreEqual(static_cast<int>(Rejection::RENDER_FAILED), static_cast<int>(rejected->result.rejection),
+                L"Recording a render rejection must not replace it with a file-read outcome");
+            directory.Write("not-yet-created.cube", Valid3dCube);
+            Assert::IsTrue(cache.Get(nullptr, path, directory.Path()) == rejected);
+            cache.Clear();
+            Assert::AreEqual(static_cast<int>(Status::ACTIVE),
+                static_cast<int>(cache.Get(nullptr, path, directory.Path())->result.status));
+        }
 		TEST_METHOD(FileLargerThanLimitIsRejectedBeforeParsing)
 		{
 			TemporaryFile file;
@@ -1514,7 +1774,7 @@ namespace VideoProcessorTest
 				Rejection::READ_FAILED, Rejection::PATH_OUTSIDE_BASE,
 				Rejection::INVALID_CUBE,
 				Rejection::ONE_DIMENSIONAL, Rejection::UNSUPPORTED_DOMAIN,
-				Rejection::UNSAFE_DIMENSIONS })
+				Rejection::UNSAFE_DIMENSIONS, Rejection::RENDER_FAILED })
 			{
 				const std::string reason = ShortReason(rejection);
 				Assert::IsFalse(reason.empty());
@@ -2117,9 +2377,16 @@ namespace VideoProcessorTest
                 for(int y=first;y<last;++y)
                     Assert::IsTrue(moved[y*64+x].r>100 && moved[y*64+x].r>moved[y*64+x].g+60,
                         L"Offset gap must have the selected backing through the picture/bar edge");
-                const int outside=(top?g.pictureTop-1:g.pictureBottom)*64+g.destination.left-1;
-                Assert::IsTrue(PixelDistance(original[outside],moved[outside])<=6,
-                    L"Background extension must stop at the bar edge");
+                const int barEdge=top?g.pictureTop-1:g.pictureBottom;
+                // This sample is inside the attached panel's intentional six-pixel display overhang.
+                const int displayOverhang=barEdge*64+g.destination.left-1;
+                Assert::IsTrue(moved[displayOverhang].r>100 &&
+                    moved[displayOverhang].r>moved[displayOverhang].g+60,
+                    L"The attached panel intentionally covers its six-pixel side overhang at the bar edge");
+                // This point is beyond the six-pixel extension and its antialiasing fringe.
+                const int unaffected=barEdge*64+g.destination.left-8;
+                Assert::IsTrue(PixelDistance(original[unaffected],moved[unaffected])<=6,
+                    L"Pixels beyond the display-mask overhang remain unchanged");
                 const auto roi=ComputeSubtitleGaussianRegion(g,5,6);
                 Assert::IsTrue(roi.top<=g.pictureTop || !top);
                 Assert::IsTrue(roi.top+roi.height*roi.step>=g.pictureBottom || top);
@@ -2325,8 +2592,18 @@ namespace VideoProcessorTest
                     Assert::IsTrue(PixelDistance(baseline[pixel],moved[pixel])<=6,
                         L"picture beyond measured card and destination must remain unchanged");
                 }
-                Assert::IsTrue(PixelDistance(moved[56*64+9],RgbaPixel{0,0,0,255})<=6,
-                    L"restoration must stop exactly at the black-bar seam");
+                // All composition includes the attached display panel's two-row
+                // bar overlap. Check its outer limit separately from restoration.
+                Assert::IsTrue(PixelDistance(moved[(geometry.pictureBottom+2)*64+9],
+                    RgbaPixel{0,0,0,255})<=6,
+                    L"display backing must not extend beyond its two-row bar overlap");
+                Assert::IsTrue(BindSubtitleCutPasteHook(hook,geometry,5,PL_COLOR_TRC_SRGB,
+                    SubtitleGeneratedGrayStyle{},0,SubtitleCompositionPhase::CleanupOnly));
+                const auto cleanup=fixture.RenderSubtitlePattern(hook,false,0,geometry,
+                    PL_COLOR_TRC_SRGB,true,true,200,false,0,&card,false,false,nullptr,nullptr,false,-1,false);
+                for(int y=geometry.pictureBottom;y<64;++y)for(const int x:{9,54})
+                    Assert::IsTrue(PixelDistance(cleanup[y*64+x],baseline[y*64+x])<=6,
+                        L"source restoration stops at the picture boundary despite display overlap");
             }
             pl_mpv_user_shader_destroy(&hook);
         }
@@ -3048,10 +3325,20 @@ namespace VideoProcessorTest
 				Assert::IsTrue(moved[pixel].r<12,
 					L"black backing reaches the last picture row and has square lower corners");
 			}
-			const int firstBarPixel=geometry.pictureBottom*64+
+			// Attached backing deliberately overlaps the bar by two source rows
+			// to avoid a fractional sampling seam in complete mixed packets.
+			// It must cover those rows without growing beyond that display overlap.
+			for(int y=geometry.pictureBottom;y<geometry.pictureBottom+2;++y) {
+				const int pixel=y*64+geometry.destination.left+2;
+				Assert::IsTrue(baseline[pixel].r>80,
+					L"the overlap fixture must expose a visible source sample");
+				Assert::IsTrue(moved[pixel].r<12,
+					L"attached backing covers exactly the two bar-facing overlap rows");
+			}
+			const int beyondOverlapPixel=(geometry.pictureBottom+2)*64+
 				geometry.destination.left+2;
-			Assert::IsTrue(PixelDistance(moved[firstBarPixel],baseline[firstBarPixel])<=6,
-				L"the panel ends exactly at the picture/bar boundary");
+			Assert::IsTrue(PixelDistance(moved[beyondOverlapPixel],baseline[beyondOverlapPixel])<=6,
+				L"pixels beyond the two-row panel overlap remain unchanged");
 			pl_mpv_user_shader_destroy(&hook);
 		}
 

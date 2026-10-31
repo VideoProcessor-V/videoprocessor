@@ -55,19 +55,17 @@ struct DolbyVisionTunnelFrameMetadata
     // Cached DM can survive a brief loss, but an untrusted current picture
     // must be presented as black and excluded from image analysis.
     bool requiresBlackFrame = false;
-    uint8_t rgbBitAlignment = 0; // 1: high 8 bits of r210, 2: low 8 bits
+    uint8_t rgbBitAlignment = 0; // 1: r210 high8, 2: r210 low8 or packed RGB8
     float nonlinear[3][3] = {};
     float nonlinearOffset[3] = {};
     float linear[3][3] = {};
     uint16_t sourceMinPq = 0;
     uint16_t sourceMaxPq = 0;
     bool hasSceneMetadata = false;
+    uint16_t sceneMinPq = 0;
     uint16_t sceneMaxPq = 0;
     uint16_t sceneAvgPq = 0;
-    // audit 2026-10-16: L1 scene minimum (12-bit PQ code), valid when
-    // hasSceneMetadata. libplacebo has no scene-minimum input; carried for
-    // VP-owned curves and status only.
-    uint16_t sceneMinPq = 0;
+    // (sceneMinPq above: the L1 scene minimum, 12-bit PQ code, valid when hasSceneMetadata.)
 
     // audit 2026-10-16: L2 / L8 display trims, parsed generically but NOT
     // applied (no rendering change). Fields use the same big-endian 16-bit
@@ -102,7 +100,7 @@ struct DolbyVisionTunnelFrameMetadata
     // parsed for status, the scene descriptor and the content classifier only
     // (no rendering change). Field layouts follow libdovi's public parser
     // (quietvoid/dovi_tool, dolby_vision/src/rpu/extension/level5.rs,
-    // level6.rs, level11.rs); see CR210DolbyVisionTunnelFormatter.cpp.
+    // level6.rs, level11.rs); see CRGBDolbyVisionTunnelFormatter.cpp.
     // L5 active area: offsets in source pixels from each edge (13-bit fields).
     bool hasActiveArea = false;
     uint16_t activeAreaLeft = 0;

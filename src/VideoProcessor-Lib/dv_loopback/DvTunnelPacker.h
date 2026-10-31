@@ -24,7 +24,7 @@
 //
 // Header-only and free of VP dependencies so the hardware loopback sender
 // (src/VideoProcessor-DvLoopback) can use it. It deliberately shares no code
-// with VP's decoder (CR210DolbyVisionTunnelFormatter) nor with the tests'
+// with VP's decoder (CRGBDolbyVisionTunnelFormatter) nor with the tests'
 // independent reference encoder (VideoProcessor-Test/DvTunnelReferenceEncoder.h):
 // the loop compares this packer against the decoder, and the tests compare
 // it against the reference, so a format error shared by the packer and the

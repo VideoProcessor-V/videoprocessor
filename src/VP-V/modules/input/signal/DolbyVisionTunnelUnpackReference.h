@@ -8,7 +8,7 @@
 
 // A C++ transcription of GpuDolbyVisionTunnelUnpack's compute shader, step by
 // step (owner 2026-10-16: the GPU tunnel unpack must be bit-exact with the CPU
-// formatter, CR210DolbyVisionTunnelFormatter). The tests run it against the
+// formatter, CRGBDolbyVisionTunnelFormatter). The tests run it against the
 // CPU unpack on synthetic tunnel frames; keep it in lockstep with DV_BODY.
 //
 // Containers: r210 ([00 R10 G10 B10], big-endian), R10b / R10l ([R10 G10 B10

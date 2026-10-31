@@ -37,6 +37,7 @@ namespace UnifiedProfileRuntime
 		// profiles (on unless a profile says off) - for the GUI's queue target and the DirectShow pin
 		// (GeneralRate::SetProcessEnabled). The look-ahead frames above follow the source rate with it.
 		bool generalRateFixes = true;
+        std::string outputDisplayMonitor;
 		StateVariables::Snapshot variables;
 
 		bool LookupVariable(const std::string& name, std::string& value) const

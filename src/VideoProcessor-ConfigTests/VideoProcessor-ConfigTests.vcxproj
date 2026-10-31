@@ -36,12 +36,12 @@
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <AdditionalOptions>/utf-8 /Zc:__cplusplus /bigobj %(AdditionalOptions)</AdditionalOptions>
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;VP_CONFIGFILE_STANDALONE;QT_WIDGETS_LIB;QT_GUI_LIB;QT_CORE_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\VideoProcessor-Config\standalone;$(QtRoot)\include;$(QtRoot)\include\QtWidgets;$(QtRoot)\include\QtGui;$(QtRoot)\include\QtCore;..\VideoProcessor-Config;..\VideoProcessor-Lib;..\VideoProcessor-ConfigCore;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(VCInstallDir)Tools\MSVC\14.29.30133\atlmfc\include;..\VideoProcessor-Config\standalone;$(QtRoot)\include;$(QtRoot)\include\QtWidgets;$(QtRoot)\include\QtGui;$(QtRoot)\include\QtCore;..\VideoProcessor-Config;..\VideoProcessor-Lib;..\VideoProcessor-ConfigCore;..\..\3rdparty\libplacebo-beta\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>$(QtRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(VCInstallDir)Tools\MSVC\14.29.30133\atlmfc\lib\x64;$(QtRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>Qt6Widgets.lib;Qt6Gui.lib;Qt6Core.lib;Ws2_32.lib;shell32.lib;user32.lib;ole32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
@@ -51,6 +51,8 @@ copy /Y "$(QtRoot)\plugins\platforms\qoffscreen.dll" "$(TargetDir)platforms\qoff
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="ConfigEditorWindowTests.cpp" />
+    <ClCompile Include="..\VideoProcessor-ChartCore\ToneCurveModel.cpp" />
+    <ClCompile Include="..\VideoProcessor-ChartCore\ToneCurveRuntime.cpp" />
     <ClCompile Include="..\VideoProcessor-Config\ConfigEditorWindow.cpp" />
     <ClCompile Include="..\VideoProcessor-Config\VpTheme.cpp" />
     <ClCompile Include="..\VP-V\config\VpvSection.cpp" />
@@ -59,6 +61,7 @@ copy /Y "$(QtRoot)\plugins\platforms\qoffscreen.dll" "$(TargetDir)platforms\qoff
     <ClCompile Include="..\VideoProcessor-ConfigCore\ConfigurationRpcClient.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\ShaderConfigValidation.cpp" />
     <ClCompile Include="..\VideoProcessor-Lib\ConfigFile.cpp" />
+    <ClCompile Include="..\VideoProcessor-Lib\DisplayRefreshRatePolicy.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\VP-V\modules\drive\projector_control\SerialPort.cpp">
       <ObjectFileName>$(IntDir)LedSerialPortStandalone.obj</ObjectFileName>
     </ClCompile>
@@ -73,6 +76,7 @@ copy /Y "$(QtRoot)\plugins\platforms\qoffscreen.dll" "$(TargetDir)platforms\qoff
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="ToneChartIntegrationTests.inc" />
     <ClInclude Include="..\VideoProcessor-Config\ConfigEditorWindow.h" />
     <ClInclude Include="..\VideoProcessor-Config\VpTheme.h" />
     <ClInclude Include="..\VideoProcessor-ConfigCore\ConfigEditorCore.h" />

@@ -1,13 +1,35 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
+    <ClInclude Include="FullscreenActivation.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="StartupPresentationReadiness.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="vprenderer\QueueNativeContinuity.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="SubtitleCutPaste.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SubtitleBackingLip.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SubtitleBackingPresentation.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="SubtitleCutPasteShader.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="DisplayRefreshRatePolicy.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DisplayRasterInfo.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DisplayWindowGeometry.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DisplayMonitorInventory.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <Filter Include="Source Files">
@@ -176,7 +198,9 @@
     <ClInclude Include="video_frame_formatter\CR210toRGB48VideoFrameFormatter.h">
       <Filter>Header Files\video_frame_formatter</Filter>
     </ClInclude>
-    <ClInclude Include="video_frame_formatter\CR210DolbyVisionTunnelFormatter.h">
+    <ClInclude Include="magewell\MagewellRgbTunnelRange.h" />
+    <ClInclude Include="DolbyVisionTunnelInput.h" />
+    <ClInclude Include="video_frame_formatter\CRGBDolbyVisionTunnelFormatter.h">
       <Filter>Header Files\video_frame_formatter</Filter>
     </ClInclude>
     <ClInclude Include="video_frame_formatter\CR12BtoRGB48VideoFrameFormatter.h">
@@ -288,6 +312,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="VideoFrameEncoding.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="P210FrameLayout.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="VideoState.h">
@@ -497,7 +524,7 @@
     <ClCompile Include="video_frame_formatter\CR210toRGB48VideoFrameFormatter.cpp">
       <Filter>Source Files\video_frame_formatter</Filter>
     </ClCompile>
-    <ClCompile Include="video_frame_formatter\CR210DolbyVisionTunnelFormatter.cpp">
+    <ClCompile Include="video_frame_formatter\CRGBDolbyVisionTunnelFormatter.cpp">
       <Filter>Source Files\video_frame_formatter</Filter>
     </ClCompile>
     <ClCompile Include="video_frame_formatter\CR12BtoRGB48VideoFrameFormatter.cpp">
@@ -725,7 +752,7 @@
     <ClInclude Include="video_frame_formatter\CDeckLinkRGBToP010VideoFrameFormatter.Common.h" />
     <ClCompile Include="video_frame_formatter\CDeckLinkRGBToP010VideoFrameFormatter.AVX2.cpp" />
     <ClInclude Include="video_frame_formatter\CR210toRGB48VideoFrameFormatter.Common.h" />
-    <ClCompile Include="video_frame_formatter\CR210DolbyVisionTunnelFormatter.AVX2.cpp" />
+    <ClCompile Include="video_frame_formatter\CRGBDolbyVisionTunnelFormatter.AVX2.cpp" />
     <ClCompile Include="video_frame_formatter\CR210toRGB48VideoFrameFormatter.AVX2.cpp" />
     <ClInclude Include="video_frame_formatter\CR12BtoRGB48VideoFrameFormatter.Common.h" />
     <ClCompile Include="video_frame_formatter\CR12BtoRGB48VideoFrameFormatter.AVX2.cpp" />
@@ -742,5 +769,30 @@
     <ClInclude Include="AnalysisDiagnosticTrace.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="AnalysisDiagnosticHooks.h"><Filter>Header Files</Filter></ClInclude>
     <ClCompile Include="AnalysisDiagnosticTrace.cpp"><Filter>Source Files</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="vprenderer\OutputOsdTelemetryCache.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="vprenderer\FrameHdrStatus.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="HdrOsdFormatting.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="StatsOverlayLayout.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="OsdInputColorInfo.h"><Filter>Header Files</Filter></ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="OsdTelemetryText.h"><Filter>Header Files</Filter></ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="microsoft_directshow\video_renderers\MadVROsdSizing.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="microsoft_directshow\video_renderers\MadVROsdRefresh.h"><Filter>Header Files</Filter></ClInclude>
+  </ItemGroup>
+  <ItemGroup><ClInclude Include="vprenderer\StatsOsdSettings.h"><Filter>Header Files</Filter></ClInclude></ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="AnalysisEvaluationBudget.h" />
+    <ClInclude Include="DebugLogAsync.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="vprenderer\Bt2020SignalWorker.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="vprenderer\PreparedPictureEvidence.h" />
+    <ClInclude Include="vprenderer\LookaheadPerformanceWindow.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="vprenderer\PreparedOutwardWindow.h" />
   </ItemGroup>
 </Project>

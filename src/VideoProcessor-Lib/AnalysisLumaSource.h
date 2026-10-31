@@ -26,13 +26,22 @@ enum class AnalysisLumaFormat
 	PackedDolbyVision422,
 };
 
-// audit 2026-10-16: every format's Sample() emits the limited (studio) 10-bit
+// audit 2026-10-16 (VP-V, DIV-AN-01): every format's Sample() emits the limited (studio) 10-bit
 // code domain: luma black 64 / white 940, chroma 512 +/- 448. Full-range
 // sources (8-bit and 12-bit RGB, the DV SDR-tunnel RGB, and full-range YCbCr
 // planes flagged by fullRangeYuv) are mapped Y = 64 + 876/1023 * Y',
 // C = 512 + 896/1023 * C'. Consumers must not apply a second full-range
 // interpretation to these codes (see VP-V/modules/drive/led_measure/LedLookahead LumaIsFullRange).
 constexpr bool kAnalysisLumaSampleLimitedDomain = true;
+
+// Encoded sample levels, independent of the format-specific 10-bit sampler.
+// Unknown preserves the historical interpretation of manually built sources.
+enum class AnalysisLumaRange : uint8_t
+{
+	Unknown,
+	Limited,
+	Full,
+};
 
 struct AnalysisLumaSample
 {
@@ -89,6 +98,12 @@ private:
 	uint8_t boundAlignment = 0;
 };
 
+struct AnalysisLumaRowContent
+{
+    int samples = 0;
+    int left = 0, right = 0;
+};
+
 struct AnalysisLumaSource
 {
 	const uint8_t* data = nullptr;
@@ -103,6 +118,7 @@ struct AnalysisLumaSource
 	uint64_t generation = 0;
 	uint8_t rgbBitAlignment = 0; // SDR / packed DV tunnel: 1 high, 2 low eight bits
 	std::shared_ptr<const void> backingOwner;
+	AnalysisLumaRange range = AnalysisLumaRange::Unknown;  // Bill: encoded sample levels (SDR tunnel)
 	// audit 2026-10-16: YCbCr plane formats (P010, P210, decoded DV 4:2:2,
 	// native 4:2:2) carry full-range codes; Sample() maps them to the limited
 	// domain. RGB formats derive their range from the encoding instead.
@@ -131,6 +147,17 @@ struct AnalysisLumaSource
 	// such a code to Sample()'s luma (the full-range remap when flagged).
 	const uint16_t* LumaPlaneRow(int y) const;
 	uint16_t PlaneLuma(uint16_t code) const;
+
+    // Exact Sample().luma threshold/count/span on a strided row. Validate once
+    // and avoid fetching/converting chroma when the consumer only needs luma.
+    bool MeasureLumaRowContent(int y, int x0, int x1, int step,
+        uint16_t threshold, AnalysisLumaRowContent& result) const;
+
+    // Checks every native pixel in a row using Sample's exact code domain.
+    // False means invalid input/read failure; a valid foreground hit returns
+    // true with withinLimits=false and counts the first rejected pixel.
+    bool RowWithinLimits(int y, uint16_t lumaMax, uint16_t chromaDeviation,
+        bool& withinLimits, size_t& samplesChecked) const;
 
 private:
 	bool SampleUnchecked(int x, int y, AnalysisLumaSample& result) const;

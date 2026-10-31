@@ -5,7 +5,7 @@
 containers, truth and an independent reference decode (2026-10-24, test/dv-synthetic).
 
 A THIRD implementation of the HDMI DV tunnel, written in Python/numpy from the
-specifications, sharing no code with VP's decoder (CR210DolbyVisionTunnelFormatter),
+specifications, sharing no code with VP's decoder (CRGBDolbyVisionTunnelFormatter),
 VP's VPV packer (dv_loopback/DvTunnelPacker.h) or the C++ reference encoder
 (VideoProcessor-Test/DvTunnelReferenceEncoder.h):
 

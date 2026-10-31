@@ -28,7 +28,7 @@ float dv_u16(uint v) { return float(v) / 65535.0; }
 )GLSL";
 
 	// One invocation per pixel pair: both intensity samples and the pair's
-	// (C0, C1) chroma texel, as CR210DolbyVisionTunnelFormatter's planes.
+	// (C0, C1) chroma texel, as CRGBDolbyVisionTunnelFormatter's planes.
 	// Keep in lockstep with DolbyVisionTunnelUnpackReference.h.
 	const char* const DV_BODY = R"GLSL(
 ivec2 g = ivec2(gl_GlobalInvocationID.xy);
