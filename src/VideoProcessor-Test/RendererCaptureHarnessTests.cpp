@@ -2749,22 +2749,29 @@ namespace Tests
 		TEST_METHOD(LowLatencyPathPropertyAndAutoEarlyUpload)
 		{
 			const HarnessScope harnessScope;
-			// Owner 2026-10-16: low_latency_path on any queue profile takes the low-latency path; with
-			// capture_upload auto (the default) early upload opens there and not on the regular path.
+			// Owner 2026-10-16: low_latency_path on any queue profile takes the low-latency path. With
+			// capture_upload auto (the default) and efficiency_fixes on (the default, EarlyUploadPolicy::Requested)
+			// early upload opens in EVERY mode (VRAM-guarded); with efficiency_fixes off the old rule holds:
+			// early upload only in the low-latency path, not on the regular one.
 			if (!RequireHardwareOrSkip("LowLatencyPathPropertyAndAutoEarlyUpload")) return;
 			g_harnessApplySnapshot = true;
 			const RunResult game = Run(VideoFrameEncoding::V210, "gpu", 4.0, true,
 				"dejudder_strength: 0.25\n[queue.Game]\nqueue_size: 4\ntarget_frames: 1\nlow_latency_path: on\n");
 			const RunResult normal = Run(VideoFrameEncoding::V210, "gpu", 4.0, true,
 				"dejudder_strength: 0.25\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n");
+			const RunResult normalOff = Run(VideoFrameEncoding::V210, "gpu", 4.0, true,
+				"dejudder_strength: 0.25\nefficiency_fixes: off\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n");
 			g_harnessApplySnapshot = false;
 			Assert::IsTrue(game.Logged("low-latency queue"), (L"low_latency_path on: the low-latency path\n" + game.Tail()).c_str());
 			Assert::IsTrue(game.Logged("Early upload: on"), (L"capture_upload auto: early upload in low latency\n" + game.Tail()).c_str());
 			// Anchor: the regular run presented and its de-judder ran.
 			Assert::IsTrue(normal.presented, (L"the Normal run presented\n" + normal.Tail()).c_str());
 			Assert::IsTrue(normal.Logged("De-judder: motion estimated"), (L"the Normal queue runs the de-judder\n" + normal.Tail()).c_str());
-			Assert::IsFalse(normal.Logged("Early upload: on"), (L"auto: no early upload on the regular path\n" + normal.Tail()).c_str());
+			Assert::IsTrue(normal.Logged("Early upload: on"), (L"auto + efficiency_fixes on: early upload on the regular path too\n" + normal.Tail()).c_str());
 			Assert::IsFalse(normal.Logged("low-latency queue"), (L"the Normal queue is regular\n" + normal.Tail()).c_str());
+			// efficiency_fixes off: the old rule (auto = early only in the low-latency path).
+			Assert::IsTrue(normalOff.presented, (L"the Normal run (efficiency_fixes off) presented\n" + normalOff.Tail()).c_str());
+			Assert::IsFalse(normalOff.Logged("Early upload: on"), (L"efficiency_fixes off: no early upload on the regular path\n" + normalOff.Tail()).c_str());
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(RebaseDebandAndCnnBlendKeepTheRecoveredDetail)
@@ -3074,14 +3081,19 @@ namespace Tests
 					}
 				Assert::IsTrue(readEarly, (std::wstring(c.name) + L": frames were read early\n" + r.Tail()).c_str());
 			}
-			// Off (the default): the pool never opens.
+			// Default (capture_upload auto): the pool opens (early upload in every mode, VRAM-guarded).
 			{
 				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 2.0);
-				Assert::IsFalse(r.Logged("Early upload: on"), (L"default: no early upload\n" + r.Tail()).c_str());
-				Assert::IsFalse(r.Logged("Alpha analysis unavailable"), (L"default: the CPU analysis ran\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.Logged("Early upload: on"), (L"default: the pool opened\n" + r.Tail()).c_str());
+			}
+			// capture_upload: render - the pool never opens; the render uploads.
+			{
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 2.0, false, "capture_upload: render\n");
+				Assert::IsFalse(r.Logged("Early upload: on"), (L"render: no early upload\n" + r.Tail()).c_str());
+				Assert::IsFalse(r.Logged("Alpha analysis unavailable"), (L"render: the CPU analysis ran\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.Logged("Alpha raw-frame analysis: the CPU reads the captured frame"),
-					(L"default: the CPU analysis read the captured frame\n" + r.Tail()).c_str());
-				Assert::IsTrue(r.presented, (L"default: frames presented\n" + r.Tail()).c_str());
+					(L"render: the CPU analysis read the captured frame\n" + r.Tail()).c_str());
+				Assert::IsTrue(r.presented, (L"render: frames presented\n" + r.Tail()).c_str());
 			}
 		}
 
@@ -4501,10 +4513,23 @@ namespace Tests
 					const bool strictExtras = _dupenv_s(&onScreen, &length, "VP_TEST_HARNESS_ONSCREEN") == 0 && onScreen &&
 						std::string(onScreen) == "1";
 					std::free(onScreen);
+					// The run itself shows the renderer knew the display's rate: the de-judder logs its
+					// "De-judder phase: cadence ... display X Hz" line only after the timing checks passed
+					// (source rate, display rate from the statistics or the open loop, arrival), with X > 0.
+					// A known rate means extras must be rendered: strict. Unknown (the line absent, as on
+					// an off-screen window without DXGI statistics): reported as PENDING-ONSCREEN below.
+					bool displayRateKnown = false;
+					for (const std::string& line : r.log)
+					{
+						const size_t at = line.find("De-judder phase: cadence");
+						const size_t hz = at == std::string::npos ? std::string::npos : line.find(", display ", at);
+						if (hz != std::string::npos && std::atof(line.c_str() + hz + 10) > 0.0)
+							displayRateKnown = true;
+					}
 					// Render-ahead plans its extras open loop from the monitor's rate: strict everywhere. The
 					// closed-loop extras need DXGI statistics, which this laptop's panel never gives (an
 					// iGPU-driven panel: windowed or fullscreen) - strict only where they exist.
-					if (strictExtras || name.find("render-ahead") != std::string::npos)
+					if (strictExtras || displayRateKnown || name.find("render-ahead") != std::string::npos)
 						failures += name + ": no extra from the processed A; ";
 					else
 						Logger::WriteMessage(("   PENDING-ONSCREEN " + name + ": no extra rendered off screen (" + r.dejudderStatus + ")\n").c_str());
