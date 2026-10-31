@@ -6299,6 +6299,10 @@ namespace Tests
 						out += "  " + line.substr(0, 300) + "\n";
 				return out;
 			};
+			// The sigma-delta takes the engine's vectors only where libplacebo has the set-texture call (the Beta
+			// flavour, libplacebo 377); the default flavour (360) searches itself, so no vectors are asked of the
+			// engine there and this test must run on the Beta renderer.
+			_putenv_s("VP_TEST_HARNESS_BETA", "1");
 			// Control: the same run without smooth motion. The sigma-delta must run in this harness and be
 			// served (so the smooth-motion run's output-dither fallback means something).
 			const RunResult control = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
@@ -6307,6 +6311,7 @@ namespace Tests
 			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
 				"deband_vp: on\ntemporal_dither: sigma_delta\n[vprenderer.motion]\nmotion_engine: smooth_motion\nsmooth_motion: always\n", false, &plan);
 			SetEnvironmentVariableA("VP_TEST_SHADER_DIR", nullptr);
+			_putenv_s("VP_TEST_HARNESS_BETA", "");
 			Logger::WriteMessage(("smooth motion:\n" + ditherLines(r) + VectorTestLines(r)).c_str());
 			bool controlServed = false;
 			for (const std::string& line : control.log)
