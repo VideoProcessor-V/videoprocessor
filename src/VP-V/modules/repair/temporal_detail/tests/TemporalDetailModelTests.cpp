@@ -945,9 +945,79 @@ namespace VideoProcessorTest
 			study(designed, g, sdb, ret, fr);
 			Log("default (template grain budget kGrainBudget):");
 			study(Model::Tuning(), g, sdb, ret, fr);
-			Assert::IsTrue(g >= 2.0 && sdb >= 2.0, L"the default still gains >= 2 dB, all of it structure");
+			// Multi-frame template cleaner + budget 0.08 (strict bounds asserted in KeepsGrain): 6.3 dB measured (3.0 dB with
+			// the single-frame split's template at its own strict-bounds budget 0.07).
+			Assert::IsTrue(g >= 5.5 && sdb >= 5.0, L"the default gains >= 5.5 dB, all of it structure");
 			Assert::IsTrue(std::fabs(ret - 1.0) <= 0.02, L"the current grain is kept (retention within 2%)");
 			Assert::IsTrue(fr <= 0.05, L"foreign grain energy <= 5% of the grain energy");
+		}
+
+		TEST_METHOD(TemporalDetailCleanerAtStrictBounds)
+		{
+			// The multi-frame template cleaner (README step 4a). (1) Its transform reconstructs exactly at unit gains: the
+			// orthonormal DCT round trip and the sine window's half-step power sum. (2) At the default budget it holds the
+			// owner's strict bounds on the two-seed grain isolate and gains far more than the single-frame split's template
+			// at that template's own strict-bounds budget (0.07); the template's residual grain share drops.
+			{
+				const Detail::CleanBasis b = Detail::MakeCleanBasis(8, 2.5);
+				Noise nz(5);
+				std::vector<double> x(64), X(64), y(64), tmp(64);
+				for (double& v : x) v = nz.Next();
+				Detail::Dct2(b, x.data(), X.data(), tmp.data(), false);
+				Detail::Dct2(b, X.data(), y.data(), tmp.data(), true);
+				double worst = 0.0, ex = 0.0, eX = 0.0;
+				for (int i = 0; i < 64; ++i) { worst = (std::max)(worst, std::fabs(x[i] - y[i])); ex += x[i] * x[i]; eX += X[i] * X[i]; }
+				Assert::IsTrue(worst < 1e-12 && std::fabs(eX / ex - 1.0) < 1e-12, L"orthonormal DCT round trip is exact");
+				for (int i = 0; i < 4; ++i)
+					Assert::IsTrue(std::fabs(b.win[i] * b.win[i] + b.win[i + 4] * b.win[i + 4] - 1.0) < 1e-12, L"window power sums to 1 at a half-patch step");
+				Assert::IsTrue(b.hs[0] == 0.0, L"the detail band holds no grain at DC");
+			}
+			const int n = 56, R = 4, nk = 96;
+			FieldMotionSource motion;
+			SetPan(motion, nk, 0.0, 0.0);
+			auto gainOf = [&](const Model::Tuning& tune)
+			{
+				double mOff = 0, mOn = 0;
+				for (int r = 0; r < R; ++r)
+				{
+					const Stream s = BuildPan(Pattern("IBBBPBBB", n), 0.0, 0.0, 7u + 101u * static_cast<uint32_t>(r), 1.2);
+					const Run on = GoTuned(s.frames, &motion, tune);
+					for (int t = 24; t < n; ++t)
+					{
+						if (t % 8 == 0 || t % 8 == 4) continue;
+						mOff += Mse(s.frames[static_cast<size_t>(t)], s.truth[static_cast<size_t>(t)]);
+						mOn += Mse(on.out[static_cast<size_t>(t)], s.truth[static_cast<size_t>(t)]);
+					}
+				}
+				return PsnrOf(mOn) - PsnrOf(mOff);
+			};
+			const Stream a = KeepsGrainScene(11, 1.5, nk), b = KeepsGrainScene(12, 1.5, nk);
+			auto bounds = [&](const Model::Tuning& tune, double& nT)
+			{
+				const Run ra = GoTuned(a.frames, &motion, tune), rb = GoTuned(b.frames, &motion, tune);
+				double s = 0.0;
+				int c = 0;
+				for (int t = 32; t < nk; ++t)
+					for (size_t u = 0; u < ra.diag[static_cast<size_t>(t)].templateGrain.size(); ++u)
+						if (ra.diag[static_cast<size_t>(t)].templateGrain[u] > 0.0) { s += ra.diag[static_cast<size_t>(t)].templateGrain[u]; ++c; }
+				nT = c ? s / c : 0.0;
+				Assert::AreEqual(0, ra.diag.back().guardTrips, L"no guard trips in normal operation");
+				return GrainIsolate(a, b, ra, rb, 32, nk, 72);
+			};
+			Model::Tuning single;
+			single.templateClean = false;
+			single.grainBudget = 0.07;   // the single-frame template's strict-bounds budget
+			double nTc = 0, nTs = 0;
+			const double gClean = gainOf(Model::Tuning()), gSingle = gainOf(single);
+			const GrainMetrics mClean = bounds(Model::Tuning(), nTc), mSingle = bounds(single, nTs);
+			LogF("B-frame gain: multi-frame cleaner %.2f dB (budget %.3f), single-frame template %.2f dB (budget 0.07)", gClean, kGrainBudget, gSingle);
+			LogF("mean template grain share sum c^2 rho^2: cleaner %.4f, single-frame %.4f", nTc, nTs);
+			LogGrain("cleaner, grain isolate (owner bounds):", mClean);
+			LogGrain("single-frame template, grain isolate:", mSingle);
+			Assert::IsTrue(mClean.Holds(), L"the cleaner holds the owner's strict bounds at the default budget");
+			Assert::IsTrue(mSingle.Holds(), L"the single-frame reference also holds them at its own budget");
+			Assert::IsTrue(gClean >= gSingle + 2.0, L"the cleaner gains >= 2 dB more at the strict bounds");
+			Assert::IsTrue(nTc < 0.6 * nTs, L"the cleaned template carries much less residual grain");
 		}
 
 		TEST_METHOD(GrainSplitAddBackIsExact)
