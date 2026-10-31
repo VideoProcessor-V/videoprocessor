@@ -3321,7 +3321,7 @@ namespace Tests
 			{
 				RunResult trims;
 				const std::string trimHash = hashOf("dv_tunnel_gpu_unpack: on\ndv_trims: on\n", L"GPU unpack + dv_trims", trims);
-				Assert::IsTrue(trims.Logged("Dolby Vision trims (non-certified): neutral: no L2 trim"),
+				Assert::IsTrue(trims.Logged("Dolby Vision trims (non-certified): neutral: no L2/L8 trim"),
 					(L"dv_trims: neutral without L2\n" + trims.Tail()).c_str());
 				Assert::AreEqual(cpuHash, trimHash, L"dv_trims without L2: unchanged");
 			}
@@ -4416,7 +4416,11 @@ namespace Tests
 					plan.step = [gap](int n) { FrameStep f; f.content = n; f.send = n != gap; return f; };
 				if (c.forceEvery)
 					SetEnvironmentVariableA("VP_TEST_ENTRANCE_ONCE_FALLBACK_EVERY", std::to_string(c.forceEvery).c_str());
-				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", c.gap ? 8.5 : 7.0, c.film, c.extra, false, &plan);
+				// Diagnostic A/B (2026-10-26): VP_TEST_EO_UPLOAD = render | early pins capture_upload for every
+				// case (prepended, so it stays in the renderer section before the [vpv] lines).
+				const std::string upload = RealClip::Env("VP_TEST_EO_UPLOAD");
+				const std::string extra = upload.empty() ? c.extra : "capture_upload: " + upload + "\n" + c.extra;
+				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", c.gap ? 8.5 : 7.0, c.film, extra, false, &plan);
 				if (c.forceEvery)
 					SetEnvironmentVariableA("VP_TEST_ENTRANCE_ONCE_FALLBACK_EVERY", nullptr);
 				const EntranceOnceCounters k = ReadEntranceOnce(r);
