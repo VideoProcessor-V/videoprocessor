@@ -486,6 +486,18 @@ namespace CustomHookChain
         return std::string();
     }
 
+    std::vector<std::string> Chain::LoadFailures() const
+    {
+        std::vector<std::string> names;
+        for (const Entry& entry : entries)
+        {
+            if (!entry.loadFailed && !entry.runtimeFailed) continue;
+            if (entry.quantizer || IsOutputQuantizer(entry.rule.filename, entry.source)) continue;
+            names.push_back(entry.rule.name.empty() ? entry.rule.filename : entry.rule.name);
+        }
+        return names;
+    }
+
     bool Chain::MarkRuntimeFailures(const uint64_t* signatures, int count)
     {
         bool changed = false;

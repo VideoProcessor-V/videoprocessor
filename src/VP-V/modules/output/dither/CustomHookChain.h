@@ -140,6 +140,9 @@ namespace CustomHookChain
         static constexpr const char* kQuantizerNotLoaded = "not loaded";
         static constexpr const char* kQuantizerDisabled = "disabled";
         std::string QuantizerProblem() const;
+        // Rule names (the file name when a rule has no name) of non-quantiser entries that
+        // did not load or were disabled at runtime, in entry order (no silent fallbacks).
+        std::vector<std::string> LoadFailures() const;
 
         // True when a submitted rule loads this file (by name, any folder,
         // case-insensitive). Stage 8 needs the SSIM downscaler in the chain.

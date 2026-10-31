@@ -425,6 +425,38 @@ namespace VideoProcessorTest
 		}
 
 
+		TEST_METHOD(LoadFailuresListsReadAndParseFailuresButNotQuantizers)
+		{
+			FakeShaders shaders;
+			shaders.files["broken.glsl"] = "OUTPUT FAIL";
+			shaders.files["quant.glsl"] = "OUTPUT FAIL VP_OUTPUT_QUANTIZER";
+			shaders.files["good.glsl"] = "CHROMA";
+			CustomHookChain::Chain chain(shaders.Loader());
+			chain.Configure({ CustomRule("missing", "absent.glsl", 1),
+				CustomRule("broken", "broken.glsl", 2),
+				CustomRule("quant", "quant.glsl", 3),
+				CustomRule("", "good.glsl", 4) });
+			Assert::IsTrue(chain.LoadFailures().empty());
+			chain.Ensure(Output2560x1600());
+			const auto failures = chain.LoadFailures();
+			Assert::AreEqual(size_t{ 2 }, failures.size());
+			Assert::AreEqual(std::string("missing"), failures[0]);
+			Assert::AreEqual(std::string("broken"), failures[1]);
+			Assert::AreEqual(std::string("not loaded"), chain.QuantizerProblem());
+		}
+
+		TEST_METHOD(LoadFailuresNamesTheFileWhenTheRuleHasNoName)
+		{
+			FakeShaders shaders;
+			shaders.files["broken.glsl"] = "OUTPUT FAIL";
+			CustomHookChain::Chain chain(shaders.Loader());
+			chain.Configure({ CustomRule("", "broken.glsl", 1) });
+			chain.Ensure(Output2560x1600());
+			const auto failures = chain.LoadFailures();
+			Assert::AreEqual(size_t{ 1 }, failures.size());
+			Assert::AreEqual(std::string("broken.glsl"), failures[0]);
+		}
+
 		TEST_METHOD(SetHookParameterMatchesTheTextRoundTrip)
 		{
 			struct Params

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 // The "Fallbacks engaged" entries of the renderer's automatic downgrades, built in ONE place
 // (module findings 2026-10-24, the silent-fallbacks batch; ADR-0001 no silent fallbacks).
@@ -126,6 +127,21 @@ namespace FallbackCatalog
 	{
 		return failed ? Engaged("texture restore", "not applied" + (error.empty() ? std::string() : " (" + error + ")") +
 			"; the frame is rendered without it") : Released("texture restore");
+	}
+
+	// Custom GLSL hooks that did not load (read, template, libplacebo rejection, no known
+	// //!HOOK stage) or that libplacebo disabled at runtime; the picture renders without them.
+	// Quantiser failures are reported by the dither entry instead. Lists at most 3 names.
+	inline Decision CustomHooksNotLoaded(const std::vector<std::string>& names)
+	{
+		if (names.empty()) return Released("custom hooks");
+		constexpr size_t kListed = 3;
+		std::string list;
+		for (size_t i = 0; i < names.size() && i < kListed; ++i)
+			list += (i ? ", " : "") + names[i];
+		if (names.size() > kListed)
+			list += " +" + std::to_string(names.size() - kListed) + " more";
+		return Engaged("custom hooks", "not loaded: " + list + " (the picture renders without them)");
 	}
 
 	// ---- repair.deband --------------------------------------------------------------------------

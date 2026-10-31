@@ -11,6 +11,7 @@
 #include <VP-V/core/FallbackCatalog.h>
 
 #include <string>
+#include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace FallbackCatalog;
@@ -165,6 +166,21 @@ namespace FallbackCatalogTest
 			Assert::AreEqual(std::string("texture restore"), restore.id);
 			Assert::IsFalse(TextureRestoreFailed(false, "x").engaged);
 			Assert::AreEqual(std::string("texture restore"), TextureRestoreFailed(false, "x").id);
+		}
+
+		TEST_METHOD(CustomHooksNotLoadedListsTheFailedHooks)
+		{
+			const Decision none = CustomHooksNotLoaded({});
+			Assert::IsFalse(none.engaged);
+			Assert::AreEqual(std::string("custom hooks"), none.id);
+			const Decision two = CustomHooksNotLoaded({ "a.glsl", "b.glsl" });
+			Assert::IsTrue(two.engaged);
+			Assert::AreEqual(std::string("custom hooks"), two.id);
+			Assert::AreEqual(std::string("not loaded: a.glsl, b.glsl (the picture renders without them)"), two.reason);
+			const Decision many = CustomHooksNotLoaded({ "a", "b", "c", "d", "e" });
+			Assert::AreEqual(std::string("not loaded: a, b, c +2 more (the picture renders without them)"), many.reason);
+			Assert::AreEqual(std::string("not loaded: a, b, c (the picture renders without them)"),
+				CustomHooksNotLoaded({ "a", "b", "c" }).reason);
 		}
 
 		TEST_METHOD(MotionConsumerGpuFailuresAreVisibleWhileRecent)
