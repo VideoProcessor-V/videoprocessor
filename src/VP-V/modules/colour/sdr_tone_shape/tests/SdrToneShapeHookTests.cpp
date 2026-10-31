@@ -205,7 +205,7 @@ namespace VideoProcessorTest
 			{
 				const size_t at = src.find("//!PARAM " + name + "
 ");
-				const size_t at2 = at == std::string::npos ? src.find("//!PARAM " + name + "
+				const size_t at2 = at == std::string::npos ? src.find("//!PARAM " + name + "
 ") : at;
 				Assert::IsTrue(at2 != std::string::npos, L"PARAM missing");
 				size_t pos = at2;
