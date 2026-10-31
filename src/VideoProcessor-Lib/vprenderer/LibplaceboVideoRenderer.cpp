@@ -2526,6 +2526,9 @@ namespace
 				value = ConfigFile::NormalizeName(value);
 				if (value == "native" || value == "auto" || SourceRebase::ClassHeight(value) > 0)
 					settings.sourceResolution = value;
+				else
+					DebugLog::Log("display rule '%s': invalid source_resolution '%s'; retaining base setting",
+						rule.name.c_str(), value.c_str());
 			}
 			if (config.TryGetString(rule.section, "source_resolution_auto_min_confidence", value))
 			{
@@ -7147,6 +7150,7 @@ struct LibplaceboVideoRenderer::Impl
 	uint64_t sourceUploadCpuIntervalSamples = 0;
 	pl_tex subtitleBoxTexture = nullptr;
 	SubtitleMeasurementWorker subtitleMeasurementWorker;
+	bool subtitleWorkerLoss = false;   // silent-fallbacks: the last 5 s window dropped or failed measurement jobs
     SubtitlePendingMeasurementGuard subtitlePendingGuard;
     struct SubtitlePerfWindow {
         uint64_t frames=0,pending=0,recovered=0,compose[2]{},gpuSamples[2]{};
@@ -10971,9 +10975,14 @@ struct LibplaceboVideoRenderer::Impl
 
 	void EnsureAutoLimitedFallback(const char* trigger)
 	{
-		if (swapchainBlit ||
-			!LibplaceboOutput::ShouldFallbackToComposed(outputPlan, actualOutput))
+		if (swapchainBlit)
 			return;
+		if (!LibplaceboOutput::ShouldFallbackToComposed(outputPlan, actualOutput))
+		{
+			SyncFallback(FallbackCatalog::OutputRangeComposed(false, std::string()));   // silent-fallbacks: flip chain kept
+			return;
+		}
+		SyncFallback(FallbackCatalog::OutputRangeComposed(true, trigger ? trigger : ""));
 
 		DebugLog::Log(
 			"libplacebo output negotiation (%s): AUTO Limited unavailable; recreating the stable composed Full/sRGB swapchain",
@@ -11360,6 +11369,11 @@ struct LibplaceboVideoRenderer::Impl
 		else if (reportBt2020ToDisplay)
 			DebugLog::Log("libplacebo: report_bt2020_to_display ignored because target primaries are Rec.709");
 		requestedOutputPlan = LibplaceboOutput::MakePlan(outputRequest);
+		SyncFallback(FallbackCatalog::OutputRequestRejected(
+			outputRequest.gamma == LibplaceboOutput::GammaRequest::UNSUPPORTED || !requestedOutputPlan.valid,
+			outputRequest.gamma == LibplaceboOutput::GammaRequest::UNSUPPORTED ?
+				settings.outputGamma : settings.outputPresentation + "/" + settings.outputRange + "/" + settings.outputGamma,
+			requestedOutputPlan.reason));
 		if (outputRequest.gamma == LibplaceboOutput::GammaRequest::UNSUPPORTED)
 		{
 			DebugLog::Log(
@@ -19648,9 +19662,15 @@ struct LibplaceboVideoRenderer::Impl
             if(!currentSubtitlePreview.available) {
                 ++subtitlePerf.pending;
                 if(subtitlePendingGuard.Resolve(currentSubtitlePreview,analysisSource,subtitleFrameMs,activeSettings.subtitleHoldMs))++subtitlePerf.recovered;
-                else if(subtitlePerf.pending-subtitlePerf.recovered<=4)
-                    DebugLog::Log("SUBTITLE PENDING: frame=%llu reason=%s",sourceSequence,subtitlePendingGuard.DecisionReason());
+                else
+                {
+                    if(subtitlePerf.pending-subtitlePerf.recovered<=4)
+                        DebugLog::Log("SUBTITLE PENDING: frame=%llu reason=%s",sourceSequence,subtitlePendingGuard.DecisionReason());
+                    SyncFallback(FallbackCatalog::SubtitleDetection(FallbackCatalog::SubtitleLoss::CueDropped));   // silent-fallbacks
+                }
             }
+            else if(!subtitleWorkerLoss)
+                SyncFallback(FallbackCatalog::SubtitleDetection(FallbackCatalog::SubtitleLoss::None));   // next good cue releases
             subtitleBoxPresentation.RefreshReferencePixels(currentSubtitlePreview,analysisSource);
             subtitlePreview=&currentSubtitlePreview;
             subtitleBoxResult = subtitleBoxPresentation.Consume(*subtitlePreview, activeSettings.subtitleHoldMs,subtitleFrameMs);
@@ -19986,6 +20006,10 @@ struct LibplaceboVideoRenderer::Impl
             const double seconds=(subtitlePerfNow-subtitlePerfTick)/1000.0;
             const auto worker=subtitleMeasurementWorker.TakeDiagnostics();
             const auto jobs=worker.fullScans+worker.refreshes+worker.failed;
+            subtitleWorkerLoss=worker.failed>0||worker.dropped>0;   // silent-fallbacks: visible, released by the next good cue
+            if(subtitleWorkerLoss)
+                SyncFallback(FallbackCatalog::SubtitleDetection(worker.failed>0 ?
+                    FallbackCatalog::SubtitleLoss::WorkerError : FallbackCatalog::SubtitleLoss::JobsDropped));
             DebugLog::Log("SUBTITLE PERFORMANCE CPU: optimization=%s window_s=%.3f frames=%llu consume_avg_ms=%.3f consume_peak_ms=%.3f pending_frames=%llu verified_pending=%llu full_scans=%llu full_scan_hz=%.2f full_avg_ms=%.3f full_peak_ms=%.3f refreshes=%llu refresh_hz=%.2f refresh_avg_ms=%.3f refresh_peak_ms=%.3f worker_busy_ms=%.3f queue_wait_avg_ms=%.3f queue_wait_peak_ms=%.3f queued=%zu active=%d ready=%zu dropped_jobs=%llu failed_jobs=%llu request_misses=%llu",
                 SubtitleDetectionOptimizationName(activeSettings.subtitleDetectionOptimization),seconds,subtitlePerf.frames,subtitlePerf.frames?subtitlePerf.consumeMs/subtitlePerf.frames:0,subtitlePerf.consumePeak,
                 subtitlePerf.pending,subtitlePerf.recovered,worker.fullScans,worker.fullScans/seconds,
@@ -22368,10 +22392,12 @@ struct LibplaceboVideoRenderer::Impl
 				{
 				case NlsMappingMode::ACTIVE:
 					SetShaderStatus("NLS: Active");
+					SyncFallback(FallbackCatalog::GeometrySafeFit(false));
 					break;
 				case NlsMappingMode::LINEAR_PASSTHROUGH:
 					SetShaderStatus(nlsPresentationCrop.applied ?
 						"NLS: Crop only" : "NLS: Passthrough");
+					SyncFallback(FallbackCatalog::GeometrySafeFit(false));
 					break;
 				case NlsMappingMode::SAFE_FIT:
 					SetShaderStatus("NLS: Safe fit");
@@ -23819,6 +23845,7 @@ struct LibplaceboVideoRenderer::Impl
                 MadVRShaderLoader::SetRuntimeShaderSelection(requestedShaderSelector,
                     requestedShaderSelector, nlsDecision.mode);
                 SetShaderStatus("NLS: Safe fit (hook failure)");
+                SyncFallback(FallbackCatalog::GeometrySafeFit(true));   // silent-fallbacks: visible beyond the shader status
                 // Hunt 2 10-layout M1: the de-judder geometry, the rendered-picture cache and
                 // the occlusion mask's NLS map were made for the failed draw (the NLS screen
                 // rectangle and map). The redraw copies nothing, the extras of this frame hold,
