@@ -362,7 +362,8 @@
         "optical_flow_cost_trust",
         "optical_flow_fb_check",
         "optical_flow_global",
-        "optical_flow_global_fallback"
+        "optical_flow_global_fallback",
+        "vector_demand"
       ],
       "planned_keys": [
         "motion_ahead_ms"
@@ -404,6 +405,7 @@
           "optical_flow": "off",
           "motion_ahead_frames": "0",
           "motion_history_fixes": "off",
+          "vector_demand": "off",
           "dejudder_estimate_ahead": "off",
           "dejudder_est_still_zero": "off"
         }
@@ -874,7 +876,8 @@
         "motion_engine",
         "motion_history_fixes",
         "occlusion_mask",
-        "timing_continuity_fixes"
+        "timing_continuity_fixes",
+        "vector_demand"
       ],
       "planned_keys": [],
       "tiers": "follows motion.estimation",

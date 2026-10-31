@@ -16,7 +16,9 @@
     "src/VP-V/modules/motion/estimation/OpticalFlowTrust.h",
     "src/VideoProcessor-Lib/MotionConfig.h",
     "src/VP-V/modules/motion/estimation/MotionEngineIdle.h",
-    "src/VP-V/modules/motion/estimation/MotionAheadProducer.h"
+    "src/VP-V/modules/motion/estimation/MotionAheadProducer.h",
+    "src/VP-V/modules/motion/estimation/VectorDemand.h",
+    "src/VP-V/modules/motion/estimation/tests/VectorDemandTests.cpp"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/MotionAhead.h",
@@ -67,7 +69,8 @@
       "optical_flow_cost_trust",
       "optical_flow_fb_check",
       "optical_flow_global",
-      "optical_flow_global_fallback"
+      "optical_flow_global_fallback",
+      "vector_demand"
     ],
     "upstream_modules": [
       "input.queue_timing",

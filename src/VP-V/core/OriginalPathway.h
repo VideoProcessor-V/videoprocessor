@@ -63,6 +63,7 @@ namespace OriginalPathway
 			{ "optical_flow", "off", "motion.estimation" },
 			{ "motion_ahead_frames", "0", "motion.estimation" },
 			{ "motion_history_fixes", "off", "motion.estimation" },
+			{ "vector_demand", "off", "motion.estimation" },
 			{ "dejudder_source_warp_filter", "bilinear", "motion.consumers" },
 			{ "nls_sampling", "bilinear", "scaling.geometry" },
 			{ "adaptive_downscale", "off", "scaling.output" },

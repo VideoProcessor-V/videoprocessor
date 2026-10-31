@@ -224,6 +224,7 @@ vprenderer.pulldown_fixes	vprenderer-timing-switches	VP Renderer timing	no
 vprenderer.timing_continuity_fixes	vprenderer-timing-switches	VP Renderer timing	no
 vprenderer.cadence_class_fixes	vprenderer-timing-switches	VP Renderer timing	no
 vprenderer.motion_history_fixes	vprenderer-timing-switches	VP Renderer timing	no
+vprenderer.vector_demand	vprenderer-timing-switches	VP Renderer timing	no
 vprenderer.queue_timing_fixes	vprenderer-timing-switches	VP Renderer timing	no
 vprenderer.render_ahead	vprenderer-timing-switches	VP Renderer timing	no
 vprenderer.dejudder_gate	vprenderer-timing-switches	VP Renderer timing	no

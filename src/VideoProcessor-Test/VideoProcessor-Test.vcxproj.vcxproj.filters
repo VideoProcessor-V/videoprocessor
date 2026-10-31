@@ -241,6 +241,7 @@
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\consumers\tests\InterpolatorHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\consumers\tests\OcclusionMaskHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\EstimatorHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\VectorDemandTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\output\dither\tests\SigmaDeltaHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\repair\deband\tests\VpDebanderHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\scaling\output\tests\AdaptiveScalingHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
