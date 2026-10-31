@@ -16,7 +16,7 @@ Scale to the output active size inside libplacebo: hybrid SSIM downscale (adapti
 
 ## Settings
 
-- Existing keys: `adaptive_downscale`, `adaptive_w_base`, `adaptive_edge_lo`, `adaptive_edge_hi`, `adaptive_grain_lo`, `adaptive_grain_hi`, `adaptive_grain_floor`, `adaptive_grain_smooth_ms`, `adaptive_grain_shadow_bias`, `adaptive_chroma_ssim`, `adaptive_grain_map`, `adaptive_grain_map_smooth_ms`, `adaptive_faithful`, `adaptive_upscale`, `adaptive_upscale_w_base`, `adaptive_upscale_superres_scale`, `downscale_light`, `upscale_light`, `ssim_bitrate_aware`, `ssim_bitrate_floor`, `cnn_residual_stabilise`, `ssim_residual_stabilise`, `residual_stabilise_grain_guard`, `fbo_float32`
+- Existing keys: `adaptive_downscale`, `adaptive_w_base`, `adaptive_edge_lo`, `adaptive_edge_hi`, `adaptive_grain_lo`, `adaptive_grain_hi`, `adaptive_grain_floor`, `adaptive_grain_smooth_ms`, `adaptive_grain_shadow_bias`, `adaptive_chroma_ssim`, `adaptive_grain_map`, `adaptive_grain_map_smooth_ms`, `adaptive_faithful`, `adaptive_upscale`, `adaptive_upscale_w_base`, `adaptive_upscale_superres_scale`, `downscale_light`, `upscale_light`, `ssim_bitrate_aware`, `ssim_bitrate_floor`, `cnn_residual_stabilise`, `ssim_residual_stabilise`, `residual_stabilise_grain_guard`, `fbo_float32`, `adaptive_motion`, `adaptive_motion_speed_lo`, `adaptive_motion_speed_hi`, `adaptive_motion_floor`, `adaptive_motion_smooth_ms`
 - Planned keys: `hybrid_refine_d`
 - Tiers: Classic Lanczos; Low..Upper hybrid; Upper + D
 
@@ -46,6 +46,13 @@ Contract tests:
 
 Chain tests:
 - pan shimmer test
+
+## Motion-adapted blend and Stage 8b one-axis (2026-10-31)
+
+- **Motion-adapted blend** (`adaptive_motion`, off by default: a candidate until the sweep in `tools/scaling_sweep/` decides). The sharper branch's weight (SSIM on a downscale, the CNN on an upscale) is multiplied per 16x16 block by a factor from the de-judder's field: 1 for a steady, trusted block, ramping by `smoothstep(adaptive_motion_speed_lo, adaptive_motion_speed_hi, speed)` to `adaptive_motion_floor` on fast motion (speed in picture heights per second: general over sizes and rates), the floor for untrusted blocks or frames; a one-pole over `adaptive_motion_smooth_ms` that follows each block's vector (no flicker at motion boundaries); bilinear between block centres in the blend. Lowering the weight only moves towards the faithful branch, so grain is kept. The camera model's per-block confidence multiplies the target when it lands (`MotionTarget`'s `confidence`, 1 today). No vectors (none running, NLS, a discontinuity): factor 1 (today's blend), shown as "Motion-adapted blend: no vectors on this frame (plain blend)". With it on, the de-judder estimate is requested like the grain map's. CPU mirror: `MotionTarget` / `MotionStep` / `MotionAlpha` / `MotionSpeed` in `AdaptiveDownscale.h`.
+- **Stage 8b one-axis** (N9-P12): the upscale gate (`UpscaleAxesOf`) also opens for a width-only upscale with the height 1:1 (the height-only gate missed it); mixed frames (one axis up, one down) keep the old routing. A frame upscaled on one axis with the other 1:1 is **faithful only** (w = 0; SSimSuperRes gets a zero grain term, so it adds nothing) and any LUMA prescaler (a CNN doubler, recognised from its shader source by `CustomHookChain::IsLumaPrescaler`) is dropped from that frame's hooks, so the CNN invents no detail on the axis that is not upscaled. The faithful branch is already separable there (`adaptive_faithful` auto: the axes' ratios differ), which is identity on the 1:1 axis. Status: "Adaptive upscale: faithful only (one-axis upscale; CNN doubler skipped)" / "Adaptive upscale: CNN + faithful blend".
+- **Optimal blend**: the non-net default stays VP's full blend (edge term, grain map, auto faithful, residual hold); `adaptive_w_base` / `adaptive_upscale_w_base` defaults are re-set from the downscale and upscale sweeps (`tools/scaling_sweep/`), re-run with the camera model on/off once it lands. The kit's locked set (w 0.2, ortho) stays a D/TrainKit concern only.
+- Config UI controls for the `adaptive_motion*` keys: not added yet (expert/sweep keys; follow-up under this module or `control/`).
 
 ## Known issues / open items
 
@@ -121,7 +128,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 
 ## Settings
 
-- Keys: `adaptive_downscale`, `adaptive_w_base`, `adaptive_edge_lo`, `adaptive_edge_hi`, `adaptive_grain_lo`, `adaptive_grain_hi`, `adaptive_grain_floor`, `adaptive_grain_smooth_ms`, `adaptive_grain_shadow_bias`, `adaptive_chroma_ssim`, `adaptive_grain_map`, `adaptive_grain_map_smooth_ms`, `adaptive_faithful`, `adaptive_upscale`, `adaptive_upscale_w_base`, `adaptive_upscale_superres_scale`, `downscale_light`, `upscale_light`, `ssim_bitrate_aware`, `ssim_bitrate_floor`, `cnn_residual_stabilise`, `ssim_residual_stabilise`, `residual_stabilise_grain_guard`, `fbo_float32`.
+- Keys: `adaptive_downscale`, `adaptive_w_base`, `adaptive_edge_lo`, `adaptive_edge_hi`, `adaptive_grain_lo`, `adaptive_grain_hi`, `adaptive_grain_floor`, `adaptive_grain_smooth_ms`, `adaptive_grain_shadow_bias`, `adaptive_chroma_ssim`, `adaptive_grain_map`, `adaptive_grain_map_smooth_ms`, `adaptive_faithful`, `adaptive_upscale`, `adaptive_upscale_w_base`, `adaptive_upscale_superres_scale`, `downscale_light`, `upscale_light`, `ssim_bitrate_aware`, `ssim_bitrate_floor`, `cnn_residual_stabilise`, `ssim_residual_stabilise`, `residual_stabilise_grain_guard`, `fbo_float32`, `adaptive_motion`, `adaptive_motion_speed_lo`, `adaptive_motion_speed_hi`, `adaptive_motion_floor`, `adaptive_motion_smooth_ms`.
 - Planned keys (not yet implemented): `hybrid_refine_d`.
 - Tiers: Classic Lanczos; Low..Upper hybrid; Upper + D.
 - VP-V page, Scaling tab: tiers Classic / Low / Mid; tier keys `adaptive_downscale`, `adaptive_w_base`, `source_resolution`.

@@ -74,6 +74,11 @@ namespace CustomHookChain
     constexpr const char* SigmaDeltaFileName = "Temporal sigma-delta.glsl";
     bool IsOutputQuantizer(const std::string& filename, const std::string& source);
 
+    // Stage 8b one-axis (N9-P12): a LUMA prescaler (a CNN doubler such as FSRCNNX / ArtCNN),
+    // recognised by its source, not its file name: a pass that hooks LUMA and declares
+    // //!WIDTH or //!HEIGHT as "LUMA.w <k> *" / "LUMA.h <k> *" (or HOOKED.w / HOOKED.h) with k > 1.
+    bool IsLumaPrescaler(const std::string& source);
+
     struct Loader
     {
         std::function<bool(const std::string& filename, std::string& source,
@@ -114,6 +119,10 @@ namespace CustomHookChain
         // hook list (it drops the sigma-delta on an unsupported code domain).
         bool IsQuantizerHook(const pl_hook* hook) const;
 
+        // Stage 8b one-axis: true when `hook` is a loaded LUMA prescaler of this chain
+        // (IsLumaPrescaler); the scaling stage drops it from a one-axis upscale's hook list.
+        bool IsPrescalerHook(const pl_hook* hook) const;
+
         // Latches entries whose hook libplacebo disabled at runtime. Returns
         // true when at least one entry newly dropped out.
         bool MarkRuntimeFailures(const uint64_t* signatures, int count);
@@ -141,6 +150,7 @@ namespace CustomHookChain
             std::string key;
             const pl_hook* hook = nullptr;
             bool quantizer = false;   // IsOutputQuantizer (audit 2026-10-16)
+            bool prescaler = false;   // IsLumaPrescaler (Stage 8b one-axis)
             bool loadFailed = false;
             bool runtimeFailed = false;
         };

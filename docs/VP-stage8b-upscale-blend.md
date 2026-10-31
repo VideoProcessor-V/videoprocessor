@@ -99,6 +99,19 @@ The grain keys are shared with Stage 8 (`adaptive_grain_*`); the
   test: rounding-level correction on synthetic pictures).
 - **Warp paths.** 8b runs in the main render; nothing path-specific.
 
+## One-axis and the either-axis gate (N9-P12, 2026-10-31)
+
+- Gate (`AdaptiveDownscale::UpscaleAxesOf`): the height upscaled (as before) or the width upscaled with the
+  height 1:1 (new); mixed frames keep the old routing. A width-only
+  upscale (anamorphic squeeze) now takes the upscale form.
+- One axis upscaled and the other 1:1: faithful branch only (w = 0, SuperRes handed a zero grain
+  term); LUMA prescalers (recognised from the shader source) dropped from the frame's hooks so PRE_KERNEL is
+  the source. The faithful branch is separable there (adaptive_faithful auto), identity on the 1:1 axis.
+  Status line: "Adaptive upscale: faithful only (one-axis upscale; CNN doubler skipped)".
+- Both axes: unchanged (CNN + faithful blend). Off / slot off (Original pathway): unchanged.
+- Not in this package (N9-P12 remainder): MC stabilisation of the CNN residual via DetailPulse, the 50/60p
+  grain map from low-latency backward vectors.
+
 ## Cinema check (1080p source with grain, in the first session if time)
 
 CNN alone → blend on, on a grainy sky over a sharp foreground: grain

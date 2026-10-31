@@ -259,6 +259,7 @@
   <ItemGroup><ClCompile Include="..\VP-V\modules\repair\deband\tests\VpDebanderHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\repair\temporal_detail\tests\TemporalDetailModelTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\scaling\output\tests\AdaptiveScalingHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\scaling\output\tests\AdaptiveScalingOneAxisMotionTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\scaling\rebase\tests\SourceRebaseHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\scaling\refine\tests\ResidualHoldHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\tests\WholeHookChainHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>

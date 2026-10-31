@@ -25,9 +25,9 @@ namespace OriginalPathway
 		const char* slot;   // the slot whose VP additions it removes (slots.json id)
 	};
 
-	inline const std::array<Override, 64>& Overrides()
+	inline const std::array<Override, 65>& Overrides()
 	{
-		static const std::array<Override, 64> table = { {
+		static const std::array<Override, 65> table = { {
 			{ "capture_path", "standard", "input.capture" },
 			{ "capture_upload", "render", "input.capture" },
 			{ "native_rgb_ingest", "off", "input.capture" },
@@ -90,6 +90,7 @@ namespace OriginalPathway
 			{ "ssim_residual_stabilise", "off", "scaling.output" },
 			{ "cnn_residual_stabilise", "off", "scaling.output" },
 			{ "residual_stabilise_grain_guard", "off", "scaling.output" },
+			{ "adaptive_motion", "off", "scaling.output" },   // the motion-adapted blend (2026-10-31)
 			{ "dejudder_estimate_ahead", "off", "motion.estimation" },
 			{ "dejudder_est_still_zero", "off", "motion.estimation" },
 			{ "interpolation_fallback", "hold", "motion.consumers" },

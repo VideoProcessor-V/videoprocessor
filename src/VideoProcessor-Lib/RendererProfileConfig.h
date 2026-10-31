@@ -859,6 +859,11 @@ namespace RendererProfileConfig
 			if (key == "adaptive_grain_lo" || key == "adaptive_grain_hi") return IsNumberInRange(value, 0.0, 64.0);
 			if (key == "adaptive_grain_smooth_ms" || key == "adaptive_grain_map_smooth_ms")
 				return IsNumberInRange(value, 0.0, 10000.0);
+			// The motion-adapted blend (VP-V scaling.output, owner 2026-10-31; candidate, off).
+			if (key == "adaptive_motion") return IsChoice(value, { "on", "off" });
+			if (key == "adaptive_motion_speed_lo" || key == "adaptive_motion_speed_hi") return IsNumberInRange(value, 0.0, 10.0);
+			if (key == "adaptive_motion_floor") return IsNumberInRange(value, 0.0, 1.0);
+			if (key == "adaptive_motion_smooth_ms") return IsNumberInRange(value, 0.0, 10000.0);
 			// Stage 10: BTB/WTW kept through libplacebo's scaling (SDR).
 			if (key == "preserve_extended_range") return IsChoice(value, { "on", "off" });
 			if (key == "extended_range_more_cases") return IsChoice(value, { "on", "off" });

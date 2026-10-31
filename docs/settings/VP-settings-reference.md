@@ -306,6 +306,7 @@ projector with the hybrid SSIM scaler.*
 | `ssim_bitrate_aware`, `ssim_bitrate_floor` | Gentler sharpening on poor streams. | SSIM would sharpen blocking. | on / 0.4 |
 | `ssim_residual_stabilise`, `cnn_residual_stabilise`, `residual_stabilise_grain_guard` | Averages the scalers' added detail along trusted motion, but not on grain. | It stops shimmer without freezing grain. | on |
 | `adaptive_chroma_ssim` | Applies SSIM to chroma too. | It can fringe colour. | off |
+| `adaptive_motion`, `adaptive_motion_speed_lo`, `adaptive_motion_speed_hi`, `adaptive_motion_floor`, `adaptive_motion_smooth_ms` | Motion-adapted scaler blend for the adaptive downscale and upscale: per 16x16 block the sharp scaler's share is kept on steady, confidently tracked areas and lowered toward the faithful scaler on fast or untracked motion (speed in picture heights per second, smoothed over time along the vectors, reset at cuts). Without vectors the plain blend runs and the status line says so. | A sharp scaler that shimmers or haloes on fast motion; lowering only moves toward the faithful branch, so grain is kept. | off / 0.1 / 0.4 / 0 / 250 ms (defaults set from the sweep) |
 | `adaptive_upscale`, `adaptive_upscale_w_base`, `adaptive_upscale_superres_scale`, `upscale_light` | The same idea for sources smaller than the screen (CNN vs faithful upscale). | CNN upscalers sharpen grain. | off / 1 / on / linear |
 | `downscale_light` (Scaling page) | The light domain for downscaling (linear or gamma). | Gamma matches madVR's SSIM. | linear |
 
