@@ -6,7 +6,7 @@
 #include "HdrVerify.h"
 #include "TranscriptRecorder.h"
 
-#include <AmbientConfig.h>
+#include <VP-V/modules/colour/appearance/AmbientConfig.h>
 #include <VP-V/modules/drive/projector_control/SerialPort.h>
 
 #include <ConfigFile.h>

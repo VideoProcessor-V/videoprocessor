@@ -15,6 +15,8 @@
     "src/VP-V/modules/input/capture/EarlyUpload.cpp",
     "src/VP-V/modules/input/capture/EarlyUpload.h",
     "src/VideoProcessor-Lib/CaptureInput.cpp",
+    "src/VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.cpp",
+    "src/VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.h",
     "src/VideoProcessor-Lib/CaptureInput.h",
     "src/VideoProcessor-Lib/blackmagic_decklink",
     "src/VideoProcessor-Lib/magewell",
@@ -22,6 +24,7 @@
     "src/VideoProcessor-Lib/VideoConversionOverride.cpp"
   ],
   "forwarding_headers": [
+    "src/VideoProcessor-Lib/video_frame_formatter/CTwoPlane420VideoFrameFormatter.h",
     "src/VideoProcessor-Lib/vprenderer/EarlyUpload.h",
     "src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.h",
     "src/VideoProcessor-Lib/vprenderer/GpuRgbUnpack.h",

@@ -128,6 +128,8 @@ VP files (in this folder):
 - `src/VP-V/modules/input/capture/UploadReuse.h`
 - `src/VP-V/modules/input/capture/EarlyUpload.h`
 - `src/VP-V/modules/input/capture/EarlyUpload.cpp`
+- `src/VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.h` (M2 item 11: our file-frame NV12/P010/P016 formatter, moved out of Bill's `video_frame_formatter/`; forwarding header kept at the old path for the renderer host `LibplaceboVideoRenderer.cpp`)
+- `src/VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.cpp`
 
 Bill's files used (stay):
 

@@ -11,6 +11,8 @@ the old path until M2 so files on active branches keep building.
 
 | Old path | New path | Commit | Note |
 |---|---|---|---|
+| `src/VideoProcessor-Lib/AmbientAdaptation.h` | `src/VP-V/modules/colour/appearance/AmbientAdaptation.h` | ? | fwd |
+| `src/VideoProcessor-Lib/AmbientConfig.h` | `src/VP-V/modules/colour/appearance/AmbientConfig.h` | ? | fwd |
 | `src/VideoProcessor-Lib/vprenderer/ExtendedRange.cpp` | `src/VP-V/modules/colour/extended_range/ExtendedRange.cpp` | 4a7a73c0 |  |
 | `src/VideoProcessor-Lib/vprenderer/ExtendedRange.h` | `src/VP-V/modules/colour/extended_range/ExtendedRange.h` | 4a7a73c0 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/DolbyVisionTrims.h` | `src/VP-V/modules/colour/sdr_tone_shape/DolbyVisionTrims.h` | d58d0b4c | fwd |
@@ -47,6 +49,8 @@ the old path until M2 so files on active branches keep building.
 | `src/VideoProcessor-Lib/led/ProjectorDriver.h` | `src/VP-V/modules/drive/projector_control/ProjectorDriver.h` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/SerialPort.cpp` | `src/VP-V/modules/drive/projector_control/SerialPort.cpp` | 570b1ee8 |  |
 | `src/VideoProcessor-Lib/led/SerialPort.h` | `src/VP-V/modules/drive/projector_control/SerialPort.h` | 570b1ee8 | fwd |
+| `src/VideoProcessor-Lib/video_frame_formatter/CTwoPlane420VideoFrameFormatter.cpp` | `src/VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.cpp` | staged |  |
+| `src/VideoProcessor-Lib/video_frame_formatter/CTwoPlane420VideoFrameFormatter.h` | `src/VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.h` | ? | fwd |
 | `src/VideoProcessor-Lib/vprenderer/EarlyUpload.cpp` | `src/VP-V/modules/input/capture/EarlyUpload.cpp` | 27622366 |  |
 | `src/VideoProcessor-Lib/vprenderer/EarlyUpload.h` | `src/VP-V/modules/input/capture/EarlyUpload.h` | 27622366 | fwd |
 | `src/VideoProcessor-Lib/vprenderer/GpuCaptureUnpack.cpp` | `src/VP-V/modules/input/capture/GpuCaptureUnpack.cpp` | 27622366 |  |

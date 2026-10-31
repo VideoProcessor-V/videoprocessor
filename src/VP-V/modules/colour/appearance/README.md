@@ -53,9 +53,13 @@ Chain tests:
 
 ## Where the code lives (live file list)
 
-Code location: **module (SdrAmbientLift helper only; slot placeholder)**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
+Code location: **module (ambient adaptation config/logic, SdrAmbientLift; slot placeholder)**. The authoritative list is `live_files` in [MANIFEST.json](MANIFEST.json).
 
 - `src/VP-V/modules/colour/appearance/SdrAmbientLift.h` (M2 step 7: the SDR ambient black-lift `SdrAmbientLift` / `ApplySdrAmbientLift`, extracted unchanged from Bill-owned `LibplaceboRenderParameters.*`, which now forwards to it; pure double math, namespace `SdrAmbientLiftModule`)
+- `src/VP-V/modules/colour/appearance/AmbientConfig.h` (M2 item 11: ambient-adaptation configuration keys, moved from `src/VideoProcessor-Lib/`)
+- `src/VP-V/modules/colour/appearance/AmbientAdaptation.h` (M2 item 11: ambient adaptation logic, moved from `src/VideoProcessor-Lib/`; still includes `AmbientState.h` from the Lib folder)
+
+Forwarding headers stay at `src/VideoProcessor-Lib/AmbientConfig.h` and `AmbientAdaptation.h` for Bill's files that include the old paths (`VideoProcessorDlg.cpp`, `MainConfigSchema.h`, `LibplaceboVideoRenderer.cpp`, `ConfigFileTests.cpp`); listed in the MANIFEST.
 
 ## Migration directive
 
