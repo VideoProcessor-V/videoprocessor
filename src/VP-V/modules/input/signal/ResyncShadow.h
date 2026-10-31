@@ -173,7 +173,10 @@ private:
             text += "; storm: " + std::to_string(storm) + " FULL in 10 s (would hold safe settings)";
         if (const std::shared_ptr<VpIndicator::Indicator> indicator = std::atomic_load(&m_indicator)) {
             const uint32_t early = indicator->PrematureFolds();
-            if (early > 0)
+            // Folds before the first Seal also count as premature; shadow mode never seals (no
+            // render-thread call site until R2), so the clause is shown only once frames are sealed.
+            // The raw count is always in EventLines (premature_folds=).
+            if (early > 0 && indicator->HasSealed())
                 text += "; indicator ring too small (" + std::to_string(early) + " early folds)";
         }
         const uint32_t errors = m_errors.load(std::memory_order_relaxed);

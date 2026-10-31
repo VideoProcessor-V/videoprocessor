@@ -277,11 +277,12 @@ public:
     }
 
     // Render thread: the frame is sealed; later events can no longer reach it.
+    // seq == UINT64_MAX is not a valid sequence (seq + 1 would wrap); it is ignored.
     Stamp Seal(uint64_t seq)
     {
         {
             std::lock_guard<std::mutex> lock(writeMutex_);
-            if (sealedNext_.load(std::memory_order_relaxed) < seq + 1)
+            if (seq != ~uint64_t(0) && sealedNext_.load(std::memory_order_relaxed) < seq + 1)
                 sealedNext_.store(seq + 1, std::memory_order_release);
         }
         return StampOf(seq);
@@ -318,6 +319,10 @@ public:
 
     // Render thread, at the seal of seq. Returns the changed mask (0 when out of order, or when
     // seq is not sealed yet: counted in UnsealedObserves, no callbacks).
+    // A reader callback may call Advance (it is clamped above the seal) but must NOT call Observe
+    // or SealAndObserve: re-entrant Observe is not guarded.
+    // Note: PrematureFolds also counts folds made before the first Seal (nothing sealed yet means
+    // every folded event still applies to unsealed frames).
     CounterMask Observe(uint64_t seq)
     {
         if (!HasSealed() || seq > LastSealed()) {
