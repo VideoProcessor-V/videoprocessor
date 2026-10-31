@@ -147,7 +147,9 @@ color.a = 1.0;
 		// read back at the same output pixel; the cut part d = v - clip(v) is
 		// added through the LUT's edge slope at clip(v) (LutExtrapolate).
 		// er_lut_max = size - 1 per axis.
-		const char* const LATE_LUT_HEADER = R"GLSL(
+		// The LUT's trilinear sample and edge slope (er_lut, er_lut_max); shared with the VP-stage
+		// calibration LUT (CalibrationLutStage, LutSlopeGlsl()).
+		const char* const LUT_SLOPE_GLSL = R"GLSL(
 vec3 er_lut_at(vec3 i)
 {
     return texelFetch(er_lut, ivec3(i + 0.5), 0).rgb;
@@ -171,6 +173,8 @@ vec3 er_lut_slope(vec3 c, vec3 axis, float d)
                      : er_lut_sample(c + e) - er_lut_sample(c);
     return s * n;
 }
+)GLSL";
+		const char* const SCALED_AT_GLSL = R"GLSL(
 vec3 er_scaled_at(vec2 q)
 {
     vec2 u = (q - er_out_rect.xy) / er_out_rect.zw;
@@ -434,6 +438,11 @@ color.a = 1.0;
 			for (int k = 0; k < 3; ++k)
 				out[k] += d * slope[k];
 		}
+	}
+
+	const char* LutSlopeGlsl()
+	{
+		return LUT_SLOPE_GLSL;
 	}
 
 	Decision Decide(bool enabled, const pl_color_space& source, const pl_color_space& output,
@@ -983,7 +992,7 @@ color.a = 1.0;
 		variables[numVariables++] = { pl_var_vec4("er_out_rect"), outRect, true };
 		if (lutMode)
 		{
-			header = LATE_LUT_HEADER;
+			header = std::string(LUT_SLOPE_GLSL) + SCALED_AT_GLSL;
 			variables[numVariables++] = { pl_var_vec4("er_scaled_rect"), scaled, true };
 			variables[numVariables++] = { pl_var_vec3("er_lut_max"), lutMax, true };
 			pl_shader_desc& s = descriptors[numDescriptors++];

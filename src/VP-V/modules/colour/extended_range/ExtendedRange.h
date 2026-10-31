@@ -189,6 +189,10 @@ namespace ExtendedRange
 	void LutEdgeSlope(const LutView& lut, const float c[3], int axis, bool upper, float out[3]);
 	// L(clamp(v)) + sum over clamped axes of (v_k - c_k) * slope_k.
 	void LutExtrapolate(const LutView& lut, const float v[3], float out[3]);
+	// The GLSL of that edge slope: er_lut_sample(p) and er_lut_slope(c, axis, d) over a sampled
+	// 3D texture `er_lut` (nearest, rgba32f) and a vec3 `er_lut_max` (= size - 1 per axis).
+	// The late LUT restore and the VP-stage calibration LUT use the same text.
+	const char* LutSlopeGlsl();
 
 	struct Decision
 	{
