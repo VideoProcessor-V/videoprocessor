@@ -1,0 +1,127 @@
+content_type,clip,case,metric,candidate,default,delta,trend,flag,note
+film24,toslb,x265_2160p_12k,psnr_Y,50.2847,50.2948,-0.0100721,same,PASS,
+film24,toslb,x265_2160p_12k,psnr_Cb,53.5857,53.5857,0,same,PASS,
+film24,toslb,x265_2160p_12k,psnr_Cr,53.2672,53.2672,0,same,PASS,
+film24,toslb,x265_2160p_12k,ssim_Y,0.993873,0.993876,-3.37458e-06,same,PASS,
+film24,toslb,x265_2160p_12k,ssim_Cb,0.996597,0.996597,0,same,PASS,
+film24,toslb,x265_2160p_12k,ssim_Cr,0.996378,0.996378,0,same,PASS,
+film24,toslb,x265_2160p_12k,lpips,NA,NA,NA,NA,NA,"lpips NA (not requested, or torch/lpips unavailable)"
+film24,toslb,x265_2160p_12k,grain_tiles_Y,16,16,0,NA,INFO,
+film24,toslb,x265_2160p_12k,grain_rms_ratio_Y,0.793016,0.79277,0.000245208,better,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+film24,toslb,x265_2160p_12k,grain_hf_ratio_Y,1.02371,1.02369,1.58582e-05,worse,PASS,
+film24,toslb,x265_2160p_12k,grain_lag1_delta_Y,-0.0105619,-0.0105667,4.75956e-06,worse,PASS,
+film24,toslb,x265_2160p_12k,grain_tiles_Cb,16,16,0,NA,INFO,
+film24,toslb,x265_2160p_12k,grain_rms_ratio_Cb,NA,NA,NA,NA,NA,no flat tiles in the reference
+film24,toslb,x265_2160p_12k,grain_hf_ratio_Cb,NA,NA,NA,NA,NA,no flat tiles / no reference grain
+film24,toslb,x265_2160p_12k,grain_lag1_delta_Cb,0,0,0,same,PASS,
+film24,toslb,x265_2160p_12k,grain_keep_vs_input_Y,1.00031,1,0.000309305,worse,PASS,
+film24,toslb,x265_2160p_12k,grain_lag1_vs_input_Y,4.75956e-06,0,4.75956e-06,worse,PASS,
+film24,toslb,x265_2160p_12k,grain_keep_vs_input_Cb,NA,NA,NA,NA,NA,no flat tiles in the reference
+film24,toslb,x265_2160p_12k,grain_lag1_vs_input_Cb,0,0,0,same,PASS,
+film24,toslb,x265_2160p_12k,btb_kept_vs_input_Y,1,1,0,same,PASS,
+film24,toslb,x265_2160p_12k,wtw_kept_vs_input_Y,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+film24,toslb,x265_2160p_12k,btb_kept_vs_input_C,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+film24,toslb,x265_2160p_12k,wtw_kept_vs_input_C,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+film24,toslb,x265_2160p_12k,flicker_excess_Y,-0.000492361,-0.000496782,4.42112e-06,same,PASS,
+film24,toslb,x265_2160p_12k,gop_ratio_gop,NA,NA,NA,NA,NA,GOP 48 longer than half the window (72 frames)
+film24,toslb,x265_2160p_12k,gop_ratio_minigop,NA,NA,NA,NA,NA,GOP 48 longer than half the window (72 frames)
+film24,toslb,x265_2160p_12k,ghost_coeff_Y,0.00284335,0.00298686,-0.000143518,same,PASS,
+film24,toslb,x265_2160p_12k,smear_Y,0.939612,0.927541,0.0120709,better,PASS,
+film24,toslb,x265_2160p_12k,duplicate_rate_Y,0,0,0,same,PASS,
+film24,toslb,x265_2160p_12k,halo_overshoot_Y,8.87703e-05,7.21136e-05,1.66567e-05,same,PASS,
+film24,toslb,x265_2160p_12k,lc_ratio_s1_Y,0.868861,0.867221,0.00163979,worse,PASS,
+film24,toslb,x265_2160p_12k,lc_ratio_s2_Y,0.932847,0.931428,0.00141951,worse,PASS,
+film24,toslb,x265_2160p_12k,lc_ratio_s3_Y,0.969166,0.9681,0.00106668,worse,PASS,
+film24,toslb,x265_2160p_12k,lc_boost_fraction_Y,0,0,0,same,PASS,
+film24,toslb,x265_2160p_12k,btb_kept_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,toslb,x265_2160p_12k,wtw_kept_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,toslb,x265_2160p_12k,clip_detect_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,toslb,x265_2160p_12k,btb_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,toslb,x265_2160p_12k,wtw_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,toslb,x265_2160p_12k,clip_detect_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,toslb,x265_2160p_12k,lpips_all,0.0283188,0.0283512,-3.2454e-05,same,PASS,
+film24,toslb,x265_2160p_12k,psnr_I_Y,49.8162,49.8237,-0.00746089,same,PASS,
+film24,toslb,x265_2160p_12k,psnr_P_Y,51.2503,51.2609,-0.0106031,same,PASS,
+film24,toslb,x265_2160p_12k,psnr_B_Y,50.0127,50.0228,-0.010039,same,PASS,
+film24,toslb,x265_2160p_12k,ssim_B_Y,0.993592,0.993596,-3.74865e-06,same,PASS,
+film24,toslb,x265_2160p_12k,lpips_B,0.029778,0.0298103,-3.23749e-05,same,PASS,
+film24,toslb,x265_2160p_12k,ib_gap_db_Y,1.0709,1.07104,-0.000143261,NA,INFO,
+film24,toslb,x265_2160p_12k,detail_pulse_Y,0.0732897,0.0723116,0.000978014,NA,INFO,
+film24,toslb,x265_2160p_12k,lb_bar_change_max_Y,9.268,0,9.268,NA,INFO,
+film24,toslb,x265_2160p_12k,lb_band_change_rms_Y,0.595902,0,0.595902,NA,INFO,
+film24,toslb,x265_2160p_12k,lb_band_overshoot_mean_Y,0.0212651,0,0.0212651,NA,INFO,
+film24,toslb,x265_2160p_12k,lb_band_undershoot_max_Y,9.13434,0,9.13434,NA,INFO,
+film24,toslb,x265_2160p_12k,grain_keep_vs_input_band1_Y,1.00028,1,0.000276615,worse,PASS,
+film24,toslb,x265_2160p_12k,grain_keep_vs_input_band2_Y,1.00033,1,0.000326412,worse,PASS,
+film24,toslb,x265_2160p_12k,grain_keep_vs_input_band3_Y,1.0003,1,0.000297931,worse,PASS,
+film24,toslb,x265_2160p_12k,grain_keep_vs_input_band4_Y,1.00034,1,0.000338939,worse,PASS,
+film24,toslb,x265_2160p_12k,grain_probe_keep_edge_vs_input_Y,1.01477,1,0.0147681,worse,PASS,
+film24,toslb,x265_2160p_12k,grain_probe_lag1_edge_vs_input_Y,NA,NA,NA,NA,NA,needs >= 3 frames (72 available)
+film24,toslb,x265_2160p_12k,grain_probe_keep_flat_vs_input_Y,1.00023,1,0.000225361,worse,PASS,
+film24,toslb,x265_2160p_12k,grain_probe_lag1_flat_vs_input_Y,-5.61141e-07,0,-5.61141e-07,better,PASS,
+film24,toslb,x265_2160p_12k,cost_ms_per_frame_pyref,1140.31,0.000499997,1140.31,worse,INFO,"py-ref: CPU numpy wall-clock, not GPU-representative"
+film24,toslb,x265_2160p_12k,cost_gpu_ms_laptop,NA,NA,NA,NA,NA,capture sidecar gpu_ms (laptop GPU)
+film24,toslb,x265_2160p_12k,cost_est_3090_ms,NA,NA,NA,NA,NA,ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json)
+film24,toslb,x265_1080p_4k,psnr_Y,47.8591,47.8778,-0.0187837,same,PASS,
+film24,toslb,x265_1080p_4k,psnr_Cb,51.728,51.728,0,same,PASS,
+film24,toslb,x265_1080p_4k,psnr_Cr,51.5476,51.5476,0,same,PASS,
+film24,toslb,x265_1080p_4k,ssim_Y,0.991645,0.991653,-7.6256e-06,same,PASS,
+film24,toslb,x265_1080p_4k,ssim_Cb,0.994663,0.994663,0,same,PASS,
+film24,toslb,x265_1080p_4k,ssim_Cr,0.994529,0.994529,0,same,PASS,
+film24,toslb,x265_1080p_4k,lpips,NA,NA,NA,NA,NA,"lpips NA (not requested, or torch/lpips unavailable)"
+film24,toslb,x265_1080p_4k,grain_tiles_Y,16,16,0,NA,INFO,
+film24,toslb,x265_1080p_4k,grain_rms_ratio_Y,0.867347,0.86515,0.00219709,better,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+film24,toslb,x265_1080p_4k,grain_hf_ratio_Y,1.02009,1.0197,0.00039455,worse,PASS,
+film24,toslb,x265_1080p_4k,grain_lag1_delta_Y,-0.00836498,-0.00837511,1.01309e-05,worse,PASS,
+film24,toslb,x265_1080p_4k,grain_tiles_Cb,16,16,0,NA,INFO,
+film24,toslb,x265_1080p_4k,grain_rms_ratio_Cb,1,1,0,same,PASS,
+film24,toslb,x265_1080p_4k,grain_hf_ratio_Cb,NA,NA,NA,NA,NA,no flat tiles / no reference grain
+film24,toslb,x265_1080p_4k,grain_lag1_delta_Cb,0,0,0,same,PASS,
+film24,toslb,x265_1080p_4k,grain_keep_vs_input_Y,1.00254,1,0.00253955,worse,PASS,
+film24,toslb,x265_1080p_4k,grain_lag1_vs_input_Y,1.01309e-05,0,1.01309e-05,worse,PASS,
+film24,toslb,x265_1080p_4k,grain_keep_vs_input_Cb,1,1,0,same,PASS,
+film24,toslb,x265_1080p_4k,grain_lag1_vs_input_Cb,0,0,0,same,PASS,
+film24,toslb,x265_1080p_4k,btb_kept_vs_input_Y,1,1,0,same,PASS,
+film24,toslb,x265_1080p_4k,wtw_kept_vs_input_Y,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+film24,toslb,x265_1080p_4k,btb_kept_vs_input_C,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+film24,toslb,x265_1080p_4k,wtw_kept_vs_input_C,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+film24,toslb,x265_1080p_4k,flicker_excess_Y,-0.00103605,-0.00120031,0.000164269,same,PASS,
+film24,toslb,x265_1080p_4k,gop_ratio_gop,NA,NA,NA,NA,NA,GOP 48 longer than half the window (72 frames)
+film24,toslb,x265_1080p_4k,gop_ratio_minigop,NA,NA,NA,NA,NA,GOP 48 longer than half the window (72 frames)
+film24,toslb,x265_1080p_4k,ghost_coeff_Y,0.00306897,0.00408149,-0.00101252,same,PASS,
+film24,toslb,x265_1080p_4k,smear_Y,0.962858,0.947446,0.0154124,better,PASS,
+film24,toslb,x265_1080p_4k,duplicate_rate_Y,0,0,0,same,PASS,
+film24,toslb,x265_1080p_4k,halo_overshoot_Y,4.42457e-05,3.58222e-05,8.42357e-06,same,PASS,
+film24,toslb,x265_1080p_4k,lc_ratio_s1_Y,0.933851,0.929701,0.00415039,worse,PASS,
+film24,toslb,x265_1080p_4k,lc_ratio_s2_Y,0.964478,0.960774,0.00370406,worse,PASS,
+film24,toslb,x265_1080p_4k,lc_ratio_s3_Y,0.981998,0.979124,0.00287397,worse,PASS,
+film24,toslb,x265_1080p_4k,lc_boost_fraction_Y,0,0,0,same,PASS,
+film24,toslb,x265_1080p_4k,btb_kept_Y,0.564133,0.472371,0.0917622,better,LIMIT,"default also fails: input/codec-limited, candidate not worse"
+film24,toslb,x265_1080p_4k,wtw_kept_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,toslb,x265_1080p_4k,clip_detect_Y,0,0,0,same,PASS,
+film24,toslb,x265_1080p_4k,btb_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,toslb,x265_1080p_4k,wtw_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,toslb,x265_1080p_4k,clip_detect_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,toslb,x265_1080p_4k,lpips_all,0.0247409,0.02483,-8.91156e-05,same,PASS,
+film24,toslb,x265_1080p_4k,psnr_I_Y,47.4907,47.4996,-0.00887849,same,PASS,
+film24,toslb,x265_1080p_4k,psnr_P_Y,48.4702,48.488,-0.0178758,same,PASS,
+film24,toslb,x265_1080p_4k,psnr_B_Y,47.6802,47.6997,-0.0194442,same,PASS,
+film24,toslb,x265_1080p_4k,ssim_B_Y,0.991444,0.991452,-7.9464e-06,same,PASS,
+film24,toslb,x265_1080p_4k,lpips_B,0.0256042,0.0256965,-9.22681e-05,same,PASS,
+film24,toslb,x265_1080p_4k,ib_gap_db_Y,0.681407,0.678738,0.00266894,NA,INFO,
+film24,toslb,x265_1080p_4k,detail_pulse_Y,0.043575,0.0375097,0.00606528,NA,INFO,
+film24,toslb,x265_1080p_4k,lb_bar_change_max_Y,10.5725,0,10.5725,NA,INFO,
+film24,toslb,x265_1080p_4k,lb_band_change_rms_Y,0.783373,0,0.783373,NA,INFO,
+film24,toslb,x265_1080p_4k,lb_band_overshoot_mean_Y,0.0233216,0,0.0233216,NA,INFO,
+film24,toslb,x265_1080p_4k,lb_band_undershoot_max_Y,8.38701,0,8.38701,NA,INFO,
+film24,toslb,x265_1080p_4k,grain_keep_vs_input_band1_Y,1.00227,1,0.0022743,worse,PASS,
+film24,toslb,x265_1080p_4k,grain_keep_vs_input_band2_Y,1.00234,1,0.00234315,worse,PASS,
+film24,toslb,x265_1080p_4k,grain_keep_vs_input_band3_Y,1.00259,1,0.00259479,worse,PASS,
+film24,toslb,x265_1080p_4k,grain_keep_vs_input_band4_Y,1.00286,1,0.00286477,worse,PASS,
+film24,toslb,x265_1080p_4k,grain_probe_keep_edge_vs_input_Y,1.01474,1,0.0147378,worse,PASS,
+film24,toslb,x265_1080p_4k,grain_probe_lag1_edge_vs_input_Y,NA,NA,NA,NA,NA,needs >= 3 frames (72 available)
+film24,toslb,x265_1080p_4k,grain_probe_keep_flat_vs_input_Y,1.00142,1,0.00141987,worse,PASS,
+film24,toslb,x265_1080p_4k,grain_probe_lag1_flat_vs_input_Y,-2.51251e-06,0,-2.51251e-06,better,PASS,
+film24,toslb,x265_1080p_4k,cost_ms_per_frame_pyref,1078.58,0.000300002,1078.58,worse,INFO,"py-ref: CPU numpy wall-clock, not GPU-representative"
+film24,toslb,x265_1080p_4k,cost_gpu_ms_laptop,NA,NA,NA,NA,NA,capture sidecar gpu_ms (laptop GPU)
+film24,toslb,x265_1080p_4k,cost_est_3090_ms,NA,NA,NA,NA,NA,ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json)

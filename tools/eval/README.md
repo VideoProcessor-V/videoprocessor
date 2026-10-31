@@ -204,6 +204,24 @@ D:\hfr\venv\Scripts\python.exe -I tools/eval/run_prototypes.py --family chroma -
     --out D:\codex\videoprocessor\eval-scratch\proto-chroma --lpips
 ```
 
+## TemporalDetail on real encodes (`--family temporal_detail`)
+
+`candidates_temporal_detail.py` drives the C++ CPU reference model (`src/VP-V/modules/repair/temporal_detail/
+TemporalDetailModel.h`) through `tools/td-cli/bin/td_cli.exe --stdio` (build: `tools/td-cli/build_td_cli.bat` from an
+x64 developer prompt, one small cl invocation). Vectors: OpenCV DIS flow reduced to the model's 16 px block grid
+(`tools/td-cli/td_flow.py`; trust = 1 - in-block flow spread / block, forward pair for the |Vf + Vb| term), a
+documented STAND-IN for VP's GPU vector engine. `td_cli` also has a file mode (`.yuv`/`.y4m` + `.tdv` vectors ->
+capture directory). Material: `make_td_encodes.py` regenerates 3 s x265 IBBBP streaming-like encodes (2160p and
+1080p rungs of 4 lossless masters; G18's 4-frame cases are too short) and the no-master no-harm suite (reference =
+input) from `D:\testclips\eval-2026-10-31`; both write central 960x544 crops to scratch. Extra rows: per-frame-type
+PSNR (`psnr_I/P/B_Y`), `ssim_B_Y`, `lpips_B`, `ib_gap_db_Y`, `detail_pulse_Y`, `grain_keep_vs_input_band1..4_Y`.
+`td_real_summary.py` merges runs; results in `prototypes/temporal_detail_real/`.
+
+```
+D:\hfrenv\Scripts\python.exe -I tools/eval/run_prototypes.py --family temporal_detail --suite tools/eval/suites/td_real.json ^
+    --baseline td_off --candidates td_b008 --out D:\codexideoprocessor\eval-scratch	est-td-realun-td_b008 --lpips
+```
+
 ## Candidate list (planned) and the metrics that gate each
 
 | candidate | what it must beat | gating metrics | guards (must not regress) |

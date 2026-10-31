@@ -1,0 +1,161 @@
+{
+ "name": "td_noharm",
+ "description": "TemporalDetail no-harm checks on eval-2026-10-31 clips (no masters: reference = input)",
+ "cases": [
+  {
+   "id": "nh_35mm",
+   "content_type": "film24",
+   "clip": "nh_35mm",
+   "case": "noharm_input_ref",
+   "protocol": "same",
+   "frames": 72,
+   "gop": null,
+   "minigop": null,
+   "frame_types": null,
+   "grain_probe": true,
+   "note": "NO MASTER: reference = input (no-harm checks only); 35mm trailer scan (heavy grain), VP9 4K; crop 960x544 at (1440,808), 3.0 s from 30.0 s",
+   "master": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 24.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/noharm\\nh_35mm_input.yuv"
+   },
+   "coded": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 24.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/noharm\\nh_35mm_input.yuv"
+   }
+  },
+  {
+   "id": "nh_16mm",
+   "content_type": "film24",
+   "clip": "nh_16mm",
+   "case": "noharm_input_ref",
+   "protocol": "same",
+   "frames": 72,
+   "gop": null,
+   "minigop": null,
+   "frame_types": null,
+   "grain_probe": true,
+   "note": "NO MASTER: reference = input (no-harm checks only); 16mm nature documentary scan (very heavy grain), VP9; crop 960x544 at (964,776), 3.0 s from 60.0 s",
+   "master": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 24.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/noharm\\nh_16mm_input.yuv"
+   },
+   "coded": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 24.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/noharm\\nh_16mm_input.yuv"
+   }
+  },
+  {
+   "id": "nh_dark",
+   "content_type": "dark",
+   "clip": "nh_dark",
+   "case": "noharm_input_ref",
+   "protocol": "same",
+   "frames": 72,
+   "gop": null,
+   "minigop": null,
+   "frame_types": null,
+   "grain_probe": true,
+   "note": "NO MASTER: reference = input (no-harm checks only); dark low-key 24p, H.264 1080p; crop 960x544 at (480,268), 3.0 s from 5.0 s",
+   "master": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 23.976,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/noharm\\nh_dark_input.yuv"
+   },
+   "coded": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 23.976,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/noharm\\nh_dark_input.yuv"
+   }
+  },
+  {
+   "id": "nh_river",
+   "content_type": "nature30",
+   "clip": "nh_river",
+   "case": "noharm_input_ref",
+   "protocol": "same",
+   "frames": 90,
+   "gop": null,
+   "minigop": null,
+   "frame_types": null,
+   "grain_probe": true,
+   "note": "NO MASTER: reference = input (no-harm checks only); nature 30p (water, foliage), H.264 1080p; crop 960x544 at (480,268), 3.0 s from 5.0 s",
+   "master": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 29.97,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/noharm\\nh_river_input.yuv"
+   },
+   "coded": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 29.97,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/noharm\\nh_river_input.yuv"
+   }
+  },
+  {
+   "id": "nh_goal",
+   "content_type": "sports50_60",
+   "clip": "nh_goal",
+   "case": "noharm_input_ref",
+   "protocol": "same",
+   "frames": 75,
+   "gop": null,
+   "minigop": null,
+   "frame_types": null,
+   "grain_probe": true,
+   "note": "NO MASTER: reference = input (no-harm checks only); football broadcast 25p (real ball sport), VP9 1080p; crop 960x544 at (480,268), 3.0 s from 5.0 s",
+   "master": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 25.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/noharm\\nh_goal_input.yuv"
+   },
+   "coded": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 25.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/noharm\\nh_goal_input.yuv"
+   }
+  }
+ ]
+}

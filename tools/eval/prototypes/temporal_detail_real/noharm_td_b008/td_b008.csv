@@ -1,0 +1,291 @@
+content_type,clip,case,metric,candidate,default,delta,trend,flag,note
+film24,nh_35mm,noharm_input_ref,psnr_Y,78.121,inf,inf,worse,FLAG,
+film24,nh_35mm,noharm_input_ref,psnr_Cb,inf,inf,0,same,PASS,
+film24,nh_35mm,noharm_input_ref,psnr_Cr,inf,inf,0,same,PASS,
+film24,nh_35mm,noharm_input_ref,ssim_Y,0.999998,1,-1.98705e-06,same,PASS,
+film24,nh_35mm,noharm_input_ref,ssim_Cb,1,1,0,same,PASS,
+film24,nh_35mm,noharm_input_ref,ssim_Cr,1,1,0,same,PASS,
+film24,nh_35mm,noharm_input_ref,lpips,NA,NA,NA,NA,NA,"lpips NA (not requested, or torch/lpips unavailable)"
+film24,nh_35mm,noharm_input_ref,grain_tiles_Y,16,16,0,NA,INFO,
+film24,nh_35mm,noharm_input_ref,grain_rms_ratio_Y,1.00085,1,0.000852911,worse,PASS,
+film24,nh_35mm,noharm_input_ref,grain_hf_ratio_Y,1.00004,1,3.76078e-05,worse,PASS,
+film24,nh_35mm,noharm_input_ref,grain_lag1_delta_Y,-4.23922e-05,0,-4.23922e-05,better,PASS,
+film24,nh_35mm,noharm_input_ref,grain_tiles_Cb,16,16,0,NA,INFO,
+film24,nh_35mm,noharm_input_ref,grain_rms_ratio_Cb,1,1,0,same,PASS,
+film24,nh_35mm,noharm_input_ref,grain_hf_ratio_Cb,1,1,0,same,PASS,
+film24,nh_35mm,noharm_input_ref,grain_lag1_delta_Cb,0,0,0,same,PASS,
+film24,nh_35mm,noharm_input_ref,grain_keep_vs_input_Y,1.00085,1,0.000852911,worse,PASS,
+film24,nh_35mm,noharm_input_ref,grain_lag1_vs_input_Y,-4.23922e-05,0,-4.23922e-05,better,PASS,
+film24,nh_35mm,noharm_input_ref,grain_keep_vs_input_Cb,1,1,0,same,PASS,
+film24,nh_35mm,noharm_input_ref,grain_lag1_vs_input_Cb,0,0,0,same,PASS,
+film24,nh_35mm,noharm_input_ref,btb_kept_vs_input_Y,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+film24,nh_35mm,noharm_input_ref,wtw_kept_vs_input_Y,1,1,0,same,PASS,
+film24,nh_35mm,noharm_input_ref,btb_kept_vs_input_C,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+film24,nh_35mm,noharm_input_ref,wtw_kept_vs_input_C,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+film24,nh_35mm,noharm_input_ref,flicker_excess_Y,3.24221e-06,0,3.24221e-06,same,PASS,
+film24,nh_35mm,noharm_input_ref,gop_ratio_gop,NA,NA,NA,NA,NA,no GOP metadata
+film24,nh_35mm,noharm_input_ref,gop_ratio_minigop,NA,NA,NA,NA,NA,no GOP metadata
+film24,nh_35mm,noharm_input_ref,ghost_coeff_Y,-0.000126927,0,-0.000126927,same,PASS,
+film24,nh_35mm,noharm_input_ref,smear_Y,1.00414,1,0.00413763,worse,PASS,
+film24,nh_35mm,noharm_input_ref,duplicate_rate_Y,0,0,0,same,PASS,
+film24,nh_35mm,noharm_input_ref,halo_overshoot_Y,3.72971e-06,0,3.72971e-06,same,PASS,
+film24,nh_35mm,noharm_input_ref,lc_ratio_s1_Y,1.00131,1,0.00131453,worse,PASS,
+film24,nh_35mm,noharm_input_ref,lc_ratio_s2_Y,1.00111,1,0.00111025,worse,PASS,
+film24,nh_35mm,noharm_input_ref,lc_ratio_s3_Y,1.00087,1,0.000866447,worse,PASS,
+film24,nh_35mm,noharm_input_ref,lc_boost_fraction_Y,0,0,0,same,PASS,
+film24,nh_35mm,noharm_input_ref,btb_kept_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,nh_35mm,noharm_input_ref,wtw_kept_Y,1,1,0,same,PASS,
+film24,nh_35mm,noharm_input_ref,clip_detect_Y,0,0,0,same,PASS,
+film24,nh_35mm,noharm_input_ref,btb_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,nh_35mm,noharm_input_ref,wtw_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,nh_35mm,noharm_input_ref,clip_detect_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,nh_35mm,noharm_input_ref,psnr_I_Y,NA,NA,NA,NA,NA,no frame_types in the case
+film24,nh_35mm,noharm_input_ref,psnr_P_Y,NA,NA,NA,NA,NA,no frame_types in the case
+film24,nh_35mm,noharm_input_ref,psnr_B_Y,NA,NA,NA,NA,NA,no frame_types in the case
+film24,nh_35mm,noharm_input_ref,ssim_B_Y,NA,NA,NA,NA,NA,no frame_types in the case
+film24,nh_35mm,noharm_input_ref,lpips_B,NA,NA,NA,NA,NA,no frame_types in the case
+film24,nh_35mm,noharm_input_ref,ib_gap_db_Y,NA,NA,NA,NA,NA,no frame_types in the case
+film24,nh_35mm,noharm_input_ref,detail_pulse_Y,0.00472733,0,0.00472733,NA,INFO,
+film24,nh_35mm,noharm_input_ref,grain_keep_vs_input_band1_Y,1.00082,1,0.000818597,worse,PASS,
+film24,nh_35mm,noharm_input_ref,grain_keep_vs_input_band2_Y,1.00087,1,0.0008686,worse,PASS,
+film24,nh_35mm,noharm_input_ref,grain_keep_vs_input_band3_Y,1.00084,1,0.000844826,worse,PASS,
+film24,nh_35mm,noharm_input_ref,grain_keep_vs_input_band4_Y,1.00091,1,0.000907446,worse,PASS,
+film24,nh_35mm,noharm_input_ref,grain_probe_keep_edge_vs_input_Y,1.00347,1,0.00346658,worse,PASS,
+film24,nh_35mm,noharm_input_ref,grain_probe_lag1_edge_vs_input_Y,NA,NA,NA,NA,NA,needs >= 3 frames (72 available)
+film24,nh_35mm,noharm_input_ref,grain_probe_keep_flat_vs_input_Y,1.00131,1,0.00130504,worse,PASS,
+film24,nh_35mm,noharm_input_ref,grain_probe_lag1_flat_vs_input_Y,2.10831e-06,0,2.10831e-06,worse,PASS,
+film24,nh_35mm,noharm_input_ref,cost_ms_per_frame_pyref,895.487,0.000400003,895.487,worse,INFO,"py-ref: CPU numpy wall-clock, not GPU-representative"
+film24,nh_35mm,noharm_input_ref,cost_gpu_ms_laptop,NA,NA,NA,NA,NA,capture sidecar gpu_ms (laptop GPU)
+film24,nh_35mm,noharm_input_ref,cost_est_3090_ms,NA,NA,NA,NA,NA,ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json)
+film24,nh_16mm,noharm_input_ref,psnr_Y,63.1218,inf,inf,worse,FLAG,
+film24,nh_16mm,noharm_input_ref,psnr_Cb,inf,inf,0,same,PASS,
+film24,nh_16mm,noharm_input_ref,psnr_Cr,inf,inf,0,same,PASS,
+film24,nh_16mm,noharm_input_ref,ssim_Y,0.999926,1,-7.36134e-05,same,PASS,
+film24,nh_16mm,noharm_input_ref,ssim_Cb,1,1,0,same,PASS,
+film24,nh_16mm,noharm_input_ref,ssim_Cr,1,1,0,same,PASS,
+film24,nh_16mm,noharm_input_ref,lpips,NA,NA,NA,NA,NA,"lpips NA (not requested, or torch/lpips unavailable)"
+film24,nh_16mm,noharm_input_ref,grain_tiles_Y,16,16,0,NA,INFO,
+film24,nh_16mm,noharm_input_ref,grain_rms_ratio_Y,1.019,1,0.0189955,worse,PASS,
+film24,nh_16mm,noharm_input_ref,grain_hf_ratio_Y,1.00162,1,0.00162189,worse,PASS,
+film24,nh_16mm,noharm_input_ref,grain_lag1_delta_Y,-0.000606562,0,-0.000606562,better,PASS,
+film24,nh_16mm,noharm_input_ref,grain_tiles_Cb,16,16,0,NA,INFO,
+film24,nh_16mm,noharm_input_ref,grain_rms_ratio_Cb,1,1,0,same,PASS,
+film24,nh_16mm,noharm_input_ref,grain_hf_ratio_Cb,1,1,0,same,PASS,
+film24,nh_16mm,noharm_input_ref,grain_lag1_delta_Cb,0,0,0,same,PASS,
+film24,nh_16mm,noharm_input_ref,grain_keep_vs_input_Y,1.019,1,0.0189955,worse,PASS,
+film24,nh_16mm,noharm_input_ref,grain_lag1_vs_input_Y,-0.000606562,0,-0.000606562,better,PASS,
+film24,nh_16mm,noharm_input_ref,grain_keep_vs_input_Cb,1,1,0,same,PASS,
+film24,nh_16mm,noharm_input_ref,grain_lag1_vs_input_Cb,0,0,0,same,PASS,
+film24,nh_16mm,noharm_input_ref,btb_kept_vs_input_Y,1,1,0,same,PASS,
+film24,nh_16mm,noharm_input_ref,wtw_kept_vs_input_Y,1,1,0,same,PASS,
+film24,nh_16mm,noharm_input_ref,btb_kept_vs_input_C,1,1,0,same,PASS,
+film24,nh_16mm,noharm_input_ref,wtw_kept_vs_input_C,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+film24,nh_16mm,noharm_input_ref,flicker_excess_Y,3.62257e-05,0,3.62257e-05,same,PASS,
+film24,nh_16mm,noharm_input_ref,gop_ratio_gop,NA,NA,NA,NA,NA,no GOP metadata
+film24,nh_16mm,noharm_input_ref,gop_ratio_minigop,NA,NA,NA,NA,NA,no GOP metadata
+film24,nh_16mm,noharm_input_ref,ghost_coeff_Y,-0.00129551,0,-0.00129551,same,PASS,
+film24,nh_16mm,noharm_input_ref,smear_Y,1.04209,1,0.0420932,worse,FLAG,
+film24,nh_16mm,noharm_input_ref,duplicate_rate_Y,0,0,0,same,PASS,
+film24,nh_16mm,noharm_input_ref,halo_overshoot_Y,4.68589e-05,0,4.68589e-05,same,PASS,
+film24,nh_16mm,noharm_input_ref,lc_ratio_s1_Y,1.01728,1,0.0172823,worse,PASS,
+film24,nh_16mm,noharm_input_ref,lc_ratio_s2_Y,1.0153,1,0.0152996,worse,PASS,
+film24,nh_16mm,noharm_input_ref,lc_ratio_s3_Y,1.01197,1,0.011969,worse,PASS,
+film24,nh_16mm,noharm_input_ref,lc_boost_fraction_Y,0,0,0,same,PASS,
+film24,nh_16mm,noharm_input_ref,btb_kept_Y,1,1,0,same,PASS,
+film24,nh_16mm,noharm_input_ref,wtw_kept_Y,1,1,0,same,PASS,
+film24,nh_16mm,noharm_input_ref,clip_detect_Y,0,0,0,same,PASS,
+film24,nh_16mm,noharm_input_ref,btb_kept_C,1,1,0,same,PASS,
+film24,nh_16mm,noharm_input_ref,wtw_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+film24,nh_16mm,noharm_input_ref,clip_detect_C,0,0,0,same,PASS,
+film24,nh_16mm,noharm_input_ref,psnr_I_Y,NA,NA,NA,NA,NA,no frame_types in the case
+film24,nh_16mm,noharm_input_ref,psnr_P_Y,NA,NA,NA,NA,NA,no frame_types in the case
+film24,nh_16mm,noharm_input_ref,psnr_B_Y,NA,NA,NA,NA,NA,no frame_types in the case
+film24,nh_16mm,noharm_input_ref,ssim_B_Y,NA,NA,NA,NA,NA,no frame_types in the case
+film24,nh_16mm,noharm_input_ref,lpips_B,NA,NA,NA,NA,NA,no frame_types in the case
+film24,nh_16mm,noharm_input_ref,ib_gap_db_Y,NA,NA,NA,NA,NA,no frame_types in the case
+film24,nh_16mm,noharm_input_ref,detail_pulse_Y,0.0151171,0,0.0151171,NA,INFO,
+film24,nh_16mm,noharm_input_ref,grain_keep_vs_input_band1_Y,1.01866,1,0.01866,worse,PASS,
+film24,nh_16mm,noharm_input_ref,grain_keep_vs_input_band2_Y,1.01813,1,0.0181271,worse,PASS,
+film24,nh_16mm,noharm_input_ref,grain_keep_vs_input_band3_Y,1.0194,1,0.0194038,worse,PASS,
+film24,nh_16mm,noharm_input_ref,grain_keep_vs_input_band4_Y,1.02035,1,0.0203544,worse,PASS,
+film24,nh_16mm,noharm_input_ref,grain_probe_keep_edge_vs_input_Y,1.02738,1,0.0273843,worse,PASS,
+film24,nh_16mm,noharm_input_ref,grain_probe_lag1_edge_vs_input_Y,NA,NA,NA,NA,NA,needs >= 3 frames (72 available)
+film24,nh_16mm,noharm_input_ref,grain_probe_keep_flat_vs_input_Y,1.0079,1,0.00789697,worse,PASS,
+film24,nh_16mm,noharm_input_ref,grain_probe_lag1_flat_vs_input_Y,4.09348e-05,0,4.09348e-05,worse,PASS,
+film24,nh_16mm,noharm_input_ref,cost_ms_per_frame_pyref,1196.16,0.000399996,1196.16,worse,INFO,"py-ref: CPU numpy wall-clock, not GPU-representative"
+film24,nh_16mm,noharm_input_ref,cost_gpu_ms_laptop,NA,NA,NA,NA,NA,capture sidecar gpu_ms (laptop GPU)
+film24,nh_16mm,noharm_input_ref,cost_est_3090_ms,NA,NA,NA,NA,NA,ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json)
+dark,nh_dark,noharm_input_ref,psnr_Y,69.4562,inf,inf,worse,FLAG,
+dark,nh_dark,noharm_input_ref,psnr_Cb,inf,inf,0,same,PASS,
+dark,nh_dark,noharm_input_ref,psnr_Cr,inf,inf,0,same,PASS,
+dark,nh_dark,noharm_input_ref,ssim_Y,0.999981,1,-1.87027e-05,same,PASS,
+dark,nh_dark,noharm_input_ref,ssim_Cb,1,1,0,same,PASS,
+dark,nh_dark,noharm_input_ref,ssim_Cr,1,1,0,same,PASS,
+dark,nh_dark,noharm_input_ref,lpips,NA,NA,NA,NA,NA,"lpips NA (not requested, or torch/lpips unavailable)"
+dark,nh_dark,noharm_input_ref,grain_tiles_Y,16,16,0,NA,INFO,
+dark,nh_dark,noharm_input_ref,grain_rms_ratio_Y,1,1,0,same,PASS,
+dark,nh_dark,noharm_input_ref,grain_hf_ratio_Y,1,1,0,same,PASS,
+dark,nh_dark,noharm_input_ref,grain_lag1_delta_Y,0,0,0,same,PASS,
+dark,nh_dark,noharm_input_ref,grain_tiles_Cb,16,16,0,NA,INFO,
+dark,nh_dark,noharm_input_ref,grain_rms_ratio_Cb,1,1,0,same,PASS,
+dark,nh_dark,noharm_input_ref,grain_hf_ratio_Cb,1,1,0,same,PASS,
+dark,nh_dark,noharm_input_ref,grain_lag1_delta_Cb,0,0,0,same,PASS,
+dark,nh_dark,noharm_input_ref,grain_keep_vs_input_Y,1,1,0,same,PASS,
+dark,nh_dark,noharm_input_ref,grain_lag1_vs_input_Y,0,0,0,same,PASS,
+dark,nh_dark,noharm_input_ref,grain_keep_vs_input_Cb,1,1,0,same,PASS,
+dark,nh_dark,noharm_input_ref,grain_lag1_vs_input_Cb,0,0,0,same,PASS,
+dark,nh_dark,noharm_input_ref,btb_kept_vs_input_Y,1,1,0,same,PASS,
+dark,nh_dark,noharm_input_ref,wtw_kept_vs_input_Y,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+dark,nh_dark,noharm_input_ref,btb_kept_vs_input_C,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+dark,nh_dark,noharm_input_ref,wtw_kept_vs_input_C,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+dark,nh_dark,noharm_input_ref,flicker_excess_Y,0.000119245,0,0.000119245,same,PASS,
+dark,nh_dark,noharm_input_ref,gop_ratio_gop,NA,NA,NA,NA,NA,no GOP metadata
+dark,nh_dark,noharm_input_ref,gop_ratio_minigop,NA,NA,NA,NA,NA,no GOP metadata
+dark,nh_dark,noharm_input_ref,ghost_coeff_Y,-0.00311378,0,-0.00311378,same,PASS,
+dark,nh_dark,noharm_input_ref,smear_Y,1.02101,1,0.0210101,worse,PASS,
+dark,nh_dark,noharm_input_ref,duplicate_rate_Y,0,0,0,same,PASS,
+dark,nh_dark,noharm_input_ref,halo_overshoot_Y,3.8395e-05,0,3.8395e-05,same,PASS,
+dark,nh_dark,noharm_input_ref,lc_ratio_s1_Y,1.00748,1,0.00748135,worse,PASS,
+dark,nh_dark,noharm_input_ref,lc_ratio_s2_Y,1.00671,1,0.00670559,worse,PASS,
+dark,nh_dark,noharm_input_ref,lc_ratio_s3_Y,1.00527,1,0.00527429,worse,PASS,
+dark,nh_dark,noharm_input_ref,lc_boost_fraction_Y,0,0,0,same,PASS,
+dark,nh_dark,noharm_input_ref,btb_kept_Y,1,1,0,same,PASS,
+dark,nh_dark,noharm_input_ref,wtw_kept_Y,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+dark,nh_dark,noharm_input_ref,clip_detect_Y,0,0,0,same,PASS,
+dark,nh_dark,noharm_input_ref,btb_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+dark,nh_dark,noharm_input_ref,wtw_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+dark,nh_dark,noharm_input_ref,clip_detect_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+dark,nh_dark,noharm_input_ref,psnr_I_Y,NA,NA,NA,NA,NA,no frame_types in the case
+dark,nh_dark,noharm_input_ref,psnr_P_Y,NA,NA,NA,NA,NA,no frame_types in the case
+dark,nh_dark,noharm_input_ref,psnr_B_Y,NA,NA,NA,NA,NA,no frame_types in the case
+dark,nh_dark,noharm_input_ref,ssim_B_Y,NA,NA,NA,NA,NA,no frame_types in the case
+dark,nh_dark,noharm_input_ref,lpips_B,NA,NA,NA,NA,NA,no frame_types in the case
+dark,nh_dark,noharm_input_ref,ib_gap_db_Y,NA,NA,NA,NA,NA,no frame_types in the case
+dark,nh_dark,noharm_input_ref,detail_pulse_Y,0.00823541,0,0.00823541,NA,INFO,
+dark,nh_dark,noharm_input_ref,grain_keep_vs_input_band1_Y,1,1,0,same,PASS,
+dark,nh_dark,noharm_input_ref,grain_keep_vs_input_band2_Y,1,1,0,same,PASS,
+dark,nh_dark,noharm_input_ref,grain_keep_vs_input_band3_Y,1,1,0,same,PASS,
+dark,nh_dark,noharm_input_ref,grain_keep_vs_input_band4_Y,1,1,0,same,PASS,
+dark,nh_dark,noharm_input_ref,grain_probe_keep_edge_vs_input_Y,1.01272,1,0.0127154,worse,PASS,
+dark,nh_dark,noharm_input_ref,grain_probe_lag1_edge_vs_input_Y,NA,NA,NA,NA,NA,needs >= 3 frames (72 available)
+dark,nh_dark,noharm_input_ref,grain_probe_keep_flat_vs_input_Y,1.00189,1,0.0018922,worse,PASS,
+dark,nh_dark,noharm_input_ref,grain_probe_lag1_flat_vs_input_Y,1.10707e-05,0,1.10707e-05,worse,PASS,
+dark,nh_dark,noharm_input_ref,cost_ms_per_frame_pyref,1346.51,0.000400003,1346.5,worse,INFO,"py-ref: CPU numpy wall-clock, not GPU-representative"
+dark,nh_dark,noharm_input_ref,cost_gpu_ms_laptop,NA,NA,NA,NA,NA,capture sidecar gpu_ms (laptop GPU)
+dark,nh_dark,noharm_input_ref,cost_est_3090_ms,NA,NA,NA,NA,NA,ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json)
+nature30,nh_river,noharm_input_ref,psnr_Y,60.3902,inf,inf,worse,FLAG,
+nature30,nh_river,noharm_input_ref,psnr_Cb,inf,inf,0,same,PASS,
+nature30,nh_river,noharm_input_ref,psnr_Cr,inf,inf,0,same,PASS,
+nature30,nh_river,noharm_input_ref,ssim_Y,0.999909,1,-9.10992e-05,same,PASS,
+nature30,nh_river,noharm_input_ref,ssim_Cb,1,1,0,same,PASS,
+nature30,nh_river,noharm_input_ref,ssim_Cr,1,1,0,same,PASS,
+nature30,nh_river,noharm_input_ref,lpips,NA,NA,NA,NA,NA,"lpips NA (not requested, or torch/lpips unavailable)"
+nature30,nh_river,noharm_input_ref,grain_tiles_Y,16,16,0,NA,INFO,
+nature30,nh_river,noharm_input_ref,grain_rms_ratio_Y,1.02501,1,0.0250056,worse,PASS,
+nature30,nh_river,noharm_input_ref,grain_hf_ratio_Y,1.00231,1,0.00231354,worse,PASS,
+nature30,nh_river,noharm_input_ref,grain_lag1_delta_Y,-0.000482047,0,-0.000482047,better,PASS,
+nature30,nh_river,noharm_input_ref,grain_tiles_Cb,16,16,0,NA,INFO,
+nature30,nh_river,noharm_input_ref,grain_rms_ratio_Cb,1,1,0,same,PASS,
+nature30,nh_river,noharm_input_ref,grain_hf_ratio_Cb,1,1,0,same,PASS,
+nature30,nh_river,noharm_input_ref,grain_lag1_delta_Cb,0,0,0,same,PASS,
+nature30,nh_river,noharm_input_ref,grain_keep_vs_input_Y,1.02501,1,0.0250056,worse,PASS,
+nature30,nh_river,noharm_input_ref,grain_lag1_vs_input_Y,-0.000482047,0,-0.000482047,better,PASS,
+nature30,nh_river,noharm_input_ref,grain_keep_vs_input_Cb,1,1,0,same,PASS,
+nature30,nh_river,noharm_input_ref,grain_lag1_vs_input_Cb,0,0,0,same,PASS,
+nature30,nh_river,noharm_input_ref,btb_kept_vs_input_Y,1,1,0,same,PASS,
+nature30,nh_river,noharm_input_ref,wtw_kept_vs_input_Y,1,1,0,same,PASS,
+nature30,nh_river,noharm_input_ref,btb_kept_vs_input_C,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+nature30,nh_river,noharm_input_ref,wtw_kept_vs_input_C,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+nature30,nh_river,noharm_input_ref,flicker_excess_Y,0.00162958,0,0.00162958,same,PASS,
+nature30,nh_river,noharm_input_ref,gop_ratio_gop,NA,NA,NA,NA,NA,no GOP metadata
+nature30,nh_river,noharm_input_ref,gop_ratio_minigop,NA,NA,NA,NA,NA,no GOP metadata
+nature30,nh_river,noharm_input_ref,ghost_coeff_Y,-0.0105681,0,-0.0105681,better,PASS,
+nature30,nh_river,noharm_input_ref,smear_Y,1.04235,1,0.0423466,worse,FLAG,
+nature30,nh_river,noharm_input_ref,duplicate_rate_Y,0,0,0,same,PASS,
+nature30,nh_river,noharm_input_ref,halo_overshoot_Y,4.94868e-05,0,4.94868e-05,same,PASS,
+nature30,nh_river,noharm_input_ref,lc_ratio_s1_Y,1.01453,1,0.0145258,worse,PASS,
+nature30,nh_river,noharm_input_ref,lc_ratio_s2_Y,1.0126,1,0.0125978,worse,PASS,
+nature30,nh_river,noharm_input_ref,lc_ratio_s3_Y,1.01023,1,0.0102312,worse,PASS,
+nature30,nh_river,noharm_input_ref,lc_boost_fraction_Y,0,0,0,same,PASS,
+nature30,nh_river,noharm_input_ref,btb_kept_Y,1,1,0,same,PASS,
+nature30,nh_river,noharm_input_ref,wtw_kept_Y,1,1,0,same,PASS,
+nature30,nh_river,noharm_input_ref,clip_detect_Y,0,0,0,same,PASS,
+nature30,nh_river,noharm_input_ref,btb_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+nature30,nh_river,noharm_input_ref,wtw_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+nature30,nh_river,noharm_input_ref,clip_detect_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+nature30,nh_river,noharm_input_ref,psnr_I_Y,NA,NA,NA,NA,NA,no frame_types in the case
+nature30,nh_river,noharm_input_ref,psnr_P_Y,NA,NA,NA,NA,NA,no frame_types in the case
+nature30,nh_river,noharm_input_ref,psnr_B_Y,NA,NA,NA,NA,NA,no frame_types in the case
+nature30,nh_river,noharm_input_ref,ssim_B_Y,NA,NA,NA,NA,NA,no frame_types in the case
+nature30,nh_river,noharm_input_ref,lpips_B,NA,NA,NA,NA,NA,no frame_types in the case
+nature30,nh_river,noharm_input_ref,ib_gap_db_Y,NA,NA,NA,NA,NA,no frame_types in the case
+nature30,nh_river,noharm_input_ref,detail_pulse_Y,0.0183287,0,0.0183287,NA,INFO,
+nature30,nh_river,noharm_input_ref,grain_keep_vs_input_band1_Y,1.02381,1,0.0238117,worse,PASS,
+nature30,nh_river,noharm_input_ref,grain_keep_vs_input_band2_Y,1.02465,1,0.0246528,worse,PASS,
+nature30,nh_river,noharm_input_ref,grain_keep_vs_input_band3_Y,1.02597,1,0.0259738,worse,PASS,
+nature30,nh_river,noharm_input_ref,grain_keep_vs_input_band4_Y,1.02657,1,0.0265666,worse,PASS,
+nature30,nh_river,noharm_input_ref,grain_probe_keep_edge_vs_input_Y,1.02652,1,0.026524,worse,PASS,
+nature30,nh_river,noharm_input_ref,grain_probe_lag1_edge_vs_input_Y,NA,NA,NA,NA,NA,needs >= 3 frames (90 available)
+nature30,nh_river,noharm_input_ref,grain_probe_keep_flat_vs_input_Y,1.01123,1,0.0112327,worse,PASS,
+nature30,nh_river,noharm_input_ref,grain_probe_lag1_flat_vs_input_Y,0.000340883,0,0.000340883,worse,PASS,
+nature30,nh_river,noharm_input_ref,cost_ms_per_frame_pyref,779.809,0.000400003,779.809,worse,INFO,"py-ref: CPU numpy wall-clock, not GPU-representative"
+nature30,nh_river,noharm_input_ref,cost_gpu_ms_laptop,NA,NA,NA,NA,NA,capture sidecar gpu_ms (laptop GPU)
+nature30,nh_river,noharm_input_ref,cost_est_3090_ms,NA,NA,NA,NA,NA,ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json)
+sports50_60,nh_goal,noharm_input_ref,psnr_Y,66.7638,inf,inf,worse,FLAG,
+sports50_60,nh_goal,noharm_input_ref,psnr_Cb,inf,inf,0,same,PASS,
+sports50_60,nh_goal,noharm_input_ref,psnr_Cr,inf,inf,0,same,PASS,
+sports50_60,nh_goal,noharm_input_ref,ssim_Y,0.99999,1,-1.01709e-05,same,PASS,
+sports50_60,nh_goal,noharm_input_ref,ssim_Cb,1,1,0,same,PASS,
+sports50_60,nh_goal,noharm_input_ref,ssim_Cr,1,1,0,same,PASS,
+sports50_60,nh_goal,noharm_input_ref,lpips,NA,NA,NA,NA,NA,"lpips NA (not requested, or torch/lpips unavailable)"
+sports50_60,nh_goal,noharm_input_ref,grain_tiles_Y,16,16,0,NA,INFO,
+sports50_60,nh_goal,noharm_input_ref,grain_rms_ratio_Y,1.00005,1,5.26022e-05,worse,PASS,
+sports50_60,nh_goal,noharm_input_ref,grain_hf_ratio_Y,1.00005,1,4.9243e-05,worse,PASS,
+sports50_60,nh_goal,noharm_input_ref,grain_lag1_delta_Y,-8.67185e-06,0,-8.67185e-06,better,PASS,
+sports50_60,nh_goal,noharm_input_ref,grain_tiles_Cb,16,16,0,NA,INFO,
+sports50_60,nh_goal,noharm_input_ref,grain_rms_ratio_Cb,1,1,0,same,PASS,
+sports50_60,nh_goal,noharm_input_ref,grain_hf_ratio_Cb,1,1,0,same,PASS,
+sports50_60,nh_goal,noharm_input_ref,grain_lag1_delta_Cb,0,0,0,same,PASS,
+sports50_60,nh_goal,noharm_input_ref,grain_keep_vs_input_Y,1.00005,1,5.26022e-05,worse,PASS,
+sports50_60,nh_goal,noharm_input_ref,grain_lag1_vs_input_Y,-8.67185e-06,0,-8.67185e-06,better,PASS,
+sports50_60,nh_goal,noharm_input_ref,grain_keep_vs_input_Cb,1,1,0,same,PASS,
+sports50_60,nh_goal,noharm_input_ref,grain_lag1_vs_input_Cb,0,0,0,same,PASS,
+sports50_60,nh_goal,noharm_input_ref,btb_kept_vs_input_Y,1,1,0,same,PASS,
+sports50_60,nh_goal,noharm_input_ref,wtw_kept_vs_input_Y,1,1,0,same,PASS,
+sports50_60,nh_goal,noharm_input_ref,btb_kept_vs_input_C,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+sports50_60,nh_goal,noharm_input_ref,wtw_kept_vs_input_C,NA,NA,NA,NA,NA,candidate input has no excursions beyond nominal limits
+sports50_60,nh_goal,noharm_input_ref,flicker_excess_Y,0.000852773,0,0.000852773,same,PASS,
+sports50_60,nh_goal,noharm_input_ref,gop_ratio_gop,NA,NA,NA,NA,NA,no GOP metadata
+sports50_60,nh_goal,noharm_input_ref,gop_ratio_minigop,NA,NA,NA,NA,NA,no GOP metadata
+sports50_60,nh_goal,noharm_input_ref,ghost_coeff_Y,-0.00670613,0,-0.00670613,same,PASS,
+sports50_60,nh_goal,noharm_input_ref,smear_Y,1.02324,1,0.0232409,worse,PASS,
+sports50_60,nh_goal,noharm_input_ref,duplicate_rate_Y,0,0,0,same,PASS,
+sports50_60,nh_goal,noharm_input_ref,halo_overshoot_Y,6.82347e-05,0,6.82347e-05,same,PASS,
+sports50_60,nh_goal,noharm_input_ref,lc_ratio_s1_Y,1.0079,1,0.00790458,worse,PASS,
+sports50_60,nh_goal,noharm_input_ref,lc_ratio_s2_Y,1.00706,1,0.00705562,worse,PASS,
+sports50_60,nh_goal,noharm_input_ref,lc_ratio_s3_Y,1.00592,1,0.00591779,worse,PASS,
+sports50_60,nh_goal,noharm_input_ref,lc_boost_fraction_Y,0,0,0,same,PASS,
+sports50_60,nh_goal,noharm_input_ref,btb_kept_Y,1,1,0,same,PASS,
+sports50_60,nh_goal,noharm_input_ref,wtw_kept_Y,1,1,0,same,PASS,
+sports50_60,nh_goal,noharm_input_ref,clip_detect_Y,0,0,0,same,PASS,
+sports50_60,nh_goal,noharm_input_ref,btb_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,nh_goal,noharm_input_ref,wtw_kept_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,nh_goal,noharm_input_ref,clip_detect_C,NA,NA,NA,NA,NA,reference has no excursions beyond nominal limits
+sports50_60,nh_goal,noharm_input_ref,psnr_I_Y,NA,NA,NA,NA,NA,no frame_types in the case
+sports50_60,nh_goal,noharm_input_ref,psnr_P_Y,NA,NA,NA,NA,NA,no frame_types in the case
+sports50_60,nh_goal,noharm_input_ref,psnr_B_Y,NA,NA,NA,NA,NA,no frame_types in the case
+sports50_60,nh_goal,noharm_input_ref,ssim_B_Y,NA,NA,NA,NA,NA,no frame_types in the case
+sports50_60,nh_goal,noharm_input_ref,lpips_B,NA,NA,NA,NA,NA,no frame_types in the case
+sports50_60,nh_goal,noharm_input_ref,ib_gap_db_Y,NA,NA,NA,NA,NA,no frame_types in the case
+sports50_60,nh_goal,noharm_input_ref,detail_pulse_Y,0.0131786,0,0.0131786,NA,INFO,
+sports50_60,nh_goal,noharm_input_ref,grain_keep_vs_input_band1_Y,1.00005,1,5.33376e-05,worse,PASS,
+sports50_60,nh_goal,noharm_input_ref,grain_keep_vs_input_band2_Y,1.00008,1,8.26993e-05,worse,PASS,
+sports50_60,nh_goal,noharm_input_ref,grain_keep_vs_input_band3_Y,1.00008,1,8.35733e-05,worse,PASS,
+sports50_60,nh_goal,noharm_input_ref,grain_keep_vs_input_band4_Y,1.00009,1,9.44909e-05,worse,PASS,
+sports50_60,nh_goal,noharm_input_ref,grain_probe_keep_edge_vs_input_Y,1.01502,1,0.0150181,worse,PASS,
+sports50_60,nh_goal,noharm_input_ref,grain_probe_lag1_edge_vs_input_Y,-0.000386732,0,-0.000386732,better,PASS,
+sports50_60,nh_goal,noharm_input_ref,grain_probe_keep_flat_vs_input_Y,1.00018,1,0.000183011,worse,PASS,
+sports50_60,nh_goal,noharm_input_ref,grain_probe_lag1_flat_vs_input_Y,-5.58395e-07,0,-5.58395e-07,better,PASS,
+sports50_60,nh_goal,noharm_input_ref,cost_ms_per_frame_pyref,1454.21,0.000400003,1454.21,worse,INFO,"py-ref: CPU numpy wall-clock, not GPU-representative"
+sports50_60,nh_goal,noharm_input_ref,cost_gpu_ms_laptop,NA,NA,NA,NA,NA,capture sidecar gpu_ms (laptop GPU)
+sports50_60,nh_goal,noharm_input_ref,cost_est_3090_ms,NA,NA,NA,NA,NA,ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json)

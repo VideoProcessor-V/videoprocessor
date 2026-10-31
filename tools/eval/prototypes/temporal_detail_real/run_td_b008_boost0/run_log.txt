@@ -1,0 +1,30 @@
+run_prototypes  harness v1  python 3.14.8  numpy 2.5.2
+suite td_real_noprobe (8 cases)  family temporal_detail  default td_off (default: temporal_detail = off (output = input))
+== candidate td_b008_boost0: TemporalDetail CPU model (td_cli), mode steady, grain budget 0.08, cleaner on, guard on; DIS-flow stand-in vectors (+forward)
+case film24 / tos / x265_2160p_12k: loading
+  done in 288.0 s
+case film24 / tos / x265_1080p_4k: loading
+  done in 365.3 s
+case film24 / sol / x265_2160p_12k: loading
+  done in 267.5 s
+case film24 / sol / x265_1080p_4k: loading
+  done in 275.8 s
+case nature30 / boat / x265_2160p_14k: loading
+  done in 465.8 s
+case nature30 / boat / x265_1080p_5k: loading
+  candidate FAILED: MemoryError: Unable to allocate 3.98 MiB for an array with shape (544, 960) and data type float64
+  done in 442.0 s
+case sports50_60 / crowd / x265_2160p_16k: loading
+  done in 669.8 s
+case sports50_60 / crowd / x265_1080p_6k: loading
+  done in 616.7 s
+   td_b008_boost0: rows 441 flags {"INFO": 35, "LIMIT": 26, "NA": 150, "PASS": 230}  3391.0 s
+stats td_b008_boost0 case-start-index 0: active_share mean 0.002063, addback_blocks mean 0, boost_mean mean 0, g_base mean 0.4363, g_corr mean 0.4309, g_evidence mean 0.1451, g_focus mean 0.4749, g_hard mean 0.1138, g_highband mean 0.5158, g_rebounds mean 0.3672, g_stronger mean 0.03754, g_target mean 0.01424, g_tau1 mean 0.0005358, g_tau2 mean 0.0003436, g_unc_px mean 4.323, guard_active mean 0, guard_trips mean 0, live_slots mean 4.861, ms mean 845.1, pipe_ms mean 861.8, refreshes mean 2.422e+04, resets mean 0, retires mean 54.54, status_ok mean 1, weight_max mean 0.09721, weight_mean mean 0.000284
+stats td_b008_boost0 case-start-index 0: active_share mean 0.00672, addback_blocks mean 0, boost_mean mean 0, g_base mean 0.4665, g_corr mean 0.5151, g_evidence mean 0.5949, g_focus mean 0.5043, g_hard mean 0.2025, g_highband mean 0.5544, g_rebounds mean 2.1, g_stronger mean 0.0381, g_target mean 0.03757, g_tau1 mean 0.0008703, g_tau2 mean 0.0005676, g_unc_px mean 1.522, guard_active mean 0, guard_trips mean 0, live_slots mean 4.861, ms mean 1123, pipe_ms mean 1143, refreshes mean 2.412e+04, resets mean 0, retires mean 58.67, status_ok mean 1, weight_max mean 0.262, weight_mean mean 0.0009348
+stats td_b008_boost0 case-start-index 0: active_share mean 0.01735, addback_blocks mean 0, boost_mean mean 0, g_base mean 0.2584, g_corr mean 0.4028, g_evidence mean 0.7275, g_focus mean 0.5133, g_hard mean 0.08303, g_highband mean 0.5276, g_rebounds mean 3.122, g_stronger mean 0.09811, g_target mean 0.1072, g_tau1 mean 0.001813, g_tau2 mean 0.001185, g_unc_px mean 13.92, guard_active mean 0, guard_trips mean 0, live_slots mean 4.861, ms mean 763.9, pipe_ms mean 782.2, refreshes mean 2.156e+04, resets mean 0, retires mean 99.14, status_ok mean 1, weight_max mean 0.2632, weight_mean mean 0.002388
+stats td_b008_boost0 case-start-index 0: active_share mean 0.02716, addback_blocks mean 0, boost_mean mean 0, g_base mean 0.2825, g_corr mean 0.4267, g_evidence mean 0.7741, g_focus mean 0.5428, g_hard mean 0.09136, g_highband mean 0.5502, g_rebounds mean 3.331, g_stronger mean 0.1288, g_target mean 0.1316, g_tau1 mean 0.003843, g_tau2 mean 0.003023, g_unc_px mean 7.894, guard_active mean 0, guard_trips mean 0, live_slots mean 4.861, ms mean 649.5, pipe_ms mean 670, refreshes mean 2.024e+04, resets mean 0, retires mean 269.7, status_ok mean 1, weight_max mean 0.361, weight_mean mean 0.004379
+stats td_b008_boost0 case-start-index 0: active_share mean 0.005626, addback_blocks mean 0, boost_mean mean 0, g_base mean 0.4965, g_corr mean 0.5119, g_evidence mean 0.4229, g_focus mean 0.5608, g_hard mean 0.4138, g_highband mean 0.584, g_rebounds mean 1.125, g_stronger mean 0.04355, g_target mean 0.02946, g_tau1 mean 0.001073, g_tau2 mean 0.0009083, g_unc_px mean 0.6188, guard_active mean 0, guard_trips mean 0, live_slots mean 4.889, ms mean 1212, pipe_ms mean 1244, refreshes mean 3.298e+04, resets mean 0, retires mean 277.6, status_ok mean 1, weight_max mean 0.2596, weight_mean mean 0.0009356
+stats td_b008_boost0 case-start-index 0: active_share mean 0.01229, addback_blocks mean 0, boost_mean mean 0, g_base mean 0.5678, g_corr mean 0.5969, g_evidence mean 0.4942, g_focus mean 0.6296, g_hard mean 0.4431, g_highband mean 0.6484, g_rebounds mean 1.552, g_stronger mean 0.04048, g_target mean 0.02799, g_tau1 mean 0.00279, g_tau2 mean 0.002464, g_unc_px mean 0.3918, guard_active mean 0, guard_trips mean 0, live_slots mean 4.889, ms mean 944, pipe_ms mean 969.4, refreshes mean 2.61e+04, resets mean 0, retires mean 408.4, status_ok mean 1, weight_max mean 0.407, weight_mean mean 0.002106
+stats td_b008_boost0 case-start-index 0: active_share mean 0.01362, addback_blocks mean 0, boost_mean mean 0, g_base mean 0.4012, g_corr mean 0.5899, g_evidence mean 0.7214, g_focus mean 0.6561, g_hard mean 0.2023, g_highband mean 0.675, g_rebounds mean 4.949, g_stronger mean 0.1281, g_target mean 0.1367, g_tau1 mean 0.005015, g_tau2 mean 0.003829, g_unc_px mean 1.407, guard_active mean 0, guard_trips mean 0, live_slots mean 4.933, ms mean 832.2, pipe_ms mean 861.5, refreshes mean 2.847e+04, resets mean 0, retires mean 68.11, status_ok mean 1, weight_max mean 0.2653, weight_mean mean 0.001889
+stats td_b008_boost0 case-start-index 0: active_share mean 0.02812, addback_blocks mean 0.006667, boost_mean mean 0, g_base mean 0.4266, g_corr mean 0.6166, g_evidence mean 0.815, g_focus mean 0.707, g_hard mean 0.234, g_highband mean 0.7217, g_rebounds mean 6.13, g_stronger mean 0.1519, g_target mean 0.1564, g_tau1 mean 0.008913, g_tau2 mean 0.007553, g_unc_px mean 1.071, guard_active mean 0, guard_trips mean 0, live_slots mean 4.933, ms mean 616, pipe_ms mean 635.6, refreshes mean 2.375e+04, resets mean 0, retires mean 102.4, status_ok mean 0.9933, weight_max mean 0.3435, weight_mean mean 0.003958
+total 3391.0 s

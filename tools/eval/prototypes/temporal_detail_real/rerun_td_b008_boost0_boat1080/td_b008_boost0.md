@@ -1,0 +1,128 @@
+<!-- Copyright(C) 2026 VP-V contributors -->
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+
+# VP-V prototype evaluation: td_b008_boost0 vs td_off (default)
+
+Suite: `td_real_rerun_boat_1080p` (1 cases). Candidate `td_b008_boost0` (TemporalDetail CPU model (td_cli), mode steady, grain budget 0.08, cleaner on, guard on; DIS-flow stand-in vectors (+forward)), default `td_off`. LPIPS not requested (NA). Cost: py-ref wall-clock on CPU (not GPU-representative).
+
+## Per-content-type summary
+
+### nature30  (INFO 5, LIMIT 4, NA 13, PASS 33)
+
+| metric | candidate (mean) | default (mean) | delta | n | NA | flags |
+|---|---|---|---|---|---|---|
+| btb_kept_C | NA | NA | NA | 1 | 1 | NA:1 |
+| btb_kept_Y | 0.308004 | 0.306188 | 0.0018162 | 1 | 0 | LIMIT:1 |
+| btb_kept_vs_input_C | NA | NA | NA | 1 | 1 | NA:1 |
+| btb_kept_vs_input_Y | 1 | 1 | 0 | 1 | 0 | PASS:1 |
+| clip_detect_C | NA | NA | NA | 1 | 1 | NA:1 |
+| clip_detect_Y | 0 | 0 | 0 | 1 | 0 | PASS:1 |
+| cost_est_3090_ms | NA | NA | NA | 1 | 1 | NA:1 |
+| cost_gpu_ms_laptop | NA | NA | NA | 1 | 1 | NA:1 |
+| cost_ms_per_frame_pyref | 1191.71 | 0.000100001 | 1191.71 | 1 | 0 | INFO:1 |
+| detail_pulse_Y | 0.0587428 | 0.0589656 | -0.000222738 | 1 | 0 | INFO:1 |
+| duplicate_rate_Y | 0 | 0 | 0 | 1 | 0 | PASS:1 |
+| flicker_excess_Y | -0.00687959 | -0.00688464 | 5.04425e-06 | 1 | 0 | PASS:1 |
+| ghost_coeff_Y | 0.0668233 | 0.0668913 | -6.80907e-05 | 1 | 0 | PASS:1 |
+| gop_ratio_gop | NA | NA | NA | 1 | 1 | NA:1 |
+| gop_ratio_minigop | NA | NA | NA | 1 | 1 | NA:1 |
+| grain_hf_ratio_Cb | 0.633518 | 0.633518 | 0 | 1 | 0 | PASS:1 |
+| grain_hf_ratio_Y | 0.981385 | 0.981382 | 2.50861e-06 | 1 | 0 | PASS:1 |
+| grain_keep_vs_input_Cb | 1 | 1 | 0 | 1 | 0 | PASS:1 |
+| grain_keep_vs_input_Y | 1.0001 | 1 | 0.000102767 | 1 | 0 | PASS:1 |
+| grain_keep_vs_input_band1_Y | 1.0001 | 1 | 0.000103483 | 1 | 0 | PASS:1 |
+| grain_keep_vs_input_band2_Y | 1.0001 | 1 | 9.97376e-05 | 1 | 0 | PASS:1 |
+| grain_keep_vs_input_band3_Y | 1.00011 | 1 | 0.000106746 | 1 | 0 | PASS:1 |
+| grain_keep_vs_input_band4_Y | 1.0001 | 1 | 0.000100949 | 1 | 0 | PASS:1 |
+| grain_lag1_delta_Cb | 0.206233 | 0.206233 | 0 | 1 | 0 | LIMIT:1 |
+| grain_lag1_delta_Y | 0.0141485 | 0.0141526 | -4.1381e-06 | 1 | 0 | PASS:1 |
+| grain_lag1_vs_input_Cb | 0 | 0 | 0 | 1 | 0 | PASS:1 |
+| grain_lag1_vs_input_Y | -4.1381e-06 | 0 | -4.1381e-06 | 1 | 0 | PASS:1 |
+| grain_rms_ratio_Cb | 0.407663 | 0.407663 | 0 | 1 | 0 | LIMIT:1 |
+| grain_rms_ratio_Y | 0.880564 | 0.880474 | 9.04841e-05 | 1 | 0 | LIMIT:1 |
+| grain_tiles_Cb | 16 | 16 | 0 | 1 | 0 | INFO:1 |
+| grain_tiles_Y | 16 | 16 | 0 | 1 | 0 | INFO:1 |
+| halo_overshoot_Y | 0.000299999 | 0.000299464 | 5.35697e-07 | 1 | 0 | PASS:1 |
+| ib_gap_db_Y | 1.16238 | 1.16339 | -0.00101116 | 1 | 0 | INFO:1 |
+| lc_boost_fraction_Y | 0 | 0 | 0 | 1 | 0 | PASS:1 |
+| lc_ratio_s1_Y | 0.90187 | 0.901736 | 0.000134232 | 1 | 0 | PASS:1 |
+| lc_ratio_s2_Y | 0.93159 | 0.931465 | 0.000124666 | 1 | 0 | PASS:1 |
+| lc_ratio_s3_Y | 0.955 | 0.954899 | 0.000101072 | 1 | 0 | PASS:1 |
+| lpips | NA | NA | NA | 1 | 1 | NA:1 |
+| lpips_B | NA | NA | NA | 1 | 1 | NA:1 |
+| lpips_all | NA | NA | NA | 1 | 1 | NA:1 |
+| psnr_B_Y | 31.5505 | 31.5496 | 0.000896727 | 1 | 0 | PASS:1 |
+| psnr_Cb | 38.2482 | 38.2482 | 0 | 1 | 0 | PASS:1 |
+| psnr_Cr | 40.5027 | 40.5027 | 0 | 1 | 0 | PASS:1 |
+| psnr_I_Y | 35.6122 | 35.6116 | 0.000552825 | 1 | 0 | PASS:1 |
+| psnr_P_Y | 32.5327 | 32.5329 | -0.000142989 | 1 | 0 | PASS:1 |
+| psnr_Y | 31.8435 | 31.8428 | 0.000666828 | 1 | 0 | PASS:1 |
+| smear_Y | 0.837013 | 0.836716 | 0.000297393 | 1 | 0 | PASS:1 |
+| ssim_B_Y | 0.916393 | 0.916379 | 1.46421e-05 | 1 | 0 | PASS:1 |
+| ssim_Cb | 0.912409 | 0.912409 | 0 | 1 | 0 | PASS:1 |
+| ssim_Cr | 0.953162 | 0.953162 | 0 | 1 | 0 | PASS:1 |
+| ssim_Y | 0.920053 | 0.920042 | 1.09434e-05 | 1 | 0 | PASS:1 |
+| wtw_kept_C | NA | NA | NA | 1 | 1 | NA:1 |
+| wtw_kept_Y | NA | NA | NA | 1 | 1 | NA:1 |
+| wtw_kept_vs_input_C | NA | NA | NA | 1 | 1 | NA:1 |
+| wtw_kept_vs_input_Y | 1 | 1 | 0 | 1 | 0 | PASS:1 |
+
+## All rows
+
+| content_type | clip | case | metric | candidate | default | delta | trend | flag | note |
+|---|---|---|---|---|---|---|---|---|---|
+| nature30 | boat | x265_1080p_5k | psnr_Y | 31.8435 | 31.8428 | 0.000666828 | same | PASS |  |
+| nature30 | boat | x265_1080p_5k | psnr_Cb | 38.2482 | 38.2482 | 0 | same | PASS |  |
+| nature30 | boat | x265_1080p_5k | psnr_Cr | 40.5027 | 40.5027 | 0 | same | PASS |  |
+| nature30 | boat | x265_1080p_5k | ssim_Y | 0.920053 | 0.920042 | 1.09434e-05 | same | PASS |  |
+| nature30 | boat | x265_1080p_5k | ssim_Cb | 0.912409 | 0.912409 | 0 | same | PASS |  |
+| nature30 | boat | x265_1080p_5k | ssim_Cr | 0.953162 | 0.953162 | 0 | same | PASS |  |
+| nature30 | boat | x265_1080p_5k | lpips | NA | NA | NA | NA | NA | lpips NA (not requested, or torch/lpips unavailable) |
+| nature30 | boat | x265_1080p_5k | grain_tiles_Y | 16 | 16 | 0 | NA | INFO |  |
+| nature30 | boat | x265_1080p_5k | grain_rms_ratio_Y | 0.880564 | 0.880474 | 9.04841e-05 | better | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| nature30 | boat | x265_1080p_5k | grain_hf_ratio_Y | 0.981385 | 0.981382 | 2.50861e-06 | better | PASS |  |
+| nature30 | boat | x265_1080p_5k | grain_lag1_delta_Y | 0.0141485 | 0.0141526 | -4.1381e-06 | better | PASS |  |
+| nature30 | boat | x265_1080p_5k | grain_tiles_Cb | 16 | 16 | 0 | NA | INFO |  |
+| nature30 | boat | x265_1080p_5k | grain_rms_ratio_Cb | 0.407663 | 0.407663 | 0 | same | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| nature30 | boat | x265_1080p_5k | grain_hf_ratio_Cb | 0.633518 | 0.633518 | 0 | same | PASS |  |
+| nature30 | boat | x265_1080p_5k | grain_lag1_delta_Cb | 0.206233 | 0.206233 | 0 | same | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| nature30 | boat | x265_1080p_5k | grain_keep_vs_input_Y | 1.0001 | 1 | 0.000102767 | worse | PASS |  |
+| nature30 | boat | x265_1080p_5k | grain_lag1_vs_input_Y | -4.1381e-06 | 0 | -4.1381e-06 | better | PASS |  |
+| nature30 | boat | x265_1080p_5k | grain_keep_vs_input_Cb | 1 | 1 | 0 | same | PASS |  |
+| nature30 | boat | x265_1080p_5k | grain_lag1_vs_input_Cb | 0 | 0 | 0 | same | PASS |  |
+| nature30 | boat | x265_1080p_5k | btb_kept_vs_input_Y | 1 | 1 | 0 | same | PASS |  |
+| nature30 | boat | x265_1080p_5k | wtw_kept_vs_input_Y | 1 | 1 | 0 | same | PASS |  |
+| nature30 | boat | x265_1080p_5k | btb_kept_vs_input_C | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| nature30 | boat | x265_1080p_5k | wtw_kept_vs_input_C | NA | NA | NA | NA | NA | candidate input has no excursions beyond nominal limits |
+| nature30 | boat | x265_1080p_5k | flicker_excess_Y | -0.00687959 | -0.00688464 | 5.04425e-06 | same | PASS |  |
+| nature30 | boat | x265_1080p_5k | gop_ratio_gop | NA | NA | NA | NA | NA | GOP 60 longer than half the window (90 frames) |
+| nature30 | boat | x265_1080p_5k | gop_ratio_minigop | NA | NA | NA | NA | NA | GOP 60 longer than half the window (90 frames) |
+| nature30 | boat | x265_1080p_5k | ghost_coeff_Y | 0.0668233 | 0.0668913 | -6.80907e-05 | same | PASS |  |
+| nature30 | boat | x265_1080p_5k | smear_Y | 0.837013 | 0.836716 | 0.000297393 | better | PASS |  |
+| nature30 | boat | x265_1080p_5k | duplicate_rate_Y | 0 | 0 | 0 | same | PASS |  |
+| nature30 | boat | x265_1080p_5k | halo_overshoot_Y | 0.000299999 | 0.000299464 | 5.35697e-07 | same | PASS |  |
+| nature30 | boat | x265_1080p_5k | lc_ratio_s1_Y | 0.90187 | 0.901736 | 0.000134232 | worse | PASS |  |
+| nature30 | boat | x265_1080p_5k | lc_ratio_s2_Y | 0.93159 | 0.931465 | 0.000124666 | worse | PASS |  |
+| nature30 | boat | x265_1080p_5k | lc_ratio_s3_Y | 0.955 | 0.954899 | 0.000101072 | worse | PASS |  |
+| nature30 | boat | x265_1080p_5k | lc_boost_fraction_Y | 0 | 0 | 0 | same | PASS |  |
+| nature30 | boat | x265_1080p_5k | btb_kept_Y | 0.308004 | 0.306188 | 0.0018162 | better | LIMIT | default also fails: input/codec-limited, candidate not worse |
+| nature30 | boat | x265_1080p_5k | wtw_kept_Y | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| nature30 | boat | x265_1080p_5k | clip_detect_Y | 0 | 0 | 0 | same | PASS |  |
+| nature30 | boat | x265_1080p_5k | btb_kept_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| nature30 | boat | x265_1080p_5k | wtw_kept_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| nature30 | boat | x265_1080p_5k | clip_detect_C | NA | NA | NA | NA | NA | reference has no excursions beyond nominal limits |
+| nature30 | boat | x265_1080p_5k | lpips_all | NA | NA | NA | NA | NA | lpips not requested / unavailable |
+| nature30 | boat | x265_1080p_5k | psnr_I_Y | 35.6122 | 35.6116 | 0.000552825 | same | PASS |  |
+| nature30 | boat | x265_1080p_5k | psnr_P_Y | 32.5327 | 32.5329 | -0.000142989 | same | PASS |  |
+| nature30 | boat | x265_1080p_5k | psnr_B_Y | 31.5505 | 31.5496 | 0.000896727 | same | PASS |  |
+| nature30 | boat | x265_1080p_5k | ssim_B_Y | 0.916393 | 0.916379 | 1.46421e-05 | same | PASS |  |
+| nature30 | boat | x265_1080p_5k | lpips_B | NA | NA | NA | NA | NA | lpips not requested / unavailable |
+| nature30 | boat | x265_1080p_5k | ib_gap_db_Y | 1.16238 | 1.16339 | -0.00101116 | NA | INFO |  |
+| nature30 | boat | x265_1080p_5k | detail_pulse_Y | 0.0587428 | 0.0589656 | -0.000222738 | NA | INFO |  |
+| nature30 | boat | x265_1080p_5k | grain_keep_vs_input_band1_Y | 1.0001 | 1 | 0.000103483 | worse | PASS |  |
+| nature30 | boat | x265_1080p_5k | grain_keep_vs_input_band2_Y | 1.0001 | 1 | 9.97376e-05 | worse | PASS |  |
+| nature30 | boat | x265_1080p_5k | grain_keep_vs_input_band3_Y | 1.00011 | 1 | 0.000106746 | worse | PASS |  |
+| nature30 | boat | x265_1080p_5k | grain_keep_vs_input_band4_Y | 1.0001 | 1 | 0.000100949 | worse | PASS |  |
+| nature30 | boat | x265_1080p_5k | cost_ms_per_frame_pyref | 1191.71 | 0.000100001 | 1191.71 | worse | INFO | py-ref: CPU numpy wall-clock, not GPU-representative |
+| nature30 | boat | x265_1080p_5k | cost_gpu_ms_laptop | NA | NA | NA | NA | NA | capture sidecar gpu_ms (laptop GPU) |
+| nature30 | boat | x265_1080p_5k | cost_est_3090_ms | NA | NA | NA | NA | NA | ESTIMATE: laptop gpu_ms x 0.20 (cost_ratios.json) |

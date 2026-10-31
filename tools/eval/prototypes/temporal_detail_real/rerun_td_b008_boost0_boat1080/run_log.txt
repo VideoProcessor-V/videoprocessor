@@ -1,0 +1,8 @@
+run_prototypes  harness v1  python 3.14.8  numpy 2.5.2
+suite td_real_rerun_boat_1080p (1 cases)  family temporal_detail  default td_off (default: temporal_detail = off (output = input))
+== candidate td_b008_boost0: TemporalDetail CPU model (td_cli), mode steady, grain budget 0.08, cleaner on, guard on; DIS-flow stand-in vectors (+forward)
+case nature30 / boat / x265_1080p_5k: loading
+  done in 283.7 s
+   td_b008_boost0: rows 55 flags {"INFO": 5, "LIMIT": 4, "NA": 13, "PASS": 33}  283.7 s
+stats td_b008_boost0 case-start-index 0: active_share mean 0.01229, addback_blocks mean 0, boost_mean mean 0, g_base mean 0.5678, g_corr mean 0.5969, g_evidence mean 0.4942, g_focus mean 0.6296, g_hard mean 0.4431, g_highband mean 0.6484, g_rebounds mean 1.552, g_stronger mean 0.04048, g_target mean 0.02799, g_tau1 mean 0.00279, g_tau2 mean 0.002464, g_unc_px mean 0.3918, guard_active mean 0, guard_trips mean 0, live_slots mean 4.889, ms mean 697.1, pipe_ms mean 713.4, refreshes mean 2.61e+04, resets mean 0, retires mean 408.4, status_ok mean 1, weight_max mean 0.407, weight_mean mean 0.002106
+total 283.7 s

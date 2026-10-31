@@ -40,6 +40,15 @@ FAMILIES = {
                   "edge_keep_vs_input_Y", "grain_keep_vs_input_Y", "grain_lag1_vs_input_Y", "grain_hf_ratio_Y",
                   "grain_rms_ratio_Y", "ghost_coeff_Y", "smear_Y", "flicker_excess_Y", "btb_kept_vs_input_Y",
                   "wtw_kept_vs_input_Y", "cost_ms_per_frame_pyref"]),
+    "temporal_detail": ("candidates_temporal_detail", "extra_metrics_temporal_detail",
+                        ["psnr_B_Y", "psnr_P_Y", "psnr_I_Y", "psnr_Y", "ssim_B_Y", "ssim_Y", "lpips_B", "lpips_all",
+                         "ib_gap_db_Y", "detail_pulse_Y", "gop_ratio_minigop", "flicker_excess_Y",
+                         "grain_keep_vs_input_Y", "grain_lag1_vs_input_Y", "grain_keep_vs_input_band1_Y",
+                         "grain_keep_vs_input_band2_Y", "grain_keep_vs_input_band3_Y", "grain_keep_vs_input_band4_Y",
+                         "grain_probe_keep_edge_vs_input_Y", "grain_probe_lag1_edge_vs_input_Y",
+                         "grain_probe_keep_flat_vs_input_Y", "grain_probe_lag1_flat_vs_input_Y",
+                         "ghost_coeff_Y", "smear_Y", "halo_overshoot_Y", "lc_boost_fraction_Y", "btb_kept_vs_input_Y",
+                         "wtw_kept_vs_input_Y", "cost_ms_per_frame_pyref"]),
 }
 
 
@@ -99,6 +108,9 @@ def main(argv=None):
     extra = getattr(mod, extra_name)
     with open(a.suite, "r", encoding="utf8") as f:
         suite = json.load(f)
+    if a.lpips:  # families with per-frame-type LPIPS rows read this case flag (not a suite key)
+        for case in suite["cases"]:
+            case["_lpips"] = True
     os.makedirs(a.out, exist_ok=True)
     lines = []
 
