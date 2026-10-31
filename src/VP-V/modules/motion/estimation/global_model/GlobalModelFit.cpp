@@ -700,7 +700,7 @@ namespace CameraModel
 			// homography would never relax when the motion becomes a pure pan. When the type is still H0's and
 			// above Translation, fit ONE type down from the same weighted set; the lower type wins when the
 			// higher one does not earn its extra parameters under the same complexity-penalty test.
-			if (earlyExit && haveChosen && chosen.type == w.type && chosen.type > ModelType::Translation)
+			if (c.stepDownOnEarlyExit && earlyExit && haveChosen && chosen.type == w.type && chosen.type > ModelType::Translation)
 			{
 				const ModelType lowerTy = kAll[static_cast<int>(chosen.type) - static_cast<int>(ModelType::Translation) - 1];
 				Params lp;

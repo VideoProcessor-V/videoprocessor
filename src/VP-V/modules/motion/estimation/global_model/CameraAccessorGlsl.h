@@ -41,7 +41,7 @@ int camera_field_vector(ivec2 blk, bool measured_trusted, vec2 m, out vec2 o)
         // Step 1: the measured vector stays unless the model agrees within noise and is preferred.
         if (camera_prefer != 0 && camera) {
             float res = cm.z;
-            float mag = sqrt(cm.x * cm.x + cm.y * cm.y);
+            precise float mag = sqrt(cm.x * cm.x + cm.y * cm.y);
             float rel_limit = camera_rel_thr * mag;
             float limit = rel_limit > camera_abs_thr ? rel_limit : camera_abs_thr;
             if (res <= limit) {
@@ -49,7 +49,8 @@ int camera_field_vector(ivec2 blk, bool measured_trusted, vec2 m, out vec2 o)
                     o = cm.xy;
                     return 1;
                 }
-                o = vec2((1.0 - wf) * m.x + wf * cm.x, (1.0 - wf) * m.y + wf * cm.y);
+                precise vec2 blend_ = vec2((1.0 - wf) * m.x + wf * cm.x, (1.0 - wf) * m.y + wf * cm.y);
+                o = blend_;
                 return 2;
             }
         }
@@ -61,7 +62,8 @@ int camera_field_vector(ivec2 blk, bool measured_trusted, vec2 m, out vec2 o)
             o = cm.xy;
             return 1;
         }
-        o = vec2((1.0 - wf) * m.x + wf * cm.x, (1.0 - wf) * m.y + wf * cm.y);
+        precise vec2 blend2_ = vec2((1.0 - wf) * m.x + wf * cm.x, (1.0 - wf) * m.y + wf * cm.y);
+        o = blend2_;
         return 2;
     }
     // Step 3: today's fallback.

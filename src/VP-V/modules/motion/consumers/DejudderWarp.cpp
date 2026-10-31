@@ -2474,7 +2474,7 @@ if (q.x < size.x && q.y < size.y) {
 			&sweep[0], &sweep[1], &ofSearch[0], &ofSearch[1], &ofNone, &previousSearch[0], &previousSearch[1], &qpelField, &subField,
 			&subSearch[0], &subSearch[1], &holdState[0], &holdState[1], &subHoldState[0], &subHoldState[1],
 			&hystField, &hystSub, &globalSad2, &globalSad1, &globalPick, &globalBothSad2, &globalBothSad1, &globalBothPick, &snapField, &snapTrust, &snapSub, &snapCamera, &camera, &globalSecond[0], &globalSecond[1], &fadeState, &aheadTrust, &verifyField, &stillField, &stillSub, &pixelMask, &snapMask, &vectorOk, &snapVectorOk, &picture,
-			&ofInTex[0], &ofInTex[1], &ofFlowTex[0], &ofFlowTex[1], &ofWeight, &cgGuide, &cgCode, &cgKeep[0], &cgKeep[1] })
+			&ofInTex[0], &ofInTex[1], &ofFlowTex[0], &ofFlowTex[1], &ofWeight, &cgGuide, &cgCode, &cgKeep[0], &cgKeep[1], &cgCounts })
 			pl_tex_destroy(gpu, tex);
 		for (int i = 0; i < 2; ++i) { ofIn[i].Release(); ofFlow[i].Release(); ofCost[i].Release(); }
 		inner.reset();   // its textures before the dispatch and the device
@@ -3065,8 +3065,12 @@ if (q.x < size.x && q.y < size.y) {
 		kp.sampleable = true;
 		kp.storable = true;
 		kp.host_readable = settings.hostReadable && (keepFmt->caps & PL_FMT_CAP_HOST_READABLE);
+		pl_tex_params np = kp;
+		np.w = np.h = 1;
+		np.host_readable = keepFmt->caps & PL_FMT_CAP_HOST_READABLE;
 		if (!pl_tex_recreate(gpu, &cgGuide, &gp) || !pl_tex_recreate(gpu, &cgCode, &cp) ||
-			!pl_tex_recreate(gpu, &cgKeep[0], &kp) || !pl_tex_recreate(gpu, &cgKeep[1], &kp))
+			!pl_tex_recreate(gpu, &cgKeep[0], &kp) || !pl_tex_recreate(gpu, &cgKeep[1], &kp) ||
+			!pl_tex_recreate(gpu, &cgCounts, &np))
 		{
 			error = "camera guidance: cannot create the textures";
 			return false;
@@ -3108,6 +3112,47 @@ if (q.x < size.x && q.y < size.y) {
 			(e1 && refineCarriesWeight ? "#define COST_W 1\n" : "") + CameraModel::GuidedPassHeaderGlsl();
 		return Dispatch(e1 ? "VideoProcessor de-judder: camera guided E1 check (plan 19)" : "VideoProcessor de-judder: camera guided narrow search (plan 19)",
 			header.c_str(), CameraModel::GuidedPassBodyGlsl(), d.data(), static_cast<int>(d.size()), vars, 6, blocksX, blocksY, 8);
+	}
+
+	// The guided passes' accepted blocks, counted on the GPU into cgCounts (1x1): r/g = narrow accepted
+	// forward/backward, b/a = E1 skipped forward/backward (-1 = that pass did not run). One work group of
+	// 256 threads, fixed strided partial sums then a fixed-order reduction (deterministic). Since the
+	// narrow results are consumed by the search before the E1 pass overwrites cgKeep, this runs after
+	// each kind: narrow counts go to r/g, E1 counts to b/a.
+	bool MotionWarp::CameraGuidanceCount(bool narrow, bool e1)
+	{
+		static const char* const body = R"GLSL(
+int li = int(gl_LocalInvocationIndex);
+ivec2 n = textureSize(keep_f, 0);
+int total = n.x * n.y;
+float cf = 0.0, cb = 0.0;
+for (int i = li; i < total; i += 256) {
+    ivec2 p = ivec2(i % n.x, i / n.x);
+    cf += texelFetch(keep_f, p, 0).z >= 0.0 ? 1.0 : 0.0;
+    cb += texelFetch(keep_b, p, 0).z >= 0.0 ? 1.0 : 0.0;
+}
+cg_sf[li] = cf;
+cg_sb[li] = cb;
+memoryBarrierShared();
+barrier();
+if (li == 0) {
+    float tf = 0.0, tb = 0.0;
+    for (int k = 0; k < 256; k++) { tf += cg_sf[k]; tb += cg_sb[k]; }
+    vec4 prev = imageLoad(dst, ivec2(0));
+    imageStore(dst, ivec2(0), cg_mode == 0 ? vec4(tf, tb, -1.0, -1.0) : cg_mode == 1 ? vec4(prev.xy, tf, tb) : vec4(-1.0, -1.0, tf, tb));
+}
+)GLSL";
+		// mode 0: the narrow pass; 1: the E1 pass after a narrow pass this pair; 2: the E1 pass alone.
+		const int mode = !e1 ? 0 : narrow ? 1 : 2;
+		const pl_shader_var var[1] = { { pl_var_int("cg_mode"), &mode, false } };
+		pl_shader_desc out{};
+		out.desc.name = "dst";
+		out.desc.type = PL_DESC_STORAGE_IMG;
+		out.desc.access = PL_DESC_ACCESS_READWRITE;
+		out.binding.object = cgCounts;
+		const pl_shader_desc d[3] = { Sampled("keep_f", cgKeep[0], false), Sampled("keep_b", cgKeep[1], false), out };
+		return DispatchPerBlock("VideoProcessor de-judder: camera guidance counts (plan 19)",
+			"shared float cg_sf[256];\nshared float cg_sb[256];\n", body, d, 3, var, 1, 1, 1, 16, 16);
 	}
 
 	// A cut / flash pair (camera guidance skipMatcher): both searches untrusted (a match error far above any
@@ -3830,6 +3875,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			~GuidanceClear() { g.reset(); }
 		} guidanceClear{ cameraGuidance };
 		cameraGuidanceUse = CameraGuidanceUse();
+		if (inner)
+			inner->cameraGuidanceUse = CameraGuidanceUse();
 		estimated = false;
 		grainErrorValid = false;
 		fillReady = false;
@@ -3922,6 +3969,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			const bool candidateMode = settings.opticalFlowCandidate && settings.estCandidates;
 			// Plan 19 phase 2: the camera guidance (null = today's matcher exactly).
 			const CameraModel::GuidanceFrame* cg = cameraGuidance && cameraGuidance->active ? cameraGuidance.get() : nullptr;
+			if (cg)
+				cameraGuidanceUse.gpuNotApplied = cg->gpuNotApplied;
 			if (cg && cg->skipMatcher)
 			{
 				// A cut or a flash: no search across it. The searches are written untrusted, so the
@@ -3930,6 +3979,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				if (!CameraSkipSearches())
 					return false;
 				previousValid = false;
+				ofHintValid = false;   // the engine's temporal hint is from the old scene too
 				opticalFlowUsed = false;
 				globalFromEngine = false;
 				refineCarriesWeight = false;
@@ -3952,9 +4002,9 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			// ... when it is clear; otherwise the global search below (opticalFlowGlobalFallback).
 			const bool engineGlobalClear = !settings.opticalFlowGlobalFallback ||
 				(OpticalFlowTrust::GlobalUsable(engineGlobal[0]) && OpticalFlowTrust::GlobalUsable(engineGlobal[1]));
-			if (settings.globalPrior && settings.opticalFlowGlobal && seeded && engineGlobalValid && !engineGlobalClear)
-				++globalFallbacks;
 			const bool modelGlobal = cg && cg->useModelGlobal && settings.globalPrior;
+			if (!modelGlobal && settings.globalPrior && settings.opticalFlowGlobal && seeded && engineGlobalValid && !engineGlobalClear)
+				++globalFallbacks;
 			if (modelGlobal)
 			{
 				// Plan 19 phase 2: the camera model's centre translation as D1 (1/8 texels of this instance's
@@ -4007,12 +4057,30 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			// Plan 19 phase 2: the guided passes (narrow before the search, E1 skip before the second sweep)
 			// and the model's static verdict for E4 (only where E4's gate runs).
 			const bool cgStatic = cg && cg->staticScene && settings.estGate && settings.globalPrior && previousValid;
-			const bool cgBlocks = cg && cg->HasBlocks() && (cg->narrow || cg->e1Skip);
-			if (cgBlocks && !CameraGuidanceUpload(*cg))
-				return false;
+			bool cgBlocks = cg && cg->HasBlocks() && (cg->narrow || cg->e1Skip);
+			if (cgBlocks)
+			{
+				// The record's grid must cover this instance's picture (in original source px); otherwise the
+				// blocks would map wrongly: the per-block guidance is rejected (visible), today's search runs.
+				const double srcW = width / static_cast<double>(cgInputScale), srcH = height / static_cast<double>(cgInputScale);
+				if (std::fabs(cg->gridW * cg->blockSize - srcW) >= cg->blockSize || std::fabs(cg->gridH * cg->blockSize - srcH) >= cg->blockSize)
+				{
+					cgBlocks = false;
+					cameraGuidanceUse.rejected = "camera guidance: record grid does not match the picture";
+				}
+				else if (!CameraGuidanceUpload(*cg))
+				{
+					cgBlocks = false;
+					cameraGuidanceUse.rejected = "camera guidance: texture upload failed";
+					error.clear();
+				}
+			}
 			const bool cgNarrow = cgBlocks && cg->narrow && !replaced && !seeded;
+			cameraGuidanceUse.narrowDroppedEngine = cgBlocks && cg->narrow && (replaced || seeded);
 			if (cgNarrow &&
 				(!CameraGuidedPass(*cg, 0, false, halfA, halfB, nullptr) || !CameraGuidedPass(*cg, 1, false, halfB, halfA, nullptr)))
+				return false;
+			if (cgNarrow && !CameraGuidanceCount(true, false))
 				return false;
 			cameraGuidanceUse.staticFromModel = cgStatic;
 			cameraGuidanceUse.narrowPass = cgNarrow;
@@ -4032,6 +4100,9 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				 !CameraGuidedPass(*cg, 1, true, halfB, halfA, seeded ? ofSearch[1] : sweep[1])))
 				return false;
 			cameraGuidanceUse.e1Pass = cgE1;
+			// Visible accept counts (read late by the host; never waited for here).
+			if (cgE1 && !CameraGuidanceCount(cgNarrow, true))
+				return false;
 			if (twoSweeps &&
 				(!Refine(halfA, halfB, seeded ? ofSearch[0] : sweep[0], previousSearch[0], globalVector[0], forward, ofCandidates ? ofSearch[0] : nullptr,
 					cgE1 ? cgKeep[0] : nullptr, cgStatic) ||

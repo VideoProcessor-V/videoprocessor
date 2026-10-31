@@ -729,7 +729,14 @@ namespace Dejudder
 		{
 			bool modelGlobal = false, staticFromModel = false, matcherSkipped = false, narrowPass = false, e1Pass = false,
 				fadeNormalised = false;
+			bool narrowDroppedEngine = false;   // narrow planned but the engine seeds / replaces the searches
+			const char* rejected = "";          // non-empty: the per-block guidance was not used (reason)
+			const char* gpuNotApplied = "";     // plan parts the GPU matcher does not do yet (GuidanceFrame)
 		};
+		// The guided passes' accepted block counts of the last guided Estimate (1x1 rgba32f, host-readable
+		// where the format allows): r/g = narrow accepted fwd/bwd, b/a = E1 skipped fwd/bwd (-1 = not run).
+		// Read it late (a frame after), as FrameTrust; escalated = planned (plan counters) - accepted.
+		pl_tex CameraGuidanceCounts() const { return HalvesForSearch() && inner ? inner->cgCounts : cgCounts; }
 		CameraGuidanceUse CameraGuidanceUsed() const
 		{
 			return HalvesForSearch() && inner ? inner->cameraGuidanceUse : cameraGuidanceUse;
@@ -757,7 +764,8 @@ namespace Dejudder
 		std::shared_ptr<const CameraModel::GuidanceFrame> cameraGuidance;
 		CameraGuidanceUse cameraGuidanceUse;
 		float cgInputScale = 1.0f;   // this instance's input px per original source px (a lowRes inner: 0.5)
-		pl_tex cgGuide = nullptr, cgCode = nullptr, cgKeep[2] = { nullptr, nullptr };
+		pl_tex cgGuide = nullptr, cgCode = nullptr, cgKeep[2] = { nullptr, nullptr }, cgCounts = nullptr;
+		bool CameraGuidanceCount(bool narrow, bool e1);
 		bool CameraGuidanceUpload(const CameraModel::GuidanceFrame& g);
 		bool CameraGuidedPass(const CameraModel::GuidanceFrame& g, int dir, bool e1, pl_tex fromHalf, pl_tex toHalf, pl_tex sweepIn);
 		bool CameraSkipSearches();

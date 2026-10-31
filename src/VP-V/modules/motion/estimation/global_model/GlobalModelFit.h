@@ -74,6 +74,10 @@ namespace CameraModel
 		// objects == false) = the record carries only the grid, the excluded mask and the thresholds, with
 		// labelsOnGpu = true; the GPU label pass (CameraModelGpu.h) produces the rest. Objects force CPU labels.
 		bool cpuLabels = true;
+		// Phase-1 audit fix (default on; false = the phase-1 early exit, which never relaxes the model type):
+		// on the early-exit path the type may also step ONE down when the higher type does not earn its
+		// parameters. The fitter has no runtime caller yet, so no released behaviour changes.
+		bool stepDownOnEarlyExit = true;
 		Clock clock = nullptr;
 	};
 

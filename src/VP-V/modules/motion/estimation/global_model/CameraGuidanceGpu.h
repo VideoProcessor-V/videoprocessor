@@ -19,7 +19,9 @@
 // This is the GPU mirror of Reference::Match (ReferenceMatcher.cpp): narrow = whole pixels c + (dx, dy)
 // with |dx|, |dy| <= R in dy-outer / dx-inner order (strict <, the first wins ties), then the eight
 // half-pixel neighbours; accepted iff sad <= tolerance. E1 skip: the first sweep's vector within e1Agree of
-// the prediction and its sad <= tolerance. Zero-mean SAD in a fade. Taps clamp per sample (the reference
+// the prediction and its sad <= tolerance; the GPU recomputes that sad at the first-sweep vector (zero-mean
+// in a fade), where the reference reuses the first sweep's stored sad (plain): in a fade the GPU accepts
+// more blocks, each still verified. Zero-mean SAD in a fade. Taps clamp per sample (the reference
 // clamps the window origin; the two differ only at the picture edge, where both escalate on failure).
 #pragma once
 
@@ -45,6 +47,9 @@ namespace CameraModel
 		double e1AgreePx = 0;          // source px
 		std::vector<float> guide;      // RGBA per record block: seed xy, prediction xy (source px)
 		std::vector<float> code;       // per record block: hint + 4 * eligible
+		// Non-empty when the plan asks for something the GPU matcher does not do yet (visible on the status
+		// line): the guided candidate inside the search lists, tiny-mover ROIs / forced split.
+		const char* gpuNotApplied = "";
 		bool HasBlocks() const
 		{
 			return gridW > 0 && gridH > 0 && blockSize > 0 && guide.size() == static_cast<size_t>(gridW) * gridH * 4 &&
@@ -74,6 +79,12 @@ namespace CameraModel
 		g.narrowRadiusPx = plan.narrowRadiusPx;
 		g.e1AgreePx = plan.e1AgreePx;
 		g.narrow = plan.counters.narrowBlocks > 0;
+		if (plan.guidedCandidate && !plan.rois.empty())
+			g.gpuNotApplied = "guided candidate and tiny-mover ROIs: CPU plan only (GPU follow-up)";
+		else if (plan.guidedCandidate)
+			g.gpuNotApplied = "guided candidate: CPU plan only (GPU follow-up)";
+		else if (!plan.rois.empty())
+			g.gpuNotApplied = "tiny-mover ROIs: CPU plan only (FinerGrid blocks keep today's search)";
 		if (!g.HasBlocks())
 		{
 			g.narrow = false;

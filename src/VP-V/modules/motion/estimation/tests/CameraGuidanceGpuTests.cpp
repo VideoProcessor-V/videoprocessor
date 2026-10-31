@@ -18,7 +18,8 @@ namespace VideoProcessorTest
 		static constexpr int kW = 512, kH = 256, kDx = 12, kDy = 6;
 
 		// An object (blocks [ox0, ox1) x [oy0, oy1) of 16 px) moving by (odx, ody) over a pan of (kDx, kDy).
-		static void Frames(pl_gpu gpu, DejudderGpuPlanes& pa, DejudderGpuPlanes& pb, bool object)
+		static void Frames(pl_gpu gpu, DejudderGpuPlanes& pa, DejudderGpuPlanes& pb, bool object, int kW = CameraGuidanceGpuTests::kW,
+			int kH = CameraGuidanceGpuTests::kH, bool still = false)
 		{
 			const int ox0 = 12 * 16, ox1 = 16 * 16, oy0 = 6 * 16, oy1 = 10 * 16, odx = -10, ody = 4;
 			const DejudderFrame a = MakeDejudderFrame(kW, kH,
@@ -31,16 +32,17 @@ namespace VideoProcessorTest
 				[&](int x, int y) {
 					const int sx = x - odx, sy = y - ody;
 					if (object && sx >= ox0 && sx < ox1 && sy >= oy0 && sy < oy1) return DejudderTexture(sx, sy, 5);
-					return DejudderTexture(x - kDx, y - kDy);
+					return still ? DejudderTexture(x, y) : DejudderTexture(x - kDx, y - kDy);
 				},
-				[](int x, int y, int c) { return DejudderTexture((x - kDx / 2) * 2, y - kDy, 7 + c); });
+				[still](int x, int y, int c) { return still ? DejudderTexture(x * 2, y, 7 + c) : DejudderTexture((x - kDx / 2) * 2, y - kDy, 7 + c); });
 			UploadDejudderFrame(gpu, a, pa);
 			UploadDejudderFrame(gpu, b, pb);
 		}
 
-		static Dejudder::Settings Settings()
+		static Dejudder::Settings Settings(bool lowRes = false)
 		{
 			Dejudder::Settings s = DejudderTestSettings();
+			s.lowRes = lowRes;
 			s.globalPrior = true;
 			s.estCandidates = true;
 			s.estGate = true;
@@ -73,12 +75,12 @@ namespace VideoProcessorTest
 		}
 
 		static DejudderField Run(TargetLutGpuFixture& fixture, bool object, std::shared_ptr<CameraModel::GuidanceFrame> guidance,
-			Dejudder::MotionWarp::CameraGuidanceUse* use = nullptr)
+			Dejudder::MotionWarp::CameraGuidanceUse* use = nullptr, int w = kW, int h = kH, bool lowRes = false, bool still = false)
 		{
 			pl_gpu gpu = fixture.Gpu();
 			DejudderGpuPlanes a, b;
-			Frames(gpu, a, b, object);
-			Dejudder::MotionWarp warp(fixture.Log(), gpu, Settings());
+			Frames(gpu, a, b, object, w, h, still);
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, Settings(lowRes));
 			// One unguided pair first so the temporal history (previous searches, E4's frame trust) exists.
 			Assert::IsTrue(warp.Estimate(a.planes, b.planes), std::wstring(warp.LastError().begin(), warp.LastError().end()).c_str());
 			warp.SetCameraGuidance(guidance);
@@ -99,6 +101,14 @@ namespace VideoProcessorTest
 			const DejudderField none = Run(fixture, true, nullptr);
 			const DejudderField inactive = Run(fixture, true, std::make_shared<CameraModel::GuidanceFrame>());
 			Assert::IsTrue(none.texels == inactive.texels, L"an inactive guidance frame changed the field");
+			// An ACTIVE frame that enables nothing goes through the guided code path (cg non-null) and must
+			// still bind and dispatch nothing new: the field bitwise as without guidance.
+			auto empty = std::make_shared<CameraModel::GuidanceFrame>();
+			empty->active = true;
+			Dejudder::MotionWarp::CameraGuidanceUse use;
+			const DejudderField active = Run(fixture, true, empty, &use);
+			Assert::IsFalse(use.narrowPass || use.e1Pass || use.modelGlobal || use.staticFromModel || use.matcherSkipped);
+			Assert::IsTrue(none.texels == active.texels, L"an active but empty guidance frame changed the field");
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(NarrowWindowAndE1SkipKeepThePanField)
@@ -198,6 +208,56 @@ namespace VideoProcessorTest
 							std::fabs(today.vy(bx, by) - guided.vy(bx, by)) > 0.5f)))
 						++differ;
 			Assert::AreEqual(0, differ, L"the model as D1 changed the pan field");
+		}
+		BEGIN_TEST_METHOD_ATTRIBUTE(StaticFromTheModelKeepsTheStillField)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(StaticFromTheModelKeepsTheStillField)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			const DejudderField today = Run(fixture, false, nullptr, nullptr, kW, kH, false, true);
+			auto g = std::make_shared<CameraModel::GuidanceFrame>();
+			g->active = true;
+			g->staticScene = true;
+			Dejudder::MotionWarp::CameraGuidanceUse use;
+			const DejudderField guided = Run(fixture, false, g, &use, kW, kH, false, true);
+			Assert::IsTrue(use.staticFromModel, L"E4 from the model did not apply");
+			for (int by = 0; by < today.blocksY; ++by)
+				for (int bx = 0; bx < today.blocksX; ++bx)
+				{
+					Assert::AreEqual(today.trusted(bx, by), guided.trusted(bx, by));
+					Assert::IsTrue(std::fabs(guided.vx(bx, by)) <= 0.5f && std::fabs(guided.vy(bx, by)) <= 0.5f, L"a still block moved");
+				}
+		}
+
+		// The low-resolution inner (an input of >= sqrt(2) x 1080 lines searches on the half-size copy):
+		// the guidance reaches it at its own pixel scale (cgInputScale 0.5).
+		BEGIN_TEST_METHOD_ATTRIBUTE(LowResInnerReceivesTheGuidanceAtItsScale)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(LowResInnerReceivesTheGuidanceAtItsScale)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			const int w = 768, h = 1600;
+			const DejudderField today = Run(fixture, false, nullptr, nullptr, w, h, true);
+			Dejudder::MotionWarp::CameraGuidanceUse use;
+			const DejudderField guided = Run(fixture, false, PanGuidance(today.blocksX, today.blocksY, true, true), &use, w, h, true);
+			Assert::IsTrue(use.narrowPass, L"the inner did not run the narrow pass");
+			Assert::IsTrue(use.rejected[0] == 0, L"the inner rejected the guidance");
+			int differ = 0, trusted = 0;
+			for (int by = 2; by + 2 < today.blocksY; ++by)
+				for (int bx = 2; bx + 2 < today.blocksX; ++bx)
+					if (today.trusted(bx, by))
+					{
+						++trusted;
+						if (std::fabs(today.vx(bx, by) - guided.vx(bx, by)) > 1.0f || std::fabs(today.vy(bx, by) - guided.vy(bx, by)) > 1.0f)
+							++differ;
+					}
+			Logger::WriteMessage(("CAMERA_GPU_GUIDED lowres trusted=" + std::to_string(trusted) + " differ=" + std::to_string(differ) + "\n").c_str());
+			Assert::IsTrue(trusted > 0);
+			Assert::AreEqual(0, differ, L"the inner's guided vectors moved from its full search");
 		}
 	};
 }
