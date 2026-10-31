@@ -6914,7 +6914,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         // Settings guide audit 2026-10-24 (ADR-0020): one total delay, 4 frames recommended.
         latencySpin->setToolTip(QStringLiteral(
             "The total delay from capture to screen: ONE value, the same at every frame rate, so the AVR's "
-            "fixed audio delay always matches. Recommended: 267 ms (4 queued frames at 24p, the slowest "
+            "fixed audio delay always matches. Recommended: 267 ms (4 queued frames at 23.976p, the slowest "
             "rate). Shorter still works: the look-ahead features (motion ahead, Dynamic Drive, crop and "
             "subtitle look-ahead, hiccup repair) fall back to 3 or 2 frames. The VP-V page's Input tab shows "
             "the frames and padding at every rate. Off uses Target frames."));
