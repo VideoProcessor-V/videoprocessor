@@ -91,6 +91,14 @@ namespace SourceResolutionMonitor
 		static std::string NotReadReason(const pl_frame& source);
 		// Any thread: what came before no longer describes the source.
 		void Discontinuity(const char* cause);
+		// R3 (resync_event on), render thread before Frame(): the Indicator's stream key of the frame
+		// (its era and FULL count; 0 = not driven, the default). Tile copies and worker jobs carry the
+		// key they were taken under; one taken under another key (a frame of the source before a FULL
+		// resync, still in flight) is dropped instead of being analysed into the new source's evidence.
+		void SetStreamKey(uint64_t key) { streamKey.store(key, std::memory_order_release); }
+		uint64_t StreamKey() const { return streamKey.load(std::memory_order_acquire); }
+		// Copies and jobs dropped that way (diagnostics, tests).
+		unsigned long long StaleJobsDropped() const { return staleJobsDropped.load(std::memory_order_relaxed); }
 		Snapshot Read() const;
 
 		// Render thread: the re-base factor auto wants for a native height
@@ -261,6 +269,7 @@ namespace SourceResolutionMonitor
 			int tileSize = kTile;
 			double blackLevel = 64.0 / 1023.0;
 			uint64_t sequence = 0;       // the source frame copied (h3-latch: look-ahead evidence)
+			uint64_t streamKey = 0;      // R3: SetStreamKey's value when the copy was taken
 		};
 		void Worker();
 		void Fail(const char* what, double seconds);
@@ -292,6 +301,8 @@ namespace SourceResolutionMonitor
 		bool haveJob = false;
 		Job job;
 		std::atomic<const char*> discontinuityCause{ nullptr };
+		std::atomic<uint64_t> streamKey{ 0 };                       // R3 (SetStreamKey)
+		std::atomic<unsigned long long> staleJobsDropped{ 0 };
 		SourceResolution::Tracker tracker;
 		std::deque<std::pair<double, double>> live;          // (seconds, ratio) of informative frames
 		std::deque<std::pair<double, double>> coherence;     // (seconds, min axis coherence)

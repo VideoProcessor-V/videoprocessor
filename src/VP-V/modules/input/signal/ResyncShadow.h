@@ -30,7 +30,9 @@ namespace VpResync {
 
 class Shadow {
 public:
-    enum class Mode : uint8_t { Off, Shadow };
+    // On (R3 / L1 / R4a, expert until the R5 gate): Shadow, plus the render loop seals each frame and
+    // the Indicator drives the readers' resets (ResyncDrive.h). Off and Shadow never change a decision.
+    enum class Mode : uint8_t { Off, Shadow, On };
 
     Shadow()
     {
@@ -44,10 +46,11 @@ public:
     void Configure(Mode mode, size_t framesInFlight)
     {
         const Mode previous = static_cast<Mode>(m_mode.load(std::memory_order_relaxed));
-        if (mode == Mode::Shadow) {
+        if (mode != Mode::Off) {
+            // Shadow <-> On keeps the Indicator (the same detector and era); Off -> either builds one.
             const size_t want = VpIndicator::Indicator::RequiredCapacity(framesInFlight);
             const std::shared_ptr<VpIndicator::Indicator> current = std::atomic_load(&m_indicator);
-            if (previous != Mode::Shadow || !current || want > current->Capacity()) {
+            if (previous == Mode::Off || !current || want > current->Capacity()) {
                 std::atomic_store(&m_indicator,
                                   std::make_shared<VpIndicator::Indicator>(VpIndicator::NextEra(), want));
                 m_restart.store(true, std::memory_order_release);
@@ -56,8 +59,11 @@ public:
         m_mode.store(static_cast<uint8_t>(mode), std::memory_order_release);
     }
 
-    // Relaxed load: true in Shadow mode. The renderer gates its whole facts block on this.
+    // Relaxed load: true in Shadow and On. The renderer gates its whole facts block on this.
     bool Active() const { return IsShadow(); }
+
+    // Relaxed load: true in On only (the readers act).
+    bool Driving() const { return m_mode.load(std::memory_order_relaxed) == static_cast<uint8_t>(Mode::On); }
 
     Mode GetMode() const { return static_cast<Mode>(m_mode.load(std::memory_order_relaxed)); }
 
@@ -82,6 +88,46 @@ public:
         if (!IsShadow())
             return;
         RefusalNote::Set(reason);
+    }
+
+    // A late MINOR (a drift-correction drop, a kept-run hole from a backlog flush) found on the render
+    // loop at slipSeq: every frame from slipSeq on gets the new continuity stamp (clamped above the
+    // last sealed frame in On). Any thread; never throws.
+    void OnLateSlip(Cause cause, uint64_t slipSeq, uint32_t gapFrames, double nowSeconds)
+    {
+        if (!IsShadow() || slipSeq == 0)
+            return;
+        try {
+            const std::shared_ptr<VpIndicator::Indicator> indicator = std::atomic_load(&m_indicator);
+            if (!indicator)
+                return;
+            Record(*indicator, m_detector.Late(cause, slipSeq, gapFrames), nowSeconds);
+        } catch (...) {
+            m_errors.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+    // R4a (On only): the re-base decider changed the width (H) and/or height (V) factor or kernel.
+    // Written for the first unsealed frame (the Indicator clamps fromSeq; never retroactive).
+    void OnRebaseDecision(bool horizontal, bool vertical, uint64_t fromSeq)
+    {
+        if (!Driving() || (!horizontal && !vertical))
+            return;
+        try {
+            const std::shared_ptr<VpIndicator::Indicator> indicator = std::atomic_load(&m_indicator);
+            if (!indicator)
+                return;
+            uint64_t effective = fromSeq;
+            if (horizontal)
+                effective = indicator->Advance(VpIndicator::kRebaseH, Cause::RebaseDecision, fromSeq);
+            if (vertical)
+                effective = indicator->Advance(VpIndicator::kRebaseV, Cause::RebaseDecision, fromSeq);
+            // Re-base changes are rare (a decision, not a frame event): every one is logged.
+            Log(std::string("Resync (on): re-base ") + (horizontal && vertical ? "H+V" : horizontal ? "H" : "V") +
+                " stamp from seq " + std::to_string(effective));
+        } catch (...) {
+            m_errors.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 
     // The caller holds the queue mutex. nowSeconds is a steady clock used for display and the storm
@@ -149,7 +195,7 @@ public:
 private:
     bool BuildStatus(std::string& out, double nowSeconds) const
     {
-        std::string text = "shadow: ";
+        std::string text = Driving() ? "on: " : "shadow: ";
         if (m_lastFullValid.load(std::memory_order_acquire)) {
             const double age = nowSeconds - m_lastFullTime.load(std::memory_order_relaxed);
             const long long seconds = age > 0.0 ? static_cast<long long>(age) : 0;
@@ -229,7 +275,8 @@ private:
     static constexpr size_t kMinorRing = 256;
     static constexpr double kMinorWindowSeconds = 600.0;
 
-    bool IsShadow() const { return m_mode.load(std::memory_order_relaxed) == static_cast<uint8_t>(Mode::Shadow); }
+    // Shadow or On: the detector runs and the Indicator is written.
+    bool IsShadow() const { return m_mode.load(std::memory_order_relaxed) != static_cast<uint8_t>(Mode::Off); }
 
     static bool IsPowerOfTwo(uint32_t n) { return n != 0 && (n & (n - 1)) == 0; }
 
@@ -239,6 +286,8 @@ private:
         case VpIndicator::kFull: return "full";
         case VpIndicator::kContinuity: return "continuity";
         case VpIndicator::kTiming: return "timing";
+        case VpIndicator::kRebaseH: return "rebase_h";
+        case VpIndicator::kRebaseV: return "rebase_v";
         default: return "other";
         }
     }
@@ -338,7 +387,7 @@ private:
         }
         indicator.Advance(counter, e.cause, e.fromSeq, e.gapFrames, e.detail);
         if (log) {
-            std::string text = std::string("Resync (shadow): ") + label + " at seq " +
+            std::string text = std::string(Driving() ? "Resync (on): " : "Resync (shadow): ") + label + " at seq " +
                 std::to_string(e.fromSeq) + " (" + Detail(e.cause, e.detail);
             if (e.gapFrames != 0)
                 text += "; gap " + std::to_string(e.gapFrames);

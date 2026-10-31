@@ -108,6 +108,12 @@ namespace LedDrive
 		// parameters. The S2 segment (OutputSegments::OutputColourSegment, built on Measurement()
 		// and Compensation()) is the ONLY emitter of the measurement and compensation hooks.
 		void DecideFrame(const DynamicDriveFrameInputs& in, OutputSegments::ColourFrame& colour);
+		// R3 (resync_event on), before DecideFrame on the frame that carries the change: a FULL
+		// resync restarts the LED's look-ahead, holds the gain until the new source's first
+		// measurement and puts CNTR at its baseline (LedDriveModule::OnSourceRestart); a timing
+		// event restarts the frame-period smoothing. A continuity slip holds (nothing). Returns
+		// whether a module received it.
+		bool OnResync(bool full, bool timing, uint64_t sourceSequence, double sourceRateHz);
 		// After S2's Collect, with the compensation hooks it pushed (ColourCounts::ledCompensation):
 		// the compensation-unavailable / measurement-off holds, the gamma-boost entry and the
 		// module's fallback entries.

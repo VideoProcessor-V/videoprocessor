@@ -405,4 +405,18 @@ namespace LedDrive
 		}
 		moduleEntriesEngaged = !entries.empty();
 	}
+
+	bool DynamicDriveFrame::OnResync(bool full, bool timing, uint64_t sourceSequence, double sourceRateHz)
+	{
+		if (!full && !timing)
+			return false;
+		const std::shared_ptr<LedDriveModule> led = Module();
+		if (!led)
+			return false;
+		if (full)
+			led->OnSourceRestart(sourceSequence, sourceRateHz);
+		else
+			led->ResetPeriodSmoothing(sourceRateHz);
+		return true;
+	}
 }
