@@ -457,7 +457,9 @@ void save(ConfigEditorWindow& window)
         require(!button->isEnabled(), "Clean Apply was enabled");
         return;
     }
-    require(button->isEnabled(), "Apply button was not enabled after an edit");
+    require(button->isEnabled(), (std::string("Apply button was not enabled after an edit: ") +
+        requireControl<QLabel>(window, QStringLiteral("configurationStatus"))->text().left(300).toStdString() + " / " +
+        requireControl<QLabel>(window, QStringLiteral("configurationEffectSummary"))->text().left(300).toStdString()).c_str());
     button->click();
     QCoreApplication::processEvents();
     const QString status = requireControl<QLabel>(window, QStringLiteral("configurationStatus"))->text();
@@ -584,7 +586,7 @@ void testEveryNewLedControlReachesVp()
         ConfigEditorWindow window(path, 0, true);
         window.resize(1500, 1150);
         window.show();
-        window.selectPage(20);
+        window.selectPage(QStringLiteral("Dynamic Drive"));
         shoot(window, "led-new-file");
         auto* enabled = requireControl<QCheckBox>(window, "config.led_drive.default.enabled");
         enabled->setChecked(true);
@@ -641,7 +643,7 @@ void testEveryNewLedControlReachesVp()
     {
         // Reopened: each control shows what was saved.
         ConfigEditorWindow window(path, 0, true);
-        window.selectPage(20);
+        window.selectPage(QStringLiteral("Dynamic Drive"));
         require(requireControl<QComboBox>(window, "config.led_drive.default.command_source")->currentData().toString() == "compensate" &&
             requireControl<QCheckBox>(window, "config.led_drive.default.adaptive_gamma")->isChecked() &&
             !requireControl<QCheckBox>(window, "config.led_drive.default.lookahead")->isChecked() &&
@@ -657,7 +659,7 @@ void testEveryNewLedControlReachesVp()
     // "Ask the projector" removes the key again (VP's default).
     {
         ConfigEditorWindow window(path, 0, true);
-        window.selectPage(20);
+        window.selectPage(QStringLiteral("Dynamic Drive"));
         auto* lightMin = requireControl<QDoubleSpinBox>(window, "config.projector.default.light_min");
         lightMin->setValue(lightMin->minimum());
         save(window);
@@ -2514,7 +2516,7 @@ void testLedDrivePageAndLiveSwitches()
     ConfigEditorWindow window(path, 0, true);
 
     // Dynamic Drive: real controls, saved to the configuration on Apply.
-    window.selectPage(20);
+    window.selectPage(QStringLiteral("Dynamic Drive"));
     auto* enabled = requireControl<QCheckBox>(window, QStringLiteral("config.led_drive.default.enabled"));
     require(!enabled->isChecked(), "Dynamic Drive did not load as off");
     // The LED core (owner 2026-10-14): the command source is read from an
@@ -7770,8 +7772,18 @@ void testResponsiveWorkspacesPreserveEditsAndFit()
             for (int n = 0; n < 4; ++n) QApplication::processEvents();
             auto* viewport = qobject_cast<QScrollArea*>(pages->currentWidget());
             if (viewport && viewport->horizontalScrollBar()->maximum() != 0)
-                throw std::runtime_error(QStringLiteral("Page %1 overflows horizontally at %2px (%3px)")
-                    .arg(page).arg(size.width()).arg(viewport->horizontalScrollBar()->maximum()).toStdString());
+            {
+                // Name the widest visible widgets so the overflow can be traced to its row.
+                QString widest;
+                const int limit = viewport->viewport()->width();
+                for (QWidget* child : viewport->widget()->findChildren<QWidget*>())
+                    if (child->isVisibleTo(viewport->widget()) && child->minimumSizeHint().width() > limit - 40)
+                        widest += QStringLiteral(" %1[%2]=%3").arg(child->objectName().isEmpty() ?
+                            QString::fromLatin1(child->metaObject()->className()) : child->objectName()).arg(child->parentWidget() ?
+                            child->parentWidget()->objectName() : QString()).arg(child->minimumSizeHint().width());
+                throw std::runtime_error((QStringLiteral("Page %1 overflows horizontally at %2px (%3px); viewport %4; wide:%5")
+                    .arg(page).arg(size.width()).arg(viewport->horizontalScrollBar()->maximum()).arg(limit).arg(widest.left(500))).toStdString());
+            }
         }
     }
     require(readBytes(path) == originalBytes, "Docking wrote the source configuration");
@@ -7809,8 +7821,8 @@ void testLeftDocksRestoreManualChoicesAndDrawerEditing()
     require(settingsScroll && toneSection->mapTo(settingsScroll->viewport(), QPoint()).y() >= 0 &&
         toneSection->mapTo(settingsScroll->viewport(), QPoint()).y() < 40,
         "Advanced focus did not bring tone controls into view");
-    requireControl<QAbstractButton>(window, "settingsRail.settingsNavigation.23")->click(); events();
-    require(requireControl<QStackedWidget>(window, "settingsPages")->currentIndex() == 23,
+    requireControl<QAbstractButton>(window, "settingsRail.settingsNavigation.22")->click(); events();
+    require(requireControl<QStackedWidget>(window, "settingsPages")->currentIndex() == 22,
         "Settings rail did not activate the original Display page action");
     window.selectPage(2); events();
     require(!navigation->isPanelExpanded(), "Page navigation changed the rail state");
@@ -7950,7 +7962,7 @@ void testMigrationNoticeOnlyForPendingMigration()
     const QString path = directory.filePath("VideoProcessor.cfg");
     QFile file(path);
     require(file.open(QIODevice::WriteOnly), "Cannot create migration fixture");
-    file.write("[vprenderer.Default]\nquality: high\ntone_mapping: spline\n[vprenderer.Child]\nshortcut: Ctrl+2\n");
+    file.write("[vprenderer.Default]\nquality: high\ntone_mapping: spline\n[vprenderer.Child]\nshortcut: Ctrl+Alt+F7\n");
     file.close();
     ConfigEditorWindow window(path, 0, true);
     window.show(); window.selectPage(2); QApplication::processEvents();
@@ -9642,8 +9654,7 @@ void testNoTargetStartupIsQuiet()
         !requireControl<QPushButton>(window, "okConfiguration")->isEnabled() &&
         QApplication::activeModalWidget() == nullptr,
         "No-target startup opened a prompt or allowed configuration writes");
-    // RC3: with no target only Updates stays clickable (page 21 after the
-    // merge; page 20 is Dynamic Drive).
+    // With no target only Updates stays clickable (found by page name).
     auto* updatesEntry = requireControl<QPushButton>(window, "config.openUpdates");
     require(updatesEntry->isEnabled(), "Updates is not clickable without a target");
     for (auto* button : window.findChildren<QPushButton*>())
@@ -10293,7 +10304,8 @@ void testConcreteVideoChoicesAndCanonicalScaling()
     QTemporaryDir directory;
     const QString path=copyFixture(directory);
     QFile file(path);require(file.open(QIODevice::Append),"Cannot add choice fixture");
-    file.write("\n[vprenderer.scaling.Default]\nupscaler: ewa_lanczossharp\ndownscaler: hermite\nsigmoid: on\ndithering: blue_noise\nchroma_upscaler: bicubic\n[vprenderer.motion.Default]\nsmooth_motion: auto\nframe_mixer: oversample\ndeinterlace: auto\ndeinterlace_algorithm: bwdif\n"
+    // Bill's Dithering menu is the Original pathway's; VP-V mode offers VP-V's own list (both kept).
+    file.write("\n[vpv]\npipeline_original_pathway: on\n[vprenderer.scaling.Default]\nupscaler: ewa_lanczossharp\ndownscaler: hermite\nsigmoid: on\ndithering: blue_noise\nchroma_upscaler: bicubic\n[vprenderer.motion.Default]\nsmooth_motion: auto\nframe_mixer: oversample\ndeinterlace: auto\ndeinterlace_algorithm: bwdif\n"
                "[vprenderer.motion.Child]\nlabel: Child\n");file.close();
     const auto original=readBytes(path);
     ConfigEditorWindow window(path,0,true);
@@ -10359,7 +10371,7 @@ void testMotionAndChromaControlsPersistAndExposeNewTab()
     const QString path=copyFixture(directory);
     QFile file(path); require(file.open(QIODevice::Append),"Cannot add Motion fixture");
     file.write("\n[vprenderer.scaling.Default]\nchroma_upscaler: bicubic\n[vprenderer.motion]\nsmooth_motion: off\nframe_mixer: oversample\ndeinterlace: auto\ndeinterlace_algorithm: bwdif\nfield_order: auto\ndeinterlace_cadence: field\ndeinterlace_skip_spatial: false\n");file.close();
-    ConfigEditorWindow window(path,0,true);window.selectPage(22);window.show();QApplication::processEvents();
+    ConfigEditorWindow window(path,0,true);window.selectPage(QStringLiteral("Motion"));window.show();QApplication::processEvents();
     auto* tabs=requireControl<QTabBar>(window,"settingsSectionTabs");
     require(tabs->count()==8&&tabs->tabText(6)=="Motion"&&tabs->currentIndex()==6,"Motion tab is missing or not selected");
     auto* mode=requireControl<QComboBox>(window,"config.vprenderer.motion.smooth_motion");
@@ -10388,12 +10400,12 @@ void testMotionAndChromaControlsPersistAndExposeNewTab()
     auto* chroma=requireControl<QComboBox>(window,"config.vprenderer.scaling.chroma_upscaler");
     require(chroma->findData("auto")==-1,"Chroma unexpectedly exposes Auto");
     selectData(chroma,"lanczos");save(window);
-    ConfigEditorWindow reopened(path,0,true);reopened.selectPage(22);
+    ConfigEditorWindow reopened(path,0,true);reopened.selectPage(QStringLiteral("Motion"));
     require(requireControl<QComboBox>(reopened,"config.vprenderer.motion.smooth_motion")->currentData()=="always","Smooth motion did not persist");
     require(requireControl<QComboBox>(reopened,"config.vprenderer.motion.frame_mixer")->currentData()=="mitchell_clamp","Mixer did not persist");
     reopened.selectPage(17);require(requireControl<QComboBox>(reopened,"config.vprenderer.scaling.chroma_upscaler")->currentData()=="lanczos","Chroma did not persist");
     const QString images=qEnvironmentVariable("VP_CONFIG_REVIEW_IMAGES");
-    if(!images.isEmpty()){reopened.resize(1040,700);reopened.show();reopened.selectPage(22);QApplication::processEvents();reopened.grab().save(images+"/motion.png");reopened.selectPage(17);QApplication::processEvents();reopened.grab().save(images+"/chroma.png");}
+    if(!images.isEmpty()){reopened.resize(1040,700);reopened.show();reopened.selectPage(QStringLiteral("Motion"));QApplication::processEvents();reopened.grab().save(images+"/motion.png");reopened.selectPage(17);QApplication::processEvents();reopened.grab().save(images+"/chroma.png");}
 }
 
 // Audit 2026-10-17: confirmed Config editor bugs before a deploy.
@@ -10409,7 +10421,9 @@ void testNamedProfileFallsBackToBuiltInDefault()
     // Bug 1: a named profile whose default profile leaves a setting unset shows
     // VP's built-in default (rounded corners and dynamic target are on).
     QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
-    writeFixture(path, "[vprenderer.Cinema]\nquality: high\n[vprenderer.Other]\nquality: medium\n"
+    // (The fixture is in v1.4.02's migrated form: Bill's load-time migration freezes the tone and luminance
+    // values into each Rendering profile and adds the Scaling Default, which is not an edit made by showing defaults.)
+    writeFixture(path, "[vprenderer.Cinema]\nsdr_target_nits: 100\nsdr_black_nits: 0\npeak_detection: high_quality\ncontrast_recovery: 0.3\n[vprenderer.Other]\nsdr_target_nits: 100\nsdr_black_nits: 0\npeak_detection: high_quality\ncontrast_recovery: 0.3\n[vprenderer.scaling.Default]\nupscaler: ewa_lanczossharp\ndownscaler: hermite\nsigmoid: on\ndeband_strength: default\ndithering: blue_noise\ndisplay_bit_depth: output\n"
         "[vprenderer.subtitles.Classic]\ntype: classic\n[vprenderer.subtitles.Black]\ntype: black\n");
     ConfigEditorWindow window(path, 0, true);
     for (int row : { 0, 1 })
@@ -10490,6 +10504,117 @@ void testSaveAsksWhenTheFileChangedOnDisk()
     require(readBytes(path) == external, "Reload wrote the file");
     require(requireControl<QSpinBox>(window, "config.general.profile_change_display_seconds")->value() == 7,
         "Reload did not show the file's value");
+}
+
+void testPagesAreAddressedByName()
+{
+    // Bill's pages keep his order and numbers; VP-V's follow. Every lookup is by name.
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+    writeFixture(path, "[general]\nrenderer: VP Renderer\n");
+    ConfigEditorWindow window(path, 0, true);
+    auto* pages = requireControl<QStackedWidget>(window, QStringLiteral("settingsPages"));
+    require(pages->count() == 26, "Unexpected page count");
+    const std::vector<std::pair<QString, int>> expected = {
+        { QStringLiteral("General"), 0 }, { QStringLiteral("Queue"), 1 }, { QStringLiteral("VP Renderer"), 2 },
+        { QStringLiteral("DirectShow"), 3 }, { QStringLiteral("Subtitles"), 19 }, { QStringLiteral("Updates"), 20 },
+        { QStringLiteral("Motion"), 21 }, { QStringLiteral("Display"), 22 }, { QStringLiteral("Dynamic Drive"), 23 },
+        { QStringLiteral("Calibration"), 24 }, { QStringLiteral("VP-V"), 25 } };
+    for (const auto& entry : expected)
+    {
+        require(window.pageIndex(entry.first) == entry.second,
+            QStringLiteral("Page %1 is not at its place in the order").arg(entry.first).toStdString().c_str());
+        window.selectPage(entry.first);
+        require(pages->currentIndex() == entry.second,
+            QStringLiteral("selectPage by name missed %1").arg(entry.first).toStdString().c_str());
+    }
+    require(window.pageIndex(QStringLiteral("No such page")) == -1, "An unknown page name resolved");
+    // Navigation buttons carry the name: they open the same page whatever the order.
+    for (const QString& name : { QStringLiteral("Display"), QStringLiteral("Updates"), QStringLiteral("Dynamic Drive"),
+            QStringLiteral("Calibration"), QStringLiteral("VP-V") })
+    {
+        QPushButton* found = nullptr;
+        for (auto* button : window.findChildren<QPushButton*>())
+            if (button->property("pageName").toString() == name) { found = button; break; }
+        require(found, QStringLiteral("No navigation button for %1").arg(name).toStdString().c_str());
+        window.selectPage(QStringLiteral("General"));
+        found->click(); QCoreApplication::processEvents();
+        require(pages->currentIndex() == window.pageIndex(name),
+            QStringLiteral("The %1 navigation button opened another page").arg(name).toStdString().c_str());
+    }
+}
+
+void testDitheringKeepsBothChoiceSets()
+{
+    // Owner decision (v1.4.02 merge): keep both. On the Original pathway the Dithering control is
+    // Bill's (blue_noise, ordered_fixed, white_noise, off; auto/on/true read as blue noise); in VP-V
+    // mode it is VP-V's full list. Neither mode rewrites, dirties or retires the other's values.
+    // The offered choices: enabled items (a saved value outside Bill's list is kept as a disabled,
+    // hidden placeholder, exactly as Bill's own control does).
+    const auto choices = [](QComboBox* combo)
+    {
+        QStringList data;
+        auto* model = qobject_cast<QStandardItemModel*>(combo->model());
+        for (int i = 0; i < combo->count(); ++i)
+            if (!combo->itemData(i).toString().isEmpty() && (!model || model->item(i)->isEnabled()))
+                data << combo->itemData(i).toString();
+        return data;
+    };
+    const QStringList vpv = { "AUTO", "blue_noise", "ordered_lut", "ordered_fixed", "white_noise",
+        "error_diffusion_simple", "error_diffusion_false_fs", "error_diffusion_sierra_lite",
+        "error_diffusion_floyd_steinberg", "error_diffusion_atkinson", "error_diffusion_jarvis_judice_ninke",
+        "error_diffusion_stucki", "error_diffusion_burkes", "error_diffusion_sierra2",
+        "error_diffusion_sierra3", "off" };
+    const QStringList original = { "blue_noise", "ordered_fixed", "white_noise", "off" };
+    const QByteArray scaling = "[general]\nrenderer: VP Renderer\n[vprenderer.scaling.Default]\ndithering: %1\n";
+    QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
+
+    // VP-V mode: every VP-V value is shown as stored and nothing is written or flagged.
+    for (const QString& mode : QStringList{ "AUTO", "ordered_lut", "error_diffusion_stucki", "off" })
+    {
+        QByteArray fixture = scaling; fixture.replace("%1", mode.toUtf8());
+        writeFixture(path, fixture);
+        ConfigEditorWindow window(path, 0, true);
+        const bool pendingAtOpen = hasPendingConfigurationChanges(window);
+        window.selectPage(QStringLiteral("Scaling")); QCoreApplication::processEvents();
+        auto* dithering = requireControl<QComboBox>(window, "config.vprenderer.scaling.dithering");
+        require(choices(dithering) == vpv, "VP-V mode does not offer VP-V's full dithering list");
+        require(dithering->currentData().toString() == mode,
+            QStringLiteral("VP-V mode shows another dithering value for %1").arg(mode).toStdString().c_str());
+        require(dithering->placeholderText().isEmpty(), "A VP-V dithering value is shown as a retired legacy method");
+        require(hasPendingConfigurationChanges(window) == pendingAtOpen, "Showing a VP-V dithering value changed the document");
+        require(readBytes(path) == fixture, "Opening Config wrote the file");
+        require(window.findChild<QLabel*>("config.vprenderer.scaling.dithering.auto_status"), "The Dithering Auto status is missing");
+    }
+    // Original pathway: Bill's control exactly, with his display mapping (display only).
+    for (const char* stored : { "auto", "true" })
+    {
+        QByteArray fixture = "[vpv]\npipeline_original_pathway: on\n" + scaling; fixture.replace("%1", stored);
+        writeFixture(path, fixture);
+        ConfigEditorWindow window(path, 0, true);
+        const bool pendingAtOpen = hasPendingConfigurationChanges(window);
+        window.selectPage(QStringLiteral("Scaling")); QCoreApplication::processEvents();
+        auto* dithering = requireControl<QComboBox>(window, "config.vprenderer.scaling.dithering");
+        require(choices(dithering) == original, "The Original pathway does not offer Bill's dithering list");
+        require(dithering->currentData().toString() == "blue_noise", "Bill's auto/on/true display mapping is missing");
+        require(hasPendingConfigurationChanges(window) == pendingAtOpen, "Bill's display mapping changed the document");
+        require(readBytes(path) == fixture, "Opening Config wrote the file");
+    }
+    // The pathway switch on the VP-V page changes the offered set at once, without touching the value.
+    {
+        QByteArray fixture = scaling; fixture.replace("%1", "error_diffusion_stucki");
+        writeFixture(path, fixture);
+        ConfigEditorWindow window(path, 0, true);
+        window.selectPage(QStringLiteral("Scaling")); QCoreApplication::processEvents();
+        auto* dithering = requireControl<QComboBox>(window, "config.vprenderer.scaling.dithering");
+        auto* pathway = requireControl<QComboBox>(window, "vpv.pathway");
+        pathway->setCurrentIndex(pathway->findData(QStringLiteral("on"))); QCoreApplication::processEvents();
+        require(choices(dithering) == original, (QStringLiteral("Switching to the Original pathway did not give Bill's list: ") +
+            choices(dithering).join(",") + QStringLiteral(" / ") +
+            QString::number(window.findChildren<QComboBox*>("config.vprenderer.scaling.dithering").size())).toStdString().c_str());
+        pathway->setCurrentIndex(pathway->findData(QStringLiteral("off"))); QCoreApplication::processEvents();
+        require(choices(dithering) == vpv && dithering->currentData().toString() == "error_diffusion_stucki",
+            "Switching back to VP-V did not restore VP-V's list and value");
+    }
 }
 
 void testCancelRunsEveryLoadMigration()
@@ -10604,12 +10729,24 @@ void testLoadWritesNothingUnrequested()
                 if (!before.contains(line)) changed += "+" + line.trimmed() + " ";
             for (const QByteArray& line : before)
                 if (!after.contains(line)) changed += "-" + line.trimmed() + " ";
+            // Keep the saved result for a line-by-line diff (VP_CONFIG_SAMPLE_DUMP = a file path).
+            if (qEnvironmentVariableIsSet("VP_CONFIG_SAMPLE_DUMP"))
+            {
+                QFile dump(qEnvironmentVariable("VP_CONFIG_SAMPLE_DUMP"));
+                if (dump.open(QIODevice::WriteOnly | QIODevice::Truncate)) dump.write(readBytes(path));
+            }
+            // Positional differences too (a reordered or re-spelled line has the same line set).
+            for (int n = 0, shown = 0; n < std::min(before.size(), after.size()) && shown < 6; ++n)
+                if (before[n] != after[n]) { changed += QByteArray("@") + QByteArray::number(n + 1) + ":" + before[n].trimmed() + "=>" + after[n].trimmed() + " "; ++shown; }
+            changed += QByteArray(" lines ") + QByteArray::number(before.size()) + "->" + QByteArray::number(after.size());
             require(false, ("The sample configuration opens with unsaved changes (a load-time migration): " +
-                changed.left(600)).constData());
+                changed.left(900)).constData());
         }
     }
     QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
-    writeFixture(path, "[general]\nprofile_change_display_seconds: 5\n[vprenderer.Cinema]\nquality: high\n");
+    // (Rendering profiles in v1.4.02's migrated form: Bill's load-time migration is a pending change by design.)
+    const QByteArray migratedProfile = "[vprenderer.Cinema]\nsdr_target_nits: 100\nsdr_black_nits: 0\npeak_detection: high_quality\ncontrast_recovery: 0.3\n[vprenderer.scaling.Default]\nupscaler: ewa_lanczossharp\ndownscaler: hermite\nsigmoid: on\ndeband_strength: default\ndithering: blue_noise\ndisplay_bit_depth: output\n";
+    writeFixture(path, "[general]\nprofile_change_display_seconds: 5\n" + migratedProfile);
     {
         ConfigEditorWindow window(path, 0, true);
         require(!requireControl<QPushButton>(window, "applyConfiguration")->isEnabled(), "A minimal file opens dirty");
@@ -10622,13 +10759,27 @@ void testLoadWritesNothingUnrequested()
     require(!saved.contains("switch_refresh_rate") && !saved.contains("vprenderer.motion"),
         (QByteArray("Unrequested keys were written: ") + saved).constData());
     require(QDir(dir.path()).entryList({ QStringLiteral("*.bak") }, QDir::Files).isEmpty(), "A plain edit made a backup");
-    // A real migration (legacy true) keeps the original file.
-    writeFixture(path, "[general]\nswitch_refresh_rate: true\n[vprenderer.Cinema]\nquality: high\n");
+    // The runtime's own spellings (true / false) are shown as Full Screen Only / Never and are
+    // never rewritten, so Bill's shipped `switch_refresh_rate: true` opens clean (DIV-CFG-02).
+    for (const auto& alias : std::vector<std::pair<QByteArray, QString>>{ { "true", "fullscreen_only" }, { "false", "never" } })
+    {
+        writeFixture(path, "[general]\nswitch_refresh_rate: " + alias.first + "\n" + migratedProfile);
+        ConfigEditorWindow window(path, 0, true);
+        require(!requireControl<QPushButton>(window, "applyConfiguration")->isEnabled(),
+            "A switch_refresh_rate spelling the runtime accepts opens dirty");
+        require(requireControl<QComboBox>(window, "config.general.switch_refresh_rate")->currentData().toString() == alias.second,
+            "The switch_refresh_rate alias is not shown as its meaning");
+        requireControl<QSpinBox>(window, "config.general.profile_change_display_seconds")->setValue(6);
+        save(window);
+        require(readBytes(path).contains("switch_refresh_rate: " + alias.first), "Saving rewrote the switch_refresh_rate alias");
+    }
+    // A real migration (a profile-level value moves to [general]) keeps the original file.
+    writeFixture(path, "[vprenderer.Cinema]\nswitch_refresh_rate: always\nquality: high\n");
     {
         ConfigEditorWindow window(path, 0, true);
         save(window);
     }
-    require(readBytes(path).contains("switch_refresh_rate: fullscreen_only"), "The migration was not saved");
+    require(readBytes(path).contains("switch_refresh_rate: always") && readBytes(path).contains("[general]"), "The migration was not saved");
     require(QDir(dir.path()).entryList({ QStringLiteral("*.bak") }, QDir::Files).size() == 1,
         "A migration did not keep a backup of the original file");
 }
@@ -10775,6 +10926,16 @@ static const std::map<std::string, const char*>& CoverageAllowList()
         { "renderer:profile_update_mode", "renderer policy read from [general]; the [general] control covers it" },
         { "renderer:switch_refresh_rate", "renderer policy read from [general]; Config migrates it there and the "
             "[general] control covers it" },
+        // v1.4.02 (Bill): the Display page owns the playback monitor and complete mode in [output_display.*]
+        // profiles (config.output_display.*); `quality` is retired (Scaling presets replace it, migrated at load).
+        { "general:fullscreen_monitor_name", "legacy: Config migrates it into the Display profile's monitor (config.output_display.monitor)" },
+        { "renderer:monitor", "[output_display.*] key: the Display page's config.output_display.monitor" },
+        { "renderer:mode_policy", "[output_display.*] key: the Display page's config.output_display.mode_policy" },
+        { "renderer:allowed_modes", "[output_display.*] key: the Display page's config.output_display.allowed_modes" },
+        { "renderer:restore_previous_mode", "[output_display.*] key: the Display page's config.output_display.restore_previous_mode" },
+        { "renderer:quality", "retired in v1.4.02 (Scaling presets replace it): accepted, migrated at load, no control" },
+        { "renderer:background_fallback_top_pixels", "Bill's v1.4.02 subtitle cut-and-paste fallback margin: validated by the renderer, no Config control upstream" },
+        { "renderer:background_fallback_side_pixels", "Bill's v1.4.02 subtitle cut-and-paste fallback margin: validated by the renderer, no Config control upstream" },
         { "renderer:subtitle_detection_optimization", "legacy subtitle key: accepted in renderer / Screen sections "
             "only, and the renderer resets it before applying the Subtitles profile (LVR, \"Discard legacy subtitle "
             "settings\"), so it never takes effect" },
@@ -11169,7 +11330,7 @@ void testAdvancedLedSettingsMatchTheParser()
     const LedDrive::LedDriveConfig defaults;
     {
         ConfigEditorWindow window(path, 0, true);
-        window.selectPage(20);
+        window.selectPage(QStringLiteral("Dynamic Drive"));
         auto number = [&](const char* key) {
             return requireControl<QDoubleSpinBox>(window, QStringLiteral("config.led_drive.default.") + key)->value();
         };
@@ -11250,7 +11411,7 @@ void testDynamicDriveAliasSectionIsKept()
         "led_btb_passthrough: false\n[projector.Default]\nprotocol: barco_ascii\nport: COM1\n");
     {
         ConfigEditorWindow window(path, 0, true);
-        window.selectPage(20);
+        window.selectPage(QStringLiteral("Dynamic Drive"));
         require(requireControl<QCheckBox>(window, "config.led_drive.default.enabled")->isChecked(),
             "The [dynamic_drive] enabled value was not read");
         require(requireControl<QComboBox>(window, "config.led_drive.default.command_source")->currentData().toString() ==
@@ -11279,7 +11440,7 @@ void testDynamicDriveAliasSectionIsKept()
     writeFixture(fresh, "[projector.Default]\nprotocol: barco_ascii\nport: COM1\n");
     {
         ConfigEditorWindow window(fresh, 0, true);
-        window.selectPage(20);
+        window.selectPage(QStringLiteral("Dynamic Drive"));
         requireControl<QCheckBox>(window, "config.led_drive.default.led_btb_passthrough")->setChecked(false);
         save(window);
     }
@@ -11465,7 +11626,7 @@ void testUnfocusedNumberBoxesIgnoreTheWheel()
 {
     // Usability (d): the wheel scrolls the page, not an unfocused setting.
     QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
-    writeFixture(path, "[general]\nprofile_change_display_seconds: 5\n[vprenderer.Cinema]\nquality: high\n");
+    writeFixture(path, "[general]\nprofile_change_display_seconds: 5\n[vprenderer.Cinema]\nsdr_target_nits: 100\nsdr_black_nits: 0\npeak_detection: high_quality\ncontrast_recovery: 0.3\n[vprenderer.scaling.Default]\nupscaler: ewa_lanczossharp\ndownscaler: hermite\nsigmoid: on\ndeband_strength: default\ndithering: blue_noise\ndisplay_bit_depth: output\n");
     ConfigEditorWindow window(path, 0, true);
     auto* seconds = requireControl<QSpinBox>(window, "config.general.profile_change_display_seconds");
     auto* refresh = requireControl<QComboBox>(window, "config.general.switch_refresh_rate");
@@ -11570,7 +11731,9 @@ void testProfileRewritesAreBackedUpLoadMigrations()
     require(!saved.contains("presentation_lead_frames") && !saved.contains("steady_reserve_frames") &&
         saved.contains("lead_frames: 2") && saved.contains("target_frames: 3"),
         (QByteArray("The legacy queue fold was not saved: ") + saved).constData());
-    require(saved.contains("downscaler: AUTO") && !saved.contains("ewa_lanczos") &&
+    // Scaling no longer offers Auto (Bill's v1.4.02): the retired spelling migrates once, at load, to the
+    // quality preset's own filter (hermite) instead of AUTO; the hermite is explicit, not inherited.
+    require(saved.contains("downscaler: hermite") && !saved.contains("downscaler: ewa_lanczos") &&
         !saved.contains("not-a-ratio") && saved.contains("crop_wider_content_to_fill_screen: true"),
         (QByteArray("The profile value migrations were not saved: ") + saved).constData());
     require(saved.contains("renderer: VP Renderer") && !saved.contains("(Alpha)"),
@@ -11878,7 +12041,7 @@ void testExplicitAutoMigrationPreservesPerProfileChoices()
 {
     QTemporaryDir directory; const QString path=directory.filePath("VideoProcessor.cfg");
     QFile file(path); require(file.open(QIODevice::WriteOnly),"Cannot create migration fixture");
-    const QByteArray original="[vprenderer.Default]\ndithering: off # retain deliberate choice\ndisplay_bit_depth: 8\n[vprenderer.Hdr]\nshortcut: Ctrl+2\ndithering: AUTO\ndisplay_bit_depth: AUTO\n";
+    const QByteArray original="[vprenderer.Default]\ndithering: off # retain deliberate choice\ndisplay_bit_depth: 8\n[vprenderer.Hdr]\nshortcut: Ctrl+Alt+F7\ndithering: AUTO\ndisplay_bit_depth: AUTO\n";
     file.write(original);file.close();
     ConfigEditorWindow window(path,0,true);QCoreApplication::processEvents();
     require(readBytes(path)==original,"Opening Config wrote the original file");
@@ -11897,7 +12060,7 @@ void testPresetResolutionPrecedesEditorSectionMigration()
 {
     QTemporaryDir directory;const QString path=directory.filePath("VideoProcessor.cfg");
     QFile file(path);require(file.open(QIODevice::WriteOnly),"Cannot create preset fixture");
-    file.write("[vprenderer.Default]\nquality: balanced\n[vprenderer.Fast]\nquality: fast\nshortcut: Ctrl+2\nupscaler: AUTO\ncontrast_recovery: AUTO\n");file.close();
+    file.write("[vprenderer.Default]\nquality: balanced\n[vprenderer.Fast]\nquality: fast\nshortcut: Ctrl+Alt+F7\nupscaler: AUTO\ncontrast_recovery: AUTO\n");file.close();
     ConfigEditorWindow window(path,0,true);QCoreApplication::processEvents();save(window);
     ConfigFile saved;require(saved.Load(path.toStdString(),ConfigFile::ReadPolicy::Fresh),"Cannot reload preset fixture");
     std::string value;
@@ -11913,7 +12076,7 @@ void testRenderingProcessingOwnershipSaveReopenAndRename()
     QFile file(path);require(file.open(QIODevice::WriteOnly),"Cannot create processing fixture");
     const QByteArray original="# keep owner comment\n[general]\nrenderer: VP Renderer\n"
         "[vprenderer.Default]\ndithering: off # keep deliberate choice\ndisplay_bit_depth: 8\n"
-        "[vprenderer.HDR]\nshortcut: Ctrl+2\ndithering: blue_noise\ndisplay_bit_depth: 10\n"
+        "[vprenderer.HDR]\nshortcut: Ctrl+Alt+F7\ndithering: blue_noise\ndisplay_bit_depth: 10\n"
         "[vprenderer.scaling.Default]\nupscaler: bilinear\n"
         "[calibration_archive.operator_extension]\nkeep_this: exact # custom comment\n";
     file.write(original);file.close();ConfigEditorWindow window(path,0,true);
@@ -11955,7 +12118,7 @@ void testRenderingMenuDuplicateExportImportPreservesLegacyOwner()
 {
     QTemporaryDir directory;const QString path=directory.filePath("VideoProcessor.cfg");
     QFile file(path);require(file.open(QIODevice::WriteOnly),"Cannot create profile-menu fixture");
-    file.write("[vprenderer.Default]\nquality: fast\ndithering: off\n[vprenderer.Child]\nsdr_target_nits: 80\nshortcut: Ctrl+2\nupscaler: AUTO\n");file.close();
+    file.write("[vprenderer.Default]\nquality: fast\ndithering: off\n[vprenderer.Child]\nsdr_target_nits: 80\nshortcut: Ctrl+Alt+F7\nupscaler: AUTO\n");file.close();
     ConfigEditorWindow window(path,0,true);QCoreApplication::processEvents();
     auto* profiles=requireControl<QListWidget>(window,"config.vprenderer.profiles");profiles->setCurrentRow(1);
     auto* menu=requireControl<QPushButton>(window,"rendererProfileMenu")->menu();require(menu,"Missing profile menu");
@@ -12325,6 +12488,8 @@ int main(int argc, char** argv)
     failures += run("reveal reloads an out-of-band edit", testRevealReloadsAnOutOfBandEdit);
     failures += run("save asks when the file changed on disk", testSaveAsksWhenTheFileChangedOnDisk);
     failures += run("Cancel runs every load migration", testCancelRunsEveryLoadMigration);
+    failures += run("pages are addressed by name", testPagesAreAddressedByName);
+    failures += run("dithering keeps both choice sets", testDitheringKeepsBothChoiceSets);
     failures += run("cleared choice shows the inherited value", testClearedChoiceShowsTheInheritedValue);
     failures += run("UTF-8 BOM and equals separator", testUtf8BomAndEqualsSeparator);
     failures += run("load writes nothing unrequested", testLoadWritesNothingUnrequested);

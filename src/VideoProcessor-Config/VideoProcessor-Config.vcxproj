@@ -39,17 +39,24 @@
     <OutDir>$(SolutionDir)x64\$(Configuration)\</OutDir>
     <IntDir>$(ProjectDir)x64\$(Configuration)\</IntDir>
   </PropertyGroup>
+  <!-- Bill's DisplayMonitorInventory.h (VideoProcessor-Lib) includes <atlbase.h>. Where the active toolset
+       ships no ATL, fall back to the side-by-side 14.29 toolset's ATL when it is installed; any machine whose
+       active toolset has ATL (or lacks 14.29) is unaffected. Proper fix: that header uses Microsoft::WRL::ComPtr. -->
+  <PropertyGroup Condition="!Exists('$(VCToolsInstallDir)atlmfc\include\atlbase.h') And Exists('$(VCInstallDir)Tools\MSVC\14.29.30133\atlmfc\include\atlbase.h')">
+    <VpAtlFallbackInclude>$(VCInstallDir)Tools\MSVC\14.29.30133\atlmfc\include;</VpAtlFallbackInclude>
+    <VpAtlFallbackLib>$(VCInstallDir)Tools\MSVC\14.29.30133\atlmfc\lib\x64;</VpAtlFallbackLib>
+  </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <WarningLevel>Level4</WarningLevel><SDLCheck>true</SDLCheck><ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard><RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <AdditionalOptions>/utf-8 /Zc:__cplusplus /bigobj %(AdditionalOptions)</AdditionalOptions>
       <PreprocessorDefinitions>_DEBUG;_WINDOWS;VP_CONFIGFILE_STANDALONE;QT_WIDGETS_LIB;QT_GUI_LIB;QT_CORE_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(VCInstallDir)Tools\MSVC\14.29.30133\atlmfc\include;$(ProjectDir)standalone;$(QtRoot)\include;$(QtRoot)\include\QtWidgets;$(QtRoot)\include\QtGui;$(QtRoot)\include\QtCore;$(QtRoot)\include\QtNetwork;..\VideoProcessor-Lib;..\VideoProcessor-ConfigCore;..\..\3rdparty\libplacebo-beta\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(VpAtlFallbackInclude)$(ProjectDir)standalone;$(QtRoot)\include;$(QtRoot)\include\QtWidgets;$(QtRoot)\include\QtGui;$(QtRoot)\include\QtCore;$(QtRoot)\include\QtNetwork;..\VideoProcessor-Lib;..\VideoProcessor-ConfigCore;..\..\3rdparty\libplacebo-beta\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem><GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>$(VCInstallDir)Tools\MSVC\14.29.30133\atlmfc\lib\x64;$(QtRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(VpAtlFallbackLib)$(QtRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>Qt6Widgetsd.lib;Qt6Guid.lib;Qt6Cored.lib;Qt6Networkd.lib;Ws2_32.lib;shell32.lib;user32.lib;ole32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>
@@ -62,11 +69,11 @@
       <LanguageStandard>stdcpp17</LanguageStandard><RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary><FunctionLevelLinking>true</FunctionLevelLinking>
       <AdditionalOptions>/utf-8 /Zc:__cplusplus /bigobj %(AdditionalOptions)</AdditionalOptions>
       <PreprocessorDefinitions>NDEBUG;_WINDOWS;VP_CONFIGFILE_STANDALONE;QT_NO_DEBUG;QT_WIDGETS_LIB;QT_GUI_LIB;QT_CORE_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(VCInstallDir)Tools\MSVC\14.29.30133\atlmfc\include;$(ProjectDir)standalone;$(QtRoot)\include;$(QtRoot)\include\QtWidgets;$(QtRoot)\include\QtGui;$(QtRoot)\include\QtCore;$(QtRoot)\include\QtNetwork;..\VideoProcessor-Lib;..\VideoProcessor-ConfigCore;..\..\3rdparty\libplacebo-beta\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(VpAtlFallbackInclude)$(ProjectDir)standalone;$(QtRoot)\include;$(QtRoot)\include\QtWidgets;$(QtRoot)\include\QtGui;$(QtRoot)\include\QtCore;$(QtRoot)\include\QtNetwork;..\VideoProcessor-Lib;..\VideoProcessor-ConfigCore;..\..\3rdparty\libplacebo-beta\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem><GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>$(VCInstallDir)Tools\MSVC\14.29.30133\atlmfc\lib\x64;$(QtRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(VpAtlFallbackLib)$(QtRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>Qt6Widgets.lib;Qt6Gui.lib;Qt6Core.lib;Qt6Network.lib;Ws2_32.lib;shell32.lib;user32.lib;ole32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <Manifest>

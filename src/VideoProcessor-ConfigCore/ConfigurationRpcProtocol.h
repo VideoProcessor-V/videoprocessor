@@ -12,7 +12,13 @@
 namespace ConfigurationRpcProtocol
 {
 	// Bump the wire version when an older peer must not read or apply settings.
-	constexpr uint16_t Version = 2;
+	// History: 2 = Bill's v1.4.02-beta (GetDisplayModes = 9) and VP-V before the
+	// merge (ProjectorTest = 9, Calibration = 10). 3 = the merge: Bill's numbers
+	// are kept and VP-V's operations follow them (ProjectorTest = 10, Calibration
+	// = 11), so a peer from either side refuses a merged build instead of
+	// reading operation 9 as the wrong request. Deploy the Config editor and
+	// VideoProcessor.exe as a pair.
+	constexpr uint16_t Version = 3;
 	// Bump this when the editor and VP configuration models cease to agree.
 	constexpr uint16_t ConfigurationCompatibilityVersion = 1;
 	constexpr uint32_t MaximumPayloadBytes = 4 * 1024 * 1024;

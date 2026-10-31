@@ -63,6 +63,11 @@ public:
         const QString& rememberedTargetLabel = {});
     ~ConfigEditorWindow() override;
     void selectPage(int index);
+    // Page lookups by name: Bill's pages keep his order and numbers, VP-V's
+    // (Dynamic Drive, Calibration, VP-V) follow them, and every navigation
+    // lookup of a page goes through its name so the two sets cannot drift.
+    void selectPage(const QString& name);
+    int pageIndex(const QString& name) const;
     void reveal();
     void showUpdates();
     void setTargetRefresh(std::function<void()> refresh);
@@ -132,6 +137,8 @@ private:
     QWidget* createCard(const QString& title, const QString& description, QWidget* content);
     QWidget* createPage(const QString& title, const QString& description, QWidget* body);
     QPushButton* addNavigationButton(const QString& text, int pageIndex);
+    int addNamedPage(const QString& name, QWidget* page);
+    bool originalPathwayOn() const;
     QString value(const QString& section, const QString& key, const QString& fallback = {}) const;
     QStringList profileSections(const QString& root) const;
     QString legacySubtitleHdrValue(const QString& key) const;
@@ -332,6 +339,7 @@ private:
     // [vprenderer.motion.Default] added in memory for a file without a Motion
     // profile: removed again on save while it holds no settings.
     bool seededMotionDefault_ = false;
+    bool seededOutputDisplayDefault_ = false;   // the Display page's starting profile (in memory; DIV-CFG-05)
     std::unique_ptr<ConfigEditorCore::ConfigDocument> document_;
 	quintptr publishedWindowHandle_ = 0;
 	std::map<std::string, std::map<std::string, std::string>> savedSnapshot_;
@@ -343,6 +351,7 @@ private:
     QStringList allRenderers_;
     QStringList monitors_;
     QStackedWidget* pages_ = nullptr;
+    QMap<QString, int> pageIndexByName_;
     QWidget* navigation_ = nullptr;
     QLabel* status_ = nullptr;
 	QLabel* effectSummary_ = nullptr;
@@ -401,6 +410,9 @@ private:
         QLabel* label;
     };
     std::vector<RendererAutoStatusBinding> rendererAutoStatusBindings_;
+    // Re-show the profile on screen when the pathway (Original / VP-V) changes: the
+    // Dithering choice set follows it. Cleared whenever the shell is rebuilt.
+    std::vector<std::function<void()>> pathwayRefreshers_;
     QString liveSourceTransfer_;
     bool liveCalibrationAvailable_ = false;
     bool liveCalibrationLutAttached_ = false;

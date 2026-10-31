@@ -291,7 +291,7 @@ namespace
 				"Original pathway disables the VP-V page and the VP rows it hosts");
 			require(control<QWidget>(window, Vpv::ObjectName("original_note"))->isVisibleTo(control<QWidget>(window, Vpv::ObjectName("section"))),
 				"Original pathway says why the page is disabled");
-			require(control<QWidget>(window, QStringLiteral("config.vprenderer.deband_strength"))->isEnabled(),
+			require(control<QWidget>(window, QStringLiteral("config.vprenderer.scaling.deband_strength"))->isEnabled(),
 				"Bill's own controls stay live in the Original pathway");
 			require(!RowShown(upstream), "a VP-V switch's duplicate row stays hidden in the Original pathway");
 			save(window);
@@ -304,7 +304,7 @@ namespace
 		{
 			ConfigEditorWindow window(path, 0, true);
 			require(!control<QWidget>(window, Vpv::ObjectName("content"))->isEnabled() &&
-				control<QWidget>(window, QStringLiteral("config.vprenderer.deband_strength"))->isEnabled(),
+				control<QWidget>(window, QStringLiteral("config.vprenderer.scaling.deband_strength"))->isEnabled(),
 				"reopened in Original pathway: the VP-V page disabled, Bill's controls live");
 			control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(0);
 			save(window);
@@ -564,7 +564,9 @@ namespace
 		require(!RowShown(debandRow), "the duplicate row stays hidden in the Original pathway (one control per key)");
 		// Bill's own Rendering keys are never on the VP-V page (checked against billslack2 v1.4.02-beta's
 		// RendererProfileConfig.h, 2026-10-24: none of the keys VP-V hosts is Bill's).
-		for (const char* key : { "quality", "deband_strength", "dithering", "display_bit_depth", "tone_mapping", "gamut_mapping",
+		// v1.4.02: Bill retired `quality` (no control) and moved debanding, dithering and dither depth to his
+		// Scaling page; they are still never on the VP-V page.
+		for (const char* key : { "scaling.deband_strength", "scaling.dithering", "scaling.display_bit_depth", "tone_mapping", "gamut_mapping",
 			"peak_detection", "contrast_recovery", "saturation", "sdr_target_nits", "sdr_black_nits" })
 		{
 			auto* w = window.findChild<QWidget*>(QStringLiteral("config.vprenderer.") + QString::fromLatin1(key));

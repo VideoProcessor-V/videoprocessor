@@ -141,3 +141,17 @@ Owner decisions of 2026-10-25, built on the pages above:
 - **Changing a tier.** Edit `docs/design/vpv-tiers.json`, run `python -I tools/gen_vpv_tiers.py`,
   then run the Config tests with `-Match "VP-V"`. `--check` is part of
   `tools/run_chain_gate.ps1`.
+
+## Helpers called from Bill's `ConfigEditorWindow.cpp` (v1.4.02 merge)
+
+Bill's editor file only gets call sites; the logic is here (header-only):
+
+- `VpvDitherChoices.h`: the Dithering choice sets. On the Original pathway the Scaling page's
+  control is Bill's (blue_noise, ordered_fixed, white_noise, off); in VP-V mode it is VP-V's
+  full list (Auto, ordered_lut, the error_diffusion_* modes). The editor switches the set when
+  the pathway changes and never rewrites a stored value.
+- `VpvRenderingDefaults.h`: what an unset VP-V key shows on a Rendering profile (moved out of
+  Bill's file) and `IsVpvChoiceKey`, the VP-V choice keys that keep their "Inherited / not set"
+  item and whose explicit `auto` is a live value (Bill's concrete-only rules are for his keys).
+- Page lookups are by name (`ConfigEditorWindow::pageIndex`, `selectPage(QString)`): Bill's pages
+  keep his order and numbers (0-22); Dynamic Drive, Calibration and VP-V follow them (23-25).
