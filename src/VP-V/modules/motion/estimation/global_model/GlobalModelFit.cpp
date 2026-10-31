@@ -11,6 +11,23 @@
 #include <limits>
 #include <vector>
 
+#ifdef CAMERA_MODEL_PROFILE
+// Test-only per-step profile (defined only by a profiling build of the tests; never in the product).
+#include <chrono>
+namespace CameraModel
+{
+	double g_profileMs[8] = {};
+	static std::chrono::steady_clock::time_point g_profileLast;
+}
+#define CM_PROF_RESET() (CameraModel::g_profileLast = std::chrono::steady_clock::now())
+#define CM_PROF_MARK(slot) do { const auto cmNow = std::chrono::steady_clock::now(); \
+	CameraModel::g_profileMs[slot] += std::chrono::duration<double, std::milli>(cmNow - CameraModel::g_profileLast).count(); \
+	CameraModel::g_profileLast = cmNow; } while (0)
+#else
+#define CM_PROF_RESET() ((void)0)
+#define CM_PROF_MARK(slot) ((void)0)
+#endif
+
 namespace CameraModel
 {
 	namespace
@@ -34,6 +51,7 @@ namespace CameraModel
 			std::vector<Sample> s;           // w = trust
 			std::vector<int> blk;            // block index per sample
 			std::vector<uint8_t> excluded;   // per block: bars or text guard
+			int bx0 = 0, bx1 = 0, by0 = 0, by1 = 0;   // grid rectangle whose block centres lie inside the picture
 			int cellsX = 1, cellsY = 1, cellsWithSample = 0;
 			double trustSum = 0;
 		};
@@ -164,16 +182,27 @@ namespace CameraModel
 			f.rel = c.relThreshold;
 
 			const int nb = in.gridW * in.gridH;
-			f.excluded.assign(static_cast<size_t>(nb), 0);
-			for (int by = 0; by < in.gridH; ++by)
-				for (int bx = 0; bx < in.gridW; ++bx)
-				{
-					const double cx = (bx + 0.5) * in.blockSize, cy = (by + 0.5) * in.blockSize;
-					const bool bar = cx < in.picture.left || cx >= in.picture.right || cy < in.picture.top || cy >= in.picture.bottom;
-					const bool guard = in.textGuard != nullptr && in.textGuard[by * in.gridW + bx] == 1;
-					if (bar || guard)
-						f.excluded[static_cast<size_t>(by * in.gridW + bx)] = 1;
-				}
+			const double bs = in.blockSize;
+			// Blocks whose centre lies inside the picture form one rectangle of the grid (bars lie outside it).
+			// The ranges are estimated and then fixed up with the exact per-centre predicate.
+			auto inside = [&](int bx, int by)
+			{
+				const double cx = (bx + 0.5) * bs, cy = (by + 0.5) * bs;
+				return !(cx < in.picture.left || cx >= in.picture.right || cy < in.picture.top || cy >= in.picture.bottom);
+			};
+			auto colOk = [&](int bx) { const double cx = (bx + 0.5) * bs; return !(cx < in.picture.left || cx >= in.picture.right); };
+			auto rowOk = [&](int by) { const double cy = (by + 0.5) * bs; return !(cy < in.picture.top || cy >= in.picture.bottom); };
+			(void)inside;
+			int bx0 = std::min(std::max(static_cast<int>(std::floor(in.picture.left / bs)), 0), in.gridW);
+			int bx1 = std::min(std::max(static_cast<int>(std::ceil(in.picture.right / bs)), 0), in.gridW);
+			int by0 = std::min(std::max(static_cast<int>(std::floor(in.picture.top / bs)), 0), in.gridH);
+			int by1 = std::min(std::max(static_cast<int>(std::ceil(in.picture.bottom / bs)), 0), in.gridH);
+			while (bx0 < bx1 && !colOk(bx0)) ++bx0;
+			while (bx1 > bx0 && !colOk(bx1 - 1)) --bx1;
+			while (by0 < by1 && !rowOk(by0)) ++by0;
+			while (by1 > by0 && !rowOk(by1 - 1)) --by1;
+			f.excluded.assign(static_cast<size_t>(nb), 1);
+			f.bx0 = bx0; f.bx1 = bx1; f.by0 = by0; f.by1 = by1;
 
 			// Cells: sized from targetCells, aspect-scaled to the picture, never smaller than a block.
 			const double target = std::max(1, c.targetCells);
@@ -190,27 +219,34 @@ namespace CameraModel
 			const int cells = cellsX * cellsY;
 			std::vector<int> best(static_cast<size_t>(cells), -1);
 			std::vector<float> bestTrust(static_cast<size_t>(cells), 0.0f);
-			for (int by = 0; by < in.gridH; ++by)
-				for (int bx = 0; bx < in.gridW; ++bx)
+			std::vector<int> colCell(static_cast<size_t>(std::max(0, bx1 - bx0)));
+			for (int bx = bx0; bx < bx1; ++bx)
+			{
+				const double fx = (bx + 0.5) * bs - in.picture.left;
+				colCell[static_cast<size_t>(bx - bx0)] = std::min(std::max(static_cast<int>(std::floor(fx / cw)), 0), cellsX - 1);
+			}
+			for (int by = by0; by < by1; ++by)
+			{
+				const double fy = (by + 0.5) * bs - in.picture.top;
+				const int cy = std::min(std::max(static_cast<int>(std::floor(fy / ch)), 0), cellsY - 1);
+				const int rowCell = cy * cellsX;
+				for (int bx = bx0; bx < bx1; ++bx)
 				{
 					const int b = by * in.gridW + bx;
-					if (f.excluded[static_cast<size_t>(b)])
-						continue;
+					if (in.textGuard != nullptr && in.textGuard[b] == 1)
+						continue;                              // excluded stays 1
+					f.excluded[static_cast<size_t>(b)] = 0;
 					const float tr = in.fwdTrust[b];
 					if (!FiniteF(tr) || !(tr > 0.0f) || !FiniteF(in.fwdX[b]) || !FiniteF(in.fwdY[b]))
 						continue;
-					const double fx = (bx + 0.5) * in.blockSize - in.picture.left;
-					const double fy = (by + 0.5) * in.blockSize - in.picture.top;
-					int cx = static_cast<int>(std::floor(fx / cw)), cy = static_cast<int>(std::floor(fy / ch));
-					cx = std::min(std::max(cx, 0), cellsX - 1);
-					cy = std::min(std::max(cy, 0), cellsY - 1);
-					const int ci = cy * cellsX + cx;
+					const int ci = rowCell + colCell[static_cast<size_t>(bx - bx0)];
 					if (best[static_cast<size_t>(ci)] < 0 || tr > bestTrust[static_cast<size_t>(ci)])
 					{
 						best[static_cast<size_t>(ci)] = b;
 						bestTrust[static_cast<size_t>(ci)] = tr;
 					}
 				}
+			}
 			for (int ci = 0; ci < cells; ++ci)
 			{
 				const int b = best[static_cast<size_t>(ci)];
@@ -328,9 +364,11 @@ namespace CameraModel
 			rec.reason = Reason::NoInput;
 			rec.confidence = 0;
 
+			CM_PROF_RESET();
 			Field f;
 			if (!BuildField(in, c, f))
 				return rec;
+			CM_PROF_MARK(0);
 			const int N = static_cast<int>(f.s.size());
 			rec.samples = static_cast<uint32_t>(N);
 			const int cellsTotal = f.cellsX * f.cellsY;
@@ -480,6 +518,7 @@ namespace CameraModel
 					pool.push_back(hyps[i].p);
 			}
 			rec.hypotheses = static_cast<uint32_t>(count);
+			CM_PROF_MARK(1);
 
 			if (!haveWinner)
 			{
@@ -489,7 +528,8 @@ namespace CameraModel
 
 			// ---- Local optimisation + model choice ----
 			Params w = winner;
-			Refine(f, f.s, w, irls);
+			if (!earlyExit)
+				Refine(f, f.s, w, irls);          // the early-exit winner (refined H0) is already refined
 			std::vector<Sample> wbuf;
 			BuildWeighted(f, f.s, w, wbuf);
 			if (static_cast<int>(wbuf.size()) < 1)
@@ -538,7 +578,18 @@ namespace CameraModel
 			Params chosen;
 			bool haveChosen = false;
 			double chosenCost = 0;
-			for (int ti = 0; ti < 4; ++ti)
+			// Early exit: keep H0's (refined) type and try ONE step up from the same weighted set under the same
+			// complexity-penalty test; otherwise run the whole ladder from translation.
+			int tiFirst = 0, tiLast = 3;
+			if (earlyExit)
+			{
+				tiFirst = static_cast<int>(w.type) - static_cast<int>(ModelType::Translation);
+				tiLast = std::min(3, tiFirst + 1);
+				chosen = w;
+				chosenCost = supportCost(w);
+				haveChosen = true;
+			}
+			for (int ti = tiFirst + (earlyExit ? 1 : 0); ti <= tiLast; ++ti)
 			{
 				const ModelType ty = kAll[ti];
 				if (ty > maxModel)
@@ -578,6 +629,7 @@ namespace CameraModel
 				return rec;
 			}
 			const Params model = chosen;
+			CM_PROF_MARK(2);
 
 			// ---- Inliers, signals ----
 			std::vector<uint8_t> inl(f.s.size(), 0);
@@ -621,14 +673,17 @@ namespace CameraModel
 				sg.haveEngine = true;
 			}
 
+			CM_PROF_MARK(3);
 			// Ambiguity: best disjoint-ish competitor.
 			{
 				std::vector<int> nonIn;
 				for (size_t i = 0; i < f.s.size(); ++i)
 					if (!inl[i])
 						nonIn.push_back(static_cast<int>(i));
-				std::vector<Params> cands = pool;
-				if (nonIn.size() >= 2)
+				std::vector<Params> cands;
+				const double nonInlierShare = f.trustSum > 0 ? 1.0 - inlierMass / f.trustSum : 0.0;
+				const bool searchCompetitor = nonInlierShare >= 2.0 * c.objectMinShare;
+				if (searchCompetitor && nonIn.size() >= 2)
 				{
 					SplitMix64 r2(seed ^ 0xA5A5A5A5DEADBEEFull);
 					for (int k = 0; k < 24; ++k)
@@ -756,9 +811,10 @@ namespace CameraModel
 					}
 				}
 				const double ratio = inlierCount > 0 ? static_cast<double>(bestSup) / inlierCount : 1.0;
-				sg.ambiguity = 1.0 - Clamp01(ratio / 0.5);
+				sg.ambiguity = searchCompetitor ? 1.0 - Clamp01(ratio / 0.5) : 1.0;
 			}
 
+			CM_PROF_MARK(4);
 			// Backward check.
 			if (in.bwdX != nullptr && in.bwdY != nullptr && in.bwdTrust != nullptr)
 			{
@@ -809,6 +865,7 @@ namespace CameraModel
 				}
 			}
 
+			CM_PROF_MARK(5);
 			// Temporal.
 			SimilarityRates rates;
 			const bool haveRates = ToSimilarity(model, in.picture, in.pairSeconds, rates);
@@ -836,7 +893,9 @@ namespace CameraModel
 			else
 				rec.reason = Reason::Ok;
 
+			CM_PROF_MARK(6);
 			Labels(F, in, f, rec, seed, runObjects);
+			CM_PROF_MARK(7);
 			return rec;
 		}
 
@@ -856,37 +915,25 @@ namespace CameraModel
 			bd->modelY.assign(nb, 0.0f);
 			bd->objectId.assign(nb, 0);
 			bd->tinyMover.assign(nb, 0);
+			bd->excluded = f.excluded;
+			bd->absThresholdPx = static_cast<float>(f.absThr);
+			bd->relThreshold = static_cast<float>(f.rel);
 
-			std::vector<uint8_t> trusted(nb, 0), zeroCand(nb, 0);
-			std::vector<double> thr(nb, 0.0);
+			// One pass over the blocks (labels lag the model/residual pass by one row because the
+			// zero-motion cluster test needs the next row's candidates). All distance tests use squares.
+			std::vector<uint8_t> zeroCand(nb, 0);
+			std::vector<uint8_t> trustedRow(static_cast<size_t>(gw) * 2, 0);
+			std::vector<double> thr2Row(static_cast<size_t>(gw) * 2, 0.0);
 			const bool confident = rec.confidence >= 0.5;
-			for (int by = 0; by < gh; ++by)
-				for (int bx = 0; bx < gw; ++bx)
-				{
-					const size_t b = static_cast<size_t>(by) * gw + bx;
-					double x, y, dx = 0, dy = 0;
-					BlockCentre(bx, by, in.blockSize, in.picture, &x, &y);
-					Displacement(rec.params, x, y, &dx, &dy);
-					if (!std::isfinite(dx) || !std::isfinite(dy))
-						dx = dy = 0;
-					bd->modelX[b] = static_cast<float>(dx);
-					bd->modelY[b] = static_cast<float>(dy);
-					const double mm = std::sqrt(dx * dx + dy * dy);
-					thr[b] = std::max(f.absThr, f.rel * mm);
-					const bool tr = !f.excluded[b] && FiniteF(in.fwdTrust[b]) && in.fwdTrust[b] > 0.0f
-						&& FiniteF(in.fwdX[b]) && FiniteF(in.fwdY[b]);
-					trusted[b] = tr ? 1 : 0;
-					if (tr)
-					{
-						bd->resX[b] = static_cast<float>(in.fwdX[b] - dx);
-						bd->resY[b] = static_cast<float>(in.fwdY[b] - dy);
-						const double vm = std::sqrt(static_cast<double>(in.fwdX[b]) * in.fwdX[b] + static_cast<double>(in.fwdY[b]) * in.fwdY[b]);
-						if (confident && vm <= f.absThr && mm > thr[b])
-							zeroCand[b] = 1;
-					}
-				}
+			const double absThr2 = f.absThr * f.absThr, rel2 = f.rel * f.rel;
+			const Params& P = rec.params;
+			const bool persp = P.type == ModelType::Homography;
+			const double bs = in.blockSize;
+			const double cx0 = 0.5 * bs - in.picture.CentreX(), cy0 = 0.5 * bs - in.picture.CentreY();
 
-			for (int by = 0; by < gh; ++by)
+			auto labelRow = [&](int by)
+			{
+				const size_t rowOff = static_cast<size_t>(by & 1) * static_cast<size_t>(gw);
 				for (int bx = 0; bx < gw; ++bx)
 				{
 					const size_t b = static_cast<size_t>(by) * gw + bx;
@@ -914,20 +961,74 @@ namespace CameraModel
 						bd->tinyMover[b] = 1;
 						continue;
 					}
-					if (trusted[b])
+					const double thr2 = thr2Row[rowOff + bx];
+					if (trustedRow[rowOff + bx])
 					{
 						const double rx = bd->resX[b], ry = bd->resY[b];
-						bd->label[b] = static_cast<uint8_t>(std::sqrt(rx * rx + ry * ry) <= thr[b] ? Label::Camera : Label::Object);
+						bd->label[b] = static_cast<uint8_t>(rx * rx + ry * ry <= thr2 ? Label::Camera : Label::Object);
 						continue;
 					}
 					bool cam = in.texture != nullptr && FiniteF(in.texture[b]) && in.texture[b] <= c.flatTexture;
 					if (!cam && FiniteF(in.fwdX[b]) && FiniteF(in.fwdY[b]))
 					{
 						const double rx = in.fwdX[b] - bd->modelX[b], ry = in.fwdY[b] - bd->modelY[b];
-						cam = std::sqrt(rx * rx + ry * ry) <= thr[b];
+						cam = rx * rx + ry * ry <= thr2;
 					}
 					bd->label[b] = static_cast<uint8_t>(cam ? Label::Camera : Label::Unknown);
 				}
+			};
+
+			for (int by = 0; by < gh; ++by)
+			{
+				const size_t rowOff = static_cast<size_t>(by & 1) * static_cast<size_t>(gw);
+				// Row start: numerators u, v and denominator w of the model at the first block centre; the
+				// per-block step along the row is constant (translation/similarity/affine) or applied to the
+				// numerators and the denominator (homography: one division per block).
+				const double y = cy0 + by * bs;
+				double x = cx0;
+				double u = P.h[0] * x + P.h[1] * y + P.h[2];
+				double v = P.h[3] * x + P.h[4] * y + P.h[5];
+				double w = P.h[6] * x + P.h[7] * y + P.h[8];
+				const double du = P.h[0] * bs, dv = P.h[3] * bs, dw = P.h[6] * bs;
+				for (int bx = 0; bx < gw; ++bx, x += bs, u += du, v += dv, w += dw)
+				{
+					const size_t b = static_cast<size_t>(by) * gw + bx;
+					double dx, dy;
+					if (persp)
+					{
+						const double iw = (w != 0.0) ? 1.0 / w : 0.0;
+						dx = u * iw - x;
+						dy = v * iw - y;
+					}
+					else
+					{
+						dx = u - x;
+						dy = v - y;
+					}
+					if (!std::isfinite(dx) || !std::isfinite(dy))
+						dx = dy = 0;
+					bd->modelX[b] = static_cast<float>(dx);
+					bd->modelY[b] = static_cast<float>(dy);
+					const double mm2 = dx * dx + dy * dy;
+					const double thr2 = std::max(absThr2, rel2 * mm2);
+					thr2Row[rowOff + bx] = thr2;
+					const bool tr = !f.excluded[b] && FiniteF(in.fwdTrust[b]) && in.fwdTrust[b] > 0.0f
+						&& FiniteF(in.fwdX[b]) && FiniteF(in.fwdY[b]);
+					trustedRow[rowOff + bx] = tr ? 1 : 0;
+					if (tr)
+					{
+						bd->resX[b] = static_cast<float>(in.fwdX[b] - dx);
+						bd->resY[b] = static_cast<float>(in.fwdY[b] - dy);
+						const double vm2 = static_cast<double>(in.fwdX[b]) * in.fwdX[b] + static_cast<double>(in.fwdY[b]) * in.fwdY[b];
+						if (confident && vm2 <= absThr2 && mm2 > thr2)
+							zeroCand[b] = 1;
+					}
+				}
+				if (by > 0)
+					labelRow(by - 1);
+			}
+			if (gh > 0)
+				labelRow(gh - 1);
 
 			if (c.objects && runObjects)
 			{

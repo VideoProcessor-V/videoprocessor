@@ -106,6 +106,10 @@ namespace CameraModel
 		std::vector<float> modelX, modelY;// model prediction at the block centre over the pair, source px
 		std::vector<uint8_t> objectId;    // 0 = none
 		std::vector<uint8_t> tinyMover;   // 1 = pixelResidual flagged a sub-block / tiny fast mover
+		std::vector<uint8_t> excluded;    // 1 = bar or text-guard block (a static-logo Overlay is NOT excluded)
+		// The fit's own agreement threshold: a vector agrees with the model when
+		// |v - model| <= max(absThresholdPx, relThreshold * |model|) (source px).
+		float absThresholdPx = 0, relThreshold = 0;
 	};
 
 	struct CameraMotion

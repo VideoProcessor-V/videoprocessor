@@ -50,5 +50,8 @@ namespace CameraModel
 	// Escalation: phase 2 re-runs a narrow block that fails verification as FullSearch.
 	SearchHints BuildHints(const HintConfig& cfg, const CameraMotion* prev, const float* prevFwdX, const float* prevFwdY,
 		const float* nvofX, const float* nvofY, bool cut, bool fade, bool flash, double fadeGain, double fadeOffset,
-		double precisionPx);
+		double precisionPx, double nextPairSeconds = 0.0);
+	// nextPairSeconds: duration of the pair about to be searched; > 0 scales the seed vectors by
+	// nextPairSeconds / prev->pairSeconds (uneven cadences, 3:2); <= 0 means no scaling.
+	// Only bar / text-guard blocks (BlockData::excluded) are Excluded; a static-logo Overlay stays searchable.
 }

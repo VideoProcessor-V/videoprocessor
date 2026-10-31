@@ -126,7 +126,9 @@ namespace CameraModel
 				const float rx = b->resX[index], ry = b->resY[index];
 				const float res = std::sqrt(rx * rx + ry * ry);
 				const float mag = std::sqrt(modelX * modelX + modelY * modelY);
-				const float limit = 0.1f * mag + 0.0156f * static_cast<float>(b->blockSize);
+				// The fit's own agreement threshold (stored in the record): max(abs, rel * |model|).
+				const float relLimit = b->relThreshold * mag;
+				const float limit = relLimit > b->absThresholdPx ? relLimit : b->absThresholdPx;
 				if (res <= limit)
 				{
 					if (wf >= 1.0f)

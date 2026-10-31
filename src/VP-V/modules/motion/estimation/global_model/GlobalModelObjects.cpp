@@ -97,18 +97,64 @@ namespace CameraModel
 			const int hyps = n <= kHypotheses ? n : kHypotheses;
 			int bestCount = 0;
 			double bestDx = 0, bestDy = 0;
+			// Two-stage scoring on large candidate sets: every hypothesis is counted on a fixed stride subset,
+			// the best few are then counted on all candidates (squared distances, no sqrt).
+			const int kSubset = 256, kFull = 4;
+			const bool staged = n > 2 * kSubset;
+			std::vector<double> hxs(static_cast<size_t>(hyps)), hys(static_cast<size_t>(hyps));
+			std::vector<int> stage1(static_cast<size_t>(hyps), 0);
 			for (int h = 0; h < hyps; ++h)
 			{
 				const int s = (n <= kHypotheses) ? h : static_cast<int>(rng.Below(static_cast<uint32_t>(n)));
-				const double hx = remaining[s].dx, hy = remaining[s].dy;
+				hxs[static_cast<size_t>(h)] = remaining[s].dx;
+				hys[static_cast<size_t>(h)] = remaining[s].dy;
+			}
+			auto countOn = [&](double hx, double hy, bool subset)
+			{
 				const double thr = Threshold(cfg, precision, hx, hy);
+				const double thr2 = thr * thr;
 				int count = 0;
-				for (int j = 0; j < n; ++j)
+				if (subset)
 				{
-					const double rx = remaining[j].dx - hx, ry = remaining[j].dy - hy;
-					if (std::sqrt(rx * rx + ry * ry) <= thr) ++count;
+					for (int k = 0; k < kSubset; ++k)
+					{
+						const Candidate& cd = remaining[static_cast<size_t>((static_cast<int64_t>(k) * n) / kSubset)];
+						const double rx = cd.dx - hx, ry = cd.dy - hy;
+						if (rx * rx + ry * ry <= thr2) ++count;
+					}
 				}
-				if (count > bestCount) { bestCount = count; bestDx = hx; bestDy = hy; }
+				else
+				{
+					for (int j = 0; j < n; ++j)
+					{
+						const double rx = remaining[j].dx - hx, ry = remaining[j].dy - hy;
+						if (rx * rx + ry * ry <= thr2) ++count;
+					}
+				}
+				return count;
+			};
+			if (!staged)
+			{
+				for (int h = 0; h < hyps; ++h)
+				{
+					const int count = countOn(hxs[static_cast<size_t>(h)], hys[static_cast<size_t>(h)], false);
+					if (count > bestCount) { bestCount = count; bestDx = hxs[static_cast<size_t>(h)]; bestDy = hys[static_cast<size_t>(h)]; }
+				}
+			}
+			else
+			{
+				for (int h = 0; h < hyps; ++h)
+					stage1[static_cast<size_t>(h)] = countOn(hxs[static_cast<size_t>(h)], hys[static_cast<size_t>(h)], true);
+				std::vector<char> taken(static_cast<size_t>(hyps), 0);
+				for (int pick = 0; pick < kFull && pick < hyps; ++pick)
+				{
+					int bi = -1;
+					for (int h = 0; h < hyps; ++h)
+						if (!taken[static_cast<size_t>(h)] && (bi < 0 || stage1[static_cast<size_t>(h)] > stage1[static_cast<size_t>(bi)])) bi = h;
+					taken[static_cast<size_t>(bi)] = 1;
+					const int count = countOn(hxs[static_cast<size_t>(bi)], hys[static_cast<size_t>(bi)], false);
+					if (count > bestCount) { bestCount = count; bestDx = hxs[static_cast<size_t>(bi)]; bestDy = hys[static_cast<size_t>(bi)]; }
+				}
 			}
 			if (bestCount < minSupport) break;
 
@@ -120,10 +166,11 @@ namespace CameraModel
 				const double thr = Threshold(cfg, precision, tx, ty);
 				inl.clear();
 				double sw = 0, sx = 0, sy = 0;
+				const double thrSq = thr * thr;
 				for (int j = 0; j < n; ++j)
 				{
 					const double rx = remaining[j].dx - tx, ry = remaining[j].dy - ty;
-					if (std::sqrt(rx * rx + ry * ry) <= thr)
+					if (rx * rx + ry * ry <= thrSq)
 					{
 						inl.push_back(j);
 						sw += remaining[j].w;

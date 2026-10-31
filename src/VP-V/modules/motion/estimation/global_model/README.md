@@ -69,12 +69,14 @@ GPU data (written once per source frame, block resolution):
   second texture (or the channels of an RGBA16F) holds label (uint 0..3 packed) and residual
   magnitude; same grid as the existing field texture.
 * Constant buffer: `confidence`, `weight` (the consumer's `BlendState` output, computed on the CPU per
-  frame), `preferModelWhenAgrees` (bool), `blockSize`, `enabled`.
+  frame), `preferModelWhenAgrees` (bool), `blockSize`, `enabled`, and the fit's own agreement threshold
+  `absThresholdPx` and `relThreshold` (floats, copied from `BlockData`).
 Branch order (identical to the CPU, float arithmetic only, no recursion or containers):
 0. `!enabled`, no valid record, block outside the grid, `weight == 0` or label data missing ->
    return the caller's value unchanged (measured if trusted, else the caller's hold value).
 1. measured vector trusted: with `preferModelWhenAgrees`, label Camera and
-   `|res| <= 0.1*|model| + 0.0156*blockSize` -> `mix(measured, model, weight)`; otherwise measured.
+   `|res| <= max(absThresholdPx, relThreshold * |model|)` (the fit's stored threshold; no constants) ->
+   `mix(measured, model, weight)`; otherwise measured.
 2. not trusted and label Camera -> `mix(hold, model, weight)` (weight == 1 gives exactly the model).
 3. else (Object / Overlay / Unknown) -> the caller's hold value.
 Weight (CPU, once per frame per consumer): zero for Cut / Flash / DeadlineMissed / NoInput /
@@ -84,6 +86,18 @@ already above 0, moved by at most `rateLimit` per frame (no pop). Output-space m
 NLS) happens after the choice, as today.
 `PixelResidualReference` is the spec of the per-block share of pixels with
 `|cur(x) - prev(H^-1 x)| > k * noiseRms` (bilinear previous-frame sample, clamp at borders).
+
+## Search hints (phase 2 data API)
+`BuildHints(..., precisionPx, nextPairSeconds)`: seeds (model and previous forward vectors) are scaled by
+`nextPairSeconds / prev->pairSeconds` for uneven cadences (3:2); `<= 0` means no scaling. Only bar and
+text-guard blocks (`BlockData::excluded`) are `Excluded`; a static-logo Overlay stays searchable
+(`FullSearch`).
+
+## Cost
+Per-step cost is profiled by a test-only harness: building the tests with `CAMERA_MODEL_PROFILE` defined
+makes `GlobalModelFit.cpp` accumulate per-step milliseconds in `CameraModel::g_profileMs[8]` (field,
+hypotheses, local optimisation + ladder, signals, ambiguity, backward, temporal, labels). The macro is not
+defined in the product build. The early-exit path keeps H0's type and tries one step up only.
 
 ## Tests
 `../tests/Camera*Tests.cpp`, CPU tier, all synthetic: geometry, temporal / objects / residual,

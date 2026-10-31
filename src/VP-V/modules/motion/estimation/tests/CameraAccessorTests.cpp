@@ -35,6 +35,9 @@ namespace VideoProcessorTest
 			b->modelY.assign(n, 0.0f);
 			b->objectId.assign(n, 0);
 			b->tinyMover.assign(n, 0);
+			b->excluded.assign(n, 0);
+			b->absThresholdPx = 0.75f;   // the fit's own agreement threshold: max(abs, rel * |model|)
+			b->relThreshold = 0.05f;
 			return b;
 		}
 
@@ -44,6 +47,7 @@ namespace VideoProcessorTest
 			r->valid = true;
 			r->confidence = confidence;
 			r->reason = Reason::Ok;
+			r->pairSeconds = 1.0 / 24;
 			r->blocks = blocks ? blocks : PanBlocks();
 			return r;
 		}
@@ -252,6 +256,31 @@ namespace VideoProcessorTest
 			Assert::IsTrue(FieldVector(on, state, rec.get(), 2, 0, true, -20.0f, 0.0f, ox, oy) == Choice::Measured, L"object stays measured");
 		}
 
+		// The agreement test uses the fit's own stored threshold max(abs, rel * |model|), not constants.
+		TEST_METHOD(AgreementUsesTheStoredThreshold)
+		{
+			using namespace CameraTestSupport;
+			auto tight = PanBlocks();
+			tight->absThresholdPx = 0.2f;
+			tight->relThreshold = 0.0f;
+			tight->resX[0] = 0.5f;   // |res| 0.5
+			auto loose = PanBlocks();
+			loose->absThresholdPx = 0.1f;
+			loose->relThreshold = 0.1f;   // 0.1 * |20| = 2.0
+			loose->resX[0] = 0.5f;
+			Policy on = On();
+			on.preferModelWhenAgrees = true;
+			float ox = 0, oy = 0;
+			auto r1 = PanRecord(0.95, tight);
+			BlendState s1;
+			Settle(s1, on, r1.get());
+			Assert::IsTrue(FieldVector(on, s1, r1.get(), 0, 0, true, -19.5f, 0.0f, ox, oy) == Choice::Measured, L"tight threshold: disagrees");
+			auto r2 = PanRecord(0.95, loose);
+			BlendState s2;
+			Settle(s2, on, r2.get());
+			Assert::IsTrue(FieldVector(on, s2, r2.get(), 0, 0, true, -19.5f, 0.0f, ox, oy) == Choice::Model, L"relative term: agrees");
+		}
+
 		TEST_METHOD(ReasonsCutFlashDeadlineGiveTargetZero)
 		{
 			using namespace CameraTestSupport;
@@ -330,9 +359,9 @@ namespace VideoProcessorTest
 	public:
 		static CameraModel::SearchHints Build(const CameraModel::HintConfig& cfg, const CameraModel::CameraMotion* prev,
 			const float* fx, const float* fy, const float* nx, const float* ny,
-			bool cut = false, bool fade = false, bool flash = false, double precision = 0.5)
+			bool cut = false, bool fade = false, bool flash = false, double precision = 0.5, double nextSeconds = 0.0)
 		{
-			return CameraModel::BuildHints(cfg, prev, fx, fy, nx, ny, cut, fade, flash, 0.8, 0.02, precision);
+			return CameraModel::BuildHints(cfg, prev, fx, fy, nx, ny, cut, fade, flash, 0.8, 0.02, precision, nextSeconds);
 		}
 
 		struct Field
@@ -413,13 +442,55 @@ namespace VideoProcessorTest
 			using namespace CameraTestSupport;
 			using namespace CameraModel;
 			auto blocks = PanBlocks();
-			for (int bx = 0; bx < kGridW; ++bx) blocks->label[bx] = static_cast<uint8_t>(Label::Overlay);
+			for (int bx = 0; bx < kGridW; ++bx)
+			{
+				blocks->label[bx] = static_cast<uint8_t>(Label::Overlay);
+				blocks->excluded[bx] = 1;   // bars / text guard
+			}
 			auto rec = PanRecord(0.95, blocks);
 			Field f;
 			const SearchHints h = Build(HintConfig(), rec.get(), f.x.data(), f.y.data(), f.x.data(), f.y.data());
 			Assert::IsTrue(h.hint[0] == static_cast<uint8_t>(BlockHint::Excluded), L"excluded");
 			Assert::AreEqual(static_cast<uint32_t>(kGridW * (kGridH - 1)), h.narrowBlocks, L"others narrow");
 			Assert::AreEqual(0u, h.fullBlocks, L"excluded counted nowhere");
+		}
+
+		// A static logo (zero-motion-cluster Overlay, NOT bars / text guard) must stay searchable.
+		TEST_METHOD(StaticLogoOverlayStaysSearchable)
+		{
+			using namespace CameraTestSupport;
+			using namespace CameraModel;
+			auto blocks = PanBlocks();
+			blocks->label[5] = static_cast<uint8_t>(Label::Overlay);   // logo block, excluded stays 0
+			blocks->label[6] = static_cast<uint8_t>(Label::Overlay);
+			blocks->excluded[6] = 1;                                   // a text-guard block next to it
+			auto rec = PanRecord(0.95, blocks);
+			Field f;
+			const SearchHints h = Build(HintConfig(), rec.get(), f.x.data(), f.y.data(), f.x.data(), f.y.data());
+			Assert::IsTrue(h.hint[5] == static_cast<uint8_t>(BlockHint::FullSearch), L"logo searchable");
+			Assert::IsTrue(h.hint[6] == static_cast<uint8_t>(BlockHint::Excluded), L"text guard excluded");
+		}
+
+		// 3:2 pulldown: the next pair lasts 2.5x as long, so the seeds scale and still agree with the engine.
+		TEST_METHOD(SeedsAreTimeScaledForAnUnevenNextPair)
+		{
+			using namespace CameraTestSupport;
+			using namespace CameraModel;
+			auto rec = PanRecord(0.95);   // pairSeconds 1/24, model (-20, 0)
+			const size_t n = static_cast<size_t>(kGridW) * kGridH;
+			std::vector<float> nvx(n, -50.0f), nvy(n, 0.0f);   // the engine measured the longer pair
+			std::vector<float> fx(n, -20.0f), fy(n, 0.0f);     // previous pair's forward vectors
+			const SearchHints scaled = Build(HintConfig(), rec.get(), fx.data(), fy.data(), nvx.data(), nvy.data(),
+				false, false, false, 0.5, 2.5 / 24);
+			Assert::AreEqual(static_cast<uint32_t>(n), scaled.narrowBlocks, L"scaled seeds agree");
+			Assert::AreEqual(-50.0, static_cast<double>(scaled.seedX[0]), 1e-4, L"seed scaled");
+			const SearchHints plain = Build(HintConfig(), rec.get(), fx.data(), fy.data(), nvx.data(), nvy.data(),
+				false, false, false, 0.5, 0.0);
+			Assert::AreEqual(static_cast<uint32_t>(n), plain.fullBlocks, L"unscaled seeds disagree -> full search");
+			// The model-only path (no engine vectors) scales too.
+			const SearchHints modelOnly = Build(HintConfig(), rec.get(), nullptr, nullptr, nullptr, nullptr,
+				false, false, false, 0.5, 2.5 / 24);
+			Assert::AreEqual(-50.0, static_cast<double>(modelOnly.seedX[0]), 1e-4, L"model seed scaled");
 		}
 
 		TEST_METHOD(SceneActionPrecedence)

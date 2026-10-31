@@ -8,7 +8,7 @@ namespace CameraModel
 {
 	SearchHints BuildHints(const HintConfig& cfg, const CameraMotion* prev, const float* prevFwdX, const float* prevFwdY,
 		const float* nvofX, const float* nvofY, bool cut, bool fade, bool flash, double fadeGain, double fadeOffset,
-		double precisionPx)
+		double precisionPx, double nextPairSeconds)
 	{
 		SearchHints out;
 		out.scene = cut ? (cfg.cutSkip ? SceneAction::SkipAcrossCut : SceneAction::Normal)
@@ -32,8 +32,13 @@ namespace CameraModel
 		out.narrowRadiusPx = cfg.narrowRadiusSigmas * precision;
 		const bool haveModel = b.modelX.size() >= n && b.modelY.size() >= n;
 		const bool haveLabel = b.label.size() >= n;
+		// 3:2 and other uneven cadences: the next pair can last longer or shorter than the previous one,
+		// so every seed vector (model and previous forward vector) is scaled by the ratio of the pair
+		// durations (a displacement is proportional to the time it spans). <= 0 means no scaling.
+		const double k = (nextPairSeconds > 0.0 && prev->pairSeconds > 0.0) ? nextPairSeconds / prev->pairSeconds : 1.0;
+		const bool haveExcluded = b.excluded.size() >= n;
 		if (haveModel)
-			for (size_t i = 0; i < n; ++i) { out.seedX[i] = b.modelX[i]; out.seedY[i] = b.modelY[i]; }
+			for (size_t i = 0; i < n; ++i) { out.seedX[i] = static_cast<float>(k * b.modelX[i]); out.seedY[i] = static_cast<float>(k * b.modelY[i]); }
 
 		if (!prev->valid || !haveLabel)
 		{
@@ -49,7 +54,9 @@ namespace CameraModel
 		{
 			const uint8_t label = b.label[i];
 			uint8_t h = static_cast<uint8_t>(BlockHint::FullSearch);
-			if (label == static_cast<uint8_t>(Label::Overlay))
+			// Only bars and text-guard tiles are excluded. A zero-motion-cluster overlay (a static logo) is
+			// not eligible for the camera narrow window and stays searchable (FullSearch).
+			if (haveExcluded && b.excluded[i] == 1)
 				h = static_cast<uint8_t>(BlockHint::Excluded);
 			else if (cfg.tinyMoverRoi && label == static_cast<uint8_t>(Label::Object) &&
 				b.tinyMover.size() > i && b.tinyMover[i] == 1)
@@ -64,10 +71,10 @@ namespace CameraModel
 				// must agree with is the engine vector, else the model vector.
 				if (eligible && (useFwd || haveModel) && (haveNvof || haveModel))
 				{
-					const double sx = useFwd ? prevFwdX[i] : b.modelX[i];
-					const double sy = useFwd ? prevFwdY[i] : b.modelY[i];
-					const double rx = haveNvof ? nvofX[i] : b.modelX[i];
-					const double ry = haveNvof ? nvofY[i] : b.modelY[i];
+					const double sx = k * (useFwd ? prevFwdX[i] : b.modelX[i]);
+					const double sy = k * (useFwd ? prevFwdY[i] : b.modelY[i]);
+					const double rx = haveNvof ? nvofX[i] : k * b.modelX[i];
+					const double ry = haveNvof ? nvofY[i] : k * b.modelY[i];
 					if (std::hypot(sx - rx, sy - ry) <= agree)
 					{
 						h = static_cast<uint8_t>(BlockHint::NarrowAroundPrediction);

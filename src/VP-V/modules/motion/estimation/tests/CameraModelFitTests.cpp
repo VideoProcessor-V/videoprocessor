@@ -349,6 +349,14 @@ namespace VideoProcessorTest
 				const std::string tag = guarded ? "logo guarded" : "logo unguarded";
 				Require(r.valid && r.confidence >= 0.5 && ModelError(r, truth, f.picture) < kTol, Fmt(tag.c_str(), r));
 				Require(CountLabelInRect(r, f, 10, 8, 4, 4, Label::Overlay) == 16, Fmt(tag.c_str(), r) + " overlay blocks");
+				// Only a text guard excludes; an unguarded static logo is an Overlay that stays searchable.
+				const BlockData& bd = *r.blocks;
+				int excluded = 0;
+				for (int y = 8; y < 12; ++y)
+					for (int x = 10; x < 14; ++x)
+						excluded += bd.excluded[static_cast<size_t>(y) * bd.gridW + x];
+				Require(excluded == (guarded ? 16 : 0), Fmt(tag.c_str(), r) + " excluded flag");
+				Require(bd.absThresholdPx > 0.0f && bd.relThreshold > 0.0f, Fmt(tag.c_str(), r) + " stored thresholds");
 			}
 		}
 
@@ -363,6 +371,12 @@ namespace VideoProcessorTest
 			Require(r.valid && r.confidence >= 0.5, Fmt("credits", r));
 			Require(ModelError(r, PanModel(0, 0), f.picture) < kTol, Fmt("credits model", r));
 			Require(CountLabelInRect(r, f, 60, 90, 120, 6, Label::Overlay) == 120 * 6, Fmt("credits overlay", r));
+			{
+				const BlockData& bd = *r.blocks;
+				int excluded = 0;
+				for (int x = 60; x < 180; ++x) excluded += bd.excluded[static_cast<size_t>(90) * bd.gridW + x];
+				Require(excluded == 120, Fmt("credits", r) + " guarded tiles excluded");
+			}
 		}
 
 		TEST_METHOD(LetterboxWithPan)

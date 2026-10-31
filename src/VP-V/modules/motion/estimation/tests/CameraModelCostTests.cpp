@@ -172,7 +172,7 @@ namespace VideoProcessorTest
 			Report("worst_homography_objects_8k", g, hom);
 			Assert::IsTrue(typical.median <= 20.0, L"typical 8K median over 20 ms");
 			Assert::IsTrue(cut.median <= 20.0, L"8K cut median over 20 ms");
-			Assert::IsTrue(hom.median <= 60.0, L"8K homography+objects median over 60 ms");
+			Assert::IsTrue(hom.median <= 20.0, L"8K homography+objects median over 20 ms");
 		}
 	};
 }
