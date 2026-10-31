@@ -108,7 +108,8 @@
         "dv_tunnel_gpu_unpack",
         "dv_tunnel_fixes",
         "dv_compare_capture_folder",
-        "hdr_inference"
+        "hdr_inference",
+        "resync_event"
       ],
       "planned_keys": [],
       "tiers": "not tiered",

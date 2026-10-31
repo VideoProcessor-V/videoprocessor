@@ -233,6 +233,9 @@
     <ClInclude Include="..\VP-V\modules\input\source_analysis\VpFrameAnalysis.h" />
     <ClInclude Include="..\VP-V\modules\input\source_analysis\VpFrameAnalysisHost.h" />
     <ClInclude Include="..\VP-V\core\FrameAnalysisStore.h" />
+    <ClInclude Include="..\VP-V\core\ResyncCause.h" />
+    <ClInclude Include="..\VP-V\core\Indicator.h" />
+    <ClInclude Include="..\VP-V\core\Ancestry.h" />
     <ClInclude Include="..\VP-V\modules\drive\led_compensation\LedRawTransfer.h" />
     <ClInclude Include="..\VP-V\modules\drive\projector_control\LedDriveArbiter.h" />
     <ClInclude Include="..\VP-V\modules\drive\led_compensation\LedDriveHoldover.h" />

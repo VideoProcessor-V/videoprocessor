@@ -72,6 +72,8 @@
 #include <VP-V/modules/input/signal/DvCompareCaptureSink.h>      // feat/dv-l8: DV comparison capture (diagnostic; WP-17 adapter)
 #include <vprenderer/EarlyUpload.h>
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h>   // WP-23 frame analysis store
+#include <VP-V/modules/input/signal/ResyncCallSites.h>   // R1 call-site helpers
+#include <VP-V/modules/input/signal/ResyncShadow.h>   // resync_event shadow (R1)
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/InterpolationPolicy.h>
 #include <vprenderer/InterpolationTimeline.h>
@@ -1290,6 +1292,9 @@ namespace
 		// frame_analysis_store (WP-23): VP's per-source-frame analysis record + ONE shared luma decode
 		// read by every analyser (VpFrameAnalysisHost.h). Off until the big test; never in Original.
 		bool frameAnalysisStore = false;
+		// resync_event (R1): off | shadow. Shadow detects resync/discontinuity events for the status line
+		// and problem report only; the picture is unchanged. Never in Original.
+		std::string resyncEvent = "off";
 		// entrance_gpu_drain (expert; bug hunt 2026-10-25, root cause open): after the entrance stages
 		// ran on a draw, "flush" submits the GPU queue and "finish" waits for it before libplacebo's
 		// render. Pictures between frames then match plain draws byte for byte (without it libplacebo's
@@ -1562,7 +1567,7 @@ namespace
 			<< settings.sourceResolutionAutoMinConfidence << '|' << settings.sourceResolutionEvidenceShots << '|'
 			<< settings.sourceResolutionEvidenceSeconds << '|' << settings.debandVp << '|' << settings.lowBitrateHandling << '|'
 			<< settings.pipelineOriginalPathway << '|' << settings.pipelineOrder << '|' << settings.pipelineSlotsOff << '|'
-			<< settings.calibrationLutStage << '|' << settings.pipelineEntranceOnce << '|' << settings.frameAnalysisStore << '|' << settings.entranceGpuDrain << '|' << settings.hdrInference << '|'
+			<< settings.calibrationLutStage << '|' << settings.pipelineEntranceOnce << '|' << settings.frameAnalysisStore << '|' << settings.resyncEvent << '|' << settings.entranceGpuDrain << '|' << settings.hdrInference << '|'
 			<< settings.adaptive.cnnResidualStabilise << '|' << settings.adaptive.ssimResidualStabilise << '|'
 			<< settings.ssimBitrateAware << '|' << settings.ssimBitrateFloor << '|' << settings.motionAheadFrames << '|' << settings.opticalFlow << '|' << settings.opticalFlowGlobal << '|'
 			<< settings.opticalFlowGlobalFallback << '|' << settings.opticalFlowCostTrust << '|' << settings.opticalFlowFbCheck << '|'
@@ -3627,6 +3632,7 @@ namespace
 		settings.pipelineOrder.clear();                    // the designed order
 		settings.pipelineEntranceOnce = false;             // B3: per-picture stages, as upstream
 		settings.frameAnalysisStore = false;               // key=frame_analysis_store (WP-23: upstream's own decodes only)
+		settings.resyncEvent = "off";                      // key=resync_event
 		settings.entranceGpuDrain = "off";                 // key=entrance_gpu_drain
 	}
 
@@ -3691,6 +3697,14 @@ namespace
 				settings.frameAnalysisStore = value == "on";
 			else
 				settings.pipelineSettingsProblems += "frame_analysis_store '" + raw + "' (on|off); ";
+		}
+		if (TryGetPipelineString(config, "resync_event", raw))
+		{
+			const std::string value = ConfigFile::NormalizeName(raw);
+			if (value == "off" || value == "shadow")
+				settings.resyncEvent = value;
+			else
+				settings.pipelineSettingsProblems += "resync_event '" + raw + "' (off|shadow; on arrives with the R5 gate); ";
 		}
 		if (TryGetPipelineString(config, "entrance_gpu_drain", raw))
 		{
@@ -7462,6 +7476,8 @@ struct LibplaceboVideoRenderer::Impl
 	FallbackStatus::Registry fallbacks;
 	// WP-23: the frame analysis store, its producer and the shared luma decode (one handle).
 	VpFrameAnalysis::Host frameAnalysis;
+	// R1: the resync event shadow (detector + status lines); never changes the picture.
+	VpResync::Shadow resync;
 	// Dynamic Drive, render side (WP-15): the LED module the outer renderer publishes, the S2 LED
 	// measurement and compensation hooks and their per-frame set-up (DynamicDriveFrame.h).
 	LedDrive::DynamicDriveFrame dynamicDrive{ queuedFrameObserver, fallbacks, GlslHookLoader() };
@@ -7550,6 +7566,10 @@ struct LibplaceboVideoRenderer::Impl
 		frameAnalysis.Configure(settings.frameAnalysisStore && !settings.pipelineOriginalPathway,   // WP-23
 			VpFrameAnalysis::Host::FullLumaReaders(pipelineSlots, settings.opticalFlow, settings.motionAheadFrames,
 				settings.sourceResolution == "auto"));   // running full-luma readers; record readers: none yet
+		// R1: resync shadow. Frames in flight = queue capacity (the member is not reachable here: the default) + motion look-ahead + 2 render-ahead + 1.
+		resync.SetLogger([](const std::string& text) { DebugLog::Log("%s", text.c_str()); });   // R1
+		resync.Configure(settings.resyncEvent == "shadow" && !settings.pipelineOriginalPathway ? VpResync::Shadow::Mode::Shadow : VpResync::Shadow::Mode::Off,
+			AlphaQueuePolicy::HardCapacity(AlphaQueuePolicy::DEFAULT_DESIRED_DEPTH) + static_cast<size_t>((std::max)(0, settings.motionAheadFrames)) + 2 + 1);
 		entrance.Invalidate();
 		std::string state = settings.pipelineOriginalPathway ? "Original pathway (every VP addition off)" :
 			pipelineSlots.IsDefaultOrder() ? "designed order" : "custom order";
@@ -24960,6 +24980,7 @@ bool LibplaceboVideoRenderer::OnVideoState(VideoStateComPtr& videoState)
 		 videoState->videoFrameEncoding != m_videoState->videoFrameEncoding ||
 		 videoState->dolbyVisionTunnel != m_videoState->dolbyVisionTunnel))
 	{
+		if (m_impl) m_impl->resync.NoteRefusal(VpResync::ClassifyStateRefusal(*videoState, *m_videoState));   // R1
 		return false;
 	}
 
@@ -24970,6 +24991,7 @@ bool LibplaceboVideoRenderer::OnVideoState(VideoStateComPtr& videoState)
 	{
 		DebugLog::Log(
 			"display: source transition arrived during renderer-thread initialization; requesting fresh construction");
+		if (m_impl) m_impl->resync.NoteRefusal(VpResync::RefusalReason::InitRace);   // R1
 		return false;
 	}
 
@@ -25010,6 +25032,7 @@ bool LibplaceboVideoRenderer::OnVideoState(VideoStateComPtr& videoState)
 				"display: effective settings changed (%s -> %s); requesting renderer rebuild",
 				currentDisplayRule.empty() ? "base" : currentDisplayRule.c_str(),
 				nextRule.empty() ? "base" : nextRule.c_str());
+			m_impl->resync.NoteRefusal(VpResync::RefusalReason::SettingsRebuild);   // R1
 			return false;
 		}
 		// The published snapshot can lag a UI profile transition by one render
@@ -25032,6 +25055,8 @@ bool LibplaceboVideoRenderer::OnVideoState(VideoStateComPtr& videoState)
 		}
 	}
 	m_videoState = new VideoState(*videoState);
+	if (materialSourceTransition && m_impl)
+		m_impl->resync.ArmInPlaceSourceChange(reinterpret_cast<uintptr_t>(m_videoState.p));   // R1
 	if (materialSourceTransition)
 	{
 		// Source metadata transitions do not alter the pixels already queued, but
@@ -25405,6 +25430,7 @@ void LibplaceboVideoRenderer::EnqueueFrame(VideoFrame& videoFrame,
 			return;
 
 		const size_t queueLimit = m_useFrameQueue ? m_frameQueueMaxSize : 1;
+		uint64_t resyncOverflowSeq = 0;   // R1: the successor that received an overflow-drop gap
 		while (m_frameQueue.size() >= queueLimit)
 		{
 			const auto dropCandidate = std::find_if(
@@ -25464,6 +25490,7 @@ void LibplaceboVideoRenderer::EnqueueFrame(VideoFrame& videoFrame,
 				const bool nextNoFill = afterDropped->gapBefore && afterDropped->gapFrames == 0;
 				afterDropped->gapFrames = merged.gapFrames;
 				afterDropped->gapBefore = merged.gapBefore;
+				resyncOverflowSeq = afterDropped->sourceSequence;   // R1
 				if (!mergeDroppedGap || !nextNoFill)
 					afterDropped->gapCause = droppedNoFill && droppedCause ? droppedCause : "queue overflow drop";
 			}
@@ -25546,6 +25573,25 @@ void LibplaceboVideoRenderer::EnqueueFrame(VideoFrame& videoFrame,
 			const int64_t diagEnqueueQpc = queuedFrame.enqueueQpc;
 			m_frameQueue.push_back(std::move(queuedFrame));
 			m_repeatPreservingDrops = 0;   // carried by this frame
+			if (m_impl && m_impl->resync.Active())   // R1: resync shadow (read-only facts); Off builds no facts
+			{
+				VpResync::EnqueueFacts facts;
+				facts.sequence = sourceSequence;
+				facts.queueGeneration = enqueueGeneration;
+				facts.stateKey = reinterpret_cast<uintptr_t>(frameState.p);
+				facts.formatKey = activePictureIdentity.sourceFormatGeneration;
+				facts.frameCounter = videoFrame.GetCounter();
+				facts.timestampTicks = static_cast<int64_t>(videoFrame.GetTimingTimestamp());
+				facts.ticksPerSecond = m_timingClock ? static_cast<int64_t>(m_timingClock->TimingClockTicksPerSecond()) : 0;
+				facts.gapBefore = gapBefore;
+				facts.gapFrames = gapFrames;
+				facts.gapCause = gapCause;
+				facts.sourceDiscontinuity = videoFrame.IsSourceDiscontinuity() || (file && file->discontinuity);
+				facts.fileFrame = file != nullptr;
+				facts.measuredRateHz = file ? 0.0 : m_measuredFrameRate.load(std::memory_order_relaxed);
+				facts.overflowSuccessorSeq = resyncOverflowSeq;
+				m_impl->resync.OnEnqueue(facts, std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
+			}
 			// Report-a-problem: the frame queued for rendering (queue depth after it).
 			RecordRendererFrame(DiagnosticHistory::StageRendererIngest, videoFrame.GetCounter(),
 				videoFrame.GetTimingTimestamp(), m_frameQueue.size(), 0,
@@ -27741,6 +27787,16 @@ bool LibplaceboVideoRenderer::GetModuleStatus(const char* module, CString& statu
 			take(lines.fallbacks, GetFallbacksStatus(line));
 			take(lines.ledDrive, GetLedDriveStatus(line));
 			take(lines.sourceResolution, GetSourceResolutionStatus(line));
+			{   // R1: the resync shadow lines (false when Off / no renderer)
+				std::string resyncLine, resyncEvents;
+				const bool haveStatus = m_impl && m_impl->resync.StatusLine(resyncLine,
+					std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
+				line = CString(resyncLine.c_str());
+				take(lines.resync, haveStatus);
+				const bool haveEvents = m_impl && m_impl->resync.EventLines(resyncEvents);
+				line = CString(resyncEvents.c_str());
+				take(lines.resyncEvents, haveEvents);
+			}
 		}, text);
 	status = text.c_str();
 	return answered;
@@ -31038,6 +31094,7 @@ void LibplaceboVideoRenderer::BeginQueueGeneration(
 		ClearQueueLocked(reason);
 		if (++m_queueGeneration == 0)
 			++m_queueGeneration;
+		if (m_impl) m_impl->resync.ArmQueueGeneration(m_queueGeneration, reason);   // R1
 		{
 			std::lock_guard<std::mutex> timingGuard(m_conversionTimingMutex);
 			m_conversionTiming.Reset();

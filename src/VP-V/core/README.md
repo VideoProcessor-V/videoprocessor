@@ -19,6 +19,9 @@ Header-only and pure: no libplacebo, no Windows, C++14. The renderer and the CPU
 | `SlotTiming.h` | Per-slot GPU timing and the projected 3090 result (barrier B4) |
 | `FallbackStatus.h` | "Fallbacks engaged: (list) / none" (ADR-0001). Built on fix/r6-baseline and moved here |
 | `FallbackCatalog.h` | The "Fallbacks engaged" entries of the renderer's automatic downgrades (silent-fallbacks batch) |
+| `ResyncCause.h` | Resync vocabulary: `Level`, `Cause` (with tokens and plain text), `RefusalReason` |
+| `Indicator.h` | The central Indicator: counters, stamps derived from a ring of events, readers (`Observe`) |
+| `Ancestry.h` | Ancestor references, headers and the pure validator for derived products |
 | `StatusText.h` | VP's status text: the renderer's `vp` module lines (generic `GetModuleStatus` entry), the Ctrl+I rows, crash-state and report lines, content/room/key-override/nets wording (WP-11) |
 
 ## How a frame runs through the skeleton
@@ -69,3 +72,5 @@ S2 (PRE_OUTPUT): SDR tone shape, DV trims, [Stage 13], LED measurement, LED comp
 [black level], | user shaders |, calibration LUT. S3 (OUTPUT): encoding repair, occlusion mask,
 sigma-delta last. The calibration LUT stays in S2 while libplacebo owns the output encoding
 (see `docs/design/segments-callsites.md`).
+
+`Indicator.h`, `Ancestry.h` and `ResyncCause.h` stay in `src/VP-V/core/` because they are skeleton-owned shared headers, not a pipeline slot (a module folder would need a fake slot). The resync detector and its shadow live in `src/VP-V/modules/input/signal`.

@@ -374,6 +374,9 @@ namespace
 			auto* analysis = control<QCheckBox>(window, Vpv::ObjectName("expert.frame_analysis_store"));
 			require(!analysis->isChecked(), "the frame analysis store is off by default");
 			analysis->setChecked(true);
+			auto* resync = control<QCheckBox>(window, Vpv::ObjectName("expert.resync_event"));
+			require(!resync->isChecked(), "the resync event shadow is off by default");
+			resync->setChecked(true);
 			auto* hdr = control<QComboBox>(window, Vpv::ObjectName("expert.hdr_inference"));
 			require(hdr->currentIndex() == 0, "hdr_inference shows vp by default");
 			hdr->setCurrentIndex(1);
@@ -389,6 +392,7 @@ namespace
 		require(config.TryGetString("vpv", "output_segments_merged", v) && v == "on", "the merged output chain is stored in [vpv]");
 		require(config.TryGetString("vpv", "entrance_gpu_drain", v) && v == "finish", "the entrance GPU drain is stored in [vpv]");
 		require(config.TryGetString("vpv", "frame_analysis_store", v) && v == "on", "the frame analysis store is stored in [vpv]");
+		require(config.TryGetString("vpv", "resync_event", v) && v == "shadow", "the resync event shadow is stored in [vpv]");
 		require(config.TryGetString("vpv", "hdr_inference", v) && v == "original", "the HDR inference choice is stored in [vpv]");
 		requireVpReads(path);
 		{
@@ -1096,6 +1100,9 @@ namespace
 		auto* analysis = control<QCheckBox>(window, Vpv::ObjectName("expert.frame_analysis_store"));
 		require(!analysis->isEnabled() && analysis->toolTip().contains(QStringLiteral("Greyed: the Original pathway is on")),
 			"the frame analysis store is greyed in the Original pathway and says why");
+		auto* resyncShadow = control<QCheckBox>(window, Vpv::ObjectName("expert.resync_event"));
+		require(!resyncShadow->isEnabled() && resyncShadow->toolTip().contains(QStringLiteral("Greyed: the Original pathway is on")),
+			"the resync event shadow is greyed in the Original pathway and says why");
 		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(0);
 		QCoreApplication::processEvents();
 		require(analysis->isEnabled() && !analysis->toolTip().contains(QStringLiteral("Greyed")), "back on the VP-V pathway the reason is gone");

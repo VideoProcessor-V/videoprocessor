@@ -1306,6 +1306,18 @@ namespace Vpv
 				state->host.setValue(section, QStringLiteral("frame_analysis_store"), on ? QStringLiteral("on") : QStringLiteral("off"));
 			});
 
+			// resync_event (R1): shadow detection of resync/discontinuity events; no picture change.
+			auto* resync = new QCheckBox(QStringLiteral("Resync event (shadow)"));
+			resync->setObjectName(ObjectName(QStringLiteral("expert.resync_event")));
+			resync->setToolTip(QStringLiteral("Key resync_event. shadow: detects resync and discontinuity events and shows them on the "
+				"Resync status line and in the problem report, without changing the picture. off: not computed."));
+			form->addRow(QStringLiteral("Resync event"), resync);
+			QObject::connect(resync, &QCheckBox::toggled, resync, [state, section](bool on)
+			{
+				if (state->refreshing || !state->host.setValue) return;
+				state->host.setValue(section, QStringLiteral("resync_event"), on ? QStringLiteral("shadow") : QStringLiteral("off"));
+			});
+
 			// The module order: slot names moved within their zone.
 			auto* order = new QLineEdit;
 			order->setObjectName(ObjectName(QStringLiteral("expert.pipeline_order")));
@@ -1360,7 +1372,7 @@ namespace Vpv
 			layout->addLayout(form);
 			layout->addStretch();
 
-			state->refreshers.push_back([state, lutStage, merged, drain, analysis, hdrInference, order, slotsOff, section]()
+			state->refreshers.push_back([state, lutStage, merged, drain, analysis, resync, hdrInference, order, slotsOff, section]()
 			{
 				const auto get = [&](const char* key) { return state->host.value ? state->host.value(section, QString::fromLatin1(key)).trimmed() : QString(); };
 				{
@@ -1376,6 +1388,13 @@ namespace Vpv
 					const QSignalBlocker blocker(drain);
 					const QString value = get("entrance_gpu_drain").toLower();
 					drain->setCurrentIndex(value == QStringLiteral("finish") ? 2 : value == QStringLiteral("flush") ? 1 : 0);
+				}
+				{
+					const QSignalBlocker blocker(resync);
+					resync->setChecked(get("resync_event").compare(QStringLiteral("shadow"), Qt::CaseInsensitive) == 0);
+					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
+					resync->setEnabled(!original);
+					SetGreyReason(resync, original ? QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).") : QString());
 				}
 				{
 					const QSignalBlocker blocker(analysis);

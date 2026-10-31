@@ -85,6 +85,7 @@ namespace VpvGui
 		lines.content = Wide(dialog.content);
 		if (isAlphaRenderer)
 			lines.dejudder = snapshot.vp.dejudder.text;
+		lines.resync = snapshot.vp.resync.text;
 		lines.fallbacks = snapshot.vp.fallbacks.text;
 		const VpStatusText::CtrlIRows<wchar_t> rows = VpStatusText::BuildCtrlIRows(lines);
 		afterShaderRule.clear();
@@ -142,6 +143,8 @@ namespace VpvGui
 		in.renderStall.Set(stall, Wide(text));
 		const bool output = renderer->GetOutputModeInfo(text);
 		in.outputMode.Set(output, Wide(text));
+		in.resync = snapshot.vp.resync;
+		in.resyncEvents = snapshot.vp.resyncEvents;
 		for (const auto& item : VpStatusText::BundleRendererSettings(in, Narrow))
 			settings.emplace_back(item.first, item.second);
 	}

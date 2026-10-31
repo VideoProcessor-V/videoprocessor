@@ -499,6 +499,14 @@
     <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvHostStageTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\DvSignalL8HoldTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncEventTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncShadowTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\IndicatorTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\tests\AncestryTests.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceWiringTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\DvTunnelMetadataExtensionTests.cpp" />
     <ClCompile Include="DetailRestoreConfigTests.cpp" />
