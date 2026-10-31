@@ -9,6 +9,7 @@
 #include "CppUnitTest.h"
 
 #include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/core/OriginalPathway.h>
 #include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <VP-V/modules/motion/estimation/VectorDemand.h>
 
@@ -258,6 +259,24 @@ namespace VectorDemandTest
 				const std::string s = StatusLine(Decide(w));
 				Assert::IsTrue(s.compare(0, 14, "Vector engine:") == 0, L"prefix");
 			}
+		}
+		TEST_METHOD(OriginalPathwayTurnsVectorDemandOff)
+		{
+			bool found = false;
+			for (const OriginalPathway::Override& o : OriginalPathway::Overrides())
+				if (std::string(o.key) == "vector_demand")
+				{
+					found = true;
+					Assert::AreEqual(std::string("off"), std::string(o.value));
+					Assert::AreEqual(std::string("motion.estimation"), std::string(o.slot));
+				}
+			Assert::IsTrue(found, L"vector_demand is an Original pathway override");
+			// Off decides nothing, whatever wants vectors: the renderer then runs today's path.
+			Input in = Make({ Consumer::GrainMap, Consumer::SigmaDelta });
+			in.enabled = false;
+			const Decision d = Decide(in);
+			Assert::IsTrue(d.mode == Mode::Off && d.reason == Reason::Disabled && d.served == 0 && d.unserved == 0 &&
+				!d.estimate && !d.producer && !d.lowLatencyAllowed);
 		}
 	};
 }

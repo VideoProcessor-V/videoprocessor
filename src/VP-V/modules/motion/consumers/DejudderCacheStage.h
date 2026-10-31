@@ -29,6 +29,9 @@ namespace DejudderCacheStage
 		// sourceSequence != 0: extras may follow this frame (not in mask-only mode; audit
 		// stage10-6d item 3).
 		bool extrasMayFollow = false;
+		// Vector engine on demand: the sigma-delta takes the engine's vectors on a frame whose extras do not run.
+		// The geometry is kept (the vectors need it); the cache is not armed and no hook is added.
+		bool geometryForVectors = false;
 		uint64_t sourceSequence = 0;
 		pl_rect2df sourceCrop{};    // renderImage.crop
 		pl_rect2df targetCrop{};    // target.crop

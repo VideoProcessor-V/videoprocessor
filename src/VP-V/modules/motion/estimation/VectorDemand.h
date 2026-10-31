@@ -271,4 +271,25 @@ namespace VectorDemand
 			s += "; " + UnservedText(d);
 		return s;
 	}
+	// The whole-frame motion statistics every source-statistics consumer reads (source monitor fast-pan,
+	// motion intent), from one engine pair's global vector. One formula for the forward producer hit,
+	// a render-time sample and the backward pair. `sourcePixels` = the global vector in source pixels
+	// per frame (DejudderPolicy::EngineGlobalSourcePixels); z / w = the ambiguity and validity of
+	// the engine's global (usable below 0.9, valid above 0.5).
+	struct GlobalSample
+	{
+		bool usable = false;          // z < 0.9: the source monitor's fast-pan switch may use it
+		bool intentValid = false;     // the intent interpreter may use it
+		double sourcePixels = 0.0;
+		double heightsPerFrame = 0.0; // picture heights per frame
+	};
+	inline GlobalSample SampleGlobal(double sourcePixels, float z, float w, int pictureHeight)
+	{
+		GlobalSample g;
+		g.usable = z < 0.9f;
+		g.sourcePixels = sourcePixels;
+		g.intentValid = w > 0.5f && z < 0.9f && pictureHeight > 0;
+		g.heightsPerFrame = pictureHeight > 0 ? sourcePixels / pictureHeight : 0.0;
+		return g;
+	}
 }
