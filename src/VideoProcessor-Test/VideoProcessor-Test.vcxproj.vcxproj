@@ -501,6 +501,7 @@
     <ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncEventTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncShadowTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncDriveTests.cpp" />
     <ClCompile Include="..\VP-V\tests\IndicatorTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>

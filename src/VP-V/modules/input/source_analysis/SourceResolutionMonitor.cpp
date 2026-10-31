@@ -438,6 +438,13 @@ if (tile < int(tiles) && g.y < ts) {
 				Fail("the readback failed", seconds);
 				continue;
 			}
+			// R3 (resync_event on): a copy of a frame from before a FULL resync is not evidence of
+			// the new source. Keys are 0 when not driven: never dropped.
+			if (done.streamKey != streamKey.load(std::memory_order_acquire))
+			{
+				staleJobsDropped.fetch_add(1, std::memory_order_relaxed);
+				continue;
+			}
 			// Tests only (gate r3 2026-10-18): VP_TEST_SOURCE_MONITOR_DIGEST=1 logs a digest of the
 			// tiles the monitor read, so a GPU test can show its input is bit-identical whatever
 			// runs after it (the detail stages). Off in ordinary runs; read per readback (a few a
@@ -581,6 +588,7 @@ if (tile < int(tiles) && g.y < ts) {
 		}
 		Job& meta = pendingMeta[slot];
 		meta.values.clear();
+		meta.streamKey = streamKey.load(std::memory_order_acquire);   // R3 (0 when not driven)
 		meta.tiles = tiles;
 		meta.tileSize = tileSize;
 		meta.baseTiles = (std::min)(baseTiles, tiles);
@@ -645,6 +653,12 @@ if (tile < int(tiles) && g.y < ts) {
 				ResetEvidence(cause);
 			}
 			if (!have) continue;
+			// R3: a job queued before a FULL resync whose reset ran first (keys 0 when not driven).
+			if (current.streamKey != streamKey.load(std::memory_order_acquire))
+			{
+				staleJobsDropped.fetch_add(1, std::memory_order_relaxed);
+				continue;
+			}
 			Analyse(current);
 			FlushHistory(false);
 		}

@@ -106,6 +106,22 @@ namespace LedDrive
 		// goes backwards. Any thread.
 		void ResetLookahead();
 		uint64_t LookaheadEpoch() const override { return lookaheadEpoch.load(std::memory_order_acquire); }
+		// R3 (resync_event on), render thread, before the frame's BeginFrame. A FULL resync at the
+		// source frame `sequence`: the look-ahead starts over (ResetLookahead); the gain is held at
+		// its last value until the new source's first measurement (compensate does not step without
+		// statistics); CNTR goes to its safe baseline (50, no black raise) at once and the CNTR
+		// assist's ceiling, bias, hold and cut recovery are dropped, so the old source's CNTR is never
+		// held above the new source's need (owner rule); the frame-period smoothing restarts at the
+		// source rate (0 = unknown: from the next frame's interval). Compensate only: the script
+		// thread owns CNTR in internal_script. Any thread (takes the module lock).
+		void OnSourceRestart(uint64_t sequence, double sourceFps);
+		// R3: a timing event (a measured-rate step): the frame-period smoothing restarts at the new
+		// rate (0 = unknown: from the next frame's interval).
+		void ResetPeriodSmoothing(double sourceFps);
+		// Tests: the smoothed frame period and whether compensate has statistics.
+		double FramePeriodMsForTest() const { std::lock_guard<std::mutex> guard(mutex); return framePeriodMs; }
+		bool HaveStatsForTest() const { std::lock_guard<std::mutex> guard(mutex); return haveStats; }
+		int PairedContrastForTest() const;
 		// Tests: the stored prediction for a source sequence (uncorrected).
 		bool PredictionFor(uint64_t sequence, FrameStats& out) const;
 		// Hunt 3: the most predictions kept (sequence 0 never prunes them).
@@ -293,6 +309,10 @@ namespace LedDrive
 		uint64_t configGeneration = 0;
 		StatsBuilder statsBuilder;
 		uint64_t lastMeasuredSequence = 0;
+		// R3: the source frame of the last OnSourceRestart (0 = none): measurements of older frames
+		// (readbacks still in flight from the old source) are not the new source's first measurement.
+		// Cleared with the look-ahead (a sequence restart).
+		uint64_t restartSequence = 0;
 		bool haveStats = false;
 		FrameStats latest;
 		bool veilValid = false;   // delta 11: the veil estimate has a value
@@ -368,6 +388,7 @@ namespace LedDrive
 		// queuedLight, led_latency_ms after the driver's next send slot (bug hunt 2).
 		std::vector<std::pair<double, double>> LedLandingsLocked(int pendingLevel) const;
 		void HoldContrastLocked();
+		void ResetPeriodSmoothingLocked(double sourceFps);
 		// mode: script with script_smoothing: on (step 7b): VP's gain bridging
 		// the projector's whole CNTR steps; smoothing is set by the script
 		// thread while it applies.
