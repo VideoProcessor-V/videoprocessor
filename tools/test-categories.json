@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "about": "Category of tests that use the GPU and carry no Category attribute (or whose file must stay untouched). Categories: GpuHardware, GpuOnScreen, MeterHardware, ProjectorHardware are excluded from the CPU run; GpuWarp renders on WARP and stays in it; Cpu marks a reviewed false positive of the name heuristic. First matching entry wins. Checked by tools/check_test_categories.py; the CPU filter comes from tools/gen_test_filters.py. Copyright(C) 2026 VP-V contributors; SPDX-License-Identifier: GPL-3.0-only",
+ "about": "Category of tests that use the GPU and carry no Category attribute (or whose file must stay untouched). Categories: GpuHardware, GpuOnScreen, MeterHardware, ProjectorHardware, Slow are excluded from the CPU run; GpuWarp renders on WARP and stays in it; Cpu marks a reviewed false positive of the name heuristic. First matching entry wins. Checked by tools/check_test_categories.py; the CPU filter comes from tools/gen_test_filters.py. Copyright(C) 2026 VP-V contributors; SPDX-License-Identifier: GPL-3.0-only",
  "scope": "Native-test sources named *Tests.cpp under src. Not covered: the Beta host tests (VideoProcessor-BetaTests/BetaGpuTests.cpp, BetaTestHost.cpp) use no TEST_METHOD macros, so the scanner cannot see them; the checker also does not follow helper calls, so a test that reaches the GPU only through a helper needs a Gpu in its name or a manifest entry.",
  "entries": [
   {
@@ -310,6 +310,104 @@
    "category": "Cpu",
    "file": "src/VP-V/tests/FallbackCatalogTests.cpp",
    "note": "Name mentions the GPU; the body is CPU only (MotionConsumerFailures catalog logic, reviewed)."
+  },
+  {
+   "kind": "methodPrefix",
+   "value": "RealClipCadenceAndFilmClock",
+   "category": "Slow",
+   "file": "src/VideoProcessor-Test/RealFootageSuiteTests.cpp",
+   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+  },
+  {
+   "kind": "methodPrefix",
+   "value": "WholeHookChainCombinationMatrix",
+   "category": "Slow",
+   "file": "src/VP-V/tests/WholeHookChainHookTests.cpp",
+   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+  },
+  {
+   "kind": "methodPrefix",
+   "value": "RenditionsReBaseToTheirExactSize",
+   "category": "Slow",
+   "file": "src/VideoProcessor-Test/SourceResolutionLatchTests.cpp",
+   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+  },
+  {
+   "kind": "methodPrefix",
+   "value": "UpscalesEngageAtACutWithTheirClassAndKernel",
+   "category": "Slow",
+   "file": "src/VideoProcessor-Test/SourceResolutionLatchTests.cpp",
+   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+  },
+  {
+   "kind": "methodPrefix",
+   "value": "RealClipPlayerPulldown",
+   "category": "Slow",
+   "file": "src/VideoProcessor-Test/RealFootageSuiteTests.cpp",
+   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+  },
+  {
+   "kind": "methodPrefix",
+   "value": "RealClipSourceResolutionCutsAndLatch",
+   "category": "Slow",
+   "file": "src/VideoProcessor-Test/RealFootageSuiteTests.cpp",
+   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+  },
+  {
+   "kind": "methodPrefix",
+   "value": "StreamSwitchingRenditionsWithoutACut",
+   "category": "Slow",
+   "file": "src/VideoProcessor-Test/SourceResolutionDetectorTests.cpp",
+   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+  },
+  {
+   "kind": "methodPrefix",
+   "value": "SubtitleGpuComposesBeforeCropAcrossAspectChangesAndNlsRecovery",
+   "category": "Slow",
+   "file": "src/VideoProcessor-Test/LibplaceboLutParserTests.cpp",
+   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+  },
+  {
+   "kind": "methodPrefix",
+   "value": "SoftNativeScenesWithQuickCutsAreNeverDeclaredLower",
+   "category": "Slow",
+   "file": "src/VideoProcessor-Test/SourceResolutionDetectorTests.cpp",
+   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+  },
+  {
+   "kind": "methodPrefix",
+   "value": "RealClipDiscontinuities",
+   "category": "Slow",
+   "file": "src/VideoProcessor-Test/RealFootageSuiteTests.cpp",
+   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+  },
+  {
+   "kind": "methodPrefix",
+   "value": "MixedScreenGuardOverAnEngagedUpscale",
+   "category": "Slow",
+   "file": "src/VideoProcessor-Test/SourceResolutionLatchTests.cpp",
+   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+  },
+  {
+   "kind": "methodPrefix",
+   "value": "GeneratedBlurSoftensWholeOverlayKeepingGlyphsAndOutsidePictureSharp",
+   "category": "Slow",
+   "file": "src/VideoProcessor-Test/LibplaceboLutParserTests.cpp",
+   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+  },
+  {
+   "kind": "methodPrefix",
+   "value": "SourceResolutionUnderQueueFaults",
+   "category": "Slow",
+   "file": "src/VideoProcessor-Test/QueueStressLaneTests.cpp",
+   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+  },
+  {
+   "kind": "methodPrefix",
+   "value": "SubtitleCutPasteGpuReadbackUsesCurrentPixelsAndDestinationFirstOverlap",
+   "category": "Slow",
+   "file": "src/VideoProcessor-Test/LibplaceboLutParserTests.cpp",
+   "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
   }
  ]
 }
