@@ -191,3 +191,51 @@ Cost test: 240×135 (4K, 16 px) and 480×270 (8K) fields, typical (temporal pan,
 2. Release x64 build green (build slot taken/released), CPU tier green
    (`python -I tools/gen_test_filters.py --cpu`, vstest `/Logger:trx`, read the TRX).
 3. `python tools/check_module_manifests.py` and `python tools/check_test_categories.py` = 0 problems.
+
+## Revision 1 (Opus planner, continuation, 2026-10-31) — binding additions
+
+R1. PCH: test `.cpp` files `#include "pch.h"` first (like `EstimatorHookTests.cpp`) and are
+    registered exactly like it (Win32 `ExcludedFromBuild`). MODULE `.cpp` files (no pch.h) are
+    registered in the test project with per-file `<PrecompiledHeader>NotUsing</PrecompiledHeader>`
+    and the same Win32 exclusion.
+R2. Phase-2 optimisation API (data/CPU only, nothing wired) — new item 9, owned by W4:
+    `GlobalModelSearchHints.h/.cpp`, namespace `CameraModel`:
+    - `enum class SceneAction : uint8_t { Normal, SkipAcrossCut, SeedFromNextPair, BridgeFlash,
+      FadeNormalised };` — `SkipAcrossCut` = matcher must not search across this pair;
+      `SeedFromNextPair` = seed the new scene from the first post-cut pair in the queue;
+      `BridgeFlash` = outlier frame, use the bridged model; `FadeNormalised` = use zero-mean
+      (gain/offset-normalised) matching cost for this pair.
+    - `enum class BlockHint : uint8_t { FullSearch = 0, NarrowAroundPrediction = 1,
+      FinerGrid = 2, Excluded = 3 };`
+    - `struct HintConfig { double minConfidence = 0.7; double agreeSigmas = 2.0;
+      double narrowRadiusSigmas = 4.0; bool temporalSeed = true; bool tinyMoverRoi = true;
+      bool fadeNormalised = true; bool cutSkip = true; bool flashBridge = true; }`
+      (every switch defaults ON in this data API; phase 2 adds the user/internal keys).
+    - `struct SearchHints { SceneAction scene; double fadeGain, fadeOffset; int gridW, gridH;
+      std::vector<uint8_t> hint; std::vector<float> seedX, seedY; double narrowRadiusPx;
+      struct Roi { int bx0, by0, bx1, by1; }; std::vector<Roi> rois; uint32_t narrowBlocks,
+      fullBlocks, finerBlocks; }`.
+    - `SearchHints BuildHints(const HintConfig&, const CameraMotion* prev, const float* prevFwdX,
+      const float* prevFwdY /*previous measured vectors = per-block temporal seed, may be null*/,
+      const float* nvofX, const float* nvofY /*may be null*/, bool cut, bool fade, bool flash,
+      double fadeGain, double fadeOffset, double precisionPx);`
+      Rules: block → `NarrowAroundPrediction` only if prev valid, confidence ≥ minConfidence,
+      label Camera or Object-with-tracked-object-model, and the temporal seed (previous vector,
+      else model vector) agrees with the NVOF seed within `agreeSigmas·precisionPx` (if NVOF is
+      null, agreement with the model vector is required instead); otherwise `FullSearch`
+      (ESCALATION: phase 2 re-runs a narrow block that fails verification as FullSearch).
+      Blocks labelled Object whose `pixelResidual` flagged a tiny mover → `FinerGrid`, and
+      4-connected groups of them become `rois` (bounding boxes, block units, deterministic
+      raster order) for the NVOF ROI / finer grid. Overlay blocks from bars/text guard →
+      `Excluded`. Scene action from the flags (cut beats flash beats fade). Radius =
+      narrowRadiusSigmas·precisionPx (relative, no constants). Absent/invalid prev → all
+      FullSearch (byte-identical to today's search).
+    - Tests in `CameraAccessorTests.cpp` (or a new `CameraModelHintsTests.cpp`): pan → narrow
+      majority; disagreeing NVOF block → FullSearch; tiny mover → FinerGrid + one ROI; cut →
+      SkipAcrossCut; null prev → all FullSearch.
+R3. `PairInput` also carries `double fadeGain = 1, fadeOffset = 0` (from the store's luma
+    means; informational, copied into the record as `fadeGain/fadeOffset`) so the fit stays valid
+    through fades and phase 2 can normalise matching.
+R4. `BlockData` also carries `std::vector<uint8_t> tinyMover` (1 = pixelResidual flagged) so
+    the hints and phase-2 ROI do not re-threshold.
+R5. The planner (not the integrator) writes `docs/design/plan19-phase2-optimisations.md`.
