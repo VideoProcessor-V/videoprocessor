@@ -123,7 +123,8 @@ def judge(metric, cand, base):
         tr = _trend_to1(c, b) if kind == "band" else _trend(delta, 0.0, kind == "kept")
         if not _hard_fail(kind, tol, c):
             return delta, tr, "PASS"
-        if b is not None and _hard_fail(kind, tol, b) and _not_worse(kind, c, b):
+        # Input-relative checks compare with the candidate's own input: "input-limited" cannot apply.
+        if "_vs_input" not in metric and b is not None and _hard_fail(kind, tol, b) and _not_worse(kind, c, b):
             return delta, tr, "LIMIT"
         return delta, tr, "FAIL"
     if b is None:

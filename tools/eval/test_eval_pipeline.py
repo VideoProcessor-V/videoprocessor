@@ -406,6 +406,13 @@ class InputRelativeGates(unittest.TestCase):
         self.assertEqual(j(0.5, 0.98), "FAIL")    # default passes
         self.assertEqual(j(0.98, 0.5), "PASS")
 
+    def test_vs_input_checks_never_limit(self):
+        # Averaging grain away against the candidate's own input fails even when the default does the same.
+        j = lambda c, b: er.judge("grain_keep_vs_input_Y", c, b)[2]  # noqa: E731
+        self.assertEqual(j(0.5, 0.5), "FAIL")
+        self.assertEqual(j(0.8, 0.5), "FAIL")
+        self.assertEqual(j(0.98, 0.5), "PASS")
+
     def test_na_reasons(self):
         notes = {}
         m = eh.compute_metrics(self.truth[:2], self.inp[:2], {"gop": 24}, False, self.inp[:2], notes)
