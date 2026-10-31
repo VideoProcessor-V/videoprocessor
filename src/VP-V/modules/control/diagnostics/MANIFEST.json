@@ -6,6 +6,7 @@
   "status": "partial",
   "code_location": "partly migrated",
   "live_files": [
+    "src/VP-V/modules/control/diagnostics/DiagnosticOverrides.h",
     "src/VP-V/modules/control/diagnostics/StateReport.cpp",
     "src/VP-V/modules/control/diagnostics/CrashState.cpp",
     "src/VP-V/modules/control/diagnostics/CrashState.h",

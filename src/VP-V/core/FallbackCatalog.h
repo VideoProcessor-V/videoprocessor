@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 // The "Fallbacks engaged" entries of the renderer's automatic downgrades, built in ONE place
 // (module findings 2026-10-24, the silent-fallbacks batch; ADR-0001 no silent fallbacks).
@@ -211,6 +212,19 @@ namespace FallbackCatalog
 	};
 	inline LookAheadFailures MotionAheadWorker() { return LookAheadFailures("motion look-ahead", "no optical-flow look-ahead for some frames"); }
 	inline LookAheadFailures SourceResolutionWorker() { return LookAheadFailures("source resolution look-ahead", "resolution judged on arrival only"); }
+
+	// ---- control.diagnostics: diagnostic overrides (bug hunt 39 #6) -----------------------------
+	// Test / debug switches set in the environment outside a test harness
+	// (VpDiagnostics::OverridesToShow). Engaged while any is set; the names only, never values.
+	inline Decision DiagnosticOverrides(const std::vector<std::string>& names)
+	{
+		if (names.empty())
+			return Released("diagnostic override");
+		std::string list;
+		for (size_t i = 0; i < names.size(); ++i)
+			list += (i ? ", " : "") + names[i];
+		return Engaged("diagnostic override", "active: " + list);
+	}
 
 	// ---- motion.consumers -----------------------------------------------------------------------
 	// A picture between frames could not be made on the GPU (the de-judder warp, the rendered warp

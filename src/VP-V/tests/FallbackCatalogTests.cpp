@@ -10,8 +10,11 @@
 
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/motion/estimation/ProducerRecovery.h>
+#include <VP-V/modules/control/diagnostics/DiagnosticOverrides.h>
 
+#include <cmath>
 #include <string>
+#include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 using namespace FallbackCatalog;
@@ -234,6 +237,46 @@ namespace FallbackCatalogTest
 			Assert::AreEqual(std::string("source resolution look-ahead"), s.id);
 			Assert::IsTrue(Has(s, "resolution judged on arrival only"));
 			Assert::IsFalse(source.Note(false, std::string(), 1).engaged);
+		}
+
+		// Bug hunt 39 #6/#7: test and debug switches are visible outside a test harness; numbers
+		// from the environment are parsed strictly.
+		TEST_METHOD(DiagnosticOverridesAreVisibleAndNumbersStrict)
+		{
+			using namespace VpDiagnostics;
+			const wchar_t block[] = L"=C:=C:\\x\0PATH=C:\\Windows\0vp_test_adapter=Intel\0VP_DEBUG_PHASE_AB=1\0"
+				L"VP_CROP_TRACE_FRAMES=10\0VP_RAW_CAPTURE_PATH=D:\\raw\0VP_TEST_EMPTY=\0VP_DISABLE_AVX2=1\0"
+				L"VP_RENDERER_FILTER_LOG=x\0VP_TEST_ADAPTER=dup\0\0";
+			const std::vector<std::string> names = ScanEnvironmentBlock(block);
+			const std::vector<std::string> want = { "VP_DEBUG_PHASE_AB", "VP_DISABLE_AVX2", "VP_RAW_CAPTURE_PATH", "VP_TEST_ADAPTER" };
+			Assert::IsTrue(names == want, L"overrides only: no trace/log switches, no empty values, unique, sorted");
+			Assert::IsTrue(ScanEnvironmentBlock(nullptr).empty());
+			Assert::IsTrue(IsTestHarnessImage("testhost.exe") && IsTestHarnessImage("vstest.console.exe") &&
+				IsTestHarnessImage("TE.ProcessHost.exe"));
+			Assert::IsFalse(IsTestHarnessImage("VideoProcessor.exe"));
+			Assert::IsTrue(OverridesToShow(names, true).empty(), L"inside the harness: nothing shown");
+			Assert::AreEqual(std::string("diagnostic override active: VP_DEBUG_PHASE_AB, VP_DISABLE_AVX2, VP_RAW_CAPTURE_PATH, VP_TEST_ADAPTER"),
+				StatusLine(OverridesToShow(names, false)));
+			Assert::AreEqual(std::string(), StatusLine({}));
+			const Decision d = DiagnosticOverrides(names);
+			Assert::IsTrue(d.engaged);
+			Assert::AreEqual(std::string("diagnostic override"), d.id);
+			Assert::IsTrue(Has(d, "active: VP_DEBUG_PHASE_AB, "));
+			Assert::IsFalse(DiagnosticOverrides({}).engaged);
+			// This process is a test host: nothing to show whatever is set.
+			Assert::IsTrue(IsTestHarnessProcess());
+			Assert::IsTrue(OverridesToShow().empty());
+
+			double v = 0.0;
+			Assert::IsTrue(ParseStrictNumber(" 12.5 ", v));
+			Assert::AreEqual(12.5, v);
+			Assert::IsTrue(ParseStrictNumber("-1", v) && v == -1.0);
+			Assert::IsTrue(ParseStrictNumber("1e3", v) && v == 1000.0);
+			for (const char* bad : { "", " ", "nan", "NaN", "inf", "-inf", "infinity", "12abc", "0x10", "1e999", "1.2.3x", "--" })
+				Assert::IsFalse(ParseStrictNumber(bad, v), L"rejected");
+			Assert::AreEqual(7.0, StrictNumber("nan", 7.0, 0.0, 10.0), L"the fallback");
+			Assert::AreEqual(10.0, StrictNumber("1e30", 7.0, 0.0, 10.0), L"clamped, never an undefined cast");
+			Assert::AreEqual(0.0, StrictNumber("-5", 7.0, 0.0, 10.0));
 		}
 
 		TEST_METHOD(MotionConsumerGpuFailuresAreVisibleWhileRecent)
