@@ -295,7 +295,9 @@ namespace Tests
 			Assert::IsTrue(d.PendingDiscontinuity(), L"the next kept frame carries the break");
 		}
 
-		TEST_METHOD(PulldownFixedRuleOffOnlyWhileRelatching)
+		// Bug hunt 35 #3 / 25a R5: the fixed 0.5% rule stays on in `on` as a backstop; a move the timing
+		// event already re-latched never trips it.
+		TEST_METHOD(PulldownFixedRuleIsABackstopWhileRelatching)
 		{
 			Pulldown::Detector rule;
 			FeedThreeTwo(rule, 400, 60.0);
@@ -306,7 +308,59 @@ namespace Tests
 			relatch.SetTimingRelatch(true);
 			FeedThreeTwo(relatch, 400, 60.0);
 			relatch.Next(false, false, 59.0);
-			Assert::IsTrue(relatch.Locked(), L"on: no fixed rule; the timing event decides");
+			Assert::IsFalse(relatch.Locked(), L"on: the 0.5% rule is the backstop for an unseen move");
+			Pulldown::Detector seen;
+			seen.SetTimingRelatch(true);
+			FeedThreeTwo(seen, 400, 60.0);
+			// 0.7%: above the 0.5% rule, inside the lock's resolution (one frame in 120 at 60 Hz).
+			Assert::IsFalse(seen.RelatchSignalHz(60.0 * 0.993));   // the timing event re-latched first
+			seen.Next(false, false, 60.0 * 0.993);
+			Assert::IsTrue(seen.Locked(), L"a re-latched move never trips the rule");
+			// 0.3%: under the rule and no timing event: the lock holds.
+			Pulldown::Detector under;
+			under.SetTimingRelatch(true);
+			FeedThreeTwo(under, 400, 60.0);
+			under.Next(false, false, 60.0 * 1.003);
+			Assert::IsTrue(under.Locked());
+		}
+
+		// 25a R5: entering `on` only latches, as the pulldown's Cursor does. Shadow -> on keeps the
+		// Indicator; its history (the Start FULL, earlier MINORs) must not reset the readers again.
+		TEST_METHOD(EnteringOnLatchesWithoutReplayingTheEra)
+		{
+			Rig r(Shadow::Mode::Shadow);
+			r.Push();
+			r.PushGap("missed frames", 1);
+			r.Push();
+			r.shadow.Configure(Shadow::Mode::On, 16);
+			const uint64_t s = r.Push();
+			Assert::AreEqual(VpIndicator::kAllCounters, r.Seal(s), L"the Indicator itself reports everything on its first observe");
+			for (size_t i = 0; i < Drive::kReaders; ++i)
+				Assert::AreEqual(VpIndicator::CounterMask(0), r.drive.Take(static_cast<Reader>(i)), L"latched: no reset on entering on");
+			// A real event after that reaches its readers as before.
+			const uint64_t g = r.PushGap("missed frames", 2);
+			r.Seal(g);
+			Assert::AreEqual(M, r.drive.Take(Reader::RenderAhead));
+			// An event AT the first observed frame still acts: on -> shadow (Detach) -> on with a FULL there.
+			r.shadow.Configure(Shadow::Mode::Shadow, 16);
+			r.drive.Detach();
+			r.PushGap("missed frames", 1);   // during shadow: history only
+			r.shadow.Configure(Shadow::Mode::On, 16);
+			r.shadow.ArmQueueGeneration(2, "live queue reset");
+			r.gen = 2;
+			const uint64_t f = r.Push();
+			r.Seal(f);
+			Assert::IsTrue((r.drive.Take(Reader::Libplacebo) & F) != 0, L"the FULL at the first observed frame acts");
+			Assert::AreEqual(VpIndicator::CounterMask(0), r.drive.Take(Reader::Libplacebo));
+			// Off -> on: a new era; the Start FULL at its first frame acts once.
+			r.shadow.Configure(Shadow::Mode::Off, 16);
+			r.drive.Detach();
+			r.shadow.Configure(Shadow::Mode::On, 16);
+			const uint64_t n = r.Push();
+			r.Seal(n);
+			Assert::IsTrue((r.drive.Take(Reader::SceneDetector) & F) != 0, L"a new era's Start resets once");
+			r.Seal(r.Push());
+			Assert::AreEqual(VpIndicator::CounterMask(0), r.drive.Take(Reader::SceneDetector));
 		}
 
 		TEST_METHOD(TimelineReanchorKeepsTheCadence)
