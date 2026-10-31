@@ -20,7 +20,7 @@ BEGIN_RE = re.compile(r'\bBEGIN_TEST_METHOD_ATTRIBUTE\s*\(\s*(\w+)\s*\)')
 CAT_RE = re.compile(r'TEST_METHOD_ATTRIBUTE\s*\(\s*L"Category"\s*,\s*L"(\w+)"\s*\)')
 
 # Categories that must not run in the CPU CI (a real device, a screen, a meter, a projector).
-EXCLUDED_FROM_CPU = ['GpuHardware', 'GpuOnScreen', 'MeterHardware', 'ProjectorHardware']
+EXCLUDED_FROM_CPU = ['GpuHardware', 'GpuOnScreen', 'MeterHardware', 'ProjectorHardware', 'Slow']
 KNOWN_CATEGORIES = EXCLUDED_FROM_CPU + ['GpuWarp', 'Cpu']
 
 
