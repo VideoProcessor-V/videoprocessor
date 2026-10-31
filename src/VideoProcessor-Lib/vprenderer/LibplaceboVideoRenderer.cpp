@@ -7150,6 +7150,7 @@ struct LibplaceboVideoRenderer::Impl
 	uint64_t sourceUploadCpuIntervalSamples = 0;
 	pl_tex subtitleBoxTexture = nullptr;
 	SubtitleMeasurementWorker subtitleMeasurementWorker;
+	bool subtitleCueLossInWindow = false;   // silent-fallbacks: an unresolved cue inside the current 5 s window
 	bool subtitleWorkerLoss = false;   // silent-fallbacks: the last 5 s window dropped or failed measurement jobs
     SubtitlePendingMeasurementGuard subtitlePendingGuard;
     struct SubtitlePerfWindow {
@@ -10975,6 +10976,9 @@ struct LibplaceboVideoRenderer::Impl
 
 	void EnsureAutoLimitedFallback(const char* trigger)
 	{
+		if (!(outputPlan.request.presentation == LibplaceboOutput::PresentationRequest::AUTO &&
+			outputPlan.request.range == LibplaceboOutput::RangeRequest::LIMITED))
+			SyncFallback(FallbackCatalog::OutputRangeComposed(false, std::string()));   // silent-fallbacks: request no longer AUTO+LIMITED
 		if (swapchainBlit)
 			return;
 		if (!LibplaceboOutput::ShouldFallbackToComposed(outputPlan, actualOutput))
@@ -12599,6 +12603,7 @@ struct LibplaceboVideoRenderer::Impl
 		if (none != selection.end())
 		{
 			SetShaderStatus("NLS: Off");
+			SyncFallback(FallbackCatalog::GeometrySafeFit(false));   // silent-fallbacks: NLS off releases a stale safe-fit entry
 			MadVRShaderLoader::SetRuntimeShaderSelection(
 				requestedShaderSelector, requestedShaderSelector,
 				NlsMappingMode::OFF);
@@ -12614,6 +12619,7 @@ struct LibplaceboVideoRenderer::Impl
 		{
 			// Custom GLSL hooks without NLS: ordinary lens-aware presentation.
 			SetShaderStatus("NLS: Off, custom: " + std::to_string(customCount));
+			SyncFallback(FallbackCatalog::GeometrySafeFit(false));   // silent-fallbacks: NLS off releases a stale safe-fit entry
 			MadVRShaderLoader::SetRuntimeShaderSelection(
 				requestedShaderSelector, requestedShaderSelector,
 				NlsMappingMode::OFF);
@@ -19669,10 +19675,9 @@ struct LibplaceboVideoRenderer::Impl
                     if(subtitlePerf.pending-subtitlePerf.recovered<=4)
                         DebugLog::Log("SUBTITLE PENDING: frame=%llu reason=%s",sourceSequence,subtitlePendingGuard.DecisionReason());
                     SyncFallback(FallbackCatalog::SubtitleDetection(FallbackCatalog::SubtitleLoss::CueDropped));   // silent-fallbacks
+                    subtitleCueLossInWindow=true;
                 }
             }
-            else if(!subtitleWorkerLoss)
-                SyncFallback(FallbackCatalog::SubtitleDetection(FallbackCatalog::SubtitleLoss::None));   // next good cue releases
             subtitleBoxPresentation.RefreshReferencePixels(currentSubtitlePreview,analysisSource);
             subtitlePreview=&currentSubtitlePreview;
             subtitleBoxResult = subtitleBoxPresentation.Consume(*subtitlePreview, activeSettings.subtitleHoldMs,subtitleFrameMs);
@@ -20008,10 +20013,15 @@ struct LibplaceboVideoRenderer::Impl
             const double seconds=(subtitlePerfNow-subtitlePerfTick)/1000.0;
             const auto worker=subtitleMeasurementWorker.TakeDiagnostics();
             const auto jobs=worker.fullScans+worker.refreshes+worker.failed;
-            subtitleWorkerLoss=worker.failed>0||worker.dropped>0;   // silent-fallbacks: visible, released by the next good cue
+            subtitleWorkerLoss=worker.failed>0||worker.dropped>0;   // silent-fallbacks: visible, released when a whole window is clean
             if(subtitleWorkerLoss)
                 SyncFallback(FallbackCatalog::SubtitleDetection(worker.failed>0 ?
                     FallbackCatalog::SubtitleLoss::WorkerError : FallbackCatalog::SubtitleLoss::JobsDropped));
+            else if(subtitleCueLossInWindow)
+                SyncFallback(FallbackCatalog::SubtitleDetection(FallbackCatalog::SubtitleLoss::CueDropped));
+            else
+                SyncFallback(FallbackCatalog::SubtitleDetection(FallbackCatalog::SubtitleLoss::None));
+            subtitleCueLossInWindow=false;
             DebugLog::Log("SUBTITLE PERFORMANCE CPU: optimization=%s window_s=%.3f frames=%llu consume_avg_ms=%.3f consume_peak_ms=%.3f pending_frames=%llu verified_pending=%llu full_scans=%llu full_scan_hz=%.2f full_avg_ms=%.3f full_peak_ms=%.3f refreshes=%llu refresh_hz=%.2f refresh_avg_ms=%.3f refresh_peak_ms=%.3f worker_busy_ms=%.3f queue_wait_avg_ms=%.3f queue_wait_peak_ms=%.3f queued=%zu active=%d ready=%zu dropped_jobs=%llu failed_jobs=%llu request_misses=%llu",
                 SubtitleDetectionOptimizationName(activeSettings.subtitleDetectionOptimization),seconds,subtitlePerf.frames,subtitlePerf.frames?subtitlePerf.consumeMs/subtitlePerf.frames:0,subtitlePerf.consumePeak,
                 subtitlePerf.pending,subtitlePerf.recovered,worker.fullScans,worker.fullScans/seconds,
