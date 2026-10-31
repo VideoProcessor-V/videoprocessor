@@ -43,6 +43,11 @@ namespace VideoProcessorTest
 		{
 			Dejudder::Settings s = DejudderTestSettings();
 			s.lowRes = lowRes;
+			s.lowResAll = lowRes;   // as the renderer's default (dejudder_low_res all)
+			// The synthetic texture's 4-px detail aliases at the inner's quarter size (match error ~11 codes on the
+			// exact vector), so the low-resolution case uses a tolerance that trusts the exact match.
+			if (lowRes)
+				s.matchTolerance = 16.0f;
 			s.globalPrior = true;
 			s.estCandidates = true;
 			s.estGate = true;
@@ -75,7 +80,7 @@ namespace VideoProcessorTest
 		}
 
 		static DejudderField Run(TargetLutGpuFixture& fixture, bool object, std::shared_ptr<CameraModel::GuidanceFrame> guidance,
-			Dejudder::MotionWarp::CameraGuidanceUse* use = nullptr, int w = kW, int h = kH, bool lowRes = false, bool still = false)
+			Dejudder::MotionWarp::CameraGuidanceUse* use = nullptr, int w = kW, int h = kH, bool lowRes = false, bool still = false, float* counts = nullptr)
 		{
 			pl_gpu gpu = fixture.Gpu();
 			DejudderGpuPlanes a, b;
@@ -87,7 +92,21 @@ namespace VideoProcessorTest
 			Assert::IsTrue(warp.Estimate(a.planes, b.planes), std::wstring(warp.LastError().begin(), warp.LastError().end()).c_str());
 			if (use)
 				*use = warp.CameraGuidanceUsed();
-			return DownloadField(gpu, warp);
+			if (counts && warp.CameraGuidanceCounts())
+			{
+				pl_tex_transfer_params d{};
+				d.tex = warp.CameraGuidanceCounts();
+				d.ptr = counts;
+				Assert::IsTrue(pl_tex_download(gpu, &d), L"the guidance counts are not host-readable");
+			}
+			DejudderField f = DownloadField(gpu, warp);
+			const int mx = f.blocksX / 2, my = f.blocksY / 2;
+			char line[200];
+			snprintf(line, sizeof(line), "CAMERA_GPU_FIELD %dx%d blocks %dx%d fmt %s centre (%.2f, %.2f, %.2f, %.2f)\n", w, h, f.blocksX, f.blocksY,
+				warp.Field()->params.format->name, f.texels[(my * f.blocksX + mx) * 4], f.texels[(my * f.blocksX + mx) * 4 + 1],
+				f.texels[(my * f.blocksX + mx) * 4 + 2], f.texels[(my * f.blocksX + mx) * 4 + 3]);
+			Logger::WriteMessage(line);
+			return f;
 		}
 
 	public:
@@ -243,7 +262,11 @@ namespace VideoProcessorTest
 			const int w = 768, h = 1600;
 			const DejudderField today = Run(fixture, false, nullptr, nullptr, w, h, true);
 			Dejudder::MotionWarp::CameraGuidanceUse use;
-			const DejudderField guided = Run(fixture, false, PanGuidance(today.blocksX, today.blocksY, true, true), &use, w, h, true);
+			float counts[4] = { -2, -2, -2, -2 };
+			const DejudderField guided = Run(fixture, false, PanGuidance(today.blocksX, today.blocksY, true, true), &use, w, h, true, false, counts);
+			Logger::WriteMessage(("CAMERA_GPU_GUIDED lowres counts narrow " + std::to_string(counts[0]) + "/" + std::to_string(counts[1]) +
+				" e1 " + std::to_string(counts[2]) + "/" + std::to_string(counts[3]) + "\n").c_str());
+			Assert::IsTrue(counts[0] > 0 && counts[1] > 0, L"no narrow block was accepted in the inner (scale or mapping wrong)");
 			Assert::IsTrue(use.narrowPass, L"the inner did not run the narrow pass");
 			Assert::IsTrue(use.rejected[0] == 0, L"the inner rejected the guidance");
 			int differ = 0, trusted = 0;
