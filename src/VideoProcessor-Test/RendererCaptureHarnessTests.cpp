@@ -17,6 +17,8 @@
 #include <VP-V/modules/input/queue_timing/QueueLookahead.h>
 
 #include <algorithm>
+#include <atomic>
+#include <filesystem>
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -1862,14 +1864,18 @@ namespace Tests
 			using Fingerprint = int(__cdecl*)(const char*, char*, int);
 			const auto fingerprintOf = reinterpret_cast<Fingerprint>(GetProcAddress(dll, "VideoProcessorLibplaceboSettingsFingerprintForTest"));
 			Assert::IsNotNull(reinterpret_cast<void*>(fingerprintOf), L"the test export");
-			const std::string path = folder + "vp-fingerprint-test.cfg";
+			static std::atomic<int> freshConfig{ 0 };
+			// ConfigFile caches a load by file index, size and file times, so a same-size rewrite of one path inside a
+			// file-time tick can return the previous parse: write a fresh path per call and delete it after use.
 			auto fingerprint = [&](const std::string& extra) {
+				const std::string path = folder + "vp-fingerprint-test-" + std::to_string(freshConfig++) + ".cfg";
 				{
 					std::ofstream config(path, std::ios::trunc);
 					config << "[general]\npersist_profile_selection: false\n[vprenderer.Default]\nquality: high\n" << extra;
 				}
 				std::vector<char> buffer(1 << 20);
 				const int length = fingerprintOf(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
+				{ std::error_code removeError; std::filesystem::remove(path, removeError); }
 				Assert::IsTrue(length > 0, L"fingerprint computed");
 				return std::string(buffer.data());
 			};
@@ -1892,7 +1898,6 @@ namespace Tests
 			for (const char* change : changes)
 				Assert::AreNotEqual(base, fingerprint(change),
 					(L"no fingerprint change for: " + std::wstring(change, change + strlen(change))).c_str());
-			DeleteFileA(path.c_str());
 		}
 
 		// Integration 2026-10-17: the keys the merge brought (the engine's extras, the
@@ -1911,14 +1916,18 @@ namespace Tests
 			const auto describe = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboDescribeSettingsForTest"));
 			Assert::IsNotNull(reinterpret_cast<void*>(fingerprintOf), L"the fingerprint export");
 			Assert::IsNotNull(reinterpret_cast<void*>(describe), L"the describe export");
-			const std::string path = folder + "vp-integration-keys-test.cfg";
+			static std::atomic<int> freshConfig{ 0 };
+			// ConfigFile caches a load by file index, size and file times, so a same-size rewrite of one path inside a
+			// file-time tick can return the previous parse: write a fresh path per call and delete it after use.
 			auto call = [&](Export function, const std::string& text) {
+				const std::string path = folder + "vp-integration-keys-test-" + std::to_string(freshConfig++) + ".cfg";
 				{
 					std::ofstream config(path, std::ios::trunc | std::ios::binary);
 					config << text;
 				}
 				std::vector<char> buffer(1 << 20);
 				const int length = function(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
+				{ std::error_code removeError; std::filesystem::remove(path, removeError); }
 				Assert::IsTrue(length > 0, L"the export ran");
 				return std::string(buffer.data());
 			};
@@ -1991,14 +2000,18 @@ namespace Tests
 			const auto describe = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboDescribeSettingsForTest"));
 			Assert::IsNotNull(reinterpret_cast<void*>(fingerprintOf), L"the fingerprint export");
 			Assert::IsNotNull(reinterpret_cast<void*>(describe), L"the describe export");
-			const std::string path = folder + "vp-hunt2-picture-keys-test.cfg";
+			static std::atomic<int> freshConfig{ 0 };
+			// ConfigFile caches a load by file index, size and file times, so a same-size rewrite of one path inside a
+			// file-time tick can return the previous parse: write a fresh path per call and delete it after use.
 			auto call = [&](Export function, const std::string& text) {
+				const std::string path = folder + "vp-hunt2-picture-keys-test-" + std::to_string(freshConfig++) + ".cfg";
 				{
 					std::ofstream config(path, std::ios::trunc | std::ios::binary);
 					config << text;
 				}
 				std::vector<char> buffer(1 << 20);
 				const int length = function(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
+				{ std::error_code removeError; std::filesystem::remove(path, removeError); }
 				Assert::IsTrue(length > 0, L"the export ran");
 				return std::string(buffer.data());
 			};
@@ -2038,14 +2051,18 @@ namespace Tests
 			const auto describe = reinterpret_cast<Export>(GetProcAddress(dll, "VideoProcessorLibplaceboDescribeSettingsForTest"));
 			Assert::IsNotNull(reinterpret_cast<void*>(fingerprintOf), L"the fingerprint export");
 			Assert::IsNotNull(reinterpret_cast<void*>(describe), L"the describe export");
-			const std::string path = folder + "vp-detail-restore-keys-test.cfg";
+			static std::atomic<int> freshConfig{ 0 };
+			// ConfigFile caches a load by file index, size and file times, so a same-size rewrite of one path inside a
+			// file-time tick can return the previous parse: write a fresh path per call and delete it after use.
 			auto call = [&](Export function, const std::string& text) {
+				const std::string path = folder + "vp-detail-restore-keys-test-" + std::to_string(freshConfig++) + ".cfg";
 				{
 					std::ofstream config(path, std::ios::trunc | std::ios::binary);
 					config << text;
 				}
 				std::vector<char> buffer(1 << 20);
 				const int length = function(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
+				{ std::error_code removeError; std::filesystem::remove(path, removeError); }
 				Assert::IsTrue(length > 0, L"the export ran");
 				return std::string(buffer.data());
 			};
