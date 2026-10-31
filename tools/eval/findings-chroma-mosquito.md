@@ -101,3 +101,33 @@ example a two-seed self-check per zone).
 CPU time: scored runs 28 min, tuning 8 min (on crops that differ from the scored ones), aborted first
 passes about 35 min.
 Follow-ups A2/B2: about 20 min of CPU (true 4:4:4 suite 10 min, edge-grain suite 10 min).
+
+### B3. Mosquito headroom by codec (owner-approved addition)
+
+Script `mosquito_headroom.py`; tables in `prototypes/mosquito_headroom/`. 4 masters (Nocturne film grain,
+Sol Levante animation, tos4k film/CG, park_joy high detail), 1024x768 windows of 12 frames at 1080p
+(downscaled master) and 2160p. Encoders: x264 (deblocking on), x265 (SAO on) and libaom-av1 cpu-used 6
+(SVT-AV1 is not in this ffmpeg build). GOP 48. Near-edge mask is `near_edge_zone`. "Artefact share" is
+the near-edge high-frequency error where the master is locally smooth, as a share of all error, i.e.
+what a perfect mosquito repair could remove.
+
+| raster | encode | Mbps (full raster) | PSNR Y | near-edge HF RMS | near-edge HF / error | artefact share | headroom dB mean / max |
+|---|---|---|---|---|---|---|---|
+| 2160p | x264 crf23 / crf28 | 46.2 / 20.7 | 39.1 / 36.9 | 11.7 / 14.8 | 6.8 / 5.8 % | 0.4 / 0.2 % | 0.02 / 0.06 |
+| 2160p | x265 crf24 / crf30 | 40.1 / 15.5 | 39.5 / 37.0 | 10.3 / 13.1 | 6.4 / 5.2 % | 0.4 / 0.2 % | 0.02 / 0.06 |
+| 2160p | AV1 crf30 / crf40 | 34.5 / 16.0 | 39.4 / 37.5 | 9.9 / 12.2 | 6.5 / 5.6 % | 0.4 / 0.3 % | 0.02 / 0.07 |
+| 1080p | x264 crf23 / crf28 | 14.2 / 6.6 | 37.6 / 35.2 | 14.7 / 19.2 | 8.4 / 7.4 % | 0.2 / 0.1 % | 0.01 / 0.02 |
+| 1080p | x265 crf24 / crf30 | 13.5 / 5.4 | 37.9 / 35.3 | 13.0 / 17.5 | 7.7 / 6.7 % | 0.2 / 0.1 % | 0.01 / 0.02 |
+| 1080p | AV1 crf30 / crf40 | 13.1 / 6.1 | 38.1 / 35.9 | 12.0 / 15.6 | 8.0 / 7.3 % | 0.2 / 0.1 % | 0.01 / 0.03 |
+
+(Mbps are means over the 4 windows, which park_joy dominates at 15 to 100 Mbps; the others run 1 to 33 Mbps.)
+
+**Verdict: no worthwhile headroom on any codec, including H.264.** Near-edge high-frequency error is 5
+to 8 % of all error, and x264 carries about 15 to 20 % more of it than x265 or AV1 at equal CRF tier.
+But almost all of it is detail lost next to edges, not ringing over smooth areas. The removable artefact
+share is ≤ 1.5 % (park_joy), which bounds the gain of a perfect repair at 0.07 dB. A mosquito repair
+is not justified for HEVC/AV1, and not for H.264 at these rates either.
+
+Caveats: Sol Levante's window has almost no edges above the mask threshold in PQ codes (zone < 0.1 %).
+Rates below about 2 Mbps at 1080p are covered only by Nocturne and Sol. SD/broadcast MPEG-2 is
+untested. Run time is about 10 min of CPU.
