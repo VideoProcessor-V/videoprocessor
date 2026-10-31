@@ -596,7 +596,10 @@ namespace CameraModel
 				}
 			}
 			Signals sg;
-			sg.inlierShare = f.trustSum > 0 ? Clamp01(inlierMass / f.trustSum) : 0.0;
+			// Signal: a camera that explains only about half the vectors (crowds, many movers) is not a dominant
+			// camera motion; below 0.4 of the trust mass the signal is 0, full at 0.9.
+			const double rawShare = f.trustSum > 0 ? Clamp01(inlierMass / f.trustSum) : 0.0;
+			sg.inlierShare = f.trustSum > 0 ? Clamp01((inlierMass / f.trustSum - 0.4) / 0.5) : 0.0;
 			const double rms = inlierMass > 0 ? std::sqrt(resSq / inlierMass) : 0.0;
 			{
 				const double q = rms / (2.0 * f.prec);
@@ -800,7 +803,7 @@ namespace CameraModel
 							const double tol = 4.0 * f.prec / f.diag;
 							devTerm = 1.0 - Clamp01(dev / tol);
 						}
-						const double shareTerm = std::min(1.0, bShare / (0.7 * sg.inlierShare + 1e-9));
+						const double shareTerm = std::min(1.0, bShare / (0.7 * rawShare + 1e-9));
 						sg.inverse = Clamp01(devTerm * shareTerm);
 					}
 				}
@@ -1098,6 +1101,13 @@ namespace CameraModel
 				h0p = &h0;
 			}
 			CameraMotion fit = Impl::Run(*this, in, h0p, true, m_config.objects, genReset);
+			if (fit.valid && Impl::DeadlinePassed(m_config, in))
+			{
+				// The consumers' slot has passed: no model for this frame (visible fallback); state is not updated.
+				fit.valid = false;
+				fit.confidence = 0;
+				fit.reason = Reason::DeadlineMissed;
+			}
 			if (fit.valid)
 			{
 				m_previous = fit;

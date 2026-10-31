@@ -61,7 +61,7 @@ namespace CameraModel
 		// b5*conditioning + b6*engineAgreement + b7*inverse + b8*ambiguity). Conservative: needs
 		// most signals high to exceed 0.5 (all signals 1 -> about 0.95; typical pan with neutral
 		// 0.5 optional signals -> about 0.8; weak coverage / ambiguity -> below 0.5).
-		double b[9] = { -6.0, 1.5, 1.0, 1.5, 0.5, 0.5, 0.5, 1.0, 2.5 };
+		double b[9] = { -8.5, 4.0, 1.0, 1.5, 0.5, 0.5, 0.5, 1.0, 2.5 };
 		bool objects = false;
 		int maxObjects = 3;
 		double objectMinShare = 0.01;
