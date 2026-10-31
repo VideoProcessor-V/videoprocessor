@@ -27,6 +27,11 @@ texture), and to narrow the matcher's search.
 | `PixelResidualReference.h/.cpp` | CPU reference / shader-mirror spec of the tiny-mover measure (not on the runtime path yet) |
 | `CameraAccessor.h` | per-consumer policy, blend state, `FieldVector` (pure, header-only) |
 | `GlobalModelSearchHints.h/.cpp` | phase-2 matcher hints (data API only, nothing wired) |
+| `GlobalModelMeasurement.h/.cpp` | phase-2 measurement plan: switches, `BuildMeasurementPlan`, verification / escalation, diagnostics, GPU guide texels |
+| `ReferenceMatcher.h/.cpp` | CPU reference of the matcher semantics (tests and cost measurement only, not on the runtime path) |
+| `CameraModelGpu.h/.cpp` | GPU label pass: constants, GLSL, CPU float mirror, `LabelPass` (libplacebo) |
+| `CameraAccessorGlsl.h` | GLSL `camera_field_vector` + `AccessorConstants` |
+| `CameraGuidanceGpu.h` | `GuidanceFrame` (plan -> matcher) + the guided pass GLSL (narrow window / E1 skip), wired in `consumers/DejudderWarp.cpp` |
 | `../../core/FrameAnalysisStore.h` | `kCamera` group, `Record::camera`, `PublishCamera` |
 
 ## Inputs and outputs
@@ -87,17 +92,80 @@ NLS) happens after the choice, as today.
 `PixelResidualReference` is the spec of the per-block share of pixels with
 `|cur(x) - prev(H^-1 x)| > k * noiseRms` (bilinear previous-frame sample, clamp at borders).
 
+## Record lifetime (hold-the-shared_ptr rule)
+A consumer must keep its own copy of the `CameraMotion` record (or at least `record.blocks`, a
+`shared_ptr<const BlockData>`) alive for as long as it calls `FieldVector` with it. The Fitter recycles a
+pooled `BlockData` only when `use_count() == 1`, so a record that is held is never overwritten. Never keep a
+raw `BlockData` pointer past the record. A `Fitter` is not thread-safe (one per motion worker); the records it
+returns are immutable and may be shared across threads.
+
+## GPU label pass (phase 2 prep)
+`CameraModelGpu.h/.cpp`: `LabelConstants` (the constant buffer), the two GLSL passes (`LabelPassGlsl`,
+`ZeroClusterGlsl`), a float CPU mirror (`LabelBlockMirror`, `ZeroClusterMirror`) that performs the shader's
+arithmetic in the same order, and `LabelPass` (libplacebo dispatch). Output texture per block:
+(modelX, modelY, |residual|, code) with code = label + 4 * tinyMover + 8 * zeroCandidate (small exact
+integers). `Config::cpuLabels = false` (objects off) makes the fitter leave the per-block arrays empty and set
+`CameraMotion::labelsOnGpu`; the accessor and `BuildHints` already treat short arrays as "no model" (caller's
+value / full search). `CameraAccessorGlsl.h` is the GLSL port of `FieldVector` (`camera_field_vector`). The CPU
+accessor and the shader compare the same float |residual| (`sqrtf(rx*rx + ry*ry)`).
+Policies: `Policy::curve` (Smoothstep / Linear / Step) and `PolicyFor(Consumer)` presets (all `enabled = false`).
+
 ## Search hints (phase 2 data API)
 `BuildHints(..., precisionPx, nextPairSeconds)`: seeds (model and previous forward vectors) are scaled by
 `nextPairSeconds / prev->pairSeconds` for uneven cadences (3:2); `<= 0` means no scaling. Only bar and
 text-guard blocks (`BlockData::excluded`) are `Excluded`; a static-logo Overlay stays searchable
 (`FullSearch`).
 
+## Measurement plan (phase 2)
+`BuildMeasurementPlan(switches, config, input)` turns the PREVIOUS pair's causal record (never the queued smoother),
+the scene flags and the switches into a per-frame, per-block plan for the matcher. All switches default off; no
+switch (or an unusable record) gives an inactive / empty plan and today's search, byte for byte. Records after a cut,
+a flash, a resync, a missed deadline, with low confidence or with labels only on the GPU give no model-driven saving and
+name the reason in `fallbackReason` (status line). Vectors are source px over the pair about to be searched, scaled by
+`nextPairSeconds / prev->pairSeconds`. `ReferenceMatcher` is the CPU mirror used by `CameraMeasurementTests`
+(`CAMERA_MEAS_COST ...` lines).
+
+| Switch | Saves | Escalation / fallback |
+|---|---|---|
+| `modelGlobal` | D1's global search: the model's centre displacement (fwd and bwd) is the global start | no usable record: today's D1 |
+| `guidedCandidate` | the model prediction is the first candidate of the full search and of the second sweep | none needed (an extra candidate only) |
+| `narrowWindow` | camera blocks searched +-r (>= `narrowMinRadiusPx`) around the prediction | block fails the SAD tolerance: full search in the same frame (`ApplyVerification`) |
+| `e1Skip` | second sweep skipped where the first-sweep vector agrees with the prediction | disagreement: the sweep runs as today (counted escalated) |
+| `staticGate` | E4 from the model: confident, `Ok`, all four picture corners within `staticSigmas` precision | otherwise the field is searched |
+| `cutSkip` | no search across a cut; `seedFromNext` when a queued pair exists | switch off: normal search, no guidance from the old scene |
+| `fadeNormalised` | zero-mean cost for the narrow pass in a fade | failing blocks fall back to today's plain-SAD search |
+| `flashBridge` | the flash pair is not searched; a bridged record stays usable but never seeds temporally | none |
+| `temporalSeed` | previous forward vector as the seed when it agrees with NVOF | disagreement: full search; bridged record: model seed |
+| `tinyMoverRoi` | tiny movers get `FinerGrid` (never narrowed); ROIs limited to `roiBudgetShare` of the grid | over budget: raster-order `FullSearch`, `roiOverBudget` counted |
+| `objects` | object blocks with a tracked model narrowed around the OBJECT model (seed and agreement reference) | switch off: those blocks are `FullSearch` |
+
+## Matcher guidance on the GPU (phase 2)
+`MakeGuidanceFrame(plan)` -> `Dejudder::MotionWarp::SetCameraGuidance()` before the pair's `Estimate` (cleared by
+each Estimate; a low-resolution inner receives it with its own pixel scale). Null or inactive: nothing is bound or
+dispatched, the matcher's shaders preprocess to today's text (`CAMERA_KEEP` / `CAMERA_STATIC` undefined).
+* `useModelGlobal`: D1's texel = the model's centre translation (1/8 texels, z 0.5, w 1); the D1 search does not run;
+  M2's second candidate is cleared.
+* `staticScene` (only where E4's gate runs): `CAMERA_STATIC` lets `static_scene()` fire when the previous mean |v| is
+  below `motion_lo` (the model replaces D1's static test, not E4's own history test).
+* `skipMatcher` (cut / flash): the searches are written untrusted (error 1e4) and D1 / M2 cleared: the consistency
+  pass and the frame trust hold the pair as a failed match does; the temporal history restarts.
+* narrow: the guided pass (before the block search) searches +-R whole px (R = ceil(radius x scale)) around the seed,
+  then half-pel; accepted (sad <= tolerance) blocks are kept by the block search (`CAMERA_KEEP`, as E4 keeps the
+  previous vectors), every other block runs today's search in the same dispatch (the escalation). Backward: the
+  forward seeds negated (verification decides). Not used when the engine seeds or replaces the searches.
+* E1 skip: the guided pass checks the first sweep (or the engine's seed) against the prediction (within `e1AgreePx`)
+  and its sad; accepted blocks skip the second sweep, the rest run it.
+* Fade: `CG_FADE` = zero-mean cost in the guided pass; full searches keep M4.
+Diagnostics: `MotionWarp::CameraGuidanceUsed()` (per Estimate) + `MeasurementDiagnostics::StatusLine()` (plan counters).
+GPU follow-ups (not in this phase): the guided candidate inside the full search / second sweep candidate lists, tiny
+movers forcing the E2 split / an NVOF ROI, the guidance texture built on the GPU from the label pass (then
+`cpuLabels = false` is possible with guidance on).
+
 ## Cost
 Per-step cost is profiled by a test-only harness: building the tests with `CAMERA_MODEL_PROFILE` defined
 makes `GlobalModelFit.cpp` accumulate per-step milliseconds in `CameraModel::g_profileMs[8]` (field,
 hypotheses, local optimisation + ladder, signals, ambiguity, backward, temporal, labels). The macro is not
-defined in the product build. The early-exit path keeps H0's type and tries one step up only.
+defined in the product build. The early-exit path keeps H0's type, tries one step up, and (when the type is still H0's and above Translation) one step down from the same weighted set: the lower type wins when the higher one does not earn its extra parameters (same complexity-penalty test), so a model that was a homography relaxes by one type per pair when the motion becomes a pure pan.
 
 The fit runs on a CPU worker, off the render path (render-path cost: zero). Two full-grid passes are
 inherent on the CPU: the stratified field scan (before the fit) and the per-block model/residual/label
