@@ -31,6 +31,7 @@
     "src/VP-V/modules/motion/estimation/global_model/CameraAccessor.h",
     "src/VP-V/modules/motion/estimation/global_model/CameraAccessorGlsl.h",
     "src/VP-V/modules/motion/estimation/global_model/CameraModelGpu.h",
+    "src/VP-V/modules/motion/estimation/global_model/CameraGuidanceGpu.h",
     "src/VP-V/modules/motion/estimation/global_model/CameraModelGpu.cpp",
     "src/VP-V/modules/motion/estimation/global_model/GlobalModelSearchHints.h",
     "src/VP-V/modules/motion/estimation/global_model/GlobalModelSearchHints.cpp",

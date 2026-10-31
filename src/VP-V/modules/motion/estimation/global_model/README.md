@@ -31,6 +31,7 @@ texture), and to narrow the matcher's search.
 | `ReferenceMatcher.h/.cpp` | CPU reference of the matcher semantics (tests and cost measurement only, not on the runtime path) |
 | `CameraModelGpu.h/.cpp` | GPU label pass: constants, GLSL, CPU float mirror, `LabelPass` (libplacebo) |
 | `CameraAccessorGlsl.h` | GLSL `camera_field_vector` + `AccessorConstants` |
+| `CameraGuidanceGpu.h` | `GuidanceFrame` (plan -> matcher) + the guided pass GLSL (narrow window / E1 skip), wired in `consumers/DejudderWarp.cpp` |
 | `../../core/FrameAnalysisStore.h` | `kCamera` group, `Record::camera`, `PublishCamera` |
 
 ## Inputs and outputs
@@ -137,6 +138,28 @@ name the reason in `fallbackReason` (status line). Vectors are source px over th
 | `temporalSeed` | previous forward vector as the seed when it agrees with NVOF | disagreement: full search; bridged record: model seed |
 | `tinyMoverRoi` | tiny movers get `FinerGrid` (never narrowed); ROIs limited to `roiBudgetShare` of the grid | over budget: raster-order `FullSearch`, `roiOverBudget` counted |
 | `objects` | object blocks with a tracked model narrowed around the OBJECT model (seed and agreement reference) | switch off: those blocks are `FullSearch` |
+
+## Matcher guidance on the GPU (phase 2)
+`MakeGuidanceFrame(plan)` -> `Dejudder::MotionWarp::SetCameraGuidance()` before the pair's `Estimate` (cleared by
+each Estimate; a low-resolution inner receives it with its own pixel scale). Null or inactive: nothing is bound or
+dispatched, the matcher's shaders preprocess to today's text (`CAMERA_KEEP` / `CAMERA_STATIC` undefined).
+* `useModelGlobal`: D1's texel = the model's centre translation (1/8 texels, z 0.5, w 1); the D1 search does not run;
+  M2's second candidate is cleared.
+* `staticScene` (only where E4's gate runs): `CAMERA_STATIC` lets `static_scene()` fire when the previous mean |v| is
+  below `motion_lo` (the model replaces D1's static test, not E4's own history test).
+* `skipMatcher` (cut / flash): the searches are written untrusted (error 1e4) and D1 / M2 cleared: the consistency
+  pass and the frame trust hold the pair as a failed match does; the temporal history restarts.
+* narrow: the guided pass (before the block search) searches +-R whole px (R = ceil(radius x scale)) around the seed,
+  then half-pel; accepted (sad <= tolerance) blocks are kept by the block search (`CAMERA_KEEP`, as E4 keeps the
+  previous vectors), every other block runs today's search in the same dispatch (the escalation). Backward: the
+  forward seeds negated (verification decides). Not used when the engine seeds or replaces the searches.
+* E1 skip: the guided pass checks the first sweep (or the engine's seed) against the prediction (within `e1AgreePx`)
+  and its sad; accepted blocks skip the second sweep, the rest run it.
+* Fade: `CG_FADE` = zero-mean cost in the guided pass; full searches keep M4.
+Diagnostics: `MotionWarp::CameraGuidanceUsed()` (per Estimate) + `MeasurementDiagnostics::StatusLine()` (plan counters).
+GPU follow-ups (not in this phase): the guided candidate inside the full search / second sweep candidate lists, tiny
+movers forcing the E2 split / an NVOF ROI, the guidance texture built on the GPU from the label pass (then
+`cpuLabels = false` is possible with guidance on).
 
 ## Cost
 Per-step cost is profiled by a test-only harness: building the tests with `CAMERA_MODEL_PROFILE` defined
