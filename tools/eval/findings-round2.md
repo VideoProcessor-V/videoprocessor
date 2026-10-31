@@ -105,7 +105,97 @@ Whole frames at 1280 wide, 16 frames each.
   and artefact costs.
 
 **Side finding:** libplacebo's contrast recovery (0.30 at quality high) amplifies grain by about 8 %.
-A grain-split contrast recovery is a cheap next Python candidate.
+A grain-split contrast recovery is tested in C1.
+
+## C. Follow-ups (owner requests)
+
+The domains are as follows. **pre-TM** means the signal domain: PQ codes for HDR, gamma codes for SDR. **post-TM** means
+the SDR output codes; there, lc is the output's PQ against the source's PQ. All runs are HDR at
+1080p with x265-10 CRF 30 unless noted.
+
+**C1. Grain-safe contrast recovery** (`cr_grainsafe_eval.py`, 6 clips; codec rows use 4 masters × 2 encodes)
+
+The grain is split off, libplacebo's recovery runs on the grain-free picture, and the grain is added
+back at the curve slope.
+
+| post-TM | restored share | halo | grain vs plain (worst clip) | codec band / dark MSE |
+|---|---|---|---|---|
+| libplacebo CR 0.30 as-is | 0.13 | 0.00016 | 1.082 (1.131) **fail** | 1.05 / 1.02 |
+| grain-safe 0.15 | 0.05 | 0.00005 | 1.021 (1.035) pass | 1.00 / 1.00 |
+| grain-safe 0.30 | 0.09 | 0.00014 | 1.042 (1.072) pass on mean, 1 clip over | 1.00 / 1.00 |
+| grain-safe 0.45 | 0.13 | 0.00024 | 1.065 (1.111) fail | 1.00 / 1.00 |
+
+* At the same restoration as CR 0.3 (0.13), the grain-safe version needs strength 0.45 and still
+  fails the grain gate.
+* It never amplifies codec banding or dark error (CR as-is: +5 %).
+* Lag-1 is unchanged for every strength.
+* **Verdict: EVALUATE ON GPU** as an either/or option to libplacebo CR, at strength ≤ 0.25. The cost
+  is one grain split (two passes) added to CR.
+
+**C2. Is banding caused by stripped texture?** (`texture_dither.py`, 32-px smooth tiles, all Part A cases)
+
+* **HDR at 2160p: yes.** The step error sits where grain retention is lowest (Spearman ρ −0.36 to
+  −0.66). The lowest-retention quartile of tiles carries 24 to 35 % of the step energy.
+* **SDR and HDR at 1080p: weak.** ρ runs from −0.17 to +0.14 (HDR→SDR 1080p up to +0.41).
+* **What re-injecting the master's fine band does** (the TemporalDetail upper bound): it removes only
+  4 to 9 % of the step energy, but masks 25 to 33 % (SDR) and 45 to 76 % (HDR) of the step
+  visibility (masking proxy).
+* **Conclusion:** texture recovery hides banding rather than repairing it, and strongly so in HDR.
+
+**C3. Stacking in pipeline order** (`deband_stack.py`, 4 masters per context, 8 frames)
+
+The order is texture oracle → deband → tone stage. Two deband models were used:
+* **VP deband:** a Python model of `repair/deband` at low-bitrate strength.
+* **Bill's libplacebo deband:** default settings. Bill turns it off for HDR, so the HDR rows are a
+  what-if.
+
+The plain curve on the master keeps lc 0.773, so tone mapping takes 23 % of local contrast. The
+encode lowers it to 0.546, a further 0.23.
+
+| post-TM HDR→SDR | PSNR | LPIPS | step visibility | lc | halo |
+|---|---|---|---|---|---|
+| decode, plain curve | 37.3 | 0.184 | 1.72 | 0.546 | 0 |
+| + VP deband / + libplacebo deband | 37.3 / 37.3 | 0.172 / 0.172 | 1.40 / 1.28 | 0.550 / 0.556 | 0 |
+| + grain-safe CR 0.30 / + pre-emphasis | 36.8 / 36.9 | 0.188 / 0.188 | 1.70 / **1.99** | 0.557 / 0.595 | 0.00006 / 0.0004 |
+| texture oracle, plain | **41.9** | **0.042** | 0.70 | **0.688** | 0 |
+| oracle + grain-safe CR 0.30 | 41.5 | 0.043 | 0.69 | 0.703 | 0.00005 |
+| oracle + pre-emphasis | 40.9 | 0.048 | 0.84 | 0.731 | 0.0003 |
+| oracle + libplacebo deband, plain | 41.7 | 0.042 | 0.60 | 0.691 | 0 |
+
+**Findings:**
+* **Encoder vs tone curve:** texture recovery brings back about 62 % of the local contrast the
+  encoder took (0.546 → 0.688). That gain is about 10 times what any tone stage adds.
+* **Stacking:** tone stages stack roughly additively on top of texture: CR +0.015, pre-emphasis
+  +0.043. They do not interfere on grain.
+* **CR needed once texture is restored:** about 0 to 0.15. The extra contrast is small, and CR costs
+  PSNR.
+* **Pre-emphasis:** it gives the most contrast, but raises banding visibility 16 % (its band mask
+  barely helps: 1.99 vs 2.08 unmasked) and halo about 7 times. Its grain is 1.04 (pass). Verdict:
+  not worth it.
+* **Deband vs texture (HDR):** texture recovery masks more banding than either deband removes (0.70
+  vs 1.28 to 1.40). Deband on top adds little (0.60 to 0.65).
+* **Deband in SDR (8-bit masters, little grain):** libplacebo deband helps more than the oracle (0.87
+  vs 1.04).
+* **What deband removes today** (projection onto the master's fine band): the VP model removes about
+  1 % of the master's texture; libplacebo removes 7 % (SDR) or 1 % (HDR). Both add dither noise
+  (non-master fine energy +0.24 SDR, +0.07 HDR).
+* **VP model caveat:** at the modelled 8-bit threshold (12 codes) the VP model raised SDR coarse
+  error 49 %. Verify against the real module.
+* **Best combination:**
+  * HDR→SDR: texture recovery, then grain-safe CR ≤ 0.15, with deband optional and light.
+  * SDR: texture recovery plus a light deband.
+
+**C4. Ringing repair in the stack** (`ringing_stack.py`)
+
+The spatial mosquito repair was tried early (on the decode), late (after the tone stage) and in both
+places.
+* **Effect:** none in any placement. Near-edge ringing changes by ≤ 0.2 % and lc is unchanged. Its
+  grain guard reverts it.
+* **Do later stages amplify ringing?** CR raises it 10 %; pre-emphasis does not.
+* **Verdict: it earns no placement.** Cost: Python 3.3 s/frame (two bilaterals). It stays DROP.
+
+**C5. External vectors.** `vector_source.py`. MC-LTM (`ltm_eval.py --vectors`) and chroma_mv / CfL+MV
+(`VP_EVAL_VECTORS`) can now take the camera model's fields; see the README. Missing fields raise.
 
 ## Caveats
 

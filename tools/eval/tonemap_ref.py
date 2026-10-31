@@ -23,6 +23,11 @@ black is given: about 13 codes brighter at mid-shadow - a documented deviation).
 lowpass sigma is fixed at 1.75 px (right for 1280-wide frames shown at 2560; approximate for the
 1080p-raster amplification crops).
 
+Grain-safe contrast recovery (round-2 follow-up): S, G = grain split of I; low = gauss(S, 1.75);
+  cr_gs : out = (1 - c) T(S) + c (T(low) + S - low) + T'(S) G
+  cr_gsb: as cr_gs but the recovered detail is gauss(S, 1) - low and the pixel-scale remainder of S
+          (S - gauss(S, 1), grain the split could not separate) keeps the curve slope T'(S).
+
 Excursions (BTB/WTW): every candidate maps the clipped signal [0, PQ(peak)] and then carries the
 excursion beyond it linearly with the curve's secant slope over the 64 codes at that end, clamped
 to the legal 10-bit signal [4, 1019], so values below black / above the mastering peak stay beyond
@@ -220,7 +225,8 @@ def ltm_structure(S, B, tm, strength, detail_sigma=1.0):
 class ToneMapper:
     """Stateful per-sequence tone mapper over 10-bit PQ luma code planes -> 10-bit SDR code planes.
 
-    kind: 'global' | 'dynamic' | 'cr' (contrast recovery) | 'ltm' | 'ltm_nograin' | 'ltm_gauss' | 'ltm_mc'
+    kind: 'global' | 'dynamic' | 'cr' (contrast recovery) | 'cr_gs' / 'cr_gsb' (grain-safe contrast recovery;
+          'b' = recovered detail only above the grain band) | 'ltm' | 'ltm_nograin' | 'ltm_gauss' | 'ltm_mc'
     ref_h: height of the full picture the plane belongs to (spatial scales are derived from it;
     windows cropped from a 2160p picture use 2160)."""
 
@@ -263,6 +269,19 @@ class ToneMapper:
             low = gauss(i1, 1.75)
             p = (1 - self.cr) * tm(ec) + self.cr * (tm(low) + (i1 - low))
             p = np.clip(p, tm.out_min, tm.out_max)
+        elif k in ("cr_gs", "cr_gsb"):
+            # grain-safe contrast recovery: split the grain off, run libplacebo's recovery on the
+            # grain-free picture, add the grain back tone-mapped exactly as the plain curve does
+            i1 = np.clip(e, 0.0, 1.0)
+            S1, G = grain_split(i1)
+            low = gauss(S1, 1.75)
+            if k == "cr_gs":
+                sharp = tm(low) + (S1 - low)
+            else:  # 'b': recovered detail only above the grain band; the pixel-scale rest at the curve slope
+                g1 = gauss(S1, 1.0)
+                sharp = tm(low) + (g1 - low) + tm.slope(S1) * (S1 - g1)
+            p = (1 - self.cr) * tm(S1) + self.cr * sharp + tm.slope(S1) * G
+            p = np.clip(p, tm.out_min, tm.out_max)
         else:
             if k == "ltm_nograin":
                 S, G = ec, np.zeros_like(ec)
@@ -302,3 +321,25 @@ def sdr_to_perceptual_codes(sdr_code, white=100.0):
     """SDR output codes -> 10-bit PQ codes of the output luminance (excursions dropped to the limits)."""
     v = np.clip(code_to_norm(sdr_code), 0.0, 1.0)
     return norm_to_code(pq_oetf(white * v ** SDR_GAMMA))
+
+
+def pre_emphasis(Ycode, tm, ref_h, mask=True, gmax=4.0, eps=0.06 ** 2):
+    """Grain-safe local-contrast PRE-EMPHASIS before a global tone curve (10-bit PQ codes in and out).
+    S, G = grain split; B = guided base (as the LTM); D = gauss(S, 1) - B (structure detail above the grain
+    band); gain g = clip(1 / T'(B), 1, gmax) so that after the curve T'(B) g D ~ D (source PQ amplitude,
+    never above it to first order); with mask, the boost fades out where the local detail RMS is at
+    band-step level (gauss(D^2, 4)^0.5 from 2 to 6 PQ codes), so smooth-gradient banding steps are not
+    amplified.  The grain G and the BTB/WTW excursions pass unboosted."""
+    e = code_to_norm(Ycode)
+    ec = np.clip(e, 0.0, 1.0)
+    ex = e - ec
+    S, G = grain_split(ec)
+    r = max(2, int(round(ref_h / 54.0)))
+    B = guided_self(S, r, eps)
+    D = gauss(S, 1.0) - B
+    g = np.clip(1.0 / np.maximum(tm.slope(B), 1e-3), 1.0, gmax)
+    w = 1.0
+    if mask:
+        lr = np.sqrt(gauss(D * D, 4.0)) * 876.0
+        w = np.clip((lr - 2.0) / 4.0, 0.0, 1.0)
+    return norm_to_code(S + w * (g - 1.0) * D + G + ex)

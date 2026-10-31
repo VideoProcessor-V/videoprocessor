@@ -374,7 +374,10 @@ class ChromaMV(ec.PythonCandidate):
     lookahead = 1
 
     def __init__(self, spatial="jbures", alpha=0.3, sigma_px=0.9, sigma_r_frac=0.05, fb_tol_px=0.5,
-                 luma_tol_frac=0.02, chroma_tol_frac=0.04):
+                 luma_tol_frac=0.02, chroma_tol_frac=0.04, vectors=None):
+        """vectors: None = VP_EVAL_VECTORS environment / DIS stand-in, or a vector_source.VectorSource."""
+        from vector_source import VectorSource
+        self.vs = vectors if vectors is not None else VectorSource.from_env()
         self.spatial_kind = spatial
         self.sp = {"jbu": ChromaJBU, "jbures": ChromaJBURes, "cfl": ChromaCfL}[spatial]()
         self.alpha, self.sigma_px, self.sigma_r_frac = alpha, sigma_px, sigma_r_frac
@@ -415,8 +418,8 @@ class ChromaMV(ec.PythonCandidate):
         used = 0.0
         for n in neigh:
             n8 = to8(n.Y, n.bitdepth)
-            f_nt = dis_flow(n8, t8)       # n -> t
-            f_tn = dis_flow(t8, n8)       # t -> n
+            f_nt = self.vs.flow(n.index, frame.index, n8, t8)   # n -> t (external vectors or DIS)
+            f_tn = self.vs.flow(frame.index, n.index, t8, n8)   # t -> n
             fxs = bilinear(f_nt[..., 0], sv, su)
             fys = bilinear(f_nt[..., 1], sv, su)
             u, v = su + fxs, sv + fys

@@ -1,0 +1,25 @@
+case,stage,grain_rms,lc_master_through_stage
+sol_sky,plain,6.513,0.6988
+sol_sky,cr 0.30,6.965,0.7278
+sol_sky,crgs 0.15,6.621,0.7119
+sol_sky,crgs 0.30,6.732,0.7251
+sol_sky,pe,6.903,0.8059
+sol_sky,pe_nomask,6.964,0.8068
+sol_dark,plain,7.543,0.8487
+sol_dark,cr 0.30,7.799,0.869
+sol_dark,crgs 0.15,7.614,0.8578
+sol_dark,crgs 0.30,7.684,0.8669
+sol_dark,pe,7.656,0.8723
+sol_dark,pe_nomask,7.657,0.8723
+nocturne_dark,plain,6.404,0.7808
+nocturne_dark,cr 0.30,6.756,0.8198
+nocturne_dark,crgs 0.15,6.498,0.7909
+nocturne_dark,crgs 0.30,6.593,0.801
+nocturne_dark,pe,6.682,0.8166
+nocturne_dark,pe_nomask,6.723,0.8187
+nocturne_mid,plain,6.879,0.7641
+nocturne_mid,cr 0.30,7.279,0.798
+nocturne_mid,crgs 0.15,6.972,0.7715
+nocturne_mid,crgs 0.30,7.065,0.7788
+nocturne_mid,pe,7.217,0.7958
+nocturne_mid,pe_nomask,7.247,0.7976

@@ -110,9 +110,15 @@ def to8(Ycode):
     return np.clip(np.rint(tr.code_to_norm(Ycode) * 255.0), 0, 255).astype(np.uint8)
 
 
-def flows_for(seq):
-    """flow[t] (t >= 1): current -> previous, so prev(p + F(p)) ~ cur(p)."""
+VECTORS = None  # vector_source.VectorSource for --vectors (camera-model fields); None = DIS stand-in
+
+
+def flows_for(seq, clip=None):
+    """flow[t] (t >= 1): current -> previous, so prev(p + F(p)) ~ cur(p).  With --vectors the fields are
+    read from <dir>/<clip>/flow_<t>_<t-1>.npy (window-local indices; see vector_source.py)."""
     f8 = [to8(f) for f in seq]
+    if VECTORS is not None and clip is not None:
+        return [None] + [VECTORS.flow(t, t - 1, f8[t], f8[t - 1], sub=clip) for t in range(1, len(seq))]
     return [None] + [cc.dis_flow(f8[t], f8[t - 1]) for t in range(1, len(seq))]
 
 
@@ -184,7 +190,16 @@ def main(argv=None):
     ap.add_argument("--out", required=True)
     ap.add_argument("--only", default="")
     ap.add_argument("--skip-amp", action="store_true")
+    ap.add_argument("--vectors", default=None, help="external vector fields (camera model): <dir>/<clip>/flow_<t>_<t-1>.npy")
+    ap.add_argument("--kinds", default="", help="comma list of candidates (default: all)")
     a = ap.parse_args(argv)
+    global VECTORS, KINDS
+    if a.vectors:
+        import vector_source
+        VECTORS = vector_source.VectorSource(a.vectors, strict=True)
+    if a.kinds:
+        want = a.kinds.split(",")
+        KINDS = [k for k in KINDS if k[0] in want or k[0] == "global"]
     os.makedirs(a.scratch, exist_ok=True)
     os.makedirs(a.out, exist_ok=True)
     only = set(x for x in a.only.split(",") if x)
@@ -194,7 +209,7 @@ def main(argv=None):
             continue
         seq = decode_clip(a.scratch, name, parts)
         ref_h = seq.shape[1]  # spatial scales follow the picture height
-        flows = flows_for(seq)
+        flows = flows_for(seq, name)
         cuts = cut_pairs(seq, flows)
         mv = [np.mean(np.hypot(F[..., 0], F[..., 1])) for t, F in enumerate(flows) if F is not None and t not in cuts]
         motion = float(np.mean(mv)) if mv else None
@@ -246,6 +261,8 @@ def main(argv=None):
                               clip_detect=bw["clip_detect"], out_min=float(out.min()), out_max=float(out.max())))
         print(json.dumps(card_rows[-1]), flush=True)
     amp = [] if a.skip_amp else amplification(a.hr_scratch)
+    if VECTORS is not None:
+        print(json.dumps({"vectors": VECTORS.stats()}), flush=True)
     write(rows, card_rows, amp, a.out)
     return 0
 
@@ -266,7 +283,7 @@ def amplification(hr):
                     print("amplification: missing", dpath, flush=True)
                     continue
                 D = ah.luma_seq(dpath, "yuv420p10le")
-                flows = flows_for(M) if "ltm_mc" in AMP_KINDS else None
+                flows = flows_for(M, "amp_%s_%s_%s" % (name, raster, enc)) if "ltm_mc" in AMP_KINDS else None
                 for kind in AMP_KINDS:
                     oM, _, _ = run_kind(kind, {}, M, peak, ref_h, flows)
                     oD, _, _ = run_kind(kind, {}, D, peak, ref_h, flows)

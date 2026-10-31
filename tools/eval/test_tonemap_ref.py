@@ -93,6 +93,26 @@ class LtmTests(unittest.TestCase):
         self.assertEqual(m.cuts, 1)
 
 
+class VectorSourceTests(unittest.TestCase):
+    def test_external_fields_strict_and_upsampled(self):
+        import tempfile
+        import vector_source as vsrc
+        with tempfile.TemporaryDirectory() as d:
+            F = np.zeros((8, 16, 2), np.float32)
+            F[..., 0] = 1.5
+            F[..., 1] = -0.5
+            np.save(os.path.join(d, "flow_000003_000002.npy"), F)
+            a8 = np.zeros((16, 32), np.uint8)
+            vs = vsrc.VectorSource(d)
+            G = vs.flow(3, 2, a8, a8)
+            self.assertEqual(G.shape, (16, 32, 2))
+            np.testing.assert_allclose(G[..., 0], 3.0)   # half-size field: upsampled and scaled x2
+            np.testing.assert_allclose(G[..., 1], -1.0)
+            with self.assertRaises(FileNotFoundError):
+                vs.flow(4, 3, a8, a8)
+            self.assertEqual(vs.stats()["external_pairs"], 1)
+
+
 class HeadroomMetricTests(unittest.TestCase):
     def test_banding_metrics_see_quantisation(self):
         x = np.linspace(200, 260, 512)[None, :].repeat(128, 0)
