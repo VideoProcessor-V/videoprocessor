@@ -18,7 +18,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <filesystem>
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -1875,7 +1874,7 @@ namespace Tests
 				}
 				std::vector<char> buffer(1 << 20);
 				const int length = fingerprintOf(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
-				{ std::error_code removeError; std::filesystem::remove(path, removeError); }
+				DeleteFileA(path.c_str());
 				Assert::IsTrue(length > 0, L"fingerprint computed");
 				return std::string(buffer.data());
 			};
@@ -1927,7 +1926,7 @@ namespace Tests
 				}
 				std::vector<char> buffer(1 << 20);
 				const int length = function(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
-				{ std::error_code removeError; std::filesystem::remove(path, removeError); }
+				DeleteFileA(path.c_str());
 				Assert::IsTrue(length > 0, L"the export ran");
 				return std::string(buffer.data());
 			};
@@ -1984,7 +1983,6 @@ namespace Tests
 			const std::string motion = line(call(describe, changed), "motion");
 			Assert::IsTrue(motion.find("|always|") != std::string::npos,
 				(L"the motion profile's smooth_motion was read: " + std::wstring(motion.begin(), motion.end())).c_str());
-			DeleteFileA(path.c_str());
 		}
 
 		// Hunt 2 (picture C): nls_sampling and source_coding_fixes are parsed and dumped, default
@@ -2011,7 +2009,7 @@ namespace Tests
 				}
 				std::vector<char> buffer(1 << 20);
 				const int length = function(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
-				{ std::error_code removeError; std::filesystem::remove(path, removeError); }
+				DeleteFileA(path.c_str());
 				Assert::IsTrue(length > 0, L"the export ran");
 				return std::string(buffer.data());
 			};
@@ -2034,7 +2032,6 @@ namespace Tests
 				Assert::AreEqual(std::string(flip.second), line(call(describe, text), flip.first), (L"parsed: " + name).c_str());
 				Assert::AreNotEqual(baseFingerprint, call(fingerprintOf, text), (L"fingerprint: " + name).c_str());
 			}
-			DeleteFileA(path.c_str());
 		}
 
 		// docs/VP-detail-restore.md (2026-10-17): detail_pulse_stabilise / detail_pulse_cap /
@@ -2062,7 +2059,7 @@ namespace Tests
 				}
 				std::vector<char> buffer(1 << 20);
 				const int length = function(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
-				{ std::error_code removeError; std::filesystem::remove(path, removeError); }
+				DeleteFileA(path.c_str());
 				Assert::IsTrue(length > 0, L"the export ran");
 				return std::string(buffer.data());
 			};
@@ -2095,7 +2092,6 @@ namespace Tests
 			Assert::AreEqual(std::string("1.35"), line(call(describe, head + "detail_pulse_cap: 1.9\n"), "detail_pulse_cap"), L"cap above the range");
 			Assert::AreEqual(std::string("1.5"), line(call(describe, head + "texture_restore_cap: 0.5\n"), "texture_restore_cap"), L"cap below the range");
 			Assert::AreEqual(std::string("off"), line(call(describe, head + "texture_restore: neural\n"), "texture_restore"), L"not a choice");
-			DeleteFileA(path.c_str());
 		}
 
 		// For the lead's lead (never run by the plumbing agent): the source-resolution monitor reads the
