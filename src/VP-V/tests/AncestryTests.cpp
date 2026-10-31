@@ -168,5 +168,58 @@ namespace AncestryTestsNs
 			Assert::IsFalse(table[2].view.valid);
 			Assert::IsTrue(table[0].view.valid);
 		}
+
+		TEST_METHOD(AncientStampIsReportedFirstForEitherStamp)
+		{
+			Indicator ind(VpIndicator::NextEra(), 64);
+			Stamp ancient = ind.StampOf(10);
+			ancient.ancient = true;
+			auto none = [](uint16_t, uint16_t) { return SlotView(); };
+			Header never = Published(0, 10, ind.StampOf(10), 0, {});
+			Assert::IsTrue(Validate(never, ancient, none) == Verdict::AncientStamp);   // before NeverPublished
+			Header h = Published(3, 10, ancient, 0, {});
+			Assert::IsTrue(Validate(h, ind.StampOf(10), none) == Verdict::AncientStamp);   // honoured is ancient
+			Header ok = Published(3, 10, ind.StampOf(10), 0, {});
+			Assert::IsTrue(Validate(ok, ancient, none) == Verdict::AncientStamp);
+			Assert::AreEqual(std::string("ancient_stamp"), std::string(Token(Verdict::AncientStamp)));
+			Assert::AreEqual(std::string("order_violation"), std::string(Token(Verdict::OrderViolation)));
+		}
+
+		TEST_METHOD(ValidateInOrderFlagsAnAncestorListedLater)
+		{
+			Indicator ind(VpIndicator::NextEra(), 64);
+			const Stamp s = ind.StampOf(10);
+			std::vector<SlotEntry> slots(2);   // descendant first: wrong order
+			slots[0].productId = 3; slots[0].slotIndex = 0; slots[0].header = Published(6, 10, s, 0, { Ref(2, 0, 10, 4) });
+			slots[1].productId = 2; slots[1].slotIndex = 0; slots[1].header = Published(4, 10, s, 0, {});
+			std::vector<TableEntry> table(2);
+			table[0].productId = 3; table[0].slotIndex = 0; table[0].view = View(10, 6);
+			table[1].productId = 2; table[1].slotIndex = 0; table[1].view = View(10, 4);
+			std::vector<Verdict> verdicts;
+			size_t missing = 99;
+			ValidateInOrder(slots, s, table, verdicts, &missing);
+			Assert::AreEqual(size_t(2), verdicts.size());
+			Assert::IsTrue(verdicts[0] == Verdict::OrderViolation);
+			Assert::IsTrue(verdicts[1] == Verdict::Valid);
+			Assert::IsFalse(table[0].view.valid);
+			Assert::AreEqual(size_t(0), missing);
+		}
+
+		TEST_METHOD(ValidateInOrderCountsSlotsMissingFromTheTable)
+		{
+			Indicator ind(VpIndicator::NextEra(), 64);
+			const Stamp s = ind.StampOf(10);
+			std::vector<SlotEntry> slots(2);
+			slots[0].productId = 2; slots[0].slotIndex = 0; slots[0].header = Published(4, 10, s, 0, {});
+			slots[1].productId = 3; slots[1].slotIndex = 0; slots[1].header = Published(6, 10, s, 0, {});
+			std::vector<TableEntry> table(1);
+			table[0].productId = 2; table[0].slotIndex = 0; table[0].view = View(10, 4);
+			std::vector<Verdict> verdicts;
+			size_t missing = 0;
+			ValidateInOrder(slots, s, table, verdicts, &missing);
+			Assert::AreEqual(size_t(1), missing);
+			ValidateInOrder(slots, s, table, verdicts);   // out-param is optional
+			Assert::AreEqual(size_t(2), verdicts.size());
+		}
 	};
 }

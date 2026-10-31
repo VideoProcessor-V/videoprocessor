@@ -39,7 +39,13 @@ enum Counter : uint8_t {
 
 using CounterMask = uint32_t;
 
-constexpr CounterMask Bit(Counter c) { return CounterMask(1u) << static_cast<unsigned>(c); }
+// 0 for an out-of-range counter (no undefined shift).
+constexpr CounterMask Bit(Counter c)
+{
+    return static_cast<unsigned>(c) < static_cast<unsigned>(kCounterCount)
+               ? (CounterMask(1u) << static_cast<unsigned>(c))
+               : CounterMask(0);
+}
 
 constexpr CounterMask kAllCounters = (CounterMask(1u) << static_cast<unsigned>(kCounterCount)) - 1u;
 
@@ -155,6 +161,10 @@ public:
         sealedNext_.store(0, std::memory_order_relaxed);
         outOfOrder_.store(0, std::memory_order_relaxed);
         rejectedReaders_.store(0, std::memory_order_relaxed);
+        prematureFolds_.store(0, std::memory_order_relaxed);
+        unsealedObserves_.store(0, std::memory_order_relaxed);
+        rejectedAdvances_.store(0, std::memory_order_relaxed);
+        clampedAdvances_.store(0, std::memory_order_relaxed);
     }
 
     Indicator(const Indicator&) = delete;
@@ -167,6 +177,14 @@ public:
     uint32_t OutOfOrderObserves() const { return outOfOrder_.load(std::memory_order_relaxed); }
     uint32_t RejectedReaders() const { return rejectedReaders_.load(std::memory_order_relaxed); }
     int ReaderCount() const { return readerCount_; }
+    // Events folded out of the ring that still applied to unsealed frames (ring undersized).
+    uint32_t PrematureFolds() const { return prematureFolds_.load(std::memory_order_relaxed); }
+    // Observe(seq) calls for a seq that is not sealed yet (ignored).
+    uint32_t UnsealedObserves() const { return unsealedObserves_.load(std::memory_order_relaxed); }
+    // Advance calls with an out-of-range counter (ignored).
+    uint32_t RejectedAdvances() const { return rejectedAdvances_.load(std::memory_order_relaxed); }
+    // Advance calls whose fromSeq was raised above the last sealed frame.
+    uint32_t ClampedAdvances() const { return clampedAdvances_.load(std::memory_order_relaxed); }
 
     // Last sealed sequence (0 when nothing is sealed yet; see HasSealed).
     uint64_t LastSealed() const
@@ -176,13 +194,20 @@ public:
     }
     bool HasSealed() const { return sealedNext_.load(std::memory_order_acquire) != 0; }
 
-    // Any thread. Returns the effective fromSeq (clamped above the last sealed frame).
+    // Any thread. Returns the effective fromSeq (clamped above the last sealed frame), or 0 with
+    // nothing written when the counter is out of range (counted in RejectedAdvances).
     uint64_t Advance(Counter counter, VpResync::Cause cause, uint64_t fromSeq,
                      uint32_t gapFrames = 0, uint8_t detail = 0)
     {
+        if (static_cast<unsigned>(counter) >= static_cast<unsigned>(kCounterCount)) {
+            rejectedAdvances_.fetch_add(1, std::memory_order_relaxed);
+            return 0;
+        }
         std::lock_guard<std::mutex> lock(writeMutex_);
         const uint64_t floorSeq = sealedNext_.load(std::memory_order_relaxed);   // LastSealed() + 1, or 0
         const uint64_t effective = fromSeq < floorSeq ? floorSeq : fromSeq;
+        if (effective != fromSeq)
+            clampedAdvances_.fetch_add(1, std::memory_order_relaxed);
 
         const uint64_t v = version_.load(std::memory_order_relaxed);
         version_.store(v + 1, std::memory_order_relaxed);
@@ -193,6 +218,8 @@ public:
         if (written >= capacity_) {
             // Fold the oldest entry (by write order) into the base counters.
             const uint64_t oldFrom = slot.fromSeq.load(std::memory_order_relaxed);
+            if (oldFrom >= floorSeq)
+                prematureFolds_.fetch_add(1, std::memory_order_relaxed);   // still applies to unsealed frames
             const Counter oldCounter = CounterOf(slot.meta.load(std::memory_order_relaxed));
             const CounterMask moved = MovedBy(oldCounter);
             for (size_t i = 0; i < size_t(kCounterCount); ++i)
@@ -282,9 +309,21 @@ public:
         return (i >= 0 && i < readerCount_) ? readers_[size_t(i)].name : "";
     }
 
-    // Render thread, at the seal of seq. Returns the changed mask (0 when out of order).
+    // Render thread: seal seq, then observe it.
+    CounterMask SealAndObserve(uint64_t seq)
+    {
+        Seal(seq);
+        return Observe(seq);
+    }
+
+    // Render thread, at the seal of seq. Returns the changed mask (0 when out of order, or when
+    // seq is not sealed yet: counted in UnsealedObserves, no callbacks).
     CounterMask Observe(uint64_t seq)
     {
+        if (!HasSealed() || seq > LastSealed()) {
+            unsealedObserves_.fetch_add(1, std::memory_order_relaxed);
+            return 0;
+        }
         if (observed_ && seq < lastObservedSeq_) {
             outOfOrder_.fetch_add(1, std::memory_order_relaxed);
             return 0;
@@ -394,7 +433,8 @@ private:
 
     static void Backoff(unsigned attempt)
     {
-        if (attempt > 64)
+        // Spin briefly, yield every 16th attempt, and past 1024 attempts yield on every spin.
+        if (attempt >= 1024 || (attempt >= 16 && (attempt & 15u) == 0))
             std::this_thread::yield();
     }
 
@@ -412,6 +452,10 @@ private:
     std::atomic<uint64_t> sealedNext_;   // LastSealed() + 1; 0 = nothing sealed
     std::atomic<uint32_t> outOfOrder_;
     std::atomic<uint32_t> rejectedReaders_;
+    std::atomic<uint32_t> prematureFolds_;
+    std::atomic<uint32_t> unsealedObserves_;
+    std::atomic<uint32_t> rejectedAdvances_;
+    std::atomic<uint32_t> clampedAdvances_;
 
     // Readers: registered at setup, called from the render thread only.
     std::array<Reader, kMaxReaders> readers_;

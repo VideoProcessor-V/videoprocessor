@@ -222,19 +222,19 @@ namespace IndicatorTestsNs
 			Assert::AreEqual(std::string("continuity"), std::string(ind.ReaderName(1)));
 
 			// First Observe reports everything: all readers are called.
-			Assert::AreEqual(kAllCounters, ind.Observe(10));
+			Assert::AreEqual(kAllCounters, ind.SealAndObserve(10));
 			Assert::AreEqual(size_t(3), calls.size());
 			Assert::IsTrue(calls[0] == 0 && calls[1] == 1 && calls[2] == 2);
 			calls.clear();
 			relevants.clear();
 
 			// Nothing changed.
-			Assert::AreEqual(CounterMask(0), ind.Observe(11));
+			Assert::AreEqual(CounterMask(0), ind.SealAndObserve(11));
 			Assert::AreEqual(size_t(0), calls.size());
 
 			// A continuity event at 12: readers b and c, in order.
 			ind.Advance(kContinuity, Cause::MissedFrames, 12);
-			Assert::AreEqual(Bit(kContinuity), ind.Observe(12));
+			Assert::AreEqual(Bit(kContinuity), ind.SealAndObserve(12));
 			Assert::AreEqual(size_t(2), calls.size());
 			Assert::IsTrue(calls[0] == 1 && calls[1] == 2);
 			Assert::AreEqual(Bit(kContinuity), relevants[0]);
@@ -243,7 +243,7 @@ namespace IndicatorTestsNs
 			// A FULL event moves continuity too (implication) but not timing.
 			ind.Advance(kFull, Cause::RendererReset, 13);
 			ind.Advance(kTiming, Cause::RateStep, 14);
-			Assert::IsTrue(ind.Observe(14) != 0);
+			Assert::IsTrue(ind.SealAndObserve(14) != 0);
 			Assert::AreEqual(size_t(3), calls.size());
 
 			Event ev[8];
@@ -261,7 +261,7 @@ namespace IndicatorTestsNs
 			Indicator ind(NextEra(), 64);
 			int calls = 0;
 			ind.Register("any", kAllCounters, NoPolicies(), [&calls](const Indicator::Change&) { ++calls; });
-			ind.Observe(20);
+			ind.SealAndObserve(20);
 			Assert::AreEqual(1, calls);
 			Assert::AreEqual(CounterMask(0), ind.Observe(19));
 			Assert::AreEqual(1, calls);
@@ -278,7 +278,7 @@ namespace IndicatorTestsNs
 			Assert::AreEqual(-1, ind.Register("extra", Bit(kFull), NoPolicies(), nullptr));
 			Assert::AreEqual(uint32_t(1), ind.RejectedReaders());
 			Indicator late(NextEra(), 64);
-			late.Observe(1);
+			late.SealAndObserve(1);
 			Assert::AreEqual(-1, late.Register("late", Bit(kFull), NoPolicies(), nullptr));
 		}
 
@@ -407,6 +407,199 @@ namespace IndicatorTestsNs
 			Assert::AreEqual(size_t(64), ind.Snapshot(all, 128));
 			Assert::AreEqual(uint64_t(37), all[0].serial);
 			Assert::AreEqual(uint32_t(100), ind.Total(kTiming));
+		}
+
+		TEST_METHOD(UndersizedRingCountsPrematureFolds)
+		{
+			// Nothing sealed: every folded event still applies to unsealed frames.
+			Indicator ind(NextEra(), 64);
+			for (uint64_t i = 0; i < 100; ++i)
+				ind.Advance(kTiming, Cause::RateStep, 100);
+			Assert::AreEqual(uint32_t(36), ind.PrematureFolds());
+
+			// A ring that keeps up with the seal never folds an event that still applies.
+			Indicator ok(NextEra(), 64);
+			for (uint64_t i = 0; i < 200; ++i) {
+				ok.Advance(kTiming, Cause::RateStep, i);
+				ok.Seal(i);
+			}
+			Assert::AreEqual(uint32_t(0), ok.PrematureFolds());
+
+			// Sealed far behind the writers: events at or above the next unsealed seq fold prematurely.
+			Indicator behind(NextEra(), 64);
+			behind.Seal(50);
+			for (uint64_t i = 0; i < 100; ++i)
+				behind.Advance(kTiming, Cause::RateStep, 51 + i);
+			Assert::AreEqual(uint32_t(36), behind.PrematureFolds());
+		}
+
+		TEST_METHOD(ObserveOfAnUnsealedSeqIsSilentAndCounted)
+		{
+			Indicator ind(NextEra(), 64);
+			int calls = 0;
+			ind.Register("any", kAllCounters, NoPolicies(), [&calls](const Indicator::Change&) { ++calls; });
+			Assert::AreEqual(CounterMask(0), ind.Observe(5));   // nothing sealed
+			Assert::AreEqual(uint32_t(1), ind.UnsealedObserves());
+			ind.Seal(5);
+			Assert::AreEqual(CounterMask(0), ind.Observe(6));   // beyond the seal
+			Assert::AreEqual(uint32_t(2), ind.UnsealedObserves());
+			Assert::AreEqual(0, calls);
+			Assert::AreEqual(kAllCounters, ind.Observe(5));     // sealed: first observe reports everything
+			Assert::AreEqual(1, calls);
+			Assert::AreEqual(uint32_t(2), ind.UnsealedObserves());
+			Indicator j(NextEra(), 64);
+			Assert::AreEqual(kAllCounters, j.SealAndObserve(9));
+		}
+
+		TEST_METHOD(ReaderCallbackAdvancingAtTheFirstUnsealedSeqLeavesTheSealedStampAlone)
+		{
+			Indicator ind(NextEra(), 64);
+			Stamp insideBefore, insideAfter;
+			uint64_t effective = 0;
+			ind.Register("reentrant", kAllCounters, NoPolicies(), [&](const Indicator::Change& c) {
+				insideBefore = ind.StampOf(c.seq);
+				effective = ind.Advance(kContinuity, Cause::MissedFrames, ind.LastSealed() + 1);
+				insideAfter = ind.StampOf(c.seq);
+			});
+			ind.SealAndObserve(10);
+			Assert::AreEqual(uint64_t(11), effective);
+			Assert::IsTrue(SameFor(insideBefore, insideAfter, kAllCounters));
+			Assert::IsTrue(SameFor(insideBefore, ind.StampOf(10), kAllCounters));
+			Assert::AreEqual(insideBefore.v[kContinuity] + 1u, ind.StampOf(11).v[kContinuity]);
+		}
+
+		TEST_METHOD(OutOfRangeCountersAreRejectedAndBitIsZero)
+		{
+			Indicator ind(NextEra(), 64);
+			Assert::AreEqual(uint64_t(0), ind.Advance(static_cast<Counter>(kCounterCount), Cause::GapOther, 77));
+			Assert::AreEqual(uint64_t(0), ind.Advance(static_cast<Counter>(200), Cause::GapOther, 77));
+			Assert::AreEqual(uint32_t(2), ind.RejectedAdvances());
+			Event ev[4];
+			Assert::AreEqual(size_t(0), ind.Snapshot(ev, 4));
+			Assert::IsTrue(SameFor(ind.StampOf(0), ind.StampOf(100), kAllCounters));
+			Assert::AreEqual(CounterMask(0), Bit(static_cast<Counter>(kCounterCount)));
+			Assert::AreEqual(CounterMask(0), Bit(static_cast<Counter>(31)));
+			Assert::AreEqual(CounterMask(0), Bit(static_cast<Counter>(255)));
+			Assert::AreEqual(CounterMask(1) << (kCounterCount - 1), Bit(kSettingsOutput));
+		}
+
+		TEST_METHOD(ClampedAdvancesAreCounted)
+		{
+			Indicator ind(NextEra(), 64);
+			ind.Advance(kTiming, Cause::RateStep, 3);
+			Assert::AreEqual(uint32_t(0), ind.ClampedAdvances());   // nothing sealed
+			ind.Seal(50);
+			ind.Advance(kTiming, Cause::RateStep, 10);               // clamped to 51
+			ind.Advance(kTiming, Cause::RateStep, 50);               // clamped to 51
+			ind.Advance(kTiming, Cause::RateStep, 51);               // exactly the floor: not clamped
+			ind.Advance(kTiming, Cause::RateStep, 90);
+			Assert::AreEqual(uint32_t(2), ind.ClampedAdvances());
+			Assert::AreEqual(uint32_t(5), ind.Total(kTiming));
+		}
+
+		TEST_METHOD(FoldingWithOutOfOrderFromSeqsMatchesTheBruteForceModel)
+		{
+			Indicator ind(NextEra(), 64);
+			Reference ref;
+			const Counter pattern[] = { kContinuity, kTiming, kFull, kRebaseV, kSettingsMotion, kGraph, kSettingsOutput };
+			for (uint64_t i = 0; i < 300; ++i) {
+				const Counter c = pattern[i % 7];
+				const uint64_t from = (i % 2 == 0) ? 1000 + i : 900 + i;
+				ind.Advance(c, Cause::GapOther, from);
+				ref.Add(from, c);
+			}
+			Assert::AreEqual(uint32_t(300 - 64), ind.PrematureFolds());
+			const uint64_t below = ind.AncientBelow();
+			Assert::IsTrue(below > 900);
+			for (uint64_t seq = 800; seq < 1400; ++seq) {
+				const Stamp s = ind.StampOf(seq);
+				if (seq < below) {
+					Assert::IsTrue(s.ancient);
+					continue;
+				}
+				Assert::IsFalse(s.ancient);
+				for (size_t c = 0; c < size_t(kCounterCount); ++c)
+					Assert::AreEqual(ref.Count(seq, c), s.v[c]);
+			}
+		}
+
+		TEST_METHOD(WritersSealerAndReadersKeepInvariantsAndFixedSeqCountsOnlyGrow)
+		{
+			// Event pattern: writer w, event k -> counter by (w + k) % 3, requested fromSeq 100 + k % 40
+			// (the sealer stops at 130, so a clamp never lifts an event above kHigh/kLow's range).
+			struct Pat {
+				static Counter CounterFor(unsigned w, uint32_t k)
+				{
+					const unsigned m = (w + k) % 3;
+					return m == 0 ? kFull : (m == 1 ? kContinuity : kTiming);
+				}
+				static uint64_t FromFor(uint32_t k) { return 100 + k % 40; }
+			};
+			const uint64_t kHigh = 200;   // above every event: never ancient
+			const uint64_t kLow = 120;    // inside the event range: may go ancient
+			Indicator ind(NextEra(), 64);
+			std::atomic<bool> stop(false);
+			std::atomic<int> violations(0);
+
+			auto implied = [&ind](Counter c) {   // events that move counter c, read after the stamp
+				uint32_t t = ind.Total(c);
+				if (c == kContinuity || c == kRebaseH || c == kRebaseV)
+					t += ind.Total(kFull);
+				return t;
+			};
+
+			auto writer = [&](unsigned w) {
+				for (uint32_t k = 0; !stop.load(std::memory_order_relaxed); ++k)
+					ind.Advance(Pat::CounterFor(w, k), Cause::GapOther, Pat::FromFor(k), k, uint8_t(w));
+			};
+			auto sealer = [&]() {
+				for (uint64_t s = 0; s <= 130 && !stop.load(std::memory_order_relaxed); ++s) {
+					ind.Seal(s);
+					std::this_thread::sleep_for(std::chrono::milliseconds(8));
+				}
+			};
+			auto reader = [&]() {
+				std::array<uint32_t, kCounterCount> lastHigh{}, lastLow{};
+				Event ev[64];
+				while (!stop.load(std::memory_order_relaxed)) {
+					const Stamp hi = ind.StampOf(kHigh);
+					if (hi.ancient)
+						violations.fetch_add(1);
+					for (size_t c = 0; c < size_t(kCounterCount); ++c) {
+						if (hi.v[c] < lastHigh[c])
+							violations.fetch_add(1);
+						lastHigh[c] = hi.v[c];
+						if (hi.v[c] > implied(Counter(c)))
+							violations.fetch_add(1);
+					}
+					const Stamp lo = ind.StampOf(kLow);
+					if (!lo.ancient) {
+						for (size_t c = 0; c < size_t(kCounterCount); ++c) {
+							if (lo.v[c] < lastLow[c])
+								violations.fetch_add(1);
+							lastLow[c] = lo.v[c];
+							if (lo.v[c] > implied(Counter(c)))
+								violations.fetch_add(1);
+						}
+					}
+					const size_t n = ind.Snapshot(ev, 64);
+					for (size_t i = 0; i < n; ++i) {
+						if (i > 0 && ev[i].serial != ev[i - 1].serial + 1)
+							violations.fetch_add(1);
+						if (ev[i].counter != Pat::CounterFor(ev[i].detail, ev[i].gapFrames))
+							violations.fetch_add(1);
+						if (ev[i].fromSeq < Pat::FromFor(ev[i].gapFrames) || ev[i].fromSeq > 131 + 40)
+							violations.fetch_add(1);
+					}
+				}
+			};
+
+			std::thread w0(writer, 0u), w1(writer, 1u), s0(sealer), r0(reader), r1(reader), r2(reader);
+			std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+			stop.store(true);
+			w0.join(); w1.join(); s0.join(); r0.join(); r1.join(); r2.join();
+			Assert::AreEqual(0, violations.load());
+			Assert::IsTrue(ind.Total(kFull) + ind.Total(kContinuity) + ind.Total(kTiming) > 0);
 		}
 	};
 }
