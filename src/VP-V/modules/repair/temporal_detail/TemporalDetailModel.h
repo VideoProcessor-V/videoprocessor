@@ -400,7 +400,13 @@ namespace TemporalDetail
 
 		explicit Model(const Settings& settings) : m_set(settings) {}
 
-		void SetTuning(const Tuning& t) { m_tune = t; }
+		// A change of the slot tier restarts the store (as the GPU module does).
+		void SetTuning(const Tuning& t)
+		{
+			const bool reset = t.slots != m_tune.slots;
+			m_tune = t;
+			if (reset) Reset("tier");
+		}
 
 		const Settings& GetSettings() const { return m_set; }
 

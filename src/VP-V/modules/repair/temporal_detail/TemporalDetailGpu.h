@@ -54,6 +54,10 @@ namespace TemporalDetail
 			MotionTex backward;            // pair (seq -> seq - 1) on frame seq's grid; absent = motion lost
 			MotionTex forward;             // pair (seq - 1 -> seq), optional (uncertainty only)
 			pl_tex quality = nullptr;      // optional bw x bh float texture (x: bitrate quality 0..1), absent = neutral
+			// Pass a null backward/forward texture for an invalid pair (the model's PairUsable): null backward = motion lost.
+			// What the host has but this GPU path does not use yet (the status then says so; never silent):
+			bool lookAheadAvailable = false;   // queued future frames (the model's future slot / referee)
+			bool cameraAvailable = false;      // a usable camera-model record (the model's homography chain)
 			// Model-only measurement knobs (Model::Tuning; never user settings)
 			double grainBudget = kGrainBudget;
 			bool templateClean = true;
@@ -79,6 +83,8 @@ namespace TemporalDetail
 			Module(const Module&) = delete;
 			Module& operator=(const Module&) = delete;
 
+			// The returned luma texture belongs to the module and stays valid until the next Apply (a host that keeps frames
+			// copies it).
 			// `source` with its luma plane processed into this module's texture (other planes pass through). Off:
 			// `out` = `source`, no pass. A repeat (same sequence and size) returns the last output without advancing.
 			// False (and `out` untouched) on any failure: the caller renders the frame as it was and shows the reason.

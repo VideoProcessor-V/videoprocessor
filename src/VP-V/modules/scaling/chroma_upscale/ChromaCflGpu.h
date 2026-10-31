@@ -52,6 +52,8 @@ namespace ChromaUpscale
 
 			// `source` with its chroma upsampled to luma size (2 planes: luma, CbCr; shifts 0). Off, or a 4:4:4 frame:
 			// `out` = `source`, no pass. False (and `out` untouched) on any failure.
+			// The output frame's chroma texture belongs to the module and stays valid until the next Apply (a host that keeps
+			// frames, e.g. render-ahead or frame mixing, copies it).
 			bool Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& out);
 			void Release(pl_gpu gpu);
 			const std::string& LastError() const { return m_error; }

@@ -420,6 +420,36 @@ namespace VideoProcessorTest
 			}
 		}
 
+		TEST_METHOD(TemporalDetailGpuLargeScaleBlocksFollowTheModel)
+		{
+			// Grain scale above 2160 lines (block 32 / patch 16 at 4320 lines, block 21 / patch 10 at 2880: not a power of two)
+			// on a plane that is not a multiple of the block, with an active picture: the GPU follows the model.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			const int pw = 150, ph = 110;
+			const std::vector<Plane> pic = Stream(14, "IBBBPBBB", 0.45, 0.2, 61u, 1.2, false, 140, 98);
+			std::vector<Plane> frames;
+			for (const Plane& f : pic)
+			{
+				Plane full(pw, ph, 30.0);
+				for (int y = 0; y < f.h; ++y)
+					for (int x = 0; x < f.w; ++x) full.at(5 + x, 6 + y) = f.at(x, y);
+				frames.push_back(full);
+			}
+			const ActiveRect rect = { 5, 6, 145, 104 };
+			for (const double lines : { 4320.0, 2880.0 })
+			{
+				Gpu::Params p;
+				p.settings = Steady();
+				const MatchResult r = RunMatch(dev, frames, 0.45, 0.2, p, Model::Tuning(), [&](int, Gpu::Params& gp, Model::FrameIn& in) {
+					gp.planeLines = lines; in.planeLines = lines;
+					gp.active = rect; in.active = rect;
+				});
+				LogF("%.0f lines: worst %.4f codes, worst frame mean %.5f, model changed %.3f", lines, r.worst, r.worstMean, r.changedShare);
+				Assert::IsTrue(r.worst <= 0.125 && r.worstMean <= 0.005 && r.maxOverShare <= 0.0, L"the GPU follows the model at a large grain scale");
+			}
+		}
+
 		TEST_METHOD(TemporalDetailGpuSlotTierFollowsTheModel)
 		{
 			// The reference-store memory tier: with 2 slots the GPU follows the model with Tuning::slots = 2, says so in its

@@ -71,7 +71,8 @@ namespace TemporalDetail
 	// Bounded: the model reads only the presented frame's pairs and those of the queued frames ahead of it (composition
 	// is incremental, nothing older is read again), so entries are pruned (a) older than the newest stored sequence minus
 	// the retention window (a frame count, not a rate: it covers the deepest queue ahead of the presented frame), (b) older
-	// than the presented frame when the host calls Prune(presented), and (c) all at Clear() (resets, stamp changes).
+	// than the presented frame when the host calls Prune(presented), and (c) all at Clear(). The host calls Clear() on every
+	// seek, reset or stamp change (sequence numbers may be reused: a stale pair must never answer for a new frame).
 	class FieldMotionSource : public IMotionSource
 	{
 	public:

@@ -380,7 +380,10 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			// --- A: the grain guard (the shared grain split, three planes) ---
 			const double cuL = CodeUnit(luma, source.repr.bits, params.colorDepth);
 			const double cuC = CodeUnit(cbTex, source.repr.bits, params.colorDepth);
-			const double cuOut = CodeUnit(m.out, source.repr.bits, params.colorDepth);
+			// The output carries the frame's one repr: write chroma in the input chroma's units (as the input would decode).
+			if (m.out->params.format->type == PL_FMT_FLOAT && cbTex->params.format->type != PL_FMT_FLOAT && source.repr.bits.bit_shift != 0)
+				return fail("chroma upscale: no storable unorm output for a bit-shifted chroma plane");
+			const double cuOut = cuC;
 			const double lines = params.lumaLines > 0.0 ? params.lumaLines : static_cast<double>(H);
 			const double linesC = lines / fy;
 			if (guard)

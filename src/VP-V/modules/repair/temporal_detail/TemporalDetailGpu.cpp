@@ -132,7 +132,7 @@ namespace TemporalDetail
 			const int cols = (std::max)(1, AtlasCols(K, w, h, 16384));
 			b += static_cast<uint64_t>(cols * ((K + cols - 1) / cols)) * (8 + 2) * px;   // slot atlas: rgba16f bands + r16 base
 			b += 2 * 8 * px;                              // cleaner accumulators (rg32f)
-			b += 8 * px + 8 * px + 2 * px;                // delta, prevg (rg32f), output (16-bit)
+			b += 8 * px + 8 * px + 2 * px + 2 * px;       // delta, prevg (rg32f), output and active-picture crop (16-bit; bars excluded)
 			b += nb * 16 * (2 + 1 + 2 * K + 2 * K + 16 + 1 + 3 + 2 + 1) + nb * 4 * (K + 1);   // block grids
 			b += static_cast<uint64_t>(g.npx) * static_cast<uint64_t>(g.npy) * 8;          // patch statistics
 			return b;
@@ -183,6 +183,7 @@ namespace TemporalDetail
 			{
 				// Off: the input itself, no pass; the store is untouched (the model's Off).
 				m_status = "off";
+				if (m_impl) { m_impl->lastSet = set; m_impl->haveSet = true; }   // switching on again is a mode change: reset
 				result = source;
 				return true;
 			}
@@ -515,6 +516,9 @@ if (g.x < TD_BW * TD_K && g.y < TD_BH) imageStore(mot_out, g, vec4(0.0));
 			m.stamps = params.stamps;
 			m_status = reason ? std::string("reset: ") + reason : (motionLost ? std::string("motion lost") : std::string("ok"));
 			if (K < kSlots) m_status += "; store " + std::to_string(K) + " of " + std::to_string(kSlots) + " slots (memory tier)";
+			if (params.lookAheadAvailable || params.cameraAvailable)
+				m_status += std::string("; not on GPU:") + (params.lookAheadAvailable ? " look-ahead" : "") +
+					(params.lookAheadAvailable && params.cameraAvailable ? "," : "") + (params.cameraAvailable ? " camera model" : "");
 			pl_frame frame = source;
 			frame.planes[0].texture = m.out;
 			result = frame;
