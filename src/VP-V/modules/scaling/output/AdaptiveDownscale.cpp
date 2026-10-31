@@ -523,7 +523,10 @@ float rs_slope(float y)
 	{
 		if (gpu)
 		{
-			for (pl_tex* tex : { &faithful, &faithfulMid, &lowres, &edge, &partial, &state, &map[0], &map[1], &motionMap[0], &motionMap[1] })
+			// The residual pair too (found 2026-10-31: it outlived Release and a new GPU recreated
+			// it through the old one's texture).
+			for (pl_tex* tex : { &faithful, &faithfulMid, &lowres, &edge, &partial, &state, &map[0], &map[1], &motionMap[0], &motionMap[1],
+				&residual[0], &residual[1] })
 				if (*tex)
 					pl_tex_destroy(gpu, tex);
 			if (readback)
@@ -540,6 +543,11 @@ float rs_slope(float y)
 			if (lut)
 				pl_shader_obj_destroy(&lut);
 		faithful = faithfulMid = lowres = edge = partial = state = map[0] = map[1] = motionMap[0] = motionMap[1] = nullptr;
+		residual[0] = residual[1] = nullptr;
+		residualIndex = 0;
+		residualPrevValid = false;
+		residualSequence = 0;
+		residualW = residualH = 0;
 		motionIndex = 0;
 		motionReady = false;
 		motionSequence = 0;
