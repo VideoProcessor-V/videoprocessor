@@ -478,9 +478,9 @@ namespace VideoProcessorTest
 				mirror.h[0] = -1.0;
 				Assert::IsTrue(IsDegenerate(mirror, pic), L"mirrored");
 
-				Params far = IdentityParams(ModelType::Translation);
-				far.h[2] = 9.0 * std::sqrt(static_cast<double>(pic.Width()) * pic.Width() + static_cast<double>(pic.Height()) * pic.Height());
-				Assert::IsTrue(IsDegenerate(far, pic), L"corner far away");
+				Params farAway = IdentityParams(ModelType::Translation);
+				farAway.h[2] = 9.0 * std::sqrt(static_cast<double>(pic.Width()) * pic.Width() + static_cast<double>(pic.Height()) * pic.Height());
+				Assert::IsTrue(IsDegenerate(farAway, pic), L"corner far away");
 			}
 			Assert::IsTrue(IsDegenerate(IdentityParams(ModelType::Translation), Rect()), L"empty picture");
 		}
