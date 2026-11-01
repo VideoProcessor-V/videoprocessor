@@ -114,7 +114,7 @@ def per_second(rows):
     for s in sorted(secs):
         g = secs[s]
         d = dict(second=s, frames=len(g))
-        for k in ("nr_band", "nr_block", "nr_ring", "nr_noise"):
+        for k in ("nr_band", "nr_block", "nr_ring", "nr_noise", "nr_detail"):
             d[k] = float(np.median([x[k] for x in g]))
         out.append(d)
     return out
@@ -142,6 +142,33 @@ def poor_spans(sec_rows, thr, min_seconds=POOR_MIN_SECONDS):
     return spans
 
 
+def relative_drop_spans(sec_rows, thr, min_seconds=POOR_MIN_SECONDS):
+    """Seconds where noise or detail fall below thr['relative_drop'][m] x the recording's own baseline (75th
+    percentile over the recording) for >= min_seconds in a row: the signature of an ABR rung drop / starved shot."""
+    rel = (thr or {}).get("relative_drop") or {}
+    flagged = set()
+    for m, limit in rel.items():
+        vals = np.array([d["nr_" + m] for d in sec_rows], float)
+        if len(vals) < 4 or np.quantile(vals, 0.75) <= 0:
+            continue
+        base = float(np.quantile(vals, 0.75))
+        for d, v in zip(sec_rows, vals):
+            d["rel_" + m] = float(v / base)
+            if v / base < limit:
+                flagged.add(d["second"])
+    spans, cur = [], None
+    for sec in sorted(flagged):
+        if cur and sec == cur[1] + 1:
+            cur[1] = sec
+        else:
+            if cur and cur[1] - cur[0] + 1 >= min_seconds:
+                spans.append(tuple(cur))
+            cur = [sec, sec]
+    if cur and cur[1] - cur[0] + 1 >= min_seconds:
+        spans.append(tuple(cur))
+    return spans
+
+
 def scan_one(folder, thr, stride=4, max_frames=None):
     name = os.path.basename(folder.rstrip(os.sep))
     rows = read_frames_csv(os.path.join(folder, "frames.csv"))
@@ -157,7 +184,7 @@ def scan_one(folder, thr, stride=4, max_frames=None):
         with open(nrcsv, "r", encoding="utf8", newline="") as f:
             for r in csv.DictReader(f):
                 series.append(dict(frame=int(r["frame"]), t=int(r["frame"]) / fps,
-                                   **{k: float(r[k]) for k in ("nr_band", "nr_block", "nr_ring", "nr_noise")}))
+                                   **{k: float(r[k]) for k in ("nr_band", "nr_block", "nr_ring", "nr_noise", "nr_detail")}))
     elif raws:
         planes = []
         by_frame = {e["frame"]: e for e in ev["raw"]}
@@ -188,12 +215,13 @@ def scan_one(folder, thr, stride=4, max_frames=None):
     if series:
         sec = per_second(series)
         res["metrics_median"] = {k: round(float(np.median([d[k] for d in sec])), 4)
-                                 for k in ("nr_band", "nr_block", "nr_ring", "nr_noise")}
+                                 for k in ("nr_band", "nr_block", "nr_ring", "nr_noise", "nr_detail")}
         if tier == "full" and thr:
             spans = poor_spans(sec, thr)
             res["poor_spans_s"] = spans
             res["poor_seconds"] = sum(b - a + 1 for a, b in spans)
             res["poor_index_max"] = round(max(d["poor_index"] for d in sec), 3)
+            res["relative_drop_spans_s"] = relative_drop_spans(sec, thr)
         res["_seconds"] = sec
     return res
 
@@ -217,14 +245,15 @@ def main(argv=None):
     os.makedirs(out, exist_ok=True)
     results = [scan_one(r, thr, a.stride, a.max_frames) for r in recs]
     lines = ["| recording | tier | frames | seconds | Hz | exact-repeat | gaps | NR median band/block/ring/noise | poor spans (s) |",
-             "|---|---|---|---|---|---|---|---|---|"]
+             "|---|---|---|---|---|---|---|---|---|---|"]
     for r in results:
         mm = r.get("metrics_median")
-        lines.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+        lines.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
             r["recording"], r["tier"], r.get("frames"), r.get("seconds"), r.get("picture_rate_hz"),
             r.get("exact_repeat_share"), r.get("gaps"),
-            "/".join("%.3f" % mm[k] for k in ("nr_band", "nr_block", "nr_ring", "nr_noise")) if mm else "no pixels",
-            json.dumps(r.get("poor_spans_s")) if "poor_spans_s" in r else "n/a"))
+            "/".join("%.3f" % mm[k] for k in ("nr_band", "nr_block", "nr_ring", "nr_noise", "nr_detail")) if mm else "no pixels",
+            json.dumps(r.get("poor_spans_s")) if "poor_spans_s" in r else "n/a",
+            json.dumps(r.get("relative_drop_spans_s")) if "relative_drop_spans_s" in r else "n/a"))
     with open(os.path.join(out, "recordings_summary.md"), "w", encoding="utf8", newline="\n") as f:
         f.write("\n".join(lines) + "\n")
     for r in results:

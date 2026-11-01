@@ -7,7 +7,8 @@ counterpart uses the master:
   band   fr_band   mean |gauss(err, 3)| (8-bit units) in the reference's smooth gradient mask (staircase error)
   block  fr_block  excess error discontinuity at the 8-px deblocking grid (phase known from the crop) vs inside blocks
   ring   fr_ring   rms of the 1-px high-pass of the error in the reference's ring zone beside strong edges
-  noise  fr_noise_loss  1 - sigma(decode)/sigma(ref) over the reference's flat mask
+  noise  fr_noise_loss  1 - sigma(decode)/sigma(ref) over the reference's flat mask (expect a NEGATIVE correlation)
+  detail fr_detail_kept detail ratio of the decode / of the master (expect a POSITIVE correlation)
   poor   1 - SSIM (luma) against the NR poor index
 Reports pooled and within-clip Spearman correlations and, per metric, the AUC for telling the lowest rung from
 the top rung of the same clip; --thresholds writes nr_thresholds.json ("poor" level per artefact).
@@ -58,7 +59,7 @@ def fr_frame(ref, dec, bd, crop):
         vals.append(m_on / max(m_off, 0.02) - 1.0)
     out["fr_block"] = float(max(np.mean(vals), 0.0))
     # ring: error high-pass beside strong edges of the reference
-    _, zone, _ = nr.edge_zone(r)
+    _, zone, _, _ = nr.edge_zone(r)
     if zone.sum() >= 256:
         hp_e = err - ndi.gaussian_filter(err, 1.0)
         out["fr_ring"] = float(np.sqrt(np.mean(hp_e[zone] ** 2)))
@@ -73,6 +74,9 @@ def fr_frame(ref, dec, bd, crop):
         out["fr_noise_loss"] = float(1.0 - s_d / s_r) if s_r > 0.05 else None
     else:
         out["fr_noise_loss"] = None
+    dr, _ = nr.detail_ratio(r)
+    dd, _ = nr.detail_ratio(d)
+    out["fr_detail_kept"] = float(dd / dr) if dr > 1e-9 else None
     out["fr_ssim_loss"] = 1.0 - em.ssim(ref[None], dec[None], bd)
     return out
 
@@ -131,7 +135,7 @@ def auc(low, top):
 
 
 PAIRS = [("band", "nr_band", "fr_band"), ("block", "nr_block", "fr_block"), ("ring", "nr_ring", "fr_ring"),
-         ("noise", "nr_noise", "fr_noise_loss")]
+         ("noise", "nr_noise", "fr_noise_loss"), ("detail", "nr_detail", "fr_detail_kept")]
 
 
 def analyse(rows, cases):
@@ -152,22 +156,33 @@ def analyse(rows, cases):
     by_case = {}
     for r in rows:
         by_case.setdefault(r["case"], []).append(r)
-    low_rows, top_rows = [], []
+    low_rows, top_rows, ratios = [], [], {"noise": [], "detail": []}
     for key, cs in sorted(groups.items()):
         cs = sorted(cs, key=lambda c: -c["streaming"]["target_kbps"])
+        cs = [c for c in cs if c["streaming"]["raster"] == cs[0]["streaming"]["raster"]]   # same raster as the top rung
         if len(cs) < 2:
             continue
-        top_rows += by_case.get(cs[0]["id"], [])
-        low_rows += by_case.get(cs[-1]["id"], [])
-    aucs, poor = [], {}
+        t, l = by_case.get(cs[0]["id"], []), by_case.get(cs[-1]["id"], [])
+        top_rows += t
+        low_rows += l
+        for m in ratios:
+            a_, b_ = [r["nr_" + m] for r in t], [r["nr_" + m] for r in l]
+            if a_ and b_ and np.median(a_) > 0:
+                ratios[m].append(float(np.median(b_) / np.median(a_)))
+    aucs, poor, rel = [], {}, {}
     for name, kx, _ in PAIRS:
         lo = [r[kx] for r in low_rows]
         tp = [r[kx] for r in top_rows]
-        aucs.append(dict(metric=name, auc_low_vs_top=auc(lo, tp), n_low=len(lo), n_top=len(tp),
+        worse_high = name in ("band", "block", "ring")
+        a_ = auc(lo, tp) if worse_high else auc(tp, lo)               # P(the lowest rung looks worse than the top rung)
+        aucs.append(dict(metric=name, auc_low_vs_top=a_, n_low=len(lo), n_top=len(tp),
                          median_top=float(np.median(tp)) if tp else None, median_low=float(np.median(lo)) if lo else None))
-        if name != "noise" and lo and tp:
+        if worse_high and lo and tp:
             hi_top, med_low = float(np.quantile(tp, 0.9)), float(np.median(lo))
             poor[name] = round(0.5 * (hi_top + med_low), 6) if med_low > hi_top else round(med_low, 6)
+    for m, v in ratios.items():
+        if v and np.median(v) < 1.0:
+            rel[m] = round(1.0 - 0.5 * (1.0 - float(np.median(v))), 4)      # halfway between "unchanged" and the typical lowest-rung level
     # composite vs SSIM loss
     if poor:
         th = {"poor": poor}
@@ -181,7 +196,7 @@ def analyse(rows, cases):
         aucs.append(dict(metric="poor_index", auc_low_vs_top=auc([r["poor_index"] for r in low_rows],
                                                                   [r["poor_index"] for r in top_rows]),
                          n_low=len(low_rows), n_top=len(top_rows), median_top=None, median_low=None))
-    return corr, aucs, poor
+    return corr, aucs, poor, rel
 
 
 def fmt(v):
@@ -206,7 +221,7 @@ def main(argv=None):
                 continue
             cases.append(c)
             rows += case_rows(c, a.stride, a.max_frames, print)
-    corr, aucs, poor = analyse(rows, cases)
+    corr, aucs, poor, rel = analyse(rows, cases)
     with open(a.out + "_frames.csv", "w", encoding="utf8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=sorted({k for r in rows for k in r}))
         w.writeheader()
@@ -215,18 +230,21 @@ def main(argv=None):
     for c in corr:
         lines.append("| %s | %s vs %s | %d | %s | %s |" % (c["metric"], c["nr"], c["fr"], c["n"], fmt(c["pooled_spearman"]),
                                                           fmt(c["within_clip_spearman"])))
-    lines += ["", "| metric | AUC lowest vs top rung | median top | median low | n low / top |", "|---|---|---|---|---|"]
+    lines += ["", "AUC = P(the lowest rung looks worse than the top rung of the same raster): 0.5 = no signal.", "",
+              "| metric | AUC lowest vs top rung | median top | median low | n low / top |", "|---|---|---|---|---|"]
     for q in aucs:
         lines.append("| %s | %s | %s | %s | %d / %d |" % (q["metric"], fmt(q["auc_low_vs_top"]), fmt(q["median_top"]),
                                                           fmt(q["median_low"]), q["n_low"], q["n_top"]))
-    lines += ["", "poor thresholds: " + json.dumps(poor, sort_keys=True)]
+    lines += ["", "poor thresholds (absolute artefact level): " + json.dumps(poor, sort_keys=True),
+              "relative-drop thresholds (value / the stream's own baseline): " + json.dumps(rel, sort_keys=True)]
     with open(a.out + "_corr.md", "w", encoding="utf8", newline="\n") as f:
         f.write("\n".join(lines) + "\n")
     print("\n".join(lines))
     if a.thresholds and poor:
         with open(nr.THRESHOLDS_PATH, "w", encoding="utf8", newline="\n") as f:
-            json.dump({"poor": poor, "method": "midpoint of top-rung p90 and lowest-rung median per artefact "
-                       "(nr_validate.py); a metric that does not separate the rungs gets the lowest-rung median",
+            json.dump({"poor": poor, "relative_drop": rel, "method": "midpoint of top-rung p90 and lowest-rung median per artefact "
+                       "(nr_validate.py); a metric that does not separate the rungs gets the lowest-rung median; relative_drop = halfway "
+                       "between 1 and the median lowest/top-rung ratio of noise and detail",
                        "suites": [os.path.basename(s) for s in a.suite]}, f, indent=1, sort_keys=True)
             f.write("\n")
     return 0

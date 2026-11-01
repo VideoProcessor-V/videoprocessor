@@ -57,6 +57,16 @@ class Allocation(unittest.TestCase):
         self.assertEqual(r[2], int(1.5 * 3000))
         self.assertLess(r[0], 3000)
 
+    def test_dark_shots_are_underweighted(self):
+        d, c = [2.0, 2.0], [1000.0, 1000.0]
+        even = sp.allocate_shot_kbps(d, c, 4000)
+        dark = sp.allocate_shot_kbps(d, c, 4000, weights=[sp.dark_weight(20.0), sp.dark_weight(120.0)])
+        self.assertEqual(even[0], even[1])
+        self.assertLess(dark[0], dark[1])
+        self.assertLessEqual(sp.weighted_mean(d, dark), 4000 + 1e-9)
+        self.assertEqual(sp.dark_weight(200.0), 1.0)
+        self.assertEqual(sp.dark_weight(0.0), sp.VBR["dark_min"])
+
     def test_monotone_and_deterministic(self):
         d = [1.0] * 6
         c = [100.0, 200.0, 400.0, 800.0, 1600.0, 3200.0]
@@ -144,6 +154,12 @@ class EncoderArgs(unittest.TestCase):
                        "aq-mode=3", "bitrate=3000", "vbv-maxrate=4500", "vbv-bufsize=9000", "yuv420p10le"):
             self.assertIn(needle, s)
         self.assertIn("keyint=96", " ".join(sp.encoder_args(sp.PRESETS["hevc_gop4"], 3000, 24.0, 300)))
+
+    def test_x264_ladder_preset(self):
+        s = " ".join(sp.encoder_args(sp.PRESETS["avc_gop2"], 3000, 24.0, 100))
+        for needle in ("libx264", "keyint=48", "scenecut=0", "bitrate=3000", "vbv-maxrate=4500", "yuv420p"):
+            self.assertIn(needle, s)
+        self.assertNotIn("10le", s)
 
     def test_gop_is_rate_general(self):
         for fps in (23.976, 25.0, 29.97, 50.0, 59.94, 120.0):
@@ -268,12 +284,26 @@ class NoReference(unittest.TestCase):
         a8 = 100 + rng.normal(0, 2.0, (192, 192))
         self.assertAlmostEqual(nr.noise_sigma(nr.to_u8(a8 * 4, 10))[0], nr.noise_sigma(nr.to_u8(a8, 8))[0], places=6)
 
+    def test_detail_ratio_falls_when_fine_detail_is_smoothed(self):
+        rng = np.random.default_rng(12)
+        from scipy import ndimage as ndi
+        tex = ndi.gaussian_filter(rng.normal(0, 1, (256, 256)), 0.7) * 30 + 100
+        soft = ndi.gaussian_filter(tex, 1.2)
+        self.assertGreater(nr.detail_ratio(tex)[0], 1.25 * nr.detail_ratio(soft)[0])
+        self.assertEqual(nr.detail_ratio(np.full((64, 64), 5.0))[0], 0.0)
+
+    def test_relative_drop_spans(self):
+        thr = {"relative_drop": {"noise": 0.8}}
+        sec = [dict(second=s, nr_noise=v) for s, v in enumerate([1.0] * 5 + [0.5, 0.5, 0.5] + [1.0] * 4 + [0.4] + [1.0] * 2)]
+        self.assertEqual(sr.relative_drop_spans(sec, thr), [(5, 7)])
+        self.assertEqual(sr.relative_drop_spans(sec, None), [])
+
     def test_deterministic_and_complete(self):
         rng = np.random.default_rng(8)
         pl = 400 + rng.normal(0, 3, (128, 160))
         a, b = nr.nr_frame(pl, 10), nr.nr_frame(pl, 10)
         self.assertEqual(a, b)
-        for k in ("band", "block", "ring", "noise"):
+        for k in ("band", "block", "ring", "noise", "detail"):
             self.assertIn("nr_" + k, a)
             self.assertIn("nr_%s_cover" % k, a)
 
@@ -438,7 +468,7 @@ class HarnessHook(Base):
         self.assertTrue(nr_rows)
         self.assertEqual({r["clip"] for r in nr_rows}, {"stream"})      # only the streaming suite gets NR rows
         self.assertTrue(any(r["metric"] == "psnr_Y" and r["clip"] == "main" for r in rows))
-        self.assertTrue({"nr_band", "nr_block", "nr_ring", "nr_noise"} <= {r["metric"] for r in nr_rows})
+        self.assertTrue({"nr_band", "nr_block", "nr_ring", "nr_noise", "nr_detail"} <= {r["metric"] for r in nr_rows})
 
     def test_nr_rules_are_judged(self):
         import eval_report as er

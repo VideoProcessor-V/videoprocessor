@@ -15,7 +15,7 @@ import math
 import re
 
 # ---------------------------------------------------------------- encoder presets
-# kind: x265 | svtav1.  gop_s = closed-GOP length in seconds (2-4 s as on streaming services).
+# kind: x265 | x264 | svtav1.  gop_s = closed-GOP length in seconds (2-4 s as on streaming services).
 PRESETS = {
     "hevc_gop2": dict(
         kind="x265", pix_fmt="yuv420p10le", gop_s=2.0, bframes=3, b_adapt=2, refs=4, aq_mode=3, aq_strength=1.0,
@@ -26,6 +26,11 @@ PRESETS = {
         kind="x265", pix_fmt="yuv420p10le", gop_s=4.0, bframes=4, b_adapt=2, refs=4, aq_mode=3, aq_strength=1.0,
         preset="medium", rc_lookahead=60, vbv_maxrate_ratio=1.5, vbv_buffer_s=2.0, threads=4, frame_threads=2,
         note="as hevc_gop2 with a closed 4 s GOP and 4 B-frames (longer-GOP services)"),
+    "avc_gop2": dict(
+        kind="x264", pix_fmt="yuv420p", gop_s=2.0, bframes=3, refs=4, aq_mode=2, aq_strength=1.0, preset="medium",
+        rc_lookahead=40, vbv_maxrate_ratio=1.5, vbv_buffer_s=2.0, threads=4,
+        note="H.264 High 8-bit, closed 2 s GOP, 3 B-frames, AQ mode 2, VBV 1.5x / 2 s (the low-tier / legacy "
+             "ladder; blockier than HEVC, which validates the blockiness metric)"),
     "av1": dict(
         kind="svtav1", pix_fmt="yuv420p10le", gop_s=2.0, preset=6, film_grain=0, film_grain_denoise=0,
         vbv_maxrate_ratio=1.5, vbv_buffer_s=2.0, fast_decode=0, threads=4,
@@ -50,7 +55,11 @@ LADDERS = {
 # Per-shot VBR rule (relative to the rung's average bitrate R): shot rate r_i is proportional to
 # complexity^alpha, clamped to [floor R, cap R], re-normalised so the duration-weighted mean is R
 # (never above).  cap < 2 is what starves dark / grainy / fast shots.
-VBR = dict(alpha=0.6, floor=0.5, cap=1.5, min_shot_s=0.5, scene_threshold=0.25, probe_width=1280, probe_crf=26)
+# alpha 0.9: close to constant-quality demand, so shots that need more than cap x R are starved relative to it.
+# dark_knee / dark_min: a metric-driven allocator (VMAF-like) is nearly blind to banding and shadow detail, so the
+# weight of a shot with mean luma below dark_knee (8-bit units) is scaled by max(mean / dark_knee, dark_min).
+VBR = dict(alpha=0.9, floor=0.5, cap=1.5, min_shot_s=0.5, scene_threshold=0.25, probe_width=1280, probe_crf=26,
+           dark_knee=64.0, dark_min=0.5)
 
 # Rung-switch plans: entries are rung indices into the ladder (0 = top, -1 = lowest), spread evenly over the
 # IDR (closed-GOP) switch points of the clip.  Players switch only at segment/IDR boundaries.
@@ -135,18 +144,23 @@ def idr_points(shots, gop):
 
 
 # ---------------------------------------------------------------- per-shot VBR allocation
+def dark_weight(mean_luma, knee=VBR["dark_knee"], lo=VBR["dark_min"]):
+    """Allocation weight of a shot from its mean luma (8-bit units): 1 at/above the knee, down to `lo` in the dark."""
+    return min(max(mean_luma / knee, lo), 1.0)
+
+
 def allocate_shot_kbps(durations, complexities, avg_kbps, alpha=VBR["alpha"], floor=VBR["floor"],
-                       cap=VBR["cap"]):
+                       cap=VBR["cap"], weights=None):
     """Per-shot bitrate (kb/s) with a CAPPED AVERAGE: sum(d_i r_i)/sum(d_i) <= avg_kbps and
     floor*avg <= r_i <= cap*avg.  r_i follows complexity^alpha (water-filling when clamped).
-    Deterministic, monotone in complexity.  If every shot is clamped the mean can fall below avg."""
+    `weights` = optional per-shot multipliers (dark_weight).  Deterministic, monotone in complexity.  If every shot is clamped the mean can fall below avg."""
     n = len(durations)
     if n == 0:
         return []
     if n != len(complexities) or any(d <= 0 for d in durations):
         raise ValueError("durations/complexities mismatch or non-positive duration")
     lo, hi = floor * avg_kbps, cap * avg_kbps
-    w = [max(c, 1e-9) ** alpha for c in complexities]
+    w = [max(c, 1e-9) ** alpha * (1.0 if weights is None else weights[i]) for i, c in enumerate(complexities)]
     free = list(range(n))
     fixed = {}
     for _ in range(n + 1):
@@ -169,7 +183,7 @@ def allocate_shot_kbps(durations, complexities, avg_kbps, alpha=VBR["alpha"], fl
             break
     rates = [fixed[i] for i in range(n)]
     # integer kb/s, never above the cap on the mean
-    rates = [int(math.floor(r)) for r in rates]
+    rates = [int(math.floor(r + 1e-6)) for r in rates]
     return rates
 
 
@@ -233,6 +247,15 @@ def encoder_args(p, kbps, fps, shot_frames, vbv=True):
     if p["kind"] == "x265":
         return ["-c:v", "libx265", "-preset", p["preset"], "-pix_fmt", p["pix_fmt"], "-tag:v", "hvc1",
                 "-x265-params", x265_params(p, kbps, fps, shot_frames, vbv)]
+    if p["kind"] == "x264":
+        g = gop_frames(p["gop_s"], fps)
+        mx = int(round(kbps * p["vbv_maxrate_ratio"]))
+        prm = ["keyint=%d" % g, "min-keyint=%d" % g, "scenecut=0", "bframes=%d" % p["bframes"], "ref=%d" % p["refs"],
+               "aq-mode=%d" % p["aq_mode"], "rc-lookahead=%d" % min(p["rc_lookahead"], max(shot_frames - 1, 0)),
+               "bitrate=%d" % kbps, "threads=%d" % p["threads"]]
+        if vbv:
+            prm += ["vbv-maxrate=%d" % mx, "vbv-bufsize=%d" % int(round(mx * p["vbv_buffer_s"]))]
+        return ["-c:v", "libx264", "-preset", p["preset"], "-pix_fmt", p["pix_fmt"], "-x264-params", ":".join(prm)]
     if p["kind"] == "svtav1":
         return ["-c:v", "libsvtav1", "-preset", str(p["preset"]), "-pix_fmt", p["pix_fmt"],
                 "-svtav1-params", svtav1_params(p, kbps, fps, vbv)]

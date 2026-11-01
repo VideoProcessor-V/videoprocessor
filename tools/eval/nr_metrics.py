@@ -10,12 +10,14 @@ so "0" is never confused with "nothing to measure".
 
   band   banding step visibility on smooth regions: fraction of the picture (area) in smooth tiles that are
          a staircase of few flat levels one quantiser step apart, weighted by the step size (invisible below ~0.3 8-bit code, full at >= 1 code) and dark-weighted (shadows).
-  block  blockiness: periodic excess of |first difference| at one phase of a block-transform grid
-         (periods 8/16/32 searched, any phase, so crops and rung scaling do not matter), smooth pixels only.
-  ring   ringing / mosquito halo: rms of the 1-px high-pass residual in a band 2..6 (x H/540) px beside
-         strong edges, over the flat-area noise floor, in 8-bit units.
+  block  blockiness: excess of |first difference| at one phase of a block-transform grid over its two
+         neighbouring positions (periods 8/16/32, any phase, so crops and scaling do not matter), smooth pixels only.
+  ring   ringing / mosquito halo: excess rms of the 1-px high-pass residual in a band 2..6 (x H/540) px
+         beside strong edges over the same picture's texture 12..24 px away, in 8-bit units.
   noise  flat-area noise: robust sigma of the high-pass residual over the flattest 30 % of pixels
          (8-bit units).  Low = grain/noise stripped (or a clean source), not "good" or "bad" by itself.
+  detail fine/mid band-pass energy ratio on the textured half: content-normalised softness (higher = more
+         fine detail kept); compare like with like (same raster, or one stream over time).
 
 Validated against the full-reference measures of the generated encodes by nr_validate.py (report in
 findings-streaming.md).  `nr_extra` plugs into eval_harness.evaluate_suite(extra=...).
@@ -29,7 +31,7 @@ from scipy import ndimage as ndi
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 THRESHOLDS_PATH = os.path.join(HERE, "nr_thresholds.json")
-METRICS = ("band", "block", "ring", "noise")
+METRICS = ("band", "block", "ring", "noise", "detail")
 BLOCK_PERIODS = (8, 16, 32)
 
 
@@ -112,67 +114,89 @@ def _profile(u, axis, edge_limit):
 
 
 def blockiness(u, edge_limit=12.0):
-    """(score >= 0, coverage): max over periods of (peak-phase / median-phase mean |d|) - 1, averaged over
-    the two directions.  Coverage = fraction of first differences that were smooth enough to use."""
+    """(score >= 0, coverage).  Per direction and period p in BLOCK_PERIODS: fold the mean-|first difference|
+    profile over phases and take, at the best phase, how much the grid-line value exceeds the mean of its two
+    neighbouring positions (a local baseline, so content gradients cancel), relative to the profile mean.
+    Score = best period / phase, averaged over the two directions.  Coverage = fraction of first differences
+    smooth enough to be used (strong edges are excluded)."""
     scores, cov = [], []
     for axis in (1, 0):
         d = np.abs(np.diff(u, axis=axis))
         cov.append(float((d <= edge_limit).mean()))
         s, c = _profile(u, axis, edge_limit)
         n = len(s)
+        mean = float(np.mean(s))
         best = 0.0
-        for p in BLOCK_PERIODS:
-            if n < 4 * p:
-                continue
-            m = n // p * p
-            ph = s[:m].reshape(-1, p).mean(axis=0)
-            med = float(np.median(ph))
-            if med <= 1e-9:
-                continue
-            best = max(best, float(ph.max()) / med - 1.0)
+        if mean > 1e-9:
+            nb = 0.5 * (np.roll(s, 1) + np.roll(s, -1))
+            excess = (s - nb)[1:-1]                         # drop the wrapped ends
+            for p in BLOCK_PERIODS:
+                if n < 6 * p:
+                    continue
+                m = (len(excess) // p) * p
+                ph = excess[:m].reshape(-1, p).mean(axis=0)
+                best = max(best, float(ph.max()) / mean)
         scores.append(best)
     return float(np.mean(scores)), float(np.mean(cov))
 
 
 # ---------------------------------------------------------------- ringing
 def edge_zone(u, h=None):
-    """(strong-edge mask, ring-zone mask) from radii that scale with the plane height."""
+    """(strong-edge mask, inner ring zone, far zone, gradient).  Radii scale with the plane height:
+    inner = beyond r_in and within r_out of a strong edge, far = 2 r_out .. 4 r_out (same-picture baseline
+    for ordinary texture); both exclude pixels that are themselves on edges."""
     h = u.shape[0] if h is None else h
     g = ndi.gaussian_filter(u, 1.0)
     gy, gx = np.gradient(g)
     grad = np.hypot(gx, gy)
     edge = grad >= 10.0
     if not edge.any():
-        return edge, np.zeros(u.shape, bool), grad
+        z = np.zeros(u.shape, bool)
+        return edge, z, z, grad
     r_in = max(2, int(round(h / 270.0)))
     r_out = max(6, int(round(h / 90.0)))
     dist = ndi.distance_transform_edt(~edge)
-    zone = (dist > r_in) & (dist <= r_out) & (grad < 5.0)
-    return edge, zone, grad
+    calm = grad < 5.0
+    return edge, (dist > r_in) & (dist <= r_out) & calm, (dist > 2 * r_out) & (dist <= 4 * r_out) & calm, grad
 
 
-def ringing(u, floor_sigma=None):
-    """(ring in 8-bit units, coverage = zone fraction)."""
-    edge, zone, _ = edge_zone(u)
-    cov = float(zone.mean())
-    if zone.sum() < 256:
+def ringing(u):
+    """(ring in 8-bit units, coverage).  Excess 1-px high-pass energy beside strong edges over the same picture's
+    texture far from edges: sqrt(max(rms_inner^2 - rms_far^2, 0)).  Coverage = min(inner, far) pixel fraction."""
+    _, inner, far, _ = edge_zone(u)
+    cov = float(min(inner.mean(), far.mean()))
+    if inner.sum() < 256 or far.sum() < 256:
         return 0.0, cov
     hp = u - ndi.gaussian_filter(u, 1.0)
-    if floor_sigma is None:
-        floor_sigma = noise_sigma(u)[0]
-    rms = math.sqrt(float(np.mean(hp[zone] ** 2)))
-    return math.sqrt(max(rms * rms - floor_sigma * floor_sigma, 0.0)), cov
+    ri, rf = float(np.mean(hp[inner] ** 2)), float(np.mean(hp[far] ** 2))
+    return math.sqrt(max(ri - rf, 0.0)), cov
+
+
+# ---------------------------------------------------------------- detail
+def detail_ratio(u):
+    """(fine / mid band-pass rms ratio over the more textured half, coverage).  Content-normalised softness:
+    lowering the bitrate (or a rung drop) removes fine detail faster than mid-scale structure, so the ratio
+    falls.  Scale-dependent (compare like with like: same raster, or one stream over time)."""
+    g1, g2, g4 = (ndi.gaussian_filter(u, s) for s in (0.8, 1.6, 3.2))
+    fine, mid = g1 - g2, g2 - g4
+    e_mid = ndi.uniform_filter(mid * mid, 9)
+    m = e_mid > np.quantile(e_mid, 0.5)
+    if m.sum() < 500:
+        return 0.0, 0.0
+    den = math.sqrt(float(np.mean(mid[m] ** 2)))
+    return (math.sqrt(float(np.mean(fine[m] ** 2))) / den if den > 1e-9 else 0.0), float(m.mean())
 
 
 # ---------------------------------------------------------------- frame / sequence API
 def nr_frame(plane, bitdepth):
-    """dict nr_band, nr_block, nr_ring, nr_noise (+ *_cover) for one luma plane."""
+    """dict nr_band, nr_block, nr_ring, nr_noise, nr_detail (+ *_cover) for one luma plane."""
     u = to_u8(plane, bitdepth)
     ns, nc = noise_sigma(u)
     b, bc = banding(u, bitdepth)
     k, kc = blockiness(u)
-    r, rc = ringing(u, ns)
-    return dict(nr_band=b, nr_band_cover=bc, nr_block=k, nr_block_cover=kc, nr_ring=r, nr_ring_cover=rc,
+    r, rc = ringing(u)
+    dt, dc = detail_ratio(u)
+    return dict(nr_detail=dt, nr_detail_cover=dc, nr_band=b, nr_band_cover=bc, nr_block=k, nr_block_cover=kc, nr_ring=r, nr_ring_cover=rc,
                 nr_noise=ns, nr_noise_cover=nc)
 
 
@@ -195,7 +219,7 @@ def nr_sequence(planes, bitdepth, stride=1):
     return [dict(frame=i, **nr_frame(p, bitdepth)) for i, p in enumerate(planes) if i % stride == 0]
 
 
-def summarize(rows, keys=("nr_band", "nr_block", "nr_ring", "nr_noise")):
+def summarize(rows, keys=("nr_band", "nr_block", "nr_ring", "nr_noise", "nr_detail")):
     out = {}
     for k in keys:
         v = np.array([r[k] for r in rows], dtype=np.float64)
@@ -211,7 +235,7 @@ def nr_extra(truth, outs, inputs, case, notes, stride=None):
     stride = stride or max(1, n // 12)
     rows = nr_sequence([o.Y for o in outs], outs[0].bitdepth, stride)
     m = summarize(rows)
-    res = {"nr_band": m["nr_band"], "nr_block": m["nr_block"], "nr_ring": m["nr_ring"], "nr_noise": m["nr_noise"]}
+    res = {k: m[k] for k in ("nr_band", "nr_block", "nr_ring", "nr_noise", "nr_detail")}
     thr = load_thresholds()
     if thr:
         res["nr_poor_index_p95"] = float(np.quantile([poor_index(r, thr) for r in rows], 0.95))

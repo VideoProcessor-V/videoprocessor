@@ -30,6 +30,8 @@ from fractions import Fraction
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import numpy as np  # noqa: E402
+
 import streaming_presets as sp  # noqa: E402
 
 MIN_FREE_GB = 15.0
@@ -124,7 +126,8 @@ def count_frames(path):
 
 
 def probe_complexity(win, shots, fps, w, h, out_dir):
-    """Shot complexity = x264 veryfast CRF kb/s at a fixed analysis width (shared by every rung)."""
+    """Per shot: complexity = x264 veryfast CRF kb/s at a fixed analysis width (shared by every rung) and the
+    mean luma (8-bit units, 64-px-wide gray decode)."""
     pw = min(sp.VBR["probe_width"], w)
     ph = int(round(h * pw / w / 2.0)) * 2
     res = []
@@ -133,8 +136,15 @@ def probe_complexity(win, shots, fps, w, h, out_dir):
         run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-ss", ss_before(s, fps), "-i", win,
              "-frames:v", str(n), "-vf", (SCALE % (pw, ph)) + ",format=yuv420p", "-c:v", "libx264",
              "-preset", "veryfast", "-crf", str(sp.VBR["probe_crf"]), "-threads", "4", tmp])
-        res.append(os.path.getsize(tmp) * 8.0 / 1000.0 / (n / float(fps)))
+        kb = os.path.getsize(tmp) * 8.0 / 1000.0 / (n / float(fps))
         os.remove(tmp)
+        r = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-ss", ss_before(s, fps), "-i", win,
+                            "-frames:v", str(n), "-vf", "scale=64:-2:flags=area,format=gray10le", "-f", "rawvideo", "-"],
+                           capture_output=True)
+        if r.returncode != 0:
+            raise RuntimeError("luma probe failed: " + r.stderr.decode("utf8", "replace")[-400:])
+        mean = float(np.frombuffer(r.stdout, dtype="<u2").mean()) / 4.0 if r.stdout else 128.0
+        res.append((kb, mean))
     return res
 
 
@@ -194,7 +204,9 @@ def build_clip(src, a, suite_cases, log=print):
     shots = detect_shots(win, fps, n_frames, out_dir)
     gop = sp.gop_frames(preset["gop_s"], float(fps))
     log("  window %d frames, %d shots %s, GOP %d" % (n_frames, len(shots), shots, gop))
-    cplx = probe_complexity(win, shots, fps, w0, h0, out_dir)
+    probe = probe_complexity(win, shots, fps, w0, h0, out_dir)
+    cplx = [p[0] for p in probe]
+    dweights = [sp.dark_weight(p[1]) for p in probe]
     durs = [n / float(fps) for _, n in shots]
     rungs = sp.ladder_rungs(a.ladder, w0, h0, float(fps))
     want = [int(x) for x in a.rungs.split(",")] if a.rungs else list(range(len(rungs)))
@@ -211,7 +223,7 @@ def build_clip(src, a, suite_cases, log=print):
         if a.uniform:
             rates = [rung["kbps"]] * len(shots)
         else:
-            rates = sp.allocate_shot_kbps(durs, cplx, rung["kbps"])
+            rates = sp.allocate_shot_kbps(durs, cplx, rung["kbps"], weights=dweights)
         if not os.path.exists(enc):
             encode_rung(win, shots, rates, fps, rung, preset, enc, out_dir)
         kbps = os.path.getsize(enc) * 8.0 / 1000.0 / (n_frames / float(fps))
@@ -226,8 +238,8 @@ def build_clip(src, a, suite_cases, log=print):
             raise RuntimeError("%s: decoded %d frames, expected %d" % (cid, count_frames(coded), n_frames))
         info = dict(preset=a.preset, ladder=a.ladder, rung=rung["name"], raster=[rung["w"], rung["h"]],
                     target_kbps=rung["kbps"], measured_kbps=round(kbps, 1), mode="cbr" if a.uniform else "shot_vbr",
-                    shots=[dict(start=s, frames=n, complexity_kbps=round(c, 1), kbps=r)
-                           for (s, n), c, r in zip(shots, cplx, rates)],
+                    shots=[dict(start=s, frames=n, complexity_kbps=round(c, 1), mean_luma=round(pr[1], 1), kbps=r)
+                           for (s, n), c, pr, r in zip(shots, cplx, probe, rates)],
                     gop_frames=gop, stream_md5=stream_md5(enc), crop=[cx, cy, cw, ch], source=src["id"],
                     ffmpeg=run([FFMPEG, "-version"]).stdout.splitlines()[0])
         suite_cases[cid] = dict(

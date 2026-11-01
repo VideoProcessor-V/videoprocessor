@@ -76,6 +76,7 @@ RULES = [
     ("nr_block", ("lower", 0.01)),
     ("nr_ring", ("lower", 0.05)),
     ("nr_poor_index", ("lower", 0.02)),
+    ("nr_detail", ("higher", 0.003)),
     ("cost_", ("info_lower", 0.0)),
 ]
 
