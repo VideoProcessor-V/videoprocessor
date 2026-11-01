@@ -1732,8 +1732,11 @@ namespace Tests
 			}
 			std::string all;
 			for (const std::string& slot : slots) all += (all.empty() ? "" : ", ") + slot;
-			const std::string allOff = StillPictureHash(VideoFrameEncoding::V210, "gpu", true,
-				std::string(kStillPictureSettings) + drain + "pipeline_slots_off: " + all + "\n");
+			// Rows on slots without an honoured switch (Bill merge 2026-10-31: Bill's chroma default on the
+			// placeholder scaling.chroma_upscale) are out of pipeline_slots_off's reach: written explicitly.
+			const SlotOverrideLayout::Layout unswitchable = SlotOverrideLayout::ForUnswitchableSlots("gpu", "finish");
+			const std::string allOff = StillPictureHash(VideoFrameEncoding::V210, unswitchable.capturePath, true,
+				SlotOverrideLayout::Extra(unswitchable, kStillPictureSettings) + "pipeline_slots_off: " + all + "\n");
 			const std::string original = StillPictureHash(VideoFrameEncoding::V210, "gpu", true,
 				std::string(kStillPictureSettings) + drain + "pipeline_original_pathway: on\n");
 			Logger::WriteMessage(("== all slots off " + allOff + ", original pathway " + original + "\n").c_str());

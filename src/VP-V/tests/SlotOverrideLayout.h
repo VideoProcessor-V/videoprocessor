@@ -15,6 +15,7 @@
 
 #include <RendererProfileConfig.h>
 #include <VP-V/core/OriginalPathway.h>
+#include <VP-V/core/SlotRegistry.h>
 
 #include <string>
 
@@ -41,14 +42,15 @@ namespace SlotOverrideLayout
 		std::string drain;          // entrance_gpu_drain value for the [vpv] line
 	};
 
-	inline Layout ForSlot(const std::string& slot, const std::string& defaultCapturePath, const std::string& defaultDrain)
+	template <class Pick>
+	inline Layout ForRows(const Pick& pick, const std::string& defaultCapturePath, const std::string& defaultDrain)
 	{
 		Layout l;
 		l.capturePath = defaultCapturePath;
 		l.drain = defaultDrain;
 		for (const OriginalPathway::Override& o : OriginalPathway::Overrides())
 		{
-			if (slot != o.slot || !o.value[0]) continue;
+			if (!pick(o) || !o.value[0]) continue;
 			const std::string key = o.key, value = o.value;
 			std::string expected;
 			if (key == "entrance_gpu_drain") l.drain = value;
@@ -58,6 +60,24 @@ namespace SlotOverrideLayout
 			else l.defaultKeys += key + ": " + value + "\n";
 		}
 		return l;
+	}
+
+	inline Layout ForSlot(const std::string& slot, const std::string& defaultCapturePath, const std::string& defaultDrain)
+	{
+		return ForRows([&slot](const OriginalPathway::Override& o) { return slot == o.slot; }, defaultCapturePath, defaultDrain);
+	}
+
+	// The overrides pipeline_slots_off cannot reach: rows whose slot has no honoured switch
+	// (PipelineSlots::SwitchHonoured). "All slots off" plus these, written, is what equals
+	// pipeline_original_pathway on. Bill merge 2026-10-31: the Original table gained Bill's chroma
+	// default (chroma_upscaler bicubic, on the placeholder slot scaling.chroma_upscale), which no slot
+	// switch applies, so the all-off comparison must write it like the other unswitchable rows.
+	inline Layout ForUnswitchableSlots(const std::string& defaultCapturePath, const std::string& defaultDrain)
+	{
+		return ForRows([](const OriginalPathway::Override& o) {
+			const PipelineSlots::Id id = PipelineSlots::FromName(o.slot);
+			return id == PipelineSlots::Id::Count || !PipelineSlots::SwitchHonoured(id);
+		}, defaultCapturePath, defaultDrain);
 	}
 
 	// The configuration text after Run's own "[general]" and input-profile lines: the input keys,
