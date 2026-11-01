@@ -456,7 +456,7 @@ namespace GrainNodeTestsNs
 				hasE3 = hasE3 || std::string(f[i].name) == "e3";
 			}
 			Assert::AreEqual(size_t(3), base, L"base: base, s1, s2 (the main map)");
-			Assert::AreEqual(size_t(3), modifiers, L"modifiers: f, N, e3");
+			Assert::AreEqual(size_t(5), modifiers, L"modifiers: f, N, e3, e1, e2");
 			Assert::IsTrue(hasN && hasF && hasE3, L"the modifier fields the consumers derive from");
 		}
 	};

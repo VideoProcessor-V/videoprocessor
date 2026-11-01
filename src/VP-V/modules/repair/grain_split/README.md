@@ -126,3 +126,32 @@ This module still creates its own GPU textures through the `VpvGpu::Ensure` wrap
 ## Stored layout: main map plus modifiers (owner decision)
 
 The node stores one main map and small modifier fields; consumers derive every other map from them (`GrainSplit::GrainFields()` is the table, tested). Base (the main map): `base`, `s1`, `s2` (clean = base + s1 + s2; grain G = Y - clean). Modifiers: per-pixel Wiener share `f`; per-block grain level `N` and focus-band energy `e3`. Derivations: temporal detail and chroma-from-luma work on clean and add G back; region evidence derives grain sigma, texture (E1 + E2 - N), ringing and banding from N and the bands; texture restore (SA8) splits grain from texture with f and uses e3 for acutance; the debander (SA5) gates on N; the camera model grain map reads N. In Full the block texel's last two channels are reserved for further modifiers (band energies, spectral shape descriptors): not written yet; adding one bumps `kUnitVersion` and the table. Both storage layouts carry the same fields.
+
+## Base vs modifiers (owner decision, unit version 2)
+
+One shared node stores the MAIN map plus small MODIFIER fields; every component derives its own maps from them on the fly (`GrainSplit::Gpu::GrainFieldTable`, `GrainSplit::GrainFields`; both tested).
+
+| Field | Role | Domain | Full | Compact |
+|---|---|---|---|---|
+| s1, s2 | base | pixel | split.x, split.y | A.x, A.y (rg16f) |
+| base | base | pixel | split.w | B.y x codeUnit (rg16) |
+| f (Wiener share) | modifier | pixel | split.z | B.x |
+| N (grain level) | modifier | block | blocks.x | blocks.x (rgba32f) |
+| e3 (focus band) | modifier | block | blocks.y | blocks.y |
+| e1, e2 (block means of d1^2, d2^2) | modifier | block | not stored (zw = 0) | blocks.z, blocks.w |
+| spectral tilt | derived | block | not available | `gs_tilt(b)` = log2((e1 + 1e-3) / (e2 + 1e-3)) |
+
+Accessors (every shader reads only these): `gs_fetch(p)` = (s1, s2, f, base) in codes, `gs_blocks(b)` = (N, e3), `gs_energies(b)` = (e1, e2) or (-1, -1) where unavailable, `gs_tilt(b)`; `GS_HAS_ENERGIES` is 1 in Compact, 0 in Full: a reader treats "unavailable" as absent and derives its own (visible, as for any missing modifier). The Compact blocks cost 16 B per block (was 8): 8 B/px + 16 B/block against Full's 16 + 16. The Full layout and its pinned shader bodies are untouched; the Compact block passes are separate bodies (same N and e3, plus e1/e2 in raster order, no atomics).
+
+| Consumer | Derives | From | Status |
+|---|---|---|---|
+| temporal detail (TD) | MEAS E1/E2/E3, guard, admission | e1, e2, e3 (E1/E2 from the pixel sums today; Compact blocks offer them directly), N, f | wired (reads s1, s2, f, base, N, e3 through the accessor; e1/e2 shortcut later) |
+| chroma-from-luma (CfL) | per-plane grain guard: clean picture and G | s1, s2, base, f (per plane), N | wired |
+| region evidence | block grain level, texture (E1 + E2 - N), ringing, banding | N, e1, e2 (CPU form today) | wired (N); e1/e2 GPU shortcut later |
+| deband (SA8) | low band, veto, light level P12 | base (low band), N (veto) | later package |
+| detail pulse (SA5) | E1/E2 | e1, e2 | later package |
+| texture restore (SA5) | grain / texture split | N + f instead of its own Wiener | later package |
+| adaptive downscale (SA8) | grain map | N + e1 | later package |
+| interpolator grain bands (SA4) | grain bands | base | later package |
+| camera model grain-map refinement (K5) | grain map refinement | N, tilt | later package |
+| contrast recovery (WP8) | halo guard | base + energies | later package |

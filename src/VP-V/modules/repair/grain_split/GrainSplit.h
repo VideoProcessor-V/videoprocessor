@@ -35,8 +35,9 @@ namespace GrainSplit
 	// Storage layout of the GPU form of the split product (SA2 either/or switch `grain_split_storage`; default
 	// full until the coordinator's grain gate passes). Full: rgba32f split (s1, s2, f, base) + rgba32f blocks
 	// (N, e3, 0, 0). Compact: texture A rg16f (s1, s2 in codes), texture B rg16 unorm (f, base x codeUnit), blocks
-	// rg32f (N, e3): 8 B/px + 8 B per block instead of 16 + 16. Readers never see the difference: GLSL gs_fetch /
-	// gs_blocks and the C++ view (GrainSplitGpu.h) are the only read path.
+	// rgba32f (N, e3, e1, e2): 8 B/px + 16 B per block instead of 16 + 16; e1/e2 are the block means of d1^2 / d2^2
+	// (extra modifier fields, version 2). Readers never see the layout: GLSL gs_fetch / gs_blocks / gs_energies / gs_tilt
+	// and the C++ view (GrainSplitGpu.h) are the only read path.
 	enum class Storage : uint8_t { Full, Compact };
 	inline const char* Token(Storage s) { return s == Storage::Compact ? "compact" : "full"; }
 
@@ -44,7 +45,7 @@ namespace GrainSplit
 	// layouts. Bump on ANY change of the law, the passes or a layout: a published frame carries it (Gpu::Frame::version),
 	// the GLSL embeds it as a define GS_UNIT_VERSION, and a reader refuses a frame of another version (stale, visible
 	// fallback, automatic recovery once a frame of the current version arrives).
-	constexpr uint32_t kUnitVersion = 1;
+	constexpr uint32_t kUnitVersion = 2;   // 2: Compact blocks carry the band energies (e1, e2)
 
 	struct Plane
 	{

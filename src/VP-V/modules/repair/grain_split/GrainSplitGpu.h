@@ -51,7 +51,7 @@ namespace GrainSplit
 		{
 			// Full:    split = w x h rgba32f (s1 = f d1, s2 = f d2, f, base; codes); blocks = bw x bh rgba32f (N, e3, 0, 0).
 			// Compact: split = texture A, w x h rg16f (s1, s2 in codes); splitB = texture B, w x h rg16 unorm (f, base x
-			//          codeUnit, i.e. the plane value); blocks = bw x bh rg32f (N, e3). Read ONLY through ViewGlsl / BindView.
+			//          codeUnit, i.e. the plane value); blocks = bw x bh rgba32f (N, e3, e1, e2). Read ONLY through ViewGlsl / BindView.
 			pl_tex split = nullptr;
 			pl_tex blocks = nullptr;   // N (grain level, codes^2 of D), e3 (block mean of d3^2)
 			int w = 0, h = 0, bw = 0, bh = 0, B = 16;
@@ -130,7 +130,7 @@ namespace GrainSplit
 
 		// Output textures supplied by the caller (a skeleton node's slot); null = the Splitter owns them as before.
 		// Full: split = w x h rgba32f, blocks = bw x bh rgba32f. Compact: split = w x h rg16f (A), splitB = w x h rg16 unorm
-		// (B), blocks = bw x bh rg32f. Never destroyed by the Splitter.
+		// (B), blocks = bw x bh rgba32f (both layouts). Never destroyed by the Splitter.
 		struct Targets { pl_tex split = nullptr, splitB = nullptr, blocks = nullptr; };
 
 		struct Options
@@ -190,9 +190,45 @@ namespace GrainSplit
 		// THE ONE READ ACCESSOR. GLSL prelude defining vec4 gs_fetch(ivec2 p) -> (s1, s2, f, base) in CODES and
 		// vec2 gs_blocks(ivec2 b) -> (N, e3), for either layout. Full samplers: `split`, `gblocks`; Compact: `gs_a`, `gs_b`,
 		// `gblocks` (libplacebo declares them from the descriptor names: BindView supplies them; do not declare uniforms).
+		// Modifier accessors (same prelude): vec2 gs_energies(ivec2 b) -> (e1, e2) block means of d1^2, d2^2 (codes^2) or (-1, -1)
+		// when the layout has none (Full); float gs_tilt(ivec2 b) = log2((e1 + 1e-3) / (e2 + 1e-3)) (0 when unavailable);
+		// `#define GS_HAS_ENERGIES 1|0` tells a shader which. A reader treats "unavailable" as absent and derives its own.
 		std::string ViewGlsl(GrainSplit::Storage storage, double codeUnit);
 		// Appends the sampled descriptors ViewGlsl reads (Full: split, gblocks; Compact: gs_a, gs_b, gblocks).
 		void BindView(const Frame& f, std::vector<pl_shader_desc>& out);
+
+		// THE EXPLICIT FIELD TABLE of both layouts (owner decision: one main map plus small modifier fields). Base = the main
+		// split map (s1, s2, base); Modifiers = what steers a derivation: per-pixel Wiener share f, per-block grain level N,
+		// focus-band energy e3 and, in Compact only, the block mean band energies e1, e2 (the spectral tilt is DERIVED from them:
+		// gs_tilt = log2((e1 + 1e-3) / (e2 + 1e-3)), never stored). Full leaves blocks.zw at 0: gs_energies returns (-1, -1) and
+		// gs_tilt 0 there (GS_HAS_ENERGIES 0) and readers derive their own.
+		enum class FieldRole : uint8_t { Base, Modifier };
+		enum class FieldDomain : uint8_t { Pixel, Block };
+
+		struct GrainField
+		{
+			const char* name;
+			FieldRole role;
+			FieldDomain domain;
+			const char* textureFull;      // texture and channel in the Full layout ("-" = not stored)
+			const char* textureCompact;   // ... and in the Compact layout
+		};
+
+		inline const GrainField* GrainFieldTable(size_t* count)
+		{
+			static const GrainField kTable[] = {
+				{ "s1", FieldRole::Base, FieldDomain::Pixel, "split.x", "A.x" },
+				{ "s2", FieldRole::Base, FieldDomain::Pixel, "split.y", "A.y" },
+				{ "base", FieldRole::Base, FieldDomain::Pixel, "split.w", "B.y (x codeUnit)" },
+				{ "f", FieldRole::Modifier, FieldDomain::Pixel, "split.z", "B.x" },
+				{ "N", FieldRole::Modifier, FieldDomain::Block, "blocks.x", "blocks.x" },
+				{ "e3", FieldRole::Modifier, FieldDomain::Block, "blocks.y", "blocks.y" },
+				{ "e1", FieldRole::Modifier, FieldDomain::Block, "-", "blocks.z" },
+				{ "e2", FieldRole::Modifier, FieldDomain::Block, "-", "blocks.w" },
+			};
+			if (count) *count = sizeof(kTable) / sizeof(kTable[0]);
+			return kTable;
+		}
 
 		// FNV-1a 64 of the Full-mode pass bodies (rows, columns, quiet, minimum, Wiener: carriage returns skipped), in
 		// that order. The Full path must stay byte-identical to the pre-SA2 shaders: a test pins this to the value of

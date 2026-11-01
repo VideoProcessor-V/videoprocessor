@@ -566,11 +566,11 @@ namespace GpuAllocatorTestsNs
 			t.fmt = TexFormat::RG16;
 			compact.terms.push_back(t);
 			t.shift = 4;
-			t.fmt = TexFormat::RG32F;
+			t.fmt = TexFormat::RGBA32F;
 			compact.terms.push_back(t);
 			const Dims d = MkDims(1366, 769);
 			const uint64_t blocks = uint64_t((1366 + 15) / 16) * uint64_t((769 + 15) / 16);
-			Assert::AreEqual(uint64_t(1366) * 769 * 8 + blocks * 8, compact.BytesPerBuffer(d), L"8 B per pixel + 8 B per block");
+			Assert::AreEqual(uint64_t(1366) * 769 * 8 + blocks * 16, compact.BytesPerBuffer(d), L"8 B per pixel + 16 B per block");
 		}
 
 		TEST_METHOD(VramPerTierReport)
@@ -678,9 +678,9 @@ namespace GpuAllocatorTestsNs
 			const Dims d = MkDims(3840, 2160);
 			const uint64_t full = BytesOf(SkeletonProducts(false).Get(kP10GrainSplit).size, d);
 			const uint64_t compact = BytesOf(SkeletonProducts(true).Get(kP10GrainSplit).size, d);
-			Assert::AreEqual(uint64_t(d.width) * d.height * 8 + CellsAt(d, 4) * 8, compact, L"compact = 8 B/px + 8 B/block");
+			Assert::AreEqual(uint64_t(d.width) * d.height * 8 + CellsAt(d, 4) * 16, compact, L"compact = 8 B/px + 16 B/block (N, e3, e1, e2)");
 			Assert::AreEqual(uint64_t(d.width) * d.height * 16 + CellsAt(d, 4) * 16, full, L"full = 16 B/px + 16 B/block");
-			Assert::IsTrue(full == compact * 2, L"half the bytes");
+			Assert::IsTrue(compact < full, L"compact is smaller");
 		}
 
 		TEST_METHOD(ArenaNestedScopeIsRefusedAndVisible)
@@ -822,7 +822,7 @@ namespace GpuAllocatorTestsNs
 			Assert::IsTrue(two[1].find("saves nothing") != std::string::npos, L"N = 2: no saving");
 			Assert::IsTrue(six[1].find("saves ") != std::string::npos && six[1].find("saves nothing") == std::string::npos, L"N = 6 saves");
 			const uint64_t fullPeak = (px * 16 + blocks * 16) * 6 + px * 16 + blocks * 16;
-			const uint64_t compactPeak = (px * 8 + blocks * 8) * 6 + px * 32 + blocks * 16;
+			const uint64_t compactPeak = (px * 8 + blocks * 16) * 6 + px * 32 + blocks * 16;
 			Assert::IsTrue(six[0].find(FormatMB(fullPeak)) != std::string::npos, L"full peak line");
 			Assert::IsTrue(six[1].find(FormatMB(compactPeak)) != std::string::npos, L"compact peak line");
 			Assert::IsTrue(six[1].find("8 x 6 + 32 B/px") != std::string::npos, L"compact peak formula");

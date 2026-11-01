@@ -305,7 +305,8 @@ namespace GrainSplit
 	// other map from them cheaply, nobody recomputes a grain estimate. Base = the per-pixel picture split (clean = base + s1 + s2,
 	// grain G = Y - clean); modifiers = what steers a derivation (per-pixel Wiener share f, per-block grain level N, per-block
 	// focus-band energy e3). Both layouts carry the same fields (Full: split rgba32f (s1, s2, f, base) + blocks rgba32f (N, e3, -, -);
-	// Compact: A rg16f (s1, s2), B rg16 (f, base x codeUnit), blocks rg32f (N, e3)); read only through gs_fetch / gs_blocks.
+	// Compact: A rg16f (s1, s2), B rg16 (f, base x codeUnit), blocks rgba32f (N, e3, e1, e2)); read only through gs_fetch / gs_blocks
+	// / gs_energies / gs_tilt (the GPU field table is GrainSplit::Gpu::GrainFieldTable).
 	// The block texel's last two channels in Full are RESERVED for further modifiers (band energies E1/E2, spectral shape
 	// descriptors): they are not written yet, and a new modifier bumps kUnitVersion and extends this table.
 	enum class FieldKind : uint8_t { Base, Modifier };
@@ -327,6 +328,8 @@ namespace GrainSplit
 			{ "f", FieldKind::Modifier, "split.z / B.x", "per-pixel Wiener share: texture restore (SA8) splits grain from texture with it; region evidence: texture and ringing maps" },
 			{ "N", FieldKind::Modifier, "blocks.x", "per-block grain level (codes^2): temporal detail guard and measurement, region evidence (grain sigma, texture = E1 + E2 - N, banding), debander (SA5) grain gate, camera model grain map" },
 			{ "e3", FieldKind::Modifier, "blocks.y", "per-block focus-band energy: temporal detail focus evidence, texture restore (SA8) acutance" },
+			{ "e1", FieldKind::Modifier, "blocks.z (Compact)", "per-block fine-band energy: temporal detail MEAS E1, detail pulse (SA5) E1, adaptive downscale (SA8) grain map" },
+			{ "e2", FieldKind::Modifier, "blocks.w (Compact)", "per-block mid-band energy: temporal detail MEAS E2, detail pulse (SA5) E2; tilt = log2(e1 / e2) (derived by gs_tilt): camera grain-map refinement (K5)" },
 		};
 		if (count) *count = sizeof(kFields) / sizeof(kFields[0]);
 		return kFields;
@@ -335,11 +338,11 @@ namespace GrainSplit
 	// The ledger comparison (Ctrl+Alt+D): the PEAK bytes of the grain split per storage layout, scratch included.
 	// Full: slots at 16 B/px (+ 16 B per block) and a bands scratch of 16 B/px (rows is the product itself).
 	// Compact: slots at 8 B/px (+ 8 B per block) and a rows + bands scratch of 32 B/px. So with N = ring + live slots
-	// compact is 8N + 32 B/px against full's 16N + 16: it saves only when N > 2.
+	// compact is 8N + 32 B/px (+ 16 B per block) against full's 16N + 16: it saves only when N > 2.
 	inline std::vector<std::string> StorageLedgerLines(VpSkeleton::Dims d, unsigned slotsRingPlusLive, int blockShift = 4)
 	{
 		const uint64_t px = VpSkeleton::CellsAt(d, 0), blocks = VpSkeleton::CellsAt(d, static_cast<uint8_t>(blockShift));
-		const uint64_t fullSlot = px * 16 + blocks * 16, compactSlot = px * 8 + blocks * 8;
+		const uint64_t fullSlot = px * 16 + blocks * 16, compactSlot = px * 8 + blocks * 16;
 		const uint64_t fullScratch = px * 16 + blocks * 16, compactScratch = px * 32 + blocks * 16;
 		const uint64_t fullPeak = fullSlot * slotsRingPlusLive + fullScratch, compactPeak = compactSlot * slotsRingPlusLive + compactScratch;
 		std::vector<std::string> lines;

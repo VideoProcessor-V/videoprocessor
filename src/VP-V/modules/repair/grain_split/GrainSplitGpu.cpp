@@ -88,6 +88,65 @@ if (b.x < GS_BW && b.y < GS_BH) {
 }
 )GLSL";
 
+			// COMPACT block passes: the same N and e3 as the Full ones, plus the block means of d1^2 and d2^2 (the fine and
+			// mid band energies, raster order, no atomics) as two more modifier channels: quiet = (quiet, e3, e1, e2).
+			const char* const QUIET_BODY_COMPACT = R"GLSL(
+ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+if (b.x < GS_BW && b.y < GS_BH) {
+    float e[GS_SUB * GS_SUB];
+    int n = 0;
+    for (int sj = 0; sj < GS_SUB; sj++)
+        for (int si = 0; si < GS_SUB; si++) {
+            int x0 = b.x * GS_B + (si * GS_B) / GS_SUB, x1 = min(GS_W, b.x * GS_B + ((si + 1) * GS_B) / GS_SUB);
+            int y0 = b.y * GS_B + (sj * GS_B) / GS_SUB, y1 = min(GS_H, b.y * GS_B + ((sj + 1) * GS_B) / GS_SUB);
+            if (x1 > x0 && y1 > y0) {
+                float sum = 0.0;
+                for (int yy = y0; yy < y1; yy++)
+                    for (int xx = x0; xx < x1; xx++) {
+                        vec4 c = texelFetch(bands, ivec2(xx, yy), 0);
+                        float d = c.x + c.y;
+                        sum += d * d;
+                    }
+                e[n] = sum / float((x1 - x0) * (y1 - y0));
+                n++;
+            }
+        }
+    for (int i = 1; i < n; i++) {
+        float v = e[i];
+        int j = i - 1;
+        while (j >= 0 && e[j] > v) { e[j + 1] = e[j]; j--; }
+        e[j + 1] = v;
+    }
+    int nq = min(n, max(1, GS_QUIET));
+    float m = 0.0;
+    for (int i = 0; i < nq; i++) m += e[i];
+    float quiet = n > 0 ? GS_CAL * m / float(nq) : 0.0;
+    float s1q = 0.0, s2q = 0.0, s3 = 0.0;
+    int y1b = min(GS_H, (b.y + 1) * GS_B), x1b = min(GS_W, (b.x + 1) * GS_B);
+    for (int yy = b.y * GS_B; yy < y1b; yy++)
+        for (int xx = b.x * GS_B; xx < x1b; xx++) {
+            vec4 c = texelFetch(bands, ivec2(xx, yy), 0);
+            s1q += c.x * c.x;
+            s2q += c.y * c.y;
+            s3 += c.z * c.z;
+        }
+    float cnt = float((x1b - b.x * GS_B) * (y1b - b.y * GS_B));
+    imageStore(quiet_out, b, vec4(quiet, s3 / cnt, s1q / cnt, s2q / cnt));
+}
+)GLSL";
+
+			const char* const NMIN_BODY_COMPACT = R"GLSL(
+ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+if (b.x < GS_BW && b.y < GS_BH) {
+    float m = 1e30;
+    for (int j = -GS_NG; j <= GS_NG; j++)
+        for (int i = -GS_NG; i <= GS_NG; i++)
+            m = min(m, texelFetch(quiet, ivec2(clamp(b.x + i, 0, GS_BW - 1), clamp(b.y + j, 0, GS_BH - 1)), 0).x);
+    vec4 q = texelFetch(quiet, b, 0);
+    imageStore(blocks_out, b, vec4(m, q.y, q.z, q.w));
+}
+)GLSL";
+
 			const char* const NMIN_BODY = R"GLSL(
 ivec2 b = ivec2(gl_GlobalInvocationID.xy);
 if (b.x < GS_BW && b.y < GS_BH) {
@@ -193,11 +252,17 @@ if (p.x < GS_W && p.y < GS_H) {
 		{
 			if (storage != GrainSplit::Storage::Compact)
 				return "vec4 gs_fetch(ivec2 p) { return texelFetch(split, p, 0); }\n"
-					"vec2 gs_blocks(ivec2 b) { return texelFetch(gblocks, b, 0).xy; }\n";
+					"vec2 gs_blocks(ivec2 b) { return texelFetch(gblocks, b, 0).xy; }\n"
+					"#define GS_HAS_ENERGIES 0\n"   // Full carries no band energies: a defined 'unavailable' value, readers derive their own
+					"vec2 gs_energies(ivec2 b) { return vec2(-1.0); }\n"
+					"float gs_tilt(ivec2 b) { return 0.0; }\n";
 			return "const float gs_cu = " + VpvGpu::Num(codeUnit) + ";\n"
 				"vec4 gs_fetch(ivec2 p)\n{\n    vec2 a = texelFetch(gs_a, p, 0).xy;\n    vec2 b = texelFetch(gs_b, p, 0).xy;\n"
 				"    return vec4(a.x, a.y, b.x, b.y / gs_cu);\n}\n"
-				"vec2 gs_blocks(ivec2 b) { return texelFetch(gblocks, b, 0).xy; }\n";
+				"vec2 gs_blocks(ivec2 b) { return texelFetch(gblocks, b, 0).xy; }\n"
+				"#define GS_HAS_ENERGIES 1\n"
+				"vec2 gs_energies(ivec2 b) { return texelFetch(gblocks, b, 0).zw; }\n"   // (e1, e2): block means of d1^2, d2^2 (codes^2)
+				"float gs_tilt(ivec2 b)\n{\n    vec2 e = texelFetch(gblocks, b, 0).zw;\n    return log2((e.x + 1e-3) / (e.y + 1e-3));\n}\n";   // derived, not stored
 		}
 		}
 
@@ -284,10 +349,9 @@ if (p.x < GS_W && p.y < GS_H) {
 			{
 				fA = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RG16F);
 				fB = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RG16);
-				fBlocks = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RG32F);
-				if (!fA || !fB || !fBlocks || !f4)
+				if (!fA || !fB || !f4)
 				{
-					m_error = "grain split: no compact storage formats (rg16f, rg16, rg32f)";
+					m_error = "grain split: no compact storage formats (rg16f, rg16, rgba32f)";
 					return false;
 				}
 			}
@@ -373,7 +437,7 @@ if (p.x < GS_W && p.y < GS_H) {
 			{
 				if (!Ensure(gpu, m_blocks, bw, bh, fBlocks))
 				{
-					m_error = compact ? "grain split: no rg32f block texture" : "grain split: no rgba32f storage texture";
+					m_error = "grain split: no rgba32f storage texture";
 					return false;
 				}
 				blocksTex = m_blocks;
@@ -405,7 +469,7 @@ if (p.x < GS_W && p.y < GS_H) {
 			{
 				const std::string hdr = geo + DefineInt("GS_SUB", params.subBlocks) + DefineInt("GS_QUIET", params.quietSubBlocks) + Define("GS_CAL", params.grainCal);
 				const pl_shader_desc d[2] = { Sampled("bands", bands), VpvGpu::Storage("quiet_out", quiet) };
-				if (!Pass(dispatch, "VideoProcessor grain split: grain level", hdr, QUIET_BODY, d, 2, nullptr, 0, bgx, bgy, 0))
+				if (!Pass(dispatch, "VideoProcessor grain split: grain level", hdr, compact ? QUIET_BODY_COMPACT : QUIET_BODY, d, 2, nullptr, 0, bgx, bgy, 0))
 				{
 					m_error = "grain split: grain level pass failed";
 					return false;
@@ -413,7 +477,7 @@ if (p.x < GS_W && p.y < GS_H) {
 			}
 			{
 				const pl_shader_desc d[2] = { Sampled("quiet", quiet), VpvGpu::Storage("blocks_out", blocksTex) };
-				if (!Pass(dispatch, "VideoProcessor grain split: neighbourhood minimum", geo + DefineInt("GS_NG", params.neighbourhood), NMIN_BODY, d, 2, nullptr, 0, bgx, bgy, 0))
+				if (!Pass(dispatch, "VideoProcessor grain split: neighbourhood minimum", geo + DefineInt("GS_NG", params.neighbourhood), compact ? NMIN_BODY_COMPACT : NMIN_BODY, d, 2, nullptr, 0, bgx, bgy, 0))
 				{
 					m_error = "grain split: minimum pass failed";
 					return false;

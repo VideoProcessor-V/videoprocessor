@@ -501,10 +501,10 @@ inline void AppendGrainSplitProduct(std::vector<ProductDecl>& decls, bool compac
     p10.sourceFrame = true;
     AddInput(p10, kP4SourceStats, 0);
     // Per plane-component. Full: split rgba32f (16 B/px) + blocks rgba32f (16 B per block). Compact: split rg16f +
-    // rg16 (8 B/px) + blocks rg32f (8 B per block). Blocks are declared at the 16 px block edge (shift 4): an upper
+    // rg16 (8 B/px) + blocks rgba32f (N, e3, e1, e2: 16 B per block). Blocks are declared at the 16 px block edge (shift 4): an upper
     // bound at 8K, where the edge doubles.
     AddTerm(p10, 0, compact ? 8 : 16);
-    AddTerm(p10, 4, compact ? 8 : 16);
+    AddTerm(p10, 4, 16);
     p10.refRenderMs = 1.2f;
     decls.push_back(p10);
 
@@ -516,7 +516,7 @@ inline void AppendGrainSplitProduct(std::vector<ProductDecl>& decls, bool compac
     c.sourceFrame = true;
     AddInput(c, kP4SourceStats, 0);
     AddTerm(c, 1, compact ? 16 : 32);   // Cb + Cr planes at half size: 2 x (8 | 16) B/px
-    AddTerm(c, 5, compact ? 16 : 32);   // block grids at 16 px of those planes: 2 x (8 | 16) B per block
+    AddTerm(c, 5, 32);                  // block grids at 16 px of those planes: 2 x 16 B per block (both layouts)
     c.refRenderMs = 0.6f;
     c.planningSize = true;
     decls.push_back(c);

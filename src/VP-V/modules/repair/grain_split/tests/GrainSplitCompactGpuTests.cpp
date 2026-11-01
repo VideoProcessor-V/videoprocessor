@@ -415,7 +415,7 @@ public:
 			VpSkeleton::TexShape a, b, blk;
 			a.w = static_cast<uint32_t>(w); a.h = static_cast<uint32_t>(h); a.fmt = compact ? VpSkeleton::TexFormat::RG16F : VpSkeleton::TexFormat::RGBA32F;
 			b = a; b.fmt = VpSkeleton::TexFormat::RG16;
-			blk.w = static_cast<uint32_t>(bw); blk.h = static_cast<uint32_t>(bh); blk.fmt = compact ? VpSkeleton::TexFormat::RG32F : VpSkeleton::TexFormat::RGBA32F;
+			blk.w = static_cast<uint32_t>(bw); blk.h = static_cast<uint32_t>(bh); blk.fmt = VpSkeleton::TexFormat::RGBA32F;
 			GrainSplit::Gpu::Targets t;
 			t.split = backend.Create(a);
 			t.splitB = compact ? backend.Create(b) : nullptr;
@@ -538,5 +538,55 @@ if (p.x < TBW && p.y < TBH) imageStore(out_blocks, p, vec4(gs_blocks(p), 0.0, 0.
 		Assert::IsTrue(worstSrel <= 1.0 / 1024.0, L"relative error of large s within the fp16 step");
 		Assert::IsTrue(worstBase <= 0.05, L"base within 0.05 codes");
 		Assert::IsTrue(worstF <= 1.0 / 255.0, L"f within 1/255");
+	}
+
+	TEST_METHOD(GrainSplitCompactBlockEnergiesMatchTheModel)
+	{
+		// The Compact blocks carry the block mean band energies e1 = mean d1^2 and e2 = mean d2^2 (modifier fields): they match
+		// GrainSplit::Compute's bands, are deterministic, and Full leaves blocks.zw at 0 (gs_energies unavailable there).
+		using namespace GrainSplitCompactGpuTestsNs;
+		GpuDevice dev;
+		Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+		pl_gpu gpu = dev.Gpu();
+		const int sizes[2][2] = { { 256, 144 }, { 320, 180 } };
+		for (int si = 0; si < 2; ++si)
+		{
+			const int w = sizes[si][0], h = sizes[si][1], B = BlockEdge(h);
+			const Plane y = MakePlane(w, h, 41u + static_cast<uint32_t>(si));
+			pl_tex tex = UploadLuma(gpu, y);
+			const Product comp = Run(dev, tex, B, Storage::Compact, nullptr);
+			const Product again = Run(dev, tex, B, Storage::Compact, nullptr);
+			const Product full = Run(dev, tex, B, Storage::Full, nullptr);
+			Assert::IsTrue(comp.ok && again.ok && full.ok, L"computes");
+			Assert::IsTrue(SameBits(comp.blocks, again.blocks), L"deterministic: the block texels are bit-identical across runs");
+			const GrainSplit::Split model = GrainSplit::Compute(y, 1.0, B);
+			double worstRel1 = 0, worstRel2 = 0;
+			size_t zwZero = 0, blocksTotal = static_cast<size_t>(comp.bw) * comp.bh;
+			for (int by = 0; by < comp.bh; ++by)
+				for (int bx = 0; bx < comp.bw; ++bx)
+				{
+					double s1 = 0, s2 = 0, cnt = 0;
+					for (int yy = by * B; yy < (std::min)(h, (by + 1) * B); ++yy)
+						for (int xx = bx * B; xx < (std::min)(w, (bx + 1) * B); ++xx)
+						{
+							s1 += model.d1.at(xx, yy) * model.d1.at(xx, yy);
+							s2 += model.d2.at(xx, yy) * model.d2.at(xx, yy);
+							cnt += 1;
+						}
+					const size_t i = static_cast<size_t>(by) * comp.bw + bx;
+					const double e1 = comp.blocks[i * 4 + 2], e2 = comp.blocks[i * 4 + 3];
+					worstRel1 = (std::max)(worstRel1, std::fabs(e1 - s1 / cnt) / (std::fabs(s1 / cnt) + 1e-3));
+					worstRel2 = (std::max)(worstRel2, std::fabs(e2 - s2 / cnt) / (std::fabs(s2 / cnt) + 1e-3));
+					zwZero += (full.blocks[i * 4 + 2] == 0.0f && full.blocks[i * 4 + 3] == 0.0f) ? 1u : 0u;
+				}
+			LogF("block energies %.0fx%.0f: worst relative error e1 %.6f, e2 %.6f against the CPU model", w, h, worstRel1, worstRel2);
+			Assert::IsTrue(worstRel1 <= 2e-3 && worstRel2 <= 2e-3, L"e1 and e2 match the model's block means of d1^2 and d2^2");
+			Assert::AreEqual(blocksTotal, zwZero, L"Full leaves blocks.zw at 0");
+			pl_tex_destroy(gpu, &tex);
+		}
+		const std::string full = GrainSplit::Gpu::ViewGlsl(Storage::Full, kCodeUnit), compact = GrainSplit::Gpu::ViewGlsl(Storage::Compact, kCodeUnit);
+		Assert::IsTrue(full.find("GS_HAS_ENERGIES 0") != std::string::npos && full.find("vec2(-1.0)") != std::string::npos, L"Full: energies unavailable");
+		Assert::IsTrue(compact.find("GS_HAS_ENERGIES 1") != std::string::npos && compact.find("gs_tilt") != std::string::npos && compact.find("gs_energies") != std::string::npos,
+			L"Compact: energies and tilt accessors");
 	}
 };
