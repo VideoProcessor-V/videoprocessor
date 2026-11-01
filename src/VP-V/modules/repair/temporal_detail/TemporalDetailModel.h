@@ -1002,7 +1002,7 @@ namespace TemporalDetail
 						else if (q > st.qLow * (1.0 + kReboundTau) && q - st.qLow >= kReboundMinEnergy) { st.rebounds += 1.0; st.rstate = 0; st.qHigh = q; }
 					}
 					const bool falling = q < st.qPrev * (1.0 - kSoftStep) && e2 < st.e2Prev * (1.0 - kSoftStep) && st.qPrev >= kRetireMinEnergy;
-					st.softRun = falling ? st.softRun + 1 : 0;
+					st.softRun = falling ? (std::min)(st.softRun + 1, kRunSaturate) : 0;
 					st.qPeak *= peakDecay;
 					if (q >= st.qPeak) { st.qPeak = q; st.e2Peak = e2; st.fPeak = F; }
 					st.qPrev = q; st.e2Prev = e2;
@@ -1175,7 +1175,7 @@ namespace TemporalDetail
 					soft = m_set.strength * Bg(static_cast<size_t>(i), 3) * wk.evidence * chosen->ageGate * chosen->strongerGate * (st.retired ? 0.0 : 1.0);
 					st.tHold = soft;
 					// the guard's veto run (the focus / high-band-loss guard against a past reference)
-					if (!useFuture && wk.pastId >= 0 && chosen->hbGate * chosen->focusGate < 0.1) ++st.vetoRun; else st.vetoRun = 0;
+					if (!useFuture && wk.pastId >= 0 && chosen->hbGate * chosen->focusGate < 0.1) st.vetoRun = (std::min)(st.vetoRun + 1, kRunSaturate); else st.vetoRun = 0;
 					d.referee[static_cast<size_t>(i)] = refereeGate;
 				}
 				else { soft = 0.0; hardTarget = 0.0; st.vetoRun = 0; }

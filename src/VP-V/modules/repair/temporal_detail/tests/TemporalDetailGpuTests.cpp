@@ -601,8 +601,8 @@ namespace VideoProcessorTest
 			for (size_t t = 0; t < frames.size(); ++t) Assert::IsTrue(outs[0][t].v == outs[1][t].v, L"bit-identical runs");
 			Assert::AreEqual(counters[0].liveSlots, counters[1].liveSlots);
 			Assert::AreEqual(counters[0].guardTrips, counters[1].guardTrips);
-			LogF("counters: live slots %.0f, refreshes %.0f, guard trips %.0f, add-back blocks %.0f", counters[0].liveSlots, counters[0].refreshes,
-				counters[0].guardTrips, counters[0].addBackBlocks);
+			LogF("counters: live slots %.0f, refreshes %.0f, guard trips %.0f, add-back blocks %.0f", static_cast<double>(counters[0].liveSlots), static_cast<double>(counters[0].refreshes),
+				static_cast<double>(counters[0].guardTrips), static_cast<double>(counters[0].addBackBlocks));
 			pl_tex_destroy(gpu, &bwdTex);
 		}
 

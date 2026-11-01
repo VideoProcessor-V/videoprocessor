@@ -30,6 +30,7 @@ namespace TemporalDetail
 	constexpr double kGrainCal = 2.2;           // pure grain reads about its own energy (quiet sub-blocks read low)
 	constexpr double kWienerKappa = 2.0;        // f = clamp(1 - kappa N / e3x3, 0, 1)
 	constexpr double kEnergyFloor = 1e-3;       // codes^2, added to q and to divisions
+	constexpr int kRunSaturate = 1 << 20;       // softRun / vetoRun saturate here (model and shader alike; keeps the float state exact)
 	constexpr int kSlots = 5;                   // K past slots (one more, the future slot, in queued modes)
 	constexpr int kMaxFutureFrames = 8;         // future frames the model looks at
 

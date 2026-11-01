@@ -16,8 +16,12 @@
 //   (all w x h planes are the active picture: its border is the plane edge; the bars are copied by APPLY)
 //   slot_blk             (K bw) x bh rgba32f F, q, N, rho2 of the stored frame (slot-major: x = k bw + bx)
 //   mot                  (K bw) x bh rgba32f cx, cy, u (composed displacement current -> slot, uncertainty)
-//   tab                  (K + 2) x 1 rgba32f per slot (live, id, age frames, cleaned); [K] = (admitted, cur, next id,
-//                        refreshes); [K + 1] = (victim, live count, 0, 0)
+//   tab                  (K + 2) x 1 rgba32ui (exact integers, no 2^24 float limit) per slot (live, id, age frames, cleaned);
+//                        [K] = (admitted, cur + 1, next id, refreshes); [K + 1] = (victim + 1, live count, 0, 0).
+//                        cur / victim are stored +1 so that 0 means none. Slot ids are uint32 and compared by the signed
+//                        difference int(a - b) < 0 (correct across a uint32 wrap while live ids span < 2^31).
+//   counters             2 x 1 rgba32ui: (guard active blocks, add-back blocks, guard trips (cumulative, exact), refreshes);
+//                        (admitted, live slots, 0, 0)
 //   ev_a / ev_b          (K bw) x bh rgba32f (hard, ageGate, strongerGate, e1w) / (hbGate, focusGate, unc base corr, age s)
 //   state                (8 bw) x bh rgba32f the model's BlockState (8 texels per block, see kState)
 //   work                 bw x bh rgba32f (past slot, refresh, evidence, referee)
@@ -35,6 +39,8 @@ namespace TemporalDetail
 	{
 		// Smoothstep, Catmull-Rom, slot-major block index; needs only the #defines.
 		constexpr const char* kCore = R"GLSL(
+// The (uint) slot table as floats, for its small fields (flags, counts, slot indices + 1, ages); ids use the raw uint.
+#define td_tabf(t, p) vec4(texelFetch(t, p, 0))
 // TemporalDetail::SanitizeBlockGate on the GPU: non-finite -> 1, thresholds to [TD_BGATE_MIN, TD_BGATE_MAX], strength to [0, 1].
 vec4 td_bgate(vec4 v)
 {
@@ -194,22 +200,23 @@ void td_store(ivec2 b, TdState s)
 		constexpr const char* kOrder = R"GLSL(
 void td_order(out int ord[TD_K])
 {
-    float ids[TD_K];
+    uint ids[TD_K];
     for (int k = 0; k < TD_K; k++) {
-        vec4 t = texelFetch(tab_new, ivec2(k, 0), 0);
-        ord[k] = t.x > 0.5 ? k : -1;
-        ids[k] = t.x > 0.5 ? t.y : 1e30;
+        uvec4 t = texelFetch(tab_new, ivec2(k, 0), 0);
+        ord[k] = t.x > 0u ? k : -1;
+        ids[k] = t.y;
     }
+    // Live slots first, by id; ids compare by the signed difference (wrap-safe), -1 slots sort last.
     for (int i = 1; i < TD_K; i++) {
         int o = ord[i];
-        float v = ids[i];
+        uint v = ids[i];
         int j = i - 1;
-        while (j >= 0 && ids[j] > v) { ids[j + 1] = ids[j]; ord[j + 1] = ord[j]; j--; }
+        while (j >= 0 && o >= 0 && (ord[j] < 0 || int(ids[j] - v) > 0)) { ids[j + 1] = ids[j]; ord[j + 1] = ord[j]; j--; }
         ids[j + 1] = v;
         ord[j + 1] = o;
     }
 }
-bool td_live_new(int k) { return k >= 0 && k < TD_K && texelFetch(tab_new, ivec2(k, 0), 0).x > 0.5; }
+bool td_live_new(int k) { return k >= 0 && k < TD_K && td_tabf(tab_new, ivec2(k, 0)).x > 0.5; }
 )GLSL";
 
 		// Two-vec4 fixed-tree reduction over a 16 x 16 workgroup (every invocation calls it).
@@ -257,7 +264,7 @@ if (g.x < TD_BW * TD_K && g.y < TD_BH) {
     int k = g.x / TD_BW;
     ivec2 b = ivec2(g.x - k * TD_BW, g.y);
     vec4 r = vec4(0.0);
-    if (compose_on > 0.5 && texelFetch(tab_old, ivec2(k, 0), 0).x > 0.5) {
+    if (compose_on > 0.5 && td_tabf(tab_old, ivec2(k, 0)).x > 0.5) {
         float px = (float(b.x) + 0.5) * float(TD_B) - 0.5, py = (float(b.y) + 0.5) * float(TD_B) - 0.5;
         vec3 v = td_pair_bwd(vec2(px, py));
         float hop = (1.0 - v.z) * bwd_bpx;
@@ -278,7 +285,7 @@ ivec2 wg = ivec2(gl_WorkGroupID.xy);
 int k = wg.x / TD_BW;
 ivec2 b = ivec2(wg.x - k * TD_BW, wg.y);
 ivec2 lid = ivec2(gl_LocalInvocationID.xy);
-vec4 tab = texelFetch(tab_old, ivec2(k, 0), 0);
+vec4 tab = td_tabf(tab_old, ivec2(k, 0));
 bool live = tab.x > 0.5 && slots_valid > 0.5;
 vec4 a0 = vec4(0.0), a1 = vec4(0.0);   // (c1, c2, w1, w2), (cs, ws, dot, bd)
 if (live) {
@@ -359,7 +366,7 @@ if (b.x < TD_BW && b.y < TD_BH) {
             else if (q > st.qLow * (1.0 + TD_REBOUND_TAU) && q - st.qLow >= TD_REBOUND_MIN) { st.rebounds += 1.0; st.rstate = 0.0; st.qHigh = q; }
         }
         bool falling = q < st.qPrev * (1.0 - TD_SOFT_STEP) && e2 < st.e2Prev * (1.0 - TD_SOFT_STEP) && st.qPrev >= TD_RETIRE_MIN;
-        st.softRun = falling ? st.softRun + 1.0 : 0.0;
+        st.softRun = falling ? min(st.softRun + 1.0, 1048576.0) : 0.0;   // saturates at TemporalDetail::kRunSaturate = 1 << 20 (as the model)
         st.qPeak *= peak_decay;
         if (q >= st.qPeak) { st.qPeak = q; st.e2Peak = e2; st.fPeak = F; }
         st.qPrev = q; st.e2Prev = e2;
@@ -375,7 +382,7 @@ if (b.x < TD_BW && b.y < TD_BH) {
 #endif
     float evidence = max(td_ss(TD_EV_LO, TD_EV_HI, st.rebounds), 1.0 - hint);
     int slot = int(st.slot);
-    bool live = slot >= 0 && slot < TD_K && slots_valid > 0.5 && texelFetch(tab_old, ivec2(slot, 0), 0).x > 0.5;
+    bool live = slot >= 0 && slot < TD_K && slots_valid > 0.5 && td_tabf(tab_old, ivec2(slot, 0)).x > 0.5;
     if (slot >= 0 && !live) { st.slot = -1.0; st.prevSlot = -1.0; st.xf = 1.0; st.qref = 0.0; }
     int past = (live && have_frame > 0.5) ? slot : -1;
     bool refresh = false;
@@ -418,27 +425,28 @@ for (uint s = 128u; s > 0u; s >>= 1u) {
 }
 if (li == 0u) {
     int refreshes = td_ci[0];
-    float live[TD_K], ids[TD_K], age[TD_K], cleaned[TD_K];
+    float live[TD_K];
+    uint ids[TD_K], age[TD_K], cleaned[TD_K];
     int nlive = 0;
     for (int k = 0; k < TD_K; k++) {
-        vec4 t = texelFetch(tab_old, ivec2(k, 0), 0);
-        bool l = t.x > 0.5 && slots_valid > 0.5;
-        live[k] = l ? 1.0 : 0.0; ids[k] = t.y; age[k] = t.z + 1.0; cleaned[k] = t.w;
+        uvec4 t = texelFetch(tab_old, ivec2(k, 0), 0);
+        bool l = t.x > 0u && slots_valid > 0.5;
+        live[k] = l ? 1.0 : 0.0; ids[k] = t.y; age[k] = t.z + 1u; cleaned[k] = t.w;
         if (l) nlive++;
     }
-    float nextId = reset > 0.5 ? 0.0 : texelFetch(tab_old, ivec2(TD_K, 0), 0).z;
+    uint nextId = reset > 0.5 ? 0u : texelFetch(tab_old, ivec2(TD_K, 0), 0).z;
     int victim = -1, cur = -1;
     bool admitted = false;
     if (refreshes > 0) {
         if (nlive >= TD_K) {
             // the first slot (in admission order) no block references, else the oldest whose blocks have faded
-            float best = 1e30;
+            uint best = 0u;   // ids compare by int(a - b) < 0 (wrap-safe); victim < 0 means none chosen yet
             for (int k = 0; k < TD_K; k++)
-                if (live[k] > 0.5 && td_ci[(1 + k) * 256] == 0 && ids[k] < best) { best = ids[k]; victim = k; }
+                if (live[k] > 0.5 && td_ci[(1 + k) * 256] == 0 && (victim < 0 || int(ids[k] - best) < 0)) { best = ids[k]; victim = k; }
             if (victim < 0) {
-                float oldest = -1.0;
+                uint oldest = 0u;
                 for (int k = 0; k < TD_K; k++)
-                    if (live[k] > 0.5 && td_ci[(1 + TD_K + k) * 256] == 0 && age[k] > oldest) { oldest = age[k]; victim = k; }
+                    if (live[k] > 0.5 && td_ci[(1 + TD_K + k) * 256] == 0 && (victim < 0 || age[k] > oldest)) { oldest = age[k]; victim = k; }
             }
             if (victim >= 0) { live[victim] = 0.0; nlive--; }
         }
@@ -447,14 +455,14 @@ if (li == 0u) {
             if (cur < 0)
                 for (int k = TD_K - 1; k >= 0; k--)
                     if (live[k] < 0.5) cur = k;
-            live[cur] = 1.0; ids[cur] = nextId; nextId += 1.0; age[cur] = 0.0; cleaned[cur] = TD_TEMPLATE_CLEAN;
+            live[cur] = 1.0; ids[cur] = nextId; nextId += 1u; age[cur] = 0u; cleaned[cur] = TD_TEMPLATE_CLEAN > 0.5 ? 1u : 0u;
             nlive++;
             admitted = true;
         }
     }
-    for (int k = 0; k < TD_K; k++) imageStore(tab_out, ivec2(k, 0), vec4(live[k], ids[k], age[k], cleaned[k]));
-    imageStore(tab_out, ivec2(TD_K, 0), vec4(admitted ? 1.0 : 0.0, float(cur), nextId, float(refreshes)));
-    imageStore(tab_out, ivec2(TD_K + 1, 0), vec4(float(victim), float(nlive), 0.0, 0.0));
+    for (int k = 0; k < TD_K; k++) imageStore(tab_out, ivec2(k, 0), uvec4(live[k] > 0.5 ? 1u : 0u, ids[k], age[k], cleaned[k]));
+    imageStore(tab_out, ivec2(TD_K, 0), uvec4(admitted ? 1u : 0u, uint(cur + 1), nextId, uint(refreshes)));
+    imageStore(tab_out, ivec2(TD_K + 1, 0), uvec4(uint(victim + 1), uint(nlive), 0u, 0u));
 }
 )GLSL";
 
@@ -503,9 +511,9 @@ vec2 td_patch_sum2(float a, float b)
 }
 )GLSL";
 		constexpr const char* kCleanBody = R"GLSL(
-vec4 fs = texelFetch(tab_new, ivec2(TD_K, 0), 0);
+vec4 fs = td_tabf(tab_new, ivec2(TD_K, 0));
 bool admitted = fs.x > 0.5;
-int cur = int(fs.y);
+int cur = (int(fs.y) - 1);
 ivec2 wgid = ivec2(gl_WorkGroupID.xy);
 int ix = 2 * wgid.x + TD_EX, iy = 2 * wgid.y + TD_EY;
 int ox = -TD_HALF + ix * TD_HALF, oy = -TD_HALF + iy * TD_HALF;
@@ -563,7 +571,7 @@ if (inside) {
 		// The new slot's planes (admitted frames only): slot<cur> = (s1, s2, c1, c2), c = cleaned (or s without the cleaner).
 		constexpr const char* kFinishBody = R"GLSL(
 ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-vec4 fs = texelFetch(tab_new, ivec2(TD_K, 0), 0);
+vec4 fs = td_tabf(tab_new, ivec2(TD_K, 0));
 if (fs.x > 0.5 && p.x < TD_W && p.y < TD_H) {
     vec4 sp = texelFetch(split, p, 0);
 #ifdef TD_CLEANED
@@ -571,21 +579,21 @@ if (fs.x > 0.5 && p.x < TD_W && p.y < TD_H) {
 #else
     vec2 c = sp.xy;
 #endif
-    td_slot_store(int(fs.y), p, vec4(sp.x, sp.y, c.x, c.y));
+    td_slot_store((int(fs.y) - 1), p, vec4(sp.x, sp.y, c.x, c.y));
 }
 )GLSL";
 		constexpr const char* kBaseCopyBody = R"GLSL(
 ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-vec4 fs = texelFetch(tab_new, ivec2(TD_K, 0), 0);
+vec4 fs = td_tabf(tab_new, ivec2(TD_K, 0));
 if (fs.x > 0.5 && p.x < TD_W && p.y < TD_H)
-    td_base_store(int(fs.y), p, vec4(texelFetch(split, p, 0).w * TD_SB_STORE, 0.0, 0.0, 1.0));
+    td_base_store((int(fs.y) - 1), p, vec4(texelFetch(split, p, 0).w * TD_SB_STORE, 0.0, 0.0, 1.0));
 )GLSL";
 		// The new slot's block maps and zero motion; rho2 = sum W^2 V0 / sum N hs w2 over the patches centred in the block.
 		constexpr const char* kCopyBlkBody = R"GLSL(
 ivec2 b = ivec2(gl_GlobalInvocationID.xy);
-vec4 fs = texelFetch(tab_new, ivec2(TD_K, 0), 0);
+vec4 fs = td_tabf(tab_new, ivec2(TD_K, 0));
 if (fs.x > 0.5 && b.x < TD_BW && b.y < TD_BH) {
-    int cur = int(fs.y);
+    int cur = (int(fs.y) - 1);
     float rho2 = 1.0;
 #ifdef TD_CLEANED
     int ix0 = (b.x * TD_B + TD_HALF - 1) / TD_HALF, ix1 = b.x == TD_BW - 1 ? TD_NPX : ((b.x + 1) * TD_B + TD_HALF - 1) / TD_HALF;
@@ -611,10 +619,10 @@ ivec2 b = ivec2(gl_GlobalInvocationID.xy);
 if (b.x < TD_BW && b.y < TD_BH) {
     TdState st = td_load(b);
     vec4 wk = texelFetch(work, b, 0);
-    vec4 fs = texelFetch(tab_new, ivec2(TD_K, 0), 0);
+    vec4 fs = td_tabf(tab_new, ivec2(TD_K, 0));
     bool admitted = fs.x > 0.5;
-    int cur = admitted ? int(fs.y) : -1;
-    int victim = int(texelFetch(tab_new, ivec2(TD_K + 1, 0), 0).x);
+    int cur = admitted ? (int(fs.y) - 1) : -1;
+    int victim = int(td_tabf(tab_new, ivec2(TD_K + 1, 0)).x) - 1;
     int past = int(wk.x);
     bool refresh = wk.y > 0.5;
     float evidence = wk.z, referee = wk.w;
@@ -645,7 +653,7 @@ if (b.x < TD_BW && b.y < TD_BH) {
         hardT = pa.x * referee;
         soft = bstrength * evidence * pa.y * pa.z * (st.retired > 0.5 ? 0.0 : 1.0);
         st.tHold = soft;
-        if (pb.x * pb.y < 0.1) st.vetoRun += 1.0; else st.vetoRun = 0.0;
+        if (pb.x * pb.y < 0.1) st.vetoRun = min(st.vetoRun + 1.0, 1048576.0); else st.vetoRun = 0.0;
     } else {
         st.vetoRun = 0.0;
     }
@@ -720,7 +728,7 @@ if (b.x < TD_BW && b.y < TD_BH) {
             int k = mem[r];
             float cm = den > 0.0 ? aSel * om[r] * aw[r] / den : 0.0;
             float rho2 = 1.0;
-            if (TD_TEMPLATE_CLEAN > 0.5 && texelFetch(tab_new, ivec2(k, 0), 0).w > 0.5) {
+            if (TD_TEMPLATE_CLEAN > 0.5 && td_tabf(tab_new, ivec2(k, 0)).w > 0.5) {
                 vec2 sp = td_position(k, int((float(b.x) + 0.5) * float(TD_B) - 0.5), int((float(b.y) + 0.5) * float(TD_B) - 0.5));
                 int sbx = clamp(int(floor((sp.x + 0.5) / float(TD_B))), 0, TD_BW - 1), sby = clamp(int(floor((sp.y + 0.5) / float(TD_B))), 0, TD_BH - 1);
                 rho2 = texelFetch(slot_blk, ivec2(k * TD_BW + sbx, sby), 0).w;
@@ -743,7 +751,7 @@ vec2 td_slot_bands(int k, int x, int y, float bc)
     vec4 sv;
     float bwv;
     td_slot_sample(k, td_position(k, x, y), sv, bwv);
-    bool cl = TD_TEMPLATE_CLEAN > 0.5 && texelFetch(tab_new, ivec2(k, 0), 0).w > 0.5;
+    bool cl = TD_TEMPLATE_CLEAN > 0.5 && td_tabf(tab_new, ivec2(k, 0)).w > 0.5;
     return td_gain(bwv, bc) * (cl ? sv.zw : sv.xy);
 }
 )GLSL";
@@ -1002,10 +1010,11 @@ for (uint s = 128u; s > 0u; s >>= 1u) {
     barrier();
 }
 if (li == 0u) {
-    vec4 old = texelFetch(counters_old, ivec2(0, 0), 0);
-    vec4 fs = texelFetch(tab_new, ivec2(TD_K, 0), 0), f2 = texelFetch(tab_new, ivec2(TD_K + 1, 0), 0);
-    imageStore(counters_out, ivec2(0, 0), vec4(td_sc[0].x, td_sc[0].y, old.z + td_sc[0].z, fs.w));
-    imageStore(counters_out, ivec2(1, 0), vec4(fs.x, f2.y, 0.0, 0.0));
+    uvec4 old = texelFetch(counters_old, ivec2(0, 0), 0);
+    uvec4 fs = texelFetch(tab_new, ivec2(TD_K, 0), 0), f2 = texelFetch(tab_new, ivec2(TD_K + 1, 0), 0);
+    // the per-frame tile sums are small exact counts; the guard-trip total is cumulative, kept as a uint32 (wraps at 2^32)
+    imageStore(counters_out, ivec2(0, 0), uvec4(uint(td_sc[0].x), uint(td_sc[0].y), old.z + uint(td_sc[0].z), fs.w));
+    imageStore(counters_out, ivec2(1, 0), uvec4(fs.x, f2.y, 0u, 0u));
 }
 )GLSL";
 
