@@ -12,6 +12,7 @@
 #include <VP-V/core/StatusText.h>
 #include <VP-V/gui/VpShortcuts.h>
 
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -24,14 +25,21 @@ namespace StatusTextTest
 	namespace
 	{
 		// docs/design/net-runner-wiring.patch (feat/nets 328b6d29), the Ctrl+I descriptions hunk,
-		// verbatim except that the renderer's members are parameters.
+		// except that the renderer's members are parameters and the milliseconds use one decimal
+		// (the draft's to_string().substr(0, 4) cut 123.456 to "123.").
+		std::string DraftMs(double ms)
+		{
+			char buffer[32];
+			std::snprintf(buffer, sizeof(buffer), "%.1f", ms);
+			return buffer;
+		}
 		std::string DraftNetsLine(bool repairLoaded, const std::string& repairName, bool fp16, double repairMs,
 			bool dLoaded, const std::string& dName, double dMs)
 		{
 			std::string nets = "Nets:";
 			if (repairLoaded) nets += " " + repairName + (fp16 ? " (fp16" : " (fp32") +
-				", " + std::to_string(repairMs).substr(0, 4) + " ms)";
-			if (dLoaded) nets += " " + dName + " (" + std::to_string(dMs).substr(0, 4) + " ms)";
+				", " + DraftMs(repairMs) + " ms)";
+			if (dLoaded) nets += " " + dName + " (" + DraftMs(dMs) + " ms)";
 			return nets == "Nets:" ? "Nets: none running" : nets;
 		}
 
@@ -210,7 +218,7 @@ namespace StatusTextTest
 
 		TEST_METHOD(NetsLineIsTheDraftsLine)
 		{
-			const double times[] = { 0.0, 0.5, 1.23456, 12.5, 123.456 };
+			const double times[] = { 0.0, 0.5, 1.23456, 5.0, 12.5, 100.0, 123.4, 123.456 };
 			for (double a : times)
 				for (double d : times)
 					for (int mask = 0; mask < 8; ++mask)
@@ -226,6 +234,16 @@ namespace StatusTextTest
 						Assert::AreEqual(DraftNetsLine(f.repairLoaded, f.repairName, f.repairFp16, a, f.dLoaded, f.dName, d),
 							NetsLine(f));
 					}
+			NetsFacts g;
+			g.repairLoaded = true;
+			g.repairName = "A";
+			g.repairMs = 5.0;
+			g.dLoaded = true;
+			g.dName = "D";
+			g.dMs = 123.4;
+			Assert::AreEqual(std::string("Nets: A (fp32, 5.0 ms) D (123.4 ms)"), NetsLine(g));
+			g.repairMs = 100.0;
+			Assert::AreEqual(std::string("Nets: A (fp32, 100.0 ms) D (123.4 ms)"), NetsLine(g));
 			Assert::AreEqual(std::string("Nets: none running"), NetsLine(NetsFacts()));
 		}
 

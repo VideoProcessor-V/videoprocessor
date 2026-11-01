@@ -11556,6 +11556,13 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
 			"filter at about a seventh of its GPU time. 'Same as the "
 			"upscaler' is the previous behaviour (EWA Lanczos sharp with High quality, the costliest)."));
 		MarkGpuCost(form, chromaUpscaler, 2);
+		auto* chromaUpscaleVp = addChoice(QStringLiteral("VP chroma upscale (candidate)"),
+			QStringLiteral("chroma_upscale_vp"), { QStringLiteral("off"), QStringLiteral("cfl") });
+		chromaUpscaleVp->setToolTip(QStringLiteral(
+			"CfL predicts colour detail from the grain-free luma inside the active picture; chroma grain is "
+			"kept exactly as the normal upscaler passes it. Off = libplacebo's chroma upscaler (above). "
+			"Candidate: not yet active in the renderer."));
+		MarkGpuCost(form, chromaUpscaleVp, 1);
 		auto* downscaler = addChoice(QStringLiteral("Downscaler"),
 			QStringLiteral("downscaler"), { QStringLiteral("AUTO"),
 			QStringLiteral("lanczos"), QStringLiteral("mitchell"),

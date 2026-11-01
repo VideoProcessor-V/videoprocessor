@@ -292,7 +292,7 @@ projector with the hybrid SSIM scaler.*
 - **Interactions:** the Scaling tier: Classic/Low = native, Mid = auto.
 
 ### 5.2 4K route, refine net and chroma upscale (planned)
-- `entrance_route_4k`, `refine_net`, `chroma_upscale_vp`: reserved slots, not yet implemented.
+- `entrance_route_4k`, `refine_net`: reserved slots, not yet implemented. (`chroma_upscale_vp` now exists as a candidate; see the table in 5.1.)
   The Scaling tier's *Upper* step waits for the refine net.
 
 ### 5.3 Output scaling: the hybrid SSIM scaler (tier)
@@ -308,6 +308,7 @@ projector with the hybrid SSIM scaler.*
 | `adaptive_chroma_ssim` | Applies SSIM to chroma too. | It can fringe colour. | off |
 | `adaptive_motion`, `adaptive_motion_speed_lo`, `adaptive_motion_speed_hi`, `adaptive_motion_floor`, `adaptive_motion_smooth_ms` | Motion-adapted scaler blend for the adaptive downscale and upscale: per 16x16 block the sharp scaler's share is kept on steady, confidently tracked areas and lowered toward the faithful scaler on fast or untracked motion (speed in picture heights per second, smoothed over time along the vectors, reset at cuts). Without vectors the plain blend runs and the status line says so. | A sharp scaler that shimmers or haloes on fast motion; lowering only moves toward the faithful branch, so grain is kept. | off / 0.1 / 0.4 / 0 / 250 ms (defaults set from the sweep) |
 | `adaptive_upscale`, `adaptive_upscale_w_base`, `adaptive_upscale_superres_scale`, `upscale_light` | The same idea for sources smaller than the screen (CNN vs faithful upscale). | CNN upscalers sharpen grain. | off / 1 / on / linear |
+| `chroma_upscale_vp` (Scaling page) | VP's own chroma upscaler: `cfl` predicts colour detail from the grain-free luma inside the active picture and keeps chroma grain exactly as the normal upscaler passes it; `off` uses libplacebo's `chroma_upscaler`. Candidate: not yet active in the renderer. | libplacebo's chroma upscaling may blur or fringe coloured edges; CfL follows the luma edges. | off |
 | `downscale_light` (Scaling page) | The light domain for downscaling (linear or gamma). | Gamma matches madVR's SSIM. | linear |
 
 - **Planned:** the D refine add-on under the hybrid scaler (`hybrid_refine_d`).
@@ -481,8 +482,10 @@ These belong to the upstream program and keep their own pages. VP-V does not ref
   (4:2:0 / 4:2:2 to full resolution).
 - The **CfL shader** ("chroma from luma", a user shader in the cinema configuration) predicts colour
   detail from the luma instead. When it is loaded it takes over that job inside libplacebo.
-- The planned **VP chroma upscale slot** (`chroma_upscale_vp`) would do it in VP's front end, so
-  libplacebo would receive 4:4:4.
+- The **VP chroma upscale slot** now exists as `chroma_upscale_vp` = `cfl` (candidate, not yet wired
+  into the renderer; default `off`). It does the upsampling in VP's front end so libplacebo would
+  receive 4:4:4, and it keeps chroma grain exactly (grain is split off, the rest processed, the same
+  grain added back through the Original Catmull-Rom kernel).
 
 ---
 

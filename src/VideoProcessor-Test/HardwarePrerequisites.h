@@ -22,31 +22,90 @@
 
 namespace HardwarePrerequisites
 {
-	inline bool RequireHardware()
+	// True when the named environment variable is exactly "1".
+	inline bool EnvIsOne(const char* name)
 	{
 		char* v = nullptr;
 		size_t n = 0;
-		const bool on = _dupenv_s(&v, &n, "VP_TEST_REQUIRE_HARDWARE") == 0 && v && std::string(v) == "1";
+		const bool on = _dupenv_s(&v, &n, name) == 0 && v && std::string(v) == "1";
 		std::free(v);
 		return on;
 	}
 
-	// True when the test can run. Otherwise logs the SKIP-NO-HARDWARE marker and returns
-	// false, or fails the test under VP_TEST_REQUIRE_HARDWARE=1.
-	inline bool RequireConditionOrSkip(const char* test, bool met, const std::string& reason)
+	// VP_TEST_REQUIRE_ALL=1 makes every kind of missing precondition fail.
+	inline bool RequireAll()
+	{
+		return EnvIsOne("VP_TEST_REQUIRE_ALL");
+	}
+
+	inline bool RequireHardware()
+	{
+		return RequireAll() || EnvIsOne("VP_TEST_REQUIRE_HARDWARE");
+	}
+
+	enum class Kind { Hardware, Gpu, Footage, Corpus };
+
+	inline bool Required(Kind kind)
+	{
+		if (RequireAll())
+			return true;
+		switch (kind)
+		{
+		case Kind::Hardware: return EnvIsOne("VP_TEST_REQUIRE_HARDWARE");
+		case Kind::Gpu: return EnvIsOne("VP_TEST_REQUIRE_GPU");
+		case Kind::Footage: return EnvIsOne("VP_TEST_REQUIRE_FOOTAGE");
+		case Kind::Corpus: return EnvIsOne("VP_TEST_REQUIRE_CORPUS");
+		}
+		return false;
+	}
+
+	inline const char* KindMarker(Kind kind)
+	{
+		switch (kind)
+		{
+		case Kind::Hardware: return "SKIP-NO-HARDWARE";
+		case Kind::Gpu: return "SKIP-NO-GPU";
+		case Kind::Footage: return "SKIP-NO-FOOTAGE";
+		case Kind::Corpus: return "SKIP-NO-CORPUS";
+		}
+		return "SKIP";
+	}
+
+	inline const char* KindEnvName(Kind kind)
+	{
+		switch (kind)
+		{
+		case Kind::Hardware: return "VP_TEST_REQUIRE_HARDWARE";
+		case Kind::Gpu: return "VP_TEST_REQUIRE_GPU";
+		case Kind::Footage: return "VP_TEST_REQUIRE_FOOTAGE";
+		case Kind::Corpus: return "VP_TEST_REQUIRE_CORPUS";
+		}
+		return "VP_TEST_REQUIRE_ALL";
+	}
+
+	// True when the test can run. Otherwise logs "<SKIP-NO-...> <test>: <reason>" and returns
+	// false, or fails the test when that kind (or VP_TEST_REQUIRE_ALL=1) requires it.
+	inline bool RequireOrSkip(Kind kind, const char* test, bool met, const std::string& reason)
 	{
 		using Microsoft::VisualStudio::CppUnitTestFramework::Assert;
 		using Microsoft::VisualStudio::CppUnitTestFramework::Logger;
 		if (met)
 			return true;
-		const std::string marker = std::string("SKIP-NO-HARDWARE ") + test + ": " + reason;
-		if (RequireHardware())
+		const std::string marker = std::string(KindMarker(kind)) + " " + test + ": " + reason;
+		if (Required(kind))
 		{
-			const std::string message = marker + " (VP_TEST_REQUIRE_HARDWARE=1: a missing precondition fails)";
+			const std::string message = marker + " (" + KindEnvName(kind) + "=1 or VP_TEST_REQUIRE_ALL=1: a missing precondition fails)";
 			Assert::Fail(std::wstring(message.begin(), message.end()).c_str());
 		}
 		Logger::WriteMessage((marker + "\n").c_str());
 		return false;
+	}
+
+	// True when the test can run. Otherwise logs the SKIP-NO-HARDWARE marker and returns
+	// false, or fails the test under VP_TEST_REQUIRE_HARDWARE=1 / VP_TEST_REQUIRE_ALL=1.
+	inline bool RequireConditionOrSkip(const char* test, bool met, const std::string& reason)
+	{
+		return RequireOrSkip(Kind::Hardware, test, met, reason);
 	}
 
 	// Windows caps a window's size at the maximum tracking size (SM_CX/CYMAXTRACK), which it

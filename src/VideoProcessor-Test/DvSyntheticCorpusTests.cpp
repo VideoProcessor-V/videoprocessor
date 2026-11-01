@@ -24,6 +24,7 @@
 //   CPU unpack cost at 4K (and the GPU route's CPU share: the DM packet only).
 #include "pch.h"
 #include "CppUnitTest.h"
+#include "HardwarePrerequisites.h"
 
 #include <dv_loopback/DvLoopbackHarness.h>
 #include <VP-V/modules/control/diagnostics/RawCaptureCorpus.h>
@@ -145,11 +146,9 @@ namespace Tests
 
 		inline bool SkipWithoutCorpus(const char* test)
 		{
-			if (!Env("VP_TEST_DV_SYNTH_CORPUS").empty())
-				return false;
-			Logger::WriteMessage((std::string("SKIP-NO-CORPUS ") + test +
-				" (set VP_TEST_DV_SYNTH_CORPUS; tools/dv_synth/run_dv_synth.ps1)\n").c_str());
-			return true;
+			return !HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Corpus, test,
+				!Env("VP_TEST_DV_SYNTH_CORPUS").empty(),
+				"set VP_TEST_DV_SYNTH_CORPUS; tools/dv_synth/run_dv_synth.ps1");
 		}
 
 		inline bool ReadFile(const std::string& path, std::vector<uint8_t>& bytes)

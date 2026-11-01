@@ -240,6 +240,25 @@ namespace LedDrive
 				int parsed = 0;
 				if (ParseReply(line, name, parsed) && SameMnemonic(name, mnemonic))
 				{
+					// Bug hunt 39 #14: a light write's read-back outside the range the
+					// write was clamped to (the projector's own range, not the user's clamp)
+					// is not this command's reply: ignored like an unmatched line.
+					if (sentLight >= 0)
+					{
+						bool outOfRange = false, firstReport = false;
+						{
+							std::lock_guard<std::mutex> guard(stateMutex);
+							outOfRange = !DeviceLightRangeContains(parsed);
+							if (outOfRange && !lightReplyRangeLogged)
+								firstReport = lightReplyRangeLogged = true;
+						}
+						if (outOfRange)
+						{
+							if (firstReport)
+								DebugLog::Log("Dynamic Drive: %s reply value out of range, ignored (%d)", mnemonic, parsed);
+							continue;
+						}
+					}
 					if (value) *value = parsed;
 					ok = true;
 					break;
@@ -445,6 +464,8 @@ namespace LedDrive
 				std::lock_guard<std::mutex> stateGuard(stateMutex);
 				if (haveMin && haveMax)
 				{
+					deviceLightMin = config.lightMin >= 0 ? -1 : minimum;
+					deviceLightMax = config.lightMax >= 0 ? -1 : maximum;
 					range.known = true;
 					range.minimum = config.lightMin >= 0 ? config.lightMin : minimum;
 					range.maximum = config.lightMax >= 0 ? config.lightMax : maximum;
@@ -503,6 +524,13 @@ namespace LedDrive
 		}
 		std::lock_guard<std::mutex> guard(stateMutex);
 		return state;
+	}
+
+	bool BarcoAsciiDriver::DeviceLightRangeContains(int level) const
+	{
+		const int low = deviceLightMin >= 0 ? deviceLightMin : 0;
+		const int high = deviceLightMax >= 0 ? deviceLightMax : 255;
+		return level >= low && level <= high;
 	}
 
 	int BarcoAsciiDriver::Clamp(int level) const

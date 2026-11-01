@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <string>
+#include "HardwarePrerequisites.h"
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -23,6 +24,11 @@ using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 // (VP_TEST_GPU=hardware) and NVIDIA only; elsewhere it reports and passes.
 namespace
 {
+	bool RequireGpu(const char* test, bool met, const std::string& reason)
+	{
+		return HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, test, met, reason);
+	}
+
 	bool OnHardware()
 	{
 		char* v = nullptr;
@@ -92,11 +98,8 @@ namespace Tests
 	public:
 		TEST_METHOD(EngineSelfCheckFindsAKnownPanQuickly)
 		{
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"optical flow self-check: VP_TEST_GPU=hardware only; not run");
+			if (!RequireGpu("EngineSelfCheckFindsAKnownPanQuickly", OnHardware(), "VP_TEST_GPU is not hardware"))
 				return;
-			}
 			// The NVIDIA adapter.
 			CComPtr<IDXGIFactory1> factory;
 			Assert::IsTrue(SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))));
@@ -111,11 +114,8 @@ namespace Tests
 				if (desc.VendorId == 0x10DE)
 					nvidia = adapter;
 			}
-			if (!nvidia)
-			{
-				Logger::WriteMessage(L"optical flow self-check: no NVIDIA GPU; not run");
+			if (!RequireGpu("EngineSelfCheckFindsAKnownPanQuickly", nvidia != nullptr, "no NVIDIA adapter"))
 				return;
-			}
 			CComPtr<ID3D11Device> device;
 			CComPtr<ID3D11DeviceContext> context;
 			Assert::IsTrue(SUCCEEDED(D3D11CreateDevice(nvidia, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0,
@@ -157,11 +157,9 @@ namespace Tests
 				for (int p = 0; p < 3; ++p)
 				{
 					NvOpticalFlow::Engine engine;
-					if (!engine.Open(device, context, size.w, size.h, presets[p]))
-					{
-						Logger::WriteMessage(("optical flow: not available: " + engine.LastError()).c_str());
-						return;   // a GPU without the engine: reported, not a failure
-					}
+					const bool opened = engine.Open(device, context, size.w, size.h, presets[p]);
+					if (!RequireGpu("EngineSelfCheckFindsAKnownPanQuickly", opened, "optical flow engine not available: " + engine.LastError()))
+						return;
 					// Warm up, then time 10 pairs.
 					double total = 0.0, best = 1e9;
 					for (int r = 0; r < 12; ++r)
@@ -193,11 +191,8 @@ namespace Tests
 			// de-judder block as a weight and the engine's own forward/backward error per cell;
 			// on a clean pan nearly every block is as sure as usual and consistent, and the
 			// whole-frame motion is clear. Reports the extras' time on the worker.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"producer extras: VP_TEST_GPU=hardware only; not run");
+			if (!RequireGpu("ProducerCarriesTheEngineTrustExtras", OnHardware(), "VP_TEST_GPU is not hardware"))
 				return;
-			}
 			CComPtr<IDXGIFactory1> factory;
 			Assert::IsTrue(SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))));
 			CComPtr<IDXGIAdapter1> nvidia;
@@ -209,7 +204,7 @@ namespace Tests
 				adapter->GetDesc1(&desc);
 				if (desc.VendorId == 0x10DE) nvidia = adapter;
 			}
-			if (!nvidia) { Logger::WriteMessage(L"producer extras: no NVIDIA GPU; not run"); return; }
+			if (!RequireGpu("ProducerCarriesTheEngineTrustExtras", nvidia != nullptr, "no NVIDIA adapter")) return;
 			CComPtr<ID3D11Device> device;
 			Assert::IsTrue(SUCCEEDED(D3D11CreateDevice(nvidia, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0,
 				D3D11_SDK_VERSION, &device, nullptr, nullptr)));
@@ -257,7 +252,7 @@ namespace Tests
 			}
 			if (!flow && !producer.Running())
 			{
-				Logger::WriteMessage(("producer extras: engine unavailable: " + producer.Error() + "\n").c_str());
+				RequireGpu("ProducerCarriesTheEngineTrustExtras", false, "engine unavailable: " + producer.Error());
 				return;
 			}
 			Assert::IsTrue(static_cast<bool>(flow), L"a pair computed ahead");
@@ -292,11 +287,8 @@ namespace Tests
 			// consecutive pair ahead of display, keyed by source frame, under the
 			// continuity generation; a pair not computed is a miss (the de-judder then
 			// estimates at render time); it never waits for frames.
-			if (!OnHardware())
-			{
-				Logger::WriteMessage(L"producer: VP_TEST_GPU=hardware only; not run");
+			if (!RequireGpu("ProducerComputesPairsAheadAndAdaptsToTheQueue", OnHardware(), "VP_TEST_GPU is not hardware"))
 				return;
-			}
 			CComPtr<IDXGIFactory1> factory;
 			Assert::IsTrue(SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))));
 			CComPtr<IDXGIAdapter1> nvidia;
@@ -308,7 +300,7 @@ namespace Tests
 				adapter->GetDesc1(&desc);
 				if (desc.VendorId == 0x10DE) nvidia = adapter;
 			}
-			if (!nvidia) { Logger::WriteMessage(L"producer: no NVIDIA GPU; not run"); return; }
+			if (!RequireGpu("ProducerComputesPairsAheadAndAdaptsToTheQueue", nvidia != nullptr, "no NVIDIA adapter")) return;
 			CComPtr<ID3D11Device> device;
 			Assert::IsTrue(SUCCEEDED(D3D11CreateDevice(nvidia, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0,
 				D3D11_SDK_VERSION, &device, nullptr, nullptr)));
@@ -374,7 +366,7 @@ namespace Tests
 				MotionAhead::FlowPtr first = waitFor(producer, 10, 11);
 				if (!first && !producer.Running())
 				{
-					Logger::WriteMessage(("producer: engine unavailable: " + producer.Error() + "\n").c_str());
+					RequireGpu("ProducerComputesPairsAheadAndAdaptsToTheQueue", false, "engine unavailable: " + producer.Error());
 					return;   // a GPU without the engine: the matcher covers everything
 				}
 				Assert::IsTrue(static_cast<bool>(first), L"the first pair is computed ahead");
