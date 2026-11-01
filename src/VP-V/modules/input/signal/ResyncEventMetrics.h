@@ -27,7 +27,9 @@
 //   vectors        valid | invalid
 //
 // SETTLED = every reader that was DUE (AddReader) has acted (OnReaderAct) AND the motion vectors are valid
-// again (OnVectorsValid) AND, if the event touched the pulldown (OnEvent flag, or OnRelock(false) after
+// again (OnVectorsValid(true) reported AT OR AFTER the carrying frame's seal: a tracked FULL starts with
+// vectors invalid while vectors are required, so it can never settle at its own frame on the strength of
+// vectors made before the discontinuity) AND, if the event touched the pulldown (OnEvent flag, or OnRelock(false) after
 // it), the relock finished (OnRelock(true)).
 // ABANDONED = not settled after MaxSettleFrames() sealed frames (default: abandon seconds, 10, times the
 // measured frame rate the caller gives with SetFrameRate; no rate means no abandon bound and that is
@@ -160,7 +162,9 @@ public:
         p.cause = cause;
         p.injected = injected;
         p.due = DueMaskLocked();
-        p.vectorsOk = !m_vectorsRequired || m_vectorsValid;
+        // Vectors made before the discontinuity never count: only OnVectorsValid(true) at or after this
+        // event's carrying seal clears it (when vectors are not required it is never waited for).
+        p.vectorsOk = !m_vectorsRequired;
         p.relockNeeded = touchesPulldown || m_relockPending;
         p.relockDone = !p.relockNeeded;
         ++m_tracked;
@@ -182,6 +186,9 @@ public:
             }
             m_lastSourceMs = sourceMs;
             ++m_sealedFrames;
+            if (!m_haveSealed || seq > m_lastSealedSeq)
+                m_lastSealedSeq = seq;
+            m_haveSealed = true;
             const uint32_t maxFrames = MaxSettleFramesLocked();
             size_t out = 0;
             for (size_t i = 0; i < m_pendingCount; ++i) {
@@ -195,7 +202,7 @@ public:
                     } else {
                         ++p.frames;
                     }
-                    if (IsSettled(p)) {
+                    if (IsSettledLocked(p)) {
                         done = true;
                         Finish(p, sourceMs, false, lines);
                     } else if (maxFrames != 0 && p.frames >= maxFrames) {
@@ -231,13 +238,20 @@ public:
     void OnDrop(uint64_t seq) { Attribute(seq, true); }
     void OnRepeat(uint64_t seq) { Attribute(seq, false); }
 
-    // The motion vectors became valid (true) / were invalidated (false).
+    // The motion vectors became valid (true) / were invalidated (false). Render thread, after the seal
+    // of the frame it reports on. true clears only the events whose carrying frame is already sealed
+    // (OnSealed ran for it); an event still queued keeps waiting for a report after its own seal.
     void OnVectorsValid(bool valid)
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_vectorsValid = valid;
-        for (size_t i = 0; i < m_pendingCount; ++i)
-            m_pending[i].vectorsOk = valid;
+        for (size_t i = 0; i < m_pendingCount; ++i) {
+            Pending& p = m_pending[i];
+            if (!valid)
+                p.vectorsOk = false;
+            else if (m_haveSealed && p.seq <= m_lastSealedSeq)
+                p.vectorsOk = true;
+        }
     }
 
     // Pulldown relock: false = a relock started and is pending (every pending event now waits for it),
@@ -365,9 +379,9 @@ private:
         return whole == 0 ? 1u : whole;
     }
 
-    static bool IsSettled(const Pending& p)
+    bool IsSettledLocked(const Pending& p) const
     {
-        return (p.acted & p.due) == p.due && p.vectorsOk && p.relockDone;
+        return (p.acted & p.due) == p.due && (p.vectorsOk || !m_vectorsRequired) && p.relockDone;
     }
 
     void Attribute(uint64_t seq, bool drop)
@@ -428,7 +442,9 @@ private:
     double m_abandonSeconds = kDefaultAbandonSeconds;   // m_mutex
     uint32_t m_maxFramesOverride = 0;               // m_mutex
     bool m_vectorsRequired = true;                  // m_mutex
-    bool m_vectorsValid = true;                     // m_mutex
+    bool m_vectorsValid = true;                     // m_mutex; the last report (status only)
+    bool m_haveSealed = false;                      // m_mutex
+    uint64_t m_lastSealedSeq = 0;                   // m_mutex; highest sealed seq seen by OnSealed
     bool m_relockPending = false;                   // m_mutex
     std::array<std::string, kReadersMax> m_readers; // m_mutex
     size_t m_readerCount = 0;                       // m_mutex

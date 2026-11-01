@@ -5,11 +5,13 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include <VP-V/core/FrameSeal.h>
 #include <VP-V/core/Indicator.h>
 #include <VP-V/core/ResyncCause.h>
 #include <VP-V/modules/control/diagnostics/VpEventLine.h>
 #include <VP-V/modules/input/signal/ResyncEventMetrics.h>
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -28,9 +30,12 @@ namespace Tests
 			std::vector<std::string> lines;
 			std::shared_ptr<VpIndicator::Indicator> ind;
 
-			Rig()
+			// vectors: whether settling waits for OnVectorsValid(true) after the carrying seal (the
+			// production default). Tests about other conditions leave it off.
+			explicit Rig(bool vectors = false)
 			{
 				ind = std::make_shared<VpIndicator::Indicator>(VpIndicator::NextEra(), 64);
+				m.SetVectorsRequired(vectors);
 				m.SetSink([this](const std::string& l) { lines.push_back(l); });
 				m.AddReader("render-ahead");
 				m.AddReader("timeline");
@@ -54,7 +59,7 @@ namespace Tests
 	public:
 		TEST_METHOD(SingleFullSettlesAfterReadersAndVectors)
 		{
-			ResyncMetrics::Rig r;
+			ResyncMetrics::Rig r(true);
 			r.m.OnEvent(10, Level::Full, Cause::InPlaceSourceChange, 0, false);
 			r.m.OnVectorsValid(false);   // the renderer invalidated them at the discontinuity
 			r.BothAct(10);
@@ -76,6 +81,67 @@ namespace Tests
 			Assert::AreEqual<size_t>(1, r.lines.size(), L"exactly one line per event");
 			r.Seal(14, 1080.0);
 			Assert::AreEqual<size_t>(1, r.lines.size());
+		}
+
+		// Audit 2 MUST 4: with vectors required (the default) a tracked FULL never settles at its own frame
+		// with settle_frames=0 on vectors made before it. The real order per frame: FrameSeal seals and
+		// observes (the readers act inside Observe, reporting OnReaderAct), then the metrics subscriber
+		// runs, then the renderer reports vector validity after the seal.
+		TEST_METHOD(VectorsMustBecomeValidAfterTheCarryingSealInTheRealCallOrder)
+		{
+			EventMetrics m;   // vectors required: the production default
+			std::vector<std::string> lines;
+			m.SetSink([&lines](const std::string& l) { lines.push_back(l); });
+			m.AddReader("reader");
+			m.SetFrameRate(50.0);
+			VpSeal::FrameSeal fs;
+			fs.AddProvider("reader", [&m](const std::shared_ptr<VpIndicator::Indicator>& i) {
+				std::array<VpIndicator::Policy, VpIndicator::kCounterCount> p{};
+				p[VpIndicator::kFull] = VpIndicator::Policy::Reset;
+				i->Register("reader", VpIndicator::Bit(VpIndicator::kFull), p,
+					[&m](const VpIndicator::Indicator::Change& c) { m.OnReaderAct("reader", c.seq); });
+			});
+			fs.Subscribe("metrics", [&m](const std::shared_ptr<VpIndicator::Indicator>& i, uint64_t seq, VpIndicator::CounterMask c) {
+				m.OnSealed(i, seq, c, 20.0 * static_cast<double>(seq));
+			});
+			const std::shared_ptr<VpIndicator::Indicator> ind = std::make_shared<VpIndicator::Indicator>(VpIndicator::NextEra(), 64);
+			for (uint64_t s = 1; s <= 7; ++s) {
+				fs.Seal(ind, s);
+				m.OnVectorsValid(true);   // steady state: vectors valid every frame
+			}
+			// The FULL for frame 10 is recorded while 8..12 are queued; the renderer keeps reporting valid
+			// vectors for the frames it renders before 10.
+			ind->Advance(VpIndicator::kFull, Cause::LiveQueueReset, 10);
+			m.OnEvent(10, Level::Full, Cause::LiveQueueReset, 0, false);
+			for (uint64_t s = 8; s <= 9; ++s) {
+				fs.Seal(ind, s);
+				m.OnVectorsValid(true);   // before the carrying seal: must not count
+			}
+			fs.Seal(ind, 10);             // the reader acts inside Observe, then metrics
+			Assert::AreEqual<size_t>(0, lines.size(), L"not settled at its own frame");
+			m.OnVectorsValid(false);      // the renderer invalidates after the seal
+			fs.Seal(ind, 11);
+			m.OnVectorsValid(false);
+			fs.Seal(ind, 12);
+			m.OnVectorsValid(true);       // valid again after the carrying seal
+			Assert::AreEqual<size_t>(0, lines.size());
+			fs.Seal(ind, 13);
+			Assert::AreEqual<size_t>(1, lines.size());
+			Assert::IsTrue(ResyncMetrics::Has(lines[0], "seq=10 "));
+			Assert::IsTrue(ResyncMetrics::Has(lines[0], "settle_frames=3 "), ResyncMetrics::W(lines[0]).c_str());
+			Assert::IsTrue(ResyncMetrics::Has(lines[0], "vectors=valid"));
+		}
+
+		TEST_METHOD(AValidReportAtTheCarryingSealItselfCounts)
+		{
+			ResyncMetrics::Rig r(true);
+			r.m.OnEvent(4, Level::Full, Cause::RendererReset, 0, false);
+			r.BothAct(4);
+			r.Seal(4, 0.0);
+			r.m.OnVectorsValid(true);   // reported after the carrying seal, same frame
+			r.Seal(5, 20.0);
+			Assert::AreEqual<size_t>(1, r.lines.size());
+			Assert::IsTrue(ResyncMetrics::Has(r.lines[0], "settle_frames=1 "), ResyncMetrics::W(r.lines[0]).c_str());
 		}
 
 		TEST_METHOD(EveryDueReaderMustAct)
@@ -188,7 +254,7 @@ namespace Tests
 
 		TEST_METHOD(UnsettledEventIsAbandonedAndCounted)
 		{
-			ResyncMetrics::Rig r;
+			ResyncMetrics::Rig r(true);
 			r.m.SetFrameRate(10.0);
 			r.m.SetAbandonSeconds(0.5);
 			Assert::AreEqual<uint32_t>(5, r.m.MaxSettleFrames(), L"abandon seconds times the measured rate");
