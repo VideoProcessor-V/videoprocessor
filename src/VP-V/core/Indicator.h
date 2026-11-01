@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -203,8 +204,18 @@ public:
             rejectedAdvances_.fetch_add(1, std::memory_order_relaxed);
             return 0;
         }
-        std::lock_guard<std::mutex> lock(writeMutex_);
+        std::unique_lock<std::mutex> lock(writeMutex_);
         const uint64_t floorSeq = sealedNext_.load(std::memory_order_relaxed);   // LastSealed() + 1, or 0
+        if (successor_) {
+            // Handed over (HandOverTo): the event belongs to the successor era. Clamped above THIS era's
+            // seal (those frames were sealed here), then written there; never lost in a dead era.
+            const std::shared_ptr<Indicator> next = successor_;
+            lock.unlock();
+            forwardedAdvances_.fetch_add(1, std::memory_order_relaxed);
+            if (fromSeq < floorSeq)
+                clampedAdvances_.fetch_add(1, std::memory_order_relaxed);
+            return next->Advance(counter, cause, fromSeq < floorSeq ? floorSeq : fromSeq, gapFrames, detail);
+        }
         const uint64_t effective = fromSeq < floorSeq ? floorSeq : fromSeq;
         if (effective != fromSeq)
             clampedAdvances_.fetch_add(1, std::memory_order_relaxed);
@@ -287,6 +298,74 @@ public:
         }
         return StampOf(seq);
     }
+
+    // Era handover (Shadow::Configure, before the new Indicator is published). Atomic with respect to
+    // every writer of THIS Indicator (one critical section on its writer mutex):
+    //   1. every retained event whose fromSeq is above this era's last sealed frame (it still applies to
+    //      queued, unsealed frames) is re-written into `next`, oldest first, with its counter, cause,
+    //      detail and gap; events for sealed frames stay here (they can no longer reach a frame);
+    //   2. `next` inherits this era's seal floor (LastSealed() + 1), so HasSealed / LastSealed agree;
+    //   3. from then on every Advance on this Indicator (an enqueue thread or a settings writer still
+    //      holding it) is forwarded to `next`, clamped above this era's seal.
+    // Returns the number of events carried. A second handover, a null or self `next` does nothing (0).
+    // Lock order is always older era -> newer era. Events already folded out of the ring before the
+    // handover cannot be carried; they are counted in PrematureFolds() as before.
+    size_t HandOverTo(const std::shared_ptr<Indicator>& next)
+    {
+        if (!next || next.get() == this)
+            return 0;
+        std::lock_guard<std::mutex> lock(writeMutex_);
+        if (successor_)
+            return 0;
+        const uint64_t floorSeq = sealedNext_.load(std::memory_order_relaxed);
+        {
+            // The new era inherits the seal floor: frames sealed here stay sealed (a writer that asks
+            // for "the first unsealed frame", LastSealed() + 1, gets the same answer in both eras, and
+            // an advance can never land on - or uniformly below - a frame already rendered).
+            std::lock_guard<std::mutex> nextLock(next->writeMutex_);
+            if (next->sealedNext_.load(std::memory_order_relaxed) < floorSeq)
+                next->sealedNext_.store(floorSeq, std::memory_order_release);
+        }
+        const uint64_t written = written_.load(std::memory_order_relaxed);
+        const uint64_t retained = written < capacity_ ? written : uint64_t(capacity_);
+        size_t carried = 0;
+        for (uint64_t w = written - retained; w < written; ++w) {   // write order: oldest first
+            const Entry& e = ring_[size_t(w) & mask_];
+            const uint64_t from = e.fromSeq.load(std::memory_order_relaxed);
+            if (from < floorSeq)
+                continue;
+            const uint64_t meta = e.meta.load(std::memory_order_relaxed);
+            next->Advance(CounterOf(meta), static_cast<VpResync::Cause>((meta >> 8) & 0xFFFFu), from,
+                          uint32_t(meta >> 32), uint8_t((meta >> 24) & 0xFFu));
+            ++carried;
+        }
+        successor_ = next;
+        std::atomic_store(&successorRead_, next);
+        hasSuccessor_.store(true, std::memory_order_release);
+        carriedEvents_.store(uint32_t(carried), std::memory_order_relaxed);
+        return carried;
+    }
+    // True once HandOverTo ran: this era is dead, its writers are forwarded.
+    bool HandedOver() const { return hasSuccessor_.load(std::memory_order_acquire); }
+    // Lock-free, any thread: the era this one handed over to (null when it has not).
+    std::shared_ptr<Indicator> Successor() const
+    {
+        return hasSuccessor_.load(std::memory_order_acquire) ? std::atomic_load(&successorRead_)
+                                                             : std::shared_ptr<Indicator>();
+    }
+    // The newest era reachable from `ind` through handovers (ind itself when it was never handed over).
+    static std::shared_ptr<Indicator> Latest(std::shared_ptr<Indicator> ind)
+    {
+        while (ind) {
+            std::shared_ptr<Indicator> next = ind->Successor();
+            if (!next)
+                break;
+            ind = std::move(next);
+        }
+        return ind;
+    }
+    uint32_t CarriedEvents() const { return carriedEvents_.load(std::memory_order_relaxed); }
+    uint32_t ForwardedAdvances() const { return forwardedAdvances_.load(std::memory_order_relaxed); }
 
     // Setup only (before the first Observe). Returns the reader index, or -1 beyond the limit
     // (counted in RejectedReaders).
@@ -561,6 +640,11 @@ private:
     std::atomic<uint32_t> unsealedObserves_;
     std::atomic<uint32_t> rejectedAdvances_;
     std::atomic<uint32_t> clampedAdvances_;
+    std::atomic<uint32_t> carriedEvents_{0};
+    std::atomic<uint32_t> forwardedAdvances_{0};
+    std::shared_ptr<Indicator> successor_;       // writeMutex_
+    std::shared_ptr<Indicator> successorRead_;   // atomic_load / atomic_store only (lock-free readers)
+    std::atomic<bool> hasSuccessor_{false};
 
     // Readers: registered at setup, called from the render thread only.
     std::array<Reader, kMaxReaders> readers_;

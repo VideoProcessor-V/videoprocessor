@@ -228,7 +228,7 @@ namespace MotionValidity
 			// Unbound (the common case): no shared_ptr atomic (MSVC's global spinlock) on this hot path.
 			if (!bound.load(std::memory_order_acquire))
 				return InvalidateNow(cause);
-			const std::shared_ptr<VpIndicator::Indicator> indicator = std::atomic_load(&ind);
+			const std::shared_ptr<VpIndicator::Indicator> indicator = VpIndicator::Indicator::Latest(std::atomic_load(&ind));
 			if (!indicator)
 				return InvalidateNow(cause);
 			switch (cause)
@@ -286,7 +286,9 @@ namespace MotionValidity
 			return r;
 		}
 
-		// Render thread (setup / teardown). Bound = resync `on`.
+		// Render thread (setup / teardown). Bound = resync `on`. Every read and write follows the bound
+		// Indicator's handovers (Indicator::Latest), so between an era swap and the provider's rebind at
+		// the next seal the State already uses the new era (never the dead one).
 		void Bind(std::shared_ptr<VpIndicator::Indicator> indicator)
 		{
 			const bool on = indicator != nullptr;
@@ -326,7 +328,7 @@ namespace MotionValidity
 				return false;
 			if (!bound.load(std::memory_order_acquire))
 				return true;
-			const std::shared_ptr<VpIndicator::Indicator> indicator = std::atomic_load(&ind);
+			const std::shared_ptr<VpIndicator::Indicator> indicator = VpIndicator::Indicator::Latest(std::atomic_load(&ind));
 			if (!indicator)
 				return true;
 			return VpIndicator::TemporalValid(*indicator, a, b,
@@ -340,7 +342,7 @@ namespace MotionValidity
 		{
 			if (!bound.load(std::memory_order_acquire))
 				return StreamGeneration();
-			const std::shared_ptr<VpIndicator::Indicator> indicator = std::atomic_load(&ind);
+			const std::shared_ptr<VpIndicator::Indicator> indicator = VpIndicator::Indicator::Latest(std::atomic_load(&ind));
 			return indicator ? VpResync::Drive::FullKey(*indicator, seq) : StreamGeneration();
 		}
 

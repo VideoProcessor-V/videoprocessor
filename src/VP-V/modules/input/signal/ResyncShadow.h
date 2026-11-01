@@ -55,8 +55,16 @@ public:
             const size_t want = VpIndicator::Indicator::RequiredCapacity(framesInFlight);
             const std::shared_ptr<VpIndicator::Indicator> current = std::atomic_load(&m_indicator);
             if (previous == Mode::Off || !current || want > current->Capacity()) {
-                std::atomic_store(&m_indicator,
-                                  std::make_shared<VpIndicator::Indicator>(VpIndicator::NextEra(), want));
+                const std::shared_ptr<VpIndicator::Indicator> next =
+                    std::make_shared<VpIndicator::Indicator>(VpIndicator::NextEra(), want);
+                // Shadow/On -> a larger ring: the old era's events for queued, unsealed frames move to
+                // the new era, and any writer still holding the old one (OnEnqueue under the queue
+                // mutex, a late slip, MotionValidity's settings advance) is forwarded there: one
+                // critical section on the old Indicator, so nothing lands in the dead era. Off -> on
+                // starts clean (nothing was written while Off).
+                if (current && previous != Mode::Off)
+                    current->HandOverTo(next);
+                std::atomic_store(&m_indicator, next);
                 ResetCursor();   // the old era's enqueue cursor must not outlive its Indicator
                 m_restart.store(true, std::memory_order_release);
             }

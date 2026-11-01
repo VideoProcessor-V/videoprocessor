@@ -6,7 +6,11 @@
 #include "CppUnitTest.h"
 
 #include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/core/FrameSeal.h>
+#include <VP-V/modules/input/signal/ResyncDrive.h>
 #include <VP-V/modules/input/signal/ResyncShadow.h>
+#include <VP-V/modules/motion/estimation/MotionResyncReaders.h>
+#include <VP-V/modules/motion/estimation/MotionValidity.h>
 
 #include <atomic>
 #include <string>
@@ -318,6 +322,193 @@ namespace Tests
 			r.Push(1.0);
 			Assert::AreEqual(uint32_t(1), r.shadow.Errors());
 			Assert::AreEqual(uint32_t(1), r.shadow.GetIndicator()->Total(VpIndicator::kFull));
+		}
+	};
+
+	// Audit 2 MUST 2: an era swap (Shadow::Configure building a larger Indicator) while frames are queued
+	// but not sealed. The old era's events for those frames must reach the new era, and a writer still
+	// holding the old Indicator must not write into the dead era.
+	TEST_CLASS(ResyncStressEraSwapTests)
+	{
+	public:
+		static VpIndicator::CounterMask At(const VpIndicator::Indicator& ind, uint64_t seq)
+		{
+			return VpIndicator::Changed(ind.StampOf(seq - 1), ind.StampOf(seq));
+		}
+		static EnqueueFacts Facts(uint64_t seq, uint64_t gen, uint64_t counter, bool gap = false)
+		{
+			EnqueueFacts f;
+			f.sequence = seq;
+			f.queueGeneration = gen;
+			f.stateKey = 0x1000;
+			f.formatKey = 7;
+			f.frameCounter = counter;
+			if (gap) {
+				f.gapBefore = true;
+				f.gapCause = "missed frames";
+				f.gapFrames = 1;
+			}
+			return f;
+		}
+
+		TEST_METHOD(EventsOnQueuedFramesSurviveAnEraSwapAndTheReadersActOnThem)
+		{
+			RefusalNote::Take();
+			Shadow shadow;
+			shadow.Configure(Shadow::Mode::On, 8);
+			VpSeal::FrameSeal fs;
+			Drive drive;
+			MotionValidity::State motion;
+			VpMotionResync::Readers mreaders;
+			fs.AddProvider("drive", [&drive](const std::shared_ptr<VpIndicator::Indicator>& i) { drive.RegisterOn(i); });
+			fs.AddProvider("motion", [&](const std::shared_ptr<VpIndicator::Indicator>& i) { VpMotionResync::RegisterOn(i, motion, mreaders); });
+			fs.Subscribe("drive", [&drive](const std::shared_ptr<VpIndicator::Indicator>& i, uint64_t seq, VpIndicator::CounterMask c) { drive.OnObserved(i, seq, c); });
+
+			// Queue depth 10: frames 1..12 enqueued, 1..2 sealed, 3..12 queued.
+			for (uint64_t f = 1; f <= 12; ++f)
+				shadow.OnEnqueue(Facts(f, 1, 100 + f), 1.0, 0.04 * double(f));
+			fs.Seal(shadow.GetIndicator(), 1);
+			fs.Seal(shadow.GetIndicator(), 2);
+			for (size_t i = 0; i < Drive::kReaders; ++i)
+				drive.Take(static_cast<Reader>(i));
+			mreaders.TakeHistory();
+			mreaders.TakeProducerNote();
+			const std::shared_ptr<VpIndicator::Indicator> old = shadow.GetIndicator();
+			// Events for future (queued) frames.
+			shadow.OnLateSlip(Cause::DriftDrop, 6, 1, 1.0, 0.24);
+			motion.Invalidate(MotionValidity::Cause::SettingsChange);   // settings[motion] at LastSealed + 1 = 3
+			old->Advance(VpIndicator::kFull, Cause::LiveQueueReset, 9);
+			old->Advance(VpIndicator::kRebaseH, Cause::RebaseDecision, 11);
+
+			shadow.Configure(Shadow::Mode::On, 256);   // a larger ring: a new era
+			const std::shared_ptr<VpIndicator::Indicator> ind = shadow.GetIndicator();
+			Assert::IsTrue(ind != old, L"a new era");
+			Assert::IsTrue(old->HandedOver());
+			Assert::AreEqual(uint64_t(2), ind->LastSealed(), L"the seal floor is inherited");
+			Assert::IsTrue((At(*ind, 3) & VpIndicator::Bit(VpIndicator::kSettingsMotion)) != 0, L"settings carried");
+			Assert::IsTrue((At(*ind, 6) & VpIndicator::Bit(VpIndicator::kContinuity)) != 0, L"late slip carried");
+			Assert::IsTrue((At(*ind, 9) & VpIndicator::Bit(VpIndicator::kFull)) != 0, L"FULL carried");
+			Assert::IsTrue((At(*ind, 11) & VpIndicator::Bit(VpIndicator::kRebaseH)) != 0, L"rebase carried");
+			Assert::AreEqual(VpIndicator::CounterMask(0), At(*ind, 5), L"nothing invented");
+			Assert::IsFalse(motion.PairValidAt(5, 6), L"pairs spanning a carried event are refused before the rebind");
+			Assert::IsFalse(motion.PairValidAt(8, 9));
+			Assert::IsTrue(motion.PairValidAt(6, 7));
+
+			// A writer still holding the dead era is forwarded (clamped above the old seal).
+			old->Advance(VpIndicator::kContinuity, Cause::MissedFrames, 7, 1);
+			Assert::IsTrue((At(*ind, 7) & VpIndicator::Bit(VpIndicator::kContinuity)) != 0, L"forwarded");
+			Assert::AreEqual(uint32_t(1), old->ForwardedAdvances());
+
+			// Render the queue in the new era: every reader acts at the carrying frame.
+			const uint64_t epoch0 = motion.Epoch();
+			unsigned contActs = 0, fullActs = 0;
+			for (uint64_t f = 3; f <= 12; ++f) {
+				fs.Seal(ind, f);
+				const VpIndicator::CounterMask m = drive.Take(Reader::RenderAhead);
+				if (f == 6 || f == 7)
+					contActs += (m & VpIndicator::Bit(VpIndicator::kContinuity)) != 0 ? 1u : 0u;
+				if (f == 9)
+					fullActs += (m & VpIndicator::Bit(VpIndicator::kFull)) != 0 ? 1u : 0u;
+			}
+			Assert::AreEqual(2u, contActs, L"render-ahead relatched at both slips");
+			Assert::AreEqual(1u, fullActs, L"render-ahead reset at the carried FULL");
+			Assert::IsTrue(motion.Epoch() >= epoch0 + 3, L"motion epoch moved at 6, 7 and 9");
+		}
+
+		// A writer thread that keeps a STALE pointer to the first era (and one that reloads it) writes
+		// events on future frames while the render thread swaps eras several times. Every event must be in
+		// the newest era exactly once, whatever the interleaving.
+		TEST_METHOD(ConcurrentWritersAcrossRepeatedEraSwapsLoseNothing)
+		{
+			for (int round = 0; round < 20; ++round) {
+				Shadow shadow;
+				shadow.Configure(Shadow::Mode::On, 8);
+				const std::shared_ptr<VpIndicator::Indicator> first = shadow.GetIndicator();
+				for (uint64_t f = 1; f <= 10; ++f)
+					first->SealAndObserve(f);   // sealed through 10: events land on 11+
+				MotionValidity::State motion;
+				motion.Bind(first);   // bound to the first era and never rebound here
+				const int kSlips = 20, kSettings = 20;
+				std::atomic<int> go(0);
+				std::thread stale([&] {
+					while (go.load() == 0) std::this_thread::yield();
+					for (int i = 0; i < kSlips; i += 2) {
+						first->Advance(VpIndicator::kContinuity, Cause::MissedFrames, 11 + 2 * uint64_t(i), 1);
+						std::this_thread::yield();
+					}
+				});
+				std::thread fresh([&] {
+					while (go.load() == 0) std::this_thread::yield();
+					for (int i = 1; i < kSlips; i += 2) {
+						shadow.GetIndicator()->Advance(VpIndicator::kContinuity, Cause::MissedFrames, 11 + 2 * uint64_t(i), 1);
+						std::this_thread::yield();
+					}
+				});
+				std::thread settings([&] {
+					while (go.load() == 0) std::this_thread::yield();
+					for (int i = 0; i < kSettings; ++i) {
+						motion.Invalidate(MotionValidity::Cause::SettingsChange);
+						std::this_thread::yield();
+					}
+				});
+				go.store(1);
+				const size_t sizes[] = { 32, 64, 128, 256 };
+				for (size_t n : sizes) {
+					std::this_thread::yield();
+					shadow.Configure(Shadow::Mode::On, n);
+				}
+				stale.join();
+				fresh.join();
+				settings.join();
+				const std::shared_ptr<VpIndicator::Indicator> last = shadow.GetIndicator();
+				Assert::IsTrue(last != first);
+				Assert::IsTrue(VpIndicator::Indicator::Latest(first) == last, L"the handover chain ends at the current era");
+				for (int i = 0; i < kSlips; ++i) {
+					const uint64_t s = 11 + 2 * uint64_t(i);
+					Assert::IsTrue((At(*last, s) & VpIndicator::Bit(VpIndicator::kContinuity)) != 0, L"every slip reached the newest era");
+				}
+				Assert::AreEqual(uint32_t(kSlips), last->Total(VpIndicator::kContinuity), L"each slip exactly once");
+				Assert::AreEqual(uint32_t(kSettings), last->Total(VpIndicator::kSettingsMotion), L"each settings advance exactly once");
+				Assert::AreEqual(uint32_t(0), last->PrematureFolds());
+				Assert::AreEqual(uint64_t(10), last->LastSealed(), L"the seal floor followed every handover");
+			}
+		}
+
+		// The real enqueue path (the detector under the queue mutex, here one enqueue thread) races the
+		// render thread's swaps with a queue of >= 8 frames: every gap MINOR stays on its frame.
+		TEST_METHOD(EnqueueRacingSwapsKeepsEveryGapOnItsFrame)
+		{
+			for (int round = 0; round < 20; ++round) {
+				RefusalNote::Take();
+				Shadow shadow;
+				shadow.Configure(Shadow::Mode::On, 8);
+				const std::shared_ptr<VpIndicator::Indicator> first = shadow.GetIndicator();
+				uint64_t counter = 100;
+				for (uint64_t f = 1; f <= 10; ++f)
+					shadow.OnEnqueue(Facts(f, 1, ++counter), 1.0, 0.04 * double(f));
+				first->SealAndObserve(2);   // 3..10 queued
+				std::atomic<int> go(0);
+				std::thread enqueue([&] {
+					while (go.load() == 0) std::this_thread::yield();
+					uint64_t c = counter;
+					for (uint64_t f = 11; f <= 80; ++f) {
+						const bool gap = (f % 5) == 0;
+						c += gap ? 2 : 1;
+						shadow.OnEnqueue(Facts(f, 1, c, gap), 1.0, 0.04 * double(f));
+					}
+				});
+				go.store(1);
+				const size_t sizes[] = { 32, 64, 128, 256, 512 };
+				for (size_t n : sizes) {
+					std::this_thread::yield();
+					shadow.Configure(Shadow::Mode::On, n);
+				}
+				enqueue.join();
+				const std::shared_ptr<VpIndicator::Indicator> last = shadow.GetIndicator();
+				Assert::AreEqual(uint32_t(0), shadow.Errors());
+				for (uint64_t f = 15; f <= 80; f += 5)
+					Assert::IsTrue((At(*last, f) & VpIndicator::Bit(VpIndicator::kContinuity)) != 0, L"the gap MINOR is on its frame in the newest era");
+			}
 		}
 	};
 }
