@@ -559,16 +559,37 @@ namespace AnalysisLaneTestsNs
 					arrived.store(s + 1);
 				}
 			});
-			const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1200);
+			// Progress, not wall time, decides when the run ends; the generous bound below only turns a hang
+			// into a failure and never makes the test pass.
+			const auto failAt = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+			bool timedOut = false;
+			auto expired = [&]() {
+				if (std::chrono::steady_clock::now() > failAt)
+					timedOut = true;
+				return timedOut;
+			};
 			uint64_t s = 0;
 			int rebuilds = 0;
 			std::shared_ptr<LaneState> old;
 			uint64_t oldDigest = 0;
+			bool oldQuiet = false;   // every worker let go of `old` (its use count fell to ours): the digest is then fixed
 			bool oldReleased = true;
-			uint64_t guardSpins = 0;
-			while (s < 380 && std::chrono::steady_clock::now() < deadline) {
+			// Quiescence of the old state: a worker lets go of it at the end of its current step.
+			auto settleOld = [&](bool wait) {
+				if (!old || oldQuiet)
+					return;
+				while (wait && old.use_count() > 1 && !expired())
+					std::this_thread::yield();
+				if (old.use_count() == 1) {
+					oldQuiet = true;
+					oldDigest = Digest(*old);
+				} else if (wait) {
+					oldReleased = false;
+				}
+			};
+			while (s < 380 && !timedOut) {
 				if (arrived.load() < s + 2) {
-					if (++guardSpins > 2000000)
+					if (expired())
 						break;
 					std::this_thread::yield();
 					continue;
@@ -576,32 +597,31 @@ namespace AnalysisLaneTestsNs
 				r.lane.OnRenderStart(s, 4000);
 				r.lane.OnFrameRetired(s, 0);
 				r.lane.OnFrameTiming(s, 10.0, 1.0, false);
+				settleOld(false);
 				if (s % 40 == 39 && rebuilds < 4) {
-					if (old)
+					settleOld(true);
+					if (old && oldQuiet)
 						Assert::IsTrue(Digest(*old) == oldDigest, L"the previous table was not touched after its swap");
 					old = r.lane.State();
+					oldQuiet = false;
 					++r.gs.queueDepth;
 					Assert::IsTrue(r.Configure(LaneSettings::Mode::On, false, s + 1) != 0, L"rebuild");
 					++rebuilds;
 					Assert::IsTrue(old != r.lane.State(), L"the state was swapped");
-					// Every worker lets go of the old state within a step or two.
-					const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
-					while (old.use_count() > 1 && std::chrono::steady_clock::now() < until)
-						std::this_thread::yield();
-					oldReleased = oldReleased && old.use_count() == 1;
-					oldDigest = Digest(*old);
 				}
 				++s;
 				rendered.store(s);
 			}
+			settleOld(true);
 			stopCapture.store(true);
 			capture.join();
 			workers.Stop();
 			Assert::IsTrue(!workers.Running(), L"workers joined");
-			if (old)
+				Assert::IsTrue(!timedOut, L"the run finished (the bound only reports a hang)");
+			if (old && oldQuiet)
 				Assert::IsTrue(Digest(*old) == oldDigest, L"the last old table was not touched");
 			Assert::IsTrue(oldReleased, L"no holder of an old state remained");
-			Assert::IsTrue(rebuilds >= 2 && s >= 80, L"the run made progress through rebuilds");
+			Assert::IsTrue(rebuilds == 4 && s == 380, L"the run went through every planned rebuild");
 			Assert::IsTrue(r.lane.Rebuilds() == uint32_t(1 + rebuilds), L"one first build plus the rebuilds");
 			Assert::IsTrue(r.ind.Total(VpIndicator::kGraph) == uint32_t(1 + rebuilds), L"each rebuild advanced graph");
 		}
@@ -618,9 +638,10 @@ namespace AnalysisLaneTestsNs
 			for (uint64_t s = 0; s < 4; ++s)   // the ring holds 4 frames until the render releases some
 				r.lane.OnSourceFrame(r.View(s));
 			const std::shared_ptr<LaneState> st = r.lane.State();
-			const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
+				// Waits for the event (4 publications); the bound only turns a hang into a failure.
+			const auto failAt = std::chrono::steady_clock::now() + std::chrono::seconds(120);
 			while (st->runner->Counters(kP4SourceStats).published.load() < 4
-			       && std::chrono::steady_clock::now() < deadline)
+			       && std::chrono::steady_clock::now() < failAt)
 				std::this_thread::yield();
 			Assert::IsTrue(st->runner->Counters(kP1HalfLuma).published.load() >= 4, L"P1 published by the CPU worker");
 			Assert::IsTrue(st->runner->Counters(kP4SourceStats).published.load() >= 4, L"P4 published by the CPU worker");
@@ -906,6 +927,231 @@ namespace AnalysisLaneTestsNs
 			r.lane.OnFrameDropped(0);
 			for (int i = 0; i < 100 && r.lane.StepWorker(Backend::Cpu, 1000); ++i) {}
 			Assert::IsTrue(AnyLine(r.lane.StatusLines(), "frames skipped (source gone)"), L"shown in plain language");
+		}
+
+		// 22. Audit-2 MUST 1: a keepAlive deleter (host pool release) never runs under the ring's mutex:
+		// it may re-enter the ring from any thread without deadlock.
+		TEST_METHOD(RingKeepAliveDeleterMayReenterTheRing)
+		{
+			struct Shared {
+				LaneSourceRing ring{ 2 };
+				std::atomic<int> deleted{ 0 };
+				std::atomic<bool> done{ false };
+			};
+			const std::shared_ptr<Shared> sh = std::make_shared<Shared>();
+			std::thread t([sh]() {
+				auto make = [&sh](uint64_t seq) {
+					SourceFrameView v;
+					v.seq = seq;
+					v.keepAlive = std::shared_ptr<const void>(new int(1), [sh](int* p) {
+						SourceFrameView probe;
+						sh->ring.Find(900, &probe);   // takes the ring mutex: a deadlock if it is held
+						sh->ring.Drop(900);
+						uint64_t n = 0;
+						sh->ring.Newest(&n);
+						++sh->deleted;
+						delete p;
+					});
+					return v;
+				};
+				sh->ring.Store(make(0));
+				sh->ring.Store(make(1));
+				sh->ring.Store(make(2));   // overwrites frame 0's slot
+				SourceFrameView out = make(7);
+				sh->ring.Find(2, &out);    // replaces out: frame 7's last copy dies in the caller, outside the lock
+				sh->ring.Drop(1);
+				sh->ring.Clear();          // the ring's copy of frame 2; `out` still holds one
+				out = SourceFrameView();
+				sh->done.store(true);
+			});
+			const auto failAt = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+			while (!sh->done.load() && std::chrono::steady_clock::now() < failAt)
+				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			if (!sh->done.load()) {
+				t.detach();   // deadlocked: the shared state outlives the thread
+				Assert::Fail(L"a keepAlive deleter that re-enters the ring deadlocked");
+			}
+			t.join();
+			Assert::IsTrue(sh->deleted.load() == 4, L"every deleter ran once (frames 0, 7, 1, 2)");
+		}
+
+		// 23. The ring's copy ends with the frame (retire) and with a swapped-out graph: the host pool is
+		// not held longer or twice.
+		TEST_METHOD(RingCopiesAreReleasedOnRetireAndOnSwap)
+		{
+			Rig r;
+			r.Configure(LaneSettings::Mode::On);
+			const std::shared_ptr<int> token = std::make_shared<int>(3);
+			SourceFrameView v0 = r.View(0);
+			v0.keepAlive = token;
+			r.lane.OnSourceFrame(v0);
+			v0.keepAlive.reset();
+			Assert::IsTrue(token.use_count() == 2, L"the ring holds a copy");
+			r.lane.OnFrameRetired(0, 0);
+			Assert::IsTrue(token.use_count() == 1, L"retired: the ring let go");
+			SourceFrameView v1 = r.View(1);
+			v1.keepAlive = token;
+			r.lane.OnSourceFrame(v1);
+			v1.keepAlive.reset();
+			Assert::IsTrue(token.use_count() == 2, L"held again");
+			const std::shared_ptr<LaneState> old = r.lane.State();
+			++r.gs.queueDepth;
+			Assert::IsTrue(r.Configure(LaneSettings::Mode::On, false, 1) != 0 && r.lane.State() != old, L"rebuilt");
+			SourceFrameView probe;
+			Assert::IsTrue(r.lane.State()->ring->Find(1, &probe), L"the new ring carries the frame");
+			probe = SourceFrameView();
+			Assert::IsTrue(!old->ring->Find(1, &probe), L"the swapped-out ring let go");
+			Assert::IsTrue(token.use_count() == 2, L"one copy only (new ring), not doubled");
+		}
+
+		// 24. Audit-2 MUST 2: the REAL gap adapter recovers from one jittery over-cap Step within a few gaps.
+		TEST_METHOD(GapWorkRecoversAfterOneOverCapStep)
+		{
+			struct SlowDispatcher : IGpuDispatcher {
+				std::atomic<uint64_t>* clock = nullptr;
+				uint64_t slowUs = 0;
+				int dispatched = 0;
+				bool first = true;
+				bool Dispatch(const LaneJobContext&, uint32_t, uint32_t) override
+				{
+					++dispatched;
+					if (first) {
+						first = false;
+						clock->fetch_add(slowUs);   // one outlier: this Step took far longer than the cap
+					}
+					return true;
+				}
+				bool DispatchLive(const Node&, uint64_t, int, const Header&, uint32_t) override { return true; }
+			};
+			Rig r;
+			r.consumers.clear();
+			r.consumers.push_back(Consumer(1, { kP3AnalysisField }));
+			SlowDispatcher disp;
+			disp.clock = &r.clock;
+			disp.slowUs = 50000;
+			r.lane.SetGpuDispatcher(&disp);
+			// No device-cost prediction (0): the adapter only has its measured Step time to go on.
+			VpLaneProducts::GpuComputeLaneJob p3(
+				kP3AnalysisField, &disp, []() { return 0.0; }, [&r]() { return r.lane.ChunkCapUs(); }, 6u);
+			r.lane.RegisterProducer(&p3);
+			r.Configure(LaneSettings::Mode::On);
+			const std::shared_ptr<LaneState> st = r.lane.State();
+			Assert::IsTrue(st->gapWorks.size() == 1, L"one gap work");
+			r.lane.OnSourceFrame(r.View(0));
+			r.lane.OnSourceFrame(r.View(1));
+			r.lane.OnSourceFrame(r.View(2));
+			r.Pump();
+			r.lane.OnRenderStart(0, 4000);
+			r.Pump();
+			const GapReport first = r.lane.OnPostSubmitGap(r.clock.load() + 1000000);
+			Assert::IsTrue(first.chunks >= 1 && disp.dispatched == 1, L"the outlier Step ran");
+			Assert::IsTrue(st->gapWorks[0]->PredictUs() > r.lane.ChunkCapUs() || first.capNoFit > 0, L"the outlier is remembered");
+			uint32_t gaps = 0;
+			bool ran = false;
+			while (!ran && gaps < 16) {
+				const GapReport g = r.lane.OnPostSubmitGap(r.clock.load() + 1000000);
+				ran = g.chunks > 0;
+				++gaps;
+			}
+			Assert::IsTrue(ran, L"the product is scheduled again within a few gaps (it starved before)");
+			Assert::IsTrue(r.lane.State()->gap.Totals().capNoFit >= 1, L"the cap misses were counted");
+			Assert::IsTrue(AnyLine(r.lane.StatusLines(), "too big for the chunk cap"), L"and shown in plain language");
+		}
+
+		// 25. Audit-2 MUST 3: a product without a producer has no lane: in-render-only, never counted
+		// missing, never skipping the healthy products or shedding them.
+		TEST_METHOD(ProducerlessProductGetsNoLaneAndNeverCountsMissing)
+		{
+			Rig r;
+			r.registered = true;   // P1 + P4 only: P2 has no producer
+			r.lane.RegisterProducer(&r.p1);
+			r.lane.RegisterProducer(&r.p4);
+			r.lane.RegisterCpuLiveCompute(kP1HalfLuma,
+				[](const Node&, const SourceFrameView* v, const std::array<const uint8_t*, kMaxInputs>&, uint8_t* dst, size_t n) {
+					return v != nullptr && VpLaneProducts::ComputeHalfLuma(*v, dst, n);
+				});
+			r.lane.RegisterCpuLiveCompute(kP4SourceStats,
+				[](const Node&, const SourceFrameView*, const std::array<const uint8_t*, kMaxInputs>& in, uint8_t* dst, size_t n) {
+					return VpLaneProducts::ComputeSourceStats(in[0], Dims{ kW, kH }, dst, n);
+				});
+			r.lane.SetLiveFill([&r](const Node&, uint64_t, int, Header&, uint32_t) {
+				r.p2Live.fetch_add(1);
+				return true;
+			});
+			r.Configure(LaneSettings::Mode::On, false);
+			const std::shared_ptr<LaneState> st = r.lane.State();
+			const int i2 = st->IndexOf(kP2VectorPair);
+			Assert::IsTrue(i2 >= 0 && !st->runner->HasProducer(kP2VectorPair), L"P2 has no producer");
+			Assert::IsTrue(!st->table->At(size_t(i2)).LaneGranted() && !st->runner->Laned(kP2VectorPair), L"no lane granted to it");
+			Assert::IsTrue(st->table->At(size_t(st->IndexOf(kP1HalfLuma))).LaneGranted()
+			               && st->table->At(size_t(st->IndexOf(kP4SourceStats))).LaneGranted(), L"the others keep theirs");
+			const Regulator& reg = r.lane.GetRegulator();
+			const size_t frames = reg.WindowFrames() * 3u;
+			r.lane.OnSourceFrame(r.View(0));
+			for (uint64_t s = 0; s < frames; ++s) {
+				const std::vector<ProductFrameResult> res = r.Begin(s);
+				Assert::IsTrue(Rig::Res(res, kP1HalfLuma).seal.reason == SealReason::Accepted, L"P1 stays accepted");
+				Assert::IsTrue(Rig::Res(res, kP4SourceStats).seal.reason == SealReason::Accepted, L"P4 stays accepted");
+				if (s >= 2)
+					Assert::IsTrue(Rig::Res(res, kP2VectorPair).seal.reason == SealReason::InRenderOnly, L"P2 is in-render-only");
+				r.End(s);
+			}
+			Assert::IsTrue(st->table->At(size_t(i2)).Counters().missing.load() == 0, L"never counted missing");
+			std::vector<RegTrace> tr(Regulator::kTraceCapacity);
+			tr.resize(r.lane.RegulatorTraces(tr.data(), tr.size()));
+			for (const RegTrace& t : tr)
+				Assert::IsTrue(t.action != RegAction::SkipToNext, L"no healthy product was told to skip");
+			Assert::IsTrue(reg.Dropped().empty() && reg.Level() == reg.MaxLevel(), L"nothing shed");
+			Assert::IsTrue(!r.lane.Fallbacks()[0].engaged, L"no fallback engaged");
+			Assert::IsTrue(r.p2Live.load() > 0, L"P2 was filled live");
+		}
+
+		// 26. Audit-2 SHOULD: an optical-flow step-down is a visible fallback, not only a status note.
+		TEST_METHOD(OfaStepDownEngagesTheFallback)
+		{
+			Rig r;
+			r.Configure(LaneSettings::Mode::On, false);
+			const Regulator& reg = r.lane.GetRegulator();
+			Assert::IsTrue(reg.MaxLevel() > 0 && reg.OfaStep() == 0, L"full at first");
+			Assert::IsTrue(!r.lane.Fallbacks()[0].engaged, L"nothing engaged");
+			for (uint64_t f = 0; f < 20000 && reg.OfaStep() == 0; ++f)
+				r.lane.OnFrameTiming(f, -5.0, 1.0, true);
+			Assert::IsTrue(reg.OfaStep() > 0, L"overload stepped the vector engine input down");
+			const FallbackCatalog::Decision d = r.lane.Fallbacks()[0];
+			Assert::IsTrue(d.id == "analysis_lane" && d.engaged && Has(d.reason, "vector engine input reduced"), L"engaged with the reason");
+		}
+
+		// 27. Audit-2 SHOULD: capNoFit / starved gaps / suppressed step-downs are shown only when nonzero.
+		TEST_METHOD(StatusShowsSuppressedStepDowns)
+		{
+			Rig r;
+			r.Configure(LaneSettings::Mode::On);
+			Assert::IsTrue(!AnyLine(r.lane.StatusLines(), "ignored") && !AnyLine(r.lane.StatusLines(), "chunk cap")
+			               && !AnyLine(r.lane.StatusLines(), "no time"), L"nothing to show yet");
+			r.lane.OnCut();
+			r.lane.OnCut();   // the second one in the same window is ignored
+			Assert::IsTrue(r.lane.GetRegulator().SuppressedStepDowns() == 1, L"one suppressed");
+			Assert::IsTrue(AnyLine(r.lane.StatusLines(), "1 source changes ignored"), L"shown in plain language");
+		}
+
+		// 28. Audit-2 SHOULD: a determinism change on a kept graph re-applies the regulator to the runner.
+		TEST_METHOD(DeterminismChangeReappliesRegulator)
+		{
+			Rig r;
+			r.consumers.clear();
+			r.consumers.push_back(Consumer(1, { kP2VectorPair }, true));
+			r.consumers.push_back(Consumer(2, { kP4SourceStats }, false));
+			r.Configure(LaneSettings::Mode::On, false);
+			const std::shared_ptr<LaneState> st = r.lane.State();
+			for (uint64_t i = 0; i < 100; ++i)
+				r.lane.OnFrameTiming(1000 + i, -5.0, 1.0, true);
+			Assert::IsTrue(r.lane.GetRegulator().StateOf(kP2VectorPair) == ProductState::Dropped, L"P2 dropped");
+			Assert::IsTrue(!st->runner->Laned(kP2VectorPair), L"and not laned");
+			Assert::IsTrue(r.Configure(LaneSettings::Mode::On, true) == 0 && r.lane.State() == st, L"the graph is kept");
+			Assert::IsTrue(r.lane.Deterministic(), L"now deterministic");
+			Assert::IsTrue(r.lane.GetRegulator().StateOf(kP2VectorPair) == ProductState::Laned, L"the regulator restarted");
+			Assert::IsTrue(st->runner->Laned(kP2VectorPair)
+			               && st->table->At(size_t(st->IndexOf(kP2VectorPair))).LaneGranted(), L"the runner and the slots follow at once");
 		}
 	};
 }

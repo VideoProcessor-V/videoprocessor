@@ -87,6 +87,7 @@ public:
                     // it decays toward the work's own prediction once per gap and re-learns when it runs.
                     capSeen.push_back(w->Id());
                     ++r.capNoFit;
+                    w->OnCapNoFit();   // the work's own remembered cost decays too (else its prediction pins the floor)
                     Learned& l = LearnedFor(w);
                     const uint64_t floorUs = w->PredictUs();
                     l.emaUs = std::max<uint64_t>(floorUs, l.emaUs > l.emaUs / 4 ? l.emaUs - l.emaUs / 4 : 0u);

@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -161,6 +162,13 @@ private:
 // The source ring: the views the lane reads. Capacity = the graph's framesInFlight. The host keeps
 // the planes valid until OnFrameRetired / OnFrameDropped. Workers read through a mutex; the render
 // thread reads lock-free through a seqlock mirror (it never takes the mutex).
+//
+// LOCK ORDER: a view's keepAlive deleter is host code (typically a pool release that takes the pool's
+// own lock). It can run on ANY thread that drops the last copy: the capture thread (Store overwrite),
+// the render thread (Drop, OnFrameRetired, an old LaneState's destruction), or a lane worker
+// (LaneRunner::ReleaseSource). It must be thread-safe, and the ring never runs it under its mutex: a
+// displaced view is moved into a local and destroyed after the lock is released, so a deleter may even
+// call back into the ring.
 // ---------------------------------------------------------------------------------------------
 
 class LaneSourceRing {
@@ -180,7 +188,9 @@ public:
     void Store(const SourceFrameView& v)
     {
         const size_t slot = size_t(v.seq % cap_);
+        SourceFrameView displaced;   // declared before the lock: destroyed after it is released
         std::lock_guard<std::mutex> lock(mutex_);   // the mirror writes are under it too: one writer at a time
+        displaced = std::move(views_[slot]);
         views_[slot] = v;
         has_[slot] = 1;
         if (!any_ || v.seq > newest_) {
@@ -202,25 +212,50 @@ public:
     // job's own copy until the job ends).
     void Drop(uint64_t seq)
     {
+        SourceFrameView displaced;   // destroyed after the lock is released (see LOCK ORDER)
         std::lock_guard<std::mutex> lock(mutex_);
         const size_t slot = size_t(seq % cap_);
         if (has_[slot] == 0 || views_[slot].seq != seq)
             return;
         mirror_[slot].seq.store(kInvalid, std::memory_order_release);
+        displaced = std::move(views_[slot]);
         views_[slot] = SourceFrameView();
         has_[slot] = 0;
+    }
+
+    // Let go of every held frame (the ring of a graph that was swapped out: the new ring carries the
+    // frames on, so the host pool is not held twice). The copies die outside the lock.
+    void Clear()
+    {
+        std::vector<SourceFrameView> displaced;
+        std::lock_guard<std::mutex> lock(mutex_);
+        displaced.reserve(cap_);
+        for (size_t i = 0; i < cap_; ++i) {
+            if (has_[i] == 0)
+                continue;
+            mirror_[i].seq.store(kInvalid, std::memory_order_release);
+            displaced.push_back(std::move(views_[i]));
+            views_[i] = SourceFrameView();
+            has_[i] = 0;
+        }
+        any_ = false;
     }
 
     // Worker side (mutex): COPIES the held view of seq into *out (the copy owns the planes through
     // its keepAlive, so a later overwrite or drop cannot free them under the caller). False: not held.
     bool Find(uint64_t seq, SourceFrameView* out) const
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const size_t slot = size_t(seq % cap_);
-        if (has_[slot] == 0 || views_[slot].seq != seq)
-            return false;
+        SourceFrameView copy;   // the copy is taken under the lock; *out (and its old keepAlive) is touched after it
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const size_t slot = size_t(seq % cap_);
+            if (has_[slot] == 0 || views_[slot].seq != seq)
+                return false;
+            if (out)
+                copy = views_[slot];
+        }
         if (out)
-            *out = views_[slot];
+            *out = std::move(copy);
         return true;
     }
 
@@ -317,12 +352,14 @@ public:
     double HeavyMs() const override { return heavyMs_; }
     bool HasWork() const override { return !idle_ && runner_ != nullptr && runner_->Laned(id_); }
     // The larger of the last measured CPU time of a Step and the producer's own device-cost prediction
-    // (a GPU-compute Step only records: its CPU time says nothing about the chunk's GPU time).
+    // (a GPU-compute Step only records: its CPU time says nothing about the chunk's GPU time). The
+    // measured part decays through OnCapNoFit, so one jittery over-cap Step cannot starve the product.
     uint32_t PredictUs() const override
     {
         const uint32_t p = runner_ != nullptr ? runner_->PredictChunkUs(id_) : 0u;
         return std::max(lastUs_, p);
     }
+    void OnCapNoFit() override { lastUs_ /= 2u; }   // halves per gap: an over-cap outlier is forgotten in a few gaps
     void RunChunk(uint32_t budgetUs) override
     {
         const uint64_t t0 = nowUs_ ? nowUs_() : 0u;
@@ -401,15 +438,24 @@ public:
 
     // ---- setup (before the lane threads start) ----
 
+    // Setup only: before the lane worker threads start (LaneWorkerThreads::Start marks them). A product
+    // WITHOUT a producer gets no lane (it is in-render-only: the seal fills it live, nothing waits for
+    // it, nothing counts it missing); register producers before Configure. A producer registered later
+    // is wired into the live graph at once (not regulated until the next rebuild).
     void RegisterProducer(ILaneProducer* p)
     {
         if (p == nullptr)
             return;
+        assert(workersRunning_.load(std::memory_order_acquire) == 0 && "RegisterProducer after the lane threads started");
         producers_.push_back(p);
         const std::shared_ptr<LaneState> st = std::atomic_load(&state_);
-        if (st)
+        if (st) {
             st->runner->Register(p);
+            ApplyRegulator(*st);
+        }
     }
+    // LaneWorkerThreads tells the lane whether its threads run (setup-order assertion only).
+    void SetWorkersRunning(bool running) { workersRunning_.store(running ? 1 : 0, std::memory_order_release); }
     void SetGpuDispatcher(IGpuDispatcher* d) { dispatcher_ = d; }
     void SetLiveFill(LiveFill fill) { liveFill_ = std::move(fill); }
     void RegisterCpuLiveCompute(ProductId id, CpuLiveCompute fn) { cpuLive_[id] = std::move(fn); }
@@ -453,8 +499,10 @@ public:
 
         if (reasons == 0 && cur) {
             cur->gap.SetChunkCapUs(ChunkCapUs());
-            if (detChanged)
+            if (detChanged) {
                 ConfigureRegulator();
+                ApplyRegulator(*cur);   // the regulator's states changed under the kept graph
+            }
             renderState_ = cur;
             return 0;
         }
@@ -474,6 +522,7 @@ public:
         if (cur) {   // frames stored in the old ring while the swap happened
             st->ring->CopyFrom(*cur->ring);
             NotifyNewest(*st);
+            cur->ring->Clear();   // the new ring carries the frames: the host pool is not held twice
         }
         renderState_ = st;
         ApplyRegulator(*st);
@@ -621,6 +670,7 @@ public:
             if (seq >= h && seq - h >= st->firstSeq)
                 st->table->At(i).Release(seq - h, releaseFenceValue);
         }
+        st->ring->Drop(seq);   // the ring's copy (and its host plane hold) ends with the frame; a running job keeps its own
         NotifyWake();
     }
 
@@ -783,6 +833,14 @@ public:
             skipped += st->runner->Counters(st->table->NodeAt(i).id).skippedDropped.load(std::memory_order_relaxed);
         if (skipped > 0)
             out.push_back("Analysis: " + std::to_string(skipped) + " frames skipped (source gone)");
+        const GapReport& gt = st->gap.Totals();
+        if (gt.capNoFit > 0)
+            out.push_back("Analysis: " + std::to_string(gt.capNoFit) + " lane chunks deferred (too big for the chunk cap)");
+        if (gt.laneStarvedGaps > 0)
+            out.push_back("Analysis: lane compute got no time in " + std::to_string(gt.laneStarvedGaps) + " idle gaps");
+        if (regulator_.SuppressedStepDowns() > 0)
+            out.push_back("Analysis: " + std::to_string(regulator_.SuppressedStepDowns())
+                          + " source changes ignored (already stepped down in this window)");
         const std::string notice = regulator_.Notice();
         if (!notice.empty())
             out.push_back("Analysis: " + notice);
@@ -809,7 +867,8 @@ public:
             for (ProductId id : regulator_.ForcedLiveIds())
                 forced.push_back(NameOf(*st, id));
             out.push_back(FallbackCatalog::AnalysisLane(dropped, forced, regulator_.PinnedAtMinimum(),
-                                                         regulator_.T0InRender() || st->plan.t0OverBudget));
+                                                         regulator_.T0InRender() || st->plan.t0OverBudget,
+                                                         unsigned(regulator_.OfaStep())));
         }
         out.push_back(FallbackCatalog::AnalysisLaneDeterminism(st && det_ ? missedBounds_ : 0u));
         out.push_back(FallbackCatalog::SourceStatsWalk(settings_.walk == VpLaneProducts::WalkSource::Lane,
@@ -917,13 +976,16 @@ private:
         st->runner->SetReleaseCompleted([this](ProductId id) -> uint64_t {
             return releaseCompleted_ ? releaseCompleted_(id) : ~uint64_t(0);
         });
+        for (ILaneProducer* p : producers_)
+            st->runner->Register(p);
         for (size_t i = 0; i < st->graph.nodes.size(); ++i) {
             const Node& n = st->graph.nodes[i];
             st->runner->SetReadsSource(n.id, st->info[i].sourceFrame);
-            st->runner->SetLaned(n.id, st->plan.Laned(n.id));
+            // A product without a producer has no lane: in-render-only, never counted missing.
+            const bool laned = st->plan.Laned(n.id) && (n.backend == Backend::RenderOnly || st->runner->HasProducer(n.id));
+            st->runner->SetLaned(n.id, laned);
+            st->table->At(i).SetLaneGranted(laned);
         }
-        for (ILaneProducer* p : producers_)
-            st->runner->Register(p);
         st->runner->SetSkipBefore(fromSeq);
 
         // Worker order: tier, then topological, per backend.
@@ -986,8 +1048,8 @@ private:
         regProducts_.clear();
         for (size_t i = 0; i < n; ++i) {
             const Node& nd = st.graph.nodes[i];
-            if (nd.backend == Backend::RenderOnly)
-                continue;
+            if (nd.backend == Backend::RenderOnly || !st.runner->HasProducer(nd.id))
+                continue;   // no lane to shed: an in-render-only product is never the regulator's to drop
             RegProduct p;
             p.id = nd.id;
             p.tier = nd.tier;
@@ -1011,7 +1073,8 @@ private:
             if (n.backend == Backend::RenderOnly)
                 continue;
             const ProductState ps = regulator_.StateOf(n.id);
-            const bool laned = st.plan.Laned(n.id) && (ps == ProductState::Laned || ps == ProductState::ForcedLive);
+            const bool laned = st.plan.Laned(n.id) && st.runner->HasProducer(n.id)
+                               && (ps == ProductState::Laned || ps == ProductState::ForcedLive);
             st.runner->SetLaned(n.id, laned);
             st.table->At(i).SetLaneGranted(laned);
         }
@@ -1043,7 +1106,7 @@ private:
                     in[k] = st.bufs[size_t(j)]->Live(size_t(ri.index));
             }
             SourceFrameView view;
-            const bool haveView = st.ring->TryGet(seq, &view);
+            const bool haveView = st.ring->TryGet(seq, &view);   // lock-free, no keepAlive copy: the render holds the frame
             ok = it->second(n, haveView ? &view : nullptr, in, st.bufs[size_t(idx)]->Live(size_t(live)),
                             st.bufs[size_t(idx)]->Bytes());
         } else if (liveFill_) {
@@ -1079,6 +1142,7 @@ private:
     double periodMs_ = 0.0;
     std::atomic<uint32_t> chunkCapUs_{ 1000 };
     std::atomic<uint8_t> mode_{ 0 };   // LaneSettings::Mode, readable from the lane threads
+    std::atomic<int> workersRunning_{ 0 };   // LaneWorkerThreads running (setup-order assertion)
     bool det_ = false;
     bool observedOnce_ = false;
     uint32_t lastSlackUs_ = 0;
@@ -1123,6 +1187,7 @@ public:
         if (running_ || !lane_.Active())
             return false;
         stop_.store(false, std::memory_order_release);
+        lane_.SetWorkersRunning(true);
         running_ = true;
         threads_.emplace_back([this]() { Loop(Backend::Ofa); });
         threads_.emplace_back([this]() { Loop(Backend::Cpu); });
@@ -1140,6 +1205,7 @@ public:
                 t.join();
         threads_.clear();
         running_ = false;
+        lane_.SetWorkersRunning(false);
     }
 
     bool Running() const { return running_; }

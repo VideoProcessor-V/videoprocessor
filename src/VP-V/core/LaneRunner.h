@@ -96,6 +96,7 @@ public:
     }
 
     // Copies the held view of `seq` (planes kept alive by its keepAlive) into *out; false: not held.
+    // `out` may be null (presence test only).
     void SetSources(std::function<bool(uint64_t, SourceFrameView*)> find) { find_ = std::move(find); }
     void SetReleaseCompleted(std::function<uint64_t(ProductId)> f) { releaseCompleted_ = std::move(f); }
     void SetReadsSource(ProductId id, bool reads)
@@ -234,8 +235,7 @@ private:
             *out = StepOutcome::WaitingSource;
             return false;
         }
-        SourceFrameView probe;
-        if (st.readsSource && (!find_ || !find_(seq, &probe))) {
+        if (st.readsSource && (!find_ || !find_(seq, nullptr))) {   // presence only: no keepAlive copy
             st.nextSeq = seq + 1u;
             st.counters.skippedDropped.fetch_add(1, std::memory_order_relaxed);
             *out = StepOutcome::Late;

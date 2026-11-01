@@ -119,6 +119,9 @@ public:
         return ChunkResult::More;
     }
 
+    // The seal (or a plan change) took the job: stop recording; no job is in progress any more.
+    void Cancel(const LaneJobContext&) override { active_ = false; }
+
     const ChunkPlan& Plan() const { return plan_; }
     uint32_t NextChunk() const { return next_; }
 

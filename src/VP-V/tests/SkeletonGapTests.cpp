@@ -210,6 +210,27 @@ namespace SkeletonGapTestsNs
 			Assert::AreEqual<uint32_t>(0, r.capNoFit);
 		}
 
+		// The work hears about every cap miss (once per gap) so it can decay what it remembers.
+		TEST_METHOD(CapMissNotifiesTheWork)
+		{
+			struct Noisy : FakeWork {
+				using FakeWork::FakeWork;
+				uint32_t notified = 0;
+				void OnCapNoFit() override { ++notified; predict = predict > 1000 ? predict / 2 : predict; }
+			};
+			Clock clk;
+			Noisy w(&clk, GapClass::LaneCompute, 3, 40000, 50, -1, nullptr);
+			GapScheduler s;
+			s.SetChunkCapUs(1000);
+			s.Add(&w);
+			uint32_t gaps = 0;
+			while (w.runs == 0 && gaps < 20) {
+				s.RunGap(clk.t + 5000, clk.Fn());
+				++gaps;
+			}
+			Assert::IsTrue(w.runs > 0 && gaps >= 2 && w.notified == gaps - 1);
+		}
+
 		TEST_METHOD(DerivedChunkCap)
 		{
 			Assert::AreEqual<uint32_t>(1000, GapScheduler::DerivedChunkCapUs(1000.0 / 24.0, 0));

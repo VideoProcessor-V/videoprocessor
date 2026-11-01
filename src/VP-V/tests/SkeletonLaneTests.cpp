@@ -231,7 +231,8 @@ namespace SkeletonLaneTestsNs
 			runner.SetSources([this](uint64_t seq, SourceFrameView* out) -> bool {
 				if (seq >= views.size() || dropped[size_t(seq)])
 					return false;
-				*out = views[size_t(seq)];
+				if (out)
+					*out = views[size_t(seq)];
 				return true;
 			});
 			runner.SetReadsSource(kA, true);

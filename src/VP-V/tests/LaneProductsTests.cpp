@@ -565,6 +565,23 @@ namespace LaneProductsTestsNs
 			Assert::IsTrue(cpu.PredictChunkUs() == 0u, L"CPU producers: no device prediction");
 		}
 
+		// A cancelled job is no longer in progress: the prediction is the next job's plan again.
+		TEST_METHOD(GpuJobCancelEndsTheJob)
+		{
+			FakeDispatcher disp;
+			double ms = 3.0;
+			uint32_t cap = 1000;
+			GpuComputeLaneJob job(kP3AnalysisField, &disp, [&ms]() { return ms; }, [&cap]() { return cap; }, 4320);
+			LaneJobContext ctx;
+			Assert::IsTrue(job.Begin(ctx), L"begin");
+			Assert::IsTrue(job.PredictChunkUs() == 1000u, L"in the job's own plan");
+			ms = 6.0;   // inputs change while the job is in flight
+			cap = 500;
+			Assert::IsTrue(job.PredictChunkUs() == 1000u, L"in-flight plan kept");
+			job.Cancel(ctx);
+			Assert::IsTrue(job.PredictChunkUs() == 500u, L"cancelled: the next job's plan (6 ms at 0.5 ms = 12 chunks)");
+		}
+
 		TEST_METHOD(ReadbackRingNeverBlocks)
 		{
 			FakeReadback dev(2);

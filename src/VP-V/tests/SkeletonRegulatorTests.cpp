@@ -484,6 +484,11 @@ namespace SkeletonRegulatorTestsNs
 			Assert::IsTrue(d.reason.find("forced live: motion field") != std::string::npos);
 			Assert::IsTrue(d.reason.find("analysis at minimum") != std::string::npos);
 			Assert::IsTrue(FallbackCatalog::AnalysisLane(none, none, false, true).engaged);
+			// The optical-flow input reduction is a visible fallback; step 0 (full) releases it.
+			Assert::IsFalse(FallbackCatalog::AnalysisLane(none, none, false, false, 0).engaged);
+			const FallbackCatalog::Decision ofa = FallbackCatalog::AnalysisLane(none, none, false, false, 2);
+			Assert::IsTrue(ofa.engaged);
+			Assert::IsTrue(ofa.reason.find("vector engine input reduced (step 2)") != std::string::npos);
 
 			FallbackCatalog::Decision det = FallbackCatalog::AnalysisLaneDeterminism(0);
 			Assert::IsFalse(det.engaged);

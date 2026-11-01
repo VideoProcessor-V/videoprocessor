@@ -16,7 +16,10 @@ namespace VpSkeleton {
 
 // A source frame as the host hands it to the lane (capture/conversion thread). Luma samples are
 // 16-bit; a sample scaled to the full 16-bit range is (raw << msbShift) (P010/P016: msbShift 0).
-// LIFETIME: the planes stay valid while ANY copy of the view that holds `keepAlive` exists. The host
+// LIFETIME: the planes stay valid while ANY copy of the view that holds `keepAlive` exists. The deleter
+// of keepAlive runs on whichever thread drops the last copy (capture, render or a lane worker): it must
+// be thread-safe and must not assume a lane lock is free (the lane never runs it under its own locks).
+// The host
 // sets keepAlive to an owner of the planes (a shared_ptr whose deleter returns them to the pool); the
 // lane copies the view (and so the owner) for the whole of a job, so a ring overwrite or the host's
 // OnFrameDropped / OnFrameRetired never frees planes under a running job. A view without keepAlive
@@ -91,6 +94,10 @@ public:
     virtual bool HasWork() const = 0;
     virtual uint32_t PredictUs() const = 0;            // the next chunk's predicted cost
     virtual void RunChunk(uint32_t budgetUs) = 0;      // render thread, one chunk
+    // The scheduler skipped this work because its prediction exceeds the chunk CAP (once per gap): a
+    // measured cost above the cap would starve the work for good, so the work decays any cost it
+    // remembers toward its own current prediction here. Render thread. Default: nothing remembered.
+    virtual void OnCapNoFit() {}
 };
 
 // Render-device work of GPU-compute products (host hook, render thread only). Lane GPU-compute jobs
