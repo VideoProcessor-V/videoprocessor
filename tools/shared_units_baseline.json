@@ -9,15 +9,131 @@
   },
   "U2": {
    "name": "gaussian_band_split",
-   "blocking": false,
-   "baseline_duplicates": 29,
-   "known_false_positive": []
+   "blocking": true,
+   "baseline_duplicates": 11,
+   "known_false_positive": [
+    {
+     "file": "src/VP-V/modules/input/source_analysis/regions/RegionEvidence.h",
+     "pattern": "GrainSplit\\.h",
+     "kind": "false_positive",
+     "reason": "reads the U1 grain-split product (GrainSplit::Compute), not a band-split copy"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/regions/RegionEvidence.h",
+     "pattern": "refMsSplit",
+     "kind": "false_positive",
+     "reason": "cost constant in a comment-trailing config line, no kernel"
+    },
+    {
+     "file": "src/VP-V/modules/repair/temporal_detail/TemporalDetailModel.h",
+     "pattern": "GrainSplit\\.h",
+     "kind": "false_positive",
+     "reason": "reads the U1 grain-split product (GrainSplit::Compute), not a band-split copy"
+    },
+    {
+     "file": "src/VP-V/modules/repair/temporal_detail/TemporalDetailModel.h",
+     "pattern": "std::exp\\(-0\\.5 \\* sig",
+     "kind": "false_positive",
+     "reason": "analytic Gaussian frequency response of a sigma, not a spatial kernel"
+    },
+    {
+     "file": "src/VP-V/modules/scaling/chroma_upscale/ChromaCfl.h",
+     "pattern": "GrainSplit\\.h",
+     "kind": "false_positive",
+     "reason": "reads the U1 grain-split product (GrainSplit::Compute), not a band-split copy"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/global_model/GlobalModelTemporal.cpp",
+     "pattern": "std::exp\\(-0\\.5 \\* d \\* d\\)",
+     "kind": "false_positive",
+     "reason": "temporal weight law of the camera fit, not a spatial band split"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/TextureRestore.h",
+     "pattern": "kSigma1 = 1\\.0",
+     "kind": "false_positive",
+     "reason": "the sigma constants themselves; the Gaussian law now lives in the unit"
+    },
+    {
+     "file": "src/VP-V/modules/motion/consumers/FrameInterpolator.cpp",
+     "pattern": "gp_w\\(i\\)",
+     "kind": "residual",
+     "reason": "Bill-owned low-band law (GrainPreserve::LowWeightsGlsl / gp_w); the consumer calls Bill's function, so the law cannot move into the unit without editing Bill's header or a GPU run proving the emitted shader unchanged; migrate with the SA5 repair package"
+    },
+    {
+     "file": "src/VP-V/modules/motion/consumers/FrameInterpolator.cpp",
+     "pattern": "LowWeightsGlsl",
+     "kind": "residual",
+     "reason": "Bill-owned low-band law (GrainPreserve::LowWeightsGlsl / gp_w); the consumer calls Bill's function, so the law cannot move into the unit without editing Bill's header or a GPU run proving the emitted shader unchanged; migrate with the SA5 repair package"
+    },
+    {
+     "file": "src/VP-V/modules/repair/deband/VpDebander.cpp",
+     "pattern": "gp_w\\(i\\)",
+     "kind": "residual",
+     "reason": "Bill-owned low-band law (GrainPreserve::LowWeightsGlsl / gp_w); the consumer calls Bill's function, so the law cannot move into the unit without editing Bill's header or a GPU run proving the emitted shader unchanged; migrate with the SA5 repair package"
+    },
+    {
+     "file": "src/VP-V/modules/repair/deband/VpDebander.cpp",
+     "pattern": "LowWeightsGlsl",
+     "kind": "residual",
+     "reason": "Bill-owned low-band law (GrainPreserve::LowWeightsGlsl / gp_w); the consumer calls Bill's function, so the law cannot move into the unit without editing Bill's header or a GPU run proving the emitted shader unchanged; migrate with the SA5 repair package"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/DetailPulse.cpp",
+     "pattern": "gp_w\\(k\\)",
+     "kind": "residual",
+     "reason": "Bill-owned low-band law (GrainPreserve::LowWeightsGlsl / gp_w); the consumer calls Bill's function, so the law cannot move into the unit without editing Bill's header or a GPU run proving the emitted shader unchanged; migrate with the SA5 repair package"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/DetailPulse.cpp",
+     "pattern": "LowWeightsGlsl",
+     "kind": "residual",
+     "reason": "Bill-owned low-band law (GrainPreserve::LowWeightsGlsl / gp_w); the consumer calls Bill's function, so the law cannot move into the unit without editing Bill's header or a GPU run proving the emitted shader unchanged; migrate with the SA5 repair package"
+    }
+   ]
   },
   "U3": {
    "name": "half_luma_downsample",
-   "blocking": false,
-   "baseline_duplicates": 19,
-   "known_false_positive": []
+   "blocking": true,
+   "baseline_duplicates": 14,
+   "known_false_positive": [
+    {
+     "file": "src/VP-V/modules/motion/consumers/DejudderWarp.cpp",
+     "pattern": "DOWNSAMPLE_BODY|MotionWarp::Downsample|FADE_APPLY|Downsample\\(",
+     "kind": "residual",
+     "reason": "matcher half-resolution downsample: GLSL float 2x2 sum with the M4 fade gain applied in the same pass; byte identity needs a GPU run and the vector-suite identity proof (doc 62 order 9), not available in this wave"
+    },
+    {
+     "file": "src/VP-V/modules/motion/vector_delivery/DejudderWarp.h",
+     "pattern": "Downsample\\(",
+     "kind": "residual",
+     "reason": "matcher half-resolution downsample: GLSL float 2x2 sum with the M4 fade gain applied in the same pass; byte identity needs a GPU run and the vector-suite identity proof (doc 62 order 9), not available in this wave"
+    },
+    {
+     "file": "src/VP-V/modules/motion/consumers/FrameInterpolator.cpp",
+     "pattern": "low_half_|LOW_HALF|LOW_A|LOW_B",
+     "kind": "residual",
+     "reason": "interpolator low band: GLSL float 2x2 box feeding the Bill low-band Gaussian; byte identity needs a GPU run, not available in this wave"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp",
+     "pattern": "LumaOf",
+     "kind": "false_positive",
+     "reason": "RGB structure-luma formula (R + 2G + B + 2) >> 2, not a downsample"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp",
+     "pattern": "HalfLuma8\\(",
+     "kind": "false_positive",
+     "reason": "the NVOF producer entry point; its 2x2 box now calls the unit (C1)"
+    },
+    {
+     "file": "src/VP-V/modules/motion/estimation/MotionAheadProducer.h",
+     "pattern": "HalfLuma8\\(",
+     "kind": "false_positive",
+     "reason": "declaration of the NVOF producer entry point"
+    }
+   ]
   },
   "U4": {
    "name": "block_statistics",
