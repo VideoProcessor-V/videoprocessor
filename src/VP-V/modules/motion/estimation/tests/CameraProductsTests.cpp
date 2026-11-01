@@ -286,7 +286,7 @@ namespace CameraProductsTestsNs
 			const std::vector<ConsumerDecl> cs = Camera({ CameraLink::CameraConsumer::Diagnostics });
 			const Graph g = BuildGraph(reg, cs, Settings(1, true));
 			Assert::IsTrue(g.valid);
-			for (ProductId p : { kP1HalfLuma, kP2VectorPair, kP3AnalysisField, kP4SourceStats, kP7CameraFit, kP8CameraLabels })
+			for (ProductId p : std::initializer_list<ProductId>{ kP1HalfLuma, kP2VectorPair, kP3AnalysisField, kP4SourceStats, kP7CameraFit, kP8CameraLabels })
 				Assert::AreEqual(1, CountOf(g, p));
 			Assert::AreEqual(size_t(6), g.nodes.size());
 			Assert::IsFalse(g.Has(kP9CameraSmoothed));
