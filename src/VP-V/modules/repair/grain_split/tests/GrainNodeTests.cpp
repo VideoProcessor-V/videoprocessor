@@ -16,8 +16,14 @@
 
 #include "../../../../tests/SettingsTestSupport.h"
 #include <VP-V/modules/repair/grain_split/GrainNode.h>
+#include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>
+#include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
+#include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
+#include "BandFromBaseGolden.generated.h"
 
+#include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -505,6 +511,209 @@ namespace GrainNodeTestsNs
 			Assert::AreEqual(size_t(3), base, L"base: base, s1, s2 (the main map)");
 			Assert::AreEqual(size_t(5), modifiers, L"modifiers: f, N, e3, e1, e2");
 			Assert::IsTrue(hasN && hasF && hasE3, L"the modifier fields the consumers derive from");
+		}
+	};
+}
+
+namespace BandFromBaseTestsNs
+{
+	// Frozen copies of the private implementations the shared unit replaced (pre-migration, verbatim).
+	namespace Frozen
+	{
+		inline int GaussRadius(double sigma) { return (std::max)(1, static_cast<int>(std::ceil(3.0 * sigma))); }
+		inline double GaussWeight(int k, double sigma)
+		{
+			const int r = GaussRadius(sigma);
+			double sum = 0.0;
+			for (int i = -r; i <= r; ++i) sum += std::exp(-0.5 * i * i / (sigma * sigma));
+			return std::exp(-0.5 * k * k / (sigma * sigma)) / sum;
+		}
+		inline GrainSplit::Plane Gauss(const GrainSplit::Plane& in, double sigma)
+		{
+			using GrainSplit::Plane;
+			if (!(sigma > 0.0)) return in;
+			const int r = (std::max)(1, static_cast<int>(std::ceil(3.0 * sigma)));
+			std::vector<double> k(static_cast<size_t>(2 * r + 1));
+			double sum = 0.0;
+			for (int i = -r; i <= r; ++i) sum += k[static_cast<size_t>(i + r)] = std::exp(-0.5 * i * i / (sigma * sigma));
+			for (double& x : k) x /= sum;
+			Plane t(in.w, in.h), o(in.w, in.h);
+			std::vector<double> pad(static_cast<size_t>(in.w + 2 * r));
+			for (int y = 0; y < in.h; ++y)
+			{
+				for (int x = -r; x < in.w + r; ++x) pad[static_cast<size_t>(x + r)] = in.get(x, y);
+				for (int x = 0; x < in.w; ++x)
+				{
+					double a = 0.0;
+					for (int i = -r; i <= r; ++i) a += k[static_cast<size_t>(i + r)] * pad[static_cast<size_t>(x + r + i)];
+					t.at(x, y) = a;
+				}
+			}
+			for (int y = 0; y < in.h; ++y)
+			{
+				double* dst = &o.v[static_cast<size_t>(y) * in.w];
+				for (int i = -r; i <= r; ++i)
+				{
+					const double* src = &t.v[static_cast<size_t>((std::max)(0, (std::min)(in.h - 1, y + i))) * in.w];
+					const double kk = k[static_cast<size_t>(i + r)];
+					for (int x = 0; x < in.w; ++x) dst[x] += kk * src[x];
+				}
+			}
+			return o;
+		}
+		// The GLSL weights block as GrainSplitGpu.cpp's WeightsGlsl built it.
+		inline std::string WeightsGlsl(const char* name, const char* radiusName, double sigma)
+		{
+			const int r = GaussRadius(sigma);
+			return VpvGpu::DefineInt(radiusName, r) + "float " + name + "(int k)\n{\n    " +
+				VpvGpu::ConstArray("w", 2 * r + 1, [&](int i) { return GaussWeight(i - r, sigma); }) + "    return w[k + " + radiusName + "];\n}\n";
+		}
+	}
+
+	inline bool BitEqual(double a, double b) { return std::memcmp(&a, &b, sizeof(double)) == 0; }
+
+	inline GrainSplit::Plane TestPlane(int w, int h, unsigned seed)
+	{
+		GrainSplit::Plane p(w, h);
+		unsigned s = seed;
+		for (double& v : p.v)
+		{
+			s = s * 1664525u + 1013904223u;
+			v = static_cast<double>((s >> 8) & 1023u);
+		}
+		return p;
+	}
+
+	TEST_CLASS(BandFromBaseUnitTests)
+	{
+	public:
+		TEST_METHOD(UnitVersionIsOne)
+		{
+			Assert::AreEqual(uint32_t(1), VpUnit::BandFromBase::kUnitVersion);
+		}
+
+		TEST_METHOD(RadiusWeightsHalfSigmaAndBlurMatchThePythonGolden)
+		{
+			using namespace BandFromBaseGolden;
+			for (int i = 0; i < kSigmaCount; ++i)
+			{
+				const double s = kSigmas[i];
+				const int r = VpUnit::BandFromBase::Radius(s, 3.0, true, 0.0);
+				Assert::AreEqual(kRadius[i], r, L"radius");
+				for (int k = -r; k <= r; ++k)
+					Assert::IsTrue(std::fabs(VpUnit::BandFromBase::Weight(k, s, r) - kWeights[i][k + r]) < 1e-14, L"weight vs python");
+				if (s > 0.5)
+					Assert::IsTrue(std::fabs(VpUnit::BandFromBase::HalfSigma(s) - kHalfSigma[i]) < 1e-14, L"half sigma vs python");
+			}
+			const std::vector<double> plane(kPlane, kPlane + kPlaneW * kPlaneH);
+			const std::vector<double> a = VpUnit::BandFromBase::Blur(plane, kPlaneW, kPlaneH, kBlurSigmaA);
+			const std::vector<double> b = VpUnit::BandFromBase::Blur(plane, kPlaneW, kPlaneH, kBlurSigmaB);
+			for (int i = 0; i < kPlaneW * kPlaneH; ++i)
+			{
+				Assert::IsTrue(std::fabs(a[static_cast<size_t>(i)] - kBlurA[i]) < 1e-12, L"blur A vs python");
+				Assert::IsTrue(std::fabs(b[static_cast<size_t>(i)] - kBlurB[i]) < 1e-12, L"blur B vs python");
+			}
+		}
+
+		TEST_METHOD(WeightsAreNormalisedAndSymmetric)
+		{
+			for (double s : { 0.4, 1.0, 2.5, 6.0, 15.0 })
+			{
+				const int r = VpUnit::BandFromBase::Radius(s, 3.0, true, 0.0);
+				double sum = 0.0;
+				for (int k = -r; k <= r; ++k)
+				{
+					const double w = VpUnit::BandFromBase::Weight(k, s, r);
+					sum += w;
+					Assert::IsTrue(BitEqual(w, VpUnit::BandFromBase::Weight(-k, s, r)), L"symmetric");
+				}
+				Assert::IsTrue(std::fabs(sum - 1.0) < 1e-12, L"normalised");
+			}
+		}
+
+		TEST_METHOD(SigmaFromPictureHeightFractionAndGlslEntryNames)
+		{
+			VpUnit::BandFromBase::Params p;
+			p.sigmaRel = 1.0 / 1080.0;
+			p.activeHeight = 2160.0;
+			Assert::IsTrue(std::fabs(p.SigmaPx() - 2.0) < 1e-12, L"sigma is a fraction of the active picture height");
+			Assert::AreEqual(6, VpUnit::BandFromBase::Radius(p), L"radius from the params");
+			const std::string g = VpUnit::BandFromBase::Glsl(p);
+			Assert::IsTrue(g.find("vpu_band_from_base_w(int k)") != std::string::npos);
+			Assert::IsTrue(g.find("vpu_band_from_base_across") != std::string::npos);
+			Assert::IsTrue(g.find("vpu_band_from_base_down") != std::string::npos);
+			Assert::IsTrue(g.find("VPU_BAND_FROM_BASE_VERSION 1") != std::string::npos);
+			Assert::IsTrue(g.find("VPU_BAND_FROM_BASE_R 6") != std::string::npos);
+			// The unit's weight literals are the shared formatter's: the same text a ConstArray of Weight() gives.
+			const int r = VpUnit::BandFromBase::Radius(p);
+			const std::string tab = VpvGpu::ConstArray("vpu_band_from_base_tab", 2 * r + 1,
+				[&](int i) { return VpUnit::BandFromBase::Weight(i - r, p.SigmaPx(), r); });
+			Assert::IsTrue(g.find(tab) != std::string::npos, L"table text identical to VpvGpu::ConstArray");
+		}
+	};
+
+	// B1: GrainSplit's own Gauss kernel and GrainSplitGpu's GaussRadius/GaussWeight now call the unit; their numbers
+	// and the GLSL they emit must be unchanged.
+	TEST_CLASS(GrainSplitBandFromBaseIdentityTests)
+	{
+	public:
+		TEST_METHOD(GaussRadiusAndWeightAreBitIdenticalToTheFrozenPrivateCopy)
+		{
+			for (double s = 0.1; s < 20.0; s += 0.137)
+			{
+				Assert::AreEqual(Frozen::GaussRadius(s), GrainSplit::Gpu::GaussRadius(s), L"radius");
+				const int r = Frozen::GaussRadius(s);
+				for (int k = -r; k <= r; ++k)
+					Assert::IsTrue(BitEqual(Frozen::GaussWeight(k, s), GrainSplit::Gpu::GaussWeight(k, s)), L"weight bits");
+			}
+			for (double base : { 1.0, 2.5, 6.0 })
+				for (double scale : { 1.0, 1.25, 1.5, 2.0, 2.5, 4.0 })
+				{
+					const double s = base * scale;
+					Assert::AreEqual(Frozen::GaussRadius(s), GrainSplit::Gpu::GaussRadius(s));
+					for (int k = -Frozen::GaussRadius(s); k <= Frozen::GaussRadius(s); ++k)
+						Assert::IsTrue(BitEqual(Frozen::GaussWeight(k, s), GrainSplit::Gpu::GaussWeight(k, s)));
+				}
+		}
+
+		TEST_METHOD(EmittedWeightsGlslIsByteIdentical)
+		{
+			for (double base : { 1.0, 2.5, 6.0 })
+				for (double scale : { 1.0, 1.5, 2.0, 2.5 })
+				{
+					const double s = base * scale;
+					const int r = GrainSplit::Gpu::GaussRadius(s);
+					const std::string now = VpvGpu::DefineInt("GS_R", r) + "float gs_w(int k)\n{\n    " +
+						VpvGpu::ConstArray("w", 2 * r + 1, [&](int i) { return GrainSplit::Gpu::GaussWeight(i - r, s); }) + "    return w[k + GS_R];\n}\n";
+					Assert::AreEqual(Frozen::WeightsGlsl("gs_w", "GS_R", s), now, L"GLSL text");
+				}
+		}
+
+		TEST_METHOD(CpuGaussIsBitIdenticalToTheFrozenPrivateCopy)
+		{
+			const int dims[][2] = { { 1, 1 }, { 2, 3 }, { 5, 3 }, { 33, 17 }, { 64, 48 }, { 7, 40 } };
+			unsigned seed = 11;
+			for (const auto& d : dims)
+				for (double s : { 0.4, 1.0, 1.5, 2.5, 6.0, 7.5 })
+				{
+					const GrainSplit::Plane in = TestPlane(d[0], d[1], seed++);
+					const GrainSplit::Plane a = Frozen::Gauss(in, s), b = GrainSplit::Gauss(in, s);
+					Assert::AreEqual(a.v.size(), b.v.size());
+					Assert::IsTrue(std::memcmp(a.v.data(), b.v.data(), a.v.size() * sizeof(double)) == 0, L"Gauss bits");
+				}
+			const GrainSplit::Plane in = TestPlane(8, 8, 3);
+			Assert::IsTrue(std::memcmp(Frozen::Gauss(in, 0.0).v.data(), GrainSplit::Gauss(in, 0.0).v.data(), 64 * sizeof(double)) == 0, L"sigma 0 passes through");
+		}
+
+		TEST_METHOD(CpuSplitComputeIsUnchanged)
+		{
+			// Compute() uses Gauss three times: base = G(2.5) Y and d1 = Y - G(1) Y equal the frozen-Gauss composition.
+			const GrainSplit::Plane y = TestPlane(48, 40, 99);
+			const GrainSplit::Split a = GrainSplit::Compute(y, 1.0, 16);
+			const GrainSplit::Plane g1 = Frozen::Gauss(y, 1.0), gb = Frozen::Gauss(y, 2.5);
+			Assert::IsTrue(std::memcmp(a.base.v.data(), gb.v.data(), gb.v.size() * sizeof(double)) == 0, L"base bits");
+			for (size_t i = 0; i < y.v.size(); ++i)
+				Assert::IsTrue(BitEqual(a.d1.v[i], y.v[i] - g1.v[i]), L"d1 bits");
 		}
 	};
 }

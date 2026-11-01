@@ -1,0 +1,28 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "repair.grain_split.shared.band_from_base",
+  "unit": "repair",
+  "order": 86,
+  "status": "draft",
+  "code_location": "migrated",
+  "shared_unit": {
+    "name": "BandFromBase",
+    "id": "U2",
+    "version": 1,
+    "product": "derived on the fly (arena temp), never stored"
+  },
+  "live_files": [
+    "src/VP-V/modules/repair/grain_split/shared/BandFromBase.h",
+    "src/VP-V/modules/repair/grain_split/shared/README.md"
+  ],
+  "forwarding_headers": [],
+  "components": {
+    "files": { "required": [], "optional": [] },
+    "hardware": { "required": [], "optional": [] },
+    "tools": [],
+    "config_keys": [],
+    "upstream_modules": []
+  },
+  "fallback_when_missing": "Header-only law; no runtime component to miss.",
+  "fallback_entry": "Band split: inactive (<reason>)"
+}
