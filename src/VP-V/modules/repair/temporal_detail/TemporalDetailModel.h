@@ -400,6 +400,9 @@ namespace TemporalDetail
 			double cleanKappa = kCleanKappa;
 			double guardTemplateShare = kGuardTemplateShare;   // <= 0: the guard reads every low-f pixel (no structure mask)
 			bool guard = true;
+			// > 0: every block with a selected reference transfers at this weight, gates and limiter bypassed (the transfer's
+			// ceiling, for measurement only - test/temporal-detail-real; the projection, coherence, budget and guard still apply)
+			double forceWeight = 0.0;
 			double forceDrop = 0.0, forceFreeze = 0.0;
 			int slots = kSlots;                  // reference-store tier: past slots kept (1 .. kSlots; small cards keep fewer)
 			GateTuning gates;                    // the gate thresholds (re-tuned on real B-frames)
@@ -1002,7 +1005,7 @@ namespace TemporalDetail
 						else if (q > st.qLow * (1.0 + kReboundTau) && q - st.qLow >= kReboundMinEnergy) { st.rebounds += 1.0; st.rstate = 0; st.qHigh = q; }
 					}
 					const bool falling = q < st.qPrev * (1.0 - kSoftStep) && e2 < st.e2Prev * (1.0 - kSoftStep) && st.qPrev >= kRetireMinEnergy;
-					st.softRun = falling ? st.softRun + 1 : 0;
+					st.softRun = falling ? (std::min)(st.softRun + 1, kRunSaturate) : 0;
 					st.qPeak *= peakDecay;
 					if (q >= st.qPeak) { st.qPeak = q; st.e2Peak = e2; st.fPeak = F; }
 					st.qPrev = q; st.e2Prev = e2;
@@ -1175,7 +1178,7 @@ namespace TemporalDetail
 					soft = m_set.strength * Bg(static_cast<size_t>(i), 3) * wk.evidence * chosen->ageGate * chosen->strongerGate * (st.retired ? 0.0 : 1.0);
 					st.tHold = soft;
 					// the guard's veto run (the focus / high-band-loss guard against a past reference)
-					if (!useFuture && wk.pastId >= 0 && chosen->hbGate * chosen->focusGate < 0.1) ++st.vetoRun; else st.vetoRun = 0;
+					if (!useFuture && wk.pastId >= 0 && chosen->hbGate * chosen->focusGate < 0.1) st.vetoRun = (std::min)(st.vetoRun + 1, kRunSaturate); else st.vetoRun = 0;
 					d.referee[static_cast<size_t>(i)] = refereeGate;
 				}
 				else { soft = 0.0; hardTarget = 0.0; st.vetoRun = 0; }
@@ -1223,7 +1226,7 @@ namespace TemporalDetail
 			Contribution& c = contrib[static_cast<size_t>(i)];
 			// the output-vs-input grain guard (step 10) scales what this block may contribute
 			const double guard = m_tune.guard ? st.guard : 1.0;
-			c.w = refreshNow ? 0.0 : weight * guard;
+			c.w = refreshNow ? 0.0 : ((m_tune.forceWeight > 0.0 && chosen) ? m_tune.forceWeight : weight) * guard;
 			c.boost = boost * guard;
 			if (!refreshNow && chosen)
 			{

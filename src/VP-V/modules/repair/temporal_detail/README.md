@@ -25,6 +25,10 @@ correlation increase <= 0.05.
 - Motion sources are bounded (long-run hunt 2026-10-31): `FieldMotionSource` keeps a 128-frame window behind its newest
   pair, `Prune(presented)` drops everything older than the presented frame (the model never re-reads an older pair:
   composition is incremental), `Clear()` at resets; the camera adapter prunes its records with them.
+- Measurement knobs (`Model::Tuning`, never user settings): grain budget, cleaner, guard, the gate thresholds
+  `Tuning::gates` (`strongerMargin`, `baseNoiseCodes`, `baseGrainSigmas`, `uncertaintyPx`; defaults = the constants) and
+  `forceWeight` (the transfer ceiling, measurement only). `tools/td-cli` drives the CPU model on real encodes with them
+  (test/temporal-detail-real; its own mirrored active-picture wrapper was superseded by `FrameIn::active` at integration).
 
 ## Algorithm (CPU reference model `TemporalDetailModel.h`; shaders mirror it)
 
@@ -129,21 +133,23 @@ host fills, later from `core/Indicator` (doc 25 §A2). Policies: `full`, `contin
 invalid) and `rebase[H|V]` reset; `settings[repair]` resets only for
 mode/max_age changes (strength/boost change the target); `timing` is ignored. Cuts and fades reset the store.
 
-## Declared products (TemporalDetailProducts.h)
+## Declared products (core/Products.h)
 
-Descriptors mirror doc 25 §B1 (map 1:1 onto `core/Products.h`).
+The module's former private descriptors (TemporalDetailProducts.h) were retired: its products are registered in
+`core/Products.h` (`AppendTemporalDetailProducts`; ids `kTdAnalysis`, `kTdRefstore`, `kTdAdmission`) and listed in
+`docs/design/product-graph.md`. `td.out` (the output luma plane) is a render-scope temporary, not a product.
 
 | Product | Inputs | Backend | History | Size at 4K |
 |---|---|---|---|---|
-| `td.analysis` (S/G split, block maps, rebounds, softening run) | re-based luma, P4 cut/fade, bitrate quality (optional) | GpuCompute | 1 | ~1 MB |
-| `td.refstore` (K past slots in one atlas, per-block state) | analysis, P3/P2 motion, camera model (optional), queue frames (+d) | GpuCompute | K | 83 MB per slot at 4K (RGBA16F raw + cleaned bands, R16 base) |
+| `td.analysis` (block maps, rebounds, softening run) | P10 grain split, P11 block stats, P13 source ring | GpuCompute (T1) | 1 | ~1.5 MB |
+| `td.refstore` (K past slots, per-block state) | td.analysis, P10, P3, P13 | GpuCompute (T1) | K = 5 | declared 4.5 B/px per slot (target); the code allocates 10 B/px = 83 MB per slot today (SA6) |
+| `td.admission` (cleaner / templates on admission frames) | td.analysis, P10, P13 | GpuCompute (T2 gap) | 0 | arena (SA1) |
 
 Cleaner cost (estimate, RTX 3090 at 4K, not dispatched): only on admission frames (a refresh, e.g. 2 of 8 frames in IBBBPBBB):
 ~0.52 M half-step 8 x 8 patches x (2 + M <= 4 forward, 2 inverse) separable DCTs ~ 4 GMAC plus one sample of each aligned
 slot per pixel (the template's own sampling), ~0.5-1 ms per admission frame, ~0.2 ms averaged; nothing on other frames.
 Memory +33 MB per slot (+166 MB for K = 5); folding the gates onto the cleaned bands (raw energy = cleaned + a per-block
 removed-energy grid) would drop the raw bands and make it ~0.
-| `td.out` (luma) | analysis, refstore | RenderOnly | 0 | plane |
 
 ## Settings (declared, not wired)
 
@@ -197,6 +203,13 @@ default **6.3 dB** B-frame PSNR gain at the strict bounds (grain RMS 1.013, lag-
 The low temporal band binds everywhere (RMS stays <= 1.014, lag-1 <= +0.015); grain RMS and the higher bands include the
 fallback boost's <= 4% share (1.012 with no transfer at all). Kappa 2 .. 8 lies within 0.2 dB. The pre-fix draft's 10.5 dB was 9.8 dB structure plus a grain swap (own grain kept 31%, 73% of the
 grain energy foreign/frozen); the first fix's 2.9 dB kept 80% own grain with 25% foreign.
+
+Real streaming-like encodes (x265 IBBBP, 2160p 4-16 Mb/s, 1080p 1.5-6 Mb/s, 4 masters; `tools/eval/prototypes/
+temporal_detail_real/`, CPU model with DIS stand-in vectors): the transfer is inert, B-frame PSNR change <= +0.001 dB at
+every tier and every swept threshold (stronger margin 0.02-0.15, base allowance x1-x3, uncertainty 0.5-1 px); the
+transfer ceiling (`Tuning::forceWeight` 1) is -0.02 dB, a per-block master-oracle strength only +0.04 dB, and a fitted
+local rule (deficit, trust, grain, brightness, I/B phase) -0.008 dB on held-out clips. Real B-frame loss is not the
+fine-band attenuation the coding simulation models. The fallback boost is the only active part (-0.004 dB, +2 % grain).
 
 Limits: the cleaner removes most, not all, of the grain the split reads as texture (the rest is budgeted); the first slot
 after a reset has no evidence (single-frame DCT Wiener); future sources are uncleaned (budgeted at rho2 = 1); the grain level needs quiet areas within 80 px (dense texture everywhere raises N, f

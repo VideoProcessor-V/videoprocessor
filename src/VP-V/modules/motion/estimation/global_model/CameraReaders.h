@@ -82,6 +82,9 @@ namespace CameraLink
 		return doReset || doRelatch;
 	}
 
+	// The hooks run INSIDE Indicator::Observe on the render thread: they must be short and must NOT call
+	// Observe or SealAndObserve (re-entrant Observe is not guarded); Advance is allowed (clamped above the seal).
+	//
 	// Registers one camera reader (setup only, before the first Observe). Returns the reader index
 	// or -1 (Indicator::Register).
 	inline int RegisterCameraReader(VpIndicator::Indicator& indicator, const char* name, CameraReaderHooks hooks)

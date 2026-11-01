@@ -9,7 +9,6 @@
   "live_files": [
     "src/VP-V/modules/repair/temporal_detail/TemporalDetail.h",
     "src/VP-V/modules/repair/temporal_detail/TemporalDetailMotion.h",
-    "src/VP-V/modules/repair/temporal_detail/TemporalDetailProducts.h",
     "src/VP-V/modules/repair/temporal_detail/TemporalDetailModel.h",
     "src/VP-V/modules/repair/temporal_detail/TemporalDetailShaders.h",
     "src/VP-V/modules/repair/temporal_detail/TemporalDetailGpu.h",

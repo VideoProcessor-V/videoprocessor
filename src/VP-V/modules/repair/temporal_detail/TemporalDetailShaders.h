@@ -359,7 +359,7 @@ if (b.x < TD_BW && b.y < TD_BH) {
             else if (q > st.qLow * (1.0 + TD_REBOUND_TAU) && q - st.qLow >= TD_REBOUND_MIN) { st.rebounds += 1.0; st.rstate = 0.0; st.qHigh = q; }
         }
         bool falling = q < st.qPrev * (1.0 - TD_SOFT_STEP) && e2 < st.e2Prev * (1.0 - TD_SOFT_STEP) && st.qPrev >= TD_RETIRE_MIN;
-        st.softRun = falling ? st.softRun + 1.0 : 0.0;
+        st.softRun = falling ? min(st.softRun + 1.0, 1048576.0) : 0.0;   // saturates at TemporalDetail::kRunSaturate = 1 << 20 (as the model)
         st.qPeak *= peak_decay;
         if (q >= st.qPeak) { st.qPeak = q; st.e2Peak = e2; st.fPeak = F; }
         st.qPrev = q; st.e2Prev = e2;
@@ -451,6 +451,18 @@ if (li == 0u) {
             nlive++;
             admitted = true;
         }
+    }
+    // Ids only order the live slots (admission order). Rebase them so the smallest live id is 0: every id stays at most
+    // a few above TD_K and is exact in float forever (a raw frame-long counter is exact only to 2^24, ~77 h at 60 Hz).
+    // Subtracting exact small integers is exact, and the order of the live ids (all the readers use) is unchanged.
+    float idBase = 1e30;
+    for (int k = 0; k < TD_K; k++)
+        if (live[k] > 0.5) idBase = min(idBase, ids[k]);
+    if (nlive == 0) nextId = 0.0;
+    else if (idBase > 0.0) {
+        for (int k = 0; k < TD_K; k++)
+            if (live[k] > 0.5) ids[k] -= idBase;
+        nextId -= idBase;
     }
     for (int k = 0; k < TD_K; k++) imageStore(tab_out, ivec2(k, 0), vec4(live[k], ids[k], age[k], cleaned[k]));
     imageStore(tab_out, ivec2(TD_K, 0), vec4(admitted ? 1.0 : 0.0, float(cur), nextId, float(refreshes)));
@@ -645,7 +657,7 @@ if (b.x < TD_BW && b.y < TD_BH) {
         hardT = pa.x * referee;
         soft = bstrength * evidence * pa.y * pa.z * (st.retired > 0.5 ? 0.0 : 1.0);
         st.tHold = soft;
-        if (pb.x * pb.y < 0.1) st.vetoRun += 1.0; else st.vetoRun = 0.0;
+        if (pb.x * pb.y < 0.1) st.vetoRun = min(st.vetoRun + 1.0, 1048576.0); else st.vetoRun = 0.0;   // saturates (kRunSaturate)
     } else {
         st.vetoRun = 0.0;
     }
@@ -1004,8 +1016,11 @@ for (uint s = 128u; s > 0u; s >>= 1u) {
 if (li == 0u) {
     vec4 old = texelFetch(counters_old, ivec2(0, 0), 0);
     vec4 fs = texelFetch(tab_new, ivec2(TD_K, 0), 0), f2 = texelFetch(tab_new, ivec2(TD_K + 1, 0), 0);
-    imageStore(counters_out, ivec2(0, 0), vec4(td_sc[0].x, td_sc[0].y, old.z + td_sc[0].z, fs.w));
-    imageStore(counters_out, ivec2(1, 0), vec4(fs.x, f2.y, 0.0, 0.0));
+    // The cumulative guard-trip count as two exact float digits (lo < 2^20, hi = carries): exact far past 2^24 trips.
+    float hiOld = texelFetch(counters_old, ivec2(1, 0), 0).z;
+    float lo = old.z + td_sc[0].z, carry = floor(lo / 1048576.0);
+    imageStore(counters_out, ivec2(0, 0), vec4(td_sc[0].x, td_sc[0].y, lo - carry * 1048576.0, fs.w));
+    imageStore(counters_out, ivec2(1, 0), vec4(fs.x, f2.y, hiOld + carry, 0.0));
 }
 )GLSL";
 

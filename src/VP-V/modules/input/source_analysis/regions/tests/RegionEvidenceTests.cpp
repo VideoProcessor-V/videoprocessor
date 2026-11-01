@@ -389,7 +389,8 @@ namespace VideoProcessorTest
 					c.blockStatsBytes / 1024.0, nb->ringBytes / 1024.0, nb->liveBytes / 1024.0, c.derivedMapBytes / 1024.0,
 					Token(es->why), Token(eb->why));
 				Logger::WriteMessage(msg);
-				Require(ns->bufferBytes == c.grainSplitBytes && nb->bufferBytes == c.blockStatsBytes, "graph buffer sizes are the cost figures");
+				Require(ns->bufferBytes == BytesOf(reg.Get(ids.grainSplit).size, d) && nb->bufferBytes == BytesOf(reg.Get(ids.blockStats).size, d),
+					"graph buffer sizes are the core declarations (SA0: the declarations live once, in core/Products.h)");
 			}
 			Assert::AreEqual(static_cast<uint64_t>(45749760), CostAt({ 3840, 2160 }).grainSplitBytes);
 			Assert::AreEqual(static_cast<uint64_t>(182607360), CostAt({ 7680, 4320 }).grainSplitBytes);

@@ -31,6 +31,7 @@ namespace TemporalDetail
 	constexpr double kWienerKappa = 2.0;        // f = clamp(1 - kappa N / e3x3, 0, 1)
 	constexpr double kEnergyFloor = 1e-3;       // codes^2, added to q and to divisions
 	constexpr int kSlots = 5;                   // K past slots (one more, the future slot, in queued modes)
+	constexpr uint32_t kUnitVersion = 1;        // the td.* products' unit version (core/ProductCatalog.h)
 	constexpr int kMaxFutureFrames = 8;         // future frames the model looks at
 
 	// Guard (README step 3)
@@ -82,6 +83,7 @@ namespace TemporalDetail
 	// [kBlockGateMin, kBlockGateMax] (a 0 would make a smoothstep edge pair equal); the strength factor to [0, 1] (never above
 	// the user's strength, so no lift past the grain-side cap).
 	constexpr double kBlockGateMin = 0.25, kBlockGateMax = 4.0;
+	constexpr int kRunSaturate = 1 << 20;       // softRun / vetoRun saturate here (model and shader alike; keeps the float state exact)
 	inline double SanitizeBlockGate(double v, int k)
 	{
 		if (!(v == v) || v > 1e30 || v < -1e30) return 1.0;

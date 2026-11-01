@@ -708,14 +708,15 @@ namespace GpuAllocatorTestsNs
 		}
 		TEST_METHOD(RegionEvidenceAdoptsTheCoreGrainSplitProduct)
 		{
-			// SA2: with the core P10 in the registry the region-evidence module adds NO second grain.split
-			// declaration: it consumes kP10GrainSplit (same token, one node); standalone (no P10) it still
-			// appends its own as before.
+			// SA0/SA2: the declarations live once in core/Products.h; the region-evidence module adds NO second
+			// grain.split declaration: it consumes kP10GrainSplit / kP11RegionBlockStats; on a first-products-only
+			// registry it completes it to the skeleton set (the same ids everywhere).
 			std::vector<ProductDecl> decls = SkeletonProducts().All();
 			const size_t before = decls.size();
 			const RegionEvidence::ProductIds ids = RegionEvidence::AppendProducts(decls, MkDims(3840, 2160));
 			Assert::AreEqual(int(kP10GrainSplit), int(ids.grainSplit), L"adopts the core P10");
-			Assert::AreEqual(before + 1, decls.size(), L"only the block statistics are appended");
+			Assert::AreEqual(before, decls.size(), L"nothing is appended to the skeleton");
+			Assert::AreEqual(int(kP11RegionBlockStats), int(ids.blockStats), L"the core block statistics");
 			Assert::AreEqual(int(kP10cGrainSplitChroma), int(ids.grainSplitChroma), L"the chroma product is the core P10c");
 			const std::vector<ConsumerDecl> readers = RegionEvidence::GrainConsumers(ids, 100);
 			Assert::AreEqual(size_t(4), readers.size(), L"four declared readers");
@@ -728,7 +729,8 @@ namespace GpuAllocatorTestsNs
 			Assert::AreEqual(size_t(1), tokens, L"exactly one grain.split declaration");
 			std::vector<ProductDecl> alone = FirstProducts().All();
 			const RegionEvidence::ProductIds own = RegionEvidence::AppendProducts(alone, MkDims(3840, 2160));
-			Assert::IsTrue(own.grainSplit >= kFirstProductCount && own.grainSplit != kP10GrainSplit, L"standalone appends its own");
+			Assert::AreEqual(int(kP10GrainSplit), int(own.grainSplit), L"a first-products registry is completed to the skeleton: the same P10");
+			Assert::AreEqual(SkeletonProducts().Size(), alone.size(), L"completed to the skeleton set");
 		}
 
 		TEST_METHOD(CompactGrainDeclaresHalfTheBytes)

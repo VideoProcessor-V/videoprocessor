@@ -334,7 +334,7 @@ namespace GrainSplit
 	}
 
 	// The P10 declaration of the GRANTED storage (finisher MUST 2): the governor plans, and ProductTextures checks, what is
-	// really allocated. Built from the one core declaration (VpSkeleton::AppendGrainSplitProduct), never a private copy.
+	// really allocated. Built from the one core declaration (VpSkeleton::AppendGrainSplitProducts), never a private copy.
 	inline VpSkeleton::ProductDecl GrainDecl(Storage granted)
 	{
 		return VpSkeleton::SkeletonProducts(granted == Storage::Compact).Get(VpSkeleton::kP10GrainSplit);

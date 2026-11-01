@@ -23,7 +23,8 @@ frames (`....R....R`); 24p in 60 Hz shows the 2:3 pattern (`.R.RR.R.RR`).
 Options: `--input hdmi|sdi` (default hdmi), `--out DIR` (default
 `stream-YYYYMMDD-HHMMSS` next to where it is run), `--thumb W` (thumbnail
 width, default 240), `--raw N` (also save the first N full frames; about
-20 MB each at 4K, for exact reproduction only).
+20 MB each at 4K, for exact reproduction only), `--stamps` (off by default: also
+decode vp-stamp/1 frame stamps, see below).
 
 Output folder:
 
@@ -36,6 +37,16 @@ Output folder:
   `events.txt`).
 - `events.txt`: mode and format changes (restarted as VP does), the
   thumbnail size and raw frames saved.
+- `stamps.csv` (only with `--stamps`): one line per frame that has data:
+  `frame_index,arrival_qpc,src_found,src_kind,src_aux,src_index,src_contrast,out_found,out_aux,out_index,out_contrast`.
+  The source stamp (top-left, written by `tools/framestamp/make_stamped_clip.py`) and the
+  output stamp (top-right, drawn by VP's debug output hook, `VP_DEBUG_OUTPUT_STAMP=1`) are
+  decoded from the frame's luma (UYVY 8-bit, v210 10-bit, and the RGB formats'
+  luma weights), reading only the two block regions so the capture callback stays cheap
+  at 2160p30. `found` is 0/1; kind/aux are -1 and index 0 when not found; contrast is in
+  code values. The format is defined in
+  `src/VP-V/modules/control/diagnostics/FrameStamp.h` (`tools/framestamp/README.md`).
+  Without `--stamps` nothing changes: no file, no decoding.
 
 The thumbnails are small, but they are still pictures of the content: keep
 recordings local and do not commit them.

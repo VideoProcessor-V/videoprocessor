@@ -430,4 +430,101 @@ namespace FallbackCatalog
 			"source monitor fast-pan / intent without whole-frame motion (vector engine pair missed)") :
 			Released("vector_engine_global");
 	}
+
+	// ---- skeleton analysis lane -----------------------------------------------------------------
+	// The regulator reduced the lane's work (dropped products, forced live fills, T0 in the render,
+	// pinned at the minimum, the optical-flow input reduced by `ofaStep` steps: 0 = full), or the lane is
+	// not available for the source stats. The lists hold plain-language product names (the host maps ids
+	// to names).
+	inline std::string JoinNames(const std::vector<std::string>& names)
+	{
+		std::string out;
+		for (size_t i = 0; i < names.size(); ++i)
+			out += (i ? ", " : "") + names[i];
+		return out;
+	}
+	inline Decision AnalysisLane(const std::vector<std::string>& dropped, const std::vector<std::string>& forcedLive,
+		bool pinnedAtMinimum, bool t0InRender, unsigned ofaStep = 0)
+	{
+		if (dropped.empty() && forcedLive.empty() && !pinnedAtMinimum && !t0InRender && ofaStep == 0)
+			return Released("analysis_lane");
+		std::string reason;
+		auto add = [&reason](const std::string& part) { reason += (reason.empty() ? std::string() : "; ") + part; };
+		if (!dropped.empty())
+			add("reduced: " + JoinNames(dropped) + " off (dropped)");
+		if (!forcedLive.empty())
+			add("forced live: " + JoinNames(forcedLive));
+		if (t0InRender)
+			add("core analysis runs in the render");
+		if (ofaStep != 0)
+			add("vector engine input reduced (step " + std::to_string(ofaStep) + ")");
+		if (pinnedAtMinimum)
+			add("analysis at minimum");
+		return Engaged("analysis_lane", reason);
+	}
+	inline Decision AnalysisLaneDeterminism(unsigned long long missedBounds)
+	{
+		if (missedBounds == 0)
+			return Released("analysis_lane_determinism");
+		return Engaged("analysis_lane_determinism", "deterministic playback: " + std::to_string(missedBounds) +
+			" frames missed the bounded wait (vector engine fallback used; this run is not reproducible)");
+	}
+	inline Decision SourceStatsWalk(bool laneRequested, bool laneUnavailable)
+	{
+		return laneRequested && laneUnavailable ? Engaged("source_stats_walk",
+			"active-picture walk uses Bill's original walk (lane source stats unavailable)") :
+			Released("source_stats_walk");
+	}
+
+	// ---- product graph (core/ProductCatalog.h) ----------------------------------------------------
+	// Every consumer of a shared product states what it does when the product is missing, stale, shed or its unit
+	// version differs from the one the reader expects. These are the ids the catalog rows name; the GUI's one-time
+	// notice keys on them like any other entry. `text` says what runs instead.
+	struct ProductEntry
+	{
+		const char* id;
+		const char* text;
+	};
+	inline const ProductEntry* ProductEntries(size_t* count)
+	{
+		static const ProductEntry kEntries[] = {
+			{ "product.unit_version", "a shared product was made by another unit version: the reader runs its own reduced form" },
+			{ "product.detail_pulse", "detail pulse measures its own bands and tiles (shared split / block statistics unavailable)" },
+			{ "product.texture_restore", "texture restore measures its own bands and noise (shared split / block statistics unavailable)" },
+			{ "product.debander", "debander uses its own half split and tensor (shared split / block statistics unavailable)" },
+			{ "product.adaptive_downscale", "adaptive downscale computes its own edge, grain and cut terms (shared products unavailable)" },
+			{ "product.sigma_delta", "output dither runs its own vector search (shared analysis field unavailable)" },
+			{ "product.led_lookahead", "LED look-ahead measures the queued frames itself (shared source statistics unavailable)" },
+			{ "product.hdr_inference", "HDR inference reads its own grid (shared source statistics unavailable)" },
+			{ "product.source_resolution", "source-resolution monitor judges its own cuts (shared source statistics unavailable)" },
+			{ "product.source_id", "source identification reads the monitor snapshot only (shared tiles unavailable)" },
+			{ "product.interpolator", "interpolator builds its own grain bands and uses the render-time field (shared products unavailable)" },
+			{ "product.temporal_detail", "temporal detail runs a lower memory tier or its own split (shared split / store unavailable)" },
+			{ "product.chroma_cfl", "chroma upscale runs a lower tier without the grain guard (chroma split unavailable)" },
+			{ "product.entrance", "entrance stages run in the render with no work done ahead (entrance output unavailable)" },
+			{ "product.motion_warp", "motion warp builds its own half-resolution pyramids (shared half luma unavailable)" },
+			{ "product.nvof_producer", "optical-flow producer builds its own 8-bit half luma (shared half luma unavailable)" },
+			{ "product.region_evidence", "regional repairs use their own local statistics (shared split / light level unavailable)" },
+			{ "product.light_level", "light-level users use the global level only (per-block light level unavailable)" },
+			{ "product.vector_demand", "vector consumer runs without vectors (the vector engine product is unavailable)" },
+			{ "product.camera", "camera consumer runs causal / without the camera model (camera products unavailable or short queue)" },
+		};
+		if (count)
+			*count = sizeof(kEntries) / sizeof(kEntries[0]);
+		return kEntries;
+	}
+	inline const ProductEntry* FindProductEntry(const char* id)
+	{
+		size_t n = 0;
+		const ProductEntry* e = ProductEntries(&n);
+		for (size_t i = 0; i < n; ++i)
+			if (std::string(e[i].id) == id)
+				return &e[i];
+		return nullptr;
+	}
+	inline Decision ProductFallback(const char* id, const std::string& why)
+	{
+		const ProductEntry* e = FindProductEntry(id);
+		return Engaged(id, (e ? std::string(e->text) : std::string("reduced form")) + ": " + why);
+	}
 }

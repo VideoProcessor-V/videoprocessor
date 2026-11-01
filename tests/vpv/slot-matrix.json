@@ -329,7 +329,10 @@
     "byte-identical with the slot off",
     "zero GPU passes when off"
    ],
-   "isolation": [],
+   "isolation": [
+    "CPU model: flat/BTB-WTW exact, siting at chroma sites, luma-correlated edge vs Catmull-Rom, 4:2:2, chroma-grain isolate within 5%, active picture bars",
+    "GPU vs CPU model within 0.02 codes on WARP (4:2:0 left/co-sited, 4:2:2, letterbox/pillarbox), off returns the frame, determinism"
+   ],
    "contract": [
     "libplacebo does not re-upsample when the slot outputs 4:4:4"
    ],
@@ -337,7 +340,6 @@
   },
   "fallback_entry": "Chroma upscale: libplacebo (<reason>)",
   "missing": [
-   "isolation",
    "chain"
   ]
  },

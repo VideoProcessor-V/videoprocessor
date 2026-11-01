@@ -168,7 +168,9 @@ namespace TemporalDetail
 			const int nc = src->params.format->num_components;
 			out.guardActive = static_cast<int>(v[0]);
 			out.addBackBlocks = static_cast<int>(v[1]);
-			out.guardTrips = static_cast<int>(v[2]);
+			// lo + hi x 2^20 (kStatsBody keeps the cumulative count as two exact float digits); saturates at INT_MAX
+			const double trips = static_cast<double>(v[2]) + 1048576.0 * static_cast<double>(v[static_cast<size_t>(nc) + 2]);
+			out.guardTrips = trips >= 2147483647.0 ? 2147483647 : static_cast<int>(trips);
 			out.refreshes = static_cast<int>(v[3]);
 			out.admitted = v[static_cast<size_t>(nc)] > 0.5f;
 			out.liveSlots = static_cast<int>(v[static_cast<size_t>(nc) + 1]);

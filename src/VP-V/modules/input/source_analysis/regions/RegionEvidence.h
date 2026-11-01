@@ -57,6 +57,9 @@ namespace GrainSplit { namespace Gpu { struct Frame; } }   // GrainSplitGpu.h (l
 
 namespace RegionEvidence
 {
+	// Unit version of region_block_stats (P11): bump on ANY change of its law, passes or layout (core/ProductCatalog.h).
+	constexpr uint32_t kUnitVersion = 1;
+
 	// Active picture / overlay rectangles in source-raster px (right/bottom exclusive), same layout as FrameAnalysis::Rect.
 	struct Rect
 	{
@@ -847,46 +850,25 @@ namespace RegionEvidence
 	// E = 0 (kNoGrain, named in StatusOf). The camera record rides FrameAnalysisStore kCamera (not a skeleton product);
 	// without it the aux texel carries confidence 0 (named in StatusOf). The visibility term reads the output settings
 	// (display peak). Both are T0: every regional repair depends on them.
-	inline ProductIds AppendProducts(std::vector<VpSkeleton::ProductDecl>& decls, VpSkeleton::Dims frame)
+	inline ProductIds AppendProducts(std::vector<VpSkeleton::ProductDecl>& decls, VpSkeleton::Dims /*frame*/)
 	{
+		// The declarations live ONCE, in core/Products.h (SA0): P10 grain split (kP10GrainSplit) and P11 region block
+		// statistics (kP11RegionBlockStats). This returns their ids. On a registry that holds only the first products
+		// it completes it to the skeleton set (SkeletonProducts() order), so the ids are dense and the same everywhere;
+		// on a registry that already holds the skeleton it appends nothing.
 		using namespace VpSkeleton;
-		using namespace VpIndicator;
-		const CounterMask content = Bit(kFull) | Bit(kContinuity);
-		const Cost c = CostAt(frame);
+		if (decls.size() == static_cast<size_t>(kFirstProductCount))
+		{
+			AppendCameraProducts(decls);
+			AppendGrainSplitProducts(decls);
+			AppendRegionProducts(decls);
+			AppendSourceRingProduct(decls);
+			AppendTemporalDetailProducts(decls);
+		}
 		ProductIds ids;
-
-		// SA2: when the registry already carries the core P10 (SkeletonProducts), that ONE declaration is the grain
-		// split node; the private one below is only the standalone form (a registry built without it).
-		if (decls.size() > VpSkeleton::kP10GrainSplit && std::string(decls[VpSkeleton::kP10GrainSplit].token) == kTokenGrainSplit)
-		{
-			ids.grainSplit = VpSkeleton::kP10GrainSplit;
-			if (decls.size() > VpSkeleton::kP10cGrainSplitChroma && std::string(decls[VpSkeleton::kP10cGrainSplitChroma].token) == "grain.split.chroma")
-				ids.grainSplitChroma = VpSkeleton::kP10cGrainSplitChroma;
-		}
-		else
-		{
-			ProductDecl gs = detail::Make(static_cast<ProductId>(decls.size()), kTokenGrainSplit, "grain split (shared)",
-				Backend::GpuCompute, 1, Tier::T0, content, Bit(kSettingsAnalysis));
-			gs.sourceFrame = true;
-			detail::AddInput(gs, kP4SourceStats, 0);
-			detail::AddTerm(gs, 0, 5);
-			detail::AddTerm(gs, 1, 2);
-			gs.size.fixedBytes = static_cast<uint32_t>(c.blocks * 16);
-			gs.refRenderMs = static_cast<float>(c.refMsSplit);
-			ids.grainSplit = gs.id;
-			decls.push_back(gs);
-		}
-
-		ProductDecl bs = detail::Make(static_cast<ProductId>(decls.size()), "region_block_stats", "region block statistics",
-			Backend::GpuCompute, 1, Tier::T0, content, Bit(kSettingsAnalysis) | Bit(kSettingsMotion) | Bit(kSettingsOutput));
-		bs.sourceFrame = true;
-		detail::AddInput(bs, ids.grainSplit, 0);
-		detail::AddInput(bs, kP4SourceStats, 0);
-		bs.size.fixedBytes = static_cast<uint32_t>(c.blockStatsBytes);
-		bs.missingInputForm = true;
-		bs.refRenderMs = static_cast<float>(c.refMsStats);
-		ids.blockStats = bs.id;
-		decls.push_back(bs);
+		ids.grainSplit = kP10GrainSplit;
+		ids.blockStats = kP11RegionBlockStats;
+		ids.grainSplitChroma = kP10cGrainSplitChroma;
 		return ids;
 	}
 }

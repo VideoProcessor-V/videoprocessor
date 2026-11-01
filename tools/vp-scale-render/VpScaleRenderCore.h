@@ -852,6 +852,17 @@ namespace VpScaleRenderCore
 					drain(done);
 					if (!done.empty()) { capture = done.back(); got = true; }
 					done.clear();
+					// Sweep run 2026-10-31: the first capture after a picture change can still show a queued
+					// frame of the previous picture (the renderer's queue is several frames deep); such a
+					// capture is dropped and the request repeated until this picture's frame is captured
+					// (bounded by giveUp, then reported as a failure as before).
+					if (got && !job.noCapture && capture.tag != pic.tag)
+					{
+						CaptureLog(("VpScaleRender: capture showed " + capture.tag + " while " + pic.tag + " plays; requesting again").c_str());
+						got = false;
+						requested = false;
+						capture = Seq::Capture();
+					}
 				}
 			}
 			capture.requested = pic.tag;

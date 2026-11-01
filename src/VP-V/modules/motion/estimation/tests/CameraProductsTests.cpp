@@ -12,6 +12,7 @@
 
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/core/ProductGraph.h>
+#include <VP-V/core/ProductSlots.h>
 #include <VP-V/modules/motion/estimation/VectorDemandProducts.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraProducts.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraReaders.h>
@@ -23,6 +24,8 @@
 #include <cctype>
 #include <filesystem>
 #include <memory>
+#include <regex>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -113,7 +116,7 @@ namespace CameraProductsTestsNs
 			const Registry reg = SkeletonProducts();
 			const char* why = "";
 			Assert::IsTrue(reg.Validate(&why), L"skeleton validates");
-			Assert::AreEqual(size_t(kSA2ProductEnd), reg.Size());   // the camera products, then SA2's P10 and P10c
+			Assert::AreEqual(size_t(kSkeletonProductEnd), reg.Size());
 			Assert::AreEqual(int(kFirstProductCount), 8);
 			Assert::AreEqual(int(kP7CameraFit), int(kFirstProductCount));
 			Assert::AreEqual(int(kP8CameraLabels), int(kFirstProductCount) + 1);
@@ -232,18 +235,55 @@ namespace CameraProductsTestsNs
 			Assert::IsTrue(Registry(good).Validate());
 		}
 
-		TEST_METHOD(LeadEdgesAreNotLagZeroEdges)
+		TEST_METHOD(LeadEdgesAreNotLagZeroEdgesAndNeverChainOrLoop)
 		{
-			// P9 reads P7 at a lead and P7 reads nothing of P9: no cycle either way. A P7 that read P9 at
-			// lag 0 would be a cycle; at a lead it is not.
+			// P5 (monitor tiles) reads P7 at a LEAD: acyclic (P7 never reaches P5), so valid; the same edge at
+			// lag 0 is also acyclic but is not a lead.
 			std::vector<ProductDecl> d = SkeletonProducts().All();
-			VpSkeleton::detail::AddLead(d[kP7CameraFit], kP9CameraSmoothed, 1);
-			d[kP7CameraFit].shortQueueSubstitute = kP8CameraLabels;   // a substitute without leads
-			// P8 reads P7 at lag 0, P9 reads P7 at lag 0: still acyclic over lag-0 edges.
-			Assert::IsTrue(Registry(d).Validate(), L"lead edge plays no part in the cycle check");
+			VpSkeleton::detail::AddLead(d[kP5MonitorTiles], kP7CameraFit, 1);
+			d[kP5MonitorTiles].shortQueueSubstitute = kP4SourceStats;   // a substitute without leads
+			const char* why = "";
+			Assert::IsTrue(Registry(d).Validate(&why), L"an acyclic lead is valid");
+
+			// A lead loop: P3 reads P7 ahead while P7 reads P3.
+			std::vector<ProductDecl> loop = SkeletonProducts().All();
+			VpSkeleton::detail::AddLead(loop[kP3AnalysisField], kP7CameraFit, 1);
+			loop[kP3AnalysisField].shortQueueSubstitute = kP4SourceStats;
+			Assert::IsTrue(ValidateFails(loop), L"a lead that closes a loop");
+
+			// A lead chain: P5 reads P9, which itself looks ahead.
+			std::vector<ProductDecl> chain = SkeletonProducts().All();
+			VpSkeleton::detail::AddLead(chain[kP5MonitorTiles], kP9CameraSmoothed, 1);
+			chain[kP5MonitorTiles].shortQueueSubstitute = kP4SourceStats;
+			Assert::IsTrue(ValidateFails(chain), L"a lead chain");
+
+			// The same edge at lag 0 closing a loop is a lag-0 cycle.
 			std::vector<ProductDecl> cyc = SkeletonProducts().All();
-			VpSkeleton::detail::AddInput(cyc[kP7CameraFit], kP9CameraSmoothed, 0);
+			VpSkeleton::detail::AddInput(cyc[kP3AnalysisField], kP7CameraFit, 0);
 			Assert::IsTrue(ValidateFails(cyc), L"the same edge at lag 0 is a cycle");
+
+			// A substitute that reads the product it replaces.
+			std::vector<ProductDecl> sub = SkeletonProducts().All();
+			sub[kP9CameraSmoothed].shortQueueSubstitute = kP8CameraLabels;   // P8 reads P7 not P9: fine
+			Assert::IsTrue(Registry(sub).Validate());
+			VpSkeleton::detail::AddInput(sub[kP8CameraLabels], kP9CameraSmoothed, 0);
+			Assert::IsTrue(ValidateFails(sub), L"substitute reads the original");
+		}
+
+		TEST_METHOD(SlotTableFailsClosedOnLookAheadInputs)
+		{
+			const Registry reg = SkeletonProducts();
+			const Graph lead = BuildGraph(reg, Camera({ CameraLink::CameraConsumer::TemporalDetail }), Settings(3));
+			Assert::IsTrue(lead.valid);
+			VpSkeleton::SlotTable bad(lead);
+			Assert::IsFalse(bad.Valid());
+			Assert::IsTrue(bad.Error()[0] != '\0', L"a plain visible reason");
+			Assert::AreEqual(size_t(0), bad.Count());
+			// The causal form (no lead input) is fine.
+			const Graph causal = BuildGraph(reg, Camera({ CameraLink::CameraConsumer::TemporalDetail }), Settings(1));
+			VpSkeleton::SlotTable ok(causal);
+			Assert::IsTrue(ok.Valid());
+			Assert::AreEqual(causal.nodes.size(), ok.Count());
 		}
 
 		TEST_METHOD(GraphOffHasNoCameraNodesAndMatchesTheFirstProducts)
@@ -286,7 +326,9 @@ namespace CameraProductsTestsNs
 			const std::vector<ConsumerDecl> cs = Camera({ CameraLink::CameraConsumer::Diagnostics });
 			const Graph g = BuildGraph(reg, cs, Settings(1, true));
 			Assert::IsTrue(g.valid);
-			for (ProductId p : std::initializer_list<ProductId>{ kP1HalfLuma, kP2VectorPair, kP3AnalysisField, kP4SourceStats, kP7CameraFit, kP8CameraLabels })
+			const ProductId expected[] = { ProductId(kP1HalfLuma), ProductId(kP2VectorPair), ProductId(kP3AnalysisField),
+				ProductId(kP4SourceStats), ProductId(kP7CameraFit), ProductId(kP8CameraLabels) };
+			for (ProductId p : expected)
 				Assert::AreEqual(1, CountOf(g, p));
 			Assert::AreEqual(size_t(6), g.nodes.size());
 			Assert::IsFalse(g.Has(kP9CameraSmoothed));
@@ -301,54 +343,66 @@ namespace CameraProductsTestsNs
 			Assert::AreEqual(1, CountOf(noEngine, kP2mMatcherPair));
 		}
 
-		TEST_METHOD(TemporalDetailLeadFollowsTheLaneLead)
+		TEST_METHOD(TemporalDetailLeadFollowsTheLaneLeadMinusOne)
 		{
 			const Registry reg = SkeletonProducts();
 			const std::vector<ConsumerDecl> td = Camera({ CameraLink::CameraConsumer::TemporalDetail });
 			const std::vector<ConsumerDecl> diag = Camera({ CameraLink::CameraConsumer::Diagnostics });
 
-			for (uint8_t lane = 1; lane <= 2; ++lane) {
+			// Effective lead = min(declared 2, laneLead - 1): lane 2 -> 1 (partial), lane 3 -> 2 (full).
+			for (uint8_t lane = 2; lane <= 3; ++lane) {
+				const int expected = lane - 1;
 				const Graph g = BuildGraph(reg, td, Settings(lane));
 				const Graph base = BuildGraph(reg, diag, Settings(lane));
 				Assert::IsTrue(g.valid && base.valid);
 				const Node* p9 = g.Find(kP9CameraSmoothed);
 				Assert::IsNotNull(p9);
-				Assert::AreEqual(int(lane), int(p9->lead));
+				Assert::AreEqual(expected, int(p9->lead));
+				Assert::AreEqual(int(kMaxCameraLead), int(p9->declaredLead));
 				Assert::IsFalse(p9->shortQueue);
-				Assert::AreEqual(int(lane), int(p9->inputs[1].lead));
+				Assert::AreEqual(expected, int(p9->inputs[1].lead));
 				Assert::AreEqual(0, int(p9->inputs[0].lead));
 				const Node* p7 = g.Find(kP7CameraFit);
 				const Node* p7Base = base.Find(kP7CameraFit);
 				Assert::IsNotNull(p7);
 				Assert::IsNotNull(p7Base);
-				Assert::AreEqual(int(lane), int(p7->leadRead));
-				Assert::AreEqual(int(p7Base->ring) + int(lane), int(p7->ring));
-				Assert::AreEqual(base.framesInFlight + lane, g.framesInFlight);
+				Assert::AreEqual(expected, int(p7->leadRead));
+				Assert::AreEqual(int(p7Base->ring) + expected, int(p7->ring));
+				Assert::AreEqual(base.framesInFlight + size_t(expected), g.framesInFlight);
 				Assert::AreEqual(size_t(0), g.ReducedNodes().size());
+				// A partial lead is listed with both numbers.
+				Assert::AreEqual(size_t(lane == 2 ? 1 : 0), g.PartialLeadNodes().size());
 			}
 
-			// A queue that cannot supply the lead: P9 is replaced by the causal P7 (visible, listed).
-			const Graph causal = BuildGraph(reg, td, Settings(0));
-			const Graph causalBase = BuildGraph(reg, diag, Settings(0));
-			Assert::IsTrue(causal.valid);
-			Assert::IsFalse(causal.Has(kP9CameraSmoothed));
-			const Node* p7 = causal.Find(kP7CameraFit);
-			Assert::IsNotNull(p7);
-			Assert::IsTrue(p7->shortQueue);
-			Assert::AreEqual(int(kP9CameraSmoothed), int(p7->reducedFrom));
-			Assert::AreEqual(0, int(p7->leadRead));
-			Assert::AreEqual(int(causalBase.Find(kP7CameraFit)->ring), int(p7->ring));
-			Assert::AreEqual(causalBase.framesInFlight, causal.framesInFlight);
-			const std::vector<const Node*> reduced = causal.ReducedNodes();
-			Assert::AreEqual(size_t(1), reduced.size());
-			Assert::AreEqual(int(kP7CameraFit), int(reduced[0]->id));
+			// A queue that cannot supply any lead (lane 0 or 1): P9 is replaced by the causal P7.
+			for (uint8_t lane = 0; lane <= 1; ++lane) {
+				const Graph causal = BuildGraph(reg, td, Settings(lane));
+				const Graph causalBase = BuildGraph(reg, diag, Settings(lane));
+				Assert::IsTrue(causal.valid);
+				Assert::IsFalse(causal.Has(kP9CameraSmoothed));
+				const Node* p7 = causal.Find(kP7CameraFit);
+				Assert::IsNotNull(p7);
+				Assert::IsTrue(p7->shortQueue);
+				Assert::AreEqual(int(kP9CameraSmoothed), int(p7->reducedFrom));
+				Assert::AreEqual(0, int(p7->leadRead));
+				Assert::AreEqual(int(causalBase.Find(kP7CameraFit)->ring), int(p7->ring));
+				Assert::AreEqual(causalBase.framesInFlight, causal.framesInFlight);
+				const std::vector<const Node*> reduced = causal.ReducedNodes();
+				Assert::AreEqual(size_t(1), reduced.size());
+				Assert::AreEqual(int(kP7CameraFit), int(reduced[0]->id));
+				// The record names what was reduced even though P7 was also asked for directly.
+				Assert::AreEqual(size_t(1), causal.reductions.size());
+				Assert::AreEqual(int(kP9CameraSmoothed), int(causal.reductions[0].asked));
+				Assert::AreEqual(int(kP7CameraFit), int(causal.reductions[0].made));
+				Assert::AreEqual(size_t(0), causal.PartialLeadNodes().size());
+			}
 		}
 
 		TEST_METHOD(SmoothedOnlyConsumerKeepsTheDeclaredIdWhenSubstituted)
 		{
 			const Registry reg = SkeletonProducts();
 			const std::vector<ConsumerDecl> roll = Camera({ CameraLink::CameraConsumer::RollOff });
-			const Graph on = BuildGraph(reg, roll, Settings(2));
+			const Graph on = BuildGraph(reg, roll, Settings(3));
 			Assert::IsTrue(on.valid && on.Has(kP9CameraSmoothed) && on.Has(kP7CameraFit));
 			Assert::IsFalse(on.Has(kP8CameraLabels));
 			const Graph off = BuildGraph(reg, roll, Settings(0));
@@ -399,11 +453,11 @@ namespace CameraProductsTestsNs
 			Assert::IsTrue(m == CameraModel::Consumer::OcclusionMask);
 			Assert::IsFalse(CameraLink::ToModelConsumer(CameraConsumer::Diagnostics, &m));
 			// The whole set builds a valid graph on every lane lead.
-			for (uint8_t lane = 0; lane <= 2; ++lane) {
+			for (uint8_t lane = 0; lane <= 3; ++lane) {
 				const Graph g = BuildGraph(SkeletonProducts(), cs, Settings(lane));
 				Assert::IsTrue(g.valid);
 				Assert::AreEqual(1, CountOf(g, kP7CameraFit));
-				Assert::AreEqual(lane == 0 ? 0 : 1, CountOf(g, kP9CameraSmoothed));
+				Assert::AreEqual(lane <= 1 ? 0 : 1, CountOf(g, kP9CameraSmoothed));
 			}
 		}
 
@@ -520,6 +574,8 @@ namespace CameraProductsTestsNs
 			Assert::IsTrue(fs::exists(root), L"src folder found from __FILE__");
 			size_t scanned = 0;
 			std::string offenders;
+			const std::regex call("PublishCamera\\s*\\(|::PublishCamera\\b");
+			const std::string adapter = Lower("src/VP-V/modules/motion/estimation/global_model/CameraStoreAdapter.h");
 			for (const fs::directory_entry& e : fs::recursive_directory_iterator(root)) {
 				if (!e.is_regular_file())
 					continue;
@@ -529,13 +585,26 @@ namespace CameraProductsTestsNs
 					continue;
 				const std::string low = Lower(path);
 				const std::string name = Lower(e.path().filename().string());
-				if (name == "frameanalysisstore.h" || name == "camerastoreadapter.h")
+				if (name == "frameanalysisstore.h")
+					continue;
+				if (low.size() >= adapter.size() && low.compare(low.size() - adapter.size(), adapter.size(), adapter) == 0)
 					continue;
 				if (low.find("\\tests\\") != std::string::npos || low.find("\\videoprocessor-test\\") != std::string::npos)
 					continue;
 				++scanned;
-				if (SettingsTestSupport::ReadFile(path).find("PublishCamera(") != std::string::npos)
-					offenders += path + "\n";
+				std::istringstream lines(SettingsTestSupport::ReadFile(path));
+				std::string line;
+				int lineNo = 0;
+				while (std::getline(lines, line)) {
+					++lineNo;
+					const size_t first = line.find_first_not_of(" \t");
+					if (first == std::string::npos)
+						continue;
+					if (line.compare(first, 2, "//") == 0 || line[first] == '*' || line.compare(first, 2, "/*") == 0)
+						continue;
+					if (std::regex_search(line, call))
+						offenders += path + ":" + std::to_string(lineNo) + "\n";
+				}
 			}
 			Assert::IsTrue(scanned > 100, L"the scan walked the source tree");
 			Assert::AreEqual(std::string(), offenders);

@@ -115,6 +115,8 @@
     </ClCompile>
     <ClCompile Include="ExtendedRangeCarryTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationCoreTests.cpp"><Filter>VP-V</Filter></ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelLutTests.cpp"><Filter>VP-V</Filter></ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelCrossCheckTests.cpp"><Filter>VP-V</Filter></ClCompile>
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationRemainderTests.cpp"><Filter>VP-V</Filter></ClCompile>
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationMeterTests.cpp"><Filter>VP-V</Filter></ClCompile>
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationPhase2Tests.cpp"><Filter>VP-V</Filter></ClCompile>
@@ -306,6 +308,8 @@
   <ItemGroup><ClCompile Include="..\VP-V\tests\SettingsFingerprintStructureTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\tests\SettingsDefaultsGoldenTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClInclude Include="..\VP-V\tests\SettingsTestSupport.h"><Filter>VP-V</Filter></ClInclude></ItemGroup>
+  <ItemGroup><ClInclude Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelGolden.generated.h"><Filter>VP-V</Filter></ClInclude></ItemGroup>
+  <ItemGroup><ClInclude Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelCrossCheck.generated.h"><Filter>VP-V</Filter></ClInclude></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\segments\OutputSegmentsMerge.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\tests\SegmentRunnerTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\tests\OutputSegmentsGpuTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
@@ -335,6 +339,11 @@
   <ItemGroup><ClCompile Include="..\VP-V\tests\AncestryTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\tests\ProductGraphTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\tests\ProductSlotsTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\tests\SkeletonLaneTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\tests\SkeletonGapTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\tests\AnalysisLaneTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\tests\LaneProductsTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\tests\SkeletonRegulatorTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\tests\CardProfileTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\tests\VramGovernorTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\tests\GpuAllocatorTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
@@ -344,6 +353,7 @@
   <ItemGroup><ClCompile Include="..\VP-V\modules\repair\grain_split\tests\GrainUnitGpuTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\VectorDemandProductsTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraProductsTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\tests\ProductCatalogTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdConsensusTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\AbrStepDetectorTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceWiringTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
