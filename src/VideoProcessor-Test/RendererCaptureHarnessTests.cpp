@@ -143,7 +143,7 @@ namespace
 	// skip fails instead.
 	bool RequireGpu()
 	{
-		return EnvIs("VP_TEST_REQUIRE_GPU", "1");
+		return EnvIs("VP_TEST_REQUIRE_GPU", "1") || EnvIs("VP_TEST_REQUIRE_ALL", "1");
 	}
 
 	// The hardware tests' guard: true when the test can run (VP_TEST_GPU=hardware). Otherwise,
