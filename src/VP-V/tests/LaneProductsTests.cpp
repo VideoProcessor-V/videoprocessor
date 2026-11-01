@@ -16,7 +16,9 @@
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneGpuJobs.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneReadback.h>
+#include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -714,6 +716,123 @@ namespace LaneProductsTestsNs
 				Assert::IsTrue(r[1].liveFilled && r[1].final == SealOutcome::Sealed, L"P6 live-filled");
 				Assert::IsTrue(h.fills == 2u, L"exactly the cascade: two live fills");
 			}
+		}
+	};
+}
+
+// U3 (shared half-luma unit): the lane's P1 producer now calls VpUnit::HalfLuma. The frozen copies below are the private
+// implementations it replaced; the product bytes must be identical.
+namespace HalfLumaUnitTestsNs
+{
+	using namespace VpSkeleton;
+	using LaneProductsTestsNs::Frame;
+	using LaneProductsTestsNs::MakeFrame;
+
+	inline void OldHalfLumaRows(const SourceFrameView& v, uint16_t* half, uint32_t rowBegin, uint32_t rowEnd)
+	{
+		const uint32_t hw = (v.width + 1u) / 2u;
+		const uint32_t hh = (v.height + 1u) / 2u;
+		if (rowEnd > hh)
+			rowEnd = hh;
+		for (uint32_t y = rowBegin; y < rowEnd; ++y) {
+			const uint32_t y0 = 2u * y;
+			const uint32_t y1 = std::min(y0 + 1u, v.height - 1u);
+			const uint16_t* r0 = v.luma + size_t(y0) * v.strideSamples;
+			const uint16_t* r1 = v.luma + size_t(y1) * v.strideSamples;
+			uint16_t* dst = half + size_t(y) * hw;
+			for (uint32_t x = 0; x < hw; ++x) {
+				const uint32_t x0 = 2u * x;
+				const uint32_t x1 = std::min(x0 + 1u, v.width - 1u);
+				const uint32_t a = uint32_t(uint16_t(r0[x0] << v.msbShift));
+				const uint32_t b = uint32_t(uint16_t(r0[x1] << v.msbShift));
+				const uint32_t c = uint32_t(uint16_t(r1[x0] << v.msbShift));
+				const uint32_t d = uint32_t(uint16_t(r1[x1] << v.msbShift));
+				dst[x] = uint16_t((a + b + c + d + 2u) >> 2);
+			}
+		}
+	}
+
+	inline void OldQuarterFromHalf(const uint16_t* half, uint32_t hw, uint32_t hh, uint16_t* quarter, uint32_t rowBegin, uint32_t rowEnd)
+	{
+		const uint32_t qw = (hw + 1u) / 2u;
+		const uint32_t qh = (hh + 1u) / 2u;
+		if (rowEnd > qh)
+			rowEnd = qh;
+		for (uint32_t y = rowBegin; y < rowEnd; ++y) {
+			const uint32_t y0 = 2u * y;
+			const uint32_t y1 = std::min(y0 + 1u, hh - 1u);
+			const uint16_t* r0 = half + size_t(y0) * hw;
+			const uint16_t* r1 = half + size_t(y1) * hw;
+			uint16_t* dst = quarter + size_t(y) * qw;
+			for (uint32_t x = 0; x < qw; ++x) {
+				const uint32_t x0 = 2u * x;
+				const uint32_t x1 = std::min(x0 + 1u, hw - 1u);
+				dst[x] = uint16_t((uint32_t(r0[x0]) + r0[x1] + r1[x0] + r1[x1] + 2u) >> 2);
+			}
+		}
+	}
+
+	TEST_CLASS(HalfLumaUnitTests)
+	{
+	public:
+		TEST_METHOD(UnitVersionAndGridMatchTheLaneProducts)
+		{
+			Assert::AreEqual(uint32_t(1), VpUnit::HalfLuma::kUnitVersion);
+			Assert::AreEqual(VpUnit::HalfLuma::kUnitVersion, VpLaneProducts::kHalfLumaVersion, L"the lane's version is the unit's");
+			for (uint32_t v : { 1u, 2u, 3u, 4u, 5u, 7u, 1080u, 1081u, 3840u, 7680u })
+			{
+				Assert::AreEqual((v + 1u) / 2u, VpUnit::HalfLuma::HalfDim(v));
+				Assert::AreEqual((v + 3u) / 4u, VpUnit::HalfLuma::QuarterDim(v));
+				Assert::AreEqual(VpUnit::HalfLuma::QuarterDim(v), VpUnit::HalfLuma::HalfDim(VpUnit::HalfLuma::HalfDim(v)), L"quarter = half of half");
+			}
+			Assert::IsTrue(VpUnit::HalfLuma::TotalBytes(1921, 1081) == VpLaneProducts::HalfLumaBytes(Dims{ 1921, 1081 }));
+		}
+
+		TEST_METHOD(ProductBytesAreIdenticalToTheFrozenPrivateCopy)
+		{
+			const Dims dims[] = { { 1, 1 }, { 2, 2 }, { 3, 5 }, { 5, 3 }, { 7, 9 }, { 16, 16 }, { 33, 17 }, { 64, 3 }, { 1, 40 }, { 41, 1 }, { 255, 129 } };
+			for (const Dims& d : dims)
+				for (uint8_t shift : { uint8_t(0), uint8_t(6) })
+					for (uint32_t rawMax : { 1023u, 65535u })
+					{
+						if (shift == 6 && rawMax > 1023u) continue;
+						const Frame f = MakeFrame(d.width, d.height, d.width + 3u, d.width * 17u + d.height + shift, rawMax);
+						// A fully saturated frame as well as noise.
+						Frame sat = f;
+						std::fill(sat.px.begin(), sat.px.end(), uint16_t(shift == 6 ? 1023u : 65535u));
+						for (const Frame* fr : { &f, &sat })
+						{
+							const uint32_t hw = (d.width + 1u) / 2u, hh = (d.height + 1u) / 2u;
+							const uint32_t qw = (hw + 1u) / 2u, qh = (hh + 1u) / 2u;
+							std::vector<uint16_t> half(size_t(hw) * hh), quarter(size_t(qw) * qh);
+							OldHalfLumaRows(fr->View(shift), half.data(), 0, hh);
+							OldQuarterFromHalf(half.data(), hw, hh, quarter.data(), 0, qh);
+							std::vector<uint8_t> out(VpLaneProducts::HalfLumaBytes(d), 0xCD);
+							Assert::IsTrue(VpLaneProducts::ComputeHalfLuma(fr->View(shift), out.data(), out.size()));
+							Assert::IsTrue(std::memcmp(out.data(), half.data(), half.size() * 2u) == 0, L"half plane bytes");
+							Assert::IsTrue(std::memcmp(out.data() + half.size() * 2u, quarter.data(), quarter.size() * 2u) == 0, L"quarter plane bytes");
+						}
+					}
+		}
+
+		TEST_METHOD(EngineEightBitFinishSaturatesAndTheGlslNamesAreFixed)
+		{
+			using namespace VpUnit::HalfLuma;
+			Assert::AreEqual(uint8_t(0), FinishEngine8(Box4(0, 0, 0, 0)));
+			Assert::AreEqual(uint8_t(255), FinishEngine8(Box4(1023, 1023, 1023, 1023)), L"4092 >> 4 = 255");
+			Assert::AreEqual(uint8_t(255), FinishEngine8(Box4(1023, 1023, 1023, 1023) + 100), L"clamped at 255");
+			Assert::AreEqual(uint8_t(64), FinishEngine8(Box4(256, 256, 256, 256)));
+			Assert::AreEqual(uint16_t(3), FinishP1(Box4(2, 3, 3, 3)));
+			Assert::AreEqual(uint16_t(2), FinishP1(Box4(1, 2, 2, 2)), L"(7 + 2) >> 2");
+			Assert::AreEqual(0, Tap0(0, 3));
+			Assert::AreEqual(1, Tap1(0, 3));
+			Assert::AreEqual(2, Tap0(1, 3));
+			Assert::AreEqual(2, Tap1(1, 3), L"odd edge replicates: the second tap of the last pair is the last sample");
+			Assert::AreEqual(5, Tap1(2, 6));
+			const std::string g = Glsl();
+			Assert::IsTrue(g.find("vpu_half_luma(sampler2D src, ivec2 q)") != std::string::npos);
+			Assert::IsTrue(g.find("vpu_quarter_luma(sampler2D halfSrc, ivec2 q)") != std::string::npos);
+			Assert::IsTrue(g.find("VPU_HALF_LUMA_VERSION 1") != std::string::npos);
 		}
 	};
 }
