@@ -78,8 +78,7 @@ namespace HookLayerSettingsTest
 			ConfigFile config;
 			explicit TempConfig(const std::string& text)
 			{
-				const char* temp = std::getenv("TEMP");
-				path = std::string(temp ? temp : ".") + "\\hooklayer-settings-tests.cfg";
+				path = (std::filesystem::temp_directory_path() / "hooklayer-settings-tests.cfg").string();
 				{ std::ofstream(path, std::ios::trunc) << text; }
 				config.Load(path, ConfigFile::ReadPolicy::Fresh);
 			}
