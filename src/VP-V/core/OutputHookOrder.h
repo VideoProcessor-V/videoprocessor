@@ -32,7 +32,8 @@ namespace OutputHookOrder
 		UserPreOutput,      // configured custom PRE_OUTPUT shaders
 		DejudderCache,      // keeps the rendered picture for the de-judder extras
 		OutputStage,        // other OUTPUT-stage hooks
-		Quantiser           // the output quantiser (sigma-delta): always last
+		Quantiser,          // the output quantiser (sigma-delta): last in normal viewing
+		DebugStamp          // debug-only frame stamp (VP_DEBUG_OUTPUT_STAMP=1): after the quantiser, never in normal viewing
 	};
 
 	template <class Hook>
@@ -54,7 +55,8 @@ namespace OutputHookOrder
 		constexpr int kCalibrationLut = 247;     // the last colour op
 		constexpr int kDejudderCache = 248;      // keeps the LUT-mapped picture for the extras
 		constexpr int kOutputStage = 300;        // other OUTPUT-stage hooks
-		constexpr int kQuantiser = 400;          // the output quantiser, always last
+		constexpr int kQuantiser = 400;          // the output quantiser, last in normal viewing
+		constexpr int kDebugStamp = 500;         // debug only, never in normal viewing: after the quantiser
 	}
 
 	template <class Hook>
@@ -73,6 +75,7 @@ namespace OutputHookOrder
 		case Kind::DejudderCache: return Ranks::kDejudderCache;
 		case Kind::OutputStage: return Ranks::kOutputStage;
 		case Kind::Quantiser: return Ranks::kQuantiser;
+		case Kind::DebugStamp: return Ranks::kDebugStamp;
 		}
 		return Ranks::kOtherStages;
 	}
