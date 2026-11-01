@@ -8,10 +8,15 @@
 
 #include "ExtensionHub.h"
 
+#include <VP-V/modules/input/signal/ResyncExtension.h>
+
 namespace
 {
 	int RegisterAtLoad()
 	{
+		// Fixed fan-out order (doc 63 section 1): resync / FrameSeal first, so every later module
+		// sees the frame already sealed.
+		Vpv::Resync::RegisterResyncExtension();
 		Vpv::Hub::RegisterHub();
 		return 1;
 	}

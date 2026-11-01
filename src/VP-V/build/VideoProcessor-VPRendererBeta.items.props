@@ -5,6 +5,7 @@
   <ItemGroup>
     <ClCompile Include="$(MSBuildThisFileDirectory)..\core\hub\ExtensionHub.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\core\hub\HubBootstrap.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\signal\ResyncExtension.cpp" />
   </ItemGroup>
   <ItemDefinitionGroup>
     <Link>
