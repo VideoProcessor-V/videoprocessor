@@ -1704,7 +1704,9 @@
         "dither_grain_tolerance_scale",
         "output_segments_merged"
       ],
-      "planned_keys": [],
+      "planned_keys": [
+        "dither_need"
+      ],
       "tiers": "Classic libplacebo dither; Low..Upper sigma-delta",
       "fallback": {
         "entry": "Dither: libplacebo (sigma-delta dropped: <reason>)",

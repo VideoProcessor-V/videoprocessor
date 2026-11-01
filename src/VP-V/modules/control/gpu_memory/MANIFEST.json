@@ -1,0 +1,32 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "control.gpu_memory",
+  "unit": "control",
+  "order": 935,
+  "status": "draft",
+  "successor_of": "control.diagnostics",
+  "draft_note": "Not a pipeline slot yet: the renderer call site is not wired (SA1). Registers as slot control.gpu_memory (slots.json + PipelineSlots.h) when wired; its shortages already report through the diagnostics slot (FallbackCatalog scratch_arena).",
+  "code_location": "src/VP-V/core (GpuAllocator.h, ScratchArena.h) + this folder (libplacebo backend)",
+  "live_files": [
+    "src/VP-V/core/GpuAllocator.h",
+    "src/VP-V/core/ScratchArena.h",
+    "src/VP-V/modules/control/gpu_memory/PlTexBackend.h",
+    "src/VP-V/tests/GpuAllocatorTests.cpp",
+    "src/VP-V/tests/PrivateTextureScanTests.cpp"
+  ],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [],
+    "upstream_modules": []
+  },
+  "fallback_when_missing": "Arena short or tier shed: the consumer runs reduced or off for that frame.",
+  "fallback_entry": "scratch_arena: scratch memory short: <owner> reduced/off"
+}

@@ -516,5 +516,100 @@ namespace VideoProcessorTest
 			Assert::IsTrue(Contains(glsl, "light_level_lut"));
 			Assert::IsTrue(Contains(glsl, "texelFetch"));
 		}
+
+		// (11) Sout (d sdrCode / d code) for HdrToSdr at peaks 1000 and 4000: against the generated golden (python
+		// mirror, same +-0.5 central difference) and against a +-1 code central difference of Entry::sdrCode.
+		// The two differences differ by curvature only, hence the loose 2e-2 relative-or-absolute tolerance there (measured max 1.4e-2, at code 66).
+		TEST_METHOD(LightLevelSoutMatchesFiniteDifferenceAndGolden)
+		{
+			const KeyMap keys = { {"sdr_target_nits", "100"}, {"sdr_black_nits", "0"}, {"peak_detection", "off"} };
+			const LightLevel::Settings s = ReadMap(keys);
+			for (int p = 0; p < LightLevelGolden::kPeakCount; ++p)
+			{
+				const double peak = LightLevelGolden::kPeaks[p];
+				const LightLevel::Lut lut = LightLevel::Build(s, Ctx(LightLevel::Context::HdrToSdr, false, peak));
+				for (int code = 0; code < LightLevel::kLutSize; ++code)
+				{
+					const double g = LightLevelGolden::kSout[p][code];
+					Assert::IsTrue(std::fabs(lut.e[static_cast<std::size_t>(code)].Sout - g) <= 1e-9 * (1.0 + std::fabs(g)),
+						L"Sout equals the golden");
+				}
+				if (peak != 1000.0 && peak != 4000.0) continue;
+				// The spline input is clipped at the source peak: sdrCode has a slope kink at that code, where the +-0.5 and
+				// +-1 differences legitimately disagree (measured ~0.28 at peak 1000); skip codes within 1.5 of it.
+				const double clipCode = 64.0 + 876.0 * LightLevel::pq::Oetf(peak);
+				for (int code = 66; code <= 1000; ++code)
+				{
+					if (std::fabs(code - clipCode) <= 1.5) continue;
+					const std::size_t i = static_cast<std::size_t>(code);
+					const double fd = (lut.e[i + 1].sdrCode - lut.e[i - 1].sdrCode) / 2.0;
+					const double err = std::fabs(lut.e[i].Sout - fd);
+					Assert::IsTrue(err <= 2e-2 * std::max(1.0, std::fabs(fd)), L"Sout within tolerance of the +-1 difference");
+				}
+				Assert::IsTrue(lut.e[10].Sout == 1.0, L"BTB code away from the knee: sdrCode is the input code");
+			}
+		}
+
+		// (12) Sdr and HdrPassthrough: sdrCode is the input code by construction, so Sout is exactly 1 for every code.
+		TEST_METHOD(LightLevelSoutIsOneForSdrAndPassthrough)
+		{
+			const LightLevel::Settings s = ReadMap({ {"sdr_target_nits", "203"}, {"sdr_black_nits", "0.05"} });
+			for (int full = 0; full < 2; ++full)
+			{
+				const LightLevel::Lut a = LightLevel::Build(s, Ctx(LightLevel::Context::Sdr, full != 0));
+				const LightLevel::Lut b = LightLevel::Build(s, Ctx(LightLevel::Context::HdrPassthrough, full != 0, 4000.0, 1000.0));
+				for (int i = 0; i < LightLevel::kLutSize; ++i)
+				{
+					Assert::IsTrue(a.e[static_cast<std::size_t>(i)].Sout == 1.0, L"Sdr Sout == 1");
+					Assert::IsTrue(b.e[static_cast<std::size_t>(i)].Sout == 1.0, L"HdrPassthrough Sout == 1");
+				}
+			}
+		}
+
+		// (13) PackOutputTexels layout (sdrCode, Sout, 0, 0); PackTexels keeps (J, S, V, L / 10000).
+		TEST_METHOD(LightLevelPackOutputTexelsLayout)
+		{
+			const LightLevel::Settings s = ReadMap({ {"sdr_target_nits", "203"}, {"sdr_black_nits", "0.05"} });
+			const LightLevel::Lut lut = LightLevel::Build(s, Ctx(LightLevel::Context::HdrToSdr, false, 1000.0));
+			const std::vector<float> o = LightLevel::PackOutputTexels(lut);
+			const std::vector<float> t = LightLevel::PackTexels(lut);
+			Assert::AreEqual(static_cast<std::size_t>(1024 * 4), o.size());
+			Assert::AreEqual(static_cast<std::size_t>(1024 * 4), t.size());
+			for (int i = 0; i < LightLevel::kLutSize; ++i)
+			{
+				const LightLevel::Entry& e = lut.e[static_cast<std::size_t>(i)];
+				const std::size_t k = static_cast<std::size_t>(i) * 4;
+				Assert::IsTrue(o[k] == static_cast<float>(e.sdrCode));
+				Assert::IsTrue(o[k + 1] == static_cast<float>(e.Sout));
+				Assert::IsTrue(o[k + 2] == 0.0f && o[k + 3] == 0.0f);
+				Assert::IsTrue(t[k] == static_cast<float>(e.J));
+				Assert::IsTrue(t[k + 1] == static_cast<float>(e.S));
+				Assert::IsTrue(t[k + 2] == static_cast<float>(e.V));
+				Assert::IsTrue(t[k + 3] == static_cast<float>(e.L / LightLevel::pq::Ceiling));
+			}
+		}
+
+		// (14) Fetch interpolates Sout linearly (midpoint) and is exact at integer codes.
+		TEST_METHOD(LightLevelFetchInterpolatesSout)
+		{
+			const LightLevel::Settings s = ReadMap({ {"sdr_target_nits", "203"}, {"sdr_black_nits", "0.05"} });
+			const LightLevel::Lut lut = LightLevel::Build(s, Ctx(LightLevel::Context::HdrToSdr, false, 1000.0));
+			for (int i = 0; i + 1 < LightLevel::kLutSize; ++i)
+			{
+				const LightLevel::Entry& a = lut.e[static_cast<std::size_t>(i)];
+				const LightLevel::Entry& b = lut.e[static_cast<std::size_t>(i) + 1];
+				Assert::AreEqual(a.Sout, LightLevel::Fetch(lut, static_cast<double>(i)).Sout, 0.0);
+				Assert::IsTrue(Close(0.5 * (a.Sout + b.Sout), LightLevel::Fetch(lut, i + 0.5).Sout), L"Sout midpoint");
+			}
+		}
+
+		// (15) The GLSL declares the output sampler and its fetch.
+		TEST_METHOD(LightLevelGlslDeclaresTheOutputFetch)
+		{
+			const std::string glsl = LightLevel::LightLevelOutGlsl();
+			Assert::IsFalse(Contains(LightLevel::LightLevelGlsl(), "light_level_out"), L"LightLevelGlsl() is unchanged");
+			Assert::IsTrue(Contains(glsl, "light_level_out_fetch"));
+			Assert::IsTrue(Contains(glsl, "light_level_out"));
+		}
 	};
 }

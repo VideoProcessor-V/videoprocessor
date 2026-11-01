@@ -194,7 +194,7 @@ Forwarding headers (WP-17; removed in M2 step 0 with their includers): `src/Vide
 
 ## Testing tooling (wave 1)
 
-- `VpEventLine.h` - structured log lines `vp-event/1`: `VPEV1 t=<ms> kind=<kind> key=value ...`. Kinds: session, resync, fallback, gate, gpu_error, source_change, cadence, repeat, frame_stats, stamp, flag (required fields per kind in the header comment). Global sink is null by default (no-op). Emitters wired: `ResyncShadow::Record` (through its logger) and `FallbackStatus::Registry` (global sink). Parser and analysers: `tools/vplog/` (grammar in its README).
+- `VpEventLine.h` - structured log lines `vp-event/1`: `VPEV1 t=<ms> kind=<kind> key=value ...`. Kinds: session, resync, fallback, gate, gpu_error, source_change, cadence, repeat, frame_stats, stamp, flag, resync_settle (required fields per kind in the header comment; `resync` also takes the additive `injected` and `readers`, `resync_settle` is the per-event settle result of `ResyncEventMetrics.h`). Global sink is null by default (no-op). Emitters wired: `ResyncShadow::Record` (through its logger) and `FallbackStatus::Registry` (global sink). Parser and analysers: `tools/vplog/` (grammar in its README).
 - `FrameStamp.h` / `FrameStampShader.h` - `vp-stamp/1` 64-bit frame stamp (source top-left, output top-right; geometry proportional to frame height). Output stamp hook is debug only (`VP_DEBUG_OUTPUT_STAMP=1`, `OutputHookOrder::Kind::DebugStamp`, rank 500); off = no hook text. `StreamRecorder --stamps` writes `stamps.csv`. Python mirror and clip generator: `tools/framestamp/`.
 - Python tools: `tools/levels/` (level/colour patterns, expected codes, deltaE, capture check), `tools/soak/` (soak runner and report), `tools/triage/` (bug-ticket intake).
 

@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "about": "Category of tests that use the GPU and carry no Category attribute (or whose file must stay untouched). Categories: GpuHardware, GpuOnScreen, MeterHardware, ProjectorHardware, Slow are excluded from the CPU run; GpuWarp renders on WARP and stays in it; Cpu marks a reviewed false positive of the name heuristic. First matching entry wins. Checked by tools/check_test_categories.py; the CPU filter comes from tools/gen_test_filters.py. Copyright(C) 2026 VP-V contributors; SPDX-License-Identifier: GPL-3.0-only",
+ "about": "Category of tests that use the GPU and carry no Category attribute (or whose file must stay untouched). Categories: GpuHardware, GpuOnScreen, MeterHardware, ProjectorHardware, Slow are excluded from the CPU run; UpstreamStale (Bill tests made stale by a later Bill commit, Bill code unchanged on both pathways) is excluded from the CPU run (select only it with gen_test_filters --gpu --categories UpstreamStale); GpuWarp renders on WARP and stays in it; Cpu marks a reviewed false positive of the name heuristic. First matching entry wins. Checked by tools/check_test_categories.py; the CPU filter comes from tools/gen_test_filters.py. Copyright(C) 2026 VP-V contributors; SPDX-License-Identifier: GPL-3.0-only",
  "scope": "Native-test sources named *Tests.cpp under src. Not covered: the Beta host tests (VideoProcessor-BetaTests/BetaGpuTests.cpp, BetaTestHost.cpp) use no TEST_METHOD macros, so the scanner cannot see them; the checker also does not follow helper calls, so a test that reaches the GPU only through a helper needs a Gpu in its name or a manifest entry.",
  "entries": [
   {
@@ -436,6 +436,62 @@
    "category": "Slow",
    "file": "src/VideoProcessor-Test/LibplaceboLutParserTests.cpp",
    "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
+  },
+  {
+   "kind": "method",
+   "value": "OpposingBoundaryDiagnosticsTests::TrueDimPictureBoundaryHasNativeBarProofAndAdjacentContrast",
+   "category": "UpstreamStale",
+   "file": "src/VideoProcessor-Test/OpposingBoundaryDiagnosticsTests.cpp",
+   "note": "UpstreamStale: Bill's test, unmodified; fails on Bill's tip a591ad3b exactly as here; passes at 2abdf66e^, fails from Bill's 2abdf66e (2026-10-30, RecoverFlatBarLowContrastPicture, his Eternals fix). Not a VP-V divergence (P010/P210/V210, Unknown range: DIV-AN-01 does not apply). The new recovery acquires the code-64 bars around the dim code-80 picture directly (first fixture: BAR_CROP_TRUSTED 0,274-3840,1886, enclosing picture rows 276-1884), so the PROVISIONAL asymmetry precondition the test sets up no longer holds. Correct acquisition; stale test. Report to Bill; remove when his test follows."
+  },
+  {
+   "kind": "method",
+   "value": "OpposingBoundaryDiagnosticsTests::SmallBarsKeepTheExistingEighteenCodeContrastRequirement",
+   "category": "UpstreamStale",
+   "file": "src/VideoProcessor-Test/OpposingBoundaryDiagnosticsTests.cpp",
+   "note": "UpstreamStale: Bill's test, unmodified; fails on Bill's tip a591ad3b exactly as here; passes at 2abdf66e^, fails from Bill's 2abdf66e (2026-10-30, RecoverFlatBarLowContrastPicture, his Eternals fix). Not a VP-V divergence (P010/P210/V210, Unknown range: DIV-AN-01 does not apply). The new recovery acquires the code-64 bars around the dim code-80 picture directly (first fixture: BAR_CROP_TRUSTED 0,274-3840,1886, enclosing picture rows 276-1884), so the PROVISIONAL asymmetry precondition the test sets up no longer holds. Correct acquisition; stale test. Report to Bill; remove when his test follows."
+  },
+  {
+   "kind": "method",
+   "value": "OpposingBoundaryDiagnosticsTests::P010P210AndNativeV210AgreeOnTheExactMirroredMeasurement",
+   "category": "UpstreamStale",
+   "file": "src/VideoProcessor-Test/OpposingBoundaryDiagnosticsTests.cpp",
+   "note": "UpstreamStale: Bill's test, unmodified; fails on Bill's tip a591ad3b exactly as here; passes at 2abdf66e^, fails from Bill's 2abdf66e (2026-10-30, RecoverFlatBarLowContrastPicture, his Eternals fix). Not a VP-V divergence (P010/P210/V210, Unknown range: DIV-AN-01 does not apply). The new recovery acquires the code-64 bars around the dim code-80 picture directly (first fixture: BAR_CROP_TRUSTED 0,274-3840,1886, enclosing picture rows 276-1884), so the PROVISIONAL asymmetry precondition the test sets up no longer holds. Correct acquisition; stale test. Report to Bill; remove when his test follows."
+  },
+  {
+   "kind": "method",
+   "value": "OpposingBoundaryDiagnosticsTests::ValidLayoutWithUnsupportedRgbDecoderCannotReportEvaluatedZeros",
+   "category": "UpstreamStale",
+   "file": "src/VideoProcessor-Test/OpposingBoundaryDiagnosticsTests.cpp",
+   "note": "UpstreamStale: Bill's test, unmodified; fails on Bill's tip a591ad3b exactly as here; passes at 2abdf66e^, fails from Bill's 2abdf66e (2026-10-30, RecoverFlatBarLowContrastPicture, his Eternals fix). Not a VP-V divergence (P010/P210/V210, Unknown range: DIV-AN-01 does not apply). The new recovery acquires the code-64 bars around the dim code-80 picture directly (first fixture: BAR_CROP_TRUSTED 0,274-3840,1886, enclosing picture rows 276-1884), so the PROVISIONAL asymmetry precondition the test sets up no longer holds. Correct acquisition; stale test. Report to Bill; remove when his test follows."
+  },
+  {
+   "kind": "method",
+   "value": "OpposingBoundaryDiagnosticsTests::InvalidSourceOrMismatchedProposedRasterUsesNoSamples",
+   "category": "UpstreamStale",
+   "file": "src/VideoProcessor-Test/OpposingBoundaryDiagnosticsTests.cpp",
+   "note": "UpstreamStale: Bill's test, unmodified; fails on Bill's tip a591ad3b exactly as here; passes at 2abdf66e^, fails from Bill's 2abdf66e (2026-10-30, RecoverFlatBarLowContrastPicture, his Eternals fix). Not a VP-V divergence (P010/P210/V210, Unknown range: DIV-AN-01 does not apply). The new recovery acquires the code-64 bars around the dim code-80 picture directly (first fixture: BAR_CROP_TRUSTED 0,274-3840,1886, enclosing picture rows 276-1884), so the PROVISIONAL asymmetry precondition the test sets up no longer holds. Correct acquisition; stale test. Report to Bill; remove when his test follows."
+  },
+  {
+   "kind": "method",
+   "value": "OpposingBoundaryDiagnosticsTests::UntrustedAsymmetryHorizontalConflictOrInconsistentFloorUsesNoSamples",
+   "category": "UpstreamStale",
+   "file": "src/VideoProcessor-Test/OpposingBoundaryDiagnosticsTests.cpp",
+   "note": "UpstreamStale: Bill's test, unmodified; fails on Bill's tip a591ad3b exactly as here; passes at 2abdf66e^, fails from Bill's 2abdf66e (2026-10-30, RecoverFlatBarLowContrastPicture, his Eternals fix). Not a VP-V divergence (P010/P210/V210, Unknown range: DIV-AN-01 does not apply). The new recovery acquires the code-64 bars around the dim code-80 picture directly (first fixture: BAR_CROP_TRUSTED 0,274-3840,1886, enclosing picture rows 276-1884), so the PROVISIONAL asymmetry precondition the test sets up no longer holds. Correct acquisition; stale test. Report to Bill; remove when his test follows."
+  },
+  {
+   "kind": "method",
+   "value": "DimSideCompositionGuardTests::QuantizedShadowedSideRejectsDeeperPictureCaptionsAndRamps",
+   "category": "UpstreamStale",
+   "file": "src/VideoProcessor-Test/DimSideCompositionGuardTests.cpp",
+   "note": "UpstreamStale: Bill's test, unmodified; fails on Bill's tip a591ad3b exactly as here; passes at 2abdf66e^, fails from Bill's 2abdf66e (2026-10-30, RecoverFlatBarLowContrastPicture, his Eternals fix). Not a VP-V divergence (P010/P210/V210, Unknown range: DIV-AN-01 does not apply). Only pattern 2 (bright object rows 267-276 crossing the boundary) changes: full raster -> trusted 0,264-3840,1890, which keeps the object and all picture (conservative crop, cuts no picture). Stale test. Report to Bill; remove when his test follows."
+  },
+  {
+   "kind": "method",
+   "value": "RememberedEdgeProfileTests::QualifiedScopeReturnsWithZeroOppositeBoundaryContrast",
+   "category": "UpstreamStale",
+   "file": "src/VideoProcessor-Test/RememberedEdgeReturnTests.cpp",
+   "note": "UpstreamStale: Bill's test, unmodified; fails on Bill's tip a591ad3b exactly as here; passes at 2abdf66e^, fails from Bill's 2abdf66e (2026-10-30, RecoverFlatBarLowContrastPicture, his Eternals fix). Not a VP-V divergence (P010/P210/V210, Unknown range: DIV-AN-01 does not apply). Bill COST REGRESSION, not stale: raw evidence is still PROVISIONAL (no new crop) but the failed recovery attempt's samples are charged to the evidence (raw luma 11,808 -> 50,977, chroma 1,088 -> 40,257), so result.samples 96,352 -> 174,690 exceeds the test's 150,000 budget. Report to Bill as a cost regression; remove when fixed upstream."
   }
  ]
 }

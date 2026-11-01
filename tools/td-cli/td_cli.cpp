@@ -17,9 +17,9 @@
 //   td_cli --stdio
 //       Binary pipe for the evaluation harness (tools/eval/candidates_temporal_detail.py). stdin: one text line
 //       "TDCLI1 <w> <h> <bitdepth> <hz> <planeLines> <mode off|steady> <budget> <clean 0|1> <guard 0|1>
-//        <strength> <maxAge> <boostMax> [<strongerMargin> <baseNoise> <baseGrainSigmas> <uncPx> [<ax0> <ay0> <ax1> <ay1> [<forceWeight>]]]\n",
+//        <strength> <maxAge> <boostMax> [<strongerMargin> <baseNoise> <baseGrainSigmas> <uncPx> [<ax0> <ay0> <ax1> <ay1> [<forceWeight> [<gatesOff> [<typeAdmission>]]]]]\n",
 //       then per frame:
-//         "FRM1" u64 seq, i32 flags (1 cut, 2 fade), f64 luma[w*h] (codes at <bitdepth>),
+//         "FRM1" u64 seq, i32 flags (1 cut, 2 fade; measurement: 4 I, 8 P, 16 B coded type), f64 luma[w*h] (codes at <bitdepth>),
 //         i32 hasB [i32 gw, i32 gh, f64 blockPx, f32 vx[n], f32 vy[n], f32 trust[n]],
 //         i32 hasF [same]
 //       and "END1". stdout per frame: "OUT1", f64 luma[w*h] (codes, unrounded), f64 ms, i32 len, char stats[len].
@@ -44,6 +44,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -68,6 +69,8 @@ namespace
 		double strongerMargin = kStrongerMargin, baseNoise = kBaseNoiseCodes, baseGrainSigmas = kBaseGrainSigmas, uncPx = kUncertaintyPx;
 		int active[4] = { 0, 0, 0, 0 };   // x0 y0 x1 y1; x1/y1 <= 0 = whole plane
 		double forceWeight = 0.0;          // measurement: transfer ceiling (Model::Tuning::forceWeight)
+		unsigned gatesOff = 0;             // measurement: gate ablation bits (Model::Tuning::gatesOff)
+		int typeAdmission = 0;             // measurement: admission from the true frame type (FRM1 flags 4 I, 8 P, 16 B)
 	};
 
 	[[noreturn]] void Die(const std::string& why)
@@ -93,6 +96,8 @@ namespace
 		t.gates.baseGrainSigmas = o.baseGrainSigmas;
 		t.gates.uncertaintyPx = o.uncPx;
 		t.forceWeight = o.forceWeight;
+		t.gatesOff = o.gatesOff;
+		t.typeAdmission = o.typeAdmission != 0;
 		m.SetTuning(t);
 		return m;
 	}
@@ -118,7 +123,17 @@ namespace
 			d.guardTrips, d.guardActive, d.addBackBlocks,
 			mean(d.evidence), mean(d.hard), mean(d.target), mean(d.stronger), mean(d.highBand), mean(d.focus),
 			mean(d.corrGate), mean(d.baseMatch), mean(d.uncertainty), mean(d.tau1), mean(d.tau2), mean(d.rebounds));
-		return buf;
+		// measurement: the frame's mean detail energy q (the model's quality evidence) and which source frames the
+		// transferring blocks take their detail from ("refs": "seq:blocks,...", ascending seq)
+		std::map<long long, int> refs;
+		for (long long s : d.refSeq) if (s >= 0) ++refs[s];
+		std::string r;
+		for (const auto& kv : refs) r += (r.empty() ? "" : ",") + std::to_string(kv.first) + ":" + std::to_string(kv.second);
+		std::string out(buf);
+		out.pop_back();
+		char extra[64];
+		std::snprintf(extra, sizeof extra, ",\"q_mean\":%.6f", mean(d.q));
+		return out + extra + ",\"refs\":\"" + r + "\"}";
 	}
 
 	// ---------------------------------------------------------------- binary IO
@@ -160,10 +175,10 @@ namespace
 		Options o;
 		char tag[16] = {}, mode[16] = {};
 		int clean = 1, guard = 1;
-		const int got = std::sscanf(line, "%15s %d %d %d %lf %lf %15s %lf %d %d %lf %lf %lf %lf %lf %lf %lf %d %d %d %d %lf", tag, &o.w,
+		const int got = std::sscanf(line, "%15s %d %d %d %lf %lf %15s %lf %d %d %lf %lf %lf %lf %lf %lf %lf %d %d %d %d %lf %u %d", tag, &o.w,
 			&o.h, &o.bitdepth, &o.hz, &o.lines, mode, &o.budget, &clean, &guard, &o.strength, &o.maxAge, &o.boostMax,
-			&o.strongerMargin, &o.baseNoise, &o.baseGrainSigmas, &o.uncPx, &o.active[0], &o.active[1], &o.active[2], &o.active[3], &o.forceWeight);
-		if ((got != 13 && got != 17 && got != 21 && got != 22) || std::strcmp(tag, "TDCLI1") != 0) Die("bad header");
+			&o.strongerMargin, &o.baseNoise, &o.baseGrainSigmas, &o.uncPx, &o.active[0], &o.active[1], &o.active[2], &o.active[3], &o.forceWeight, &o.gatesOff, &o.typeAdmission);
+		if ((got != 13 && got != 17 && got != 21 && got != 22 && got != 23 && got != 24) || std::strcmp(tag, "TDCLI1") != 0) Die("bad header");
 		if (o.w <= 0 || o.h <= 0 || o.bitdepth < 8 || o.bitdepth > 16) Die("bad geometry");
 		o.mode = mode;
 		o.clean = clean != 0;
@@ -190,6 +205,7 @@ namespace
 			if (ReadPair(stdin, f)) motion.SetForward(in.seq, f);
 			in.contentHz = o.hz;
 			in.planeLines = o.lines;
+			in.codedType = (flags & 4) ? 'I' : (flags & 8) ? 'P' : (flags & 16) ? 'B' : 0;   // measurement only
 			in.cut = (flags & 1) != 0;
 			in.fade = (flags & 2) != 0;
 			in.motion = &motion;

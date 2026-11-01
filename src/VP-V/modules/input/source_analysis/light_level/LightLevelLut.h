@@ -41,6 +41,9 @@
 
 namespace LightLevel
 {
+	// P12 light level unit version (core/ProductCatalog.h). 2 = WP2: the per-block product (LightLevelBlocks.h) on top of the LUT.
+	constexpr unsigned kUnitVersion = 3;   // 3: LL4 output table (light_level_out, Sout) for dither need
+
 	struct Context
 	{
 		enum Kind { Sdr, HdrPassthrough, HdrToSdr } kind = Sdr;
@@ -60,6 +63,10 @@ namespace LightLevel
 		double S = 0.0;         // dJ / dcode
 		double V = 0.0;         // visibility of one code step, Weber units: |dL| / (weber (L + ambient)) per code
 		double sdrCode = 0.0;   // HdrToSdr: SDR signal code (limited-range scale); other kinds: the input code
+		double Sout = 0.0;      // d sdrCode / d code, same central difference as S. Sdr / HdrPassthrough: exactly 1.
+		                        // BTB codes: ev.L sets sdrCode = the input code there, so the same formula gives 1 for codes
+		                        // whose +-0.5 positions are both BTB and a mixed value at the knee code (HdrToSdr code 64:
+		                        // (sdrCode(64.5) - 63.5) / 1); not special-cased.
 	};
 
 	constexpr int kLutSize = 1024;
@@ -309,7 +316,7 @@ namespace LightLevel
 	inline std::string Fingerprint(const Settings& s, const Context& c)
 	{
 		std::ostringstream o; o.imbue(std::locale::classic()); o << std::setprecision(17);
-		o << "LL3|" << s.weber << '|' << s.ambientNits << '|' << s.sdrTargetNits << '|' << s.sdrBlackNits << '|'
+		o << "LL4|" << s.weber << '|' << s.ambientNits << '|' << s.sdrTargetNits << '|' << s.sdrBlackNits << '|'
 			<< s.displayWhiteNits << '|' << s.displayBlackNits << '|' << s.quality << '|'
 			<< static_cast<int>(s.transfer) << '|' << s.gammaPower << '|' << s.toneMapping << '|'
 			<< static_cast<int>(s.peakDetection) << '|' << ToneMappingTuning::Fingerprint(s.tuning) << '|'
@@ -385,12 +392,14 @@ namespace LightLevel
 			double sdrCode = code;
 			en.L = ev.L(code, sdrCode);
 			en.sdrCode = sdrCode;
-			if (ev.Btb(code)) { en.J = pq::Oetf(en.L); en.S = 0.0; en.V = 0.0; continue; }   // J continuous at 64
-			en.J = pq::Oetf(en.L);
 			const double lo = i > 0 ? code - 0.5 : code;
 			const double hi = i < kLutSize - 1 ? code + 0.5 : code;
 			const double span = hi - lo;
-			const double lLo = ev.L(lo), lHi = ev.L(hi);
+			double sdrLo = lo, sdrHi = hi;
+			const double lLo = ev.L(lo, sdrLo), lHi = ev.L(hi, sdrHi);
+			en.Sout = (sdrHi - sdrLo) / span;   // computed for every code incl. BTB (see Entry::Sout)
+			if (ev.Btb(code)) { en.J = pq::Oetf(en.L); en.S = 0.0; en.V = 0.0; continue; }   // J continuous at 64
+			en.J = pq::Oetf(en.L);
 			en.S = (pq::Oetf(lHi) - pq::Oetf(lLo)) / span;
 			const double dL = std::fabs(lHi - lLo) / span;
 			const double denom = s.weber * std::max(en.L + s.ambientNits, lowestStep);
@@ -417,6 +426,33 @@ namespace LightLevel
 		r.S = a.S + (b.S - a.S) * t;
 		r.V = a.V + (b.V - a.V) * t;
 		r.sdrCode = a.sdrCode + (b.sdrCode - a.sdrCode) * t;
+		r.Sout = a.Sout + (b.Sout - a.Sout) * t;
+		return r;
+	}
+
+	// The LUT as the shader reads it (PackTexels layout), evaluated with the SAME arithmetic as light_level_lut_fetch:
+	// clamp the index, floor, a + (b - a) * t. T = float is the GLSL mirror, T = double the CPU reference over the same
+	// float texels (the stats pass and the block pass use this one function on both sides).
+	template <class T>
+	struct PackedEntry { T J, S, V, L10k; };
+
+	template <class T>
+	inline PackedEntry<T> FetchPacked(const float* texels, T code10)
+	{
+		T idx = code10;
+		if (!(idx > T(0))) idx = T(0);
+		if (idx > T(kLutSize - 1)) idx = T(kLutSize - 1);
+		const T f = std::floor(idx);
+		const int i0 = static_cast<int>(f);
+		const int i1 = std::min(i0 + 1, kLutSize - 1);
+		const T t = idx - f;
+		const float* a = texels + static_cast<std::size_t>(i0) * 4;
+		const float* b = texels + static_cast<std::size_t>(i1) * 4;
+		PackedEntry<T> r;
+		r.J = T(a[0]) + (T(b[0]) - T(a[0])) * t;
+		r.S = T(a[1]) + (T(b[1]) - T(a[1])) * t;
+		r.V = T(a[2]) + (T(b[2]) - T(a[2])) * t;
+		r.L10k = T(a[3]) + (T(b[3]) - T(a[3])) * t;
 		return r;
 	}
 
@@ -432,6 +468,20 @@ namespace LightLevel
 			p[1] = static_cast<float>(en.S);
 			p[2] = static_cast<float>(en.V);
 			p[3] = static_cast<float>(en.L / pq::Ceiling);
+		}
+		return t;
+	}
+
+	// RGBA32F, 1024 x 1: (sdrCode, Sout, 0, 0), the layout light_level_out_fetch reads.
+	inline std::vector<float> PackOutputTexels(const Lut& lut)
+	{
+		std::vector<float> t(static_cast<std::size_t>(kLutSize) * 4, 0.0f);
+		for (int i = 0; i < kLutSize; ++i)
+		{
+			const Entry& en = lut.e[static_cast<std::size_t>(i)];
+			float* p = &t[static_cast<std::size_t>(i) * 4];
+			p[0] = static_cast<float>(en.sdrCode);
+			p[1] = static_cast<float>(en.Sout);
 		}
 		return t;
 	}

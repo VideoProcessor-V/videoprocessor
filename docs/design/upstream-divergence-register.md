@@ -36,6 +36,7 @@ Owner decisions are binding: in every either/or the Original pathway (`pipeline_
 | DIV-CFG-03 | Config shortcuts | A profile shortcut equal to a fixed application shortcut blocks Apply. | n/a | Bug fix |
 | DIV-CFG-04 | Config VP-V choice keys | Keep "Inherited / not set"; a saved `auto` is live (Bill's concrete-only / retired-auto rules apply to his keys only). VP-V rows keep their combo as the form field (Bill's Reset wrapper only on his keys); Bill's load-time rendering-profile freeze skips VP-V keys (they keep inheriting). | Bill's keys: Bill | Either/or by key ownership |
 | DIV-CFG-05 | Config starting profiles | Display/Motion starting profiles seeded in memory, not a pending change (Bill wrote defaults into a clean file). | n/a | Bug fix |
+| DIV-CFG-08 | Config no-target window | `selectPage` redirects a no-target window to Updates (page 20). Bill's `index = 21` landed on Motion once Motion was added after Updates. (Number DIV-CFG-06 was already taken by the downscaler row; the task brief's tag was renumbered.) | n/a | Bug fix (Bill PR) |
 | DIV-CFG-07 | Config remote Apply | VP-V's remote Apply runs on a worker thread (audit 2026-10-16); Bill's synchronous remote-Apply test waits for it. | n/a | Bug fix |
 | DIV-CFG-06 | Config retired downscaler spellings | Migrated once at load with a backup; displaying a profile never mutates the document. | n/a | Bug fix |
 | DR-M-ABI | Plugin API 45, ActiveProfileStatus v14, Config RPC wire 3 | Union of both sides' exports/fields; Bill's RPC numbers kept, ours after. Host, renderer and Config deploy as a set. | n/a | Version (no behaviour) |
@@ -44,6 +45,18 @@ Owner decisions are binding: in every either/or the Original pathway (`pipeline_
 | DR-M-PAYLOAD | Native P010/P210 capture payload | The merge let VP raw/DV-raw checks dereference `convertedPayload`, which is null on Bill's native-planar route (0xC0000005 in RenderLocked, Original included); those checks now test for the payload first (7cd89bec). | = Bill | Merge repair |
 | DR-M-HOLD | Start-up hold black clear | The merge lost `pl_frame_clear` under `if (rendered && startupHoldBlack)`, leaving the hold guarding Bill's `CacheDisplayFrame`; restored. | = Bill (hold off on Original) | Merge repair |
 | DR-M-LOOKAHEAD | Active-picture look-ahead gate | VP's LED/intent observers walk the queue without Bill's active-picture frames when his gate refuses them; his look-ahead statistics count only his attempts. | = Bill when observers are off | Merge repair |
+
+Upstream-stale Bill tests (NOT a divergence; 2026-11-01): 8 of Bill's black-bar tests fail on Bill's own tip a591ad3b exactly
+as on VP-V; they pass at 2abdf66e^ and fail from Bill's 2abdf66e (2026-10-30, `RecoverFlatBarLowContrastPicture`, his Eternals
+fix). VP-V's `ActivePictureEvidence` equals Bill's for these P010/P210/V210 fixtures on both pathways (DIV-AN-01 does not apply).
+- 6 OpposingBoundaryDiagnostics: the recovery now acquires the code-64 bars around the dim code-80 picture directly (e.g.
+  BAR_CROP_TRUSTED 0,274-3840,1886 enclosing picture 276-1884), so their PROVISIONAL precondition fails. Correct; stale tests.
+- DimSideCompositionGuard `QuantizedShadowedSideRejectsDeeperPictureCaptionsAndRamps`: only pattern 2 changes, full raster ->
+  0,264-3840,1890, keeping the crossing object and all picture (conservative). Stale test.
+- RememberedEdge `QualifiedScopeReturnsWithZeroOppositeBoundaryContrast`: a Bill COST REGRESSION, not stale. No new crop, but the
+  failed recovery's samples are charged (result.samples 96,352 -> 174,690 > the 150,000 budget).
+Tests and Bill's code are unmodified; the 8 are in category `UpstreamStale` in `tools/test-categories.json` (out of the CPU run;
+`gen_test_filters.py --gpu --categories UpstreamStale` selects them). To report to Bill; remove the entries when fixed upstream.
 
 Open owner questions from the merge: edge blanking `blank_*` (VP-V viewport keys, default 0) is not in the Original table (a row, or a screen-installation property?); Bill's AGENTS.md text naming an EDID .bin as a release asset is superseded by the publishing rule (EXE/ZIP/vp-update.json only).
 

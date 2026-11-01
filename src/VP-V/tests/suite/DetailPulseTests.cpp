@@ -6,6 +6,7 @@
 #include <VP-V/tests/support/GrainReferenceModel.h>
 
 #include <VP-V/modules/repair/texture_restore/DetailPulse.h>
+#include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
 
 #include <libplacebo/d3d11.h>
 #include <libplacebo/dispatch.h>
@@ -1484,6 +1485,54 @@ namespace DetailPulseTestsNs
 					Assert::IsTrue(iGain <= 1.01, W(text).c_str());
 					Assert::IsTrue(meanLoss <= 0.15 && worstLoss <= 0.35, W(text).c_str());
 				}
+			}
+		}
+	};
+}
+
+// B2 (shared unit U2): DetailPulse's fine-band Gaussian now calls VpUnit::BandFromBase. The frozen copy below is the
+// private implementation it replaced; the numbers (and so the emitted GLSL tables) must be bit-identical.
+namespace DetailPulseBandFromBaseNs
+{
+	inline int OldFineRadius(double scale) { return static_cast<int>(std::ceil(3.0 * DetailPulse::kSigmaFine * scale - 1e-9)); }
+	inline double OldFineWeight(int i, double scale)
+	{
+		const double s = DetailPulse::kSigmaFine * scale;
+		const int r = OldFineRadius(scale);
+		double sum = 0.0;
+		for (int k = -r; k <= r; ++k) sum += std::exp(-0.5 * k * k / (s * s));
+		return std::exp(-0.5 * i * i / (s * s)) / sum;
+	}
+
+	TEST_CLASS(DetailPulseBandFromBaseIdentityTests)
+	{
+	public:
+		TEST_METHOD(FineRadiusAndWeightAreBitIdenticalToTheFrozenPrivateCopy)
+		{
+			std::vector<double> scales;
+			for (double s = 1.0; s <= 2.5001; s += 0.0625) scales.push_back(s);
+			for (double lines : { 480.0, 720.0, 1080.0, 1440.0, 2160.0, 3240.0, 4320.0, 5400.0, 8640.0 }) scales.push_back(DetailPulse::Scale(lines));
+			for (double scale : scales)
+			{
+				const int r = OldFineRadius(scale);
+				Assert::AreEqual(r, DetailPulse::FineRadius(scale), L"radius");
+				for (int i = -r; i <= r; ++i)
+				{
+					const double a = OldFineWeight(i, scale), b = DetailPulse::FineWeight(i, scale);
+					Assert::IsTrue(std::memcmp(&a, &b, sizeof(double)) == 0, L"weight bits");
+				}
+			}
+		}
+
+		TEST_METHOD(EmittedFineWeightTableTextIsByteIdentical)
+		{
+			for (double scale : { 1.0, 1.5, 2.0, 2.5 })
+			{
+				const int r = OldFineRadius(scale);
+				const std::string before = VpvGpu::ConstArray("w", 2 * r + 1, [&](int i) { return OldFineWeight(i - r, scale); });
+				const std::string after = VpvGpu::ConstArray("w", 2 * DetailPulse::FineRadius(scale) + 1,
+					[&](int i) { return DetailPulse::FineWeight(i - DetailPulse::FineRadius(scale), scale); });
+				Assert::AreEqual(before, after, L"GLSL table text");
 			}
 		}
 	};

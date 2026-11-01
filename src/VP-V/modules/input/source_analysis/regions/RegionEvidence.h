@@ -42,6 +42,7 @@
 
 #include <VP-V/core/Ancestry.h>
 #include <VP-V/core/Products.h>
+#include <VP-V/modules/input/source_analysis/light_level/LightLevelLut.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraMotion.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 
@@ -57,6 +58,11 @@ namespace GrainSplit { namespace Gpu { struct Frame; } }   // GrainSplitGpu.h (l
 
 namespace RegionEvidence
 {
+	// Unit version of region_block_stats (P11): bump on ANY change of its law, passes or layout (core/ProductCatalog.h).
+	// 2 = WP2: with a light-level LUT bound the stats pass takes J / L / V from it (the context-correct law) instead of the
+	// generic Nits / PqOf / Visibility chain; without one the generic law is the visible reduced path.
+	constexpr uint32_t kUnitVersion = 2;
+
 	// Active picture / overlay rectangles in source-raster px (right/bottom exclusive), same layout as FrameAnalysis::Rect.
 	struct Rect
 	{
@@ -252,6 +258,11 @@ namespace RegionEvidence
 		double sdrWhite = 100.0;
 		int haveSplit = 0;       // the split's block texel is bound (else E1..E3 = 0, N = -1)
 		VisibilityParams vis;
+		// The light-level LUT as packed texels (LightLevel::PackTexels: 1024 x rgba32f = J, S, V, L / 10000). Non-null: meanNits,
+		// meanPq and the visibility stat come from it (LightLevel::FetchPacked, the shader's light_level_lut_fetch); null: the
+		// generic law below (the reduced path, named in StatusOf). Must outlive the call.
+		// With a LUT, kMeanNits is the luminance the viewer SEES (display nits after the context's mapping), not source nits.
+		const float* lutTexels = nullptr;
 	};
 
 	// Luma sources for StatsBlock.
@@ -343,9 +354,18 @@ namespace RegionEvidence
 				lapE += lap * lap;
 				sxY += (T(x) - cxm) * c;
 				syY += (T(y) - cym) * c;
-				const T nits = Nits<T>(c, k.transfer, T(k.sdrWhite));
-				sumNits += nits;
-				sumPq += PqOf<T>(nits);
+				if (k.lutTexels)
+				{
+					const LightLevel::PackedEntry<T> e = LightLevel::FetchPacked<T>(k.lutTexels, c);
+					sumNits += e.L10k * T(10000);
+					sumPq += e.J;
+				}
+				else
+				{
+					const T nits = Nits<T>(c, k.transfer, T(k.sdrWhite));
+					sumNits += nits;
+					sumPq += PqOf<T>(nits);
+				}
 			}
 		const T thr2 = T(0.0625) * g2max;   // |grad| < gmax / 4
 		T offLap = T(0);
@@ -375,7 +395,8 @@ namespace RegionEvidence
 		out[kMeanNits] = sumNits * inv; out[kMeanPq] = sumPq * inv;
 		out[kCoverage] = T(n) / T(sp.frameArea);
 		out[kOffShare] = T(offCount) * inv;
-		out[kVisibilityStat] = Visibility<T>(out[kMeanY], k.transfer, T(k.sdrWhite), k.vis);
+		out[kVisibilityStat] = k.lutTexels ? Clamp01<T>(LightLevel::FetchPacked<T>(k.lutTexels, out[kMeanY]).V)
+			: Visibility<T>(out[kMeanY], k.transfer, T(k.sdrWhite), k.vis);
 	}
 
 	// ---- the aux texel (packed on the CPU from data computed elsewhere) -----------------------------------------------
@@ -606,6 +627,7 @@ namespace RegionEvidence
 		Rect picture;                    // clipped
 		SplitState split = SplitState::Missing;
 		CameraStatus camera;
+		std::string lightFingerprint;    // LightLevel::Lut::fingerprint the stats were made with; empty = the generic transfer law
 		std::vector<double> data;        // Count() x kPrecursorChannels: S0..S4 then the aux texel
 		VpAncestry::Header header;       // stamped by the producer (lane or in-render), see Stamp()
 
@@ -625,6 +647,7 @@ namespace RegionEvidence
 		if (m.split == SplitState::Mismatched) add("grain split of another size or grid: grain, texture, ringing and banding unknown");
 		if (!m.camera.record) add("no camera record: camera confidence 0");
 		else if (!m.camera.labels) add("camera labels only on the GPU: CPU labels unknown");
+		if (m.lightFingerprint.empty()) add("no light-level LUT: generic transfer law for brightness and visibility");
 		return why.empty() ? std::string() : "Region evidence: reduced (" + why + ")";
 	}
 
@@ -632,15 +655,17 @@ namespace RegionEvidence
 	{
 		int blockOverride = 0;           // 0 = BlockSizeFor(height)
 		VisibilityParams vis;
+		const LightLevel::Lut* lut = nullptr;   // the light-level LUT (null: generic transfer law, reduced; see StatusOf)
 	};
 
 	inline StatsConstants MakeStatsConstants(int w, int h, int B, const Rect& picture, const Externals& ex, bool haveSplit,
-		const VisibilityParams& vis)
+		const VisibilityParams& vis, const float* lutTexels = nullptr)
 	{
 		StatsConstants sk;
 		sk.w = w; sk.h = h; sk.B = B; sk.picture = picture;
 		sk.transfer = ex.transfer; sk.sdrWhite = ex.sdrWhiteNits; sk.haveSplit = haveSplit ? 1 : 0;
 		sk.vis = vis;
+		sk.lutTexels = lutTexels;
 		return sk;
 	}
 
@@ -663,7 +688,10 @@ namespace RegionEvidence
 		out.picture = PictureOrFrame(ex.picture, luma.w, luma.h);
 		out.split = split == nullptr ? SplitState::Missing : (SplitMatches(*split, out.grid) ? SplitState::Present : SplitState::Mismatched);
 		const bool have = out.HaveSplit();
-		const StatsConstants sk = MakeStatsConstants(luma.w, luma.h, B, out.picture, ex, have, fp.vis);
+		const std::vector<float> lutTexels = fp.lut ? LightLevel::PackTexels(*fp.lut) : std::vector<float>();
+		if (fp.lut) out.lightFingerprint = fp.lut->fingerprint;
+		const StatsConstants sk = MakeStatsConstants(luma.w, luma.h, B, out.picture, ex, have, fp.vis,
+			fp.lut ? lutTexels.data() : nullptr);
 		PlaneSource src;
 		src.y = &luma;
 		std::vector<float> aux;
@@ -787,6 +815,9 @@ namespace RegionEvidence
 	{
 		VpSkeleton::ProductId grainSplit = VpSkeleton::kNoProduct;
 		VpSkeleton::ProductId blockStats = VpSkeleton::kNoProduct;
+		// The chroma planes' split (core P10c): only when the registry carries the core grain products; the chroma-from-luma
+		// grain guard consumes it in addition to the luma product.
+		VpSkeleton::ProductId grainSplitChroma = VpSkeleton::kNoProduct;
 	};
 
 	// The grain product's declared readers as skeleton consumers (ids firstId .. firstId + 3, assigned at integration):
@@ -803,6 +834,8 @@ namespace RegionEvidence
 			c.id = static_cast<uint16_t>(firstId + i);
 			c.name = kNames[i];
 			VpSkeleton::AddConsume(c, ids.grainSplit, 0);
+			if (i == 2 && ids.grainSplitChroma != VpSkeleton::kNoProduct)   // the chroma-from-luma grain guard
+				VpSkeleton::AddConsume(c, ids.grainSplitChroma, 0);
 			out.push_back(c);
 		}
 		return out;
@@ -842,35 +875,26 @@ namespace RegionEvidence
 	// E = 0 (kNoGrain, named in StatusOf). The camera record rides FrameAnalysisStore kCamera (not a skeleton product);
 	// without it the aux texel carries confidence 0 (named in StatusOf). The visibility term reads the output settings
 	// (display peak). Both are T0: every regional repair depends on them.
-	inline ProductIds AppendProducts(std::vector<VpSkeleton::ProductDecl>& decls, VpSkeleton::Dims frame)
+	inline ProductIds AppendProducts(std::vector<VpSkeleton::ProductDecl>& decls, VpSkeleton::Dims /*frame*/)
 	{
+		// The declarations live ONCE, in core/Products.h (SA0): P10 grain split (kP10GrainSplit) and P11 region block
+		// statistics (kP11RegionBlockStats). This returns their ids. On a registry that holds only the first products
+		// it completes it to the skeleton set (SkeletonProducts() order), so the ids are dense and the same everywhere;
+		// on a registry that already holds the skeleton it appends nothing.
 		using namespace VpSkeleton;
-		using namespace VpIndicator;
-		const CounterMask content = Bit(kFull) | Bit(kContinuity);
-		const Cost c = CostAt(frame);
+		if (decls.size() == static_cast<size_t>(kFirstProductCount))
+		{
+			AppendCameraProducts(decls);
+			AppendGrainSplitProducts(decls);
+			AppendRegionProducts(decls);
+			AppendSourceRingProduct(decls);
+			AppendTemporalDetailProducts(decls);
+			AppendSourceIdentityProduct(decls);
+		}
 		ProductIds ids;
-
-		ProductDecl gs = detail::Make(static_cast<ProductId>(decls.size()), kTokenGrainSplit, "grain split (shared)",
-			Backend::GpuCompute, 1, Tier::T0, content, Bit(kSettingsAnalysis));
-		gs.sourceFrame = true;
-		detail::AddInput(gs, kP4SourceStats, 0);
-		detail::AddTerm(gs, 0, 5);
-		detail::AddTerm(gs, 1, 2);
-		gs.size.fixedBytes = static_cast<uint32_t>(c.blocks * 16);
-		gs.refRenderMs = static_cast<float>(c.refMsSplit);
-		ids.grainSplit = gs.id;
-		decls.push_back(gs);
-
-		ProductDecl bs = detail::Make(static_cast<ProductId>(decls.size()), "region_block_stats", "region block statistics",
-			Backend::GpuCompute, 1, Tier::T0, content, Bit(kSettingsAnalysis) | Bit(kSettingsMotion) | Bit(kSettingsOutput));
-		bs.sourceFrame = true;
-		detail::AddInput(bs, ids.grainSplit, 0);
-		detail::AddInput(bs, kP4SourceStats, 0);
-		bs.size.fixedBytes = static_cast<uint32_t>(c.blockStatsBytes);
-		bs.missingInputForm = true;
-		bs.refRenderMs = static_cast<float>(c.refMsStats);
-		ids.blockStats = bs.id;
-		decls.push_back(bs);
+		ids.grainSplit = kP10GrainSplit;
+		ids.blockStats = kP11RegionBlockStats;
+		ids.grainSplitChroma = kP10cGrainSplitChroma;
 		return ids;
 	}
 }

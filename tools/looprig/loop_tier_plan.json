@@ -1,0 +1,16 @@
+{
+ "schema": 1,
+ "about": "Scenarios the unattended loop tier runs (ids from scenarios.json). src_fps/cadence feed tools/framestamp/make_stamped_clip.py; schedule = a resync stress group from stress_schedule.py driven through VP_RESYNC_INJECT. attended = needs a person (Apple TV switch, HDMI re-plug): only with -OwnerAttended.",
+ "optional_rows": ["latency"],
+ "modes": {
+  "1080p60": {"size": [1920, 1080], "fps": [60000, 1001]},
+  "2160p30": {"size": [3840, 2160], "fps": [30000, 1001]}
+ },
+ "scenarios": [
+  {"id": "film24_to_60", "mode": "1080p60", "src_fps": [24000, 1001], "cadence": null, "seconds": 120},
+  {"id": "sport60_native", "mode": "1080p60", "src_fps": [60000, 1001], "cadence": null, "seconds": 120},
+  {"id": "resync_random", "mode": "1080p60", "src_fps": [24000, 1001], "cadence": null, "seconds": 300, "schedule": {"group": "random", "input": "sdr"}},
+  {"id": "resync_atv_switch", "scenario": "resync_random", "mode": "1080p60", "src_fps": [24000, 1001], "cadence": null, "seconds": 300, "attended": true, "schedule": {"group": "atv_switch", "input": "sdr", "manual": true}},
+  {"id": "film24_to_30", "mode": "2160p30", "src_fps": [24000, 1001], "cadence": null, "seconds": 120}
+ ]
+}

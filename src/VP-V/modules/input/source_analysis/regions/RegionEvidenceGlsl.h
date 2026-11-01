@@ -24,10 +24,14 @@
 //                 vec4 re_d1 (edgeGateOffLo, edgeGateOffHi, ringFloor, flatLo), vec4 re_d2 (flatHi, slopeLo, slopeHi, 0).
 //    Uniforms(): fills those three vec4 from DeriveParams.
 //
+// StatsPassLutHeaderGlsl() replaces StatsPassHeaderGlsl() when the light-level LUT is bound (see there).
+//
 // TransferGlsl(): re_nits / re_pq_of / re_visibility only (no descriptors), usable by any shader.
 #pragma once
 
 #include "RegionEvidence.h"
+
+#include <VP-V/modules/input/source_analysis/light_level/LightLevelGlsl.h>
 
 #include <string>
 
@@ -86,6 +90,42 @@ float re_y(ivec2 p)
     ivec2 q = clamp(p, re_rect_lo, re_rect_hi - ivec2(1));
     return texelFetch(re_src, q, 0).x;
 }
+// The generic transfer law (the reduced path): per-pixel nits / PQ and the block's visibility.
+void re_accumulate(float c, inout float sum_nits, inout float sum_pq)
+{
+    float nits = re_nits(c, re_transfer, re_vis.x);
+    sum_nits += nits;
+    sum_pq += re_pq_of(nits);
+}
+float re_visibility_mean(float code)
+{
+    return re_visibility(code, re_transfer, re_vis.x, re_vis.y, re_vis.z, re_vis.w, re_dark);
+}
+)GLSL";
+	}
+
+	// The stats pass header with the light-level LUT (WP2): same body (StatsPassGlsl), but J / L / V come from the LUT.
+	// Extra descriptor: light_level_lut (LightLevelGlsl.h: sampled rgba32f 1024 x 1). re_transfer / re_vis / re_dark are not
+	// read. Mirror: StatsBlock<float> with StatsConstants::lutTexels.
+	inline std::string StatsPassLutHeaderGlsl()
+	{
+		return std::string(LightLevel::LightLevelGlsl()) + R"GLSL(
+float re_clamp01(float v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
+float re_y(ivec2 p)
+{
+    ivec2 q = clamp(p, re_rect_lo, re_rect_hi - ivec2(1));
+    return texelFetch(re_src, q, 0).x;
+}
+void re_accumulate(float c, inout float sum_nits, inout float sum_pq)
+{
+    vec4 e = light_level_lut_fetch(c);
+    sum_nits += e.w * 10000.0;
+    sum_pq += e.x;
+}
+float re_visibility_mean(float code)
+{
+    return re_clamp01(light_level_lut_fetch(code).z);
+}
 )GLSL";
 	}
 
@@ -124,9 +164,7 @@ if (blk.x < grid.x && blk.y < grid.y) {
                 lap_e += lap * lap;
                 sx_y += (float(x) - cxm) * c;
                 sy_y += (float(y) - cym) * c;
-                float nits = re_nits(c, re_transfer, re_vis.x);
-                sum_nits += nits;
-                sum_pq += re_pq_of(nits);
+                re_accumulate(c, sum_nits, sum_pq);
             }
         }
         float thr2 = 0.0625 * g2max;
@@ -153,7 +191,7 @@ if (blk.x < grid.x && blk.y < grid.y) {
         o3 = vec4(nx > 1 ? sx_y / sxx : 0.0, ny > 1 ? sy_y / syy : 0.0, sum_nits * inv, sum_pq * inv);
         o4.x = float(n) / float(frame_area);
         o4.y = float(off_count) * inv;
-        o4.z = re_visibility(o0.x, re_transfer, re_vis.x, re_vis.y, re_vis.z, re_vis.w, re_dark);
+        o4.z = re_visibility_mean(o0.x);
     }
     imageStore(re_s0, blk, o0);
     imageStore(re_s1, blk, o1);

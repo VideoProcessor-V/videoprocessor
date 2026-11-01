@@ -69,6 +69,7 @@
 #include <vprenderer/AnamorphicPresentation.h>
 #include <vprenderer/EdgeBlanking.h>
 #include <vprenderer/NlsHookRecovery.h>
+#include <vprenderer/RendererExtension.h> // VPV-HOOK
 #include <vprenderer/CaptureTimestampGap.h>
 #include <vprenderer/FileFrameClock.h>
 #include <vprenderer/DisplayRateHold.h>
@@ -84,8 +85,7 @@
 #include <VP-V/modules/input/capture/EarlyUploadHandoff.h>
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h>   // WP-23 frame analysis store
 #include <VP-V/modules/input/signal/ResyncCallSites.h>   // R1 call-site helpers
-#include <VP-V/modules/input/signal/ResyncShadow.h>   // resync_event shadow (R1)
-#include <VP-V/modules/input/signal/ResyncDrive.h>    // resync_event on: the Indicator's readers (R3)
+#include <VP-V/modules/input/signal/ResyncExtension.h>   // VPV-HOOK: resync Q1 (Shadow, Drive, HostBinding, pulldown step)
 #include <VP-V/modules/scaling/rebase/RebaseDecision.h>   // R4a: the re-base decision product P0
 #include <vprenderer/DejudderPolicy.h>
 #include <vprenderer/InterpolationPolicy.h>
@@ -8716,11 +8716,9 @@ struct LibplaceboVideoRenderer::Impl
 	VpFrameAnalysis::Host frameAnalysis;
 	// R1: the resync event shadow (detector + status lines); never changes the picture.
 	VpResync::Shadow resync;
-	// R3 (resync_event on): the readers the Indicator drives (render thread), the pulldown's cursor
-	// (capture thread) and the last enqueued sequence it reads (capture thread).
+	// R3 (resync_event on): the readers the Indicator drives (render thread).
 	VpResync::Drive resyncDrive;
-	VpResync::Drive::Cursor pulldownResyncCursor;
-	uint64_t pulldownResyncSeq = 0;
+	Vpv::Resync::HostBinding resyncBinding{ this, resync, resyncDrive };   // VPV-HOOK: the resync extension's state for this renderer
 	// R4a (resync_event on): the re-base decision product P0 (per-axis source-time fades).
 	VpRebase::DecisionTracker rebaseDecision;
 	VpRebase::StatusCell rebaseP0Status;   // R4a: the last frame's P0, for the source-resolution status line
@@ -8815,15 +8813,10 @@ struct LibplaceboVideoRenderer::Impl
 		(void)next.ActiveEntrance();   // warm the kept list here, so the render thread only reads it
 		pipelineSlots = next;
 		VpFrameAnalysis::Host::SetLimitedDomain(settings.sourceCodingFixes);   // DIV-AN-01 either/or (Original: off = Bill's codes)
-		frameAnalysis.Configure(settings.frameAnalysisStore && !settings.pipelineOriginalPathway,   // WP-23
+		frameAnalysis.Owner(this).Configure(settings.frameAnalysisStore && !settings.pipelineOriginalPathway,   // WP-23
 			VpFrameAnalysis::Host::FullLumaReaders(pipelineSlots, settings.opticalFlow, settings.motionAheadFrames,
 				settings.sourceResolution == "auto"));   // running full-luma readers; record readers: none yet
-		// R1: resync shadow. Frames in flight = queue capacity (the member is not reachable here: the default) + motion look-ahead + 2 render-ahead + 1.
-		resync.SetLogger([](const std::string& text) { DebugLog::Log("%s", text.c_str()); });   // R1
-		resync.Configure(VpResync::ModeFromSetting(settings.resyncEvent, settings.pipelineOriginalPathway),
-			AlphaQueuePolicy::HardCapacity(AlphaQueuePolicy::DEFAULT_DESIRED_DEPTH) + static_cast<size_t>((std::max)(0, settings.motionAheadFrames)) + 2 + 1);
-		if (!resync.Driving())
-			resyncDrive.Detach();   // R3: the readers' pending changes are dropped when not `on`
+		RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::SettingsApplied, this, nullptr, nullptr, settings.resyncEvent.c_str(), nullptr, settings.pipelineOriginalPathway ? 1 : 0, nullptr, static_cast<double>(settings.motionAheadFrames)); // VPV-HOOK
 		entrance.Invalidate();
 		std::string state = settings.pipelineOriginalPathway ? "Original pathway (every VP addition off)" :
 			pipelineSlots.IsDefaultOrder() ? "designed order" : "custom order";
@@ -9809,6 +9802,7 @@ struct LibplaceboVideoRenderer::Impl
 			renderAheadEstimateTimer.ReleaseResources();
 			renderAheadTimersReady = false;
 			renderTimingContext.Release();
+			RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::GpuReleased, this); // VPV-HOOK
 			SaveShaderCache();
 			pl_d3d11_destroy(&d3d11);
 			pl_cache_destroy(&cache);
@@ -12803,6 +12797,7 @@ struct LibplaceboVideoRenderer::Impl
 		d3d11 = pl_d3d11_create(log, &deviceParams);
 		if (!d3d11)
 			throw std::runtime_error("Failed to create libplacebo D3D11 device");
+		RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::GpuCreated, this, d3d11->gpu, d3d11->device); // VPV-HOOK
         // libplacebo's setter does not check HRESULT. Verify the actual device
         // cap before sizing either swapchain; never advertise a rejected value.
         CComPtr<IDXGIDevice1> latencyDevice;
@@ -28405,6 +28400,7 @@ releaseDriftBaseRetention =
         }
         // Dynamic Drive, stats out: finished measurements (a few frames old; never waits).
         dynamicDrive.CollectMeasurements();
+        RendererExtension::NotifyAfterRender(this, sourceSequence, frameGeneration, static_cast<int>(hookRender.errors), hookRender.retried ? 1 : 0, rendered); // VPV-HOOK
         if (hookRender.retried)
             DebugLog::Log("VP anamorphic hook recovery: schema=1 sequence=%llu generation=%llu hook=%llu errors=0x%x retry=1 rendered=%d lens=%.6f latch=until_shader_selection_change",
                 sourceSequence, frameGeneration, hookRender.failedSignature, hookRender.errors,
@@ -30135,7 +30131,7 @@ bool LibplaceboVideoRenderer::OnVideoState(VideoStateComPtr& videoState)
 		 videoState->dolbyVisionTunnel != m_videoState->dolbyVisionTunnel ||
          videoState->tunnelSdrRgbRange != m_videoState->tunnelSdrRgbRange))
 	{
-		if (m_impl) m_impl->resync.NoteRefusal(VpResync::ClassifyStateRefusal(*videoState, *m_videoState));   // R1
+		RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::StateRefused, m_impl.get(), nullptr, nullptr, videoState.p, m_videoState.p, 0); // VPV-HOOK
 		return false;
 	}
 
@@ -30146,7 +30142,7 @@ bool LibplaceboVideoRenderer::OnVideoState(VideoStateComPtr& videoState)
 	{
 		DebugLog::Log(
 			"display: source transition arrived during renderer-thread initialization; requesting fresh construction");
-		if (m_impl) m_impl->resync.NoteRefusal(VpResync::RefusalReason::InitRace);   // R1
+		RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::StateRefused, m_impl.get(), nullptr, nullptr, nullptr, nullptr, 1); // VPV-HOOK
 		return false;
 	}
 
@@ -30187,7 +30183,7 @@ bool LibplaceboVideoRenderer::OnVideoState(VideoStateComPtr& videoState)
 				"display: effective settings changed (%s -> %s); requesting renderer rebuild",
 				currentDisplayRule.empty() ? "base" : currentDisplayRule.c_str(),
 				nextRule.empty() ? "base" : nextRule.c_str());
-			m_impl->resync.NoteRefusal(VpResync::RefusalReason::SettingsRebuild);   // R1
+			RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::StateRefused, m_impl.get(), nullptr, nullptr, nullptr, nullptr, 2); // VPV-HOOK
 			return false;
 		}
 		// The published snapshot can lag a UI profile transition by one render
@@ -30210,8 +30206,7 @@ bool LibplaceboVideoRenderer::OnVideoState(VideoStateComPtr& videoState)
 		}
 	}
 	m_videoState = new VideoState(*videoState);
-	if (materialSourceTransition && m_impl)
-		m_impl->resync.ArmInPlaceSourceChange(reinterpret_cast<uintptr_t>(m_videoState.p));   // R1
+	if (materialSourceTransition) RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::StateAccepted, m_impl.get(), nullptr, nullptr, m_videoState.p); // VPV-HOOK
 	if (materialSourceTransition)
 	{
 		// Source metadata transitions do not alter the pixels already queued, but
@@ -30389,36 +30384,14 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 	bool filmUpdate = false;
 	if (m_pulldownDetection.load(std::memory_order_relaxed) && frameState->displayMode)
 	{
-		// R3 (resync_event on): the pulldown reads the Indicator through its cursor (the stamp of the
-		// last enqueued frame; the frame being decided has no stamp yet): a FULL resets it as the
-		// renderer's own reset request does, a timing event re-latches the signal rate in place of the
-		// fixed 0.5% rule. Off/shadow: the rule and the request as before.
-		const bool pulldownResyncDriving = m_impl && m_impl->resync.Driving();
-		m_pulldown.SetTimingRelatch(pulldownResyncDriving);
-		VpIndicator::CounterMask pulldownResync = 0;
-		if (pulldownResyncDriving && m_impl->pulldownResyncSeq != 0)
-		{
-			if (const std::shared_ptr<VpIndicator::Indicator> indicator = m_impl->resync.GetIndicator())
-			{
-				const bool latched = m_impl->pulldownResyncCursor.Has();
-				pulldownResync = m_impl->pulldownResyncCursor.Advance(*indicator, m_impl->pulldownResyncSeq);
-				if (!latched)
-					pulldownResync = 0;   // the first read only latches (no action on entering `on`)
-			}
-		}
-		else if (m_impl && m_impl->pulldownResyncCursor.Has())
-			m_impl->pulldownResyncCursor.Reset();   // left `on`: a later `on` latches afresh
-		const bool pulldownResetRequest = m_pulldownResetRequested.exchange(false, std::memory_order_acq_rel);
-		if (pulldownResetRequest || (pulldownResync & VpIndicator::Bit(VpIndicator::kFull)) != 0)
+		const Vpv::Resync::PulldownStep pulldownResync = Vpv::Resync::PulldownResyncStep(m_impl.get(), m_pulldownResetRequested.exchange(false, std::memory_order_acq_rel)); // VPV-HOOK: resync cursor (on: FULL resets, timing re-latches)
+		m_pulldown.SetTimingRelatch(pulldownResync.driving); // VPV-HOOK
+		if (pulldownResync.reset) // VPV-HOOK
 		{
 			m_pulldown.Reset();
 			m_pulldownClock.Reset();
 			m_pulldownSignature = 0;
 			m_pulldownFilmQpc = 0;
-			// R3: the request's own FULL (the new generation's first frame) must not reset it again.
-			if (pulldownResetRequest && m_impl)
-				m_impl->pulldownResyncCursor.Reset();
-			pulldownResync = 0;
 		}
 		const uint64_t signature = Pulldown::Signature(videoFrame.GetData(),
 			static_cast<size_t>(frameState->BytesPerRow()),
@@ -30426,7 +30399,7 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 		const bool repeat = signature != 0 && signature == m_pulldownSignature;
 		m_pulldownSignature = signature;
 		const double measuredRateHz = m_measuredFrameRate.load(std::memory_order_relaxed);
-		const double signalHz = measuredRateHz > 0.0 ? measuredRateHz : frameState->displayMode->RefreshRateHz();
+		const double signalHz = RendererExtension::ResolveFor(RendererExtension::Resolve::SourceSignalRate, m_impl.get(), measuredRateHz > 0.0 ? measuredRateHz : frameState->displayMode->RefreshRateHz()); // VPV-HOOK
 		const bool fixes = m_pulldownFixes.load(std::memory_order_relaxed);
 		const bool classFixes = m_cadenceClassFixes.load(std::memory_order_relaxed);
 		if (fixes != m_pulldownFixesApplied || classFixes != m_cadenceClassFixesApplied)
@@ -30476,7 +30449,7 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 		const int previousCycle = m_pulldown.Cycle(), previousUnique = m_pulldown.Unique();
 		// R3 (resync_event on): an unannounced rate move (timing) re-latches the signal rate; the lock
 		// is dropped only when the cadence class changes (Pulldown::Detector::RelatchSignalHz).
-		if ((pulldownResync & VpIndicator::Bit(VpIndicator::kTiming)) != 0 && m_pulldown.RelatchSignalHz(signalHz))
+		if (pulldownResync.relatchTiming && m_pulldown.RelatchSignalHz(signalHz)) // VPV-HOOK
 			DebugLog::Log("Pulldown: signal rate moved to %.3f Hz beyond the lock's resolution (resync timing); lock dropped",
 				signalHz);
 		// D4: the counted misses keep the lock (verified over the next cycle).
@@ -30763,26 +30736,11 @@ void LibplaceboVideoRenderer::EnqueueFrame(VideoFrame& videoFrame,
 			const int64_t diagEnqueueQpc = queuedFrame.enqueueQpc;
 			m_frameQueue.push_back(std::move(queuedFrame));
 			m_repeatPreservingDrops = 0;   // carried by this frame
-			if (m_impl && m_impl->resync.Active())   // R1: resync shadow (read-only facts); Off builds no facts
-			{
-				VpResync::EnqueueFacts facts;
-				facts.sequence = sourceSequence;
-				facts.queueGeneration = enqueueGeneration;
-				facts.stateKey = reinterpret_cast<uintptr_t>(frameState.p);
-				facts.formatKey = activePictureIdentity.sourceFormatGeneration;
-				facts.frameCounter = videoFrame.GetCounter();
-				facts.timestampTicks = static_cast<int64_t>(videoFrame.GetTimingTimestamp());
-				facts.ticksPerSecond = m_timingClock ? static_cast<int64_t>(m_timingClock->TimingClockTicksPerSecond()) : 0;
-				facts.gapBefore = gapBefore;
-				facts.gapFrames = gapFrames;
-				facts.gapCause = gapCause;
-				facts.sourceDiscontinuity = videoFrame.IsSourceDiscontinuity() || (file && file->discontinuity);
-				facts.fileFrame = file != nullptr;
-				facts.measuredRateHz = file ? 0.0 : m_measuredFrameRate.load(std::memory_order_relaxed);
-				facts.overflowSuccessorSeq = resyncOverflowSeq;
-				m_impl->resync.OnEnqueue(facts, std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
-				m_impl->pulldownResyncSeq = sourceSequence;   // R3: the pulldown's cursor reads this frame's stamp next
-			}
+			{ RendererExtension::IngressContext ic; ic.host = m_impl.get(); ic.seq = static_cast<int64_t>(sourceSequence); ic.queueGeneration = static_cast<int64_t>(enqueueGeneration); // VPV-HOOK
+			  ic.stateKey = reinterpret_cast<uintptr_t>(frameState.p); ic.formatKey = activePictureIdentity.sourceFormatGeneration; ic.frameCounter = static_cast<int64_t>(videoFrame.GetCounter()); // VPV-HOOK
+			  ic.timestamp = static_cast<int64_t>(videoFrame.GetTimingTimestamp()); ic.ticksPerSecond = m_timingClock ? static_cast<int64_t>(m_timingClock->TimingClockTicksPerSecond()) : 0; // VPV-HOOK
+			  ic.gapBefore = gapBefore; ic.gapFrames = gapFrames; ic.gapCause = gapCause; ic.discontinuity = videoFrame.IsSourceDiscontinuity() || (file && file->discontinuity); ic.fromFile = file != nullptr; // VPV-HOOK
+			  ic.measuredRateHz = file ? 0.0 : m_measuredFrameRate.load(std::memory_order_relaxed); ic.overflowSuccessor = static_cast<int64_t>(resyncOverflowSeq); RendererExtension::Ingress(ic); } // VPV-HOOK
 			// Report-a-problem: the frame queued for rendering (queue depth after it).
 			RecordRendererFrame(DiagnosticHistory::StageRendererIngest, videoFrame.GetCounter(),
 				videoFrame.GetTimingTimestamp(), m_frameQueue.size(), 0,
@@ -32297,6 +32255,7 @@ void LibplaceboVideoRenderer::OnDisplayChange()
 	if (m_impl)
     {
         m_impl->displayRefreshRate.InvalidateOutputRaster();
+		RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::DisplayChange, m_impl.get()); // VPV-HOOK
 		m_impl->RenegotiateOutput();
         m_impl->Resize(m_videoHwnd);
     }
@@ -33019,7 +32978,7 @@ bool LibplaceboVideoRenderer::GetFallbacksStatus(CString& status) const
 	status.Empty();
 	if (!m_impl)
 		return false;
-	status = CString(m_impl->fallbacks.Heading().c_str());
+	status = CString(RendererExtension::WithStatusLines(RendererExtension::StatusKind::Fallbacks, m_impl.get(), m_impl->fallbacks.Heading()).c_str()); // VPV-HOOK
 	return true;
 }
 
@@ -33037,20 +32996,16 @@ bool LibplaceboVideoRenderer::GetModuleStatus(const char* module, CString& statu
 			take(lines.fallbacks, GetFallbacksStatus(line));
 			take(lines.ledDrive, GetLedDriveStatus(line));
 			take(lines.sourceResolution, GetSourceResolutionStatus(line));
-			{   // R1: the resync shadow lines (false when Off / no renderer)
-				std::string resyncLine, resyncEvents;
-				const bool haveStatus = m_impl && m_impl->resync.StatusLine(resyncLine,
-					std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
-				line = CString(resyncLine.c_str());
-				take(lines.resync, haveStatus);
-				const bool haveEvents = m_impl && m_impl->resync.EventLines(resyncEvents);
-				line = CString(resyncEvents.c_str());
-				take(lines.resyncEvents, haveEvents);
-			}
+			std::vector<std::string> extensionLines; RendererExtension::CollectStatusLines(RendererExtension::StatusKind::Lines, m_impl.get(), extensionLines); // VPV-HOOK
+			VpStatusText::SetExtensionLines(lines, extensionLines, [](const std::string& text) { return std::wstring(CString(text.c_str()).GetString()); }); // VPV-HOOK
 		}, text);
 	status = text.c_str();
 	return answered;
 }
+
+void* LibplaceboVideoRenderer::QueryExtension(const char* iid) { return RendererExtension::Query(iid); } // VPV-HOOK
+bool LibplaceboVideoRenderer::InvokeModuleCommand(const char* module, const char* command, CString& reply) // VPV-HOOK
+{ std::string text; const bool handled = RendererExtension::CommandFor(m_impl.get(), module, command, text); reply = CString(text.c_str()); return handled; } // VPV-HOOK
 
 // feat/dv-l8 WIP (plugin API 43): the dv_compare_capture shortcut (DvCompareCapture.h).
 bool LibplaceboVideoRenderer::ToggleDvCompareCapture(CString& status)
@@ -35928,6 +35883,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 			catch (const std::exception& e)
 			{
 				DebugLog::Log("Motion ahead: frames skipped: %s", e.what());
+				RendererExtension::ReportWorker(m_impl.get(), "motion-ahead", e.what()); // VPV-HOOK
 			}
 			for (QueuedFrame& ahead : motionAheadFrames)
 				ahead.frame.SourceBufferRelease();
@@ -35961,6 +35917,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 			catch (const std::exception& e)
 			{
 				DebugLog::Log("Source resolution look-ahead skipped: %s", e.what());
+				RendererExtension::ReportWorker(m_impl.get(), "source-look-ahead", e.what()); // VPV-HOOK
 			}
 			if (!m_impl->sourceAheadLogged)
 			{
@@ -36076,10 +36033,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 				m_frameQueue.front().cadenceDeadlineSeconds;
 			currentFileFrame = m_frameQueue.front().fileFrame;
 			currentFileMotionOff = m_frameQueue.front().fileMotionOff;
-			// R3 (resync_event on): the frame about to be rendered is sealed; the Indicator tells each
-			// reader which of its counters changed for it (the readers act at their own call sites).
-			if (m_impl && m_impl->resync.Driving())
-				m_impl->resyncDrive.SealAndObserve(m_impl->resync.GetIndicator(), sourceSequence);
+			RendererExtension::NotifyFrame(RendererExtension::FramePhase::Begin, m_impl.get(), static_cast<int64_t>(sourceSequence)); // VPV-HOOK: the one FrameSeal (resync), then the readers at their sites
 			const auto& dequeued = m_frameQueue.front();
 			if (dequeued.state && dequeued.state->dolbyVisionTunnel)
 			{
@@ -36658,7 +36612,7 @@ void LibplaceboVideoRenderer::RenderLoop()
                     static_cast<uint64_t>(sourceSubtitleMode)+1ULL;
                 m_impl->ApplyResyncLibplaceboFlush(sourceSequence);   // L1 (resync_event on)
                 m_impl->temporalRenderer.Begin(motionSettings,captureRateHz,
-                    m_impl->renderLoadDisplayRefreshHz.load(std::memory_order_acquire),
+                    RendererExtension::ResolveFor(RendererExtension::Resolve::PresentClockRate,m_impl.get(),m_impl->renderLoadDisplayRefreshHz.load(std::memory_order_acquire)), // VPV-HOOK
                     state&&state->displayMode&&state->displayMode->IsInterlaced(),
                     state&&state->displayMode?static_cast<int>(state->displayMode->FirstFieldOrder()):0,
                     temporalCaptureEpoch,sourceSequence,sourcePts,frame.IsSourceDiscontinuity(),
@@ -37005,10 +36959,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 								m_frameQueue.front().gapBefore = true;
 								m_frameQueue.front().gapCause = "backlog flush";
 								m_frameQueue.front().gapFrames = 0;   // a flush: never a gap-fill pair
-								if (m_impl)   // R3: a late MINOR (kept-run hole) at the first kept frame (shadow/on; off: nothing)
-									m_impl->resync.OnLateSlip(VpResync::Cause::KeptRunHole, m_frameQueue.front().sourceSequence,
-										static_cast<uint32_t>(droppedFrames),
-										std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
+								RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Drop, m_impl.get(), static_cast<int64_t>(m_frameQueue.front().sourceSequence), 0, static_cast<uint32_t>(droppedFrames), 1); // VPV-HOOK: kept-run hole
 								// A held shed of the late frames keeps the steering and render-ahead's anchor
 								// (the queue is back at its hold, not restarted).
 								if (m_impl && backlogDecision.restartsTiming)
@@ -37344,9 +37295,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 			// The dropped frame breaks the kept run: no pair or hold across it
 			// (NoteKept would also see the hole at the next frame).
 			m_impl->RequestMotionInvalidate(MotionValidity::Cause::DriftDrop);
-			// R3: a late MINOR at the slip point, the frame after the dropped one (shadow/on; off: nothing).
-			m_impl->resync.OnLateSlip(VpResync::Cause::DriftDrop, sourceSequence + 1, 1,
-				std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
+			RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Drop, m_impl.get(), static_cast<int64_t>(sourceSequence + 1), 0, 1, 2); // VPV-HOOK: drift drop
 			const uint64_t dropCount =
 				m_sceneCorrectionDropCount.fetch_add(
 					1, std::memory_order_relaxed) + 1;
@@ -37535,7 +37484,6 @@ void LibplaceboVideoRenderer::BeginQueueGeneration(
 		ClearQueueLocked(reason);
 		if (++m_queueGeneration == 0)
 			++m_queueGeneration;
-		if (m_impl) m_impl->resync.ArmQueueGeneration(m_queueGeneration, reason);   // R1
 		{
 			std::lock_guard<std::mutex> timingGuard(m_conversionTimingMutex);
 			m_conversionTiming.Reset();
@@ -37551,6 +37499,7 @@ void LibplaceboVideoRenderer::BeginQueueGeneration(
 		generation = m_queueGeneration;
 		target = PrefillTargetLocked();
 		capacity = m_useFrameQueue ? m_frameQueueMaxSize : 1;
+		RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Flush, m_impl.get(), -1, static_cast<int64_t>(generation), static_cast<uint32_t>(capacity), 0, reason); // VPV-HOOK
 		if (m_impl)
 		{
 			{

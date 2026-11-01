@@ -1,11 +1,16 @@
 #pragma once
 
+#include <VP-V/core/ScratchArena.h>
+#include <VP-V/modules/control/gpu_memory/PlTexBackend.h>
+#include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
+
 #include <libplacebo/renderer.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 // texture_restore: off | statistical (experimental; owner 2026-10-17; docs/VP-detail-restore.md).
 // Repair towards the original: per tile the luma detail is split into grain (unstructured,
@@ -90,26 +95,13 @@ namespace TextureRestore
 		const int sub = (std::max)(1, static_cast<int>(std::lround(kTilePx * scale / kSubBlocks)));
 		return sub * kSubBlocks;
 	}
-	inline int Radius1(double scale) { return (std::max)(1, static_cast<int>(std::ceil(3.0 * kSigma1 * scale - 1e-9))); }
-	inline double Weight1(int k, double scale)
-	{
-		const double s = kSigma1 * scale;
-		const int r = Radius1(scale);
-		double sum = 0.0;
-		for (int i = -r; i <= r; ++i) sum += std::exp(-0.5 * i * i / (s * s));
-		return std::exp(-0.5 * k * k / (s * s)) / sum;
-	}
+	// The band Gaussians are the shared U2 law (VpUnit::BandFromBase).
+	inline int Radius1(double scale) { return VpUnit::BandFromBase::Radius(kSigma1 * scale, 3.0, true, 1e-9); }
+	inline double Weight1(int k, double scale) { return VpUnit::BandFromBase::Weight(k, kSigma1 * scale, Radius1(scale)); }
 	// The half-resolution sigma of a full-resolution split (the 2x2 box adds 0.25 px^2 per axis).
-	inline double HalfSigma(double sigma) { return std::sqrt(sigma * sigma - 0.25) / 2.0; }
-	inline int HalfRadius(double sigma) { return (std::max)(1, static_cast<int>(std::ceil(3.5 * HalfSigma(sigma) - 1e-9))); }
-	inline double HalfWeight(int k, double sigma)
-	{
-		const double s = HalfSigma(sigma);
-		const int r = HalfRadius(sigma);
-		double sum = 0.0;
-		for (int i = -r; i <= r; ++i) sum += std::exp(-0.5 * i * i / (s * s));
-		return std::exp(-0.5 * k * k / (s * s)) / sum;
-	}
+	inline double HalfSigma(double sigma) { return VpUnit::BandFromBase::HalfSigma(sigma); }
+	inline int HalfRadius(double sigma) { return VpUnit::BandFromBase::Radius(VpUnit::BandFromBase::HalfSigma(sigma), 3.5, true, 1e-9); }
+	inline double HalfWeight(int k, double sigma) { return VpUnit::BandFromBase::Weight(k, VpUnit::BandFromBase::HalfSigma(sigma), HalfRadius(sigma)); }
 	// One 8-bit code in the signal's codes.
 	inline double EightBitStep(int colorDepth) { return std::pow(2.0, (std::max)(0, colorDepth - 8)); }
 	// The expected coding-noise RMS in 8-bit codes (as GrainPreserve::CodingNoiseCodes).
@@ -142,7 +134,15 @@ namespace TextureRestore
 		double fieldScale = 1.0;
 		double fieldScaleX = 0.0;
 		uint64_t sequence = 0;
+		VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* arena = nullptr;  // SA1: null = private textures as before
 	};
+
+	// SA1: the scratch arena scopes (one per Apply / ApplyForeign call) and the temporaries they ask for.
+	constexpr uint16_t kArenaScopeApply = 0x0101, kArenaScopeForeign = 0x0102;
+	// Tier T1. Apply: the half-resolution `half` (one float-1 texture) and `tmp` (one float-2 texture).
+	// With foreignW > 0 also ApplyForeign's trio at half of the foreign dims (one float-1, two float-2).
+	// The formats are the ones Apply uses (FloatFormat). Empty when a format does not map.
+	std::vector<VpSkeleton::ArenaRequest> ArenaRequests(pl_gpu gpu, int planeW, int planeH, int foreignW = 0, int foreignH = 0);
 
 	class Module
 	{
@@ -171,6 +171,8 @@ namespace TextureRestore
 		const std::string& LastError() const { return error; }
 		unsigned long long Failures() const { return failures; }
 		unsigned long long Frames() const { return frames; }
+		// True when the LAST Apply / ApplyForeign failed because the scratch arena had no texture.
+		bool ScratchShort() const { return scratchShort; }
 		// The source frame the references last advanced on (0 = none or a restart pending): a
 		// caller may apply this frame's decision to another picture of it (a de-judder extra)
 		// as a repeat, without advancing.
@@ -181,5 +183,6 @@ namespace TextureRestore
 		Impl* impl = nullptr;
 		std::string error;
 		unsigned long long failures = 0, frames = 0;
+		bool scratchShort = false;
 	};
 }

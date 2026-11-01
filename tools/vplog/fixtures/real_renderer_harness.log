@@ -1,0 +1,150 @@
+VP build identity: module=renderer commit=https://github.com/billslack2/videoprocessor/commit/d4a8d4549d6bd267758583ae94e478d32b8a8ca4 branch=feat/one-axis-sharp dirty=1 build=v1.4.00-beta-d4a8d45 build_id=7d1f32a3d794c59c8b61b9ce22382c22
+Configuration disk read: serial=1 identity=4525286295152051989 path=<path>
+Alpha shaders: queued selector "@shader-profiles:standard.fsrcnnx|standard.ssim_superres" for render thread
+VpScaleRender: shader profiles selected: NLS: Pending
+Alpha queue policy: target_frames=4 target=4 hard_capacity=8
+Alpha queue generation armed: generation=1 reason=start prefill_target=4 hard_capacity=8
+DISPLAY_STATE pid=36096 tid=30104 seq=1 tick=83582000 phase=vp-before-initialize begin renderer=VP Renderer instance=00000250C37A0080 hwnd=000000000066092E read_only=1 wire_state=unverified
+DISPLAY_STATE pid=36096 tid=30104 seq=1 tick=83582000 phase=vp-before-initialize monitor=0000000000010001 device=\\.\DISPLAY1 current_mode_available=1 size=1920x1200 refresh_integer=59 bpp=32 mode_flags=0x0
+DISPLAY_STATE pid=36096 tid=30104 seq=1 tick=83582000 phase=vp-before-initialize topology result=0 paths=1
+DISPLAY_STATE pid=36096 tid=30104 seq=1 tick=83582000 phase=vp-before-initialize path=0 adapter=00000000:000148F7 source=0 target=8388688 technology=2147483648 refresh=15400000/256880 scan=1 flags=0x1
+DISPLAY_STATE pid=36096 tid=30104 seq=1 tick=83582000 phase=vp-before-initialize advanced_color target=8388688 supported=1 enabled=0 wide_enforced=1 force_disabled=0 encoding=0 bits=8 (OS report; enabled is not proof of HDR content)
+DISPLAY_STATE pid=36096 tid=30104 seq=1 tick=83582000 phase=vp-before-initialize windows_sdr_white target=8388688 raw=1000 nits=80.0000 (OS desktop setting, not VP tone-map target)
+DISPLAY_STATE pid=36096 tid=30104 seq=1 tick=83582000 phase=vp-before-initialize topology matched_paths=1
+DISPLAY_STATE pid=36096 tid=30104 seq=1 tick=83582000 phase=vp-before-initialize GDI gamma hash=EA9B825068F22D25 (legacy API report only; may not reflect advanced-color scanout)
+DISPLAY_STATE pid=36096 tid=30104 seq=1 tick=83582000 phase=vp-before-initialize GDI gamma channel=0 code[0,16,64,128,235,255]=0,4112,16448,32896,60395,65535
+DISPLAY_STATE pid=36096 tid=30104 seq=1 tick=83582000 phase=vp-before-initialize GDI gamma channel=1 code[0,16,64,128,235,255]=0,4112,16448,32896,60395,65535
+DISPLAY_STATE pid=36096 tid=30104 seq=1 tick=83582000 phase=vp-before-initialize GDI gamma channel=2 code[0,16,64,128,235,255]=0,4112,16448,32896,60395,65535
+DISPLAY_STATE pid=36096 tid=30104 seq=1 tick=83582000 phase=vp-before-initialize DXGI output result=0x00000000 device=\\.\DISPLAY1 monitor=0000000000010001 matches_window=1
+DISPLAY_STATE pid=36096 tid=30104 seq=1 tick=83582000 phase=vp-before-initialize DXGI output_desc1 color_space=0 bits=8 min=0.005 max=552 full_frame=552 red=0.66650,0.33198 green=0.26792,0.63732 blue=0.14154,0.04887 white=0.28064,0.29596 (OS reported, not measured HDMI)
+DISPLAY_STATE pid=36096 tid=30104 seq=1 tick=83582000 phase=vp-before-initialize DXGI gamma not queried: exclusive-fullscreen ownership not established
+DISPLAY_STATE pid=36096 tid=30104 seq=1 tick=83582000 phase=vp-before-initialize end elapsed_ms=31
+libplacebo configuration snapshot evaluated: path=<path>
+calibration workflow: hdr_target_gamma=2.2 sdr_lut_input_gamma=passthrough profiles=display/base, viewport/oa, zoom/oa, standard_shaders/base
+profiles: automatic selections: display/base, viewport/oa, zoom/oa, standard_shaders/base
+Pipeline: designed order; entrance: scaling.rebase > repair.deband > repair.texture_restore; entrance once (B3) on: motion pictures from the processed A and B
+libplacebo [info]: Initialized libplacebo v7.360.1 (v7.360.1-3-g3f5bce24-dirty) (API v360)
+libplacebo: VP_TEST_ADAPTER selects NVIDIA GeForce RTX 3050 Ti Laptop GPU
+libplacebo [info]: Using DXGI 1.2+
+libplacebo [info]: Using Direct3D 11 feature level 12_1
+libplacebo [info]: Direct3D 11 device properties:
+libplacebo [info]:     Device Name: NVIDIA GeForce RTX 3050 Ti Laptop GPU
+libplacebo [info]:     Device ID: 10de:25a0 (rev a1)
+libplacebo [info]:     Subsystem ID: 1028:0a61
+libplacebo [info]:     LUID: 0000000000014cfa
+libplacebo [info]:     Driver version: 32.0.16.1060
+libplacebo [info]: shaderc SPIR-V version 1.6 rev 1
+libplacebo [info]: Initialized SPIR-V compiler 'shaderc'
+libplacebo [info]: Using Direct3D 11.4 runtime
+libplacebo [info]: D3DCompiler version: 10.0.26100.9711
+libplacebo [info]: GPU information:
+libplacebo [info]:     GLSL version: 450 (vulkan)
+libplacebo [info]:       max_shmem_size:            32768
+libplacebo [info]:       max_group_threads:         1024
+libplacebo [info]:       max_group_size[0]:         1024
+libplacebo [info]:       max_group_size[1]:         1024
+libplacebo [info]:       max_group_size[2]:         64
+libplacebo [info]:       subgroup_size:             0
+libplacebo [info]:       min_gather_offset:         -32
+libplacebo [info]:       max_gather_offset:         31
+libplacebo [info]:     Limits:
+libplacebo [info]:       thread_safe:               0
+libplacebo [info]:       callbacks:                 0
+libplacebo [info]:       max_buf_size:              1039400960
+libplacebo [info]:       max_ubo_size:              65536
+libplacebo [info]:       max_ssbo_size:             1039400960
+libplacebo [info]:       max_vbo_size:              1039400960
+libplacebo [info]:       max_mapped_size:           0
+libplacebo [info]:       max_buffer_texels:         134217728
+libplacebo [info]:       align_host_ptr:            0
+libplacebo [info]:       host_cached:               0
+libplacebo [info]:       max_tex_1d_dim:            16384
+libplacebo [info]:       max_tex_2d_dim:            16384
+libplacebo [info]:       max_tex_3d_dim:            2048
+libplacebo [info]:       blittable_1d_3d:           1
+libplacebo [info]:       buf_transfer:              0
+libplacebo [info]:       align_tex_xfer_pitch:      1
+libplacebo [info]:       align_tex_xfer_offset:     32
+libplacebo [info]:       max_variable_comps:        0
+libplacebo [info]:       max_constants:             0
+libplacebo [info]:       max_pushc_size:            0
+libplacebo [info]:       align_vertex_stride:       1
+libplacebo [info]:       max_dispatch[0]:           65535
+libplacebo [info]:       max_dispatch[1]:           65535
+libplacebo [info]:       max_dispatch[2]:           65535
+libplacebo [info]:       fragment_queues:           1
+libplacebo [info]:       compute_queues:            1
+libplacebo D3D11 device: feature_level=0xC100 software=0 allow_software=0 no_compute=0 max_frame_latency=2 debug=0 internal_pass_timers=alternating
+Alpha GPU render timing: scopes=same_frame_stage_sum(source_upload,subtitle_composition,overlay_upload,pl_render_image),pr75_pass_sum sampling=rotating supported=1 query_ring=16 stage_end_flush=1 minimum_lag_frames=2 polling=donotflush
+libplacebo persistent shader cache loaded: 63 objects, 397384 bytes
+libplacebo GPU shader cache enabled: memory limit=256 MiB object limit=64 MiB path=<path>
+Alpha presentation target: trigger=initialize hwnd=000000000066092E parent=0000000000000000 root=000000000066092E owner=0000000000000000 style=0x94000000 exstyle=0x08000080 is_child=0 visible=1 iconic=0 cloaked=0 cloak_result=0x00000000 client=0,0-2560,1440 screen=-6000,-6000--3440,-4560 monitor=0000000000010001 monitor_rect=0,0-1920,1200 requested=AUTO/AUTO/AUTO/Rec.709 effective=AUTO/AUTO/AUTO/Rec.709 fallback=none
+libplacebo [info]: Using flip-model presentation
+libplacebo [info]: Initial swap chain configuration: format: R10G10B10A2_UNORM, color space: RGB_FULL_G22_NONE_P709.
+libplacebo refresh-rate policy: input=23.976024 Hz interlaced=0 policy=native-first preferred=23.976024 Hz
+libplacebo refresh-rate switch: no safe DXGI candidate for input=23.976024 Hz target=23.976024 Hz candidates=2; retaining 59.950171 Hz
+Fallbacks engaged: refresh rate (kept 59.950 Hz for 23.976 Hz input: no matching display mode)
+Alpha presentation target: trigger=initialize hwnd=000000000066092E parent=0000000000000000 root=000000000066092E owner=0000000000000000 style=0x94000000 exstyle=0x08000080 is_child=0 visible=1 iconic=0 cloaked=0 cloak_result=0x00000000 client=0,0-2560,1440 screen=-6000,-6000--3440,-4560 monitor=0000000000010001 monitor_rect=0,0-1920,1200 requested=AUTO/AUTO/AUTO/Rec.709 effective=AUTO/AUTO/AUTO/Rec.709 fallback=none
+DISPLAY_STATE vp negotiation trigger=initialize
+DISPLAY_STATE pid=36096 tid=30104 seq=2 tick=83583718 phase=vp-before-colorspace begin renderer=VP Renderer instance=00000250C37A0080 hwnd=000000000066092E read_only=1 wire_state=unverified
+DISPLAY_STATE pid=36096 tid=30104 seq=2 tick=83583718 phase=vp-before-colorspace monitor=0000000000010001 device=\\.\DISPLAY1 current_mode_available=1 size=1920x1200 refresh_integer=59 bpp=32 mode_flags=0x0
+DISPLAY_STATE pid=36096 tid=30104 seq=2 tick=83583718 phase=vp-before-colorspace topology result=0 paths=1
+DISPLAY_STATE pid=36096 tid=30104 seq=2 tick=83583718 phase=vp-before-colorspace path=0 adapter=00000000:000148F7 source=0 target=8388688 technology=2147483648 refresh=15400000/256880 scan=1 flags=0x1
+DISPLAY_STATE pid=36096 tid=30104 seq=2 tick=83583718 phase=vp-before-colorspace advanced_color target=8388688 supported=1 enabled=0 wide_enforced=1 force_disabled=0 encoding=0 bits=8 (OS report; enabled is not proof of HDR content)
+DISPLAY_STATE pid=36096 tid=30104 seq=2 tick=83583718 phase=vp-before-colorspace windows_sdr_white target=8388688 raw=1000 nits=80.0000 (OS desktop setting, not VP tone-map target)
+DISPLAY_STATE pid=36096 tid=30104 seq=2 tick=83583718 phase=vp-before-colorspace topology matched_paths=1
+DISPLAY_STATE pid=36096 tid=30104 seq=2 tick=83583718 phase=vp-before-colorspace GDI gamma hash=EA9B825068F22D25 (legacy API report only; may not reflect advanced-color scanout)
+DISPLAY_STATE pid=36096 tid=30104 seq=2 tick=83583718 phase=vp-before-colorspace GDI gamma channel=0 code[0,16,64,128,235,255]=0,4112,16448,32896,60395,65535
+DISPLAY_STATE pid=36096 tid=30104 seq=2 tick=83583718 phase=vp-before-colorspace GDI gamma channel=1 code[0,16,64,128,235,255]=0,4112,16448,32896,60395,65535
+DISPLAY_STATE pid=36096 tid=30104 seq=2 tick=83583718 phase=vp-before-colorspace GDI gamma channel=2 code[0,16,64,128,235,255]=0,4112,16448,32896,60395,65535
+DISPLAY_STATE pid=36096 tid=30104 seq=2 tick=83583718 phase=vp-before-colorspace swapchain=00000250C8414510 fullscreen_result=0x00000000 exclusive=0 containing_output_result=0x887A0004
+DISPLAY_STATE pid=36096 tid=30104 seq=2 tick=83583718 phase=vp-before-colorspace DXGI output result=0x00000000 device=\\.\DISPLAY1 monitor=0000000000010001 matches_window=1
+DISPLAY_STATE pid=36096 tid=30104 seq=2 tick=83583718 phase=vp-before-colorspace DXGI output_desc1 color_space=0 bits=8 min=0.005 max=552 full_frame=552 red=0.66650,0.33198 green=0.26792,0.63732 blue=0.14154,0.04887 white=0.28064,0.29596 (OS reported, not measured HDMI)
+DISPLAY_STATE pid=36096 tid=30104 seq=2 tick=83583718 phase=vp-before-colorspace DXGI gamma not queried: exclusive-fullscreen ownership not established
+DISPLAY_STATE pid=36096 tid=30104 seq=2 tick=83583718 phase=vp-before-colorspace end elapsed_ms=0
+libplacebo DXGI swapchain: trigger=initialize format=24 swap_effect=3 flags=0x00000000 buffers=3 windowed=1 model=FLIP/DIRECT-ELIGIBLE direct_state=unverified
+libplacebo DXGI adapter: name=NVIDIA GeForce RTX 3050 Ti Laptop GPU luid=00000000:00014CFA vendor=0x10DE device=0x25A0 driver_check=0x00000000 driver=00200000:00100424
+libplacebo DXGI color-space support: RGB full G22 P709 check=0x00000000 flags=0x00000001 present=1 overlay=0
+libplacebo DXGI color-space support: RGB studio G22 P709 check=0x00000000 flags=0x00000001 present=1 overlay=0
+libplacebo DXGI color-space support: RGB studio G24 P709 check=0x00000000 flags=0x00000001 present=1 overlay=0
+libplacebo DXGI color-space support: RGB full G22 P2020 check=0x00000000 flags=0x00000001 present=1 overlay=0
+libplacebo DXGI color-space support: RGB studio G22 P2020 check=0x00000000 flags=0x00000001 present=1 overlay=0
+libplacebo DXGI color-space support: RGB studio G24 P2020 check=0x00000000 flags=0x00000001 present=1 overlay=0
+libplacebo DXGI color-space support: RGB full linear P709 check=0x00000000 flags=0x00000000 present=0 overlay=0
+libplacebo DXGI color-space result: trigger=initialize requested=RGB_FULL_G22_NONE_P709 accepted=1 applied_record=unavailable (IDXGISwapChain3 has no getter) wire_state=unverified
+libplacebo output applied state: pixel_transfer=sRGB dxgi_declaration=RGB_FULL_G22_NONE_P709 declaration_semantics=sRGB_nominal_no_pure22_DXGI_enum presenter_owner=libplacebo strict=0 wire_state=unverified
+libplacebo output negotiation (initialize): effective_request=AUTO/AUTO/AUTO/Rec.709 actual_contract=FLIP/DIRECT-ELIGIBLE/FULL/sRGB/G22/Rec.709 dxgi=RGB_FULL_G22_NONE_P709 accepted=1 safe=1 wire_state=unverified reason=using the standard Windows Full/sRGB swapchain contract
+DISPLAY_STATE pid=36096 tid=30104 seq=3 tick=83583718 phase=vp-after-colorspace begin renderer=VP Renderer instance=00000250C37A0080 hwnd=000000000066092E read_only=1 wire_state=unverified
+DISPLAY_STATE pid=36096 tid=30104 seq=3 tick=83583718 phase=vp-after-colorspace monitor=0000000000010001 device=\\.\DISPLAY1 current_mode_available=1 size=1920x1200 refresh_integer=59 bpp=32 mode_flags=0x0
+DISPLAY_STATE pid=36096 tid=30104 seq=3 tick=83583718 phase=vp-after-colorspace topology result=0 paths=1
+DISPLAY_STATE pid=36096 tid=30104 seq=3 tick=83583718 phase=vp-after-colorspace path=0 adapter=00000000:000148F7 source=0 target=8388688 technology=2147483648 refresh=15400000/256880 scan=1 flags=0x1
+DISPLAY_STATE pid=36096 tid=30104 seq=3 tick=83583718 phase=vp-after-colorspace advanced_color target=8388688 supported=1 enabled=0 wide_enforced=1 force_disabled=0 encoding=0 bits=8 (OS report; enabled is not proof of HDR content)
+DISPLAY_STATE pid=36096 tid=30104 seq=3 tick=83583718 phase=vp-after-colorspace windows_sdr_white target=8388688 raw=1000 nits=80.0000 (OS desktop setting, not VP tone-map target)
+DISPLAY_STATE pid=36096 tid=30104 seq=3 tick=83583718 phase=vp-after-colorspace topology matched_paths=1
+DISPLAY_STATE pid=36096 tid=30104 seq=3 tick=83583718 phase=vp-after-colorspace GDI gamma hash=EA9B825068F22D25 (legacy API report only; may not reflect advanced-color scanout)
+DISPLAY_STATE pid=36096 tid=30104 seq=3 tick=83583718 phase=vp-after-colorspace GDI gamma channel=0 code[0,16,64,128,235,255]=0,4112,16448,32896,60395,65535
+DISPLAY_STATE pid=36096 tid=30104 seq=3 tick=83583718 phase=vp-after-colorspace GDI gamma channel=1 code[0,16,64,128,235,255]=0,4112,16448,32896,60395,65535
+DISPLAY_STATE pid=36096 tid=30104 seq=3 tick=83583718 phase=vp-after-colorspace GDI gamma channel=2 code[0,16,64,128,235,255]=0,4112,16448,32896,60395,65535
+DISPLAY_STATE pid=36096 tid=30104 seq=3 tick=83583718 phase=vp-after-colorspace swapchain=00000250C8414510 fullscreen_result=0x00000000 exclusive=0 containing_output_result=0x887A0004
+DISPLAY_STATE pid=36096 tid=30104 seq=3 tick=83583718 phase=vp-after-colorspace DXGI output result=0x00000000 device=\\.\DISPLAY1 monitor=0000000000010001 matches_window=1
+DISPLAY_STATE pid=36096 tid=30104 seq=3 tick=83583718 phase=vp-after-colorspace DXGI output_desc1 color_space=0 bits=8 min=0.005 max=552 full_frame=552 red=0.66650,0.33198 green=0.26792,0.63732 blue=0.14154,0.04887 white=0.28064,0.29596 (OS reported, not measured HDMI)
+DISPLAY_STATE pid=36096 tid=30104 seq=3 tick=83583718 phase=vp-after-colorspace DXGI gamma not queried: exclusive-fullscreen ownership not established
+DISPLAY_STATE pid=36096 tid=30104 seq=3 tick=83583718 phase=vp-after-colorspace end elapsed_ms=0
+SUBTITLE MODE: box=0 move=0 background=rectangle padding_sides=60 padding_top=40 padding_bottom=21 inset=0 source_pixels text_reduction_percent=0 rounded_corners=1 background_edge=extend
+libplacebo settings: quality=high tone_mapping=spline gamut_mapping=perceptual peak_detection=high_quality hdr_peak_analysis_picture_only=0 hdr_peak_analysis_motion_compensation=0 hdr_peak_analysis_height_percent=75 hdr_peak_analysis_position=top libplacebo_version=v7.360.1 (v7.360.1-3-g3f5bce24-dirty) api=360 local_analysis_crop=vp0147-motion-v1 contrast_recovery=0.30 upscaler=ewa_lanczossharp downscaler=hermite deband=off dithering=off dynamic_constants=1 display_bit_depth=auto output_presentation=auto output_range=auto output_transport_gamma=auto output_gamma=auto sdr_input_transfer=2.4 sdr_adjust_gamma=passthrough target=203.0 nits black=0.000 profile_update_mode=rebuild output_diagnostics=0 diagnostic_disable_shader_cache=0 diagnostic_disable_compute=0 diagnostic_force_8bit_sdr_swapchain=0 diagnostic_allow_limited_g22=0 diagnostic_allow_full_g22=0 diagnostic_vp_owned_dxgi_presenter=0 refresh_switch=1 refresh_command_delay=5s refresh_commands=0 viewport_target=configured screen_aspect=1.3333 automatic_crop=0 subtitle_fit=1 subtitle_hold=2000ms subtitle_engage_drift=500ms subtitle_release_drift=2000ms subtitle_padding=20px subtitle_target_buffer=10px
+libplacebo resolved render options (renderer initialization): upscaler=ewa_lanczossharp downscaler=hermite frame_mixing=motion_profile (matched-rate bypass unless Always) all=upscaler=ewa_lanczossharp,downscaler=hermite,plane_upscaler=catmull_rom,frame_mixer=oversample,sigmoid=yes,color_adjustment=no,peak_detect=yes,peak_percentile=99.99500274658203,contrast_recovery=0.30000001192092896,dynamic_constants=yes
+libplacebo initialized: D3D11 on NVIDIA GeForce RTX 3050 Ti Laptop GPU, upload: lossless P210 (GPU unpack), SDR target request=Rec.709 203.0 nits
+libplacebo resolved render options (renderer start/restart (including HDMI re-sync)): upscaler=ewa_lanczossharp downscaler=hermite frame_mixing=motion_profile (matched-rate bypass unless Always) all=upscaler=ewa_lanczossharp,downscaler=hermite,plane_upscaler=catmull_rom,frame_mixer=oversample,sigmoid=yes,color_adjustment=no,peak_detect=yes,peak_percentile=99.99500274658203,contrast_recovery=0.30000001192092896,dynamic_constants=yes
+Alpha conversion worker started: prepared frames are handed to the presentation thread
+Rendered-output capture queued: stage=next-rendered-frame output_directory=<path>
+Capture raw route: up to 1 capture buffers held at once (queue, next / ahead frames)
+Capture raw route: up to 2 capture buffers held at once (queue, next / ahead frames)
+Capture raw route: up to 3 capture buffers held at once (queue, next / ahead frames)
+Capture raw route: up to 4 capture buffers held at once (queue, next / ahead frames)
+Alpha queue startup prefill released: generation=1 depth=4 target=4
+Temporal dither: off (the shader list's sigma-delta left out)
+Alpha shaders: selected "@shader-profiles:standard.fsrcnnx|standard.ssim_superres" (NLS off, 2 custom hook(s))
+Alpha shaders: applied queued selector "@shader-profiles:standard.fsrcnnx|standard.ssim_superres" on render thread
+Motion engine: VP (de-judder); smooth motion off (motion_engine=auto)
+Alpha formatter output contract: source=3 ingress=P210 range=limited libplacebo_levels=limited color_depth=10 bit_shift=6 size=1920x1440
+Alpha analysis contract: source=native-yuv422-sparse live_domain=16993828003567953053 queued_domain=16993828003567953053 same_domain=1 storage_depth=10 storage_shift=0 sample_codes=10bit source_size=1920x1440 render_native=0 render_422=1

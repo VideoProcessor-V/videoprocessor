@@ -135,7 +135,7 @@ class Prefix(unittest.TestCase):
         events = parse.parse_file(fx("vpev1_all_kinds.log"))
         kinds = set(e.kind for e in events)
         self.assertTrue(parse.KINDS <= kinds, parse.KINDS - kinds)
-        self.assertEqual(len(events), 26)
+        self.assertEqual(len(events), 27)
         self.assertEqual(events.skipped, 1)  # the comment line
         walls = [e for e in events if e.wall is not None]
         self.assertGreaterEqual(len(walls), 2)
@@ -302,7 +302,7 @@ class Summary(unittest.TestCase):
 
     def test_vpev_fixture(self):
         s = parse.summarize(parse.parse_file(fx("vpev1_all_kinds.log")))
-        self.assertEqual(s["total"], 26)
+        self.assertEqual(s["total"], 27)
         self.assertEqual(s["counts_by_kind"]["malformed"], 9)
         self.assertEqual(s["counts_by_kind"]["flag"], 3)
         self.assertEqual(s["counts_by_kind"]["resync"], 4)
@@ -325,7 +325,7 @@ class Cli(unittest.TestCase):
 
     def test_json_smoke(self):
         out = json.loads(self.run_cli(fx("vpev1_all_kinds.log"), "--json"))
-        self.assertEqual(len(out), 26)
+        self.assertEqual(len(out), 27)
         self.assertEqual(out[1]["kind"], "resync")
         self.assertEqual(out[1]["category"], "drop")
         self.assertEqual(out[1]["wall"], "2026-10-31T20:00:00")

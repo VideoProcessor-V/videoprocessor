@@ -3,6 +3,7 @@
 #pragma once
 
 #include <VP-V/core/LaneInterfaces.h>
+#include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 
 #include <algorithm>
 #include <cmath>
@@ -31,11 +32,12 @@ using VpSkeleton::SourceFrameView;
 // (qw x qh). hw = ceil(w/2), hh = ceil(h/2), qw = ceil(w/4), qh = ceil(h/4).
 // ---------------------------------------------------------------------------------------------
 
-inline uint32_t HalfDim(uint32_t v) { return (v + 1u) / 2u; }
-inline uint32_t QuarterDim(uint32_t v) { return (v + 3u) / 4u; }
-inline size_t HalfLumaHalfBytes(Dims d) { return size_t(HalfDim(d.width)) * HalfDim(d.height) * 2u; }
-inline size_t HalfLumaQuarterBytes(Dims d) { return size_t(QuarterDim(d.width)) * QuarterDim(d.height) * 2u; }
-inline size_t HalfLumaBytes(Dims d) { return HalfLumaHalfBytes(d) + HalfLumaQuarterBytes(d); }
+// The grid, taps and rounding are the shared unit U3 (VpUnit::HalfLuma, lane/shared/HalfLuma.h).
+inline uint32_t HalfDim(uint32_t v) { return VpUnit::HalfLuma::HalfDim(v); }
+inline uint32_t QuarterDim(uint32_t v) { return VpUnit::HalfLuma::QuarterDim(v); }
+inline size_t HalfLumaHalfBytes(Dims d) { return VpUnit::HalfLuma::HalfBytes(d.width, d.height); }
+inline size_t HalfLumaQuarterBytes(Dims d) { return VpUnit::HalfLuma::QuarterBytes(d.width, d.height); }
+inline size_t HalfLumaBytes(Dims d) { return VpUnit::HalfLuma::TotalBytes(d.width, d.height); }
 
 // Half rows [rowBegin, rowEnd) of the 2x2 box mean of the 16-bit-scaled samples; odd edges replicate.
 inline void HalfLumaRows(const SourceFrameView& v, uint16_t* half, uint32_t rowBegin, uint32_t rowEnd)
@@ -45,19 +47,19 @@ inline void HalfLumaRows(const SourceFrameView& v, uint16_t* half, uint32_t rowB
     if (rowEnd > hh)
         rowEnd = hh;
     for (uint32_t y = rowBegin; y < rowEnd; ++y) {
-        const uint32_t y0 = 2u * y;
-        const uint32_t y1 = std::min(y0 + 1u, v.height - 1u);
+        const uint32_t y0 = VpUnit::HalfLuma::Tap0(y, v.height);
+        const uint32_t y1 = VpUnit::HalfLuma::Tap1(y, v.height);
         const uint16_t* r0 = v.luma + size_t(y0) * v.strideSamples;
         const uint16_t* r1 = v.luma + size_t(y1) * v.strideSamples;
         uint16_t* dst = half + size_t(y) * hw;
         for (uint32_t x = 0; x < hw; ++x) {
-            const uint32_t x0 = 2u * x;
-            const uint32_t x1 = std::min(x0 + 1u, v.width - 1u);
+            const uint32_t x0 = VpUnit::HalfLuma::Tap0(x, v.width);
+            const uint32_t x1 = VpUnit::HalfLuma::Tap1(x, v.width);
             const uint32_t a = uint32_t(uint16_t(r0[x0] << v.msbShift));
             const uint32_t b = uint32_t(uint16_t(r0[x1] << v.msbShift));
             const uint32_t c = uint32_t(uint16_t(r1[x0] << v.msbShift));
             const uint32_t d = uint32_t(uint16_t(r1[x1] << v.msbShift));
-            dst[x] = uint16_t((a + b + c + d + 2u) >> 2);
+            dst[x] = VpUnit::HalfLuma::FinishP1(VpUnit::HalfLuma::Box4(a, b, c, d));
         }
     }
 }
@@ -71,15 +73,15 @@ inline void QuarterFromHalf(const uint16_t* half, uint32_t hw, uint32_t hh, uint
     if (rowEnd > qh)
         rowEnd = qh;
     for (uint32_t y = rowBegin; y < rowEnd; ++y) {
-        const uint32_t y0 = 2u * y;
-        const uint32_t y1 = std::min(y0 + 1u, hh - 1u);
+        const uint32_t y0 = VpUnit::HalfLuma::Tap0(y, hh);
+        const uint32_t y1 = VpUnit::HalfLuma::Tap1(y, hh);
         const uint16_t* r0 = half + size_t(y0) * hw;
         const uint16_t* r1 = half + size_t(y1) * hw;
         uint16_t* dst = quarter + size_t(y) * qw;
         for (uint32_t x = 0; x < qw; ++x) {
-            const uint32_t x0 = 2u * x;
-            const uint32_t x1 = std::min(x0 + 1u, hw - 1u);
-            dst[x] = uint16_t((uint32_t(r0[x0]) + r0[x1] + r1[x0] + r1[x1] + 2u) >> 2);
+            const uint32_t x0 = VpUnit::HalfLuma::Tap0(x, hw);
+            const uint32_t x1 = VpUnit::HalfLuma::Tap1(x, hw);
+            dst[x] = VpUnit::HalfLuma::FinishP1(VpUnit::HalfLuma::Box4(r0[x0], r0[x1], r1[x0], r1[x1]));
         }
     }
 }
@@ -211,6 +213,7 @@ private:
 
 constexpr uint32_t kStatsHistBins = 1024;      // top 10 bits of the 16-bit half-plane sample
 constexpr uint32_t kStatsVersion = 1;
+constexpr uint32_t kHalfLumaVersion = VpUnit::HalfLuma::kUnitVersion;       // P1 half + quarter luma layout and law (core/ProductCatalog.h)
 constexpr uint32_t kStatsBytes = 8192;         // the declared fixed size of P4
 constexpr uint32_t kGrainBlock = 8;            // grain: 8x8 blocks of the half plane
 constexpr uint32_t kRectFractionShift = 4;     // rect threshold = p1 + (p99 - p1) / 16

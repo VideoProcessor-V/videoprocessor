@@ -48,6 +48,12 @@ public:
 		GetExternalSink().store(sink, std::memory_order_release);
 	}
 
+// VPV-HOOK
+	// Generic observer of each committed line (null = none). Set during start-up; called on the logging thread after the sink/queue.
+	using LogObserver = void (*)(int level, const char* text);
+	static void SetLogObserver(LogObserver observer) { GetLogObserver().store(observer, std::memory_order_release); }
+// VPV-HOOK-END
+
 	/**
 	 * Log a message to vp.log with timestamp (async, non-blocking)
 	 * Thread-safe
@@ -72,6 +78,7 @@ public:
 			return;
 		}
 		QueueMessage(buffer, length >= static_cast<int>(sizeof(buffer)));
+		if (LogObserver observer = GetLogObserver().load(std::memory_order_acquire)) observer(0, buffer); // VPV-HOOK
 	}
 
 	using Metrics = DebugLogAsync::Metrics;
@@ -448,6 +455,14 @@ private:
 		static std::thread writer;
 		return writer;
 	}
+
+// VPV-HOOK
+	static std::atomic<LogObserver>& GetLogObserver()
+	{
+		static std::atomic<LogObserver> s_logObserver(nullptr);
+		return s_logObserver;
+	}
+// VPV-HOOK-END
 
 	static std::atomic<ExternalSink>& GetExternalSink()
 	{

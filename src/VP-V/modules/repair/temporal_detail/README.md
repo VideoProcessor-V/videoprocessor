@@ -29,6 +29,10 @@ correlation increase <= 0.05.
   `Tuning::gates` (`strongerMargin`, `baseNoiseCodes`, `baseGrainSigmas`, `uncertaintyPx`; defaults = the constants) and
   `forceWeight` (the transfer ceiling, measurement only). `tools/td-cli` drives the CPU model on real encodes with them
   (test/temporal-detail-real; its own mirrored active-picture wrapper was superseded by `FrameIn::active` at integration).
+- Measurement ablation (test/td-real-vectors; `Model::Tuning`, never user settings): `gatesOff` (gate ablation bits
+  `Tuning::GateBits`: each set bit forces that gate open; 0 = the designed model, byte-identical) and `typeAdmission`
+  (admission from the TRUE coded frame type `FrameIn::codedType`, offline only; false = byte-identical). `td_cli` reads
+  both from its header and the FRM1 flags (4 I, 8 P, 16 B); per-block `Diagnostics::refSeq` names the reference frame; the gate bits also change the template cleaner's member selection, `kGateAge` opens the age gate only up to 4 x `maxAge`, and only `--stdio` takes the knobs (stats JSON ends with `q_mean` and `refs`).
 
 ## Algorithm (CPU reference model `TemporalDetailModel.h`; shaders mirror it)
 
@@ -133,21 +137,23 @@ host fills, later from `core/Indicator` (doc 25 §A2). Policies: `full`, `contin
 invalid) and `rebase[H|V]` reset; `settings[repair]` resets only for
 mode/max_age changes (strength/boost change the target); `timing` is ignored. Cuts and fades reset the store.
 
-## Declared products (TemporalDetailProducts.h)
+## Declared products (core/Products.h)
 
-Descriptors mirror doc 25 §B1 (map 1:1 onto `core/Products.h`).
+The module's former private descriptors (TemporalDetailProducts.h) were retired: its products are registered in
+`core/Products.h` (`AppendTemporalDetailProducts`; ids `kTdAnalysis`, `kTdRefstore`, `kTdAdmission`) and listed in
+`docs/design/product-graph.md`. `td.out` (the output luma plane) is a render-scope temporary, not a product.
 
 | Product | Inputs | Backend | History | Size at 4K |
 |---|---|---|---|---|
-| `td.analysis` (S/G split, block maps, rebounds, softening run) | re-based luma, P4 cut/fade, bitrate quality (optional) | GpuCompute | 1 | ~1 MB |
-| `td.refstore` (K past slots in one atlas, per-block state) | analysis, P3/P2 motion, camera model (optional), queue frames (+d) | GpuCompute | K | 83 MB per slot at 4K (RGBA16F raw + cleaned bands, R16 base) |
+| `td.analysis` (block maps, rebounds, softening run) | P10 grain split, P11 block stats, P13 source ring | GpuCompute (T1) | 1 | ~1.5 MB |
+| `td.refstore` (K past slots, per-block state) | td.analysis, P10, P3, P13 | GpuCompute (T1) | K = 5 | declared 10 B/px per slot = 83 MB at 4K (what the code allocates today; the SA6 compact form targets 4.5 B/px) |
+| `td.admission` (cleaner / templates on admission frames) | td.analysis, P10, P13 | GpuCompute (T2 gap) | 0 | arena (SA1) |
 
 Cleaner cost (estimate, RTX 3090 at 4K, not dispatched): only on admission frames (a refresh, e.g. 2 of 8 frames in IBBBPBBB):
 ~0.52 M half-step 8 x 8 patches x (2 + M <= 4 forward, 2 inverse) separable DCTs ~ 4 GMAC plus one sample of each aligned
 slot per pixel (the template's own sampling), ~0.5-1 ms per admission frame, ~0.2 ms averaged; nothing on other frames.
 Memory +33 MB per slot (+166 MB for K = 5); folding the gates onto the cleaned bands (raw energy = cleaned + a per-block
 removed-energy grid) would drop the raw bands and make it ~0.
-| `td.out` (luma) | analysis, refstore | RenderOnly | 0 | plane |
 
 ## Settings (declared, not wired)
 
@@ -273,3 +279,24 @@ current grain untouched), the grain guard against forced damage, the gain decomp
 split's exact add-back, flicker, future referee, irregular patterns, scale and rate, camera-adapter fallback, boost
 fallback, settings parsing, the active picture (letterbox / pillarbox with a pan: bars bit-exact, output independent of the
 bar level and identical to the picture processed alone), the bounded motion source (10,000 frames).
+
+## Grain split read path (SA2)
+
+The GPU module reads the shared grain split ONLY through the one accessor of repair/grain_split (GrainSplitGpu.h): every
+shader fetch is `gs_fetch(p)` (s1, s2, f, base in codes) or `gs_blocks(b)` (N, e3); each grain-reading pass gets
+`GrainSplit::Gpu::ViewGlsl(frame.storage, frame.codeUnit)` in its header and `BindView(frame, descs)` for its descriptors, so the
+shared product may be Full or Compact and the module never touches the `split` / `gblocks` textures directly. Full generates
+the same math as before (Off / Full output byte-identical).
+
+Fallback rule: the shared product is used when `Fits` holds for this plane (size, block, scale, code unit, component, and the
+second texture of a Compact frame); otherwise (absent, invalid view, wrong size or any misfit) the module computes its OWN
+Full split and says so, visibly, every frame, and returns to the shared product the first frame it fits again (nothing is latched).
+Status keeps "own grain split" / "own grain split (the shared product does not fit)". `LastGrainStatus()` is Ring (shared
+product read), Missing (no product) or WrongSize (misfit); Shed is the node's. `GrainFallbackDecision()` is
+GrainSplit::ReaderFallback("temporal detail", status): the catalog entry "grain split (temporal detail)", engaged while the own
+split runs. Off / auto idle read no grain: Ring. Tests: TemporalDetailGpuGrainProduct*, ...FittingFullProduct*,
+...CompactProduct*, ...GrainFallbackRecoversAutomatically (WARP).
+
+## Private GPU textures (skeleton rule)
+
+This module still creates its own GPU textures through the `Ensure` wrapper (its persistent state and, when no shared product fits, its own grain split; see the static test src/VP-V/tests/PrivateTextureScanTests.cpp). It migrates in SA6/SA7/SA8/SA12 (doc D:\codex\vp-handover\51-skeleton-adoption-audit.md section 6): kept state moves to skeleton product nodes and per-render temporaries to the shared scratch arena (src/VP-V/core/ScratchArena.h). Its grain reads already go through the one accessor (`gs_fetch` / `gs_blocks`); a shared product that is Missing, Stale (another frame or unit version, `Params::grainSeq`), WrongSize or Shed (`Params::grainShed`) makes it use its own split, visibly (FallbackCatalog "grain split (...)"), and it recovers on the first fitting frame.

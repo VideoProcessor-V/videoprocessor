@@ -13,7 +13,10 @@
     "src/VP-V/modules/output/dither/CustomHookChain.cpp",
     "shaders/Temporal sigma-delta.glsl",
     "src/VP-V/modules/output/dither/SigmaDeltaVectors.h",
-    "src/VP-V/modules/output/dither/DitherSlot.h"
+    "src/VP-V/modules/output/dither/DitherSlot.h",
+    "src/VP-V/modules/output/dither/DitherNeed.h",
+    "src/VP-V/modules/output/dither/DitherNeedGlsl.h",
+    "src/VP-V/modules/output/dither/DitherNeedGpu.h"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/vprenderer/CustomHookChain.h",
@@ -34,6 +37,7 @@
     "tools": [],
     "config_keys": [
       "dither_grain_tolerance_scale",
+      "dither_need",
       "dither_vectors",
       "dithering",
       "output_segments_merged",

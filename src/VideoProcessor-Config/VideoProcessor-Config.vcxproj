@@ -147,6 +147,6 @@ copy /Y "$(ProjectDir)..\VideoProcessor-ConfigDiscovery\x64\$(Configuration)\Vid
       <LinkLibraryDependencies>false</LinkLibraryDependencies>
     </ProjectReference>
   </ItemGroup>
-  <Import Project="$(MSBuildThisFileDirectory)..\VP-V\build\VideoProcessor-Config.items.props" Condition="Exists('$(MSBuildThisFileDirectory)..\VP-V\build\VideoProcessor-Config.items.props')" />
+  <Import Project="$(MSBuildThisFileDirectory)..\VP-V\build\$(MSBuildProjectName).items.props" Condition="Exists('$(MSBuildThisFileDirectory)..\VP-V\build\$(MSBuildProjectName).items.props')" />  <!-- VPV-HOOK -->
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

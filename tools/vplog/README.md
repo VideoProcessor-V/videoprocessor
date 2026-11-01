@@ -28,8 +28,8 @@ One line, prefix token `VPEV1` (may follow the log prefix `YYYY-MM-DD HH:MM:SS |
 order. Keys `[a-z0-9_]+`. Values bare when matching `[A-Za-z0-9_.:+/-]+`, else double-quoted with
 `\"` and `\\` escapes; CR/LF/TAB were replaced by space by the emitter; empty value is `""`. Max
 line 1000 chars; if a value was truncated the line ends with `trunc=1`. Closed kind list: session,
-resync, fallback, gate, gpu_error, source_change, cadence, repeat, frame_stats, stamp, flag.
-Required fields per kind: resync: level cause seq [gap] [detail] mode; fallback:
+resync, fallback, gate, gpu_error, source_change, cadence, repeat, frame_stats, stamp, flag, resync_settle.
+Required fields per kind: resync: level cause seq [gap] [detail] mode [injected] [readers]; resync_settle: seq settle_ms settle_frames drops repeats relock relock_frames vectors [cause]; fallback:
 state=engaged|released id [reason]; gate: from to reason; gpu_error: api code [what];
 source_change: w h rate_num rate_den transfer [dv]; cadence: state pattern [phase]; repeat: cause
 count; frame_stats: window_s n p50_ms p99_ms max_ms; session: build_id [commit]; flag: source tag;

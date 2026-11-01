@@ -28,11 +28,15 @@ PROPS_DIR = "src/VP-V/build"
 
 
 def props_name(project_path):
-    """Project file basename with every trailing .vcxproj removed."""
+    """$(MSBuildProjectName): the project file basename without its last .vcxproj (the M2 hook layer's
+    H7 import is `VP-V\\build\\$(MSBuildProjectName).items.props`)."""
     name = Path(project_path).name
-    while name.endswith(".vcxproj"):
+    if name.endswith(".vcxproj"):
         name = name[: -len(".vcxproj")]
     return name
+
+
+H7_IMPORT_RE = r"<Import\b[^>]*VP-V\\build\\[^\"']*\.items\.props"
 
 
 def props_path(project_path):
@@ -135,6 +139,10 @@ class Group:
 
 def norm_include(inc):
     s = inc.replace("/", "\\")
+    # props-relative items (hook layer style) name the same file as project-relative ones: every Bill
+    # project sits in src/<dir>/, the props in src/VP-V/build/.
+    if s.lower().startswith("$(msbuildthisfiledirectory)..\\"):
+        s = "..\\VP-V\\" + s[len("$(MSBuildThisFileDirectory)..\\"):]
     while s.startswith(".\\"):
         s = s[2:]
     return s.lower()
@@ -352,6 +360,27 @@ def parse_props(raw):
             norm = norm_item_text(full, text, s)
             items.append(PropsItem(it.tag, it.include, norm, it.key))
     return items, nl, bom
+
+
+def write_props(existing_raw, name, items, n_existing, newline):
+    """Props bytes. A new props is rendered whole; an existing one (it may hold another team's items,
+    ItemDefinitionGroups or comments) keeps its bytes and gets the items after the first n_existing
+    appended as new ItemGroups before </Project>."""
+    if existing_raw is None:
+        return render_props(name, items, newline)
+    new = items[n_existing:]
+    if not new:
+        return existing_raw
+    text, bom = decode(existing_raw)
+    nl = detect_newline(text)
+    body = render_props(name, new, "\n").decode("utf-8")
+    s = body.index("<Project")
+    s = body.index(">", s) + 1
+    e = body.rindex("</Project>")
+    chunk = body[s:e].lstrip("\n")
+    at = text.rindex("</Project>")
+    out = text[:at] + chunk.replace("\n", nl) + text[at:]
+    return encode(out, bom)
 
 
 def render_props(name, items, newline):

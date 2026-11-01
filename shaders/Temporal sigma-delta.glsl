@@ -82,6 +82,27 @@
  *   from VPVEC. A 1x1 r8 placeholder when nothing is bound (as VPVEC: an
  *   rgba16f TEXTURE's data is sized as 16 bytes on D3D11); never read at 0.
  *
+ * Dither need map (`dither_need` = 1, set by the renderer from the setting
+ *   dither_need = auto; module output.dither / DitherNeed.h)
+ *   Where the picture carries no grain and one link step is visible (a clean
+ *   gradient, a fade, a CGI sky), the fixed noise_amplitude is not enough to
+ *   break the banding. The renderer derives a per-region-block EXTRA amplitude
+ *   (a tiny block-grid rgba32f texture, the extra in .x, from the shared grain
+ *   split, region evidence and light-level products) and binds it as VPDN
+ *   (pl_mpv_user_shader_set_texture, as VPVEC). The quantizer then dithers
+ *   with amp = noise_amplitude + extra, the extra bilinearly interpolated over
+ *   the block centres (dn_extra): the output pixel (x, y) maps to the block
+ *   grid at ((x + 0.5) * dn_scale + dn_off) / dn_block, with indices clamped
+ *   to the grid. The total amplitude never exceeds 0.5 (amp is clamped), so an
+ *   exact code (a value within 0.5 of a whole code that the loop already holds
+ *   exact) is never moved off its code by the dither; the residual bound
+ *   follows the amplitude (0.5 + amp). VPDN is a 1x1 r8 placeholder (zero: no
+ *   extra) when nothing is bound. At 0 (the default) VPDN is never read and
+ *   the output is byte-identical: amp is noise_amplitude itself and the same
+ *   arithmetic is executed in the same order. dn_scale_x/y, dn_off_x/y and
+ *   dn_block are set by the renderer together with dither_need; they place the
+ *   output pixel on the block grid (the grid is of the decoded source picture).
+ *
  * Pipeline position
  *   Hooks OUTPUT: after colour management, the calibration LUT, and
  *   libplacebo's encode_color (so values are already in the target's code
@@ -251,6 +272,48 @@
 //!MAXIMUM 1.0
 0.0
 
+//!PARAM dither_need
+//!DESC Set by the renderer: 1 = add the per-block extra dither amplitude of VPDN to noise_amplitude (dither need map), 0 = off
+//!TYPE float
+//!MINIMUM 0.0
+//!MAXIMUM 1.0
+0.0
+
+//!PARAM dn_scale_x
+//!DESC Set by the renderer with dither_need: output pixel to block-grid source pixel scale, horizontal
+//!TYPE float
+//!MINIMUM 0.000001
+//!MAXIMUM 1000000.0
+1.0
+
+//!PARAM dn_scale_y
+//!DESC Set by the renderer with dither_need: output pixel to block-grid source pixel scale, vertical
+//!TYPE float
+//!MINIMUM 0.000001
+//!MAXIMUM 1000000.0
+1.0
+
+//!PARAM dn_off_x
+//!DESC Set by the renderer with dither_need: output pixel to block-grid source pixel offset, horizontal
+//!TYPE float
+//!MINIMUM -1000000.0
+//!MAXIMUM 1000000.0
+0.0
+
+//!PARAM dn_off_y
+//!DESC Set by the renderer with dither_need: output pixel to block-grid source pixel offset, vertical
+//!TYPE float
+//!MINIMUM -1000000.0
+//!MAXIMUM 1000000.0
+0.0
+
+//!PARAM dn_block
+//!DESC Set by the renderer with dither_need: the block edge of the VPDN grid in source pixels
+//!TYPE float
+//!MINIMUM 1.0
+//!MAXIMUM 4096.0
+16.0
+
 //!PARAM test_ramp
 //!DESC 1 = replace the picture with a 10-bit horizontal grey ramp for verification
 //!TYPE float
@@ -266,6 +329,13 @@
 00
 
 //!TEXTURE VPPIX
+//!SIZE 1 1
+//!FORMAT r8
+//!FILTER NEAREST
+//!BORDER CLAMP
+00
+
+//!TEXTURE VPDN
 //!SIZE 1 1
 //!FORMAT r8
 //!FILTER NEAREST
@@ -774,6 +844,7 @@ void hook()
 //!BIND RESID_NEXT
 //!BIND PREV_NEXT
 //!BIND VPPIX
+//!BIND VPDN
 //!BIND LQPREV
 //!DESC VideoProcessor temporal sigma-delta quantizer
 //!COMPUTE 16 16
@@ -809,16 +880,37 @@ vec3 exact_half(vec3 v)
 // normal operation. Clipping it at 0.5 threw away error the loop needed to
 // cancel (a mean bias up to ~0.06 code at amplitude 0.5). The bound only
 // stops wind-up where k is clamped at the code limits.
-float resid_bound()
+float resid_bound(float a)
 {
-    return 0.5 + noise_amplitude;
+    return 0.5 + a;
+}
+
+// Dither need map: the extra dither amplitude at output pixel `posOut`, bilinear
+// over the block centres of VPDN (the extra in .x), four texel fetches with the
+// indices clamped to the grid. Mirrors DitherNeed::SampleExtra (DitherNeed.h).
+float dn_extra(vec2 posOut)
+{
+    float sx = (posOut.x + 0.5) * dn_scale_x + dn_off_x;
+    float sy = (posOut.y + 0.5) * dn_scale_y + dn_off_y;
+    float u = sx / dn_block - 0.5;
+    float v = sy / dn_block - 0.5;
+    float fx0 = floor(u), fy0 = floor(v);
+    float fx = u - fx0, fy = v - fy0;
+    ivec2 sz = textureSize(VPDN, 0);
+    int x0 = int(fx0), y0 = int(fy0);
+    int i0 = min(max(x0, 0), sz.x - 1), i1 = min(max(x0 + 1, 0), sz.x - 1);
+    int j0 = min(max(y0, 0), sz.y - 1), j1 = min(max(y0 + 1, 0), sz.y - 1);
+    float a = texelFetch(VPDN, ivec2(i0, j0), 0).x, b = texelFetch(VPDN, ivec2(i1, j0), 0).x;
+    float c = texelFetch(VPDN, ivec2(i0, j1), 0).x, d = texelFetch(VPDN, ivec2(i1, j1), 0).x;
+    float top = a + (b - a) * fx, bot = c + (d - c) * fx;
+    return top + (bot - top) * fy;
 }
 
 // Ping-pong (see the carry pass): true = this refresh writes RESID/PREV
 // and reads RESID_NEXT/PREV_NEXT; false the other way round.
 bool write_a_;
 
-bool carried(ivec2 from, vec3 x, float gate_scale, out vec3 r)
+bool carried(ivec2 from, vec3 x, float gate_scale, float amp, out vec3 r)
 {
     r = vec3(0.0);
     vec4 rs = write_a_ ? imageLoad(RESID_NEXT, from) : imageLoad(RESID, from);
@@ -829,7 +921,7 @@ bool carried(ivec2 from, vec3 x, float gate_scale, out vec3 r)
     float units = color_bits > 9.0 ? 4.0 : 1.0;
     if (any(greaterThan(abs(x - ps.rgb), vec3(motion_threshold * units * gate_scale))))
         return false;
-    r = clamp(rs.rgb, -resid_bound(), resid_bound());
+    r = clamp(rs.rgb, -resid_bound(amp), resid_bound(amp));
     return true;
 }
 
@@ -913,7 +1005,13 @@ void hook()
     // fifth of five, so frame / 5 is the refresh count: the same noise
     // sequence as the one-pass stage 2 shader (motion_compensation 0 is then
     // byte-for-byte the stage 2 output).
-    vec3 d = vec3((ign(vec2(pos), frame / 5) - 0.5) * 2.0 * noise_amplitude);
+    // Dither need map: the extra amplitude of this pixel's block, the total
+    // capped at 0.5 so an exact code is never moved. dither_need 0: amp is
+    // noise_amplitude itself and nothing else changes.
+    float amp = noise_amplitude;
+    if (dither_need > 0.5)
+        amp = min(amp + max(dn_extra(vec2(pos)), 0.0), 0.5);
+    vec3 d = vec3((ign(vec2(pos), frame / 5) - 0.5) * 2.0 * amp);
 
     if (enabled > 0.5) {
         ivec2 state_size = imageSize(RESID);
@@ -944,16 +1042,16 @@ void hook()
             ivec2 from = pos - v;
             if (mv.z > 0.5 && v != ivec2(0) &&
                 all(greaterThanEqual(from, ivec2(0))) && all(lessThan(from, state_size)))
-                have = carried(from, x, gate_scale, r);
+                have = carried(from, x, gate_scale, amp, r);
         }
         // Plain motion gate: the same pixel, if it did not change.
         if (!have && !occluded)
-            have = carried(spos, x, gate_scale, r);
+            have = carried(spos, x, gate_scale, amp, r);
 
         // First-order sigma-delta: quantise the error-corrected value, carry
         // the new residual. The dither term is not fed back.
         k = clamp(floor(x + r + d + 0.5), code_min, code_max);
-        vec3 r_next = clamp(x + r - k, -resid_bound(), resid_bound());
+        vec3 r_next = clamp(x + r - k, -resid_bound(amp), resid_bound(amp));
 
         if (write_a_) {
             imageStore(RESID, spos, vec4(r_next, VALID_TAG));

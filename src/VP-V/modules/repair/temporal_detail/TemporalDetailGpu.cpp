@@ -14,6 +14,7 @@
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
 
 #include <algorithm>
+#include <initializer_list>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -185,6 +186,7 @@ namespace TemporalDetail
 			{
 				// Off: the input itself, no pass; the store is untouched (the model's Off).
 				m_status = "off";
+				m_grainStatus = GrainSplit::GrainStatus::Ring;   // not reading the grain: no fallback to show
 				if (m_impl) { m_impl->lastSet = set; m_impl->haveSet = true; }   // switching on again is a mode change: reset
 				result = source;
 				return true;
@@ -193,6 +195,7 @@ namespace TemporalDetail
 			{
 				// auto, idle: the input itself, no pass; the store restarts when it engages again.
 				m_status = "auto: idle";
+				m_grainStatus = GrainSplit::GrainStatus::Ring;
 				if (m_impl) m_impl->haveFrame = false;
 				result = source;
 				return true;
@@ -336,10 +339,16 @@ namespace TemporalDetail
 			}
 			// The shared product when it fits (one producer, many readers), else this module's own split (visible).
 			const GrainSplit::Gpu::Frame* const sharedSplit = params.grain.Gpu(RegionEvidence::GrainPlane::Luma);
-			const bool shared = GrainSplit::Gpu::Fits(sharedSplit, w, h, g.B, g.scale, cu, 0);
+			const GrainSplit::Gpu::FitResult fit = GrainSplit::Gpu::CheckFit(sharedSplit, w, h, g.B, g.scale, cu, 0, params.grainSeq);
+			const bool shared = fit == GrainSplit::Gpu::FitResult::Fits && !params.grainShed;
+			// Recomputed every frame: a product that fits again is used from this frame on (automatic recovery).
+			m_grainStatus = params.grainShed ? GrainSplit::GrainStatus::Shed : shared ? GrainSplit::GrainStatus::Ring :
+				(fit == GrainSplit::Gpu::FitResult::Stale ? GrainSplit::GrainStatus::Stale :
+				(fit == GrainSplit::Gpu::FitResult::WrongSize ? GrainSplit::GrainStatus::WrongSize : GrainSplit::GrainStatus::Missing));
 			if (!shared && !m.split.Compute(gpu, dispatch, work, 0, cu, g.scale, g.B, sp)) return fail(m.split.LastError().c_str());
 			const GrainSplit::Gpu::Frame& gs = shared ? *sharedSplit : m.split.Out();
-			const pl_tex splitTex = gs.split, gblocks = gs.blocks;
+			// THE ONE READ ACCESSOR: every grain read goes through gs_fetch / gs_blocks (the prelude + BindView of the frame's layout).
+			const std::string view = GrainSplit::Gpu::ViewGlsl(gs.storage, gs.codeUnit);
 
 			// --- Headers ---
 			const std::string geo = DefineInt("TD_W", w) + DefineInt("TD_H", h) + DefineInt("TD_B", g.B) + DefineInt("TD_BW", g.bw) +
@@ -373,6 +382,7 @@ namespace TemporalDetail
 			if (bgTex) law += "#define TD_BGATES 1\n";
 			if (lagOk) law += "#define TD_LAG 1\n";
 			const std::string base = geo + law + Shaders::kCore;
+			const std::string baseG = base + view;   // the passes that read the grain split
 			const std::string slots = SlotFunctions(true, false, false) + Shaders::kSlotSample;
 
 			// --- Per-frame variables ---
@@ -408,6 +418,12 @@ namespace TemporalDetail
 				d.push_back(Sampled("slots", m.atlasPix));
 				d.push_back(Sampled("sbases", m.atlasBase));
 			};
+			// The pass's descriptors: the grain view's (BindView) first, then the pass's own, in their order.
+			auto withGrain = [&](std::initializer_list<pl_shader_desc> rest) {
+				d.clear();
+				GrainSplit::Gpu::BindView(gs, d);
+				d.insert(d.end(), rest.begin(), rest.end());
+			};
 			auto run = [&](const char* what, const std::string& header, const char* body, int gx, int gy, size_t shmem, int gw = 16, int gh = 16) {
 				const bool r = Pass(dispatch, what, header, body, d.data(), static_cast<int>(d.size()), vars, nv, gx, gy, shmem, gw, gh);
 				d.clear();
@@ -415,8 +431,8 @@ namespace TemporalDetail
 			};
 
 			// 2: MEAS
-			d = { Sampled("split", splitTex), Sampled("gblocks", gblocks), Storage("meas_out", m.meas) };
-			if (!run("VideoProcessor temporal detail: block measures", base, Shaders::kMeasBody, bgx, bgy, 0)) return fail("block measures pass failed");
+			withGrain({ Storage("meas_out", m.meas) });
+			if (!run("VideoProcessor temporal detail: block measures", baseG, Shaders::kMeasBody, bgx, bgy, 0)) return fail("block measures pass failed");
 			// 5: COMPOSE
 			d = { Sampled("mot", m.mot[motOld]), Sampled("tab_old", m.tab[tabOld]), Storage("mot_out", m.mot[motNew]) };
 			if (haveBwd) d.push_back(Sampled("bwd", params.backward.tex));
@@ -430,11 +446,11 @@ if (g.x < TD_BW * TD_K && g.y < TD_BH) imageStore(mot_out, g, vec4(0.0));
 				if (!run("VideoProcessor temporal detail: composed motion", hdr, body, (kbw + 15) / 16, bgy, 0)) return fail("compose pass failed");
 			}
 			// 6: EVAL
-			d = { Sampled("split", splitTex), Sampled("gblocks", gblocks), Sampled("meas", m.meas), Sampled("mot", m.mot[motNew]),
-				Sampled("tab_old", m.tab[tabOld]), Sampled("slot_blk", m.slotBlk), Storage("ev_a_out", m.evA), Storage("ev_b_out", m.evB) };
+			withGrain({ Sampled("meas", m.meas), Sampled("mot", m.mot[motNew]),
+				Sampled("tab_old", m.tab[tabOld]), Sampled("slot_blk", m.slotBlk), Storage("ev_a_out", m.evA), Storage("ev_b_out", m.evB) });
 			if (bgTex) d.push_back(Sampled("bgates", bgTex));
 			slotDescs();
-			if (!run("VideoProcessor temporal detail: validation", base + Shaders::kMot + slots + Shaders::kReduce, Shaders::kEvalBody, kbw, g.bh, redShmem))
+			if (!run("VideoProcessor temporal detail: validation", baseG + Shaders::kMot + slots + Shaders::kReduce, Shaders::kEvalBody, kbw, g.bh, redShmem))
 				return fail("validation pass failed");
 			// 3: TRACK (state 0 -> 1)
 			d = { Sampled("st_in", m.state[0]), Storage("st_out", m.state[1]), Sampled("meas", m.meas), Sampled("tab_old", m.tab[tabOld]),
@@ -458,11 +474,11 @@ if (g.x < TD_BW * TD_K && g.y < TD_BH) imageStore(mot_out, g, vec4(0.0));
 				{
 					const int ex = q & 1, ey = q >> 1;
 					const int gx = (g.npx - ex + 1) / 2, gy = (g.npy - ey + 1) / 2;
-					d = { Sampled("split", splitTex), Sampled("gblocks", gblocks), Sampled("mot", m.mot[motNew]), Sampled("tab_new", m.tab[tabNew]),
-						Sampled("ev_a", m.evA), Sampled("ev_b", m.evB), Storage("patch_out", m.patches), Storage("acc_out", m.acc[q & 1]) };
+					withGrain({ Sampled("mot", m.mot[motNew]), Sampled("tab_new", m.tab[tabNew]),
+						Sampled("ev_a", m.evA), Sampled("ev_b", m.evB), Storage("patch_out", m.patches), Storage("acc_out", m.acc[q & 1]) });
 					if (q > 0) d.push_back(Sampled("acc_in", m.acc[(q - 1) & 1]));
 					slotDescs();
-					const std::string hdr = base + DefineInt("TD_EX", ex) + DefineInt("TD_EY", ey) + (q > 0 ? "#define TD_ACC_IN 1\n" : "") + chdr +
+					const std::string hdr = baseG + DefineInt("TD_EX", ex) + DefineInt("TD_EY", ey) + (q > 0 ? "#define TD_ACC_IN 1\n" : "") + chdr +
 						Shaders::kMot + slots + Shaders::kOrder + Shaders::kCleanHeader;
 					if (gx > 0 && gy > 0 && !run("VideoProcessor temporal detail: template cleaner", hdr, Shaders::kCleanBody, gx, gy,
 						sizeof(float) * (2 * g.P * g.P + 2), g.P, g.P))
@@ -471,20 +487,20 @@ if (g.x < TD_BW * TD_K && g.y < TD_BH) imageStore(mot_out, g, vec4(0.0));
 			}
 			const std::string cleanedDef = params.templateClean ? "#define TD_CLEANED 1\n" : "";
 			// 4: the new slot (admission frames only)
-			d = { Sampled("split", splitTex), Sampled("tab_new", m.tab[tabNew]) };
+			withGrain({ Sampled("tab_new", m.tab[tabNew]) });
 			if (params.templateClean) d.push_back(Sampled("acc_in", m.acc[1]));
 			d.push_back(Storage("slots_out", m.atlasPix));
-			if (!run("VideoProcessor temporal detail: store slot", base + cleanedDef + SlotFunctions(false, true, false), Shaders::kFinishBody, pgx, pgy, 0))
+			if (!run("VideoProcessor temporal detail: store slot", baseG + cleanedDef + SlotFunctions(false, true, false), Shaders::kFinishBody, pgx, pgy, 0))
 				return fail("slot store pass failed");
-			d = { Sampled("split", splitTex), Sampled("tab_new", m.tab[tabNew]) };
+			withGrain({ Sampled("tab_new", m.tab[tabNew]) });
 			d.push_back(Storage("sbases_out", m.atlasBase));
-			if (!run("VideoProcessor temporal detail: store slot base", base + SlotFunctions(false, false, true), Shaders::kBaseCopyBody, pgx, pgy, 0))
+			if (!run("VideoProcessor temporal detail: store slot base", baseG + SlotFunctions(false, false, true), Shaders::kBaseCopyBody, pgx, pgy, 0))
 				return fail("slot base pass failed");
-			d = { Sampled("meas", m.meas), Sampled("gblocks", gblocks), Sampled("tab_new", m.tab[tabNew]), Storage("slot_blk_out", m.slotBlk),
-				Storage("mot_out", m.mot[motNew]) };
+			withGrain({ Sampled("meas", m.meas), Sampled("tab_new", m.tab[tabNew]), Storage("slot_blk_out", m.slotBlk),
+				Storage("mot_out", m.mot[motNew]) });
 			if (params.templateClean) d.push_back(Sampled("patches", m.patches));
 			{
-				const std::string hdr = base + cleanedDef + DefineInt("TD_HALF", g.half) + DefineInt("TD_NPX", g.npx) + DefineInt("TD_NPY", g.npy);
+				const std::string hdr = baseG + cleanedDef + DefineInt("TD_HALF", g.half) + DefineInt("TD_NPX", g.npx) + DefineInt("TD_NPY", g.npy);
 				if (!run("VideoProcessor temporal detail: store slot maps", hdr, Shaders::kCopyBlkBody, bgx, bgy, 0)) return fail("slot map pass failed");
 			}
 			// 7: WEIGHT (state 1 -> 0)
@@ -496,22 +512,22 @@ if (g.x < TD_BW * TD_K && g.y < TD_BH) imageStore(mot_out, g, vec4(0.0));
 				Shaders::kWeightBody, bgx, bgy, 0))
 				return fail("weight pass failed");
 			// 8: PROJ
-			d = { Sampled("cw", m.cw), Sampled("coef", m.coef), Sampled("tab_new", m.tab[tabNew]), Sampled("split", splitTex), Sampled("mot", m.mot[motNew]),
-				Storage("cf_out", m.cf), Storage("ct_out", m.ct) };
+			withGrain({ Sampled("cw", m.cw), Sampled("coef", m.coef), Sampled("tab_new", m.tab[tabNew]), Sampled("mot", m.mot[motNew]),
+				Storage("cf_out", m.cf), Storage("ct_out", m.ct) });
 			slotDescs();
 			const std::string tmpl = Shaders::kMot + slots + Shaders::kOrder + Shaders::kTemplate;
-			if (!run("VideoProcessor temporal detail: projections", base + tmpl + Shaders::kReduce, Shaders::kProjBody, g.bw, g.bh, redShmem))
+			if (!run("VideoProcessor temporal detail: projections", baseG + tmpl + Shaders::kReduce, Shaders::kProjBody, g.bw, g.bh, redShmem))
 				return fail("projection pass failed");
 			// 8: TRANSFER
-			d = { Sampled("cf", m.cf), Sampled("ct", m.ct), Sampled("coef", m.coef), Sampled("tab_new", m.tab[tabNew]), Sampled("split", splitTex),
-				Sampled("gblocks", gblocks), Sampled("mot", m.mot[motNew]), Storage("delta_out", m.delta) };
+			withGrain({ Sampled("cf", m.cf), Sampled("ct", m.ct), Sampled("coef", m.coef), Sampled("tab_new", m.tab[tabNew]),
+				Sampled("mot", m.mot[motNew]), Storage("delta_out", m.delta) });
 			slotDescs();
-			if (!run("VideoProcessor temporal detail: transfer", base + tmpl, Shaders::kTransferBody, pgx, pgy, 0)) return fail("transfer pass failed");
+			if (!run("VideoProcessor temporal detail: transfer", baseG + tmpl, Shaders::kTransferBody, pgx, pgy, 0)) return fail("transfer pass failed");
 			// 10: GUARD
-			d = { Sampled("split", splitTex), Sampled("src", work), Sampled("delta", m.delta), Storage("gsum_out", m.gsum) };
+			withGrain({ Sampled("src", work), Sampled("delta", m.delta), Storage("gsum_out", m.gsum) });
 			if (lagOk) { d.push_back(Sampled("bwd", params.backward.tex)); d.push_back(Sampled("prevg", m.prevg)); }
 			if (!run("VideoProcessor temporal detail: grain guard sums",
-				base + (lagOk ? std::string(Shaders::kPairBwd) + Shaders::kPrevG : std::string()) + Shaders::kReduce, Shaders::kGuardSumsBody, g.bw, g.bh, redShmem))
+				baseG + (lagOk ? std::string(Shaders::kPairBwd) + Shaders::kPrevG : std::string()) + Shaders::kReduce, Shaders::kGuardSumsBody, g.bw, g.bh, redShmem))
 				return fail("guard sums pass failed");
 			d = { Sampled("st_in", m.state[0]), Storage("st_out", m.state[1]), Sampled("gsum", m.gsum), Storage("kback_out", m.kback) };
 			if (!run("VideoProcessor temporal detail: grain guard add-back", base + Shaders::kStateLoad + Shaders::kStateStore, Shaders::kGuardEmaBody, bgx, bgy, 0))
@@ -524,9 +540,9 @@ if (g.x < TD_BW * TD_K && g.y < TD_BH) imageStore(mot_out, g, vec4(0.0));
 			if (!run("VideoProcessor temporal detail: counters", base + Shaders::kStatsHeader, Shaders::kStatsBody, 1, 1, sizeof(float) * 4 * 256))
 				return fail("counter pass failed");
 			// 9: APPLY
-			d = { Sampled("src", luma), Sampled("split", splitTex), Sampled("delta", m.delta), Sampled("kback", m.kback), Storage("dst", m.out),
-				Storage("prevg_out", m.prevg) };
-			if (!run("VideoProcessor temporal detail: recompose", base, Shaders::kApplyBody, (W + 15) / 16, (H + 15) / 16, 0)) return fail("recompose pass failed");
+			withGrain({ Sampled("src", luma), Sampled("delta", m.delta), Sampled("kback", m.kback), Storage("dst", m.out),
+				Storage("prevg_out", m.prevg) });
+			if (!run("VideoProcessor temporal detail: recompose", baseG, Shaders::kApplyBody, (W + 15) / 16, (H + 15) / 16, 0)) return fail("recompose pass failed");
 
 			m.motCur = motNew;
 			m.tabCur = tabNew;

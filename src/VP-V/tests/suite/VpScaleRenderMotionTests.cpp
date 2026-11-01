@@ -457,6 +457,11 @@ namespace VpScaleRenderMotionTests
 			"adaptive_downscale: on\nadaptive_w_base: 0.2\nadaptive_faithful: ortho\n";
 		for (const auto& o : Seq::MotionOverrides())
 			kv += std::string(o.key) + ": " + (std::string(o.key) == "occlusion_mask" ? std::string("off") : std::string(o.value)) + "\n";
+		// The control renders run without vectors. With vector_demand on (the default) the grain map
+		// (adaptive_grain_map) asks the vector engine for vectors by itself, so the control turns the
+		// on-demand engine off: the grain map then runs without vectors, as the control requires.
+		if (!motion)
+			kv += "vector_demand: off\n";
 		{
 			std::ofstream cfg(folder + "\\render.cfg", std::ios::trunc);
 			cfg << "[general]\npersist_profile_selection: false\n[vprenderer]\n" << kv << "[vprenderer.Default]\n" << kv
@@ -569,8 +574,9 @@ namespace VpScaleRenderMotionTests
 			Assert::AreEqual(0, wrong, L"every capture is the frame it is named after");
 			Assert::AreEqual(frames, identified);
 
-			// 3. The control: the same configuration with occlusion_mask off (the only difference), so the grain map
-			// runs without vectors; the vectors path is genuinely in the pixels.
+			// 3. The control: the same configuration with occlusion_mask off and the on-demand vector engine off
+			// (vector_demand: off; with it on, the grain map would ask for vectors itself), so the grain map runs
+			// without vectors; the vectors path is genuinely in the pixels.
 			const Render off = RenderSequence("pan_control", pan, frames, false, -1.0);
 			Logger::WriteMessage((off.outcome.summary + "\n").c_str());
 			Assert::AreEqual(0, off.outcome.rc);

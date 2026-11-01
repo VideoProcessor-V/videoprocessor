@@ -8,6 +8,7 @@ Everything is recomputed from the current tree and the --bill ref on every run; 
 idempotent. See tools/m2/README.md.
 """
 import argparse
+import posixpath
 import re
 import sys
 from collections import Counter, OrderedDict
@@ -79,8 +80,17 @@ def process_project(bill, path, plan, report):
         new_items.append(C.PropsItem(it.tag, it.include, norm, it.key))
     merged = list(p_items)
     existing = {i.key for i in p_items}
+    # a merge can bring back a moved test file under its old path: dedupe through test_moves.json "resolved"
+    resolved = {o.lower(): n for o, n in C.load_config().get("resolved", {}).items()}
+    pdir = posixpath.dirname(path)
     appended = 0
     for ni in new_items:
+        old_full = posixpath.normpath(posixpath.join(pdir, ni.include.replace("\\", "/"))).lower()
+        mapped = resolved.get(old_full)
+        if mapped is not None:
+            mkey = (ni.tag, C.norm_include(posixpath.relpath(mapped, pdir)))
+            if mkey in existing:
+                continue  # the moved file is already in props under its new path
         if ni.key in existing:
             continue  # already in props: dedupe by key
         existing.add(ni.key)
@@ -114,7 +124,8 @@ def process_project(bill, path, plan, report):
     import_added = False
     import_reused = False
     if props_will_exist:
-        if re.search(r"<Import\b[^>]*" + re.escape(imp_marker), new_text, re.I):
+        if re.search(r"<Import\b[^>]*" + re.escape(imp_marker), new_text, re.I) or \
+                re.search(r"<Import\b[^>]*VP-V\\build\\\$\(MSBuildProjectName\)\.items\.props", new_text, re.I):
             import_reused = True
         else:
             m = CPP_TARGETS_RE.search(new_text)
@@ -129,7 +140,7 @@ def process_project(bill, path, plan, report):
 
     if props_will_exist:
         use_nl = p_nl or nl
-        plan[pp] = C.render_props(name, merged, use_nl)
+        plan[pp] = C.write_props(props_raw, name, merged, len(p_items), use_nl)
     new_raw = C.encode(new_text, bom)
     plan[path] = new_raw
 

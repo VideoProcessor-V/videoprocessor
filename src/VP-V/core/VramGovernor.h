@@ -48,6 +48,8 @@ enum VramUserId : uint16_t {
     kUserCameraModel,          // camera-model textures
     kUserInterpolator,         // interpolator engine + grain bands
     kUserEnhancers,            // texture restore, detail pulse, debander extras
+    kUserScratchArena,         // SA1: the shared scratch arena, T0 temporaries (GpuAllocator.h)
+    kUserScratchArenaExtra,    // SA1: the arena's T1/T2 temporaries (the increment over the T0 plan)
     kUserProductBase = 0x100,  // + ProductId: skeleton lane products
 };
 
@@ -218,7 +220,15 @@ struct MeasuredCost {
     double renderMs = 0.0;   // measured in-render cost (PassTimers), replaces the estimate
 };
 
+// The ACTUAL bytes of one buffer of a product when its runtime geometry is not what the declaration plans
+// (a chroma plane: ProductTextures' layout of the real plane dims). PlanTiers uses it instead of the SizeRule.
+struct ActualBuffer {
+    ProductId id = kNoProduct;
+    uint64_t bytesPerBuffer = 0;
+};
+
 struct TierInput {
+    std::vector<ActualBuffer> actual;
     double headroom = kHeadroomStart;
     double framePeriodMs = 0.0;              // measured source frame period (0 = unknown)
     std::vector<MeasuredCost> measured;
@@ -292,17 +302,29 @@ inline TierPlan PlanTiers(const Registry& reg, const Graph& g, const CardProfile
     std::vector<TierEntry> all;
     std::vector<char> canLane;
     all.reserve(g.nodes.size());
-    for (const Node& n : g.nodes) {
+    // Per node: the bytes the governor counts (the actual ones where the product reports them).
+    std::vector<uint64_t> bufB(g.nodes.size()), ringB(g.nodes.size()), liveB(g.nodes.size());
+    for (size_t i = 0; i < g.nodes.size(); ++i) {
+        const Node& n = g.nodes[i];
+        bufB[i] = n.bufferBytes;
+        for (const ActualBuffer& a : in.actual)
+            if (a.id == n.id)
+                bufB[i] = a.bytesPerBuffer;
+        ringB[i] = n.backend == Backend::RenderOnly ? 0 : bufB[i] * n.ring;
+        liveB[i] = bufB[i] * n.livePool;
+    }
+    for (size_t gi_ = 0; gi_ < g.nodes.size(); ++gi_) {
+        const Node& n = g.nodes[gi_];
         const ProductDecl& d = reg.Get(n.id);
         TierEntry e;
         e.id = n.id;
         e.tier = n.tier;
         e.backend = n.backend;
-        e.residency = ResidencyFor(d, n.bufferBytes);
-        e.extraBytes = n.ringBytes;
+        e.residency = ResidencyFor(d, bufB[gi_]);
+        e.extraBytes = ringB[gi_];
         double saved = RenderMsOf(d, g, card, in.measured);
         if (e.residency == Residency::SystemRam)
-            saved -= uploadBytesPerMs > 0.0 ? double(n.bufferBytes) / uploadBytesPerMs : saved;
+            saved -= uploadBytesPerMs > 0.0 ? double(bufB[gi_]) / uploadBytesPerMs : saved;
         e.msSaved = saved > 0.0 ? saved : 0.0;
         const double mb = double(e.extraBytes) / (1024.0 * 1024.0);
         e.msPerMB = mb > 0.0 ? e.msSaved / mb : e.msSaved * 1.0e9;   // free items rank first
@@ -315,8 +337,8 @@ inline TierPlan PlanTiers(const Registry& reg, const Graph& g, const CardProfile
                 plan.ofaFits = plan.ofaFits && plan.ofaLoad <= 1.0;
             }
         }
-        if (n.backend == Backend::RenderOnly)
-            e.why = GrantWhy::RenderOnly;
+        if (n.backend == Backend::RenderOnly || e.residency == Residency::Transient)
+            e.why = GrantWhy::RenderOnly;   // a Transient product has no ring: the arena user counts it
         else if (e.tier != Tier::T0 && e.msSaved <= 0.0)
             e.why = GrantWhy::NoGain;
         else
@@ -363,10 +385,10 @@ inline TierPlan PlanTiers(const Registry& reg, const Graph& g, const CardProfile
         u.tier = n.tier;
         u.shedOrder = shed[i];
         u.lossless = true;   // in-render recompute is identical
-        u.levels.push_back((canLane[i] ? n.ringBytes : 0) + n.liveBytes);
+        u.levels.push_back((canLane[i] ? ringB[i] : 0) + liveB[i]);
         u.levelText.push_back(nullptr);
-        if (canLane[i] && n.ringBytes > 0) {
-            u.levels.push_back(n.liveBytes);
+        if (canLane[i] && ringB[i] > 0) {
+            u.levels.push_back(liveB[i]);
             u.levelText.push_back("computed in the render (no look-ahead)");
         }
         userOf[i] = int(gi.users.size());
@@ -379,7 +401,7 @@ inline TierPlan PlanTiers(const Registry& reg, const Graph& g, const CardProfile
     uint64_t systemBytes = 0;
     for (size_t i = 0; i < all.size(); ++i)
         if (all[i].residency == Residency::SystemRam)
-            systemBytes += g.nodes[i].liveBytes;
+            systemBytes += liveB[i];
     for (size_t i = 0; i < all.size(); ++i) {
         TierEntry& e = all[i];
         if (e.why != GrantWhy::Granted)
@@ -409,6 +431,8 @@ inline TierPlan PlanTiers(const Registry& reg, const Graph& g, const CardProfile
             if (n.inputs[k].lag != 0)
                 continue;
             const int j = g.IndexOf(n.inputs[k].product);
+            if (j >= 0 && g.nodes[size_t(j)].laneVisible)
+                continue;   // a view the lane reads too (the source ring): not an in-render input
             if (j >= 0 && all[size_t(j)].grant != Grant::Lane) {
                 e.grant = Grant::InRender;
                 e.why = GrantWhy::InputInRender;

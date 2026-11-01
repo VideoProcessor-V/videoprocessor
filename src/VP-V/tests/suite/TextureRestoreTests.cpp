@@ -5,6 +5,9 @@
 #include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
 
 #include <VP-V/modules/repair/texture_restore/TextureRestore.h>
+#include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
+
+#include <VP-V/modules/control/gpu_memory/PlTexBackend.h>
 
 #include <libplacebo/dispatch.h>
 
@@ -13,6 +16,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <random>
 #include <string>
@@ -1134,6 +1138,161 @@ namespace TextureRestoreTestsNs
 			module.Release(gpu);
 		}
 
+		TEST_METHOD(TextureRestoreGpuArenaIsByteIdentical)
+		{
+			// SA1: the per-frame temporaries from the scratch arena change nothing: the same inputs through
+			// a module without an arena and a module with one give exactly equal planes (main and foreign
+			// geometry, with and without a field, a repeated frame included).
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			std::mt19937 rng(191u);
+			const Image big = Scene(kW + 64, kH, rng);
+			const int fw = (kW + 15) / 16, fh = (kH + 15) / 16;
+			Field moving(fw, fh, 0.0f, 0.0f, 1.0f);
+			for (int y = 0; y < fh; ++y)
+				for (int x = fw / 2; x < fw; ++x) moving.at(x, y)[0] = 3.0f;
+			pl_tex fieldTex = UploadField(gpu, moving);
+			Assert::IsNotNull(fieldTex);
+			for (int withField = 0; withField < 2; ++withField)
+			{
+				VpSkeleton::PlTexBackend backend(gpu);
+				VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend);
+				const auto requests = TextureRestore::ArenaRequests(gpu, kW, kH, kW / 2, kH / 2);
+				Assert::IsFalse(requests.empty(), L"the float formats map to arena formats");
+				Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(requests, VpSkeleton::Tier::T2)), L"arena reserve");
+				TextureRestore::Module a, b;
+				int frames = 0;
+				for (int t = 0; t < 8; ++t)
+				{
+					const int src = t == 4 ? 3 : t;   // frame 4 repeats frame 3 (same sequence, same picture)
+					Image f(kW, kH);
+					for (int y = 0; y < kH; ++y)
+						for (int x = 0; x < kW; ++x)
+							f.at(x, y) = x < kW / 2 ? big.at(x, y) : big.at((std::min)(kW + 63, x + 60 - 3 * src), y);
+					std::mt19937 grainRng(5000u + static_cast<unsigned>(src));
+					const Image in = Quantised(Dctq(Sum(f, Grain(kW, kH, 1.5 * kCode8, true, grainRng)), IsI(src, 8) ? 4.0 : 24.0));
+					TextureRestore::Params pa = Frame(1300 + src);
+					if (withField) { pa.field = fieldTex; pa.fieldScale = 1.0; }
+					TextureRestore::Params pb = pa;
+					pb.arena = &arena;
+					pl_tex tex = UploadLuma(gpu, in);
+					pl_frame outA{}, outB{};
+					arena.BeginFrame();
+					Assert::IsTrue(a.Apply(gpu, dev.dispatch, LumaFrame(tex), pa, outA), Wide(a.LastError()).c_str());
+					Assert::IsTrue(b.Apply(gpu, dev.dispatch, LumaFrame(tex), pb, outB), Wide(b.LastError()).c_str());
+					Assert::IsFalse(b.ScratchShort(), L"no shortage");
+					const Image ia = Download(gpu, outA.planes[0].texture), ib = Download(gpu, outB.planes[0].texture);
+					Assert::IsTrue(ia.v == ib.v, (L"arena output equals private output, main, frame " + std::to_wstring(t)).c_str());
+					// The foreign geometry on the half-size picture.
+					Image halfPic(kW / 2, kH / 2);
+					for (int y = 0; y < halfPic.h; ++y)
+						for (int x = 0; x < halfPic.w; ++x)
+							halfPic.at(x, y) = std::round(0.25 * (in.at(2 * x, 2 * y) + in.at(2 * x + 1, 2 * y) + in.at(2 * x, 2 * y + 1) + in.at(2 * x + 1, 2 * y + 1)));
+					TextureRestore::Params fa = pa, fb = pb;
+					fa.planeLines = kH / 2;
+					fb.planeLines = kH / 2;
+					pl_tex stex = UploadLuma(gpu, halfPic);
+					pl_frame foreignA{}, foreignB{};
+					Assert::IsTrue(a.ApplyForeign(gpu, dev.dispatch, LumaFrame(stex), fa, foreignA), Wide(a.LastError()).c_str());
+					Assert::IsTrue(b.ApplyForeign(gpu, dev.dispatch, LumaFrame(stex), fb, foreignB), Wide(b.LastError()).c_str());
+					Assert::IsFalse(b.ScratchShort(), L"no foreign shortage");
+					const Image fiA = Download(gpu, foreignA.planes[0].texture), fiB = Download(gpu, foreignB.planes[0].texture);
+					Assert::IsTrue(fiA.v == fiB.v, (L"arena output equals private output, foreign, frame " + std::to_wstring(t)).c_str());
+					pl_tex_destroy(gpu, &tex);
+					pl_tex_destroy(gpu, &stex);
+					++frames;
+				}
+				char text[160];
+				snprintf(text, sizeof(text), "%s: %d frames identical, arena acquired %llu, exhausted %llu, shed %llu", withField ? "field" : "no field", frames,
+					static_cast<unsigned long long>(arena.Acquired()), static_cast<unsigned long long>(arena.Exhausted()), static_cast<unsigned long long>(arena.Shed()));
+				Logger::WriteMessage(text);
+				Assert::AreEqual(uint64_t(0), arena.Exhausted(), L"the arena never ran short");
+				Assert::IsFalse(arena.FrameDecision().engaged, L"scratch_arena released");
+				Assert::IsTrue(arena.Acquired() > 0, L"the arena was really used");
+				Assert::IsTrue(b.Failures() == 0 && a.Failures() == 0, L"no failures");
+				a.Release(gpu);
+				b.Release(gpu);
+				arena.Release();
+			}
+			pl_tex_destroy(gpu, &fieldTex);
+		}
+
+		TEST_METHOD(TextureRestoreGpuArenaShortageIsVisibleAndRecovers)
+		{
+			// SA1: no scratch texture (empty plan, or the tier shed) = texture restore visibly off for that
+			// frame (Apply false, ScratchShort, scratch_arena engaged, the failure counted); cap 1.0 needs
+			// no arena; the next frame with a proper plan restarts by itself and equals a private module.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			std::mt19937 rng(201u);
+			const Image a = Scene(kW, kH, rng);
+			const Image in = Quantised(Dctq(Sum(a, Grain(kW, kH, 1.5 * kCode8, true, rng)), 24.0));
+			pl_tex tex = UploadLuma(gpu, in);
+			Assert::IsNotNull(tex);
+			const auto requests = TextureRestore::ArenaRequests(gpu, kW, kH);
+			Assert::IsFalse(requests.empty(), L"the float formats map to arena formats");
+			for (int tierCase = 0; tierCase < 2; ++tierCase)
+			{
+				VpSkeleton::PlTexBackend backend(gpu);
+				VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend);
+				// 0: an empty plan; 1: a plan whose tier (T0) is below TextureRestore's (T1): shed.
+				if (tierCase == 0)
+					arena.Reserve(VpSkeleton::PlanArena(std::vector<VpSkeleton::ArenaRequest>(), VpSkeleton::Tier::T2));
+				else
+					arena.Reserve(VpSkeleton::PlanArena(requests, VpSkeleton::Tier::T0));
+				TextureRestore::Module module;
+				TextureRestore::Params p = Frame(1400);
+				p.arena = &arena;
+				pl_frame out{};
+				arena.BeginFrame();
+				const unsigned long long before = module.Failures();
+				Assert::IsFalse(module.Apply(gpu, dev.dispatch, LumaFrame(tex), p, out), L"no scratch texture: Apply fails");
+				Assert::IsTrue(module.ScratchShort(), L"ScratchShort");
+				Assert::IsTrue(module.LastError().rfind("scratch memory short", 0) == 0, Wide(module.LastError()).c_str());
+				Assert::AreEqual(before + 1, module.Failures(), L"one failure counted");
+				const FallbackCatalog::Decision d = arena.FrameDecision();
+				Assert::IsTrue(d.engaged && d.id == "scratch_arena", L"scratch_arena engaged");
+				Assert::IsTrue(d.reason.find("texture_restore") != std::string::npos, Wide(d.reason).c_str());
+				if (tierCase == 1)
+					Assert::IsTrue(arena.Shed() > 0, L"shed by tier");
+				else
+					Assert::IsTrue(arena.Shed() > 0 || arena.Exhausted() > 0, L"counted");
+				// cap 1.0 needs no arena: the input itself.
+				{
+					TextureRestore::Params p1 = Frame(1401, 1.0);
+					p1.arena = &arena;
+					pl_frame same{};
+					Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex), p1, same));
+					Assert::IsTrue(same.planes[0].texture == tex, L"cap 1.0 returns the input");
+					Assert::IsFalse(module.ScratchShort(), L"ScratchShort reset by the next call");
+				}
+				// Recovery: a proper plan, a new frame, the failure made the next Apply restart.
+				arena.BeginFrame();
+				Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(requests, VpSkeleton::Tier::T2)), L"arena reserve");
+				Assert::IsFalse(arena.FrameDecision().engaged, L"released after BeginFrame");
+				TextureRestore::Params p2 = Frame(1402);
+				p2.arena = &arena;
+				pl_frame out2{};
+				Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex), p2, out2), Wide(module.LastError()).c_str());
+				Assert::IsFalse(module.ScratchShort(), L"recovered");
+				Assert::IsFalse(arena.FrameDecision().engaged, L"no shortage after recovery");
+				const Image got = Download(gpu, out2.planes[0].texture);
+				TextureRestore::Module fresh;
+				TextureRestore::Params pf = Frame(1402);
+				pl_frame outF{};
+				Assert::IsTrue(fresh.Apply(gpu, dev.dispatch, LumaFrame(tex), pf, outF), Wide(fresh.LastError()).c_str());
+				const Image want = Download(gpu, outF.planes[0].texture);
+				Assert::IsTrue(got.v == want.v, L"the recovered frame equals a private-texture module's");
+				Logger::WriteMessage(tierCase == 0 ? "empty plan: visible, recovered" : "tier shed: visible, recovered");
+				module.Release(gpu);
+				fresh.Release(gpu);
+				arena.Release();
+			}
+			pl_tex_destroy(gpu, &tex);
+		}
+
 		TEST_METHOD(TextureRestoreGpuTiming)
 		{
 			// Hardware only (VP_TEST_GPU=hardware): Apply at 3840x2160 and 1920x1080, median wall
@@ -1176,6 +1335,86 @@ namespace TextureRestoreTestsNs
 				Logger::WriteMessage(text);
 				module.Release(gpu);
 				pl_tex_destroy(gpu, &tex);
+			}
+		}
+	};
+}
+
+// B3 (shared unit U2): TextureRestore's Gaussians (sigma 1 at full resolution, the half-resolution pair for sigma 2.5 / 6)
+// now call VpUnit::BandFromBase. The frozen copies below are the private implementations they replaced; the numbers (and
+// so the GLSL weight tables) must be bit-identical.
+namespace TextureRestoreBandFromBaseNs
+{
+	inline int OldRadius1(double scale) { return (std::max)(1, static_cast<int>(std::ceil(3.0 * TextureRestore::kSigma1 * scale - 1e-9))); }
+	inline double OldWeight1(int k, double scale)
+	{
+		const double s = TextureRestore::kSigma1 * scale;
+		const int r = OldRadius1(scale);
+		double sum = 0.0;
+		for (int i = -r; i <= r; ++i) sum += std::exp(-0.5 * i * i / (s * s));
+		return std::exp(-0.5 * k * k / (s * s)) / sum;
+	}
+	inline double OldHalfSigma(double sigma) { return std::sqrt(sigma * sigma - 0.25) / 2.0; }
+	inline int OldHalfRadius(double sigma) { return (std::max)(1, static_cast<int>(std::ceil(3.5 * OldHalfSigma(sigma) - 1e-9))); }
+	inline double OldHalfWeight(int k, double sigma)
+	{
+		const double s = OldHalfSigma(sigma);
+		const int r = OldHalfRadius(sigma);
+		double sum = 0.0;
+		for (int i = -r; i <= r; ++i) sum += std::exp(-0.5 * i * i / (s * s));
+		return std::exp(-0.5 * k * k / (s * s)) / sum;
+	}
+	inline bool Same(double a, double b) { return std::memcmp(&a, &b, sizeof(double)) == 0; }
+
+	TEST_CLASS(TextureRestoreBandFromBaseIdentityTests)
+	{
+	public:
+		TEST_METHOD(FullResolutionRadiusAndWeightAreBitIdentical)
+		{
+			std::vector<double> scales;
+			for (double s = 1.0; s <= 4.0001; s += 0.0625) scales.push_back(s);
+			for (double lines : { 480.0, 1080.0, 2160.0, 3240.0, 4320.0, 8640.0 }) scales.push_back(TextureRestore::Scale(lines));
+			for (double scale : scales)
+			{
+				const int r = OldRadius1(scale);
+				Assert::AreEqual(r, TextureRestore::Radius1(scale), L"radius");
+				for (int k = -r; k <= r; ++k)
+					Assert::IsTrue(Same(OldWeight1(k, scale), TextureRestore::Weight1(k, scale)), L"weight bits");
+			}
+		}
+
+		TEST_METHOD(HalfResolutionSigmaRadiusAndWeightAreBitIdentical)
+		{
+			for (double scale : { 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0 })
+				for (double base : { TextureRestore::kSigma2, TextureRestore::kSigma3 })
+				{
+					const double sigma = base * scale;
+					Assert::IsTrue(Same(OldHalfSigma(sigma), TextureRestore::HalfSigma(sigma)), L"half sigma bits");
+					const int r = OldHalfRadius(sigma);
+					Assert::AreEqual(r, TextureRestore::HalfRadius(sigma), L"half radius");
+					for (int k = -r; k <= r; ++k)
+						Assert::IsTrue(Same(OldHalfWeight(k, sigma), TextureRestore::HalfWeight(k, sigma)), L"half weight bits");
+				}
+		}
+
+		TEST_METHOD(EmittedWeightTablesTextIsByteIdentical)
+		{
+			for (double scale : { 1.0, 1.5, 2.0, 2.5 })
+			{
+				const int r1 = OldRadius1(scale);
+				Assert::AreEqual(
+					VpvGpu::ConstArray("w", 2 * r1 + 1, [&](int k) { return OldWeight1(k - r1, scale); }),
+					VpvGpu::ConstArray("w", 2 * TextureRestore::Radius1(scale) + 1, [&](int k) { return TextureRestore::Weight1(k - TextureRestore::Radius1(scale), scale); }),
+					L"w1 table text");
+				for (double base : { TextureRestore::kSigma2, TextureRestore::kSigma3 })
+				{
+					const double sigma = base * scale;
+					const int rh = OldHalfRadius(sigma);
+					Assert::AreEqual(
+						VpvGpu::ConstArray("w", 2 * rh + 1, [&](int k) { return OldHalfWeight(k - rh, sigma); }),
+						VpvGpu::ConstArray("w", 2 * TextureRestore::HalfRadius(sigma) + 1, [&](int k) { return TextureRestore::HalfWeight(k - TextureRestore::HalfRadius(sigma), sigma); }),
+						L"half table text");
+				}
 			}
 		}
 	};

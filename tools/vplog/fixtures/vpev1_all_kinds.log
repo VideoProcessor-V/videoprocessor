@@ -1,0 +1,28 @@
+# synthetic vp-event/1 fixture: every kind, quoting cases and malformed cases
+VPEV1 t=0.000 kind=session build_id=v1.4.00-beta-70d668d commit=70d668d
+2026-10-31 20:00:00 | VPEV1 t=1234.500 kind=resync level=minor cause=missed_frames seq=42 gap=3 mode=shadow
+VPEV1 t=1300.000 kind=resync level=full cause=start seq=1 mode=on
+VPEV1 t=1400.000 kind=resync level=minor cause=pulldown_rephase seq=50 mode=on
+VPEV1 t=1500.000 kind=resync level=timing cause=rate_step seq=60 detail=2 mode=on
+VPEV1 t=2000.000 kind=resync_settle seq=60 settle_ms=500 settle_frames=30 drops=0 repeats=0 relock=yes relock_frames=2 vectors=valid
+2026-10-31 20:00:01 | VPEV1 t=5.250 kind=fallback state=engaged id="capture GPU unpack" reason="CPU formatters: \"x\" \\ y"
+VPEV1 t=6.000 kind=fallback state=released id=early_upload
+VPEV1 t=1.000 kind=gate from=a to=b reason=""
+VPEV1 t=7.000 kind=gpu_error api=d3d11 code=0x887a0005 what="device removed"
+VPEV1 t=8.000 kind=source_change w=3840 h=2160 rate_num=24000 rate_den=1001 transfer=pq dv=1
+VPEV1 t=9.000 kind=cadence state=locked pattern=3:2 phase=1
+VPEV1 t=10.000 kind=repeat cause=pulldown count=2
+VPEV1 t=60000.125 kind=frame_stats window_s=60.000 n=3600 p50_ms=16.667 p99_ms=17.250 max_ms=33.400
+VPEV1 t=11.000 kind=stamp dir=in index=7
+VPEV1 t=0.000 kind=flag source=hotkey tag="needs space"
+VPEV1 t=2.000 kind=flag source=s tag="a  b c"
+VPEV1 t=12.000 kind=flag source=s tag="long" trunc=1
+VPEV1 kind=flag source=s
+VPEV1 t=13.000 source=s tag=x
+VPEV1 kind=flag t=13.000 source=s
+VPEV1 t=14.000 kind=bogus a=1
+VPEV1 t=15.000 kind=flag tag="unterminated
+VPEV1 t=16.000 kind=flag Tag=bad
+VPEV1 t=17.000 kind=flag tag="bad \q escape"
+VPEV1 t=18.000 kind=flag tag=has space"x
+VPEV1 t=19.000 kind=flag tag=a tag=b

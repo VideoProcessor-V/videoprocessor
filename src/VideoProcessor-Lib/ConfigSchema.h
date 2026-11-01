@@ -2,6 +2,7 @@
 
 #include "ConfigFile.h"
 #include "DisplayRuleExpression.h"
+#include "SettingsExtension.h" // VPV-HOOK
 
 #include <algorithm>
 #include <climits>
@@ -140,6 +141,12 @@ namespace ConfigSchema
 				{ return candidate.key == value.first; });
 			if (rule == rules.end())
 			{
+				// VPV-HOOK
+				// A key the built-in rules do not know may belong to a registered settings extension.
+				const SettingsExtension::Verdict extension = SettingsExtension::Validate(section, value.first, value.second, error);
+				if (extension == SettingsExtension::Verdict::Valid) continue;
+				if (extension == SettingsExtension::Verdict::Invalid) return false;
+				// VPV-HOOK-END
 				error = "[" + section + "] unknown key '" + value.first + "'";
 				return false;
 			}

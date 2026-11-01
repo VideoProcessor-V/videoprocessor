@@ -9,7 +9,8 @@ Usage: python tools/gen_test_filters.py [--cpu] [--gpu [--categories A,B]] [--gp
   --cpu      print the CPU filter (default)
   --gpu      print the complementary selection (excluded categories and manifest entries, OR-ed)
   --categories  with --gpu: restrict to these excluded categories (e.g. GpuHardware,GpuOnScreen keeps the
-             meter and projector tests out of a GPU run)
+             meter and projector tests out of a GPU run; UpstreamStale selects only the quarantined
+             upstream-stale Bill tests, which the CPU run leaves out)
   --gpuwarp  print the selection of the GpuWarp tests (WARP-capable GPU tests), for a run with
              VP_TEST_GPU=hardware: the owner rule is that these run on WARP (CPU run) and on the real GPU
   --compare  compare the CPU filter's clauses with a canonical filter (set comparison)
@@ -67,7 +68,7 @@ def cpu_filter(manifest):
 
 
 def gpu_filter(manifest, cats=None):
-    cats = lib.EXCLUDED_FROM_CPU if cats is None else cats
+    cats = lib.GPU_DEFAULT_EXCLUDED if cats is None else cats
     parts = clauses(manifest, False, cats) + [f'Category={c}' for c in cats]
     return '|'.join(parts)
 

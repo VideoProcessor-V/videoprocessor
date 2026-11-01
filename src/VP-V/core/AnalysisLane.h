@@ -400,6 +400,9 @@ struct LaneNodeInfo {
 };
 
 struct LaneState {
+    // Keeps the Indicator this state's runner reads alive (declared first: destroyed last). Null when the
+    // lane was built on a raw pointer (tests).
+    std::shared_ptr<VpIndicator::Indicator> indHold;
     Graph graph;
     std::unique_ptr<LaneSourceRing> ring;
     std::unique_ptr<SlotTable> table;                 // (declared before the runner: destroyed after it)
@@ -429,17 +432,92 @@ public:
     using LiveFill = std::function<bool(const Node&, uint64_t, int, Header&, uint32_t)>;
 
     // `indicator` is the host's central Indicator (not owned; may be null: the lane is then unavailable).
-    // TODO(resync Q0, plan 50 gap G3): NOT WIRED to the renderer, and must not be until Q0 lands. Two hazards once it is:
-    // (1) OnRenderStart seals the central Indicator (SealAndObserve) and so does the resync drive
-    // (LibplaceboVideoRenderer ResyncDrive::SealAndObserve): one FrameSeal must own the seal; (2) this RAW pointer can
-    // dangle when a resync mode change replaces the Indicator (the host holds it as a shared_ptr): Q0 changes it to a
-    // shared_ptr / handle. Nothing outside tests constructs an AnalysisLane today (integration 2026-11-01).
+    // Resync Q0 (plan 50 gap G3): the lane holds the Indicator by SHARED HANDLE (BindIndicator, rebound on an era
+    // change by FrameSeal) and, with SetExternalSeal(true), never seals it itself: FrameSeal owns the one seal per
+    // frame and calls OnSealed(seq, changed). The raw-pointer constructor is the standalone path (the lane seals
+    // itself in OnRenderStart); it is kept for the lane's existing tests and must not be used next to a FrameSeal.
     AnalysisLane(VpIndicator::Indicator* indicator, std::function<uint64_t()> nowUs)
-        : ind_(indicator), nowUs_(std::move(nowUs))
+        : ind_(indicator), indEra_(indicator != nullptr ? indicator->Era() : 0u), nowUs_(std::move(nowUs))
+    {
+    }
+    AnalysisLane(std::shared_ptr<VpIndicator::Indicator> indicator, std::function<uint64_t()> nowUs)
+        : ind_(indicator.get()), indEra_(indicator ? indicator->Era() : 0u), indHandle_(std::move(indicator)),
+          nowUs_(std::move(nowUs))
     {
     }
     AnalysisLane(const AnalysisLane&) = delete;
     AnalysisLane& operator=(const AnalysisLane&) = delete;
+
+    // The frame-bound source-resolution monitor's readiness (Monitor::ReadyFor), consulted by
+    // DeterministicWaitUs after the lane's own products. `onMissed` runs once per frame whose bound ran
+    // out (Monitor::NoteWaitMissed). Setup / render thread. Null = none (today's behaviour).
+    void SetReadyProbe(std::function<bool(uint64_t)> ready, std::function<void()> onMissed)
+    {
+        readyProbe_ = std::move(ready);
+        readyMissed_ = std::move(onMissed);
+    }
+    uint64_t ReadyProbeMisses() const { return readyProbeMisses_; }
+
+    // ---- FrameSeal integration (render thread) ----
+
+    // Rebind the lane to a (new-era) Indicator. A state built on the previous Indicator keeps it alive through
+    // LaneState::indHold, so a worker never reads a destroyed Indicator; the next Configure rebuilds the graph
+    // (the era is part of the graph key) on the new one. The first observation after a rebind is not a change.
+    void BindIndicator(const std::shared_ptr<VpIndicator::Indicator>& indicator)
+    {
+        // The same Indicator is the same ERA (eras are process-unique), never the same address: a freed
+        // Indicator's address may be reused by the next era's.
+        const uint32_t era = indicator ? indicator->Era() : 0u;
+        if (era == indEra_ && (era != 0 || ind_ == nullptr)) {
+            indHandle_ = indicator;   // the same Indicator: only adopt the shared handle, nothing to rebuild
+            ind_ = indicator.get();
+            return;
+        }
+        indHandle_ = indicator;
+        ind_ = indicator.get();
+        indEra_ = era;
+        observedOnce_ = false;
+        waitValid_ = false;
+        ++indicatorRebinds_;
+        // The built graph, ring slots and runner belong to the previous Indicator's era: their stamps
+        // can no longer match. The next OnRenderStart rebuilds them from the last Configure inputs
+        // (RebuildOnRebind); until then the status says so (never a silent in-render fallback).
+        if (std::atomic_load(&state_))
+            rebuildPending_ = true;
+    }
+    // True between BindIndicator and the rebuild at the next OnRenderStart.
+    bool RebuildPending() const { return rebuildPending_; }
+    uint64_t RebindRebuilds() const { return rebindRebuilds_; }
+    // FrameSeal owns the seal: OnRenderStart no longer seals; the lane learns the frame's changed mask
+    // through OnSealed (called by FrameSeal before OnRenderStart of the same frame).
+    void SetExternalSeal(bool on) { externalSeal_ = on; }
+    bool ExternalSeal() const { return externalSeal_; }
+    // Render thread. `changed` is FrameSeal's SealAndObserve result for `seq`.
+    void OnSealed(uint64_t seq, VpIndicator::CounterMask changed)
+    {
+        if (observedOnce_ && changed != 0)
+            regulator_.OnIndicatorChange(changed);   // the first observation is not a change
+        observedOnce_ = true;
+        sealedSeq_ = seq;
+        haveSealedSeq_ = true;
+        ApplyStorm();
+    }
+    // The resync storm hold (Shadow::StormSafeSettings().laneT0): while held the regulator is kept at the
+    // conservative floor (T0). Released when the storm ends; the regulator then recovers as usual.
+    void SetStormHold(bool held)
+    {
+        if (held && !stormHold_) {
+            ++stormHoldEngagements_;
+            stormEdgePending_ = true;   // the engagement itself is traced once, even when already at T0
+        }
+        stormHold_ = held;
+    }
+    bool StormHold() const { return stormHold_; }
+    uint64_t StormHoldEngagements() const { return stormHoldEngagements_; }
+    uint64_t IndicatorRebinds() const { return indicatorRebinds_; }
+    // OnRenderStart calls in external-seal mode whose frame was not sealed by FrameSeal first (a wiring bug:
+    // counted, never silently sealed twice).
+    uint64_t ExternalSealMisses() const { return externalSealMisses_; }
 
     // ---- setup (before the lane threads start) ----
 
@@ -478,6 +556,12 @@ public:
     {
         settings_ = s;
         mode_.store(uint8_t(s.mode), std::memory_order_release);
+        if (s.mode != LaneSettings::Mode::Off) {
+            // The inputs of the last Configure, kept so an Indicator rebind can rebuild (RebuildOnRebind).
+            // `cfg` may alias the previously saved copy (the rebuild passes a local copy, so it does not).
+            cfg_.reset(new SavedConfig{ reg, consumers, gs, card, tier, hostDeterministic });
+        }
+        rebuildPending_ = false;
         if (s.mode == LaneSettings::Mode::Off || ind_ == nullptr) {
             Clear();
             error_ = s.mode == LaneSettings::Mode::Off ? "" : "no indicator";
@@ -498,6 +582,17 @@ public:
             renderState_.reset();
             return reasons;
         }
+        // A look-ahead input (lead > 0) has no seal rule yet (K1): SlotTable would be invalid. Refuse the graph: the lane
+        // is off and every product is made live in the render; the reason reaches Fallbacks() via error_.
+        for (const Node& n : g.nodes)
+            for (size_t k = 0; k < n.inputCount; ++k)
+                if (n.inputs[k].lead > 0) {
+                    error_ = std::string("look-ahead input on ") + (reg.Has(n.id) ? reg.Get(n.id).token : "?")
+                             + " needs the K1 seal rule";
+                    std::atomic_store(&state_, std::shared_ptr<LaneState>());
+                    renderState_.reset();
+                    return reasons;
+                }
         error_.clear();
         periodMs_ = tier.framePeriodMs;
         chunkCapUs_.store(GapScheduler::DerivedChunkCapUs(tier.framePeriodMs, s.chunkUs), std::memory_order_relaxed);
@@ -545,17 +640,25 @@ public:
     {
         if (settings_.mode == LaneSettings::Mode::Off || ind_ == nullptr)
             return empty_;
+        if (rebuildPending_)
+            RebuildOnRebind(seq);
         const std::shared_ptr<LaneState> st = std::atomic_load(&state_);
         if (!st)
             return empty_;
         renderState_ = st;
         lastSlackUs_ = presentSlackUs;
 
-        // TODO(resync Q0, G3): a second sealer of the central Indicator besides the resync drive; see the constructor.
-        const VpIndicator::CounterMask changed = ind_->SealAndObserve(seq);
-        if (observedOnce_ && changed != 0)
-            regulator_.OnIndicatorChange(changed);   // the first observation is not a change
-        observedOnce_ = true;
+        if (externalSeal_) {
+            // One seal owner: FrameSeal sealed this frame and reported it through OnSealed.
+            if (!haveSealedSeq_ || sealedSeq_ != seq)
+                ++externalSealMisses_;
+        } else {
+            const VpIndicator::CounterMask changed = ind_->SealAndObserve(seq);
+            if (observedOnce_ && changed != 0)
+                regulator_.OnIndicatorChange(changed);   // the first observation is not a change
+            observedOnce_ = true;
+            ApplyStorm();
+        }
         ApplyRegulator(*st);
         if (seq < st->firstSeq)
             return empty_;
@@ -624,6 +727,7 @@ public:
         p.testWaitUs = settings_.testWaitUs;
         uint32_t more = 0;
         bool missed = false;
+        bool probeMissed = false;
         for (size_t i = 0; i < st->table->Count(); ++i) {
             const Node& n = st->table->NodeAt(i);
             if (n.backend == Backend::RenderOnly || !st->runner->Laned(n.id) || !st->runner->HasProducer(n.id))
@@ -637,6 +741,20 @@ public:
             else if (d == WaitDecision::BoundMissed)
                 missed = true;
         }
+        // Q3 (N1): the source-resolution monitor's frame-bound decision needs the analysis through
+        // s - D. Same bounded wait as a laned product (deterministic runs only, inside the present
+        // slack, never a late present); a bound that runs out is counted here and reported to the
+        // probe's owner (SRM NoteWaitMissed), so the run is visibly not reproducible.
+        if (readyProbe_ && !readyProbe_(seq)) {
+            uint32_t m = 0;
+            const WaitDecision d = DecideWait(Variants::NonIdentical, true, SlotState::Writing, p, waitedUs_, &m);
+            if (d == WaitDecision::Wait)
+                more = std::max(more, m);
+            else if (d == WaitDecision::BoundMissed) {
+                missed = true;
+                probeMissed = true;
+            }
+        }
         if (more > 0) {
             lastAskUs_ = more;
             return more;
@@ -645,6 +763,11 @@ public:
         if (missed && !missCounted_) {
             ++missedBounds_;
             missCounted_ = true;
+            if (probeMissed) {
+                ++readyProbeMisses_;
+                if (readyMissed_)
+                    readyMissed_();
+            }
         }
         return 0;
     }
@@ -828,12 +951,25 @@ public:
                                                                     : "Analysis lane: on");
         out.push_back("Analysis products: " + std::to_string(lastAhead_) + " ahead, " + std::to_string(lastInRender_)
                       + " in render, " + std::to_string(regulator_.Dropped().size()) + " dropped");
+        if (totalDeclined_ > 0)
+            out.push_back("Analysis: " + std::to_string(totalDeclined_) +
+                          " product frames unavailable (no producer result and no live fill; the consumer uses its own fallback)");
         out.push_back(std::string("Analysis lead: ") + LeadText(lead_));
         out.push_back("Analysis level: " + std::to_string(unsigned(regulator_.Level())) + "/"
                       + std::to_string(unsigned(regulator_.MaxLevel())));
         out.push_back("Analysis late: " + std::to_string(lateRingSum_) + " per 10 s");
         if (det_)
             out.push_back("Analysis deterministic: " + std::to_string(missedBounds_) + " frames missed the wait bound");
+        if (rebuildPending_)
+            out.push_back("Analysis: the Indicator changed (new source era); the graph is rebuilt at the next frame");
+        if (indicatorRebinds_ > 0)
+            out.push_back("Analysis: Indicator rebound x" + std::to_string(indicatorRebinds_) + ", graph rebuilt x" +
+                          std::to_string(rebindRebuilds_));
+        if (externalSealMisses_ > 0)
+            out.push_back("Analysis: " + std::to_string(externalSealMisses_) +
+                          " frames reached the lane without the shared seal (not sealed twice)");
+        if (stormHold_)
+            out.push_back("Analysis: held at T0 by the resync storm (" + std::to_string(stormHoldEngagements_) + " engagements)");
         uint64_t skipped = 0;
         for (size_t i = 0; i < st->table->Count(); ++i)
             skipped += st->runner->Counters(st->table->NodeAt(i).id).skippedDropped.load(std::memory_order_relaxed);
@@ -879,6 +1015,8 @@ public:
         out.push_back(FallbackCatalog::AnalysisLaneDeterminism(st && det_ ? missedBounds_ : 0u));
         out.push_back(FallbackCatalog::SourceStatsWalk(settings_.walk == VpLaneProducts::WalkSource::Lane,
                                                         !P4Available()));
+        if (externalSealMisses_ != 0)   // appended only when engaged: the list keeps its shape otherwise
+            out.push_back(FallbackCatalog::ResyncSeal(externalSealMisses_, 0u));
         return out;
     }
 
@@ -939,6 +1077,7 @@ private:
         st->firstSeq = fromSeq;
         st->ring.reset(new LaneSourceRing(std::max<size_t>(st->graph.framesInFlight, 4u)));
         st->table.reset(new SlotTable(st->graph));
+        assert(st->table->Valid());   // Configure refuses graphs with look-ahead inputs before this point
         ProductId maxId = 0;
         for (const Node& n : st->graph.nodes)
             maxId = std::max(maxId, n.id);
@@ -960,6 +1099,7 @@ private:
         st->plan = governor_.Update(reg, st->graph, card, tier);
         ApplyLaneGrants(st->plan, *st->table);
 
+        st->indHold = indHandle_;
         st->runner.reset(new LaneRunner(*st->table, ind_, nowUs_));
         LaneState* sp = st.get();
         st->runner->SetBuffers(
@@ -1129,7 +1269,63 @@ private:
         return ok;
     }
 
+    // While the storm hold is in force keep the regulator at the conservative floor (T0), once per frame.
+    // The Indicator was replaced (new era) since the graph was built: rebuild it on the new one from
+    // the inputs of the last Configure (the state is swapped like any Configure rebuild; the ring's
+    // frames are carried over; the previous state keeps the previous Indicator alive until its last
+    // worker lets go).
+    void RebuildOnRebind(uint64_t seq)
+    {
+        rebuildPending_ = false;
+        if (!cfg_)
+            return;
+        const SavedConfig c = *cfg_;
+        Configure(settings_, c.reg, c.consumers, c.gs, c.card, c.tier, seq, c.hostDet);
+        ++rebindRebuilds_;
+        // The rebuild re-derived the regulator for the new graph: a storm hold in force must floor it at
+        // T0 again in THIS frame (OnSealed applied it to the previous graph's regulator before the rebuild).
+        if (stormHold_) {
+            stormEdgePending_ = true;
+            ApplyStorm();
+        }
+    }
+
+    struct SavedConfig {
+        Registry reg;
+        std::vector<ConsumerDecl> consumers;
+        GraphSettings gs;
+        CardProfile card;
+        TierInput tier;
+        bool hostDet = false;
+    };
+
+    void ApplyStorm()
+    {
+        if (!stormHold_)
+            return;
+        if (stormEdgePending_ || regulator_.LaneLevel() > regulator_.T0StepCount()) {
+            stormEdgePending_ = false;
+            regulator_.OnIndicatorChange(VpIndicator::Bit(VpIndicator::kFull));
+        }
+    }
+
     VpIndicator::Indicator* ind_;
+    uint32_t indEra_ = 0;                                 // render thread only; ind_'s era (0 = none)
+    std::shared_ptr<VpIndicator::Indicator> indHandle_;   // render thread only
+    bool externalSeal_ = false;
+    bool haveSealedSeq_ = false;
+    uint64_t sealedSeq_ = 0;
+    bool stormHold_ = false;
+    bool stormEdgePending_ = false;
+    std::function<bool(uint64_t)> readyProbe_;
+    std::function<void()> readyMissed_;
+    uint64_t readyProbeMisses_ = 0;
+    std::unique_ptr<SavedConfig> cfg_;
+    bool rebuildPending_ = false;
+    uint64_t rebindRebuilds_ = 0;
+    uint64_t stormHoldEngagements_ = 0;
+    uint64_t indicatorRebinds_ = 0;
+    uint64_t externalSealMisses_ = 0;
     std::function<uint64_t()> nowUs_;
     LaneSettings settings_;
     std::shared_ptr<LaneState> state_;         // swapped with std::atomic_store / atomic_load

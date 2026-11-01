@@ -11,6 +11,6 @@
     <Link><AdditionalLibraryDirectories>..\..\3rdparty\libplacebo-beta\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories><AdditionalDependencies>libplacebo-388.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
   </ItemDefinitionGroup>
   <ItemGroup><ClCompile Include="BetaParametersTests.cpp"/><ClCompile Include="..\VideoProcessor-Lib\vprenderer\LibplaceboRenderParameters.cpp"/></ItemGroup>
-  <Import Project="$(MSBuildThisFileDirectory)..\VP-V\build\VideoProcessor-BetaTests.items.props" Condition="Exists('$(MSBuildThisFileDirectory)..\VP-V\build\VideoProcessor-BetaTests.items.props')" />
+  <Import Project="$(MSBuildThisFileDirectory)..\VP-V\build\$(MSBuildProjectName).items.props" Condition="Exists('$(MSBuildThisFileDirectory)..\VP-V\build\$(MSBuildProjectName).items.props')" />  <!-- VPV-HOOK -->
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

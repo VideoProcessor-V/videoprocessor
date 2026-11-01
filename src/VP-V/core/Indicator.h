@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -176,7 +177,7 @@ public:
     uint32_t Total(Counter c) const { return total_[size_t(c)].load(std::memory_order_relaxed); }
     uint32_t OutOfOrderObserves() const { return outOfOrder_.load(std::memory_order_relaxed); }
     uint32_t RejectedReaders() const { return rejectedReaders_.load(std::memory_order_relaxed); }
-    int ReaderCount() const { return readerCount_; }
+    int ReaderCount() const { return readerCount_.load(std::memory_order_acquire); }
     // Events folded out of the ring that still applied to unsealed frames (ring undersized).
     uint32_t PrematureFolds() const { return prematureFolds_.load(std::memory_order_relaxed); }
     // Observe(seq) calls for a seq that is not sealed yet (ignored).
@@ -203,8 +204,18 @@ public:
             rejectedAdvances_.fetch_add(1, std::memory_order_relaxed);
             return 0;
         }
-        std::lock_guard<std::mutex> lock(writeMutex_);
+        std::unique_lock<std::mutex> lock(writeMutex_);
         const uint64_t floorSeq = sealedNext_.load(std::memory_order_relaxed);   // LastSealed() + 1, or 0
+        if (successor_) {
+            // Handed over (HandOverTo): the event belongs to the successor era. Clamped above THIS era's
+            // seal (those frames were sealed here), then written there; never lost in a dead era.
+            const std::shared_ptr<Indicator> next = successor_;
+            lock.unlock();
+            forwardedAdvances_.fetch_add(1, std::memory_order_relaxed);
+            if (fromSeq < floorSeq)
+                clampedAdvances_.fetch_add(1, std::memory_order_relaxed);
+            return next->Advance(counter, cause, fromSeq < floorSeq ? floorSeq : fromSeq, gapFrames, detail);
+        }
         const uint64_t effective = fromSeq < floorSeq ? floorSeq : fromSeq;
         if (effective != fromSeq)
             clampedAdvances_.fetch_add(1, std::memory_order_relaxed);
@@ -288,26 +299,116 @@ public:
         return StampOf(seq);
     }
 
+    // Era handover (Shadow::Configure, before the new Indicator is published). Atomic with respect to
+    // every writer of THIS Indicator (one critical section on its writer mutex):
+    //   1. every retained event whose fromSeq is above this era's last sealed frame (it still applies to
+    //      queued, unsealed frames) is re-written into `next`, oldest first, with its counter, cause,
+    //      detail and gap; events for sealed frames stay here (they can no longer reach a frame);
+    //   2. `next` inherits this era's seal floor (LastSealed() + 1), so HasSealed / LastSealed agree;
+    //   3. from then on every Advance on this Indicator (an enqueue thread or a settings writer still
+    //      holding it) is forwarded to `next`, clamped above this era's seal.
+    // Returns the number of events carried. A second handover, a null or self `next` does nothing (0).
+    // Lock order is always older era -> newer era. Events already folded out of the ring before the
+    // handover cannot be carried; they are counted in PrematureFolds() as before.
+    size_t HandOverTo(const std::shared_ptr<Indicator>& next)
+    {
+        // `next` must be a fresh era (never handed over itself): a handover cycle would make Latest and
+        // the forwarded Advance loop forever.
+        if (!next || next.get() == this || next->HandedOver())
+            return 0;
+        std::lock_guard<std::mutex> lock(writeMutex_);
+        if (successor_)
+            return 0;
+        const uint64_t floorSeq = sealedNext_.load(std::memory_order_relaxed);
+        {
+            // The new era inherits the seal floor: frames sealed here stay sealed (a writer that asks
+            // for "the first unsealed frame", LastSealed() + 1, gets the same answer in both eras, and
+            // an advance can never land on - or uniformly below - a frame already rendered).
+            // Frames before the last sealed one are ANCIENT in the new era (single-frame use only): the
+            // new era's stamps no longer carry the events between them, so a pair reaching back across
+            // the swap is refused instead of read as valid. The last sealed frame itself stays a normal
+            // stamp: it is the baseline the readers latch from (LatchBaseline).
+            std::lock_guard<std::mutex> nextLock(next->writeMutex_);
+            if (next->sealedNext_.load(std::memory_order_relaxed) < floorSeq)
+                next->sealedNext_.store(floorSeq, std::memory_order_release);
+            const uint64_t ancient = floorSeq > 0 ? floorSeq - 1 : 0;
+            if (next->ancientBelow_.load(std::memory_order_relaxed) < ancient) {
+                const uint64_t v = next->version_.load(std::memory_order_relaxed);
+                next->version_.store(v + 1, std::memory_order_relaxed);
+                std::atomic_thread_fence(std::memory_order_release);
+                next->ancientBelow_.store(ancient, std::memory_order_relaxed);
+                next->version_.store(v + 2, std::memory_order_release);
+            }
+        }
+        const uint64_t written = written_.load(std::memory_order_relaxed);
+        const uint64_t retained = written < capacity_ ? written : uint64_t(capacity_);
+        size_t carried = 0;
+        for (uint64_t w = written - retained; w < written; ++w) {   // write order: oldest first
+            const Entry& e = ring_[size_t(w) & mask_];
+            const uint64_t from = e.fromSeq.load(std::memory_order_relaxed);
+            if (from < floorSeq)
+                continue;
+            const uint64_t meta = e.meta.load(std::memory_order_relaxed);
+            next->Advance(CounterOf(meta), static_cast<VpResync::Cause>((meta >> 8) & 0xFFFFu), from,
+                          uint32_t(meta >> 32), uint8_t((meta >> 24) & 0xFFu));
+            ++carried;
+        }
+        successor_ = next;
+        std::atomic_store(&successorRead_, next);
+        hasSuccessor_.store(true, std::memory_order_release);
+        carriedEvents_.store(uint32_t(carried), std::memory_order_relaxed);
+        return carried;
+    }
+    // True once HandOverTo ran: this era is dead, its writers are forwarded.
+    bool HandedOver() const { return hasSuccessor_.load(std::memory_order_acquire); }
+    // Lock-free, any thread: the era this one handed over to (null when it has not).
+    std::shared_ptr<Indicator> Successor() const
+    {
+        return hasSuccessor_.load(std::memory_order_acquire) ? std::atomic_load(&successorRead_)
+                                                             : std::shared_ptr<Indicator>();
+    }
+    // The newest era reachable from `ind` through handovers (ind itself when it was never handed over).
+    static std::shared_ptr<Indicator> Latest(std::shared_ptr<Indicator> ind)
+    {
+        while (ind) {
+            std::shared_ptr<Indicator> next = ind->Successor();
+            if (!next)
+                break;
+            ind = std::move(next);
+        }
+        return ind;
+    }
+    // The frame a reader registered on this Indicator latches against at its first observe: the last
+    // frame sealed before the registration when the seal floor was inherited from a predecessor era
+    // (HandOverTo), else 0 (= the frame before the observed one). Call at registration (before the
+    // first Observe). With it, a carried event on a frame that was never sealed (dropped from the
+    // queue) still differs from the baseline and acts, instead of being swallowed by the latch.
+    uint64_t LatchBaseline() const { return HasSealed() ? LastSealed() : 0; }
+    uint32_t CarriedEvents() const { return carriedEvents_.load(std::memory_order_relaxed); }
+    uint32_t ForwardedAdvances() const { return forwardedAdvances_.load(std::memory_order_relaxed); }
+
     // Setup only (before the first Observe). Returns the reader index, or -1 beyond the limit
     // (counted in RejectedReaders).
     int Register(const char* name, CounterMask reads, const std::array<Policy, kCounterCount>& policies,
                  std::function<void(const Change&)> onChange)
     {
-        if (readerCount_ >= int(kMaxReaders) || observed_) {
+        const int n = readerCount_.load(std::memory_order_relaxed);
+        if (n >= int(kMaxReaders) || observed_) {
             rejectedReaders_.fetch_add(1, std::memory_order_relaxed);
             return -1;
         }
-        Reader& r = readers_[size_t(readerCount_)];
+        Reader& r = readers_[size_t(n)];
         r.name = name;
         r.reads = reads;
         r.policies = policies;
         r.onChange = std::move(onChange);
-        return readerCount_++;
+        readerCount_.store(n + 1, std::memory_order_release);   // the reader is complete before it is counted
+        return n;
     }
 
     const char* ReaderName(int i) const
     {
-        return (i >= 0 && i < readerCount_) ? readers_[size_t(i)].name : "";
+        return (i >= 0 && i < readerCount_.load(std::memory_order_acquire)) ? readers_[size_t(i)].name : "";
     }
 
     // Render thread: seal seq, then observe it.
@@ -335,9 +436,10 @@ public:
         }
         const Stamp stamp = StampOf(seq);
         const CounterMask changed = observed_ ? Changed(lastObservedStamp_, stamp) : kAllCounters;
+        const int readerCount = readerCount_.load(std::memory_order_acquire);
 
         uint64_t acting = 0;
-        for (int i = 0; i < readerCount_; ++i)
+        for (int i = 0; i < readerCount; ++i)
             if ((readers_[size_t(i)].reads & changed) != 0)
                 acting |= uint64_t(1) << unsigned(i);
 
@@ -352,7 +454,7 @@ public:
                     continue;
                 const CounterMask moved = MovedBy(CounterOf(e.meta.load(std::memory_order_relaxed)));
                 uint64_t bits = 0;
-                for (int i = 0; i < readerCount_; ++i)
+                for (int i = 0; i < readerCount; ++i)
                     if (((acting >> unsigned(i)) & 1u) != 0 && (readers_[size_t(i)].reads & moved) != 0)
                         bits |= uint64_t(1) << unsigned(i);
                 if (bits != 0)
@@ -365,7 +467,7 @@ public:
         lastObservedStamp_ = stamp;
 
         // Callbacks run outside the writer mutex so a reader may call Advance.
-        for (int i = 0; i < readerCount_; ++i) {
+        for (int i = 0; i < readerCount; ++i) {
             Reader& r = readers_[size_t(i)];
             const CounterMask relevant = r.reads & changed;
             if (relevant == 0 || !r.onChange)
@@ -411,6 +513,106 @@ public:
                 continue;
             }
             return count;
+        }
+    }
+
+    // Lock-free, any thread (seqlock read like Snapshot). Among retained events whose counter is
+    // exactly `counter` (a kFull event is NOT returned for kContinuity) and whose fromSeq lies in
+    // (fromSeqExclusive, toSeqInclusive], returns the cause (and detail, when non-null) of the one
+    // with the highest serial. False when none is retained. Also false when the interval is older
+    // than the ring (AncientBelow() > fromSeqExclusive: events there may have been folded away, so
+    // "none" would be unreliable); callers can compare AncientBelow() to tell the two apart.
+    bool LastCauseIn(Counter counter, uint64_t fromSeqExclusive, uint64_t toSeqInclusive,
+                     VpResync::Cause& cause, uint8_t* detail = nullptr) const
+    {
+        if (static_cast<unsigned>(counter) >= static_cast<unsigned>(kCounterCount)
+            || toSeqInclusive <= fromSeqExclusive)
+            return false;
+        for (unsigned attempt = 0;; ++attempt) {
+            const uint64_t v1 = version_.load(std::memory_order_acquire);
+            if ((v1 & 1u) != 0) {
+                Backoff(attempt);
+                continue;
+            }
+            const uint64_t ancientBelow = ancientBelow_.load(std::memory_order_relaxed);
+            const uint64_t written = written_.load(std::memory_order_relaxed);
+            const size_t n = written < capacity_ ? size_t(written) : capacity_;
+            bool found = false;
+            uint64_t bestSerial = 0;
+            VpResync::Cause bestCause = VpResync::Cause::None;
+            uint8_t bestDetail = 0;
+            for (size_t k = 0; k < n; ++k) {
+                const Entry& e = ring_[k];
+                const uint64_t from = e.fromSeq.load(std::memory_order_relaxed);
+                if (from <= fromSeqExclusive || from > toSeqInclusive)
+                    continue;
+                const uint64_t meta = e.meta.load(std::memory_order_relaxed);
+                if (CounterOf(meta) != counter)
+                    continue;
+                const uint64_t serial = e.serial.load(std::memory_order_relaxed);
+                if (!found || serial > bestSerial) {
+                    found = true;
+                    bestSerial = serial;
+                    bestCause = static_cast<VpResync::Cause>((meta >> 8) & 0xFFFFu);
+                    bestDetail = uint8_t((meta >> 24) & 0xFFu);
+                }
+            }
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (version_.load(std::memory_order_relaxed) != v1) {
+                Backoff(attempt);
+                continue;
+            }
+            if (ancientBelow > fromSeqExclusive)
+                return false;
+            if (!found)
+                return false;
+            cause = bestCause;
+            if (detail != nullptr)
+                *detail = bestDetail;
+            return true;
+        }
+    }
+
+    // Lock-free, any thread. True when ANY retained event of exactly `counter` with fromSeq in
+    // (fromSeqExclusive, toSeqInclusive] has a cause other than `except`, or when the interval is
+    // older than the ring (AncientBelow() > fromSeqExclusive: an event there may have been folded
+    // away, so "only `except`" cannot be proven; the conservative answer). False for an empty
+    // interval, an out-of-range counter, or when every event in the interval has cause `except`
+    // (or there are none and the interval is within the ring). Used by the pulldown reader: absorb
+    // only when EVERY FULL between two stamps was a LiveQueueReset.
+    bool AnyCauseOtherThanIn(Counter counter, VpResync::Cause except, uint64_t fromSeqExclusive,
+                             uint64_t toSeqInclusive) const
+    {
+        if (static_cast<unsigned>(counter) >= static_cast<unsigned>(kCounterCount)
+            || toSeqInclusive <= fromSeqExclusive)
+            return false;
+        for (unsigned attempt = 0;; ++attempt) {
+            const uint64_t v1 = version_.load(std::memory_order_acquire);
+            if ((v1 & 1u) != 0) {
+                Backoff(attempt);
+                continue;
+            }
+            const uint64_t ancientBelow = ancientBelow_.load(std::memory_order_relaxed);
+            const uint64_t written = written_.load(std::memory_order_relaxed);
+            const size_t n = written < capacity_ ? size_t(written) : capacity_;
+            bool other = false;
+            for (size_t k = 0; k < n && !other; ++k) {
+                const Entry& e = ring_[k];
+                const uint64_t from = e.fromSeq.load(std::memory_order_relaxed);
+                if (from <= fromSeqExclusive || from > toSeqInclusive)
+                    continue;
+                const uint64_t meta = e.meta.load(std::memory_order_relaxed);
+                if (CounterOf(meta) != counter)
+                    continue;
+                if (static_cast<VpResync::Cause>((meta >> 8) & 0xFFFFu) != except)
+                    other = true;
+            }
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (version_.load(std::memory_order_relaxed) != v1) {
+                Backoff(attempt);
+                continue;
+            }
+            return other || ancientBelow > fromSeqExclusive;
         }
     }
 
@@ -461,14 +663,30 @@ private:
     std::atomic<uint32_t> unsealedObserves_;
     std::atomic<uint32_t> rejectedAdvances_;
     std::atomic<uint32_t> clampedAdvances_;
+    std::atomic<uint32_t> carriedEvents_{0};
+    std::atomic<uint32_t> forwardedAdvances_{0};
+    std::shared_ptr<Indicator> successor_;       // writeMutex_
+    std::shared_ptr<Indicator> successorRead_;   // atomic_load / atomic_store only (lock-free readers)
+    std::atomic<bool> hasSuccessor_{false};
 
     // Readers: registered at setup, called from the render thread only.
     std::array<Reader, kMaxReaders> readers_;
-    int readerCount_ = 0;
+    std::atomic<int> readerCount_{0};   // written by Register (setup), read by status threads
     bool observed_ = false;
     uint64_t lastObservedSeq_ = 0;
     Stamp lastObservedStamp_;
 };
+
+// The counters a latching reader acts on at its first observe of `seq`: the stamp of seq against the
+// stamp of `baseline` (Indicator::LatchBaseline at registration) when it is an earlier frame, else
+// against seq - 1 (every counter for seq 0).
+inline CounterMask ChangedSinceLatch(const Indicator& ind, uint64_t baseline, uint64_t seq)
+{
+    if (seq == 0)
+        return kAllCounters;
+    const uint64_t from = (baseline != 0 && baseline < seq) ? baseline : seq - 1;
+    return Changed(ind.StampOf(from), ind.StampOf(seq));
+}
 
 // Ancient seqs are valid for single-frame use only: never temporal.
 inline bool TemporalValid(const Indicator& ind, uint64_t seqA, uint64_t seqB, CounterMask m)

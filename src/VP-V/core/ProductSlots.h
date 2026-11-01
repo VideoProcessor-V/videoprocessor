@@ -857,8 +857,21 @@ struct ProductFrameResult {
 // of recent frames (span checks), and the per-frame resolve that seals and live-fills in order.
 class SlotTable {
 public:
+    // Fails closed: a node with a look-ahead input (lead > 0) makes the table INVALID (Valid() false, Error()
+    // says why, Count() 0) until the K1 seal rule for lead ancestors exists (Published with stamps ==
+    // StampOf(N+k)). Today every ancestor is computed as seq - lag and a lead would be silently ignored.
     explicit SlotTable(const Graph& g) : nodes_(g.nodes)
     {
+        for (const Node& n : nodes_)
+            for (size_t k = 0; k < n.inputCount; ++k)
+                if (n.inputs[k].lead > 0) {
+                    valid_ = false;
+                    error_ = "look-ahead input needs the K1 seal rule";
+                }
+        if (!valid_) {
+            nodes_.clear();
+            return;
+        }
         sets_.reserve(nodes_.size());
         size_t maxRing = 1;
         for (const Node& n : nodes_) {
@@ -877,6 +890,8 @@ public:
     SlotTable(const SlotTable&) = delete;
     SlotTable& operator=(const SlotTable&) = delete;
 
+    bool Valid() const { return valid_; }
+    const char* Error() const { return error_; }
     size_t Count() const { return sets_.size(); }
     const Node& NodeAt(size_t i) const { return nodes_[i]; }
     SlotSet& At(size_t i) { return *sets_[i]; }
@@ -1091,6 +1106,8 @@ private:
         return SealReason::Accepted;
     }
 
+    bool valid_ = true;
+    const char* error_ = "";
     std::vector<Node> nodes_;
     std::vector<SlotSet*> sets_;
     std::vector<SealedRecord> sealed_;

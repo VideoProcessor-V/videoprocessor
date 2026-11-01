@@ -611,7 +611,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
   </ItemGroup>
-  <Import Project="$(MSBuildThisFileDirectory)..\VP-V\build\VideoProcessor-Lib.items.props" Condition="Exists('$(MSBuildThisFileDirectory)..\VP-V\build\VideoProcessor-Lib.items.props')" />
+  <Import Project="$(MSBuildThisFileDirectory)..\VP-V\build\$(MSBuildProjectName).items.props" Condition="Exists('$(MSBuildThisFileDirectory)..\VP-V\build\$(MSBuildProjectName).items.props')" />  <!-- VPV-HOOK -->
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

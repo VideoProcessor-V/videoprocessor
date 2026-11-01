@@ -78,11 +78,60 @@ namespace CameraModel
 		// on the early-exit path the type may also step ONE down when the higher type does not earn its
 		// parameters. The fitter has no runtime caller yet, so no released behaviour changes.
 		bool stepDownOnEarlyExit = true;
+		// Robustness fixes (2026-11-01; the fitter still has no runtime caller). inlierShareLo / Hi: the trusted
+		// share of vectors the camera must explain for the inlier-share signal to start (0) and to be full (1).
+		// Phase 1 used 0.4 / 0.9, which made any scene with many movers (a crowd under a pan, ~half the
+		// vectors on the background) "no dominant motion" whatever the margin over the next motion; dominance
+		// against a competing motion is the ambiguity signal's job.
+		double inlierShareLo = 0.25, inlierShareHi = 0.55;
+		// true: the temporal consistency signal and filter use a noise floor of one vector precision (the
+		// similarity rates' translation, and scale / angle at a quarter of the picture diagonal). false = the
+		// phase-1 relative-only noise model, under which near-zero components (scale, angle, a slow pan) made
+		// the signal 0 on almost every real pair.
+		bool temporalNoiseFloor = true;
+		// true: an Ambiguous or InverseMismatch record's confidence is halved and scaled by how far its signal fell
+		// below the gate, so a failed verdict is never usable (< 0.5). false = phase 1 (the reason was set, but
+		// the logistic confidence could still exceed 0.5, e.g. a 60 % moving object over a 40 % background).
+		bool verdictGatesConfidence = true;
+		// Two-layer foreground fix (K10a). false = records are byte-identical to the single-layer fitter (every
+		// two-layer path sits behind this). true: the best competing motion is kept as a second layer; the camera
+		// layer is the one with the best support x continuity x border evidence x area history; a foreground that
+		// fills the middle of the picture without touching the border is never reported as a confident camera.
+		bool twoLayer = false;
+		// Border ring width per side = max(1 block, round(fraction * picture extent in blocks)).
+		double borderRingFraction = 0.125;
+		// Layer change hysteresis: M = max(1, lround(layerSwapSeconds / pairSeconds)) pairs (derived from the measured
+		// pair duration, never a frame-rate literal).
+		double layerSwapSeconds = 0.25;
+		// A single layer whose border ratio (its ring share / the ring's share of all samples) is below this, that
+		// explains less than 3/4 of the vectors and has no agreeing continuity reference, is reported Ambiguous.
+		double borderVetoRatio = 0.35;
+		// Lower bound of the continuity factor of a layer (a fully discontinuous layer keeps this much score).
+		double continuityFloor = 0.2;
+		// A competing layer exists when its support is at least this share of the camera layer's.
+		double competitorMinRatio = 0.15;
 		Clock clock = nullptr;
 	};
 
 	// A Fitter is NOT thread-safe: one Fitter per motion worker, Fit() called from one thread at a time. The
 	// records it returns are immutable and may be shared across threads (BlockData via shared_ptr<const>).
+	// Two-layer state (reset with the fitter; flash leaves it untouched). Defined here so Fitter can hold it.
+	struct TwoLayerState
+	{
+		bool haveRef = false;                       // last usable camera layer (the continuity reference)
+		Params ref;
+		double refSeconds = 0;
+		double refShare = 0;
+		int age = 0;                                // pairs since the reference was refreshed
+		int holdCount = 0;                          // consecutive pairs the reference layer was kept
+		int swapAge = -1;                           // pairs since the last accepted swap (-1 = none)
+		bool haveObj = false;                       // object layer of the previous pair
+		Params obj;
+		double objSeconds = 0;
+		uint8_t objId = 0;
+		uint8_t nextId = 1;
+	};
+
 	class Fitter
 	{
 	public:
@@ -103,6 +152,7 @@ namespace CameraModel
 		uint64_t m_resyncGeneration = 0, m_rebaseGeneration = 0;
 		bool m_haveGenerations = false;
 		bool m_seedPending = false;                 // previous call published a post-cut seed
+		TwoLayerState m_tl;
 		// Reused buffers (cost only; never part of the output). Fresh multi-100 KB allocations every pair
 		// cost hundreds of first-touch page faults, so the per-block record and the per-pair scratch are
 		// recycled. A pooled BlockData is rewritten only when no record still holds it (use_count == 1);

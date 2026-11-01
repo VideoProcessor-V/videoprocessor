@@ -75,6 +75,25 @@ namespace VpStatusText
 		return text;
 	}
 
+	// Renderer side: the lines VP-V extensions give through the generic status hook
+	// (RendererExtension StatusKind::Lines, one "<key>=<text>" each) into the matching lines. Only
+	// the resync keys are taken; `widen` converts the narrow text exactly as the renderer converts its
+	// own lines (CString), so nothing is re-encoded. A key given twice keeps the first.
+	template <class Char, class Widen>
+	void SetExtensionLines(RendererLines<Char>& lines, const std::vector<std::string>& extension, Widen widen)
+	{
+		for (const std::string& entry : extension)
+		{
+			const size_t eq = entry.find('=');
+			if (eq == std::string::npos)
+				continue;
+			const std::string key = entry.substr(0, eq);
+			Line<Char>* line = key == kResync ? &lines.resync : key == kResyncEvents ? &lines.resyncEvents : nullptr;
+			if (line && !line->known)
+				line->Set(true, widen(entry.substr(eq + 1)));
+		}
+	}
+
 	// GUI side: the lines back; unknown keys (a newer renderer) are ignored.
 	template <class Char>
 	RendererLines<Char> ReadRendererModule(const std::basic_string<Char>& text)

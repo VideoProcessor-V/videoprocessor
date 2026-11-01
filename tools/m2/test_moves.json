@@ -171,6 +171,7 @@
   "src/VideoProcessor-Test/ShortcutDefaultsTests.cpp": "src/VP-V/tests/suite/ShortcutDefaultsTests.cpp",
   "src/VideoProcessor-Test/SigmaDeltaBiasProbe.h": "src/VP-V/tests/support/SigmaDeltaBiasProbe.h",
   "src/VideoProcessor-Test/SourceResolutionDetectorTests.cpp": "src/VP-V/tests/suite/SourceResolutionDetectorTests.cpp",
+  "src/VideoProcessor-Test/SourceResolutionFrameBoundTests.cpp": "src/VP-V/tests/suite/SourceResolutionFrameBoundTests.cpp",
   "src/VideoProcessor-Test/SourceResolutionLatchTests.cpp": "src/VP-V/tests/suite/SourceResolutionLatchTests.cpp",
   "src/VideoProcessor-Test/StateReportTests.cpp": "src/VP-V/tests/suite/StateReportTests.cpp",
   "src/VideoProcessor-Test/SubtitleTextTestPattern.h": "src/VP-V/tests/support/SubtitleTextTestPattern.h",

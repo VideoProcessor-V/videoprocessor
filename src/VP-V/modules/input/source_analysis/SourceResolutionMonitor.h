@@ -1,6 +1,8 @@
 #pragma once
 
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
+#include <VP-V/modules/input/source_analysis/identity/SourceIdPipeline.h>
+#include <VP-V/modules/input/source_analysis/identity/SourceQualityView.h>
 
 #include <libplacebo/renderer.h>
 
@@ -55,6 +57,11 @@ namespace SourceResolutionMonitor
 		int kernel = -1;
 		int kernelVotes = 0, kernelAgree = 0;
 		double bitrateQuality = 1.0;   // spec 1b (smoothed)
+		// Source identity (doc 61, SID-2): the FRAME-level quality of the last analysed frame (not smoothed; 1 until the
+		// source_id_consensus worker runs - then the resolution term min the relative noise term, identity/FrameQuality.h)
+		// and its raw noise sigma (8-bit units, -1 = none).
+		double frameQuality = 1.0;
+		double frameNoise = -1.0;
 		double effectiveBits = 0.0;    // spec 2d (0 = unknown)
 		double coherenceV = 0.0, coherenceH = 0.0;
 		unsigned long long frames = 0, cuts = 0, discontinuities = 0;
@@ -73,6 +80,16 @@ namespace SourceResolutionMonitor
 		double analyseMs = 0.0;        // worker time for the last frame
 		int tiles = 0;                 // tiles in the last analysed frame (8 = base grid, 16 = dense)
 		std::string error;             // the last GPU-side failure (empty when none)
+		// Frame-bound mode (SetFrameBound; all zero / false when off): shown by Describe().
+		bool frameBound = false;
+		unsigned frameLead = 0;               // D
+		unsigned heldNow = 0;                 // analysed results waiting for the render sequence to reach them
+		unsigned long long heldDropped = 0;   // dropped oldest because the held queue was full
+		unsigned long long heldStale = 0;     // held / queued results of an era before a Discontinuity()
+		unsigned long long jobsDropped = 0;   // queued jobs dropped oldest because the job queue was full
+		unsigned long long waitsMissed = 0;   // NoteWaitMissed(): a deterministic wait ran out
+		unsigned long long clockStepsBack = 0; // source seconds that went backwards (clamped)
+		unsigned long long submitSkipped = 0; // frame-bound: frames not copied because both readback slots were still in flight
 	};
 
 	class Monitor
@@ -85,7 +102,8 @@ namespace SourceResolutionMonitor
 
 		// Render thread, every rendered source frame: submits a tile copy when
 		// the interval has passed and a slot is free, and collects finished
-		// copies for the worker. `seconds`: a monotonic clock.
+		// copies for the worker. `seconds`: a monotonic clock (frame-bound: the frame's source
+		// seconds; a backward step is clamped and counted).
 		void Frame(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, uint64_t sourceSequence, double seconds);
 		// Why a source cannot be measured ("" = it can). Dolby Vision (2026-10-17):
 		// measured on its decoded intensity (I) plane, planes[0] (12-bit IPT-PQ,
@@ -93,6 +111,67 @@ namespace SourceResolutionMonitor
 		static std::string NotReadReason(const pl_frame& source);
 		// Any thread: what came before no longer describes the source.
 		void Discontinuity(const char* cause);
+
+		// ---- Frame-bound mode (resync Q3; default off = the behaviour before, exactly) ----
+		// On: the decision for render sequence s (AutoFactor / AutoFactors renderSequence) uses only
+		// the analysis of frames <= s - D (D = leadFramesD). Results of later frames are HELD, not
+		// applied, until s reaches them: the held queue is a fixed ring of kHeldCap results; on
+		// overflow the oldest is dropped and counted (Snapshot::heldDropped, Describe). Jobs reach
+		// the worker through a FIFO of kJobQueueCap (no replace-the-pending-copy; overflow drops the
+		// oldest, counted). Every time input is SOURCE time passed by the caller (frame timestamp /
+		// measured rate; never a constant): Frame(), AutoFactor(s), AutoTransition and the job
+		// `seconds`; the fade, the engage wait, the pan clock, the 5 s disengage and the failure
+		// pause run on it (a negative value is just a time; the steady clock is never read). Source
+		// time that steps backwards (a seek) is clamped, not subtracted: durations never underflow
+		// (counted). The look-ahead consumers (AheadWorker's verdict, the per-frame judge evidence)
+		// are not used: they depend on analysis of frames after s. A Discontinuity() takes effect at
+		// the render thread's next Frame / AutoFactor and must be called from that thread, in frame
+		// order. Call SetFrameBound at set-up (render thread); it starts a fresh era.
+		void SetFrameBound(bool on, uint32_t leadFramesD);
+		bool FrameBound() const { return frameBound.load(std::memory_order_acquire); }
+		uint32_t FrameLead() const { return frameLead.load(std::memory_order_acquire); }
+		// True when the analysis through s - D is available, or nothing is in flight (copied, queued
+		// or being analysed) for frames <= s - D. Any thread (a short leaf lock). For the lane's
+		// bounded deterministic wait; never a reason to present late.
+		bool ReadyFor(uint64_t s) const;
+		// The source sequence of the last analysed frame (0 = none yet). Any thread.
+		uint64_t AnalysedThrough() const { return analysedThrough.load(std::memory_order_acquire); }
+		// The lane's wait for ReadyFor ran out: counted, shown by Describe.
+		void NoteWaitMissed() { waitsMissed.fetch_add(1, std::memory_order_relaxed); }
+		unsigned long long WaitsMissed() const { return waitsMissed.load(std::memory_order_relaxed); }
+		unsigned long long HeldDropped() const { return heldDropped.load(std::memory_order_relaxed); }
+		unsigned long long ClockStepsBack() const { return clockStepsBack.load(std::memory_order_relaxed); }
+		unsigned long long JobsDroppedCount() const { return jobsDropped.load(std::memory_order_relaxed); }
+		// Frame-bound: frames whose tile copy was skipped because the readback slot was still in
+		// flight (GPU timing decides it: such a run is not reproducible). Counted, shown by Describe.
+		unsigned long long SubmitSkipped() const { return submitSkipped.load(std::memory_order_relaxed); }
+		// Frame-bound: true while nothing timing-dependent has dropped or skipped an analysis in this
+		// era (no job-queue drop, no held-queue drop, no skipped copy, no missed bounded wait). The
+		// counters restart with each SetFrameBound era. When
+		// false the decisions of this run are NOT reproducible; Describe says so (no silent loss).
+		bool Reproducible() const
+		{
+			return jobsDropped.load(std::memory_order_relaxed) == 0 && heldDropped.load(std::memory_order_relaxed) == 0 &&
+				submitSkipped.load(std::memory_order_relaxed) == 0 && waitsMissed.load(std::memory_order_relaxed) == 0;
+		}
+		// Tests: a copy of tiles handed to the REAL worker thread through the same bounded FIFO the
+		// readback collector uses (overflow drops the oldest, counted); the frame is in flight until
+		// the worker has analysed it.
+		void SubmitJobForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight,
+			int baseTiles, int tileSize, double blackLevel, uint64_t sequence);
+		size_t HeldCount() const { std::lock_guard<std::mutex> lock(mutex); return heldCount; }
+		// Tests: register a frame as copied and in flight (what Frame() does), so ReadyFor sees it
+		// until AnalyseTilesForTest (given its sequence) completes it.
+		void NoteSubmittedForTest(uint64_t sequence) { NoteSubmitted(sequence); }
+		// Tests: the frame-bound front part of Frame() (source clock + release of the held results),
+		// which Frame() runs before any GPU work: lets the renderer's call order
+		// Discontinuity -> Frame -> AutoFactor(s) be tested without a GPU.
+		void FrameFrontForTest(uint64_t sourceSequence, double seconds) { if (frameBound.load(std::memory_order_acquire)) BeginBoundFrame(sourceSequence, seconds); }
+		// Tests: one analysed result as the worker would publish it (frame-bound: held for `sequence`;
+		// off: published at once), and the frame is no longer in flight.
+		void InjectResultForTest(const Snapshot& result, uint64_t sequence);
+		static constexpr size_t kHeldCap = 16;
+		static constexpr size_t kJobQueueCap = 4;
 		// R3 (resync_event on), render thread before Frame(): the Indicator's stream key of the frame
 		// (its era and FULL count; 0 = not driven, the default). Tile copies and worker jobs carry the
 		// key they were taken under; one taken under another key (a frame of the source before a FULL
@@ -102,6 +181,30 @@ namespace SourceResolutionMonitor
 		// Copies and jobs dropped that way (diagnostics, tests).
 		unsigned long long StaleJobsDropped() const { return staleJobsDropped.load(std::memory_order_relaxed); }
 		Snapshot Read() const;
+
+		// ---- source identity (doc 61, P14; VP-V module identity/) -------------------------------------------------------
+		// source_id_consensus (default OFF: nothing below runs, every value is byte-identical to before). On: the analysis
+		// worker feeds the consensus with every analysed frame and publishes the held-state record; AutoFactor(s) then ask the
+		// record which source it is (the latched axes) and engage only on a latched field, falling back to the classical
+		// value - visibly - while the record is absent or stale.
+		void SetSourceIdConsensus(bool on);
+		bool SourceIdConsensus() const { return sourceIdOn.load(std::memory_order_acquire); }
+		void SetSourceIdNotice(bool on) { sourceIdNotice.store(on, std::memory_order_release); sourceIdNoticeDirty.store(true, std::memory_order_release); }
+		// Any thread: the newest record (seq <= `sequence`; 0 = newest). False: none published yet.
+		bool SourceIdRecord(SourceIdentity::Record& out, uint64_t sequence = 0) const { return sourceId.Held().ReadLatest(sequence, out); }
+		// Render thread (or any): the shared read API for every quality consumer, on the monitor's frame clock (`seconds`,
+		// < 0 = the steady clock). Consensus off: exactly Snapshot.bitrateQuality. Absent / stale: the classical value with an
+		// engaged fallback decision (SourceIdentity::View).
+		SourceIdentity::QualityView QualityView(double seconds = -1.0) const;
+		// The Ctrl+I / Config status line ("Source identity: ...").
+		std::string SourceIdStatusLine(double seconds = -1.0) const;
+		// The auto-engage gate's own fallback: engaged while consensus is on but the record could not be used.
+		FallbackCatalog::Decision SourceIdGateFallback() const;
+		// Render thread: apply the consensus's re-base requests to the Indicator port, each generation exactly once.
+		int ApplySourceIdRebase(SourceIdentity::IndicatorPort& port);
+		// Render thread: true once per firing of the one-time "stream quality dropped" notice (`seen`: the caller's serial).
+		bool TakeSourceIdNotice(uint64_t& seen, std::string& text) const { return sourceId.TakeNotice(seen, text); }
+		unsigned long long SourceIdEvents() const { return sourceIdEvents.load(std::memory_order_relaxed); }
 		// Bug hunt 34 item 1: true while the tiles are read back without waiting (D3D11 staging);
 		// false before the first frame, on another API, or when the staging could not be made on
 		// D3D11 (then libplacebo's readback, which waits there: the renderer can show it).
@@ -276,7 +379,33 @@ namespace SourceResolutionMonitor
 			double blackLevel = 64.0 / 1023.0;
 			uint64_t sequence = 0;       // the source frame copied (h3-latch: look-ahead evidence)
 			uint64_t streamKey = 0;      // R3: SetStreamKey's value when the copy was taken
+			uint64_t epoch = 0;          // frame-bound: Discontinuity() count when the copy was taken
 		};
+		// Frame-bound: one analysed result waiting for its render sequence.
+		struct Held
+		{
+			uint64_t sequence = 0, epoch = 0;
+			Snapshot snap;
+			bool dense = false;   // denseGrid after this analysis
+			bool reset = false;   // the analysis itself reset the evidence (gap / tracker discontinuity)
+		};
+		// Source time made monotone: a backward step keeps the mapped time still and re-bases (counted).
+		struct SourceClock
+		{
+			bool have = false;
+			double lastRaw = 0.0, lastMapped = 0.0;
+			double Advance(double raw, std::atomic<unsigned long long>& stepsBack);
+			double Peek(double raw) const;
+			void Reset() { have = false; }
+		};
+		double DecisionNow(double seconds);                 // render thread (AutoFactor / AutoFactors)
+		double DecisionPeek(double seconds) const;          // AutoTransition
+		bool ReleaseHeldFor(uint64_t sequence);             // true: a reset to apply
+		double BeginBoundFrame(uint64_t sourceSequence, double seconds);   // Frame()'s frame-bound front part
+		void PushHeld(const Job& j, bool reset);            // with `mutex` held
+		void ResetVisible();                                // with `mutex` held
+		void NoteSubmitted(uint64_t sequence);
+		void FinishSequence(uint64_t sequence);
 		void Worker();
 		void Fail(const char* what, double seconds);
 		void Record(const std::string& row);   // with `mutex` held
@@ -285,6 +414,21 @@ namespace SourceResolutionMonitor
 		void ResetEvidence(const char* cause);   // with `mutex` held: back to native, all evidence cleared
 		std::string gapReason;                   // the last gap's text (ResetEvidence keeps a pointer)
 		double lastAnalysedSeconds = -1.0;
+		// Frame-bound state.
+		std::atomic<bool> frameBound{ false };
+		std::atomic<uint32_t> frameLead{ 0 };
+		std::atomic<uint64_t> epoch{ 0 };
+		std::atomic<const char*> lastRenderCause{ nullptr };
+		std::atomic<uint64_t> analysedThrough{ 0 };
+		std::atomic<unsigned long long> waitsMissed{ 0 }, heldDropped{ 0 }, heldStale{ 0 }, jobsDropped{ 0 }, clockStepsBack{ 0 }, submitSkipped{ 0 };
+		std::atomic<bool> denseGridApplied{ false };
+		Held held[kHeldCap];            // ring, guarded by `mutex`
+		size_t heldHead = 0, heldCount = 0;
+		Snapshot visible;               // what Read() returns when frame-bound (guarded by `mutex`)
+		std::deque<Job> jobQueue;       // frame-bound FIFO to the worker (guarded by `mutex`)
+		mutable std::mutex outMutex;    // leaf lock: the frames in flight
+		std::deque<uint64_t> outstanding;
+		SourceClock submitClock, decideClock;   // render thread
 
 		// GPU side (render thread).
 		pl_gpu gpu = nullptr;
@@ -317,6 +461,20 @@ namespace SourceResolutionMonitor
 		std::atomic<uint64_t> streamKey{ 0 };                       // R3 (SetStreamKey)
 		std::atomic<unsigned long long> staleJobsDropped{ 0 };
 		SourceResolution::Tracker tracker;
+		// Source identity (worker side; Held() is the only part other threads read).
+		SourceIdentity::Pipeline sourceId;
+		std::atomic<bool> sourceIdOn{ false };
+		std::atomic<bool> sourceIdNotice{ true };
+		std::atomic<bool> sourceIdNoticeDirty{ false };
+		std::atomic<bool> sourceIdResetPending{ false };
+		std::atomic<unsigned long long> sourceIdEvents{ 0 };
+		unsigned long long sourceIdLastCuts = 0;
+		SourceIdentity::RebaseApplier sourceIdRebase;   // render thread
+		mutable std::mutex gateMutex;
+		FallbackCatalog::Decision gateDecision;         // written by AutoFactor(s), read for the status
+		// The gate's view of the record at `now` (render thread): fresh = usable; ratios are the latched axes (1 = native).
+		struct IdGate { bool on = false, fresh = false; double ratioH = 1.0, ratioV = 1.0; bool latchedH = false, latchedV = false; };
+		IdGate SourceIdGate(double now);
 		std::deque<std::pair<double, double>> live;          // (seconds, ratio) of informative frames
 		std::deque<std::pair<double, double>> coherence;     // (seconds, min axis coherence)
 		unsigned long long lastCuts = 0;
@@ -369,6 +527,7 @@ namespace SourceResolutionMonitor
 
 		// Auto (render thread).
 		std::atomic<bool> autoReset{ false };
+		std::atomic<bool> pendingBoundReset{ false };   // frame-bound: a reset Frame() consumed, for AutoFactor to apply
 		double autoApplied = 1.0, autoPending = 1.0;
 		std::atomic<double> autoAppliedShared{ 1.0 };
 		std::atomic<bool> textGuard{ true };

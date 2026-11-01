@@ -32,6 +32,9 @@ texture), and to narrow the matcher's search.
 | `CameraModelGpu.h/.cpp` | GPU label pass: constants, GLSL, CPU float mirror, `LabelPass` (libplacebo) |
 | `CameraAccessorGlsl.h` | GLSL `camera_field_vector` + `AccessorConstants` |
 | `CameraGuidanceGpu.h` | `GuidanceFrame` (plan -> matcher) + the guided pass GLSL (narrow window / E1 skip), wired in `consumers/DejudderWarp.cpp` |
+| `CameraProducts.h` | camera link layer (K0): `CameraConsumer`, `CameraDemandInput`, `DeclareCameraConsumers` (registry consumers of P7 camera fit / P8 camera labels / P9 camera smoothed, ids 0x0200 + index) |
+| `CameraReaders.h` | camera link layer (K0): one Indicator reader policy table (full/continuity/settings/graph Reset, timing Relatch, rebase Ignore), `RegisterCameraReader`, binders for `Fitter`, `TemporalFilter`, `BlendState`, `PairSpansSlip` |
+| `CameraStoreAdapter.h` | camera link layer (K0): `CameraSealToStore`, the ONLY non-test caller of `PublishCamera` (a record the seal rejected is skipped and counted) |
 | `../../core/FrameAnalysisStore.h` | `kCamera` group, `Record::camera`, `PublishCamera` |
 
 ## Inputs and outputs
@@ -176,8 +179,72 @@ field scan and the fit on ~1300 samples. Buffers: the per-block record (`BlockDa
 small pool when no record still holds it, and the per-pair scratch is reused, so steady state allocates
 nothing large (no first-touch page faults).
 
+## Robustness (2026-11-01)
+On real sequences (crowd_run under a pan, ~half the vectors on movers) the RANSAC fit was right but the confidence
+could never reach 0.5. Three `Config` fixes (the fitter still has no runtime caller, so no released behaviour changes):
+1. `inlierShareLo / Hi` = 0.25 / 0.55 (phase 1: 0.4 / 0.9). The inlier-share signal asked that the camera explain
+   most vectors; with many movers that is "no dominant motion" whatever the margin. Dominance against a competing
+   motion is the ambiguity signal's job.
+2. `temporalNoiseFloor` = true. `TemporalFilter::Consistency / Update` take an optional `floorSigma[4]` (one vector
+   precision per component: translation `precision / dt`, scale and angle at a quarter of the picture diagonal). Null
+   = phase-1 relative-only noise, under which near-zero components (scale, angle, a slow pan) made the signal ~0.
+3. `verdictGatesConfidence` = true. An Ambiguous / InverseMismatch record's confidence is multiplied by
+   `0.5 * clamp(signal / gate)`, so a failed verdict is never usable (< 0.5).
+Phase-1 behaviour = `{inlierShareLo 0.4, inlierShareHi 0.9, temporalNoiseFloor false, verdictGatesConfidence false}`
+(`camera_eval --phase1`). Tests: `CrowdUnderPanIsDominant` (also asserts the phase-1 failure), `NoDominantMotionRandomField`,
+`TwoLayerHalfAndHalfIsAmbiguous`, `ObjectOverBackgroundSixtyForty`, `NewDefaultsAreDeterministic`, and the temporal
+noise-floor tests.
+
+Measured with `tools/camera_eval` (`run_eval.py --match`; usable = valid and confidence >= 0.5; real truth = master
+DIS/NVOF fits that agree, region metric described in `tools/camera_eval/xcheck_real.py`):
+
+| | phase 1 | new |
+|---|---|---|
+| synthetic usable: crowd_pan / crowd_shake / crowd_static | 0 / 0 / 0 | 1.00 / 0.31 / 1.00 |
+| synthetic WRONG-confident (9 scenarios, 39 pairs each) | 0 | 0 |
+| real usable, mean over tiers and sources: crowd / tos / sol / boat | 0.00 / 0.26 / 0.20 / 0.35 | 0.91 / 0.98 / 0.81 / 0.59 |
+| real WRONG-confident, region metric (confident pairs judged; p90 block error over the true-camera blocks > max(1 px, 10 % of the p90 truth magnitude); all tiers incl. master) | 5 of 459 | 16 of 1857 (crowd 2/515, boat 14/323, sol 0, tos 0); over the fit's own camera labels 4 and 13; the crowd tiers plus boat/sol/tos `_low` alone: 5 of 741 vs 1 of 103 |
+| real WRONG-confident, extrapolated corner error (includes non-camera regions; mostly measures affine / homography extrapolation into runners and other movers) | 19 of 409 | 114 of 1660 |
+| matcher evaluations guided / full (coded `*_1080p_low` NVOF, 40 pairs): crowd / tos / sol / boat | 1.00 / 0.98 / 1.00 / 0.88 | 0.68 / 0.39 / 0.85 / 0.84 |
+| matcher EPE vs reference (all blocks), guided vs full | unchanged | unchanged or slightly better |
+
+Tools and metric definitions: `tools/camera_eval/README.md`.
+
+Known limitation: a coherent object covering about 50 % of the picture, over a background of incoherent or garbage vectors,
+is indistinguishable from a pan behind a crowd. It is fitted as the dominant motion, by definition. The ambiguity signal only
+catches a coherent competitor with at least about a third of the camera's support (test
+`CoherentObjectOverRandomBackgroundIsFittedAsDominant`).
+
 ## Tests
 `../tests/Camera*Tests.cpp`, CPU tier, all synthetic: geometry, temporal / objects / residual,
 accessor + hints, store record, fitter behaviour (pan, zoom, rotation, perspective, noise, objects,
 tiny movers, sky, cut, fade, flash, parallax, crowds, logos, credits, letterbox, shake, pulldown,
 inverse, determinism, generations, deadline, 8K) and a cost report (`CAMERA_COST ...` lines).
+
+## Two-layer (K10a)
+`Config::twoLayer` (default **off**; off = records byte-identical to the single-layer fitter). A large foreground that
+fills the middle of the picture (a boat, a vehicle, a tracked subject) can out-vote the background and be reported as a
+confident camera. With `twoLayer` the best competing motion found by the ambiguity search is kept as a second layer and
+the camera layer is the one with the best `support x continuity x border evidence x area history`:
+- **Border evidence**: share of a layer's inlier weight inside a ring of `borderRingFraction` (12.5 %) of the active
+  picture, divided by the ring's share of all samples (~1 = background-like, ~0 = centred foreground); factor 0.25..1.
+- **Continuity**: closeness (corner displacement) of the layer to the last usable camera layer, time-scaled to the pair;
+  factor `continuityFloor`..1. **Area history**: factor 0.5..1 from the change of the layer's inlier share.
+- With two layers the ambiguity signal is the **score ratio** (same 0.35 gate): a near tie stays Ambiguous (visible,
+  never used). With one layer that touches no border (ratio < `borderVetoRatio`), explains < 75 % of the vectors and has
+  no agreeing continuity reference, the record is Ambiguous with `ForegroundSuspect`.
+- **Hysteresis**: when the new winner is not continuous with the reference but the reference layer is still present, the
+  reference layer is kept for `M-1` pairs (`M = max(1, round(layerSwapSeconds / pairSeconds))`, derived from the measured
+  pair duration), then the change is accepted (`Swapped`, `layerRisk` 1 decaying linearly to 0 over `M` pairs, confidence
+  scaled by `1 - 0.5*layerRisk`). If the reference layer has vanished, the new layer is accepted at once.
+- Record fields: `layerFlags` (1 ran, 2 competitor, 4 camera is the RANSAC runner-up, 8 foreground suspect, 16 swap
+  pending, 32 swapped, 64 continuity used), `objectLayer` (the other layer; persistent id 1..255), `layerRisk`, and the
+  `Signals::border` / `continuity` diagnostics. State (reference, object id, hold count) resets with the fitter, on a cut
+  and on a generation reset; a flash leaves it untouched. Evaluation: `tools/camera_eval` (`--two-layer`).
+
+## Link layer (K1 / K2 / K4, module side)
+`link/` holds the fit runner (P7 producer, worker thread, readback ring, pool), the P8 producer / fill / per-consumer binding and
+the guided-matching scheduler, governor and `p7g_camera_guide` product. All of it is inert until the H1 adapter registers it; see
+`link/README.md` (wiring table, fill rule, private-history justification). The verdict gate (D-K4) is `CameraModel::ReasonUsable`:
+one set shared by `BlendState::ForcesZero` and the guidance gate (Ok, PostCutSeeded, FlashBridged); Ambiguous, InverseMismatch,
+Degenerate, TooFewSamples and LowConfidence records are published for diagnostics and never used.

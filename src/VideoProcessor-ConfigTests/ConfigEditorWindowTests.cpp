@@ -7,6 +7,8 @@
 // VP-V section tests (VpvConfigTests.cpp), handed the suite's helpers.
 int RunVpvConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
     const std::function<void(bool, const char*)>& require, const std::function<void(ConfigEditorWindow&)>& save);
+int RunHookLayerConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
+    const std::function<void(bool, const char*)>& require, const std::function<void(ConfigEditorWindow&)>& save);   // VPV-HOOK
 #include "../VideoProcessor-Config/ToneChartPanel.h"
 #include <QElapsedTimer>
 #include <QImage>
@@ -10826,7 +10828,7 @@ static std::set<std::string> RendererValidatedKeys()
     std::ifstream file(path + "VideoProcessor-Lib\\RendererProfileConfig.h", std::ios::binary);
     const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     std::set<std::string> keys;
-    for (const char* function : { "inline bool ValidateProfileSetting(", "inline bool ValidateBaseSetting(" })
+    for (const char* function : { "inline bool ValidateProfileSetting(", "inline bool ValidateProfileSettingBuiltin(", "inline bool ValidateBaseSetting(" })
     {
         const size_t start = text.find(function);
         if (start == std::string::npos) continue;
@@ -12539,6 +12541,7 @@ int main(int argc, char** argv)
     failures += run("hunt 3: legacy queue fold targets [queue]", testHunt3LegacyQueueFoldTargetsQueueSection);
     failures += run("hunt 3: remote discard folds like a load", testHunt3RemoteDiscardFoldsLikeALoad);
     failures += RunVpvConfigTests(run, require, save);   // VP-V section (VpvConfigTests.cpp)
+    failures += RunHookLayerConfigTests(run, require, save);   // VPV-HOOK generic hook layer (HookLayerConfigTests.cpp)
     if ((!testNameFilter.isEmpty() || !testNameMatches.isEmpty()) && selectedTestsRun == 0)
         return 2;
     return failures == 0 ? 0 : 1;

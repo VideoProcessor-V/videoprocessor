@@ -26,18 +26,8 @@ enum class AnalysisLumaFormat
 	PackedDolbyVision422,
 };
 
-// VP-V DIV-AN-01 (either/or; merge 2026-10-31): the limited (studio) analysis code domain.
-// With AnalysisLumaSource::limitedDomain set (the VP-V pathway: renderer key
-// source_coding_fixes=on), every format's Sample() emits luma black 64 / white 940,
-// chroma 512 +/- 448: full-range RGB (8-bit and 12-bit RGB, the DV SDR-tunnel RGB) is
-// mapped Y = 64 + 876/1023 * Y', C = 512 + 896/1023 * C' (and BT.601-tagged RGB uses
-// BT.601 coefficients); full-range YCbCr planes are mapped when fullRangeYuv is set.
-// Without it (the default, the Original pathway) Sample() is Bill's v1.4.02 sampler
-// exactly: delivered codes, with AnalysisLumaRange describing their levels.
-// Consumers ask the source which domain its codes are in (CodesFullRange / CodesRange /
-// MapsToLimitedDomain) and never apply a second full-range interpretation.
-// kAnalysisLumaSampleLimitedDomain is the VP-V DEFAULT (source_coding_fixes defaults on),
-// kept for consumers that only run in the VP-V pathway; per-source queries are authoritative.
+// VP-V DIV-AN-01 (either/or): the limited (studio) analysis code domain; the explanation lives in
+// VP-V/modules/input/source_analysis/AnalysisLumaDomain.h. VP-V default on, Original = Bill.
 constexpr bool kAnalysisLumaSampleLimitedDomain = true;
 
 // Encoded sample levels, independent of the format-specific 10-bit sampler.
@@ -138,22 +128,11 @@ struct AnalysisLumaSource
 
 	bool IsValid() const;
 	bool Sample(int x, int y, AnalysisLumaSample& result) const;
-	// VP-V DIV-AN-01 domain queries (one authority per source; Bill's model when the
-	// VP-V fields are clear):
-	// - FullRangeLevels: the source's encoded levels are full range (8/12-bit RGB, the
-	//   SDR tunnel unless tagged Limited, YCbCr flagged fullRangeYuv or tagged Full).
-	// - MapsToLimitedDomain: Sample() mapped those full-range levels to studio codes.
-	// - CodesFullRange: Sample() codes are full-range levels (black 0, white 1023).
-	// - CodesRange: AnalysisLumaRange of the codes Sample() returns: `range`, except
-	//   Limited where the VP-V map produced them (Bill's range-aware consumers use it so
-	//   a mapped source is not interpreted as full range a second time).
+	// VP-V DIV-AN-01 domain queries (documented and defined in AnalysisLumaDomain.h):
 	bool FullRangeLevels() const;
 	bool MapsToLimitedDomain() const;
-	bool CodesFullRange() const { return FullRangeLevels() && !MapsToLimitedDomain(); }
-	AnalysisLumaRange CodesRange() const
-	{
-		return MapsToLimitedDomain() ? AnalysisLumaRange::Limited : range;
-	}
+	bool CodesFullRange() const;
+	AnalysisLumaRange CodesRange() const;
 	// WP-23: Sample(x, y).luma, read from the published shared plane when
 	// there is one (same value, same failures).
 	bool SampleLuma(int x, int y, uint16_t& luma) const;
@@ -189,3 +168,4 @@ private:
 };
 
 const char* AnalysisLumaFormatName(const AnalysisLumaSource& source);
+#include "../VP-V/modules/input/source_analysis/AnalysisLumaDomain.h" // VPV-HOOK

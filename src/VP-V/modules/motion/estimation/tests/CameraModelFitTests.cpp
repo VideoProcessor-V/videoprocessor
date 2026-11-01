@@ -76,6 +76,23 @@ namespace VideoProcessorTest
 				&& a.blocks->objectId == b.blocks->objectId && a.blocks->tinyMover == b.blocks->tinyMover;
 		}
 
+		// Field-by-field, bitwise per double: Params and Signals have padding bytes, so no memcmp over the structs.
+		bool SameParams(const Params& a, const Params& b)
+		{
+			return a.type == b.type && std::memcmp(a.h, b.h, sizeof(a.h)) == 0;
+		}
+
+		bool SameBits(double a, double b) { return std::memcmp(&a, &b, sizeof(double)) == 0; }
+
+		bool SameSignals(const Signals& a, const Signals& b)
+		{
+			return SameBits(a.inlierShare, b.inlierShare) && SameBits(a.precision, b.precision) && SameBits(a.coverage, b.coverage)
+				&& SameBits(a.temporal, b.temporal) && SameBits(a.conditioning, b.conditioning) && SameBits(a.engineAgreement, b.engineAgreement)
+				&& SameBits(a.inverse, b.inverse) && SameBits(a.ambiguity, b.ambiguity) && SameBits(a.logit, b.logit)
+				&& a.haveBackward == b.haveBackward && a.haveEngine == b.haveEngine
+				&& SameBits(a.border, b.border) && SameBits(a.continuity, b.continuity);
+		}
+
 		int64_t g_fakeNow = 0;
 		int64_t FakeClock() { g_fakeNow += 1000000; return g_fakeNow; }
 	}
@@ -265,12 +282,12 @@ namespace VideoProcessorTest
 			const CameraMotion rf = withFlash.Fit(fl);
 			Require(rf.reason == Reason::Flash && !rf.valid && rf.confidence == 0, Fmt("flash", rf));
 			Require(withFlash.Previous() != nullptr && withFlash.Previous()->seq == beforePrev.seq
-				&& std::memcmp(&withFlash.Previous()->params, &beforePrev.params, sizeof(Params)) == 0
+				&& SameParams(withFlash.Previous()->params, beforePrev.params)
 				&& withFlash.Previous()->confidence == beforePrev.confidence, "flash changed Previous()");
 			const CameraMotion r1 = withFlash.Fit(a2.Input(kPairSeconds, 7));
 			const CameraMotion r2 = without.Fit(a2.Input(kPairSeconds, 7));
-			Require(std::memcmp(&r1.params, &r2.params, sizeof(Params)) == 0 && r1.confidence == r2.confidence
-				&& r1.hypotheses == r2.hypotheses && std::memcmp(&r1.signals, &r2.signals, sizeof(Signals)) == 0 && SameBlocks(r1, r2),
+			Require(SameParams(r1.params, r2.params) && r1.confidence == r2.confidence
+				&& r1.hypotheses == r2.hypotheses && SameSignals(r1.signals, r2.signals) && SameBlocks(r1, r2),
 				Fmt("after flash", r1) + " vs " + Fmt("no flash", r2));
 		}
 
@@ -303,10 +320,20 @@ namespace VideoProcessorTest
 			Require(r.confidence < 0.5, Fmt("parallax", r));
 		}
 
-		TEST_METHOD(CrowdLowConfidence)
+		// The owner requires a pan behind many scattered movers to be FOUND (phase 1 called it "no dominant motion").
+		static Config Phase1Config()
+		{
+			Config c;
+			c.inlierShareLo = 0.4; c.inlierShareHi = 0.9;
+			c.temporalNoiseFloor = false; c.verdictGatesConfidence = false;
+			return c;
+		}
+
+		TEST_METHOD(CrowdUnderPanIsDominant)
 		{
 			Field f(Grid4K());
-			f.FromModel(Pan4K());
+			const Params truth = Pan4K();
+			f.FromModel(truth);
 			SplitMix64 rng(41);
 			int scattered = 0;
 			// Many small (2x2 block) movers, each with its own vector, on about 45% of the picture.
@@ -320,7 +347,99 @@ namespace VideoProcessorTest
 			f.AddNoise(0.05, 42);
 			Fitter fitter;
 			const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5));
-			Require(r.confidence < 0.5, Fmt("crowd", r) + " scattered=" + std::to_string(scattered));
+			const std::string msg = Fmt("crowd", r) + " scattered=" + std::to_string(scattered);
+			Require(r.valid && r.reason == Reason::Ok && r.confidence >= 0.5, msg);
+			Require(ModelError(r, truth, f.picture) < kTol, msg + " err=" + std::to_string(ModelError(r, truth, f.picture)));
+			// Documents the phase-1 failure: the same field was "no dominant motion" (confidence could not reach 0.5).
+			Fitter old(Phase1Config());
+			const CameraMotion r1 = old.Fit(f.Input(kPairSeconds, 5));
+			Require(r1.confidence < 0.5, Fmt("crowd phase1", r1) + " scattered=" + std::to_string(scattered));
+		}
+
+		TEST_METHOD(NoDominantMotionRandomField)
+		{
+			Field f(Grid4K());
+			SplitMix64 rng(51);
+			for (size_t i = 0; i < f.Count(); ++i)
+			{
+				f.fx[i] = static_cast<float>((rng.Unit() - 0.5) * 80);
+				f.fy[i] = static_cast<float>((rng.Unit() - 0.5) * 80);
+			}
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5));
+			Require(r.confidence < 0.5, Fmt("random field", r));
+		}
+
+		TEST_METHOD(TwoLayerHalfAndHalfIsAmbiguous)
+		{
+			Field f(Grid4K());
+			f.FromModel(PanModel(12, 0));
+			f.AddObject(f.gridW / 2, 0, f.gridW - f.gridW / 2, f.gridH, -12, 3);
+			f.AddNoise(0.05, 52);
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5));
+			Require(r.confidence < 0.5 && r.reason == Reason::Ambiguous, Fmt("two layers 50/50", r));
+		}
+
+		TEST_METHOD(ObjectOverBackgroundSixtyForty)
+		{
+			Field f(Grid4K());
+			f.FromModel(PanModel(12, 0));
+			const int x0 = static_cast<int>(0.4 * f.gridW);
+			f.AddObject(x0, 0, f.gridW - x0, f.gridH, -30, 8);
+			f.AddNoise(0.05, 53);
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5));
+			Require(r.confidence < 0.5 && r.reason == Reason::Ambiguous, Fmt("60% object over 40% pan", r));
+			// Is the verdict gate what keeps it below 0.5? (documentation: logged, not asserted either way)
+			Config noGate;
+			noGate.verdictGatesConfidence = false;
+			Fitter ungated(noGate);
+			const CameraMotion u = ungated.Fit(f.Input(kPairSeconds, 5));
+			Logger::WriteMessage((Fmt("without verdict gate", u)).c_str());
+			Require(u.confidence >= r.confidence, Fmt("gate must never raise confidence", u));
+		}
+
+		// Known limitation: a coherent object over ~50% of the picture, over a background of incoherent vectors, is
+		// indistinguishable from a pan behind a crowd: it IS the dominant motion. The ambiguity signal only catches a
+		// coherent competitor with at least about a third of the camera's support. The verdict is logged.
+		TEST_METHOD(CoherentObjectOverRandomBackgroundIsFittedAsDominant)
+		{
+			Field f(Grid4K());
+			SplitMix64 rng(71);
+			for (size_t i = 0; i < f.Count(); ++i)
+			{
+				f.fx[i] = static_cast<float>((rng.Unit() - 0.5) * 80);
+				f.fy[i] = static_cast<float>((rng.Unit() - 0.5) * 80);
+			}
+			const int x0 = f.gridW / 2;
+			f.AddObject(x0, 0, f.gridW - x0, f.gridH, -20, 6);
+			f.AddNoise(0.05, 72);
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5));
+			Logger::WriteMessage(Fmt("50% coherent object over random background", r).c_str());
+			Require(r.valid && std::fabs(r.params.h[2] + 20) < 1.0 && std::fabs(r.params.h[5] - 6) < 1.0, Fmt("the object's motion is the fitted model", r));
+			Require(r.reason == Reason::Ok && r.confidence >= 0.5, Fmt("documented limitation: confident", r));
+		}
+
+		TEST_METHOD(NewDefaultsAreDeterministic)
+		{
+			Field f(Grid4K());
+			f.FromModel(Pan4K());
+			SplitMix64 rng(61);
+			for (int y = 0; y + 1 < f.gridH; y += 2)
+				for (int x = 0; x + 1 < f.gridW; x += 2)
+					if (rng.Unit() < 0.45) f.AddObject(x, y, 2, 2, (rng.Unit() - 0.5) * 80, (rng.Unit() - 0.5) * 80);
+			f.AddNoise(0.05, 62);
+			Fitter f1, f2;
+			for (uint64_t i = 0; i < 4; ++i)
+			{
+				const CameraMotion a = f1.Fit(f.Input(kPairSeconds, 5 + i));
+				const CameraMotion b = f2.Fit(f.Input(kPairSeconds, 5 + i));
+				Require(SameParams(a.params, b.params), "params differ");
+				Require(a.confidence == b.confidence && a.reason == b.reason && a.valid == b.valid, "confidence / reason differ");
+				Require(SameSignals(a.signals, b.signals), "signals differ");
+			}
 		}
 
 		TEST_METHOD(ObjectFillingMostOfFrameIsAmbiguous)
@@ -497,9 +616,9 @@ namespace VideoProcessorTest
 			const PairInput in = f.Input(kPairSeconds, 5);
 			const CameraMotion a = f1.Fit(in);
 			const CameraMotion b = f2.Fit(in);
-			Require(std::memcmp(&a.params, &b.params, sizeof(Params)) == 0, "params differ");
+			Require(SameParams(a.params, b.params), "params differ");
 			Require(a.confidence == b.confidence && a.hypotheses == b.hypotheses && a.samples == b.samples && a.reason == b.reason, "scalars differ");
-			Require(std::memcmp(&a.signals, &b.signals, sizeof(Signals)) == 0, "signals differ");
+			Require(SameSignals(a.signals, b.signals), "signals differ");
 			Require(SameBlocks(a, b), "block data differ");
 			Require(a.objects.size() == b.objects.size(), "object count differs");
 			for (size_t i = 0; i < a.objects.size(); ++i)
@@ -717,6 +836,400 @@ namespace VideoProcessorTest
 				Field f = PairFor(i);
 				const CameraMotion r = again.Fit(f.Input(kPairSeconds, 5 + i));
 				Require(Snapshot(r) == first[static_cast<size_t>(i)], "refit differs at pair " + std::to_string(i));
+			}
+		}
+	};
+
+	// Two-layer foreground fix (K10a, Config::twoLayer). Every test states its Config explicitly.
+	TEST_CLASS(CameraTwoLayerTests)
+	{
+	public:
+		static Config TL() { Config c; c.twoLayer = true; return c; }
+
+		static void RandomField(Field& f, uint64_t seed, double amplitude)
+		{
+			SplitMix64 rng(seed);
+			for (size_t i = 0; i < f.Count(); ++i)
+			{
+				f.fx[i] = static_cast<float>((rng.Unit() - 0.5) * 2 * amplitude);
+				f.fy[i] = static_cast<float>((rng.Unit() - 0.5) * 2 * amplitude);
+			}
+		}
+
+		static std::string Flags(const CameraMotion& r)
+		{
+			return Describe(r) + " flags=" + std::to_string(static_cast<int>(r.layerFlags)) + " risk=" + std::to_string(r.layerRisk)
+				+ " obj=" + std::to_string(r.haveObjectLayer ? r.objectLayer.id : 0);
+		}
+
+		static double ObjectError(const CameraMotion& r, const Params& truth, const Rect& pic)
+		{
+			Params p;
+			p.type = r.objectLayer.type;
+			for (int i = 0; i < 9; ++i) p.h[i] = r.objectLayer.h[i];
+			return MaxCornerDifference(p, truth, pic);
+		}
+
+		// (a) twoLayer off keeps today's verdict on a coherent object over a random background (documented limitation);
+		// the original test CoherentObjectOverRandomBackgroundIsFittedAsDominant holds it. (b) The same field, twoLayer on:
+		// a right-half object touches three picture edges, so there is no border evidence against it. The verdict is logged.
+		TEST_METHOD(RightHalfObjectOverRandomBackgroundTwoLayerVerdictIsLogged)
+		{
+			Field f(Grid4K());
+			RandomField(f, 71, 40);
+			const int x0 = f.gridW / 2;
+			f.AddObject(x0, 0, f.gridW - x0, f.gridH, -20, 6);
+			f.AddNoise(0.05, 72);
+			Fitter off;
+			const CameraMotion ro = off.Fit(f.Input(kPairSeconds, 5));
+			Require(ro.layerFlags == 0 && !ro.haveObjectLayer && ro.layerRisk == 0, "twoLayer off: no layer fields " + Flags(ro));
+			Fitter on(TL());
+			const CameraMotion r = on.Fit(f.Input(kPairSeconds, 5));
+			Logger::WriteMessage(("right-half object over random background, twoLayer on: " + Flags(r)).c_str());
+			Require((r.layerFlags & 1) != 0, "the two-layer path ran " + Flags(r));
+			// Known limitation (no border evidence, no camera in the field): the object is still reported as dominant. The
+			// two-layer path must never be MORE confident than today.
+			Require(r.confidence <= ro.confidence + 1e-12, "no more lenient than off: " + Flags(r) + " vs " + Flags(ro));
+		}
+
+		// (c) A centred object (~50 % of the picture, away from the border) over a random background: the border evidence
+		// makes the verdict Ambiguous, never usable, and the record says why (ForegroundSuspect).
+		TEST_METHOD(CentredObjectOverRandomBackgroundIsForegroundSuspect)
+		{
+			Field f(Grid4K());
+			RandomField(f, 71, 40);
+			f.AddObject(36, 19, 168, 97, -20, 6);   // 70 % x 72 % of the grid, inside the border ring
+			f.AddNoise(0.05, 73);
+			Fitter fitter(TL());
+			const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5));
+			Require(r.reason == Reason::Ambiguous && r.confidence < 0.5, "centred object: " + Flags(r));
+			Require((r.layerFlags & 8) != 0, "ForegroundSuspect flag: " + Flags(r));
+			Require(r.haveObjectLayer && r.objectLayer.id >= 1, "the suspect layer is reported as the object layer: " + Flags(r));
+			Require(r.signals.border < 0.35, "border signal " + std::to_string(r.signals.border));
+			Fitter off;
+			const CameraMotion ro = off.Fit(f.Input(kPairSeconds, 5));
+			Logger::WriteMessage(("same field, twoLayer off: " + Flags(ro)).c_str());
+		}
+
+		// (d) A centred object over a pan background with 40 % of the background random: the object is the RANSAC dominant
+		// motion but the camera is the pan (the layer touching the border).
+		TEST_METHOD(CentredObjectOverPanWithRandomPartKeepsThePanAsCamera)
+		{
+			const Params pan = PanModel(12, -3);
+			Field f(Grid4K());
+			f.FromModel(pan);
+			SplitMix64 rng(81);
+			for (int y = 0; y < f.gridH; ++y)
+				for (int x = 0; x < f.gridW; ++x)
+					if (rng.Unit() < 0.4)
+					{
+						f.fx[f.Index(x, y)] = static_cast<float>((rng.Unit() - 0.5) * 80);
+						f.fy[f.Index(x, y)] = static_cast<float>((rng.Unit() - 0.5) * 80);
+					}
+			f.AddObject(36, 19, 168, 97, -20, 6);
+			f.AddNoise(0.05, 82);
+			Fitter fitter(TL());
+			const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5));
+			Require(r.valid && ModelError(r, pan, f.picture) < kTol, "camera is the pan: " + Flags(r) + " err=" + std::to_string(ModelError(r, pan, f.picture)));
+			Require((r.layerFlags & 4) != 0, "camera is the RANSAC runner-up: " + Flags(r));
+			Require(r.haveObjectLayer && ObjectError(r, PanModel(-20, 6), f.picture) < 2e-3, "object layer is the object motion: " + Flags(r));
+			Fitter off;
+			const CameraMotion ro = off.Fit(f.Input(kPairSeconds, 5));
+			Logger::WriteMessage(("same field, twoLayer off: " + Flags(ro) + " err=" + std::to_string(ModelError(ro, pan, f.picture))).c_str());
+		}
+
+		// A centred coherent boat over water (small random vectors plus a weak drift): never a usable fit.
+		TEST_METHOD(BoatLikeForegroundOverWaterIsNeverUsable)
+		{
+			for (uint64_t seed = 0; seed < 4; ++seed)
+			{
+				Field f(Grid4K());
+				RandomField(f, 90 + seed, 3.0);
+				for (size_t i = 0; i < f.Count(); ++i) { f.fx[i] += 0.3f; }
+				f.AddObject(78, 44, 84, 47, 4, -1);     // ~12 % of the grid, centred
+				f.AddNoise(0.05, 95 + seed);
+				Fitter fitter(TL());
+				const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5 + seed));
+				Require(!(r.valid && r.confidence >= 0.5), "boat over water must not be usable: " + Flags(r));
+			}
+		}
+
+		// The camera follows a nearly static subject: the subject (120 x 108 of 240 x 135 blocks = 40 %, centred) is the minority layer, the panning
+		// background is the camera.
+		TEST_METHOD(TrackedSubjectPanningBackground)
+		{
+			const Params pan = PanModel(-12, 2);
+			Field f(Grid4K());
+			f.FromModel(pan);
+			f.AddObject(60, 14, 120, 108, 0, 0);
+			f.AddNoise(0.05, 101);
+			Fitter fitter(TL());
+			const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5));
+			Require(r.valid && ModelError(r, pan, f.picture) < kTol, "camera is the pan: " + Flags(r));
+			Require(r.haveObjectLayer && ObjectError(r, PanModel(0, 0), f.picture) < 2e-3, "object layer is the static subject: " + Flags(r));
+			// 60/40 stays Ambiguous exactly as with twoLayer off: continuity and border evidence choose the layer, they never
+			// make a record confident.
+			Fitter off;
+			const CameraMotion ro = off.Fit(f.Input(kPairSeconds, 5));
+			Require(r.confidence <= ro.confidence + 1e-12, "no more lenient than off: " + Flags(r) + " vs " + Flags(ro));
+		}
+
+		// An object enters from the right edge and grows to ~55 % of the picture over a pan: the camera stays the pan.
+		TEST_METHOD(ObjectEntersFromEdgeCameraStaysThePan)
+		{
+			const Params pan = PanModel(12, -3);
+			Fitter fitter(TL());
+			for (int i = 0; i < 14; ++i)
+			{
+				Field f(Grid4K());
+				f.FromModel(pan);
+				const int w = std::min(static_cast<int>(0.55 * f.gridW), 4 * i * f.gridW / 100 * 2);
+				if (w > 0) f.AddObject(f.gridW - w, 4, w, f.gridH - 8, -30, 8);
+				f.AddNoise(0.05, 110 + i);
+				const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5 + i));
+				const double e = ModelError(r, pan, f.picture);
+				Logger::WriteMessage(("enter pair " + std::to_string(i) + " w=" + std::to_string(w) + ": " + Flags(r) + " err=" + std::to_string(e)).c_str());
+				Require(r.valid && e < kTol, "pair " + std::to_string(i) + ": camera must stay the pan: " + Flags(r) + " err=" + std::to_string(e));
+			}
+		}
+
+		// Sequence P (pan) 80 % / Q (-12, 3) 20 %, then Q 85 % / P 15 %: Q now wins the score but is not continuous with the
+		// reference, P still is. P is held for M-1 pairs, Q is accepted at pair M (flags 32, layerRisk 1, decaying to 0 over M pairs).
+		static void SwapHysteresisAt(double pairSeconds, uint64_t seqBase)
+		{
+			const Params P = PanModel(12, 0), Q = PanModel(-12, 3);
+			const int M = std::max(1, static_cast<int>(std::lround(Config().layerSwapSeconds / pairSeconds)));
+			Fitter fitter(TL());
+			auto fieldPQ = [&](int pFraction100, uint64_t seed)
+			{
+				Field f(Grid4K());
+				f.FromModel(P);
+				const int qw = f.gridW * (100 - pFraction100) / 100;
+				f.AddObject(f.gridW - qw, 0, qw, f.gridH, -12, 3);
+				f.AddNoise(0.05, seed);
+				return f;
+			};
+			uint64_t seq = seqBase;
+			for (int i = 0; i < 3; ++i)
+			{
+				Field f = fieldPQ(80, 120 + i);
+				const CameraMotion r = fitter.Fit(f.Input(pairSeconds, seq++));
+				Require(r.valid && r.reason == Reason::Ok && r.confidence >= 0.5 && ModelError(r, P, f.picture) < kTol, "establish P: " + Flags(r));
+			}
+			double prevRisk = 2;
+			for (int i = 1; i <= 2 * M + 2; ++i)
+			{
+				Field f = fieldPQ(15, 130 + i);
+				const CameraMotion r = fitter.Fit(f.Input(pairSeconds, seq++));
+				const std::string tag = "M=" + std::to_string(M) + " pair " + std::to_string(i) + ": " + Flags(r);
+				Logger::WriteMessage(tag.c_str());
+				if (i < M)
+				{
+					Require(ModelError(r, P, f.picture) < kTol, "held on P " + tag);
+					Require((r.layerFlags & 16) != 0 && (r.layerFlags & 32) == 0, "SwapPending " + tag);
+				}
+				else if (i == M)
+				{
+					Require(ModelError(r, Q, f.picture) < kTol, "accepted Q " + tag);
+					Require((r.layerFlags & 32) != 0 && (r.layerFlags & 16) == 0 && r.layerRisk == 1.0, "Swapped, layerRisk 1 " + tag);
+					prevRisk = r.layerRisk;
+				}
+				else
+				{
+					Require(ModelError(r, Q, f.picture) < kTol, "stays Q " + tag);
+					Require((r.layerFlags & 32) == 0, "swap reported once " + tag);
+					if (i - M < M)
+						Require(r.layerRisk < prevRisk && r.layerRisk > 0, "risk decays " + tag);
+					else
+						Require(r.layerRisk == 0, "risk gone " + tag);
+					prevRisk = r.layerRisk;
+				}
+			}
+		}
+
+		TEST_METHOD(SwapHysteresisAt24PairsPerSecond) { SwapHysteresisAt(1.0 / 24, 200); }
+		TEST_METHOD(SwapHysteresisAt60PairsPerSecond) { SwapHysteresisAt(1.0 / 60, 300); }
+
+		// A single layer that changes its motion (a whip pan) is accepted at once: no hold, no risk.
+		TEST_METHOD(WhipPanSingleLayerAcceptedAtOnce)
+		{
+			Fitter fitter(TL());
+			const Params slow = PanModel(8, 0), fast = PanModel(70, -20);
+			for (int i = 0; i < 4; ++i)
+			{
+				Field f(Grid4K());
+				f.FromModel(slow);
+				f.AddNoise(0.05, 140 + i);
+				const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5 + i));
+				Require(r.valid && r.confidence >= 0.5, "establish: " + Flags(r));
+			}
+			Field w(Grid4K());
+			w.FromModel(fast);
+			w.AddNoise(0.05, 150);
+			const CameraMotion r = fitter.Fit(w.Input(kPairSeconds, 20));
+			Require(r.valid && ModelError(r, fast, w.picture) < kTol, "whip pan fitted at once: " + Flags(r));
+			Require((r.layerFlags & 16) == 0 && r.layerRisk == 0, "no hold, no risk: " + Flags(r));
+		}
+
+		// Two layers present, the reference layer vanishes (both layers change motion): the new layer is accepted at once.
+		TEST_METHOD(WhipPanTwoLayersReferenceVanishesAcceptedAtOnce)
+		{
+			Fitter fitter(TL());
+			const Params P = PanModel(12, 0), P2 = PanModel(60, -15);
+			for (int i = 0; i < 3; ++i)
+			{
+				Field f(Grid4K());
+				f.FromModel(P);
+				const int qw = f.gridW * 20 / 100;
+				f.AddObject(f.gridW - qw, 0, qw, f.gridH, -12, 3);
+				f.AddNoise(0.05, 160 + i);
+				const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5 + i));
+				Require(r.valid && r.confidence >= 0.5, "establish: " + Flags(r));
+			}
+			Field f(Grid4K());
+			f.FromModel(P2);
+			const int qw = f.gridW * 20 / 100;
+			f.AddObject(f.gridW - qw, 0, qw, f.gridH, -40, 20);
+			f.AddNoise(0.05, 170);
+			const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 20));
+			Require(ModelError(r, P2, f.picture) < kTol, "new layer accepted at once: " + Flags(r));
+			Require((r.layerFlags & 32) != 0 && (r.layerFlags & 16) == 0, "Swapped, not held: " + Flags(r));
+		}
+
+		// A cut clears the two-layer state (reference, hold count, risk), also with a queued next pair for the post-cut seed.
+		TEST_METHOD(CutClearsTwoLayerState)
+		{
+			const Params P = PanModel(12, 0);
+			auto fieldPQ = [&](int pPercent, uint64_t seed)
+			{
+				Field f(Grid4K());
+				f.FromModel(P);
+				const int qw = f.gridW * (100 - pPercent) / 100;
+				f.AddObject(f.gridW - qw, 0, qw, f.gridH, -12, 3);
+				f.AddNoise(0.05, seed);
+				return f;
+			};
+			Fitter fitter(TL());
+			uint64_t seq = 5;
+			for (int i = 0; i < 3; ++i)
+				fitter.Fit(fieldPQ(80, 180 + i).Input(kPairSeconds, seq++));
+			const CameraMotion held = fitter.Fit(fieldPQ(15, 190).Input(kPairSeconds, seq++));
+			Require((held.layerFlags & 16) != 0 && (held.layerFlags & 64) != 0, "hold in progress before the cut: " + Flags(held));
+			Field after = fieldPQ(15, 191);
+			PairInput cut = fieldPQ(15, 192).Input(kPairSeconds, seq++);
+			cut.cut = true;
+			const PairInput nextIn = after.Input(kPairSeconds, seq++);
+			cut.next = &nextIn;
+			const CameraMotion rc = fitter.Fit(cut);
+			Require(rc.reason == Reason::PostCutSeeded || rc.reason == Reason::Cut, "cut record: " + Flags(rc));
+			const CameraMotion r = fitter.Fit(after.Input(kPairSeconds, seq++));
+			Require((r.layerFlags & (16 | 64)) == 0 && r.layerRisk == 0, "no hold, no continuity reference after the cut: " + Flags(r));
+		}
+
+		static std::vector<CameraMotion> Sequence(const Config& c)
+		{
+			Fitter fitter(c);
+			std::vector<CameraMotion> out;
+			for (int i = 0; i < 8; ++i)
+			{
+				Field f(Grid4K());
+				f.FromModel(PanModel(10.0 + 0.7 * i, -4.0 + 0.3 * i));
+				f.AddNoise(0.05, 400 + i);
+				if (i % 2 == 1) f.AddObject(100 + i, 60, 6, 4, -20, 15);
+				if (i % 3 == 0) f.AddLogo(10, 8, 4, 4, false);
+				if (i >= 4) f.AddObject(36, 19, 100, 60, -25, 7);
+				out.push_back(fitter.Fit(f.Input(kPairSeconds, 5 + i)));
+			}
+			return out;
+		}
+
+		static bool SameRecord(const CameraMotion& a, const CameraMotion& b)
+		{
+			return a.valid == b.valid && a.reason == b.reason && SameBits(a.confidence, b.confidence) && SameParams(a.params, b.params)
+				&& SameSignals(a.signals, b.signals) && SameBlocks(a, b) && a.layerFlags == b.layerFlags
+				&& a.haveObjectLayer == b.haveObjectLayer && a.objectLayer.id == b.objectLayer.id && SameBits(a.layerRisk, b.layerRisk)
+				&& SameBits(a.objectLayer.h[2], b.objectLayer.h[2]) && SameBits(a.objectLayer.h[5], b.objectLayer.h[5]);
+		}
+
+		// Identity with the pre-change fitter is shown by the camf comparison of camera_eval vs camera_eval_base.exe (real clips,
+		// bit-identical .camf); this test shows that, with twoLayer off, the other two-layer constants change nothing and that
+		// the layer fields stay empty.
+		// twoLayer = false: the records equal the default-configuration records bit for bit, whatever the other two-layer
+		// constants are, and carry no layer fields.
+		TEST_METHOD(TwoLayerOffIsByteIdentical)
+		{
+			Config odd;
+			odd.twoLayer = false;
+			odd.borderRingFraction = 0.3; odd.layerSwapSeconds = 2; odd.borderVetoRatio = 0.9; odd.continuityFloor = 0.9; odd.competitorMinRatio = 0.9;
+			const std::vector<CameraMotion> a = Sequence(Config()), b = Sequence(odd);
+			for (size_t i = 0; i < a.size(); ++i)
+			{
+				Require(SameRecord(a[i], b[i]), "record " + std::to_string(i) + " differs");
+				Require(a[i].layerFlags == 0 && !a[i].haveObjectLayer && a[i].layerRisk == 0, "no layer fields when off: " + Flags(a[i]));
+				Require(a[i].signals.border == 0.5 && a[i].signals.continuity == 0.5, "neutral diagnostics when off");
+			}
+		}
+
+		TEST_METHOD(TwoLayerIsDeterministic)
+		{
+			const std::vector<CameraMotion> a = Sequence(TL()), b = Sequence(TL());
+			for (size_t i = 0; i < a.size(); ++i)
+				Require(SameRecord(a[i], b[i]), "record " + std::to_string(i) + " differs between two runs");
+		}
+
+		// The verdicts of the existing single-layer tests survive twoLayer on.
+		TEST_METHOD(ExistingVerdictsSurviveTwoLayerOn)
+		{
+			{
+				Field f(Grid4K());
+				f.FromModel(PanModel(12, 0));
+				f.AddObject(f.gridW / 2, 0, f.gridW - f.gridW / 2, f.gridH, -12, 3);
+				f.AddNoise(0.05, 52);
+				Fitter fitter(TL());
+				const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5));
+				Require(r.confidence < 0.5 && r.reason == Reason::Ambiguous, Fmt("50/50", r));
+			}
+			{
+				Field f(Grid4K());
+				f.FromModel(PanModel(12, 0));
+				const int x0 = static_cast<int>(0.4 * f.gridW);
+				f.AddObject(x0, 0, f.gridW - x0, f.gridH, -30, 8);
+				f.AddNoise(0.05, 53);
+				Fitter fitter(TL());
+				const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5));
+				Require(r.confidence < 0.5 && r.reason == Reason::Ambiguous, Fmt("60/40", r));
+			}
+			{
+				Field f(Grid4K());
+				f.FromModel(PanModel(12, 0));
+				f.AddObject(static_cast<int>(0.3 * f.gridW), 0, f.gridW - static_cast<int>(0.3 * f.gridW), f.gridH, -30, 8);
+				f.AddNoise(0.05, 43);
+				Fitter fitter(TL());
+				const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5));
+				Require(r.confidence < 0.5, Fmt("70% object", r));
+			}
+			{
+				const Params truth = Pan4K();
+				Field f(Grid4K());
+				f.FromModel(truth);
+				SplitMix64 rng(41);
+				for (int y = 0; y + 1 < f.gridH; y += 2)
+					for (int x = 0; x + 1 < f.gridW; x += 2)
+						if (rng.Unit() < 0.45) f.AddObject(x, y, 2, 2, (rng.Unit() - 0.5) * 80, (rng.Unit() - 0.5) * 80);
+				f.AddNoise(0.05, 42);
+				Fitter fitter(TL());
+				const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5));
+				Require(r.valid && r.reason == Reason::Ok && r.confidence >= 0.5 && ModelError(r, truth, f.picture) < kTol, Fmt("crowd under pan", r));
+			}
+			{
+				const Params truth = Pan4K();
+				Field bars(Grid4K());
+				bars.FromModel(truth);
+				bars.AddNoise(0.05, 53);
+				bars.AddBars(17, 17);
+				Fitter fitter(TL());
+				const CameraMotion rb = fitter.Fit(bars.Input(kPairSeconds, 5));
+				Require(rb.valid && rb.confidence >= 0.5 && ModelError(rb, truth, bars.picture) < kTol, Fmt("letterbox", rb));
 			}
 		}
 	};

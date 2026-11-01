@@ -23,4 +23,8 @@
       <ObjectFileName>$(IntDir)LedConnectionTestStandalone.obj</ObjectFileName>
     </ClCompile>
   </ItemGroup>
+  <!-- From the M2 hook layer (P0) -->
+  <ItemGroup>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\tests\hooks\HookLayerConfigTests.cpp" />
+  </ItemGroup>
 </Project>

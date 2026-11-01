@@ -601,5 +601,93 @@ namespace IndicatorTestsNs
 			Assert::AreEqual(0, violations.load());
 			Assert::IsTrue(ind.Total(kFull) + ind.Total(kContinuity) + ind.Total(kTiming) > 0);
 		}
+
+		TEST_METHOD(LastCauseInPicksTheHighestSerialAndExactCounterOnly)
+		{
+			Indicator ind(NextEra(), 64);
+			ind.Advance(kContinuity, Cause::MissedFrames, 10, 1, 3);
+			ind.Advance(kFull, Cause::RendererReset, 12);
+			ind.Advance(kContinuity, Cause::DriftDrop, 15, 2, 9);
+			ind.Advance(kContinuity, Cause::KeptRunHole, 50);   // outside the interval below
+			Cause cause = Cause::None;
+			uint8_t detail = 0;
+			Assert::IsTrue(ind.LastCauseIn(kContinuity, 0, 20, cause, &detail));
+			Assert::IsTrue(cause == Cause::DriftDrop);
+			Assert::AreEqual(uint8_t(9), detail);
+			// An exact counter only: the kFull event moves continuity but is not returned for it.
+			Assert::IsTrue(ind.LastCauseIn(kFull, 0, 20, cause));
+			Assert::IsTrue(cause == Cause::RendererReset);
+			Assert::IsFalse(ind.LastCauseIn(kTiming, 0, 20, cause));
+			Cause onlyFull = Cause::None;
+			Indicator second(NextEra(), 64);
+			second.Advance(kFull, Cause::LiveQueueReset, 5);
+			Assert::IsFalse(second.LastCauseIn(kContinuity, 0, 100, onlyFull));
+			Assert::IsTrue(onlyFull == Cause::None, L"cause untouched on false");
+		}
+
+		TEST_METHOD(LastCauseInIntervalIsExclusiveInclusiveAndEmptyOnesFail)
+		{
+			Indicator ind(NextEra(), 64);
+			ind.Advance(kContinuity, Cause::MissedFrames, 10);
+			ind.Advance(kContinuity, Cause::DriftDrop, 20);
+			Cause cause = Cause::None;
+			Assert::IsTrue(ind.LastCauseIn(kContinuity, 9, 10, cause));
+			Assert::IsTrue(cause == Cause::MissedFrames);
+			Assert::IsFalse(ind.LastCauseIn(kContinuity, 10, 19, cause), L"from is exclusive");
+			Assert::IsTrue(ind.LastCauseIn(kContinuity, 10, 20, cause), L"to is inclusive");
+			Assert::IsTrue(cause == Cause::DriftDrop);
+			Assert::IsFalse(ind.LastCauseIn(kContinuity, 20, 20, cause), L"empty interval");
+			Assert::IsFalse(ind.LastCauseIn(kContinuity, 30, 10, cause), L"reversed interval");
+			Assert::IsFalse(ind.LastCauseIn(kCounterCount, 0, 100, cause), L"out-of-range counter");
+		}
+
+		TEST_METHOD(LastCauseInIsFalseWhenTheIntervalIsOlderThanTheRing)
+		{
+			Indicator ind(NextEra(), 64);
+			for (uint64_t i = 1; i <= 200; ++i)
+				ind.Advance(kContinuity, Cause::MissedFrames, i);
+			Assert::IsTrue(ind.AncientBelow() > 0);
+			Cause cause = Cause::None;
+			// The interval starts below AncientBelow: events there may be folded away.
+			Assert::IsFalse(ind.LastCauseIn(kContinuity, 0, 200, cause));
+			// A recent interval is still answered.
+			const uint64_t from = ind.AncientBelow();
+			Assert::IsTrue(ind.LastCauseIn(kContinuity, from, 200, cause));
+			Assert::IsTrue(cause == Cause::MissedFrames);
+		}
+
+		TEST_METHOD(LastCauseInUnderAConcurrentWriterReturnsConsistentAnswers)
+		{
+			Indicator ind(NextEra(), 64);
+			std::atomic<bool> stop(false);
+			std::atomic<int> violations(0);
+			std::thread writer([&]() {
+				uint64_t seq = 1;
+				while (!stop.load()) {
+					ind.Advance(kContinuity, Cause::DriftDrop, seq, 0, 5);
+					ind.Advance(kTiming, Cause::RateStep, seq);
+					++seq;
+				}
+			});
+			std::thread reader([&]() {
+				for (int i = 0; i < 20000; ++i) {
+					Cause c = Cause::None;
+					uint8_t d = 0;
+					const uint64_t lo = ind.AncientBelow();
+					if (ind.LastCauseIn(kContinuity, lo, ~uint64_t(0), c, &d)) {
+						if (c != Cause::DriftDrop || d != 5)
+							violations.fetch_add(1);
+					}
+					if (ind.LastCauseIn(kTiming, 0, ~uint64_t(0), c)) {
+						if (c != Cause::RateStep)
+							violations.fetch_add(1);
+					}
+				}
+			});
+			reader.join();
+			stop.store(true);
+			writer.join();
+			Assert::AreEqual(0, violations.load());
+		}
 	};
 }

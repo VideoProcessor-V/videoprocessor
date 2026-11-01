@@ -4,6 +4,7 @@
 
 #include <vprenderer/GrainPreserve.h>
 #include <VP-V/modules/repair/deband/VpDebander.h>
+#include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
 
 #include <algorithm>
 #include <cmath>
@@ -89,15 +90,9 @@ namespace DetailPulse
 	constexpr double kMaxScale = 2.5;
 
 	inline double Scale(double planeLines) { return (std::min)(GrainPreserve::GrainScale(planeLines), kMaxScale); }
-	inline int FineRadius(double scale) { return static_cast<int>(std::ceil(3.0 * kSigmaFine * scale - 1e-9)); }
-	inline double FineWeight(int i, double scale)
-	{
-		const double s = kSigmaFine * scale;
-		const int r = FineRadius(scale);
-		double sum = 0.0;
-		for (int k = -r; k <= r; ++k) sum += std::exp(-0.5 * k * k / (s * s));
-		return std::exp(-0.5 * i * i / (s * s)) / sum;
-	}
+	// The fine band's Gaussian is the shared U2 law (VpUnit::BandFromBase): radius ceil(3 sigma - 1e-9), no minimum.
+	inline int FineRadius(double scale) { return VpUnit::BandFromBase::Radius(kSigmaFine * scale, 3.0, false, 1e-9); }
+	inline double FineWeight(int i, double scale) { return VpUnit::BandFromBase::Weight(i, kSigmaFine * scale, FineRadius(scale)); }
 	inline double WideSigma(double scale) { return kSigmaWide * scale; }
 	inline double ClampCap(double cap) { return (std::max)(kCapMin, (std::min)(kCapMax, cap)); }
 	inline double RateHz(double sourceHz) { return sourceHz > 0.0 ? sourceHz : kReferenceHz; }

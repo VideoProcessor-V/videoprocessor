@@ -1,9 +1,9 @@
 # Copyright(C) 2026 VP-V contributors
 # SPDX-License-Identifier: GPL-3.0-only
-"""Generates two headers for the light-level LUT tests (tests/ folder of the light_level module):
+"""Generates three headers for the light-level LUT tests (tests/ folder of the light_level module):
   LightLevelGolden.generated.h       tonemap_ref.SplineTM golden values (below)
-  LightLevelCrossCheck.generated.h   J, L, S, V (1024 codes each) and sdrCode (HdrToSdr cases only; the other kinds
-                                     use the input code) of light_level_ref.build_lut for the CASES list: settings
+  LightLevelCrossCheck.generated.h   J, L, S, V (1024 codes each), Sout (dsdrCode/dcode, all cases) and sdrCode (HdrToSdr cases
+                                     only; the other kinds use the input code) of light_level_ref.build_lut for the CASES list: settings
                                      as C++ config keys ("key=value;..."), kind, source/display peaks (see CASES).
 
 For source peaks 1000 / 4000 / 10000 nit, dst 100 nit, black 0 and the VP default ToneMappingTuning constants
@@ -29,6 +29,7 @@ OUT = os.path.normpath(os.path.join(
     HERE, "..", "..", "src", "VP-V", "modules", "input", "source_analysis", "light_level", "tests",
     "LightLevelGolden.generated.h"))
 OUT_CROSS = os.path.join(os.path.dirname(OUT), "LightLevelCrossCheck.generated.h")
+OUT_BLOCKS = os.path.join(os.path.dirname(OUT), "LightLevelBlocksGolden.generated.h")
 
 # name, kind (C++ Context::Kind index: 0 Sdr, 1 HdrPassthrough, 2 HdrToSdr), config keys, Context kwargs for python.
 # Sets: A = defaults (203 / 0, bt1886, display auto); B = target 203 / black 0.05; C = display 300 / 0.1 on top of B;
@@ -110,7 +111,7 @@ def write_cross():
         "namespace LightLevelCrossCheck",
         "{",
         "	struct Case { const char* name; const char* keys; int kind; double sourcePeak; double displayPeak;",
-        "		const double* L; const double* J; const double* S; const double* V; const double* sdrCode; };",
+        "		const double* L; const double* J; const double* S; const double* V; const double* sdrCode; const double* Sout; };",
     ]
     names = []
     for name, kind, keys, extra in CASES:
@@ -120,14 +121,15 @@ def write_cross():
         out += emit("kJ%s" % name, lut["J"])
         out += emit("kS%s" % name, lut["S"])
         out += emit("kV%s" % name, lut["V"])
+        out += emit("kO%s" % name, lut["sout"])
         if kind == 2:
             out += emit("kC%s" % name, lut["sdr_code"])
         else:
             assert np.array_equal(lut["sdr_code"], np.arange(1024, dtype=np.float64))
         kstr = ";".join("%s=%s" % (k, keys[k]) for k in sorted(keys))
-        names.append('		{ "%s", "%s", %d, %.1f, %.1f, kL%s, kJ%s, kS%s, kV%s, %s },'
+        names.append('		{ "%s", "%s", %d, %.1f, %.1f, kL%s, kJ%s, kS%s, kV%s, %s, kO%s },'
                      % (name, kstr, kind, extra.get("src_peak", 0.0), extra.get("display_peak", 0.0), name, name, name, name,
-                        "kC" + name if kind == 2 else "nullptr"))
+                        "kC" + name if kind == 2 else "nullptr", name))
     out.append("	constexpr int kCaseCount = %d;" % len(CASES))
     out.append("	constexpr Case kCases[kCaseCount] = {")
     out += names
@@ -138,7 +140,63 @@ def write_cross():
     print("wrote", OUT_CROSS)
 
 
+def emit_flat(name, values, per_line=6):
+    lines = ["	constexpr double %s[%d] = {" % (name, len(values))]
+    for i in range(0, len(values), per_line):
+        lines.append("		" + ", ".join("%.17g" % float(v) for v in values[i:i + per_line]) + ",")
+    lines.append("	};")
+    return lines
+
+
+def write_blocks():
+    """Golden for the P12 block law (LightLevelBlocks.h BlockOut<double>): a 19 x 11 grid with a bright/dark layout, bar rows
+    (coverage 0), a half-covered edge column, a block without a grain split, a pixel-level hole, an SDR context."""
+    gw, gh = 19, 11
+    ys, xs = np.mgrid[0:gh, 0:gw]
+    j_local = 0.22 + 0.30 * (xs / (gw - 1.0)) + 0.06 * np.sin(ys * 0.9 + xs * 0.35)
+    j_local[3:6, 12:16] += 0.12
+    cov = np.ones((gh, gw))
+    cov[0:2, :] = 0.0
+    cov[gh - 2:, :] = 0.0
+    cov[:, 0] = 0.5
+    cov[2, 5] = 0.4          # below the in-picture threshold: weighted, but no confidence
+    mean_y = 150.0 + 700.0 * (xs / (gw - 1.0)) + 20.0 * (ys % 3)
+    grain_n = np.full((gh, gw), 1.5)
+    grain_n[4, 7] = -1.0     # no split for this block
+    j_local = np.where(cov > 0, j_local, 0.0)      # P11 stats are 0 for blocks without picture
+    mean_y = np.where(cov > 0, mean_y, 0.0)
+    lut = llr.build_lut(llr.Context(kind="sdr"))
+    sigma, radius = 1.6875, 6
+    frame_j = float((cov * j_local).sum() / cov.sum())
+    reset = llr.block_product(j_local, cov, mean_y, grain_n >= 0, lut, sigma, radius, frame_j, 1.0, None, 0.0)
+    prev = 0.8 * reset[:, :, 0] + 0.03
+    alpha = 0.0540292
+    smooth = llr.block_product(j_local, cov, mean_y, grain_n >= 0, lut, sigma, radius, frame_j, 1.0, prev, alpha)
+    out = [
+        "// Copyright(C) 2026 VP-V contributors",
+        "// SPDX-License-Identifier: GPL-3.0-only",
+        "//",
+        "// GENERATED by tools/eval/gen_light_level_golden.py from tools/eval/light_level_ref.py (block_product). Do not edit.",
+        "// Inputs of the P12 block law on a %d x %d grid (row-major): J_local (P11 kMeanPq), coverage, mean code, grain level N" % (gw, gh),
+        "// (-1 = no split); outputs (J_surround, J_local, V, conf) for a reset frame and for a smoothed frame against kPrev.",
+        "#pragma once",
+        "",
+        "namespace LightLevelBlocksGolden",
+        "{",
+        "	constexpr int kGw = %d, kGh = %d, kRadius = %d;" % (gw, gh, radius),
+        "	constexpr double kSigma = %.17g, kFrameJ = %.17g, kAlpha = %.17g;" % (sigma, frame_j, alpha),
+    ]
+    out += emit_flat("kJLocal", j_local.ravel()) + emit_flat("kCoverage", cov.ravel()) + emit_flat("kMeanY", mean_y.ravel())
+    out += emit_flat("kGrainN", grain_n.ravel()) + emit_flat("kPrev", prev.ravel())
+    out += emit_flat("kReset", reset.ravel()) + emit_flat("kSmooth", smooth.ravel())
+    out.append("}")
+    with open(OUT_BLOCKS, "w", newline="\n") as f:
+        f.write("\n".join(out) + "\n")
+    print("wrote", OUT_BLOCKS)
+
+
 def main():
+    write_blocks()
     write_cross()
     d = T.VP_DEFAULTS
     out = [
@@ -167,6 +225,13 @@ def main():
         sdrs.append("kSdr%d" % p)
     out.append("\tconstexpr const double* kPq[kPeakCount] = { %s };" % ", ".join(pqs))
     out.append("\tconstexpr const double* kSdr[kPeakCount] = { %s };" % ", ".join(sdrs))
+    # Sout golden: light_level_ref.build_lut (Settings: dst 100 nit, black 0, bt1886, display auto), hdr_to_sdr, same peaks.
+    souts = []
+    for p in PEAKS:
+        lut = llr.build_lut(llr.Context(kind="hdr_to_sdr", target_white=DST_PEAK, src_peak=float(p)))
+        out += emit("kSout%d" % p, lut["sout"])
+        souts.append("kSout%d" % p)
+    out.append("	constexpr const double* kSout[kPeakCount] = { %s };" % ", ".join(souts))
     out.append("}")
     with open(OUT, "w", newline="\n") as f:
         f.write("\n".join(out) + "\n")

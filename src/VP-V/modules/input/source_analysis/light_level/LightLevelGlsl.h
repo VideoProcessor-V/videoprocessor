@@ -35,4 +35,24 @@ float light_level_j(float code10)
 }
 )GLSL";
 	}
+
+	// The output-slope table's fetch (dither need; a separate string so LightLevelGlsl() stays as shipped). Requires the
+	// sampler2D light_level_out (rgba32f, 1024 x 1, nearest): the PackOutputTexels() layout (sdrCode, Sout, 0, 0) per
+	// integer 10-bit code. Same index clamp and interpolation as light_level_lut_fetch.
+	inline const char* LightLevelOutGlsl()
+	{
+		return R"GLSL(
+vec4 light_level_out_fetch(float code10)
+{
+    float idx = clamp(code10, 0.0, 1023.0);
+    float f = floor(idx);
+    int i0 = int(f);
+    int i1 = min(i0 + 1, 1023);
+    float t = idx - f;
+    vec4 a = texelFetch(light_level_out, ivec2(i0, 0), 0);
+    vec4 b = texelFetch(light_level_out, ivec2(i1, 0), 0);
+    return a + (b - a) * t;
+}
+)GLSL";
+	}
 }

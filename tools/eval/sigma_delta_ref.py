@@ -23,7 +23,10 @@ def limits(color_bits, full):
 
 
 def residual_bound(amplitude):
-    return 0.5 + max(0.0, float(amplitude))
+    """0.5 + max(0, amplitude); amplitude may be a scalar (float result, unchanged) or an array (elementwise)."""
+    if np.ndim(amplitude) == 0:
+        return 0.5 + max(0.0, float(amplitude))
+    return 0.5 + np.maximum(0.0, np.asarray(amplitude, dtype=np.float64))
 
 
 def quantise_step(x, r, d, lim, amplitude):
@@ -49,15 +52,19 @@ def ign(px, py, frame):
 
 
 def dither(px, py, frame, amplitude):
-    """(Ign - 0.5) * 2 * amplitude, evaluated in double like the C++ test."""
-    return (ign(px, py, frame).astype(np.float64) - 0.5) * 2.0 * float(amplitude)
+    """(Ign - 0.5) * 2 * amplitude, evaluated in double like the C++ test. amplitude: scalar or an array
+    broadcastable to the pixel arrays (a per-pixel / per-frame amplitude map, e.g. noise_amplitude + dither-need extra)."""
+    amp = float(amplitude) if np.ndim(amplitude) == 0 else np.asarray(amplitude, dtype=np.float64)
+    return (ign(px, py, frame).astype(np.float64) - 0.5) * 2.0 * amp
 
 
 def quantise_sequence(frames_codes_float, bits=8, full=False, amplitude=0.15,
                       return_residual=False):
     """frames: (T,H,W) or (T,...) float output codes. Per-pixel residual is
     carried across frames; dither uses pixel (x,y)=(col,row) of the last two
-    axes (1-D/scalar frames use py=0). Returns integer codes (int32)."""
+    axes (1-D/scalar frames use py=0). Returns integer codes (int32).
+    amplitude: a scalar, or an array: with as many dims as `frames` it is per frame (and per pixel where its extent
+    is not 1; first axis T or 1), with one dim fewer it is a per-pixel map broadcast to the frame shape."""
     f = np.asarray(frames_codes_float, dtype=np.float64)
     lim = limits(bits, full)
     shp = f.shape[1:]
@@ -70,9 +77,12 @@ def quantise_sequence(frames_codes_float, bits=8, full=False, amplitude=0.15,
         py = np.zeros_like(px)
     r = np.zeros(shp, dtype=np.float64)
     out = np.empty(f.shape, dtype=np.int32)
+    amp_all = amplitude if np.ndim(amplitude) == 0 else np.asarray(amplitude, dtype=np.float64)
+    per_frame = np.ndim(amp_all) == f.ndim
     for t in range(f.shape[0]):
-        d = dither(px, py, t, amplitude)
-        k, r = quantise_step(f[t], r, d, lim, amplitude)
+        amp = (amp_all[t if amp_all.shape[0] > 1 else 0] if per_frame else amp_all)
+        d = dither(px, py, t, amp)
+        k, r = quantise_step(f[t], r, d, lim, amp)
         out[t] = k.astype(np.int32)
     return (out, r) if return_residual else out
 

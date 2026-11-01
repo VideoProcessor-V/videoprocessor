@@ -372,8 +372,9 @@ def update_props(plan, bill_path, new_path):
         norm = C.norm_item_text(text, proj_text, tmpl.start)
     else:
         norm = '<ClCompile Include="%s" />' % rel
+    n_existing = len(items)
     items.append(C.PropsItem("ClCompile", rel, norm, key))
-    plan[TEST_PROPS] = C.render_props(C.props_name(TEST_PROJECT), items, pnl or "\r\n")
+    plan[TEST_PROPS] = C.write_props(praw, C.props_name(TEST_PROJECT), items, n_existing, pnl or "\r\n")
 
 
 def update_renames(renames_new, plan):

@@ -32,8 +32,20 @@ VP owns two file pairs in this folder (moved by `git mv` in M2 step 10): `Source
 - `SourceResolutionMonitor.h`, class `SourceResolutionMonitor::Monitor` (needs libplacebo):
   - Render thread: `Frame(gpu, dispatch, source, sequence, seconds)`; `AutoFactor` / `AutoFactors` (the factor `source_resolution: auto` wants, per axis); `AutoTransition` (the crossfade weight and the factors being left); `LookAheadFrame` (queued frames ahead); `SetSelection`, `SetMotion`; the setters `SetTextGuard`, `SetMixedGuard`, `SetCodingFixes`, `SetLatchFixes`, `SetCutFixes`, `SetEngageTiming`, `SetEvidence`, `SetHistoryFolder`; `Release`.
   - Any thread: `Read()` (a `Snapshot` copy under the mutex), `Discontinuity(cause)`, `AutoRatio()`, `Selection()`, `Ahead()`.
-  - Tests: `AnalyseTilesForTest` (synchronous, no GPU), `FadeWeight`, `FadeMixTimestamps`, `FadeMixValue`.
+  - Frame-bound mode (resync Q3, default off; the behaviour with it off is unchanged): `SetFrameBound(on, leadFramesD)`, `FrameBound()`, `FrameLead()`, `ReadyFor(s)`, `AnalysedThrough()`, `NoteWaitMissed()`, and the counters `HeldDropped()`, `WaitsMissed()`, `ClockStepsBack()`, `HeldCount()`. See "Frame-bound mode" below.
+  - Tests: `AnalyseTilesForTest` (synchronous, no GPU), `InjectResultForTest` and `NoteSubmittedForTest` (frame-bound tests), `FadeWeight`, `FadeMixTimestamps`, `FadeMixValue`.
   - Free function `Describe(snapshot, autoRatio, autoSelected)`: the status text.
+
+### Frame-bound mode (resync Q3)
+
+`SetFrameBound(true, D)` makes the monitor's decisions a function of the frame sequence alone, so the decisions are the same whatever the worker's timing **as long as no analysis is lost** (what is proven: the CPU tests below, with a simulated and a real worker thread and randomised completion delays, when every submitted frame is analysed). Analyses can still be lost to timing, and the monitor counts and shows every loss instead of hiding it: a full job queue drops the oldest (`jobs dropped`), a full held ring drops the oldest (`dropped`), a frame whose tile copy finds both GPU readback slots in flight is skipped (`copies skipped`, GPU timing), and the lane's bounded wait can run out (`waits missed`). `Reproducible()` is false after any of them and `Describe` then says "this run is not reproducible". The GPU slot skip cannot be tested without a GPU (Q5 covers it):
+
+- The decision for render sequence `s` (`AutoFactor` / `AutoFactors` `renderSequence`) uses only the analysis of frames <= `s - D`. A result for a later frame is held in a fixed ring of `kHeldCap` (16); on overflow the oldest is dropped and counted (`Describe` shows held / dropped). The released result becomes what `Read()` returns; the dense grid for the next copy follows the released result too. Jobs reach the worker through a FIFO of `kJobQueueCap` (4), not by replacing the pending copy.
+- Every time input is SOURCE time passed by the caller (frame timestamp / measured rate, never a constant): `Frame`, `AutoFactor(s)`, `AutoTransition` and the job `seconds`. The crossfade, the engage wait (`source_resolution_engage_max_wait_s`), the pan clock, the 5 s disengage and the failure pause use it; the steady clock is not read for any decision. A backward step (a seek) is clamped on the monitor's clock (it holds, then goes on) and counted (`ClockStepsBack`).
+- Wall clock that remains, display or idle only: `analyseMs` (steady_clock around one analysis), the history CSV's row time and file name (`GetLocalTime`), the history flush interval, the worker's condition-variable wait (no timeout).
+- `Discontinuity()` bumps an era counter and takes effect at the render thread's next `Frame` / `AutoFactor` (call it from that thread, in frame order); held results and queued jobs of an older era are dropped (`heldStale`). A reset made by the analysis itself (gap, tracker discontinuity) travels with its result and applies when that result is released.
+- The look-ahead verdict and the look-ahead evidence for the cut judge are not used (they are analysis of frames after the one decided).
+- `ReadyFor(s)` is true when nothing is in flight (copied, queued or being analysed) for frames <= `s - D`; `AnalysedThrough()` is the last analysed sequence. The analysis lane's bounded wait (on deterministic runs only, never a late present) polls `ReadyFor` and calls `NoteWaitMissed()` when the bound runs out. `AnalysisLane::SetReadyProbe(ready, onMissed)` is that wait (host wiring: `ReadyFor` and `NoteWaitMissed`, Q1). `FrameFrontForTest` runs Frame()'s frame-bound front part (clock + release) without a GPU so the renderer's order Discontinuity -> Frame -> AutoFactors is testable; a reset consumed by Frame is carried to AutoFactor. `SubmitJobForTest` hands tiles to the real worker thread through the same bounded FIFO.
 
 ### Data flow (VP)
 
@@ -96,6 +108,7 @@ vstest.console.exe x64\Release\VideoProcessor-Test.dll /Platform:x64 /TestCaseFi
   - `SourceResolutionDetectorTests`: detector and tracker. `RealFootageReadings` needs `VP_TEST_REAL_FOOTAGE`, `RealCodecReadings` needs `VP_TEST_CODEC_CORPUS`; else skipped.
   - `SourceResolutionLatchTests`: the monitor through `AnalyseTilesForTest`. Real-footage cases need `VP_TEST_REAL_FOOTAGE` (or D:\hfr); `RealFilmCutDecisions` needs `VP_TEST_CUT_FILMS`.
   - `MixedScreenSourceResolutionTests`: the mixed-screen guard and the dense grid.
+  - `SourceResolutionFrameBoundTests` and `SourceResolutionFrameBoundThreadedTests` (src/VideoProcessor-Test): frame-bound mode (real worker thread runs equal the simulated model, loss counting, order Discontinuity -> Frame -> AutoFactors; run-twice traces with randomised worker timing, source-time engage / fade / disengage, frozen source time with real sleeps, backward-step clamp, held results, held-queue overflow, era drop, `ReadyFor`, switch off = D 0). No footage needed.
 - GPU (D3D11; WARP unless `VP_TEST_GPU=hardware`; only when GPU tests are allowed): `SourceResolutionHookTests` (moved from LibplaceboLutParserTests) methods `SourceResolutionMonitorIdentifiesThePlayerKernel`, `SourceResolutionLookAheadVerifiesOrCancelsTheSwitch`, `SourceResolutionMonitorDeclaresAutoEngagesAtACutAndDisengagesAtOnce`, `SourceResolutionReadsAndRebasesTheDolbyVisionTunnel` (filter `FullyQualifiedName~SourceResolutionHookTests`).
 - Bill's subtitle code: `SubtitleBoxDetectorTests`, `SubtitleBoxLookaheadTests`, `SubtitleOpaqueCardRefinementTests`, `SubtitleMeasurementWorkerTests`; probes in tools/subtitle_*_probe; exact native frame capture with `VP_SUBTITLE_CAPTURE_PATH` (see AGENTS.md).
 
@@ -226,6 +239,7 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 
 VP code in this folder:
 
+- `src/VP-V/modules/input/source_analysis/AnalysisLumaDomain.h` (DIV-AN-01 limited-domain logic of `AnalysisLumaSource`: coefficients, full-to-limited maps, domain queries; header-only, included at the end of Bill's AnalysisLumaSource.h)
 - `src/VP-V/modules/input/source_analysis/SourceResolutionDetector.cpp`
 - `src/VP-V/modules/input/source_analysis/SourceResolutionDetector.h`
 - `src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.cpp`

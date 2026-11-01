@@ -30,8 +30,25 @@
 #include <cstdint>
 #include <vector>
 
+#include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
+
 namespace GrainSplit
 {
+	// Storage layout of the GPU form of the split product (SA2 either/or switch `grain_split_storage`; default
+	// full until the coordinator's grain gate passes). Full: rgba32f split (s1, s2, f, base) + rgba32f blocks
+	// (N, e3, 0, 0). Compact: texture A rg16f (s1, s2 in codes), texture B rg16 unorm (f, base x codeUnit), blocks
+	// rgba32f (N, e3, e1, e2): 8 B/px + 16 B per block instead of 16 + 16; e1/e2 are the block means of d1^2 / d2^2
+	// (extra modifier fields, version 2). Readers never see the layout: GLSL gs_fetch / gs_blocks / gs_energies / gs_tilt
+	// and the C++ view (GrainSplitGpu.h) are the only read path.
+	enum class Storage : uint8_t { Full, Compact };
+	inline const char* Token(Storage s) { return s == Storage::Compact ? "compact" : "full"; }
+
+	// THE GRAIN SPLIT IS ONE DEPENDENCY UNIT: this CPU reference (Compute), its GLSL (GrainSplitGpu.cpp) and the storage
+	// layouts. Bump on ANY change of the law, the passes or a layout: a published frame carries it (Gpu::Frame::version),
+	// the GLSL embeds it as a define GS_UNIT_VERSION, and a reader refuses a frame of another version (stale, visible
+	// fallback, automatic recovery once a frame of the current version arrives).
+	constexpr uint32_t kUnitVersion = 2;   // 2: Compact blocks carry the band energies (e1, e2)
+
 	struct Plane
 	{
 		int w = 0, h = 0;
@@ -69,37 +86,12 @@ namespace GrainSplit
 
 	inline double Clamp01(double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
 
-	// Separable Gaussian, edges replicated; fixed summation order.
+	// Separable Gaussian, edges replicated; fixed summation order (the shared U2 law: VpUnit::BandFromBase).
 	inline Plane Gauss(const Plane& in, double sigma)
 	{
 		if (!(sigma > 0.0)) return in;
-		const int r = (std::max)(1, static_cast<int>(std::ceil(3.0 * sigma)));
-		std::vector<double> k(static_cast<size_t>(2 * r + 1));
-		double sum = 0.0;
-		for (int i = -r; i <= r; ++i) sum += k[static_cast<size_t>(i + r)] = std::exp(-0.5 * i * i / (sigma * sigma));
-		for (double& x : k) x /= sum;
-		Plane t(in.w, in.h), o(in.w, in.h);
-		std::vector<double> pad(static_cast<size_t>(in.w + 2 * r));
-		for (int y = 0; y < in.h; ++y)
-		{
-			for (int x = -r; x < in.w + r; ++x) pad[static_cast<size_t>(x + r)] = in.get(x, y);
-			for (int x = 0; x < in.w; ++x)
-			{
-				double a = 0.0;
-				for (int i = -r; i <= r; ++i) a += k[static_cast<size_t>(i + r)] * pad[static_cast<size_t>(x + r + i)];
-				t.at(x, y) = a;
-			}
-		}
-		for (int y = 0; y < in.h; ++y)
-		{
-			double* dst = &o.v[static_cast<size_t>(y) * in.w];
-			for (int i = -r; i <= r; ++i)
-			{
-				const double* src = &t.v[static_cast<size_t>((std::max)(0, (std::min)(in.h - 1, y + i))) * in.w];
-				const double kk = k[static_cast<size_t>(i + r)];
-				for (int x = 0; x < in.w; ++x) dst[x] += kk * src[x];
-			}
-		}
+		Plane o(in.w, in.h);
+		o.v = VpUnit::BandFromBase::Blur(in.v, in.w, in.h, sigma);
 		return o;
 	}
 
