@@ -276,6 +276,7 @@ namespace MotionValidityTest
 					state.Consume(seen);
 					++sequence;
 					checks.fetch_add(1, std::memory_order_relaxed);
+					std::this_thread::yield();
 				}
 			});
 			std::thread producer([&]
@@ -290,6 +291,7 @@ namespace MotionValidityTest
 					if (state.Epoch() != made && gate.Usable(state, from, from + 1)) staleAccepted.fetch_add(1);
 					++from;
 					checks.fetch_add(1, std::memory_order_relaxed);
+					std::this_thread::yield();
 				}
 			});
 			std::thread capture(invalidator, Cause::Gap, Cause::DriftDrop);
