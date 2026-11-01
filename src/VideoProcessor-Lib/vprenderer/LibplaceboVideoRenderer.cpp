@@ -12661,7 +12661,11 @@ struct LibplaceboVideoRenderer::Impl
 		// WP-12: VP's automatic reload (the calibration adapter's reload policy; Bill's explicit
 		// Apply is the other choice, see CalibrationLutHostPolicy.h).
 		if (calibrationHost.LutReloadDue(displayLutPath, activeSettings.calibrationLutEnabled, GetTickCount64()))
+		{
+			// The parse cache is keyed on path only: a changed file must be re-read (as Bill's Apply does).
+			displayLutCache.Clear();
 			LoadDisplayLut(activeSettings, true);
+		}
 	}
     void ApplyPendingDisplayLutReloadLocked()
     {
