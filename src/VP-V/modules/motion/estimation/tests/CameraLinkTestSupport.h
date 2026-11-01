@@ -79,6 +79,9 @@ namespace CameraLinkTest
 			const VpSkeleton::Node* n = table->NodeOf(VpSkeleton::kP7CameraFit);
 			bytes.reset(new VpSkeleton::CpuBuffers(*n));
 			indicator.reset(new VpIndicator::Indicator(1, 256));
+			// Frame 0 is the previous frame of the lag-1 inputs (P2 reads P1 at lag 1) and must be sealed before frame 1.
+			PublishInputs(0);
+			table->Resolve(0, indicator->Seal(0), [](const VpSkeleton::Node&, uint64_t, int, VpAncestry::Header&, uint32_t) { return true; });
 		}
 
 		size_t Ring() { return table->Find(VpSkeleton::kP7CameraFit)->Ring(); }

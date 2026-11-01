@@ -119,6 +119,7 @@ namespace VideoProcessorTest
 			CameraLink::GuidanceGovernor g;
 			g.OnPair(Pair(1000, 500, 0.5));
 			g.OnPair(Pair(0, 0, 0.6));
+			g.OnPair(Pair(0, 0, 0.6));
 			Assert::IsFalse(g.Tripped());
 			Assert::IsTrue(g.OnPair(Pair(1000, 500, 0.5)));
 			Assert::AreEqual(uint32_t(2), g.Trips());

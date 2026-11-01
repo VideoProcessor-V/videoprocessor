@@ -88,7 +88,7 @@ namespace CameraLink
 		m_bytes = p7Bytes;
 		m_indicator = indicator;
 		const size_t ring = table->Find(VpSkeleton::kP7CameraFit)->Ring();
-		m_pool.reset(new CameraRecordPool(std::max(static_cast<size_t>(ring), m_settings.poolRing)));
+		m_pool.reset(new CameraRecordPool((std::max)(static_cast<size_t>(ring), m_settings.poolRing)));
 		m_sealedMark.assign(ring, ~uint64_t(0));
 		m_producer.reset(new CameraFitProducer(m_settings.fit, &m_counters));
 		CameraFitEnv env;
@@ -114,9 +114,9 @@ namespace CameraLink
 				m_trace << "seq,pairFrom,pairTo,pairSeconds,reason,confidence,type,params,costUs,late,published\n";
 		}
 		if (m_gpu && m_settings.readbackEntries >= 3)
-			m_ring.reset(new FieldReadbackRing(m_gpu, static_cast<int>(m_settings.readbackEntries)));
+			m_ring.reset(new FieldReadbackRing(m_gpu, static_cast<int>(m_settings.readbackEntries), m_log));
 		else if (m_gpu)
-			m_ring.reset(new FieldReadbackRing(m_gpu, 3));
+			m_ring.reset(new FieldReadbackRing(m_gpu, 3, m_log));
 	}
 
 	void CameraLinkCore::SetTimingFacts(const TimingFacts& f)
@@ -134,11 +134,12 @@ namespace CameraLink
 		return RegisterCameraReader(indicator, "camera-fit", h);
 	}
 
-	void CameraLinkCore::OnGpuCreated(pl_gpu gpu)
+	void CameraLinkCore::OnGpuCreated(pl_gpu gpu, pl_log log)
 	{
 		m_gpu = gpu;
+		m_log = log;
 		if (m_active && m_pool && gpu && !m_ring)
-			m_ring.reset(new FieldReadbackRing(gpu, std::max<int>(3, static_cast<int>(m_settings.readbackEntries))));
+			m_ring.reset(new FieldReadbackRing(gpu, (std::max<int>)(3, static_cast<int>(m_settings.readbackEntries)), log));
 	}
 
 	void CameraLinkCore::OnGpuReleased()
@@ -158,8 +159,8 @@ namespace CameraLink
 			{
 				std::vector<uint32_t> c = m_costs;
 				std::sort(c.begin(), c.end());
-				const size_t idx = std::min(c.size() - 1, static_cast<size_t>(c.size() * 95 / 100));
-				guard = std::max<int64_t>(guard, static_cast<int64_t>(c[idx]));
+				const size_t idx = (std::min)(c.size() - 1, static_cast<size_t>(c.size() * 95 / 100));
+				guard = (std::max<int64_t>)(guard, static_cast<int64_t>(c[idx]));
 			}
 		}
 		const double delta = (static_cast<double>(seq) - static_cast<double>(m_lastSealSeq)) * m_period * 1e6;

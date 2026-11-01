@@ -46,7 +46,9 @@ namespace CameraLink
 	bool CameraLabelProducer::EnsureSlot(pl_tex* tex, int w, int h)
 	{
 		pl_fmt fmt = pl_find_fmt(m_gpu, PL_FMT_FLOAT, 4, 32, 32,
-			static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE));
+			static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_BLITTABLE));
+		if (!fmt)   // upload mode needs no blit
+			fmt = pl_find_fmt(m_gpu, PL_FMT_FLOAT, 4, 32, 32, static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE));
 		if (!fmt)
 		{
 			m_error = "no sampleable host-writable rgba32f format";
@@ -58,7 +60,7 @@ namespace CameraLink
 		p.format = fmt;
 		p.sampleable = true;
 		p.host_writable = true;
-		p.blit_dst = true;
+		p.blit_dst = (fmt->caps & PL_FMT_CAP_BLITTABLE) != 0;
 		p.host_readable = m_readable && (fmt->caps & PL_FMT_CAP_HOST_READABLE);
 		if (!pl_tex_recreate(m_gpu, tex, &p))
 		{
@@ -124,11 +126,16 @@ namespace CameraLink
 		}
 		if (!EnsureSlot(slot, in.gridW, in.gridH))
 			return false;
+		if (!m_pass->Output() || !m_pass->Output()->params.blit_src || !(*slot)->params.blit_dst)
+		{
+			m_error = "compute mode: the pass output or the P8 slot is not blittable on this device";
+			return false;
+		}
 		pl_tex_blit_params blit{};
 		blit.src = m_pass->Output();
 		blit.dst = *slot;
-		blit.src_rc = { 0, 0, in.gridW, in.gridH };
-		blit.dst_rc = { 0, 0, in.gridW, in.gridH };
+		blit.src_rc.x0 = 0; blit.src_rc.y0 = 0; blit.src_rc.x1 = in.gridW; blit.src_rc.y1 = in.gridH;   // pl_rect3d: z left default
+		blit.dst_rc = blit.src_rc;
 		blit.sample_mode = PL_TEX_SAMPLE_NEAREST;
 		pl_tex_blit(m_gpu, &blit);
 		return true;

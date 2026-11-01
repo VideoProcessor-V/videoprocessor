@@ -347,7 +347,7 @@ if (blk.x < cm_grid.x && blk.y < cm_grid.y) {
 			params.format = fmt;
 			params.sampleable = true;
 			params.storable = true;
-			params.blit_src = true;   // K2: the camera link copies the pass output into its P8 slot
+			params.blit_src = (fmt->caps & PL_FMT_CAP_BLITTABLE) != 0;   // K2: the camera link copies the pass output into its P8 slot
 			params.host_readable = m_readable && (fmt->caps & PL_FMT_CAP_HOST_READABLE);
 			if (!pl_tex_recreate(m_gpu, &t, &params))
 			{

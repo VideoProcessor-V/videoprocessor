@@ -86,7 +86,7 @@ namespace CameraLink
 		// ---- phases ----
 		void OnFrameStart(const FramePhaseFacts& f);
 		void OnPostSubmitGap();
-		void OnGpuCreated(pl_gpu gpu);
+		void OnGpuCreated(pl_gpu gpu, pl_log log = nullptr);
 		void OnGpuReleased();
 		void CollectStatus(std::vector<std::string>& lines);
 		std::vector<FallbackCatalog::Decision> CollectDecisions();
@@ -139,6 +139,7 @@ namespace CameraLink
 		std::unique_ptr<CameraFitWorker> m_worker;
 		std::unique_ptr<FieldReadbackRing> m_ring;
 		pl_gpu m_gpu = nullptr;
+		pl_log m_log = nullptr;
 		uint64_t m_lastRequestedField = 0;
 		int64_t m_lastSealUs = 0;
 		uint64_t m_lastSealSeq = 0;

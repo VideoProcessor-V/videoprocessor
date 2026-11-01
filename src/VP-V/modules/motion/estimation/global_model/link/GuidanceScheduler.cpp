@@ -82,7 +82,10 @@ namespace CameraLink
 		mi.fadeOffset = in.ctx.fadeOffset;
 		mi.nextPairSeconds = in.ctx.nextPairSeconds;
 		r.plan = CameraModel::BuildMeasurementPlan(sw, cfg, mi);
-		if (!r.plan.Active())
+		// An "active" plan can still carry nothing to apply (the builder refused the model: fallbackReason says why).
+		const bool nothing = r.plan.fallbackReason && r.plan.fallbackReason[0] != 0 && r.plan.hint.empty() &&
+			!r.plan.skipMatcher && !r.plan.useModelGlobal && !r.plan.staticScene && !r.plan.fadeNormalised;
+		if (!r.plan.Active() || nothing)
 		{
 			r.refusal = Refusal::NoPlan;
 			return r;

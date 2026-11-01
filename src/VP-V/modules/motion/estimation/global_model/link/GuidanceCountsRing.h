@@ -8,6 +8,7 @@
 #pragma once
 
 #include "GuidanceScheduler.h"
+#include "NativeCopyReadback.h"
 
 #include <libplacebo/gpu.h>
 
@@ -18,7 +19,7 @@ namespace CameraLink
 	class GuidanceCountsRing : public IGuidanceCountsSource
 	{
 	public:
-		GuidanceCountsRing(pl_gpu gpu, int entries = 4);
+		GuidanceCountsRing(pl_gpu gpu, int entries = 4, pl_log log = nullptr);
 		~GuidanceCountsRing() override;
 		GuidanceCountsRing(const GuidanceCountsRing&) = delete;
 		GuidanceCountsRing& operator=(const GuidanceCountsRing&) = delete;
@@ -28,8 +29,11 @@ namespace CameraLink
 		uint64_t Dropped() const { return m_dropped; }
 
 	private:
-		struct Entry { pl_buf buf = nullptr; bool busy = false; uint64_t seq = 0; };
+		struct Entry { pl_buf buf = nullptr; bool busy = false; bool native = false; uint64_t seq = 0; };
 		pl_gpu m_gpu;
+		pl_log m_log;
+		std::unique_ptr<NativeCopyReadback> m_native;   // D3D11: no buffer transfers there (NativeCopyReadback.h)
+		bool m_nativeTried = false;
 		std::vector<Entry> m_entries;
 		uint64_t m_dropped = 0;
 	};

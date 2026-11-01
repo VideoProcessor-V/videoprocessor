@@ -12,6 +12,7 @@
 #include <VP-V/modules/motion/estimation/global_model/GlobalModelMeasurement.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraUsable.h>
 #include <VP-V/modules/motion/estimation/global_model/link/PairAssembly.h>
+#include <VP-V/modules/motion/estimation/global_model/link/GuidanceScheduler.h>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -108,7 +109,13 @@ namespace VideoProcessorTest
 			mi.prev = rec.get();
 			mi.nextPairSeconds = 1.0 / 24;
 			const CameraModel::MeasurementPlan plan = CameraModel::BuildMeasurementPlan(sw, CameraModel::MeasurementConfig(), mi);
-			Assert::IsFalse(plan.Active(), L"no guidance from an ambiguous record");
+			Assert::IsTrue(plan.hint.empty() && !plan.useModelGlobal && std::string(plan.fallbackReason) == "low confidence",
+				L"the plan builder gives no per-block guidance from an ambiguous record");
+			// ... and the guidance gate refuses it before a plan is even built.
+			CameraLink::GuideInputs gi;
+			gi.record = rec.get();
+			const CameraLink::GuideResult gr = CameraLink::BuildGuide(sw, CameraModel::MeasurementConfig(), gi);
+			Assert::IsTrue(gr.frame == nullptr && gr.refusal == CameraLink::Refusal::NotUsable, L"no guidance from an ambiguous record");
 		}
 	};
 }

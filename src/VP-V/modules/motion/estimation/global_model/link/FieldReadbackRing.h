@@ -8,6 +8,7 @@
 #pragma once
 
 #include "FieldCopy.h"
+#include "NativeCopyReadback.h"
 
 #include <VP-V/core/LaneInterfaces.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
@@ -30,7 +31,8 @@ namespace CameraLink
 		};
 
 		// `entries` is clamped to >= 3.
-		FieldReadbackRing(pl_gpu gpu, int entries);
+		// `log` may be null. On D3D11 the NativeCopyReadback path is used (no buffer transfers there); elsewhere pl_buf.
+		FieldReadbackRing(pl_gpu gpu, int entries, pl_log log = nullptr);
 		// Tolerates copies in flight: pl_gpu_finish (the only blocking wait, destructor only) then pl_buf_destroy, because
 		// destroying a buffer the GPU still writes would be a use-after-free.
 		~FieldReadbackRing() override;
@@ -49,6 +51,7 @@ namespace CameraLink
 		void Clear();
 
 		struct Stats Stats() const { return m_stats; }
+		const char* LastError() const { return m_lastError; }
 		int Entries() const { return static_cast<int>(m_entries.size()); }
 
 		// IReadbackDevice. The staging index is the ring entry index. CopyToStaging starts the copy of the pending
@@ -73,13 +76,19 @@ namespace CameraLink
 			VpIndicator::Stamp stamp;
 			bool haveBwd = false;
 			bool mapped = false;
+			bool native = false;   // read through NativeCopyReadback (slot = the entry index)
 		};
 
 		bool Start(Entry& e);
 		void Release(Entry& e);
 		void DrainParked();
+		const char* m_lastError = "";
 
+		bool TryNative(const Entry& e);
 		pl_gpu m_gpu;
+		pl_log m_log;
+		std::unique_ptr<NativeCopyReadback> m_native;
+		bool m_nativeUnavailable = false;   // Create failed once: the pl_buf path for good
 		std::vector<Entry> m_entries;
 		std::vector<pl_buf> m_parked;
 		uint64_t m_ticket = 0;

@@ -45,7 +45,7 @@ namespace VideoProcessorTest
 					hooks.relatchTiming();
 				}
 				worker.WaitIdle();
-				rig.Retire(static_cast<uint64_t>(i));
+				rig.Retire(static_cast<uint64_t>(i) - 1);
 			}
 			worker.Stop();
 			Assert::AreEqual(24, submitted, L"WaitIdle after every pair: nothing dropped");
@@ -73,7 +73,7 @@ namespace VideoProcessorTest
 						producer.NoteReset();
 					worker.Submit(CameraLinkTest::PanJob(static_cast<uint64_t>(i), 6.0 + i * 0.1));
 					worker.WaitIdle();
-					rig.Retire(static_cast<uint64_t>(i));
+					rig.Retire(static_cast<uint64_t>(i) - 1);
 				}
 				worker.Stop();
 				hashes[run] = producer.HistoryHash();

@@ -421,4 +421,5 @@
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\GuideProductTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\MotionBenchWriterTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\GuidanceNullIdentityWarpTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\link\NativeCopyReadback.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
 </Project>

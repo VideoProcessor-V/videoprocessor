@@ -49,10 +49,12 @@ namespace VideoProcessorTest
 					rig.SealP7Empty(seq);
 				CameraLink::CameraFitJob job = CameraLinkTest::PanJob(seq, 8.0 + 0.5 * i, 0.0);
 				job.facts.pairSeconds = 0;   // derived from the latched timing
-				worker.ProcessJob(job);
+				const CameraLink::PublishOutcome po = worker.ProcessJob(job);
+				if (po != CameraLink::PublishOutcome::Published)
+					Logger::WriteMessage((std::string("seq ") + std::to_string(seq) + " " + CameraLink::Text(po) + "\n").c_str());
 				CameraLink::PoolEntry e;
 				r.inPool.push_back(pool.Get(seq, e));
-				rig.Retire(seq);
+				rig.Retire(seq - 1);
 			}
 			r.hash = producer.HistoryHash();
 			r.published = counters.published.load();

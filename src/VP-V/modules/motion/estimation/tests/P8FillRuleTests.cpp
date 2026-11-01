@@ -69,8 +69,12 @@ namespace VideoProcessorTest
 			const std::vector<VpSkeleton::ProductFrameResult>& Seal(uint64_t seq)
 			{
 				const VpIndicator::Stamp st = rig.indicator->Seal(seq);
-				return rig.table->Resolve(seq, st, [this](const VpSkeleton::Node& n, uint64_t s, int live, VpAncestry::Header& h, uint32_t) {
+				const auto& res = rig.table->Resolve(seq, st, [this](const VpSkeleton::Node& n, uint64_t s, int live, VpAncestry::Header& h, uint32_t) {
 					return n.id == VpSkeleton::kP8CameraLabels ? fill.FillLive(s, live, h) : true; });
+				for (const VpSkeleton::ProductFrameResult& r : res)
+					Logger::WriteMessage((std::string("seal seq ") + std::to_string(seq) + " product " + std::to_string(r.id) + " seal=" +
+						VpSkeleton::Token(r.seal.reason) + " final=" + VpSkeleton::Token(r.finalReason) + (r.liveFilled ? " live" : "") + "\n").c_str());
+				return res;
 			}
 
 			static const VpSkeleton::ProductFrameResult* Of(const std::vector<VpSkeleton::ProductFrameResult>& r, VpSkeleton::ProductId id)
