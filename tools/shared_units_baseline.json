@@ -1,0 +1,77 @@
+{
+ "schema": 1,
+ "units": {
+  "U1": {
+   "name": "grain_estimate",
+   "blocking": false,
+   "baseline_duplicates": 37,
+   "known_false_positive": []
+  },
+  "U2": {
+   "name": "gaussian_band_split",
+   "blocking": false,
+   "baseline_duplicates": 29,
+   "known_false_positive": []
+  },
+  "U3": {
+   "name": "half_luma_downsample",
+   "blocking": false,
+   "baseline_duplicates": 19,
+   "known_false_positive": []
+  },
+  "U4": {
+   "name": "block_statistics",
+   "blocking": false,
+   "baseline_duplicates": 19,
+   "known_false_positive": []
+  },
+  "U5": {
+   "name": "laplacian_ringing",
+   "blocking": false,
+   "baseline_duplicates": 2,
+   "known_false_positive": []
+  },
+  "U6": {
+   "name": "histogram_apl",
+   "blocking": false,
+   "baseline_duplicates": 32,
+   "known_false_positive": []
+  },
+  "U7": {
+   "name": "cut_fade_flash_judge",
+   "blocking": false,
+   "baseline_duplicates": 21,
+   "known_false_positive": []
+  },
+  "U8": {
+   "name": "active_picture_rect",
+   "blocking": false,
+   "baseline_duplicates": 8,
+   "known_false_positive": []
+  },
+  "U9": {
+   "name": "light_level",
+   "blocking": false,
+   "baseline_duplicates": 0,
+   "known_false_positive": []
+  },
+  "U10": {
+   "name": "global_motion",
+   "blocking": false,
+   "baseline_duplicates": 36,
+   "known_false_positive": []
+  },
+  "U11": {
+   "name": "camera_fit",
+   "blocking": false,
+   "baseline_duplicates": 0,
+   "known_false_positive": []
+  },
+  "U12": {
+   "name": "source_quality",
+   "blocking": false,
+   "baseline_duplicates": 0,
+   "known_false_positive": []
+  }
+ }
+}
