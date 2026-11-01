@@ -8,12 +8,20 @@ namespace CameraLink
 {
 	namespace
 	{
-		const char* kCopyBody = R"GLSL(
+		// Two variants. The same texture is never bound to two sampled descriptors: on D3D11/WARP a
+		// pass with a duplicated binding wrote nothing (the readback came back zero).
+		const char* kCopyBody1 = R"GLSL(
 ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-if (p.x < nc_dim.x && p.y < nc_dim.y) {
+ivec2 d = ivec2(nc_dim);
+if (p.x < d.x && p.y < d.y)
     imageStore(nc_dst, p, texelFetch(nc_a, p, 0));
-    if (nc_planes == 2)
-        imageStore(nc_dst, p + ivec2(0, nc_dim.y), texelFetch(nc_b, p, 0));
+)GLSL";
+		const char* kCopyBody2 = R"GLSL(
+ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+ivec2 d = ivec2(nc_dim);
+if (p.x < d.x && p.y < d.y) {
+    imageStore(nc_dst, p, texelFetch(nc_a, p, 0));
+    imageStore(nc_dst, p + ivec2(0, d.y), texelFetch(nc_b, p, 0));
 }
 )GLSL";
 
@@ -53,31 +61,30 @@ if (p.x < nc_dim.x && p.y < nc_dim.y) {
 
 	bool NativeCopyReadback::Start(int slot, pl_tex a, pl_tex b)
 	{
-		if (!Active() || !a || (m_planes == 2 && !b))
+		if (!Active() || !a)
 			return false;
+		const bool two = m_planes == 2 && b && b != a;   // a single plane leaves the second half of the target unread
 		pl_tex dst = m_native->Target(slot);
 		if (!dst)
 			return false;
-		const pl_shader_desc desc[3] = { Sampled("nc_a", a), Sampled("nc_b", m_planes == 2 ? b : a), [&] {
-			pl_shader_desc d{};
-			d.desc.name = "nc_dst";
-			d.desc.type = PL_DESC_STORAGE_IMG;
-			d.desc.access = PL_DESC_ACCESS_WRITEONLY;
-			d.binding.object = dst;
-			return d;
-		}() };
-		int dim[2] = { m_w, m_h };
-		int planes = m_planes;
-		const pl_shader_var vars[2] = { { pl_var_ivec2("nc_dim"), dim, true }, { pl_var_int("nc_planes"), &planes, true } };
+		pl_shader_desc dstDesc{};
+		dstDesc.desc.name = "nc_dst";
+		dstDesc.desc.type = PL_DESC_STORAGE_IMG;
+		dstDesc.desc.access = PL_DESC_ACCESS_WRITEONLY;
+		dstDesc.binding.object = dst;
+		const pl_shader_desc desc[3] = { Sampled("nc_a", a), dstDesc, Sampled("nc_b", two ? b : a) };
+		// Float variables only, as SourceResolutionMonitor (the proven native-readback pass).
+		const float dim[2] = { static_cast<float>(m_w), static_cast<float>(m_h) };
+		const pl_shader_var vars[1] = { { pl_var_vec2("nc_dim"), dim, true } };
 		pl_custom_shader custom{};
 		custom.description = "VideoProcessor camera link: readback copy";
-		custom.body = kCopyBody;
+		custom.body = two ? kCopyBody2 : kCopyBody1;
 		custom.input = PL_SHADER_SIG_NONE;
 		custom.output = PL_SHADER_SIG_NONE;
 		custom.descriptors = desc;
-		custom.num_descriptors = 3;
+		custom.num_descriptors = two ? 3 : 2;
 		custom.variables = vars;
-		custom.num_variables = 2;
+		custom.num_variables = 1;
 		custom.compute = true;
 		custom.compute_group_size[0] = 8;
 		custom.compute_group_size[1] = 8;

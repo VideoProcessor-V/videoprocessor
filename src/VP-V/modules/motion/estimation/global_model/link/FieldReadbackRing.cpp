@@ -62,7 +62,7 @@ namespace CameraLink
 
 	bool FieldReadbackRing::TryNative(const Entry& e)
 	{
-		const int planes = 2;   // always two planes: a field without a backward plane writes the forward one twice
+		const int planes = 2;   // always a two-plane target: a field without a backward plane fills only the first half
 		if (m_native && m_native->Active() && m_native->Width() == e.gridW && m_native->Height() == e.gridH && m_native->Planes() == planes)
 			return true;
 		if (m_nativeUnavailable)
@@ -86,7 +86,7 @@ namespace CameraLink
 		if (TryNative(e))
 		{
 			const int idx = static_cast<int>(&e - m_entries.data());
-			if (!m_native->Start(idx, e.fwd, e.bwd ? e.bwd : e.fwd))
+			if (!m_native->Start(idx, e.fwd, e.bwd))
 			{
 				m_lastError = "native readback copy pass failed";
 				return false;

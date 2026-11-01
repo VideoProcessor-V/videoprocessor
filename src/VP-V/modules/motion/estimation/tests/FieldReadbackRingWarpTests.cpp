@@ -112,13 +112,11 @@ namespace VideoProcessorTest
 				for (size_t r = 0; r < 2; ++r)
 				{
 					const CameraLink::FieldCopy& c = *ready[r];
-					Assert::IsTrue(c.Valid());
-					Assert::IsTrue(c.blockSize == 16.0);
+					Assert::IsTrue(c.Valid(), L"copy invalid");
+					Assert::IsTrue(c.blockSize == 16.0, L"block size");
 					for (size_t i = 0; i < n; ++i)
 					{
-						Assert::IsTrue(c.fwdX[i] == a[i * 4] * scale);
-						Assert::IsTrue(c.fwdY[i] == a[i * 4 + 1] * scale);
-						Assert::IsTrue(c.fwdTrust[i] == a[i * 4 + 2]);
+						if (!(c.fwdX[i] == a[i * 4] * scale && c.fwdY[i] == a[i * 4 + 1] * scale && c.fwdTrust[i] == a[i * 4 + 2])) { wchar_t m[300]; swprintf(m, 300, L"mismatch r=%zu i=%zu x=%g/%g y=%g/%g t=%g/%g", r, i, c.fwdX[i], a[i*4]*scale, c.fwdY[i], a[i*4+1]*scale, c.fwdTrust[i], a[i*4+2]); Assert::Fail(m); }
 					}
 				}
 				Assert::IsTrue(ready[0]->HaveBackward());
