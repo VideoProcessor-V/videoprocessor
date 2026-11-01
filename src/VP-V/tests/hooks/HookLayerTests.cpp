@@ -14,6 +14,7 @@
 #include <vprenderer/RendererExtension.h>
 #include <CaptureDeliveryHook.h>
 #include <DebugLog.h>
+#include "../../core/hub/ExtensionHub.h"
 
 #include <stdexcept>
 #include <string>
@@ -33,24 +34,36 @@ namespace HookLayerTest
 		{
 			std::string name;
 			double rateAdd = 0;
-			bool throwOnEvent = false;
+			bool throwOnQueue = false;
 			bool throwOnFault = false;
+			bool handleFrame = false;
 			void* iface = nullptr;
 			explicit Recorder(const char* n) : name(n) {}
-			void OnEvent(const RE::EventFacts& f) override
+			void OnQueue(const RE::QueueFacts& f) override
 			{
-				g_log->push_back(name + ":event:" + std::to_string(f.sequence));
-				if (throwOnEvent) throw std::runtime_error("boom");
+				g_log->push_back(name + ":queue:" + std::to_string(f.seq));
+				if (throwOnQueue) throw std::runtime_error("boom");
 			}
-			void OnGpuReleased() override { g_log->push_back(name + ":gpuReleased"); }
-			double ResolveRate(RE::RateKind, double v) override { g_log->push_back(name + ":rate"); return v + rateAdd; }
-			void OnWorkerFault(const char* w, const char* what) override
+			void OnLifecycle(RE::LifecycleFacts& f) override
 			{
-				g_log->push_back(name + ":fault:" + w + ":" + what);
-				if (throwOnFault) throw std::runtime_error("fault boom");
+				g_log->push_back(name + ":life:" + std::to_string(static_cast<int>(f.kind)) + ":" + std::to_string(reinterpret_cast<intptr_t>(f.host)));
 			}
-			void CollectStatus(RE::StatusKind, std::vector<std::string>& out) override { out.push_back(name); }
-			void* QueryInterface(const char*) override { return iface; }
+			bool OnFrame(RE::FrameContext& f) override
+			{
+				g_log->push_back(name + ":frame:" + std::to_string(f.seq));
+				return handleFrame;
+			}
+			double OnResolve(RE::Resolve, const RE::Context&, double v) override { g_log->push_back(name + ":rate"); return v + rateAdd; }
+			void OnStatus(const RE::Context&, RE::StatusKind k, std::vector<std::string>& out, const char* w, const char* what) override
+			{
+				if (k == RE::StatusKind::WorkerFault)
+				{
+					g_log->push_back(name + ":fault:" + w + ":" + what);
+					if (throwOnFault) throw std::runtime_error("fault boom");
+				}
+				else out.push_back(name);
+			}
+			void* Query(const char*) override { return iface; }
 		};
 
 		struct CaptureRecorder : ICaptureObserver
@@ -85,12 +98,22 @@ namespace HookLayerTest
 		{
 			Scope s;
 			Assert::IsFalse(RE::Any());
-			Assert::AreEqual(23.976, RE::ResolveRate(RE::RateKind::SourceSignal, 23.976));
+			RE::Context ctx;
+			Assert::AreEqual(23.976, RE::ResolveValue(RE::Resolve::SourceSignalRate, ctx, 23.976));
 			Assert::IsTrue(RE::Query("x") == nullptr);
 			std::vector<std::string> status;
-			RE::CollectStatus(RE::StatusKind::Lines, status);
-			RE::Emit(RE::EventFacts());
-			RE::GpuReleased();
+			RE::Status(ctx, RE::StatusKind::Lines, status);
+			RE::Queue(RE::QueueFacts());
+			RE::LifecycleFacts life;
+			RE::Notify(life);
+			RE::FrameContext fc;
+			Assert::IsFalse(RE::Frame(fc));
+			Assert::AreEqual(0u, fc.requests);
+			RE::IngressContext ic;
+			RE::Ingress(ic);
+			Assert::IsFalse(ic.drop);
+			std::string reply;
+			Assert::IsFalse(RE::Command(ctx, "m", "c", reply));
 			Assert::IsTrue(status.empty());
 			Assert::IsTrue(s.log.empty());
 		}
@@ -102,42 +125,68 @@ namespace HookLayerTest
 			RE::Register(std::unique_ptr<RE::IRendererExtension>(new Recorder("b")));
 			RE::Register(nullptr);
 			Assert::IsTrue(RE::Any());
-			RE::EventFacts f;
-			f.sequence = 7;
-			RE::Emit(f);
-			RE::GpuReleased();
+			RE::QueueFacts f;
+			f.seq = 7;
+			RE::Queue(f);
 			std::vector<std::string> status;
-			RE::CollectStatus(RE::StatusKind::Fallbacks, status);
-			const std::vector<std::string> expected = { "a:event:7", "b:event:7", "a:gpuReleased", "b:gpuReleased" };
+			RE::Status(RE::Context(), RE::StatusKind::Fallbacks, status);
+			const std::vector<std::string> expected = { "a:queue:7", "b:queue:7" };
 			Assert::IsTrue(expected == s.log);
 			Assert::IsTrue((std::vector<std::string>{ "a", "b" }) == status);
 		}
 
-		TEST_METHOD(RendererExtensionResolveRateChainsInOrder)
+		TEST_METHOD(RendererExtensionFrameFirstHandlerStopsChain)
+		{
+			Scope s;
+			Recorder* a = new Recorder("a"); a->handleFrame = true;
+			RE::Register(std::unique_ptr<RE::IRendererExtension>(a));
+			RE::Register(std::unique_ptr<RE::IRendererExtension>(new Recorder("b")));
+			RE::FrameContext fc;
+			fc.seq = 4;
+			Assert::IsTrue(RE::Frame(fc));
+			Assert::IsTrue((std::vector<std::string>{ "a:frame:4" }) == s.log);
+		}
+
+		TEST_METHOD(RendererExtensionHostKeyedLifecycle)
+		{
+			Scope s;
+			RE::Register(std::unique_ptr<RE::IRendererExtension>(new Recorder("a")));
+			int hostA = 0, hostB = 0;
+			RE::LifecycleFacts f;
+			f.kind = RE::Lifecycle::GpuReleased;
+			f.host = &hostA;
+			RE::Notify(f);
+			f.host = &hostB;
+			RE::Notify(f);
+			Assert::AreEqual<size_t>(2, s.log.size());
+			Assert::IsTrue(s.log[0] != s.log[1]); // each call carries its own host identity
+		}
+
+		TEST_METHOD(RendererExtensionResolveChainsInOrder)
 		{
 			Scope s;
 			Recorder* a = new Recorder("a"); a->rateAdd = 1.0;
 			Recorder* b = new Recorder("b"); b->rateAdd = 10.0;
 			RE::Register(std::unique_ptr<RE::IRendererExtension>(a));
 			RE::Register(std::unique_ptr<RE::IRendererExtension>(b));
-			Assert::AreEqual(111.0, RE::ResolveRate(RE::RateKind::DisplayRefresh, 100.0));
+			Assert::AreEqual(111.0, RE::ResolveValue(RE::Resolve::DisplayRefreshRate, RE::Context(), 100.0));
 			Assert::IsTrue((std::vector<std::string>{ "a:rate", "b:rate" }) == s.log);
 		}
 
 		TEST_METHOD(RendererExtensionThrowIsContainedAndReportedOnce)
 		{
 			Scope s;
-			Recorder* a = new Recorder("a"); a->throwOnEvent = true;
+			Recorder* a = new Recorder("a"); a->throwOnQueue = true;
 			Recorder* b = new Recorder("b"); b->throwOnFault = true;
 			RE::Register(std::unique_ptr<RE::IRendererExtension>(a));
 			RE::Register(std::unique_ptr<RE::IRendererExtension>(b));
-			RE::EventFacts f;
-			f.sequence = 3;
-			RE::Emit(f); // must not throw
+			RE::QueueFacts f;
+			f.seq = 3;
+			RE::Queue(f); // must not throw
 			const std::vector<std::string> expected = {
-				"a:event:3", "a:fault:extension:boom", "b:fault:extension:boom",
-				"b:event:3" };
-			// b's own throw from OnWorkerFault is swallowed; b still receives the event.
+				"a:queue:3", "a:fault:extension:boom", "b:fault:extension:boom",
+				"b:queue:3" };
+			// b's own throw from OnStatus(WorkerFault) is swallowed; b still receives the event.
 			Assert::IsTrue(expected == s.log);
 		}
 
@@ -161,7 +210,50 @@ namespace HookLayerTest
 			Assert::IsTrue(RE::Any());
 			RE::ResetForTesting();
 			Assert::IsFalse(RE::Any());
-			Assert::AreEqual(5.0, RE::ResolveRate(RE::RateKind::PresentClock, 5.0));
+			Assert::AreEqual(5.0, RE::ResolveValue(RE::Resolve::PresentClockRate, RE::Context(), 5.0));
+		}
+
+		TEST_METHOD(HubIsInertWithNoModulesAndKeysStateByHost)
+		{
+			Scope s;
+			Vpv::Hub::ExtensionHub& hub = Vpv::Hub::ExtensionHub::Instance();
+			hub.ResetModulesForTesting();
+			Assert::AreEqual<size_t>(0, hub.ModuleCount());
+			int hostA = 0, hostB = 0;
+			RE::LifecycleFacts f;
+			f.host = &hostA; f.kind = RE::Lifecycle::GpuCreated; hub.OnLifecycle(f);
+			f.host = &hostB; hub.OnLifecycle(f);
+			Assert::AreEqual<size_t>(2, hub.LiveHostCount());
+			f.host = &hostA; f.kind = RE::Lifecycle::GpuReleased; hub.OnLifecycle(f);
+			Assert::IsFalse(hub.HasHost(&hostA));
+			Assert::IsTrue(hub.HasHost(&hostB)); // releasing A leaves B alone
+			RE::FrameContext fc;
+			Assert::IsFalse(hub.OnFrame(fc));
+			Assert::AreEqual(7.0, hub.OnResolve(RE::Resolve::DisplayRefreshRate, RE::Context(), 7.0));
+			Assert::IsTrue(hub.Query("x") == nullptr);
+			hub.ResetModulesForTesting();
+		}
+
+		TEST_METHOD(HubFansOutToModulesInOrder)
+		{
+			Scope s;
+			struct Mod : Vpv::Hub::ISkeletonModule
+			{
+				std::string n; double add;
+				Mod(const char* name, double a) : n(name), add(a) {}
+				const char* Name() const override { return n.c_str(); }
+				void OnQueue(const RE::QueueFacts& f) override { g_log->push_back(n + ":queue:" + std::to_string(f.seq)); }
+				double OnResolve(RE::Resolve, const RE::Context&, double v) override { return v + add; }
+			};
+			Vpv::Hub::ExtensionHub& hub = Vpv::Hub::ExtensionHub::Instance();
+			hub.ResetModulesForTesting();
+			hub.AddModule(std::unique_ptr<Vpv::Hub::ISkeletonModule>(new Mod("m1", 1.0)));
+			hub.AddModule(std::unique_ptr<Vpv::Hub::ISkeletonModule>(new Mod("m2", 10.0)));
+			RE::QueueFacts q; q.seq = 5;
+			hub.OnQueue(q);
+			Assert::IsTrue((std::vector<std::string>{ "m1:queue:5", "m2:queue:5" }) == s.log);
+			Assert::AreEqual(111.0, hub.OnResolve(RE::Resolve::PresentClockRate, RE::Context(), 100.0));
+			hub.ResetModulesForTesting();
 		}
 
 		TEST_METHOD(CaptureObserverEmptyIsNoCall)
