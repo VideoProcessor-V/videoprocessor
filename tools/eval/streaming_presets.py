@@ -15,29 +15,32 @@ import math
 import re
 
 # ---------------------------------------------------------------- encoder presets
+# DETERMINISM: every encoder runs single-threaded (x265 pools=1/frame-threads=1, x264 threads=1, SVT-AV1 lp=1):
+# multi-threaded x265/x264/SVT-AV1 output differs run to run (measured).  Speed comes from encoding independent
+# shot segments / rungs as parallel processes (make_streaming_encodes.py --jobs).
 # kind: x265 | x264 | svtav1.  gop_s = closed-GOP length in seconds (2-4 s as on streaming services).
 PRESETS = {
     "hevc_gop2": dict(
         kind="x265", pix_fmt="yuv420p10le", gop_s=2.0, bframes=3, b_adapt=2, refs=4, aq_mode=3, aq_strength=1.0,
-        preset="medium", rc_lookahead=40, vbv_maxrate_ratio=1.5, vbv_buffer_s=2.0, threads=4, frame_threads=2,
+        preset="medium", rc_lookahead=40, vbv_maxrate_ratio=1.5, vbv_buffer_s=2.0, threads=1, frame_threads=1,
         note="HEVC Main10, closed 2 s GOP, 3 B-frames (b-adapt 2, pyramid), AQ mode 3 (dark-biased auto-variance), "
              "no scene-cut keyframes (shots are encoded as separate closed segments), VBV 1.5x peak / 2 s buffer"),
     "hevc_gop4": dict(
         kind="x265", pix_fmt="yuv420p10le", gop_s=4.0, bframes=4, b_adapt=2, refs=4, aq_mode=3, aq_strength=1.0,
-        preset="medium", rc_lookahead=60, vbv_maxrate_ratio=1.5, vbv_buffer_s=2.0, threads=4, frame_threads=2,
+        preset="medium", rc_lookahead=60, vbv_maxrate_ratio=1.5, vbv_buffer_s=2.0, threads=1, frame_threads=1,
         note="as hevc_gop2 with a closed 4 s GOP and 4 B-frames (longer-GOP services)"),
     "avc_gop2": dict(
         kind="x264", pix_fmt="yuv420p", gop_s=2.0, bframes=3, refs=4, aq_mode=2, aq_strength=1.0, preset="medium",
-        rc_lookahead=40, vbv_maxrate_ratio=1.5, vbv_buffer_s=2.0, threads=4,
+        rc_lookahead=40, vbv_maxrate_ratio=1.5, vbv_buffer_s=2.0, threads=1,
         note="H.264 High 8-bit, closed 2 s GOP, 3 B-frames, AQ mode 2, VBV 1.5x / 2 s (the low-tier / legacy "
              "ladder; blockier than HEVC, which validates the blockiness metric)"),
     "av1": dict(
         kind="svtav1", pix_fmt="yuv420p10le", gop_s=2.0, preset=6, film_grain=0, film_grain_denoise=0,
-        vbv_maxrate_ratio=1.5, vbv_buffer_s=2.0, fast_decode=0, threads=4,
+        vbv_maxrate_ratio=1.5, vbv_buffer_s=2.0, fast_decode=0, threads=1,
         note="SVT-AV1 10-bit preset 6, closed 2 s GOP, VBR at the per-shot target (the per-shot cap is the allocation clamp), no film-grain synthesis"),
     "av1_fgs": dict(
         kind="svtav1", pix_fmt="yuv420p10le", gop_s=2.0, preset=6, film_grain=8, film_grain_denoise=1,
-        vbv_maxrate_ratio=1.5, vbv_buffer_s=2.0, fast_decode=0, threads=4,
+        vbv_maxrate_ratio=1.5, vbv_buffer_s=2.0, fast_decode=0, threads=1,
         note="as av1 with film-grain synthesis (strength 8, source denoised then re-synthesised at decode, "
              "the practice of AV1 services); the decoded grain is synthetic, not the master's"),
 }

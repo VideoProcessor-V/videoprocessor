@@ -1,0 +1,297 @@
+{
+ "cases": [
+  {
+   "case": "hevc_gop2_2160p_16000",
+   "clip": "crowd",
+   "coded": {
+    "fps": 50.0,
+    "height": 544,
+    "kind": "ffmpeg",
+    "path": "D:/codex/videoprocessor/eval-scratch/streaming-suite/enc/crowd/crowd_hevc_gop2_2160p_16000_coded.mkv",
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "width": 960
+   },
+   "content_type": "sports50_60",
+   "frame_types": "IBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBPIBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBPBBBPBBBPBBBPBBBPBBBP",
+   "frames": 200,
+   "gop": 100,
+   "grain_probe": false,
+   "id": "crowd_hevc_gop2_2160p_16000",
+   "master": {
+    "fps": 50.0,
+    "height": 544,
+    "kind": "ffmpeg",
+    "path": "D:/codex/videoprocessor/eval-scratch/streaming-suite/enc/crowd/3840x2160_master.mkv",
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "width": 960
+   },
+   "minigop": 4,
+   "note": "crowd_run 2160p50 (sports PROXY: fast motion, dense texture; single shot); hevc_gop2 per-shot VBR rung 2160p_16000 3840x2160 target 20656 kb/s measured 21071 kb/s, 1 shots, crop 960x544 at (1440,808)",
+   "protocol": "same",
+   "streaming": {
+    "crop": [
+     1440,
+     808,
+     960,
+     544
+    ],
+    "ffmpeg": "ffmpeg version 9.0.2-full_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers",
+    "gop_frames": 100,
+    "ladder": "uhd",
+    "measured_kbps": 21071.4,
+    "mode": "shot_vbr",
+    "preset": "hevc_gop2",
+    "raster": [
+     3840,
+     2160
+    ],
+    "rung": "2160p_16000",
+    "shots": [
+     {
+      "complexity_kbps": 6359.3,
+      "frames": 200,
+      "kbps": 20656,
+      "mean_luma": 97.8,
+      "start": 0
+     }
+    ],
+    "source": "crowd",
+    "stream_md5": "345665373e0e49f8b8ad60f75e2b5b7b",
+    "target_kbps": 20656
+   }
+  },
+  {
+   "case": "hevc_gop2_2160p_8000",
+   "clip": "crowd",
+   "coded": {
+    "fps": 50.0,
+    "height": 544,
+    "kind": "ffmpeg",
+    "path": "D:/codex/videoprocessor/eval-scratch/streaming-suite/enc/crowd/crowd_hevc_gop2_2160p_8000_coded.mkv",
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "width": 960
+   },
+   "content_type": "sports50_60",
+   "frame_types": "IBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBPIBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBPBBBPBBBPBBBPBBBPBBBP",
+   "frames": 200,
+   "gop": 100,
+   "grain_probe": false,
+   "id": "crowd_hevc_gop2_2160p_8000",
+   "master": {
+    "fps": 50.0,
+    "height": 544,
+    "kind": "ffmpeg",
+    "path": "D:/codex/videoprocessor/eval-scratch/streaming-suite/enc/crowd/3840x2160_master.mkv",
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "width": 960
+   },
+   "minigop": 4,
+   "note": "crowd_run 2160p50 (sports PROXY: fast motion, dense texture; single shot); hevc_gop2 per-shot VBR rung 2160p_8000 3840x2160 target 10328 kb/s measured 10500 kb/s, 1 shots, crop 960x544 at (1440,808)",
+   "protocol": "same",
+   "streaming": {
+    "crop": [
+     1440,
+     808,
+     960,
+     544
+    ],
+    "ffmpeg": "ffmpeg version 9.0.2-full_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers",
+    "gop_frames": 100,
+    "ladder": "uhd",
+    "measured_kbps": 10500.2,
+    "mode": "shot_vbr",
+    "preset": "hevc_gop2",
+    "raster": [
+     3840,
+     2160
+    ],
+    "rung": "2160p_8000",
+    "shots": [
+     {
+      "complexity_kbps": 6359.3,
+      "frames": 200,
+      "kbps": 10328,
+      "mean_luma": 97.8,
+      "start": 0
+     }
+    ],
+    "source": "crowd",
+    "stream_md5": "422e5c5a0a4842c5531606039d4be8b8",
+    "target_kbps": 10328
+   }
+  },
+  {
+   "case": "hevc_gop2_2160p_16000",
+   "clip": "tos",
+   "coded": {
+    "fps": 24.0,
+    "height": 544,
+    "kind": "ffmpeg",
+    "path": "D:/codex/videoprocessor/eval-scratch/streaming-suite/enc/tos/tos_hevc_gop2_2160p_16000_coded.mkv",
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "width": 960
+   },
+   "content_type": "film24",
+   "frame_types": "IBBBPBBBPBBBPBPBBBPBBBPBBBPBBBPBBPIBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBPIBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPIBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBPIBBBPBBPBBBPIBBBPBBBPBBBPBBBP",
+   "frames": 192,
+   "gop": 48,
+   "grain_probe": false,
+   "id": "tos_hevc_gop2_2160p_16000",
+   "master": {
+    "fps": 24.0,
+    "height": 544,
+    "kind": "ffmpeg",
+    "path": "D:/codex/videoprocessor/eval-scratch/streaming-suite/enc/tos/3840x1714_master.mkv",
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "width": 960
+   },
+   "minigop": 4,
+   "note": "Tears of Steel 4K FFV1 master (live action + VFX, scope; dark interiors); hevc_gop2 per-shot VBR rung 2160p_16000 3840x1714 target 12696 kb/s measured 13217 kb/s, 4 shots, crop 960x544 at (1440,584)",
+   "protocol": "same",
+   "streaming": {
+    "crop": [
+     1440,
+     584,
+     960,
+     544
+    ],
+    "ffmpeg": "ffmpeg version 9.0.2-full_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers",
+    "gop_frames": 48,
+    "ladder": "uhd",
+    "measured_kbps": 13216.9,
+    "mode": "shot_vbr",
+    "preset": "hevc_gop2",
+    "raster": [
+     3840,
+     1714
+    ],
+    "rung": "2160p_16000",
+    "shots": [
+     {
+      "complexity_kbps": 286.6,
+      "frames": 34,
+      "kbps": 7141,
+      "mean_luma": 51.2,
+      "start": 0
+     },
+     {
+      "complexity_kbps": 449.5,
+      "frames": 81,
+      "kbps": 13379,
+      "mean_luma": 89.7,
+      "start": 34
+     },
+     {
+      "complexity_kbps": 551.0,
+      "frames": 60,
+      "kbps": 16069,
+      "mean_luma": 80.6,
+      "start": 115
+     },
+     {
+      "complexity_kbps": 411.0,
+      "frames": 17,
+      "kbps": 8642,
+      "mean_luma": 44.8,
+      "start": 175
+     }
+    ],
+    "source": "tos",
+    "stream_md5": "ec674b1222b9d5a99758e3730fcb0327",
+    "target_kbps": 12696
+   }
+  },
+  {
+   "case": "hevc_gop2_2160p_8000",
+   "clip": "tos",
+   "coded": {
+    "fps": 24.0,
+    "height": 544,
+    "kind": "ffmpeg",
+    "path": "D:/codex/videoprocessor/eval-scratch/streaming-suite/enc/tos/tos_hevc_gop2_2160p_8000_coded.mkv",
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "width": 960
+   },
+   "content_type": "film24",
+   "frame_types": "IBBBPBBBPBBBPBPBBBPBBBPBBBPBBBPBBPIBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBPIBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPIBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBPIBBBPBBPBBBPIBBBPBBBPBBBPBBBP",
+   "frames": 192,
+   "gop": 48,
+   "grain_probe": false,
+   "id": "tos_hevc_gop2_2160p_8000",
+   "master": {
+    "fps": 24.0,
+    "height": 544,
+    "kind": "ffmpeg",
+    "path": "D:/codex/videoprocessor/eval-scratch/streaming-suite/enc/tos/3840x1714_master.mkv",
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "width": 960
+   },
+   "minigop": 4,
+   "note": "Tears of Steel 4K FFV1 master (live action + VFX, scope; dark interiors); hevc_gop2 per-shot VBR rung 2160p_8000 3840x1714 target 6348 kb/s measured 6592 kb/s, 4 shots, crop 960x544 at (1440,584)",
+   "protocol": "same",
+   "streaming": {
+    "crop": [
+     1440,
+     584,
+     960,
+     544
+    ],
+    "ffmpeg": "ffmpeg version 9.0.2-full_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers",
+    "gop_frames": 48,
+    "ladder": "uhd",
+    "measured_kbps": 6591.8,
+    "mode": "shot_vbr",
+    "preset": "hevc_gop2",
+    "raster": [
+     3840,
+     1714
+    ],
+    "rung": "2160p_8000",
+    "shots": [
+     {
+      "complexity_kbps": 286.6,
+      "frames": 34,
+      "kbps": 3570,
+      "mean_luma": 51.2,
+      "start": 0
+     },
+     {
+      "complexity_kbps": 449.5,
+      "frames": 81,
+      "kbps": 6689,
+      "mean_luma": 89.7,
+      "start": 34
+     },
+     {
+      "complexity_kbps": 551.0,
+      "frames": 60,
+      "kbps": 8034,
+      "mean_luma": 80.6,
+      "start": 115
+     },
+     {
+      "complexity_kbps": 411.0,
+      "frames": 17,
+      "kbps": 4321,
+      "mean_luma": 44.8,
+      "start": 175
+     }
+    ],
+    "source": "tos",
+    "stream_md5": "88bba7df1f36609eaa7ac2b75224fcd9",
+    "target_kbps": 6348
+   }
+  }
+ ],
+ "description": "Streaming-realistic encodes (make_streaming_encodes.py): per-shot VBR under a capped average, ABR ladder rungs and rung switches; pixels stay in scratch, never committed",
+ "name": "streaming_hevc_uhd",
+ "nr_metrics": true
+}

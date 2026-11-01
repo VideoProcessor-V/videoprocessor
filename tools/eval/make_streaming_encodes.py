@@ -125,17 +125,23 @@ def count_frames(path):
     return int(r.stdout.strip().split()[0])
 
 
-def probe_complexity(win, shots, fps, w, h, out_dir):
+def probe_complexity(win, shots, fps, w, h, out_dir, jobs=4):
     """Per shot: complexity = x264 veryfast CRF kb/s at a fixed analysis width (shared by every rung) and the
     mean luma (8-bit units, 64-px-wide gray decode)."""
     pw = min(sp.VBR["probe_width"], w)
     ph = int(round(h * pw / w / 2.0)) * 2
-    res = []
-    for i, (s, n) in enumerate(shots):
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max(jobs, 1)) as ex:
+        return list(ex.map(lambda t: _probe_one(win, t[1], fps, pw, ph, out_dir, t[0]), enumerate(shots)))
+
+
+def _probe_one(win, shot, fps, pw, ph, out_dir, i):
+    if True:
+        s, n = shot
         tmp = os.path.join(out_dir, "probe_%d.mkv" % i)
         run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-ss", ss_before(s, fps), "-i", win,
              "-frames:v", str(n), "-vf", (SCALE % (pw, ph)) + ",format=yuv420p", "-c:v", "libx264",
-             "-preset", "veryfast", "-crf", str(sp.VBR["probe_crf"]), "-threads", "4", tmp])
+             "-preset", "veryfast", "-crf", str(sp.VBR["probe_crf"]), "-threads", "1", tmp])
         kb = os.path.getsize(tmp) * 8.0 / 1000.0 / (n / float(fps))
         os.remove(tmp)
         r = subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-ss", ss_before(s, fps), "-i", win,
@@ -144,26 +150,36 @@ def probe_complexity(win, shots, fps, w, h, out_dir):
         if r.returncode != 0:
             raise RuntimeError("luma probe failed: " + r.stderr.decode("utf8", "replace")[-400:])
         mean = float(np.frombuffer(r.stdout, dtype="<u2").mean()) / 4.0 if r.stdout else 128.0
-        res.append((kb, mean))
-    return res
+        return (kb, mean)
 
 
-def encode_rung(win, shots, rates, fps, rung, preset, out_path, tmp_dir):
-    """Encode each shot as an independent closed-GOP segment at its rate and concatenate (stream copy)."""
-    segs = []
+def segment_jobs(win, shots, rates, fps, rung, preset, tmp_dir):
+    """[(segment path, ffmpeg command)] for one rung: each shot an independent closed-GOP segment."""
+    jobs = []
     for i, ((s, n), kb) in enumerate(zip(shots, rates)):
         seg = os.path.join(tmp_dir, "seg_%d_%s.mkv" % (i, rung["name"]))
-        run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-ss", ss_before(s, fps), "-i", win,
-             "-frames:v", str(n), "-an", "-vf", (SCALE % (rung["w"], rung["h"])) + ",format=" + preset["pix_fmt"]]
-            + sp.encoder_args(preset, kb, float(fps), n) + ["-fflags", "+bitexact", "-flags:v", "+bitexact", seg])
-        segs.append(seg)
-    lst = os.path.join(tmp_dir, "concat_%s.txt" % rung["name"])
+        jobs.append((seg, [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-ss", ss_before(s, fps), "-i", win,
+                           "-frames:v", str(n), "-an", "-vf", (SCALE % (rung["w"], rung["h"])) + ",format=" + preset["pix_fmt"]]
+                    + sp.encoder_args(preset, kb, float(fps), n) + ["-fflags", "+bitexact", "-flags:v", "+bitexact", seg]))
+    return jobs
+
+
+def run_parallel(cmds, jobs):
+    """Run independent single-threaded ffmpeg processes with at most `jobs` at a time (deterministic outputs)."""
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max(jobs, 1)) as ex:
+        for f in [ex.submit(run, c) for c in cmds]:
+            f.result()
+
+
+def concat_rung(seg_paths, rung_name, out_path, tmp_dir):
+    lst = os.path.join(tmp_dir, "concat_%s.txt" % rung_name)
     with open(lst, "w", encoding="utf8", newline="\n") as f:
-        for sgm in segs:
+        for sgm in seg_paths:
             f.write("file '%s'\n" % sgm.replace("\\", "/"))
     run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-c", "copy",
          "-fflags", "+bitexact", "-flags:v", "+bitexact", "-map_metadata", "-1", out_path])
-    for sgm in segs:
+    for sgm in seg_paths:
         os.remove(sgm)
     os.remove(lst)
 
@@ -204,7 +220,7 @@ def build_clip(src, a, suite_cases, log=print):
     shots = detect_shots(win, fps, n_frames, out_dir)
     gop = sp.gop_frames(preset["gop_s"], float(fps))
     log("  window %d frames, %d shots %s, GOP %d" % (n_frames, len(shots), shots, gop))
-    probe = probe_complexity(win, shots, fps, w0, h0, out_dir)
+    probe = probe_complexity(win, shots, fps, w0, h0, out_dir, a.jobs)
     cplx = [p[0] for p in probe]
     dweights = [sp.dark_weight(p[1]) for p in probe]
     durs = [n / float(fps) for _, n in shots]
@@ -217,15 +233,17 @@ def build_clip(src, a, suite_cases, log=print):
     all_rungs = sp.ladder_rungs(a.ladder, w0, h0, float(fps))
     top = all_rungs[0]
     decoded = {}  # rung name -> (coded path scaled to top raster) for the switch case
+    plan = []
     for rung in rungs:
         cid = "%s_%s_%s%s" % (src["id"], a.preset, rung["name"], "_cbr" if a.uniform else "")
         enc = os.path.join(out_dir, cid + ".mkv")
-        if a.uniform:
-            rates = [rung["kbps"]] * len(shots)
-        else:
-            rates = sp.allocate_shot_kbps(durs, cplx, rung["kbps"], weights=dweights)
-        if not os.path.exists(enc):
-            encode_rung(win, shots, rates, fps, rung, preset, enc, out_dir)
+        rates = [rung["kbps"]] * len(shots) if a.uniform else sp.allocate_shot_kbps(durs, cplx, rung["kbps"], weights=dweights)
+        plan.append((rung, cid, enc, rates))
+    todo = [(r, e, sp_) for r, c, e, rt in plan if not os.path.exists(e) for sp_ in [segment_jobs(win, shots, rt, fps, r, preset, out_dir)]]
+    run_parallel([cmd for _, _, jb in todo for _, cmd in jb], a.jobs)
+    for r, e, jb in todo:
+        concat_rung([p_ for p_, _ in jb], r["name"], e, out_dir)
+    for rung, cid, enc, rates in plan:
         kbps = os.path.getsize(enc) * 8.0 / 1000.0 / (n_frames / float(fps))
         cx, cy, cw, ch = crop_for(rung["w"], rung["h"], a.crop)
         crop_vf = "crop=%d:%d:%d:%d" % (cw, ch, cx, cy)
@@ -333,6 +351,7 @@ def main(argv=None):
     ap.add_argument("--switch", default=None, choices=sorted(sp.SWITCH_PLANS))
     ap.add_argument("--uniform", action="store_true", help="control: same bitrate for every shot (fixed-bitrate style)")
     ap.add_argument("--crop", default="%dx%d" % CROP_DEFAULT, help="WxH centre crop of the evaluated window, 0 = none")
+    ap.add_argument("--jobs", type=int, default=5, help="parallel single-threaded encode processes")
     ap.add_argument("--keep-window", action="store_true", help="keep the lossless window master (default: delete at the end of the clip)")
     ap.add_argument("--name", default=None, help="suite name (default: file stem)")
     a = ap.parse_args(argv)
