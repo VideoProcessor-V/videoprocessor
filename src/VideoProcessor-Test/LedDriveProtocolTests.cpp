@@ -430,6 +430,18 @@ namespace VideoProcessorTest
 			Assert::AreEqual(210, driver->Status().lastLight);
 		}
 
+		// Bug hunt 39 #14: the check is against the projector's own range, not the user's clamp.
+		TEST_METHOD(ReplyInsideDeviceRangeButOutsideUserClampIsAccepted)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			ProjectorConfig config = FastConfig();
+			config.lightMax = 150;
+			auto driver = OpenDriver(projector, config);
+			projector->lightReplyOverride = 200;   // above the user's clamp, inside 0..255
+			Assert::IsTrue(driver->SetLightNow(140, 500));
+			Assert::AreEqual(0, driver->Status().timeouts);
+		}
+
 		TEST_METHOD(MissingReplyIsCountedAndTheDriverCarriesOn)
 		{
 			auto projector = std::make_shared<FakeProjector>();
