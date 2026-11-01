@@ -8,6 +8,7 @@
 #include "ColorOutputProfileMigration.h"
 #include "CalibrationProfileMigration.h"
 #include "ConfigSchema.h"
+#include "SettingsExtension.h" // VPV-HOOK
 #include "MainConfigSchema.h"
 #include "PresentationConfig.h"
 #include "RendererConfigView.h"
@@ -648,7 +649,7 @@ namespace RendererProfileConfig
         return key.rfind("subtitle_", 0) == 0 || key.rfind("scope_subtitle_", 0) == 0;
     }
 
-	inline bool ValidateProfileSetting(const std::string& group, const std::string& key,
+	inline bool ValidateProfileSettingBuiltin(const std::string& group, const std::string& key, // VPV-HOOK (renamed; wrapper below)
 		const std::string& value, std::string& expected)
 	{
         if (group == "subtitles") {
@@ -1124,6 +1125,20 @@ namespace RendererProfileConfig
 		}
 		expected = "a known setting"; return false;
 	}
+
+	// VPV-HOOK
+	// Built-in keys first; a registered settings extension is asked only about a key they reject.
+	inline bool ValidateProfileSetting(const std::string& group, const std::string& key,
+		const std::string& value, std::string& expected)
+	{
+		if (ValidateProfileSettingBuiltin(group, key, value, expected)) return true;
+		std::string extensionError;
+		const SettingsExtension::Verdict verdict = SettingsExtension::Validate(group, key, value, extensionError);
+		if (verdict == SettingsExtension::Verdict::Valid) return true;
+		if (verdict == SettingsExtension::Verdict::Invalid) expected = extensionError;
+		return false;
+	}
+	// VPV-HOOK-END
 
 	inline bool ValidateBaseSetting(const std::string& key, const std::string& value)
 	{
