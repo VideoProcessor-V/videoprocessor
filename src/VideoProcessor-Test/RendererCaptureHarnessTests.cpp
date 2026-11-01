@@ -7,6 +7,9 @@
 #include <wincodec.h>
 #include <atlbase.h>
 #pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "dwmapi.lib")
+#include <dwmapi.h>
 #include "CppUnitTest.h"
 
 #include <DisplayMode.h>
@@ -56,6 +59,48 @@ using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 // profile, and its log read back to see which capture path ran. Hardware
 // only (VP_TEST_GPU=hardware): the renderer opens the real GPU, a swapchain on
 // a small off-screen window.
+namespace
+{
+	// The primary display's exact refresh (e.g. 59.940 or 119.88), not the rounded integer
+	// EnumDisplaySettings reports: the display configuration's rational rate for the active
+	// path whose source is the primary monitor (source mode at 0,0), else the DWM composition
+	// rate, else the rounded mode frequency, else 60.
+	double ExactMonitorHz()
+	{
+		UINT32 pathCount = 0, modeCount = 0;
+		if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount) == ERROR_SUCCESS && pathCount > 0)
+		{
+			std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+			std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+			if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(), &modeCount, modes.data(), nullptr) == ERROR_SUCCESS)
+			{
+				for (UINT32 i = 0; i < pathCount; ++i)
+				{
+					const UINT32 sourceIndex = paths[i].sourceInfo.modeInfoIdx;
+					if (sourceIndex >= modeCount || modes[sourceIndex].infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
+						continue;
+					const POINTL position = modes[sourceIndex].sourceMode.position;
+					if (position.x != 0 || position.y != 0)
+						continue;
+					const DISPLAYCONFIG_RATIONAL rate = paths[i].targetInfo.refreshRate;
+					if (rate.Numerator > 0 && rate.Denominator > 0)
+						return static_cast<double>(rate.Numerator) / static_cast<double>(rate.Denominator);
+				}
+			}
+		}
+		DWM_TIMING_INFO timing{};
+		timing.cbSize = sizeof(timing);
+		if (SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &timing)) && timing.rateRefresh.uiDenominator > 0 &&
+			timing.rateRefresh.uiNumerator > 0)
+			return static_cast<double>(timing.rateRefresh.uiNumerator) / static_cast<double>(timing.rateRefresh.uiDenominator);
+		DEVMODEW mode{};
+		mode.dmSize = sizeof(mode);
+		if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1)
+			return static_cast<double>(mode.dmDisplayFrequency);
+		return 60.0;
+	}
+}
+
 namespace
 {
 	std::mutex g_logMutex;
@@ -837,10 +882,7 @@ namespace
 			// As the app does: the monitor's refresh rate (smooth motion needs it;
 			// it does not come from the window's frame statistics).
 			{
-				DEVMODEW mode{};
-				mode.dmSize = sizeof(mode);
-				if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1)
-					renderer->SetRenderLoadDisplayRefreshRate(static_cast<double>(mode.dmDisplayFrequency));
+				renderer->SetRenderLoadDisplayRefreshRate(ExactMonitorHz());
 			}
 			g_harnessShadersSelected = false;
 			if (!g_harnessShaderProfiles.empty())
@@ -1760,13 +1802,7 @@ namespace Tests
 			//     SAME at every rate for one budget, within a refresh plus measurement jitter;
 			//   - recovery: after a one-second capture gap the delay returns to its level.
 			if (!RequireHardwareOrSkip("DelayBudgetFrameLadderHoldsTheTotalAtEveryRate")) return;
-			double refreshHz = 60.0;
-			{
-				DEVMODEW mode{};
-				mode.dmSize = sizeof(mode);
-				if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1)
-					refreshHz = static_cast<double>(mode.dmDisplayFrequency);
-			}
+			const double refreshHz = ExactMonitorHz();
 			DelayBudget::Model model;
 			model.refreshHz = refreshHz;
 			struct Rate { int numerator, denominator; };
@@ -4749,10 +4785,7 @@ namespace Tests
 		// display, whatever the display), never a fixed rate (owner [[vp-general-not-fixed]]).
 		static double HarnessMonitorHz()
 		{
-			DEVMODEA mode{};
-			mode.dmSize = sizeof(mode);
-			return EnumDisplaySettingsA(nullptr, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1 ?
-				static_cast<double>(mode.dmDisplayFrequency) : 60.0;
+			return ExactMonitorHz();
 		}
 
 		static FramePlan RatePlan(double sourceHz)
