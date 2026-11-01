@@ -14,6 +14,7 @@
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <VP-V/modules/input/source_analysis/light_level/LightLevelLut.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
+#include <VP-V/modules/input/source_analysis/identity/SourceIdProduct.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
 #include <VP-V/modules/scaling/rebase/RebaseDecision.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
@@ -114,7 +115,7 @@ namespace ProductCatalogTestsNs
 				Assert::IsTrue(c.decl.hasReducedMode);
 				Assert::IsTrue(c.module != nullptr && c.module[0] != '\0');
 			}
-			Assert::IsTrue(ConsumerRows().size() >= 17 + size_t(VectorDemand::kConsumerCount) + size_t(CameraLink::kCameraConsumerCount));
+			Assert::IsTrue(ConsumerRows().size() >= 19 + size_t(VectorDemand::kConsumerCount) + size_t(CameraLink::kCameraConsumerCount));
 		}
 
 		TEST_METHOD(ModuleBuildersAgreeWithTheCatalog)
@@ -175,8 +176,8 @@ namespace ProductCatalogTestsNs
 				{ kTdAdmission, "temporal detail" },
 			};
 			const Registry reg = SkeletonProducts();
-			Assert::AreEqual(size_t(kSkeletonProductEnd) - 1u, sizeof(expected) / sizeof(expected[0]),
-				L"every product but the matcher pair has an expectation");
+			Assert::AreEqual(size_t(kSkeletonProductEnd) - 2u, sizeof(expected) / sizeof(expected[0]),
+				L"every product but the matcher pair and the held-state source identity has an expectation");
 			for (const Expect& e : expected) {
 				const ConsumerRow* owner = LiveFillOwner(e.id);
 				Assert::IsNotNull(owner, L"an owner exists");
@@ -184,6 +185,14 @@ namespace ProductCatalogTestsNs
 			}
 			// The matcher pair is read as P2 (declared id): nobody reads it by its own id, and it is lane-produced.
 			Assert::IsNull(LiveFillOwner(kP2mMatcherPair));
+			// P14 source identity is HELD STATE (doc 61 D-SID1): its consumers read the latest sealed record (lag 1), so no
+			// consumer can fill it live; it still has readers.
+			Assert::IsNull(LiveFillOwner(kSourceIdentity), L"no live fill for the held-state source identity");
+			Assert::IsFalse(ConsumersOf(kSourceIdentity).empty());
+			for (const ConsumerRow* c : ConsumersOf(kSourceIdentity))
+				for (size_t k = 0; k < c->decl.count; ++k)
+					if (c->decl.consumes[k].product == kSourceIdentity)
+						Assert::IsTrue(c->decl.consumes[k].lag >= 1, L"a held-state read is lag >= 1");
 			size_t unread = 0;
 			for (const ProductDecl& d : reg.All())
 				if (ConsumersOf(d.id).empty() && d.backend != Backend::RenderOnly)
@@ -235,6 +244,7 @@ namespace ProductCatalogTestsNs
 				{ kP12LightLevel, LightLevel::kUnitVersion },
 				{ kTdAnalysis, TemporalDetail::kUnitVersion }, { kTdRefstore, TemporalDetail::kUnitVersion },
 				{ kTdAdmission, TemporalDetail::kUnitVersion },
+				{ kSourceIdentity, SourceIdentity::kUnitVersion },
 				{ kP10GrainSplit, GrainSplit::kUnitVersion }, { kP10cGrainSplitChroma, GrainSplit::kUnitVersion },
 			};
 			for (const Pair& p : pairs) {
