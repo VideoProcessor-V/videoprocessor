@@ -261,6 +261,7 @@ namespace RegionEvidence
 		// The light-level LUT as packed texels (LightLevel::PackTexels: 1024 x rgba32f = J, S, V, L / 10000). Non-null: meanNits,
 		// meanPq and the visibility stat come from it (LightLevel::FetchPacked, the shader's light_level_lut_fetch); null: the
 		// generic law below (the reduced path, named in StatusOf). Must outlive the call.
+		// With a LUT, kMeanNits is the luminance the viewer SEES (display nits after the context's mapping), not source nits.
 		const float* lutTexels = nullptr;
 	};
 

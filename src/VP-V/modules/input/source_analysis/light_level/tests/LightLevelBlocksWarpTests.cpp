@@ -360,10 +360,11 @@ if (gid.x < 80 && gid.y < 48) {
 			const std::string header = LB::LightLevelBlocksHeaderGlsl() + LB::LightLevelBlocksAccessorGlsl();
 			const int grid[2] = { g.gw, g.gh }, block = kB;
 			const float mix = static_cast<float>(p.surroundMix);
-			const pl_shader_var vars[3] = { { pl_var_ivec2("ll_grid"), grid, true }, { pl_var_int("ll_block"), &block, true },
-				{ pl_var_float("ll_mix"), &mix, true } };
+			const int present = 1;
+			const pl_shader_var vars[4] = { { pl_var_ivec2("ll_grid"), grid, true }, { pl_var_int("ll_block"), &block, true },
+				{ pl_var_float("ll_mix"), &mix, true }, { pl_var_int("ll_present"), &present, true } };
 			const pl_shader_desc desc[3] = { Sampled("ll_blocks", blockTex), Sampled("light_level_lut", lutTex), Storage("test_out", outTex) };
-			Check(Run(dispatch, header.c_str(), kBody, desc, 3, vars, 3, kOw, kOh), "the accessor shader failed");
+			Check(Run(dispatch, header.c_str(), kBody, desc, 3, vars, 4, kOw, kOh), "the accessor shader failed");
 			const std::vector<float> got = Download(gpu, outTex);
 			int bad = 0, withConf = 0;
 			double worst = 0.0;

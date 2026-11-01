@@ -369,6 +369,14 @@ namespace VideoProcessorTest
 			for (size_t i = 0; i < n; ++i) anyConf = anyConf || o.data[i * 4 + LB::kConf] == 1.0;
 			Require(anyConf, "confidence returns with the products");
 			Require(Has(o.status, "viewing distance unknown"), "the fallback sigma is reported");
+			{   // a reduced frame is no smoothing history: the next full frame is unsmoothed and says so
+				LB::State s2;
+				LB::In none; none.frameAplCode = 300.0;
+				s2.Step(none, p, &lut, LB::Events());
+				in.stats = &good;
+				const LB::Out full = s2.Step(in, p, &lut, LB::Events());
+				Require(full.mode == LB::Mode::Full && full.reset == LB::Reset::NoHistory, "no-history reset");
+			}
 		}
 
 		TEST_METHOD(BlockLawMatchesThePythonMirror)
@@ -465,10 +473,10 @@ namespace VideoProcessorTest
 			for (const VpSkeleton::Dims& dm : dims)
 			{
 				const uint64_t bytes = LB::BlockBytes(static_cast<int>(dm.width), static_cast<int>(dm.height));
-				Require(bytes == 8160u * 8u, "block bytes at " + std::to_string(dm.width));
+				Require(bytes == 8160u * 16u, "block bytes at " + std::to_string(dm.width));
 				Require(bytes + 1024u * 16u <= VpSkeleton::BytesOf(d.size, dm), "declared size too small at " + std::to_string(dm.width));
 			}
-			Require(VpSkeleton::BytesOf(d.size, dims[0]) == 16384u + 8160u * 8u, "declaration at 1080p is exact (LUT + blocks)");
+			Require(VpSkeleton::BytesOf(d.size, dims[0]) == 16384u + 8160u * 16u, "declaration at 1080p is exact (LUT + blocks)");
 			Require(d.inputCount >= 1, "P12 reads P11");
 		}
 

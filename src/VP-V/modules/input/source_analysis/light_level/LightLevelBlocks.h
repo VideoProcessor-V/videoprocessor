@@ -47,7 +47,7 @@ namespace LightLevel
 	{
 		enum Channel { kJSurround = 0, kJLocal = 1, kV = 2, kConf = 3 };
 		constexpr int kChannels = 4;
-		constexpr int kBytesPerBlock = 8;          // rgba16f in the slot (core/Products.h AddTerm(p12, 4, 8))
+		constexpr int kBytesPerBlock = 16;         // rgba32f in the slot: the one-pole reads J_surround back, a half float would stall it (core/Products.h)
 		constexpr double kVCap = 64.0;             // half-float storage and a sane consumer range
 		constexpr double kSupportEpsilon = 1e-6;   // picture weight below which the surround falls back to the frame level
 
@@ -60,7 +60,7 @@ namespace LightLevel
 			Neutral       // no LUT / no display context: the light term is 1 (consumers ignore the product)
 		};
 
-		enum class Reset : uint8_t { None, First, Cut, Resync, Rebase, Geometry, Context };
+		enum class Reset : uint8_t { None, First, Cut, Resync, Rebase, Geometry, Context, NoHistory };
 
 		inline const char* Token(Reset r)
 		{
@@ -73,6 +73,7 @@ namespace LightLevel
 			case Reset::Rebase: return "re-base";
 			case Reset::Geometry: return "geometry change";
 			case Reset::Context: return "context change";
+			case Reset::NoHistory: return "no full previous frame";
 			}
 			return "?";
 		}
@@ -90,7 +91,7 @@ namespace LightLevel
 			double tauSeconds = 0.3;                     // one-pole time constant (per-frame weight via GeneralRate)
 			double frameRateHz = 0.0;                    // measured; 0 = unknown (the 60 Hz reference weight)
 			double surroundMix = 0.5;                    // J_eff = mix(J_p, J_s, surroundMix * conf), tuned by the eval
-			double frameLevelConf = 0.5;                 // conf of the frame-level fallback
+			double frameLevelConf = 0.0;                 // conf of the frame-level fallback (design: 0 without stats; consumers go light-neutral)
 		};
 
 		struct Kernel
@@ -287,7 +288,7 @@ namespace LightLevel
 			if (lut->exactness == Exactness::Approx) why.push_back(lut->status);
 
 			const bool statsOk = in.stats != nullptr && in.stats->Valid() && in.stats->grid.w == p.w && in.stats->grid.h == p.h &&
-				in.stats->grid.B == p.B;
+				in.stats->grid.B == p.B && in.stats->picture == RegionEvidence::PictureOrFrame(p.picture, p.w, p.h);
 			if (!statsOk)
 			{
 				const char* reason = in.stats == nullptr ? "no region statistics" : "region statistics of another size or grid";
@@ -349,12 +350,13 @@ namespace LightLevel
 				if (!valid_) why = Reset::First;
 				else if (geo != geometry_) why = Reset::Geometry;
 				else if (ctx != context_) why = Reset::Context;
+				else if (prev_.empty()) why = Reset::NoHistory;
 				else if (ev.cut) why = Reset::Cut;
 				else if (ev.resync) why = Reset::Resync;
 				else if (ev.rebase) why = Reset::Rebase;
 				const bool reset = why != Reset::None;
 				Out o = Compute(in, p, lut, reset || prev_.empty() ? nullptr : prev_.data(), reset, why);
-				if (reset && why != Reset::First && o.mode == Mode::Full)
+				if (reset && why != Reset::First)
 					o.status += (o.status.empty() ? std::string() : std::string(" | ")) + "Light level: reset (" + Token(why) + ")";
 				prev_ = o.data;
 				if (o.mode != Mode::Full) prev_.clear();   // a reduced frame is no smoothing history

@@ -17,7 +17,7 @@
 //    vpu_light_block(ivec2 blk)            the raw texel (conf 0 outside the grid)
 //    vpu_light_jeff(vec2 px, float code10) vec4(J_eff, V at the pixel's own code, conf, 1): J_eff = J_p + (J_s - J_p) *
 //                                          (ll_mix * conf), J_s bilinear over the block centres. conf 0: J_eff = J_p.
-//    Descriptors: ll_blocks (sampled, grid size, nearest), light_level_lut. Uniforms: ivec2 ll_grid, int ll_block, float ll_mix.
+//    Descriptors: ll_blocks (sampled, grid size, nearest), light_level_lut. Uniforms: ivec2 ll_grid, int ll_block, float ll_mix, int ll_present (0: product absent, J_eff = J_p, conf 0).
 #pragma once
 
 #include "LightLevelGlsl.h"
@@ -38,15 +38,15 @@ namespace LightLevel
 			return R"GLSL(
 ivec2 blk = ivec2(gl_GlobalInvocationID.xy);
 if (blk.x < ll_grid.x && blk.y < ll_grid.y) {
-    vec4 own0 = texelFetch(re_s0, blk, 0);
-    vec4 own3 = texelFetch(re_s3, blk, 0);
-    vec4 own4 = texelFetch(re_s4, blk, 0);
-    bool in_picture = own4.x >= 0.5;
-    bool have_grain = own4.w >= 0.0;
     vec4 o;
     if (ll_mode == 1) {
         o = vec4(ll_frame_j, ll_frame_j, ll_frame_v, ll_frame_conf);
     } else {
+        vec4 own0 = texelFetch(re_s0, blk, 0);
+        vec4 own3 = texelFetch(re_s3, blk, 0);
+        vec4 own4 = texelFetch(re_s4, blk, 0);
+        bool in_picture = own4.x >= 0.5;
+        bool have_grain = own4.w >= 0.0;
         float sw = 0.0, sj = 0.0;
         int y0 = max(0, blk.y - ll_radius), y1 = min(ll_grid.y - 1, blk.y + ll_radius);
         int x0 = max(0, blk.x - ll_radius), x1 = min(ll_grid.x - 1, blk.x + ll_radius);
@@ -86,6 +86,10 @@ vec4 vpu_light_block(ivec2 blk)
 }
 vec4 vpu_light_jeff(vec2 px, float code10)
 {
+    if (ll_present == 0) {   // product absent: the pixel's own level, conf 0 (ll_blocks may be unbound)
+        vec4 p = light_level_lut_fetch(code10);
+        return vec4(p.x, p.z, 0.0, 1.0);
+    }
     float fx = px.x / float(ll_block) - 0.5, fy = px.y / float(ll_block) - 0.5;
     float flx = floor(fx), fly = floor(fy);
     int xa = int(flx), ya = int(fly);

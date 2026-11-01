@@ -623,7 +623,8 @@ inline void AppendRegionProducts(std::vector<ProductDecl>& decls)
                            content, Bit(kSettingsAnalysis) | Bit(kSettingsOutput));
     AddInput(p12, kP11RegionBlockStats, 0);
     p12.size.fixedBytes = 16384;
-    AddTerm(p12, 4, 8);   // 4 = the 16 px cell: exact at 1080p, an upper bound at 4K/8K (B = 32/64 give the same 8160 blocks = 65 KB)
+    AddTerm(p12, 4, 16);  // rgba32f (the one-pole state must not be half float); 4 = the 16 px cell: exact at 1080p, an upper bound at 4K/8K (8160 blocks = 130 KB)
+    AddInput(p12, kP4SourceStats, 0);   // FrameLevel fallback reads P4's APL
     p12.history = 1;      // the previous frame's slot is the temporal one-pole's state (WP2); no private copy
     p12.missingInputForm = true;   // without P11: frame level from P4's APL, else code only (LightLevelBlocks.h Mode)
     p12.refRenderMs = 0.02f;

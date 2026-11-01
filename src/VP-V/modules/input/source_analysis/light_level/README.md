@@ -84,7 +84,7 @@ Deterministic (fixed loops, double math, no threads), C++14, no Windows headers.
 
 ## Block product P12 (WP2, unit version 2)
 
-One rgba texel per region block (the P11 grid; 8160 blocks = 65 KB per frame at 1080p, 4K and 8K, plus the 16 KB LUT):
+One rgba texel per region block (the P11 grid; 8160 blocks = 130 KB per frame as rgba32f (the one-pole reads J_surround back) at 1080p, 4K and 8K, plus the 16 KB LUT):
 `(J_surround, J_local, V, conf)`. Declared in `core/Products.h` (P12, history 1: the previous slot is the one-pole state, no
 private copy), catalogued in `core/ProductCatalog.h` (expected unit version 2), counted by the VRAM governor.
 
