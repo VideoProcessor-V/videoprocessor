@@ -6,9 +6,15 @@
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/modules/output/dither/DitherNeed.h>
 #include <VP-V/modules/output/dither/SigmaDeltaDomain.h>
+#include <VP-V/modules/output/dither/DitherNeedGlsl.h>
+#include <VP-V/modules/output/dither/DitherNeedGpu.h>
 #include "DitherNeedGolden.generated.h"
 
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -1335,6 +1341,507 @@ namespace VideoProcessorTest
 			Assert::IsTrue(worstRelN <= 1e-12, L"N");
 			Assert::IsTrue(worstMean <= 1e-9, L"meanY");
 			Assert::IsTrue(worstBanding <= 1e-7, L"banding (float in Sample)");
+		}
+	};
+
+	// ---- DitherNeed on the GPU (WARP unless VP_TEST_GPU=hardware): the block pass, the quantiser's use of the map -----------------
+	//
+	// Byte-identity of the quantiser with dither_need 0 (the owner's rule), by construction and by test: in `Temporal sigma-delta.glsl`
+	// the only executed change at dither_need <= 0.5 is `float amp = noise_amplitude;` and its use in place of noise_amplitude in
+	// the dither term and in resid_bound(a) (0.5 + a, the same float addition as before); the dn_extra() call and the VPDN fetches
+	// sit inside `if (dither_need > 0.5)`. The tests compare a run with the dn_* parameters untouched with runs that set them (and
+	// a bound texture) at dither_need 0, 16 refreshes at each of four levels, code for code.
+	namespace
+	{
+		void DwCheck(bool ok, const std::string& what)
+		{
+			if (ok) return;
+			Logger::WriteMessage((what + "\n").c_str());
+			Assert::Fail(std::wstring(what.begin(), what.end()).c_str());
+		}
+
+		pl_tex DwRgba32f(pl_gpu gpu, int w, int h, const float* data, bool storable = false)
+		{
+			const auto caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | (storable ? PL_FMT_CAP_STORABLE : 0));
+			pl_fmt fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, caps);
+			Assert::IsNotNull(fmt, L"no rgba32f format");
+			pl_tex_params params{};
+			params.w = w;
+			params.h = h;
+			params.format = fmt;
+			params.sampleable = true;
+			params.storable = storable;
+			params.host_readable = storable;
+			params.initial_data = data;
+			pl_tex tex = pl_tex_create(gpu, &params);
+			Assert::IsNotNull(tex, L"cannot create the texture");
+			return tex;
+		}
+
+		std::vector<float> DwDownload(pl_gpu gpu, pl_tex tex)
+		{
+			std::vector<float> v(static_cast<size_t>(tex->params.w) * tex->params.h * 4);
+			pl_tex_transfer_params d{};
+			d.tex = tex;
+			d.ptr = v.data();
+			Assert::IsTrue(pl_tex_download(gpu, &d), L"the texture is not host-readable");
+			return v;
+		}
+
+		std::string DwLf(std::string s)
+		{
+			size_t at = 0;
+			while ((at = s.find("\r\n", at)) != std::string::npos) s.erase(at, 1);
+			return s;
+		}
+
+		// ---- the quantiser with and without the map ----
+
+		std::map<std::string, std::string> DwSigmaParams(bool full, const char* noise)
+		{
+			return { { "enabled", "1" }, { "levels_full", full ? "1" : "0" }, { "swapchain_bits", "10" }, { "color_bits", "10" },
+				{ "noise_amplitude", noise } };
+		}
+
+		// One fresh fixture, chain and sigma-delta hook; `frames` refreshes at each grey (the hook's state carries across the
+		// greys, the same way in every run); a bound map (rgba32f, e in .x) needs the fork's set_texture.
+		std::vector<int> DwSigmaCodes(const std::map<std::string, std::string>& params, const std::vector<float>& greys, int frames,
+			bool full, const std::vector<float>& mapData = std::vector<float>(), int mapW = 0, int mapH = 0)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			std::string log;
+			fixture.CaptureLog(&log);
+			CustomHookChain::Chain chain({
+				[](const std::string& file, std::string& source, std::string& reason)
+				{
+					source = LoadBundledShader(file.c_str());
+					reason = "bundled shader not found";
+					return !source.empty();
+				},
+				[&fixture](const std::string& source) -> const pl_hook*
+				{
+					return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+				},
+				[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } });
+			ConfiguredShaderRule sigma;
+			sigma.name = "sigma_delta";
+			sigma.filename = "Temporal sigma-delta.glsl";
+			sigma.parameters = params;
+			chain.Configure({ sigma });
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = values.outputHeight = 2;
+			chain.Ensure(values);
+			std::vector<const pl_hook*> hooks;
+			chain.Collect(false, hooks);
+			Assert::AreEqual(size_t{ 1 }, hooks.size(), L"libplacebo rejected the sigma-delta (the dither need parameters or texture?)");
+			pl_tex map = nullptr;
+			if (!mapData.empty())
+			{
+#ifdef PL_VP_MPV_USER_SHADER_SET_TEXTURE
+				map = DwRgba32f(fixture.Gpu(), mapW, mapH, mapData.data());
+				Assert::IsTrue(pl_mpv_user_shader_set_texture(hooks[0], "VPDN", map), L"VPDN not accepted");
+#else
+				(void)mapW; (void)mapH;
+				Assert::Fail(L"a bound map needs the libplacebo fork's pl_mpv_user_shader_set_texture");
+#endif
+			}
+			const pl_color_levels levels = full ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
+			std::vector<int> codes;
+			for (const float grey : greys)
+			{
+				const std::vector<int> c = fixture.RenderTenBitSequence(hooks, levels, grey, frames, nullptr, 10);
+				codes.insert(codes.end(), c.begin(), c.end());
+			}
+#ifdef PL_VP_MPV_USER_SHADER_SET_TEXTURE
+			if (map)
+			{
+				pl_mpv_user_shader_set_texture(hooks[0], "VPDN", nullptr);
+				pl_tex_destroy(fixture.Gpu(), &map);
+			}
+#endif
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+			return codes;
+		}
+
+		// Greys that are exact in the rgba16f OUTPUT texture (m / 2048, m in [1024, 2047]): the quantiser's input is then
+		// x = grey * 1023 exactly (full range, true 10-bit), with a fraction well away from a whole code.
+		std::vector<float> DwGreys() { return { 1100.0f / 2048.0f, 1357.0f / 2048.0f, 1601.0f / 2048.0f, 1999.0f / 2048.0f }; }
+
+		// The CPU model of `frames` refreshes of the quantiser at one grey: SigmaDeltaDomain::QuantiseStep with the shader's
+		// dither (frame / 5 = firstFrame + j), amplitude `amp` (float, as the shader's), x moved by dx. True when every code matches.
+		bool DwModelMatches(const int* got, int frames, float grey, int firstFrame, float amp, double dx)
+		{
+			const auto limits = SigmaDeltaDomain::Limits(10, true);
+			const double x = static_cast<double>(grey * 1023.0f) + dx;
+			double r = 0.0;
+			for (int j = 0; j < frames; ++j)
+			{
+				const double d = static_cast<double>((SigmaDeltaDomain::Ign(0.0f, 0.0f, firstFrame + j) - 0.5f) * 2.0f * amp);
+				if (static_cast<int>(SigmaDeltaDomain::QuantiseStep(x, r, d, limits, amp)) != got[j]) return false;
+			}
+			return true;
+		}
+
+		bool DwModelMatchesAnyDx(const int* got, int frames, float grey, int firstFrame, float amp)
+		{
+			for (const double dx : { 0.0, 1e-4, -1e-4, 3e-4, -3e-4 })
+				if (DwModelMatches(got, frames, grey, firstFrame, amp, dx)) return true;
+			return false;
+		}
+
+		std::wstring DwCodes(const std::vector<int>& c)
+		{
+			std::wstring s;
+			for (const int v : c) s += std::to_wstring(v) + L" ";
+			return s;
+		}
+
+		std::vector<float> DwConstantMap(int w, int h, float e)
+		{
+			std::vector<float> m(static_cast<size_t>(w) * h * 4, 0.0f);
+			for (size_t i = 0; i < static_cast<size_t>(w) * h; ++i) m[i * 4] = e;
+			return m;
+		}
+
+		bool DwHaveSetTexture()
+		{
+#ifdef PL_VP_MPV_USER_SHADER_SET_TEXTURE
+			return true;
+#else
+			return false;
+#endif
+		}
+	}
+
+	TEST_CLASS(DitherNeedWarpTests)
+	{
+	public:
+		// The text of dn_extra in the DitherNeedGlsl.h string (run by the probe test below) is the text in the shader.
+		TEST_METHOD(DitherNeedWarpAccessorTextIsInTheShader)
+		{
+			const std::string shader = DwLf(LoadBundledShader("Temporal sigma-delta.glsl"));
+			Assert::IsFalse(shader.empty(), L"bundled shader not found");
+			const std::string accessor = DwLf(DitherNeed::ExtraAccessorGlsl());
+			Assert::IsTrue(shader.find(accessor) != std::string::npos, L"dn_extra in the shader differs from DitherNeedGlsl.h");
+			Assert::IsTrue(shader.find(accessor, shader.find(accessor) + 1) == std::string::npos, L"dn_extra appears twice");
+			for (const char* needed : { "//!PARAM dither_need\n", "//!PARAM dn_scale_x\n", "//!PARAM dn_scale_y\n", "//!PARAM dn_off_x\n",
+				"//!PARAM dn_off_y\n", "//!PARAM dn_block\n", "//!TEXTURE VPDN\n//!SIZE 1 1\n//!FORMAT r8\n//!FILTER NEAREST\n//!BORDER CLAMP\n00\n",
+				"//!BIND VPDN\n", "float resid_bound(float a)", "* 2.0 * amp);" })
+				Assert::IsTrue(shader.find(needed) != std::string::npos, (std::wstring(L"the shader lacks: ") + DnWide(needed)).c_str());
+			// The quantiser pass is the only pass that binds VPDN.
+			size_t binds = 0;
+			for (size_t at = shader.find("//!BIND VPDN"); at != std::string::npos; at = shader.find("//!BIND VPDN", at + 1)) ++binds;
+			Assert::AreEqual(size_t{ 1 }, binds);
+			Assert::IsTrue(shader.find("resid_bound(noise_amplitude)") == std::string::npos, L"resid_bound must take the pixel's amplitude");
+		}
+
+		// (a) The block pass against the float mirror (MapF) over the golden frames: a first frame, discontinuities (reset),
+		// smoothing, hysteresis holds (the repeated frames), then an off frame (zeros) and the recovery (reset).
+		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpBlockPassMatchesTheFloatMirror)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DitherNeedWarpBlockPassMatchesTheFloatMirror)
+		{
+			using namespace DitherNeedGolden;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			Assert::IsNotNull(dispatch);
+			DnFixture fx[3];
+			pl_tex gsTex[3] = {};
+			pl_tex pre[3][RegionEvidence::kPrecursorTextures] = {};
+			for (int f = 0; f < 3; ++f)
+			{
+				fx[f].Make(f);
+				const size_t n = fx[f].grid.Count();
+				std::vector<float> gs(n * 4, 0.0f);
+				for (size_t i = 0; i < n; ++i) gs[i * 4] = static_cast<float>(fx[f].grain.split.N[i]);
+				gsTex[f] = DwRgba32f(gpu, fx[f].grid.gw, fx[f].grid.gh, gs.data());
+				for (int t = 0; t < RegionEvidence::kPrecursorTextures; ++t)
+				{
+					std::vector<float> d(n * 4, 0.0f);
+					for (size_t i = 0; i < n; ++i)
+						for (int c = 0; c < 4; ++c)
+							d[i * 4 + c] = static_cast<float>(fx[f].pre.data[i * RegionEvidence::kPrecursorChannels + t * 4 + c]);
+					pre[f][t] = DwRgba32f(gpu, fx[f].grid.gw, fx[f].grid.gh, d.data());
+				}
+			}
+			const LightLevel::Lut lut = DnFixture::GoldenLut();
+			const std::vector<float> lutTexels = LightLevel::PackTexels(lut), outTexels = LightLevel::PackOutputTexels(lut);
+			pl_tex lutTex = DwRgba32f(gpu, LightLevel::kLutSize, 1, lutTexels.data());
+			pl_tex lutOutTex = DwRgba32f(gpu, LightLevel::kLutSize, 1, outTexels.data());
+
+			DitherNeed::Gpu::BlockPass pass;
+			pass.SetHostReadable(true);
+			DitherNeed::MapF mirror;
+			double worst = 0.0, worstOther = 0.0;
+			float raisedMax = 0.0f;
+			bool afterOff = false;
+			for (int s = 0; s < kSteps + 2; ++s)
+			{
+				const bool offStep = s == kSteps;
+				const int frame = s < kSteps ? kStep[s].frame : 1;
+				const bool disc = s < kSteps && kStep[s].discontinuity != 0;
+				const double dt = s < kSteps ? kStep[s].dt : 1.0 / 60;
+				const DnFixture& in = fx[frame];
+				DitherNeed::FrameArgs fa = DnArgs(in.grid, dt, disc, "golden");
+				fa.colorBits = kColorBits;
+				fa.enabled = !offStep;
+				std::vector<DitherNeed::BlockIn> b;
+				Assert::AreEqual(0u, DitherNeed::Gather(in.Inputs(), in.grid, b));
+				std::vector<DitherNeed::BlockInT<float>> bf(b.size());
+				for (size_t i = 0; i < b.size(); ++i)
+				{
+					bf[i].N = static_cast<float>(b[i].N); bf[i].meanY = static_cast<float>(b[i].meanY);
+					bf[i].banding = static_cast<float>(b[i].banding); bf[i].V = static_cast<float>(b[i].V);
+					bf[i].Sout = static_cast<float>(b[i].Sout); bf[i].inPicture = b[i].inPicture; bf[i].overlay = b[i].overlay;
+				}
+				const DitherNeed::Result res = mirror.Update(fa, bf);
+				Assert::IsTrue(res == (offStep ? DitherNeed::Result::Off : DitherNeed::Result::On));
+
+				DitherNeed::Gpu::Args a;
+				a.gsBlocks = gsTex[frame];
+				for (int t = 0; t < RegionEvidence::kPrecursorTextures; ++t) a.precursors[t] = pre[frame][t];
+				a.lut = lutTex; a.lutOut = lutOutTex;
+				a.gridW = in.grid.gw; a.gridH = in.grid.gh; a.blockPx = in.grid.B;
+				a.derive = RegionEvidence::Uniforms(RegionEvidence::DeriveParams());
+				a.params = fa.params;
+				a.qOut = DitherNeed::QOut(kColorBits);
+				a.alpha = DitherNeed::AlphaFor(dt, fa.params.tauSeconds);
+				a.reset = s == 0 || disc || afterOff;
+				a.off = offStep;
+				afterOff = offStep;
+				DwCheck(pass.Run(gpu, dispatch, a), "the block pass failed: " + pass.LastError());
+				const std::vector<float> got = DwDownload(gpu, pass.Current());
+				const std::vector<float>& want = mirror.Extra();
+				Assert::AreEqual(want.size(), in.grid.Count());
+				for (size_t i = 0; i < want.size(); ++i)
+				{
+					worst = (std::max)(worst, std::fabs(static_cast<double>(got[i * 4]) - want[i]));
+					worstOther = (std::max)(worstOther, static_cast<double>(std::fabs(got[i * 4 + 1]) + std::fabs(got[i * 4 + 2]) + std::fabs(got[i * 4 + 3])));
+					raisedMax = (std::max)(raisedMax, want[i]);
+				}
+			}
+			char msg[160];
+			std::snprintf(msg, sizeof(msg), "DITHER_NEED_BLOCK_PASS steps=%d worst=%.3e other_channels=%.1e max_extra=%.3f vram=%zu\n", kSteps + 2, worst,
+				worstOther, raisedMax, pass.VramBytes());
+			Logger::WriteMessage(msg);
+			DwCheck(worst <= 1e-5, std::string("the block pass differs from the float mirror: ") + msg);
+			DwCheck(worstOther == 0.0, "channels y, z, w of the state must be zero");
+			DwCheck(raisedMax > 0.05f, "the golden frames must raise at least one block");
+			Assert::AreEqual(static_cast<size_t>(2) * fx[0].grid.Count() * 16, pass.VramBytes());
+			pass.Release(gpu);
+			pl_tex_destroy(gpu, &lutTex);
+			pl_tex_destroy(gpu, &lutOutTex);
+			for (int f = 0; f < 3; ++f)
+			{
+				pl_tex_destroy(gpu, &gsTex[f]);
+				for (int t = 0; t < RegionEvidence::kPrecursorTextures; ++t) pl_tex_destroy(gpu, &pre[f][t]);
+			}
+			pl_dispatch_destroy(&dispatch);
+		}
+
+		// (b) dither_need 0 (with the other dn_* set, and a map bound where the fork allows) is byte-identical to the dn_* untouched.
+		// (c) dither_need 1 with the 1x1 placeholder, and with an all-zero map, is identical too.
+		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpOffAndZeroMapAreByteIdentical)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DitherNeedWarpOffAndZeroMapAreByteIdentical)
+		{
+			const std::vector<float> greys = DwGreys();
+			const int frames = 16;
+			const std::vector<int> base = DwSigmaCodes(DwSigmaParams(true, "0.15"), greys, frames, true);
+			Assert::AreEqual(greys.size() * frames, base.size());
+			bool varies = false;
+			for (int j = 0; j < frames; ++j) varies = varies || base[static_cast<size_t>(j)] != base[0];
+			Assert::IsTrue(varies, L"the reference run must dither (noise_amplitude 0.15 at an off-grid level)");
+
+			auto withDn = [](std::map<std::string, std::string> p, const char* need)
+			{
+				p["dither_need"] = need;
+				p["dn_scale_x"] = "3.7"; p["dn_scale_y"] = "0.5"; p["dn_off_x"] = "11"; p["dn_off_y"] = "-4"; p["dn_block"] = "32";
+				return p;
+			};
+			const std::vector<int> offSet = DwSigmaCodes(withDn(DwSigmaParams(true, "0.15"), "0"), greys, frames, true);
+			Assert::IsTrue(offSet == base, (L"dither_need 0 with dn_* set differs: " + DwCodes(offSet) + L" vs " + DwCodes(base)).c_str());
+
+			// (c) placeholder: dither_need 1, nothing bound (VPDN is the 1x1 zero r8 texture).
+			const std::vector<int> placeholder = DwSigmaCodes(withDn(DwSigmaParams(true, "0.15"), "1"), greys, frames, true);
+			Assert::IsTrue(placeholder == base, (L"dither_need 1 with the placeholder differs: " + DwCodes(placeholder) + L" vs " + DwCodes(base)).c_str());
+
+			if (!DwHaveSetTexture())
+			{
+				Logger::WriteMessage("DitherNeedWarpOffAndZeroMapAreByteIdentical: no pl_mpv_user_shader_set_texture in this libplacebo; bound-map cases skipped\n");
+				return;
+			}
+			const std::vector<int> zero = DwSigmaCodes(withDn(DwSigmaParams(true, "0.15"), "1"), greys, frames, true, DwConstantMap(4, 3, 0.0f), 4, 3);
+			Assert::IsTrue(zero == base, (L"dither_need 1 with an all-zero map differs: " + DwCodes(zero) + L" vs " + DwCodes(base)).c_str());
+			// dither_need 0 with a non-zero map bound: never read.
+			const std::vector<int> unread = DwSigmaCodes(withDn(DwSigmaParams(true, "0.15"), "0"), greys, frames, true, DwConstantMap(4, 3, 0.3f), 4, 3);
+			Assert::IsTrue(unread == base, (L"dither_need 0 with a bound map differs: " + DwCodes(unread) + L" vs " + DwCodes(base)).c_str());
+		}
+
+		// (d) A constant extra e: the codes equal the CPU quantiser model at amplitude aBase + e. The model's frame phase is found
+		// from the plain run (the shader's frame / 5 counter has an unknown but fixed start), then used for every run.
+		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpConstantExtraFollowsTheCpuQuantiserModel)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DitherNeedWarpConstantExtraFollowsTheCpuQuantiserModel)
+		{
+			if (!DwHaveSetTexture())
+			{
+				Logger::WriteMessage("DitherNeedWarpConstantExtraFollowsTheCpuQuantiserModel: no set_texture in this libplacebo; skipped\n");
+				return;
+			}
+			const std::vector<float> greys = DwGreys();
+			const int frames = 16;
+			const float aBase = 0.15f;
+			const std::vector<int> base = DwSigmaCodes(DwSigmaParams(true, "0.15"), greys, frames, true);
+			// The frame phase: the one offset at which the plain run is the model's at amplitude aBase.
+			int phase = -1;
+			for (int o = 0; o < 64 && phase < 0; ++o)
+				if (DwModelMatchesAnyDx(base.data(), frames, greys[0], o, aBase)) phase = o;
+			if (phase < 0)
+			{
+				std::string codes;
+				for (int j = 0; j < frames; ++j) codes += std::to_string(base[static_cast<size_t>(j)]) + " ";
+				DwCheck(false, "no frame phase makes the CPU model reproduce the plain run at grey 0 (codes " + codes + ")");
+			}
+			for (size_t g = 0; g < greys.size(); ++g)
+				DwCheck(DwModelMatchesAnyDx(&base[g * frames], frames, greys[g], phase + static_cast<int>(g) * frames, aBase),
+					"the plain run leaves the model at grey " + std::to_string(g));
+
+			bool differs = false;
+			for (const float e : { 0.1f, 0.25f, 0.35f })
+			{
+				std::map<std::string, std::string> p = DwSigmaParams(true, "0.15");
+				p["dither_need"] = "1";
+				p["dn_block"] = "16";
+				const std::vector<int> got = DwSigmaCodes(p, greys, frames, true, DwConstantMap(4, 3, e), 4, 3);
+				const float amp = (std::min)(aBase + (std::max)(e, 0.0f), 0.5f);
+				for (size_t g = 0; g < greys.size(); ++g)
+				{
+					const int* c = &got[g * frames];
+					DwCheck(DwModelMatchesAnyDx(c, frames, greys[g], phase + static_cast<int>(g) * frames, amp),
+						"extra " + std::to_string(e) + ": the codes at grey " + std::to_string(g) + " leave the CPU model at amplitude " +
+						std::to_string(amp));
+					for (int j = 0; j < frames; ++j) differs = differs || c[j] != base[g * frames + j];
+				}
+			}
+			DwCheck(differs, "a raised amplitude must change at least one code (the test would be vacuous)");
+		}
+
+		// (e) Total amplitude 0.5 (aBase 0.15 + e 0.35): codes that are exact without any dither stay exact: black, white, and
+		// the footroom / headroom levels when libplacebo hands them through.
+		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap)
+		{
+			if (!DwHaveSetTexture())
+			{
+				Logger::WriteMessage("DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap: no set_texture in this libplacebo; skipped\n");
+				return;
+			}
+			const std::vector<float> levels = { 0.0f, 1.0f, 1.05f, -0.04f };   // black, white, WTW, BTB (limited range)
+			const int frames = 16;
+			const std::vector<int> exact = DwSigmaCodes(DwSigmaParams(false, "0"), levels, frames, false);
+			std::map<std::string, std::string> p = DwSigmaParams(false, "0.15");
+			p["dither_need"] = "1";
+			p["dn_block"] = "16";
+			const std::vector<int> capped = DwSigmaCodes(p, levels, frames, false, DwConstantMap(4, 3, 0.35f), 4, 3);
+			int asserted = 0;
+			for (size_t g = 0; g < levels.size(); ++g)
+			{
+				bool constant = true;
+				for (int j = 1; j < frames; ++j) constant = constant && exact[g * frames + j] == exact[g * frames];
+				if (!constant)
+				{
+					Logger::WriteMessage(("level " + std::to_string(levels[g]) + " is not constant without dither; not asserted\n").c_str());
+					continue;
+				}
+				++asserted;
+				for (int j = 0; j < frames; ++j)
+					Assert::AreEqual(exact[g * frames], capped[g * frames + j],
+						(L"an exact code moved at total amplitude 0.5, level index " + std::to_wstring(g) + L" refresh " + std::to_wstring(j)).c_str());
+			}
+			Assert::IsTrue(asserted >= 2, L"black and white must be exact without dither");
+		}
+
+		// (f) dn_extra against DitherNeed::SampleExtra: the text of DitherNeedGlsl.h in a probe compute pass (a test asserts it is the
+		// shader's text), VPDN a random map, positions inside and outside the grid, three placements.
+		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpAccessorMatchesSampleExtra)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DitherNeedWarpAccessorMatchesSampleExtra)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			Assert::IsNotNull(dispatch);
+			const int gw = 12, gh = 8;
+			std::vector<float> map(static_cast<size_t>(gw) * gh), mapTexels(map.size() * 4, 0.0f);
+			for (size_t i = 0; i < map.size(); ++i)
+			{
+				map[i] = static_cast<float>((i * 37 + 11) % 100) / 100.0f * 0.35f;
+				mapTexels[i * 4] = map[i];
+			}
+			std::vector<int> px, py;
+			for (const int y : { 0, 1, 3, 9, 20, 31, 40, 63, 70, 79, 100 })
+				for (const int x : { 0, 1, 7, 16, 33, 50, 64, 95, 100, 127, 200 })
+				{
+					px.push_back(x);
+					py.push_back(y);
+				}
+			const int n = static_cast<int>(px.size());
+			std::vector<float> posTexels(static_cast<size_t>(n) * 4, 0.0f);
+			for (int i = 0; i < n; ++i)
+			{
+				posTexels[static_cast<size_t>(i) * 4] = static_cast<float>(px[static_cast<size_t>(i)]);
+				posTexels[static_cast<size_t>(i) * 4 + 1] = static_cast<float>(py[static_cast<size_t>(i)]);
+			}
+			pl_tex mapTex = DwRgba32f(gpu, gw, gh, mapTexels.data());
+			pl_tex posTex = DwRgba32f(gpu, n, 1, posTexels.data());
+			pl_tex outTex = DwRgba32f(gpu, n, 1, nullptr, true);
+			struct Cfg { float sx, sy, ox, oy; int block; };
+			const std::string header = "#define DN_N " + std::to_string(n) + "\n" + DitherNeed::ExtraAccessorGlsl();
+			const char* const body = R"GLSL(
+ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+if (g.y == 0 && g.x < DN_N) {
+    vec4 p = texelFetch(dn_pos, ivec2(g.x, 0), 0);
+    imageStore(dn_out, ivec2(g.x, 0), vec4(dn_extra(p.xy), 0.0, 0.0, 0.0));
+}
+)GLSL";
+			double worst = 0.0;
+			for (const Cfg c : { Cfg{ 0.75f, 0.75f, 3.0f, 1.5f, 8 }, Cfg{ 1.0f, 1.0f, 0.0f, 0.0f, 8 }, Cfg{ 2.5f, 1.25f, -3.5f, 7.25f, 16 } })
+			{
+				const float blockF = static_cast<float>(c.block);
+				const pl_shader_var vars[5] = { { pl_var_float("dn_scale_x"), &c.sx, true }, { pl_var_float("dn_scale_y"), &c.sy, true },
+					{ pl_var_float("dn_off_x"), &c.ox, true }, { pl_var_float("dn_off_y"), &c.oy, true },
+					{ pl_var_float("dn_block"), &blockF, true } };
+				const pl_shader_desc desc[3] = { VpvGpu::Sampled("VPDN", mapTex), VpvGpu::Sampled("dn_pos", posTex), VpvGpu::Storage("dn_out", outTex) };
+				DwCheck(VpvGpu::Pass(dispatch, "VideoProcessor dither need: accessor probe", header, body, desc, 3, vars, 5, (n + 15) / 16, 1, 0),
+					"the accessor probe pass failed");
+				const std::vector<float> got = DwDownload(gpu, outTex);
+				for (int i = 0; i < n; ++i)
+				{
+					const float want = DitherNeed::SampleExtra(map.data(), gw, gh, c.block, c.sx, c.sy, c.ox, c.oy,
+						px[static_cast<size_t>(i)], py[static_cast<size_t>(i)]);
+					worst = (std::max)(worst, std::fabs(static_cast<double>(got[static_cast<size_t>(i) * 4]) - want));
+				}
+			}
+			char msg[120];
+			std::snprintf(msg, sizeof(msg), "DITHER_NEED_ACCESSOR positions=%d worst=%.3e\n", n, worst);
+			Logger::WriteMessage(msg);
+			DwCheck(worst <= 1e-6, std::string("dn_extra differs from DitherNeed::SampleExtra: ") + msg);
+			pl_tex_destroy(gpu, &mapTex);
+			pl_tex_destroy(gpu, &posTex);
+			pl_tex_destroy(gpu, &outTex);
+			pl_dispatch_destroy(&dispatch);
 		}
 	};
 }
