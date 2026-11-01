@@ -3,7 +3,7 @@
   "slot": "scaling.chroma_upscale",
   "unit": "scaling",
   "order": 120,
-  "status": "partial",
+  "status": "placeholder",
   "code_location": "migrated",
   "live_files": [
     "src/VP-V/modules/scaling/chroma_upscale/ChromaCfl.h",

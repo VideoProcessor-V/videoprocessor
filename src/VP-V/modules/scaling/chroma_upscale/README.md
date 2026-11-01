@@ -1,6 +1,6 @@
 # Chroma upscale: chroma-from-luma (`scaling.chroma_upscale`)
 
-Unit: **scaling** | side: input | order: 120 | status: **candidate** | hook point: prepass (before libplacebo renders the source frame)
+Unit: **scaling** | side: input | order: 120 | status: **placeholder** (CfL module code and tests present; the slot stays a placeholder until the renderer call site lands, so it costs nothing) | hook point: prepass (before libplacebo renders the source frame)
 
 
 **Grain map: one producer, many readers (owner rule 2026-10-31).** `Gpu::Params::lumaSplit / cbSplit / crSplit` take the

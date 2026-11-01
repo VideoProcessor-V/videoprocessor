@@ -804,7 +804,7 @@
       "unit": "scaling",
       "side": "input",
       "order": 120,
-      "status": "partial",
+      "status": "placeholder",
       "hook_point": "prepass",
       "purpose": "Reserve a VP-owned chroma upscale right after the input stages, in case libplacebo's chroma upscaling (chroma_upscaler auto / CfL) proves a compromise. When active, libplacebo must receive 4:4:4 and not re-upsample.",
       "contract": {
