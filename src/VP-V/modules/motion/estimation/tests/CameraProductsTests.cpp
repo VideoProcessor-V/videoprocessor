@@ -234,15 +234,15 @@ namespace CameraProductsTestsNs
 
 		TEST_METHOD(LeadEdgesAreNotLagZeroEdges)
 		{
-			// P9 reads P7 at a lead and P7 reads nothing of P9: no cycle either way. A P7 that read P9 at
-			// lag 0 would be a cycle; at a lead it is not.
+			// P7 reads P3 at lag 0. P3 reading P7 at a LEAD (frames ahead) is not a cycle; the same edge
+			// at lag 0 is.
 			std::vector<ProductDecl> d = SkeletonProducts().All();
-			VpSkeleton::detail::AddLead(d[kP7CameraFit], kP9CameraSmoothed, 1);
-			d[kP7CameraFit].shortQueueSubstitute = kP8CameraLabels;   // a substitute without leads
-			// P8 reads P7 at lag 0, P9 reads P7 at lag 0: still acyclic over lag-0 edges.
-			Assert::IsTrue(Registry(d).Validate(), L"lead edge plays no part in the cycle check");
+			VpSkeleton::detail::AddLead(d[kP3AnalysisField], kP7CameraFit, 1);
+			d[kP3AnalysisField].shortQueueSubstitute = kP4SourceStats;   // a substitute without leads
+			const char* why = "";
+			Assert::IsTrue(Registry(d).Validate(&why), L"lead edge plays no part in the cycle check");
 			std::vector<ProductDecl> cyc = SkeletonProducts().All();
-			VpSkeleton::detail::AddInput(cyc[kP7CameraFit], kP9CameraSmoothed, 0);
+			VpSkeleton::detail::AddInput(cyc[kP3AnalysisField], kP7CameraFit, 0);
 			Assert::IsTrue(ValidateFails(cyc), L"the same edge at lag 0 is a cycle");
 		}
 
@@ -286,7 +286,9 @@ namespace CameraProductsTestsNs
 			const std::vector<ConsumerDecl> cs = Camera({ CameraLink::CameraConsumer::Diagnostics });
 			const Graph g = BuildGraph(reg, cs, Settings(1, true));
 			Assert::IsTrue(g.valid);
-			for (ProductId p : { kP1HalfLuma, kP2VectorPair, kP3AnalysisField, kP4SourceStats, kP7CameraFit, kP8CameraLabels })
+			const ProductId expected[] = { ProductId(kP1HalfLuma), ProductId(kP2VectorPair), ProductId(kP3AnalysisField),
+				ProductId(kP4SourceStats), ProductId(kP7CameraFit), ProductId(kP8CameraLabels) };
+			for (ProductId p : expected)
 				Assert::AreEqual(1, CountOf(g, p));
 			Assert::AreEqual(size_t(6), g.nodes.size());
 			Assert::IsFalse(g.Has(kP9CameraSmoothed));
