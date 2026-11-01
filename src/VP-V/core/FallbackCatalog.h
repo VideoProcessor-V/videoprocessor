@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 // The "Fallbacks engaged" entries of the renderer's automatic downgrades, built in ONE place
 // (module findings 2026-10-24, the silent-fallbacks batch; ADR-0001 no silent fallbacks).
@@ -355,5 +356,47 @@ namespace FallbackCatalog
 		return sustainedMiss ? Engaged("vector_engine_global",
 			"source monitor fast-pan / intent without whole-frame motion (vector engine pair missed)") :
 			Released("vector_engine_global");
+	}
+
+	// ---- skeleton analysis lane -----------------------------------------------------------------
+	// The regulator reduced the lane's work (dropped products, forced live fills, T0 in the render,
+	// pinned at the minimum), or the lane is not available for the source stats. The lists hold
+	// plain-language product names (the host maps ids to names).
+	inline std::string JoinNames(const std::vector<std::string>& names)
+	{
+		std::string out;
+		for (size_t i = 0; i < names.size(); ++i)
+			out += (i ? ", " : "") + names[i];
+		return out;
+	}
+	inline Decision AnalysisLane(const std::vector<std::string>& dropped, const std::vector<std::string>& forcedLive,
+		bool pinnedAtMinimum, bool t0InRender)
+	{
+		if (dropped.empty() && forcedLive.empty() && !pinnedAtMinimum && !t0InRender)
+			return Released("analysis_lane");
+		std::string reason;
+		auto add = [&reason](const std::string& part) { reason += (reason.empty() ? std::string() : "; ") + part; };
+		if (!dropped.empty())
+			add("reduced: " + JoinNames(dropped) + " off (dropped)");
+		if (!forcedLive.empty())
+			add("forced live: " + JoinNames(forcedLive));
+		if (t0InRender)
+			add("core analysis runs in the render");
+		if (pinnedAtMinimum)
+			add("analysis at minimum");
+		return Engaged("analysis_lane", reason);
+	}
+	inline Decision AnalysisLaneDeterminism(unsigned long long missedBounds)
+	{
+		if (missedBounds == 0)
+			return Released("analysis_lane_determinism");
+		return Engaged("analysis_lane_determinism", "deterministic playback: " + std::to_string(missedBounds) +
+			" frames missed the bounded wait (vector engine fallback used; this run is not reproducible)");
+	}
+	inline Decision SourceStatsWalk(bool laneRequested, bool laneUnavailable)
+	{
+		return laneRequested && laneUnavailable ? Engaged("source_stats_walk",
+			"active-picture walk uses Bill's original walk (lane source stats unavailable)") :
+			Released("source_stats_walk");
 	}
 }
