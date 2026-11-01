@@ -18,7 +18,8 @@
 #include <SettingsExtension.h>
 #include "../../../VideoProcessor-GUI/DialogExtension.h"
 
-#include <cstdlib>
+#include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <string>
