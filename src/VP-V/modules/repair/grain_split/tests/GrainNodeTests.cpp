@@ -441,6 +441,45 @@ namespace GrainNodeTestsNs
 			Assert::AreEqual(uint64_t(0xd4c796a262566634ull), h, L"the reversed text hashes to the pre-SA2 shader text");
 		}
 
+		// Finisher MUST 2: the node's declaration is built from the GRANTED storage (NodeLayout::decl = GrainDecl(choice.storage)),
+		// so a Compact request downgraded to Full allocates as Full instead of failing every allocation. CPU: fake textures.
+		TEST_METHOD(DeclarationFollowsTheGrantedStorage)
+		{
+			struct Be
+			{
+				using Handle = int;
+				int n = 0;
+				Handle Create(const VpSkeleton::TexShape&) { return ++n; }
+				void Destroy(Handle& h) { h = 0; }
+			};
+			const VpSkeleton::Dims sizes[] = { { 1920, 1080 }, { 3840, 2160 }, { 7680, 4320 }, { 1366, 769 } };
+			for (const VpSkeleton::Dims& d : sizes)
+				for (int B : { 16, 32 })
+				{
+					GrainDesc desc;
+					desc.w = static_cast<int>(d.width); desc.h = static_cast<int>(d.height); desc.B = B; desc.codeUnit = 1.0 / 1023.0; desc.component = 0;
+					for (Storage granted : { Storage::Full, Storage::Compact })
+					{
+						const VpSkeleton::ProductTexLayout layout = GrainLayout(granted, desc);
+						const VpSkeleton::ProductDecl decl = GrainDecl(granted);
+						Assert::IsTrue(layout.MatchesDecl(decl, d), L"the layout matches the declaration of its own storage");
+						const VpSkeleton::Registry reg = GrainRegistryFor(granted);
+						Assert::IsTrue(reg.Validate(), L"the registry for the granted storage validates");
+						Assert::AreEqual(VpSkeleton::BytesOf(decl.size, d), VpSkeleton::BytesOf(reg.Get(VpSkeleton::kP10GrainSplit).size, d), L"one declaration");
+						VpSkeleton::Node node;
+						node.id = VpSkeleton::kP10GrainSplit;
+						node.ring = 0;
+						node.livePool = 2;
+						Be be;
+						VpSkeleton::ProductTextures<Be> tex(be);
+						Assert::IsTrue(tex.Allocate(node, decl, layout, d, VpSkeleton::TierPlan()), L"allocates");
+						Assert::IsTrue(tex.Bytes() <= 2 * VpSkeleton::BytesOf(decl.size, d), L"within the declaration");
+					}
+					// Requested Compact, granted Full (a float plane): the REQUESTED declaration would refuse the layout forever.
+					Assert::IsFalse(GrainLayout(Storage::Full, desc).MatchesDecl(GrainDecl(Storage::Compact), d), L"requested declaration refuses the downgrade");
+				}
+		}
+
 		TEST_METHOD(GrainLayoutNamesBaseAndModifiersWithTheirConsumers)
 		{
 			size_t n = 0;

@@ -512,6 +512,12 @@ namespace GrainUnitGpuTestsNs
 			Assert::IsTrue(nl.choice.downgraded && nl.choice.storage == Storage::Full, L"Compact refused for a float plane");
 			Assert::IsTrue(GrainSplit::Gpu::StorageFallback(nl.choice).engaged, L"visible");
 			Assert::AreEqual(size_t(2), nl.layout.terms.size(), L"the node is laid out as Full");
+			{
+				// Finisher MUST 2: the declaration follows the GRANTED storage, so the downgraded node still allocates.
+				VpSkeleton::Dims dd; dd.width = kW; dd.height = kH;
+				Assert::IsTrue(nl.layout.MatchesDecl(nl.decl, dd), L"the Full layout matches the granted (Full) declaration");
+				Assert::IsFalse(nl.layout.MatchesDecl(GrainSplit::GrainDecl(Storage::Compact), dd), L"the requested (Compact) declaration would refuse it");
+			}
 
 			VpSkeleton::PlTexBackend backend(gpu);
 			VpSkeleton::Dims dims; dims.width = kW; dims.height = kH;

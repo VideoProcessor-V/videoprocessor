@@ -32,50 +32,28 @@ namespace GrainSplit
 {
 	namespace Gpu
 	{
-		// The layout of one P10 buffer for the plane `desc` describes. Full: split rgba32f + blocks rgba32f; Compact: A rg16f +
-		// B rg16 + blocks rgba32f (N, e3, e1, e2). The block grid is ABSOLUTE: ceil(w / B) x ceil(h / B) of the node's real
-		// block edge (the declaration counts it at the smallest edge, 16 px, an upper bound: ProductTexLayout::MatchesDecl).
-		inline VpSkeleton::ProductTexLayout GrainLayout(Storage storage, const GrainDesc& desc)
-		{
-			using VpSkeleton::TexFormat;
-			VpSkeleton::ProductTexLayout l;
-			auto term = [&l](uint8_t shift, TexFormat f, uint32_t absW, uint32_t absH) {
-				VpSkeleton::TexTerm t;
-				t.shift = shift;
-				t.fmt = f;
-				t.absW = absW;
-				t.absH = absH;
-				l.terms.push_back(t);
-			};
-			const int B = desc.B > 0 ? desc.B : 1;
-			const uint32_t bw = static_cast<uint32_t>((desc.w + B - 1) / B), bh = static_cast<uint32_t>((desc.h + B - 1) / B);
-			if (storage == Storage::Compact)
-			{
-				term(0, TexFormat::RG16F, 0, 0);
-				term(0, TexFormat::RG16, 0, 0);
-				term(4, TexFormat::RGBA32F, bw, bh);
-			}
-			else
-			{
-				term(0, TexFormat::RGBA32F, 0, 0);
-				term(4, TexFormat::RGBA32F, bw, bh);
-			}
-			return l;
-		}
+		// GrainLayout / GrainDecl live in GrainNode.h (CPU: the protocol tests check them without a GPU).
+		using GrainSplit::GrainLayout;
+		using GrainSplit::GrainDecl;
 
-		// The node's storage and layout: the REQUESTED storage passed through ChooseStorage for the node's plane (a refused
-		// Compact becomes Full, with the visible StorageFallback decision), and the layout of what was granted. The host
-		// allocates the node's ProductTextures from `layout` and gives `choice.storage` to SplitterFill::SetTargets.
+		// The node's storage, layout AND declaration: the REQUESTED storage passed through ChooseStorage for the node's plane
+		// (a refused Compact becomes Full, with the visible StorageFallback decision), the layout of what was granted and the
+		// P10 declaration of what was granted (finisher MUST 2). The host plans the governor with `decl` (or with
+		// GrainRegistryFor(choice.storage)), allocates the node's ProductTextures with (`decl`, `layout`) and gives
+		// `choice.storage` to SplitterFill::SetTargets. Declaring the REQUESTED storage would make a downgraded Compact
+		// (Full layout, 16 B/px) fail every allocation against an 8 B/px declaration: never do that.
 		struct NodeLayout
 		{
 			StorageChoice choice;
 			VpSkeleton::ProductTexLayout layout;
+			VpSkeleton::ProductDecl decl;
 		};
 		inline NodeLayout ChooseNodeLayout(Storage requested, pl_fmt planeFormat, double codeUnit, const GrainDesc& desc)
 		{
 			NodeLayout n;
 			n.choice = ChooseStorage(requested, planeFormat, codeUnit);
 			n.layout = GrainLayout(n.choice.storage, desc);
+			n.decl = GrainDecl(n.choice.storage);
 			return n;
 		}
 

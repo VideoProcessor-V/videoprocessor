@@ -301,6 +301,47 @@ namespace GrainSplit
 		std::string lastFiller_;
 	};
 
+	// The layout of one P10 buffer for the plane `desc` describes, for the GRANTED storage. Full: split rgba32f + blocks
+	// rgba32f; Compact: A rg16f + B rg16 + blocks rgba32f (N, e3, e1, e2). The block grid is ABSOLUTE: ceil(w / B) x
+	// ceil(h / B) of the node's real block edge (the declaration counts it at the smallest edge, 16 px, an upper bound:
+	// ProductTexLayout::MatchesDecl matches per shift and bounds the grid per axis).
+	inline VpSkeleton::ProductTexLayout GrainLayout(Storage storage, const GrainDesc& desc)
+	{
+		using VpSkeleton::TexFormat;
+		VpSkeleton::ProductTexLayout l;
+		auto term = [&l](uint8_t shift, TexFormat f, uint32_t absW, uint32_t absH) {
+			VpSkeleton::TexTerm t;
+			t.shift = shift;
+			t.fmt = f;
+			t.absW = absW;
+			t.absH = absH;
+			l.terms.push_back(t);
+		};
+		const int B = desc.B > 0 ? desc.B : 1;
+		const uint32_t bw = static_cast<uint32_t>((desc.w + B - 1) / B), bh = static_cast<uint32_t>((desc.h + B - 1) / B);
+		if (storage == Storage::Compact)
+		{
+			term(0, TexFormat::RG16F, 0, 0);
+			term(0, TexFormat::RG16, 0, 0);
+			term(4, TexFormat::RGBA32F, bw, bh);
+		}
+		else
+		{
+			term(0, TexFormat::RGBA32F, 0, 0);
+			term(4, TexFormat::RGBA32F, bw, bh);
+		}
+		return l;
+	}
+
+	// The P10 declaration of the GRANTED storage (finisher MUST 2): the governor plans, and ProductTextures checks, what is
+	// really allocated. Built from the one core declaration (VpSkeleton::AppendGrainSplitProduct), never a private copy.
+	inline VpSkeleton::ProductDecl GrainDecl(Storage granted)
+	{
+		return VpSkeleton::SkeletonProducts(granted == Storage::Compact).Get(VpSkeleton::kP10GrainSplit);
+	}
+	// The skeleton registry for the GRANTED storage (what the tier plan / governor must be built from).
+	inline VpSkeleton::Registry GrainRegistryFor(Storage granted) { return VpSkeleton::SkeletonProducts(granted == Storage::Compact); }
+
 	// THE EXPLICIT LAYOUT (owner decision): the node stores ONE main map plus small MODIFIER fields; consumers derive every
 	// other map from them cheaply, nobody recomputes a grain estimate. Base = the per-pixel picture split (clean = base + s1 + s2,
 	// grain G = Y - clean); modifiers = what steers a derivation (per-pixel Wiener share f, per-block grain level N, per-block
