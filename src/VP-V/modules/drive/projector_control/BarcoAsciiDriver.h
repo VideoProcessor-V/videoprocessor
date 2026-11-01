@@ -106,6 +106,7 @@ namespace LedDrive
 		bool stopping = false;
 		bool opened = false;
 		int pendingLight = -1;
+		bool lightReplyRangeLogged = false; // bug hunt 39 #14: log once
 		bool pendingJump = false;
 		int commands = 0;
 		int timeouts = 0;

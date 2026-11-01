@@ -240,6 +240,25 @@ namespace LedDrive
 				int parsed = 0;
 				if (ParseReply(line, name, parsed) && SameMnemonic(name, mnemonic))
 				{
+					// Bug hunt 39 #14: a light write's read-back outside the range the
+					// write was clamped to (Clamp: override, else the reported range)
+					// is not this command's reply: ignored like an unmatched line.
+					if (sentLight >= 0)
+					{
+						bool outOfRange = false, firstReport = false;
+						{
+							std::lock_guard<std::mutex> guard(stateMutex);
+							outOfRange = Clamp(parsed) != parsed;
+							if (outOfRange && !lightReplyRangeLogged)
+								firstReport = lightReplyRangeLogged = true;
+						}
+						if (outOfRange)
+						{
+							if (firstReport)
+								DebugLog::Log("Dynamic Drive: %s reply value out of range, ignored (%d)", mnemonic, parsed);
+							continue;
+						}
+					}
 					if (value) *value = parsed;
 					ok = true;
 					break;

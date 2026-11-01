@@ -416,6 +416,19 @@ namespace VideoProcessorTest
 				Assert::IsTrue(light != ":LPW190\r", L"The queued dim target was dropped");
 		}
 
+		// Bug hunt 39 #14: a read-back outside the clamped range is ignored (the wait goes on).
+		TEST_METHOD(OutOfRangeLightReplyIsIgnored)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			auto driver = OpenDriver(projector);
+			projector->lightReplyOverride = 999;   // range is 60..255
+			Assert::IsFalse(driver->SetLightNow(200, 500));
+			Assert::IsTrue(driver->Status().timeouts >= 1);
+			projector->lightReplyOverride = -1;
+			Assert::IsTrue(driver->SetLightNow(210, 500));
+			Assert::AreEqual(210, driver->Status().lastLight);
+		}
+
 		TEST_METHOD(MissingReplyIsCountedAndTheDriverCarriesOn)
 		{
 			auto projector = std::make_shared<FakeProjector>();
