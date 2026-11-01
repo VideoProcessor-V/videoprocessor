@@ -74,6 +74,13 @@ namespace TemporalDetail
 		void SetBackward(uint64_t seq, const MotionPair& pair) { m_backward[seq] = pair; }
 		void SetForward(uint64_t seq, const MotionPair& pair) { m_forward[seq] = pair; }
 		void Clear() { m_backward.clear(); m_forward.clear(); }
+		// Drops every pair older than oldestNeeded (bug hunt 38 H1: the maps otherwise grow without bound).
+		void PruneField(uint64_t oldestNeeded)
+		{
+			m_backward.erase(m_backward.begin(), m_backward.lower_bound(oldestNeeded));
+			m_forward.erase(m_forward.begin(), m_forward.lower_bound(oldestNeeded));
+		}
+		size_t FieldCount() const { return m_backward.size() + m_forward.size(); }
 		bool Backward(uint64_t seq, MotionPair& out) const override { return Find(m_backward, seq, out); }
 		bool Forward(uint64_t seq, MotionPair& out) const override { return Find(m_forward, seq, out); }
 

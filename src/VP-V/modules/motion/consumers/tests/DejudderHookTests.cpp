@@ -2136,6 +2136,7 @@ namespace VideoProcessorTest
 			{ auto c = ok(); c.active = false; cases.push_back({ L"not active", c, Reason::NotActive }); }
 			{ auto c = ok(); c.next = 0; cases.push_back({ L"no next", c, Reason::NoNext }); }
 			{ auto c = ok(); c.after = 0; cases.push_back({ L"frame after next not supplied", c, Reason::NoAfter }); }
+			{ auto c = ok(); c.after = 0; c.afterGap = true; cases.push_back({ L"frame after next follows a gap", c, Reason::AfterGap }); }
 			{ auto c = ok(); c.after = 11; cases.push_back({ L"after = next", c, Reason::AfterNotNew }); }
 			{ auto c = ok(); c.estimated = 9; cases.push_back({ L"pair not estimated", c, Reason::NotEstimated }); }
 			{ auto c = ok(); c.layoutMatches = false; cases.push_back({ L"layout", c, Reason::Layout }); }

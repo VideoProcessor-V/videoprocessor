@@ -52,7 +52,7 @@ namespace
 	// The gate; false = the caller returns (the test passes with the marker).
 	bool GateOrSkip(const char* name, std::wstring& clip)
 	{
-		const bool require = Env("VP_TEST_REQUIRE_GPU") == "1";
+		const bool require = Env("VP_TEST_REQUIRE_GPU") == "1" || Env("VP_TEST_REQUIRE_ALL") == "1";
 		std::string marker;
 		if (Env("VP_TEST_GPU") != "hardware")
 			marker = std::string("SKIP-NO-GPU ") + name;

@@ -43,6 +43,28 @@ namespace PassTimers
 		double sumMs = 0.0;
 		double maxMs = 0.0;
 		double lastMs = 0.0;
+		// Bug hunt 38 M2: recent figures (sample-based, deterministic, no clock). recentMs is an EWMA
+		// (alpha 1/32, the first sample seeds it); recentMaxMs is the max over the last 256..128 samples
+		// (two buckets of 128: the current one and the previous one).
+		double recentMs = 0.0;
+		double recentMaxMs = 0.0;
+		double bucketMaxMs = 0.0;
+		double prevBucketMaxMs = 0.0;
+		uint32_t bucketCount = 0;
+		void AddRecent(double ms)
+		{
+			recentMs = samples <= 1 ? ms : recentMs + (ms - recentMs) * (1.0 / 32.0);
+			if (bucketCount >= 128)
+			{
+				prevBucketMaxMs = bucketMaxMs;
+				bucketMaxMs = 0.0;
+				bucketCount = 0;
+			}
+			++bucketCount;
+			if (ms > bucketMaxMs)
+				bucketMaxMs = ms;
+			recentMaxMs = bucketMaxMs > prevBucketMaxMs ? bucketMaxMs : prevBucketMaxMs;
+		}
 		double MeanMs() const { return samples ? sumMs / static_cast<double>(samples) : 0.0; }
 	};
 
@@ -65,6 +87,7 @@ namespace PassTimers
 			s.lastMs = ms;
 			if (ms > s.maxMs)
 				s.maxMs = ms;
+			s.AddRecent(ms);
 		}
 		void AddGpuPassNs(const char* description, uint64_t ns)
 		{
@@ -113,9 +136,12 @@ namespace PassTimers
 				text += line;
 				for (size_t i = 0; i < rows.size() && i < maxLines; ++i)
 				{
-					std::snprintf(line, sizeof(line), "    %7.3f ms avg %7.3f max (%llu)  %s\n", rows[i].second.MeanMs(),
-						rows[i].second.maxMs, static_cast<unsigned long long>(rows[i].second.samples), rows[i].first.c_str());
-					text += line;
+					// 512 bytes; the name is cut at 300 characters so the figures and the newline always fit.
+					char row[512];
+					std::snprintf(row, sizeof(row), "    %7.3f ms avg %7.3f max (%llu)  %.300s  %7.3f recent %7.3f recent max\n", rows[i].second.MeanMs(),
+						rows[i].second.maxMs, static_cast<unsigned long long>(rows[i].second.samples), rows[i].first.c_str(),
+						rows[i].second.recentMs, rows[i].second.recentMaxMs);
+					text += row;
 				}
 				if (rows.size() > maxLines)
 				{

@@ -1384,5 +1384,22 @@ namespace VideoProcessorTest
 			Assert::AreEqual(3, static_cast<int>(sizeof(kProducts) / sizeof(kProducts[0])), L"three products");
 			Assert::IsTrue(Shaders::kSplit != nullptr && Shaders::kBlockMeasures != nullptr && Shaders::kValidate != nullptr && Shaders::kTransfer != nullptr, L"draft shaders declared");
 		}
+
+		TEST_METHOD(TemporalDetailFieldSourcePruneBounded)
+		{
+			// Bug hunt 38 H1: pruning each frame keeps the field source bounded.
+			FieldMotionSource src;
+			for (uint64_t seq = 0; seq < 10000; ++seq)
+			{
+				src.SetBackward(seq, MotionPair::Uniform(kW, kH, 16.0, 0.5, 0.25));
+				src.SetForward(seq, MotionPair::Uniform(kW, kH, 16.0, -0.5, -0.25));
+				src.PruneField(seq >= 8 ? seq - 8 : 0);
+				Assert::IsTrue(src.FieldCount() <= 2 * 9, L"field source stays bounded");
+			}
+			MotionPair out;
+			Assert::IsTrue(src.Backward(9999, out) && src.Forward(9999, out), L"newest pair found");
+			Assert::IsTrue(src.Backward(9991, out) && src.Forward(9991, out), L"oldest needed pair found");
+			Assert::IsFalse(src.Backward(9990, out), L"older pair pruned");
+		}
 	};
 }

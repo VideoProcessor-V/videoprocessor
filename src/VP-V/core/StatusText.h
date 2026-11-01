@@ -361,14 +361,21 @@ namespace VpStatusText
 		std::string dName;
 		double dMs = 0.0;
 	};
+	// One decimal always ("5.0", "100.0", "123.5"): the old to_string().substr(0, 4) cut 123.456 to "123."
+	inline std::string NetsMs(double ms)
+	{
+		char buffer[32];
+		std::snprintf(buffer, sizeof(buffer), "%.1f", ms);
+		return buffer;
+	}
 	inline std::string NetsLine(const NetsFacts& f)
 	{
 		std::string nets = "Nets:";
 		if (f.repairLoaded)
 			nets += " " + f.repairName + (f.repairFp16 ? " (fp16" : " (fp32") + ", " +
-				std::to_string(f.repairMs).substr(0, 4) + " ms)";
+				NetsMs(f.repairMs) + " ms)";
 		if (f.dLoaded)
-			nets += " " + f.dName + " (" + std::to_string(f.dMs).substr(0, 4) + " ms)";
+			nets += " " + f.dName + " (" + NetsMs(f.dMs) + " ms)";
 		return nets == "Nets:" ? std::string("Nets: none running") : nets;
 	}
 }
