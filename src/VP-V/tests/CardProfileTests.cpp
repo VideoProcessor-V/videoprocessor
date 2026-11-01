@@ -145,7 +145,7 @@ namespace CardProfileTestsNs
 			const Graph g = Graph4k();
 			CardProfile small = Laptop();
 			small.vramBudgetBytes = 1000 * kMB;
-			small.vramUsageBytes = 700 * kMB;   // 300 MB free, 240 MB budget
+			small.vramUsageBytes = 650 * kMB;   // 350 MB free, 280 MB budget (the monitor tile buffers are 4.2 MB each since SA0)
 			const TierPlan p = PlanTiers(reg, g, small, TierInput());
 			Assert::IsTrue(p.Laned(kP1HalfLuma));
 			Assert::IsTrue(p.Laned(kP2VectorPair));

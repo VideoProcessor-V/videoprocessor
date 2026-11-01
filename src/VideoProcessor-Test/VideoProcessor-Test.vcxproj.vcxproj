@@ -691,6 +691,10 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\VP-V\tests\ProductCatalogTests.cpp">
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdConsensusTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\AbrStepDetectorTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceWiringTests.cpp" />

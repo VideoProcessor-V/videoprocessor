@@ -409,13 +409,14 @@ inline Registry FirstProducts()
     d.push_back(p0);
 
     // P1: half luma plus quarter luma, 16-bit.
-    // Format (doc 51 section 3): half luma R16 + quarter luma R16 + the engine-size 8-bit half-luma view the
-    // optical-flow producer takes (MotionAheadProducer HalfLuma8: 2.1 MB at 4K). 7.2 MB at 4K.
+    // Format (doc 51 section 3): half luma R16 + quarter luma R16 (what HalfLumaProducer makes today: 5.2 MB at 4K).
+    // The engine-size 8-bit half-luma VIEW the optical-flow producer takes (MotionAheadProducer HalfLuma8, 2.1 MB at
+    // 4K) is added to this declaration with SA4, when the producer's own CPU copy is retired and the lane layout
+    // changes with it: declaring it now would disagree with the producer's real layout (LaneProductsTests pins it).
     ProductDecl p1 = Make(kP1HalfLuma, "p1_half_luma", "half luma", Backend::Cpu, 1, Tier::T0, fullOnly, 0);
     p1.sourceFrame = true;
     AddTerm(p1, 1, 2);
     AddTerm(p1, 2, 2);
-    AddTerm(p1, 1, 1);
     p1.refRenderMs = 0.6f;
     d.push_back(p1);
 

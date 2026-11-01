@@ -216,8 +216,8 @@ namespace ProductCatalogTestsNs
 			Assert::AreEqual(uint64_t(4194304), BytesOf(reg.Get(kP5MonitorTiles).size, d4k));
 			Assert::AreEqual(uint64_t(4194304), BytesOf(reg.Get(kP5MonitorTiles).size, Dims{ 1920, 1080 }));
 			Assert::AreEqual(8388608u, kMonitorRingBytes);
-			// P1: half R16 + quarter R16 + engine-size u8 half view.
-			Assert::AreEqual(uint64_t(4147200 + 1036800 + 2073600), BytesOf(reg.Get(kP1HalfLuma).size, d4k));
+			// P1: half R16 + quarter R16 (the engine-size u8 view joins with SA4).
+			Assert::AreEqual(uint64_t(4147200 + 1036800), BytesOf(reg.Get(kP1HalfLuma).size, d4k));
 			// P4: 16 KB of system RAM.
 			Assert::AreEqual(uint64_t(16384), BytesOf(reg.Get(kP4SourceStats).size, d4k));
 			Assert::IsTrue(reg.Get(kP4SourceStats).residency == Residency::SystemRam);
@@ -262,7 +262,9 @@ namespace ProductCatalogTestsNs
 			const std::string path = SettingsTestSupport::RepoRoot() + "docs\\design\\product-graph.md";
 			const std::string rendered = Normalise(RenderDoc());
 			std::string text = Normalise(SettingsTestSupport::ReadFile(path));
-			const bool write = std::getenv("VP_WRITE_PRODUCT_GRAPH_DOC") != nullptr;
+			size_t envLen = 0;
+			getenv_s(&envLen, nullptr, 0, "VP_WRITE_PRODUCT_GRAPH_DOC");
+			const bool write = envLen > 0;
 			const size_t b = text.find(kDocBegin);
 			const size_t e = text.find(kDocEnd);
 			if (write) {
