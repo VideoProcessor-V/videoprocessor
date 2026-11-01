@@ -517,6 +517,30 @@ namespace FallbackCatalog
 			Released("source_stats_walk");
 	}
 
+	// ---- skeleton activation (modules/control/skeleton, modules/motion/estimation/global_model/link) ----
+	// analysis_lane was asked for but the lane cannot run (yet): the reason says what it waits for
+	// (resync_event=on for the one shared seal, frame_analysis_store=on for the source frames, ...).
+	inline Decision SkeletonLane(const std::string& waiting)
+	{
+		return waiting.empty() ? Released("skeleton_lane") : Engaged("skeleton_lane", waiting);
+	}
+	// Products the lane's graph holds that nothing can make yet (no producer, no live fill): they are declined,
+	// their consumers keep their own computation.
+	inline Decision SkeletonProductsDeclined(const std::string& products, const std::string& why)
+	{
+		return products.empty() ? Released("skeleton_products") : Engaged("skeleton_products", products + " declined: " + why);
+	}
+	// A [vpv.skeleton] key that could not be read (kept at its default).
+	inline Decision SkeletonKeys(const std::string& problems)
+	{
+		return problems.empty() ? Released("skeleton_settings") : Engaged("skeleton_settings", problems);
+	}
+	// camera_link = report was asked for but the camera link cannot report (no store, no seal, ...).
+	inline Decision CameraLinkReport(const std::string& problem)
+	{
+		return problem.empty() ? Released("camera_link") : Engaged("camera_link", problem);
+	}
+
 	// ---- product graph (core/ProductCatalog.h) ----------------------------------------------------
 	// Every consumer of a shared product states what it does when the product is missing, stale, shed or its unit
 	// version differs from the one the reader expects. These are the ids the catalog rows name; the GUI's one-time
