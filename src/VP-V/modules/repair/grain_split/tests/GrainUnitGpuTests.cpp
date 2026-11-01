@@ -24,6 +24,7 @@
 #include <cstring>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -281,11 +282,10 @@ namespace GrainUnitGpuTestsNs
 
 			VpSkeleton::PlTexBackend backend(gpu);
 			VpSkeleton::ProductTextures<VpSkeleton::PlTexBackend> tex(backend);   // destroyed before the device
-			Assert::IsTrue(tex.Allocate(*node, reg.Get(VpSkeleton::kP10GrainSplit), GrainSplit::Gpu::GrainLayout(Storage::Full), gs.dims, plan),
-				L"the slot textures match the declaration and allocate");
-
 			GrainSplit::GrainDesc desc;
 			desc.w = kW; desc.h = kH; desc.B = kB; desc.scale = 1.0; desc.codeUnit = kCu10in16; desc.component = 0;
+			Assert::IsTrue(tex.Allocate(*node, reg.Get(VpSkeleton::kP10GrainSplit), GrainSplit::Gpu::GrainLayout(Storage::Full, desc), gs.dims, plan),
+				L"the slot textures match the declaration and allocate");
 			GrainSplit::GrainNode gnode(VpSkeleton::kP10GrainSplit, node->ring, node->livePool, desc);
 			gnode.SetLaneGranted(true);
 			GrainSplit::Gpu::Splitter splitter;   // the ONE implementation both paths call
@@ -293,7 +293,7 @@ namespace GrainUnitGpuTestsNs
 			GrainSplit::Gpu::SplitterFill::Source src;
 			src.plane = plane; src.component = 0; src.codeUnit = kCu10in16; src.scale = 1.0; src.B = kB; src.storage = Storage::Full;
 			fill.SetSource(src);
-			fill.SetTargets([&](const GrainSplit::GrainTarget& t) { return GrainSplit::Gpu::TargetsFor(tex, t, Storage::Full); });
+			fill.SetTargets([&](const GrainSplit::GrainTarget& t) { return GrainSplit::Gpu::TargetsFor(tex, t, Storage::Full); }, Storage::Full);
 
 			const uint64_t ringN = node->ring;
 			const uint64_t laneSeq = 3 * ringN + 1, liveSeq = 3 * ringN + 2;
@@ -325,6 +325,218 @@ namespace GrainUnitGpuTestsNs
 				L"the live-fill result equals the lane result: one implementation");
 			splitter.Release(gpu);
 			ref.Release(gpu);
+			pl_tex_destroy(gpu, &plane);
+		}
+
+		// Audit 2 A: one code path, one instance per thread. A lane instance (own Splitter + own pl_dispatch, on its own
+		// thread, writing a ring buffer) and a render instance (own Splitter + dispatch, this thread, writing a live
+		// buffer) produce bit-identical slots.
+		TEST_METHOD(GrainUnitLaneAndRenderInstancesAreBitIdentical)
+		{
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			pl_tex plane = UploadR16(gpu, MakeCodes(kW, kH, 23u), kW, kH, 64.0);
+			GrainSplit::GrainDesc desc;
+			desc.w = kW; desc.h = kH; desc.B = kB; desc.scale = 1.0; desc.codeUnit = kCu10in16; desc.component = 0;
+			for (Storage storage : { Storage::Full, Storage::Compact })
+			{
+				const VpSkeleton::ProductTexLayout layout = GrainSplit::Gpu::GrainLayout(storage, desc);
+				VpSkeleton::PlTexBackend backend(gpu);
+				VpSkeleton::Dims dims; dims.width = kW; dims.height = kH;
+				std::vector<pl_tex> laneT, liveT;
+				for (size_t i = 0; i < layout.terms.size(); ++i)
+				{
+					laneT.push_back(backend.Create(layout.ShapeOf(i, dims)));
+					liveT.push_back(backend.Create(layout.ShapeOf(i, dims)));
+					Assert::IsTrue(laneT.back() && liveT.back(), L"slot textures");
+				}
+				auto targetsOf = [&](const std::vector<pl_tex>& v) {
+					GrainSplit::Gpu::Targets t;
+					t.split = v[0];
+					if (storage == Storage::Compact) { t.splitB = v[1]; t.blocks = v[2]; }
+					else t.blocks = v[1];
+					return t;
+				};
+				GrainSplit::Gpu::SplitterFill::Source src;
+				src.plane = plane; src.component = 0; src.codeUnit = kCu10in16; src.scale = 1.0; src.B = kB; src.storage = storage;
+
+				// The lane instance: created and used on its own thread with its own dispatch.
+				bool laneOk = false;
+				std::string laneErr;
+				std::thread lane([&]() {
+					pl_dispatch laneDispatch = pl_dispatch_create(dev.log, gpu);
+					GrainSplit::Gpu::Splitter laneSplitter;
+					{
+						GrainSplit::Gpu::SplitterFill laneFill(laneSplitter, gpu, laneDispatch);
+						laneFill.SetSource(src);
+						laneFill.SetTargets([&](const GrainSplit::GrainTarget&) { return targetsOf(laneT); }, storage);
+						laneOk = laneDispatch && laneFill.Fill(7, GrainSplit::GrainTarget{ false, 0 });
+						laneErr = laneFill.LastRefusal() + laneSplitter.LastError();
+					}
+					laneSplitter.Release(gpu);
+					if (laneDispatch) pl_dispatch_destroy(&laneDispatch);
+				});
+				lane.join();
+				Assert::IsTrue(laneOk, Wide("lane fill: " + laneErr).c_str());
+
+				// The render instance on this thread.
+				GrainSplit::Gpu::Splitter renderSplitter;
+				GrainSplit::Gpu::SplitterFill renderFill(renderSplitter, gpu, dev.dispatch);
+				renderFill.SetSource(src);
+				renderFill.SetTargets([&](const GrainSplit::GrainTarget&) { return targetsOf(liveT); }, storage);
+				Assert::IsTrue(renderFill.Fill(7, GrainSplit::GrainTarget{ true, 0 }), Wide("render fill: " + renderFill.LastRefusal() + renderSplitter.LastError()).c_str());
+
+				for (size_t i = 0; i < layout.terms.size(); ++i)
+					Assert::IsTrue(SameBits(DownloadRGBA(gpu, dev.dispatch, laneT[i]), DownloadRGBA(gpu, dev.dispatch, liveT[i])),
+						storage == Storage::Full ? L"Full: the lane and render instances write identical bits" : L"Compact: the lane and render instances write identical bits");
+				renderSplitter.Release(gpu);
+				for (pl_tex& t : laneT) backend.Destroy(t);
+				for (pl_tex& t : liveT) backend.Destroy(t);
+			}
+			pl_tex_destroy(gpu, &plane);
+		}
+
+		// Audit 2 A: a SplitterFill is bound to the thread of its first Fill; another thread's Fill is refused visibly and
+		// does no GPU work; an arena bound to another thread is refused too. The owning thread keeps working.
+		TEST_METHOD(GrainUnitFillRefusesAnotherThreadAndAnotherThreadsArena)
+		{
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			pl_tex plane = UploadR16(gpu, MakeCodes(kW, kH, 29u), kW, kH, 64.0);
+			GrainSplit::Gpu::Splitter splitter;
+			GrainSplit::Gpu::SplitterFill fill(splitter, gpu, dev.dispatch);
+			GrainSplit::Gpu::SplitterFill::Source src;
+			src.plane = plane; src.component = 0; src.codeUnit = kCu10in16; src.scale = 1.0; src.B = kB;
+			fill.SetSource(src);
+			Assert::IsTrue(fill.Fill(1, GrainSplit::GrainTarget{ true, 0 }), Wide(splitter.LastError()).c_str());
+			Assert::IsFalse(fill.FillDecision().engaged, L"accepted fill: nothing shown");
+			bool other = true;
+			std::thread t([&]() { other = fill.Fill(2, GrainSplit::GrainTarget{ true, 0 }); });
+			t.join();
+			Assert::IsFalse(other, L"another thread's Fill is refused");
+			Assert::AreEqual(1u, fill.Fills(), L"no compute for the refused Fill");
+			Assert::AreEqual(1u, fill.Refusals(), L"counted");
+			Assert::IsTrue(fill.FillDecision().engaged && fill.LastRefusal().find("another thread") != std::string::npos, L"visible, with the reason");
+			Assert::IsTrue(fill.Fill(3, GrainSplit::GrainTarget{ true, 0 }), L"the owning thread recovers at once");
+			Assert::IsFalse(fill.FillDecision().engaged, L"and the notice is released");
+
+			// An arena bound to another thread (reserved there) is refused on this thread's instance.
+			VpSkeleton::PlTexBackend backend(gpu);
+			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend);
+			std::thread r([&]() { arena.Reserve(VpSkeleton::ArenaPlan()); });
+			r.join();
+			src.arena = &arena;
+			fill.SetSource(src);
+			Assert::IsFalse(fill.Fill(4, GrainSplit::GrainTarget{ true, 0 }), L"another thread's arena is refused");
+			Assert::IsTrue(fill.LastRefusal().find("arena") != std::string::npos, L"with the reason");
+			Assert::AreEqual(2u, fill.Fills(), L"still no compute for a refused Fill");
+			splitter.Release(gpu);
+			pl_tex_destroy(gpu, &plane);
+		}
+
+		// Audit 2 B: the block grid follows the node's real block edge. At 8K the edge doubles (B = 32): the layout's grid
+		// is ceil(w / 32) x ceil(h / 32), it passes the declaration check (the declaration is the upper bound at 16 px), and a
+		// grid larger than declared (B = 8) is refused. A fill at B = 32 into node textures succeeds.
+		TEST_METHOD(GrainUnitBlockGridFollowsTheBlockEdge)
+		{
+			const VpSkeleton::Registry reg = VpSkeleton::SkeletonProducts();
+			const VpSkeleton::ProductDecl& decl = reg.Get(VpSkeleton::kP10GrainSplit);
+			VpSkeleton::Dims d8k; d8k.width = 7680; d8k.height = 4320;
+			GrainSplit::GrainDesc desc;
+			desc.w = 7680; desc.h = 4320; desc.B = 32; desc.scale = 2.0; desc.codeUnit = kCu10in16; desc.component = 0;
+			const VpSkeleton::ProductTexLayout full32 = GrainSplit::Gpu::GrainLayout(Storage::Full, desc);
+			const VpSkeleton::TexShape g = full32.ShapeOf(1, d8k);
+			Assert::AreEqual(240u, g.w, L"7680 / 32");
+			Assert::AreEqual(135u, g.h, L"4320 / 32");
+			Assert::IsTrue(full32.MatchesDecl(decl, d8k), L"B = 32 is within the declared grid");
+			desc.B = 16;
+			Assert::IsTrue(GrainSplit::Gpu::GrainLayout(Storage::Full, desc).MatchesDecl(decl, d8k), L"B = 16 equals the declared grid");
+			desc.B = 8;
+			Assert::IsFalse(GrainSplit::Gpu::GrainLayout(Storage::Full, desc).MatchesDecl(decl, d8k), L"a grid larger than declared is refused");
+			VpSkeleton::ProductTexLayout wrongFmt = full32;
+			wrongFmt.terms[1].fmt = VpSkeleton::TexFormat::RG32F;
+			Assert::IsFalse(wrongFmt.MatchesDecl(decl, d8k), L"an absolute term at other bytes per cell is refused");
+
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			pl_tex plane = UploadR16(gpu, MakeCodes(kW, kH, 31u), kW, kH, 64.0);
+			GrainSplit::GrainDesc desc32;
+			desc32.w = kW; desc32.h = kH; desc32.B = 32; desc32.scale = 1.0; desc32.codeUnit = kCu10in16; desc32.component = 0;
+			VpSkeleton::Dims dims; dims.width = kW; dims.height = kH;
+			for (Storage storage : { Storage::Full, Storage::Compact })
+			{
+				const VpSkeleton::ProductTexLayout layout = GrainSplit::Gpu::GrainLayout(storage, desc32);
+				VpSkeleton::PlTexBackend backend(gpu);
+				std::vector<pl_tex> tx;
+				for (size_t i = 0; i < layout.terms.size(); ++i)
+					tx.push_back(backend.Create(layout.ShapeOf(i, dims)));
+				GrainSplit::Gpu::Splitter splitter;
+				GrainSplit::Gpu::SplitterFill fill(splitter, gpu, dev.dispatch);
+				GrainSplit::Gpu::SplitterFill::Source src;
+				src.plane = plane; src.component = 0; src.codeUnit = kCu10in16; src.scale = 1.0; src.B = 32; src.storage = storage;
+				fill.SetSource(src);
+				fill.SetTargets([&](const GrainSplit::GrainTarget&) {
+					GrainSplit::Gpu::Targets t;
+					t.split = tx[0];
+					if (storage == Storage::Compact) { t.splitB = tx[1]; t.blocks = tx[2]; }
+					else t.blocks = tx[1];
+					return t;
+				}, storage);
+				Assert::IsTrue(fill.Fill(5, GrainSplit::GrainTarget{ true, 0 }), Wide("B = 32 fill: " + splitter.LastError()).c_str());
+				Assert::AreEqual((kW + 31) / 32, splitter.Out().bw, L"block columns at B = 32");
+				splitter.Release(gpu);
+				for (pl_tex& t : tx) backend.Destroy(t);
+			}
+			pl_tex_destroy(gpu, &plane);
+		}
+
+		// Audit 2 C: Compact requested on a plane that refuses it (a float plane) is laid out as Full (ChooseNodeLayout),
+		// so the fill succeeds as Full with the visible storage fallback; targets laid out for a storage the plane no longer
+		// grants are refused visibly (the host lays the node out again) instead of failing inside Compute forever.
+		TEST_METHOD(GrainUnitDowngradedCompactIsLaidOutAsFull)
+		{
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			std::vector<float> v(static_cast<size_t>(kW) * kH);
+			for (size_t i = 0; i < v.size(); ++i) v[i] = 0.25f + 0.001f * static_cast<float>(i % 97);
+			pl_tex plane = UploadR32F(gpu, v, kW, kH);
+			Assert::IsNotNull(plane, L"float plane");
+			const double cu = 1.0 / 1023.0;
+			GrainSplit::GrainDesc desc;
+			desc.w = kW; desc.h = kH; desc.B = kB; desc.scale = 1.0; desc.codeUnit = cu; desc.component = 0;
+			const GrainSplit::Gpu::NodeLayout nl = GrainSplit::Gpu::ChooseNodeLayout(Storage::Compact, plane->params.format, cu, desc);
+			Assert::IsTrue(nl.choice.downgraded && nl.choice.storage == Storage::Full, L"Compact refused for a float plane");
+			Assert::IsTrue(GrainSplit::Gpu::StorageFallback(nl.choice).engaged, L"visible");
+			Assert::AreEqual(size_t(2), nl.layout.terms.size(), L"the node is laid out as Full");
+
+			VpSkeleton::PlTexBackend backend(gpu);
+			VpSkeleton::Dims dims; dims.width = kW; dims.height = kH;
+			std::vector<pl_tex> tx;
+			for (size_t i = 0; i < nl.layout.terms.size(); ++i)
+				tx.push_back(backend.Create(nl.layout.ShapeOf(i, dims)));
+			GrainSplit::Gpu::Splitter splitter;
+			GrainSplit::Gpu::SplitterFill fill(splitter, gpu, dev.dispatch);
+			GrainSplit::Gpu::SplitterFill::Source src;
+			src.plane = plane; src.component = 0; src.codeUnit = cu; src.scale = 1.0; src.B = kB; src.storage = Storage::Compact;
+			fill.SetSource(src);
+			auto fullTargets = [&](const GrainSplit::GrainTarget&) { GrainSplit::Gpu::Targets t; t.split = tx[0]; t.blocks = tx[1]; return t; };
+			fill.SetTargets(fullTargets, nl.choice.storage);
+			Assert::IsTrue(fill.Fill(1, GrainSplit::GrainTarget{ true, 0 }), Wide("downgraded fill: " + fill.LastRefusal() + splitter.LastError()).c_str());
+			Assert::IsTrue(splitter.Out().storage == Storage::Full, L"computed as Full into the Full layout");
+
+			// Targets laid out for Compact while the plane grants only Full: refused before Compute, visibly.
+			fill.SetTargets(fullTargets, Storage::Compact);
+			Assert::IsFalse(fill.Fill(2, GrainSplit::GrainTarget{ true, 0 }), L"a stale layout is refused");
+			Assert::IsTrue(fill.FillDecision().engaged && fill.LastRefusal().find("laid out again") != std::string::npos, L"visible, with the reason");
+			Assert::AreEqual(1u, fill.Fills(), L"no compute for the refused Fill");
+			fill.SetTargets(fullTargets, nl.choice.storage);
+			Assert::IsTrue(fill.Fill(3, GrainSplit::GrainTarget{ true, 0 }), L"recovers once laid out again");
+			splitter.Release(gpu);
+			for (pl_tex& t : tx) backend.Destroy(t);
 			pl_tex_destroy(gpu, &plane);
 		}
 	};

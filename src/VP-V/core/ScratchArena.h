@@ -130,6 +130,10 @@ public:
 
     void EndScope() { scopeOpen_ = false; }
 
+    // True when the arena is bound to a thread other than the caller's (its Acquires would be refused): a caller
+    // that runs on another thread (a lane producer) must use its own arena.
+    bool BoundToOtherThread() const { return ownerSet_ && owner_ != std::this_thread::get_id(); }
+
     // The texture for `owner`'s next temporary of `shape` in the open scope; null when there is none (the
     // caller reduces or switches off for this frame; the shortage is recorded for FrameDecision()).
     Handle Acquire(const char* owner, const TexShape& shape)

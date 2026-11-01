@@ -341,8 +341,35 @@ struct ProductTexLayout {
             b += ShapeBytes(ShapeOf(i, d));
         return b;
     }
-    // The static check of the governor: the layout is exactly what the declaration counts.
-    bool MatchesDecl(const ProductDecl& decl, Dims d) const { return BytesPerBuffer(d) == BytesOf(decl.size, d); }
+    // The static check of the governor: the layout is exactly what the declaration counts. A layout without
+    // absolute terms must equal the SizeRule in total. A layout with absolute terms (a grid whose cell edge is a
+    // runtime choice, e.g. the grain split's block edge B) is checked term by term against the declaration's terms
+    // in the same order: a relative term exactly, an absolute term at the same bytes per cell and AT MOST the
+    // declared cells (the declaration is the upper bound the governor plans with).
+    bool MatchesDecl(const ProductDecl& decl, Dims d) const
+    {
+        bool hasAbs = false;
+        for (const TexTerm& t : terms)
+            if (t.absW > 0 && t.absH > 0)
+                hasAbs = true;
+        if (!hasAbs)
+            return BytesPerBuffer(d) == BytesOf(decl.size, d);
+        const size_t n = decl.size.termCount < decl.size.terms.size() ? size_t(decl.size.termCount) : decl.size.terms.size();
+        if (decl.size.fixedBytes != 0 || terms.size() != n)
+            return false;
+        for (size_t i = 0; i < n; ++i) {
+            const SizeTerm& st = decl.size.terms[i];
+            const uint64_t declBytes = CellsAt(d, st.shift) * st.bytesPerCell;
+            const uint64_t bytes = ShapeBytes(ShapeOf(i, d));
+            if (terms[i].absW > 0 && terms[i].absH > 0) {
+                if (BytesPerTexel(terms[i].fmt) != st.bytesPerCell || bytes > declBytes)
+                    return false;
+            } else if (bytes != declBytes) {
+                return false;
+            }
+        }
+        return true;
+    }
 };
 
 // The textures of one product: `ring` buffers when laned, always `live` buffers. Allocation happens only
