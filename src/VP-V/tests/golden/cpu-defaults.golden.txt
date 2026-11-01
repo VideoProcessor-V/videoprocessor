@@ -458,7 +458,7 @@ fp[307]=0
 fp[308]=0
 fp[309]=
 ### case sample-VideoProcessor.cfg
-rule=scaling/default, motion/default, display/default, color/rec709, viewport/viewport_16x9, zoom/viewport_16x9, queue/normal, lldv/default, nls/off, standard_shaders/base
+rule=scaling/default, motion/default, display/default, color/rec709, viewport/viewport_16x9, zoom/viewport_16x9, queue/normal, lldv/default, output_display/default, nls/off, standard_shaders/base
 capture_path=gpu
 capture_upload=auto
 source_range=auto
@@ -612,7 +612,7 @@ fp[003]=0
 fp[004]=2
 fp[005]=0
 fp[006]=1
-fp[007]=
+fp[007]=auto
 fp[008]=
 fp[009]=0
 fp[010]=150
