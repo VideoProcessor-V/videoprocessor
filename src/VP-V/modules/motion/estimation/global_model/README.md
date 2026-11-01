@@ -220,3 +220,10 @@ catches a coherent competitor with at least about a third of the camera's suppor
 accessor + hints, store record, fitter behaviour (pan, zoom, rotation, perspective, noise, objects,
 tiny movers, sky, cut, fade, flash, parallax, crowds, logos, credits, letterbox, shake, pulldown,
 inverse, determinism, generations, deadline, 8K) and a cost report (`CAMERA_COST ...` lines).
+
+## Link layer (K1 / K2 / K4, module side)
+`link/` holds the fit runner (P7 producer, worker thread, readback ring, pool), the P8 producer / fill / per-consumer binding and
+the guided-matching scheduler, governor and `p7g_camera_guide` product. All of it is inert until the H1 adapter registers it; see
+`link/README.md` (wiring table, fill rule, private-history justification). The verdict gate (D-K4) is `CameraModel::ReasonUsable`:
+one set shared by `BlendState::ForcesZero` and the guidance gate (Ok, PostCutSeeded, FlashBridged); Ambiguous, InverseMismatch,
+Degenerate, TooFewSamples and LowConfidence records are published for diagnostics and never used.
