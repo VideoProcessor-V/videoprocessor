@@ -380,6 +380,11 @@ namespace TemporalDetail
 			const IMotionSource* motion = nullptr;
 			std::vector<FutureFrame> future;   // queued modes: seq + 1, seq + 2, ... (the referee and future slot)
 			std::vector<double> quality;       // optional per-block bitrate quality 0..1 (empty = neutral 1)
+			// Active picture [activeX0, activeX1) x [activeY0, activeY1) in plane pixels (bars / letterbox outside it).
+			// Each axis on its own: activeX1 (activeY1) <= 0 means the plane's right (bottom) edge; the defaults are the whole
+			// plane (the model runs exactly as without a rectangle). Outside: output = input, byte-identical; the analysis runs on
+			// the picture mirrored into the bars, so the bar edge is never structure (no halo at the boundary).
+			int activeX0 = 0, activeY0 = 0, activeX1 = 0, activeY1 = 0;
 		};
 
 		// Model-only knobs for measurement and the guard's own test (not user settings, never in the config):
@@ -393,6 +398,14 @@ namespace TemporalDetail
 			double cleanKappa = kCleanKappa;
 			double guardTemplateShare = kGuardTemplateShare;   // <= 0: the guard reads every low-f pixel (no structure mask)
 			bool guard = true;
+			// Validation thresholds (README step 6), exposed for measurement on real encodes; defaults = the constants.
+			double strongerMargin = kStrongerMargin;     // reference-stronger gate: zero at 1 + m, full at 1 + 3 m
+			double baseNoiseCodes = kBaseNoiseCodes;     // base-match allowance: coding noise ...
+			double baseGrainSigmas = kBaseGrainSigmas;   // ... plus this many grain-level RMS of the base band
+			double uncertaintyPx = kUncertaintyPx;       // composed motion uncertainty limit (x Scale)
+			// > 0: every block with a selected reference transfers at this weight, gates and limiter bypassed (the
+			// transfer's ceiling, for measurement only; the projection, coherence, budget and guard still apply)
+			double forceWeight = 0.0;
 			double forceDrop = 0.0, forceFreeze = 0.0;
 		};
 
@@ -458,6 +471,9 @@ namespace TemporalDetail
 		bool m_haveFrame = false;
 		uint64_t m_prevSeq = 0;
 		StampView m_stamps;
+		int m_active[4] = { 0, 0, 0, 0 };   // the last active rectangle (x0, y0, x1, y1); a change resets
+		const char* m_pendingReset = nullptr;   // a wrapper-detected reset reason, applied by ProcessPlane
+		Plane ProcessPlane(const FrameIn& in);
 		int m_w = 0, m_h = 0, m_B = 16;
 		double m_scale = 1.0;
 		double m_camCx = 0.0, m_camCy = 0.0;
@@ -678,7 +694,7 @@ namespace TemporalDetail
 		const double e2c = c2 / n, e2w = w2 / n;
 		e.corr = dot / std::sqrt(cs * ws + 1e-12);
 		e.corrGate = Smoothstep(0.5 * kCorrMin, kCorrMin, e.corr);
-		e.strongerGate = Smoothstep(1.0 + kStrongerMargin, 1.0 + 3.0 * kStrongerMargin, (e.e1w + fl) / (e.e1c + fl)) *
+		e.strongerGate = Smoothstep(1.0 + m_tune.strongerMargin, 1.0 + 3.0 * m_tune.strongerMargin, (e.e1w + fl) / (e.e1c + fl)) *
 			Smoothstep(kSignificanceLo, kSignificanceHi, e.e1w / (A.N[bi] + fl));
 		// A reference clearly weaker than the current block would soften it: that veto is instant.
 		e.harmGate = Smoothstep(1.0 - 3.0 * kStrongerMargin, 1.0 - kStrongerMargin, (e.e1w + fl) / (e.e1c + fl));
@@ -693,10 +709,10 @@ namespace TemporalDetail
 			e.focusGate = Smoothstep(kPullLo, kPullHi, A.F[bi] / (Fw + 1e-6));
 			e.u = Detail::GridAt(src.u, bw, bh, B, cx, cy);
 		}
-		const double uMax = kUncertaintyPx * m_scale;
+		const double uMax = m_tune.uncertaintyPx * m_scale;
 		e.uncGate = 1.0 - Smoothstep(0.3 * uMax, uMax, e.u);
 		e.baseDiff = bd / n;
-		const double allow = kBaseNoiseCodes + kBaseGrainSigmas * std::sqrt((std::max)(0.0, A.N[bi])) / 4.0;
+		const double allow = m_tune.baseNoiseCodes + m_tune.baseGrainSigmas * std::sqrt((std::max)(0.0, A.N[bi])) / 4.0;
 		e.baseGate = 1.0 - Smoothstep(allow, 2.0 * allow, e.baseDiff);
 		const double hzv = hz > 0.0 ? hz : kReferenceHz;
 		const double ageFrames = src.future ? static_cast<double>(src.seq) - static_cast<double>(m_prevSeq + 1) : static_cast<double>(m_prevSeq + 1) - static_cast<double>(src.seq);
@@ -707,7 +723,62 @@ namespace TemporalDetail
 		return e;
 	}
 
+	// The active-picture wrapper: bars are copied unchanged, the picture is processed on the plane with the picture
+	// mirrored into the bars (the bar edge is not structure, so the boundary gets no halo or undershoot).
 	inline Plane Model::Process(const FrameIn& in)
+	{
+		if (m_set.mode == Mode::Off)
+		{
+			m_diag.status = "off";
+			return in.luma;
+		}
+		const int w = in.luma.w, h = in.luma.h;
+		const int x0 = (std::max)(0, (std::min)(w, in.activeX0)), y0 = (std::max)(0, (std::min)(h, in.activeY0));
+		const int x1 = in.activeX1 > 0 ? (std::min)(w, in.activeX1) : w, y1 = in.activeY1 > 0 ? (std::min)(h, in.activeY1) : h;
+		const int rect[4] = { x0, y0, x1, y1 };
+		if (m_haveFrame && (rect[0] != m_active[0] || rect[1] != m_active[1] || rect[2] != m_active[2] || rect[3] != m_active[3]))
+			m_pendingReset = "active picture";   // ProcessPlane resets once, with this reason (unless a cut/fade wins)
+		for (int i = 0; i < 4; ++i) m_active[i] = rect[i];
+		if (x0 == 0 && y0 == 0 && x1 == w && y1 == h) return ProcessPlane(in);
+		if (x1 - x0 < 2 || y1 - y0 < 2)
+		{
+			Diagnostics d;   // nothing processed: no stale block maps; the counters carry on
+			d.resets = m_diag.resets; d.refreshes = m_diag.refreshes; d.retires = m_diag.retires; d.frames = m_diag.frames;
+			d.guardTrips = m_diag.guardTrips;
+			d.status = "inactive: no active picture";
+			m_diag = d;
+			return in.luma;
+		}
+		// mirror (half-sample symmetric) the picture into the bars: texture statistics continue across the boundary,
+		// so the split, the grain level and the gates near the edge read like the interior (no edge, no flat strip)
+		auto mirror = [](int v, int lo, int hi) {
+			const int n = hi - lo, period = 2 * n;
+			int k = (v - lo) % period;
+			if (k < 0) k += period;
+			return lo + (k < n ? k : period - 1 - k);
+		};
+		auto pad = [&](const Plane& src) {
+			Plane p(src.w, src.h);
+			for (int y = 0; y < src.h; ++y)
+				for (int x = 0; x < src.w; ++x) p.at(x, y) = src.at(mirror(x, x0, x1), mirror(y, y0, y1));
+			return p;
+		};
+		FrameIn padded = in;
+		padded.luma = pad(in.luma);
+		std::vector<Plane> fut;
+		fut.reserve(in.future.size());
+		// a queued frame of another size is passed through untouched (ProcessPlane rejects it as before)
+		auto sameSize = [&](const Plane* f) { return f && f->w == w && f->h == h; };
+		for (const FutureFrame& f : in.future) fut.push_back(sameSize(f.luma) ? pad(*f.luma) : Plane());
+		for (size_t i = 0; i < in.future.size(); ++i) if (sameSize(in.future[i].luma)) padded.future[i].luma = &fut[i];
+		Plane out = ProcessPlane(padded);
+		for (int y = 0; y < h; ++y)
+			for (int x = 0; x < w; ++x)
+				if (x < x0 || x >= x1 || y < y0 || y >= y1) out.at(x, y) = in.luma.at(x, y);
+		return out;
+	}
+
+	inline Plane Model::ProcessPlane(const FrameIn& in)
 	{
 		if (m_set.mode == Mode::Off)
 		{
@@ -732,6 +803,8 @@ namespace TemporalDetail
 			else if (in.stamps.rebaseH != m_stamps.rebaseH && PolicyOf(Counter::RebaseH) == ReaderPolicy::Reset) reason = "stamp rebaseH";
 			else if (in.stamps.rebaseV != m_stamps.rebaseV && PolicyOf(Counter::RebaseV) == ReaderPolicy::Reset) reason = "stamp rebaseV";
 		}
+		if (!reason && m_haveFrame && m_pendingReset) reason = m_pendingReset;
+		m_pendingReset = nullptr;
 		if (in.cut) reason = "cut";
 		else if (in.fade) reason = "fade";
 		if (reason) Reset(reason);
@@ -1095,7 +1168,7 @@ namespace TemporalDetail
 			Contribution& c = contrib[static_cast<size_t>(i)];
 			// the output-vs-input grain guard (step 10) scales what this block may contribute
 			const double guard = m_tune.guard ? st.guard : 1.0;
-			c.w = refreshNow ? 0.0 : weight * guard;
+			c.w = refreshNow ? 0.0 : ((m_tune.forceWeight > 0.0 && chosen) ? m_tune.forceWeight : weight) * guard;
 			c.boost = boost * guard;
 			if (!refreshNow && chosen)
 			{

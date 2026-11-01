@@ -1,0 +1,190 @@
+<!-- Copyright(C) 2026 VP-V contributors -->
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+
+# Prototype summary: temporal_detail family, default `td_off`
+
+Suite `td_noharm`. Key metrics per case; flags are the harness verdicts vs the default (full rows in `<candidate>.md`).
+
+## Means over cases
+
+| metric | default | td_b008_boost0 |
+|---|---|---|
+| psnr_B_Y | NA | NA |
+| psnr_P_Y | NA | NA |
+| psnr_I_Y | NA | NA |
+| psnr_Y | NA | 89.8966 |
+| ssim_B_Y | NA | NA |
+| ssim_Y | 1 | 0.999998 |
+| lpips_B | NA | NA |
+| lpips_all | NA | NA |
+| ib_gap_db_Y | NA | NA |
+| detail_pulse_Y | 0 | 0.000928561 |
+| gop_ratio_minigop | NA | NA |
+| flicker_excess_Y | 0 | 2.12996e-05 |
+| grain_keep_vs_input_Y | 1 | 1.00017 |
+| grain_lag1_vs_input_Y | 0 | 9.28665e-07 |
+| grain_keep_vs_input_band1_Y | 1 | 1.00016 |
+| grain_keep_vs_input_band2_Y | 1 | 1.0002 |
+| grain_keep_vs_input_band3_Y | 1 | 1.00017 |
+| grain_keep_vs_input_band4_Y | 1 | 1.00014 |
+| grain_probe_keep_edge_vs_input_Y | 1 | 1.00095 |
+| grain_probe_lag1_edge_vs_input_Y | 0 | 6.43807e-06 |
+| grain_probe_keep_flat_vs_input_Y | 1 | 1.00001 |
+| grain_probe_lag1_flat_vs_input_Y | 0 | 7.95992e-07 |
+| ghost_coeff_Y | 0 | -6.47798e-05 |
+| smear_Y | 1 | 1.00111 |
+| halo_overshoot_Y | 0 | 9.99377e-07 |
+| lc_boost_fraction_Y | 0 | 0 |
+| btb_kept_vs_input_Y | 1 | 1 |
+| wtw_kept_vs_input_Y | 1 | 1 |
+| cost_ms_per_frame_pyref | 0.000319997 | 858.464 |
+
+## Per case
+
+| content_type | clip | case | metric | default | td_b008_boost0 | flags |
+|---|---|---|---|---|---|---|
+| film24 | nh_35mm | noharm_input_ref | psnr_Y | inf | 110.259 | td_b008_boost0:FLAG |
+| film24 | nh_35mm | noharm_input_ref | ssim_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | nh_35mm | noharm_input_ref | grain_keep_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | nh_35mm | noharm_input_ref | grain_lag1_vs_input_Y | 0 | -6.59314e-09 | td_b008_boost0:PASS |
+| film24 | nh_35mm | noharm_input_ref | btb_kept_vs_input_Y | NA | NA | td_b008_boost0:NA |
+| film24 | nh_35mm | noharm_input_ref | wtw_kept_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | nh_35mm | noharm_input_ref | flicker_excess_Y | 0 | -3.36011e-08 | td_b008_boost0:PASS |
+| film24 | nh_35mm | noharm_input_ref | gop_ratio_minigop | NA | NA | td_b008_boost0:NA |
+| film24 | nh_35mm | noharm_input_ref | ghost_coeff_Y | 0 | -1.11089e-07 | td_b008_boost0:PASS |
+| film24 | nh_35mm | noharm_input_ref | smear_Y | 1 | 1.00001 | td_b008_boost0:PASS |
+| film24 | nh_35mm | noharm_input_ref | halo_overshoot_Y | 0 | 5.95736e-09 | td_b008_boost0:PASS |
+| film24 | nh_35mm | noharm_input_ref | lc_boost_fraction_Y | 0 | 0 | td_b008_boost0:PASS |
+| film24 | nh_35mm | noharm_input_ref | lpips_all | NA | NA | td_b008_boost0:NA |
+| film24 | nh_35mm | noharm_input_ref | psnr_I_Y | NA | NA | td_b008_boost0:NA |
+| film24 | nh_35mm | noharm_input_ref | psnr_P_Y | NA | NA | td_b008_boost0:NA |
+| film24 | nh_35mm | noharm_input_ref | psnr_B_Y | NA | NA | td_b008_boost0:NA |
+| film24 | nh_35mm | noharm_input_ref | ssim_B_Y | NA | NA | td_b008_boost0:NA |
+| film24 | nh_35mm | noharm_input_ref | lpips_B | NA | NA | td_b008_boost0:NA |
+| film24 | nh_35mm | noharm_input_ref | ib_gap_db_Y | NA | NA | td_b008_boost0:NA |
+| film24 | nh_35mm | noharm_input_ref | detail_pulse_Y | 0 | 2.73281e-05 | td_b008_boost0:INFO |
+| film24 | nh_35mm | noharm_input_ref | grain_keep_vs_input_band1_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | nh_35mm | noharm_input_ref | grain_keep_vs_input_band2_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | nh_35mm | noharm_input_ref | grain_keep_vs_input_band3_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | nh_35mm | noharm_input_ref | grain_keep_vs_input_band4_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | nh_35mm | noharm_input_ref | grain_probe_keep_edge_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | nh_35mm | noharm_input_ref | grain_probe_lag1_edge_vs_input_Y | NA | NA | td_b008_boost0:NA |
+| film24 | nh_35mm | noharm_input_ref | grain_probe_keep_flat_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | nh_35mm | noharm_input_ref | grain_probe_lag1_flat_vs_input_Y | 0 | -8.00099e-10 | td_b008_boost0:PASS |
+| film24 | nh_35mm | noharm_input_ref | cost_ms_per_frame_pyref | 0.000300002 | 682.317 | td_b008_boost0:INFO |
+| film24 | nh_16mm | noharm_input_ref | psnr_Y | inf | 80.319 | td_b008_boost0:FLAG |
+| film24 | nh_16mm | noharm_input_ref | ssim_Y | 1 | 0.999999 | td_b008_boost0:PASS |
+| film24 | nh_16mm | noharm_input_ref | grain_keep_vs_input_Y | 1 | 1.00015 | td_b008_boost0:PASS |
+| film24 | nh_16mm | noharm_input_ref | grain_lag1_vs_input_Y | 0 | -2.82478e-05 | td_b008_boost0:PASS |
+| film24 | nh_16mm | noharm_input_ref | btb_kept_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | nh_16mm | noharm_input_ref | wtw_kept_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | nh_16mm | noharm_input_ref | flicker_excess_Y | 0 | 7.64094e-08 | td_b008_boost0:PASS |
+| film24 | nh_16mm | noharm_input_ref | gop_ratio_minigop | NA | NA | td_b008_boost0:NA |
+| film24 | nh_16mm | noharm_input_ref | ghost_coeff_Y | 0 | -2.4806e-05 | td_b008_boost0:PASS |
+| film24 | nh_16mm | noharm_input_ref | smear_Y | 1 | 1.00111 | td_b008_boost0:PASS |
+| film24 | nh_16mm | noharm_input_ref | halo_overshoot_Y | 0 | 7.02608e-07 | td_b008_boost0:PASS |
+| film24 | nh_16mm | noharm_input_ref | lc_boost_fraction_Y | 0 | 0 | td_b008_boost0:PASS |
+| film24 | nh_16mm | noharm_input_ref | lpips_all | NA | NA | td_b008_boost0:NA |
+| film24 | nh_16mm | noharm_input_ref | psnr_I_Y | NA | NA | td_b008_boost0:NA |
+| film24 | nh_16mm | noharm_input_ref | psnr_P_Y | NA | NA | td_b008_boost0:NA |
+| film24 | nh_16mm | noharm_input_ref | psnr_B_Y | NA | NA | td_b008_boost0:NA |
+| film24 | nh_16mm | noharm_input_ref | ssim_B_Y | NA | NA | td_b008_boost0:NA |
+| film24 | nh_16mm | noharm_input_ref | lpips_B | NA | NA | td_b008_boost0:NA |
+| film24 | nh_16mm | noharm_input_ref | ib_gap_db_Y | NA | NA | td_b008_boost0:NA |
+| film24 | nh_16mm | noharm_input_ref | detail_pulse_Y | 0 | 0.00109151 | td_b008_boost0:INFO |
+| film24 | nh_16mm | noharm_input_ref | grain_keep_vs_input_band1_Y | 1 | 1.00014 | td_b008_boost0:PASS |
+| film24 | nh_16mm | noharm_input_ref | grain_keep_vs_input_band2_Y | 1 | 1.00016 | td_b008_boost0:PASS |
+| film24 | nh_16mm | noharm_input_ref | grain_keep_vs_input_band3_Y | 1 | 1.00016 | td_b008_boost0:PASS |
+| film24 | nh_16mm | noharm_input_ref | grain_keep_vs_input_band4_Y | 1 | 1.00016 | td_b008_boost0:PASS |
+| film24 | nh_16mm | noharm_input_ref | grain_probe_keep_edge_vs_input_Y | 1 | 1.00013 | td_b008_boost0:PASS |
+| film24 | nh_16mm | noharm_input_ref | grain_probe_lag1_edge_vs_input_Y | NA | NA | td_b008_boost0:NA |
+| film24 | nh_16mm | noharm_input_ref | grain_probe_keep_flat_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | nh_16mm | noharm_input_ref | grain_probe_lag1_flat_vs_input_Y | 0 | -1.82568e-08 | td_b008_boost0:PASS |
+| film24 | nh_16mm | noharm_input_ref | cost_ms_per_frame_pyref | 0.000200002 | 632.628 | td_b008_boost0:INFO |
+| dark | nh_dark | noharm_input_ref | psnr_Y | inf | 95.4204 | td_b008_boost0:FLAG |
+| dark | nh_dark | noharm_input_ref | ssim_Y | 1 | 1 | td_b008_boost0:PASS |
+| dark | nh_dark | noharm_input_ref | grain_keep_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| dark | nh_dark | noharm_input_ref | grain_lag1_vs_input_Y | 0 | 0 | td_b008_boost0:PASS |
+| dark | nh_dark | noharm_input_ref | btb_kept_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| dark | nh_dark | noharm_input_ref | wtw_kept_vs_input_Y | NA | NA | td_b008_boost0:NA |
+| dark | nh_dark | noharm_input_ref | flicker_excess_Y | 0 | 4.89945e-07 | td_b008_boost0:PASS |
+| dark | nh_dark | noharm_input_ref | gop_ratio_minigop | NA | NA | td_b008_boost0:NA |
+| dark | nh_dark | noharm_input_ref | ghost_coeff_Y | 0 | -9.66394e-06 | td_b008_boost0:PASS |
+| dark | nh_dark | noharm_input_ref | smear_Y | 1 | 1.00007 | td_b008_boost0:PASS |
+| dark | nh_dark | noharm_input_ref | halo_overshoot_Y | 0 | 1.75029e-07 | td_b008_boost0:PASS |
+| dark | nh_dark | noharm_input_ref | lc_boost_fraction_Y | 0 | 0 | td_b008_boost0:PASS |
+| dark | nh_dark | noharm_input_ref | lpips_all | NA | NA | td_b008_boost0:NA |
+| dark | nh_dark | noharm_input_ref | psnr_I_Y | NA | NA | td_b008_boost0:NA |
+| dark | nh_dark | noharm_input_ref | psnr_P_Y | NA | NA | td_b008_boost0:NA |
+| dark | nh_dark | noharm_input_ref | psnr_B_Y | NA | NA | td_b008_boost0:NA |
+| dark | nh_dark | noharm_input_ref | ssim_B_Y | NA | NA | td_b008_boost0:NA |
+| dark | nh_dark | noharm_input_ref | lpips_B | NA | NA | td_b008_boost0:NA |
+| dark | nh_dark | noharm_input_ref | ib_gap_db_Y | NA | NA | td_b008_boost0:NA |
+| dark | nh_dark | noharm_input_ref | detail_pulse_Y | 0 | 9.12838e-05 | td_b008_boost0:INFO |
+| dark | nh_dark | noharm_input_ref | grain_keep_vs_input_band1_Y | 1 | 1 | td_b008_boost0:PASS |
+| dark | nh_dark | noharm_input_ref | grain_keep_vs_input_band2_Y | 1 | 1 | td_b008_boost0:PASS |
+| dark | nh_dark | noharm_input_ref | grain_keep_vs_input_band3_Y | 1 | 1 | td_b008_boost0:PASS |
+| dark | nh_dark | noharm_input_ref | grain_keep_vs_input_band4_Y | 1 | 1 | td_b008_boost0:PASS |
+| dark | nh_dark | noharm_input_ref | grain_probe_keep_edge_vs_input_Y | 1 | 0.999993 | td_b008_boost0:PASS |
+| dark | nh_dark | noharm_input_ref | grain_probe_lag1_edge_vs_input_Y | NA | NA | td_b008_boost0:NA |
+| dark | nh_dark | noharm_input_ref | grain_probe_keep_flat_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| dark | nh_dark | noharm_input_ref | grain_probe_lag1_flat_vs_input_Y | 0 | -2.36398e-07 | td_b008_boost0:PASS |
+| dark | nh_dark | noharm_input_ref | cost_ms_per_frame_pyref | 0.000399988 | 1207.44 | td_b008_boost0:INFO |
+| nature30 | nh_river | noharm_input_ref | psnr_Y | inf | 69.2824 | td_b008_boost0:FLAG |
+| nature30 | nh_river | noharm_input_ref | ssim_Y | 1 | 0.999992 | td_b008_boost0:PASS |
+| nature30 | nh_river | noharm_input_ref | grain_keep_vs_input_Y | 1 | 1.00071 | td_b008_boost0:PASS |
+| nature30 | nh_river | noharm_input_ref | grain_lag1_vs_input_Y | 0 | 3.28103e-05 | td_b008_boost0:PASS |
+| nature30 | nh_river | noharm_input_ref | btb_kept_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| nature30 | nh_river | noharm_input_ref | wtw_kept_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| nature30 | nh_river | noharm_input_ref | flicker_excess_Y | 0 | 7.48688e-05 | td_b008_boost0:PASS |
+| nature30 | nh_river | noharm_input_ref | gop_ratio_minigop | NA | NA | td_b008_boost0:NA |
+| nature30 | nh_river | noharm_input_ref | ghost_coeff_Y | 0 | -0.000283267 | td_b008_boost0:PASS |
+| nature30 | nh_river | noharm_input_ref | smear_Y | 1 | 1.00422 | td_b008_boost0:PASS |
+| nature30 | nh_river | noharm_input_ref | halo_overshoot_Y | 0 | 3.77071e-06 | td_b008_boost0:PASS |
+| nature30 | nh_river | noharm_input_ref | lc_boost_fraction_Y | 0 | 0 | td_b008_boost0:PASS |
+| nature30 | nh_river | noharm_input_ref | lpips_all | NA | NA | td_b008_boost0:NA |
+| nature30 | nh_river | noharm_input_ref | psnr_I_Y | NA | NA | td_b008_boost0:NA |
+| nature30 | nh_river | noharm_input_ref | psnr_P_Y | NA | NA | td_b008_boost0:NA |
+| nature30 | nh_river | noharm_input_ref | psnr_B_Y | NA | NA | td_b008_boost0:NA |
+| nature30 | nh_river | noharm_input_ref | ssim_B_Y | NA | NA | td_b008_boost0:NA |
+| nature30 | nh_river | noharm_input_ref | lpips_B | NA | NA | td_b008_boost0:NA |
+| nature30 | nh_river | noharm_input_ref | ib_gap_db_Y | NA | NA | td_b008_boost0:NA |
+| nature30 | nh_river | noharm_input_ref | detail_pulse_Y | 0 | 0.00323663 | td_b008_boost0:INFO |
+| nature30 | nh_river | noharm_input_ref | grain_keep_vs_input_band1_Y | 1 | 1.00067 | td_b008_boost0:PASS |
+| nature30 | nh_river | noharm_input_ref | grain_keep_vs_input_band2_Y | 1 | 1.00083 | td_b008_boost0:PASS |
+| nature30 | nh_river | noharm_input_ref | grain_keep_vs_input_band3_Y | 1 | 1.00069 | td_b008_boost0:PASS |
+| nature30 | nh_river | noharm_input_ref | grain_keep_vs_input_band4_Y | 1 | 1.00054 | td_b008_boost0:PASS |
+| nature30 | nh_river | noharm_input_ref | grain_probe_keep_edge_vs_input_Y | 1 | 1.00463 | td_b008_boost0:PASS |
+| nature30 | nh_river | noharm_input_ref | grain_probe_lag1_edge_vs_input_Y | NA | NA | td_b008_boost0:NA |
+| nature30 | nh_river | noharm_input_ref | grain_probe_keep_flat_vs_input_Y | 1 | 1.00006 | td_b008_boost0:PASS |
+| nature30 | nh_river | noharm_input_ref | grain_probe_lag1_flat_vs_input_Y | 0 | 4.15275e-06 | td_b008_boost0:PASS |
+| nature30 | nh_river | noharm_input_ref | cost_ms_per_frame_pyref | 0.000400003 | 742.353 | td_b008_boost0:INFO |
+| sports50_60 | nh_goal | noharm_input_ref | psnr_Y | inf | 94.2022 | td_b008_boost0:FLAG |
+| sports50_60 | nh_goal | noharm_input_ref | ssim_Y | 1 | 1 | td_b008_boost0:PASS |
+| sports50_60 | nh_goal | noharm_input_ref | grain_keep_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| sports50_60 | nh_goal | noharm_input_ref | grain_lag1_vs_input_Y | 0 | 8.74175e-08 | td_b008_boost0:PASS |
+| sports50_60 | nh_goal | noharm_input_ref | btb_kept_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| sports50_60 | nh_goal | noharm_input_ref | wtw_kept_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| sports50_60 | nh_goal | noharm_input_ref | flicker_excess_Y | 0 | 3.10965e-05 | td_b008_boost0:PASS |
+| sports50_60 | nh_goal | noharm_input_ref | gop_ratio_minigop | NA | NA | td_b008_boost0:NA |
+| sports50_60 | nh_goal | noharm_input_ref | ghost_coeff_Y | 0 | -6.05094e-06 | td_b008_boost0:PASS |
+| sports50_60 | nh_goal | noharm_input_ref | smear_Y | 1 | 1.00015 | td_b008_boost0:PASS |
+| sports50_60 | nh_goal | noharm_input_ref | halo_overshoot_Y | 0 | 3.42581e-07 | td_b008_boost0:PASS |
+| sports50_60 | nh_goal | noharm_input_ref | lc_boost_fraction_Y | 0 | 0 | td_b008_boost0:PASS |
+| sports50_60 | nh_goal | noharm_input_ref | lpips_all | NA | NA | td_b008_boost0:NA |
+| sports50_60 | nh_goal | noharm_input_ref | psnr_I_Y | NA | NA | td_b008_boost0:NA |
+| sports50_60 | nh_goal | noharm_input_ref | psnr_P_Y | NA | NA | td_b008_boost0:NA |
+| sports50_60 | nh_goal | noharm_input_ref | psnr_B_Y | NA | NA | td_b008_boost0:NA |
+| sports50_60 | nh_goal | noharm_input_ref | ssim_B_Y | NA | NA | td_b008_boost0:NA |
+| sports50_60 | nh_goal | noharm_input_ref | lpips_B | NA | NA | td_b008_boost0:NA |
+| sports50_60 | nh_goal | noharm_input_ref | ib_gap_db_Y | NA | NA | td_b008_boost0:NA |
+| sports50_60 | nh_goal | noharm_input_ref | detail_pulse_Y | 0 | 0.000196051 | td_b008_boost0:INFO |
+| sports50_60 | nh_goal | noharm_input_ref | grain_keep_vs_input_band1_Y | 1 | 1 | td_b008_boost0:PASS |
+| sports50_60 | nh_goal | noharm_input_ref | grain_keep_vs_input_band2_Y | 1 | 1 | td_b008_boost0:PASS |
+| sports50_60 | nh_goal | noharm_input_ref | grain_keep_vs_input_band3_Y | 1 | 1 | td_b008_boost0:PASS |
+| sports50_60 | nh_goal | noharm_input_ref | grain_keep_vs_input_band4_Y | 1 | 1 | td_b008_boost0:PASS |
+| sports50_60 | nh_goal | noharm_input_ref | grain_probe_keep_edge_vs_input_Y | 1 | 1.00001 | td_b008_boost0:PASS |
+| sports50_60 | nh_goal | noharm_input_ref | grain_probe_lag1_edge_vs_input_Y | 0 | 6.43807e-06 | td_b008_boost0:PASS |
+| sports50_60 | nh_goal | noharm_input_ref | grain_probe_keep_flat_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| sports50_60 | nh_goal | noharm_input_ref | grain_probe_lag1_flat_vs_input_Y | 0 | 8.26624e-08 | td_b008_boost0:PASS |
+| sports50_60 | nh_goal | noharm_input_ref | cost_ms_per_frame_pyref | 0.000299988 | 1027.58 | td_b008_boost0:INFO |

@@ -1,0 +1,277 @@
+<!-- Copyright(C) 2026 VP-V contributors -->
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+
+# Prototype summary: temporal_detail family, default `td_off`
+
+Suite `td_real_low`. Key metrics per case; flags are the harness verdicts vs the default (full rows in `<candidate>.md`).
+
+## Means over cases
+
+| metric | default | td_b008_boost0 |
+|---|---|---|
+| psnr_B_Y | 34.3373 | 34.3378 |
+| psnr_P_Y | 35.1899 | 35.1898 |
+| psnr_I_Y | 36.4579 | 36.4582 |
+| psnr_Y | 34.5649 | 34.5652 |
+| ssim_B_Y | 0.871026 | 0.871043 |
+| ssim_Y | 0.874086 | 0.874098 |
+| lpips_B | 0.131021 | 0.130992 |
+| lpips_all | 0.127798 | 0.127777 |
+| ib_gap_db_Y | 0.928257 | 0.927755 |
+| detail_pulse_Y | 0.22314 | 0.222814 |
+| gop_ratio_minigop | NA | NA |
+| flicker_excess_Y | -0.036511 | -0.0365023 |
+| grain_keep_vs_input_Y | 1 | 1.00022 |
+| grain_lag1_vs_input_Y | 0 | -7.33407e-06 |
+| grain_keep_vs_input_band1_Y | 1 | 1.00023 |
+| grain_keep_vs_input_band2_Y | 1 | 1.00021 |
+| grain_keep_vs_input_band3_Y | 1 | 1.00023 |
+| grain_keep_vs_input_band4_Y | 1 | 1.0002 |
+| grain_probe_keep_edge_vs_input_Y | 1 | 1.0001 |
+| grain_probe_lag1_edge_vs_input_Y | 0 | 0.000341411 |
+| grain_probe_keep_flat_vs_input_Y | 1 | 1 |
+| grain_probe_lag1_flat_vs_input_Y | 0 | 3.3493e-06 |
+| ghost_coeff_Y | 0.102347 | 0.102293 |
+| smear_Y | 0.730705 | 0.731011 |
+| halo_overshoot_Y | 0.000426972 | 0.000427442 |
+| lc_boost_fraction_Y | 0 | 0 |
+| btb_kept_vs_input_Y | 1 | 1 |
+| wtw_kept_vs_input_Y | 1 | 1 |
+| cost_ms_per_frame_pyref | 0.000287502 | 1035.68 |
+
+## Per case
+
+| content_type | clip | case | metric | default | td_b008_boost0 | flags |
+|---|---|---|---|---|---|---|
+| film24 | tos | x265_2160p_6k_low | psnr_Y | 46.0116 | 46.0115 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | ssim_Y | 0.986486 | 0.986486 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | grain_keep_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | grain_lag1_vs_input_Y | 0 | 2.47206e-07 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | btb_kept_vs_input_Y | NA | NA | td_b008_boost0:NA |
+| film24 | tos | x265_2160p_6k_low | wtw_kept_vs_input_Y | NA | NA | td_b008_boost0:NA |
+| film24 | tos | x265_2160p_6k_low | flicker_excess_Y | -0.000201539 | -0.000201375 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | gop_ratio_minigop | NA | NA | td_b008_boost0:NA |
+| film24 | tos | x265_2160p_6k_low | ghost_coeff_Y | 0.00353428 | 0.00353347 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | smear_Y | 0.885163 | 0.885169 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | halo_overshoot_Y | 2.50286e-05 | 2.50309e-05 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | lc_boost_fraction_Y | 0 | 0 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | lpips_all | 0.0582708 | 0.0582693 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | psnr_I_Y | 46.31 | 46.31 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | psnr_P_Y | 46.5035 | 46.5035 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | psnr_B_Y | 45.8428 | 45.8427 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | ssim_B_Y | 0.986186 | 0.986186 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | lpips_B | 0.0592325 | 0.0592305 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | ib_gap_db_Y | 0.640994 | 0.641026 | td_b008_boost0:INFO |
+| film24 | tos | x265_2160p_6k_low | detail_pulse_Y | 0.232474 | 0.232474 | td_b008_boost0:INFO |
+| film24 | tos | x265_2160p_6k_low | grain_keep_vs_input_band1_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | grain_keep_vs_input_band2_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | grain_keep_vs_input_band3_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | grain_keep_vs_input_band4_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | grain_probe_keep_edge_vs_input_Y | 1 | 0.999996 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | grain_probe_lag1_edge_vs_input_Y | NA | NA | td_b008_boost0:NA |
+| film24 | tos | x265_2160p_6k_low | grain_probe_keep_flat_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | grain_probe_lag1_flat_vs_input_Y | 0 | -1.96759e-10 | td_b008_boost0:PASS |
+| film24 | tos | x265_2160p_6k_low | cost_ms_per_frame_pyref | 0.000200002 | 991.564 | td_b008_boost0:INFO |
+| film24 | tos | x265_1080p_2.5k_low | psnr_Y | 45.1418 | 45.1419 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | ssim_Y | 0.98652 | 0.98652 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | grain_keep_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | grain_lag1_vs_input_Y | 0 | 3.95847e-08 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | btb_kept_vs_input_Y | NA | NA | td_b008_boost0:NA |
+| film24 | tos | x265_1080p_2.5k_low | wtw_kept_vs_input_Y | NA | NA | td_b008_boost0:NA |
+| film24 | tos | x265_1080p_2.5k_low | flicker_excess_Y | -0.00165591 | -0.00165484 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | gop_ratio_minigop | NA | NA | td_b008_boost0:NA |
+| film24 | tos | x265_1080p_2.5k_low | ghost_coeff_Y | 0.00503012 | 0.00502624 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | smear_Y | 0.936867 | 0.936901 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | halo_overshoot_Y | 4.47107e-05 | 4.47266e-05 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | lc_boost_fraction_Y | 0 | 0 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | lpips_all | 0.0403076 | 0.0403068 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | psnr_I_Y | 43.862 | 43.8621 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | psnr_P_Y | 45.7633 | 45.7633 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | psnr_B_Y | 45.0009 | 45.001 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | ssim_B_Y | 0.98637 | 0.98637 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | lpips_B | 0.0415726 | 0.0415714 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | ib_gap_db_Y | 0.530196 | 0.530066 | td_b008_boost0:INFO |
+| film24 | tos | x265_1080p_2.5k_low | detail_pulse_Y | 0.069476 | 0.0694638 | td_b008_boost0:INFO |
+| film24 | tos | x265_1080p_2.5k_low | grain_keep_vs_input_band1_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | grain_keep_vs_input_band2_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | grain_keep_vs_input_band3_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | grain_keep_vs_input_band4_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | grain_probe_keep_edge_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | grain_probe_lag1_edge_vs_input_Y | NA | NA | td_b008_boost0:NA |
+| film24 | tos | x265_1080p_2.5k_low | grain_probe_keep_flat_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | grain_probe_lag1_flat_vs_input_Y | 0 | -1.61106e-08 | td_b008_boost0:PASS |
+| film24 | tos | x265_1080p_2.5k_low | cost_ms_per_frame_pyref | 0.000600005 | 1079.83 | td_b008_boost0:INFO |
+| film24 | sol | x265_2160p_6k_low | psnr_Y | 36.3357 | 36.3358 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | ssim_Y | 0.934444 | 0.934444 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | grain_keep_vs_input_Y | 1 | 1.00022 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | grain_lag1_vs_input_Y | 0 | 1.05649e-05 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | btb_kept_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | wtw_kept_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | flicker_excess_Y | -0.00701674 | -0.00701573 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | gop_ratio_minigop | NA | NA | td_b008_boost0:NA |
+| film24 | sol | x265_2160p_6k_low | ghost_coeff_Y | 0.0209735 | 0.0209634 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | smear_Y | 0.796392 | 0.796521 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | halo_overshoot_Y | 0.000401656 | 0.000401806 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | lc_boost_fraction_Y | 0 | 0 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | lpips_all | 0.0839357 | 0.0839267 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | psnr_I_Y | 38.5995 | 38.5995 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | psnr_P_Y | 36.8976 | 36.8976 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | psnr_B_Y | 36.0924 | 36.0925 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | ssim_B_Y | 0.933618 | 0.933618 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | lpips_B | 0.0844818 | 0.08447 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | ib_gap_db_Y | 0.948409 | 0.94828 | td_b008_boost0:INFO |
+| film24 | sol | x265_2160p_6k_low | detail_pulse_Y | 0.448807 | 0.448704 | td_b008_boost0:INFO |
+| film24 | sol | x265_2160p_6k_low | grain_keep_vs_input_band1_Y | 1 | 1.00023 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | grain_keep_vs_input_band2_Y | 1 | 1.00022 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | grain_keep_vs_input_band3_Y | 1 | 1.00021 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | grain_keep_vs_input_band4_Y | 1 | 1.0002 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | grain_probe_keep_edge_vs_input_Y | 1 | 0.999995 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | grain_probe_lag1_edge_vs_input_Y | NA | NA | td_b008_boost0:NA |
+| film24 | sol | x265_2160p_6k_low | grain_probe_keep_flat_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | grain_probe_lag1_flat_vs_input_Y | 0 | -3.46143e-08 | td_b008_boost0:PASS |
+| film24 | sol | x265_2160p_6k_low | cost_ms_per_frame_pyref | 0.000400003 | 1354.32 | td_b008_boost0:INFO |
+| film24 | sol | x265_1080p_2.5k_low | psnr_Y | 33.4601 | 33.4601 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | ssim_Y | 0.893328 | 0.893332 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | grain_keep_vs_input_Y | 1 | 1.00035 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | grain_lag1_vs_input_Y | 0 | -4.80705e-05 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | btb_kept_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | wtw_kept_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | flicker_excess_Y | -0.0129662 | -0.0129659 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | gop_ratio_minigop | NA | NA | td_b008_boost0:NA |
+| film24 | sol | x265_1080p_2.5k_low | ghost_coeff_Y | 0.0373323 | 0.037297 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | smear_Y | 0.734874 | 0.735215 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | halo_overshoot_Y | 0.000543137 | 0.000543683 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | lc_boost_fraction_Y | 0 | 0 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | lpips_all | 0.097648 | 0.0976417 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | psnr_I_Y | 36.7179 | 36.7184 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | psnr_P_Y | 34.1658 | 34.1658 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | psnr_B_Y | 33.1573 | 33.1573 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | ssim_B_Y | 0.89 | 0.890005 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | lpips_B | 0.09875 | 0.0987423 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | ib_gap_db_Y | 1.20591 | 1.20591 | td_b008_boost0:INFO |
+| film24 | sol | x265_1080p_2.5k_low | detail_pulse_Y | 0.33281 | 0.332813 | td_b008_boost0:INFO |
+| film24 | sol | x265_1080p_2.5k_low | grain_keep_vs_input_band1_Y | 1 | 1.00028 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | grain_keep_vs_input_band2_Y | 1 | 1.00036 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | grain_keep_vs_input_band3_Y | 1 | 1.00036 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | grain_keep_vs_input_band4_Y | 1 | 1.00039 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | grain_probe_keep_edge_vs_input_Y | 1 | 1.00003 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | grain_probe_lag1_edge_vs_input_Y | NA | NA | td_b008_boost0:NA |
+| film24 | sol | x265_1080p_2.5k_low | grain_probe_keep_flat_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | grain_probe_lag1_flat_vs_input_Y | 0 | 1.1737e-05 | td_b008_boost0:PASS |
+| film24 | sol | x265_1080p_2.5k_low | cost_ms_per_frame_pyref | 0.000200002 | 1229.53 | td_b008_boost0:INFO |
+| nature30 | boat | x265_2160p_6k_low | psnr_Y | 32.962 | 32.9628 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | ssim_Y | 0.913936 | 0.913945 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | grain_keep_vs_input_Y | 1 | 1.00032 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | grain_lag1_vs_input_Y | 0 | -4.04263e-05 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | btb_kept_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | wtw_kept_vs_input_Y | NA | NA | td_b008_boost0:NA |
+| nature30 | boat | x265_2160p_6k_low | flicker_excess_Y | -0.00326326 | -0.0032541 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | gop_ratio_minigop | NA | NA | td_b008_boost0:NA |
+| nature30 | boat | x265_2160p_6k_low | ghost_coeff_Y | 0.067087 | 0.0670146 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | smear_Y | 0.796423 | 0.796683 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | halo_overshoot_Y | 0.000331668 | 0.000331982 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | lc_boost_fraction_Y | 0 | 0 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | lpips_all | 0.0658872 | 0.0658718 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | psnr_I_Y | 35.3389 | 35.3392 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | psnr_P_Y | 33.6145 | 33.6144 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | psnr_B_Y | 32.7063 | 32.7073 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | ssim_B_Y | 0.911568 | 0.911581 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | lpips_B | 0.067368 | 0.0673473 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | ib_gap_db_Y | 1.06066 | 1.05964 | td_b008_boost0:INFO |
+| nature30 | boat | x265_2160p_6k_low | detail_pulse_Y | 0.0725941 | 0.0722579 | td_b008_boost0:INFO |
+| nature30 | boat | x265_2160p_6k_low | grain_keep_vs_input_band1_Y | 1 | 1.00039 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | grain_keep_vs_input_band2_Y | 1 | 1.00023 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | grain_keep_vs_input_band3_Y | 1 | 1.00027 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | grain_keep_vs_input_band4_Y | 1 | 1.00039 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | grain_probe_keep_edge_vs_input_Y | 1 | 1.00005 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | grain_probe_lag1_edge_vs_input_Y | NA | NA | td_b008_boost0:NA |
+| nature30 | boat | x265_2160p_6k_low | grain_probe_keep_flat_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | grain_probe_lag1_flat_vs_input_Y | 0 | 2.8147e-07 | td_b008_boost0:PASS |
+| nature30 | boat | x265_2160p_6k_low | cost_ms_per_frame_pyref | 0.000200002 | 858.56 | td_b008_boost0:INFO |
+| nature30 | boat | x265_1080p_2.5k_low | psnr_Y | 28.7511 | 28.7528 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | ssim_Y | 0.848339 | 0.848387 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | grain_keep_vs_input_Y | 1 | 1.00084 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | grain_lag1_vs_input_Y | 0 | 1.80088e-05 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | btb_kept_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | wtw_kept_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | flicker_excess_Y | -0.0347345 | -0.0347273 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | gop_ratio_minigop | NA | NA | td_b008_boost0:NA |
+| nature30 | boat | x265_1080p_2.5k_low | ghost_coeff_Y | 0.122664 | 0.122434 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | smear_Y | 0.715071 | 0.715844 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | halo_overshoot_Y | 0.000409907 | 0.000410998 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | lc_boost_fraction_Y | 0 | 0 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | lpips_all | 0.0905272 | 0.0904933 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | psnr_I_Y | 31.6322 | 31.6341 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | psnr_P_Y | 29.4434 | 29.4433 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | psnr_B_Y | 28.4754 | 28.4775 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | ssim_B_Y | 0.842423 | 0.842486 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | lpips_B | 0.0942817 | 0.0942351 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | ib_gap_db_Y | 1.15289 | 1.1508 | td_b008_boost0:INFO |
+| nature30 | boat | x265_1080p_2.5k_low | detail_pulse_Y | 0.114089 | 0.113321 | td_b008_boost0:INFO |
+| nature30 | boat | x265_1080p_2.5k_low | grain_keep_vs_input_band1_Y | 1 | 1.00089 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | grain_keep_vs_input_band2_Y | 1 | 1.00079 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | grain_keep_vs_input_band3_Y | 1 | 1.00096 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | grain_keep_vs_input_band4_Y | 1 | 1.00068 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | grain_probe_keep_edge_vs_input_Y | 1 | 1.00028 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | grain_probe_lag1_edge_vs_input_Y | 0 | 0.000341411 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | grain_probe_keep_flat_vs_input_Y | 1 | 1.00001 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | grain_probe_lag1_flat_vs_input_Y | 0 | 1.23036e-05 | td_b008_boost0:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | cost_ms_per_frame_pyref | 0.000200002 | 873.677 | td_b008_boost0:INFO |
+| sports50_60 | crowd | x265_2160p_6k_low | psnr_Y | 28.1053 | 28.1054 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | ssim_Y | 0.743033 | 0.74304 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | grain_keep_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | grain_lag1_vs_input_Y | 0 | 4.78232e-07 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | btb_kept_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | wtw_kept_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | flicker_excess_Y | -0.10757 | -0.107554 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | gop_ratio_minigop | NA | NA | td_b008_boost0:NA |
+| sports50_60 | crowd | x265_2160p_6k_low | ghost_coeff_Y | 0.252626 | 0.252596 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | smear_Y | 0.502166 | 0.502421 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | halo_overshoot_Y | 0.000838367 | 0.000838719 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | lc_boost_fraction_Y | 0 | 0 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | lpips_all | 0.314836 | 0.314786 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | psnr_I_Y | 31.5195 | 31.5195 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | psnr_P_Y | 28.8775 | 28.8774 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | psnr_B_Y | 27.8466 | 27.8468 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | ssim_B_Y | 0.737846 | 0.737856 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | lpips_B | 0.322622 | 0.322556 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | ib_gap_db_Y | 1.14219 | 1.14195 | td_b008_boost0:INFO |
+| sports50_60 | crowd | x265_2160p_6k_low | detail_pulse_Y | 0.292613 | 0.292197 | td_b008_boost0:INFO |
+| sports50_60 | crowd | x265_2160p_6k_low | grain_keep_vs_input_band1_Y | 1 | 1 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | grain_keep_vs_input_band2_Y | 1 | 1.00001 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | grain_keep_vs_input_band3_Y | 1 | 1 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | grain_keep_vs_input_band4_Y | 1 | 0.999992 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | grain_probe_keep_edge_vs_input_Y | 1 | 1.00018 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | grain_probe_lag1_edge_vs_input_Y | NA | NA | td_b008_boost0:NA |
+| sports50_60 | crowd | x265_2160p_6k_low | grain_probe_keep_flat_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | grain_probe_lag1_flat_vs_input_Y | 0 | 1.02466e-06 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | cost_ms_per_frame_pyref | 0.000300002 | 1010.74 | td_b008_boost0:INFO |
+| sports50_60 | crowd | x265_1080p_2.5k_low | psnr_Y | 25.7514 | 25.7516 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | ssim_Y | 0.686601 | 0.686633 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | grain_keep_vs_input_Y | 1 | 1.00007 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | grain_lag1_vs_input_Y | 0 | 4.85481e-07 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | btb_kept_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | wtw_kept_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | flicker_excess_Y | -0.12468 | -0.124645 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | gop_ratio_minigop | NA | NA | td_b008_boost0:NA |
+| sports50_60 | crowd | x265_1080p_2.5k_low | ghost_coeff_Y | 0.309529 | 0.309482 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | smear_Y | 0.478685 | 0.479337 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | halo_overshoot_Y | 0.000821301 | 0.000822593 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | lc_boost_fraction_Y | 0 | 0 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | lpips_all | 0.270973 | 0.270919 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | psnr_I_Y | 27.6828 | 27.6828 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | psnr_P_Y | 26.2534 | 26.2533 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | psnr_B_Y | 25.5768 | 25.5771 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | ssim_B_Y | 0.680199 | 0.68024 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | lpips_B | 0.279859 | 0.279786 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | ib_gap_db_Y | 0.744804 | 0.744369 | td_b008_boost0:INFO |
+| sports50_60 | crowd | x265_1080p_2.5k_low | detail_pulse_Y | 0.222255 | 0.221281 | td_b008_boost0:INFO |
+| sports50_60 | crowd | x265_1080p_2.5k_low | grain_keep_vs_input_band1_Y | 1 | 1.00007 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | grain_keep_vs_input_band2_Y | 1 | 1.00006 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | grain_keep_vs_input_band3_Y | 1 | 1.00003 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | grain_keep_vs_input_band4_Y | 1 | 0.999956 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | grain_probe_keep_edge_vs_input_Y | 1 | 1.00026 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | grain_probe_lag1_edge_vs_input_Y | NA | NA | td_b008_boost0:NA |
+| sports50_60 | crowd | x265_1080p_2.5k_low | grain_probe_keep_flat_vs_input_Y | 1 | 1 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | grain_probe_lag1_flat_vs_input_Y | 0 | 1.49856e-06 | td_b008_boost0:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | cost_ms_per_frame_pyref | 0.000200002 | 887.182 | td_b008_boost0:INFO |

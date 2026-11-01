@@ -17,14 +17,16 @@
 //   td_cli --stdio
 //       Binary pipe for the evaluation harness (tools/eval/candidates_temporal_detail.py). stdin: one text line
 //       "TDCLI1 <w> <h> <bitdepth> <hz> <planeLines> <mode off|steady> <budget> <clean 0|1> <guard 0|1>
-//        <strength> <maxAge> <boostMax>\n", then per frame:
+//        <strength> <maxAge> <boostMax> [<strongerMargin> <baseNoise> <baseGrainSigmas> <uncPx> [<ax0> <ay0> <ax1> <ay1> [<forceWeight>]]]\n",
+//       then per frame:
 //         "FRM1" u64 seq, i32 flags (1 cut, 2 fade), f64 luma[w*h] (codes at <bitdepth>),
 //         i32 hasB [i32 gw, i32 gh, f64 blockPx, f32 vx[n], f32 vy[n], f32 trust[n]],
 //         i32 hasF [same]
 //       and "END1". stdout per frame: "OUT1", f64 luma[w*h] (codes, unrounded), f64 ms, i32 len, char stats[len].
 //   td_cli --in <file.yuv|file.y4m> --vectors <file.tdv> --out <dir> [--w W --h H --pix-fmt yuv420p|yuv420p10le]
 //          [--hz 24] [--lines 1080] [--start-index 0] [--frames N] [--mode steady|off] [--budget 0.08]
-//          [--no-clean] [--no-guard] [--strength 1] [--max-age 2] [--boost-max 0.15]
+//          [--no-clean] [--no-guard] [--strength 1] [--max-age 2] [--boost-max 0.15] [--stronger-margin 0.15]
+//          [--base-noise 0.75] [--base-grain-sigmas 3] [--unc-px 0.5] [--active x0,y0,x1,y1]
 //       Reads planar 4:2:0 frames (luma processed, chroma passed through), writes the evaluation harness capture
 //       directory (NNNNNN.yuv + capture.json, tools/eval/README.md) with source_frame_index = start + n, and
 //       td_stats.txt (per-frame CPU ms and model diagnostics).
@@ -63,6 +65,9 @@ namespace
 		double budget = kGrainBudget;
 		bool clean = true, guard = true;
 		double strength = 1.0, maxAge = 2.0, boostMax = 0.15;
+		double strongerMargin = kStrongerMargin, baseNoise = kBaseNoiseCodes, baseGrainSigmas = kBaseGrainSigmas, uncPx = kUncertaintyPx;
+		int active[4] = { 0, 0, 0, 0 };   // x0 y0 x1 y1; x1/y1 <= 0 = whole plane
+		double forceWeight = 0.0;          // measurement: transfer ceiling (Model::Tuning::forceWeight)
 	};
 
 	[[noreturn]] void Die(const std::string& why)
@@ -83,6 +88,11 @@ namespace
 		t.grainBudget = o.budget;
 		t.templateClean = o.clean;
 		t.guard = o.guard;
+		t.strongerMargin = o.strongerMargin;
+		t.baseNoiseCodes = o.baseNoise;
+		t.baseGrainSigmas = o.baseGrainSigmas;
+		t.uncertaintyPx = o.uncPx;
+		t.forceWeight = o.forceWeight;
 		m.SetTuning(t);
 		return m;
 	}
@@ -150,9 +160,10 @@ namespace
 		Options o;
 		char tag[16] = {}, mode[16] = {};
 		int clean = 1, guard = 1;
-		if (std::sscanf(line, "%15s %d %d %d %lf %lf %15s %lf %d %d %lf %lf %lf", tag, &o.w, &o.h, &o.bitdepth, &o.hz, &o.lines,
-				mode, &o.budget, &clean, &guard, &o.strength, &o.maxAge, &o.boostMax) != 13 || std::strcmp(tag, "TDCLI1") != 0)
-			Die("bad header");
+		const int got = std::sscanf(line, "%15s %d %d %d %lf %lf %15s %lf %d %d %lf %lf %lf %lf %lf %lf %lf %d %d %d %d %lf", tag, &o.w,
+			&o.h, &o.bitdepth, &o.hz, &o.lines, mode, &o.budget, &clean, &guard, &o.strength, &o.maxAge, &o.boostMax,
+			&o.strongerMargin, &o.baseNoise, &o.baseGrainSigmas, &o.uncPx, &o.active[0], &o.active[1], &o.active[2], &o.active[3], &o.forceWeight);
+		if ((got != 13 && got != 17 && got != 21 && got != 22) || std::strcmp(tag, "TDCLI1") != 0) Die("bad header");
 		if (o.w <= 0 || o.h <= 0 || o.bitdepth < 8 || o.bitdepth > 16) Die("bad geometry");
 		o.mode = mode;
 		o.clean = clean != 0;
@@ -182,6 +193,7 @@ namespace
 			in.cut = (flags & 1) != 0;
 			in.fade = (flags & 2) != 0;
 			in.motion = &motion;
+			in.activeX0 = o.active[0]; in.activeY0 = o.active[1]; in.activeX1 = o.active[2]; in.activeY1 = o.active[3];
 			const auto t0 = std::chrono::steady_clock::now();
 			const Plane out = model.Process(in);
 			const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -285,6 +297,12 @@ namespace
 		o.strength = std::atof(Arg(argc, argv, "--strength", "1").c_str());
 		o.maxAge = std::atof(Arg(argc, argv, "--max-age", "2").c_str());
 		o.boostMax = std::atof(Arg(argc, argv, "--boost-max", "0.15").c_str());
+		o.strongerMargin = std::atof(Arg(argc, argv, "--stronger-margin", "0.15").c_str());
+		o.baseNoise = std::atof(Arg(argc, argv, "--base-noise", "0.75").c_str());
+		o.baseGrainSigmas = std::atof(Arg(argc, argv, "--base-grain-sigmas", "3").c_str());
+		o.uncPx = std::atof(Arg(argc, argv, "--unc-px", "0.5").c_str());
+		if (std::sscanf(Arg(argc, argv, "--active", "0,0,0,0").c_str(), "%d,%d,%d,%d", &o.active[0], &o.active[1], &o.active[2], &o.active[3]) != 4)
+			Die("--active x0,y0,x1,y1");
 		const long long start = std::atoll(Arg(argc, argv, "--start-index", "0").c_str());
 		const long long maxFrames = std::atoll(Arg(argc, argv, "--frames", "0").c_str());
 		Reader rd;
@@ -334,6 +352,7 @@ namespace
 			in.contentHz = o.hz;
 			in.planeLines = o.lines;
 			in.motion = &motion;
+			in.activeX0 = o.active[0]; in.activeY0 = o.active[1]; in.activeX1 = o.active[2]; in.activeY1 = o.active[3];
 			const auto t0 = std::chrono::steady_clock::now();
 			const Plane out = model.Process(in);
 			const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();

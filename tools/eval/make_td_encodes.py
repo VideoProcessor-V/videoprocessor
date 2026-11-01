@@ -84,6 +84,13 @@ def make_noharm_case(m, out):
                 master=dict(src), coded=dict(src))
 
 
+# Bitrate tiers: std = the per-master streaming rates above (12-16 / 4-6 Mb/s, x265 default pbratio 1.3);
+# low = streaming-typical lower rungs; vlow = lower still with a harsher B-frame QP offset (pbratio 1.6).
+TIERS = {"std": dict(suffix="", kbps=None, pbratio=1.3),
+         "low": dict(suffix="_low", kbps=(6000, 2500), pbratio=1.3),
+         "vlow": dict(suffix="_vlow", kbps=(4000, 1500), pbratio=1.6)}
+
+
 def run(cmd, **kw):
     r = subprocess.run(cmd, capture_output=True, text=True, **kw)
     if r.returncode != 0:
@@ -97,10 +104,11 @@ def crop_expr(w, h, y=None):
     return "crop=%d:%d:%d:%d" % (CROP_W, CROP_H, x, y), x, y
 
 
-def make_case(m, rung, out):
-    cid = "%s_%s" % (m["id"], rung)
+def make_case(m, rung, out, tier="std"):
+    t = TIERS[tier]
+    cid = "%s_%s%s" % (m["id"], rung, t["suffix"])
     n = int(round(m["secs"] * m["fps"]))
-    kbps = m["kbps"][0 if rung == "2160p" else 1]
+    kbps = t["kbps"][0 if rung == "2160p" else 1] if t["kbps"] else m["kbps"][0 if rung == "2160p" else 1]
     w, h = m["size"]
     chain = [m["vf"]] if m["vf"] else []
     if rung == "1080p":
@@ -113,7 +121,8 @@ def make_case(m, rung, out):
     mp4 = os.path.join(out, cid + ".mp4")
     gop = int(round(2 * m["fps"]))
     xp = ("bitrate=%d:vbv-maxrate=%d:vbv-bufsize=%d:keyint=%d:min-keyint=%d:scenecut=0:open-gop=0:bframes=3:"
-          "b-adapt=0:pools=4:frame-threads=2:log-level=error" % (kbps, int(kbps * 1.5), int(kbps * 2), gop, gop))
+          "b-adapt=0:pbratio=%.2f:pools=4:frame-threads=2:log-level=error" % (kbps, int(kbps * 1.5), int(kbps * 2), gop,
+                                                                          gop, t["pbratio"]))
     if not os.path.isfile(mp4):
         run([FFMPEG, "-hide_banner", "-y"] + src + ["-vf", vf, "-c:v", "libx265", "-preset", "medium",
                                                     "-x265-params", xp, "-an", mp4])
@@ -136,11 +145,11 @@ def make_case(m, rung, out):
         raise RuntimeError("%s: %d frame types for %d frames" % (cid, len(types), n))
     base = dict(kind="raw", width=CROP_W, height=CROP_H, pix_fmt="yuv420p10le", start=0, fps=m["fps"])
     extra = dict(letterbox=dict(bar_rows=lb)) if lb else {}
-    return dict(id=cid, content_type=m["ct"], clip=m["id"], case="x265_%s_%dk" % (rung, kbps // 1000), **extra,
+    return dict(id=cid, content_type=m["ct"], clip=m["id"], case="x265_%s_%gk%s" % (rung, kbps / 1000.0, t["suffix"]), **extra,
                 protocol="same", frames=n, gop=gop, minigop=4, frame_types=types, grain_probe=True,
                 note="%s; %s rung %dx%d, crop %dx%d at (%d,%d); x265 medium ABR %d kb/s (measured %.0f kb/s), "
-                     "IBBBP b-adapt 0, keyint %d, scenecut 0" % (m["note"], rung, w, h, CROP_W, CROP_H, cx, cy, kbps,
-                                                                 bits, gop),
+                     "IBBBP b-adapt 0, pbratio %.2f, keyint %d, scenecut 0" % (m["note"], rung, w, h, CROP_W, CROP_H, cx, cy, kbps,
+                                                                 bits, t["pbratio"], gop),
                 master=dict(base, path=mfile), coded=dict(base, path=cfile))
 
 
@@ -151,6 +160,7 @@ def main(argv=None):
     ap.add_argument("--only", default=None)
     ap.add_argument("--noharm", action="store_true", help="build the no-master no-harm suite instead")
     ap.add_argument("--letterbox", action="store_true", help="build the letterboxed suite instead")
+    ap.add_argument("--tier", default="std", choices=sorted(TIERS), help="bitrate tier (std = per-master rates)")
     a = ap.parse_args(argv)
     os.makedirs(a.out, exist_ok=True)
     cases = []
@@ -166,13 +176,13 @@ def main(argv=None):
         return 0
     for m in (LETTERBOX if a.letterbox else MASTERS):
         for rung in ("2160p", "1080p"):
-            cid = "%s_%s" % (m["id"], rung)
+            cid = "%s_%s%s" % (m["id"], rung, TIERS[a.tier]["suffix"])
             if a.only and a.only not in cid:
                 continue
-            c = make_case(m, rung, a.out)
+            c = make_case(m, rung, a.out, a.tier)
             print("%s: %d frames, types %s" % (cid, c["frames"], c["frame_types"][:24]), flush=True)
             cases.append(c)
-    suite = dict(name="td_letterbox" if a.letterbox else "td_real", description="TemporalDetail on streaming-like x265 encodes (make_td_encodes.py); "
+    suite = dict(name=("td_letterbox" if a.letterbox else "td_real") + TIERS[a.tier]["suffix"], description="TemporalDetail on streaming-like x265 encodes (make_td_encodes.py); "
                  "masters and decodes are central %dx%d crops in scratch, never committed" % (CROP_W, CROP_H),
                  cases=cases)
     with open(a.suite, "w", encoding="utf8", newline="\n") as f:

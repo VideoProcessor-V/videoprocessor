@@ -17,6 +17,12 @@ correlation increase <= 0.05.
 - Motion: an `IMotionSource`: today's vector field, or the camera model through an adapter compiled only when its header exists.
 - Output: same size and format, delay 0; look-ahead optional (queued modes).
 - Off (`temporal_detail = off`): the module does not run, output = input byte-identical.
+- Active picture (`FrameIn::activeX0/Y0/X1/Y1`, from the host's crop/bar detector; default = whole plane, unchanged
+  behaviour): pixels outside the rectangle are copied from the input byte-identical; the model runs on the picture
+  mirrored into the bars, so the bar edge is never structure (no halo/undershoot at the boundary). A changed
+  rectangle resets the store (status `reset: active picture`).
+- Measurement knobs (`Model::Tuning`, never user settings): grain budget, cleaner, guard, and the validation thresholds
+  `strongerMargin`, `baseNoiseCodes`, `baseGrainSigmas`, `uncertaintyPx` (defaults = the constants).
 
 ## Algorithm (CPU reference model `TemporalDetailModel.h`; shaders mirror it)
 
@@ -171,6 +177,13 @@ default **6.3 dB** B-frame PSNR gain at the strict bounds (grain RMS 1.013, lag-
 The low temporal band binds everywhere (RMS stays <= 1.014, lag-1 <= +0.015); grain RMS and the higher bands include the
 fallback boost's <= 4% share (1.012 with no transfer at all). Kappa 2 .. 8 lies within 0.2 dB. The pre-fix draft's 10.5 dB was 9.8 dB structure plus a grain swap (own grain kept 31%, 73% of the
 grain energy foreign/frozen); the first fix's 2.9 dB kept 80% own grain with 25% foreign.
+
+Real streaming-like encodes (x265 IBBBP, 2160p 4-16 Mb/s, 1080p 1.5-6 Mb/s, 4 masters; `tools/eval/prototypes/
+temporal_detail_real/`, CPU model with DIS stand-in vectors): the transfer is inert, B-frame PSNR change <= +0.001 dB at
+every tier and every swept threshold (stronger margin 0.02-0.15, base allowance x1-x3, uncertainty 0.5-1 px); the
+transfer ceiling (`Tuning::forceWeight` 1) is -0.02 dB, a per-block master-oracle strength only +0.04 dB, and a fitted
+local rule (deficit, trust, grain, brightness, I/B phase) -0.008 dB on held-out clips. Real B-frame loss is not the
+fine-band attenuation the coding simulation models. The fallback boost is the only active part (-0.004 dB, +2 % grain).
 
 Limits: the cleaner removes most, not all, of the grain the split reads as texture (the rest is budgeted); the first slot
 after a reset has no evidence (single-frame DCT Wiener); future sources are uncleaned (budgeted at rho2 = 1); the grain level needs quiet areas within 80 px (dense texture everywhere raises N, f

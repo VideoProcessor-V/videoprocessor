@@ -1,0 +1,25 @@
+# Input (decoded encode) PSNR vs master in dB per frame type, first <= 72 frames, central 960x544 crop; gapIP-B = PSNR(I+P) - PSNR(B)
+tos_2160p           12527 I 48.71 P 48.77 B 47.87 gapIP-B 0.90 I-B 0.85
+tos_1080p            4093 I 46.90 P 48.22 B 47.37 gapIP-B 0.69 I-B -0.48
+sol_2160p           12441 I 41.10 P 39.93 B 39.20 gapIP-B 0.83 I-B 1.90
+sol_1080p            4958 I 39.12 P 36.83 B 35.73 gapIP-B 1.28 I-B 3.40
+boat_2160p          14915 I 39.64 P 37.39 B 36.58 gapIP-B 0.99 I-B 3.06
+boat_1080p           5246 I 35.61 P 32.86 B 31.71 gapIP-B 1.37 I-B 3.90
+crowd_2160p         16380 I 36.02 P 32.26 B 31.12 gapIP-B 1.28 I-B 4.90
+crowd_1080p          6128 I 32.52 P 29.41 B 28.28 gapIP-B 1.26 I-B 4.24
+tos_2160p_low        5166 I 46.31 P 46.50 B 45.84 gapIP-B 0.64 I-B 0.47
+tos_1080p_low        2193 I 43.86 P 45.76 B 45.00 gapIP-B 0.53 I-B -1.14
+sol_2160p_low        6523 I 38.60 P 36.90 B 36.09 gapIP-B 0.95 I-B 2.51
+sol_1080p_low        2760 I 36.72 P 34.17 B 33.16 gapIP-B 1.21 I-B 3.56
+boat_2160p_low       6365 I 35.34 P 33.61 B 32.71 gapIP-B 1.06 I-B 2.63
+boat_1080p_low       2589 I 31.63 P 29.44 B 28.48 gapIP-B 1.15 I-B 3.16
+crowd_2160p_low      6106 I 31.52 P 28.88 B 27.85 gapIP-B 1.14 I-B 3.67
+crowd_1080p_low      2541 I 27.68 P 26.25 B 25.58 gapIP-B 0.74 I-B 2.11
+tos_2160p_vlow       3306 I 44.59 P 45.34 B 44.29 gapIP-B 0.96 I-B 0.29
+tos_1080p_vlow       1261 I 41.03 P 43.23 B 42.19 gapIP-B 0.76 I-B -1.16
+sol_2160p_vlow       4444 I 36.97 P 35.50 B 34.15 gapIP-B 1.47 I-B 2.81
+sol_1080p_vlow       1678 I 34.39 P 32.50 B 31.15 gapIP-B 1.50 I-B 3.24
+boat_2160p_vlow      4165 I 32.92 P 31.82 B 30.42 gapIP-B 1.50 I-B 2.50
+boat_1080p_vlow      1508 I 28.69 P 27.36 B 26.30 gapIP-B 1.18 I-B 2.39
+crowd_2160p_vlow     4035 I 29.61 P 27.64 B 26.48 gapIP-B 1.25 I-B 3.13
+crowd_1080p_vlow     1507 I 25.31 P 24.82 B 24.22 gapIP-B 0.63 I-B 1.09

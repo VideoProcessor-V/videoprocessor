@@ -1,0 +1,232 @@
+<!-- Copyright(C) 2026 VP-V contributors -->
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+
+# Prototype summary: temporal_detail family, default `td_off`
+
+Suite `td_real_low_sweep`. Key metrics per case; flags are the harness verdicts vs the default (full rows in `<candidate>.md`).
+
+## Means over cases
+
+| metric | default | td_s0.15_b2_u0.5 | td_s0.15_b3_u0.5 | td_s0.05_b2_u0.75 | td_s0.05_b2_u1 |
+|---|---|---|---|---|---|
+| psnr_B_Y | 34.1215 | 34.1221 | 34.122 | 34.1221 | 34.1219 |
+| psnr_P_Y | 35.0294 | 35.0293 | 35.0293 | 35.0292 | 35.029 |
+| psnr_I_Y | 36.3262 | 36.3262 | 36.3262 | 36.3262 | 36.3262 |
+| psnr_Y | 34.3493 | 34.3498 | 34.3498 | 34.3498 | 34.3496 |
+| ssim_B_Y | 0.870983 | 0.871003 | 0.871002 | 0.871013 | 0.871014 |
+| ssim_Y | 0.874117 | 0.874133 | 0.874132 | 0.874141 | 0.874142 |
+| lpips_B | NA | NA | NA | NA | NA |
+| lpips_all | NA | NA | NA | NA | NA |
+| ib_gap_db_Y | 0.963872 | 0.963209 | 0.963256 | 0.962982 | 0.963045 |
+| detail_pulse_Y | 0.239524 | 0.239132 | 0.239133 | 0.238879 | 0.238892 |
+| gop_ratio_minigop | NA | NA | NA | NA | NA |
+| flicker_excess_Y | -0.0381958 | -0.0381819 | -0.0381837 | -0.0381786 | -0.0381696 |
+| grain_keep_vs_input_Y | 1 | 1.00015 | 1.00015 | 1.00022 | 1.00028 |
+| grain_lag1_vs_input_Y | 0 | -2.51975e-06 | -3.65455e-06 | -2.94903e-06 | -3.60786e-06 |
+| grain_keep_vs_input_band1_Y | 1 | 1.00015 | 1.00015 | 1.0002 | 1.00026 |
+| grain_keep_vs_input_band2_Y | 1 | 1.00016 | 1.00017 | 1.00022 | 1.0003 |
+| grain_keep_vs_input_band3_Y | 1 | 1.00011 | 1.00012 | 1.00018 | 1.00022 |
+| grain_keep_vs_input_band4_Y | 1 | 1.0001 | 1.00011 | 1.00013 | 1.00017 |
+| ghost_coeff_Y | 0.103284 | 0.103208 | 0.103213 | 0.103127 | 0.103129 |
+| smear_Y | 0.73211 | 0.732514 | 0.732494 | 0.732882 | 0.733044 |
+| halo_overshoot_Y | 0.000439903 | 0.000440512 | 0.000440505 | 0.000441109 | 0.000441448 |
+| lc_boost_fraction_Y | 0 | 0 | 0 | 0 | 0 |
+| btb_kept_vs_input_Y | 1 | 0.999998 | 0.999999 | 0.999999 | 1 |
+| wtw_kept_vs_input_Y | 1 | 1 | 1 | 1 | 1 |
+
+## Per case
+
+| content_type | clip | case | metric | default | td_s0.15_b2_u0.5 | td_s0.15_b3_u0.5 | td_s0.05_b2_u0.75 | td_s0.05_b2_u1 | flags |
+|---|---|---|---|---|---|---|---|---|---|
+| film24 | tos | x265_2160p_6k_low | psnr_Y | 45.3258 | 45.3258 | 45.3259 | 45.3258 | 45.3258 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_2160p_6k_low | ssim_Y | 0.984698 | 0.984698 | 0.984698 | 0.984698 | 0.984698 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_2160p_6k_low | grain_keep_vs_input_Y | 1 | 1 | 1 | 1 | 1 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_2160p_6k_low | grain_lag1_vs_input_Y | 0 | 0 | 0 | 3.17633e-09 | 3.17633e-09 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_2160p_6k_low | btb_kept_vs_input_Y | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| film24 | tos | x265_2160p_6k_low | wtw_kept_vs_input_Y | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| film24 | tos | x265_2160p_6k_low | flicker_excess_Y | -0.000269955 | -0.000269947 | -0.000269961 | -0.000269842 | -0.000269953 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_2160p_6k_low | gop_ratio_minigop | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| film24 | tos | x265_2160p_6k_low | ghost_coeff_Y | 0.00355461 | 0.00355439 | 0.00355435 | 0.0035541 | 0.00355385 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_2160p_6k_low | smear_Y | 0.886196 | 0.886198 | 0.886198 | 0.886201 | 0.886203 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_2160p_6k_low | halo_overshoot_Y | 2.76493e-05 | 2.765e-05 | 2.765e-05 | 2.76506e-05 | 2.76522e-05 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_2160p_6k_low | lc_boost_fraction_Y | 0 | 0 | 0 | 0 | 0 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_2160p_6k_low | lpips_all | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| film24 | tos | x265_2160p_6k_low | psnr_I_Y | 44.8223 | 44.8223 | 44.8223 | 44.8223 | 44.8223 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_2160p_6k_low | psnr_P_Y | 45.898 | 45.898 | 45.898 | 45.898 | 45.898 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_2160p_6k_low | psnr_B_Y | 45.1605 | 45.1605 | 45.1605 | 45.1605 | 45.1605 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_2160p_6k_low | ssim_B_Y | 0.984316 | 0.984316 | 0.984316 | 0.984316 | 0.984316 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_2160p_6k_low | lpips_B | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| film24 | tos | x265_2160p_6k_low | ib_gap_db_Y | 0.644637 | 0.644623 | 0.644613 | 0.644628 | 0.644639 | td_s0.15_b2_u0.5:INFO td_s0.15_b3_u0.5:INFO td_s0.05_b2_u0.75:INFO td_s0.05_b2_u1:INFO |
+| film24 | tos | x265_2160p_6k_low | detail_pulse_Y | 0.164206 | 0.164206 | 0.164206 | 0.164202 | 0.164201 | td_s0.15_b2_u0.5:INFO td_s0.15_b3_u0.5:INFO td_s0.05_b2_u0.75:INFO td_s0.05_b2_u1:INFO |
+| film24 | tos | x265_2160p_6k_low | grain_keep_vs_input_band1_Y | 1 | 1 | 1 | 1 | 1 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_2160p_6k_low | grain_keep_vs_input_band2_Y | 1 | 1 | 1 | 1 | 1 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_2160p_6k_low | grain_keep_vs_input_band3_Y | 1 | 1 | 1 | 1 | 1 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_2160p_6k_low | grain_keep_vs_input_band4_Y | 1 | 1 | 1 | 1 | 1 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_1080p_2.5k_low | psnr_Y | 44.3917 | 44.3918 | 44.3918 | 44.3919 | 44.3919 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_1080p_2.5k_low | ssim_Y | 0.984669 | 0.984669 | 0.984669 | 0.984669 | 0.984669 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_1080p_2.5k_low | grain_keep_vs_input_Y | 1 | 1.00001 | 1.00001 | 1.00003 | 1.00002 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_1080p_2.5k_low | grain_lag1_vs_input_Y | 0 | 1.02835e-07 | 1.09317e-06 | -4.3742e-06 | -1.65387e-06 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_1080p_2.5k_low | btb_kept_vs_input_Y | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| film24 | tos | x265_1080p_2.5k_low | wtw_kept_vs_input_Y | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| film24 | tos | x265_1080p_2.5k_low | flicker_excess_Y | -0.00200683 | -0.00200607 | -0.00200584 | -0.00200398 | -0.00200218 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_1080p_2.5k_low | gop_ratio_minigop | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| film24 | tos | x265_1080p_2.5k_low | ghost_coeff_Y | 0.00576678 | 0.00576374 | 0.00576329 | 0.00575152 | 0.00573827 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_1080p_2.5k_low | smear_Y | 0.93148 | 0.931507 | 0.931511 | 0.931614 | 0.931709 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_1080p_2.5k_low | halo_overshoot_Y | 5.15697e-05 | 5.15847e-05 | 5.15869e-05 | 5.1627e-05 | 5.16679e-05 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_1080p_2.5k_low | lc_boost_fraction_Y | 0 | 0 | 0 | 0 | 0 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_1080p_2.5k_low | lpips_all | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| film24 | tos | x265_1080p_2.5k_low | psnr_I_Y | 41.6599 | 41.6599 | 41.6599 | 41.6599 | 41.6599 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_1080p_2.5k_low | psnr_P_Y | 45.0903 | 45.0903 | 45.0902 | 45.0902 | 45.0901 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_1080p_2.5k_low | psnr_B_Y | 44.2805 | 44.2807 | 44.2807 | 44.2808 | 44.2809 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_1080p_2.5k_low | ssim_B_Y | 0.984581 | 0.984581 | 0.984581 | 0.984582 | 0.984582 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_1080p_2.5k_low | lpips_B | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| film24 | tos | x265_1080p_2.5k_low | ib_gap_db_Y | 0.425336 | 0.425193 | 0.425177 | 0.425015 | 0.424881 | td_s0.15_b2_u0.5:INFO td_s0.15_b3_u0.5:INFO td_s0.05_b2_u0.75:INFO td_s0.05_b2_u1:INFO |
+| film24 | tos | x265_1080p_2.5k_low | detail_pulse_Y | 0.073986 | 0.0739553 | 0.0739525 | 0.0739442 | 0.0738809 | td_s0.15_b2_u0.5:INFO td_s0.15_b3_u0.5:INFO td_s0.05_b2_u0.75:INFO td_s0.05_b2_u1:INFO |
+| film24 | tos | x265_1080p_2.5k_low | grain_keep_vs_input_band1_Y | 1 | 1.00001 | 1.00001 | 1.00002 | 1.00002 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_1080p_2.5k_low | grain_keep_vs_input_band2_Y | 1 | 1.00001 | 1.00001 | 1.00003 | 1.00002 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_1080p_2.5k_low | grain_keep_vs_input_band3_Y | 1 | 1.00001 | 1.00001 | 1.00003 | 1.00002 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | tos | x265_1080p_2.5k_low | grain_keep_vs_input_band4_Y | 1 | 1.00001 | 1.00001 | 1.00003 | 1.00003 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_2160p_6k_low | psnr_Y | 35.9552 | 35.9552 | 35.9552 | 35.9552 | 35.9553 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_2160p_6k_low | ssim_Y | 0.930287 | 0.930287 | 0.930287 | 0.930287 | 0.930288 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_2160p_6k_low | grain_keep_vs_input_Y | 1 | 1.00009 | 1.00009 | 1.00026 | 1.00024 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_2160p_6k_low | grain_lag1_vs_input_Y | 0 | -3.62433e-06 | -3.98606e-06 | 7.98504e-06 | 1.75919e-05 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_2160p_6k_low | btb_kept_vs_input_Y | 1 | 1 | 1 | 1 | 1 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_2160p_6k_low | wtw_kept_vs_input_Y | 1 | 1 | 1 | 1 | 1 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_2160p_6k_low | flicker_excess_Y | -0.00599649 | -0.00599521 | -0.00599541 | -0.00599563 | -0.00599447 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_2160p_6k_low | gop_ratio_minigop | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| film24 | sol | x265_2160p_6k_low | ghost_coeff_Y | 0.0205843 | 0.0205744 | 0.0205737 | 0.0205634 | 0.0205562 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_2160p_6k_low | smear_Y | 0.797125 | 0.797249 | 0.797257 | 0.797402 | 0.797491 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_2160p_6k_low | halo_overshoot_Y | 0.00043796 | 0.000438143 | 0.000438152 | 0.00043836 | 0.000438506 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_2160p_6k_low | lc_boost_fraction_Y | 0 | 0 | 0 | 0 | 0 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_2160p_6k_low | lpips_all | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| film24 | sol | x265_2160p_6k_low | psnr_I_Y | 38.8405 | 38.8405 | 38.8405 | 38.8405 | 38.8405 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_2160p_6k_low | psnr_P_Y | 36.5311 | 36.5311 | 36.5311 | 36.531 | 36.5311 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_2160p_6k_low | psnr_B_Y | 35.7167 | 35.7167 | 35.7167 | 35.7168 | 35.7169 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_2160p_6k_low | ssim_B_Y | 0.929626 | 0.929626 | 0.929626 | 0.929626 | 0.929627 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_2160p_6k_low | lpips_B | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| film24 | sol | x265_2160p_6k_low | ib_gap_db_Y | 0.95446 | 0.954434 | 0.954418 | 0.954256 | 0.954198 | td_s0.15_b2_u0.5:INFO td_s0.15_b3_u0.5:INFO td_s0.05_b2_u0.75:INFO td_s0.05_b2_u1:INFO |
+| film24 | sol | x265_2160p_6k_low | detail_pulse_Y | 0.562107 | 0.56206 | 0.562058 | 0.562031 | 0.562022 | td_s0.15_b2_u0.5:INFO td_s0.15_b3_u0.5:INFO td_s0.05_b2_u0.75:INFO td_s0.05_b2_u1:INFO |
+| film24 | sol | x265_2160p_6k_low | grain_keep_vs_input_band1_Y | 1 | 1.00009 | 1.00009 | 1.00026 | 1.00025 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_2160p_6k_low | grain_keep_vs_input_band2_Y | 1 | 1.00008 | 1.00009 | 1.00026 | 1.00024 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_2160p_6k_low | grain_keep_vs_input_band3_Y | 1 | 1.00009 | 1.00009 | 1.00026 | 1.00024 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_2160p_6k_low | grain_keep_vs_input_band4_Y | 1 | 1.00009 | 1.00009 | 1.00025 | 1.00021 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_1080p_2.5k_low | psnr_Y | 33.2855 | 33.2855 | 33.2855 | 33.2856 | 33.2854 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_1080p_2.5k_low | ssim_Y | 0.890966 | 0.890971 | 0.890971 | 0.890978 | 0.890978 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_1080p_2.5k_low | grain_keep_vs_input_Y | 1 | 1.00057 | 1.0006 | 1.00051 | 1.00052 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_1080p_2.5k_low | grain_lag1_vs_input_Y | 0 | -1.52909e-05 | -1.38236e-05 | -1.96843e-05 | -4.01622e-05 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_1080p_2.5k_low | btb_kept_vs_input_Y | 1 | 1 | 1 | 1 | 1 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_1080p_2.5k_low | wtw_kept_vs_input_Y | 1 | 1 | 1 | 1 | 1 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_1080p_2.5k_low | flicker_excess_Y | -0.0130409 | -0.0130415 | -0.0130414 | -0.0130401 | -0.0130405 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_1080p_2.5k_low | gop_ratio_minigop | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| film24 | sol | x265_1080p_2.5k_low | ghost_coeff_Y | 0.0375779 | 0.0375283 | 0.0375254 | 0.0374839 | 0.0374639 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_1080p_2.5k_low | smear_Y | 0.734601 | 0.735062 | 0.735086 | 0.735479 | 0.735663 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_1080p_2.5k_low | halo_overshoot_Y | 0.000585954 | 0.000586726 | 0.000586765 | 0.000587375 | 0.000587759 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_1080p_2.5k_low | lc_boost_fraction_Y | 0 | 0 | 0 | 0 | 0 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_1080p_2.5k_low | lpips_all | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| film24 | sol | x265_1080p_2.5k_low | psnr_I_Y | 37.4255 | 37.4255 | 37.4255 | 37.4255 | 37.4255 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_1080p_2.5k_low | psnr_P_Y | 34.0091 | 34.0092 | 34.0092 | 34.0094 | 34.0094 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_1080p_2.5k_low | psnr_B_Y | 32.9909 | 32.9909 | 32.9909 | 32.9911 | 32.9907 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_1080p_2.5k_low | ssim_B_Y | 0.887697 | 0.887703 | 0.887703 | 0.88771 | 0.887709 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_1080p_2.5k_low | lpips_B | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| film24 | sol | x265_1080p_2.5k_low | ib_gap_db_Y | 1.20411 | 1.20416 | 1.20417 | 1.20418 | 1.20451 | td_s0.15_b2_u0.5:INFO td_s0.15_b3_u0.5:INFO td_s0.05_b2_u0.75:INFO td_s0.05_b2_u1:INFO |
+| film24 | sol | x265_1080p_2.5k_low | detail_pulse_Y | 0.414546 | 0.414568 | 0.414567 | 0.414639 | 0.414732 | td_s0.15_b2_u0.5:INFO td_s0.15_b3_u0.5:INFO td_s0.05_b2_u0.75:INFO td_s0.05_b2_u1:INFO |
+| film24 | sol | x265_1080p_2.5k_low | grain_keep_vs_input_band1_Y | 1 | 1.00056 | 1.00059 | 1.00045 | 1.00046 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_1080p_2.5k_low | grain_keep_vs_input_band2_Y | 1 | 1.00059 | 1.00062 | 1.00056 | 1.00054 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_1080p_2.5k_low | grain_keep_vs_input_band3_Y | 1 | 1.00054 | 1.00057 | 1.00046 | 1.00051 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| film24 | sol | x265_1080p_2.5k_low | grain_keep_vs_input_band4_Y | 1 | 1.00059 | 1.00061 | 1.00056 | 1.0006 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_2160p_6k_low | psnr_Y | 33.1646 | 33.1656 | 33.1656 | 33.1656 | 33.1657 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_2160p_6k_low | ssim_Y | 0.918374 | 0.918384 | 0.918383 | 0.918386 | 0.918389 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_2160p_6k_low | grain_keep_vs_input_Y | 1 | 1 | 1 | 1 | 1 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_2160p_6k_low | grain_lag1_vs_input_Y | 0 | 0 | 0 | -1.29218e-07 | 0 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_2160p_6k_low | btb_kept_vs_input_Y | 1 | 0.999993 | 1 | 1 | 1 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_2160p_6k_low | wtw_kept_vs_input_Y | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| nature30 | boat | x265_2160p_6k_low | flicker_excess_Y | -0.00781908 | -0.007798 | -0.0077949 | -0.00778087 | -0.00779421 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_2160p_6k_low | gop_ratio_minigop | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| nature30 | boat | x265_2160p_6k_low | ghost_coeff_Y | 0.0654834 | 0.0653857 | 0.0654051 | 0.0652846 | 0.0653318 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_2160p_6k_low | smear_Y | 0.806187 | 0.806477 | 0.806423 | 0.806721 | 0.806708 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_2160p_6k_low | halo_overshoot_Y | 0.000332055 | 0.000332395 | 0.000332367 | 0.000332723 | 0.000332716 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_2160p_6k_low | lc_boost_fraction_Y | 0 | 0 | 0 | 0 | 0 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_2160p_6k_low | lpips_all | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| nature30 | boat | x265_2160p_6k_low | psnr_I_Y | 36.3165 | 36.3165 | 36.3165 | 36.3165 | 36.3165 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_2160p_6k_low | psnr_P_Y | 33.9524 | 33.9523 | 33.9523 | 33.9523 | 33.9522 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_2160p_6k_low | psnr_B_Y | 32.8911 | 32.8923 | 32.8922 | 32.8923 | 32.8924 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_2160p_6k_low | ssim_B_Y | 0.916007 | 0.916019 | 0.916018 | 0.916022 | 0.916025 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_2160p_6k_low | lpips_B | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| nature30 | boat | x265_2160p_6k_low | ib_gap_db_Y | 1.21593 | 1.2147 | 1.21478 | 1.21458 | 1.21448 | td_s0.15_b2_u0.5:INFO td_s0.15_b3_u0.5:INFO td_s0.05_b2_u0.75:INFO td_s0.05_b2_u1:INFO |
+| nature30 | boat | x265_2160p_6k_low | detail_pulse_Y | 0.0618573 | 0.0614861 | 0.0615444 | 0.0613156 | 0.0613417 | td_s0.15_b2_u0.5:INFO td_s0.15_b3_u0.5:INFO td_s0.05_b2_u0.75:INFO td_s0.05_b2_u1:INFO |
+| nature30 | boat | x265_2160p_6k_low | grain_keep_vs_input_band1_Y | 1 | 1 | 1 | 1 | 1 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_2160p_6k_low | grain_keep_vs_input_band2_Y | 1 | 1 | 1 | 1 | 1 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_2160p_6k_low | grain_keep_vs_input_band3_Y | 1 | 1 | 1 | 1 | 1 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_2160p_6k_low | grain_keep_vs_input_band4_Y | 1 | 1 | 1 | 1 | 1 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | psnr_Y | 28.8149 | 28.8174 | 28.8172 | 28.8177 | 28.8169 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | ssim_Y | 0.851496 | 0.85156 | 0.851555 | 0.851586 | 0.851575 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | grain_keep_vs_input_Y | 1 | 1.0002 | 1.00019 | 1.00045 | 1.00051 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | grain_lag1_vs_input_Y | 0 | 3.50393e-06 | -4.5866e-07 | -1.87536e-05 | -2.50256e-05 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | btb_kept_vs_input_Y | 1 | 0.999993 | 0.999993 | 0.999993 | 1 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | wtw_kept_vs_input_Y | 1 | 1 | 1 | 1 | 1 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | flicker_excess_Y | -0.0462079 | -0.0461912 | -0.0461964 | -0.0462243 | -0.0462234 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | gop_ratio_minigop | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| nature30 | boat | x265_1080p_2.5k_low | ghost_coeff_Y | 0.120286 | 0.119922 | 0.119941 | 0.11954 | 0.119614 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | smear_Y | 0.716427 | 0.717547 | 0.717468 | 0.71863 | 0.718401 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | halo_overshoot_Y | 0.000396541 | 0.000398079 | 0.000397997 | 0.000399775 | 0.000399724 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | lc_boost_fraction_Y | 0 | 0 | 0 | 0 | 0 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | lpips_all | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| nature30 | boat | x265_1080p_2.5k_low | psnr_I_Y | 32.3426 | 32.3426 | 32.3426 | 32.3426 | 32.3426 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | psnr_P_Y | 29.658 | 29.6579 | 29.6579 | 29.6572 | 29.657 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | psnr_B_Y | 28.5237 | 28.5267 | 28.5265 | 28.5273 | 28.5264 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | ssim_B_Y | 0.84545 | 0.845534 | 0.845528 | 0.845567 | 0.845552 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | lpips_B | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| nature30 | boat | x265_1080p_2.5k_low | ib_gap_db_Y | 1.30451 | 1.30132 | 1.30157 | 1.30013 | 1.30077 | td_s0.15_b2_u0.5:INFO td_s0.15_b3_u0.5:INFO td_s0.05_b2_u0.75:INFO td_s0.05_b2_u1:INFO |
+| nature30 | boat | x265_1080p_2.5k_low | detail_pulse_Y | 0.114455 | 0.11319 | 0.113307 | 0.112448 | 0.113093 | td_s0.15_b2_u0.5:INFO td_s0.15_b3_u0.5:INFO td_s0.05_b2_u0.75:INFO td_s0.05_b2_u1:INFO |
+| nature30 | boat | x265_1080p_2.5k_low | grain_keep_vs_input_band1_Y | 1 | 1.00021 | 1.0002 | 1.00034 | 1.00038 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | grain_keep_vs_input_band2_Y | 1 | 1.00025 | 1.00024 | 1.00058 | 1.00065 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | grain_keep_vs_input_band3_Y | 1 | 1.00022 | 1.00021 | 1.00053 | 1.00061 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| nature30 | boat | x265_1080p_2.5k_low | grain_keep_vs_input_band4_Y | 1 | 1.00009 | 1.00009 | 1.00027 | 1.00033 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | psnr_Y | 28.1923 | 28.1926 | 28.1926 | 28.1926 | 28.1923 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | ssim_Y | 0.747524 | 0.747535 | 0.747535 | 0.747541 | 0.747542 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | grain_keep_vs_input_Y | 1 | 1.00004 | 1.00002 | 1.00003 | 1.0001 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | grain_lag1_vs_input_Y | 0 | -7.60767e-06 | -1.50217e-05 | -7.77655e-06 | -9.39022e-06 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | btb_kept_vs_input_Y | 1 | 1 | 1 | 1 | 1 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | wtw_kept_vs_input_Y | 1 | 1 | 1 | 1 | 1 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | flicker_excess_Y | -0.101988 | -0.101941 | -0.10195 | -0.101947 | -0.101905 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | gop_ratio_minigop | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| sports50_60 | crowd | x265_2160p_6k_low | ghost_coeff_Y | 0.254786 | 0.254739 | 0.254744 | 0.254698 | 0.254677 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | smear_Y | 0.509077 | 0.509543 | 0.50944 | 0.509706 | 0.510043 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | halo_overshoot_Y | 0.000837101 | 0.000837669 | 0.000837568 | 0.000837961 | 0.000838489 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | lc_boost_fraction_Y | 0 | 0 | 0 | 0 | 0 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | lpips_all | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| sports50_60 | crowd | x265_2160p_6k_low | psnr_I_Y | 31.5195 | 31.5195 | 31.5195 | 31.5195 | 31.5195 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | psnr_P_Y | 28.9645 | 28.9644 | 28.9644 | 28.9643 | 28.9641 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | psnr_B_Y | 27.9203 | 27.9206 | 27.9206 | 27.9207 | 27.9204 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | ssim_B_Y | 0.74198 | 0.741996 | 0.741996 | 0.742004 | 0.742005 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | lpips_B | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| sports50_60 | crowd | x265_2160p_6k_low | ib_gap_db_Y | 1.20829 | 1.20782 | 1.20785 | 1.20763 | 1.20773 | td_s0.15_b2_u0.5:INFO td_s0.15_b3_u0.5:INFO td_s0.05_b2_u0.75:INFO td_s0.05_b2_u1:INFO |
+| sports50_60 | crowd | x265_2160p_6k_low | detail_pulse_Y | 0.296664 | 0.296156 | 0.296064 | 0.295864 | 0.295594 | td_s0.15_b2_u0.5:INFO td_s0.15_b3_u0.5:INFO td_s0.05_b2_u0.75:INFO td_s0.05_b2_u1:INFO |
+| sports50_60 | crowd | x265_2160p_6k_low | grain_keep_vs_input_band1_Y | 1 | 1.00003 | 1.00001 | 1.00003 | 1.00008 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | grain_keep_vs_input_band2_Y | 1 | 1.00007 | 1.00006 | 1.00005 | 1.00015 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | grain_keep_vs_input_band3_Y | 1 | 1.00005 | 1.00008 | 1.00007 | 1.00015 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_2160p_6k_low | grain_keep_vs_input_band4_Y | 1 | 1.00002 | 1.00005 | 1.00005 | 1.00004 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | psnr_Y | 25.6645 | 25.6645 | 25.6645 | 25.6641 | 25.6635 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | ssim_Y | 0.684926 | 0.684957 | 0.684958 | 0.684981 | 0.684999 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | grain_keep_vs_input_Y | 1 | 1.00025 | 1.00026 | 1.0005 | 1.00086 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | grain_lag1_vs_input_Y | 0 | 2.75817e-06 | 2.96044e-06 | 1.91374e-05 | 2.97739e-05 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | btb_kept_vs_input_Y | 1 | 1 | 1 | 1 | 1 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | wtw_kept_vs_input_Y | 1 | 1 | 1 | 1 | 1 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | flicker_excess_Y | -0.128237 | -0.128212 | -0.128216 | -0.128167 | -0.128127 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | gop_ratio_minigop | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| sports50_60 | crowd | x265_1080p_2.5k_low | ghost_coeff_Y | 0.318236 | 0.3182 | 0.3182 | 0.318141 | 0.318099 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | smear_Y | 0.47579 | 0.476526 | 0.476569 | 0.477302 | 0.478137 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | halo_overshoot_Y | 0.000850393 | 0.000851853 | 0.000851956 | 0.000853404 | 0.000855072 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | lc_boost_fraction_Y | 0 | 0 | 0 | 0 | 0 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | lpips_all | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| sports50_60 | crowd | x265_1080p_2.5k_low | psnr_I_Y | 27.6828 | 27.6828 | 27.6828 | 27.6828 | 27.6828 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | psnr_P_Y | 26.1316 | 26.1314 | 26.1314 | 26.1309 | 26.1301 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | psnr_B_Y | 25.488 | 25.4881 | 25.488 | 25.4876 | 25.4871 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | ssim_B_Y | 0.678209 | 0.678248 | 0.67825 | 0.678277 | 0.678299 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | lpips_B | NA | NA | NA | NA | NA | td_s0.15_b2_u0.5:NA td_s0.15_b3_u0.5:NA td_s0.05_b2_u0.75:NA td_s0.05_b2_u1:NA |
+| sports50_60 | crowd | x265_1080p_2.5k_low | ib_gap_db_Y | 0.753705 | 0.753426 | 0.753466 | 0.753434 | 0.753154 | td_s0.15_b2_u0.5:INFO td_s0.15_b3_u0.5:INFO td_s0.05_b2_u0.75:INFO td_s0.05_b2_u1:INFO |
+| sports50_60 | crowd | x265_1080p_2.5k_low | detail_pulse_Y | 0.228373 | 0.227435 | 0.227369 | 0.226592 | 0.226272 | td_s0.15_b2_u0.5:INFO td_s0.15_b3_u0.5:INFO td_s0.05_b2_u0.75:INFO td_s0.05_b2_u1:INFO |
+| sports50_60 | crowd | x265_1080p_2.5k_low | grain_keep_vs_input_band1_Y | 1 | 1.00026 | 1.00026 | 1.00053 | 1.00088 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | grain_keep_vs_input_band2_Y | 1 | 1.00032 | 1.00032 | 1.00031 | 1.00078 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | grain_keep_vs_input_band3_Y | 1 | 0.999982 | 0.999979 | 1.0001 | 1.00026 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |
+| sports50_60 | crowd | x265_1080p_2.5k_low | grain_keep_vs_input_band4_Y | 1 | 1.00002 | 1.00003 | 0.99988 | 1.00016 | td_s0.15_b2_u0.5:PASS td_s0.15_b3_u0.5:PASS td_s0.05_b2_u0.75:PASS td_s0.05_b2_u1:PASS |

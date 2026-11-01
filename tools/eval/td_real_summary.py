@@ -92,12 +92,75 @@ def fmt(v, p=3, sign=False):
     return ("%+.*f" if sign else "%.*f") % (p, v)
 
 
+def sweep_table(dirs, out, title):
+    """One row per candidate csv found in `dirs` (several candidates per run dir): means over cases of the gains,
+    the I/B gap change, the transfer's activity (stats), and the gate verdicts (worst value and non-PASS count)."""
+    rows = []
+    for d in dirs:
+        entries_by = {}
+        log = os.path.join(d, "run_log.txt")
+        if os.path.isfile(log):
+            for line in open(log, encoding="utf8"):
+                m = re.match(r"stats (\S+) case-start-index \S+: (.*)", line)
+                if m:
+                    entries_by.setdefault(m.group(1), []).append(dict(re.findall(r"(\w+) mean ([-0-9.e+]+)", m.group(2))))
+        for f in sorted(glob.glob(os.path.join(d, "*.csv"))):
+            name = os.path.splitext(os.path.basename(f))[0]
+            if name == "summary":
+                continue
+            by = {}
+            with open(f, encoding="utf8") as fh:
+                for r in csv.DictReader(fh):
+                    by.setdefault((r["clip"], r["case"]), {})[r["metric"]] = r
+
+            def mean_delta(metric):
+                v = [num(c[metric]["delta"]) for c in by.values() if metric in c and num(c[metric]["delta"]) is not None]
+                return sum(v) / len(v) if v else None
+
+            def worst(metric, ref):
+                v = [num(c[metric]["candidate"]) for c in by.values() if metric in c and num(c[metric]["candidate"]) is not None]
+                return max(v, key=lambda x: abs(x - ref)) if v else None
+            bad = sum(1 for c in by.values() for g in GATES if g in c and c[g]["flag"] in ("FAIL", "FLAG"))
+            errs = sum(1 for c in by.values() for m in c if m.startswith("error_"))
+            st = entries_by.get(name, [])
+            w = [num(e.get("weight_mean")) for e in st if num(e.get("weight_mean")) is not None]
+            act = [num(e.get("active_share")) for e in st if num(e.get("active_share")) is not None]
+            rows.append((name, len(by), mean_delta("psnr_B_Y"), mean_delta("psnr_Y"), mean_delta("ssim_B_Y"),
+                         mean_delta("lpips_all"), mean_delta("ib_gap_db_Y"), sum(w) / len(w) if w else None,
+                         sum(act) / len(act) if act else None, worst("grain_keep_vs_input_Y", 1.0),
+                         worst("grain_lag1_vs_input_Y", 0.0),
+                         max([worst("grain_keep_vs_input_band%d_Y" % k, 1.0) or 1.0 for k in range(1, 5)],
+                             key=lambda x: abs(x - 1.0)),
+                         worst("grain_probe_keep_edge_vs_input_Y", 1.0), mean_delta("ghost_coeff_Y"),
+                         mean_delta("smear_Y"), bad, errs))
+    L = ["<!-- Copyright(C) 2026 VP-V contributors -->", "<!-- SPDX-License-Identifier: GPL-3.0-only -->", "",
+         "# " + title, "",
+         "One row per candidate; means over cases of candidate - default (td_off). `w` = mean block weight, `act` = share of "
+         "blocks with weight > 0.05 (scored run). Worst = the case value farthest from neutral. Gates = non-PASS flags among "
+         "the grain/ghost/smear/flicker/halo/BTB-WTW/GOP rows (0 = all PASS).", "",
+         "| candidate | n | dPSNR B | dPSNR all | dSSIM B | dLPIPS | d gap | w | act | worst grain keep | worst lag-1 | "
+         "worst band | worst probe edge | d ghost | d smear | gates non-PASS | errors |",
+         "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for r in rows:
+        L.append("| %s | %d | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %d | %d |" % (
+            r[0], r[1], fmt(r[2], 3, True), fmt(r[3], 3, True), fmt(r[4], 5, True), fmt(r[5], 4, True),
+            fmt(r[6], 3, True), fmt(r[7], 4), fmt(r[8], 3), fmt(r[9], 4), fmt(r[10], 4), fmt(r[11], 4), fmt(r[12], 4),
+            fmt(r[13], 4, True), fmt(r[14], 4, True), r[15], r[16]))
+    with open(out, "w", encoding="utf8", newline="\n") as f:
+        f.write("\n".join(L) + "\n")
+    print("\n".join(L))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--runs", nargs="+", required=True)
+    ap.add_argument("--runs", nargs="+", default=None)
+    ap.add_argument("--sweep", nargs="+", default=None, help="run dirs with several candidates: one row per candidate")
     ap.add_argument("--out", required=True)
     ap.add_argument("--title", default="TemporalDetail on real streaming-like encodes")
     a = ap.parse_args(argv)
+    if a.sweep:
+        sweep_table(a.sweep, a.out, a.title)
+        return 0
     runs = [load(r) for r in a.runs]
     L = ["<!-- Copyright(C) 2026 VP-V contributors -->", "<!-- SPDX-License-Identifier: GPL-3.0-only -->", "",
          "# " + a.title, "",

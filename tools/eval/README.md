@@ -215,7 +215,12 @@ capture directory). Material: `make_td_encodes.py` regenerates 3 s x265 IBBBP st
 1080p rungs of 4 lossless masters; G18's 4-frame cases are too short) and the no-master no-harm suite (reference =
 input) from `D:\testclips\eval-2026-10-31`; both write central 960x544 crops to scratch. Extra rows: per-frame-type
 PSNR (`psnr_I/P/B_Y`), `ssim_B_Y`, `lpips_B`, `ib_gap_db_Y`, `detail_pulse_Y`, `grain_keep_vs_input_band1..4_Y`.
-`td_real_summary.py` merges runs; results in `prototypes/temporal_detail_real/`.
+`td_real_summary.py` merges runs (`--sweep` = one row per candidate); results in `prototypes/temporal_detail_real/`.
+Re-tune (`prototypes/temporal_detail_real/retune/`): `make_td_encodes.py --tier low|vlow` (2160p 6/4 Mb/s, 1080p
+2.5/1.5 Mb/s, vlow with pbratio 1.6), sweep candidates `td_s<margin>_b<base x>_u<px>[_boost]`, the active-picture
+rectangle detected per case (`detect_active`, a stand-in for VP's crop detector), and `td_regional.py` (transfer
+ceiling via `Tuning::forceWeight`, per-block master oracle, a local-evidence strength rule fitted on train clips and
+scored on held-out clips).
 
 ```
 D:\hfrenv\Scripts\python.exe -I tools/eval/run_prototypes.py --family temporal_detail --suite tools/eval/suites/td_real.json ^

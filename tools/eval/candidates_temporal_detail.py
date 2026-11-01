@@ -55,9 +55,15 @@ class TemporalDetailCLI(ec.PythonCandidate):
     """TemporalDetail CPU model via td_cli --stdio, DIS stand-in vectors."""
 
     def __init__(self, name, budget=0.08, mode="steady", clean=True, guard=True, forward=True,
-                 strength=1.0, max_age=2.0, boost_max=0.15, block=16.0, trust_one=False):
+                 strength=1.0, max_age=2.0, boost_max=0.15, block=16.0, trust_one=False, stronger_margin=0.15,
+                 base_noise=0.75, base_grain_sigmas=3.0, unc_px=0.5, active="auto", force_weight=0.0):
         self.name = name
         self.trust_one = trust_one
+        self.stronger_margin, self.base_noise, self.base_grain_sigmas, self.unc_px = (stronger_margin, base_noise,
+                                                                                      base_grain_sigmas, unc_px)
+        self.active = active
+        self.force_weight = force_weight
+        self.rect = (0, 0, 0, 0)
         self.budget, self.mode, self.clean, self.guard, self.forward = budget, mode, clean, guard, forward
         self.strength, self.max_age, self.boost_max, self.block = strength, max_age, boost_max, block
         self.description = ("TemporalDetail CPU model (td_cli), mode %s, grain budget %s, cleaner %s, guard %s; "
@@ -99,9 +105,12 @@ class TemporalDetailCLI(ec.PythonCandidate):
         if not os.path.isfile(TD_CLI):
             raise RuntimeError("td_cli.exe not built: run tools/td-cli/build_td_cli.bat (%s)" % TD_CLI)
         self.proc = subprocess.Popen([TD_CLI, "--stdio"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-        hdr = "TDCLI1 %d %d %d %.9g %.9g %s %.9g %d %d %.9g %.9g %.9g\n" % (
-            w, h, frame.bitdepth, frame.fps, max(h, 1080), self.mode, self.budget, int(self.clean), int(self.guard),
-            self.strength, self.max_age, self.boost_max)
+        self.rect = detect_active(frame) if self.active == "auto" else (0, 0, 0, 0)
+        vals = (w, h, frame.bitdepth, frame.fps, max(h, 1080), self.mode, self.budget, int(self.clean), int(self.guard),
+                self.strength, self.max_age, self.boost_max, self.stronger_margin, self.base_noise,
+                self.base_grain_sigmas, self.unc_px) + tuple(self.rect)
+        hdr = "TDCLI1 %d %d %d %.9g %.9g %s %.9g %d %d %.9g %.9g %.9g %.9g %.9g %.9g %.9g %d %d %d %d" % vals
+        hdr += (" %.9g\n" % self.force_weight) if self.force_weight > 0 else "\n"   # 22nd field only when used
         self.proc.stdin.write(hdr.encode("ascii"))
 
     def _pair(self, rec):
@@ -148,6 +157,32 @@ class TemporalDetailCLI(ec.PythonCandidate):
         return frame.with_planes(Y=Y)
 
 
+def detect_active(frame, max_std8=4.0, max_mean8=24.0, min_run=4):
+    """Active-picture rectangle from the first frame: leading/trailing rows (columns) that are flat (std <=
+    max_std8, so codec ringing next to the bar still counts) and dark (mean <= max_mean8), 8-bit-equivalent codes,
+    at least min_run long. A deterministic STAND-IN for VP's crop detector; a dark flat picture edge misread as a
+    bar is left unprocessed (the safe direction). -> (x0, y0, x1, y1); (0, 0, 0, 0) = whole plane."""
+    Y = np.asarray(frame.Y, np.float64) / (1 << (frame.bitdepth - 8))
+    h, w = Y.shape
+
+    def flat(a):
+        return (a.std(axis=1) <= max_std8) & (a.mean(axis=1) <= max_mean8)
+
+    def runs(mask):
+        lead = 0
+        while lead < len(mask) and mask[lead]:
+            lead += 1
+        trail = 0
+        while trail < len(mask) - lead and mask[len(mask) - 1 - trail]:
+            trail += 1
+        return (lead if lead >= min_run else 0), (trail if trail >= min_run else 0)
+    t, b = runs(flat(Y))
+    l, r = runs(flat(Y.T))
+    if (t, b, l, r) == (0, 0, 0, 0) or t + b >= h - 2 or l + r >= w - 2:
+        return (0, 0, 0, 0)
+    return (l, t, w - r, h - b)
+
+
 class PassThrough(ec.PythonCandidate):
     name = "td_off"
     description = "default: temporal_detail = off (output = input)"
@@ -165,6 +200,7 @@ CANDIDATES = {
     "td_nobudget": lambda: TemporalDetailCLI("td_nobudget", budget=0.0),
     "td_b008_trust1": lambda: TemporalDetailCLI("td_b008_trust1", budget=0.08, forward=False, trust_one=True),
     "td_b008_boost0": lambda: TemporalDetailCLI("td_b008_boost0", budget=0.08, boost_max=0.0),
+    "td_b008_noactive": lambda: TemporalDetailCLI("td_b008_noactive", budget=0.08, active="off"),
 }
 
 
@@ -288,3 +324,21 @@ def extra_metrics_temporal_detail(truth, outs, inputs, case, notes):
         for k, n in enumerate(names):
             m[n] = math.sqrt(eo[k] / ei[k]) if ei[k] > 0 else None
     return m
+
+
+# ------------------------------------------------------------------ gate re-tune on real B-frames (sweep)
+# Gate thresholds: stronger margin m (reference-stronger gate zero at 1 + m, full at 1 + 3 m; default 0.15),
+# base-match allowance scale k (noise 0.75 k codes + 3 k grain sigmas; default 1), motion-uncertainty limit u
+# (px; default 0.5). Names: td_s<m>_b<k>_u<u>[_boost]; boost off unless _boost (transfer only = the main candidate).
+def _sweep(m, k, u, boost=False):
+    tag = "td_s%g_b%g_u%g%s" % (m, k, u, "_boost" if boost else "")
+    return tag, (lambda: TemporalDetailCLI(tag, budget=0.08, boost_max=0.15 if boost else 0.0, stronger_margin=m,
+                                           base_noise=0.75 * k, base_grain_sigmas=3.0 * k, unc_px=u))
+
+
+for _m in (0.15, 0.08, 0.05, 0.02):
+    for _k in (1.0, 1.5, 2.0, 3.0):
+        for _u in (0.5, 0.75, 1.0):
+            for _b in (False, True):
+                _t, _f = _sweep(_m, _k, _u, _b)
+                CANDIDATES[_t] = _f
