@@ -7,6 +7,7 @@
 #include <VP-V/core/FallbackCatalog.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <thread>
@@ -31,6 +32,38 @@
 // TexBackend: using Handle (null-testable, default constructed = null); Handle Create(const TexShape&)
 // (null on failure); void Destroy(Handle&) (leaves it null).
 namespace VpSkeleton {
+
+// The owning thread of a single-thread object (the scratch arena, a grain-split SplitterFill), race-free: the id is
+// atomic, and binding an unbound object is a compare-exchange, so when two threads race for the first use exactly one
+// wins and the other sees "bound to another thread". Rebind() is an explicit transfer by the owner (e.g. a re-Reserve).
+class ThreadBinding {
+public:
+    ThreadBinding() : id_(std::thread::id()) {}
+    ThreadBinding(const ThreadBinding&) = delete;
+    ThreadBinding& operator=(const ThreadBinding&) = delete;
+
+    // Binds to the caller when unbound; true when (now) bound to the caller, false when another thread owns it.
+    bool BindIfUnbound()
+    {
+        const std::thread::id me = std::this_thread::get_id();
+        std::thread::id expected = std::thread::id();
+        if (id_.compare_exchange_strong(expected, me))
+            return true;
+        return expected == me;
+    }
+    void Rebind() { id_.store(std::this_thread::get_id()); }
+    void Reset() { id_.store(std::thread::id()); }
+    bool Bound() const { return id_.load() != std::thread::id(); }
+    bool BoundToCaller() const { return id_.load() == std::this_thread::get_id(); }
+    bool BoundToOther() const
+    {
+        const std::thread::id v = id_.load();
+        return v != std::thread::id() && v != std::this_thread::get_id();
+    }
+
+private:
+    std::atomic<std::thread::id> id_;
+};
 
 template <class TexBackend>
 class ScratchArena {

@@ -16,6 +16,7 @@
 #include <VP-V/modules/repair/grain_split/GrainNode.h>
 
 #include <algorithm>
+#include <atomic>
 #include <map>
 #include <numeric>
 #include <string>
@@ -706,6 +707,36 @@ namespace GpuAllocatorTestsNs
 			Assert::AreEqual(uint64_t(d.width) * d.height * 8 + CellsAt(d, 4) * 16, compact, L"compact = 8 B/px + 16 B/block (N, e3, e1, e2)");
 			Assert::AreEqual(uint64_t(d.width) * d.height * 16 + CellsAt(d, 4) * 16, full, L"full = 16 B/px + 16 B/block");
 			Assert::IsTrue(compact < full, L"compact is smaller");
+		}
+
+		// Finisher MUST 3: the first-use binding is an atomic compare-exchange: of many threads racing for an unbound
+		// object exactly one wins, every other one sees "bound to another thread".
+		TEST_METHOD(ThreadBindingFirstUseRaceHasOneWinner)
+		{
+			for (int round = 0; round < 200; ++round) {
+				ThreadBinding b;
+				std::atomic<int> winners{ 0 };
+				std::atomic<int> go{ 0 };
+				std::vector<std::thread> ts;
+				for (int i = 0; i < 6; ++i)
+					ts.emplace_back([&]() {
+						while (go.load() == 0) {}
+						if (b.BindIfUnbound())
+							winners.fetch_add(1);
+					});
+				go.store(1);
+				for (std::thread& t : ts)
+					t.join();
+				Assert::AreEqual(1, winners.load(), L"exactly one thread owns it");
+				Assert::IsTrue(b.Bound() && b.BoundToOther(), L"bound, and not to this (test) thread");
+			}
+			ThreadBinding mine;
+			Assert::IsTrue(mine.BindIfUnbound() && mine.BindIfUnbound(), L"the owner binds again idempotently");
+			Assert::IsTrue(mine.BoundToCaller() && !mine.BoundToOther(), L"owned by the caller");
+			bool other = true;
+			std::thread t([&]() { other = mine.BindIfUnbound(); });
+			t.join();
+			Assert::IsFalse(other, L"another thread is refused");
 		}
 
 		TEST_METHOD(ArenaNestedScopeIsRefusedAndVisible)

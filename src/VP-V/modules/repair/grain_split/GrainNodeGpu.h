@@ -7,6 +7,7 @@
 #include <VP-V/modules/repair/grain_split/GrainNode.h>
 #include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>
 
+#include <atomic>
 #include <functional>
 #include <string>
 #include <thread>
@@ -20,8 +21,11 @@
 // note, private intermediates) and a pl_dispatch is not thread-safe, so the lane thread and the render thread each own
 // their own SplitterFill + Splitter + pl_dispatch (and, if any, their own ScratchArena: the render's arena is
 // render-thread only and the lane's arena is lane-thread only, each a separate governor-counted pool). SplitterFill binds
-// to the thread of its first Fill; a Fill from another thread, or with an arena bound to another thread, is refused
-// (counted, LastRefusal(), FillDecision() visible) and never touches the GPU. The two instances write different
+// to its owning thread with Bind() (call it on that thread before the first Fill, e.g. at lane-thread start) or, without
+// it, to the thread of its first Fill; the binding is an atomic compare-exchange (VpSkeleton::ThreadBinding), so two
+// threads racing for the first use cannot both win. A Fill from another thread, or with an arena bound to another
+// thread, is refused (counted, LastRefusal(), FillDecision() visible) and never touches the GPU; a refusal from another
+// thread touches only atomics (it never writes the owner's state). The two instances write different
 // textures (ring buffers for the lane, live buffers for the render), so nothing aliases.
 //
 // The slot textures come from the node's ProductTextures, laid out by GrainLayout(storage, desc) for the storage that
@@ -122,6 +126,12 @@ namespace GrainSplit
 				VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* arena = nullptr;
 			};
 
+			// Binds this instance to the CALLING thread (its owner) when still unbound. True when the caller owns it. Call it on
+			// the owning thread before the first Fill; otherwise the first Fill binds (atomically).
+			bool Bind() { return m_binding.BindIfUnbound(); }
+			bool BoundToCaller() const { return m_binding.BoundToCaller(); }
+
+			// Owner thread only (like Fill).
 			void SetSource(const Source& s) { m_source = s; }
 			// `layoutStorage`: the storage the targets were allocated for (NodeLayout::choice.storage).
 			void SetTargets(TargetsFn f, Storage layoutStorage)
@@ -134,14 +144,15 @@ namespace GrainSplit
 			// a plane whose granted storage no longer matches the targets' layout (the host lays the node out again).
 			bool Fill(uint64_t seq, const GrainTarget& target)
 			{
-				m_refusal.clear();
-				if (!m_threadBound)
+				if (!m_binding.BindIfUnbound())
 				{
-					m_thread = std::this_thread::get_id();
-					m_threadBound = true;
+					// Another thread owns this instance: touch only atomics (never the owner's string / source / targets).
+					m_crossThread.fetch_add(1);
+					m_crossPending.store(true);
+					return false;
 				}
-				if (std::this_thread::get_id() != m_thread)
-					return Refuse("called from another thread (one SplitterFill per thread)");
+				m_refusal.clear();
+				m_crossPending.store(false);
 				if (m_source.arena && m_source.arena->BoundToOtherThread())
 					return Refuse("the scratch arena belongs to another thread");
 				const StorageChoice granted = ChooseStorage(m_source.storage, m_source.plane ? m_source.plane->params.format : nullptr, m_source.codeUnit);
@@ -159,17 +170,25 @@ namespace GrainSplit
 			}
 
 			unsigned Fills() const { return m_fills; }
-			unsigned Refusals() const { return m_refusals; }
-			const std::string& LastRefusal() const { return m_refusal; }
+			unsigned Refusals() const { return m_refusals + m_crossThread.load(); }
+			unsigned CrossThreadRefusals() const { return m_crossThread.load(); }
+			// Owner thread: the last refusal; a refused call from another thread since the owner's last Fill shows first.
+			const std::string& LastRefusal() const { return m_crossPending.load() ? CrossThreadText() : m_refusal; }
 			// Visible while the last Fill was refused (no silent fallbacks); released by the next accepted Fill.
 			FallbackCatalog::Decision FillDecision() const
 			{
-				return m_refusal.empty() ? FallbackCatalog::Released("grain split fill")
-					: FallbackCatalog::Engaged("grain split fill", "grain split not computed: " + m_refusal);
+				const std::string& why = LastRefusal();
+				return why.empty() ? FallbackCatalog::Released("grain split fill")
+					: FallbackCatalog::Engaged("grain split fill", "grain split not computed: " + why);
 			}
 			const Splitter& Computer() const { return *m_splitter; }
 
 		private:
+			static const std::string& CrossThreadText()
+			{
+				static const std::string s = "called from another thread (one SplitterFill per thread)";
+				return s;
+			}
 			bool Refuse(const char* why)
 			{
 				m_refusal = why;
@@ -183,8 +202,9 @@ namespace GrainSplit
 			Source m_source;
 			TargetsFn m_targets;
 			Storage m_layoutStorage = Storage::Full;
-			std::thread::id m_thread;
-			bool m_threadBound = false;
+			VpSkeleton::ThreadBinding m_binding;
+			std::atomic<unsigned> m_crossThread{ 0 };
+			std::atomic<bool> m_crossPending{ false };
 			unsigned m_fills = 0;
 			unsigned m_refusals = 0;
 			std::string m_refusal;

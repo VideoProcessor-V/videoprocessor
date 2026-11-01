@@ -432,6 +432,23 @@ namespace GrainUnitGpuTestsNs
 			Assert::IsFalse(fill.Fill(4, GrainSplit::GrainTarget{ true, 0 }), L"another thread's arena is refused");
 			Assert::IsTrue(fill.LastRefusal().find("arena") != std::string::npos, L"with the reason");
 			Assert::AreEqual(2u, fill.Fills(), L"still no compute for a refused Fill");
+
+			// Finisher MUST 3: Bind() on the owning thread before any Fill; a Fill from any other thread is then refused
+			// before GPU work (no first-use race decides the owner).
+			GrainSplit::Gpu::Splitter laneSplitter;
+			GrainSplit::Gpu::SplitterFill laneFill(laneSplitter, gpu, dev.dispatch);
+			bool bound = false;
+			std::thread owner([&]() { bound = laneFill.Bind(); });
+			owner.join();
+			Assert::IsTrue(bound, L"the owning thread binds");
+			Assert::IsFalse(laneFill.Bind(), L"another thread cannot take it");
+			src.arena = nullptr;
+			laneFill.SetSource(src);
+			Assert::IsFalse(laneFill.Fill(5, GrainSplit::GrainTarget{ true, 0 }), L"a non-owner Fill is refused");
+			Assert::AreEqual(0u, laneFill.Fills(), L"no compute");
+			Assert::AreEqual(1u, laneFill.CrossThreadRefusals(), L"counted");
+			Assert::IsTrue(laneFill.FillDecision().engaged, L"visible");
+			laneSplitter.Release(gpu);
 			splitter.Release(gpu);
 			pl_tex_destroy(gpu, &plane);
 		}
