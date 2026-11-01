@@ -46,7 +46,7 @@ namespace CameraLink
 	bool CameraLabelProducer::EnsureSlot(pl_tex* tex, int w, int h)
 	{
 		pl_fmt fmt = pl_find_fmt(m_gpu, PL_FMT_FLOAT, 4, 32, 32,
-			static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_HOST_WRITABLE));
+			static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE));
 		if (!fmt)
 		{
 			m_error = "no sampleable host-writable rgba32f format";

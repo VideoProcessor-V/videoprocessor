@@ -88,7 +88,7 @@ namespace CameraLink
 		m_bytes = p7Bytes;
 		m_indicator = indicator;
 		const size_t ring = table->Find(VpSkeleton::kP7CameraFit)->Ring();
-		m_pool.reset(new CameraRecordPool(std::max(ring, m_settings.poolRing)));
+		m_pool.reset(new CameraRecordPool(std::max(static_cast<size_t>(ring), m_settings.poolRing)));
 		m_sealedMark.assign(ring, ~uint64_t(0));
 		m_producer.reset(new CameraFitProducer(m_settings.fit, &m_counters));
 		CameraFitEnv env;

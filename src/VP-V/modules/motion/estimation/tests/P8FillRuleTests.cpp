@@ -146,8 +146,6 @@ namespace VideoProcessorTest
 			CameraLink::CameraLabelsView v;
 			Assert::IsFalse(t.fill.LabelsFor(1, CameraLink::CameraConsumer::GrainMap, v));
 			Assert::IsFalse(v.available);
-			CameraLink::CameraConsumerBinding binding(CameraLink::CameraConsumer::GrainMap, true);
-			(void)binding;
 			Assert::IsTrue(t.fill.Counters().absent.load() >= 1);
 			Assert::IsTrue(t.fill.Counters().declined.load() >= 1);
 		}

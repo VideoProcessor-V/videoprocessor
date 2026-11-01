@@ -16,6 +16,8 @@
 #include <memory>
 #include <vector>
 
+namespace VideoProcessorTest
+{
 namespace CameraLinkTest
 {
 	inline std::shared_ptr<CameraLink::FieldCopy> CopyOf(const CameraSynth::Field& f, uint64_t seq, uint32_t era = 1)
@@ -146,4 +148,5 @@ namespace CameraLinkTest
 		j.stamp = j.field->stamp;
 		return j;
 	}
+}
 }

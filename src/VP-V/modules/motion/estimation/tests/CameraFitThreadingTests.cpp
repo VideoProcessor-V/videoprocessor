@@ -8,6 +8,7 @@
 // Camera link K1-5 (F2): the reader hooks only bump atomics; the worker thread owns the Fitter. 10 000 reset requests
 // from the "render thread" during fits leave a deterministic, race-free sequence; the single thread drains the queue.
 #include "CameraLinkTestSupport.h"
+#include <VP-V/modules/motion/estimation/global_model/CameraReaders.h>
 
 #include <atomic>
 #include <thread>
