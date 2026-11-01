@@ -120,10 +120,10 @@ namespace CameraModel
 		}
 
 	private:
+		// D-K4: any reason outside the usable set (CameraModel::ReasonUsable) forces weight 0.
 		static bool ForcesZero(Reason reason)
 		{
-			return reason == Reason::Cut || reason == Reason::Flash || reason == Reason::DeadlineMissed ||
-				reason == Reason::NoInput || reason == Reason::GenerationReset || reason == Reason::Disabled;
+			return !ReasonUsable(reason);
 		}
 
 		double m_weight = 0.0;

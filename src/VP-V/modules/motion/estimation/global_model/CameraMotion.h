@@ -61,6 +61,14 @@ namespace CameraModel
 		return "unknown";
 	}
 
+	// D-K4 (verdict gate): the ONE set of reasons whose record may be used by a consumer (the accessor weight and the 
+	// measurement guidance gate share it): a clean fit, or a fit seeded/bridged across a cut/flash. Every other reason
+	// (Ambiguous, InverseMismatch, Degenerate, TooFewSamples, LowConfidence, Cut, Flash, ...) is never used.
+	inline bool ReasonUsable(Reason reason)
+	{
+		return reason == Reason::Ok || reason == Reason::PostCutSeeded || reason == Reason::FlashBridged;
+	}
+
 	// Active picture rectangle in frame pixels (right/bottom exclusive).
 	struct Rect
 	{
