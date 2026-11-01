@@ -138,7 +138,7 @@ Code location: **migrated**. The authoritative list is `live_files` in [MANIFEST
 
 ## Settings
 
-- Keys: `chroma_upscale_vp`, `chroma_upscaler`.
+- Keys: `chroma_upscaler`, `chroma_upscale_vp`.
 - Tiers: not tiered until a component exists.
 - VP-V page, Scaling tab: tiers Classic / Low / Mid; tier keys `adaptive_downscale`, `adaptive_w_base`, `source_resolution`.
 - Plain-language guide: [docs/settings/VP-settings-reference.md#5-scaling](../../../../../docs/settings/VP-settings-reference.md#5-scaling).
@@ -147,7 +147,7 @@ Code location: **migrated**. The authoritative list is `live_files` in [MANIFEST
 ## Tests
 
 - Placeholder (byte-identity on/off, zero cost): byte-identical with the slot off; zero GPU passes when off.
-- Isolation (fixed inputs, expected outputs, cost): MISSING.
+- Isolation (fixed inputs, expected outputs, cost): CPU model: flat/BTB-WTW exact, siting at chroma sites, luma-correlated edge vs Catmull-Rom, 4:2:2, chroma-grain isolate within 5%, active picture bars; GPU vs CPU model within 0.02 codes on WARP (4:2:0 left/co-sited, 4:2:2, letterbox/pillarbox), off returns the frame, determinism.
 - Contract (formats, geometry, fallback entry): libplacebo does not re-upsample when the slot outputs 4:4:4.
 - Chain (total delay at the 4/3/2-frame budgets): MISSING.
 - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
