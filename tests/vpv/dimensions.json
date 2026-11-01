@@ -155,6 +155,14 @@
    "source": "toggle:motion"
   },
   {
+   "name": "vector_demand",
+   "values": [
+    "on",
+    "off"
+   ],
+   "source": "toggle:motion"
+  },
+  {
    "name": "dither_vectors",
    "values": [
     "auto",
