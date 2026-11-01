@@ -636,6 +636,126 @@ namespace DetailPulseTestsNs
 				Assert::IsTrue(off[k].out.v == c.frames[k].v, L"cap 1.0 returns the input bit-exactly");
 		}
 
+		// Bug hunt 33 F1: a letterboxed / pillarboxed picture. The bars (black, code 64) come out as
+		// the source bit for bit, the bar edge is no unsharp-mask edge (the picture rows beside it
+		// change no more than the interior), and the pulse still steadies the picture. Without the
+		// picture rectangle (the old behaviour) the bar edge undershoots below black with the pulse.
+		static Image Barred(const Image& f, const int b[4])
+		{
+			Image o = f;
+			for (int y = 0; y < f.h; ++y)
+				for (int x = 0; x < f.w; ++x)
+					if (x < b[0] || x > b[2] || y < b[1] || y > b[3]) o.at(x, y) = 64.0;
+			return o;
+		}
+
+		TEST_METHOD(DetailPulseLeavesLetterboxAndPillarboxBarsAlone)
+		{
+			const int w = 256, h = 192;
+			const Coded c = MakeCoded(w, h, 24, 23.976, 4.0, false, 3301u);
+			// Letterbox with edges inside tiles (rows 24 and 167), and pillarbox (columns 40 and 215).
+			const int boxes[2][4] = { { 0, 24, w - 1, 167 }, { 40, 0, 215, h - 1 } };
+			for (const auto& b : boxes)
+			{
+				std::vector<Image> frames;
+				for (const Image& f : c.frames) frames.push_back(Barred(f, b));
+				Settings s;
+				s.picture = { b[0] / static_cast<float>(w), b[1] / static_cast<float>(h),
+					(b[2] + 1) / static_cast<float>(w), (b[3] + 1) / static_cast<float>(h) };
+				int bounds[4];
+				Assert::IsTrue(DetailPulse::PictureBounds(s.picture, w, h, bounds));
+				for (int i = 0; i < 4; ++i) Assert::AreEqual(b[i], bounds[i], L"PictureBounds rounding");
+				const std::vector<Frame> withRect = Run(frames, s);
+				const std::vector<Frame> without = Run(frames, Settings());
+				const bool letterbox = b[1] > 0;
+				double gmax = 1.0, edgeMax = 0.0, interiorMax = 0.0, oldBarMin = 1e9;
+				for (size_t k = 0; k < frames.size(); ++k)
+				{
+					gmax = (std::max)(gmax, (std::max)(withRect[k].g1, withRect[k].g2));
+					for (int y = 0; y < h; ++y)
+						for (int x = 0; x < w; ++x)
+						{
+							const bool bar = x < b[0] || x > b[2] || y < b[1] || y > b[3];
+							const double in = frames[k].at(x, y);
+							if (bar)
+							{
+								Assert::AreEqual(in, withRect[k].out.at(x, y), L"a bar pixel changed");
+								oldBarMin = (std::min)(oldBarMin, without[k].out.at(x, y));
+								continue;
+							}
+							const int d = letterbox ? (std::min)(y - b[1], b[3] - y) : (std::min)(x - b[0], b[2] - x);
+							const double delta = std::fabs(withRect[k].out.at(x, y) - in);
+							if (d < 2) edgeMax = (std::max)(edgeMax, delta);
+							else if (d >= 16) interiorMax = (std::max)(interiorMax, delta);
+						}
+				}
+				char text[220];
+				snprintf(text, sizeof(text), "%s: gain max %.3f, picture edge |delta| max %.3f, interior %.3f; without the rectangle the bars reach %.2f",
+					letterbox ? "letterbox" : "pillarbox", gmax, edgeMax, interiorMax, oldBarMin);
+				Logger::WriteMessage(text);
+				Assert::IsTrue(gmax > 1.01, W(text).c_str());                        // the pulse is steadied
+				Assert::IsTrue(edgeMax <= 2.0 * interiorMax + 0.5, W(text).c_str()); // no edge halo
+				Assert::IsTrue(oldBarMin < 63.5, W(text).c_str());                   // the old undershoot (what this guards)
+			}
+		}
+
+		TEST_METHOD(DetailPulseGpuLetterboxMatchesModel)
+		{
+			// Bug hunt 33 F1 (GPU vs model; WARP unless VP_TEST_GPU=hardware): letterbox and
+			// pillarbox edges inside tiles, the fast and the original passes, a look-ahead: within
+			// 0.05 codes of the model, the bars bit for bit the source.
+			PulseGpu g;
+			const int w = 200, h = 136;
+			const Coded c = MakeCoded(w, h, 8, 23.976, 4.0, false, 3302u);
+			const int boxes[2][4] = { { 0, 17, w - 1, 118 }, { 21, 0, 180, h - 1 } };
+			for (const auto& b : boxes)
+				for (bool fast : { true, false })
+				{
+					std::vector<Image> frames;
+					std::vector<pl_tex> textures;
+					for (const Image& f : c.frames)
+					{
+						frames.push_back(Barred(f, b));
+						textures.push_back(g.Upload(frames.back()));
+					}
+					DetailPulse::Module module;
+					Model model;
+					Settings s;
+					s.picture = { b[0] / static_cast<float>(w), b[1] / static_cast<float>(h),
+						(b[2] + 1) / static_cast<float>(w), (b[3] + 1) / static_cast<float>(h) };
+					double worst = 0.0, barWorst = 0.0;
+					for (int k = 0; k < static_cast<int>(frames.size()); ++k)
+					{
+						const uint64_t seq = static_cast<uint64_t>(k) + 1;
+						DetailPulse::Params p;
+						p.sequence = seq;
+						p.fast = fast;
+						p.picture = s.picture;
+						if (k > 0 && k + 1 < static_cast<int>(frames.size()))
+						{
+							Assert::IsTrue(module.MeasureAhead(g.gpu, g.dispatch, textures[k + 1], seq + 1, p), W(module.LastError().c_str()).c_str());
+							model.MeasureAhead(frames[k + 1], seq + 1, s);
+						}
+						pl_frame out{};
+						Assert::IsTrue(module.Apply(g.gpu, g.dispatch, PulseGpu::LumaFrame(textures[k]), p, out), W(module.LastError().c_str()).c_str());
+						const Image gpuOut = g.Readback(out.planes[0].texture);
+						worst = (std::max)(worst, MaxAbsDiff(gpuOut, model.Process(frames[k], seq, s).out));
+						for (int y = 0; y < h; ++y)
+							for (int x = 0; x < w; ++x)
+								if (x < b[0] || x > b[2] || y < b[1] || y > b[3])
+									barWorst = (std::max)(barWorst, std::fabs(gpuOut.at(x, y) - frames[k].at(x, y)));
+					}
+					char text[160];
+					snprintf(text, sizeof(text), "%s %s: worst GPU vs model %.4f codes, bars %.4f", b[1] > 0 ? "letterbox" : "pillarbox",
+						fast ? "fast" : "original", worst, barWorst);
+					Logger::WriteMessage(text);
+					Assert::IsTrue(worst < 0.05, W(text).c_str());
+					Assert::AreEqual(0.0, barWorst, W(text).c_str());
+					module.Release(g.gpu);
+					for (pl_tex& t : textures) pl_tex_destroy(g.gpu, &t);
+				}
+		}
+
 		TEST_METHOD(DetailPulseGpuMatchesModel)
 		{
 			// The shader against the model on a short coded sequence (edges: partial tiles), without

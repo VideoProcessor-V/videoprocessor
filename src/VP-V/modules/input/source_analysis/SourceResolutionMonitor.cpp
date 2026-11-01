@@ -5,6 +5,8 @@
 #include <DebugLog.h>
 #include <GeneralRateLog.h>
 
+#include <VP-V/modules/drive/led_measure/NativeReadback.h>
+
 #include <libplacebo/dispatch.h>
 
 #include <algorithm>
@@ -32,9 +34,20 @@ if (tile < int(tiles) && g.y < ts) {
     vec2 origin = (tile % 2) == 0 ? pair.xy : pair.zw;
     ivec2 p = clamp(ivec2(origin) + ivec2(x, g.y), ivec2(0), textureSize(src, 0) - ivec2(1));
     vec4 c = texelFetch(src, p, 0);
-    values[(tile * ts + g.y) * ts + x] = is_rgb > 0.5 ? dot(c.rgb, vec3(0.2126, 0.7152, 0.0722)) : c.r;
+    float v = is_rgb > 0.5 ? dot(c.rgb, vec3(0.2126, 0.7152, 0.0722)) : c.r;
+    int idx = (tile * ts + g.y) * ts + x;
+#ifdef SR_IMG
+    imageStore(out_img, ivec2(idx % SR_IMG, idx / SR_IMG), vec4(v));
+#else
+    values[idx] = v;
+#endif
 }
 )GLSL";
+
+		LedDrive::NativeTexReadback* Native(const std::shared_ptr<void>& holder)
+		{
+			return static_cast<LedDrive::NativeTexReadback*>(holder.get());
+		}
 
 		// Local wall-clock time for the history rows.
 		std::string Clock()
@@ -392,6 +405,10 @@ if (tile < int(tiles) && g.y < ts) {
 			ring[i] = nullptr;
 			busy[i] = false;
 		}
+		if (LedDrive::NativeTexReadback* native = Native(nativeHolder))
+			native->Release(g);
+		nativeHolder.reset();
+		nativeTried = false;
 		gpu = nullptr;
 	}
 
@@ -424,14 +441,43 @@ if (tile < int(tiles) && g.y < ts) {
 		if (!g || !dispatch) return;
 		if (gpu && gpu != g) Release(gpu);
 		gpu = g;
+		if (!nativeTried)
+		{
+			// D3D11: two native staging slots of the whole tile buffer (once per GPU).
+			nativeTried = true;
+			std::shared_ptr<LedDrive::NativeTexReadback> created = std::make_shared<LedDrive::NativeTexReadback>();
+			const int rows = (kMaxTiles * kPixels + kReadbackWidth - 1) / kReadbackWidth;
+			if (created->Create(gpu, 2, kReadbackWidth, rows, DXGI_FORMAT_R32_FLOAT))
+				nativeHolder = created;
+			else
+				DebugLog::Log("Source resolution: the non-blocking tile readback is unavailable (not D3D11 or no staging); libplacebo's readback");
+		}
+		LedDrive::NativeTexReadback* const native = Native(nativeHolder);
 
-		// Collect finished copies (never waits).
+		// Collect finished copies (never waits: D3D11, the copy's event query and a DO_NOT_WAIT
+		// map; elsewhere libplacebo's poll).
 		for (int i = 0; i < 2; ++i)
 		{
-			if (!busy[i] || pl_buf_poll(gpu, ring[i], 0)) continue;
+			if (!busy[i]) continue;
+			if (native ? !native->Ready(i) : pl_buf_poll(gpu, ring[i], 0)) continue;
 			Job done = pendingMeta[i];
-			done.values.resize(static_cast<size_t>(done.tiles) * done.tileSize * done.tileSize);
-			const bool ok = pl_buf_read(gpu, ring[i], 0, done.values.data(), done.values.size() * sizeof(float));
+			const size_t count = static_cast<size_t>(done.tiles) * done.tileSize * done.tileSize;
+			bool ok = false;
+			if (native)
+			{
+				// Whole rows of the R32F image, then trimmed to the tiles' samples.
+				const int rows = static_cast<int>((count + kReadbackWidth - 1) / kReadbackWidth);
+				done.values.resize(static_cast<size_t>(rows) * kReadbackWidth);
+				if (!native->Read(i, done.values.data(), kReadbackWidth * sizeof(float), rows))
+					continue;   // still drawing after all: the next frame takes it
+				done.values.resize(count);
+				ok = true;
+			}
+			else
+			{
+				done.values.resize(count);
+				ok = pl_buf_read(gpu, ring[i], 0, done.values.data(), done.values.size() * sizeof(float));
+			}
 			busy[i] = false;
 			if (!ok)
 			{
@@ -512,7 +558,7 @@ if (tile < int(tiles) && g.y < ts) {
 		const int slot = nextSlot;
 		if (busy[slot]) return;   // the oldest copy is still on its way: skip, never wait
 		const size_t bytes = static_cast<size_t>(kMaxTiles) * kPixels * sizeof(float);
-		if (!ring[slot])
+		if (!native && !ring[slot])
 		{
 			pl_buf_params params{};
 			params.size = bytes;
@@ -535,13 +581,23 @@ if (tile < int(tiles) && g.y < ts) {
 		descriptors[0].binding.object = luma;
 		descriptors[0].binding.address_mode = PL_TEX_ADDRESS_CLAMP;
 		descriptors[0].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
-		descriptors[1].desc.name = "out_values";
-		descriptors[1].desc.type = PL_DESC_BUF_STORAGE;
-		descriptors[1].desc.access = PL_DESC_ACCESS_WRITEONLY;
-		descriptors[1].binding.object = ring[slot];
-		descriptors[1].buffer_vars = &var;
-		descriptors[1].num_buffer_vars = 1;
-		descriptors[1].memory = PL_MEMORY_COHERENT;
+		if (native)
+		{
+			descriptors[1].desc.name = "out_img";
+			descriptors[1].desc.type = PL_DESC_STORAGE_IMG;
+			descriptors[1].desc.access = PL_DESC_ACCESS_WRITEONLY;
+			descriptors[1].binding.object = native->Target(slot);
+		}
+		else
+		{
+			descriptors[1].desc.name = "out_values";
+			descriptors[1].desc.type = PL_DESC_BUF_STORAGE;
+			descriptors[1].desc.access = PL_DESC_ACCESS_WRITEONLY;
+			descriptors[1].binding.object = ring[slot];
+			descriptors[1].buffer_vars = &var;
+			descriptors[1].num_buffer_vars = 1;
+			descriptors[1].memory = PL_MEMORY_COHERENT;
+		}
 		const float tileCount = static_cast<float>(tiles);
 		const float tileSizeVar = static_cast<float>(tileSize);
 		const float rgb = luma->params.format->num_components >= 3 ? 1.0f : 0.0f;
@@ -558,7 +614,9 @@ if (tile < int(tiles) && g.y < ts) {
 			{ pl_var_vec4("ocd"), &origins[24], true },
 			{ pl_var_vec4("oef"), &origins[28], true } };
 		pl_custom_shader custom{};
+		static const std::string nativeHeader = "#define SR_IMG " + std::to_string(kReadbackWidth) + "\n";
 		custom.description = "VideoProcessor source resolution tiles";
+		custom.header = native ? nativeHeader.c_str() : nullptr;
 		custom.body = BODY;
 		custom.input = PL_SHADER_SIG_NONE;
 		custom.output = PL_SHADER_SIG_NONE;
@@ -586,6 +644,8 @@ if (tile < int(tiles) && g.y < ts) {
 			Fail("the tile copy failed", seconds);
 			return;
 		}
+		if (native)
+			native->Queue(slot);
 		Job& meta = pendingMeta[slot];
 		meta.values.clear();
 		meta.streamKey = streamKey.load(std::memory_order_acquire);   // R3 (0 when not driven)

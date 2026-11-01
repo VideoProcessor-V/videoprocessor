@@ -209,6 +209,10 @@ namespace VideoProcessorTest
 			// 4. Both light domains, the same weight map (edges from the source).
 			render(scene, 256, 160, true, noGrain, false, true);
 			const auto linearStats = grainNow(scene, noGrain);
+			// Bug hunt 34 item 1: on D3D11 the statistics come through the non-blocking staging
+			// ring (libplacebo's buffer readback blocks there), and still arrive one frame later.
+			Assert::IsTrue(module.NativeStatsReadback(), L"D3D11: the statistics must be read back without waiting");
+			Assert::AreEqual<uint64_t>(0, module.StatsDropped(), L"statistics frames dropped by the staging ring");
 			render(scene, 256, 160, true, noGrain, true, true);
 			render(scene, 256, 160, true, noGrain, true, false);
 			render(scene, 256, 160, true, noGrain, true, false);

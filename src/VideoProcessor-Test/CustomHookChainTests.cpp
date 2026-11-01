@@ -2,6 +2,7 @@
 #include "CppUnitTest.h"
 
 #include <cmath>
+#include <cstdio>
 
 #include <VP-V/modules/output/dither/CustomHookChain.h>
 
@@ -359,6 +360,143 @@ namespace VideoProcessorTest
 			Assert::IsFalse(chain.SuppressesDither(false));
 			Assert::AreEqual(size_t{ 0 }, chain.ConfiguredCount());
 			Assert::IsTrue(shaders.parsed.empty());
+		}
+
+		TEST_METHOD(EnsureSettledSkipsRepeatedCallsAndReloadsOnUsedValuesOnly)
+		{
+			FakeShaders shaders;
+			shaders.files["a.glsl"] = "OUTPUT {{output_width}} {{refresh_hz}}";
+			auto loader = shaders.Loader();
+			int reads = 0;
+			const auto read = loader.read;
+			loader.read = [&](const std::string& file, std::string& source, std::string& reason)
+			{
+				++reads;
+				return read(file, source, reason);
+			};
+			CustomHookChain::Chain chain(loader);
+			chain.Configure({ CustomRule("a", "a.glsl", 1) });
+			auto values = Output2560x1600();
+			Assert::IsTrue(chain.Ensure(values));
+			Assert::IsFalse(chain.Ensure(values));
+			Assert::IsFalse(chain.Ensure(values));
+			Assert::AreEqual(1, reads);
+			Assert::AreEqual(size_t{ 1 }, shaders.parsed.size());
+			values.sourceFps = 50.0;   // not used by the source
+			Assert::IsFalse(chain.Ensure(values));
+			Assert::AreEqual(size_t{ 1 }, shaders.parsed.size());
+			values.refreshHz = 50.0;   // used
+			Assert::IsTrue(chain.Ensure(values));
+			Assert::AreEqual(size_t{ 2 }, shaders.parsed.size());
+			Assert::AreEqual(std::string("OUTPUT 2560 50"), shaders.parsed.back());
+			// Configure invalidates the fast exit.
+			chain.Configure({ CustomRule("a", "a.glsl", 1) });
+			Assert::IsTrue(chain.Ensure(values));
+			Assert::AreEqual(size_t{ 3 }, shaders.parsed.size());
+		}
+
+		TEST_METHOD(EnsureRetriesANotKnownYetEntryOnTheNextCall)
+		{
+			FakeShaders shaders;
+			shaders.files["a.glsl"] = "OUTPUT {{output_width}}";
+			shaders.files["b.glsl"] = "CHROMA";
+			CustomHookChain::Chain chain(shaders.Loader());
+			chain.Configure({ CustomRule("a", "a.glsl", 1), CustomRule("b", "b.glsl", 2) });
+			CustomHookChain::TemplateValues values;
+			Assert::IsTrue(chain.Ensure(values));   // b loads, a waits
+			Assert::AreEqual(size_t{ 1 }, shaders.parsed.size());
+			Assert::IsFalse(chain.Ensure(values));
+			Assert::AreEqual(size_t{ 1 }, shaders.parsed.size());
+			values.outputWidth = 1280;
+			Assert::IsTrue(chain.Ensure(values));
+			Assert::AreEqual(std::string("OUTPUT 1280"), shaders.parsed.back());
+			Assert::IsFalse(chain.Ensure(values));
+			Assert::AreEqual(size_t{ 2 }, shaders.parsed.size());
+		}
+
+		TEST_METHOD(TemplateKeyListsUsedBuiltInsInOrder)
+		{
+			auto values = Output2560x1600();
+			values.sigmaDeltaGrids = true;
+			const std::string source = "{{source_fps}} {{output_height_q4}} {{output_width}} {{output_width_b16}}";
+			const std::string key = CustomHookChain::TemplateKey(source, values);
+			Assert::AreEqual(std::string("output_width=2560;output_height_q4=401;output_width_b16=161;source_fps=23.976;"), key);
+			Assert::AreEqual(std::string(), CustomHookChain::TemplateKey("none", values));
+		}
+
+
+		TEST_METHOD(LoadFailuresListsReadAndParseFailuresButNotQuantizers)
+		{
+			FakeShaders shaders;
+			shaders.files["broken.glsl"] = "OUTPUT FAIL";
+			shaders.files["quant.glsl"] = "OUTPUT FAIL VP_OUTPUT_QUANTIZER";
+			shaders.files["good.glsl"] = "CHROMA";
+			CustomHookChain::Chain chain(shaders.Loader());
+			chain.Configure({ CustomRule("missing", "absent.glsl", 1),
+				CustomRule("broken", "broken.glsl", 2),
+				CustomRule("quant", "quant.glsl", 3),
+				CustomRule("", "good.glsl", 4) });
+			Assert::IsTrue(chain.LoadFailures().empty());
+			chain.Ensure(Output2560x1600());
+			const auto failures = chain.LoadFailures();
+			Assert::AreEqual(size_t{ 2 }, failures.size());
+			Assert::AreEqual(std::string("missing"), failures[0]);
+			Assert::AreEqual(std::string("broken"), failures[1]);
+			Assert::AreEqual(std::string("not loaded"), chain.QuantizerProblem());
+		}
+
+		TEST_METHOD(LoadFailuresNamesTheFileWhenTheRuleHasNoName)
+		{
+			FakeShaders shaders;
+			shaders.files["broken.glsl"] = "OUTPUT FAIL";
+			CustomHookChain::Chain chain(shaders.Loader());
+			chain.Configure({ CustomRule("", "broken.glsl", 1) });
+			chain.Ensure(Output2560x1600());
+			const auto failures = chain.LoadFailures();
+			Assert::AreEqual(size_t{ 1 }, failures.size());
+			Assert::AreEqual(std::string("broken.glsl"), failures[0]);
+		}
+
+		TEST_METHOD(SetHookParameterMatchesTheTextRoundTrip)
+		{
+			struct Params
+			{
+				pl_var_data data[3]{};
+				pl_hook_par par[3]{};
+				pl_hook hook{};
+				Params()
+				{
+					par[0].name = "f"; par[0].type = PL_VAR_FLOAT; par[0].data = &data[0];
+					par[0].minimum.f = -2.0f; par[0].maximum.f = 10.0f;
+					par[1].name = "s"; par[1].type = PL_VAR_SINT; par[1].data = &data[1];
+					par[1].minimum.i = -5; par[1].maximum.i = 7;
+					par[2].name = "u"; par[2].type = PL_VAR_UINT; par[2].data = &data[2];
+					par[2].minimum.u = 1; par[2].maximum.u = 9;
+					hook.parameters = par;
+					hook.num_parameters = 3;
+				}
+			};
+			const double nan = std::nan("");
+			const double inputs[] = { 0.0, 3.0, -3.0, 2.5, -2.5, 100.0, -100.0, 1e12, -1e12, 0.3, nan, INFINITY };
+			for (const char* name : { "f", "s", "u", "unknown" })
+			{
+				for (const double value : inputs)
+				{
+					Params direct, reference;
+					char text[64];
+					std::snprintf(text, sizeof(text), "%.9g", value);
+					const bool expected = !CustomHookChain::ApplyHookParameters(&reference.hook, { { name, text } }).empty();
+					const bool actual = CustomHookChain::SetHookParameter(&direct.hook, name, value);
+					Assert::AreEqual(expected, actual);
+					Assert::AreEqual(reference.data[0].f, direct.data[0].f);
+					Assert::AreEqual(reference.data[1].i, direct.data[1].i);
+					Assert::AreEqual(reference.data[2].u, direct.data[2].u);
+				}
+			}
+			Params unnamed;
+			unnamed.par[0].name = nullptr;
+			Assert::IsFalse(CustomHookChain::SetHookParameter(&unnamed.hook, "f", 1.0));
+			Assert::IsFalse(CustomHookChain::SetHookParameter(nullptr, "f", 1.0));
 		}
 	};
 }

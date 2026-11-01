@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <regex>
 #include <sstream>
 
@@ -55,6 +56,25 @@ namespace CustomHookChain
         std::string Token(const std::string& name)
         {
             return "{{" + name + "}}";
+        }
+
+        // Bit i of the mask is BuiltIns()[i].
+        unsigned UsedBuiltInMask(const std::string& source, const std::vector<BuiltIn>& builtIns)
+        {
+            unsigned mask = 0;
+            for (size_t i = 0; i < builtIns.size(); ++i)
+                if (source.find(Token(builtIns[i].name)) != std::string::npos)
+                    mask |= 1u << i;
+            return mask;
+        }
+
+        std::string KeyFromMask(unsigned mask, const std::vector<BuiltIn>& builtIns)
+        {
+            std::string key;
+            for (size_t i = 0; i < builtIns.size(); ++i)
+                if (mask & (1u << i))
+                    key += std::string(builtIns[i].name) + "=" + builtIns[i].value + ";";
+            return key;
         }
 
         bool ReplaceAll(std::string& source, const std::string& token,
@@ -184,10 +204,55 @@ namespace CustomHookChain
 
     bool SetHookParameter(const pl_hook* hook, const char* name, double value)
     {
-        char text[64];
-        std::snprintf(text, sizeof(text), "%.9g", value);
-        const auto applied = ApplyHookParameters(hook, { { name, text } });
-        return !applied.empty();
+        if (!std::isfinite(value) || value != std::floor(value) || std::fabs(value) >= 1e9)
+        {
+            // Non-integral or large values keep the "%.9g" text round trip.
+            char text[64];
+            std::snprintf(text, sizeof(text), "%.9g", value);
+            const auto applied = ApplyHookParameters(hook, { { name, text } });
+            return !applied.empty();
+        }
+        if (!hook || !name) return false;
+        // Integral and below 1e9: the "%.9g" text parses back to exactly this value.
+        bool applied = false;
+        for (int i = 0; i < hook->num_parameters; ++i)
+        {
+            const pl_hook_par& parameter = hook->parameters[i];
+            if (!parameter.name || !parameter.data || std::strcmp(parameter.name, name) != 0)
+                continue;
+            switch (parameter.type)
+            {
+            case PL_VAR_FLOAT:
+            {
+                const float next = static_cast<float>(Bounded(value,
+                    static_cast<double>(parameter.minimum.f),
+                    static_cast<double>(parameter.maximum.f)));
+                if (parameter.data->f != next) parameter.data->f = next;
+                break;
+            }
+            case PL_VAR_SINT:
+            {
+                const int next = static_cast<int>(Bounded(std::llround(value),
+                    static_cast<long long>(parameter.minimum.i),
+                    static_cast<long long>(parameter.maximum.i)));
+                if (parameter.data->i != next) parameter.data->i = next;
+                break;
+            }
+            case PL_VAR_UINT:
+            {
+                const unsigned next = static_cast<unsigned>(Bounded(
+                    std::llround(std::max(value, 0.0)),
+                    static_cast<long long>(parameter.minimum.u),
+                    static_cast<long long>(parameter.maximum.u)));
+                if (parameter.data->u != next) parameter.data->u = next;
+                break;
+            }
+            default:
+                continue;
+            }
+            applied = true;
+        }
+        return applied;
     }
 
     Chain::Chain(Loader loaderIn) : loader(std::move(loaderIn))
@@ -227,11 +292,14 @@ namespace CustomHookChain
         for (Entry& entry : entries)
             DestroyHook(entry);
         entries.clear();
+        settled = false;
     }
 
     bool Chain::Ensure(const TemplateValues& values)
     {
+        if (settled && values == lastValues) return false;
         bool changed = false;
+        std::vector<BuiltIn> builtIns;   // built at most once per call
         for (Entry& entry : entries)
         {
             if (entry.runtimeFailed) continue;
@@ -248,9 +316,14 @@ namespace CustomHookChain
                 }
                 entry.quantizer = IsOutputQuantizer(entry.rule.filename, entry.source);
                 entry.prescaler = IsLumaPrescaler(entry.source);
+                if (builtIns.empty()) builtIns = BuiltIns(values);
+                entry.usedBuiltIns = UsedBuiltInMask(entry.source, builtIns);
             }
             if (entry.source.empty()) continue;
-            const std::string key = TemplateKey(entry.source, values);
+            if (builtIns.empty()) builtIns = BuiltIns(values);
+            entry.evaluated = true;
+            entry.pending = false;
+            const std::string key = KeyFromMask(entry.usedBuiltIns, builtIns);
             if (key == entry.key && (entry.hook || entry.loadFailed)) continue;
             if (entry.hook) changed = true;
             DestroyHook(entry);
@@ -265,6 +338,7 @@ namespace CustomHookChain
                 if (reason.find("not known yet") != std::string::npos)
                 {
                     entry.key.clear();
+                    entry.pending = true;
                     continue;
                 }
                 entry.loadFailed = true;
@@ -308,6 +382,12 @@ namespace CustomHookChain
                 applied.size(), key.c_str(), entry.rule.cinemaOnly ? " cinema_only=1" : "",
                 unused.empty() ? "" : " unused_params=", unused.c_str());
         }
+        settled = std::all_of(entries.begin(), entries.end(), [](const Entry& entry)
+            {
+                return entry.runtimeFailed || (entry.sourceRead && entry.source.empty()) ||
+                    (entry.evaluated && !entry.pending);
+            });
+        lastValues = values;
         return changed;
     }
 
@@ -406,9 +486,22 @@ namespace CustomHookChain
         return std::string();
     }
 
+    std::vector<std::string> Chain::LoadFailures() const
+    {
+        std::vector<std::string> names;
+        for (const Entry& entry : entries)
+        {
+            if (!entry.loadFailed && !entry.runtimeFailed) continue;
+            if (entry.quantizer || IsOutputQuantizer(entry.rule.filename, entry.source)) continue;
+            names.push_back(entry.rule.name.empty() ? entry.rule.filename : entry.rule.name);
+        }
+        return names;
+    }
+
     bool Chain::MarkRuntimeFailures(const uint64_t* signatures, int count)
     {
         bool changed = false;
+        settled = false;
         for (Entry& entry : entries)
         {
             if (!entry.hook || entry.runtimeFailed) continue;

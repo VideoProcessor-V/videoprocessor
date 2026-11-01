@@ -8,6 +8,8 @@
 #include <libplacebo/shaders/sampling.h>
 
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
+#include <VP-V/modules/repair/texture_restore/DetailPulse.h>
+#include <VP-V/modules/drive/led_measure/NativeReadback.h>
 
 #include <algorithm>
 #include <vector>
@@ -24,13 +26,32 @@ namespace AdaptiveDownscale
 		// is a fixed reference domain for the edge / grain thresholds (they were tuned in
 		// it), not a claim about the source; the residual guard's noise limit, which is in
 		// the source's own codes, uses the source transfer (GuardTransfer).
+		// Bug hunt 33 F3 / F4: AD_KW = the source's luma weights; AD_HDR = a PQ / HLG picture
+		// decoded to relative linear first (MeasureDomain; CPU mirror MeasureLumaCode).
 		const char* const MEASURE_HEADER = R"GLSL(
 shared vec4 ad_sum[256];
+#ifdef AD_HDR
+float ad_lin(float c)
+{
+    c = max(c, 0.0);
+    if (ad_trc < 1.5) {
+        float e = pow(c, 1.0 / 78.84375);
+        float n = max(e - 0.8359375, 0.0) / (18.8515625 - 18.6875 * e);
+        return pow(n, 1.0 / 0.1593017578125) * (10000.0 / 203.0);
+    }
+    float x = (1.0 - ad_b) * c + ad_b;
+    float s = (x <= 0.5 ? 4.0 * x * x : exp((x - 0.55991073) / 0.17883277) + 0.28466892) / 12.0;
+    return ad_a * pow(max(s, 0.0), ad_g);
+}
+#endif
 float ad_luma(ivec2 p)
 {
     ivec2 sz = textureSize(src, 0);
     vec3 c = texelFetch(src, clamp(p, ivec2(0), sz - ivec2(1)), 0).rgb;
-    float y = dot(c, vec3(0.2126, 0.7152, 0.0722));
+#ifdef AD_HDR
+    c = vec3(ad_lin(c.r), ad_lin(c.g), ad_lin(c.b));
+#endif
+    float y = dot(c, AD_KW);
     if (linear_in > 0.5)
         y = sign(y) * pow(abs(y), 1.0 / 2.2);
     return y * 255.0;
@@ -114,8 +135,13 @@ if (li == 0u && advance > 0.5) {
     float scale = cut ? target : mix(prev.r, target, smooth_alpha);
     // a: 1 initialised, 2 = a cut on this frame (the grain map resets too).
     imageStore(state_io, ivec2(0), vec4(scale, free_mean, luma_mean, cut ? 2.0 : 1.0));
-    if (write_stats > 0.5)
+    if (write_stats > 0.5) {
+#ifdef AD_STATS_IMG
+        imageStore(ad_stats_img, ivec2(0), vec4(scale, free_mean, luma_mean, 1.0));
+#else
         ad_out = vec4(scale, free_mean, luma_mean, 1.0);
+#endif
+    }
 }
 )GLSL";
 
@@ -245,7 +271,7 @@ if (q.x < size.x && q.y < size.y) {
     w = 0.0;
     ga = 0.0;
 #endif
-    const vec3 ku = vec3(0.2126, 0.7152, 0.0722);
+    const vec3 ku = AD_KW;
     vec4 o = ss;
     o.rgb = ss.rgb + vec3((1.0 - w) * (dot(fa.rgb, ku) - dot(ss.rgb, ku)));
 #ifdef AD_SUPERRES_ALPHA
@@ -261,7 +287,7 @@ if (q.x < size.x && q.y < size.y) {
     if (chroma_ssim > 0.5) {
         o = mix(fa, ss, w);
     } else {
-        const vec3 k = vec3(0.2126, 0.7152, 0.0722);
+        const vec3 k = AD_KW;
         o.rgb = fa.rgb + vec3(w * (dot(ss.rgb, k) - dot(fa.rgb, k)));
         o.a = fa.a;   // passed through (Stage 10b does not use alpha)
     }
@@ -278,7 +304,7 @@ if (q.x < size.x && q.y < size.y) {
 		// residual: this frame's own.
 		const char* const STABILISE_DEFINE = R"GLSL(
 #define STABILISE_AND_STORE { \
-    const vec3 kr = vec3(0.2126, 0.7152, 0.0722); \
+    const vec3 kr = AD_KW; \
     float r = dot(o.rgb, kr) - dot(fa.rgb, kr); \
     float rs = r; \
     vec2 sps = rs_crop.xy + (s - src_origin) / src_size * rs_crop.zw; \
@@ -345,7 +371,7 @@ float rs_slope(float y)
     return (rs_lin(hi) - rs_lin(lo)) / (hi - lo);
 }
 #define STABILISE_AND_STORE { \
-    const vec3 kr = vec3(0.2126, 0.7152, 0.0722); \
+    const vec3 kr = AD_KW; \
     float r = dot(o.rgb, kr) - dot(fa.rgb, kr); \
     float rs = r; \
     vec2 sps = rs_crop.xy + (s - src_origin) / src_size * rs_crop.zw; \
@@ -497,18 +523,31 @@ float rs_slope(float y)
 	{
 		if (gpu)
 		{
-			for (pl_tex* tex : { &faithful, &faithfulMid, &lowres, &edge, &partial, &state, &map[0], &map[1], &motionMap[0], &motionMap[1] })
+			// The residual pair too (found 2026-10-31: it outlived Release and a new GPU recreated
+			// it through the old one's texture).
+			for (pl_tex* tex : { &faithful, &faithfulMid, &lowres, &edge, &partial, &state, &map[0], &map[1], &motionMap[0], &motionMap[1],
+				&residual[0], &residual[1] })
 				if (*tex)
 					pl_tex_destroy(gpu, tex);
 			if (readback)
 				pl_buf_destroy(gpu, &readback);
+			if (statsNative)
+				statsNative->Release(gpu);
 		}
+		statsNative.reset();
+		statsNativeTried = false;
+		statsSchedule.Reset();
 		if (polarLut)
 			pl_shader_obj_destroy(&polarLut);
 		for (pl_shader_obj& lut : orthoLut)
 			if (lut)
 				pl_shader_obj_destroy(&lut);
 		faithful = faithfulMid = lowres = edge = partial = state = map[0] = map[1] = motionMap[0] = motionMap[1] = nullptr;
+		residual[0] = residual[1] = nullptr;
+		residualIndex = 0;
+		residualPrevValid = false;
+		residualSequence = 0;
+		residualW = residualH = 0;
 		motionIndex = 0;
 		motionReady = false;
 		motionSequence = 0;
@@ -588,6 +627,33 @@ float rs_slope(float y)
 		return t;
 	}
 
+	MeasureDomain MeasureDomainFor(const pl_color_space& hooked, enum pl_color_system system,
+		enum pl_color_primaries primaries)
+	{
+		MeasureDomain d;
+		double k[3];
+		DetailPulse::LumaWeights(system, primaries, k);
+		for (int i = 0; i < 3; ++i) d.w[i] = static_cast<float>(k[i]);
+		d.bt709 = k[0] == 0.2126 && k[2] == 0.0722;
+		if (hooked.transfer == PL_COLOR_TRC_LINEAR)
+			d.mode = 1.0f;
+		else if (hooked.transfer == PL_COLOR_TRC_PQ || hooked.transfer == PL_COLOR_TRC_HLG)
+		{
+			d.mode = 2.0f;
+			d.transfer = GuardTransfer(hooked);
+		}
+		return d;
+	}
+
+	std::string LumaWeightsGlsl(const MeasureDomain& d)
+	{
+		if (d.bt709)
+			return "vec3(0.2126, 0.7152, 0.0722)";
+		char text[96];
+		snprintf(text, sizeof(text), "vec3(%.9g, %.9g, %.9g)", d.w[0], d.w[1], d.w[2]);
+		return text;
+	}
+
 	pl_hook_res Module::RunMeasure(void* priv, const pl_hook_params* params)
 	{
 		return static_cast<Module*>(priv)->Measuring(params);
@@ -598,18 +664,39 @@ float rs_slope(float y)
 		return static_cast<Module*>(priv)->Blending(params);
 	}
 
+	bool Module::NativeStatsReadback() const
+	{
+		return statsNative && statsNative->Active();
+	}
+
 	void Module::PollStats()
 	{
-		if (!readbackPending || !gpu || !readback || pl_buf_poll(gpu, readback, 0))
-			return;
-		float values[4] = {};
-		if (pl_buf_read(gpu, readback, 0, values, sizeof(values)))
+		auto take = [this](const float values[4])
 		{
 			stats.valid = true;
 			stats.grainScale = values[0];
 			stats.meanW = upscale.on ? upscale.wBase * values[0] : settings.wBase * values[1] * values[0];
 			stats.meanLuma = values[2];
+		};
+		if (NativeStatsReadback())
+		{
+			// Never waits: a slot is read only once its copy's query reports done, oldest first.
+			const std::vector<int> slots = statsSchedule.Collect(statsFrames, [this](int slot) { return statsNative->Ready(slot); });
+			for (int slot : slots)
+			{
+				float values[4] = {};
+				if (!statsNative->Read(slot, values, sizeof(values), 1))
+					break;   // still drawing after all: the next frame takes it
+				take(values);
+				statsSchedule.Release(slot);
+			}
+			return;
 		}
+		if (!readbackPending || !gpu || !readback || pl_buf_poll(gpu, readback, 0))
+			return;
+		float values[4] = {};
+		if (pl_buf_read(gpu, readback, 0, values, sizeof(values)))
+			take(values);
 		readbackPending = false;
 	}
 
@@ -651,6 +738,15 @@ float rs_slope(float y)
 		if (gpu && gpu != p->gpu)
 			Release();
 		gpu = p->gpu;
+		if (!statsNativeTried)
+		{
+			// D3D11: the non-blocking statistics ring (once per GPU); elsewhere libplacebo's
+			// buffer readback, whose poll reports "busy" there.
+			statsNativeTried = true;
+			statsNative.reset(new LedDrive::NativeTexReadback());
+			if (!statsNative->Create(gpu, kStatsSlots, 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT))
+				statsNative.reset();
+		}
 		PollStats();
 		pl_tex base = p->tex;
 		if (ratio == 2)
@@ -688,7 +784,7 @@ float rs_slope(float y)
 			++failures;
 			return unchanged;
 		}
-		if (!readback)
+		if (!readback && !NativeStatsReadback())
 		{
 			// The final pass writes the statistics straight into this storage
 			// buffer (the LED measurement's pattern); polled frames later.
@@ -772,22 +868,33 @@ float rs_slope(float y)
 			}
 		}
 
-		// 2. Edges and the per-workgroup grain sums.
-		const float linearIn = p->color.transfer == PL_COLOR_TRC_LINEAR ? 1.0f : 0.0f;
+		// 2. Edges and the per-workgroup grain sums (bug hunt 33 F3 / F4: the source's luma
+		// weights; HDR decoded to relative linear, then the 2.2 reference as a linear picture).
+		const pl_color_system lumaSystem = p->orig_repr ? p->orig_repr->sys : p->repr.sys;
+		const pl_color_primaries lumaPrimaries = p->orig_color ? p->orig_color->primaries : p->color.primaries;
+		domain = MeasureDomainFor(p->color, lumaSystem, lumaPrimaries);
+		const float linearIn = domain.mode > 0.5f ? 1.0f : 0.0f;
+		const bool hdrDecode = domain.mode > 1.5f;
+		const std::string measureHeader = "#define AD_KW " + LumaWeightsGlsl(domain) + "\n" +
+			(hdrDecode ? "#define AD_HDR 1\n" : "") + MEASURE_HEADER;
 		const float origin[2] = { static_cast<float>(ox), static_cast<float>(oy) };
 		const float region[2] = { static_cast<float>(w), static_cast<float>(h) };
 		{
 			const pl_shader_desc d[3] = { Sampled("src", base, false), Storage("edge_out", edge),
 				Storage("partial_out", partial) };
-			const pl_shader_var v[6] = {
+			const pl_shader_var v[10] = {
 				{ pl_var_float("linear_in"), &linearIn, true },
 				{ pl_var_vec2("origin"), origin, true },
 				{ pl_var_vec2("region"), region, true },
 				{ pl_var_float("edge_lo"), &settings.edgeLo, true },
 				{ pl_var_float("edge_hi"), &settings.edgeHi, true },
-				{ pl_var_float("shadow_bias"), &settings.shadowBias, true } };
-			if (!Compute(p->dispatch, "VideoProcessor adaptive downscale: measure", MEASURE_HEADER, MEASURE_BODY,
-				d, 3, v, 6, gx, gy))
+				{ pl_var_float("shadow_bias"), &settings.shadowBias, true },
+				{ pl_var_float("ad_trc"), &domain.transfer.mode, true },
+				{ pl_var_float("ad_a"), &domain.transfer.a, true },
+				{ pl_var_float("ad_b"), &domain.transfer.b, true },
+				{ pl_var_float("ad_g"), &domain.transfer.g, true } };
+			if (!Compute(p->dispatch, "VideoProcessor adaptive downscale: measure", measureHeader.c_str(), MEASURE_BODY,
+				d, 3, v, hdrDecode ? 10 : 6, gx, gy))
 			{
 				++failures;
 				return unchanged;
@@ -797,7 +904,11 @@ float rs_slope(float y)
 		// 3. The frame's grain term into the state (once per source frame).
 		{
 			const float advance = sequence != advancedSequence ? 1.0f : 0.0f;
-			const bool writeStats = advance > 0.5f && readback && !readbackPending;
+			const bool native = NativeStatsReadback();
+			// Native: a ring slot for this source frame's statistics (none free: skipped, never
+			// waited for); otherwise the one libplacebo buffer when it is free.
+			const int statsSlot = native && advance > 0.5f ? statsSchedule.Claim(++statsFrames) : -1;
+			const bool writeStats = native ? statsSlot >= 0 : advance > 0.5f && readback && !readbackPending;
 			const float writeStatsF = writeStats ? 1.0f : 0.0f;
 			const float total = static_cast<float>(w) * static_cast<float>(h);
 			const float alpha = settings.grainSmoothMs > 0.0f ?
@@ -808,7 +919,14 @@ float rs_slope(float y)
 			pl_shader_desc d[3] = { Sampled("partial_in", partial, false),
 				Storage("state_io", state, PL_DESC_ACCESS_READWRITE), pl_shader_desc{} };
 			int numDescriptors = 2;
-			if (readback)
+			if (native)
+			{
+				// The image is always bound (the shader text stays one); written only when a slot
+				// was claimed (write_stats).
+				d[2] = Storage("ad_stats_img", statsNative->Target(statsSlot >= 0 ? statsSlot : 0));
+				numDescriptors = 3;
+			}
+			else if (readback)
 			{
 				d[2].desc.name = "ad_stats";
 				d[2].desc.type = PL_DESC_BUF_STORAGE;
@@ -827,16 +945,21 @@ float rs_slope(float y)
 				{ pl_var_float("grain_hi"), &settings.grainHi, true },
 				{ pl_var_float("grain_floor"), &settings.grainFloor, true },
 				{ pl_var_float("smooth_alpha"), &alpha, true } };
+			static const std::string finalImgHeader = std::string("#define AD_STATS_IMG 1\n") + FINAL_HEADER;
 			if (numDescriptors != 3 || !Compute(p->dispatch, "VideoProcessor adaptive downscale: grain",
-				FINAL_HEADER, FINAL_BODY, d, numDescriptors, v, 7, 1, 1))
+				native ? finalImgHeader.c_str() : FINAL_HEADER, FINAL_BODY, d, numDescriptors, v, 7, 1, 1))
 			{
+				if (statsSlot >= 0)
+					statsSchedule.Release(statsSlot);
 				++failures;
 				return unchanged;
 			}
+			if (statsSlot >= 0)
+				statsNative->Queue(statsSlot);
 			if (advance > 0.5f)
 			{
 				advancedSequence = sequence;
-				if (writeStats)
+				if (writeStats && !native)
 					readbackPending = true;
 			}
 			// 4. 8-3: the map, after the scalar (it reads the cut flag).
@@ -1078,7 +1201,8 @@ float rs_slope(float y)
 			(upscale.superresAlpha ? "#define AD_SUPERRES_ALPHA 1\n" : "") +
 			(upscale.oneAxis ? "#define AD_FAITHFUL_ONLY 1\n" : "") : std::string();
 		const bool guard = stabilise && settings.residualGrainGuard;
-		const std::string header = upHeader + (useMotion ? std::string("#define AD_MOTION 1\n") : std::string()) +
+		const std::string header = "#define AD_KW " + LumaWeightsGlsl(domain) + "\n" + upHeader +
+			(useMotion ? std::string("#define AD_MOTION 1\n") : std::string()) +
 			(useMap ? mapHeader : std::string()) +
 			(stabilise ? (guard ? STABILISE_GUARD_DEFINE : STABILISE_DEFINE) : PLAIN_DEFINE);
 		const float wBase = upscale.on ? upscale.wBase : settings.wBase;

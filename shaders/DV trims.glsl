@@ -292,63 +292,63 @@
 //!TYPE float
 //!MINIMUM -8.0
 //!MAXIMUM 8.0
-3.0
+3.437555
 
 //!PARAM dv_ilms01
 //!DESC LMS -> output RGB row 0 col 1 (the inverse of dv_lms)
 //!TYPE float
 //!MINIMUM -8.0
 //!MAXIMUM 8.0
--2.2
+-2.50722
 
 //!PARAM dv_ilms02
 //!DESC LMS -> output RGB row 0 col 2 (the inverse of dv_lms)
 //!TYPE float
 //!MINIMUM -8.0
 //!MAXIMUM 8.0
-0.07
+0.06975897
 
 //!PARAM dv_ilms10
 //!DESC LMS -> output RGB row 1 col 0 (the inverse of dv_lms)
 //!TYPE float
 //!MINIMUM -8.0
 //!MAXIMUM 8.0
--0.69
+-0.7914317
 
 //!PARAM dv_ilms11
 //!DESC LMS -> output RGB row 1 col 1 (the inverse of dv_lms)
 //!TYPE float
 //!MINIMUM -8.0
 //!MAXIMUM 8.0
-1.72
+1.983825
 
 //!PARAM dv_ilms12
 //!DESC LMS -> output RGB row 1 col 2 (the inverse of dv_lms)
 //!TYPE float
 //!MINIMUM -8.0
 //!MAXIMUM 8.0
--0.03
+-0.1922744
 
 //!PARAM dv_ilms20
 //!DESC LMS -> output RGB row 2 col 0 (the inverse of dv_lms)
 //!TYPE float
 //!MINIMUM -8.0
 //!MAXIMUM 8.0
--0.02
+-0.02564634
 
 //!PARAM dv_ilms21
 //!DESC LMS -> output RGB row 2 col 1 (the inverse of dv_lms)
 //!TYPE float
 //!MINIMUM -8.0
 //!MAXIMUM 8.0
--0.08
+-0.09923901
 
 //!PARAM dv_ilms22
 //!DESC LMS -> output RGB row 2 col 2 (the inverse of dv_lms)
 //!TYPE float
 //!MINIMUM -8.0
 //!MAXIMUM 8.0
-1.12
+1.124873
 
 //!HOOK PREOUTPUT
 //!BIND HOOKED

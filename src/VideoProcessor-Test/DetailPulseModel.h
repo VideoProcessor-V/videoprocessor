@@ -34,7 +34,36 @@ namespace DetailPulseModel
 		double bitrateQuality = 1.0;
 		double fieldScale = 1.0;      // field (native) px per plane px down
 		double fieldScaleX = 0.0;     // across (0 = fieldScale)
+		pl_rect2df picture{};         // bug hunt 33 F1: the active picture (DetailPulse::Params::picture)
 	};
+
+	// Bug hunt 33 F1: the active picture's bounds (inclusive px), when it is not the whole plane.
+	struct Picture
+	{
+		bool on = false;
+		int b[4] = { 0, 0, 0, 0 };
+		bool In(int x, int y) const { return !on || (x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]); }
+		bool HalfIn(int qx, int qy) const { return !on || (2 * qx >= b[0] && 2 * qx + 1 <= b[2] && 2 * qy >= b[1] && 2 * qy + 1 <= b[3]); }
+	};
+
+	inline Picture PictureOf(const pl_rect2df& r, int w, int h)
+	{
+		Picture p;
+		p.on = DetailPulse::PictureBounds(r, w, h, p.b);
+		return p;
+	}
+
+	// The shader's reads with a picture: every code clamped to it (its edge acts as the plane's
+	// border), i.e. the plane with the picture's edge rows and columns repeated over the bars.
+	inline Image Extended(const Image& y, const Picture& p)
+	{
+		if (!p.on) return y;
+		Image e(y.w, y.h);
+		for (int yy = 0; yy < y.h; ++yy)
+			for (int x = 0; x < y.w; ++x)
+				e.at(x, yy) = y.at((std::max)(p.b[0], (std::min)(p.b[2], x)), (std::max)(p.b[1], (std::min)(p.b[3], yy)));
+		return e;
+	}
 
 	// The de-judder's block field: one trust value per 16 x 16 native block (.z in the shader).
 	struct Field
@@ -107,7 +136,7 @@ namespace DetailPulseModel
 		Image e1, e2, meanL, spread, untrusted, change, weight, measurable;
 	};
 
-	inline Tiles Measure(const Bands& b, const Settings& s, const Field* field, const Tiles* prev)
+	inline Tiles Measure(const Bands& b, const Settings& s, const Field* field, const Tiles* prev, const Picture& pic = Picture())
 	{
 		const int T = DetailPulse::kTilePx, HT = T / 2;
 		const int w = b.d1.w, h = b.d1.h;
@@ -130,7 +159,7 @@ namespace DetailPulseModel
 						for (int q = 0; q < 4; ++q)
 						{
 							const int x = bx * T + 2 * cx + (q & 1), y = by * T + 2 * cy + (q >> 1);
-							if (x < w && y < h)
+							if (x < w && y < h && pic.In(x, y))
 							{
 								s1 += b.d1.at(x, y) * b.d1.at(x, y);
 								s2 += b.d2.at(x, y) * b.d2.at(x, y);
@@ -150,13 +179,16 @@ namespace DetailPulseModel
 				for (int qy = by * HT; qy < (std::min)(hh, (by + 1) * HT); ++qy)
 					for (int qx = bx * HT; qx < (std::min)(hw, (bx + 1) * HT); ++qx)
 					{
+						if (!pic.HalfIn(qx, qy)) continue;
 						const double l = b.lowHalf.at(qx, qy);
 						ls += l;
 						ls2 += l * l;
 						ln += 1.0;
 					}
 				const double nn = (std::max)(n, 1.0), lnn = (std::max)(ln, 1.0);
-				const double mean = ls / lnn;
+				// No half texel inside (a tile the picture barely enters): the shader's mean is its
+				// shift texel (the half block's centre, clamped).
+				const double mean = ln > 0.0 ? ls / lnn : b.lowHalf.get(bx * HT + 8, by * HT + 8);
 				t.e1.at(bx, by) = s1 / nn;
 				t.e2.at(bx, by) = s2 / nn;
 				t.meanL.at(bx, by) = mean;
@@ -172,6 +204,14 @@ namespace DetailPulseModel
 				t.measurable.at(bx, by) = measurable;
 				if (field) wt = DetailPulse::TrustWeight(un / nn);
 				else if (prev) wt = DetailPulse::VetoWeight(change, veto);
+				if (pic.on && n == 0.0)
+				{
+					// Wholly in the bars: out of the frame's statistics, weight 1 (no veto).
+					wt = 1.0;
+					change = 0.0;
+					t.untrusted.at(bx, by) = 0.0;
+					t.measurable.at(bx, by) = -1.0;
+				}
 				t.change.at(bx, by) = change;
 				t.weight.at(bx, by) = wt;
 			}
@@ -193,6 +233,7 @@ namespace DetailPulseModel
 		for (size_t i = 0; i < t.e1.v.size(); ++i)
 		{
 			if (t.e1.v[i] + t.e2.v[i] >= floorEnergy && t.weight.v[i] >= 0.5 && t.measurable.v[i] > 0.5) { a1x += t.e1.v[i]; a1y += t.e2.v[i]; a1n += 1.0; }
+			if (t.measurable.v[i] < -0.5) continue;   // a tile wholly in the bars
 			my += t.meanL.v[i];
 			cuts += t.change.v[i] > cut ? 1.0 : 0.0;
 			unt += t.untrusted.v[i] > 0.5 ? 1.0 : 0.0;
@@ -217,13 +258,14 @@ namespace DetailPulseModel
 	}
 
 	// The apply pass: Y + w ((g1 - 1) D1 + (g2 - 1) D2), w bilinear between tile centres.
-	inline Image ApplyGains(const Image& y, const Bands& b, const Image& tileWeight, double g1, double g2)
+	inline Image ApplyGains(const Image& y, const Bands& b, const Image& tileWeight, double g1, double g2, const Picture& pic = Picture())
 	{
 		const double T = DetailPulse::kTilePx;
 		Image out(y.w, y.h);
 		for (int yy = 0; yy < y.h; ++yy)
 			for (int x = 0; x < y.w; ++x)
 			{
+				if (!pic.In(x, yy)) { out.at(x, yy) = y.at(x, yy); continue; }   // the bars: the source
 				const double w = GrainModel::Bilinear(tileWeight, (x + 0.5) / T, (yy + 0.5) / T);
 				const double delta = w * ((g1 - 1.0) * b.d1.at(x, yy) + (g2 - 1.0) * b.d2.at(x, yy));
 				out.at(x, yy) = y.at(x, yy) + delta;
@@ -240,16 +282,17 @@ namespace DetailPulseModel
 			const bool sameGeometry = decided && luma.w == geoW && luma.h == geoH && scale == geoScale;
 			const bool repeat = sameGeometry && sequence != 0 && sequence == lastSequence;
 			const bool consecutive = sameGeometry && lastSequence != 0 && sequence == lastSequence + 1;
-			const Bands b = MakeBands(luma, scale);
+			const Picture pic = PictureOf(s.picture, luma.w, luma.h);
+			const Bands b = MakeBands(Extended(luma, pic), scale);
 			Frame f;
 			if (repeat)
 			{
 				f = last;
 				f.repeat = true;
-				f.out = ApplyGains(luma, b, last.tileWeight, last.g1, last.g2);
+				f.out = ApplyGains(luma, b, last.tileWeight, last.g1, last.g2, pic);
 				return f;
 			}
-			const Tiles t = Measure(b, s, field, consecutive ? &prevTiles : nullptr);
+			const Tiles t = Measure(b, s, field, consecutive ? &prevTiles : nullptr, pic);
 			const FrameStats fs = Reduce(t, s);
 			const int slot = decided ? (cur + 1) % DetailPulse::kRingSlots : 0;
 			const int nValid = consecutive ? (std::min)(behind + 1, DetailPulse::kRingSlots - 2) : 0;
@@ -307,7 +350,7 @@ namespace DetailPulseModel
 			f.meanLuma = fs.meanLuma;
 			f.cutShare = fs.cutShare;
 			f.tileWeight = t.weight;
-			f.out = ApplyGains(luma, b, t.weight, f.g1, f.g2);
+			f.out = ApplyGains(luma, b, t.weight, f.g1, f.g2, pic);
 			prevTiles = t;
 			cur = slot;
 			behind = nValid;
@@ -329,13 +372,15 @@ namespace DetailPulseModel
 			Frame f = last;
 			f.repeat = true;
 			const double scale = DetailPulse::Scale(s.planeLines > 0.0 ? s.planeLines : luma.h);
-			const Bands b = MakeBands(luma, scale);
+			const Picture pic = PictureOf(s.picture, luma.w, luma.h);
+			const Bands b = MakeBands(Extended(luma, pic), scale);
 			const double T = DetailPulse::kTilePx;
 			const double rx = static_cast<double>(geoW) / luma.w, ry = static_cast<double>(geoH) / luma.h;
 			f.out = Image(luma.w, luma.h);
 			for (int yy = 0; yy < luma.h; ++yy)
 				for (int x = 0; x < luma.w; ++x)
 				{
+					if (!pic.In(x, yy)) { f.out.at(x, yy) = luma.at(x, yy); continue; }
 					const double w = GrainModel::Bilinear(last.tileWeight, (x + 0.5) * rx / T, (yy + 0.5) * ry / T);
 					f.out.at(x, yy) = luma.at(x, yy) + w * ((last.g1 - 1.0) * b.d1.at(x, yy) + (last.g2 - 1.0) * b.d2.at(x, yy));
 				}
@@ -346,8 +391,9 @@ namespace DetailPulseModel
 		void MeasureAhead(const Image& luma, uint64_t sequence, const Settings& s)
 		{
 			const double scale = DetailPulse::Scale(s.planeLines > 0.0 ? s.planeLines : luma.h);
-			const Bands b = MakeBands(luma, scale);
-			const FrameStats fs = Reduce(Measure(b, s, nullptr, nullptr), s);
+			const Picture pic = PictureOf(s.picture, luma.w, luma.h);
+			const Bands b = MakeBands(Extended(luma, pic), scale);
+			const FrameStats fs = Reduce(Measure(b, s, nullptr, nullptr, pic), s);
 			ring[kRing + 1] = { fs.e1, fs.e2, fs.meanLuma, 1.0 };
 			aheadSequence = sequence;
 			aheadW = luma.w;

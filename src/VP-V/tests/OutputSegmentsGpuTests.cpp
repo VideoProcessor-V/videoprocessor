@@ -11,6 +11,8 @@
 
 #include <libplacebo/d3d11.h>
 
+#include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -191,6 +193,60 @@ namespace OutputSegmentsGpuTestsNs
 				// Still missing (documented): a merged S3 case with the real sigma-delta, the mask and the
 				// repair, checking the sigma-delta statistics and "dither last".
 				runner.Release();
+				lut.Release();
+			}
+			pl_renderer_destroy(&renderer);
+			pl_d3d11_destroy(&d3d);
+			pl_log_destroy(&log);
+		}
+
+		// Bug hunt 2026-10-31 F2 (WRITTEN, NOT RUN: for the coordinator): the VP-stage calibration
+		// LUT carries BTB/WTW through the LUT's edge slope, as the libplacebo stage does. With the
+		// affine LUT 0.02 + 0.95 x every column, in range or not, must follow 0.02 + 0.95 x of the
+		// render without the LUT (within 1 code). The old slope-1 restore put WTW (code 1019) about
+		// 4 codes high and BTB (code 4) about 3 codes low.
+		BEGIN_TEST_METHOD_ATTRIBUTE(OutputSegmentsGpuCalibrationLutCarriesBtbWtwThroughItsEdgeSlope)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(OutputSegmentsGpuCalibrationLutCarriesBtbWtwThroughItsEdgeSlope)
+		{
+			pl_log_params logParams{};
+			logParams.log_level = PL_LOG_NONE;
+			pl_log log = pl_log_create(PL_API_VER, &logParams);
+			std::string device;
+			const pl_d3d11_params deviceParams = ExtendedRangeGpuProbe::TestDeviceParams(&device);
+			pl_d3d11 d3d = pl_d3d11_create(log, &deviceParams);
+			Assert::IsNotNull(d3d, L"Could not create the libplacebo test device");
+			pl_gpu gpu = d3d->gpu;
+			pl_renderer renderer = pl_renderer_create(log, gpu);
+			{
+				CalibrationLutStage::Hook lut;
+				const std::vector<float> lutData = AffineLut(17);
+				pl_custom_lut customLut{};
+				customLut.signature = 0x5348;
+				customLut.size[0] = customLut.size[1] = customLut.size[2] = 17;
+				customLut.data = lutData.data();
+				lut.SetLut(&customLut);
+				const std::vector<int> codes = { 4, 16, 40, 64, 300, 600, 940, 980, 1019 };
+				const ExtendedRangeGpuProbe::Planes planes = ExtendedRangeGpuProbe::Greys(codes, 32, 16);
+				ExtendedRangeGpuProbe::Case c;
+				c.outputPrimaries = PL_COLOR_PRIM_BT_709;
+				const ExtendedRangeGpuProbe::Result base = ExtendedRangeGpuProbe::Render(gpu, renderer, planes, c);
+				c.extraHooks = { lut.Get() };
+				const ExtendedRangeGpuProbe::Result mapped = ExtendedRangeGpuProbe::Render(gpu, renderer, planes, c);
+				Assert::IsTrue(base.ok && mapped.ok, ToWide(base.error + " / " + mapped.error).c_str());
+				Assert::IsTrue(lut.SlopeApplied() > 0 && lut.SlopeFallbacks() == 0, L"the edge slope was not used");
+				const std::vector<int> a = ExtendedRangeGpuProbe::Columns(base, int(codes.size()), 1.0);
+				const std::vector<int> b = ExtendedRangeGpuProbe::Columns(mapped, int(codes.size()), 1.0);
+				std::vector<int> expected;
+				for (int code : a)
+					expected.push_back(static_cast<int>(std::lround(64.0 + 876.0 * (0.02 + 0.95 * (code - 64) / 876.0))));
+				const std::string text = "base " + ExtendedRangeGpuProbe::Join(a) + " | LUT " + ExtendedRangeGpuProbe::Join(b) +
+					" | expected " + ExtendedRangeGpuProbe::Join(expected);
+				Logger::WriteMessage(text.c_str());
+				Assert::IsTrue(a.front() < 64 && a.back() > 940, ToWide("BTB/WTW not carried to the hook: " + text).c_str());
+				for (size_t i = 0; i < b.size(); ++i)
+					Assert::IsTrue(std::abs(b[i] - expected[i]) <= 1, ToWide("column " + std::to_string(i) + ": " + text).c_str());
 				lut.Release();
 			}
 			pl_renderer_destroy(&renderer);

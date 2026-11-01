@@ -191,6 +191,76 @@ namespace PostMergeAudit20261017Test
 		}
 	};
 
+	// Bug hunt 33 F3 / F4 (2026-10-31): adaptive scaling's luma uses the source's own weights,
+	// and its edge / grain thresholds act at the same strength on HDR as on SDR.
+	TEST_CLASS(AdaptiveScalingMeasureDomainTests)
+	{
+	public:
+		TEST_METHOD(LumaWeightsFollowTheSource)
+		{
+			using namespace AdaptiveDownscale;
+			pl_color_space sdr{};
+			sdr.primaries = PL_COLOR_PRIM_BT_709;
+			sdr.transfer = PL_COLOR_TRC_BT_1886;
+			const MeasureDomain d709 = MeasureDomainFor(sdr, PL_COLOR_SYSTEM_BT_709, PL_COLOR_PRIM_BT_709);
+			Assert::IsTrue(d709.bt709);
+			// BT.709 keeps the old literal text: the same shader as before the fix.
+			Assert::AreEqual(std::string("vec3(0.2126, 0.7152, 0.0722)"), LumaWeightsGlsl(d709));
+			pl_color_space pq{};
+			pq.primaries = PL_COLOR_PRIM_BT_2020;
+			pq.transfer = PL_COLOR_TRC_PQ;
+			for (pl_color_system sys : { PL_COLOR_SYSTEM_BT_2020_NC, PL_COLOR_SYSTEM_UNKNOWN })
+			{
+				const MeasureDomain d = MeasureDomainFor(pq, sys, PL_COLOR_PRIM_BT_2020);
+				Assert::IsFalse(d.bt709);
+				Assert::AreEqual(0.2627f, d.w[0], 1e-6f);
+				Assert::AreEqual(0.6780f, d.w[1], 1e-6f);
+				Assert::AreEqual(0.0593f, d.w[2], 1e-6f);
+				Assert::IsTrue(LumaWeightsGlsl(d) != "vec3(0.2126, 0.7152, 0.0722)");
+			}
+			// A pure-red step on a BT.2020 picture is weighed as BT.2020 luma (BT.709's 0.2126
+			// under-reads it by 19 %).
+			const MeasureDomain d2020 = MeasureDomainFor(sdr, PL_COLOR_SYSTEM_BT_2020_NC, PL_COLOR_PRIM_BT_2020);
+			const double red[3] = { 1.0, 0.0, 0.0 };
+			Assert::AreEqual(0.2627 * 255.0, MeasureLumaCode(d2020, red), 1e-3);
+		}
+
+		TEST_METHOD(HdrIsMeasuredInTheSdrReferenceDomain)
+		{
+			using namespace AdaptiveDownscale;
+			pl_color_space sdr{};
+			sdr.primaries = PL_COLOR_PRIM_BT_709;
+			sdr.transfer = PL_COLOR_TRC_GAMMA22;
+			pl_color_space linear = sdr;
+			linear.transfer = PL_COLOR_TRC_LINEAR;
+			pl_color_space pq{};
+			pq.primaries = PL_COLOR_PRIM_BT_709;   // the weights equal; only the transfer differs
+			pq.transfer = PL_COLOR_TRC_PQ;
+			const MeasureDomain ds = MeasureDomainFor(sdr, PL_COLOR_SYSTEM_BT_709, PL_COLOR_PRIM_BT_709);
+			const MeasureDomain dl = MeasureDomainFor(linear, PL_COLOR_SYSTEM_BT_709, PL_COLOR_PRIM_BT_709);
+			const MeasureDomain dp = MeasureDomainFor(pq, PL_COLOR_SYSTEM_BT_709, PL_COLOR_PRIM_BT_709);
+			Assert::AreEqual(0.0f, ds.mode);
+			Assert::AreEqual(1.0f, dl.mode);
+			Assert::AreEqual(2.0f, dp.mode);
+			const GuardTransferParams tpq = GuardTransfer(pq);
+			for (double c : { 0.05, 0.2, 0.5, 0.9, 1.0 })
+			{
+				// The same light (c^2.2 of SDR white) gives the same reference code in all three
+				// encodings; before the fix a PQ picture was measured on its PQ codes.
+				const double light = std::pow(c, 2.2);
+				const double g[3] = { c, c, c };
+				const double l[3] = { light, light, light };
+				const double codePq = GuardCode(tpq, light);
+				const double p[3] = { codePq, codePq, codePq };
+				Assert::AreEqual(c * 255.0, MeasureLumaCode(ds, g), 1e-3);
+				Assert::AreEqual(c * 255.0, MeasureLumaCode(dl, l), 1e-3);
+				Assert::AreEqual(c * 255.0, MeasureLumaCode(dp, p), 1e-2 * 255.0);
+				if (c < 0.9)
+					Assert::IsTrue(std::abs(codePq * 255.0 - c * 255.0) > 5.0, L"PQ codes are not the reference domain");
+			}
+		}
+	};
+
 	TEST_CLASS(DolbyVisionCaptureEncodingTests)
 	{
 	public:
