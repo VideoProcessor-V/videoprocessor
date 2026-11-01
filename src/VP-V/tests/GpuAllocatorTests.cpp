@@ -387,6 +387,13 @@ namespace GpuAllocatorTestsNs
 			t.join();
 			Assert::AreEqual(0, fromThread, L"another thread gets null");
 			Assert::AreEqual(uint64_t(1), arena.CrossThreadAcquires(), L"cross-thread counted");
+			Assert::IsTrue(arena.FrameDecision().engaged && arena.FrameDecision().reason.find("another thread") != std::string::npos,
+				L"a cross-thread use is visible");
+			bool scopeFromThread = true;
+			std::thread t2([&]() { scopeFromThread = arena.BeginScope(2); });
+			t2.join();
+			Assert::IsFalse(scopeFromThread, L"another thread cannot open a scope on the owner's arena");
+			Assert::AreEqual(uint64_t(2), arena.CrossThreadAcquires(), L"counted");
 			Assert::AreEqual(uint64_t(0), arena.Acquired(), L"pools untouched by the foreign thread");
 			Assert::AreEqual(1, arena.Acquire("x", s), L"the render thread still gets slot 0");
 			Assert::AreEqual(0, arena.Acquire("nobody", s), L"unrequested owner gets null");

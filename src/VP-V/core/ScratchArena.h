@@ -26,8 +26,9 @@
 // while a frame was short, released by itself on the first frame that was not: recovery is automatic
 // once a larger plan is reserved). Never a silent fallback.
 //
-// Threading: single render thread (documented, checked: another thread's Acquire returns null and is
-// counted in CrossThreadAcquires, never touches the pools).
+// Threading: single owner thread (documented, checked race-free: the owner is a ThreadBinding, bound by Reserve or
+// the first BeginScope; another thread's Acquire / BeginScope returns null / false, is counted in CrossThreadAcquires
+// and flagged in FrameDecision through atomics only, and never touches the pools or the owner's records).
 //
 // TexBackend: using Handle (null-testable, default constructed = null); Handle Create(const TexShape&)
 // (null on failure); void Destroy(Handle&) (leaves it null).
@@ -80,8 +81,7 @@ public:
     // texture could not be created (that pool stays short: its Acquires are exhausted, visibly).
     bool Reserve(const ArenaPlan& plan)
     {
-        owner_ = std::this_thread::get_id();
-        ownerSet_ = true;
+        owner_.Rebind();   // the reserving thread owns the arena (an explicit transfer)
         scopeOpen_ = false;
         std::vector<Pool> next;
         bool ok = true;
@@ -140,15 +140,17 @@ public:
     {
         frameShort_.clear();
         frameNested_ = false;
+        frameCross_.store(false);
     }
 
     // False (and the OUTER scope untouched) when a scope is already open: nested scopes are refused, counted and
     // shown (FrameDecision). The caller must call EndScope only when this returned true.
     bool BeginScope(uint16_t scope)
     {
-        if (!ownerSet_) {
-            owner_ = std::this_thread::get_id();
-            ownerSet_ = true;
+        if (!owner_.BindIfUnbound()) {
+            ++crossThread_;   // another thread's scope: refused, the owner's state untouched
+            frameCross_.store(true);
+            return false;
         }
         if (scopeOpen_) {
             ++nestedScopes_;
@@ -165,15 +167,16 @@ public:
 
     // True when the arena is bound to a thread other than the caller's (its Acquires would be refused): a caller
     // that runs on another thread (a lane producer) must use its own arena.
-    bool BoundToOtherThread() const { return ownerSet_ && owner_ != std::this_thread::get_id(); }
+    bool BoundToOtherThread() const { return owner_.BoundToOther(); }
 
     // The texture for `owner`'s next temporary of `shape` in the open scope; null when there is none (the
     // caller reduces or switches off for this frame; the shortage is recorded for FrameDecision()).
     Handle Acquire(const char* owner, const TexShape& shape)
     {
-        if (std::this_thread::get_id() != owner_ || !ownerSet_) {
+        if (!owner_.BoundToCaller()) {
             ++crossThread_;
-            return Fail(owner);
+            frameCross_.store(true);
+            return Handle();   // another thread: atomics only (count + flag), never the owner's shortage record
         }
         if (!scopeOpen_) {
             ++outsideScope_;
@@ -209,7 +212,8 @@ public:
     // The FallbackCatalog entry for the frame so far: engaged while any Acquire went without.
     FallbackCatalog::Decision FrameDecision() const
     {
-        if (frameShort_.empty() && !frameNested_)
+        const bool cross = frameCross_.load();
+        if (frameShort_.empty() && !frameNested_ && !cross)
             return FallbackCatalog::Released("scratch_arena");
         std::string reason;
         if (!frameShort_.empty()) {
@@ -220,6 +224,8 @@ public:
         }
         if (frameNested_)
             reason += std::string(reason.empty() ? "" : "; ") + "nested scratch scope refused (a stage did not close its scope)";
+        if (cross)
+            reason += std::string(reason.empty() ? "" : "; ") + "scratch arena used from another thread (refused; that caller ran reduced/off)";
         return FallbackCatalog::Engaged("scratch_arena", reason);
     }
 
@@ -241,7 +247,7 @@ public:
     uint64_t Acquired() const { return acquired_; }
     uint64_t Exhausted() const { return exhausted_; }
     uint64_t Shed() const { return shed_; }
-    uint64_t CrossThreadAcquires() const { return crossThread_; }
+    uint64_t CrossThreadAcquires() const { return crossThread_.load(); }
     uint64_t OutsideScopeAcquires() const { return outsideScope_; }
     uint64_t NestedScopes() const { return nestedScopes_; }
     uint32_t CreateFailures() const { return createFailures_; }
@@ -283,11 +289,12 @@ private:
     bool frameNested_ = false;
     uint64_t nestedScopes_ = 0;
     std::vector<std::string> frameShort_;   // owners that went without this frame (sorted, unique)
-    std::thread::id owner_;
-    bool ownerSet_ = false;
+    ThreadBinding owner_;   // atomic: BoundToOtherThread / Acquire read it from any thread
     bool scopeOpen_ = false;
     uint16_t scope_ = 0;
-    uint64_t acquired_ = 0, exhausted_ = 0, shed_ = 0, crossThread_ = 0, outsideScope_ = 0;
+    uint64_t acquired_ = 0, exhausted_ = 0, shed_ = 0, outsideScope_ = 0;
+    std::atomic<uint64_t> crossThread_{ 0 };
+    std::atomic<bool> frameCross_{ false };
     uint32_t createFailures_ = 0, reserves_ = 0;
 };
 
