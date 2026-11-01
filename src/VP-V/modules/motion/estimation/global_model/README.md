@@ -220,3 +220,24 @@ catches a coherent competitor with at least about a third of the camera's suppor
 accessor + hints, store record, fitter behaviour (pan, zoom, rotation, perspective, noise, objects,
 tiny movers, sky, cut, fade, flash, parallax, crowds, logos, credits, letterbox, shake, pulldown,
 inverse, determinism, generations, deadline, 8K) and a cost report (`CAMERA_COST ...` lines).
+
+## Two-layer (K10a)
+`Config::twoLayer` (default **off**; off = records byte-identical to the single-layer fitter). A large foreground that
+fills the middle of the picture (a boat, a vehicle, a tracked subject) can out-vote the background and be reported as a
+confident camera. With `twoLayer` the best competing motion found by the ambiguity search is kept as a second layer and
+the camera layer is the one with the best `support x continuity x border evidence x area history`:
+- **Border evidence**: share of a layer's inlier weight inside a ring of `borderRingFraction` (12.5 %) of the active
+  picture, divided by the ring's share of all samples (~1 = background-like, ~0 = centred foreground); factor 0.25..1.
+- **Continuity**: closeness (corner displacement) of the layer to the last usable camera layer, time-scaled to the pair;
+  factor `continuityFloor`..1. **Area history**: factor 0.5..1 from the change of the layer's inlier share.
+- With two layers the ambiguity signal is the **score ratio** (same 0.35 gate): a near tie stays Ambiguous (visible,
+  never used). With one layer that touches no border (ratio < `borderVetoRatio`), explains < 75 % of the vectors and has
+  no agreeing continuity reference, the record is Ambiguous with `ForegroundSuspect`.
+- **Hysteresis**: when the new winner is not continuous with the reference but the reference layer is still present, the
+  reference layer is kept for `M-1` pairs (`M = max(1, round(layerSwapSeconds / pairSeconds))`, derived from the measured
+  pair duration), then the change is accepted (`Swapped`, `layerRisk` 1 decaying linearly to 0 over `M` pairs, confidence
+  scaled by `1 - 0.5*layerRisk`). If the reference layer has vanished, the new layer is accepted at once.
+- Record fields: `layerFlags` (1 ran, 2 competitor, 4 camera is the RANSAC runner-up, 8 foreground suspect, 16 swap
+  pending, 32 swapped, 64 continuity used), `objectLayer` (the other layer; persistent id 1..255), `layerRisk`, and the
+  `Signals::border` / `continuity` diagnostics. State (reference, object id, hold count) resets with the fitter, on a cut
+  and on a generation reset; a flash leaves it untouched. Evaluation: `tools/camera_eval` (`--two-layer`).
