@@ -48,7 +48,15 @@ namespace Vpv
 		// Injectable so tests need no file. Returns false when no file could be read (all keys default).
 		using ConfigLoader = std::function<bool(ConfigFile&)>;
 
-		inline bool DefaultLoader(ConfigFile& config) { return config.Load(); }
+		// The renderer's selected configuration path (SetRendererConfigurationPath, resolved by
+		// Load(RENDERER_FILENAME)) when the host set one, else the working directory's VideoProcessor.cfg
+		// (the application configuration the renderer then uses).
+		inline bool DefaultLoader(ConfigFile& config)
+		{
+			if (!ConfigFile::GetRendererConfigurationPath().empty())
+				return config.Load(ConfigFile::RENDERER_FILENAME);
+			return config.Load();
+		}
 
 		inline Settings Parse(const ConfigFile& config)
 		{
