@@ -66,6 +66,7 @@ namespace filesource
 			m_flushing = false;
 			m_stepPending = false;
 			m_discontinuityPending = true;
+			m_haveLastStart = false;
 		}
 
 		// IMediaFilter::Pause (from Stopped: pre-roll; from Running: hold).
@@ -93,6 +94,7 @@ namespace filesource
 		{
 			m_flushing = false;
 			m_discontinuityPending = true;
+			m_haveLastStart = false;
 		}
 
 		// IPin::NewSegment. Returns true when the rate changed.
@@ -107,6 +109,7 @@ namespace filesource
 				m_rate = rate;
 			}
 			m_discontinuityPending = true;
+			m_haveLastStart = false;
 			return rateChanged;
 		}
 
@@ -157,6 +160,28 @@ namespace filesource
 			}
 
 			t.discontinuity = m_discontinuityPending || sample.discontinuityFlag;
+			// Timestamp continuity: a backward step or a forward jump of more
+			// than 4 source periods is a discontinuity even without a flag.
+			if (sample.hasStart)
+			{
+				if (m_haveLastStart)
+				{
+					if (sample.start100ns < m_lastStart100ns)
+						t.discontinuity = true;
+					else
+					{
+						double hz = sourceRate.IsValid() ? sourceRate.Hz() : measuredRateHz;
+						if (hz > 0.0 && std::isfinite(hz))
+						{
+							const double jump100ns = static_cast<double>(sample.start100ns - m_lastStart100ns);
+							if (jump100ns > 4.0 * 1e7 / hz)
+								t.discontinuity = true;
+						}
+					}
+				}
+				m_lastStart100ns = sample.start100ns;
+				m_haveLastStart = true;
+			}
 			m_discontinuityPending = false;
 
 			const bool held = m_state != FileGraphState::Running || m_stepPending;
@@ -189,5 +214,7 @@ namespace filesource
 		int64_t m_tStart = 0;
 		int64_t m_segmentStart = 0;
 		int64_t m_segmentStop = 0;
+		bool m_haveLastStart = false;
+		int64_t m_lastStart100ns = 0;
 	};
 }

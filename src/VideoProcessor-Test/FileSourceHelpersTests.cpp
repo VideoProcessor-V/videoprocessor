@@ -452,6 +452,29 @@ namespace FileSourceTests
 			Assert::IsTrue(p.MotionAllowed());
 		}
 
+		TEST_METHOD(SampleTimestampContinuityFlagsBackwardStepsAndLargeJumps)
+		{
+			const FileClockMapper m = IdentityMapper();
+			const RationalRate rate = SnapAvgTimePerFrame(417083);
+			FilePlaybackState p;
+			p.Run(0);
+			p.BuildTiming(Sample(0), rate, 0.0, m, 0);
+			Assert::IsFalse(p.BuildTiming(Sample(417083), rate, 0.0, m, 0).discontinuity);
+			// One dropped frame (2 periods) is not a discontinuity.
+			Assert::IsFalse(p.BuildTiming(Sample(417083 * 3), rate, 0.0, m, 0).discontinuity);
+			// A backward step is.
+			Assert::IsTrue(p.BuildTiming(Sample(417083), rate, 0.0, m, 0).discontinuity);
+			// A forward jump of more than 4 periods is.
+			Assert::IsTrue(p.BuildTiming(Sample(417083 * 10), rate, 0.0, m, 0).discontinuity);
+			Assert::IsFalse(p.BuildTiming(Sample(417083 * 11), rate, 0.0, m, 0).discontinuity);
+			// Unknown rate: the jump test is skipped, backward still flags.
+			FilePlaybackState q;
+			q.Run(0);
+			q.BuildTiming(Sample(0), RationalRate(), 0.0, m, 0);
+			Assert::IsFalse(q.BuildTiming(Sample(90000000), RationalRate(), 0.0, m, 0).discontinuity);
+			Assert::IsTrue(q.BuildTiming(Sample(1000), RationalRate(), 0.0, m, 0).discontinuity);
+		}
+
 		TEST_METHOD(PrerollIsPausedHeldAndUntimed)
 		{
 			FilePlaybackState p;
