@@ -280,9 +280,12 @@ public:
                 if (!Has(d.shortQueueSubstitute) || d.shortQueueSubstitute == d.id)
                     return fail("bad short-queue substitute");
                 const ProductDecl& sub = decls_[d.shortQueueSubstitute];
-                for (size_t k = 0; k < sub.inputCount; ++k)
+                for (size_t k = 0; k < sub.inputCount; ++k) {
                     if (sub.inputs[k].lead > 0)
                         return fail("short-queue substitute has a look-ahead input");
+                    if (sub.inputs[k].product == d.id)
+                        return fail("short-queue substitute reads the product it replaces");
+                }
             }
             if (d.noOfaSubstitute != kNoProduct) {
                 if (!Has(d.noOfaSubstitute) || d.backend != Backend::Ofa)
@@ -291,6 +294,34 @@ public:
                     return fail("optical-flow substitute needs the engine");
             }
         }
+        // Look-ahead edges: no chains (the target has no lead inputs itself) and no loops (the target
+        // cannot reach the reader through ANY edge, lag, lag 0 or lead): a frame-ahead read must end at
+        // a product made from the source alone.
+        for (const ProductDecl& d : decls_)
+            for (size_t k = 0; k < d.inputCount; ++k) {
+                if (d.inputs[k].lead == 0)
+                    continue;
+                const ProductDecl& target = decls_[d.inputs[k].product];
+                for (size_t j = 0; j < target.inputCount; ++j)
+                    if (target.inputs[j].lead > 0)
+                        return fail("a look-ahead input names a product that itself looks ahead");
+                std::vector<char> seen(decls_.size(), 0);
+                std::vector<ProductId> stack(1, target.id);
+                seen[target.id] = 1;
+                while (!stack.empty()) {
+                    const ProductId p = stack.back();
+                    stack.pop_back();
+                    if (p == d.id)
+                        return fail("a look-ahead input closes a loop");
+                    for (size_t j = 0; j < decls_[p].inputCount; ++j) {
+                        const ProductId q = decls_[p].inputs[j].product;
+                        if (!seen[q]) {
+                            seen[q] = 1;
+                            stack.push_back(q);
+                        }
+                    }
+                }
+            }
         // Lag-0 cycle check (Kahn).
         std::vector<int> indeg(decls_.size(), 0);
         for (const ProductDecl& d : decls_)

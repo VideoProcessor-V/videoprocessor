@@ -30,10 +30,12 @@
 // history = max(the product's own history, the largest lag any active node or consumer reads it at).
 //
 // Look-ahead (K0): an input may carry a LEAD (frames ahead). The effective lead of a node is
-// min(its largest declared lead, the lane lead); a product read at lead k gets k more ring slots, and
+// min(its largest declared lead, laneLead - 1): the lane makes N+L when frame N starts rendering, so a
+// reader that needs N+L would have zero slack; one frame less is what is safely there. A product read at lead k gets k more ring slots, and
 // framesInFlight grows by the largest effective lead. When the queue cannot supply any lead (effective
-// lead 0) the node resolves to its shortQueueSubstitute (a visible, non-identical reduced mode, listed
-// by Graph::ReducedNodes()). Lead edges are not lag-0 edges: they play no part in the topological order.
+// lead 0) the node resolves to its shortQueueSubstitute (a visible, non-identical reduced mode, recorded in
+// Graph::reductions and listed by Graph::ReducedNodes()). An effective lead above 0 but below the declared lead
+// is a PARTIAL lead (Graph::PartialLeadNodes(): both numbers are on the Node). Lead edges are not lag-0 edges: they play no part in the topological order.
 // Everything is fixed at build (no per-frame allocation). A rebuild advances the Indicator's
 // `graph` counter (GraphOwner); every node honours `graph`, so lane work from the old graph is
 // rejected at the seal. Header-only, pure C++14.
@@ -68,6 +70,7 @@ struct Node {
     VpIndicator::CounterMask spanMask = 0;
     bool missingInputForm = false;
     uint8_t lead = 0;                 // effective look-ahead of this node (0 = none)
+    uint8_t declaredLead = 0;         // what the product declared (lead < declaredLead and lead > 0: a partial lead)
     uint8_t leadRead = 0;             // the largest effective lead any node reads THIS product at
     bool shortQueue = false;          // stands in for a look-ahead product the queue cannot feed
     ProductId reducedFrom = kNoProduct;   // that look-ahead product (declared id) when shortQueue
@@ -180,6 +183,13 @@ struct Graph {
     uint64_t totalRingBytes = 0;
     uint64_t totalLiveBytes = 0;
     bool hasRebasedPlane = false;
+    // One record per (asked, made) substitution because the queue is short. A node that was ALSO asked
+    // for directly is still made as itself: the record, not the node, says what was reduced.
+    struct Reduction {
+        ProductId asked = kNoProduct;
+        ProductId made = kNoProduct;
+    };
+    std::vector<Reduction> reductions;
 
     int IndexOf(ProductId id) const
     {
@@ -189,12 +199,22 @@ struct Graph {
         return -1;
     }
     bool Has(ProductId id) const { return IndexOf(id) >= 0; }
-    // Nodes made in a visibly reduced mode because the queue is short (plan 45: "camera: causal").
+    // Nodes that stand in for a look-ahead product the queue cannot feed (plan 45: "camera: causal").
+    // Lists a node even when it is also asked for directly; `reductions` names what was reduced.
     std::vector<const Node*> ReducedNodes() const
     {
         std::vector<const Node*> out;
         for (const Node& n : nodes)
             if (n.shortQueue)
+                out.push_back(&n);
+        return out;
+    }
+    // Nodes whose look-ahead is shorter than declared but not zero (lead < declaredLead).
+    std::vector<const Node*> PartialLeadNodes() const
+    {
+        std::vector<const Node*> out;
+        for (const Node& n : nodes)
+            if (n.lead > 0 && n.lead < n.declaredLead)
                 out.push_back(&n);
         return out;
     }
@@ -234,7 +254,8 @@ inline uint8_t EffectiveLead(const ProductDecl& d, const GraphSettings& gs)
     if (d.backend == Backend::RenderOnly)
         return 0;
     const uint8_t m = MaxDeclaredLead(d);
-    return m < gs.laneLead ? m : gs.laneLead;
+    const uint8_t avail = gs.laneLead > 0 ? uint8_t(gs.laneLead - 1) : uint8_t(0);
+    return m < avail ? m : avail;
 }
 
 // Resolve with the queue: the no-engine substitute first, then the short-queue substitute for a
@@ -284,8 +305,19 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
             maxLeadRead[p] = lead;
         if (holdsSpan)
             span[p] = 1;
-        if (reduced && reducedFrom[p] == kNoProduct)
-            reducedFrom[p] = asked;
+        if (reduced) {
+            if (reducedFrom[p] == kNoProduct)
+                reducedFrom[p] = asked;
+            bool known = false;
+            for (const Graph::Reduction& r : g.reductions)
+                known = known || (r.asked == asked && r.made == p);
+            if (!known) {
+                Graph::Reduction r;
+                r.asked = asked;
+                r.made = p;
+                g.reductions.push_back(r);
+            }
+        }
         if (!needed[p]) {
             needed[p] = 1;
             declaredAs[p] = asked;
@@ -379,6 +411,7 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
         const unsigned L = lane ? gs.laneLead : 0u;
         const unsigned q = lane ? 1u : 0u;
         node.lead = EffectiveLead(d, gs);
+        node.declaredLead = MaxDeclaredLead(d);
         node.leadRead = maxLeadRead[p];
         node.reducedFrom = reducedFrom[p];
         node.shortQueue = reducedFrom[p] != kNoProduct;
