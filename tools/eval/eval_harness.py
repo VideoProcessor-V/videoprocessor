@@ -178,7 +178,30 @@ def _na_reasons(m, notes, n, case, rng):
 
 
 # ------------------------------------------------------------------ cases
+def crop_frame(frame, crop, master_shape):
+    """Crop a Frame to case["crop"] = {"x","y","w","h"} given in MASTER luma coordinates (all multiples
+    of 4 so every 4:2:0 / half-raster plane stays aligned).  A coded picture on a smaller raster (a
+    half-size rung) is cropped at the proportionally scaled window.  Chroma planes are cropped at the
+    subsampled window, so chroma siting is unchanged."""
+    x, y, w, h = (int(crop[k]) for k in ("x", "y", "w", "h"))
+    if any(v % 4 for v in (x, y, w, h)) or w <= 0 or h <= 0:
+        raise ValueError("crop %s: x, y, w, h must be positive multiples of 4" % (crop,))
+    if x + w > master_shape[1] or y + h > master_shape[0]:
+        raise ValueError("crop %s exceeds the master raster %s" % (crop, master_shape))
+    H, W = frame.Y.shape
+    # integer raster ratio (1 = same raster, 2 = half-size rung; odd master sizes round down)
+    ry, rx = max(master_shape[0] // H, 1), max(master_shape[1] // W, 1)
+    y0, x0, h0, w0 = y // ry, x // rx, h // ry, w // rx
+    fy, fx = max(round(H / frame.Cb.shape[0]), 1), max(round(W / frame.Cb.shape[1]), 1)
+    sl = (slice(y0, y0 + h0), slice(x0, x0 + w0))
+    cs = (slice(y0 // fy, (y0 + h0) // fy), slice(x0 // fx, (x0 + w0) // fx))
+    return frame.with_planes(Y=np.ascontiguousarray(frame.Y[sl]), Cb=np.ascontiguousarray(frame.Cb[cs]),
+                             Cr=np.ascontiguousarray(frame.Cr[cs]))
+
+
 def build_case_inputs(case, max_frames=None):
+    """-> (candidate inputs, truth).  Optional case keys: "crop" (see crop_frame), applied to master and
+    coded frames before the protocol."""
     n = case.get("frames", 4)
     if max_frames:
         n = min(n, max_frames)
@@ -186,8 +209,12 @@ def build_case_inputs(case, max_frames=None):
     ms = load_source(case["master"], n)
     cs = load_source(case["coded"], n)
     base = case["master"].get("start", 0)
+    crop = case.get("crop")
     inputs, truth = [], []
     for i, (mf, cf) in enumerate(zip(ms, cs)):
+        if crop:
+            mshape = mf.Y.shape
+            mf, cf = crop_frame(mf, crop, mshape), crop_frame(cf, crop, mshape)
         mf.index = cf.index = base + i
         a, t = proto(mf, cf)
         a.index = t.index = base + i
@@ -212,28 +239,90 @@ def run_candidate(cand, inputs, truth):
     return outs, dict(ms=None, gpu_ms=have if len(have) == len(gms) else None)
 
 
+def grain_probe_rows(cand, inputs, truth, notes):
+    """Near-edge grain gate (case key "grain_probe": true; Python candidates only).  The candidate is run
+    twice more, on its inputs plus synthetic probe grain of two fixed seeds (luma only); out_A - out_B
+    is the part of the probe grain it passed.  Rows (all *_vs_input: never LIMIT):
+      grain_probe_keep_edge_vs_input_Y / grain_probe_lag1_edge_vs_input_Y   near strong edges
+      grain_probe_keep_flat_vs_input_Y / grain_probe_lag1_flat_vs_input_Y   far from edges"""
+    names = ("grain_probe_keep_edge_vs_input_Y", "grain_probe_lag1_edge_vs_input_Y",
+             "grain_probe_keep_flat_vs_input_Y", "grain_probe_lag1_flat_vs_input_Y")
+    if getattr(cand, "kind", "python") != "python":
+        for k in names:
+            notes[k] = "grain probe needs a Python candidate (capture candidates cannot be re-run)"
+        return {k: None for k in names}
+    bd = inputs[0].bitdepth
+    ins = []
+    for seed in em.PROBE_SEEDS:
+        ins.append([f.with_planes(Y=f.Y + em.probe_grain(f.Y.shape, seed, f.index, bd)) for f in inputs])
+    outs = [ec.run_python_candidate(cand, x)[0] for x in ins]
+    d_in = np.stack([a.Y - b.Y for a, b in zip(*ins)])
+    d_out = np.stack([a.Y - b.Y for a, b in zip(*outs)])
+    zones = [em.near_edge_zone(t.Y, bd) for t in truth]
+    m = {}
+    for tag, idx in (("edge", 0), ("flat", 1)):
+        r = em.grain_probe(d_in, d_out, [z[idx] for z in zones])
+        kk, kl = "grain_probe_keep_%s_vs_input_Y" % tag, "grain_probe_lag1_%s_vs_input_Y" % tag
+        m[kk] = r["keep"] if r else None
+        m[kl] = r["lag1"] if r else None
+        if r is None:
+            notes[kk] = notes[kl] = "no %s pixels in the reference" % ("near-edge" if tag == "edge" else "far-from-edge")
+        elif r["lag1"] is None:
+            notes[kl] = "needs >= 3 frames (%d available)" % len(truth)
+    return m
+
+
 def load_cost_ratio():
     with open(os.path.join(HERE, "cost_ratios.json"), "r", encoding="utf8") as f:
         return json.load(f)
 
 
-def evaluate_suite(suite, cand, base, max_frames=None, use_lpips=False, with_cost=True, log=print):
+def evaluate_suite(suite, cand, base, max_frames=None, use_lpips=False, with_cost=True, log=print,
+                   cache=None, extra=None):
+    """Rows for `cand` vs `base` over the suite's cases.
+    cache: optional dict shared across calls with the SAME baseline and options: per case it keeps the
+           inputs, truth and the baseline's result, so several candidates are scored without reloading
+           or re-running the default (values are identical to uncached runs; cost rows reuse the
+           baseline's first timing).
+    extra: optional callable(truth, outs, inputs, case, notes) -> dict of additional metric rows,
+           applied to candidate and default alike (named so eval_report.RULES judges them; unknown
+           prefixes are INFO)."""
     rows = []
     ratio = load_cost_ratio()["gpu_ms_ratio"]
     for case in suite["cases"]:
         ct, clip, cname = case["content_type"], case["clip"], case["case"]
         t0 = time.time()
-        log("case %s / %s / %s: loading" % (ct, clip, cname))
-        inputs, truth = build_case_inputs(case, max_frames)
+        key = (case.get("id"), ct, clip, cname, max_frames, bool(use_lpips), base.name)
+        hit = cache.get(key) if cache is not None else None
+        if hit is None:
+            log("case %s / %s / %s: loading" % (ct, clip, cname))
+            inputs, truth = build_case_inputs(case, max_frames)
+        else:
+            log("case %s / %s / %s: cached inputs and default" % (ct, clip, cname))
+            inputs, truth = hit["inputs"], hit["truth"]
         res = {}
-        na_notes = {}
+        notes_by = {"default": dict(hit["notes"])} if hit is not None else {}
         for label, c in (("candidate", cand), ("default", base)):
+            if label == "default" and hit is not None:
+                res[label] = hit["default"]
+                continue
+            notes_by[label] = {}
             try:
                 outs, cost = run_candidate(c, inputs, truth)
-                res[label] = (compute_metrics(truth, outs, case, use_lpips, inputs, na_notes), cost, None)
+                m = compute_metrics(truth, outs, case, use_lpips, inputs, notes_by[label])
+                if extra is not None:
+                    m.update(extra(truth, outs, inputs, case, notes_by[label]))
+                if case.get("grain_probe"):
+                    m.update(grain_probe_rows(c, inputs, truth, notes_by[label]))
+                res[label] = (m, cost, None)
             except Exception as e:  # visible, never silent
                 res[label] = (None, None, "%s: %s" % (type(e).__name__, e))
                 log("  %s FAILED: %s" % (label, res[label][2]))
+        # NA reasons: the candidate's own reason wins, the default's fills the rest
+        na_notes = dict(notes_by.get("default", {}))
+        na_notes.update(notes_by.get("candidate", {}))
+        if cache is not None and hit is None:
+            cache[key] = dict(inputs=inputs, truth=truth, default=res["default"], notes=dict(notes_by["default"]))
         names = None
         for label in ("candidate", "default"):
             if res[label][0] is not None:

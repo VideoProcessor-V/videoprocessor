@@ -1,0 +1,142 @@
+{
+ "name": "proto_mosquito_edgegrain",
+ "description": "Mosquito candidates against the NEAR-EDGE grain gate (two-seed probe, case key grain_probe): 4 cases of proto_mosquito, windows <= 6 frames.",
+ "cases": [
+  {
+   "id": "g18-bosphorus-x264-crf28",
+   "content_type": "sports50_60",
+   "clip": "Bosphorus",
+   "case": "native_x264_crf28",
+   "protocol": "same",
+   "frames": 4,
+   "gop": 250,
+   "minigop": 4,
+   "master": {
+    "kind": "raw",
+    "path": "D:/hfr/Bosphorus_3840x2160_120fps_420_10bit_YUV.yuv",
+    "width": 3840,
+    "height": 2160,
+    "pix_fmt": "yuv420p10le",
+    "fps": 120.0,
+    "start": 140
+   },
+   "coded": {
+    "kind": "raw",
+    "path": "D:/hfr/coded/Bosphorus_native_x264_crf28.yuv",
+    "width": 3840,
+    "height": 2160,
+    "pix_fmt": "yuv420p10le",
+    "fps": 120.0,
+    "start": 0
+   },
+   "crop": {
+    "x": 1408,
+    "y": 688,
+    "w": 1024,
+    "h": 768
+   },
+   "grain_probe": true
+  },
+  {
+   "id": "g18-bosphorus-av1fgs-crf35",
+   "content_type": "sports50_60",
+   "clip": "Bosphorus",
+   "case": "native_av1fgs_crf35",
+   "protocol": "same",
+   "frames": 4,
+   "gop": 250,
+   "minigop": null,
+   "master": {
+    "kind": "raw",
+    "path": "D:/hfr/Bosphorus_3840x2160_120fps_420_10bit_YUV.yuv",
+    "width": 3840,
+    "height": 2160,
+    "pix_fmt": "yuv420p10le",
+    "fps": 120.0,
+    "start": 140
+   },
+   "coded": {
+    "kind": "raw",
+    "path": "D:/hfr/coded/Bosphorus_native_av1fgs_crf35.yuv",
+    "width": 3840,
+    "height": 2160,
+    "pix_fmt": "yuv420p10le",
+    "fps": 120.0,
+    "start": 0
+   },
+   "crop": {
+    "x": 1408,
+    "y": 688,
+    "w": 1024,
+    "h": 768
+   },
+   "note": "AV1 film-grain synthesis: decoded grain is not the master's; grain gates vs INPUT matter",
+   "grain_probe": true
+  },
+  {
+   "id": "nn-tos4k-x265-6000k",
+   "content_type": "film24",
+   "clip": "tos4k",
+   "case": "x265_2160p_6000k_w2400",
+   "protocol": "same",
+   "frames": 6,
+   "gop": 48,
+   "minigop": 5,
+   "master": {
+    "kind": "ffmpeg",
+    "path": "D:/nn-corpus/trimmed/tos4k/reference_ffv1.mkv",
+    "width": 3840,
+    "height": 1714,
+    "pix_fmt": "yuv420p",
+    "fps": 24.0,
+    "start": 2400
+   },
+   "coded": {
+    "kind": "ffmpeg",
+    "path": "D:/nn-corpus/pairs/tos4k/tos4k__x265__2160p__6000k.mp4",
+    "width": 3840,
+    "height": 1714,
+    "pix_fmt": "yuv420p10le",
+    "fps": 24.0,
+    "start": 2400
+   },
+   "crop": {
+    "x": 1408,
+    "y": 472,
+    "w": 1024,
+    "h": 768
+   },
+   "grain_probe": true
+  },
+  {
+   "id": "stress-tos4k-x264-crf36",
+   "content_type": "film24",
+   "clip": "tos4k",
+   "case": "stress_x264_crf36_crop1024_w2400",
+   "protocol": "same",
+   "frames": 6,
+   "gop": 48,
+   "minigop": 3,
+   "note": "STRESS (scratch, regenerate before use): master = FFV1 tos4k frames 2400..2423 cropped 1024x768 at (1408,472) -> yuv420p raw; coded = that raw through libx264 -crf 36 -preset medium -g 48, decoded to yuv420p raw. Commands: ffmpeg -ss 99.979 -i reference_ffv1.mkv -frames:v 24 -vf crop=1024:768:1408:472 -pix_fmt yuv420p -f rawvideo tos_master_crop.yuv; ffmpeg -f rawvideo -pix_fmt yuv420p -s 1024x768 -r 24 -i tos_master_crop.yuv -c:v libx264 -crf 36 -preset medium -g 48 tos_x264_crf36.mp4; ffmpeg -i tos_x264_crf36.mp4 -pix_fmt yuv420p -f rawvideo tos_x264_crf36.yuv",
+   "master": {
+    "kind": "raw",
+    "path": "D:/codex/videoprocessor/eval-scratch/feat-eval-prototypes-stress/tos_master_crop.yuv",
+    "width": 1024,
+    "height": 768,
+    "pix_fmt": "yuv420p",
+    "fps": 24.0,
+    "start": 0
+   },
+   "coded": {
+    "kind": "raw",
+    "path": "D:/codex/videoprocessor/eval-scratch/feat-eval-prototypes-stress/tos_x264_crf36.yuv",
+    "width": 1024,
+    "height": 768,
+    "pix_fmt": "yuv420p",
+    "fps": 24.0,
+    "start": 0
+   },
+   "grain_probe": true
+  }
+ ]
+}
