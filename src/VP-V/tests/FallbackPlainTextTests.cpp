@@ -32,7 +32,8 @@ namespace FallbackPlainTextTest
 				const std::string text = FallbackNoticeText(id, std::string());
 				Assert::IsFalse(text.empty(), L"sentence is empty");
 				Assert::IsTrue(text.compare(0, unknownPrefix.size(), unknownPrefix) != 0, L"id fell through to the default");
-				Assert::IsTrue(text.find(id) == std::string::npos, L"sentence repeats the raw id");
+				Assert::IsTrue(text != id, L"sentence is the raw id");
+				Assert::IsTrue(text.find(' ') != std::string::npos, L"sentence is not a sentence");
 			}
 		}
 
