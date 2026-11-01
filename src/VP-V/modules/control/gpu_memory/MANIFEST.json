@@ -3,7 +3,9 @@
   "slot": "control.gpu_memory",
   "unit": "control",
   "order": 935,
-  "status": "partial",
+  "status": "draft",
+  "successor_of": "control.diagnostics",
+  "draft_note": "Not a pipeline slot yet: the renderer call site is not wired (SA1). Registers as slot control.gpu_memory (slots.json + PipelineSlots.h) when wired; its shortages already report through the diagnostics slot (FallbackCatalog scratch_arena).",
   "code_location": "src/VP-V/core (GpuAllocator.h, ScratchArena.h) + this folder (libplacebo backend)",
   "live_files": [
     "src/VP-V/core/GpuAllocator.h",

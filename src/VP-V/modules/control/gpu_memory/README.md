@@ -1,6 +1,6 @@
 # GPU memory: scratch arena and product textures (`control.gpu_memory`)
 
-Unit: **control** | order: 935 | status: **partial** (SA1: core + backend + TextureRestore adoption; the renderer call site is not wired)
+Unit: **control** | order: 935 | status: **partial** (draft manifest until the renderer call site is wired; SA1: core + backend + TextureRestore adoption)
 
 ## Purpose / why
 
