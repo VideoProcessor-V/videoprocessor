@@ -8,6 +8,7 @@
 #include <QStringList>
 #include <ConfigurationRpcClient.h>
 #include <VP-V/config/VpvConfigPages.h>   // VPV-HOOK
+#include <VP-V/config/VpvConfigFormApi.h>   // VPV-HOOK
 #include <VP-V/config/VpvDitherChoiceSet.h>   // VPV-HOOK
 
 #include <map>
@@ -350,6 +351,7 @@ private:
     QStringList monitors_;
     QStackedWidget* pages_ = nullptr;
     Vpv::ConfigPageDirectory vpvPages_;   // VPV-HOOK
+    Vpv::FunctionFormApi formApi_;   // VPV-HOOK
     QWidget* navigation_ = nullptr;
     QLabel* status_ = nullptr;
 	QLabel* effectSummary_ = nullptr;

@@ -138,6 +138,7 @@
 #include <VP-V/config/VpvSection.h>   // VP-V section hook (src/VP-V/config/README.md)
 #include <VP-V/config/VpvRenderingDefaults.h>   // unset VP-V keys' defaults (moved out of this file; one call site)
 #include <VP-V/config/VpvDitherChoiceSet.h>   // VPV-HOOK
+#include "ConfigPageHost.h"   // VPV-HOOK
 #include <VP-V/config/VpvConfigPages.h>   // VPV-HOOK
 
 // Settings preview (queue item 23): VideoProcessorConfig.exe --sandbox edits only its --config
@@ -1543,6 +1544,18 @@ ConfigEditorWindow::ConfigEditorWindow(QString configPath, quintptr ownerHandle,
     // instead of raising the minimum size.
     resize(1120, 700);
     setMinimumSize(760, 540);
+    // VPV-HOOK
+    formApi_.valueFn = [this](const QString& section, const QString& key) { return value(section, key); };
+    formApi_.setValueFn = [this](const QString& section, const QString& key, const QString& text)
+    {
+        if (!document_) return;
+        if (text.isEmpty()) document_->RemoveKnown(section.toStdString(), key.toStdString().c_str());
+        else document_->SetKnown(section.toStdString(), key.toStdString().c_str(), text.toLocal8Bit().constData());
+        if (centralWidget()) markDirty();
+    };
+    formApi_.markDirtyFn = [this] { markDirty(); };
+    formApi_.profileSectionsFn = [this](const QString& root) { return profileSections(root); };
+    // VPV-HOOK-END
     loadConfiguration();
     runLoadMigrations();
     if (!testMode_ && !noTarget_) loadDiscoveryCache();
@@ -2394,6 +2407,7 @@ void ConfigEditorWindow::runLoadMigrations()
     migrateProfileValueNormalisations();
     migrateLegacyRendererName();
     migrateRefreshKeys();
+    if (ConfigPageHost::MigrateOnLoad(formApi_)) { dirty_ = true; hasPendingMigrations_ = true; }   // VPV-HOOK
     // Any real migration keeps a backup of the original file on save.
     if (document_ && configurationLoaded_ && document_->Serialize() != before)
         document_->requiresMigrationBackup = document_->existedAtLoad;
@@ -4936,6 +4950,7 @@ bool ConfigEditorWindow::saveChanges(std::function<void()> afterRemoteApply)
     // are written into the document only for this save. If validation or the
     // save fails, restore the document so it matches the controls again.
     const auto rollback = std::make_shared<const ConfigEditorCore::ConfigDocument>(*document_);
+    ConfigPageHost::BeforeSave(formApi_);   // VPV-HOOK
 
     const DocumentSnapshot currentSnapshot = captureDocumentSnapshot(*document_);
     const std::vector<ConfigurationApplyPolicy::Change> changed = changedDocumentValues(
@@ -5231,6 +5246,7 @@ bool ConfigEditorWindow::saveChanges(std::function<void()> afterRemoteApply)
     updateEffectSummary();
     showCanonicalShortcutSpelling(this);
     refreshConfigToggleShortcut();
+    ConfigPageHost::AfterApply(formApi_);   // VPV-HOOK
 
     // Say where a replaced file was kept (hunt 2, L2/L8).
     QString kept;
@@ -5445,6 +5461,7 @@ QWidget* ConfigEditorWindow::createShell()
             QStringLiteral("Everything VP-V adds, by unit: one tier per unit plus a global tier, each unit's settings, and the fallbacks engaged."),
             Vpv::CreateSection(vpvHost)));
     }
+    vpvPages_.appendProviderPages(pages_, formApi_);   // VPV-HOOK
     // VPV-HOOK-END
     auto* navGroup = new QButtonGroup(root);
     navGroup->setExclusive(true);
@@ -12040,6 +12057,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
     }
     else if(sectionPrefix==QStringLiteral("vprenderer.motion"))detailLayout->insertWidget(2,profileFields);
     else detailLayout->addWidget(profileFields);
+    ConfigPageHost::AppendProfileRows(sectionPrefix, addPlainForm, formApi_);   // VPV-HOOK
     detailLayout->addStretch();
 
     const auto updateQueuePolicyPresentation = [queuePolicy, queuePolicySummary,

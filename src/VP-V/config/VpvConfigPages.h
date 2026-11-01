@@ -12,6 +12,7 @@
 #include <QStackedWidget>
 #include <QStringList>
 #include <QWidget>
+#include <VideoProcessor-Config/ConfigPageHost.h>
 #include <vector>
 
 namespace Vpv
@@ -62,6 +63,23 @@ namespace Vpv
 			const int index = pages->addWidget(page);
 			vpvNames_.push_back(name);
 			return index;
+		}
+
+		// Adds the pages of registered config page providers (ConfigPageHost.h) after the VP-V pages;
+		// nothing registered adds nothing. A page's leafAfter is advisory and not yet honoured: the
+		// leaves follow the VP-V ones.
+		int appendProviderPages(QStackedWidget* pages, ConfigPageHost::ConfigFormApi& api)
+		{
+			std::vector<ConfigPageHost::ConfigPage> extra;
+			ConfigPageHost::AppendPages(api, extra);
+			int added = 0;
+			for (const ConfigPageHost::ConfigPage& page : extra)
+			{
+				if (!page.widget || page.name.isEmpty()) continue;
+				append(pages, page.name, page.widget);
+				++added;
+			}
+			return added;
 		}
 
 		// Adds the VP-V navigation leaves through the host's own leaf builder (title, page index).
