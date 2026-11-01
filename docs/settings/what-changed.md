@@ -80,3 +80,9 @@ setting is still there, once. Details: `organisation.md` (the map) and `VP-setti
   and a width-only upscale (e.g. anamorphic) now goes through the adaptive upscale. Shown on the status line.
   Off by default and off in the Original pathway, so Bill's behaviour is unchanged.
 - New `adaptive_motion` (off until the sweep sets its values): motion-adapted scaler blend.
+
+## 2026-10-31: CfL chroma upscale (candidate)
+
+- New `chroma_upscale_vp` (`off` | `cfl`, default off, off in the Original pathway): a GPU chroma-from-luma upscaler
+  that keeps chroma grain exactly and only works inside the active picture. Candidate: not yet active in the
+  renderer until it is GPU-validated, so nothing changes yet. Shown on the Scaling page.

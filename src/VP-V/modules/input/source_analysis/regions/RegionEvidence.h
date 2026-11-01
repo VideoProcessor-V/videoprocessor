@@ -53,6 +53,8 @@
 #include <string>
 #include <vector>
 
+namespace GrainSplit { namespace Gpu { struct Frame; } }   // GrainSplitGpu.h (libplacebo-free forward declaration)
+
 namespace RegionEvidence
 {
 	// Active picture / overlay rectangles in source-raster px (right/bottom exclusive), same layout as FrameAnalysis::Rect.
@@ -524,12 +526,20 @@ namespace RegionEvidence
 	// extended by mirroring: bars never enter it). The law is repair.grain_split's, reused unchanged. Readers: the camera
 	// model's grain-map consumer, TemporalDetail, the chroma-from-luma grain guard, the dynamic grain-safe contrast recovery,
 	// the region block stats (and through them every derived map). Nobody recomputes it.
+	// The planes of the product's GPU form (luma for every reader; Cb/Cr for the chroma-from-luma grain guard).
+	enum class GrainPlane : int { Luma = 0, Cb = 1, Cr = 2, Count = 3 };
+
 	struct GrainProduct
 	{
-		GrainSplit::Split split;         // base, D1/D2/D3, f, s1/s2, clean, grain, N (block grid = the region grid)
+		GrainSplit::Split split;         // CPU form: base, D1/D2/D3, f, s1/s2, clean, grain, N (block grid = the region grid)
 		Rect picture;                    // clipped picture the split was made for
 		VpAncestry::Header header;       // stamped by the producer (StampGrain)
+		// GPU form: the same law as GrainSplit::Gpu::Splitter passes (GrainSplitGpu.h), one Frame per plane, borrowed from
+		// the producer and valid until its next Compute. Null = not made on the GPU for that plane. A reader checks
+		// GrainSplit::Gpu::Fits against its own plane and falls back visibly (its own Splitter, named in its status).
+		const GrainSplit::Gpu::Frame* gpu[static_cast<int>(GrainPlane::Count)] = { nullptr, nullptr, nullptr };
 		bool Valid() const { return split.w > 0 && split.bw > 0 && split.N.size() >= static_cast<size_t>(split.bw) * split.bh; }
+		bool HasGpu() const { return gpu[0] != nullptr || gpu[1] != nullptr || gpu[2] != nullptr; }
 	};
 
 	inline GrainProduct ComputeGrain(const GrainSplit::Plane& luma, const Rect& picture, int B)
@@ -558,23 +568,32 @@ namespace RegionEvidence
 	{
 	public:
 		GrainView() = default;
-		explicit GrainView(const GrainProduct* g) : m_g(g && g->Valid() ? g : nullptr) {}
-		bool Valid() const { return m_g != nullptr; }
-		double Clean(int x, int y) const { return m_g ? m_g->split.clean.get(x, y) : 0.0; }       // grain-free picture
-		double Grain(int x, int y) const { return m_g ? m_g->split.grain.get(x, y) : 0.0; }       // Y - clean
-		double Share(int x, int y) const { return m_g ? m_g->split.f.get(x, y) : 0.0; }           // Wiener share f
+		explicit GrainView(const GrainProduct* g)
+			: m_g(g && (g->Valid() || g->HasGpu()) ? g : nullptr), m_cpu(g && g->Valid() ? g : nullptr) {}
+		bool Valid() const { return m_g != nullptr; }        // either form present
+		bool CpuValid() const { return m_cpu != nullptr; }   // the CPU form (the per-pixel reads below)
+		// The GPU form of one plane (GrainSplit::Gpu::Frame), or null: GPU readers (temporal_detail, CfL) bind its textures.
+		const GrainSplit::Gpu::Frame* Gpu(GrainPlane p = GrainPlane::Luma) const
+		{
+			const int i = static_cast<int>(p);
+			return m_g && i >= 0 && i < static_cast<int>(GrainPlane::Count) ? m_g->gpu[i] : nullptr;
+		}
+		double Clean(int x, int y) const { return m_cpu ? m_cpu->split.clean.get(x, y) : 0.0; }   // grain-free picture
+		double Grain(int x, int y) const { return m_cpu ? m_cpu->split.grain.get(x, y) : 0.0; }   // Y - clean
+		double Share(int x, int y) const { return m_cpu ? m_cpu->split.f.get(x, y) : 0.0; }       // Wiener share f
 		double Level(int bx, int by) const                                                          // block N (codes^2)
 		{
-			if (!m_g) return 0.0;
-			const int x = (std::max)(0, (std::min)(m_g->split.bw - 1, bx)), y = (std::max)(0, (std::min)(m_g->split.bh - 1, by));
-			return m_g->split.N[static_cast<size_t>(y) * m_g->split.bw + x];
+			if (!m_cpu) return 0.0;
+			const int x = (std::max)(0, (std::min)(m_cpu->split.bw - 1, bx)), y = (std::max)(0, (std::min)(m_cpu->split.bh - 1, by));
+			return m_cpu->split.N[static_cast<size_t>(y) * m_cpu->split.bw + x];
 		}
-		double LevelAtPixel(int x, int y) const { return m_g ? Level(x / m_g->split.B, y / m_g->split.B) : 0.0; }
-		int BlockSize() const { return m_g ? m_g->split.B : 0; }
-		const GrainSplit::Split* Split() const { return m_g ? &m_g->split : nullptr; }
+		double LevelAtPixel(int x, int y) const { return m_cpu ? Level(x / m_cpu->split.B, y / m_cpu->split.B) : 0.0; }
+		int BlockSize() const { return m_cpu ? m_cpu->split.B : 0; }
+		const GrainSplit::Split* Split() const { return m_cpu ? &m_cpu->split : nullptr; }
 
 	private:
-		const GrainProduct* m_g = nullptr;
+		const GrainProduct* m_g = nullptr;     // either form
+		const GrainProduct* m_cpu = nullptr;   // the CPU form valid
 	};
 
 	// ---- the stored product of one frame: the precursors ---------------------------------------------------------------
@@ -831,7 +850,7 @@ namespace RegionEvidence
 		const Cost c = CostAt(frame);
 		ProductIds ids;
 
-		ProductDecl gs = detail::Make(static_cast<ProductId>(decls.size()), "grain_split", "grain split (shared)",
+		ProductDecl gs = detail::Make(static_cast<ProductId>(decls.size()), kTokenGrainSplit, "grain split (shared)",
 			Backend::GpuCompute, 1, Tier::T0, content, Bit(kSettingsAnalysis));
 		gs.sourceFrame = true;
 		detail::AddInput(gs, kP4SourceStats, 0);

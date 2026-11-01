@@ -44,9 +44,9 @@ namespace TemporalDetail
 	{
 		// Block maps only: ~ (w/16)(h/16) blocks x 12 floats.
 		constexpr uint64_t AnalysisBytes(int w, int h, int) { return static_cast<uint64_t>((w + 15) / 16) * static_cast<uint64_t>((h + 15) / 16) * 12u * 4u; }
-		// K slots of RG16F grain-free structure bands s1/s2 (4 B/px) plus a half-resolution R16F base (0.5 B/px), plus the
-		// future slot (K = 5: ~224 MB at 3840 x 2160).
-		constexpr uint64_t RefstoreBytes(int w, int h, int K) { return static_cast<uint64_t>(K + 1) * static_cast<uint64_t>(w) * static_cast<uint64_t>(h) * 9u / 2u; }
+		// The GPU store (TemporalDetailGpu): K slots of RGBA16F raw + cleaned grain-free bands (8 B/px) plus an R16 base
+		// (2 B/px) on the active picture (K = 5: ~415 MB at 3840 x 2160; K is the memory tier, SlotsForBudget).
+		constexpr uint64_t RefstoreBytes(int w, int h, int K) { return static_cast<uint64_t>(K) * static_cast<uint64_t>(w) * static_cast<uint64_t>(h) * 10u; }
 		// The output luma plane (R16F).
 		constexpr uint64_t OutBytes(int w, int h, int) { return static_cast<uint64_t>(w) * static_cast<uint64_t>(h) * 2u; }
 	}
