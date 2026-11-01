@@ -170,7 +170,7 @@ namespace Tests
 			VpSeal::FrameSeal fs;
 			Rig()
 			{
-				fs.AddProvider("motion", [this](const std::shared_ptr<Indicator>& i) { VpMotionResync::RegisterOn(*i, state, readers); });
+				fs.AddProvider("motion", [this](const std::shared_ptr<Indicator>& i) { VpMotionResync::RegisterOn(i, state, readers); });
 			}
 			static std::shared_ptr<Indicator> NewEra() { return std::make_shared<Indicator>(VpIndicator::NextEra(), 64); }
 			void Frames(const std::shared_ptr<Indicator>& i, uint64_t from, uint64_t to)
@@ -209,6 +209,33 @@ namespace Tests
 			Assert::IsTrue(h2.changed && h2.cause == MotionValidity::Cause::QueueReset, L"the cause is found in the NEW era");
 			const VpMotionResync::ProducerNote n = r.readers.TakeProducerNote();
 			Assert::IsTrue(n.drop && n.engageGeneration == VpResync::Drive::FullKey(*b, 5));
+		}
+
+		// Audit 2 MUST 1: the provider form binds the State to each new era itself (no manual Bind).
+		// Before the fix PairValidAt / Invalidate(SettingsChange) still used the first (dead) Indicator.
+		TEST_METHOD(TheProviderRebindsTheStateOnEveryEraWithoutAManualBind)
+		{
+			Rig r;
+			const std::shared_ptr<Indicator> a = Rig::NewEra();
+			r.Frames(a, 1, 4);
+			Assert::IsTrue(r.state.Driven(), L"bound by the provider");
+			const std::shared_ptr<Indicator> b = Rig::NewEra();
+			r.Frames(b, 1, 4);
+			// A FULL in the NEW era for frame 6: the pair (5, 6) spans it and must be refused.
+			b->Advance(VpIndicator::kFull, RCause::LiveQueueReset, 6);
+			Assert::IsFalse(r.state.PairValidAt(5, 6), L"reads the new era's stamps");
+			Assert::IsTrue(r.state.PairValidAt(6, 7));
+			Assert::IsTrue(r.state.StreamGenerationAt(6) == VpResync::Drive::FullKey(*b, 6), L"keyed on the new era");
+			// A settings invalidation is written to the NEW Indicator (not lost in the old one).
+			const uint32_t before = b->Total(VpIndicator::kSettingsMotion);
+			const uint32_t beforeOld = a->Total(VpIndicator::kSettingsMotion);
+			r.state.Invalidate(MotionValidity::Cause::SettingsChange);
+			Assert::AreEqual(before + 1u, b->Total(VpIndicator::kSettingsMotion));
+			Assert::AreEqual(beforeOld, a->Total(VpIndicator::kSettingsMotion));
+			// ... and the reader moves the epoch at the seal of the carrying frame.
+			const uint64_t epoch = r.state.Epoch();
+			r.Frames(b, 5, 5);
+			Assert::IsTrue(r.state.Epoch() > epoch, L"settings[motion] acted in the new era");
 		}
 
 		TEST_METHOD(AnUnknownCauseMapsConservatively)

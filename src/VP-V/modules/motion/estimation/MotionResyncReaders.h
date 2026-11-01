@@ -243,7 +243,8 @@ struct Ids {
 
 // Setup (before the Indicator's first Observe). `readers` and `state` must outlive the Indicator's
 // observes. Returns the reader ids; -1 for a reader the Indicator refused (counted in its
-// RejectedReaders; a refused reader never fires).
+// RejectedReaders; a refused reader never fires). This form does NOT bind `state` (the caller must
+// have bound it to this same Indicator); FrameSeal providers use the shared_ptr overload below.
 inline Ids RegisterOn(VpIndicator::Indicator& indicator, MotionValidity::State& state, Readers& readers)
 {
     Ids ids;
@@ -258,6 +259,22 @@ inline Ids RegisterOn(VpIndicator::Indicator& indicator, MotionValidity::State& 
     ids.vectorProducer = indicator.Register(producer.name, producer.reads, producer.policies,
         [ind, rd](const VpIndicator::Indicator::Change& c) { rd->OnProducer(*ind, c); });
     return ids;
+}
+
+// The FrameSeal provider entry (the form every host must use): binds `state` to `indicator` FIRST, so
+// State::PairValidAt / StreamGenerationAt / Invalidate(SettingsChange ...) read and write the same
+// Indicator the readers are registered on, then registers the readers. Without the bind an era swap
+// left the State on the previous (dead) Indicator: pairs spanning a new-era FULL were accepted and
+// settings[motion] advances were lost. A null Indicator unbinds the State and registers nothing.
+inline Ids RegisterOn(const std::shared_ptr<VpIndicator::Indicator>& indicator, MotionValidity::State& state,
+                      Readers& readers)
+{
+    if (!indicator) {
+        state.Unbind();
+        return Ids();
+    }
+    state.Bind(indicator);
+    return RegisterOn(*indicator, state, readers);
 }
 
 } // namespace VpMotionResync
