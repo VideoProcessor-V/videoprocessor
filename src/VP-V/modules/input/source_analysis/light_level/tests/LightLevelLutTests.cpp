@@ -78,7 +78,7 @@ namespace VideoProcessorTest
 		// (1) HdrToSdr against tools/eval/tonemap_ref.py (generated golden), 3 peaks x all codes.
 		TEST_METHOD(LightLevelHdrToSdrMatchesTonemapRefGolden)
 		{
-			const KeyMap keys = { {"sdr_target_nits", "100"}, {"sdr_black_nits", "0"} };
+			const KeyMap keys = { {"sdr_target_nits", "100"}, {"sdr_black_nits", "0"}, {"peak_detection", "off"} };
 			const LightLevel::Settings s = ReadMap(keys);
 			Assert::AreEqual(100.0, s.sdrTargetNits, 0.0);
 			Assert::AreEqual(0.0, s.sdrBlackNits, 0.0);
@@ -235,27 +235,46 @@ namespace VideoProcessorTest
 			const LightLevel::Context fixed = Ctx(LightLevel::Context::HdrToSdr, false, 1000.0);
 			const LightLevel::Context dynamic = Ctx(LightLevel::Context::HdrToSdr, false, 1000.0, 0.0, 800.0);
 
-			const LightLevel::Lut exact = LightLevel::Build(ReadMap({}), fixed);
+			const LightLevel::Lut exact = LightLevel::Build(ReadMap({ {"peak_detection", "off"} }), fixed);
 			Assert::IsTrue(exact.exactness == LightLevel::Exactness::Exact);
 			Assert::IsTrue(Contains(exact.status, "exact"));
 
+			// auto follows the quality preset: on for high / balanced, off for fast (LightLevel::PeakDetectionOn).
+			Assert::IsTrue(LightLevel::PeakDetectionOn(ReadMap({})));
+			Assert::IsTrue(LightLevel::PeakDetectionOn(ReadMap({ {"quality", "balanced"} })));
+			Assert::IsFalse(LightLevel::PeakDetectionOn(ReadMap({ {"quality", "fast"} })));
+			Assert::IsTrue(LightLevel::PeakDetectionOn(ReadMap({ {"quality", "fast"}, {"peak_detection", "on"} })));
+			Assert::IsTrue(LightLevel::Build(ReadMap({ {"quality", "fast"} }), fixed).exactness == LightLevel::Exactness::Exact);
+
 			for (const char* mode : { "on", "auto", "default", "high_quality" })
 			{
-				const LightLevel::Lut lut = LightLevel::Build(ReadMap({ {"peak_detection", mode} }), dynamic);
+				const LightLevel::Settings ps = ReadMap({ {"peak_detection", mode} });
+				// With a VP peak estimate.
+				const LightLevel::Lut lut = LightLevel::Build(ps, dynamic);
 				Assert::IsTrue(lut.exactness == LightLevel::Exactness::Approx, L"peak detection on -> Approx");
-				Assert::IsTrue(Contains(lut.status, "dynamic"), L"status names the dynamic tone mapping");
+				Assert::IsTrue(Contains(lut.status, "approx (dynamic tone mapping)"), L"status names the dynamic tone mapping");
+				Assert::IsFalse(Contains(lut.status, "no VP peak estimate"));
+				// Without one: still Approx, and the status says the curve is static.
+				const LightLevel::Lut none = LightLevel::Build(ps, fixed);
+				Assert::IsTrue(none.exactness == LightLevel::Exactness::Approx, L"peak detection on, no estimate -> Approx");
+				Assert::IsTrue(Contains(none.status, "approx (dynamic tone mapping; static curve, no VP peak estimate)"));
 			}
 			const LightLevel::Lut off = LightLevel::Build(ReadMap({ {"peak_detection", "off"} }), dynamic);
 			Assert::IsTrue(off.exactness == LightLevel::Exactness::Exact);
 			Assert::IsTrue(off.fingerprint != exact.fingerprint, L"the measured peak is part of the context");
 
-			const LightLevel::Settings bt = ReadMap({ {"tone_mapping", "bt2390"} });
+			// Every reason is named, joined with "; ".
+			const LightLevel::Lut both = LightLevel::Build(ReadMap({ {"tone_mapping", "bt2390"}, {"peak_detection", "on"} }), dynamic);
+			Assert::IsTrue(both.exactness == LightLevel::Exactness::Approx);
+			Assert::IsTrue(Contains(both.status, "tone_mapping bt2390 not modelled; spline used; dynamic tone mapping)"));
+
+			const LightLevel::Settings bt = ReadMap({ {"tone_mapping", "bt2390"}, {"peak_detection", "off"} });
 			Assert::IsTrue(bt.notes.empty());
 			const LightLevel::Lut unmodelled = LightLevel::Build(bt, fixed);
 			Assert::IsTrue(unmodelled.exactness == LightLevel::Exactness::Approx, L"unmodelled tone_mapping -> Approx");
 			Assert::IsTrue(Contains(unmodelled.status, "bt2390"));
 			Assert::IsTrue(Contains(unmodelled.status, "not modelled"));
-			Assert::IsTrue(LightLevel::Build(ReadMap({ {"tone_mapping", "spline"} }), fixed).exactness == LightLevel::Exactness::Exact);
+			Assert::IsTrue(LightLevel::Build(ReadMap({ {"tone_mapping", "spline"}, {"peak_detection", "off"} }), fixed).exactness == LightLevel::Exactness::Exact);
 
 			// Invalid values: a note each, the default stays.
 			const LightLevel::Settings bad = ReadMap({ {"tone_mapping", "banana"}, {"sdr_target_nits", "abc"},
@@ -278,6 +297,54 @@ namespace VideoProcessorTest
 			const LightLevel::Lut pass = LightLevel::Build(ReadMap({}), Ctx(LightLevel::Context::HdrPassthrough, false, 1000.0, 600.0));
 			Assert::IsTrue(pass.exactness == LightLevel::Exactness::Approx);
 			Assert::IsFalse(pass.status.empty());
+		}
+
+		// (6b) HdrToSdr display model: libplacebo encodes L_out with the inverse of the target transfer (incl. black), so
+		// with the display on auto the viewer sees L_out; a physical white of 2x the target doubles L.
+		TEST_METHOD(LightLevelHdrToSdrDisplayModel)
+		{
+			const KeyMap keys = { {"sdr_target_nits", "203"}, {"sdr_black_nits", "0.05"}, {"peak_detection", "off"} };
+			const LightLevel::Settings s = ReadMap(keys);
+			Assert::IsTrue(s.notes.empty());
+			Assert::AreEqual(203.0, s.displayWhiteNits, 0.0);
+			Assert::AreEqual(0.05, s.displayBlackNits, 0.0);
+			const auto tone = LightLevel::detail::Evaluator::Resolve(s);
+			const double peak = 1000.0;
+			const LightLevel::detail::Spline spline(peak, 203.0, 0.0, 0.05, tone);
+			const LightLevel::Lut lut = LightLevel::Build(s, Ctx(LightLevel::Context::HdrToSdr, false, peak));
+			for (int code = 64; code < LightLevel::kLutSize; ++code)
+			{
+				const double v = std::min(std::max(LimitedSignal(code), 0.0), 1.0);
+				const double out = std::min(std::max(LightLevel::pq::Eotf(spline(v)), 0.05), 203.0);
+				Assert::IsTrue(Close(out, lut.e[static_cast<std::size_t>(code)].L), L"L == L_out with display auto");
+			}
+
+			// Physical display white 2x the target: black 0 BT.1886, mid code.
+			const KeyMap base = { {"sdr_target_nits", "100"}, {"sdr_black_nits", "0"}, {"peak_detection", "off"} };
+			KeyMap doubled = base;
+			doubled["light_level_display_white_nits"] = "200";
+			const LightLevel::Settings sb = ReadMap(base), sd = ReadMap(doubled);
+			Assert::IsTrue(sd.notes.empty());
+			Assert::AreEqual(200.0, sd.displayWhiteNits, 0.0);
+			Assert::IsTrue(LightLevel::Fingerprint(sb, Ctx(LightLevel::Context::Sdr)) != LightLevel::Fingerprint(sd, Ctx(LightLevel::Context::Sdr)));
+			const LightLevel::Lut sdrA = LightLevel::Build(sb, Ctx(LightLevel::Context::Sdr));
+			const LightLevel::Lut sdrB = LightLevel::Build(sd, Ctx(LightLevel::Context::Sdr));
+			Assert::IsTrue(Close(Bt1886(LimitedSignal(500.0), 200.0, 0.0), sdrB.e[500].L), L"Sdr shown on the physical display");
+			Assert::IsTrue(Close(2.0 * sdrA.e[500].L, sdrB.e[500].L));
+			const LightLevel::Lut hdrA = LightLevel::Build(sb, Ctx(LightLevel::Context::HdrToSdr, false, 1000.0));
+			const LightLevel::Lut hdrB = LightLevel::Build(sd, Ctx(LightLevel::Context::HdrToSdr, false, 1000.0));
+			Assert::IsTrue(Close(2.0 * hdrA.e[500].L, hdrB.e[500].L), L"HdrToSdr L scales with the physical white");
+			Assert::AreEqual(hdrA.e[500].sdrCode, hdrB.e[500].sdrCode, 1e-12, L"the encoded signal does not depend on the display");
+
+			// Invalid or white <= black: a note and the auto values.
+			const LightLevel::Settings bad = ReadMap({ {"light_level_display_white_nits", "0.5"}, {"light_level_display_black_nits", "2"} });
+			Assert::IsTrue(AnyNoteContains(bad, "light_level_display_white_nits"));
+			Assert::AreEqual(203.0, bad.displayWhiteNits, 0.0);   // 0.5 is below the 1 nit minimum: auto
+			Assert::AreEqual(2.0, bad.displayBlackNits, 0.0);     // valid on its own
+			const LightLevel::Settings crossed = ReadMap({ {"light_level_display_white_nits", "50"}, {"light_level_display_black_nits", "60"} });
+			Assert::IsTrue(AnyNoteContains(crossed, "must exceed"));
+			Assert::AreEqual(203.0, crossed.displayWhiteNits, 0.0);
+			Assert::IsTrue(ReadMap({ {"light_level_display_white_nits", "auto"} }).notes.empty());
 		}
 
 		// (7) The SDR tone shape changes the LUT only above the knee start.

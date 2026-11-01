@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Python mirror of the light-level LUT (per 10-bit code, float64, deterministic, single-threaded).
 
+Mirrors the C++ LightLevel::Build (src/VP-V/modules/input/source_analysis/light_level/LightLevelLut.h);
+tests/LightLevelCrossCheckTests.cpp compares the two to 1e-9 on J using vectors from gen_light_level_golden.py.
+
 Public API
   Context(kind, ...)         dataclass; kind in {"sdr", "hdr_passthrough", "hdr_to_sdr"}; to_dict()/from_dict()
   build_lut(ctx)             -> dict J, S, V, L, sdr_code : float64 arrays of length 1024 (index = 10-bit code)
@@ -11,19 +14,33 @@ Public API
   tile_size_for(h)           -> max(1, round(h / 68))   (about 32 px at 2160p; no fixed pixel size)
   lowpass(plane)             -> separable binomial [1 4 6 4 1]/16, reflect borders (documented, fixed 5 taps)
 
-Per code c: v = (c-64)/876 (limited) or c/1023 (full); v < 0 (BTB) -> J = S = V = 0 (L reported as 0).
-  sdr             display EOTF at white Lw, black Lb.  eotf="bt1886": g=2.4, a=(Lw^(1/g)-Lb^(1/g))^g,
-                  b=Lb^(1/g)/(Lw^(1/g)-Lb^(1/g)), L=a*max(v+b,0)^g;  eotf="power": L=Lb+(Lw-Lb)*v^g.  L capped at Lw.
-  hdr_passthrough PQ EOTF of the signal, then the BT.2390 EETF (src min/peak -> display Lb/Lw, Lw = display peak).
-  hdr_to_sdr      tonemap_ref.SplineTM(src_peak, dst_peak=Lw, src_min, dst_min=Lb) on the PQ signal; SDR code
-                  = 64 + 876 * (L_out / Lw)^(1/2.4); then the SDR display EOTF above (BT.1886 black lift applies).
-J = PQ OETF(L) in [0, 1].  S = dJ/dcode (central difference, +-0.5 code; BTB evaluates at v = 0).
-V = |L(c+.5) - L(c-.5)| / (weber * (L(c) + L_floor)),  weber default 0.02,  L_floor = Lb + ambient
-(V < 1: the step is below the Weber threshold; denominator floored at 1e-9 nit).  All nit values are Context fields; the dataclass defaults
-(white 100, black 0.05, ambient 0, source peak 1000, source min 0) are documented defaults only.
-sdr_code: identity-scale code for sdr, tone-mapped code for hdr_to_sdr, 0 for hdr_passthrough (none exists).
+Settings (C++ Settings keys): target_white = sdr_target_nits (203), target_black = sdr_black_nits (0),
+eotf/gamma = hdr_tone_map_target_gamma (bt1886 | srgb | power, power = gamma), display_white/display_black =
+light_level_display_white_nits/_black_nits (None = auto = the target), ambient = light_level_ambient_nits (0),
+weber = light_level_weber (0.02).  Context (C++ Context): kind, range (limited | full), src_peak (0 = unknown ->
+10000), src_min, display_peak (0 = unknown).  Dynamic peak is not modelled.  The SDR tone shape is off.
+Compatibility: the former fields white/black are now target_white/target_black (the old white also served as the
+HDR display peak: now display_peak, and the old black as the display black: now display_black).
+
+Per code c: v = (c-64)/876 (limited) or c/1023 (full).  A continuous analytic map L(x) is evaluated at float codes.
+  TargetDisplay  = the encoding display (target white/black, eotf); PhysicalDisplay = the same with display white/black.
+  Display(v)     nits capped at white: bt1886 with black (g=2.4, a=(Lw^(1/g)-Lb^(1/g))^g, b=Lb^(1/g)/(Lw^(1/g)-Lb^(1/g)),
+                 L=a*max(v+b,0)^g), power: Lb+(Lw-Lb)v^g, srgb: Lb+(Lw-Lb)*exact piecewise lin.  Display.Inverse = exact inverse.
+  v < 0 (BTB)    L = physical display black, J = S = V = 0, sdr_code = the input code (any kind).
+  sdr            L = PhysicalDisplay(v)
+  hdr_passthrough L = max(EETF(PQ_EOTF(v)), physical black); BT.2390 EETF in PQ space, source [src_min, src_peak]
+                 -> [physical black, display peak]; identity when the display peak is unknown or >= src peak.
+                 (e1 and the Hermite parameter t are clipped to [0, 1]; the C++ must match.)
+  hdr_to_sdr     L_out = PQ_EOTF(SplineTM(v)) (src peak, src_min, dst peak = target white, dst min = target black);
+                 signal = TargetDisplay.Inverse(clamp(L_out, target black, target white));
+                 sdr_code = 64 + 876*signal; L = PhysicalDisplay(signal).
+J = PQ OETF(L) in [0, 1].  S = (J(c+.5) - J(c-.5)) / span, one-sided at the ends (lo = c for code 0, hi = c for
+code 1023; span = hi - lo).  V = |L(hi) - L(lo)| / span / (weber * max(L(c) + L_floor, lowest_step)),
+L_floor = physical black + ambient, lowest_step = PQ_EOTF(1/1023) nit (V < 1: below the Weber threshold).
+sdr_code: input code except hdr_to_sdr (tone-mapped SDR code).
 """
 from dataclasses import asdict, dataclass
+from typing import Optional
 
 import numpy as np
 from scipy import ndimage
@@ -37,14 +54,17 @@ NCODES = 1024
 class Context:
     kind: str = "sdr"
     range: str = "limited"          # limited | full
-    white: float = 100.0            # Lw: SDR display white / display peak (nit)
-    black: float = 0.05             # Lb: display black (nit)
+    target_white: float = 203.0     # sdr_target_nits (encoding white)
+    target_black: float = 0.0       # sdr_black_nits
+    eotf: str = "bt1886"            # bt1886 | srgb | power
+    gamma: float = 2.4              # power only
+    display_white: Optional[float] = None   # physical display white; None = target_white
+    display_black: Optional[float] = None   # physical display black; None = target_black
     ambient: float = 0.0            # reflected ambient (nit), enters L_floor only
     weber: float = 0.02
-    eotf: str = "bt1886"            # sdr only: bt1886 | power
-    gamma: float = 2.4
-    src_peak: float = 1000.0        # HDR source mastering peak (nit)
+    src_peak: float = 0.0           # HDR source mastering peak (nit); 0 = unknown = 10000
     src_min: float = 0.0            # HDR source mastering black (nit)
+    display_peak: float = 0.0       # hdr_passthrough display peak (nit); 0 = unknown, no roll-off
 
     def to_dict(self):
         return asdict(self)
@@ -54,8 +74,20 @@ class Context:
         return Context(**d)
 
     @property
+    def phys_white(self):
+        return self.target_white if self.display_white is None else self.display_white
+
+    @property
+    def phys_black(self):
+        return self.target_black if self.display_black is None else self.display_black
+
+    @property
     def l_floor(self):
-        return self.black + self.ambient
+        return self.phys_black + self.ambient
+
+    @property
+    def peak(self):
+        return self.src_peak if self.src_peak > 0 else 10000.0
 
 
 def _v_of_code(c, rng):
@@ -63,79 +95,110 @@ def _v_of_code(c, rng):
     return (c - 64.0) / 876.0 if rng == "limited" else c / 1023.0
 
 
-def _sdr_eotf(v, ctx):
-    v = np.clip(v, 0.0, None)
-    Lw, Lb, g = ctx.white, ctx.black, ctx.gamma
+def _srgb_lin(v):
+    v = np.maximum(v, 0.0)
+    return np.where(v <= 0.04045, v / 12.92, ((v + 0.055) / 1.055) ** 2.4)
+
+
+def _srgb_inv(lin):
+    lin = np.clip(lin, 0.0, 1.0)
+    return np.where(lin <= 0.0031308, 12.92 * lin, 1.055 * lin ** (1 / 2.4) - 0.055)
+
+
+def _display(v, ctx, Lw, Lb):
+    """Display EOTF: signal v (0 black, 1 white, may exceed 1) -> nits, capped at white."""
+    v = np.asarray(v, np.float64)
     if ctx.eotf == "bt1886":
+        g = 2.4
         d = Lw ** (1 / g) - Lb ** (1 / g)
-        a = d ** g
-        b = Lb ** (1 / g) / d
-        L = a * np.maximum(v + b, 0.0) ** g
+        L = d ** g * np.maximum(v + Lb ** (1 / g) / d, 0.0) ** g
     elif ctx.eotf == "power":
-        L = Lb + (Lw - Lb) * v ** g
+        L = Lb + (Lw - Lb) * np.maximum(v, 0.0) ** ctx.gamma
+    elif ctx.eotf == "srgb":
+        L = Lb + (Lw - Lb) * _srgb_lin(v)
     else:
         raise ValueError("eotf %r" % ctx.eotf)
     return np.minimum(L, Lw)
 
 
-def _bt2390(e, ctx):
-    """BT.2390 EETF on the PQ signal e (0..1): source [src_min, src_peak] -> display [black, white]."""
-    smin, smax = float(tr.pq_oetf(ctx.src_min)), float(tr.pq_oetf(ctx.src_peak))
-    dmin, dmax = float(tr.pq_oetf(ctx.black)), float(tr.pq_oetf(ctx.white))
-    span = smax - smin
-    e1 = np.clip((e - smin) / span, 0.0, 1.0)
-    min_l, max_l = (dmin - smin) / span, (dmax - smin) / span
-    if max_l >= 1.0:
-        e2 = e1
-    else:
-        ks = 1.5 * max_l - 0.5
-        t = np.clip((e1 - ks) / (1.0 - ks), 0.0, 1.0)
-        p = ((2 * t ** 3 - 3 * t ** 2 + 1) * ks + (t ** 3 - 2 * t ** 2 + t) * (1 - ks)
-             + (-2 * t ** 3 + 3 * t ** 2) * max_l)
-        e2 = np.where(e1 < ks, e1, p)
-    e3 = e2 + min_l * (1.0 - e2) ** 4
-    return np.minimum(tr.pq_eotf(e3 * span + smin), ctx.white)
+def _display_inverse(L, ctx, Lw, Lb):
+    L = np.asarray(L, np.float64)
+    if ctx.eotf == "bt1886":
+        g = 2.4
+        d = Lw ** (1 / g) - Lb ** (1 / g)
+        return (np.maximum(L, 0.0) / d ** g) ** (1 / g) - Lb ** (1 / g) / d
+    if ctx.eotf == "power":
+        return (np.maximum(L - Lb, 0.0) / (Lw - Lb)) ** (1 / ctx.gamma)
+    if ctx.eotf == "srgb":
+        return _srgb_inv((L - Lb) / (Lw - Lb))
+    raise ValueError("eotf %r" % ctx.eotf)
+
+
+def _physical(v, ctx):
+    return _display(v, ctx, ctx.phys_white, ctx.phys_black)
+
+
+def _eetf(nits, ctx):
+    """BT.2390 EETF in PQ space: source [src_min, src_peak] -> [physical black, display peak]; identity when off."""
+    peak = ctx.peak
+    lo, hi = float(tr.pq_oetf(ctx.src_min)), float(tr.pq_oetf(peak))
+    rng = hi - lo
+    if not (ctx.display_peak > 0.0) or not (rng > 0.0) or ctx.display_peak >= peak:
+        return nits
+    max_t = (float(tr.pq_oetf(ctx.display_peak)) - lo) / rng
+    min_t = (float(tr.pq_oetf(ctx.phys_black)) - lo) / rng
+    ks = 1.5 * max_t - 0.5
+    e1 = np.clip((tr.pq_oetf(nits) - lo) / rng, 0.0, 1.0)
+    t = np.clip((e1 - ks) / (1.0 - ks), 0.0, 1.0)
+    t2, t3 = t * t, t * t * t
+    p = (2 * t3 - 3 * t2 + 1) * ks + (t3 - 2 * t2 + t) * (1 - ks) + (-2 * t3 + 3 * t2) * max_t
+    e2 = np.where(e1 >= ks, p, e1)
+    e3 = e2 + min_t * (1.0 - e2) ** 4
+    return np.minimum(tr.pq_eotf(e3 * rng + lo), ctx.display_peak)
 
 
 def _spline(ctx):
-    return tr.SplineTM(ctx.src_peak, dst_peak=ctx.white, src_min=ctx.src_min, dst_min=ctx.black)
+    return tr.SplineTM(ctx.peak, dst_peak=ctx.target_white, src_min=ctx.src_min, dst_min=ctx.target_black)
+
+
+def _signal_tm(v, ctx, sp):
+    """hdr_to_sdr: tone-mapped SDR signal (0..1) for the PQ signal v."""
+    l_out = np.clip(tr.pq_eotf(sp(v)), ctx.target_black, ctx.target_white)
+    return _display_inverse(l_out, ctx, ctx.target_white, ctx.target_black)
 
 
 def _luminance(codes, ctx, spline=None):
-    """Display luminance (nit) at float 10-bit codes; v < 0 evaluates as v = 0 (callers zero the BTB themselves)."""
+    """Analytic luminance (nit), sdr code and BTB mask at float 10-bit codes (BTB -> physical black)."""
+    codes = np.asarray(codes, np.float64)
     v = _v_of_code(codes, ctx.range)
-    v = np.clip(v, 0.0, None if ctx.kind == "sdr" else 1.0)
+    btb = v < 0.0
+    sdr_code = codes.copy()
     if ctx.kind == "sdr":
-        return _sdr_eotf(v, ctx)
-    if ctx.kind == "hdr_passthrough":
-        return _bt2390(v, ctx)
-    if ctx.kind == "hdr_to_sdr":
-        return _sdr_eotf((_tm_code(v, ctx, spline or _spline(ctx)) - 64.0) / 876.0, ctx)
-    raise ValueError("kind %r" % ctx.kind)
-
-
-def _tm_code(v, ctx, sp):
-    l_out = tr.pq_eotf(sp(v))
-    return 64.0 + 876.0 * np.clip(l_out / ctx.white, 0.0, 1.0) ** (1 / 2.4)
+        L = _physical(v, ctx)
+    elif ctx.kind == "hdr_passthrough":
+        L = np.maximum(_eetf(tr.pq_eotf(np.clip(v, 0.0, 1.0)), ctx), ctx.phys_black)
+    elif ctx.kind == "hdr_to_sdr":
+        sig = _signal_tm(np.clip(v, 0.0, 1.0), ctx, spline or _spline(ctx))
+        sdr_code = np.where(btb, codes, 64.0 + 876.0 * sig)
+        L = _physical(sig, ctx)
+    else:
+        raise ValueError("kind %r" % ctx.kind)
+    return np.where(btb, ctx.phys_black, L), sdr_code, btb
 
 
 def build_lut(ctx):
     c = np.arange(NCODES, dtype=np.float64)
     sp = _spline(ctx) if ctx.kind == "hdr_to_sdr" else None
-    L = _luminance(c, ctx, sp)
-    Lp, Lm = _luminance(c + 0.5, ctx, sp), _luminance(c - 0.5, ctx, sp)
+    L, sdr_code, btb = _luminance(c, ctx, sp)
+    lo = np.where(c == 0, c, c - 0.5)
+    hi = np.where(c == NCODES - 1, c, c + 0.5)
+    Ll, Lh = _luminance(lo, ctx, sp)[0], _luminance(hi, ctx, sp)[0]
+    span = hi - lo
     J = tr.pq_oetf(L)
-    S = tr.pq_oetf(Lp) - tr.pq_oetf(Lm)
-    V = np.abs(Lp - Lm) / (ctx.weber * np.maximum(L + ctx.l_floor, 1e-9))
-    v = np.clip(_v_of_code(c, ctx.range), 0.0, 1.0)
-    if ctx.kind == "sdr":
-        sdr_code = 64.0 + 876.0 * v
-    elif ctx.kind == "hdr_to_sdr":
-        sdr_code = _tm_code(v, ctx, sp)
-    else:
-        sdr_code = np.zeros_like(v)
-    btb = _v_of_code(c, ctx.range) < 0
-    J, S, V, L = (np.where(btb, 0.0, a) for a in (J, S, V, L))
+    S = (tr.pq_oetf(Lh) - tr.pq_oetf(Ll)) / span
+    lowest_step = float(tr.pq_eotf(1.0 / 1023.0))
+    V = np.abs(Lh - Ll) / span / (ctx.weber * np.maximum(L + ctx.l_floor, lowest_step))
+    J, S, V = (np.where(btb, 0.0, a) for a in (J, S, V))
     return dict(J=J, S=S, V=V, L=L, sdr_code=sdr_code)
 
 

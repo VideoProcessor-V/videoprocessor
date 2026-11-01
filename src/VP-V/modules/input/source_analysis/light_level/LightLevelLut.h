@@ -6,19 +6,23 @@
 // units. Header-only CPU reference, C++14, deterministic (fixed loops, no threads, no Windows headers).
 //
 // Contexts (Context::kind):
-//   Sdr            SDR source on an SDR display: optional SdrToneShape, then the display EOTF (BT.1886 with black,
-//                  numeric power, sRGB) with white = sdr_target_nits and black = sdr_black_nits.
+//   Sdr            SDR source on an SDR display: optional SdrToneShape, then the PHYSICAL display EOTF (BT.1886 with
+//                  black, numeric power, exact piecewise sRGB) with white / black = light_level_display_white_nits /
+//                  light_level_display_black_nits (auto = sdr_target_nits / sdr_black_nits).
 //   HdrPassthrough HDR source shown as HDR: PQ EOTF, then a BT.2390 EETF roll-off in PQ space from the source
-//                  [sourceMinNits, sourcePeakNits] to the display [sdr_black_nits, displayPeakNits] (approximation of
+//                  [sourceMinNits, sourcePeakNits] to the display [physical display black, displayPeakNits] (approximation of
 //                  the display's own roll-off, exactness Approx).
 //   HdrToSdr       HDR source tone mapped to SDR: exact port of tools/eval/tonemap_ref.py SplineTM (libplacebo 7.360
-//                  pl_tone_map_spline + st2094_pick_knee) with the ToneMappingTuning constants, static knee. The SDR
-//                  signal is 64 + 876 (L_out / white)^(1/gamma) (tonemap_ref.pq_out_to_sdr_code, gamma from the
-//                  hdr_tone_map_target_gamma setting), stored in Entry::sdrCode; L is the display EOTF of that signal.
+//                  pl_tone_map_spline + st2094_pick_knee) with the ToneMappingTuning constants, static knee, mapping
+//                  to the ENCODING target [sdr_black_nits, sdr_target_nits]. libplacebo encodes the tone-mapped light
+//                  L_out with the INVERSE of the target transfer including the target black, so the SDR signal is
+//                  signal = TargetDisplay.Inverse(clamp(L_out)), sdrCode = 64 + 876 signal (with black 0 this is
+//                  tonemap_ref.pq_out_to_sdr_code), stored in Entry::sdrCode. L is what the PHYSICAL display emits
+//                  for that signal: PhysicalDisplay(signal); with display auto, L == L_out.
 //
 // BTB rule: this is a LOOKUP. Pixel data keep their below-black and above-white values untouched (the owner rule);
 // the LUT never clamps picture data. Limited-range codes below 64 (v < 0) get J = S = V = 0 and L = display black
-// (sdr_black_nits); codes above white are looked up as written (SDR: curve continued, L capped at white; HDR: the
+// (the physical display black); codes above white are looked up as written (SDR: curve continued, L capped at white; HDR: the
 // PQ signal is clipped to [0, 1]).
 #pragma once
 
@@ -155,8 +159,9 @@ namespace LightLevel
 			Transfer transfer = Transfer::Bt1886;
 			double power = 2.4, white = 0, black = 0, a = 0, b = 0;
 
-			Display(const Settings& s) : transfer(s.transfer), power(EffectivePower(s)),
-				white(s.sdrTargetNits), black(s.sdrBlackNits)
+			// Encoding target display (sdr_target_nits / sdr_black_nits) or physical display (resolved display keys).
+			Display(const Settings& s, double whiteNits, double blackNits) : transfer(s.transfer),
+				power(s.transfer == Transfer::Power ? s.gammaPower : 2.4), white(whiteNits), black(blackNits)
 			{
 				if (transfer == Transfer::Bt1886)
 				{
@@ -181,6 +186,17 @@ namespace LightLevel
 					l = black + (white - black) * std::pow(std::max(v, 0.0), power);
 				return std::min(l, white);
 			}
+			// Exact inverse of operator() for L in [black, white]: nits -> signal. L below black gives signal 0
+			// (piecewise forms) or the BT.1886 signal that reproduces L.
+			double Inverse(double nits) const
+			{
+				if (transfer == Transfer::Bt1886)
+					return std::pow(std::max(nits, 0.0) / a, 1.0 / power) - b;
+				const double lin = std::max(nits - black, 0.0) / (white - black);
+				if (transfer == Transfer::Srgb)
+					return lin <= 0.04045 / 12.92 ? lin * 12.92 : 1.055 * std::pow(lin, 1.0 / 2.4) - 0.055;
+				return std::pow(lin, 1.0 / power);
+			}
 		};
 
 		// BT.2390 EETF in PQ space (ITU-R BT.2390-10 section 5.4.1, knee offset 1 = specification form).
@@ -201,11 +217,11 @@ namespace LightLevel
 			double operator()(double nits, double dstPeak) const
 			{
 				if (identity) return nits;
-				const double e1 = (pq::Oetf(nits) - minLum) / range;
+				const double e1 = std::min(1.0, std::max(0.0, (pq::Oetf(nits) - minLum) / range));   // clipped, mirrors light_level_ref.py
 				double e2 = e1;
 				if (e1 >= ks)
 				{
-					const double t = (e1 - ks) / (1.0 - ks), t2 = t * t, t3 = t2 * t;
+					const double t = std::min(1.0, std::max(0.0, (e1 - ks) / (1.0 - ks))), t2 = t * t, t3 = t2 * t;
 					e2 = (2.0 * t3 - 3.0 * t2 + 1.0) * ks + (t3 - 2.0 * t2 + t) * (1.0 - ks) + (-2.0 * t3 + 3.0 * t2) * maxT;
 				}
 				const double e3 = e2 + minT * std::pow(1.0 - e2, 4.0);
@@ -215,7 +231,7 @@ namespace LightLevel
 
 		inline bool PeakDetectionUsed(const Settings& s, const Context& c)
 		{
-			return c.dynamicPeakNits > 0.0 && s.peakDetection != PeakDetection::Off;
+			return c.dynamicPeakNits > 0.0 && PeakDetectionOn(s);
 		}
 
 		// One continuous evaluation of the analytic map at (possibly half-integer) code c.
@@ -223,7 +239,8 @@ namespace LightLevel
 		{
 			const Settings& s;
 			const Context& ctx;
-			Display display;
+			Display target;     // encoding target: sdr_target_nits / sdr_black_nits
+			Display display;    // physical display: light_level_display_white_nits / _black_nits
 			std::array<double, ToneMappingTuning::Count> tone;
 			double srcPeak;
 			Spline spline;
@@ -243,10 +260,11 @@ namespace LightLevel
 			}
 
 			Evaluator(const Settings& settings, const Context& context)
-				: s(settings), ctx(context), display(settings), tone(Resolve(settings)),
+				: s(settings), ctx(context), target(settings, settings.sdrTargetNits, settings.sdrBlackNits),
+				display(settings, settings.displayWhiteNits, settings.displayBlackNits), tone(Resolve(settings)),
 				srcPeak(SourcePeak(settings, context)),
 				spline(srcPeak, settings.sdrTargetNits, context.sourceMinNits, settings.sdrBlackNits, tone),
-				eetf(context.sourceMinNits, srcPeak, settings.sdrBlackNits, context.displayPeakNits) {}
+				eetf(context.sourceMinNits, srcPeak, settings.displayBlackNits, context.displayPeakNits) {}
 
 			double Signal(double c) const { return ctx.fullRange ? c / 1023.0 : (c - 64.0) / 876.0; }
 			bool Btb(double c) const { return Signal(c) < 0.0; }
@@ -256,7 +274,7 @@ namespace LightLevel
 			{
 				sdrCode = c;
 				const double v = Signal(c);
-				if (v < 0.0) return s.sdrBlackNits;     // BTB: display black, see the header
+				if (v < 0.0) return s.displayBlackNits;     // BTB: physical display black, see the header
 				switch (ctx.kind)
 				{
 				case Context::Sdr:
@@ -271,12 +289,12 @@ namespace LightLevel
 				{
 					const double nits = pq::Eotf(v);
 					const double peak = ctx.displayPeakNits > 0.0 ? ctx.displayPeakNits : srcPeak;
-					return std::max(eetf(nits, peak), s.sdrBlackNits);
+					return std::max(eetf(nits, peak), s.displayBlackNits);
 				}
 				default:    // HdrToSdr
 				{
 					const double out = pq::Eotf(spline(std::min(std::max(v, 0.0), 1.0)));
-					const double sig = std::pow(std::max(out / s.sdrTargetNits, 0.0), 1.0 / EffectivePower(s));
+					const double sig = target.Inverse(std::min(std::max(out, s.sdrBlackNits), s.sdrTargetNits));
 					sdrCode = 64.0 + 876.0 * sig;
 					return display(sig);
 				}
@@ -290,7 +308,8 @@ namespace LightLevel
 	inline std::string Fingerprint(const Settings& s, const Context& c)
 	{
 		std::ostringstream o; o.imbue(std::locale::classic()); o << std::setprecision(17);
-		o << "LL1|" << s.weber << '|' << s.ambientNits << '|' << s.sdrTargetNits << '|' << s.sdrBlackNits << '|'
+		o << "LL2|" << s.weber << '|' << s.ambientNits << '|' << s.sdrTargetNits << '|' << s.sdrBlackNits << '|'
+			<< s.displayWhiteNits << '|' << s.displayBlackNits << '|' << s.quality << '|'
 			<< static_cast<int>(s.transfer) << '|' << s.gammaPower << '|' << s.toneMapping << '|'
 			<< static_cast<int>(s.peakDetection) << '|' << ToneMappingTuning::Fingerprint(s.tuning) << '|'
 			<< (s.shape.knee ? 1 : 0) << '|' << s.shape.headroom << '|' << s.shape.kneeStart << '|' << s.shape.kneeStrength
@@ -305,7 +324,7 @@ namespace LightLevel
 		lut.fingerprint = Fingerprint(s, c);
 		const detail::Evaluator ev(s, c);
 
-		// Exactness and status.
+		// Exactness and status: every reason the map is an approximation is named, joined with "; ".
 		lut.exactness = Exactness::Exact;
 		if (c.kind == Context::Sdr)
 			lut.status = "light level: exact (SDR display EOTF)";
@@ -314,25 +333,29 @@ namespace LightLevel
 			lut.exactness = Exactness::Approx;
 			lut.status = "light level: HDR passthrough (approx display roll-off)";
 		}
-		else if (detail::PeakDetectionUsed(s, c))
-		{
-			lut.exactness = Exactness::Approx;
-			lut.status = "light level: approx (dynamic tone mapping)";
-		}
-		else if (s.toneMapping != "auto" && s.toneMapping != "spline")
-		{
-			lut.exactness = Exactness::Approx;
-			lut.status = "light level: approx (tone_mapping " + s.toneMapping + " not modelled; spline used)";
-		}
 		else
-			lut.status = "light level: exact (spline tone map)";
-		if (c.kind == Context::HdrToSdr && lut.exactness == Exactness::Approx && s.toneMapping != "auto" &&
-			s.toneMapping != "spline" && detail::PeakDetectionUsed(s, c))
-			lut.status += "; tone_mapping " + s.toneMapping + " not modelled";
+		{
+			std::vector<std::string> reasons;
+			if (s.toneMapping != "auto" && s.toneMapping != "spline")
+				reasons.push_back("tone_mapping " + s.toneMapping + " not modelled; spline used");
+			if (PeakDetectionOn(s))
+				reasons.push_back(c.dynamicPeakNits > 0.0 ? "dynamic tone mapping"
+					: "dynamic tone mapping; static curve, no VP peak estimate");
+			if (reasons.empty())
+				lut.status = "light level: exact (spline tone map)";
+			else
+			{
+				lut.exactness = Exactness::Approx;
+				lut.status = "light level: approx (";
+				for (std::size_t r = 0; r < reasons.size(); ++r)
+					lut.status += (r ? "; " : "") + reasons[r];
+				lut.status += ")";
+			}
+		}
 
 		// Analytic maps, central difference over +-0.5 code (one-sided at the ends).
 		const double lowestStep = pq::Eotf(1.0 / (kLutSize - 1));   // PQ minimum step at 0: the only denominator guard
-		const double floorNits = s.sdrBlackNits + s.ambientNits;
+		const double floorNits = s.displayBlackNits + s.ambientNits;
 		for (int i = 0; i < kLutSize; ++i)
 		{
 			Entry& en = lut.e[static_cast<std::size_t>(i)];

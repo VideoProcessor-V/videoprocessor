@@ -36,11 +36,15 @@ GRAIN_SEEDS = {0.0: 20260001, 0.5: 20260002, 1.5: 20260003}  # fixed; per-shape 
 SHAPE_OFFSET = {"horizontal": 0, "vertical": 100, "radial": 200}
 SUITE_WHITE, SUITE_BLACK, DISPLAY_PEAK = 100.0, 0.05, 600.0
 CONTEXTS = {
-    "sdr": dict(kind="sdr", white=SUITE_WHITE, black=SUITE_BLACK, eotf="bt1886"),
-    "hdr_pq_1000": dict(kind="hdr_passthrough", white=DISPLAY_PEAK, black=SUITE_BLACK, src_peak=1000.0),
-    "hdr_pq_4000": dict(kind="hdr_passthrough", white=DISPLAY_PEAK, black=SUITE_BLACK, src_peak=4000.0),
-    "lldv_1000": dict(kind="hdr_passthrough", white=DISPLAY_PEAK, black=SUITE_BLACK, src_peak=1000.0),
-    "lldv_4000": dict(kind="hdr_passthrough", white=DISPLAY_PEAK, black=SUITE_BLACK, src_peak=4000.0),
+    "sdr": dict(kind="sdr", target_white=SUITE_WHITE, target_black=SUITE_BLACK, eotf="bt1886"),
+    "hdr_pq_1000": dict(kind="hdr_passthrough", target_white=SUITE_WHITE, target_black=SUITE_BLACK,
+                        display_peak=DISPLAY_PEAK, display_black=SUITE_BLACK, src_peak=1000.0),
+    "hdr_pq_4000": dict(kind="hdr_passthrough", target_white=SUITE_WHITE, target_black=SUITE_BLACK,
+                        display_peak=DISPLAY_PEAK, display_black=SUITE_BLACK, src_peak=4000.0),
+    "lldv_1000": dict(kind="hdr_passthrough", target_white=SUITE_WHITE, target_black=SUITE_BLACK,
+                        display_peak=DISPLAY_PEAK, display_black=SUITE_BLACK, src_peak=1000.0),
+    "lldv_4000": dict(kind="hdr_passthrough", target_white=SUITE_WHITE, target_black=SUITE_BLACK,
+                        display_peak=DISPLAY_PEAK, display_black=SUITE_BLACK, src_peak=4000.0),
 }
 SDR_CONTEXTS = ("sdr",)
 
@@ -61,9 +65,9 @@ def ramp_luminance(shape, h, w, lo_nit, hi_nit):
 
 
 def _sdr_code_of_L(L, ctx):
-    g = ctx.gamma
-    d = ctx.white ** (1 / g) - ctx.black ** (1 / g)
-    a, b = d ** g, ctx.black ** (1 / g) / d
+    g = 2.4  # BT.1886
+    d = ctx.target_white ** (1 / g) - ctx.target_black ** (1 / g)
+    a, b = d ** g, ctx.target_black ** (1 / g) / d
     v = np.clip((np.asarray(L) / a) ** (1 / g) - b, 0.0, 1.0)  # BT.1886 inverse
     return 64.0 + 876.0 * v
 

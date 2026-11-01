@@ -11,8 +11,8 @@
    "frames": 2,
    "light_context": {
     "kind": "sdr",
-    "white": 100.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
     "eotf": "bt1886"
    },
    "master": {
@@ -55,8 +55,8 @@
    "frames": 2,
    "light_context": {
     "kind": "sdr",
-    "white": 100.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
     "eotf": "bt1886"
    },
    "master": {
@@ -99,8 +99,8 @@
    "frames": 2,
    "light_context": {
     "kind": "sdr",
-    "white": 100.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
     "eotf": "bt1886"
    },
    "master": {
@@ -143,8 +143,8 @@
    "frames": 2,
    "light_context": {
     "kind": "sdr",
-    "white": 100.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
     "eotf": "bt1886"
    },
    "master": {
@@ -187,8 +187,8 @@
    "frames": 2,
    "light_context": {
     "kind": "sdr",
-    "white": 100.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
     "eotf": "bt1886"
    },
    "master": {
@@ -231,8 +231,8 @@
    "frames": 2,
    "light_context": {
     "kind": "sdr",
-    "white": 100.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
     "eotf": "bt1886"
    },
    "master": {
@@ -275,8 +275,8 @@
    "frames": 2,
    "light_context": {
     "kind": "sdr",
-    "white": 100.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
     "eotf": "bt1886"
    },
    "master": {
@@ -319,8 +319,8 @@
    "frames": 2,
    "light_context": {
     "kind": "sdr",
-    "white": 100.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
     "eotf": "bt1886"
    },
    "master": {
@@ -363,8 +363,8 @@
    "frames": 2,
    "light_context": {
     "kind": "sdr",
-    "white": 100.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
     "eotf": "bt1886"
    },
    "master": {
@@ -407,8 +407,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 1000.0
    },
    "master": {
@@ -451,8 +453,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 1000.0
    },
    "master": {
@@ -495,8 +499,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 1000.0
    },
    "master": {
@@ -539,8 +545,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 1000.0
    },
    "master": {
@@ -583,8 +591,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 1000.0
    },
    "master": {
@@ -627,8 +637,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 1000.0
    },
    "master": {
@@ -671,8 +683,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 1000.0
    },
    "master": {
@@ -715,8 +729,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 1000.0
    },
    "master": {
@@ -759,8 +775,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 1000.0
    },
    "master": {
@@ -803,8 +821,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 4000.0
    },
    "master": {
@@ -847,8 +867,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 4000.0
    },
    "master": {
@@ -891,8 +913,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 4000.0
    },
    "master": {
@@ -935,8 +959,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 4000.0
    },
    "master": {
@@ -979,8 +1005,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 4000.0
    },
    "master": {
@@ -1023,8 +1051,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 4000.0
    },
    "master": {
@@ -1067,8 +1097,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 4000.0
    },
    "master": {
@@ -1111,8 +1143,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 4000.0
    },
    "master": {
@@ -1155,8 +1189,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 4000.0
    },
    "master": {
@@ -1199,8 +1235,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 1000.0
    },
    "master": {
@@ -1243,8 +1281,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 1000.0
    },
    "master": {
@@ -1287,8 +1327,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 1000.0
    },
    "master": {
@@ -1331,8 +1373,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 1000.0
    },
    "master": {
@@ -1375,8 +1419,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 1000.0
    },
    "master": {
@@ -1419,8 +1465,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 1000.0
    },
    "master": {
@@ -1463,8 +1511,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 1000.0
    },
    "master": {
@@ -1507,8 +1557,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 1000.0
    },
    "master": {
@@ -1551,8 +1603,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 1000.0
    },
    "master": {
@@ -1595,8 +1649,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 4000.0
    },
    "master": {
@@ -1639,8 +1695,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 4000.0
    },
    "master": {
@@ -1683,8 +1741,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 4000.0
    },
    "master": {
@@ -1727,8 +1787,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 4000.0
    },
    "master": {
@@ -1771,8 +1833,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 4000.0
    },
    "master": {
@@ -1815,8 +1879,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 4000.0
    },
    "master": {
@@ -1859,8 +1925,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 4000.0
    },
    "master": {
@@ -1903,8 +1971,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 4000.0
    },
    "master": {
@@ -1947,8 +2017,10 @@
    "frames": 2,
    "light_context": {
     "kind": "hdr_passthrough",
-    "white": 600.0,
-    "black": 0.05,
+    "target_white": 100.0,
+    "target_black": 0.05,
+    "display_peak": 600.0,
+    "display_black": 0.05,
     "src_peak": 4000.0
    },
    "master": {

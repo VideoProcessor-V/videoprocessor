@@ -13,25 +13,36 @@ binding. Nothing here is wired yet.
 
 ## Contexts (`Context::kind`)
 
-- **Sdr**: optional `SdrToneShape::Map` (when `sdr_tone_shape`/`sdr_white_headroom` are active), then the display EOTF
-  with white `sdr_target_nits` and black `sdr_black_nits`. BT.1886: g = 2.4, a = (Lw^(1/g) - Lb^(1/g))^g,
+- **Sdr**: optional `SdrToneShape::Map` (when `sdr_tone_shape`/`sdr_white_headroom` are active), then the PHYSICAL
+  display EOTF with white `light_level_display_white_nits` and black `light_level_display_black_nits` (auto =
+  `sdr_target_nits` / `sdr_black_nits`). BT.1886: g = 2.4, a = (Lw^(1/g) - Lb^(1/g))^g,
   b = Lb^(1/g) / (Lw^(1/g) - Lb^(1/g)), L = a max(v + b, 0)^g. Numeric power: L = Lb + (Lw - Lb) v^g. sRGB: piecewise,
   likewise. Above white the curve continues and L is capped at Lw. Exact.
 - **HdrPassthrough**: L = PQ EOTF(v), then a BT.2390 EETF roll-off in PQ space from [sourceMinNits, sourcePeakNits]
-  (10000 when unknown) to [sdr_black_nits, displayPeakNits]. Approximation of the display's own roll-off: Approx.
+  (10000 when unknown) to [physical display black, displayPeakNits]. Approximation of the display's own roll-off: Approx.
 - **HdrToSdr**: exact port of `tools/eval/tonemap_ref.py` `SplineTM` (libplacebo 7.360 `pl_tone_map_spline` with the
   ST 2094 knee pick), constants from the ToneMappingTuning keys (auto = Specs() default), src peak = mastering peak
-  (static knee), src min = `sourceMinNits`, dst = [`sdr_black_nits`, `sdr_target_nits`], input clipped to
-  [PQ(src min), PQ(src peak)]. SDR signal = 64 + 876 (L_out / Lw)^(1/g), g from `hdr_tone_map_target_gamma`
-  (bt1886 2.4, srgb approximated by 2.2, numeric power); stored in `Entry::sdrCode`; L = display EOTF of that signal.
-  Peak detection on (a measured `dynamicPeakNits`) uses it as the source peak: Approx ("dynamic tone mapping"; the scene
-  average knee is not modelled). `tone_mapping` other than auto/spline uses the spline: Approx, status names the curve.
+  (static knee), src min = `sourceMinNits`, dst = the ENCODING target [`sdr_black_nits`, `sdr_target_nits`], input
+  clipped to [PQ(src min), PQ(src peak)]. libplacebo encodes the tone-mapped light L_out with the INVERSE of the target
+  transfer including the target black, so the display reproduces L_out:
+  signal = TargetDisplay.Inverse(clamp(L_out, Lb_t, Lw_t)); sdrCode = 64 + 876 signal (stored in `Entry::sdrCode`);
+  L = PhysicalDisplay(signal). TargetDisplay uses `sdr_target_nits` / `sdr_black_nits` / `hdr_tone_map_target_gamma`;
+  PhysicalDisplay uses the display keys. With the display on auto, L == L_out; with target black 0 and BT.1886 this is
+  `tonemap_ref.pq_out_to_sdr_code` ((L_out / Lw)^(1/2.4)). `Display::Inverse` is the exact inverse of the display
+  EOTF (BT.1886 with black, power with black, piecewise sRGB). sRGB is approximated by gamma 2.2 only in the SDR
+  tone-shape power (matching the renderer, `EffectivePower`); Display / Inverse use the exact piecewise sRGB.
+  Any peak detection that is on is Approx (the scene-average knee is not modelled): with a VP peak estimate
+  (`dynamicPeakNits` > 0, used as the source peak) "light level: approx (dynamic tone mapping)", without one "light
+  level: approx (dynamic tone mapping; static curve, no VP peak estimate)". `peak_detection: auto` keeps the quality
+  preset's value: on for quality high / balanced, off for fast (LibplaceboRenderParameters.cpp:317-326, presets
+  :45-50). `tone_mapping` other than auto/spline uses the spline and adds "tone_mapping X not modelled; spline used".
+  The status names every reason, joined with "; ".
 
 ## Units and formulas
 
 Per code c in 0..1023: v = (c - 64) / 876 limited, c / 1023 full. J = PQ_OETF(L) in 0..1. S = dJ/dcode, central
 difference over +-0.5 code of the same analytic map (one-sided at the ends). V = |dL/dcode| /
-(weber (L + L_floor)), L_floor = sdr_black_nits + light_level_ambient_nits; one V unit = one just-visible Weber step per
+(weber (L + L_floor)), L_floor = physical display black + light_level_ambient_nits; one V unit = one just-visible Weber step per
 code. Where L + L_floor is 0 the denominator uses the PQ minimum step (PQ EOTF of 1/1023, a format constant).
 
 BTB: limited-range codes below 64 get J = S = V = 0 and L = display black. The LUT is a lookup: pixel data keep their
@@ -40,9 +51,12 @@ clips the PQ signal to 1.
 
 ## Settings
 
-VP-owned (`Specs()`): `light_level_weber` (default 0.02, 0.001 to 0.2, provisional) and `light_level_ambient_nits`
-(default 0, 0 to 1000, provisional). Read (existing keys, renderer parse rules, cited in LightLevelSettings.h):
-`sdr_target_nits`, `sdr_black_nits` (auto = 0), `hdr_tone_map_target_gamma`, `tone_mapping`, `peak_detection`, the
+VP-owned (`Specs()`): `light_level_weber` (default 0.02, 0.001 to 0.2, provisional), `light_level_ambient_nits`
+(default 0, 0 to 1000, provisional), `light_level_display_white_nits` (`auto` = `sdr_target_nits`, or 1 to 10000,
+provisional) and `light_level_display_black_nits` (`auto` = `sdr_black_nits`, or 0 to 100, provisional); white must
+exceed black, else a note and both fall back to auto. They describe the PHYSICAL display, separate from the ENCODING
+target (`sdr_target_nits` / `sdr_black_nits`). Read (existing keys, renderer parse rules, cited in LightLevelSettings.h):
+`sdr_target_nits`, `sdr_black_nits` (auto = 0), `hdr_tone_map_target_gamma`, `tone_mapping`, `peak_detection`, `quality` (selects the preset for `peak_detection: auto`), the
 ToneMappingTuning keys, `sdr_tone_shape`, `sdr_white_headroom`, `sdr_knee_start`, `sdr_knee_strength`. An invalid value
 falls back to the default and adds a line to `Settings::notes`. No nit, rate or resolution is hard-coded: everything is
 a setting or comes in through `Context`.

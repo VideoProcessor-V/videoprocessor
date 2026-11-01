@@ -22,7 +22,7 @@ import tonemap_ref as tr  # noqa: E402
 
 class LightLevelRef(unittest.TestCase):
     def test_hdr_to_sdr_matches_spline(self):
-        ctx = llr.Context(kind="hdr_to_sdr", white=100.0, black=0.0, src_peak=1000.0)
+        ctx = llr.Context(kind="hdr_to_sdr", target_white=100.0, target_black=0.0, src_peak=1000.0)
         lut = llr.build_lut(ctx)
         sp = tr.SplineTM(1000.0, dst_peak=100.0, src_min=0.0, dst_min=0.0)
         for c in (64, 100, 200, 400, 600, 800, 940):
@@ -54,7 +54,7 @@ def ramp(h, w, lo, hi):
 
 
 class LightMetrics(unittest.TestCase):
-    CTX = llr.Context(kind="sdr")
+    CTX = llr.Context(kind="sdr", target_white=100.0, target_black=0.05)
 
     def test_banding_steps_shadow_vs_mids(self):
         # smooth ramp with coarse 8 px steps (a step of 4 codes) in the shadow half only
@@ -92,6 +92,35 @@ class LightMetrics(unittest.TestCase):
         rb = lm.shadow_texture_kept(m, plain, blur, self.CTX, None, 5.0, tile=8)
         self.assertLess(rb["ratio"], 0.9)
         self.assertFalse(rb["pass"])
+
+
+class FinalStepMetrics(unittest.TestCase):
+    CTX = stack_runner.SDR_EVAL
+
+    def test_btb_survives_both_finals(self):
+        rng = np.random.default_rng(3)
+        master = np.stack([np.where(rng.random((48, 48)) < 0.5, 56.0, 120.0)] * 2)  # BTB at -8 ten-bit codes
+        for final in ("nd", "sd"):
+            out = stack_runner.finalise(master, final)
+            kept, n = lm.btb_kept(master, out)
+            self.assertGreater(n, 0)
+            self.assertEqual(kept, 1.0, final)
+        # within half an output step of black is not counted
+        self.assertEqual(lm.btb_kept(np.full((4, 4), 63.0), np.full((4, 4), 64.0))[1], 0)
+
+    def test_identical_candidate_and_plain(self):
+        rng = np.random.default_rng(11)
+        master = np.stack([100.0 + 14.0 * rng.standard_normal((96, 96)) for _ in range(2)])
+        lut = llr.build_lut(self.CTX)
+        for final in ("nd", "sd"):
+            plain = stack_runner.finalise(master, final)
+            r = stack_runner.evaluate(master, plain, plain.copy(), self.CTX, lut)
+            self.assertAlmostEqual(r["grain_rms_ratio"], 1.0, places=9, msg=final)
+            tex = [r[k] for k in ("tex_lt5", "tex_5to50") if r[k] is not None]
+            self.assertTrue(tex, r["na"])
+            for t in tex:
+                self.assertAlmostEqual(t, 1.0, places=9)
+            self.assertIsNotNone(r["grain_ratio_master"])
 
 
 class SigmaDeltaVectors(unittest.TestCase):

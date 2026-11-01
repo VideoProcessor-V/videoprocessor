@@ -26,6 +26,9 @@
     "config_keys": [
       "light_level_ambient_nits",
       "light_level_weber",
+      "light_level_display_white_nits",
+      "light_level_display_black_nits",
+      "quality",
       "hdr_tone_map_target_gamma",
       "peak_detection",
       "sdr_black_nits",
