@@ -29,6 +29,10 @@ correlation increase <= 0.05.
   `Tuning::gates` (`strongerMargin`, `baseNoiseCodes`, `baseGrainSigmas`, `uncertaintyPx`; defaults = the constants) and
   `forceWeight` (the transfer ceiling, measurement only). `tools/td-cli` drives the CPU model on real encodes with them
   (test/temporal-detail-real; its own mirrored active-picture wrapper was superseded by `FrameIn::active` at integration).
+- Measurement ablation (test/td-real-vectors; `Model::Tuning`, never user settings): `gatesOff` (gate ablation bits
+  `Tuning::GateBits`: each set bit forces that gate open; 0 = the designed model, byte-identical) and `typeAdmission`
+  (admission from the TRUE coded frame type `FrameIn::codedType`, offline only; false = byte-identical). `td_cli` reads
+  both from its header and the FRM1 flags (4 I, 8 P, 16 B); per-block `Diagnostics::refSeq` names the reference frame; the gate bits also change the template cleaner's member selection, `kGateAge` opens the age gate only up to 4 x `maxAge`, and only `--stdio` takes the knobs (stats JSON ends with `q_mean` and `refs`).
 
 ## Algorithm (CPU reference model `TemporalDetailModel.h`; shaders mirror it)
 
