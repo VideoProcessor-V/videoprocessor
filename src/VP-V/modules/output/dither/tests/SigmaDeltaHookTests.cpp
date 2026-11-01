@@ -1741,7 +1741,7 @@ namespace VideoProcessorTest
 				a.qOut = DitherNeed::QOut(kColorBits);
 				a.alpha = DitherNeed::AlphaFor(dt, fa.params.tauSeconds);
 				// reset / off come from the shared decision (DitherNeed::StateTracker::Decide), not from this test
-				const DitherNeed::Gpu::BlockPass::StepResult st = pass.Step(gpu, dispatch, a, fa);
+				const DitherNeed::Gpu::BlockPass::StepResult st = pass.Step(gpu, dispatch, a, fa, false);
 				Assert::IsTrue(st.decision.result == res, L"the GPU decision differs from the CPU class");
 				const bool expectReset = s == 0 || disc || afterOff;
 				afterOff = offStep;
@@ -2037,7 +2037,7 @@ if (g.y == 0 && g.x < DN_N) {
 				DitherNeed::Gpu::Args a = DwArgs(ft, fx, lutTex, lutOutTex, fa);
 				a.blockPx = fa.grid.B;
 				Assert::IsTrue(mirror.Update(fa, bf) == DitherNeed::Result::On);
-				const DitherNeed::Gpu::BlockPass::StepResult st = pass.Step(gpu, dispatch, a, fa);
+				const DitherNeed::Gpu::BlockPass::StepResult st = pass.Step(gpu, dispatch, a, fa, false);
 				DwCheck(st.ran, std::string(c.what) + ": " + pass.LastError());
 				Assert::AreEqual(c.expectReset, st.decision.reset, (L"reset decision: " + DnWide(c.what)).c_str());
 				worst = (std::max)(worst, DwWorstDiff(gpu, pass.Current(), mirror.Extra()));
@@ -2087,7 +2087,7 @@ if (g.y == 0 && g.x < DN_N) {
 				DitherNeed::FrameArgs fa = DnArgs(fx.grid, 1.0 / 60, false, "fp");
 				fa.needed = true;
 				DitherNeed::Gpu::Args good = DwArgs(ft, fx, lutTex, lutOutTex, fa);
-				DitherNeed::Gpu::BlockPass::StepResult st = pass.Step(gpu, dispatch, good, fa);
+				DitherNeed::Gpu::BlockPass::StepResult st = pass.Step(gpu, dispatch, good, fa, false);
 				DwCheck(st.ran && pass.Current() != nullptr, std::string(c.what) + ": the healthy first frame must run");
 				DitherNeed::Gpu::Args bad = good;
 				switch (c.want)
@@ -2099,7 +2099,7 @@ if (g.y == 0 && g.x < DN_N) {
 				case DitherNeed::kNoLut: bad.lutOut = nullptr; break;
 				default: bad.lut = shortLut; break;
 				}
-				st = pass.Step(gpu, dispatch, bad, fa);
+				st = pass.Step(gpu, dispatch, bad, fa, false);
 				Assert::IsFalse(st.ran, (L"skipped: " + DnWide(c.what)).c_str());
 				Assert::IsTrue((st.missing & c.want) == c.want, (L"missing bit: " + DnWide(c.what)).c_str());
 				Assert::IsTrue(st.decision.result == DitherNeed::Result::Unavailable);
@@ -2108,10 +2108,30 @@ if (g.y == 0 && g.x < DN_N) {
 				// recovery: a reset, equal to a fresh mirror
 				DitherNeed::MapF fresh;
 				Assert::IsTrue(fresh.Update(fa, bf) == DitherNeed::Result::On);
-				st = pass.Step(gpu, dispatch, good, fa);
+				st = pass.Step(gpu, dispatch, good, fa, false);
 				DwCheck(st.ran, std::string(c.what) + ": recovery " + pass.LastError());
 				Assert::IsTrue(st.decision.reset, L"recovery resets");
 				DwCheck(DwWorstDiff(gpu, pass.Current(), fresh.Extra()) <= 1e-5, std::string(c.what) + ": the recovered map differs from a fresh reset");
+				pass.Release(gpu);
+			}
+			// a missing product is Unavailable even when the LUT says the step is invisible (as on the CPU), and the fa / args grids must agree
+			{
+				DitherNeed::Gpu::BlockPass pass;
+				DitherNeed::FrameArgs fa = DnArgs(fx.grid, 1.0 / 60, false, "fp");
+				fa.needed = false;
+				DitherNeed::Gpu::Args bad = DwArgs(ft, fx, lutTex, lutOutTex, fa);
+				bad.gsBlocks = nullptr;
+				DitherNeed::Gpu::BlockPass::StepResult st = pass.Step(gpu, dispatch, bad, fa, false);
+				Assert::IsTrue(st.decision.result == DitherNeed::Result::Unavailable && (st.missing & DitherNeed::kNoGrain) != 0, L"missing product + not needed");
+				fa.needed = true;
+				DitherNeed::Gpu::Args good = DwArgs(ft, fx, lutTex, lutOutTex, fa);
+				fa.grid.gw += 1;
+				st = pass.Step(gpu, dispatch, good, fa, false);
+				Assert::IsTrue((st.missing & DitherNeed::kGrainGridMismatch) != 0, L"fa / args grid disagreement");
+				fa.grid.gw -= 1;
+				st = pass.Step(gpu, dispatch, good, fa, true);
+				Assert::AreEqual(DwHaveSetTexture(), st.ran, L"without the fork's set_texture the frame is Unavailable (kNoSetTexture)");
+				if (!DwHaveSetTexture()) Assert::IsTrue((st.missing & DitherNeed::kNoSetTexture) != 0);
 				pass.Release(gpu);
 			}
 			ft.Destroy(gpu);

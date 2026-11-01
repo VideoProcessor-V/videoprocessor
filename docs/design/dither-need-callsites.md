@@ -17,3 +17,4 @@ Status: `dither_need` (output.dither) is implemented in VP-V files only. The lin
    - `FallbackCatalog::Sync(registry, FallbackCatalog::DitherNeed(requested, DitherNeed::MissingText(mask)))`.
 4. Shader list: none (the sigma-delta shader file is VP-V; `VPDN` is a 1x1 placeholder like `VPVEC`).
 5. libplacebo: `pl_mpv_user_shader_set_texture` (fork patch 0004, `PL_VP_MPV_USER_SHADER_SET_TEXTURE`) is required to bind `VPDN`; without it `HookGuard::Apply` returns false and the feature reports unavailable.
+6. Lifetime: call `DitherNeed::Gpu::BlockPass::Release(oldGpu)` BEFORE a `pl_gpu` is destroyed (device loss, renderer reset, target change); its two state textures belong to that gpu. `Release` also invalidates the state tracker.

@@ -57,6 +57,19 @@ namespace DitherNeed
 			bool off = false;                                                  // skipped frame: Run() invalidates and returns
 		};
 
+		// Internal linkage, as SigmaDeltaVectors: the bodies depend on which libplacebo the translation unit sees.
+		namespace
+		{
+			inline bool Supported()
+			{
+#ifdef PL_VP_MPV_USER_SHADER_SET_TEXTURE
+				return true;
+#else
+				return false;
+#endif
+			}
+		}
+
 		class BlockPass
 		{
 		public:
@@ -98,10 +111,21 @@ namespace DitherNeed
 			// One frame: Decide (the caller's `fa.missing`, e.g. no LUT / unsupported domain / no set_texture, plus the GPU
 			// input validation), then the pass when On. Every other outcome Invalidate()s the product. The block-grid geometry
 			// of `fa` and `a` must agree (fa.grid.gw/gh = a.gridW/gridH). a.reset / a.off are set from the decision.
-			StepResult Step(pl_gpu gpu, pl_dispatch dispatch, Args a, FrameArgs fa)
+			// The pass values (params, qOut, alpha) are taken from `fa`, the one copy of the frame's values; a block grid that
+			// `fa` and `a` disagree on is a grain-grid mismatch. requireBind (default true): the product is useless without the
+			// fork's set_texture, so the frame reports kNoSetTexture; pass false to exercise the block pass alone.
+			StepResult Step(pl_gpu gpu, pl_dispatch dispatch, Args a, FrameArgs fa, bool requireBind = true)
 			{
 				StepResult r;
-				if (fa.enabled && fa.needed) fa.missing |= Validate(a);
+				if (fa.enabled)   // a missing product must read Unavailable, not NotNeeded, exactly as on the CPU
+				{
+					fa.missing |= Validate(a);
+					if (fa.grid.gw != a.gridW || fa.grid.gh != a.gridH) fa.missing |= kGrainGridMismatch;
+					if (requireBind && !Supported()) fa.missing |= kNoSetTexture;
+				}
+				a.params = fa.params;
+				a.qOut = QOut(fa.colorBits);
+				a.alpha = AlphaFor(fa.dtSeconds, fa.params.tauSeconds);
 				r.decision = m_tracker.Decide(fa);
 				r.missing = r.decision.missing;
 				if (r.decision.off) { Invalidate(); return r; }
@@ -125,7 +149,7 @@ namespace DitherNeed
 			}
 
 			// A skipped frame (setting off, not needed, an input missing, a failed pass): nothing is bound, the next pass resets.
-			void Invalidate() { m_valid = false; }
+			void Invalidate() { m_valid = false; m_tracker.Invalidate(); }
 
 			// One pass. A (re)created state texture forces reset (its contents are undefined) and clears the valid flag; the
 			// flag is set again only by a successful pass; a failed pass invalidates. a.off = Invalidate and return true.
@@ -253,15 +277,6 @@ namespace DitherNeed
 #else
 				(void)hook;
 				(void)state;
-				return false;
-#endif
-			}
-
-			inline bool Supported()
-			{
-#ifdef PL_VP_MPV_USER_SHADER_SET_TEXTURE
-				return true;
-#else
 				return false;
 #endif
 			}
