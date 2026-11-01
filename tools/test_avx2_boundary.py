@@ -22,17 +22,9 @@ def project(path):
     return ET.parse(path).getroot()
 
 
-def lib_compiles():
-    """Lib's ClCompile items, including the VP-V items moved to src/VP-V/build (M2 H7 import)."""
-    items = project(LIB / "VideoProcessor-Lib.vcxproj").findall("m:ItemGroup/m:ClCompile", NS)
-    props = ROOT / "src/VP-V/build/VideoProcessor-Lib.items.props"
-    if props.exists():
-        items += project(props).findall("m:ItemGroup/m:ClCompile", NS)
-    return items
-
-
 def kernels():
-    return [item for item in lib_compiles() if item.attrib["Include"].endswith(".AVX2.cpp")]
+    return [item for item in project(LIB / "VideoProcessor-Lib.vcxproj").findall(
+        "m:ItemGroup/m:ClCompile", NS) if item.attrib["Include"].endswith(".AVX2.cpp")]
 
 
 def coff(path):
@@ -86,7 +78,7 @@ class Avx2BoundaryTests(unittest.TestCase):
                 self.assertNotIn("Condition", setting.attrib)
 
     def test_no_avx2_intrinsics_in_baseline_sources(self):
-        for item in lib_compiles():
+        for item in project(LIB / "VideoProcessor-Lib.vcxproj").findall("m:ItemGroup/m:ClCompile", NS):
             source = LIB / Path(item.attrib["Include"].replace("\\", "/"))
             if source.name.endswith(".AVX2.cpp"):
                 continue
