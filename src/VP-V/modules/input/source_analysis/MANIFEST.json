@@ -6,6 +6,7 @@
   "status": "partial",
   "code_location": "partly migrated",
   "live_files": [
+    "src/VP-V/modules/input/source_analysis/AnalysisLumaDomain.h",
     "src/VP-V/modules/input/source_analysis/SourceResolutionDetector.cpp",
     "src/VP-V/modules/input/source_analysis/SourceResolutionDetector.h",
     "src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.cpp",

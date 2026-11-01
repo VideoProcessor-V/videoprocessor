@@ -239,6 +239,7 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 
 VP code in this folder:
 
+- `src/VP-V/modules/input/source_analysis/AnalysisLumaDomain.h` (DIV-AN-01 limited-domain logic of `AnalysisLumaSource`: coefficients, full-to-limited maps, domain queries; header-only, included at the end of Bill's AnalysisLumaSource.h)
 - `src/VP-V/modules/input/source_analysis/SourceResolutionDetector.cpp`
 - `src/VP-V/modules/input/source_analysis/SourceResolutionDetector.h`
 - `src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.cpp`

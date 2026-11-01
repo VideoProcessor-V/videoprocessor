@@ -168,6 +168,8 @@ public:
 	void SetQueueDelayBudget(int totalMs) override;
 	// VP-V (WP-11): VP's status lines through the generic entry (module "vp").
 	bool GetModuleStatus(const char* module, CString& status) const override;
+	void* QueryExtension(const char* iid) override; // VPV-HOOK
+	bool InvokeModuleCommand(const char* module, const char* command, CString& reply) override; // VPV-HOOK
 	bool GetLedDriveStatus(CString& status) const override;
 	bool GetSourceResolutionStatus(CString& status) const override;
 	bool SuspendLedDriveForTest(CString& reason) override;

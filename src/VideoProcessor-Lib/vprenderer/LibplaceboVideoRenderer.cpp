@@ -69,6 +69,7 @@
 #include <vprenderer/AnamorphicPresentation.h>
 #include <vprenderer/EdgeBlanking.h>
 #include <vprenderer/NlsHookRecovery.h>
+#include <vprenderer/RendererExtension.h> // VPV-HOOK
 #include <vprenderer/CaptureTimestampGap.h>
 #include <vprenderer/FileFrameClock.h>
 #include <vprenderer/DisplayRateHold.h>
@@ -9809,6 +9810,7 @@ struct LibplaceboVideoRenderer::Impl
 			renderAheadEstimateTimer.ReleaseResources();
 			renderAheadTimersReady = false;
 			renderTimingContext.Release();
+			RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::GpuReleased, this); // VPV-HOOK
 			SaveShaderCache();
 			pl_d3d11_destroy(&d3d11);
 			pl_cache_destroy(&cache);
@@ -12803,6 +12805,7 @@ struct LibplaceboVideoRenderer::Impl
 		d3d11 = pl_d3d11_create(log, &deviceParams);
 		if (!d3d11)
 			throw std::runtime_error("Failed to create libplacebo D3D11 device");
+		RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::GpuCreated, this, d3d11->gpu, d3d11->device); // VPV-HOOK
         // libplacebo's setter does not check HRESULT. Verify the actual device
         // cap before sizing either swapchain; never advertise a rejected value.
         CComPtr<IDXGIDevice1> latencyDevice;
@@ -28405,6 +28408,7 @@ releaseDriftBaseRetention =
         }
         // Dynamic Drive, stats out: finished measurements (a few frames old; never waits).
         dynamicDrive.CollectMeasurements();
+        RendererExtension::NotifyAfterRender(this, sourceSequence, frameGeneration, static_cast<int>(hookRender.errors), hookRender.retried ? 1 : 0, rendered); // VPV-HOOK
         if (hookRender.retried)
             DebugLog::Log("VP anamorphic hook recovery: schema=1 sequence=%llu generation=%llu hook=%llu errors=0x%x retry=1 rendered=%d lens=%.6f latch=until_shader_selection_change",
                 sourceSequence, frameGeneration, hookRender.failedSignature, hookRender.errors,
@@ -32297,6 +32301,7 @@ void LibplaceboVideoRenderer::OnDisplayChange()
 	if (m_impl)
     {
         m_impl->displayRefreshRate.InvalidateOutputRaster();
+		RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::DisplayChange, m_impl.get()); // VPV-HOOK
 		m_impl->RenegotiateOutput();
         m_impl->Resize(m_videoHwnd);
     }
@@ -33019,7 +33024,7 @@ bool LibplaceboVideoRenderer::GetFallbacksStatus(CString& status) const
 	status.Empty();
 	if (!m_impl)
 		return false;
-	status = CString(m_impl->fallbacks.Heading().c_str());
+	status = CString(RendererExtension::WithStatusLines(RendererExtension::StatusKind::Fallbacks, m_impl.get(), m_impl->fallbacks.Heading()).c_str()); // VPV-HOOK
 	return true;
 }
 
@@ -33051,6 +33056,10 @@ bool LibplaceboVideoRenderer::GetModuleStatus(const char* module, CString& statu
 	status = text.c_str();
 	return answered;
 }
+
+void* LibplaceboVideoRenderer::QueryExtension(const char* iid) { return RendererExtension::Query(iid); } // VPV-HOOK
+bool LibplaceboVideoRenderer::InvokeModuleCommand(const char* module, const char* command, CString& reply) // VPV-HOOK
+{ std::string text; const bool handled = RendererExtension::CommandFor(m_impl.get(), module, command, text); reply = CString(text.c_str()); return handled; } // VPV-HOOK
 
 // feat/dv-l8 WIP (plugin API 43): the dv_compare_capture shortcut (DvCompareCapture.h).
 bool LibplaceboVideoRenderer::ToggleDvCompareCapture(CString& status)
@@ -35928,6 +35937,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 			catch (const std::exception& e)
 			{
 				DebugLog::Log("Motion ahead: frames skipped: %s", e.what());
+				RendererExtension::ReportWorker(m_impl.get(), "motion-ahead", e.what()); // VPV-HOOK
 			}
 			for (QueuedFrame& ahead : motionAheadFrames)
 				ahead.frame.SourceBufferRelease();
@@ -35961,6 +35971,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 			catch (const std::exception& e)
 			{
 				DebugLog::Log("Source resolution look-ahead skipped: %s", e.what());
+				RendererExtension::ReportWorker(m_impl.get(), "source-look-ahead", e.what()); // VPV-HOOK
 			}
 			if (!m_impl->sourceAheadLogged)
 			{
@@ -36658,7 +36669,7 @@ void LibplaceboVideoRenderer::RenderLoop()
                     static_cast<uint64_t>(sourceSubtitleMode)+1ULL;
                 m_impl->ApplyResyncLibplaceboFlush(sourceSequence);   // L1 (resync_event on)
                 m_impl->temporalRenderer.Begin(motionSettings,captureRateHz,
-                    m_impl->renderLoadDisplayRefreshHz.load(std::memory_order_acquire),
+                    RendererExtension::ResolveFor(RendererExtension::Resolve::PresentClockRate,m_impl.get(),m_impl->renderLoadDisplayRefreshHz.load(std::memory_order_acquire)), // VPV-HOOK
                     state&&state->displayMode&&state->displayMode->IsInterlaced(),
                     state&&state->displayMode?static_cast<int>(state->displayMode->FirstFieldOrder()):0,
                     temporalCaptureEpoch,sourceSequence,sourcePts,frame.IsSourceDiscontinuity(),

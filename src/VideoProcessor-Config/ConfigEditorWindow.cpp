@@ -137,7 +137,9 @@
 #include <sstream>
 #include <VP-V/config/VpvSection.h>   // VP-V section hook (src/VP-V/config/README.md)
 #include <VP-V/config/VpvRenderingDefaults.h>   // unset VP-V keys' defaults (moved out of this file; one call site)
-#include <VP-V/config/VpvDitherChoices.h>   // Dithering: Bill's set on the Original pathway, VP-V's own otherwise
+#include <VP-V/config/VpvDitherChoiceSet.h>   // VPV-HOOK
+#include "ConfigPageHost.h"   // VPV-HOOK
+#include <VP-V/config/VpvConfigPages.h>   // VPV-HOOK
 
 // Settings preview (queue item 23): VideoProcessorConfig.exe --sandbox edits only its --config
 // file. It never signals, queries or commands a running VP (no live apply, no live status, no
@@ -674,39 +676,6 @@ QString effectiveChoiceValue(const QComboBox* combo)
     if (selected.isEmpty() && combo->property("inheritedValue").isValid())
         return combo->property("inheritedValue").toString().trimmed().toLower();
     return (selected.isEmpty() ? combo->property("effectiveValue").toString() : selected).trimmed().toLower();
-}
-
-// Dithering on the Scaling page (owner decision: keep both). Original pathway = Bill's four
-// choices exactly; otherwise VP-V's full list (Vpv::VpvDitherChoices, as before the merge).
-// Only the choice items and the tooltip change; the stored value is never touched.
-QString friendlyChoiceLabel(const QString& raw);
-void applyDitherChoiceSet(QComboBox* combo, bool original)
-{
-    if (!combo) return;
-    const QString wanted = original ? QStringLiteral("original") : QStringLiteral("vpv");
-    if (combo->property("ditherSet").toString() == wanted) return;
-    const QSignalBlocker blocker(combo);
-    for (int i = combo->count() - 1; i >= 0; --i)
-        if (!combo->itemData(i).toString().isEmpty()) combo->removeItem(i);
-    if (original)
-    {
-        for (const char* choice : Vpv::OriginalDitherChoices())
-            combo->addItem(friendlyChoiceLabel(QString::fromLatin1(choice)), QString::fromLatin1(choice));
-        combo->setToolTip(combo->property("originalToolTip").toString());
-    }
-    else
-    {
-        for (const Vpv::DitherChoice& choice : Vpv::VpvDitherChoices())
-            combo->addItem(QString::fromLatin1(choice.label), QString::fromLatin1(choice.data));
-        combo->setToolTip(QStringLiteral(
-            "Auto follows the rendering-quality preset: Blue noise for Balanced "
-            "and High, or Off for Fast. Blue noise is libplacebo's default and "
-            "recommended mode. Ordered modes and White noise are alternate "
-            "libplacebo methods. Error-diffusion modes require compute shaders "
-            "and are substantially more expensive. The display-calibration LUT "
-            "runs before this final dithering stage. Off disables dithering."));
-    }
-    combo->setProperty("ditherSet", wanted);
 }
 
 // Hunt 3 (CFG3): a retired choice value the renderer still reads, and the
@@ -1575,6 +1544,18 @@ ConfigEditorWindow::ConfigEditorWindow(QString configPath, quintptr ownerHandle,
     // instead of raising the minimum size.
     resize(1120, 700);
     setMinimumSize(760, 540);
+    // VPV-HOOK
+    formApi_.valueFn = [this](const QString& section, const QString& key) { return value(section, key); };
+    formApi_.setValueFn = [this](const QString& section, const QString& key, const QString& text)
+    {
+        if (!document_) return;
+        if (text.isEmpty()) document_->RemoveKnown(section.toStdString(), key.toStdString().c_str());
+        else document_->SetKnown(section.toStdString(), key.toStdString().c_str(), text.toLocal8Bit().constData());
+        if (centralWidget()) markDirty();
+    };
+    formApi_.markDirtyFn = [this] { markDirty(); };
+    formApi_.profileSectionsFn = [this](const QString& root) { return profileSections(root); };
+    // VPV-HOOK-END
     loadConfiguration();
     runLoadMigrations();
     if (!testMode_ && !noTarget_) loadDiscoveryCache();
@@ -2259,37 +2240,10 @@ bool ConfigEditorWindow::selectAnotherTarget(const Target& target)
 	return true;
 }
 
-// The renderer's precedence for the pathway key: [vpv] first, then [vprenderer]
-// (skeleton audit item 6; same rule as Vpv::PathwayIsVpv). on = the Original pathway.
-bool ConfigEditorWindow::originalPathwayOn() const
-{
-    QString v = value(QStringLiteral("vpv"), QStringLiteral("pipeline_original_pathway")).trimmed();
-    if (v.isEmpty()) v = value(QStringLiteral("vprenderer"), QStringLiteral("pipeline_original_pathway")).trimmed();
-    return v.compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
-}
-
-int ConfigEditorWindow::pageIndex(const QString& name) const
-{
-    return pageIndexByName_.value(name, -1);
-}
-
-int ConfigEditorWindow::addNamedPage(const QString& name, QWidget* page)
-{
-    const int index = pages_->addWidget(page);
-    pageIndexByName_.insert(name, index);
-    return index;
-}
-
-void ConfigEditorWindow::selectPage(const QString& name)
-{
-    const int index = pageIndex(name);
-    if (index >= 0) selectPage(index);
-}
-
 void ConfigEditorWindow::selectPage(int index)
 {
     if (!pages_ || index < 0 || index >= pages_->count()) return;
-    if (noTarget_ && index != pageIndex(QStringLiteral("Updates"))) index = pageIndex(QStringLiteral("Updates"));
+    if (noTarget_ && index != 20) index = 20;   // DIV-CFG-08 (Bill PR: no-target window opens Updates, not Motion)
     if (index == 13) index = 16; // Preserve old Output page links.
     pages_->setCurrentIndex(index);
     if (!navigation_) return;
@@ -2453,6 +2407,7 @@ void ConfigEditorWindow::runLoadMigrations()
     migrateProfileValueNormalisations();
     migrateLegacyRendererName();
     migrateRefreshKeys();
+    if (ConfigPageHost::MigrateOnLoad(formApi_)) { dirty_ = true; hasPendingMigrations_ = true; }   // VPV-HOOK
     // Any real migration keeps a backup of the original file on save.
     if (document_ && configurationLoaded_ && document_->Serialize() != before)
         document_->requiresMigrationBackup = document_->existedAtLoad;
@@ -2965,19 +2920,7 @@ void ConfigEditorWindow::migrateProcessingToScaling()
         for (const auto& setting : document_->SectionSettings(section))
             values[ConfigFile::NormalizeName(setting.first)] = setting.second;
     }
-    // Dithering Auto is a VP-V value (VP-V mode): Bill's plan would rewrite it to the preset's
-    // blue_noise. Hide it from the plan behind a marker and put it back unchanged, so the
-    // migration moves it but never rewrites it. The Original pathway keeps Bill's behaviour.
-    static const std::string vpvAutoMarker = "\x01vpv-auto";
-    const bool keepVpvDitherAuto = !originalPathwayOn();
-    if (keepVpvDitherAuto)
-        for (auto& entry : sections)
-        {
-            auto found = entry.second.find("dithering");
-            if (found != entry.second.end() &&
-                QString::fromStdString(found->second).trimmed().compare(QStringLiteral("auto"), Qt::CaseInsensitive) == 0)
-                found->second = vpvAutoMarker;
-        }
+    Vpv::HideDitherAutoFromPlan(sections, originalPathwayOn());   // VPV-HOOK
     const auto plan = QualityProfileMigration::Build(sections, order);
     if (plan.Empty()) return;
     // A Scaling copy keeps its Rendering profile's spelling.
@@ -2993,7 +2936,7 @@ void ConfigEditorWindow::migrateProcessingToScaling()
     }
     for (const auto& item : plan.sets)
         document_->SetKnown(originalNames.at(std::get<0>(item)), std::get<1>(item).c_str(),
-            std::get<2>(item) == vpvAutoMarker ? std::string("AUTO") : std::get<2>(item));
+            Vpv::RestoreDitherAuto(std::get<2>(item)));   // VPV-HOOK
     for (const auto& item : plan.removals)
         document_->RemoveKnown(originalNames.at(item.first), item.second.c_str(), true);
     document_->requiresMigrationBackup = document_->existedAtLoad;
@@ -5007,6 +4950,7 @@ bool ConfigEditorWindow::saveChanges(std::function<void()> afterRemoteApply)
     // are written into the document only for this save. If validation or the
     // save fails, restore the document so it matches the controls again.
     const auto rollback = std::make_shared<const ConfigEditorCore::ConfigDocument>(*document_);
+    ConfigPageHost::BeforeSave(formApi_);   // VPV-HOOK
 
     const DocumentSnapshot currentSnapshot = captureDocumentSnapshot(*document_);
     const std::vector<ConfigurationApplyPolicy::Change> changed = changedDocumentValues(
@@ -5302,6 +5246,7 @@ bool ConfigEditorWindow::saveChanges(std::function<void()> afterRemoteApply)
     updateEffectSummary();
     showCanonicalShortcutSpelling(this);
     refreshConfigToggleShortcut();
+    ConfigPageHost::AfterApply(formApi_);   // VPV-HOOK
 
     // Say where a replaced file was kept (hunt 2, L2/L8).
     QString kept;
@@ -5453,51 +5398,47 @@ QWidget* ConfigEditorWindow::createShell()
 
     pages_ = new QStackedWidget;
     pages_->setObjectName(QStringLiteral("settingsPages"));
-    pageIndexByName_.clear();
-    // Bill's pages keep his order and numbers (0-22); VP-V's pages follow them.
-    // Every navigation lookup of a page goes through its name (addNamedPage /
-    // pageIndex), never a literal number, so neither side can shift the other.
-    addNamedPage(QStringLiteral("General"), createStartupPage());
-    addNamedPage(QStringLiteral("Queue"), createQueuePage());
-    addNamedPage(QStringLiteral("VP Renderer"), createRendererPage());
-    addNamedPage(QStringLiteral("DirectShow"), createDirectShowPage());
-    addNamedPage(QStringLiteral("Screen"), createViewportPage());
-    addNamedPage(QStringLiteral("DV"), createDvPage());
-    addNamedPage(QStringLiteral("Shortcuts list"), createShortcutsPage());
-    addNamedPage(QStringLiteral("Actions"), createActionsPage());
-    addNamedPage(QStringLiteral("Standard shaders"), createStandardShadersPage());
-    addNamedPage(QStringLiteral("NLS shaders"), createNlsShadersPage());
-    addNamedPage(QStringLiteral("Logs"), createLogsPage());
-    addNamedPage(QStringLiteral("Input processing (VP Renderer)"), createInputProcessingPage(
+    pages_->addWidget(createStartupPage());
+    pages_->addWidget(createQueuePage());
+    pages_->addWidget(createRendererPage());
+    pages_->addWidget(createDirectShowPage());
+    pages_->addWidget(createViewportPage());
+    pages_->addWidget(createDvPage());
+    pages_->addWidget(createShortcutsPage());
+    pages_->addWidget(createActionsPage());
+    pages_->addWidget(createStandardShadersPage());
+    pages_->addWidget(createNlsShadersPage());
+    pages_->addWidget(createLogsPage());
+    pages_->addWidget(createInputProcessingPage(
         QStringLiteral("Input processing"),
         QStringLiteral("Override the General input policy for VP Renderer, or inherit it."),
         QStringLiteral("vprenderer.input_processing")));
-    addNamedPage(QStringLiteral("Input processing (DirectShow)"), createInputProcessingPage(
+    pages_->addWidget(createInputProcessingPage(
         QStringLiteral("Input processing"),
         QStringLiteral("Override the General input policy for DirectShow, or inherit it."),
         QStringLiteral("directshow")));
-    addNamedPage(QStringLiteral("Output (former)"), new QWidget); // Former Output page; selectPage redirects to Color / Output.
-    addNamedPage(QStringLiteral("Shaders"), createShadersSetupPage());
-    addNamedPage(QStringLiteral("Shortcuts"), createShortcutsSetupPage());
-    addNamedPage(QStringLiteral("Color"), createColorConfigPage());
-    addNamedPage(QStringLiteral("Scaling"), createScalingPage());
-    addNamedPage(QStringLiteral("Zoom"), createZoomPage());
-    addNamedPage(QStringLiteral("Subtitles"), createProfilePage(QStringLiteral("Subtitles"),
+    pages_->addWidget(new QWidget); // Former Output page; selectPage redirects to Color / Output.
+    pages_->addWidget(createShadersSetupPage());
+    pages_->addWidget(createShortcutsSetupPage());
+    pages_->addWidget(createColorConfigPage());
+	pages_->addWidget(createScalingPage());
+	pages_->addWidget(createZoomPage());
+    pages_->addWidget(createProfilePage(QStringLiteral("Subtitles"),
         QStringLiteral("Choose subtitle processing and inward placement. With no profile, processing is Off; otherwise the first profile is the default."),
         QStringLiteral("vprenderer.subtitles")));
 
     updatePanel_ = new UpdatePanel(QString::fromStdWString(UpdateLauncher::InstallationRoot()), nullptr, !testMode_);
-    addNamedPage(QStringLiteral("Updates"), createPage(QStringLiteral("Updates"),
+    pages_->addWidget(createPage(QStringLiteral("Updates"),
         QStringLiteral("Manage updates on this computer. Remote VideoProcessors update separately."), updatePanel_));
 
-    addNamedPage(QStringLiteral("Motion"), createProfilePage(QStringLiteral("Motion"),
+    pages_->addWidget(createProfilePage(QStringLiteral("Motion"),
         QStringLiteral("Configure smooth motion and field-aware deinterlacing. Changes apply after renderer restart."),
         QStringLiteral("vprenderer.motion")));
-    addNamedPage(QStringLiteral("Display"), createDisplayPage());
-    // VP-V pages (after Bill's): Dynamic Drive, then automatic calibration
-    // (meter, patches, wizard), then the VP-V section.
-    addNamedPage(QStringLiteral("Dynamic Drive"), createLedDrivePage());
-    addNamedPage(QStringLiteral("Calibration"), createCalibrationPage());
+    const int displayPageIndex = pages_->addWidget(createDisplayPage());
+    // VPV-HOOK
+    vpvPages_.reset();
+    vpvPages_.append(pages_, QStringLiteral("Dynamic Drive"), createLedDrivePage());
+    vpvPages_.append(pages_, QStringLiteral("Calibration"), createCalibrationPage());
     // VP-V section hook (owner 2026-10-24; src/VP-V/config/README.md). The whole VP-V section lives in src/VP-V/config/;
     // this block and the "VP-V" navigation leaf below are its only footprint in this file.
     {
@@ -5511,42 +5452,40 @@ QWidget* ConfigEditorWindow::createShell()
             markDirty();
             // The pathway decides which Dithering choices the Scaling page offers.
             if (key == QStringLiteral("pipeline_original_pathway"))
-                for (const auto& refresh : pathwayRefreshers_) refresh();
+                pathwayRefreshers_.refresh();
         };
         vpvHost.profileSections = [this](const QString& root) { return profileSections(root); };
         vpvHost.upstreamControlName = [](const QString& key) { return controlName(QStringLiteral("vprenderer"), key); };
         vpvHost.upstreamRoot = pages_;
-        addNamedPage(QStringLiteral("VP-V"), createPage(QStringLiteral("VP-V"),
+        vpvPages_.append(pages_, QStringLiteral("VP-V"), createPage(QStringLiteral("VP-V"),
             QStringLiteral("Everything VP-V adds, by unit: one tier per unit plus a global tier, each unit's settings, and the fallbacks engaged."),
             Vpv::CreateSection(vpvHost)));
     }
+    vpvPages_.appendProviderPages(pages_, formApi_);   // VPV-HOOK
+    // VPV-HOOK-END
     auto* navGroup = new QButtonGroup(root);
     navGroup->setExclusive(true);
-    // Leaves are addressed by page name; the stack index is looked up, never typed.
-    const auto addLeaf = [this, navLayout, navGroup](const QString& pageName)
+    const auto addLeaf = [this, navLayout, navGroup](const QString& title, int page)
     {
-        const int page = pageIndex(pageName);
-        QPushButton* button = addNavigationButton(pageName, page);
+        QPushButton* button = addNavigationButton(title, page);
         navGroup->addButton(button, page);
         navLayout->addWidget(button);
         if (page == 0) button->setChecked(true);
         return button;
     };
-    addLeaf(QStringLiteral("General"));
-    addLeaf(QStringLiteral("Display"));
-    addLeaf(QStringLiteral("Queue"));
-    addLeaf(QStringLiteral("DV"));
-    QPushButton* shadersNavigation = addLeaf(QStringLiteral("Shaders"));
-    addLeaf(QStringLiteral("Actions"));
-    QPushButton* shortcutsNavigation = addLeaf(QStringLiteral("Shortcuts"));
-    addLeaf(QStringLiteral("Dynamic Drive"));
-    addLeaf(QStringLiteral("Calibration"));
-    addLeaf(QStringLiteral("VP-V"))->setObjectName(QStringLiteral("config.openVpv"));
-    addLeaf(QStringLiteral("Logs"));
+    addLeaf(QStringLiteral("General"), 0);
+    addLeaf(QStringLiteral("Display"), displayPageIndex);
+    addLeaf(QStringLiteral("Queue"), 1);
+    addLeaf(QStringLiteral("DV"), 5);
+    QPushButton* shadersNavigation = addLeaf(QStringLiteral("Shaders"), 14);
+    addLeaf(QStringLiteral("Actions"), 7);
+    QPushButton* shortcutsNavigation = addLeaf(QStringLiteral("Shortcuts"), 15);
+    vpvPages_.addNavigationLeaves(addLeaf);   // VPV-HOOK
+    addLeaf(QStringLiteral("Logs"), 10);
     navLayout->addSpacing(8);
-    QPushButton* vpNavigation = addLeaf(QStringLiteral("VP Renderer"));
-    QPushButton* directShowNavigation = addLeaf(QStringLiteral("DirectShow"));
-    addLeaf(QStringLiteral("Updates"))->setObjectName(QStringLiteral("config.openUpdates"));
+    QPushButton* vpNavigation = addLeaf(QStringLiteral("VP Renderer"), 2);
+    QPushButton* directShowNavigation = addLeaf(QStringLiteral("DirectShow"), 3);
+    addLeaf(QStringLiteral("Updates"), 20)->setObjectName(QStringLiteral("config.openUpdates"));
     navLayout->addStretch();
 
     auto* pageHost = new QWidget;
@@ -5590,9 +5529,8 @@ QWidget* ConfigEditorWindow::createShell()
         sectionTabs->setCurrentIndex(selected);
         sectionTabs->setVisible(!entries.empty());
     };
-    const int motionPage = pageIndex(QStringLiteral("Motion"));
     const auto updateSectionTabs = [showSectionTabs, shadersNavigation,
-        shortcutsNavigation, vpNavigation, directShowNavigation, motionPage](int page)
+        shortcutsNavigation, vpNavigation, directShowNavigation](int page)
     {
         if (page == 8 || page == 9 || page == 14)
         {
@@ -5602,7 +5540,7 @@ QWidget* ConfigEditorWindow::createShell()
                 { QStringLiteral("NLS"), 9 } }, page);
         }
         else if (page == 2 || page == 4 || page == 11 || page == 13 ||
-			page == 16 || page == 17 || page == 18 || page == 19 || page == motionPage)
+			page == 16 || page == 17 || page == 18 || page == 19 || page == 21)
         {
             vpNavigation->setChecked(true);
             showSectionTabs({ { QStringLiteral("Tone Mapping"), 2 },
@@ -5611,7 +5549,7 @@ QWidget* ConfigEditorWindow::createShell()
 				{ QStringLiteral("Screen"), 4 },
 				{ QStringLiteral("Zoom"), 18 },
                 { QStringLiteral("Subtitles"), 19 },
-				{ QStringLiteral("Motion"), motionPage },   // by name: Bill's order, VP-V pages follow
+				{ QStringLiteral("Motion"), 21 },
 				{ QStringLiteral("Input Processing"), 11 } }, page);
         }
         else if (page == 3 || page == 12)
@@ -5722,7 +5660,7 @@ QWidget* ConfigEditorWindow::createShell()
         pages_->addWidget(emptyState);
         pages_->setCurrentWidget(emptyState);
         for (auto* button : navigation_->findChildren<QPushButton*>())
-            button->setEnabled(button->property("pageName").toString() == QStringLiteral("Updates"));
+            button->setEnabled(button->property("pageIndex").toInt() == 20);
 	}
     rootLayout->addWidget(center, 1);
 
@@ -5819,18 +5757,7 @@ QWidget* ConfigEditorWindow::createShell()
 QPushButton* ConfigEditorWindow::addNavigationButton(const QString& text, int pageIndex)
 {
     auto* button = new QPushButton;
-    // SettingsNavigationIcons draws by Bill's icon ids. They are looked up by
-    // page name, so a page VP-V adds (no icon of Bill's) takes the default icon
-    // and neither side's page order can mis-draw the other's icons.
-    static const QMap<QString, int> billIconByName = {
-        { QStringLiteral("General"), 0 }, { QStringLiteral("Queue"), 1 },
-        { QStringLiteral("VP Renderer"), 2 }, { QStringLiteral("DirectShow"), 3 },
-        { QStringLiteral("DV"), 5 }, { QStringLiteral("Actions"), 7 },
-        { QStringLiteral("Logs"), 10 }, { QStringLiteral("Shaders"), 14 },
-        { QStringLiteral("Shortcuts"), 15 }, { QStringLiteral("Updates"), 20 },
-        { QStringLiteral("Display"), 22 } };
-    const QString pageName = pageIndexByName_.key(pageIndex);
-    button->setIcon(SettingsNavigationIcons::create(billIconByName.value(pageName, -1)));
+    button->setIcon(SettingsNavigationIcons::create(pageIndex));
     button->setIconSize(QSize(18, 18));
     button->setToolTip(text);
     button->setText(text);
@@ -5838,7 +5765,7 @@ QPushButton* ConfigEditorWindow::addNavigationButton(const QString& text, int pa
     button->setAccessibleDescription(QStringLiteral("Open the %1 settings page.").arg(text));
     button->setProperty("nav", true);
     button->setProperty("pageIndex", pageIndex);
-    button->setProperty("pageName", pageName);
+    button->setProperty("pageName", vpvPages_.name(pageIndex));   // VPV-HOOK
     button->setObjectName(QStringLiteral("settingsNavigation.%1").arg(pageIndex));
     button->setCheckable(true);
     button->setFlat(true);
@@ -11606,8 +11533,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             "Calibration LUT processing runs before final dithering."));
         // The set follows the pathway (loadDetails): Bill's four on the Original pathway
         // (as built here), VP-V's full list otherwise.
-        dithering->setProperty("ditherSet", QStringLiteral("original"));
-        dithering->setProperty("originalToolTip", dithering->toolTip());
+        Vpv::MarkOriginalDitherSet(dithering);   // VPV-HOOK
         addRendererAutoStatus(QStringLiteral("dithering"), dithering);
         auto* displayBitDepth = addChoice(QStringLiteral("Dither target depth"),
             QStringLiteral("display_bit_depth"),
@@ -12612,6 +12538,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             }
             field.widget->style()->unpolish(field.widget);
             field.widget->style()->polish(field.widget);
+            ConfigPageHost::OnBillField(sectionPrefix, field.key, field.widget, formApi_);   // VPV-HOOK
             if (field.kind == Field::Text)
             {
                 QString displayed = configured.compare(
@@ -12673,7 +12600,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             {
                 auto* combo = qobject_cast<QComboBox*>(field.widget);
                 if (field.key == QStringLiteral("dithering") && sectionPrefix == QStringLiteral("vprenderer.scaling"))
-                    applyDitherChoiceSet(combo, ditherOriginal);
+                    Vpv::ApplyDitherChoiceSet(combo, ditherOriginal, friendlyChoiceLabel);   // VPV-HOOK
                 const bool subtitleCleanupFill =
                     sectionPrefix == QStringLiteral("vprenderer.subtitles") &&
                     field.key == QStringLiteral("cleanup_fill");
@@ -13254,7 +13181,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         remove, up, down, std::move(listPolicy));
     profileList->setCurrentChanged(loadDetails);
     if (sectionPrefix == QStringLiteral("vprenderer.scaling"))
-        pathwayRefreshers_.push_back([list, loadDetails] { loadDetails(list->currentItem()); });
+        pathwayRefreshers_.add([list, loadDetails] { loadDetails(list->currentItem()); });   // VPV-HOOK
     std::function<void(const QString&)> refresh = [profileList](const QString& wanted)
         { profileList->refresh(wanted); };
     if (renderingFreezePlan)
@@ -17749,7 +17676,7 @@ QWidget* ConfigEditorWindow::createShortcutsSetupPage()
 void ConfigEditorWindow::showUpdates()
 {
     reveal();
-    selectPage(QStringLiteral("Updates"));
+    selectPage(20);
 }
 
 void ConfigEditorWindow::setupTray()

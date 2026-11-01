@@ -11,6 +11,8 @@
 #include <immintrin.h>
 #endif
 
+using namespace Vpv::AnalysisDomain; // VPV-HOOK
+
 namespace
 {
 	bool CheckedMultiply(size_t left, size_t right, size_t& result)
@@ -146,53 +148,6 @@ namespace
 		306526, 601775, 116869, -176934, -347354, 524288,
 		524288, -439026, -85262
 	};
-
-	// Full-range RGB -> full-range Y'CbCr, Q16, applied to 10-bit codes.
-	struct FullRgbCoefficients
-	{
-		int32_t yR, yG, yB;
-		int32_t cbR, cbG, cbB;
-		int32_t crR, crG, crB;
-	};
-	constexpr FullRgbCoefficients BT709_FULL = {
-		13933, 46871, 4732, -7508, -25259, 32768, 32768, -29763, -3005
-	};
-	constexpr FullRgbCoefficients BT2020_FULL = {
-		17218, 44444, 3886, -9147, -23621, 32768, 32768, -30134, -2634
-	};
-	constexpr FullRgbCoefficients BT601_FULL = { // audit 2026-10-16
-		19595, 38470, 7471, -11058, -21710, 32768, 32768, -27439, -5329
-	};
-
-	bool IsBt601(ColorSpace colorspace)
-	{
-		return colorspace == ColorSpace::REC_601_525 ||
-			colorspace == ColorSpace::REC_601_576 ||
-			colorspace == ColorSpace::REC_601_625;
-	}
-
-	// Symmetric round-half-away-from-zero division; denominator > 0.
-	int64_t RoundDivide(int64_t numerator, int64_t denominator)
-	{
-		return numerator >= 0 ? (numerator + denominator / 2) / denominator :
-			-((-numerator + denominator / 2) / denominator);
-	}
-
-	// audit 2026-10-16: full-range 10-bit code (scaled by `scale`) to the
-	// limited code domain every analysis consumer assumes. Monotonic and
-	// unclamped before the final 10-bit container clamp, so codes outside
-	// the nominal range keep their order (nothing is folded onto black/white).
-	uint16_t FullLumaToLimited(int64_t scaledLuma, int64_t scale)
-	{
-		return Clamp10(64 + static_cast<int>(
-			RoundDivide(scaledLuma * 876, 1023LL * scale)));
-	}
-
-	uint16_t FullChromaToLimited(int64_t scaledOffset, int64_t scale)
-	{
-		return Clamp10(512 + static_cast<int>(
-			RoundDivide(scaledOffset * 896, 1023LL * scale)));
-	}
 
 	int RoundQ20(int64_t value)
 	{
@@ -472,26 +427,6 @@ bool AnalysisLumaSource::RowWithinLimits(int y, uint16_t lumaMax,
     return true;
 }
 
-bool AnalysisLumaSource::FullRangeLevels() const
-{
-	// The levels Sample()'s RGB paths treat as full range (its limitedRgb rule), or a
-	// YCbCr source flagged / tagged full range.
-	if (format == AnalysisLumaFormat::NativeRgb)
-		return !(encoding == VideoFrameEncoding::R210 || encoding == VideoFrameEncoding::R10b ||
-			encoding == VideoFrameEncoding::R10l);
-	if (format == AnalysisLumaFormat::SdrTunnelRgb)
-		return range != AnalysisLumaRange::Limited;
-	return fullRangeYuv || range == AnalysisLumaRange::Full;
-}
-
-bool AnalysisLumaSource::MapsToLimitedDomain() const
-{
-	// VP-V DIV-AN-01: RGB under limitedDomain; YCbCr planes flagged fullRangeYuv.
-	if (format == AnalysisLumaFormat::NativeRgb || format == AnalysisLumaFormat::SdrTunnelRgb)
-		return limitedDomain && FullRangeLevels();
-	return fullRangeYuv;
-}
-
 bool AnalysisLumaSource::Sample(int x, int y, AnalysisLumaSample& result) const
 {
 	if (!IsValid() || x < 0 || y < 0 || x >= width || y >= height)
@@ -664,15 +599,8 @@ bool AnalysisLumaSource::SampleLumaRow(int x0, int y, int count, uint16_t* out) 
 			return true;
 		}
 		const FullRgbCoefficients& f = bt2020 ? BT2020_FULL : (bt601 ? BT601_FULL : BT709_FULL);
-		// Sample()'s full-range luma: the VP-V limited-domain map, or Bill's Q16 rounding
-		// of the delivered codes (Original pathway).
 		const bool mapLimited = limitedDomain;
-		auto fullLuma = [&f, mapLimited](int64_t r, int64_t g, int64_t b)
-		{
-			const int64_t sum = f.yR * r + f.yG * g + f.yB * b;
-			return mapLimited ? FullLumaToLimited(sum, 65536) :
-				Clamp10(static_cast<int>((sum + 32768) >> 16));
-		};
+		auto fullLuma = [&f, mapLimited](int64_t r, int64_t g, int64_t b) { return Vpv::AnalysisDomain::FullRgbLuma(f, mapLimited, r, g, b); }; // VPV-HOOK
 		const uint8_t* row = data + static_cast<size_t>(y) * rowBytes;
 		const bool high = rgbBitAlignment == 1;
 		auto channel = [high](uint32_t code)
@@ -857,38 +785,19 @@ bool AnalysisLumaSource::SampleUnchecked(int x, int y, AnalysisLumaSample& resul
 			static_cast<int64_t>(coefficients.crB) * b));
 		return true;
 	}
-	// audit 2026-10-16: full-range RGB (8-bit, R12B/R12L, SDR tunnel). The
-	// Q16 full-range Y'CbCr sums are mapped straight to the limited code
-	// domain with a single rounding (previously emitted as 0..1023 / +-511,
-	// which every darkness threshold misread as studio codes).
-	if (!limitedDomain)
-	{
-		// Bill v1.4.02 (Original pathway): the delivered full-range codes, Q16 rounded.
-		const int yRed = bt2020 ? 17218 : 13933;
-		const int yGreen = bt2020 ? 44444 : 46871;
-		const int yBlue = bt2020 ? 3886 : 4732;
-		const int cbRed = bt2020 ? -9147 : -7508;
-		const int cbGreen = bt2020 ? -23621 : -25259;
-		const int cbBlue = 32768;
-		const int crRed = 32768;
-		const int crGreen = bt2020 ? -30134 : -29763;
-		const int crBlue = bt2020 ? -2634 : -3005;
-		result.luma = Clamp10((yRed * red + yGreen * green + yBlue * blue + 32768) >> 16);
-		result.chromaU = Clamp10(((cbRed * red + cbGreen * green + cbBlue * blue + 32768) >> 16) + 512);
-		result.chromaV = Clamp10(((crRed * red + crGreen * green + crBlue * blue + 32768) >> 16) + 512);
-		return true;
-	}
-	const FullRgbCoefficients& full = bt2020 ? BT2020_FULL :
-		(bt601 ? BT601_FULL : BT709_FULL);
-	const int64_t r = red;
-	const int64_t g = green;
-	const int64_t b = blue;
-	const int64_t ySum = full.yR * r + full.yG * g + full.yB * b;
-	const int64_t cbSum = full.cbR * r + full.cbG * g + full.cbB * b;
-	const int64_t crSum = full.crR * r + full.crG * g + full.crB * b;
-	result.luma = FullLumaToLimited(ySum, 65536);
-	result.chromaU = FullChromaToLimited(cbSum, 65536);
-	result.chromaV = FullChromaToLimited(crSum, 65536);
+	if (limitedDomain) return Vpv::AnalysisDomain::MapFullRgb(bt2020, bt601, red, green, blue, result); // VPV-HOOK
+	const int yRed = bt2020 ? 17218 : 13933;
+	const int yGreen = bt2020 ? 44444 : 46871;
+	const int yBlue = bt2020 ? 3886 : 4732;
+	const int cbRed = bt2020 ? -9147 : -7508;
+	const int cbGreen = bt2020 ? -23621 : -25259;
+	const int cbBlue = 32768;
+	const int crRed = 32768;
+	const int crGreen = bt2020 ? -30134 : -29763;
+	const int crBlue = bt2020 ? -2634 : -3005;
+	result.luma = Clamp10((yRed * red + yGreen * green + yBlue * blue + 32768) >> 16);
+	result.chromaU = Clamp10(((cbRed * red + cbGreen * green + cbBlue * blue + 32768) >> 16) + 512);
+	result.chromaV = Clamp10(((crRed * red + crGreen * green + crBlue * blue + 32768) >> 16) + 512);
 	return true;
 }
 
