@@ -140,3 +140,19 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
 
 <!-- vpv-settings-tests:end -->
+
+### Dither need (`dither_need`, WP4a/WP5a; header-only, default off)
+
+Key `dither_need`: `off` (default) | `auto`. Off is byte-identical to the sigma-delta above (the shader's `dither_need` parameter stays 0 and nothing is bound).
+
+Files: `DitherNeed.h` (the law, temporal state, sampling, `Parse`, status, the `dither.need` product declaration; CPU reference templated on `T`, double = reference, float = shader mirror), `DitherNeedGlsl.h` (block pass, one thread per region block, same arithmetic order), `DitherNeedGpu.h` (libplacebo wrapper `BlockPass`, `HookGuard`). Python mirror: `tools/eval/dither_need_ref.py`; golden: `tests/DitherNeedGolden.generated.h` (`tools/eval/gen_dither_need_golden.py`). Tests: `DitherNeedTests` (CPU) and `DitherNeedWarpTests` (WARP) at the end of `tests/SigmaDeltaHookTests.cpp`. Move them to their own `.cpp` when the PROJ zone lock is free.
+
+What it does: the extra amplitude is raised only in banding-prone picture blocks (not overlay) where one LINK code step is visible after the context's display mapping (`gVis`, from the light-level `V` and the output slope `Sout`) and the grain is below the link step (`sigmaOut = sqrt(N) * |Sout| / q_out`). `aTarget = clamp(aNeed - sigmaOut, aBase, max(aMax, aBase))`, `extra = banding * gVis * (aTarget - aBase)`. The total amplitude never exceeds `aMax` = 0.5, so exact codes (black, BTB, WTW) are never moved. The per-block extra is smoothed (time constant 0.25 s from the MEASURED frame interval, deadband 0.02) and reset at a cut, resync, re-base, context change, grid, LUT, colour-depth or base-amplitude change.
+
+Light-level dependence: extra dither exists only where a link step is visible (`gVis > 0`), i.e. mainly in dark smooth gradients after the context's mapping (SDR, HDR passthrough or HDR to SDR); bright regions, where the step is invisible, get none. `NeededAnywhere` (once per LUT fingerprint) skips the whole pass when no code has a visible link step: status "dither need: not needed (link step invisible)".
+
+Missing input (no grain split, mismatched grid, no precursors, no LUT, unsupported domain): extra = 0, i.e. today's amplitude, with a named status (`FallbackCatalog::DitherNeed`, id "dither need") and automatic recovery.
+
+Cost: the product is the block-grid state, rgba32f, two textures (ping-pong), 2 x blocks x 16 B. The block grid is about 120 x 68 at every size (16 px at 1080, 32 at 2160, 64 at 4320): ~0.26 MB VRAM at 1080p, 4K and 8K alike. Per output pixel: 4 texel fetches + ~10 ALU in the quantiser; the block pass is one thread per block. Not needed / off: no pass, no fetch.
+
+Link noise versus the grain rule: the added dither is judged by its OWN limit, not the +-5 % grain rule: noise vs plain+4 at most 1.40 in shadow blocks where `sigmaOut < 0.35` (the grain is already below the link step, so the "grain" there is quantiser noise) and 1.05 elsewhere (`tools/eval/link_noise.py`); to be confirmed by eye on the FL35.
