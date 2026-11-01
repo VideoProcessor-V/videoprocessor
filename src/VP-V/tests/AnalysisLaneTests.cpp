@@ -14,6 +14,9 @@
 // test bounded.
 
 #include <VP-V/core/AnalysisLane.h>
+#include <VP-V/core/FrameSeal.h>
+#include <VP-V/modules/input/signal/ResyncDrive.h>
+#include <VP-V/modules/input/signal/ResyncShadow.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneGpuJobs.h>
 
 #include <algorithm>
@@ -1152,6 +1155,141 @@ namespace AnalysisLaneTestsNs
 			Assert::IsTrue(r.lane.GetRegulator().StateOf(kP2VectorPair) == ProductState::Laned, L"the regulator restarted");
 			Assert::IsTrue(st->runner->Laned(kP2VectorPair)
 			               && st->table->At(size_t(st->IndexOf(kP2VectorPair))).LaneGranted(), L"the runner and the slots follow at once");
+		}
+	};
+
+	// Resync Q0-B: FrameSeal owns the one seal; the lane holds the Indicator by shared handle.
+	TEST_CLASS(AnalysisLaneFrameSealTests)
+	{
+	public:
+		static std::shared_ptr<Indicator> Alias(Indicator& i) { return std::shared_ptr<Indicator>(&i, [](Indicator*) {}); }
+
+		// A frame in external-seal mode: arrive, pump, FrameSeal seals + fans out, lane render start.
+		static void Frame(Rig& r, VpSeal::FrameSeal& fs, const std::shared_ptr<Indicator>& h, uint64_t s)
+		{
+			r.lane.OnSourceFrame(r.View(s + 1));
+			r.Pump();
+			fs.Seal(h, s);
+			r.lane.OnRenderStart(s, 4000);
+			r.End(s);
+		}
+
+		// One seal per frame with the lane and the Drive both subscribed; the lane never seals itself.
+		TEST_METHOD(OneSealPerFrameWithLaneAndDrive)
+		{
+			Rig r;
+			r.Configure(LaneSettings::Mode::On, false, 1);
+			r.lane.SetExternalSeal(true);
+			const std::shared_ptr<Indicator> h = Alias(r.ind);
+			VpResync::Drive drive;
+			VpSeal::FrameSeal fs;
+			fs.AddProvider("resync-drive", [&drive](const std::shared_ptr<Indicator>& i) { drive.RegisterOn(i); });
+			fs.AddProvider("lane", [&r](const std::shared_ptr<Indicator>& i) { r.lane.BindIndicator(i); });
+			fs.Subscribe("lane", [&r](const std::shared_ptr<Indicator>&, uint64_t seq, VpIndicator::CounterMask c) { r.lane.OnSealed(seq, c); });
+			fs.Subscribe("resync-drive", [&drive](const std::shared_ptr<Indicator>& i, uint64_t seq, VpIndicator::CounterMask c) { drive.OnObserved(i, seq, c); });
+			r.lane.OnSourceFrame(r.View(1));
+			for (uint64_t s = 1; s <= 20; ++s)
+				Frame(r, fs, h, s);
+			Assert::IsTrue(fs.Seals() == 20 && fs.Eras() == 1, L"one seal per frame, one era");
+			Assert::IsTrue(r.ind.LastSealed() == 20 && r.ind.UnsealedObserves() == 0 && r.ind.OutOfOrderObserves() == 0, L"in order");
+			Assert::IsTrue(r.lane.ExternalSealMisses() == 0, L"the lane never needed to seal");
+			Assert::IsTrue(r.ind.RejectedReaders() == 0 && drive.Registered() == h, L"every reader registered before the first observe");
+			Assert::IsTrue(drive.LastSealed() == 20, L"the drive saw each frame");
+		}
+
+		// The standalone drive and the FrameSeal path see identical pending masks.
+		TEST_METHOD(DriveProviderPathMatchesStandalone)
+		{
+			std::vector<VpIndicator::CounterMask> a, b;
+			for (int mode = 0; mode < 2; ++mode) {
+				Indicator ind(5, 256);
+				const std::shared_ptr<Indicator> h = Alias(ind);
+				VpResync::Drive drive;
+				VpSeal::FrameSeal fs;
+				fs.AddProvider("drive", [&drive](const std::shared_ptr<Indicator>& i) { drive.RegisterOn(i); });
+				fs.Subscribe("drive", [&drive](const std::shared_ptr<Indicator>& i, uint64_t seq, VpIndicator::CounterMask c) { drive.OnObserved(i, seq, c); });
+				std::vector<VpIndicator::CounterMask>& out = mode == 0 ? a : b;
+				for (uint64_t s = 1; s <= 12; ++s) {
+					if (s == 5)
+						ind.Advance(VpIndicator::kFull, Cause::LiveQueueReset, 5);
+					if (s == 8)
+						ind.Advance(VpIndicator::kContinuity, Cause::DriftDrop, 8, 1);
+					if (mode == 0)
+						drive.SealAndObserve(h, s);
+					else
+						fs.Seal(h, s);
+					out.push_back(drive.Take(VpResync::Reader::RenderAhead) | (drive.Take(VpResync::Reader::SigmaDelta) << 16));
+				}
+			}
+			Assert::IsTrue(a == b, L"identical masks per frame");
+			Assert::IsTrue(a[4] != 0 && a[7] != 0, L"the FULL and the MINOR were seen");
+		}
+
+		// A new era re-registers every provider, and the lane holds no stale Indicator after the swap.
+		TEST_METHOD(NewEraReRegistersProvidersAndLaneHoldsNoStaleIndicator)
+		{
+			VpResync::Shadow shadow;
+			shadow.Configure(VpResync::Shadow::Mode::On, 8);
+			std::shared_ptr<Indicator> first = shadow.GetIndicator();
+			AnalysisLane lane(first, []() { return uint64_t(0); });
+			VpResync::Drive drive;
+			VpSeal::FrameSeal fs;
+			int calls = 0;
+			fs.AddProvider("count", [&calls](const std::shared_ptr<Indicator>&) { ++calls; });
+			fs.AddProvider("drive", [&drive](const std::shared_ptr<Indicator>& i) { drive.RegisterOn(i); });
+			fs.AddProvider("lane", [&lane](const std::shared_ptr<Indicator>& i) { lane.BindIndicator(i); });
+			fs.Seal(shadow.GetIndicator(), 1);
+			fs.Seal(shadow.GetIndicator(), 2);
+			Assert::IsTrue(calls == 1 && fs.Eras() == 1, L"registered once on the first era");
+			const uint32_t era1 = first->Era();
+			shadow.Configure(VpResync::Shadow::Mode::Off, 8);
+			shadow.Configure(VpResync::Shadow::Mode::Shadow, 8);   // a fresh Indicator
+			const std::shared_ptr<Indicator> second = shadow.GetIndicator();
+			Assert::IsTrue(second && second->Era() != era1, L"a new era");
+			fs.Seal(second, 3);
+			Assert::IsTrue(calls == 2 && fs.Eras() == 2, L"every provider registered again");
+			Assert::IsTrue(drive.Registered() == second && drive.ReaderIndex(VpResync::Reader::RenderAhead) >= 0, L"drive readers on the new era");
+			Assert::IsTrue(second->RejectedReaders() == 0, L"before the first observe");
+			Assert::IsTrue(lane.IndicatorRebinds() == 1, L"lane rebound once");
+			std::weak_ptr<Indicator> old = first;
+			first.reset();
+			Assert::IsTrue(old.expired(), L"nothing (lane, seal, shadow) keeps the old Indicator alive");
+		}
+
+		// The storm hold reaches the lane's regulator as T0 and is counted.
+		TEST_METHOD(StormHoldFloorsTheLaneRegulatorToT0)
+		{
+			Rig r;
+			r.Configure(LaneSettings::Mode::On, false, 1);
+			r.lane.SetExternalSeal(true);
+			const std::shared_ptr<Indicator> h = Alias(r.ind);
+			VpSeal::FrameSeal fs;
+			fs.AddProvider("lane", [&r](const std::shared_ptr<Indicator>& i) { r.lane.BindIndicator(i); });
+			fs.Subscribe("lane", [&r](const std::shared_ptr<Indicator>&, uint64_t seq, VpIndicator::CounterMask c) { r.lane.OnSealed(seq, c); });
+			r.lane.OnSourceFrame(r.View(1));
+			for (uint64_t s = 1; s <= 10; ++s)
+				Frame(r, fs, h, s);
+			const Regulator& reg = r.lane.GetRegulator();
+			Assert::IsTrue(reg.LaneLevel() > reg.T0StepCount(), L"full level before the storm");
+			r.lane.SetStormHold(true);
+			Frame(r, fs, h, 11);
+			Assert::IsTrue(reg.LaneLevel() == reg.T0StepCount(), L"held at T0");
+			Assert::IsTrue(r.lane.StormHoldEngagements() == 1 && r.lane.StormHold(), L"counted");
+			r.lane.SetStormHold(false);
+			Assert::IsTrue(!r.lane.StormHold(), L"released");
+		}
+
+		// In external-seal mode a frame nobody sealed is counted, never sealed twice or silently.
+		TEST_METHOD(UnsealedFrameInExternalModeIsCounted)
+		{
+			Rig r;
+			r.Configure(LaneSettings::Mode::On, false, 1);
+			r.lane.SetExternalSeal(true);
+			r.lane.OnSourceFrame(r.View(1));
+			r.Pump();
+			r.lane.OnRenderStart(1, 4000);
+			Assert::IsTrue(r.lane.ExternalSealMisses() == 1, L"counted");
+			Assert::IsTrue(!r.ind.HasSealed(), L"the lane did not seal");
 		}
 	};
 }

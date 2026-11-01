@@ -93,36 +93,48 @@ public:
     // Render thread: the frame is about to be rendered. Registers the readers on a new Indicator
     // (a new era: Configure built one), seals the frame and observes it. Returns the changed mask
     // (0 without an Indicator). The callbacks only collect pending masks.
+    // Standalone path (today's renderer). With a FrameSeal use RegisterOn + OnObserved instead: the
+    // FrameSeal owns the one seal per frame.
     CounterMask SealAndObserve(const std::shared_ptr<VpIndicator::Indicator>& indicator, uint64_t seq)
     {
         if (!indicator || seq == 0)
             return 0;
-        if (indicator != m_registered) {
-            m_registered = indicator;
-            m_pending.fill(0);
-            for (size_t i = 0; i < kReaders; ++i) {
-                const ReaderSpec& spec = SpecOf(static_cast<Reader>(i));
-                CounterMask* slot = &m_pending[i];
-                m_ids[i] = indicator->Register(spec.name, spec.reads, spec.policies,
-                    [slot](const VpIndicator::Indicator::Change& c) { *slot |= c.relevant; });
-            }
-            m_latch = true;
-        }
+        if (indicator != m_registered)
+            RegisterOn(indicator);
         m_lastSealed = seq;
         const CounterMask changed = indicator->SealAndObserve(seq);
-        if (m_latch) {
-            // Entering `on` (25a R5, matching the pulldown's Cursor): the first observe after a
-            // registration (shadow -> on keeps the Indicator; off -> on builds a new era) or a return
-            // to `on` (Detach) only LATCHES. The Indicator reports every counter on its first observe
-            // (and everything since the last observe on a return); the readers act only on what
-            // changed AT this frame - its stamp against the previous frame's - never on the history
-            // of the era (a settings change is not a source event). An ancient previous frame
-            // compares as "everything" (the conservative reset). The returned mask is unfiltered.
-            m_latch = false;
-            const CounterMask atFrame = VpIndicator::Changed(indicator->StampOf(seq - 1), indicator->StampOf(seq));
-            for (CounterMask& pending : m_pending)
-                pending &= atFrame;
+        ApplyLatch(*indicator, seq);
+        return changed;
+    }
+
+    // FrameSeal provider entry (render thread, before the Indicator's first Observe): registers the
+    // readers on `indicator` and arms the entering-`on` latch. A no-op when already registered on it.
+    // Readers that cannot be registered (the Indicator refused: already observed) keep id -1 and never
+    // act; Indicator::RejectedReaders() counts them.
+    void RegisterOn(const std::shared_ptr<VpIndicator::Indicator>& indicator)
+    {
+        if (!indicator || indicator == m_registered)
+            return;
+        m_registered = indicator;
+        m_pending.fill(0);
+        for (size_t i = 0; i < kReaders; ++i) {
+            const ReaderSpec& spec = SpecOf(static_cast<Reader>(i));
+            CounterMask* slot = &m_pending[i];
+            m_ids[i] = indicator->Register(spec.name, spec.reads, spec.policies,
+                [slot](const VpIndicator::Indicator::Change& c) { *slot |= c.relevant; });
         }
+        m_latch = true;
+    }
+
+    // FrameSeal subscriber entry (render thread): the frame `seq` was sealed and observed by the
+    // FrameSeal (no second seal). Applies the entering-`on` latch exactly like SealAndObserve and
+    // returns `changed`. Ignored (returns `changed`) when `indicator` is not the one registered.
+    CounterMask OnObserved(const std::shared_ptr<VpIndicator::Indicator>& indicator, uint64_t seq, CounterMask changed)
+    {
+        if (!indicator || seq == 0 || indicator != m_registered)
+            return changed;
+        m_lastSealed = seq;
+        ApplyLatch(*indicator, seq);
         return changed;
     }
 
@@ -197,6 +209,23 @@ public:
     };
 
 private:
+    void ApplyLatch(const VpIndicator::Indicator& indicator, uint64_t seq)
+    {
+        if (!m_latch)
+            return;
+        // Entering `on` (25a R5, matching the pulldown's Cursor): the first observe after a
+        // registration (shadow -> on keeps the Indicator; off -> on builds a new era) or a return
+        // to `on` (Detach) only LATCHES. The Indicator reports every counter on its first observe
+        // (and everything since the last observe on a return); the readers act only on what
+        // changed AT this frame - its stamp against the previous frame's - never on the history
+        // of the era (a settings change is not a source event). An ancient previous frame
+        // compares as "everything" (the conservative reset). The returned mask is unfiltered.
+        m_latch = false;
+        const CounterMask atFrame = VpIndicator::Changed(indicator.StampOf(seq - 1), indicator.StampOf(seq));
+        for (CounterMask& pending : m_pending)
+            pending &= atFrame;
+    }
+
     std::shared_ptr<VpIndicator::Indicator> m_registered;
     std::array<CounterMask, kReaders> m_pending{};
     std::array<int, kReaders> m_ids{};

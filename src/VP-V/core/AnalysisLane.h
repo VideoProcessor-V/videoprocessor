@@ -400,6 +400,9 @@ struct LaneNodeInfo {
 };
 
 struct LaneState {
+    // Keeps the Indicator this state's runner reads alive (declared first: destroyed last). Null when the
+    // lane was built on a raw pointer (tests).
+    std::shared_ptr<VpIndicator::Indicator> indHold;
     Graph graph;
     std::unique_ptr<LaneSourceRing> ring;
     std::unique_ptr<SlotTable> table;                 // (declared before the runner: destroyed after it)
@@ -429,17 +432,64 @@ public:
     using LiveFill = std::function<bool(const Node&, uint64_t, int, Header&, uint32_t)>;
 
     // `indicator` is the host's central Indicator (not owned; may be null: the lane is then unavailable).
-    // TODO(resync Q0, plan 50 gap G3): NOT WIRED to the renderer, and must not be until Q0 lands. Two hazards once it is:
-    // (1) OnRenderStart seals the central Indicator (SealAndObserve) and so does the resync drive
-    // (LibplaceboVideoRenderer ResyncDrive::SealAndObserve): one FrameSeal must own the seal; (2) this RAW pointer can
-    // dangle when a resync mode change replaces the Indicator (the host holds it as a shared_ptr): Q0 changes it to a
-    // shared_ptr / handle. Nothing outside tests constructs an AnalysisLane today (integration 2026-11-01).
+    // Resync Q0 (plan 50 gap G3): the lane holds the Indicator by SHARED HANDLE (BindIndicator, rebound on an era
+    // change by FrameSeal) and, with SetExternalSeal(true), never seals it itself: FrameSeal owns the one seal per
+    // frame and calls OnSealed(seq, changed). The raw-pointer constructor is the standalone path (the lane seals
+    // itself in OnRenderStart); it is kept for the lane's existing tests and must not be used next to a FrameSeal.
     AnalysisLane(VpIndicator::Indicator* indicator, std::function<uint64_t()> nowUs)
         : ind_(indicator), nowUs_(std::move(nowUs))
     {
     }
+    AnalysisLane(std::shared_ptr<VpIndicator::Indicator> indicator, std::function<uint64_t()> nowUs)
+        : ind_(indicator.get()), indHandle_(std::move(indicator)), nowUs_(std::move(nowUs))
+    {
+    }
     AnalysisLane(const AnalysisLane&) = delete;
     AnalysisLane& operator=(const AnalysisLane&) = delete;
+
+    // ---- FrameSeal integration (render thread) ----
+
+    // Rebind the lane to a (new-era) Indicator. A state built on the previous Indicator keeps it alive through
+    // LaneState::indHold, so a worker never reads a destroyed Indicator; the next Configure rebuilds the graph
+    // (the era is part of the graph key) on the new one. The first observation after a rebind is not a change.
+    void BindIndicator(const std::shared_ptr<VpIndicator::Indicator>& indicator)
+    {
+        if (indicator.get() == ind_ && indicator == indHandle_)
+            return;
+        indHandle_ = indicator;
+        ind_ = indicator.get();
+        observedOnce_ = false;
+        waitValid_ = false;
+        ++indicatorRebinds_;
+    }
+    // FrameSeal owns the seal: OnRenderStart no longer seals; the lane learns the frame's changed mask
+    // through OnSealed (called by FrameSeal before OnRenderStart of the same frame).
+    void SetExternalSeal(bool on) { externalSeal_ = on; }
+    bool ExternalSeal() const { return externalSeal_; }
+    // Render thread. `changed` is FrameSeal's SealAndObserve result for `seq`.
+    void OnSealed(uint64_t seq, VpIndicator::CounterMask changed)
+    {
+        if (observedOnce_ && changed != 0)
+            regulator_.OnIndicatorChange(changed);   // the first observation is not a change
+        observedOnce_ = true;
+        sealedSeq_ = seq;
+        haveSealedSeq_ = true;
+        ApplyStorm();
+    }
+    // The resync storm hold (Shadow::StormSafeSettings().laneT0): while held the regulator is kept at the
+    // conservative floor (T0). Released when the storm ends; the regulator then recovers as usual.
+    void SetStormHold(bool held)
+    {
+        if (held && !stormHold_)
+            ++stormHoldEngagements_;
+        stormHold_ = held;
+    }
+    bool StormHold() const { return stormHold_; }
+    uint64_t StormHoldEngagements() const { return stormHoldEngagements_; }
+    uint64_t IndicatorRebinds() const { return indicatorRebinds_; }
+    // OnRenderStart calls in external-seal mode whose frame was not sealed by FrameSeal first (a wiring bug:
+    // counted, never silently sealed twice).
+    uint64_t ExternalSealMisses() const { return externalSealMisses_; }
 
     // ---- setup (before the lane threads start) ----
 
@@ -551,11 +601,17 @@ public:
         renderState_ = st;
         lastSlackUs_ = presentSlackUs;
 
-        // TODO(resync Q0, G3): a second sealer of the central Indicator besides the resync drive; see the constructor.
-        const VpIndicator::CounterMask changed = ind_->SealAndObserve(seq);
-        if (observedOnce_ && changed != 0)
-            regulator_.OnIndicatorChange(changed);   // the first observation is not a change
-        observedOnce_ = true;
+        if (externalSeal_) {
+            // One seal owner: FrameSeal sealed this frame and reported it through OnSealed.
+            if (!haveSealedSeq_ || sealedSeq_ != seq)
+                ++externalSealMisses_;
+        } else {
+            const VpIndicator::CounterMask changed = ind_->SealAndObserve(seq);
+            if (observedOnce_ && changed != 0)
+                regulator_.OnIndicatorChange(changed);   // the first observation is not a change
+            observedOnce_ = true;
+            ApplyStorm();
+        }
         ApplyRegulator(*st);
         if (seq < st->firstSeq)
             return empty_;
@@ -960,6 +1016,7 @@ private:
         st->plan = governor_.Update(reg, st->graph, card, tier);
         ApplyLaneGrants(st->plan, *st->table);
 
+        st->indHold = indHandle_;
         st->runner.reset(new LaneRunner(*st->table, ind_, nowUs_));
         LaneState* sp = st.get();
         st->runner->SetBuffers(
@@ -1129,7 +1186,22 @@ private:
         return ok;
     }
 
+    // While the storm hold is in force keep the regulator at the conservative floor (T0), once per frame.
+    void ApplyStorm()
+    {
+        if (stormHold_ && regulator_.LaneLevel() > regulator_.T0StepCount())
+            regulator_.OnIndicatorChange(VpIndicator::Bit(VpIndicator::kFull));
+    }
+
     VpIndicator::Indicator* ind_;
+    std::shared_ptr<VpIndicator::Indicator> indHandle_;   // render thread only
+    bool externalSeal_ = false;
+    bool haveSealedSeq_ = false;
+    uint64_t sealedSeq_ = 0;
+    bool stormHold_ = false;
+    uint64_t stormHoldEngagements_ = 0;
+    uint64_t indicatorRebinds_ = 0;
+    uint64_t externalSealMisses_ = 0;
     std::function<uint64_t()> nowUs_;
     LaneSettings settings_;
     std::shared_ptr<LaneState> state_;         // swapped with std::atomic_store / atomic_load
