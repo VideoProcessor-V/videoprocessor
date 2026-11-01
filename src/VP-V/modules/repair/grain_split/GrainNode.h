@@ -3,12 +3,15 @@
 #pragma once
 
 #include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/core/GpuAllocator.h>
 #include <VP-V/core/ProductSlots.h>
 #include <VP-V/core/Products.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <string>
+#include <vector>
 
 // repair.grain_split as a skeleton node (SA2, doc 51 P10): ONE node per plane-component over a core SlotSet
 // (ProductSlots.h). Pure C++14 protocol, no GPU: the compute is behind an interface (`Compute::Fill`), so the CPU
@@ -80,7 +83,7 @@ namespace GrainSplit
 		bool Ok() const { return status == GrainStatus::Ring || status == GrainStatus::Live; }
 	};
 
-	enum class LaneOutcome : uint8_t { Published, Late, Skipped, WriteFailed };
+	enum class LaneOutcome : uint8_t { Published, Late, Skipped, WriteFailed, Shed };
 
 	struct NodeCounters
 	{
@@ -90,13 +93,14 @@ namespace GrainSplit
 		uint64_t liveReuses = 0;     // reads served from an existing live fill (later consumers)
 		uint64_t fillFailures = 0;
 		uint64_t missing = 0, stale = 0, wrongSize = 0, shed = 0;
+		uint64_t shedClaims = 0;     // lane claims refused because the governor dropped the product
 	};
 
 	class GrainNode
 	{
 	public:
 		GrainNode(VpSkeleton::ProductId id, uint16_t ring, uint16_t livePool, const GrainDesc& desc)
-			: slots_(id, ring, livePool), desc_(desc) {}
+			: slots_(id, ring, livePool), desc_(desc), frames_(slots_.Ring()) {}
 		GrainNode(const GrainNode&) = delete;
 		GrainNode& operator=(const GrainNode&) = delete;
 
@@ -117,7 +121,10 @@ namespace GrainSplit
 		VpSkeleton::ClaimResult LaneClaim(uint64_t seq, VpSkeleton::LaneTicket* t, uint64_t completedRelease = ~uint64_t(0))
 		{
 			if (shed_)
-				return VpSkeleton::ClaimResult::TooEarly;   // a dropped product is not precomputed
+			{
+				++counters_.shedClaims;
+				return VpSkeleton::ClaimResult::TooEarly;   // a dropped product is not precomputed (LanePrecompute: Shed)
+			}
 			return slots_.Claim(seq, VpSkeleton::Provenance::AheadLane, completedRelease, t);
 		}
 		bool LaneWritable(const VpSkeleton::LaneTicket& t) const { return slots_.Writable(t); }
@@ -138,6 +145,11 @@ namespace GrainSplit
 		LaneOutcome LanePrecompute(uint64_t seq, Compute& c)
 		{
 			VpSkeleton::LaneTicket t;
+			if (shed_)
+			{
+				++counters_.shedClaims;
+				return LaneOutcome::Shed;
+			}
 			if (LaneClaim(seq, &t) != VpSkeleton::ClaimResult::Claimed || !LaneWritable(t))
 			{
 				if (t.valid)
@@ -160,10 +172,13 @@ namespace GrainSplit
 		VpSkeleton::SealResult Seal(uint64_t seq)
 		{
 			const VpSkeleton::SealResult r = slots_.Seal(seq, [](const VpSkeleton::Header&) { return VpSkeleton::SealReason::Accepted; });
+			FrameState& f = State(seq);
+			if (!(f.sealed && f.seq == seq))
+				f = FrameState();   // a new frame in this ring slot: its own record
 			if (r.reason != VpSkeleton::SealReason::AlreadySealed)
-				sealResult_ = r;
-			sealedSeq_ = seq;
-			sealed_ = true;
+				f.sealResult = r;
+			f.seq = seq;
+			f.sealed = true;
 			return r;
 		}
 
@@ -185,17 +200,18 @@ namespace GrainSplit
 				out.status = GrainStatus::WrongSize;
 				return out;
 			}
-			if (!sealed_ || sealedSeq_ != seq)
+			if (!(State(seq).sealed && State(seq).seq == seq))
 				Seal(seq);
+			FrameState& fs = State(seq);
 			VpSkeleton::ReadInfo r = slots_.Read(seq);
 			if (r.kind == VpSkeleton::ReadInfo::None)
 			{
-				if (failedSeq_ == seq && failed_)
+				if (fs.failed)
 				{
 					++counters_.missing;
 					return out;   // no second producer inside the frame
 				}
-				const VpSkeleton::SealResult s = sealResult_;
+				const VpSkeleton::SealResult s = fs.sealResult;
 				if (s.outcome == VpSkeleton::SealOutcome::Unavailable)
 				{
 					const bool stale = s.reason == VpSkeleton::SealReason::Overrun || s.reason == VpSkeleton::SealReason::OrderError;
@@ -217,8 +233,7 @@ namespace GrainSplit
 				if (!compute.Fill(seq, target))
 				{
 					slots_.CancelLive(seq);
-					failed_ = true;
-					failedSeq_ = seq;
+					fs.failed = true;
 					++counters_.fillFailures;
 					++counters_.missing;
 					out.reason = VpSkeleton::SealReason::FillDeclined;
@@ -229,8 +244,7 @@ namespace GrainSplit
 				if (!slots_.CommitLive(seq, hdr))
 				{
 					slots_.CancelLive(seq);
-					failed_ = true;
-					failedSeq_ = seq;
+					fs.failed = true;
 					++counters_.missing;
 					out.reason = VpSkeleton::SealReason::FillDeclined;
 					return out;
@@ -261,25 +275,50 @@ namespace GrainSplit
 		// After the frame's last use by any consumer.
 		bool Release(uint64_t seq, uint64_t releaseValue = 0)
 		{
-			if (sealedSeq_ == seq)
-				sealed_ = false;
-			if (failedSeq_ == seq)
-				failed_ = false;
+			FrameState& f = State(seq);
+			if (f.seq == seq)
+				f = FrameState();
 			return slots_.Release(seq, releaseValue);
 		}
 
 	private:
+		// The render-side record of one frame, per ring slot (indexed by SlotOf(seq), stamped with seq): two frames in
+		// flight never share a seal result or a fill-failed flag.
+		struct FrameState
+		{
+			uint64_t seq = ~uint64_t(0);
+			bool sealed = false;
+			bool failed = false;
+			VpSkeleton::SealResult sealResult;
+		};
+		FrameState& State(uint64_t seq) { return frames_[slots_.SlotOf(seq)]; }
+
 		VpSkeleton::SlotSet slots_;
 		GrainDesc desc_;
 		NodeCounters counters_;
-		VpSkeleton::SealResult sealResult_;
-		uint64_t sealedSeq_ = 0;
-		bool sealed_ = false;
-		uint64_t failedSeq_ = 0;
-		bool failed_ = false;
+		std::vector<FrameState> frames_;
 		bool shed_ = false;
 		std::string lastFiller_;
 	};
+
+	// The ledger comparison (Ctrl+Alt+D): the PEAK bytes of the grain split per storage layout, scratch included.
+	// Full: slots at 16 B/px (+ 16 B per block) and a bands scratch of 16 B/px (rows is the product itself).
+	// Compact: slots at 8 B/px (+ 8 B per block) and a rows + bands scratch of 32 B/px. So with N = ring + live slots
+	// compact is 8N + 32 B/px against full's 16N + 16: it saves only when N > 2.
+	inline std::vector<std::string> StorageLedgerLines(VpSkeleton::Dims d, unsigned slotsRingPlusLive, int blockShift = 4)
+	{
+		const uint64_t px = VpSkeleton::CellsAt(d, 0), blocks = VpSkeleton::CellsAt(d, static_cast<uint8_t>(blockShift));
+		const uint64_t fullSlot = px * 16 + blocks * 16, compactSlot = px * 8 + blocks * 8;
+		const uint64_t fullScratch = px * 16 + blocks * 16, compactScratch = px * 32 + blocks * 16;
+		const uint64_t fullPeak = fullSlot * slotsRingPlusLive + fullScratch, compactPeak = compactSlot * slotsRingPlusLive + compactScratch;
+		std::vector<std::string> lines;
+		lines.push_back("VRAM grain split full: " + VpSkeleton::FormatMB(fullPeak) + " (16 x " + std::to_string(slotsRingPlusLive) +
+			" + 16 B/px incl. scratch)");
+		lines.push_back("VRAM grain split compact: " + VpSkeleton::FormatMB(compactPeak) + " (8 x " + std::to_string(slotsRingPlusLive) +
+			" + 32 B/px incl. scratch)" + std::string(compactPeak < fullPeak ? ", saves " + VpSkeleton::FormatMB(fullPeak - compactPeak) :
+			std::string(", saves nothing (ring + live <= 2)")));
+		return lines;
+	}
 
 	// The visible fallback of one reader (FallbackCatalog entry "grain split (<consumer>)"): engaged while the
 	// shared product is not Ok for it (the reader runs its own reduced computation or goes off), released by

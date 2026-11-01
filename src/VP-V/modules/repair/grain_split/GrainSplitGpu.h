@@ -29,6 +29,8 @@
 #include <libplacebo/gpu.h>
 #include <libplacebo/shaders/custom.h>
 
+#include <VP-V/core/FallbackCatalog.h>
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -58,16 +60,72 @@ namespace GrainSplit
 			int component = -1;        // the plane component it was computed on
 			GrainSplit::Storage storage = GrainSplit::Storage::Full;
 			pl_tex splitB = nullptr;   // Compact only (texture B)
+			uint64_t seq = 0;          // the source frame it was computed for (Options::seq)
+			uint32_t version = 0;      // GrainSplit::kUnitVersion of the unit that made it (0 = not made by a Splitter)
 		};
 
 		inline bool Compact(const Frame* f) { return f && f->storage == GrainSplit::Storage::Compact; }
 
-		// Whether a published product fits a reader's plane (same size, block, scale, code unit and component): else the reader
-		// falls back visibly (a product of another bit depth or another chroma channel is never accepted silently).
-		inline bool Fits(const Frame* f, int w, int h, int B, double scale, double codeUnit, int component)
+		constexpr uint64_t kAnySeq = ~uint64_t(0);
+
+		enum class FitResult : uint8_t { Fits, Missing, WrongSize, Stale };
+
+		// Whether a published product fits a reader's plane: same unit version, the expected source frame (kAnySeq = the
+		// reader does not know it), size, block, scale, code unit and component. Else the reader falls back visibly (a
+		// product of another bit depth, chroma channel, frame or unit version is never accepted silently):
+		// Missing = nothing usable, Stale = another frame or version, WrongSize = another geometry/unit/component.
+		inline FitResult CheckFit(const Frame* f, int w, int h, int B, double scale, double codeUnit, int component,
+			uint64_t expectedSeq = kAnySeq)
 		{
-			return f && f->split && f->blocks && (f->storage != GrainSplit::Storage::Compact || f->splitB) && f->w == w && f->h == h && f->B == B && f->scale == scale && f->codeUnit == codeUnit &&
-				f->component == component;
+			if (!f || !f->split || !f->blocks || (f->storage == GrainSplit::Storage::Compact && !f->splitB))
+				return FitResult::Missing;
+			if (f->version != GrainSplit::kUnitVersion || (expectedSeq != kAnySeq && f->seq != expectedSeq))
+				return FitResult::Stale;
+			if (f->w != w || f->h != h || f->B != B || f->scale != scale || f->codeUnit != codeUnit || f->component != component)
+				return FitResult::WrongSize;
+			return FitResult::Fits;
+		}
+
+		inline bool Fits(const Frame* f, int w, int h, int B, double scale, double codeUnit, int component,
+			uint64_t expectedSeq = kAnySeq)
+		{
+			return CheckFit(f, w, h, B, scale, codeUnit, component, expectedSeq) == FitResult::Fits;
+		}
+
+		// The storage a Compute really uses. Compact is refused (Full instead, visibly) when it would be wrong:
+		//  - the plane is not UNORM/UINT: a float plane can hold blacker-than-black / whiter-than-white that the unorm
+		//    base of the compact layout would clamp;
+		//  - 1 / codeUnit > 4096 (more than 12 bits of codes): the fp16 s1/s2 would lose precision (and overflow).
+		struct StorageChoice
+		{
+			GrainSplit::Storage storage = GrainSplit::Storage::Full;
+			bool downgraded = false;
+			std::string why;
+		};
+
+		inline StorageChoice ChooseStorage(GrainSplit::Storage requested, pl_fmt planeFormat, double codeUnit)
+		{
+			StorageChoice c;
+			c.storage = requested;
+			if (requested != GrainSplit::Storage::Compact)
+				return c;
+			if (!planeFormat || !(planeFormat->type == PL_FMT_UNORM || planeFormat->type == PL_FMT_UINT))
+				c.why = "the plane is not an integer format (compact would clamp blacker-than-black and whiter-than-white)";
+			else if (!(codeUnit > 0.0) || 1.0 / codeUnit > 4096.0)
+				c.why = "more than 12 bits of codes (compact fp16 would lose precision)";
+			if (!c.why.empty())
+			{
+				c.storage = GrainSplit::Storage::Full;
+				c.downgraded = true;
+			}
+			return c;
+		}
+
+		inline FallbackCatalog::Decision StorageFallback(const StorageChoice& c)
+		{
+			if (!c.downgraded)
+				return FallbackCatalog::Released("grain split storage");
+			return FallbackCatalog::Engaged("grain split storage", "compact refused, using full: " + c.why);
 		}
 
 		// Output textures supplied by the caller (a skeleton node's slot); null = the Splitter owns them as before.
@@ -80,6 +138,7 @@ namespace GrainSplit
 			GrainSplit::Storage storage = GrainSplit::Storage::Full;
 			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* arena = nullptr;   // intermediates; null = private textures
 			Targets targets;
+			uint64_t seq = 0;   // the source frame this split is for: stamped into Frame::seq
 		};
 
 		class Splitter
@@ -102,6 +161,16 @@ namespace GrainSplit
 			// The scratch-arena requests of one Compute (scope kArenaScope, owner "grain_split", T0): the rgba32f temporaries.
 			static std::vector<VpSkeleton::ArenaRequest> ArenaRequests(pl_gpu gpu, int w, int h, int B, GrainSplit::Storage storage);
 			bool ScratchShort() const { return m_scratchShort; }
+			// "" or why the requested Compact storage was replaced by Full (ChooseStorage); StorageDecision() is the
+			// FallbackCatalog entry (engaged while the last Compute had to fall back).
+			const std::string& StorageNote() const { return m_storageNote; }
+			FallbackCatalog::Decision StorageDecision() const
+			{
+				StorageChoice c;
+				c.downgraded = !m_storageNote.empty();
+				c.why = m_storageNote;
+				return StorageFallback(c);
+			}
 			const Frame& Out() const { return m_out; }
 			void Release(pl_gpu gpu);
 			const std::string& LastError() const { return m_error; }
@@ -111,6 +180,7 @@ namespace GrainSplit
 			Frame m_out;
 			std::string m_error;
 			bool m_scratchShort = false;
+			std::string m_storageNote;
 		};
 
 		// The Gaussian weights of GrainSplit::Gauss (radius max(1, ceil(3 sigma)), normalised over the taps).
@@ -123,5 +193,10 @@ namespace GrainSplit
 		std::string ViewGlsl(GrainSplit::Storage storage, double codeUnit);
 		// Appends the sampled descriptors ViewGlsl reads (Full: split, gblocks; Compact: gs_a, gs_b, gblocks).
 		void BindView(const Frame& f, std::vector<pl_shader_desc>& out);
+
+		// FNV-1a 64 of the Full-mode pass bodies (rows, columns, quiet, minimum, Wiener: carriage returns skipped), in
+		// that order. The Full path must stay byte-identical to the pre-SA2 shaders: a test pins this to the value of
+		// the strings at 160987e5. Any intended change of the law bumps GrainSplit::kUnitVersion AND this pin.
+		uint64_t FullShaderFingerprint();
 	}
 }

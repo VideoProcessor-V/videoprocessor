@@ -57,6 +57,7 @@ enum : ProductId {
 // chroma CfL and the region evidence (doc 51 P10).
 enum : ProductId {
     kP10GrainSplit = kCameraProductEnd,
+    kP10cGrainSplitChroma,   // the same split for the Cb and Cr planes (read by the chroma-from-luma grain guard only)
     kSA2ProductEnd
 };
 
@@ -183,6 +184,9 @@ struct ProductDecl {
     // Without it such a fill is refused: the product is unavailable for that frame (visible).
     bool missingInputForm = false;
     float refRenderMs = 0.0f;                 // estimated in-render cost on the reference card, 1080p
+    // The SizeRule is a planning figure (a plane whose runtime geometry is not a plain shift of the source, e.g.
+    // chroma): the allocator's layout uses the ACTUAL plane dims and TierInput::actual carries its bytes.
+    bool planningSize = false;
 };
 
 // Products declared outside FirstProducts by their owning module (dense ids appended at plan time) keep a registered
@@ -503,6 +507,19 @@ inline void AppendGrainSplitProduct(std::vector<ProductDecl>& decls, bool compac
     AddTerm(p10, 4, compact ? 8 : 16);
     p10.refRenderMs = 1.2f;
     decls.push_back(p10);
+
+    // P10c: the chroma planes' split (Cb + Cr), read only by the CfL grain guard. The SizeRule PLANS for the
+    // declared chroma geometry (two planes at half width and height); the runtime path never assumes it: the
+    // governor user and the ledger use the actual bytes of the real chroma planes (planningSize).
+    ProductDecl c = Make(kP10cGrainSplitChroma, "grain.split.chroma", "grain split (chroma planes)", Backend::GpuCompute, 1,
+                         Tier::T1, content, Bit(kSettingsAnalysis));
+    c.sourceFrame = true;
+    AddInput(c, kP4SourceStats, 0);
+    AddTerm(c, 1, compact ? 16 : 32);   // Cb + Cr planes at half size: 2 x (8 | 16) B/px
+    AddTerm(c, 5, compact ? 16 : 32);   // block grids at 16 px of those planes: 2 x (8 | 16) B per block
+    c.refRenderMs = 0.6f;
+    c.planningSize = true;
+    decls.push_back(c);
 }
 
 // The registry the skeleton runs with: the first products, the camera products, then P10, in fixed id order.

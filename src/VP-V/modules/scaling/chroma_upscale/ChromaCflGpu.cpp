@@ -429,12 +429,17 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			m_grainStatus = GrainSplit::GrainStatus::Ring;   // recomputed every frame: a fitting product is read again at once
 			if (guard)
 			{
+				bool stale = false, shedNow = false;
 				auto pick = [&](const GrainSplit::Gpu::Frame* shared, GrainSplit::Gpu::Splitter& own, pl_tex tex, int comp, double cu, double ln,
 					const GrainSplit::Gpu::Frame*& outF) {
-					if (GrainSplit::Gpu::Fits(shared, tex->params.w, tex->params.h, BlockPx(ln), Scale(ln), cu, comp)) { outF = shared; return true; }
+					const GrainSplit::Gpu::FitResult fit = GrainSplit::Gpu::CheckFit(shared, tex->params.w, tex->params.h, BlockPx(ln), Scale(ln), cu, comp,
+						params.grainSeq);
+					if (fit == GrainSplit::Gpu::FitResult::Fits && !params.grainShed) { outF = shared; return true; }
 					ownSplit = true;
-					if (shared) misfit = true;
-					m_grainStatus = misfit ? GrainSplit::GrainStatus::WrongSize : GrainSplit::GrainStatus::Missing;
+					if (params.grainShed) shedNow = true;
+					if (shared && !params.grainShed) misfit = true;
+					if (fit == GrainSplit::Gpu::FitResult::Stale) stale = true;
+					m_grainStatus = shedNow ? GrainSplit::GrainStatus::Shed : stale ? GrainSplit::GrainStatus::Stale : (misfit ? GrainSplit::GrainStatus::WrongSize : GrainSplit::GrainStatus::Missing);
 					if (!own.Compute(gpu, dispatch, tex, comp, cu, Scale(ln), BlockPx(ln))) return false;
 					outF = &own.Out();
 					return true;

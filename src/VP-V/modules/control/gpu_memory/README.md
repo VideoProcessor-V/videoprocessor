@@ -28,3 +28,11 @@ Acquire beyond capacity, for a tier the plan shed, outside a scope or off-thread
 ## How to build / test
 
 Tests: `src/VP-V/tests/GpuAllocatorTests.cpp` (CPU: plan, order independence, determinism, exhaustion + recovery, tier shed, Transient residency, ProductTextures, layout bytes, per-tier VRAM report at 1080p/4K/8K, ledger) and `src/VP-V/tests/PrivateTextureScanTests.cpp` (static scan: no private `pl_tex_create` in repair/scaling modules outside the justified allow-list). WARP: TextureRestoreGpuTests arena tests.
+
+## Audit-1 changes (SA1/SA2)
+
+- Governor: two arena users. `kUserScratchArena` (tier T0, levels [plan(T0), 0]) and `kUserScratchArenaExtra` (tier T1, levels [plan(T2) - plan(T0), plan(T1) - plan(T0), 0]): pressure on the optional temporaries never takes the T0 ones. `AddScratchArenaUsers`, `ArenaGrantFor(requests, t0Grant, extraGrant)`.
+- Scopes: a nested `BeginScope` is refused (returns false, counted, shown by `FrameDecision`; the outer scope is untouched); a caller closes only a scope it opened.
+- Usage is counted per (owner, shape), up to that owner's admitted count, from that owner's slice of the pool: one owner cannot take another's textures.
+- `ProductTextures::Allocate(node, decl, layout, dims, plan)` refuses (visibly, FallbackCatalog "product textures") when the layout's bytes do not equal the declaration's SizeRule, unless the declaration is a planning-only size (`ProductDecl::planningSize`, the chroma product P10c): then the governor uses the ACTUAL bytes (`TierInput::actual`) and the layout takes the real plane dims (`TexTerm::absW/absH`), never an assumed subsampling.
+- The arena path destroys the private temporaries it replaces (TextureRestore half/tmp and the foreign trio, the grain Splitter's rows/bands/quiet).

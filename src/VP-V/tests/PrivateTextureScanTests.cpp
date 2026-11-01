@@ -30,6 +30,11 @@ namespace PrivateTextureScanTestsNs
 		{ "src/VP-V/modules/repair/deband/VpDebander.cpp", "src/VP-V/modules/repair/deband/README.md" },
 		{ "src/VP-V/modules/scaling/rebase/SourceRebase.cpp", "src/VP-V/modules/scaling/rebase/README.md" },
 		{ "src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp", "src/VP-V/modules/scaling/output/README.md" },
+		// Wrapper definition and wrapper callers (VpvGpu::Ensure / Ensure / EnsureFloat around pl_tex_recreate):
+		{ "src/VP-V/modules/repair/grain_split/GpuPassUtil.h", "src/VP-V/modules/repair/grain_split/README.md" },
+		{ "src/VP-V/modules/repair/grain_split/GrainSplitGpu.cpp", "src/VP-V/modules/repair/grain_split/README.md" },
+		{ "src/VP-V/modules/repair/temporal_detail/TemporalDetailGpu.cpp", "src/VP-V/modules/repair/temporal_detail/README.md" },
+		{ "src/VP-V/modules/scaling/chroma_upscale/ChromaCflGpu.cpp", "src/VP-V/modules/scaling/chroma_upscale/README.md" },
 	};
 
 	static const char* const kScanDirs[] = {
@@ -40,11 +45,25 @@ namespace PrivateTextureScanTestsNs
 
 	static const char* const kSentence = "migrates in SA6/SA7/SA8/SA12";
 
-	// Pure scanner: does the text create a texture privately?
+	bool IsIdentChar(char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
+
+	// A call of the bare wrapper name `name(` (Ensure / EnsureFloat), alone or qualified (VpvGpu::Ensure), but not
+	// a longer identifier (EnsureSize, MyEnsure).
+	bool CallsWrapper(const std::string& text, const char* name)
+	{
+		const std::string call = std::string(name) + "(";
+		for (size_t at = text.find(call); at != std::string::npos; at = text.find(call, at + 1))
+			if (at == 0 || !IsIdentChar(text[at - 1])) return true;
+		return false;
+	}
+
+	// Pure scanner: does the text create a texture privately (directly or through the Ensure / EnsureFloat wrappers
+	// around pl_tex_recreate that the repair and scaling modules define)?
 	bool CreatesTexturePrivately(const std::string& text)
 	{
 		return text.find("pl_tex_create") != std::string::npos
-			|| text.find("pl_tex_recreate") != std::string::npos;
+			|| text.find("pl_tex_recreate") != std::string::npos
+			|| CallsWrapper(text, "Ensure") || CallsWrapper(text, "EnsureFloat");
 	}
 
 	std::string RepoRoot()
@@ -148,6 +167,12 @@ namespace PrivateTextureScanTestsNs
 			Assert::IsTrue(CreatesTexturePrivately("pl_tex_recreate(gpu, &tex, &params);"));
 			Assert::IsFalse(CreatesTexturePrivately("auto t = arena.Acquire(width, height, format);"));
 			Assert::IsFalse(CreatesTexturePrivately(""));
+			// the wrappers are caught, longer identifiers are not
+			Assert::IsTrue(CreatesTexturePrivately("if (!VpvGpu::Ensure(gpu, m_rows, w, h, fmt)) return;"));
+			Assert::IsTrue(CreatesTexturePrivately("Ensure(gpu, tex, 1, 1, f);"));
+			Assert::IsTrue(CreatesTexturePrivately("if (!EnsureFloat(tex, w, h, 4)) return;"));
+			Assert::IsFalse(CreatesTexturePrivately("bool EnsureSize(int w, int h);"));
+			Assert::IsFalse(CreatesTexturePrivately("MyEnsure(x);"));
 		}
 	};
 }

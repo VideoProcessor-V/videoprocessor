@@ -40,6 +40,12 @@ namespace GrainSplit
 	enum class Storage : uint8_t { Full, Compact };
 	inline const char* Token(Storage s) { return s == Storage::Compact ? "compact" : "full"; }
 
+	// THE GRAIN SPLIT IS ONE DEPENDENCY UNIT: this CPU reference (Compute), its GLSL (GrainSplitGpu.cpp) and the storage
+	// layouts. Bump on ANY change of the law, the passes or a layout: a published frame carries it (Gpu::Frame::version),
+	// the GLSL embeds it as a define GS_UNIT_VERSION, and a reader refuses a frame of another version (stale, visible
+	// fallback, automatic recovery once a frame of the current version arrives).
+	constexpr uint32_t kUnitVersion = 1;
+
 	struct Plane
 	{
 		int w = 0, h = 0;

@@ -14,6 +14,7 @@
 // discards frame seq - ring (the render dropped it): the slot then holds a released earlier frame, exactly the
 // steady state the lane sees, and frames >= 10 are claimable.
 
+#include "../../../../tests/SettingsTestSupport.h"
 #include <VP-V/modules/repair/grain_split/GrainNode.h>
 
 #include <cstdint>
@@ -328,6 +329,116 @@ namespace GrainNodeTestsNs
 			Assert::AreEqual(1, live.calls, L"exactly one live fill");
 			Assert::AreEqual(uint64_t(0), node.Slots().Counters().missing.load(), L"InRenderOnly is not a miss");
 			Assert::AreEqual(uint64_t(0), node.Counters().missing, L"no node-level miss either");
+		}
+
+		TEST_METHOD(ShedIsADistinctLaneOutcome)
+		{
+			GrainNode node(VpSkeleton::kP10GrainSplit, kRing, kLive, Desc());
+			node.SetLaneGranted(true);
+			Warm(node, 10);
+			FakeCompute lane;
+			node.SetShed(true);
+			Assert::IsTrue(node.LanePrecompute(10, lane) == LaneOutcome::Shed, L"a shed product reports Shed, not Skipped");
+			Assert::AreEqual(0, lane.calls, L"nothing is computed for a shed product");
+			Assert::AreEqual(uint64_t(1), node.Counters().shedClaims, L"the refused claim is counted");
+			VpSkeleton::LaneTicket t;
+			Assert::IsTrue(node.LaneClaim(10, &t) != ClaimResult::Claimed, L"no claim while shed");
+			Assert::AreEqual(uint64_t(2), node.Counters().shedClaims, L"counted again");
+			node.SetShed(false);
+			Assert::IsTrue(node.LanePrecompute(10, lane) == LaneOutcome::Published, L"recovers when the governor returns the product");
+		}
+
+		TEST_METHOD(TwoFramesInFlightKeepTheirOwnSealResult)
+		{
+			// Frame 10 is sealed (published by the lane), frame 11 is sealed after it with NOTHING published (live fill).
+			// Re-acquiring frame 10 afterwards still gets frame 10's ring buffer: the seal results are per ring slot.
+			GrainNode node(VpSkeleton::kP10GrainSplit, kRing, kLive, Desc());
+			node.SetLaneGranted(true);
+			Warm(node, 10);
+			Warm(node, 11);
+			FakeCompute lane, render;
+			Assert::IsTrue(node.LanePrecompute(10, lane) == LaneOutcome::Published, L"frame 10 published");
+			node.Seal(10);
+			const GrainRead a10 = node.Acquire(10, Desc(), "temporal_detail", render);
+			node.Seal(11);   // no lane result for 11
+			const GrainRead a11 = node.Acquire(11, Desc(), "temporal_detail", render);
+			Assert::IsTrue(a10.status == GrainStatus::Ring && a11.status == GrainStatus::Live && a11.filledHere, L"10 ring, 11 live");
+			Assert::AreEqual(1, render.calls, L"one live fill (frame 11)");
+			const GrainRead again = node.Acquire(10, Desc(), "chroma_cfl", render);
+			Assert::IsTrue(again.status == GrainStatus::Ring && again.index == a10.index && !again.filledHere,
+				L"frame 10 still reads its own ring buffer after frame 11 was sealed");
+			Assert::AreEqual(1, render.calls, L"no extra compute");
+			const GrainRead again11 = node.Acquire(11, Desc(), "chroma_cfl", render);
+			Assert::IsTrue(again11.status == GrainStatus::Live && again11.index == a11.index && !again11.filledHere, L"11 reused");
+		}
+
+		TEST_METHOD(AFailedFillStaysFailedPerFrame)
+		{
+			// Frame 10's live fill fails; frame 11 fails too: neither is retried (no second producer) and the failure of
+			// 11 does not clear or replace the failure of 10.
+			GrainNode node(VpSkeleton::kP10GrainSplit, kRing, kLive, Desc());
+			Warm(node, 10);
+			Warm(node, 11);
+			FakeCompute render;
+			render.fail = true;
+			Assert::IsTrue(node.Acquire(10, Desc(), "temporal_detail", render).status == GrainStatus::Missing, L"10 fails");
+			Assert::IsTrue(node.Acquire(11, Desc(), "temporal_detail", render).status == GrainStatus::Missing, L"11 fails");
+			Assert::AreEqual(2, render.calls, L"one attempt per frame");
+			render.fail = false;   // the compute works again, but inside the frame nobody retries
+			Assert::IsTrue(node.Acquire(10, Desc(), "chroma_cfl", render).status == GrainStatus::Missing, L"10 stays failed");
+			Assert::IsTrue(node.Acquire(11, Desc(), "chroma_cfl", render).status == GrainStatus::Missing, L"11 stays failed");
+			Assert::AreEqual(2, render.calls, L"no second producer for either frame");
+			node.Release(10);
+			node.Release(11);
+			Warm(node, 14);
+			Assert::IsTrue(node.Acquire(14, Desc(), "temporal_detail", render).status == GrainStatus::Live, L"a later frame recovers");
+		}
+
+		TEST_METHOD(TemporalDetailShadersReverseToTheirPreAccessorText)
+		{
+			// The accessor switch is mechanical: replacing gs_fetch(P) by texelFetch(split, P, 0) and gs_blocks(B) by
+			// texelFetch(gblocks, B, 0) in the SA2 shader text gives back, byte for byte, the text at 160987e5 (pinned
+			// by size and FNV-1a 64). With the Full prelude (gs_fetch = texelFetch(split, ...)) the Full-mode shader
+			// therefore computes exactly what it computed before.
+			const std::string root = SettingsTestSupport::RepoRoot();
+			std::string text = SettingsTestSupport::ReadFile(root + "src\\VP-V\\modules\\repair\\temporal_detail\\TemporalDetailShaders.h");
+			Assert::IsTrue(!text.empty(), L"TemporalDetailShaders.h is readable");
+			text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
+			auto replaceCalls = [](const std::string& t, const std::string& name, const std::string& before, const std::string& after) {
+				std::string out;
+				size_t i = 0;
+				for (;;)
+				{
+					const size_t j = t.find(name + "(", i);
+					if (j == std::string::npos)
+					{
+						out += t.substr(i);
+						break;
+					}
+					out += t.substr(i, j - i);
+					const size_t k = j + name.size() + 1;
+					size_t m = k;
+					int depth = 1;
+					while (depth > 0 && m < t.size())
+					{
+						depth += (t[m] == '(') - (t[m] == ')');
+						++m;
+					}
+					out += before + t.substr(k, m - 1 - k) + after;
+					i = m;
+				}
+				return out;
+			};
+			text = replaceCalls(text, "gs_fetch", "texelFetch(split, ", ", 0)");
+			text = replaceCalls(text, "gs_blocks", "texelFetch(gblocks, ", ", 0)");
+			uint64_t h = 14695981039346656037ull;
+			for (unsigned char c : text)
+			{
+				h ^= c;
+				h *= 1099511628211ull;
+			}
+			Assert::AreEqual(size_t(46944), text.size(), L"the reversed text has the pre-SA2 size");
+			Assert::AreEqual(uint64_t(0xd4c796a262566634ull), h, L"the reversed text hashes to the pre-SA2 shader text");
 		}
 	};
 }

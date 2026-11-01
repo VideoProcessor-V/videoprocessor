@@ -279,3 +279,7 @@ product read), Missing (no product) or WrongSize (misfit); Shed is the node's. `
 GrainSplit::ReaderFallback("temporal detail", status): the catalog entry "grain split (temporal detail)", engaged while the own
 split runs. Off / auto idle read no grain: Ring. Tests: TemporalDetailGpuGrainProduct*, ...FittingFullProduct*,
 ...CompactProduct*, ...GrainFallbackRecoversAutomatically (WARP).
+
+## Private GPU textures (skeleton rule)
+
+This module still creates its own GPU textures through the `Ensure` wrapper (its persistent state and, when no shared product fits, its own grain split; see the static test src/VP-V/tests/PrivateTextureScanTests.cpp). It migrates in SA6/SA7/SA8/SA12 (doc D:\codex\vp-handover\51-skeleton-adoption-audit.md section 6): kept state moves to skeleton product nodes and per-render temporaries to the shared scratch arena (src/VP-V/core/ScratchArena.h). Its grain reads already go through the one accessor (`gs_fetch` / `gs_blocks`); a shared product that is Missing, Stale (another frame or unit version, `Params::grainSeq`), WrongSize or Shed (`Params::grainShed`) makes it use its own split, visibly (FallbackCatalog "grain split (...)"), and it recovers on the first fitting frame.

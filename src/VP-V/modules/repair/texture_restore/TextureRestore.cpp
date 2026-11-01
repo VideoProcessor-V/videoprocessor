@@ -536,8 +536,9 @@ if (p.x < sz.x && p.y < sz.y) {
 		struct ArenaScopeGuard
 		{
 			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* arena;
-			ArenaScopeGuard(VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* a, uint16_t scope) : arena(a) { if (arena) arena->BeginScope(scope); }
-			~ArenaScopeGuard() { if (arena) arena->EndScope(); }
+			bool opened = false;   // a refused (nested) scope is not ours to close
+			ArenaScopeGuard(VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* a, uint16_t scope) : arena(a) { if (arena) opened = arena->BeginScope(scope); }
+			~ArenaScopeGuard() { if (arena && opened) arena->EndScope(); }
 			ArenaScopeGuard(const ArenaScopeGuard&) = delete;
 			ArenaScopeGuard& operator=(const ArenaScopeGuard&) = delete;
 		};
@@ -655,6 +656,9 @@ if (p.x < sz.x && p.y < sz.y) {
 		pl_tex fHalfTex = nullptr, fTmpTex = nullptr, fLowTex = nullptr;
 		if (params.arena)
 		{
+			// The private temporaries of the non-arena path are not used any more: free them.
+			for (pl_tex* t : { &m.fHalf, &m.fTmp, &m.fLow })
+				if (*t) pl_tex_destroy(gpu, t);
 			if (!Ensure(gpu, m.fOut, w, h, StorableLike(gpu, luma->params.format), true))
 			{
 				error = "no float texture for the other geometry";
@@ -789,6 +793,8 @@ if (p.x < sz.x && p.y < sz.y) {
 		pl_tex halfTex = nullptr, tmpTex = nullptr;
 		if (params.arena)
 		{
+			for (pl_tex* t : { &m.half, &m.tmp })   // the private temporaries of the non-arena path: free them
+				if (*t) pl_tex_destroy(gpu, t);
 			if (!Ensure(gpu, m.low[0], hw, hh, f2) || !Ensure(gpu, m.low[1], hw, hh, f2))
 				return fail("no float texture for the low bands");
 			VpSkeleton::TexFormat t1{}, t2{};

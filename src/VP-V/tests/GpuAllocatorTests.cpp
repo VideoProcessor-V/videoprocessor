@@ -13,6 +13,7 @@
 
 #include <VP-V/core/ScratchArena.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
+#include <VP-V/modules/repair/grain_split/GrainNode.h>
 
 #include <algorithm>
 #include <map>
@@ -398,55 +399,65 @@ namespace GpuAllocatorTestsNs
 			r.push_back(Req(1, "c", Tier::T2, Shape(256, 256, TexFormat::R32F), 1));
 			const uint64_t p0 = PlanArena(r, Tier::T0).bytes, p1 = PlanArena(r, Tier::T1).bytes,
 				p2 = PlanArena(r, Tier::T2).bytes;
-			const VramUser u = ScratchArenaUser(r);
-			Assert::AreEqual(uint16_t(kUserScratchArena), u.id, L"arena user id");
-			Assert::IsFalse(u.lossless, L"arena levels are not lossless");
-			Assert::AreEqual(size_t(4), u.levels.size(), L"four levels");
-			Assert::AreEqual(p2, u.levels[0], L"level 0 is the T2 plan");
-			Assert::AreEqual(p1, u.levels[1], L"level 1 is the T1 plan");
-			Assert::AreEqual(p0, u.levels[2], L"level 2 is the T0 plan");
-			Assert::AreEqual(uint64_t(0), u.levels[3], L"last level is off");
-			for (size_t i = 1; i < u.levels.size(); ++i)
-				Assert::IsTrue(u.levels[i] < u.levels[i - 1], L"levels strictly decrease");
-			Assert::IsTrue(std::string(u.levelText[1]).find("T2 temporaries off") != std::string::npos, L"level 1 text");
-			// Equal plans: duplicate levels are dropped.
+			// Two users: the T0 temporaries and the T1/T2 increment.
+			const VramUser u0 = ScratchArenaT0User(r);
+			const VramUser ux = ScratchArenaExtraUser(r);
+			Assert::AreEqual(uint16_t(kUserScratchArena), u0.id, L"T0 arena user id");
+			Assert::AreEqual(uint16_t(kUserScratchArenaExtra), ux.id, L"extra arena user id");
+			Assert::IsTrue(u0.tier == Tier::T0 && ux.tier == Tier::T1, L"tiers T0 and T1");
+			Assert::IsFalse(u0.lossless || ux.lossless, L"arena levels are not lossless");
+			Assert::AreEqual(size_t(2), u0.levels.size(), L"T0 user: plan and off");
+			Assert::AreEqual(p0, u0.levels[0], L"T0 user level 0 is the T0 plan");
+			Assert::AreEqual(uint64_t(0), u0.levels[1], L"T0 user last level is off");
+			Assert::AreEqual(size_t(3), ux.levels.size(), L"extra user: three levels");
+			Assert::AreEqual(p2 - p0, ux.levels[0], L"extra level 0 is plan(T2) - plan(T0)");
+			Assert::AreEqual(p1 - p0, ux.levels[1], L"extra level 1 is plan(T1) - plan(T0)");
+			Assert::AreEqual(uint64_t(0), ux.levels[2], L"extra last level is off");
+			Assert::IsTrue(std::string(ux.levelText[1]).find("T2 temporaries off") != std::string::npos, L"level 1 text");
+			// Equal plans: duplicate levels are dropped; nothing optional = a single zero level.
 			std::vector<ArenaRequest> only0;
 			only0.push_back(Req(1, "a", Tier::T0, Shape(64, 64, TexFormat::R32F), 1));
-			const VramUser u0 = ScratchArenaUser(only0);
-			Assert::AreEqual(size_t(2), u0.levels.size(), L"equal levels dropped");
-			Assert::AreEqual(uint64_t(0), u0.levels[1], L"then off");
-			// Grants.
-			ArenaGrant g = ArenaGrantFor(r, p2);
+			Assert::AreEqual(size_t(1), ScratchArenaExtraUser(only0).levels.size(), L"no optional temporaries: one level");
+			// Grants (T0 grant, extra grant).
+			ArenaGrant g = ArenaGrantFor(r, p0, p2 - p0);
 			Assert::IsTrue(g.any && g.maxTier == Tier::T2, L"full grant keeps T2");
-			g = ArenaGrantFor(r, p2 + 12345);
+			g = ArenaGrantFor(r, p0 + 999, p2 - p0 + 12345);
 			Assert::IsTrue(g.any && g.maxTier == Tier::T2, L"a bigger grant keeps T2");
-			g = ArenaGrantFor(r, p2 - 1);
+			g = ArenaGrantFor(r, p0, p2 - p0 - 1);
 			Assert::IsTrue(g.any && g.maxTier == Tier::T1, L"just below T2 keeps T1");
-			g = ArenaGrantFor(r, p1);
-			Assert::IsTrue(g.any && g.maxTier == Tier::T1, L"exactly the T1 plan keeps T1");
-			g = ArenaGrantFor(r, p1 - 1);
+			g = ArenaGrantFor(r, p0, p1 - p0);
+			Assert::IsTrue(g.any && g.maxTier == Tier::T1, L"exactly the T1 increment keeps T1");
+			g = ArenaGrantFor(r, p0, p1 - p0 - 1);
 			Assert::IsTrue(g.any && g.maxTier == Tier::T0, L"just below T1 keeps T0");
-			g = ArenaGrantFor(r, p0 - 1);
-			Assert::IsFalse(g.any, L"below the T0 plan the arena is off");
-			Assert::IsFalse(ArenaGrantFor(r, 0).any, L"zero grant is off");
-			// The governor forces the arena down one level.
+			g = ArenaGrantFor(r, p0 - 1, p2);
+			Assert::IsFalse(g.any, L"below the T0 plan the arena is off, whatever the extra grant");
+			Assert::IsFalse(ArenaGrantFor(r, 0, 0).any, L"zero grant is off");
+			// The governor forces the OPTIONAL temporaries down first and never the T0 ones.
 			const uint64_t fixed = 10 * kMB;
 			GovernorInput gi;
-			gi.card.vramBudgetBytes = uint64_t(double(fixed + 200000) / 0.8);
+			gi.card.vramBudgetBytes = uint64_t(double(fixed + p0 + (p1 - p0) + 100) / 0.8);
 			gi.card.vramUsageBytes = 0;
 			gi.headroom = 0.8;
 			gi.users.push_back(FixedUser(kUserLibplacebo, "libplacebo intermediates", fixed));
-			gi.users.push_back(u);
+			gi.users.push_back(u0);
+			gi.users.push_back(ux);
 			Assert::IsTrue(fixed + p2 > GovernorBudget(gi.card, 0, 0.8), L"full need exceeds the budget");
 			Assert::IsTrue(fixed + p1 <= GovernorBudget(gi.card, 0, 0.8), L"the T1 level fits");
 			const GovernorPlan plan = PlanVram(gi);
-			Assert::AreEqual(size_t(1), plan.Find(kUserScratchArena)->level, L"arena stepped down one level");
-			Assert::AreEqual(p1, plan.Find(kUserScratchArena)->bytes, L"arena granted the T1 plan");
+			Assert::AreEqual(size_t(1), plan.Find(kUserScratchArenaExtra)->level, L"optional arena stepped down one level");
+			Assert::AreEqual(p1 - p0, plan.Find(kUserScratchArenaExtra)->bytes, L"optional arena granted the T1 increment");
+			Assert::AreEqual(size_t(0), plan.Find(kUserScratchArena)->level, L"T0 temporaries untouched");
 			bool found = false;
 			for (const std::string& line : plan.lines)
 				if (line.find("scratch arena") != std::string::npos && line.find("T2 temporaries off") != std::string::npos)
 					found = true;
 			Assert::IsTrue(found, L"governor line names the arena and the T2 step");
+			// Heavy T1 pressure: even with the budget below the T0 plan + 0 extra, the extra user goes first.
+			GovernorInput hard = gi;
+			hard.card.vramBudgetBytes = uint64_t(double(fixed + p0 + 100) / 0.8);
+			const GovernorPlan hp = PlanVram(hard);
+			Assert::IsTrue(hp.Find(kUserScratchArenaExtra)->shed, L"optional temporaries shed first");
+			Assert::AreEqual(size_t(0), hp.Find(kUserScratchArena)->level, L"T1 pressure never drops the T0 temporaries");
 		}
 
 		TEST_METHOD(TransientResidencyIsNotARingProduct)
@@ -470,7 +481,7 @@ namespace GpuAllocatorTestsNs
 			TierInput in;
 			in.headroom = 0.8;
 			in.otherUsers.push_back(FixedUser(kUserLibplacebo, "libplacebo intermediates", 100 * kMB));
-			in.otherUsers.push_back(ScratchArenaUser(RequestsFor(dims)));
+			AddScratchArenaUsers(in.otherUsers, RequestsFor(dims));
 			const TierPlan plan = PlanTiers(reg, g, Card3090(), in);
 			const TierEntry* e = plan.Find(kP10GrainSplit);
 			Assert::IsNotNull(e, L"P10 has a tier entry");
@@ -502,7 +513,7 @@ namespace GpuAllocatorTestsNs
 			{
 				FakeBackend be;
 				ProductTextures<FakeBackend> t(be);
-				Assert::IsTrue(t.Allocate(*node, layout, dims, big), L"allocate laned");
+				Assert::IsTrue(t.Allocate(*node, reg.Get(kP10GrainSplit), layout, dims, big), L"allocate laned");
 				Assert::IsTrue(t.Laned(), L"laned");
 				Assert::AreEqual(size_t(node->ring), t.RingBuffers(), L"ring buffers");
 				Assert::AreEqual(size_t(node->livePool), t.LiveBuffers(), L"live buffers");
@@ -517,7 +528,7 @@ namespace GpuAllocatorTestsNs
 			{
 				FakeBackend be;
 				ProductTextures<FakeBackend> t(be);
-				Assert::IsTrue(t.Allocate(*node, layout, dims, TierPlan()), L"allocate live only");
+				Assert::IsTrue(t.Allocate(*node, reg.Get(kP10GrainSplit), layout, dims, TierPlan()), L"allocate live only");
 				Assert::IsFalse(t.Laned(), L"not laned");
 				Assert::AreEqual(size_t(0), t.RingBuffers(), L"no ring buffers");
 				Assert::AreEqual(size_t(node->livePool), t.LiveBuffers(), L"live buffers");
@@ -528,7 +539,7 @@ namespace GpuAllocatorTestsNs
 				FakeBackend be;
 				be.failAfter = 3;
 				ProductTextures<FakeBackend> t(be);
-				Assert::IsFalse(t.Allocate(*node, layout, dims, big), L"failing backend fails the allocation");
+				Assert::IsFalse(t.Allocate(*node, reg.Get(kP10GrainSplit), layout, dims, big), L"failing backend fails the allocation");
 				Assert::AreEqual(be.created, be.destroyed, L"partial textures destroyed");
 				Assert::AreEqual(uint64_t(0), t.Bytes(), L"nothing held");
 				Assert::AreEqual(1u, t.CreateFailures(), L"failure counted");
@@ -579,7 +590,7 @@ namespace GpuAllocatorTestsNs
 					const std::vector<ArenaRequest> req = RequestsFor(d);
 					TierInput in;
 					in.headroom = 0.8;
-					in.otherUsers.push_back(ScratchArenaUser(req));
+					AddScratchArenaUsers(in.otherUsers, req);
 					const TierPlan plan = PlanTiers(reg, g, card, in);
 					const std::string head = std::string("== ") + cardName + " at " + std::to_string(d.width) + "x"
 						+ std::to_string(d.height);
@@ -621,7 +632,7 @@ namespace GpuAllocatorTestsNs
 			TierInput in;
 			in.headroom = 0.8;
 			in.otherUsers.push_back(FixedUser(kUserLibplacebo, "libplacebo intermediates", 100 * kMB));
-			in.otherUsers.push_back(ScratchArenaUser(req));
+			AddScratchArenaUsers(in.otherUsers, req);
 			const TierPlan plan = PlanTiers(reg, g, Card3090(), in);
 			const std::vector<std::string> lines = VramLedgerLines(plan, PlanArena(req, Tier::T2), reg);
 			size_t tierLines = 0, planLines = 0, transientLines = 0;
@@ -647,6 +658,11 @@ namespace GpuAllocatorTestsNs
 			const RegionEvidence::ProductIds ids = RegionEvidence::AppendProducts(decls, MkDims(3840, 2160));
 			Assert::AreEqual(int(kP10GrainSplit), int(ids.grainSplit), L"adopts the core P10");
 			Assert::AreEqual(before + 1, decls.size(), L"only the block statistics are appended");
+			Assert::AreEqual(int(kP10cGrainSplitChroma), int(ids.grainSplitChroma), L"the chroma product is the core P10c");
+			const std::vector<ConsumerDecl> readers = RegionEvidence::GrainConsumers(ids, 100);
+			Assert::AreEqual(size_t(4), readers.size(), L"four declared readers");
+			Assert::AreEqual(size_t(2), size_t(readers[2].count), L"the chroma-from-luma guard consumes luma and chroma");
+			Assert::AreEqual(size_t(1), size_t(readers[1].count), L"temporal detail consumes luma only");
 			Assert::IsTrue(Registry(decls).Validate(), L"registry validates");
 			size_t tokens = 0;
 			for (const ProductDecl& d : decls)
@@ -665,6 +681,151 @@ namespace GpuAllocatorTestsNs
 			Assert::AreEqual(uint64_t(d.width) * d.height * 8 + CellsAt(d, 4) * 8, compact, L"compact = 8 B/px + 8 B/block");
 			Assert::AreEqual(uint64_t(d.width) * d.height * 16 + CellsAt(d, 4) * 16, full, L"full = 16 B/px + 16 B/block");
 			Assert::IsTrue(full == compact * 2, L"half the bytes");
+		}
+
+		TEST_METHOD(ArenaNestedScopeIsRefusedAndVisible)
+		{
+			FakeBackend be;
+			ScratchArena<FakeBackend> arena(be);
+			std::vector<ArenaRequest> r;
+			r.push_back(Req(1, "outer", Tier::T0, Shape(8, 8, TexFormat::R8), 1));
+			r.push_back(Req(2, "inner", Tier::T0, Shape(8, 8, TexFormat::R8), 1));
+			arena.Reserve(PlanArena(r, Tier::T2));
+			arena.BeginFrame();
+			Assert::IsTrue(arena.BeginScope(1), L"the outer scope opens");
+			Assert::IsFalse(arena.BeginScope(2), L"a nested scope is refused");
+			Assert::AreEqual(uint64_t(1), arena.NestedScopes(), L"the refusal is counted");
+			// The outer scope is untouched: its owner still gets its texture, the inner one (another scope) does not.
+			Assert::IsTrue(arena.Acquire("outer", Shape(8, 8, TexFormat::R8)) != 0, L"outer scope still works");
+			Assert::IsTrue(arena.Acquire("inner", Shape(8, 8, TexFormat::R8)) == 0, L"the refused scope owner gets nothing");
+			arena.EndScope();   // closes the OUTER scope, once
+			const FallbackCatalog::Decision d = arena.FrameDecision();
+			Assert::IsTrue(d.engaged && d.reason.find("nested scratch scope refused") != std::string::npos, L"visible");
+			arena.BeginFrame();
+			Assert::IsFalse(arena.FrameDecision().engaged, L"released on a clean frame");
+			Assert::IsTrue(arena.BeginScope(1), L"a scope opens again after the outer one closed");
+			arena.EndScope();
+		}
+
+		TEST_METHOD(ArenaOwnerCannotTakeAnotherOwnersTextures)
+		{
+			FakeBackend be;
+			ScratchArena<FakeBackend> arena(be);
+			const TexShape s = Shape(16, 16, TexFormat::R32F);
+			std::vector<ArenaRequest> r;
+			r.push_back(Req(1, "alpha", Tier::T0, s, 1));
+			r.push_back(Req(1, "beta", Tier::T0, s, 2));
+			arena.Reserve(PlanArena(r, Tier::T2));
+			Assert::AreEqual(size_t(3), arena.PoolSize(s), L"capacity = the scope total");
+			arena.BeginFrame();
+			arena.BeginScope(1);
+			const int a0 = arena.Acquire("alpha", s);
+			const int a1 = arena.Acquire("alpha", s);   // alpha asked for ONE
+			Assert::IsTrue(a0 != 0, L"alpha gets its texture");
+			Assert::IsTrue(a1 == 0, L"alpha cannot take the textures of beta");
+			const int b0 = arena.Acquire("beta", s);
+			const int b1 = arena.Acquire("beta", s);
+			const int b2 = arena.Acquire("beta", s);
+			Assert::IsTrue(b0 != 0 && b1 != 0 && b2 == 0, L"beta gets exactly its two");
+			Assert::IsTrue(a0 != b0 && a0 != b1 && b0 != b1, L"disjoint textures");
+			arena.EndScope();
+			// Deterministic slices: alpha (sorted first) holds pool slot 0, beta slots 1 and 2, in any call order.
+			arena.BeginFrame();
+			arena.BeginScope(1);
+			const int b0b = arena.Acquire("beta", s);
+			const int a0b = arena.Acquire("alpha", s);
+			arena.EndScope();
+			Assert::AreEqual(a0, a0b, L"the slice of alpha does not depend on who asked first");
+			Assert::AreEqual(b0, b0b, L"the slice of beta does not depend on who asked first");
+		}
+
+		TEST_METHOD(ProductTexturesRefuseALayoutThatDoesNotMatchTheDeclaration)
+		{
+			const Registry reg = P10Registry(false);
+			const Dims dims = MkDims(1920, 1080);
+			const Graph g = P10Graph(reg, dims);
+			const Node* node = g.Find(kP10GrainSplit);
+			Assert::IsNotNull(node, L"P10 node");
+			const TierPlan big = PlanTiers(reg, g, Card3090(), TierInput());
+			ProductTexLayout wrong = P10Layout();
+			wrong.terms[0].fmt = TexFormat::RGBA16F;
+			FakeBackend be;
+			ProductTextures<FakeBackend> t(be);
+			Assert::IsFalse(t.Allocate(*node, reg.Get(kP10GrainSplit), wrong, dims, big), L"a mismatching layout is refused");
+			Assert::AreEqual(0, be.created, L"nothing was created");
+			Assert::AreEqual(1u, t.Refusals(), L"counted");
+			const FallbackCatalog::Decision d = t.RefusalDecision();
+			Assert::IsTrue(d.engaged && d.id == "product textures", L"visible");
+			Assert::IsTrue(t.Allocate(*node, reg.Get(kP10GrainSplit), P10Layout(), dims, big), L"the matching layout allocates");
+			Assert::IsFalse(t.RefusalDecision().engaged, L"the refusal clears on the next good allocation");
+		}
+
+		TEST_METHOD(ChromaProductUsesTheActualPlaneBytes)
+		{
+			// P10c plans for 4:2:0 but the governor and the allocator use the REAL chroma plane dims.
+			const Registry reg = SkeletonProducts();
+			const ProductDecl& decl = reg.Get(kP10cGrainSplitChroma);
+			Assert::IsTrue(decl.planningSize, L"the chroma SizeRule is a planning figure");
+			const Dims dims = MkDims(1920, 1080);
+			ConsumerDecl c;
+			c.id = 1;
+			AddConsume(c, kP10cGrainSplitChroma);
+			GraphSettings gs;
+			gs.dims = dims;
+			gs.renderAhead = 2;
+			gs.laneLead = 1;
+			const Graph g = BuildGraph(reg, { c }, gs);
+			const Node* node = g.Find(kP10cGrainSplitChroma);
+			Assert::IsNotNull(node, L"P10c node");
+			// A 4:2:2 chroma plane (half width, full height): not the planned geometry.
+			ProductTexLayout layout;
+			for (int plane = 0; plane < 2; ++plane) {
+				TexTerm split;
+				split.fmt = TexFormat::RGBA32F;
+				split.absW = dims.width / 2;
+				split.absH = dims.height;
+				layout.terms.push_back(split);
+				TexTerm blocks;
+				blocks.fmt = TexFormat::RGBA32F;
+				blocks.absW = (split.absW + 15) / 16;
+				blocks.absH = (split.absH + 15) / 16;
+				layout.terms.push_back(blocks);
+			}
+			const uint64_t actual = layout.BytesPerBuffer(dims);
+			Assert::IsTrue(actual != BytesOf(decl.size, dims), L"the real geometry differs from the plan");
+			TierInput in;
+			ActualBuffer ab;
+			ab.id = kP10cGrainSplitChroma;
+			ab.bytesPerBuffer = actual;
+			in.actual.push_back(ab);
+			const TierPlan plan = PlanTiers(reg, g, Card3090(), in);
+			const UserGrant* grant = plan.governor.Find(uint16_t(kUserProductBase + kP10cGrainSplitChroma));
+			Assert::IsNotNull(grant, L"governor user");
+			FakeBackend be;
+			ProductTextures<FakeBackend> t(be);
+			Assert::IsTrue(t.Allocate(*node, decl, layout, dims, plan), L"a planning-size declaration accepts the actual layout");
+			Assert::AreEqual(grant->bytes, t.Bytes(), L"the governor grant equals the bytes really allocated");
+			const TierPlan planned = PlanTiers(reg, g, Card3090(), TierInput());
+			Assert::IsTrue(planned.governor.Find(uint16_t(kUserProductBase + kP10cGrainSplitChroma))->bytes != grant->bytes,
+				L"without the actual bytes the governor would count the plan");
+		}
+
+		TEST_METHOD(GrainStorageLedgerComparesPeaksIncludingScratch)
+		{
+			// compact 8N + 32 vs full 16N + 16 B/px: compact saves only when ring + live > 2.
+			const Dims d = MkDims(1920, 1080);
+			const uint64_t px = uint64_t(d.width) * d.height;
+			const uint64_t blocks = CellsAt(d, 4);
+			const std::vector<std::string> two = GrainSplit::StorageLedgerLines(d, 2);
+			const std::vector<std::string> six = GrainSplit::StorageLedgerLines(d, 6);
+			Assert::AreEqual(size_t(2), two.size(), L"two lines");
+			Assert::IsTrue(two[1].find("saves nothing") != std::string::npos, L"N = 2: no saving");
+			Assert::IsTrue(six[1].find("saves ") != std::string::npos && six[1].find("saves nothing") == std::string::npos, L"N = 6 saves");
+			const uint64_t fullPeak = (px * 16 + blocks * 16) * 6 + px * 16 + blocks * 16;
+			const uint64_t compactPeak = (px * 8 + blocks * 8) * 6 + px * 32 + blocks * 16;
+			Assert::IsTrue(six[0].find(FormatMB(fullPeak)) != std::string::npos, L"full peak line");
+			Assert::IsTrue(six[1].find(FormatMB(compactPeak)) != std::string::npos, L"compact peak line");
+			Assert::IsTrue(six[1].find("8 x 6 + 32 B/px") != std::string::npos, L"compact peak formula");
 		}
 	};
 }

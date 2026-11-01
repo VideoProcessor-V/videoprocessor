@@ -106,17 +106,26 @@ public:
     void BeginFrame()
     {
         frameShort_.clear();
+        frameNested_ = false;
     }
 
-    void BeginScope(uint16_t scope)
+    // False (and the OUTER scope untouched) when a scope is already open: nested scopes are refused, counted and
+    // shown (FrameDecision). The caller must call EndScope only when this returned true.
+    bool BeginScope(uint16_t scope)
     {
         if (!ownerSet_) {
             owner_ = std::this_thread::get_id();
             ownerSet_ = true;
         }
+        if (scopeOpen_) {
+            ++nestedScopes_;
+            frameNested_ = true;
+            return false;
+        }
         scope_ = scope;
         scopeOpen_ = true;
-        used_.assign(pools_.size(), 0u);
+        uses_.clear();
+        return true;
     }
 
     void EndScope() { scopeOpen_ = false; }
@@ -138,25 +147,43 @@ public:
             ++shed_;   // not planned: its tier was shed (or it never asked)
             return Fail(owner);
         }
-        const uint32_t allowed = plan_.ScopeCount(scope_, shape);
-        uint32_t& k = used_[pool];
-        if (k >= allowed || k >= pools_[pool].tex.size() || !pools_[pool].tex[k]) {
+        // Counted per (owner, shape): up to this owner's admitted count, from this owner's base index.
+        const uint32_t mine = plan_.OwnerCount(scope_, owner, shape);
+        const uint32_t base = plan_.OwnerBase(scope_, owner, shape);
+        const std::string name = owner ? owner : "";
+        Use* use = nullptr;
+        for (Use& u : uses_)
+            if (u.pool == pool && u.owner == name)
+                use = &u;
+        if (!use) {
+            uses_.push_back(Use{ name, pool, 0u });
+            use = &uses_.back();
+        }
+        const size_t index = size_t(base) + use->count;
+        if (use->count >= mine || index >= pools_[pool].tex.size() || !pools_[pool].tex[index]) {
             ++exhausted_;
             return Fail(owner);
         }
+        ++use->count;
         ++acquired_;
-        return pools_[pool].tex[k++];
+        return pools_[pool].tex[index];
     }
 
     // The FallbackCatalog entry for the frame so far: engaged while any Acquire went without.
     FallbackCatalog::Decision FrameDecision() const
     {
-        if (frameShort_.empty())
+        if (frameShort_.empty() && !frameNested_)
             return FallbackCatalog::Released("scratch_arena");
-        std::string list;
-        for (size_t i = 0; i < frameShort_.size(); ++i)
-            list += (i ? ", " : "") + frameShort_[i];
-        return FallbackCatalog::Engaged("scratch_arena", "scratch memory short: " + list + " reduced/off");
+        std::string reason;
+        if (!frameShort_.empty()) {
+            std::string list;
+            for (size_t i = 0; i < frameShort_.size(); ++i)
+                list += (i ? ", " : "") + frameShort_[i];
+            reason = "scratch memory short: " + list + " reduced/off";
+        }
+        if (frameNested_)
+            reason += std::string(reason.empty() ? "" : "; ") + "nested scratch scope refused (a stage did not close its scope)";
+        return FallbackCatalog::Engaged("scratch_arena", reason);
     }
 
     // The textures of the pool of `shape` (read-only, for tests and the ledger).
@@ -179,6 +206,7 @@ public:
     uint64_t Shed() const { return shed_; }
     uint64_t CrossThreadAcquires() const { return crossThread_; }
     uint64_t OutsideScopeAcquires() const { return outsideScope_; }
+    uint64_t NestedScopes() const { return nestedScopes_; }
     uint32_t CreateFailures() const { return createFailures_; }
     uint32_t Reserves() const { return reserves_; }
 
@@ -186,6 +214,11 @@ private:
     struct Pool {
         TexShape shape;
         std::vector<Handle> tex;
+    };
+    struct Use {
+        std::string owner;
+        size_t pool;
+        uint32_t count;
     };
 
     size_t PoolIndex(const TexShape& s) const
@@ -209,7 +242,9 @@ private:
     TexBackend* backend_;
     std::vector<Pool> pools_;
     ArenaPlan plan_;
-    std::vector<uint32_t> used_;
+    std::vector<Use> uses_;
+    bool frameNested_ = false;
+    uint64_t nestedScopes_ = 0;
     std::vector<std::string> frameShort_;   // owners that went without this frame (sorted, unique)
     std::thread::id owner_;
     bool ownerSet_ = false;

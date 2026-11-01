@@ -143,8 +143,9 @@ if (p.x < GS_W && p.y < GS_H) {
 			struct ScopeGuard
 			{
 				VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* a;
-				explicit ScopeGuard(VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* arena) : a(arena) { if (a) a->BeginScope(kArenaScope); }
-				~ScopeGuard() { if (a) a->EndScope(); }
+				bool opened = false;   // a refused (nested) scope is not ours to close
+				explicit ScopeGuard(VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* arena) : a(arena) { if (a) opened = a->BeginScope(kArenaScope); }
+				~ScopeGuard() { if (a && opened) a->EndScope(); }
 				ScopeGuard(const ScopeGuard&) = delete;
 				ScopeGuard& operator=(const ScopeGuard&) = delete;
 			};
@@ -175,7 +176,20 @@ if (p.x < GS_W && p.y < GS_H) {
 			m_out = Frame();
 		}
 
+		namespace
+		{
+			std::string ViewGlslBody(GrainSplit::Storage storage, double codeUnit);
+		}
+
+		// The unit version is embedded in every prelude (a mismatch is detectable in the GLSL itself).
 		std::string ViewGlsl(GrainSplit::Storage storage, double codeUnit)
+		{
+			return std::string("#define GS_UNIT_VERSION ") + std::to_string(GrainSplit::kUnitVersion) + "\n" + ViewGlslBody(storage, codeUnit);
+		}
+
+		namespace
+		{
+		std::string ViewGlslBody(GrainSplit::Storage storage, double codeUnit)
 		{
 			if (storage != GrainSplit::Storage::Compact)
 				return "vec4 gs_fetch(ivec2 p) { return texelFetch(split, p, 0); }\n"
@@ -184,6 +198,20 @@ if (p.x < GS_W && p.y < GS_H) {
 				"vec4 gs_fetch(ivec2 p)\n{\n    vec2 a = texelFetch(gs_a, p, 0).xy;\n    vec2 b = texelFetch(gs_b, p, 0).xy;\n"
 				"    return vec4(a.x, a.y, b.x, b.y / gs_cu);\n}\n"
 				"vec2 gs_blocks(ivec2 b) { return texelFetch(gblocks, b, 0).xy; }\n";
+		}
+		}
+
+		uint64_t FullShaderFingerprint()
+		{
+			uint64_t h = 14695981039346656037ull;
+			for (const char* body : { GH_BODY, GV_BODY, QUIET_BODY, NMIN_BODY, F_BODY })
+				for (const char* c = body; *c; ++c)
+					if (*c != '\r')
+					{
+						h ^= static_cast<unsigned char>(*c);
+						h *= 1099511628211ull;
+					}
+			return h;
 		}
 
 		void BindView(const Frame& f, std::vector<pl_shader_desc>& out)
@@ -228,6 +256,7 @@ if (p.x < GS_W && p.y < GS_H) {
 			using namespace VpvGpu;
 			m_error.clear();
 			m_scratchShort = false;
+			m_out = Frame();   // a failed Compute never leaves the previous frame's product looking valid
 			if (!gpu || !dispatch || !plane || !plane->params.sampleable || component < 0 || component > 3 || !(codeUnit > 0.0) || B < 1)
 			{
 				m_error = "grain split: invalid input";
@@ -238,8 +267,15 @@ if (p.x < GS_W && p.y < GS_H) {
 				m_error = "grain split: invalid law";
 				return false;
 			}
-			const bool compact = options.storage == GrainSplit::Storage::Compact;
+			const StorageChoice choice = ChooseStorage(options.storage, plane->params.format, codeUnit);
+			m_storageNote = choice.why;
+			const bool compact = choice.storage == GrainSplit::Storage::Compact;
 			const Targets& tg = options.targets;
+			if (choice.downgraded && tg.splitB)
+			{
+				m_error = "grain split: targets are for the compact layout but storage fell back to full (" + choice.why + ")";
+				return false;
+			}
 			const int w = plane->params.w, h = plane->params.h;
 			const int bw = (w + B - 1) / B, bh = (h + B - 1) / B;
 			const pl_fmt f4 = FloatFormat(gpu, 4);
@@ -273,6 +309,10 @@ if (p.x < GS_W && p.y < GS_H) {
 			ScopeGuard scope(options.arena);
 			if (options.arena)
 			{
+				// The private temporaries of the non-arena path are not used any more: free them.
+				for (pl_tex* t : { &m_bands, &m_quiet })
+					if (*t) pl_tex_destroy(gpu, t);
+				if (compact && m_rows) pl_tex_destroy(gpu, &m_rows);
 				VpSkeleton::TexFormat tf = VpSkeleton::TexFormat::RGBA32F;
 				if (!VpSkeleton::PlTexBackend::FormatOf(f4, &tf))
 				{
@@ -339,7 +379,8 @@ if (p.x < GS_W && p.y < GS_H) {
 				blocksTex = m_blocks;
 			}
 			static const char* const kComp[4] = { "x", "y", "z", "w" };
-			const std::string geo = DefineInt("GS_W", w) + DefineInt("GS_H", h) + DefineInt("GS_B", B) + DefineInt("GS_BW", bw) + DefineInt("GS_BH", bh);
+			const std::string geo = DefineInt("GS_W", w) + DefineInt("GS_H", h) + DefineInt("GS_B", B) + DefineInt("GS_BW", bw) + DefineInt("GS_BH", bh) +
+				DefineInt("GS_UNIT_VERSION", GrainSplit::kUnitVersion);
 			const std::string weights = WeightsGlsl("w1", "R1", params.sigmaFine * scale) + WeightsGlsl("wb", "RB", params.sigmaBase * scale) +
 				WeightsGlsl("w6", "R6", params.sigmaLow * scale);
 			const std::string yread = "float gs_y(int x, int y) { return texelFetch(src, ivec2(x, y), 0)." + std::string(kComp[component]) + " * " +
@@ -405,7 +446,9 @@ if (p.x < GS_W && p.y < GS_H) {
 			m_out.blocks = blocksTex;
 			m_out.w = w; m_out.h = h; m_out.bw = bw; m_out.bh = bh; m_out.B = B; m_out.scale = scale;
 			m_out.codeUnit = codeUnit; m_out.component = component;
-			m_out.storage = options.storage;
+			m_out.storage = choice.storage;
+			m_out.seq = options.seq;
+			m_out.version = GrainSplit::kUnitVersion;
 			return true;
 		}
 	}

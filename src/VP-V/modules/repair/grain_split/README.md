@@ -102,3 +102,23 @@ Derived bounds: s1, s2 <= 2^-11 relative (0.03 codes at 64, asserted <= 0.05); b
 | 7680 x 4320 | 32 | 240 x 135 | 531,360,000 B (506.7 MiB) | 265,680,000 B (253.4 MiB) | 50 % |
 
 Scratch (arena, shared across scopes, not per slot): Full 16 B/px (bands) + 16 B/block (quiet); Compact 32 B/px (rows, bands) + 16 B/block.
+
+## One dependency unit, version and stale detection (SA2 audit)
+
+The grain split is ONE unit: the CPU reference (`GrainSplit::Compute`, GrainSplit.h), its GLSL (GrainSplitGpu.cpp) and the storage layouts, versioned by `GrainSplit::kUnitVersion` (bump on ANY change of the law, a pass or a layout, and update the pin in GrainUnitGpuTests). A produced `Gpu::Frame` carries `seq` (the source frame, `Options::seq`), `version` and `storage`; the GLSL embeds the version as `#define GS_UNIT_VERSION` (also in the `ViewGlsl` prelude). `Splitter::Compute` resets `Out()` first (a failed Compute never leaves the previous frame looking valid). Readers call `Gpu::CheckFit(frame, w, h, B, scale, codeUnit, component, expectedSeq)`: another frame or another unit version is `Stale`, another geometry/unit/component `WrongSize`, nothing `Missing`; each falls back visibly to the module's own split (FallbackCatalog "grain split (<consumer>)") and recovers on the first fitting frame. A governor-dropped product is `Shed` (`Params::grainShed`).
+
+The lane producer and the live-fill path are the same implementation: `GrainNodeGpu.h` `SplitterFill::Fill` calls `Splitter::Compute` into the slot textures of the node's `ProductTextures` (`GrainLayout`, `TargetsFor`, `FrameOf`); `GrainNode::LanePrecompute` and the first consumer's `Acquire` both go through it (test GrainUnitGpuTests::GrainUnitLaneAndLiveFillShareOneCompute: both results equal the plain Splitter result).
+
+Full-mode identity is pinned, not assumed: `Gpu::FullShaderFingerprint()` (FNV-1a 64 of the five Full pass bodies) equals the value of the strings at 160987e5, and the temporal-detail shader text with `gs_fetch/gs_blocks` mapped back to `texelFetch(split/gblocks, ...)` equals its pre-SA2 text byte for byte (size + hash, GrainNodeTests). The chroma upscaler's shaders changed structurally (three per-plane accessors), so its Full-mode identity is asserted on output (bit-identical to its own split), not on text.
+
+### Compact storage rules
+
+Compact is refused (Full instead, status + FallbackCatalog "grain split storage") when 1 / codeUnit > 4096 (more than 12 bits of codes: the fp16 s1/s2 would lose precision) and when the plane format is not UNORM/UINT (a float plane can hold blacker-than-black and whiter-than-white that the unorm base would clamp). `Gpu::ChooseStorage`, tests at 12 bit (compact), 16 bit (full) and on a float plane with values < 0 and > 1. Peak bytes incl. the arena scratch: compact 8 (ring + live) + 32 B/px against full 16 (ring + live) + 16: compact saves only when ring + live > 2 (`GrainSplit::StorageLedgerLines`).
+
+### Private grain estimators outside the unit (not reachable in SA2)
+
+These still estimate grain privately and are redirected to the unit in their own packages: TextureRestore N + Wiener (SA8), the debander (SA5), AdaptiveDownscale Laplacian (SA4), the matcher GrainError (SA3), VpFrameAnalysis 8x8 RMS (SA3), the interpolator LOW_HALF (SA3). Redirect in SA5/SA8/SA4/SA3. Region evidence reads the unit's CPU reference (`GrainSplit::Compute` via `ComputeGrain`) and the GPU product through `GrainView`; it has no estimator of its own.
+
+## Private GPU textures (skeleton rule)
+
+This module still creates its own GPU textures through the `VpvGpu::Ensure` wrapper (outputs and, without an arena, the temporaries; see the static test src/VP-V/tests/PrivateTextureScanTests.cpp). It migrates in SA6/SA7/SA8/SA12 (doc D:\codex\vp-handover\51-skeleton-adoption-audit.md section 6): the outputs come from the node's `ProductTextures` (`SplitterFill` with `Targets`), the per-render temporaries already come from the shared scratch arena when `Options::arena` is set and the private ones are then destroyed.

@@ -320,7 +320,7 @@ namespace ChromaCflTestsNs
 	}
 
 	// --- The shared grain products: absent, misfit and Compact (SA2 B3) ---
-	enum class CflShared { Absent, EmptyProduct, Full, Compact, WrongBlock, WrongUnit, WrongComponent, CbMisfitOnly };
+	enum class CflShared { Absent, EmptyProduct, Full, Compact, WrongBlock, WrongUnit, WrongComponent, CbMisfitOnly, StaleSeq, StaleVersion, Shed };
 
 	struct CflFrameOut
 	{
@@ -345,12 +345,34 @@ namespace ChromaCflTestsNs
 		const int bL = ChromaUpscale::BlockPx(lines), bC = ChromaUpscale::BlockPx(linesC);
 		GrainSplit::Gpu::Options compact;
 		compact.storage = GrainSplit::Storage::Compact;
+		GrainSplit::Gpu::Frame tamperedL, tamperedB, tamperedR;
+		GrainSplit::Gpu::Options stale7;   // computed for source frame 7 (the frame the reader asks for)
+		stale7.seq = 7;
+		GrainSplit::Gpu::Options stale100;   // computed for another frame
+		stale100.seq = 100;
 		for (const CflShared kind : seq)
 		{
 			RegionEvidence::GrainProduct product;
 			bool made = true;
 			switch (kind)
 			{
+			case CflShared::StaleSeq:
+			case CflShared::StaleVersion:
+			{
+				const GrainSplit::Gpu::Options& o = kind == CflShared::StaleSeq ? stale100 : stale7;
+				made = fl.Compute(gpu, dev.dispatch, luma, 0, cu, sL, bL, GrainSplit::Params(), o) &&
+					fb.Compute(gpu, dev.dispatch, chroma, 0, cu, sC, bC, GrainSplit::Params(), o) &&
+					fr.Compute(gpu, dev.dispatch, chroma, 1, cu, sC, bC, GrainSplit::Params(), o);
+				product.gpu[0] = &fl.Out(); product.gpu[1] = &fb.Out(); product.gpu[2] = &fr.Out();
+				if (kind == CflShared::StaleVersion)
+				{
+					tamperedL = fl.Out(); tamperedB = fb.Out(); tamperedR = fr.Out();
+					tamperedL.version = tamperedB.version = tamperedR.version = GrainSplit::kUnitVersion + 1;
+					product.gpu[0] = &tamperedL; product.gpu[1] = &tamperedB; product.gpu[2] = &tamperedR;
+				}
+				break;
+			}
+			case CflShared::Shed:
 			case CflShared::Full:
 			case CflShared::CbMisfitOnly:
 				made = fl.Compute(gpu, dev.dispatch, luma, 0, cu, sL, bL) && fb.Compute(gpu, dev.dispatch, chroma, 0, cu, sC, bC) &&
@@ -390,6 +412,8 @@ namespace ChromaCflTestsNs
 			ChromaUpscale::Gpu::Params gp;
 			gp.settings.mode = ChromaUpscale::Mode::Cfl;
 			if (kind != CflShared::Absent) gp.grain = RegionEvidence::GrainView(&product);
+			if (kind == CflShared::StaleSeq || kind == CflShared::StaleVersion) gp.grainSeq = 7;
+			if (kind == CflShared::Shed) gp.grainShed = true;
 			pl_frame out{};
 			Assert::IsTrue(module.Apply(gpu, dev.dispatch, src, gp, out), Wide(module.LastError()).c_str());
 			CflFrameOut o;
@@ -920,6 +944,39 @@ namespace VideoProcessorTest
 				pl_tex_destroy(gpu, &luma);
 				pl_tex_destroy(gpu, &chroma);
 			}
+		}
+
+		TEST_METHOD(ChromaCflGpuStaleProductFallsBackVisibly)
+		{
+			// Products computed for another source frame, or by another version of the grain split unit, are STALE: the module
+			// uses its own splits (own-split output), the entry is engaged and named, and a fitting product recovers it.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			const Scene sc = MakeScene(128, 96, 64, 48, -0.5, 0.0, 31u, 1.5, 2.0);
+			const std::vector<CflFrameOut> r = RunCflShared(dev, sc, { CflShared::Absent, CflShared::StaleSeq, CflShared::StaleVersion });
+			for (size_t i = 1; i < r.size(); ++i)
+			{
+				Assert::IsTrue(r[i].grain == GrainSplit::GrainStatus::Stale, L"stale product: Stale");
+				Assert::IsTrue(r[i].engaged && r[i].id == "grain split (chroma-from-luma)", L"engaged and named");
+				Assert::IsTrue(CflWorstDiff(r[0], r[i]) == 0.0, L"a stale product is not read: the own-split output");
+			}
+			// Recovery: stale, fitting (a Full product made without a seq stamp is accepted when the reader does not ask), stale.
+			const std::vector<CflFrameOut> rec = RunCflShared(dev, sc, { CflShared::StaleSeq, CflShared::Full, CflShared::StaleVersion, CflShared::Full });
+			Assert::IsTrue(rec[0].engaged && !rec[1].engaged && rec[2].engaged && !rec[3].engaged, L"engaged exactly while stale: automatic recovery");
+			Assert::IsTrue(rec[1].grain == GrainSplit::GrainStatus::Ring && rec[3].grain == GrainSplit::GrainStatus::Ring, L"Ring when it fits again");
+		}
+
+		TEST_METHOD(ChromaCflGpuShedProductFallsBackVisibly)
+		{
+			// The governor dropped the products (Params::grainShed): a fitting product is not read, status Shed, engaged, own-split
+			// output; released when the products are back.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			const Scene sc = MakeScene(128, 96, 64, 48, -0.5, 0.0, 31u, 1.5, 2.0);
+			const std::vector<CflFrameOut> r = RunCflShared(dev, sc, { CflShared::Absent, CflShared::Shed, CflShared::Full });
+			Assert::IsTrue(r[1].grain == GrainSplit::GrainStatus::Shed && r[1].engaged && r[1].id == "grain split (chroma-from-luma)", L"Shed, engaged, named");
+			Assert::IsTrue(CflWorstDiff(r[0], r[1]) == 0.0, L"the shed product is not read");
+			Assert::IsTrue(!r[2].engaged && r[2].grain == GrainSplit::GrainStatus::Ring, L"recovers when the products are back");
 		}
 	};
 }

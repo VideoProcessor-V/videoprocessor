@@ -4,6 +4,8 @@
 
 #include "VramGovernor.h"
 
+#include <VP-V/core/FallbackCatalog.h>
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -132,6 +134,26 @@ struct ArenaPlan {
                 n += r.count;
         return n;
     }
+    // What ONE owner may hold at once of `shape` in `scope`, and where its slice of the pool starts (the sum of
+    // the owners sorted before it): usage is counted per (owner, shape) so an owner never takes another's textures.
+    uint32_t OwnerCount(uint16_t scope, const char* owner, const TexShape& s) const
+    {
+        uint32_t n = 0;
+        const std::string o = owner ? owner : "";
+        for (const ArenaRequest& r : admitted)
+            if (r.scope == scope && r.shape == s && std::string(r.owner ? r.owner : "") == o)
+                n += r.count;
+        return n;
+    }
+    uint32_t OwnerBase(uint16_t scope, const char* owner, const TexShape& s) const
+    {
+        uint32_t n = 0;
+        const std::string o = owner ? owner : "";
+        for (const ArenaRequest& r : admitted)
+            if (r.scope == scope && r.shape == s && std::string(r.owner ? r.owner : "") < o)
+                n += r.count;
+        return n;
+    }
     // Whether `owner` asked for `shape` in `scope` and was admitted (not shed by tier).
     bool Admits(uint16_t scope, const char* owner, const TexShape& s) const
     {
@@ -206,55 +228,85 @@ inline ArenaPlan PlanArena(const std::vector<ArenaRequest>& requests, Tier maxTi
     return plan;
 }
 
-// The arena as one governor user: levels [plan(T2), plan(T1), plan(T0), 0], dropping levels that save
-// nothing. Not lossless (a shed temporary switches a repair off or reduces it), tier T1 so the T2
-// consumers' own levels (render-ahead depth, early upload) are shed first.
-inline VramUser ScratchArenaUser(const std::vector<ArenaRequest>& requests)
+// The arena as TWO governor users, so pressure on the optional (T1/T2) temporaries never takes the T0 ones:
+//   kUserScratchArena      tier T0: the T0 plan, levels [plan(T0), 0]. It is shed only after every T1/T2 user.
+//   kUserScratchArenaExtra tier T1: the increment of the T1/T2 temporaries over the T0 plan, levels
+//                          [plan(T2) - plan(T0), plan(T1) - plan(T0), 0] (equal levels dropped).
+// Not lossless (a shed temporary switches a repair off or reduces it).
+inline VramUser ScratchArenaT0User(const std::vector<ArenaRequest>& requests)
 {
     VramUser u;
     u.id = kUserScratchArena;
     u.name = "scratch arena";
-    u.tier = Tier::T1;
-    u.shedOrder = 0;
+    u.tier = Tier::T0;
+    u.shedOrder = 200;
     u.lossless = false;
-    const uint64_t b2 = PlanArena(requests, Tier::T2).bytes;
-    const uint64_t b1 = PlanArena(requests, Tier::T1).bytes;
     const uint64_t b0 = PlanArena(requests, Tier::T0).bytes;
-    u.levels.push_back(b2);
+    u.levels.push_back(b0);
     u.levelText.push_back(nullptr);
-    if (b1 < u.levels.back()) {
-        u.levels.push_back(b1);
-        u.levelText.push_back("T2 temporaries off");
-    }
-    if (b0 < u.levels.back()) {
-        u.levels.push_back(b0);
-        u.levelText.push_back("T1 and T2 temporaries off");
-    }
-    if (u.levels.back() > 0) {
+    if (b0 > 0) {
         u.levels.push_back(0);
-        u.levelText.push_back("off");
+        u.levelText.push_back("T0 temporaries off");
     }
     return u;
 }
 
-// What the arena may keep when the governor granted `grantedBytes` to kUserScratchArena: the largest
-// tier whose plan fits. `any` is false when even the T0 plan does not fit (the arena is off).
+inline VramUser ScratchArenaExtraUser(const std::vector<ArenaRequest>& requests)
+{
+    VramUser u;
+    u.id = kUserScratchArenaExtra;
+    u.name = "scratch arena (optional temporaries)";
+    u.tier = Tier::T1;
+    u.shedOrder = 0;
+    u.lossless = false;
+    const uint64_t b0 = PlanArena(requests, Tier::T0).bytes;
+    const uint64_t b1 = PlanArena(requests, Tier::T1).bytes;
+    const uint64_t b2 = PlanArena(requests, Tier::T2).bytes;
+    const uint64_t i2 = b2 > b0 ? b2 - b0 : 0;
+    const uint64_t i1 = b1 > b0 ? b1 - b0 : 0;
+    u.levels.push_back(i2);
+    u.levelText.push_back(nullptr);
+    if (i1 < u.levels.back()) {
+        u.levels.push_back(i1);
+        u.levelText.push_back("T2 temporaries off");
+    }
+    if (u.levels.back() > 0) {
+        u.levels.push_back(0);
+        u.levelText.push_back("T1 and T2 temporaries off");
+    }
+    return u;
+}
+
+inline void AddScratchArenaUsers(std::vector<VramUser>& users, const std::vector<ArenaRequest>& requests)
+{
+    users.push_back(ScratchArenaT0User(requests));
+    users.push_back(ScratchArenaExtraUser(requests));
+}
+
+// What the arena may keep when the governor granted `t0Bytes` to kUserScratchArena and `extraBytes` to
+// kUserScratchArenaExtra: `any` is false when the T0 plan does not fit (the arena is off); else the largest
+// tier whose increment over the T0 plan fits the extra grant.
 struct ArenaGrant {
     bool any = false;
     Tier maxTier = Tier::T0;
 };
 
-inline ArenaGrant ArenaGrantFor(const std::vector<ArenaRequest>& requests, uint64_t grantedBytes)
+inline ArenaGrant ArenaGrantFor(const std::vector<ArenaRequest>& requests, uint64_t t0Bytes, uint64_t extraBytes)
 {
     ArenaGrant g;
-    for (Tier t : { Tier::T2, Tier::T1, Tier::T0 }) {
-        if (PlanArena(requests, t).bytes <= grantedBytes) {
-            g.any = true;
+    const uint64_t b0 = PlanArena(requests, Tier::T0).bytes;
+    if (b0 > t0Bytes)
+        return g;   // off
+    g.any = true;
+    for (Tier t : { Tier::T2, Tier::T1 }) {
+        const uint64_t bt = PlanArena(requests, t).bytes;
+        if ((bt > b0 ? bt - b0 : 0) <= extraBytes) {
             g.maxTier = t;
             return g;
         }
     }
-    return g;   // off
+    g.maxTier = Tier::T0;
+    return g;
 }
 
 // ---- product textures: ring + live pool of one GPU product ----
@@ -264,6 +316,10 @@ inline ArenaGrant ArenaGrantFor(const std::vector<ArenaRequest>& requests, uint6
 struct TexTerm {
     uint8_t shift = 0;
     TexFormat fmt = TexFormat::R8;
+    // Optional absolute size (both > 0): the ACTUAL plane dims of a product whose geometry is not a plain shift of
+    // the source (a chroma plane): the runtime path uses what the plane really is, never an assumed subsampling.
+    uint32_t absW = 0;
+    uint32_t absH = 0;
 };
 
 struct ProductTexLayout {
@@ -273,8 +329,8 @@ struct ProductTexLayout {
     {
         const uint64_t div = uint64_t(1) << terms[i].shift;
         TexShape s;
-        s.w = uint32_t((uint64_t(d.width) + div - 1) / div);
-        s.h = uint32_t((uint64_t(d.height) + div - 1) / div);
+        s.w = terms[i].absW > 0 && terms[i].absH > 0 ? terms[i].absW : uint32_t((uint64_t(d.width) + div - 1) / div);
+        s.h = terms[i].absW > 0 && terms[i].absH > 0 ? terms[i].absH : uint32_t((uint64_t(d.height) + div - 1) / div);
         s.fmt = terms[i].fmt;
         return s;
     }
@@ -305,9 +361,18 @@ public:
     // Ring + live when `plan.Laned(node.id)` (and the node has a lane), the live pool alone otherwise.
     // False (and nothing held) when a texture could not be created: the caller treats the product as
     // unavailable (a visible, graceful path), never partially allocated.
-    bool Allocate(const Node& node, const ProductTexLayout& layout, Dims dims, const TierPlan& plan)
+    // Refuses (visibly: LastRefusal() / RefusalDecision()) when the layout's bytes do not equal the declaration's
+    // SizeRule, unless the declaration is a planning-only size (decl.planningSize: its runtime bytes are the
+    // layout's actual ones, reported to the governor through TierInput::actual).
+    bool Allocate(const Node& node, const ProductDecl& decl, const ProductTexLayout& layout, Dims dims, const TierPlan& plan)
     {
         Release();
+        refusal_.clear();
+        if (!decl.planningSize && !layout.MatchesDecl(decl, dims)) {
+            refusal_ = std::string("layout does not match the declaration of ") + decl.name;
+            ++refusals_;
+            return false;
+        }
         const bool lane = plan.Laned(node.id) && node.backend != Backend::RenderOnly;
         const size_t ringCount = lane ? node.ring : 0;
         const size_t liveCount = node.livePool;
@@ -343,6 +408,14 @@ public:
         laned_ = false;
     }
 
+    const std::string& LastRefusal() const { return refusal_; }
+    unsigned Refusals() const { return refusals_; }
+    FallbackCatalog::Decision RefusalDecision() const
+    {
+        if (refusal_.empty())
+            return FallbackCatalog::Released("product textures");
+        return FallbackCatalog::Engaged("product textures", refusal_ + ": the product is unavailable (readers fall back)");
+    }
     bool Laned() const { return laned_; }
     size_t RingBuffers() const { return layout_.terms.empty() ? 0 : ring_.size() / layout_.terms.size(); }
     size_t LiveBuffers() const { return layout_.terms.empty() ? 0 : live_.size() / layout_.terms.size(); }
@@ -369,6 +442,8 @@ private:
     std::vector<Handle> live_;
     uint64_t bytes_ = 0;
     unsigned createFailures_ = 0;
+    std::string refusal_;
+    unsigned refusals_ = 0;
 };
 
 // ---- the ledger (Ctrl+Alt+D) ----

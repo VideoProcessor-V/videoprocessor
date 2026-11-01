@@ -77,6 +77,11 @@ namespace TemporalDetail
 			// plane's GPU form, computed on the same active picture with this module's scale and block). Absent or not
 			// fitting: the module computes its own (status says so).
 			RegionEvidence::GrainView grain;
+			// The source frame the shared product must be for (Frame::seq); kAnySeq = not checked. Another frame or another
+			// unit version is STALE: visible fallback to the module's own split, recovery on the next fitting frame.
+			uint64_t grainSeq = GrainSplit::Gpu::kAnySeq;
+			// The governor dropped the shared product (GrainNode::Shed()): the module uses its own split and says so (Shed).
+			bool grainShed = false;
 			bool autoEngaged = false;      // temporal_detail = auto: the host's AutoGate decision (idle = the input, no pass)
 		};
 

@@ -47,6 +47,11 @@ namespace ChromaUpscale
 			// active-picture crop with the module's scale and block. Null or not fitting: the module computes its own (status).
 			// Read through the product's one API (RegionEvidence::GrainView: GPU form per plane, Luma / Cb / Cr).
 			RegionEvidence::GrainView grain;
+			// The source frame the shared product must be for (GrainSplit::Gpu::Frame::seq); kAnySeq = not checked. A
+			// product of another frame or of another unit version is STALE: visible fallback, recovery on the next fit.
+			uint64_t grainSeq = GrainSplit::Gpu::kAnySeq;
+			// The governor dropped the shared product (GrainNode::Shed()): the module uses its own split and says so (Shed).
+			bool grainShed = false;
 		};
 
 		class CflModule

@@ -337,9 +337,12 @@ namespace TemporalDetail
 			}
 			// The shared product when it fits (one producer, many readers), else this module's own split (visible).
 			const GrainSplit::Gpu::Frame* const sharedSplit = params.grain.Gpu(RegionEvidence::GrainPlane::Luma);
-			const bool shared = GrainSplit::Gpu::Fits(sharedSplit, w, h, g.B, g.scale, cu, 0);
+			const GrainSplit::Gpu::FitResult fit = GrainSplit::Gpu::CheckFit(sharedSplit, w, h, g.B, g.scale, cu, 0, params.grainSeq);
+			const bool shared = fit == GrainSplit::Gpu::FitResult::Fits && !params.grainShed;
 			// Recomputed every frame: a product that fits again is used from this frame on (automatic recovery).
-			m_grainStatus = shared ? GrainSplit::GrainStatus::Ring : (sharedSplit ? GrainSplit::GrainStatus::WrongSize : GrainSplit::GrainStatus::Missing);
+			m_grainStatus = params.grainShed ? GrainSplit::GrainStatus::Shed : shared ? GrainSplit::GrainStatus::Ring :
+				(fit == GrainSplit::Gpu::FitResult::Stale ? GrainSplit::GrainStatus::Stale :
+				(fit == GrainSplit::Gpu::FitResult::WrongSize ? GrainSplit::GrainStatus::WrongSize : GrainSplit::GrainStatus::Missing));
 			if (!shared && !m.split.Compute(gpu, dispatch, work, 0, cu, g.scale, g.B, sp)) return fail(m.split.LastError().c_str());
 			const GrainSplit::Gpu::Frame& gs = shared ? *sharedSplit : m.split.Out();
 			// THE ONE READ ACCESSOR: every grain read goes through gs_fetch / gs_blocks (the prelude + BindView of the frame's layout).
