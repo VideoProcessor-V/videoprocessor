@@ -20,14 +20,17 @@
 namespace VectorDemand
 {
 	constexpr bool kAnalysisUnderSmoothMotion = true;
+	constexpr unsigned kUnitVersion = 1;   // P2/P3 (vector pair, analysis field) unit version (core/ProductCatalog.h)
 
 	enum class Consumer : int
 	{
 		DejudderExtras, Interpolator, HiccupRepair, OcclusionMask,
 		SigmaDelta, GrainMap, DebandHold, DetailPulse, EntranceSegment,
-		SourceMonitorPan, MotionIntent
+		SourceMonitorPan, MotionIntent,
+		// Camera-linking consumers (K0): appended so the indices above never move. All read the source field.
+		TextureRestore, ResidualStabilise, TemporalDetail
 	};
-	constexpr int kConsumerCount = 11;
+	constexpr int kConsumerCount = 14;
 
 	enum class Domain { Synthesis, Output, SourceField, SourceStatistics };
 
@@ -43,7 +46,10 @@ namespace VectorDemand
 		case Consumer::GrainMap:
 		case Consumer::DebandHold:
 		case Consumer::DetailPulse:
-		case Consumer::EntranceSegment: return Domain::SourceField;
+		case Consumer::EntranceSegment:
+		case Consumer::TextureRestore:
+		case Consumer::ResidualStabilise:
+		case Consumer::TemporalDetail: return Domain::SourceField;
 		case Consumer::SourceMonitorPan:
 		case Consumer::MotionIntent: return Domain::SourceStatistics;
 		}
@@ -65,6 +71,9 @@ namespace VectorDemand
 		case Consumer::EntranceSegment: return "entrance segment";
 		case Consumer::SourceMonitorPan: return "source monitor";
 		case Consumer::MotionIntent: return "intent";
+		case Consumer::TextureRestore: return "texture restore";
+		case Consumer::ResidualStabilise: return "residual stabilise";
+		case Consumer::TemporalDetail: return "temporal detail";
 		}
 		return "?";
 	}

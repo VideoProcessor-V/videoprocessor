@@ -211,6 +211,7 @@ private:
 
 constexpr uint32_t kStatsHistBins = 1024;      // top 10 bits of the 16-bit half-plane sample
 constexpr uint32_t kStatsVersion = 1;
+constexpr uint32_t kHalfLumaVersion = 1;       // P1 half + quarter luma layout and law (core/ProductCatalog.h)
 constexpr uint32_t kStatsBytes = 8192;         // the declared fixed size of P4
 constexpr uint32_t kGrainBlock = 8;            // grain: 8x8 blocks of the half plane
 constexpr uint32_t kRectFractionShift = 4;     // rect threshold = p1 + (p99 - p1) / 16

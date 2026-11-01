@@ -40,7 +40,8 @@ namespace VectorDemandTest
 				a.smoothMotion == b.smoothMotion && a.synthesisOnly == b.synthesisOnly;
 		}
 		const Consumer kNonSynthesis[] = { Consumer::SigmaDelta, Consumer::GrainMap, Consumer::DebandHold,
-			Consumer::DetailPulse, Consumer::EntranceSegment, Consumer::SourceMonitorPan, Consumer::MotionIntent };
+			Consumer::DetailPulse, Consumer::EntranceSegment, Consumer::SourceMonitorPan, Consumer::MotionIntent,
+			Consumer::TextureRestore, Consumer::ResidualStabilise, Consumer::TemporalDetail };
 	}
 
 	TEST_CLASS(VectorDemandTests)

@@ -29,6 +29,8 @@
 // dark tiles carry no evidence; anything uncertain stays native.
 namespace SourceResolution
 {
+	constexpr uint32_t kUnitVersion = 1;   // P5 monitor tiles (tile geometry and judging law; core/ProductCatalog.h)
+
 	// One tile's vertical (down the columns) and horizontal power spectra,
 	// bins 0..n/2, normalised so white noise of variance v reads v per bin.
 	struct Spectrum
