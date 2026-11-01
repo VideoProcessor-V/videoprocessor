@@ -74,7 +74,7 @@ namespace CameraModel
 		return true;
 	}
 
-	double TemporalFilter::Consistency(double dtSeconds, const SimilarityRates& measured) const
+	double TemporalFilter::Consistency(double dtSeconds, const SimilarityRates& measured, const double* floorSigma) const
 	{
 		if (!m_valid) return 0.5;
 		const double dt = dtSeconds > 0 ? dtSeconds : 0;
@@ -83,11 +83,14 @@ namespace CameraModel
 		double pred[4];
 		double sumAbs = 0;
 		for (int c = 0; c < 4; ++c) { pred[c] = m_value[c] + m_rate[c] * dt; sumAbs += std::fabs(pred[c]); }
-		const double floorSigma = 1e-9 * sumAbs + 1e-12;
+		const double tiny = 1e-9 * sumAbs + 1e-12;
 		double acc = 0;
 		for (int c = 0; c < 4; ++c)
 		{
-			const double sigma = std::sqrt(m_var[c]) + kSigmaRel * std::fabs(pred[c]) + floorSigma;
+			// With a noise floor the filter variance and the floor add in quadrature (a measurement can never be
+			// expected to agree better than its own precision); without one, the phase-1 relative-only model.
+			const double fl = floorSigma != nullptr ? floorSigma[c] : 0.0;
+			const double sigma = std::sqrt(m_var[c] + fl * fl) + kSigmaRel * std::fabs(pred[c]) + tiny;
 			acc += Sq(m[c] - pred[c]) / Sq(sigma);
 		}
 		const double d = std::sqrt(acc) / 2.0;
@@ -95,7 +98,7 @@ namespace CameraModel
 		return std::exp(-0.5 * d * d);
 	}
 
-	void TemporalFilter::Update(double dtSeconds, const SimilarityRates& measured)
+	void TemporalFilter::Update(double dtSeconds, const SimilarityRates& measured, const double* floorSigma)
 	{
 		double m[4];
 		ToArray(measured, m);
@@ -105,7 +108,7 @@ namespace CameraModel
 			{
 				m_value[c] = m[c];
 				m_rate[c] = 0;
-				m_var[c] = Sq(kInitial * m[c]) + 1e-12;
+				m_var[c] = Sq(kInitial * m[c]) + (floorSigma != nullptr ? Sq(floorSigma[c]) : 0.0) + 1e-12;
 			}
 			m_valid = true;
 			return;
@@ -118,7 +121,7 @@ namespace CameraModel
 			const double mag = std::fabs(innov) + std::fabs(m_value[c]);
 			const double q = kProcess * dt * Sq(mag) + 1e-6 * Sq(m[c]) + 1e-12;
 			const double P = m_var[c] + q;
-			const double R = Sq(kMeasure * m[c]) + 1e-12;
+			const double R = Sq(kMeasure * m[c]) + (floorSigma != nullptr ? Sq(floorSigma[c]) : 0.0) + 1e-12;
 			const double gain = P / (P + R);
 			m_value[c] = pred + gain * innov;
 			m_var[c] = (1.0 - gain) * P;
