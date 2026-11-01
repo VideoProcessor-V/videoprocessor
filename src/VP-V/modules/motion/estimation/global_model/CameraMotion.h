@@ -93,6 +93,9 @@ namespace CameraModel
 		double inlierShare = 0, precision = 0, coverage = 0, temporal = 0.5, conditioning = 0,
 			engineAgreement = 0.5, inverse = 0.5, ambiguity = 1, logit = 0;
 		bool haveBackward = false, haveEngine = false;
+		// Two-layer diagnostics (Config::twoLayer; neutral 0.5 otherwise): the camera layer's border ratio (clamped
+		// to 0..1) and its continuity with the last usable camera layer.
+		double border = 0.5, continuity = 0.5;
 	};
 
 	struct ObjectModel
@@ -141,6 +144,12 @@ namespace CameraModel
 		std::vector<ObjectModel> objects;
 		std::shared_ptr<const BlockData> blocks;
 		Rect picture;
+		// Two-layer (Config::twoLayer), K10a. layerFlags: 1 TwoLayerRan, 2 CompetitorFound, 4 CameraIsRansacRunnerUp,
+		// 8 ForegroundSuspect, 16 SwapPending (hysteresis held), 32 Swapped, 64 ContinuityUsed.
+		uint8_t layerFlags = 0;
+		bool haveObjectLayer = false;
+		ObjectModel objectLayer;     // params, blocks = support count, cx/cy = support centre, id = persistent layer id 1..255
+		double layerRisk = 0;        // 1 at an accepted layer swap, decaying linearly to 0 over the swap window
 	};
 
 	// Map a point (picture-centred, source px) through Params.

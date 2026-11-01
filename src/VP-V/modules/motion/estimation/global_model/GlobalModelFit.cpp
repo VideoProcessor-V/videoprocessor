@@ -406,6 +406,226 @@ namespace CameraModel
 			out[0] = out[1] = (r > 0 ? prec / r : 0.0) / t;
 			out[2] = out[3] = prec / t;
 		}
+
+		struct ChosenModel
+		{
+			Params model;
+			bool ok = false;
+		};
+
+		// Local optimisation + model choice from a start model (the RANSAC winner, or a competing layer's model): refine,
+		// build the support set, then the complexity-penalised ladder. Every layer goes through this one function.
+		ChosenModel ChooseModel(const Field& f, const Config& c, const Params& start, bool earlyExit, ModelType maxModel, int irls)
+		{
+			Params w = start;
+			if (!earlyExit)
+				Refine(f, f.s, w, irls);          // the early-exit winner (refined H0) is already refined
+			std::vector<Sample> wbuf;
+			BuildWeighted(f, f.s, w, wbuf);
+			if (static_cast<int>(wbuf.size()) < 1)
+				wbuf = f.s;
+
+			// Support set of the winner (for the cost comparison) and its quadrant mass.
+			std::vector<uint8_t> support(f.s.size(), 0);
+			double tiny = 0;
+			const bool wAff = AffineRow(w);
+			for (size_t i = 0; i < f.s.size(); ++i)
+			{
+				double r2, pm2;
+				ResidualSq(w, wAff, f.s[i], &r2, &pm2);
+				if (r2 <= 9.0 * Threshold2(f, pm2))
+				{
+					support[i] = 1;
+					tiny += f.s[i].w * (0.5 * f.prec) * (0.5 * f.prec);
+				}
+			}
+			double qMass[4] = { 0, 0, 0, 0 }, massTotal = 0;
+			for (size_t i = 0; i < wbuf.size(); ++i)
+			{
+				qMass[Quadrant(wbuf[i].x, wbuf[i].y)] += wbuf[i].w;
+				massTotal += wbuf[i].w;
+			}
+			int quadrants = 0;
+			for (int q = 0; q < 4; ++q)
+				if (massTotal > 0 && qMass[q] / massTotal >= c.quadrantMinShare)
+					++quadrants;
+
+			auto supportCost = [&](const Params& p)
+			{
+				double cost = 0;
+				const bool aff = AffineRow(p);
+				for (size_t i = 0; i < f.s.size(); ++i)
+					if (support[i])
+					{
+						double r2, pm2;
+						ResidualSq(p, aff, f.s[i], &r2, &pm2);
+						const double t2 = 9.0 * Threshold2(f, pm2);
+						cost += f.s[i].w * ((r2 < t2) ? r2 : t2);
+					}
+				return cost;
+			};
+
+			static const ModelType kAll[4] = { ModelType::Translation, ModelType::Similarity, ModelType::Affine, ModelType::Homography };
+			Params chosen;
+			bool haveChosen = false;
+			double chosenCost = 0;
+			// Early exit: keep H0's (refined) type and try ONE step up from the same weighted set under the same
+			// complexity-penalty test; otherwise run the whole ladder from translation.
+			int tiFirst = 0, tiLast = 3;
+			if (earlyExit)
+			{
+				tiFirst = static_cast<int>(w.type) - static_cast<int>(ModelType::Translation);
+				tiLast = std::min(3, tiFirst + 1);
+				chosen = w;
+				chosenCost = supportCost(w);
+				haveChosen = true;
+			}
+			for (int ti = tiFirst + (earlyExit ? 1 : 0); ti <= tiLast; ++ti)
+			{
+				const ModelType ty = kAll[ti];
+				if (ty > maxModel)
+					break;
+				if (ty == ModelType::Affine && quadrants < 2 && haveChosen)
+					continue;
+				if (ty == ModelType::Homography && quadrants < 3 && haveChosen)
+					continue;
+				Params p;
+				if (static_cast<int>(wbuf.size()) < MinimalCount(ty) || !FitWeighted(ty, wbuf.data(), static_cast<int>(wbuf.size()), f.halfDiag, p))
+					continue;
+				p.type = ty;
+				if (IsDegenerate(p, f.pic))
+					continue;
+				Refine(f, f.s, p, irls);
+				if (IsDegenerate(p, f.pic))
+					continue;
+				const double cost = supportCost(p);
+				if (!haveChosen)
+				{
+					chosen = p;
+					chosenCost = cost;
+					haveChosen = true;
+					continue;
+				}
+				const double extra = ParamCount(ty) - ParamCount(chosen.type);
+				const double drop = (chosenCost - cost) / std::max(chosenCost, tiny);
+				if (drop > c.complexityPenaltyPerParam * extra)
+				{
+					chosen = p;
+					chosenCost = cost;
+				}
+			}
+			// Early exit, step down: the loop above only tries one step UP from H0's type, so a model that was a
+			// homography would never relax when the motion becomes a pure pan. When the type is still H0's and
+			// above Translation, fit ONE type down from the same weighted set; the lower type wins when the
+			// higher one does not earn its extra parameters under the same complexity-penalty test.
+			if (c.stepDownOnEarlyExit && earlyExit && haveChosen && chosen.type == w.type && chosen.type > ModelType::Translation)
+			{
+				const ModelType lowerTy = kAll[static_cast<int>(chosen.type) - static_cast<int>(ModelType::Translation) - 1];
+				Params lp;
+				if (static_cast<int>(wbuf.size()) >= MinimalCount(lowerTy) &&
+					FitWeighted(lowerTy, wbuf.data(), static_cast<int>(wbuf.size()), f.halfDiag, lp))
+				{
+					lp.type = lowerTy;
+					if (!IsDegenerate(lp, f.pic))
+					{
+						Refine(f, f.s, lp, irls);
+						if (!IsDegenerate(lp, f.pic))
+						{
+							const double costLower = supportCost(lp);
+							const double extra = ParamCount(chosen.type) - ParamCount(lowerTy);
+							if ((costLower - chosenCost) / std::max(chosenCost, tiny) <= c.complexityPenaltyPerParam * extra)
+							{
+								chosen = lp;
+								chosenCost = costLower;
+							}
+						}
+					}
+				}
+			}
+			ChosenModel r;
+			r.ok = haveChosen;
+			r.model = chosen;
+			return r;
+		}
+
+		// One layer's model, inlier set and the signals that depend only on them.
+		struct Cand
+		{
+			Params model;
+			std::vector<uint8_t> inl;
+			double inlierMass = 0, rawShare = 0;
+			int inlierCount = 0;
+			Signals sg;
+		};
+
+		void BuildCand(const Field& f, const Config& c, const PairInput& in, int cellsTotal, const Params& model, Cand& cd)
+		{
+			std::vector<uint8_t> inl(f.s.size(), 0);
+			double inlierMass = 0, resSq = 0;
+			int inlierCount = 0;
+			const bool mAff = AffineRow(model);
+			for (size_t i = 0; i < f.s.size(); ++i)
+			{
+				double r2, pm2;
+				ResidualSq(model, mAff, f.s[i], &r2, &pm2);
+				if (r2 <= Threshold2(f, pm2))
+				{
+					inl[i] = 1;
+					++inlierCount;
+					inlierMass += f.s[i].w;
+					resSq += f.s[i].w * r2;
+				}
+			}
+			Signals sg;
+			// Signal: the trusted share of vectors the camera explains, 0 at inlierShareLo, full at inlierShareHi.
+			// A camera behind many movers (a crowd under a pan) explains about half the vectors and is still the
+			// dominant motion when no other motion competes; a competing motion is the ambiguity signal's job.
+			const double rawShare = f.trustSum > 0 ? Clamp01(inlierMass / f.trustSum) : 0.0;
+			{
+				const double lo = c.inlierShareLo, span = std::max(1e-6, c.inlierShareHi - c.inlierShareLo);
+				sg.inlierShare = f.trustSum > 0 ? Clamp01((inlierMass / f.trustSum - lo) / span) : 0.0;
+			}
+			const double rms = inlierMass > 0 ? std::sqrt(resSq / inlierMass) : 0.0;
+			{
+				const double q = rms / (2.0 * f.prec);
+				sg.precision = 1.0 / (1.0 + q * q);
+			}
+			sg.coverage = std::min(1.0, 1.5 * static_cast<double>(f.cellsWithSample) / cellsTotal);
+			sg.conditioning = InliersSpreadConditioning(f, inl);
+
+			// Engine agreement.
+			if (in.haveEngineGlobal && std::isfinite(in.engineGx) && std::isfinite(in.engineGy))
+			{
+				double dx = 0, dy = 0;
+				Displacement(model, 0.0, 0.0, &dx, &dy);
+				const double d = std::hypot(dx - in.engineGx, dy - in.engineGy);
+				const double mag = std::max(std::hypot(in.engineGx, in.engineGy), std::hypot(dx, dy));
+				const double t = std::max(f.absThr, f.rel * mag);
+				const double q = d / (2.0 * t);
+				sg.engineAgreement = std::exp(-q * q);
+				sg.haveEngine = true;
+			}
+			cd.model = model;
+			cd.inl.swap(inl);
+			cd.inlierMass = inlierMass;
+			cd.inlierCount = inlierCount;
+			cd.rawShare = rawShare;
+			cd.sg = sg;
+		}
+
+		// Two-layer state changes of one pair, applied by Fitter::Fit only when the pair's record is kept.
+		struct TlNext
+		{
+			bool have = false;
+			bool swapped = false;                    // the camera layer changed: the reference follows it at once
+			int holdCount = 0;
+			int swapAge = -1;
+			double camShare = 0;
+			bool haveObj = false;
+			Params obj;
+			uint8_t objId = 0;
+			uint8_t nextId = 1;
+		};
 	}
 
 	struct Fitter::Impl
@@ -429,8 +649,138 @@ namespace CameraModel
 			return c.clock != nullptr && in.deadlineMicros > 0 && c.clock() > in.deadlineMicros;
 		}
 
+		// Backward check, temporal consistency, confidence and verdict of one layer's candidate fit.
+		static void Finish(Fitter& F, const PairInput& in, const Config& c, const Field& f, bool temporalRead, Cand& cd, double ambiguity, CameraMotion& rec)
+		{
+			Signals sg = cd.sg;
+			sg.ambiguity = ambiguity;
+			const Params& model = cd.model;
+			const double rawShare = cd.rawShare;
+			// Backward check.
+			if (in.bwdX != nullptr && in.bwdY != nullptr && in.bwdTrust != nullptr)
+			{
+				std::vector<Sample> bs;
+				double bTrust = 0;
+				for (size_t i = 0; i < f.s.size(); ++i)
+				{
+					const int b = f.blk[i];
+					if (!FiniteF(in.bwdTrust[b]) || !(in.bwdTrust[b] > 0.0f) || !FiniteF(in.bwdX[b]) || !FiniteF(in.bwdY[b]))
+						continue;
+					Sample s = f.s[i];
+					s.dx = in.bwdX[b];
+					s.dy = in.bwdY[b];
+					s.w = in.bwdTrust[b];
+					bs.push_back(s);
+					bTrust += s.w;
+				}
+				if (static_cast<int>(bs.size()) >= std::max(3, MinimalCount(model.type) + 2))
+				{
+					bool invOk = true;
+					Params inv = Invert(model, &invOk);
+					inv.type = model.type;
+					sg.haveBackward = true;
+					if (!invOk)
+						sg.inverse = 0.0;
+					else
+					{
+						double inMass = 0;
+						const bool iAff = AffineRow(inv);
+						for (size_t i = 0; i < bs.size(); ++i)
+						{
+							double r2, pm2;
+							ResidualSq(inv, iAff, bs[i], &r2, &pm2);
+							if (r2 <= Threshold2(f, pm2))
+								inMass += bs[i].w;
+						}
+						const double bShare = bTrust > 0 ? inMass / bTrust : 0.0;
+						double devTerm = 0.0;
+						Params B = inv;
+						if (Refine(f, bs, B, 1))
+						{
+							const double dev = MaxCornerDifference(Compose(B, model), IdentityParams(model.type), f.pic);
+							const double tol = 4.0 * f.prec / f.diag;
+							devTerm = 1.0 - Clamp01(dev / tol);
+						}
+						const double shareTerm = std::min(1.0, bShare / (0.7 * rawShare + 1e-9));
+						sg.inverse = Clamp01(devTerm * shareTerm);
+					}
+				}
+			}
+
+			SimilarityRates rates;
+			const bool haveRates = ToSimilarity(model, in.picture, in.pairSeconds, rates);
+			if (haveRates)
+			{
+				rec.rates = rates;
+				if (temporalRead && F.m_temporal.Valid())
+				{
+					double fl[4];
+					TemporalFloor(f.prec, in.picture, in.pairSeconds, fl);
+					sg.temporal = Clamp01(F.m_temporal.Consistency(in.pairSeconds, rates, c.temporalNoiseFloor ? fl : nullptr));
+				}
+			}
+
+			double logit = c.b[0] + c.b[1] * sg.inlierShare + c.b[2] * sg.precision + c.b[3] * sg.coverage
+				+ c.b[4] * sg.temporal + c.b[5] * sg.conditioning + c.b[6] * sg.engineAgreement
+				+ c.b[7] * sg.inverse + c.b[8] * sg.ambiguity;
+			sg.logit = logit;
+			rec.signals = sg;
+			rec.confidence = 1.0 / (1.0 + std::exp(-logit));
+			rec.params = model;
+			rec.valid = true;
+			if (sg.ambiguity < 0.35)
+				rec.reason = Reason::Ambiguous;
+			else if (sg.haveBackward && sg.inverse < 0.3)
+				rec.reason = Reason::InverseMismatch;
+			else if (rec.confidence < 0.5)
+				rec.reason = Reason::LowConfidence;
+			else
+				rec.reason = Reason::Ok;
+			// A failed verdict is never a usable fit: an Ambiguous record (a competing motion with about a third
+			// or more of the camera's support) or an InverseMismatch record keeps its model for diagnostics, but
+			// its confidence is halved and scaled by how far the signal fell below its gate, so it stays < 0.5.
+			if (c.verdictGatesConfidence && (rec.reason == Reason::Ambiguous || rec.reason == Reason::InverseMismatch))
+			{
+				const double g = rec.reason == Reason::Ambiguous ? Clamp01(sg.ambiguity / 0.35) : Clamp01(sg.inverse / 0.3);
+				rec.confidence *= 0.5 * g;
+			}
+		}
+
+		// Two-layer state after one pair (see Config::twoLayer). The reference follows usable records (and any accepted
+		// layer change); it ages out after 2M pairs without a refresh.
+		static void ApplyTl(Fitter& F, const PairInput& in, const CameraMotion& fit, const TlNext& n)
+		{
+			TwoLayerState& s = F.m_tl;
+			const int M = std::max(1, static_cast<int>(std::lround(F.m_config.layerSwapSeconds / in.pairSeconds)));
+			const bool ran = n.have && fit.valid;
+			if (ran)
+			{
+				s.holdCount = n.holdCount;
+				s.swapAge = n.swapAge;
+				s.haveObj = n.haveObj;
+				if (n.haveObj)
+				{
+					s.obj = n.obj;
+					s.objSeconds = in.pairSeconds;
+					s.objId = n.objId;
+				}
+				s.nextId = n.nextId;
+			}
+			const bool usable = fit.valid && fit.reason == Reason::Ok && fit.confidence >= 0.5;
+			if (ran && (usable || n.swapped))
+			{
+				s.haveRef = true;
+				s.ref = fit.params;
+				s.refSeconds = in.pairSeconds;
+				s.refShare = n.camShare;
+				s.age = 0;
+			}
+			else if (s.haveRef && ++s.age > 2 * M)
+				s.haveRef = false;
+		}
+
 		// Fits one pair. Reads (never writes) the Fitter's history; objects are updated only when asked.
-		static CameraMotion Run(Fitter& F, const PairInput& in, const Params* h0, bool temporalRead, bool runObjects, bool genReset)
+		static CameraMotion Run(Fitter& F, const PairInput& in, const Params* h0, bool temporalRead, bool runObjects, bool genReset, TlNext* tlOut)
 		{
 			const Config& c = F.m_config;
 			CameraMotion rec;
@@ -612,188 +962,26 @@ namespace CameraModel
 				return rec;
 			}
 
-			// ---- Local optimisation + model choice ----
-			Params w = winner;
-			if (!earlyExit)
-				Refine(f, f.s, w, irls);          // the early-exit winner (refined H0) is already refined
-			std::vector<Sample> wbuf;
-			BuildWeighted(f, f.s, w, wbuf);
-			if (static_cast<int>(wbuf.size()) < 1)
-				wbuf = f.s;
-
-			// Support set of the winner (for the cost comparison) and its quadrant mass.
-			std::vector<uint8_t> support(f.s.size(), 0);
-			double tiny = 0;
-			const bool wAff = AffineRow(w);
-			for (size_t i = 0; i < f.s.size(); ++i)
-			{
-				double r2, pm2;
-				ResidualSq(w, wAff, f.s[i], &r2, &pm2);
-				if (r2 <= 9.0 * Threshold2(f, pm2))
-				{
-					support[i] = 1;
-					tiny += f.s[i].w * (0.5 * f.prec) * (0.5 * f.prec);
-				}
-			}
-			double qMass[4] = { 0, 0, 0, 0 }, massTotal = 0;
-			for (size_t i = 0; i < wbuf.size(); ++i)
-			{
-				qMass[Quadrant(wbuf[i].x, wbuf[i].y)] += wbuf[i].w;
-				massTotal += wbuf[i].w;
-			}
-			int quadrants = 0;
-			for (int q = 0; q < 4; ++q)
-				if (massTotal > 0 && qMass[q] / massTotal >= c.quadrantMinShare)
-					++quadrants;
-
-			auto supportCost = [&](const Params& p)
-			{
-				double cost = 0;
-				const bool aff = AffineRow(p);
-				for (size_t i = 0; i < f.s.size(); ++i)
-					if (support[i])
-					{
-						double r2, pm2;
-						ResidualSq(p, aff, f.s[i], &r2, &pm2);
-						const double t2 = 9.0 * Threshold2(f, pm2);
-						cost += f.s[i].w * ((r2 < t2) ? r2 : t2);
-					}
-				return cost;
-			};
-
-			static const ModelType kAll[4] = { ModelType::Translation, ModelType::Similarity, ModelType::Affine, ModelType::Homography };
-			Params chosen;
-			bool haveChosen = false;
-			double chosenCost = 0;
-			// Early exit: keep H0's (refined) type and try ONE step up from the same weighted set under the same
-			// complexity-penalty test; otherwise run the whole ladder from translation.
-			int tiFirst = 0, tiLast = 3;
-			if (earlyExit)
-			{
-				tiFirst = static_cast<int>(w.type) - static_cast<int>(ModelType::Translation);
-				tiLast = std::min(3, tiFirst + 1);
-				chosen = w;
-				chosenCost = supportCost(w);
-				haveChosen = true;
-			}
-			for (int ti = tiFirst + (earlyExit ? 1 : 0); ti <= tiLast; ++ti)
-			{
-				const ModelType ty = kAll[ti];
-				if (ty > maxModel)
-					break;
-				if (ty == ModelType::Affine && quadrants < 2 && haveChosen)
-					continue;
-				if (ty == ModelType::Homography && quadrants < 3 && haveChosen)
-					continue;
-				Params p;
-				if (static_cast<int>(wbuf.size()) < MinimalCount(ty) || !FitWeighted(ty, wbuf.data(), static_cast<int>(wbuf.size()), f.halfDiag, p))
-					continue;
-				p.type = ty;
-				if (IsDegenerate(p, f.pic))
-					continue;
-				Refine(f, f.s, p, irls);
-				if (IsDegenerate(p, f.pic))
-					continue;
-				const double cost = supportCost(p);
-				if (!haveChosen)
-				{
-					chosen = p;
-					chosenCost = cost;
-					haveChosen = true;
-					continue;
-				}
-				const double extra = ParamCount(ty) - ParamCount(chosen.type);
-				const double drop = (chosenCost - cost) / std::max(chosenCost, tiny);
-				if (drop > c.complexityPenaltyPerParam * extra)
-				{
-					chosen = p;
-					chosenCost = cost;
-				}
-			}
-			// Early exit, step down: the loop above only tries one step UP from H0's type, so a model that was a
-			// homography would never relax when the motion becomes a pure pan. When the type is still H0's and
-			// above Translation, fit ONE type down from the same weighted set; the lower type wins when the
-			// higher one does not earn its extra parameters under the same complexity-penalty test.
-			if (c.stepDownOnEarlyExit && earlyExit && haveChosen && chosen.type == w.type && chosen.type > ModelType::Translation)
-			{
-				const ModelType lowerTy = kAll[static_cast<int>(chosen.type) - static_cast<int>(ModelType::Translation) - 1];
-				Params lp;
-				if (static_cast<int>(wbuf.size()) >= MinimalCount(lowerTy) &&
-					FitWeighted(lowerTy, wbuf.data(), static_cast<int>(wbuf.size()), f.halfDiag, lp))
-				{
-					lp.type = lowerTy;
-					if (!IsDegenerate(lp, f.pic))
-					{
-						Refine(f, f.s, lp, irls);
-						if (!IsDegenerate(lp, f.pic))
-						{
-							const double costLower = supportCost(lp);
-							const double extra = ParamCount(chosen.type) - ParamCount(lowerTy);
-							if ((costLower - chosenCost) / std::max(chosenCost, tiny) <= c.complexityPenaltyPerParam * extra)
-							{
-								chosen = lp;
-								chosenCost = costLower;
-							}
-						}
-					}
-				}
-			}
-			if (!haveChosen)
+			// ---- Local optimisation + model choice (layer A: the RANSAC winner) ----
+			const ChosenModel chA = ChooseModel(f, c, winner, earlyExit, maxModel, irls);
+			if (!chA.ok)
 			{
 				rec.reason = Reason::Degenerate;
 				return rec;
 			}
-			const Params model = chosen;
 			CM_PROF_MARK(2);
 
 			// ---- Inliers, signals ----
-			std::vector<uint8_t> inl(f.s.size(), 0);
-			double inlierMass = 0, resSq = 0;
-			int inlierCount = 0;
-			const bool mAff = AffineRow(model);
-			for (size_t i = 0; i < f.s.size(); ++i)
-			{
-				double r2, pm2;
-				ResidualSq(model, mAff, f.s[i], &r2, &pm2);
-				if (r2 <= Threshold2(f, pm2))
-				{
-					inl[i] = 1;
-					++inlierCount;
-					inlierMass += f.s[i].w;
-					resSq += f.s[i].w * r2;
-				}
-			}
-			Signals sg;
-			// Signal: the trusted share of vectors the camera explains, 0 at inlierShareLo, full at inlierShareHi.
-			// A camera behind many movers (a crowd under a pan) explains about half the vectors and is still the
-			// dominant motion when no other motion competes; a competing motion is the ambiguity signal's job.
-			const double rawShare = f.trustSum > 0 ? Clamp01(inlierMass / f.trustSum) : 0.0;
-			{
-				const double lo = c.inlierShareLo, span = std::max(1e-6, c.inlierShareHi - c.inlierShareLo);
-				sg.inlierShare = f.trustSum > 0 ? Clamp01((inlierMass / f.trustSum - lo) / span) : 0.0;
-			}
-			const double rms = inlierMass > 0 ? std::sqrt(resSq / inlierMass) : 0.0;
-			{
-				const double q = rms / (2.0 * f.prec);
-				sg.precision = 1.0 / (1.0 + q * q);
-			}
-			sg.coverage = std::min(1.0, 1.5 * static_cast<double>(f.cellsWithSample) / cellsTotal);
-			sg.conditioning = InliersSpreadConditioning(f, inl);
-
-			// Engine agreement.
-			if (in.haveEngineGlobal && std::isfinite(in.engineGx) && std::isfinite(in.engineGy))
-			{
-				double dx = 0, dy = 0;
-				Displacement(model, 0.0, 0.0, &dx, &dy);
-				const double d = std::hypot(dx - in.engineGx, dy - in.engineGy);
-				const double mag = std::max(std::hypot(in.engineGx, in.engineGy), std::hypot(dx, dy));
-				const double t = std::max(f.absThr, f.rel * mag);
-				const double q = d / (2.0 * t);
-				sg.engineAgreement = std::exp(-q * q);
-				sg.haveEngine = true;
-			}
-
+			Cand cdA;
+			BuildCand(f, c, in, cellsTotal, chA.model, cdA);
+			const std::vector<uint8_t>& inl = cdA.inl;
+			const int inlierCount = cdA.inlierCount;
+			const double inlierMass = cdA.inlierMass;
 			CM_PROF_MARK(3);
+			double ambA = 1.0;
+			int bestSup = 0;
+			Params bestP;
+			bool haveBest = false;
 			// Ambiguity: best disjoint-ish competitor.
 			{
 				std::vector<int> nonIn;
@@ -904,9 +1092,6 @@ namespace CameraModel
 							break;
 						}
 				}
-				int bestSup = 0;
-				Params bestP;
-				bool haveBest = false;
 				for (int j = 0; j < keep; ++j)
 				{
 					if (topIdx[j] < 0)
@@ -929,103 +1114,257 @@ namespace CameraModel
 						int sup, ov;
 						evalCand(q, &sup, &ov);
 						if (sup > 0 && ov * 2 < sup && sup > bestSup)
+						{
 							bestSup = sup;
+							bestP = q;                          // the refined competitor (second layer, Config::twoLayer)
+						}
 					}
 				}
 				const double ratio = inlierCount > 0 ? static_cast<double>(bestSup) / inlierCount : 1.0;
-				sg.ambiguity = searchCompetitor ? 1.0 - Clamp01(ratio / 0.5) : 1.0;
+				ambA = searchCompetitor ? 1.0 - Clamp01(ratio / 0.5) : 1.0;
 			}
 
 			CM_PROF_MARK(4);
-			// Backward check.
-			if (in.bwdX != nullptr && in.bwdY != nullptr && in.bwdTrust != nullptr)
+
+			Cand* cam = &cdA;
+			Cand cdB;
+			double ambiguity = ambA;
+			TlNext tl;
+			uint8_t flags = 0;
+			double layerRisk = 0;
+			bool haveObj = false;
+			ObjectModel objLayer;
+			if (c.twoLayer)
 			{
-				std::vector<Sample> bs;
-				double bTrust = 0;
+				flags = 1;
+				const TwoLayerState& st = F.m_tl;
+				const int M = std::max(1, static_cast<int>(std::lround(c.layerSwapSeconds / in.pairSeconds)));
+				const int ringX = std::max(1, static_cast<int>(std::lround(c.borderRingFraction * (f.bx1 - f.bx0))));
+				const int ringY = std::max(1, static_cast<int>(std::lround(c.borderRingFraction * (f.by1 - f.by0))));
+				std::vector<uint8_t> ringMask(f.s.size(), 0);
+				double allMass = 0, allRing = 0;
 				for (size_t i = 0; i < f.s.size(); ++i)
 				{
 					const int b = f.blk[i];
-					if (!FiniteF(in.bwdTrust[b]) || !(in.bwdTrust[b] > 0.0f) || !FiniteF(in.bwdX[b]) || !FiniteF(in.bwdY[b]))
-						continue;
-					Sample s = f.s[i];
-					s.dx = in.bwdX[b];
-					s.dy = in.bwdY[b];
-					s.w = in.bwdTrust[b];
-					bs.push_back(s);
-					bTrust += s.w;
+					const int bx = b % f.gridW, by = b / f.gridW;
+					const bool r = bx < f.bx0 + ringX || bx >= f.bx1 - ringX || by < f.by0 + ringY || by >= f.by1 - ringY;
+					ringMask[i] = r ? 1 : 0;
+					allMass += f.s[i].w;
+					if (r)
+						allRing += f.s[i].w;
 				}
-				if (static_cast<int>(bs.size()) >= std::max(3, MinimalCount(model.type) + 2))
-				{
-					bool invOk = true;
-					Params inv = Invert(model, &invOk);
-					inv.type = model.type;
-					sg.haveBackward = true;
-					if (!invOk)
-						sg.inverse = 0.0;
-					else
-					{
-						double inMass = 0;
-						const bool iAff = AffineRow(inv);
-						for (size_t i = 0; i < bs.size(); ++i)
-						{
-							double r2, pm2;
-							ResidualSq(inv, iAff, bs[i], &r2, &pm2);
-							if (r2 <= Threshold2(f, pm2))
-								inMass += bs[i].w;
-						}
-						const double bShare = bTrust > 0 ? inMass / bTrust : 0.0;
-						double devTerm = 0.0;
-						Params B = inv;
-						if (Refine(f, bs, B, 1))
-						{
-							const double dev = MaxCornerDifference(Compose(B, model), IdentityParams(model.type), f.pic);
-							const double tol = 4.0 * f.prec / f.diag;
-							devTerm = 1.0 - Clamp01(dev / tol);
-						}
-						const double shareTerm = std::min(1.0, bShare / (0.7 * rawShare + 1e-9));
-						sg.inverse = Clamp01(devTerm * shareTerm);
-					}
-				}
-			}
+				const double allRingShare = allMass > 0 ? allRing / allMass : 0.0;
 
-			CM_PROF_MARK(5);
-			// Temporal.
-			SimilarityRates rates;
-			const bool haveRates = ToSimilarity(model, in.picture, in.pairSeconds, rates);
-			if (haveRates)
-			{
-				rec.rates = rates;
-				if (temporalRead && F.m_temporal.Valid())
+				// Continuity reference: the last usable camera layer, time-scaled to this pair.
+				const bool haveRef = st.haveRef && st.refSeconds > 0;
+				Params refScaled;
+				double refMax = 0, floorPx = 0;
+				if (haveRef)
 				{
+					refScaled = TimeScale(st.ref, in.pairSeconds / st.refSeconds, in.picture);
+					const double hw = 0.5 * in.picture.Width(), hh = 0.5 * in.picture.Height();
+					const double cxs[4] = { -hw, hw, hw, -hw }, cys[4] = { -hh, -hh, hh, hh };
+					for (int k = 0; k < 4; ++k)
+					{
+						double dx, dy;
+						Displacement(refScaled, cxs[k], cys[k], &dx, &dy);
+						refMax = std::max(refMax, std::hypot(dx, dy));
+					}
 					double fl[4];
 					TemporalFloor(f.prec, in.picture, in.pairSeconds, fl);
-					sg.temporal = Clamp01(F.m_temporal.Consistency(in.pairSeconds, rates, c.temporalNoiseFloor ? fl : nullptr));
+					floorPx = fl[2] * in.pairSeconds;
+				}
+
+				struct Layer
+				{
+					bool present = false;
+					Params p;
+					int count = 0;
+					double mass = 0, border = 1, share = 0, f = 1, a = 1, score = 0;
+					const std::vector<uint8_t>* mask = nullptr;
+				};
+				Layer L[2];
+				auto fillLayer = [&](Layer& Ly, const Params& p, const std::vector<uint8_t>& mask, int count)
+				{
+					Ly.present = true;
+					Ly.p = p;
+					Ly.count = count;
+					Ly.mask = &mask;
+					double mass = 0, ring = 0;
+					for (size_t i = 0; i < f.s.size(); ++i)
+						if (mask[i])
+						{
+							mass += f.s[i].w;
+							if (ringMask[i])
+								ring += f.s[i].w;
+						}
+					Ly.mass = mass;
+					Ly.border = allRingShare > 0 ? (mass > 0 ? (ring / mass) / allRingShare : 0.0) : 1.0;
+					Ly.share = f.trustSum > 0 ? Clamp01(mass / f.trustSum) : 0.0;
+					if (haveRef)
+					{
+						const double d = MaxCornerDifference(p, refScaled, f.pic) * f.diag;
+						const double tol = 4.0 * f.prec + 0.25 * refMax + floorPx;
+						const double q = d / tol;
+						Ly.f = std::max(c.continuityFloor, std::exp(-q * q));
+						Ly.a = 1.0 - 0.5 * Clamp01(std::fabs(Ly.share - st.refShare) / std::max(st.refShare, 0.1));
+					}
+					Ly.score = Ly.count * Ly.f * (0.25 + 0.75 * Clamp01(Ly.border)) * Ly.a;
+				};
+				fillLayer(L[0], cdA.model, cdA.inl, cdA.inlierCount);
+				std::vector<uint8_t> maskB;
+				if (haveBest)
+				{
+					maskB.assign(f.s.size(), 0);
+					int cntB = 0;
+					const bool bAff = AffineRow(bestP);
+					for (size_t i = 0; i < f.s.size(); ++i)
+					{
+						double r2, pm2;
+						ResidualSq(bestP, bAff, f.s[i], &r2, &pm2);
+						if (r2 <= Threshold2(f, pm2))
+						{
+							maskB[i] = 1;
+							++cntB;
+						}
+					}
+					if (cdA.inlierCount > 0 && cntB >= c.competitorMinRatio * cdA.inlierCount)
+						fillLayer(L[1], bestP, maskB, cntB);
+				}
+
+				int ci = 0;
+				bool held = false, swapped = false, riskSwap = false;
+				int newHold = 0;
+				if (L[1].present)
+				{
+					flags |= 2;
+					const int win = L[1].score > L[0].score ? 1 : 0;
+					const double ws = L[win].score, ls = L[1 - win].score;
+					ambiguity = ws > 0 ? 1.0 - Clamp01((ls / ws) / 0.5) : 0.0;
+					ci = win;
+					if (haveRef && L[win].f < 0.5)
+					{
+						if (L[1 - win].f >= 0.5)
+						{
+							newHold = st.holdCount + 1;
+							if (newHold >= M)
+							{
+								swapped = riskSwap = true;
+								newHold = 0;
+							}
+							else
+							{
+								ci = 1 - win;
+								held = true;
+							}
+						}
+						else
+							swapped = true;      // the reference layer is gone: a real change of camera motion, accepted at once
+					}
+				}
+				else if (L[0].border < c.borderVetoRatio && cdA.rawShare < 0.75 && !(haveRef && L[0].f >= 0.8))
+				{
+					flags |= 8;
+					ambiguity = std::min(ambiguity, 0.34 * Clamp01(L[0].border / c.borderVetoRatio));
+				}
+				if (ci == 1)
+				{
+					const ChosenModel chB = ChooseModel(f, c, bestP, false, maxModel, irls);
+					if (chB.ok)
+					{
+						BuildCand(f, c, in, cellsTotal, chB.model, cdB);
+						cam = &cdB;
+						flags |= 4;
+					}
+					else
+					{
+						ci = 0;
+						held = swapped = riskSwap = false;
+						newHold = 0;
+					}
+				}
+				if (held)
+					flags |= 16;
+				if (swapped)
+					flags |= 32;
+				if (haveRef)
+					flags |= 64;
+				cam->sg.border = Clamp01(L[ci].border);
+				cam->sg.continuity = haveRef ? L[ci].f : 0.5;
+
+				int newSwapAge = -1;
+				if (riskSwap)
+					newSwapAge = 0;
+				else if (st.swapAge >= 0 && st.swapAge + 1 < M)
+					newSwapAge = st.swapAge + 1;
+				if (newSwapAge >= 0)
+					layerRisk = 1.0 - static_cast<double>(newSwapAge) / M;
+
+				// The other layer (or the suspect single layer) is the object layer.
+				const Layer* ob = L[1 - ci].present ? &L[1 - ci] : ((flags & 8) ? &L[0] : nullptr);
+				tl.have = true;
+				tl.swapped = swapped;
+				tl.holdCount = newHold;
+				tl.swapAge = newSwapAge;
+				tl.camShare = cam->rawShare;
+				tl.nextId = st.nextId;
+				if (ob != nullptr)
+				{
+					haveObj = true;
+					double sw = 0, mx = 0, my = 0;
+					for (size_t i = 0; i < f.s.size(); ++i)
+						if ((*ob->mask)[i])
+						{
+							sw += f.s[i].w;
+							mx += f.s[i].w * f.s[i].x;
+							my += f.s[i].w * f.s[i].y;
+						}
+					objLayer.type = ob->p.type;
+					for (int k = 0; k < 9; ++k)
+						objLayer.h[k] = ob->p.h[k];
+					objLayer.blocks = static_cast<uint32_t>(ob->count);
+					objLayer.cx = sw > 0 ? mx / sw : 0.0;
+					objLayer.cy = sw > 0 ? my / sw : 0.0;
+					bool cont = false;
+					if (st.haveObj && st.objSeconds > 0)
+					{
+						const Params pr = TimeScale(st.obj, in.pairSeconds / st.objSeconds, in.picture);
+						const double hw = 0.5 * in.picture.Width(), hh = 0.5 * in.picture.Height();
+						const double cxs[4] = { -hw, hw, hw, -hw }, cys[4] = { -hh, -hh, hh, hh };
+						double pmax = 0;
+						for (int k = 0; k < 4; ++k)
+						{
+							double dx, dy;
+							Displacement(pr, cxs[k], cys[k], &dx, &dy);
+							pmax = std::max(pmax, std::hypot(dx, dy));
+						}
+						const double d = MaxCornerDifference(ob->p, pr, f.pic) * f.diag;
+						cont = d <= 5.0 * f.prec + 0.25 * pmax;
+					}
+					if (cont)
+						objLayer.id = st.objId;
+					else
+					{
+						objLayer.id = st.nextId;
+						tl.nextId = st.nextId >= 255 ? 1 : static_cast<uint8_t>(st.nextId + 1);
+					}
+					tl.haveObj = true;
+					tl.obj = ob->p;
+					tl.objId = objLayer.id;
 				}
 			}
-
-			double logit = c.b[0] + c.b[1] * sg.inlierShare + c.b[2] * sg.precision + c.b[3] * sg.coverage
-				+ c.b[4] * sg.temporal + c.b[5] * sg.conditioning + c.b[6] * sg.engineAgreement
-				+ c.b[7] * sg.inverse + c.b[8] * sg.ambiguity;
-			sg.logit = logit;
-			rec.signals = sg;
-			rec.confidence = 1.0 / (1.0 + std::exp(-logit));
-			rec.params = model;
-			rec.valid = true;
-			if (sg.ambiguity < 0.35)
-				rec.reason = Reason::Ambiguous;
-			else if (sg.haveBackward && sg.inverse < 0.3)
-				rec.reason = Reason::InverseMismatch;
-			else if (rec.confidence < 0.5)
-				rec.reason = Reason::LowConfidence;
-			else
-				rec.reason = Reason::Ok;
-			// A failed verdict is never a usable fit: an Ambiguous record (a competing motion with about a third
-			// or more of the camera's support) or an InverseMismatch record keeps its model for diagnostics, but
-			// its confidence is halved and scaled by how far the signal fell below its gate, so it stays < 0.5.
-			if (c.verdictGatesConfidence && (rec.reason == Reason::Ambiguous || rec.reason == Reason::InverseMismatch))
+			Finish(F, in, c, f, temporalRead, *cam, ambiguity, rec);
+			if (c.twoLayer)
 			{
-				const double g = rec.reason == Reason::Ambiguous ? Clamp01(sg.ambiguity / 0.35) : Clamp01(sg.inverse / 0.3);
-				rec.confidence *= 0.5 * g;
+				if (layerRisk > 0)
+					rec.confidence *= 1.0 - 0.5 * layerRisk;
+				rec.layerFlags = flags;
+				rec.layerRisk = layerRisk;
+				rec.haveObjectLayer = haveObj;
+				if (haveObj)
+					rec.objectLayer = objLayer;
+				if (tlOut != nullptr)
+					*tlOut = tl;
 			}
 
 			CM_PROF_MARK(6);
@@ -1257,6 +1596,7 @@ namespace CameraModel
 		m_rebaseGeneration = 0;
 		m_haveGenerations = false;
 		m_seedPending = false;
+		m_tl = TwoLayerState();
 	}
 
 	CameraMotion Fitter::Fit(const PairInput& in)
@@ -1312,7 +1652,7 @@ namespace CameraModel
 				rec.confidence = 0;
 				if (in.next != nullptr)
 				{
-					CameraMotion seed = Impl::Run(*this, *in.next, nullptr, false, m_config.objects, false);
+					CameraMotion seed = Impl::Run(*this, *in.next, nullptr, false, m_config.objects, false, nullptr);
 					if (seed.valid)
 					{
 						rec.valid = true;
@@ -1347,7 +1687,7 @@ namespace CameraModel
 				{
 					const Params pre = TimeScale(m_previous.params, in.pairSeconds / m_previous.pairSeconds, in.picture);
 					const Params preForNext = TimeScale(m_previous.params, in.next->pairSeconds / m_previous.pairSeconds, in.next->picture);
-					CameraMotion nx = Impl::Run(*this, *in.next, &preForNext, false, false, false);
+					CameraMotion nx = Impl::Run(*this, *in.next, &preForNext, false, false, false, nullptr);
 					if (nx.valid)
 					{
 						const Params nextP = TimeScale(nx.params, in.pairSeconds / in.next->pairSeconds, in.picture);
@@ -1398,7 +1738,8 @@ namespace CameraModel
 				h0.type = m_previous.params.type;
 				h0p = &h0;
 			}
-			CameraMotion fit = Impl::Run(*this, in, h0p, true, m_config.objects, genReset);
+			TlNext tlNext;
+			CameraMotion fit = Impl::Run(*this, in, h0p, true, m_config.objects, genReset, &tlNext);
 			if (fit.valid && Impl::DeadlinePassed(m_config, in))
 			{
 				// The consumers' slot has passed: no model for this frame (visible fallback); state is not updated.
@@ -1413,6 +1754,8 @@ namespace CameraModel
 				m_seedPending = false;
 				m_temporal.Update(in.pairSeconds, fit.rates, updateFloor(in));
 			}
+			if (m_config.twoLayer)
+				Impl::ApplyTl(*this, in, fit, tlNext);
 			fit.inFade = in.fade;
 			finish(fit);
 			return fit;
