@@ -155,6 +155,9 @@ namespace VectorDemand
 				return d;
 			}
 		}
+		// Low latency (owner 2026-11-01): vectors never ADD queue depth. A mode that queues no frame ahead
+		// (competitive, capacity 0) runs backward pairs; a mode whose own queue holds frames ahead (games,
+		// capacity >= 1) uses those already-queued frames (ForwardShallow, EngageAhead bounded by the capacity).
 		if (in.lowLatency && in.queueAheadCapacity == 0)
 		{
 			unsigned stats = 0;

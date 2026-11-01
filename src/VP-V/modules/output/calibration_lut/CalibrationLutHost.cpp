@@ -145,6 +145,11 @@ namespace CalibrationLutHost
 			std::memory_order_release);
 		readbackCorner.store(pixels[0], std::memory_order_release);
 		readbackGeneration.store(generation, std::memory_order_release);
+		const uint32_t centre = pixels[static_cast<size_t>(desc.Height / 2) * desc.Width + desc.Width / 2];
+		DebugLog::Log("Calibration patterns: read back generation %llu (%ux%u): centre %u,%u,%u corner %u,%u,%u",
+			static_cast<unsigned long long>(generation), desc.Width, desc.Height,
+			centre & 0x3FF, (centre >> 10) & 0x3FF, (centre >> 20) & 0x3FF,
+			pixels[0] & 0x3FF, (pixels[0] >> 10) & 0x3FF, (pixels[0] >> 20) & 0x3FF);
 	}
 
 	// Writes the patch into fbo: the background, then the window (a cleared texture of the same
@@ -183,6 +188,10 @@ namespace CalibrationLutHost
 			params.format = fbo->params.format;
 			params.renderable = true;
 			params.blit_src = true;
+			// pl_tex_clear requires blit_dst on the cleared texture. Without it libplacebo rejected the
+			// clear ("Validation failed: dst->params.blit_dst"), the patch texture stayed zero and the
+			// window read back code 0 instead of the patch (2026-11-01 gate, windowed mid-grey shot).
+			params.blit_dst = true;
 			patchTexture = pl_tex_create(gpu, &params);
 			windowed = patchTexture != nullptr;
 			if (!windowed)
