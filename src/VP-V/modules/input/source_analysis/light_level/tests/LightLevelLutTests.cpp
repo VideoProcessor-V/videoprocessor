@@ -111,8 +111,9 @@ namespace VideoProcessorTest
 			Assert::IsTrue(maxPqError <= 1e-6, L"tight bound on the PQ output");
 		}
 
-		// (2) BTB codes are a lookup: J = S = V = 0, L = display black; Fetch clamps only the index below 0.
-		TEST_METHOD(LightLevelBtbCodesGiveZeroJAndFetchClampsTheIndexOnly)
+		// (2) BTB codes are a lookup: L = display black, J = PQ(display black) (continuous at 64), S = V = 0; Fetch
+		// clamps only the index below 0 (pixel values stay unclamped).
+		TEST_METHOD(LightLevelBtbCodesGiveBlackJAndFetchClampsTheIndexOnly)
 		{
 			const KeyMap keys = { {"sdr_target_nits", "203"}, {"sdr_black_nits", "0.05"} };
 			const LightLevel::Settings s = ReadMap(keys);
@@ -122,11 +123,15 @@ namespace VideoProcessorTest
 				const LightLevel::Lut lut = LightLevel::Build(s, c);
 				for (std::size_t code = 0; code < 64; ++code)
 				{
-					Assert::AreEqual(0.0, lut.e[code].J, 0.0, L"BTB J");
+					Assert::AreEqual(LightLevel::pq::Oetf(0.05), lut.e[code].J, 1e-12, L"BTB J is PQ(display black)");
 					Assert::AreEqual(0.0, lut.e[code].S, 0.0, L"BTB S");
 					Assert::AreEqual(0.0, lut.e[code].V, 0.0, L"BTB V");
 					Assert::AreEqual(0.05, lut.e[code].L, 1e-12, L"BTB L is the display black");
 				}
+				// No fake edge at the BTB boundary: J is continuous from code 63 to 64 (a typical step is above it).
+				const double jump = std::fabs(lut.e[64].J - lut.e[63].J), step = lut.e[65].J - lut.e[64].J;
+				Assert::IsTrue(jump <= 1e-12, L"J continuous across the BTB edge");
+				Assert::IsTrue(jump < step || step <= 0.0, L"jump smaller than a typical step above black");
 				// Below 0 only the index clamps.
 				for (double code : { -1.0, -5.0, -1e9 })
 				{
@@ -139,7 +144,7 @@ namespace VideoProcessorTest
 				Assert::AreEqual(lut.e[1023].L, top.L, 0.0);
 				Assert::AreEqual(lut.e[1023].J, top.J, 0.0);
 				const LightLevel::Entry edge = LightLevel::Fetch(lut, 63.5);
-				Assert::AreEqual(0.5 * lut.e[64].J, edge.J, 1e-12, L"interpolates across the BTB edge, not clamped");
+				Assert::AreEqual(lut.e[64].J, edge.J, 1e-12, L"interpolates across the BTB edge (J continuous), not clamped");
 			}
 		}
 
@@ -185,10 +190,10 @@ namespace VideoProcessorTest
 				Assert::AreEqual(set.b, lut.e[64].L, 1e-9, L"L at black = sdr_black_nits");
 				Assert::AreEqual(set.w, lut.e[1023].L, 1e-9, L"above-white is capped at white");
 				Assert::AreEqual(LightLevel::pq::Oetf(set.w), lut.e[940].J, 1e-12);
-				// V at code 64: one-sided step to 64.5 (63.5 is BTB, which reads as black), floor = black + ambient.
+				// V at code 64: one-sided step to 64.5 (63.5 is BTB, which reads as black), floor = ambient only (L already holds the black).
 				const double dL = Bt1886(LimitedSignal(64.5), set.w, set.b) - set.b;
-				const double expected = dL / (set.k * (set.b + (set.b + set.a)));
-				Assert::AreEqual(expected, lut.e[64].V, 1e-9 * std::max(1.0, expected), L"V uses weber and the black+ambient floor");
+				const double expected = dL / (set.k * (set.b + set.a));
+				Assert::AreEqual(expected, lut.e[64].V, 1e-9 * std::max(1.0, expected), L"V uses weber and the ambient-only floor (black counted once, inside L)");
 				// Mid code against the closed form.
 				Assert::AreEqual(Bt1886(LimitedSignal(500.0), set.w, set.b), lut.e[500].L, 1e-9);
 			}
@@ -293,7 +298,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(bad.toneMapping == "auto");
 			Assert::IsTrue(ReadMap({}).notes.empty());
 
-			// HDR passthrough is always an approximation of the display's own roll-off.
+			// HDR passthrough with a real roll-off approximates the display's own roll-off (statuses: tests 6d).
 			const LightLevel::Lut pass = LightLevel::Build(ReadMap({}), Ctx(LightLevel::Context::HdrPassthrough, false, 1000.0, 600.0));
 			Assert::IsTrue(pass.exactness == LightLevel::Exactness::Approx);
 			Assert::IsFalse(pass.status.empty());
@@ -345,6 +350,71 @@ namespace VideoProcessorTest
 			Assert::IsTrue(AnyNoteContains(crossed, "must exceed"));
 			Assert::AreEqual(203.0, crossed.displayWhiteNits, 0.0);
 			Assert::IsTrue(ReadMap({ {"light_level_display_white_nits", "auto"} }).notes.empty());
+		}
+
+		// (6c) SDR labelling: exact at defaults, Approx with a named reason otherwise (keys read through Settings).
+		TEST_METHOD(LightLevelSdrExactnessReasons)
+		{
+			const LightLevel::Context sdr = Ctx(LightLevel::Context::Sdr);
+			const LightLevel::Lut def = LightLevel::Build(ReadMap({}), sdr);
+			Assert::IsTrue(def.exactness == LightLevel::Exactness::Exact);
+			Assert::IsTrue(def.status == "light level: exact (SDR display EOTF)");
+			for (const char* ok : { "auto", "2.4", "bt1886" })   // default-equals-modelled spellings
+				Assert::IsTrue(LightLevel::Build(ReadMap({ {"sdr_input_transfer", ok}, {"output_gamma", ok} }), sdr).exactness
+					== LightLevel::Exactness::Exact, L"modelled spellings stay Exact");
+			const LightLevel::Lut black = LightLevel::Build(ReadMap({ {"sdr_black_nits", "0.05"} }), sdr);
+			Assert::IsTrue(black.exactness == LightLevel::Exactness::Approx);
+			Assert::IsTrue(Contains(black.status, "display black above 0"));
+			const LightLevel::Lut in = LightLevel::Build(ReadMap({ {"sdr_input_transfer", "2.2"} }), sdr);
+			Assert::IsTrue(in.exactness == LightLevel::Exactness::Approx);
+			Assert::IsTrue(Contains(in.status, "sdr_input_transfer 2.2"));
+			const LightLevel::Lut out = LightLevel::Build(ReadMap({ {"output_gamma", "srgb"} }), sdr);
+			Assert::IsTrue(out.exactness == LightLevel::Exactness::Approx);
+			Assert::IsTrue(Contains(out.status, "output_gamma srgb"));
+			// Matching the modelled display transfer keeps Exact.
+			Assert::IsTrue(LightLevel::Build(ReadMap({ {"hdr_tone_map_target_gamma", "2.2"}, {"sdr_input_transfer", "2.2"},
+				{"output_gamma", "2.2"} }), sdr).exactness == LightLevel::Exactness::Exact);
+			// Tone shape with sRGB (power 2.2 in the shape only).
+			const KeyMap shape = { {"hdr_tone_map_target_gamma", "srgb"}, {"sdr_input_transfer", "srgb"}, {"sdr_tone_shape", "knee"} };
+			const LightLevel::Lut sh = LightLevel::Build(ReadMap(shape), sdr);
+			Assert::IsTrue(sh.exactness == LightLevel::Exactness::Approx);
+			Assert::IsTrue(Contains(sh.status, "sdr tone shape uses gamma 2.2 for sRGB"));
+			KeyMap noShape = shape; noShape["sdr_tone_shape"] = "off";
+			Assert::IsTrue(LightLevel::Build(ReadMap(noShape), sdr).exactness == LightLevel::Exactness::Exact);
+			// Every reason is named, joined with "; ".
+			const LightLevel::Lut many = LightLevel::Build(ReadMap({ {"sdr_black_nits", "0.05"}, {"sdr_input_transfer", "2.2"} }), sdr);
+			Assert::IsTrue(Contains(many.status, "display black above 0") && Contains(many.status, "; sdr_input_transfer 2.2"));
+			Assert::IsTrue(AnyNoteContains(ReadMap({ {"sdr_input_transfer", "9"} }), "sdr_input_transfer"));
+			Assert::IsTrue(AnyNoteContains(ReadMap({ {"contrast_recovery", "5"} }), "contrast_recovery"));
+		}
+
+		// (6d) HdrToSdr contrast_recovery and HDR passthrough statuses.
+		TEST_METHOD(LightLevelContrastRecoveryAndPassthroughStatus)
+		{
+			const LightLevel::Context fixed = Ctx(LightLevel::Context::HdrToSdr, false, 1000.0);
+			Assert::IsTrue(LightLevel::Build(ReadMap({ {"peak_detection", "off"}, {"contrast_recovery", "auto"} }), fixed).exactness
+				== LightLevel::Exactness::Exact, L"auto is not labelled");
+			Assert::IsTrue(LightLevel::Build(ReadMap({ {"peak_detection", "off"}, {"contrast_recovery", "0"} }), fixed).exactness
+				== LightLevel::Exactness::Exact);
+			const LightLevel::Lut cr = LightLevel::Build(ReadMap({ {"peak_detection", "off"}, {"contrast_recovery", "0.3"} }), fixed);
+			Assert::IsTrue(cr.exactness == LightLevel::Exactness::Approx);
+			Assert::IsTrue(Contains(cr.status, "contrast_recovery not modelled"));
+			Assert::IsTrue(LightLevel::Build(ReadMap({ {"contrast_recovery", "0.3"} }), Ctx(LightLevel::Context::Sdr)).exactness
+				== LightLevel::Exactness::Exact, L"contrast_recovery is an HdrToSdr concern only");
+
+			const LightLevel::Settings s = ReadMap({});
+			const LightLevel::Lut roll = LightLevel::Build(s, Ctx(LightLevel::Context::HdrPassthrough, false, 1000.0, 600.0));
+			Assert::IsTrue(roll.exactness == LightLevel::Exactness::Approx);
+			Assert::IsTrue(Contains(roll.status, "approx display roll-off"));
+			const LightLevel::Lut ident = LightLevel::Build(s, Ctx(LightLevel::Context::HdrPassthrough, false, 1000.0, 1000.0));
+			Assert::IsTrue(ident.exactness == LightLevel::Exactness::Exact);
+			Assert::IsTrue(ident.status == "light level: exact (HDR passthrough, no display roll-off needed)");
+			const LightLevel::Lut brighter = LightLevel::Build(s, Ctx(LightLevel::Context::HdrPassthrough, false, 1000.0, 4000.0));
+			Assert::IsTrue(brighter.exactness == LightLevel::Exactness::Exact);
+			const LightLevel::Lut unknown = LightLevel::Build(s, Ctx(LightLevel::Context::HdrPassthrough, false, 1000.0, 0.0));
+			Assert::IsTrue(unknown.exactness == LightLevel::Exactness::Approx);
+			Assert::IsTrue(Contains(unknown.status, "display peak unknown; no roll-off modelled"));
+			Assert::IsFalse(Contains(unknown.status, "approx display roll-off"));
 		}
 
 		// (7) The SDR tone shape changes the LUT only above the knee start.

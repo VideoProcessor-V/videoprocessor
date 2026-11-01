@@ -236,8 +236,8 @@ converter script (PNG + sidecar -> `capture.json` + `.yuv`) is the bridge.
   `stack_s2.csv`, `stack_s2.md`, `run_log.txt`.
 
 ```
-python -I tools/eval/stack_runner.py --suite s2                       # default: 6 cases, 480x270 windows, ~2.5 min CPU
-python -I tools/eval/stack_runner.py --suite s2 --max-cases 0 --size-frac 0.25 --out D:/scratch/light-level-map-full   # all cases (long)
+python -I tools/eval/stack_runner.py --suite s2 --max-cases 6 --size-frac 0.125   # quick subset: 6 cases, 480x270 windows, ~3 min CPU
+python -I tools/eval/stack_runner.py --suite s2 --max-cases 0 --size-frac 0.25     # full run (suite size 960x540, 18 runnable cases, ~17 min CPU)
 python -I tools/eval/test_light_eval.py                                # tests
 ```
 
@@ -247,4 +247,4 @@ python -I tools/eval/test_light_eval.py                                # tests
   +4 vs plain+4); the absolute cand/master grain ratio is a separate column. Texture kept is NA when plain keeps < 0.25 of the
   master texture. btb counts a master pixel only if below black by more than half an output code step (2 ten-bit codes for 8-bit).
 
-The committed sample (`prototypes/stack_s2/`) is the default subset; read it as relative ordering only (stand-in stages).
+The committed run (`prototypes/stack_s2/`) is the full 18-case run at 960x540 (the runner supports the sdr and hdr_pq_1000 contexts; the suite's hdr_pq_4000 and lldv cases have no runner context); read it as relative ordering only (stand-in stages).

@@ -11,7 +11,8 @@
 //             light_level_display_black_nits (each display key: `auto` = sdr_target_nits / sdr_black_nits, or a number)
 //   existing: sdr_target_nits, sdr_black_nits, hdr_tone_map_target_gamma, tone_mapping, peak_detection, quality,
 //             the ToneMappingTuning keys (ToneMappingTuning::Read), sdr_tone_shape, sdr_white_headroom,
-//             sdr_knee_start, sdr_knee_strength.
+//             sdr_knee_start, sdr_knee_strength, and (exactness labelling only) sdr_input_transfer, output_gamma,
+//             contrast_recovery.
 //
 // Entry: `template<class Getter> Settings Read(Getter get)` with `bool get(const std::string& key, std::string& raw)`
 // (true when the key is present in the effective configuration).
@@ -20,6 +21,7 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <locale>
 #include <sstream>
 #include <string>
@@ -49,9 +51,9 @@ namespace LightLevel
 			// field (about 1 to 2 percent); to be tuned against the owner's i1Pro measurements.
 			{"light_level_weber", "Weber fraction", 0.001, 0.2, 0.02, "fraction",
 				"Relative luminance step the viewer just notices; one visibility unit V = one such step.", false},
-			// PROVISIONAL DEFAULT: 0 (dark room, projector); the floor added to the display black for V.
+			// PROVISIONAL DEFAULT: 0 (dark room, projector); the floor in the V denominator (L already contains the display black).
 			{"light_level_ambient_nits", "Ambient floor", 0.0, 1000.0, 0.0, "nits",
-				"Room light reflected from the screen, added to the display black when weighing visibility.", false},
+				"Room light reflected from the screen, added to the luminance L (which already includes the display black) in the visibility denominator.", false},
 			// PROVISIONAL: auto = sdr_target_nits. The PHYSICAL white of the display the viewer looks at; the
 			// encoding target (sdr_target_nits) is what libplacebo tone maps to. Range 1 to 10000 nits.
 			{"light_level_display_white_nits", "Display white", 1.0, 10000.0, 0.0, "nits",
@@ -100,6 +102,16 @@ namespace LightLevel
 		ToneMappingTuning::Overrides tuning{};          // auto = the ToneMappingTuning::Specs() default
 
 		SdrToneShape::Settings shape;                   // sdr_tone_shape / headroom / knee start / knee strength
+
+		// Read only to label exactness (not part of the numeric map). Defaults equal the modelled behaviour.
+		// sdr_input_transfer: renderer default 2.4, `auto` normalises to 2.4 (RendererProfileConfig.h:1403,
+		// LibplaceboVideoRenderer.cpp:3895-3897). output_gamma: renderer default auto (:3881-3883).
+		std::string sdrInputTransfer = "2.4";           // auto | bt1886 | srgb | 1.8 .. 2.8
+		std::string outputGamma = "auto";               // auto | bt1886 | srgb | 1.8 .. 2.8
+		// contrast_recovery (LibplaceboVideoRenderer.cpp:3285-3300, 0..2): < 0 = `auto` (the quality preset's own value;
+		// libplacebo's high-quality colour map params use 0.30, the others 0, shaders/colorspace.h:340-343). Auto is
+		// NOT labelled; only an explicit value above 0 is.
+		double contrastRecovery = -1.0;
 		std::vector<std::string> notes;                 // one entry per invalid value that fell back
 	};
 
@@ -109,6 +121,17 @@ namespace LightLevel
 	inline double EffectivePower(const Settings& s)
 	{
 		return s.transfer == Transfer::Bt1886 ? 2.4 : s.transfer == Transfer::Srgb ? 2.2 : s.gammaPower;
+	}
+
+	// Whether a gamma choice token (auto | bt1886 | srgb | number) describes the same transfer as the modelled display
+	// transfer. `auto` is the modelled default; bt1886 and 2.4 are treated alike (BT.1886 is gamma 2.4 by definition).
+	inline bool TransferChoiceMatchesModel(const std::string& choice, const Settings& s)
+	{
+		if (choice.empty() || choice == "auto") return true;
+		const bool bt = s.transfer == Transfer::Bt1886 || (s.transfer == Transfer::Power && s.gammaPower == 2.4);
+		if (choice == "bt1886" || choice == "2.4") return bt;
+		if (choice == "srgb") return s.transfer == Transfer::Srgb;
+		return s.transfer == Transfer::Power && std::abs(std::atof(choice.c_str()) - s.gammaPower) < 1e-9;
 	}
 
 	// Whether libplacebo peak detection (dynamic tone mapping) is active for these settings.
@@ -272,6 +295,30 @@ namespace LightLevel
 			ToneMappingTuning::Override probe;
 			if (!ToneMappingTuning::Parse(i, raw, probe))
 				detail::Note(s, ToneMappingTuning::Specs()[i].key, raw, "auto");
+		}
+
+		for (int k = 0; k < 2; ++k)
+		{
+			const char* key = k == 0 ? "sdr_input_transfer" : "output_gamma";
+			std::string& target = k == 0 ? s.sdrInputTransfer : s.outputGamma;
+			raw.clear();
+			if (!get(key, raw)) continue;
+			const std::string t = detail::Normalize(raw);
+			double v = 0.0;
+			if (t == "auto") target = k == 0 ? "2.4" : "auto";   // sdr_input_transfer auto = 2.4 (RendererProfileConfig.h:1403)
+			else if (t == "bt1886" || t == "srgb") target = t;
+			else if (detail::ParseNumber(t, v) && (t == "1.8" || t == "2.0" || t == "2.2" || t == "2.4" || t == "2.6" || t == "2.8"))
+				target = t;
+			else detail::Note(s, key, raw, target);
+		}
+		raw.clear();
+		if (get("contrast_recovery", raw))
+		{
+			const std::string t = detail::Normalize(raw);
+			double v = 0.0;
+			if (t == "auto") s.contrastRecovery = -1.0;
+			else if (detail::ParseNumber(t, v) && v >= 0.0 && v <= 2.0) s.contrastRecovery = v;
+			else detail::Note(s, "contrast_recovery", raw, "auto");
 		}
 
 		raw.clear();

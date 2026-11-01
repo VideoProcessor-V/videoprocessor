@@ -34,8 +34,14 @@ class LightLevelRef(unittest.TestCase):
 
     def test_btb_zero_and_monotone(self):
         for kind in ("sdr", "hdr_passthrough", "hdr_to_sdr"):
+            for black in (0.0, 0.05):
+                ctx = llr.Context(kind=kind, target_black=black)
+                lut = llr.build_lut(ctx)
+                self.assertTrue(np.all(lut["J"][:64] == float(tr.pq_oetf(black))))
+                self.assertTrue(np.all(lut["L"][:64] == black))
+                self.assertTrue(np.all(lut["S"][:64] == 0.0) and np.all(lut["V"][:64] == 0.0))
+                self.assertTrue(np.all(lut["sdr_code"][:64] == np.arange(64)))
             lut = llr.build_lut(llr.Context(kind=kind))
-            self.assertTrue(np.all(lut["J"][:64] == 0.0))
             self.assertTrue(np.all(np.diff(lut["J"][64:941]) >= -1e-12))
 
     def test_fetch_and_tile(self):

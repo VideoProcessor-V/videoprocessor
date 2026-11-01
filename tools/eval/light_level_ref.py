@@ -26,7 +26,8 @@ Per code c: v = (c-64)/876 (limited) or c/1023 (full).  A continuous analytic ma
   TargetDisplay  = the encoding display (target white/black, eotf); PhysicalDisplay = the same with display white/black.
   Display(v)     nits capped at white: bt1886 with black (g=2.4, a=(Lw^(1/g)-Lb^(1/g))^g, b=Lb^(1/g)/(Lw^(1/g)-Lb^(1/g)),
                  L=a*max(v+b,0)^g), power: Lb+(Lw-Lb)v^g, srgb: Lb+(Lw-Lb)*exact piecewise lin.  Display.Inverse = exact inverse.
-  v < 0 (BTB)    L = physical display black, J = S = V = 0, sdr_code = the input code (any kind).
+  v < 0 (BTB)    L = physical display black, J = PQ_OETF(physical display black), S = V = 0, sdr_code = the input
+                 code (any kind).
   sdr            L = PhysicalDisplay(v)
   hdr_passthrough L = max(EETF(PQ_EOTF(v)), physical black); BT.2390 EETF in PQ space, source [src_min, src_peak]
                  -> [physical black, display peak]; identity when the display peak is unknown or >= src peak.
@@ -35,8 +36,8 @@ Per code c: v = (c-64)/876 (limited) or c/1023 (full).  A continuous analytic ma
                  signal = TargetDisplay.Inverse(clamp(L_out, target black, target white));
                  sdr_code = 64 + 876*signal; L = PhysicalDisplay(signal).
 J = PQ OETF(L) in [0, 1].  S = (J(c+.5) - J(c-.5)) / span, one-sided at the ends (lo = c for code 0, hi = c for
-code 1023; span = hi - lo).  V = |L(hi) - L(lo)| / span / (weber * max(L(c) + L_floor, lowest_step)),
-L_floor = physical black + ambient, lowest_step = PQ_EOTF(1/1023) nit (V < 1: below the Weber threshold).
+code 1023; span = hi - lo).  V = |L(hi) - L(lo)| / span / (weber * max(L(c) + ambient, lowest_step)); L(c) already
+includes the physical display black (it is not added again), lowest_step = PQ_EOTF(1/1023) nit (V < 1: below the Weber threshold).
 sdr_code: input code except hdr_to_sdr (tone-mapped SDR code).
 """
 from dataclasses import asdict, dataclass
@@ -60,7 +61,7 @@ class Context:
     gamma: float = 2.4              # power only
     display_white: Optional[float] = None   # physical display white; None = target_white
     display_black: Optional[float] = None   # physical display black; None = target_black
-    ambient: float = 0.0            # reflected ambient (nit), enters L_floor only
+    ambient: float = 0.0            # reflected ambient (nit), added to L in the V denominator only
     weber: float = 0.02
     src_peak: float = 0.0           # HDR source mastering peak (nit); 0 = unknown = 10000
     src_min: float = 0.0            # HDR source mastering black (nit)
@@ -80,10 +81,6 @@ class Context:
     @property
     def phys_black(self):
         return self.target_black if self.display_black is None else self.display_black
-
-    @property
-    def l_floor(self):
-        return self.phys_black + self.ambient
 
     @property
     def peak(self):
@@ -197,8 +194,9 @@ def build_lut(ctx):
     J = tr.pq_oetf(L)
     S = (tr.pq_oetf(Lh) - tr.pq_oetf(Ll)) / span
     lowest_step = float(tr.pq_eotf(1.0 / 1023.0))
-    V = np.abs(Lh - Ll) / span / (ctx.weber * np.maximum(L + ctx.l_floor, lowest_step))
-    J, S, V = (np.where(btb, 0.0, a) for a in (J, S, V))
+    V = np.abs(Lh - Ll) / span / (ctx.weber * np.maximum(L + ctx.ambient, lowest_step))
+    J = np.where(btb, float(tr.pq_oetf(ctx.phys_black)), J)
+    S, V = (np.where(btb, 0.0, a) for a in (S, V))
     return dict(J=J, S=S, V=V, L=L, sdr_code=sdr_code)
 
 
