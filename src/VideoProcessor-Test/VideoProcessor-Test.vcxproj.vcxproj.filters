@@ -414,4 +414,11 @@
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraConsumerBindingTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraLabelUploadTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraLabelWarpTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\link\GuidanceScheduler.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\link\GuidanceCountsRing.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\GuidanceGovernorTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\GuidanceSchedulingTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\GuideProductTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\MotionBenchWriterTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\GuidanceNullIdentityWarpTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
 </Project>
