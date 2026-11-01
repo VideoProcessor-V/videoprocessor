@@ -38,6 +38,9 @@
     "src/VP-V/modules/input/signal/ResyncEventMetrics.h",
     "src/VP-V/modules/input/signal/DvResyncReader.h",
     "src/VP-V/modules/input/signal/DvFallbacks.h",
+    "src/VP-V/modules/input/signal/ResyncExtension.h",
+    "src/VP-V/modules/input/signal/ResyncExtension.cpp",
+    "src/VP-V/modules/input/signal/tests/ResyncExtensionTests.cpp",
     "src/VP-V/modules/input/signal/tests/ResyncInjectScheduleTests.cpp",
     "src/VP-V/modules/input/signal/tests/ResyncEventMetricsTests.cpp",
     "src/VP-V/modules/input/signal/tests/DvResyncReaderTests.cpp"
