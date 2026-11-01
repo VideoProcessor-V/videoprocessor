@@ -88,5 +88,6 @@ copy /Y "$(QtRoot)\plugins\platforms\qoffscreen.dll" "$(TargetDir)platforms\qoff
     <ClInclude Include="..\VideoProcessor-Config\VpTheme.h" />
     <ClInclude Include="..\VideoProcessor-ConfigCore\ConfigEditorCore.h" />
   </ItemGroup>
+  <Import Project="$(MSBuildThisFileDirectory)..\VP-V\build\$(MSBuildProjectName).items.props" Condition="Exists('$(MSBuildThisFileDirectory)..\VP-V\build\$(MSBuildProjectName).items.props')" />  <!-- VPV-HOOK -->
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
