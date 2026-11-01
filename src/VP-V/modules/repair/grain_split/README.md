@@ -28,7 +28,13 @@ flag/level, not a per-pixel split. The Wiener split is the one that separates fi
 
 ## Product and cost
 
-`GrainSplit::kProduct` (`grain.split`): input `rebased.luma` (lag 0), GpuCompute, history 1. Outputs: base (half-resolution
+Owned as a skeleton product by [input.source_analysis/regions](../../input/source_analysis/regions/README.md) (coordinator
+2026-10-31): `RegionEvidence::AppendProducts` declares `grain_split`, `ComputeGrain` makes it once per decoded source frame
+(early, on the source, picture extended by mirroring so bars never enter it), `GrainView` is the one read API (clean, grain,
+Wiener share, block level). Declared readers: camera-model grain map, temporal_detail, chroma-from-luma grain guard,
+grain-safe contrast recovery, the region block stats.
+
+`GrainSplit::kProduct` (`grain.split`): input the picture-extended source luma (lag 0), GpuCompute, history 1. Outputs: base (half-resolution
 R16F), s1/s2 = f D1 / f D2 (RG16F), f (R8), N (block grid); `clean` and `G` are formed on read (`base + s1 + s2`, `Y - clean`).
 Cost (estimate, not dispatched): three separable Gaussians (sigma 1, 2.5, 6 x Scale; the 2.5/6 pair at half resolution), one
 3 x 3 energy, a 16-sub-block reduction and a 5 x 5 block minimum per frame; ~7 B/px (~58 MB at 4K), well under 1 ms on the

@@ -182,6 +182,9 @@ namespace GrainSplit
 		int history;
 		const char* readers;
 	};
-	constexpr ProductInfo kProduct = { "grain.split", "rebased.luma (lag 0)", "GpuCompute", 1,
-		"repair.temporal_detail (today); chroma, mosquito repair, scaling (intended)" };
+	// Owned as a skeleton product by input.source_analysis/regions (RegionEvidence.h AppendProducts "grain_split",
+	// ComputeGrain / GrainView): computed once, early, on the decoded source with the picture extended by mirroring.
+	constexpr ProductInfo kProduct = { "grain.split", "source luma, picture-extended (lag 0); p4 picture rect", "GpuCompute", 1,
+		"camera model grain map, repair.temporal_detail, chroma-from-luma grain guard, grain-safe contrast recovery, "
+		"region block stats (declared); mosquito repair, scaling (intended)" };
 }
