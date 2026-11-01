@@ -399,7 +399,7 @@ namespace VideoProcessorTest
 			CreateDirectoryA(outDir.c_str(), nullptr);
 			// The repository from this source file's path: src\VideoProcessor-Test\.
 			std::string repo = __FILE__;
-			for (int up = 0; up < 3; ++up) repo = repo.substr(0, repo.find_last_of("\\/"));
+			for (int up = 0; up < 5; ++up) repo = repo.substr(0, repo.find_last_of("\\/"));
 			const std::string simulator = repo + "\\tools\\led_script_sim.py";
 			const std::string script = repo + "\\tools\\led-reference\\main_vp.py";
 			char python[MAX_PATH] = {};

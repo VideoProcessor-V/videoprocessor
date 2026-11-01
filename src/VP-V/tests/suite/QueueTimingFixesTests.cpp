@@ -614,7 +614,7 @@ namespace Tests
 		{
 			std::string here = __FILE__;
 			std::replace(here.begin(), here.end(), '/', '\\');
-			const std::string src = here.substr(0, here.rfind("\\VideoProcessor-Test\\"));
+			const std::string src = here.substr(0, here.rfind("\\VP-V\\tests\\"));
 			const std::regex comparison(R"(([<>]=?|==)\s*(10|240|480|500)(\.0+)?\b(?!\s*[*/]))");
 			const std::regex rateWord(R"(hz|refresh|fps|framerate|frame_rate|rate\b)");
 			const std::regex constant(R"(constexpr\s+double\s+\w*(min|max)\w*(rate|refresh|hz)\w*\s*=\s*(10|240|480|500)(\.0+)?\s*;)");

@@ -25,7 +25,7 @@ namespace Integration20261017Test
 		{
 			std::string path = __FILE__;
 			std::replace(path.begin(), path.end(), '/', '\\');
-			const std::string marker = "\\src\\VideoProcessor-Test\\";
+			const std::string marker = "\\src\\VP-V\\tests\\";
 			const size_t at = path.rfind(marker);
 			Assert::IsTrue(at != std::string::npos);
 			return path.substr(0, at) + "\\" + relative;

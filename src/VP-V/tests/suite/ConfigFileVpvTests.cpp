@@ -479,7 +479,7 @@ namespace VideoProcessorTest
         TEST_METHOD(ShippedConfigurationsTurnDebandingOffForHdr)
         {
             std::string repository = __FILE__;
-            for (int level = 0; level < 3; ++level)
+            for (int level = 0; level < 5; ++level)
                 repository.resize(repository.find_last_of("\\/"));
             for (const char* relative : { "\\VideoProcessor.cfg", "\\docs\\cinema\\VideoProcessor-test.cfg" })
             {
@@ -531,7 +531,7 @@ namespace VideoProcessorTest
         TEST_METHOD(CinemaTestConfigurationStartsWithShadersDisabledAndEnablesThemOneAtATime)
         {
             std::string repository = __FILE__;
-            for (int level = 0; level < 3; ++level)
+            for (int level = 0; level < 5; ++level)
                 repository.resize(repository.find_last_of("\\/"));
             std::ifstream shipped(repository + "\\docs\\cinema\\VideoProcessor-test.cfg",
                 std::ios::binary);
@@ -595,7 +595,7 @@ namespace VideoProcessorTest
         TEST_METHOD(CinemaTestConfigurationPicksLowLatencyForHighFrameRates)
         {
             std::string repository = __FILE__;
-            for (int level = 0; level < 3; ++level)
+            for (int level = 0; level < 5; ++level)
                 repository.resize(repository.find_last_of("\\/"));
             std::ifstream shipped(repository + "\\docs\\cinema\\VideoProcessor-test.cfg",
                 std::ios::binary);
@@ -693,7 +693,7 @@ namespace VideoProcessorTest
         TEST_METHOD(KeyProfileChoiceLastsUntilTheRulesChange)
         {
             std::string repository = __FILE__;
-            for (int level = 0; level < 3; ++level)
+            for (int level = 0; level < 5; ++level)
                 repository.resize(repository.find_last_of("\\/"));
             std::ifstream shipped(repository + "\\docs\\cinema\\VideoProcessor-test.cfg",
                 std::ios::binary);
@@ -897,7 +897,7 @@ namespace VideoProcessorTest
         TEST_METHOD(CinemaTestConfigurationSwitchesBlackBarZoomFromTheConfigApp)
         {
             std::string repository = __FILE__;
-            for (int level = 0; level < 3; ++level)
+            for (int level = 0; level < 5; ++level)
                 repository.resize(repository.find_last_of("\\/"));
             std::ifstream shipped(repository + "\\docs\\cinema\\VideoProcessor-test.cfg",
                 std::ios::binary);

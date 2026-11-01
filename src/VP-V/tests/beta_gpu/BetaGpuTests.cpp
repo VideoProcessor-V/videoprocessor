@@ -260,7 +260,7 @@ namespace
 	std::string LoadRepoShader(const char* fileName)
 	{
 		std::string path = __FILE__;
-		for (int level = 0; level < 3; ++level) path.resize(path.find_last_of("\\/"));
+		for (int level = 0; level < 5; ++level) path.resize(path.find_last_of("\\/"));
 		std::ifstream input(path + "\\shaders\\" + fileName, std::ios::binary);
 		return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
 	}
@@ -296,7 +296,7 @@ namespace
 	std::string LoadFixtureShader(const char* fileName)
 	{
 		std::string path = __FILE__;
-		for (int level = 0; level < 2; ++level) path.resize(path.find_last_of("\\/"));
+		for (int level = 0; level < 4; ++level) path.resize(path.find_last_of("\\/"));
 		std::ifstream input(path + "\\VideoProcessor-Test\\fixtures\\" + fileName, std::ios::binary);
 		return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
 	}

@@ -2279,7 +2279,7 @@ namespace Tests
 			// changed from the default so the read is visible).
 			std::string repository = __FILE__;
 			std::replace(repository.begin(), repository.end(), '/', '\\');
-			repository.resize(repository.rfind("\\src\\VideoProcessor-Test\\"));
+			repository.resize(repository.rfind("\\src\\VP-V\\tests\\"));
 			std::ifstream sampleFile(repository + "\\VideoProcessor.cfg", std::ios::binary);
 			std::string sample((std::istreambuf_iterator<char>(sampleFile)), std::istreambuf_iterator<char>());
 			Assert::IsFalse(sample.empty(), L"the sample configuration");

@@ -41,7 +41,7 @@ namespace Tests
 		{
 			std::string path = __FILE__;
 			std::replace(path.begin(), path.end(), '/', '\\');
-			const size_t at = path.rfind("\\src\\VideoProcessor-Test\\");
+			const size_t at = path.rfind("\\src\\VP-V\\tests\\");
 			return path.substr(0, at) + "\\" + name;
 		}
 

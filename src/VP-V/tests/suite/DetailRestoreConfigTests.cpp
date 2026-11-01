@@ -199,7 +199,7 @@ namespace DetailRestoreConfigTestsNs
 		{
 			std::string root = __FILE__;
 			std::replace(root.begin(), root.end(), '/', '\\');
-			root.resize(root.rfind("\\src\\VideoProcessor-Test\\"));
+			root.resize(root.rfind("\\src\\VP-V\\tests\\"));
 			return root;
 		}
 	}

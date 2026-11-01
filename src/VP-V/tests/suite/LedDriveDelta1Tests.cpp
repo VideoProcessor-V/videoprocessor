@@ -854,7 +854,7 @@ namespace VideoProcessorTest
 		TEST_METHOD(ShippedExampleProfileIsValidAndEqualsTheBuiltInValues)
 		{
 			std::string repository = __FILE__;
-			for (int level = 0; level < 3; ++level)
+			for (int level = 0; level < 5; ++level)
 				repository.resize(repository.find_last_of("\\/"));
 			const std::string example = repository + "\\docs\\cinema\\led-profile-example.cfg";
 			std::string error;
