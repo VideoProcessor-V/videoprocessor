@@ -7,7 +7,7 @@ tests/LightLevelCrossCheckTests.cpp compares the two to 1e-9 on J using vectors 
 
 Public API
   Context(kind, ...)         dataclass; kind in {"sdr", "hdr_passthrough", "hdr_to_sdr"}; to_dict()/from_dict()
-  build_lut(ctx)             -> dict J, S, V, L, sdr_code : float64 arrays of length 1024 (index = 10-bit code)
+  build_lut(ctx)             -> dict J, S, V, L, sdr_code, sout : float64 arrays of length 1024 (index = 10-bit code)
   fetch(lut, code10)         -> dict of the same fields at (array of) float codes; index clamp to [0,1023], linear interp
   j_eff(plane_codes10, ctx, tile=None, lut=None) -> float64 map, same shape as the plane:
                                 0.5 * J(lowpass(code)) + 0.5 * tile_mean(J(lowpass(code)))
@@ -39,6 +39,8 @@ J = PQ OETF(L) in [0, 1].  S = (J(c+.5) - J(c-.5)) / span, one-sided at the ends
 code 1023; span = hi - lo).  V = |L(hi) - L(lo)| / span / (weber * max(L(c) + ambient, lowest_step)); L(c) already
 includes the physical display black (it is not added again), lowest_step = PQ_EOTF(1/1023) nit (V < 1: below the Weber threshold).
 sdr_code: input code except hdr_to_sdr (tone-mapped SDR code).
+sout = (sdr_code(hi) - sdr_code(lo)) / span, the same +-0.5 central difference as S, for EVERY code incl. BTB (sdr_code is the
+input code there): 1 exactly for sdr / hdr_passthrough; hdr_to_sdr BTB codes 1, the knee code 64 mixed.
 """
 from dataclasses import asdict, dataclass
 from typing import Optional
@@ -189,22 +191,24 @@ def build_lut(ctx):
     L, sdr_code, btb = _luminance(c, ctx, sp)
     lo = np.where(c == 0, c, c - 0.5)
     hi = np.where(c == NCODES - 1, c, c + 0.5)
-    Ll, Lh = _luminance(lo, ctx, sp)[0], _luminance(hi, ctx, sp)[0]
+    Ll, sdr_lo, _ = _luminance(lo, ctx, sp)
+    Lh, sdr_hi, _ = _luminance(hi, ctx, sp)
     span = hi - lo
     J = tr.pq_oetf(L)
+    sout = (sdr_hi - sdr_lo) / span
     S = (tr.pq_oetf(Lh) - tr.pq_oetf(Ll)) / span
     lowest_step = float(tr.pq_eotf(1.0 / 1023.0))
     V = np.abs(Lh - Ll) / span / (ctx.weber * np.maximum(L + ctx.ambient, lowest_step))
     J = np.where(btb, float(tr.pq_oetf(ctx.phys_black)), J)
     S, V = (np.where(btb, 0.0, a) for a in (S, V))
-    return dict(J=J, S=S, V=V, L=L, sdr_code=sdr_code)
+    return dict(J=J, S=S, V=V, L=L, sdr_code=sdr_code, sout=sout)
 
 
 def fetch(lut, code10):
     x = np.clip(np.asarray(code10, np.float64), 0.0, NCODES - 1.0)
     i0 = np.minimum(np.floor(x).astype(np.int64), NCODES - 2)
     f = x - i0
-    return {k: lut[k][i0] * (1 - f) + lut[k][i0 + 1] * f for k in ("J", "S", "V", "L", "sdr_code")}
+    return {k: lut[k][i0] * (1 - f) + lut[k][i0 + 1] * f for k in ("J", "S", "V", "L", "sdr_code", "sout")}
 
 
 def tile_size_for(h):

@@ -63,6 +63,10 @@
       "input.source_analysis"
     ]
   },
+  "lut_layouts": {
+    "light_level_lut": "PackTexels(): rgba32f 1024x1 (J, S, V, L / 10000); light_level_lut_fetch",
+    "light_level_out": "PackOutputTexels(): rgba32f 1024x1 (sdrCode, Sout, 0, 0); light_level_out_fetch. Sout = d sdrCode / d code, +-0.5 central difference like S; exactly 1 for Sdr and HdrPassthrough; BTB codes use the same formula (sdrCode = input code there: 1, mixed at the knee code 64 for HdrToSdr). Fingerprint tag LL4."
+  },
   "fallback_when_missing": "Draft: not wired; when wired, a repair without the light-level map weighs by its own local statistics and says so in its status.",
   "fallback_entry": "Light level: approx (<why>) | neutral (<why>)"
 }
