@@ -42,6 +42,16 @@ namespace FallbackCatalogTest
 			Assert::AreEqual(std::string("Fallbacks engaged: none"), registry.Heading());
 		}
 
+		TEST_METHOD(DitherNeedEngagesOnlyWhenRequestedAndAnInputIsMissing)
+		{
+			Assert::IsFalse(DitherNeed(false, "no grain split").engaged, L"not requested");
+			Assert::IsFalse(DitherNeed(true, "").engaged, L"nothing missing");
+			const Decision d = DitherNeed(true, "no grain split");
+			Assert::IsTrue(d.engaged);
+			Assert::AreEqual(std::string("dither need"), d.id);
+			Assert::AreEqual(std::string("Dither need: unavailable (no grain split); sigma-delta at its base amplitude"), d.reason);
+		}
+
 		TEST_METHOD(DitherOnlyWhenTheSigmaDeltaWasAskedFor)
 		{
 			Assert::IsFalse(Dither(false, DitherDrop::UnsupportedDomain).engaged, L"not requested: libplacebo's dither is the setting");

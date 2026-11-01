@@ -46,6 +46,17 @@ namespace FallbackCatalog
 		return decision.engaged ? registry.Engage(decision.id, decision.reason) : registry.Release(decision.id);
 	}
 
+	// ---- output.dither: dither need (dither_need = auto) ----------------------------------------
+	// The per-region extra dither amplitude was asked for but an input is missing (grain split, region
+	// precursors, light-level LUT, supported domain): the sigma-delta runs at its base amplitude.
+	// `missing` is DitherNeed::MissingText; empty = nothing missing.
+	inline Decision DitherNeed(bool requested, const std::string& missing)
+	{
+		if (!requested || missing.empty())
+			return Released("dither need");
+		return Engaged("dither need", "Dither need: unavailable (" + missing + "); sigma-delta at its base amplitude");
+	}
+
 	// ---- output.dither --------------------------------------------------------------------------
 	// The sigma-delta was asked for (temporal_dither = sigma_delta, or the shader is in the list)
 	// but does not run: libplacebo's own dither quantises the output instead.

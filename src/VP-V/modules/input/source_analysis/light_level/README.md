@@ -55,6 +55,13 @@ difference over +-0.5 code of the same analytic map (one-sided at the ends). V =
 is not counted twice); one V unit = one just-visible Weber step per code. Where L + ambient is 0 the denominator uses the
 PQ minimum step (PQ EOTF of 1/1023, a format constant).
 
+Sout = d sdrCode / d code (`Entry::Sout`), the same central difference over +-0.5 code as S (one-sided at the ends 0
+and 1023), computed for EVERY code: Sout = (sdrCode(hi) - sdrCode(lo)) / span. Sdr and HdrPassthrough: sdrCode is the input
+code, so Sout is exactly 1. HdrToSdr: the slope of the tone-mapped SDR code, 0 where the spline input is clipped (above the
+source peak). BTB codes are not special-cased: the evaluator sets sdrCode to the input code there, so BTB codes whose +-0.5
+positions are both below 64 get Sout = 1, and the knee code 64 (HdrToSdr) mixes the input code at 63.5 with the tone-mapped
+code at 64.5. `Fetch` interpolates Sout like the other fields. The fingerprint tag is LL4 (the LUT content gained Sout).
+
 BTB: limited-range codes below 64 get L = display black, J = PQ_OETF(display black) (equal to J at code 64, so there is
 no fake edge at the BTB boundary), S = V = 0. The LUT is a lookup: pixel data keep their below-black and above-white
 values (never clamped); `Fetch` clamps only the index. WTW: SDR continues the curve (L capped at white), HDR
@@ -75,18 +82,19 @@ a setting or comes in through `Context`.
 ## Files
 
 - `LightLevelSettings.h`: `Specs()`, `Settings`, `Read(get)`.
-- `LightLevelLut.h`: `Context`, `Entry`, `Lut`, `Build`, `Fingerprint`, `Fetch`, `PackTexels`, `LutCache`
+- `LightLevelLut.h`: `Context`, `Entry`, `Lut`, `Build`, `Fingerprint`, `Fetch`, `PackTexels`, `PackOutputTexels`, `LutCache`
   (rebuilds only when the fingerprint changes).
 - `LightLevelGlsl.h`: `LightLevelGlsl()`: `light_level_lut_fetch`, `light_level_j` (sampler `light_level_lut`, 1024 x 1
-  rgba32f: J, S, V, L / 10000).
+  rgba32f: J, S, V, L / 10000), plus `light_level_out_fetch` (sampler `light_level_out`, 1024 x 1 rgba32f from
+  `PackOutputTexels`: sdrCode, Sout, 0, 0; same clamp / interpolation arithmetic).
 
 Deterministic (fixed loops, double math, no threads), C++14, no Windows headers.
 
-## Block product P12 (WP2, unit version 2)
+## Block product P12 (WP2, unit version 3; 3 adds the LL4 output table)
 
 One rgba texel per region block (the P11 grid; 8160 blocks = 130 KB per frame as rgba32f (the one-pole reads J_surround back) at 1080p, 4K and 8K, plus the 16 KB LUT):
 `(J_surround, J_local, V, conf)`. Declared in `core/Products.h` (P12, history 1: the previous slot is the one-pole state, no
-private copy), catalogued in `core/ProductCatalog.h` (expected unit version 2), counted by the VRAM governor.
+private copy), catalogued in `core/ProductCatalog.h` (expected unit version 3), counted by the VRAM governor.
 
 - **J_local**: mean J over the block's picture pixels, taken by P11's stats pass from this LUT (`StatsConstants::lutTexels`,
   `FetchPacked`; RegionEvidence unit version 2). It replaces the generic `Nits` / `PqOf` / `Visibility` chain; without a LUT the

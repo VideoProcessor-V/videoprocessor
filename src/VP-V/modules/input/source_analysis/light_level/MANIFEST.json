@@ -67,6 +67,10 @@
       "input.source_analysis"
     ]
   },
-  "fallback_when_missing": "Draft: not wired. Product P12 (unit version 2): no region statistics -> frame level from the source APL; no APL -> code only (LUT per pixel, conf 0); no LUT or display context -> neutral (light term 1); stats made without this LUT or for another context -> confidence 0. Every case has a status line; the product recovers when its inputs return.",
+  "lut_layouts": {
+    "light_level_lut": "PackTexels(): rgba32f 1024x1 (J, S, V, L / 10000); light_level_lut_fetch",
+    "light_level_out": "PackOutputTexels(): rgba32f 1024x1 (sdrCode, Sout, 0, 0); light_level_out_fetch. Sout = d sdrCode / d code, +-0.5 central difference like S; exactly 1 for Sdr and HdrPassthrough; BTB codes use the same formula (sdrCode = input code there: 1, mixed at the knee code 64 for HdrToSdr). Fingerprint tag LL4."
+  },
+  "fallback_when_missing": "Draft: not wired. Product P12 (unit version 3): no region statistics -> frame level from the source APL; no APL -> code only (LUT per pixel, conf 0); no LUT or display context -> neutral (light term 1); stats made without this LUT or for another context -> confidence 0. Every case has a status line; the product recovers when its inputs return.",
   "fallback_entry": "Light level: approx (<why>) | neutral (<why>)"
 }

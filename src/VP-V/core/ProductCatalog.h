@@ -76,7 +76,7 @@ struct ProductRow {
 constexpr uint32_t kExpectedCameraUnit = 1;
 constexpr uint32_t kExpectedRegionUnit = 2;
 constexpr uint32_t kExpectedTemporalDetailUnit = 1;
-constexpr uint32_t kExpectedLightLevelUnit = 2;
+constexpr uint32_t kExpectedLightLevelUnit = 3;
 constexpr uint32_t kExpectedVectorUnit = 1;
 constexpr uint32_t kExpectedStatsUnit = 1;
 constexpr uint32_t kExpectedGrainSplitUnit = 2;

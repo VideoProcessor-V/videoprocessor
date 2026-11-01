@@ -481,7 +481,7 @@ namespace VideoProcessorTest
 
 		TEST_METHOD(CatalogVersionsAgreeAndAStaleReaderGetsAVisibleFallback)
 		{
-			Assert::AreEqual(2u, static_cast<unsigned>(LightLevel::kUnitVersion));
+			Assert::AreEqual(3u, static_cast<unsigned>(LightLevel::kUnitVersion));
 			Assert::AreEqual(2u, static_cast<unsigned>(RE::kUnitVersion));
 			FallbackCatalog::Decision d;
 			Require(VpSkeleton::Catalog::VerifyUnit(VpSkeleton::kP12LightLevel, LightLevel::kUnitVersion, &d), "current reader");

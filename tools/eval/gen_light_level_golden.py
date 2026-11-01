@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Generates three headers for the light-level LUT tests (tests/ folder of the light_level module):
   LightLevelGolden.generated.h       tonemap_ref.SplineTM golden values (below)
-  LightLevelCrossCheck.generated.h   J, L, S, V (1024 codes each) and sdrCode (HdrToSdr cases only; the other kinds
-                                     use the input code) of light_level_ref.build_lut for the CASES list: settings
+  LightLevelCrossCheck.generated.h   J, L, S, V (1024 codes each), Sout (dsdrCode/dcode, all cases) and sdrCode (HdrToSdr cases
+                                     only; the other kinds use the input code) of light_level_ref.build_lut for the CASES list: settings
                                      as C++ config keys ("key=value;..."), kind, source/display peaks (see CASES).
 
 For source peaks 1000 / 4000 / 10000 nit, dst 100 nit, black 0 and the VP default ToneMappingTuning constants
@@ -111,7 +111,7 @@ def write_cross():
         "namespace LightLevelCrossCheck",
         "{",
         "	struct Case { const char* name; const char* keys; int kind; double sourcePeak; double displayPeak;",
-        "		const double* L; const double* J; const double* S; const double* V; const double* sdrCode; };",
+        "		const double* L; const double* J; const double* S; const double* V; const double* sdrCode; const double* Sout; };",
     ]
     names = []
     for name, kind, keys, extra in CASES:
@@ -121,14 +121,15 @@ def write_cross():
         out += emit("kJ%s" % name, lut["J"])
         out += emit("kS%s" % name, lut["S"])
         out += emit("kV%s" % name, lut["V"])
+        out += emit("kO%s" % name, lut["sout"])
         if kind == 2:
             out += emit("kC%s" % name, lut["sdr_code"])
         else:
             assert np.array_equal(lut["sdr_code"], np.arange(1024, dtype=np.float64))
         kstr = ";".join("%s=%s" % (k, keys[k]) for k in sorted(keys))
-        names.append('		{ "%s", "%s", %d, %.1f, %.1f, kL%s, kJ%s, kS%s, kV%s, %s },'
+        names.append('		{ "%s", "%s", %d, %.1f, %.1f, kL%s, kJ%s, kS%s, kV%s, %s, kO%s },'
                      % (name, kstr, kind, extra.get("src_peak", 0.0), extra.get("display_peak", 0.0), name, name, name, name,
-                        "kC" + name if kind == 2 else "nullptr"))
+                        "kC" + name if kind == 2 else "nullptr", name))
     out.append("	constexpr int kCaseCount = %d;" % len(CASES))
     out.append("	constexpr Case kCases[kCaseCount] = {")
     out += names
@@ -224,6 +225,13 @@ def main():
         sdrs.append("kSdr%d" % p)
     out.append("\tconstexpr const double* kPq[kPeakCount] = { %s };" % ", ".join(pqs))
     out.append("\tconstexpr const double* kSdr[kPeakCount] = { %s };" % ", ".join(sdrs))
+    # Sout golden: light_level_ref.build_lut (Settings: dst 100 nit, black 0, bt1886, display auto), hdr_to_sdr, same peaks.
+    souts = []
+    for p in PEAKS:
+        lut = llr.build_lut(llr.Context(kind="hdr_to_sdr", target_white=DST_PEAK, src_peak=float(p)))
+        out += emit("kSout%d" % p, lut["sout"])
+        souts.append("kSout%d" % p)
+    out.append("	constexpr const double* kSout[kPeakCount] = { %s };" % ", ".join(souts))
     out.append("}")
     with open(OUT, "w", newline="\n") as f:
         f.write("\n".join(out) + "\n")
