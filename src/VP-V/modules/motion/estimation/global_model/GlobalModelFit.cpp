@@ -1172,7 +1172,7 @@ namespace CameraModel
 					}
 					double fl[4];
 					TemporalFloor(f.prec, in.picture, in.pairSeconds, fl);
-					floorPx = fl[2] * in.pairSeconds;
+					floorPx = fl[2] * in.pairSeconds;   // reduces to f.prec, so tol = 5 * prec + 0.25 * refMax
 				}
 
 				struct Layer
@@ -1240,7 +1240,7 @@ namespace CameraModel
 					flags |= 2;
 					const int win = L[1].score > L[0].score ? 1 : 0;
 					const double ws = L[win].score, ls = L[1 - win].score;
-					ambiguity = ws > 0 ? 1.0 - Clamp01((ls / ws) / 0.5) : 0.0;
+					(void)ws; (void)ls;
 					ci = win;
 					if (haveRef && L[win].f < 0.5)
 					{
@@ -1262,11 +1262,6 @@ namespace CameraModel
 							swapped = true;      // the reference layer is gone: a real change of camera motion, accepted at once
 					}
 				}
-				else if (L[0].border < c.borderVetoRatio && cdA.rawShare < 0.75 && !(haveRef && L[0].f >= 0.8))
-				{
-					flags |= 8;
-					ambiguity = std::min(ambiguity, 0.34 * Clamp01(L[0].border / c.borderVetoRatio));
-				}
 				if (ci == 1)
 				{
 					const ChosenModel chB = ChooseModel(f, c, bestP, false, maxModel, irls);
@@ -1282,6 +1277,22 @@ namespace CameraModel
 						held = swapped = riskSwap = false;
 						newHold = 0;
 					}
+				}
+				// Ambiguity. Continuity may CHOOSE the layer but never makes the record confident: the score ratio is taken
+				// without the continuity factor, and a record on layer A is never more lenient than the support-based value.
+				if (L[1].present)
+				{
+					const double sa = L[0].count * (0.25 + 0.75 * Clamp01(L[0].border)) * L[0].a;
+					const double sb = L[1].count * (0.25 + 0.75 * Clamp01(L[1].border)) * L[1].a;
+					const double hi = std::max(sa, sb), lo = std::min(sa, sb);
+					const double scoreAmb = hi > 0 ? 1.0 - Clamp01((lo / hi) / 0.5) : 0.0;
+					ambiguity = ci == 1 ? scoreAmb : std::min(ambiguity, scoreAmb);
+				}
+				// ForegroundSuspect: the FINAL camera layer touches no border, explains < 3/4 of the vectors and has no agreeing reference.
+				if (L[ci].border < c.borderVetoRatio && L[ci].share < 0.75 && !(haveRef && L[ci].f >= 0.8))
+				{
+					flags |= 8;
+					ambiguity = std::min(ambiguity, 0.34 * Clamp01(L[ci].border / c.borderVetoRatio));
 				}
 				if (held)
 					flags |= 16;
@@ -1358,6 +1369,8 @@ namespace CameraModel
 			{
 				if (layerRisk > 0)
 					rec.confidence *= 1.0 - 0.5 * layerRisk;
+				if (rec.reason == Reason::Ok && rec.confidence < 0.5)
+					rec.reason = Reason::LowConfidence;
 				rec.layerFlags = flags;
 				rec.layerRisk = layerRisk;
 				rec.haveObjectLayer = haveObj;
@@ -1647,6 +1660,7 @@ namespace CameraModel
 				if (m_config.objects)
 					m_objects.Reset();
 				m_seedPending = false;
+				m_tl = TwoLayerState();     // before the post-cut seed Run, which reads it
 				rec.valid = false;
 				rec.reason = Reason::Cut;
 				rec.confidence = 0;

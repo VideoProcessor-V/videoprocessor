@@ -887,6 +887,9 @@ namespace VideoProcessorTest
 			const CameraMotion r = on.Fit(f.Input(kPairSeconds, 5));
 			Logger::WriteMessage(("right-half object over random background, twoLayer on: " + Flags(r)).c_str());
 			Require((r.layerFlags & 1) != 0, "the two-layer path ran " + Flags(r));
+			// Known limitation (no border evidence, no camera in the field): the object is still reported as dominant. The
+			// two-layer path must never be MORE confident than today.
+			Require(r.confidence <= ro.confidence + 1e-12, "no more lenient than off: " + Flags(r) + " vs " + Flags(ro));
 		}
 
 		// (c) A centred object (~50 % of the picture, away from the border) over a random background: the border evidence
@@ -951,7 +954,7 @@ namespace VideoProcessorTest
 			}
 		}
 
-		// The camera follows a nearly static subject: the subject (40 %, centred) is the minority layer, the panning
+		// The camera follows a nearly static subject: the subject (120 x 108 of 240 x 135 blocks = 40 %, centred) is the minority layer, the panning
 		// background is the camera.
 		TEST_METHOD(TrackedSubjectPanningBackground)
 		{
@@ -964,10 +967,11 @@ namespace VideoProcessorTest
 			const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5));
 			Require(r.valid && ModelError(r, pan, f.picture) < kTol, "camera is the pan: " + Flags(r));
 			Require(r.haveObjectLayer && ObjectError(r, PanModel(0, 0), f.picture) < 2e-3, "object layer is the static subject: " + Flags(r));
-			Require(r.reason == Reason::Ok && r.confidence >= 0.5, "the pan is usable once the border evidence is counted: " + Flags(r));
+			// 60/40 stays Ambiguous exactly as with twoLayer off: continuity and border evidence choose the layer, they never
+			// make a record confident.
 			Fitter off;
 			const CameraMotion ro = off.Fit(f.Input(kPairSeconds, 5));
-			Logger::WriteMessage(("same field, twoLayer off: " + Flags(ro)).c_str());
+			Require(r.confidence <= ro.confidence + 1e-12, "no more lenient than off: " + Flags(r) + " vs " + Flags(ro));
 		}
 
 		// An object enters from the right edge and grows to ~55 % of the picture over a pan: the camera stays the pan.
@@ -1047,7 +1051,7 @@ namespace VideoProcessorTest
 		TEST_METHOD(SwapHysteresisAt60PairsPerSecond) { SwapHysteresisAt(1.0 / 60, 300); }
 
 		// A single layer that changes its motion (a whip pan) is accepted at once: no hold, no risk.
-		TEST_METHOD(WhipPanAcceptedAtOnce)
+		TEST_METHOD(WhipPanSingleLayerAcceptedAtOnce)
 		{
 			Fitter fitter(TL());
 			const Params slow = PanModel(8, 0), fast = PanModel(70, -20);
@@ -1065,6 +1069,61 @@ namespace VideoProcessorTest
 			const CameraMotion r = fitter.Fit(w.Input(kPairSeconds, 20));
 			Require(r.valid && ModelError(r, fast, w.picture) < kTol, "whip pan fitted at once: " + Flags(r));
 			Require((r.layerFlags & 16) == 0 && r.layerRisk == 0, "no hold, no risk: " + Flags(r));
+		}
+
+		// Two layers present, the reference layer vanishes (both layers change motion): the new layer is accepted at once.
+		TEST_METHOD(WhipPanTwoLayersReferenceVanishesAcceptedAtOnce)
+		{
+			Fitter fitter(TL());
+			const Params P = PanModel(12, 0), P2 = PanModel(60, -15);
+			for (int i = 0; i < 3; ++i)
+			{
+				Field f(Grid4K());
+				f.FromModel(P);
+				const int qw = f.gridW * 20 / 100;
+				f.AddObject(f.gridW - qw, 0, qw, f.gridH, -12, 3);
+				f.AddNoise(0.05, 160 + i);
+				const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5 + i));
+				Require(r.valid && r.confidence >= 0.5, "establish: " + Flags(r));
+			}
+			Field f(Grid4K());
+			f.FromModel(P2);
+			const int qw = f.gridW * 20 / 100;
+			f.AddObject(f.gridW - qw, 0, qw, f.gridH, -40, 20);
+			f.AddNoise(0.05, 170);
+			const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 20));
+			Require(ModelError(r, P2, f.picture) < kTol, "new layer accepted at once: " + Flags(r));
+			Require((r.layerFlags & 32) != 0 && (r.layerFlags & 16) == 0, "Swapped, not held: " + Flags(r));
+		}
+
+		// A cut clears the two-layer state (reference, hold count, risk), also with a queued next pair for the post-cut seed.
+		TEST_METHOD(CutClearsTwoLayerState)
+		{
+			const Params P = PanModel(12, 0);
+			auto fieldPQ = [&](int pPercent, uint64_t seed)
+			{
+				Field f(Grid4K());
+				f.FromModel(P);
+				const int qw = f.gridW * (100 - pPercent) / 100;
+				f.AddObject(f.gridW - qw, 0, qw, f.gridH, -12, 3);
+				f.AddNoise(0.05, seed);
+				return f;
+			};
+			Fitter fitter(TL());
+			uint64_t seq = 5;
+			for (int i = 0; i < 3; ++i)
+				fitter.Fit(fieldPQ(80, 180 + i).Input(kPairSeconds, seq++));
+			const CameraMotion held = fitter.Fit(fieldPQ(15, 190).Input(kPairSeconds, seq++));
+			Require((held.layerFlags & 16) != 0 && (held.layerFlags & 64) != 0, "hold in progress before the cut: " + Flags(held));
+			Field after = fieldPQ(15, 191);
+			PairInput cut = fieldPQ(15, 192).Input(kPairSeconds, seq++);
+			cut.cut = true;
+			const PairInput nextIn = after.Input(kPairSeconds, seq++);
+			cut.next = &nextIn;
+			const CameraMotion rc = fitter.Fit(cut);
+			Require(rc.reason == Reason::PostCutSeeded || rc.reason == Reason::Cut, "cut record: " + Flags(rc));
+			const CameraMotion r = fitter.Fit(after.Input(kPairSeconds, seq++));
+			Require((r.layerFlags & (16 | 64)) == 0 && r.layerRisk == 0, "no hold, no continuity reference after the cut: " + Flags(r));
 		}
 
 		static std::vector<CameraMotion> Sequence(const Config& c)
@@ -1092,6 +1151,9 @@ namespace VideoProcessorTest
 				&& SameBits(a.objectLayer.h[2], b.objectLayer.h[2]) && SameBits(a.objectLayer.h[5], b.objectLayer.h[5]);
 		}
 
+		// Identity with the pre-change fitter is shown by the camf comparison of camera_eval vs camera_eval_base.exe (real clips,
+		// bit-identical .camf); this test shows that, with twoLayer off, the other two-layer constants change nothing and that
+		// the layer fields stay empty.
 		// twoLayer = false: the records equal the default-configuration records bit for bit, whatever the other two-layer
 		// constants are, and carry no layer fields.
 		TEST_METHOD(TwoLayerOffIsByteIdentical)
