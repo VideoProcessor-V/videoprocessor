@@ -259,7 +259,10 @@ namespace VideoProcessorTest
 			ex.overlays.push_back(R(100, 60, 120, 70));
 			ex.textGuard = &guard;
 			ex.camera = &cam;
-			const Frame f = Make(y, ex);
+			const LightLevel::Lut lut = LightLevel::Build(LightLevel::Read([](const std::string&, std::string&) { return false; }), LightLevel::Context());
+			FrameParams withLut;
+			withLut.lut = &lut;   // complete evidence includes the light-level LUT (WP2)
+			const Frame f = Make(y, ex, true, withLut);
 			const View v(&f.pre);
 			Require(std::string(v.Status()).empty(), "complete evidence: empty status");
 			Require(v.At(6, 3).Overlay() && v.At(7, 4).Overlay(), "subtitle box blocks");
