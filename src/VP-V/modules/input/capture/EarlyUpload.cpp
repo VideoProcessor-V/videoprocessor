@@ -254,6 +254,7 @@ EarlyUpload::SlotHandle EarlyUpload::Upload(const void* data, size_t rowBytes, i
 				{
 					chosen.busy = false;
 					++stats.capDeferred;
+					++stats.noFreeSlot;
 					return nullptr;
 				}
 			}
