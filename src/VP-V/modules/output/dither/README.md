@@ -125,6 +125,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 ## Settings
 
 - Keys: `temporal_dither`, `dithering`, `dither_vectors`, `dither_grain_tolerance_scale`, `output_segments_merged`.
+- Planned keys (not yet implemented): `dither_need`.
 - Tiers: Classic libplacebo dither; Low..Upper sigma-delta.
 - VP-V page, Output tab: tiers Classic / Low / Mid; tier keys `temporal_dither`.
 - Listed under the tier: `occlusion_mask`.
