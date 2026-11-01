@@ -7,6 +7,8 @@
 #include <utility>
 #include <vector>
 
+#include <VP-V/core/Indicator.h>
+
 // Motion vectors computed ahead of display (docs/VP-nvof-ahead.md; owner
 // 2026-10-16: "start working on the frame 4 or so ahead and save the vector
 // sets ... obviously always have to default back to the original gpu path").
@@ -166,3 +168,22 @@ private:
 	std::map<std::pair<uint64_t, uint64_t>, Entry> entries;
 	Stats stats;
 };
+
+// Resync-driven keying (resync_event = on): one generation word for the store, from the central
+// Indicator at the frame `seq`. Packing (no two distinct stamps collide inside the wrap limits):
+//   bits 63..48  era            (low 16 bits of the Indicator era; 65 535 rebuilds per process)
+//   bits 47..24  continuity     (the continuity count at seq, low 24 bits; a FULL also moves it)
+//   bits 23..0   full + 1       (the FULL count at seq plus one, low 24 bits)
+// Limits: the key repeats only after 2^24 (16.7 M) FULL events, 2^24 continuity events or 2^16
+// eras within one Indicator; at 1 event per second that is 194 days. The key is 0 only when all
+// three fields wrapped at once (callers treat 0 as "no generation"; runtime-safe, no abort).
+// The key changes after a FULL, after a continuity event and is stable otherwise; the producer's
+// engage generation is VpResync::Drive::FullKey (era + full only), so a Minor gap keeps its
+// engagement while the store itself drops the pairs that span the gap.
+inline uint64_t VectorStoreKey(const VpIndicator::Indicator& ind, uint64_t seq)
+{
+	const VpIndicator::Stamp s = ind.StampOf(seq);
+	return (uint64_t(s.era & 0xFFFFu) << 48) |
+		((uint64_t(s.v[VpIndicator::kContinuity]) & 0xFFFFFFu) << 24) |
+		((uint64_t(s.v[VpIndicator::kFull]) + 1u) & 0xFFFFFFu);
+}

@@ -44,7 +44,10 @@
     "src/VP-V/modules/motion/estimation/VectorDemand.h",
     "src/VP-V/modules/motion/estimation/tests/VectorDemandTests.cpp",
     "src/VP-V/modules/motion/estimation/VectorDemandProducts.h",
-    "src/VP-V/modules/motion/estimation/tests/VectorDemandProductsTests.cpp"
+    "src/VP-V/modules/motion/estimation/tests/VectorDemandProductsTests.cpp",
+    "src/VP-V/modules/motion/estimation/MotionResyncReaders.h",
+    "src/VP-V/modules/motion/estimation/tests/MotionValidityResyncTests.cpp",
+    "src/VP-V/core/FrameAnalysisValidity.h"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/MotionAhead.h",

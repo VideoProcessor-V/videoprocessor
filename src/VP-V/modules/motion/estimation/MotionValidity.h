@@ -4,7 +4,12 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
+
+#include <VP-V/core/Indicator.h>
+#include <VP-V/core/ResyncCause.h>
+#include <VP-V/modules/input/signal/ResyncDrive.h>
 
 // One vectors-valid state (docs/VP-interpolator-50-60-plan.md, build order step 1;
 // owner 2026-10-14, [[vp-vector-validity]]): every consumer of motion vectors
@@ -150,6 +155,51 @@ namespace MotionValidity
 		uint64_t invalidations = 0;    // how many since the last look
 	};
 
+	// Resync-driven mode (resync_event = on): the central Indicator drives the epoch at the SEAL of
+	// the frame that carries a change. Mapping of the Indicator's cause to this vocabulary (the
+	// table the `motion-history` reader uses, see MotionResyncReaders.h):
+	//   FULL  Start, StartAfterSourceChange, RendererReset, CounterBackwards,
+	//         TimestampBreakLarge, other/unknown            -> Resync (releases resources)
+	//   FULL  InPlaceSourceChange, SourceFormatChanged      -> SourceFormatChange (releases)
+	//   FULL  LiveQueueReset, QueueGenerationOther,
+	//         CalibrationStart, CalibrationEnd              -> QueueReset
+	//   FULL  FileDiscontinuity                             -> Seek
+	//   continuity  DriftDrop                               -> DriftDrop
+	//   continuity  every other cause                       -> Gap
+	//   settings[motion]                                    -> SettingsChange
+	inline Cause CauseOfFull(VpResync::Cause c)
+	{
+		switch (c)
+		{
+		case VpResync::Cause::InPlaceSourceChange:
+		case VpResync::Cause::SourceFormatChanged:
+			return Cause::SourceFormatChange;
+		case VpResync::Cause::LiveQueueReset:
+		case VpResync::Cause::QueueGenerationOther:
+		case VpResync::Cause::CalibrationStart:
+		case VpResync::Cause::CalibrationEnd:
+			return Cause::QueueReset;
+		case VpResync::Cause::FileDiscontinuity:
+			return Cause::Seek;
+		default:
+			return Cause::Resync;
+		}
+	}
+
+	inline Cause CauseOfContinuity(VpResync::Cause c)
+	{
+		return c == VpResync::Cause::DriftDrop ? Cause::DriftDrop : Cause::Gap;
+	}
+
+	// What OnSealedChange did (for the reader's pending flags).
+	struct SealedResult
+	{
+		bool moved = false;        // the epoch moved at least once
+		bool release = false;      // one of the moves released resources
+		Cause cause = Cause::Gap;  // the last cause applied
+		unsigned moves = 0;        // how many epoch moves
+	};
+
 	class State
 	{
 	public:
@@ -161,18 +211,108 @@ namespace MotionValidity
 
 		// Any thread. Moves the epoch; returns the new one. Everything made before
 		// (pairs, masks, grain, hold history, stored vectors) is stale from here.
+		//
+		// Bound to an Indicator (Driven()): a request for Resync / QueueReset / Seek /
+		// SourceFormatChange does NOT move the epoch (the resync arms already wrote FULL to
+		// the Indicator; the epoch moves at the seal of the carrying frame, OnSealedChange),
+		// it is counted in DeferredToSeal() and the current epoch is returned.
+		// SettingsChange / MotionSourceChange / SmoothMotionMix write settings[motion] for the
+		// first unsealed frame instead (the reader moves the epoch at that frame's seal).
+		// Gap, CadenceRepeat, DriftDrop and RebaseChange stay immediate (the hole safety net).
+		// Unbound: exactly InvalidateNow (today's code path).
 		uint64_t Invalidate(Cause cause) noexcept
 		{
-			const size_t i = Index(cause);
-			if (i >= kCauseCount)
+			if (Index(cause) >= kCauseCount)
 				return epoch.load(std::memory_order_acquire);
-			// The cause and the release request are published before the epoch, so a
-			// reader that sees the new epoch (acquire) sees them too.
-			lastCause.store(static_cast<int>(cause), std::memory_order_relaxed);
-			if (ReleasesResources(cause))
-				releasePending.store(true, std::memory_order_relaxed);
-			counts[i].fetch_add(1, std::memory_order_relaxed);
-			return epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+			const std::shared_ptr<VpIndicator::Indicator> indicator = std::atomic_load(&ind);
+			if (!indicator)
+				return InvalidateNow(cause);
+			switch (cause)
+			{
+			case Cause::Resync:
+			case Cause::QueueReset:
+			case Cause::Seek:
+			case Cause::SourceFormatChange:
+				deferred.fetch_add(1, std::memory_order_relaxed);
+				return epoch.load(std::memory_order_acquire);
+			case Cause::SettingsChange:
+			case Cause::MotionSourceChange:
+			case Cause::SmoothMotionMix:
+				try
+				{
+					indicator->Advance(VpIndicator::kSettingsMotion, VpResync::Cause::SettingsApply,
+						indicator->HasSealed() ? indicator->LastSealed() + 1 : 0);
+					settingsAdvances.fetch_add(1, std::memory_order_relaxed);
+					return epoch.load(std::memory_order_acquire);
+				}
+				catch (...)
+				{
+					return InvalidateNow(cause);   // never lose an invalidation
+				}
+			default:
+				return InvalidateNow(cause);
+			}
+		}
+
+		// Render thread, from the `motion-history` reader at the seal of the frame that
+		// carries a change (c.relevant = the counters that changed for this reader).
+		// FULL -> CauseOfFull(fullCause) (the Indicator cause of the FULL event);
+		// else continuity -> CauseOfContinuity(continuityCause); settings[motion] ->
+		// SettingsChange. Rebase axes alone move nothing here (RebaseChange stays immediate;
+		// the reader raises its own forget-re-based-holders flag). Each applies the
+		// unconditional epoch move; a FULL from a source/format change releases resources.
+		SealedResult OnSealedChange(const VpIndicator::Indicator::Change& c, VpResync::Cause fullCause,
+			VpResync::Cause continuityCause = VpResync::Cause::None) noexcept
+		{
+			SealedResult r;
+			auto apply = [&](Cause cause) {
+				InvalidateNow(cause);
+				r.moved = true;
+				r.cause = cause;
+				++r.moves;
+				if (ReleasesResources(cause))
+					r.release = true;
+			};
+			if ((c.relevant & VpIndicator::Bit(VpIndicator::kFull)) != 0)
+				apply(CauseOfFull(fullCause));
+			else if ((c.relevant & VpIndicator::Bit(VpIndicator::kContinuity)) != 0)
+				apply(CauseOfContinuity(continuityCause));
+			if ((c.relevant & VpIndicator::Bit(VpIndicator::kSettingsMotion)) != 0)
+				apply(Cause::SettingsChange);
+			return r;
+		}
+
+		// Render thread (setup / teardown). Bound = resync `on`.
+		void Bind(std::shared_ptr<VpIndicator::Indicator> indicator) { std::atomic_store(&ind, std::move(indicator)); }
+		void Unbind() { std::atomic_store(&ind, std::shared_ptr<VpIndicator::Indicator>()); }
+		bool Driven() const { return std::atomic_load(&ind) != nullptr; }
+
+		// Requests deferred to the seal, and settings[motion] advances written (bound only).
+		uint64_t DeferredToSeal() const noexcept { return deferred.load(std::memory_order_relaxed); }
+		uint64_t SettingsAdvances() const noexcept { return settingsAdvances.load(std::memory_order_relaxed); }
+
+		// Adjacent(a, b) and, when bound, the Indicator stamps of a and b agree on FULL,
+		// continuity and settings[motion]: a look-ahead copy queued before a FULL whose pair
+		// spans it is refused whatever the epoch says. Unbound: Adjacent only (the caller keeps
+		// the epoch form of PairValid).
+		bool PairValidAt(uint64_t a, uint64_t b) const
+		{
+			if (!Adjacent(a, b))
+				return false;
+			const std::shared_ptr<VpIndicator::Indicator> indicator = std::atomic_load(&ind);
+			if (!indicator)
+				return true;
+			return VpIndicator::TemporalValid(*indicator, a, b,
+				VpIndicator::Bit(VpIndicator::kFull) | VpIndicator::Bit(VpIndicator::kContinuity) |
+				VpIndicator::Bit(VpIndicator::kSettingsMotion));
+		}
+
+		// Bound: the producer's engage generation at seq = Drive::FullKey (era + FULL count).
+		// Unbound: StreamGeneration().
+		uint64_t StreamGenerationAt(uint64_t seq) const
+		{
+			const std::shared_ptr<VpIndicator::Indicator> indicator = std::atomic_load(&ind);
+			return indicator ? VpResync::Drive::FullKey(*indicator, seq) : StreamGeneration();
 		}
 
 		// Any thread.
@@ -185,7 +325,9 @@ namespace MotionValidity
 		// ResetLiveQueue() with QueueReset. For the producer's store and the
 		// look-ahead engagement while step 1 must not change behaviour (a gap moves
 		// the epoch, and keying the store on the epoch would discard the ahead pairs
-		// computed for the frames after the gap). Monotonic; any thread.
+		// computed for the frames after the gap). Monotonic; any thread. Bound to an Indicator
+		// this STILL returns this unbound formula (the request-time counts, which do not move
+		// for deferred causes); use StreamGenerationAt(seq) for the Indicator-keyed generation.
 		uint64_t StreamGeneration() const noexcept
 		{
 			return kInitialEpoch + Count(Cause::Resync) + Count(Cause::QueueReset) + Count(Cause::Seek) +
@@ -302,6 +444,21 @@ namespace MotionValidity
 		}
 
 	private:
+		// The unconditional epoch move (today's Invalidate).
+		uint64_t InvalidateNow(Cause cause) noexcept
+		{
+			const size_t i = Index(cause);
+			if (i >= kCauseCount)
+				return epoch.load(std::memory_order_acquire);
+			// The cause and the release request are published before the epoch, so a
+			// reader that sees the new epoch (acquire) sees them too.
+			lastCause.store(static_cast<int>(cause), std::memory_order_relaxed);
+			if (ReleasesResources(cause))
+				releasePending.store(true, std::memory_order_relaxed);
+			counts[i].fetch_add(1, std::memory_order_relaxed);
+			return epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+		}
+
 		void StartRunLocked(uint64_t sequence, uint64_t inEpoch)
 		{
 			previousKept = 0;
@@ -314,6 +471,9 @@ namespace MotionValidity
 		std::atomic<bool> releasePending{ false };
 		std::array<std::atomic<uint64_t>, kCauseCount> counts{};
 		std::atomic<uint64_t> repeats{ 0 };
+		std::shared_ptr<VpIndicator::Indicator> ind;   // accessed with std::atomic_load / atomic_store only
+		std::atomic<uint64_t> deferred{ 0 };
+		std::atomic<uint64_t> settingsAdvances{ 0 };
 
 		mutable std::mutex keptMutex;
 		uint64_t lastKept = 0, previousKept = 0, keptEpoch = 0;

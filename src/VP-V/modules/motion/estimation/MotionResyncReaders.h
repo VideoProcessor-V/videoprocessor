@@ -1,0 +1,254 @@
+// Copyright(C) 2026 VP-V contributors
+// SPDX-License-Identifier: GPL-3.0-only
+#pragma once
+
+#include <VP-V/core/Indicator.h>
+#include <VP-V/core/ResyncCause.h>
+#include <VP-V/modules/input/signal/ResyncDrive.h>
+#include <VP-V/modules/motion/estimation/MotionValidity.h>
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+// The motion family as readers of the central Indicator (resync_event = on). Two readers, both
+// called on the render thread at the seal of the frame that carries the change:
+//
+//   motion-history   moves MotionValidity's epoch (State::OnSealedChange) and collects what the
+//                    consumer must forget at its apply point (Take: same style as Drive::Take).
+//   vector-producer  re-keys the look-ahead producer's engage generation to Drive::FullKey at the
+//                    carrying frame and records the in-flight job generation to drop, WITHOUT a
+//                    restart or a back-off; a continuity change only sets the "skip pairs
+//                    spanning" note (pair validity itself is State::PairValidAt).
+//
+// They are not entries of VpResync::Reader / Drive: they are plain registrations a FrameSeal
+// provider calls later (RegisterOn). Like Drive's readers they LATCH on their first observe: the
+// Indicator reports every counter then, and a reader acts only on what changed AT that frame (the
+// stamp of seq against the stamp of seq - 1), never on the history of the era.
+//
+// Header-only, C++14. Render thread only (callbacks, Take, counters).
+namespace VpMotionResync {
+
+using VpIndicator::Bit;
+using VpIndicator::CounterMask;
+using VpIndicator::Policy;
+
+enum class Reader : uint8_t { MotionHistory, VectorProducer, Count };
+
+struct ReaderSpec {
+    const char* name;
+    CounterMask reads;
+    std::array<Policy, VpIndicator::kCounterCount> policies;
+};
+
+inline const ReaderSpec& SpecOf(Reader r)
+{
+    using namespace VpIndicator;
+    static const ReaderSpec specs[static_cast<size_t>(Reader::Count)] = {
+        // F Reset (release resources when the FULL cause releases), M Reset ("forget"),
+        // rebase axes Reset ("forget re-based-plane holders only"), settings[motion] Reset.
+        { "motion-history",
+          Bit(kFull) | Bit(kContinuity) | Bit(kRebaseH) | Bit(kRebaseV) | Bit(kSettingsMotion),
+          [] {
+              std::array<Policy, kCounterCount> p{};
+              p[kFull] = Policy::Reset;
+              p[kContinuity] = Policy::Reset;
+              p[kRebaseH] = Policy::Reset;
+              p[kRebaseV] = Policy::Reset;
+              p[kSettingsMotion] = Policy::Reset;
+              return p;
+          }() },
+        // F and settings[motion]: re-key, drop the in-flight job, no restart. M: note only.
+        { "vector-producer",
+          Bit(kFull) | Bit(kContinuity) | Bit(kSettingsMotion),
+          [] {
+              std::array<Policy, kCounterCount> p{};
+              p[kFull] = Policy::Reset;
+              p[kContinuity] = Policy::Hold;
+              p[kSettingsMotion] = Policy::Reset;
+              return p;
+          }() },
+    };
+    return specs[static_cast<size_t>(r) < static_cast<size_t>(Reader::Count) ? static_cast<size_t>(r) : 0];
+}
+
+// What the motion-history consumer must do at its apply point (cleared by Take).
+struct HistoryPending {
+    bool changed = false;                 // the epoch moved at a seal: forget vector-derived history
+    bool forgetRebaseHolders = false;     // a rebase axis (or a FULL) moved: forget re-based-plane holders only
+    bool release = false;                 // a FULL from a source/format change: release resources
+    MotionValidity::Cause cause = MotionValidity::Cause::Gap;   // the last cause applied
+    unsigned moves = 0;                   // epoch moves since the last Take
+    CounterMask counters = 0;             // the counters that changed since the last Take
+};
+
+// What the vector producer must do (cleared by TakeProducerNote).
+struct ProducerNote {
+    bool drop = false;                    // drop the job in flight under droppedInFlightGeneration
+    uint64_t droppedInFlightGeneration = 0;   // the old engage generation (0 = none)
+    uint64_t engageGeneration = 0;        // the new one: Drive::FullKey at the carrying seq
+    bool skipSpanning = false;            // a continuity change: skip pairs spanning it
+};
+
+// The readers' state. Must outlive the Indicator's callbacks (the callbacks hold its address).
+class Readers {
+public:
+    Readers() = default;
+    Readers(const Readers&) = delete;
+    Readers& operator=(const Readers&) = delete;
+
+    // motion-history
+    HistoryPending TakeHistory()
+    {
+        const HistoryPending p = m_history;
+        m_history = HistoryPending();
+        return p;
+    }
+    const HistoryPending& PeekHistory() const { return m_history; }
+
+    // vector-producer
+    ProducerNote TakeProducerNote()
+    {
+        const ProducerNote n = m_note;
+        m_note.drop = false;
+        m_note.droppedInFlightGeneration = 0;
+        m_note.skipSpanning = false;
+        return n;   // engageGeneration stays current
+    }
+    uint64_t EngageGeneration() const { return m_note.engageGeneration; }
+    uint64_t RestartsAvoided() const { return m_restartsAvoided; }
+    uint64_t InFlightDrops() const { return m_inFlightDrops; }
+
+    // Test hook: callbacks that ACTED (a relevant change AT the carrying frame), one per frame,
+    // and all callbacks (including the latching first one).
+    unsigned HistoryActs() const { return m_historyActs; }
+    unsigned ProducerActs() const { return m_producerActs; }
+    unsigned HistoryCalls() const { return m_historyCalls; }
+    unsigned ProducerCalls() const { return m_producerCalls; }
+
+    // Called by RegisterOn's callbacks (render thread).
+    void OnHistory(VpIndicator::Indicator& ind, MotionValidity::State& state,
+                   const VpIndicator::Indicator::Change& c)
+    {
+        ++m_historyCalls;
+        CounterMask rel = c.relevant;
+        if (!m_historyLatched) {
+            m_historyLatched = true;
+            rel &= AtFrame(ind, c.seq);
+        }
+        const VpIndicator::Indicator::Change cc{ c.seq, c.changed, rel, c.policies };
+        if (rel == 0) {
+            m_historyLast = c.seq;
+            m_historyHave = true;
+            return;
+        }
+        VpResync::Cause full = VpResync::Cause::None, cont = VpResync::Cause::None;
+        if ((rel & Bit(VpIndicator::kFull)) != 0)
+            full = LatestCause(ind, VpIndicator::kFull, m_historyHave, m_historyLast, c.seq);
+        else if ((rel & Bit(VpIndicator::kContinuity)) != 0)
+            cont = LatestCause(ind, VpIndicator::kContinuity, m_historyHave, m_historyLast, c.seq);
+        const MotionValidity::SealedResult r = state.OnSealedChange(cc, full, cont);
+        ++m_historyActs;
+        m_historyLast = c.seq;
+        m_historyHave = true;
+        m_history.counters |= rel;
+        if (r.moved) {
+            m_history.changed = true;
+            m_history.cause = r.cause;
+            m_history.moves += r.moves;
+            if (r.release)
+                m_history.release = true;
+        }
+        if ((rel & (Bit(VpIndicator::kRebaseH) | Bit(VpIndicator::kRebaseV))) != 0)
+            m_history.forgetRebaseHolders = true;
+    }
+
+    void OnProducer(VpIndicator::Indicator& ind, const VpIndicator::Indicator::Change& c)
+    {
+        ++m_producerCalls;
+        CounterMask rel = c.relevant;
+        if (!m_producerLatched) {
+            m_producerLatched = true;
+            rel &= AtFrame(ind, c.seq);
+            // Baseline before the carrying frame: a change AT this frame then re-keys and drops.
+            m_note.engageGeneration = VpResync::Drive::FullKey(ind, c.seq == 0 ? 0 : c.seq - 1);
+        }
+        if (rel == 0)
+            return;
+        ++m_producerActs;
+        if ((rel & (Bit(VpIndicator::kFull) | Bit(VpIndicator::kSettingsMotion))) != 0) {
+            m_note.drop = true;
+            m_note.droppedInFlightGeneration = m_note.engageGeneration;
+            m_note.engageGeneration = VpResync::Drive::FullKey(ind, c.seq);
+            ++m_inFlightDrops;
+            ++m_restartsAvoided;   // the producer keeps running: no restart, no back-off count
+        }
+        if ((rel & Bit(VpIndicator::kContinuity)) != 0)
+            m_note.skipSpanning = true;
+    }
+
+private:
+    // The counters that changed AT seq: its stamp against the previous frame's.
+    static CounterMask AtFrame(const VpIndicator::Indicator& ind, uint64_t seq)
+    {
+        if (seq == 0)
+            return VpIndicator::kAllCounters;
+        return VpIndicator::Changed(ind.StampOf(seq - 1), ind.StampOf(seq));
+    }
+
+    // The cause of the newest event of `counter` that applies to seq and is newer than `last`.
+    static VpResync::Cause LatestCause(const VpIndicator::Indicator& ind, VpIndicator::Counter counter,
+                                       bool haveLast, uint64_t last, uint64_t seq)
+    {
+        std::vector<VpIndicator::Event> events(ind.Capacity());
+        const size_t n = ind.Snapshot(events.data(), events.size());
+        VpResync::Cause best = VpResync::Cause::None;
+        uint64_t bestSerial = 0;
+        for (size_t i = 0; i < n; ++i) {
+            const VpIndicator::Event& e = events[i];
+            if (e.counter != counter || e.fromSeq > seq || (haveLast && e.fromSeq <= last))
+                continue;
+            if (e.serial >= bestSerial) {
+                bestSerial = e.serial;
+                best = e.cause;
+            }
+        }
+        return best;
+    }
+
+    HistoryPending m_history;
+    ProducerNote m_note;
+    uint64_t m_restartsAvoided = 0;
+    uint64_t m_inFlightDrops = 0;
+    unsigned m_historyActs = 0, m_producerActs = 0, m_historyCalls = 0, m_producerCalls = 0;
+    uint64_t m_historyLast = 0;
+    bool m_historyHave = false;
+    bool m_historyLatched = false;
+    bool m_producerLatched = false;
+};
+
+struct Ids {
+    int motionHistory = -1;
+    int vectorProducer = -1;
+};
+
+// Setup (before the Indicator's first Observe). `readers` and `state` must outlive the Indicator's
+// observes. Returns the reader ids; -1 for a reader the Indicator refused (counted in its
+// RejectedReaders; a refused reader never fires).
+inline Ids RegisterOn(VpIndicator::Indicator& indicator, MotionValidity::State& state, Readers& readers)
+{
+    Ids ids;
+    VpIndicator::Indicator* ind = &indicator;
+    MotionValidity::State* st = &state;
+    Readers* rd = &readers;
+    const ReaderSpec& history = SpecOf(Reader::MotionHistory);
+    ids.motionHistory = indicator.Register(history.name, history.reads, history.policies,
+        [ind, st, rd](const VpIndicator::Indicator::Change& c) { rd->OnHistory(*ind, *st, c); });
+    const ReaderSpec& producer = SpecOf(Reader::VectorProducer);
+    ids.vectorProducer = indicator.Register(producer.name, producer.reads, producer.policies,
+        [ind, rd](const VpIndicator::Indicator::Change& c) { rd->OnProducer(*ind, c); });
+    return ids;
+}
+
+} // namespace VpMotionResync
