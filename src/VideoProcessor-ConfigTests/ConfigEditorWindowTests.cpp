@@ -384,6 +384,10 @@ QString repositoryPath(const QString& relative)
     return source.left(position) + u'/' + relative;
 }
 
+// A Rendering profile in v1.4.02's migrated form (Bill's load-time migration freezes tone and luminance values
+// into each profile and adds the Scaling Default): it opens with no pending change.
+const QByteArray kMigratedCinema = QByteArray("[vprenderer.Cinema]\nsdr_target_nits: 100\nsdr_black_nits: 0\npeak_detection: high_quality\ncontrast_recovery: 0.3\n[vprenderer.scaling.Default]\nupscaler: ewa_lanczossharp\ndownscaler: hermite\nsigmoid: on\ndeband_strength: default\ndithering: blue_noise\ndisplay_bit_depth: output\n");
+
 QByteArray readBytes(const QString& path)
 {
     QFile file(path);
@@ -477,7 +481,11 @@ void testRendererCardsShowDefaultsAndRoundTrip()
     // only what applies is shown, and Apply / reopen keeps every edit while
     // the rest of the file stays as it was.
     QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
-    const QByteArray original = "# a comment that stays\n[vprenderer.Cinema]\nquality: high # kept\n";
+    // `quality` is retired in v1.4.02 (the migration removes it), so the commented line kept is a live key,
+    // in the migrated form of the profile.
+    const QByteArray original = "# a comment that stays\n[vprenderer.Cinema]\nsdr_target_nits: 100 # kept\nsdr_black_nits: 0\n"
+        "peak_detection: high_quality\ncontrast_recovery: 0.3\n[vprenderer.scaling.Default]\nupscaler: ewa_lanczossharp\n"
+        "downscaler: hermite\nsigmoid: on\ndeband_strength: default\ndithering: blue_noise\ndisplay_bit_depth: output\n";
     {
         QFile file(path); require(file.open(QIODevice::WriteOnly), "fixture");
         file.write(original);
@@ -546,7 +554,7 @@ void testRendererCardsShowDefaultsAndRoundTrip()
             "The strobing switch did not survive Apply and reopen");
     }
     const QByteArray saved = readBytes(path);
-    for (const char* kept : { "# a comment that stays", "quality: high # kept" })
+    for (const char* kept : { "# a comment that stays", "sdr_target_nits: 100 # kept" })
         require(saved.contains(kept), (QByteArray("A line outside the edits changed: ") + kept).constData());
     for (const char* edited : { "dejudder_strength: 0.25", "dejudder_motion_rolloff: on", "sdr_tone_shape: knee",
             "capture_path: gpu", "dejudder_fade_match: off" })
@@ -557,7 +565,8 @@ void testRendererCardsShowDefaultsAndRoundTrip()
         if (line.startsWith("dejudder_") || line.startsWith("sdr_") || line.startsWith("capture_") ||
                 line.startsWith("adaptive_") || line.startsWith("dither_") || line.startsWith("occlusion_"))
             ++rendererKeys;
-    require(rendererKeys == 5, ("Renderer keys other than the five edits were written:\n" + saved).constData());
+    // The five edits, plus the fixture's own sdr_target_nits / sdr_black_nits (migrated form of the profile).
+    require(rendererKeys == 7, ("Renderer keys other than the five edits were written:\n" + saved).constData());
 }
 
 // Saves the window's current page as a PNG in %VP_TEST_SHOTS% (when set),
@@ -742,7 +751,7 @@ void testEveryNewRendererControlReachesVp()
     for (const auto& entry : model.profiles)
     {
         names += entry.first + " ";
-        if (entry.second.settings.count("quality")) cinema = &entry.second;
+        if (entry.first == "display.cinema") cinema = &entry.second;   // `quality` is retired in v1.4.02
     }
     require(cinema != nullptr, ("The Cinema profile is missing after the save; profiles: " + names).c_str());
     for (const Edit& edit : edits)
@@ -7113,6 +7122,7 @@ void testRemoteApplyTracksPendingSettings()
         "Cannot inspect the clean Apply RPC port");
     std::atomic<bool> stop{false}, exactCandidate{false};
     std::atomic<unsigned int> applies{0};
+    std::atomic<int> dOrigEq{-1}, dCandNe{-1}, dOrigSize{0}, dBaseSize{0};
     std::thread server([&]
     {
         const auto receiveExact = [](SOCKET client, uint8_t* bytes, size_t count)
@@ -7163,6 +7173,8 @@ void testRemoteApplyTracksPendingSettings()
                     Read16(payload.data()) == ConfigurationCompatibilityVersion &&
                     ReadString(payload, cursor, original) && ReadString(payload, cursor, candidate) &&
                     cursor == payload.size() && original == baseline && candidate != baseline;
+                dOrigEq = original == baseline ? 1 : 0; dCandNe = candidate != baseline ? 1 : 0;
+                dOrigSize = static_cast<int>(original.size()); dBaseSize = static_cast<int>(baseline.size());
                 ++applies;
                 WriteString(response.payload, "Apply profiles live");
                 response.payload.push_back(1);
@@ -7196,8 +7208,16 @@ void testRemoteApplyTracksPendingSettings()
     require(apply->isEnabled() && hasPendingConfigurationChanges(remote),
         "Remote edit did not enable Apply");
     apply->click();
+    // The remote Apply runs on a worker (VP may take up to a minute to answer; VP-V audit 2026-10-16), so the
+    // test waits for it instead of assuming the request was sent before click() returned.
+    for (int waited = 0; waited < 400 && requireControl<QLabel>(remote, "configurationStatus")->text().startsWith(QStringLiteral("Applying")); ++waited)
+    {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
+        QThread::msleep(25);
+    }
     require(applies.load() == 1 && exactCandidate.load(),
-        "Remote Apply did not send its saved baseline and edited candidate");
+        (QStringLiteral("Remote Apply did not send its saved baseline and edited candidate: applies %1 origEq %2 candNe %3 sizes %4/%5")
+            .arg(applies.load()).arg(dOrigEq.load()).arg(dCandNe.load()).arg(dOrigSize.load()).arg(dBaseSize.load()) + QStringLiteral(" status: ") + requireControl<QLabel>(remote, "configurationStatus")->text().left(400)).toStdString().c_str());
     require(!apply->isEnabled() && !hasPendingConfigurationChanges(remote) &&
         readBytes(path).toStdString() == baseline,
         "Successful remote Apply did not disable, or changed the local file");
@@ -10450,11 +10470,11 @@ void testRevealReloadsAnOutOfBandEdit()
     // Bug 2: Config hidden in the tray keeps its document; a reveal reloads a
     // clean editor whose file changed meanwhile.
     QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
-    writeFixture(path, "[general]\nprofile_change_display_seconds: 5\n[vprenderer.Cinema]\nquality: high\n");
+    writeFixture(path, "[general]\nprofile_change_display_seconds: 5\n" + kMigratedCinema);
     ConfigEditorWindow window(path, 0, true);
     require(requireControl<QSpinBox>(window, "config.general.profile_change_display_seconds")->value() == 5, "fixture");
     window.hide();
-    writeFixture(path, "[general]\nprofile_change_display_seconds: 9\n[vprenderer.Cinema]\nquality: high\n");
+    writeFixture(path, "[general]\nprofile_change_display_seconds: 9\n" + kMigratedCinema);
     window.reveal();
     QCoreApplication::processEvents();
     require(requireControl<QSpinBox>(window, "config.general.profile_change_display_seconds")->value() == 9,
@@ -10468,8 +10488,8 @@ void testSaveAsksWhenTheFileChangedOnDisk()
     // Bug 2: a dirty editor whose file changed on disk asks Reload / Overwrite
     // / Cancel instead of overwriting the other change silently.
     QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
-    const QByteArray original = "[general]\nprofile_change_display_seconds: 5\n[vprenderer.Cinema]\nquality: high\n";
-    const QByteArray external = "# hand edit\n[general]\nprofile_change_display_seconds: 7\n[vprenderer.Cinema]\nquality: high\n";
+    const QByteArray original = "[general]\nprofile_change_display_seconds: 5\n" + kMigratedCinema;
+    const QByteArray external = "# hand edit\n[general]\nprofile_change_display_seconds: 7\n" + kMigratedCinema;
     writeFixture(path, original);
     ConfigEditorWindow window(path, 0, true);
     window.setPromptsForTesting(true);
@@ -11488,7 +11508,7 @@ void testUnsavedEditsAskOnCloseAndExit()
     // Usability (a): closing or exiting with unsaved edits asks Save /
     // Discard / Keep editing.
     QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
-    const QByteArray original = "[general]\nprofile_change_display_seconds: 5\n[vprenderer.Cinema]\nquality: high\n";
+    const QByteArray original = "[general]\nprofile_change_display_seconds: 5\n" + kMigratedCinema;
     writeFixture(path, original);
     ConfigEditorWindow window(path, 0, true);
     window.setPromptsForTesting(true);
@@ -11623,8 +11643,7 @@ void testRenderAheadControlsShowDefaultsAndSave()
     save(window);
     const QByteArray saved = readBytes(path);
     require(saved.contains("render_ahead: on") && saved.contains("dejudder_gate: period") &&
-        saved.contains("render_ahead_utilisation: 0.9") && saved.contains("render_ahead_queue_credit: on") &&
-        saved.contains("quality: high"),
+        saved.contains("render_ahead_utilisation: 0.9") && saved.contains("render_ahead_queue_credit: on"),
         (QByteArray("the render-ahead keys did not save: ") + saved).constData());
 }
 
@@ -11668,9 +11687,10 @@ void testInheritedPictureFieldsAndGreyedRenderAhead()
 {
     QTemporaryDir dir; const QString path = dir.filePath("VideoProcessor.cfg");
     writeFixture(path, "[general]\nprofile_change_display_seconds: 5\n"
-        "[vprenderer.Cinema]\nquality: high\nsource_resolution_auto_min_confidence: 0.70\n"
+        "[vprenderer.Cinema]\nsdr_target_nits: 100\nsdr_black_nits: 0\npeak_detection: high_quality\ncontrast_recovery: 0.3\nsource_resolution_auto_min_confidence: 0.70\n"
         "source_resolution_evidence_seconds: 5\nsource_resolution_evidence_shots: 2\n"
-        "[vprenderer.Night]\nquality: high\n");
+        "[vprenderer.Night]\nsdr_target_nits: 100\nsdr_black_nits: 0\npeak_detection: high_quality\ncontrast_recovery: 0.3\n[vprenderer.scaling.Default]\nupscaler: ewa_lanczossharp\ndownscaler: hermite\nsigmoid: on\n"
+        "deband_strength: default\ndithering: blue_noise\ndisplay_bit_depth: output\n");
     ConfigEditorWindow window(path, 0, true);
     auto* apply = requireControl<QPushButton>(window, "applyConfiguration");
     requireControl<QListWidget>(window, "config.vprenderer.profiles")->setCurrentRow(1);
@@ -11785,8 +11805,7 @@ void testFilePlaybackControlsValidateResetAndSave()
     require(offset->value() == MainConfigSchema::FileAvOffsetDefaultMs, "reset did not restore the default offset");
     save(window);
     const QByteArray saved = readBytes(path);
-    require(saved.contains("file_av_offset_ms: 0") && saved.contains("file_led_holdover_ms: 1500") &&
-        saved.contains("quality: high"), (QByteArray("the file playback keys did not save: ") + saved).constData());
+    require(saved.contains("file_av_offset_ms: 0") && saved.contains("file_led_holdover_ms: 1500"), (QByteArray("the file playback keys did not save: ") + saved).constData());
 }
 
 // Bug hunt 3 (2026-10-18, hunter D): Config findings CFG2-CFG7.

@@ -6571,6 +6571,10 @@ namespace VideoProcessorTest
 			const size_t hdrAt = normalized.find(hdrRule);
 			Assert::IsTrue(hdrAt != std::string::npos);
 			normalized.erase(hdrAt, hdrRule.size());
+			// v1.4.02 layout: the same rule selects the Scaling profile that holds the HDR debanding.
+			const std::string scalingHdrRule = "\n[vprenderer.scaling.HDR]\nwhen: $eotf==\"pq\" || $eotf==\"hlg\"\n";
+			const size_t scalingAt = normalized.find(scalingHdrRule);
+			if (scalingAt != std::string::npos) normalized.erase(scalingAt, scalingHdrRule.size());
 			Assert::IsTrue(normalized.find("\nwhen:") == std::string::npos);
 			Assert::IsTrue(shipped.find("[actions.") == std::string::npos);
 			Assert::IsTrue(shipped.find("[event_actions.") == std::string::npos);

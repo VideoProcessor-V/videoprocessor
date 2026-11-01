@@ -7113,7 +7113,11 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         auto* choiceLayout = new QHBoxLayout(choiceRow);
         choiceLayout->setContentsMargins(0, 0, 0, 0);
         choiceLayout->setSpacing(6);
-        choiceLayout->addWidget(combo, 1);
+        // VP-V's rows are driven by form row (setRowVisible(combo), moveRow, exclusive buttons beside a
+        // hidden combo): their combo stays the form's field itself, as before the merge. Only Bill's own
+        // keys get his combo + Reset row.
+        const bool vpvRow = Vpv::IsVpvOnlyKey(key) || Vpv::IsVpvChoiceKey(key);
+        if (!vpvRow) choiceLayout->addWidget(combo, 1);
         auto* reset = new QPushButton(QStringLiteral("Reset"), choiceRow);
         reset->setAccessibleName(QStringLiteral("Reset override"));
         // Keep the styled text and padding visible at every font/DPI size.
@@ -7123,8 +7127,17 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
         reset->setObjectName(combo->objectName() + QStringLiteral(".reset_override"));
         reset->setToolTip(QStringLiteral("Remove this setting's override and follow the inherited or built-in value."));
         reset->setVisible(allowInherited);
-        choiceLayout->addWidget(reset);
-        form->addRow(label, choiceRow);
+        if (vpvRow)
+        {
+            choiceRow->setParent(combo);   // keeps the (never shown) Reset button owned by the combo
+            choiceRow->hide();
+            form->addRow(label, combo);
+        }
+        else
+        {
+            choiceLayout->addWidget(reset);
+            form->addRow(label, choiceRow);
+        }
         fields->push_back({ key, combo, Field::Choice });
         connect(reset, &QPushButton::clicked, this, [this, state, key, combo, reset, sectionPrefix] {
             if (state->loading || state->section.isEmpty() || !document_) return;
@@ -8679,6 +8692,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 for (const Field& field : *fields)
                 {
                     if (QualityProfileMigration::ProcessingKey(field.key.toStdString()) ||
+                        Vpv::IsVpvOnlyKey(field.key) ||   // VP-V keys keep inheriting the default profile (DIV-CFG-04)
                         (preservePresets && QualityProfileMigration::PresetValue("high", field.key.toStdString())) ||
                         field.key == QStringLiteral("output_diagnostics") ||
                         field.key == QStringLiteral("diagnostic_disable_shader_cache") ||
@@ -11446,6 +11460,16 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
                 return nullptr;
             };
             auto moveRow = [](QWidget* field, QFormLayout* to) {
+                // Bill's addChoice wraps its combo (with the Reset button) in a row widget, so the
+                // combo is not itself a form field: walk up to the widget that is.
+                for (QWidget* f = field; f && f->parentWidget(); f = f->parentWidget())
+                    if (auto* owner = qobject_cast<QFormLayout*>(f->parentWidget()->layout()))
+                    {
+                        int at = -1;
+                        QFormLayout::ItemRole itemRole;
+                        owner->getWidgetPosition(f, &at, &itemRole);
+                        if (at >= 0) { field = f; break; }
+                    }
                 if (!field || !to || !field->parentWidget()) return;
                 auto* from = qobject_cast<QFormLayout*>(field->parentWidget()->layout());
                 if (!from || from == to) return;
