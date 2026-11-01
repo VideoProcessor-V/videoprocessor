@@ -179,6 +179,42 @@ field scan and the fit on ~1300 samples. Buffers: the per-block record (`BlockDa
 small pool when no record still holds it, and the per-pair scratch is reused, so steady state allocates
 nothing large (no first-touch page faults).
 
+## Robustness (2026-11-01)
+On real sequences (crowd_run under a pan, ~half the vectors on movers) the RANSAC fit was right but the confidence
+could never reach 0.5. Three `Config` fixes (the fitter still has no runtime caller, so no released behaviour changes):
+1. `inlierShareLo / Hi` = 0.25 / 0.55 (phase 1: 0.4 / 0.9). The inlier-share signal asked that the camera explain
+   most vectors; with many movers that is "no dominant motion" whatever the margin. Dominance against a competing
+   motion is the ambiguity signal's job.
+2. `temporalNoiseFloor` = true. `TemporalFilter::Consistency / Update` take an optional `floorSigma[4]` (one vector
+   precision per component: translation `precision / dt`, scale and angle at a quarter of the picture diagonal). Null
+   = phase-1 relative-only noise, under which near-zero components (scale, angle, a slow pan) made the signal ~0.
+3. `verdictGatesConfidence` = true. An Ambiguous / InverseMismatch record's confidence is multiplied by
+   `0.5 * clamp(signal / gate)`, so a failed verdict is never usable (< 0.5).
+Phase-1 behaviour = `{inlierShareLo 0.4, inlierShareHi 0.9, temporalNoiseFloor false, verdictGatesConfidence false}`
+(`camera_eval --phase1`). Tests: `CrowdUnderPanIsDominant` (also asserts the phase-1 failure), `NoDominantMotionRandomField`,
+`TwoLayerHalfAndHalfIsAmbiguous`, `ObjectOverBackgroundSixtyForty`, `NewDefaultsAreDeterministic`, and the temporal
+noise-floor tests.
+
+Measured with `tools/camera_eval` (`run_eval.py --match`; usable = valid and confidence >= 0.5; real truth = master
+DIS/NVOF fits that agree, region metric described in `tools/camera_eval/xcheck_real.py`):
+
+| | phase 1 | new |
+|---|---|---|
+| synthetic usable: crowd_pan / crowd_shake / crowd_static | 0 / 0 / 0 | 1.00 / 0.31 / 1.00 |
+| synthetic WRONG-confident (9 scenarios, 39 pairs each) | 0 | 0 |
+| real usable, mean over tiers and sources: crowd / tos / sol / boat | 0.00 / 0.26 / 0.20 / 0.35 | 0.91 / 0.98 / 0.81 / 0.59 |
+| real WRONG-confident, region metric (confident pairs judged; p90 block error over the true-camera blocks > max(1 px, 10 % of the p90 truth magnitude); all tiers incl. master) | 5 of 459 | 16 of 1857 (crowd 2/515, boat 14/323, sol 0, tos 0); over the fit's own camera labels 4 and 13; the crowd tiers plus boat/sol/tos `_low` alone: 5 of 741 vs 1 of 103 |
+| real WRONG-confident, extrapolated corner error (includes non-camera regions; mostly measures affine / homography extrapolation into runners and other movers) | 19 of 409 | 114 of 1660 |
+| matcher evaluations guided / full (coded `*_1080p_low` NVOF, 40 pairs): crowd / tos / sol / boat | 1.00 / 0.98 / 1.00 / 0.88 | 0.68 / 0.39 / 0.85 / 0.84 |
+| matcher EPE vs reference (all blocks), guided vs full | unchanged | unchanged or slightly better |
+
+Tools and metric definitions: `tools/camera_eval/README.md`.
+
+Known limitation: a coherent object covering about 50 % of the picture, over a background of incoherent or garbage vectors,
+is indistinguishable from a pan behind a crowd. It is fitted as the dominant motion, by definition. The ambiguity signal only
+catches a coherent competitor with at least about a third of the camera's support (test
+`CoherentObjectOverRandomBackgroundIsFittedAsDominant`).
+
 ## Tests
 `../tests/Camera*Tests.cpp`, CPU tier, all synthetic: geometry, temporal / objects / residual,
 accessor + hints, store record, fitter behaviour (pan, zoom, rotation, perspective, noise, objects,

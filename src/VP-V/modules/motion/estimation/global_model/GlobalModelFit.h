@@ -78,6 +78,21 @@ namespace CameraModel
 		// on the early-exit path the type may also step ONE down when the higher type does not earn its
 		// parameters. The fitter has no runtime caller yet, so no released behaviour changes.
 		bool stepDownOnEarlyExit = true;
+		// Robustness fixes (2026-11-01; the fitter still has no runtime caller). inlierShareLo / Hi: the trusted
+		// share of vectors the camera must explain for the inlier-share signal to start (0) and to be full (1).
+		// Phase 1 used 0.4 / 0.9, which made any scene with many movers (a crowd under a pan, ~half the
+		// vectors on the background) "no dominant motion" whatever the margin over the next motion; dominance
+		// against a competing motion is the ambiguity signal's job.
+		double inlierShareLo = 0.25, inlierShareHi = 0.55;
+		// true: the temporal consistency signal and filter use a noise floor of one vector precision (the
+		// similarity rates' translation, and scale / angle at a quarter of the picture diagonal). false = the
+		// phase-1 relative-only noise model, under which near-zero components (scale, angle, a slow pan) made
+		// the signal 0 on almost every real pair.
+		bool temporalNoiseFloor = true;
+		// true: an Ambiguous or InverseMismatch record's confidence is halved and scaled by how far its signal fell
+		// below the gate, so a failed verdict is never usable (< 0.5). false = phase 1 (the reason was set, but
+		// the logistic confidence could still exceed 0.5, e.g. a 60 % moving object over a 40 % background).
+		bool verdictGatesConfidence = true;
 		Clock clock = nullptr;
 	};
 
