@@ -303,10 +303,20 @@ namespace VideoProcessorTest
 			Require(r.confidence < 0.5, Fmt("parallax", r));
 		}
 
-		TEST_METHOD(CrowdLowConfidence)
+		// The owner requires a pan behind many scattered movers to be FOUND (phase 1 called it "no dominant motion").
+		static Config Phase1Config()
+		{
+			Config c;
+			c.inlierShareLo = 0.4; c.inlierShareHi = 0.9;
+			c.temporalNoiseFloor = false; c.verdictGatesConfidence = false;
+			return c;
+		}
+
+		TEST_METHOD(CrowdUnderPanIsDominant)
 		{
 			Field f(Grid4K());
-			f.FromModel(Pan4K());
+			const Params truth = Pan4K();
+			f.FromModel(truth);
 			SplitMix64 rng(41);
 			int scattered = 0;
 			// Many small (2x2 block) movers, each with its own vector, on about 45% of the picture.
@@ -320,7 +330,77 @@ namespace VideoProcessorTest
 			f.AddNoise(0.05, 42);
 			Fitter fitter;
 			const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5));
-			Require(r.confidence < 0.5, Fmt("crowd", r) + " scattered=" + std::to_string(scattered));
+			const std::string msg = Fmt("crowd", r) + " scattered=" + std::to_string(scattered);
+			Require(r.valid && r.reason == Reason::Ok && r.confidence >= 0.5, msg);
+			Require(ModelError(r, truth, f.picture) < kTol, msg + " err=" + std::to_string(ModelError(r, truth, f.picture)));
+			// Documents the phase-1 failure: the same field was "no dominant motion" (confidence could not reach 0.5).
+			Fitter old(Phase1Config());
+			const CameraMotion r1 = old.Fit(f.Input(kPairSeconds, 5));
+			Require(r1.confidence < 0.5, Fmt("crowd phase1", r1) + " scattered=" + std::to_string(scattered));
+		}
+
+		TEST_METHOD(NoDominantMotionRandomField)
+		{
+			Field f(Grid4K());
+			SplitMix64 rng(51);
+			for (size_t i = 0; i < f.Count(); ++i)
+			{
+				f.fx[i] = static_cast<float>((rng.Unit() - 0.5) * 80);
+				f.fy[i] = static_cast<float>((rng.Unit() - 0.5) * 80);
+			}
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5));
+			Require(r.confidence < 0.5, Fmt("random field", r));
+		}
+
+		TEST_METHOD(TwoLayerHalfAndHalfIsAmbiguous)
+		{
+			Field f(Grid4K());
+			f.FromModel(PanModel(12, 0));
+			f.AddObject(f.gridW / 2, 0, f.gridW - f.gridW / 2, f.gridH, -12, 3);
+			f.AddNoise(0.05, 52);
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5));
+			Require(r.confidence < 0.5 && r.reason == Reason::Ambiguous, Fmt("two layers 50/50", r));
+		}
+
+		TEST_METHOD(ObjectOverBackgroundSixtyForty)
+		{
+			Field f(Grid4K());
+			f.FromModel(PanModel(12, 0));
+			const int x0 = static_cast<int>(0.4 * f.gridW);
+			f.AddObject(x0, 0, f.gridW - x0, f.gridH, -30, 8);
+			f.AddNoise(0.05, 53);
+			Fitter fitter;
+			const CameraMotion r = fitter.Fit(f.Input(kPairSeconds, 5));
+			Require(r.confidence < 0.5 && r.reason == Reason::Ambiguous, Fmt("60% object over 40% pan", r));
+			// Is the verdict gate what keeps it below 0.5? (documentation: logged, not asserted either way)
+			Config noGate;
+			noGate.verdictGatesConfidence = false;
+			Fitter ungated(noGate);
+			const CameraMotion u = ungated.Fit(f.Input(kPairSeconds, 5));
+			Logger::WriteMessage((Fmt("without verdict gate", u)).c_str());
+			Require(u.confidence >= r.confidence, Fmt("gate must never raise confidence", u));
+		}
+
+		TEST_METHOD(NewDefaultsAreDeterministic)
+		{
+			Field f(Grid4K());
+			f.FromModel(Pan4K());
+			SplitMix64 rng(61);
+			for (int y = 0; y + 1 < f.gridH; y += 2)
+				for (int x = 0; x + 1 < f.gridW; x += 2)
+					if (rng.Unit() < 0.45) f.AddObject(x, y, 2, 2, (rng.Unit() - 0.5) * 80, (rng.Unit() - 0.5) * 80);
+			f.AddNoise(0.05, 62);
+			Fitter f1, f2;
+			for (uint64_t i = 0; i < 4; ++i)
+			{
+				const CameraMotion a = f1.Fit(f.Input(kPairSeconds, 5 + i));
+				const CameraMotion b = f2.Fit(f.Input(kPairSeconds, 5 + i));
+				Require(std::memcmp(&a.params, &b.params, sizeof(Params)) == 0, "params differ");
+				Require(a.confidence == b.confidence && a.reason == b.reason && a.valid == b.valid, "confidence / reason differ");
+				Require(std::memcmp(&a.signals, &b.signals, sizeof(Signals)) == 0, "signals differ");
+			}
 		}
 
 		TEST_METHOD(ObjectFillingMostOfFrameIsAmbiguous)

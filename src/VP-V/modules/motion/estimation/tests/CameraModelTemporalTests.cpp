@@ -5,6 +5,7 @@
 #include <VP-V/modules/motion/estimation/global_model/GlobalModelObjects.h>
 #include <VP-V/modules/motion/estimation/global_model/PixelResidualReference.h>
 #include <VP-V/modules/motion/estimation/global_model/GlobalModelGeometry.h>
+#include "SyntheticCameraFields.h"
 #include "CppUnitTest.h"
 
 #include <cmath>
@@ -330,6 +331,61 @@ namespace VideoProcessorTest
 			Assert::IsTrue(out.type == ModelType::Affine, L"highest type");
 			Assert::AreEqual(50.0 * sec, out.h[2], 1e-9, L"tx");
 			Assert::AreEqual(1.0, out.h[0], 1e-9, L"unit scale");
+		}
+
+		// ---- temporal noise floor (robustness fix 2) ----
+		// A slow steady pan (0.5, 0.1 px per pair) whose per-pair measurement carries ~0.1 px of translation noise and ~1e-5 of
+		// scale / angle noise. Relative-only noise (phase 1) calls the near-zero components "inconsistent".
+		static int ConsistentPairs(bool floorOn, int pairs, double* meanOut)
+		{
+			const double dt = 1.0 / 24.0;
+			const CameraSynth::GridSpec g = CameraSynth::Grid4K();
+			CameraSynth::Field f(g);
+			Config cfg;
+			cfg.temporalNoiseFloor = floorOn;
+			Fitter fitter(cfg);
+			SplitMix64 rng(77);
+			int good = 0, counted = 0;
+			double sum = 0;
+			for (int i = 0; i < pairs; ++i)
+			{
+				const double n0 = (rng.Unit() - 0.5) * 2, n1 = (rng.Unit() - 0.5) * 2, n2 = (rng.Unit() - 0.5) * 2, n3 = (rng.Unit() - 0.5) * 2;
+				f.FromModel(CameraSynth::SimilarityModel(1.0 + 1e-5 * n0, 1e-5 * n1, 0.5 + 0.1 * n2, 0.1 + 0.1 * n3));
+				const CameraMotion r = fitter.Fit(f.Input(dt, 10 + i));
+				if (i == 0) continue;   // the filter has no state on the first pair (neutral 0.5)
+				++counted; sum += r.signals.temporal;
+				if (r.signals.temporal > 0.5) ++good;
+			}
+			*meanOut = counted ? sum / counted : 0;
+			return good;
+		}
+
+		TEST_METHOD(SlowPanWithMeasurementNoiseIsConsistentWithTheFloor)
+		{
+			double meanOn = 0, meanOff = 0;
+			const int on = ConsistentPairs(true, 13, &meanOn);
+			const int off = ConsistentPairs(false, 13, &meanOff);
+			char b[200];
+			snprintf(b, sizeof(b), "consistent pairs of 12: floor %d (mean %.3f), phase-1 %d (mean %.3f)", on, meanOn, off, meanOff);
+			Logger::WriteMessage(b);
+			Assert::IsTrue(on >= 10, L"with the floor most pairs are temporally consistent");
+			Assert::IsTrue(meanOff < 0.2, L"phase-1 relative-only noise: the signal is near 0 (documents the bug)");
+		}
+
+		TEST_METHOD(FilterWithFloorToleratesNoiseOnNearZeroComponents)
+		{
+			TemporalFilter withFloor, without;
+			const double dt = 1.0 / 24.0, prec = 0.25, r = 0.25 * std::sqrt(1920.0 * 1920.0 + 1080.0 * 1080.0);
+			const double fl[4] = { prec / r / dt, prec / r / dt, prec / dt, prec / dt };
+			SplitMix64 rng(78);
+			auto noisy = [&]() { return Rates(1e-5 * (rng.Unit() - 0.5) * 2 / dt, 1e-5 * (rng.Unit() - 0.5) * 2 / dt,
+				(0.5 + 0.1 * (rng.Unit() - 0.5) * 2) / dt, (0.1 + 0.1 * (rng.Unit() - 0.5) * 2) / dt); };
+			for (int i = 0; i < 8; ++i) { const SimilarityRates m = noisy(); withFloor.Update(dt, m, fl); without.Update(dt, m); }
+			const SimilarityRates probe = noisy();
+			Assert::IsTrue(withFloor.Consistency(dt, probe, fl) > 0.5, L"floor: consistent");
+			Assert::IsTrue(without.Consistency(dt, probe) < withFloor.Consistency(dt, probe, fl), L"floor never makes it worse");
+			// A real 10x speed change is still flagged with the floor.
+			Assert::IsTrue(withFloor.Consistency(dt, Rates(0, 0, 20.0 / dt, 4.0 / dt), fl) < 0.2, L"10x change still flagged");
 		}
 	};
 
