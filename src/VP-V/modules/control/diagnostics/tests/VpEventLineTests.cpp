@@ -342,7 +342,7 @@ namespace Tests
 			};
 			push(0.0, false);
 			for (int i = 0; i < 30; ++i)
-				push(1.0 + 0.01 * i, true);   // 31 events inside one second
+				push(0.5 + 0.01 * i, true);   // 31 events inside one second (all within 1 s of the first)
 			Assert::AreEqual(size_t(20), OnlyEvents(log).size());
 			push(5.0, true);
 			const std::vector<std::string> events = OnlyEvents(log);
