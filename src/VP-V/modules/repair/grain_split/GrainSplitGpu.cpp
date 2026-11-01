@@ -6,6 +6,7 @@
 
 #include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
+#include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
 
 #include <algorithm>
 #include <cmath>
@@ -217,14 +218,11 @@ if (p.x < GS_W && p.y < GS_H) {
 			}
 		}
 
-		int GaussRadius(double sigma) { return (std::max)(1, static_cast<int>(std::ceil(3.0 * sigma))); }
+		int GaussRadius(double sigma) { return VpUnit::BandFromBase::Radius(sigma, 3.0, true, 0.0); }
 
 		double GaussWeight(int k, double sigma)
 		{
-			const int r = GaussRadius(sigma);
-			double sum = 0.0;
-			for (int i = -r; i <= r; ++i) sum += std::exp(-0.5 * i * i / (sigma * sigma));
-			return std::exp(-0.5 * k * k / (sigma * sigma)) / sum;
+			return VpUnit::BandFromBase::Weight(k, sigma, GaussRadius(sigma));
 		}
 
 		void Splitter::Release(pl_gpu gpu)

@@ -18,6 +18,7 @@
 // One implementation (owner rule "one unit per shared computation"): the CPU reference below is what the monitor worker calls on
 // the tiles it already holds and what the offline evaluation calls on the same tiles. Pure, header-only, C++14, deterministic
 // (fixed reduction orders), no clock: the caller passes SOURCE time.
+#include "../../../repair/grain_split/shared/BandFromBase.h"
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -41,19 +42,13 @@ namespace SourceIdentity
 
 		namespace detail
 		{
+			// The taps come from shared unit U2 (VpUnit::BandFromBase): radius ceil(3 sigma), normalised Gaussian weights.
 			inline std::vector<float> GaussTaps(double sigma)
 			{
-				const int r = static_cast<int>(std::ceil(3.0 * sigma));
+				const int r = VpUnit::BandFromBase::Radius(sigma, 3.0, false, 0.0);
 				std::vector<float> t(static_cast<size_t>(2 * r + 1));
-				double sum = 0.0;
 				for (int i = -r; i <= r; ++i)
-				{
-					const double v = std::exp(-0.5 * (i * i) / (sigma * sigma));
-					t[static_cast<size_t>(i + r)] = static_cast<float>(v);
-					sum += v;
-				}
-				for (float& v : t)
-					v = static_cast<float>(v / sum);
+					t[static_cast<size_t>(i + r)] = static_cast<float>(VpUnit::BandFromBase::Weight(i, sigma, r));
 				return t;
 			}
 

@@ -2,6 +2,7 @@
 
 #include <VP-V/core/ScratchArena.h>
 #include <VP-V/modules/control/gpu_memory/PlTexBackend.h>
+#include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
 
 #include <libplacebo/renderer.h>
 
@@ -94,26 +95,13 @@ namespace TextureRestore
 		const int sub = (std::max)(1, static_cast<int>(std::lround(kTilePx * scale / kSubBlocks)));
 		return sub * kSubBlocks;
 	}
-	inline int Radius1(double scale) { return (std::max)(1, static_cast<int>(std::ceil(3.0 * kSigma1 * scale - 1e-9))); }
-	inline double Weight1(int k, double scale)
-	{
-		const double s = kSigma1 * scale;
-		const int r = Radius1(scale);
-		double sum = 0.0;
-		for (int i = -r; i <= r; ++i) sum += std::exp(-0.5 * i * i / (s * s));
-		return std::exp(-0.5 * k * k / (s * s)) / sum;
-	}
+	// The band Gaussians are the shared U2 law (VpUnit::BandFromBase).
+	inline int Radius1(double scale) { return VpUnit::BandFromBase::Radius(kSigma1 * scale, 3.0, true, 1e-9); }
+	inline double Weight1(int k, double scale) { return VpUnit::BandFromBase::Weight(k, kSigma1 * scale, Radius1(scale)); }
 	// The half-resolution sigma of a full-resolution split (the 2x2 box adds 0.25 px^2 per axis).
-	inline double HalfSigma(double sigma) { return std::sqrt(sigma * sigma - 0.25) / 2.0; }
-	inline int HalfRadius(double sigma) { return (std::max)(1, static_cast<int>(std::ceil(3.5 * HalfSigma(sigma) - 1e-9))); }
-	inline double HalfWeight(int k, double sigma)
-	{
-		const double s = HalfSigma(sigma);
-		const int r = HalfRadius(sigma);
-		double sum = 0.0;
-		for (int i = -r; i <= r; ++i) sum += std::exp(-0.5 * i * i / (s * s));
-		return std::exp(-0.5 * k * k / (s * s)) / sum;
-	}
+	inline double HalfSigma(double sigma) { return VpUnit::BandFromBase::HalfSigma(sigma); }
+	inline int HalfRadius(double sigma) { return VpUnit::BandFromBase::Radius(VpUnit::BandFromBase::HalfSigma(sigma), 3.5, true, 1e-9); }
+	inline double HalfWeight(int k, double sigma) { return VpUnit::BandFromBase::Weight(k, VpUnit::BandFromBase::HalfSigma(sigma), HalfRadius(sigma)); }
 	// One 8-bit code in the signal's codes.
 	inline double EightBitStep(int colorDepth) { return std::pow(2.0, (std::max)(0, colorDepth - 8)); }
 	// The expected coding-noise RMS in 8-bit codes (as GrainPreserve::CodingNoiseCodes).
