@@ -8,6 +8,7 @@
 #include <VP-V/modules/input/signal/ResyncInject.h>
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -20,7 +21,7 @@ namespace Tests
 	{
 		inline ResyncInject::Getter Env(const char* value)
 		{
-			return [value](const char*) { return value; };
+			return [value](const char* name) -> const char* { return std::strcmp(name, "VP_RESYNC_INJECT") == 0 ? value : nullptr; };   // only the arming variable
 		}
 
 		// A generated sample (tools/soak/resync_schedule.py grammar): 12 lines, 10 entries.

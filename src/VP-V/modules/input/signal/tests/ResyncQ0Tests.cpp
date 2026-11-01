@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -50,7 +51,7 @@ namespace Tests
 
 		ResyncInject::Getter Env(const char* value)
 		{
-			return [value](const char*) { return value; };
+			return [value](const char* name) -> const char* { return std::strcmp(name, "VP_RESYNC_INJECT") == 0 ? value : nullptr; };   // only the arming variable
 		}
 	}
 
