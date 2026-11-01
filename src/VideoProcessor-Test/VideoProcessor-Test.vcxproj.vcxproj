@@ -588,6 +588,12 @@
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationCoreTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelLutTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelCrossCheckTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelBlocksTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelBlocksWarpTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationRemainderTests.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationMeterTests.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationPhase2Tests.cpp" />
@@ -931,6 +937,7 @@
     <ClInclude Include="..\VP-V\tests\SettingsTestSupport.h" />
     <ClInclude Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelGolden.generated.h" />
     <ClInclude Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelCrossCheck.generated.h" />
+    <ClInclude Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelBlocksGolden.generated.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="RealClipLibrary.h" />
   </ItemGroup>
