@@ -363,6 +363,14 @@ def evaluate_suite(suite, cand, base, max_frames=None, use_lpips=False, with_cos
 
 
 # ------------------------------------------------------------------ CLI
+def suite_extra(suite):
+    """extra-metric hook for a suite: suites with "nr_metrics": true get the no-reference rows (nr_metrics.py)."""
+    if not suite.get("nr_metrics"):
+        return None
+    import nr_metrics
+    return nr_metrics.nr_extra
+
+
 def cmd_run(a):
     with open(a.suite, "r", encoding="utf8") as f:
         suite = json.load(f)
@@ -377,11 +385,22 @@ def cmd_run(a):
     log("suite %s  candidate %s (%s)  baseline %s (%s)" % (suite.get("name"), cand.name, cand.description,
                                                          base.name, base.description))
     t0 = time.time()
-    rows = evaluate_suite(suite, cand, base, a.max_frames, a.lpips, not a.no_cost, log)
+    rows = evaluate_suite(suite, cand, base, a.max_frames, a.lpips, not a.no_cost, log, extra=suite_extra(suite))
+    # also-suites (e.g. the streaming-realistic suite): every repair evaluation can include them with
+    # --also-suite (repeatable) or VP_EVAL_ALSO_SUITES (os.pathsep list); rows are concatenated, cases keep their ids
+    also = list(a.also_suite or []) + [p for p in os.environ.get("VP_EVAL_ALSO_SUITES", "").split(os.pathsep) if p]
+    n_cases = len(suite["cases"])
+    for path in also:
+        with open(path, "r", encoding="utf8") as f:
+            extra_suite = json.load(f)
+        log("also-suite %s (%d cases)" % (extra_suite.get("name", path), len(extra_suite["cases"])))
+        rows += evaluate_suite(extra_suite, cand, base, a.max_frames, a.lpips, not a.no_cost, log,
+                               extra=suite_extra(extra_suite))
+        n_cases += len(extra_suite["cases"])
     scored = er.score_rows(rows)
     csv_text = er.to_csv(scored)
     extra = ["Suite: `%s` (%d cases). Candidate `%s`, default `%s`. LPIPS %s. Cost: %s." % (
-        suite.get("name"), len(suite["cases"]), cand.name, base.name, "requested" if a.lpips else "not requested (NA)",
+        suite.get("name"), n_cases, cand.name, base.name, "requested" if a.lpips else "not requested (NA)",
         "py-ref wall-clock on CPU (not GPU-representative)" if not a.no_cost else "omitted")]
     md = er.to_markdown(scored, cand.name, base.name, extra_lines=extra)
     with open(os.path.join(a.out, "results.csv"), "w", encoding="utf8", newline="") as f:
@@ -439,6 +458,9 @@ def main(argv=None):
     r.add_argument("--max-frames", type=int, default=None)
     r.add_argument("--lpips", action="store_true")
     r.add_argument("--no-cost", action="store_true", help="omit the (non-deterministic) cost rows")
+    r.add_argument("--also-suite", action="append", default=None,
+                   help="additional suite JSON scored with the same candidate/default (repeatable), e.g. "
+                        "tools/eval/suites/streaming_hevc.json; also VP_EVAL_ALSO_SUITES")
     r.set_defaults(fn=cmd_run)
     c = sub.add_parser("catalog")
     c.add_argument("--out", default=None)
