@@ -93,5 +93,15 @@ namespace VideoProcessorTest
 			const std::string r = a.Readout(8);
 			Assert::IsTrue(r.find("recent max") != std::string::npos);
 		}
+
+		TEST_METHOD(LongPassNameKeepsRecentFiguresAndNewline)
+		{
+			PassTimers::Accumulator a;
+			a.Add(PassTimers::Kind::CpuWork, std::string(300, 'n'), 1.0);
+			const std::string r = a.Readout(8);
+			const std::string tail = "recent max\n";
+			Assert::IsTrue(r.size() > tail.size());
+			Assert::AreEqual(tail, r.substr(r.size() - tail.size()));
+		}
 	};
 }

@@ -136,10 +136,12 @@ namespace PassTimers
 				text += line;
 				for (size_t i = 0; i < rows.size() && i < maxLines; ++i)
 				{
-					std::snprintf(line, sizeof(line), "    %7.3f ms avg %7.3f max (%llu)  %s  %7.3f recent %7.3f recent max\n", rows[i].second.MeanMs(),
+					// 512 bytes; the name is cut at 300 characters so the figures and the newline always fit.
+					char row[512];
+					std::snprintf(row, sizeof(row), "    %7.3f ms avg %7.3f max (%llu)  %.300s  %7.3f recent %7.3f recent max\n", rows[i].second.MeanMs(),
 						rows[i].second.maxMs, static_cast<unsigned long long>(rows[i].second.samples), rows[i].first.c_str(),
 						rows[i].second.recentMs, rows[i].second.recentMaxMs);
-					text += line;
+					text += row;
 				}
 				if (rows.size() > maxLines)
 				{
