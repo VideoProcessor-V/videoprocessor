@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include "ExtendedRangeGpuProbe.h"
+#include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
 
 #include <vprenderer/CrossfadeMix.h>
 #include <VP-V/modules/colour/extended_range/ExtendedRange.h>

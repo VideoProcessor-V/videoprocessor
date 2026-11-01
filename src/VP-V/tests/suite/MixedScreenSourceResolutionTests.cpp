@@ -2,7 +2,7 @@
 #include "CppUnitTest.h"
 
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
-#include "SubtitleTextTestPattern.h"
+#include <VP-V/tests/support/SubtitleTextTestPattern.h>
 
 #include <algorithm>
 #include <cmath>

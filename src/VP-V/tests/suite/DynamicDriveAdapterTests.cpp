@@ -8,7 +8,7 @@
 #include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
 #include <ConfigFile.h>
 #include <MainConfigSchema.h>
-#include "LedDriveTestSupport.h"
+#include <VP-V/tests/support/LedDriveTestSupport.h>
 #include <VP-V/segments/OutputSegments.h>
 #include <VP-V/segments/OutputSegmentsMerge.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>

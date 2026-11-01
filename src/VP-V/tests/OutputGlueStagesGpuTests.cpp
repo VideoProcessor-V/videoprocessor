@@ -3,7 +3,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include <ExtendedRangeGpuProbe.h>
+#include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
 #include <VP-V/modules/colour/extended_range/ExtendedRangeStage.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleStage.h>
 

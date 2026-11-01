@@ -7,7 +7,7 @@
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
 #include <VP-V/modules/scaling/rebase/KernelInverse.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
-#include "SubtitleTextTestPattern.h"
+#include <VP-V/tests/support/SubtitleTextTestPattern.h>
 
 #include <algorithm>
 #include <chrono>

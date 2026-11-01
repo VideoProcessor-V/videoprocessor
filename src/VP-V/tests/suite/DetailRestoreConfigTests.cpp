@@ -9,8 +9,8 @@
 #include <VP-V/modules/repair/texture_restore/DetailPulse.h>
 #include <VP-V/modules/repair/texture_restore/TextureRestore.h>
 
-#include "DetailPulseModel.h"
-#include "TextureRestoreModel.h"
+#include <VP-V/tests/support/DetailPulseModel.h>
+#include <VP-V/tests/support/TextureRestoreModel.h>
 
 #include <algorithm>
 #include <cmath>

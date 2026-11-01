@@ -7,7 +7,7 @@
    "kind": "class",
    "value": "RendererCaptureHarnessTests",
    "category": "GpuHardware",
-   "file": "src/VideoProcessor-Test/RendererCaptureHarnessTests.cpp",
+   "file": "src/VP-V/tests/harness/RendererCaptureHarnessTests.cpp",
    "note": "Every method also carries its own attribute; the class clause is how the CPU run and the chain gate select it."
   },
   {
@@ -21,21 +21,21 @@
    "kind": "methodPrefix",
    "value": "DvAutotestGpu",
    "category": "GpuHardware",
-   "file": "src/VideoProcessor-Test/RendererCaptureHarnessTests.cpp",
+   "file": "src/VP-V/tests/harness/RendererCaptureHarnessTests.cpp",
    "note": "Harness tests; name clause kept for the native adapter."
   },
   {
    "kind": "methodPrefix",
    "value": "DolbyVisionGpuUnpack",
    "category": "GpuHardware",
-   "file": "src/VideoProcessor-Test/RendererCaptureHarnessTests.cpp",
+   "file": "src/VP-V/tests/harness/RendererCaptureHarnessTests.cpp",
    "note": "Harness test; name clause kept for the native adapter."
   },
   {
    "kind": "class",
    "value": "VpScaleRenderMotionGpu",
    "category": "GpuHardware",
-   "file": "src/VideoProcessor-Test/VpScaleRenderMotionTests.cpp",
+   "file": "src/VP-V/tests/suite/VpScaleRenderMotionTests.cpp",
    "note": "Real-adapter motion render tests."
   },
   {
@@ -56,7 +56,7 @@
    "kind": "class",
    "value": "NvOpticalFlowTests",
    "category": "GpuHardware",
-   "file": "src/VideoProcessor-Test/NvOpticalFlowTests.cpp",
+   "file": "src/VP-V/tests/suite/NvOpticalFlowTests.cpp",
    "note": "NVIDIA-only engine (the tests skip themselves elsewhere). Extends the canonical CPU filter; no CPU coverage lost."
   },
   {
@@ -196,35 +196,35 @@
    "kind": "methodPrefix",
    "value": "DetailPulseGpu",
    "category": "GpuWarp",
-   "file": "src/VideoProcessor-Test/DetailPulseTests.cpp",
+   "file": "src/VP-V/tests/suite/DetailPulseTests.cpp",
    "note": "WARP unless VP_TEST_GPU=hardware."
   },
   {
    "kind": "method",
    "value": "TextureRestoreTests::TextureRestoreRealClipBreathing",
    "category": "GpuWarp",
-   "file": "src/VideoProcessor-Test/TextureRestoreTests.cpp",
+   "file": "src/VP-V/tests/suite/TextureRestoreTests.cpp",
    "note": "Real-footage run; self-skips without VP_TEST_REAL_FOOTAGE."
   },
   {
    "kind": "class",
    "value": "TextureRestoreGpuTests",
    "category": "GpuWarp",
-   "file": "src/VideoProcessor-Test/TextureRestoreTests.cpp",
+   "file": "src/VP-V/tests/suite/TextureRestoreTests.cpp",
    "note": "WARP unless VP_TEST_GPU=hardware."
   },
   {
    "kind": "class",
    "value": "CrossfadeMixGpuTests",
    "category": "GpuWarp",
-   "file": "src/VideoProcessor-Test/CrossfadeMixTests.cpp",
+   "file": "src/VP-V/tests/suite/CrossfadeMixTests.cpp",
    "note": "WARP unless VP_TEST_GPU=hardware."
   },
   {
    "kind": "class",
    "value": "AmbientSdrGpuTests",
    "category": "GpuWarp",
-   "file": "src/VideoProcessor-Test/AmbientAdaptationTests.cpp",
+   "file": "src/VP-V/tests/suite/AmbientAdaptationTests.cpp",
    "note": "WARP unless VP_TEST_GPU=hardware."
   },
   {
@@ -245,21 +245,21 @@
    "kind": "method",
    "value": "AmbientSdrLiftTests::AmbientSdrLiftReachesTheCodes",
    "category": "Cpu",
-   "file": "src/VideoProcessor-Test/AmbientAdaptationTests.cpp",
+   "file": "src/VP-V/tests/suite/AmbientAdaptationTests.cpp",
    "note": "Name mentions the GPU; the body is CPU only (reviewed)."
   },
   {
    "kind": "method",
    "value": "CrossfadeMixTests::CrossfadeFromPathTakesThePictureHooksOnly",
    "category": "Cpu",
-   "file": "src/VideoProcessor-Test/CrossfadeMixTests.cpp",
+   "file": "src/VP-V/tests/suite/CrossfadeMixTests.cpp",
    "note": "Name mentions the GPU; the body is CPU only (reviewed)."
   },
   {
    "kind": "method",
    "value": "LedDriveDelta1Tests::RawFramesAreMeasuredThroughTheTransferLikeTheGpuPass",
    "category": "Cpu",
-   "file": "src/VideoProcessor-Test/LedDriveDelta1Tests.cpp",
+   "file": "src/VP-V/tests/suite/LedDriveDelta1Tests.cpp",
    "note": "Name mentions the GPU; the body is CPU only (reviewed)."
   },
   {
@@ -315,7 +315,7 @@
    "kind": "methodPrefix",
    "value": "RealClipCadenceAndFilmClock",
    "category": "Slow",
-   "file": "src/VideoProcessor-Test/RealFootageSuiteTests.cpp",
+   "file": "src/VP-V/tests/suite/RealFootageSuiteTests.cpp",
    "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
   },
   {
@@ -329,35 +329,35 @@
    "kind": "methodPrefix",
    "value": "RenditionsReBaseToTheirExactSize",
    "category": "Slow",
-   "file": "src/VideoProcessor-Test/SourceResolutionLatchTests.cpp",
+   "file": "src/VP-V/tests/suite/SourceResolutionLatchTests.cpp",
    "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
   },
   {
    "kind": "methodPrefix",
    "value": "UpscalesEngageAtACutWithTheirClassAndKernel",
    "category": "Slow",
-   "file": "src/VideoProcessor-Test/SourceResolutionLatchTests.cpp",
+   "file": "src/VP-V/tests/suite/SourceResolutionLatchTests.cpp",
    "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
   },
   {
    "kind": "methodPrefix",
    "value": "RealClipPlayerPulldown",
    "category": "Slow",
-   "file": "src/VideoProcessor-Test/RealFootageSuiteTests.cpp",
+   "file": "src/VP-V/tests/suite/RealFootageSuiteTests.cpp",
    "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
   },
   {
    "kind": "methodPrefix",
    "value": "RealClipSourceResolutionCutsAndLatch",
    "category": "Slow",
-   "file": "src/VideoProcessor-Test/RealFootageSuiteTests.cpp",
+   "file": "src/VP-V/tests/suite/RealFootageSuiteTests.cpp",
    "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
   },
   {
    "kind": "methodPrefix",
    "value": "StreamSwitchingRenditionsWithoutACut",
    "category": "Slow",
-   "file": "src/VideoProcessor-Test/SourceResolutionDetectorTests.cpp",
+   "file": "src/VP-V/tests/suite/SourceResolutionDetectorTests.cpp",
    "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
   },
   {
@@ -371,21 +371,21 @@
    "kind": "methodPrefix",
    "value": "SoftNativeScenesWithQuickCutsAreNeverDeclaredLower",
    "category": "Slow",
-   "file": "src/VideoProcessor-Test/SourceResolutionDetectorTests.cpp",
+   "file": "src/VP-V/tests/suite/SourceResolutionDetectorTests.cpp",
    "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
   },
   {
    "kind": "methodPrefix",
    "value": "RealClipDiscontinuities",
    "category": "Slow",
-   "file": "src/VideoProcessor-Test/RealFootageSuiteTests.cpp",
+   "file": "src/VP-V/tests/suite/RealFootageSuiteTests.cpp",
    "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
   },
   {
    "kind": "methodPrefix",
    "value": "MixedScreenGuardOverAnEngagedUpscale",
    "category": "Slow",
-   "file": "src/VideoProcessor-Test/SourceResolutionLatchTests.cpp",
+   "file": "src/VP-V/tests/suite/SourceResolutionLatchTests.cpp",
    "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
   },
   {
@@ -399,7 +399,7 @@
    "kind": "methodPrefix",
    "value": "SourceResolutionUnderQueueFaults",
    "category": "Slow",
-   "file": "src/VideoProcessor-Test/QueueStressLaneTests.cpp",
+   "file": "src/VP-V/tests/suite/QueueStressLaneTests.cpp",
    "note": "Slow (>~95 s): excluded from the per-package CPU tier; runs in the nightly/slow tier and before merges touching its area (gen_test_filters --gpu --categories Slow)."
   },
   {

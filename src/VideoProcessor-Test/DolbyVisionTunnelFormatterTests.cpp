@@ -9,7 +9,7 @@
 #include <CpuFeatures.h>
 #include <DolbyVisionTunnelInput.h>
 #include <video_frame_formatter/CRGBDolbyVisionTunnelFormatter.h>
-#include "DolbyVisionTunnelSender.h"
+#include <VP-V/tests/support/DolbyVisionTunnelSender.h>
 #include <vprenderer/DolbyVisionTunnelUnpackReference.h>
 #include <AnalysisFrame.h>
 #include <SceneDescriptor.h>

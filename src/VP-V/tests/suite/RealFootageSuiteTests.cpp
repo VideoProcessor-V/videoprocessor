@@ -45,7 +45,7 @@
 // Results: every run is logged (trx) and written as a per-clip table to
 // VP_TEST_RESULTS_DIR (default %TEMP%\vp-realclip\results.md).
 
-#include "RealClipLibrary.h"
+#include <VP-V/tests/support/RealClipLibrary.h>
 
 #include <ContentClassifier.h>
 #include <ContentIntentObserver.h>

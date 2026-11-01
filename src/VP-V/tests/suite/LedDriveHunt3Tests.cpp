@@ -7,7 +7,7 @@
 #include <VP-V/modules/drive/led_measure/LedLookahead.h>
 #include <VP-V/modules/drive/led_measure/LedMeasurement.h>
 
-#include "LedDriveTestSupport.h"
+#include <VP-V/tests/support/LedDriveTestSupport.h>
 
 #include <algorithm>
 #include <atomic>

@@ -8,29 +8,29 @@
 -->
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <ClCompile Include="DolbyVisionTrimsTests.cpp" />
-    <ClCompile Include="FileSideDataTests.cpp" />
-    <ClCompile Include="SceneDescriptorTests.cpp" />
-    <ClCompile Include="ContentIntentTests.cpp" />
-    <ClCompile Include="AmbientAdaptationTests.cpp" />
-    <ClCompile Include="BlackIntentTests.cpp" />
-    <ClCompile Include="DisplayIntentTests.cpp" />
-    <ClCompile Include="LedIntentLimitsTests.cpp" />
-    <ClCompile Include="MotionIntentTests.cpp" />
-    <ClCompile Include="IntentInterpreterTests.cpp" />
-    <ClCompile Include="H3TimingTests.cpp" />
-    <ClCompile Include="FileSourceRuleVariableTests.cpp" />
-    <ClCompile Include="FileHostTests.cpp" />
-    <ClCompile Include="LedDriveArbiterTests.cpp" />
-    <ClCompile Include="LedDriveHoldoverTests.cpp" />
-    <ClCompile Include="DynamicDriveAdapterTests.cpp" />
-    <ClCompile Include="DvTunnelLoopbackTests.cpp" />
-    <ClCompile Include="DvIncomingHdrModeTests.cpp" />
-    <ClCompile Include="DvRawCorpusTests.cpp" />
-    <ClCompile Include="DvSyntheticCorpusTests.cpp" />
-    <ClCompile Include="DvRpuAnchorTests.cpp" />
-    <ClCompile Include="DvTunnelHandoffTests.cpp" />
-    <ClCompile Include="ShortcutDefaultsTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\DolbyVisionTrimsTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\FileSideDataTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\SceneDescriptorTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\ContentIntentTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\AmbientAdaptationTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\BlackIntentTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\DisplayIntentTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\LedIntentLimitsTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\MotionIntentTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\IntentInterpreterTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\H3TimingTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\FileSourceRuleVariableTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\FileHostTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\LedDriveArbiterTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\LedDriveHoldoverTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\DynamicDriveAdapterTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\DvTunnelLoopbackTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\DvIncomingHdrModeTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\DvRawCorpusTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\DvSyntheticCorpusTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\DvRpuAnchorTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\DvTunnelHandoffTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\ShortcutDefaultsTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\extended_range\tests\ExtendedRangeHookTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
@@ -262,8 +262,8 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="VPRendererFilterTests.cpp" />
-    <ClCompile Include="VPRendererFilterGraphTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\VPRendererFilterTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\VPRendererFilterGraphTests.cpp" />
     <ClCompile Include="..\VideoProcessor-VPRendererFilter\FilterTimingGlue.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -279,13 +279,13 @@
     <ClCompile Include="..\VideoProcessor-VPRendererFilter\VPRendererFilterRegistration.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="HdrInferenceTests.cpp" />
-    <ClCompile Include="SourceResolutionDetectorTests.cpp" />
-    <ClCompile Include="MixedScreenSourceResolutionTests.cpp" />
-    <ClCompile Include="SourceResolutionLatchTests.cpp" />
-    <ClCompile Include="ExtendedRangeCarryTests.cpp" />
-    <ClCompile Include="ChangeKeyTests.cpp" />
-    <ClCompile Include="EfficiencyPolicyTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\HdrInferenceTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\SourceResolutionDetectorTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\MixedScreenSourceResolutionTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\SourceResolutionLatchTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\ExtendedRangeCarryTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\ChangeKeyTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\EfficiencyPolicyTests.cpp" />
     <ClCompile Include="..\VP-V\tests\PassTimersTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -296,24 +296,24 @@
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationLutHostTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="SdrToneShapeWtwTests.cpp" />
-    <ClCompile Include="BugHunt20261017CaptureTests.cpp" />
-    <ClCompile Include="BugHunt2GuiTests.cpp" />
-    <ClCompile Include="BugHunt3ShutdownTests.cpp" />
-    <ClCompile Include="BugHunt2CaptureTests.cpp" />
-    <ClCompile Include="Integration20261017Tests.cpp" />
-    <ClCompile Include="Hunt2MotionTests.cpp" />
-    <ClCompile Include="PostMergeAudit20261017Tests.cpp" />
-    <ClCompile Include="CaptureLayerAuditTests.cpp" />
-    <ClCompile Include="DisplayRuleExpressionAuditTests.cpp" />
-    <ClCompile Include="GuiAuditTests.cpp" />
-    <ClCompile Include="VectorStoreTests.cpp" />
-    <ClCompile Include="MotionValidityTests.cpp" />
-    <ClCompile Include="InterpolationPolicyTests.cpp" />
-    <ClCompile Include="RenderAheadPolicyTests.cpp" />
-    <ClCompile Include="GrainPreservationTests.cpp" />
-    <ClCompile Include="DetailPulseTests.cpp" />
-    <ClCompile Include="CrossfadeMixTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\SdrToneShapeWtwTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\BugHunt20261017CaptureTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\BugHunt2GuiTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\BugHunt3ShutdownTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\BugHunt2CaptureTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\Integration20261017Tests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\Hunt2MotionTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\PostMergeAudit20261017Tests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\CaptureLayerAuditTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\DisplayRuleExpressionAuditTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\GuiAuditTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\VectorStoreTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\MotionValidityTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\InterpolationPolicyTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\RenderAheadPolicyTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\GrainPreservationTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\DetailPulseTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\CrossfadeMixTests.cpp" />
     <ClCompile Include="..\VP-V\tests\PipelineSkeletonTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -343,8 +343,8 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="HookSegmentTests.cpp" />
-    <ClCompile Include="TextureRestoreTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\HookSegmentTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\TextureRestoreTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvTrimSelectionTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvDolbyStyleTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvHostStageTests.cpp" />
@@ -378,27 +378,27 @@
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\AbrStepDetectorTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceWiringTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\DvTunnelMetadataExtensionTests.cpp" />
-    <ClCompile Include="DetailRestoreConfigTests.cpp" />
-    <ClCompile Include="KernelInverseTests.cpp" />
-    <ClCompile Include="CustomHookChainTests.cpp" />
-    <ClCompile Include="LedDriveProtocolTests.cpp" />
-    <ClCompile Include="LedDriveControllerTests.cpp" />
-    <ClCompile Include="LedScriptLookaheadTests.cpp" />
-    <ClCompile Include="LedDriveMeasurementTests.cpp" />
-    <ClCompile Include="LedDriveCompensateTests.cpp" />
-    <ClCompile Include="LedScriptCorrelationTests.cpp" />
-    <ClCompile Include="CrashStateTests.cpp" />
-    <ClCompile Include="DiagnosticHistoryTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\DetailRestoreConfigTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\KernelInverseTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\CustomHookChainTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\LedDriveProtocolTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\LedDriveControllerTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\LedScriptLookaheadTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\LedDriveMeasurementTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\LedDriveCompensateTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\LedScriptCorrelationTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\CrashStateTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\DiagnosticHistoryTests.cpp" />
     <ClCompile Include="..\VP-V\modules\control\diagnostics\tests\DiagnosticsAdapterTests.cpp" />
-    <ClCompile Include="StateReportTests.cpp" />
-    <ClCompile Include="RendererCaptureHarnessTests.cpp" />
-    <ClCompile Include="VpScaleRenderMotionTests.cpp" />
-    <ClCompile Include="NvOpticalFlowTests.cpp" />
-    <ClCompile Include="PulldownReliabilityTests.cpp" />
-    <ClCompile Include="PulldownCorpusTests.cpp" />
-    <ClCompile Include="Hunt2CadenceClassTests.cpp" />
-    <ClCompile Include="GeneralRateMatrixTests.cpp" />
-    <ClCompile Include="BugHunt20261017Tests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\StateReportTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\harness\RendererCaptureHarnessTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\VpScaleRenderMotionTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\NvOpticalFlowTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\PulldownReliabilityTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\PulldownCorpusTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\Hunt2CadenceClassTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\GeneralRateMatrixTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\BugHunt20261017Tests.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\estimation\NvOpticalFlow.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -407,13 +407,13 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="LedDriveDelta1Tests.cpp" />
-    <ClCompile Include="LedDriveHunt2Tests.cpp" />
-    <ClCompile Include="LedDriveHunt3Tests.cpp" />
-    <ClCompile Include="QueueTimingFixesTests.cpp" />
-    <ClCompile Include="EfficiencyTests.cpp" />
-    <ClCompile Include="RealFootageSuiteTests.cpp" />
-    <ClCompile Include="QueueStressTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\LedDriveDelta1Tests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\LedDriveHunt2Tests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\LedDriveHunt3Tests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\QueueTimingFixesTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\EfficiencyTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\RealFootageSuiteTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\QueueStressTests.cpp" />
     <ClCompile Include="..\VP-V\tests\DelayGateTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -474,17 +474,17 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VP-V\tests\VpStatusAdapterTests.cpp" />
-    <ClCompile Include="ModuleStatusTextTests.cpp" />
-    <ClCompile Include="QueueStressLaneTests.cpp" />
-    <ClCompile Include="FileFrameTests.cpp" />
-    <ClCompile Include="R6BaselineTests.cpp" />
-    <ClCompile Include="AnalysisLumaRangeTests.cpp" />
-    <ClCompile Include="FileSourceHelpersTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\ModuleStatusTextTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\QueueStressLaneTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\FileFrameTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\R6BaselineTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\AnalysisLumaRangeTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\FileSourceHelpersTests.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\VP-V\tests\VpLutGpuTestSupport.h" />
     <ClInclude Include="..\VP-V\tests\SettingsTestSupport.h" />
-    <ClInclude Include="RealClipLibrary.h" />
+    <ClInclude Include="..\VP-V\tests\support\RealClipLibrary.h" />
   </ItemGroup>
   <ItemGroup>
     <!-- Build order only: CalibrationMeterTests runs x64/Release/test-tools/fake_spotread.exe. -->

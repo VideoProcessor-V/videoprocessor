@@ -19,7 +19,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include "DvTunnelReferenceEncoder.h"
+#include <VP-V/tests/support/DvTunnelReferenceEncoder.h>
 #include <dv_loopback/DvLoopbackHarness.h>
 #include <cmath>
 

@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include "GrainReferenceModel.h"
+#include <VP-V/tests/support/GrainReferenceModel.h>
 
 #include <vprenderer/GrainPreserve.h>
 #include <VP-V/modules/motion/consumers/InterpolationPolicy.h>

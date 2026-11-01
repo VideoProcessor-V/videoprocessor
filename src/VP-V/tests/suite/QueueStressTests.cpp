@@ -10,7 +10,7 @@
 // shortest event list that still fails and written, as a ready regression test, to
 // %TEMP%\vp-qstress\repros.txt (VP_QSTRESS_DIR overrides).
 
-#include "QueueStressHarness.h"
+#include <VP-V/tests/support/QueueStressHarness.h>
 
 #include <chrono>
 #include <cstdlib>

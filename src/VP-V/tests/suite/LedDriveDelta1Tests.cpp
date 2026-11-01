@@ -11,7 +11,7 @@
 #include <VP-V/modules/drive/projector_control/LedShutdownRestore.h>
 #include <vprenderer/AlphaQueuePolicy.h>
 
-#include "LedDriveTestSupport.h"
+#include <VP-V/tests/support/LedDriveTestSupport.h>
 
 #include <algorithm>
 #include <atomic>

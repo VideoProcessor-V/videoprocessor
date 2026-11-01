@@ -38,7 +38,7 @@
 #include <thread>
 #include <vector>
 
-#include "DolbyVisionTunnelSender.h"
+#include <VP-V/tests/support/DolbyVisionTunnelSender.h>
 #include <dv_loopback/DvLoopbackPattern.h>
 #include <dv_loopback/DvCaptureContainer.h>
 #include <VP-V/modules/control/diagnostics/RawCaptureCorpus.h>
@@ -47,7 +47,7 @@
 #include <VP-V/modules/output/calibration_lut/calibration/CalibrationController.h>
 #include <VP-V/modules/output/calibration_lut/calibration/CalibrationSimulation.h>
 #include <VP-V/modules/output/calibration_lut/calibration/PatternCodes.h>
-#include "RealClipLibrary.h"   // B3 real-clip acceptance (decoded clip frames into the harness)
+#include <VP-V/tests/support/RealClipLibrary.h>   // B3 real-clip acceptance (decoded clip frames into the harness)
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
 // capture_path (owner 2026-10-13): the shipped VP renderer DLL driven like the

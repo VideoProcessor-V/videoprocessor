@@ -8,7 +8,7 @@
 -->
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <ClCompile Include="BetaGpuTests.cpp"/>
+    <ClCompile Include="..\VP-V\tests\beta_gpu\BetaGpuTests.cpp"/>
     <ClCompile Include="..\VP-V\modules\output\dither\OutputEncodingRepair.cpp"/>
     <ClCompile Include="..\VP-V\modules\motion\consumers\DejudderWarp.cpp"/>
     <ClCompile Include="..\VP-V\modules\motion\estimation\NvOpticalFlow.cpp"/>

@@ -1,8 +1,8 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include "TextureRestoreModel.h"
-#include "ExtendedRangeGpuProbe.h"
+#include <VP-V/tests/support/TextureRestoreModel.h>
+#include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
 
 #include <VP-V/modules/repair/texture_restore/TextureRestore.h>
 

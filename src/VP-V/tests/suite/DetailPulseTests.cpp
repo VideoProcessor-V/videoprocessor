@@ -1,9 +1,9 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include "DetailPulseModel.h"
-#include "ExtendedRangeGpuProbe.h"
-#include "GrainReferenceModel.h"
+#include <VP-V/tests/support/DetailPulseModel.h>
+#include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
+#include <VP-V/tests/support/GrainReferenceModel.h>
 
 #include <VP-V/modules/repair/texture_restore/DetailPulse.h>
 

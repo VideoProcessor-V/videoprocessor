@@ -9,7 +9,7 @@
 // the wire bytes against the independent reference encoder.
 #include "pch.h"
 #include "CppUnitTest.h"
-#include "DvTunnelReferenceEncoder.h"
+#include <VP-V/tests/support/DvTunnelReferenceEncoder.h>
 
 #include <dv_loopback/DvLoopbackHarness.h>
 #include <dv_loopback/DvTunnelPacker.h>

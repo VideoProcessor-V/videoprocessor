@@ -4,7 +4,7 @@
 
 #include "CppUnitTest.h"
 
-#include "HardwarePrerequisites.h"
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 #include "../../tools/vp-scale-render/VpScaleRenderCore.h"
 #include "vprenderer/CaptureTimestampGap.h"
 #include <VP-V/modules/motion/vector_delivery/DejudderPolicy.h>

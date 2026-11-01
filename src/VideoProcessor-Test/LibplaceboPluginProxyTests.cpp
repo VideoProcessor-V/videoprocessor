@@ -15,7 +15,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
-#include "HardwarePrerequisites.h"
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 #include <atomic>
 #include <fstream>
 #include <mutex>

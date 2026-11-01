@@ -12,9 +12,9 @@
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <VP-V/modules/motion/consumers/RenderedWarp.h>
 #include "../VideoProcessor-Lib/vprenderer/HookInstanceTag.h"
-#include "../VideoProcessor-Test/ExtendedRangeGpuProbe.h"
-#include "../VideoProcessor-Test/ChainGpuProbe.h"
-#include "../VideoProcessor-Test/SigmaDeltaBiasProbe.h"
+#include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
+#include <VP-V/tests/support/ChainGpuProbe.h>
+#include <VP-V/tests/support/SigmaDeltaBiasProbe.h>
 
 #include <algorithm>
 #include <fstream>

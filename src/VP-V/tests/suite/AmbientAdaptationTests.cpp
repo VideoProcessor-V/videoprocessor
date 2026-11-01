@@ -7,7 +7,7 @@
 #include <VP-V/modules/colour/appearance/AmbientAdaptation.h>
 #include <IntentInterpreterSupport.h>
 #include <vprenderer/LibplaceboRenderParameters.h>
-#include "ExtendedRangeGpuProbe.h"
+#include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
 #include <algorithm>
 #include <vector>
 #include <cmath>

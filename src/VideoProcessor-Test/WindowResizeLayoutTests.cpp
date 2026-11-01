@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 #include <WindowResizeLayout.h>
-#include "HardwarePrerequisites.h"
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 

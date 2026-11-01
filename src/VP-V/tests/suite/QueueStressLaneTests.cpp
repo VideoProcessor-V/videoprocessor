@@ -6,8 +6,8 @@
 // the content-intent observer fed by the harness's kept-frame stream, and the
 // source-resolution monitor under the same queue faults. See QueueStressHarness.h.
 
-#include "LedDriveTestSupport.h"
-#include "QueueStressHarness.h"
+#include <VP-V/tests/support/LedDriveTestSupport.h>
+#include <VP-V/tests/support/QueueStressHarness.h>
 
 #include <ContentIntentObserver.h>
 #include <VP-V/modules/drive/led_measure/LedMeasurement.h>

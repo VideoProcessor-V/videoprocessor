@@ -21,7 +21,7 @@
 #include <VP-V/modules/drive/projector_control/LedShutdownRestore.h>
 #include <VP-V/modules/drive/projector_control/ProjectorDriver.h>
 
-#include "LedDriveTestSupport.h"
+#include <VP-V/tests/support/LedDriveTestSupport.h>
 
 #include <atomic>
 #include <chrono>
