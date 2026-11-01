@@ -107,6 +107,11 @@ foreach ($n in $projects.Keys) { $byPath[$projects[$n].path.ToLowerInvariant()] 
 foreach ($n in $projects.Keys) {
     $p = $projects[$n]
     [xml]$x = Get-Content $p.path -Raw
+    # M2 (H7): VP-V items of a Bill project live in src/VP-V/build/<project>.items.props (paths relative to the project).
+    $itemsProps = Join-Path $root ('src\VP-V\build\' + ([IO.Path]::GetFileName($p.path) -replace '(\.vcxproj)+$', '') + '.items.props')
+    $docs = @($x)
+    if (Test-Path $itemsProps) { [xml]$propsXml = Get-Content $itemsProps -Raw; $docs += $propsXml }
+    foreach ($x in $docs) {
     foreach ($item in $x.SelectNodes("//*[local-name()='ClCompile' or local-name()='ClInclude' or local-name()='ResourceCompile' or local-name()='None' or local-name()='CustomBuild' or local-name()='Image' or local-name()='Text']")) {
         $inc = $item.GetAttribute('Include')
         if (-not $inc -or $inc.Contains('$(') -or $inc.Contains('*')) { continue }
@@ -115,6 +120,7 @@ foreach ($n in $projects.Keys) {
     foreach ($r in $x.SelectNodes("//*[local-name()='ProjectReference']")) {
         $rp = [IO.Path]::GetFullPath((Join-Path $p.dir $r.GetAttribute('Include'))).ToLowerInvariant()
         if ($byPath.ContainsKey($rp)) { $p.refs.Add($byPath[$rp]) }
+    }
     }
 }
 function OwnersOf([string]$fullPath) { @($projects.Keys | Where-Object { $projects[$_].files.Contains($fullPath) } | Sort-Object) }
@@ -199,6 +205,7 @@ $classes = New-Object 'System.Collections.Generic.SortedSet[string]'
 if ($affectedProjects.Contains('VideoProcessor-VPRenderer')) {
     # The renderer DLL is exercised by loading it, not by including its sources.
     [void]$classes.Add('LibplaceboPluginProxyTests'); $reasons.Add('VideoProcessor-VPRenderer affected: LibplaceboPluginProxyTests (loads the renderer DLL)')
+    [void]$classes.Add('LibplaceboPluginProxyTestsVpv'); $reasons.Add('VideoProcessor-VPRenderer affected: LibplaceboPluginProxyTestsVpv (VP-V split of the same DLL tests)')
 }
 foreach ($t in $testFiles) {
     if (-not (Test-Path $t)) { continue }
