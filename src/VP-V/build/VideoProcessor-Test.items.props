@@ -480,6 +480,18 @@
     <ClCompile Include="..\VP-V\tests\suite\R6BaselineTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\AnalysisLumaRangeTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\FileSourceHelpersTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\ConfigFileVpvTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\DolbyVisionTunnelFormatterVpvTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\LibplaceboPluginProxyVpvTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\MotionRendererVpvTests.cpp"><ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild></ClCompile>
+    <ClCompile Include="..\VP-V\tests\suite\DolbyVisionLuminancePolicyVpvTests.cpp" />
+    <ClCompile Include="..\VP-V\tests\suite\LibplaceboRenderParametersVpvTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\tests\suite\AlphaSourceCropPolicyVpvTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\tests\suite\ConfigEditorCoreVpvTests.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\VP-V\tests\VpLutGpuTestSupport.h" />

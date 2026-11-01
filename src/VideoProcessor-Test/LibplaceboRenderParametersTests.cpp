@@ -213,22 +213,6 @@ namespace VideoProcessorTest
             Assert::AreEqual(.45f, standard.colorMapParams.tone_constants.knee_default);
         }
 
-        // FL35 merge check (RC3): the owner runs static HDR->SDR with LLDV doing
-        // the dynamic mapping. With peak_detection off and every tuning key on
-        // Auto, nothing is dynamic and the static curve's constants are exactly
-        // libplacebo's defaults: RC3's tuning changes nothing until a key is set.
-        TEST_METHOD(PeakDetectionOffWithTuningAtAutoKeepsTheStaticCurve)
-        {
-            Settings settings;
-            settings.peakDetection = PeakDetection::Off;
-            Projection projection;
-            BuildOrFail(settings, false, projection);
-            Assert::IsTrue(projection.renderParams.peak_detect_params == nullptr);
-            const auto* defaults = NativeData<pl_color_map_params>("pl_color_map_default_params");
-            AssertSameData(&defaults->tone_constants, &projection.colorMapParams.tone_constants,
-                sizeof(defaults->tone_constants), L"Auto tuning must keep libplacebo's tone constants");
-        }
-
         TEST_METHOD(ToneTuningValidatesBoundsAndInheritedRelations)
         {
             ToneMappingTuning::Override number;
@@ -729,30 +713,6 @@ namespace VideoProcessorTest
 			Assert::IsTrue(projection.renderParams.dither_params == nullptr);
 			Assert::IsTrue(projection.renderParams.error_diffusion == nullptr,
 				L"Disabled dithering must also disable the preferred error-diffusion path.");
-		}
-
-		TEST_METHOD(SaturationOffsetProjectsToColorAdjustmentOnlyWhenNonZero)
-		{
-			Settings settings;
-			Projection neutral;
-			BuildOrFail(settings, false, neutral);
-			Assert::IsTrue(neutral.renderParams.color_adjustment == nullptr,
-				L"Saturation 0 must leave libplacebo's colour adjustment untouched");
-
-			settings.saturation = 5;
-			Projection boosted;
-			BuildOrFail(settings, false, boosted);
-			Assert::IsTrue(boosted.renderParams.color_adjustment == &boosted.colorAdjustment);
-			Assert::AreEqual(1.05f, boosted.colorAdjustment.saturation, 1e-6f);
-			Assert::AreEqual(pl_color_adjustment_neutral.brightness, boosted.colorAdjustment.brightness);
-			Assert::AreEqual(pl_color_adjustment_neutral.contrast, boosted.colorAdjustment.contrast);
-			Assert::AreEqual(pl_color_adjustment_neutral.hue, boosted.colorAdjustment.hue);
-			Assert::AreEqual(pl_color_adjustment_neutral.gamma, boosted.colorAdjustment.gamma);
-
-			settings.saturation = -100;
-			Projection grey;
-			BuildOrFail(settings, false, grey);
-			Assert::AreEqual(0.0f, grey.colorAdjustment.saturation, 1e-6f);
 		}
 
         TEST_METHOD(ExplicitMigrationDefaultsMatchTheRetiredNativePresets)

@@ -1,0 +1,374 @@
+[
+ {
+  "old": "AlphaSourceCropPolicyTests::EdgeBlankingFitsPictureInsideLitArea",
+  "new": "AlphaSourceCropPolicyTestsVpv::EdgeBlankingFitsPictureInsideLitArea"
+ },
+ {
+  "old": "AlphaSourceCropPolicyTests::EdgeBlankingZeroAndExcessiveInsetsLeaveOutputUnchanged",
+  "new": "AlphaSourceCropPolicyTestsVpv::EdgeBlankingZeroAndExcessiveInsetsLeaveOutputUnchanged"
+ },
+ {
+  "old": "ConfigEditorCoreTests::DynamicDriveAliasSectionIsEditedInPlace",
+  "new": "ConfigEditorCoreTestsVpv::DynamicDriveAliasSectionIsEditedInPlace"
+ },
+ {
+  "old": "ConfigFileTests::AmbientRoomLightsSwitchAndSelectProfiles",
+  "new": "ConfigFileTestsVpv::AmbientRoomLightsSwitchAndSelectProfiles"
+ },
+ {
+  "old": "ConfigFileTests::AmbientSensorReadsLuxLinesFromItsOwnPort",
+  "new": "ConfigFileTestsVpv::AmbientSensorReadsLuxLinesFromItsOwnPort"
+ },
+ {
+  "old": "ConfigFileTests::DeckLinkYCbCr12CaptureChoice",
+  "new": "ConfigFileTestsVpv::DeckLinkYCbCr12CaptureChoice"
+ },
+ {
+  "old": "ConfigFileTests::Hunt3DefaultOnBooleansCanBeTurnedOff",
+  "new": "ConfigFileTestsVpv::Hunt3DefaultOnBooleansCanBeTurnedOff"
+ },
+ {
+  "old": "ConfigFileTests::Hunt3GeneralQueueSizeIsRead",
+  "new": "ConfigFileTestsVpv::Hunt3GeneralQueueSizeIsRead"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::ActivePictureLookaheadAcceptsZeroToEightAndAbsence",
+  "new": "ConfigurationReadCacheTestsVpv::ActivePictureLookaheadAcceptsZeroToEightAndAbsence"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::ChromaUpscalerIsAScalingChoice",
+  "new": "ConfigurationReadCacheTestsVpv::ChromaUpscalerIsAScalingChoice"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::CinemaTestConfigurationPicksLowLatencyForHighFrameRates",
+  "new": "ConfigurationReadCacheTestsVpv::CinemaTestConfigurationPicksLowLatencyForHighFrameRates"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::CinemaTestConfigurationStartsWithShadersDisabledAndEnablesThemOneAtATime",
+  "new": "ConfigurationReadCacheTestsVpv::CinemaTestConfigurationStartsWithShadersDisabledAndEnablesThemOneAtATime"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::CinemaTestConfigurationSwitchesBlackBarZoomFromTheConfigApp",
+  "new": "ConfigurationReadCacheTestsVpv::CinemaTestConfigurationSwitchesBlackBarZoomFromTheConfigApp"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::CustomGlslStandardShaderCarriesParamsAndCinemaOnlyToVPRenderer",
+  "new": "ConfigurationReadCacheTestsVpv::CustomGlslStandardShaderCarriesParamsAndCinemaOnlyToVPRenderer"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::CustomGlslStandardShaderRejectsNonNumericParams",
+  "new": "ConfigurationReadCacheTestsVpv::CustomGlslStandardShaderRejectsNonNumericParams"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::DejudderEvenCadenceStrength",
+  "new": "ConfigurationReadCacheTestsVpv::DejudderEvenCadenceStrength"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::DejudderExtrasFillOnlyTheRefreshesTheFrameOwns",
+  "new": "ConfigurationReadCacheTestsVpv::DejudderExtrasFillOnlyTheRefreshesTheFrameOwns"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::DejudderLatencyFloorIsTheRecentMinimum",
+  "new": "ConfigurationReadCacheTestsVpv::DejudderLatencyFloorIsTheRecentMinimum"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::DejudderPolicyIsGeneral",
+  "new": "ConfigurationReadCacheTestsVpv::DejudderPolicyIsGeneral"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::DejudderPolicyRunsOnlyForUnevenCadenceWithANextFrame",
+  "new": "ConfigurationReadCacheTestsVpv::DejudderPolicyRunsOnlyForUnevenCadenceWithANextFrame"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::DejudderSettingsAreInputProfileNumbersWithLimits",
+  "new": "ConfigurationReadCacheTestsVpv::DejudderSettingsAreInputProfileNumbersWithLimits"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::DejudderTelemetrySeesTheMainPresentNotTheExtras",
+  "new": "ConfigurationReadCacheTestsVpv::DejudderTelemetrySeesTheMainPresentNotTheExtras"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::DownscaleLightIsAScalingChoiceForDownscalingFrames",
+  "new": "ConfigurationReadCacheTestsVpv::DownscaleLightIsAScalingChoiceForDownscalingFrames"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::EdgeBlankingRejectsInvalidValues",
+  "new": "ConfigurationReadCacheTestsVpv::EdgeBlankingRejectsInvalidValues"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::EdgeBlankingSurvivesAcceptedConfiguration",
+  "new": "ConfigurationReadCacheTestsVpv::EdgeBlankingSurvivesAcceptedConfiguration"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::IntentRemainderKeysValidate",
+  "new": "ConfigurationReadCacheTestsVpv::IntentRemainderKeysValidate"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::InterpolationKeysValidateAndWantTheLookAhead",
+  "new": "ConfigurationReadCacheTestsVpv::InterpolationKeysValidateAndWantTheLookAhead"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::KeyProfileChoiceLastsUntilTheRulesChange",
+  "new": "ConfigurationReadCacheTestsVpv::KeyProfileChoiceLastsUntilTheRulesChange"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::LookAheadQueueFramesAreTimeBasedAndNeverForceTheQueue",
+  "new": "ConfigurationReadCacheTestsVpv::LookAheadQueueFramesAreTimeBasedAndNeverForceTheQueue"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::LookAheadQueueFramesFollowTheSelectedProfiles",
+  "new": "ConfigurationReadCacheTestsVpv::LookAheadQueueFramesFollowTheSelectedProfiles"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::LowLatencyPathAndLegacyTargetAreNotInherited",
+  "new": "ConfigurationReadCacheTestsVpv::LowLatencyPathAndLegacyTargetAreNotInherited"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::LowLatencyPathIsAQueueProperty",
+  "new": "ConfigurationReadCacheTestsVpv::LowLatencyPathIsAQueueProperty"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::MotionEngineIsOneOrTheOther",
+  "new": "ConfigurationReadCacheTestsVpv::MotionEngineIsOneOrTheOther"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::NlsMaskMappingMatchesTheShadersCentreScales",
+  "new": "ConfigurationReadCacheTestsVpv::NlsMaskMappingMatchesTheShadersCentreScales"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::OldConfigurationWithRetiredSettingsLoads",
+  "new": "ConfigurationReadCacheTestsVpv::OldConfigurationWithRetiredSettingsLoads"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::OlderShippedConfigurationsLoad",
+  "new": "ConfigurationReadCacheTestsVpv::OlderShippedConfigurationsLoad"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::PulldownEvenPatternRule",
+  "new": "ConfigurationReadCacheTestsVpv::PulldownEvenPatternRule"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::PulldownFilmClockIsEvenAndNeverEarly",
+  "new": "ConfigurationReadCacheTestsVpv::PulldownFilmClockIsEvenAndNeverEarly"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::PulldownKeepsItsLockThroughStillsAndDropsItOnABreak",
+  "new": "ConfigurationReadCacheTestsVpv::PulldownKeepsItsLockThroughStillsAndDropsItOnABreak"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::PulldownLocksOntoAnyRateCombination",
+  "new": "ConfigurationReadCacheTestsVpv::PulldownLocksOntoAnyRateCombination"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::PulldownNeverLocksOnVideoStillsOrChanceRepeats",
+  "new": "ConfigurationReadCacheTestsVpv::PulldownNeverLocksOnVideoStillsOrChanceRepeats"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::QueueTargetLatencyBecomesWholeSourceFrames",
+  "new": "ConfigurationReadCacheTestsVpv::QueueTargetLatencyBecomesWholeSourceFrames"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::QueueTargetLatencyIsValidatedAndResolvedPerProfile",
+  "new": "ConfigurationReadCacheTestsVpv::QueueTargetLatencyIsValidatedAndResolvedPerProfile"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::RenderAheadKeysValidate",
+  "new": "ConfigurationReadCacheTestsVpv::RenderAheadKeysValidate"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::RetiredRendererSettingsMigrate",
+  "new": "ConfigurationReadCacheTestsVpv::RetiredRendererSettingsMigrate"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::SaturationIsAnInputProfileSettingFromMinus100To100",
+  "new": "ConfigurationReadCacheTestsVpv::SaturationIsAnInputProfileSettingFromMinus100To100"
+ },
+ {
+  "old": "ConfigurationReadCacheTests::ShippedConfigurationsTurnDebandingOffForHdr",
+  "new": "ConfigurationReadCacheTestsVpv::ShippedConfigurationsTurnDebandingOffForHdr"
+ },
+ {
+  "old": "DolbyVisionLuminancePolicyTests::SceneMinimumAbsentOrBlackIsDistinguished",
+  "new": "DolbyVisionLuminancePolicyTestsVpv::SceneMinimumAbsentOrBlackIsDistinguished"
+ },
+ {
+  "old": "DolbyVisionLuminancePolicyTests::SceneMinimumIsCarriedSeparatelyFromSourceRange",
+  "new": "DolbyVisionLuminancePolicyTestsVpv::SceneMinimumIsCarriedSeparatelyFromSourceRange"
+ },
+ {
+  "old": "DolbyVisionLuminancePolicyTests::SceneMinimumReachesTheStatusButNotTheToneMapper",
+  "new": "DolbyVisionLuminancePolicyTestsVpv::SceneMinimumReachesTheStatusButNotTheToneMapper"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::ActiveIdMatchAfterSixteenHeaderlessPicturesIsAmbiguous",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::ActiveIdMatchAfterSixteenHeaderlessPicturesIsAmbiguous"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::AdvanceMetadataFollowsIdsAcrossRepeatedWrap",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::AdvanceMetadataFollowsIdsAcrossRepeatedWrap"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::AllContainersTimingsAndRastersUnpackBitExact",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::AllContainersTimingsAndRastersUnpackBitExact"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::BlackAndDarkSdrNeverLockAWrongAlignment",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::BlackAndDarkSdrNeverLockAWrongAlignment"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::BriefLossShorterThanWindowHoldsBlackThenResumesDv",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::BriefLossShorterThanWindowHoldsBlackThenResumesDv"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::DvTunnelFixesOffCountsAnalysedPictures",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::DvTunnelFixesOffCountsAnalysedPictures"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::ExtensionLevelsAreSummarisedOncePerTitle",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::ExtensionLevelsAreSummarisedOncePerTitle"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::GrainyMidGreyTunnelWithLostHeadersStaysTunnel",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::GrainyMidGreyTunnelWithLostHeadersStaysTunnel"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::GreySdrMenuAfterTunnelExitsWithinTheWindow",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::GreySdrMenuAfterTunnelExitsWithinTheWindow"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::L2AndL8TrimsAreParsedWithoutAffectingDm",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::L2AndL8TrimsAreParsedWithoutAffectingDm"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::L5L6L11AreParsedIntoTheDmAndTheSceneDescriptor",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::L5L6L11AreParsedIntoTheDmAndTheSceneDescriptor"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::L8BlocksBeforeL2CannotCrowdOutL2Trims",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::L8BlocksBeforeL2CannotCrowdOutL2Trims"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::LetterboxedSdrResolvesAlignmentFromTheWholePicture",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::LetterboxedSdrResolvesAlignmentFromTheWholePicture"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::LossLimitCountsSourcePicturesIncludingSkippedCounters",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::LossLimitCountsSourcePicturesIncludingSkippedCounters"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::LossLimitIsDerivedFromFrameRate",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::LossLimitIsDerivedFromFrameRate"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::MajorityVoteRecoversDifferentErrorsInAllThreeCopies",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::MajorityVoteRecoversDifferentErrorsInAllThreeCopies"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::MaximumLengthDmReassemblesAcrossOneHundredPackets",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::MaximumLengthDmReassemblesAcrossOneHundredPackets"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::MoreTrimsThanCapacityAreFlaggedNotRejected",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::MoreTrimsThanCapacityAreFlaggedNotRejected"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::PackedL5AndOutOfRangeOrShortBlocksAreBoundsChecked",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::PackedL5AndOutOfRangeOrShortBlocksAreBoundsChecked"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::PendingAdvanceDmIsNotAppliedAfterPossibleIdWrap",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::PendingAdvanceDmIsNotAppliedAfterPossibleIdWrap"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::R10ContainersCoverEveryTwelveBitCodeAndTails",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::R10ContainersCoverEveryTwelveBitCodeAndTails"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::RealTunnelWithLostHeadersNeverFallsBackToSdr",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::RealTunnelWithLostHeadersNeverFallsBackToSdr"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::SceneMinimumIsCarriedWithMaxAndAverage",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::SceneMinimumIsCarriedWithMaxAndAverage"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::SdrSwitchWithoutEosFallsBackAfterRateDerivedWindow",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::SdrSwitchWithoutEosFallsBackAfterRateDerivedWindow"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::TitleLogNamesTheL11ContentTypeOncePerTitle",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::TitleLogNamesTheL11ContentTypeOncePerTitle"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::TruncatedL11BlockRejectsThePacketAndKeepsTheActiveDm",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::TruncatedL11BlockRejectsThePacketAndKeepsTheActiveDm"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::UnsupportedSignalsAreRejectedCleanly",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::UnsupportedSignalsAreRejectedCleanly"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::VideoStateCycleResetsTheLossRun",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::VideoStateCycleResetsTheLossRun"
+ },
+ {
+  "old": "DolbyVisionTunnelFormatterTests::VpvTunnelAdmissionAddsR10ContainersBehindTheSwitch",
+  "new": "DolbyVisionTunnelFormatterTestsVpv::VpvTunnelAdmissionAddsR10ContainersBehindTheSwitch"
+ },
+ {
+  "old": "LibplaceboPluginProxyTests::BuildIdentityPairingRefusesAnyMismatch",
+  "new": "LibplaceboPluginProxyTestsVpv::BuildIdentityPairingRefusesAnyMismatch"
+ },
+ {
+  "old": "LibplaceboPluginProxyTests::DejudderHoldTextsMapToStableCodes",
+  "new": "LibplaceboPluginProxyTestsVpv::DejudderHoldTextsMapToStableCodes"
+ },
+ {
+  "old": "LibplaceboPluginProxyTests::HostBuildIdIsWellFormedAndEmbeddedAsOneMarker",
+  "new": "LibplaceboPluginProxyTestsVpv::HostBuildIdIsWellFormedAndEmbeddedAsOneMarker"
+ },
+ {
+  "old": "LibplaceboPluginProxyTests::IntentAndCalibrationHaveExplicitProxyOverrides",
+  "new": "LibplaceboPluginProxyTestsVpv::IntentAndCalibrationHaveExplicitProxyOverrides"
+ },
+ {
+  "old": "LibplaceboPluginProxyTests::PostStallTelemetrySuppressionHasExplicitProxyOverride",
+  "new": "LibplaceboPluginProxyTestsVpv::PostStallTelemetrySuppressionHasExplicitProxyOverride"
+ },
+ {
+  "old": "LibplaceboPluginProxyTests::RendererDiagnosticHistoryReachesCSinkAsTaggedRows",
+  "new": "LibplaceboPluginProxyTestsVpv::RendererDiagnosticHistoryReachesCSinkAsTaggedRows"
+ },
+ {
+  "old": "LibplaceboPluginProxyTests::RendererDllExportsTheHostBuildId",
+  "new": "LibplaceboPluginProxyTestsVpv::RendererDllExportsTheHostBuildId"
+ },
+ {
+  "old": "LibplaceboPluginProxyTests::TimedFileFramesHaveExplicitProxyOverrides",
+  "new": "LibplaceboPluginProxyTestsVpv::TimedFileFramesHaveExplicitProxyOverrides"
+ },
+ {
+  "old": "LibplaceboPluginProxyTests::WriteDiagnosticHistoryHasExplicitProxyOverride",
+  "new": "LibplaceboPluginProxyTestsVpv::WriteDiagnosticHistoryHasExplicitProxyOverride"
+ },
+ {
+  "old": "LibplaceboRenderParametersTests::PeakDetectionOffWithTuningAtAutoKeepsTheStaticCurve",
+  "new": "LibplaceboRenderParametersTestsVpv::PeakDetectionOffWithTuningAtAutoKeepsTheStaticCurve"
+ },
+ {
+  "old": "LibplaceboRenderParametersTests::SaturationOffsetProjectsToColorAdjustmentOnlyWhenNonZero",
+  "new": "LibplaceboRenderParametersTestsVpv::SaturationOffsetProjectsToColorAdjustmentOnlyWhenNonZero"
+ },
+ {
+  "old": "MotionRendererTests::DeinterlacedExtendedRangeConvertsEachFrameOnce",
+  "new": "MotionRendererTestsVpv::DeinterlacedExtendedRangeConvertsEachFrameOnce"
+ },
+ {
+  "old": "MotionRendererTests::DeinterlacedHistoryIsConvertedOnceWithThePreparedColour",
+  "new": "MotionRendererTestsVpv::DeinterlacedHistoryIsConvertedOnceWithThePreparedColour"
+ },
+ {
+  "old": "MotionRendererTests::HistoryFramesTakeThePreparedColourWhenGiven",
+  "new": "MotionRendererTestsVpv::HistoryFramesTakeThePreparedColourWhenGiven"
+ }
+]
