@@ -9,7 +9,10 @@
 // otherwise, keeps its stable id, and Sync() changes the heading only on a real change.
 
 #include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/modules/motion/estimation/ProducerRecovery.h>
+#include <VP-V/modules/control/diagnostics/DiagnosticOverrides.h>
 
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -181,6 +184,114 @@ namespace FallbackCatalogTest
 			Assert::AreEqual(std::string("not loaded: a, b, c +2 more (the picture renders without them)"), many.reason);
 			Assert::AreEqual(std::string("not loaded: a, b, c (the picture renders without them)"),
 				CustomHooksNotLoaded({ "a", "b", "c" }).reason);
+		}
+
+		// Bug hunt 35 #1: the vector producer restarts with a back-off instead of stopping for the
+		// session, and the stop is visible to every vector consumer while it waits.
+		TEST_METHOD(VectorProducerRestartBackOffAndEntry)
+		{
+			using MotionAhead::ProducerRecovery;
+			const unsigned long long first = ProducerRecovery::kFirstDelayMs, later = ProducerRecovery::kLaterDelayMs,
+				healthy = ProducerRecovery::kHealthyMs;
+			ProducerRecovery r;
+			Assert::IsFalse(r.Recovering());
+			Assert::AreEqual(first, static_cast<unsigned long long>(r.OnStopped(1000)));
+			Assert::IsTrue(r.Recovering());
+			Assert::AreEqual(first - 1000, static_cast<unsigned long long>(r.RemainingMs(2000)));
+			r.OnRestarted(6000);
+			Assert::IsFalse(r.Recovering());
+			Assert::AreEqual(0ull, static_cast<unsigned long long>(r.RemainingMs(6000)));
+			// Failing again soon after the restart: the long wait, and it stays long.
+			Assert::AreEqual(later, static_cast<unsigned long long>(r.OnStopped(7000)));
+			r.OnRestarted(67000);
+			Assert::AreEqual(later, static_cast<unsigned long long>(r.OnStopped(67000 + healthy - 1)));
+			// A restart that ran healthy for the healthy interval forgives: the short wait again.
+			const uint64_t t = 200000;
+			r.OnRestarted(t);
+			Assert::AreEqual(first, static_cast<unsigned long long>(r.OnStopped(t + healthy)));
+			Assert::AreEqual(4u, r.Stops());
+			Assert::AreEqual(3u, r.Restarts());
+			// A stop that never restarted (no device) keeps growing the wait.
+			ProducerRecovery n;
+			n.OnStopped(0);
+			Assert::AreEqual(later, static_cast<unsigned long long>(n.OnStopped(first)));
+
+			const Decision off = VectorProducer(false, true, 1, "x");
+			Assert::IsFalse(off.engaged);
+			Assert::AreEqual(std::string("vector producer"), off.id);
+			Assert::IsFalse(VectorProducer(true, false, 3, "x").engaged);   // running again: released
+			const Decision on = VectorProducer(true, true, 2, "cannot create its textures");
+			Assert::IsTrue(on.engaged);
+			Assert::AreEqual(std::string("vector producer"), on.id);
+			Assert::IsTrue(Has(on, "cannot create its textures"));
+			Assert::IsTrue(Has(on, "restarting with back-off (stop 2)"));
+			FallbackStatus::Registry registry;
+			Assert::IsTrue(Sync(registry, on));
+			Assert::IsFalse(Sync(registry, on));   // the same stop: no heading churn
+			Assert::IsTrue(Sync(registry, VectorProducer(true, false, 2)));
+			Assert::IsFalse(registry.Engaged("vector producer"));
+		}
+
+		// Bug hunt 31 H3: a look-ahead worker exception is visible at once and released after a run of
+		// good batches (each batch retries on its own).
+		TEST_METHOD(LookAheadWorkerExceptionsAreVisibleThenRecover)
+		{
+			LookAheadFailures motion = MotionAheadWorker();
+			Assert::IsFalse(motion.Note(false).engaged);
+			const Decision failed = motion.Note(true, "bad allocation");
+			Assert::IsTrue(failed.engaged);
+			Assert::AreEqual(std::string("motion look-ahead"), failed.id);
+			Assert::IsTrue(Has(failed, "worker exception: bad allocation"));
+			for (int i = 0; i < 7; ++i)
+				Assert::IsTrue(motion.Note(false).engaged, L"held through seven good batches");
+			Assert::IsFalse(motion.Note(false).engaged, L"released after eight");
+			Assert::IsTrue(motion.Note(true).engaged);
+			Assert::IsTrue(motion.Note(false).engaged, L"a new failure restarts the count");
+			LookAheadFailures source = SourceResolutionWorker();
+			const Decision s = source.Note(true, "x");
+			Assert::AreEqual(std::string("source resolution look-ahead"), s.id);
+			Assert::IsTrue(Has(s, "resolution judged on arrival only"));
+			Assert::IsFalse(source.Note(false, std::string(), 1).engaged);
+		}
+
+		// Bug hunt 39 #6/#7: test and debug switches are visible outside a test harness; numbers
+		// from the environment are parsed strictly.
+		TEST_METHOD(DiagnosticOverridesAreVisibleAndNumbersStrict)
+		{
+			using namespace VpDiagnostics;
+			const wchar_t block[] = L"=C:=C:\\x\0PATH=C:\\Windows\0vp_test_adapter=Intel\0VP_DEBUG_PHASE_AB=1\0"
+				L"VP_CROP_TRACE_FRAMES=10\0VP_RAW_CAPTURE_PATH=D:\\raw\0VP_TEST_EMPTY=\0VP_DISABLE_AVX2=1\0"
+				L"VP_RENDERER_FILTER_LOG=x\0VP_TEST_ADAPTER=dup\0\0";
+			const std::vector<std::string> names = ScanEnvironmentBlock(block);
+			const std::vector<std::string> want = { "VP_DEBUG_PHASE_AB", "VP_DISABLE_AVX2", "VP_RAW_CAPTURE_PATH", "VP_TEST_ADAPTER" };
+			Assert::IsTrue(names == want, L"overrides only: no trace/log switches, no empty values, unique, sorted");
+			Assert::IsTrue(ScanEnvironmentBlock(nullptr).empty());
+			Assert::IsTrue(IsTestHarnessImage("testhost.exe") && IsTestHarnessImage("vstest.console.exe") &&
+				IsTestHarnessImage("TE.ProcessHost.exe"));
+			Assert::IsFalse(IsTestHarnessImage("VideoProcessor.exe"));
+			Assert::IsTrue(OverridesToShow(names, true).empty(), L"inside the harness: nothing shown");
+			Assert::AreEqual(std::string("diagnostic override active: VP_DEBUG_PHASE_AB, VP_DISABLE_AVX2, VP_RAW_CAPTURE_PATH, VP_TEST_ADAPTER"),
+				StatusLine(OverridesToShow(names, false)));
+			Assert::AreEqual(std::string(), StatusLine({}));
+			const Decision d = DiagnosticOverrides(names);
+			Assert::IsTrue(d.engaged);
+			Assert::AreEqual(std::string("diagnostic override"), d.id);
+			Assert::IsTrue(Has(d, "active: VP_DEBUG_PHASE_AB, "));
+			Assert::IsFalse(DiagnosticOverrides({}).engaged);
+			// This process is a test host: nothing to show whatever is set.
+			Assert::IsTrue(IsTestHarnessProcess());
+			Assert::IsTrue(OverridesToShow().empty());
+
+			double v = 0.0;
+			Assert::IsTrue(ParseStrictNumber(" 12.5 ", v));
+			Assert::AreEqual(12.5, v);
+			Assert::IsTrue(ParseStrictNumber("-1", v) && v == -1.0);
+			Assert::IsTrue(ParseStrictNumber("1e3", v) && v == 1000.0);
+			for (const char* bad : { "", " ", "nan", "NaN", "inf", "-inf", "infinity", "12abc", "0x10", "1e999", "1.2.3x", "--" })
+				Assert::IsFalse(ParseStrictNumber(bad, v), L"rejected");
+			Assert::AreEqual(7.0, StrictNumber("nan", 7.0, 0.0, 10.0), L"the fallback");
+			Assert::AreEqual(10.0, StrictNumber("1e30", 7.0, 0.0, 10.0), L"clamped, never an undefined cast");
+			Assert::AreEqual(0.0, StrictNumber("-5", 7.0, 0.0, 10.0));
 		}
 
 		TEST_METHOD(MotionConsumerGpuFailuresAreVisibleWhileRecent)

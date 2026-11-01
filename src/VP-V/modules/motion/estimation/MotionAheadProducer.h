@@ -13,14 +13,17 @@
 // stores them per pair in a VectorStore under the continuity generation. The
 // de-judder takes its pair from there (no engine work at render time); a miss
 // means it runs the engine itself, or the searches, as before. Never waits: a
-// full queue drops the oldest submissions; an engine failure stops the producer
-// for the session (logged) and everything falls back.
+// full queue drops the oldest submissions; three failures in a row stop the producer
+// and everything falls back - and (bug hunt 35 #1) it restarts itself with a back-off
+// (ProducerRecovery.h) on a fresh device while it is still wanted (not Stop()ped).
+// GetHealth() and FallbackCatalog::VectorProducer show the state.
 
 #include <AnalysisLumaSource.h>
 #include <VP-V/modules/motion/estimation/MotionAhead.h>
 #include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
 #include <VP-V/modules/motion/estimation/VectorStore.h>
 #include <VP-V/modules/motion/estimation/NvOpticalFlow.h>
+#include <VP-V/modules/motion/estimation/ProducerRecovery.h>
 
 #include <d3d11.h>
 #include <atlbase.h>
@@ -224,11 +227,26 @@ namespace MotionAhead
 		struct Stats { unsigned long long frames = 0, pairs = 0, dropped = 0, failures = 0; double lastPairMs = 0.0, lumaMs = 0.0, extrasMs = 0.0; };
 		Stats GetStats() const;
 
+		// Bug hunt 35 #1: the stop/restart state (FallbackCatalog::VectorProducer builds the entry).
+		struct Health
+		{
+			bool recovering = false;          // stopped, a restart is pending
+			unsigned stops = 0, restarts = 0; // this session
+			uint64_t retryInMs = 0;           // while recovering
+			std::string error;                // the failure that stopped it last
+		};
+		Health GetHealth() const;
+		// Test seam: the back-off waits (ms) are scaled by this divisor (1 = real time).
+		void SetRecoveryTimeDivisorForTest(unsigned divisor) { recoveryDivisor.store(divisor < 1 ? 1 : divisor, std::memory_order_release); }
+
 	private:
 		struct Job { uint64_t sequence = 0, generation = 0; AnalysisLumaSource luma; bool breakBefore = false; };
 		void Worker();
 		bool Process(const Job& job);
 		bool EnsureSize(int halfW, int halfH);
+		void ReleaseEngine();
+		bool CreateDevice(std::string& why);
+		static uint64_t NowMs();
 
 		mutable std::mutex mutex;
 		std::condition_variable wake;
@@ -244,6 +262,10 @@ namespace MotionAhead
 		std::vector<uint8_t> quarterBuffer;
 		std::string error;
 		Stats stats;
+		ProducerRecovery recovery;          // under mutex
+		std::string stopError;              // under mutex: the error that caused the last stop
+		std::atomic<unsigned> recoveryDivisor{ 1 };
+		CComPtr<IDXGIAdapter> renderAdapter;   // the render GPU (set in Start, read by the worker)
 
 		// Worker side.
 		CComPtr<ID3D11Device> device;

@@ -110,8 +110,26 @@ namespace LedDrive
 		return std::string();
 	}
 
+	std::string DynamicDriveFrame::RejectionReason(const std::string& validationError)
+	{
+		return validationError.empty() ? std::string() :
+			"configuration rejected: " + validationError + "; LED drive and gamma boost off";
+	}
+
 	void DynamicDriveFrame::DecideFrame(const DynamicDriveFrameInputs& in, OutputSegments::ColourFrame& colour)
 	{
+		// Bug hunt 31 H1: the host rejected the configuration (module and boost off): visible. Only
+		// on a change of the published reason (no registry call on an ordinary frame).
+		const uint64_t rejectionGeneration = RejectionGeneration();
+		if (rejectionGeneration != rejectionSeen)
+		{
+			rejectionSeen = rejectionGeneration;
+			const std::string reason = RejectionReason(PublishedRejection());
+			if (reason.empty())
+				ReleaseFallback(kConfigFallbackId);
+			else
+				Engage(kConfigFallbackId, reason);
+		}
 		const pl_frame& image = *in.image;
 		const pl_frame& target = *in.target;
 		const pl_frame& screen = *in.screen;
@@ -341,10 +359,12 @@ namespace LedDrive
 				std::string("readbacks behind: frames not measured; the LED follows the last statistics");
 		}
 		const bool losing = lateNoteTick != 0 && now - lateNoteTick < 2000;
-		if (losing != readbacksLosing || (losing && readbacksReason != readbacksEngagedReason))
+		const bool downgraded = measurement.NativeReadbackFailed();
+		if (losing != readbacksLosing || (losing && readbacksReason != readbacksEngagedReason) || downgraded != readbackDowngraded)
 		{
 			readbacksLosing = losing;
 			readbacksEngagedReason = losing ? readbacksReason : std::string();
+			readbackDowngraded = downgraded;
 			UpdateMeasurementFallback();
 		}
 	}
@@ -355,6 +375,8 @@ namespace LedDrive
 			Engage(kMeasurementFallbackId, "libplacebo disabled the measurement pass; the LED follows the last statistics");
 		else if (readbacksLosing)
 			Engage(kMeasurementFallbackId, readbacksEngagedReason);
+		else if (readbackDowngraded)   // bug hunt 31 M1: a latency downgrade, visible even while results keep up
+			Engage(kMeasurementFallbackId, "libplacebo readback for the session (the non-blocking readback failed)");
 		else
 			ReleaseFallback(kMeasurementFallbackId);
 	}
@@ -368,6 +390,7 @@ namespace LedDrive
 		compensationRuntimeDisabled = false;
 		measurementDisabledLogged = false;
 		readbacksLosing = false;
+		readbackDowngraded = false;
 		lateNoteTick = 0;
 		readbacksEngagedReason.clear();
 		UpdateMeasurementFallback();

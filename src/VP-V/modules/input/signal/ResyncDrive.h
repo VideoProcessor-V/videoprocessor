@@ -106,9 +106,24 @@ public:
                 m_ids[i] = indicator->Register(spec.name, spec.reads, spec.policies,
                     [slot](const VpIndicator::Indicator::Change& c) { *slot |= c.relevant; });
             }
+            m_latch = true;
         }
         m_lastSealed = seq;
-        return indicator->SealAndObserve(seq);
+        const CounterMask changed = indicator->SealAndObserve(seq);
+        if (m_latch) {
+            // Entering `on` (25a R5, matching the pulldown's Cursor): the first observe after a
+            // registration (shadow -> on keeps the Indicator; off -> on builds a new era) or a return
+            // to `on` (Detach) only LATCHES. The Indicator reports every counter on its first observe
+            // (and everything since the last observe on a return); the readers act only on what
+            // changed AT this frame - its stamp against the previous frame's - never on the history
+            // of the era (a settings change is not a source event). An ancient previous frame
+            // compares as "everything" (the conservative reset). The returned mask is unfiltered.
+            m_latch = false;
+            const CounterMask atFrame = VpIndicator::Changed(indicator->StampOf(seq - 1), indicator->StampOf(seq));
+            for (CounterMask& pending : m_pending)
+                pending &= atFrame;
+        }
+        return changed;
     }
 
     // Render thread: the counters this reader saw change since its last Take (then cleared).
@@ -131,10 +146,11 @@ public:
 
     // Render thread: resync_event left `on`. Pending masks are dropped; the registration is kept
     // (an Indicator accepts readers only before its first Observe, and the callbacks stay valid for
-    // this Drive), so a return to `on` on the same Indicator observes from where it stopped.
+    // this Drive), so a return to `on` on the same Indicator observes from where it stopped (and latches: only the changes AT that frame act).
     void Detach()
     {
         m_pending.fill(0);
+        m_latch = true;   // the next `on` observe latches (see SealAndObserve)
     }
 
     const std::shared_ptr<VpIndicator::Indicator>& Registered() const { return m_registered; }
@@ -185,6 +201,7 @@ private:
     std::array<CounterMask, kReaders> m_pending{};
     std::array<int, kReaders> m_ids{};
     uint64_t m_lastSealed = 0;
+    bool m_latch = true;
 };
 
 } // namespace VpResync

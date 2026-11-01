@@ -114,6 +114,7 @@
       "status": "built",
       "code_location": "partly migrated",
       "live_files": [
+        "src/VP-V/modules/input/queue_timing/WindowedRate.h",
         "src/VP-V/core/DelayBudget.h",
         "src/VP-V/modules/input/queue_timing/QueueLatency.h",
         "src/VideoProcessor-Lib/QueueConfiguration.h",
@@ -231,6 +232,7 @@
       "status": "built",
       "code_location": "partly migrated",
       "live_files": [
+        "src/VP-V/modules/motion/estimation/ProducerRecovery.h",
         "src/VP-V/modules/motion/estimation/NvOpticalFlow.cpp",
         "src/VP-V/modules/motion/estimation/NvOpticalFlow.h",
         "src/VP-V/modules/motion/consumers/DejudderWarp.cpp",
@@ -1259,6 +1261,7 @@
       "status": "partial",
       "code_location": "partly migrated",
       "live_files": [
+        "src/VP-V/modules/control/diagnostics/DiagnosticOverrides.h",
         "src/VP-V/modules/control/diagnostics/StateReport.cpp",
         "src/VP-V/modules/control/diagnostics/CrashState.cpp",
         "src/VP-V/modules/control/diagnostics/CrashState.h",

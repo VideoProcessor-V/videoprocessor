@@ -31,6 +31,7 @@
 // (CPU ingest) only the metadata lines are written and the header says so. The copy runs on
 // the render thread while a clip records (a few ms per 4K frame) - a diagnostic cost.
 #include <VP-V/modules/control/diagnostics/RawCaptureRecorder.h>
+#include <VP-V/modules/control/diagnostics/DiagnosticOverrides.h>
 #include <VideoFrame.h>
 #include <VideoState.h>
 #include <EOTF.h>
@@ -59,14 +60,12 @@ namespace DvCompareCapture
 		return out;
 	}
 
-	inline double EnvNumber(const char* name, double fallback)
+	// Bug hunt 39 #7: a whole-string finite positive number up to hi, else the fallback ("nan",
+	// "inf" and "12abc" were accepted).
+	inline double EnvNumber(const char* name, double fallback, double hi)
 	{
-		const std::string text = Env(name);
-		if (text.empty())
-			return fallback;
-		char* end = nullptr;
-		const double v = std::strtod(text.c_str(), &end);
-		return end != text.c_str() && v > 0.0 ? v : fallback;
+		double v = 0.0;
+		return VpDiagnostics::ParseStrictNumber(Env(name), v) && v > 0.0 ? (std::min)(v, hi) : fallback;
 	}
 
 	struct Options
@@ -80,8 +79,8 @@ namespace DvCompareCapture
 		{
 			Options o;
 			o.root = Env("VP_DV_COMPARE_PATH");
-			o.seconds = EnvNumber("VP_DV_COMPARE_SECONDS", 4.0);
-			o.minFreeGb = EnvNumber("VP_DV_COMPARE_MIN_FREE_GB", 10.0);
+			o.seconds = EnvNumber("VP_DV_COMPARE_SECONDS", 4.0, 3600.0);
+			o.minFreeGb = EnvNumber("VP_DV_COMPARE_MIN_FREE_GB", 10.0, 1.0e6);
 			o.note = Env("VP_DV_COMPARE_NOTE");
 			return o;
 		}

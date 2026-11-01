@@ -59,6 +59,11 @@ public:
         m_mode.store(static_cast<uint8_t>(mode), std::memory_order_release);
     }
 
+    // Bug hunt 35 #3 / 25a R5: the detector's windowed measured rate (capture frames with timestamps;
+    // 0 until the window has filled since the last break, and in Off). Any thread. The interface for
+    // the pulldown's signal rate in `on` (the renderer passes the cumulative rate today: listed).
+    double WindowedRateHz() const { return IsShadow() ? m_windowedRateHz.load(std::memory_order_relaxed) : 0.0; }
+
     // Relaxed load: true in Shadow and On. The renderer gates its whole facts block on this.
     bool Active() const { return IsShadow(); }
 
@@ -139,12 +144,14 @@ public:
         try {
             if (m_restart.exchange(false, std::memory_order_acq_rel)) {
                 m_detector.Restart();
+                m_windowedRateHz.store(0.0, std::memory_order_relaxed);
                 ResetSummary();
             }
             const std::shared_ptr<VpIndicator::Indicator> indicator = std::atomic_load(&m_indicator);
             if (!indicator)
                 return;
             const Decision decision = m_detector.OnEnqueue(facts, m_arms);
+            m_windowedRateHz.store(m_detector.WindowedRateHz(), std::memory_order_relaxed);
             for (uint8_t i = 0; i < decision.count; ++i)
                 Record(*indicator, decision.events[i], nowSeconds);
         } catch (...) {
@@ -403,6 +410,7 @@ private:
 
     ArmBox m_arms;
     Detector m_detector;   // queue mutex
+    std::atomic<double> m_windowedRateHz{0.0};
 
     mutable std::mutex m_stormMutex;
     StormWindow m_storm;   // m_stormMutex

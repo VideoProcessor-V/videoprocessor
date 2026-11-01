@@ -3,6 +3,7 @@
 #pragma once
 
 #include <VP-V/core/ResyncCause.h>
+#include <VP-V/modules/input/queue_timing/WindowedRate.h>
 
 #include <atomic>
 #include <cmath>
@@ -49,6 +50,11 @@ struct Decision {
 struct DetectorSettings {
     double breakFullSeconds = 2.0;
     double rateStepPpm = 500.0;
+    // Bug hunt 35 #3 / audit 25a R5: the RateStep reference. With timestamps (capture frames), the
+    // step is judged on a windowed least-squares rate over this many seconds (VpTiming::WindowedRate)
+    // against the rate latched when the window last filled - never on the cumulative average, which
+    // stops moving after minutes. Without timestamps the measured rate as before.
+    double rateWindowSeconds = VpTiming::WindowedRate::kDefaultWindowSeconds;
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -187,7 +193,12 @@ inline Cause CauseFromQueueReason(const char* reason)
 // ---------------------------------------------------------------------------------------------
 class Detector {
 public:
-    void SetSettings(const DetectorSettings& s) { m_settings = s; }
+    void SetSettings(const DetectorSettings& s)
+    {
+        m_settings = s;
+        m_window = VpTiming::WindowedRate(s.rateWindowSeconds);
+        m_refRateHz = 0.0;
+    }
 
     // The next frame is a FULL Start.
     void Restart()
@@ -196,7 +207,12 @@ public:
         m_haveLastTs = false;
         m_lastNormalDeltaTicks = 0;
         m_prevRateHz = 0.0;
+        m_window.Reset();
+        m_refRateHz = 0.0;
     }
+
+    // The windowed measured rate (bug hunt 35 #3): 0 until the window has filled since the last break.
+    double WindowedRateHz() const { return m_window.Valid() ? m_window.RateHz() : 0.0; }
 
     Decision OnEnqueue(const EnqueueFacts& f, ArmBox& arms)
     {
@@ -254,8 +270,32 @@ public:
         if (f.overflowSuccessorSeq != 0)
             d.events[d.count++] = MakeMinor(Cause::OverflowDrop, f.overflowSuccessorSeq, 0);
 
-        if (!full && f.measuredRateHz > 0.0 && m_prevRateHz > 0.0
-            && std::fabs(f.measuredRateHz - m_prevRateHz) / m_prevRateHz > m_settings.rateStepPpm * 1e-6) {
+        const bool windowed = !f.fileFrame && f.ticksPerSecond > 0 && f.timestampTicks != 0;
+        bool rateStep = false;
+        if (windowed) {
+            // Bug hunt 35 #3 / 25a R5: the windowed rate against the rate latched when the window last
+            // filled. A break (any content event, a gap) restarts the window and the reference; a step
+            // restarts them too, so one move is one event and the new rate is latched from its own frames.
+            if (content.level != Level::None)
+                RestartWindow();
+            m_window.Observe(static_cast<double>(f.timestampTicks) / static_cast<double>(f.ticksPerSecond));
+            if (m_window.Valid()) {
+                const double rate = m_window.RateHz();
+                if (m_refRateHz <= 0.0)
+                    m_refRateHz = rate;
+                else if (std::fabs(rate - m_refRateHz) / m_refRateHz > m_settings.rateStepPpm * 1e-6) {
+                    rateStep = !full;
+                    RestartWindow();
+                    m_window.Observe(static_cast<double>(f.timestampTicks) / static_cast<double>(f.ticksPerSecond));
+                }
+            }
+        } else {
+            if (m_window.Samples() != 0)
+                RestartWindow();   // timestamps went away: never judge across them
+            rateStep = !full && f.measuredRateHz > 0.0 && m_prevRateHz > 0.0
+                && std::fabs(f.measuredRateHz - m_prevRateHz) / m_prevRateHz > m_settings.rateStepPpm * 1e-6;
+        }
+        if (rateStep) {
             Event e;
             e.level = Level::Timing;
             e.cause = Cause::RateStep;
@@ -308,6 +348,12 @@ private:
         return e;
     }
 
+    void RestartWindow()
+    {
+        m_window.Reset();
+        m_refRateHz = 0.0;
+    }
+
     // True when the break is FULL: backwards beyond one period, or a jump beyond breakFullSeconds.
     bool GradeTimestampBreak(const EnqueueFacts& f) const
     {
@@ -332,6 +378,8 @@ private:
     int64_t m_lastTs = 0;
     int64_t m_lastNormalDeltaTicks = 0;
     double m_prevRateHz = 0.0;
+    VpTiming::WindowedRate m_window;
+    double m_refRateHz = 0.0;
     uint64_t m_consumedQueue = 0;
     uint64_t m_consumedState = 0;
 };

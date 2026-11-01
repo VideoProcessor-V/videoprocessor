@@ -183,6 +183,64 @@ namespace FallbackCatalog
 		return Engaged("motion", reason + (error.empty() ? std::string() : ": " + error) + ")");
 	}
 
+	// ---- motion.estimation: the vector producer's restarts (bug hunt 35 #1) -----------------------
+	// The look-ahead producer stopped after three failed jobs in a row and restarts itself with a
+	// back-off (MotionAhead::ProducerRecovery). Engaged while it is wanted and waiting to restart,
+	// for every vector consumer (the "motion" entry above covers only the de-judder's view).
+	inline Decision VectorProducer(bool wanted, bool recovering, unsigned stops, const std::string& error = std::string())
+	{
+		if (!wanted || !recovering)
+			return Released("vector producer");
+		return Engaged("vector producer", "render-time motion estimate; the look-ahead stopped" +
+			(error.empty() ? std::string() : ": " + error) + "; restarting with back-off (stop " + std::to_string(stops) + ")");
+	}
+
+	// ---- look-ahead workers (bug hunt 31 H3) ----------------------------------------------------
+	// A look-ahead batch threw (the motion-ahead hand-off, the source-resolution look-ahead): its
+	// frames went without that work. Engaged at the failure with the exception text, released after
+	// `releaseAfterGood` batches in a row without one (the next batches retry on their own).
+	struct LookAheadFailures
+	{
+		const char* id = "look-ahead";
+		const char* without = "frames skipped";
+		unsigned long long failures = 0;
+		unsigned goodSince = 0;
+		bool engaged = false;
+		std::string what;
+		LookAheadFailures(const char* idIn, const char* withoutIn) : id(idIn), without(withoutIn) {}
+		Decision Note(bool failed, const std::string& whatIn = std::string(), unsigned releaseAfterGood = 8)
+		{
+			if (failed)
+			{
+				++failures;
+				goodSince = 0;
+				engaged = true;
+				what = whatIn;
+			}
+			else if (engaged && ++goodSince >= releaseAfterGood)
+				engaged = false;
+			if (!engaged)
+				return Released(id);
+			return Engaged(id, std::string(without) + " (worker exception" + (what.empty() ? std::string() : ": " + what) +
+				"); retrying each batch");
+		}
+	};
+	inline LookAheadFailures MotionAheadWorker() { return LookAheadFailures("motion look-ahead", "no optical-flow look-ahead for some frames"); }
+	inline LookAheadFailures SourceResolutionWorker() { return LookAheadFailures("source resolution look-ahead", "resolution judged on arrival only"); }
+
+	// ---- control.diagnostics: diagnostic overrides (bug hunt 39 #6) -----------------------------
+	// Test / debug switches set in the environment outside a test harness
+	// (VpDiagnostics::OverridesToShow). Engaged while any is set; the names only, never values.
+	inline Decision DiagnosticOverrides(const std::vector<std::string>& names)
+	{
+		if (names.empty())
+			return Released("diagnostic override");
+		std::string list;
+		for (size_t i = 0; i < names.size(); ++i)
+			list += (i ? ", " : "") + names[i];
+		return Engaged("diagnostic override", "active: " + list);
+	}
+
 	// ---- motion.consumers -----------------------------------------------------------------------
 	// A picture between frames could not be made on the GPU (the de-judder warp, the rendered warp
 	// or the interpolation failed): the source frame is shown instead (the de-judder holds). Engaged

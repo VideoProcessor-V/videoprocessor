@@ -145,6 +145,9 @@ namespace LedDrive
 		// Fallback ids this adapter engages in the host's registry.
 		static constexpr const char* kMeasurementFallbackId = "LED measurement";
 		static constexpr const char* kBoostFallbackId = "gamma boost";
+		static constexpr const char* kConfigFallbackId = "Dynamic Drive";   // bug hunt 31 H1
+		// Bug hunt 31 H1: the "Dynamic Drive" entry's text for a rejected configuration ("" = released).
+		static std::string RejectionReason(const std::string& validationError);
 
 	private:
 		void Engage(const char* id, const std::string& reason);
@@ -166,6 +169,8 @@ namespace LedDrive
 		std::string readbacksEngagedReason;      // the text the entry shows now
 		bool readbacksLosing = false;
 		bool boostEngaged = false;
+		uint64_t rejectionSeen = 0;              // the RejectionGeneration last shown (bug hunt 31 H1)
+		bool readbackDowngraded = false;         // the measurement's non-blocking readback failed (bug hunt 31 M1)
 		// DecideFrame -> AfterCollect (render thread, one frame).
 		std::shared_ptr<LedDriveModule> frameModule;
 		double frameBoostExponent = 1.0;

@@ -409,9 +409,98 @@ namespace Tests
 			// format change at 8K -> FULL
 			s.format += 1;
 			ExpectOne(s.Push(), Level::Full, Cause::SourceFormatChanged);
-			// 120 -> 119.88 (1000 ppm) -> timing only
+			// 120 -> 119.88 (1000 ppm) -> timing only. Bug hunt 35 #3: with timestamps the step is judged
+			// on the windowed rate (the cumulative measured rate is not used), so the measurement alone
+			// moving does nothing; without timestamps it does, as before.
+			s.rate = 119.88;
+			ExpectNone(s.Push());
+			s.ts = 0;
+			s.rate = 120.0;
+			s.Push();
 			s.rate = 119.88;
 			ExpectOne(s.Push(), Level::Timing, Cause::RateStep);
+		}
+
+		// Bug hunt 35 #3 / 25a R5: after a long session the cumulative measured rate barely moves; the
+		// windowed rate sees an unannounced 59.94 -> 60 move within about half a window, once.
+		TEST_METHOD(WindowedRateStepFiresOnceAfterALongSession)
+		{
+			Stream s;
+			s.tps = 10000000;
+			s.ts = 10000000;
+			s.rate = 60000.0 / 1001.0;   // the renderer's cumulative value: it never changes below
+			uint32_t lcg = 12345;
+			auto jitter = [&lcg]() { lcg = lcg * 1664525u + 1013904223u; return static_cast<int64_t>((lcg >> 16) % 20001) - 10000; };   // +-1 ms
+			double exact = 1.0;   // seconds
+			auto step = [&](double hz) { exact += 1.0 / hz; s.ts = static_cast<int64_t>(exact * 1e7) + jitter(); return s.Push(); };
+			s.Push();   // Start
+			int events = 0;
+			const double before = 60000.0 / 1001.0;
+			for (int i = 0; i < static_cast<int>(before * 20 * 60); ++i)   // 20 minutes
+				events += step(before).count;
+			Assert::AreEqual(0, events, L"jitter and a steady rate never fire");
+			Assert::AreEqual(before, s.det.WindowedRateHz(), 0.003);
+			int firedAt = -1;
+			for (int i = 0; i < 60 * 60; ++i)   // one minute at 60.000
+			{
+				const Decision d = step(60.0);
+				if (d.count)
+				{
+					ExpectOne(d, Level::Timing, Cause::RateStep);
+					Assert::AreEqual(-1, firedAt, L"once");
+					firedAt = i;
+				}
+			}
+			Assert::IsTrue(firedAt > 0, L"the step is seen");
+			Assert::IsTrue(firedAt < 60 * 8, L"within about half a window (10 s) plus margin");
+			Assert::AreEqual(60.0, s.det.WindowedRateHz(), 0.003, L"the new rate is latched from its own frames");
+			// 50 ppm drift: nothing.
+			for (int i = 0; i < 60 * 60; ++i)
+				Assert::AreEqual(0, static_cast<int>(step(60.0 * (1.0 + 50e-6)).count));
+		}
+
+		TEST_METHOD(WindowedRateRestartsAtBreaksAndIgnoresFiles)
+		{
+			Stream s;
+			s.ts = 1000000;
+			double exact = 0.1;
+			auto at = [&](double hz) { exact += 1.0 / hz; s.ts = static_cast<int64_t>(exact * 1e7); };
+			s.Push();
+			for (int i = 0; i < 24 * 15; ++i) { at(24.0); ExpectNone(s.Push()); }
+			Assert::AreEqual(24.0, s.det.WindowedRateHz(), 1e-4);
+			// One frame missing without a flagged gap: the window restarts, no false step.
+			at(24.0); at(24.0);
+			ExpectNone(s.Push());
+			Assert::AreEqual(0.0, s.det.WindowedRateHz(), L"restarted at the unflagged hole");
+			for (int i = 0; i < 24 * 15; ++i) { at(24.0); ExpectNone(s.Push()); }
+			Assert::AreEqual(24.0, s.det.WindowedRateHz(), 1e-4);
+			// A gap at a rate change: the gap is the event (MINOR); the new rate is latched afresh, no timing.
+			at(25.0);
+			EnqueueFacts f = s.Next(); f.gapBefore = true; f.gapCause = "missed frames"; f.gapFrames = 1;
+			const Decision gap = s.Push(f);
+			Assert::AreEqual(1, static_cast<int>(gap.count));
+			Assert::IsTrue(gap.events[0].level == Level::Minor);
+			Assert::AreEqual(0.0, s.det.WindowedRateHz(), L"restarted at the break");
+			for (int i = 0; i < 25 * 15; ++i) { at(25.0); ExpectNone(s.Push()); }
+			Assert::AreEqual(25.0, s.det.WindowedRateHz(), 1e-4);
+			// File frames: no windowed judgement (they pass no measured rate either).
+			for (int i = 0; i < 30 * 15; ++i) { at(30.0); EnqueueFacts ff = s.Next(); ff.fileFrame = true; ExpectNone(s.Push(ff)); }
+			Assert::AreEqual(0.0, s.det.WindowedRateHz());
+			// Determinism: the same timestamps give the same rate, exactly.
+			VpTiming::WindowedRate a, b;
+			for (int i = 0; i < 1000; ++i) { a.Observe(i / 59.94); b.Observe(i / 59.94); }
+			Assert::AreEqual(a.RateHz(), b.RateHz());
+			Assert::IsTrue(a.Valid());
+			Assert::AreEqual(59.94, a.RateHz(), 1e-6);
+			// Non-finite and backwards timestamps restart it; the storage stays bounded.
+			a.Observe(std::nan(""));
+			Assert::AreEqual(size_t(0), a.Samples());
+			for (int i = 0; i < 100000; ++i) a.Observe(i / 1000.0);
+			Assert::IsTrue(a.Samples() <= size_t(4096));
+			Assert::IsTrue(a.Valid(), L"a full ring is a full window at a very high rate");
+			Assert::AreEqual(1000.0, a.RateHz(), 1e-6);
+			a.Observe(0.0);
+			Assert::AreEqual(size_t(1), a.Samples());
 		}
 
 		TEST_METHOD(VocabularyHelpersAreConsistent)
