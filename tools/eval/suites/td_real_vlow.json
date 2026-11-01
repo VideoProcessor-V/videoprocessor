@@ -1,0 +1,254 @@
+{
+ "name": "td_real_vlow",
+ "description": "TemporalDetail on streaming-like x265 encodes (make_td_encodes.py); masters and decodes are central 960x544 crops in scratch, never committed",
+ "cases": [
+  {
+   "id": "tos_2160p_vlow",
+   "content_type": "film24",
+   "clip": "tos",
+   "case": "x265_2160p_4k_vlow",
+   "protocol": "same",
+   "frames": 72,
+   "gop": 48,
+   "minigop": 4,
+   "frame_types": "IBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBPIBBBPBBBPBBBPBBBPBBBPBBP",
+   "grain_probe": true,
+   "note": "Tears of Steel 4K (live action + VFX, scope), FFV1 master; 2160p rung 3840x1714, crop 960x544 at (1440,584); x265 medium ABR 4000 kb/s (measured 3306 kb/s), IBBBP b-adapt 0, pbratio 1.60, keyint 48, scenecut 0",
+   "master": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 24.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/enc\\tos_2160p_vlow_master.yuv"
+   },
+   "coded": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 24.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/enc\\tos_2160p_vlow_coded.yuv"
+   }
+  },
+  {
+   "id": "tos_1080p_vlow",
+   "content_type": "film24",
+   "clip": "tos",
+   "case": "x265_1080p_1.5k_vlow",
+   "protocol": "same",
+   "frames": 72,
+   "gop": 48,
+   "minigop": 4,
+   "frame_types": "IBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBPIBBBPBBBPBBBPBBBPBBBPBBP",
+   "grain_probe": true,
+   "note": "Tears of Steel 4K (live action + VFX, scope), FFV1 master; 1080p rung 1920x856, crop 960x544 at (480,156); x265 medium ABR 1500 kb/s (measured 1261 kb/s), IBBBP b-adapt 0, pbratio 1.60, keyint 48, scenecut 0",
+   "master": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 24.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/enc\\tos_1080p_vlow_master.yuv"
+   },
+   "coded": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 24.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/enc\\tos_1080p_vlow_coded.yuv"
+   }
+  },
+  {
+   "id": "sol_2160p_vlow",
+   "content_type": "film24",
+   "clip": "sol",
+   "case": "x265_2160p_4k_vlow",
+   "protocol": "same",
+   "frames": 72,
+   "gop": 48,
+   "minigop": 4,
+   "frame_types": "IBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBPIBBBPBBBPBBBPBBBPBBBPBBP",
+   "grain_probe": true,
+   "note": "Sol Levante (2D animation, 4:2:2 10-bit FFV1 master; chroma to 4:2:0); 2160p rung 3840x2160, crop 960x544 at (1440,808); x265 medium ABR 4000 kb/s (measured 4444 kb/s), IBBBP b-adapt 0, pbratio 1.60, keyint 48, scenecut 0",
+   "master": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 24.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/enc\\sol_2160p_vlow_master.yuv"
+   },
+   "coded": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 24.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/enc\\sol_2160p_vlow_coded.yuv"
+   }
+  },
+  {
+   "id": "sol_1080p_vlow",
+   "content_type": "film24",
+   "clip": "sol",
+   "case": "x265_1080p_1.5k_vlow",
+   "protocol": "same",
+   "frames": 72,
+   "gop": 48,
+   "minigop": 4,
+   "frame_types": "IBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBPIBBBPBBBPBBBPBBBPBBBPBBP",
+   "grain_probe": true,
+   "note": "Sol Levante (2D animation, 4:2:2 10-bit FFV1 master; chroma to 4:2:0); 1080p rung 1920x1080, crop 960x544 at (480,268); x265 medium ABR 1500 kb/s (measured 1678 kb/s), IBBBP b-adapt 0, pbratio 1.60, keyint 48, scenecut 0",
+   "master": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 24.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/enc\\sol_1080p_vlow_master.yuv"
+   },
+   "coded": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 24.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/enc\\sol_1080p_vlow_coded.yuv"
+   }
+  },
+  {
+   "id": "boat_2160p_vlow",
+   "content_type": "nature30",
+   "clip": "boat",
+   "case": "x265_2160p_4k_vlow",
+   "protocol": "same",
+   "frames": 90,
+   "gop": 60,
+   "minigop": 4,
+   "frame_types": "IBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBPIBBBPBBBPBBBPBBBPBBBPBBBPBBBPP",
+   "grain_probe": true,
+   "note": "boat 4K 60p FFV1 master decimated to 30p (nature30 PROXY); 2160p rung 4096x2160, crop 960x544 at (1568,808); x265 medium ABR 4000 kb/s (measured 4165 kb/s), IBBBP b-adapt 0, pbratio 1.60, keyint 60, scenecut 0",
+   "master": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 30.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/enc\\boat_2160p_vlow_master.yuv"
+   },
+   "coded": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 30.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/enc\\boat_2160p_vlow_coded.yuv"
+   }
+  },
+  {
+   "id": "boat_1080p_vlow",
+   "content_type": "nature30",
+   "clip": "boat",
+   "case": "x265_1080p_1.5k_vlow",
+   "protocol": "same",
+   "frames": 90,
+   "gop": 60,
+   "minigop": 4,
+   "frame_types": "IBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBPIBBBPBBBPBBBPBBBPBBBPBBBPBBBPP",
+   "grain_probe": true,
+   "note": "boat 4K 60p FFV1 master decimated to 30p (nature30 PROXY); 1080p rung 1920x1012, crop 960x544 at (480,232); x265 medium ABR 1500 kb/s (measured 1508 kb/s), IBBBP b-adapt 0, pbratio 1.60, keyint 60, scenecut 0",
+   "master": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 30.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/enc\\boat_1080p_vlow_master.yuv"
+   },
+   "coded": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 30.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/enc\\boat_1080p_vlow_coded.yuv"
+   }
+  },
+  {
+   "id": "crowd_2160p_vlow",
+   "content_type": "sports50_60",
+   "clip": "crowd",
+   "case": "x265_2160p_4k_vlow",
+   "protocol": "same",
+   "frames": 150,
+   "gop": 100,
+   "minigop": 4,
+   "frame_types": "IBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBPIBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPP",
+   "grain_probe": true,
+   "note": "crowd_run 2160p50 y4m (sports PROXY: fast motion, dense texture); 2160p rung 3840x2160, crop 960x544 at (1440,808); x265 medium ABR 4000 kb/s (measured 4035 kb/s), IBBBP b-adapt 0, pbratio 1.60, keyint 100, scenecut 0",
+   "master": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 50.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/enc\\crowd_2160p_vlow_master.yuv"
+   },
+   "coded": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 50.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/enc\\crowd_2160p_vlow_coded.yuv"
+   }
+  },
+  {
+   "id": "crowd_1080p_vlow",
+   "content_type": "sports50_60",
+   "clip": "crowd",
+   "case": "x265_1080p_1.5k_vlow",
+   "protocol": "same",
+   "frames": 150,
+   "gop": 100,
+   "minigop": 4,
+   "frame_types": "IBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBPIBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPP",
+   "grain_probe": true,
+   "note": "crowd_run 2160p50 y4m (sports PROXY: fast motion, dense texture); 1080p rung 1920x1080, crop 960x544 at (480,268); x265 medium ABR 1500 kb/s (measured 1507 kb/s), IBBBP b-adapt 0, pbratio 1.60, keyint 100, scenecut 0",
+   "master": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 50.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/enc\\crowd_1080p_vlow_master.yuv"
+   },
+   "coded": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 50.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/enc\\crowd_1080p_vlow_coded.yuv"
+   }
+  }
+ ]
+}

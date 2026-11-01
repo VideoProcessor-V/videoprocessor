@@ -25,6 +25,10 @@ correlation increase <= 0.05.
 - Motion sources are bounded (long-run hunt 2026-10-31): `FieldMotionSource` keeps a 128-frame window behind its newest
   pair, `Prune(presented)` drops everything older than the presented frame (the model never re-reads an older pair:
   composition is incremental), `Clear()` at resets; the camera adapter prunes its records with them.
+- Measurement knobs (`Model::Tuning`, never user settings): grain budget, cleaner, guard, the gate thresholds
+  `Tuning::gates` (`strongerMargin`, `baseNoiseCodes`, `baseGrainSigmas`, `uncertaintyPx`; defaults = the constants) and
+  `forceWeight` (the transfer ceiling, measurement only). `tools/td-cli` drives the CPU model on real encodes with them
+  (test/temporal-detail-real; its own mirrored active-picture wrapper was superseded by `FrameIn::active` at integration).
 
 ## Algorithm (CPU reference model `TemporalDetailModel.h`; shaders mirror it)
 
@@ -197,6 +201,13 @@ default **6.3 dB** B-frame PSNR gain at the strict bounds (grain RMS 1.013, lag-
 The low temporal band binds everywhere (RMS stays <= 1.014, lag-1 <= +0.015); grain RMS and the higher bands include the
 fallback boost's <= 4% share (1.012 with no transfer at all). Kappa 2 .. 8 lies within 0.2 dB. The pre-fix draft's 10.5 dB was 9.8 dB structure plus a grain swap (own grain kept 31%, 73% of the
 grain energy foreign/frozen); the first fix's 2.9 dB kept 80% own grain with 25% foreign.
+
+Real streaming-like encodes (x265 IBBBP, 2160p 4-16 Mb/s, 1080p 1.5-6 Mb/s, 4 masters; `tools/eval/prototypes/
+temporal_detail_real/`, CPU model with DIS stand-in vectors): the transfer is inert, B-frame PSNR change <= +0.001 dB at
+every tier and every swept threshold (stronger margin 0.02-0.15, base allowance x1-x3, uncertainty 0.5-1 px); the
+transfer ceiling (`Tuning::forceWeight` 1) is -0.02 dB, a per-block master-oracle strength only +0.04 dB, and a fitted
+local rule (deficit, trust, grain, brightness, I/B phase) -0.008 dB on held-out clips. Real B-frame loss is not the
+fine-band attenuation the coding simulation models. The fallback boost is the only active part (-0.004 dB, +2 % grain).
 
 Limits: the cleaner removes most, not all, of the grain the split reads as texture (the rest is budgeted); the first slot
 after a reset has no evidence (single-frame DCT Wiener); future sources are uncleaned (budgeted at rho2 = 1); the grain level needs quiet areas within 80 px (dense texture everywhere raises N, f

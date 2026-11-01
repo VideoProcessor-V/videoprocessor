@@ -1,0 +1,74 @@
+{
+ "name": "td_letterbox",
+ "description": "TemporalDetail on streaming-like x265 encodes (make_td_encodes.py); masters and decodes are central 960x544 crops in scratch, never committed",
+ "cases": [
+  {
+   "id": "toslb_2160p",
+   "content_type": "film24",
+   "clip": "toslb",
+   "case": "x265_2160p_12k",
+   "letterbox": {
+    "bar_rows": 222
+   },
+   "protocol": "same",
+   "frames": 72,
+   "gop": 48,
+   "minigop": 4,
+   "frame_types": "IBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBPIBBBPBBBPBBBPBBBPBBBPBBP",
+   "grain_probe": true,
+   "note": "Tears of Steel 4K scope master LETTERBOXED to 3840x2160 (222-row black bars), crop at the top edge; 2160p rung 3840x2160, crop 960x544 at (1440,0); x265 medium ABR 12000 kb/s (measured 12840 kb/s), IBBBP b-adapt 0, keyint 48, scenecut 0",
+   "master": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 24.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/enc\\toslb_2160p_master.yuv"
+   },
+   "coded": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 24.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/enc\\toslb_2160p_coded.yuv"
+   }
+  },
+  {
+   "id": "toslb_1080p",
+   "content_type": "film24",
+   "clip": "toslb",
+   "case": "x265_1080p_4k",
+   "letterbox": {
+    "bar_rows": 111
+   },
+   "protocol": "same",
+   "frames": 72,
+   "gop": 48,
+   "minigop": 4,
+   "frame_types": "IBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBBPBBPIBBBPBBBPBBBPBBBPBBBPBBP",
+   "grain_probe": true,
+   "note": "Tears of Steel 4K scope master LETTERBOXED to 3840x2160 (222-row black bars), crop at the top edge; 1080p rung 1920x1080, crop 960x544 at (480,0); x265 medium ABR 4500 kb/s (measured 3831 kb/s), IBBBP b-adapt 0, keyint 48, scenecut 0",
+   "master": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 24.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/enc\\toslb_1080p_master.yuv"
+   },
+   "coded": {
+    "kind": "raw",
+    "width": 960,
+    "height": 544,
+    "pix_fmt": "yuv420p10le",
+    "start": 0,
+    "fps": 24.0,
+    "path": "D:/codex/videoprocessor/eval-scratch/test-td-real/enc\\toslb_1080p_coded.yuv"
+   }
+  }
+ ]
+}

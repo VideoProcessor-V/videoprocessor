@@ -421,6 +421,80 @@ namespace VideoProcessorTest
 			Assert::IsTrue(vOn <= 0.75 * vOff, L"the I/B fine-structure energy variance drops by >= 25%");
 		}
 
+		TEST_METHOD(TemporalDetailActivePictureKeepsBars)
+		{
+			// Letterbox: the top kBar rows are a black bar (with a little coding noise); the picture below pulses I/B.
+			constexpr int n = 40;
+			static constexpr int kBar = 16;   // static: usable in the capture-less hooks
+			Stream s = BuildPan(Pattern("IBBBPBBB", n), 0.0);
+			const std::vector<Plane> noBar = s.frames;   // the same picture without the bar (baseline for the band)
+			Noise noise(99);
+			for (Plane& f : s.frames)
+				for (int y = 0; y < kBar; ++y)
+					for (int x = 0; x < kW; ++x) f.at(x, y) = 16.0 + 0.3 * noise.Next();
+			FieldMotionSource motion;
+			SetPan(motion, n, 0.0, 0.0);
+			auto whole = [](int, Model::FrameIn& in) { in.active.left = 0; in.active.top = 0; in.active.right = kW; in.active.bottom = kH; };
+			auto box = [](int, Model::FrameIn& in) { in.active.left = 0; in.active.top = kBar; in.active.right = kW; in.active.bottom = kH; };
+			Model plain(Steady()), explicitWhole(Steady()), boxed(Steady());
+			Settings so = Steady();
+			so.boostMax = 0.0;
+			Model boxedNoBoost(so), noBarNoBoost(so);
+			const Run a = Go(plain, s.frames, &motion);
+			const Run b = Go(explicitWhole, s.frames, &motion, kHz, 1080.0, 0, whole);
+			const Run c = Go(boxed, s.frames, &motion, kHz, 1080.0, 0, box);
+			const Run d = Go(boxedNoBoost, s.frames, &motion, kHz, 1080.0, 0, box);
+			const Run e = Go(noBarNoBoost, noBar, &motion);   // the picture alone: the band is interior there
+			double barMax = 0.0, mseOff = 0.0, mseOn = 0.0, under = 0.0, underNoBar = 0.0;
+			int cnt = 0;
+			for (int f = 0; f < n; ++f)
+			{
+				const size_t u = static_cast<size_t>(f);
+				Assert::IsTrue(Same(a.out[u], b.out[u]), L"an explicit whole-plane rectangle equals no rectangle (bit-identical)");
+				for (int y = 0; y < kBar; ++y)
+					for (int x = 0; x < kW; ++x)
+					{
+						barMax = (std::max)(barMax, std::fabs(c.out[u].at(x, y) - s.frames[u].at(x, y)));
+						barMax = (std::max)(barMax, std::fabs(d.out[u].at(x, y) - s.frames[u].at(x, y)));
+					}
+				// boundary band (the first 16 picture rows, transfer only): the dip below the input's local 5 x 5 minimum
+				// (restored detail legitimately leaves the soft B-frame's range) is no larger than with no bar at all
+				for (int y = kBar; y < kBar + 16; ++y)
+					for (int x = 2; x < kW - 2; ++x)
+					{
+						double lo = 1e9;
+						for (int yy = (std::max)(kBar, y - 2); yy <= y + 2; ++yy)
+							for (int xx = x - 2; xx <= x + 2; ++xx) lo = (std::min)(lo, s.frames[u].at(xx, yy));
+						under = (std::max)(under, lo - d.out[u].at(x, y));
+						underNoBar = (std::max)(underNoBar, lo - e.out[u].at(x, y));
+					}
+				if (f >= 16 && f % 8 != 0 && f % 8 != 4)
+				{
+					mseOff += Mse(s.frames[u], s.truth[u], 8, kBar + 8);
+					mseOn += Mse(c.out[u], s.truth[u], 8, kBar + 8);
+					++cnt;
+				}
+			}
+			const double gain = PsnrOf(mseOn / cnt) - PsnrOf(mseOff / cnt);
+			LogF("letterbox: bar change max %.6f, band undershoot (boost off) %.3f (same picture, no bar %.3f), picture B-frame gain %.2f dB",
+				barMax, under, underNoBar, gain);
+			Assert::IsTrue(barMax == 0.0, L"bar pixels are byte-identical");
+			Assert::IsTrue(under <= underNoBar + 1.0, L"no extra undershoot at the picture/bar boundary (transfer only) vs the same picture without a bar");
+			Assert::IsTrue(gain >= 1.0, L"the picture below the bar still gains >= 1 dB on B-frames");
+		}
+
+		TEST_METHOD(TemporalDetailActiveRectangleChangeResets)
+		{
+			const int n = 12;
+			const Stream s = BuildPan(Pattern("IBBBPBBB", n), 0.0);
+			FieldMotionSource motion;
+			SetPan(motion, n, 0.0, 0.0);
+			Model m(Steady());
+			const Run r = Go(m, s.frames, &motion, kHz, 1080.0, 0, [](int t, Model::FrameIn& in) { in.active.left = 0; in.active.top = t < 6 ? 0 : 8; in.active.right = kW; in.active.bottom = kH; });
+			Assert::IsTrue(r.diag[6].resets == r.diag[5].resets + 1, L"a new active rectangle resets the store (once)");
+			Assert::IsTrue(r.diag[7].resets == r.diag[6].resets, L"an unchanged rectangle does not reset");
+		}
+
 		TEST_METHOD(TemporalDetailSubPixelPanAligns)
 		{
 			const double pans[2] = { 0.25, 0.37 };

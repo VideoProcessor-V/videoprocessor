@@ -400,6 +400,9 @@ namespace TemporalDetail
 			double cleanKappa = kCleanKappa;
 			double guardTemplateShare = kGuardTemplateShare;   // <= 0: the guard reads every low-f pixel (no structure mask)
 			bool guard = true;
+			// > 0: every block with a selected reference transfers at this weight, gates and limiter bypassed (the transfer's
+			// ceiling, for measurement only - test/temporal-detail-real; the projection, coherence, budget and guard still apply)
+			double forceWeight = 0.0;
 			double forceDrop = 0.0, forceFreeze = 0.0;
 			int slots = kSlots;                  // reference-store tier: past slots kept (1 .. kSlots; small cards keep fewer)
 			GateTuning gates;                    // the gate thresholds (re-tuned on real B-frames)
@@ -1223,7 +1226,7 @@ namespace TemporalDetail
 			Contribution& c = contrib[static_cast<size_t>(i)];
 			// the output-vs-input grain guard (step 10) scales what this block may contribute
 			const double guard = m_tune.guard ? st.guard : 1.0;
-			c.w = refreshNow ? 0.0 : weight * guard;
+			c.w = refreshNow ? 0.0 : ((m_tune.forceWeight > 0.0 && chosen) ? m_tune.forceWeight : weight) * guard;
 			c.boost = boost * guard;
 			if (!refreshNow && chosen)
 			{
