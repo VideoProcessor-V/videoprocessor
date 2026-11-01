@@ -37,6 +37,8 @@ namespace TemporalDetailGpuTestsNs
 	constexpr int kW = 128, kH = 96;
 	constexpr double kHz = 23.976;
 	constexpr double kPi = 3.14159265358979323846;
+	// Compact vs Full shared grain product: worst output difference allowed, in codes (WARP-measured value + margin).
+	constexpr double kCompactVsFullMaxCodes = 0.05;
 
 	void LogF(const char* fmt, double a = 0, double b = 0, double c = 0, double d = 0, double e = 0)
 	{
@@ -844,7 +846,9 @@ namespace VideoProcessorTest
 			}
 			const double worst = WorstDiff(full.out, compact.out);
 			LogF("temporal detail: Compact vs Full shared product, worst output difference %.5f codes", worst);
-			Assert::IsTrue(worst <= 1.0, L"Compact output within one code of Full");
+			// Measured on WARP (finisher, 2026-11-01): 0.0156 codes (one fp16 step of s1/s2 at these magnitudes). Bound = measured
+			// plus margin (about 3x), so a real precision regression fails instead of hiding under a one-code bound.
+			Assert::IsTrue(worst <= kCompactVsFullMaxCodes, L"Compact output within the measured bound of Full");
 		}
 
 		TEST_METHOD(TemporalDetailGpuGrainFallbackRecoversAutomatically)
@@ -867,7 +871,7 @@ namespace VideoProcessorTest
 			}
 			for (size_t t = 0; t < 6; ++t)   // frames before the Compact one are exact (Full or own); Compact is within one code
 				Assert::IsTrue(r.out[t].v == own.out[t].v, L"no visible change across the switches");
-			Assert::IsTrue(WorstDiff(own.out, r.out) <= 1.0, L"a Compact frame in the sequence stays within one code");
+			Assert::IsTrue(WorstDiff(own.out, r.out) <= kCompactVsFullMaxCodes, L"a Compact frame in the sequence stays within the measured bound");
 		}
 
 		TEST_METHOD(TemporalDetailGpuKeepsGrain)

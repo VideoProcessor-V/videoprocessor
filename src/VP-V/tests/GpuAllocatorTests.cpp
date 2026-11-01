@@ -541,7 +541,13 @@ namespace GpuAllocatorTestsNs
 			Assert::IsTrue(e->grant == Grant::InRender, L"no lane grant");
 			Assert::IsTrue(e->why == GrantWhy::RenderOnly, L"why render only");
 			Assert::IsNull(plan.governor.Find(uint16_t(kUserProductBase + kP10GrainSplit)), L"no governor user for it");
-			Assert::AreEqual(SumLevel0(in.otherUsers), plan.vramBytes, L"vram total has no P10 ring");
+			// P10 reads P4 (which reads P1) since SA2: those ancestors are ordinary products with their own grants. The total is
+			// the other users plus the ancestors' grants, with nothing for P10.
+			uint64_t ancestors = 0;
+			for (const UserGrant& gr : plan.governor.grants)
+				if (gr.id >= kUserProductBase && gr.id != uint16_t(kUserProductBase + kP10GrainSplit))
+					ancestors += gr.bytes;
+			Assert::AreEqual(SumLevel0(in.otherUsers) + ancestors, plan.vramBytes, L"vram total has no P10 ring");
 			// The same graph with a normal P10 is a laned product (existing behaviour).
 			const Registry normal = P10Registry(false);
 			const TierPlan np = PlanTiers(normal, P10Graph(normal, dims), Card3090(), in);

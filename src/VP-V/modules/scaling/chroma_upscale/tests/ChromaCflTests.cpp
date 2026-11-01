@@ -32,6 +32,8 @@ namespace ChromaCflTestsNs
 	using ChromaUpscale::ActiveRect;
 	using ChromaUpscale::Plane;
 	constexpr double kPi = 3.14159265358979323846;
+	// Compact vs Full shared grain product: worst output difference allowed, in codes (WARP-measured value + margin).
+	constexpr double kCompactVsFullMaxCodes = 0.05;
 
 	void LogF(const char* fmt, double a = 0, double b = 0, double c = 0, double d = 0, double e = 0)
 	{
@@ -848,7 +850,9 @@ namespace VideoProcessorTest
 			Assert::AreEqual(std::string("ok"), r[1].status);
 			const double worst = CflWorstDiff(r[0], r[1]);
 			LogF("chroma upscale: Compact vs Full shared products, worst output difference %.5f codes", worst);
-			Assert::IsTrue(worst <= 1.0, L"Compact output within one code of Full");
+			// Measured on WARP (finisher, 2026-11-01): 0.0156 codes (one fp16 step of s1/s2 at these magnitudes). Bound = measured
+			// plus margin (about 3x), so a real precision regression fails instead of hiding under a one-code bound.
+			Assert::IsTrue(worst <= kCompactVsFullMaxCodes, L"Compact output within the measured bound of Full");
 		}
 
 		TEST_METHOD(ChromaCflGpuGrainFallbackRecoversAutomatically)
