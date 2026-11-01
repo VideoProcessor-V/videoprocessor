@@ -480,8 +480,10 @@ public:
     // conservative floor (T0). Released when the storm ends; the regulator then recovers as usual.
     void SetStormHold(bool held)
     {
-        if (held && !stormHold_)
+        if (held && !stormHold_) {
             ++stormHoldEngagements_;
+            stormEdgePending_ = true;   // the engagement itself is traced once, even when already at T0
+        }
         stormHold_ = held;
     }
     bool StormHold() const { return stormHold_; }
@@ -1189,8 +1191,12 @@ private:
     // While the storm hold is in force keep the regulator at the conservative floor (T0), once per frame.
     void ApplyStorm()
     {
-        if (stormHold_ && regulator_.LaneLevel() > regulator_.T0StepCount())
+        if (!stormHold_)
+            return;
+        if (stormEdgePending_ || regulator_.LaneLevel() > regulator_.T0StepCount()) {
+            stormEdgePending_ = false;
             regulator_.OnIndicatorChange(VpIndicator::Bit(VpIndicator::kFull));
+        }
     }
 
     VpIndicator::Indicator* ind_;
@@ -1199,6 +1205,7 @@ private:
     bool haveSealedSeq_ = false;
     uint64_t sealedSeq_ = 0;
     bool stormHold_ = false;
+    bool stormEdgePending_ = false;
     uint64_t stormHoldEngagements_ = 0;
     uint64_t indicatorRebinds_ = 0;
     uint64_t externalSealMisses_ = 0;

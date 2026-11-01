@@ -1270,10 +1270,15 @@ namespace AnalysisLaneTestsNs
 			for (uint64_t s = 1; s <= 10; ++s)
 				Frame(r, fs, h, s);
 			const Regulator& reg = r.lane.GetRegulator();
-			Assert::IsTrue(reg.LaneLevel() > reg.T0StepCount(), L"full level before the storm");
+			Assert::IsTrue(reg.LaneLevel() >= reg.T0StepCount(), L"at or above T0 before the storm");
+			RegTrace before[64];
+			const size_t nBefore = r.lane.RegulatorTraces(before, 64);
 			r.lane.SetStormHold(true);
 			Frame(r, fs, h, 11);
 			Assert::IsTrue(reg.LaneLevel() == reg.T0StepCount(), L"held at T0");
+			RegTrace after[64];
+			const size_t nAfter = r.lane.RegulatorTraces(after, 64);
+			Assert::IsTrue(nAfter == nBefore + 1 && after[nAfter - 1].action == RegAction::ConservativeFloor, L"the engagement is traced once as a conservative floor");
 			Assert::IsTrue(r.lane.StormHoldEngagements() == 1 && r.lane.StormHold(), L"counted");
 			r.lane.SetStormHold(false);
 			Assert::IsTrue(!r.lane.StormHold(), L"released");

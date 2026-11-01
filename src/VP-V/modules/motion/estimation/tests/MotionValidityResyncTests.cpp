@@ -362,9 +362,9 @@ namespace Tests
 			// Taken once; the generation stays current.
 			Assert::IsFalse(rig.readers.TakeProducerNote().drop);
 			Assert::AreEqual(U(note.engageGeneration), U(rig.readers.EngageGeneration()));
-			// The bound State's StreamGeneration() is still the unbound formula (no request-time
-			// count moved).
-			Assert::AreEqual(U(MotionValidity::State::kInitialEpoch), U(rig.state.StreamGeneration()));
+			// The bound State's StreamGeneration() is still the unbound formula; the LiveQueueReset moved
+			// its count once, at the seal of the carrying frame (not at request time).
+			Assert::AreEqual(U(MotionValidity::State::kInitialEpoch + 1), U(rig.state.StreamGeneration()));
 		}
 
 		TEST_METHOD(VectorProducerSettingsDropsAndContinuityOnlyNotes)
