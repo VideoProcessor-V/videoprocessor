@@ -93,3 +93,4 @@ relock_frames vectors [cause]` line per FULL resync once it settled (or was aban
 `resync_settle` check prints median/p95/max settle_ms, settle_frames, drops/repeats per cause, relock failures
 and injected vs real FULL counts; thresholds `settle_p95_ms_max` (5000), `settle_unsettled_max` (0),
 `settle_relock_fail_max` (0). A run without settle lines passes with a "not evaluated" note.
+- `VP_RESYNC_SCHEDULE=<path>` (read only when `VP_RESYNC_INJECT=1`): the loop test tier hands the stress schedule (`tools/soak/resync_schedule.py` output) to `ResyncInject`, which loads it at construction (`LoadScheduleFile`); a missing or invalid file is shown in `StatusText` ("NOT loaded"), never silent. Unarmed: the variable is not read.

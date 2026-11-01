@@ -1457,13 +1457,20 @@ namespace AnalysisLaneTestsNs
 			VpSeal::FrameSeal fs;
 			Wire(r, fs);
 			r.lane.OnSourceFrame(r.View(1));
-			std::vector<ProductFrameResult> res;
-			for (uint64_t s = 1; s <= 4; ++s) {
-				res = SealedFrame(r, fs, h, s, true);
+			// Steady state (the first frames of a lane may still be catching up): from frame 8 on, every
+			// product the lane published before the seal is the one used, never a live fill.
+			for (uint64_t s = 1; s <= 14; ++s) {
+				const std::vector<ProductFrameResult> res = SealedFrame(r, fs, h, s, true);
 				r.End(s);
+				const ProductFrameResult& p1 = Rig::Res(res, kP1HalfLuma);
+				const ProductFrameResult& p4 = Rig::Res(res, kP4SourceStats);
+				Logger::WriteMessage(("frame " + std::to_string(s) + " P1 " + Token(p1.seal.reason) + (p1.liveFilled ? " live" : "") +
+					" P4 " + Token(p4.seal.reason) + (p4.liveFilled ? " live" : "") + std::string(1, (char)10)).c_str());
+				if (s >= 8) {
+					Assert::IsTrue(p1.seal.reason == SealReason::Accepted && !p1.liveFilled, L"P1 used");
+					Assert::IsTrue(p4.seal.reason == SealReason::Accepted && !p4.liveFilled, L"P4 used");
+				}
 			}
-			Assert::IsTrue(Rig::Res(res, kP1HalfLuma).seal.reason == SealReason::Accepted && !Rig::Res(res, kP1HalfLuma).liveFilled, L"P1 used");
-			Assert::IsTrue(Rig::Res(res, kP4SourceStats).seal.reason == SealReason::Accepted && !Rig::Res(res, kP4SourceStats).liveFilled, L"P4 used");
 		}
 
 		// (b) not published at the seal -> filled live ONCE; a second seal of the same frame never fills again.

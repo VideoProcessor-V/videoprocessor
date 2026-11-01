@@ -331,4 +331,71 @@ namespace Tests
 			Assert::IsTrue(inj.StatusText().find("schedule 2 of 2 pending, 0 blocked") != std::string::npos);
 		}
 	};
+
+	// The loop test tier hands the schedule in VP_RESYNC_SCHEDULE (a file path), read only when armed.
+	TEST_CLASS(ResyncInjectScheduleEnvTests)
+	{
+	public:
+		static ResyncInject::Getter Env(const std::string& inject, const std::string& schedule)
+		{
+			return [inject, schedule](const char* name) -> const char* {
+				if (std::string(name) == "VP_RESYNC_INJECT")
+					return inject.empty() ? nullptr : inject.c_str();
+				if (std::string(name) == "VP_RESYNC_SCHEDULE")
+					return schedule.empty() ? nullptr : schedule.c_str();
+				return nullptr;
+			};
+		}
+		static std::string TempFile(const char* name, const std::string& text)
+		{
+			char dir[MAX_PATH] = {};
+			GetTempPathA(MAX_PATH, dir);
+			const std::string path = std::string(dir) + name;
+			FILE* f = nullptr;
+			fopen_s(&f, path.c_str(), "wb");
+			if (f) {
+				fwrite(text.data(), 1, text.size(), f);
+				fclose(f);
+			}
+			return path;
+		}
+
+		TEST_METHOD(ArmedLoadsTheScheduleFromTheEnvironmentPath)
+		{
+			const std::string path = TempFile("vp_resync_schedule_env_test.txt", std::string("seed 5") + char(10) + "at 1s seek" + char(10) + "at 2s reset" + char(10));
+			ResyncInject inj(Env("1", path));
+			Assert::IsTrue(inj.ScheduleError().empty());
+			Assert::AreEqual<size_t>(2, inj.ScheduleRemaining());
+			Assert::AreEqual<uint64_t>(5, inj.ScheduleSeed());
+			Assert::IsTrue(inj.StatusText().find("schedule 2 of 2 pending") != std::string::npos);
+			DeleteFileA(path.c_str());
+		}
+
+		TEST_METHOD(UnarmedNeverReadsTheSchedule)
+		{
+			const std::string path = TempFile("vp_resync_schedule_env_test2.txt", "at 1s seek" + std::string(1, char(10)));
+			ResyncInject inj(Env("", path));
+			Assert::IsFalse(inj.Armed());
+			Assert::AreEqual<size_t>(0, inj.ScheduleRemaining());
+			Assert::IsTrue(inj.SchedulePath().empty(), L"the path is not even looked at");
+			Assert::AreEqual<std::string>("", inj.StatusText());
+			ResyncInject other(Env("0", path));
+			Assert::IsFalse(other.Armed());
+			Assert::AreEqual<size_t>(0, other.ScheduleRemaining());
+			DeleteFileA(path.c_str());
+		}
+
+		TEST_METHOD(AMissingOrInvalidFileIsShownNotSilent)
+		{
+			ResyncInject missing(Env("1", "Z:/no/such/schedule.txt"));
+			Assert::IsTrue(missing.Armed() && !missing.ScheduleError().empty());
+			Assert::IsTrue(missing.StatusText().find("NOT loaded") != std::string::npos);
+			const std::string path = TempFile("vp_resync_schedule_env_test3.txt", "at 1s nonsense" + std::string(1, char(10)));
+			ResyncInject bad(Env("1", path));
+			Assert::IsFalse(bad.ScheduleError().empty());
+			Assert::IsTrue(bad.StatusText().find("NOT loaded") != std::string::npos);
+			Assert::AreEqual<size_t>(0, bad.ScheduleRemaining());
+			DeleteFileA(path.c_str());
+		}
+	};
 }

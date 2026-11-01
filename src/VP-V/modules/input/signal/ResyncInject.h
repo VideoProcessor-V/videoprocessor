@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -86,7 +88,37 @@ public:
     {
         const char* v = getter ? getter("VP_RESYNC_INJECT") : DefaultGetenv("VP_RESYNC_INJECT");
         m_armed = v != nullptr && std::strcmp(v, "1") == 0;
+        if (!m_armed)
+            return;   // unarmed: VP_RESYNC_SCHEDULE is not even read
+        // The loop test tier hands the stress schedule over in VP_RESYNC_SCHEDULE (a path to a file in
+        // LoadSchedule's format). A missing or invalid file is not silent: StatusText says so.
+        const char* path = getter ? getter("VP_RESYNC_SCHEDULE") : DefaultGetenv("VP_RESYNC_SCHEDULE");
+        if (path != nullptr && *path != char(0)) {
+            m_schedulePath = path;
+            std::string err;
+            if (!LoadScheduleFile(m_schedulePath, err))
+                m_scheduleError = err;
+        }
     }
+
+    // Armed only: read `path` and LoadSchedule it. False with a plain reason on any failure.
+    bool LoadScheduleFile(const std::string& path, std::string& error)
+    {
+        if (!m_armed) {
+            error = "not armed";
+            return false;
+        }
+        std::ifstream in(path.c_str(), std::ios::in | std::ios::binary);
+        if (!in) {
+            error = "cannot read the schedule file";
+            return false;
+        }
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        return LoadSchedule(text, error);
+    }
+    // The failure of the VP_RESYNC_SCHEDULE load at construction ("" = none or not requested).
+    const std::string& ScheduleError() const { return m_scheduleError; }
+    const std::string& SchedulePath() const { return m_schedulePath; }
 
     bool Armed() const { return m_armed; }
 
@@ -96,6 +128,8 @@ public:
         if (!m_armed)
             return "";
         std::lock_guard<std::mutex> lock(m_schedMutex);
+        if (!m_scheduleError.empty())
+            return "resync injection armed; schedule " + m_schedulePath + " NOT loaded: " + m_scheduleError;
         if (!m_scheduleLoaded)
             return "resync injection armed";
         return "resync injection armed; schedule " + std::to_string(RemainingLocked()) + " of " +
@@ -596,6 +630,8 @@ private:
     }
 
     bool m_armed = false;
+    std::string m_schedulePath;        // VP_RESYNC_SCHEDULE, set in the constructor only
+    std::string m_scheduleError;       // set in the constructor only
     std::mutex m_mutex;
     Request m_queue[kQueueMax];
     size_t m_head = 0;
