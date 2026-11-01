@@ -50,3 +50,12 @@ divided by 2^(bitdepth-8), the matcher's code scale) without and with the plan.
   skipped); reported for all blocks, reference-camera blocks (the fit of the reference field labels 1) and the rest,
   as mean, median, share > 1 px and share > 3 px. Direction check: with the plan off, the median EPE on a clean film
   pan (tos_master) is well under 1 px (about 0.4), which confirms the from/to convention (frame_b(p + F(p)) ~ frame_a(p)).
+
+## Two-layer comparison (K10a)
+`run_eval.py --vs two-layer` (default) fits everything with `Config::twoLayer` off ("new") and on ("two"), side by side.
+Real-clip truth is pinned to the default (twoLayer off) master DIS + NVOF fits for both columns, so the metric is not
+self-referential. `camera_eval fit --two-layer` switches the layer on (`--tl-ring/--tl-swap/--tl-veto/--tl-floor/--tl-comp`
+override the constants for tuning; `run_eval.py --tl-args "..."` passes them through). The CSV gains `fitUs` (microseconds
+per Fit call), `layerFlags`, `layerRisk`, `border`, `continuity`, `haveObject`, `objId`, `objBlocks`, `objH2`, `objH5`; the
+summary reports a per-clip table and the fit time (p50 / p95 / max). Synthetic foreground scenarios (camera = background):
+`obj6040_pan`, `vehicle_pan`, `tracked_subject`; `water_boat` has no camera truth (any usable fit is WRONG).

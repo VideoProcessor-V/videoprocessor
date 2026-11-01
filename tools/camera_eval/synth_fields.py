@@ -19,8 +19,13 @@ gw4, gh4 = W // G, H // G
 xs = (np.arange(gw4) * G + 1.5 - W / 2)[None, :].repeat(gh4, 0)
 ys = (np.arange(gh4) * G + 1.5 - H / 2)[:, None].repeat(gw4, 1)
 
-SCENARIOS = ['pan_clean', 'crowd_pan', 'crowd_shake', 'crowd_static', 'zoom_rot', 'two_layers', 'big_object', 'random', 'water']
-NON_DOMINANT = ('two_layers', 'random', 'water')
+SCENARIOS = ['pan_clean', 'crowd_pan', 'crowd_shake', 'crowd_static', 'zoom_rot', 'two_layers', 'big_object', 'random', 'water',
+             'obj6040_pan', 'vehicle_pan', 'tracked_subject', 'water_boat']
+NON_DOMINANT = ('two_layers', 'random', 'water', 'water_boat')
+# K10a foreground scenarios (camera = the background): obj6040_pan = a centred object over 60 % of the picture over a pan;
+# vehicle_pan = a large vehicle entering from the right edge and growing to ~54 % over a pan; tracked_subject = a centred,
+# nearly static subject over 40 % while the background pans (the camera follows the subject); water_boat = a centred
+# coherent boat over correlated water vectors with a weak drift (no camera truth: any usable fit is WRONG).
 
 
 def hom(s=0.0, a=0.0, tx=0.0, ty=0.0, px=0.0, py=0.0, shx=0.0):
@@ -61,11 +66,33 @@ def scenario(name, N, rng):
         mov[:, : gw4 // 2] = 1
     elif name == 'big_object':
         mov[int(0.2 * gh4):, int(0.1 * gw4):int(0.85 * gw4)] = 1
+    elif name == 'obj6040_pan':
+        mov[int(0.07 * gh4):int(0.93 * gh4), int(0.15 * gw4):int(0.85 * gw4)] = 1
+    elif name == 'tracked_subject':
+        mov[int(0.1 * gh4):int(0.9 * gh4), int(0.25 * gw4):int(0.75 * gw4)] = 1
+    elif name == 'water_boat':
+        mov[int(0.35 * gh4):int(0.65 * gh4), int(0.35 * gw4):int(0.65 * gw4)] = 1
     ids = np.unique(mov[mov > 0])
     vel = {int(i): rng.normal(0, 2.5, 2) + (np.array([0, 2.0]) if name.startswith('crowd') else 0) for i in ids}
+    if name == 'obj6040_pan':
+        vel = {1: np.array([3.0, -1.0])}
+    elif name == 'vehicle_pan':
+        vel = {1: np.array([5.0, 0.5])}
     for t in range(N):
         ph = 2 * np.pi * t / N
-        if name == 'crowd_pan':
+        if name == 'vehicle_pan':
+            mov[:] = 0
+            wd = int(gw4 * min(0.6, 0.6 * (t + 1) / max(1.0, 0.6 * N)))
+            mov[int(0.05 * gh4):int(0.95 * gh4), gw4 - wd:] = 1
+        if name == 'obj6040_pan':
+            Hm = hom(tx=-2.5 + 0.5 * np.sin(ph), ty=0.5)
+        elif name == 'vehicle_pan':
+            Hm = hom(tx=-3.0, ty=0.3)
+        elif name == 'tracked_subject':
+            Hm = hom(tx=-6.0 + 1.0 * np.sin(ph), ty=0.4)
+        elif name == 'water_boat':
+            Hm = hom(tx=0.3, ty=0.0)
+        elif name == 'crowd_pan':
             Hm = hom(tx=-1.0 + 1.6 * np.sin(ph), ty=0.3 * np.cos(2 * ph), a=1e-4 * np.sin(ph))
         elif name == 'crowd_shake':
             Hm = hom(tx=rng.normal(0, 1.5), ty=rng.normal(0, 1.0))
@@ -91,7 +118,7 @@ def scenario(name, N, rng):
             dx = np.where(mov > 0, 1.5, dx)
             dy = np.where(mov > 0, -0.5, dy)
             cam = mov == 0
-        elif name in ('random', 'water'):
+        elif name in ('random', 'water', 'water_boat'):
             if name == 'random':
                 dx = rng.uniform(-6, 6, (gh4, gw4))
                 dy = rng.uniform(-6, 6, (gh4, gw4))
@@ -102,6 +129,10 @@ def scenario(name, N, rng):
                 dy = np.real(ifft2(fft2(rng.normal(size=(gh4, gw4))) * k))
                 dx *= 2.5 / dx.std()
                 dy *= 2.5 / dy.std()
+            if name == 'water_boat':
+                wx, wy = apply(Hm, xs, ys)
+                dx = np.where(mov > 0, 4.0, dx + wx)
+                dy = np.where(mov > 0, -1.0, dy + wy)
             cam[:] = False
         else:
             for i, v in vel.items():
@@ -109,6 +140,9 @@ def scenario(name, N, rng):
                 jit = rng.normal(0, 0.4, 2)
                 dx = np.where(m, dx + v[0] + jit[0], dx)
                 dy = np.where(m, dy + v[1] + jit[1], dy)
+            if name == 'tracked_subject':
+                dx = np.where(mov > 0, rng.normal(0, 0.15, dx.shape), dx)
+                dy = np.where(mov > 0, rng.normal(0, 0.15, dy.shape), dy)
             cam = mov == 0
         noise = 0.12
         dx = dx + rng.normal(0, noise, dx.shape)
