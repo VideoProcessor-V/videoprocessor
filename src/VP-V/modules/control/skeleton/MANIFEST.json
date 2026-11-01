@@ -4,6 +4,7 @@
   "unit": "control",
   "order": 940,
   "status": "draft",
+  "successor_of": "control.diagnostics",
   "draft_note": "Not a pipeline slot: a hub module (ISkeletonModule) that activates the analysis lane, off by default ([vpv.skeleton] analysis_lane). Registers through HubBootstrap after the resync extension.",
   "code_location": "src/VP-V/modules/control/skeleton (this folder) + src/VP-V/core/AnalysisLane.h + src/VP-V/modules/input/source_analysis/SourceFrameTap.h",
   "live_files": [
