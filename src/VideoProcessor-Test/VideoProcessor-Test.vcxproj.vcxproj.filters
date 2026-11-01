@@ -335,6 +335,11 @@
   <ItemGroup><ClCompile Include="..\VP-V\tests\AncestryTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\tests\ProductGraphTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\tests\ProductSlotsTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\tests\SkeletonLaneTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\tests\SkeletonGapTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\tests\AnalysisLaneTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\tests\LaneProductsTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\tests\SkeletonRegulatorTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\tests\CardProfileTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\tests\VramGovernorTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\VectorDemandProductsTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
