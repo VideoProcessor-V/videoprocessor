@@ -430,4 +430,14 @@ namespace FallbackCatalog
 			"source monitor fast-pan / intent without whole-frame motion (vector engine pair missed)") :
 			Released("vector_engine_global");
 	}
+	// ---- input.signal: resync storm hold (G8 / D4) ----------------------------------------------
+	// Engaged while the resync storm hold is in force (On mode only): more than 3 FULL resyncs in
+	// 10 s hold lane T0, native re-base and the vector engine at safe settings.
+	inline Decision ResyncStorm(bool held, int fullCount)
+	{
+		if (!held)
+			return Released("resync_storm");
+		return Engaged("resync_storm", "Input unstable: " + std::to_string(fullCount < 0 ? 0 : fullCount) +
+			" resyncs in 10 s - processing held at safe settings");
+	}
 }

@@ -92,9 +92,17 @@ Checked against the code 2026-10-25 (WP-14 / M2 step 14, `feat/m2-dv`).
   (`Detector::OnEnqueue`), the lock-free arm box, the refusal note and the storm window.
 - `ResyncShadow.h` - resync shadow mode (R1): feeds the detector, writes the central Indicator, and summarises
   it as the Ctrl+I "Resync:" line and the Ctrl+Alt+D `resync` / `resync_events` lines; Off costs one atomic load.
+  Q0-A part 1 additions (no sink / Off / Shadow = unchanged behaviour): the B2 enqueue cursor (`NoteEnqueued`,
+  `PulldownCursorSeq`, `ResetCursor`; reset on restart); the G8/D4 storm hold (`StormHold`, `StormSafeSettings`,
+  `StormNotice`: engages on more than 3 counted FULL in 10 s, held until 10 s with no FULL, true ONLY in On; Shadow keeps
+  the "would hold" status text; notice text from `FallbackCatalog::ResyncStorm`, id `resync_storm`); and the unthrottled
+  `SetEventSink` that emits one `VPEV1 t=<ms> kind=resync level=full|minor|timing cause=<token> seq gap mode readers=pending`
+  line per recorded event (readers act at the seal, so `pending`; no sink = no string built). Tests:
+  `tests/ResyncShadowQ0Tests.cpp` (to be registered by the integrator).
 - `ResyncDrive.h` - resync_event `on` (R3): the readers the Indicator drives (render-ahead, timeline, sigma-delta carry,
   scene detector, source-resolution monitor, Dynamic Drive, libplacebo flush, re-base P0) with their per-counter
   policies, sealed and observed at the render loop's dequeue; the capture-thread Cursor for the pulldown detector.
+- `SettingsStamp.h` (Q0-A part 2) - per-domain (motion, rebase, analysis, output) FNV-1a settings hashes; `Configure` records on the first call and Advances only changed domains (`SettingsApply`); `AdvanceGraph` (`GraphRebuild`). `ResyncInject.h` - test-only fault injection (`resync.inject`), armed only by env `VP_RESYNC_INJECT=1`, inert otherwise. Tests: `tests/ResyncQ0Tests.cpp` (to be registered by the integrator). Inert until a call site uses them.
 - `ResyncCallSites.h` - the renderer's call-site glue (reader generation key, carry validity, mode from the setting).
 - `DolbyVisionTunnelGate.h`, `DolbyVisionTunnelHandoff.h` - which captured signals the DV tunnel
   formatter may claim (`dv_tunnel_handoff`), and the hand-off of an RGB LLDV signal to the tunnel.

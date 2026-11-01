@@ -30,8 +30,11 @@
     "src/VP-V/modules/input/signal/HdrInferenceChoice.h",
     "src/VP-V/modules/input/signal/ResyncEvent.h",
     "src/VP-V/modules/input/signal/ResyncShadow.h",
+    "src/VP-V/modules/input/signal/tests/ResyncShadowQ0Tests.cpp",
     "src/VP-V/modules/input/signal/ResyncCallSites.h",
-    "src/VP-V/modules/input/signal/ResyncDrive.h"
+    "src/VP-V/modules/input/signal/ResyncDrive.h",
+    "src/VP-V/modules/input/signal/SettingsStamp.h",
+    "src/VP-V/modules/input/signal/ResyncInject.h"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/DolbyVisionTunnelGate.h",

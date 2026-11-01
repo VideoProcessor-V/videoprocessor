@@ -20,8 +20,9 @@ Header-only and pure: no libplacebo, no Windows, C++14. The renderer and the CPU
 | `FallbackStatus.h` | "Fallbacks engaged: (list) / none" (ADR-0001). Built on fix/r6-baseline and moved here |
 | `FallbackCatalog.h` | The "Fallbacks engaged" entries of the renderer's automatic downgrades (silent-fallbacks batch) |
 | `ResyncCause.h` | Resync vocabulary: `Level`, `Cause` (with tokens and plain text), `RefusalReason` |
-| `Indicator.h` | The central Indicator: counters, stamps derived from a ring of events, readers (`Observe`) |
+| `Indicator.h` | The central Indicator: counters, stamps derived from a ring of events, readers (`Observe`); `LastCauseIn(counter, fromExclusive, toInclusive, cause, detail*)` returns the latest retained event's cause for an exact counter (false when none, or when the interval is older than the ring) |
 | `Ancestry.h` | Ancestor references, headers and the pure validator for derived products |
+| `FrameAnalysisValidity.h` | `VpFrameAnalysis::RecordValid(indicator, recordSeq, useSeq, mask)`: per-record temporal validity from the Indicator's stamps (FrameAnalysisStore itself unchanged; no private frame history added) |
 | `Products.h` | Skeleton S0 registry: product declarations (inputs with lag, backend, history, size, honoured counters, tier, residency, variants) and the first products P0-P6 (+ P2m matcher pair); component consumer declarations |
 | `ProductGraph.h` | Skeleton S0 graph: the closure of what active consumers need (each product once, topological, deterministic), fixed ring and live-pool counts, rebuild triggers, `GraphOwner` (advances the Indicator's `graph` counter), Indicator ring sizing (N6) |
 | `ProductSlots.h` | Skeleton S1 slots: the 64-bit state word, ABA-proof generation-tagged claim, lane/live headers, lane-owned rejected buffers, live pool for every backend, lane input pins, the seal (stamps, span, ancestry cgens) and the cascade (`SlotTable::Resolve`) |

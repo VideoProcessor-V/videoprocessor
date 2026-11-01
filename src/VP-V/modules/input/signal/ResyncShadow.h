@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/Indicator.h>
 #include <VP-V/core/ResyncCause.h>
 #include <VP-V/modules/input/signal/ResyncEvent.h>
@@ -10,6 +11,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -145,6 +147,7 @@ public:
             if (m_restart.exchange(false, std::memory_order_acq_rel)) {
                 m_detector.Restart();
                 m_windowedRateHz.store(0.0, std::memory_order_relaxed);
+                ResetCursor();
                 ResetSummary();
             }
             const std::shared_ptr<VpIndicator::Indicator> indicator = std::atomic_load(&m_indicator);
@@ -185,6 +188,71 @@ public:
             try { out = "shadow: events unavailable; shadow error x" + std::to_string(n); } catch (...) {}
             return true;
         }
+    }
+
+    // ---- B2 cursor: the highest sequence enqueued so far (the pulldown reads it at the seal) -------
+    // The writer runs under the queue mutex, so a relaxed read then a release store is enough; the
+    // value only ever grows until ResetCursor (restart / era change).
+    void NoteEnqueued(uint64_t seq)
+    {
+        if (seq > m_cursorSeq.load(std::memory_order_relaxed))
+            m_cursorSeq.store(seq, std::memory_order_release);
+    }
+    uint64_t PulldownCursorSeq() const { return m_cursorSeq.load(std::memory_order_acquire); }
+    void ResetCursor() { m_cursorSeq.store(0, std::memory_order_release); }
+
+    // ---- G8 / D4 storm hold ---------------------------------------------------------------------
+    // Engages on more than StormWindow's threshold of FULL events (3) in 10 s (calibration / start
+    // causes excluded, as StormWindow does) and stays held until 10 s pass with no FULL since the
+    // last FULL. True ONLY in On: in Shadow nothing is held and the status text keeps "would hold".
+    struct SafeSettings {
+        bool laneT0 = false;
+        bool nativeRebase = false;
+        bool vectorsPaused = false;
+    };
+    bool StormHold(double nowSeconds) const
+    {
+        if (!Driving())
+            return false;
+        std::lock_guard<std::mutex> lock(m_stormMutex);
+        return m_stormHeld && (nowSeconds - m_stormLastFull) < kStormReleaseSeconds;
+    }
+    // All true iff StormHold, else all false.
+    SafeSettings StormSafeSettings(double nowSeconds) const
+    {
+        SafeSettings s;
+        s.laneT0 = s.nativeRebase = s.vectorsPaused = StormHold(nowSeconds);
+        return s;
+    }
+    // The visible notice for the "resync_storm" fallback entry; false unless held (On only).
+    bool StormNotice(std::string& out, double nowSeconds) const
+    {
+        if (!StormHold(nowSeconds))
+            return false;
+        try {
+            int count = 0;
+            {
+                std::lock_guard<std::mutex> lock(m_stormMutex);
+                count = m_storm.FullCount(nowSeconds);
+            }
+            out = FallbackCatalog::ResyncStorm(true, count).reason;
+            return true;
+        } catch (...) {
+            m_errors.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+    }
+
+    // ---- D: unthrottled VPEV1 resync lines ----------------------------------------------------------
+    // One line per recorded event, never rate-limited (the human log stays throttled):
+    //   VPEV1 t=<ms> kind=resync level=full|minor|timing cause=<token> seq=<n> gap=<n> mode=shadow|on readers=pending
+    // t is nowSeconds * 1000 (the caller's steady clock), mode the Shadow mode; the order follows the
+    // vplog grammar (level cause seq gap mode, then the extra key). readers=pending always: readers
+    // act at the seal, after the event is recorded (EventLines shows who acted later). No sink set
+    // = no string is built. The sink runs on the recording thread (the queue mutex may be held).
+    void SetEventSink(std::function<void(const std::string&)> sink)
+    {
+        std::atomic_store(&m_eventSink, std::make_shared<const std::function<void(const std::string&)>>(std::move(sink)));
     }
 
     // Before frames flow (or from the render thread); safe against a concurrent OnEnqueue.
@@ -328,6 +396,8 @@ private:
             m_minorTimes[i].store(-1.0e30, std::memory_order_relaxed);
         std::lock_guard<std::mutex> lock(m_stormMutex);
         m_storm = StormWindow();
+        m_stormHeld = false;
+        m_stormLastFull = 0.0;
     }
 
     uint32_t MinorInWindow(double nowSeconds) const
@@ -353,6 +423,25 @@ private:
         }
     }
 
+    void EmitEventLine(const Event& e, double nowSeconds) const
+    {
+        const std::shared_ptr<const std::function<void(const std::string&)>> sink = std::atomic_load(&m_eventSink);
+        if (!sink || !*sink)
+            return;
+        try {
+            char head[64];
+            std::snprintf(head, sizeof(head), "VPEV1 t=%.3f", nowSeconds * 1000.0);
+            const char* level = e.level == Level::Full ? "full" : e.level == Level::Minor ? "minor" : "timing";
+            std::string line = head;
+            line += std::string(" kind=resync level=") + level + " cause=" + Token(e.cause) +
+                " seq=" + std::to_string(e.fromSeq) + " gap=" + std::to_string(e.gapFrames) +
+                (Driving() ? " mode=on" : " mode=shadow") + " readers=pending";
+            (*sink)(line);
+        } catch (...) {
+            m_errors.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
     void Record(VpIndicator::Indicator& indicator, const Event& e, double nowSeconds)
     {
         VpIndicator::Counter counter = VpIndicator::kContinuity;
@@ -364,7 +453,14 @@ private:
             label = "FULL";
             {
                 std::lock_guard<std::mutex> lock(m_stormMutex);
+                if (m_stormHeld && (nowSeconds - m_stormLastFull) >= kStormReleaseSeconds)
+                    m_stormHeld = false;   // 10 s with no FULL since the last: released before this one counts
                 m_storm.Note(e.cause, nowSeconds);
+                if (LevelOf(e.cause) == Level::Full && !ExcludedFromStorm(e.cause)) {
+                    m_stormLastFull = nowSeconds;
+                    if (m_storm.Engaged(nowSeconds))
+                        m_stormHeld = true;
+                }
             }
             m_lastFullCause.store(static_cast<uint16_t>(e.cause), std::memory_order_relaxed);
             m_lastFullDetail.store(e.detail, std::memory_order_relaxed);
@@ -393,6 +489,7 @@ private:
             return;
         }
         indicator.Advance(counter, e.cause, e.fromSeq, e.gapFrames, e.detail);
+        EmitEventLine(e, nowSeconds);
         if (log) {
             std::string text = std::string(Driving() ? "Resync (on): " : "Resync (shadow): ") + label + " at seq " +
                 std::to_string(e.fromSeq) + " (" + Detail(e.cause, e.detail);
@@ -414,6 +511,11 @@ private:
 
     mutable std::mutex m_stormMutex;
     StormWindow m_storm;   // m_stormMutex
+    bool m_stormHeld = false;        // m_stormMutex
+    double m_stormLastFull = 0.0;    // m_stormMutex; time of the last counted FULL
+    static constexpr double kStormReleaseSeconds = 10.0;
+    std::atomic<uint64_t> m_cursorSeq{0};
+    std::shared_ptr<const std::function<void(const std::string&)>> m_eventSink;   // atomic_load / atomic_store only
 
     std::atomic<bool> m_lastFullValid{false};
     std::atomic<uint16_t> m_lastFullCause{0};

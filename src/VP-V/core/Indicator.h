@@ -414,6 +414,63 @@ public:
         }
     }
 
+    // Lock-free, any thread (seqlock read like Snapshot). Among retained events whose counter is
+    // exactly `counter` (a kFull event is NOT returned for kContinuity) and whose fromSeq lies in
+    // (fromSeqExclusive, toSeqInclusive], returns the cause (and detail, when non-null) of the one
+    // with the highest serial. False when none is retained. Also false when the interval is older
+    // than the ring (AncientBelow() > fromSeqExclusive: events there may have been folded away, so
+    // "none" would be unreliable); callers can compare AncientBelow() to tell the two apart.
+    bool LastCauseIn(Counter counter, uint64_t fromSeqExclusive, uint64_t toSeqInclusive,
+                     VpResync::Cause& cause, uint8_t* detail = nullptr) const
+    {
+        if (static_cast<unsigned>(counter) >= static_cast<unsigned>(kCounterCount)
+            || toSeqInclusive <= fromSeqExclusive)
+            return false;
+        for (unsigned attempt = 0;; ++attempt) {
+            const uint64_t v1 = version_.load(std::memory_order_acquire);
+            if ((v1 & 1u) != 0) {
+                Backoff(attempt);
+                continue;
+            }
+            const uint64_t ancientBelow = ancientBelow_.load(std::memory_order_relaxed);
+            const uint64_t written = written_.load(std::memory_order_relaxed);
+            const size_t n = written < capacity_ ? size_t(written) : capacity_;
+            bool found = false;
+            uint64_t bestSerial = 0;
+            VpResync::Cause bestCause = VpResync::Cause::None;
+            uint8_t bestDetail = 0;
+            for (size_t k = 0; k < n; ++k) {
+                const Entry& e = ring_[k];
+                const uint64_t from = e.fromSeq.load(std::memory_order_relaxed);
+                if (from <= fromSeqExclusive || from > toSeqInclusive)
+                    continue;
+                const uint64_t meta = e.meta.load(std::memory_order_relaxed);
+                if (CounterOf(meta) != counter)
+                    continue;
+                const uint64_t serial = e.serial.load(std::memory_order_relaxed);
+                if (!found || serial > bestSerial) {
+                    found = true;
+                    bestSerial = serial;
+                    bestCause = static_cast<VpResync::Cause>((meta >> 8) & 0xFFFFu);
+                    bestDetail = uint8_t((meta >> 24) & 0xFFu);
+                }
+            }
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (version_.load(std::memory_order_relaxed) != v1) {
+                Backoff(attempt);
+                continue;
+            }
+            if (ancientBelow > fromSeqExclusive)
+                return false;
+            if (!found)
+                return false;
+            cause = bestCause;
+            if (detail != nullptr)
+                *detail = bestDetail;
+            return true;
+        }
+    }
+
 private:
     struct Entry {
         std::atomic<uint64_t> serial;
