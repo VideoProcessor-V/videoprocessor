@@ -32,6 +32,9 @@ texture), and to narrow the matcher's search.
 | `CameraModelGpu.h/.cpp` | GPU label pass: constants, GLSL, CPU float mirror, `LabelPass` (libplacebo) |
 | `CameraAccessorGlsl.h` | GLSL `camera_field_vector` + `AccessorConstants` |
 | `CameraGuidanceGpu.h` | `GuidanceFrame` (plan -> matcher) + the guided pass GLSL (narrow window / E1 skip), wired in `consumers/DejudderWarp.cpp` |
+| `CameraProducts.h` | camera link layer (K0): `CameraConsumer`, `CameraDemandInput`, `DeclareCameraConsumers` (registry consumers of P7 camera fit / P8 camera labels / P9 camera smoothed, ids 0x0200 + index) |
+| `CameraReaders.h` | camera link layer (K0): one Indicator reader policy table (full/continuity/settings/graph Reset, timing Relatch, rebase Ignore), `RegisterCameraReader`, binders for `Fitter`, `TemporalFilter`, `BlendState`, `PairSpansSlip` |
+| `CameraStoreAdapter.h` | camera link layer (K0): `CameraSealToStore`, the ONLY non-test caller of `PublishCamera` (a record the seal rejected is skipped and counted) |
 | `../../core/FrameAnalysisStore.h` | `kCamera` group, `Record::camera`, `PublishCamera` |
 
 ## Inputs and outputs
