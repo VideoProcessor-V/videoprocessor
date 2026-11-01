@@ -171,7 +171,7 @@ namespace filesource
 					else
 					{
 						double hz = sourceRate.IsValid() ? sourceRate.Hz() : measuredRateHz;
-						if (hz > 0.0 && std::isfinite(hz))
+						if (std::fabs(m_rate - 1.0) < 1e-9 && hz > 0.0 && std::isfinite(hz))
 						{
 							const double jump100ns = static_cast<double>(sample.start100ns - m_lastStart100ns);
 							if (jump100ns > 4.0 * 1e7 / hz)
