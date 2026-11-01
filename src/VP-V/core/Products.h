@@ -51,13 +51,25 @@ enum : ProductId {
     kCameraProductEnd
 };
 
+// SA2 (skeleton adoption): the shared grain split. SA0 (the registry completion) adopts this
+// declaration; it is the only product SA2 adds. P10 = one plane-component's grain-free picture
+// (split planes + block statistics), produced once per source frame, read by temporal detail, the
+// chroma CfL and the region evidence (doc 51 P10).
+enum : ProductId {
+    kP10GrainSplit = kCameraProductEnd,
+    kSA2ProductEnd
+};
+
 // Frames of look-ahead P9 reads from P7 at film depth (the declared lead; the effective lead is
 // capped by the lane lead of the graph).
 constexpr uint8_t kMaxCameraLead = 2;
 
 enum class Backend : uint8_t { Ofa, GpuCompute, Cpu, RenderOnly };
 enum class Tier : uint8_t { T0, T1, T2 };
-enum class Residency : uint8_t { Vram, SystemRam };
+// Transient (SA1): a temporary that lives only inside one render scope (the shared scratch arena,
+// GpuAllocator.h). It is not a ring product: it has no ring, no lane grant and no governor user of
+// its own; its bytes are counted only through the arena user (kUserScratchArena).
+enum class Residency : uint8_t { Vram, SystemRam, Transient };
 enum class Variants : uint8_t { Identical, NonIdentical };
 
 inline const char* Token(Backend b)
@@ -458,11 +470,31 @@ inline void AppendCameraProducts(std::vector<ProductDecl>& decls)
     decls.push_back(p9);
 }
 
-// The registry the skeleton runs with: the first products plus the camera products, in fixed id order.
+// P10 (SA2): the grain split of one plane-component, declared with the `full` storage layout
+// (rgba32f split plane + rgba32f per 16x16 block, today's layout; the compact layout is an SA2
+// either/or switch declared in GrainNode.h). It reads the source frame only (no lag, no history):
+// it is made once per frame by the lane or, when not published by the seal, by the first consumer.
+inline void AppendGrainSplitProduct(std::vector<ProductDecl>& decls)
+{
+    using detail::AddTerm;
+    using detail::Make;
+    using namespace VpIndicator;
+    const CounterMask content = Bit(kFull) | Bit(kContinuity);
+    ProductDecl p10 = Make(kP10GrainSplit, "p10_grain_split", "grain split", Backend::GpuCompute, 0, Tier::T1,
+                           content, Bit(kSettingsAnalysis));
+    p10.sourceFrame = true;
+    AddTerm(p10, 0, 16);   // split: (s1, s2, f, base) rgba32f per plane pixel
+    AddTerm(p10, 4, 16);   // blocks: (N, e3, 0, 0) rgba32f per 16x16 block
+    p10.refRenderMs = 1.2f;
+    decls.push_back(p10);
+}
+
+// The registry the skeleton runs with: the first products, the camera products, then P10, in fixed id order.
 inline Registry SkeletonProducts()
 {
     std::vector<ProductDecl> d = FirstProducts().All();
     AppendCameraProducts(d);
+    AppendGrainSplitProduct(d);
     return Registry(std::move(d));
 }
 

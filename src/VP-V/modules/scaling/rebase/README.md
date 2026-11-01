@@ -208,3 +208,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
 
 <!-- vpv-settings-tests:end -->
+
+## Private GPU textures (skeleton rule)
+
+This module still creates its own GPU textures (see the static test src/VP-V/tests/PrivateTextureScanTests.cpp). It migrates in SA6/SA7/SA8/SA12 (doc D:\codex\vp-handover\51-skeleton-adoption-audit.md section 6): per-render temporaries move to the shared scratch arena (src/VP-V/core/ScratchArena.h) and kept state to skeleton product nodes.

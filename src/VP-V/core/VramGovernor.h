@@ -48,6 +48,7 @@ enum VramUserId : uint16_t {
     kUserCameraModel,          // camera-model textures
     kUserInterpolator,         // interpolator engine + grain bands
     kUserEnhancers,            // texture restore, detail pulse, debander extras
+    kUserScratchArena,         // SA1: the shared scratch arena for per-render temporaries (GpuAllocator.h)
     kUserProductBase = 0x100,  // + ProductId: skeleton lane products
 };
 
@@ -315,8 +316,8 @@ inline TierPlan PlanTiers(const Registry& reg, const Graph& g, const CardProfile
                 plan.ofaFits = plan.ofaFits && plan.ofaLoad <= 1.0;
             }
         }
-        if (n.backend == Backend::RenderOnly)
-            e.why = GrantWhy::RenderOnly;
+        if (n.backend == Backend::RenderOnly || e.residency == Residency::Transient)
+            e.why = GrantWhy::RenderOnly;   // a Transient product has no ring: the arena user counts it
         else if (e.tier != Tier::T0 && e.msSaved <= 0.0)
             e.why = GrantWhy::NoGain;
         else

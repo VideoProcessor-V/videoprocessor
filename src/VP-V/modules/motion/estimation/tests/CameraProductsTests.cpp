@@ -113,7 +113,7 @@ namespace CameraProductsTestsNs
 			const Registry reg = SkeletonProducts();
 			const char* why = "";
 			Assert::IsTrue(reg.Validate(&why), L"skeleton validates");
-			Assert::AreEqual(size_t(kCameraProductEnd), reg.Size());
+			Assert::IsTrue(reg.Size() >= size_t(kCameraProductEnd), L"the camera products are in the registry (SA2 appends P10 after them)");
 			Assert::AreEqual(int(kFirstProductCount), 8);
 			Assert::AreEqual(int(kP7CameraFit), int(kFirstProductCount));
 			Assert::AreEqual(int(kP8CameraLabels), int(kFirstProductCount) + 1);

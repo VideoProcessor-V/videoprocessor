@@ -86,3 +86,8 @@ not R + 1, because every frame the render holds may be a live fill and a late la
 released live buffer; ring and live pool are separate memory (a lane costs its whole ring).
 
 `Indicator.h`, `Ancestry.h` and `ResyncCause.h` stay in `src/VP-V/core/` because they are skeleton-owned shared headers, not a pipeline slot (a module folder would need a fake slot). The resync detector and its shadow live in `src/VP-V/modules/input/signal`.
+
+
+## GPU allocator (SA1)
+
+`GpuAllocator.h` / `ScratchArena.h`: the shared scratch arena (per-render temporaries, capacity = busiest scope per texture shape), `ProductTextures` (ring + live pool from a declared layout that must equal the product's `SizeRule`), the arena as governor user `kUserScratchArena`, `Residency::Transient` (not a ring product) and `VramLedgerLines` for Ctrl+Alt+D. Details and call sites: `modules/control/gpu_memory/README.md`. `kP10GrainSplit` (SA2) is the only product added after the camera products; SA0 adopts its declaration.
