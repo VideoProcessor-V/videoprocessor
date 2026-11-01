@@ -159,7 +159,8 @@ namespace HookLayerTest
 			f.host = &hostB;
 			RE::Notify(f);
 			Assert::AreEqual<size_t>(2, s.log.size());
-			Assert::IsTrue(s.log[0] != s.log[1]); // each call carries its own host identity
+			Assert::AreEqual(std::string("a:life:1:") + std::to_string(reinterpret_cast<intptr_t>(&hostA)), s.log[0]);
+			Assert::AreEqual(std::string("a:life:1:") + std::to_string(reinterpret_cast<intptr_t>(&hostB)), s.log[1]);
 		}
 
 		TEST_METHOD(RendererExtensionResolveChainsInOrder)
@@ -253,6 +254,61 @@ namespace HookLayerTest
 			hub.OnQueue(q);
 			Assert::IsTrue((std::vector<std::string>{ "m1:queue:5", "m2:queue:5" }) == s.log);
 			Assert::AreEqual(111.0, hub.OnResolve(RE::Resolve::PresentClockRate, RE::Context(), 100.0));
+			hub.ResetModulesForTesting();
+		}
+
+		TEST_METHOD(RegisteredHubWithNoModulesGivesBillResults)
+		{
+			Scope s;
+			struct Fwd : RE::IRendererExtension
+			{
+				Vpv::Hub::ExtensionHub& h = Vpv::Hub::ExtensionHub::Instance();
+				void OnLifecycle(RE::LifecycleFacts& f) override { h.OnLifecycle(f); }
+				bool OnFrame(RE::FrameContext& c) override { return h.OnFrame(c); }
+				double OnResolve(RE::Resolve k, const RE::Context& c, double v) override { return h.OnResolve(k, c, v); }
+				void OnStatus(const RE::Context& c, RE::StatusKind k, std::vector<std::string>& l, const char* w, const char* x) override { h.OnStatus(c, k, l, w, x); }
+				bool OnCommand(const RE::Context& c, const char* m, const char* cmd, std::string& r) override { return h.OnCommand(c, m, cmd, r); }
+				void* Query(const char* i) override { return h.Query(i); }
+			};
+			Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting();
+			RE::Register(std::unique_ptr<RE::IRendererExtension>(new Fwd()));
+			int host = 0;
+			Assert::AreEqual(59.94, RE::ResolveFor(RE::Resolve::PresentClockRate, &host, 59.94));
+			Assert::AreEqual(std::string("heading"), RE::WithStatusLines(RE::StatusKind::Fallbacks, &host, "heading"));
+			std::string reply;
+			Assert::IsFalse(RE::CommandFor(&host, "m", "c", reply));
+			Assert::IsTrue(reply.empty());
+			Assert::IsTrue(RE::Query("x") == nullptr);
+			RE::NotifyAfterRender(&host, 1, 1, 0, 0, true);
+			RE::NotifyLifecycle(RE::Lifecycle::GpuCreated, &host);
+			Assert::IsTrue(Vpv::Hub::ExtensionHub::Instance().HasHost(&host));
+			RE::NotifyLifecycle(RE::Lifecycle::GpuReleased, &host);
+			Assert::IsFalse(Vpv::Hub::ExtensionHub::Instance().HasHost(&host));
+		}
+
+		TEST_METHOD(HubModuleThrowDoesNotSkipLaterModules)
+		{
+			Scope s;
+			struct Thrower : Vpv::Hub::ISkeletonModule
+			{
+				const char* Name() const override { return "thrower"; }
+				void OnQueue(const RE::QueueFacts&) override { throw 1; }
+				double OnResolve(RE::Resolve, const RE::Context&, double) override { throw 1; }
+			};
+			struct After : Vpv::Hub::ISkeletonModule
+			{
+				const char* Name() const override { return "after"; }
+				void OnQueue(const RE::QueueFacts& f) override { g_log->push_back("after:queue:" + std::to_string(f.seq)); }
+				double OnResolve(RE::Resolve, const RE::Context&, double v) override { return v + 1.0; }
+			};
+			Vpv::Hub::ExtensionHub& hub = Vpv::Hub::ExtensionHub::Instance();
+			hub.ResetModulesForTesting();
+			hub.AddModule(std::unique_ptr<Vpv::Hub::ISkeletonModule>(new Thrower()));
+			hub.AddModule(std::unique_ptr<Vpv::Hub::ISkeletonModule>(new After()));
+			RE::QueueFacts q; q.seq = 2;
+			hub.OnQueue(q);
+			Assert::IsTrue((std::vector<std::string>{ "after:queue:2" }) == s.log);
+			Assert::AreEqual(6.0, hub.OnResolve(RE::Resolve::DisplayRefreshRate, RE::Context(), 5.0));
 			hub.ResetModulesForTesting();
 		}
 

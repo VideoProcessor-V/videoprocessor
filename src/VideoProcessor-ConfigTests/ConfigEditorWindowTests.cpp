@@ -10828,7 +10828,7 @@ static std::set<std::string> RendererValidatedKeys()
     std::ifstream file(path + "VideoProcessor-Lib\\RendererProfileConfig.h", std::ios::binary);
     const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     std::set<std::string> keys;
-    for (const char* function : { "inline bool ValidateProfileSetting(", "inline bool ValidateBaseSetting(" })
+    for (const char* function : { "inline bool ValidateProfileSetting(", "inline bool ValidateProfileSettingBuiltin(", "inline bool ValidateBaseSetting(" })
     {
         const size_t start = text.find(function);
         if (start == std::string::npos) continue;

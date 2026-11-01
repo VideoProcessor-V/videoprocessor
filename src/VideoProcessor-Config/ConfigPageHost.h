@@ -49,7 +49,7 @@ namespace ConfigPageHost
 		virtual ~IConfigPageProvider() = default;
 		virtual void AppendPages(ConfigFormApi& api, std::vector<ConfigPage>& pages) { (void)api; (void)pages; }
 		// An either/or hook for a field Bill's editor binds (e.g. a choice set that depends on a VP-V
-		// switch): called once per bound field with its section prefix, key and widget.
+		// switch): called for each bound field on every profile load/refresh, before the editor sets the widget's value, with its section prefix, key and widget (so use it to change the widget's choices, not its value).
 		virtual void OnBillField(const QString& sectionPrefix, const QString& key, QWidget* widget, ConfigFormApi& api)
 		{ (void)sectionPrefix; (void)key; (void)widget; (void)api; }
 		// True when it changed the document.

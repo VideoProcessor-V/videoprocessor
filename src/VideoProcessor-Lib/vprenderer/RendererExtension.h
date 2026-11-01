@@ -159,13 +159,17 @@ namespace RendererExtension
 
 	namespace detail
 	{
+		inline bool& InFault() { static thread_local bool flag = false; return flag; }
 		inline void Fault(const Context& ctx, const char* what) noexcept
 		{
+			if (InFault()) return; // a throw from a fault report is swallowed, never re-reported
+			InFault() = true;
 			for (auto& e : Extensions())
 			{
 				try { std::vector<std::string> none; e->OnStatus(ctx, StatusKind::WorkerFault, none, "extension", what); }
 				catch (...) {}
 			}
+			InFault() = false;
 		}
 
 		template<class F> void ForEach(const Context& ctx, F&& f) noexcept
@@ -275,7 +279,9 @@ namespace RendererExtension
 		{
 			std::vector<std::string> lines;
 			CollectStatusLines(kind, host, lines);
-			for (const std::string& l : lines) { base += "\n"; base += l; }
+			std::string result = base;
+			for (const std::string& l : lines) { result += "\n"; result += l; }
+			base.swap(result);
 		}
 		catch (...) {}
 		return base;

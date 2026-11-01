@@ -33,6 +33,17 @@ namespace Vpv
 			};
 		}
 
+		// A throwing module never stops the modules after it; the fault is reported with its name.
+		static void Contain(const RE::Context& ctx, const char* module) noexcept
+		{
+			try
+			{
+				std::vector<std::string> none;
+				ExtensionHub::Instance().OnStatus(ctx, RE::StatusKind::WorkerFault, none, module ? module : "module", "exception");
+			}
+			catch (...) {}
+		}
+
 		ExtensionHub& ExtensionHub::Instance()
 		{
 			static ExtensionHub hub;
@@ -73,7 +84,7 @@ namespace Vpv
 				state.hostView = f.hostView;
 				state.gpuLive = true;
 			}
-			for (auto& m : modules_) m->OnLifecycle(f);
+			for (auto& m : modules_) { try { m->OnLifecycle(f); } catch (...) { Contain(f, m->Name()); } }
 			// Released only for this host: a replacement renderer's state is untouched.
 			if ((f.kind == RE::Lifecycle::GpuReleased || f.kind == RE::Lifecycle::Shutdown) && f.host)
 			{
@@ -82,35 +93,35 @@ namespace Vpv
 			}
 		}
 
-		void ExtensionHub::OnSettingsLoad(RE::SettingsLoadContext& c) { for (auto& m : modules_) m->OnSettingsLoad(c); }
-		void ExtensionHub::OnIngress(RE::IngressContext& c) { for (auto& m : modules_) m->OnIngress(c); }
-		void ExtensionHub::OnQueue(const RE::QueueFacts& f) { for (auto& m : modules_) m->OnQueue(f); }
+		void ExtensionHub::OnSettingsLoad(RE::SettingsLoadContext& c) { for (auto& m : modules_) { try { m->OnSettingsLoad(c); } catch (...) { Contain(c, m->Name()); } } }
+		void ExtensionHub::OnIngress(RE::IngressContext& c) { for (auto& m : modules_) { try { m->OnIngress(c); } catch (...) { Contain(c, m->Name()); } } }
+		void ExtensionHub::OnQueue(const RE::QueueFacts& f) { for (auto& m : modules_) { try { m->OnQueue(f); } catch (...) { Contain(f, m->Name()); } } }
 
 		bool ExtensionHub::OnFrame(RE::FrameContext& c)
 		{
 			bool handled = false;
 			for (auto& m : modules_)
-				if (!handled) handled = m->OnFrame(c);
+				if (!handled) { try { handled = m->OnFrame(c); } catch (...) { Contain(c, m->Name()); } }
 			return handled;
 		}
 
 		double ExtensionHub::OnResolve(RE::Resolve kind, const RE::Context& ctx, double billValue)
 		{
 			double value = billValue;
-			for (auto& m : modules_) value = m->OnResolve(kind, ctx, value);
+			for (auto& m : modules_) { try { value = m->OnResolve(kind, ctx, value); } catch (...) { Contain(ctx, m->Name()); } }
 			return value;
 		}
 
 		void ExtensionHub::OnStatus(const RE::Context& ctx, RE::StatusKind kind, std::vector<std::string>& lines, const char* worker, const char* what)
 		{
-			for (auto& m : modules_) m->OnStatus(ctx, kind, lines, worker, what);
+			for (auto& m : modules_) { try { m->OnStatus(ctx, kind, lines, worker, what); } catch (...) { if (kind != RE::StatusKind::WorkerFault) Contain(ctx, m->Name()); } }
 		}
 
 		bool ExtensionHub::OnCommand(const RE::Context& ctx, const char* module, const char* command, std::string& reply)
 		{
 			bool handled = false;
 			for (auto& m : modules_)
-				if (!handled) handled = m->OnCommand(ctx, module, command, reply);
+				if (!handled) { try { handled = m->OnCommand(ctx, module, command, reply); } catch (...) { Contain(ctx, m->Name()); } }
 			return handled;
 		}
 
@@ -118,7 +129,7 @@ namespace Vpv
 		{
 			void* found = nullptr;
 			for (auto& m : modules_)
-				if (!found) found = m->Query(iid);
+				if (!found) { try { found = m->Query(iid); } catch (...) {} }
 			return found;
 		}
 
@@ -127,6 +138,7 @@ namespace Vpv
 			static bool registered = false;
 			if (registered) return;
 			registered = true;
+			ExtensionHub::Instance(); // construct before the registry owns the forwarder, so it is destroyed after it
 			RE::Register(std::unique_ptr<RE::IRendererExtension>(new Forwarder()));
 		}
 	}
