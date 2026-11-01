@@ -1,0 +1,57 @@
+{
+ "schema": 1,
+ "about": "Configuration and result of tools/m2/move_tests.py. Copyright(C) 2026 VP-V contributors; SPDX-License-Identifier: GPL-3.0-only",
+ "scan_dirs": [
+  "src/VideoProcessor-Test",
+  "src/VideoProcessor-BetaTests",
+  "src/VideoProcessor-ConfigTests"
+ ],
+ "extensions": [".cpp", ".h", ".hpp", ".inc"],
+ "keep": [
+  "src/VideoProcessor-BetaTests/pch.h",
+  "src/VideoProcessor-BetaTests/VideoProcessor-BetaTestsHost.vcxproj"
+ ],
+ "keep_notes": {
+  "src/VideoProcessor-BetaTests/pch.h": "stand-in found via $(ProjectDir) as <pch.h> before Lib's pch.h; moving it changes include resolution",
+  "src/VideoProcessor-BetaTests/VideoProcessor-BetaTestsHost.vcxproj": "the Beta host DLL path must stay (coordinator GPU scripts)"
+ },
+ "rules": [
+  {"glob": "src/VideoProcessor-Test/RendererCaptureHarnessTests.cpp", "dest": "src/VP-V/tests/harness/"},
+  {"glob": "src/VideoProcessor-BetaTests/*.cpp", "dest": "src/VP-V/tests/beta_gpu/"},
+  {"glob": "src/VideoProcessor-Test/*.h", "dest": "src/VP-V/tests/support/"},
+  {"glob": "src/VideoProcessor-Test/*.cpp", "dest": "src/VP-V/tests/suite/"}
+ ],
+ "origins": {
+  "VideoProcessor-Test": {
+   "dir": "src/VideoProcessor-Test",
+   "include_dirs": ["src/VideoProcessor-Test", "src/VideoProcessor-Lib", "src/VideoProcessor-ConfigCore", "src"]
+  },
+  "VideoProcessor-BetaTests": {
+   "dir": "src/VideoProcessor-BetaTests",
+   "include_dirs": ["src/VideoProcessor-BetaTests", "src/VideoProcessor-Lib", "src"]
+  }
+ },
+ "origin_by_dest": {
+  "src/VP-V/tests/harness": "VideoProcessor-Test",
+  "src/VP-V/tests/support": "VideoProcessor-Test",
+  "src/VP-V/tests/suite": "VideoProcessor-Test",
+  "src/VP-V/tests/beta_gpu": "VideoProcessor-BetaTests"
+ },
+ "split": [
+  "src/VideoProcessor-Test/ConfigFileTests.cpp",
+  "src/VideoProcessor-Test/DolbyVisionTunnelFormatterTests.cpp",
+  "src/VideoProcessor-Test/LibplaceboPluginProxyTests.cpp",
+  "src/VideoProcessor-Test/MotionRendererTests.cpp",
+  "src/VideoProcessor-Test/DolbyVisionLuminancePolicyTests.cpp",
+  "src/VideoProcessor-Test/LibplaceboRenderParametersTests.cpp",
+  "src/VideoProcessor-Test/AlphaSourceCropPolicyTests.cpp",
+  "src/VideoProcessor-Test/ConfigEditorCoreTests.cpp"
+ ],
+ "split_excluded_open_items": {
+  "src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp": "Qt; needs H3 / plan section 4.3",
+  "src/VideoProcessor-BetaTests/BetaParametersTests.cpp": "no TEST_METHODs; custom suite",
+  "src/VideoProcessor-Test/MagewellCaptureTests.cpp": "Magewell isolation rules / CI no-SDK build conditions"
+ },
+ "exclude": {},
+ "resolved": {}
+}
