@@ -431,6 +431,8 @@ inline TierPlan PlanTiers(const Registry& reg, const Graph& g, const CardProfile
             if (n.inputs[k].lag != 0)
                 continue;
             const int j = g.IndexOf(n.inputs[k].product);
+            if (j >= 0 && g.nodes[size_t(j)].laneVisible)
+                continue;   // a view the lane reads too (the source ring): not an in-render input
             if (j >= 0 && all[size_t(j)].grant != Grant::Lane) {
                 e.grant = Grant::InRender;
                 e.why = GrantWhy::InputInRender;

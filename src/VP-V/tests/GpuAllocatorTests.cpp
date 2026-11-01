@@ -567,6 +567,10 @@ namespace GpuAllocatorTestsNs
 			const ProductTexLayout layout = P10Layout();
 			const TierPlan big = PlanTiers(reg, g, Card3090(), TierInput());
 			Assert::IsTrue(big.Laned(kP10GrainSplit), L"laned on a big card");
+			// Merge reconciliation: P10 reads the source ring P13 (RenderOnly views, SA0); a lane-visible view never moves its
+			// reader into the render, while an ordinary render-only input still would.
+			Assert::IsTrue(reg.Get(kP13SourceRing).laneVisible && !reg.Get(kP0RebaseDecision).laneVisible, L"only the source ring is a lane-visible view");
+			Assert::IsTrue(big.Find(kP10GrainSplit)->why != GrantWhy::InputInRender, L"P13 does not demote P10");
 			const size_t terms = layout.terms.size();
 			{
 				FakeBackend be;

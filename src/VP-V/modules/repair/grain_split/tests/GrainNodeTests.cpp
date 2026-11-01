@@ -397,8 +397,8 @@ namespace GrainNodeTestsNs
 		TEST_METHOD(TemporalDetailShadersReverseToTheirPreAccessorText)
 		{
 			// The accessor switch is mechanical: replacing gs_fetch(P) by texelFetch(split, P, 0) and gs_blocks(B) by
-			// texelFetch(gblocks, B, 0) in the SA2 shader text gives back, byte for byte, the text at 160987e5 (pinned
-			// by size and FNV-1a 64). With the Full prelude (gs_fetch = texelFetch(split, ...)) the Full-mode shader
+			// texelFetch(gblocks, B, 0) in the SA2 shader text gives back, byte for byte, the accessor-free text (160987e5 plus
+			// K0/SA0's own TemporalDetail changes: feat/camera-k0 at f62e9fae; pinned by size and FNV-1a 64). With the Full prelude (gs_fetch = texelFetch(split, ...)) the Full-mode shader
 			// therefore computes exactly what it computed before.
 			const std::string root = SettingsTestSupport::RepoRoot();
 			std::string text = SettingsTestSupport::ReadFile(root + "src\\VP-V\\modules\\repair\\temporal_detail\\TemporalDetailShaders.h");
@@ -437,8 +437,8 @@ namespace GrainNodeTestsNs
 				h ^= c;
 				h *= 1099511628211ull;
 			}
-			Assert::AreEqual(size_t(46944), text.size(), L"the reversed text has the pre-SA2 size");
-			Assert::AreEqual(uint64_t(0xd4c796a262566634ull), h, L"the reversed text hashes to the pre-SA2 shader text");
+			Assert::AreEqual(size_t(48008), text.size(), L"the reversed text has the pre-SA2 size");
+			Assert::AreEqual(uint64_t(0xb77b206dff1cdaf2ull), h, L"the reversed text hashes to the pre-SA2 shader text");
 		}
 
 		// Finisher MUST 2: the node's declaration is built from the GRANTED storage (NodeLayout::decl = GrainDecl(choice.storage)),

@@ -197,6 +197,10 @@ struct ProductDecl {
     // The SizeRule is a planning figure (a plane whose runtime geometry is not a plain shift of the source, e.g.
     // chroma): the allocator's layout uses the ACTUAL plane dims and TierInput::actual carries its bytes.
     bool planningSize = false;
+    // A RenderOnly VIEW of data that exists before the render and is readable from the lane as well (the source ring's
+    // unpacked planes, owned by the queue / early upload): it has no lane of its own, but it never moves a lane reader
+    // into the render (VramGovernor's InputInRender rule skips it).
+    bool laneVisible = false;
 };
 
 // The real tile geometry of the source-resolution monitor (SourceResolutionMonitor.h: kTile, kMaxTiles, ring[2]):
@@ -635,6 +639,7 @@ inline void AppendSourceRingProduct(std::vector<ProductDecl>& decls)
                            Bit(kFull) | Bit(kContinuity), 0);
     p13.sourceFrame = true;
     p13.size.fixedBytes = 0;
+    p13.laneVisible = true;   // the lane reads the queued planes through it: P10/P11/TD keep their lanes
     decls.push_back(p13);
 }
 
