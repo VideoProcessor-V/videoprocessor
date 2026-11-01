@@ -7,6 +7,7 @@
 #include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>
 #include <VP-V/modules/drive/led_measure/LedMeasurementHook.h>
 #include <VP-V/modules/output/dither/CustomHookChain.h>
+#include <VP-V/modules/output/dither/OutputEncodingRepair.h>
 #include <vprenderer/HookSegment.h>
 
 #include <libplacebo/d3d11.h>
@@ -233,6 +234,15 @@ namespace OutputSegmentsGpuTestsNs
 				c.outputPrimaries = PL_COLOR_PRIM_BT_709;
 				const ExtendedRangeGpuProbe::Result base = ExtendedRangeGpuProbe::Render(gpu, renderer, planes, c);
 				c.extraHooks = { lut.Get() };
+				// As the renderer does: a texture-input PRE_OUTPUT hook makes libplacebo 7.360 skip the output encoding, so the
+				// repair runs first whenever Needed() (never on Beta 377). Without it the hook's result went out unencoded.
+				OutputEncodingRepair::Hook repair;
+				pl_color_repr target{};
+				target.sys = PL_COLOR_SYSTEM_RGB;
+				target.levels = PL_COLOR_LEVELS_LIMITED;
+				target.bits.sample_depth = 10; target.bits.color_depth = 10;
+				repair.SetTarget(target);
+				if (OutputEncodingRepair::Needed(c.extraHooks)) c.firstHook = repair.Get();
 				const ExtendedRangeGpuProbe::Result mapped = ExtendedRangeGpuProbe::Render(gpu, renderer, planes, c);
 				Assert::IsTrue(base.ok && mapped.ok, ToWide(base.error + " / " + mapped.error).c_str());
 				Assert::IsTrue(lut.SlopeApplied() > 0 && lut.SlopeFallbacks() == 0, L"the edge slope was not used");

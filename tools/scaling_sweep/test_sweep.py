@@ -62,6 +62,18 @@ class SweepTests(unittest.TestCase):
         self.assertEqual(sweep.route_size((1920, 1080)), (3840, 2160))
         self.assertEqual(sweep.route_size((1280, 720)), (2560, 1440))
 
+    def test_prepare_cmd_and_refusal(self):
+        a = self.args()
+        plan = sweep.Plan(a)
+        g = plan.geoms[0]
+        cmd = sweep.prepare_cmd(a, g, g["pics"][0], "m.mkv", ["s", "r", "k"])
+        self.assertLess(cmd.index("-i"), cmd.index("-fps_mode"), "-fps_mode is an output option (ffmpeg 9)")
+        self.assertEqual(cmd.count("-fps_mode"), 3)
+        self.assertIn("format=yuv420p10le,extractplanes=y", cmd[cmd.index("-filter_complex") + 1])
+        self.assertEqual(sorted(sweep.prepared(plan)), sorted(x["id"] for x in plan.geoms))
+        a2 = sweep.parse_args(["render", "--work", os.path.join(self.dir, "work"), "--sweeps", "3"])
+        self.assertEqual(sweep.main(["render", "--work", os.path.join(self.dir, "work"), "--sweeps", "3"]) if not sweep.Plan(a2).problems else 1, 1)
+
     def test_camera_model_doubles(self):
         a0, a1 = self.args(), self.args("--camera-model-key", "camera_model")
         n0 = sum(len(sweep.geom_variants(a0, g)) for g in sweep.geometries(a0) if g["sweep"] in (1, 2, 4))

@@ -53,6 +53,21 @@ namespace LedDrive
 		btbPassthrough.store(p.btbPassthrough, std::memory_order_release);
 	}
 
+	void DynamicDriveShared::PublishRejection(const std::string& reason)
+	{
+		std::lock_guard<std::mutex> lock(rejectionMutex);
+		if (reason == rejection)
+			return;
+		rejection = reason;
+		rejectionGeneration.fetch_add(1, std::memory_order_acq_rel);
+	}
+
+	std::string DynamicDriveShared::PublishedRejection() const
+	{
+		std::lock_guard<std::mutex> lock(rejectionMutex);
+		return rejection;
+	}
+
 	std::shared_ptr<LedDriveModule> DynamicDriveShared::Module() const
 	{
 		return std::atomic_load(&module);
@@ -105,6 +120,7 @@ namespace LedDrive
 		if (module)
 			context.frame->PublishObserver(module, true);
 		context.frame->PublishParams(params);
+		context.frame->PublishRejection(rejection);
 	}
 
 	void DynamicDriveHost::ParkForHoldover(const HostContext& context)
@@ -157,6 +173,12 @@ namespace LedDrive
 		}
 		std::string validationError;
 		const bool valid = Validate(config, validationError);
+		// Bug hunt 31 H1: a rejected configuration turns the module and the gamma boost off; that is
+		// shown (the "Dynamic Drive" fallback entry and status line), never log-only. A valid Apply
+		// releases it.
+		rejection = valid ? std::string() : (validationError.empty() ? std::string("invalid settings") : validationError);
+		if (context.frame)
+			context.frame->PublishRejection(rejection);
 		// The gamma boost applies even with the module off or in log_only.
 		const LedDriveConfig boostConfig = valid ? ReadLedDriveConfig(config) : LedDriveConfig();
 		// The exponent is output gamma / gamma_boost, worked out per frame from the frame's
@@ -345,7 +367,8 @@ namespace LedDrive
 	{
 		const std::shared_ptr<LedDriveModule> led = module;
 		if (!led)
-			return "off";
+			return rejection.empty() ? std::string("off") :
+				"off: configuration rejected (" + rejection + "); LED drive and gamma boost off";
 		const LedDriveConfig config = led->Config();
 		const DriverStatus driver = led->ProjectorStatus();
 		const CompensationGain gain = led->CurrentGain();

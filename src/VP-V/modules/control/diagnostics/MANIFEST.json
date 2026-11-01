@@ -6,6 +6,7 @@
   "status": "partial",
   "code_location": "partly migrated",
   "live_files": [
+    "src/VP-V/modules/control/diagnostics/DiagnosticOverrides.h",
     "src/VP-V/modules/control/diagnostics/StateReport.cpp",
     "src/VP-V/modules/control/diagnostics/CrashState.cpp",
     "src/VP-V/modules/control/diagnostics/CrashState.h",
@@ -19,6 +20,9 @@
     "src/VP-V/modules/control/diagnostics/RawCaptureCorpus.h",
     "src/VP-V/modules/control/diagnostics/DiagnosticsAdapter.h",
     "src/VP-V/modules/control/diagnostics/DiagnosticsReportRun.h",
+    "src/VP-V/modules/control/diagnostics/VpEventLine.h",
+    "src/VP-V/modules/control/diagnostics/FrameStamp.h",
+    "src/VP-V/modules/control/diagnostics/FrameStampShader.h",
     "src/VP-V/core/SlotTiming.h",
     "src/VP-V/core/FallbackStatus.h",
     "src/VideoProcessor-GUI/StatsOverlayWindow.cpp",

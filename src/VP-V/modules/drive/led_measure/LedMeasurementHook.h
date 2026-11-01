@@ -100,6 +100,9 @@ namespace LedDrive
 		std::string LateNote() { return schedule.Note(); }
 		// True when the non-blocking D3D11 readback is in use.
 		bool NativeReadback() const { return nativeReadback; }
+		// Bug hunt 31 M1: the non-blocking readback failed and libplacebo's (blocking) readback runs
+		// for the session (until Release); the adapter shows it as a fallback entry.
+		bool NativeReadbackFailed() const { return nativeFailed; }
 		// A result still unread this many frames after its pass counts as late.
 		static constexpr int LATE_FRAMES = 3;
 
@@ -135,6 +138,7 @@ namespace LedDrive
 		ReadbackRing schedule{ RING, LATE_FRAMES };
 		bool nativeTried = false;
 		bool nativeReadback = false;
+		bool nativeFailed = false;
 		ID3D11DeviceContext* immediate = nullptr;
 		ID3D11Texture2D* readbackTex[RING] = {};
 		ID3D11Texture2D* stagingTex[RING] = {};

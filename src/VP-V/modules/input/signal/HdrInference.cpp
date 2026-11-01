@@ -13,6 +13,7 @@ const char* ToString(HdrInferenceState state)
 	case HdrInferenceState::Waiting: return "waiting";
 	case HdrInferenceState::InferredPq: return "inferred-pq";
 	case HdrInferenceState::VetoedSdr: return "vetoed-sdr";
+	case HdrInferenceState::Suspended: return "suspended";
 	default: return "unknown";
 	}
 }
@@ -31,6 +32,7 @@ const char* ToString(HdrInferenceEvent event)
 	case HdrInferenceEvent::VetoArmed: return "veto-armed";
 	case HdrInferenceEvent::VetoAtCut: return "veto-at-cut";
 	case HdrInferenceEvent::VetoWithoutCut: return "veto-without-cut";
+	case HdrInferenceEvent::Suspended: return "suspended";
 	default: return "unknown";
 	}
 }
@@ -99,6 +101,8 @@ void HdrInferenceTracker::Reset()
 	m_signalKey = 0;
 	m_candidateSinceMs = 0;
 	m_epochFlips = 0;
+	m_suspendedSinceMs = 0;
+	m_resumedAfterGap = false;
 	ResetShots();
 }
 
@@ -119,6 +123,7 @@ void HdrInferenceTracker::StartEpoch(uint64_t nowMs, uint64_t signalKey)
 	m_signalKey = signalKey;
 	m_candidateSinceMs = nowMs;
 	m_epochFlips = 0;
+	m_resumedAfterGap = false;
 	ResetShots();
 }
 
@@ -143,6 +148,41 @@ HdrInferenceUpdate HdrInferenceTracker::OnSignal(
 		EvaluateOriginalNewLldvEligibility(signal) : EvaluateHdrInferenceEligibility(signal);
 	if (!eligibility.eligible)
 	{
+		// Bug hunt 37 S1: a PQ epoch whose capture signal merely went invalid (an HDMI re-sync)
+		// is suspended, not ended, so the same source coming back resumes PQ at once. VP's
+		// inference only; any other reason (or the window running out) ends it as before.
+		if (!m_options.originalHeuristic && signal.enabled && !signal.valid &&
+			m_options.resumeWindowMs > 0)
+		{
+			if (m_state == HdrInferenceState::InferredPq)
+			{
+				m_state = HdrInferenceState::Suspended;
+				m_suspendedSinceMs = nowMs;
+				m_reason = "suspended: capture state invalid; PQ resumes if the signal returns eligible";
+				ResetShots();
+				update.event = HdrInferenceEvent::Suspended;
+				update.effectiveChanged = true;
+				return update;
+			}
+			if (m_state == HdrInferenceState::Suspended)
+			{
+				if (nowMs - m_suspendedSinceMs < m_options.resumeWindowMs)
+					return update;
+				m_state = HdrInferenceState::NotEligible;
+				m_reason = "capture state invalid (signal gap longer than the resume window)";
+				update.event = HdrInferenceEvent::Ended;
+				return update;
+			}
+		}
+		if (m_state == HdrInferenceState::Suspended)
+		{
+			// Back, but not eligible (or the suspension no longer applies): the epoch ends.
+			m_state = signal.enabled ? HdrInferenceState::NotEligible : HdrInferenceState::Off;
+			m_reason = eligibility.reason;
+			ResetShots();
+			update.event = HdrInferenceEvent::Ended;
+			return update;
+		}
 		const bool wasInferred = IsInferredPq();
 		if (IsCandidate())
 			update.event = m_state == HdrInferenceState::Waiting ?
@@ -153,6 +193,23 @@ HdrInferenceUpdate HdrInferenceTracker::OnSignal(
 		m_reason = eligibility.reason;
 		ResetShots();
 		return update;
+	}
+
+	if (m_state == HdrInferenceState::Suspended)
+	{
+		if (nowMs - m_suspendedSinceMs < m_options.resumeWindowMs)
+		{
+			// Bug hunt 37 S1: the signal is back and eligible within the window. A new epoch
+			// (as a valid-to-valid mode change) that stays PQ, with fresh veto evidence.
+			StartEpoch(nowMs, signal.signalKey);
+			m_state = HdrInferenceState::InferredPq;
+			m_reason = "inferred (resumed after a signal gap)";
+			m_resumedAfterGap = true;
+			update.event = HdrInferenceEvent::NewEpoch;
+			update.effectiveChanged = true;
+			return update;
+		}
+		m_state = HdrInferenceState::NotEligible;   // too late: stabilise from scratch below
 	}
 
 	if (!IsCandidate())
@@ -192,6 +249,14 @@ HdrInferenceUpdate HdrInferenceTracker::OnSignal(
 HdrInferenceUpdate HdrInferenceTracker::OnTick(uint64_t nowMs)
 {
 	HdrInferenceUpdate update;
+	if (m_state == HdrInferenceState::Suspended &&
+		nowMs - m_suspendedSinceMs >= m_options.resumeWindowMs)
+	{
+		m_state = HdrInferenceState::NotEligible;
+		m_reason = "capture state invalid (signal gap longer than the resume window)";
+		update.event = HdrInferenceEvent::Ended;
+		return update;
+	}
 	if (m_state == HdrInferenceState::Waiting &&
 		nowMs - m_candidateSinceMs >= m_options.confirmMs)
 	{

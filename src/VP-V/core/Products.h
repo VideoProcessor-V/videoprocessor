@@ -173,6 +173,15 @@ struct ProductDecl {
     float refRenderMs = 0.0f;                 // estimated in-render cost on the reference card, 1080p
 };
 
+// Products declared outside FirstProducts by their owning module (dense ids appended at plan time) keep a registered
+// token here so every reader names the same node.
+//   grain.split  the shared grain product (grain-free picture + grain layer of the decoded source, computed once, early).
+//                Owner and declaration: input.source_analysis/regions (RegionEvidence::AppendProducts, GrainProduct; the
+//                one read API is RegionEvidence::GrainView). Implementation: repair.grain_split (GrainSplit::Compute on the
+//                CPU, the GrainSplit::Gpu::Splitter passes on the GPU). Readers: region block stats, repair.temporal_detail,
+//                scaling.chroma_upscale (CfL grain guard), camera-model grain map, grain-safe contrast recovery.
+constexpr const char* kTokenGrainSplit = "grain.split";
+
 namespace detail {
 
 inline ProductDecl Make(ProductId id, const char* token, const char* name, Backend backend, uint8_t history,

@@ -1,5 +1,6 @@
 #include <pch.h>
 #include <VP-V/modules/input/capture/EarlyUpload.h>
+#include <VP-V/modules/input/capture/EarlyUploadBudget.h>
 
 #include <libplacebo/d3d11.h>
 #include <dxgi1_4.h>
@@ -238,6 +239,25 @@ EarlyUpload::SlotHandle EarlyUpload::Upload(const void* data, size_t rowBytes, i
 			for (size_t i = 0; i < entries.size() && i < allowed; ++i)
 				++(entries[i].busy ? stats.noFreeHeld : stats.noFreeGpu);
 			return nullptr;
+		}
+		{
+			// Bug hunt 38 M3: a new texture coexists with old-size ones still held or in GPU use; make it
+			// only while the live bytes plus this frame fit the cap (same-size reuse needs nothing new).
+			Entry& chosen = entries[static_cast<size_t>(index)];
+			if (!(chosen.uploadTex && chosen.rowBytes == rowBytes && chosen.height == height))
+			{
+				size_t liveBytes = 0;
+				for (size_t i = 0; i < entries.size(); ++i)
+					if (i != static_cast<size_t>(index) && entries[i].uploadTex)
+						liveBytes += entries[i].rowBytes * static_cast<size_t>(entries[i].height);
+				if (!EarlyUploadBudget::MayMakeSlot(liveBytes, frameBytes, capBytes))
+				{
+					chosen.busy = false;
+					++stats.capDeferred;
+					++stats.noFreeSlot;
+					return nullptr;
+				}
+			}
 		}
 		if (!MakeTexture(entries[static_cast<size_t>(index)], rowBytes, height))
 		{

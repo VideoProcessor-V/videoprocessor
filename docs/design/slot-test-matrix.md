@@ -17,7 +17,7 @@ Kinds: placeholder = byte-identity on/off + zero cost (required for placeholder/
 | 90 | repair.texture_restore | built | prepass | not required | TextureRestoreGpuTiming<br>DetailPulse tests | never runs with libplacebo smooth motion / deinterlacing | stacked A -> texture restore (double-boost check) | Texture restore: inactive (<reason>) |
 | 100 | scaling.route_4k | placeholder | prepass | byte-identical with the slot off<br>zero GPU passes when off | 1-D x2 port vs kit within 1 LSB | processing size rule recomputed on output-profile change (vectors invalidated)<br>8K placeholder unit tests | 4K60 load at the 1080p60 shadow leg | 4K route: off (<reason>) |
 | 110 | scaling.refine | placeholder | prepass (VP NetRunner, once per source frame) | byte-identical with the slot off<br>zero GPU passes when off | per combination group quality + MTF/HF energy/grain kept; no ringing | fingerprint bypass shows under 'Fallbacks engaged' | Upper preset at 24p/200 ms on the 3090 | Refine: bypassed (fingerprint mismatch / group underperforms / low latency) |
-| 120 | scaling.chroma_upscale | placeholder | prepass | byte-identical with the slot off<br>zero GPU passes when off | MISSING | libplacebo does not re-upsample when the slot outputs 4:4:4 | MISSING | Chroma upscale: libplacebo (<reason>) |
+| 120 | scaling.chroma_upscale | placeholder | prepass | byte-identical with the slot off<br>zero GPU passes when off | CPU model: flat/BTB-WTW exact, siting at chroma sites, luma-correlated edge vs Catmull-Rom, 4:2:2, chroma-grain isolate within 5%, active picture bars<br>GPU vs CPU model within 0.02 codes on WARP (4:2:0 left/co-sited, 4:2:2, letterbox/pillarbox), off returns the frame, determinism | libplacebo does not re-upsample when the slot outputs 4:4:4 | MISSING | Chroma upscale: libplacebo (<reason>) |
 | 130 | motion.vector_delivery | partial | host | MISSING | per-axis scaling unit tests (VectorScale) | sx != sy maps exactly; identity factors leave vectors unchanged | single-axis re-base + de-judder | motion: matcher (optical flow unavailable) |
 | 140 | motion.consumers | built | prepass | not required | DejudderWarp tests<br>InterpolationTimeline tests<br>PulldownDetector tests | exclusive with libplacebo smooth motion by profile rules | 24p in 60 at 200 ms, 4/3/2 frames | motion consumers: <warp failed / rendered warp failed / interpolation failed>: the source frame is shown instead |
 | 150 | scaling.geometry | built | libplacebo | not required | NlsGeometryPolicy tests<br>AnamorphicPresentation tests | active area propagated to every net slot | A-lens/NLS + re-base + vectors | Geometry: NLS safe fit (hook failure) |
@@ -40,6 +40,6 @@ Kinds: placeholder = byte-identity on/off + zero cost (required for placeholder/
 ## Missing tests by kind
 
 - placeholder: 3 (input.source_analysis, motion.vector_delivery, scaling.output)
-- isolation: 2 (scaling.chroma_upscale, drive.black_level)
+- isolation: 1 (drive.black_level)
 - contract: 1 (control.net_runtime)
 - chain: 4 (scaling.chroma_upscale, colour.sdr_tone_shape, drive.black_level, output.dither)

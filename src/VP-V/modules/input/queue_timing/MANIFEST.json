@@ -6,6 +6,7 @@
   "status": "built",
   "code_location": "partly migrated",
   "live_files": [
+    "src/VP-V/modules/input/queue_timing/WindowedRate.h",
     "src/VP-V/core/DelayBudget.h",
     "src/VP-V/modules/input/queue_timing/QueueLatency.h",
     "src/VideoProcessor-Lib/QueueConfiguration.h",

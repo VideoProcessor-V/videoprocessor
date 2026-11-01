@@ -215,8 +215,9 @@ namespace LedDrive
 	{
 	public:
 		explicit StatsBuilder(const LedDriveConfig& config);
-		// timeMs: the frame's time, for highlight persistence.
-		FrameStats Build(const RawMeasurement& raw, double timeMs = 0.0);
+		// timeMs: the frame's time, for highlight persistence. sourcePeriodMs: the measured source
+		// frame period (<= 0 = unmeasured), for fade keys written in frames (bug hunt 31).
+		FrameStats Build(const RawMeasurement& raw, double timeMs = 0.0, double sourcePeriodMs = 0.0);
 		// Mean absolute difference of block luma against the previous frame,
 		// in codes (the cut metric); 0 before there is a previous frame.
 		double LastDifference() const { return lastDifference; }

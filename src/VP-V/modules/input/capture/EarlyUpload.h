@@ -66,6 +66,7 @@ public:
 	// payload and those free but waiting for their GPU release.
 	// copyCpuMs*: the conversion thread's copy + signal per upload (efficiency timers T4).
 	struct Stats { uint64_t uploads = 0, noFreeSlot = 0, failures = 0, noFreeHeld = 0, noFreeGpu = 0; int slotsMade = 0;
+		uint64_t capDeferred = 0;   // bug hunt 38 M3: a new texture refused because live bytes + the frame exceed the cap
 		double copyCpuMsTotal = 0.0, copyCpuMsMax = 0.0; };
 	Stats GetStats() const;
 	const std::string& LastError() const { return error; }
