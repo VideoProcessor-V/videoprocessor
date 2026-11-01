@@ -410,4 +410,30 @@
   </ItemGroup>
   <ItemGroup><ClCompile Include="ReconstructionMotionTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="ProcessingPerformanceWindowTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\link\CameraFitProducer.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\link\CameraFitWorker.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\link\CameraLinkCore.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\link\FieldReadbackRing.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\FieldReadbackRingWarpTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\PairTimingTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\PairAssemblyTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\VerdictGateTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraFitRunnerTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraFitThreadingTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraOffTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\link\CameraLabelFill.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\link\CameraLabelProducer.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\link\CameraConsumerBinding.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\P8FillRuleTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraConsumerBindingTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraLabelUploadTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraLabelWarpTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\link\GuidanceScheduler.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\link\GuidanceCountsRing.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\GuidanceGovernorTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\GuidanceSchedulingTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\GuideProductTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\MotionBenchWriterTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\GuidanceNullIdentityWarpTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
+  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\link\NativeCopyReadback.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
 </Project>

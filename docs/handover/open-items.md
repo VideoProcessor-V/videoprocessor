@@ -15,3 +15,14 @@ Pending fixes merged with SHOULD/minor findings (feature off by default or inert
 - feat/dither-need-map: if light_level_out becomes part of P12, raise p12.size.fixedBytes 16384 -> 32768. core/Products.h:628
 - feat/dither-need-map: BlockPass::Step (external linkage) calls internal-linkage Supported() (formal ODR nit). modules/output/dither/DitherNeedGpu.h
 - feat/m2-hooks: unwired re-shape sites #4-7, #15-16, #21-23, #27 and the settings/Config hand-offs are not yet routed through the hooks (not blockers); they move with the resync Q1 / P3 / P7 packages. docs (M2 P0 call-site document), LibplaceboVideoRenderer.cpp call sites
+- feat/camera-k1-k4 (re-check SHOULDs): CameraConsumerBinding binds m_dummy that can be null (SetDummyTexture only in tests); refuse the binding while null. CameraConsumerBinding.cpp:43-46
+- feat/camera-k1-k4: field-era change only resets m_lastRequestedField; clear the ring, sealed mark and fitter history (NoteReset). CameraLinkCore.cpp:217-226
+- feat/camera-k1-k4: Guide gets ctx.nextPairSeconds; if 0 the governor cool-down never runs down; fall back to measured time. GuidanceScheduler.cpp:369
+- feat/camera-k1-k4: failed native create/start is silent and m_dropped not counted (D3D11 falls back to the failing buffer path); count and show it. GuidanceCountsRing.cpp:390-405
+- feat/camera-k1-k4: m_seenReadbackDropped unused (CameraLinkCore.h:164); mis-indented line (CameraLinkCore.cpp:242)
+
+## Camera K1+K2+K4 (module side)
+- Subtask 13, the offline benchmark (motion_bench on D:\testclips, EPE no-camera vs camera vs RAFT, narrow/escalated/skipped shares), is
+  NOT run: limp L2 (coordinator, 2026-11-01). Run it after the usage reset, after the verification build; tools are in
+  tools/eval/motion_bench/ (run_motion_bench.ps1, score_flow.py, offline_adapter.py).
+- Wiring still to do: H1 adapter (CameraExtension), items.props (H7), K1-9 LaneRunner registration, p7g in SkeletonProducts()/ProductRows().
