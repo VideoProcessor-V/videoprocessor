@@ -241,4 +241,10 @@ python -I tools/eval/stack_runner.py --suite s2 --max-cases 0 --size-frac 0.25 -
 python -I tools/eval/test_light_eval.py                                # tests
 ```
 
+* **sRGB note**: sRGB is approximated by gamma 2.2 only in the SDR tone-shape power (as the renderer does); the
+  Display/Inverse transforms in `light_level_ref.py` use the exact piecewise sRGB curve.
+* **Gates**: grain ratio and texture kept compare each candidate with the plain chain using the SAME final step (nd vs plain,
+  +4 vs plain+4); the absolute cand/master grain ratio is a separate column. Texture kept is NA when plain keeps < 0.25 of the
+  master texture. btb counts a master pixel only if below black by more than half an output code step (2 ten-bit codes for 8-bit).
+
 The committed sample (`prototypes/stack_s2/`) is the default subset; read it as relative ordering only (stand-in stages).

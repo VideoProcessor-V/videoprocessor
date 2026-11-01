@@ -16,7 +16,7 @@ Stand-in stages (signal domain, before tone mapping, in VP order):
   s4  sigma-delta 8-bit final      sigma_delta_ref.quantise_sequence (amplitude 0.15)
 Final conversion is ALWAYS 8-bit: variant "sd" = sigma-delta (stage 4; config name gets "+4"), variant "nd" =
 plain 8-bit rounding without dither (scale reference).  Metrics are computed in display units (light_metrics),
-tiles come from the master.  Texture kept compares with the plain/nd output of the same context.
+tiles come from the master.  Texture kept and the grain ratio compare with the plain chain of the same context AND the same final step.
 """
 import argparse
 import csv
@@ -40,7 +40,7 @@ import tonemap_ref as tr  # noqa: E402
 
 SD_AMPLITUDE = 0.15
 GRAIN_MIN_RMS = 0.2   # display codes: below this the master has no grain to compare with
-TEX_MIN_PROJ = 0.1    # plain must keep at least this projection of the master texture, else the ratio is unreliable
+TEX_MIN_PROJ = 0.25   # plain must keep at least this projection of the master texture, else the ratio is unreliable
 RANGES = dict(lm.SHADOW_RANGES, all=(None, 10000.0))
 STAGE_SETS = [(), (1,), (2,), (3,), (1, 2), (1, 2, 3)]
 RUN_CONTEXTS = {  # name -> (S2 context, evaluation kind)
@@ -48,9 +48,9 @@ RUN_CONTEXTS = {  # name -> (S2 context, evaluation kind)
     "hdr_pq": ("hdr_pq_1000", "hdr_passthrough"),
     "hdr_to_sdr": ("hdr_pq_1000", "hdr_to_sdr"),
 }
-SDR_EVAL = llr.Context(kind="sdr", white=s2_synth.SUITE_WHITE, black=s2_synth.SUITE_BLACK)
+SDR_EVAL = llr.Context(kind="sdr", target_white=s2_synth.SUITE_WHITE, target_black=s2_synth.SUITE_BLACK)
 COLUMNS = ["case", "run_context", "config", "final", "band_all_mse", "band_all_p99", "band_lt5_mse", "band_lt5_p99",
-           "band_5to50_mse", "band_5to50_p99", "tex_lt5", "tex_5to50", "grain_rms_ratio", "grain_rms_out",
+           "band_5to50_mse", "band_5to50_p99", "tex_lt5", "tex_5to50", "grain_rms_ratio", "grain_ratio_master", "grain_rms_out",
            "btb_kept", "wtw_kept", "na"]
 
 
@@ -93,28 +93,32 @@ def finalise(x, final):
     return q.astype(np.float64) * 4.0
 
 
-def grain_stats(master, cand, ctx, lut, tile=None):
-    """grain_rms_ratio = rms(cand residual) / rms(master residual) in display codes over shadow (<50 nit) pixels
-    away from edges (None when the master has no residual, e.g. grain 0); grain_rms_out = rms of cand residual."""
-    M, C = lm.display_planes(master, ctx, lut), lm.display_planes(cand, ctx, lut)
+def grain_stats(master, plain, cand, ctx, lut, tile=None):
+    """Grain over shadow (<50 nit) pixels away from edges, residual rms in display codes.
+    grain_rms_ratio = rms(cand residual) / rms(plain residual), plain = the plain chain WITH THE SAME FINAL STEP
+    (None when the master or plain has no residual above GRAIN_MIN_RMS); grain_ratio_master = cand/master (absolute);
+    grain_rms_out = rms of the cand residual.  Returns (ratio_vs_plain, ratio_vs_master, out)."""
+    M, P, C = (lm.display_planes(a, ctx, lut) for a in (master, plain, cand))
     reg = lm.region_tiles(master, ctx, None, 50.0, lut, tile)
-    sm = so = 0.0
+    sm = sp = so = 0.0
     n = 0
-    for m, c, rg in zip(M, C, reg):
+    for m, p, c, rg in zip(M, P, C, reg):
         sel = rg & em.near_edge_zone(m, 10)[1]
         if not sel.any():
             continue
         sm += float(np.sum(em.grain_residual(m)[sel] ** 2))
+        sp += float(np.sum(em.grain_residual(p)[sel] ** 2))
         so += float(np.sum(em.grain_residual(c)[sel] ** 2))
         n += int(sel.sum())
     if n < lm.MIN_PX:
-        return None, None
-    out = float(np.sqrt(so / n))
-    ref = float(np.sqrt(sm / n))
-    return (out / ref if ref > GRAIN_MIN_RMS else None), out
+        return None, None, None
+    out, ref, pl = (float(np.sqrt(v / n)) for v in (so, sm, sp))
+    has = ref > GRAIN_MIN_RMS
+    return (out / pl if has and pl > GRAIN_MIN_RMS else None), (out / ref if has else None), out
 
 
 def evaluate(master_eval, plain_eval, cand, ctx, lut):
+    """plain_eval = the plain chain with the SAME final step as cand (nd vs plain nd; sd vs plain+4)."""
     na = []
     row = {}
     b = lm.shadow_banding(master_eval, cand, ctx, RANGES, lut)
@@ -130,9 +134,11 @@ def evaluate(master_eval, plain_eval, cand, ctx, lut):
             na.append("tex_%s: plain keeps only %.3f of the master texture (< %g)" % (k, t["proj_plain"], TEX_MIN_PROJ))
         if t["na_reason"]:
             na.append("tex_%s: %s" % (k, t["na_reason"]))
-    row["grain_rms_ratio"], row["grain_rms_out"] = grain_stats(master_eval, cand, ctx, lut)
+    row["grain_rms_ratio"], row["grain_ratio_master"], row["grain_rms_out"] = grain_stats(
+        master_eval, plain_eval, cand, ctx, lut)
     bw = em.btb_wtw(master_eval, cand, 10)
-    row["btb_kept"], row["wtw_kept"] = bw["btb_kept"], bw["wtw_kept"]
+    row["btb_kept"] = lm.btb_kept(master_eval, cand)[0]
+    row["wtw_kept"] = bw["wtw_kept"]
     row["na"] = "; ".join(na)
     return row
 
@@ -155,7 +161,7 @@ def run_case(case, run_contexts, log):
         else:
             ref, ctx = master, made["context"] if kind == "hdr_passthrough" else SDR_EVAL
         lut = llr.build_lut(ctx)
-        plain_nd = None
+        plain_by_final = {}
         for stages in STAGE_SETS:
             if 3 in stages and kind != "hdr_to_sdr":
                 continue
@@ -164,9 +170,9 @@ def run_case(case, run_contexts, log):
                 x = tone_map("cr_gs" if 3 in stages else "global", x, peak)
             for final in ("nd", "sd"):
                 out = finalise(x, final)
-                if not stages and final == "nd":
-                    plain_nd = out
-                r = evaluate(ref, plain_nd, out, ctx, lut)
+                if not stages:
+                    plain_by_final[final] = out
+                r = evaluate(ref, plain_by_final[final], out, ctx, lut)
                 r.update({"case": case["id"], "run_context": rc, "config": config_name(stages, final), "final": final})
                 rows.append(r)
         log("  %s %s done" % (case["id"], rc))
@@ -193,7 +199,7 @@ def mean(rows, key):
 def write_md(rows, path, args, n_cases, secs, log_lines):
     cols = [("band_all_mse", "band all"), ("band_lt5_mse", "band <5 nit"), ("band_5to50_mse", "band 5-50 nit"),
             ("band_lt5_p99", "step p99 <5"), ("tex_lt5", "texture kept <5"), ("tex_5to50", "texture kept 5-50"),
-            ("grain_rms_out", "grain rms out"), ("grain_rms_ratio", "grain ratio"), ("btb_kept", "btb"), ("wtw_kept", "wtw")]
+            ("grain_rms_out", "grain rms out"), ("grain_rms_ratio", "grain ratio vs plain"), ("grain_ratio_master", "grain ratio vs master"), ("btb_kept", "btb"), ("wtw_kept", "wtw")]
     md = ["<!-- Copyright(C) 2026 VP-V contributors -->", "<!-- SPDX-License-Identifier: GPL-3.0-only -->", "",
           "# S2 shadow-ramp stack run", "",
           "Generated by `python -I tools/eval/stack_runner.py --suite s2 --size-frac %g --max-cases %s --contexts %s`." %
@@ -206,9 +212,11 @@ def write_md(rows, path, args, n_cases, secs, log_lines):
           "Stand-ins: s1 texture oracle, s2 VP deband model, s3 cr_gs contrast recovery (HDR->SDR only), s4 sigma-delta. "
           "`nd` = 8-bit rounding, no dither (scale reference); `+4` = sigma-delta final (amplitude 0.15). Every row ends "
           "8-bit. band = mean-square coarse error in display PQ codes (lower is better); texture kept = projection "
-          "ratio vs plain/nd (1 = as plain, gate 0.97); grain ratio = cand/master residual rms in display codes "
-          "(blank when the master has no grain); texture kept is blank when plain keeps < 0.1 of the master texture; btb/wtw = share of master below-black/above-white pixels still beyond "
-          "the limit. Values are means over the cases whose metric is defined; blanks = not applicable. "
+          "ratio vs the plain chain with the same final step (nd vs plain nd, +4 vs plain+4; 1 = as plain, gate 0.97); "
+          "grain ratio vs plain = cand/plain(same final) residual rms in display codes, vs master = cand/master (blank "
+          "when the master has no grain); texture kept is blank when plain keeps < 0.25 of the master texture; btb = share "
+          "of master pixels below black by more than half an output code step (2 ten-bit codes) whose output is still "
+          "below black; wtw = share of master above-white pixels still above white. Values are means over the cases whose metric is defined; blanks = not applicable. "
           "Synthetic ramps contain no above-white; sigma-delta amplitude, stand-in strengths and the 2-frame length are "
           "deliberately simple, so read the tables as relative ordering only. The SDR coded input is already on the 8-bit "
           "grid, so plain+4 equals plain there (sigma-delta of an exact 8-bit signal is a no-op); texture-kept ratios "

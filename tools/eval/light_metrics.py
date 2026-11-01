@@ -53,6 +53,17 @@ def region_tiles(master, ctx, lo_nit, hi_nit, lut=None, tile=None):
     return np.stack([(lambda j: (j >= lo) & (j < hi))(llr.j_eff(m, ctx, tile, lut)) for m in _seq(master)])
 
 
+def btb_kept(master, out, black=64.0, half_step=2.0):
+    """BTB preservation for an 8-bit output: a master pixel counts as below-black only if it is below the black code
+    by more than half an OUTPUT code step (half_step, 10-bit units; 2 for an 8-bit output = 2 ten-bit codes), so
+    master values within rounding of black are not expected to survive.  kept = share of those pixels whose output is
+    below the black code at all.  Returns (kept or None when no such pixel, count)."""
+    r, o = np.asarray(master, np.float64), np.asarray(out, np.float64)
+    sel = r < black - half_step
+    n = int(sel.sum())
+    return (float(np.mean(o[sel] < black)) if n else None), n
+
+
 def shadow_banding(master, cand, ctx, ranges=SHADOW_RANGES, lut=None, tile=None):
     lut = lut or llr.build_lut(ctx)
     R, C = display_planes(master, ctx, lut), display_planes(cand, ctx, lut)
