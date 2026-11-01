@@ -23,7 +23,8 @@ namespace Tests
 		struct Rig
 		{
 			Shadow shadow;
-			std::vector<std::string> log;
+			std::vector<std::string> log;      // the human-readable lines
+			std::vector<std::string> events;   // the vp-event/1 (VPEV1) lines, kept apart from the text assertions
 			uint64_t seq = 0;
 			uint64_t gen = 1;
 			uint64_t state = 0x1000;
@@ -34,7 +35,10 @@ namespace Tests
 			Rig()
 			{
 				RefusalNote::Take();   // the note is process-global
-				shadow.SetLogger([this](const std::string& line) { log.push_back(line); });
+				shadow.SetLogger([this](const std::string& line)
+				{
+					(line.compare(0, 5, "VPEV1") == 0 ? events : log).push_back(line);
+				});
 			}
 
 			EnqueueFacts Next()
@@ -171,7 +175,11 @@ namespace Tests
 		TEST_METHOD(AThrowingLoggerDoesNotPropagateAndShowsTheErrorCount)
 		{
 			Rig r;
-			r.shadow.SetLogger([](const std::string&) { throw std::runtime_error("log sink"); });
+			r.shadow.SetLogger([](const std::string& line)
+			{
+				if (line.compare(0, 5, "VPEV1") != 0)   // only the text line throws (VPEV1 lines are ignored here)
+					throw std::runtime_error("log sink");
+			});
 			r.shadow.Configure(Shadow::Mode::Shadow, 8);
 			r.Push(1.0);   // FULL start -> logged -> throws inside the logger
 			Assert::AreEqual(uint32_t(1), r.shadow.Errors());

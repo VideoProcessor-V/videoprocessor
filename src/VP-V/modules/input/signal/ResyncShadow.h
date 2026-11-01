@@ -4,6 +4,7 @@
 
 #include <VP-V/core/Indicator.h>
 #include <VP-V/core/ResyncCause.h>
+#include <VP-V/modules/control/diagnostics/VpEventLine.h>
 #include <VP-V/modules/input/signal/ResyncEvent.h>
 
 #include <atomic>
@@ -14,6 +15,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 // Resync shadow mode (R1). The renderer's enqueue path feeds every frame's facts to the R0 detector;
 // in Shadow mode the verdicts are written to the central Indicator and summarised as one status line
@@ -346,6 +348,32 @@ private:
         }
     }
 
+    // vp-event/1: one VPEV1 line per recorded event through the same logger, rate-limited.
+    void EmitEventLine(const Event& e, double nowSeconds)
+    {
+        try {
+            const char* level = e.level == Level::Full ? "full" : (e.level == Level::Minor ? "minor" : "timing");
+            std::vector<VpEvent::Field> fields;
+            fields.emplace_back("level", level);
+            fields.emplace_back("cause", Token(e.cause));
+            fields.emplace_back("seq", static_cast<uint64_t>(e.fromSeq));
+            if (e.gapFrames != 0)
+                fields.emplace_back("gap", static_cast<uint64_t>(e.gapFrames));
+            if (e.detail != 0)
+                fields.emplace_back("detail", static_cast<uint64_t>(e.detail));
+            fields.emplace_back("mode", Driving() ? "on" : "shadow");
+            uint32_t suppressed = 0;
+            const double tMs = nowSeconds * 1000.0;
+            if (!m_eventLimiter.Allow(VpEvent::Kind::resync, tMs, suppressed))
+                return;
+            if (suppressed != 0)
+                fields.emplace_back("suppressed", static_cast<uint64_t>(suppressed));
+            Log(VpEvent::FormatRange(VpEvent::Kind::resync, tMs, fields.data(), fields.size()));
+        } catch (...) {
+            m_errors.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
     void Record(VpIndicator::Indicator& indicator, const Event& e, double nowSeconds)
     {
         VpIndicator::Counter counter = VpIndicator::kContinuity;
@@ -386,6 +414,7 @@ private:
             return;
         }
         indicator.Advance(counter, e.cause, e.fromSeq, e.gapFrames, e.detail);
+        EmitEventLine(e, nowSeconds);
         if (log) {
             std::string text = std::string(Driving() ? "Resync (on): " : "Resync (shadow): ") + label + " at seq " +
                 std::to_string(e.fromSeq) + " (" + Detail(e.cause, e.detail);
@@ -401,6 +430,7 @@ private:
     std::shared_ptr<VpIndicator::Indicator> m_indicator;                                 // atomic_load / atomic_store only
     std::shared_ptr<const std::function<void(const std::string&)>> m_logger;             // atomic_load / atomic_store only
 
+    VpEvent::Limiter m_eventLimiter;
     ArmBox m_arms;
     Detector m_detector;   // queue mutex
 
