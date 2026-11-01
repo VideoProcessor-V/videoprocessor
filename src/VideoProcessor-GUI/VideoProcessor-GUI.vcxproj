@@ -91,20 +91,6 @@
       <ReferenceOutputAssembly>true</ReferenceOutputAssembly>
       <Private>false</Private>
     </ProjectReference>
-    <!-- Hunt 2 (MEDIUM-2): build order only. Building the GUI also rebuilds both renderer
-         DLLs, so the EXE and the DLLs always carry the same build ID (VpBuildIdentity). -->
-    <ProjectReference Include="..\VideoProcessor-VPRenderer\VideoProcessor-VPRenderer.vcxproj">
-      <Project>{c72197b6-afb1-4bf2-abea-6b63de71389e}</Project>
-      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
-      <LinkLibraryDependencies>false</LinkLibraryDependencies>
-      <Private>false</Private>
-    </ProjectReference>
-    <ProjectReference Include="..\VideoProcessor-VPRenderer\VideoProcessor-VPRendererBeta.vcxproj">
-      <Project>{d4ab7e36-6a11-4dca-8ca0-9c7f55376e10}</Project>
-      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
-      <LinkLibraryDependencies>false</LinkLibraryDependencies>
-      <Private>false</Private>
-    </ProjectReference>
   </ItemGroup>
   <ItemGroup>
     <Image Include="..\..\images\cie1932xy.bmp" />
@@ -260,6 +246,7 @@
       <Command>if not exist "$(OutDir)VideoProcessor.cfg" if exist "$(SolutionDir)VideoProcessor.cfg" copy "$(SolutionDir)VideoProcessor.cfg" "$(OutDir)VideoProcessor.cfg" &amp; if exist "$(SolutionDir)CONFIGURATION.html" copy /Y "$(SolutionDir)CONFIGURATION.html" "$(OutDir)CONFIGURATION.html"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
+  <Import Project="$(MSBuildThisFileDirectory)..\VP-V\build\VideoProcessor-GUI.items.props" Condition="Exists('$(MSBuildThisFileDirectory)..\VP-V\build\VideoProcessor-GUI.items.props')" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

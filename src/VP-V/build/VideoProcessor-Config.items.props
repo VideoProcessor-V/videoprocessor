@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright(C) 2026 VP-V contributors
+  SPDX-License-Identifier: GPL-3.0-only
+  VP-V items for VideoProcessor-Config; maintained by tools/m2/move_project_items.py;
+  Include paths are relative to the importing project's directory (MSBuild resolves item paths
+  against the project).
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="..\VP-V\config\VpvSection.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\projector_control\SerialPort.cpp">
+      <ObjectFileName>$(IntDir)LedSerialPortStandalone.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\drive\projector_control\BarcoAsciiDriver.cpp">
+      <ObjectFileName>$(IntDir)LedBarcoAsciiDriverStandalone.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\drive\projector_control\ProjectorDriver.cpp">
+      <ObjectFileName>$(IntDir)LedProjectorDriverStandalone.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\drive\projector_control\ConnectionTest.cpp">
+      <ObjectFileName>$(IntDir)LedConnectionTestStandalone.obj</ObjectFileName>
+    </ClCompile>
+  </ItemGroup>
+</Project>

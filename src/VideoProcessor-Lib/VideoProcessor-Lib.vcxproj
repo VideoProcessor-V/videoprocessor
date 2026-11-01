@@ -203,72 +203,9 @@
     <ClInclude Include="cie.h" />
     <ClInclude Include="ColorSpace.h" />
     <ClInclude Include="ConfigFile.h" />
-    <ClInclude Include="..\VP-V\modules\drive\led_compensation\LedDriveConfig.h" />
-    <ClInclude Include="AmbientState.h" />
-    <ClInclude Include="..\VP-V\modules\colour\appearance\AmbientConfig.h" />
-    <ClInclude Include="AmbientSensor.h" />
-    <ClInclude Include="..\VP-V\modules\drive\projector_control\SerialPort.h" />
-    <ClInclude Include="..\VP-V\modules\drive\projector_control\ProjectorDriver.h" />
-    <ClInclude Include="..\VP-V\modules\drive\projector_control\LedShutdownRestore.h" />
-    <ClInclude Include="..\VP-V\modules\drive\projector_control\BarcoAsciiDriver.h" />
-    <ClInclude Include="..\VP-V\modules\drive\projector_control\LedClock.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\ColorMath.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\PatternPlan.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\DisplayModel.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\LedCharacterize.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\CalibrationOutputs.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\SimulatedDisplay.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\SimulatedMeter.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\CalibrationConfig.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\MeterCatalog.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\Spotread.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\Terminal.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\ArgyllInstall.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\CalibrationPattern.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\PatternCodes.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\Meter.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\CalibrationRun.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\CalibrationSession.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\CalibrationSimulation.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\CalibrationController.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\CalibrationRunBase.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\LedRun.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\AmbientCheck.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\HdrVerify.h" />
-    <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\TranscriptRecorder.h" />
-    <ClInclude Include="..\VP-V\modules\drive\led_compensation\LedController.h" />
-    <ClInclude Include="..\VP-V\modules\drive\led_measure\LedMeasurement.h" />
-    <ClInclude Include="..\VP-V\modules\drive\led_measure\FrameStats.h" />
-    <ClInclude Include="..\VP-V\modules\drive\led_compensation\LedDriveModule.h" />
-    <ClInclude Include="..\VP-V\modules\drive\led_measure\LedMeasurementHook.h" />
-    <ClInclude Include="..\VP-V\modules\drive\led_measure\LedLookahead.h" />
-    <ClInclude Include="..\VP-V\modules\input\source_analysis\VpFrameAnalysis.h" />
-    <ClInclude Include="..\VP-V\modules\input\source_analysis\VpFrameAnalysisHost.h" />
-    <ClInclude Include="..\VP-V\core\FrameAnalysisStore.h" />
-    <ClInclude Include="..\VP-V\core\ResyncCause.h" />
-    <ClInclude Include="..\VP-V\core\Indicator.h" />
-    <ClInclude Include="..\VP-V\core\Ancestry.h" />
-    <ClInclude Include="..\VP-V\modules\drive\led_compensation\LedRawTransfer.h" />
-    <ClInclude Include="..\VP-V\modules\drive\projector_control\LedDriveArbiter.h" />
-    <ClInclude Include="..\VP-V\modules\drive\led_compensation\LedDriveHoldover.h" />
-    <ClInclude Include="..\VP-V\modules\drive\led_compensation\DynamicDriveHost.h" />
-    <ClInclude Include="..\VP-V\modules\drive\led_compensation\DynamicDriveFrame.h" />
-    <ClInclude Include="filesource\FileHost.h" />
-    <ClInclude Include="filesource\FileHostSettings.h" />
-    <ClInclude Include="SourceRuleVariable.h" />
-    <ClInclude Include="QueuedFrameStatistics.h" />
     <ClInclude Include="ConfigurationDiscovery.h" />
     <ClInclude Include="ConfigSchema.h" />
     <ClInclude Include="DebugLog.h" />
-    <ClInclude Include="..\VP-V\modules\control\diagnostics\CrashState.h" />
-    <ClInclude Include="..\VP-V\modules\control\diagnostics\DiagnosticHistory.h" />
-    <ClInclude Include="..\VP-V\modules\control\diagnostics\DiagnosticsAdapter.h" />
-    <ClInclude Include="..\VP-V\modules\control\diagnostics\DiagnosticsReportRun.h" />
-    <ClInclude Include="..\VP-V\modules\control\diagnostics\RendererDiagnosticCodes.h" />
-    <ClInclude Include="..\VP-V\modules\control\diagnostics\StateReport.h" />
-    <ClInclude Include="..\VP-V\modules\control\diagnostics\StateReportSettings.h" />
-    <ClInclude Include="..\VP-V\modules\control\diagnostics\StoreZipWriter.h" />
-    <ClInclude Include="VpBuildIdentity.h" />
     <ClInclude Include="DebugLogAsync.h" />
     <ClInclude Include="vprenderer\Bt2020SignalWorker.h" />
     <ClInclude Include="DebugLogRetention.h" />
@@ -282,8 +219,6 @@
 	<ClInclude Include="CadenceIntervalEstimate.h" />
 	<ClInclude Include="OsdTimingPolicy.h" />
 	<ClInclude Include="DisplayTopologySession.h" />
-	<ClInclude Include="CaptureDisplayFixes.h" />
-    <ClInclude Include="CaptureStatePolicy.h" />
 	<ClInclude Include="DirectShowFrameDeliverer.h" />
 	<ClInclude Include="DirectShowDeliveryOutcome.h" />
 	<ClInclude Include="DirectShowSegmentTransition.h" />
@@ -307,25 +242,6 @@
 	<ClInclude Include="MadVRShaderTransactionPolicy.h" />
     <ClInclude Include="IRenderer.h" />
     <ClInclude Include="DolbyVisionLuminanceStatus.h" />
-    <ClInclude Include="SceneDescriptor.h" />
-    <ClInclude Include="IntentDescriptor.h" />
-    <ClInclude Include="FileFrameTiming.h" />
-    <ClInclude Include="filesource\RationalRate.h" />
-    <ClInclude Include="filesource\FileClockMapper.h" />
-    <ClInclude Include="filesource\FilePlaybackState.h" />
-    <ClInclude Include="filesource\FileMediaTypeAdapter.h" />
-    <ClInclude Include="filesource\FileSideData.h" />
-    <ClInclude Include="ContentClassifier.h" />
-    <ClInclude Include="ContentIntentObserver.h" />
-    <ClInclude Include="MotionIntent.h" />
-    <ClInclude Include="IntentInterpreterObserver.h" />
-    <ClInclude Include="IntentInterpreterSupport.h" />
-    <ClInclude Include="..\VP-V\modules\input\queue_timing\QueueLookahead.h" />
-    <ClInclude Include="..\VP-V\modules\colour\appearance\AmbientAdaptation.h" />
-    <ClInclude Include="BlackIntent.h" />
-    <ClInclude Include="DisplayIntent.h" />
-    <ClInclude Include="DisplayProfile.h" />
-    <ClInclude Include="MappingPolicy.h" />
     <ClInclude Include="vprenderer\DolbyVisionLuminancePolicy.h" />
     <ClInclude Include="RendererLiveness.h" />
     <ClInclude Include="RendererPostStallResetAdvisor.h" />
@@ -334,7 +250,6 @@
 	<ClInclude Include="EotfTransitionStabilizer.h" />
     <ClInclude Include="RendererResetCoordinator.h" />
     <ClInclude Include="RendererResetPolicy.h" />
-    <ClInclude Include="GuiLifecyclePolicy.h" />
     <ClInclude Include="SubtitleProfileUpdatePolicy.h" />
     <ClInclude Include="RendererResetRequest.h" />
     <ClInclude Include="RendererResetRequestLatch.h" />
@@ -419,23 +334,6 @@
     <ClInclude Include="StateVariables.h" />
     <ClInclude Include="UnifiedProfileRuntime.h" />
 	<ClInclude Include="SceneDetector.h" />
-	<ClInclude Include="..\VP-V\modules\input\signal\HdrInference.h" />
-	<ClInclude Include="..\VP-V\modules\input\source_analysis\SourceResolutionDetector.h" />
-	<ClInclude Include="..\VP-V\modules\motion\estimation\VectorStore.h" />
-	<ClInclude Include="..\VP-V\modules\motion\estimation\MotionValidity.h" />
-	<ClInclude Include="..\VP-V\modules\motion\consumers\InterpolationPolicy.h" />
-	<ClInclude Include="..\VP-V\modules\motion\consumers\FrameInterpolator.h" />
-	<ClInclude Include="..\VP-V\modules\motion\consumers\InterpolationTimeline.h" />
-	<ClInclude Include="..\VP-V\modules\motion\estimation\MotionEngineIdle.h" />
-	<ClInclude Include="vprenderer\CaptureTimestampGap.h" />
-	<ClInclude Include="vprenderer\DisplayRateHold.h" />
-	<ClInclude Include="..\VP-V\modules\input\capture\UploadReuse.h" />
-	<ClInclude Include="..\VP-V\modules\motion\estimation\MotionAhead.h" />
-	<ClInclude Include="GeneralRate.h" />
-	<ClInclude Include="GeneralRateLog.h" />
-	<ClInclude Include="RefreshKey.h" />
-	<ClInclude Include="microsoft_directshow\DirectShowRatePolicy.h" />
-	<ClInclude Include="..\VP-V\modules\scaling\rebase\KernelInverse.h" />
 	<ClInclude Include="vprenderer\AlphaNativeRgbIngress.h" />
     <ClInclude Include="SubtitleRepositionMode.h" />
     <ClInclude Include="StringUtils.h" />
@@ -449,32 +347,12 @@
     <ClInclude Include="video_frame_formatter\CARGBtoP010VideoFrameFormatter.h" />
     <ClInclude Include="video_frame_formatter\CDeckLinkRGBToP010VideoFrameFormatter.h" />
     <ClInclude Include="video_frame_formatter\CR210toRGB48VideoFrameFormatter.h" />
-    <ClInclude Include="..\VP-V\modules\input\signal\DolbyVisionTunnelGate.h" />
-    <ClInclude Include="DolbyVisionTunnelPresentation.h" />
-    <ClInclude Include="..\VP-V\modules\input\signal\HdrInferenceSignalBuilder.h" />
-    <ClInclude Include="..\VP-V\modules\input\signal\DolbyVisionTunnelHandoff.h" />
-    <ClInclude Include="ShortcutDefaults.h" />
-    <ClInclude Include="ShortcutChord.h" />
-    <ClInclude Include="SessionEndShutdown.h" />
-    <ClInclude Include="LldvStaticMetadata.h" />
-    <ClInclude Include="..\VP-V\modules\control\diagnostics\RawCaptureRecorder.h" />
-    <ClInclude Include="..\VP-V\modules\control\diagnostics\RawCaptureCorpus.h" />
-    <ClInclude Include="dv_loopback\DvTunnelPacker.h" />
-    <ClInclude Include="dv_loopback\DvCaptureContainer.h" />
-    <ClInclude Include="dv_loopback\DvLoopbackPattern.h" />
-    <ClInclude Include="dv_loopback\DvMetadataModel.h" />
-    <ClInclude Include="dv_loopback\DvLoopbackAnalyzer.h" />
-    <ClInclude Include="dv_loopback\DvSimulatedLoop.h" />
-    <ClInclude Include="dv_loopback\DvLoopbackHarness.h" />
     <ClInclude Include="magewell\MagewellRgbTunnelRange.h" />
     <ClInclude Include="magewell\MagewellCaptureFormatPolicy.h" />
     <ClInclude Include="DolbyVisionTunnelInput.h" />
     <ClInclude Include="video_frame_formatter\CRGBDolbyVisionTunnelFormatter.h" />
     <ClInclude Include="video_frame_formatter\CR12BtoRGB48VideoFrameFormatter.h" />
     <ClInclude Include="video_frame_formatter\CNoopVideoFrameFormatter.h" />
-    <ClInclude Include="..\VP-V\modules\input\capture\CTwoPlane420VideoFrameFormatter.h" />
-    <ClInclude Include="vprenderer\FileFrameClock.h" />
-    <ClInclude Include="vprenderer\FileFrameSlotGate.h" />
     <ClInclude Include="video_frame_formatter\CUYVYtoP010VideoFrameFormatter.h" />
     <ClInclude Include="video_frame_formatter\CUYVYtoP210VideoFrameFormatter.h" />
     <ClInclude Include="video_frame_formatter\CV210toP010VideoFrameFormatter.h" />
@@ -491,9 +369,6 @@
     <ClCompile Include="ShaderConfigValidation.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\VP-V\modules\control\diagnostics\CrashState.cpp" />
-    <ClCompile Include="..\VP-V\modules\control\diagnostics\StateReport.cpp" />
-    <ClCompile Include="VpBuildIdentity.cpp" />
     <ClCompile Include="WindowsDisplayDiagnostics.cpp" />
     <ClCompile Include="ACaptureDevice.cpp" />
     <ClCompile Include="ActivePictureDecisionTimeline.cpp" />
@@ -540,47 +415,11 @@
 	<ClCompile Include="OutputReadinessController.cpp" />
 	<ClCompile Include="RationalLiveOutputSequencer.cpp" />
     <ClCompile Include="ConfigFile.cpp" />
-    <ClCompile Include="..\VP-V\modules\drive\projector_control\SerialPort.cpp" />
-    <ClCompile Include="AmbientSensor.cpp" />
-    <ClCompile Include="..\VP-V\modules\drive\projector_control\ProjectorDriver.cpp" />
-    <ClCompile Include="..\VP-V\modules\drive\projector_control\BarcoAsciiDriver.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\PatternPlan.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\DisplayModel.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\LedCharacterize.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\CalibrationOutputs.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\SimulatedDisplay.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\SimulatedMeter.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\MeterCatalog.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\Spotread.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\ConPtyTerminal.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\ArgyllInstall.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\PatternCodes.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\Meter.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\CalibrationRun.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\CalibrationSession.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\CalibrationSimulation.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\CalibrationController.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\CalibrationRunBase.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\LedRun.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\AmbientCheck.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\HdrVerify.cpp" />
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\calibration\TranscriptRecorder.cpp" />
-    <ClCompile Include="..\VP-V\modules\drive\led_compensation\LedController.cpp" />
-    <ClCompile Include="..\VP-V\modules\drive\led_measure\LedMeasurement.cpp" />
-    <ClCompile Include="..\VP-V\modules\drive\led_compensation\LedDriveModule.cpp" />
-    <ClCompile Include="..\VP-V\modules\drive\projector_control\ConnectionTest.cpp" />
-    <ClCompile Include="..\VP-V\modules\drive\led_measure\LedLookahead.cpp" />
-    <ClCompile Include="..\VP-V\modules\input\source_analysis\VpFrameAnalysis.cpp" />
-    <ClCompile Include="..\VP-V\modules\drive\projector_control\LedDriveArbiter.cpp" />
-    <ClCompile Include="..\VP-V\modules\drive\led_compensation\LedDriveHoldover.cpp" />
-    <ClCompile Include="..\VP-V\modules\drive\led_compensation\DynamicDriveHost.cpp" />
-    <ClCompile Include="filesource\FileHost.cpp" />
     <ClCompile Include="ConfigurationDiscovery.cpp" />
 	<ClCompile Include="DisplayTopologySession.cpp" />
     <ClCompile Include="EOTF.cpp" />
     <ClCompile Include="guid.cpp" />
     <ClCompile Include="HDRData.cpp" />
-    <ClCompile Include="filesource\FileSideData.cpp" />
     <ClCompile Include="InputLocked.cpp" />
     <ClCompile Include="IRenderer.cpp" />
 	<ClCompile Include="EotfTransitionStabilizer.cpp" />
@@ -647,9 +486,6 @@
     <ClCompile Include="StateVariables.cpp" />
     <ClCompile Include="UnifiedProfileRuntime.cpp" />
 	<ClCompile Include="SceneDetector.cpp" />
-	<ClCompile Include="..\VP-V\modules\input\signal\HdrInference.cpp" />
-	<ClCompile Include="..\VP-V\modules\input\source_analysis\SourceResolutionDetector.cpp" />
-	<ClCompile Include="..\VP-V\modules\scaling\rebase\KernelInverse.cpp" />
     <ClCompile Include="StringUtils.cpp" />
     <ClCompile Include="TimingClock.cpp" />
 	<ClCompile Include="VideoTimingController.cpp" />
@@ -660,12 +496,9 @@
     <ClCompile Include="video_frame_formatter\CARGBtoP010VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CDeckLinkRGBToP010VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CR210toRGB48VideoFrameFormatter.cpp" />
-    <ClCompile Include="dv_loopback\DvLoopbackAnalyzer.cpp" />
-    <ClCompile Include="..\VP-V\modules\control\diagnostics\RawCaptureRecorder.cpp" />
     <ClCompile Include="video_frame_formatter\CRGBDolbyVisionTunnelFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CR12BtoRGB48VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CNoopVideoFrameFormatter.cpp" />
-    <ClCompile Include="..\VP-V\modules\input\capture\CTwoPlane420VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CUYVYtoP010VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CUYVYtoP210VideoFrameFormatter.cpp" />
     <ClCompile Include="video_frame_formatter\CV210toP010VideoFrameFormatter.cpp" />
@@ -715,50 +548,6 @@
     </None>
     <None Include="..\..\shaders\NLSPlus.glsl">
       <Link>shaders\NLSPlus.glsl</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="..\..\shaders\Temporal sigma-delta.glsl">
-      <Link>shaders\Temporal sigma-delta.glsl</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="..\..\shaders\SSimDownscaler.glsl">
-      <Link>shaders\SSimDownscaler.glsl</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="..\..\shaders\CfL_Prediction.glsl">
-      <Link>shaders\CfL_Prediction.glsl</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="..\..\shaders\FSRCNNX_x2_16-0-4-1.glsl">
-      <Link>shaders\FSRCNNX_x2_16-0-4-1.glsl</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="..\..\shaders\ArtCNN_C4F16.glsl">
-      <Link>shaders\ArtCNN_C4F16.glsl</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="..\..\shaders\ArtCNN-LICENSE.txt">
-      <Link>shaders\ArtCNN-LICENSE.txt</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="..\..\shaders\SSimSuperRes.glsl">
-      <Link>shaders\SSimSuperRes.glsl</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="..\..\shaders\LED compensation.glsl">
-      <Link>shaders\LED compensation.glsl</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="..\..\shaders\DV trims.glsl">
-      <Link>shaders\DV trims.glsl</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="..\..\shaders\SDR tone shape.glsl">
-      <Link>shaders\SDR tone shape.glsl</Link>
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="..\..\shaders\CfL_Prediction-LICENSE.txt">
-      <Link>shaders\CfL_Prediction-LICENSE.txt</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
@@ -822,6 +611,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
   </ItemGroup>
+  <Import Project="$(MSBuildThisFileDirectory)..\VP-V\build\VideoProcessor-Lib.items.props" Condition="Exists('$(MSBuildThisFileDirectory)..\VP-V\build\VideoProcessor-Lib.items.props')" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

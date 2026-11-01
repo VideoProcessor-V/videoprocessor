@@ -11,7 +11,6 @@
     <ClCompile Include="CpuFeaturesTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="FileSourceHelpersTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="SubtitleHandoffTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="SubtitleBackingLipTests.cpp">
       <Filter>Source Files</Filter>
@@ -20,54 +19,6 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="WindowResizeLayoutTests.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="DolbyVisionTrimsTests.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="FileSideDataTests.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="SceneDescriptorTests.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="ContentIntentTests.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="AmbientAdaptationTests.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="BlackIntentTests.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="DisplayIntentTests.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="LedIntentLimitsTests.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="MotionIntentTests.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="IntentInterpreterTests.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="H3TimingTests.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="FileSourceRuleVariableTests.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="FileHostTests.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="LedDriveArbiterTests.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="LedDriveHoldoverTests.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="DynamicDriveAdapterTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="DolbyVisionTunnelFormatterTests.cpp">
@@ -80,9 +31,6 @@
       <Filter>Resource Files</Filter>
     </ClCompile>
     <ClCompile Include="ConfigFileTests.cpp">
-      <Filter>Resource Files</Filter>
-    </ClCompile>
-    <ClCompile Include="CustomHookChainTests.cpp">
       <Filter>Resource Files</Filter>
     </ClCompile>
     <ClCompile Include="MadVRShaderRuntimeStateTests.cpp">
@@ -113,23 +61,6 @@
     <ClCompile Include="SubtitleTranslationReversalTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="ExtendedRangeCarryTests.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationCoreTests.cpp"><Filter>VP-V</Filter></ClCompile>
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationRemainderTests.cpp"><Filter>VP-V</Filter></ClCompile>
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationMeterTests.cpp"><Filter>VP-V</Filter></ClCompile>
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationPhase2Tests.cpp"><Filter>VP-V</Filter></ClCompile>
-    <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationLutHostTests.cpp"><Filter>VP-V</Filter></ClCompile>
-    <ClCompile Include="SdrToneShapeWtwTests.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="BugHunt20261017CaptureTests.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="BugHunt2GuiTests.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="BugHunt2CaptureTests.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="Integration20261017Tests.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="Hunt2MotionTests.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="PostMergeAudit20261017Tests.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="CaptureLayerAuditTests.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="DisplayRuleExpressionAuditTests.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="GuiAuditTests.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="MixedScreenSourceResolutionTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="RetainedScopeUnknownPresentationTests.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -157,8 +88,6 @@
     <ClCompile Include="SceneDetectorTests.cpp">
       <Filter>Resource Files</Filter>
     </ClCompile>
-    <ClCompile Include="AnalysisLumaRangeTests.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="HdrInferenceTests.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="NativeRgbAnalysisTests.cpp">
       <Filter>Resource Files</Filter>
     </ClCompile>
@@ -245,104 +174,6 @@
   </ItemGroup>
   <ItemGroup><ClCompile Include="LocalBoundaryRefinementTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="SparseEntryEpisodeRecoveryTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="MotionValidityTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="InterpolationPolicyTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="GrainPreservationTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="DetailPulseTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="CrossfadeMixTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="VpScaleRenderMotionTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
-  <ItemGroup><Filter Include="VP-V"><UniqueIdentifier>{6f1b7a52-4c3e-4f6a-9d1e-5a0c2b7e9d41}</UniqueIdentifier></Filter></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\colour\extended_range\tests\ExtendedRangeHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\SdrToneShapeHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\drive\led_compensation\tests\LedCompensationHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\drive\led_measure\tests\LedMeasureHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\input\capture\tests\CaptureUnpackHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\input\capture\tests\EarlyUploadHandoffTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\input\signal\tests\DvTunnelUnpackHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\input\source_analysis\tests\SourceResolutionHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\consumers\tests\DejudderHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\consumers\tests\InterpolatorHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\consumers\tests\OcclusionMaskHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\EstimatorHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelGeometry.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelTemporal.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelObjects.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelFit.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelSearchHints.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelMeasurement.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\ReferenceMatcher.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\PixelResidualReference.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\global_model\CameraModelGpu.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraModelGpuMirrorTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraGuidanceGpuTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraModelGpuWarpTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraModelGeometryTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraModelTemporalTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraAccessorTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraMeasurementTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraModelStoreTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraModelFitTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\CameraModelCostTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\VectorDemandTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\output\dither\tests\SigmaDeltaHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\repair\deband\tests\VpDebanderHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\repair\temporal_detail\tests\TemporalDetailModelTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\scaling\output\tests\AdaptiveScalingHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\scaling\output\tests\AdaptiveScalingOneAxisMotionTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\scaling\rebase\tests\SourceRebaseHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\scaling\refine\tests\ResidualHoldHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\tests\WholeHookChainHookTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClInclude Include="..\VP-V\tests\VpLutGpuTestSupport.h"><Filter>VP-V</Filter></ClInclude></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\tests\PipelineSkeletonTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\tests\CpuDeterminismTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\tests\SettingsFingerprintStructureTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\tests\SettingsDefaultsGoldenTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClInclude Include="..\VP-V\tests\SettingsTestSupport.h"><Filter>VP-V</Filter></ClInclude></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\segments\OutputSegmentsMerge.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\tests\SegmentRunnerTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\tests\OutputSegmentsGpuTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\core\SegmentRunner.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\segments\OutputSegments.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutStage.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VideoProcessor-Lib\vprenderer\HookSegment.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="HookSegmentTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\nets\NetFusion.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\nets\PlNetRunner.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\nets\tests\PlNetRunnerGpuTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\nets\tests\NetRunnerTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\nets\NetPackage.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\nets\GlslMini.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\nets\CpuNetExecutor.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\tests\StatusTextTests.cpp"><Filter>VP-V</Filter></ClCompile><ClCompile Include="..\VP-V\tests\VpStatusAdapterTests.cpp"><Filter>VP-V</Filter></ClCompile><ClCompile Include="ModuleStatusTextTests.cpp" /></ItemGroup>
-  <ItemGroup><ClCompile Include="TextureRestoreTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvTrimSelectionTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvDolbyStyleTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\DvHostStageTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\input\signal\tests\DvSignalL8HoldTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncEventTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncShadowTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncDriveTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\tests\IndicatorTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\tests\AncestryTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\tests\ProductGraphTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\tests\ProductSlotsTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\tests\CardProfileTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\tests\VramGovernorTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\motion\estimation\tests\VectorDemandProductsTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdConsensusTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\AbrStepDetectorTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceWiringTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="..\VP-V\modules\input\signal\tests\DvTunnelMetadataExtensionTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="DetailRestoreConfigTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="PulldownReliabilityTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="PulldownCorpusTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="Hunt2CadenceClassTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="GeneralRateMatrixTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="BugHunt20261017Tests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="RenderAheadPolicyTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="QueueStressTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
-  <ItemGroup><ClCompile Include="QueueStressLaneTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="ActivePictureMeasurementCacheTests.cpp"><Filter>Source Files</Filter></ClCompile></ItemGroup>
   <ItemGroup>
     <ClCompile Include="OutputOsdTelemetryCacheTests.cpp"><Filter>Source Files</Filter></ClCompile>
