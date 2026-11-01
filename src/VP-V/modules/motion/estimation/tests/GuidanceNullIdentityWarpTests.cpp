@@ -90,9 +90,6 @@ namespace VideoProcessorTest
 				}
 				Assert::AreEqual(size_t(1), done.size());
 				Assert::AreEqual(uint64_t(41), done[0].pairSeq);
-				char dbg[200];
-				snprintf(dbg, sizeof(dbg), "COUNTSDBG got %g %g %g %g\n", done[0].v[0], done[0].v[1], done[0].v[2], done[0].v[3]);
-				Logger::WriteMessage(dbg);
 				for (int i = 0; i < 4; ++i)
 					Assert::IsTrue(done[0].v[i] == want[i]);
 				// Teardown with a copy in flight.

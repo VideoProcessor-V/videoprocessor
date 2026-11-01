@@ -123,15 +123,18 @@ namespace CameraLink
 		GuidanceScheduler(ICameraLink& link, const GuidanceSettings& settings);
 
 		void SetSettings(const GuidanceSettings& s);
-		void SetLag(uint8_t d) { m_lag = d < kMinGuideLagLocal ? kMinGuideLagLocal : d; }
+		void SetLag(uint8_t d) { m_lag = d < kMinGuideLagLocal ? kMinGuideLagLocal : d; RefreshSnapshot(); }
 		uint8_t Lag() const { return m_lag; }
 		// Fills the PairContext of pair N (scene flags from P4, slip from the engine). False: no description possible.
-		void SetContextProvider(std::function<bool(uint64_t pairSeq, PairContext&)> p) { m_context = std::move(p); }
+		// The provider is also called from the camera worker (PublishLane): it must be thread-safe and read P4 of the pair from a
+		// pinned / published slot, never from render-thread-only state.
+		void SetContextProvider(std::function<bool(uint64_t pairSeq, PairContext&)> p) { m_context = std::move(p); RefreshSnapshot(); }
 
 		// Camera worker: right after Fit(N-d) once P4(N) is published. Stores the result unless the render already asked.
 		bool PublishLane(uint64_t pairSeq);
 		// Render thread: the guidance for pair N (the lane result when it was there first, else the live computation).
-		GuideResult Guide(uint64_t pairSeq);
+		// pairSeconds = the measured duration of the pair (advances the governor's cool-down for every pair asked).
+		GuideResult Guide(uint64_t pairSeq, double pairSeconds = 0);
 
 		// The counts of a finished guided pair (from the readback): diagnostics + governor.
 		void OnCounts(uint64_t pairSeq, const float counts[4], double pairSeconds);
@@ -145,9 +148,11 @@ namespace CameraLink
 		std::vector<std::string> StatusLines() const;
 
 	private:
-		struct Stored { uint64_t seq = ~uint64_t(0); GuideResult result; };
+		struct Stored { uint64_t seq = ~uint64_t(0); uint32_t key = 0; GuideResult result; };
 		static constexpr uint8_t kMinGuideLagLocal = 2;
 		GuideResult Compute(uint64_t pairSeq);
+		void RefreshSnapshot();   // render thread: publishes the governed switches / lag / config / provider for PublishLane
+		uint32_t KeyOf(const CameraModel::MeasurementSwitches& sw, uint8_t lag) const { return SwitchMask(sw) | (uint32_t(lag) << 16); }
 
 		ICameraLink& m_link;
 		GuidanceSettings m_settings;
@@ -157,7 +162,11 @@ namespace CameraLink
 		uint8_t m_lag = kMinGuideLagLocal;
 		MotionBenchWriter* m_bench = nullptr;
 		std::function<bool(uint64_t, PairContext&)> m_context;
-		std::atomic<bool> m_trippedFlag{ false };   // the lane thread reads it
+		// What the camera worker reads (under m_mutex): the same governed switches the render thread uses.
+		CameraModel::MeasurementSwitches m_snapSwitches;
+		CameraModel::MeasurementConfig m_snapConfig;
+		uint8_t m_snapLag = kMinGuideLagLocal;
+		std::function<bool(uint64_t, PairContext&)> m_snapContext;
 		mutable std::mutex m_mutex;           // the lane store only
 		std::vector<Stored> m_lane;           // ring by seq
 		std::vector<Stored> m_pending;        // render-side: the plan awaiting its counts

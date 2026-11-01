@@ -27,6 +27,7 @@ namespace CameraLink
 	constexpr const char* kIdNoModelReadback = "camera.no_model.readback";
 	constexpr const char* kIdNoModelSlip = "camera.no_model.slip";
 	constexpr const char* kIdNoModelDepth0 = "camera.no_model.depth0";
+	constexpr const char* kIdNoModelQueue = "camera.no_model.queue";
 
 	constexpr double kAmbiguousEngageSeconds = 0.5;
 
@@ -86,6 +87,7 @@ namespace CameraLink
 		bool timingUnknownNow = false;
 		bool readbackFailedNow = false;
 		bool slipNow = false;
+		bool queueFullNow = false;      // the bounded job queue dropped a pair
 		bool ambiguousNow = false;
 		double ambiguousShare = 0;      // share of recent records Ambiguous (for the line)
 	};
@@ -102,6 +104,7 @@ namespace CameraLink
 		add(kIdNoModelTiming, f.timingUnknownNow, "camera: no model (timing unknown): the pair duration could not be derived");
 		add(kIdNoModelReadback, f.readbackFailedNow, "camera: no model (readback): the field copy was not ready");
 		add(kIdNoModelSlip, f.slipNow, "camera: no model (slip): the pair spans a drop, repeat or resync");
+		add(kIdNoModelQueue, f.queueFullNow, "camera: no model (queue): the fit queue was full and a pair was dropped; the next fit restarts its history");
 		add(kIdNoModelDepth0, f.laneDepthZero, "camera: no model (no look-ahead depth): the fit cannot run ahead");
 		return d;
 	}

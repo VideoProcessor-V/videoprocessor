@@ -12,8 +12,7 @@ namespace CameraLink
 {
 	namespace
 	{
-		constexpr int64_t kMinGuardUs = 200;
-		constexpr size_t kCostWindow = 64;
+		constexpr double kHoldSeconds = 0.5;   // same measured interval as the ambiguity engage time
 		constexpr uint64_t kMaxFieldsPerPump = 16;
 
 		std::string TracePath()
@@ -148,25 +147,6 @@ namespace CameraLink
 		m_gpu = nullptr;
 	}
 
-	int64_t CameraLinkCore::DeadlineFor(uint64_t seq) const
-	{
-		if (m_settings.deterministic || m_lastSealUs == 0 || m_period <= 0)
-			return 0;
-		int64_t guard = kMinGuardUs;
-		{
-			std::lock_guard<std::mutex> lock(m_statusMutex);
-			if (!m_costs.empty())
-			{
-				std::vector<uint32_t> c = m_costs;
-				std::sort(c.begin(), c.end());
-				const size_t idx = (std::min)(c.size() - 1, static_cast<size_t>(c.size() * 95 / 100));
-				guard = (std::max<int64_t>)(guard, static_cast<int64_t>(c[idx]));
-			}
-		}
-		const double delta = (static_cast<double>(seq) - static_cast<double>(m_lastSealSeq)) * m_period * 1e6;
-		return m_lastSealUs + static_cast<int64_t>(delta) - guard;
-	}
-
 	void CameraLinkCore::SubmitReady(const std::vector<std::shared_ptr<FieldCopy>>& ready, const FramePhaseFacts& f)
 	{
 		(void)f;
@@ -199,7 +179,9 @@ namespace CameraLink
 		job.haveTimestamps = d.haveTimestamps;
 		job.tsFrom = d.tsFrom;
 		job.tsTo = d.tsTo;
-		job.facts.deadlineMicros = DeadlineFor(field->seq);
+		// Decision (overrides doc 56 1.4 deadline row): the Fitter gets NO deadline. Every pair is fully fitted, so the history is
+		// deterministic; lateness is judged only at the publish / seal.
+		job.facts.deadlineMicros = 0;
 		return m_worker->Submit(job);
 	}
 
@@ -221,19 +203,28 @@ namespace CameraLink
 		(accepted ? m_counters.sealedOk : m_counters.sealedLate).fetch_add(1, std::memory_order_relaxed);
 		if (m_settings.laneDepthZero)
 			m_counters.depth0.fetch_add(1, std::memory_order_relaxed);
-		if (f.sealUs != 0)
-		{
-			m_lastSealUs = f.sealUs;
-			m_lastSealSeq = f.seq;
-		}
-		if (f.displayPeriodSeconds > 0)
-			m_period = f.displayPeriodSeconds;
-		{
-			std::lock_guard<std::mutex> lock(m_statusMutex);
-			m_facts.lateNow = !accepted;
-		}
+		// P7 lateness = the seal had no published P7 for this frame (independent of the store acceptance).
+		if (!f.p7SealedPublished)
+			m_events.fetch_or(1u << kEvLate, std::memory_order_relaxed);
+		// Measured time since the previous frame start (the output period when the host supplies it).
+		const auto now = std::chrono::steady_clock::now();
+		double dt = f.displayPeriodSeconds;
+		if (!(dt > 0) && m_haveFrameAt)
+			dt = std::chrono::duration<double>(now - m_lastFrameAt).count();
+		m_lastFrameAt = now;
+		m_haveFrameAt = true;
 		// (2) poll the ring, (3) request the copy of each new verified field
 		OnPostSubmitGap();
+		if (m_engine)
+		{
+			// A new field era (a seek / resync restarted the numbering of the engine): the last-requested bookkeeping is void.
+			const uint64_t era = m_engine->FieldEra();
+			if (era != m_lastEra)
+			{
+				m_lastEra = era;
+				m_lastRequestedField = 0;
+			}
+		}
 		if (m_ring && m_engine)
 		{
 			const uint64_t latest = m_engine->LatestVerifiedFieldSeq();
@@ -248,6 +239,7 @@ namespace CameraLink
 				if (!m_ring->Request(vf))
 				{
 					m_counters.readbackDropped.fetch_add(1, std::memory_order_relaxed);
+						m_events.fetch_or(1u << kEvReadback, std::memory_order_relaxed);
 					if (m_producer)
 						m_producer->NoteReset();   // a hole in the pair chain
 				}
@@ -257,6 +249,30 @@ namespace CameraLink
 		}
 		if (m_settings.deterministic && m_worker)
 			m_worker->ProcessQueued();
+		// Queue-full drops since the last frame.
+		const uint64_t qf = m_counters.queueFull.load(std::memory_order_relaxed);
+		if (qf != m_seenQueueFull)
+		{
+			m_seenQueueFull = qf;
+			m_events.fetch_or(1u << kEvQueue, std::memory_order_relaxed);
+		}
+		// Holds: an event engages for kHoldSeconds of measured time; no event lets the time run down.
+		const uint32_t ev = m_events.exchange(0, std::memory_order_relaxed);
+		std::lock_guard<std::mutex> lock(m_statusMutex);
+		for (int i = 0; i < kEvCount; ++i)
+		{
+			Hold& h = m_hold[i];
+			if ((ev >> i) & 1u)
+				h.remaining = kHoldSeconds;
+			else
+				h.remaining -= dt > 0 ? dt : 0;
+			h.engaged = h.remaining > 0;
+		}
+		m_facts.lateNow = m_hold[kEvLate].engaged;
+		m_facts.readbackFailedNow = m_hold[kEvReadback].engaged;
+		m_facts.timingUnknownNow = m_hold[kEvTiming].engaged;
+		m_facts.slipNow = m_hold[kEvSlip].engaged;
+		m_facts.queueFullNow = m_hold[kEvQueue].engaged;
 	}
 
 	void CameraLinkCore::OnPostSubmitGap()
@@ -267,10 +283,6 @@ namespace CameraLink
 		m_ring->Poll(ready);
 		FramePhaseFacts none;
 		SubmitReady(ready, none);
-		const uint64_t dropped = m_counters.readbackDropped.load(std::memory_order_relaxed);
-		std::lock_guard<std::mutex> lock(m_statusMutex);
-		m_facts.readbackFailedNow = dropped != m_seenReadbackDropped;
-		m_seenReadbackDropped = dropped;
 	}
 
 	size_t CameraLinkCore::ProcessPending()
@@ -289,19 +301,11 @@ namespace CameraLink
 				m_ambiguousRecords += rec->reason == CameraModel::Reason::Ambiguous ? 1u : 0u;
 				m_facts.ambiguousNow = m_ambiguous.Observe(rec->reason, rec->pairSeconds);
 				m_facts.ambiguousShare = m_records ? double(m_ambiguousRecords) / double(m_records) : 0.0;
-				if (rec->costMicros > 0)
-				{
-					if (m_costs.size() < kCostWindow)
-						m_costs.push_back(static_cast<uint32_t>(rec->costMicros));
-					else
-					{
-						m_costs[m_costNext] = static_cast<uint32_t>(rec->costMicros);
-						m_costNext = (m_costNext + 1) % kCostWindow;
-					}
-				}
 			}
-			m_facts.timingUnknownNow = r.timingUnknown;
-			m_facts.slipNow = r.status == AssembleStatus::NotFittedSlip || r.status == AssembleStatus::NotFittedAncient;
+			if (r.timingUnknown)
+				m_events.fetch_or(1u << kEvTiming, std::memory_order_relaxed);
+			if (r.status == AssembleStatus::NotFittedSlip || r.status == AssembleStatus::NotFittedAncient)
+				m_events.fetch_or(1u << kEvSlip, std::memory_order_relaxed);
 		}
 		std::lock_guard<std::mutex> lock(m_traceMutex);
 		if (m_trace.is_open() && rec)

@@ -90,18 +90,6 @@ namespace VideoProcessorTest
 			CameraModel::PackLabelInputs(in, *rec.blocks, field, aux);
 			CameraModel::LabelGridMirror(k, field.data(), aux.data(), cfg.overlayZeroClusterMin, mirror);
 			const std::vector<uint8_t> band = NearThresholdBand(k, *s.field, mirror);
-			{
-				char dbg[400];
-				size_t first = 0;
-				for (; first < static_cast<size_t>(k.gridW) * k.gridH; ++first)
-					if (CameraModel::CodeLabel(got[first * 4 + 3]) != CameraModel::CodeLabel(mirror[first * 4 + 3]))
-						break;
-				snprintf(dbg, sizeof(dbg), "LABELDBG first mismatch %zu got (%g %g %g %g) mirror (%g %g %g %g) pic %d %d %d %d k.c %g %g bs %g\n", first,
-					got[first * 4], got[first * 4 + 1], got[first * 4 + 2], got[first * 4 + 3], mirror[first * 4], mirror[first * 4 + 1],
-					mirror[first * 4 + 2], mirror[first * 4 + 3], rec.picture.left, rec.picture.top, rec.picture.right, rec.picture.bottom,
-					k.cx, k.cy, k.blockSize);
-				Logger::WriteMessage(dbg);
-			}
 			size_t outside = 0;
 			for (size_t i = 0; i < static_cast<size_t>(k.gridW) * k.gridH; ++i)
 				if (CameraModel::CodeLabel(got[i * 4 + 3]) != CameraModel::CodeLabel(mirror[i * 4 + 3]) && !band[i])

@@ -7,8 +7,9 @@
 //   * Update() runs at most ONCE per SOURCE frame: a cadence repeat re-presents the same source frame and must not advance
 //     the rate limit;
 //   * the AccessorConstants (MakeAccessorConstants), the P8 texture as the sampler "camera_model", the six uniforms named
-//     exactly as CameraAccessorGlsl.h declares them, and a per-consumer #define that exists ONLY when the consumer is on, so
-//     with the camera off the shader text and its cache key are unchanged;
+//     exactly as CameraAccessorGlsl.h declares them, and a per-consumer #define that exists ONLY when the consumer is ENABLED
+//     (policy), never depending on whether P8 is present this frame: with the camera off the shader text and its cache key are
+//     unchanged, with it on they are constant. While P8 is absent a 1x1 dummy texture is bound with camera_enabled = 0;
 //   * the DomainMap is the identity on the SOURCE plane (output mapping is K7's job).
 // P8 absent (the labels view is not available) -> enabled = 0: today's values, with the reason counted for the status.
 // Pure apart from the pl_tex handle it passes through. Render thread.
@@ -80,6 +81,8 @@ namespace CameraLink
 	public:
 		CameraConsumerBinding(CameraConsumer consumer, bool enabled);
 
+		// A 1x1 texture bound while P8 is absent, so the shader text, its cache key and the descriptor set never change per frame.
+		void SetDummyTexture(pl_tex t) { m_dummy = t; }
 		void SetEnabled(bool on) { m_policy.enabled = on; }
 		bool Enabled() const { return m_policy.enabled; }
 		const CameraModel::Policy& GetPolicy() const { return m_policy; }
@@ -101,6 +104,7 @@ namespace CameraLink
 		CameraConsumer m_consumer;
 		CameraModel::Policy m_policy;
 		CameraModel::BlendState m_state;
+		pl_tex m_dummy = nullptr;
 		CameraBinding m_binding;
 		BindingStats m_stats;
 		std::string m_defineName;

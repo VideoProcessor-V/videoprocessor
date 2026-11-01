@@ -75,9 +75,13 @@ namespace CameraLink
 		if (!m_native->Create(m_log, m_gpu, static_cast<int>(m_entries.size()), e.gridW, e.gridH, planes))
 		{
 			m_native.reset();
-			m_nativeUnavailable = true;   // not D3D11 (or no storable format): the pl_buf path
+			if (!m_nativeEverOk)
+				m_nativeUnavailable = true;   // the very first Create failed: not D3D11 (or no storable format): the pl_buf path for good
+			else
+				m_lastError = "native readback re-create failed after a geometry change; retried on the next request";
 			return false;
 		}
+		m_nativeEverOk = true;
 		return true;
 	}
 
@@ -95,8 +99,10 @@ namespace CameraLink
 			e.state = State::InFlight;
 			return true;
 		}
-		if (m_native && !m_nativeUnavailable)
+		if (m_nativeEverOk)
 		{
+			// D3D11 (native worked before): never fall to the pl_buf path (no buffer transfers there). The request fails, is
+			// counted in Stats().failed and the next request retries.
 			m_lastError = "geometry changed while native copies are in flight";
 			return false;
 		}
@@ -159,7 +165,7 @@ namespace CameraLink
 		return true;
 	}
 
-	bool FieldReadbackRing::Request(const VpMotion::VerifiedField& f, bool startNow)
+	bool FieldReadbackRing::Request(const VpMotion::VerifiedField& f)
 	{
 		++m_stats.requested;
 		if (!m_gpu || !f.fwd || f.gridW <= 0 || f.gridH <= 0)
@@ -190,11 +196,6 @@ namespace CameraLink
 		e.stamp = f.stamp;
 		e.mapped = false;
 		e.ticket = ++m_ticket;
-		if (!startNow)
-		{
-			e.state = State::Pending;
-			return true;
-		}
 		if (!Start(e))
 		{
 			Release(e);
@@ -276,47 +277,5 @@ namespace CameraLink
 			}
 			Release(e);
 		}
-	}
-
-	bool FieldReadbackRing::CopyToStaging(VpSkeleton::ProductId, uint64_t seq, int stagingIndex)
-	{
-		if (stagingIndex < 0 || static_cast<size_t>(stagingIndex) >= m_entries.size())
-			return false;
-		Entry& e = m_entries[static_cast<size_t>(stagingIndex)];
-		if (e.state != State::Pending || e.seq != seq)
-			return false;
-		if (!Start(e))
-		{
-			Release(e);
-			++m_stats.failed;
-			return false;
-		}
-		return true;
-	}
-
-	bool FieldReadbackRing::QueryDone(int stagingIndex)
-	{
-		if (stagingIndex < 0 || static_cast<size_t>(stagingIndex) >= m_entries.size())
-			return false;
-		const Entry& e = m_entries[static_cast<size_t>(stagingIndex)];
-		return e.state == State::InFlight && e.buf && !pl_buf_poll(m_gpu, e.buf, 0);
-	}
-
-	const void* FieldReadbackRing::MapNoWait(int stagingIndex, size_t* bytes)
-	{
-		if (!QueryDone(stagingIndex))
-			return nullptr;
-		Entry& e = m_entries[static_cast<size_t>(stagingIndex)];
-		e.mapped = true;
-		if (bytes)
-			*bytes = PlaneBytes(e.gridW, e.gridH) * (e.haveBwd ? 2 : 1);
-		return e.buf->data;
-	}
-
-	void FieldReadbackRing::Unmap(int stagingIndex)
-	{
-		if (stagingIndex < 0 || static_cast<size_t>(stagingIndex) >= m_entries.size())
-			return;
-		m_entries[static_cast<size_t>(stagingIndex)].mapped = false;
 	}
 }

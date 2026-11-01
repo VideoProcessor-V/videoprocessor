@@ -20,6 +20,11 @@ namespace VpMotion
 {
 	constexpr const char* kVectorEngineQueryId = "vpv.vector_engine.v1";
 
+	// Required texture capabilities: fwd, bwd and the counts texture must be SAMPLEABLE rgba32f (the camera readback copy pass
+	// reads them with texelFetch); they need not be host readable. Threading: BeforeEstimate / AfterEstimate run on the thread that
+	// calls Estimate: the render thread for ahead == false; for ahead == true the thread of the engine lane, NOT the render thread,
+	// so the hook may only touch thread-safe state there. GuidanceScheduler::Guide is render-thread only: the engine must call
+	// the hook for ahead == false only (PublishLane covers the ahead path from the camera worker).
 	// A verified analysis field (P3) of one source pair. Textures are owned by the engine: valid only while the
 	// field's seq is within the engine's ring (the consumer copies, never keeps the pl_tex).
 	struct VerifiedField
@@ -57,6 +62,9 @@ namespace VpMotion
 		virtual ~IVectorEngine() {}
 		// The newest verified field's seq (0 = none). Monotonic within a stamp era: the "new field" signal.
 		virtual uint64_t LatestVerifiedFieldSeq() const = 0;
+		// Changes whenever the numbering of the engine fields restarts (seek, resync, graph rebuild, stamp era change). The camera
+		// link forgets which fields it already requested when it changes.
+		virtual uint64_t FieldEra() const = 0;
 		virtual bool FieldOf(uint64_t seq, VerifiedField& out) const = 0;
 		virtual float FieldScale() const = 0;
 		virtual bool GlobalFromEngine() const = 0;

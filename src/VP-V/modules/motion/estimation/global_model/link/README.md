@@ -12,7 +12,7 @@ no Bill file is touched, and with no consumer of P7 there is no thread, product,
 | Interface | `CameraLink.h` (`ICameraLink`, query `vpv.camera.v1`), `../../VectorEngineInterface.h` (`IVectorEngine`, `IPreEstimateHook`, query `vpv.vector_engine.v1`) | the typed surfaces; P5a implements the second |
 | K1-1/2 | `PairTiming.h`, `PairAssembly.h`, `FieldCopy.h` | pair seconds (film lock / measured / nominal / unknown = 0), `PairInput` assembly, stamp -> generation (full, continuity, settings[motion] only; re-base is always 0) |
 | K1-3 | `CameraRecordPool.h`, `CameraUsable.h` | pool parallel to the P7 SlotSet, 330 B `CameraRecordPod` (declared 1 KB), the one usable set (D-K4) |
-| K1-4 | `FieldReadbackRing.*` | P3 field to CPU: `pl_tex_download` into host-mapped `pl_buf`, `pl_buf_poll(...,0)`, never blocks |
+| K1-4 | `FieldReadbackRing.*`, `NativeCopyReadback.*`, `GuidanceCountsRing.*` | P3 field / 16 B counts to CPU without waiting: on D3D11 (no buffer transfers there) the shared `LedDrive::NativeTexReadback` with a copy pass; elsewhere `pl_buf` + `pl_buf_poll(...,0)`. Not an `IReadbackDevice` until K1-9 |
 | K1-5 | `CameraFitProducer.*`, `CameraFitWorker.*` | `ILaneProducer` for P7; the one worker thread; never `BindFitter` (F2): the reader only bumps atomics |
 | K1-6 | `CameraLinkCore.*`, `CameraFitStatus.h` | phases as plain methods, status, `camera.no_model.*` ids, `VP_CAMERA_FIT_TRACE` |
 | K2 | `CameraLabelPack.h`, `CameraLabelProducer.*`, `CameraLabelFill.*`, `CameraConsumerBinding.*` | P8 upload / compute (one unit), lane / live fill, per-consumer binding |
@@ -37,6 +37,21 @@ no Bill file is touched, and with no consumer of P7 there is no thread, product,
 * **Fitter history** (previous record, temporal filter, object tracker): inside `Fitter`, history 1 as P7 declares; it is the
   fit's own state, not a picture buffer.
 * No private full-resolution texture exists anywhere here: P8 slots are per-block (0.5 MB at 4K), the counts texture is 1x1.
+
+## Decisions recorded by the audit round (2026-11-01)
+
+* **No deadline in the Fitter** (overrides doc 56 section 1.4 deadline row): `PairInput::deadlineMicros` is always 0. Every pair is
+  fully fitted, so the fit history is deterministic; lateness is judged only at the publish / seal (late = fitted, not published).
+  The seal-time estimate (`FramePhaseFacts::sealUs`) and the p95 guard were removed with it.
+* **Reset / relatch generations are stamped into the job at submit** (`CameraFitWorker::Submit`); the fitting thread applies a reset
+  before THAT job's Fit, whatever the queue backlog.
+* **A pool entry is served only after the slot publish succeeded** (`committed`); only the seal observer may read an uncommitted one.
+* **Guidance cool-down runs on measured pair time for every pair asked** (`GuidanceScheduler::Guide`), so narrow / E1-only configurations
+  recover; lane and live both use the governed switches (snapshot under the mutex) and a lane result built under other switches or
+  another lag is dropped. A NoRecord verdict is never stored by the lane.
+* **Status holds**: each `camera.no_model.*` event engages its id for 0.5 s of measured time (frame period), then releases;
+  `camera.no_model.queue` reports queue-full drops.
+* **Binding**: the per-consumer define and the sampler follow the policy, never P8 presence; a 1x1 dummy is bound with `camera_enabled = 0`.
 
 ## Rules this code follows
 
@@ -65,7 +80,7 @@ no Bill file is touched, and with no consumer of P7 there is no thread, product,
 | Indicator setup | `RegisterReader(indicator)` |
 | P5a engine | `SetEngine(IVectorEngine*)`, `engine->SetPreEstimateHook(&CameraGuidanceHook)` |
 
-Also pending: `items.props` (H7) listing `GlobalModel*.cpp` and `link/*.cpp`; K1-9 (LaneRunner registration of
+Also pending: `FieldReadbackRing` becomes an `IReadbackDevice` again at K1-9 (the half-wired methods were removed); `items.props` (H7) listing `GlobalModel*.cpp` and `link/*.cpp`; K1-9 (LaneRunner registration of
 `CameraFitProducer` at SK-W); a text-guard / pixel-residual producer ("text guard: none" is shown until then).
 
 ## Tests

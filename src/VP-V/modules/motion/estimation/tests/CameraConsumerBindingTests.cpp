@@ -127,13 +127,39 @@ namespace VideoProcessorTest
 		{
 			CameraLink::CameraConsumerBinding b(CameraLink::CameraConsumer::Debander, true);
 			auto rec = Rec(0.95);
+			pl_tex dummy = reinterpret_cast<pl_tex>(static_cast<uintptr_t>(0x3000));
+			b.SetDummyTexture(dummy);
 			Assert::IsTrue(b.Update(1, rec.get(), Labels(false)) == CameraLink::BindOutcome::NoLabels);
 			Assert::AreEqual(0, b.Current().constants.enabled);
-			Assert::IsFalse(b.Current().defineActive);
+			Assert::IsTrue(b.Current().defineActive, L"the define does NOT flip with P8 presence");
+			Assert::IsTrue(b.Current().tex == dummy, L"a 1x1 dummy keeps the descriptor set constant");
 			Assert::IsTrue(b.Update(2, nullptr, Labels()) == CameraLink::BindOutcome::NoRecord);
 			Assert::AreEqual(0, b.Current().constants.enabled);
+			Assert::IsTrue(b.Current().defineActive && b.Current().tex == dummy);
 			Assert::AreEqual(uint64_t(1), b.Stats().noLabels);
 			Assert::AreEqual(uint64_t(1), b.Stats().noRecord);
+		}
+		TEST_METHOD(TheShaderTextKeyIsConstantAcrossPresentAndAbsentFramesAndOnlyEnabledChangesIt)
+		{
+			pl_tex dummy = reinterpret_cast<pl_tex>(static_cast<uintptr_t>(0x3000));
+			CameraLink::CameraConsumerBinding on(CameraLink::CameraConsumer::GrainMap, true);
+			on.SetDummyTexture(dummy);
+			on.MutablePolicy().rateLimit = 1.0;
+			auto rec = Rec(0.95);
+			std::string define;
+			for (uint64_t f = 1; f <= 6; ++f)
+			{
+				on.Update(f, rec.get(), Labels(f % 2 == 0));   // P8 present on even frames only
+				Assert::IsTrue(on.Current().defineActive);
+				if (define.empty())
+					define = on.Current().defineName;
+				Assert::AreEqual(define, on.Current().defineName);
+				Assert::IsTrue(on.Current().tex != nullptr);
+				Assert::AreEqual(f % 2 == 0 ? 1 : 0, on.Current().constants.enabled);
+			}
+			CameraLink::CameraConsumerBinding off(CameraLink::CameraConsumer::GrainMap, false);
+			off.Update(1, rec.get(), Labels());
+			Assert::IsFalse(off.Current().defineActive, L"disabled consumer: no define, shader text unchanged");
 		}
 	};
 }

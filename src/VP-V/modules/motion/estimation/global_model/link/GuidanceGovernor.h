@@ -68,6 +68,20 @@ namespace CameraLink
 			return tripped;
 		}
 
+		// Advances the cool-down by one pair of MEASURED time without judging the pair (the scheduler calls it for every pair it is
+		// asked about while tripped: a narrow / E1-only configuration has no guided pair to judge, yet must still recover).
+		void Elapse(double pairSeconds)
+		{
+			if (m_cooldown <= 0)
+				return;
+			m_cooldown -= pairSeconds > 0 ? pairSeconds : 0;
+			if (m_cooldown <= 0)
+			{
+				m_cooldown = 0;
+				++m_recoveries;
+			}
+		}
+
 		bool Tripped() const { return m_cooldown > 0; }
 		double CooldownRemaining() const { return m_cooldown; }
 		uint32_t Trips() const { return m_trips; }

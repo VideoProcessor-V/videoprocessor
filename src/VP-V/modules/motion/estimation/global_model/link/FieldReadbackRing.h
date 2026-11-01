@@ -10,7 +10,6 @@
 #include "FieldCopy.h"
 #include "NativeCopyReadback.h"
 
-#include <VP-V/core/LaneInterfaces.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 
 #include <libplacebo/gpu.h>
@@ -22,7 +21,7 @@
 
 namespace CameraLink
 {
-	class FieldReadbackRing : public VpSkeleton::IReadbackDevice
+	class FieldReadbackRing
 	{
 	public:
 		struct Stats
@@ -35,13 +34,13 @@ namespace CameraLink
 		FieldReadbackRing(pl_gpu gpu, int entries, pl_log log = nullptr);
 		// Tolerates copies in flight: pl_gpu_finish (the only blocking wait, destructor only) then pl_buf_destroy, because
 		// destroying a buffer the GPU still writes would be a use-after-free.
-		~FieldReadbackRing() override;
+		~FieldReadbackRing();
 		FieldReadbackRing(const FieldReadbackRing&) = delete;
 		FieldReadbackRing& operator=(const FieldReadbackRing&) = delete;
 
-		// Render thread. Starts the copy at once (startNow) or leaves the entry pending until CopyToStaging(seq). False
+		// Render thread. Starts the copy. False
 		// when the ring is full (newest request dropped, counted), the field is unusable, or the download failed.
-		bool Request(const VpMotion::VerifiedField& f, bool startNow = true);
+		bool Request(const VpMotion::VerifiedField& f);
 
 		// Appends every finished entry, in request order, as a new FieldCopy (source px) and frees it. Never blocks.
 		size_t Poll(std::vector<std::shared_ptr<FieldCopy>>& ready);
@@ -53,13 +52,6 @@ namespace CameraLink
 		struct Stats Stats() const { return m_stats; }
 		const char* LastError() const { return m_lastError; }
 		int Entries() const { return static_cast<int>(m_entries.size()); }
-
-		// IReadbackDevice. The staging index is the ring entry index. CopyToStaging starts the copy of the pending
-		// request whose seq matches (`product` is unused: the ring carries the one field product).
-		bool CopyToStaging(VpSkeleton::ProductId product, uint64_t seq, int stagingIndex) override;
-		bool QueryDone(int stagingIndex) override;
-		const void* MapNoWait(int stagingIndex, size_t* bytes) override;
-		void Unmap(int stagingIndex) override;
 
 	private:
 		enum class State { Free, Pending, InFlight };
@@ -88,7 +80,8 @@ namespace CameraLink
 		pl_gpu m_gpu;
 		pl_log m_log;
 		std::unique_ptr<NativeCopyReadback> m_native;
-		bool m_nativeUnavailable = false;   // Create failed once: the pl_buf path for good
+		bool m_nativeEverOk = false;        // the first Create worked (D3D11): later failures retry, they do not demote
+		bool m_nativeUnavailable = false;   // the very FIRST Create failed (not D3D11): the pl_buf path for good
 		std::vector<Entry> m_entries;
 		std::vector<pl_buf> m_parked;
 		uint64_t m_ticket = 0;

@@ -26,6 +26,8 @@
 #include <VP-V/modules/motion/estimation/global_model/CameraReaders.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraStoreAdapter.h>
 
+#include <atomic>
+#include <chrono>
 #include <fstream>
 #include <functional>
 #include <memory>
@@ -39,7 +41,6 @@ namespace CameraLink
 	struct FramePhaseFacts
 	{
 		uint64_t seq = 0;                 // the frame starting to render
-		int64_t sealUs = 0;               // its seal time in the Fitter clock (steady microseconds); 0 = unknown
 		double displayPeriodSeconds = 0;  // the measured OUTPUT period (ResolveRate(DisplayRefresh)); 0 = unknown
 		bool p7SealedPublished = false;   // the seal accepted a lane-published P7 for `seq`
 	};
@@ -99,6 +100,8 @@ namespace CameraLink
 
 		// ---- introspection ----
 		bool Active() const { return m_active; }
+		uint64_t LastRequestedField() const { return m_lastRequestedField; }
+		void DebugSetLastRequestedField(uint64_t v) { m_lastRequestedField = v; }   // tests only
 		bool HasThread() const { return m_worker && m_worker->Running(); }
 		bool Allocated() const { return m_producer != nullptr; }
 		const FitCounters& Counters() const { return m_counters; }
@@ -121,7 +124,6 @@ namespace CameraLink
 	private:
 		void Teardown();
 		void SubmitReady(const std::vector<std::shared_ptr<FieldCopy>>& ready, const FramePhaseFacts& f);
-		int64_t DeadlineFor(uint64_t seq) const;
 		void OnResult(const CameraFitJob& job, const CameraFitResult& r, PublishOutcome o);
 
 		FrameAnalysis::Store& m_store;
@@ -141,9 +143,15 @@ namespace CameraLink
 		pl_gpu m_gpu = nullptr;
 		pl_log m_log = nullptr;
 		uint64_t m_lastRequestedField = 0;
-		int64_t m_lastSealUs = 0;
-		uint64_t m_lastSealSeq = 0;
-		double m_period = 0;
+		uint64_t m_lastEra = 0;               // IVectorEngine::FieldEra of the last request
+		std::chrono::steady_clock::time_point m_lastFrameAt;
+		bool m_haveFrameAt = false;
+		// Fallback holds: an event engages the id for kHoldSeconds of MEASURED time, so the status never flickers per call.
+		struct Hold { double remaining = 0; bool engaged = false; };
+		enum { kEvLate, kEvReadback, kEvTiming, kEvSlip, kEvQueue, kEvCount };
+		Hold m_hold[kEvCount];
+		std::atomic<uint32_t> m_events{ 0 };   // bits set by any thread, consumed by OnFrameStart
+		uint64_t m_seenQueueFull = 0;
 		std::vector<uint64_t> m_sealedMark;   // seq accepted at the seal, indexed seq mod size
 
 		// status state touched by the worker's onResult
@@ -151,9 +159,6 @@ namespace CameraLink
 		AmbiguousTracker m_ambiguous;
 		StatusFacts m_facts;
 		uint64_t m_records = 0, m_ambiguousRecords = 0;
-		std::vector<uint32_t> m_costs;        // recent fit costs (us) for the deadline guard
-		size_t m_costNext = 0;
-		bool m_lastTimingUnknown = false, m_lastSlip = false;
 		std::mutex m_traceMutex;
 		std::ofstream m_trace;
 		uint64_t m_seenReadbackDropped = 0;

@@ -49,9 +49,7 @@ namespace VideoProcessorTest
 					rig.SealP7Empty(seq);
 				CameraLink::CameraFitJob job = CameraLinkTest::PanJob(seq, 8.0 + 0.5 * i, 0.0);
 				job.facts.pairSeconds = 0;   // derived from the latched timing
-				const CameraLink::PublishOutcome po = worker.ProcessJob(job);
-				if (po != CameraLink::PublishOutcome::Published)
-					Logger::WriteMessage((std::string("seq ") + std::to_string(seq) + " " + CameraLink::Text(po) + "\n").c_str());
+				worker.ProcessJob(job);
 				CameraLink::PoolEntry e;
 				r.inPool.push_back(pool.Get(seq, e));
 				rig.Retire(seq - 1);
@@ -203,6 +201,22 @@ namespace VideoProcessorTest
 			Assert::IsTrue(r.timingUnknown);
 			Assert::IsTrue(r.record->reason == CameraModel::Reason::NoInput && !r.record->valid);
 			Assert::AreEqual(uint64_t(1), counters.timingUnknown.load());
+		}
+		TEST_METHOD(AnUncommittedPoolEntryIsNeverServedButTheSealObserverMaySeeIt)
+		{
+			CameraLink::CameraRecordPool pool(4);
+			auto rec = std::make_shared<CameraModel::CameraMotion>();
+			rec->seq = 9;
+			pool.Put(9, rec, nullptr);
+			CameraLink::PoolEntry e;
+			Assert::IsFalse(pool.Get(9, e), L"before the slot publish succeeded: not served");
+			Assert::IsTrue(pool.Get(9, e, true), L"the seal observer accepts a Published slot");
+			pool.Commit(9);
+			Assert::IsTrue(pool.Get(9, e));
+			pool.Put(9, rec, nullptr);   // a refill of the slot starts uncommitted again
+			Assert::IsFalse(pool.Get(9, e));
+			pool.Erase(9);
+			Assert::IsFalse(pool.Get(9, e, true));
 		}
 	};
 }

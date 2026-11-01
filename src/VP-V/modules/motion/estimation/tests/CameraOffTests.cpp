@@ -142,12 +142,12 @@ namespace VideoProcessorTest
 			for (const FallbackCatalog::Decision& d : CameraLink::BuildDecisions(quiet))
 				Assert::IsFalse(d.engaged);
 			CameraLink::StatusFacts bad = quiet;
-			bad.lateNow = bad.ambiguousNow = bad.timingUnknownNow = bad.readbackFailedNow = bad.slipNow = bad.laneDepthZero = true;
+			bad.lateNow = bad.ambiguousNow = bad.timingUnknownNow = bad.readbackFailedNow = bad.slipNow = bad.laneDepthZero = bad.queueFullNow = true;
 			const std::vector<FallbackCatalog::Decision> ds = CameraLink::BuildDecisions(bad);
-			Assert::AreEqual(size_t(6), ds.size());
+			Assert::AreEqual(size_t(7), ds.size());
 			const char* ids[] = { CameraLink::kIdNoModelLate, CameraLink::kIdNoModelAmbiguous, CameraLink::kIdNoModelTiming,
-				CameraLink::kIdNoModelReadback, CameraLink::kIdNoModelSlip, CameraLink::kIdNoModelDepth0 };
-			for (size_t i = 0; i < 6; ++i)
+				CameraLink::kIdNoModelReadback, CameraLink::kIdNoModelSlip, CameraLink::kIdNoModelQueue, CameraLink::kIdNoModelDepth0 };
+			for (size_t i = 0; i < 7; ++i)
 			{
 				Assert::AreEqual(std::string(ids[i]), ds[i].id);
 				Assert::IsTrue(ds[i].engaged && !ds[i].reason.empty());
@@ -156,6 +156,112 @@ namespace VideoProcessorTest
 			bad.graphHasP7 = false;
 			for (const FallbackCatalog::Decision& d : CameraLink::BuildDecisions(bad))
 				Assert::IsFalse(d.engaged);
+		}
+		static bool Engaged(CameraLink::CameraLinkCore& core, const char* id)
+		{
+			for (const FallbackCatalog::Decision& d : core.CollectDecisions())
+				if (d.id == id)
+					return d.engaged;
+			return false;
+		}
+
+		TEST_METHOD(AFallbackIsHeldForAMeasuredIntervalNotPerCall)
+		{
+			CameraLinkTest::Rig rig;
+			FrameAnalysis::Store store;
+			CameraLink::CameraLinkCore core(store);
+			CameraLink::CameraLinkSettings on;
+			on.p7Wanted = true;
+			on.deterministic = true;
+			core.OnSettings(on);
+			core.AttachGraph(rig.table.get(), rig.bytes.get(), rig.indicator.get());
+			CameraLink::FramePhaseFacts f;
+			f.displayPeriodSeconds = 0.1;   // a measured 10 Hz output
+			f.seq = 1;
+			f.p7SealedPublished = false;
+			core.OnFrameStart(f);
+			Assert::IsTrue(Engaged(core, CameraLink::kIdNoModelLate), L"engaged by the late seal");
+			f.p7SealedPublished = true;
+			int held = 0;
+			for (uint64_t s = 2; s < 20; ++s)
+			{
+				f.seq = s;
+				core.OnFrameStart(f);
+				if (!Engaged(core, CameraLink::kIdNoModelLate))
+					break;
+				++held;
+			}
+			Assert::IsTrue(held >= 3 && held <= 5, L"held for 0.5 s of measured time (4 frames at 0.1 s), then released");
+			Assert::IsFalse(Engaged(core, CameraLink::kIdNoModelLate));
+		}
+
+		TEST_METHOD(AQueueFullDropEngagesTheQueueIdAndIsHeld)
+		{
+			CameraLinkTest::Rig rig;
+			FrameAnalysis::Store store;
+			CameraLink::CameraLinkCore core(store);
+			CameraLink::CameraLinkSettings on;
+			on.p7Wanted = true;
+			on.deterministic = true;
+			on.queueCapacity = 1;
+			core.OnSettings(on);
+			core.AttachGraph(rig.table.get(), rig.bytes.get(), rig.indicator.get());
+			CameraLink::FramePhaseFacts f;
+			f.displayPeriodSeconds = 0.1;
+			f.p7SealedPublished = true;
+			auto copy = CameraLinkTest::PanJob(1, 8).field;
+			core.Producer()->SetTimingFacts(CameraLink::TimingFacts());
+			Assert::IsTrue(core.SubmitField(copy, f));
+			Assert::IsFalse(core.SubmitField(copy, f), L"capacity 1: the second is dropped");
+			f.seq = 1;
+			core.OnFrameStart(f);   // deterministic: also drains the queue
+			Assert::IsTrue(Engaged(core, CameraLink::kIdNoModelQueue));
+			Assert::IsTrue(core.Counters().queueFull.load() >= 1);
+			for (uint64_t s = 2; s < 4; ++s)
+			{
+				f.seq = s;
+				core.OnFrameStart(f);
+			}
+			Assert::IsTrue(Engaged(core, CameraLink::kIdNoModelQueue), L"still held 0.2 s later");
+		}
+
+		struct EraEngine : VpMotion::IVectorEngine
+		{
+			uint64_t era = 1, latest = 0;
+			uint64_t LatestVerifiedFieldSeq() const override { return latest; }
+			uint64_t FieldEra() const override { return era; }
+			bool FieldOf(uint64_t, VpMotion::VerifiedField&) const override { return false; }
+			float FieldScale() const override { return 1; }
+			bool GlobalFromEngine() const override { return false; }
+			bool EngineGlobal(uint64_t, VpMotion::GlobalVec&) const override { return false; }
+			bool PairSpansSlip(uint64_t, uint64_t) const override { return false; }
+			bool FlowIsCpuResident() const override { return false; }
+			bool FlowOf(uint64_t, VpMotion::FlowView&) const override { return false; }
+			void SetPreEstimateHook(VpMotion::IPreEstimateHook*) override {}
+		};
+
+		TEST_METHOD(AFieldEraChangeForgetsTheLastRequestedField)
+		{
+			CameraLinkTest::Rig rig;
+			FrameAnalysis::Store store;
+			CameraLink::CameraLinkCore core(store);
+			CameraLink::CameraLinkSettings on;
+			on.p7Wanted = true;
+			on.deterministic = true;
+			core.OnSettings(on);
+			core.AttachGraph(rig.table.get(), rig.bytes.get(), rig.indicator.get());
+			EraEngine engine;
+			core.SetEngine(&engine);
+			CameraLink::FramePhaseFacts f;
+			f.p7SealedPublished = true;
+			core.OnFrameStart(f);
+			Assert::AreEqual(uint64_t(0), core.LastRequestedField());
+			core.DebugSetLastRequestedField(7);   // the request loop needs a GPU ring; the era bookkeeping does not
+			core.OnFrameStart(f);
+			Assert::AreEqual(uint64_t(7), core.LastRequestedField(), L"same era: kept");
+			engine.era = 2;
+			core.OnFrameStart(f);
+			Assert::AreEqual(uint64_t(0), core.LastRequestedField(), L"the era changed: forgotten");
 		}
 	};
 }

@@ -136,6 +136,17 @@ namespace CameraLink
 	{
 		m_settings = s;
 		m_governor = GuidanceGovernor(s.governor);
+		RefreshSnapshot();
+	}
+
+	void GuidanceScheduler::RefreshSnapshot()
+	{
+		const CameraModel::MeasurementSwitches governed = m_governor.Apply(m_settings.switches);
+		std::lock_guard<std::mutex> lock(m_mutex);
+		m_snapSwitches = governed;
+		m_snapConfig = m_settings.config;
+		m_snapLag = m_lag;
+		m_snapContext = m_context;
 	}
 
 	void GuidanceScheduler::ResetForDiscontinuity()
@@ -148,7 +159,7 @@ namespace CameraLink
 		for (Stored& s : m_pending)
 			s = Stored();
 		m_governor.Reset();
-		m_trippedFlag.store(false, std::memory_order_release);
+		RefreshSnapshot();
 	}
 
 	GuideResult GuidanceScheduler::Compute(uint64_t pairSeq)
@@ -181,28 +192,37 @@ namespace CameraLink
 
 	bool GuidanceScheduler::PublishLane(uint64_t pairSeq)
 	{
-		if (!m_settings.switches.Any() || m_trippedFlag.load(std::memory_order_acquire))
-			return false;
+		// Everything the worker thread reads is a snapshot taken under the mutex (same governed switches as the render thread).
+		CameraModel::MeasurementSwitches sw;
+		CameraModel::MeasurementConfig cfg;
+		uint8_t lag;
+		std::function<bool(uint64_t, PairContext&)> context;
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
+			sw = m_snapSwitches;
+			cfg = m_snapConfig;
+			lag = m_snapLag;
+			context = m_snapContext;
+			if (!sw.Any())
+				return false;
 			if (m_asked[pairSeq % m_asked.size()] == pairSeq)
 			{
 				++m_counters.laneDiscarded;   // the render computed it live first: a late lane result is discarded, never merged
 				return false;
 			}
 		}
-		GuideInputs in;
-		std::shared_ptr<const CameraModel::CameraMotion> rec;
-		std::shared_ptr<const FieldCopy> field;
-		if (pairSeq < m_lag)
+		if (pairSeq < lag)
 			return false;
-		rec = m_link.CausalRecord(pairSeq - m_lag);
-		field = m_link.FieldOf(pairSeq - m_lag);
+		GuideInputs in;
+		const std::shared_ptr<const CameraModel::CameraMotion> rec = m_link.CausalRecord(pairSeq - lag);
+		const std::shared_ptr<const FieldCopy> field = m_link.FieldOf(pairSeq - lag);
 		in.record = rec.get();
 		in.prevField = field.get();
-		if (m_context && !m_context(pairSeq, in.ctx))
+		if (context && !context(pairSeq, in.ctx))
 			return false;
-		GuideResult r = BuildGuide(m_settings.switches, m_settings.config, in);
+		GuideResult r = BuildGuide(sw, cfg, in);
+		if (r.refusal == Refusal::NoRecord)
+			return false;   // "late" is not a stored verdict: the render asks again with the record it then has
 		r.fromLane = true;
 		std::lock_guard<std::mutex> lock(m_mutex);
 		if (m_asked[pairSeq % m_asked.size()] == pairSeq)
@@ -212,20 +232,29 @@ namespace CameraLink
 		}
 		Stored& s = m_lane[pairSeq % m_lane.size()];
 		s.seq = pairSeq;
+		s.key = KeyOf(sw, lag);
 		s.result = std::move(r);
 		++m_counters.lanePublished;
 		return true;
 	}
 
-	GuideResult GuidanceScheduler::Guide(uint64_t pairSeq)
+	GuideResult GuidanceScheduler::Guide(uint64_t pairSeq, double pairSeconds)
 	{
+		// The cool-down runs on MEASURED pair time for every pair asked about, guided or not (a narrow-only configuration
+		// has no guided pair to judge, and must still recover).
+		if (m_governor.Tripped())
+		{
+			m_governor.Elapse(pairSeconds);
+			RefreshSnapshot();
+		}
+		const uint32_t key = KeyOf(m_governor.Apply(m_settings.switches), m_lag);
 		GuideResult out;
 		bool haveLane = false;
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			m_asked[pairSeq % m_asked.size()] = pairSeq;
 			Stored& s = m_lane[pairSeq % m_lane.size()];
-			if (s.seq == pairSeq && !m_governor.Tripped())
+			if (s.seq == pairSeq && s.key == key)   // a lane result built under other switches / lag is never used
 			{
 				out = s.result;
 				haveLane = true;
@@ -308,8 +337,9 @@ namespace CameraLink
 		}
 		g.pairSeconds = pairSeconds;
 		++m_counters.pairsJudged;
-		m_governor.OnPair(g);
-		m_trippedFlag.store(m_governor.Tripped(), std::memory_order_release);
+		if (!m_governor.Tripped())
+			m_governor.OnPair(g);   // while tripped the cool-down is advanced by Guide(); this pair ran without narrow / E1
+		RefreshSnapshot();
 		p = Stored();
 	}
 
@@ -336,7 +366,7 @@ namespace CameraLink
 
 	void CameraGuidanceHook::BeforeEstimate(const VpMotion::EstimateContext& ctx, VpMotion::IGuidanceSink& sink)
 	{
-		const GuideResult r = m_sched.Guide(ctx.pairSeq);
+		const GuideResult r = m_sched.Guide(ctx.pairSeq, ctx.nextPairSeconds);
 		sink.SetCameraGuidance(r.frame);   // null = nothing bound: today's matcher exactly
 		m_waiting.push_back(std::make_pair(ctx.pairSeq, ctx.nextPairSeconds));
 		if (m_waiting.size() > 32)

@@ -37,12 +37,18 @@ namespace CameraLink
 		}
 		else
 			++m_stats.repeats;
+		// Enabled: the define, the sampler and the descriptor are ALWAYS present (a constant shader); only the values change.
 		CameraBinding b;
 		b.domain = DomainMap();
+		b.defineActive = true;
+		b.defineName = m_defineName;
+		b.tex = m_dummy;
+		b.labelsFloats[0] = 1;
+		b.labelsFloats[1] = 1;
 		if (!record || !record->valid)
 		{
 			++m_stats.noRecord;
-			m_binding = b;
+			m_binding = b;   // constants.enabled = 0
 			return BindOutcome::NoRecord;
 		}
 		if (!labels.available || !labels.tex)
@@ -54,13 +60,12 @@ namespace CameraLink
 		b.constants = CameraModel::MakeAccessorConstants(m_policy, m_state, record);
 		if (b.constants.enabled == 0)
 		{
-			m_binding = CameraBinding();
+			b.constants = CameraModel::AccessorConstants();
 			++m_stats.noRecord;
+			m_binding = b;
 			return BindOutcome::NoRecord;
 		}
 		b.tex = labels.tex;
-		b.defineActive = true;
-		b.defineName = m_defineName;
 		b.labelsFloats[0] = labels.gridW;
 		b.labelsFloats[1] = labels.gridH;
 		m_binding = b;

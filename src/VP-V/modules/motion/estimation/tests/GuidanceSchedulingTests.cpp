@@ -157,24 +157,46 @@ namespace VideoProcessorTest
 			Assert::IsFalse(sched.StatusLines().empty(), L"refusals are visible");
 		}
 
-		TEST_METHOD(AGovernorTripRefusesNarrowOnlyConfigurationsAndRecovers)
+		// A narrow-only configuration has no guided pair to judge while tripped: the cool-down must still run on measured pair
+		// time (Guide advances it for every pair asked) and the guidance must come back.
+		static void TripAndRecover(const std::vector<double>& dts)
 		{
 			FakeLink link;
-			link.AddPan(1);
+			for (uint64_t q = 1; q <= 80; ++q)
+				link.AddPan(q);
 			CameraLink::GuidanceSettings s;
 			s.switches.narrowWindow = true;   // narrow only
 			CameraLink::GuidanceScheduler sched(link, s);
 			sched.SetLag(2);
-			Assert::IsTrue(sched.Guide(3).frame != nullptr);
-			// Feed an escalation-heavy pair: the governor trips.
+			uint64_t pair = 3;
+			Assert::IsTrue(sched.Guide(pair, dts[0]).frame != nullptr, L"guided before the trip");
 			const float bad[4] = { 1.0f, 1.0f, -1.0f, -1.0f };   // far fewer accepted than planned
-			sched.OnCounts(3, bad, 1.0 / 24);
-			Assert::IsTrue(sched.Governor().Tripped() || sched.Diagnostics().frames >= 1);
-			if (sched.Governor().Tripped())
+			sched.OnCounts(pair, bad, dts[0]);
+			Assert::IsTrue(sched.Governor().Tripped(), L"the escalations tripped the governor");
+			Assert::AreEqual(uint32_t(1), sched.Governor().Trips());
+			double elapsed = 0, last = 0;
+			size_t n = 0;
+			while (sched.Governor().Tripped() && n < 200)
 			{
-				const CameraLink::GuideResult r = sched.Guide(3);
-				Assert::IsTrue(r.frame == nullptr && r.refusal == CameraLink::Refusal::Governor);
+				++pair;
+				last = dts[n % dts.size()];
+				const CameraLink::GuideResult r = sched.Guide(pair, last);
+				elapsed += last;
+				++n;
+				if (sched.Governor().Tripped())
+					Assert::IsTrue(r.frame == nullptr && r.refusal == CameraLink::Refusal::Governor, L"refused while cooling");
 			}
+			Assert::IsFalse(sched.Governor().Tripped(), L"recovered without any guided pair");
+			Assert::IsTrue(elapsed >= 1.0 - 1e-9 && elapsed - last < 1.0, L"after exactly 1 s of measured pair time");
+			Assert::AreEqual(uint32_t(1), sched.Governor().Recoveries());
+			Assert::IsTrue(sched.Guide(pair + 1, last).frame != nullptr, L"guidance is back");
+		}
+
+		TEST_METHOD(AGovernorTripRefusesNarrowOnlyConfigurationsAndRecoversAt24Fps) { TripAndRecover({ 1.0 / 24 }); }
+		TEST_METHOD(AGovernorTripRefusesNarrowOnlyConfigurationsAndRecoversAt60Fps) { TripAndRecover({ 1.0 / 60 }); }
+		TEST_METHOD(AGovernorTripRefusesNarrowOnlyConfigurationsAndRecoversWithVariableFrameRate)
+		{
+			TripAndRecover({ 0.1, 0.4, 0.05, 0.3, 0.2, 0.01, 0.2, 0.06 });
 		}
 
 		TEST_METHOD(TheHookBindsNullWhenRefusedAndTheFrameWhenGuidedAndParsesCountsLater)

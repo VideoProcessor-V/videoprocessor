@@ -43,9 +43,9 @@ namespace CameraLink
 		m_facts = f;
 	}
 
-	void CameraFitProducer::Consume()
+	void CameraFitProducer::Consume(const CameraFitJob& job)
 	{
-		const uint64_t r = m_resetGen.load(std::memory_order_acquire);
+		const uint64_t r = job.gensStamped ? job.resetGen : m_resetGen.load(std::memory_order_acquire);
 		if (r != m_seenReset)
 		{
 			m_seenReset = r;
@@ -53,7 +53,7 @@ namespace CameraLink
 			if (m_counters)
 				m_counters->resets.fetch_add(1, std::memory_order_relaxed);
 		}
-		const uint64_t t = m_timingGen.load(std::memory_order_acquire);
+		const uint64_t t = job.gensStamped ? job.timingGen : m_timingGen.load(std::memory_order_acquire);
 		if (t != m_seenTiming)
 		{
 			m_seenTiming = t;
@@ -70,7 +70,7 @@ namespace CameraLink
 
 	CameraFitResult CameraFitProducer::Fit(const CameraFitJob& job)
 	{
-		Consume();
+		Consume(job);
 		CameraFitResult res;
 		PairFacts facts = job.facts;
 		if (!(facts.pairSeconds > 0))

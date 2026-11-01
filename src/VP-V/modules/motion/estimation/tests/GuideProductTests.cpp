@@ -24,8 +24,8 @@ namespace VideoProcessorTest
 			std::shared_ptr<const CameraModel::CameraMotion> rec;
 			std::shared_ptr<const CameraLink::FieldCopy> field;
 			std::shared_ptr<const CameraModel::CameraMotion> SealedRecord(uint64_t) const override { return rec; }
-			std::shared_ptr<const CameraModel::CameraMotion> CausalRecord(uint64_t s) const override { return s == 1 ? rec : nullptr; }
-			std::shared_ptr<const CameraLink::FieldCopy> FieldOf(uint64_t s) const override { return s == 1 ? field : nullptr; }
+			std::shared_ptr<const CameraModel::CameraMotion> CausalRecord(uint64_t s) const override { return s >= 1 ? rec : nullptr; }
+			std::shared_ptr<const CameraLink::FieldCopy> FieldOf(uint64_t s) const override { return s >= 1 ? field : nullptr; }
 			bool LabelsFor(uint64_t, CameraLink::CameraConsumer, CameraLink::CameraLabelsView&) override { return false; }
 			std::shared_ptr<const CameraModel::GuidanceFrame> GuideFor(uint64_t) override { return nullptr; }
 		};
@@ -154,6 +154,50 @@ namespace VideoProcessorTest
 			cs.cutSkip = true;
 			const CameraLink::GuideResult c = CameraLink::BuildGuide(cs, s.config, in);
 			Assert::IsTrue(c.frame != nullptr && c.frame->skipMatcher);
+		}
+		TEST_METHOD(LaneAndLiveStayByteEqualWhileTheGovernorIsTripped)
+		{
+			Link link;
+			Fill(link);
+			CameraLink::GuidanceSettings st = Settings();
+			CameraLink::GuidanceScheduler lane(link, st);
+			CameraLink::GuidanceScheduler live(link, st);
+			lane.SetLag(2);
+			live.SetLag(2);
+			// Trip both governors (narrow + E1 off, model global / static stay).
+			const float bad[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+			for (CameraLink::GuidanceScheduler* s : { &lane, &live })
+			{
+				Assert::IsTrue(s->Guide(3, 1.0 / 24).frame != nullptr);
+				s->OnCounts(3, bad, 1.0 / 24);
+				Assert::IsTrue(s->Governor().Tripped());
+			}
+			Assert::IsTrue(lane.PublishLane(4), L"the lane builds under the governed switches");
+			const CameraLink::GuideResult a = lane.Guide(4, 1.0 / 24);
+			const CameraLink::GuideResult b = live.Guide(4, 1.0 / 24);
+			Assert::IsTrue(a.fromLane && !b.fromLane);
+			Assert::IsTrue(a.frame != nullptr && b.frame != nullptr);
+			Assert::IsTrue(CameraLink::SameGuide(*a.frame, *b.frame));
+			Assert::IsFalse(a.frame->narrow || a.frame->e1Skip, L"narrow and E1 are off while tripped, lane and live alike");
+			Assert::IsTrue(a.frame->useModelGlobal);
+		}
+
+		TEST_METHOD(ALaneResultBuiltBeforeTheTripIsNotUsedAfterIt)
+		{
+			Link link;
+			Fill(link);
+			CameraLink::GuidanceScheduler s(link, Settings());
+			s.SetLag(2);
+			Assert::IsFalse(s.PublishLane(1), L"before the first lagged pair: nothing to build, nothing stored");
+			Assert::AreEqual(uint64_t(0), s.Counters().lanePublished);
+			Assert::IsTrue(s.PublishLane(4));   // built with narrow + E1 on
+			const float bad[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+			Assert::IsTrue(s.Guide(3, 1.0 / 24).frame != nullptr);
+			s.OnCounts(3, bad, 1.0 / 24);
+			Assert::IsTrue(s.Governor().Tripped());
+			const CameraLink::GuideResult g2 = s.Guide(4, 1.0 / 24);
+			Assert::IsFalse(g2.fromLane, L"different governed switches: computed live, the stale lane result is dropped");
+			Assert::IsTrue(g2.frame != nullptr && !g2.frame->narrow);
 		}
 	};
 }

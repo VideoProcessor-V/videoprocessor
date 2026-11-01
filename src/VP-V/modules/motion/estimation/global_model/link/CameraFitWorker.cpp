@@ -58,8 +58,9 @@ namespace CameraLink
 		m_queue.clear();
 	}
 
-	bool CameraFitWorker::Submit(const CameraFitJob& job)
+	bool CameraFitWorker::Submit(const CameraFitJob& submitted)
 	{
+		CameraFitJob job = submitted;
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			if (m_queue.size() >= m_env.queueCapacity)
@@ -70,6 +71,9 @@ namespace CameraLink
 				m_producer.NoteReset();
 				return false;
 			}
+			job.gensStamped = true;   // the generations as of THIS submit (after a drop's NoteReset above)
+			job.resetGen = m_producer.ResetGen();
+			job.timingGen = m_producer.TimingGen();
 			m_queue.push_back(job);
 			if (m_env.counters)
 				m_env.counters->submitted.fetch_add(1, std::memory_order_relaxed);
@@ -182,6 +186,7 @@ namespace CameraLink
 			m_env.pool->Erase(job.seq);
 			return late(PublishOutcome::LateSeal);
 		}
+		m_env.pool->Commit(job.seq);
 		if (c)
 		{
 			c->published.fetch_add(1, std::memory_order_relaxed);

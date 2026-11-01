@@ -33,6 +33,10 @@ namespace CameraLink
 		bool haveTimestamps = false;
 		double tsFrom = 0, tsTo = 0;
 		VpIndicator::Stamp stamp;        // the field's stamp (generation mapping)
+		// The reset / timing generations AT SUBMIT (stamped by CameraFitWorker::Submit): the fitting thread applies a reset before
+		// THIS job's Fit, never before an earlier queued one, so the history does not depend on when the worker gets to the queue.
+		bool gensStamped = false;
+		uint64_t resetGen = 0, timingGen = 0;
 	};
 
 	struct CameraFitResult
@@ -71,7 +75,7 @@ namespace CameraLink
 		uint32_t PredictChunkUs() const override { return m_costEwmaUs; }
 
 	private:
-		void Consume();
+		void Consume(const CameraFitJob& job);
 
 		CameraModel::Fitter m_fitter;
 		PairTiming m_timing;

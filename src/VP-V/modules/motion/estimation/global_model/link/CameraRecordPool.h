@@ -120,6 +120,7 @@ namespace CameraLink
 		uint64_t seq = ~uint64_t(0);
 		std::shared_ptr<const CameraModel::CameraMotion> record;
 		std::shared_ptr<const FieldCopy> field;
+		bool committed = false;   // set only AFTER the slot publish succeeded: a late / unpublished record is never served
 	};
 
 	class CameraRecordPool
@@ -137,14 +138,26 @@ namespace CameraLink
 			e.seq = seq;
 			e.record = std::move(record);
 			e.field = std::move(field);
+			e.committed = false;
+		}
+
+		// Producer: the slot publish succeeded -> readers may now see the entry.
+		void Commit(uint64_t seq)
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			PoolEntry& e = m_entries[seq % m_entries.size()];
+			if (e.seq == seq)
+				e.committed = true;
 		}
 
 		// Reader. False when the slot holds another frame (or nothing).
-		bool Get(uint64_t seq, PoolEntry& out) const
+		// includeUncommitted is for the seal observer only (the seal accepted a Published slot: the entry exists even if the worker
+		// has not yet committed it).
+		bool Get(uint64_t seq, PoolEntry& out, bool includeUncommitted = false) const
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			const PoolEntry& e = m_entries[seq % m_entries.size()];
-			if (e.seq != seq || !e.record)
+			if (e.seq != seq || !e.record || (!e.committed && !includeUncommitted))
 				return false;
 			out = e;
 			return true;

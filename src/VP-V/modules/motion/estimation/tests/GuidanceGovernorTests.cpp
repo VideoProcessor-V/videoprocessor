@@ -124,5 +124,20 @@ namespace VideoProcessorTest
 			Assert::IsTrue(g.OnPair(Pair(1000, 500, 0.5)));
 			Assert::AreEqual(uint32_t(2), g.Trips());
 		}
+		TEST_METHOD(ElapseAdvancesTheCooldownWithoutJudgingAPair)
+		{
+			CameraLink::GuidanceGovernor g;
+			Assert::IsTrue(g.OnPair(Pair(1000, 500, 0.02)));
+			g.Elapse(0.5);
+			Assert::IsTrue(g.Tripped());
+			Assert::AreEqual(0.5, g.CooldownRemaining(), 1e-12);
+			g.Elapse(0.0);
+			Assert::AreEqual(0.5, g.CooldownRemaining(), 1e-12);
+			g.Elapse(0.6);
+			Assert::IsFalse(g.Tripped());
+			Assert::AreEqual(uint32_t(1), g.Recoveries());
+			g.Elapse(1.0);
+			Assert::AreEqual(uint32_t(1), g.Recoveries(), L"not tripped: nothing to advance");
+		}
 	};
 }
