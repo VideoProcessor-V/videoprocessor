@@ -4,6 +4,13 @@
 // VP-V GPU hook tests (moved out of Bill's LibplaceboLutParserTests.cpp; test names unchanged).
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
+#include <VP-V/modules/output/dither/DitherNeed.h>
+#include <VP-V/modules/output/dither/SigmaDeltaDomain.h>
+#include "DitherNeedGolden.generated.h"
+
+#include <cstring>
+#include <string>
+#include <vector>
 
 namespace VideoProcessorTest
 {
@@ -746,6 +753,588 @@ namespace VideoProcessorTest
 			};
 			for (const IgnPoint& p : points)
 				Assert::AreEqual(p.value, SigmaDeltaDomain::Ign(p.px, p.py, p.frame), L"Ign matches the fixed vector");
+		}
+	};
+
+	// ---- DitherNeed (output.dither / dither need map): CPU law, state, sampling, golden cross-check -----------------------------
+	namespace
+	{
+		std::wstring DnWide(const std::string& s) { return std::wstring(s.begin(), s.end()); }
+
+		bool DnClose(double actual, double expected, double rel = 1e-9)
+		{
+			return std::fabs(actual - expected) <= rel * std::fabs(expected) + 1e-14;
+		}
+
+		// One golden frame run through the real shared products: grain split, precursors, views, a LUT.
+		struct DnFixture
+		{
+			GrainSplit::Plane luma;
+			RegionEvidence::GrainProduct grain;
+			RegionEvidence::Precursors pre;
+			RegionEvidence::GrainView grainView;
+			RegionEvidence::View view;
+			LightLevel::Lut lut;
+			RegionEvidence::Grid grid;
+			void Make(int frame, int blockOverride = 0)
+			{
+				luma = GrainSplit::Plane(DitherNeedGolden::kW, DitherNeedGolden::kH);
+				for (int i = 0; i < DitherNeedGolden::kW * DitherNeedGolden::kH; ++i)
+					luma.v[static_cast<size_t>(i)] = DitherNeedGolden::kLuma[frame * DitherNeedGolden::kW * DitherNeedGolden::kH + i];
+				const int B = blockOverride > 0 ? blockOverride : RegionEvidence::BlockSizeFor(luma.h);
+				RegionEvidence::Externals ex;
+				grain = RegionEvidence::ComputeGrain(luma, ex.picture, B);
+				RegionEvidence::FrameParams fp;
+				fp.blockOverride = B;
+				pre = RegionEvidence::Compute(luma, &grain.split, ex, fp);
+				grainView = RegionEvidence::GrainView(&grain);
+				view = RegionEvidence::View(&pre);
+				grid = RegionEvidence::MakeGrid(luma.w, luma.h, RegionEvidence::BlockSizeFor(luma.h));   // the expected grid
+				lut = GoldenLut();
+			}
+			static LightLevel::Lut GoldenLut()
+			{
+				LightLevel::Lut l;
+				for (int i = 0; i < LightLevel::kLutSize; ++i)
+				{
+					l.e[static_cast<size_t>(i)].V = DitherNeedGolden::kLutV[i];
+					l.e[static_cast<size_t>(i)].Sout = DitherNeedGolden::kLutSout[i];
+				}
+				l.fingerprint = "golden";
+				return l;
+			}
+			DitherNeed::Inputs Inputs() const
+			{
+				DitherNeed::Inputs in;
+				in.grain = &grainView; in.evidence = &view; in.lut = &lut; in.colorBits = 8; in.domainSupported = true;
+				return in;
+			}
+		};
+
+		DitherNeed::FrameArgs DnArgs(const RegionEvidence::Grid& g, double dt, bool disc, const std::string& fp = "fp")
+		{
+			DitherNeed::FrameArgs a;
+			a.grid = g; a.dtSeconds = dt; a.discontinuity = disc; a.lutFingerprint = fp;
+			return a;
+		}
+
+		// A two-block frame whose first block has the given banding (the rest of the law is fully on: no grain, visible step).
+		std::vector<DitherNeed::BlockIn> DnTwoBlocks(double banding0, double banding1 = 1.0)
+		{
+			std::vector<DitherNeed::BlockIn> b(2);
+			for (auto& x : b) { x.N = 0.0; x.meanY = 300.0; x.V = 5.0; x.Sout = 1.0; x.inPicture = true; x.overlay = false; }
+			b[0].banding = banding0; b[1].banding = banding1;
+			return b;
+		}
+	}
+
+	TEST_CLASS(DitherNeedTests)
+	{
+	public:
+
+		TEST_METHOD(LawCases)
+		{
+			const DitherNeed::Params p;
+			const double q = DitherNeed::QOut(8);
+			Assert::AreEqual(4.0, q, 0.0, L"8-bit link step in 10-bit codes");
+			// grain-free, banding visible: aMax - aBase
+			Assert::AreEqual(0.35, DitherNeed::TargetBlock<double>(p, 0.0, 5.0, 1.0, 1.0, true, false, q), 1e-12, L"grain-free");
+			// grain above the link step: the grain dithers, no extra
+			Assert::AreEqual(0.0, DitherNeed::TargetBlock<double>(p, 9.0, 5.0, 1.0, 1.0, true, false, q), 0.0, L"grain above step");
+			// partial grain: sigmaOut 0.25 -> aTarget 0.30 -> extra 0.15
+			Assert::AreEqual(0.15, DitherNeed::TargetBlock<double>(p, 1.0, 5.0, 1.0, 1.0, true, false, q), 1e-12, L"partial grain");
+			// banding weight scales it
+			Assert::AreEqual(0.175, DitherNeed::TargetBlock<double>(p, 0.0, 5.0, 1.0, 0.5, true, false, q), 1e-12, L"banding 0.5");
+			// overlay / outside the picture / BTB block / invisible step / flat LUT: nothing
+			Assert::AreEqual(0.0, DitherNeed::TargetBlock<double>(p, 0.0, 5.0, 1.0, 1.0, true, true, q), 0.0, L"overlay");
+			Assert::AreEqual(0.0, DitherNeed::TargetBlock<double>(p, 0.0, 5.0, 1.0, 1.0, false, false, q), 0.0, L"outside the picture");
+			Assert::AreEqual(0.0, DitherNeed::TargetBlock<double>(p, 0.0, 0.01, 1.0, 1.0, true, false, q), 0.0, L"invisible step");
+			Assert::AreEqual(0.0, DitherNeed::TargetBlock<double>(p, 0.0, 5.0, 0.0, 1.0, true, false, q), 0.0, L"flat LUT (Sout 0)");
+			// V * q / |Sout| = 0.5 -> gVis 0.5; negative Sout uses |Sout|
+			Assert::AreEqual(0.175, DitherNeed::TargetBlock<double>(p, 0.0, 0.25, -2.0, 1.0, true, false, q), 1e-12, L"half visible");
+			// a real BTB block: the LUT gives V = 0 below code 64
+			LightLevel::Lut lut = DnFixture::GoldenLut();
+			const LightLevel::Entry btb = LightLevel::Fetch(lut, 30.0);
+			Assert::AreEqual(0.0, DitherNeed::TargetBlock<double>(p, 0.0, btb.V, btb.Sout, 1.0, true, false, q), 0.0, L"BTB block");
+			// aMax below aBase: no extra
+			DitherNeed::Params hi; hi.aBase = 0.6;
+			Assert::AreEqual(0.0, DitherNeed::TargetBlock<double>(hi, 0.0, 5.0, 1.0, 1.0, true, false, q), 0.0, L"aMax < aBase");
+			// the float template follows the double one
+			Assert::AreEqual(0.15, static_cast<double>(DitherNeed::TargetBlock<float>(p, 1.0f, 5.0f, 1.0f, 1.0f, true, false, 4.0f)), 1e-6, L"float");
+		}
+
+		TEST_METHOD(TenBitLinkUsesStepOne)
+		{
+			const DitherNeed::Params p;
+			Assert::AreEqual(4.0, DitherNeed::QOut(8), 0.0);
+			Assert::AreEqual(1.0, DitherNeed::QOut(10), 0.0);
+			Assert::AreEqual(0.25, DitherNeed::QOut(12), 0.0);
+			// V * q / Sout: 0.5 * 4 = 2 (fully visible at 8 bit), 0.5 * 1 = 0.5 (half visible at 10 bit)
+			Assert::AreEqual(0.35, DitherNeed::TargetBlock<double>(p, 0.0, 0.5, 1.0, 1.0, true, false, DitherNeed::QOut(8)), 1e-12);
+			Assert::AreEqual(0.175, DitherNeed::TargetBlock<double>(p, 0.0, 0.5, 1.0, 1.0, true, false, DitherNeed::QOut(10)), 1e-12);
+			// grain rms in link codes: N = 0.0625 -> 0.25 at q 1, 0.0625 at q 4
+			Assert::AreEqual(0.15 + 0.0, DitherNeed::TargetBlock<double>(p, 0.0625, 5.0, 1.0, 1.0, true, false, 1.0), 1e-12, L"q=1: sigmaOut .25");
+			Assert::AreEqual(0.55 - 0.0625 - 0.15, DitherNeed::TargetBlock<double>(p, 0.0625, 5.0, 1.0, 1.0, true, false, 4.0), 1e-12, L"q=4: sigmaOut .0625");
+			// 10-bit link through the Map: colorBits 10 is q 1
+			DitherNeed::Map m;
+			DitherNeed::FrameArgs a = DnArgs(RegionEvidence::MakeGrid(16, 8, 8), 1.0 / 60, false);
+			a.colorBits = 10;
+			std::vector<DitherNeed::BlockIn> b = DnTwoBlocks(1.0);
+			b[0].V = 0.5;
+			Assert::IsTrue(m.Update(a, b) == DitherNeed::Result::On);
+			Assert::AreEqual(0.175, m.Extra()[0], 1e-12, L"10-bit link: step 1");
+			Assert::AreEqual(0.35, m.Extra()[1], 1e-12);
+		}
+
+		TEST_METHOD(SmoothingResetDeadbandAndAlpha)
+		{
+			const RegionEvidence::Grid g = RegionEvidence::MakeGrid(16, 8, 8);   // 2 x 1 blocks
+			Assert::AreEqual(1, g.gh);
+			DitherNeed::Map m;
+			const double dt = 1.0 / 60;
+			Assert::IsTrue(m.Update(DnArgs(g, dt, false), DnTwoBlocks(1.0)) == DitherNeed::Result::On);
+			Assert::AreEqual(0.35, m.Extra()[0], 1e-12, L"first frame resets to the target");
+
+			// target 0 (banding 0): one smoothing step with alpha from dt
+			Assert::IsTrue(m.Update(DnArgs(g, dt, false), DnTwoBlocks(0.0)) == DitherNeed::Result::On);
+			const double alpha = 1.0 - std::exp(-dt / 0.25);
+			Assert::AreEqual(DitherNeed::AlphaFor(dt, 0.25), alpha, 1e-15);
+			Assert::AreEqual(0.35 * (1.0 - alpha), m.Extra()[0], 1e-12, L"one-pole step");
+			Assert::AreEqual(0.35, m.Extra()[1], 1e-12, L"the other block holds its target");
+			Assert::AreEqual(1.0, DitherNeed::AlphaFor(0.0, 0.25), 0.0, L"unknown dt: no smoothing");
+			Assert::AreEqual(1.0, DitherNeed::AlphaFor(-1.0, 0.25), 0.0);
+
+			// discontinuity: reset to the target
+			Assert::IsTrue(m.Update(DnArgs(g, dt, true), DnTwoBlocks(0.0)) == DitherNeed::Result::On);
+			Assert::AreEqual(0.0, m.Extra()[0], 0.0, L"discontinuity resets");
+
+			// deadband: a target within 0.02 of e holds e exactly
+			m.Update(DnArgs(g, dt, true), DnTwoBlocks(1.0));                     // e = 0.35
+			m.Update(DnArgs(g, dt, false), DnTwoBlocks((0.35 - 0.015) / 0.35));  // target 0.335: |diff| 0.015 <= 0.02
+			Assert::AreEqual(0.35, m.Extra()[0], 1e-12, L"hysteresis holds");
+			m.Update(DnArgs(g, dt, false), DnTwoBlocks((0.35 - 0.03) / 0.35));   // target 0.32: moves
+			Assert::IsTrue(m.Extra()[0] < 0.35 - 1e-6 && m.Extra()[0] > 0.32, L"moves beyond the deadband, not all the way");
+
+			// every other reset reason, each with a target inside the deadband (so only the reset can move e)
+			const double inside = (0.35 - 0.01) / 0.35;
+			{
+				DitherNeed::Map r; r.Update(DnArgs(g, dt, false), DnTwoBlocks(1.0));
+				r.Update(DnArgs(g, dt, false, "other lut"), DnTwoBlocks(inside));
+				Assert::AreEqual(0.34, r.Extra()[0], 1e-12, L"LUT fingerprint change resets");
+			}
+			{
+				DitherNeed::Map r; r.Update(DnArgs(g, dt, false), DnTwoBlocks(1.0));
+				DitherNeed::FrameArgs a = DnArgs(g, dt, false); a.colorBits = 10;   // visible at both depths: only the reset moves e
+				r.Update(a, DnTwoBlocks(inside));
+				Assert::AreEqual(0.34, r.Extra()[0], 1e-12, L"colour depth change resets");
+			}
+			{
+				DitherNeed::Map r; r.Update(DnArgs(g, dt, false), DnTwoBlocks(1.0));
+				DitherNeed::FrameArgs a = DnArgs(g, dt, false); a.params.aBase = 0.10;   // target (0.5 - 0.10) * 0.85 = 0.34
+				r.Update(a, DnTwoBlocks(0.85));
+				Assert::AreEqual(0.34, r.Extra()[0], 1e-12, L"aBase change resets");
+			}
+			{
+				DitherNeed::Map r; r.Update(DnArgs(g, dt, false), DnTwoBlocks(1.0));
+				const RegionEvidence::Grid g2 = RegionEvidence::MakeGrid(16, 8, 4);   // 4 x 2 blocks
+				std::vector<DitherNeed::BlockIn> b(g2.Count(), DnTwoBlocks(inside)[0]);
+				r.Update(DnArgs(g2, dt, false), b);
+				Assert::AreEqual(g2.Count(), r.Extra().size());
+				Assert::AreEqual(0.34, r.Extra()[0], 1e-12, L"grid change resets");
+			}
+		}
+
+		TEST_METHOD(SameTimeConstantAtTwoFrameRates)
+		{
+			const RegionEvidence::Grid g = RegionEvidence::MakeGrid(16, 8, 8);
+			DitherNeed::Map fast, slow;
+			fast.Update(DnArgs(g, 1.0 / 60, false), DnTwoBlocks(1.0));
+			slow.Update(DnArgs(g, 1.0 / 30, false), DnTwoBlocks(1.0));
+			// 60 Hz, two steps toward 0  ==  30 Hz, one step toward 0
+			fast.Update(DnArgs(g, 1.0 / 60, false), DnTwoBlocks(0.0));
+			fast.Update(DnArgs(g, 1.0 / 60, false), DnTwoBlocks(0.0));
+			slow.Update(DnArgs(g, 1.0 / 30, false), DnTwoBlocks(0.0));
+			Assert::IsTrue(std::fabs(fast.Extra()[0] - slow.Extra()[0]) < 1e-12, L"same e after the same wall-clock time");
+			Assert::IsTrue(fast.Extra()[0] > 0.0 && fast.Extra()[0] < 0.35);
+			Assert::AreEqual(0.35 * std::exp(-2.0 / 60 / 0.25), fast.Extra()[0], 1e-12, L"exp(-t / tau)");
+		}
+
+		TEST_METHOD(MissingInputsGiveZeroNamedStatusAndRecover)
+		{
+			DnFixture f;
+			f.Make(0);
+			std::vector<DitherNeed::BlockIn> blocks;
+			Assert::AreEqual(0u, DitherNeed::Gather(f.Inputs(), f.grid, blocks), L"complete inputs");
+			Assert::AreEqual(static_cast<size_t>(DitherNeedGolden::kBlocks), blocks.size());
+
+			DitherNeed::Map m;
+			DitherNeed::FrameArgs a = DnArgs(f.grid, 1.0 / 60, false, "golden");
+			Assert::IsTrue(m.Update(a, blocks) == DitherNeed::Result::On);
+			double sum = 0.0; for (double e : m.Extra()) sum += e;
+			Assert::IsTrue(sum > 1.0, L"some extra amplitude on a grain-free ramp");
+			size_t raised = 0; for (double e : m.Extra()) if (e > 1e-3) ++raised;
+			Assert::IsTrue(m.Status() == "dither need: on (" + std::to_string(raised) + " of " + std::to_string(DitherNeedGolden::kBlocks) +
+				" blocks raised)", DnWide(m.Status()).c_str());
+
+			{
+				DitherNeed::Inputs in = f.Inputs(); in.grain = nullptr;
+				std::vector<DitherNeed::BlockIn> b;
+				Assert::AreEqual(static_cast<unsigned>(DitherNeed::kNoGrain), DitherNeed::Gather(in, f.grid, b), L"null grain");
+				Assert::IsTrue(b.empty());
+				const RegionEvidence::GrainView none(nullptr);
+				in.grain = &none;
+				Assert::AreEqual(static_cast<unsigned>(DitherNeed::kNoGrain), DitherNeed::Gather(in, f.grid, b), L"invalid grain view");
+			}
+			{
+				DnFixture other; other.Make(0, 16);   // grain and precursors on 16 px blocks, expected grid 8 px
+				DitherNeed::Inputs in = f.Inputs(); in.grain = &other.grainView;
+				std::vector<DitherNeed::BlockIn> b;
+				Assert::AreEqual(static_cast<unsigned>(DitherNeed::kGrainGridMismatch), DitherNeed::Gather(in, f.grid, b), L"grain grid");
+				in = f.Inputs(); in.evidence = &other.view;
+				Assert::AreEqual(static_cast<unsigned>(DitherNeed::kEvidenceGridMismatch), DitherNeed::Gather(in, f.grid, b), L"evidence grid");
+			}
+			{
+				DitherNeed::Inputs in = f.Inputs(); in.evidence = nullptr;
+				std::vector<DitherNeed::BlockIn> b;
+				Assert::AreEqual(static_cast<unsigned>(DitherNeed::kNoPrecursors), DitherNeed::Gather(in, f.grid, b), L"no precursors");
+				in = f.Inputs(); in.lut = nullptr;
+				Assert::AreEqual(static_cast<unsigned>(DitherNeed::kNoLut), DitherNeed::Gather(in, f.grid, b), L"no lut");
+				in = f.Inputs(); in.domainSupported = false;
+				Assert::AreEqual(static_cast<unsigned>(DitherNeed::kUnsupportedDomain), DitherNeed::Gather(in, f.grid, b), L"domain");
+				in = f.Inputs(); in.grain = nullptr; in.lut = nullptr;
+				Assert::AreEqual(static_cast<unsigned>(DitherNeed::kNoGrain | DitherNeed::kNoLut), DitherNeed::Gather(in, f.grid, b));
+			}
+			Assert::IsTrue(DitherNeed::MissingText(DitherNeed::kNoGrain) == "no grain product");
+			Assert::IsTrue(DitherNeed::MissingText(DitherNeed::kGrainGridMismatch) == "grain product on another grid");
+			Assert::IsTrue(DitherNeed::MissingText(DitherNeed::kNoPrecursors) == "no region precursors");
+			Assert::IsTrue(DitherNeed::MissingText(DitherNeed::kNoLut) == "no light-level table");
+			Assert::IsTrue(DitherNeed::MissingText(DitherNeed::kUnsupportedDomain) == "output domain not supported");
+			Assert::IsTrue(DitherNeed::MissingText(DitherNeed::kNoGrain | DitherNeed::kNoLut) == "no grain product; no light-level table");
+			Assert::IsTrue(DitherNeed::MissingText(0).empty());
+
+			// missing: target 0 everywhere, e reset, status names the input, base amplitude (today's behaviour)
+			a.missing = DitherNeed::kNoGrain | DitherNeed::kUnsupportedDomain;
+			Assert::IsTrue(m.Update(a, std::vector<DitherNeed::BlockIn>()) == DitherNeed::Result::Unavailable);
+			for (double e : m.Extra()) Assert::AreEqual(0.0, e, 0.0);
+			Assert::IsTrue(m.Status() == "dither need: unavailable (no grain product; output domain not supported); sigma-delta at its base amplitude",
+				DnWide(m.Status()).c_str());
+			Assert::IsFalse(m.Valid());
+			// automatic recovery: the next complete frame is a reset, e = target (no leftover state)
+			a.missing = 0;
+			Assert::IsTrue(m.Update(a, blocks) == DitherNeed::Result::On);
+			DitherNeed::Map fresh;
+			fresh.Update(a, blocks);
+			Assert::IsTrue(m.Extra() == fresh.Extra(), L"recovery equals a fresh start");
+
+			// off and not-needed
+			a.enabled = false;
+			Assert::IsTrue(m.Update(a, blocks) == DitherNeed::Result::Off);
+			Assert::IsTrue(m.Status() == "dither need: off");
+			for (double e : m.Extra()) Assert::AreEqual(0.0, e, 0.0);
+			a.enabled = true; a.needed = false;
+			Assert::IsTrue(m.Update(a, blocks) == DitherNeed::Result::NotNeeded);
+			Assert::IsTrue(m.Status() == "dither need: not needed (link step invisible)");
+			for (double e : m.Extra()) Assert::AreEqual(0.0, e, 0.0);
+			a.needed = true;
+			Assert::IsTrue(m.Update(a, blocks) == DitherNeed::Result::On, L"recovers from not-needed");
+			Assert::IsTrue(m.Extra() == fresh.Extra());
+			// a block count that does not fit the grid is refused, never read out of range
+			Assert::IsTrue(m.Update(a, std::vector<DitherNeed::BlockIn>(3)) == DitherNeed::Result::Unavailable);
+		}
+
+		TEST_METHOD(DeterministicTwoRunsAreBitIdentical)
+		{
+			std::vector<double> runs[2];
+			for (int r = 0; r < 2; ++r)
+			{
+				DnFixture f; DitherNeed::Map m;
+				for (int s = 0; s < DitherNeedGolden::kSteps; ++s)
+				{
+					f.Make(DitherNeedGolden::kStep[s].frame);
+					std::vector<DitherNeed::BlockIn> b;
+					Assert::AreEqual(0u, DitherNeed::Gather(f.Inputs(), f.grid, b));
+					m.Update(DnArgs(f.grid, DitherNeedGolden::kStep[s].dt, DitherNeedGolden::kStep[s].discontinuity != 0, "golden"), b);
+					runs[r].insert(runs[r].end(), m.Extra().begin(), m.Extra().end());
+				}
+			}
+			Assert::AreEqual(runs[0].size(), runs[1].size());
+			Assert::IsTrue(std::memcmp(runs[0].data(), runs[1].data(), runs[0].size() * sizeof(double)) == 0, L"bitwise identical");
+		}
+
+		TEST_METHOD(ParseDefaultsOffAndRejectsInvalid)
+		{
+			auto parse = [](const char* key, const char* value, DitherNeed::Settings& s, std::vector<std::string>& errs)
+			{
+				const std::string k = key ? key : "", v = value ? value : "";
+				return DitherNeed::Parse([&](const std::string& name, std::string& out)
+				{
+					if (!key || name != k) return false;
+					out = v;
+					return true;
+				}, s, errs);
+			};
+			DitherNeed::Settings s; std::vector<std::string> errs;
+			s.on = true;
+			Assert::IsTrue(parse(nullptr, nullptr, s, errs)); Assert::IsFalse(s.on, L"absent = off"); Assert::IsTrue(errs.empty());
+			s.on = true; Assert::IsTrue(parse("dither_need", "", s, errs)); Assert::IsFalse(s.on, L"empty = off"); Assert::IsTrue(errs.empty());
+			Assert::IsTrue(parse("dither_need", "off", s, errs)); Assert::IsFalse(s.on);
+			Assert::IsTrue(parse("dither_need", "OFF", s, errs)); Assert::IsFalse(s.on);
+			Assert::IsTrue(parse("dither_need", "auto", s, errs)); Assert::IsTrue(s.on);
+			Assert::IsTrue(parse("dither_need", " Auto ", s, errs)); Assert::IsTrue(s.on, L"case-insensitive, blanks trimmed");
+			Assert::IsTrue(errs.empty());
+			Assert::IsFalse(parse("dither_need", "maybe", s, errs));
+			Assert::IsFalse(s.on, L"invalid stays off");
+			Assert::AreEqual(static_cast<size_t>(1), errs.size());
+			Assert::IsTrue(errs[0] == "dither_need: invalid value 'maybe' (expected off or auto); using off", DnWide(errs[0]).c_str());
+			s.on = true; errs.clear();
+			Assert::IsFalse(parse("dither_need", "on", s, errs)); Assert::IsFalse(s.on);
+			Assert::IsTrue(errs[0] == "dither_need: invalid value 'on' (expected off or auto); using off");
+		}
+
+		TEST_METHOD(AppendProductDeclaresOneNode)
+		{
+			std::vector<VpSkeleton::ProductDecl> decls;
+			const VpSkeleton::Dims frame = { 1920, 1080 };
+			const RegionEvidence::ProductIds ids = RegionEvidence::AppendProducts(decls, frame);
+			const size_t before = decls.size();
+			const VpSkeleton::ProductId id = DitherNeed::AppendProduct(decls, ids.grainSplit, ids.blockStats, frame);
+			Assert::AreEqual(before + 1, decls.size(), L"exactly one node appended");
+			int named = 0;
+			for (const auto& d : decls) if (std::strcmp(d.token, "dither.need") == 0) ++named;
+			Assert::AreEqual(1, named);
+			const VpSkeleton::ProductDecl& d = decls.back();
+			Assert::AreEqual(static_cast<int>(id), static_cast<int>(d.id));
+			Assert::AreEqual(static_cast<int>(before), static_cast<int>(d.id), L"dense id");
+			Assert::AreEqual(2, static_cast<int>(d.inputCount));
+			Assert::AreEqual(static_cast<int>(ids.grainSplit), static_cast<int>(d.inputs[0].product));
+			Assert::AreEqual(static_cast<int>(ids.blockStats), static_cast<int>(d.inputs[1].product));
+			Assert::AreEqual(0, static_cast<int>(d.inputs[0].lag));
+			Assert::AreEqual(0, static_cast<int>(d.inputs[1].lag));
+			Assert::IsTrue(d.backend == VpSkeleton::Backend::GpuCompute);
+			Assert::AreEqual(1, static_cast<int>(d.history));
+			Assert::IsTrue(d.missingInputForm);
+			Assert::IsFalse(d.sourceFrame, L"filled live by its consumer");
+			Assert::AreEqual(static_cast<uint32_t>(RegionEvidence::CostAt(frame).blocks * 32), d.size.fixedBytes, L"2 x rgba32f per block");
+			const VpSkeleton::ConsumerDecl c = DitherNeed::Consumer(id, 7);
+			Assert::AreEqual(1, static_cast<int>(c.count));
+			Assert::AreEqual(static_cast<int>(id), static_cast<int>(c.consumes[0].product));
+		}
+
+		// The quantiser model: with the total amplitude (noise_amplitude + extra) at 0.5 the dither stays inside (-0.5, 0.5), so
+		// codes that are exact link codes are never moved, BTB / WTW survive, and the code limits still clamp.
+		TEST_METHOD(QuantiserAtMaxAmplitudeKeepsExactCodesAndStaysUnbiased)
+		{
+			const DitherNeed::Params p;
+			const double amplitude = p.aBase + (p.aMax - p.aBase);
+			Assert::AreEqual(0.5, amplitude, 1e-15);
+			const SigmaDeltaDomain::CodeLimits lim = SigmaDeltaDomain::Limits(8, false);
+			Assert::AreEqual(1.0, lim.min, 0.0); Assert::AreEqual(254.0, lim.max, 0.0);
+			// 1 = lowest kept BTB code, 16 limited black, 100, 235 white, 240 WTW, 254 highest kept WTW
+			const double exact[] = { 1.0, 5.0, 16.0, 100.0, 235.0, 240.0, 254.0 };
+			for (double x : exact)
+			{
+				double r = 0.0;
+				for (int frame = 0; frame < 256; ++frame)
+					for (int px = 0; px < 8; ++px)
+					{
+						const double d = (static_cast<double>(SigmaDeltaDomain::Ign(static_cast<float>(px * 37 + 3), static_cast<float>(px * 11 + 1), frame)) - 0.5) * 2.0 * amplitude;
+						Assert::IsTrue(std::fabs(d) <= amplitude);
+						const double k = SigmaDeltaDomain::QuantiseStep(x, r, d, lim, amplitude);
+						Assert::AreEqual(x, k, 0.0, L"an exact code is never moved");
+						Assert::AreEqual(0.0, r, 0.0, L"and carries no residual");
+					}
+			}
+			// timing reference codes clamp into the kept range, the residual stays bounded
+			for (double x : { 0.0, 255.0 })
+			{
+				double r = 0.0;
+				for (int frame = 0; frame < 64; ++frame)
+				{
+					const double d = (static_cast<double>(SigmaDeltaDomain::Ign(5.0f, 9.0f, frame)) - 0.5) * 2.0 * amplitude;
+					const double k = SigmaDeltaDomain::QuantiseStep(x, r, d, lim, amplitude);
+					Assert::AreEqual(x == 0.0 ? lim.min : lim.max, k, 0.0);
+					Assert::IsTrue(std::fabs(r) <= SigmaDeltaDomain::ResidualBound(amplitude) + 1e-12);
+				}
+			}
+			// unbiased: the long-run mean of the output is the input (flat 100.3), at the base and at the raised amplitude
+			for (double amp : { p.aBase, amplitude })
+			{
+				double r = 0.0, sum = 0.0;
+				const int frames = 4096;
+				for (int frame = 0; frame < frames; ++frame)
+				{
+					const double d = (static_cast<double>(SigmaDeltaDomain::Ign(17.0f, 23.0f, frame)) - 0.5) * 2.0 * amp;
+					sum += SigmaDeltaDomain::QuantiseStep(100.3, r, d, lim, amp);
+				}
+				Assert::IsTrue(std::fabs(sum / frames - 100.3) < 0.01, L"unbiased");
+			}
+		}
+
+		TEST_METHOD(NeededAnywhereAndItsCache)
+		{
+			const DitherNeed::Params p;
+			LightLevel::Lut flat;
+			for (auto& e : flat.e) { e.V = 0.01; e.Sout = 1.0; }
+			flat.fingerprint = "flat";
+			Assert::IsFalse(DitherNeed::NeededAnywhere(flat, 4.0, p), L"tiny V: the link step is invisible");
+			// a visible step only below code 64 (BTB) does not count
+			LightLevel::Lut btbOnly = flat;
+			for (int c = 0; c < 64; ++c) btbOnly.e[static_cast<size_t>(c)].V = 5.0;
+			Assert::IsFalse(DitherNeed::NeededAnywhere(btbOnly, 4.0, p), L"codes below 64 are not counted");
+			LightLevel::Lut one = flat;
+			one.e[600].V = 5.0;
+			Assert::IsTrue(DitherNeed::NeededAnywhere(one, 4.0, p), L"one visible code is enough");
+			Assert::IsTrue(DitherNeed::Gate(one, 4.0, p).worstCode == 600);
+			Assert::IsFalse(DitherNeed::NeededAnywhere(one, 0.01, p), L"a finer link step is invisible");
+
+			// HdrToSdr 1000 nits, defaults, 8-bit link (q 4): needed
+			const LightLevel::Settings s = LightLevel::Read([](const std::string&, std::string&) { return false; });
+			LightLevel::Context c;
+			c.kind = LightLevel::Context::HdrToSdr;
+			c.sourcePeakNits = 1000.0;
+			const LightLevel::Lut hdr = LightLevel::Build(s, c);
+			Assert::IsTrue(DitherNeed::NeededAnywhere(hdr, 4.0, p));
+
+			DitherNeed::NeedCache cache;
+			Assert::IsFalse(cache.Get(flat, 4.0, p)); Assert::IsTrue(cache.LastRebuilt());
+			Assert::IsFalse(cache.Get(flat, 4.0, p)); Assert::IsFalse(cache.LastRebuilt(), L"cached per fingerprint");
+			Assert::IsTrue(cache.Get(hdr, 4.0, p)); Assert::IsTrue(cache.LastRebuilt(), L"another LUT");
+			Assert::IsTrue(cache.Get(hdr, 4.0, p)); Assert::IsFalse(cache.LastRebuilt());
+			cache.Get(hdr, 1.0, p); Assert::IsTrue(cache.LastRebuilt(), L"another link step");
+			DitherNeed::Params q = p; q.visHi = 0.9;
+			cache.Get(hdr, 1.0, q); Assert::IsTrue(cache.LastRebuilt(), L"another visibility ramp");
+		}
+
+		TEST_METHOD(SampleExtraBilinearConstantGradientAndClamp)
+		{
+			const int gw = 4, gh = 3, B = 8;
+			std::vector<float> constant(gw * gh, 0.3f);
+			for (int y : { 0, 3, 11, 12, 23, 40, 1000 })
+				for (int x : { 0, 1, 7, 8, 15, 31, 32, 1000 })
+					Assert::AreEqual(0.3, static_cast<double>(DitherNeed::SampleExtra(constant.data(), gw, gh, B, 1.0f, 1.0f, 0.0f, 0.0f, x, y)), 1e-6, L"constant");
+			// column index as value, row index * 10: gradients
+			std::vector<float> grad(gw * gh);
+			for (int j = 0; j < gh; ++j) for (int i = 0; i < gw; ++i) grad[static_cast<size_t>(j) * gw + i] = static_cast<float>(i + 10 * j);
+			// offset 0.5: src = pos + 1; a block centre is src = 8 i + 4, i.e. pos = 8 i + 3
+			for (int j = 0; j < gh; ++j) for (int i = 0; i < gw; ++i)
+				Assert::AreEqual(static_cast<double>(i + 10 * j), static_cast<double>(DitherNeed::SampleExtra(grad.data(), gw, gh, B, 1.0f, 1.0f, 0.5f, 0.5f, 8 * i + 3, 8 * j + 3)), 1e-5, L"block centre");
+			// halfway between two centres: pos = 8 i + 7
+			Assert::AreEqual(1.5, static_cast<double>(DitherNeed::SampleExtra(grad.data(), gw, gh, B, 1.0f, 1.0f, 0.5f, 0.5f, 8 * 1 + 7, 3)), 1e-5, L"halfway in x");
+			Assert::AreEqual(5.0, static_cast<double>(DitherNeed::SampleExtra(grad.data(), gw, gh, B, 1.0f, 1.0f, 0.5f, 0.5f, 3, 7)), 1e-5, L"halfway in y");
+			Assert::AreEqual(6.5, static_cast<double>(DitherNeed::SampleExtra(grad.data(), gw, gh, B, 1.0f, 1.0f, 0.5f, 0.5f, 15, 7)), 1e-5, L"halfway in both");
+			// clamped at the grid edges: before the first and beyond the last centre the edge value
+			Assert::AreEqual(0.0, static_cast<double>(DitherNeed::SampleExtra(grad.data(), gw, gh, B, 1.0f, 1.0f, 0.0f, 0.0f, 0, 0)), 1e-6, L"top-left");
+			Assert::AreEqual(3.0, static_cast<double>(DitherNeed::SampleExtra(grad.data(), gw, gh, B, 1.0f, 1.0f, 0.0f, 0.0f, 1000, 0)), 1e-6, L"right of the grid");
+			Assert::AreEqual(23.0, static_cast<double>(DitherNeed::SampleExtra(grad.data(), gw, gh, B, 1.0f, 1.0f, 0.0f, 0.0f, 1000, 1000)), 1e-6, L"bottom-right");
+			Assert::AreEqual(20.0, static_cast<double>(DitherNeed::SampleExtra(grad.data(), gw, gh, B, 1.0f, 1.0f, 0.0f, 0.0f, -40, 1000)), 1e-6, L"left of the grid");
+			// scale / offset against the formula in double
+			const float sx = 0.75f, ox = 3.0f, sy = 0.75f, oy = 1.5f;
+			for (int y : { 2, 9, 17 }) for (int x : { 4, 13, 22 })
+			{
+				const double u = ((x + 0.5) * sx + ox) / B - 0.5, v = ((y + 0.5) * sy + oy) / B - 0.5;
+				const double ex = std::min<double>(std::max<double>(u, 0.0), gw - 1) , ey = std::min<double>(std::max<double>(v, 0.0), gh - 1);
+				Assert::AreEqual(ex + 10 * ey, static_cast<double>(DitherNeed::SampleExtra(grad.data(), gw, gh, B, sx, sy, ox, oy, x, y)), 1e-4, L"scale and offset");
+			}
+			Assert::AreEqual(0.0, static_cast<double>(DitherNeed::SampleExtra(nullptr, gw, gh, B, 1.0f, 1.0f, 0.0f, 0.0f, 0, 0)), 0.0);
+		}
+
+		TEST_METHOD(FloatTemplateFollowsTheDoubleReference)
+		{
+			DnFixture f; f.Make(1);
+			std::vector<DitherNeed::BlockIn> bd;
+			Assert::AreEqual(0u, DitherNeed::Gather(f.Inputs(), f.grid, bd));
+			std::vector<DitherNeed::BlockInT<float>> bf(bd.size());
+			for (size_t i = 0; i < bd.size(); ++i)
+			{
+				bf[i].N = static_cast<float>(bd[i].N); bf[i].meanY = static_cast<float>(bd[i].meanY);
+				bf[i].banding = static_cast<float>(bd[i].banding); bf[i].V = static_cast<float>(bd[i].V);
+				bf[i].Sout = static_cast<float>(bd[i].Sout); bf[i].inPicture = bd[i].inPicture; bf[i].overlay = bd[i].overlay;
+			}
+			DitherNeed::Map md; DitherNeed::MapF mf;
+			const DitherNeed::FrameArgs a = DnArgs(f.grid, 1.0 / 60, false, "golden");
+			md.Update(a, bd); mf.Update(a, bf);
+			double worst = 0.0;
+			for (size_t i = 0; i < bd.size(); ++i) worst = std::max(worst, std::fabs(md.Extra()[i] - static_cast<double>(mf.Extra()[i])));
+			Assert::IsTrue(worst < 1e-5, L"float template vs double reference");
+		}
+
+		// The law + state + sampling against tools/eval/dither_need_ref.py (generated golden, double path 1e-9 relative).
+		TEST_METHOD(GoldenCrossCheckLawStateAndSampling)
+		{
+			using namespace DitherNeedGolden;
+			const DitherNeed::Params p;
+			const LightLevel::Lut lut = DnFixture::GoldenLut();
+			const double q = DitherNeed::QOut(kColorBits);
+			// per-frame targets from the golden block inputs
+			std::vector<std::vector<DitherNeed::BlockIn>> blocks(kFrames);
+			for (int f = 0; f < kFrames; ++f)
+			{
+				blocks[static_cast<size_t>(f)].resize(kBlocks);
+				for (int i = 0; i < kBlocks; ++i)
+				{
+					DitherNeed::BlockIn& b = blocks[static_cast<size_t>(f)][static_cast<size_t>(i)];
+					const int k = f * kBlocks + i;
+					b.N = kN[k]; b.meanY = kMeanY[k]; b.banding = kBanding[k]; b.inPicture = kInPicture[k] != 0; b.overlay = false;
+					const LightLevel::Entry en = LightLevel::Fetch(lut, b.meanY);
+					b.V = en.V; b.Sout = en.Sout;
+					const double t = DitherNeed::TargetBlock<double>(p, b.N, b.V, b.Sout, b.banding, b.inPicture, b.overlay, q);
+					Assert::IsTrue(DnClose(t, kTarget[k]), (L"target frame " + std::to_wstring(f) + L" block " + std::to_wstring(i)).c_str());
+				}
+			}
+			// state over the step sequence, then the sampled extras
+			DitherNeed::Map m;
+			const RegionEvidence::Grid grid = RegionEvidence::MakeGrid(kW, kH, kB);
+			Assert::AreEqual(kGw, grid.gw); Assert::AreEqual(kGh, grid.gh);
+			double worstSample = 0.0;
+			for (int s = 0; s < kSteps; ++s)
+			{
+				Assert::IsTrue(m.Update(DnArgs(grid, kStep[s].dt, kStep[s].discontinuity != 0, "golden"), blocks[static_cast<size_t>(kStep[s].frame)]) == DitherNeed::Result::On);
+				for (int i = 0; i < kBlocks; ++i)
+					Assert::IsTrue(DnClose(m.Extra()[static_cast<size_t>(i)], kE[s * kBlocks + i]), (L"e step " + std::to_wstring(s) + L" block " + std::to_wstring(i)).c_str());
+				const std::vector<float> map = m.ExtraFloat();
+				for (int k = 0; k < kSamples; ++k)
+				{
+					const float v = DitherNeed::SampleExtra(map.data(), kGw, kGh, kB, static_cast<float>(kScale), static_cast<float>(kScale),
+						static_cast<float>(kOffX), static_cast<float>(kOffY), kSampleX[k], kSampleY[k]);
+					worstSample = std::max(worstSample, std::fabs(static_cast<double>(v) - static_cast<double>(kSampled[s * kSamples + k])));
+				}
+			}
+			char msg[120];
+			std::snprintf(msg, sizeof(msg), "dither need golden: worst sampled-extra difference (float) %.3e", worstSample);
+			Logger::WriteMessage(msg);
+			Assert::IsTrue(worstSample <= 2e-6, L"float sampling within 2e-6 of the numpy float32 mirror");
+		}
+
+		// The python block inputs are a vectorised port of GrainSplit / StatsBlock / DeriveBlock; the C++ RegionEvidence chain on the
+		// same luma must agree. Measured on the three golden frames: N relative 2.3e-16, meanY exact, banding 2.4e-8 (Sample holds it as
+		// float); the tolerances below are those rounded up.
+		TEST_METHOD(GoldenRegionEvidenceInputsAgreeWithThePythonMirror)
+		{
+			using namespace DitherNeedGolden;
+			double worstRelN = 0.0, worstMean = 0.0, worstBanding = 0.0;
+			for (int f = 0; f < kFrames; ++f)
+			{
+				DnFixture fx; fx.Make(f);
+				std::vector<DitherNeed::BlockIn> b;
+				Assert::AreEqual(0u, DitherNeed::Gather(fx.Inputs(), fx.grid, b));
+				Assert::AreEqual(static_cast<size_t>(kBlocks), b.size());
+				for (int i = 0; i < kBlocks; ++i)
+				{
+					const int k = f * kBlocks + i;
+					const DitherNeed::BlockIn& c = b[static_cast<size_t>(i)];
+					worstRelN = std::max(worstRelN, std::fabs(c.N - kN[k]) / std::max(std::fabs(kN[k]), 1e-9));
+					worstMean = std::max(worstMean, std::fabs(c.meanY - kMeanY[k]));
+					worstBanding = std::max(worstBanding, std::fabs(c.banding - kBanding[k]));
+					Assert::AreEqual(kInPicture[k] != 0, c.inPicture);
+					Assert::IsFalse(c.overlay);
+				}
+			}
+			char msg[200];
+			std::snprintf(msg, sizeof(msg), "dither need inputs vs python: N rel %.3e, meanY abs %.3e, banding abs %.3e", worstRelN, worstMean, worstBanding);
+			Logger::WriteMessage(msg);
+			Assert::IsTrue(worstRelN <= 1e-12, L"N");
+			Assert::IsTrue(worstMean <= 1e-9, L"meanY");
+			Assert::IsTrue(worstBanding <= 1e-7, L"banding (float in Sample)");
 		}
 	};
 }
