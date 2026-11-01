@@ -416,8 +416,7 @@ namespace VideoProcessorTest
 						}
 					}
 			}
-			Logger::WriteMessage(("LIGHT_BLOCKS_GOLDEN worst=" + std::to_string(worst) + "
-").c_str());
+			Logger::WriteMessage(("LIGHT_BLOCKS_GOLDEN worst=" + std::to_string(worst) + "\n").c_str());
 		}
 
 		TEST_METHOD(BelowBlackAndAboveWhiteStayInTheDataAndAreLookedUpNotClamped)
