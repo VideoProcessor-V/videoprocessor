@@ -1812,8 +1812,26 @@ namespace VideoProcessorTest
 			const std::vector<int> placeholder = DwSigmaCodes(withDn(DwSigmaParams(true, "0.15"), "1"), greys, frames, true);
 			Assert::IsTrue(placeholder == base, (L"dither_need 1 with the placeholder differs: " + DwCodes(placeholder) + L" vs " + DwCodes(base)).c_str());
 
-			if (!DwHaveSetTexture())
-				Assert::Inconclusive(L"no pl_mpv_user_shader_set_texture in this libplacebo (standard 7.360 build): the bound-map cases did not run; the placeholder cases above did");
+		}
+
+		// (b2) the bound-map cases of (b): an all-zero map, and a non-zero map with dither_need 0, are byte-identical too.
+		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpBoundMapCasesAreByteIdentical)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+#ifndef PL_VP_MPV_USER_SHADER_SET_TEXTURE
+			TEST_IGNORE()   // needs the beta host's libplacebo fork (pl_mpv_user_shader_set_texture)
+#endif
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DitherNeedWarpBoundMapCasesAreByteIdentical)
+		{
+			const std::vector<float> greys = DwGreys();
+			const int frames = 16;
+			const std::vector<int> base = DwSigmaCodes(DwSigmaParams(true, "0.15"), greys, frames, true);
+			auto withDn = [](std::map<std::string, std::string> p, const char* need)
+			{
+				p["dither_need"] = need;
+				p["dn_scale_x"] = "3.7"; p["dn_scale_y"] = "0.5"; p["dn_off_x"] = "11"; p["dn_off_y"] = "-4"; p["dn_block"] = "32";
+				return p;
+			};
 			const std::vector<int> zero = DwSigmaCodes(withDn(DwSigmaParams(true, "0.15"), "1"), greys, frames, true, DwConstantMap(4, 3, 0.0f), 4, 3);
 			Assert::IsTrue(zero == base, (L"dither_need 1 with an all-zero map differs: " + DwCodes(zero) + L" vs " + DwCodes(base)).c_str());
 			// dither_need 0 with a non-zero map bound: never read.
@@ -1825,11 +1843,12 @@ namespace VideoProcessorTest
 		// from the plain run (the shader's frame / 5 counter has an unknown but fixed start), then used for every run.
 		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpConstantExtraFollowsTheCpuQuantiserModel)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+#ifndef PL_VP_MPV_USER_SHADER_SET_TEXTURE
+			TEST_IGNORE()   // needs the beta host's libplacebo fork (pl_mpv_user_shader_set_texture)
+#endif
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(DitherNeedWarpConstantExtraFollowsTheCpuQuantiserModel)
 		{
-			if (!DwHaveSetTexture())
-				Assert::Inconclusive(L"no pl_mpv_user_shader_set_texture in this libplacebo (standard 7.360 build): needs the beta host");
 			const std::vector<float> greys = DwGreys();
 			const int frames = 16;
 			const float aBase = 0.15f;
@@ -1872,11 +1891,12 @@ namespace VideoProcessorTest
 		// the footroom / headroom levels when libplacebo hands them through.
 		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+#ifndef PL_VP_MPV_USER_SHADER_SET_TEXTURE
+			TEST_IGNORE()   // needs the beta host's libplacebo fork (pl_mpv_user_shader_set_texture)
+#endif
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap)
 		{
-			if (!DwHaveSetTexture())
-				Assert::Inconclusive(L"no pl_mpv_user_shader_set_texture in this libplacebo (standard 7.360 build): needs the beta host");
 			const std::vector<float> levels = { 0.0f, 1.0f, 1.05f, -0.04f };   // black, white, WTW, BTB (limited range)
 			const int frames = 16;
 			const std::vector<int> exact = DwSigmaCodes(DwSigmaParams(false, "0"), levels, frames, false);
@@ -2104,7 +2124,7 @@ if (g.y == 0 && g.x < DN_N) {
 
 		// HookGuard: a skipped frame (no product) binds nothing and renders the off path; with the fork call the guard binds the map
 		// and Release() / the destructor restore the hook byte for byte. Without the fork call (standard 7.360 build) Apply returns
-		// false, reports kNoSetTexture, sets nothing, and the bound-map half is Inconclusive (it needs the beta host).
+		// false, reports kNoSetTexture, sets nothing, and that leg is asserted in full (the bound leg runs where the fork call exists).
 		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpHookGuardAppliesAndRestores)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
 		END_TEST_METHOD_ATTRIBUTE()
@@ -2172,7 +2192,7 @@ if (g.y == 0 && g.x < DN_N) {
 				Assert::IsFalse(applied, L"without set_texture Apply must return false");
 				Assert::AreEqual(static_cast<unsigned>(DitherNeed::kNoSetTexture), missingBit);
 				Assert::IsTrue(bound == base, L"without set_texture nothing is bound: the off path");
-				Assert::Inconclusive(L"no pl_mpv_user_shader_set_texture in this libplacebo (standard 7.360 build): the bound half of the guard test needs the beta host");
+				return;   // the unsupported leg is fully asserted above; the bound leg runs on the beta host
 			}
 			Assert::IsTrue(applied, L"Apply must bind the product");
 			Assert::IsTrue(bound != base, L"a bound non-zero map must change the codes (the test would be vacuous)");
