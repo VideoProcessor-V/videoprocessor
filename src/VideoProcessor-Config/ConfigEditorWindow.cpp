@@ -12064,7 +12064,6 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
     }
     else if(sectionPrefix==QStringLiteral("vprenderer.motion"))detailLayout->insertWidget(2,profileFields);
     else detailLayout->addWidget(profileFields);
-    ConfigPageHost::AppendProfileRows(sectionPrefix, addPlainForm, formApi_);   // VPV-HOOK
     detailLayout->addStretch();
 
     const auto updateQueuePolicyPresentation = [queuePolicy, queuePolicySummary,
@@ -12539,6 +12538,7 @@ QWidget* ConfigEditorWindow::createProfilePage(const QString& title, const QStri
             }
             field.widget->style()->unpolish(field.widget);
             field.widget->style()->polish(field.widget);
+            ConfigPageHost::OnBillField(sectionPrefix, field.key, field.widget, formApi_);   // VPV-HOOK
             if (field.kind == Field::Text)
             {
                 QString displayed = configured.compare(

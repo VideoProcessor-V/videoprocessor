@@ -67,8 +67,8 @@ namespace
 			entry.widget = page;
 			pages.push_back(entry);
 		}
-		void AppendProfileRows(const QString& prefix, QFormLayout*, CPH::ConfigFormApi&) override
-		{ log_->push_back(name_ + ":rows:" + prefix.toStdString()); }
+		void OnBillField(const QString& prefix, const QString& key, QWidget*, CPH::ConfigFormApi&) override
+		{ log_->push_back(name_ + ":field:" + prefix.toStdString() + ":" + key.toStdString()); }
 		bool MigrateOnLoad(CPH::ConfigFormApi& api) override
 		{
 			log_->push_back(name_ + ":migrate");
@@ -89,7 +89,7 @@ namespace
 	{
 	public:
 		void AppendPages(CPH::ConfigFormApi&, std::vector<CPH::ConfigPage>&) override { throw std::runtime_error("x"); }
-		void AppendProfileRows(const QString&, QFormLayout*, CPH::ConfigFormApi&) override { throw 1; }
+		void OnBillField(const QString&, const QString&, QWidget*, CPH::ConfigFormApi&) override { throw 1; }
 		bool MigrateOnLoad(CPH::ConfigFormApi&) override { throw 1; }
 		void BeforeSave(CPH::ConfigFormApi&) override { throw 1; }
 		void AfterApply(CPH::ConfigFormApi&) override { throw 1; }
@@ -110,9 +110,7 @@ namespace
 		CPH::AppendPages(api, pages);
 		require(pages.empty(), "an empty registry added pages");
 		require(!CPH::MigrateOnLoad(api), "an empty registry reported a migration");
-		int factoryCalls = 0;
-		CPH::AppendProfileRows(QStringLiteral("vprenderer"), [&]() -> QFormLayout* { ++factoryCalls; return nullptr; }, api);
-		require(factoryCalls == 0, "an empty registry asked for a profile form (it would add an empty widget)");
+		CPH::OnBillField(QStringLiteral("vprenderer"), QStringLiteral("k"), nullptr, api);
 		CPH::BeforeSave(api);
 		CPH::AfterApply(api);
 	}
@@ -128,15 +126,13 @@ namespace
 		CPH::Register(&b);
 		std::vector<CPH::ConfigPage> pages;
 		CPH::AppendPages(api, pages);
-		int factoryCalls = 0;
-		CPH::AppendProfileRows(QStringLiteral("p"), [&]() -> QFormLayout* { ++factoryCalls; return nullptr; }, api);
+		CPH::OnBillField(QStringLiteral("p"), QStringLiteral("k"), nullptr, api);
 		require(CPH::MigrateOnLoad(api), "a migrating provider was not reported");
 		CPH::BeforeSave(api);
 		CPH::AfterApply(api);
-		const std::vector<std::string> want = { "a:pages", "b:pages", "a:rows:p", "b:rows:p", "a:migrate", "b:migrate",
+		const std::vector<std::string> want = { "a:pages", "b:pages", "a:field:p:k", "b:field:p:k", "a:migrate", "b:migrate",
 			"a:before", "b:before", "a:after", "b:after" };
 		require(log == want, "the providers were not called in registration order");
-		require(factoryCalls == 1, "the profile form was not created exactly once");
 		CPH::ResetForTesting();
 		log.clear();
 		CPH::BeforeSave(api);
@@ -154,11 +150,11 @@ namespace
 		CPH::Register(&after);
 		std::vector<CPH::ConfigPage> pages;
 		CPH::AppendPages(api, pages);
-		CPH::AppendProfileRows(QStringLiteral("p"), []() -> QFormLayout* { return nullptr; }, api);
+		CPH::OnBillField(QStringLiteral("p"), QStringLiteral("k"), nullptr, api);
 		require(CPH::MigrateOnLoad(api), "a provider after a throwing one was not reached");
 		CPH::BeforeSave(api);
 		CPH::AfterApply(api);
-		require(Count(log, "after:pages") == 1 && Count(log, "after:rows:p") == 1 &&
+		require(Count(log, "after:pages") == 1 && Count(log, "after:field:p:k") == 1 &&
 			Count(log, "after:before") == 1 && Count(log, "after:after") == 1,
 			"a provider after a throwing one missed a call");
 	}
@@ -202,7 +198,9 @@ namespace
 			for (QPushButton* button : window.findChildren<QPushButton*>())
 				if (button->text() == QStringLiteral("Hook p")) leaf = true;
 			require(leaf, "the provider page has no navigation leaf");
-			require(Count(log, "p:rows:vprenderer") >= 1, "AppendProfileRows was not called for a profile page");
+			bool sawField = false;
+			for (const std::string& line : log) if (line.rfind("p:field:", 0) == 0) sawField = true;
+			require(sawField, "OnBillField was not called for a bound field");
 			g_save(window);   // the migration left a pending change
 			require(Count(log, "p:before") >= 1, "BeforeSave was not called by Apply");
 			require(Count(log, "p:after") >= 1, "AfterApply was not called after a successful Apply");

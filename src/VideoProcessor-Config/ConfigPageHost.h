@@ -16,7 +16,7 @@
 
 #include <vector>
 
-// Config editor extension point: an extension adds pages and profile rows, migrates settings at
+// Config editor extension point: an extension adds pages and sees each bound field, migrates settings at
 // load, and is told before a save and after a successful save, without the editor knowing it.
 // With nothing registered every call below does nothing.
 //
@@ -48,8 +48,10 @@ namespace ConfigPageHost
 	public:
 		virtual ~IConfigPageProvider() = default;
 		virtual void AppendPages(ConfigFormApi& api, std::vector<ConfigPage>& pages) { (void)api; (void)pages; }
-		virtual void AppendProfileRows(const QString& sectionPrefix, QFormLayout* form, ConfigFormApi& api)
-		{ (void)sectionPrefix; (void)form; (void)api; }
+		// An either/or hook for a field Bill's editor binds (e.g. a choice set that depends on a VP-V
+		// switch): called once per bound field with its section prefix, key and widget.
+		virtual void OnBillField(const QString& sectionPrefix, const QString& key, QWidget* widget, ConfigFormApi& api)
+		{ (void)sectionPrefix; (void)key; (void)widget; (void)api; }
 		// True when it changed the document.
 		virtual bool MigrateOnLoad(ConfigFormApi& api) { (void)api; return false; }
 		virtual void BeforeSave(ConfigFormApi& api) { (void)api; }
@@ -78,18 +80,13 @@ namespace ConfigPageHost
 		catch (...) {}
 	}
 
-	// `makeForm` returns the form to fill and is called once, only when a provider is registered,
-	// so an editor with no providers gets no extra widget.
-	template <class MakeForm>
-	void AppendProfileRows(const QString& sectionPrefix, MakeForm&& makeForm, ConfigFormApi& api) noexcept
+	inline void OnBillField(const QString& sectionPrefix, const QString& key, QWidget* widget, ConfigFormApi& api) noexcept
 	{
 		try
 		{
-			if (Detail::Registry().empty()) return;
-			QFormLayout* form = makeForm();
 			for (IConfigPageProvider* p : Detail::Registry())
 			{
-				try { p->AppendProfileRows(sectionPrefix, form, api); } catch (...) {}
+				try { p->OnBillField(sectionPrefix, key, widget, api); } catch (...) {}
 			}
 		}
 		catch (...) {}

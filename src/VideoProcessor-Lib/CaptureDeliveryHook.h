@@ -21,6 +21,9 @@
 #include <utility>
 #include <vector>
 
+class VideoFrame;
+class VideoState;
+
 struct CaptureFrameFacts
 {
 	int64_t sequence = -1;
@@ -38,6 +41,9 @@ public:
 	virtual ~ICaptureObserver() = default;
 	virtual void OnCaptureFrame(const CaptureFrameFacts&) {}
 	virtual void OnSourceFormatChange(const CaptureFrameFacts&) {}
+	// The delivered frame by reference (valid only for the call). `state` is the source state when
+	// the delivery point has it at hand, else nullptr; nothing is copied for the observer.
+	virtual void OnCaptureFrameData(const VideoFrame&, const VideoState*) {}
 };
 
 namespace CaptureDeliveryHook
@@ -58,6 +64,16 @@ namespace CaptureDeliveryHook
 		for (auto& o : Observers())
 		{
 			try { o->OnCaptureFrame(facts); }
+			catch (...) {}
+		}
+	}
+
+	inline void FrameData(const VideoFrame& frame, const VideoState* state) noexcept
+	{
+		if (!Any()) return;
+		for (auto& o : Observers())
+		{
+			try { o->OnCaptureFrameData(frame, state); }
 			catch (...) {}
 		}
 	}
