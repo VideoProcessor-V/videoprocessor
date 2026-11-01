@@ -183,6 +183,64 @@ namespace FallbackCatalog
 		return Engaged("motion", reason + (error.empty() ? std::string() : ": " + error) + ")");
 	}
 
+	// ---- motion.estimation: the vector producer's restarts (bug hunt 35 #1) -----------------------
+	// The look-ahead producer stopped after three failed jobs in a row and restarts itself with a
+	// back-off (MotionAhead::ProducerRecovery). Engaged while it is wanted and waiting to restart,
+	// for every vector consumer (the "motion" entry above covers only the de-judder's view).
+	inline Decision VectorProducer(bool wanted, bool recovering, unsigned stops, const std::string& error = std::string())
+	{
+		if (!wanted || !recovering)
+			return Released("vector producer");
+		return Engaged("vector producer", "render-time motion estimate; the look-ahead stopped" +
+			(error.empty() ? std::string() : ": " + error) + "; restarting with back-off (stop " + std::to_string(stops) + ")");
+	}
+
+	// ---- look-ahead workers (bug hunt 31 H3) ----------------------------------------------------
+	// A look-ahead batch threw (the motion-ahead hand-off, the source-resolution look-ahead): its
+	// frames went without that work. Engaged at the failure with the exception text, released after
+	// `releaseAfterGood` batches in a row without one (the next batches retry on their own).
+	struct LookAheadFailures
+	{
+		const char* id = "look-ahead";
+		const char* without = "frames skipped";
+		unsigned long long failures = 0;
+		unsigned goodSince = 0;
+		bool engaged = false;
+		std::string what;
+		LookAheadFailures(const char* idIn, const char* withoutIn) : id(idIn), without(withoutIn) {}
+		Decision Note(bool failed, const std::string& whatIn = std::string(), unsigned releaseAfterGood = 8)
+		{
+			if (failed)
+			{
+				++failures;
+				goodSince = 0;
+				engaged = true;
+				what = whatIn;
+			}
+			else if (engaged && ++goodSince >= releaseAfterGood)
+				engaged = false;
+			if (!engaged)
+				return Released(id);
+			return Engaged(id, std::string(without) + " (worker exception" + (what.empty() ? std::string() : ": " + what) +
+				"); retrying each batch");
+		}
+	};
+	inline LookAheadFailures MotionAheadWorker() { return LookAheadFailures("motion look-ahead", "no optical-flow look-ahead for some frames"); }
+	inline LookAheadFailures SourceResolutionWorker() { return LookAheadFailures("source resolution look-ahead", "resolution judged on arrival only"); }
+
+	// ---- control.diagnostics: diagnostic overrides (bug hunt 39 #6) -----------------------------
+	// Test / debug switches set in the environment outside a test harness
+	// (VpDiagnostics::OverridesToShow). Engaged while any is set; the names only, never values.
+	inline Decision DiagnosticOverrides(const std::vector<std::string>& names)
+	{
+		if (names.empty())
+			return Released("diagnostic override");
+		std::string list;
+		for (size_t i = 0; i < names.size(); ++i)
+			list += (i ? ", " : "") + names[i];
+		return Engaged("diagnostic override", "active: " + list);
+	}
+
 	// ---- motion.consumers -----------------------------------------------------------------------
 	// A picture between frames could not be made on the GPU (the de-judder warp, the rendered warp
 	// or the interpolation failed): the source frame is shown instead (the de-judder holds). Engaged
@@ -371,5 +429,50 @@ namespace FallbackCatalog
 		return sustainedMiss ? Engaged("vector_engine_global",
 			"source monitor fast-pan / intent without whole-frame motion (vector engine pair missed)") :
 			Released("vector_engine_global");
+	}
+
+	// ---- skeleton analysis lane -----------------------------------------------------------------
+	// The regulator reduced the lane's work (dropped products, forced live fills, T0 in the render,
+	// pinned at the minimum, the optical-flow input reduced by `ofaStep` steps: 0 = full), or the lane is
+	// not available for the source stats. The lists hold plain-language product names (the host maps ids
+	// to names).
+	inline std::string JoinNames(const std::vector<std::string>& names)
+	{
+		std::string out;
+		for (size_t i = 0; i < names.size(); ++i)
+			out += (i ? ", " : "") + names[i];
+		return out;
+	}
+	inline Decision AnalysisLane(const std::vector<std::string>& dropped, const std::vector<std::string>& forcedLive,
+		bool pinnedAtMinimum, bool t0InRender, unsigned ofaStep = 0)
+	{
+		if (dropped.empty() && forcedLive.empty() && !pinnedAtMinimum && !t0InRender && ofaStep == 0)
+			return Released("analysis_lane");
+		std::string reason;
+		auto add = [&reason](const std::string& part) { reason += (reason.empty() ? std::string() : "; ") + part; };
+		if (!dropped.empty())
+			add("reduced: " + JoinNames(dropped) + " off (dropped)");
+		if (!forcedLive.empty())
+			add("forced live: " + JoinNames(forcedLive));
+		if (t0InRender)
+			add("core analysis runs in the render");
+		if (ofaStep != 0)
+			add("vector engine input reduced (step " + std::to_string(ofaStep) + ")");
+		if (pinnedAtMinimum)
+			add("analysis at minimum");
+		return Engaged("analysis_lane", reason);
+	}
+	inline Decision AnalysisLaneDeterminism(unsigned long long missedBounds)
+	{
+		if (missedBounds == 0)
+			return Released("analysis_lane_determinism");
+		return Engaged("analysis_lane_determinism", "deterministic playback: " + std::to_string(missedBounds) +
+			" frames missed the bounded wait (vector engine fallback used; this run is not reproducible)");
+	}
+	inline Decision SourceStatsWalk(bool laneRequested, bool laneUnavailable)
+	{
+		return laneRequested && laneUnavailable ? Engaged("source_stats_walk",
+			"active-picture walk uses Bill's original walk (lane source stats unavailable)") :
+			Released("source_stats_walk");
 	}
 }

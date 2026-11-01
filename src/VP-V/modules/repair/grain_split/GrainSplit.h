@@ -182,6 +182,12 @@ namespace GrainSplit
 		int history;
 		const char* readers;
 	};
-	constexpr ProductInfo kProduct = { "grain.split", "rebased.luma (lag 0)", "GpuCompute", 1,
-		"repair.temporal_detail (today); chroma, mosquito repair, scaling (intended)" };
+	// ONE product node (integration 2026-11-01): token VpSkeleton::kTokenGrainSplit (core/Products.h), declared and owned by
+	// input.source_analysis/regions (RegionEvidence::AppendProducts, GrainProduct; GrainView is the one read API), computed
+	// once, early, on the decoded source with the picture extended by mirroring. This module is its implementation: the CPU
+	// law below and the GPU passes (GrainSplitGpu.h, one Frame per plane carried in GrainProduct::gpu). The exact original
+	// grain is added back once at the end of the source-domain block.
+	constexpr ProductInfo kProduct = { "grain.split", "source luma, picture-extended (lag 0); p4 picture rect", "GpuCompute", 1,
+		"camera model grain map, repair.temporal_detail, scaling.chroma_upscale (CfL chroma-grain guard), grain-safe contrast "
+		"recovery, region block stats (declared); deband, mosquito repair, scaling (intended)" };
 }

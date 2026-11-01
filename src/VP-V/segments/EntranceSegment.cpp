@@ -2,6 +2,7 @@
 #include "EntranceSegment.h"
 
 #include <VP-V/core/EntranceEpoch.h>
+#include <VP-V/modules/control/diagnostics/DiagnosticOverrides.h>
 #include <VP-V/core/FallbackCatalog.h>
 
 #include <VP-V/modules/control/diagnostics/DiagnosticsAdapter.h>
@@ -309,7 +310,7 @@ namespace EntranceSegment
 		// The "Entrance cost" / "Entrance stages" lines and their cadence live in the diagnostics adapter.
 		VpDiagnostics::EntranceCounters c = {
 			entranceStageRuns, entranceSourceFrames, entranceRuns, entranceReuses, entranceOnceA, entranceOnceB,
-			entranceOnceReused, entranceOncePictures, entranceOnceFallbacks, entranceStatefulBreaks, Once() };
+			entranceOnceReused, entranceOncePictures, entranceOnceFallbacks, entranceStatefulBreaks, Once(), entranceOnceFallbackFrames };
 		VpDiagnostics::LogEntranceCounters(c, entranceCostLoggedAt);
 	}
 
@@ -395,6 +396,8 @@ namespace EntranceSegment
 	void Segment::OnceFallback(const std::string& why)
 	{
 		++entranceOnceFallbacks;
+		if (entranceOnceFallbackFor != entranceOnceCurrentA)
+			++entranceOnceFallbackFrames;
 		entranceOnceFallbackFor = entranceOnceCurrentA;
 		if (why != entranceOnceNote)
 		{
@@ -433,8 +436,8 @@ namespace EntranceSegment
 			entranceOnceForcedRead = true;
 			// The process environment (the harness sets it with SetEnvironmentVariable).
 			char v[32] = {};
-			if (GetEnvironmentVariableA("VP_TEST_ENTRANCE_ONCE_FALLBACK_EVERY", v, sizeof(v)) > 0)
-				entranceOnceForcedEvery = static_cast<unsigned>(std::strtoul(v, nullptr, 10));
+			if (GetEnvironmentVariableA("VP_TEST_ENTRANCE_ONCE_FALLBACK_EVERY", v, sizeof(v)) > 0)   // strict (bug hunt 39 #7)
+				entranceOnceForcedEvery = static_cast<unsigned>(VpDiagnostics::StrictNumber(v, 0.0, 0.0, 1.0e6));
 		}
 		return entranceOnceForcedEvery > 0 && (++entranceOnceForcedCount % entranceOnceForcedEvery) == 0;
 	}

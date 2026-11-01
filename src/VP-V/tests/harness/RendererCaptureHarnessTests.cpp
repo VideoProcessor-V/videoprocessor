@@ -7,6 +7,9 @@
 #include <wincodec.h>
 #include <atlbase.h>
 #pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "dwmapi.lib")
+#include <dwmapi.h>
 #include "CppUnitTest.h"
 
 #include <DisplayMode.h>
@@ -56,6 +59,48 @@ using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 // profile, and its log read back to see which capture path ran. Hardware
 // only (VP_TEST_GPU=hardware): the renderer opens the real GPU, a swapchain on
 // a small off-screen window.
+namespace
+{
+	// The primary display's exact refresh (e.g. 59.940 or 119.88), not the rounded integer
+	// EnumDisplaySettings reports: the display configuration's rational rate for the active
+	// path whose source is the primary monitor (source mode at 0,0), else the DWM composition
+	// rate, else the rounded mode frequency, else 60.
+	double ExactMonitorHz()
+	{
+		UINT32 pathCount = 0, modeCount = 0;
+		if (GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &pathCount, &modeCount) == ERROR_SUCCESS && pathCount > 0)
+		{
+			std::vector<DISPLAYCONFIG_PATH_INFO> paths(pathCount);
+			std::vector<DISPLAYCONFIG_MODE_INFO> modes(modeCount);
+			if (QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &pathCount, paths.data(), &modeCount, modes.data(), nullptr) == ERROR_SUCCESS)
+			{
+				for (UINT32 i = 0; i < pathCount; ++i)
+				{
+					const UINT32 sourceIndex = paths[i].sourceInfo.modeInfoIdx;
+					if (sourceIndex >= modeCount || modes[sourceIndex].infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
+						continue;
+					const POINTL position = modes[sourceIndex].sourceMode.position;
+					if (position.x != 0 || position.y != 0)
+						continue;
+					const DISPLAYCONFIG_RATIONAL rate = paths[i].targetInfo.refreshRate;
+					if (rate.Numerator > 0 && rate.Denominator > 0)
+						return static_cast<double>(rate.Numerator) / static_cast<double>(rate.Denominator);
+				}
+			}
+		}
+		DWM_TIMING_INFO timing{};
+		timing.cbSize = sizeof(timing);
+		if (SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &timing)) && timing.rateRefresh.uiDenominator > 0 &&
+			timing.rateRefresh.uiNumerator > 0)
+			return static_cast<double>(timing.rateRefresh.uiNumerator) / static_cast<double>(timing.rateRefresh.uiDenominator);
+		DEVMODEW mode{};
+		mode.dmSize = sizeof(mode);
+		if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1)
+			return static_cast<double>(mode.dmDisplayFrequency);
+		return 60.0;
+	}
+}
+
 namespace
 {
 	std::mutex g_logMutex;
@@ -143,7 +188,7 @@ namespace
 	// skip fails instead.
 	bool RequireGpu()
 	{
-		return EnvIs("VP_TEST_REQUIRE_GPU", "1");
+		return EnvIs("VP_TEST_REQUIRE_GPU", "1") || EnvIs("VP_TEST_REQUIRE_ALL", "1");
 	}
 
 	// The hardware tests' guard: true when the test can run (VP_TEST_GPU=hardware). Otherwise,
@@ -837,10 +882,7 @@ namespace
 			// As the app does: the monitor's refresh rate (smooth motion needs it;
 			// it does not come from the window's frame statistics).
 			{
-				DEVMODEW mode{};
-				mode.dmSize = sizeof(mode);
-				if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1)
-					renderer->SetRenderLoadDisplayRefreshRate(static_cast<double>(mode.dmDisplayFrequency));
+				renderer->SetRenderLoadDisplayRefreshRate(ExactMonitorHz());
 			}
 			g_harnessShadersSelected = false;
 			if (!g_harnessShaderProfiles.empty())
@@ -1763,13 +1805,7 @@ namespace Tests
 			//     SAME at every rate for one budget, within a refresh plus measurement jitter;
 			//   - recovery: after a one-second capture gap the delay returns to its level.
 			if (!RequireHardwareOrSkip("DelayBudgetFrameLadderHoldsTheTotalAtEveryRate")) return;
-			double refreshHz = 60.0;
-			{
-				DEVMODEW mode{};
-				mode.dmSize = sizeof(mode);
-				if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1)
-					refreshHz = static_cast<double>(mode.dmDisplayFrequency);
-			}
+			const double refreshHz = ExactMonitorHz();
 			DelayBudget::Model model;
 			model.refreshHz = refreshHz;
 			struct Rate { int numerator, denominator; };
@@ -4752,10 +4788,7 @@ namespace Tests
 		// display, whatever the display), never a fixed rate (owner [[vp-general-not-fixed]]).
 		static double HarnessMonitorHz()
 		{
-			DEVMODEA mode{};
-			mode.dmSize = sizeof(mode);
-			return EnumDisplaySettingsA(nullptr, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1 ?
-				static_cast<double>(mode.dmDisplayFrequency) : 60.0;
+			return ExactMonitorHz();
 		}
 
 		static FramePlan RatePlan(double sourceHz)
@@ -4781,6 +4814,7 @@ namespace Tests
 		{
 			bool found = false;
 			unsigned long long a = 0, b = 0, reused = 0, pictures = 0, fallbacks = 0, breaks = 0;
+			unsigned long long fallbackFrames = 0;   // source frames that fell back (once per frame)
 		};
 		static EntranceOnceCounters ReadEntranceOnce(const RunResult& r)
 		{
@@ -4790,13 +4824,14 @@ namespace Tests
 				const size_t at = line.find("entrance once (B3): A ");
 				if (at == std::string::npos)
 					continue;
-				unsigned long long a = 0, b = 0, reused = 0, pictures = 0, fallbacks = 0, breaks = 0;
-				const int n = sscanf_s(line.c_str() + at, "entrance once (B3): A %llu, B ahead %llu, ring reuses %llu, pictures from processed planes %llu, fallbacks %llu, history breaks %llu",
-					&a, &b, &reused, &pictures, &fallbacks, &breaks);
-				if (n == 6)
+				unsigned long long a = 0, b = 0, reused = 0, pictures = 0, fallbacks = 0, breaks = 0, fallbackFrames = 0;
+				const int n = sscanf_s(line.c_str() + at, "entrance once (B3): A %llu, B ahead %llu, ring reuses %llu, pictures from processed planes %llu, fallbacks %llu, history breaks %llu, fallback frames %llu",
+					&a, &b, &reused, &pictures, &fallbacks, &breaks, &fallbackFrames);
+				if (n >= 6)
 				{
 					c.found = true;
-					c.a = a; c.b = b; c.reused = reused; c.pictures = pictures; c.fallbacks = fallbacks; c.breaks = n == 6 ? breaks : 0;
+					c.a = a; c.b = b; c.reused = reused; c.pictures = pictures; c.fallbacks = fallbacks; c.breaks = breaks;
+					c.fallbackFrames = n == 7 ? fallbackFrames : fallbacks;   // an older line: the per-picture count
 				}
 			}
 			return c;
@@ -4870,8 +4905,8 @@ namespace Tests
 					SetEnvironmentVariableA("VP_TEST_ENTRANCE_ONCE_FALLBACK_EVERY", nullptr);
 				const EntranceOnceCounters k = ReadEntranceOnce(r);
 				char line[320];
-				snprintf(line, sizeof(line), "== %s: presented %s; B3 counters %s: A %llu, B ahead %llu, ring reuses %llu, pictures %llu, fallbacks %llu, history breaks %llu; %s\n",
-					c.name, r.presented ? "yes" : "NO", k.found ? "found" : "none", k.a, k.b, k.reused, k.pictures, k.fallbacks, k.breaks,
+				snprintf(line, sizeof(line), "== %s: presented %s; B3 counters %s: A %llu, B ahead %llu, ring reuses %llu, pictures %llu, fallbacks %llu, fallback frames %llu, history breaks %llu; %s\n",
+					c.name, r.presented ? "yes" : "NO", k.found ? "found" : "none", k.a, k.b, k.reused, k.pictures, k.fallbacks, k.fallbackFrames, k.breaks,
 					r.fallbacksStatus.c_str());
 				Logger::WriteMessage(line);
 				const std::string name = c.name;
@@ -4909,9 +4944,28 @@ namespace Tests
 				{
 					if (shown)
 						failures += name + ": B3 fell back (" + r.fallbacksStatus + "); ";
-					// Start-up only (C not yet queued): never more than a few (audit HIGH 2).
-					if (k.found && k.fallbacks > 3)
-						failures += name + ": " + std::to_string(k.fallbacks) + " fallbacks (start-up allows 3); ";
+					// Start-up only (C not yet queued): a fixed allowance of 3 source frames, plus one per
+					// gap in the case (a gap leaves no frame after next); judged per source frame, not per
+					// picture (the per-picture count stays logged), and never scaled with the run length.
+					const unsigned long long gapsInCase = c.gap ? 1ull : 0ull;
+					const unsigned long long allowed = 3ull + gapsInCase;
+					if (k.found && k.fallbackFrames > allowed)
+					{
+						failures += name + ": " + std::to_string(k.fallbackFrames) + " fallback frames (allows " +
+							std::to_string(allowed) + "; " + std::to_string(k.fallbacks) + " per-picture fallbacks); ";
+						std::vector<size_t> depths;
+						for (const RunResult::TrendSample& t : r.trend)
+							if (t.seconds >= 2.0) depths.push_back(t.queueDepth);
+						if (!depths.empty())
+						{
+							std::sort(depths.begin(), depths.end());
+							Logger::WriteMessage(("   queue depth after 2 s: min " + std::to_string(depths.front()) + ", 5th percentile " +
+								std::to_string(depths[depths.size() * 5 / 100]) + " (" + std::to_string(depths.size()) + " samples)\n").c_str());
+						}
+						for (const std::string& logLine : r.log)
+							if (logLine.find("De-judder estimate ahead") != std::string::npos && logLine.find("no frame after next") != std::string::npos)
+								Logger::WriteMessage(("   " + logLine + "\n").c_str());
+					}
 				}
 				// HIGH 1: the stateful stages never ran out of sequence (gaps excepted: they skip sequences).
 				if (!c.gap && k.found && k.breaks > 0)
@@ -5261,8 +5315,9 @@ namespace Tests
 						failures += "motion B3 on: fell back (" + r.fallbacksStatus + "); ";
 					// 2: the draw found B's A made ahead (the input side once per source frame).
 					// Audit HIGH 1/2: start-up fallbacks only, and the stateful history never restarted.
-					if (k.found && k.fallbacks > 3)
-						failures += "motion B3 on: " + std::to_string(k.fallbacks) + " fallbacks (start-up allows 3); ";
+					if (k.found && k.fallbackFrames > 3)
+						failures += "motion B3 on: " + std::to_string(k.fallbackFrames) + " fallback frames (start-up allows 3; " +
+							std::to_string(k.fallbacks) + " per-picture); ";
 					if (k.found && k.breaks > 0)
 						failures += "motion B3 on: " + std::to_string(k.breaks) + " stateful history breaks; ";
 					if (k.found && k.b > 10 && k.a * 10 > k.b)

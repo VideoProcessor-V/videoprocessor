@@ -314,7 +314,10 @@ namespace Pulldown
 	private:
 		Decision Decide(bool repeat, bool gap, double signalHz, int missedFrames)
 		{
-			if (!m_timingRelatch && m_signalHz > 0.0 && signalHz > 0.0 && std::fabs(signalHz - m_signalHz) > m_signalHz * 0.005)
+			// The fixed 0.5% rule. Bug hunt 35 #3 / 25a R5: also in `on` (timing re-latch), as a backstop
+			// for a move the timing event cannot see (a window that never fills between gaps); a re-latch
+			// moves m_signalHz first, so a move it already handled never trips it.
+			if (m_signalHz > 0.0 && signalHz > 0.0 && std::fabs(signalHz - m_signalHz) > m_signalHz * 0.005)
 				ResetState();
 			else if (gap && !SkipMissed(missedFrames))
 				ResetState();
@@ -449,8 +452,8 @@ namespace Pulldown
 	public:
 		bool Locked() const { return m_locked; }
 
-		// R3 (resync_event on): the Indicator's `timing` counter re-latches the signal rate in
-		// place of the fixed 0.5% rule (which is off while this is set). Off = the rule as before.
+		// R3 (resync_event on): the Indicator's `timing` counter re-latches the signal rate; the fixed
+		// 0.5% rule stays on as a backstop (bug hunt 35 #3 / 25a R5). Off = the rule alone, as before.
 		void SetTimingRelatch(bool on) { m_timingRelatch = on; }
 		bool TimingRelatch() const { return m_timingRelatch; }
 		double SignalHz() const { return m_signalHz; }

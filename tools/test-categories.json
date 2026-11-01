@@ -81,6 +81,34 @@
    "note": "Motion-adapted blend and Stage 8b one-axis hook tests; WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture). The CPU class in the same file is AdaptiveScalingOneAxisMotionTests."
   },
   {
+   "kind": "method",
+   "value": "TemporalDetailGpuTests::TemporalDetailGpuTiming",
+   "category": "GpuHardware",
+   "file": "src/VP-V/modules/repair/temporal_detail/tests/TemporalDetailGpuTests.cpp",
+   "note": "Timing; runs only with VP_TEST_GPU=hardware."
+  },
+  {
+   "kind": "method",
+   "value": "ChromaCflGpuTests::ChromaCflGpuTiming",
+   "category": "GpuHardware",
+   "file": "src/VP-V/modules/scaling/chroma_upscale/tests/ChromaCflTests.cpp",
+   "note": "Timing; runs only with VP_TEST_GPU=hardware."
+  },
+  {
+   "kind": "class",
+   "value": "TemporalDetailGpuTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/repair/temporal_detail/tests/TemporalDetailGpuTests.cpp",
+   "note": "WARP unless VP_TEST_GPU=hardware; the *Timing methods carry Category GpuHardware."
+  },
+  {
+   "kind": "class",
+   "value": "ChromaCflGpuTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/scaling/chroma_upscale/tests/ChromaCflTests.cpp",
+   "note": "WARP unless VP_TEST_GPU=hardware; the *Timing methods carry Category GpuHardware."
+  },
+  {
    "kind": "class",
    "value": "CaptureUnpackHookTests",
    "category": "GpuWarp",

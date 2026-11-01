@@ -1,0 +1,12 @@
+{
+  "warmup_min": 30,
+  "min_samples": 3,
+  "private_bytes_mb_per_h": 2,
+  "vram_mb_per_h": 4,
+  "handles_per_h": 50,
+  "thread_range": 8,
+  "drops_per_h": 1,
+  "steady_window_s": 10,
+  "p99_creep_pct": 10,
+  "min_hours_creep": 2
+}

@@ -31,6 +31,7 @@ namespace Dejudder
 			SnapshotFailed,
 			UploadFailed,
 			EstimateFailed,
+			AfterGap,          // C is not queued because a gap follows B (inert until the host sets afterGap)
 			Count
 		};
 
@@ -42,6 +43,7 @@ namespace Dejudder
 			uint64_t source = 0;      // A, showing
 			uint64_t next = 0;        // B
 			uint64_t after = 0;       // C (0 = not available)
+			bool afterGap = false;    // C is absent because the frame after next follows a gap
 			uint64_t estimated = 0;   // the matcher holds (estimated, its next)
 			bool layoutMatches = true;
 		};
@@ -62,7 +64,7 @@ namespace Dejudder
 			if (!c.renderedWarp) return skip(Reason::SourceWarp);
 			if (!c.active) return skip(Reason::NotActive);
 			if (c.next == 0) return skip(Reason::NoNext);
-			if (c.after == 0) return skip(Reason::NoAfter);
+			if (c.after == 0) return skip(c.afterGap ? Reason::AfterGap : Reason::NoAfter);
 			if (c.after == c.next || c.after == c.source) return skip(Reason::AfterNotNew);
 			if (c.estimated != c.source) return skip(Reason::NotEstimated);
 			if (!c.layoutMatches) return skip(Reason::Layout);
@@ -121,6 +123,7 @@ namespace Dejudder
 			case Reason::SnapshotFailed: return "copy failed";
 			case Reason::UploadFailed: return "upload failed";
 			case Reason::EstimateFailed: return "estimate failed";
+			case Reason::AfterGap: return "frame after next follows a gap";
 			default: return "?";
 			}
 		}

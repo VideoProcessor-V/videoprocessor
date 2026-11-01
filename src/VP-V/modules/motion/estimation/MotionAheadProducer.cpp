@@ -1,6 +1,8 @@
 #include <pch.h>
 #include "MotionAheadProducer.h"
 
+#include <DebugLog.h>
+
 #include <dxgi.h>
 
 #include <algorithm>
@@ -202,28 +204,76 @@ namespace MotionAhead
 		havePrevious = false;
 		engineReady = false;
 		sizeW = sizeH = 0;
+		consecutiveFailures = 0;
+		recovery = ProducerRecovery();
+		stopError.clear();
+		renderAdapter = adapter;
 		running = true;
-		CComPtr<IDXGIAdapter> workerAdapter = adapter;
-		worker = std::thread([this, workerAdapter] {
-			const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
-			CComPtr<ID3D11Device> created;
-			CComPtr<ID3D11DeviceContext> createdContext;
-			if (FAILED(D3D11CreateDevice(workerAdapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, levels, 2, D3D11_SDK_VERSION,
-					&created, nullptr, &createdContext)))
+		worker = std::thread([this] {
+			std::string why;
+			if (!CreateDevice(why))
 			{
 				std::lock_guard<std::mutex> lock(mutex);
-				error = "cannot create its D3D11 device";
+				error = why;
 				running = false;
 				return;
-			}
-			{
-				std::lock_guard<std::mutex> lock(mutex);
-				device = created;
-				context = createdContext;
 			}
 			Worker();
 		});
 		return true;
+	}
+
+	bool Producer::CreateDevice(std::string& why)
+	{
+		const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
+		CComPtr<IDXGIAdapter> workerAdapter;
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			workerAdapter = renderAdapter;
+		}
+		CComPtr<ID3D11Device> created;
+		CComPtr<ID3D11DeviceContext> createdContext;
+		if (!workerAdapter || FAILED(D3D11CreateDevice(workerAdapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, levels, 2, D3D11_SDK_VERSION,
+				&created, nullptr, &createdContext)))
+		{
+			why = "cannot create its D3D11 device";
+			return false;
+		}
+		std::lock_guard<std::mutex> lock(mutex);
+		device = created;
+		context = createdContext;
+		return true;
+	}
+
+	// The engine first (it unregisters its textures), then the textures.
+	void Producer::ReleaseEngine()
+	{
+		engine.reset();
+		for (int i = 0; i < 2; ++i)
+		{
+			lumaTex[i].Release(); flowTex[i].Release(); costTex[i].Release(); flowRead[i].Release(); costRead[i].Release();
+		}
+		sizeW = sizeH = 0;
+		havePrevious = false;
+		hintSequence = UINT64_MAX;
+	}
+
+	uint64_t Producer::NowMs()
+	{
+		return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count());
+	}
+
+	Producer::Health Producer::GetHealth() const
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		Health h;
+		h.recovering = recovery.Recovering();
+		h.stops = recovery.Stops();
+		h.restarts = recovery.Restarts();
+		h.retryInMs = recovery.RemainingMs(NowMs());
+		h.error = stopError;
+		return h;
 	}
 
 	void Producer::Stop()
@@ -237,13 +287,11 @@ namespace MotionAhead
 		if (worker.joinable()) worker.join();
 		running = false;
 		// The engine first (it unregisters its textures), then the textures, then the device.
-		engine.reset();
-		for (int i = 0; i < 2; ++i)
-		{
-			lumaTex[i].Release(); flowTex[i].Release(); costTex[i].Release(); flowRead[i].Release(); costRead[i].Release();
-		}
+		ReleaseEngine();
 		context.Release();
 		device.Release();
+		std::lock_guard<std::mutex> lock(mutex);
+		renderAdapter.Release();
 	}
 
 	std::string Producer::Error() const
@@ -299,20 +347,53 @@ namespace MotionAhead
 			bool ok = false;
 			try { ok = Process(job); }
 			catch (...) { ok = false; }
-			std::lock_guard<std::mutex> lock(mutex);
+			std::unique_lock<std::mutex> lock(mutex);
 			if (ok)
 			{
 				consecutiveFailures = 0;
 				continue;
 			}
 			++stats.failures;
-			if (++consecutiveFailures >= 3)
+			if (++consecutiveFailures < 3)
+				continue;
+			// Persistent failure: stop (the matcher covers everything meanwhile). Bug hunt 35 #1: no
+			// longer for the session - restart with a back-off on a fresh device while still wanted.
+			running = false;
+			engineReady = false;
+			jobs.clear();
+			stopError = error.empty() ? std::string("three failed jobs in a row") : error;
+			for (;;)
 			{
-				// Persistent failure: stop (the matcher covers everything) until the producer is wanted again.
-				running = false;
-				engineReady = false;
-				return;
+				const uint64_t delay = recovery.OnStopped(NowMs());
+				const unsigned divisor = recoveryDivisor.load(std::memory_order_acquire);
+				error = stopError + "; restarting in " + std::to_string((delay + 999) / 1000) + " s (stop " +
+					std::to_string(recovery.Stops()) + ")";
+				DebugLog::Log("Motion ahead: the producer stopped (%s)", error.c_str());
+				if (wake.wait_for(lock, std::chrono::milliseconds(delay / divisor), [this] { return stopping; }))
+					return;
+				lock.unlock();
+				// The old engine, textures and device go (a removed device cannot recover in place).
+				ReleaseEngine();
+				{
+					std::lock_guard<std::mutex> deviceLock(mutex);
+					context.Release();
+					device.Release();
+				}
+				std::string why;
+				const bool created = CreateDevice(why);
+				lock.lock();
+				if (stopping) return;
+				if (created)
+					break;
+				stopError = why;   // no device yet: another stop, a longer wait
 			}
+			jobs.clear();
+			consecutiveFailures = 0;
+			recovery.OnRestarted(NowMs());
+			error.clear();   // the next stop names its own failure
+			DebugLog::Log("Motion ahead: the producer restarted on a new device (restart %u after: %s)",
+				recovery.Restarts(), stopError.c_str());
+			running = true;
 		}
 	}
 

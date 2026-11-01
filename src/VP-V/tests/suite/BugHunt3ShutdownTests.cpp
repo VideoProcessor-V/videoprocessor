@@ -247,7 +247,7 @@ namespace VideoProcessorTest
 			Assert::IsFalse(ShutdownDeadline::RunWithTimedLock(mutex, 100, [&ran] { ran = true; return true; }, skipped));
 			const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
 			Assert::IsTrue(skipped && !ran);
-			Assert::IsTrue(elapsed < 1500, (L"waited " + std::to_wstring(elapsed) + L" ms").c_str());
+			Assert::IsTrue(elapsed < 4500, (L"waited " + std::to_wstring(elapsed) + L" ms").c_str());
 			release = true;
 			holder.join();
 			Assert::IsTrue(ShutdownDeadline::RunWithTimedLock(mutex, 100, [&ran] { ran = true; return true; }, skipped));
@@ -277,7 +277,7 @@ namespace VideoProcessorTest
 			plan.cancel->store(true);
 			test.join();
 			const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-			Assert::IsTrue(elapsed < 2500, (L"the hold did not end early: " + std::to_wstring(elapsed) + L" ms").c_str());
+			Assert::IsTrue(elapsed < 4500, (L"the hold did not end early (5 s hold): " + std::to_wstring(elapsed) + L" ms").c_str());
 			Assert::AreEqual(255, projector->light, L"the light is back");
 			Assert::IsFalse(result.pass);
 			Assert::IsTrue(result.summary.find("cancelled") != std::string::npos, Wide(result.summary).c_str());

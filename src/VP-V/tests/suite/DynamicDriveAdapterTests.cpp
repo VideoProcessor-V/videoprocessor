@@ -463,6 +463,42 @@ namespace VideoProcessorTest
 			Assert::IsFalse(f.fallbacks.Engaged(LedDrive::LedDriveModule::kHoldFallbackId));
 		}
 
+		// Bug hunt 31 H1: a rejected configuration (module and gamma boost off) is visible - the
+		// "Dynamic Drive" fallback entry and the status line - and a valid Apply releases it.
+		TEST_METHOD(RejectedConfigurationIsVisibleAndReleased)
+		{
+			std::mutex state;
+			LedDrive::DynamicDriveHost host(state);
+			FrameFixture f;
+			LedDrive::HostContext context;
+			context.frame = &f.frame;
+			FrameFacts facts;
+			std::vector<const pl_hook*> hooks;
+			AdapterConfig bad("[led_drive.default]\nenabled: false\ngamma_boost: 9\n");
+			host.ApplySnapshot(bad.config, std::string(), context);
+			Assert::IsFalse(host.Rejection().empty());
+			Assert::IsTrue(host.StatusText().find("configuration rejected") != std::string::npos);
+			RunS2(f.frame, facts.in, hooks, NoTag);
+			const std::string reason = ReasonOf(f.fallbacks, LedDrive::DynamicDriveFrame::kConfigFallbackId);
+			Assert::IsTrue(reason.find("configuration rejected: ") == 0, L"engaged with the validation error");
+			Assert::IsTrue(reason.find("LED drive and gamma boost off") != std::string::npos);
+			// A new Impl (Attach) gets the same state.
+			FrameFixture g;
+			LedDrive::HostContext other;
+			other.frame = &g.frame;
+			host.Attach(other);
+			RunS2(g.frame, facts.in, hooks, NoTag);
+			Assert::IsTrue(g.fallbacks.Engaged(LedDrive::DynamicDriveFrame::kConfigFallbackId));
+			// Valid again: released, status "off".
+			AdapterConfig good("[led_drive.default]\nenabled: false\n");
+			host.ApplySnapshot(good.config, std::string(), context);
+			Assert::IsTrue(host.Rejection().empty());
+			Assert::AreEqual(std::string("off"), host.StatusText());
+			RunS2(f.frame, facts.in, hooks, NoTag);
+			Assert::IsFalse(f.fallbacks.Engaged(LedDrive::DynamicDriveFrame::kConfigFallbackId));
+			Assert::AreEqual(std::string(), LedDrive::DynamicDriveFrame::RejectionReason(std::string()));
+		}
+
 		TEST_METHOD(MissingGammaBoostIsVisible)
 		{
 			FrameFixture f;

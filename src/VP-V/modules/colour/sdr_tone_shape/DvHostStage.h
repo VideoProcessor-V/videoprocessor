@@ -307,6 +307,8 @@ public:
 		// without dv_trims.
 		if (p.dvTonePicture)
 			m_referenceConditions = DvDolbyStyle::Conditions(*p.dm, p.selection, m_toneDolbyRunning, p.libplaceboCurve);
+		else
+			m_referenceConditions = DvDolbyStyle::ReferenceConditions(); // no DV reference after DV -> HDR10 (bug hunt 37 S10)
 		if (!p.ran)
 			return;
 		std::string state = p.state;

@@ -1261,7 +1261,17 @@ namespace Vpv
 				state->host.setValue(section, QStringLiteral("hdr_inference"), hdrInference->itemData(i).toString());
 			});
 
-			// pipeline_entrance_once (B3, ADR-0024) is a hidden diagnostic/test key with no Config control (skeleton b76571c1).
+			// pipeline_entrance_once (B3, ADR-0024): a test key; on (B3) is the default. Off in the Original pathway.
+			auto* entranceOnce = new QCheckBox(QStringLiteral("Run the input side once per source frame (B3)"));
+			entranceOnce->setObjectName(ObjectName(QStringLiteral("expert.pipeline_entrance_once")));
+			entranceOnce->setToolTip(QStringLiteral("Key pipeline_entrance_once. A test key: on (the default) runs the input-side "
+				"stages once per source frame; off runs them per picture, as before B3. Leave it on for normal use."));
+			form->addRow(QStringLiteral("Input side once"), entranceOnce);
+			QObject::connect(entranceOnce, &QCheckBox::toggled, entranceOnce, [state, section](bool on)
+			{
+				if (state->refreshing || !state->host.setValue) return;
+				state->host.setValue(section, QStringLiteral("pipeline_entrance_once"), on ? QStringLiteral("on") : QStringLiteral("off"));
+			});
 
 			// Output segments S2/S3 as one hook each (draft): off until the GPU check passes; never in the
 			// Original pathway (the renderer also forces it off there).
@@ -1379,17 +1389,30 @@ namespace Vpv
 			layout->addLayout(form);
 			layout->addStretch();
 
-			state->refreshers.push_back([state, lutStage, merged, drain, analysis, resync, hdrInference, order, slotsOff, section]()
+			state->refreshers.push_back([state, lutStage, entranceOnce, merged, drain, analysis, resync, hdrInference, order, slotsOff, section]()
 			{
 				const auto get = [&](const char* key) { return state->host.value ? state->host.value(section, QString::fromLatin1(key)).trimmed() : QString(); };
 				{
 					const QSignalBlocker blocker(lutStage);
 					lutStage->setCurrentIndex(get("calibration_lut_stage").compare(QStringLiteral("vp"), Qt::CaseInsensitive) == 0 ? 1 : 0);
+					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
+					lutStage->setEnabled(!original);
+					SetGreyReason(lutStage, original ? QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).") : QString());
+				}
+				{
+					const QSignalBlocker blocker(entranceOnce);
+					const QString value = get("pipeline_entrance_once");
+					entranceOnce->setChecked(value.isEmpty() || value.compare(QStringLiteral("off"), Qt::CaseInsensitive) != 0);
+					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
+					entranceOnce->setEnabled(!original);
+					SetGreyReason(entranceOnce, original ? QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).") : QString());
 				}
 				{
 					const QSignalBlocker blocker(merged);
 					merged->setChecked(get("output_segments_merged").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0);
-					merged->setEnabled(get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) != 0);
+					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
+					merged->setEnabled(!original);
+					SetGreyReason(merged, original ? QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).") : QString());
 				}
 				{
 					const QSignalBlocker blocker(drain);
@@ -1414,6 +1437,9 @@ namespace Vpv
 				{
 					const QSignalBlocker blocker(hdrInference);
 					hdrInference->setCurrentIndex(get("hdr_inference").compare(QStringLiteral("original"), Qt::CaseInsensitive) == 0 ? 1 : 0);
+					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
+					hdrInference->setEnabled(!original);
+					SetGreyReason(hdrInference, original ? QStringLiteral("Greyed: the Original pathway always uses Bill's heuristic (the stored value is unchanged).") : QString());
 				}
 				if (!order->hasFocus()) order->setText(get("pipeline_order"));
 				if (!slotsOff->hasFocus()) slotsOff->setText(get("pipeline_slots_off"));
@@ -2423,7 +2449,7 @@ namespace Vpv
 		pathway->setObjectName(ObjectName(QStringLiteral("pathway")));
 		pathway->setAccessibleName(QStringLiteral("Pathway"));
 		pathway->addItem(QStringLiteral("VP-V pathway"), QStringLiteral("off"));
-		pathway->addItem(QStringLiteral("Original pathway"), QStringLiteral("on"));
+		pathway->addItem(QStringLiteral("Original (Bill's)"), QStringLiteral("on"));
 		pathway->setToolTip(QStringLiteral(
 			"VP-V: the settings below own the units they list, and the matching controls on the other pages are greyed "
 			"(\"Managed by VP-V\"). Original: the tiers and VP-V switches are disabled and the other pages behave exactly "

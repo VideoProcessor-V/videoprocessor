@@ -699,7 +699,7 @@ namespace LedDrive
 		// R3: a readback of the old source after a FULL resync (resync_event on only; 0 otherwise).
 		if (sequence != 0 && restartSequence != 0 && sequence < restartSequence) return;
 		lastMeasuredSequence = sequence;
-		const FrameStats stats = statsBuilder.Build(raw, NowMs());
+		const FrameStats stats = statsBuilder.Build(raw, NowMs(), sourceFps > 0.0 ? 1000.0 / sourceFps : 0.0);   // unmeasured: the 24p values
 		if (stats.blocks == 0) return;
 		latest = stats;
 		haveStats = true;

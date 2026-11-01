@@ -31,6 +31,11 @@ enum class HdrInferenceState
 	Waiting,      // qualifying signal, stabilising before PQ is inferred
 	InferredPq,   // PQ / BT.2020 is inferred for this epoch
 	VetoedSdr,    // the SDR veto returned this epoch to SDR (final for the epoch)
+	// Bug hunt 37 S1: a PQ epoch whose capture signal went invalid (an HDMI re-sync, e.g. an
+	// Apple TV match-frame-rate switch). Not PQ while the signal is absent; an eligible signal
+	// back within HdrInferenceOptions::resumeWindowMs resumes PQ at once in a new epoch instead
+	// of stabilising again from SDR. Past the window (or an ineligible return) it ends.
+	Suspended,
 };
 
 const char* ToString(HdrInferenceState state);
@@ -94,6 +99,10 @@ struct HdrInferenceOptions
 	// no bit-depth / DV-tunnel / explicit-settings gates, no signal epochs, no SDR veto. The
 	// Original pathway selects it. false (default) = VP's inference.
 	bool originalHeuristic = false;
+	// Bug hunt 37 S1: how long a PQ epoch survives a capture-signal gap (Suspended). A time
+	// constant of the HDMI re-lock, not a rate. 0 = end at once (the behaviour before the fix).
+	// Not used by the original heuristic (Bill's has no epochs).
+	uint32_t resumeWindowMs = 10000;
 };
 
 // Bill's original newlldv candidate rule (upstream UpdateNewLldvCandidate): the capture state is
@@ -125,6 +134,7 @@ enum class HdrInferenceEvent
 	VetoArmed,
 	VetoAtCut,
 	VetoWithoutCut,
+	Suspended,   // bug hunt 37 S1: PQ epoch held across a signal gap (not PQ meanwhile)
 };
 
 const char* ToString(HdrInferenceEvent event);
@@ -163,6 +173,8 @@ public:
 	uint32_t ShotsWithEvidence() const { return m_shotsWithEvidence; }
 	bool VetoArmed() const { return m_vetoArmed; }
 	uint32_t EpochFlips() const { return m_epochFlips; }
+	// The current epoch began by resuming a suspended PQ epoch (bug hunt 37 S1), for the log.
+	bool ResumedAfterGap() const { return m_resumedAfterGap; }
 	const char* Reason() const { return m_reason; }
 
 private:
@@ -187,6 +199,8 @@ private:
 	bool m_vetoArmed = false;
 	uint64_t m_vetoArmedMs = 0;
 	uint32_t m_epochFlips = 0;
+	uint64_t m_suspendedSinceMs = 0;
+	bool m_resumedAfterGap = false;
 };
 
 // Picture statistics for the veto, from a sparse luma grid in the limited

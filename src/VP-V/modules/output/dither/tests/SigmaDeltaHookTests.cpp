@@ -696,5 +696,56 @@ namespace VideoProcessorTest
 			Assert::IsTrue(worstStore <= 1.0, ExtendedRangeGpuProbe::ToWide(
 				std::string("the exact-code snap moves a level by more than the rgba16f store's step (a snap bias)\n") + verdict + report).c_str());
 		}
+
+		// Cross-language fixed vectors: the same table is in tools/eval/sigma_delta_vectors.json and
+		// is asserted by tools/eval/test_sigma_delta_vectors.py against the numpy port. Exact equality
+		// (hex-float literals; QuantiseStep is double, Ign is float).
+		TEST_METHOD(CrossLanguageFixedVectors)
+		{
+			struct Case
+			{
+				double x, amplitude;
+				int bits;
+				bool full;
+				float px, py;
+				int k[16];
+				double r[16];
+			};
+			const Case cases[] = {
+				{ 100.3, 0.15, 8, false, 3.0f, 5.0f, { 100, 101, 100, 100, 101, 100, 100, 100, 101, 100, 100, 101, 100, 100, 101, 100 }, { 0x1.3333333333300p-2, -0x1.9999999999a00p-2, -0x1.9999999999c00p-4, 0x1.9999999999800p-3, -0x1.0000000000080p-1, -0x1.9999999999c00p-3, 0x1.9999999999400p-4, 0x1.9999999999800p-2, -0x1.3333333333500p-2, -0x1.0000000000000p-45, 0x1.3333333333100p-2, -0x1.9999999999c00p-2, -0x1.999999999a400p-4, 0x1.9999999999400p-3, -0x1.0000000000180p-1, -0x1.999999999a000p-3 } },
+				{ 1.05, 0.5, 8, false, 37.0f, 11.0f, { 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }, { -0x1.e666666666666p-1, -0x1.cccccccccccccp-1, -0x1.b333333333332p-1, -0x1.9999999999998p-1, -0x1.7fffffffffffep-1, -0x1.6666666666664p-1, -0x1.4cccccccccccap-1, -0x1.3333333333330p-1, -0x1.1999999999996p-1, -0x1.ffffffffffff8p-2, -0x1.cccccccccccc4p-2, -0x1.9999999999990p-2, -0x1.666666666665cp-2, -0x1.3333333333328p-2, -0x1.fffffffffffe8p-3, -0x1.9999999999980p-3 } },
+				{ 253.95, 0.15, 8, false, 211.0f, 2.0f, { 254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 253, 254, 254, 254, 254, 254 }, { -0x1.999999999a000p-5, -0x1.999999999a000p-4, -0x1.3333333333800p-3, -0x1.999999999a000p-3, -0x1.0000000000400p-2, -0x1.3333333333800p-2, -0x1.6666666666c00p-2, -0x1.999999999a000p-2, -0x1.cccccccccd400p-2, -0x1.0000000000400p-1, 0x1.cccccccccc400p-2, 0x1.9999999999000p-2, 0x1.6666666665c00p-2, 0x1.3333333332800p-2, 0x1.fffffffffe800p-3, 0x1.9999999998000p-3 } },
+				{ 255.6, 0.15, 8, false, 9.0f, 9.0f, { 254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254 }, { 0x1.4cccccccccccdp-1, 0x1.4cccccccccccdp-1, 0x1.4cccccccccccdp-1, 0x1.4cccccccccccdp-1, 0x1.4cccccccccccdp-1, 0x1.4cccccccccccdp-1, 0x1.4cccccccccccdp-1, 0x1.4cccccccccccdp-1, 0x1.4cccccccccccdp-1, 0x1.4cccccccccccdp-1, 0x1.4cccccccccccdp-1, 0x1.4cccccccccccdp-1, 0x1.4cccccccccccdp-1, 0x1.4cccccccccccdp-1, 0x1.4cccccccccccdp-1, 0x1.4cccccccccccdp-1 } },
+				{ 4.2, 0.3, 10, false, 64.0f, 7.0f, { 4, 4, 4, 5, 4, 4, 4, 4, 5, 4, 4, 4, 4, 5, 4, 4 }, { 0x1.99999999999a0p-3, 0x1.99999999999a0p-2, 0x1.3333333333338p-1, -0x1.9999999999980p-3, 0x1.0000000000000p-50, 0x1.99999999999c0p-3, 0x1.99999999999b0p-2, 0x1.3333333333340p-1, -0x1.9999999999960p-3, 0x1.0000000000000p-49, 0x1.99999999999e0p-3, 0x1.99999999999c0p-2, 0x1.3333333333348p-1, -0x1.9999999999940p-3, 0x1.8000000000000p-49, 0x1.9999999999a00p-3 } },
+				{ 512.5, 0.15, 10, true, 100.0f, 50.0f, { 512, 513, 512, 513, 513, 512, 513, 512, 513, 512, 512, 513, 512, 513, 513, 512 }, { 0x1.0000000000000p-1, 0x0.0p+0, 0x1.0000000000000p-1, 0x0.0p+0, -0x1.0000000000000p-1, 0x0.0p+0, -0x1.0000000000000p-1, 0x0.0p+0, -0x1.0000000000000p-1, 0x0.0p+0, 0x1.0000000000000p-1, 0x0.0p+0, 0x1.0000000000000p-1, 0x0.0p+0, -0x1.0000000000000p-1, 0x0.0p+0 } },
+				{ 0.2, 0.5, 8, true, 1.0f, 1.0f, { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 }, { -0x1.999999999999ap-1, -0x1.3333333333334p-1, -0x1.999999999999bp-2, -0x1.999999999999cp-3, -0x1.0000000000000p-54, -0x1.999999999999ap-1, -0x1.3333333333334p-1, -0x1.999999999999bp-2, -0x1.999999999999cp-3, -0x1.0000000000000p-54, -0x1.999999999999ap-1, -0x1.3333333333334p-1, -0x1.999999999999bp-2, -0x1.999999999999cp-3, -0x1.0000000000000p-54, -0x1.999999999999ap-1 } },
+				{ 1018.8, 0.5, 10, false, 500.0f, 300.0f, { 1019, 1019, 1018, 1019, 1019, 1019, 1019, 1018, 1019, 1019, 1019, 1019, 1018, 1019, 1019, 1019 }, { -0x1.999999999a000p-3, -0x1.999999999a000p-2, 0x1.9999999999000p-2, 0x1.9999999998000p-3, -0x1.0000000000000p-42, -0x1.999999999c000p-3, -0x1.999999999b000p-2, 0x1.9999999998000p-2, 0x1.9999999996000p-3, -0x1.0000000000000p-41, -0x1.999999999e000p-3, -0x1.999999999c000p-2, 0x1.9999999997000p-2, 0x1.9999999994000p-3, -0x1.8000000000000p-41, -0x1.99999999a0000p-3 } },
+			};
+			for (const Case& c : cases)
+			{
+				const auto limits = SigmaDeltaDomain::Limits(c.bits, c.full);
+				double r = 0.0;
+				for (int t = 0; t < 16; ++t)
+				{
+					const double d = (SigmaDeltaDomain::Ign(c.px, c.py, t) - 0.5) * 2.0 * c.amplitude;
+					const double k = SigmaDeltaDomain::QuantiseStep(c.x, r, d, limits, c.amplitude);
+					Assert::AreEqual(static_cast<double>(c.k[t]), k, L"code matches the fixed vector");
+					Assert::AreEqual(c.r[t], r, L"residual matches the fixed vector");
+				}
+			}
+			struct IgnPoint { float px, py; int frame; float value; };
+			const IgnPoint points[] = {
+				{ 0.0f, 0.0f, 0, 0x0.0p+0f },
+				{ 3.0f, 5.0f, 1, 0x1.9fb5000000000p-1f },
+				{ 37.0f, 11.0f, 7, 0x1.e718000000000p-3f },
+				{ 211.0f, 2.0f, 63, 0x1.ef88000000000p-3f },
+				{ 1919.0f, 1079.0f, 64, 0x1.af8e400000000p-2f },
+				{ 100.5f, 200.25f, 5, 0x1.b490000000000p-2f },
+				{ 0.5f, 0.5f, 33, 0x1.ce6a800000000p-1f },
+				{ 4095.0f, 2159.0f, 200, 0x1.9cb4000000000p-4f },
+			};
+			for (const IgnPoint& p : points)
+				Assert::AreEqual(p.value, SigmaDeltaDomain::Ign(p.px, p.py, p.frame), L"Ign matches the fixed vector");
+		}
 	};
 }

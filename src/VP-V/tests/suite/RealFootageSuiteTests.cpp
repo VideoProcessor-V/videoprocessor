@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "CppUnitTest.h"
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 // Real-footage suite (2026-10-18): VP's CPU-side timing, cadence, classifier and
 // source-resolution components fed with real decoded pictures from the clip library
@@ -1160,10 +1161,7 @@ namespace RealFootage
 		{
 			if (available)
 				return false;
-			const bool require = RealClip::Env("VP_TEST_REQUIRE_FOOTAGE") == "1";
-			Log(Fmt("%s: SKIP-NO-FOOTAGE (%s)", test, skipReason.c_str()));
-			if (require)
-				Assert::Fail(L"VP_TEST_REQUIRE_FOOTAGE=1 and the clip library is missing");
+			HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, test, false, skipReason);
 			return true;
 		}
 
@@ -2736,7 +2734,7 @@ namespace RealFootage
 		TEST_METHOD(RealFilmCutDecisionsCutFixes)
 		{
 			const std::string films = RealClip::Env("VP_TEST_CUT_FILMS");
-			if (films.empty()) { Logger::WriteMessage("RealFilmCutDecisionsCutFixes: VP_TEST_CUT_FILMS not set: skipped\n"); return; }
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "RealFilmCutDecisionsCutFixes", !films.empty(), "VP_TEST_CUT_FILMS not set")) return;
 			size_t from = 0;
 			while (from < films.size())
 			{

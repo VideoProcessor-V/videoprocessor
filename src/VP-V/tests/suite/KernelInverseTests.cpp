@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "CppUnitTest.h"
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <VP-V/modules/scaling/rebase/KernelInverse.h>
 
@@ -111,7 +112,7 @@ namespace KernelInverseTest
 			// tools: ffmpeg x265 1080p decodes upscaled 2x by ffmpeg (VP_TEST_KERNELID_DIR, e.g.
 			// D:\hfr\kernelid: <clip>_1080_dec.yuv and <clip>_4k_<kernel>.yuv, 10-bit 4:2:0).
 			const std::string folder = Env("VP_TEST_KERNELID_DIR");
-			if (folder.empty()) { Logger::WriteMessage("VP_TEST_KERNELID_DIR not set: skipped\n"); return; }
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "RealUpscalesAreIdentifiedAndRecovered", !folder.empty(), "VP_TEST_KERNELID_DIR not set")) return;
 			auto luma = [](const std::string& path, int w, int h) {
 				std::vector<float> v;
 				FILE* f = nullptr;

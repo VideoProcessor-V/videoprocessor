@@ -555,11 +555,6 @@
           "slot": "scaling.refine"
         },
         {
-          "key": "chroma_upscale_vp",
-          "label": "VP chroma upscale",
-          "slot": "scaling.chroma_upscale"
-        },
-        {
           "key": "hybrid_refine_d",
           "label": "Extra detail-recovery step under the hybrid scaler",
           "slot": "scaling.output"
