@@ -65,4 +65,21 @@ them by hand). A file that cannot be compiled after the split goes into `"exclud
 
 ## Deviations and open items
 
-See the end of this file (filled in by the integrator).
+- Include resolution for files that are not in a test project (for example `src/VP-V/tests/*.h`, which the
+  Test project compiles) uses the union of both test projects' include directories after the includer's
+  directory, because those files include `"ChainGpuProbe.h"` and similar through the Test project's `.`.
+- `__FILE__`-based repository-root lookups are reported by P15a but NOT rewritten by the script. In this
+  run they were fixed by hand (commit "P15 fix"): the level counts in `ConfigFileVpvTests.cpp`,
+  `LedDriveDelta1Tests.cpp`, `LedScriptCorrelationTests.cpp`, `BetaGpuTests.cpp` (3 -> 5, 2 -> 4) and the
+  `\src\VideoProcessor-Test\` markers (now `\src\VP-V	ests\`). After a later re-run, new moved
+  files or newly appended methods that use `__FILE__` need the same hand fix (the report lists them).
+- The split does not prune standard-library `#include`s (kept when unsure): `<cstring>` stays in
+  `DolbyVisionLuminancePolicyTests.cpp` (one line of residual footprint).
+- `VideoProcessorConfigTests.exe -functions` RUNS the Qt tests; no ConfigTests listing was taken (the
+  sources of that project are unchanged apart from P1's project items).
+- `VideoProcessorBetaTestsHost.dll` is not part of the solution build; no listing was compared.
+- Not split (open items): `ConfigEditorWindowTests.cpp` (Qt, H3 / plan 4.3), `BetaParametersTests.cpp`
+  (no TEST_METHODs), `MagewellCaptureTests.cpp` (Magewell isolation rules).
+- Not edited (reported only): docs that name moved paths, `tools/ci/select_ci_scope.ps1` (selects tests by
+  the old `src\VideoProcessor-Test` folder; CI is disabled) and `tools/test_magewell_isolation.ps1`
+  (Magewell files did not move).
