@@ -8,7 +8,9 @@
 
 #include "ExtensionHub.h"
 
+#include <VP-V/modules/control/skeleton/SkeletonModule.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
+#include <VP-V/modules/motion/estimation/global_model/link/CameraExtension.h>
 
 namespace
 {
@@ -17,6 +19,9 @@ namespace
 		// Fixed fan-out order (doc 63 section 1): resync / FrameSeal first, so every later module
 		// sees the frame already sealed.
 		Vpv::Resync::RegisterResyncExtension();
+		// Activation (all off by default, [vpv.skeleton]): the analysis lane, then the camera link (report).
+		Vpv::Skeleton::RegisterSkeletonModule();
+		Vpv::Camera::RegisterCameraExtension();
 		Vpv::Hub::RegisterHub();
 		return 1;
 	}
