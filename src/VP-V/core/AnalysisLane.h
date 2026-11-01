@@ -437,11 +437,12 @@ public:
     // frame and calls OnSealed(seq, changed). The raw-pointer constructor is the standalone path (the lane seals
     // itself in OnRenderStart); it is kept for the lane's existing tests and must not be used next to a FrameSeal.
     AnalysisLane(VpIndicator::Indicator* indicator, std::function<uint64_t()> nowUs)
-        : ind_(indicator), nowUs_(std::move(nowUs))
+        : ind_(indicator), indEra_(indicator != nullptr ? indicator->Era() : 0u), nowUs_(std::move(nowUs))
     {
     }
     AnalysisLane(std::shared_ptr<VpIndicator::Indicator> indicator, std::function<uint64_t()> nowUs)
-        : ind_(indicator.get()), indHandle_(std::move(indicator)), nowUs_(std::move(nowUs))
+        : ind_(indicator.get()), indEra_(indicator ? indicator->Era() : 0u), indHandle_(std::move(indicator)),
+          nowUs_(std::move(nowUs))
     {
     }
     AnalysisLane(const AnalysisLane&) = delete;
@@ -464,12 +465,17 @@ public:
     // (the era is part of the graph key) on the new one. The first observation after a rebind is not a change.
     void BindIndicator(const std::shared_ptr<VpIndicator::Indicator>& indicator)
     {
-        if (indicator.get() == ind_) {
+        // The same Indicator is the same ERA (eras are process-unique), never the same address: a freed
+        // Indicator's address may be reused by the next era's.
+        const uint32_t era = indicator ? indicator->Era() : 0u;
+        if (era == indEra_ && (era != 0 || ind_ == nullptr)) {
             indHandle_ = indicator;   // the same Indicator: only adopt the shared handle, nothing to rebuild
+            ind_ = indicator.get();
             return;
         }
         indHandle_ = indicator;
         ind_ = indicator.get();
+        indEra_ = era;
         observedOnce_ = false;
         waitValid_ = false;
         ++indicatorRebinds_;
@@ -1264,6 +1270,12 @@ private:
         const SavedConfig c = *cfg_;
         Configure(settings_, c.reg, c.consumers, c.gs, c.card, c.tier, seq, c.hostDet);
         ++rebindRebuilds_;
+        // The rebuild re-derived the regulator for the new graph: a storm hold in force must floor it at
+        // T0 again in THIS frame (OnSealed applied it to the previous graph's regulator before the rebuild).
+        if (stormHold_) {
+            stormEdgePending_ = true;
+            ApplyStorm();
+        }
     }
 
     struct SavedConfig {
@@ -1286,6 +1298,7 @@ private:
     }
 
     VpIndicator::Indicator* ind_;
+    uint32_t indEra_ = 0;                                 // render thread only; ind_'s era (0 = none)
     std::shared_ptr<VpIndicator::Indicator> indHandle_;   // render thread only
     bool externalSeal_ = false;
     bool haveSealedSeq_ = false;

@@ -206,12 +206,14 @@ public:
     }
 
     // ---- B2 cursor: the highest sequence enqueued so far (the pulldown reads it at the seal) -------
-    // The writer runs under the queue mutex, so a relaxed read then a release store is enough; the
-    // value only ever grows until ResetCursor (restart / era change).
+    // A compare-exchange loop: the value only ever grows until ResetCursor (restart / era change, the
+    // render thread), and a NoteEnqueued racing a ResetCursor never writes back a value read before
+    // the reset over it (it retries against the reset value).
     void NoteEnqueued(uint64_t seq)
     {
-        if (seq > m_cursorSeq.load(std::memory_order_relaxed))
-            m_cursorSeq.store(seq, std::memory_order_release);
+        uint64_t cur = m_cursorSeq.load(std::memory_order_relaxed);
+        while (seq > cur && !m_cursorSeq.compare_exchange_weak(cur, seq, std::memory_order_release, std::memory_order_relaxed)) {
+        }
     }
     uint64_t PulldownCursorSeq() const { return m_cursorSeq.load(std::memory_order_acquire); }
     void ResetCursor() { m_cursorSeq.store(0, std::memory_order_release); }

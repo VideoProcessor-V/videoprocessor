@@ -434,9 +434,9 @@ namespace FallbackCatalog
 	// Engaged when the one-seal-owner wiring is wrong: a frame reached the lane without the shared seal
 	// (it is NOT sealed twice; its analysis falls back to the in-render form), or a provider was added
 	// after the first frame (its readers are not registered on the current era until the next one).
-	inline Decision ResyncSeal(unsigned long long frameMisses, unsigned lateProviders)
+	inline Decision ResyncSeal(unsigned long long frameMisses, unsigned lateProviders, unsigned rejectedReaders = 0)
 	{
-		if (frameMisses == 0 && lateProviders == 0)
+		if (frameMisses == 0 && lateProviders == 0 && rejectedReaders == 0)
 			return Released("resync_seal");
 		std::string reason;
 		if (frameMisses != 0)
@@ -444,6 +444,9 @@ namespace FallbackCatalog
 		if (lateProviders != 0)
 			reason += std::string(reason.empty() ? "" : "; ") + std::to_string(lateProviders) +
 				" resync reader provider(s) added after the first frame (not registered on this era)";
+		if (rejectedReaders != 0)
+			reason += std::string(reason.empty() ? "" : "; ") + std::to_string(rejectedReaders) +
+				" resync reader(s) refused by the Indicator (registered after its first frame: they never act)";
 		return Engaged("resync_seal", reason);
 	}
 

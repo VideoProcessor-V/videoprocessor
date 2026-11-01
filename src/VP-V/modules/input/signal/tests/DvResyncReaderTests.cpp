@@ -227,7 +227,8 @@ namespace Tests
 			Assert::IsFalse(r.holder.HaveMetadata());
 		}
 
-		TEST_METHOD(ReRegistrationDropsPendingFlags)
+		// Audit 2 SHOULD: a relatch owed from the old era is still owed after a new era registers.
+		TEST_METHOD(ReRegistrationKeepsPendingFlags)
 		{
 			DvResync::Rig r;
 			r.Run(3);
@@ -236,7 +237,10 @@ namespace Tests
 			Assert::IsTrue(r.reader.Peek().relatch);
 			auto era2 = std::make_shared<VpIndicator::Indicator>(VpIndicator::NextEra(), 64);
 			r.reader.RegisterOn(era2);
-			Assert::IsFalse(r.reader.Peek().relatch);
+			Assert::IsTrue(r.reader.Peek().relatch, L"kept across the era");
+			const VpDvResync::Reader::Pending p = r.reader.Take();
+			Assert::IsTrue(p.relatch && p.seq == 4);
+			Assert::IsFalse(r.reader.Peek().relatch, L"Take clears it");
 		}
 
 		TEST_METHOD(DvSwitchSequenceThroughTheHostHooks)

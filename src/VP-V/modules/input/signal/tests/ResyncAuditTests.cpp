@@ -7,6 +7,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/FrameSeal.h>
 #include <VP-V/core/Indicator.h>
 #include <VP-V/modules/input/queue_timing/PulldownResync.h>
@@ -14,6 +15,7 @@
 #include <VP-V/modules/motion/estimation/MotionResyncReaders.h>
 #include <VP-V/modules/motion/estimation/MotionValidity.h>
 
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -175,6 +177,32 @@ namespace Tests
 			Assert::AreEqual(0, paced[26], L"released 10 s after the last FULL");
 			Assert::AreEqual(0, paced[39], L"not held before the second storm's events");
 			Assert::AreEqual(1, paced[46], L"the second storm holds at its 4th FULL");
+		}
+
+		// Audit 2 SHOULD: a reader the Indicator refused is a visible seal fallback.
+		TEST_METHOD(SealFallbackShowsReadersTheIndicatorRefused)
+		{
+			VpSeal::FrameSeal fs;
+			const std::shared_ptr<Indicator> ind = std::make_shared<Indicator>(VpIndicator::NextEra(), 64);
+			fs.Seal(ind, 1);
+			Assert::IsFalse(fs.Fallback().engaged);
+			std::array<VpIndicator::Policy, VpIndicator::kCounterCount> p{};
+			Assert::AreEqual(-1, ind->Register("late", VpIndicator::Bit(VpIndicator::kFull), p, nullptr));
+			const FallbackCatalog::Decision d = fs.Fallback();
+			Assert::IsTrue(d.engaged, L"engaged");
+			Assert::IsTrue(d.reason.find("1 resync reader(s) refused") != std::string::npos, L"says why");
+		}
+
+		// Audit 2 SHOULD: the enqueue cursor never moves backwards except through ResetCursor.
+		TEST_METHOD(CursorCompareExchangeIsMonotonic)
+		{
+			VpResync::Shadow s;
+			s.NoteEnqueued(9);
+			s.NoteEnqueued(4);
+			Assert::AreEqual(uint64_t(9), s.PulldownCursorSeq());
+			s.ResetCursor();
+			s.NoteEnqueued(3);
+			Assert::AreEqual(uint64_t(3), s.PulldownCursorSeq());
 		}
 
 		TEST_METHOD(SourceTimeModeCountsEventsWithoutSourceTime)

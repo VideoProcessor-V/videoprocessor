@@ -92,9 +92,11 @@ public:
 
     // The visible fallback for a wiring fault (no silent fallbacks): a provider added after the first
     // frame, plus the lane's frames that arrived unsealed (pass AnalysisLane::ExternalSealMisses()).
+    // Readers the current Indicator refused (Register after its first Observe) are included.
     FallbackCatalog::Decision Fallback(unsigned long long laneFrameMisses = 0) const
     {
-        return FallbackCatalog::ResyncSeal(laneFrameMisses, m_lateProviders);
+        const unsigned rejected = m_current ? m_current->RejectedReaders() : 0u;
+        return FallbackCatalog::ResyncSeal(laneFrameMisses, m_lateProviders, rejected);
     }
 
     // Status text for Ctrl+Alt+D / Config status ("one seal owner" evidence). Shown by the host's

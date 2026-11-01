@@ -139,7 +139,8 @@ namespace SourceResolutionMonitor
 		// flight (GPU timing decides it: such a run is not reproducible). Counted, shown by Describe.
 		unsigned long long SubmitSkipped() const { return submitSkipped.load(std::memory_order_relaxed); }
 		// Frame-bound: true while nothing timing-dependent has dropped or skipped an analysis in this
-		// era (no job-queue drop, no held-queue drop, no skipped copy, no missed bounded wait). When
+		// era (no job-queue drop, no held-queue drop, no skipped copy, no missed bounded wait). The
+		// counters restart with each SetFrameBound era. When
 		// false the decisions of this run are NOT reproducible; Describe says so (no silent loss).
 		bool Reproducible() const
 		{

@@ -1495,6 +1495,13 @@ if (tile < int(tiles) && g.y < ts) {
 		decideClock.Reset();
 		lastSubmit = -1e9;
 		denseGridApplied.store(false, std::memory_order_release);
+		// A fresh era: a reset carried from the previous era is superseded by this one's (autoReset
+		// below), and reproducibility is judged per era (losses of the previous era are not this run's).
+		pendingBoundReset.store(false, std::memory_order_release);
+		jobsDropped.store(0, std::memory_order_relaxed);
+		heldDropped.store(0, std::memory_order_relaxed);
+		submitSkipped.store(0, std::memory_order_relaxed);
+		waitsMissed.store(0, std::memory_order_relaxed);
 		frameLead.store(lead, std::memory_order_release);
 		frameBound.store(on, std::memory_order_release);
 		// A fresh era on the render side (the clocks changed domain): no worker-side reset, so the

@@ -8,11 +8,13 @@
 #include <VP-V/modules/input/signal/DvMetadataHold.h>
 
 #include <array>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
+#include <thread>
 
 // The Dolby Vision metadata family as a reader of the central Indicator (item 16). ONE reader,
 // "dv-metadata", registered by a FrameSeal provider (RegisterOn) and called on the render thread at the
@@ -102,7 +104,8 @@ public:
     void SetActObserver(std::function<void(const char*, uint64_t)> observer) { m_observer = std::move(observer); }
 
     // FrameSeal provider entry (before the Indicator's first Observe). A no-op for the Indicator already
-    // registered; a different Indicator is a NEW ERA: the latch re-arms and pending flags are dropped.
+    // registered; a different Indicator is a NEW ERA: the latch re-arms. Pending flags the host has not
+    // taken yet are KEPT (a relatch owed from the old era is still owed).
     // An Indicator that refused the registration (already observed) leaves ReaderId() == -1, never acts,
     // and says so in StatusText.
     void RegisterOn(const std::shared_ptr<VpIndicator::Indicator>& indicator)
@@ -125,7 +128,6 @@ public:
         m_latched = false;
         m_haveAct = false;
         m_lastActSeq = 0;
-        m_pending = Pending();
         ++m_eras;
         const ReaderSpec& spec = Spec();
         VpIndicator::Indicator* ind = &indicator;
@@ -292,6 +294,7 @@ public:
     // visible) and the retained rate.
     void OnRelatch(const Reader::Act&)
     {
+        m_sealThread = std::this_thread::get_id();
         m_have = false;
         m_dm = Metadata();
         m_tunnelDetected = false;
@@ -301,12 +304,20 @@ public:
     }
 
     // MINOR: the last valid metadata stays; only counted.
-    void OnHold(const Reader::Act&) { ++m_holdCount; }
+    void OnHold(const Reader::Act&)
+    {
+        m_sealThread = std::this_thread::get_id();
+        ++m_holdCount;
+    }
 
     // One picture. fresh = the picture's own accepted metadata (valid), or nullptr when it carried none /
     // it was rejected. headerValid = a CRC-valid tunnel header was seen (tunnel detection).
+    // Render thread, AFTER the picture's frame was sealed (the reader's relatch for that frame has run):
+    // the same thread as the reader's acts (asserted in debug builds).
     Shown OnPicture(const Metadata* fresh, uint64_t counter, bool headerValid = false)
     {
+        assert((m_sealThread == std::thread::id() || m_sealThread == std::this_thread::get_id()) &&
+               "MetadataHolder::OnPicture must run on the seal (render) thread");
         Shown s;
         if (headerValid)
             m_tunnelDetected = true;
@@ -384,6 +395,7 @@ public:
 
 private:
     Tracker m_hold;
+    std::thread::id m_sealThread;   // the thread the reader's acts ran on (render thread)
     Metadata m_dm;
     bool m_have = false;
     bool m_tunnelDetected = false;

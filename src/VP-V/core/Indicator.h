@@ -177,7 +177,7 @@ public:
     uint32_t Total(Counter c) const { return total_[size_t(c)].load(std::memory_order_relaxed); }
     uint32_t OutOfOrderObserves() const { return outOfOrder_.load(std::memory_order_relaxed); }
     uint32_t RejectedReaders() const { return rejectedReaders_.load(std::memory_order_relaxed); }
-    int ReaderCount() const { return readerCount_; }
+    int ReaderCount() const { return readerCount_.load(std::memory_order_acquire); }
     // Events folded out of the ring that still applied to unsealed frames (ring undersized).
     uint32_t PrematureFolds() const { return prematureFolds_.load(std::memory_order_relaxed); }
     // Observe(seq) calls for a seq that is not sealed yet (ignored).
@@ -372,21 +372,23 @@ public:
     int Register(const char* name, CounterMask reads, const std::array<Policy, kCounterCount>& policies,
                  std::function<void(const Change&)> onChange)
     {
-        if (readerCount_ >= int(kMaxReaders) || observed_) {
+        const int n = readerCount_.load(std::memory_order_relaxed);
+        if (n >= int(kMaxReaders) || observed_) {
             rejectedReaders_.fetch_add(1, std::memory_order_relaxed);
             return -1;
         }
-        Reader& r = readers_[size_t(readerCount_)];
+        Reader& r = readers_[size_t(n)];
         r.name = name;
         r.reads = reads;
         r.policies = policies;
         r.onChange = std::move(onChange);
-        return readerCount_++;
+        readerCount_.store(n + 1, std::memory_order_release);   // the reader is complete before it is counted
+        return n;
     }
 
     const char* ReaderName(int i) const
     {
-        return (i >= 0 && i < readerCount_) ? readers_[size_t(i)].name : "";
+        return (i >= 0 && i < readerCount_.load(std::memory_order_acquire)) ? readers_[size_t(i)].name : "";
     }
 
     // Render thread: seal seq, then observe it.
@@ -414,9 +416,10 @@ public:
         }
         const Stamp stamp = StampOf(seq);
         const CounterMask changed = observed_ ? Changed(lastObservedStamp_, stamp) : kAllCounters;
+        const int readerCount = readerCount_.load(std::memory_order_acquire);
 
         uint64_t acting = 0;
-        for (int i = 0; i < readerCount_; ++i)
+        for (int i = 0; i < readerCount; ++i)
             if ((readers_[size_t(i)].reads & changed) != 0)
                 acting |= uint64_t(1) << unsigned(i);
 
@@ -431,7 +434,7 @@ public:
                     continue;
                 const CounterMask moved = MovedBy(CounterOf(e.meta.load(std::memory_order_relaxed)));
                 uint64_t bits = 0;
-                for (int i = 0; i < readerCount_; ++i)
+                for (int i = 0; i < readerCount; ++i)
                     if (((acting >> unsigned(i)) & 1u) != 0 && (readers_[size_t(i)].reads & moved) != 0)
                         bits |= uint64_t(1) << unsigned(i);
                 if (bits != 0)
@@ -444,7 +447,7 @@ public:
         lastObservedStamp_ = stamp;
 
         // Callbacks run outside the writer mutex so a reader may call Advance.
-        for (int i = 0; i < readerCount_; ++i) {
+        for (int i = 0; i < readerCount; ++i) {
             Reader& r = readers_[size_t(i)];
             const CounterMask relevant = r.reads & changed;
             if (relevant == 0 || !r.onChange)
@@ -648,7 +651,7 @@ private:
 
     // Readers: registered at setup, called from the render thread only.
     std::array<Reader, kMaxReaders> readers_;
-    int readerCount_ = 0;
+    std::atomic<int> readerCount_{0};   // written by Register (setup), read by status threads
     bool observed_ = false;
     uint64_t lastObservedSeq_ = 0;
     Stamp lastObservedStamp_;

@@ -1292,6 +1292,36 @@ namespace AnalysisLaneTestsNs
 			Assert::IsTrue(!r.lane.StormHold(), L"released");
 		}
 
+		// Audit 2 SHOULD: a storm hold in force floors the regulator again after the rebind rebuild of a
+		// new era (the rebuild re-derives the regulator in the same frame).
+		TEST_METHOD(StormHoldFloorSurvivesARebindRebuild)
+		{
+			Rig r;
+			r.Configure(LaneSettings::Mode::On, false, 1);
+			r.lane.SetExternalSeal(true);
+			const std::shared_ptr<Indicator> h = Alias(r.ind);
+			const std::shared_ptr<Indicator> h2 = std::make_shared<Indicator>(VpIndicator::NextEra(), 256);
+			VpSeal::FrameSeal fs;
+			fs.AddProvider("lane", [&r](const std::shared_ptr<Indicator>& i) { r.lane.BindIndicator(i); });
+			fs.Subscribe("lane", [&r](const std::shared_ptr<Indicator>&, uint64_t seq, VpIndicator::CounterMask c) { r.lane.OnSealed(seq, c); });
+			r.lane.OnSourceFrame(r.View(1));
+			for (uint64_t s = 1; s <= 10; ++s)
+				Frame(r, fs, h, s);
+			r.lane.SetStormHold(true);
+			Frame(r, fs, h, 11);
+			const Regulator& reg = r.lane.GetRegulator();
+			Assert::IsTrue(reg.LaneLevel() == reg.T0StepCount(), L"held at T0");
+			for (uint64_t s = 12; s <= 14; ++s) {
+				Frame(r, fs, h2, s);
+				Assert::IsTrue(r.lane.GetRegulator().LaneLevel() == r.lane.GetRegulator().T0StepCount(), L"still at T0 after the rebind rebuild");
+			}
+			Assert::IsTrue(r.lane.RebindRebuilds() == 1 && !r.lane.RebuildPending(), L"rebuilt once on the new era");
+			Assert::IsTrue(r.lane.IndicatorRebinds() == 1);
+			// The same Indicator again is recognised by its era: no second rebind.
+			r.lane.BindIndicator(h2);
+			Assert::IsTrue(r.lane.IndicatorRebinds() == 1 && !r.lane.RebuildPending());
+		}
+
 		// In external-seal mode a frame nobody sealed is counted, never sealed twice or silently.
 		TEST_METHOD(UnsealedFrameInExternalModeIsCounted)
 		{

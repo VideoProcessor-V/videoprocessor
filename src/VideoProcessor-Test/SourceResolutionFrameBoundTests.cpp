@@ -549,6 +549,18 @@ namespace VideoProcessorTest
 				Assert::IsTrue(m.Reproducible());
 		}
 
+		// Audit 2 SHOULD: reproducibility is judged per frame-bound era.
+		TEST_METHOD(ANewFrameBoundEraStartsReproducibleAgain)
+		{
+			Monitor m;
+			m.SetFrameBound(true, 0);
+			m.NoteWaitMissed();
+			Assert::IsFalse(m.Reproducible());
+			m.SetFrameBound(true, 2);   // a new lead: a fresh era
+			Assert::IsTrue(m.Reproducible(), L"the previous era's loss is not this era's");
+			Assert::AreEqual(0ull, m.WaitsMissed());
+		}
+
 		TEST_METHOD(AMissedWaitMakesTheRunNotReproducible)
 		{
 			Monitor m;
