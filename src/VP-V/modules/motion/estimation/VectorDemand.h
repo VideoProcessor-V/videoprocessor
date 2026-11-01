@@ -70,6 +70,7 @@ namespace VectorDemand
 	}
 
 	enum class Mode { Off, Forward, Backward };
+	// ForwardShallow is no longer decided (low latency is always BackwardDepth0); kept so the values stay stable.
 	enum class Reason { Disabled, SlotsOff, NoConsumer, Interlaced, SmoothMotionExclusive, Forward, ForwardShallow, BackwardDepth0 };
 
 	struct Input
@@ -155,7 +156,10 @@ namespace VectorDemand
 				return d;
 			}
 		}
-		if (in.lowLatency && in.queueAheadCapacity == 0)
+		// Low latency never looks ahead (owner 2026-10-15/16: backward vectors without look-ahead; the
+		// producer does not run ahead in low latency), whatever the queue holds: backward pairs at any
+		// queue capacity. The consumers that need a frame ahead fall back visibly.
+		if (in.lowLatency)
 		{
 			unsigned stats = 0;
 			for (int i = 0; i < kConsumerCount; ++i)
@@ -173,11 +177,6 @@ namespace VectorDemand
 		d.served = served;
 		d.mode = Mode::Forward;
 		d.reason = Reason::Forward;
-		if (in.lowLatency && in.queueAheadCapacity >= 1)
-		{
-			d.reason = Reason::ForwardShallow;
-			d.lowLatencyAllowed = true;
-		}
 		// A render-time estimate only for the consumers that need a GPU field (source field, output);
 		// the statistics consumers take the producer's whole-frame motion and cost no matcher run.
 		unsigned fieldMask = 0;

@@ -173,16 +173,27 @@ namespace VectorDemandTest
 			Assert::IsTrue(f.engaged && f.reason.find("interlaced") != std::string::npos, L"visible, says interlaced");
 		}
 
-		TEST_METHOD(DepthOneLowLatencyIsShallowForward)
+		TEST_METHOD(LowLatencyNeverLooksAheadAtAnyQueueCapacity)
 		{
-			Input in = Make({ Consumer::GrainMap, Consumer::DebandHold });
-			in.lowLatency = true;
-			in.queueAheadCapacity = 1;
-			const Decision d = Decide(in);
-			Assert::IsTrue(d.mode == Mode::Forward, L"forward");
-			Assert::IsTrue(d.reason == Reason::ForwardShallow, L"shallow");
-			Assert::IsTrue(d.lowLatencyAllowed, L"low latency allowed");
-			Assert::AreEqual(0u, d.unserved);
+			// Owner (2026-10-15/16): low latency uses backward vectors without look-ahead; a queue that
+			// holds frames ahead does not change that (it used to run forward, ForwardShallow).
+			for (int capacity : { 0, 1, 2, 4, 8 })
+			{
+				Input in = Make({ Consumer::GrainMap, Consumer::DebandHold, Consumer::SourceMonitorPan });
+				in.lowLatency = true;
+				in.queueAheadCapacity = capacity;
+				const Decision d = Decide(in);
+				Assert::IsTrue(d.mode == Mode::Backward, L"backward");
+				Assert::IsTrue(d.reason == Reason::BackwardDepth0, L"no look-ahead");
+				Assert::IsFalse(d.estimate, L"no forward estimate");
+				Assert::IsTrue(d.lowLatencyAllowed, L"low latency allowed");
+				Assert::IsTrue(d.Serves(Consumer::SourceMonitorPan), L"statistics served backward");
+				Assert::AreEqual((1u << static_cast<int>(Consumer::GrainMap)) | (1u << static_cast<int>(Consumer::DebandHold)), d.unserved,
+					L"the field consumers fall back visibly");
+				// The same input outside low latency runs forward.
+				in.lowLatency = false;
+				Assert::IsTrue(Decide(in).mode == Mode::Forward, L"forward outside low latency");
+			}
 			Assert::AreEqual(1, EngageAhead(2, 1));
 			Assert::AreEqual(1, EngageAhead(4, 0));
 			Assert::AreEqual(2, EngageAhead(2, 5));

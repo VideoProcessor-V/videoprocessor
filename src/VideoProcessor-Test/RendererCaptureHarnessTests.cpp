@@ -293,6 +293,22 @@ namespace
 			for (size_t i = log.size() > 25 ? log.size() - 25 : 0; i < log.size(); ++i) text += log[i] + "\n";
 			return std::wstring(text.begin(), text.end());
 		}
+		// vector_demand (on by default): the vector engine runs whenever any consumer wants vectors (source
+		// monitor, entrance segment, output dither, grain map, ...), also under libplacebo smooth motion for
+		// the analysis consumers (owner-agreed exception). "De-judder: motion estimated" therefore no longer
+		// means that VP's de-judder or interpolation ran. Where VP must not synthesise motion, check that
+		// instead: no de-judder active, no interpolation, and any estimate is the vector engine's forward
+		// analysis estimate (its status line names it). Empty = no violation.
+		std::string VpMotionSynthesisViolations() const
+		{
+			std::string v;
+			if (Logged("De-judder: active")) v += "the de-judder was active; ";
+			if (Logged("Interpolation: interpolating")) v += "VP interpolated; ";
+			if (Logged("Interpolation timeline: engaged")) v += "the interpolation timeline engaged; ";
+			if (Logged("De-judder: motion estimated") && !Logged("Vector engine: on (forward)"))
+				v += "motion estimated without the vector engine's analysis serving a consumer; ";
+			return v;
+		}
 	};
 
 	// dv_tunnel_gpu_unpack (2026-10-16): a Dolby Vision tunnel signal. The frames
@@ -2044,7 +2060,11 @@ namespace Tests
 					std::wstring(c.name, c.name + std::strlen(c.name)) + L"\n" + on.Tail()).c_str());
 				Assert::IsTrue(on.dejudderStatus.find("repeats skipped") != std::string::npos,
 					(L"pulldown on the stats line\n" + on.Tail()).c_str());
-				Assert::IsTrue(after(on, "Pulldown: ", "De-judder: motion estimated"),
+				// vector_demand: the analysis estimates start before the lock, so the one-time "motion
+				// estimated" line can precede it. After the lock (which invalidates the vectors) the
+				// estimate restarts on the film frames, and the de-judder is active.
+				Assert::IsTrue((after(on, "Pulldown: ", "De-judder: motion estimated") || after(on, "Pulldown: ", "De-judder: estimating again")) &&
+					after(on, "Pulldown: ", "De-judder: active"),
 					(L"the de-judder runs on the film frames\n" + on.Tail()).c_str());
 				Assert::IsTrue(on.presented);
 				// Off (the default): nothing is detected or skipped.
@@ -2188,10 +2208,21 @@ namespace Tests
 				const int length = fingerprintOf(path.c_str(), buffer.data(), static_cast<int>(buffer.size()));
 				DeleteFileA(path.c_str());
 				Assert::IsTrue(length > 0, L"fingerprint computed");
-				return std::string(buffer.data());
+				// Bill's merge (1940d790) put the file's content identity and its path first in the
+				// fingerprint. The path differs per call here (fresh file), and the identity alone would
+				// make any edit differ: compare the settings after both, so every key must still enter
+				// the settings part (structural check) and the same content gives the same settings.
+				const std::string full(buffer.data());
+				const size_t identityEnd = full.find('|');
+				const size_t pathEnd = identityEnd == std::string::npos ? std::string::npos : full.find('|', identityEnd + 1);
+				Assert::IsTrue(pathEnd != std::string::npos, L"fingerprint starts with identity|path|");
+				return std::make_pair(full.substr(0, identityEnd), full.substr(pathEnd + 1));
 			};
-			const std::string base = fingerprint("");
-			Assert::AreEqual(base, fingerprint(""), L"the same file gives the same fingerprint");
+			const auto baseFull = fingerprint("");
+			const std::string base = baseFull.second;
+			const auto again = fingerprint("");
+			Assert::AreEqual(baseFull.first, again.first, L"the same content gives the same content identity");
+			Assert::AreEqual(base, again.second, L"the same file gives the same fingerprint");
 			const char* const changes[] = { "source_range: full\n", "capture_upload: early\n", "source_resolution: 1080\n",
 				"source_resolution_auto_min_confidence: 0.9\n", "source_resolution_text_guard: off\n", "source_resolution_evidence_shots: 5\n", "source_resolution_evidence_seconds: 30\n", "optical_flow_global: off\n", "temporal_dither: off\n", "deband_vp: auto\n", "low_bitrate_handling: off\n",
 				"cnn_residual_stabilise: off\n", "ssim_residual_stabilise: off\n", "ssim_bitrate_aware: off\n",
@@ -2207,7 +2238,7 @@ namespace Tests
 				"detail_pulse_fast: off\n",
 				"a_key_not_invented_yet: 1\n" };
 			for (const char* change : changes)
-				Assert::AreNotEqual(base, fingerprint(change),
+				Assert::AreNotEqual(base, fingerprint(change).second,
 					(L"no fingerprint change for: " + std::wstring(change, change + strlen(change))).c_str());
 		}
 
@@ -3456,8 +3487,10 @@ namespace Tests
 				{
 					Assert::IsTrue(r.Logged("Motion engine: libplacebo smooth motion"), (name + L": smooth motion is the engine\n" + r.Tail()).c_str());
 					Assert::IsTrue(r.Logged("Motion: smooth motion mixing on"), (name + L": frames were mixed\n" + r.Tail()).c_str());
-					Assert::IsFalse(r.Logged("De-judder: motion estimated"), (name + L": no de-judder estimate (no vectors)\n" + r.Tail()).c_str());
 					Assert::IsFalse(r.Logged("De-judder: active"), (name + L": the de-judder never active\n" + r.Tail()).c_str());
+					// vector_demand: analysis vectors may run under smooth motion (owner-agreed); no VP synthesis.
+					const std::string synthesis = r.VpMotionSynthesisViolations();
+					Assert::IsTrue(synthesis.empty(), (name + L": no VP motion synthesis: " + std::wstring(synthesis.begin(), synthesis.end()) + L"\n" + r.Tail()).c_str());
 				}
 				else
 				{
@@ -3691,7 +3724,9 @@ namespace Tests
 				const RunResult r = Run(VideoFrameEncoding::R12B, "standard", 3.0, true,
 					"dejudder_strength: 0.25\ndejudder_warp_stage: source\n");
 				Assert::IsTrue(r.Logged("De-judder: RGB capture"), (L"film R12B, source warp: holds (RGB capture)\n" + r.Tail()).c_str());
-				Assert::IsFalse(r.Logged("De-judder: motion estimated"), (L"film R12B, source warp: no estimate\n" + r.Tail()).c_str());
+				// vector_demand: the analysis consumers may estimate on the unpack's luma; the de-judder holds.
+				const std::string synthesis = r.VpMotionSynthesisViolations();
+				Assert::IsTrue(synthesis.empty(), (L"film R12B, source warp: no de-judder synthesis: " + std::wstring(synthesis.begin(), synthesis.end()) + L"\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.presented, (L"film R12B, source warp: frames presented\n" + r.Tail()).c_str());
 			}
 		}
@@ -5373,7 +5408,9 @@ namespace Tests
 				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 3.0, false, "interpolation: auto\n", false, &plan);
 				ReportInterpolation("display rate, auto", r);
 				Assert::IsTrue(r.Logged("Interpolation: whole ratio: passes through"), (L"1:1: untouched\n" + r.Tail()).c_str());
-				Assert::IsFalse(r.Logged("De-judder: motion estimated"), (L"1:1: no estimate\n" + r.Tail()).c_str());
+				// vector_demand: the analysis consumers may estimate; VP synthesises nothing at 1:1.
+				const std::string synthesis = r.VpMotionSynthesisViolations();
+				Assert::IsTrue(synthesis.empty(), (L"1:1: no VP motion synthesis: " + std::wstring(synthesis.begin(), synthesis.end()) + L"\n" + r.Tail()).c_str());
 			}
 			{
 				const FramePlan plan = RatePlan(display * 5.0 / 6.0);
@@ -5382,7 +5419,8 @@ namespace Tests
 				Assert::IsTrue(r.presented, (L"off: frames presented\n" + r.Tail()).c_str());
 				Assert::IsTrue(r.Logged("Capture path gpu: V210 unpacked on the GPU"), (L"off: the run's log is there\n" + r.Tail()).c_str());
 				Assert::IsFalse(r.Logged("Interpolation:"), (L"off by default\n" + r.Tail()).c_str());
-				Assert::IsFalse(r.Logged("De-judder: motion estimated"), (L"off: no estimate\n" + r.Tail()).c_str());
+				const std::string synthesis = r.VpMotionSynthesisViolations();
+				Assert::IsTrue(synthesis.empty(), (L"off: no VP motion synthesis: " + std::wstring(synthesis.begin(), synthesis.end()) + L"\n" + r.Tail()).c_str());
 			}
 		}
 
@@ -5460,7 +5498,9 @@ namespace Tests
 		{
 			const HarnessScope harnessScope;
 			// One motion engine (owner 2026-10-15): with libplacebo's smooth motion selected,
-			// VP's interpolation stays off (no estimate, no vectors).
+			// VP's interpolation and de-judder stay off. Analysis vectors may still run for the
+			// source analysis consumers (vector_demand, owner-agreed exception); the output dither
+			// falls back while smooth motion owns the output.
 			if (!RequireHardwareOrSkip("InterpolationIsExclusiveWithSmoothMotion")) return;
 			const FramePlan plan = RatePlan(HarnessMonitorHz() * 5.0 / 6.0);
 			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 4.0, false,
@@ -5469,7 +5509,20 @@ namespace Tests
 			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
 			Assert::IsTrue(r.Logged("Motion engine: libplacebo smooth motion"), (L"smooth motion is the engine\n" + r.Tail()).c_str());
 			Assert::IsFalse(r.Logged("Interpolation: interpolating"), (L"VP's interpolation off\n" + r.Tail()).c_str());
-			Assert::IsFalse(r.Logged("De-judder: motion estimated"), (L"no estimate\n" + r.Tail()).c_str());
+			const std::string synthesis = r.VpMotionSynthesisViolations();
+			Assert::IsTrue(synthesis.empty(), (L"no VP motion synthesis under smooth motion: " + std::wstring(synthesis.begin(), synthesis.end()) + L"\n" + r.Tail()).c_str());
+			// The output dither is never among the served consumers while smooth motion runs (it may only
+			// appear in the "... without vectors (...)" part of the status line).
+			bool ditherServed = false;
+			for (const std::string& line : r.log)
+			{
+				const size_t at = line.find("Vector engine: on (forward) for ");
+				if (at == std::string::npos) continue;
+				const size_t servedEnd = line.find(';', at);
+				const std::string served = line.substr(at, servedEnd == std::string::npos ? std::string::npos : servedEnd - at);
+				ditherServed |= served.find("output dither") != std::string::npos;
+			}
+			Assert::IsFalse(ditherServed, (L"the output dither is not served under smooth motion\n" + r.Tail()).c_str());
 			Assert::IsTrue(r.presented);
 		}
 
@@ -6360,6 +6413,7 @@ namespace Tests
 				Calibration::PatternRequest request;
 				Calibration::PatternOutputInfo after;
 				bool shown = false, checked = false;
+				double shownAt = 0.0, checkedAt = 0.0;
 				std::string error;
 			};
 			Calibration::PatternOutputInfo format;
@@ -6389,9 +6443,12 @@ namespace Tests
 					}
 					shots[1].request.windowAreaPercent = 10.0f;
 				}
+				// Each shot follows the previous one's check. A shot is checked once its generation was
+				// presented twice and read back, or 3 s after it was requested (an off-screen render loop can
+				// stall for shader compiles at the start; a fixed 0.6 s window then read generation 0).
 				for (int i = 0; i < 3; ++i)
 				{
-					const double at = 1.2 + 0.8 * i;
+					const double at = i == 0 ? 1.2 : (shots[i - 1].checked ? shots[i - 1].checkedAt + 0.2 : 1e9);
 					if (formatRead && !shots[i].shown && t >= at)
 					{
 						shots[i].request.active = true;
@@ -6400,21 +6457,33 @@ namespace Tests
 						CString reason;
 						shots[i].shown = renderer.SetCalibrationPattern(shots[i].request, reason);
 						shots[i].error = CStringA(reason).GetString();
+						shots[i].shownAt = t;
+						if (!shots[i].shown) { shots[i].checked = true; shots[i].checkedAt = t; }
 					}
-					if (shots[i].shown && !shots[i].checked && t >= at + 0.6)
+					if (shots[i].shown && !shots[i].checked && t >= shots[i].shownAt + 0.6)
 					{
 						renderer.GetCalibrationOutput(shots[i].after);
-						shots[i].checked = true;
+						const uint64_t generation = static_cast<uint64_t>(i + 1);
+						const bool done = shots[i].after.presentedGeneration == generation && shots[i].after.presentsOfGeneration >= 2 &&
+							(shots[i].after.containerBits != 10 || shots[i].after.readbackGeneration == generation);
+						if (done || t >= shots[i].shownAt + 3.0)
+						{
+							shots[i].checked = true;
+							shots[i].checkedAt = t;
+						}
 					}
 				}
-				if (!ended && shots[2].checked && t >= 4.0)
+				if (!ended && shots[2].checked && t >= shots[2].checkedAt + 0.2)
 				{
 					Calibration::PatternRequest off;
 					CString reason;
 					ended = renderer.SetCalibrationPattern(off, reason);
 				}
 			};
-			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false, std::string(), false, &plan);
+			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 12.0, false, std::string(), false, &plan);
+			for (const std::string& line : r.log)
+				if (line.find("Calibration patterns:") != std::string::npos || line.find("blit") != std::string::npos)
+					Logger::WriteMessage(("   " + line).c_str());
 			Logger::WriteMessage(("format: container " + std::to_string(format.containerBits) + " code " +
 				std::to_string(format.codeBits) + (format.limitedRange ? " limited" : " full") + " " +
 				std::to_string(format.width) + "x" + std::to_string(format.height) + " " +
@@ -6426,22 +6495,23 @@ namespace Tests
 			for (int i = 0; i < 3; ++i)
 			{
 				const Shot& s = shots[i];
-				Assert::IsTrue(s.shown, std::wstring(s.error.begin(), s.error.end()).c_str());
-				Assert::AreEqual(static_cast<uint64_t>(i + 1), s.after.presentedGeneration, L"the patch was presented");
-				Assert::IsTrue(s.after.presentsOfGeneration >= 2, L"presented every refresh");
+				const std::wstring shot = L"shot " + std::to_wstring(i) + L": ";
+				Assert::IsTrue(s.shown, (shot + std::wstring(s.error.begin(), s.error.end())).c_str());
+				Assert::AreEqual(static_cast<uint64_t>(i + 1), s.after.presentedGeneration, (shot + L"the patch was presented\n" + r.Tail()).c_str());
+				Assert::IsTrue(s.after.presentsOfGeneration >= 2, (shot + L"presented every refresh").c_str());
 				if (format.containerBits != 10)
 				{
 					Logger::WriteMessage("SKIP-READBACK 8-bit swapchain: presentation checked, codes not read back\n");
 					continue;
 				}
-				Assert::AreEqual(static_cast<uint64_t>(i + 1), s.after.readbackGeneration, L"read back");
+				Assert::AreEqual(static_cast<uint64_t>(i + 1), s.after.readbackGeneration, (shot + L"read back").c_str());
 				for (int c = 0; c < 3; ++c)
 				{
 					Assert::AreEqual(static_cast<int>(s.request.patch[c]), static_cast<int>(s.after.readbackCenter[c]),
-						L"the centre pixel holds the exact patch code");
+						(shot + L"the centre pixel holds the exact patch code").c_str());
 					const int cornerWant = i == 1 ? s.request.background[c] : s.request.patch[c];
 					Assert::AreEqual(cornerWant, static_cast<int>(s.after.readbackCorner[c]),
-						i == 1 ? L"the corner holds the surround" : L"full field reaches the corner");
+						(shot + (i == 1 ? L"the corner holds the surround" : L"full field reaches the corner")).c_str());
 				}
 			}
 			Assert::IsTrue(ended, L"patterns ended");
@@ -6644,26 +6714,36 @@ namespace Tests
 			}
 		}
 
-		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineGamesDepthOneEngagesAtOneAhead)
+		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineLowLatencyDepthOneStaysBackward)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()
-		TEST_METHOD(VectorEngineGamesDepthOneEngagesAtOneAhead)
+		TEST_METHOD(VectorEngineLowLatencyDepthOneStaysBackward)
 		{
 			const HarnessScope harnessScope;
-			// A games queue (queue_size 4, target_frames 2) keeps one frame ahead: the look-ahead engages
-			// at one ahead and the vectors are forward.
-			if (!RequireHardwareOrSkip("VectorEngineGamesDepthOneEngagesAtOneAhead")) return;
-			if (VectorTestSkip("VectorEngineGamesDepthOneEngagesAtOneAhead")) return;
+			// A low-latency queue that keeps one frame ahead (queue_size 4, target_frames 2) still never
+			// looks ahead (owner 2026-10-15/16: backward vectors without look-ahead in low latency). Until
+			// 2026-11-01 this queue ran forward (ForwardShallow) and engaged the look-ahead; now the
+			// backward pairs are published, as at depth zero, and the consumer that needs a frame ahead
+			// (the debander hold) is named as without vectors.
+			if (!RequireHardwareOrSkip("VectorEngineLowLatencyDepthOneStaysBackward")) return;
+			if (VectorTestSkip("VectorEngineLowLatencyDepthOneStaysBackward")) return;
 			g_harnessApplySnapshot = true;
 			g_harnessQueueTarget = 2;   // the harness sets the target itself after the snapshot (SetQueueFramePolicy)
 			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
-				"deband_vp: on\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 2\n");
+				"deband_vp: on\nsource_resolution: auto\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 2\n");
 			g_harnessApplySnapshot = false;
 			g_harnessQueueTarget = 0;
 			Logger::WriteMessage(VectorTestLines(r).c_str());
 			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
-			Assert::IsTrue(r.Logged("Motion ahead: engaged"), (L"the look-ahead engaged at one ahead\n" + r.Tail()).c_str());
-			Assert::IsTrue(r.Logged("vectors delivered (forward"), (L"forward vectors delivered\n" + r.Tail()).c_str());
+			Assert::IsFalse(r.Logged("Motion ahead: engaged"), (L"no look-ahead in low latency\n" + r.Tail()).c_str());
+			Assert::IsFalse(r.Logged("vectors delivered (forward"), (L"no forward vectors in low latency\n" + r.Tail()).c_str());
+			Assert::IsTrue(r.Logged("vectors delivered (backward"), (L"backward pairs delivered\n" + r.Tail()).c_str());
+			bool named = false;
+			for (const std::string& line : r.log)
+				if (line.find("Vector engine: backward pairs") != std::string::npos && line.find("deband hold") != std::string::npos &&
+					line.find("without vectors") != std::string::npos)
+					named = true;
+			Assert::IsTrue(named, (L"the status names the deband hold as without vectors\n" + r.Tail()).c_str());
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineCompetitiveDepthZeroPublishesBackwardPairs)
