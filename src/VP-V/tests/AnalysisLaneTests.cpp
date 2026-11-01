@@ -445,7 +445,8 @@ namespace AnalysisLaneTestsNs
 			Assert::IsTrue(Rig::Res(f10, kP1HalfLuma).seal.reason == SealReason::StampMismatch, L"lane work from before the event is rejected");
 			Assert::IsTrue(Rig::Res(f10, kP1HalfLuma).liveFilled && Rig::Res(f10, kP1HalfLuma).final == SealOutcome::Sealed, L"filled live");
 			Assert::IsTrue(Rig::Res(f10, kP4SourceStats).liveFilled, L"P4 live too");
-			Assert::IsTrue(reg.Level() == reg.T0StepCount(), L"the regulator floored");
+			Assert::IsTrue(reg.LaneLevel() == reg.T0StepCount(), L"the regulator floored");
+			Assert::IsTrue(reg.OfaStep() == 0, L"the floor left the OFA variant alone");
 			r.End(10);
 			const std::vector<ProductFrameResult> f11 = r.Begin(11);
 			Assert::IsTrue(Rig::Res(f11, kP1HalfLuma).seal.reason == SealReason::Accepted, L"P1 started after the event is accepted");
@@ -728,19 +729,183 @@ namespace AnalysisLaneTestsNs
 		{
 			Rig r(16);
 			LaneSourceRing ring(4);
-			Assert::IsTrue(ring.Find(0) == nullptr && !ring.Newest(nullptr), L"empty");
+			SourceFrameView f;
+			Assert::IsTrue(!ring.Find(0, &f) && !ring.Newest(nullptr), L"empty");
 			for (uint64_t s = 0; s < 6; ++s)
 				ring.Store(r.View(s));
 			uint64_t n = 0;
 			Assert::IsTrue(ring.Newest(&n) && n == 5, L"newest");
-			Assert::IsTrue(ring.Find(1) == nullptr && ring.Find(2) != nullptr && ring.Find(5)->seq == 5, L"oldest frames are overwritten");
+			Assert::IsTrue(!ring.Find(1, &f) && ring.Find(2, &f) && ring.Find(5, &f) && f.seq == 5, L"oldest frames are overwritten");
 			SourceFrameView v;
 			Assert::IsTrue(ring.TryGet(4, &v) && v.seq == 4 && v.width == kW && v.luma == r.View(4).luma, L"lock-free copy");
 			Assert::IsTrue(!ring.TryGet(1, &v) && !ring.TryGet(9, &v), L"not held");
 			LaneSourceRing next(8);
 			next.CopyFrom(ring);
-			Assert::IsTrue(next.Find(2) != nullptr && next.Find(5) != nullptr && next.Find(1) == nullptr, L"carried over");
+			Assert::IsTrue(next.Find(2, &f) && next.Find(5, &f) && !next.Find(1, &f), L"carried over");
 			Assert::IsTrue(next.Newest(&n) && n == 5, L"newest carried");
+		}
+
+		// 16. M1: the lane job owns its view of the source frame: a ring overwrite or a drop never frees
+		// the planes under a running job; they are released when the job ends.
+		TEST_METHOD(SourceViewKeepsPlanesAliveForTheJob)
+		{
+			// A: the ring overwrites the frame while the P1 job is mid-chunk.
+			{
+				Rig r;
+				r.Configure(LaneSettings::Mode::On);
+				const std::shared_ptr<LaneState> st = r.lane.State();
+				const std::shared_ptr<int> token = std::make_shared<int>(7);
+				SourceFrameView v0 = r.View(0);
+				v0.keepAlive = token;
+				r.lane.OnSourceFrame(v0);
+				v0.keepAlive.reset();   // the test keeps only `token`
+				Assert::IsTrue(token.use_count() == 2, L"the ring holds a copy");
+				StepOutcome o = st->runner->Step(kP1HalfLuma, 1);
+				Assert::IsTrue(o == StepOutcome::Ran, L"the job is mid-chunk");
+				Assert::IsTrue(st->runner->Counters(kP1HalfLuma).published.load() == 0, L"not finished");
+				Assert::IsTrue(token.use_count() == 3, L"ring + the job's own copy");
+				const uint64_t overwrite = st->ring->Capacity();
+				r.lane.OnSourceFrame(r.View(overwrite));   // takes frame 0's ring slot
+				SourceFrameView probe;
+				Assert::IsTrue(!st->ring->Find(0, &probe), L"the ring let go of frame 0");
+				Assert::IsTrue(token.use_count() == 2, L"the job's copy keeps the planes alive");
+				int guard = 0;
+				while (o != StepOutcome::Published && ++guard < 100000) {
+					o = st->runner->Step(kP1HalfLuma, 1);
+					if (o != StepOutcome::Published)
+						Assert::IsTrue(token.use_count() == 2, L"alive for the whole job");
+				}
+				Assert::IsTrue(o == StepOutcome::Published, L"the job finished");
+				Assert::IsTrue(token.use_count() == 1, L"released when the job ended");
+				const std::vector<ProductFrameResult> res = r.lane.OnRenderStart(0, 4000);
+				Assert::IsTrue(Rig::Res(res, kP1HalfLuma).seal.reason == SealReason::Accepted, L"accepted from the lane");
+				Assert::IsTrue(r.Bytes(kP1HalfLuma, 0) == r.ExpectedHalf(0), L"the job's view was unchanged");
+			}
+			// B: the host drops the frame mid-job: the job is cancelled and the planes are released.
+			{
+				Rig r;
+				r.Configure(LaneSettings::Mode::On);
+				const std::shared_ptr<LaneState> st = r.lane.State();
+				const std::shared_ptr<int> token = std::make_shared<int>(8);
+				SourceFrameView v0 = r.View(0);
+				v0.keepAlive = token;
+				r.lane.OnSourceFrame(v0);
+				v0.keepAlive.reset();   // the test keeps only `token`
+				StepOutcome o = st->runner->Step(kP1HalfLuma, 1);
+				Assert::IsTrue(o == StepOutcome::Ran && token.use_count() == 3, L"mid-job: ring + job");
+				r.lane.OnFrameDropped(0);
+				SourceFrameView probe;
+				Assert::IsTrue(!st->ring->Find(0, &probe) && token.use_count() == 2, L"the ring let go on the drop");
+				int guard = 0;
+				while (o != StepOutcome::Abandoned && o != StepOutcome::Late && ++guard < 1000)
+					o = st->runner->Step(kP1HalfLuma, 1);
+				Assert::IsTrue(guard < 1000, L"the job ended");
+				Assert::IsTrue(token.use_count() == 1, L"released when the job ended");
+			}
+		}
+
+		// 17. M2: a lane too far behind to claim (missing, not late) still reaches the regulator.
+		TEST_METHOD(MissingFramesReachTheRegulator)
+		{
+			Rig r;
+			r.Configure(LaneSettings::Mode::On);
+			const std::shared_ptr<LaneState> st = r.lane.State();
+			const size_t window = r.lane.GetRegulator().WindowFrames();
+			for (uint64_t s = 0; s < window + 2; ++s) {   // the lane never runs
+				r.lane.OnRenderStart(s, 4000);
+				r.lane.OnFrameRetired(s, 0);
+				r.lane.OnFrameTiming(s, 10.0, 1.0, false);
+			}
+			bool missingOnly = false;
+			for (size_t i = 0; i < st->table->Count(); ++i) {
+				const SlotCounters& c = st->table->At(i).Counters();
+				missingOnly = missingOnly || (c.missing.load() > 0 && c.late.load() == 0);
+			}
+			Assert::IsTrue(missingOnly, L"the plant: missing without late");
+			std::vector<RegTrace> tr(Regulator::kTraceCapacity);
+			tr.resize(r.lane.RegulatorTraces(tr.data(), tr.size()));
+			bool skip = false;
+			for (const RegTrace& t : tr)
+				skip = skip || t.action == RegAction::SkipToNext;
+			Assert::IsTrue(skip, L"the regulator saw the lane behind (skip to next)");
+		}
+
+		// 18. M3: a GPU-compute job's chunk is predicted by its device cost: a 3 ms job at a 1 ms cap is
+		// split, each chunk predicted <= the cap, and a 0.5 ms gap runs none of it.
+		TEST_METHOD(GpuChunkPredictionKeepsSmallGapsEmpty)
+		{
+			Rig r;
+			r.consumers.clear();
+			r.consumers.push_back(Consumer(1, { kP3AnalysisField }));
+			FakeDispatcher disp;
+			r.lane.SetGpuDispatcher(&disp);
+			VpLaneProducts::GpuComputeLaneJob p3(
+				kP3AnalysisField, &disp, []() { return 3.0; }, [&r]() { return r.lane.ChunkCapUs(); }, 6u);
+			r.lane.RegisterProducer(&p3);
+			r.Configure(LaneSettings::Mode::On);
+			const std::shared_ptr<LaneState> st = r.lane.State();
+			Assert::IsTrue(r.lane.ChunkCapUs() == 1000u, L"1 ms cap");
+			Assert::IsTrue(st->gapWorks.size() == 1, L"one gap work");
+			r.lane.OnSourceFrame(r.View(0));
+			r.lane.OnSourceFrame(r.View(1));
+			r.lane.OnSourceFrame(r.View(2));
+			r.Pump();
+			r.lane.OnRenderStart(0, 4000);
+			r.Pump();
+			const uint32_t predicted = st->gapWorks[0]->PredictUs();
+			Assert::IsTrue(predicted >= 1000u - 1u && predicted <= r.lane.ChunkCapUs(), L"predicted by the device cost, within the cap");
+			const GapReport small = r.lane.OnPostSubmitGap(r.clock.load() + 500);
+			Assert::IsTrue(small.chunks == 0 && disp.dispatched == 0, L"a 0.5 ms gap runs none of it");
+			const GapReport big = r.lane.OnPostSubmitGap(r.clock.load() + 100000);
+			Assert::IsTrue(big.chunks > 0 && disp.dispatched > 0, L"a big gap runs it");
+			Assert::IsTrue(p3.Plan().chunkCount == 3u, L"split into 3 chunks of 1 ms");
+		}
+
+		// 19. S3: a product without a producer is not waited for.
+		TEST_METHOD(NoProducerNoDeterministicWait)
+		{
+			Rig r;
+			r.registered = true;   // register P1 + P4 only: P2 has no producer
+			r.lane.RegisterProducer(&r.p1);
+			r.lane.RegisterProducer(&r.p4);
+			r.Configure(LaneSettings::Mode::On, true);
+			r.lane.OnSourceFrame(r.View(0));
+			r.lane.OnSourceFrame(r.View(1));
+			for (int i = 0; i < 100 && r.lane.StepWorker(Backend::Cpu, 1000); ++i) {}
+			r.lane.OnRenderStart(0, 4000);
+			Assert::IsTrue(!r.lane.State()->runner->HasProducer(kP2VectorPair), L"no producer");
+			Assert::IsTrue(r.lane.DeterministicWaitUs(1, 4000) == 0, L"nothing to wait for");
+			Assert::IsTrue(r.lane.MissedBounds() == 0, L"no bound burnt");
+		}
+
+		// 20. S4: a regulator-dropped P4 makes the lane walk unavailable (Bill's walk + the decision).
+		TEST_METHOD(DroppedP4FallsBackToOriginalWalk)
+		{
+			Rig r;
+			r.consumers.clear();
+			r.consumers.push_back(Consumer(1, { kP4SourceStats, kP2VectorPair }, true));
+			LaneSettings s = r.Settings(LaneSettings::Mode::On);
+			s.walk = VpLaneProducts::WalkSource::Lane;
+			r.Configure(s);
+			Assert::IsTrue(r.lane.EffectiveWalk() == VpLaneProducts::WalkSource::Lane, L"lane walk while P4 runs");
+			for (uint64_t f = 0; f < 1000 && r.lane.GetRegulator().StateOf(kP4SourceStats) != ProductState::Dropped; ++f)
+				r.lane.OnFrameTiming(f, 0.0, 1.0, false);
+			Assert::IsTrue(r.lane.GetRegulator().StateOf(kP4SourceStats) == ProductState::Dropped, L"P4 dropped by overload");
+			Assert::IsTrue(r.lane.EffectiveWalk() == VpLaneProducts::WalkSource::Original, L"Bill's walk");
+			Assert::IsTrue(r.lane.Fallbacks()[2].engaged, L"the decision is shown");
+		}
+
+		// 21. S6: frames skipped because their source is gone are shown.
+		TEST_METHOD(SkippedFramesAreShown)
+		{
+			Rig r;
+			r.Configure(LaneSettings::Mode::On);
+			Assert::IsTrue(!AnyLine(r.lane.StatusLines(), "source gone"), L"nothing skipped yet");
+			r.lane.OnSourceFrame(r.View(0));
+			r.lane.OnSourceFrame(r.View(1));
+			r.lane.OnFrameDropped(0);
+			for (int i = 0; i < 100 && r.lane.StepWorker(Backend::Cpu, 1000); ++i) {}
+			Assert::IsTrue(AnyLine(r.lane.StatusLines(), "frames skipped (source gone)"), L"shown in plain language");
 		}
 	};
 }

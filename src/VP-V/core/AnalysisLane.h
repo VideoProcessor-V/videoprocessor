@@ -57,6 +57,14 @@
 //   keys (M2 H2 settings hook)  analysis_lane, analysis_lane_chunk_us, analysis_lane_deterministic,
 //                               analysis_lane_test_wait_ms, source_stats_walk -> LaneSettings::Parse
 //
+// PRODUCER / SOURCE CONTRACT. (1) A SourceFrameView handed to OnSourceFrame owns its planes through
+// keepAlive: the lane copies the view for the whole of a job, so the host may recycle the planes
+// the moment every copy is released (ring overwrite, OnFrameDropped, job end), never earlier.
+// (2) An ILaneProducer's Begin may follow an unfinished job of a previous graph's runner (a graph
+// swap re-registers the same producer with the new runner): Begin resets ALL job state. Device work of
+// that abandoned job lands in the OLD graph's buffers, which the host keeps until the old LaneState
+// (and so its last holder) is released.
+//
 // Timing decides WHEN lane work runs, never WHAT a product contains: every product is the pure
 // function of the frame and its inputs; the live (in-render) form is bit-identical for CPU products.
 namespace VpSkeleton {
@@ -172,14 +180,12 @@ public:
     void Store(const SourceFrameView& v)
     {
         const size_t slot = size_t(v.seq % cap_);
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            views_[slot] = v;
-            has_[slot] = 1;
-            if (!any_ || v.seq > newest_) {
-                newest_ = v.seq;
-                any_ = true;
-            }
+        std::lock_guard<std::mutex> lock(mutex_);   // the mirror writes are under it too: one writer at a time
+        views_[slot] = v;
+        has_[slot] = 1;
+        if (!any_ || v.seq > newest_) {
+            newest_ = v.seq;
+            any_ = true;
         }
         Mirror& m = mirror_[slot];
         m.seq.store(kInvalid, std::memory_order_relaxed);
@@ -192,15 +198,34 @@ public:
         m.seq.store(v.seq, std::memory_order_release);
     }
 
-    // Worker side (mutex). The pointer stays valid until a frame cap_ newer arrives.
-    const SourceFrameView* Find(uint64_t seq) const
+    // The frame will never be rendered: the ring lets go of its copy (the planes live on in any lane
+    // job's own copy until the job ends).
+    void Drop(uint64_t seq)
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const size_t slot = size_t(seq % cap_);
-        return has_[slot] != 0 && views_[slot].seq == seq ? &views_[slot] : nullptr;
+        if (has_[slot] == 0 || views_[slot].seq != seq)
+            return;
+        mirror_[slot].seq.store(kInvalid, std::memory_order_release);
+        views_[slot] = SourceFrameView();
+        has_[slot] = 0;
     }
 
-    // Render side (lock-free copy). False when the frame is not (or no longer) held.
+    // Worker side (mutex): COPIES the held view of seq into *out (the copy owns the planes through
+    // its keepAlive, so a later overwrite or drop cannot free them under the caller). False: not held.
+    bool Find(uint64_t seq, SourceFrameView* out) const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const size_t slot = size_t(seq % cap_);
+        if (has_[slot] == 0 || views_[slot].seq != seq)
+            return false;
+        if (out)
+            *out = views_[slot];
+        return true;
+    }
+
+    // Render side (lock-free copy; carries NO keepAlive: used at render start of a frame the render
+    // itself holds). False when the frame is not (or no longer) held.
     bool TryGet(uint64_t seq, SourceFrameView* out) const
     {
         const Mirror& m = mirror_[size_t(seq % cap_)];
@@ -291,7 +316,13 @@ public:
     Tier WorkTier() const override { return tier_; }
     double HeavyMs() const override { return heavyMs_; }
     bool HasWork() const override { return !idle_ && runner_ != nullptr && runner_->Laned(id_); }
-    uint32_t PredictUs() const override { return lastUs_; }
+    // The larger of the last measured CPU time of a Step and the producer's own device-cost prediction
+    // (a GPU-compute Step only records: its CPU time says nothing about the chunk's GPU time).
+    uint32_t PredictUs() const override
+    {
+        const uint32_t p = runner_ != nullptr ? runner_->PredictChunkUs(id_) : 0u;
+        return std::max(lastUs_, p);
+    }
     void RunChunk(uint32_t budgetUs) override
     {
         const uint64_t t0 = nowUs_ ? nowUs_() : 0u;
@@ -344,6 +375,7 @@ struct LaneState {
     std::vector<std::unique_ptr<LaneComputeGapWork>> gapWorks;
     GapScheduler gap;
     std::vector<uint64_t> lateSeen;                   // per node index (render thread)
+    std::vector<uint64_t> missSeen;                   // per node index (render thread)
     uint64_t firstSeq = 0;                            // the first frame this graph serves
 
     int IndexOf(ProductId id) const { return id < indexOfId.size() ? indexOfId[id] : -1; }
@@ -539,8 +571,8 @@ public:
         bool missed = false;
         for (size_t i = 0; i < st->table->Count(); ++i) {
             const Node& n = st->table->NodeAt(i);
-            if (n.backend == Backend::RenderOnly || !st->runner->Laned(n.id))
-                continue;
+            if (n.backend == Backend::RenderOnly || !st->runner->Laned(n.id) || !st->runner->HasProducer(n.id))
+                continue;   // no producer: nothing to wait for (the seal fills it live), no bound burnt
             uint32_t m = 0;
             const Variants v = st->info[i].identical ? Variants::Identical : Variants::NonIdentical;
             const SlotSet& set = st->table->At(i);
@@ -602,6 +634,7 @@ public:
             return;
         for (size_t i = 0; i < st->table->Count(); ++i)
             st->table->At(i).Discard(seq);
+        st->ring->Drop(seq);
         NotifyWake();
     }
 
@@ -616,9 +649,14 @@ public:
             return;
         uint32_t lateNow = 0;
         for (size_t i = 0; i < st->table->Count(); ++i) {
-            const uint64_t cur = st->table->At(i).Counters().late.load(std::memory_order_relaxed);
-            const uint64_t delta = cur > st->lateSeen[i] ? cur - st->lateSeen[i] : 0u;
+            // A lane too far behind to claim shows as missing (counted only while granted), not late.
+            const SlotCounters& c = st->table->At(i).Counters();
+            const uint64_t cur = c.late.load(std::memory_order_relaxed);
+            const uint64_t curMiss = c.missing.load(std::memory_order_relaxed);
+            const uint64_t delta = (cur > st->lateSeen[i] ? cur - st->lateSeen[i] : 0u)
+                                   + (curMiss > st->missSeen[i] ? curMiss - st->missSeen[i] : 0u);
             st->lateSeen[i] = cur;
+            st->missSeen[i] = curMiss;
             if (delta > 0) {
                 regulator_.OnLaneLate(st->table->NodeAt(i).id, uint32_t(delta));
                 lateNow += uint32_t(delta);
@@ -740,6 +778,11 @@ public:
         out.push_back("Analysis late: " + std::to_string(lateRingSum_) + " per 10 s");
         if (det_)
             out.push_back("Analysis deterministic: " + std::to_string(missedBounds_) + " frames missed the wait bound");
+        uint64_t skipped = 0;
+        for (size_t i = 0; i < st->table->Count(); ++i)
+            skipped += st->runner->Counters(st->table->NodeAt(i).id).skippedDropped.load(std::memory_order_relaxed);
+        if (skipped > 0)
+            out.push_back("Analysis: " + std::to_string(skipped) + " frames skipped (source gone)");
         const std::string notice = regulator_.Notice();
         if (!notice.empty())
             out.push_back("Analysis: " + notice);
@@ -780,7 +823,8 @@ private:
     bool P4Available() const
     {
         const std::shared_ptr<LaneState> st = std::atomic_load(&state_);
-        return settings_.mode != LaneSettings::Mode::Off && st && st->graph.Has(kP4SourceStats);
+        return settings_.mode != LaneSettings::Mode::Off && st && st->graph.Has(kP4SourceStats)
+               && regulator_.StateOf(kP4SourceStats) != ProductState::Dropped;
     }
 
     static std::string NameOf(const LaneState& st, ProductId id)
@@ -846,6 +890,7 @@ private:
             st->info.push_back(info);
         }
         st->lateSeen.assign(st->graph.nodes.size(), 0u);
+        st->missSeen.assign(st->graph.nodes.size(), 0u);
 
         st->plan = governor_.Update(reg, st->graph, card, tier);
         ApplyLaneGrants(st->plan, *st->table);
@@ -868,7 +913,7 @@ private:
                 const int i = sp->IndexOf(p);
                 return i >= 0 ? size_t(sp->graph.nodes[size_t(i)].bufferBytes) : size_t(0);
             });
-        st->runner->SetSources([sp](uint64_t seq) { return sp->ring->Find(seq); });
+        st->runner->SetSources([sp](uint64_t seq, SourceFrameView* out) { return sp->ring->Find(seq, out); });
         st->runner->SetReleaseCompleted([this](ProductId id) -> uint64_t {
             return releaseCompleted_ ? releaseCompleted_(id) : ~uint64_t(0);
         });

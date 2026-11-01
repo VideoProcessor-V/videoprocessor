@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 
 // Skeleton S3-S7 contracts between the analysis lane (LaneRunner.h), the render thread's idle-gap
 // scheduler (GapScheduler.h), the product producers (modules/input/source_analysis/lane/) and the host
@@ -13,11 +14,18 @@
 // C++14: the host owns every device call; these interfaces only describe them.
 namespace VpSkeleton {
 
-// A source frame as the host hands it to the lane (capture/conversion thread). The host keeps the
-// planes valid until OnFrameRetired(seq) or OnFrameDropped(seq). Luma samples are 16-bit; a sample
-// scaled to the full 16-bit range is (raw << msbShift) (P010/P016: msbShift 0).
+// A source frame as the host hands it to the lane (capture/conversion thread). Luma samples are
+// 16-bit; a sample scaled to the full 16-bit range is (raw << msbShift) (P010/P016: msbShift 0).
+// LIFETIME: the planes stay valid while ANY copy of the view that holds `keepAlive` exists. The host
+// sets keepAlive to an owner of the planes (a shared_ptr whose deleter returns them to the pool); the
+// lane copies the view (and so the owner) for the whole of a job, so a ring overwrite or the host's
+// OnFrameDropped / OnFrameRetired never frees planes under a running job. A view without keepAlive
+// (tests, host-owned planes) is only valid until the host retires/drops the frame. The render-side
+// mirror (LaneSourceRing::TryGet) carries no keepAlive: it is used at render start of a frame the
+// render itself holds.
 struct SourceFrameView {
     uint64_t seq = 0;
+    std::shared_ptr<const void> keepAlive;
     const uint16_t* luma = nullptr;
     uint32_t width = 0;
     uint32_t height = 0;
@@ -49,11 +57,18 @@ public:
     virtual ~ILaneProducer() {}
     virtual ProductId Product() const = 0;
     // Once per job, after the claim, Writable and the input pins. False: cannot run this frame (the
-    // runner abandons the job and counts it).
+    // runner abandons the job and counts it). Begin may follow an UNFINISHED job of the same producer
+    // (a graph swap hands the producer to the next graph's runner, and the old runner's job is simply
+    // left): Begin must reset ALL job state. Device work of such an abandoned job lands in the old
+    // graph's buffers, which the host keeps until the old LaneState is released.
     virtual bool Begin(const LaneJobContext& job) = 0;
     // One bounded chunk of about budgetUs. Deterministic: the finished result never depends on how
     // the work was chunked.
     virtual ChunkResult RunChunk(const LaneJobContext& job, uint32_t budgetUs) = 0;
+    // Predicted cost in microseconds of the NEXT chunk (0 = unknown). Producers whose cost is not the
+    // CPU time of RunChunk (GPU-compute jobs: the CPU only records) override it so the gap scheduler
+    // does not flood the device queue in a small gap.
+    virtual uint32_t PredictChunkUs() const { return 0; }
     // Producer-device fence: the value signalled after this job's last write, and the polled completed
     // value. CPU and render-device products: 0 and UINT64_MAX.
     virtual uint64_t ProducerSignal() const { return 0; }

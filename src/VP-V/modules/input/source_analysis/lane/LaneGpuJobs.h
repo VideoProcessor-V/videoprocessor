@@ -4,6 +4,7 @@
 
 #include <VP-V/core/LaneInterfaces.h>
 
+#include <cmath>
 #include <cstdint>
 #include <functional>
 #include <utility>
@@ -83,24 +84,58 @@ public:
         if (dispatcher_ == nullptr)
             return false;
         plan_ = PlanChunks(rows_, predictedMs_ ? predictedMs_() : 0.0, chunkCapUs_ ? chunkCapUs_() : 0u);
+        predictedUs_ = PredictedUs();
         next_ = 0;
+        active_ = true;
         return true;
+    }
+
+    // The device cost of the next chunk (the CPU only records it): the whole-job prediction divided by
+    // the chunk count of the current plan; before Begin / between jobs, of the plan the next job would
+    // get from the current inputs. Rounded up so a chunk planned to fit the cap is predicted <= cap.
+    uint32_t PredictChunkUs() const override
+    {
+        if (active_)
+            return ChunkUs(predictedUs_, plan_.chunkCount);
+        const ChunkPlan p = PlanChunks(rows_, predictedMs_ ? predictedMs_() : 0.0, chunkCapUs_ ? chunkCapUs_() : 0u);
+        return ChunkUs(PredictedUs(), p.chunkCount);
     }
 
     ChunkResult RunChunk(const LaneJobContext& job, uint32_t) override
     {
-        if (dispatcher_ == nullptr || next_ >= plan_.chunkCount)
+        if (dispatcher_ == nullptr || next_ >= plan_.chunkCount) {
+            active_ = false;
             return ChunkResult::Failed;
-        if (!dispatcher_->Dispatch(job, next_, plan_.chunkCount))
+        }
+        if (!dispatcher_->Dispatch(job, next_, plan_.chunkCount)) {
+            active_ = false;
             return ChunkResult::Failed;
+        }
         ++next_;
-        return next_ >= plan_.chunkCount ? ChunkResult::Done : ChunkResult::More;
+        if (next_ >= plan_.chunkCount) {
+            active_ = false;
+            return ChunkResult::Done;
+        }
+        return ChunkResult::More;
     }
 
     const ChunkPlan& Plan() const { return plan_; }
     uint32_t NextChunk() const { return next_; }
 
 private:
+    double PredictedUs() const
+    {
+        const double ms = predictedMs_ ? predictedMs_() : 0.0;
+        return ms > 0.0 ? ms * 1000.0 : 0.0;
+    }
+    static uint32_t ChunkUs(double wholeUs, uint32_t chunks)
+    {
+        if (!(wholeUs > 0.0) || chunks == 0)
+            return 0;
+        const double per = std::ceil(wholeUs / double(chunks));
+        return per >= 4294967295.0 ? 0xFFFFFFFFu : uint32_t(per);
+    }
+
     ProductId id_;
     IGpuDispatcher* dispatcher_;
     std::function<double()> predictedMs_;
@@ -108,6 +143,8 @@ private:
     uint32_t rows_;
     ChunkPlan plan_;
     uint32_t next_ = 0;
+    bool active_ = false;       // a job is in progress: plan_ and predictedUs_ are its own
+    double predictedUs_ = 0.0;  // the whole-job prediction at Begin
 };
 
 } // namespace VpLaneProducts

@@ -507,6 +507,64 @@ namespace LaneProductsTestsNs
 			Assert::IsFalse(none.Begin(ctx), L"no dispatcher: cannot run");
 		}
 
+		// S5: Begin after an UNFINISHED job (a graph swap leaves one behind) resets all job state.
+		TEST_METHOD(BeginAfterUnfinishedJobGivesCorrectBytes)
+		{
+			const Frame a = MakeFrame(64, 48, 64, 11u, 0xFFFFu);
+			const Frame b = MakeFrame(64, 48, 64, 22u, 0xFFFFu);
+			const SourceFrameView va = a.View(0);
+			const SourceFrameView vb = b.View(0);
+			const Dims d{ 64, 48 };
+			std::vector<uint8_t> outA(HalfLumaBytes(d), 0xCD);
+			std::vector<uint8_t> outB(HalfLumaBytes(d), 0xCD);
+			HalfLumaProducer p;
+			LaneJobContext ja;
+			ja.source = &va;
+			ja.out = outA.data();
+			ja.outBytes = outA.size();
+			Assert::IsTrue(p.Begin(ja), L"begin A");
+			Assert::IsTrue(p.RunChunk(ja, 1) == ChunkResult::More, L"A unfinished");
+			LaneJobContext jb;
+			jb.source = &vb;
+			jb.out = outB.data();
+			jb.outBytes = outB.size();
+			Assert::IsTrue(p.Begin(jb), L"begin B after the unfinished A");
+			ChunkResult r = ChunkResult::More;
+			for (int n = 0; r == ChunkResult::More && n < 100000; ++n)
+				r = p.RunChunk(jb, 1);
+			Assert::IsTrue(r == ChunkResult::Done, L"B done");
+			std::vector<uint8_t> ref(HalfLumaBytes(d), 0);
+			Assert::IsTrue(ComputeHalfLuma(vb, ref.data(), ref.size()), L"reference");
+			Assert::IsTrue(outB == ref, L"B's bytes are correct");
+		}
+
+		// M3: the device-cost prediction of a GPU-compute job.
+		TEST_METHOD(GpuJobPredictsChunkCost)
+		{
+			FakeDispatcher disp;
+			double ms = 3.0;
+			uint32_t cap = 1000;
+			GpuComputeLaneJob job(kP3AnalysisField, &disp, [&ms]() { return ms; }, [&cap]() { return cap; }, 4320);
+			Assert::IsTrue(job.PredictChunkUs() == 1000u, L"before Begin: from the plan of the current inputs (3 ms / 3 chunks)");
+			cap = 500;
+			Assert::IsTrue(job.PredictChunkUs() == 500u, L"a smaller cap: more chunks, each <= cap");
+			LaneJobContext ctx;
+			Assert::IsTrue(job.Begin(ctx), L"begin");
+			Assert::IsTrue(job.Plan().chunkCount == 6u && job.PredictChunkUs() == 500u, L"in a job: its own plan");
+			ms = 6.0;   // inputs change mid-job: the plan in flight is unchanged
+			Assert::IsTrue(job.PredictChunkUs() == 500u, L"in-flight plan kept");
+			ChunkResult r = ChunkResult::More;
+			while (r == ChunkResult::More)
+				r = job.RunChunk(ctx, 0);
+			Assert::IsTrue(job.PredictChunkUs() == 500u, L"after the job: the next job's plan (6 ms at 0.5 ms = 12 chunks)");
+			ms = 0.0;
+			Assert::IsTrue(job.PredictChunkUs() == 0u, L"no prediction: 0");
+			VpSkeleton::ILaneProducer& base = job;
+			Assert::IsTrue(base.PredictChunkUs() == 0u, L"virtual dispatch");
+			HalfLumaProducer cpu;
+			Assert::IsTrue(cpu.PredictChunkUs() == 0u, L"CPU producers: no device prediction");
+		}
+
 		TEST_METHOD(ReadbackRingNeverBlocks)
 		{
 			FakeReadback dev(2);

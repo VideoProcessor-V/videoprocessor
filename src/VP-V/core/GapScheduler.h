@@ -25,11 +25,22 @@ struct GapReport {
     bool laneStarved = false;           // lane compute had work but got no chunk in this gap
     uint32_t laneStarvedGaps = 0;       // cumulative form: gaps in which the lane was starved
     uint32_t renderAheadNoFit = 0;      // render-ahead extras whose next chunk did not fit (once per id per gap)
+    uint32_t capNoFit = 0;              // works skipped because their prediction exceeds the chunk CAP (once per id per gap)
 };
 
 class GapScheduler {
 public:
-    void Add(IGapWork* w) { if (w) m_works.push_back(w); }
+    // No heap allocation happens in RunGap once the works are added: the scratch vectors and the
+    // learned entries are sized here.
+    void Add(IGapWork* w)
+    {
+        if (!w) return;
+        m_works.push_back(w);
+        m_order.reserve(m_works.size());
+        m_noFitSeen.reserve(m_works.size());
+        m_capSeen.reserve(m_works.size());
+        m_learned.insert(std::make_pair(w->Id(), Learned()));
+    }
     void SetChunkCapUs(uint32_t capUs) { m_capUs = capUs; }
     uint32_t ChunkCapUs() const { return m_capUs; }
 
@@ -47,8 +58,11 @@ public:
     {
         GapReport r;
         if (!nowUs) return r;
-        std::vector<IGapWork*> order;
-        std::vector<uint16_t> noFitSeen;
+        std::vector<IGapWork*>& order = m_order;
+        std::vector<uint16_t>& noFitSeen = m_noFitSeen;
+        std::vector<uint16_t>& capSeen = m_capSeen;
+        noFitSeen.clear();
+        capSeen.clear();
         bool laneHadWork = false;
         bool laneRan = false;
         // Bounded: a clock that never advances must not spin forever.
@@ -66,7 +80,17 @@ public:
 
             IGapWork* pick = nullptr;
             for (IGapWork* w : order) {
-                if (Predict(w) <= limit) { pick = w; break; }
+                const uint64_t pred = Predict(w);
+                if (pred <= limit) { pick = w; break; }
+                if (pred > m_capUs && std::find(capSeen.begin(), capSeen.end(), w->Id()) == capSeen.end()) {
+                    // Too big for ANY gap: a learned cost above the cap would starve the work for good, so
+                    // it decays toward the work's own prediction once per gap and re-learns when it runs.
+                    capSeen.push_back(w->Id());
+                    ++r.capNoFit;
+                    Learned& l = LearnedFor(w);
+                    const uint64_t floorUs = w->PredictUs();
+                    l.emaUs = std::max<uint64_t>(floorUs, l.emaUs > l.emaUs / 4 ? l.emaUs - l.emaUs / 4 : 0u);
+                }
                 if (w->Class() == GapClass::RenderAheadExtra &&
                     std::find(noFitSeen.begin(), noFitSeen.end(), w->Id()) == noFitSeen.end()) {
                     noFitSeen.push_back(w->Id());
@@ -109,7 +133,7 @@ public:
 private:
     static const uint32_t kMaxChunksPerGap = 1u << 16;
 
-    struct Learned { uint64_t emaUs = 0; };
+    struct Learned { uint64_t emaUs = 0; bool init = false; };
 
     static bool Before(const IGapWork* a, const IGapWork* b)
     {
@@ -123,13 +147,12 @@ private:
 
     Learned& LearnedFor(IGapWork* w)
     {
-        auto it = m_learned.find(w->Id());
-        if (it == m_learned.end()) {
-            Learned l;
+        Learned& l = m_learned[w->Id()];   // present since Add: no allocation here
+        if (!l.init) {
             l.emaUs = w->PredictUs();   // start = the first prediction
-            it = m_learned.insert(std::make_pair(w->Id(), l)).first;
+            l.init = true;
         }
-        return it->second;
+        return l;
     }
 
     uint64_t Predict(IGapWork* w)
@@ -148,9 +171,13 @@ private:
         m_totals.laneStarved = m_totals.laneStarved || r.laneStarved;
         m_totals.laneStarvedGaps += r.laneStarvedGaps;
         m_totals.renderAheadNoFit += r.renderAheadNoFit;
+        m_totals.capNoFit += r.capNoFit;
     }
 
     std::vector<IGapWork*> m_works;
+    std::vector<IGapWork*> m_order;           // scratch (reserved at Add)
+    std::vector<uint16_t> m_noFitSeen;
+    std::vector<uint16_t> m_capSeen;
     std::map<uint16_t, Learned> m_learned;   // ordered by id: never an unordered container in decisions
     uint32_t m_capUs = 1000;
     GapReport m_totals;

@@ -16,10 +16,13 @@
 
 // Skeleton S5: the analysis-lane regulator (design B8, audit 25a 3.8/3.9). Render thread only.
 //
-// It keeps one number, the LEVEL: how many steps of a fixed LADDER are granted. The ladder (from the
-// minimum upward) is every sheddable T0 product, then every T1, then every T2 (given order inside a
-// tier), then, on non-deterministic runs with an optical-flow product, the OFA variant steps
-// (quarter -> preset -> extras). A product below its step is shed: moved into the render when its
+// It keeps two numbers. The LANE level: how many steps of a fixed LADDER are granted: every sheddable
+// T0 product, then every T1, then every T2 (given order inside a tier). And, on non-deterministic runs
+// with an optical-flow product, the separate OFA level (quarter -> preset -> extras): a non-identical
+// change of the picture, so it is the LAST resort: a floor, a cut, a MINOR change and the lane
+// back-offs never touch it; it steps down (one step per window) only when the lane level is already 0
+// and a window is still low, and growth restores it first, then the lane steps. Level() is their sum.
+// A product below its lane step is shed: moved into the render when its
 // fallback is identical (only with accounting), else dropped when it declares a reduced mode and the
 // run is not deterministic, else forced live (it stays laned; the seal live-fills it when late, and
 // the cost is charged). Products that may not be shed sit permanently at their full state.
@@ -111,13 +114,16 @@ public:
                     ++t0Steps_;
             }
         }
+        stepDownThisWindow_ = false;
+        suppressedStepDowns_ = 0;
         laneSteps_ = steps_.size();
         bool anyOfa = false;
         for (const Item& it : items_)
             anyOfa = anyOfa || it.p.ofa;
         ofaSteps_ = (!det_ && anyOfa) ? size_t(cfg_.ofaSteps) : 0;
         maxLevel_ = uint16_t(laneSteps_ + ofaSteps_);
-        level_ = maxLevel_;
+        lane_ = uint16_t(laneSteps_);
+        ofaGranted_ = ofaSteps_;
 
         windowFrames_ = size_t(std::max(8.0, std::floor(cfg_.windowSeconds * 1000.0 / periodMs_ + 0.5)));
         slack_.clear();
@@ -154,8 +160,8 @@ public:
     {
         const VpIndicator::CounterMask hard = VpIndicator::Bit(VpIndicator::kFull) | VpIndicator::Bit(VpIndicator::kGraph);
         if ((changed & hard) != 0) {
-            if (level_ > t0Steps_) {
-                SetLevel(uint16_t(t0Steps_), RegAction::ConservativeFloor, false);
+            if (lane_ > t0Steps_) {
+                SetLane(uint16_t(t0Steps_), RegAction::ConservativeFloor, false);
             }
             else
                 Trace(RegAction::ConservativeFloor, kNoProduct, 0.f);
@@ -189,10 +195,12 @@ public:
     {
         if (ofaSteps_ == 0)
             return 0;
-        const size_t granted = level_ > laneSteps_ ? size_t(level_) - laneSteps_ : 0;
-        return uint8_t(ofaSteps_ - std::min(granted, ofaSteps_));
+        return uint8_t(ofaSteps_ - std::min(ofaGranted_, ofaSteps_));
     }
-    uint16_t Level() const { return level_; }
+    uint16_t Level() const { return uint16_t(lane_ + ofaGranted_); }
+    uint16_t LaneLevel() const { return lane_; }
+    // Cut / MINOR step-downs ignored because one already happened in this window.
+    uint64_t SuppressedStepDowns() const { return suppressedStepDowns_; }
     uint16_t MaxLevel() const { return maxLevel_; }
     double MarginMs() const { return marginMs_; }
     bool PinnedAtMinimum() const { return pinned_; }
@@ -282,8 +290,7 @@ private:
     {
         if (it.step < 0)
             return false;
-        const size_t laneLevel = std::min<size_t>(level_, laneSteps_);
-        return size_t(it.step) >= laneLevel || it.lateShed;
+        return size_t(it.step) >= size_t(lane_) || it.lateShed;
     }
 
     std::vector<ProductId> IdsIn(ProductState s) const
@@ -302,34 +309,47 @@ private:
         t.seq = lastSeq_;
         t.action = a;
         t.id = id;
-        t.level = level_;
+        t.level = Level();
         t.slackLowMs = float(lastSlackLow_);
         t.marginMs = float(decisionMargin_);
         t.predictedDeltaMs = delta;
         ++traceCount_;
     }
 
-    void SetLevel(uint16_t newLevel, RegAction why, bool fresh)
+    void SetLane(uint16_t newLane, RegAction why, bool fresh)
     {
-        if (newLevel > maxLevel_)
-            newLevel = maxLevel_;
-        const uint16_t old = level_;
-        const uint8_t ofaOld = OfaStep();
-        level_ = newLevel;
-        dwell_ = newLevel < old ? 0 : dwell_;
+        if (newLane > laneSteps_)
+            newLane = uint16_t(laneSteps_);
+        const uint16_t old = lane_;
+        lane_ = newLane;
+        dwell_ = newLane < old ? 0 : dwell_;
         Trace(why, kNoProduct, 0.f);
-        const uint8_t ofaNew = OfaStep();
-        if (ofaNew > ofaOld)
-            Trace(RegAction::OfaStepDown, kNoProduct, 0.f);
-        else if (ofaNew < ofaOld)
-            Trace(RegAction::OfaStepUp, kNoProduct, 0.f);
         Recompute(fresh);
     }
 
+    // The OFA variant level; it changes no product state, so nothing is recomputed.
+    void SetOfa(size_t granted, RegAction why)
+    {
+        if (granted > ofaSteps_)
+            granted = ofaSteps_;
+        const size_t old = ofaGranted_;
+        ofaGranted_ = granted;
+        if (granted < old)
+            dwell_ = 0;
+        Trace(why, kNoProduct, 0.f);
+        Trace(granted < old ? RegAction::OfaStepDown : RegAction::OfaStepUp, kNoProduct, 0.f);
+    }
+
+    // A cut or MINOR change: one lane step, at most once per window (frequent slips must not flap drops).
     void StepDown(RegAction why)
     {
-        if (level_ > 0)
-            SetLevel(uint16_t(level_ - 1), why, false);
+        if (stepDownThisWindow_) {
+            ++suppressedStepDowns_;
+            return;
+        }
+        stepDownThisWindow_ = true;
+        if (lane_ > 0)
+            SetLane(uint16_t(lane_ - 1), why, false);
         else
             Trace(why, kNoProduct, 0.f);
     }
@@ -404,6 +424,7 @@ private:
     void EndWindow(uint64_t seq)
     {
         lastSeq_ = seq;
+        stepDownThisWindow_ = false;
         std::vector<double> s(slack_);
         std::vector<double> r(render_);
         slack_.clear();
@@ -466,9 +487,16 @@ private:
 
         if (low) {
             dwell_ = 0;
-            if (level_ > 0) {
+            if (lane_ > 0) {
                 pinned_ = false;
-                SetLevel(uint16_t(std::floor(double(level_) * cfg_.backoff)), RegAction::BackOff, true);
+                SetLane(uint16_t(std::floor(double(lane_) * cfg_.backoff)), RegAction::BackOff, true);
+                return;
+            }
+            if (ofaGranted_ > 0) {   // last resort: the lane is at its minimum and a window is still low
+                pinned_ = false;
+                SetOfa(ofaGranted_ - 1u, RegAction::BackOff);
+                if (lateChanged)
+                    Recompute(false);
                 return;
             }
             if (!pinned_) {
@@ -479,9 +507,14 @@ private:
         else {
             pinned_ = false;
             if (slackLow >= m + cfg_.hysteresisFrac * periodMs_) {
-                if (++dwell_ >= cfg_.dwellWindows && level_ < maxLevel_) {
+                if (++dwell_ >= cfg_.dwellWindows && Level() < maxLevel_) {
                     dwell_ = 0;
-                    SetLevel(uint16_t(level_ + 1), RegAction::Grow, false);
+                    if (ofaGranted_ < ofaSteps_)   // the OFA step comes back first
+                        SetOfa(ofaGranted_ + 1u, RegAction::Grow);
+                    else
+                        SetLane(uint16_t(lane_ + 1), RegAction::Grow, false);
+                    if (lateChanged)
+                        Recompute(false);
                     return;
                 }
             }
@@ -500,8 +533,11 @@ private:
     size_t laneSteps_ = 0;
     size_t ofaSteps_ = 0;
     size_t t0Steps_ = 0;
-    uint16_t level_ = 0;
+    uint16_t lane_ = 0;              // granted lane steps
+    size_t ofaGranted_ = 0;          // granted OFA variant steps
     uint16_t maxLevel_ = 0;
+    bool stepDownThisWindow_ = false;
+    uint64_t suppressedStepDowns_ = 0;
     size_t windowFrames_ = 0;
     std::vector<double> slack_;
     std::vector<double> render_;

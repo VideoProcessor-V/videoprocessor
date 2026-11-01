@@ -180,6 +180,36 @@ namespace SkeletonGapTestsNs
 			Assert::AreEqual<uint32_t>(2, s.Totals().overruns);
 		}
 
+		// M4: a learned cost above the chunk cap decays once per gap, so the work is not starved for good.
+		TEST_METHOD(OverCapLearnedCostDecaysAndIsScheduledAgain)
+		{
+			Clock clk; std::vector<uint16_t> log;
+			FakeWork w(&clk, GapClass::LaneCompute, 4, 1000, 1500, -1, &log);   // overruns to 1.5x the cap
+			GapScheduler s;
+			s.SetChunkCapUs(1000);
+			s.Add(&w);
+			GapReport r = s.RunGap(clk.t + 5000, clk.Fn());
+			Assert::AreEqual<uint32_t>(1, r.chunks);
+			Assert::AreEqual<uint32_t>(1, r.capNoFit);                 // learned 1125 > cap: skipped, counted once
+			Assert::AreEqual<uint64_t>(1000, s.LearnedUs(4));          // and decayed toward the prediction
+			const uint32_t runsBefore = w.runs;
+			uint32_t gaps = 0;
+			while (w.runs == runsBefore && gaps < 5) {
+				s.RunGap(clk.t + 5000, clk.Fn());
+				++gaps;
+			}
+			Assert::IsTrue(w.runs > runsBefore && gaps <= 2);          // scheduled again within a few gaps
+			Assert::IsTrue(s.Totals().capNoFit >= 1);
+			// Merely too little time left is not a cap miss.
+			Clock c2; FakeWork v(&c2, GapClass::LaneCompute, 5, 1000, 1000, -1, nullptr);
+			GapScheduler t;
+			t.SetChunkCapUs(1000);
+			t.Add(&v);
+			r = t.RunGap(c2.t + 300, c2.Fn());
+			Assert::AreEqual<uint32_t>(0, r.chunks);
+			Assert::AreEqual<uint32_t>(0, r.capNoFit);
+		}
+
 		TEST_METHOD(DerivedChunkCap)
 		{
 			Assert::AreEqual<uint32_t>(1000, GapScheduler::DerivedChunkCapUs(1000.0 / 24.0, 0));

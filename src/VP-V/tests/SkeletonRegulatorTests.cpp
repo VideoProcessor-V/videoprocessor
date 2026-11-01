@@ -244,34 +244,82 @@ namespace SkeletonRegulatorTestsNs
 			Assert::IsTrue(r.MarginMs() > m0 + 0.1);
 		}
 
-		// 3. Back-off is multiplicative, once per window; grow +1 after two calm windows above m + hysteresis.
+		// 3. Lane back-off is multiplicative, once per window; grow +1 after two calm windows above m + hysteresis.
+		// The OFA level is separate: lane back-offs never touch it.
 		TEST_METHOD(BackoffMultiplicativeGrowAfterTwoCalmWindows)
 		{
 			Regulator r;
 			r.Configure(Products(), kPeriod, false);
 			uint64_t seq = 0;
 			Assert::AreEqual(uint16_t(8), r.Level());
-			Feed(r, seq, 0.0, 5.0);                    // one bad window: 120 bad frames, one back-off
-			Assert::AreEqual(uint16_t(4), r.Level());
+			Assert::AreEqual(uint16_t(5), r.LaneLevel());
+			Feed(r, seq, 0.0, 5.0);                    // one bad window: 120 bad frames, one back-off of the lane
+			Assert::AreEqual(uint16_t(2), r.LaneLevel());
+			Assert::AreEqual(uint16_t(5), r.Level());
 			Assert::AreEqual(size_t(1), CountAction(r, RegAction::BackOff));
 			Feed(r, seq, 0.0, 5.0);
-			Assert::AreEqual(uint16_t(2), r.Level());
+			Assert::AreEqual(uint16_t(1), r.LaneLevel());
 			Feed(r, seq, 0.0, 5.0);
-			Assert::AreEqual(uint16_t(1), r.Level());
+			Assert::AreEqual(uint16_t(0), r.LaneLevel());
 			Assert::AreEqual(size_t(3), CountAction(r, RegAction::BackOff));
+			Assert::AreEqual(uint8_t(0), r.OfaStep());
+			Assert::AreEqual(size_t(0), CountAction(r, RegAction::OfaStepDown));
 			Feed(r, seq, 8.0, 5.0);                    // calm 1
-			Assert::AreEqual(uint16_t(1), r.Level());
-			Feed(r, seq, 8.0, 5.0);                    // calm 2: +1
-			Assert::AreEqual(uint16_t(2), r.Level());
+			Assert::AreEqual(uint16_t(0), r.LaneLevel());
+			Feed(r, seq, 8.0, 5.0);                    // calm 2: +1 (the OFA is at full: a lane step)
+			Assert::AreEqual(uint16_t(1), r.LaneLevel());
 			Feed(r, seq, 0.6, 5.0);                    // between m and m + hysteresis: the dwell resets
 			Feed(r, seq, 8.0, 5.0);
-			Assert::AreEqual(uint16_t(2), r.Level());
+			Assert::AreEqual(uint16_t(1), r.LaneLevel());
 			Feed(r, seq, 8.0, 5.0);
-			Assert::AreEqual(uint16_t(3), r.Level());
+			Assert::AreEqual(uint16_t(2), r.LaneLevel());
 			Assert::AreEqual(size_t(2), CountAction(r, RegAction::Grow));
 		}
 
-		// 4. FULL/graph -> floor at the T0 steps; MINOR and cut -> one step down.
+		// 3b. The OFA variant is the last resort: only a low window with the lane already at 0 steps it,
+		// one step per window; growth restores it before any lane step.
+		TEST_METHOD(OfaStepsOnlyWhenLaneIsPinnedAndRestoresFirst)
+		{
+			Regulator r;
+			r.Configure(Products(), kPeriod, false);
+			uint64_t seq = 0;
+			for (int i = 0; i < 3; ++i)
+				Feed(r, seq, 0.0, 5.0);
+			Assert::AreEqual(uint16_t(0), r.LaneLevel());
+			Assert::AreEqual(uint8_t(0), r.OfaStep());
+			Feed(r, seq, 0.0, 5.0);
+			Assert::AreEqual(uint8_t(1), r.OfaStep());
+			Assert::AreEqual(size_t(1), CountAction(r, RegAction::OfaStepDown));
+			Feed(r, seq, 0.0, 5.0);
+			Assert::AreEqual(uint8_t(2), r.OfaStep());
+			Feed(r, seq, 0.0, 5.0);
+			Assert::AreEqual(uint8_t(3), r.OfaStep());
+			Assert::AreEqual(size_t(3), CountAction(r, RegAction::OfaStepDown));
+			Assert::AreEqual(uint16_t(0), r.Level());
+			Assert::IsFalse(r.PinnedAtMinimum());
+			Feed(r, seq, 0.0, 5.0);
+			Assert::IsTrue(r.PinnedAtMinimum());
+			Assert::AreEqual(uint8_t(3), r.OfaStep());
+			// Recovery: the OFA steps come back first, the lane stays at 0 meanwhile.
+			Feed(r, seq, 8.0, 5.0);
+			Feed(r, seq, 8.0, 5.0);
+			Assert::AreEqual(uint8_t(2), r.OfaStep());
+			Assert::AreEqual(uint16_t(0), r.LaneLevel());
+			Feed(r, seq, 8.0, 5.0);
+			Feed(r, seq, 8.0, 5.0);
+			Assert::AreEqual(uint8_t(1), r.OfaStep());
+			Feed(r, seq, 8.0, 5.0);
+			Feed(r, seq, 8.0, 5.0);
+			Assert::AreEqual(uint8_t(0), r.OfaStep());
+			Assert::AreEqual(uint16_t(0), r.LaneLevel());
+			Feed(r, seq, 8.0, 5.0);
+			Feed(r, seq, 8.0, 5.0);
+			Assert::AreEqual(uint16_t(1), r.LaneLevel());
+			Assert::AreEqual(size_t(3), CountAction(r, RegAction::OfaStepUp));
+		}
+
+		// 4. FULL/graph -> floor at the T0 lane steps (the OFA step is kept); MINOR and cut -> one lane
+		// step down, at most once per window.
 		TEST_METHOD(IndicatorFloorAndStepDowns)
 		{
 			using namespace VpIndicator;
@@ -279,24 +327,44 @@ namespace SkeletonRegulatorTestsNs
 			r.Configure(Products(), kPeriod, false);
 			Assert::AreEqual(size_t(2), r.T0StepCount());
 			r.OnIndicatorChange(Bit(kFull));
-			Assert::AreEqual(uint16_t(2), r.Level());
+			Assert::AreEqual(uint16_t(2), r.LaneLevel());
+			Assert::AreEqual(uint8_t(0), r.OfaStep());   // a floor never changes the picture non-identically
+			Assert::AreEqual(uint16_t(5), r.Level());
 			Assert::AreEqual(size_t(1), CountAction(r, RegAction::ConservativeFloor));
+			Assert::AreEqual(size_t(0), CountAction(r, RegAction::OfaStepDown));
 
 			Regulator g;
 			g.Configure(Products(), kPeriod, false);
 			g.OnIndicatorChange(Bit(kGraph) | Bit(kContinuity));
-			Assert::AreEqual(uint16_t(2), g.Level());
+			Assert::AreEqual(uint16_t(2), g.LaneLevel());
+			Assert::AreEqual(uint8_t(0), g.OfaStep());
 
 			Regulator m;
 			m.Configure(Products(), kPeriod, false);
+			uint64_t seq = 0;
 			m.OnIndicatorChange(Bit(kContinuity));
+			Assert::AreEqual(uint16_t(4), m.LaneLevel());
 			Assert::AreEqual(uint16_t(7), m.Level());
 			Assert::AreEqual(size_t(1), CountAction(m, RegAction::StepDownMinor));
 			m.OnIndicatorChange(Bit(kTiming));
 			Assert::AreEqual(uint16_t(7), m.Level());
+			m.OnCut();   // same window: suppressed
+			Assert::AreEqual(uint16_t(7), m.Level());
+			Assert::AreEqual(uint64_t(1), m.SuppressedStepDowns());
+			Assert::AreEqual(size_t(0), CountAction(m, RegAction::StepDownCut));
+			Feed(m, seq, 8.0, 5.0);   // a window passes
 			m.OnCut();
 			Assert::AreEqual(uint16_t(6), m.Level());
 			Assert::AreEqual(size_t(1), CountAction(m, RegAction::StepDownCut));
+			Assert::AreEqual(uint8_t(0), m.OfaStep());
+
+			// Frequent slips: many events in one window step once.
+			Regulator f;
+			f.Configure(Products(), kPeriod, false);
+			for (int i = 0; i < 6; ++i)
+				i % 2 ? f.OnCut() : f.OnIndicatorChange(Bit(kContinuity));
+			Assert::AreEqual(uint16_t(4), f.LaneLevel());
+			Assert::AreEqual(uint64_t(5), f.SuppressedStepDowns());
 
 			// Already below the floor: unchanged.
 			Regulator low;
@@ -304,16 +372,16 @@ namespace SkeletonRegulatorTestsNs
 			low.OnIndicatorChange(Bit(kFull));
 			low.OnCut();
 			low.OnIndicatorChange(Bit(kGraph));
-			Assert::AreEqual(uint16_t(1), low.Level());
+			Assert::AreEqual(uint16_t(1), low.LaneLevel());
 		}
 
-		// 5. Pinned at the minimum.
+		// 5. Pinned at the minimum (lane at 0 and the OFA at its lowest step).
 		TEST_METHOD(PinnedAtMinimumRaisesNotice)
 		{
 			Regulator r;
 			r.Configure(Products(), kPeriod, false);
 			uint64_t seq = 0;
-			for (int i = 0; i < 4; ++i)
+			for (int i = 0; i < 6; ++i)
 				Feed(r, seq, 0.0, 5.0);
 			Assert::AreEqual(uint16_t(0), r.Level());
 			Assert::IsFalse(r.PinnedAtMinimum());
@@ -370,6 +438,7 @@ namespace SkeletonRegulatorTestsNs
 			Feed(c, sc, 10.0, 5.0);
 			c.OnCut();   // level 2 -> 1: product 2 is shed; 10 ms of slack: the move fits
 			Assert::IsTrue(c.StateOf(2) == ProductState::MovedToRender);
+			Feed(c, sc, 10.0, 5.0);
 			c.OnCut();
 			Assert::IsTrue(c.StateOf(0) != ProductState::Dropped);
 		}

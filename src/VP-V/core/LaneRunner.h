@@ -95,7 +95,8 @@ public:
         bytes_ = std::move(bytes);
     }
 
-    void SetSources(std::function<const SourceFrameView*(uint64_t)> find) { find_ = std::move(find); }
+    // Copies the held view of `seq` (planes kept alive by its keepAlive) into *out; false: not held.
+    void SetSources(std::function<bool(uint64_t, SourceFrameView*)> find) { find_ = std::move(find); }
     void SetReleaseCompleted(std::function<uint64_t(ProductId)> f) { releaseCompleted_ = std::move(f); }
     void SetReadsSource(ProductId id, bool reads)
     {
@@ -132,6 +133,17 @@ public:
         return st ? st->counters : none_;
     }
     uint64_t IgnoredProducers() const { return ignoredProducers_; }
+    bool HasProducer(ProductId id) const
+    {
+        const State* st = StateOf(id);
+        return st && st->producer != nullptr;
+    }
+    // The producer's prediction of its next chunk (0 = unknown or no producer). Lane thread of the product.
+    uint32_t PredictChunkUs(ProductId id) const
+    {
+        const State* st = StateOf(id);
+        return st && st->producer ? st->producer->PredictChunkUs() : 0u;
+    }
 
     // ---- the product's lane thread only ----
 
@@ -192,12 +204,20 @@ private:
         LaneTicket ticket;
         LaneInputs pins;
         LaneJobContext job;
+        SourceFrameView src;      // the job's own copy of the source view: its keepAlive holds the planes
         bool began = false;       // the producer's fence values are meaningful
         uint64_t costUs = 0;
     };
 
     State* StateOf(ProductId id) { return id < states_.size() ? &states_[id] : nullptr; }
     const State* StateOf(ProductId id) const { return id < states_.size() ? &states_[id] : nullptr; }
+
+    // The job is over: drop the view copy (and its keepAlive) so the host's planes can be recycled.
+    static void ReleaseSource(State& st)
+    {
+        st.src = SourceFrameView();
+        st.job.source = nullptr;
+    }
 
     uint64_t Now() const { return nowUs_ ? nowUs_() : 0u; }
 
@@ -214,7 +234,8 @@ private:
             *out = StepOutcome::WaitingSource;
             return false;
         }
-        if (st.readsSource && (!find_ || find_(seq) == nullptr)) {
+        SourceFrameView probe;
+        if (st.readsSource && (!find_ || !find_(seq, &probe))) {
             st.nextSeq = seq + 1u;
             st.counters.skippedDropped.fetch_add(1, std::memory_order_relaxed);
             *out = StepOutcome::Late;
@@ -262,12 +283,14 @@ private:
         }
         const SourceFrameView* src = nullptr;
         if (st.readsSource) {
-            src = find_ ? find_(st.seq) : nullptr;
-            if (!src) {
+            SourceFrameView v;
+            if (!find_ || !find_(st.seq, &v)) {
                 st.counters.skippedDropped.fetch_add(1, std::memory_order_relaxed);
                 st.phase = Phase::Abandoning;
                 return true;
             }
+            st.src = std::move(v);   // kept (with its planes) until the job returns to Idle
+            src = &st.src;
         }
         Header& hdr = st.set->LaneHeader(st.ticket);
         if (!table_.LaneAncestors(st.node->id, st.seq, hdr, st.pins)) {
@@ -339,6 +362,7 @@ private:
         if (r == PublishResult::NotComplete)
             return StepOutcome::WaitingDevice;
         st.pins.Unpin();
+        ReleaseSource(st);
         st.nextSeq = st.seq + 1u;
         st.phase = Phase::Idle;
         if (r == PublishResult::Published) {
@@ -356,6 +380,7 @@ private:
         if (!st.set->Abandon(st.ticket, signal, completed))
             return StepOutcome::WaitingDevice;
         st.pins.Unpin();
+        ReleaseSource(st);
         st.nextSeq = st.seq + 1u;
         st.phase = Phase::Idle;
         st.counters.abandoned.fetch_add(1, std::memory_order_relaxed);
@@ -369,7 +394,7 @@ private:
     std::function<uint8_t*(ProductId, int)> ring_;
     std::function<const uint8_t*(ProductId, uint64_t, int)> input_;
     std::function<size_t(ProductId)> bytes_;
-    std::function<const SourceFrameView*(uint64_t)> find_;
+    std::function<bool(uint64_t, SourceFrameView*)> find_;
     std::function<uint64_t(ProductId)> releaseCompleted_;
     std::atomic<uint64_t> arrived_{ 0 };
     std::atomic<uint64_t> skipBefore_{ 0 };

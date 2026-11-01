@@ -228,8 +228,11 @@ namespace SkeletonLaneTestsNs
 					return live >= 0 ? Buf(p).Live(size_t(live)) : Buf(p).Ring(table.Find(p)->SlotOf(seq));
 				},
 				[this](ProductId p) { return Buf(p).Bytes(); });
-			runner.SetSources([this](uint64_t seq) -> const SourceFrameView* {
-				return (seq < views.size() && !dropped[size_t(seq)]) ? &views[size_t(seq)] : nullptr;
+			runner.SetSources([this](uint64_t seq, SourceFrameView* out) -> bool {
+				if (seq >= views.size() || dropped[size_t(seq)])
+					return false;
+				*out = views[size_t(seq)];
+				return true;
 			});
 			runner.SetReadsSource(kA, true);
 		}
