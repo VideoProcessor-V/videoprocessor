@@ -258,7 +258,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 ## Settings
 
 - Keys: `source_resolution`, `source_resolution_auto_min_confidence`, `source_resolution_evidence_shots`, `source_resolution_evidence_seconds`, `source_resolution_text_guard`, `source_resolution_mixed_guard`, `source_resolution_latch_fixes`, `source_resolution_cut_fixes`, `source_resolution_engage_max_wait_s`, `source_resolution_crossfade_s`, `source_resolution_release_fade_s`, `subtitle_fit`, `subtitle_reposition`, `subtitle_type`, `source_coding_fixes`, `frame_analysis_store`.
-- Planned keys (not yet implemented): `label_detector`.
+- Planned keys (not yet implemented): `label_detector`, `source_id_abr_notice`, `source_id_consensus`.
 - Tiers: not tiered; label-detector net optional.
 - VP-V page, Input tab: not tiered (Always on: capture and timing have no quality steps, only paths (the toggles below).).
 - Listed under the tier: `intent_content`.

@@ -146,7 +146,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 
 ## Settings
 
-- Keys: `dejudder_even_rates`, `dejudder_strength`, `dejudder_strength_even`, `general_rate_fixes`, `motion_engine`, `motion_history_fixes`, `occlusion_mask`, `timing_continuity_fixes`.
+- Keys: `dejudder_even_rates`, `dejudder_strength`, `dejudder_strength_even`, `general_rate_fixes`, `motion_engine`, `motion_history_fixes`, `occlusion_mask`, `timing_continuity_fixes`, `vector_demand`.
 - Tiers: follows motion.estimation.
 - VP-V page, Motion tab: tiers Classic / Low / Mid / Upper; tier keys `dejudder_est_qpel`, `dejudder_est_split`, `motion_ahead_frames`, `optical_flow`.
 - Plain-language guide: [docs/settings/VP-settings-reference.md#3-motion](../../../../../docs/settings/VP-settings-reference.md#3-motion).

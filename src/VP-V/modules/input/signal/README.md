@@ -214,7 +214,7 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 
 ## Settings
 
-- Keys: `newlldv`, `newlldv_sdr_veto`, `dv_tunnel_handoff`, `dv_tunnel_gpu_unpack`, `dv_tunnel_fixes`, `dv_compare_capture_folder`, `hdr_inference`.
+- Keys: `newlldv`, `newlldv_sdr_veto`, `dv_tunnel_handoff`, `dv_tunnel_gpu_unpack`, `dv_tunnel_fixes`, `dv_compare_capture_folder`, `hdr_inference`, `resync_event`.
 - Tiers: not tiered.
 - VP-V page, Input tab: not tiered (Always on: capture and timing have no quality steps, only paths (the toggles below).).
 - Listed under the tier: `dv_tunnel_gpu_unpack`, `source_range`.
