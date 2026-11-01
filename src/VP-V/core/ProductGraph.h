@@ -28,6 +28,12 @@
 //               that was itself filled live, so an in-render-only history product could not run)
 //
 // history = max(the product's own history, the largest lag any active node or consumer reads it at).
+//
+// Look-ahead (K0): an input may carry a LEAD (frames ahead). The effective lead of a node is
+// min(its largest declared lead, the lane lead); a product read at lead k gets k more ring slots, and
+// framesInFlight grows by the largest effective lead. When the queue cannot supply any lead (effective
+// lead 0) the node resolves to its shortQueueSubstitute (a visible, non-identical reduced mode, listed
+// by Graph::ReducedNodes()). Lead edges are not lag-0 edges: they play no part in the topological order.
 // Everything is fixed at build (no per-frame allocation). A rebuild advances the Indicator's
 // `graph` counter (GraphOwner); every node honours `graph`, so lane work from the old graph is
 // rejected at the seal. Header-only, pure C++14.
@@ -61,6 +67,10 @@ struct Node {
     VpIndicator::CounterMask reads = 0;          // the product's reads plus `graph`
     VpIndicator::CounterMask spanMask = 0;
     bool missingInputForm = false;
+    uint8_t lead = 0;                 // effective look-ahead of this node (0 = none)
+    uint8_t leadRead = 0;             // the largest effective lead any node reads THIS product at
+    bool shortQueue = false;          // stands in for a look-ahead product the queue cannot feed
+    ProductId reducedFrom = kNoProduct;   // that look-ahead product (declared id) when shortQueue
     uint64_t bufferBytes = 0;
     uint64_t ringBytes = 0;   // lane ring buffers (0 for render-only)
     uint64_t liveBytes = 0;   // live pool, separate memory
@@ -179,6 +189,15 @@ struct Graph {
         return -1;
     }
     bool Has(ProductId id) const { return IndexOf(id) >= 0; }
+    // Nodes made in a visibly reduced mode because the queue is short (plan 45: "camera: causal").
+    std::vector<const Node*> ReducedNodes() const
+    {
+        std::vector<const Node*> out;
+        for (const Node& n : nodes)
+            if (n.shortQueue)
+                out.push_back(&n);
+        return out;
+    }
     const Node* Find(ProductId id) const
     {
         const int i = IndexOf(id);
@@ -198,6 +217,44 @@ inline ProductId Resolve(const Registry& reg, ProductId id, bool ofaPresent)
     return id;
 }
 
+// The largest lead any input of `d` declares.
+inline uint8_t MaxDeclaredLead(const ProductDecl& d)
+{
+    uint8_t m = 0;
+    for (size_t k = 0; k < d.inputCount; ++k)
+        if (d.inputs[k].lead > m)
+            m = d.inputs[k].lead;
+    return m;
+}
+
+// The look-ahead the queue can supply to `d`: its declared lead capped by the lane lead (a render-only
+// product has no lane, so none).
+inline uint8_t EffectiveLead(const ProductDecl& d, const GraphSettings& gs)
+{
+    if (d.backend == Backend::RenderOnly)
+        return 0;
+    const uint8_t m = MaxDeclaredLead(d);
+    return m < gs.laneLead ? m : gs.laneLead;
+}
+
+// Resolve with the queue: the no-engine substitute first, then the short-queue substitute for a
+// look-ahead product that cannot get any lead. *shortQueue is set when the latter applied.
+inline ProductId Resolve(const Registry& reg, ProductId id, const GraphSettings& gs, bool* shortQueue = nullptr)
+{
+    if (shortQueue)
+        *shortQueue = false;
+    ProductId p = Resolve(reg, id, gs.ofaPresent);
+    if (p == kNoProduct)
+        return p;
+    const ProductDecl& d = reg.Get(p);
+    if (MaxDeclaredLead(d) > 0 && EffectiveLead(d, gs) == 0 && d.shortQueueSubstitute != kNoProduct) {
+        if (shortQueue)
+            *shortQueue = true;
+        return Resolve(reg, d.shortQueueSubstitute, gs.ofaPresent);
+    }
+    return p;
+}
+
 inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& consumers, const GraphSettings& gs)
 {
     Graph g;
@@ -210,18 +267,25 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
     const size_t n = reg.Size();
     std::vector<char> needed(n, 0);
     std::vector<uint8_t> maxLag(n, 0);
+    std::vector<uint8_t> maxLeadRead(n, 0);
     std::vector<char> span(n, 0);
     std::vector<ProductId> declaredAs(n, kNoProduct);
+    std::vector<ProductId> reducedFrom(n, kNoProduct);
     std::vector<ProductId> work;
 
-    auto want = [&](ProductId asked, uint8_t lag, bool holdsSpan) -> bool {
-        const ProductId p = Resolve(reg, asked, gs.ofaPresent);
+    auto want = [&](ProductId asked, uint8_t lag, bool holdsSpan, uint8_t lead) -> bool {
+        bool reduced = false;
+        const ProductId p = Resolve(reg, asked, gs, &reduced);
         if (p == kNoProduct)
             return false;
         if (lag > maxLag[p])
             maxLag[p] = lag;
+        if (lead > maxLeadRead[p])
+            maxLeadRead[p] = lead;
         if (holdsSpan)
             span[p] = 1;
+        if (reduced && reducedFrom[p] == kNoProduct)
+            reducedFrom[p] = asked;
         if (!needed[p]) {
             needed[p] = 1;
             declaredAs[p] = asked;
@@ -232,15 +296,18 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
 
     for (const ConsumerDecl& c : consumers)
         for (size_t k = 0; k < c.count && k < kMaxConsumes; ++k)
-            if (!want(c.consumes[k].product, c.consumes[k].lag, c.holdsSpan)) {
+            if (!want(c.consumes[k].product, c.consumes[k].lag, c.holdsSpan, 0)) {
                 g.error = "a consumer asks for an unknown product";
                 return g;
             }
-    // Closure: each product visited once.
+    // Closure: each product visited once. A lead input is read at the reader's effective lead.
     for (size_t w = 0; w < work.size(); ++w) {
         const ProductDecl& d = reg.Get(work[w]);
-        for (size_t k = 0; k < d.inputCount; ++k)
-            want(d.inputs[k].product, d.inputs[k].lag, false);
+        const uint8_t eff = EffectiveLead(d, gs);
+        for (size_t k = 0; k < d.inputCount; ++k) {
+            const uint8_t lead = d.inputs[k].lead < eff ? d.inputs[k].lead : eff;
+            want(d.inputs[k].product, d.inputs[k].lag, false, lead);
+        }
     }
 
     // Topological order over lag-0 edges of the needed set; the smallest ready id first.
@@ -250,7 +317,7 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
             continue;
         const ProductDecl& d = reg.Get(ProductId(p));
         for (size_t k = 0; k < d.inputCount; ++k)
-            if (d.inputs[k].lag == 0)
+            if (d.inputs[k].lag == 0 && d.inputs[k].lead == 0)
                 ++indeg[p];
     }
     std::vector<char> placed(n, 0);
@@ -271,7 +338,8 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
                 continue;
             const ProductDecl& d = reg.Get(ProductId(p));
             for (size_t k = 0; k < d.inputCount; ++k)
-                if (d.inputs[k].lag == 0 && Resolve(reg, d.inputs[k].product, gs.ofaPresent) == next)
+                if (d.inputs[k].lag == 0 && d.inputs[k].lead == 0
+                    && Resolve(reg, d.inputs[k].product, gs) == next)
                     --indeg[p];
         }
     }
@@ -292,11 +360,12 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
         if (d.backend == Backend::RenderOnly)
             continue;
         for (size_t k = 0; k < d.inputCount; ++k)
-            ++laneReadRefs[Resolve(reg, d.inputs[k].product, gs.ofaPresent)];
+            ++laneReadRefs[Resolve(reg, d.inputs[k].product, gs)];
     }
 
     const unsigned R = gs.renderAhead;
     size_t maxHistory = 0;
+    unsigned maxLead = 0;
     for (ProductId p : order) {
         const ProductDecl& d = reg.Get(p);
         Node node;
@@ -309,15 +378,21 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
         const bool lane = d.backend != Backend::RenderOnly;
         const unsigned L = lane ? gs.laneLead : 0u;
         const unsigned q = lane ? 1u : 0u;
-        const unsigned ring = unsigned(node.history) + 1u + R + L + q + (node.holdsSpan ? 1u : 0u);
+        node.lead = EffectiveLead(d, gs);
+        node.leadRead = maxLeadRead[p];
+        node.reducedFrom = reducedFrom[p];
+        node.shortQueue = reducedFrom[p] != kNoProduct;
+        const unsigned ring = unsigned(node.history) + 1u + R + L + q + (node.holdsSpan ? 1u : 0u)
+                              + unsigned(node.leadRead);
         node.ring = uint8_t(ring > 255u ? 255u : ring);
         const unsigned live = unsigned(node.history) + 1u + R + (node.holdsSpan ? 1u : 0u)
                               + laneReadRefs[p] * unsigned(gs.laneJobsInFlight == 0 ? 1u : gs.laneJobsInFlight);
         node.livePool = uint8_t(live > 255u ? 255u : live);
         node.inputCount = d.inputCount;
         for (size_t k = 0; k < d.inputCount; ++k) {
-            node.inputs[k].product = Resolve(reg, d.inputs[k].product, gs.ofaPresent);
+            node.inputs[k].product = Resolve(reg, d.inputs[k].product, gs);
             node.inputs[k].lag = d.inputs[k].lag;
+            node.inputs[k].lead = d.inputs[k].lead < node.lead ? d.inputs[k].lead : node.lead;
         }
         node.reads = d.reads | VpIndicator::Bit(VpIndicator::kGraph);
         node.spanMask = d.spanMask;
@@ -333,9 +408,12 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
             g.hasRebasedPlane = true;
         if (node.history > maxHistory)
             maxHistory = node.history;
+        if (node.lead > maxLead)
+            maxLead = node.lead;
         g.nodes.push_back(node);
     }
-    g.framesInFlight = size_t(gs.queueDepth) + gs.lookAheadWalk + maxHistory + R + gs.laneLead + 1u;
+    g.framesInFlight = size_t(gs.queueDepth) + gs.lookAheadWalk + maxHistory + R + gs.laneLead + 1u
+                       + maxLead;
     g.valid = true;
     return g;
 }

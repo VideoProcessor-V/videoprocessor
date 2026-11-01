@@ -22,6 +22,7 @@ using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 namespace VectorDemandProductsTestsNs
 {
 	using namespace VectorDemand;
+	constexpr int kOriginalConsumerCount = 11;   // the first consumers; the camera three are swept as a group
 	using VpSkeleton::BuildGraph;
 	using VpSkeleton::ConsumerDecl;
 	using VpSkeleton::Graph;
@@ -45,6 +46,10 @@ namespace VectorDemandProductsTestsNs
 				for (int ahead = 0; ahead <= 2; ++ahead)
 					for (int under = 0; under <= 1; ++under)
 						for (unsigned wants = 0; wants < (1u << kConsumerCount); ++wants) {
+							// The three camera consumers are covered as a group (none / all) to keep the sweep size.
+							const unsigned extra = wants >> kOriginalConsumerCount;
+							if (extra != 0 && extra != 7u)
+								continue;
 							Input in;
 							in.enabled = (flags & 1) != 0;
 							in.slotsRun = (flags & 2) != 0;
@@ -70,7 +75,7 @@ namespace VectorDemandProductsTestsNs
 							Assert::AreEqual(uint8_t(d.mode == Mode::Backward ? 0 : 1), LaneLeadFor(d, 1));
 							++checked;
 						}
-			Assert::AreEqual(size_t(32 * 3 * 2) << kConsumerCount, checked);
+			Assert::AreEqual((size_t(32 * 3 * 2) << kOriginalConsumerCount) * 2, checked);
 		}
 
 		TEST_METHOD(DeclarationsFollowTheDomains)

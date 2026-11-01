@@ -38,6 +38,23 @@ enum : ProductId {
     kFirstProductCount
 };
 
+// The camera-linking products (plan 45 section 1, K0). Appended AFTER the first products so the
+// first ids and kFirstProductCount stay exactly as they were. SkeletonProducts() below is the one
+// assembly point (later phases append region evidence and the light-level map there, in fixed order).
+//   P7 camera fit       the per-frame global camera-motion fit (CPU), seeded by its own previous frame
+//   P8 camera labels    the per-16x16-block camera/object label field (compute)
+//   P9 camera smoothed  P7 smoothed over a look-ahead of +-kMaxCameraLead frames (needs the queue)
+enum : ProductId {
+    kP7CameraFit = kFirstProductCount,
+    kP8CameraLabels,
+    kP9CameraSmoothed,
+    kCameraProductEnd
+};
+
+// Frames of look-ahead P9 reads from P7 at film depth (the declared lead; the effective lead is
+// capped by the lane lead of the graph).
+constexpr uint8_t kMaxCameraLead = 2;
+
 enum class Backend : uint8_t { Ofa, GpuCompute, Cpu, RenderOnly };
 enum class Tier : uint8_t { T0, T1, T2 };
 enum class Residency : uint8_t { Vram, SystemRam };
@@ -113,6 +130,14 @@ inline bool IsFullResPerFrame(const SizeRule& r)
 struct InputRef {
     ProductId product = kNoProduct;
     uint8_t lag = 0;   // frames back: 0 = the same source frame, 1 = the previous one
+    // Frames AHEAD (N+lead): a look-ahead read of a product the queue has already analysed. An input
+    // has a lag OR a lead, never both. A lead edge is not a lag-0 edge (no cycle check, no topological
+    // constraint). The product that reads a lead must declare shortQueueSubstitute.
+    //
+    // Seal note (S3/K1, NOT implemented in K0): the seal validates a LEAD ancestor as Published with
+    // stamps == StampOf(N+k) (it need not be Sealed: frame N+k has not reached its own seal yet).
+    // ProductSlots.h today computes every ancestor as seq - lag and ignores `lead`.
+    uint8_t lead = 0;
 };
 
 constexpr size_t kMaxInputs = 4;
@@ -138,6 +163,10 @@ struct ProductDecl {
     bool rebasedPlane = false;                // sized on the re-based plane: an axis change rebuilds
     bool rarelyTouched = false;               // read rarely: may live in system RAM (doc 21 item 3)
     ProductId noOfaSubstitute = kNoProduct;   // used instead on cards without an optical-flow engine
+    // Used instead when the queue cannot supply the declared lead (lane lead 0: Competitive mode or
+    // queue depth 0). It is a NON-identical, visibly reduced mode ("camera: causal (queue short)"),
+    // never a silent one: the graph lists it in Graph::ReducedNodes().
+    ProductId shortQueueSubstitute = kNoProduct;
     // A declared form for a live fill with an input missing (e.g. no previous frame after a reset).
     // Without it such a fill is refused: the product is unavailable for that frame (visible).
     bool missingInputForm = false;
@@ -167,6 +196,18 @@ inline void AddInput(ProductDecl& d, ProductId p, uint8_t lag)
     if (d.inputCount < kMaxInputs) {
         d.inputs[d.inputCount].product = p;
         d.inputs[d.inputCount].lag = lag;
+        d.inputs[d.inputCount].lead = 0;
+        ++d.inputCount;
+    }
+}
+
+// A look-ahead input: `lead` frames ahead (lag stays 0).
+inline void AddLead(ProductDecl& d, ProductId p, uint8_t lead)
+{
+    if (d.inputCount < kMaxInputs) {
+        d.inputs[d.inputCount].product = p;
+        d.inputs[d.inputCount].lag = 0;
+        d.inputs[d.inputCount].lead = lead;
         ++d.inputCount;
     }
 }
@@ -209,11 +250,30 @@ public:
                 return fail("product ids are not dense");
             if (d.inputCount > kMaxInputs)
                 return fail("too many inputs");
+            bool hasLead = false;
             for (size_t k = 0; k < d.inputCount; ++k) {
-                if (!Has(d.inputs[k].product))
+                const InputRef& in = d.inputs[k];
+                if (!Has(in.product))
                     return fail("unknown input product");
-                if (d.inputs[k].lag == 0 && d.inputs[k].product == d.id)
+                if (in.lead > 0) {
+                    hasLead = true;
+                    if (in.product == d.id)
+                        return fail("product reads itself at a lead");
+                    if (in.lag != 0)
+                        return fail("an input has a lag or a lead, not both");
+                } else if (in.lag == 0 && in.product == d.id) {
                     return fail("product reads itself at lag 0");
+                }
+            }
+            if (hasLead && d.shortQueueSubstitute == kNoProduct)
+                return fail("a look-ahead product needs a short-queue substitute");
+            if (d.shortQueueSubstitute != kNoProduct) {
+                if (!Has(d.shortQueueSubstitute) || d.shortQueueSubstitute == d.id)
+                    return fail("bad short-queue substitute");
+                const ProductDecl& sub = decls_[d.shortQueueSubstitute];
+                for (size_t k = 0; k < sub.inputCount; ++k)
+                    if (sub.inputs[k].lead > 0)
+                        return fail("short-queue substitute has a look-ahead input");
             }
             if (d.noOfaSubstitute != kNoProduct) {
                 if (!Has(d.noOfaSubstitute) || d.backend != Backend::Ofa)
@@ -226,7 +286,7 @@ public:
         std::vector<int> indeg(decls_.size(), 0);
         for (const ProductDecl& d : decls_)
             for (size_t k = 0; k < d.inputCount; ++k)
-                if (d.inputs[k].lag == 0)
+                if (d.inputs[k].lag == 0 && d.inputs[k].lead == 0)
                     ++indeg[d.id];
         std::vector<ProductId> ready;
         for (size_t i = 0; i < decls_.size(); ++i)
@@ -239,7 +299,8 @@ public:
             ++done;
             for (const ProductDecl& d : decls_)
                 for (size_t k = 0; k < d.inputCount; ++k)
-                    if (d.inputs[k].lag == 0 && d.inputs[k].product == p && --indeg[d.id] == 0)
+                    if (d.inputs[k].lag == 0 && d.inputs[k].lead == 0 && d.inputs[k].product == p
+                        && --indeg[d.id] == 0)
                         ready.push_back(d.id);
         }
         if (done != decls_.size())
@@ -345,6 +406,63 @@ inline Registry FirstProducts()
     p6.refRenderMs = 1.5f;
     d.push_back(p6);
 
+    return Registry(std::move(d));
+}
+
+// The camera products (P7..P9), appended after the first products. Their ids are the enum values
+// above, so they must be appended onto exactly the first products (Registry::Validate rejects a
+// registry whose ids are not dense).
+inline void AppendCameraProducts(std::vector<ProductDecl>& decls)
+{
+    using detail::AddInput;
+    using detail::AddLead;
+    using detail::AddTerm;
+    using detail::Make;
+    using namespace VpIndicator;
+    const CounterMask content = Bit(kFull) | Bit(kContinuity);
+
+    // P7: the per-frame global camera fit; its own previous frame seeds the temporal fit (history 1).
+    ProductDecl p7 = Make(kP7CameraFit, "p7_camera_fit", "camera fit", Backend::Cpu, 1, Tier::T0, content,
+                          Bit(kSettingsMotion));
+    AddInput(p7, kP3AnalysisField, 0);
+    AddInput(p7, kP4SourceStats, 0);
+    AddInput(p7, kP2VectorPair, 0);   // resolves to P2m on a card without an engine
+    p7.residency = Residency::SystemRam;
+    p7.spanMask = content;
+    p7.size.fixedBytes = 1024;        // per-block object arrays only with `objects` (stays off)
+    p7.refRenderMs = 0.5f;
+    decls.push_back(p7);
+
+    // P8: the camera/object label field, RGBA16F per 16x16 block plus the LabelConstants header.
+    ProductDecl p8 = Make(kP8CameraLabels, "p8_camera_labels", "camera labels", Backend::GpuCompute, 0, Tier::T0,
+                          content, 0);
+    AddInput(p8, kP7CameraFit, 0);
+    AddInput(p8, kP3AnalysisField, 0);
+    AddTerm(p8, 4, 8);
+    p8.size.fixedBytes = 256;
+    p8.refRenderMs = 0.1f;
+    decls.push_back(p8);
+
+    // P9: the smoothed camera, read over +-kMaxCameraLead frames of P7 (non-identical reduced mode:
+    // causal P7 when the queue is short).
+    ProductDecl p9 = Make(kP9CameraSmoothed, "p9_camera_smoothed", "camera smoothed", Backend::Cpu, 0, Tier::T1,
+                          content, Bit(kSettingsMotion));
+    AddInput(p9, kP7CameraFit, 0);
+    AddLead(p9, kP7CameraFit, kMaxCameraLead);
+    p9.residency = Residency::SystemRam;
+    p9.variants = Variants::NonIdentical;
+    p9.spanMask = content;
+    p9.size.fixedBytes = 256;
+    p9.shortQueueSubstitute = kP7CameraFit;
+    p9.refRenderMs = 0.05f;
+    decls.push_back(p9);
+}
+
+// The registry the skeleton runs with: the first products plus the camera products, in fixed id order.
+inline Registry SkeletonProducts()
+{
+    std::vector<ProductDecl> d = FirstProducts().All();
+    AppendCameraProducts(d);
     return Registry(std::move(d));
 }
 
