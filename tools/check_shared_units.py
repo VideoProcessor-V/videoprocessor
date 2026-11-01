@@ -50,6 +50,10 @@ REGISTRY = [
      "owning_unit": "src/VP-V/modules/input/source_analysis",
      "signatures": [re.compile(p, _F) for p in (
          r"histogram", r"\bAPL\b", r"average[_ ]?picture[_ ]?level")]},
+    {"name": "source_quality_read",
+     "owning_unit": "src/VP-V/modules/input/source_analysis/identity",
+     "signatures": [re.compile(p, _F) for p in (
+         r"snap(shot)?\.bitrateQuality", r"\.bitrateQuality.*(strength|allowance|tier)")]},
     {"name": "global_motion",
      "owning_unit": "src/VP-V/modules/motion/estimation",
      "signatures": [re.compile(p, _F) for p in (
@@ -66,6 +70,7 @@ KNOWN_DUPLICATES = [
     "block statistics 8",
     "histogram/APL/peak 6",
     "global motion 3",
+    "source quality read straight from the snapshot (P14 SourceQualityView is the one read API; LVR call sites move with P11)",
 ]
 
 

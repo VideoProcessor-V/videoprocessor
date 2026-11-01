@@ -1,6 +1,8 @@
 #pragma once
 
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
+#include <VP-V/modules/input/source_analysis/identity/SourceIdPipeline.h>
+#include <VP-V/modules/input/source_analysis/identity/SourceQualityView.h>
 
 #include <libplacebo/renderer.h>
 
@@ -55,6 +57,11 @@ namespace SourceResolutionMonitor
 		int kernel = -1;
 		int kernelVotes = 0, kernelAgree = 0;
 		double bitrateQuality = 1.0;   // spec 1b (smoothed)
+		// Source identity (doc 61, SID-2): the FRAME-level quality of the last analysed frame (not smoothed; 1 until the
+		// source_id_consensus worker runs - then the resolution term min the relative noise term, identity/FrameQuality.h)
+		// and its raw noise sigma (8-bit units, -1 = none).
+		double frameQuality = 1.0;
+		double frameNoise = -1.0;
 		double effectiveBits = 0.0;    // spec 2d (0 = unknown)
 		double coherenceV = 0.0, coherenceH = 0.0;
 		unsigned long long frames = 0, cuts = 0, discontinuities = 0;
@@ -174,6 +181,30 @@ namespace SourceResolutionMonitor
 		// Copies and jobs dropped that way (diagnostics, tests).
 		unsigned long long StaleJobsDropped() const { return staleJobsDropped.load(std::memory_order_relaxed); }
 		Snapshot Read() const;
+
+		// ---- source identity (doc 61, P14; VP-V module identity/) -------------------------------------------------------
+		// source_id_consensus (default OFF: nothing below runs, every value is byte-identical to before). On: the analysis
+		// worker feeds the consensus with every analysed frame and publishes the held-state record; AutoFactor(s) then ask the
+		// record which source it is (the latched axes) and engage only on a latched field, falling back to the classical
+		// value - visibly - while the record is absent or stale.
+		void SetSourceIdConsensus(bool on);
+		bool SourceIdConsensus() const { return sourceIdOn.load(std::memory_order_acquire); }
+		void SetSourceIdNotice(bool on) { sourceIdNotice.store(on, std::memory_order_release); sourceIdNoticeDirty.store(true, std::memory_order_release); }
+		// Any thread: the newest record (seq <= `sequence`; 0 = newest). False: none published yet.
+		bool SourceIdRecord(SourceIdentity::Record& out, uint64_t sequence = 0) const { return sourceId.Held().ReadLatest(sequence, out); }
+		// Render thread (or any): the shared read API for every quality consumer, on the monitor's frame clock (`seconds`,
+		// < 0 = the steady clock). Consensus off: exactly Snapshot.bitrateQuality. Absent / stale: the classical value with an
+		// engaged fallback decision (SourceIdentity::View).
+		SourceIdentity::QualityView QualityView(double seconds = -1.0) const;
+		// The Ctrl+I / Config status line ("Source identity: ...").
+		std::string SourceIdStatusLine(double seconds = -1.0) const;
+		// The auto-engage gate's own fallback: engaged while consensus is on but the record could not be used.
+		FallbackCatalog::Decision SourceIdGateFallback() const;
+		// Render thread: apply the consensus's re-base requests to the Indicator port, each generation exactly once.
+		int ApplySourceIdRebase(SourceIdentity::IndicatorPort& port);
+		// Render thread: true once per firing of the one-time "stream quality dropped" notice (`seen`: the caller's serial).
+		bool TakeSourceIdNotice(uint64_t& seen, std::string& text) const { return sourceId.TakeNotice(seen, text); }
+		unsigned long long SourceIdEvents() const { return sourceIdEvents.load(std::memory_order_relaxed); }
 		// Bug hunt 34 item 1: true while the tiles are read back without waiting (D3D11 staging);
 		// false before the first frame, on another API, or when the staging could not be made on
 		// D3D11 (then libplacebo's readback, which waits there: the renderer can show it).
@@ -430,6 +461,20 @@ namespace SourceResolutionMonitor
 		std::atomic<uint64_t> streamKey{ 0 };                       // R3 (SetStreamKey)
 		std::atomic<unsigned long long> staleJobsDropped{ 0 };
 		SourceResolution::Tracker tracker;
+		// Source identity (worker side; Held() is the only part other threads read).
+		SourceIdentity::Pipeline sourceId;
+		std::atomic<bool> sourceIdOn{ false };
+		std::atomic<bool> sourceIdNotice{ true };
+		std::atomic<bool> sourceIdNoticeDirty{ false };
+		std::atomic<bool> sourceIdResetPending{ false };
+		std::atomic<unsigned long long> sourceIdEvents{ 0 };
+		unsigned long long sourceIdLastCuts = 0;
+		SourceIdentity::RebaseApplier sourceIdRebase;   // render thread
+		mutable std::mutex gateMutex;
+		FallbackCatalog::Decision gateDecision;         // written by AutoFactor(s), read for the status
+		// The gate's view of the record at `now` (render thread): fresh = usable; ratios are the latched axes (1 = native).
+		struct IdGate { bool on = false, fresh = false; double ratioH = 1.0, ratioV = 1.0; bool latchedH = false, latchedV = false; };
+		IdGate SourceIdGate(double now);
 		std::deque<std::pair<double, double>> live;          // (seconds, ratio) of informative frames
 		std::deque<std::pair<double, double>> coherence;     // (seconds, min axis coherence)
 		unsigned long long lastCuts = 0;

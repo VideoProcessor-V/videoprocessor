@@ -83,6 +83,7 @@ constexpr uint32_t kExpectedGrainSplitUnit = 2;
 constexpr uint32_t kExpectedRebaseUnit = 1;
 constexpr uint32_t kExpectedHalfLumaUnit = 1;
 constexpr uint32_t kExpectedMonitorUnit = 1;
+constexpr uint32_t kExpectedSourceIdentityUnit = 1;
 
 inline const std::vector<ProductRow>& ProductRows()
 {
@@ -106,6 +107,8 @@ inline const std::vector<ProductRow>& ProductRows()
         { kTdAnalysis, "repair/temporal_detail", kExpectedTemporalDetailUnit, "td analysis pass" },
         { kTdRefstore, "repair/temporal_detail", kExpectedTemporalDetailUnit, "" },
         { kTdAdmission, "repair/temporal_detail", kExpectedTemporalDetailUnit, "td admission cleaner" },
+        // P14 is a HELD-STATE product: the monitor worker publishes it on each consensus evaluation, no lane producer, no live fill.
+        { kSourceIdentity, "input/source_analysis/identity", kExpectedSourceIdentityUnit, "" },
     };
     return rows;
 }
@@ -138,15 +141,18 @@ constexpr uint16_t kCatalogConsumerIdBase = 0x0300;
 
 inline ConsumerRow MakeRow(uint16_t index, const char* name, const char* module, PathwayUnit unit, uint16_t order,
                            std::initializer_list<ProductId> reads, FallbackKind kind, const char* fallbackId,
-                           bool holdsSpan = false)
+                           bool holdsSpan = false, std::initializer_list<ProductId> heldReads = {})
 {
     ConsumerRow r;
     r.decl.id = uint16_t(kCatalogConsumerIdBase + index);
     r.decl.name = name;
     r.family = name;
-    assert(reads.size() <= kMaxConsumes);   // a row never silently drops a read
+    assert(reads.size() + heldReads.size() <= kMaxConsumes);   // a row never silently drops a read
     for (ProductId p : reads)
         AddConsume(r.decl, p);
+    // Held-state reads (P14 source identity): the latest sealed record, i.e. a lag >= 1 read, never a live fill.
+    for (ProductId p : heldReads)
+        AddConsume(r.decl, p, 1);
     r.decl.holdsSpan = holdsSpan;
     r.decl.hasReducedMode = true;
     r.module = module;
@@ -244,12 +250,17 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
                             { kP10GrainSplit, kP11RegionBlockStats, kP13SourceRing, kTdAnalysis, kTdRefstore, kTdAdmission },
                             lower, "product.temporal_detail"));
         r.push_back(MakeRow(0, "detail pulse", "VP-V/modules/repair/detail_pulse", PathwayUnit::Repair, 20,
-                            { kP10GrainSplit, kP11RegionBlockStats, kP4SourceStats }, own, "product.detail_pulse"));
+                            { kP10GrainSplit, kP11RegionBlockStats, kP4SourceStats }, own, "product.detail_pulse", false,
+                            { kSourceIdentity }));
         r.push_back(MakeRow(1, "texture restore", "VP-V/modules/repair/texture_restore", PathwayUnit::Repair, 30,
-                            { kP10GrainSplit, kP11RegionBlockStats, kP4SourceStats }, own, "product.texture_restore"));
+                            { kP10GrainSplit, kP11RegionBlockStats, kP4SourceStats }, own, "product.texture_restore", false,
+                            { kSourceIdentity }));
         r.push_back(MakeRow(2, "debander (with hold)", "VP-V/modules/repair/deband", PathwayUnit::Repair, 40,
                             { kP10GrainSplit, kP11RegionBlockStats, kP12LightLevel, kP3AnalysisField }, own,
-                            "product.debander", true));
+                            "product.debander", true, { kSourceIdentity }));
+        // Contrast recovery gates itself off on a clean high-bitrate source (get out of the way): it reads only the held record.
+        r.push_back(MakeRow(18, "contrast recovery need", "VP-V/modules/repair", PathwayUnit::Repair, 55,
+                            {}, own, "product.contrast_recovery", false, { kSourceIdentity }));
         r.push_back(MakeRow(16, "light-level users", "VP-V/modules/repair", PathwayUnit::Repair, 50,
                             { kP12LightLevel, kP11RegionBlockStats }, own, "product.light_level"));
         // Scaling
@@ -257,10 +268,12 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
                             { kP10GrainSplit, kP10cGrainSplitChroma, kP13SourceRing }, lower, "product.chroma_cfl"));
         r.push_back(MakeRow(3, "adaptive downscale (grain map)", "VP-V/modules/scaling/adaptive_downscale",
                             PathwayUnit::Scaling, 20, { kP11RegionBlockStats, kP10GrainSplit, kP4SourceStats }, own,
-                            "product.adaptive_downscale"));
+                            "product.adaptive_downscale", false, { kSourceIdentity }));
         // Drive and output
         r.push_back(MakeRow(5, "LED look-ahead", "VP-V/modules/drive/led_measure", PathwayUnit::Drive, 10, { kP4SourceStats },
                             own, "product.led_lookahead"));
+        r.push_back(MakeRow(17, "dither need (source quality)", "VP-V/modules/output/dither", PathwayUnit::Output, 15,
+                            {}, own, "product.dither_need", false, { kSourceIdentity }));
         r.push_back(MakeRow(4, "sigma-delta (analysis field mapped)", "VP-V/modules/output/dither", PathwayUnit::Output, 10,
                             { kP3AnalysisField }, own, "product.sigma_delta", true));
         // VectorDemand consumers: ids and reads from VectorDemandProducts.h

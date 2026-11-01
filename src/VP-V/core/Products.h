@@ -59,6 +59,8 @@ enum : ProductId {
 //   P12  light level          the 16 KB perceptual LUT + per-block light level (WP2 reserved)
 //   P13  source ring          VIEWS of the unpacked planes of the queued frames (owned by queue/upload): 0 extra bytes
 //   td.refstore / td.analysis / td.admission   TemporalDetail's module-owned history product and its lane products
+//   P14  source identity      the held-state source record (axes, kernel, codec class, quality tier; CPU, ~256 B). No live fill:
+//                             consumers read the latest sealed record and fall back to the classical value when it is stale
 enum : ProductId {
     kP10GrainSplit = kCameraProductEnd,
     kP10cGrainSplitChroma,
@@ -68,6 +70,7 @@ enum : ProductId {
     kTdAnalysis,
     kTdRefstore,
     kTdAdmission,
+    kSourceIdentity,      // P14 (doc 61 D-SID1): HELD-STATE source identity record; appended last so every earlier id is unchanged
     kSkeletonProductEnd
 };
 
@@ -694,6 +697,27 @@ inline void AppendTemporalDetailProducts(std::vector<ProductDecl>& decls)
     decls.push_back(ad);
 }
 
+
+// P14: the source identity record (doc 61 section 2.1, D-SID1). A HELD-STATE product: the source-resolution worker publishes
+// it on each evaluation of the consensus and consumers read the latest sealed record (seq <= N), i.e. a lag >= 1 read, so it
+// has no live-fill owner (the consensus is hysteretic: recomputing it on the render thread would differ). A record older than
+// its maximum age is stale and every consumer falls back to the classical value, visibly. ~256 B of system RAM.
+constexpr uint32_t kSourceIdentityRecordBytes = 256;
+inline void AppendSourceIdentityProduct(std::vector<ProductDecl>& decls)
+{
+    using detail::AddInput;
+    using detail::Make;
+    using namespace VpIndicator;
+    ProductDecl p = Make(kSourceIdentity, "p14_source_identity", "source identity (held state)", Backend::Cpu, 1,
+                         Tier::T0, Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis));
+    AddInput(p, kP5MonitorTiles, 0);   // through the monitor snapshot (the tiles' analysis)
+    p.size.fixedBytes = kSourceIdentityRecordBytes;
+    p.residency = Residency::SystemRam;
+    p.rarelyTouched = true;
+    p.refRenderMs = 0.0f;
+    decls.push_back(p);
+}
+
 // The registry the skeleton runs with: the first products, the camera products, then P10..P13 and the TemporalDetail
 // products, in fixed id order. THE one assembly point.
 // `compactGrain` / `compactChroma`: the GRANTED storage of P10 (luma) and P10c (chroma planes).
@@ -705,6 +729,7 @@ inline Registry SkeletonProducts(bool compactGrain, bool compactChroma)
     AppendRegionProducts(d);
     AppendSourceRingProduct(d);
     AppendTemporalDetailProducts(d);
+    AppendSourceIdentityProduct(d);
     return Registry(std::move(d));
 }
 inline Registry SkeletonProducts(bool compactGrain = false) { return SkeletonProducts(compactGrain, compactGrain); }

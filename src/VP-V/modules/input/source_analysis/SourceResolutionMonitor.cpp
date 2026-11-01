@@ -448,6 +448,100 @@ if (tile < int(tiles) && g.y < ts) {
 		return out;
 	}
 
+
+	// ---- source identity (doc 61, P14) -------------------------------------------------------------------------------
+	void Monitor::SetSourceIdConsensus(bool on)
+	{
+		if (sourceIdOn.exchange(on, std::memory_order_acq_rel) != on && on)
+		{
+			sourceId.Held().Reset();   // records from before an off period must not read as fresh (HeldState is mutex-guarded)
+			sourceIdResetPending.store(true, std::memory_order_release);
+		}
+	}
+
+	namespace
+	{
+		double ClockNow(double seconds)
+		{
+			return seconds >= 0.0 ? seconds : std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+		}
+	}
+
+	SourceIdentity::QualityView Monitor::QualityView(double seconds) const
+	{
+		const Snapshot s = Read();
+		SourceIdentity::ClassicalQuality c;
+		c.reading = s.reading;
+		c.bitrateQuality = s.bitrateQuality;
+		c.effectiveBits = s.effectiveBits;
+		const bool on = SourceIdConsensus();
+		if (!on)
+			return SourceIdentity::View(nullptr, c, false, 0);
+		SourceIdentity::Record rec;
+		const bool have = sourceId.Held().ReadLatest(0, rec);
+		return SourceIdentity::View(have ? &rec : nullptr, c, true, static_cast<int64_t>(std::llround(ClockNow(seconds) * 1e6)));
+	}
+
+	std::string Monitor::SourceIdStatusLine(double seconds) const
+	{
+		const SourceIdentity::QualityView v = QualityView(seconds);
+		SourceIdentity::Record rec;
+		const bool have = sourceId.Held().ReadLatest(0, rec);
+		return SourceIdentity::StatusLine(v, have ? &rec : nullptr);
+	}
+
+	FallbackCatalog::Decision Monitor::SourceIdGateFallback() const
+	{
+		std::lock_guard<std::mutex> lock(gateMutex);
+		return gateDecision;
+	}
+
+	int Monitor::ApplySourceIdRebase(SourceIdentity::IndicatorPort& port)
+	{
+		SourceIdentity::Record rec;
+		if (!SourceIdConsensus() || !sourceId.Held().ReadLatest(0, rec))
+			return 0;
+		return sourceIdRebase.Poll(rec, port);
+	}
+
+	Monitor::IdGate Monitor::SourceIdGate(double now)
+	{
+		IdGate g;
+		g.on = SourceIdConsensus();
+		if (!g.on)
+		{
+			std::lock_guard<std::mutex> lock(gateMutex);
+			if (gateDecision.engaged || gateDecision.id.empty())
+				gateDecision = FallbackCatalog::Released("product.source_quality");
+			return g;
+		}
+		SourceIdentity::Record rec;
+		const char* why = nullptr;
+		if (!sourceId.Held().ReadLatest(0, rec))
+			why = "no record";
+		else if (rec.unitVersion != SourceIdentity::kUnitVersion)
+			why = "unit version";
+		else
+		{
+			const int64_t nowUs = static_cast<int64_t>(std::llround(now * 1e6));
+			if (rec.maxAgeUs > 0 && (nowUs - rec.timeUs > rec.maxAgeUs || nowUs < rec.timeUs - rec.maxAgeUs))
+				why = "stale";
+		}
+		{
+			std::lock_guard<std::mutex> lock(gateMutex);
+			gateDecision = why ? FallbackCatalog::ProductFallback("product.source_quality", std::string("auto engage: ") + why)
+				: FallbackCatalog::Released("product.source_quality");
+		}
+		if (why)
+			return g;
+		g.fresh = true;
+		g.latchedH = rec.Latched(SourceIdentity::Field::AxisH);
+		g.latchedV = rec.Latched(SourceIdentity::Field::AxisV);
+		g.ratioH = g.latchedH ? rec.ratioH : 1.0;
+		g.ratioV = g.latchedV ? rec.ratioV : 1.0;
+		return g;
+	}
+
 	std::string Monitor::NotReadReason(const pl_frame& source)
 	{
 		const pl_tex luma = source.num_planes > 0 ? source.planes[0].texture : nullptr;
@@ -815,6 +909,12 @@ if (tile < int(tiles) && g.y < ts) {
 		qualitySmoothed = -1.0;
 		bitsSmoothed = 0.0;
 		lastAnalysedSeconds = -1.0;
+		// Source identity (worker thread): a new title/source starts from native/unknown (no stamp: the Indicator's FULL
+		// already bumps both axes).
+		sourceId.Discontinuity(snapshot.frames, streamKey.load(std::memory_order_acquire));
+		sourceIdLastCuts = tracker.Cuts();
+		snapshot.frameQuality = 1.0;
+		snapshot.frameNoise = -1.0;
 		snapshot.reading = false;
 		snapshot.liveRatio = snapshot.declaredRatio = snapshot.frameRatio = 1.0;
 		snapshot.confidence = 0.0;
@@ -862,6 +962,21 @@ if (tile < int(tiles) && g.y < ts) {
 		}
 		thresholds.signatureTiles = j.baseTiles;
 		const SourceResolution::FrameReading frame = SourceResolution::ReadFrame(spectra, thresholds);
+
+		// Source identity (doc 61 SID-2): the relative-noise measurement of the frame's informative tiles, taken BEFORE `mutex`
+		// is held (the render thread's Read() never waits for it). Off (the default): nothing is measured.
+		const bool idOn = sourceIdOn.load(std::memory_order_acquire);
+		if (sourceIdResetPending.exchange(false, std::memory_order_acq_rel))
+			sourceId.Discontinuity(snapshot.frames, streamKey.load(std::memory_order_acquire));   // switched on: a clean start
+		sourceId.SetConsensusOn(idOn);
+		std::vector<SourceIdentity::FrameQuality::TileNoise> idNoise;
+		if (idOn)
+		{
+			constexpr size_t kMaxNoiseTiles = 4;   // bounded cost: the first informative tiles in tile order (deterministic)
+			for (int t = 0; t < j.tiles && idNoise.size() < kMaxNoiseTiles; ++t)
+				if (SourceResolution::Informative(spectra[static_cast<size_t>(t)], thresholds))
+					idNoise.push_back(SourceIdentity::FrameQuality::MeasureNoise(codeTiles[static_cast<size_t>(t)].data(), T));
+		}
 
 		// Efficiency 2026-10-24: a unique_lock so the kernel fit (below) runs unlocked.
 		std::unique_lock<std::mutex> lock(mutex);
@@ -1085,12 +1200,62 @@ if (tile < int(tiles) && g.y < ts) {
 		++snapshot.frames;
 		snapshot.analyseMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 		snapshot.tiles = j.tiles;
+		if (sourceIdNoticeDirty.exchange(false, std::memory_order_acq_rel))
+			sourceId.SetNoticeEnabled(sourceIdNotice.load(std::memory_order_acquire));
+		if (idOn)
+		{
+			SourceIdentity::FrameInput in;
+			in.seq = j.sequence != 0 ? j.sequence : snapshot.frames;
+			in.timeUs = static_cast<int64_t>(std::llround(j.seconds * 1e6));
+			in.streamKey = j.streamKey;
+			in.classical.reading = snapshot.reading;
+			in.classical.declaredRatio = snapshot.declaredRatio;
+			in.classical.confidence = snapshot.confidence;
+			in.classical.axisRatioX = snapshot.axisRatioX;
+			in.classical.axisRatioY = snapshot.axisRatioY;
+			in.classical.axisConfidence = snapshot.axisConfidence;
+			in.classical.kernel = snapshot.kernel;
+			in.classical.kernelVotes = snapshot.kernelVotes;
+			in.classical.kernelAgree = snapshot.kernelAgree;
+			in.classical.bitrateQuality = snapshot.bitrateQuality;
+			// "Detail above the re-based size": every tracker is back to native with nothing gathered below it, on an
+			// informative frame (the classical safety veto; consensus may not hold a re-base the evidence no longer has).
+			in.classical.detailAbove = frame.informative() && tracker.Ratio() >= 1.0 && tracker.Candidate() >= 1.0 &&
+				trackerV.Ratio() >= 1.0 && trackerV.Candidate() >= 1.0 && trackerH.Ratio() >= 1.0 && trackerH.Candidate() >= 1.0;
+			in.deliveredRatio = frame.informative() ? frame.ratio : 0.0;
+			in.noise = idNoise;
+			in.apl = frame.mean;
+			in.blank = !frame.informative();
+			in.cut = snapshot.cuts != sourceIdLastCuts;
+			sourceIdLastCuts = snapshot.cuts;
+			in.nativeHeight = j.nativeHeight;
+			const unsigned long long eventsBefore = sourceId.Events();
+			sourceId.Push(in);
+			if (sourceId.Events() != eventsBefore)
+				sourceIdEvents.fetch_add(sourceId.Events() - eventsBefore, std::memory_order_relaxed);
+			snapshot.frameQuality = sourceId.LastFrameQuality();
+			snapshot.frameNoise = sourceId.LastNoise();
+		}
 		char row[256];
 		snprintf(row, sizeof(row), "reading,%.4f,%.3f,%.3f,%.4f,%.4f,%.2f,%.2f,%.1f,%llu,%d/%d,%.4f,%.1f ms",
 			frame.ratio, frame.vertical.coherence, frame.horizontal.coherence, snapshot.liveRatio, snapshot.declaredRatio,
 			snapshot.confidence, snapshot.bitrateQuality, snapshot.effectiveBits, snapshot.cuts, frame.informativeTiles,
 			frame.tiles, autoAppliedShared.load(std::memory_order_acquire), snapshot.analyseMs);
-		Record(row);
+		if (idOn)
+		{
+			SourceIdentity::Record rec;
+			if (sourceId.Held().ReadLatest(0, rec))
+			{
+				char cols[200];
+				snprintf(cols, sizeof(cols), ",sid,%.4f,%.2f,%d,%.4f,%.4f,%.4f,%s", snapshot.frameQuality, snapshot.frameNoise, rec.tier,
+					rec.level, rec.ratioH, rec.ratioV, SourceIdentity::ReasonText(static_cast<SourceIdentity::ReasonCode>(rec.reason[static_cast<int>(SourceIdentity::Field::Quality)])));
+				Record(std::string(row) + cols);
+			}
+			else
+				Record(row);
+		}
+		else
+			Record(row);
 		if (bound)
 		{
 			PushHeld(j, workerReset);
@@ -1149,6 +1314,22 @@ if (tile < int(tiles) && g.y < ts) {
 			if (before < 1.0) why = "native at once (" + (s.lastDiscontinuity.empty() ? std::string("discontinuity") : s.lastDiscontinuity) + ")";
 		}
 		double wanted = s.reading && s.declaredRatio < 1.0 && s.confidence >= minimumConfidence ? s.declaredRatio : 1.0;
+		// Source identity (doc 61, auto engage): with source_id_consensus on and a fresh record, the classical reading may only
+		// engage on a LATCHED field, and the target is the consensus's ratio. The classical confidence minimum still applies
+		// (consensus can delay, veto or refine an engage, never add one). A stale or absent record: the classical value above,
+		// visibly (SourceIdGateFallback).
+		{
+			const IdGate gate = SourceIdGate(now);
+			if (gate.fresh && wanted < 1.0)
+			{
+				const double tol = 0.03;
+				const bool uniform = gate.latchedH && gate.latchedV && std::fabs(gate.ratioH - gate.ratioV) <= tol * (std::max)(gate.ratioH, gate.ratioV);
+				// Consensus moves only TOWARDS native: never a deeper re-base than the classical reading wants (a rise
+				// in detail must not wait for the consensus dwell).
+				const double target = uniform && gate.ratioH < 1.0 ? 0.5 * (gate.ratioH + gate.ratioV) : 1.0;
+				wanted = (std::max)(wanted, target);
+			}
+		}
 		// Lines: an even height derived from the frame's own height (general).
 		if (wanted < 1.0 && nativeHeight > 0)
 		{
@@ -1295,7 +1476,14 @@ if (tile < int(tiles) && g.y < ts) {
 		if (s.reading && s.axisConfidence >= minimumConfidence)
 		{
 			const int sizes[2] = { nativeWidth, nativeHeight };
-			const double ratios[2] = { s.axisRatioX, s.axisRatioY };
+			double ratios[2] = { s.axisRatioX, s.axisRatioY };
+			// Source identity: only latched axes engage, at the consensus's ratio (see AutoFactor).
+			const IdGate gate = SourceIdGate(now);
+			if (gate.fresh)
+			{
+				ratios[0] = ratios[0] < 1.0 && gate.latchedH ? (std::max)(ratios[0], gate.ratioH) : 1.0;
+				ratios[1] = ratios[1] < 1.0 && gate.latchedV ? (std::max)(ratios[1], gate.ratioV) : 1.0;
+			}
 			for (int a = 0; a < 2; ++a)
 				if (ratios[a] < 1.0 && sizes[a] > 0)
 				{
