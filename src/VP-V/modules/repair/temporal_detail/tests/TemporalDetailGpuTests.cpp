@@ -7,7 +7,7 @@
 // vectors). The timing test is hardware only (category GpuHardware).
 #include "pch.h"
 #include "CppUnitTest.h"
-#include "ExtendedRangeGpuProbe.h"
+#include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
 
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>

@@ -24,7 +24,7 @@
 #include <RendererProfileConfig.h>
 
 #include <VP-V/config/VpvTierTable.generated.h>
-#include "../../VideoProcessor-Test/QueueStressHarness.h"
+#include <VP-V/tests/support/QueueStressHarness.h>
 
 #include <cstdio>
 #include <cstdlib>

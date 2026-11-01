@@ -6,7 +6,7 @@
 // the includes, the WARP/hardware GPU fixture and the helper functions those tests use.
 #include "CppUnitTest.h"
 
-#include "SubtitleTextTestPattern.h"
+#include <VP-V/tests/support/SubtitleTextTestPattern.h>
 #include <algorithm>
 #include <array>
 #include <vprenderer/LibplaceboDisplayLut.h>
@@ -26,7 +26,7 @@
 #include <vprenderer/GpuDolbyVisionTunnelUnpack.h>
 #include <vprenderer/DolbyVisionTunnelUnpackReference.h>
 #include <video_frame_formatter/CRGBDolbyVisionTunnelFormatter.h>
-#include "DolbyVisionTunnelSender.h"
+#include <VP-V/tests/support/DolbyVisionTunnelSender.h>
 #include <RawCaptureCorpus.h>
 #include <vprenderer/EarlyUpload.h>
 #include <vprenderer/SourceRebase.h>
@@ -53,11 +53,11 @@
 #include <vprenderer/DolbyVisionTrims.h>
 #include <vprenderer/RenderedWarp.h>
 #include <vprenderer/AdaptiveDownscale.h>
-#include "ExtendedRangeGpuProbe.h"
-#include "HardwarePrerequisites.h"
-#include "ChainGpuProbe.h"
-#include "SigmaDeltaBiasProbe.h"
-#include "GrainReferenceModel.h"
+#include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
+#include <VP-V/tests/support/ChainGpuProbe.h>
+#include <VP-V/tests/support/SigmaDeltaBiasProbe.h>
+#include <VP-V/tests/support/GrainReferenceModel.h>
 #include <memory>
 #include <vprenderer/NlsMaskMapping.h>
 #include <VP-V/modules/drive/led_measure/LedMeasurementHook.h>

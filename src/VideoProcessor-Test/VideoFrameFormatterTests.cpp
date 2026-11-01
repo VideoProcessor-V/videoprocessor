@@ -12,7 +12,7 @@
 #include <cmath>
 #include <fstream>
 #include <numeric>
-#include "HardwarePrerequisites.h"
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <video_frame_formatter/CNoopVideoFrameFormatter.h>
 #include <video_frame_formatter/CARGBtoP010VideoFrameFormatter.h>

@@ -1,7 +1,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
-#include "ExtendedRangeGpuProbe.h"
+#include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
 
 #include <VP-V/segments/OutputSegments.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationLutStage.h>

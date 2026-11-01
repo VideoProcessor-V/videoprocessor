@@ -6,7 +6,7 @@
 // tier) unless VP_TEST_GPU=hardware. The timing test is hardware only (category GpuHardware).
 #include "pch.h"
 #include "CppUnitTest.h"
-#include "ExtendedRangeGpuProbe.h"
+#include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
 
 #include <VP-V/modules/scaling/chroma_upscale/ChromaCfl.h>
 #include <VP-V/modules/scaling/chroma_upscale/ChromaCflGpu.h>

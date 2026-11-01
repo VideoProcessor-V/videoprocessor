@@ -7,7 +7,7 @@
 // the lane producer and the render's live fill.
 #include "pch.h"
 #include "CppUnitTest.h"
-#include "ExtendedRangeGpuProbe.h"
+#include <VP-V/tests/support/ExtendedRangeGpuProbe.h>
 
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
 #include <VP-V/modules/repair/grain_split/GrainNodeGpu.h>

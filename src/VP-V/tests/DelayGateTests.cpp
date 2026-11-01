@@ -31,7 +31,7 @@
 
 #include <VP-V/core/DelayBudgetLadder.h>
 
-#include "../../VideoProcessor-Test/QueueStressHarness.h"
+#include <VP-V/tests/support/QueueStressHarness.h>
 
 #include <cstdlib>
 #include <sstream>

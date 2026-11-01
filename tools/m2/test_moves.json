@@ -1,0 +1,185 @@
+{
+ "schema": 1,
+ "about": "Configuration and result of tools/m2/move_tests.py. Copyright(C) 2026 VP-V contributors; SPDX-License-Identifier: GPL-3.0-only",
+ "scan_dirs": [
+  "src/VideoProcessor-Test",
+  "src/VideoProcessor-BetaTests",
+  "src/VideoProcessor-ConfigTests"
+ ],
+ "extensions": [
+  ".cpp",
+  ".h",
+  ".hpp",
+  ".inc"
+ ],
+ "keep": [
+  "src/VideoProcessor-BetaTests/pch.h",
+  "src/VideoProcessor-BetaTests/VideoProcessor-BetaTestsHost.vcxproj"
+ ],
+ "keep_notes": {
+  "src/VideoProcessor-BetaTests/pch.h": "stand-in found via $(ProjectDir) as <pch.h> before Lib's pch.h; moving it changes include resolution",
+  "src/VideoProcessor-BetaTests/VideoProcessor-BetaTestsHost.vcxproj": "the Beta host DLL path must stay (coordinator GPU scripts)"
+ },
+ "rules": [
+  {
+   "glob": "src/VideoProcessor-Test/RendererCaptureHarnessTests.cpp",
+   "dest": "src/VP-V/tests/harness/"
+  },
+  {
+   "glob": "src/VideoProcessor-BetaTests/*.cpp",
+   "dest": "src/VP-V/tests/beta_gpu/"
+  },
+  {
+   "glob": "src/VideoProcessor-Test/*.h",
+   "dest": "src/VP-V/tests/support/"
+  },
+  {
+   "glob": "src/VideoProcessor-Test/*.cpp",
+   "dest": "src/VP-V/tests/suite/"
+  }
+ ],
+ "origins": {
+  "VideoProcessor-Test": {
+   "dir": "src/VideoProcessor-Test",
+   "include_dirs": [
+    "src/VideoProcessor-Test",
+    "src/VideoProcessor-Lib",
+    "src/VideoProcessor-ConfigCore",
+    "src"
+   ]
+  },
+  "VideoProcessor-BetaTests": {
+   "dir": "src/VideoProcessor-BetaTests",
+   "include_dirs": [
+    "src/VideoProcessor-BetaTests",
+    "src/VideoProcessor-Lib",
+    "src"
+   ]
+  }
+ },
+ "origin_by_dest": {
+  "src/VP-V/tests/harness": "VideoProcessor-Test",
+  "src/VP-V/tests/support": "VideoProcessor-Test",
+  "src/VP-V/tests/suite": "VideoProcessor-Test",
+  "src/VP-V/tests/beta_gpu": "VideoProcessor-BetaTests"
+ },
+ "split": [
+  "src/VideoProcessor-Test/ConfigFileTests.cpp",
+  "src/VideoProcessor-Test/DolbyVisionTunnelFormatterTests.cpp",
+  "src/VideoProcessor-Test/LibplaceboPluginProxyTests.cpp",
+  "src/VideoProcessor-Test/MotionRendererTests.cpp",
+  "src/VideoProcessor-Test/DolbyVisionLuminancePolicyTests.cpp",
+  "src/VideoProcessor-Test/LibplaceboRenderParametersTests.cpp",
+  "src/VideoProcessor-Test/AlphaSourceCropPolicyTests.cpp",
+  "src/VideoProcessor-Test/ConfigEditorCoreTests.cpp"
+ ],
+ "split_excluded_open_items": {
+  "src/VideoProcessor-ConfigTests/ConfigEditorWindowTests.cpp": "Qt; needs H3 / plan section 4.3",
+  "src/VideoProcessor-BetaTests/BetaParametersTests.cpp": "no TEST_METHODs; custom suite",
+  "src/VideoProcessor-Test/MagewellCaptureTests.cpp": "Magewell isolation rules / CI no-SDK build conditions"
+ },
+ "exclude": {},
+ "resolved": {
+  "src/VideoProcessor-BetaTests/BetaGpuTests.cpp": "src/VP-V/tests/beta_gpu/BetaGpuTests.cpp",
+  "src/VideoProcessor-BetaTests/BetaTestHost.cpp": "src/VP-V/tests/beta_gpu/BetaTestHost.cpp",
+  "src/VideoProcessor-Test/AmbientAdaptationTests.cpp": "src/VP-V/tests/suite/AmbientAdaptationTests.cpp",
+  "src/VideoProcessor-Test/AnalysisLumaRangeTests.cpp": "src/VP-V/tests/suite/AnalysisLumaRangeTests.cpp",
+  "src/VideoProcessor-Test/BlackIntentTests.cpp": "src/VP-V/tests/suite/BlackIntentTests.cpp",
+  "src/VideoProcessor-Test/BugHunt20261017CaptureTests.cpp": "src/VP-V/tests/suite/BugHunt20261017CaptureTests.cpp",
+  "src/VideoProcessor-Test/BugHunt20261017Tests.cpp": "src/VP-V/tests/suite/BugHunt20261017Tests.cpp",
+  "src/VideoProcessor-Test/BugHunt2CaptureTests.cpp": "src/VP-V/tests/suite/BugHunt2CaptureTests.cpp",
+  "src/VideoProcessor-Test/BugHunt2GuiTests.cpp": "src/VP-V/tests/suite/BugHunt2GuiTests.cpp",
+  "src/VideoProcessor-Test/BugHunt3ShutdownTests.cpp": "src/VP-V/tests/suite/BugHunt3ShutdownTests.cpp",
+  "src/VideoProcessor-Test/CaptureLayerAuditTests.cpp": "src/VP-V/tests/suite/CaptureLayerAuditTests.cpp",
+  "src/VideoProcessor-Test/ChainGpuProbe.h": "src/VP-V/tests/support/ChainGpuProbe.h",
+  "src/VideoProcessor-Test/ChangeKeyTests.cpp": "src/VP-V/tests/suite/ChangeKeyTests.cpp",
+  "src/VideoProcessor-Test/ContentIntentTests.cpp": "src/VP-V/tests/suite/ContentIntentTests.cpp",
+  "src/VideoProcessor-Test/CrashStateTests.cpp": "src/VP-V/tests/suite/CrashStateTests.cpp",
+  "src/VideoProcessor-Test/CrossfadeMixTests.cpp": "src/VP-V/tests/suite/CrossfadeMixTests.cpp",
+  "src/VideoProcessor-Test/CustomHookChainTests.cpp": "src/VP-V/tests/suite/CustomHookChainTests.cpp",
+  "src/VideoProcessor-Test/DetailPulseModel.h": "src/VP-V/tests/support/DetailPulseModel.h",
+  "src/VideoProcessor-Test/DetailPulseTests.cpp": "src/VP-V/tests/suite/DetailPulseTests.cpp",
+  "src/VideoProcessor-Test/DetailRestoreConfigTests.cpp": "src/VP-V/tests/suite/DetailRestoreConfigTests.cpp",
+  "src/VideoProcessor-Test/DiagnosticHistoryTests.cpp": "src/VP-V/tests/suite/DiagnosticHistoryTests.cpp",
+  "src/VideoProcessor-Test/DisplayIntentTests.cpp": "src/VP-V/tests/suite/DisplayIntentTests.cpp",
+  "src/VideoProcessor-Test/DisplayRuleExpressionAuditTests.cpp": "src/VP-V/tests/suite/DisplayRuleExpressionAuditTests.cpp",
+  "src/VideoProcessor-Test/DolbyVisionTrimsTests.cpp": "src/VP-V/tests/suite/DolbyVisionTrimsTests.cpp",
+  "src/VideoProcessor-Test/DolbyVisionTunnelSender.h": "src/VP-V/tests/support/DolbyVisionTunnelSender.h",
+  "src/VideoProcessor-Test/DvIncomingHdrModeTests.cpp": "src/VP-V/tests/suite/DvIncomingHdrModeTests.cpp",
+  "src/VideoProcessor-Test/DvRawCorpusTests.cpp": "src/VP-V/tests/suite/DvRawCorpusTests.cpp",
+  "src/VideoProcessor-Test/DvRpuAnchorTests.cpp": "src/VP-V/tests/suite/DvRpuAnchorTests.cpp",
+  "src/VideoProcessor-Test/DvSyntheticCorpusTests.cpp": "src/VP-V/tests/suite/DvSyntheticCorpusTests.cpp",
+  "src/VideoProcessor-Test/DvTunnelHandoffTests.cpp": "src/VP-V/tests/suite/DvTunnelHandoffTests.cpp",
+  "src/VideoProcessor-Test/DvTunnelLoopbackTests.cpp": "src/VP-V/tests/suite/DvTunnelLoopbackTests.cpp",
+  "src/VideoProcessor-Test/DvTunnelReferenceEncoder.h": "src/VP-V/tests/support/DvTunnelReferenceEncoder.h",
+  "src/VideoProcessor-Test/DynamicDriveAdapterTests.cpp": "src/VP-V/tests/suite/DynamicDriveAdapterTests.cpp",
+  "src/VideoProcessor-Test/EfficiencyPolicyTests.cpp": "src/VP-V/tests/suite/EfficiencyPolicyTests.cpp",
+  "src/VideoProcessor-Test/EfficiencyTests.cpp": "src/VP-V/tests/suite/EfficiencyTests.cpp",
+  "src/VideoProcessor-Test/ExtendedRangeCarryTests.cpp": "src/VP-V/tests/suite/ExtendedRangeCarryTests.cpp",
+  "src/VideoProcessor-Test/ExtendedRangeGpuProbe.h": "src/VP-V/tests/support/ExtendedRangeGpuProbe.h",
+  "src/VideoProcessor-Test/FileFrameTests.cpp": "src/VP-V/tests/suite/FileFrameTests.cpp",
+  "src/VideoProcessor-Test/FileHostTests.cpp": "src/VP-V/tests/suite/FileHostTests.cpp",
+  "src/VideoProcessor-Test/FileSideDataTests.cpp": "src/VP-V/tests/suite/FileSideDataTests.cpp",
+  "src/VideoProcessor-Test/FileSourceHelpersTests.cpp": "src/VP-V/tests/suite/FileSourceHelpersTests.cpp",
+  "src/VideoProcessor-Test/FileSourceRuleVariableTests.cpp": "src/VP-V/tests/suite/FileSourceRuleVariableTests.cpp",
+  "src/VideoProcessor-Test/GeneralRateMatrixTests.cpp": "src/VP-V/tests/suite/GeneralRateMatrixTests.cpp",
+  "src/VideoProcessor-Test/GrainPreservationTests.cpp": "src/VP-V/tests/suite/GrainPreservationTests.cpp",
+  "src/VideoProcessor-Test/GrainReferenceModel.h": "src/VP-V/tests/support/GrainReferenceModel.h",
+  "src/VideoProcessor-Test/GuiAuditTests.cpp": "src/VP-V/tests/suite/GuiAuditTests.cpp",
+  "src/VideoProcessor-Test/H3TimingTests.cpp": "src/VP-V/tests/suite/H3TimingTests.cpp",
+  "src/VideoProcessor-Test/HardwarePrerequisites.h": "src/VP-V/tests/support/HardwarePrerequisites.h",
+  "src/VideoProcessor-Test/HdrInferenceTests.cpp": "src/VP-V/tests/suite/HdrInferenceTests.cpp",
+  "src/VideoProcessor-Test/HookSegmentTests.cpp": "src/VP-V/tests/suite/HookSegmentTests.cpp",
+  "src/VideoProcessor-Test/Hunt2CadenceClassTests.cpp": "src/VP-V/tests/suite/Hunt2CadenceClassTests.cpp",
+  "src/VideoProcessor-Test/Hunt2MotionTests.cpp": "src/VP-V/tests/suite/Hunt2MotionTests.cpp",
+  "src/VideoProcessor-Test/Integration20261017Tests.cpp": "src/VP-V/tests/suite/Integration20261017Tests.cpp",
+  "src/VideoProcessor-Test/IntentInterpreterTests.cpp": "src/VP-V/tests/suite/IntentInterpreterTests.cpp",
+  "src/VideoProcessor-Test/InterpolationPolicyTests.cpp": "src/VP-V/tests/suite/InterpolationPolicyTests.cpp",
+  "src/VideoProcessor-Test/KernelInverseTests.cpp": "src/VP-V/tests/suite/KernelInverseTests.cpp",
+  "src/VideoProcessor-Test/LedDriveArbiterTests.cpp": "src/VP-V/tests/suite/LedDriveArbiterTests.cpp",
+  "src/VideoProcessor-Test/LedDriveCompensateTests.cpp": "src/VP-V/tests/suite/LedDriveCompensateTests.cpp",
+  "src/VideoProcessor-Test/LedDriveControllerTests.cpp": "src/VP-V/tests/suite/LedDriveControllerTests.cpp",
+  "src/VideoProcessor-Test/LedDriveDelta1Tests.cpp": "src/VP-V/tests/suite/LedDriveDelta1Tests.cpp",
+  "src/VideoProcessor-Test/LedDriveHoldoverTests.cpp": "src/VP-V/tests/suite/LedDriveHoldoverTests.cpp",
+  "src/VideoProcessor-Test/LedDriveHunt2Tests.cpp": "src/VP-V/tests/suite/LedDriveHunt2Tests.cpp",
+  "src/VideoProcessor-Test/LedDriveHunt3Tests.cpp": "src/VP-V/tests/suite/LedDriveHunt3Tests.cpp",
+  "src/VideoProcessor-Test/LedDriveMeasurementTests.cpp": "src/VP-V/tests/suite/LedDriveMeasurementTests.cpp",
+  "src/VideoProcessor-Test/LedDriveProtocolTests.cpp": "src/VP-V/tests/suite/LedDriveProtocolTests.cpp",
+  "src/VideoProcessor-Test/LedDriveTestSupport.h": "src/VP-V/tests/support/LedDriveTestSupport.h",
+  "src/VideoProcessor-Test/LedIntentLimitsTests.cpp": "src/VP-V/tests/suite/LedIntentLimitsTests.cpp",
+  "src/VideoProcessor-Test/LedScriptCorrelationTests.cpp": "src/VP-V/tests/suite/LedScriptCorrelationTests.cpp",
+  "src/VideoProcessor-Test/LedScriptLookaheadTests.cpp": "src/VP-V/tests/suite/LedScriptLookaheadTests.cpp",
+  "src/VideoProcessor-Test/MixedScreenSourceResolutionTests.cpp": "src/VP-V/tests/suite/MixedScreenSourceResolutionTests.cpp",
+  "src/VideoProcessor-Test/ModuleStatusTextTests.cpp": "src/VP-V/tests/suite/ModuleStatusTextTests.cpp",
+  "src/VideoProcessor-Test/MotionIntentTests.cpp": "src/VP-V/tests/suite/MotionIntentTests.cpp",
+  "src/VideoProcessor-Test/MotionValidityTests.cpp": "src/VP-V/tests/suite/MotionValidityTests.cpp",
+  "src/VideoProcessor-Test/NvOpticalFlowTests.cpp": "src/VP-V/tests/suite/NvOpticalFlowTests.cpp",
+  "src/VideoProcessor-Test/PostMergeAudit20261017Tests.cpp": "src/VP-V/tests/suite/PostMergeAudit20261017Tests.cpp",
+  "src/VideoProcessor-Test/PulldownCorpusTests.cpp": "src/VP-V/tests/suite/PulldownCorpusTests.cpp",
+  "src/VideoProcessor-Test/PulldownReliabilityTests.cpp": "src/VP-V/tests/suite/PulldownReliabilityTests.cpp",
+  "src/VideoProcessor-Test/QueueStressHarness.h": "src/VP-V/tests/support/QueueStressHarness.h",
+  "src/VideoProcessor-Test/QueueStressLaneTests.cpp": "src/VP-V/tests/suite/QueueStressLaneTests.cpp",
+  "src/VideoProcessor-Test/QueueStressTests.cpp": "src/VP-V/tests/suite/QueueStressTests.cpp",
+  "src/VideoProcessor-Test/QueueTimingFixesTests.cpp": "src/VP-V/tests/suite/QueueTimingFixesTests.cpp",
+  "src/VideoProcessor-Test/R6BaselineTests.cpp": "src/VP-V/tests/suite/R6BaselineTests.cpp",
+  "src/VideoProcessor-Test/RealClipLibrary.h": "src/VP-V/tests/support/RealClipLibrary.h",
+  "src/VideoProcessor-Test/RealFootageSuiteTests.cpp": "src/VP-V/tests/suite/RealFootageSuiteTests.cpp",
+  "src/VideoProcessor-Test/RenderAheadPolicyTests.cpp": "src/VP-V/tests/suite/RenderAheadPolicyTests.cpp",
+  "src/VideoProcessor-Test/RendererCaptureHarnessTests.cpp": "src/VP-V/tests/harness/RendererCaptureHarnessTests.cpp",
+  "src/VideoProcessor-Test/SceneDescriptorTests.cpp": "src/VP-V/tests/suite/SceneDescriptorTests.cpp",
+  "src/VideoProcessor-Test/SdrToneShapeWtwTests.cpp": "src/VP-V/tests/suite/SdrToneShapeWtwTests.cpp",
+  "src/VideoProcessor-Test/ShortcutDefaultsTests.cpp": "src/VP-V/tests/suite/ShortcutDefaultsTests.cpp",
+  "src/VideoProcessor-Test/SigmaDeltaBiasProbe.h": "src/VP-V/tests/support/SigmaDeltaBiasProbe.h",
+  "src/VideoProcessor-Test/SourceResolutionDetectorTests.cpp": "src/VP-V/tests/suite/SourceResolutionDetectorTests.cpp",
+  "src/VideoProcessor-Test/SourceResolutionFrameBoundTests.cpp": "src/VP-V/tests/suite/SourceResolutionFrameBoundTests.cpp",
+  "src/VideoProcessor-Test/SourceResolutionLatchTests.cpp": "src/VP-V/tests/suite/SourceResolutionLatchTests.cpp",
+  "src/VideoProcessor-Test/StateReportTests.cpp": "src/VP-V/tests/suite/StateReportTests.cpp",
+  "src/VideoProcessor-Test/SubtitleTextTestPattern.h": "src/VP-V/tests/support/SubtitleTextTestPattern.h",
+  "src/VideoProcessor-Test/TextureRestoreModel.h": "src/VP-V/tests/support/TextureRestoreModel.h",
+  "src/VideoProcessor-Test/TextureRestoreTests.cpp": "src/VP-V/tests/suite/TextureRestoreTests.cpp",
+  "src/VideoProcessor-Test/VPRendererFilterGraphTests.cpp": "src/VP-V/tests/suite/VPRendererFilterGraphTests.cpp",
+  "src/VideoProcessor-Test/VPRendererFilterTests.cpp": "src/VP-V/tests/suite/VPRendererFilterTests.cpp",
+  "src/VideoProcessor-Test/VectorStoreTests.cpp": "src/VP-V/tests/suite/VectorStoreTests.cpp",
+  "src/VideoProcessor-Test/VpScaleRenderMotionTests.cpp": "src/VP-V/tests/suite/VpScaleRenderMotionTests.cpp"
+ }
+}
