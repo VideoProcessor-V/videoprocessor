@@ -22,7 +22,9 @@ correlation increase <= 0.05.
   mirrored into the bars, so the bar edge is never structure (no halo/undershoot at the boundary). A changed
   rectangle resets the store (status `reset: active picture`).
 - Measurement knobs (`Model::Tuning`, never user settings): grain budget, cleaner, guard, and the validation thresholds
-  `strongerMargin`, `baseNoiseCodes`, `baseGrainSigmas`, `uncertaintyPx` (defaults = the constants).
+  `strongerMargin`, `baseNoiseCodes`, `baseGrainSigmas`, `uncertaintyPx` (defaults = the constants), and `gatesOff`
+  (gate ablation bits `Tuning::GateBits`: each set bit forces that gate open; 0 = the designed model, byte-identical;
+  measurement only, test/td-real-vectors).
 
 ## Algorithm (CPU reference model `TemporalDetailModel.h`; shaders mirror it)
 

@@ -227,6 +227,19 @@ D:\hfrenv\Scripts\python.exe -I tools/eval/run_prototypes.py --family temporal_
     --baseline td_off --candidates td_b008 --out D:\codexideoprocessor\eval-scratch	est-td-realun-td_b008 --lpips
 ```
 
+### TemporalDetail with real vectors (`td_vectors/`, test/td-real-vectors)
+
+Full 1080p frames (no crops) of the td_real encodes (`prep_data.py`); consecutive-pair vectors on a 4 px grid in the
+`vector_source.py` contract (`vecgen.py`: `dis`, `disref` = DIS seed + quarter-pel block refinement, `nvof` / `nvofref`
+= VP's NVIDIA optical flow seed from `tools/td-cli/bin/nvof_dump.exe` (+ the same refinement)), computed on the decoded
+frames ("engine") and on the master (the near-ideal ceiling applied to the decoded frames). `available_detail.py`:
+per frame type PSNR / fine-band energy, per-block oracle ceilings of fine-band transfer, full blend, a perfect
+reference and a vector-error-free offset search, the master's incoherent (grain) fine band. `td_run.py`: the CPU model
+through `td_cli --stdio` scored on the fly (`--gates-off` = `Tuning::gatesOff`). `td_banding.py`: light_metrics banding
+/ shadow texture (SDR, HDR-proxy -> SDR, deband, 8-bit nd / sigma-delta). `make_jobs.py` + `run_jobs.py` queue the
+runs, `summarize.py` writes the tables (`prototypes/temporal_detail_real/vectors/`). Outputs (vectors, frames) stay in
+scratch (`D:/codex/td-real-vectors-out`).
+
 ## Candidate list (planned) and the metrics that gate each
 
 | candidate | what it must beat | gating metrics | guards (must not regress) |
