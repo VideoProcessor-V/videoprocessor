@@ -1853,19 +1853,16 @@ namespace VideoProcessorTest
 			const int frames = 16;
 			const float aBase = 0.15f;
 			const std::vector<int> base = DwSigmaCodes(DwSigmaParams(true, "0.15"), greys, frames, true);
-			// The frame phase: the one offset at which the plain run is the model's at amplitude aBase.
-			int phase = -1;
-			for (int o = 0; o < 64 && phase < 0; ++o)
-				if (DwModelMatchesAnyDx(base.data(), frames, greys[0], o, aBase)) phase = o;
-			if (phase < 0)
-			{
-				std::string codes;
-				for (int j = 0; j < frames; ++j) codes += std::to_string(base[static_cast<size_t>(j)]) + " ";
-				DwCheck(false, "no frame phase makes the CPU model reproduce the plain run at grey 0 (codes " + codes + ")");
-			}
+			// The frame phase of each grey (the shader's frame / 5 counter has an unknown but fixed start, and the sequence
+			// renders may skip counts between greys): every offset (the dither repeats every 64) at which the plain run is the
+			// model's at amplitude aBase. A raised-amplitude run must match the model at one of the same offsets.
+			std::vector<std::vector<int>> phases(greys.size());
 			for (size_t g = 0; g < greys.size(); ++g)
-				DwCheck(DwModelMatchesAnyDx(&base[g * frames], frames, greys[g], phase + static_cast<int>(g) * frames, aBase),
-					"the plain run leaves the model at grey " + std::to_string(g));
+			{
+				for (int o = 0; o < 64; ++o)
+					if (DwModelMatchesAnyDx(&base[g * frames], frames, greys[g], o, aBase)) phases[g].push_back(o);
+				DwCheck(!phases[g].empty(), "no frame phase makes the CPU model reproduce the plain run at grey " + std::to_string(g));
+			}
 
 			bool differs = false;
 			for (const float e : { 0.1f, 0.25f, 0.35f })
@@ -1878,8 +1875,9 @@ namespace VideoProcessorTest
 				for (size_t g = 0; g < greys.size(); ++g)
 				{
 					const int* c = &got[g * frames];
-					DwCheck(DwModelMatchesAnyDx(c, frames, greys[g], phase + static_cast<int>(g) * frames, amp),
-						"extra " + std::to_string(e) + ": the codes at grey " + std::to_string(g) + " leave the CPU model at amplitude " +
+					bool match = false;
+					for (const int o : phases[g]) match = match || DwModelMatchesAnyDx(c, frames, greys[g], o, amp);
+					DwCheck(match, "extra " + std::to_string(e) + ": the codes at grey " + std::to_string(g) + " leave the CPU model at amplitude " +
 						std::to_string(amp));
 					for (int j = 0; j < frames; ++j) differs = differs || c[j] != base[g * frames + j];
 				}
