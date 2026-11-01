@@ -38,6 +38,9 @@ namespace CameraModel
 		inline bool FiniteF(float v) { return IsFiniteBits(v); }
 		inline double Clamp01(double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
 
+		// Expected vector precision of a pair (source px): the caller's, else a quarter px per 16 px of block size.
+		inline double PairPrecision(const PairInput& in) { return in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0; }
+
 		// The usable, stratified sample set of one pair (picture-centred positions).
 		struct Field
 		{
@@ -219,7 +222,7 @@ namespace CameraModel
 			f.gridH = in.gridH;
 			f.blockSize = in.blockSize;
 			f.pic = in.picture;
-			f.prec = in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0;
+			f.prec = PairPrecision(in);
 			const double W = in.picture.Width(), H = in.picture.Height();
 			f.diag = std::sqrt(W * W + H * H);
 			f.halfDiag = 0.5 * f.diag;
@@ -1281,7 +1284,7 @@ namespace CameraModel
 			{
 				if (!m_config.temporalNoiseFloor)
 					return nullptr;
-				const double prec = p.precisionPx > 0 ? p.precisionPx : 0.25 * p.blockSize / 16.0;
+				const double prec = PairPrecision(p);
 				TemporalFloor(prec, p.picture, p.pairSeconds, floorBuf);
 				return floorBuf;
 			};

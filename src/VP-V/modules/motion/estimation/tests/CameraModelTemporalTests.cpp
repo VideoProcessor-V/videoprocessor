@@ -384,8 +384,8 @@ namespace VideoProcessorTest
 			const SimilarityRates probe = noisy();
 			Assert::IsTrue(withFloor.Consistency(dt, probe, fl) > 0.5, L"floor: consistent");
 			Assert::IsTrue(without.Consistency(dt, probe) < withFloor.Consistency(dt, probe, fl), L"floor never makes it worse");
-			// A real 10x speed change is still flagged with the floor.
-			Assert::IsTrue(withFloor.Consistency(dt, Rates(0, 0, 20.0 / dt, 4.0 / dt), fl) < 0.2, L"10x change still flagged");
+			// A real 40x speed change is still flagged with the floor.
+			Assert::IsTrue(withFloor.Consistency(dt, Rates(0, 0, 20.0 / dt, 4.0 / dt), fl) < 0.2, L"a 40x change is still flagged");
 		}
 	};
 

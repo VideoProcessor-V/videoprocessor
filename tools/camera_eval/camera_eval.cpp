@@ -207,7 +207,7 @@ static int RunFit(const Args& a)
 	for (int t = 1; t < a.N; ++t)
 	{
 		Reduced F, B;
-		if (!ReadPair(a.vec, t, g.gridW, g.gridH, g.block, F, B)) return 2;
+		if (!ReadPair(a.vec, t, g.gridW, g.gridH, g.block, F, B)) { if (csv) fclose(csv); return 2; }
 		const CameraMotion m = FitPair(fit, F, &B, g, (uint64_t)t);
 		Rec r; r.valid = m.valid ? 1 : 0; r.type = (int)m.params.type; r.conf = m.confidence;
 		memcpy(r.h, m.params.h, sizeof(r.h));
@@ -310,19 +310,19 @@ static int RunMatch(const Args& a)
 	{
 		// The input's causal fit of pair t (frames t-1 -> t); the plan for pair t+1 is built from it.
 		Reduced F, B;
-		if (!ReadPair(a.vec, t, g.gridW, g.gridH, g.block, F, B)) return 2;
+		if (!ReadPair(a.vec, t, g.gridW, g.gridH, g.block, F, B)) { fclose(out); fclose(yuv); return 2; }
 		const CameraMotion rec = FitPair(fitIn, F, &B, g, (uint64_t)t);
 
 		// Reference field and camera labels of pair t.
 		Reduced RF, RB;
-		if (!ReadPair(a.ref, t, g.gridW, g.gridH, g.block, RF, RB)) return 2;
+		if (!ReadPair(a.ref, t, g.gridW, g.gridH, g.block, RF, RB)) { fclose(out); fclose(yuv); return 2; }
 		const CameraMotion refRec = FitPair(fitRef, RF, &RB, g, (uint64_t)t);
 
 		if (t >= a.start)
 		{
 			// Match frames t-1 -> t with the plan built from the PREVIOUS pair's record (prevRecord).
-			if (!ReadLuma(yuv, a.W, a.H, a.bitdepth, t - 1, lumaPrev, mw, mh)) return 2;
-			if (!ReadLuma(yuv, a.W, a.H, a.bitdepth, t, lumaCur, mw, mh)) return 2;
+			if (!ReadLuma(yuv, a.W, a.H, a.bitdepth, t - 1, lumaPrev, mw, mh)) { fclose(out); fclose(yuv); return 2; }
+			if (!ReadLuma(yuv, a.W, a.H, a.bitdepth, t, lumaCur, mw, mh)) { fclose(out); fclose(yuv); return 2; }
 			Reference::Plane from, to;
 			from.w = to.w = mw; from.h = to.h = mh; from.px = lumaPrev.data(); to.px = lumaCur.data();
 

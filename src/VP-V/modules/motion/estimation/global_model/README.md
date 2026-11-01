@@ -193,18 +193,24 @@ Phase-1 behaviour = `{inlierShareLo 0.4, inlierShareHi 0.9, temporalNoiseFloor f
 noise-floor tests.
 
 Measured with `tools/camera_eval` (`run_eval.py --match`; usable = valid and confidence >= 0.5; real truth = master
-DIS/NVOF fits that agree; WRONG = usable but corner error > max(1 px, 10 %)):
+DIS/NVOF fits that agree, region metric described in `tools/camera_eval/xcheck_real.py`):
 
 | | phase 1 | new |
 |---|---|---|
 | synthetic usable: crowd_pan / crowd_shake / crowd_static | 0 / 0 / 0 | 1.00 / 0.31 / 1.00 |
 | synthetic WRONG-confident (9 scenarios, 39 pairs each) | 0 | 0 |
 | real usable, mean over tiers and sources: crowd / tos / sol / boat | 0.00 / 0.26 / 0.20 / 0.35 | 0.91 / 0.98 / 0.81 / 0.59 |
-| real WRONG-confident (judged pairs) | 19 (409) | 114 (1660), mostly crowd and boat at the low / vlow tiers |
+| real WRONG-confident, region metric (confident pairs judged; p90 block error over the true-camera blocks > max(1 px, 10 % of the p90 truth magnitude); all tiers incl. master) | 5 of 459 | 16 of 1857 (crowd 2/515, boat 14/323, sol 0, tos 0); over the fit's own camera labels 4 and 13; the crowd tiers plus boat/sol/tos `_low` alone: 5 of 741 vs 1 of 103 |
+| real WRONG-confident, extrapolated corner error (includes non-camera regions; mostly measures affine / homography extrapolation into runners and other movers) | 19 of 409 | 114 of 1660 |
 | matcher evaluations guided / full (coded `*_1080p_low` NVOF, 40 pairs): crowd / tos / sol / boat | 1.00 / 0.98 / 1.00 / 0.88 | 0.68 / 0.39 / 0.85 / 0.84 |
 | matcher EPE vs reference (all blocks), guided vs full | unchanged | unchanged or slightly better |
 
 Tools and metric definitions: `tools/camera_eval/README.md`.
+
+Known limitation: a coherent object covering about 50 % of the picture, over a background of incoherent or garbage vectors,
+is indistinguishable from a pan behind a crowd. It is fitted as the dominant motion, by definition. The ambiguity signal only
+catches a coherent competitor with at least about a third of the camera's support (test
+`CoherentObjectOverRandomBackgroundIsFittedAsDominant`).
 
 ## Tests
 `../tests/Camera*Tests.cpp`, CPU tier, all synthetic: geometry, temporal / objects / residual,

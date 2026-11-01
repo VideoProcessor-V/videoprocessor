@@ -111,6 +111,14 @@ def main():
     a = ap.parse_args()
     exe = os.path.abspath(a.exe)
     out = os.path.abspath(a.out)
+    repo = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+    for d in (out, os.path.abspath(a.synth_root) if a.synth_root else out):
+        try:
+            inside = os.path.commonpath([os.path.normcase(d), os.path.normcase(repo)]) == os.path.normcase(repo)
+        except ValueError:   # different drives
+            inside = False
+        if inside:
+            raise SystemExit('refusing --out / --synth-root inside the repo worktree: ' + d)
     synth_root = os.path.abspath(a.synth_root or os.path.join(out, 'synth_fields'))
     os.makedirs(out, exist_ok=True)
     if not os.path.isdir(os.path.join(synth_root, synth_fields.SCENARIOS[-1])):
@@ -130,7 +138,7 @@ def main():
         for seq, src, d, w, h, fps in jobs:
             run([exe, 'fit', '--vec', d, '--frames', str(a.real_frames), '--w', str(w), '--h', str(h), '--fps', str(fps),
                  '--out', os.path.join(rd, '%s_%s.camf' % (seq, src)), '--csv', os.path.join(rd, '%s_%s.csv' % (seq, src))] + flags)
-        rows, truths = xcheck_real.evaluate(rd)
+        rows, truths = xcheck_real.evaluate(rd, a.real_root)
         real[tag] = ({(r['seq'], r['src']): r for r in rows}, truths)
         print('fitted', tag, flush=True)
 
@@ -150,24 +158,33 @@ def main():
             tot[t]['wrong'] += synth[(t, n)]['wrong']
     L += ['', 'Total WRONG-confident pairs: new %d, phase 1 %d.' % (tot['new']['wrong'], tot['phase1']['wrong']), '',
           '## Real sequences (truth = master DIS/NVOF fits that agree)', '']
-    for clip, (n, m) in real['new'][1].items():
-        L.append('- %s: trusted truth on %d/%d pairs' % (clip, n, m))
-    L += ['', '| sequence | source | usable new | usable p1 | judged new/p1 | corner err med new | p1 | master-camera-block err med new | p1 | WRONG new | p1 |',
-          '|---|---|---|---|---|---|---|---|---|---|---|']
+    for clip, (n, m, k) in real['new'][1].items():
+        L.append('- %s: region truth on %d/%d pairs, corner truth on %d' % (clip, k, m, n))
+    L += ['', 'Region metric (primary): truth = pairs where master DIS and NVOF fits are valid, share >= 50 camera blocks, p90 block difference <= 0.5 px. '
+          'WRONG = confident fit whose p90 block error over the true-camera blocks (or over the fit own camera labels) exceeds max(1 px, 10 % of the p90 truth magnitude). '
+          '"Extrapolated corner" columns use the max picture-corner error and include non-camera regions.', '',
+          '| sequence | source | usable new | usable p1 | region judged new/p1 | WRONG@true-cam new | p1 | WRONG@own-labels new | p1 | extrapolated corner err med new | p1 | master-camera-block err med new | p1 | extrapolated corner WRONG new | p1 |',
+          '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|']
     rn, rp = real['new'][0], real['phase1'][0]
-    agg = {t: dict(u=[], w=0, j=0) for t in ('new', 'phase1')}
+    agg = {t: dict(u=[], w=0, j=0, rj=0, rw=0, ro=0) for t in ('new', 'phase1')}
     for k in sorted(rn):
         x, y = rn[k], rp.get(k)
         if y is None:
             continue
-        L.append('| %s | %s | %s | %s | %d/%d | %s | %s | %s | %s | %d | %d |' % (k[0], k[1], f(x['usable']), f(y['usable']), x['judged'], y['judged'],
+        L.append('| %s | %s | %s | %s | %d/%d | %d | %d | %d | %d | %s | %s | %s | %s | %d | %d |' % (k[0], k[1], f(x['usable']), f(y['usable']), x['region_judged'], y['region_judged'],
+                 x['region_wrong'], y['region_wrong'], x['region_wrong_own'], y['region_wrong_own'],
                  f(x['err_med']), f(y['err_med']), f(x['cam_err_med']), f(y['cam_err_med']), x['wrong'], y['wrong']))
         for t, r in (('new', x), ('phase1', y)):
             agg[t]['u'].append(r['usable'])
             agg[t]['w'] += r['wrong']
             agg[t]['j'] += r['judged']
-    L += ['', 'Mean usable share over all real candidates: new %s, phase 1 %s. WRONG-confident: new %d of %d judged, phase 1 %d of %d judged.' % (
-        f(mean(agg['new']['u'])), f(mean(agg['phase1']['u'])), agg['new']['w'], agg['new']['j'], agg['phase1']['w'], agg['phase1']['j'])]
+            agg[t]['rj'] += r['region_judged']
+            agg[t]['rw'] += r['region_wrong']
+            agg[t]['ro'] += r['region_wrong_own']
+    L += ['', 'Mean usable share over all real candidates: new %s, phase 1 %s. Region metric WRONG-confident (true-camera blocks / own labels): new %d / %d of %d judged, phase 1 %d / %d of %d judged. '
+        'Extrapolated corner WRONG-confident: new %d of %d judged, phase 1 %d of %d judged.' % (
+        f(mean(agg['new']['u'])), f(mean(agg['phase1']['u'])), agg['new']['rw'], agg['new']['ro'], agg['new']['rj'], agg['phase1']['rw'], agg['phase1']['ro'], agg['phase1']['rj'],
+        agg['new']['w'], agg['new']['j'], agg['phase1']['w'], agg['phase1']['j'])]
 
     if a.match:
         res = run_match(exe, out, a.real_root, a.match_clips.split(','), a.match_count)

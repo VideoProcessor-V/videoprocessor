@@ -31,11 +31,18 @@ divided by 2^(bitdepth-8), the matcher's code scale) without and with the plan.
 ## Metrics
 - **usable**: share of pairs with `valid` and confidence >= 0.5.
 - **WRONG-confident** (synthetic): a usable fit on a scene with no dominant camera motion, or with max picture-corner
-  error > max(1 px, 10 % of the true corner displacement). (Real): the same error rule against the master truth.
+  error > max(1 px, 10 % of the true corner displacement).
+- **WRONG-confident** (real, primary, region metric): truth pairs are those where the master DIS and master NVOF fits are
+  both valid, their common camera labels cover >= 50 blocks and the p90 block difference between the two fits over those
+  labels is <= 0.5 px; truth field = mean of the two fits. A confident fit is WRONG when its p90 block error over the
+  true-camera blocks exceeds max(1 px, 10 % of the p90 truth magnitude there). The same test over the fit's own camera
+  labels is reported too. The corner-error version (max corner error, "extrapolated corner error, includes non-camera
+  regions") is kept as a secondary column: it mostly measures affine / homography extrapolation into corners that are not
+  camera (runners in crowd), where the model is not used.
 - **corner error**: max over the four picture corners of |fitted - true displacement| (source px); median / p90.
 - **label precision / recall**: camera-labelled blocks (label 1) against the true camera mask. **jitter**: std of the
   pair-to-pair change of the corner error.
-- **master truth** (real): pairs where the DIS and NVOF fits of the master clip agree (corner difference within
+- **corner truth** (real, secondary): pairs where the DIS and NVOF fits of the master clip agree (corner difference within
   max(0.5 px, 5 %)); truth = their mean. **master-camera-block error**: mean |model displacement - truth displacement|
   over blocks the master DIS fit labels camera, median over judged pairs.
 - **match**: `evals` = matcher candidate evaluations (guided / full). EPE = endpoint error in source px of the
