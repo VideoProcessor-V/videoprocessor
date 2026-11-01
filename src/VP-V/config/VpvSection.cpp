@@ -1261,7 +1261,17 @@ namespace Vpv
 				state->host.setValue(section, QStringLiteral("hdr_inference"), hdrInference->itemData(i).toString());
 			});
 
-			// pipeline_entrance_once (B3, ADR-0024) is a hidden diagnostic/test key with no Config control (skeleton b76571c1).
+			// pipeline_entrance_once (B3, ADR-0024): a test key; on (B3) is the default. Off in the Original pathway.
+			auto* entranceOnce = new QCheckBox(QStringLiteral("Run the input side once per source frame (B3)"));
+			entranceOnce->setObjectName(ObjectName(QStringLiteral("expert.pipeline_entrance_once")));
+			entranceOnce->setToolTip(QStringLiteral("Key pipeline_entrance_once. A test key: on (the default) runs the input-side "
+				"stages once per source frame; off runs them per picture, as before B3. Leave it on for normal use."));
+			form->addRow(QStringLiteral("Input side once"), entranceOnce);
+			QObject::connect(entranceOnce, &QCheckBox::toggled, entranceOnce, [state, section](bool on)
+			{
+				if (state->refreshing || !state->host.setValue) return;
+				state->host.setValue(section, QStringLiteral("pipeline_entrance_once"), on ? QStringLiteral("on") : QStringLiteral("off"));
+			});
 
 			// Output segments S2/S3 as one hook each (draft): off until the GPU check passes; never in the
 			// Original pathway (the renderer also forces it off there).
@@ -1379,7 +1389,7 @@ namespace Vpv
 			layout->addLayout(form);
 			layout->addStretch();
 
-			state->refreshers.push_back([state, lutStage, merged, drain, analysis, resync, hdrInference, order, slotsOff, section]()
+			state->refreshers.push_back([state, lutStage, entranceOnce, merged, drain, analysis, resync, hdrInference, order, slotsOff, section]()
 			{
 				const auto get = [&](const char* key) { return state->host.value ? state->host.value(section, QString::fromLatin1(key)).trimmed() : QString(); };
 				{
@@ -1388,6 +1398,14 @@ namespace Vpv
 					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
 					lutStage->setEnabled(!original);
 					SetGreyReason(lutStage, original ? QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).") : QString());
+				}
+				{
+					const QSignalBlocker blocker(entranceOnce);
+					const QString value = get("pipeline_entrance_once");
+					entranceOnce->setChecked(value.isEmpty() || value.compare(QStringLiteral("off"), Qt::CaseInsensitive) != 0);
+					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
+					entranceOnce->setEnabled(!original);
+					SetGreyReason(entranceOnce, original ? QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).") : QString());
 				}
 				{
 					const QSignalBlocker blocker(merged);
