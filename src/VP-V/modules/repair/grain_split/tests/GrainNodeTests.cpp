@@ -440,5 +440,24 @@ namespace GrainNodeTestsNs
 			Assert::AreEqual(size_t(46944), text.size(), L"the reversed text has the pre-SA2 size");
 			Assert::AreEqual(uint64_t(0xd4c796a262566634ull), h, L"the reversed text hashes to the pre-SA2 shader text");
 		}
+
+		TEST_METHOD(GrainLayoutNamesBaseAndModifiersWithTheirConsumers)
+		{
+			size_t n = 0;
+			const FieldSpec* f = GrainFields(&n);
+			size_t base = 0, modifiers = 0;
+			bool hasN = false, hasF = false, hasE3 = false;
+			for (size_t i = 0; i < n; ++i)
+			{
+				Assert::IsTrue(f[i].name && f[i].where && f[i].derivedBy && std::string(f[i].derivedBy).size() > 10, L"every field names where it is and who derives what");
+				(f[i].kind == FieldKind::Base ? base : modifiers) += 1;
+				hasN = hasN || std::string(f[i].name) == "N";
+				hasF = hasF || std::string(f[i].name) == "f";
+				hasE3 = hasE3 || std::string(f[i].name) == "e3";
+			}
+			Assert::AreEqual(size_t(3), base, L"base: base, s1, s2 (the main map)");
+			Assert::AreEqual(size_t(3), modifiers, L"modifiers: f, N, e3");
+			Assert::IsTrue(hasN && hasF && hasE3, L"the modifier fields the consumers derive from");
+		}
 	};
 }

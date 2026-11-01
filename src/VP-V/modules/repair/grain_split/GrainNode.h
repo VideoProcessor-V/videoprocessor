@@ -301,6 +301,37 @@ namespace GrainSplit
 		std::string lastFiller_;
 	};
 
+	// THE EXPLICIT LAYOUT (owner decision): the node stores ONE main map plus small MODIFIER fields; consumers derive every
+	// other map from them cheaply, nobody recomputes a grain estimate. Base = the per-pixel picture split (clean = base + s1 + s2,
+	// grain G = Y - clean); modifiers = what steers a derivation (per-pixel Wiener share f, per-block grain level N, per-block
+	// focus-band energy e3). Both layouts carry the same fields (Full: split rgba32f (s1, s2, f, base) + blocks rgba32f (N, e3, -, -);
+	// Compact: A rg16f (s1, s2), B rg16 (f, base x codeUnit), blocks rg32f (N, e3)); read only through gs_fetch / gs_blocks.
+	// The block texel's last two channels in Full are RESERVED for further modifiers (band energies E1/E2, spectral shape
+	// descriptors): they are not written yet, and a new modifier bumps kUnitVersion and extends this table.
+	enum class FieldKind : uint8_t { Base, Modifier };
+
+	struct FieldSpec
+	{
+		const char* name;
+		FieldKind kind;
+		const char* where;       // texture and channel (Full / Compact)
+		const char* derivedBy;   // who derives what from it
+	};
+
+	inline const FieldSpec* GrainFields(size_t* count)
+	{
+		static const FieldSpec kFields[] = {
+			{ "base", FieldKind::Base, "split.w / B.y / cu", "temporal detail, chroma-from-luma: clean = base + s1 + s2 (the grain-free picture they work on)" },
+			{ "s1", FieldKind::Base, "split.x / A.x", "temporal detail, chroma-from-luma: clean picture; G = Y - clean is added back exactly" },
+			{ "s2", FieldKind::Base, "split.y / A.y", "temporal detail, chroma-from-luma: clean picture; region evidence: mid-band energy E2 per block" },
+			{ "f", FieldKind::Modifier, "split.z / B.x", "per-pixel Wiener share: texture restore (SA8) splits grain from texture with it; region evidence: texture and ringing maps" },
+			{ "N", FieldKind::Modifier, "blocks.x", "per-block grain level (codes^2): temporal detail guard and measurement, region evidence (grain sigma, texture = E1 + E2 - N, banding), debander (SA5) grain gate, camera model grain map" },
+			{ "e3", FieldKind::Modifier, "blocks.y", "per-block focus-band energy: temporal detail focus evidence, texture restore (SA8) acutance" },
+		};
+		if (count) *count = sizeof(kFields) / sizeof(kFields[0]);
+		return kFields;
+	}
+
 	// The ledger comparison (Ctrl+Alt+D): the PEAK bytes of the grain split per storage layout, scratch included.
 	// Full: slots at 16 B/px (+ 16 B per block) and a bands scratch of 16 B/px (rows is the product itself).
 	// Compact: slots at 8 B/px (+ 8 B per block) and a rows + bands scratch of 32 B/px. So with N = ring + live slots
