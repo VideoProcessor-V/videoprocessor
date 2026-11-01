@@ -225,8 +225,12 @@ public:
         bool nativeRebase = false;
         bool vectorsPaused = false;
     };
-    // The storm clock: steady seconds by default; in source-time mode (SetStormSourceTime) the
-    // latest source second seen (events and AdvanceStormClock) and the argument is ignored.
+    // The storm clock: steady seconds by default; in source-time mode (SetStormSourceTime) every event
+    // is timed by its frame's source seconds. The HOLD is decided for the RENDERED frame: StormHold,
+    // StormSafeSettings and StormNotice take that frame's time (source seconds in source-time mode)
+    // and see only the FULL events timed at or before it, so the enqueue thread running ahead (events
+    // of queued frames already recorded) never changes the answer. AdvanceStormClock only feeds the
+    // status line's display time.
     void SetStormSourceTime(bool on) { m_stormSourceTime.store(on, std::memory_order_release); }
     bool StormSourceTime() const { return m_stormSourceTime.load(std::memory_order_acquire); }
     // Render thread, once per frame in source-time mode: lets the 10 s quiet release run without an
@@ -239,13 +243,15 @@ public:
     }
     uint64_t StormClockMissing() const { return m_stormClockMissing.load(std::memory_order_relaxed); }
 
-    bool StormHold(double nowSeconds) const
+    // renderSeconds = the rendered (sealed) frame's time: its source seconds in source-time mode, the
+    // steady clock otherwise. Deterministic in source-time mode: the result depends only on the FULL
+    // events whose source time is <= renderSeconds, never on how far the enqueue thread has run ahead.
+    bool StormHold(double renderSeconds) const
     {
         if (!Driving())
             return false;
-        const double now = StormNow(nowSeconds);
         std::lock_guard<std::mutex> lock(m_stormMutex);
-        return m_stormHeld && (now - m_stormLastFull) < kStormReleaseSeconds;
+        return StormHeldAtLocked(renderSeconds);
     }
     // All true iff StormHold, else all false.
     SafeSettings StormSafeSettings(double nowSeconds) const
@@ -263,7 +269,7 @@ public:
             int count = 0;
             {
                 std::lock_guard<std::mutex> lock(m_stormMutex);
-                count = m_storm.FullCount(StormNow(nowSeconds));
+                count = m_storm.FullCount(nowSeconds);   // events at or before the rendered frame only
             }
             out = FallbackCatalog::ResyncStorm(true, count).reason;
             return true;
@@ -436,6 +442,8 @@ private:
         m_storm = StormWindow();
         m_stormHeld = false;
         m_stormLastFull = 0.0;
+        m_stormHistoryCount = 0;
+        m_stormHistoryNext = 0;
     }
 
     uint32_t MinorInWindow(double nowSeconds) const
@@ -498,6 +506,18 @@ private:
         }
     }
 
+    // m_stormMutex held. The newest recorded FULL (record order) timed at or before `seconds` decides:
+    // held then, and fewer than 10 s since the last counted FULL at that point.
+    bool StormHeldAtLocked(double seconds) const
+    {
+        for (size_t k = 0; k < m_stormHistoryCount; ++k) {
+            const StormEntry& h = m_stormHistory[(m_stormHistoryNext + kStormHistory - 1 - k) % kStormHistory];
+            if (h.seconds <= seconds)
+                return h.held && (seconds - h.lastFull) < kStormReleaseSeconds;
+        }
+        return false;
+    }
+
     double StormNow(double nowSeconds) const
     {
         return m_stormSourceTime.load(std::memory_order_acquire) ? m_stormClock.load(std::memory_order_relaxed) : nowSeconds;
@@ -536,6 +556,15 @@ private:
                     if (m_storm.Engaged(stormNow))
                         m_stormHeld = true;
                 }
+                // The state after this FULL, keyed by its time: StormHold reads the newest entry at or
+                // before the rendered frame's time (never an event of a frame still queued).
+                StormEntry& h = m_stormHistory[m_stormHistoryNext];
+                h.seconds = stormNow;
+                h.held = m_stormHeld;
+                h.lastFull = m_stormLastFull;
+                m_stormHistoryNext = (m_stormHistoryNext + 1) % kStormHistory;
+                if (m_stormHistoryCount < kStormHistory)
+                    ++m_stormHistoryCount;
             }
             m_lastFullCause.store(static_cast<uint16_t>(e.cause), std::memory_order_relaxed);
             m_lastFullDetail.store(e.detail, std::memory_order_relaxed);
@@ -594,6 +623,15 @@ private:
     bool m_stormHeld = false;        // m_stormMutex
     double m_stormLastFull = 0.0;    // m_stormMutex; time of the last counted FULL
     static constexpr double kStormReleaseSeconds = 10.0;
+    struct StormEntry {
+        double seconds = 0.0;
+        bool held = false;
+        double lastFull = 0.0;
+    };
+    static constexpr size_t kStormHistory = 64;   // FULLs; far more than any render-behind-enqueue lag
+    StormEntry m_stormHistory[kStormHistory];      // m_stormMutex
+    size_t m_stormHistoryCount = 0;                // m_stormMutex
+    size_t m_stormHistoryNext = 0;                 // m_stormMutex
     std::atomic<uint64_t> m_cursorSeq{0};
     std::shared_ptr<const std::function<void(const std::string&)>> m_eventSink;   // atomic_load / atomic_store only
 

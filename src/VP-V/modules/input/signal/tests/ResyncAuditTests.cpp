@@ -119,7 +119,7 @@ namespace Tests
 			const double probes[] = { 4.0, 8.0, 13.9, 14.1, 30.0 };
 			for (double t : probes) {
 				s.AdvanceStormClock(t);
-				out.push_back(s.StormHold(wallBase - 1000.0) ? 1 : 0);   // the argument is ignored in source-time mode
+				out.push_back(s.StormHold(t) ? 1 : 0);   // the rendered frame's source time
 			}
 			return out;
 		}
@@ -131,6 +131,50 @@ namespace Tests
 			Assert::IsTrue(a == b, L"identical whatever the wall clock");
 			const std::vector<int> expect = { 1, 1, 1, 0, 0 };
 			Assert::IsTrue(a == expect, L"held until 10 s after the last FULL, in source time");
+		}
+
+		// Audit 2 MUST 3: the hold is decided for the RENDERED frame. Two storms (source 0..3 and 20..23);
+		// the enqueue thread either keeps pace with the render or has already enqueued every frame. The
+		// hold seen at each rendered frame must be identical.
+		static std::vector<int> TwoStorms(bool enqueueAhead)
+		{
+			VpResync::Shadow s;
+			s.Configure(VpResync::Shadow::Mode::On, 64);
+			s.SetStormSourceTime(true);
+			const int kFrames = 80;   // 0.5 s per frame: source 0 .. 39.5
+			uint64_t seq = 0, gen = 1;
+			auto enqueue = [&](int f) {
+				const double src = 0.5 * f;
+				const bool full = (f >= 2 && f <= 6 && (f % 2) == 0) || (f >= 40 && f <= 46 && (f % 2) == 0);
+				if (full) {
+					++gen;
+					s.ArmQueueGeneration(gen, "live queue reset");
+				}
+				Facts(s, seq, gen, 9000.0 + f, src);
+			};
+			std::vector<int> out;
+			if (enqueueAhead)
+				for (int f = 0; f < kFrames; ++f)
+					enqueue(f);
+			for (int f = 0; f < kFrames; ++f) {
+				if (!enqueueAhead)
+					enqueue(f);
+				out.push_back(s.StormHold(0.5 * f) ? 1 : 0);
+			}
+			return out;
+		}
+
+		TEST_METHOD(StormHoldIsDecidedAtTheRenderedFrameNotByTheEnqueueThread)
+		{
+			const std::vector<int> paced = TwoStorms(false);
+			const std::vector<int> ahead = TwoStorms(true);
+			Assert::IsTrue(paced == ahead, L"enqueue running ahead must not change the hold");
+			Assert::AreEqual(0, paced[5], L"not held before the 4th FULL (source 3)");
+			Assert::AreEqual(1, paced[6], L"held from the 4th FULL");
+			Assert::AreEqual(1, paced[25], L"still held 9.5 s after the last FULL");
+			Assert::AreEqual(0, paced[26], L"released 10 s after the last FULL");
+			Assert::AreEqual(0, paced[39], L"not held before the second storm's events");
+			Assert::AreEqual(1, paced[46], L"the second storm holds at its 4th FULL");
 		}
 
 		TEST_METHOD(SourceTimeModeCountsEventsWithoutSourceTime)
