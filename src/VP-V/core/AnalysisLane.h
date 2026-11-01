@@ -429,6 +429,11 @@ public:
     using LiveFill = std::function<bool(const Node&, uint64_t, int, Header&, uint32_t)>;
 
     // `indicator` is the host's central Indicator (not owned; may be null: the lane is then unavailable).
+    // TODO(resync Q0, plan 50 gap G3): NOT WIRED to the renderer, and must not be until Q0 lands. Two hazards once it is:
+    // (1) OnRenderStart seals the central Indicator (SealAndObserve) and so does the resync drive
+    // (LibplaceboVideoRenderer ResyncDrive::SealAndObserve): one FrameSeal must own the seal; (2) this RAW pointer can
+    // dangle when a resync mode change replaces the Indicator (the host holds it as a shared_ptr): Q0 changes it to a
+    // shared_ptr / handle. Nothing outside tests constructs an AnalysisLane today (integration 2026-11-01).
     AnalysisLane(VpIndicator::Indicator* indicator, std::function<uint64_t()> nowUs)
         : ind_(indicator), nowUs_(std::move(nowUs))
     {
@@ -546,6 +551,7 @@ public:
         renderState_ = st;
         lastSlackUs_ = presentSlackUs;
 
+        // TODO(resync Q0, G3): a second sealer of the central Indicator besides the resync drive; see the constructor.
         const VpIndicator::CounterMask changed = ind_->SealAndObserve(seq);
         if (observedOnce_ && changed != 0)
             regulator_.OnIndicatorChange(changed);   // the first observation is not a change
