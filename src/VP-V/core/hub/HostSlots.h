@@ -35,11 +35,12 @@ namespace Vpv
 					if (s.key.load(std::memory_order_acquire) == host)
 					{
 						std::shared_ptr<T> st = std::atomic_load(&s.state);
-						return st;
+						return st && st->host == host ? st : nullptr;   // a slot re-claimed between the loads is not ours
 					}
 				return nullptr;
 			}
 
+			// T needs a `host` member (the key the state was created for).
 			// Claims (or finds) the slot of `host` without a state: for `aux`. False when the table is full.
 			bool Claim(const void* host)
 			{

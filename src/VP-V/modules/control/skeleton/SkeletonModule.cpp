@@ -139,8 +139,11 @@ namespace Vpv
 
 		struct HostState
 		{
-			explicit HostState(const void* h) : host(h) {}
+			explicit HostState(const void* h) : host(h), ownerGen(VpFrameAnalysis::SourceFrameTap::Generation(h)),
+				seenEpoch(VpFrameAnalysis::SourceFrameTap::Epoch()) {}
 			const void* host;
+			const uint64_t ownerGen;   // the tap generation of the renderer this state was built for (address reuse = stale)
+			uint64_t seenEpoch;
 
 			// Written by the lifecycle thread (the render thread), read there.
 			Settings settings;
@@ -164,6 +167,7 @@ namespace Vpv
 			std::mutex dropMutex;
 			std::vector<uint64_t> drops;
 			std::atomic<uint64_t> dropsLost{ 0 };
+			std::atomic<uint64_t> dropsInferred{ 0 };   // dropped sequences inferred as contiguous before the survivor
 
 			// Render thread.
 			uint64_t frames = 0;
@@ -313,6 +317,14 @@ namespace Vpv
 			if (originalFlag >= 0)
 				s.originalPathway = originalFlag != 0;   // the renderer's own word beats the file
 			std::shared_ptr<HostState> st = hosts_.Find(host);
+			if (st && st->ownerGen != VpFrameAnalysis::SourceFrameTap::Generation(host))
+			{
+				// A new renderer at the address of one that died without GpuReleased (a failed device create):
+				// the old state's seal hooks, tap and lane belong to the dead one.
+				Teardown(st, false);
+				hosts_.Remove(host, false);
+				st.reset();
+			}
 			if (!s.LaneWanted())
 			{
 				if (st)
@@ -373,7 +385,7 @@ namespace Vpv
 				}
 			}
 			st->active.store(true, std::memory_order_release);
-			if (!wasActive)
+			if (!wasActive || !VpFrameAnalysis::SourceFrameTap::Wants(host))   // the tap is also re-registered when it was lost
 			{
 				st->frames = 0;
 				st->lastBeginUs = 0;
@@ -440,6 +452,11 @@ namespace Vpv
 			// before it: the dropped frames are [seq - frames, seq).
 			const uint64_t survivor = static_cast<uint64_t>(f.seq);
 			const uint64_t count = (std::min<uint64_t>)(f.frames, survivor);
+			// ASSUMPTION (backlog-flush call site): the frames dropped before the survivor carry consecutive
+			// sequences. Counted and shown (dropsInferred); a hole would discard the wrong slot, never a wrong product.
+			st->dropsInferred.fetch_add(count, std::memory_order_relaxed);
+			if (count > kMaxDropsPerEvent)
+				st->dropsLost.fetch_add(count - kMaxDropsPerEvent, std::memory_order_relaxed);
 			std::lock_guard<std::mutex> lock(st->dropMutex);
 			for (uint64_t i = 0; i < count && i < kMaxDropsPerEvent; ++i)
 			{
@@ -458,6 +475,18 @@ namespace Vpv
 			const std::shared_ptr<HostState> st = hosts_.Find(c.host);
 			if (!st || !st->active.load(std::memory_order_acquire) || c.seq <= 0)
 				return false;
+			const uint64_t epoch = VpFrameAnalysis::SourceFrameTap::Epoch();
+			if (epoch != st->seenEpoch)
+			{
+				st->seenEpoch = epoch;
+				if (st->ownerGen != VpFrameAnalysis::SourceFrameTap::Generation(c.host))
+				{
+					Reconcile(c.host, -1);   // stale state of a dead renderer at this address: rebuild
+					return false;
+				}
+				if (!VpFrameAnalysis::SourceFrameTap::Wants(c.host))
+					Reconcile(c.host, -1);   // the tap was lost: register it again
+			}
 			if (c.phase == RE::FramePhase::Begin)
 				Begin(*st, c.seq);
 			else
@@ -566,7 +595,7 @@ namespace Vpv
 				DrainPending(st, *b);
 			}
 			++b->framesSinceConfigure;
-			if (!b->threads.Running())
+			if (startWorkers_ && !b->threads.Running())
 				b->threads.Start();   // false (no thread) while the lane has no graph; retried each frame
 
 			// Drops reported by the queue thread, applied here (the lane is render-thread state).
@@ -638,6 +667,9 @@ namespace Vpv
 			const uint64_t lost = st.dropsLost.load(std::memory_order_relaxed);
 			if (evicted != 0)
 				fb.push_back("skeleton_lane: " + std::to_string(evicted) + " source frame(s) arrived before the lane graph or in another size and were not analysed");
+			const uint64_t inferred = st.dropsInferred.load(std::memory_order_relaxed);
+			if (inferred != 0)
+				fb.push_back("skeleton_lane: " + std::to_string(inferred) + " dropped frame(s) were taken as consecutive sequences before the surviving frame (backlog flush)");
 			if (lost != 0)
 				fb.push_back("skeleton_lane: " + std::to_string(lost) + " queue drop(s) could not be reported to the lane");
 			const unsigned long long faults = Faults().load(std::memory_order_relaxed);

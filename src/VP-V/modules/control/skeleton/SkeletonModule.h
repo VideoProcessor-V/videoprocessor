@@ -59,6 +59,8 @@ namespace Vpv
 			// Dimensions of the current lane graph (0 x 0 without one).
 			VpSkeleton::Dims DimsOf(const void* host) const;
 			bool WorkersRunning(const void* host) const;
+			// Tests: do not start the lane worker threads (the test drives AnalysisLane::StepWorker itself).
+			void SetWorkerThreadsForTesting(bool start) { startWorkers_ = start; }
 			// Tests: use this card profile instead of the device query (no render device exists in a unit test).
 			void SetCardForTesting(const VpSkeleton::CardProfile& card) { cardOverride_ = true; card_ = card; }
 			// Hub-contained exceptions in this module (all renderers).
@@ -75,6 +77,7 @@ namespace Vpv
 			std::function<uint64_t()> nowUs_;
 			Hub::HostSlots<HostState> hosts_;
 			bool cardOverride_ = false;
+			bool startWorkers_ = true;
 			VpSkeleton::CardProfile card_;
 		};
 

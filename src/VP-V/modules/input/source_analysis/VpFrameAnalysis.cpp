@@ -311,7 +311,7 @@ namespace VpFrameAnalysis
 			if (!plane)
 			{
 				AnalysisLumaSource own = job.source;
-				own.sharedLuma = std::make_shared<AnalysisLumaPlane>();
+				own.sharedLuma = AcquirePlane();   // pooled like every plane; the view's keepAlive blocks its recycling
 				DecodeSharedLuma(own);
 				plane = own.sharedLuma;
 			}

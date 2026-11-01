@@ -51,6 +51,7 @@ namespace Vpv
 			bool Active(const void* host) const;                    // report mode is on for this renderer
 			CameraLink::CameraLinkCore* CoreOf(const void* host) const;   // null without one (render thread / tests)
 			size_t HostStates() const;
+			const void* StoreOf(const void* host) const;   // the FrameAnalysis::Store the host's core was built over (null: none)
 
 		private:
 			void Reconcile(const void* host, int originalFlag, pl_gpu gpu);

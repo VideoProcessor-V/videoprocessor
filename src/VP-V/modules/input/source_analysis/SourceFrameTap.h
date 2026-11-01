@@ -51,7 +51,9 @@ namespace VpFrameAnalysis
 			std::mutex mutex;
 			std::map<const void*, std::shared_ptr<Entry>> sinks;
 			std::map<const void*, FrameAnalysis::Store*> stores;
+			std::map<const void*, uint64_t> generations;   // per owner: bumped whenever its store registration changes
 			std::atomic<int> count{ 0 };
+			std::atomic<uint64_t> epoch{ 0 };              // bumped on any generation change (a cheap "look again")
 		};
 
 		inline Registry& Reg()
@@ -146,11 +148,27 @@ namespace VpFrameAnalysis
 				return;
 			Registry& r = Reg();
 			std::lock_guard<std::mutex> lock(r.mutex);
+			const auto it = r.stores.find(owner);
+			const FrameAnalysis::Store* current = it == r.stores.end() ? nullptr : it->second;
+			if (current == store)
+				return;   // the same registration (Owner() is called at every settings apply): no new generation
 			if (store)
 				r.stores[owner] = store;
 			else
 				r.stores.erase(owner);
+			++r.generations[owner];
+			r.epoch.fetch_add(1, std::memory_order_release);
 		}
+		// A renderer that is destroyed (its Host clears the store) and a new one created at the SAME address
+		// differ in generation: per-host module state built for the old one is stale (hub modules compare).
+		inline uint64_t Generation(const void* owner)
+		{
+			Registry& r = Reg();
+			std::lock_guard<std::mutex> lock(r.mutex);
+			const auto it = r.generations.find(owner);
+			return it == r.generations.end() ? 0u : it->second;
+		}
+		inline uint64_t Epoch() { return Reg().epoch.load(std::memory_order_acquire); }
 		inline FrameAnalysis::Store* StoreFor(const void* owner)
 		{
 			if (!owner)

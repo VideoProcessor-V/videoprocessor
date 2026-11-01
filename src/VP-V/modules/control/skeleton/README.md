@@ -55,3 +55,14 @@ time, each behind its own switch.
 Lifecycle and frame phases: render thread. The tap sink: the frame-analysis worker. Queue drops: the queue thread (a mutex-guarded
 list the render thread drains). Status: a cache rebuilt on the render thread. Per-host state is found through
 `core/hub/HostSlots.h` (lock-free lookup); the seal hooks hold weak references, so a released renderer's state can never be touched.
+
+## Stale state and drops (audit notes)
+
+* A renderer whose device creation throws never gets `GpuReleased`; a new renderer may then reuse its address. The tap keeps a
+  generation per owner (bumped when the Host's store registration changes); module state records the generation it was built
+  for and is rebuilt (lifecycle or the next frame) when it differs. The tap sink is registered again whenever it is missing.
+* The seal hooks of a rebuilt state are appended to the seal again (a `FrameSeal` cannot drop them). The old hooks hold weak
+  references to the discarded state and do nothing; the cost is a few idle closures per address reuse.
+* Backlog-flush drops (`OnQueue(Drop)`): the call site passes the surviving sequence and the number of frames dropped before
+  it, so the dropped sequences are taken as `[seq - n, seq)` (consecutive). That assumption is counted and shown
+  (`dropped frame(s) were taken as consecutive sequences`); at most 16 per event are applied, the rest are counted as lost.

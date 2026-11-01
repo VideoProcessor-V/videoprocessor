@@ -216,6 +216,29 @@ namespace CameraExtensionTestsNs
 			Assert::IsTrue(rig.Lines(RE::StatusKind::Lines).empty());
 		}
 
+		TEST_METHOD(AReusedRendererAddressRebuildsTheCore)
+		{
+			Rig rig("[vpv.skeleton]\ncamera_link=report\n");
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			Assert::IsTrue(rig.ext.StoreOf(rig.Host()) == &rig.r.store);
+			// The old Host died without GpuReleased; a new one at the same address has another store.
+			FrameAnalysis::Store other(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rig.Host(), nullptr);
+			Tap::SetStore(rig.Host(), &other);
+			rig.Frame(1);   // the frame path notices
+			Assert::IsTrue(rig.ext.StoreOf(rig.Host()) == &other, L"rebuilt over the current store");
+			Tap::SetStore(rig.Host(), nullptr);
+			Tap::SetStore(rig.Host(), &rig.r.store);
+			rig.Life(RE::Lifecycle::SettingsApplied);   // and through the settings path
+			Assert::IsTrue(rig.ext.StoreOf(rig.Host()) == &rig.r.store);
+			// The store is gone and not replaced: no core, a visible fallback.
+			Tap::SetStore(rig.Host(), nullptr);
+			rig.Life(RE::Lifecycle::SettingsApplied);
+			Assert::IsNull(rig.ext.CoreOf(rig.Host()));
+			Assert::IsTrue(Has(rig.Lines(RE::StatusKind::Fallbacks), "camera_link: no frame analysis store"));
+		}
+
 		TEST_METHOD(TeardownIsPerHost)
 		{
 			Rig a("[vpv.skeleton]\ncamera_link=report\n");

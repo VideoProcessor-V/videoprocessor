@@ -43,7 +43,8 @@ namespace VpFrameAnalysis
 
 		// The renderer identity this Host serves (the `host` of every hub callback). With it the VP-V source
 		// frame tap (SourceFrameTap.h) can find this Host's store and decode the plane for a registered
-		// sink. Chainable: `frameAnalysis.Owner(this).Configure(...)`. Not calling it changes nothing.
+		// sink. Chainable: `frameAnalysis.Owner(this).Configure(...)`. Always writes the tap's store map (even
+		// with every switch off; harmless: a pointer in a map, no thread, no decode). Not calling it changes nothing.
 		Host& Owner(const void* key)
 		{
 			const void* previous = m_owner.exchange(key, std::memory_order_acq_rel);

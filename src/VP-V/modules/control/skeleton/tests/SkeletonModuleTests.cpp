@@ -15,6 +15,7 @@
 #include <windows.h>
 #include "CppUnitTest.h"
 
+#include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/core/FramesInFlight.h>
 #include <VP-V/modules/control/skeleton/SkeletonModule.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
@@ -407,34 +408,60 @@ namespace SkeletonModuleTestsNs
 
 		TEST_METHOD(AnAheadResultIsTheSameBytesAsTheLiveForm)
 		{
-			// Give the lane worker time between frames: the product of the frame ahead is then made by the lane
-			// and accepted at the seal. Whichever way a frame was made, its bytes are the one-shot reference.
+			// No timing: the worker threads are not started and the test steps the CPU worker itself, so the
+			// product of frame 2 is made ahead (while frame 1 renders) and accepted at the seal of frame 2.
 			Rig rig(Lane("on"));
 			VpSkeleton::CardProfile card;   // no render device in a unit test: a card with room for the lane
 			card.vramBudgetBytes = 1ull << 30;
 			card.systemRamFreeBytes = 1ull << 30;
 			card.uploadGBps = 10.0;
 			rig.sk.SetCardForTesting(card);
+			rig.sk.SetWorkerThreadsForTesting(false);
 			rig.ResyncApply("on");
 			rig.Life(RE::Lifecycle::GpuCreated);
 			rig.Frame(1);
 			VpSkeleton::AnalysisLane* lane = rig.sk.LaneOf(rig.Host());
 			Assert::IsNotNull(lane);
-			int64_t s = 2;
-			for (; s < 120 && lane->TotalAhead() == 0; ++s)
+			Assert::IsFalse(rig.sk.WorkersRunning(rig.Host()));
+			int steps = 0;
+			while (lane->StepWorker(VpSkeleton::Backend::Cpu, 0) && ++steps < 1000)
 			{
-				Sleep(10);
-				rig.Frame(s);
-				const std::vector<uint8_t> half = rig.Bytes(VpSkeleton::kP1HalfLuma, uint64_t(s));
-				Assert::IsTrue(half == rig.ExpectedHalf(uint64_t(s)), L"P1 equals the reference");
-				Assert::IsTrue(rig.Bytes(VpSkeleton::kP4SourceStats, uint64_t(s)) == rig.ExpectedStats(half), L"P4 equals the reference");
 			}
-			if (lane->TotalAhead() == 0)
-			{
-				const std::string text = rig.Command();
-				Logger::WriteMessage(text.c_str());
-			}
-			Assert::IsTrue(lane->TotalAhead() > 0, L"the lane made at least one product ahead of the seal");
+			Assert::IsTrue(steps > 0 && steps < 1000, L"the lane made progress and went idle");
+			rig.Frame(2);
+			Assert::IsTrue(lane->TotalAhead() > 0, L"frame 2 was made ahead of its seal");
+			const std::vector<uint8_t> half = rig.Bytes(VpSkeleton::kP1HalfLuma, 2);
+			Assert::IsTrue(half == rig.ExpectedHalf(2), L"P1 equals the reference");
+			Assert::IsTrue(rig.Bytes(VpSkeleton::kP4SourceStats, 2) == rig.ExpectedStats(half), L"P4 equals the reference");
+		}
+
+		TEST_METHOD(AReusedRendererAddressRebuildsTheStaleState)
+		{
+			// A renderer that died without GpuReleased (a failed device create) and a new one at its address.
+			Rig rig(Lane("on"));
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rig.Host(), &store);
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+			rig.Frame(1);
+			Assert::IsTrue(rig.sk.TapRegistered(rig.Host()));
+			// The old Host's destructor: store and sink go.
+			Tap::SetStore(rig.Host(), nullptr);
+			Tap::Unregister(rig.Host());
+			Assert::IsFalse(rig.sk.TapRegistered(rig.Host()));
+			// The new Host registers its store; the first thing the module sees is a frame.
+			Tap::SetStore(rig.Host(), &store);
+			rig.Frame(2);
+			Assert::IsTrue(rig.sk.Active(rig.Host()), L"rebuilt from the configuration");
+			Assert::IsTrue(rig.sk.TapRegistered(rig.Host()), L"the tap is registered again");
+			// And through the settings path.
+			Tap::SetStore(rig.Host(), nullptr);
+			Tap::Unregister(rig.Host());
+			Tap::SetStore(rig.Host(), &store);
+			rig.Life(RE::Lifecycle::SettingsApplied);
+			Assert::IsTrue(rig.sk.Active(rig.Host()) && rig.sk.TapRegistered(rig.Host()));
+			Assert::AreEqual<size_t>(1, rig.sk.HostStates());
+			Tap::SetStore(rig.Host(), nullptr);
 		}
 
 		TEST_METHOD(AReleasedHostLeavesTheOtherIntact)

@@ -49,8 +49,12 @@ namespace Vpv
 
 		struct CameraHostState
 		{
-			explicit CameraHostState(const void* h) : host(h) {}
+			explicit CameraHostState(const void* h) : host(h), ownerGen(VpFrameAnalysis::SourceFrameTap::Generation(h)),
+				seenEpoch(VpFrameAnalysis::SourceFrameTap::Epoch()) {}
 			const void* host;
+			const uint64_t ownerGen;   // tap generation of the renderer this state was built for (address reuse = stale)
+			uint64_t seenEpoch;
+			FrameAnalysis::Store* builtStore = nullptr;   // the store the core references
 
 			Skeleton::Settings settings;
 			std::atomic<bool> active{ false };
@@ -91,6 +95,11 @@ namespace Vpv
 			return st ? st->core.get() : nullptr;
 		}
 		size_t CameraExtension::HostStates() const { return hosts_.States(); }
+		const void* CameraExtension::StoreOf(const void* host) const
+		{
+			const std::shared_ptr<CameraHostState> st = hosts_.Find(host);
+			return st && st->core ? st->builtStore : nullptr;
+		}
 
 		void CameraExtension::OnLifecycle(RE::LifecycleFacts& f)
 		{
@@ -99,6 +108,7 @@ namespace Vpv
 			switch (f.kind)
 			{
 			case RE::Lifecycle::GpuCreated:
+				hosts_.SetAux(f.host, const_cast<void*>(static_cast<const void*>(f.gpu)));   // kept so a camera switched on later gets it
 				Reconcile(f.host, -1, f.gpu);
 				break;
 			case RE::Lifecycle::SettingsApplied:
@@ -124,7 +134,16 @@ namespace Vpv
 			Skeleton::Settings s = Skeleton::Load(loader_);
 			if (originalFlag >= 0)
 				s.originalPathway = originalFlag != 0;
+			if (!gpu)
+				gpu = static_cast<pl_gpu>(hosts_.Aux(host));
 			std::shared_ptr<CameraHostState> st = hosts_.Find(host);
+			if (st && st->ownerGen != VpFrameAnalysis::SourceFrameTap::Generation(host))
+			{
+				// A new renderer at the address of one that died without GpuReleased: its core's store is gone.
+				Teardown(st, false);
+				hosts_.Remove(host, false);
+				st.reset();
+			}
 			if (!s.CameraWanted())
 			{
 				if (st)
@@ -162,14 +181,21 @@ namespace Vpv
 			st->settings = s;
 			st->dump = DumpRequested();
 			st->problem.clear();
+			FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::StoreFor(host);
+			if (st->core && st->builtStore != store)
+			{
+				st->core->OnGpuReleased();
+				st->core.reset();   // built over a store that is gone or replaced
+				st->builtStore = nullptr;
+			}
 			if (!st->core)
 			{
-				FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::StoreFor(host);
 				if (!store)
 					st->problem = "no frame analysis store for this renderer (the renderer does not register one); the camera link cannot report";
 				else
 				{
 					st->core.reset(new CameraLink::CameraLinkCore(*store));
+					st->builtStore = store;
 					CameraLink::CameraLinkSettings settings;
 					settings.p7Wanted = false;   // no vector engine yet (P5a): nothing for the fit to read, nothing is allocated
 					st->core->OnSettings(settings);
@@ -225,6 +251,17 @@ namespace Vpv
 			const std::shared_ptr<CameraHostState> st = hosts_.Find(c.host);
 			if (!st || !st->active.load(std::memory_order_acquire) || c.seq <= 0)
 				return false;
+			const uint64_t epoch = VpFrameAnalysis::SourceFrameTap::Epoch();
+			if (epoch != st->seenEpoch)
+			{
+				st->seenEpoch = epoch;
+				if (st->ownerGen != VpFrameAnalysis::SourceFrameTap::Generation(c.host) ||
+					st->builtStore != VpFrameAnalysis::SourceFrameTap::StoreFor(c.host))
+				{
+					Reconcile(c.host, -1, nullptr);   // stale core: rebuild over the current store (or say there is none)
+					return false;
+				}
+			}
 			if (c.phase == RE::FramePhase::Begin)
 			{
 				++st->frames;
