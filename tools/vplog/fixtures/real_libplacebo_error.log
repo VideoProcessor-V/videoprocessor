@@ -1,0 +1,78 @@
+Configuration disk read: serial=18 identity=8511869663291466038 path=<path>
+Shaders: configured rule "@shader-key:" has no [shaders.@shader-key:] section
+DISPLAY_STATE pid=47276 tid=19972 seq=52 tick=430814468 phase=vp-before-initialize advanced_color target=8388688 supported=1 enabled=0 wide_enforced=1 force_disabled=0 encoding=0 bits=8 (OS report; enabled is not proof of HDR content)
+libplacebo configuration snapshot evaluated: path=<path>
+libplacebo: VP_TEST_ADAPTER selects NVIDIA GeForce RTX 3050 Ti Laptop GPU
+libplacebo [info]: shaderc SPIR-V version 1.6 rev 1
+libplacebo [info]: Initialized SPIR-V compiler 'shaderc'
+libplacebo persistent shader cache loaded: 113 objects, 803688 bytes
+libplacebo GPU shader cache enabled: memory limit=256 MiB object limit=64 MiB path=<path>
+DISPLAY_STATE pid=47276 tid=19972 seq=53 tick=430815640 phase=vp-before-colorspace advanced_color target=8388688 supported=1 enabled=0 wide_enforced=1 force_disabled=0 encoding=0 bits=8 (OS report; enabled is not proof of HDR content)
+DISPLAY_STATE pid=47276 tid=19972 seq=53 tick=430815640 phase=vp-before-colorspace swapchain=000001BDEB1BA6B0 fullscreen_result=0x00000000 exclusive=0 containing_output_result=0x887A0004
+libplacebo DXGI swapchain: trigger=initialize format=24 swap_effect=4 flags=0x00000000 buffers=3 windowed=1 model=FLIP/DIRECT-ELIGIBLE direct_state=unverified
+libplacebo DXGI adapter: name=NVIDIA GeForce RTX 3050 Ti Laptop GPU luid=00000000:00013DFD vendor=0x10DE device=0x25A0 driver_check=0x00000000 driver=00200000:00100424
+libplacebo output negotiation (initialize): effective_request=AUTO/AUTO/AUTO/Rec.709 actual_contract=FLIP/DIRECT-ELIGIBLE/FULL/sRGB/G22/Rec.709 dxgi=RGB_FULL_G22_NONE_P709 accepted=1 safe=1 wire_state=unverified reason=using the standard Windows Full/sRGB swapchain contract
+DISPLAY_STATE pid=47276 tid=19972 seq=54 tick=430815640 phase=vp-after-colorspace advanced_color target=8388688 supported=1 enabled=0 wide_enforced=1 force_disabled=0 encoding=0 bits=8 (OS report; enabled is not proof of HDR content)
+DISPLAY_STATE pid=47276 tid=19972 seq=54 tick=430815640 phase=vp-after-colorspace swapchain=000001BDEB1BA6B0 fullscreen_result=0x00000000 exclusive=0 containing_output_result=0x887A0004
+libplacebo settings: quality=high tone_mapping=spline gamut_mapping=perceptual peak_detection=high_quality hdr_peak_analysis_picture_only=0 hdr_peak_analysis_motion_compensation=0 hdr_peak_analysis_height_percent=75 hdr_peak_analysis_position=top libplacebo_version=v7.360.1 (v7.360.1-3-g3f5bce24-dirty) api=360 local_analysis_crop=vp0147-motion-v1 contrast_recovery=0.30 upscaler=ewa_lanczossharp downscaler=built-in deband=auto/on dithering=blue_noise dynamic_constants=1 display_bit_depth=8 output_presentation=auto output_range=auto output_transport_gamma=auto output_gamma=auto sdr_input_transfer=2.4 sdr_adjust_gamma=passthrough target=203.0 nits black=0.000 profile_update_mode=rebuild output_diagnostics=0 diagnostic_disable_shader_cache=0 diagnostic_disable_compute=0 diagnostic_force_8bit_sdr_swapchain=0 diagnostic_allow_limited_g22=0 diagnostic_allow_full_g22=0 diagnostic_vp_owned_dxgi_presenter=0 refresh_switch=1 refresh_command_delay=5s refresh_commands=0 viewport_target=output-panel screen_aspect=0.0000 automatic_crop=0 subtitle_fit=1 subtitle_hold=2000ms subtitle_engage_drift=500ms subtitle_release_drift=2000ms subtitle_padding=20px subtitle_target_buffer=10px
+libplacebo resolved render options (renderer initialization): upscaler=ewa_lanczossharp downscaler=none frame_mixing=motion_profile (matched-rate bypass unless Always) all=upscaler=ewa_lanczossharp,plane_upscaler=catmull_rom,frame_mixer=oversample,deband=yes,deband_grain=0,sigmoid=yes,color_adjustment=no,peak_detect=yes,peak_percentile=99.99500274658203,contrast_recovery=0.30000001192092896,dither=yes,dynamic_constants=yes
+libplacebo resolved render options (renderer start/restart (including HDMI re-sync)): upscaler=ewa_lanczossharp downscaler=none frame_mixing=motion_profile (matched-rate bypass unless Always) all=upscaler=ewa_lanczossharp,plane_upscaler=catmull_rom,frame_mixer=oversample,deband=yes,deband_grain=0,sigmoid=yes,color_adjustment=no,peak_detect=yes,peak_percentile=99.99500274658203,contrast_recovery=0.30000001192092896,dither=yes,dynamic_constants=yes
+Capture: stale capture delivery (age 631 ms, callback time; runs 1, stale frames on hardware time 0, on callback time 1)
+Capture raw route: up to 1 capture buffers held at once (queue, next / ahead frames)
+Capture raw route: up to 2 capture buffers held at once (queue, next / ahead frames)
+Capture raw route: up to 3 capture buffers held at once (queue, next / ahead frames)
+Capture raw route: up to 4 capture buffers held at once (queue, next / ahead frames)
+Alpha raw-frame analysis: the CPU reads the captured frame (format=3 path=native-yuv422-sparse 3840x2160, upload by the render, generation=1)
+Alpha picture decision edges: schema=1 instance={B899DE6D-D040-414A-917C-49ADE97C4EE1} generation=1 sequence=1 epoch=0 valid=0/0 region=excluded-bands strip_base=0,0-0,0 strip_candidate=0,0-0,0 fields=pixels,black_fraction,p90,texture,continuity,neutral_chroma left=0,0.0000,0.0,0.0,0.0000,0.0000 top=0,0.0000,0.0,0.0,0.0000,0.0000 right=0,0.0000,0.0,0.0,0.0000,0.0000 bottom=0,0.0000,0.0,0.0,0.0000,0.0000
+Alpha cadence policy: event=generation_changed action_id=0 policy_generation=11400714819323198551 detector_generation=1 presentation_generation=0 queue_generation=1 source=1 present_id=0 evidence=unavailable rate_samples=0 action=none authorized=0 reason=disabled phase=0.000000000 deadline_s=+0.000000 raw_ppm=+0.000 filtered_ppm=0.000 capture_hz=23.976024 display_hz=0.000000 queue=3/4 oldest_ms=209.090 debt=0 scene_event=0 scene_safe=0 scene_fresh=0 scene_authorized=0 planned_frames=0 fallback_frames=0 fallback_mature=0 fallback_eligible=0 cooldown_frames=0 verification_pending=0
+Capture path gpu: V210 unpacked on the GPU (3840x2160, no CPU conversion)
+De-judder: motion invalidated (stale capture delivery; 1 in total); the vectors' users fall back until a fresh pair
+De-judder: estimating again on a fresh contiguous pair
+De-judder motion: optical-flow engine
+De-judder: motion estimated for 1 source frames (0x0, 4:2:0)
+SDR_GAMMA requested=PASSTHROUGH applicable=yes action=SUPPRESS source_configured=2.4 source_declared=GAMMA24 source_effective=sRGB target_requested=auto target_actual=sRGB output_fallback=0 other_processing=range:1,primaries:0,lut:0,scaling:possible,dither:1,deband:1 reason="SDR tone codes preserved into the display or active LUT input domain"
+Alpha crop diagnostics: schema=1 recovery_dwell_ms=250 summary_ms=2000 sampling_equivalence=max(2,width/480,height/270) sampling_requires=same-bars-and-current-safe-bands provisional_sampling=per-vertical-edge-scan-step-contained-sides-and-current-strip-check partial_composition=defer-publication failed_bar_axis=retain-established-inward-format axis_full_extent=diagnostic-only axis_extent_support=both-outer-lines-6-of-12-per-quartile-above-cutoff-plus24 stable_aspect_deadband_percent=5.0 stable_aspect_scope=contained-trusted-picture all_sided_inset=retain-inner-composition scheduled_admission=exact-or-current-proven-outward-scan-step-reference-and-live-deadbands picture_handoff=broad-vertical-confirmation-bounded-by-existing-proof-budget outward_proof_sampling=anchored-max(2,width/960,height/540) global_grid=16x16 near_black_p90_max=96 edge_grid=48x6 extent_grid_max=256x64 extent_support=2x2 black_floor=perimeter-p10-clamped-48-80 black_threshold=min(104,floor+24) retention_black_min=0.95 retention_p90_max=min(104,floor+24) dispersion_max=24 texture_max=8 chroma_neutral_min=0.90 continuity_min=0.99 trace_budget=0 trace_max=2400 trace_scope=candidate-and-presentation evidence=existing-samples capture_missed_semantics=timestamp-gap-estimate
+Detail pulse stabilise: on (cap 1.35)
+libplacebo HDR analysis ROI policy: enabled=0 mode=off fixed_enabled=0 motion_enabled=0 motion_protection_pixels=0.0 peak_detection=1 fork=vp0147-motion-v1 api=360 version=v7.360.1 (v7.360.1-3-g3f5bce24-dirty) analysis_height_percent=75.0 analysis_position=top source_generation=1 source_sequence=1 trusted_available=0 trusted_generation=0 trusted=0,0-0,0 raster=0x0 presentation=0.000,0.000-3840.000,2160.000 analysis_intersection=0.000,0.000-0.000,0.000 normalized=0.000000,0.000000-0.000000,0.000000 excluded_pixels=0 excluded_percent=0.000 outcome=disabled reason="disabled"
+Temporal dither: sigma_delta (the shader list's sigma-delta added if missing)
+Alpha shaders: selected "" (NLS off, 1 custom hook(s))
+libplacebo [info]: Registering named parameter 'swapchain_bits'
+libplacebo [info]: Registering named texture 'VPVEC'
+libplacebo [info]: Registering named texture 'VPPIX'
+libplacebo [info]: Registering named texture 'RESID'
+libplacebo [info]: Registering named texture 'PREV'
+libplacebo [info]: Registering named texture 'RESID_NEXT'
+libplacebo [info]: Registering named texture 'PREV_NEXT'
+libplacebo [info]: Registering named texture 'LQPREV'
+libplacebo [info]: Registering named texture 'MVPREV'
+libplacebo [info]: Registering hook pass: VideoProcessor sigma-delta: quarter-resolution luma
+libplacebo [info]: Registering hook pass: VideoProcessor sigma-delta: coarse (1/16) luma
+libplacebo [info]: Registering hook pass: VideoProcessor sigma-delta: block motion search
+libplacebo [info]: Registering hook pass: VideoProcessor sigma-delta: carry state to this refresh
+libplacebo [info]: Registering hook pass: VideoProcessor temporal sigma-delta quantizer
+Custom hooks: loaded "vp.temporal_dither" file=Temporal sigma-delta.glsl stages=0x8000 output_stage=1 params_set=0 templates="output_width=1920;output_height=1080;"
+Sigma-delta code domain from the target: full range, 10-bit swapchain, 8-bit codes
+Capture raw route: up to 5 capture buffers held at once (queue, next / ahead frames)
+libplacebo [error]: User hook tried resizing non-resizable stage!
+Extended range (BTB/WTW): WARNING libplacebo disabled its hook; off until VP restarts (today's path)
+Alpha source upload diagnostic: generation=1 source=1 submission=1 stage_end_flush=1 cpu_last_ms=85.894 cpu_interval_avg_ms=85.894 cpu_interval_peak_ms=85.894 cpu_interval_samples=1 gpu_latest_ms=0.000 core_latest_ms=0.000 swap_ms=0.565 capture_hz=23.976024 display_hz=0.000000
+Source resolution look-ahead: watching 3 queued frame(s) ahead
+Extended range (BTB/WTW): off: libplacebo disabled its hook
+Alpha frame pacing history: generation=1 trigger_source=2 fields=source,source_frame,capture_timestamp,cadence_repeat,callback_ms,enqueue_ms,dequeue_ms,swap_start_ms,queue_after,lookahead_ms,conversion_ms,upload_cpu_ms,render_ms,swap_ms,present_id,stats_available,stats_disjoint,stats_hr,stats_present,stats_present_refresh,stats_sync_refresh,stats_sync_ms base_qpc=4308385141944 records= [1,10,4308378832083,0,0.00,0.05,313.05,433.04,3,0.00,0.01,85.89,31.84,0.56,1,0,1,887A000B,0,0,0,-1.00] [2,11,4308379249163,0,103.88,103.96,435.31,488.75,3,0.00,0.04,3.84,2.33,0.40,2,1,0,0,0,0,0,-1.00]
+Rendered-output capture queued: stage=next-rendered-frame output_directory=<path>
+Rendered-output capture queued: stage=next-rendered-frame output_directory=<path>
+Rendered-output capture complete: source=14 png=<path> metadata=<path> raw_bytes=8294400 elapsed_ms=345.34
+Rendered-output capture queued: stage=next-rendered-frame output_directory=<path>
+Rendered-output capture complete: source=18 png=<path> metadata=<path> raw_bytes=8294400 elapsed_ms=388.39
+Alpha frame pacing history: generation=1 trigger_source=22 fields=source,source_frame,capture_timestamp,cadence_repeat,callback_ms,enqueue_ms,dequeue_ms,swap_start_ms,queue_after,lookahead_ms,conversion_ms,upload_cpu_ms,render_ms,swap_ms,present_id,stats_available,stats_disjoint,stats_hr,stats_present,stats_present_refresh,stats_sync_refresh,stats_sync_ms base_qpc=4308399179706 records= [15,24,4308384671203,0,0.00,0.03,336.56,341.89,3,0.00,0.01,3.50,1.29,0.38,15,1,0,0,0,0,0,-1.00] [16,25,4308385088283,0,102.21,102.24,436.78,441.95,3,0.00,0.01,3.44,1.27,0.46,16,1,0,0,0,0,0,-1.00] [17,26,4308385505363,0,236.05,236.10,535.07,540.62,3,0.00,0.00,3.52,1.35,0.41,17,1,0,0,0,0,0,-1.00] [18,27,4308385922443,0,335.85,335.89,639.69,647.42,3,0.00,0.01,3.15,1.23,75.98,18,1,0,0,0,0,0,-1.00] [19,28,4308386339523,0,436.15,436.18,737.84,746.28,3,0.00,0.01,6.17,1.50,1.08,19,1,0,0,0,0,0,-1.00] [20,29,4308386756603,0,534.27,534.31,837.74,842.47,3,0.00,0.01,2.96,1.31,0.45,20,1,0,0,0,0,0,-1.00] [21,30,4308387173683,0,638.94,638.96,980.86,986.54,3,0.00,0.01,3.57,1.40,0.33,21,1,0,0,0,0,0,-1.00] [22,31,4308387590763,0,736.97,737.01,1083.97,1089.96,3,0.00,0.01,3.96,1.46,79.39,22,1,0,0,0,0,0,-1.00]
+Rendered-output capture queued: stage=next-rendered-frame output_directory=<path>
+Rendered-output capture complete: source=22 png=<path> metadata=<path> raw_bytes=8294400 elapsed_ms=344.74
+Rendered-output capture complete: source=26 png=<path> metadata=<path> raw_bytes=8294400 elapsed_ms=420.71
+libplacebo persistent shader cache saved: 113 objects, 803688 bytes
+VP Renderer retirement: swapchain and D3D resources released before display-global restoration
+renderer_dir=<path> shader_dir=<path> adapter=NVIDIA
+shader_profiles_selected=0 requested=-
+gpu_timing: valid=1 frame_ms_avg=10.2684 frame_ms_peak=60.4334 core_ms_avg=7.69079 core_ms_peak=55.6165 frames=13
+dejudder status: 
+presentation: warming: incomplete sample; Motion: Off
+source: Source resolution: native (declared native, confidence 0.00); bitrate quality 1.00, 9.7-bit; auto native; source_resolution auto

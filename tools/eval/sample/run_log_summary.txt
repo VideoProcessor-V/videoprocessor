@@ -1,0 +1,16 @@
+# sample run log summary (2026-10-31, laptop, CPU only), audit-1 fix round
+# command: D:\hfr\venv\Scripts\python.exe -I tools/eval/eval_harness.py run --suite tools/eval/suites/sample_chroma.json --candidate chroma_lanczos3 --baseline chroma_bicubic --out <scratch> --lpips
+# cost rows are wall-clock (non-deterministic); all other columns are deterministic
+harness v1  python 3.14.8  numpy 2.5.2
+suite sample_chroma  candidate chroma_lanczos3 (candidate: Lanczos-3 chroma upsampling, left siting)  baseline chroma_bicubic (default: Catmull-Rom (a=-0.5) chroma upsampling, left siting)
+case sports50_60 / Bosphorus / native_x265_crf26: loading
+  done in 69.7 s
+case sports50_60 / Jockey / native_x264_crf23: loading
+  done in 57.6 s
+case sports50_60 / park_joy / native_x265_crf26: loading
+  done in 57.6 s
+case film24 / tos4k / x265_2160p_6000k_w2400: loading
+  done in 48.5 s
+case film24 / breathing / enc24_48f: loading
+  done in 118.3 s
+rows 215  flags {"FLAG": 2, "INFO": 15, "LIMIT": 21, "NA": 68, "PASS": 109}  total 351.7 s

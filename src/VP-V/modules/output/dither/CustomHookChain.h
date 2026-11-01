@@ -30,6 +30,15 @@ namespace CustomHookChain
         // (and heights) are the sigma-delta's quarter / block grids only with efficiency_fixes
         // on; off (the default, the Original pathway) they are the full output size as before.
         bool sigmaDeltaGrids = false;
+
+        bool operator==(const TemplateValues& other) const
+        {
+            return outputWidth == other.outputWidth && outputHeight == other.outputHeight &&
+                sourceWidth == other.sourceWidth && sourceHeight == other.sourceHeight &&
+                refreshHz == other.refreshHz && sourceFps == other.sourceFps &&
+                sigmaDeltaGrids == other.sigmaDeltaGrids;
+        }
+        bool operator!=(const TemplateValues& other) const { return !(*this == other); }
     };
 
     // Rules this chain owns, in execution order. Like the madVR path, the
@@ -131,6 +140,9 @@ namespace CustomHookChain
         static constexpr const char* kQuantizerNotLoaded = "not loaded";
         static constexpr const char* kQuantizerDisabled = "disabled";
         std::string QuantizerProblem() const;
+        // Rule names (the file name when a rule has no name) of non-quantiser entries that
+        // did not load or were disabled at runtime, in entry order (no silent fallbacks).
+        std::vector<std::string> LoadFailures() const;
 
         // True when a submitted rule loads this file (by name, any folder,
         // case-insensitive). Stage 8 needs the SSIM downscaler in the chain.
@@ -153,6 +165,9 @@ namespace CustomHookChain
             bool prescaler = false;   // IsLumaPrescaler (Stage 8b one-axis)
             bool loadFailed = false;
             bool runtimeFailed = false;
+            unsigned usedBuiltIns = 0;   // bit i set: source contains built-in i's {{token}}
+            bool evaluated = false;      // key check reached for the current source
+            bool pending = false;        // a used built-in is not known yet: retry next frame
         };
 
         bool Submitted(const Entry& entry, bool lowLatency) const;
@@ -160,5 +175,8 @@ namespace CustomHookChain
 
         Loader loader;
         std::vector<Entry> entries;
+        // Fast exit for Ensure: the values of the last call and whether every entry settled.
+        TemplateValues lastValues;
+        bool settled = false;
     };
 }

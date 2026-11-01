@@ -248,7 +248,6 @@ namespace Vpv
                 u.toggles.push_back({ "adaptive_upscale", "Grain-aware upscale for small sources", { "on", "off" }, "scaling.output" });
                 u.planned.push_back({ "entrance_route_4k", "4K route (fixed 1-D steps to 4K)", "scaling.route_4k" });
                 u.planned.push_back({ "refine_net", "4K refine net", "scaling.refine" });
-                u.planned.push_back({ "chroma_upscale_vp", "VP chroma upscale", "scaling.chroma_upscale" });
                 u.planned.push_back({ "hybrid_refine_d", "Extra detail-recovery step under the hybrid scaler", "scaling.output" });
                 t.units.push_back(u);
             }

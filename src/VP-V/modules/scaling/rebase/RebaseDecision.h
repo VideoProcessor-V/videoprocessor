@@ -19,6 +19,8 @@
 // Header-only, pure C++14, deterministic, render thread (one owner).
 namespace VpRebase {
 
+constexpr uint32_t kUnitVersion = 1;   // P0 re-base decision and P6 entrance output (core/ProductCatalog.h)
+
 enum Axis : int { kH = 0, kV = 1, kAxes = 2 };
 
 struct AxisDecision {

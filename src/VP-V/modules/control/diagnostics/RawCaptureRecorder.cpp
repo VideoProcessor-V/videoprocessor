@@ -5,6 +5,7 @@
 #include <pch.h>
 #include "RawCaptureRecorder.h"
 #include <DebugLog.h>
+#include <VP-V/modules/control/diagnostics/DiagnosticOverrides.h>
 #include <EOTF.h>
 #include <ColorSpace.h>
 #include <VideoFrameEncoding.h>
@@ -30,14 +31,11 @@ namespace
 		return out;
 	}
 
-	double EnvNumber(const char* name, double fallback)
+	// Bug hunt 39 #7: a whole-string finite number clamped to [lo, hi], else the fallback (strtod
+	// accepted "nan", "inf" and "12abc", and the casts below were undefined for them).
+	double EnvNumber(const char* name, double fallback, double lo, double hi)
 	{
-		const std::string text = Env(name);
-		if (text.empty())
-			return fallback;
-		char* end = nullptr;
-		const double v = std::strtod(text.c_str(), &end);
-		return end != text.c_str() ? v : fallback;
+		return VpDiagnostics::StrictNumber(Env(name), fallback, lo, hi);
 	}
 
 	bool FileExists(const std::string& path)
@@ -102,12 +100,13 @@ RawCaptureOptions RawCaptureOptions::FromEnvironment()
 	o.root = Env("VP_RAW_CAPTURE_PATH");
 	if (o.root.empty())
 		return o;
-	o.burstFrames = static_cast<uint32_t>((std::max)(0.0, EnvNumber("VP_RAW_CAPTURE_BURST", 0)));
-	o.burstSkipFrames = static_cast<int64_t>(EnvNumber("VP_RAW_CAPTURE_SKIP", -1));
-	o.every = static_cast<uint32_t>((std::max)(1.0, EnvNumber("VP_RAW_CAPTURE_EVERY", 1)));
-	o.maxSeconds = (std::max)(0.5, EnvNumber("VP_RAW_CAPTURE_MAX_SECONDS", 30.0));
-	o.minFreeGb = (std::max)(0.0, EnvNumber("VP_RAW_CAPTURE_MIN_FREE_GB", 30.0));
-	o.queueBytes = static_cast<size_t>((std::max)(64.0, EnvNumber("VP_RAW_CAPTURE_QUEUE_MB", 2048))) << 20;
+	// The ranges keep every cast defined (and the previous floors).
+	o.burstFrames = static_cast<uint32_t>(EnvNumber("VP_RAW_CAPTURE_BURST", 0, 0.0, 1.0e6));
+	o.burstSkipFrames = static_cast<int64_t>(EnvNumber("VP_RAW_CAPTURE_SKIP", -1, -1.0, 1.0e12));
+	o.every = static_cast<uint32_t>(EnvNumber("VP_RAW_CAPTURE_EVERY", 1, 1.0, 1.0e6));
+	o.maxSeconds = EnvNumber("VP_RAW_CAPTURE_MAX_SECONDS", 30.0, 0.5, 7.0 * 24.0 * 3600.0);
+	o.minFreeGb = EnvNumber("VP_RAW_CAPTURE_MIN_FREE_GB", 30.0, 0.0, 1.0e6);
+	o.queueBytes = static_cast<size_t>(EnvNumber("VP_RAW_CAPTURE_QUEUE_MB", 2048, 64.0, 65536.0)) << 20;
 	o.note = Env("VP_RAW_CAPTURE_NOTE");
 	return o;
 }

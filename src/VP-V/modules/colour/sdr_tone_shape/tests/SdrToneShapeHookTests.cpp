@@ -195,6 +195,45 @@ namespace VideoProcessorTest
 			Logger::WriteMessage(("DV trims shader: " + std::to_string(checked) + " pixels matched the reference\n").c_str());
 		}
 
+		// DV trims.glsl: the default inverse-LMS parameters are the inverse of the default
+		// forward LMS parameters (CPU only: parses the //!PARAM defaults from the shader text).
+		TEST_METHOD(DolbyVisionTrimShaderInverseLmsDefaultsInvertForwardDefaults)
+		{
+			const std::string src = LoadBundledShader("DV trims.glsl");
+			Assert::IsFalse(src.empty(), L"bundled DV trims.glsl not found");
+			auto def = [&src](const std::string& name)
+			{
+				const size_t at = src.find("//!PARAM " + name + "\r\n");
+				const size_t at2 = at == std::string::npos ? src.find("//!PARAM " + name + "\n") : at;
+				Assert::IsTrue(at2 != std::string::npos, L"PARAM missing");
+				size_t pos = at2;
+				for (;;)
+				{
+					pos = src.find('\n', pos) + 1;
+					Assert::IsTrue(pos != 0 && pos < src.size(), L"default missing");
+					if (src.compare(pos, 3, "//!") != 0)
+						break;
+				}
+				return std::stod(src.substr(pos, 32));
+			};
+			double f[3][3], g[3][3];
+			for (int r = 0; r < 3; ++r)
+				for (int c = 0; c < 3; ++c)
+				{
+					const std::string idx = std::to_string(r) + std::to_string(c);
+					f[r][c] = def("dv_lms" + idx);
+					g[r][c] = def("dv_ilms" + idx);
+				}
+			for (int r = 0; r < 3; ++r)
+				for (int c = 0; c < 3; ++c)
+				{
+					double sum = 0.0;
+					for (int k = 0; k < 3; ++k)
+						sum += g[r][k] * f[k][c];
+					Assert::AreEqual(r == c ? 1.0 : 0.0, sum, 1e-5);
+				}
+		}
+
 		// feat/dv-l8 (audit 2026-10-24): DV trims.glsl's L8 path (dv_ext = 1: mid contrast, clip
 		// trim, per-hue saturation / hue) matches DvTrimSelection::ApplyPixel, and its ICtCp path
 		// (dv_space = 1, the Dolby-style mode) matches DvDolbyStyle::ApplyPixelIctcp, on the GPU,

@@ -6,6 +6,7 @@
   "status": "built",
   "code_location": "partly migrated",
   "live_files": [
+    "src/VP-V/modules/motion/estimation/ProducerRecovery.h",
     "src/VP-V/modules/motion/estimation/NvOpticalFlow.cpp",
     "src/VP-V/modules/motion/estimation/NvOpticalFlow.h",
     "src/VP-V/modules/motion/consumers/DejudderWarp.cpp",
@@ -43,7 +44,11 @@
     "src/VP-V/modules/motion/estimation/VectorDemand.h",
     "src/VP-V/modules/motion/estimation/tests/VectorDemandTests.cpp",
     "src/VP-V/modules/motion/estimation/VectorDemandProducts.h",
-    "src/VP-V/modules/motion/estimation/tests/VectorDemandProductsTests.cpp"
+    "src/VP-V/modules/motion/estimation/tests/VectorDemandProductsTests.cpp",
+    "src/VP-V/modules/motion/estimation/global_model/CameraProducts.h",
+    "src/VP-V/modules/motion/estimation/global_model/CameraReaders.h",
+    "src/VP-V/modules/motion/estimation/global_model/CameraStoreAdapter.h",
+    "src/VP-V/modules/motion/estimation/tests/CameraProductsTests.cpp"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/MotionAhead.h",

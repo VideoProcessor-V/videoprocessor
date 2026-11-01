@@ -1,0 +1,359 @@
+<!-- Copyright(C) 2026 VP-V contributors -->
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+
+# VP-V common evaluation harness (`tools/eval/`)
+
+ONE harness: the same material and the same metrics score every candidate against the current
+default, per content type (**film24, nature30, sports50_60, dark**). A candidate is "better" only if it
+wins on the gating metrics of its feature *without* breaking the always-on guards (grain, BTB/WTW,
+flicker, ghosting). Python 3 + numpy + scipy; CPU only; deterministic (same input -> same bytes,
+float64, fixed reduction order, fixed seeds). Cost rows are the only wall-clock (non-deterministic)
+data; `--no-cost` drops them.
+
+## Quick start
+
+```
+# unit tests (system python; LPIPS test skips when torch is missing)
+python -I -m unittest discover -s tools/eval -p "test_*.py" -v
+
+# material discovery -> tools/eval/material_catalog.json
+python -I tools/eval/eval_harness.py catalog
+
+# verify encode-frame -> master-frame alignment of a suite (PSNR peak over master offsets)
+python -I tools/eval/eval_harness.py align --suite tools/eval/suites/sample_chroma.json
+
+# scored run, candidate vs default; LPIPS needs the venv python (torch, CPU only)
+D:\hfr\venv\Scripts\python.exe -I tools/eval/eval_harness.py run ^
+    --suite tools/eval/suites/sample_chroma.json --candidate chroma_lanczos3 --baseline chroma_bicubic ^
+    --out D:\codex\videoprocessor\eval-scratch\run --lpips [--max-frames N] [--no-cost]
+```
+
+`run` writes `results.csv`, `results.md`, `run_log.txt` to `--out`. Put scratch output outside the
+worktree (`D:\codex\videoprocessor\eval-scratch\`); only text results are ever committed
+(`sample/`). Never commit pixels; never write to E:.
+
+Files: `eval_io.py` (Frame, readers, resamplers) - `eval_material.py` (discovery) - `eval_metrics.py` (pure
+metrics) - `eval_candidates.py` (contract + built-ins) - `eval_protocols.py` - `eval_synth.py` -
+`eval_report.py` - `eval_harness.py` (CLI) - `cost_ratios.json` - `alignment_g18.json` -
+`material_catalog.json` - `suites/` - `sample/`.
+Round 2 (Python reference, scratch pixels outside the worktree): `artefact_headroom.py` (banding / dark
+blocking / texture headroom per codec x rate in SDR, HDR-PQ and HDR->SDR) - `tonemap_ref.py` (libplacebo
+spline reproduction, contrast recovery, local tone mapping incl. MC) - `ltm_eval.py` - `test_tonemap_ref.py`;
+results in `findings-round2.md`.
+Also `cr_grainsafe_eval.py` (grain-safe contrast recovery), `texture_dither.py` (texture loss vs banding),
+`deband_stack.py` (texture oracle x deband x tone stage; `--projection-only` = deband vs master texture) and
+`ringing_stack.py` (mosquito repair placements in the stack), `adaptive_mosquito.py` (adaptive grain-safe
+ringing repair, standalone + stack) and `ringing_usecases.py` (upscale / sharpen / chroma / credits / low rungs).
+
+**External vectors (camera model).** `vector_source.py` defines the contract: `<dir>/flow_<a>_<b>.npy`, (H,W,2)
+float, channel 0 = dx, 1 = dy, `frame_b(p + F(p)) ~ frame_a(p)`, 6-digit frame indices (a divisor-size field
+is upsampled and scaled). A missing pair raises (no silent fallback). Re-run:
+* MC-LTM: `python -I tools/eval/ltm_eval.py --vectors <dir> --kinds ltm,ltm_mc --scratch ... --hr-scratch ... --out ...`
+  (fields under `<dir>/<clip>/flow_<t>_<t-1>.npy`, window-local indices; amplification windows under
+  `<dir>/amp_<master>_1080p_<encode>/`; add `--skip-amp` without them).
+* chroma_mv / chroma_mv_cfl (harness): set `VP_EVAL_VECTORS=<dir>` (source frame indices, both directions
+  n->t and t->n) before `eval_harness.py run`; `VP_EVAL_VECTORS_STRICT=0` allows a counted DIS fallback.
+
+## Candidate contract
+
+Both paths feed the same metrics; the harness never trusts frame order, only `source_frame_index`.
+
+**(a) Python candidate** (`eval_candidates.PythonCandidate`): `name`, `description`, `lookahead`
+(frames, default 0), `reset(meta)` once per case, `process(frame, future=()) -> Frame` in source order.
+Stateful / temporal candidates are fine; the harness buffers `lookahead` following input frames into
+`future`. A `Frame` holds float64 planes `Y, Cb, Cr` (code values) + `bitdepth, range (limited|full), matrix
+(709|2020|601), transfer (sdr|pq), fps, index, siting (left|center)`. Spec: built-in name, or
+`py:<file.py>::<Class>`. Cost = median wall-clock ms/frame, labelled **py-ref** (CPU numpy, not
+GPU-representative).
+
+**(b) Capture candidate** (`capture:<dir>`): a directory of `NNNNNN.yuv` planar frames plus
+`capture.json`:
+
+```
+{"schema":1, "producer":"VpScaleRender|raw-capture|...", "vp_commit":"<hash>", "config_hash":"<hash>",
+ "width":W, "height":H, "pix_fmt":"yuv420p10le", "bitdepth":10, "range":"limited", "matrix":"709",
+ "transfer":"sdr", "fps":24.0,
+ "frames":[{"file":"000000.yuv","source_frame_index":140,"gpu_ms":1.7}, ...]}
+```
+`gpu_ms` is optional (-> `cost_gpu_ms_laptop` and `cost_est_3090_ms`). Supported formats: planar
+yuv420p/yuv444p, 8-16 bit LE. Output raster must equal the protocol truth raster (same-geometry);
+a missing `source_frame_index` is an explicit `error_candidate` row, never a silent skip.
+
+Built-ins this phase: `chroma_bicubic` (the DEFAULT: Catmull-Rom a=-0.5, left siting) and
+`chroma_lanczos3` (candidate): upsample 4:2:0 chroma to the luma raster; luma untouched.
+
+## Protocols (`eval_protocols.py`)
+
+* **chroma444** - chroma reconstruction against a TRUE 4:4:4 reference. Take a 4:2:0 master (W x H):
+  luma is downscaled 2x with fixed Lanczos-3 (grid shifted so luma sample j sits on the chroma sample
+  position: left/MPEG-2 siting) to the chroma raster (W/2 x H/2); the master's native chroma plane is
+  already at that raster. Half-luma + native chroma = genuine 4:4:4 truth at half size. Input = the same
+  from the ENCODE: coded luma downscaled with the same filter, coded chroma subsampled once more to 4:2:0
+  at the half raster (Lanczos-3, left siting: chroma j on luma column 2j, vertically centred). The
+  candidate rebuilds the half-raster 4:4:4 chroma planes from the 4:2:0 ones (+ luma). If the coded
+  picture is already the half raster (a 1080p rung of a 4K master) it is used as input directly. Master
+  bit depth is scaled to the coded depth by powers of two (8 -> 10 bit = x4). Odd sizes are edge-padded.
+* **same** - same-geometry: candidate output vs master at the coded raster (repair, tone mapping,
+  temporal candidates).
+
+## Material and alignment
+
+`material_catalog.json` is generated by `eval_material.py` (never hand-typed): per entry id, group,
+path, content types, `proxy` flag, format (raster, pix_fmt, bit depth, fps, frames), suggested window,
+availability, GOP where known (G18: encoder defaults; nn pairs: `gop_s x fps` from manifest; breathing:
+parsed `types*.txt`), master mapping. Counts per content type (total / available / real=non-proxy) and
+the gap list are embedded.
+
+Sources: G18 real-codec corpus `D:\hfr\coded` (126 decoded 4-frame cases of UVG Bosphorus, Jockey,
+ReadySetGo, ShakeNDry, YachtRide and park_joy, crowd_run; masters in `D:\hfr`), UVG HFR masters, nn-corpus
+FFV1 4K masters (`trimmed/<id>/reference_ffv1.mkv`) + `pairs/` encodes (`.done` = complete; 77 of the
+manifest's 410 exist), `D:\hfr\breathing` (48-frame GOP clip; proxy of UNKNOWN content type, filed under film24 only by its 24 fps), `D:\testclips` film y4m and variants.
+Short windows are decoded through an ffmpeg pipe (`-ss` half a frame early, explicit `-pix_fmt`).
+
+Content-type rules (explicit; every matching rule applies; fps is the MEASURED rate):
+
+| rule | type |
+|---|---|
+| name contains "dark" (tos_dark_2stops) | dark |
+| fps <= 26 (23.976 / 24 / 25) | film24 |
+| 26 < fps < 48 (29.97 / 30) | nature30 |
+| fps >= 48 (50 / 59.94 / 60 / 120) | sports50_60 |
+
+Pulldown / cadence variants (`_32_`, `_22_`, 50i...) get NO fidelity type (they are cadence tests).
+`proxy: true` marks stand-ins: all UVG and park_joy/crowd_run material (sports proxies: fast motion,
+no ball), meridian (30p/60p), boat4k/foodmarket4k, breathing (unknown content type).
+
+**Alignment (G18) - verified:** G18 coded frame 0 is NOT master frame 20. `make_codec_corpus.py` seeks
+1 s into the master (`-ss 1`), encodes, then decodes coded frames 20..23, so coded frame k is master
+frame `round(1 s x fps) + 20 + k`: **140..143** for the 120 fps UVG clips, **70..73** for the 50 fps
+y4m clips. Verified on all 7 clips by luma-PSNR peak over master offsets (single peak, >= 4 dB above the
+best neighbouring offset; see `alignment_g18.json`). nn-corpus encodes share the master's timeline
+(encode frame n = master frame n; verified at n = 2400, 37.9 dB peak vs 25.1 dB at +-1); breathing
+`dec24.yuv` frame n = `orig.yuv` frame n. `eval_harness.py align` re-checks any suite.
+
+## Metrics (`eval_metrics.py`)
+
+All metrics are pure functions; planes are code values; tile sizes, windows and scales derive from the
+picture size; `NA` = insufficient data / not applicable (explicit, never 0). Rows are named
+`<metric>_<plane>`; "default" is the baseline run through the identical path. Flag rule = the report's
+verdict (`eval_report.RULES`):
+
+| flag | meaning |
+|---|---|
+| PASS | rule met |
+| FLAG | soft rule: worse than the default beyond tolerance |
+| FAIL | hard rule broken and the default does NOT already break it, or the candidate is worse than the default beyond SLACK (band/max_abs 0.05, kept 0.01, zero 0) |
+| LIMIT | absolute-vs-reference hard rule broken, but the default breaks it too and the candidate is not worse than the default beyond SLACK: input/codec-limited, not the candidate's fault (note kept) |
+| NA | cannot be judged (reason in `note`: frames < 8 for grain_hf, < 3 for lag1 / flicker, no GOP metadata, GOP longer than half the window, no flat tiles, no excursions, geometry differs) |
+| INFO | reported, not gated |
+
+A candidate is judged against the default AND against its own input: the `*_vs_input` metrics below
+are THE "grain never averaged away" and "BTB/WTW preserved" gates; the vs-reference rows mostly measure
+what the codec already destroyed.
+
+| # | metric (row name) | definition | units | pass rule |
+|---|---|---|---|---|
+| 1 | `psnr_Y/Cb/Cr` | 10 log10(peak^2 / MSE), peak = 2^bd - 1; identical -> `inf` | dB | candidate >= default - 0.05 dB |
+| 1 | `ssim_Y/Cb/Cr` | Wang 2004, Gaussian 11x11 sigma 1.5, K1 .01 K2 .03, L = 2^bd-1, valid region | 0..1 | >= default - 0.0005 |
+| 2 | `lpips` | LPIPS-alex on R'G'B' (correct matrix/range, no transfer change), mean over 9 deterministic square crops (edge ~ min(h,w)/8, multiple of 16, >= 64); CPU; `NA` without torch/lpips or cached weights (never downloads) | 0..1, lower better | <= default + 0.002 |
+| 3 | `grain_rms_ratio_Y/Cb` | residual = plane - gaussian_lowpass(sigma 2) on FLAT tiles chosen from the REFERENCE (tile ~ min/16 px; low-passed mean 20-80 % of range; mean low-passed gradient <= 0.4 % of peak/px; the 16 flattest); ratio = rms(out)/rms(ref) | ratio | PASS iff within +-5 % (hard) |
+| 3 | `grain_hf_ratio_*` | share of temporal-DFT energy of the residual above 0.25 cyc/frame, out / ref (needs >= 8 frames) | ratio | not farther from 1 than default + 0.10 |
+| 3 | `grain_lag1_delta_*` | per-pixel lag-1 temporal correlation of the residual, out minus ref (needs >= 3 frames); temporal averaging raises it | corr. | <= +0.05 (hard) |
+| 3 | `grain_keep_vs_input_Y/Cb` | rms(out residual) / rms(candidate INPUT residual) on the same reference-chosen flat tiles; only where input and output have the same geometry (Y in chroma444; all planes in `same`), else NA + note | ratio | PASS iff within +-5 % (hard; **the grain gate**) |
+| 3 | `grain_lag1_vs_input_Y/Cb` | lag-1 temporal correlation of the residual, out minus INPUT (same geometry only) | corr. | <= +0.05 (hard) |
+| 3 | `grain_tiles_*` | number of flat tiles found (0 -> grain rows NA) | count | INFO |
+| 4 | `flicker_excess_Y` | (V_out - V_ref)/(V_ref + 0.01): V = mean over tiles of var(diff over time of tile mean), 8-bit-equivalent codes^2; needs >= 3 frames | rel. | <= default + 0.05 |
+| 4 | `gop_ratio_gop`, `gop_ratio_minigop` | rss over 3 harmonics of the DFT amplitude of the normalised tile-detail-energy series at f = 1/GOP and 1/miniGOP (frames, from metadata), out / ref; NA if shorter than 2 periods or no metadata | ratio | not farther from 1 than default + 0.10 |
+| 5 | `ghost_coeff_Y` | <out_t - ref_t, ref_{t-1} - ref_t> / \|\|ref_{t-1} - ref_t\|\|^2 over a motion mask (1 = previous frame fully blended, 0 = none) | coeff. | <= default + 0.01 |
+| 5 | `smear_Y` | gradient energy out/ref inside the dilated motion mask (< 1 = softened motion) | ratio | not farther from 1 than default + 0.03 |
+| 5 | `duplicate_rate_Y` | share of transitions where the output repeats (MAD < 0.25 8-bit codes) while the reference changes (MAD >= 0.5) | 0..1 | <= default |
+| 6 | `halo_overshoot_Y` | mean amount out leaves the reference's local [min,max] envelope (odd window ~ min/120) in the near-edge band (local range > 5 % of peak) | share of range | <= default + 0.002 |
+| 6 | `lc_ratio_s1/s2/s3_Y`, `lc_boost_fraction_Y` | local std out/ref at sigma = min/540 x {1,2,4}; share of tiles whose averaged ratio > 1.05 ("restore lost local contrast only, no boost") | ratio / share | ratio <= 1.05 (hard); boost share <= default + 0.05 |
+| 7 | `btb_kept_Y/C`, `wtw_kept_Y/C` | share of reference pixels below nominal black (16<<(bd-8); chroma 16..240) / above nominal white (235<<(bd-8)) still beyond in the output; limited range only; NA when the reference has none | share | >= 0.99 (hard) |
+| 7 | `btb_kept_vs_input_Y/C`, `wtw_kept_vs_input_Y/C` | same, but against the candidate's INPUT: share of the input's beyond-limit pixels still beyond in the output (same-geometry planes only; NA otherwise) | share | >= 0.99 (hard; **the BTB/WTW gate**) |
+| 7 | `clip_detect_Y/C` | 1 if the output extremum sits exactly at a nominal limit while the reference exceeds it | 0/1 | must be 0 (hard) |
+| 8 | `cost_ms_per_frame_pyref` | median wall-clock ms/frame of a Python candidate, label **py-ref** | ms | INFO |
+| 8 | `cost_gpu_ms_laptop`, `cost_est_3090_ms` | capture sidecar `gpu_ms` (median) and `x gpu_ms_ratio` from `cost_ratios.json` | ms | INFO |
+
+Hard rules are judged on the candidate alone; when the default breaks them too and the candidate is
+not worse, the flag is LIMIT with the note "default also fails: input/codec-limited, candidate not worse"
+(e.g. the codec itself removes grain, so the vs-reference grain ratio and WTW kept fail for both). **3090 ratio:** RTX 3050 Ti Laptop -> RTX 3090 = **~0.2** (FP32 TFLOPS 5.3 ->
+35.6 = 0.15; memory bandwidth 192 -> 936 GB/s = 0.205), flagged **ESTIMATE**; it applies to GPU
+milliseconds only, never to py-ref wall-clock; 3090 runs confirm/tune, they never gate.
+
+## Output format
+
+`results.csv` / `results.md`: rows = content_type x clip x case x metric; columns `content_type, clip,
+case, metric, candidate, default, delta, trend (better|same|worse|NA), flag, note`; `inf` and `NA` are
+literal; the Markdown adds a per-content-type summary (mean candidate / default / delta, n, NA count,
+flag counts per metric). `run_log.txt` records versions, candidates and timings.
+
+## Suites
+
+`suites/*.json`: cases with `content_type, clip, case, protocol, frames, gop, minigop` and
+`master` / `coded` sources (`raw` with width/height/pix_fmt/start, `y4m`, or `ffmpeg` window).
+`suites/sample_chroma.json` is the sample (3 G18 4K sports-proxy cases, 1 nn-corpus tos4k film24 x265
+2160p window, 1 48-frame breathing GOP clip so temporal / GOP metrics have data). G18 cases have 4
+frames: temporal metrics show NA there by design.
+
+Optional case key `crop` = `{"x","y","w","h"}` (master luma coordinates, multiples of 4) crops master and
+coded frames before the protocol (a half-size coded rung is cropped at the scaled window), so Python
+reference candidates fit the CPU budget.
+
+## Python reference prototypes (chroma, mosquito)
+
+`candidates_chroma.py` (JBU, KrigBilateral-style, chroma-from-luma, motion-vector temporal chroma) and
+`candidates_mosquito.py` (ringing-zone MC repair with grain split and guard, spatial and naive
+variants) are offline Python REFERENCE candidates, not product code. `run_prototypes.py` scores several
+of them against one default in one pass (each case loaded once, default run once:
+`evaluate_suite(cache=..., extra=...)`) and adds family-specific rows (chroma: `psnr_edge_Cb/Cr`,
+`flicker_excess_Cb/Cr`; mosquito: `ringing_energy_ratio_Y`, `psnr_band_Y`, `edge_keep_*`). Suites
+`suites/proto_chroma.json`, `suites/proto_mosquito.json`; committed results in `prototypes/`; findings in
+`findings-chroma-mosquito.md`. Protocol `chroma444_true` scores chroma against a GENUINE 4:4:4 master
+(4:2:2 masters: horizontal-only partial check); case key `grain_probe: true` adds the near-edge grain gate
+(two-seed probe: the candidate is re-run on its input plus fixed-seed synthetic grain, rows
+`grain_probe_keep/lag1_{edge,flat}_vs_input_Y`; Python candidates only). The motion candidates use OpenCV DIS flow (`opencv-python-headless`) as a
+documented stand-in for VP's vector engine; their tests skip without OpenCV.
+
+```
+D:\hfr\venv\Scripts\python.exe -I tools/eval/run_prototypes.py --family chroma --suite tools/eval/suites/proto_chroma.json ^
+    --baseline chroma_bicubic --candidates chroma_jbu,chroma_krig,chroma_cfl,chroma_mv,chroma_mv_cfl,chroma_lanczos3 ^
+    --out D:\codex\videoprocessor\eval-scratch\proto-chroma --lpips
+```
+
+## TemporalDetail on real encodes (`--family temporal_detail`)
+
+`candidates_temporal_detail.py` drives the C++ CPU reference model (`src/VP-V/modules/repair/temporal_detail/
+TemporalDetailModel.h`) through `tools/td-cli/bin/td_cli.exe --stdio` (build: `tools/td-cli/build_td_cli.bat` from an
+x64 developer prompt, one small cl invocation). Vectors: OpenCV DIS flow reduced to the model's 16 px block grid
+(`tools/td-cli/td_flow.py`; trust = 1 - in-block flow spread / block, forward pair for the |Vf + Vb| term), a
+documented STAND-IN for VP's GPU vector engine. `td_cli` also has a file mode (`.yuv`/`.y4m` + `.tdv` vectors ->
+capture directory). Material: `make_td_encodes.py` regenerates 3 s x265 IBBBP streaming-like encodes (2160p and
+1080p rungs of 4 lossless masters; G18's 4-frame cases are too short) and the no-master no-harm suite (reference =
+input) from `D:\testclips\eval-2026-10-31`; both write central 960x544 crops to scratch. Extra rows: per-frame-type
+PSNR (`psnr_I/P/B_Y`), `ssim_B_Y`, `lpips_B`, `ib_gap_db_Y`, `detail_pulse_Y`, `grain_keep_vs_input_band1..4_Y`.
+`td_real_summary.py` merges runs (`--sweep` = one row per candidate); results in `prototypes/temporal_detail_real/`.
+Re-tune (`prototypes/temporal_detail_real/retune/`): `make_td_encodes.py --tier low|vlow` (2160p 6/4 Mb/s, 1080p
+2.5/1.5 Mb/s, vlow with pbratio 1.6), sweep candidates `td_s<margin>_b<base x>_u<px>[_boost]`, the active-picture
+rectangle detected per case (`detect_active`, a stand-in for VP's crop detector), and `td_regional.py` (transfer
+ceiling via `Tuning::forceWeight`, per-block master oracle, a local-evidence strength rule fitted on train clips and
+scored on held-out clips).
+
+```
+D:\hfrenv\Scripts\python.exe -I tools/eval/run_prototypes.py --family temporal_detail --suite tools/eval/suites/td_real.json ^
+    --baseline td_off --candidates td_b008 --out D:\codexideoprocessor\eval-scratch	est-td-realun-td_b008 --lpips
+```
+
+### TemporalDetail with real vectors (`td_vectors/`, test/td-real-vectors)
+
+Full 1080p frames (no crops) of the td_real encodes (`prep_data.py`); consecutive-pair vectors on a 4 px grid in the
+`vector_source.py` contract (`vecgen.py`: `dis`, `disref` = DIS seed + quarter-pel block refinement, `nvof` / `nvofref`
+= VP's NVIDIA optical flow seed from `tools/td-cli/bin/nvof_dump.exe` (+ the same refinement)), computed on the decoded
+frames ("engine") and on the master (the near-ideal ceiling applied to the decoded frames). `available_detail.py`:
+per frame type PSNR / fine-band energy, per-block oracle ceilings of fine-band transfer, full blend, a perfect
+reference and a vector-error-free offset search, the master's incoherent (grain) fine band. `td_run.py`: the CPU model
+through `td_cli --stdio` scored on the fly (`--gates-off` = `Tuning::gatesOff`). `td_banding.py`: light_metrics banding
+/ shadow texture (SDR, HDR-proxy -> SDR, deband, 8-bit nd / sigma-delta). `make_jobs.py` + `run_jobs.py` queue the
+runs, `summarize.py` writes the tables (`prototypes/temporal_detail_real/vectors/`). Outputs (vectors, frames) stay in
+scratch (`D:/codex/td-real-vectors-out`).
+
+## Candidate list (planned) and the metrics that gate each
+
+| candidate | what it must beat | gating metrics | guards (must not regress) |
+|---|---|---|---|
+| TemporalDetail | current detail path, same grain | lc_ratio / ssim_Y / lpips, smear | grain_rms_ratio, grain_hf_ratio, grain_lag1_delta, ghost_coeff, flicker_excess, halo_overshoot |
+| MV chroma reconstruction vs luma-guided joint-bilateral vs KrigBilateral / chroma-from-luma baselines (protocol chroma444) | `chroma_bicubic` | psnr_Cb/Cr, ssim_Cb/Cr, lpips | ghost_coeff, flicker_excess, btb_kept_C / wtw_kept_C, clip_detect_C |
+| MC mosquito repair, limited to edge-ringing zones, grain excluded | no repair | psnr_Y, ssim_Y, lpips, halo_overshoot | grain_rms_ratio (flat tiles untouched), grain_lag1_delta, smear, ghost_coeff |
+| motion-adapted scaler blend (SSIM-downscale vs Catmull-Rom by occlusion x confidence x speed) | the single fixed scaler | ssim_Y, lpips, smear, ghost_coeff | duplicate_rate, flicker_excess, halo_overshoot |
+| MC local tone mapping HDR -> SDR (restore only lost local contrast, no boost) | static TM | lc_ratio_s* <= 1.05, lc_boost_fraction ~ 0, halo_overshoot, flicker_excess | btb_kept / wtw_kept, clip_detect, grain_rms_ratio |
+| camera model on / off | off | ghost_coeff, smear, flicker_excess, psnr_Y | grain_*, duplicate_rate |
+| narrow vs full search | full search | psnr_Y, ghost_coeff, smear, cost | flicker_excess, gop_ratio_* |
+
+## Capture paths for VP-output candidates (inspected, not built or run)
+
+| path | produces | input or renderer OUTPUT | notes |
+|---|---|---|---|
+| `tools/vp-scale-render/` (VpScaleRender.cpp, VpScaleRenderCore.h; source last changed 2026-10-24) | drives the real VP renderer DLL off-screen; per picture / sequence frame writes a 16-bit PNG + JSON sidecar (`source_frame_counter`, hybrid motion mode, estimates) and a results line | **renderer output** | job-file CLI (`VpScaleRender.exe job.txt`: dll, config, shots, source w h rate, window, picture / picture_seq raw 10-bit LUMA, `motion vectors`, `capture per_frame`); input is luma-only raw, output is RGB R10 PNG -> needs a converter to `capture.json` + planar YUV. The binary `D:\nn-corpus\vp-scale-render\bin\VpScaleRender.exe` (2026-10-18) is stale: **rebuild needed before use**. |
+| `src/VideoProcessor-Test/RendererCaptureHarnessTests.cpp` (VP-0133) | shipped renderer DLL driven like the player with `capture_path` profile, rendered-output capture PNG (R10 codes in 16-bit) + JSON (`raw_r10_sha256`), `captureTimes` for several captures per run | **renderer output** | GPU tests: documented only, not run here; captures at chosen times, not every frame, no gpu_ms |
+| env `VP_RAW_CAPTURE_PATH` (`src/VP-V/modules/control/diagnostics/RawCaptureRecorder.cpp`, shortcut `raw_capture`) | raw capture-card frames `frame_NNNNNN.bin` + `frames.csv` + `capture.txt` | **input** | useful as candidate INPUT corpus, not as an output |
+| env `VP_SUBTITLE_CAPTURE_PATH` (`src/VideoProcessor-Lib/SubtitleMeasurementWorker.h`, see AGENTS.md) | one native input frame + `.txt` sidecar | **input** | single frame, diagnostic only |
+
+**Missing (follow-up):** a per-frame renderer-OUTPUT capture in a planar YCbCr/RGB format that stamps the
+source-frame index and per-frame GPU milliseconds into a `capture.json`-style sidecar (VpScaleRender
+has the index but is luma-in/PNG-out; the harness tests capture sparse frames). Until then a small
+converter script (PNG + sidecar -> `capture.json` + `.yuv`) is the bridge.
+
+## Known gaps (confirmed by the catalog)
+
+* No real ball/puck sports footage: Jockey, ReadySetGo, crowd_run, park_joy and meridian 60p are proxies.
+* No true 30p nature-documentary material: meridian 30p and decimated boat4k / foodmarket4k 60p are proxies.
+* Dark = `tos_dark_2stops_23976p_3min.mp4` plus dark windows of cosmos / meridian / tos4k.
+* HDR -> SDR tone-mapping material: only chimera4k (PQ); meridian / cosmos "HDR" names carry no tags.
+* No SVT-AV1 encoder in `D:\tools\ffmpeg` (essentials 9.0.2): AV1 only as existing decodes / pairs.
+* Synthetic sports generator not written: `eval_synth.generate_sports_clip(spec)` is the hook (raises
+  `NotImplementedError`; spec fields documented in `SPORTS_SPEC_FIELDS`: object size/speed as fractions of
+  the picture height, shutter angle -> blur length, background pan, grain, occlusion, fps-derived steps,
+  seed). `tiny_clip` is TEST-ONLY.
+* Chroma metrics on G18 compare against 4-frame windows only (no temporal metrics there); LPIPS is a
+  tile-crop estimate, not full-frame.
+* Capture-candidate path has no producer yet (see "Missing" above).
+
+## S2 shadow-ramp suite, light-level metrics and stack runner
+
+* **S2 suite** (`suites/s2_shadow_ramps.json`, generator `s2_synth.py`, rewrite with `python -I tools/eval/s2_synth.py`):
+  synthetic 0.01-20 nit gradients (horizontal / vertical / radial, linear in PQ) x contexts (SDR BT.1886 100 / 0.05 nit,
+  HDR PQ 1000 / 4000 nit, LLDV-like 1000 / 4000) x seeded grain 0 / 0.5 / 1.5 delivered codes; `master` = ideal + grain,
+  `coded` = quantised to the delivered depth without dither. Cases are `kind: "synth"` (no `eval_io` loader): call
+  `s2_synth.make_case(case["master"]["params"])`.
+* **Light-level metrics**: `light_level_ref.py` mirrors the per-code light-level LUT (J, S, V, L, sdr_code; J_eff tiles from
+  the master). `light_metrics.py` gives `shadow_banding` (coarse-error MSE and step p99 in display PQ codes for J_eff < 5 nit
+  and 5-50 nit) and `shadow_texture_kept` (projection of the candidate's fine band on the master's, relative to plain; gate 0.97).
+* **Runner**: `stack_runner.py` runs SDR, HDR-PQ passthrough and HDR->SDR (static `tonemap_ref` spline) contexts through
+  plain, each stand-in stage alone (s1 texture oracle, s2 VP deband model, s3 cr_gs tone mapping, s4 sigma-delta), 1+2, 1+2+3
+  and the "+4" sigma-delta finals; every output ends 8-bit, with a no-dither 8-bit variant (`nd`) for scale. Writes
+  `stack_s2.csv`, `stack_s2.md`, `run_log.txt`.
+
+```
+python -I tools/eval/stack_runner.py --suite s2 --max-cases 6 --size-frac 0.125   # quick subset: 6 cases, 480x270 windows, ~3 min CPU
+python -I tools/eval/stack_runner.py --suite s2 --max-cases 0 --size-frac 0.25     # full run (suite size 960x540, 18 runnable cases, ~17 min CPU)
+python -I tools/eval/test_light_eval.py                                # tests
+```
+
+* **sRGB note**: sRGB is approximated by gamma 2.2 only in the SDR tone-shape power (as the renderer does); the
+  Display/Inverse transforms in `light_level_ref.py` use the exact piecewise sRGB curve.
+* **Gates**: grain ratio and texture kept compare each candidate with the plain chain using the SAME final step (nd vs plain,
+  +4 vs plain+4); the absolute cand/master grain ratio is a separate column. Texture kept is NA when plain keeps < 0.25 of the
+  master texture. btb counts a master pixel only if below black by more than half an output code step (2 ten-bit codes for 8-bit).
+
+The committed run (`prototypes/stack_s2/`) is the full 18-case run at 960x540 (the runner supports the sdr and hdr_pq_1000 contexts; the suite's hdr_pq_4000 and lldv cases have no runner context); read it as relative ordering only (stand-in stages).
+
+## Streaming-realistic suite (`streaming_*.json`)
+
+Fixed-bitrate x265 encodes are kinder than real streaming: services starve dark / grainy / fast shots with per-shot
+VBR under a capped average, and players drop to low ladder rungs during congestion. This suite models that.
+
+* **Generator** `make_streaming_encodes.py` (rules and presets in `streaming_presets.py`, documented there):
+  shots found with ffmpeg's scene score; each shot is an independent closed-GOP segment whose bitrate follows
+  `complexity^0.6` (complexity = x264 CRF probe at a fixed analysis width), clamped to 0.5-1.5x the rung average
+  so the average is capped and hard shots are starved; ladders `hd` (1080p 6/4.5/3 Mb/s, 720p 1.5) and `uhd`
+  (2160p 16/12/8, 1080p 4.5) scaled by real pixel area and frame rate (never upscaled, any master size);
+  presets `hevc_gop2`/`hevc_gop4` (x265 Main10, 2/4 s closed GOP, 3-4 B-frames, AQ mode 3, VBV 1.5x),
+  `av1` and `av1_fgs` (SVT-AV1, film-grain synthesis); rung switches (`--switch congestion`) splice per-rung
+  decodes at IDR points, lower rungs bicubic-upscaled to the top raster like a player; `--uniform` makes the
+  fixed-bitrate control. Deterministic (fixed threads, bitexact muxing; `stream_md5` per case in the suite).
+  Pixels are scratch only (`D:/codex/videoprocessor/eval-scratch/streaming-suite/enc`); free space is checked
+  (>= 15 GB). Suites carry `"nr_metrics": true`.
+* **No-reference metrics** `nr_metrics.py`: `nr_band` (banding step visibility on smooth tiles), `nr_block`
+  (block-grid periodicity at any phase), `nr_ring` (ringing beside strong edges over the noise floor),
+  `nr_noise` (flat-area noise sigma), `nr_poor_index_p95` (worst artefact over its "poor" threshold,
+  `nr_thresholds.json`). All in 8-bit units, sizes derived from the plane height. `nr_validate.py` correlates them
+  with full-reference counterparts on the generated encodes (`findings-streaming.md`).
+* **Runner hook**: `eval_harness.py run ... --also-suite tools/eval/suites/streaming_hevc.json` (repeatable, or
+  `VP_EVAL_ALSO_SUITES`) scores the same candidate/default on the streaming suite; its cases add `nr_*` rows
+  (judged lower-is-better except `nr_noise`, which is informational).
+* **Recordings** `scan_recordings.py --root D:/testclips/pulldown --out <scratch>`: read-only scan of
+  StreamRecorder folders; per recording the NR quality per second and the spans where it is "poor". Needs pixels
+  (`raw_*.bin`, or `nr.csv`); thumbnail-only folders are shown but never flagged; timing-only folders (frames.csv
+  + labels.csv, like the current library) get a cadence/timing summary only.
+
+Tests: `python -I -m unittest discover -s tools/eval -p "test_streaming*.py" -v`.

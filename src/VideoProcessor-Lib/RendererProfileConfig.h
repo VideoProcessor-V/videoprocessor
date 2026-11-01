@@ -920,6 +920,8 @@ namespace RendererProfileConfig
 			// to the polar filter on his clip, about 1/7 of its cost); upscaler = the
 			// main upscaler (Bill's VP).
 			if (key == "chroma_upscaler") return IsChoice(value, { "auto", "upscaler", "ewa_lanczossharp", "ewa_lanczos", "lanczos", "catmull_rom", "bicubic", "bilinear" });
+			// VP-V scaling.chroma_upscale (2026-10-31; candidate, off until GPU-validated)
+			if (key == "chroma_upscale_vp") return IsChoice(value, { "off", "cfl" });
 			if (key == "downscaler")
 			{
 				// Accept the two removed spellings only as legacy input so an old

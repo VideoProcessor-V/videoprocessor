@@ -208,12 +208,16 @@ def geom_variants(a, g):
 
 
 # ------------------------------------------------------------------------------------ job / cfg text
-def cfg_text(settings):
+def cfg_text(settings, viewport=None):
     kv = dict(S["common"])
     kv.update(settings)
     kv["source_resolution"] = "native"
     body = [f"{k}: {v}" for k, v in kv.items()]
-    return "\n".join(["[general]", "persist_profile_selection: false", "[vprenderer]"] + body + ["[vprenderer.Default]"] + body) + "\n" + S["shader_sections"] + "\n"
+    lines = ["[general]", "persist_profile_selection: false", "[vprenderer]"] + body + ["[vprenderer.Default]"] + body
+    if viewport:   # the geometry's screen profile (the first named viewport profile is the default)
+        lines += ["[vprenderer.viewport.sweep]", "label: sweep"] + [f"{k}: {v}" for k, v in viewport.items()]
+        lines += ["[vprenderer.zoom.sweep]", "label: sweep", "automatic_crop: false"]
+    return "\n".join(lines) + "\n" + S["shader_sections"] + "\n"
 
 
 def src_raw(work, g, pic):
@@ -270,7 +274,7 @@ class Plan:
                     self.jobs.append(dict(id=jid, dir=os.path.join(self.work, "vp", jid), geom=g["id"], variant=v["id"], stage=si + 1,
                                           final=last, base=v["base"], feed="stage1" if si == 1 else "delivered",
                                           source=list(route_size(g["src"]) if si == 1 else g["src"]), window=list(window),
-                                          shaders=shaders, hooks=hooks_for(shaders), cfg=cfg_text(settings)))
+                                          shaders=shaders, hooks=hooks_for(shaders), cfg=cfg_text(settings, g.get("viewport"))))
         self.check()
 
     def geom(self, gid):
@@ -464,12 +468,14 @@ def prepare_cmd(a, g, pic, master_path, outs):
     sel = f"between(n\\,{pic['frame']}\\,{pic['frame'] + pic['n'] - 1})"
     sw, sh = g["src"]
     ow, oh = g["out"]
-    chain = (f"[0:v]select={sel},scale={CANVAS[0]}:{CANVAS[1]}:force_original_aspect_ratio=decrease:flags=lanczos,"
-             f"pad={CANVAS[0]}:{CANVAS[1]}:(ow-iw)/2:(oh-ih)/2,extractplanes=y,split=3[a][b][c];"
+    fit = (f"scale={CANVAS[0]}:{CANVAS[1]}:force_original_aspect_ratio=increase:flags=lanczos,crop={CANVAS[0]}:{CANVAS[1]}" if g.get("fill") else
+           f"scale={CANVAS[0]}:{CANVAS[1]}:force_original_aspect_ratio=decrease:flags=lanczos,pad={CANVAS[0]}:{CANVAS[1]}:(ow-iw)/2:(oh-ih)/2")
+    chain = (f"[0:v]select={sel},{fit},format=yuv420p10le,extractplanes=y,split=3[a][b][c];"
              f"[a]scale={sw}:{sh}:flags=lanczos[s];[b]scale={ow}:{oh}:flags=lanczos[r];[c]scale={ow}:{oh}:flags=bicubic:param0=0:param1=0.5[k]")
-    cmd = [a.ffmpeg, "-y", "-v", "error", "-threads", str(a.threads), "-fps_mode", "passthrough", "-i", master_path, "-filter_complex", chain]
+    # ffmpeg 9: -fps_mode is an output option (before each output); extractplanes needs a fixed input format.
+    cmd = [a.ffmpeg, "-y", "-v", "error", "-threads", str(a.threads), "-i", master_path, "-filter_complex", chain]
     for label, path in zip("srk", outs):
-        cmd += ["-map", f"[{label}]", "-frames:v", str(pic["n"]), "-f", "rawvideo", "-pix_fmt", "gray10le", path]
+        cmd += ["-map", f"[{label}]", "-fps_mode", "passthrough", "-frames:v", str(pic["n"]), "-f", "rawvideo", "-pix_fmt", "gray10le", path]
     return cmd
 
 
@@ -497,12 +503,34 @@ def assemble(work, g, kind):
                 f.write(yuv420p10_bytes(pad_codes(fr, g["window"])))
 
 
+def prepared(plan):
+    """The geometries whose prepare output (suite + ref + coded) is missing."""
+    return [g["id"] for g in plan.geoms if not all(os.path.exists(p) for p in (
+        os.path.join(plan.work, "suites", g["id"] + ".json"), os.path.join(plan.work, "ref", g["id"] + ".yuv"),
+        os.path.join(plan.work, "coded", g["id"] + ".yuv")))]
+
+
 def prepare(a, plan):
+    """Returns 0, or 1 after printing every failed picture (partial outputs removed; nothing assembled for it)."""
     masters = dict(MASTERS)
+    failed = []
     for g in plan.geoms:
+        ok = True
         for p in g["pics"]:
             outs = [src_raw(plan.work, g, p)] + [os.path.join(plan.work, "pre", k, g["id"], p["tag"] + ".y16") for k in ("ref", "coded")]
-            run_or_print(a, prepare_cmd(a, g, p, masters[p["master"]], outs), outs[0])
+            try:
+                if not a.dry_run:
+                    for o in outs:   # every output's folder (ffmpeg opens all three)
+                        os.makedirs(os.path.dirname(o), exist_ok=True)
+                run_or_print(a, prepare_cmd(a, g, p, masters[p["master"]], outs), outs[0])
+            except (subprocess.CalledProcessError, OSError) as e:
+                print(f"PREPARE FAILED {g['id']} {p['tag']}: {e}", flush=True)
+                for o in outs:
+                    if os.path.exists(o):
+                        os.remove(o)
+                failed.append(f"{g['id']}/{p['tag']}")
+                ok = False
+                continue
             if a.encode_kbps and g["sweep"] in (2, 4) and g["form"] == "up":
                 enc, dec = encode_cmds(a, g, p, outs[0])
                 if a.dry_run:
@@ -514,11 +542,17 @@ def prepare(a, plan):
         if a.dry_run:
             print(f"    assemble {g['id']}: ref/ coded/ yuv + suites/{g['id']}.json")
             continue
+        if not ok:
+            continue
         for kind in ("ref", "coded"):
             assemble(plan.work, g, kind)
         os.makedirs(os.path.join(plan.work, "suites"), exist_ok=True)
         with open(os.path.join(plan.work, "suites", g["id"] + ".json"), "w", newline="\n") as f:
             json.dump(suite_json(g, plan.work), f, indent=1)
+    if failed:
+        print("PREPARE FAILED for", len(failed), "picture(s); render/score refuse until prepare succeeds:", *failed, sep="\n  ")
+        return 1
+    return 0
 
 
 # ------------------------------------------------------------------------------------ render
@@ -743,8 +777,12 @@ def main(argv=None):
         print(*["PROBLEM: " + p for p in plan.problems], sep="\n")
         return 1
     if a.stage == "prepare":
-        prepare(a, plan)
-        return 0
+        return prepare(a, plan)
+    if a.stage in ("render", "score") and not a.dry_run:
+        missing = prepared(plan)
+        if missing:
+            print("PROBLEM: prepare output missing for", ", ".join(missing), "- run prepare first (it must exit 0)")
+            return 1
     return {"render": render, "score": score, "report": report}[a.stage](a, plan)
 
 

@@ -410,6 +410,138 @@ namespace Tests
 			Assert::AreEqual(epoch + 2, tracker.Epoch());
 		}
 
+		// Bug hunt 37 S1: an HDMI re-sync (Apple TV match frame rate) drops the capture signal for
+		// longer than the 1.5 s invalid-state grace. The PQ epoch is suspended, not ended, and
+		// resumes at once when the signal returns eligible inside the window.
+		TEST_METHOD(SignalGapSuspendsAndResumesPq)
+		{
+			uint64_t now = 0;
+			HdrInferenceSignal signal = LldvSignal();
+			HdrInferenceTracker tracker = InferredTracker(signal, now);
+			Shot(tracker, now, 1000, true);
+			Assert::AreEqual(1u, tracker.ShotsWithEvidence());
+			const uint64_t epoch = tracker.Epoch();
+			HdrInferenceSignal invalid = signal;
+			invalid.valid = false;
+			auto update = tracker.OnSignal(invalid, now);
+			Assert::IsTrue(update.event == HdrInferenceEvent::Suspended);
+			Assert::IsTrue(update.effectiveChanged);
+			Assert::IsTrue(tracker.State() == HdrInferenceState::Suspended);
+			Assert::IsFalse(tracker.IsInferredPq());
+			Assert::IsFalse(tracker.WantsPictureStatistics());
+			// Repeated invalid notifications and ticks inside the window change nothing.
+			for (uint64_t t = 1000; t < 9000; t += 1000)
+			{
+				Assert::IsTrue(tracker.OnSignal(invalid, now + t).event == HdrInferenceEvent::None);
+				Assert::IsTrue(tracker.OnTick(now + t).event == HdrInferenceEvent::None);
+			}
+			// Back at another rate (a new signal key) within the window: PQ at once, a new epoch,
+			// fresh veto evidence. No stabilising pass through SDR.
+			signal.signalKey = 0x5555;
+			update = tracker.OnSignal(signal, now + 9000);
+			Assert::IsTrue(update.event == HdrInferenceEvent::NewEpoch);
+			Assert::IsTrue(update.effectiveChanged);
+			Assert::IsTrue(tracker.IsInferredPq());
+			Assert::IsTrue(tracker.ResumedAfterGap());
+			Assert::AreEqual(epoch + 1, tracker.Epoch());
+			Assert::AreEqual(0u, tracker.ShotsWithEvidence());
+			// The same key returning resumes too, and the veto still works in the resumed epoch.
+			tracker.OnSignal(invalid, now + 10000);
+			Assert::IsTrue(tracker.OnSignal(signal, now + 12500).event == HdrInferenceEvent::NewEpoch);
+			Assert::IsTrue(tracker.IsInferredPq());
+			now += 12500;
+			Shot(tracker, now, 1000, true);
+			Shot(tracker, now, 1000, true);
+			Shot(tracker, now, 1000, false);
+			Assert::IsTrue(tracker.State() == HdrInferenceState::VetoedSdr);
+		}
+
+		TEST_METHOD(SignalGapLongerThanTheWindowOrIneligibleReturnEnds)
+		{
+			for (int variant = 0; variant < 4; ++variant)
+			{
+				uint64_t now = 0;
+				const HdrInferenceSignal signal = Hdr10FlagDroppedSignal();
+				HdrInferenceTracker tracker = InferredTracker(signal, now);
+				HdrInferenceSignal invalid = signal;
+				invalid.valid = false;
+				Assert::IsTrue(tracker.OnSignal(invalid, now).event == HdrInferenceEvent::Suspended);
+				const uint64_t window = tracker.Options().resumeWindowMs;
+				if (variant == 0)
+				{
+					// The window runs out on a tick: ended; the return stabilises again.
+					Assert::IsTrue(tracker.OnTick(now + window - 1).event == HdrInferenceEvent::None);
+					const auto update = tracker.OnTick(now + window);
+					Assert::IsTrue(update.event == HdrInferenceEvent::Ended);
+					Assert::IsFalse(update.effectiveChanged);
+					Assert::IsTrue(tracker.State() == HdrInferenceState::NotEligible);
+					Assert::IsTrue(tracker.OnSignal(signal, now + window + 1).event == HdrInferenceEvent::CandidateSeen);
+					Assert::IsFalse(tracker.IsInferredPq());
+				}
+				else if (variant == 1)
+				{
+					// The window runs out on an invalid notification.
+					Assert::IsTrue(tracker.OnSignal(invalid, now + window).event == HdrInferenceEvent::Ended);
+					Assert::IsTrue(tracker.State() == HdrInferenceState::NotEligible);
+				}
+				else if (variant == 2)
+				{
+					// Late return with no tick in between: stabilises from scratch, never PQ at once.
+					const auto update = tracker.OnSignal(signal, now + window + 500);
+					Assert::IsTrue(update.event == HdrInferenceEvent::CandidateSeen);
+					Assert::IsTrue(tracker.State() == HdrInferenceState::Waiting);
+					Assert::IsFalse(tracker.IsInferredPq());
+				}
+				else
+				{
+					// Back inside the window as real SDR (Rec.709): ended, not resumed.
+					HdrInferenceSignal menu = signal;
+					menu.colorspace = ColorSpace::REC_709;
+					const auto update = tracker.OnSignal(menu, now + 2000);
+					Assert::IsTrue(update.event == HdrInferenceEvent::Ended);
+					Assert::IsFalse(update.effectiveChanged);
+					Assert::IsTrue(tracker.State() == HdrInferenceState::NotEligible);
+				}
+			}
+		}
+
+		TEST_METHOD(SignalGapEndsAtOnceForTheOriginalHeuristicWindowZeroAndNonPqStates)
+		{
+			// Original heuristic (Bill's) and resumeWindowMs = 0: the gap ends the epoch as before.
+			for (int variant = 0; variant < 2; ++variant)
+			{
+				HdrInferenceOptions options;
+				if (variant == 0) options.originalHeuristic = true; else options.resumeWindowMs = 0;
+				HdrInferenceTracker tracker;
+				tracker.SetOptions(options);
+				const HdrInferenceSignal signal = LldvSignal();
+				tracker.OnSignal(signal, 0);
+				tracker.OnSignal(signal, 1500);
+				Assert::IsTrue(tracker.IsInferredPq());
+				HdrInferenceSignal invalid = signal;
+				invalid.valid = false;
+				const auto update = tracker.OnSignal(invalid, 2000);
+				Assert::IsTrue(update.event == HdrInferenceEvent::Ended);
+				Assert::IsTrue(tracker.State() == HdrInferenceState::NotEligible);
+				Assert::IsTrue(tracker.OnSignal(signal, 3000).event == HdrInferenceEvent::CandidateSeen);
+			}
+			// A waiting candidate is cleared by a gap as before (only PQ epochs are suspended).
+			HdrInferenceTracker tracker;
+			const HdrInferenceSignal signal = LldvSignal();
+			tracker.OnSignal(signal, 0);
+			HdrInferenceSignal invalid = signal;
+			invalid.valid = false;
+			Assert::IsTrue(tracker.OnSignal(invalid, 500).event == HdrInferenceEvent::CandidateCleared);
+			// newlldv switched off while suspended: off, ended.
+			tracker.OnSignal(signal, 1000);
+			tracker.OnSignal(signal, 2500);
+			Assert::IsTrue(tracker.OnSignal(invalid, 3000).event == HdrInferenceEvent::Suspended);
+			HdrInferenceSignal off = invalid;
+			off.enabled = false;
+			Assert::IsTrue(tracker.OnSignal(off, 3500).event == HdrInferenceEvent::Ended);
+			Assert::IsTrue(tracker.State() == HdrInferenceState::Off);
+		}
+
 		TEST_METHOD(ModeChangeDuringPqKeepsPqAndResetsVetoEvidence)
 		{
 			uint64_t now = 0;

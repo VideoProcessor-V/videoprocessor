@@ -31,6 +31,7 @@ namespace TemporalDetail
 	constexpr double kWienerKappa = 2.0;        // f = clamp(1 - kappa N / e3x3, 0, 1)
 	constexpr double kEnergyFloor = 1e-3;       // codes^2, added to q and to divisions
 	constexpr int kSlots = 5;                   // K past slots (one more, the future slot, in queued modes)
+	constexpr uint32_t kUnitVersion = 1;        // the td.* products' unit version (core/ProductCatalog.h)
 	constexpr int kMaxFutureFrames = 8;         // future frames the model looks at
 
 	// Guard (README step 3)
@@ -77,6 +78,18 @@ namespace TemporalDetail
 	constexpr double kGuardRiseTrip = 0.05;              // output grain level above the input's that trips
 	constexpr double kGuardFreezeTrip = 0.03;            // lag-1 grain correlation increase that trips (0.05 before the structure-transfer exclusion)
 	constexpr double kGuardRelease = 0.5;                // hysteresis: released below this share of the trip level
+	// Per-block gate factors (FrameIn::blockGates / Gpu::Params::blockGates), sanitised identically on the CPU model and the
+	// GPU (merge audit 2026-11-01): a non-finite factor is 1; the three threshold factors are bounded to
+	// [kBlockGateMin, kBlockGateMax] (a 0 would make a smoothstep edge pair equal); the strength factor to [0, 1] (never above
+	// the user's strength, so no lift past the grain-side cap).
+	constexpr double kBlockGateMin = 0.25, kBlockGateMax = 4.0;
+	constexpr int kRunSaturate = 1 << 20;       // softRun / vetoRun saturate here (model and shader alike; keeps the float state exact)
+	inline double SanitizeBlockGate(double v, int k)
+	{
+		if (!(v == v) || v > 1e30 || v < -1e30) return 1.0;
+		const double lo = k == 3 ? 0.0 : kBlockGateMin, hi = k == 3 ? 1.0 : kBlockGateMax;
+		return v < lo ? lo : (v > hi ? hi : v);
+	}
 	constexpr double kGuardFallSeconds = 0.1, kGuardRiseSeconds = 2.0;   // guard factor rate limits (slow recovery: no trip/release cycling under damage)
 	constexpr double kGuardAddBackMin = 0.01;            // measured current-grain loss below this is not added back
 	constexpr double kGuardMaxShare = 0.2;               // guard statistics use grain-dominated pixels only (Wiener share f below this)
@@ -101,14 +114,90 @@ namespace TemporalDetail
 	// GrainScale (vprenderer/GrainPreserve.h): 1 at <= 2160 lines, lines / 2160 above.
 	inline double Scale(double planeLines) { return planeLines > 2160.0 ? planeLines / 2160.0 : 1.0; }
 
-	enum class Mode { Off, Steady };
+	// The active picture (the renderer's trusted black-bar / picture rect, scaled to this plane; right/bottom exclusive).
+	// Everything (band splits, statistics, gates, templates, transfer, boost, cleaner, grain guard and add-back) runs
+	// inside it with its border treated as the plane edge (taps clamp there, never reach into a bar); pixels outside are
+	// copied unchanged. Empty (right <= left or bottom <= top) = the whole plane.
+	struct ActiveRect
+	{
+		int left = 0, top = 0, right = 0, bottom = 0;
+		bool operator==(const ActiveRect& o) const { return left == o.left && top == o.top && right == o.right && bottom == o.bottom; }
+		bool operator!=(const ActiveRect& o) const { return !(*this == o); }
+		// Clamped to a w x h plane; the whole plane when empty or degenerate.
+		ActiveRect Resolve(int w, int h) const
+		{
+			ActiveRect r;
+			r.left = (std::max)(0, (std::min)(w, left)); r.right = (std::max)(0, (std::min)(w, right));
+			r.top = (std::max)(0, (std::min)(h, top)); r.bottom = (std::max)(0, (std::min)(h, bottom));
+			if (r.right <= r.left || r.bottom <= r.top) { r.left = 0; r.top = 0; r.right = w; r.bottom = h; }
+			return r;
+		}
+		int Width() const { return right - left; }
+		int Height() const { return bottom - top; }
+	};
+
+	// off; steady (always on); auto (on only while the source-ID consensus says the stream is low quality: AutoGate).
+	enum class Mode { Off, Steady, Auto };
 
 	struct Settings
 	{
 		Mode mode = Mode::Off;
 		double strength = 1.0;       // 0 .. 1
 		double maxAgeSeconds = 2.0;  // 0.25 .. 4
-		double boostMax = 0.15;      // 0 .. 0.3
+		bool boost = false;          // the fallback boost (owner 2026-10-31: off unless re-validated on real encodes)
+		double boostMax = 0.15;      // 0 .. 0.3 (used when boost is on)
+	};
+
+	// The gate thresholds real B-frames will re-tune (owner 2026-10-31): defaults are the model's constants.
+	struct GateTuning
+	{
+		double strongerMargin = kStrongerMargin;     // reference stronger: E1(S_w) > (1 + m) E1(S)
+		double significanceLo = kSignificanceLo;     // reference fine energy over the grain level: zero at
+		double significanceHi = kSignificanceHi;     // ... full at
+		double baseNoiseCodes = kBaseNoiseCodes;     // base match allowance: coding noise ...
+		double baseGrainSigmas = kBaseGrainSigmas;   // ... plus this many grain RMS (of the base band: / 4)
+		double uncertaintyPx = kUncertaintyPx;       // motion uncertainty limit (x Scale)
+	};
+
+	// AUTO mode (temporal_detail = auto): engages only while the source-ID consensus (input.source_analysis identity,
+	// SourceIdConsensus Result.value.qualityTier: 0 = lowest .. 3, -1 = unknown; already latched with its own dwell) says
+	// the stream is low quality, with hysteresis in time on top: engage after the tier has been <= engageTier for
+	// engageSeconds, release after it has been above engageTier (or unknown) for releaseSeconds. Frame counts follow the
+	// measured content rate. Status() is the visible line ("auto: on (stream quality tier 1)", ...).
+	class AutoGate
+	{
+	public:
+		struct Params
+		{
+			int engageTier = 1;            // tiers 0..1 = bitrate quality below 0.5 (SourceIdVote qualityTierEdges)
+			double engageSeconds = 1.0;
+			double releaseSeconds = 3.0;
+		};
+		AutoGate() = default;
+		explicit AutoGate(const Params& p) : m_p(p) {}
+		// One presented source frame; returns whether temporal detail runs on it.
+		bool Update(int qualityTier, double hz)
+		{
+			const bool low = qualityTier >= 0 && qualityTier <= m_p.engageTier;
+			m_tier = qualityTier;
+			if (low == m_on) m_run = 0;
+			else if (++m_run >= Frames(m_on ? m_p.releaseSeconds : m_p.engageSeconds, hz)) { m_on = low; m_run = 0; }
+			return m_on;
+		}
+		bool On() const { return m_on; }
+		void Reset() { m_on = false; m_run = 0; m_tier = -1; }
+		std::string Status() const
+		{
+			if (m_tier < 0) return m_on ? "auto: on (stream quality unknown, releasing)" : "auto: idle (no stream quality estimate)";
+			const std::string t = std::to_string(m_tier);
+			if (m_on) return "auto: on (stream quality tier " + t + (m_tier > m_p.engageTier ? ", releasing)" : ")");
+			return "auto: idle (stream quality tier " + t + (m_tier <= m_p.engageTier ? ", engaging)" : ")");
+		}
+
+	private:
+		Params m_p;
+		bool m_on = false;
+		int m_run = 0, m_tier = -1;
 	};
 
 	inline std::string ToLower(std::string s)
@@ -127,8 +216,8 @@ namespace TemporalDetail
 		return true;
 	}
 
-	// Keys temporal_detail (off|steady), temporal_detail_strength (0..1), temporal_detail_max_age (0.25..4),
-	// temporal_detail_boost_max (0..0.3). An invalid value adds a message to errors and keeps the previous
+	// Keys temporal_detail (off|steady|auto), temporal_detail_strength (0..1), temporal_detail_max_age (0.25..4),
+	// temporal_detail_boost (on|off, default off), temporal_detail_boost_max (0..0.3). An invalid value adds a message to errors and keeps the previous
 	// value of inOut; unknown keys are ignored. Returns true when every present key was valid.
 	inline bool ParseSettings(const std::map<std::string, std::string>& kv, Settings& inOut, std::vector<std::string>* errors)
 	{
@@ -144,7 +233,16 @@ namespace TemporalDetail
 			const std::string v = ToLower(it->second);
 			if (v == "off") inOut.mode = Mode::Off;
 			else if (v == "steady") inOut.mode = Mode::Steady;
-			else fail(it->first, "expected off or steady, got '" + it->second + "'");
+			else if (v == "auto") inOut.mode = Mode::Auto;
+			else fail(it->first, "expected off, steady or auto, got '" + it->second + "'");
+		}
+		it = kv.find("temporal_detail_boost");
+		if (it != kv.end())
+		{
+			const std::string v = ToLower(it->second);
+			if (v == "on") inOut.boost = true;
+			else if (v == "off") inOut.boost = false;
+			else fail(it->first, "expected on or off, got '" + it->second + "'");
 		}
 		auto number = [&](const char* key, double lo, double hi, double& target)
 		{

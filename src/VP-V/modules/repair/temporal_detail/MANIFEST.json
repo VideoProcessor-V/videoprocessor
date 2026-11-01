@@ -9,11 +9,13 @@
   "live_files": [
     "src/VP-V/modules/repair/temporal_detail/TemporalDetail.h",
     "src/VP-V/modules/repair/temporal_detail/TemporalDetailMotion.h",
-    "src/VP-V/modules/repair/temporal_detail/TemporalDetailProducts.h",
     "src/VP-V/modules/repair/temporal_detail/TemporalDetailModel.h",
     "src/VP-V/modules/repair/temporal_detail/TemporalDetailShaders.h",
+    "src/VP-V/modules/repair/temporal_detail/TemporalDetailGpu.h",
+    "src/VP-V/modules/repair/temporal_detail/TemporalDetailGpu.cpp",
     "src/VP-V/modules/repair/temporal_detail/README.md",
-    "src/VP-V/modules/repair/temporal_detail/tests/TemporalDetailModelTests.cpp"
+    "src/VP-V/modules/repair/temporal_detail/tests/TemporalDetailModelTests.cpp",
+    "src/VP-V/modules/repair/temporal_detail/tests/TemporalDetailGpuTests.cpp"
   ],
   "forwarding_headers": [],
   "components": {
@@ -28,6 +30,7 @@
     "tools": [],
     "config_keys": [
       "temporal_detail",
+      "temporal_detail_boost",
       "temporal_detail_boost_max",
       "temporal_detail_max_age",
       "temporal_detail_strength"

@@ -67,7 +67,7 @@ def cpu_filter(manifest):
 
 
 def gpu_filter(manifest, cats=None):
-    cats = lib.EXCLUDED_FROM_CPU if cats is None else cats
+    cats = lib.GPU_DEFAULT_EXCLUDED if cats is None else cats
     parts = clauses(manifest, False, cats) + [f'Category={c}' for c in cats]
     return '|'.join(parts)
 

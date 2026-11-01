@@ -468,7 +468,7 @@ namespace LedDrive
 		}
 	}
 
-	FrameStats StatsBuilder::Build(const RawMeasurement& raw, double timeMs)
+	FrameStats StatsBuilder::Build(const RawMeasurement& raw, double timeMs, double sourcePeriodMs)
 	{
 		FrameStats stats;
 		if (raw.blocks == 0) return stats;
@@ -523,16 +523,19 @@ namespace LedDrive
 			aplHistory.pop_front();
 		// Keep the newest sample at or before the window's start, so the
 		// samples kept span the whole window.
-		while (aplHistory.size() > 2 && aplHistory[1].time <= timeMs - config.fadeMs + 1e-6)
+		// Bug hunt 31: fade keys written in source frames follow the measured period (not 24 Hz).
+		const double fadeMs = config.EffectiveFadeMs(sourcePeriodMs);
+		const double fadeMinSlope = config.EffectiveFadeMinSlope(sourcePeriodMs);
+		while (aplHistory.size() > 2 && aplHistory[1].time <= timeMs - fadeMs + 1e-6)
 			aplHistory.pop_front();
-		if (aplHistory.size() >= 2 && timeMs - aplHistory.front().time >= config.fadeMs - 1e-6)
+		if (aplHistory.size() >= 2 && timeMs - aplHistory.front().time >= fadeMs - 1e-6)
 		{
 			bool falling = true;
 			for (size_t i = 1; i < aplHistory.size(); ++i)
 			{
 				const double seconds = std::max(0.0, aplHistory[i].time - aplHistory[i - 1].time) / 1000.0;
 				const double drop = aplHistory[i - 1].value - aplHistory[i].value;
-				falling = falling && drop > 0.0 && drop >= config.fadeMinSlope * seconds - 1e-9;
+				falling = falling && drop > 0.0 && drop >= fadeMinSlope * seconds - 1e-9;
 			}
 			stats.fade = falling;
 		}

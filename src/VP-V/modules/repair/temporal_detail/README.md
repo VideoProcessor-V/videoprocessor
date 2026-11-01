@@ -1,6 +1,6 @@
 # TemporalDetail (`repair.temporal_detail`, DRAFT)
 
-Unit **repair** | replaces `repair.texture_restore` (order 90) | status **draft**, no call sites | hook: prepass
+Unit **repair** | replaces `repair.texture_restore` (order 90) | status **draft**: CPU model + GPU passes (WARP-matched), no call sites | hook: prepass
 
 ## Purpose
 
@@ -17,6 +17,22 @@ correlation increase <= 0.05.
 - Motion: an `IMotionSource`: today's vector field, or the camera model through an adapter compiled only when its header exists.
 - Output: same size and format, delay 0; look-ahead optional (queued modes).
 - Off (`temporal_detail = off`): the module does not run, output = input byte-identical.
+- Active picture (owner 2026-10-31, after the detail pulse's bar halos): `FrameIn::active` / `Gpu::Params::active` is the
+  renderer's trusted black-bar / picture rect scaled to the plane. Everything (split, statistics, gates, templates,
+  transfer, boost, cleaner, grain guard, add-back) runs on that rect with its border as the plane edge (no tap reaches
+  into a bar; bar blocks do not exist for the statistics); bar pixels are copied bit-exact. Moving the rect at equal size
+  resets the store (geometry). Motion grids stay in plane coordinates (`MotionPair::originX/Y`).
+- Motion sources are bounded (long-run hunt 2026-10-31): `FieldMotionSource` keeps a 128-frame window behind its newest
+  pair, `Prune(presented)` drops everything older than the presented frame (the model never re-reads an older pair:
+  composition is incremental), `Clear()` at resets; the camera adapter prunes its records with them.
+- Measurement knobs (`Model::Tuning`, never user settings): grain budget, cleaner, guard, the gate thresholds
+  `Tuning::gates` (`strongerMargin`, `baseNoiseCodes`, `baseGrainSigmas`, `uncertaintyPx`; defaults = the constants) and
+  `forceWeight` (the transfer ceiling, measurement only). `tools/td-cli` drives the CPU model on real encodes with them
+  (test/temporal-detail-real; its own mirrored active-picture wrapper was superseded by `FrameIn::active` at integration).
+- Measurement ablation (test/td-real-vectors; `Model::Tuning`, never user settings): `gatesOff` (gate ablation bits
+  `Tuning::GateBits`: each set bit forces that gate open; 0 = the designed model, byte-identical) and `typeAdmission`
+  (admission from the TRUE coded frame type `FrameIn::codedType`, offline only; false = byte-identical). `td_cli` reads
+  both from its header and the FRM1 flags (4 I, 8 P, 16 B); per-block `Diagnostics::refSeq` names the reference frame; the gate bits also change the template cleaner's member selection, `kGateAge` opens the age gate only up to 4 x `maxAge`, and only `--stdio` takes the knobs (stats JSON ends with `q_mean` and `refs`).
 
 ## Algorithm (CPU reference model `TemporalDetailModel.h`; shaders mirror it)
 
@@ -121,30 +137,50 @@ host fills, later from `core/Indicator` (doc 25 §A2). Policies: `full`, `contin
 invalid) and `rebase[H|V]` reset; `settings[repair]` resets only for
 mode/max_age changes (strength/boost change the target); `timing` is ignored. Cuts and fades reset the store.
 
-## Declared products (TemporalDetailProducts.h)
+## Declared products (core/Products.h)
 
-Descriptors mirror doc 25 §B1 (map 1:1 onto `core/Products.h`).
+The module's former private descriptors (TemporalDetailProducts.h) were retired: its products are registered in
+`core/Products.h` (`AppendTemporalDetailProducts`; ids `kTdAnalysis`, `kTdRefstore`, `kTdAdmission`) and listed in
+`docs/design/product-graph.md`. `td.out` (the output luma plane) is a render-scope temporary, not a product.
 
 | Product | Inputs | Backend | History | Size at 4K |
 |---|---|---|---|---|
-| `td.analysis` (S/G split, block maps, rebounds, softening run) | re-based luma, P4 cut/fade, bitrate quality (optional) | GpuCompute | 1 | ~1 MB |
-| `td.refstore` (K past + 1 future slots, per-block state) | analysis, P3/P2 motion, camera model (optional), queue frames (+d) | GpuCompute | K | ~16 MB R16F S + 4 MB base + 33 MB cleaned bands (RG16F) per slot |
+| `td.analysis` (block maps, rebounds, softening run) | P10 grain split, P11 block stats, P13 source ring | GpuCompute (T1) | 1 | ~1.5 MB |
+| `td.refstore` (K past slots, per-block state) | td.analysis, P10, P3, P13 | GpuCompute (T1) | K = 5 | declared 10 B/px per slot = 83 MB at 4K (what the code allocates today; the SA6 compact form targets 4.5 B/px) |
+| `td.admission` (cleaner / templates on admission frames) | td.analysis, P10, P13 | GpuCompute (T2 gap) | 0 | arena (SA1) |
 
 Cleaner cost (estimate, RTX 3090 at 4K, not dispatched): only on admission frames (a refresh, e.g. 2 of 8 frames in IBBBPBBB):
 ~0.52 M half-step 8 x 8 patches x (2 + M <= 4 forward, 2 inverse) separable DCTs ~ 4 GMAC plus one sample of each aligned
 slot per pixel (the template's own sampling), ~0.5-1 ms per admission frame, ~0.2 ms averaged; nothing on other frames.
 Memory +33 MB per slot (+166 MB for K = 5); folding the gates onto the cleaned bands (raw energy = cleaned + a per-block
 removed-energy grid) would drop the raw bands and make it ~0.
-| `td.out` (luma) | analysis, refstore | RenderOnly | 0 | plane |
 
 ## Settings (declared, not wired)
 
 | Key | Values | Default |
 |---|---|---|
-| `temporal_detail` | off, steady | off (draft) |
+| `temporal_detail` | off, steady, auto | off (draft) |
+| `temporal_detail_boost` | on, off (the fallback boost) | off (owner 2026-10-31: re-validate on real encodes first) |
 | `temporal_detail_strength` | 0.0 .. 1.0 | 1.0 |
 | `temporal_detail_max_age` | 0.25 .. 4.0 s | 2.0 |
 | `temporal_detail_boost_max` | 0.0 .. 0.3 | 0.15 |
+
+**auto** (owner 2026-10-31): `AutoGate` (TemporalDetail.h) reads the source-ID consensus quality tier
+(input.source_analysis identity, `SourceIdConsensus` Result.value.qualityTier, 0 = lowest .. 3, -1 unknown) and engages
+after the tier has been <= 1 (bitrate quality below 0.5) for 1 s, releases after 3 s above it or unknown; idle = the input
+bit-exact, no pass; `Status()` is the visible line ("auto: on (stream quality tier 1)", "auto: idle (...)"). The host
+calls `Update(tier, contentHz)` per presented frame and passes `autoEngaged` (FrameIn / Gpu::Params); the store restarts
+on each engagement. Gate thresholds that real B-frames will re-tune are tunables (`GateTuning`: reference-stronger margin,
+significance band, base-match noise and grain allowance, motion-uncertainty limit) in `Model::Tuning::gates` and
+`Gpu::Params::gates`, defaults = the constants above.
+
+**Regionally adaptive gates** (owner 2026-10-31): the thresholds and strength take per-block factors on the active
+picture's block grid (`FrameIn::blockGates` / `Gpu::Params::blockGates`, 4 per block: reference-stronger margin, base-match
+allowance, motion-uncertainty limit, strength; absent = 1, the global `GateTuning`). The re-tune team's rule fills them
+from per-block maps the module already has or the host owns: local texture deficit (q against its decayed peak, td.analysis /
+the block state), vector / camera confidence (pair trust, composed uncertainty u, camera labels), grain level N
+(grain.split blocks), brightness (block mean of the base band) and the frame's I/B phase (the rebound evidence). Applied
+identically in the model and the GPU passes (`TemporalDetailGpuBlockGatesFollowTheModel`).
 
 `TemporalDetail::ParseSettings` validates them (an invalid value keeps the previous one). They are not in
 RendererProfileConfig, slots.json, the tier table or the Config editor yet.
@@ -172,6 +208,13 @@ The low temporal band binds everywhere (RMS stays <= 1.014, lag-1 <= +0.015); gr
 fallback boost's <= 4% share (1.012 with no transfer at all). Kappa 2 .. 8 lies within 0.2 dB. The pre-fix draft's 10.5 dB was 9.8 dB structure plus a grain swap (own grain kept 31%, 73% of the
 grain energy foreign/frozen); the first fix's 2.9 dB kept 80% own grain with 25% foreign.
 
+Real streaming-like encodes (x265 IBBBP, 2160p 4-16 Mb/s, 1080p 1.5-6 Mb/s, 4 masters; `tools/eval/prototypes/
+temporal_detail_real/`, CPU model with DIS stand-in vectors): the transfer is inert, B-frame PSNR change <= +0.001 dB at
+every tier and every swept threshold (stronger margin 0.02-0.15, base allowance x1-x3, uncertainty 0.5-1 px); the
+transfer ceiling (`Tuning::forceWeight` 1) is -0.02 dB, a per-block master-oracle strength only +0.04 dB, and a fitted
+local rule (deficit, trust, grain, brightness, I/B phase) -0.008 dB on held-out clips. Real B-frame loss is not the
+fine-band attenuation the coding simulation models. The fallback boost is the only active part (-0.004 dB, +2 % grain).
+
 Limits: the cleaner removes most, not all, of the grain the split reads as texture (the rest is budgeted); the first slot
 after a reset has no evidence (single-frame DCT Wiener); future sources are uncleaned (budgeted at rho2 = 1); the grain level needs quiet areas within 80 px (dense texture everywhere raises N, f
 falls, transfer fails safe); block weights reach half a block past an edge of a soft region.
@@ -185,13 +228,75 @@ part of the guard; the grain boost is dropped.
 Integration: rename the slot to `repair.temporal_detail`; map `detail_pulse_stabilise = on` to `temporal_detail =
 steady` and `detail_pulse_cap` to `_boost_max = cap - 1` (clamped 0.3); drop `texture_restore*` with a logged
 notice; Original pathway sets `temporal_detail = off`; reuse the host plumbing (crossfade, Forget triggers,
-DetailLookAhead, status strings). Old keys are read for one release. A repeat (same
+DetailLookAhead, status strings). Old keys are read for one release. `detail_pulse_stabilise = on` maps to `temporal_detail = steady` with `temporal_detail_boost = off` until the boost is re-validated. A repeat (same
 sequence) returns the last output (repeat/foreign/phase pictures come at integration); `CameraModelMotionSource` stays uncompiled until feat/camera-model merges.
+
+## GPU implementation (TemporalDetailGpu.h/.cpp, TemporalDetailShaders.h)
+
+**Grain map: one producer, many readers (owner rule 2026-10-31).** `Gpu::Params::grain` (RegionEvidence::GrainView, the one
+read API of the single `grain.split` node owned by input.source_analysis/regions; its luma GPU form), computed once, early, on the decoded source's active picture by the host; the module
+then computes no split (bit-identical output, `TemporalDetailGpuReadsTheSharedGrainSplit`). Without it, or when it does not
+fit (size / block / scale), the module computes its own and the status says "own grain split". The module's output is
+`Y + delta` = the shared clean picture's repair plus the ORIGINAL grain; a later repair must read the same published
+product, never a split of this output. Open point for the coordinator: the product is computed on the plane the readers
+work on (today the re-based plane); if the re-base changes geometry, the published split must follow it (re-based once).
+
+Every model step runs as libplacebo compute passes, nothing read back within a frame (the per-block controller lives in
+GPU textures): grain split (repair.grain_split, GrainSplitGpu) -> MEAS -> COMPOSE -> EVAL (per slot x block) -> TRACK
+-> ADMIT (one workgroup) -> CLEAN (4 parity classes of DCT patches; work only on admission frames) -> store slot ->
+WEIGHT -> PROJ -> TRANSFER -> GUARD sums / EMA / pool -> counters -> APPLY. Deterministic (fixed reduction trees, no
+atomics, no barrier in varying flow). Matches the model to 1/64 code (the output's quantisation) on WARP over I/B pans,
+both template variants, resets / repeats / motion loss, the 2-slot tier and letterbox / pillarbox pictures. Not on the GPU
+yet: the queued-mode future slot / referee and the camera homography chain (the model without them is what runs).
+
+Memory (TextureBytes, exact for the allocation): 3840x2160 **945 MiB** at 5 slots (grain split 253 MiB, slot atlas 396,
+cleaner accumulators 127, delta / previous grain / output 142, block grids ~24), **701 MiB** at 2 slots; 1920x1080 about a
+quarter. The store is tier-able: `Params::slots` (1..5, model `Tuning::slots`), `SlotsForBudget(bytes, w, h)` picks the
+largest that fits; below 5 the status says "store N of 5 slots (memory tier)". Further savings (not done): aliasing the
+cleaner accumulators onto the split's band texture (-127 MiB), half-resolution base (README plan).
+
+Time (estimates; TemporalDetailGpuTiming measures on hardware): ~1.3 G texel reads per 4K frame at 5 slots worst case
+(EVAL, PROJ and TRANSFER each sample every live slot with 4x4 Catmull-Rom), plus the grain split (~0.7 G) and, on
+admission frames, the cleaner (~4 GMAC). RTX 3090: ~5-8 ms at 4K (~1.5-2 ms at 1080p); RTX 3050 Ti laptop: ~20-35 ms at
+4K (~5-9 ms at 1080p) - not real-time at 4K on the laptop with 5 slots. Next optimisation: shared-memory slot tiles per
+block (the warp is near a translation per block, ~10x fewer reads).
+
+Renderer call sites needed (after the Bill merge; none made): (1) add GrainSplitGpu.cpp and TemporalDetailGpu.cpp to
+VideoProcessor-VPRenderer(.Beta).vcxproj; (2) in the prepass after the re-base (texture_restore's position), when
+`temporal_detail = steady`: `Module::Apply(gpu, dispatch, rebasedFrame, params, out)` with seq / content rate / plane lines
+/ Indicator stamps / cut-fade flags / the active picture rect / backward (and forward) vector textures scaled to the
+re-based plane; on false render the frame as it was and show "Temporal detail: inactive (<reason>)"; (3) `Forget()` on the
+existing Forget triggers; (4) `FieldMotionSource::Prune(presented)` (or the host's own vector ring) per presented frame;
+(5) the memory tier from the card profile (`SlotsForBudget`); (6) settings keys into RendererProfileConfig / Config /
+slots.json with the migration in "Migration" below.
 
 ## Tests and shaders
 
-`TemporalDetailShaders.h` holds the draft GLSL (not dispatched). `tests/TemporalDetailModelTests.cpp` (CPU, model only): off identity, I/B pulse, sub-pixel pans, focus pulls,
+`TemporalDetailShaders.h` holds the GLSL; `tests/TemporalDetailGpuTests.cpp` (GpuWarp; timing GpuHardware) checks the
+split and the module against the models. `tests/TemporalDetailModelTests.cpp` (CPU, model only): off identity, I/B pulse, sub-pixel pans, focus pulls,
 rack focus, motion blur, occlusion, cuts and stamps, determinism, grain (owner bounds on a two-seed grain isolate; the
 current grain untouched), the grain guard against forced damage, the gain decomposition (structure vs grain), the grain
 split's exact add-back, flicker, future referee, irregular patterns, scale and rate, camera-adapter fallback, boost
-fallback, settings parsing.
+fallback, settings parsing, the active picture (letterbox / pillarbox with a pan: bars bit-exact, output independent of the
+bar level and identical to the picture processed alone), the bounded motion source (10,000 frames).
+
+## Grain split read path (SA2)
+
+The GPU module reads the shared grain split ONLY through the one accessor of repair/grain_split (GrainSplitGpu.h): every
+shader fetch is `gs_fetch(p)` (s1, s2, f, base in codes) or `gs_blocks(b)` (N, e3); each grain-reading pass gets
+`GrainSplit::Gpu::ViewGlsl(frame.storage, frame.codeUnit)` in its header and `BindView(frame, descs)` for its descriptors, so the
+shared product may be Full or Compact and the module never touches the `split` / `gblocks` textures directly. Full generates
+the same math as before (Off / Full output byte-identical).
+
+Fallback rule: the shared product is used when `Fits` holds for this plane (size, block, scale, code unit, component, and the
+second texture of a Compact frame); otherwise (absent, invalid view, wrong size or any misfit) the module computes its OWN
+Full split and says so, visibly, every frame, and returns to the shared product the first frame it fits again (nothing is latched).
+Status keeps "own grain split" / "own grain split (the shared product does not fit)". `LastGrainStatus()` is Ring (shared
+product read), Missing (no product) or WrongSize (misfit); Shed is the node's. `GrainFallbackDecision()` is
+GrainSplit::ReaderFallback("temporal detail", status): the catalog entry "grain split (temporal detail)", engaged while the own
+split runs. Off / auto idle read no grain: Ring. Tests: TemporalDetailGpuGrainProduct*, ...FittingFullProduct*,
+...CompactProduct*, ...GrainFallbackRecoversAutomatically (WARP).
+
+## Private GPU textures (skeleton rule)
+
+This module still creates its own GPU textures through the `Ensure` wrapper (its persistent state and, when no shared product fits, its own grain split; see the static test src/VP-V/tests/PrivateTextureScanTests.cpp). It migrates in SA6/SA7/SA8/SA12 (doc D:\codex\vp-handover\51-skeleton-adoption-audit.md section 6): kept state moves to skeleton product nodes and per-render temporaries to the shared scratch arena (src/VP-V/core/ScratchArena.h). Its grain reads already go through the one accessor (`gs_fetch` / `gs_blocks`); a shared product that is Missing, Stale (another frame or unit version, `Params::grainSeq`), WrongSize or Shed (`Params::grainShed`) makes it use its own split, visibly (FallbackCatalog "grain split (...)"), and it recovers on the first fitting frame.

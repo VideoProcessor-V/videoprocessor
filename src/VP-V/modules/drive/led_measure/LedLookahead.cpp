@@ -316,7 +316,8 @@ namespace LedDrive
 			streamTimeMs += periodMs;
 		}
 		lastSequence = sourceSequence;
-		const FrameStats stats = builder.Build(raw, streamTimeMs);
+		// Fade keys in frames: N frames span N periods on this stream clock (the same period).
+		const FrameStats stats = builder.Build(raw, streamTimeMs, periodMs);
 		module.SubmitPrediction(sourceSequence, stats);
 	}
 }

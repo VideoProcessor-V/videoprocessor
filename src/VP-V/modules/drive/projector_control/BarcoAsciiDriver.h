@@ -86,6 +86,9 @@ namespace LedDrive
 		bool EnsurePortLocked(std::string& error);
 		void SelectFraming();
 		int Clamp(int level) const;
+		// Bug hunt 39 #14: the projector's own light range (as it reported it; 0..255 where the
+		// user override replaced the query), unaffected by lightMin/lightMax. Call under stateMutex.
+		bool DeviceLightRangeContains(int level) const;
 		void Worker();
 
 		const ClockPtr clock;
@@ -106,6 +109,8 @@ namespace LedDrive
 		bool stopping = false;
 		bool opened = false;
 		int pendingLight = -1;
+		int deviceLightMin = -1, deviceLightMax = -1; // queried device range; -1 = not queried
+		bool lightReplyRangeLogged = false; // bug hunt 39 #14: log once
 		bool pendingJump = false;
 		int commands = 0;
 		int timeouts = 0;

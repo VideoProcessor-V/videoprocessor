@@ -111,7 +111,7 @@ void load_block(ivec2 origin, ivec2 hi)
 {
     uint li = gl_LocalInvocationIndex;
     for (int i = int(li); i < SW * SW; i += 256)
-        sy[i] = code_at(clamp(origin - ivec2(R1) + ivec2(i % SW, i / SW), ivec2(0), hi));
+        sy[i] = code_at(clamp(origin - ivec2(R1) + ivec2(i % SW, i / SW), PIC_LO(hi), PIC_HI(hi)));
     barrier();
     for (int i = int(li); i < SW * BLK; i += 256) {
         int r = i / BLK, c = i % BLK;
@@ -138,8 +138,8 @@ void load_low(ivec2 qb, ivec2 hi, ivec2 hhi)
     ivec2 ob = qb - ivec2(1 + GP_R);
     for (int i = int(li); i < RB * RB; i += 256) {
         ivec2 b = clamp(ob + ivec2(i % RB, i / RB), ivec2(0), hhi) * 2;
-        sbox[i] = 0.25 * (code_at(clamp(b, ivec2(0), hi)) + code_at(clamp(b + ivec2(1, 0), ivec2(0), hi)) +
-                          code_at(clamp(b + ivec2(0, 1), ivec2(0), hi)) + code_at(clamp(b + ivec2(1, 1), ivec2(0), hi)));
+        sbox[i] = 0.25 * (code_at(clamp(b, PIC_LO(hi), PIC_HI(hi))) + code_at(clamp(b + ivec2(1, 0), PIC_LO(hi), PIC_HI(hi))) +
+                          code_at(clamp(b + ivec2(0, 1), PIC_LO(hi), PIC_HI(hi))) + code_at(clamp(b + ivec2(1, 1), PIC_LO(hi), PIC_HI(hi))));
     }
     barrier();
     for (int i = int(li); i < RB * HL; i += 256) {
@@ -180,7 +180,7 @@ vec4 acc = vec4(0.0);   // D1^2, D2^2, pixels, untrusted pixels
 for (int q = 0; q < 4; q++) {
     ivec2 o = lid * 2 + ivec2(q & 1, q >> 1);
     ivec2 p = origin + o;
-    if (p.x < sz.x && p.y < sz.y) {
+    if (p.x < sz.x && p.y < sz.y && PIC_IN(p)) {
         float g1 = fine_at(o);
         float d1 = sy[(o.y + R1) * SW + o.x + R1] - g1;
         float d2 = g1 - low_at(o);
@@ -202,12 +202,13 @@ ivec2 hl = ivec2(int(li % 16u), int(li / 16u));
 ivec2 hq = qb + hl;
 float shift = slow[9 * HL + 9];
 vec4 hacc = vec4(0.0);
-if (hq.x < hsz.x && hq.y < hsz.y) {
+if (hq.x < hsz.x && hq.y < hsz.y && PIC_HALF_IN(hq)) {
     float l = slow[(hl.y + 1) * HL + hl.x + 1];
     hacc = vec4(l - shift, (l - shift) * (l - shift), 1.0, 0.0);
 }
 vec4 tot = reduce4(acc);
 vec4 htot = reduce4(hacc);
+#define TILE_PIXELS tot.z
 if (li == 0u) {
     float n = max(tot.z, 1.0);
     float hn = max(htot.z, 1.0);
@@ -232,6 +233,17 @@ if (li == 0u) {
     w = 1.0 - smoothstep(0.0, untrusted_share, u);
 #elif defined(PREV)
     w = 1.0 - smoothstep(veto_codes, 2.0 * veto_codes, change);
+#endif
+#ifdef PICT
+    if (TILE_PIXELS == 0.0) {
+        // A tile wholly in the bars: not in the frame's statistics. Weight 1 (no veto: its
+        // change is not picture evidence), so the picture pixels beside it interpolate between
+        // their own tiles' weights and 1, as when bar tiles measured as static before.
+        w = 1.0;
+        u = 0.0;
+        change = 0.0;
+        measurable = -1.0;
+    }
 #endif
     imageStore(weight_out, blk, vec4(w, u, change, measurable));
 }
@@ -282,7 +294,8 @@ for (int i = int(li); i < n; i += 256) {
     vec4 b = texelFetch(weight_in, t, 0);
     if (s.x + s.y >= floor_energy && b.x >= 0.5 && b.w > 0.5)
         a1 += vec4(s.x, s.y, 1.0, 0.0);
-    a2 += vec4(s.z, b.z > cut_codes ? 1.0 : 0.0, b.y > 0.5 ? 1.0 : 0.0, 1.0);
+    if (b.w > -0.5)
+        a2 += vec4(s.z, b.z > cut_codes ? 1.0 : 0.0, b.y > 0.5 ? 1.0 : 0.0, 1.0);
 }
 vec4 t1 = reduce4(a1);
 vec4 t2 = reduce4(a2);
@@ -374,6 +387,17 @@ for (int q = 0; q < 4; q++) {
     ivec2 o = lid * 2 + ivec2(q & 1, q >> 1);
     ivec2 p = origin + o;
     if (p.x < sz.x && p.y < sz.y) {
+#ifdef PICT
+        if (!PIC_IN(p)) {
+            // Outside the active picture (the bars): the source sample, untouched.
+#ifdef DP_RGB
+            imageStore(dst, p, texelFetch(src, p, 0));
+#else
+            imageStore(dst, p, vec4(texelFetch(src, p, 0).r, 0.0, 0.0, 1.0));
+#endif
+            continue;
+        }
+#endif
         float g1 = fine_at(o);
         float d1 = sy[(o.y + R1) * SW + o.x + R1] - g1;
         float d2 = g1 - low_at(o);
@@ -442,6 +466,13 @@ float code_at(ivec2 p)
 // The codes of the 2 x 2 texels from p: (0,0), (1,0), (0,1), (1,1).
 vec4 quad_codes(ivec2 p, vec2 isz)
 {
+#ifdef PICT
+    // A quad crossing the active picture's edge: the codes clamped to the picture (the edge
+    // acts as the plane's border); a quad inside it reads as before.
+    if (any(lessThan(p, PIC_LO(p))) || any(greaterThan(p + ivec2(1), PIC_HI(p))))
+        return vec4(code_at(clamp(p, PIC_LO(p), PIC_HI(p))), code_at(clamp(p + ivec2(1, 0), PIC_LO(p), PIC_HI(p))),
+                    code_at(clamp(p + ivec2(0, 1), PIC_LO(p), PIC_HI(p))), code_at(clamp(p + ivec2(1, 1), PIC_LO(p), PIC_HI(p))));
+#endif
 #ifdef GATHER
     vec2 uv = vec2(p + ivec2(1)) * isz;
 #ifdef DP_RGB
@@ -459,8 +490,8 @@ vec4 quad_codes(ivec2 p, vec2 isz)
 #endif
 #else
     ivec2 hi = textureSize(src, 0) - ivec2(1);
-    return vec4(code_at(clamp(p, ivec2(0), hi)), code_at(clamp(p + ivec2(1, 0), ivec2(0), hi)),
-                code_at(clamp(p + ivec2(0, 1), ivec2(0), hi)), code_at(clamp(p + ivec2(1, 1), ivec2(0), hi)));
+    return vec4(code_at(clamp(p, PIC_LO(hi), PIC_HI(hi))), code_at(clamp(p + ivec2(1, 0), PIC_LO(hi), PIC_HI(hi))),
+                code_at(clamp(p + ivec2(0, 1), PIC_LO(hi), PIC_HI(hi))), code_at(clamp(p + ivec2(1, 1), PIC_LO(hi), PIC_HI(hi))));
 #endif
 }
 )GLSL";
@@ -601,7 +632,7 @@ bands4(px, py0, d1s, d2s);
 for (int q = 0; q < 4; q++) {
     ivec2 o = ivec2(px, py0 + q);
     ivec2 p = origin + o;
-    if (p.x < sz.x && p.y < sz.y) {
+    if (p.x < sz.x && p.y < sz.y && PIC_IN(p)) {
         float d1 = d1s[q];
         float d2 = d2s[q];
         float untrusted = 0.0;
@@ -618,7 +649,7 @@ ivec2 hl = ivec2(int(li % 16u), int(li / 16u));
 ivec2 hq = qb + hl;
 float shift = sm[O_SLOW + 9 * HL + 9];
 vec4 hacc = vec4(0.0);
-if (hq.x < hsz.x && hq.y < hsz.y) {
+if (hq.x < hsz.x && hq.y < hsz.y && PIC_HALF_IN(hq)) {
     float l = sm[O_SLOW + (hl.y + 1) * HL + hl.x + 1];
     hacc = vec4(l - shift, (l - shift) * (l - shift), 1.0, 0.0);
 }
@@ -657,10 +688,23 @@ if (li == 0u) {
     tot.w = sm[1448] + sm[1449] + sm[1450] + sm[1451];
     htot.x = sm[1452] + sm[1453] + sm[1454] + sm[1455];
     htot.y = sm[1456] + sm[1457] + sm[1458] + sm[1459];
+#ifdef PICT
+    // The tile's pixels inside the active picture, and its half texels whose 2 x 2 box is.
+    ivec2 tlo = max(origin, PIC_LO(sz));
+    ivec2 thi = min(min(origin + ivec2(BLK - 1), sz - ivec2(1)), PIC_HI(sz));
+    ivec2 tn = max(thi - tlo + ivec2(1), ivec2(0));
+    ivec2 hlo = max(qb, (PIC_LO(sz) + ivec2(1)) / 2);
+    ivec2 hhi2 = min(min(qb + ivec2(HB - 1), hsz - ivec2(1)), (PIC_HI(sz) + ivec2(1)) / 2 - ivec2(1));
+    ivec2 hn2 = max(hhi2 - hlo + ivec2(1), ivec2(0));
+    float n = max(float(tn.x * tn.y), 1.0);
+    float hn = max(float(hn2.x * hn2.y), 1.0);
+#define TILE_PIXELS float(tn.x * tn.y)
+#else
     ivec2 tn = min(ivec2(BLK), sz - origin);
     ivec2 hn2 = min(ivec2(HB), hsz - qb);
     float n = float(tn.x * tn.y);
     float hn = float(hn2.x * hn2.y);
+#endif
     float hm = htot.x / hn;
     float mean_l = shift + hm;
     float spread = sqrt(max(htot.y / hn - hm * hm, 0.0));
@@ -680,6 +724,17 @@ if (li == 0u) {
     w = 1.0 - smoothstep(0.0, untrusted_share, u);
 #elif defined(PREV)
     w = 1.0 - smoothstep(veto_codes, 2.0 * veto_codes, change);
+#endif
+#ifdef PICT
+    if (TILE_PIXELS == 0.0) {
+        // A tile wholly in the bars: not in the frame's statistics. Weight 1 (no veto: its
+        // change is not picture evidence), so the picture pixels beside it interpolate between
+        // their own tiles' weights and 1, as when bar tiles measured as static before.
+        w = 1.0;
+        u = 0.0;
+        change = 0.0;
+        measurable = -1.0;
+    }
 #endif
     imageStore(weight_out, blk, vec4(w, u, change, measurable));
 }
@@ -722,7 +777,9 @@ for (int q = 0; q < 4; q++) {
     ivec2 o = ivec2(px, py0 + q);
     ivec2 p = origin + o;
     if (p.x < sz.x && p.y < sz.y) {
-        if (work) {
+        // Outside the active picture (the bars): the source sample, untouched (PIC_IN is
+        // always true without one).
+        if (work && PIC_IN(p)) {
             float d1 = d1s[q];
             float d2 = d2s[q];
 #ifdef XGEO
@@ -936,6 +993,9 @@ for (int q = 0; q < 4; q++) {
 			bool rgb = false;
 			float lumaMul = 1.0f, lumaAdd = 0.0f;
 			float lumaW[3] = { 0.0f, 0.0f, 0.0f };
+			// Bug hunt 33 F1: the active picture in plane px (inclusive), when it is not the plane.
+			bool pict = false;
+			float picRect[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 		};
 	}
 
@@ -1015,6 +1075,9 @@ for (int q = 0; q < 4; q++) {
 				1.0 / (std::pow(2.0, params.colorDepth) - 1.0) :
 				std::pow(2.0, shift) / (std::pow(2.0, sampleDepth) - 1.0);
 			c.codeScale = static_cast<float>(1.0 / codeUnit);
+			int bounds[4];
+			c.pict = PictureBounds(params.picture, c.geometry.w, c.geometry.h, bounds);
+			for (int i = 0; i < 4; ++i) c.picRect[i] = static_cast<float>(bounds[i]);
 			c.rgb = frame && PlaneKind(*frame) == 1;
 			if (c.rgb)
 			{
@@ -1048,23 +1111,43 @@ for (int q = 0; q < 4; q++) {
 			}
 		}
 
+		// Bug hunt 33 F1: the active picture. With one (PICT), every code read is clamped to it
+		// (its edge acts as the plane's border), only its pixels are measured and changed; the
+		// bars are the source exactly. Without one the macros expand to the old expressions.
+		const char* const PICT_MACROS = R"GLSL(
+#define PIC_LO(hi) ivec2(pic_rect.xy)
+#define PIC_HI(hi) ivec2(pic_rect.zw)
+#define PIC_IN(p) (all(greaterThanEqual(p, ivec2(pic_rect.xy))) && all(lessThanEqual(p, ivec2(pic_rect.zw))))
+#define PIC_HALF_IN(q) (all(greaterThanEqual(2 * (q), ivec2(pic_rect.xy))) && all(lessThanEqual(2 * (q) + ivec2(1), ivec2(pic_rect.zw))))
+)GLSL";
+		const char* const NO_PICT_MACROS = R"GLSL(
+#define PIC_LO(hi) ivec2(0)
+#define PIC_HI(hi) (hi)
+#define PIC_IN(p) true
+#define PIC_HALF_IN(q) true
+)GLSL";
+
 		std::string Defines(const Constants& c)
 		{
-			return c.rgb ? "#define DP_RGB 1\n" : "";
+			return std::string(c.rgb ? "#define DP_RGB 1\n" : "") + (c.pict ? "#define PICT 1\n" : "") +
+				(c.pict ? PICT_MACROS : NO_PICT_MACROS);
 		}
 
 		// The plane-reading variables (code_scale, or the RGB luma's).
 		int CodeVars(const Constants& c, pl_shader_var* v)
 		{
+			int n = 0;
 			if (!c.rgb)
+				v[n++] = { pl_var_float("code_scale"), &c.codeScale, true };
+			else
 			{
-				v[0] = { pl_var_float("code_scale"), &c.codeScale, true };
-				return 1;
+				v[n++] = { pl_var_float("luma_mul"), &c.lumaMul, true };
+				v[n++] = { pl_var_float("luma_add"), &c.lumaAdd, true };
+				v[n++] = { pl_var_vec3("luma_w"), c.lumaW, true };
 			}
-			v[0] = { pl_var_float("luma_mul"), &c.lumaMul, true };
-			v[1] = { pl_var_float("luma_add"), &c.lumaAdd, true };
-			v[2] = { pl_var_vec3("luma_w"), c.lumaW, true };
-			return 3;
+			if (c.pict)
+				v[n++] = { pl_var_vec4("pic_rect"), c.picRect, true };
+			return n;
 		}
 
 		size_t MeasureShmem(const Constants& c)
@@ -1093,7 +1176,7 @@ for (int q = 0; q < 4; q++) {
 		bool LowPass(pl_dispatch dispatch, pl_tex luma, const Constants& c, pl_tex lowOut, bool timed, std::string& error)
 		{
 			const pl_shader_desc d[2] = { Sampled("src", luma), Storage("low_out", lowOut) };
-			pl_shader_var v[3];
+			pl_shader_var v[4];
 			const int nv = CodeVars(c, v);
 			if (!Compute(dispatch, "VideoProcessor detail pulse: low band", Defines(c) + c.lowHeader, LOW_BODY_FAST, d, 2, v, nv,
 				c.lowShmem, c.lowTilesX, c.lowTilesY, timed ? 3 : -1))
@@ -1132,7 +1215,7 @@ for (int q = 0; q < 4; q++) {
 				if (fast) d[nd++] = Sampled("low_in", lowTex);
 				if (usePrev) d[nd++] = Sampled("prev_stats", prevStats);
 				if (useField) d[nd++] = Sampled("field", params.field);
-				pl_shader_var v[10];
+				pl_shader_var v[11];
 				int nv = CodeVars(c, v);
 				if (usePrev && !useField) v[nv++] = { pl_var_float("veto_codes"), &vetoCodes, true };
 				if (usePrev) v[nv++] = { pl_var_float("energy_jump"), &energyJump, true };
@@ -1207,7 +1290,7 @@ for (int q = 0; q < 4; q++) {
 			pl_shader_desc d[5] = { Sampled("src", luma), Storage("dst", dst), Sampled("weight_in", weight), Sampled("ring", ring) };
 			int nd = 4;
 			if (fast) d[nd++] = Sampled("low_in", lowTex);
-			pl_shader_var v[4];
+			pl_shader_var v[5];
 			int nv = CodeVars(c, v);
 			if (tileRatio) v[nv++] = { pl_var_vec2("tile_ratio"), tileRatio, true };
 			std::string header = fast ? Defines(c) + APPLY_HEADER + c.fastHeader : Defines(c) + c.bandHeader + APPLY_HEADER;
@@ -1242,25 +1325,6 @@ for (int q = 0; q < 4; q++) {
 			ms[i] = g_timers.count[i] > 0 ? g_timers.ns[i] / g_timers.count[i] / 1e6 : 0.0;
 		if (reset)
 			for (int i = 0; i < 4; ++i) { g_timers.ns[i] = 0.0; g_timers.count[i] = 0; }
-	}
-
-	void LumaWeights(enum pl_color_system system, enum pl_color_primaries primaries, double out[3])
-	{
-		double kr = 0.2126, kb = 0.0722;
-		switch (system)
-		{
-		case PL_COLOR_SYSTEM_BT_601: kr = 0.299; kb = 0.114; break;
-		case PL_COLOR_SYSTEM_BT_2020_NC:
-		case PL_COLOR_SYSTEM_BT_2020_C: kr = 0.2627; kb = 0.0593; break;
-		case PL_COLOR_SYSTEM_SMPTE_240M: kr = 0.212; kb = 0.087; break;
-		case PL_COLOR_SYSTEM_BT_709: break;
-		default:
-			if (primaries == PL_COLOR_PRIM_BT_2020) { kr = 0.2627; kb = 0.0593; }
-			break;
-		}
-		out[0] = kr;
-		out[1] = 1.0 - kr - kb;
-		out[2] = kb;
 	}
 
 	Module::~Module()

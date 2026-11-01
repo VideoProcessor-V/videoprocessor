@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 // The "Fallbacks engaged" entries of the renderer's automatic downgrades, built in ONE place
 // (module findings 2026-10-24, the silent-fallbacks batch; ADR-0001 no silent fallbacks).
@@ -128,6 +129,21 @@ namespace FallbackCatalog
 			"; the frame is rendered without it") : Released("texture restore");
 	}
 
+	// Custom GLSL hooks that did not load (read, template, libplacebo rejection, no known
+	// //!HOOK stage) or that libplacebo disabled at runtime; the picture renders without them.
+	// Quantiser failures are reported by the dither entry instead. Lists at most 3 names.
+	inline Decision CustomHooksNotLoaded(const std::vector<std::string>& names)
+	{
+		if (names.empty()) return Released("custom hooks");
+		constexpr size_t kListed = 3;
+		std::string list;
+		for (size_t i = 0; i < names.size() && i < kListed; ++i)
+			list += (i ? ", " : "") + names[i];
+		if (names.size() > kListed)
+			list += " +" + std::to_string(names.size() - kListed) + " more";
+		return Engaged("custom hooks", "not loaded: " + list + " (the picture renders without them)");
+	}
+
 	// ---- repair.deband --------------------------------------------------------------------------
 	// libplacebo's automatic deband yields to VP's debander (deband_vp_exclusive). Before this, a
 	// FAILED VP debander left the picture with no deband at all; now libplacebo's deband stands in
@@ -165,6 +181,64 @@ namespace FallbackCatalog
 			return Released("motion");
 		std::string reason = engineFailed ? "matcher only (optical flow failed" : "no optical-flow look-ahead (producer stopped";
 		return Engaged("motion", reason + (error.empty() ? std::string() : ": " + error) + ")");
+	}
+
+	// ---- motion.estimation: the vector producer's restarts (bug hunt 35 #1) -----------------------
+	// The look-ahead producer stopped after three failed jobs in a row and restarts itself with a
+	// back-off (MotionAhead::ProducerRecovery). Engaged while it is wanted and waiting to restart,
+	// for every vector consumer (the "motion" entry above covers only the de-judder's view).
+	inline Decision VectorProducer(bool wanted, bool recovering, unsigned stops, const std::string& error = std::string())
+	{
+		if (!wanted || !recovering)
+			return Released("vector producer");
+		return Engaged("vector producer", "render-time motion estimate; the look-ahead stopped" +
+			(error.empty() ? std::string() : ": " + error) + "; restarting with back-off (stop " + std::to_string(stops) + ")");
+	}
+
+	// ---- look-ahead workers (bug hunt 31 H3) ----------------------------------------------------
+	// A look-ahead batch threw (the motion-ahead hand-off, the source-resolution look-ahead): its
+	// frames went without that work. Engaged at the failure with the exception text, released after
+	// `releaseAfterGood` batches in a row without one (the next batches retry on their own).
+	struct LookAheadFailures
+	{
+		const char* id = "look-ahead";
+		const char* without = "frames skipped";
+		unsigned long long failures = 0;
+		unsigned goodSince = 0;
+		bool engaged = false;
+		std::string what;
+		LookAheadFailures(const char* idIn, const char* withoutIn) : id(idIn), without(withoutIn) {}
+		Decision Note(bool failed, const std::string& whatIn = std::string(), unsigned releaseAfterGood = 8)
+		{
+			if (failed)
+			{
+				++failures;
+				goodSince = 0;
+				engaged = true;
+				what = whatIn;
+			}
+			else if (engaged && ++goodSince >= releaseAfterGood)
+				engaged = false;
+			if (!engaged)
+				return Released(id);
+			return Engaged(id, std::string(without) + " (worker exception" + (what.empty() ? std::string() : ": " + what) +
+				"); retrying each batch");
+		}
+	};
+	inline LookAheadFailures MotionAheadWorker() { return LookAheadFailures("motion look-ahead", "no optical-flow look-ahead for some frames"); }
+	inline LookAheadFailures SourceResolutionWorker() { return LookAheadFailures("source resolution look-ahead", "resolution judged on arrival only"); }
+
+	// ---- control.diagnostics: diagnostic overrides (bug hunt 39 #6) -----------------------------
+	// Test / debug switches set in the environment outside a test harness
+	// (VpDiagnostics::OverridesToShow). Engaged while any is set; the names only, never values.
+	inline Decision DiagnosticOverrides(const std::vector<std::string>& names)
+	{
+		if (names.empty())
+			return Released("diagnostic override");
+		std::string list;
+		for (size_t i = 0; i < names.size(); ++i)
+			list += (i ? ", " : "") + names[i];
+		return Engaged("diagnostic override", "active: " + list);
 	}
 
 	// ---- motion.consumers -----------------------------------------------------------------------
@@ -355,5 +429,102 @@ namespace FallbackCatalog
 		return sustainedMiss ? Engaged("vector_engine_global",
 			"source monitor fast-pan / intent without whole-frame motion (vector engine pair missed)") :
 			Released("vector_engine_global");
+	}
+
+	// ---- skeleton analysis lane -----------------------------------------------------------------
+	// The regulator reduced the lane's work (dropped products, forced live fills, T0 in the render,
+	// pinned at the minimum, the optical-flow input reduced by `ofaStep` steps: 0 = full), or the lane is
+	// not available for the source stats. The lists hold plain-language product names (the host maps ids
+	// to names).
+	inline std::string JoinNames(const std::vector<std::string>& names)
+	{
+		std::string out;
+		for (size_t i = 0; i < names.size(); ++i)
+			out += (i ? ", " : "") + names[i];
+		return out;
+	}
+	inline Decision AnalysisLane(const std::vector<std::string>& dropped, const std::vector<std::string>& forcedLive,
+		bool pinnedAtMinimum, bool t0InRender, unsigned ofaStep = 0)
+	{
+		if (dropped.empty() && forcedLive.empty() && !pinnedAtMinimum && !t0InRender && ofaStep == 0)
+			return Released("analysis_lane");
+		std::string reason;
+		auto add = [&reason](const std::string& part) { reason += (reason.empty() ? std::string() : "; ") + part; };
+		if (!dropped.empty())
+			add("reduced: " + JoinNames(dropped) + " off (dropped)");
+		if (!forcedLive.empty())
+			add("forced live: " + JoinNames(forcedLive));
+		if (t0InRender)
+			add("core analysis runs in the render");
+		if (ofaStep != 0)
+			add("vector engine input reduced (step " + std::to_string(ofaStep) + ")");
+		if (pinnedAtMinimum)
+			add("analysis at minimum");
+		return Engaged("analysis_lane", reason);
+	}
+	inline Decision AnalysisLaneDeterminism(unsigned long long missedBounds)
+	{
+		if (missedBounds == 0)
+			return Released("analysis_lane_determinism");
+		return Engaged("analysis_lane_determinism", "deterministic playback: " + std::to_string(missedBounds) +
+			" frames missed the bounded wait (vector engine fallback used; this run is not reproducible)");
+	}
+	inline Decision SourceStatsWalk(bool laneRequested, bool laneUnavailable)
+	{
+		return laneRequested && laneUnavailable ? Engaged("source_stats_walk",
+			"active-picture walk uses Bill's original walk (lane source stats unavailable)") :
+			Released("source_stats_walk");
+	}
+
+	// ---- product graph (core/ProductCatalog.h) ----------------------------------------------------
+	// Every consumer of a shared product states what it does when the product is missing, stale, shed or its unit
+	// version differs from the one the reader expects. These are the ids the catalog rows name; the GUI's one-time
+	// notice keys on them like any other entry. `text` says what runs instead.
+	struct ProductEntry
+	{
+		const char* id;
+		const char* text;
+	};
+	inline const ProductEntry* ProductEntries(size_t* count)
+	{
+		static const ProductEntry kEntries[] = {
+			{ "product.unit_version", "a shared product was made by another unit version: the reader runs its own reduced form" },
+			{ "product.detail_pulse", "detail pulse measures its own bands and tiles (shared split / block statistics unavailable)" },
+			{ "product.texture_restore", "texture restore measures its own bands and noise (shared split / block statistics unavailable)" },
+			{ "product.debander", "debander uses its own half split and tensor (shared split / block statistics unavailable)" },
+			{ "product.adaptive_downscale", "adaptive downscale computes its own edge, grain and cut terms (shared products unavailable)" },
+			{ "product.sigma_delta", "output dither runs its own vector search (shared analysis field unavailable)" },
+			{ "product.led_lookahead", "LED look-ahead measures the queued frames itself (shared source statistics unavailable)" },
+			{ "product.hdr_inference", "HDR inference reads its own grid (shared source statistics unavailable)" },
+			{ "product.source_resolution", "source-resolution monitor judges its own cuts (shared source statistics unavailable)" },
+			{ "product.source_id", "source identification reads the monitor snapshot only (shared tiles unavailable)" },
+			{ "product.interpolator", "interpolator builds its own grain bands and uses the render-time field (shared products unavailable)" },
+			{ "product.temporal_detail", "temporal detail runs a lower memory tier or its own split (shared split / store unavailable)" },
+			{ "product.chroma_cfl", "chroma upscale runs a lower tier without the grain guard (chroma split unavailable)" },
+			{ "product.entrance", "entrance stages run in the render with no work done ahead (entrance output unavailable)" },
+			{ "product.motion_warp", "motion warp builds its own half-resolution pyramids (shared half luma unavailable)" },
+			{ "product.nvof_producer", "optical-flow producer builds its own 8-bit half luma (shared half luma unavailable)" },
+			{ "product.region_evidence", "regional repairs use their own local statistics (shared split / light level unavailable)" },
+			{ "product.light_level", "light-level users use the global level only (per-block light level unavailable)" },
+			{ "product.vector_demand", "vector consumer runs without vectors (the vector engine product is unavailable)" },
+			{ "product.camera", "camera consumer runs causal / without the camera model (camera products unavailable or short queue)" },
+		};
+		if (count)
+			*count = sizeof(kEntries) / sizeof(kEntries[0]);
+		return kEntries;
+	}
+	inline const ProductEntry* FindProductEntry(const char* id)
+	{
+		size_t n = 0;
+		const ProductEntry* e = ProductEntries(&n);
+		for (size_t i = 0; i < n; ++i)
+			if (std::string(e[i].id) == id)
+				return &e[i];
+		return nullptr;
+	}
+	inline Decision ProductFallback(const char* id, const std::string& why)
+	{
+		const ProductEntry* e = FindProductEntry(id);
+		return Engaged(id, (e ? std::string(e->text) : std::string("reduced form")) + ": " + why);
 	}
 }

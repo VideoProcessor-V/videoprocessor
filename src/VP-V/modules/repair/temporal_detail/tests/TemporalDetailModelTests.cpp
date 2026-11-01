@@ -10,7 +10,7 @@
 #include <VP-V/modules/repair/temporal_detail/TemporalDetail.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetailModel.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetailMotion.h>
-#include <VP-V/modules/repair/temporal_detail/TemporalDetailProducts.h>
+#include <VP-V/core/Products.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetailShaders.h>
 
 #include <algorithm>
@@ -242,10 +242,13 @@ namespace
 		}
 		return r;
 	}
+	// The designed behaviour these tests measure includes the fallback boost; the product default has it off (owner
+	// 2026-10-31, TemporalDetailBoostAndAutoDefaults covers the default).
 	Settings Steady()
 	{
 		Settings s;
 		s.mode = Mode::Steady;
+		s.boost = true;
 		return s;
 	}
 	Run GoSteady(const std::vector<Plane>& frames, const IMotionSource* motion, const Settings& s = Steady(), int future = 0, double hz = kHz)
@@ -416,6 +419,80 @@ namespace VideoProcessorTest
 			// The transfer runs under the template grain budget (kGrainBudget): the owner's grain bounds come first, so the
 			// pulse is steadied less than at the designed strength (TemporalDetailGainIsStructure logs both).
 			Assert::IsTrue(vOn <= 0.75 * vOff, L"the I/B fine-structure energy variance drops by >= 25%");
+		}
+
+		TEST_METHOD(TemporalDetailActivePictureKeepsBars)
+		{
+			// Letterbox: the top kBar rows are a black bar (with a little coding noise); the picture below pulses I/B.
+			constexpr int n = 40;
+			static constexpr int kBar = 16;   // static: usable in the capture-less hooks
+			Stream s = BuildPan(Pattern("IBBBPBBB", n), 0.0);
+			const std::vector<Plane> noBar = s.frames;   // the same picture without the bar (baseline for the band)
+			Noise noise(99);
+			for (Plane& f : s.frames)
+				for (int y = 0; y < kBar; ++y)
+					for (int x = 0; x < kW; ++x) f.at(x, y) = 16.0 + 0.3 * noise.Next();
+			FieldMotionSource motion;
+			SetPan(motion, n, 0.0, 0.0);
+			auto whole = [](int, Model::FrameIn& in) { in.active.left = 0; in.active.top = 0; in.active.right = kW; in.active.bottom = kH; };
+			auto box = [](int, Model::FrameIn& in) { in.active.left = 0; in.active.top = kBar; in.active.right = kW; in.active.bottom = kH; };
+			Model plain(Steady()), explicitWhole(Steady()), boxed(Steady());
+			Settings so = Steady();
+			so.boostMax = 0.0;
+			Model boxedNoBoost(so), noBarNoBoost(so);
+			const Run a = Go(plain, s.frames, &motion);
+			const Run b = Go(explicitWhole, s.frames, &motion, kHz, 1080.0, 0, whole);
+			const Run c = Go(boxed, s.frames, &motion, kHz, 1080.0, 0, box);
+			const Run d = Go(boxedNoBoost, s.frames, &motion, kHz, 1080.0, 0, box);
+			const Run e = Go(noBarNoBoost, noBar, &motion);   // the picture alone: the band is interior there
+			double barMax = 0.0, mseOff = 0.0, mseOn = 0.0, under = 0.0, underNoBar = 0.0;
+			int cnt = 0;
+			for (int f = 0; f < n; ++f)
+			{
+				const size_t u = static_cast<size_t>(f);
+				Assert::IsTrue(Same(a.out[u], b.out[u]), L"an explicit whole-plane rectangle equals no rectangle (bit-identical)");
+				for (int y = 0; y < kBar; ++y)
+					for (int x = 0; x < kW; ++x)
+					{
+						barMax = (std::max)(barMax, std::fabs(c.out[u].at(x, y) - s.frames[u].at(x, y)));
+						barMax = (std::max)(barMax, std::fabs(d.out[u].at(x, y) - s.frames[u].at(x, y)));
+					}
+				// boundary band (the first 16 picture rows, transfer only): the dip below the input's local 5 x 5 minimum
+				// (restored detail legitimately leaves the soft B-frame's range) is no larger than with no bar at all
+				for (int y = kBar; y < kBar + 16; ++y)
+					for (int x = 2; x < kW - 2; ++x)
+					{
+						double lo = 1e9;
+						for (int yy = (std::max)(kBar, y - 2); yy <= y + 2; ++yy)
+							for (int xx = x - 2; xx <= x + 2; ++xx) lo = (std::min)(lo, s.frames[u].at(xx, yy));
+						under = (std::max)(under, lo - d.out[u].at(x, y));
+						underNoBar = (std::max)(underNoBar, lo - e.out[u].at(x, y));
+					}
+				if (f >= 16 && f % 8 != 0 && f % 8 != 4)
+				{
+					mseOff += Mse(s.frames[u], s.truth[u], 8, kBar + 8);
+					mseOn += Mse(c.out[u], s.truth[u], 8, kBar + 8);
+					++cnt;
+				}
+			}
+			const double gain = PsnrOf(mseOn / cnt) - PsnrOf(mseOff / cnt);
+			LogF("letterbox: bar change max %.6f, band undershoot (boost off) %.3f (same picture, no bar %.3f), picture B-frame gain %.2f dB",
+				barMax, under, underNoBar, gain);
+			Assert::IsTrue(barMax == 0.0, L"bar pixels are byte-identical");
+			Assert::IsTrue(under <= underNoBar + 1.0, L"no extra undershoot at the picture/bar boundary (transfer only) vs the same picture without a bar");
+			Assert::IsTrue(gain >= 1.0, L"the picture below the bar still gains >= 1 dB on B-frames");
+		}
+
+		TEST_METHOD(TemporalDetailActiveRectangleChangeResets)
+		{
+			const int n = 12;
+			const Stream s = BuildPan(Pattern("IBBBPBBB", n), 0.0);
+			FieldMotionSource motion;
+			SetPan(motion, n, 0.0, 0.0);
+			Model m(Steady());
+			const Run r = Go(m, s.frames, &motion, kHz, 1080.0, 0, [](int t, Model::FrameIn& in) { in.active.left = 0; in.active.top = t < 6 ? 0 : 8; in.active.right = kW; in.active.bottom = kH; });
+			Assert::IsTrue(r.diag[6].resets == r.diag[5].resets + 1, L"a new active rectangle resets the store (once)");
+			Assert::IsTrue(r.diag[7].resets == r.diag[6].resets, L"an unchanged rectangle does not reset");
 		}
 
 		TEST_METHOD(TemporalDetailSubPixelPanAligns)
@@ -1242,6 +1319,40 @@ namespace VideoProcessorTest
 			Assert::IsTrue(seconds[0] > 0 && seconds[1] > 0 && seconds[1] / seconds[0] > 0.7 && seconds[1] / seconds[0] < 1.4, L"the age-out takes the same seconds at 24 and 60 Hz");
 		}
 
+		TEST_METHOD(TemporalDetailCameraSourcePruneAndViewLifetime)
+		{
+#ifdef TEMPORAL_DETAIL_HAVE_CAMERA_MODEL
+			CameraModel::Policy policy;
+			policy.enabled = true;
+			policy.threshold = 0.5;
+			auto record = [](uint8_t labelValue)
+			{
+				auto blocks = std::make_shared<CameraModel::BlockData>();
+				blocks->gridW = 4; blocks->gridH = 3; blocks->blockSize = 16.0;
+				blocks->label.assign(12, labelValue);
+				auto r = std::make_shared<CameraModel::CameraMotion>();
+				r->valid = true;
+				r->reason = CameraModel::Reason::Ok;
+				r->confidence = 1.0;
+				r->blocks = blocks;
+				return std::shared_ptr<const CameraModel::CameraMotion>(r);
+			};
+			CameraModelMotionSource src(policy);
+			for (uint64_t q = 1; q <= 5; ++q) src.SetCamera(q, record(1));
+			src.Prune(3);
+			Assert::AreEqual(size_t{ 3 }, src.CameraCount(), L"seqs 3..5 kept");
+			CameraPairView v;
+			Assert::IsFalse(src.Camera(2, v), L"old seq pruned");
+			Assert::IsTrue(src.Camera(3, v) && src.Camera(5, v), L"newer seqs kept");
+			// The view stays valid after its seq is replaced and after a prune.
+			Assert::IsTrue(src.Camera(4, v) && v.label != nullptr);
+			src.SetCamera(4, record(0));
+			src.Prune(100);
+			Assert::AreEqual(size_t{ 0 }, src.CameraCount());
+			for (int i = 0; i < 12; ++i) Assert::AreEqual(1, static_cast<int>(v.label[i]), L"view's labels intact");
+#endif
+		}
+
 		TEST_METHOD(TemporalDetailCameraAdapterFallback)
 		{
 			// A test source that adds a camera view (the real adapter needs the camera branch's header).
@@ -1347,8 +1458,251 @@ namespace VideoProcessorTest
 			}
 			// Declared tables are consistent (compile-time data the host will map onto core/Products.h).
 			Assert::IsTrue(PolicyOf(Counter::Full) == ReaderPolicy::Reset && PolicyOf(Counter::Timing) == ReaderPolicy::Ignore, L"reader policies");
-			Assert::AreEqual(3, static_cast<int>(sizeof(kProducts) / sizeof(kProducts[0])), L"three products");
-			Assert::IsTrue(Shaders::kSplit != nullptr && Shaders::kBlockMeasures != nullptr && Shaders::kValidate != nullptr && Shaders::kTransfer != nullptr, L"draft shaders declared");
+			{   // TemporalDetail's products are registered in core/Products.h (its private descriptors were retired).
+				const VpSkeleton::Registry reg = VpSkeleton::SkeletonProducts();
+				Assert::IsTrue(reg.Has(VpSkeleton::kTdRefstore) && reg.Has(VpSkeleton::kTdAnalysis) && reg.Has(VpSkeleton::kTdAdmission), L"td products");
+				Assert::AreEqual(std::string("td.refstore"), std::string(reg.Get(VpSkeleton::kTdRefstore).token));
+				Assert::AreEqual(static_cast<int>(kSlots), static_cast<int>(reg.Get(VpSkeleton::kTdRefstore).history), L"history = slots");
+				Assert::AreEqual(static_cast<int>(kSlots), static_cast<int>(VpSkeleton::kRefSlots), L"core slot count matches");
+			}
+			Assert::IsTrue(Shaders::kMeasBody != nullptr && Shaders::kCleanBody != nullptr && Shaders::kWeightBody != nullptr && Shaders::kTransferBody != nullptr, L"shaders declared");
+		}
+
+		TEST_METHOD(TemporalDetailBoostAndAutoDefaults)
+		{
+			// Owner 2026-10-31: the fallback boost is off by default (it was the only part acting on real encodes and cost
+			// PSNR); temporal_detail = auto runs only while the source-ID consensus says the stream is low quality, with
+			// hysteresis, and is the input itself (bit-exact) while idle.
+			Settings def;
+			Assert::IsFalse(def.boost, L"boost off by default");
+			std::map<std::string, std::string> kv = { { "temporal_detail", "AUTO" }, { "temporal_detail_boost", "on" } };
+			Settings p;
+			Assert::IsTrue(ParseSettings(kv, p, nullptr) && p.mode == Mode::Auto && p.boost, L"auto and the boost switch parse");
+			std::map<std::string, std::string> bad = { { "temporal_detail_boost", "maybe" } };
+			Assert::IsFalse(ParseSettings(bad, p, nullptr) || !p.boost, L"an invalid boost value keeps the previous one");
+
+			const int n = 32;
+			const Stream st = BuildPan(Pattern("IBBBPBBB", n), 0.0);
+			FieldMotionSource motion;
+			SetPan(motion, n, 0.0, 0.0);
+			Settings steadyDefault;
+			steadyDefault.mode = Mode::Steady;   // boost off
+			Model m(steadyDefault);
+			double boostSum = 0.0;
+			for (int t = 0; t < n; ++t)
+			{
+				Model::FrameIn in;
+				in.luma = st.frames[static_cast<size_t>(t)];
+				in.seq = static_cast<uint64_t>(t);
+				in.contentHz = kHz;
+				in.motion = &motion;
+				m.Process(in);
+				for (double b : m.Diag().boost) boostSum += b;
+			}
+			Assert::AreEqual(0.0, boostSum, L"no boost with the default settings");
+
+			// The gate: tier 1 (low) engages after 1 s, tier 3 releases after 3 s, unknown does not engage.
+			AutoGate gate;
+			int engagedAt = -1, releasedAt = -1;
+			for (int t = 0; t < 200; ++t)
+			{
+				const int tier = t < 10 ? -1 : (t < 100 ? 1 : 3);
+				const bool on = gate.Update(tier, kHz);
+				if (on && engagedAt < 0) engagedAt = t;
+				if (!on && engagedAt >= 0 && releasedAt < 0) releasedAt = t;
+			}
+			LogF("auto gate: engaged at frame %.0f, released at frame %.0f", engagedAt, releasedAt);
+			Log(gate.Status().c_str());
+			Assert::AreEqual(10 + Frames(1.0, kHz) - 1, engagedAt, L"engages after the dwell");
+			Assert::AreEqual(100 + Frames(3.0, kHz) - 1, releasedAt, L"releases after the longer dwell");
+			// Model in auto: idle frames are the input bit-exact; engaged frames process.
+			Settings a = Steady();
+			a.mode = Mode::Auto;
+			Model ma(a);
+			bool changedWhileEngaged = false;
+			for (int t = 0; t < n; ++t)
+			{
+				Model::FrameIn in;
+				in.luma = st.frames[static_cast<size_t>(t)];
+				in.seq = static_cast<uint64_t>(t);
+				in.contentHz = kHz;
+				in.motion = &motion;
+				in.autoEngaged = t >= 8;
+				const Plane o = ma.Process(in);
+				if (t < 8) Assert::IsTrue(Same(o, in.luma), L"auto idle = the input");
+				else if (!Same(o, in.luma)) changedWhileEngaged = true;
+			}
+			Assert::IsTrue(changedWhileEngaged, L"auto engaged processes");
+			// engaged -> idle -> engaged: the store restarts, so the re-engaged run equals a fresh model started there.
+			Model mb(a), fresh(a);
+			for (int t = 0; t < n; ++t)
+			{
+				Model::FrameIn in;
+				in.luma = st.frames[static_cast<size_t>(t)];
+				in.seq = static_cast<uint64_t>(t);
+				in.contentHz = kHz;
+				in.motion = &motion;
+				in.autoEngaged = t < 10 || t >= 14;
+				const Plane o = mb.Process(in);
+				if (t >= 14)
+				{
+					const Plane f = fresh.Process(in);
+					Assert::IsTrue(Same(o, f), L"re-engaged = a fresh start");
+				}
+			}
+		}
+
+		TEST_METHOD(TemporalDetailMotionSourceIsBounded)
+		{
+			// Long-run hunt (2026-10-31): the per-sequence pair maps were never pruned. Over 10,000 frames the source stays
+			// bounded by its retention window without the host's help, stays at the queue depth when the host prunes the
+			// presented frame, survives a seek back, and Clear() empties it; the model keeps working on a pruned source.
+			FieldMotionSource m;
+			const MotionPair pair = MotionPair::Uniform(kW, kH, 16.0, -0.25, 0.0);
+			size_t worst = 0;
+			for (uint64_t t = 0; t < 10000; ++t)
+			{
+				m.SetBackward(t, pair);
+				m.SetForward(t, pair);
+				worst = (std::max)(worst, m.Size());
+			}
+			LogF("unpruned host: worst size %.0f entries (retention %.0f frames)", static_cast<double>(worst), static_cast<double>(m.Retention()));
+			Assert::IsTrue(worst <= 2 * m.Retention(), L"bounded by the retention window");
+			m.SetBackward(5, pair);   // a seek back restarts the window
+			Assert::IsTrue(m.Size() <= 2 * m.Retention(), L"bounded after a seek back");
+			MotionPair got;
+			Assert::IsTrue(m.Backward(5, got), L"the seek target is kept");
+			m.Clear();
+			Assert::AreEqual(static_cast<size_t>(0), m.Size(), L"Clear empties it");
+			// A host that prunes the presented frame (queue 4 ahead) keeps about the queue depth, and the model runs on it.
+			const int ahead = 4;
+			const Stream s = BuildPan(Pattern("IBBBPBBB", 48), 0.25, 0.0);
+			Model model(Steady());
+			size_t worstPruned = 0;
+			for (uint64_t t = 0; t < 10000; ++t)
+			{
+				m.SetBackward(t + ahead, pair);
+				m.SetForward(t + ahead, pair);
+				if (t == 0)
+					for (uint64_t k = 0; k < static_cast<uint64_t>(ahead); ++k) { m.SetBackward(k, pair); m.SetForward(k, pair); }
+				if (t < 48)
+				{
+					Model::FrameIn in;
+					in.luma = s.frames[static_cast<size_t>(t)];
+					in.seq = t;
+					in.contentHz = kHz;
+					in.motion = &m;
+					model.Process(in);
+					Assert::IsTrue(model.Diag().status.find("motion lost") == std::string::npos, L"the presented pair is still there");
+				}
+				m.Prune(t);
+				worstPruned = (std::max)(worstPruned, m.Size());
+			}
+			LogF("pruning host: worst size %.0f entries", static_cast<double>(worstPruned));
+			Assert::IsTrue(worstPruned <= static_cast<size_t>(2 * (ahead + 1)), L"the queue depth only");
+		}
+
+		TEST_METHOD(TemporalDetailActivePictureKeepsBarsAndEdges)
+		{
+			// Owner 2026-10-31 (the detail pulse's bar halos): with an active picture (letterbox, pillarbox), bar pixels stay
+			// bit-exact, no filter tap reaches across the bar boundary (the picture's output does not depend on the bar's
+			// level), and no undershoot / overshoot appears within 8 px of the boundary; a pan runs next to the bar.
+			struct Case { const char* name; int pw, ph; ActiveRect rect; };
+			const Case cases[] = { { "letterbox", kW, kH + 32, { 0, 16, kW, kH + 16 } }, { "pillarbox", kW + 32, kH, { 16, 0, kW + 16, kH } } };
+			for (const Case& c : cases)
+			{
+				const int n = 24;
+				const Stream s = BuildPan(Pattern("IBBBPBBB", n), 0.6, 0.0);
+				FieldMotionSource motion;
+				for (int t = 0; t < n; ++t)
+				{
+					motion.SetBackward(static_cast<uint64_t>(t), MotionPair::Uniform(c.pw, c.ph, 16.0, -0.6, 0.0));
+					motion.SetForward(static_cast<uint64_t>(t), MotionPair::Uniform(c.pw, c.ph, 16.0, 0.6, 0.0));
+				}
+				Plane outs[2][n], alone[n];
+				{
+					// The picture alone as a plane: the active picture must be processed exactly like it.
+					Model m(Steady());
+					for (int t = 0; t < n; ++t)
+					{
+						Model::FrameIn in;
+						in.luma = s.frames[static_cast<size_t>(t)];
+						in.seq = static_cast<uint64_t>(t);
+						in.contentHz = kHz;
+						in.motion = &motion;
+						alone[t] = m.Process(in);
+					}
+				}
+				for (int bar = 0; bar < 2; ++bar)
+				{
+					Model m(Steady());
+					for (int t = 0; t < n; ++t)
+					{
+						Model::FrameIn in;
+						in.luma = Plane(c.pw, c.ph, bar ? 900.0 : 16.0);
+						for (int y = 0; y < kH; ++y)
+							for (int x = 0; x < kW; ++x) in.luma.at(c.rect.left + x, c.rect.top + y) = s.frames[static_cast<size_t>(t)].at(x, y);
+						in.seq = static_cast<uint64_t>(t);
+						in.contentHz = kHz;
+						in.motion = &motion;
+						in.active = c.rect;
+						outs[bar][t] = m.Process(in);
+						const Plane& o = outs[bar][t];
+						for (int y = 0; y < c.ph; ++y)
+							for (int x = 0; x < c.pw; ++x)
+							{
+								const bool inside = x >= c.rect.left && x < c.rect.right && y >= c.rect.top && y < c.rect.bottom;
+								if (!inside) Assert::IsTrue(o.at(x, y) == in.luma.at(x, y), L"bar pixels bit-exact");
+							}
+					}
+				}
+				double worstDep = 0.0, worstEdge = 0.0, worstAlone = 0.0, edgeAlone = 0.0, changed = 0.0;
+				for (int t = 0; t < n; ++t)
+				{
+					const Plane& f = s.frames[static_cast<size_t>(t)];
+					double lo = 1e30, hi = -1e30;
+					for (double v : f.v) { lo = (std::min)(lo, v); hi = (std::max)(hi, v); }
+					for (int y = 0; y < kH; ++y)
+						for (int x = 0; x < kW; ++x)
+						{
+							const double a = outs[0][t].at(c.rect.left + x, c.rect.top + y), b = outs[1][t].at(c.rect.left + x, c.rect.top + y);
+							worstDep = (std::max)(worstDep, std::fabs(a - b));
+							worstAlone = (std::max)(worstAlone, std::fabs(a - alone[t].at(x, y)));
+							changed += std::fabs(a - f.at(x, y)) > 0.05 ? 1.0 : 0.0;
+							const bool nearEdge = (c.rect.top > 0 && (y < 8 || y >= kH - 8)) || (c.rect.left > 0 && (x < 8 || x >= kW - 8));
+							if (nearEdge)
+							{
+								worstEdge = (std::max)(worstEdge, (std::max)(lo - a, a - hi));
+								edgeAlone = (std::max)(edgeAlone, (std::max)(lo - alone[t].at(x, y), alone[t].at(x, y) - hi));
+							}
+						}
+				}
+				char line[200];
+				std::snprintf(line, sizeof line, "%s: vs bar level %.3g, vs the picture alone %.3g codes; beyond the frame's range near the boundary %.3g (picture alone %.3g); changed %.0f px",
+					c.name, worstDep, worstAlone, worstEdge, edgeAlone, changed);
+				Log(line);
+				Assert::IsTrue(worstDep == 0.0, L"the picture does not depend on the bars (no tap across the boundary)");
+				// The boundary behaves exactly as a plane edge: no undershoot or overshoot the bars add (the detail pulse's halos).
+				Assert::IsTrue(worstAlone == 0.0 && worstEdge <= edgeAlone, L"the bar boundary is a plane edge");
+				Assert::IsTrue(changed > 0.0, L"the transfer runs inside the picture");
+			}
+		}
+
+		TEST_METHOD(TemporalDetailFieldSourcePruneBounded)
+		{
+			// Bug hunt 38 H1: pruning each frame keeps the field source bounded.
+			FieldMotionSource src;
+			for (uint64_t seq = 0; seq < 10000; ++seq)
+			{
+				src.SetBackward(seq, MotionPair::Uniform(kW, kH, 16.0, 0.5, 0.25));
+				src.SetForward(seq, MotionPair::Uniform(kW, kH, 16.0, -0.5, -0.25));
+				src.PruneField(seq >= 8 ? seq - 8 : 0);
+				Assert::IsTrue(src.FieldCount() <= 2 * 9, L"field source stays bounded");
+			}
+			MotionPair out;
+			Assert::IsTrue(src.Backward(9999, out) && src.Forward(9999, out), L"newest pair found");
+			Assert::IsTrue(src.Backward(9991, out) && src.Forward(9991, out), L"oldest needed pair found");
+			Assert::IsFalse(src.Backward(9990, out), L"older pair pruned");
 		}
 	};
 }

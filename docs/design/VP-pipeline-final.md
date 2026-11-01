@@ -600,8 +600,8 @@ a few clearly commented `#include <VP-V/...>` hooks. Read `src/VP-V/README.md` f
      picture too.
    - The default stays `calibration_lut_stage = libplacebo` (byte-identical) until the owner's
      measurement.
-   - BTB/WTW in the VP stage are carried at slope 1 in code space (libplacebo mode uses the LUT
-     edge slope): a documented difference.
+   - BTB/WTW in the VP stage go through the LUT's edge slope, as in libplacebo mode (bug hunt
+     2026-10-31 F2; slope 1 only for a LUT that cannot be carried, counted as a fallback).
 5. **Config UI** for the tiers, slot switches and order list: the settings agent, from
    `slots.json` (`src/VP-V/config/`).
    - Fallbacks report through `core/FallbackStatus.h`.

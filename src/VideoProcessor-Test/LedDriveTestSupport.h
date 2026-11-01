@@ -44,6 +44,7 @@ namespace
 		int contrast = 74;
 		int minimum = 60;
 		int maximum = 255;
+		int lightReplyOverride = -1; // >= 0: an LPW1 write is answered with this value instead
 		// Flaky-test fix 2026-10-18: the clock the write times are taken from (the
 		// module's manual clock in the deterministic tests; the steady clock if unset).
 		std::shared_ptr<const LedDrive::Clock> clock;
@@ -73,7 +74,7 @@ namespace
 			else if (body == ":LPW1 ?N") replies.push_back(Reply("LPW1", minimum));
 			else if (body == ":LPW1 ?M") replies.push_back(Reply("LPW1", maximum));
 			else if (body == ":CNTR?") replies.push_back(Reply("CNTR", contrast));
-			else if (body.rfind(":LPW1", 0) == 0) { light = std::stoi(body.substr(5)); replies.push_back(Reply("LPW1", light)); }
+			else if (body.rfind(":LPW1", 0) == 0) { light = std::stoi(body.substr(5)); replies.push_back(Reply("LPW1", lightReplyOverride >= 0 ? lightReplyOverride : light)); }
 			else if (body.rfind(":CNTR", 0) == 0) { contrast = std::stoi(body.substr(5)); replies.push_back(Reply("CNTR", contrast)); }
 			// Any other ":MNEMvalue" (LDMM, LDCR, ...) is acknowledged with its value.
 			else if (body.size() > 5 && body[0] == ':' && body.find('?') == std::string::npos &&

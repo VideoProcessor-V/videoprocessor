@@ -38,6 +38,9 @@ namespace CameraModel
 		inline bool FiniteF(float v) { return IsFiniteBits(v); }
 		inline double Clamp01(double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
 
+		// Expected vector precision of a pair (source px): the caller's, else a quarter px per 16 px of block size.
+		inline double PairPrecision(const PairInput& in) { return in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0; }
+
 		// The usable, stratified sample set of one pair (picture-centred positions).
 		struct Field
 		{
@@ -219,7 +222,7 @@ namespace CameraModel
 			f.gridH = in.gridH;
 			f.blockSize = in.blockSize;
 			f.pic = in.picture;
-			f.prec = in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0;
+			f.prec = PairPrecision(in);
 			const double W = in.picture.Width(), H = in.picture.Height();
 			f.diag = std::sqrt(W * W + H * H);
 			f.halfDiag = 0.5 * f.diag;
@@ -391,6 +394,17 @@ namespace CameraModel
 			const double sx = std::sqrt(vx / sw) / (0.3 * f.pic.Width());
 			const double sy = std::sqrt(vy / sw) / (0.3 * f.pic.Height());
 			return Clamp01(std::min(sx, sy));
+		}
+
+		// Temporal noise floor per similarity-rate component (per second): one vector precision as a
+		// translation, and as scale / angle at a quarter of the picture diagonal.
+		void TemporalFloor(double prec, const Rect& pic, double pairSeconds, double* out)
+		{
+			const double W = pic.Width(), H = pic.Height();
+			const double r = 0.25 * std::sqrt(W * W + H * H);
+			const double t = pairSeconds > 0 ? pairSeconds : 1.0;
+			out[0] = out[1] = (r > 0 ? prec / r : 0.0) / t;
+			out[2] = out[3] = prec / t;
 		}
 	}
 
@@ -750,10 +764,14 @@ namespace CameraModel
 				}
 			}
 			Signals sg;
-			// Signal: a camera that explains only about half the vectors (crowds, many movers) is not a dominant
-			// camera motion; below 0.4 of the trust mass the signal is 0, full at 0.9.
+			// Signal: the trusted share of vectors the camera explains, 0 at inlierShareLo, full at inlierShareHi.
+			// A camera behind many movers (a crowd under a pan) explains about half the vectors and is still the
+			// dominant motion when no other motion competes; a competing motion is the ambiguity signal's job.
 			const double rawShare = f.trustSum > 0 ? Clamp01(inlierMass / f.trustSum) : 0.0;
-			sg.inlierShare = f.trustSum > 0 ? Clamp01((inlierMass / f.trustSum - 0.4) / 0.5) : 0.0;
+			{
+				const double lo = c.inlierShareLo, span = std::max(1e-6, c.inlierShareHi - c.inlierShareLo);
+				sg.inlierShare = f.trustSum > 0 ? Clamp01((inlierMass / f.trustSum - lo) / span) : 0.0;
+			}
 			const double rms = inlierMass > 0 ? std::sqrt(resSq / inlierMass) : 0.0;
 			{
 				const double q = rms / (2.0 * f.prec);
@@ -978,7 +996,11 @@ namespace CameraModel
 			{
 				rec.rates = rates;
 				if (temporalRead && F.m_temporal.Valid())
-					sg.temporal = Clamp01(F.m_temporal.Consistency(in.pairSeconds, rates));
+				{
+					double fl[4];
+					TemporalFloor(f.prec, in.picture, in.pairSeconds, fl);
+					sg.temporal = Clamp01(F.m_temporal.Consistency(in.pairSeconds, rates, c.temporalNoiseFloor ? fl : nullptr));
+				}
 			}
 
 			double logit = c.b[0] + c.b[1] * sg.inlierShare + c.b[2] * sg.precision + c.b[3] * sg.coverage
@@ -997,6 +1019,14 @@ namespace CameraModel
 				rec.reason = Reason::LowConfidence;
 			else
 				rec.reason = Reason::Ok;
+			// A failed verdict is never a usable fit: an Ambiguous record (a competing motion with about a third
+			// or more of the camera's support) or an InverseMismatch record keeps its model for diagnostics, but
+			// its confidence is halved and scaled by how far the signal fell below its gate, so it stays < 0.5.
+			if (c.verdictGatesConfidence && (rec.reason == Reason::Ambiguous || rec.reason == Reason::InverseMismatch))
+			{
+				const double g = rec.reason == Reason::Ambiguous ? Clamp01(sg.ambiguity / 0.35) : Clamp01(sg.inverse / 0.3);
+				rec.confidence *= 0.5 * g;
+			}
 
 			CM_PROF_MARK(6);
 			Labels(F, in, f, rec, seed, runObjects);
@@ -1249,6 +1279,16 @@ namespace CameraModel
 				return rec;
 			}
 
+			double floorBuf[4];
+			auto updateFloor = [&](const PairInput& p) -> const double*
+			{
+				if (!m_config.temporalNoiseFloor)
+					return nullptr;
+				const double prec = PairPrecision(p);
+				TemporalFloor(prec, p.picture, p.pairSeconds, floorBuf);
+				return floorBuf;
+			};
+
 			bool genReset = false;
 			if (m_haveGenerations && (in.resyncGeneration != m_resyncGeneration || in.rebaseGeneration != m_rebaseGeneration))
 			{
@@ -1290,7 +1330,7 @@ namespace CameraModel
 						rec.blocks = seed.blocks;
 						m_previous = rec;
 						m_havePrevious = true;
-						m_temporal.Update(in.next->pairSeconds, seed.rates);
+						m_temporal.Update(in.next->pairSeconds, seed.rates, updateFloor(*in.next));
 						m_seedPending = true;
 					}
 				}
@@ -1371,7 +1411,7 @@ namespace CameraModel
 				m_previous = fit;
 				m_havePrevious = true;
 				m_seedPending = false;
-				m_temporal.Update(in.pairSeconds, fit.rates);
+				m_temporal.Update(in.pairSeconds, fit.rates, updateFloor(in));
 			}
 			fit.inFade = in.fade;
 			finish(fit);

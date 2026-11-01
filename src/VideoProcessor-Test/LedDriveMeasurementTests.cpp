@@ -209,6 +209,41 @@ namespace VideoProcessorTest
 			}
 		}
 
+		// Bug hunt 31 (hard-coded rates): fade_frames / fade_min_step are SOURCE frames, converted at
+		// the measured source period, not at a fixed 24 Hz. Unmeasured: the 24p values as before.
+		// Without the frame keys nothing changes.
+		TEST_METHOD(FrameBasedFadeKeysFollowTheMeasuredRate)
+		{
+			LedDriveConfig config;
+			config.fadeFrames = 6;
+			config.fadeMinStepPerFrame = 0.5;
+			config.fadeMs = 250;          // what the reader stores for an unmeasured source (6 at 24p)
+			config.fadeMinSlope = 12.0;
+			Assert::AreEqual(250.0, config.EffectiveFadeMs(0.0), 1e-9, L"unmeasured: as before");
+			Assert::AreEqual(12.0, config.EffectiveFadeMinSlope(0.0), 1e-9);
+			Assert::AreEqual(6000.0 / 24.0, config.EffectiveFadeMs(1000.0 / 24.0), 1e-9, L"24p: identical");
+			Assert::AreEqual(12.0, config.EffectiveFadeMinSlope(1000.0 / 24.0), 1e-9);
+			Assert::AreEqual(100.0, config.EffectiveFadeMs(1000.0 / 60.0), 1e-9, L"60p: six frames are 100 ms");
+			Assert::AreEqual(30.0, config.EffectiveFadeMinSlope(1000.0 / 60.0), 1e-9);
+			LedDriveConfig timed;
+			Assert::AreEqual(static_cast<double>(timed.fadeMs), timed.EffectiveFadeMs(1000.0 / 60.0), 1e-9, L"no frame keys: fade_ms");
+			Assert::AreEqual(timed.fadeMinSlope, timed.EffectiveFadeMinSlope(1000.0 / 60.0), 1e-9);
+
+			// The builder uses the period it is given: a 6-frame fade at 60p is seen after 100 ms.
+			const double step = 1000.0 / 60.0;
+			StatsBuilder fading(config);
+			double apl = 120.0;
+			FrameStats stats;
+			for (int frame = 0; frame < 6; ++frame)
+			{
+				stats = fading.Build(Uniform(apl), frame * step, step);
+				Assert::IsFalse(stats.fade);
+				apl -= 1.0;   // 60 APL per second, above 30
+			}
+			stats = fading.Build(Uniform(apl), 6 * step, step);
+			Assert::IsTrue(stats.fade, L"six source frames of decline at 60p");
+		}
+
 		// Step 7b: script mode is the script - real LPW1 and CNTR, VP's picture
 		// untouched (script_smoothing off), CNTR 50 at start and exit.
 		TEST_METHOD(ScriptModeSendsTheScriptsLightAndContrast)

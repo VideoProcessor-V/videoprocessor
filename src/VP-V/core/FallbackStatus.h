@@ -7,6 +7,8 @@
 #include <utility>
 #include <vector>
 
+#include "../modules/control/diagnostics/VpEventLine.h"
+
 // "Fallbacks engaged" (owner rule vp-no-silent-fallbacks, 2026-10-20; r6 fix 7, 2026-10-24).
 // Every AUTOMATIC fallback or quality downgrade is visible, never log-only, under ONE heading in
 // the Ctrl+I overlay, the Config status and the Ctrl+Alt+D bundle:
@@ -107,25 +109,36 @@ namespace FallbackStatus
 	public:
 		bool Engage(const std::string& id, const std::string& reason)
 		{
-			std::lock_guard<std::mutex> guard(mutex);
-			for (Entry& e : entries)
-				if (e.id == id)
-				{
-					if (e.reason == reason)
-						return false;
-					e.reason = reason;
-					return true;
-				}
-			entries.push_back({ id, reason });
+			{
+				std::lock_guard<std::mutex> guard(mutex);
+				bool found = false;
+				for (Entry& e : entries)
+					if (e.id == id)
+					{
+						if (e.reason == reason)
+							return false;
+						e.reason = reason;
+						found = true;
+						break;
+					}
+				if (!found)
+					entries.push_back({ id, reason });
+			}
+			VpEvent::Emit(VpEvent::Kind::fallback, { { "state", "engaged" }, { "id", id }, { "reason", reason } });
 			return true;
 		}
 		bool Release(const std::string& id)
 		{
-			std::lock_guard<std::mutex> guard(mutex);
-			const auto it = std::find_if(entries.begin(), entries.end(), [&](const Entry& e) { return e.id == id; });
-			if (it == entries.end())
-				return false;
-			entries.erase(it);
+			std::string reason;
+			{
+				std::lock_guard<std::mutex> guard(mutex);
+				const auto it = std::find_if(entries.begin(), entries.end(), [&](const Entry& e) { return e.id == id; });
+				if (it == entries.end())
+					return false;
+				reason = it->reason;
+				entries.erase(it);
+			}
+			VpEvent::Emit(VpEvent::Kind::fallback, { { "state", "released" }, { "id", id }, { "reason", reason } });
 			return true;
 		}
 		bool Engaged(const std::string& id) const

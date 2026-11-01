@@ -4,6 +4,7 @@
 
 #include <VP-V/core/Indicator.h>
 #include <VP-V/core/ResyncCause.h>
+#include <VP-V/modules/control/diagnostics/VpEventLine.h>
 #include <VP-V/modules/input/signal/ResyncEvent.h>
 
 #include <atomic>
@@ -14,6 +15,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 // Resync shadow mode (R1). The renderer's enqueue path feeds every frame's facts to the R0 detector;
 // in Shadow mode the verdicts are written to the central Indicator and summarised as one status line
@@ -58,6 +60,11 @@ public:
         }
         m_mode.store(static_cast<uint8_t>(mode), std::memory_order_release);
     }
+
+    // Bug hunt 35 #3 / 25a R5: the detector's windowed measured rate (capture frames with timestamps;
+    // 0 until the window has filled since the last break, and in Off). Any thread. The interface for
+    // the pulldown's signal rate in `on` (the renderer passes the cumulative rate today: listed).
+    double WindowedRateHz() const { return IsShadow() ? m_windowedRateHz.load(std::memory_order_relaxed) : 0.0; }
 
     // Relaxed load: true in Shadow and On. The renderer gates its whole facts block on this.
     bool Active() const { return IsShadow(); }
@@ -139,12 +146,14 @@ public:
         try {
             if (m_restart.exchange(false, std::memory_order_acq_rel)) {
                 m_detector.Restart();
+                m_windowedRateHz.store(0.0, std::memory_order_relaxed);
                 ResetSummary();
             }
             const std::shared_ptr<VpIndicator::Indicator> indicator = std::atomic_load(&m_indicator);
             if (!indicator)
                 return;
             const Decision decision = m_detector.OnEnqueue(facts, m_arms);
+            m_windowedRateHz.store(m_detector.WindowedRateHz(), std::memory_order_relaxed);
             for (uint8_t i = 0; i < decision.count; ++i)
                 Record(*indicator, decision.events[i], nowSeconds);
         } catch (...) {
@@ -346,6 +355,32 @@ private:
         }
     }
 
+    // vp-event/1: one VPEV1 line per recorded event through the same logger, rate-limited.
+    void EmitEventLine(const Event& e, double nowSeconds)
+    {
+        try {
+            const char* level = e.level == Level::Full ? "full" : (e.level == Level::Minor ? "minor" : "timing");
+            std::vector<VpEvent::Field> fields;
+            fields.emplace_back("level", level);
+            fields.emplace_back("cause", Token(e.cause));
+            fields.emplace_back("seq", static_cast<uint64_t>(e.fromSeq));
+            if (e.gapFrames != 0)
+                fields.emplace_back("gap", static_cast<uint64_t>(e.gapFrames));
+            if (e.detail != 0)
+                fields.emplace_back("detail", static_cast<uint64_t>(e.detail));
+            fields.emplace_back("mode", Driving() ? "on" : "shadow");
+            uint32_t suppressed = 0;
+            const double tMs = nowSeconds * 1000.0;
+            if (!m_eventLimiter.Allow(VpEvent::Kind::resync, tMs, suppressed))
+                return;
+            if (suppressed != 0)
+                fields.emplace_back("suppressed", static_cast<uint64_t>(suppressed));
+            Log(VpEvent::FormatRange(VpEvent::Kind::resync, tMs, fields.data(), fields.size()));
+        } catch (...) {
+            m_errors.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
     void Record(VpIndicator::Indicator& indicator, const Event& e, double nowSeconds)
     {
         VpIndicator::Counter counter = VpIndicator::kContinuity;
@@ -386,6 +421,7 @@ private:
             return;
         }
         indicator.Advance(counter, e.cause, e.fromSeq, e.gapFrames, e.detail);
+        EmitEventLine(e, nowSeconds);
         if (log) {
             std::string text = std::string(Driving() ? "Resync (on): " : "Resync (shadow): ") + label + " at seq " +
                 std::to_string(e.fromSeq) + " (" + Detail(e.cause, e.detail);
@@ -401,8 +437,10 @@ private:
     std::shared_ptr<VpIndicator::Indicator> m_indicator;                                 // atomic_load / atomic_store only
     std::shared_ptr<const std::function<void(const std::string&)>> m_logger;             // atomic_load / atomic_store only
 
+    VpEvent::Limiter m_eventLimiter;
     ArmBox m_arms;
     Detector m_detector;   // queue mutex
+    std::atomic<double> m_windowedRateHz{0.0};
 
     mutable std::mutex m_stormMutex;
     StormWindow m_storm;   // m_stormMutex

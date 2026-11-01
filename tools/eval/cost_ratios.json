@@ -1,0 +1,9 @@
+{
+ "schema": 1,
+ "status": "ESTIMATE - not measured; confirm on the 3090 (3090 tests tune, they never gate)",
+ "laptop_gpu": "NVIDIA GeForce RTX 3050 Ti Laptop GPU (GA107, ~5.3 FP32 TFLOPS, 128-bit GDDR6 ~192 GB/s)",
+ "target_gpu": "NVIDIA GeForce RTX 3090 (GA102, ~35.6 FP32 TFLOPS, 384-bit GDDR6X ~936 GB/s)",
+ "basis": {"fp32_tflops_ratio": 0.15, "memory_bandwidth_ratio": 0.205},
+ "gpu_ms_ratio": 0.2,
+ "applies_to": "GPU milliseconds only (capture sidecar gpu_ms); never to python reference wall-clock"
+}

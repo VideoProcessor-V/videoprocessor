@@ -1,0 +1,12 @@
+2026-10-31 19:55:01 | === VP LOG SESSION START ===
+2026-10-31 19:55:01 | VP build identity: module=host commit=https://github.com/billslack2/videoprocessor/commit/70d668d702745ab0e5cdab9ec16580ad0133a3fb branch=merge-v1.4.02 dirty=1 build=v1.4.00-beta-70d668d
+2026-10-31 19:55:02 | Alpha queue generation armed: generation=1 reason=start prefill_target=4 hard_capacity=8
+2026-10-31 19:55:02 | an ordinary line that is skipped
+2026-10-31 19:55:03 | Resync (shadow): FULL at seq 1 (start)
+2026-10-31 19:55:09 | Resync (shadow): MINOR at seq 42 (missed frames; gap 3)
+2026-10-31 19:55:10 | Resync (on): TIMING at seq 77 (frame rate step)
+2026-10-31 19:55:11 | Render-ahead gate: full -> degraded (extra too slow; p95 new frame 9.10 ms, extra 4.00 ms (L1 2.00), estimate ahead 1.00 ms; per source frame 12.00 ms of 41.71 ms at u=0.29; queue depth 4)
+2026-10-31 19:55:12 | Render-ahead gate: reset (queue epoch; was degraded)
+2026-10-31 19:55:13 | Fallbacks engaged: refresh rate (kept 59.950 Hz for 23.976 Hz input: no matching display mode); entrance once (nested (inner) reason)
+2026-10-31 19:55:14 | Fallbacks engaged: none
+2026-10-31 19:55:15 | libplacebo [error]: User hook tried resizing non-resizable stage!
