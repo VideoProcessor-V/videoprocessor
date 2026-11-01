@@ -5,6 +5,7 @@
 #include "ExtendedRangeGpuProbe.h"
 
 #include <VP-V/modules/repair/texture_restore/TextureRestore.h>
+#include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
 
 #include <VP-V/modules/control/gpu_memory/PlTexBackend.h>
 
@@ -15,6 +16,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <random>
 #include <string>
@@ -1333,6 +1335,86 @@ namespace TextureRestoreTestsNs
 				Logger::WriteMessage(text);
 				module.Release(gpu);
 				pl_tex_destroy(gpu, &tex);
+			}
+		}
+	};
+}
+
+// B3 (shared unit U2): TextureRestore's Gaussians (sigma 1 at full resolution, the half-resolution pair for sigma 2.5 / 6)
+// now call VpUnit::BandFromBase. The frozen copies below are the private implementations they replaced; the numbers (and
+// so the GLSL weight tables) must be bit-identical.
+namespace TextureRestoreBandFromBaseNs
+{
+	inline int OldRadius1(double scale) { return (std::max)(1, static_cast<int>(std::ceil(3.0 * TextureRestore::kSigma1 * scale - 1e-9))); }
+	inline double OldWeight1(int k, double scale)
+	{
+		const double s = TextureRestore::kSigma1 * scale;
+		const int r = OldRadius1(scale);
+		double sum = 0.0;
+		for (int i = -r; i <= r; ++i) sum += std::exp(-0.5 * i * i / (s * s));
+		return std::exp(-0.5 * k * k / (s * s)) / sum;
+	}
+	inline double OldHalfSigma(double sigma) { return std::sqrt(sigma * sigma - 0.25) / 2.0; }
+	inline int OldHalfRadius(double sigma) { return (std::max)(1, static_cast<int>(std::ceil(3.5 * OldHalfSigma(sigma) - 1e-9))); }
+	inline double OldHalfWeight(int k, double sigma)
+	{
+		const double s = OldHalfSigma(sigma);
+		const int r = OldHalfRadius(sigma);
+		double sum = 0.0;
+		for (int i = -r; i <= r; ++i) sum += std::exp(-0.5 * i * i / (s * s));
+		return std::exp(-0.5 * k * k / (s * s)) / sum;
+	}
+	inline bool Same(double a, double b) { return std::memcmp(&a, &b, sizeof(double)) == 0; }
+
+	TEST_CLASS(TextureRestoreBandFromBaseIdentityTests)
+	{
+	public:
+		TEST_METHOD(FullResolutionRadiusAndWeightAreBitIdentical)
+		{
+			std::vector<double> scales;
+			for (double s = 1.0; s <= 4.0001; s += 0.0625) scales.push_back(s);
+			for (double lines : { 480.0, 1080.0, 2160.0, 3240.0, 4320.0, 8640.0 }) scales.push_back(TextureRestore::Scale(lines));
+			for (double scale : scales)
+			{
+				const int r = OldRadius1(scale);
+				Assert::AreEqual(r, TextureRestore::Radius1(scale), L"radius");
+				for (int k = -r; k <= r; ++k)
+					Assert::IsTrue(Same(OldWeight1(k, scale), TextureRestore::Weight1(k, scale)), L"weight bits");
+			}
+		}
+
+		TEST_METHOD(HalfResolutionSigmaRadiusAndWeightAreBitIdentical)
+		{
+			for (double scale : { 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0 })
+				for (double base : { TextureRestore::kSigma2, TextureRestore::kSigma3 })
+				{
+					const double sigma = base * scale;
+					Assert::IsTrue(Same(OldHalfSigma(sigma), TextureRestore::HalfSigma(sigma)), L"half sigma bits");
+					const int r = OldHalfRadius(sigma);
+					Assert::AreEqual(r, TextureRestore::HalfRadius(sigma), L"half radius");
+					for (int k = -r; k <= r; ++k)
+						Assert::IsTrue(Same(OldHalfWeight(k, sigma), TextureRestore::HalfWeight(k, sigma)), L"half weight bits");
+				}
+		}
+
+		TEST_METHOD(EmittedWeightTablesTextIsByteIdentical)
+		{
+			for (double scale : { 1.0, 1.5, 2.0, 2.5 })
+			{
+				const int r1 = OldRadius1(scale);
+				Assert::AreEqual(
+					VpvGpu::ConstArray("w", 2 * r1 + 1, [&](int k) { return OldWeight1(k - r1, scale); }),
+					VpvGpu::ConstArray("w", 2 * TextureRestore::Radius1(scale) + 1, [&](int k) { return TextureRestore::Weight1(k - TextureRestore::Radius1(scale), scale); }),
+					L"w1 table text");
+				for (double base : { TextureRestore::kSigma2, TextureRestore::kSigma3 })
+				{
+					const double sigma = base * scale;
+					const int rh = OldHalfRadius(sigma);
+					Assert::AreEqual(
+						VpvGpu::ConstArray("w", 2 * rh + 1, [&](int k) { return OldHalfWeight(k - rh, sigma); }),
+						VpvGpu::ConstArray("w", 2 * TextureRestore::HalfRadius(sigma) + 1, [&](int k) { return TextureRestore::HalfWeight(k - TextureRestore::HalfRadius(sigma), sigma); }),
+						L"half table text");
+				}
 			}
 		}
 	};
