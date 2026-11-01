@@ -312,7 +312,9 @@ public:
     // handover cannot be carried; they are counted in PrematureFolds() as before.
     size_t HandOverTo(const std::shared_ptr<Indicator>& next)
     {
-        if (!next || next.get() == this)
+        // `next` must be a fresh era (never handed over itself): a handover cycle would make Latest and
+        // the forwarded Advance loop forever.
+        if (!next || next.get() == this || next->HandedOver())
             return 0;
         std::lock_guard<std::mutex> lock(writeMutex_);
         if (successor_)
@@ -322,9 +324,21 @@ public:
             // The new era inherits the seal floor: frames sealed here stay sealed (a writer that asks
             // for "the first unsealed frame", LastSealed() + 1, gets the same answer in both eras, and
             // an advance can never land on - or uniformly below - a frame already rendered).
+            // Frames before the last sealed one are ANCIENT in the new era (single-frame use only): the
+            // new era's stamps no longer carry the events between them, so a pair reaching back across
+            // the swap is refused instead of read as valid. The last sealed frame itself stays a normal
+            // stamp: it is the baseline the readers latch from (LatchBaseline).
             std::lock_guard<std::mutex> nextLock(next->writeMutex_);
             if (next->sealedNext_.load(std::memory_order_relaxed) < floorSeq)
                 next->sealedNext_.store(floorSeq, std::memory_order_release);
+            const uint64_t ancient = floorSeq > 0 ? floorSeq - 1 : 0;
+            if (next->ancientBelow_.load(std::memory_order_relaxed) < ancient) {
+                const uint64_t v = next->version_.load(std::memory_order_relaxed);
+                next->version_.store(v + 1, std::memory_order_relaxed);
+                std::atomic_thread_fence(std::memory_order_release);
+                next->ancientBelow_.store(ancient, std::memory_order_relaxed);
+                next->version_.store(v + 2, std::memory_order_release);
+            }
         }
         const uint64_t written = written_.load(std::memory_order_relaxed);
         const uint64_t retained = written < capacity_ ? written : uint64_t(capacity_);
@@ -364,6 +378,12 @@ public:
         }
         return ind;
     }
+    // The frame a reader registered on this Indicator latches against at its first observe: the last
+    // frame sealed before the registration when the seal floor was inherited from a predecessor era
+    // (HandOverTo), else 0 (= the frame before the observed one). Call at registration (before the
+    // first Observe). With it, a carried event on a frame that was never sealed (dropped from the
+    // queue) still differs from the baseline and acts, instead of being swallowed by the latch.
+    uint64_t LatchBaseline() const { return HasSealed() ? LastSealed() : 0; }
     uint32_t CarriedEvents() const { return carriedEvents_.load(std::memory_order_relaxed); }
     uint32_t ForwardedAdvances() const { return forwardedAdvances_.load(std::memory_order_relaxed); }
 
@@ -656,6 +676,17 @@ private:
     uint64_t lastObservedSeq_ = 0;
     Stamp lastObservedStamp_;
 };
+
+// The counters a latching reader acts on at its first observe of `seq`: the stamp of seq against the
+// stamp of `baseline` (Indicator::LatchBaseline at registration) when it is an earlier frame, else
+// against seq - 1 (every counter for seq 0).
+inline CounterMask ChangedSinceLatch(const Indicator& ind, uint64_t baseline, uint64_t seq)
+{
+    if (seq == 0)
+        return kAllCounters;
+    const uint64_t from = (baseline != 0 && baseline < seq) ? baseline : seq - 1;
+    return Changed(ind.StampOf(from), ind.StampOf(seq));
+}
 
 // Ancient seqs are valid for single-frame use only: never temporal.
 inline bool TemporalValid(const Indicator& ind, uint64_t seqA, uint64_t seqB, CounterMask m)

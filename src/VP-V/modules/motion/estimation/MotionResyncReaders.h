@@ -130,12 +130,14 @@ public:
     // first observe of the new Indicator (only what changed AT that frame acts), the cause lookup
     // forgets the old era's last seq, and the producer baseline is re-taken from the new Indicator.
     // Pending flags the consumer has not taken yet are kept (they are still owed).
-    void Rearm()
+    // baseline = Indicator::LatchBaseline() of the new era (0 = latch against the frame before).
+    void Rearm(uint64_t baseline = 0)
     {
         m_historyLatched = false;
-        m_historyHave = false;
-        m_historyLast = 0;
+        m_historyHave = baseline != 0;   // cause lookups then search (baseline, seq]
+        m_historyLast = baseline;
         m_producerLatched = false;
+        m_latchBaseline = baseline;
         ++m_rearms;
     }
     unsigned Rearms() const { return m_rearms; }
@@ -148,7 +150,7 @@ public:
         CounterMask rel = c.relevant;
         if (!m_historyLatched) {
             m_historyLatched = true;
-            rel &= AtFrame(ind, c.seq);
+            rel &= VpIndicator::ChangedSinceLatch(ind, m_latchBaseline, c.seq);
         }
         const VpIndicator::Indicator::Change cc{ c.seq, c.changed, rel, c.policies };
         if (rel == 0) {
@@ -183,9 +185,11 @@ public:
         CounterMask rel = c.relevant;
         if (!m_producerLatched) {
             m_producerLatched = true;
-            rel &= AtFrame(ind, c.seq);
+            rel &= VpIndicator::ChangedSinceLatch(ind, m_latchBaseline, c.seq);
             // Baseline before the carrying frame: a change AT this frame then re-keys and drops.
-            m_note.engageGeneration = VpResync::Drive::FullKey(ind, c.seq == 0 ? 0 : c.seq - 1);
+            const uint64_t base = (m_latchBaseline != 0 && m_latchBaseline < c.seq) ? m_latchBaseline
+                                                                                  : (c.seq == 0 ? 0 : c.seq - 1);
+            m_note.engageGeneration = VpResync::Drive::FullKey(ind, base);
         }
         if (rel == 0)
             return;
@@ -202,14 +206,6 @@ public:
     }
 
 private:
-    // The counters that changed AT seq: its stamp against the previous frame's.
-    static CounterMask AtFrame(const VpIndicator::Indicator& ind, uint64_t seq)
-    {
-        if (seq == 0)
-            return VpIndicator::kAllCounters;
-        return VpIndicator::Changed(ind.StampOf(seq - 1), ind.StampOf(seq));
-    }
-
     // The cause of the newest event of `counter` that applies to seq and is newer than `last`
     // (Indicator::LastCauseIn: lock-free, no allocation). Not found - none retained, or the interval
     // is older than the ring - is UNKNOWN = Cause::None, which maps conservatively (FULL -> Resync,
@@ -234,6 +230,7 @@ private:
     bool m_historyHave = false;
     bool m_historyLatched = false;
     bool m_producerLatched = false;
+    uint64_t m_latchBaseline = 0;
 };
 
 struct Ids {
@@ -248,7 +245,7 @@ struct Ids {
 inline Ids RegisterOn(VpIndicator::Indicator& indicator, MotionValidity::State& state, Readers& readers)
 {
     Ids ids;
-    readers.Rearm();   // a new Indicator (era): latch again, forget the old era's sequence
+    readers.Rearm(indicator.LatchBaseline());   // a new Indicator (era): latch again (from the inherited seal)
     VpIndicator::Indicator* ind = &indicator;
     MotionValidity::State* st = &state;
     Readers* rd = &readers;

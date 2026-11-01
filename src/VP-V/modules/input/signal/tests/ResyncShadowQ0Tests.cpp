@@ -7,6 +7,7 @@
 
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/FrameSeal.h>
+#include <VP-V/modules/input/signal/DvResyncReader.h>
 #include <VP-V/modules/input/signal/ResyncDrive.h>
 #include <VP-V/modules/input/signal/ResyncShadow.h>
 #include <VP-V/modules/motion/estimation/MotionResyncReaders.h>
@@ -413,6 +414,46 @@ namespace Tests
 			Assert::AreEqual(2u, contActs, L"render-ahead relatched at both slips");
 			Assert::AreEqual(1u, fullActs, L"render-ahead reset at the carried FULL");
 			Assert::IsTrue(motion.Epoch() >= epoch0 + 3, L"motion epoch moved at 6, 7 and 9");
+		}
+
+		// Audit 3 MUST: a carried event on a frame that is never sealed in the new era (dropped from the
+		// queue) must still act at the first sealed frame: the readers latch from the inherited seal, not
+		// from the frame before the observed one.
+		TEST_METHOD(ACarriedEventOnADroppedFrameStillActsAfterTheSwap)
+		{
+			RefusalNote::Take();
+			Shadow shadow;
+			shadow.Configure(Shadow::Mode::On, 8);
+			VpSeal::FrameSeal fs;
+			Drive drive;
+			MotionValidity::State motion;
+			VpMotionResync::Readers mreaders;
+			VpDvResync::Reader dv;
+			fs.AddProvider("drive", [&drive](const std::shared_ptr<VpIndicator::Indicator>& i) { drive.RegisterOn(i); });
+			fs.AddProvider("motion", [&](const std::shared_ptr<VpIndicator::Indicator>& i) { VpMotionResync::RegisterOn(i, motion, mreaders); });
+			fs.AddProvider("dv", [&dv](const std::shared_ptr<VpIndicator::Indicator>& i) { dv.RegisterOn(i); });
+			fs.Subscribe("drive", [&drive](const std::shared_ptr<VpIndicator::Indicator>& i, uint64_t seq, VpIndicator::CounterMask c) { drive.OnObserved(i, seq, c); });
+			for (uint64_t f = 1; f <= 8; ++f)
+				shadow.OnEnqueue(Facts(f, 1, 100 + f), 1.0, 0.04 * double(f));
+			for (uint64_t f = 1; f <= 4; ++f)
+				fs.Seal(shadow.GetIndicator(), f);
+			drive.Take(Reader::RenderAhead);
+			mreaders.TakeHistory();
+			dv.Take();
+			const uint64_t relatches0 = dv.Relatches();
+			// A FULL on frame 5 (the first unsealed frame), then the ring grows, then frame 5 is dropped.
+			shadow.GetIndicator()->Advance(VpIndicator::kFull, Cause::InPlaceSourceChange, 5);
+			shadow.Configure(Shadow::Mode::On, 256);
+			const std::shared_ptr<VpIndicator::Indicator> ind = shadow.GetIndicator();
+			Assert::AreEqual(uint64_t(4), ind->LatchBaseline());
+			fs.Seal(ind, 6);   // frame 5 never sealed
+			Assert::IsTrue((drive.Take(Reader::RenderAhead) & VpIndicator::Bit(VpIndicator::kFull)) != 0, L"render-ahead resets at 6");
+			const VpMotionResync::HistoryPending h = mreaders.TakeHistory();
+			Assert::IsTrue(h.changed && h.cause == MotionValidity::Cause::SourceFormatChange, L"motion history acts with the carried cause");
+			Assert::AreEqual(relatches0 + 1, dv.Relatches(), L"DV relatches at 6");
+			// Pairs reaching back across the swap are refused (ancient), the baseline frame is not.
+			Assert::IsFalse(motion.PairValidAt(2, 3), L"older than the inherited seal: ancient");
+			Assert::IsTrue(motion.PairValidAt(6, 7));
 		}
 
 		// A writer thread that keeps a STALE pointer to the first era (and one that reloads it) writes

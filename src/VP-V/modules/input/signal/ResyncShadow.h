@@ -230,9 +230,10 @@ public:
     // The storm clock: steady seconds by default; in source-time mode (SetStormSourceTime) every event
     // is timed by its frame's source seconds. The HOLD is decided for the RENDERED frame: StormHold,
     // StormSafeSettings and StormNotice take that frame's time (source seconds in source-time mode)
-    // and see only the FULL events timed at or before it, so the enqueue thread running ahead (events
-    // of queued frames already recorded) never changes the answer. AdvanceStormClock only feeds the
-    // status line's display time.
+    // and see only the FULL events timed at or before it, so in source-time mode the enqueue thread
+    // running ahead (events of queued frames already recorded) never changes the answer. On the
+    // steady clock (the default) event times are enqueue times, so the hold stays timing-dependent
+    // by nature (not reproducible). AdvanceStormClock only feeds the status line's display time.
     void SetStormSourceTime(bool on) { m_stormSourceTime.store(on, std::memory_order_release); }
     bool StormSourceTime() const { return m_stormSourceTime.load(std::memory_order_acquire); }
     // Render thread, once per frame in source-time mode: lets the 10 s quiet release run without an
@@ -508,16 +509,19 @@ private:
         }
     }
 
-    // m_stormMutex held. The newest recorded FULL (record order) timed at or before `seconds` decides:
-    // held then, and fewer than 10 s since the last counted FULL at that point.
+    // m_stormMutex held. The recorded FULL with the LATEST time at or before `seconds` decides (ties:
+    // the newest recorded): held then, and fewer than 10 s since the last counted FULL at that point.
+    // Taking the latest time, not the newest record, keeps an enqueue-ahead entry of a new (lower)
+    // source timebase from deciding a frame of the old one.
     bool StormHeldAtLocked(double seconds) const
     {
+        const StormEntry* best = nullptr;
         for (size_t k = 0; k < m_stormHistoryCount; ++k) {
             const StormEntry& h = m_stormHistory[(m_stormHistoryNext + kStormHistory - 1 - k) % kStormHistory];
-            if (h.seconds <= seconds)
-                return h.held && (seconds - h.lastFull) < kStormReleaseSeconds;
+            if (h.seconds <= seconds && (best == nullptr || h.seconds > best->seconds))
+                best = &h;
         }
-        return false;
+        return best != nullptr && best->held && (seconds - best->lastFull) < kStormReleaseSeconds;
     }
 
     double StormNow(double nowSeconds) const

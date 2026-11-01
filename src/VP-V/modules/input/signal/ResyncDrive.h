@@ -124,6 +124,7 @@ public:
                 [slot](const VpIndicator::Indicator::Change& c) { *slot |= c.relevant; });
         }
         m_latch = true;
+        m_latchBaseline = indicator->LatchBaseline();   // a successor era: latch from the last sealed frame
     }
 
     // FrameSeal subscriber entry (render thread): the frame `seq` was sealed and observed by the
@@ -163,6 +164,7 @@ public:
     {
         m_pending.fill(0);
         m_latch = true;   // the next `on` observe latches (see SealAndObserve)
+        m_latchBaseline = 0;
     }
 
     const std::shared_ptr<VpIndicator::Indicator>& Registered() const { return m_registered; }
@@ -220,8 +222,11 @@ private:
         // changed AT this frame - its stamp against the previous frame's - never on the history
         // of the era (a settings change is not a source event). An ancient previous frame
         // compares as "everything" (the conservative reset). The returned mask is unfiltered.
+        // On a successor era (Indicator::HandOverTo) the baseline is the last frame sealed in the old era,
+        // so an event carried onto a frame that was never sealed (dropped) still acts here.
         m_latch = false;
-        const CounterMask atFrame = VpIndicator::Changed(indicator.StampOf(seq - 1), indicator.StampOf(seq));
+        const CounterMask atFrame = VpIndicator::ChangedSinceLatch(indicator, m_latchBaseline, seq);
+        m_latchBaseline = 0;
         for (CounterMask& pending : m_pending)
             pending &= atFrame;
     }
@@ -231,6 +236,7 @@ private:
     std::array<int, kReaders> m_ids{};
     uint64_t m_lastSealed = 0;
     bool m_latch = true;
+    uint64_t m_latchBaseline = 0;
 };
 
 } // namespace VpResync

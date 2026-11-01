@@ -128,6 +128,7 @@ public:
         m_latched = false;
         m_haveAct = false;
         m_lastActSeq = 0;
+        m_latchBaseline = indicator.LatchBaseline();
         ++m_eras;
         const ReaderSpec& spec = Spec();
         VpIndicator::Indicator* ind = &indicator;
@@ -163,21 +164,13 @@ public:
     }
 
 private:
-    // The counters that changed AT seq: its stamp against the previous frame's (every counter for seq 0).
-    static CounterMask AtFrame(const VpIndicator::Indicator& ind, uint64_t seq)
-    {
-        if (seq == 0)
-            return VpIndicator::kAllCounters;
-        return VpIndicator::Changed(ind.StampOf(seq - 1), ind.StampOf(seq));
-    }
-
     void OnChange(const VpIndicator::Indicator& ind, const VpIndicator::Indicator::Change& c)
     {
         ++m_calls;
         CounterMask rel = c.relevant;
         if (!m_latched) {
             m_latched = true;
-            rel &= AtFrame(ind, c.seq);
+            rel &= VpIndicator::ChangedSinceLatch(ind, m_latchBaseline, c.seq);
         }
         if (rel == 0)
             return;
@@ -218,6 +211,7 @@ private:
     bool m_haveKey = false;
     const VpIndicator::Indicator* m_keyAddress = nullptr;
     uint32_t m_keyEra = 0;
+    uint64_t m_latchBaseline = 0;
     int m_id = -1;
     bool m_latched = false;
     bool m_haveAct = false;
