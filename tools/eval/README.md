@@ -284,3 +284,32 @@ converter script (PNG + sidecar -> `capture.json` + `.yuv`) is the bridge.
 * Chroma metrics on G18 compare against 4-frame windows only (no temporal metrics there); LPIPS is a
   tile-crop estimate, not full-frame.
 * Capture-candidate path has no producer yet (see "Missing" above).
+
+## S2 shadow-ramp suite, light-level metrics and stack runner
+
+* **S2 suite** (`suites/s2_shadow_ramps.json`, generator `s2_synth.py`, rewrite with `python -I tools/eval/s2_synth.py`):
+  synthetic 0.01-20 nit gradients (horizontal / vertical / radial, linear in PQ) x contexts (SDR BT.1886 100 / 0.05 nit,
+  HDR PQ 1000 / 4000 nit, LLDV-like 1000 / 4000) x seeded grain 0 / 0.5 / 1.5 delivered codes; `master` = ideal + grain,
+  `coded` = quantised to the delivered depth without dither. Cases are `kind: "synth"` (no `eval_io` loader): call
+  `s2_synth.make_case(case["master"]["params"])`.
+* **Light-level metrics**: `light_level_ref.py` mirrors the per-code light-level LUT (J, S, V, L, sdr_code; J_eff tiles from
+  the master). `light_metrics.py` gives `shadow_banding` (coarse-error MSE and step p99 in display PQ codes for J_eff < 5 nit
+  and 5-50 nit) and `shadow_texture_kept` (projection of the candidate's fine band on the master's, relative to plain; gate 0.97).
+* **Runner**: `stack_runner.py` runs SDR, HDR-PQ passthrough and HDR->SDR (static `tonemap_ref` spline) contexts through
+  plain, each stand-in stage alone (s1 texture oracle, s2 VP deband model, s3 cr_gs tone mapping, s4 sigma-delta), 1+2, 1+2+3
+  and the "+4" sigma-delta finals; every output ends 8-bit, with a no-dither 8-bit variant (`nd`) for scale. Writes
+  `stack_s2.csv`, `stack_s2.md`, `run_log.txt`.
+
+```
+python -I tools/eval/stack_runner.py --suite s2 --max-cases 6 --size-frac 0.125   # quick subset: 6 cases, 480x270 windows, ~3 min CPU
+python -I tools/eval/stack_runner.py --suite s2 --max-cases 0 --size-frac 0.25     # full run (suite size 960x540, 18 runnable cases, ~17 min CPU)
+python -I tools/eval/test_light_eval.py                                # tests
+```
+
+* **sRGB note**: sRGB is approximated by gamma 2.2 only in the SDR tone-shape power (as the renderer does); the
+  Display/Inverse transforms in `light_level_ref.py` use the exact piecewise sRGB curve.
+* **Gates**: grain ratio and texture kept compare each candidate with the plain chain using the SAME final step (nd vs plain,
+  +4 vs plain+4); the absolute cand/master grain ratio is a separate column. Texture kept is NA when plain keeps < 0.25 of the
+  master texture. btb counts a master pixel only if below black by more than half an output code step (2 ten-bit codes for 8-bit).
+
+The committed run (`prototypes/stack_s2/`) is the full 18-case run at 960x540 (the runner supports the sdr and hdr_pq_1000 contexts; the suite's hdr_pq_4000 and lldv cases have no runner context); read it as relative ordering only (stand-in stages).

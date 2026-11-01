@@ -66,11 +66,15 @@ def _hash_field(shape, seed):
     return rng.random(shape), rng.random(shape)
 
 
+def bilinear(a, yy, xx):
+    """Bilinear sample of a at float (yy, xx), edge-replicated (candidates_chroma.bilinear is not in the tree)."""
+    return ndimage.map_coordinates(a, [yy, xx], order=1, mode="nearest")
+
+
 def _ring_avg(L, r, ang):
     h, w = L.shape
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
     dx, dy = r * np.cos(ang), r * np.sin(ang)
-    from candidates_chroma import bilinear
     return 0.25 * (bilinear(L, yy + dy, xx + dx) + bilinear(L, yy + dy, xx - dx)
                    + bilinear(L, yy - dy, xx - dx) + bilinear(L, yy - dy, xx + dx))
 
