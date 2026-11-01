@@ -517,6 +517,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationCoreTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelLutTests.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationRemainderTests.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationMeterTests.cpp" />
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationPhase2Tests.cpp" />
@@ -789,6 +790,7 @@
   <ItemGroup>
     <ClInclude Include="..\VP-V\tests\VpLutGpuTestSupport.h" />
     <ClInclude Include="..\VP-V\tests\SettingsTestSupport.h" />
+    <ClInclude Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelGolden.generated.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="RealClipLibrary.h" />
   </ItemGroup>
