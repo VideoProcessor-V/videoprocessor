@@ -800,7 +800,8 @@ namespace HalfLumaUnitTestsNs
 						// A fully saturated frame as well as noise.
 						Frame sat = f;
 						std::fill(sat.px.begin(), sat.px.end(), uint16_t(shift == 6 ? 1023u : 65535u));
-						for (const Frame* fr : { &f, &sat })
+						const Frame* const frames[] = { &f, &sat };
+						for (const Frame* fr : frames)
 						{
 							const uint32_t hw = (d.width + 1u) / 2u, hh = (d.height + 1u) / 2u;
 							const uint32_t qw = (hw + 1u) / 2u, qh = (hh + 1u) / 2u;
