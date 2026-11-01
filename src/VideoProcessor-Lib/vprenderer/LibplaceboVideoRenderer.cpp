@@ -8813,7 +8813,7 @@ struct LibplaceboVideoRenderer::Impl
 		(void)next.ActiveEntrance();   // warm the kept list here, so the render thread only reads it
 		pipelineSlots = next;
 		VpFrameAnalysis::Host::SetLimitedDomain(settings.sourceCodingFixes);   // DIV-AN-01 either/or (Original: off = Bill's codes)
-		frameAnalysis.Configure(settings.frameAnalysisStore && !settings.pipelineOriginalPathway,   // WP-23
+		frameAnalysis.Owner(this).Configure(settings.frameAnalysisStore && !settings.pipelineOriginalPathway,   // WP-23
 			VpFrameAnalysis::Host::FullLumaReaders(pipelineSlots, settings.opticalFlow, settings.motionAheadFrames,
 				settings.sourceResolution == "auto"));   // running full-luma readers; record readers: none yet
 		RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::SettingsApplied, this, nullptr, nullptr, settings.resyncEvent.c_str(), nullptr, settings.pipelineOriginalPathway ? 1 : 0, nullptr, static_cast<double>(settings.motionAheadFrames)); // VPV-HOOK

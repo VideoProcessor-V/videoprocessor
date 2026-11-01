@@ -6,6 +6,17 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)..\core\hub\ExtensionHub.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\core\hub\HubBootstrap.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\input\signal\ResyncExtension.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\control\skeleton\SkeletonModule.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraExtension.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraLinkCore.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraFitProducer.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraFitWorker.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\FieldReadbackRing.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\NativeCopyReadback.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\GlobalModelGeometry.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\GlobalModelTemporal.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\GlobalModelObjects.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\GlobalModelFit.cpp" />
   </ItemGroup>
   <ItemDefinitionGroup>
     <Link>

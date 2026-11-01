@@ -1,0 +1,39 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "control.skeleton",
+  "unit": "control",
+  "order": 940,
+  "status": "draft",
+  "draft_note": "Not a pipeline slot: a hub module (ISkeletonModule) that activates the analysis lane, off by default ([vpv.skeleton] analysis_lane). Registers through HubBootstrap after the resync extension.",
+  "code_location": "src/VP-V/modules/control/skeleton (this folder) + src/VP-V/core/AnalysisLane.h + src/VP-V/modules/input/source_analysis/SourceFrameTap.h",
+  "live_files": [
+    "src/VP-V/modules/control/skeleton/SkeletonModule.h",
+    "src/VP-V/modules/control/skeleton/SkeletonModule.cpp",
+    "src/VP-V/modules/control/skeleton/SkeletonSettings.h",
+    "src/VP-V/core/hub/HostSlots.h",
+    "src/VP-V/modules/input/source_analysis/SourceFrameTap.h",
+    "src/VP-V/modules/control/skeleton/tests/SkeletonModuleTests.cpp",
+    "src/VP-V/modules/input/source_analysis/tests/SourceFrameTapTests.cpp"
+  ],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": ["video memory budget (IDXGIAdapter3::QueryVideoMemoryInfo) for the tier plan"]
+    },
+    "tools": [],
+    "config_keys": [
+      "vpv.skeleton.analysis_lane",
+      "vpv.skeleton.analysis_lane_chunk_us",
+      "vpv.skeleton.analysis_lane_deterministic",
+      "vpv.skeleton.analysis_lane_test_wait_ms",
+      "vpv.skeleton.camera_link"
+    ],
+    "upstream_modules": ["input.signal (resync_event = on: the one shared seal)", "input.source_analysis (frame_analysis_store = on: the source frames)"]
+  },
+  "fallback_when_missing": "No lane: no analysis products are made; every consumer keeps its own computation. The reason is shown (skeleton_lane).",
+  "fallback_entry": "skeleton_lane: waiting: resync_event=on required (one shared seal) | no source frames: needs frame_analysis_store=on"
+}

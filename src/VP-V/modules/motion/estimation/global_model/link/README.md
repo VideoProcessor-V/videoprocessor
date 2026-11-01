@@ -65,6 +65,15 @@ no Bill file is touched, and with no consumer of P7 there is no thread, product,
   timing; deterministic mode (`CameraLinkSettings::deterministic`) starts no thread and drains with `ProcessPending()`.
 * **No hard-coded rates.** Pair seconds, deadlines, cool-down and `d` all come from measured values.
 
+## Activation (report mode, 2026-11-01)
+
+`CameraExtension.h/.cpp` is the H1 adapter in REPORT mode (`[vpv.skeleton] camera_link = report`, off by default): per renderer a
+`CameraLinkCore` over that renderer's `FrameAnalysis::Store` (found through `SourceFrameTap::StoreFor`), `OnGpuCreated`, the
+Indicator reader through a FrameSeal provider, `OnFrameStart` at Begin (resync driving), `OnPostSubmitGap` after render, status and
+decisions into the hub's status. No vector engine exists yet (P5a), so the core is configured with `p7Wanted = false`: no thread,
+pool, ring or product. It never feeds a consumer and answers no `vpv.camera.v1` query. `VP_CAMERA_DUMP=1` logs the status once
+a second. The rows below remain the plan for the full wiring.
+
 ## Wiring TODO (the H1 adapter, ~40 lines, a later step; needs `feat/m2-hooks` c716298f)
 
 `CameraExtension : IRendererExtension`, registered after `ResyncExtension`:
