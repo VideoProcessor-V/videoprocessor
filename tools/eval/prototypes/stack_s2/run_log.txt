@@ -1,0 +1,11 @@
+suite s2_shadow_ramps: 6 cases selected, size_frac 0.125, contexts ['sdr', 'hdr_pq', 'hdr_to_sdr']
+  s2-sdr-horizontal-g0 sdr done
+  s2-sdr-vertical-g0 sdr done
+  s2-sdr-radial-g0p5 sdr done
+  s2-hdr_pq_1000-horizontal-g0p5 hdr_pq done
+  s2-hdr_pq_1000-horizontal-g0p5 hdr_to_sdr done
+  s2-hdr_pq_1000-vertical-g1p5 hdr_pq done
+  s2-hdr_pq_1000-vertical-g1p5 hdr_to_sdr done
+  s2-hdr_pq_1000-radial-g1p5 hdr_pq done
+  s2-hdr_pq_1000-radial-g1p5 hdr_to_sdr done
+rows 84, cpu 134.8 s
