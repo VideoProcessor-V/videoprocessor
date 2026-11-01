@@ -8,7 +8,7 @@ nothing, this throws, so a stale hand-written filter can never be used by accide
 
   . (Join-Path $PSScriptRoot 'test_filters.ps1')         # from a script in tools/
   Get-VpTestFilter -Kind cpu                              # everything that may run without a GPU
-  Get-VpTestFilter -Kind gpu                              # excluded categories (hardware, on-screen, meter, projector)
+  Get-VpTestFilter -Kind gpu                              # excluded categories (hardware, on-screen, meter, projector, Slow, UpstreamStale)
   Get-VpTestFilter -Kind gpu -Categories GpuHardware,GpuOnScreen
   Get-VpTestFilter -Kind gpuwarp                          # WARP-capable GPU tests; run with VP_TEST_GPU=hardware too
   Get-VpTestFilter -Kind gpuall                           # gpu | gpuwarp

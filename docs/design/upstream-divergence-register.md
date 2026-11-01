@@ -45,6 +45,18 @@ Owner decisions are binding: in every either/or the Original pathway (`pipeline_
 | DR-M-HOLD | Start-up hold black clear | The merge lost `pl_frame_clear` under `if (rendered && startupHoldBlack)`, leaving the hold guarding Bill's `CacheDisplayFrame`; restored. | = Bill (hold off on Original) | Merge repair |
 | DR-M-LOOKAHEAD | Active-picture look-ahead gate | VP's LED/intent observers walk the queue without Bill's active-picture frames when his gate refuses them; his look-ahead statistics count only his attempts. | = Bill when observers are off | Merge repair |
 
+Upstream-stale Bill tests (NOT a divergence; 2026-11-01): 8 of Bill's black-bar tests fail on Bill's own tip a591ad3b exactly
+as on VP-V; they pass at 2abdf66e^ and fail from Bill's 2abdf66e (2026-10-30, `RecoverFlatBarLowContrastPicture`, his Eternals
+fix). VP-V's `ActivePictureEvidence` equals Bill's for these P010/P210/V210 fixtures on both pathways (DIV-AN-01 does not apply).
+- 6 OpposingBoundaryDiagnostics: the recovery now acquires the code-64 bars around the dim code-80 picture directly (e.g.
+  BAR_CROP_TRUSTED 0,274-3840,1886 enclosing picture 276-1884), so their PROVISIONAL precondition fails. Correct; stale tests.
+- DimSideCompositionGuard `QuantizedShadowedSideRejectsDeeperPictureCaptionsAndRamps`: only pattern 2 changes, full raster ->
+  0,264-3840,1890, keeping the crossing object and all picture (conservative). Stale test.
+- RememberedEdge `QualifiedScopeReturnsWithZeroOppositeBoundaryContrast`: a Bill COST REGRESSION, not stale. No new crop, but the
+  failed recovery's samples are charged (result.samples 96,352 -> 174,690 > the 150,000 budget).
+Tests and Bill's code are unmodified; the 8 are in category `UpstreamStale` in `tools/test-categories.json` (out of the CPU run;
+`gen_test_filters.py --gpu --categories UpstreamStale` selects them). To report to Bill; remove the entries when fixed upstream.
+
 Open owner questions from the merge: edge blanking `blank_*` (VP-V viewport keys, default 0) is not in the Original table (a row, or a screen-installation property?); Bill's AGENTS.md text naming an EDID .bin as a release asset is superseded by the publishing rule (EXE/ZIP/vp-update.json only).
 
 ## Carried rows (2026-10-25 sweep draft, against Bill 8c453746; re-verify against a591ad3b)
