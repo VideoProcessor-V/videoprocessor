@@ -168,6 +168,12 @@
      "pattern": "0\\.25 \\* \\(",
      "kind": "residual",
      "reason": "GLSL, no byte-identity proof without GPU: DetailPulse load_low sbox 2x2 box (line 141) and the 2x2 mean at line 521"
+    },
+    {
+     "file": "src/VP-V/modules/control/skeleton/SkeletonModule.cpp",
+     "pattern": "kP1HalfLuma|HalfLumaProducer|ComputeHalfLuma",
+     "kind": "false_positive",
+     "reason": "registers/consumes the lane's own P1 producer (VpLaneProducts, the U3 owner); no private downsample"
     }
    ]
   },
