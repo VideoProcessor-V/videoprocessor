@@ -440,4 +440,49 @@ namespace FallbackCatalog
 		return Engaged("resync_storm", "Input unstable: " + std::to_string(fullCount < 0 ? 0 : fullCount) +
 			" resyncs in 10 s - processing held at safe settings");
 	}
+
+	// ---- skeleton analysis lane -----------------------------------------------------------------
+	// The regulator reduced the lane's work (dropped products, forced live fills, T0 in the render,
+	// pinned at the minimum, the optical-flow input reduced by `ofaStep` steps: 0 = full), or the lane is
+	// not available for the source stats. The lists hold plain-language product names (the host maps ids
+	// to names).
+	inline std::string JoinNames(const std::vector<std::string>& names)
+	{
+		std::string out;
+		for (size_t i = 0; i < names.size(); ++i)
+			out += (i ? ", " : "") + names[i];
+		return out;
+	}
+	inline Decision AnalysisLane(const std::vector<std::string>& dropped, const std::vector<std::string>& forcedLive,
+		bool pinnedAtMinimum, bool t0InRender, unsigned ofaStep = 0)
+	{
+		if (dropped.empty() && forcedLive.empty() && !pinnedAtMinimum && !t0InRender && ofaStep == 0)
+			return Released("analysis_lane");
+		std::string reason;
+		auto add = [&reason](const std::string& part) { reason += (reason.empty() ? std::string() : "; ") + part; };
+		if (!dropped.empty())
+			add("reduced: " + JoinNames(dropped) + " off (dropped)");
+		if (!forcedLive.empty())
+			add("forced live: " + JoinNames(forcedLive));
+		if (t0InRender)
+			add("core analysis runs in the render");
+		if (ofaStep != 0)
+			add("vector engine input reduced (step " + std::to_string(ofaStep) + ")");
+		if (pinnedAtMinimum)
+			add("analysis at minimum");
+		return Engaged("analysis_lane", reason);
+	}
+	inline Decision AnalysisLaneDeterminism(unsigned long long missedBounds)
+	{
+		if (missedBounds == 0)
+			return Released("analysis_lane_determinism");
+		return Engaged("analysis_lane_determinism", "deterministic playback: " + std::to_string(missedBounds) +
+			" frames missed the bounded wait (vector engine fallback used; this run is not reproducible)");
+	}
+	inline Decision SourceStatsWalk(bool laneRequested, bool laneUnavailable)
+	{
+		return laneRequested && laneUnavailable ? Engaged("source_stats_walk",
+			"active-picture walk uses Bill's original walk (lane source stats unavailable)") :
+			Released("source_stats_walk");
+	}
 }

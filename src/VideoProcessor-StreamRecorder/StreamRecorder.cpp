@@ -20,10 +20,14 @@
 #include <string>
 #include <vector>
 
+// vp-stamp/1 decoder (header only, no Windows headers); relative path so the vcxproj needs no include dir.
+#include "../VP-V/modules/control/diagnostics/FrameStamp.h"
+
 namespace
 {
 	struct Options
 	{
+		bool stamps = false;   // --stamps: decode vp-stamp/1 source + output stamps into stamps.csv
 		int device = 0;
 		bool list = false;
 		BMDVideoConnection input = bmdVideoConnectionHDMI;
@@ -79,8 +83,20 @@ namespace
 		return static_cast<BMDPixelFormat>(0);
 	}
 
-	// An approximate 8-bit luma of pixel x in a row, for the thumbnail only.
-	uint8_t SampleLuma(const uint8_t* row, BMDPixelFormat format, int x)
+	// Bits per luma sample of a capture format (0 = no luma to read).
+	int NativeLumaDepth(BMDPixelFormat format)
+	{
+		switch (format)
+		{
+		case bmdFormat8BitYUV: case bmdFormat8BitARGB: case bmdFormat8BitBGRA: return 8;
+		case bmdFormat10BitYUV: case bmdFormat10BitRGB: return 10;
+		default: return 0;
+		}
+	}
+
+	// The luma of pixel x in a row at the format's own depth (NativeLumaDepth bits): for the
+	// thumbnail (shifted to 8 bits below) and for the vp-stamp/1 decoder.
+	uint32_t SampleLumaNative(const uint8_t* row, BMDPixelFormat format, int x)
 	{
 		switch (format)
 		{
@@ -99,28 +115,35 @@ namespace
 			case 4: y = words[3] & 0x3ff; break;
 			default: y = (words[3] >> 20) & 0x3ff; break;
 			}
-			return static_cast<uint8_t>(y >> 2);
+			return y;
 		}
 		case bmdFormat8BitARGB:
 		{
 			const uint8_t* p = row + x * 4;
-			return static_cast<uint8_t>((p[1] * 2 + p[2] * 5 + p[3]) / 8);
+			return (p[1] * 2u + p[2] * 5u + p[3]) / 8u;
 		}
 		case bmdFormat8BitBGRA:
 		{
 			const uint8_t* p = row + x * 4;
-			return static_cast<uint8_t>((p[2] * 2 + p[1] * 5 + p[0]) / 8);
+			return (p[2] * 2u + p[1] * 5u + p[0]) / 8u;
 		}
 		case bmdFormat10BitRGB:  // r210: big-endian, R 29-20, G 19-10, B 9-0
 		{
 			const uint8_t* p = row + x * 4;
 			const uint32_t v = (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
 			const uint32_t r = (v >> 20) & 0x3ff, g = (v >> 10) & 0x3ff, b = v & 0x3ff;
-			return static_cast<uint8_t>(((r * 2 + g * 5 + b) / 8) >> 2);
+			return (r * 2 + g * 5 + b) / 8;
 		}
 		default:
 			return 0;
 		}
+	}
+
+	// An approximate 8-bit luma of pixel x in a row, for the thumbnail only.
+	uint8_t SampleLuma(const uint8_t* row, BMDPixelFormat format, int x)
+	{
+		const int depth = NativeLumaDepth(format);
+		return static_cast<uint8_t>(depth > 8 ? SampleLumaNative(row, format, x) >> (depth - 8) : SampleLumaNative(row, format, x));
 	}
 
 	// A fast 64-bit hash of every byte: identical hashes = a bit-exact repeat.
@@ -144,8 +167,8 @@ namespace
 	class Recorder : public IDeckLinkInputCallback
 	{
 	public:
-		Recorder(IDeckLinkInput* input, const Options& options, FILE* frames, FILE* thumbs, FILE* events)
-			: m_input(input), m_options(options), m_frames(frames), m_thumbs(thumbs), m_events(events)
+		Recorder(IDeckLinkInput* input, const Options& options, FILE* frames, FILE* thumbs, FILE* events, FILE* stamps = nullptr)
+			: m_input(input), m_options(options), m_frames(frames), m_thumbs(thumbs), m_events(events), m_stamps(stamps)
 		{
 			LARGE_INTEGER frequency{};
 			QueryPerformanceFrequency(&frequency);
@@ -267,6 +290,27 @@ namespace
 				}
 			}
 
+			// --stamps: decode only the two stamp blocks (luma sampled in place from the capture
+			// buffer, so the callback does not stall at 2160p30). One line per frame with data.
+			if (m_stamps && data && !noInput)
+			{
+				const int depth = NativeLumaDepth(m_pixelFormat);
+				if (depth > 0)
+				{
+					const BMDPixelFormat format = m_pixelFormat;
+					auto sampler = [data, rowBytes, format](int x, int y)
+					{
+						return SampleLumaNative(data + size_t(y) * size_t(rowBytes), format, x);
+					};
+					const VpFrameStamp::Result src = VpFrameStamp::DecodeWith(sampler, int(width), int(height), depth, VpFrameStamp::Corner::Source);
+					const VpFrameStamp::Result out = VpFrameStamp::DecodeWith(sampler, int(width), int(height), depth, VpFrameStamp::Corner::Output);
+					fprintf(m_stamps, "%llu,%lld,%d,%d,%d,%u,%.1f,%d,%d,%u,%.1f\n",
+						static_cast<unsigned long long>(m_index), static_cast<long long>(qpc),
+						src.found ? 1 : 0, src.found ? src.kind : -1, src.found ? src.aux : -1, src.found ? src.index : 0u, src.contrast,
+						out.found ? 1 : 0, out.found ? out.aux : -1, out.found ? out.index : 0u, out.contrast);
+				}
+			}
+
 			const int64_t callbackUs = (QpcNow() - qpc) * 1000000 / m_qpcFrequency;
 			fprintf(m_frames, "%llu,%lld,%lld,%lld,%lld,%lld,%d,%u,0x%x,%d,%016llx,%d,%lld\n",
 				static_cast<unsigned long long>(m_index), static_cast<long long>(hw), static_cast<long long>(hwDuration),
@@ -299,6 +343,8 @@ namespace
 			m_repeatsThisSecond = 0;
 			fflush(m_frames);
 			fflush(m_thumbs);
+			if (m_stamps)
+				fflush(m_stamps);
 		}
 
 		uint64_t Frames() { std::lock_guard<std::mutex> lock(m_mutex); return m_index; }
@@ -310,6 +356,7 @@ namespace
 		FILE* m_frames;
 		FILE* m_thumbs;
 		FILE* m_events;
+		FILE* m_stamps;   // stamps.csv, or null without --stamps
 		std::mutex m_mutex;
 		int64_t m_qpcFrequency = 1;
 		BMDTimeValue m_frameDuration = 0;
@@ -339,7 +386,8 @@ namespace
 			"  --seconds S         how long to record (default 60; Ctrl+C stops early)\n"
 			"  --out DIR           output folder (default .\\stream-YYYYMMDD-HHMMSS)\n"
 			"  --thumb W           thumbnail width in pixels (default 240, 0 = none)\n"
-			"  --raw N             also save the first N full frames (about 20 MB each at 4K)\n\n"
+			"  --raw N             also save the first N full frames (about 20 MB each at 4K)\n"
+			"  --stamps            decode vp-stamp/1 source + output stamps into stamps.csv (off by default)\n\n"
 			"Writes frames.csv (one line per frame), thumbs.y8 (8-bit luma thumbnails) and events.txt.\n");
 	}
 }
@@ -358,6 +406,7 @@ int wmain(int argc, wchar_t** argv)
 		else if (arg == L"--out" && hasValue) options.outDir = argv[++i];
 		else if (arg == L"--thumb" && hasValue) options.thumbWidth = std::max(0, _wtoi(argv[++i]));
 		else if (arg == L"--raw" && hasValue) options.rawFrames = std::max(0, _wtoi(argv[++i]));
+		else if (arg == L"--stamps") options.stamps = true;
 		else { PrintUsage(); return arg == L"--help" || arg == L"-h" ? 0 : 2; }
 	}
 	if (options.thumbWidth == 0)
@@ -431,7 +480,10 @@ int wmain(int argc, wchar_t** argv)
 		_wfopen_s(&frames, (options.outDir + L"\\frames.csv").c_str(), L"w");
 		_wfopen_s(&thumbs, (options.outDir + L"\\thumbs.y8").c_str(), L"wb");
 		_wfopen_s(&events, (options.outDir + L"\\events.txt").c_str(), L"w");
-		if (!frames || !thumbs || !events)
+		FILE* stamps = nullptr;
+		if (options.stamps)
+			_wfopen_s(&stamps, (options.outDir + L"\\stamps.csv").c_str(), L"w");
+		if (!frames || !thumbs || !events || (options.stamps && !stamps))
 		{
 			printf("Cannot write to %ls\n", options.outDir.c_str());
 			CoUninitialize();
@@ -444,7 +496,11 @@ int wmain(int argc, wchar_t** argv)
 		fprintf(frames, "index,hw_time_100ns,hw_duration_100ns,stream_time,stream_duration,callback_qpc,"
 			"periods_since_previous,buffered,flags,no_input,hash,exact_repeat,callback_us\n");
 
-		Recorder recorder(input.Get(), options, frames, thumbs, events);
+		if (stamps)
+			fprintf(stamps, "frame_index,arrival_qpc,src_found,src_kind,src_aux,src_index,src_contrast,"
+				"out_found,out_aux,out_index,out_contrast\n");
+
+		Recorder recorder(input.Get(), options, frames, thumbs, events, stamps);
 		input->SetCallback(&recorder);
 
 		// Start in any mode with format detection; the first format change
@@ -491,6 +547,8 @@ int wmain(int argc, wchar_t** argv)
 		fclose(frames);
 		fclose(thumbs);
 		fclose(events);
+		if (stamps)
+			fclose(stamps);
 	}
 	CoUninitialize();
 	return result;

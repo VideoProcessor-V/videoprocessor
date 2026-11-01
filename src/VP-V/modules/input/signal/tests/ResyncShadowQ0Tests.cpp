@@ -264,11 +264,11 @@ namespace Tests
 			r.rate = 24.05;
 			r.Push(3.0);   // TIMING at seq 3
 			Assert::AreEqual(size_t(3), r.lines.size());
-			Assert::AreEqual(std::string("VPEV1 t=1000.000 kind=resync level=full cause=start seq=1 gap=0 mode=shadow readers=pending"),
+			Assert::AreEqual(std::string("VPEV1 t=1000.000 kind=resync level=full cause=start seq=1 mode=shadow"),
 				r.lines[0]);
-			Assert::AreEqual(std::string("VPEV1 t=2500.000 kind=resync level=minor cause=drift_drop seq=7 gap=2 mode=shadow readers=pending"),
+			Assert::AreEqual(std::string("VPEV1 t=2500.000 kind=resync level=minor cause=drift_drop seq=7 gap=2 mode=shadow"),
 				r.lines[1]);
-			Assert::AreEqual(std::string("VPEV1 t=3000.000 kind=resync level=timing cause=rate_step seq=3 gap=0 mode=shadow readers=pending"),
+			Assert::AreEqual(std::string("VPEV1 t=3000.000 kind=resync level=timing cause=rate_step seq=3 mode=shadow"),
 				r.lines[2]);
 		}
 
@@ -279,7 +279,7 @@ namespace Tests
 			r.shadow.Configure(Shadow::Mode::On, 8);
 			r.Push(1.0);
 			Assert::AreEqual(size_t(1), r.lines.size());
-			Assert::IsTrue(r.lines[0].find(" mode=on readers=pending") != std::string::npos);
+			Assert::IsTrue(r.lines[0].find(" mode=on") != std::string::npos);
 		}
 
 		TEST_METHOD(NoSinkMeansNothingIsEmitted)
@@ -307,7 +307,11 @@ namespace Tests
 			for (int i = 0; i < 100; ++i)
 				r.shadow.OnLateSlip(Cause::DriftDrop, 10 + i, 1, 2.0 + i * 0.01);
 			Assert::AreEqual(size_t(100), r.lines.size());
-			Assert::AreEqual(size_t(7), r.log.size(), L"human log: 1, 2, 4, 8, 16, 32, 64");
+			size_t human = 0;   // the human log also carries rate-limited VPEV1 copies: count the others
+			for (const std::string& l : r.log)
+				if (l.compare(0, 5, "VPEV1") != 0)
+					++human;
+			Assert::AreEqual(size_t(7), human, L"human log: 1, 2, 4, 8, 16, 32, 64");
 		}
 
 		TEST_METHOD(AThrowingSinkIsContained)

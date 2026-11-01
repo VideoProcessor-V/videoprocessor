@@ -16,6 +16,7 @@
         "src/VP-V/modules/input/capture/UploadReuse.h",
         "src/VP-V/modules/input/capture/EarlyUpload.cpp",
         "src/VP-V/modules/input/capture/EarlyUpload.h",
+        "src/VP-V/modules/input/capture/EarlyUploadBudget.h",
         "src/VP-V/modules/input/capture/EarlyUploadHandoff.h",
         "src/VideoProcessor-Lib/CaptureInput.cpp",
         "src/VP-V/modules/input/capture/CTwoPlane420VideoFrameFormatter.cpp",
@@ -186,7 +187,13 @@
         "src/VP-V/modules/input/source_analysis/identity/SourceIdVote.h",
         "src/VP-V/modules/input/source_analysis/identity/SourceIdConsensus.h",
         "src/VP-V/modules/input/source_analysis/identity/AbrStepDetector.h",
-        "src/VP-V/modules/input/source_analysis/identity/AbrNoticePolicy.h"
+        "src/VP-V/modules/input/source_analysis/identity/AbrNoticePolicy.h",
+        "src/VP-V/modules/input/source_analysis/regions/RegionEvidence.h",
+        "src/VP-V/modules/input/source_analysis/regions/RegionEvidenceGlsl.h",
+        "src/VP-V/modules/input/source_analysis/regions/README.md",
+        "src/VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h",
+        "src/VP-V/modules/input/source_analysis/lane/LaneGpuJobs.h",
+        "src/VP-V/modules/input/source_analysis/lane/LaneReadback.h"
       ],
       "components": {
         "files": {
@@ -526,15 +533,18 @@
       "slot": "scaling.chroma_upscale",
       "order": 120,
       "status": "placeholder",
-      "code_location": "legacy",
+      "code_location": "migrated",
       "live_files": [
-        "shaders/CfL_Prediction.glsl"
+        "src/VP-V/modules/scaling/chroma_upscale/ChromaCfl.h",
+        "src/VP-V/modules/scaling/chroma_upscale/ChromaCflGpu.h",
+        "src/VP-V/modules/scaling/chroma_upscale/ChromaCflGpu.cpp",
+        "src/VP-V/modules/scaling/chroma_upscale/README.md",
+        "src/VP-V/modules/scaling/chroma_upscale/tests/ChromaCflTests.cpp",
+        "src/VP-V/modules/scaling/chroma_upscale/tests/README.md"
       ],
       "components": {
         "files": {
-          "required": [
-            "shaders/CfL_Prediction.glsl"
-          ],
+          "required": [],
           "optional": []
         },
         "hardware": {
@@ -1275,6 +1285,9 @@
         "src/VP-V/modules/control/diagnostics/RawCaptureCorpus.h",
         "src/VP-V/modules/control/diagnostics/DiagnosticsAdapter.h",
         "src/VP-V/modules/control/diagnostics/DiagnosticsReportRun.h",
+        "src/VP-V/modules/control/diagnostics/VpEventLine.h",
+        "src/VP-V/modules/control/diagnostics/FrameStamp.h",
+        "src/VP-V/modules/control/diagnostics/FrameStampShader.h",
         "src/VP-V/core/SlotTiming.h",
         "src/VP-V/core/FallbackStatus.h",
         "src/VideoProcessor-GUI/StatsOverlayWindow.cpp",

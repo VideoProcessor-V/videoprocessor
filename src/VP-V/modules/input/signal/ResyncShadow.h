@@ -5,6 +5,7 @@
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/Indicator.h>
 #include <VP-V/core/ResyncCause.h>
+#include <VP-V/modules/control/diagnostics/VpEventLine.h>
 #include <VP-V/modules/input/signal/ResyncEvent.h>
 
 #include <atomic>
@@ -16,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 // Resync shadow mode (R1). The renderer's enqueue path feeds every frame's facts to the R0 detector;
 // in Shadow mode the verdicts are written to the central Indicator and summarised as one status line
@@ -423,20 +425,35 @@ private:
         }
     }
 
-    void EmitEventLine(const Event& e, double nowSeconds) const
+    // vp-event/1: one VPEV1 line per recorded event. The logger copy is rate-limited (human log);
+    // the event sink (SetEventSink, the soak report) gets EVERY event, unthrottled, in the same
+    // vp-event/1 format. No sink and no logger limit hit = nothing built beyond the limiter check.
+    void EmitEventLine(const Event& e, double nowSeconds)
     {
-        const std::shared_ptr<const std::function<void(const std::string&)>> sink = std::atomic_load(&m_eventSink);
-        if (!sink || !*sink)
-            return;
         try {
-            char head[64];
-            std::snprintf(head, sizeof(head), "VPEV1 t=%.3f", nowSeconds * 1000.0);
-            const char* level = e.level == Level::Full ? "full" : e.level == Level::Minor ? "minor" : "timing";
-            std::string line = head;
-            line += std::string(" kind=resync level=") + level + " cause=" + Token(e.cause) +
-                " seq=" + std::to_string(e.fromSeq) + " gap=" + std::to_string(e.gapFrames) +
-                (Driving() ? " mode=on" : " mode=shadow") + " readers=pending";
-            (*sink)(line);
+            const char* level = e.level == Level::Full ? "full" : (e.level == Level::Minor ? "minor" : "timing");
+            std::vector<VpEvent::Field> fields;
+            fields.emplace_back("level", level);
+            fields.emplace_back("cause", Token(e.cause));
+            fields.emplace_back("seq", static_cast<uint64_t>(e.fromSeq));
+            if (e.gapFrames != 0)
+                fields.emplace_back("gap", static_cast<uint64_t>(e.gapFrames));
+            if (e.detail != 0)
+                fields.emplace_back("detail", static_cast<uint64_t>(e.detail));
+            fields.emplace_back("mode", Driving() ? "on" : "shadow");
+            const double tMs = nowSeconds * 1000.0;
+            const std::shared_ptr<const std::function<void(const std::string&)>> sink = std::atomic_load(&m_eventSink);
+            if (sink && *sink) {
+                // The vp-event/1 resync grammar (VpEventLine.h) has no `readers` key: readers act at the
+                // seal of the carrying frame and are shown in Ctrl+Alt+D / the event list instead.
+                (*sink)(VpEvent::FormatRange(VpEvent::Kind::resync, tMs, fields.data(), fields.size()));
+            }
+            uint32_t suppressed = 0;
+            if (!m_eventLimiter.Allow(VpEvent::Kind::resync, tMs, suppressed))
+                return;
+            if (suppressed != 0)
+                fields.emplace_back("suppressed", static_cast<uint64_t>(suppressed));
+            Log(VpEvent::FormatRange(VpEvent::Kind::resync, tMs, fields.data(), fields.size()));
         } catch (...) {
             m_errors.fetch_add(1, std::memory_order_relaxed);
         }
@@ -505,6 +522,7 @@ private:
     std::shared_ptr<VpIndicator::Indicator> m_indicator;                                 // atomic_load / atomic_store only
     std::shared_ptr<const std::function<void(const std::string&)>> m_logger;             // atomic_load / atomic_store only
 
+    VpEvent::Limiter m_eventLimiter;
     ArmBox m_arms;
     Detector m_detector;   // queue mutex
     std::atomic<double> m_windowedRateHz{0.0};

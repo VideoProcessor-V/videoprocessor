@@ -1,0 +1,86 @@
+{
+ "breathing": {
+  "finding": "dec24.yuv frame n = orig.yuv frame n; verified PSNR peak 43.2 dB at offset 0 (32.6 dB at 1)"
+ },
+ "finding": "G18 coded frame 0 is master frame round(1 s * fps) + 20 (140 for the 120 fps UVG clips, 70 for the 50 fps y4m clips), NOT frames 20..23: tools/make_codec_corpus.py seeks 1 s into the master (-ss 1) before encoding, then decodes coded frames 20..23. Verified by luma PSNR peak over master offsets (single sharp peak, >= 4 dB above the best neighbouring offset).",
+ "method": "python -I tools/eval/eval_harness.py align --suite <suite> ; PSNR(coded Y frame 0, master Y at offset), offsets start-span..start+span",
+ "nn_corpus": {
+  "best_master_offset": 2400,
+  "case": "x265_2160p_6000k",
+  "clip": "tos4k",
+  "finding": "encode frame n = master frame n (same timeline; encodes start at master frame 0); verified at n=2400: PSNR peak 37.87 dB vs 25.1 dB at +-1"
+ },
+ "schema": 1,
+ "verified": [
+  {
+   "best_master_offset": 140,
+   "case": "native_x265_crf26",
+   "clip": "Bosphorus",
+   "psnr_db_near_peak": {
+    "139": 35.65,
+    "140": 40.72,
+    "141": 35.63
+   }
+  },
+  {
+   "best_master_offset": 140,
+   "case": "native_x264_crf23",
+   "clip": "Jockey",
+   "psnr_db_near_peak": {
+    "139": 20.82,
+    "140": 39.21,
+    "141": 20.87
+   }
+  },
+  {
+   "best_master_offset": 70,
+   "case": "native_x265_crf26",
+   "clip": "park_joy",
+   "psnr_db_near_peak": {
+    "69": 19.3,
+    "70": 34.55,
+    "71": 19.04
+   }
+  },
+  {
+   "best_master_offset": 140,
+   "case": "native_x265_crf26",
+   "clip": "ReadySetGo",
+   "psnr_db_near_peak": {
+    "139": 19.46,
+    "140": 39.74,
+    "141": 19.4
+   }
+  },
+  {
+   "best_master_offset": 140,
+   "case": "native_x265_crf26",
+   "clip": "ShakeNDry",
+   "psnr_db_near_peak": {
+    "139": 33.45,
+    "140": 37.77,
+    "141": 33.5
+   }
+  },
+  {
+   "best_master_offset": 140,
+   "case": "native_x265_crf26",
+   "clip": "YachtRide",
+   "psnr_db_near_peak": {
+    "139": 27.29,
+    "140": 39.46,
+    "141": 27.27
+   }
+  },
+  {
+   "best_master_offset": 70,
+   "case": "native_x265_crf26",
+   "clip": "crowd_run",
+   "psnr_db_near_peak": {
+    "69": 22.33,
+    "70": 35.51,
+    "71": 21.7
+   }
+  }
+ ]
+}

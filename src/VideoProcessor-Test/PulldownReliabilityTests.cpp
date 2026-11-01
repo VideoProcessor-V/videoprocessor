@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "CppUnitTest.h"
+#include "HardwarePrerequisites.h"
 
 #include <VP-V/modules/input/queue_timing/PulldownDetector.h>
 
@@ -918,7 +919,7 @@ namespace VideoProcessorTest
 		TEST_METHOD(RealFootageTelecined)
 		{
 			const std::string folder = EnvValue("VP_TEST_REAL_FOOTAGE");
-			if (folder.empty()) { Logger::WriteMessage("VP_TEST_REAL_FOOTAGE not set: skipped\n"); return; }
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, "RealFootageTelecined", !folder.empty(), "VP_TEST_REAL_FOOTAGE not set")) return;
 			struct Clip { std::string file; bool y4m; int frames; int decimate; Rate film; int W = 3840, H = 2160; };
 			std::vector<Clip> clips = {
 				{ "Bosphorus_3840x2160_120fps_420_10bit_YUV.yuv", false, 600, 5, { 24, 1 } },
