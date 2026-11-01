@@ -19,8 +19,13 @@ METHOD_RE = re.compile(r'\bTEST_METHOD\s*\(\s*(\w+)\s*\)')
 BEGIN_RE = re.compile(r'\bBEGIN_TEST_METHOD_ATTRIBUTE\s*\(\s*(\w+)\s*\)')
 CAT_RE = re.compile(r'TEST_METHOD_ATTRIBUTE\s*\(\s*L"Category"\s*,\s*L"(\w+)"\s*\)')
 
+# Bill's own tests that a later Bill (upstream) commit made stale, with Bill's code unchanged in
+# VP-V on both pathways: kept out of the CPU run (like every excluded category, they stay in the
+# complementary --gpu selection) and listed by name in the manifest with the upstream commit; run
+# only them with --gpu --categories UpstreamStale.
+QUARANTINED = ['UpstreamStale']
 # Categories that must not run in the CPU CI (a real device, a screen, a meter, a projector).
-EXCLUDED_FROM_CPU = ['GpuHardware', 'GpuOnScreen', 'MeterHardware', 'ProjectorHardware', 'Slow']
+EXCLUDED_FROM_CPU = ['GpuHardware', 'GpuOnScreen', 'MeterHardware', 'ProjectorHardware', 'Slow'] + QUARANTINED
 KNOWN_CATEGORIES = EXCLUDED_FROM_CPU + ['GpuWarp', 'Cpu']
 
 
