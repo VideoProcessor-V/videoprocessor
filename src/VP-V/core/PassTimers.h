@@ -43,6 +43,28 @@ namespace PassTimers
 		double sumMs = 0.0;
 		double maxMs = 0.0;
 		double lastMs = 0.0;
+		// Bug hunt 38 M2: recent figures (sample-based, deterministic, no clock). recentMs is an EWMA
+		// (alpha 1/32, the first sample seeds it); recentMaxMs is the max over the last 256..128 samples
+		// (two buckets of 128: the current one and the previous one).
+		double recentMs = 0.0;
+		double recentMaxMs = 0.0;
+		double bucketMaxMs = 0.0;
+		double prevBucketMaxMs = 0.0;
+		uint32_t bucketCount = 0;
+		void AddRecent(double ms)
+		{
+			recentMs = samples <= 1 ? ms : recentMs + (ms - recentMs) * (1.0 / 32.0);
+			if (bucketCount >= 128)
+			{
+				prevBucketMaxMs = bucketMaxMs;
+				bucketMaxMs = 0.0;
+				bucketCount = 0;
+			}
+			++bucketCount;
+			if (ms > bucketMaxMs)
+				bucketMaxMs = ms;
+			recentMaxMs = bucketMaxMs > prevBucketMaxMs ? bucketMaxMs : prevBucketMaxMs;
+		}
 		double MeanMs() const { return samples ? sumMs / static_cast<double>(samples) : 0.0; }
 	};
 
@@ -65,6 +87,7 @@ namespace PassTimers
 			s.lastMs = ms;
 			if (ms > s.maxMs)
 				s.maxMs = ms;
+			s.AddRecent(ms);
 		}
 		void AddGpuPassNs(const char* description, uint64_t ns)
 		{

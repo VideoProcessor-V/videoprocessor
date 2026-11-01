@@ -74,5 +74,24 @@ namespace VideoProcessorTest
 			Assert::IsTrue(r.find("GPU group") < r.find("CPU work") && r.find("CPU work") < r.find("CPU wait"));
 			Assert::IsTrue(PassTimers::Accumulator().Readout(4).find("no samples yet") != std::string::npos);
 		}
+
+		TEST_METHOD(RecentFiguresTrackChangesAndForgetSpikes)
+		{
+			// Bug hunt 38 M2: sample-based EWMA and a windowed max beside the cumulative figures.
+			PassTimers::Accumulator a;
+			a.Add(PassTimers::Kind::CpuWork, "x", 50.0);   // startup spike seeds the EWMA
+			Assert::AreEqual(50.0, a.Find("x")->recentMs, 1e-12);
+			for (int i = 0; i < 300; ++i) a.Add(PassTimers::Kind::CpuWork, "x", 2.0);
+			const PassTimers::Stat* s = a.Find("x");
+			Assert::AreEqual(2.0, s->recentMs, 0.01);          // converged to the step
+			Assert::AreEqual(2.0, s->recentMaxMs, 1e-12);      // spike forgotten after 256 samples
+			Assert::AreEqual(50.0, s->maxMs, 1e-12);           // cumulative max unchanged
+			Assert::AreEqual(301ull, static_cast<unsigned long long>(s->samples));
+			Assert::AreEqual((50.0 + 300 * 2.0) / 301.0, s->MeanMs(), 1e-9);
+			a.Add(PassTimers::Kind::CpuWork, "x", 9.0);
+			Assert::AreEqual(9.0, a.Find("x")->recentMaxMs, 1e-12);
+			const std::string r = a.Readout(8);
+			Assert::IsTrue(r.find("recent max") != std::string::npos);
+		}
 	};
 }
