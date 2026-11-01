@@ -14,3 +14,4 @@ Pending fixes merged with SHOULD/minor findings (feature off by default or inert
 - feat/dither-need-map: sigma-delta catalog row lists only P3; add P10/P11/P12 inputs, and add a VerifyUnit(kP12LightLevel) check in dither need. core/ProductCatalog.h:277; modules/output/dither/DitherNeedGpu.h
 - feat/dither-need-map: if light_level_out becomes part of P12, raise p12.size.fixedBytes 16384 -> 32768. core/Products.h:628
 - feat/dither-need-map: BlockPass::Step (external linkage) calls internal-linkage Supported() (formal ODR nit). modules/output/dither/DitherNeedGpu.h
+- feat/m2-hooks: unwired re-shape sites #4-7, #15-16, #21-23, #27 and the settings/Config hand-offs are not yet routed through the hooks (not blockers); they move with the resync Q1 / P3 / P7 packages. docs (M2 P0 call-site document), LibplaceboVideoRenderer.cpp call sites
