@@ -517,12 +517,12 @@ inline void AppendCameraProducts(std::vector<ProductDecl>& decls)
     p7.refRenderMs = 0.5f;
     decls.push_back(p7);
 
-    // P8: the camera/object label field, RGBA16F per 16x16 block plus the LabelConstants header.
+    // P8: the camera/object label field, RGBA32F (16 B) per 16x16 block (all label code uses 32-bit float) plus the LabelConstants header.
     ProductDecl p8 = Make(kP8CameraLabels, "p8_camera_labels", "camera labels", Backend::GpuCompute, 0, Tier::T0,
                           content, 0);
     AddInput(p8, kP7CameraFit, 0);
     AddInput(p8, kP3AnalysisField, 0);
-    AddTerm(p8, 4, 8);
+    AddTerm(p8, 4, 16);
     p8.size.fixedBytes = 256;
     p8.refRenderMs = 0.1f;
     decls.push_back(p8);
@@ -650,16 +650,16 @@ inline void AppendTemporalDetailProducts(std::vector<ProductDecl>& decls)
     an.refRenderMs = 1.5f;
     decls.push_back(an);
 
-    // td.refstore: history = the slots. Target <= 4.5 B/px per slot (4 B/px + 0.5 B/px half-size base); the code
-    // allocates kRefstoreTodayBytesPerPixel (10 B/px, 83 MB/slot at 4K) until SA6 compacts it.
+    // td.refstore: history = the slots. Declared at what the code allocates TODAY: kRefstoreTodayBytesPerPixel (10 B/px,
+    // 83 MB per slot at 4K: RGBA16F raw + cleaned bands 8 B/px + R16 base 2 B/px). The SA6 compact form targets
+    // <= 4.5 B/px (kRefstoreTargetBytesPerPixelX2 / 2); the declaration changes with it, never ahead of it.
     ProductDecl rs = Make(kTdRefstore, "td.refstore", "temporal detail reference store", Backend::GpuCompute, kRefSlots,
                           Tier::T1, content | Bit(kRebaseH) | Bit(kRebaseV), Bit(kSettingsRebase) | Bit(kSettingsAnalysis));
     AddInput(rs, kTdAnalysis, 0);
     AddInput(rs, kP10GrainSplit, 0);
     AddInput(rs, kP3AnalysisField, 0);
     AddInput(rs, kP13SourceRing, 0);
-    AddTerm(rs, 0, 4);
-    AddTerm(rs, 1, 2);
+    AddTerm(rs, 0, kRefstoreTodayBytesPerPixel);
     rs.rebasedPlane = true;
     rs.refRenderMs = 1.0f;
     decls.push_back(rs);

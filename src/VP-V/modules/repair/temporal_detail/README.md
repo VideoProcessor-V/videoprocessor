@@ -142,7 +142,7 @@ The module's former private descriptors (TemporalDetailProducts.h) were retired:
 | Product | Inputs | Backend | History | Size at 4K |
 |---|---|---|---|---|
 | `td.analysis` (block maps, rebounds, softening run) | P10 grain split, P11 block stats, P13 source ring | GpuCompute (T1) | 1 | ~1.5 MB |
-| `td.refstore` (K past slots, per-block state) | td.analysis, P10, P3, P13 | GpuCompute (T1) | K = 5 | declared 4.5 B/px per slot (target); the code allocates 10 B/px = 83 MB per slot today (SA6) |
+| `td.refstore` (K past slots, per-block state) | td.analysis, P10, P3, P13 | GpuCompute (T1) | K = 5 | declared 10 B/px per slot = 83 MB at 4K (what the code allocates today; the SA6 compact form targets 4.5 B/px) |
 | `td.admission` (cleaner / templates on admission frames) | td.analysis, P10, P13 | GpuCompute (T2 gap) | 0 | arena (SA1) |
 
 Cleaner cost (estimate, RTX 3090 at 4K, not dispatched): only on admission frames (a refresh, e.g. 2 of 8 frames in IBBBPBBB):

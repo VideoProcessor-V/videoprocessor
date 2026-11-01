@@ -95,6 +95,10 @@ namespace CameraLink
 
 	// Convenience binders: Reset the component; they have no timing state to relatch (the temporal
 	// filter takes dt per call). The referenced object must outlive the Indicator's readers.
+	// NOT for cross-thread use: the hook runs on the thread that calls Observe (the render thread), while a Fitter belongs
+	// to ONE motion worker (Fitter is not thread-safe). Binding it here would reset it under the worker's feet. Use it
+	// only when the Fitter and Observe share a thread (tests, single-threaded hosts); K1 resets the worker's fitter by
+	// posting the reset to that worker instead.
 	inline CameraReaderHooks BindFitter(CameraModel::Fitter& f)
 	{
 		CameraReaderHooks h;

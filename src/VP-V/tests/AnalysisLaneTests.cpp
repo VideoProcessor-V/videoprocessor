@@ -276,6 +276,32 @@ namespace AnalysisLaneTestsNs
 	TEST_CLASS(AnalysisLaneTests)
 	{
 	public:
+		// 0. A graph with a look-ahead input (SlotTable invalid until the K1 seal rule) is refused: lane off, visible.
+		TEST_METHOD(LookAheadGraphIsRefusedVisibly)
+		{
+			Rig r;
+			r.reg = SkeletonProducts();
+			r.consumers.clear();
+			ConsumerDecl c;
+			c.id = 9;
+			c.name = "smoothed camera reader";
+			AddConsume(c, kP9CameraSmoothed);
+			r.consumers.push_back(c);
+			r.gs.laneLead = 3;
+			r.Configure(LaneSettings::Mode::On);
+			Assert::IsFalse(r.lane.Active(), L"lane off");
+			bool engaged = false;
+			for (const FallbackCatalog::Decision& d : r.lane.Fallbacks())
+				if (d.id == "analysis_lane" && d.engaged && d.reason.find("look-ahead") != std::string::npos)
+					engaged = true;
+			Assert::IsTrue(engaged, L"visible fallback names the look-ahead input");
+			Assert::IsTrue(r.lane.OnRenderStart(0, 4000).empty(), L"nothing sealed, nothing indexed");
+			// A short queue (lane lead 1) resolves P9 to the causal P7: the lane builds.
+			r.gs.laneLead = 1;
+			r.Configure(LaneSettings::Mode::On);
+			Assert::IsTrue(r.lane.Active(), L"causal form runs");
+		}
+
 		// 1. Off is inert: nothing built, no hook acts, no thread.
 		TEST_METHOD(OffIsInert)
 		{

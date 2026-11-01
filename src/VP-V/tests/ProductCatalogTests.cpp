@@ -13,7 +13,9 @@
 #include <VP-V/core/ProductCatalog.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <VP-V/modules/input/source_analysis/light_level/LightLevelLut.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
+#include <VP-V/modules/scaling/rebase/RebaseDecision.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetail.h>
 
 #include "SettingsTestSupport.h"
@@ -145,36 +147,85 @@ namespace ProductCatalogTestsNs
 			}
 		}
 
-		TEST_METHOD(LiveFillOwnerIsTheFirstReaderInPathwayOrder)
+		TEST_METHOD(LiveFillOwnerMatchesAnIndependentlyWrittenTable)
+		{
+			// Expected owners written by hand from the pathway order (input < motion < repair < scaling < ... , render
+			// order within a unit) and the declared reads, NOT computed with the catalog's own functions. Only reads of
+			// the same frame (lag 0) can fill a slot live, so camera measurement (P7 at lag 1) is never an owner.
+			struct Expect { ProductId id; const char* family; };
+			const Expect expected[] = {
+				{ kP0RebaseDecision, "entrance stages" },
+				{ kP1HalfLuma, "optical-flow producer" },
+				{ kP2VectorPair, "optical-flow producer" },
+				{ kP3AnalysisField, "entrance stages" },       // the entrance segment (input 45) reads the analysis field
+				{ kP4SourceStats, "source resolution monitor" },
+				{ kP5MonitorTiles, "source resolution monitor" },
+				{ kP6EntranceAhead, "entrance stages" },
+				{ kP7CameraFit, "temporal detail" },        // camera TD (repair 12): measurement reads P7 at lag 1 only
+				{ kP8CameraLabels, "occlusion mask" },      // camera occlusion filler (motion 45) precedes the repair readers
+				{ kP9CameraSmoothed, "camera object split" },
+				{ kP10GrainSplit, "region evidence (derived maps)" },
+				{ kP10cGrainSplitChroma, "chroma from luma" },
+				{ kP11RegionBlockStats, "region evidence (derived maps)" },
+				{ kP12LightLevel, "region evidence (derived maps)" },
+				{ kP13SourceRing, "temporal detail" },
+				{ kTdAnalysis, "temporal detail" },
+				{ kTdRefstore, "temporal detail" },
+				{ kTdAdmission, "temporal detail" },
+			};
+			const Registry reg = SkeletonProducts();
+			Assert::AreEqual(size_t(kSkeletonProductEnd) - 1u, sizeof(expected) / sizeof(expected[0]),
+				L"every product but the matcher pair has an expectation");
+			for (const Expect& e : expected) {
+				const ConsumerRow* owner = LiveFillOwner(e.id);
+				Assert::IsNotNull(owner, L"an owner exists");
+				Assert::AreEqual(std::string(e.family), std::string(owner->family));
+			}
+			// The matcher pair is read as P2 (declared id): nobody reads it by its own id, and it is lane-produced.
+			Assert::IsNull(LiveFillOwner(kP2mMatcherPair));
+			size_t unread = 0;
+			for (const ProductDecl& d : reg.All())
+				if (ConsumersOf(d.id).empty() && d.backend != Backend::RenderOnly)
+					++unread;
+			Assert::AreEqual(size_t(1), unread);
+
+			// Over the ACTIVE consumers: with the temporal-detail camera row off, P7's owner is the next lag-0 reader.
+			std::vector<uint16_t> active;
+			for (const ConsumerRow& c : ConsumerRows())
+				if (c.decl.id != CameraLink::DeclarationOf(CameraLink::CameraConsumer::TemporalDetail).id)
+					active.push_back(c.decl.id);
+			Assert::AreEqual(std::string("detail pulse"), std::string(LiveFillOwner(kP7CameraFit, &active)->family));
+			// Only camera measurement active: it reads P7 at lag 1, so nothing can fill P7 live from it.
+			std::vector<uint16_t> only(1, CameraLink::DeclarationOf(CameraLink::CameraConsumer::Measurement).id);
+			Assert::IsNull(LiveFillOwner(kP7CameraFit, &only));
+			Assert::IsFalse(ConsumersOf(kP7CameraFit, false, &only).empty());
+			// A family with several rows is one reader.
+			size_t families = 0;
+			for (const ConsumerRow* c : ConsumersOf(kP8CameraLabels))
+				families += std::string(c->family) == "temporal detail" ? 1u : 0u;
+			Assert::IsTrue(families <= 1);
+		}
+
+		TEST_METHOD(EveryRegistryProductHasACatalogRow)
 		{
 			const Registry reg = SkeletonProducts();
-			std::vector<ProductId> noConsumers;
+			Assert::AreEqual(reg.Size(), ProductRows().size());
 			for (const ProductDecl& d : reg.All()) {
-				const std::vector<const ConsumerRow*> cs = ConsumersOf(d.id);
-				if (cs.empty()) {
-					if (d.backend != Backend::RenderOnly)
-						noConsumers.push_back(d.id);
-					continue;
-				}
-				const ConsumerRow* owner = LiveFillOwner(d.id);
-				Assert::IsNotNull(owner);
-				for (size_t i = 1; i < cs.size(); ++i)
-					Assert::IsTrue(PathwayKey(*owner) < PathwayKey(*cs[i]), L"the owner precedes every other reader");
-				Assert::IsTrue(owner == cs.front());
+				const ProductRow* row = RowOf(d.id);
+				Assert::IsNotNull(row);
+				Assert::IsTrue(row->unit != nullptr && row->unit[0] != '\0');
 			}
-			// A lane-produced product nobody reads is flagged: only the matcher pair (read as P2 on cards without an engine).
-			Assert::AreEqual(size_t(1), noConsumers.size());
-			Assert::AreEqual(int(kP2mMatcherPair), int(noConsumers[0]));
-			// A few owners by name (input < motion < repair < scaling ...).
-			Assert::AreEqual(std::string("region evidence (derived maps)"), std::string(LiveFillOwner(kP10GrainSplit)->decl.name));
-			Assert::AreEqual(std::string("temporal detail"), std::string(LiveFillOwner(kTdAdmission)->decl.name));
-			Assert::AreEqual(std::string("source resolution monitor"), std::string(LiveFillOwner(kP5MonitorTiles)->decl.name));
+			// No consumer row drops a read: every declared read count fits (MakeRow asserts it) and is non-empty.
+			for (const ConsumerRow& c : ConsumerRows())
+				Assert::IsTrue(c.decl.count > 0 && c.decl.count <= kMaxConsumes);
 		}
 
 		TEST_METHOD(UnitVersionsMatchTheUnitsAndVerifyUnitEngagesAFallback)
 		{
 			struct Pair { ProductId id; uint32_t unit; };
 			const Pair pairs[] = {
+				{ kP0RebaseDecision, VpRebase::kUnitVersion }, { kP6EntranceAhead, VpRebase::kUnitVersion },
+				{ kP1HalfLuma, VpLaneProducts::kHalfLumaVersion }, { kP5MonitorTiles, SourceResolution::kUnitVersion },
 				{ kP2VectorPair, VectorDemand::kUnitVersion }, { kP3AnalysisField, VectorDemand::kUnitVersion },
 				{ kP4SourceStats, VpLaneProducts::kStatsVersion },
 				{ kP7CameraFit, CameraLink::kCameraUnitVersion }, { kP8CameraLabels, CameraLink::kCameraUnitVersion },
@@ -204,8 +255,12 @@ namespace ProductCatalogTestsNs
 			FallbackCatalog::Decision unknown;
 			Assert::IsFalse(VerifyUnit(ProductId(0x7000), 1, &unknown));
 			Assert::IsTrue(unknown.engaged);
-			// An unversioned unit (0) never mismatches.
-			Assert::IsTrue(VerifyUnit(kP5MonitorTiles, 7, nullptr));
+			// A reader that declares version 0 against a versioned unit is a mismatch; an unversioned unit (the source ring)
+			// never mismatches.
+			FallbackCatalog::Decision zero;
+			Assert::IsFalse(VerifyUnit(kP5MonitorTiles, 0, &zero));
+			Assert::IsTrue(zero.engaged);
+			Assert::IsTrue(VerifyUnit(kP13SourceRing, 7, nullptr));
 		}
 
 		TEST_METHOD(DeclaredSizesAreTheCorrectedOnes)
@@ -221,8 +276,8 @@ namespace ProductCatalogTestsNs
 			// P4: 8 KB today (the producer layout) of system RAM.
 			Assert::AreEqual(uint64_t(8192), BytesOf(reg.Get(kP4SourceStats).size, d4k));
 			Assert::IsTrue(reg.Get(kP4SourceStats).residency == Residency::SystemRam);
-			// td.refstore: 4.5 B/px per slot declared (4 B/px + a 0.5 B/px half-size base), history = the slots.
-			Assert::AreEqual(uint64_t(3840ull * 2160 * 4 + 1920ull * 1080 * 2), BytesOf(reg.Get(kTdRefstore).size, d4k));
+			// td.refstore: today's 10 B/px per slot (83 MB at 4K), history = the slots.
+			Assert::AreEqual(uint64_t(3840ull * 2160 * 10), BytesOf(reg.Get(kTdRefstore).size, d4k));
 			Assert::AreEqual(int(kRefSlots), int(reg.Get(kTdRefstore).history));
 			// P13: views only.
 			Assert::AreEqual(uint64_t(0), BytesOf(reg.Get(kP13SourceRing).size, d4k));

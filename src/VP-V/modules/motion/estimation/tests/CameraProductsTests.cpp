@@ -160,7 +160,7 @@ namespace CameraProductsTestsNs
 			Assert::AreEqual(content, p8.reads);
 			Assert::AreEqual(1, int(p8.size.termCount));
 			Assert::AreEqual(4, int(p8.size.terms[0].shift));
-			Assert::AreEqual(8, int(p8.size.terms[0].bytesPerCell));
+			Assert::AreEqual(16, int(p8.size.terms[0].bytesPerCell));
 			Assert::AreEqual(256u, p8.size.fixedBytes);
 
 			const ProductDecl& p9 = reg.Get(kP9CameraSmoothed);
@@ -183,9 +183,9 @@ namespace CameraProductsTestsNs
 			const Registry reg = SkeletonProducts();
 			struct Case { uint32_t w, h; uint64_t labels; };
 			// ceil(w/16) * ceil(h/16) * 8 + 256
-			const Case cases[] = { { 1920, 1080, 120u * 68u * 8u + 256u },
-				{ 3840, 2160, 240u * 135u * 8u + 256u },
-				{ 7680, 4320, 480u * 270u * 8u + 256u } };
+			const Case cases[] = { { 1920, 1080, 120u * 68u * 16u + 256u },
+				{ 3840, 2160, 240u * 135u * 16u + 256u },
+				{ 7680, 4320, 480u * 270u * 16u + 256u } };
 			for (const Case& c : cases) {
 				Dims d;
 				d.width = c.w;
@@ -194,9 +194,9 @@ namespace CameraProductsTestsNs
 				Assert::AreEqual(c.labels, BytesOf(reg.Get(kP8CameraLabels).size, d));
 				Assert::AreEqual(uint64_t(256), BytesOf(reg.Get(kP9CameraSmoothed).size, d));
 			}
-			Assert::AreEqual(uint64_t(65536), uint64_t(120u * 68u * 8u + 256u));
-			Assert::AreEqual(uint64_t(259456), uint64_t(240u * 135u * 8u + 256u));
-			Assert::AreEqual(uint64_t(1037056), uint64_t(480u * 270u * 8u + 256u));
+			Assert::AreEqual(uint64_t(130816), uint64_t(120u * 68u * 16u + 256u));
+			Assert::AreEqual(uint64_t(518656), uint64_t(240u * 135u * 16u + 256u));
+			Assert::AreEqual(uint64_t(2073856), uint64_t(480u * 270u * 16u + 256u));
 		}
 
 		TEST_METHOD(ValidateRejectsBadLookAheadDeclarations)

@@ -498,6 +498,17 @@ public:
             renderState_.reset();
             return reasons;
         }
+        // A look-ahead input (lead > 0) has no seal rule yet (K1): SlotTable would be invalid. Refuse the graph: the lane
+        // is off and every product is made live in the render; the reason reaches Fallbacks() via error_.
+        for (const Node& n : g.nodes)
+            for (size_t k = 0; k < n.inputCount; ++k)
+                if (n.inputs[k].lead > 0) {
+                    error_ = std::string("look-ahead input on ") + (reg.Has(n.id) ? reg.Get(n.id).token : "?")
+                             + " needs the K1 seal rule";
+                    std::atomic_store(&state_, std::shared_ptr<LaneState>());
+                    renderState_.reset();
+                    return reasons;
+                }
         error_.clear();
         periodMs_ = tier.framePeriodMs;
         chunkCapUs_.store(GapScheduler::DerivedChunkCapUs(tier.framePeriodMs, s.chunkUs), std::memory_order_relaxed);
@@ -939,6 +950,7 @@ private:
         st->firstSeq = fromSeq;
         st->ring.reset(new LaneSourceRing(std::max<size_t>(st->graph.framesInFlight, 4u)));
         st->table.reset(new SlotTable(st->graph));
+        assert(st->table->Valid());   // Configure refuses graphs with look-ahead inputs before this point
         ProductId maxId = 0;
         for (const Node& n : st->graph.nodes)
             maxId = std::max(maxId, n.id);

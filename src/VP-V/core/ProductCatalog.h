@@ -10,6 +10,9 @@
 #include <VP-V/modules/motion/estimation/global_model/CameraProducts.h>
 
 #include <array>
+#include <cassert>
+#include <initializer_list>
+#include <utility>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -77,18 +80,21 @@ constexpr uint32_t kExpectedLightLevelUnit = 1;
 constexpr uint32_t kExpectedVectorUnit = 1;
 constexpr uint32_t kExpectedStatsUnit = 1;
 constexpr uint32_t kExpectedGrainSplitUnit = 2;
+constexpr uint32_t kExpectedRebaseUnit = 1;
+constexpr uint32_t kExpectedHalfLumaUnit = 1;
+constexpr uint32_t kExpectedMonitorUnit = 1;
 
 inline const std::vector<ProductRow>& ProductRows()
 {
     static const std::vector<ProductRow> rows = {
-        { kP0RebaseDecision, "scaling/rebase", 0, "" },
-        { kP1HalfLuma, "input/source_analysis/lane", 0, "HalfLumaProducer" },
+        { kP0RebaseDecision, "scaling/rebase", kExpectedRebaseUnit, "" },
+        { kP1HalfLuma, "input/source_analysis/lane", kExpectedHalfLumaUnit, "HalfLumaProducer" },
         { kP2VectorPair, "motion/estimation", kExpectedVectorUnit, "NVOF producer (MotionAheadProducer)" },
         { kP2mMatcherPair, "motion/estimation", kExpectedVectorUnit, "matcher (DejudderWarp estimate)" },
         { kP3AnalysisField, "motion/estimation", kExpectedVectorUnit, "analysis field pass" },
         { kP4SourceStats, "input/source_analysis/lane", kExpectedStatsUnit, "SourceStatsProducer" },
-        { kP5MonitorTiles, "input/source_analysis", 0, "tile pass + async readback" },
-        { kP6EntranceAhead, "scaling/rebase", 0, "entrance B-ahead" },
+        { kP5MonitorTiles, "input/source_analysis", kExpectedMonitorUnit, "tile pass + async readback" },
+        { kP6EntranceAhead, "scaling/rebase", kExpectedRebaseUnit, "entrance B-ahead" },
         { kP7CameraFit, "motion/estimation/global_model", kExpectedCameraUnit, "camera fit (CPU worker)" },
         { kP8CameraLabels, "motion/estimation/global_model", kExpectedCameraUnit, "camera label pass" },
         { kP9CameraSmoothed, "motion/estimation/global_model", kExpectedCameraUnit, "camera smoothing (CPU)" },
@@ -121,6 +127,8 @@ struct ConsumerRow {
     uint16_t order;           // render order within the unit; unique per (unit, order)
     FallbackKind kind;
     const char* fallbackId;   // an entry of FallbackCatalog::ProductEntries
+    const char* family;       // the component this row belongs to: several rows (module row, vector demand, camera) of
+                              // one component are ONE reader for ownership and the document
 };
 
 // Sorting key: pathway unit first, then render order.
@@ -135,6 +143,8 @@ inline ConsumerRow MakeRow(uint16_t index, const char* name, const char* module,
     ConsumerRow r;
     r.decl.id = uint16_t(kCatalogConsumerIdBase + index);
     r.decl.name = name;
+    r.family = name;
+    assert(reads.size() <= kMaxConsumes);   // a row never silently drops a read
     for (ProductId p : reads)
         AddConsume(r.decl, p);
     r.decl.holdsSpan = holdsSpan;
@@ -147,37 +157,57 @@ inline ConsumerRow MakeRow(uint16_t index, const char* name, const char* module,
     return r;
 }
 
-inline PathwayUnit UnitOf(VectorDemand::Consumer c)
+// Real render-order positions of the vector-demand consumers (within their pathway unit; the module rows use 10, 20, ...
+// and these sit next to the component they belong to). The statistics consumers read the vector pair's global vector
+// right after the producer, so they are motion-unit readers of P2; the entrance segment belongs to the input side.
+struct Placement {
+    PathwayUnit unit;
+    uint16_t order;
+    const char* family;
+};
+
+inline Placement PlacementOf(VectorDemand::Consumer c)
 {
-    switch (VectorDemand::DomainOf(c)) {
-    case VectorDemand::Domain::Synthesis: return PathwayUnit::Motion;
-    case VectorDemand::Domain::Output: return PathwayUnit::Output;
-    case VectorDemand::Domain::SourceField: return PathwayUnit::Repair;
-    case VectorDemand::Domain::SourceStatistics: return PathwayUnit::Input;
+    using C = VectorDemand::Consumer;
+    switch (c) {
+    case C::DejudderExtras: return { PathwayUnit::Motion, 50, "de-judder extras" };
+    case C::Interpolator: return { PathwayUnit::Motion, 41, "interpolator / hiccup repair" };
+    case C::HiccupRepair: return { PathwayUnit::Motion, 66, "interpolator / hiccup repair" };
+    case C::OcclusionMask: return { PathwayUnit::Motion, 81, "occlusion mask" };
+    case C::SigmaDelta: return { PathwayUnit::Output, 11, "sigma-delta (analysis field mapped)" };
+    case C::GrainMap: return { PathwayUnit::Repair, 5, "grain map" };
+    case C::DebandHold: return { PathwayUnit::Repair, 41, "debander (with hold)" };
+    case C::DetailPulse: return { PathwayUnit::Repair, 21, "detail pulse" };
+    case C::EntranceSegment: return { PathwayUnit::Input, 45, "entrance stages" };
+    case C::SourceMonitorPan: return { PathwayUnit::Motion, 30, "source monitor pan" };
+    case C::MotionIntent: return { PathwayUnit::Motion, 35, "motion intent" };
+    case C::TextureRestore: return { PathwayUnit::Repair, 31, "texture restore" };
+    case C::ResidualStabilise: return { PathwayUnit::Repair, 61, "residual stabilise" };
+    case C::TemporalDetail: return { PathwayUnit::Repair, 11, "temporal detail" };
     }
-    return PathwayUnit::Motion;
+    return { PathwayUnit::Motion, 99, "?" };
 }
 
-inline PathwayUnit UnitOf(CameraLink::CameraConsumer c)
+inline Placement PlacementOf(CameraLink::CameraConsumer c)
 {
     using CameraLink::CameraConsumer;
     switch (c) {
-    case CameraConsumer::Diagnostics: return PathwayUnit::Output;
-    case CameraConsumer::GrainMap:
-    case CameraConsumer::ResidualStabilise:
-    case CameraConsumer::TemporalDetail:
-    case CameraConsumer::DetailPulse:
-    case CameraConsumer::TextureRestore:
-    case CameraConsumer::Debander:
-    case CameraConsumer::RollOff: return PathwayUnit::Repair;
-    case CameraConsumer::DitherVectors: return PathwayUnit::Output;
-    case CameraConsumer::OcclusionFiller:
-    case CameraConsumer::Measurement:
-    case CameraConsumer::DejudderWarp:
-    case CameraConsumer::HiccupRepair:
-    case CameraConsumer::ObjectSplit: return PathwayUnit::Motion;
+    case CameraConsumer::Diagnostics: return { PathwayUnit::Output, 90, "camera diagnostics" };
+    case CameraConsumer::GrainMap: return { PathwayUnit::Repair, 6, "grain map" };
+    case CameraConsumer::ResidualStabilise: return { PathwayUnit::Repair, 62, "residual stabilise" };
+    case CameraConsumer::TemporalDetail: return { PathwayUnit::Repair, 12, "temporal detail" };
+    case CameraConsumer::DetailPulse: return { PathwayUnit::Repair, 22, "detail pulse" };
+    case CameraConsumer::TextureRestore: return { PathwayUnit::Repair, 32, "texture restore" };
+    case CameraConsumer::Debander: return { PathwayUnit::Repair, 42, "debander (with hold)" };
+    case CameraConsumer::RollOff: return { PathwayUnit::Repair, 70, "camera roll-off" };
+    case CameraConsumer::DitherVectors: return { PathwayUnit::Output, 12, "sigma-delta (analysis field mapped)" };
+    case CameraConsumer::OcclusionFiller: return { PathwayUnit::Motion, 45, "occlusion mask" };
+    case CameraConsumer::Measurement: return { PathwayUnit::Motion, 25, "camera measurement" };
+    case CameraConsumer::DejudderWarp: return { PathwayUnit::Motion, 55, "de-judder extras" };
+    case CameraConsumer::HiccupRepair: return { PathwayUnit::Motion, 67, "interpolator / hiccup repair" };
+    case CameraConsumer::ObjectSplit: return { PathwayUnit::Motion, 27, "camera object split" };
     }
-    return PathwayUnit::Motion;
+    return { PathwayUnit::Motion, 99, "?" };
 }
 
 // Every consumer, in a fixed order: the module consumers of doc 51 section 1, then the VectorDemand consumers and the
@@ -200,9 +230,11 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
         r.push_back(MakeRow(15, "region evidence (derived maps)", "VP-V/modules/input/source_analysis/regions",
                             PathwayUnit::Input, 50, { kP10GrainSplit, kP11RegionBlockStats, kP12LightLevel }, own,
                             "product.region_evidence"));
+        // The optical-flow producer's module is motion/estimation, but it runs AHEAD in the lane (before any render-side reader),
+        // so it ranks first in the pathway (input, order 5): it is the live-fill owner of P1 and P2.
         // Motion
         r.push_back(MakeRow(14, "optical-flow producer", "VP-V/modules/motion/estimation/MotionAheadProducer",
-                            PathwayUnit::Motion, 10, { kP1HalfLuma }, own, "product.nvof_producer"));
+                            PathwayUnit::Input, 5, { kP1HalfLuma, kP2VectorPair }, own, "product.nvof_producer"));
         r.push_back(MakeRow(13, "matcher / motion warp", "VP-V/modules/motion/consumers/DejudderWarp", PathwayUnit::Motion,
                             20, { kP1HalfLuma, kP2VectorPair, kP4SourceStats }, own, "product.motion_warp"));
         r.push_back(MakeRow(9, "interpolator / hiccup repair", "VP-V/modules/motion/consumers", PathwayUnit::Motion, 40,
@@ -236,9 +268,11 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
             const VectorDemand::Consumer c = VectorDemand::ConsumerAt(i);
             ConsumerRow row;
             row.decl = VectorDemand::DeclarationOf(c);
+            const Placement pl = PlacementOf(c);
             row.module = "VP-V/modules/motion/estimation/VectorDemand";
-            row.unit = UnitOf(c);
-            row.order = uint16_t(500 + i);
+            row.unit = pl.unit;
+            row.order = pl.order;
+            row.family = pl.family;
             row.kind = own;
             row.fallbackId = "product.vector_demand";
             r.push_back(row);
@@ -248,9 +282,11 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
             const CameraLink::CameraConsumer c = CameraLink::ConsumerAt(i);
             ConsumerRow row;
             row.decl = CameraLink::DeclarationOf(c);
+            const Placement pl = PlacementOf(c);
             row.module = "VP-V/modules/motion/estimation/global_model";
-            row.unit = UnitOf(c);
-            row.order = uint16_t(700 + i);
+            row.unit = pl.unit;
+            row.order = pl.order;
+            row.family = pl.family;
             row.kind = own;
             row.fallbackId = "product.camera";
             r.push_back(row);
@@ -268,33 +304,56 @@ inline std::vector<ConsumerDecl> AllConsumerDecls()
     return out;
 }
 
-// The consumers that read `product` (declared id), in pathway order.
-inline std::vector<const ConsumerRow*> ConsumersOf(ProductId product)
+// The readers of `product` (declared id), in pathway order, one per family (a component with a module row AND a
+// vector-demand / camera row is one reader, at its earliest position). `lag0Only` keeps the reads of the SAME frame:
+// only those can fill the frame's slot live. `active` (consumer ids) restricts to the consumers that are on; null = all.
+inline std::vector<const ConsumerRow*> ConsumersOf(ProductId product, bool lag0Only = false,
+                                                   const std::vector<uint16_t>* active = nullptr)
 {
     std::vector<const ConsumerRow*> out;
-    for (const ConsumerRow& c : ConsumerRows())
+    for (const ConsumerRow& c : ConsumerRows()) {
+        if (active) {
+            bool on = false;
+            for (uint16_t id : *active)
+                on = on || id == c.decl.id;
+            if (!on)
+                continue;
+        }
+        bool reads = false;
         for (size_t k = 0; k < c.decl.count; ++k)
-            if (c.decl.consumes[k].product == product) {
-                out.push_back(&c);
+            reads = reads || (c.decl.consumes[k].product == product && (!lag0Only || c.decl.consumes[k].lag == 0));
+        if (!reads)
+            continue;
+        bool merged = false;
+        for (const ConsumerRow*& o : out)
+            if (std::string(o->family) == c.family) {
+                if (PathwayKey(c) < PathwayKey(*o))
+                    o = &c;
+                merged = true;
                 break;
             }
+        if (!merged)
+            out.push_back(&c);
+    }
     for (size_t i = 1; i < out.size(); ++i)
         for (size_t j = i; j > 0 && PathwayKey(*out[j]) < PathwayKey(*out[j - 1]); --j)
             std::swap(out[j], out[j - 1]);
     return out;
 }
 
-// The consumer that fills `product` LIVE when the lane did not make it: the first reader in pathway order. nullptr
-// when nothing reads the product.
-inline const ConsumerRow* LiveFillOwner(ProductId product)
+// The consumer that fills `product` LIVE when the lane did not make it: the first lag-0 reader in pathway order among
+// the ACTIVE consumers (a lag >= 1 reader needs the product already made, so it can never be the filler). nullptr when
+// no active consumer reads it.
+inline const ConsumerRow* LiveFillOwner(ProductId product, const std::vector<uint16_t>* active = nullptr)
 {
-    const std::vector<const ConsumerRow*> c = ConsumersOf(product);
+    const std::vector<const ConsumerRow*> c = ConsumersOf(product, true, active);
     return c.empty() ? nullptr : c.front();
 }
 
 // Reader version check: a reader built for unit version `readerExpected` of `product` against a catalog that expects
 // another one engages a visible fallback (never a silent mix of two laws). True when they agree (or the unit has no
-// version yet: expected 0 on either side).
+// version yet: catalog 0). A reader that declares 0 against a versioned unit is a mismatch (it was not built against
+// any version).
 inline bool VerifyUnit(ProductId product, uint32_t readerExpected, FallbackCatalog::Decision* out)
 {
     const ProductRow* row = RowOf(product);
@@ -303,7 +362,7 @@ inline bool VerifyUnit(ProductId product, uint32_t readerExpected, FallbackCatal
             *out = FallbackCatalog::Engaged("product.unit_version", "unknown product " + std::to_string(unsigned(product)));
         return false;
     }
-    if (row->unitVersion == 0 || readerExpected == 0 || row->unitVersion == readerExpected) {
+    if (row->unitVersion == 0 || row->unitVersion == readerExpected) {
         if (out)
             *out = FallbackCatalog::Released("product.unit_version");
         return true;
@@ -370,9 +429,10 @@ inline std::string RenderDoc()
     for (const ProductDecl& d : reg.All()) {
         const ProductRow* row = RowOf(d.id);
         const std::vector<const ConsumerRow*> cs = ConsumersOf(d.id);
+        const ConsumerRow* owner = LiveFillOwner(d.id);
         std::string consumers;
         for (const ConsumerRow* c : cs)
-            consumers += (consumers.empty() ? "" : ", ") + std::string(c->decl.name);
+            consumers += (consumers.empty() ? "" : ", ") + std::string(c->family);
         std::string stamps;
         for (int b = 0; b < int(VpIndicator::kCounterCount); ++b)
             if ((d.reads & (VpIndicator::CounterMask(1u) << unsigned(b))) != 0) {
@@ -383,7 +443,7 @@ inline std::string RenderDoc()
         s += "| " + std::to_string(unsigned(d.id)) + " | " + d.token + " | " + (row ? row->unit : "?") + " (v"
              + std::to_string(row ? row->unitVersion : 0u) + ") | " + Token(d.backend) + " | "
              + ((row && row->laneProducer[0]) ? row->laneProducer : "none") + " | "
-             + (cs.empty() ? "none" : cs.front()->decl.name) + " | " + (consumers.empty() ? "none" : consumers) + " | "
+             + (owner ? owner->family : "none") + " | " + (consumers.empty() ? "none" : consumers) + " | "
              + stamps + " | " + Token(d.tier) + " | " + Token(d.residency);
         for (const Dims& dm : dims)
             s += " | " + MegaBytes(BytesOf(d.size, dm));
