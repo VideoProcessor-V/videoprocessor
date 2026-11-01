@@ -139,7 +139,7 @@ namespace SettingsFingerprintStructure
 	{
 		std::set<std::string> keys;
 		static const std::regex marker(R"re(\bkey\s*==\s*"([^"]+)")re");
-		for (const char* function : { "inline bool ValidateProfileSetting(", "inline bool ValidateBaseSetting(" })
+		for (const char* function : { "inline bool ValidateProfileSettingBuiltin(", "inline bool ValidateBaseSetting(" })
 		{
 			const std::string body = FunctionBody(text, function);
 			for (std::sregex_iterator it(body.begin(), body.end(), marker), last; it != last; ++it)

@@ -889,6 +889,7 @@ namespace RegionEvidence
 			AppendRegionProducts(decls);
 			AppendSourceRingProduct(decls);
 			AppendTemporalDetailProducts(decls);
+			AppendSourceIdentityProduct(decls);
 		}
 		ProductIds ids;
 		ids.grainSplit = kP10GrainSplit;
