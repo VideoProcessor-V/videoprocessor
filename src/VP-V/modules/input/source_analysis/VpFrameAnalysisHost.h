@@ -13,6 +13,7 @@
 // Everything else (records, epochs, the shared luma decode, the worker) lives here and in
 // VpFrameAnalysis / FrameAnalysisStore, tested on the CPU.
 
+#include "SourceFrameTap.h"
 #include "VpFrameAnalysis.h"
 #include <VP-V/core/SlotRegistry.h>
 
@@ -28,9 +29,29 @@ namespace VpFrameAnalysis
 	{
 	public:
 		Host() : m_store(FrameAnalysis::RingDepth(4, 4)), m_producer(m_store) { m_store.SetEnabled(false); }
-		~Host() { m_producer.Stop(); }
+		~Host()
+		{
+			m_producer.Stop();
+			if (const void* owner = m_owner.load(std::memory_order_acquire))
+			{
+				SourceFrameTap::SetStore(owner, nullptr);
+				SourceFrameTap::Unregister(owner);   // the store is going away: no sink may outlive it
+			}
+		}
 		Host(const Host&) = delete;
 		Host& operator=(const Host&) = delete;
+
+		// The renderer identity this Host serves (the `host` of every hub callback). With it the VP-V source
+		// frame tap (SourceFrameTap.h) can find this Host's store and decode the plane for a registered
+		// sink. Chainable: `frameAnalysis.Owner(this).Configure(...)`. Not calling it changes nothing.
+		Host& Owner(const void* key)
+		{
+			const void* previous = m_owner.exchange(key, std::memory_order_acq_rel);
+			if (previous && previous != key)
+				SourceFrameTap::SetStore(previous, nullptr);
+			SourceFrameTap::SetStore(key, &m_store);
+			return *this;
+		}
 
 		// The full-luma readers that actually RUN (modularity sweep): the NVOF half luma only when the
 		// optical-flow engine feeds running motion slots, the source-resolution look-ahead only when
@@ -83,7 +104,7 @@ namespace VpFrameAnalysis
 		// before it is cached and copied out, so every reader of this frame shares one decode.
 		static void AttachIfEnabled(AnalysisLumaSource& source)
 		{
-			if (SharedFlag().load(std::memory_order_acquire))
+			if (SharedFlag().load(std::memory_order_acquire) || SourceFrameTap::AnyWants())
 				AttachSharedLuma(source);
 		}
 
@@ -120,10 +141,12 @@ namespace VpFrameAnalysis
 			uint64_t original = 0;
 			bool repeat = false;
 			bool decodePlane = false, measure = false;
+			const void* owner = m_owner.load(std::memory_order_acquire);
+			const bool tapWants = SourceFrameTap::Wants(owner);   // one atomic load with no sink registered
 			{
 				std::lock_guard<std::mutex> lock(m_mutex);
 				if (!m_enabled || !source.IsValid()) return;
-				decodePlane = m_fullLumaReaders;
+				decodePlane = m_fullLumaReaders || tapWants;
 				measure = m_recordReaders;
 				if (!decodePlane && !measure) return;   // nothing runs that would read it
 				repeat = captureRepeat && m_haveUnique;
@@ -156,6 +179,7 @@ namespace VpFrameAnalysis
 			job.source = source;
 			job.decodePlane = decodePlane;
 			job.measure = measure;
+			job.owner = tapWants ? owner : nullptr;
 			m_producer.Submit(std::move(job));
 		}
 
@@ -218,6 +242,7 @@ namespace VpFrameAnalysis
 		mutable std::mutex m_mutex;
 		FrameAnalysis::Store m_store;
 		Producer m_producer;
+		std::atomic<const void*> m_owner{ nullptr };
 		bool m_enabled = false;
 		bool m_fullLumaReaders = false;
 		bool m_recordReaders = false;

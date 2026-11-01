@@ -1,5 +1,6 @@
 #include <pch.h>
 #include "VpFrameAnalysis.h"
+#include "SourceFrameTap.h"
 
 #include <algorithm>
 #include <chrono>
@@ -299,10 +300,45 @@ namespace VpFrameAnalysis
 		return true;
 	}
 
+	namespace
+	{
+		// Hands the decoded luma plane to the skeleton's sink (SourceFrameTap.h). A format that is read in
+		// place (P010 / P210 / decoded DV) has no shared plane: it is decoded into a private one here, only
+		// because a sink asked. The plane is held by the view's keepAlive, so the pool cannot recycle it.
+		void DeliverToTap(const Job& job)
+		{
+			std::shared_ptr<AnalysisLumaPlane> plane = job.source.sharedLuma;
+			if (!plane)
+			{
+				AnalysisLumaSource own = job.source;
+				own.sharedLuma = std::make_shared<AnalysisLumaPlane>();
+				DecodeSharedLuma(own);
+				plane = own.sharedLuma;
+			}
+			const size_t samples = static_cast<size_t>((std::max)(0, job.source.width)) * static_cast<size_t>((std::max)(0, job.source.height));
+			if (!plane || !plane->Ready() || samples == 0 || plane->codes.size() != samples)
+			{
+				SourceFrameTap::NoteSkipped(job.owner);
+				return;
+			}
+			VpSkeleton::SourceFrameView view;
+			view.seq = job.identity.seq;
+			view.luma = plane->codes.data();
+			view.width = static_cast<uint32_t>(job.source.width);
+			view.height = static_cast<uint32_t>(job.source.height);
+			view.strideSamples = view.width;
+			view.msbShift = 6;   // 10-bit sampler codes in the low bits of 16
+			view.keepAlive = std::shared_ptr<const void>(plane);
+			SourceFrameTap::Deliver(job.owner, view);
+		}
+	}
+
 	void Process(FrameAnalysis::Store& store, const Job& job)
 	{
 		if (job.decodePlane)
 			DecodeSharedLuma(job.source);
+		if (job.owner && SourceFrameTap::Wants(job.owner))
+			DeliverToTap(job);
 		if (!job.measure)
 			return;
 		Measured measured;

@@ -120,6 +120,7 @@ namespace VpFrameAnalysis
 		AnalysisLumaSource source;          // keeps the frame's buffer (and shared plane) alive
 		bool decodePlane = true;            // fill the shared luma plane (some reader wants full luma)
 		bool measure = true;                // compute the measured groups
+		const void* owner = nullptr;        // set when a SourceFrameTap sink of this renderer wants the decoded plane
 	};
 
 	// Decode + reduce + publish, on the calling thread (the worker; tests call it directly).
