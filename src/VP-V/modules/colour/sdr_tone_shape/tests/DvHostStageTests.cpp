@@ -302,9 +302,10 @@ namespace Tests
 			Assert::IsFalse(rc.trimApplied);
 			Assert::AreEqual(std::string("bt2390"), rc.curve);
 			Assert::IsTrue(rc.masteringPeakNits > 1000.0, L"the DM's source range (L0) when there is no L6");
-			// A non-DV picture leaves the last DV picture's record (as before).
+			// A non-DV picture clears the record: CAM16 must not keep the last DV title's L6/L9/L11
+			// (bug hunt 37 S10).
 			run.Frame(stage, Picture(false), Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
-			Assert::IsTrue(stage.ReferenceConditions().valid);
+			Assert::IsFalse(stage.ReferenceConditions().valid);
 		}
 
 		// Owner rule (2026-10-25): colour.sdr_tone_shape switched off (pipeline_slots_off, Original
