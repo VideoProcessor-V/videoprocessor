@@ -74,8 +74,9 @@ namespace RendererExtension
 		int64_t seq = -1, queueGeneration = 0, frameCounter = 0, timestamp = 0, ticksPerSecond = 0;
 		uint64_t stateKey = 0, formatKey = 0;
 		uint32_t gapFrames = 0;
-		int32_t gapCause = 0;
-		bool gapBefore = false, fromFile = false, overflowSuccessor = false, discontinuity = false;
+		const char* gapCause = nullptr; // static text, valid for the call
+		int64_t overflowSuccessor = 0; // != 0: an already-queued frame (this sequence) got an overflow-drop gap
+		bool gapBefore = false, fromFile = false, discontinuity = false;
 		double measuredRateHz = 0, nominalRateHz = 0;
 		const void* frame = nullptr;
 		const void* state = nullptr;
@@ -231,12 +232,12 @@ namespace RendererExtension
 
 	// ---- One-line call-site helpers (build the context from plain arguments) -------------------
 	inline void NotifyLifecycle(Lifecycle kind, const void* host, pl_gpu gpu = nullptr, ID3D11Device* device = nullptr,
-		const void* subject = nullptr, const void* previous = nullptr, int32_t code = 0, void* hostView = nullptr) noexcept
+		const void* subject = nullptr, const void* previous = nullptr, int32_t code = 0, void* hostView = nullptr, double value = 0) noexcept
 	{
 		if (!Any()) return;
 		LifecycleFacts f;
 		f.host = host; f.hostView = hostView; f.kind = kind; f.gpu = gpu; f.device = device;
-		f.subject = subject; f.previous = previous; f.code = code;
+		f.subject = subject; f.previous = previous; f.code = code; f.value = value;
 		Notify(f);
 	}
 	inline void NotifyQueue(QueueEvent kind, const void* host, int64_t seq = -1, int64_t generation = 0,
@@ -285,6 +286,13 @@ namespace RendererExtension
 		}
 		catch (...) {}
 		return base;
+	}
+	// A per-frame phase with no payload (e.g. Begin: the frame about to be rendered). True = handled.
+	inline bool NotifyFrame(FramePhase phase, const void* host, int64_t seq, int64_t generation = 0) noexcept
+	{
+		if (!Any()) return false;
+		FrameContext c; c.host = host; c.phase = phase; c.seq = seq; c.generation = generation;
+		return Frame(c);
 	}
 	inline void NotifyAfterRender(const void* host, int64_t seq, int64_t generation, int errors, int retried, bool rendered) noexcept
 	{
