@@ -169,7 +169,7 @@ namespace SourceIdentity
 			// The reference noise level is this quantile of the stream's own recent measurements ("its upper level").
 			double referenceQuantile = 0.8;
 			size_t referenceWindow = 120;        // measurements kept (the monitor analyses about 2 frames per second: ~60 s)
-			size_t referenceMinimum = 4;         // measurements before the noise term is used at all
+			size_t referenceMinimum = 8;         // measurements (about 4 s) before the noise term is used at all: a short history's quantile is its start
 			double minimumSigma = 0.25;          // below this (8-bit units) a picture carries no noise to lose: the term abstains
 			double minimumCoverage = 0.02;       // of a tile
 		};

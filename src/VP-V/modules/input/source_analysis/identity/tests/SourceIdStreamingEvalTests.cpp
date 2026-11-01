@@ -173,7 +173,6 @@ namespace Tests
 				const double black = 64.0 / 1023.0;
 				double lastSubmit = -1e9;
 				int g = 0;
-				uint64_t lastEventUs = -1;
 				for (const Segment& seg : reel.segments)
 				{
 					DecodeSegment(ffmpeg, seg, reel.width, reel.height, [&](const std::vector<uint16_t>& luma) {
@@ -242,7 +241,6 @@ namespace Tests
 						++g;
 					});
 				}
-				(void)lastEventUs;
 				++done;
 				Logger::WriteMessage((reel.id + ": " + std::to_string(g) + " frames").c_str());
 			}

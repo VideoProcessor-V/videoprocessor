@@ -509,7 +509,7 @@ namespace Tests
 			Assert::IsTrue(m.SourceIdGateFallback().reason.find("no record") != std::string::npos);
 			m.SetSourceIdConsensus(false);
 			m.AutoFactors(1920, 1080, 0.8, why, fx, fy, 11.0, 2);
-			Assert::IsTrue(m.SourceIdGateFallback().engaged || true);   // the last decision is kept; the view is what reports
+			Assert::IsFalse(m.SourceIdGateFallback().engaged, L"off releases the gate's fallback");
 			Assert::IsFalse(m.QualityView(11.0).fallback.engaged);
 		}
 	};

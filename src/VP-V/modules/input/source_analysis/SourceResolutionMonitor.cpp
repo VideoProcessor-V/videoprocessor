@@ -430,7 +430,10 @@ if (tile < int(tiles) && g.y < ts) {
 	void Monitor::SetSourceIdConsensus(bool on)
 	{
 		if (sourceIdOn.exchange(on, std::memory_order_acq_rel) != on && on)
+		{
+			sourceId.Held().Reset();   // records from before an off period must not read as fresh (HeldState is mutex-guarded)
 			sourceIdResetPending.store(true, std::memory_order_release);
+		}
 	}
 
 	namespace
@@ -483,7 +486,12 @@ if (tile < int(tiles) && g.y < ts) {
 		IdGate g;
 		g.on = SourceIdConsensus();
 		if (!g.on)
+		{
+			std::lock_guard<std::mutex> lock(gateMutex);
+			if (gateDecision.engaged || gateDecision.id.empty())
+				gateDecision = FallbackCatalog::Released("product.source_quality");
 			return g;
+		}
 		SourceIdentity::Record rec;
 		const char* why = nullptr;
 		if (!sourceId.Held().ReadLatest(0, rec))
@@ -1223,7 +1231,10 @@ if (tile < int(tiles) && g.y < ts) {
 			{
 				const double tol = 0.03;
 				const bool uniform = gate.latchedH && gate.latchedV && std::fabs(gate.ratioH - gate.ratioV) <= tol * (std::max)(gate.ratioH, gate.ratioV);
-				wanted = uniform && gate.ratioH < 1.0 ? 0.5 * (gate.ratioH + gate.ratioV) : 1.0;
+				// Consensus moves only TOWARDS native: never a deeper re-base than the classical reading wants (a rise
+				// in detail must not wait for the consensus dwell).
+				const double target = uniform && gate.ratioH < 1.0 ? 0.5 * (gate.ratioH + gate.ratioV) : 1.0;
+				wanted = (std::max)(wanted, target);
 			}
 		}
 		// Lines: an even height derived from the frame's own height (general).
@@ -1377,8 +1388,8 @@ if (tile < int(tiles) && g.y < ts) {
 			const IdGate gate = SourceIdGate(now);
 			if (gate.fresh)
 			{
-				ratios[0] = ratios[0] < 1.0 && gate.latchedH ? gate.ratioH : 1.0;
-				ratios[1] = ratios[1] < 1.0 && gate.latchedV ? gate.ratioV : 1.0;
+				ratios[0] = ratios[0] < 1.0 && gate.latchedH ? (std::max)(ratios[0], gate.ratioH) : 1.0;
+				ratios[1] = ratios[1] < 1.0 && gate.latchedV ? (std::max)(ratios[1], gate.ratioV) : 1.0;
 			}
 			for (int a = 0; a < 2; ++a)
 				if (ratios[a] < 1.0 && sizes[a] > 0)

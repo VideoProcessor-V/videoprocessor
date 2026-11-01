@@ -259,7 +259,7 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
                             { kP10GrainSplit, kP11RegionBlockStats, kP12LightLevel, kP3AnalysisField }, own,
                             "product.debander", true, { kSourceIdentity }));
         // Contrast recovery gates itself off on a clean high-bitrate source (get out of the way): it reads only the held record.
-        r.push_back(MakeRow(18, "contrast recovery need", "VP-V/modules/repair/contrast", PathwayUnit::Repair, 55,
+        r.push_back(MakeRow(18, "contrast recovery need", "VP-V/modules/repair", PathwayUnit::Repair, 55,
                             {}, own, "product.contrast_recovery", false, { kSourceIdentity }));
         r.push_back(MakeRow(16, "light-level users", "VP-V/modules/repair", PathwayUnit::Repair, 50,
                             { kP12LightLevel, kP11RegionBlockStats }, own, "product.light_level"));

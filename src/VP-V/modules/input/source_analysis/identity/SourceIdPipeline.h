@@ -35,6 +35,16 @@ namespace SourceIdentity
 		NoticePolicy::Settings notice;
 		VoteSettings vote;
 		FrameQuality::Settings quality;
+
+		PipelineSettings()
+		{
+			// The monitor analyses about 2 frames per second (not the detector's default 4): windows of 1 s keep >= 2 samples.
+			detector.preWindowUs = 1000000;
+			detector.postWindowUs = 1000000;
+			detector.confirmUs = 500000;
+			detector.minSamples = 2;
+			detector.stableMad = 0.08;
+		}
 		// A record older than this is stale. 0 = derived: twice the longest classical vote expiry (never a fixed number).
 		int64_t maxAgeUs = 0;
 
