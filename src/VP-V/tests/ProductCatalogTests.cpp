@@ -16,6 +16,7 @@
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
 #include <VP-V/modules/scaling/rebase/RebaseDecision.h>
+#include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetail.h>
 
 #include "SettingsTestSupport.h"
@@ -234,6 +235,7 @@ namespace ProductCatalogTestsNs
 				{ kP12LightLevel, LightLevel::kUnitVersion },
 				{ kTdAnalysis, TemporalDetail::kUnitVersion }, { kTdRefstore, TemporalDetail::kUnitVersion },
 				{ kTdAdmission, TemporalDetail::kUnitVersion },
+				{ kP10GrainSplit, GrainSplit::kUnitVersion }, { kP10cGrainSplitChroma, GrainSplit::kUnitVersion },
 			};
 			for (const Pair& p : pairs) {
 				const ProductRow* row = RowOf(p.id);
@@ -243,7 +245,7 @@ namespace ProductCatalogTestsNs
 				Assert::IsTrue(VerifyUnit(p.id, p.unit, &d));
 				Assert::IsFalse(d.engaged);
 			}
-			// P10/P10c: the grain split unit's own constant arrives with SA2 (GrainSplit::kUnitVersion = 2).
+			// P10/P10c: the grain split unit's own constant (SA2, GrainSplit::kUnitVersion = 2), checked above.
 			Assert::AreEqual(2u, RowOf(kP10GrainSplit)->unitVersion);
 			Assert::AreEqual(2u, RowOf(kP10cGrainSplitChroma)->unitVersion);
 

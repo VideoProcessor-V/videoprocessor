@@ -77,7 +77,10 @@ constexpr uint8_t kMaxCameraLead = 2;
 
 enum class Backend : uint8_t { Ofa, GpuCompute, Cpu, RenderOnly };
 enum class Tier : uint8_t { T0, T1, T2 };
-enum class Residency : uint8_t { Vram, SystemRam };
+// Transient (SA1): a temporary that lives only inside one render scope (the shared scratch arena,
+// GpuAllocator.h). It is not a ring product: it has no ring, no lane grant and no governor user of
+// its own; its bytes are counted only through the arena user (kUserScratchArena).
+enum class Residency : uint8_t { Vram, SystemRam, Transient };
 enum class Variants : uint8_t { Identical, NonIdentical };
 
 inline const char* Token(Backend b)
@@ -190,9 +193,14 @@ struct ProductDecl {
     // A declared form for a live fill with an input missing (e.g. no previous frame after a reset).
     // Without it such a fill is refused: the product is unavailable for that frame (visible).
     bool missingInputForm = false;
-    // The SizeRule PLANS for a declared geometry; the runtime path uses the real planes' bytes (P10c chroma).
-    bool planningSize = false;
     float refRenderMs = 0.0f;                 // estimated in-render cost on the reference card, 1080p
+    // The SizeRule is a planning figure (a plane whose runtime geometry is not a plain shift of the source, e.g.
+    // chroma): the allocator's layout uses the ACTUAL plane dims and TierInput::actual carries its bytes.
+    bool planningSize = false;
+    // A RenderOnly VIEW of data that exists before the render and is readable from the lane as well (the source ring's
+    // unpacked planes, owned by the queue / early upload): it has no lane of its own, but it never moves a lane reader
+    // into the render (VramGovernor's InputInRender rule skips it).
+    bool laneVisible = false;
 };
 
 // The real tile geometry of the source-resolution monitor (SourceResolutionMonitor.h: kTile, kMaxTiles, ring[2]):
@@ -543,17 +551,20 @@ inline void AppendCameraProducts(std::vector<ProductDecl>& decls)
 }
 
 // P10/P10c (the SA2 declaration, adopted by SA0): the grain split of one plane-component and of the chroma planes.
-// `compact` is the SA2 either/or storage layout; `full` is today's (rgba32f split plane 16 B/px + rgba32f per block).
-// Today's full form is recorded as kGrainSplitFullBytesPerPixel for the VRAM story (doc 51: 32 B/px with the two
-// planes the GPU port stores; the ring of 4 + 3 live made 1.86 GB at 4K).
+// `compact` / `compactChroma` are the GRANTED SA2 storage layouts of P10 (luma) and P10c (the chroma planes may be granted
+// another storage than luma); `full` is today's (rgba32f split plane 16 B/px + rgba32f per block). Today's full form is
+// recorded as kGrainSplitFullBytesPerPixel for the VRAM story (doc 51: 32 B/px with the two planes the GPU port stores;
+// the ring of 4 + 3 live made 1.86 GB at 4K).
 constexpr uint32_t kGrainSplitFullBytesPerPixel = 32;
-inline void AppendGrainSplitProducts(std::vector<ProductDecl>& decls, bool compact = false)
+inline void AppendGrainSplitProducts(std::vector<ProductDecl>& decls, bool compact, bool compactChroma)
 {
     using detail::AddInput;
     using detail::AddTerm;
     using detail::Make;
     using namespace VpIndicator;
     const CounterMask content = Bit(kFull) | Bit(kContinuity);
+    // Same declaration the region-evidence module made privately (token, name, T0: every regional repair depends
+    // on it, history 1, reads P4 for the picture rect); only the sizes are the real storage layouts.
     ProductDecl p10 = Make(kP10GrainSplit, kTokenGrainSplit, "grain split (shared)", Backend::GpuCompute, 1,
                            Tier::T0, content, Bit(kSettingsAnalysis));
     p10.sourceFrame = true;
@@ -572,11 +583,16 @@ inline void AppendGrainSplitProducts(std::vector<ProductDecl>& decls, bool compa
     c.sourceFrame = true;
     AddInput(c, kP4SourceStats, 0);
     AddInput(c, kP13SourceRing, 0);
-    AddTerm(c, 1, compact ? 16 : 32);   // Cb + Cr planes at half size: 2 x (8 | 16) B/px
+    AddTerm(c, 1, compactChroma ? 16 : 32);   // Cb + Cr planes at half size: 2 x (8 | 16) B/px
     AddTerm(c, 5, 32);                  // block grids at 16 px of those planes: 2 x 16 B per block (both layouts)
     c.refRenderMs = 0.6f;
     c.planningSize = true;
     decls.push_back(c);
+}
+
+inline void AppendGrainSplitProducts(std::vector<ProductDecl>& decls, bool compact = false)
+{
+    AppendGrainSplitProducts(decls, compact, compact);
 }
 
 // P11 (region block statistics) and P12 (light level), with the reserved E1/E2/E3 band energies and WP2 per-block terms.
@@ -623,6 +639,7 @@ inline void AppendSourceRingProduct(std::vector<ProductDecl>& decls)
                            Bit(kFull) | Bit(kContinuity), 0);
     p13.sourceFrame = true;
     p13.size.fixedBytes = 0;
+    p13.laneVisible = true;   // the lane reads the queued planes through it: P10/P11/TD keep their lanes
     decls.push_back(p13);
 }
 
@@ -679,16 +696,18 @@ inline void AppendTemporalDetailProducts(std::vector<ProductDecl>& decls)
 
 // The registry the skeleton runs with: the first products, the camera products, then P10..P13 and the TemporalDetail
 // products, in fixed id order. THE one assembly point.
-inline Registry SkeletonProducts(bool compactGrain = false)
+// `compactGrain` / `compactChroma`: the GRANTED storage of P10 (luma) and P10c (chroma planes).
+inline Registry SkeletonProducts(bool compactGrain, bool compactChroma)
 {
     std::vector<ProductDecl> d = FirstProducts().All();
     AppendCameraProducts(d);
-    AppendGrainSplitProducts(d, compactGrain);
+    AppendGrainSplitProducts(d, compactGrain, compactChroma);
     AppendRegionProducts(d);
     AppendSourceRingProduct(d);
     AppendTemporalDetailProducts(d);
     return Registry(std::move(d));
 }
+inline Registry SkeletonProducts(bool compactGrain = false) { return SkeletonProducts(compactGrain, compactGrain); }
 
 // A component's consumption: which products it reads, and at which lag.
 struct ConsumeRef {

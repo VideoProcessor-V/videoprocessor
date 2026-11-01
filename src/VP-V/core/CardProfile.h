@@ -134,8 +134,12 @@ inline bool SystemRamAllowed(const ProductDecl& d, uint64_t bytesPerFrame)
     return bytesPerFrame < kSystemRamItemLimit || d.backend == Backend::Cpu || d.rarelyTouched;
 }
 
+// Transient (SA1) is never a ring product: PlanTiers gives it no lane grant and no governor user; its
+// bytes are counted only through the scratch arena user (GpuAllocator.h, kUserScratchArena).
 inline Residency ResidencyFor(const ProductDecl& d, uint64_t bytesPerFrame)
 {
+    if (d.residency == Residency::Transient)
+        return Residency::Transient;
     return d.residency == Residency::SystemRam && SystemRamAllowed(d, bytesPerFrame) ? Residency::SystemRam
                                                                                       : Residency::Vram;
 }

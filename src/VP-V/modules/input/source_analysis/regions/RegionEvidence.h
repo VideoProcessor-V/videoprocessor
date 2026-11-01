@@ -790,6 +790,9 @@ namespace RegionEvidence
 	{
 		VpSkeleton::ProductId grainSplit = VpSkeleton::kNoProduct;
 		VpSkeleton::ProductId blockStats = VpSkeleton::kNoProduct;
+		// The chroma planes' split (core P10c): only when the registry carries the core grain products; the chroma-from-luma
+		// grain guard consumes it in addition to the luma product.
+		VpSkeleton::ProductId grainSplitChroma = VpSkeleton::kNoProduct;
 	};
 
 	// The grain product's declared readers as skeleton consumers (ids firstId .. firstId + 3, assigned at integration):
@@ -806,6 +809,8 @@ namespace RegionEvidence
 			c.id = static_cast<uint16_t>(firstId + i);
 			c.name = kNames[i];
 			VpSkeleton::AddConsume(c, ids.grainSplit, 0);
+			if (i == 2 && ids.grainSplitChroma != VpSkeleton::kNoProduct)   // the chroma-from-luma grain guard
+				VpSkeleton::AddConsume(c, ids.grainSplitChroma, 0);
 			out.push_back(c);
 		}
 		return out;
@@ -863,6 +868,7 @@ namespace RegionEvidence
 		ProductIds ids;
 		ids.grainSplit = kP10GrainSplit;
 		ids.blockStats = kP11RegionBlockStats;
+		ids.grainSplitChroma = kP10cGrainSplitChroma;
 		return ids;
 	}
 }

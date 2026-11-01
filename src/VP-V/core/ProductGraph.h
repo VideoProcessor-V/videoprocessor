@@ -74,6 +74,7 @@ struct Node {
     uint8_t leadRead = 0;             // the largest effective lead any node reads THIS product at
     bool shortQueue = false;          // stands in for a look-ahead product the queue cannot feed
     ProductId reducedFrom = kNoProduct;   // that look-ahead product (declared id) when shortQueue
+    bool laneVisible = false;         // ProductDecl::laneVisible (a view the lane can read: never demotes a lane reader)
     uint64_t bufferBytes = 0;
     uint64_t ringBytes = 0;   // lane ring buffers (0 for render-only)
     uint64_t liveBytes = 0;   // live pool, separate memory
@@ -405,6 +406,7 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
         node.declared = declaredAs[p];
         node.backend = d.backend;
         node.tier = d.tier;
+        node.laneVisible = d.laneVisible;
         node.history = d.history > maxLag[p] ? d.history : maxLag[p];
         node.holdsSpan = span[p] != 0;
         const bool lane = d.backend != Backend::RenderOnly;

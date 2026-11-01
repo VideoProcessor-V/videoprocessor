@@ -1,0 +1,30 @@
+{
+  "schema": "vp-module-manifest/1",
+  "slot": "control.gpu_memory",
+  "unit": "control",
+  "order": 935,
+  "status": "partial",
+  "code_location": "src/VP-V/core (GpuAllocator.h, ScratchArena.h) + this folder (libplacebo backend)",
+  "live_files": [
+    "src/VP-V/core/GpuAllocator.h",
+    "src/VP-V/core/ScratchArena.h",
+    "src/VP-V/modules/control/gpu_memory/PlTexBackend.h",
+    "src/VP-V/tests/GpuAllocatorTests.cpp",
+    "src/VP-V/tests/PrivateTextureScanTests.cpp"
+  ],
+  "components": {
+    "files": {
+      "required": [],
+      "optional": []
+    },
+    "hardware": {
+      "required": [],
+      "optional": []
+    },
+    "tools": [],
+    "config_keys": [],
+    "upstream_modules": []
+  },
+  "fallback_when_missing": "Arena short or tier shed: the consumer runs reduced or off for that frame.",
+  "fallback_entry": "scratch_arena: scratch memory short: <owner> reduced/off"
+}
