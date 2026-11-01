@@ -430,6 +430,23 @@ namespace FallbackCatalog
 			"source monitor fast-pan / intent without whole-frame motion (vector engine pair missed)") :
 			Released("vector_engine_global");
 	}
+	// ---- core: the shared seal (FrameSeal / AnalysisLane external-seal mode) ----------------------
+	// Engaged when the one-seal-owner wiring is wrong: a frame reached the lane without the shared seal
+	// (it is NOT sealed twice; its analysis falls back to the in-render form), or a provider was added
+	// after the first frame (its readers are not registered on the current era until the next one).
+	inline Decision ResyncSeal(unsigned long long frameMisses, unsigned lateProviders)
+	{
+		if (frameMisses == 0 && lateProviders == 0)
+			return Released("resync_seal");
+		std::string reason;
+		if (frameMisses != 0)
+			reason += std::to_string(frameMisses) + " frames reached the analysis lane without the shared seal";
+		if (lateProviders != 0)
+			reason += std::string(reason.empty() ? "" : "; ") + std::to_string(lateProviders) +
+				" resync reader provider(s) added after the first frame (not registered on this era)";
+		return Engaged("resync_seal", reason);
+	}
+
 	// ---- input.signal: resync storm hold (G8 / D4) ----------------------------------------------
 	// Engaged while the resync storm hold is in force (On mode only): more than 3 FULL resyncs in
 	// 10 s hold lane T0, native re-base and the vector engine at safe settings.

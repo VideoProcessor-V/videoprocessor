@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string>
 
 #include <VP-V/core/Indicator.h>
 #include <VP-V/core/ResyncCause.h>
@@ -224,6 +225,9 @@ namespace MotionValidity
 		{
 			if (Index(cause) >= kCauseCount)
 				return epoch.load(std::memory_order_acquire);
+			// Unbound (the common case): no shared_ptr atomic (MSVC's global spinlock) on this hot path.
+			if (!bound.load(std::memory_order_acquire))
+				return InvalidateNow(cause);
 			const std::shared_ptr<VpIndicator::Indicator> indicator = std::atomic_load(&ind);
 			if (!indicator)
 				return InvalidateNow(cause);
@@ -283,9 +287,30 @@ namespace MotionValidity
 		}
 
 		// Render thread (setup / teardown). Bound = resync `on`.
-		void Bind(std::shared_ptr<VpIndicator::Indicator> indicator) { std::atomic_store(&ind, std::move(indicator)); }
-		void Unbind() { std::atomic_store(&ind, std::shared_ptr<VpIndicator::Indicator>()); }
-		bool Driven() const { return std::atomic_load(&ind) != nullptr; }
+		void Bind(std::shared_ptr<VpIndicator::Indicator> indicator)
+		{
+			const bool on = indicator != nullptr;
+			std::atomic_store(&ind, std::move(indicator));
+			bound.store(on, std::memory_order_release);
+		}
+		void Unbind()
+		{
+			bound.store(false, std::memory_order_release);
+			std::atomic_store(&ind, std::shared_ptr<VpIndicator::Indicator>());
+		}
+		bool Driven() const { return bound.load(std::memory_order_acquire); }
+
+		// Status text (Ctrl+Alt+D / Config status): empty when unbound; bound shows the deferred
+		// requests (moved at the seal) and the settings[motion] advances so the Indicator-driven mode is
+		// never invisible.
+		std::string StatusText() const
+		{
+			if (!Driven())
+				return std::string();
+			return "motion validity: driven by the Indicator; " + std::to_string(DeferredToSeal()) +
+				" request(s) deferred to the seal, " + std::to_string(SettingsAdvances()) + " settings advance(s), epoch " +
+				std::to_string(Epoch());
+		}
 
 		// Requests deferred to the seal, and settings[motion] advances written (bound only).
 		uint64_t DeferredToSeal() const noexcept { return deferred.load(std::memory_order_relaxed); }
@@ -299,6 +324,8 @@ namespace MotionValidity
 		{
 			if (!Adjacent(a, b))
 				return false;
+			if (!bound.load(std::memory_order_acquire))
+				return true;
 			const std::shared_ptr<VpIndicator::Indicator> indicator = std::atomic_load(&ind);
 			if (!indicator)
 				return true;
@@ -311,6 +338,8 @@ namespace MotionValidity
 		// Unbound: StreamGeneration().
 		uint64_t StreamGenerationAt(uint64_t seq) const
 		{
+			if (!bound.load(std::memory_order_acquire))
+				return StreamGeneration();
 			const std::shared_ptr<VpIndicator::Indicator> indicator = std::atomic_load(&ind);
 			return indicator ? VpResync::Drive::FullKey(*indicator, seq) : StreamGeneration();
 		}
@@ -326,8 +355,9 @@ namespace MotionValidity
 		// look-ahead engagement while step 1 must not change behaviour (a gap moves
 		// the epoch, and keying the store on the epoch would discard the ahead pairs
 		// computed for the frames after the gap). Monotonic; any thread. Bound to an Indicator
-		// this STILL returns this unbound formula (the request-time counts, which do not move
-		// for deferred causes); use StreamGenerationAt(seq) for the Indicator-keyed generation.
+		// this STILL returns this unbound formula; its counts move at the SEAL of the carrying frame
+		// (OnSealedChange applies the unconditional move), not at request time, for the deferred causes;
+		// use StreamGenerationAt(seq) for the Indicator-keyed generation.
 		uint64_t StreamGeneration() const noexcept
 		{
 			return kInitialEpoch + Count(Cause::Resync) + Count(Cause::QueueReset) + Count(Cause::Seek) +
@@ -472,6 +502,7 @@ namespace MotionValidity
 		std::array<std::atomic<uint64_t>, kCauseCount> counts{};
 		std::atomic<uint64_t> repeats{ 0 };
 		std::shared_ptr<VpIndicator::Indicator> ind;   // accessed with std::atomic_load / atomic_store only
+		std::atomic<bool> bound{ false };   // mirrors ind != nullptr: the hot-path guard
 		std::atomic<uint64_t> deferred{ 0 };
 		std::atomic<uint64_t> settingsAdvances{ 0 };
 

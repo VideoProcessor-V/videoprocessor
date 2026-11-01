@@ -15,6 +15,13 @@
 
 #include <VP-V/core/AnalysisLane.h>
 #include <VP-V/core/FrameSeal.h>
+#include <VP-V/core/FramesInFlight.h>
+#include <VP-V/modules/drive/led_compensation/LedResyncPolicy.h>
+#include <VP-V/modules/input/queue_timing/PulldownResync.h>
+#include <VP-V/modules/input/signal/DvResyncReader.h>
+#include <VP-V/modules/input/signal/ResyncEventMetrics.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
+#include <VP-V/modules/motion/estimation/MotionResyncReaders.h>
 #include <VP-V/modules/input/signal/ResyncDrive.h>
 #include <VP-V/modules/input/signal/ResyncShadow.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneGpuJobs.h>
@@ -25,6 +32,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <memory>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -878,8 +886,8 @@ namespace AnalysisLaneTestsNs
 			r.Pump();
 			const uint32_t predicted = st->gapWorks[0]->PredictUs();
 			Assert::IsTrue(predicted >= 1000u - 1u && predicted <= r.lane.ChunkCapUs(), L"predicted by the device cost, within the cap");
-			const GapReport small = r.lane.OnPostSubmitGap(r.clock.load() + 500);
-			Assert::IsTrue(small.chunks == 0 && disp.dispatched == 0, L"a 0.5 ms gap runs none of it");
+			const GapReport smallGap = r.lane.OnPostSubmitGap(r.clock.load() + 500);
+			Assert::IsTrue(smallGap.chunks == 0 && disp.dispatched == 0, L"a 0.5 ms gap runs none of it");
 			const GapReport big = r.lane.OnPostSubmitGap(r.clock.load() + 100000);
 			Assert::IsTrue(big.chunks > 0 && disp.dispatched > 0, L"a big gap runs it");
 			Assert::IsTrue(p3.Plan().chunkCount == 3u, L"split into 3 chunks of 1 ms");
@@ -1295,6 +1303,644 @@ namespace AnalysisLaneTestsNs
 			r.lane.OnRenderStart(1, 4000);
 			Assert::IsTrue(r.lane.ExternalSealMisses() == 1, L"counted");
 			Assert::IsTrue(!r.ind.HasSealed(), L"the lane did not seal");
+		}
+	};
+
+	// Audit 1: the Indicator rebind rebuild (item 5), the status of the seal wiring (item 6), the
+	// frame-bound readiness wait (item 12) and the owner's fill rule at the shared seal (item 13).
+	TEST_CLASS(AnalysisLaneAuditTests)
+	{
+	public:
+		using Handle = std::shared_ptr<Indicator>;
+		static Handle Alias(Indicator& i) { return Handle(&i, [](Indicator*) {}); }
+		static uint64_t LiveFillsOf(Rig& r) { return r.lane.State()->table->LiveFills(); }
+
+		static std::vector<ProductFrameResult> SealedFrame(Rig& r, VpSeal::FrameSeal& fs, const Handle& h, uint64_t s, bool pump)
+		{
+			r.lane.OnSourceFrame(r.View(s + 1));
+			if (pump)
+				r.Pump();
+			fs.Seal(h, s);
+			return r.lane.OnRenderStart(s, 4000);
+		}
+
+		static void Wire(Rig& r, VpSeal::FrameSeal& fs)
+		{
+			r.lane.SetExternalSeal(true);
+			fs.AddProvider("lane", [&r](const Handle& i) { r.lane.BindIndicator(i); });
+			fs.Subscribe("lane", [&r](const Handle&, uint64_t seq, VpIndicator::CounterMask c) { r.lane.OnSealed(seq, c); });
+		}
+
+		// A new era under a configured lane: rebuilt on the new Indicator at the next frame (visible),
+		// products accepted again from the lane, the old Indicator released after its last holder.
+		TEST_METHOD(AnEraSwapRebuildsTheGraphAndReleasesTheOldIndicator)
+		{
+			Rig r;
+			Handle a = std::make_shared<Indicator>(VpIndicator::NextEra(), 256);
+			r.lane.BindIndicator(a);
+			r.Configure(LaneSettings::Mode::On, false, 1);
+			VpSeal::FrameSeal fs;
+			Wire(r, fs);
+			r.lane.OnSourceFrame(r.View(1));
+			for (uint64_t s = 1; s <= 6; ++s) {
+				SealedFrame(r, fs, a, s, true);
+				r.End(s);
+			}
+			Assert::IsTrue(r.lane.IndicatorRebinds() == 1 && !r.lane.RebuildPending(), L"the first bind is the initial one");
+			const std::weak_ptr<Indicator> old = a;
+
+			const Handle b = std::make_shared<Indicator>(VpIndicator::NextEra(), 256);
+			fs.Seal(b, 7);   // the provider rebinds the lane
+			Assert::IsTrue(r.lane.RebuildPending(), L"rebind marks a pending rebuild");
+			bool shown = false;
+			for (const std::string& l : r.lane.StatusLines())
+				shown = shown || Has(l, "rebuilt at the next frame");
+			Assert::IsTrue(shown, L"and says so");
+			r.lane.OnSourceFrame(r.View(8));
+			r.Pump();
+			r.lane.OnRenderStart(7, 4000);
+			Assert::IsTrue(!r.lane.RebuildPending() && r.lane.RebindRebuilds() == 1, L"rebuilt at that frame");
+			Assert::IsTrue(r.lane.ExternalSealMisses() == 0);
+			a.reset();
+			// Frames on the new Indicator: the lane's products are accepted again (stamps match).
+			std::vector<ProductFrameResult> last;
+			for (uint64_t s = 8; s <= 16; ++s) {
+				last = SealedFrame(r, fs, b, s, true);
+				r.End(s);
+			}
+			Assert::IsTrue(Rig::Res(last, kP1HalfLuma).seal.reason == SealReason::Accepted, L"P1 from the lane on the new era");
+			Assert::IsTrue(Rig::Res(last, kP4SourceStats).seal.reason == SealReason::Accepted, L"P4 from the lane on the new era");
+			Assert::IsTrue(old.expired(), L"the old Indicator is released after its last holder");
+			bool counted = false;
+			for (const std::string& l : r.lane.StatusLines())
+				counted = counted || Has(l, "Indicator rebound x2, graph rebuilt x1");
+			Assert::IsTrue(counted, L"the rebind is in the status");
+		}
+
+		TEST_METHOD(AnUnsealedFrameShowsInTheStatusAndTheFallbackCatalog)
+		{
+			Rig r;
+			r.Configure(LaneSettings::Mode::On, false, 1);
+			r.lane.SetExternalSeal(true);
+			r.lane.OnSourceFrame(r.View(1));
+			r.Pump();
+			r.lane.OnRenderStart(1, 4000);
+			bool status = false;
+			for (const std::string& l : r.lane.StatusLines())
+				status = status || Has(l, "without the shared seal");
+			Assert::IsTrue(status, L"status line");
+			bool engaged = false;
+			for (const FallbackCatalog::Decision& d : r.lane.Fallbacks())
+				engaged = engaged || (d.id == "resync_seal" && d.engaged);
+			Assert::IsTrue(engaged, L"resync_seal fallback");
+			VpSeal::FrameSeal fs;
+			Assert::IsFalse(fs.Fallback().engaged);
+			fs.AddProvider("a", [](const Handle&) {});
+			const Handle h = std::make_shared<Indicator>(VpIndicator::NextEra(), 64);
+			fs.Seal(h, 1);
+			fs.AddProvider("late", [](const Handle&) {});
+			Assert::IsTrue(fs.Fallback().engaged && Has(fs.Fallback().reason, "after the first frame"), L"a late provider is visible");
+			Assert::IsTrue(Has(fs.Describe(), "added after the first frame"));
+		}
+
+		// The bounded wait for the frame-bound monitor's readiness (N1): deterministic runs only, counted.
+		TEST_METHOD(TheReadinessProbeJoinsTheBoundedDeterministicWait)
+		{
+			Rig r;
+			r.Configure(LaneSettings::Mode::On, true, 1);
+			Assert::IsTrue(r.lane.Deterministic());
+			for (uint64_t s = 1; s <= 5; ++s)
+				r.lane.OnSourceFrame(r.View(s));
+			r.Pump();
+			bool ready = true;
+			int missed = 0;
+			r.lane.SetReadyProbe([&ready](uint64_t) { return ready; }, [&missed]() { ++missed; });
+			auto drain = [&r](uint64_t seq) {
+				uint32_t total = 0;
+				for (int i = 0; i < 200; ++i) {
+					const uint32_t w = r.lane.DeterministicWaitUs(seq, 4000);
+					if (w == 0)
+						return total;
+					total += w;
+				}
+				Assert::Fail(L"the wait is not bounded");
+				return total;
+			};
+			drain(3);   // whatever the products themselves need
+			Assert::IsTrue(r.lane.ReadyProbeMisses() == 0 && missed == 0, L"a ready probe never waits or misses");
+			ready = false;
+			const uint32_t waited = drain(4);
+			Assert::IsTrue(waited > 0, L"an unready probe waits");
+			Assert::IsTrue(waited <= 4000, L"inside the present slack: never a late present");
+			Assert::IsTrue(r.lane.ReadyProbeMisses() == 1 && missed == 1, L"the missed bound is counted once and reported to the owner");
+			bool shown = false;
+			for (const std::string& l : r.lane.StatusLines())
+				shown = shown || Has(l, "missed the wait bound");
+			Assert::IsTrue(shown, L"shown");
+		}
+
+		TEST_METHOD(TheReadinessProbeIsIgnoredWhenNotDeterministic)
+		{
+			Rig r;
+			r.Configure(LaneSettings::Mode::On, false, 1);
+			r.lane.SetReadyProbe([](uint64_t) { return false; }, []() {});
+			Assert::IsTrue(r.lane.DeterministicWaitUs(2, 4000) == 0, L"never a wait outside deterministic runs");
+			Assert::IsTrue(r.lane.ReadyProbeMisses() == 0);
+		}
+
+		// Owner fill rule (a): published before the seal -> used.
+		TEST_METHOD(PublishedBeforeTheSealIsUsed)
+		{
+			Rig r;
+			r.Configure(LaneSettings::Mode::On, false, 1);
+			const Handle h = Alias(r.ind);
+			VpSeal::FrameSeal fs;
+			Wire(r, fs);
+			r.lane.OnSourceFrame(r.View(1));
+			std::vector<ProductFrameResult> res;
+			for (uint64_t s = 1; s <= 4; ++s) {
+				res = SealedFrame(r, fs, h, s, true);
+				r.End(s);
+			}
+			Assert::IsTrue(Rig::Res(res, kP1HalfLuma).seal.reason == SealReason::Accepted && !Rig::Res(res, kP1HalfLuma).liveFilled, L"P1 used");
+			Assert::IsTrue(Rig::Res(res, kP4SourceStats).seal.reason == SealReason::Accepted && !Rig::Res(res, kP4SourceStats).liveFilled, L"P4 used");
+		}
+
+		// (b) not published at the seal -> filled live ONCE; a publish after the seal is discarded (the
+		// slot is locked for that frame); a second seal of the same frame changes nothing.
+		TEST_METHOD(UnpublishedAtTheSealIsLiveFilledOnceAndALatePublishIsDiscarded)
+		{
+			Rig r;
+			r.Configure(LaneSettings::Mode::On, false, 1);
+			const Handle h = Alias(r.ind);
+			VpSeal::FrameSeal fs;
+			Wire(r, fs);
+			r.lane.OnSourceFrame(r.View(1));
+			const std::vector<ProductFrameResult> res = SealedFrame(r, fs, h, 1, false);   // the lane has not run
+			const ProductFrameResult p1 = Rig::Res(res, kP1HalfLuma);
+			const ProductFrameResult p4 = Rig::Res(res, kP4SourceStats);
+			Assert::IsTrue(p1.liveFilled && p1.final == SealOutcome::Sealed, L"P1 filled live");
+			Assert::IsTrue(p4.liveFilled && p4.final == SealOutcome::Sealed, L"P4 filled live (after P1, same frame)");
+			const std::vector<uint8_t> before = r.Bytes(kP1HalfLuma, 1);
+			const uint64_t fills = LiveFillsOf(r);
+			Assert::IsTrue(fills >= 2);
+			r.Pump();   // the lane now finishes frame 1: too late
+			Assert::IsTrue(r.Bytes(kP1HalfLuma, 1) == before, L"the locked slot is not rewritten");
+			Assert::IsTrue(LiveFillsOf(r) == fills, L"no second fill");
+			const std::shared_ptr<LaneState> st = r.lane.State();
+			uint64_t discarded = 0;
+			for (size_t i = 0; i < st->table->Count(); ++i) {
+				const SlotCounters& c = st->table->At(i).Counters();
+				const LaneProductCounters& rc = st->runner->Counters(st->table->NodeAt(i).id);
+				discarded += c.lateDiscards.load() + rc.latePublishes.load() + rc.staleSkips.load() + rc.abandoned.load() + rc.cancelled.load();
+			}
+			Assert::IsTrue(discarded > 0, L"the late result was discarded and counted");
+			r.lane.OnRenderStart(1, 4000);   // a second seal of the same frame
+			Assert::IsTrue(LiveFillsOf(r) == fills, L"a second seal never fills again");
+			uint64_t doubles = 0;
+			for (size_t i = 0; i < st->table->Count(); ++i)
+				doubles += st->table->At(i).Counters().doubleSeals.load();
+			Assert::IsTrue(doubles > 0, L"counted as a double seal");
+		}
+
+		// (c) two consumers of one product: one node, one live fill per frame.
+		TEST_METHOD(TwoConsumersOfOneProductShareOneLiveFill)
+		{
+			Rig r;
+			r.consumers.clear();
+			r.consumers.push_back(Consumer(1, { kP4SourceStats }));
+			r.consumers.push_back(Consumer(2, { kP4SourceStats }));
+			r.Configure(LaneSettings::Mode::On, false, 1);
+			const Handle h = Alias(r.ind);
+			VpSeal::FrameSeal fs;
+			Wire(r, fs);
+			r.lane.OnSourceFrame(r.View(1));
+			const std::vector<ProductFrameResult> res = SealedFrame(r, fs, h, 1, false);
+			uint64_t liveResults = 0;
+			for (const ProductFrameResult& x : res)
+				liveResults += x.liveFilled ? 1u : 0u;
+			Assert::IsTrue(liveResults >= 1);
+			Assert::IsTrue(LiveFillsOf(r) == liveResults, L"exactly one fill per live product, not one per consumer");
+		}
+
+		// (d) neither a lane result nor a live fill: declined, counted and shown (the consumer falls back).
+		TEST_METHOD(NoProducerAndNoLiveFillIsAVisibleFallback)
+		{
+			Rig r;
+			r.consumers.clear();
+			r.consumers.push_back(Consumer(1, { kP2VectorPair }));
+			r.Configure(LaneSettings::Mode::On, false, 1);
+			r.lane.SetLiveFill([](const Node&, uint64_t, int, Header&, uint32_t) { return false; });
+			const Handle h = Alias(r.ind);
+			VpSeal::FrameSeal fs;
+			Wire(r, fs);
+			r.lane.OnSourceFrame(r.View(1));
+			const std::vector<ProductFrameResult> res = SealedFrame(r, fs, h, 1, false);
+			const ProductFrameResult& o = Rig::Res(res, kP2VectorPair);
+			Assert::IsTrue(o.final == SealOutcome::Unavailable, L"unavailable");
+			Assert::IsTrue(r.lane.TotalDeclined() > 0);
+			bool shown = false;
+			for (const std::string& l : r.lane.StatusLines())
+				shown = shown || Has(l, "unavailable");
+			Assert::IsTrue(shown, L"visible in the status");
+		}
+	};
+
+	// ---------------------------------------------------------------------------------------------
+	// Resync stress (audit 1, item 17): randomised event sequences driving the Indicator, the Shadow
+	// detector, FrameSeal, the resync Drive, the motion readers, the DV reader, the lane (external
+	// seal, with Configure rebuilds on every era swap), the pulldown and LED policies, the frame-bound
+	// SRM and the metrics tracker. Everything is checked against what the Indicator itself says
+	// (stamps), never against the implementation of a reader:
+	//   - every reader acts exactly once per carrying frame (and only then),
+	//   - no motion pair is valid across a FULL / continuity / settings[motion] break,
+	//   - the pulldown absorbs only when EVERY FULL in the interval was a LiveQueueReset,
+	//   - no premature fold with the graph-derived capacity, the lane never sealed twice,
+	//   - old Indicators expire (no leak), containers stay bounded,
+	//   - the same seed gives the same trace hash (single-threaded variant).
+	// ---------------------------------------------------------------------------------------------
+	namespace ResyncStress
+	{
+		constexpr double kFrameStep = 0.0625;   // source seconds per frame: a test fixture, exact in binary
+
+		struct FakeLed
+		{
+			unsigned restarts = 0;
+			void OnSourceRestart(uint64_t, double) { ++restarts; }
+		};
+
+		struct Result
+		{
+			uint64_t hash = 0;
+			unsigned eras = 0;
+			uint64_t fulls = 0, minors = 0, frames = 0;
+			unsigned pulldownAbsorbs = 0, pulldownResets = 0, ledRestarts = 0, dvRelatches = 0, dvHolds = 0;
+			unsigned stormFrames = 0, metricsLines = 0;
+			uint64_t metricsTracked = 0, metricsSettled = 0, metricsUnsettled = 0;
+			bool violation = false;
+			std::string why;
+		};
+
+		inline void Mix(uint64_t& h, uint64_t v)
+		{
+			h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+		}
+
+		inline void Fail(Result& r, const std::string& why)
+		{
+			if (!r.violation) {
+				r.violation = true;
+				r.why = why;
+			}
+		}
+
+		// Newest first scan of the ring for events of `counters` with fromSeq in (from, to].
+		inline bool AnyEvent(const Indicator& ind, VpIndicator::CounterMask counters, uint64_t from, uint64_t to)
+		{
+			std::vector<VpIndicator::Event> ev(ind.Capacity());
+			const size_t n = ind.Snapshot(ev.data(), ev.size());
+			for (size_t i = 0; i < n; ++i)
+				if (ev[i].fromSeq > from && ev[i].fromSeq <= to && (VpIndicator::Bit(ev[i].counter) & counters) != 0)
+					return true;
+			return false;
+		}
+		inline bool AnyFullOtherThanSeek(const Indicator& ind, uint64_t from, uint64_t to)
+		{
+			std::vector<VpIndicator::Event> ev(ind.Capacity());
+			const size_t n = ind.Snapshot(ev.data(), ev.size());
+			for (size_t i = 0; i < n; ++i)
+				if (ev[i].counter == VpIndicator::kFull && ev[i].fromSeq > from && ev[i].fromSeq <= to &&
+					ev[i].cause != Cause::LiveQueueReset)
+					return true;
+			return false;
+		}
+
+		inline Result Run(uint32_t seed, uint64_t frames, bool concurrentWriter)
+		{
+			Result res;
+			uint64_t h = 1469598103934665603ull;
+			Rig r;
+			VpResync::Shadow shadow;
+			const size_t inFlight = ::FramesInFlight(8, 2, 4, 2, 1);
+			shadow.Configure(VpResync::Shadow::Mode::On, inFlight);
+			shadow.SetStormSourceTime(true);
+			std::vector<std::weak_ptr<Indicator>> eras;
+			eras.push_back(shadow.GetIndicator());
+			r.lane.BindIndicator(shadow.GetIndicator());
+			r.Configure(LaneSettings::Mode::On, false, 1);
+			r.lane.SetExternalSeal(true);
+
+			VpSeal::FrameSeal fs;
+			VpResync::Drive drive;
+			MotionValidity::State motion;
+			VpMotionResync::Readers mreaders;
+			VpDvResync::Reader dv;
+			VpResync::EventMetrics metrics;
+			VpResync::Drive::Cursor pullCursor;
+			FakeLed led;
+			SourceResolutionMonitor::Monitor srm;
+			srm.SetFrameBound(true, 3);
+			unsigned dvRelatch = 0, dvHold = 0;
+			dv.SetHooks([&dvRelatch](const VpDvResync::Reader::Act&) { ++dvRelatch; },
+				[&dvHold](const VpDvResync::Reader::Act&) { ++dvHold; });
+			metrics.AddReader("motion-history");
+			metrics.AddReader("dv-metadata");
+			metrics.SetFrameRate(1.0 / kFrameStep);
+			metrics.SetSink([&res](const std::string&) { ++res.metricsLines; });
+			dv.SetActObserver([&metrics](const char* n, uint64_t s) { metrics.OnReaderAct(n, s); });
+
+			fs.AddProvider("drive", [&drive](const std::shared_ptr<Indicator>& i) { drive.RegisterOn(i); });
+			fs.AddProvider("motion", [&](const std::shared_ptr<Indicator>& i) { motion.Bind(i); VpMotionResync::RegisterOn(*i, motion, mreaders); });
+			fs.AddProvider("dv", [&dv](const std::shared_ptr<Indicator>& i) { dv.RegisterOn(i); });
+			fs.AddProvider("lane", [&r](const std::shared_ptr<Indicator>& i) { r.lane.BindIndicator(i); });
+			fs.Subscribe("drive", [&drive](const std::shared_ptr<Indicator>& i, uint64_t seq, VpIndicator::CounterMask c) { drive.OnObserved(i, seq, c); });
+			fs.Subscribe("lane", [&r](const std::shared_ptr<Indicator>&, uint64_t seq, VpIndicator::CounterMask c) { r.lane.OnSealed(seq, c); });
+			fs.Subscribe("metrics", [&metrics](const std::shared_ptr<Indicator>& i, uint64_t seq, VpIndicator::CounterMask c) {
+				metrics.OnSealed(i, seq, c, static_cast<double>(seq) * kFrameStep * 1000.0);
+			});
+
+			std::atomic<bool> stop(false);
+			std::thread writer;
+			if (concurrentWriter) {
+				writer = std::thread([&] {
+					while (!stop.load()) {
+						const std::shared_ptr<Indicator> ind = shadow.GetIndicator();
+						if (ind)
+							ind->Advance(VpIndicator::kContinuity, Cause::DriftDrop, 1, 1);   // clamped above the sealed frame
+						std::this_thread::sleep_for(std::chrono::microseconds(200));
+					}
+				});
+			}
+
+			r.lane.OnSourceFrame(r.View(1));
+			std::mt19937 rng(seed);
+			uint64_t gen = 1, stateKey = 0x1000, counter = 100;
+			unsigned burst = 0;
+			uint64_t lastCursorSeq = 0;
+			uint32_t lastCursorEra = 0;
+			uint64_t prevEraFirst = 1;
+			uint32_t eraOfFrame = 0;
+			uint64_t eraFirstSeq = 1;
+			unsigned hAct0 = 0, pAct0 = 0;
+			for (uint64_t f = 1; f <= frames && !res.violation; ++f) {
+				const double src = static_cast<double>(f) * kFrameStep;
+				const double wall = 5000.0 + static_cast<double>(rng() % 1000);   // wall clock noise: must change nothing
+				// ---- 1. the events of this frame ----
+				uint32_t roll = rng() % 1000;
+				if (burst > 0) {
+					roll = 0;
+					--burst;
+				} else if (roll >= 985) {
+					burst = 5;
+				}
+				if (roll < 12) {   // FULL
+					if (rng() % 2) {
+						++gen;
+						shadow.ArmQueueGeneration(gen, "live queue reset");
+					} else {
+						stateKey += 0x10;
+						shadow.ArmInPlaceSourceChange(stateKey);
+					}
+				}
+				if (f > 1 && roll >= 700 && roll < 720) {   // era swap
+					const std::shared_ptr<Indicator> before = shadow.GetIndicator();
+					shadow.Configure(VpResync::Shadow::Mode::Off, inFlight);
+					shadow.Configure(VpResync::Shadow::Mode::On, inFlight);
+					if (shadow.GetIndicator() != before)
+						eras.push_back(shadow.GetIndicator());
+				}
+				if (f > 1 && roll >= 12 && roll < 40)
+					shadow.OnLateSlip(Cause::DriftDrop, f, 1, wall, src);
+				const std::shared_ptr<Indicator> ind = shadow.GetIndicator();
+				if (roll >= 40 && roll < 60)
+					ind->Advance(VpIndicator::kTiming, Cause::RateStep, f);
+				if (roll >= 60 && roll < 75)
+					ind->Advance(VpIndicator::kSettingsMotion, Cause::SettingsApply, f);
+				if (roll >= 75 && roll < 85)
+					ind->Advance(VpIndicator::kSettingsOutput, Cause::SettingsApply, f);
+				if (roll >= 85 && roll < 95)
+					shadow.OnRebaseDecision((roll & 1) != 0, (roll & 1) == 0, f);
+
+				// ---- 2. enqueue (the detector may add its own events: Start after an era swap, ...) ----
+				VpResync::EnqueueFacts facts;
+				facts.sequence = f;
+				facts.queueGeneration = gen;
+				facts.stateKey = stateKey;
+				facts.formatKey = 7;
+				facts.frameCounter = ++counter;
+				shadow.OnEnqueue(facts, wall, src);
+				shadow.NoteEnqueued(f);
+				shadow.AdvanceStormClock(src);
+				r.lane.SetStormHold(shadow.StormSafeSettings(src).laneT0);
+				if (shadow.StormHold(src))
+					++res.stormFrames;
+				const std::shared_ptr<Indicator> cur = shadow.GetIndicator();
+
+				// ---- 3. seal (once) and the lane's frame ----
+				r.lane.OnSourceFrame(r.View(f + 1));
+				r.Pump();
+				fs.Seal(cur, f);
+				const std::vector<ProductFrameResult> lane = r.lane.OnRenderStart(f, 4000);
+				r.End(f);
+				++res.frames;
+
+				// ---- 4. checks against the Indicator's own stamps ----
+				if (cur->Era() != eraOfFrame) {
+					eraOfFrame = cur->Era();
+					eraFirstSeq = f;
+					prevEraFirst = f;
+					++res.eras;
+				}
+				const VpIndicator::CounterMask expected = VpIndicator::Changed(cur->StampOf(f - 1), cur->StampOf(f));
+				const bool fullHere = (expected & VpIndicator::Bit(VpIndicator::kFull)) != 0;
+				if (fullHere)
+					++res.fulls;
+				if ((expected & VpIndicator::Bit(VpIndicator::kContinuity)) != 0 && !fullHere)
+					++res.minors;
+				for (size_t i = 0; i < VpResync::Drive::kReaders; ++i) {
+					const VpResync::Reader rd = static_cast<VpResync::Reader>(i);
+					const VpIndicator::CounterMask got = drive.Take(rd);
+					const VpIndicator::CounterMask want = expected & VpResync::SpecOf(rd).reads;
+					if (got != want)
+						Fail(res, "drive reader " + std::string(VpResync::SpecOf(rd).name) + " mask at frame " + std::to_string(f));
+					Mix(h, got);
+				}
+				const unsigned hActs = mreaders.HistoryActs(), pActs = mreaders.ProducerActs();
+				const bool wantH = (expected & VpMotionResync::SpecOf(VpMotionResync::Reader::MotionHistory).reads) != 0;
+				const bool wantP = (expected & VpMotionResync::SpecOf(VpMotionResync::Reader::VectorProducer).reads) != 0;
+				if (hActs - hAct0 != (wantH ? 1u : 0u))
+					Fail(res, "motion-history acts at frame " + std::to_string(f));
+				if (pActs - pAct0 != (wantP ? 1u : 0u))
+					Fail(res, "vector-producer acts at frame " + std::to_string(f));
+				hAct0 = hActs;
+				pAct0 = pActs;
+				if (wantH)
+					metrics.OnReaderAct("motion-history", f);
+				const VpDvResync::Reader::Pending dvp = dv.Take();
+				const bool wantDv = (expected & (VpIndicator::Bit(VpIndicator::kFull) | VpIndicator::Bit(VpIndicator::kContinuity) |
+					VpIndicator::Bit(VpIndicator::kSettingsOutput))) != 0;
+				if ((dvp.relatches + dvp.holds) != (wantDv ? 1u : 0u))
+					Fail(res, "dv-metadata acts at frame " + std::to_string(f));
+				mreaders.TakeHistory();
+				mreaders.TakeProducerNote();
+
+				// No motion pair across a break: pair (f-1, f) is valid iff nothing in F / M / S(motion) at f.
+				if (f > eraFirstSeq) {
+					const VpIndicator::CounterMask brk = VpIndicator::Bit(VpIndicator::kFull) | VpIndicator::Bit(VpIndicator::kContinuity) |
+						VpIndicator::Bit(VpIndicator::kSettingsMotion);
+					const bool shouldBeValid = !AnyEvent(*cur, brk, f - 1, f);
+					if (motion.PairValidAt(f - 1, f) != shouldBeValid)
+						Fail(res, "pair validity at frame " + std::to_string(f));
+					Mix(h, shouldBeValid ? 1 : 0);
+				}
+				(void)prevEraFirst;
+
+				// Pulldown policy over (last cursor seq, f].
+				{
+					const bool newEra = pullCursor.Has() && lastCursorEra != cur->Era();
+					const VpIndicator::CounterMask changed = pullCursor.Advance(*cur, f);
+					if (newEra && changed != VpIndicator::kAllCounters)
+						Fail(res, "cursor did not report a new era as everything at frame " + std::to_string(f));
+					const VpResync::PulldownResyncAction act = VpResync::PulldownResyncPolicy::DecideFromIndicator(
+						*cur, newEra ? 0 : lastCursorSeq, f, changed, false, 0.0, 0.0, [](double) { return 0; });
+					if ((changed & VpIndicator::Bit(VpIndicator::kFull)) != 0) {
+						const bool wantReset = newEra || AnyFullOtherThanSeek(*cur, lastCursorSeq, f) || !AnyEvent(*cur, VpIndicator::Bit(VpIndicator::kFull), lastCursorSeq, f);
+						if (act.reset != wantReset || act.absorb == wantReset)
+							Fail(res, "pulldown policy at frame " + std::to_string(f));
+						if (act.reset) ++res.pulldownResets; else ++res.pulldownAbsorbs;
+					}
+					Mix(h, (act.reset ? 4u : 0u) | (act.absorb ? 2u : 0u) | (act.rederiveHz ? 1u : 0u));
+					if (VpResync::ApplyFullToLed(led, changed, f, 0.0))
+						Mix(h, 77);
+					lastCursorSeq = f;
+					lastCursorEra = cur->Era();
+				}
+
+				// Metrics feed: FULL events recorded at this frame.
+				if (fullHere) {
+					std::vector<VpIndicator::Event> ev(cur->Capacity());
+					const size_t n = cur->Snapshot(ev.data(), ev.size());
+					for (size_t i = 0; i < n; ++i)
+						if (ev[i].counter == VpIndicator::kFull && ev[i].fromSeq == f)
+							metrics.OnEvent(f, VpResync::Level::Full, ev[i].cause, ev[i].gapFrames, false);
+				}
+				metrics.OnVectorsValid(!fullHere);
+
+				// SRM frame-bound: a scripted analysis every 8th frame, a Discontinuity() at a FULL, the
+				// renderer's order Discontinuity -> Frame -> AutoFactors.
+				if (f % 8 == 0) {
+					SourceResolutionMonitor::Snapshot snap;
+					snap.reading = true;
+					snap.nativeWidth = 1920;
+					snap.nativeHeight = 1080;
+					snap.declaredRatio = snap.liveRatio = snap.frameRatio = 0.5;
+					snap.confidence = 0.9;
+					snap.frames = f / 8;
+					srm.NoteSubmittedForTest(f);
+					srm.InjectResultForTest(snap, f);
+				}
+				if (fullHere)
+					srm.Discontinuity("resync");
+				srm.FrameFrontForTest(f, src);
+				std::string why;
+				double fx = 1.0, fy = 1.0;
+				srm.AutoFactors(1920, 1080, 0.5, why, fx, fy, src, f);
+				Mix(h, static_cast<uint64_t>(fx * 1000.0));
+				if (srm.HeldCount() > SourceResolutionMonitor::Monitor::kHeldCap)
+					Fail(res, "SRM held queue unbounded");
+
+				// The lane's results are part of the trace.
+				for (const ProductFrameResult& x : lane)
+					Mix(h, (static_cast<uint64_t>(x.seal.reason) << 8) | (x.liveFilled ? 1u : 0u));
+				Mix(h, expected);
+				Mix(h, static_cast<uint64_t>(lane.size()));
+			}
+			stop.store(true);
+			if (writer.joinable())
+				writer.join();
+
+			// ---- end-of-run assertions ----
+			if (r.lane.ExternalSealMisses() != 0)
+				Fail(res, "the lane saw an unsealed frame");
+			if (shadow.GetIndicator()->PrematureFolds() != 0)
+				Fail(res, "premature folds with the graph-derived capacity");
+			if (metrics.PendingCount() > VpResync::EventMetrics::kPendingMax)
+				Fail(res, "metrics pending unbounded");
+			if (!concurrentWriter && metrics.Tracked() != metrics.Settled() + metrics.Unsettled() + metrics.PendingCount())
+				Fail(res, "metrics accounting");
+			res.ledRestarts = led.restarts;
+			res.dvRelatches = dvRelatch;
+			res.dvHolds = dvHold;
+			res.metricsTracked = metrics.Tracked();
+			res.metricsSettled = metrics.Settled();
+			res.metricsUnsettled = metrics.Unsettled();
+			// The old Indicators expire: only the current era may still be alive.
+			for (size_t i = 0; i + 1 < eras.size(); ++i)
+				if (!eras[i].expired())
+					Fail(res, "an old Indicator is still held (era " + std::to_string(i) + ")");
+			Mix(h, res.fulls);
+			res.hash = h;
+			return res;
+		}
+	}
+
+	TEST_CLASS(ResyncStressTests)
+	{
+	public:
+		static void Check(const ResyncStress::Result& r)
+		{
+			if (r.violation)
+				Logger::WriteMessage(("stress violation: " + r.why + "\n").c_str());
+			Assert::IsFalse(r.violation, L"an invariant failed (see the output)");
+		}
+
+		TEST_METHOD(RandomisedEventsKeepEveryReaderConsistentAndTheRunIsDeterministic)
+		{
+			const ResyncStress::Result a = ResyncStress::Run(12345, 900, false);
+			Check(a);
+			const ResyncStress::Result b = ResyncStress::Run(12345, 900, false);
+			Check(b);
+			Assert::IsTrue(a.hash == b.hash, L"same seed, same trace hash");
+			Assert::IsTrue(a.fulls == b.fulls && a.eras == b.eras && a.stormFrames == b.stormFrames);
+			Assert::IsTrue(a.fulls > 10 && a.minors > 5, L"the script produces events");
+			Assert::IsTrue(a.eras >= 2, L"and era swaps");
+			Assert::IsTrue(a.pulldownAbsorbs > 0 && a.pulldownResets > 0, L"both pulldown outcomes occur");
+			Assert::IsTrue(a.dvRelatches > 0 && a.dvHolds > 0, L"both DV outcomes occur");
+			Assert::IsTrue(a.ledRestarts == a.fulls || a.ledRestarts > 0);
+			Assert::IsTrue(a.metricsTracked > 0);
+		}
+
+		TEST_METHOD(DifferentSeedsGiveDifferentTracesAndAllHold)
+		{
+			const ResyncStress::Result a = ResyncStress::Run(1, 500, false);
+			const ResyncStress::Result b = ResyncStress::Run(2, 500, false);
+			const ResyncStress::Result c = ResyncStress::Run(99991, 500, false);
+			Check(a);
+			Check(b);
+			Check(c);
+			Assert::IsTrue(a.hash != b.hash && b.hash != c.hash, L"the seed matters");
+		}
+
+		TEST_METHOD(AStormHoldsTheLaneAndIsReproducibleOnSourceTime)
+		{
+			// Seeds with bursts: find one that stormed, run it twice.
+			ResyncStress::Result first;
+			uint32_t seed = 0;
+			for (seed = 1; seed < 40; ++seed) {
+				first = ResyncStress::Run(seed * 7919u, 700, false);
+				Check(first);
+				if (first.stormFrames > 0)
+					break;
+			}
+			Assert::IsTrue(first.stormFrames > 0, L"some seed produces a storm");
+			const ResyncStress::Result again = ResyncStress::Run(seed * 7919u, 700, false);
+			Assert::IsTrue(again.stormFrames == first.stormFrames && again.hash == first.hash, L"storm hold on source time reproduces");
+		}
+
+		TEST_METHOD(AConcurrentWriterNeverBreaksTheInvariants)
+		{
+			const ResyncStress::Result a = ResyncStress::Run(777, 600, true);
+			Check(a);
 		}
 	};
 }

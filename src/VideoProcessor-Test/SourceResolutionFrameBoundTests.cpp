@@ -441,4 +441,122 @@ namespace VideoProcessorTest
 			Assert::IsFalse(m.FrameBound());
 		}
 	};
+
+	// Audit 1 (items 2 and 8): the renderer's call order, and the REAL worker thread.
+	TEST_CLASS(SourceResolutionFrameBoundThreadedTests)
+	{
+	public:
+		// The renderer calls Discontinuity -> Frame -> AutoFactors in that order. Frame's frame-bound
+		// release consumes the reset; AutoFactors must still see it ("native at once").
+		TEST_METHOD(ADiscontinuityConsumedByFrameStillResetsAutoFactor)
+		{
+			Monitor m;
+			m.SetFrameBound(true, 0);
+			uint64_t engagedSeq = 0;
+			for (uint64_t seq = 1; seq <= 440 && engagedSeq == 0; ++seq)
+			{
+				if (seq % 10 == 0) m.InjectResultForTest(Scripted(seq), seq);
+				double factor = 1.0;
+				Decide(m, seq, SecondsOf(seq), false, &factor);
+				if (factor < 1.0) engagedSeq = seq;
+			}
+			Assert::AreEqual(static_cast<unsigned long long>(420), static_cast<unsigned long long>(engagedSeq));
+			m.Discontinuity("test seek");
+			m.FrameFrontForTest(421, SecondsOf(421));   // Frame(): the clock and the release, no GPU
+			std::string why;
+			double fx = 1.0, fy = 1.0;
+			m.AutoFactors(kW, kH, 0.5, why, fx, fy, SecondsOf(421), 421);
+			Assert::AreEqual(1.0, fx, 0.0);
+			Assert::AreEqual(1.0, fy, 0.0);
+			Assert::IsTrue(Contains(why, "native at once"), L"the reset survived Frame()");
+			// And it is applied once: the next frame does not reset again.
+			m.FrameFrontForTest(422, SecondsOf(422));
+			std::string why2;
+			m.AutoFactors(kW, kH, 0.5, why2, fx, fy, SecondsOf(422), 422);
+			Assert::IsFalse(Contains(why2, "native at once"));
+		}
+
+		// One run with a REAL worker thread: every 8th frame's tiles are handed to the worker, the
+		// completion is delayed by a random sleep, and the lane's bounded wait (ReadyFor) is honoured
+		// before each decision. The trace must equal the single-threaded model, whatever the timing.
+		static std::vector<std::string> RunThreaded(unsigned timingSeed, uint32_t lead, uint64_t frames, uint64_t every,
+			bool* reproducible)
+		{
+			Monitor m;
+			m.SetFrameBound(true, lead);
+			std::mt19937 rng(timingSeed);
+			std::vector<std::string> trace;
+			for (uint64_t seq = 1; seq <= frames; ++seq)
+			{
+				if (seq % every == 0)
+				{
+					m.SubmitJobForTest(NoiseTiles(seq), 8, SecondsOf(seq), kW, kH, 8, Monitor::kTile, kBlack, seq);
+					if (rng() % 3 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(rng() % 4));
+					else std::this_thread::yield();
+				}
+				// The bounded deterministic wait: bounded here by 10 s of wall clock (a failure, not a hang).
+				const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+				while (!m.ReadyFor(seq) && std::chrono::steady_clock::now() < until)
+					std::this_thread::sleep_for(std::chrono::microseconds(100 + rng() % 400));
+				Assert::IsTrue(m.ReadyFor(seq), L"the worker finished within the bound");
+				trace.push_back(Decide(m, seq, SecondsOf(seq), true));
+			}
+			if (reproducible) *reproducible = m.Reproducible();
+			return trace;
+		}
+
+		TEST_METHOD(RealWorkerThreadGivesTheSameDecisionsRunToRun)
+		{
+			bool r1 = false, r2 = false, r3 = false;
+			const std::vector<std::string> a = RunThreaded(1, 4, 120, 8, &r1);
+			const std::vector<std::string> b = RunThreaded(7, 4, 120, 8, &r2);
+			const std::vector<std::string> c = RunThreaded(31337, 4, 120, 8, &r3);
+			AssertSameTrace(a, b, L"threaded run 2 differs from run 1");
+			AssertSameTrace(a, c, L"threaded run 3 differs from run 1");
+			Assert::IsTrue(r1 && r2 && r3, L"nothing was dropped or skipped, so the runs are reproducible");
+			const std::vector<std::string> model = RunLagged(true, 4, 5, 120, 8);
+			AssertSameTrace(a, model, L"the real worker equals the single-threaded model");
+			Assert::IsTrue(Contains(a.back(), " fr="), L"readings were released");
+		}
+
+		// Timing may lose analyses (a full job queue drops the oldest): never silently. Whatever the
+		// worker does, every submitted frame is either analysed or counted as dropped, and a run with
+		// a loss says it is not reproducible.
+		TEST_METHOD(LostAnalysesAreCountedAndTheRunIsMarkedNotReproducible)
+		{
+			Monitor m;
+			m.SetFrameBound(true, 0);
+			const uint64_t submitted = 12;
+			for (uint64_t seq = 1; seq <= submitted; ++seq)
+				m.SubmitJobForTest(NoiseTiles(seq), 8, SecondsOf(seq), kW, kH, 8, Monitor::kTile, kBlack, seq);
+			const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+			while (!m.ReadyFor(1000) && std::chrono::steady_clock::now() < until)
+				std::this_thread::sleep_for(std::chrono::milliseconds(2));
+			Assert::IsTrue(m.ReadyFor(1000));
+			double factor = 1.0;
+			Decide(m, 1000, SecondsOf(1000), false, &factor);   // releases everything held
+			const unsigned long long analysed = m.Read().frames;
+			const unsigned long long dropped = m.JobsDroppedCount();
+			Assert::AreEqual(static_cast<unsigned long long>(submitted), analysed + dropped, L"nothing disappears unaccounted");
+			const std::string text = SourceResolutionMonitor::Describe(m.Read(), 1.0, true);
+			Assert::IsTrue(Contains(text, "copies skipped 0"), L"the skipped-copy counter is shown");
+			if (dropped > 0)
+			{
+				Assert::IsFalse(m.Reproducible());
+				Assert::IsTrue(Contains(text, "not reproducible"), L"a loss is announced");
+			}
+			else
+				Assert::IsTrue(m.Reproducible());
+		}
+
+		TEST_METHOD(AMissedWaitMakesTheRunNotReproducible)
+		{
+			Monitor m;
+			m.SetFrameBound(true, 0);
+			Assert::IsTrue(m.Reproducible());
+			m.NoteWaitMissed();
+			Assert::IsFalse(m.Reproducible());
+			Assert::IsTrue(Contains(SourceResolutionMonitor::Describe(m.Read(), 1.0, true), "not reproducible"));
+		}
+	};
 }

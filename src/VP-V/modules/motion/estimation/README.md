@@ -203,3 +203,5 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
 
 <!-- vpv-settings-tests:end -->
+
+- Audit 1: `Readers::Rearm()` (called by `RegisterOn`) re-arms both readers for a NEW Indicator (FrameSeal re-registers on every era): the latch, the last seq of the cause lookup and the producer baseline start again, so the new era's first observe is only a latch. The cause lookup is `Indicator::LastCauseIn` (no allocation); an unknown or out-of-ring cause maps conservatively (FULL -> Resync + release, continuity -> Gap). `State::StatusText()` shows the bound mode (deferred requests, settings advances); the hot unbound path takes no `shared_ptr` atomic.

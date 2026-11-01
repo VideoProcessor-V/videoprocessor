@@ -656,6 +656,10 @@
     <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncShadowQ0Tests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\queue_timing\tests\PulldownResyncTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncQ0Tests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncAuditTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncInjectScheduleTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncEventMetricsTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\signal\tests\DvResyncReaderTests.cpp" />
     <ClCompile Include="..\VP-V\tests\IndicatorTests.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>

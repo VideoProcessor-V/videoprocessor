@@ -173,7 +173,7 @@ namespace Tests
 			const VpEvent::Kind all[] = {
 				VpEvent::Kind::session, VpEvent::Kind::resync, VpEvent::Kind::fallback, VpEvent::Kind::gate,
 				VpEvent::Kind::gpu_error, VpEvent::Kind::source_change, VpEvent::Kind::cadence, VpEvent::Kind::repeat,
-				VpEvent::Kind::frame_stats, VpEvent::Kind::stamp, VpEvent::Kind::flag };
+				VpEvent::Kind::frame_stats, VpEvent::Kind::stamp, VpEvent::Kind::flag, VpEvent::Kind::resync_settle };
 			Assert::AreEqual(VpEvent::kKindCount, sizeof(all) / sizeof(all[0]));
 			for (VpEvent::Kind k : all)
 			{

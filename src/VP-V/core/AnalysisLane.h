@@ -447,6 +447,16 @@ public:
     AnalysisLane(const AnalysisLane&) = delete;
     AnalysisLane& operator=(const AnalysisLane&) = delete;
 
+    // The frame-bound source-resolution monitor's readiness (Monitor::ReadyFor), consulted by
+    // DeterministicWaitUs after the lane's own products. `onMissed` runs once per frame whose bound ran
+    // out (Monitor::NoteWaitMissed). Setup / render thread. Null = none (today's behaviour).
+    void SetReadyProbe(std::function<bool(uint64_t)> ready, std::function<void()> onMissed)
+    {
+        readyProbe_ = std::move(ready);
+        readyMissed_ = std::move(onMissed);
+    }
+    uint64_t ReadyProbeMisses() const { return readyProbeMisses_; }
+
     // ---- FrameSeal integration (render thread) ----
 
     // Rebind the lane to a (new-era) Indicator. A state built on the previous Indicator keeps it alive through
@@ -461,7 +471,15 @@ public:
         observedOnce_ = false;
         waitValid_ = false;
         ++indicatorRebinds_;
+        // The built graph, ring slots and runner belong to the previous Indicator's era: their stamps
+        // can no longer match. The next OnRenderStart rebuilds them from the last Configure inputs
+        // (RebuildOnRebind); until then the status says so (never a silent in-render fallback).
+        if (std::atomic_load(&state_))
+            rebuildPending_ = true;
     }
+    // True between BindIndicator and the rebuild at the next OnRenderStart.
+    bool RebuildPending() const { return rebuildPending_; }
+    uint64_t RebindRebuilds() const { return rebindRebuilds_; }
     // FrameSeal owns the seal: OnRenderStart no longer seals; the lane learns the frame's changed mask
     // through OnSealed (called by FrameSeal before OnRenderStart of the same frame).
     void SetExternalSeal(bool on) { externalSeal_ = on; }
@@ -530,6 +548,12 @@ public:
     {
         settings_ = s;
         mode_.store(uint8_t(s.mode), std::memory_order_release);
+        if (s.mode != LaneSettings::Mode::Off) {
+            // The inputs of the last Configure, kept so an Indicator rebind can rebuild (RebuildOnRebind).
+            // `cfg` may alias the previously saved copy (the rebuild passes a local copy, so it does not).
+            cfg_.reset(new SavedConfig{ reg, consumers, gs, card, tier, hostDeterministic });
+        }
+        rebuildPending_ = false;
         if (s.mode == LaneSettings::Mode::Off || ind_ == nullptr) {
             Clear();
             error_ = s.mode == LaneSettings::Mode::Off ? "" : "no indicator";
@@ -597,6 +621,8 @@ public:
     {
         if (settings_.mode == LaneSettings::Mode::Off || ind_ == nullptr)
             return empty_;
+        if (rebuildPending_)
+            RebuildOnRebind(seq);
         const std::shared_ptr<LaneState> st = std::atomic_load(&state_);
         if (!st)
             return empty_;
@@ -682,6 +708,7 @@ public:
         p.testWaitUs = settings_.testWaitUs;
         uint32_t more = 0;
         bool missed = false;
+        bool probeMissed = false;
         for (size_t i = 0; i < st->table->Count(); ++i) {
             const Node& n = st->table->NodeAt(i);
             if (n.backend == Backend::RenderOnly || !st->runner->Laned(n.id) || !st->runner->HasProducer(n.id))
@@ -695,6 +722,20 @@ public:
             else if (d == WaitDecision::BoundMissed)
                 missed = true;
         }
+        // Q3 (N1): the source-resolution monitor's frame-bound decision needs the analysis through
+        // s - D. Same bounded wait as a laned product (deterministic runs only, inside the present
+        // slack, never a late present); a bound that runs out is counted here and reported to the
+        // probe's owner (SRM NoteWaitMissed), so the run is visibly not reproducible.
+        if (readyProbe_ && !readyProbe_(seq)) {
+            uint32_t m = 0;
+            const WaitDecision d = DecideWait(Variants::NonIdentical, true, SlotState::Writing, p, waitedUs_, &m);
+            if (d == WaitDecision::Wait)
+                more = std::max(more, m);
+            else if (d == WaitDecision::BoundMissed) {
+                missed = true;
+                probeMissed = true;
+            }
+        }
         if (more > 0) {
             lastAskUs_ = more;
             return more;
@@ -703,6 +744,11 @@ public:
         if (missed && !missCounted_) {
             ++missedBounds_;
             missCounted_ = true;
+            if (probeMissed) {
+                ++readyProbeMisses_;
+                if (readyMissed_)
+                    readyMissed_();
+            }
         }
         return 0;
     }
@@ -886,12 +932,25 @@ public:
                                                                     : "Analysis lane: on");
         out.push_back("Analysis products: " + std::to_string(lastAhead_) + " ahead, " + std::to_string(lastInRender_)
                       + " in render, " + std::to_string(regulator_.Dropped().size()) + " dropped");
+        if (totalDeclined_ > 0)
+            out.push_back("Analysis: " + std::to_string(totalDeclined_) +
+                          " product frames unavailable (no producer result and no live fill; the consumer uses its own fallback)");
         out.push_back(std::string("Analysis lead: ") + LeadText(lead_));
         out.push_back("Analysis level: " + std::to_string(unsigned(regulator_.Level())) + "/"
                       + std::to_string(unsigned(regulator_.MaxLevel())));
         out.push_back("Analysis late: " + std::to_string(lateRingSum_) + " per 10 s");
         if (det_)
             out.push_back("Analysis deterministic: " + std::to_string(missedBounds_) + " frames missed the wait bound");
+        if (rebuildPending_)
+            out.push_back("Analysis: the Indicator changed (new source era); the graph is rebuilt at the next frame");
+        if (indicatorRebinds_ > 0)
+            out.push_back("Analysis: Indicator rebound x" + std::to_string(indicatorRebinds_) + ", graph rebuilt x" +
+                          std::to_string(rebindRebuilds_));
+        if (externalSealMisses_ > 0)
+            out.push_back("Analysis: " + std::to_string(externalSealMisses_) +
+                          " frames reached the lane without the shared seal (not sealed twice)");
+        if (stormHold_)
+            out.push_back("Analysis: held at T0 by the resync storm (" + std::to_string(stormHoldEngagements_) + " engagements)");
         uint64_t skipped = 0;
         for (size_t i = 0; i < st->table->Count(); ++i)
             skipped += st->runner->Counters(st->table->NodeAt(i).id).skippedDropped.load(std::memory_order_relaxed);
@@ -937,6 +996,7 @@ public:
         out.push_back(FallbackCatalog::AnalysisLaneDeterminism(st && det_ ? missedBounds_ : 0u));
         out.push_back(FallbackCatalog::SourceStatsWalk(settings_.walk == VpLaneProducts::WalkSource::Lane,
                                                         !P4Available()));
+        out.push_back(FallbackCatalog::ResyncSeal(externalSealMisses_, 0u));
         return out;
     }
 
@@ -1189,6 +1249,29 @@ private:
     }
 
     // While the storm hold is in force keep the regulator at the conservative floor (T0), once per frame.
+    // The Indicator was replaced (new era) since the graph was built: rebuild it on the new one from
+    // the inputs of the last Configure (the state is swapped like any Configure rebuild; the ring's
+    // frames are carried over; the previous state keeps the previous Indicator alive until its last
+    // worker lets go).
+    void RebuildOnRebind(uint64_t seq)
+    {
+        rebuildPending_ = false;
+        if (!cfg_)
+            return;
+        const SavedConfig c = *cfg_;
+        Configure(settings_, c.reg, c.consumers, c.gs, c.card, c.tier, seq, c.hostDet);
+        ++rebindRebuilds_;
+    }
+
+    struct SavedConfig {
+        Registry reg;
+        std::vector<ConsumerDecl> consumers;
+        GraphSettings gs;
+        CardProfile card;
+        TierInput tier;
+        bool hostDet = false;
+    };
+
     void ApplyStorm()
     {
         if (!stormHold_)
@@ -1206,6 +1289,12 @@ private:
     uint64_t sealedSeq_ = 0;
     bool stormHold_ = false;
     bool stormEdgePending_ = false;
+    std::function<bool(uint64_t)> readyProbe_;
+    std::function<void()> readyMissed_;
+    uint64_t readyProbeMisses_ = 0;
+    std::unique_ptr<SavedConfig> cfg_;
+    bool rebuildPending_ = false;
+    uint64_t rebindRebuilds_ = 0;
     uint64_t stormHoldEngagements_ = 0;
     uint64_t indicatorRebinds_ = 0;
     uint64_t externalSealMisses_ = 0;

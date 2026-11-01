@@ -82,6 +82,7 @@ namespace SourceResolutionMonitor
 		unsigned long long jobsDropped = 0;   // queued jobs dropped oldest because the job queue was full
 		unsigned long long waitsMissed = 0;   // NoteWaitMissed(): a deterministic wait ran out
 		unsigned long long clockStepsBack = 0; // source seconds that went backwards (clamped)
+		unsigned long long submitSkipped = 0; // frame-bound: frames not copied because both readback slots were still in flight
 	};
 
 	class Monitor
@@ -133,10 +134,31 @@ namespace SourceResolutionMonitor
 		unsigned long long WaitsMissed() const { return waitsMissed.load(std::memory_order_relaxed); }
 		unsigned long long HeldDropped() const { return heldDropped.load(std::memory_order_relaxed); }
 		unsigned long long ClockStepsBack() const { return clockStepsBack.load(std::memory_order_relaxed); }
+		unsigned long long JobsDroppedCount() const { return jobsDropped.load(std::memory_order_relaxed); }
+		// Frame-bound: frames whose tile copy was skipped because the readback slot was still in
+		// flight (GPU timing decides it: such a run is not reproducible). Counted, shown by Describe.
+		unsigned long long SubmitSkipped() const { return submitSkipped.load(std::memory_order_relaxed); }
+		// Frame-bound: true while nothing timing-dependent has dropped or skipped an analysis in this
+		// era (no job-queue drop, no held-queue drop, no skipped copy, no missed bounded wait). When
+		// false the decisions of this run are NOT reproducible; Describe says so (no silent loss).
+		bool Reproducible() const
+		{
+			return jobsDropped.load(std::memory_order_relaxed) == 0 && heldDropped.load(std::memory_order_relaxed) == 0 &&
+				submitSkipped.load(std::memory_order_relaxed) == 0 && waitsMissed.load(std::memory_order_relaxed) == 0;
+		}
+		// Tests: a copy of tiles handed to the REAL worker thread through the same bounded FIFO the
+		// readback collector uses (overflow drops the oldest, counted); the frame is in flight until
+		// the worker has analysed it.
+		void SubmitJobForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight,
+			int baseTiles, int tileSize, double blackLevel, uint64_t sequence);
 		size_t HeldCount() const { std::lock_guard<std::mutex> lock(mutex); return heldCount; }
 		// Tests: register a frame as copied and in flight (what Frame() does), so ReadyFor sees it
 		// until AnalyseTilesForTest (given its sequence) completes it.
 		void NoteSubmittedForTest(uint64_t sequence) { NoteSubmitted(sequence); }
+		// Tests: the frame-bound front part of Frame() (source clock + release of the held results),
+		// which Frame() runs before any GPU work: lets the renderer's call order
+		// Discontinuity -> Frame -> AutoFactor(s) be tested without a GPU.
+		void FrameFrontForTest(uint64_t sourceSequence, double seconds) { if (frameBound.load(std::memory_order_acquire)) BeginBoundFrame(sourceSequence, seconds); }
 		// Tests: one analysed result as the worker would publish it (frame-bound: held for `sequence`;
 		// off: published at once), and the frame is no longer in flight.
 		void InjectResultForTest(const Snapshot& result, uint64_t sequence);
@@ -347,6 +369,7 @@ namespace SourceResolutionMonitor
 		double DecisionNow(double seconds);                 // render thread (AutoFactor / AutoFactors)
 		double DecisionPeek(double seconds) const;          // AutoTransition
 		bool ReleaseHeldFor(uint64_t sequence);             // true: a reset to apply
+		double BeginBoundFrame(uint64_t sourceSequence, double seconds);   // Frame()'s frame-bound front part
 		void PushHeld(const Job& j, bool reset);            // with `mutex` held
 		void ResetVisible();                                // with `mutex` held
 		void NoteSubmitted(uint64_t sequence);
@@ -365,7 +388,7 @@ namespace SourceResolutionMonitor
 		std::atomic<uint64_t> epoch{ 0 };
 		std::atomic<const char*> lastRenderCause{ nullptr };
 		std::atomic<uint64_t> analysedThrough{ 0 };
-		std::atomic<unsigned long long> waitsMissed{ 0 }, heldDropped{ 0 }, heldStale{ 0 }, jobsDropped{ 0 }, clockStepsBack{ 0 };
+		std::atomic<unsigned long long> waitsMissed{ 0 }, heldDropped{ 0 }, heldStale{ 0 }, jobsDropped{ 0 }, clockStepsBack{ 0 }, submitSkipped{ 0 };
 		std::atomic<bool> denseGridApplied{ false };
 		Held held[kHeldCap];            // ring, guarded by `mutex`
 		size_t heldHead = 0, heldCount = 0;
@@ -458,6 +481,7 @@ namespace SourceResolutionMonitor
 
 		// Auto (render thread).
 		std::atomic<bool> autoReset{ false };
+		std::atomic<bool> pendingBoundReset{ false };   // frame-bound: a reset Frame() consumed, for AutoFactor to apply
 		double autoApplied = 1.0, autoPending = 1.0;
 		std::atomic<double> autoAppliedShared{ 1.0 };
 		std::atomic<bool> textGuard{ true };

@@ -50,7 +50,8 @@ public:
 
     struct Input {
         VpIndicator::CounterMask changed = 0;   // counters changed since the pulldown's cursor stamp
-        Cause fullCause = Cause::None;          // cause of the FULL between the stamps (None = unknown)
+        Cause fullCause = Cause::None;          // cause of the latest FULL between the stamps (None = unknown)
+        bool anyOtherFull = false;              // ANY FULL between the stamps had a cause other than LiveQueueReset (or the interval is out of the ring)
         bool modeWasOnNowOff = false;           // resync_event left `on` at this frame (see ModeEdgeLatch)
         double oldHz = 0.0;                     // measured signal rate at the last applied stamp
         double newHz = 0.0;                     // measured signal rate now
@@ -58,8 +59,10 @@ public:
 
     // Rows, in priority order:
     //  1. on -> off edge: reset (once; the edge is consumed by ModeEdgeLatch).
-    //  2. FULL (any cause, with or without timing: FULL wins): LiveQueueReset (seek, skip, capture
-    //     re-lock) -> absorb; every other cause, and an unknown cause -> reset.
+    //  2. FULL (any cause, with or without timing: FULL wins): absorb only when the latest FULL is a
+    //     LiveQueueReset (seek, skip, capture re-lock) AND no other FULL with a different cause lies
+    //     between the stamps (anyOtherFull false); every other cause, an unknown cause, and a
+    //     mixed interval (e.g. RendererReset + LiveQueueReset) -> reset.
     //  3. timing only: rederive the Hz; reset only when classOf(oldHz) != classOf(newHz). With an
     //     unknown rate (<= 0 or non-finite on either side) the class cannot be compared: rederive
     //     only (the detector's own 0.5% backstop still guards the lock).
@@ -72,7 +75,7 @@ public:
             return a;
         }
         if ((in.changed & VpIndicator::Bit(VpIndicator::kFull)) != 0) {
-            if (in.fullCause == Cause::LiveQueueReset)
+            if (in.fullCause == Cause::LiveQueueReset && !in.anyOtherFull)
                 a.absorb = true;
             else
                 a.reset = true;
@@ -113,8 +116,11 @@ public:
         in.modeWasOnNowOff = modeWasOnNowOff;
         in.oldHz = oldHz;
         in.newHz = newHz;
-        if ((changed & VpIndicator::Bit(VpIndicator::kFull)) != 0)
+        if ((changed & VpIndicator::Bit(VpIndicator::kFull)) != 0) {
             in.fullCause = FullCauseBetween(indicator, fromSeqExclusive, toSeqInclusive);
+            in.anyOtherFull = indicator.AnyCauseOtherThanIn(VpIndicator::kFull, Cause::LiveQueueReset,
+                                                            fromSeqExclusive, toSeqInclusive);
+        }
         return Decide(in, classOf);
     }
 };

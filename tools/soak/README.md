@@ -47,6 +47,7 @@ Slopes are least-squares fits over samples after the warm-up (default 30 min).
 | gpu_errors | any gpu_error event, `libplacebo [error]`, or a device-removed line | no collected log |
 | drops_repeats | > 1 /h in steady time (after warm-up, outside +/-10 s of source_change or full resync) | no log, no steady time |
 | resync_causes | a full resync with cause none/unknown/empty (counts per cause are listed) | no log |
+| resync_settle | settle_ms p95 > 5000, any event with `vectors=invalid` (never settled), or any `relock=no` (all limits in thresholds.json: `settle_p95_ms_max`, `settle_unsettled_max`, `settle_relock_fail_max`) | never NO DATA: PASS with a "not evaluated" note when the run has no `kind=resync_settle` lines |
 | fallback_notice | never FAIL | any fallback engaged: a visible-notice event does not exist yet, so it cannot be verified |
 | frame_time_creep | frame_stats p99, last hour vs first hour, > +10% | no frame_stats, run < 2 h |
 | crash | soak-exit.json says crash | file missing |
@@ -65,3 +66,30 @@ trigger_wall, first_events` (up to 10 `{line_no, raw}`).
 
 - Drops/repeats and resync-cause checks need resync instrumentation: set `resync_event shadow` (or `on`) in the TEST deployment's own config (done by the coordinator or owner, never by the runner). Without any in-run `kind=resync` / `Resync (shadow|on)` line these checks report NO DATA.
 - Only the run's own session counts: `vp.log.0` is collected only when written after launch, and the report drops every event before the run's `=== VP LOG SESSION START ===` marker from all checks. A FULL resync with cause `queue_generation_other` counts as uncaused.
+
+## Resync fault-injection schedule (`resync_schedule.py`)
+
+```
+python -I tools/soak/resync_schedule.py --seed N --hours H [--mean-interval-s 90] [--scenarios seek,reset,...] [--dv] > schedule.txt
+python -I -B tools/soak/test_resync_schedule.py
+```
+
+Writes the text read by `ResyncInject::LoadSchedule` (`src/VP-V/modules/input/signal/ResyncInject.h`; the VP
+test deployment is armed with env `VP_RESYNC_INJECT=1`): a `seed N` header, then `at <sec>s <kind> [arg]` lines in
+non-decreasing time (`#<n>` / `seq <n>` source-sequence times are also accepted by the loader). Deterministic for
+a seed (own SplitMix64, no clock, no `random` module): the same arguments give the same bytes. Gaps between
+scenarios are exponential-ish around `--mean-interval-s` (clamped to 0.25x..4x). Scenarios (default: all but
+the DV ones; `--dv` adds `dv_switch`, `rpu_loss`, `tunnel_handoff`): `seek reset inplace rebuild gap rate stall
+capture_restart signal_loss storm overflow minor full`. `rate` steps are +-300..3000 ppm and return to `rate 0`
+20..120 s later; `rpu_loss n` is followed by `rpu_return`, `signal_loss ms` by `signal_return`; `dv_switch`
+targets rotate tunnel, lldv, hdr10, sdr; a `storm` is 4-6 events within 8 s. Exit 2 on a usage error or more than
+100000 entries.
+
+## Per-event settle metrics (`resync_settle`)
+
+`ResyncEventMetrics.h` emits one `VPEV1 ... kind=resync_settle seq settle_ms settle_frames drops repeats relock
+relock_frames vectors [cause]` line per FULL resync once it settled (or was abandoned: `vectors=invalid`, the
+"did not settle" marker). `resync` lines may also carry `injected=0|1` and `readers="a,b"`. The report's
+`resync_settle` check prints median/p95/max settle_ms, settle_frames, drops/repeats per cause, relock failures
+and injected vs real FULL counts; thresholds `settle_p95_ms_max` (5000), `settle_unsettled_max` (0),
+`settle_relock_fail_max` (0). A run without settle lines passes with a "not evaluated" note.

@@ -10,7 +10,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <vector>
 
 // The motion family as readers of the central Indicator (resync_event = on). Two readers, both
 // called on the render thread at the seal of the frame that carries the change:
@@ -127,6 +126,20 @@ public:
     unsigned HistoryCalls() const { return m_historyCalls; }
     unsigned ProducerCalls() const { return m_producerCalls; }
 
+    // Re-arm for a NEW Indicator (a new era; RegisterOn calls it): both readers latch again on their
+    // first observe of the new Indicator (only what changed AT that frame acts), the cause lookup
+    // forgets the old era's last seq, and the producer baseline is re-taken from the new Indicator.
+    // Pending flags the consumer has not taken yet are kept (they are still owed).
+    void Rearm()
+    {
+        m_historyLatched = false;
+        m_historyHave = false;
+        m_historyLast = 0;
+        m_producerLatched = false;
+        ++m_rearms;
+    }
+    unsigned Rearms() const { return m_rearms; }
+
     // Called by RegisterOn's callbacks (render thread).
     void OnHistory(VpIndicator::Indicator& ind, MotionValidity::State& state,
                    const VpIndicator::Indicator::Change& c)
@@ -197,24 +210,18 @@ private:
         return VpIndicator::Changed(ind.StampOf(seq - 1), ind.StampOf(seq));
     }
 
-    // The cause of the newest event of `counter` that applies to seq and is newer than `last`.
+    // The cause of the newest event of `counter` that applies to seq and is newer than `last`
+    // (Indicator::LastCauseIn: lock-free, no allocation). Not found - none retained, or the interval
+    // is older than the ring - is UNKNOWN = Cause::None, which maps conservatively (FULL -> Resync,
+    // releasing resources; continuity -> Gap).
     static VpResync::Cause LatestCause(const VpIndicator::Indicator& ind, VpIndicator::Counter counter,
                                        bool haveLast, uint64_t last, uint64_t seq)
     {
-        std::vector<VpIndicator::Event> events(ind.Capacity());
-        const size_t n = ind.Snapshot(events.data(), events.size());
-        VpResync::Cause best = VpResync::Cause::None;
-        uint64_t bestSerial = 0;
-        for (size_t i = 0; i < n; ++i) {
-            const VpIndicator::Event& e = events[i];
-            if (e.counter != counter || e.fromSeq > seq || (haveLast && e.fromSeq <= last))
-                continue;
-            if (e.serial >= bestSerial) {
-                bestSerial = e.serial;
-                best = e.cause;
-            }
-        }
-        return best;
+        const uint64_t from = haveLast ? last : (seq > 0 ? seq - 1 : 0);
+        VpResync::Cause cause = VpResync::Cause::None;
+        if (!ind.LastCauseIn(counter, from, seq, cause))
+            return VpResync::Cause::None;
+        return cause;
     }
 
     HistoryPending m_history;
@@ -222,6 +229,7 @@ private:
     uint64_t m_restartsAvoided = 0;
     uint64_t m_inFlightDrops = 0;
     unsigned m_historyActs = 0, m_producerActs = 0, m_historyCalls = 0, m_producerCalls = 0;
+    unsigned m_rearms = 0;
     uint64_t m_historyLast = 0;
     bool m_historyHave = false;
     bool m_historyLatched = false;
@@ -239,6 +247,7 @@ struct Ids {
 inline Ids RegisterOn(VpIndicator::Indicator& indicator, MotionValidity::State& state, Readers& readers)
 {
     Ids ids;
+    readers.Rearm();   // a new Indicator (era): latch again, forget the old era's sequence
     VpIndicator::Indicator* ind = &indicator;
     MotionValidity::State* st = &state;
     Readers* rd = &readers;

@@ -471,6 +471,49 @@ public:
         }
     }
 
+    // Lock-free, any thread. True when ANY retained event of exactly `counter` with fromSeq in
+    // (fromSeqExclusive, toSeqInclusive] has a cause other than `except`, or when the interval is
+    // older than the ring (AncientBelow() > fromSeqExclusive: an event there may have been folded
+    // away, so "only `except`" cannot be proven; the conservative answer). False for an empty
+    // interval, an out-of-range counter, or when every event in the interval has cause `except`
+    // (or there are none and the interval is within the ring). Used by the pulldown reader: absorb
+    // only when EVERY FULL between two stamps was a LiveQueueReset.
+    bool AnyCauseOtherThanIn(Counter counter, VpResync::Cause except, uint64_t fromSeqExclusive,
+                             uint64_t toSeqInclusive) const
+    {
+        if (static_cast<unsigned>(counter) >= static_cast<unsigned>(kCounterCount)
+            || toSeqInclusive <= fromSeqExclusive)
+            return false;
+        for (unsigned attempt = 0;; ++attempt) {
+            const uint64_t v1 = version_.load(std::memory_order_acquire);
+            if ((v1 & 1u) != 0) {
+                Backoff(attempt);
+                continue;
+            }
+            const uint64_t ancientBelow = ancientBelow_.load(std::memory_order_relaxed);
+            const uint64_t written = written_.load(std::memory_order_relaxed);
+            const size_t n = written < capacity_ ? size_t(written) : capacity_;
+            bool other = false;
+            for (size_t k = 0; k < n && !other; ++k) {
+                const Entry& e = ring_[k];
+                const uint64_t from = e.fromSeq.load(std::memory_order_relaxed);
+                if (from <= fromSeqExclusive || from > toSeqInclusive)
+                    continue;
+                const uint64_t meta = e.meta.load(std::memory_order_relaxed);
+                if (CounterOf(meta) != counter)
+                    continue;
+                if (static_cast<VpResync::Cause>((meta >> 8) & 0xFFFFu) != except)
+                    other = true;
+            }
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (version_.load(std::memory_order_relaxed) != v1) {
+                Backoff(attempt);
+                continue;
+            }
+            return other || ancientBelow > fromSeqExclusive;
+        }
+    }
+
 private:
     struct Entry {
         std::atomic<uint64_t> serial;

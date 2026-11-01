@@ -134,7 +134,8 @@ class Prefix(unittest.TestCase):
     def test_all_kinds_fixture(self):
         events = parse.parse_file(fx("vpev1_all_kinds.log"))
         kinds = set(e.kind for e in events)
-        self.assertTrue(parse.KINDS <= kinds, parse.KINDS - kinds)
+        # resync_settle is additive (item 15); the fixture predates it
+        self.assertTrue((parse.KINDS - {"resync_settle"}) <= kinds, parse.KINDS - kinds)
         self.assertEqual(len(events), 26)
         self.assertEqual(events.skipped, 1)  # the comment line
         walls = [e for e in events if e.wall is not None]

@@ -442,6 +442,7 @@ if (tile < int(tiles) && g.y < ts) {
 		out.heldDropped = heldDropped.load(std::memory_order_relaxed);
 		out.heldStale = heldStale.load(std::memory_order_relaxed);
 		out.jobsDropped = jobsDropped.load(std::memory_order_relaxed);
+		out.submitSkipped = submitSkipped.load(std::memory_order_relaxed);
 		out.waitsMissed = waitsMissed.load(std::memory_order_relaxed);
 		out.clockStepsBack = clockStepsBack.load(std::memory_order_relaxed);
 		return out;
@@ -462,12 +463,8 @@ if (tile < int(tiles) && g.y < ts) {
 		if (!g || !dispatch) return;
 		const bool bound = frameBound.load(std::memory_order_acquire);
 		// Frame-bound: the monitor's source clock (monotone) and the results this frame may see.
-		const double raw = seconds;
-		if (bound)
-		{
-			seconds = submitClock.Advance(raw, clockStepsBack);
-			ReleaseHeldFor(sourceSequence);
-		}
+		const double raw = seconds;   // the frame's own source seconds (the trackers' clock)
+		if (bound) seconds = BeginBoundFrame(sourceSequence, seconds);
 		if (gpu && gpu != g) Release(gpu);
 		gpu = g;
 		if (!nativeTried)
@@ -603,7 +600,13 @@ if (tile < int(tiles) && g.y < ts) {
 		}
 
 		const int slot = nextSlot;
-		if (busy[slot]) return;   // the oldest copy is still on its way: skip, never wait
+		if (busy[slot])
+		{
+			// The oldest copy is still on its way: skip, never wait. Frame-bound: counted and shown
+			// (this frame gets no analysis; GPU timing decided it, so the run is not reproducible).
+			if (bound) submitSkipped.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
 		const size_t bytes = static_cast<size_t>(kMaxTiles) * kPixels * sizeof(float);
 		if (!native && !ring[slot])
 		{
@@ -1120,7 +1123,13 @@ if (tile < int(tiles) && g.y < ts) {
 		// analysis of frames <= renderSequence - D is visible.
 		const double now = bound ? DecisionNow(seconds) : seconds >= 0.0 ? seconds :
 			std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-		const bool boundReset = bound && ReleaseHeldFor(renderSequence);
+		bool boundReset = false;
+		if (bound)
+		{
+			const bool released = ReleaseHeldFor(renderSequence);
+			const bool carried = pendingBoundReset.exchange(false, std::memory_order_acq_rel);
+			boundReset = released || carried;
+		}
 		const Snapshot s = Read();
 		const double before = autoApplied;
 		const bool fixes = LatchFixes();
@@ -1545,6 +1554,37 @@ if (tile < int(tiles) && g.y < ts) {
 
 	double Monitor::DecisionPeek(double seconds) const { return decideClock.Peek(seconds); }
 
+	void Monitor::SubmitJobForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight,
+		int baseTiles, int tileSize, double blackLevel, uint64_t sequence)
+	{
+		Job j;
+		j.epoch = epoch.load(std::memory_order_acquire);
+		j.streamKey = streamKey.load(std::memory_order_acquire);
+		j.sequence = sequence;
+		j.values = tiles;
+		j.tiles = count;
+		j.codeMaximum = 1023;
+		j.scale = 1023.0;
+		j.seconds = seconds;
+		j.nativeWidth = nativeWidth;
+		j.nativeHeight = nativeHeight;
+		j.baseTiles = (std::min)(baseTiles, count);
+		j.tileSize = tileSize;
+		j.blackLevel = blackLevel;
+		NoteSubmitted(sequence);
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			if (jobQueue.size() >= kJobQueueCap)
+			{
+				FinishSequence(jobQueue.front().sequence);
+				jobQueue.pop_front();
+				jobsDropped.fetch_add(1, std::memory_order_relaxed);
+			}
+			jobQueue.push_back(std::move(j));
+		}
+		wake.notify_all();
+	}
+
 	void Monitor::NoteSubmitted(uint64_t sequence)
 	{
 		std::lock_guard<std::mutex> lock(outMutex);
@@ -1598,6 +1638,16 @@ if (tile < int(tiles) && g.y < ts) {
 		++visible.discontinuities;
 		const char* cause = lastRenderCause.load(std::memory_order_acquire);
 		visible.lastDiscontinuity = cause ? cause : "discontinuity";
+	}
+
+	double Monitor::BeginBoundFrame(uint64_t sourceSequence, double seconds)
+	{
+		const double mapped = submitClock.Advance(seconds, clockStepsBack);
+		// The renderer's order is Discontinuity -> Frame -> AutoFactor(s): a reset this release
+		// consumed (the flagged discontinuity or a held worker reset) is carried to AutoFactor.
+		if (ReleaseHeldFor(sourceSequence))
+			pendingBoundReset.store(true, std::memory_order_release);
+		return mapped;
 	}
 
 	bool Monitor::ReleaseHeldFor(uint64_t sequence)
@@ -1673,8 +1723,11 @@ if (tile < int(tiles) && g.y < ts) {
 		const std::string text = DescribeBase(s, autoRatio, autoSelected);
 		if (!s.frameBound) return text;
 		char bound[200];
-		snprintf(bound, sizeof(bound), "; frame-bound D=%u: held %u, dropped %llu, stale %llu, jobs dropped %llu, waits missed %llu, clock steps back %llu",
-			s.frameLead, s.heldNow, s.heldDropped, s.heldStale, s.jobsDropped, s.waitsMissed, s.clockStepsBack);
-		return text + bound;
+		snprintf(bound, sizeof(bound), "; frame-bound D=%u: held %u, dropped %llu, stale %llu, jobs dropped %llu, copies skipped %llu, waits missed %llu, clock steps back %llu",
+			s.frameLead, s.heldNow, s.heldDropped, s.heldStale, s.jobsDropped, s.submitSkipped, s.waitsMissed, s.clockStepsBack);
+		std::string out = text + bound;
+		if (s.heldDropped != 0 || s.jobsDropped != 0 || s.submitSkipped != 0 || s.waitsMissed != 0)
+			out += " (analyses were lost to timing: this run is not reproducible)";
+		return out;
 	}
 }

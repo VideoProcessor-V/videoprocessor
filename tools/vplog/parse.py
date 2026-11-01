@@ -23,7 +23,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 # Event model
 
 KINDS = frozenset(["session", "resync", "fallback", "gate", "gpu_error", "source_change",
-                   "cadence", "repeat", "frame_stats", "stamp", "flag"])
+                   "cadence", "repeat", "frame_stats", "stamp", "flag", "resync_settle"])
 
 _PREFIX_RE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) \| ")
 _KEY_RE = re.compile(r"^[a-z0-9_]+$")

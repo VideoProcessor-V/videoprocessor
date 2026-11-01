@@ -57,6 +57,7 @@ public:
             if (previous == Mode::Off || !current || want > current->Capacity()) {
                 std::atomic_store(&m_indicator,
                                   std::make_shared<VpIndicator::Indicator>(VpIndicator::NextEra(), want));
+                ResetCursor();   // the old era's enqueue cursor must not outlive its Indicator
                 m_restart.store(true, std::memory_order_release);
             }
         }
@@ -102,7 +103,7 @@ public:
     // A late MINOR (a drift-correction drop, a kept-run hole from a backlog flush) found on the render
     // loop at slipSeq: every frame from slipSeq on gets the new continuity stamp (clamped above the
     // last sealed frame in On). Any thread; never throws.
-    void OnLateSlip(Cause cause, uint64_t slipSeq, uint32_t gapFrames, double nowSeconds)
+    void OnLateSlip(Cause cause, uint64_t slipSeq, uint32_t gapFrames, double nowSeconds, double sourceSeconds = -1.0)
     {
         if (!IsShadow() || slipSeq == 0)
             return;
@@ -110,7 +111,7 @@ public:
             const std::shared_ptr<VpIndicator::Indicator> indicator = std::atomic_load(&m_indicator);
             if (!indicator)
                 return;
-            Record(*indicator, m_detector.Late(cause, slipSeq, gapFrames), nowSeconds);
+            Record(*indicator, m_detector.Late(cause, slipSeq, gapFrames), nowSeconds, StormTime(nowSeconds, sourceSeconds));
         } catch (...) {
             m_errors.fetch_add(1, std::memory_order_relaxed);
         }
@@ -139,9 +140,13 @@ public:
         }
     }
 
-    // The caller holds the queue mutex. nowSeconds is a steady clock used for display and the storm
-    // window only; no decision depends on it.
-    void OnEnqueue(const EnqueueFacts& facts, double nowSeconds)
+    // The caller holds the queue mutex. nowSeconds is a steady clock used for display, the minor
+    // window and the VPEV1 time stamp. The detector's verdicts depend only on the facts. The STORM
+    // HOLD (a decision in `on`) runs on nowSeconds by default; in reproducible (frame-bound /
+    // deterministic) runs call SetStormSourceTime(true) and pass `sourceSeconds` (the frame's source
+    // time, never a constant): the storm window and release then use source time only. A negative
+    // sourceSeconds in that mode is counted (StormClockMissing) and the last source time is kept.
+    void OnEnqueue(const EnqueueFacts& facts, double nowSeconds, double sourceSeconds = -1.0)
     {
         if (!IsShadow())
             return;
@@ -158,7 +163,7 @@ public:
             const Decision decision = m_detector.OnEnqueue(facts, m_arms);
             m_windowedRateHz.store(m_detector.WindowedRateHz(), std::memory_order_relaxed);
             for (uint8_t i = 0; i < decision.count; ++i)
-                Record(*indicator, decision.events[i], nowSeconds);
+                Record(*indicator, decision.events[i], nowSeconds, StormTime(nowSeconds, sourceSeconds));
         } catch (...) {
             m_errors.fetch_add(1, std::memory_order_relaxed);   // never propagates into the renderer; shown in the status line
         }
@@ -212,12 +217,27 @@ public:
         bool nativeRebase = false;
         bool vectorsPaused = false;
     };
+    // The storm clock: steady seconds by default; in source-time mode (SetStormSourceTime) the
+    // latest source second seen (events and AdvanceStormClock) and the argument is ignored.
+    void SetStormSourceTime(bool on) { m_stormSourceTime.store(on, std::memory_order_release); }
+    bool StormSourceTime() const { return m_stormSourceTime.load(std::memory_order_acquire); }
+    // Render thread, once per frame in source-time mode: lets the 10 s quiet release run without an
+    // event (source seconds only move forward here).
+    void AdvanceStormClock(double sourceSeconds)
+    {
+        double cur = m_stormClock.load(std::memory_order_relaxed);
+        if (sourceSeconds > cur)
+            m_stormClock.store(sourceSeconds, std::memory_order_relaxed);
+    }
+    uint64_t StormClockMissing() const { return m_stormClockMissing.load(std::memory_order_relaxed); }
+
     bool StormHold(double nowSeconds) const
     {
         if (!Driving())
             return false;
+        const double now = StormNow(nowSeconds);
         std::lock_guard<std::mutex> lock(m_stormMutex);
-        return m_stormHeld && (nowSeconds - m_stormLastFull) < kStormReleaseSeconds;
+        return m_stormHeld && (now - m_stormLastFull) < kStormReleaseSeconds;
     }
     // All true iff StormHold, else all false.
     SafeSettings StormSafeSettings(double nowSeconds) const
@@ -235,7 +255,7 @@ public:
             int count = 0;
             {
                 std::lock_guard<std::mutex> lock(m_stormMutex);
-                count = m_storm.FullCount(nowSeconds);
+                count = m_storm.FullCount(StormNow(nowSeconds));
             }
             out = FallbackCatalog::ResyncStorm(true, count).reason;
             return true;
@@ -254,7 +274,9 @@ public:
     // = no string is built. The sink runs on the recording thread (the queue mutex may be held).
     void SetEventSink(std::function<void(const std::string&)> sink)
     {
+        const bool has = static_cast<bool>(sink);
         std::atomic_store(&m_eventSink, std::make_shared<const std::function<void(const std::string&)>>(std::move(sink)));
+        m_hasEventSink.store(has, std::memory_order_release);
     }
 
     // Before frames flow (or from the render thread); safe against a concurrent OnEnqueue.
@@ -289,8 +311,8 @@ private:
         bool engaged = false;
         {
             std::lock_guard<std::mutex> lock(m_stormMutex);
-            engaged = m_storm.Engaged(nowSeconds);
-            storm = m_storm.FullCount(nowSeconds);
+            engaged = m_storm.Engaged(StormNow(nowSeconds));
+            storm = m_storm.FullCount(StormNow(nowSeconds));
         }
         if (engaged)
             text += "; storm: " + std::to_string(storm) + " FULL in 10 s (would hold safe settings)";
@@ -301,6 +323,12 @@ private:
             // The raw count is always in EventLines (premature_folds=).
             if (early > 0 && indicator->HasSealed())
                 text += "; indicator ring too small (" + std::to_string(early) + " early folds)";
+        }
+        if (m_stormSourceTime.load(std::memory_order_acquire)) {
+            const uint64_t missing = m_stormClockMissing.load(std::memory_order_relaxed);
+            text += "; storm clock: source time";
+            if (missing > 0)
+                text += " (" + std::to_string(missing) + " events without source time)";
         }
         const uint32_t errors = m_errors.load(std::memory_order_relaxed);
         if (errors > 0)
@@ -442,7 +470,10 @@ private:
                 fields.emplace_back("detail", static_cast<uint64_t>(e.detail));
             fields.emplace_back("mode", Driving() ? "on" : "shadow");
             const double tMs = nowSeconds * 1000.0;
-            const std::shared_ptr<const std::function<void(const std::string&)>> sink = std::atomic_load(&m_eventSink);
+            // The guard keeps the common no-sink case off the shared_ptr atomic (MSVC's global spinlock).
+            const std::shared_ptr<const std::function<void(const std::string&)>> sink =
+                m_hasEventSink.load(std::memory_order_acquire) ? std::atomic_load(&m_eventSink)
+                                                                : std::shared_ptr<const std::function<void(const std::string&)>>();
             if (sink && *sink) {
                 // The vp-event/1 resync grammar (VpEventLine.h) has no `readers` key: readers act at the
                 // seal of the carrying frame and are shown in Ctrl+Alt+D / the event list instead.
@@ -459,7 +490,26 @@ private:
         }
     }
 
-    void Record(VpIndicator::Indicator& indicator, const Event& e, double nowSeconds)
+    double StormNow(double nowSeconds) const
+    {
+        return m_stormSourceTime.load(std::memory_order_acquire) ? m_stormClock.load(std::memory_order_relaxed) : nowSeconds;
+    }
+
+    // The time the storm window runs on for this event: nowSeconds, or in source-time mode the
+    // event's source seconds (kept as the storm clock).
+    double StormTime(double nowSeconds, double sourceSeconds)
+    {
+        if (!m_stormSourceTime.load(std::memory_order_acquire))
+            return nowSeconds;
+        if (sourceSeconds < 0.0 || !std::isfinite(sourceSeconds)) {
+            m_stormClockMissing.fetch_add(1, std::memory_order_relaxed);
+            return m_stormClock.load(std::memory_order_relaxed);
+        }
+        AdvanceStormClock(sourceSeconds);
+        return sourceSeconds;
+    }
+
+    void Record(VpIndicator::Indicator& indicator, const Event& e, double nowSeconds, double stormNow)
     {
         VpIndicator::Counter counter = VpIndicator::kContinuity;
         const char* label = "MINOR";
@@ -470,12 +520,12 @@ private:
             label = "FULL";
             {
                 std::lock_guard<std::mutex> lock(m_stormMutex);
-                if (m_stormHeld && (nowSeconds - m_stormLastFull) >= kStormReleaseSeconds)
+                if (m_stormHeld && (stormNow - m_stormLastFull) >= kStormReleaseSeconds)
                     m_stormHeld = false;   // 10 s with no FULL since the last: released before this one counts
-                m_storm.Note(e.cause, nowSeconds);
+                m_storm.Note(e.cause, stormNow);
                 if (LevelOf(e.cause) == Level::Full && !ExcludedFromStorm(e.cause)) {
-                    m_stormLastFull = nowSeconds;
-                    if (m_storm.Engaged(nowSeconds))
+                    m_stormLastFull = stormNow;
+                    if (m_storm.Engaged(stormNow))
                         m_stormHeld = true;
                 }
             }
@@ -529,6 +579,10 @@ private:
 
     mutable std::mutex m_stormMutex;
     StormWindow m_storm;   // m_stormMutex
+    std::atomic<bool> m_hasEventSink{false};
+    std::atomic<bool> m_stormSourceTime{false};
+    std::atomic<double> m_stormClock{0.0};            // source-time mode: the latest source second seen
+    std::atomic<uint64_t> m_stormClockMissing{0};
     bool m_stormHeld = false;        // m_stormMutex
     double m_stormLastFull = 0.0;    // m_stormMutex; time of the last counted FULL
     static constexpr double kStormReleaseSeconds = 10.0;

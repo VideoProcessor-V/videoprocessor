@@ -8,5 +8,8 @@
   "drops_per_h": 1,
   "steady_window_s": 10,
   "p99_creep_pct": 10,
-  "min_hours_creep": 2
+  "min_hours_creep": 2,
+  "settle_p95_ms_max": 5000,
+  "settle_unsettled_max": 0,
+  "settle_relock_fail_max": 0
 }

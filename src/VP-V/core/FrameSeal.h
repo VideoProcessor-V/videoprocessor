@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include "FallbackCatalog.h"
 #include "Indicator.h"
 
 #include <cstddef>
@@ -89,7 +90,15 @@ public:
     size_t ProviderCount() const { return m_providers.size(); }
     size_t SubscriberCount() const { return m_subscribers.size(); }
 
-    // Status text for Ctrl+Alt+D / Config status ("one seal owner" evidence).
+    // The visible fallback for a wiring fault (no silent fallbacks): a provider added after the first
+    // frame, plus the lane's frames that arrived unsealed (pass AnalysisLane::ExternalSealMisses()).
+    FallbackCatalog::Decision Fallback(unsigned long long laneFrameMisses = 0) const
+    {
+        return FallbackCatalog::ResyncSeal(laneFrameMisses, m_lateProviders);
+    }
+
+    // Status text for Ctrl+Alt+D / Config status ("one seal owner" evidence). Shown by the host's
+    // resync diagnostics text (with Shadow::EventLines) and in the Config status page.
     std::string Describe() const
     {
         std::string text = "seal: " + std::to_string(m_seals) + " frames, " + std::to_string(m_eras) + " era(s), " +
