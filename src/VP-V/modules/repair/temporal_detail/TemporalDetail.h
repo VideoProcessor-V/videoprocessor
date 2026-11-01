@@ -177,7 +177,7 @@ namespace TemporalDetail
 		{
 			if (m_tier < 0) return m_on ? "auto: on (stream quality unknown, releasing)" : "auto: idle (no stream quality estimate)";
 			const std::string t = std::to_string(m_tier);
-			if (m_on) return "auto: on (stream quality tier " + t + ")";
+			if (m_on) return "auto: on (stream quality tier " + t + (m_tier > m_p.engageTier ? ", releasing)" : ")");
 			return "auto: idle (stream quality tier " + t + (m_tier <= m_p.engageTier ? ", engaging)" : ")");
 		}
 

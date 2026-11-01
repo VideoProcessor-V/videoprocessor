@@ -243,7 +243,8 @@ namespace ChromaCflTestsNs
 	};
 
 	// One Apply on a fresh module. threePlane: Cb and Cr as separate planes.
-	GpuOut RunGpu(GpuDevice& dev, const Scene& s, double sx, double sy, const ActiveRect& rect, bool threePlane = false, bool guard = true)
+	// shared: pass the grain.split products computed once outside the module (one producer, many readers).
+	GpuOut RunGpu(GpuDevice& dev, const Scene& s, double sx, double sy, const ActiveRect& rect, bool threePlane = false, bool guard = true, bool shared = false)
 	{
 		GpuOut o;
 		pl_gpu gpu = dev.Gpu();
@@ -264,6 +265,16 @@ namespace ChromaCflTestsNs
 		gp.settings.mode = ChromaUpscale::Mode::Cfl;
 		gp.active = rect;
 		gp.cfl.grainGuard = guard;
+		GrainSplit::Gpu::Splitter pL, pB, pR;
+		if (shared && !threePlane)
+		{
+			const double cu = 64.0 / 65535.0, lines = s.y.h, linesC = lines / (static_cast<double>(s.y.h) / s.cb.h);
+			const bool made = pL.Compute(gpu, dev.dispatch, luma, 0, cu, ChromaUpscale::Scale(lines), ChromaUpscale::BlockPx(lines)) &&
+				pB.Compute(gpu, dev.dispatch, chroma, 0, cu, ChromaUpscale::Scale(linesC), ChromaUpscale::BlockPx(linesC)) &&
+				pR.Compute(gpu, dev.dispatch, chroma, 1, cu, ChromaUpscale::Scale(linesC), ChromaUpscale::BlockPx(linesC));
+			Assert::IsTrue(made, L"the shared products are made");
+			gp.lumaSplit = &pL.Out(); gp.cbSplit = &pB.Out(); gp.crSplit = &pR.Out();
+		}
 		pl_frame out{};
 		o.ok = module.Apply(gpu, dev.dispatch, src, gp, out);
 		o.error = module.LastError();
@@ -295,6 +306,7 @@ namespace ChromaCflTestsNs
 			}
 		}
 		module.Release(gpu);
+		pL.Release(gpu); pB.Release(gpu); pR.Release(gpu);
 		for (pl_tex* t : { &luma, &chroma, &cbT, &crT })
 			if (*t) pl_tex_destroy(gpu, t);
 		return o;
@@ -530,7 +542,7 @@ namespace VideoProcessorTest
 		{
 			const GpuOut g = RunGpu(dev, sc, sx, sy, rect);
 			Assert::IsTrue(g.ok, Wide(g.error).c_str());
-			Assert::IsTrue(g.status == "ok" || g.status == "ok; own grain split", Wide(g.status).c_str());
+			Assert::IsTrue(g.status == "ok" || g.status == "ok; own grain split", Wide(g.status).c_str());   // no product passed here
 			const ChromaUpscale::Result m = RunModel(sc, sx, sy, rect);
 			Assert::IsTrue(g.texW == sc.y.w && g.texH == sc.y.h, L"output chroma is luma size");
 			const double wcb = MaxDiff(g.cb, m.cb), wcr = MaxDiff(g.cr, m.cr);
@@ -639,6 +651,20 @@ namespace VideoProcessorTest
 			const GpuOut a = RunGpu(dev, sc, -0.5, 0.0, ActiveRect()), b = RunGpu(dev, sc, -0.5, 0.0, ActiveRect());
 			Assert::IsTrue(a.ok && b.ok, Wide(a.error + b.error).c_str());
 			Assert::IsTrue(a.cb.v == b.cb.v && a.cr.v == b.cr.v, L"two runs are bit-identical");
+		}
+
+		TEST_METHOD(ChromaCflGpuReadsTheSharedGrainSplit)
+		{
+			// One producer, many readers: with the shared grain.split products (luma, Cb, Cr) the module computes no split of
+			// its own and its output is bit-identical to its own-split output.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			const Scene sc = MakeScene(128, 96, 64, 48, -0.5, 0.0, 31u, 1.5, 2.0);
+			const GpuOut own = RunGpu(dev, sc, -0.5, 0.0, ActiveRect()), shared = RunGpu(dev, sc, -0.5, 0.0, ActiveRect(), false, true, true);
+			Assert::IsTrue(own.ok && shared.ok, Wide(own.error + shared.error).c_str());
+			Assert::AreEqual(std::string("ok; own grain split"), own.status);
+			Assert::AreEqual(std::string("ok"), shared.status);
+			Assert::IsTrue(own.cb.v == shared.cb.v && own.cr.v == shared.cr.v, L"bit-identical to the module's own split");
 		}
 
 		TEST_METHOD(ChromaCflGpu444IsNothing)

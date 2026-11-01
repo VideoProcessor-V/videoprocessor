@@ -382,6 +382,11 @@ namespace TemporalDetail
 			std::vector<double> quality;       // optional per-block bitrate quality 0..1 on the active picture's block grid (empty = neutral 1)
 			ActiveRect active;                 // the active picture (empty = the whole plane)
 			bool autoEngaged = false;          // temporal_detail = auto: the host's AutoGate decision for this frame
+			// Regionally adaptive gates (owner 2026-10-31): per block of the active picture's grid, 4 factors on the tunables -
+			// [0] reference-stronger margin, [1] base-match allowance, [2] motion-uncertainty limit, [3] strength. A rule
+			// computed from the local maps (texture deficit, vector / camera confidence, grain level, brightness, I/B phase;
+			// see README "Regionally adaptive gates") fills it; empty or short = 1 (the global tunables).
+			std::vector<float> blockGates;
 		};
 
 		// Model-only knobs for measurement and the guard's own test (not user settings, never in the config):
@@ -474,6 +479,12 @@ namespace TemporalDetail
 		int m_w = 0, m_h = 0, m_B = 16;
 		double m_scale = 1.0;
 		double m_camCx = 0.0, m_camCy = 0.0;
+		std::vector<float> m_blockGates;  // this frame's per-block gate factors (FrameIn::blockGates)
+		double Bg(size_t bi, int k) const
+		{
+			const size_t i = bi * 4 + static_cast<size_t>(k);
+			return i < m_blockGates.size() ? static_cast<double>(m_blockGates[i]) : 1.0;
+		}
 		ActiveRect m_rect;                // the last frame's resolved active picture (plane coordinates)
 		bool m_rectMoved = false;         // its origin moved at equal size: a geometry reset
 		Plane m_lastFull;                 // the last full-plane output (repeats)
@@ -695,10 +706,11 @@ namespace TemporalDetail
 		e.corr = dot / std::sqrt(cs * ws + 1e-12);
 		e.corrGate = Smoothstep(0.5 * kCorrMin, kCorrMin, e.corr);
 		const GateTuning& gt = m_tune.gates;
-		e.strongerGate = Smoothstep(1.0 + gt.strongerMargin, 1.0 + 3.0 * gt.strongerMargin, (e.e1w + fl) / (e.e1c + fl)) *
+		const double margin = gt.strongerMargin * Bg(bi, 0);
+		e.strongerGate = Smoothstep(1.0 + margin, 1.0 + 3.0 * margin, (e.e1w + fl) / (e.e1c + fl)) *
 			Smoothstep(gt.significanceLo, gt.significanceHi, e.e1w / (A.N[bi] + fl));
 		// A reference clearly weaker than the current block would soften it: that veto is instant.
-		e.harmGate = Smoothstep(1.0 - 3.0 * gt.strongerMargin, 1.0 - gt.strongerMargin, (e.e1w + fl) / (e.e1c + fl));
+		e.harmGate = Smoothstep(1.0 - 3.0 * margin, 1.0 - margin, (e.e1w + fl) / (e.e1c + fl));
 		e.hbGate = Smoothstep(kRho2Lo, kRho2Hi, (e2c + fl) / (e2w + fl));
 		// Focus: the source block's F at the composed block centre.
 		{
@@ -710,10 +722,10 @@ namespace TemporalDetail
 			e.focusGate = Smoothstep(kPullLo, kPullHi, A.F[bi] / (Fw + 1e-6));
 			e.u = Detail::GridAt(src.u, bw, bh, B, cx, cy);
 		}
-		const double uMax = gt.uncertaintyPx * m_scale;
+		const double uMax = gt.uncertaintyPx * m_scale * Bg(bi, 2);
 		e.uncGate = 1.0 - Smoothstep(0.3 * uMax, uMax, e.u);
 		e.baseDiff = bd / n;
-		const double allow = gt.baseNoiseCodes + gt.baseGrainSigmas * std::sqrt((std::max)(0.0, A.N[bi])) / 4.0;
+		const double allow = (gt.baseNoiseCodes + gt.baseGrainSigmas * std::sqrt((std::max)(0.0, A.N[bi])) / 4.0) * Bg(bi, 1);
 		e.baseGate = 1.0 - Smoothstep(allow, 2.0 * allow, e.baseDiff);
 		const double hzv = hz > 0.0 ? hz : kReferenceHz;
 		const double ageFrames = src.future ? static_cast<double>(src.seq) - static_cast<double>(m_prevSeq + 1) : static_cast<double>(m_prevSeq + 1) - static_cast<double>(src.seq);
@@ -770,8 +782,8 @@ namespace TemporalDetail
 		if (m_set.mode == Mode::Auto && !in.autoEngaged)
 		{
 			// auto, idle: the input itself; the store restarts when it engages again (the sequence breaks meanwhile).
+			if (m_haveFrame || !m_slots.empty()) Reset("auto idle");   // the store restarts on engagement (as the GPU)
 			m_diag.status = "auto: idle";
-			m_haveFrame = false;
 			return in.luma;
 		}
 		const ActiveRect r = in.active.Resolve(in.luma.w, in.luma.h);
@@ -788,7 +800,7 @@ namespace TemporalDetail
 		FrameIn c;
 		c.luma = Detail::Crop(in.luma, r);
 		c.seq = in.seq; c.contentHz = in.contentHz; c.planeLines = in.planeLines; c.stamps = in.stamps;
-		c.cut = in.cut; c.fade = in.fade; c.quality = in.quality;
+		c.cut = in.cut; c.fade = in.fade; c.quality = in.quality; c.blockGates = in.blockGates;
 		const Detail::OffsetMotionSource shifted(in.motion, r.left, r.top);
 		c.motion = in.motion ? &shifted : nullptr;
 		std::vector<Plane> futures;
@@ -820,6 +832,7 @@ namespace TemporalDetail
 			m_diag.status = "off";
 			return in.luma;
 		}
+		m_blockGates = in.blockGates;
 		const int w = in.luma.w, h = in.luma.h;
 		// A repeat (same sequence, same size): the last output again, no state advanced.
 		if (m_haveFrame && !m_rectMoved && in.seq == m_prevSeq && w == m_w && h == m_h && m_lastOut.w == w && m_lastOut.h == h) return m_lastOut;
@@ -1152,7 +1165,7 @@ namespace TemporalDetail
 				{
 					const double refereeGate = useFuture ? 1.0 : wk.referee;
 					hardTarget = chosen->hard * refereeGate;
-					soft = m_set.strength * wk.evidence * chosen->ageGate * chosen->strongerGate * (st.retired ? 0.0 : 1.0);
+					soft = m_set.strength * Bg(static_cast<size_t>(i), 3) * wk.evidence * chosen->ageGate * chosen->strongerGate * (st.retired ? 0.0 : 1.0);
 					st.tHold = soft;
 					// the guard's veto run (the focus / high-band-loss guard against a past reference)
 					if (!useFuture && wk.pastId >= 0 && chosen->hbGate * chosen->focusGate < 0.1) ++st.vetoRun; else st.vetoRun = 0;
@@ -1193,7 +1206,7 @@ namespace TemporalDetail
 				const double fP = Smoothstep(kPullLo, kPullHi, A.F[u] / (st.fPeak + 1e-6));
 				const double noRef = 1.0 - Smoothstep(0.0, 0.5, weight);
 				const double refB = wk.futQ >= 0.0 ? Smoothstep(0.8 * kSoftFuture, 1.2 * kSoftFuture, wk.futQ / (st.qPeak + kEnergyFloor)) : 1.0;
-				bn *= hbP * fP * wk.evidence * noRef * refB * m_set.strength;
+				bn *= hbP * fP * wk.evidence * noRef * refB * m_set.strength * Bg(u, 3);
 				bn = (st.retired ? 0.0 : bn);
 				if (!st.bOn && bn >= kEnterWeight) st.bOn = true;
 				else if (st.bOn && bn < kLeaveWeight) st.bOn = false;

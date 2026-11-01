@@ -333,7 +333,7 @@ namespace TemporalDetail
 					return fail("active picture pass failed");
 			}
 			// The shared product when it fits (one producer, many readers), else this module's own split (visible).
-			const bool shared = GrainSplit::Gpu::Fits(params.split, w, h, g.B, g.scale);
+			const bool shared = GrainSplit::Gpu::Fits(params.split, w, h, g.B, g.scale, cu, 0);
 			if (!shared && !m.split.Compute(gpu, dispatch, work, 0, cu, g.scale, g.B, sp)) return fail(m.split.LastError().c_str());
 			const GrainSplit::Gpu::Frame& gs = shared ? *params.split : m.split.Out();
 			const pl_tex splitTex = gs.split, gblocks = gs.blocks;
@@ -361,6 +361,7 @@ namespace TemporalDetail
 			if (params.guard) law += "#define TD_GUARD 1\n";
 			if (haveFwd) law += "#define TD_FWD 1\n";
 			if (params.quality) law += "#define TD_QUALITY 1\n";
+			if (params.blockGates) law += "#define TD_BGATES 1\n";
 			if (lagOk) law += "#define TD_LAG 1\n";
 			const std::string base = geo + law + Shaders::kCore;
 			const std::string slots = SlotFunctions(true, false, false) + Shaders::kSlotSample;
@@ -422,6 +423,7 @@ if (g.x < TD_BW * TD_K && g.y < TD_BH) imageStore(mot_out, g, vec4(0.0));
 			// 6: EVAL
 			d = { Sampled("split", splitTex), Sampled("gblocks", gblocks), Sampled("meas", m.meas), Sampled("mot", m.mot[motNew]),
 				Sampled("tab_old", m.tab[tabOld]), Sampled("slot_blk", m.slotBlk), Storage("ev_a_out", m.evA), Storage("ev_b_out", m.evB) };
+			if (params.blockGates) d.push_back(Sampled("bgates", params.blockGates));
 			slotDescs();
 			if (!run("VideoProcessor temporal detail: validation", base + Shaders::kMot + slots + Shaders::kReduce, Shaders::kEvalBody, kbw, g.bh, redShmem))
 				return fail("validation pass failed");
@@ -480,6 +482,7 @@ if (g.x < TD_BW * TD_K && g.y < TD_BH) imageStore(mot_out, g, vec4(0.0));
 			d = { Sampled("st_in", m.state[1]), Storage("st_out", m.state[0]), Sampled("work", m.work), Sampled("tab_new", m.tab[tabNew]),
 				Sampled("meas", m.meas), Sampled("ev_a", m.evA), Sampled("ev_b", m.evB), Sampled("slot_blk", m.slotBlk), Sampled("mot", m.mot[motNew]),
 				Storage("coef_out", m.coef), Storage("cw_out", m.cw) };
+			if (params.blockGates) d.push_back(Sampled("bgates", params.blockGates));
 			if (!run("VideoProcessor temporal detail: weights", base + Shaders::kStateLoad + Shaders::kStateStore + Shaders::kMot + Shaders::kOrder,
 				Shaders::kWeightBody, bgx, bgy, 0))
 				return fail("weight pass failed");

@@ -390,13 +390,14 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			const GrainSplit::Gpu::Frame* gL = nullptr;
 			const GrainSplit::Gpu::Frame* gB = nullptr;
 			const GrainSplit::Gpu::Frame* gR = nullptr;
-			bool ownSplit = false;
+			bool ownSplit = false, misfit = false;
 			if (guard)
 			{
 				auto pick = [&](const GrainSplit::Gpu::Frame* shared, GrainSplit::Gpu::Splitter& own, pl_tex tex, int comp, double cu, double ln,
 					const GrainSplit::Gpu::Frame*& outF) {
-					if (GrainSplit::Gpu::Fits(shared, tex->params.w, tex->params.h, BlockPx(ln), Scale(ln))) { outF = shared; return true; }
+					if (GrainSplit::Gpu::Fits(shared, tex->params.w, tex->params.h, BlockPx(ln), Scale(ln), cu, comp)) { outF = shared; return true; }
 					ownSplit = true;
+					if (shared) misfit = true;
 					if (!own.Compute(gpu, dispatch, tex, comp, cu, Scale(ln), BlockPx(ln))) return false;
 					outF = &own.Out();
 					return true;
@@ -489,7 +490,7 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			up.shift_y = 0.0f;
 			frame.planes[1] = up;
 			result = frame;
-			m_status = ownSplit ? "ok; own grain split" : "ok";
+			m_status = !ownSplit ? "ok" : (misfit ? "ok; own grain split (the shared product does not fit)" : "ok; own grain split");
 			return true;
 		}
 	}

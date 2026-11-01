@@ -43,12 +43,16 @@ namespace GrainSplit
 			pl_tex blocks = nullptr;   // bw x bh rgba32f: N (grain level, codes^2 of D), e3 (block mean of d3^2), 0, 0
 			int w = 0, h = 0, bw = 0, bh = 0, B = 16;
 			double scale = 1.0;
+			double codeUnit = 0.0;     // the plane's code unit it was computed with
+			int component = -1;        // the plane component it was computed on
 		};
 
-		// Whether a published product fits a reader's plane (same size, block and scale): else the reader falls back visibly.
-		inline bool Fits(const Frame* f, int w, int h, int B, double scale)
+		// Whether a published product fits a reader's plane (same size, block, scale, code unit and component): else the reader
+		// falls back visibly (a product of another bit depth or another chroma channel is never accepted silently).
+		inline bool Fits(const Frame* f, int w, int h, int B, double scale, double codeUnit, int component)
 		{
-			return f && f->split && f->blocks && f->w == w && f->h == h && f->B == B && f->scale == scale;
+			return f && f->split && f->blocks && f->w == w && f->h == h && f->B == B && f->scale == scale && f->codeUnit == codeUnit &&
+				f->component == component;
 		}
 
 		class Splitter

@@ -164,6 +164,14 @@ on each engagement. Gate thresholds that real B-frames will re-tune are tunables
 significance band, base-match noise and grain allowance, motion-uncertainty limit) in `Model::Tuning::gates` and
 `Gpu::Params::gates`, defaults = the constants above.
 
+**Regionally adaptive gates** (owner 2026-10-31): the thresholds and strength take per-block factors on the active
+picture's block grid (`FrameIn::blockGates` / `Gpu::Params::blockGates`, 4 per block: reference-stronger margin, base-match
+allowance, motion-uncertainty limit, strength; absent = 1, the global `GateTuning`). The re-tune team's rule fills them
+from per-block maps the module already has or the host owns: local texture deficit (q against its decayed peak, td.analysis /
+the block state), vector / camera confidence (pair trust, composed uncertainty u, camera labels), grain level N
+(grain.split blocks), brightness (block mean of the base band) and the frame's I/B phase (the rebound evidence). Applied
+identically in the model and the GPU passes (`TemporalDetailGpuBlockGatesFollowTheModel`).
+
 `TemporalDetail::ParseSettings` validates them (an invalid value keeps the previous one). They are not in
 RendererProfileConfig, slots.json, the tier table or the Config editor yet.
 

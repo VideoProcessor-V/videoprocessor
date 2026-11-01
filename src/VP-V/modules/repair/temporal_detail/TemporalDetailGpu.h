@@ -68,6 +68,9 @@ namespace TemporalDetail
 			// "store N of 5 slots (memory tier)" whenever it is below kSlots. The CPU model's Tuning::slots matches it.
 			int slots = kSlots;
 			GateTuning gates;              // the gate thresholds (the model's Tuning::gates)
+			// Regionally adaptive gates: optional bw x bh float texture on the active picture's block grid, per block
+			// (x margin, y base allowance, z uncertainty limit, w strength) factors on the tunables (FrameIn::blockGates).
+			pl_tex blockGates = nullptr;
 			// The shared grain.split product of this frame (one producer, many readers; computed on the same active picture
 			// with this module's scale and block). Null or not fitting: the module computes its own (status says so).
 			const GrainSplit::Gpu::Frame* split = nullptr;

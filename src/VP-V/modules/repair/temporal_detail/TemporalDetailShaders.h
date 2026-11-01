@@ -298,11 +298,17 @@ if (gl_LocalInvocationIndex == 0u) {
         float fl = TD_FLOOR;
         float N = texelFetch(gblocks, b, 0).x;
         float e1c = a0.x / n, e2c = a0.y / n, e1w = a0.z / n, e2w = a0.w / n;
+#ifdef TD_BGATES
+        vec4 bgv = texelFetch(bgates, b, 0);   // per-block gate factors: margin, base allowance, uncertainty limit, strength
+#else
+        vec4 bgv = vec4(1.0);
+#endif
+        float margin = TD_STRONGER_MARGIN * bgv.x;
         float corr = a1.z / sqrt(a1.x * a1.y + 1e-12);
         float corrGate = td_ss(0.5 * TD_CORR_MIN, TD_CORR_MIN, corr);
         float ratio = (e1w + fl) / (e1c + fl);
-        float stronger = td_ss(1.0 + TD_STRONGER_MARGIN, 1.0 + 3.0 * TD_STRONGER_MARGIN, ratio) * td_ss(TD_SIG_LO, TD_SIG_HI, e1w / (N + fl));
-        float harm = td_ss(1.0 - 3.0 * TD_STRONGER_MARGIN, 1.0 - TD_STRONGER_MARGIN, ratio);
+        float stronger = td_ss(1.0 + margin, 1.0 + 3.0 * margin, ratio) * td_ss(TD_SIG_LO, TD_SIG_HI, e1w / (N + fl));
+        float harm = td_ss(1.0 - 3.0 * margin, 1.0 - margin, ratio);
         float hb = td_ss(TD_RHO2_LO, TD_RHO2_HI, (e2c + fl) / (e2w + fl));
         float cx = (float(b.x) + 0.5) * float(TD_B) - 0.5, cy = (float(b.y) + 0.5) * float(TD_B) - 0.5;
         vec2 sp = td_position(k, int(cx), int(cy));
@@ -310,8 +316,9 @@ if (gl_LocalInvocationIndex == 0u) {
         float Fw = texelFetch(slot_blk, ivec2(k * TD_BW + sbx, sby), 0).x;
         float focus = td_ss(TD_PULL_LO, TD_PULL_HI, texelFetch(meas, b, 0).z / (Fw + 1e-6));
         float u = td_mot_grid(k, vec2(cx, cy)).z;
-        float unc = 1.0 - td_ss(0.3 * TD_UMAX, TD_UMAX, u);
-        float allow = TD_BASE_NOISE + TD_BASE_GRAIN_SIGMAS * sqrt(max(0.0, N)) / 4.0;
+        float umax = TD_UMAX * bgv.z;
+        float unc = 1.0 - td_ss(0.3 * umax, umax, u);
+        float allow = (TD_BASE_NOISE + TD_BASE_GRAIN_SIGMAS * sqrt(max(0.0, N)) / 4.0) * bgv.y;
         float bgate = 1.0 - td_ss(allow, 2.0 * allow, a1.w / n);
         float ageSec = (tab.z + 1.0) / hz;
         float ageGate = clamp((max_age - ageSec) / (max_age * TD_AGE_FADE), 0.0, 1.0);
@@ -611,6 +618,11 @@ if (b.x < TD_BW && b.y < TD_BH) {
     }
     bool refreshNow = refresh && admitted;
     vec4 m = texelFetch(meas, b, 0);
+#ifdef TD_BGATES
+    float bstrength = strength * texelFetch(bgates, b, 0).w;
+#else
+    float bstrength = strength;
+#endif
     vec4 pa = vec4(0.0), pb = vec4(0.0);
     if (past >= 0) { pa = texelFetch(ev_a, td_blk(past, b), 0); pb = texelFetch(ev_b, td_blk(past, b), 0); }
     float soft = 0.0, hardT = 0.0;
@@ -624,7 +636,7 @@ if (b.x < TD_BW && b.y < TD_BH) {
     } else if (past >= 0) {
         chosen = true;
         hardT = pa.x * referee;
-        soft = strength * evidence * pa.y * pa.z * (st.retired > 0.5 ? 0.0 : 1.0);
+        soft = bstrength * evidence * pa.y * pa.z * (st.retired > 0.5 ? 0.0 : 1.0);
         st.tHold = soft;
         if (pb.x * pb.y < 0.1) st.vetoRun += 1.0; else st.vetoRun = 0.0;
     } else {
@@ -647,7 +659,7 @@ if (b.x < TD_BW && b.y < TD_BH) {
     float hbP = td_ss(TD_RHO2_LO, TD_RHO2_HI, (m.y + TD_FLOOR) / (st.e2Peak + TD_FLOOR));
     float fP = td_ss(TD_PULL_LO, TD_PULL_HI, m.z / (st.fPeak + 1e-6));
     float noRef = 1.0 - td_ss(0.0, 0.5, weight);
-    bn *= hbP * fP * evidence * noRef * strength;
+    bn *= hbP * fP * evidence * noRef * bstrength;
     bn = st.retired > 0.5 ? 0.0 : bn;
     if (st.bOn < 0.5 && bn >= TD_ENTER) st.bOn = 1.0;
     else if (st.bOn > 0.5 && bn < TD_LEAVE) st.bOn = 0.0;

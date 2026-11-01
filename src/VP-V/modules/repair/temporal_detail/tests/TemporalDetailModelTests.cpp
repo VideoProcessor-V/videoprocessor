@@ -1419,6 +1419,23 @@ namespace VideoProcessorTest
 				else if (!Same(o, in.luma)) changedWhileEngaged = true;
 			}
 			Assert::IsTrue(changedWhileEngaged, L"auto engaged processes");
+			// engaged -> idle -> engaged: the store restarts, so the re-engaged run equals a fresh model started there.
+			Model mb(a), fresh(a);
+			for (int t = 0; t < n; ++t)
+			{
+				Model::FrameIn in;
+				in.luma = st.frames[static_cast<size_t>(t)];
+				in.seq = static_cast<uint64_t>(t);
+				in.contentHz = kHz;
+				in.motion = &motion;
+				in.autoEngaged = t < 10 || t >= 14;
+				const Plane o = mb.Process(in);
+				if (t >= 14)
+				{
+					const Plane f = fresh.Process(in);
+					Assert::IsTrue(Same(o, f), L"re-engaged = a fresh start");
+				}
+			}
 		}
 
 		TEST_METHOD(TemporalDetailMotionSourceIsBounded)

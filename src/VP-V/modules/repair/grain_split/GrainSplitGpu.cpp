@@ -217,6 +217,7 @@ if (p.x < GS_W && p.y < GS_H) {
 			m_out.split = m_rows;
 			m_out.blocks = m_blocks;
 			m_out.w = w; m_out.h = h; m_out.bw = bw; m_out.bh = bh; m_out.B = B; m_out.scale = scale;
+			m_out.codeUnit = codeUnit; m_out.component = component;
 			return true;
 		}
 	}

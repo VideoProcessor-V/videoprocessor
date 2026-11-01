@@ -461,6 +461,44 @@ namespace VideoProcessorTest
 			}
 		}
 
+		TEST_METHOD(TemporalDetailGpuBlockGatesFollowTheModel)
+		{
+			// Regionally adaptive gates (owner 2026-10-31): per-block factors on the margin, base allowance, uncertainty limit
+			// and strength (here: left half stricter and weaker, a band with a loose uncertainty limit) reach the GPU exactly as
+			// the model, and they change the result (so the inputs are really used).
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			const std::vector<Plane> frames = Stream(16, "IBBBPBBB", 0.37, 0.0, 19u, 1.2);
+			const int bw = (kW + 15) / 16, bh = (kH + 15) / 16;
+			std::vector<float> gates(static_cast<size_t>(bw) * bh * 4, 1.0f);
+			for (int by = 0; by < bh; ++by)
+				for (int bx = 0; bx < bw; ++bx)
+				{
+					float* g = &gates[(static_cast<size_t>(by) * bw + bx) * 4];
+					if (bx < bw / 2) { g[0] = 2.0f; g[1] = 0.7f; g[3] = 0.5f; }
+					if (by == 2) g[2] = 3.0f;
+				}
+			pl_tex_params tp{};
+			tp.w = bw; tp.h = bh; tp.format = pl_find_named_fmt(gpu, "rgba32f"); tp.sampleable = true; tp.initial_data = gates.data();
+			pl_tex gtex = pl_tex_create(gpu, &tp);
+			Assert::IsNotNull(gtex);
+			Gpu::Params p;
+			p.settings = Steady();
+			const MatchResult r = RunMatch(dev, frames, 0.37, 0.0, p, Model::Tuning(), [&](int, Gpu::Params& gp, Model::FrameIn& in) {
+				gp.blockGates = gtex;
+				in.blockGates = gates;
+			});
+			const MatchResult neutral = RunMatch(dev, frames, 0.37, 0.0, p, Model::Tuning());
+			double diff = 0.0;
+			for (size_t t = 0; t < frames.size(); ++t)
+				for (size_t i = 0; i < r.model[t].v.size(); ++i) diff = (std::max)(diff, std::fabs(r.model[t].v[i] - neutral.model[t].v[i]));
+			LogF("block gates: worst %.4f codes, worst frame mean %.5f; differs from the global gates by up to %.3f codes", r.worst, r.worstMean, diff);
+			Assert::IsTrue(r.worst <= 0.125 && r.worstMean <= 0.005 && r.maxOverShare <= 0.0, L"the GPU follows the model with per-block gates");
+			Assert::IsTrue(diff > 0.1, L"the per-block gates change the result");
+			pl_tex_destroy(gpu, &gtex);
+		}
+
 		TEST_METHOD(TemporalDetailGpuSlotTierFollowsTheModel)
 		{
 			// The reference-store memory tier: with 2 slots the GPU follows the model with Tuning::slots = 2, says so in its
