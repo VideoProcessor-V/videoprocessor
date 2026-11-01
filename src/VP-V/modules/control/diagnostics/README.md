@@ -192,6 +192,12 @@ Forwarding headers (WP-17; removed in M2 step 0 with their includers): `src/Vide
 - `src/VideoProcessor-GUI/StatsOverlayWindow.cpp`
 - `src/VideoProcessor-Lib/DebugLog.h`
 
+## Testing tooling (wave 1)
+
+- `VpEventLine.h` - structured log lines `vp-event/1`: `VPEV1 t=<ms> kind=<kind> key=value ...`. Kinds: session, resync, fallback, gate, gpu_error, source_change, cadence, repeat, frame_stats, stamp, flag (required fields per kind in the header comment). Global sink is null by default (no-op). Emitters wired: `ResyncShadow::Record` (through its logger) and `FallbackStatus::Registry` (global sink). Parser and analysers: `tools/vplog/` (grammar in its README).
+- `FrameStamp.h` / `FrameStampShader.h` - `vp-stamp/1` 64-bit frame stamp (source top-left, output top-right; geometry proportional to frame height). Output stamp hook is debug only (`VP_DEBUG_OUTPUT_STAMP=1`, `OutputHookOrder::Kind::DebugStamp`, rank 500); off = no hook text. `StreamRecorder --stamps` writes `stamps.csv`. Python mirror and clip generator: `tools/framestamp/`.
+- Python tools: `tools/levels/` (level/colour patterns, expected codes, deltaE, capture check), `tools/soak/` (soak runner and report), `tools/triage/` (bug-ticket intake).
+
 ## Migration directive
 
 Code moves into this folder only when this slot is touched (opportunistic until M1, a dedicated phase after M1, finished by M2). A move = `git mv` + project/include updates + this module's `live_files` + `docs/design/components-master.json` (regenerate with `python tools/check_module_manifests.py --write`) in the SAME commit, with the build, this module's tests and the chain-gate subset passing. Never leave a copy behind; one module per change; never during a release/deploy window. Update this README in the same commit as any slot change.
