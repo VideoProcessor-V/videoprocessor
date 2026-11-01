@@ -105,7 +105,18 @@ namespace TemporalDetail
 		explicit CameraModelMotionSource(const CameraModel::Policy& policy) : m_policy(policy) {}
 		void SetCamera(uint64_t seq, std::shared_ptr<const CameraModel::CameraMotion> record) { m_cam[seq] = std::move(record); }
 		// Drops the records of every sequence below oldestNeeded (each holds a block-data buffer).
-		void Prune(uint64_t oldestNeeded) { m_cam.erase(m_cam.begin(), m_cam.lower_bound(oldestNeeded)); }
+		// Also drops the field pairs below it (FieldMotionSource::PruneField, bug hunt 38 H1): one Prune bounds every map.
+		void Prune(uint64_t oldestNeeded)
+		{
+			m_cam.erase(m_cam.begin(), m_cam.lower_bound(oldestNeeded));
+			PruneField(oldestNeeded);
+		}
+		// Clears the camera records as well as the field pairs (hides FieldMotionSource::Clear, which would keep m_cam).
+		void Clear()
+		{
+			FieldMotionSource::Clear();
+			m_cam.clear();
+		}
 		size_t CameraCount() const { return m_cam.size(); }
 
 		bool Camera(uint64_t seq, CameraPairView& out) const override
