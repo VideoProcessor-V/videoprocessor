@@ -25,10 +25,12 @@ namespace CameraModel
 		bool Predict(double dtSeconds, SimilarityRates& out) const;
 		// 0..1: how well `measured` agrees with the prediction (1 = identical; falls off relative to
 		// the motion magnitude and the filter's own variance). Returns 0.5 (neutral) when no state.
-		double Consistency(double dtSeconds, const SimilarityRates& measured) const;
+		// floorSigma (optional, 4 values in the rates' units, per second): the measurement noise floor of each
+		// component (from the vector precision and the picture size). Null = the phase-1 relative-only noise model.
+		double Consistency(double dtSeconds, const SimilarityRates& measured, const double* floorSigma = nullptr) const;
 		// Fold in a measured set of rates; dtSeconds = time since the previous update (<= 0 on the
 		// first update is allowed). Updates the state deterministically.
-		void Update(double dtSeconds, const SimilarityRates& measured);
+		void Update(double dtSeconds, const SimilarityRates& measured, const double* floorSigma = nullptr);
 
 	private:
 		bool m_valid = false;

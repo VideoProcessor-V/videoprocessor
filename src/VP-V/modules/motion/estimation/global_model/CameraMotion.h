@@ -85,7 +85,9 @@ namespace CameraModel
 		double logScale = 0, angle = 0, tx = 0, ty = 0;
 	};
 
-	// Confidence inputs, each 0..1 (neutral 0.5 where unavailable).
+	// Confidence inputs, each 0..1 (neutral 0.5 where unavailable). `logit` is the UNGATED value (before the
+	// Ambiguous / InverseMismatch verdict gate of Config::verdictGatesConfidence): confidence = logistic(logit),
+	// then halved and scaled when a verdict failed.
 	struct Signals
 	{
 		double inlierShare = 0, precision = 0, coverage = 0, temporal = 0.5, conditioning = 0,
