@@ -4,9 +4,7 @@
  */
 // Q0-A part 1: the B2 enqueue cursor, the G8/D4 storm hold and its notice, the unthrottled VPEV1
 // resync lines (all in ResyncShadow.h) and the "resync_storm" FallbackCatalog entry.
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
+#include "pch.h"
 #include "CppUnitTest.h"
 
 #include <VP-V/core/FallbackCatalog.h>
