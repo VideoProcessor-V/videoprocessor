@@ -229,7 +229,7 @@ namespace EntranceSegment
 		unsigned long long entranceRuns = 0, entranceReuses = 0;
 		EntranceStages::Ring<OwnedEntrance, 3> entranceRing;
 		unsigned long long entranceOnceA = 0, entranceOnceB = 0, entranceOnceReused = 0, entranceOncePictures = 0,
-			entranceOnceFallbacks = 0;
+			entranceOnceFallbacks = 0, entranceOnceFallbackFrames = 0;
 		std::string entranceOnceNote;   // the fallback shown under "Fallbacks engaged" (empty: none)
 		size_t entranceRingBytesLogged = 0;
 		unsigned long long entranceStageRuns = 0;     // every call (any path): the input side's cost unit

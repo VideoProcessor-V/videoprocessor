@@ -309,7 +309,7 @@ namespace EntranceSegment
 		// The "Entrance cost" / "Entrance stages" lines and their cadence live in the diagnostics adapter.
 		VpDiagnostics::EntranceCounters c = {
 			entranceStageRuns, entranceSourceFrames, entranceRuns, entranceReuses, entranceOnceA, entranceOnceB,
-			entranceOnceReused, entranceOncePictures, entranceOnceFallbacks, entranceStatefulBreaks, Once() };
+			entranceOnceReused, entranceOncePictures, entranceOnceFallbacks, entranceStatefulBreaks, Once(), entranceOnceFallbackFrames };
 		VpDiagnostics::LogEntranceCounters(c, entranceCostLoggedAt);
 	}
 
@@ -395,6 +395,8 @@ namespace EntranceSegment
 	void Segment::OnceFallback(const std::string& why)
 	{
 		++entranceOnceFallbacks;
+		if (entranceOnceFallbackFor != entranceOnceCurrentA)
+			++entranceOnceFallbackFrames;
 		entranceOnceFallbackFor = entranceOnceCurrentA;
 		if (why != entranceOnceNote)
 		{
