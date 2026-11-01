@@ -343,9 +343,14 @@ struct ProductTexLayout {
     }
     // The static check of the governor: the layout is exactly what the declaration counts. A layout without
     // absolute terms must equal the SizeRule in total. A layout with absolute terms (a grid whose cell edge is a
-    // runtime choice, e.g. the grain split's block edge B) is checked term by term against the declaration's terms
-    // in the same order: a relative term exactly, an absolute term at the same bytes per cell and AT MOST the
-    // declared cells (the declaration is the upper bound the governor plans with).
+    // runtime choice, e.g. the grain split's block edge B) is checked PER SHIFT, not by term position (a layout may
+    // split one declared term over several textures, e.g. the compact grain split's A rg16f + B rg16 = 8 B/px):
+    //   * every shift the layout uses is declared and every declared shift is used;
+    //   * per shift, the bytes per cell of all layout terms at that shift (relative and absolute) sum to the declared
+    //     bytes per cell of that shift (all declared terms sharing it);
+    //   * an absolute term is at most the declared grid of its shift in EACH axis (absW <= ceil(w / 2^s) and
+    //     absH <= ceil(h / 2^s), not only in total bytes): the declaration is the upper bound the governor plans with.
+    // A declaration with fixed bytes never matches a layout with absolute terms.
     bool MatchesDecl(const ProductDecl& decl, Dims d) const
     {
         bool hasAbs = false;
@@ -355,18 +360,29 @@ struct ProductTexLayout {
         if (!hasAbs)
             return BytesPerBuffer(d) == BytesOf(decl.size, d);
         const size_t n = decl.size.termCount < decl.size.terms.size() ? size_t(decl.size.termCount) : decl.size.terms.size();
-        if (decl.size.fixedBytes != 0 || terms.size() != n)
+        if (decl.size.fixedBytes != 0 || n == 0)
             return false;
-        for (size_t i = 0; i < n; ++i) {
-            const SizeTerm& st = decl.size.terms[i];
-            const uint64_t declBytes = CellsAt(d, st.shift) * st.bytesPerCell;
-            const uint64_t bytes = ShapeBytes(ShapeOf(i, d));
-            if (terms[i].absW > 0 && terms[i].absH > 0) {
-                if (BytesPerTexel(terms[i].fmt) != st.bytesPerCell || bytes > declBytes)
-                    return false;
-            } else if (bytes != declBytes) {
-                return false;
+        std::map<uint8_t, uint64_t> declRate, layoutRate;
+        for (size_t i = 0; i < n; ++i)
+            declRate[decl.size.terms[i].shift] += decl.size.terms[i].bytesPerCell;
+        for (const TexTerm& t : terms) {
+            if (declRate.find(t.shift) == declRate.end())
+                return false;   // a shift the declaration does not count
+            layoutRate[t.shift] += BytesPerTexel(t.fmt);
+            if (t.absW > 0 && t.absH > 0) {
+                const uint64_t div = uint64_t(1) << t.shift;
+                const uint64_t gw = (uint64_t(d.width) + div - 1) / div;
+                const uint64_t gh = (uint64_t(d.height) + div - 1) / div;
+                if (uint64_t(t.absW) > gw || uint64_t(t.absH) > gh)
+                    return false;   // larger than the declared grid in one axis
             }
+        }
+        for (const auto& kv : declRate) {
+            const auto it = layoutRate.find(kv.first);
+            if (kv.second != 0 && (it == layoutRate.end() || it->second != kv.second))
+                return false;
+            if (kv.second == 0 && it != layoutRate.end() && it->second != 0)
+                return false;
         }
         return true;
     }

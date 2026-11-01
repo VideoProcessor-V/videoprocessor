@@ -142,9 +142,34 @@ namespace GpuAllocatorTestsNs
 		return c;
 	}
 
-	Registry P10Registry(bool transient)
+	// The grain split's layouts as GrainSplit::Gpu::GrainLayout builds them (CPU copy: no libplacebo here): the per-pixel
+	// terms are relative, the block grid is ABSOLUTE at ceil(w / B) x ceil(h / B) of the runtime block edge B.
+	ProductTexLayout GrainLayoutCpu(bool compact, Dims d, uint32_t B)
 	{
-		std::vector<ProductDecl> d = SkeletonProducts().All();
+		ProductTexLayout l;
+		TexTerm t;
+		t.shift = 0;
+		if (compact) {
+			t.fmt = TexFormat::RG16F;
+			l.terms.push_back(t);
+			t.fmt = TexFormat::RG16;
+			l.terms.push_back(t);
+		} else {
+			t.fmt = TexFormat::RGBA32F;
+			l.terms.push_back(t);
+		}
+		TexTerm b;
+		b.shift = 4;
+		b.fmt = TexFormat::RGBA32F;
+		b.absW = (d.width + B - 1) / B;
+		b.absH = (d.height + B - 1) / B;
+		l.terms.push_back(b);
+		return l;
+	}
+
+	Registry P10Registry(bool transient, bool compact = false)
+	{
+		std::vector<ProductDecl> d = SkeletonProducts(compact).All();
 		if (transient)
 			d[kP10GrainSplit].residency = Residency::Transient;
 		return Registry(std::move(d));
@@ -758,6 +783,62 @@ namespace GpuAllocatorTestsNs
 			Assert::IsTrue(d.engaged && d.id == "product textures", L"visible");
 			Assert::IsTrue(t.Allocate(*node, reg.Get(kP10GrainSplit), P10Layout(), dims, big), L"the matching layout allocates");
 			Assert::IsFalse(t.RefusalDecision().engaged, L"the refusal clears on the next good allocation");
+		}
+
+		// Finisher MUST 1: the declaration is matched PER SHIFT, not by term position. Compact (A rg16f + B rg16 at shift 0,
+		// absolute blocks) has three terms against P10's two declared terms; it must allocate at block edges 16 and 32.
+		TEST_METHOD(ProductTexturesAllocateCompactAtBlock16And32)
+		{
+			const Registry reg = P10Registry(false, true);
+			const Dims sizes[] = { MkDims(1920, 1080), MkDims(3840, 2160), MkDims(7680, 4320), MkDims(1366, 769) };
+			for (const Dims& dims : sizes) {
+				const Graph g = P10Graph(reg, dims);
+				Assert::IsTrue(g.valid, L"graph valid");
+				const Node* node = g.Find(kP10GrainSplit);
+				Assert::IsNotNull(node, L"P10 node");
+				const TierPlan big = PlanTiers(reg, g, Card3090(), TierInput());
+				for (uint32_t B : { 16u, 32u }) {
+					const ProductTexLayout layout = GrainLayoutCpu(true, dims, B);
+					Assert::AreEqual(size_t(3), layout.terms.size(), L"three textures per buffer");
+					Assert::IsTrue(layout.MatchesDecl(reg.Get(kP10GrainSplit), dims), L"compact matches the compact declaration");
+					FakeBackend be;
+					ProductTextures<FakeBackend> t(be);
+					Assert::IsTrue(t.Allocate(*node, reg.Get(kP10GrainSplit), layout, dims, TierPlan()), L"compact allocates (live)");
+					Assert::AreEqual(0u, t.Refusals(), L"no refusal");
+					Assert::AreEqual(size_t(node->livePool) * 3, size_t(be.created), L"three textures per live buffer");
+					Assert::IsTrue(t.Bytes() <= node->liveBytes, L"never more than the declaration counts");
+					if (B == 16)
+						Assert::AreEqual(node->liveBytes, t.Bytes(), L"at B = 16 exactly what the declaration counts");
+					ProductTextures<FakeBackend> laned(be);
+					Assert::IsTrue(laned.Allocate(*node, reg.Get(kP10GrainSplit), layout, dims, big), L"compact allocates (laned)");
+					// The compact layout against the FULL declaration (8 B/px vs 16 B/px) is refused, and Full against Compact.
+					Assert::IsFalse(layout.MatchesDecl(SkeletonProducts(false).Get(kP10GrainSplit), dims), L"compact vs full declaration refused");
+					Assert::IsFalse(GrainLayoutCpu(false, dims, B).MatchesDecl(reg.Get(kP10GrainSplit), dims), L"full vs compact declaration refused");
+					Assert::IsTrue(GrainLayoutCpu(false, dims, B).MatchesDecl(SkeletonProducts(false).Get(kP10GrainSplit), dims), L"full vs full matches");
+				}
+			}
+		}
+
+		// Finisher SHOULD: an absolute grid is bounded in EACH axis, not only in total bytes.
+		TEST_METHOD(AbsoluteGridIsCheckedPerAxis)
+		{
+			const ProductDecl& decl = SkeletonProducts(true).Get(kP10GrainSplit);
+			const Dims d = MkDims(1920, 1080);   // declared grid 120 x 68
+			ProductTexLayout l = GrainLayoutCpu(true, d, 32);   // 60 x 34
+			Assert::IsTrue(l.MatchesDecl(decl, d), L"within the grid");
+			l.terms[2].absW = 121;   // wider than declared, total bytes still far below (121 x 34 < 120 x 68)
+			Assert::IsTrue(uint64_t(121) * 34 < CellsAt(d, 4), L"total within the declared bytes");
+			Assert::IsFalse(l.MatchesDecl(decl, d), L"wider than the declared grid is refused");
+			l.terms[2].absW = 60;
+			l.terms[2].absH = 69;
+			Assert::IsFalse(l.MatchesDecl(decl, d), L"taller than the declared grid is refused");
+			// An undeclared shift is refused; a missing declared shift is refused.
+			ProductTexLayout extra = GrainLayoutCpu(true, d, 16);
+			extra.terms[1].shift = 1;
+			Assert::IsFalse(extra.MatchesDecl(decl, d), L"a term at an undeclared shift is refused");
+			ProductTexLayout missing = GrainLayoutCpu(true, d, 16);
+			missing.terms.erase(missing.terms.begin(), missing.terms.begin() + 2);
+			Assert::IsFalse(missing.MatchesDecl(decl, d), L"a declared shift without textures is refused");
 		}
 
 		TEST_METHOD(ChromaProductUsesTheActualPlaneBytes)
