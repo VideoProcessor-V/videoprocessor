@@ -32,7 +32,11 @@ CSV_COLUMNS = ["utc", "elapsed_s", "private_bytes", "working_set", "handles", "t
 _DEVREM_RE = re.compile(r"DEVICE_REMOVED|DEVICE_HUNG|DEVICE_RESET|device[ _-]removed|device[ _-]lost",
                         re.I)
 _PREFIX_RE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) \| ")
-_BAD_CAUSES = ("", "none", "unknown")
+_BAD_CAUSES = ("", "none", "unknown", "queue_generation_other")
+_SESSION_MARK = "=== VP LOG SESSION START ==="
+_LEGACY_RESYNC_RE = re.compile(r"Resync \((shadow|on)\)")
+_CUT = {}          # log path -> first line number that belongs to this run (inf: whole file is older)
+_START = [None]    # run start (local naive wall time)
 
 
 def load_thresholds(path):
@@ -136,6 +140,8 @@ def load_logs(collected):
 def assign_times(files, start):
     """Adds ts (seconds since run start, or None) and pre to every event. Returns pre count."""
     pre = 0
+    _CUT.clear()
+    _START[0] = start
     for _p, evs in files:
         anchor = None
         for e in evs:
@@ -148,6 +154,18 @@ def assign_times(files, start):
                 ts = anchor[0] + (e.t_ms - anchor[1]) / 1000.0
             e.ts = ts
             e.pre = ts is not None and ts < -2.0
+        # Session cut: the first session marker at/after the run start begins this run's
+        # session; every earlier line belongs to an older session (VP rotates its log at its
+        # own start, enhanced logging does not rotate). Only older markers: whole file is older.
+        marks = [e for e in evs if _SESSION_MARK in e.raw and e.ts is not None]
+        if marks:
+            inrun = [e for e in marks if e.ts >= -2.0]
+            cut = min(e.line_no for e in inrun) if inrun else float("inf")
+            _CUT[_p] = cut
+            for e in evs:
+                if e.line_no < cut:
+                    e.pre = True
+        for e in evs:
             if e.pre:
                 pre += 1
     return pre
@@ -201,12 +219,14 @@ def check_gpu(files):
         try:
             with open(p, "r", encoding="utf-8", errors="replace") as f:
                 for i, line in enumerate(f, 1):
-                    if (p, i) in seen or not _DEVREM_RE.search(line):
+                    if (p, i) in seen or i < _CUT.get(p, 0) or not _DEVREM_RE.search(line):
                         continue
                     wall = None
                     m = _PREFIX_RE.match(line)
                     if m:
                         wall = datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                        if _START[0] is not None and (wall - _START[0]).total_seconds() < -2.0:
+                            continue
                     hits.append((p, i, line.rstrip("\r\n"), wall))
         except OSError:
             pass
@@ -241,9 +261,23 @@ def steady_hours(files, duration_s, warmup_s, window):
     return max(0.0, duration_s - warmup_s - excluded) / 3600.0, spans
 
 
+_NO_INSTR = ("no resync instrumentation in this run (no in-run VPEV1 kind=resync or legacy "
+             "'Resync (shadow|on)' line): NO DATA; set resync_event shadow (or on) in the test "
+             "deployment's own config")
+
+
+def has_resync_instrumentation(files):
+    for _p, e in _all_events(files):
+        if e.kind == "resync" and (e.source == "vpev" or _LEGACY_RESYNC_RE.search(e.raw)):
+            return True
+    return False
+
+
 def check_drops(files, duration_s, warmup_s, th):
     if not files:
         return _result("drops_repeats", NODATA, "no collected vp.log")
+    if not has_resync_instrumentation(files):
+        return _result("drops_repeats", NODATA, _NO_INSTR)
     hrs, spans = steady_hours(files, duration_s, warmup_s, th["steady_window_s"])
     if hrs <= 0:
         return _result("drops_repeats", NODATA, "no steady time after %g min warm-up" % (warmup_s / 60.0))
@@ -268,6 +302,8 @@ def check_drops(files, duration_s, warmup_s, th):
 def check_resync(files):
     if not files:
         return _result("resync_causes", NODATA, "no collected vp.log")
+    if not has_resync_instrumentation(files):
+        return _result("resync_causes", NODATA, _NO_INSTR)
     counts = {}
     bad = []
     for p, e in _all_events(files):
@@ -280,7 +316,7 @@ def check_resync(files):
     listing = ", ".join("%s=%d" % kv for kv in sorted(counts.items())) or "none"
     if bad:
         return _result("resync_causes", FAIL,
-                       "%d full resync(s) with no cause; counts: %s" % (len(bad), listing),
+                       "%d full resync(s) with no cause (empty/none/unknown/queue_generation_other); counts: %s" % (len(bad), listing),
                        [_ev(e) for _p, e in bad], bad[0][0])
     return _result("resync_causes", PASS, "every full resync has a cause; counts: %s" % listing)
 

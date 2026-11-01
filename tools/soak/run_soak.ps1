@@ -205,6 +205,8 @@ try {
     New-Item -ItemType Directory -Force -Path $col | Out-Null
     foreach ($n in @('vp.log', 'vp.log.0')) {
         $src = Join-Path $workFull ('logs\' + $n)
+        # vp.log.0 is the PREVIOUS session (VP rotates at its own start): only collect it when it was written after launch
+        if ($n -eq 'vp.log.0' -and (Test-Path -LiteralPath $src) -and ((Get-Item -LiteralPath $src).LastWriteTime -le $launch)) { continue }
         if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination (Join-Path $col $n) -Force }
     }
     $repDir = Join-Path $workFull 'logs\reports'

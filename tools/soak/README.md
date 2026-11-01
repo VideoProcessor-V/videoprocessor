@@ -60,3 +60,8 @@ Outputs in `<Out>`: `soak-YYYYMMDD.md`, `report.json`, `plot-memory.svg`, `plot-
 `plot-handles.svg`, `plot-frametime.svg` (a plot is skipped when it has fewer than 2 points), and for
 each FAIL `triage\<check>.json` with keys `source, check, verdict, detail, build_id, out_dir, log_path,
 trigger_wall, first_events` (up to 10 `{line_no, raw}`).
+
+## Required deployment config and sessions
+
+- Drops/repeats and resync-cause checks need resync instrumentation: set `resync_event shadow` (or `on`) in the TEST deployment's own config (done by the coordinator or owner, never by the runner). Without any in-run `kind=resync` / `Resync (shadow|on)` line these checks report NO DATA.
+- Only the run's own session counts: `vp.log.0` is collected only when written after launch, and the report drops every event before the run's `=== VP LOG SESSION START ===` marker from all checks. A FULL resync with cause `queue_generation_other` counts as uncaused.

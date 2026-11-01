@@ -26,7 +26,8 @@ def _fmt(sec_offset, start_local):
 
 
 def make_run(out, hours, interval=60, pb_mb_per_h=0.0, handles_per_h=0.0, vram=True,
-             threads=lambda i: 40, events=(), exit_info=None, write_log=True, frame_p99=None):
+             threads=lambda i: 40, events=(), exit_info=None, write_log=True, frame_p99=None,
+             instrument=True, extra_prelog=()):
     """Synthetic soak dir. events: iterable of (elapsed_s, body-after-prefix). Returns start_local."""
     os.makedirs(os.path.join(out, "collected"), exist_ok=True)
     start_utc = datetime.datetime(2026, 10, 30, 12, 0, 0, tzinfo=datetime.timezone.utc)
@@ -43,8 +44,12 @@ def make_run(out, hours, interval=60, pb_mb_per_h=0.0, handles_per_h=0.0, vram=T
             vd = str(int(900 * MB)) if vram else ""
             f.write("%s,%d,%d,%d,%d,%d,10,5,%s,,,,,,0\n" % (ts, el, pb, pb // 2,
                                                              int(2000 + handles_per_h * h), threads(i), vd))
-    lines = ["%s | === VP LOG SESSION START ===" % _fmt(0, start_local),
-             "%s | VPEV1 t=5000000.000 kind=session build_id=BLD123 commit=abc" % _fmt(0, start_local)]
+    lines = list(extra_prelog)
+    lines += ["%s | === VP LOG SESSION START ===" % _fmt(0, start_local),
+              "%s | VPEV1 t=5000000.000 kind=session build_id=BLD123 commit=abc" % _fmt(0, start_local)]
+    if instrument:
+        lines.append("%s | VPEV1 t=5000000.000 kind=resync level=full cause=start seq=1 mode=shadow"
+                     % _fmt(0, start_local))
     if frame_p99:
         sec = 0
         while sec <= hours * 3600:
@@ -164,6 +169,38 @@ class ReportTests(unittest.TestCase):
         _c, _r, c = self.go()
         self.assertEqual(c["resync_causes"]["verdict"], "FAIL")
         self.assertEqual(len(c["resync_causes"]["first_events"]), 1)
+
+    def test_previous_session_in_same_log_ignored(self):
+        old = datetime.datetime(2026, 10, 29, 9, 0, 0)
+        pre = ["%s | === VP LOG SESSION START ===" % old.strftime("%Y-%m-%d %H:%M:%S"),
+               "%s | ERROR: DXGI_ERROR_DEVICE_REMOVED during Present" % old.strftime("%Y-%m-%d %H:%M:%S"),
+               "%s | libplacebo [error]: old failure" % old.strftime("%Y-%m-%d %H:%M:%S")]
+        self.full_pass_run(extra_prelog=pre)
+        # a collected vp.log.0 that is wholly an older session
+        with open(os.path.join(self.out, "collected", "vp.log.0"), "w", encoding="utf-8") as f:
+            f.write(os.linesep.join(pre) + os.linesep)
+        _c, rep, c = self.go()
+        self.assertEqual(c["gpu_errors"]["verdict"], "PASS", c["gpu_errors"]["detail"])
+        self.assertNotEqual(rep["overall"], "FAIL", rep["checks"])
+
+    def test_no_resync_instrumentation_is_no_data(self):
+        self.full_pass_run(instrument=False)
+        code, rep, c = self.go()
+        self.assertEqual(c["drops_repeats"]["verdict"], "NO DATA")
+        self.assertEqual(c["resync_causes"]["verdict"], "NO DATA")
+        self.assertEqual(rep["overall"], "INCOMPLETE")
+        shutil.rmtree(self.out)
+        self.full_pass_run(instrument=True)
+        _c, _r, c = self.go()
+        self.assertEqual(c["drops_repeats"]["verdict"], "PASS")
+        self.assertEqual(c["resync_causes"]["verdict"], "PASS")
+
+    def test_queue_generation_other_is_uncaused(self):
+        self.full_pass_run(events=[
+            (4000, "VPEV1 t={T} kind=resync level=full cause=queue_generation_other seq=7 mode=on")])
+        _c, _r, c = self.go()
+        self.assertEqual(c["resync_causes"]["verdict"], "FAIL")
+        self.assertIn("queue_generation_other", c["resync_causes"]["detail"])
 
     def test_fallback_is_no_data(self):
         self.full_pass_run(events=[(4000, 'VPEV1 t={T} kind=fallback state=engaged id=gpu_unpack reason=x')])
