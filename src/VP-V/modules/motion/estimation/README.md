@@ -93,8 +93,8 @@ Synthesis consumers (dejudder extras, interpolator, hiccup repair, occlusion mas
 2. No consumer wants vectors, or only synthesis consumers do: mode Off, idle.
 3. Interlaced: no vectors, every wanting consumer is unserved (visible fallback).
 4. libplacebo smooth motion: see the exception below.
-5. Low latency, at any queue capacity (owner: backward vectors without look-ahead; no look-ahead in low latency): Backward pairs. Source statistics consumers (source monitor, intent) are served; source-field consumers (grain map, deband hold, detail pulse, entrance segment) and output dither are unserved ("needs a frame ahead"). (Until 2026-11-01 a low-latency queue holding a frame ahead ran forward, `ForwardShallow`, which engaged the look-ahead in low latency; that reason is no longer decided.)
-6. Otherwise Forward. Every wanting consumer is served; the estimate and producer run when anything is served. `EngageAhead(configured, capacity)` is max(1, min(configured, capacity)).
+5. Low latency with no frame ahead (queue capacity 0, e.g. a competitive queue): Backward pairs. Source statistics consumers (source monitor, intent) are served; source-field consumers (grain map, deband hold, detail pulse, entrance segment) and output dither are unserved ("needs a frame ahead").
+6. Otherwise Forward (ForwardShallow in low latency with capacity of at least 1, e.g. a games queue that keeps one frame queued: it uses the frames its own queue already holds). Every wanting consumer is served; the estimate and producer run when anything is served. `EngageAhead(configured, capacity)` is max(1, min(configured, capacity)). Owner rule (2026-11-01): in low latency the vectors never ADD queue depth; they use only frames the mode already queues (nothing raises the queue target for the look-ahead).
 
 `MotionAhead::Decide(..., backwardPairs)` gives depth 0 with reason BackwardPairs for the backward mode in low latency (engine available, consumer present); without the flag nothing changes.
 

@@ -3191,8 +3191,13 @@ namespace Tests
 			// de-judder off and the producer never started.
 			if (!RequireHardwareOrSkip("LowLatencyQueueFromTheFirstFrame")) return;
 			g_harnessApplySnapshot = true;
+			// The harness sets the queue target itself after the snapshot (SetQueueFramePolicy; 4 for film by
+			// default): match the profile's target_frames 1 (competitive, no frame queued ahead). With the
+			// default 4 the queue held 3 frames ahead, which the vector engine may use (owner 2026-11-01).
+			g_harnessQueueTarget = 1;
 			const RunResult low = Run(VideoFrameEncoding::V210, "gpu", 4.0, true,
 				"dejudder_strength: 0.25\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 1\n");
+			g_harnessQueueTarget = 0;
 			const RunResult normal = Run(VideoFrameEncoding::V210, "gpu", 4.0, true,
 				"dejudder_strength: 0.25\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n");
 			g_harnessApplySnapshot = false;
@@ -3617,7 +3622,9 @@ namespace Tests
 			{
 				const std::string extra = std::string(early ? "capture_upload: early\n" : "capture_upload: render\n") +
 					"[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 1\n";
+				g_harnessQueueTarget = 1;   // as the profile's target_frames 1 (competitive: no frame queued ahead)
 				const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false, extra, false, &plan60);
+				g_harnessQueueTarget = 0;
 				const std::string name = std::string("low latency 60 Hz, early upload ") + (early ? "on" : "off");
 				report(name, r);
 				bool readEarly = !early;
@@ -5435,8 +5442,10 @@ namespace Tests
 			if (!RequireHardwareOrSkip("InterpolationLowLatencyFromTheFirstFrame")) return;
 			const FramePlan plan = RatePlan(HarnessMonitorHz() * 5.0 / 6.0);
 			g_harnessApplySnapshot = true;
+			g_harnessQueueTarget = 1;   // as the profile's target_frames 1 (the harness overrides the snapshot's target)
 			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 4.0, false,
 				"interpolation: auto\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 1\n", false, &plan);
+			g_harnessQueueTarget = 0;
 			g_harnessApplySnapshot = false;
 			ReportInterpolation("low latency", r);
 			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
@@ -6714,36 +6723,26 @@ namespace Tests
 			}
 		}
 
-		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineLowLatencyDepthOneStaysBackward)
+		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineGamesDepthOneEngagesAtOneAhead)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
 		END_TEST_METHOD_ATTRIBUTE()
-		TEST_METHOD(VectorEngineLowLatencyDepthOneStaysBackward)
+		TEST_METHOD(VectorEngineGamesDepthOneEngagesAtOneAhead)
 		{
 			const HarnessScope harnessScope;
-			// A low-latency queue that keeps one frame ahead (queue_size 4, target_frames 2) still never
-			// looks ahead (owner 2026-10-15/16: backward vectors without look-ahead in low latency). Until
-			// 2026-11-01 this queue ran forward (ForwardShallow) and engaged the look-ahead; now the
-			// backward pairs are published, as at depth zero, and the consumer that needs a frame ahead
-			// (the debander hold) is named as without vectors.
-			if (!RequireHardwareOrSkip("VectorEngineLowLatencyDepthOneStaysBackward")) return;
-			if (VectorTestSkip("VectorEngineLowLatencyDepthOneStaysBackward")) return;
+			// A games queue (queue_size 4, target_frames 2) keeps one frame ahead: the look-ahead engages
+			// at one ahead and the vectors are forward.
+			if (!RequireHardwareOrSkip("VectorEngineGamesDepthOneEngagesAtOneAhead")) return;
+			if (VectorTestSkip("VectorEngineGamesDepthOneEngagesAtOneAhead")) return;
 			g_harnessApplySnapshot = true;
 			g_harnessQueueTarget = 2;   // the harness sets the target itself after the snapshot (SetQueueFramePolicy)
 			const RunResult r = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
-				"deband_vp: on\nsource_resolution: auto\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 2\n");
+				"deband_vp: on\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 2\n");
 			g_harnessApplySnapshot = false;
 			g_harnessQueueTarget = 0;
 			Logger::WriteMessage(VectorTestLines(r).c_str());
 			Assert::IsTrue(r.presented, (L"frames presented\n" + r.Tail()).c_str());
-			Assert::IsFalse(r.Logged("Motion ahead: engaged"), (L"no look-ahead in low latency\n" + r.Tail()).c_str());
-			Assert::IsFalse(r.Logged("vectors delivered (forward"), (L"no forward vectors in low latency\n" + r.Tail()).c_str());
-			Assert::IsTrue(r.Logged("vectors delivered (backward"), (L"backward pairs delivered\n" + r.Tail()).c_str());
-			bool named = false;
-			for (const std::string& line : r.log)
-				if (line.find("Vector engine: backward pairs") != std::string::npos && line.find("deband hold") != std::string::npos &&
-					line.find("without vectors") != std::string::npos)
-					named = true;
-			Assert::IsTrue(named, (L"the status names the deband hold as without vectors\n" + r.Tail()).c_str());
+			Assert::IsTrue(r.Logged("Motion ahead: engaged"), (L"the look-ahead engaged at one ahead\n" + r.Tail()).c_str());
+			Assert::IsTrue(r.Logged("vectors delivered (forward"), (L"forward vectors delivered\n" + r.Tail()).c_str());
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(VectorEngineCompetitiveDepthZeroPublishesBackwardPairs)
