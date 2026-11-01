@@ -239,3 +239,43 @@ def j_eff(plane_codes10, ctx, tile=None, lut=None):
     lut = lut or build_lut(ctx)
     jp = fetch(lut, lowpass(p))["J"]
     return 0.5 * jp + 0.5 * tile_mean(jp, tile or tile_size_for(p.shape[0]))
+
+
+# ---- P12 block product (WP2): mirror of LightLevel::Blocks::BlockOut (LightLevelBlocks.h) -----------------------------
+V_CAP = 64.0
+SUPPORT_EPS = 1e-6
+
+
+def block_product(j_local, cov, mean_y, have_grain, lut, sigma_blocks, radius, frame_j, gate=1.0,
+                  prev_js=None, alpha=0.0, v_cap=V_CAP):
+    """(gh, gw, 4) = (J_surround, J_local, V, conf) per region block.
+
+    j_local, cov, mean_y, have_grain : (gh, gw) arrays (P11's kMeanPq, kCoverage, kMeanY, kStatN >= 0).
+    J_surround   = sum(w cov J_local) / sum(w cov), w = exp(-0.5 ((dx^2 + dy^2) / sigma^2)) over |dx|,|dy| <= radius, rows then
+                   columns (the C++ loop order); frame_j when the picture support is <= 1e-6; then the one-pole against
+                   prev_js (the previous J_surround, None = reset).
+    J_local      = block value in the picture (cov >= 0.5), else J_surround.   V = min(LUT V at mean_y, v_cap) in the picture
+    conf         = gate in the picture with a grain split, else 0."""
+    j_local = np.asarray(j_local, np.float64)
+    cov = np.asarray(cov, np.float64)
+    gh, gw = j_local.shape
+    out = np.zeros((gh, gw, 4), np.float64)
+    vfull = fetch(lut, np.asarray(mean_y, np.float64))["V"]
+    for by in range(gh):
+        for bx in range(gw):
+            sw = sj = 0.0
+            for y in range(max(0, by - radius), min(gh - 1, by + radius) + 1):
+                dy = (y - by) / sigma_blocks
+                wy = np.exp(-0.5 * dy * dy)
+                for x in range(max(0, bx - radius), min(gw - 1, bx + radius) + 1):
+                    dx = (x - bx) / sigma_blocks
+                    wc = np.exp(-0.5 * dx * dx) * wy * cov[y, x]
+                    sw += wc
+                    sj += wc * j_local[y, x]
+            js = sj / sw if sw > SUPPORT_EPS else frame_j
+            if prev_js is not None:
+                js = prev_js[by, bx] + alpha * (js - prev_js[by, bx])
+            inpic = cov[by, bx] >= 0.5
+            out[by, bx] = (js, j_local[by, bx] if inpic else js, min(float(vfull[by, bx]), v_cap) if inpic else 0.0,
+                           gate if (inpic and have_grain[by, bx]) else 0.0)
+    return out

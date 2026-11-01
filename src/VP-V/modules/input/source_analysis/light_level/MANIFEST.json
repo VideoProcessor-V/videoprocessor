@@ -9,7 +9,11 @@
     "src/VP-V/modules/input/source_analysis/light_level/LightLevelSettings.h",
     "src/VP-V/modules/input/source_analysis/light_level/LightLevelLut.h",
     "src/VP-V/modules/input/source_analysis/light_level/LightLevelGlsl.h",
+    "src/VP-V/modules/input/source_analysis/light_level/LightLevelBlocks.h",
+    "src/VP-V/modules/input/source_analysis/light_level/LightLevelBlocksGlsl.h",
     "src/VP-V/modules/input/source_analysis/light_level/README.md",
+    "src/VP-V/modules/input/source_analysis/light_level/tests/LightLevelBlocksTests.cpp",
+    "src/VP-V/modules/input/source_analysis/light_level/tests/LightLevelBlocksWarpTests.cpp",
     "src/VP-V/modules/input/source_analysis/light_level/tests/README.md"
   ],
   "forwarding_headers": [],
@@ -63,6 +67,6 @@
       "input.source_analysis"
     ]
   },
-  "fallback_when_missing": "Draft: not wired; when wired, a repair without the light-level map weighs by its own local statistics and says so in its status.",
+  "fallback_when_missing": "Draft: not wired. Product P12 (unit version 2): no region statistics -> frame level from the source APL; no APL -> code only (LUT per pixel, conf 0); no LUT or display context -> neutral (light term 1); stats made without this LUT or for another context -> confidence 0. Every case has a status line; the product recovers when its inputs return.",
   "fallback_entry": "Light level: approx (<why>) | neutral (<why>)"
 }

@@ -117,6 +117,8 @@
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationCoreTests.cpp"><Filter>VP-V</Filter></ClCompile>
     <ClCompile Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelLutTests.cpp"><Filter>VP-V</Filter></ClCompile>
     <ClCompile Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelCrossCheckTests.cpp"><Filter>VP-V</Filter></ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelBlocksTests.cpp"><Filter>VP-V</Filter></ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelBlocksWarpTests.cpp"><Filter>VP-V</Filter></ClCompile>
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationRemainderTests.cpp"><Filter>VP-V</Filter></ClCompile>
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationMeterTests.cpp"><Filter>VP-V</Filter></ClCompile>
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\tests\CalibrationPhase2Tests.cpp"><Filter>VP-V</Filter></ClCompile>
@@ -310,6 +312,7 @@
   <ItemGroup><ClInclude Include="..\VP-V\tests\SettingsTestSupport.h"><Filter>VP-V</Filter></ClInclude></ItemGroup>
   <ItemGroup><ClInclude Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelGolden.generated.h"><Filter>VP-V</Filter></ClInclude></ItemGroup>
   <ItemGroup><ClInclude Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelCrossCheck.generated.h"><Filter>VP-V</Filter></ClInclude></ItemGroup>
+  <ItemGroup><ClInclude Include="..\VP-V\modules\input\source_analysis\light_level\tests\LightLevelBlocksGolden.generated.h"><Filter>VP-V</Filter></ClInclude></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\segments\OutputSegmentsMerge.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\tests\SegmentRunnerTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>
   <ItemGroup><ClCompile Include="..\VP-V\tests\OutputSegmentsGpuTests.cpp"><Filter>VP-V</Filter></ClCompile></ItemGroup>

@@ -74,9 +74,9 @@ struct ProductRow {
 // (VerifyUnit). P10/P10c: the grain split unit defines GrainSplit::kUnitVersion with SA2 (2 = compact blocks carry
 // the band energies); the expectation is declared here so the catalog is complete.
 constexpr uint32_t kExpectedCameraUnit = 1;
-constexpr uint32_t kExpectedRegionUnit = 1;
+constexpr uint32_t kExpectedRegionUnit = 2;
 constexpr uint32_t kExpectedTemporalDetailUnit = 1;
-constexpr uint32_t kExpectedLightLevelUnit = 1;
+constexpr uint32_t kExpectedLightLevelUnit = 2;
 constexpr uint32_t kExpectedVectorUnit = 1;
 constexpr uint32_t kExpectedStatsUnit = 1;
 constexpr uint32_t kExpectedGrainSplitUnit = 2;

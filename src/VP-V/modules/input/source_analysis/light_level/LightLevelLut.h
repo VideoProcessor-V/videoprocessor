@@ -41,7 +41,8 @@
 
 namespace LightLevel
 {
-	constexpr unsigned kUnitVersion = 1;   // P12 light level unit version (core/ProductCatalog.h)
+	// P12 light level unit version (core/ProductCatalog.h). 2 = WP2: the per-block product (LightLevelBlocks.h) on top of the LUT.
+	constexpr unsigned kUnitVersion = 2;
 
 	struct Context
 	{
@@ -419,6 +420,32 @@ namespace LightLevel
 		r.S = a.S + (b.S - a.S) * t;
 		r.V = a.V + (b.V - a.V) * t;
 		r.sdrCode = a.sdrCode + (b.sdrCode - a.sdrCode) * t;
+		return r;
+	}
+
+	// The LUT as the shader reads it (PackTexels layout), evaluated with the SAME arithmetic as light_level_lut_fetch:
+	// clamp the index, floor, a + (b - a) * t. T = float is the GLSL mirror, T = double the CPU reference over the same
+	// float texels (the stats pass and the block pass use this one function on both sides).
+	template <class T>
+	struct PackedEntry { T J, S, V, L10k; };
+
+	template <class T>
+	inline PackedEntry<T> FetchPacked(const float* texels, T code10)
+	{
+		T idx = code10;
+		if (!(idx > T(0))) idx = T(0);
+		if (idx > T(kLutSize - 1)) idx = T(kLutSize - 1);
+		const T f = std::floor(idx);
+		const int i0 = static_cast<int>(f);
+		const int i1 = std::min(i0 + 1, kLutSize - 1);
+		const T t = idx - f;
+		const float* a = texels + static_cast<std::size_t>(i0) * 4;
+		const float* b = texels + static_cast<std::size_t>(i1) * 4;
+		PackedEntry<T> r;
+		r.J = T(a[0]) + (T(b[0]) - T(a[0])) * t;
+		r.S = T(a[1]) + (T(b[1]) - T(a[1])) * t;
+		r.V = T(a[2]) + (T(b[2]) - T(a[2])) * t;
+		r.L10k = T(a[3]) + (T(b[3]) - T(a[3])) * t;
 		return r;
 	}
 

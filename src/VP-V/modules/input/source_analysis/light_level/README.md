@@ -82,6 +82,34 @@ a setting or comes in through `Context`.
 
 Deterministic (fixed loops, double math, no threads), C++14, no Windows headers.
 
+## Block product P12 (WP2, unit version 2)
+
+One rgba texel per region block (the P11 grid; 8160 blocks = 65 KB per frame at 1080p, 4K and 8K, plus the 16 KB LUT):
+`(J_surround, J_local, V, conf)`. Declared in `core/Products.h` (P12, history 1: the previous slot is the one-pole state, no
+private copy), catalogued in `core/ProductCatalog.h` (expected unit version 2), counted by the VRAM governor.
+
+- **J_local**: mean J over the block's picture pixels, taken by P11's stats pass from this LUT (`StatsConstants::lutTexels`,
+  `FetchPacked`; RegionEvidence unit version 2). It replaces the generic `Nits` / `PqOf` / `Visibility` chain; without a LUT the
+  generic law is kept as the visible reduced path (`RegionEvidence::StatusOf`: "no light-level LUT").
+- **J_surround**: Gaussian over J_local weighted by picture coverage, so bars (coverage 0) never enter it, whatever their level;
+  sigma = 1 degree of visual angle from the picture height and `Params::viewingDistancePictureHeights` (display settings), else
+  picture height / 40, in blocks (the same share of the picture at every resolution); window radius 3 sigma, capped and reported.
+  Then a one-pole (tau 0.3 s at the 60 Hz reference, `GeneralRate::PerFrameWeight`) that resets on cut, resync, re-base,
+  geometry (frame, block, picture rect) and context (LUT fingerprint) changes.
+- **V**: the LUT visibility (Weber units) of one code step at the block mean code, capped at 64 (unclamped, unlike P11's 0..1
+  `kVisibilityStat`). **conf**: 1 in the picture with a grain split, scaled by the frame gate (0 when P11 was made without this
+  LUT or for another context).
+- **Modes and status** (`LightLevelBlocks.h`, `Out::status`): Full; FrameLevel (no P11: one level from P4's APL, conf 0.5);
+  CodeOnly (no P11, no APL: conf 0, consumers use the LUT per pixel); Neutral (no LUT/context: light term 1). Every reduction is
+  named ("Light level: reduced (...)"), reset reasons are appended, the product recovers when its inputs return.
+- **Consumer read**: `vpu_light_block(blk)`, `vpu_light_jeff(px, code10)` (GLSL, `LightLevelBlocksGlsl.h`) and
+  `EffectiveAt<T>` (CPU mirror): `J_eff = J_p + (J_s - J_p) * (surroundMix * conf)`, J_s bilinear over the block centres; conf 0
+  gives J_p. Consumers: dither-need map (V, Sout), deband (`k_light`), contrast recovery.
+- **Fill**: lane after P11 (one pass), or the first consumer fills it live into the same slot with the same pass
+  (`LightLevelBlocksPassGlsl`). Mirror: `BlockOut<float>`; reference: `BlockOut<double>`; python: `tools/eval/light_level_ref.py`
+  `block_product`, pinned by `tests/LightLevelBlocksGolden.generated.h`.
+- Open: the surround sigma is a guess until the WP9 eval; the viewing distance has no setting key yet (the host passes it).
+
 ## Status line
 
 `Light level: approx (<why>) | neutral (<why>)` when wired; the LUT's own `status` carries the exact / approx text.
