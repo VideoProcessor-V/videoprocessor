@@ -7,6 +7,8 @@
 #include <QString>
 #include <QStringList>
 #include <ConfigurationRpcClient.h>
+#include <VP-V/config/VpvConfigPages.h>   // VPV-HOOK
+#include <VP-V/config/VpvDitherChoiceSet.h>   // VPV-HOOK
 
 #include <map>
 #include <functional>
@@ -63,11 +65,8 @@ public:
         const QString& rememberedTargetLabel = {});
     ~ConfigEditorWindow() override;
     void selectPage(int index);
-    // Page lookups by name: Bill's pages keep his order and numbers, VP-V's
-    // (Dynamic Drive, Calibration, VP-V) follow them, and every navigation
-    // lookup of a page goes through its name so the two sets cannot drift.
-    void selectPage(const QString& name);
-    int pageIndex(const QString& name) const;
+    void selectPage(const QString& name) { const int page = pageIndex(name); if (page >= 0) selectPage(page); }   // VPV-HOOK
+    int pageIndex(const QString& name) const { return vpvPages_.index(name); }   // VPV-HOOK
     void reveal();
     void showUpdates();
     void setTargetRefresh(std::function<void()> refresh);
@@ -137,8 +136,7 @@ private:
     QWidget* createCard(const QString& title, const QString& description, QWidget* content);
     QWidget* createPage(const QString& title, const QString& description, QWidget* body);
     QPushButton* addNavigationButton(const QString& text, int pageIndex);
-    int addNamedPage(const QString& name, QWidget* page);
-    bool originalPathwayOn() const;
+    bool originalPathwayOn() const { return Vpv::ConfigOriginalPathwayOn([this](const QString& s, const QString& k) { return value(s, k); }); }   // VPV-HOOK
     QString value(const QString& section, const QString& key, const QString& fallback = {}) const;
     QStringList profileSections(const QString& root) const;
     QString legacySubtitleHdrValue(const QString& key) const;
@@ -351,7 +349,7 @@ private:
     QStringList allRenderers_;
     QStringList monitors_;
     QStackedWidget* pages_ = nullptr;
-    QMap<QString, int> pageIndexByName_;
+    Vpv::ConfigPageDirectory vpvPages_;   // VPV-HOOK
     QWidget* navigation_ = nullptr;
     QLabel* status_ = nullptr;
 	QLabel* effectSummary_ = nullptr;
@@ -410,9 +408,7 @@ private:
         QLabel* label;
     };
     std::vector<RendererAutoStatusBinding> rendererAutoStatusBindings_;
-    // Re-show the profile on screen when the pathway (Original / VP-V) changes: the
-    // Dithering choice set follows it. Cleared whenever the shell is rebuilt.
-    std::vector<std::function<void()>> pathwayRefreshers_;
+    Vpv::PathwayRefreshers pathwayRefreshers_;   // VPV-HOOK: re-shows profiles when the pathway changes; cleared when the shell is rebuilt
     QString liveSourceTransfer_;
     bool liveCalibrationAvailable_ = false;
     bool liveCalibrationLutAttached_ = false;
