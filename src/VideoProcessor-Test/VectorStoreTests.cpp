@@ -3,8 +3,12 @@
 
 #include <VP-V/modules/motion/estimation/VectorStore.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cstring>
+#include <memory>
 #include <thread>
+#include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -602,6 +606,59 @@ namespace OpticalFlowTrustTest
 			Assert::IsTrue(store.Put(101, 102, 6, make(10)));
 			Assert::IsTrue(store.Get(101, 102, e));
 			for (float w : e.payload->costWeight) Assert::AreEqual(1.0f, w, L"the new pair's own weights");
+		}
+	};
+}
+
+// U3 / C1: MotionAhead::HalfLuma8's 2x2 box now calls VpUnit::HalfLuma (taps, sum and the engine-view finish); the decode
+// path is untouched. The frozen loop below is the private box it replaced, applied to the decoded 10-bit codes.
+namespace MotionAheadHalfLumaUnitTest
+{
+	TEST_CLASS(MotionAheadHalfLumaUnitIdentityTests)
+	{
+	public:
+		TEST_METHOD(HalfLuma8IsByteIdenticalToTheFrozenBoxOnOddAndEvenSizes)
+		{
+			const int sizes[][2] = { { 1, 1 }, { 2, 2 }, { 3, 5 }, { 5, 3 }, { 7, 9 }, { 16, 8 }, { 33, 17 }, { 64, 3 }, { 129, 66 }, { 130, 65 } };
+			unsigned seed = 5;
+			for (const auto& sz : sizes)
+				for (int mode = 0; mode < 3; ++mode)   // 0 noise, 1 saturated (code 1023), 2 black
+				{
+					const int W = sz[0], H = sz[1];
+					auto p010 = std::make_shared<std::vector<uint16_t>>(static_cast<size_t>(W) * H * 3 / 2 + 8, static_cast<uint16_t>(512 << 6));
+					std::vector<uint16_t> codes(static_cast<size_t>(W) * H);
+					for (int y = 0; y < H; ++y)
+						for (int x = 0; x < W; ++x)
+						{
+							seed = seed * 1664525u + 1013904223u;
+							const uint16_t c = mode == 1 ? 1023 : mode == 2 ? 0 : static_cast<uint16_t>((seed >> 8) & 1023u);
+							codes[static_cast<size_t>(y) * W + x] = c;
+							(*p010)[static_cast<size_t>(y) * W + x] = static_cast<uint16_t>(c << 6);
+						}
+					AnalysisLumaSource a; a.data = reinterpret_cast<const uint8_t*>(p010->data()); a.dataBytes = p010->size() * 2;
+					a.width = W; a.height = H; a.rowBytes = static_cast<size_t>(W) * 2; a.chromaRowBytes = static_cast<size_t>(W) * 2;
+					a.format = AnalysisLumaFormat::P010; a.backingOwner = p010;
+					std::vector<uint8_t> out;
+					int hw = 0, hh = 0;
+					Assert::IsTrue(MotionAhead::HalfLuma8(a, out, hw, hh), L"HalfLuma8");
+					Assert::AreEqual((W + 1) / 2, hw);
+					Assert::AreEqual((H + 1) / 2, hh);
+					// The frozen private box (verbatim) over the decoded codes.
+					std::vector<uint8_t> ref(static_cast<size_t>(hw) * hh);
+					for (int y = 0; y < hh; ++y)
+					{
+						const uint16_t* r0 = &codes[static_cast<size_t>((std::min)(2 * y, H - 1)) * W];
+						const uint16_t* r1 = &codes[static_cast<size_t>((std::min)(2 * y + 1, H - 1)) * W];
+						for (int x = 0; x < hw; ++x)
+						{
+							const int x0 = (std::min)(2 * x, W - 1), x1 = (std::min)(2 * x + 1, W - 1);
+							const unsigned sum = r0[x0] + r0[x1] + r1[x0] + r1[x1];
+							ref[static_cast<size_t>(y) * hw + x] = static_cast<uint8_t>((std::min)(255u, sum >> 4));
+						}
+					}
+					Assert::AreEqual(ref.size(), out.size());
+					Assert::IsTrue(std::memcmp(ref.data(), out.data(), ref.size()) == 0, L"engine view bytes");
+				}
 		}
 	};
 }

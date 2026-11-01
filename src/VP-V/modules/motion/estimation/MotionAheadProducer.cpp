@@ -2,6 +2,7 @@
 #include "MotionAheadProducer.h"
 
 #include <DebugLog.h>
+#include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
 
 #include <dxgi.h>
 
@@ -145,14 +146,14 @@ namespace MotionAhead
 			std::vector<uint16_t> r0(static_cast<size_t>(w)), r1(static_cast<size_t>(w));
 			for (int y = fromY; y < toY; ++y)
 			{
-				decodeRow((std::min)(2 * y, h - 1), r0.data());
-				decodeRow((std::min)(2 * y + 1, h - 1), r1.data());
+				decodeRow(VpUnit::HalfLuma::Tap0(y, h), r0.data());
+				decodeRow(VpUnit::HalfLuma::Tap1(y, h), r1.data());
 				uint8_t* dst = &out[static_cast<size_t>(y) * halfW];
 				for (int x = 0; x < halfW; ++x)
 				{
-					const int x0 = (std::min)(2 * x, w - 1), x1 = (std::min)(2 * x + 1, w - 1);
-					const unsigned sum = r0[x0] + r0[x1] + r1[x0] + r1[x1];
-					dst[x] = static_cast<uint8_t>((std::min)(255u, sum >> 4));   // the mean code / 4
+					// The 2x2 box of the shared half-luma unit (VpUnit::HalfLuma, U3) with its engine-view finish.
+					const int x0 = VpUnit::HalfLuma::Tap0(x, w), x1 = VpUnit::HalfLuma::Tap1(x, w);
+					dst[x] = VpUnit::HalfLuma::FinishEngine8(VpUnit::HalfLuma::Box4(r0[x0], r0[x1], r1[x0], r1[x1]));   // the mean code / 4
 				}
 			}
 		};
