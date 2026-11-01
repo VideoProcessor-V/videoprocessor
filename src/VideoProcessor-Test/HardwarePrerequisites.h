@@ -97,8 +97,7 @@ namespace HardwarePrerequisites
 			const std::string message = marker + " (" + KindEnvName(kind) + "=1 or VP_TEST_REQUIRE_ALL=1: a missing precondition fails)";
 			Assert::Fail(std::wstring(message.begin(), message.end()).c_str());
 		}
-		Logger::WriteMessage((marker + "
-").c_str());
+		Logger::WriteMessage((marker + "\n").c_str());
 		return false;
 	}
 
