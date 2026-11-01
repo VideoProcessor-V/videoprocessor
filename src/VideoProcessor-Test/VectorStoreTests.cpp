@@ -625,7 +625,8 @@ namespace MotionAheadHalfLumaUnitTest
 				for (int mode = 0; mode < 3; ++mode)   // 0 noise, 1 saturated (code 1023), 2 black
 				{
 					const int W = sz[0], H = sz[1];
-					auto p010 = std::make_shared<std::vector<uint16_t>>(static_cast<size_t>(W) * H * 3 / 2 + 8, static_cast<uint16_t>(512 << 6));
+					// r210 (big-endian 10-bit RGB, R = G = B = code): valid at odd sizes; its own decode gives (R + 2G + B + 2) >> 2 = code.
+					auto rgb = std::make_shared<std::vector<uint8_t>>(static_cast<size_t>(W) * H * 4, uint8_t(0));
 					std::vector<uint16_t> codes(static_cast<size_t>(W) * H);
 					for (int y = 0; y < H; ++y)
 						for (int x = 0; x < W; ++x)
@@ -633,11 +634,13 @@ namespace MotionAheadHalfLumaUnitTest
 							seed = seed * 1664525u + 1013904223u;
 							const uint16_t c = mode == 1 ? 1023 : mode == 2 ? 0 : static_cast<uint16_t>((seed >> 8) & 1023u);
 							codes[static_cast<size_t>(y) * W + x] = c;
-							(*p010)[static_cast<size_t>(y) * W + x] = static_cast<uint16_t>(c << 6);
+							const uint32_t word = (uint32_t(c) << 20) | (uint32_t(c) << 10) | uint32_t(c);
+							uint8_t* px = rgb->data() + (static_cast<size_t>(y) * W + x) * 4;
+							px[0] = uint8_t(word >> 24); px[1] = uint8_t(word >> 16); px[2] = uint8_t(word >> 8); px[3] = uint8_t(word);
 						}
-					AnalysisLumaSource a; a.data = reinterpret_cast<const uint8_t*>(p010->data()); a.dataBytes = p010->size() * 2;
-					a.width = W; a.height = H; a.rowBytes = static_cast<size_t>(W) * 2; a.chromaRowBytes = static_cast<size_t>(W) * 2;
-					a.format = AnalysisLumaFormat::P010; a.backingOwner = p010;
+					AnalysisLumaSource a; a.data = rgb->data(); a.dataBytes = rgb->size();
+					a.width = W; a.height = H; a.rowBytes = static_cast<size_t>(W) * 4;
+					a.format = AnalysisLumaFormat::NativeRgb; a.encoding = VideoFrameEncoding::R210; a.backingOwner = rgb;
 					std::vector<uint8_t> out;
 					int hw = 0, hh = 0;
 					Assert::IsTrue(MotionAhead::HalfLuma8(a, out, hw, hh), L"HalfLuma8");
