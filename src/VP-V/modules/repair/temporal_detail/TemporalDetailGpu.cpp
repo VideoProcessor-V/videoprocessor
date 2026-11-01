@@ -158,7 +158,7 @@ namespace TemporalDetail
 			pl_tex_blit_params bp{};
 			bp.src = src; bp.dst = readable;
 			pl_tex_blit(gpu, &bp);
-			std::vector<uint32_t> v(static_cast<size_t>(rp.w) * src->params.format->num_components, 0u);
+			std::vector<float> v(static_cast<size_t>(rp.w) * src->params.format->num_components, 0.0f);
 			pl_tex_transfer_params d{};
 			d.tex = readable; d.ptr = v.data();
 			const bool ok = pl_tex_download(gpu, &d);
@@ -167,9 +167,11 @@ namespace TemporalDetail
 			const int nc = src->params.format->num_components;
 			out.guardActive = static_cast<int>(v[0]);
 			out.addBackBlocks = static_cast<int>(v[1]);
-			out.guardTrips = v[2];
+			// lo + hi x 2^20 (kStatsBody keeps the cumulative count as two exact float digits); saturates at INT_MAX
+			const double trips = static_cast<double>(v[2]) + 1048576.0 * static_cast<double>(v[static_cast<size_t>(nc) + 2]);
+			out.guardTrips = trips >= 2147483647.0 ? 2147483647 : static_cast<int>(trips);
 			out.refreshes = static_cast<int>(v[3]);
-			out.admitted = v[static_cast<size_t>(nc)] > 0u;
+			out.admitted = v[static_cast<size_t>(nc)] > 0.5f;
 			out.liveSlots = static_cast<int>(v[static_cast<size_t>(nc) + 1]);
 			return true;
 		}
@@ -273,13 +275,11 @@ namespace TemporalDetail
 
 			// --- Textures ---
 			const pl_fmt f4 = FloatFormat(gpu, 4), f2 = FloatFormat(gpu, 2), f1 = FloatFormat(gpu, 1), h4 = FloatFormat(gpu, 4, 16);
-			const pl_fmt u4 = UintFormat(gpu, 4);
 			const bool floatLuma = luma->params.format->type == PL_FMT_FLOAT;
 			pl_fmt baseFmt = floatLuma ? nullptr : Unorm16(gpu, 1);
 			m.baseUnorm = baseFmt != nullptr;
 			if (!baseFmt) baseFmt = f1;
 			const int kbw = K * g.bw;
-			if (!u4) return fail("no 32-bit unsigned-integer storage format for the slot table");
 			bool ok = f4 && f2 && f1 && h4 &&
 				Ensure(gpu, m.out, W, H, StorableLike(gpu, luma->params.format), true) &&
 				Ensure(gpu, m.meas, g.bw, g.bh, f4) && Ensure(gpu, m.slotBlk, kbw, g.bh, f4) &&
@@ -294,18 +294,18 @@ namespace TemporalDetail
 			const int arows = (K + acols - 1) / acols;
 			ok = ok && Ensure(gpu, m.atlasPix, acols * w, arows * h, h4) && Ensure(gpu, m.atlasBase, acols * w, arows * h, baseFmt);
 			for (int i = 0; ok && i < 2; ++i)
-				ok = Ensure(gpu, m.mot[i], kbw, g.bh, f4) && Ensure(gpu, m.tab[i], K + 2, 1, u4) && Ensure(gpu, m.state[i], 8 * g.bw, g.bh, f4);
+				ok = Ensure(gpu, m.mot[i], kbw, g.bh, f4) && Ensure(gpu, m.tab[i], K + 2, 1, f4) && Ensure(gpu, m.state[i], 8 * g.bw, g.bh, f4);
 			if (ok && params.templateClean)
 				ok = Ensure(gpu, m.acc[0], w, h, f2) && Ensure(gpu, m.acc[1], w, h, f2) && Ensure(gpu, m.patches, g.npx, g.npy, f2);
 			if (ok && !m.counters[0])
 			{
 				// Zero-initialised (the guard-trip count is cumulative over the stream, as the model's).
-				const std::vector<uint32_t> zero(2 * 4, 0u);
+				const std::vector<float> zero(2 * 4, 0.0f);
 				for (int i = 0; ok && i < 2; ++i)
 				{
 					pl_tex_params tp{};
-					tp.w = 2; tp.h = 1; tp.format = u4; tp.sampleable = true; tp.storable = true; tp.blit_src = true;
-					tp.initial_data = zero.data();
+					tp.w = 2; tp.h = 1; tp.format = f4; tp.sampleable = true; tp.storable = true; tp.blit_src = true;
+					tp.initial_data = f4->num_components == 4 ? zero.data() : nullptr;
 					m.counters[i] = pl_tex_create(gpu, &tp);
 					ok = m.counters[i] != nullptr;
 				}

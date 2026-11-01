@@ -67,13 +67,6 @@ namespace VpvGpu
 		return f ? f : pl_find_fmt(gpu, PL_FMT_FLOAT, n, 16, 16, caps);
 	}
 
-	// A sampleable + storable 32-bit unsigned-integer format (exact counters / ids); null if the GPU has none.
-	inline pl_fmt UintFormat(pl_gpu gpu, int components)
-	{
-		const auto caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE);
-		return pl_find_fmt(gpu, PL_FMT_UINT, components, 32, 32, caps);
-	}
-
 	inline pl_shader_desc Sampled(const char* name, pl_tex tex)
 	{
 		pl_shader_desc d{};

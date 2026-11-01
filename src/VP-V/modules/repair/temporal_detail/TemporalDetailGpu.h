@@ -81,8 +81,7 @@ namespace TemporalDetail
 
 		struct Counters
 		{
-			int guardActive = 0, addBackBlocks = 0, refreshes = 0, liveSlots = 0;
-			uint32_t guardTrips = 0;   // cumulative over the stream; exact (uint32 on the GPU, wraps at 2^32)
+			int guardActive = 0, addBackBlocks = 0, guardTrips = 0, refreshes = 0, liveSlots = 0;
 			bool admitted = false;
 		};
 
