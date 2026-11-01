@@ -284,7 +284,7 @@ def lead_start(text, mask, start):
     while pos > 0:
         pls = text.rfind("\n", 0, pos - 1) + 1
         raw = text[pls:pos]
-        if raw.strip() != "" and mask[pls:pos].strip() == "":
+        if raw.strip() != "" and mask[pls:pos].strip() == "" and not raw.lstrip().startswith("#"):
             pos = pls
         else:
             break
@@ -401,7 +401,7 @@ def external_linkage_definition(member, in_unnamed):
     if in_unnamed or member.kind != "other":
         return False
     h = member.head.strip()
-    if re.match(r"template", h) or h.startswith("#"):
+    if re.match(r"template\b", h) or h.startswith("#"):
         return False
     is_func = "(" in h and "=" not in h.split("(")[0]
     first = h.split("(")[0] if is_func else h

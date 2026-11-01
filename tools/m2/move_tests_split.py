@@ -341,8 +341,19 @@ def append_to_vpv(existing_text, head, vp_methods, vp_classes, per_class, notes)
 
 # ------------------------------------------------------------------ project / renames / categories
 
+def cond_depth(text, pos):
+    depth = 0
+    for ln in text[:pos].split("\n"):
+        t = ln.strip()
+        if re.match(r"#\s*if", t):
+            depth += 1
+        elif re.match(r"#\s*endif", t):
+            depth -= 1
+    return depth
+
+
 def update_props(plan, bill_path, new_path):
-    praw = C.read_working(TEST_PROPS)
+    praw = plan.get(TEST_PROPS) or C.read_working(TEST_PROPS)
     items, pnl, _ = C.parse_props(praw)
     key = ("ClCompile", C.norm_include(posixpath.relpath(new_path, "src/VideoProcessor-Test").replace("/", "\\")))
     if any(i.key == key for i in items):
@@ -357,7 +368,7 @@ def update_props(plan, bill_path, new_path):
         if it.tag == "ClCompile" and C.norm_include(it.include) == bname:
             tmpl = it
     if tmpl is not None:
-        text = re.sub(r'(Include\s*=\s*")[^"]*(")', lambda m: m.group(1) + rel + m.group(2), tmpl.text, count=1)
+        text = re.sub(r'(\bInclude\s*=\s*")[^"]*(")', lambda m: m.group(1) + rel + m.group(2), tmpl.text, count=1)
         norm = C.norm_item_text(text, proj_text, tmpl.start)
     else:
         norm = '<ClCompile Include="%s" />' % rel
@@ -428,7 +439,16 @@ def plan_file(f, bill_ref, cfg, plan, report):
            "inc_removed": [], "notes": [], "lines_before": head_text.count("\n"), "bill_lines": bill_text.count("\n")}
     if not vp_methods and not vp_classes:
         res["lines_after"] = head_text.count("\n")
+        if C.read_working(new_path) is not None:
+            update_props(plan, f, new_path)
         return res
+    # --- conditional-compilation guard: VP methods inside #if/#ifdef regions are only reported
+    for c in head.classes:
+        for ch in c.children or []:
+            if ch.kind == "method" and (c.name, ch.name) in set(vp_methods):
+                if cond_depth(head_text, ch.start) > 0:
+                    res["notes"].append("VP method %s::%s lies inside a conditional-compilation block "
+                                        "(moved without it: review)" % (c.name, ch.name))
     # --- Bill-side text
     new_bill = build_bill_text(head, vp_methods, vp_classes)
     bill_idents = set(S.IDENT.findall(bill.mask))
