@@ -25,7 +25,8 @@
 // it, to the thread of its first Fill; the binding is an atomic compare-exchange (VpSkeleton::ThreadBinding), so two
 // threads racing for the first use cannot both win. A Fill from another thread, or with an arena bound to another
 // thread, is refused (counted, LastRefusal(), FillDecision() visible) and never touches the GPU; a refusal from another
-// thread touches only atomics (it never writes the owner's state). The two instances write different
+// thread touches only atomics (it never writes the owner's state) and stays visible until the owner's next BeginFrame.
+// The status accessors (Fills, Refusals, LastRefusal, FillDecision) may be read from any thread. The two instances write different
 // textures (ring buffers for the lane, live buffers for the render), so nothing aliases.
 //
 // The slot textures come from the node's ProductTextures, laid out by GrainLayout(storage, desc) for the storage that
@@ -154,14 +155,13 @@ namespace GrainSplit
 					m_crossPending.store(true);
 					return false;
 				}
-				m_refusal.clear();
-				m_crossPending.store(false);
+				m_refusal.store(nullptr);
 				if (m_source.arena && m_source.arena->BoundToOtherThread())
 					return Refuse("the scratch arena belongs to another thread");
 				const StorageChoice granted = ChooseStorage(m_source.storage, m_source.plane ? m_source.plane->params.format : nullptr, m_source.codeUnit);
 				if (m_targets && granted.storage != m_layoutStorage)
 					return Refuse("the plane's storage changed: the node must be laid out again");
-				++m_fills;
+				m_fills.fetch_add(1);
 				Options o;
 				o.storage = m_targets ? m_layoutStorage : m_source.storage;
 				o.arena = m_source.arena;
@@ -172,30 +172,46 @@ namespace GrainSplit
 					m_source.params, o);
 			}
 
-			unsigned Fills() const { return m_fills; }
-			unsigned Refusals() const { return m_refusals + m_crossThread.load(); }
+			// A new frame (owner thread, like the arena's BeginFrame): forgets a cross-thread refusal of the previous frame, so
+			// such a refusal stays visible until the frame's status has been read at least once.
+			void BeginFrame()
+			{
+				if (m_binding.BindIfUnbound())
+					m_crossPending.store(false);
+			}
+
+			// Status accessors are safe from ANY thread (the host may read a lane instance's status on the render thread):
+			// counters are atomic and the refusal reason is a pointer to a fixed literal, published atomically.
+			unsigned Fills() const { return m_fills.load(); }
+			unsigned Refusals() const { return m_refusals.load() + m_crossThread.load(); }
 			unsigned CrossThreadRefusals() const { return m_crossThread.load(); }
-			// Owner thread: the last refusal; a refused call from another thread since the owner's last Fill shows first.
-			const std::string& LastRefusal() const { return m_crossPending.load() ? CrossThreadText() : m_refusal; }
-			// Visible while the last Fill was refused (no silent fallbacks); released by the next accepted Fill.
+			// The owner's last refusal (released by its next accepted Fill), or a cross-thread refusal of this frame (released
+			// by BeginFrame); "" when neither.
+			std::string LastRefusal() const
+			{
+				const char* own = m_refusal.load();
+				const bool cross = m_crossPending.load();
+				std::string r = own ? own : "";
+				if (cross)
+					r += std::string(r.empty() ? "" : "; ") + kCrossThreadText;
+				return r;
+			}
+			// Visible while the last Fill was refused or another thread was refused this frame (no silent fallbacks).
 			FallbackCatalog::Decision FillDecision() const
 			{
-				const std::string& why = LastRefusal();
+				const std::string why = LastRefusal();
 				return why.empty() ? FallbackCatalog::Released("grain split fill")
 					: FallbackCatalog::Engaged("grain split fill", "grain split not computed: " + why);
 			}
 			const Splitter& Computer() const { return *m_splitter; }
 
 		private:
-			static const std::string& CrossThreadText()
-			{
-				static const std::string s = "called from another thread (one SplitterFill per thread)";
-				return s;
-			}
+			static constexpr const char* kCrossThreadText = "called from another thread (one SplitterFill per thread)";
+			// `why` must be a string literal (its pointer is published to other threads).
 			bool Refuse(const char* why)
 			{
-				m_refusal = why;
-				++m_refusals;
+				m_refusal.store(why);
+				m_refusals.fetch_add(1);
 				return false;
 			}
 
@@ -208,9 +224,9 @@ namespace GrainSplit
 			VpSkeleton::ThreadBinding m_binding;
 			std::atomic<unsigned> m_crossThread{ 0 };
 			std::atomic<bool> m_crossPending{ false };
-			unsigned m_fills = 0;
-			unsigned m_refusals = 0;
-			std::string m_refusal;
+			std::atomic<unsigned> m_fills{ 0 };
+			std::atomic<unsigned> m_refusals{ 0 };
+			std::atomic<const char*> m_refusal{ nullptr };
 		};
 	}
 }

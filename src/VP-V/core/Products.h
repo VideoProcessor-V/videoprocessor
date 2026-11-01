@@ -487,7 +487,9 @@ inline void AppendCameraProducts(std::vector<ProductDecl>& decls)
 // (rgba32f split plane + rgba32f per 16x16 block, today's layout; the compact layout is an SA2
 // either/or switch declared in GrainNode.h). It reads the source frame only (no lag, no history):
 // it is made once per frame by the lane or, when not published by the seal, by the first consumer.
-inline void AppendGrainSplitProduct(std::vector<ProductDecl>& decls, bool compact = false)
+// `compactChroma` is P10c's own storage grant (the chroma planes may be granted another storage than luma); it defaults
+// to the luma flag.
+inline void AppendGrainSplitProduct(std::vector<ProductDecl>& decls, bool compact, bool compactChroma)
 {
     using detail::AddInput;
     using detail::AddTerm;
@@ -515,21 +517,28 @@ inline void AppendGrainSplitProduct(std::vector<ProductDecl>& decls, bool compac
                          Tier::T1, content, Bit(kSettingsAnalysis));
     c.sourceFrame = true;
     AddInput(c, kP4SourceStats, 0);
-    AddTerm(c, 1, compact ? 16 : 32);   // Cb + Cr planes at half size: 2 x (8 | 16) B/px
+    AddTerm(c, 1, compactChroma ? 16 : 32);   // Cb + Cr planes at half size: 2 x (8 | 16) B/px
     AddTerm(c, 5, 32);                  // block grids at 16 px of those planes: 2 x 16 B per block (both layouts)
     c.refRenderMs = 0.6f;
     c.planningSize = true;
     decls.push_back(c);
 }
 
+inline void AppendGrainSplitProduct(std::vector<ProductDecl>& decls, bool compact = false)
+{
+    AppendGrainSplitProduct(decls, compact, compact);
+}
+
 // The registry the skeleton runs with: the first products, the camera products, then P10, in fixed id order.
-inline Registry SkeletonProducts(bool compactGrain = false)
+// `compactGrain` / `compactChroma`: the GRANTED storage of P10 (luma) and P10c (chroma planes).
+inline Registry SkeletonProducts(bool compactGrain, bool compactChroma)
 {
     std::vector<ProductDecl> d = FirstProducts().All();
     AppendCameraProducts(d);
-    AppendGrainSplitProduct(d, compactGrain);
+    AppendGrainSplitProduct(d, compactGrain, compactChroma);
     return Registry(std::move(d));
 }
+inline Registry SkeletonProducts(bool compactGrain = false) { return SkeletonProducts(compactGrain, compactGrain); }
 
 // A component's consumption: which products it reads, and at which lag.
 struct ConsumeRef {

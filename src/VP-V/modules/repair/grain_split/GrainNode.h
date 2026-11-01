@@ -339,8 +339,13 @@ namespace GrainSplit
 	{
 		return VpSkeleton::SkeletonProducts(granted == Storage::Compact).Get(VpSkeleton::kP10GrainSplit);
 	}
-	// The skeleton registry for the GRANTED storage (what the tier plan / governor must be built from).
-	inline VpSkeleton::Registry GrainRegistryFor(Storage granted) { return VpSkeleton::SkeletonProducts(granted == Storage::Compact); }
+	// The skeleton registry for the GRANTED storages (what the tier plan / governor must be built from): luma (P10) and the
+	// chroma planes (P10c) are granted separately (ChooseStorage per plane).
+	inline VpSkeleton::Registry GrainRegistryFor(Storage grantedLuma, Storage grantedChroma)
+	{
+		return VpSkeleton::SkeletonProducts(grantedLuma == Storage::Compact, grantedChroma == Storage::Compact);
+	}
+	inline VpSkeleton::Registry GrainRegistryFor(Storage granted) { return GrainRegistryFor(granted, granted); }
 
 	// THE EXPLICIT LAYOUT (owner decision): the node stores ONE main map plus small MODIFIER fields; consumers derive every
 	// other map from them cheaply, nobody recomputes a grain estimate. Base = the per-pixel picture split (clean = base + s1 + s2,

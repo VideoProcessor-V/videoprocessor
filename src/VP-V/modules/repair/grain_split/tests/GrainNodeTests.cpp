@@ -475,6 +475,14 @@ namespace GrainNodeTestsNs
 						Assert::IsTrue(tex.Allocate(node, decl, layout, d, VpSkeleton::TierPlan()), L"allocates");
 						Assert::IsTrue(tex.Bytes() <= 2 * VpSkeleton::BytesOf(decl.size, d), L"within the declaration");
 					}
+					// Luma and chroma granted separately: P10 and P10c each follow their own grant.
+					{
+						const VpSkeleton::Registry mixed = GrainRegistryFor(Storage::Compact, Storage::Full);
+						Assert::IsTrue(mixed.Validate(), L"mixed grants validate");
+						Assert::AreEqual(VpSkeleton::BytesOf(GrainDecl(Storage::Compact).size, d), VpSkeleton::BytesOf(mixed.Get(VpSkeleton::kP10GrainSplit).size, d), L"luma compact");
+						Assert::AreEqual(VpSkeleton::BytesOf(VpSkeleton::SkeletonProducts(false).Get(VpSkeleton::kP10cGrainSplitChroma).size, d),
+							VpSkeleton::BytesOf(mixed.Get(VpSkeleton::kP10cGrainSplitChroma).size, d), L"chroma full");
+					}
 					// Requested Compact, granted Full (a float plane): the REQUESTED declaration would refuse the layout forever.
 					Assert::IsFalse(GrainLayout(Storage::Full, desc).MatchesDecl(GrainDecl(Storage::Compact), d), L"requested declaration refuses the downgrade");
 				}

@@ -26,8 +26,9 @@
 // while a frame was short, released by itself on the first frame that was not: recovery is automatic
 // once a larger plan is reserved). Never a silent fallback.
 //
-// Threading: single owner thread (documented, checked race-free: the owner is a ThreadBinding, bound by Reserve or
-// the first BeginScope; another thread's Acquire / BeginScope returns null / false, is counted in CrossThreadAcquires
+// Threading: single owner thread (documented, checked race-free: the owner is a ThreadBinding, bound by the first
+// Reserve or BeginScope, handed over only by Unbind(); another thread's Reserve / BeginFrame / BeginScope / Acquire is
+// refused (false / no-op / false / null), is counted in CrossThreadAcquires
 // and flagged in FrameDecision through atomics only, and never touches the pools or the owner's records).
 //
 // TexBackend: using Handle (null-testable, default constructed = null); Handle Create(const TexShape&)
@@ -79,9 +80,15 @@ public:
     // Makes the pools match `plan`: textures of a shape already held are kept (up to the new capacity),
     // missing ones are created in pool order, surplus and unplanned ones are destroyed. False when a
     // texture could not be created (that pool stays short: its Acquires are exhausted, visibly).
+    // Only the owner (or the first caller of an unbound arena) may reserve: another thread's Reserve is refused (false,
+    // counted in CrossThreadAcquires, flagged in FrameDecision) and touches nothing. Unbind() hands the arena over.
     bool Reserve(const ArenaPlan& plan)
     {
-        owner_.Rebind();   // the reserving thread owns the arena (an explicit transfer)
+        if (!owner_.BindIfUnbound()) {
+            ++crossThread_;
+            frameCross_.store(true);
+            return false;
+        }
         scopeOpen_ = false;
         std::vector<Pool> next;
         bool ok = true;
@@ -123,7 +130,14 @@ public:
         return ok;
     }
 
-    // Destroys every texture (device loss, shutdown).
+    // The owner hands the arena over (e.g. to a lane thread that will Reserve it next). Owner thread only.
+    void Unbind()
+    {
+        if (owner_.BoundToCaller())
+            owner_.Reset();
+    }
+
+    // Destroys every texture (device loss, shutdown). Owner thread, or after every user has stopped (destruction).
     void Release()
     {
         for (Pool& p : pools_)
@@ -138,6 +152,11 @@ public:
     // A new frame: forgets the previous frame's shortage record.
     void BeginFrame()
     {
+        if (owner_.BoundToOther()) {
+            ++crossThread_;
+            frameCross_.store(true);
+            return;   // another thread: the owner's records are untouched
+        }
         frameShort_.clear();
         frameNested_ = false;
         frameCross_.store(false);
@@ -173,6 +192,10 @@ public:
     // caller reduces or switches off for this frame; the shortage is recorded for FrameDecision()).
     Handle Acquire(const char* owner, const TexShape& shape)
     {
+        if (!owner_.Bound()) {
+            ++outsideScope_;   // never reserved nor scoped: no scope is open
+            return Handle();
+        }
         if (!owner_.BoundToCaller()) {
             ++crossThread_;
             frameCross_.store(true);

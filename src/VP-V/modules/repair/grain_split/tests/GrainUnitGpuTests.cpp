@@ -420,7 +420,9 @@ namespace GrainUnitGpuTestsNs
 			Assert::AreEqual(1u, fill.Refusals(), L"counted");
 			Assert::IsTrue(fill.FillDecision().engaged && fill.LastRefusal().find("another thread") != std::string::npos, L"visible, with the reason");
 			Assert::IsTrue(fill.Fill(3, GrainSplit::GrainTarget{ true, 0 }), L"the owning thread recovers at once");
-			Assert::IsFalse(fill.FillDecision().engaged, L"and the notice is released");
+			Assert::IsTrue(fill.FillDecision().engaged, L"the cross-thread notice stays for the rest of the frame");
+			fill.BeginFrame();
+			Assert::IsFalse(fill.FillDecision().engaged, L"and is released on the next frame");
 
 			// An arena bound to another thread (reserved there) is refused on this thread's instance.
 			VpSkeleton::PlTexBackend backend(gpu);

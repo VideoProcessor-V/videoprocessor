@@ -399,6 +399,25 @@ namespace GpuAllocatorTestsNs
 			Assert::AreEqual(0, arena.Acquire("nobody", s), L"unrequested owner gets null");
 			Assert::AreEqual(0, arena.Acquire("x", Shape(7, 7, TexFormat::R8)), L"unrequested shape gets null");
 			Assert::AreEqual(uint64_t(2), arena.Shed(), L"unrequested acquires counted as shed");
+			arena.EndScope();
+			// Audit: a non-owner can neither re-Reserve nor start a frame on the owner's arena; Unbind hands it over.
+			const int createdBefore = be.created;
+			bool reserved = true;
+			std::thread t3([&]() { reserved = arena.Reserve(PlanArena(r, Tier::T2)); arena.BeginFrame(); });
+			t3.join();
+			Assert::IsFalse(reserved, L"another thread's Reserve is refused");
+			Assert::AreEqual(createdBefore, be.created, L"and touches nothing");
+			Assert::AreEqual(uint64_t(4), arena.CrossThreadAcquires(), L"Reserve and BeginFrame counted");
+			arena.Unbind();
+			std::thread t4([&]() { reserved = arena.Reserve(PlanArena(r, Tier::T2)); });
+			t4.join();
+			Assert::IsTrue(reserved, L"after Unbind another thread may take the arena");
+			Assert::IsTrue(arena.BoundToOtherThread(), L"now owned by that thread");
+			// An arena never bound: an Acquire is outside a scope, not a cross-thread use.
+			ScratchArena<FakeBackend> fresh(be);
+			Assert::AreEqual(0, fresh.Acquire("x", s), L"null");
+			Assert::AreEqual(uint64_t(1), fresh.OutsideScopeAcquires(), L"counted as outside a scope");
+			Assert::AreEqual(uint64_t(0), fresh.CrossThreadAcquires(), L"not as another thread");
 		}
 
 		TEST_METHOD(ArenaReserveFailureIsVisible)
