@@ -175,3 +175,16 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
 
 <!-- vpv-settings-tests:end -->
+
+## Scratch arena (SA1)
+
+- Temporaries from the arena (when Params::arena is set): Apply's `half` (one float-1 texture, half-resolution) and `tmp` (one float-2); ApplyForeign's trio `fHalf`, `fTmp`, `fLow` (one float-1, two float-2, half of the foreign dims). Formats are the ones the module already uses (FloatFormat), mapped with PlTexBackend::FormatOf; `TextureRestore::ArenaRequests(gpu, planeW, planeH, foreignW, foreignH)` lists them.
+- Scope ids: `kArenaScopeApply` 0x0101 (owner `texture_restore`), `kArenaScopeForeign` 0x0102 (owner `texture_restore_foreign`). Tier T1: shed by the governor before T0.
+- Fallback: no scratch texture (arena short, plan empty, tier shed) = "scratch memory short": that frame is rendered without texture restore (Apply returns false, ScratchShort() true, the failure counts). It is visible through the FallbackCatalog entry `scratch_arena` and the existing texture restore entry (TextureRestoreFailed). The failure restarts the references, so the module recovers by itself on the first frame after the arena returns.
+- Off = byte-identical: with Params::arena null the code path and the private textures are exactly as before; with an arena the output is byte-identical (test TextureRestoreGpuArenaIsByteIdentical).
+- Persistent state (output, low bands, repeat bands, tile statistics, grain, references, gains, state, foreign output) stays private: it is history or the returned output and migrates in SA6/SA7/SA8/SA12.
+- Host call site to wire (hook layer, NOT done here): the renderer owns one `ScratchArena<PlTexBackend>`, reserves `PlanArena(requests, tier)` with the tier from the governor grant of `kUserScratchArena` (via ArenaGrantFor), calls `BeginFrame()` per frame, and passes the arena in `Params::arena`.
+
+## Private GPU textures (skeleton rule)
+
+This module still creates its own GPU textures (see the static test src/VP-V/tests/PrivateTextureScanTests.cpp). Its per-frame half-resolution temporaries (half, tmp, and the foreign-geometry trio) come from the shared scratch arena when Params::arena is set (SA1); its persistent state (low bands, tile statistics, references, gains, output) stays private and migrates in SA6/SA7/SA8/SA12.

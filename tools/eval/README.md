@@ -244,6 +244,19 @@ D:\hfrenv\Scripts\python.exe -I tools/eval/run_prototypes.py --family temporal_
     --baseline td_off --candidates td_b008 --out D:\codexideoprocessor\eval-scratch	est-td-realun-td_b008 --lpips
 ```
 
+### TemporalDetail with real vectors (`td_vectors/`, test/td-real-vectors)
+
+Full 1080p frames (no crops) of the td_real encodes (`prep_data.py`); consecutive-pair vectors on a 4 px grid in the
+`vector_source.py` contract (`vecgen.py`: `dis`, `disref` = DIS seed + quarter-pel block refinement, `nvof` / `nvofref`
+= VP's NVIDIA optical flow seed from `tools/td-cli/bin/nvof_dump.exe` (+ the same refinement)), computed on the decoded
+frames ("engine") and on the master (the near-ideal ceiling applied to the decoded frames). `available_detail.py`:
+per frame type PSNR / fine-band energy, per-block oracle ceilings of fine-band transfer, full blend, a perfect
+reference and a vector-error-free offset search, the master's incoherent (grain) fine band. `td_run.py`: the CPU model
+through `td_cli --stdio` scored on the fly (`--gates-off` = `Tuning::gatesOff`). `td_banding.py`: light_metrics banding
+/ shadow texture (SDR, HDR-proxy -> SDR, deband, 8-bit nd / sigma-delta). `make_jobs.py` + `run_jobs.py` queue the
+runs, `summarize.py` writes the tables (`prototypes/temporal_detail_real/vectors/`). Outputs (vectors, frames) stay in
+scratch (`D:/codex/td-real-vectors-out`).
+
 ## Candidate list (planned) and the metrics that gate each
 
 | candidate | what it must beat | gating metrics | guards (must not regress) |
@@ -313,3 +326,34 @@ python -I tools/eval/test_light_eval.py                                # tests
   master texture. btb counts a master pixel only if below black by more than half an output code step (2 ten-bit codes for 8-bit).
 
 The committed run (`prototypes/stack_s2/`) is the full 18-case run at 960x540 (the runner supports the sdr and hdr_pq_1000 contexts; the suite's hdr_pq_4000 and lldv cases have no runner context); read it as relative ordering only (stand-in stages).
+
+## Streaming-realistic suite (`streaming_*.json`)
+
+Fixed-bitrate x265 encodes are kinder than real streaming: services starve dark / grainy / fast shots with per-shot
+VBR under a capped average, and players drop to low ladder rungs during congestion. This suite models that.
+
+* **Generator** `make_streaming_encodes.py` (rules and presets in `streaming_presets.py`, documented there):
+  shots found with ffmpeg's scene score; each shot is an independent closed-GOP segment whose bitrate follows
+  `complexity^0.6` (complexity = x264 CRF probe at a fixed analysis width), clamped to 0.5-1.5x the rung average
+  so the average is capped and hard shots are starved; ladders `hd` (1080p 6/4.5/3 Mb/s, 720p 1.5) and `uhd`
+  (2160p 16/12/8, 1080p 4.5) scaled by real pixel area and frame rate (never upscaled, any master size);
+  presets `hevc_gop2`/`hevc_gop4` (x265 Main10, 2/4 s closed GOP, 3-4 B-frames, AQ mode 3, VBV 1.5x),
+  `av1` and `av1_fgs` (SVT-AV1, film-grain synthesis); rung switches (`--switch congestion`) splice per-rung
+  decodes at IDR points, lower rungs bicubic-upscaled to the top raster like a player; `--uniform` makes the
+  fixed-bitrate control. Deterministic (fixed threads, bitexact muxing; `stream_md5` per case in the suite).
+  Pixels are scratch only (`D:/codex/videoprocessor/eval-scratch/streaming-suite/enc`); free space is checked
+  (>= 15 GB). Suites carry `"nr_metrics": true`.
+* **No-reference metrics** `nr_metrics.py`: `nr_band` (banding step visibility on smooth tiles), `nr_block`
+  (block-grid periodicity at any phase), `nr_ring` (ringing beside strong edges over the noise floor),
+  `nr_noise` (flat-area noise sigma), `nr_poor_index_p95` (worst artefact over its "poor" threshold,
+  `nr_thresholds.json`). All in 8-bit units, sizes derived from the plane height. `nr_validate.py` correlates them
+  with full-reference counterparts on the generated encodes (`findings-streaming.md`).
+* **Runner hook**: `eval_harness.py run ... --also-suite tools/eval/suites/streaming_hevc.json` (repeatable, or
+  `VP_EVAL_ALSO_SUITES`) scores the same candidate/default on the streaming suite; its cases add `nr_*` rows
+  (judged lower-is-better except `nr_noise`, which is informational).
+* **Recordings** `scan_recordings.py --root D:/testclips/pulldown --out <scratch>`: read-only scan of
+  StreamRecorder folders; per recording the NR quality per second and the spans where it is "poor". Needs pixels
+  (`raw_*.bin`, or `nr.csv`); thumbnail-only folders are shown but never flagged; timing-only folders (frames.csv
+  + labels.csv, like the current library) get a cadence/timing summary only.
+
+Tests: `python -I -m unittest discover -s tools/eval -p "test_streaming*.py" -v`.

@@ -45,6 +45,7 @@ namespace TemporalDetail
 		std::vector<uint8_t> guardOn;
 		int guardTrips = 0, guardActive = 0, addBackBlocks = 0;
 		std::vector<int> slotId;                  // -1 none
+		std::vector<long long> refSeq;            // source frame seq of the reference transferred from (-1 none; measurement)
 		std::vector<uint8_t> retired, refreshed, usedFuture, camera;
 		// input grain G (the shared split), input structure S, output structure, output grain (G plus any guard add-back), base band
 		Plane grain, structure, structureOut, grainOut, base;
@@ -57,7 +58,7 @@ namespace TemporalDetail
 				uncertainty == o.uncertainty && baseMatch == o.baseMatch && corr == o.corr && corrGate == o.corrGate &&
 				stronger == o.stronger && highBand == o.highBand && focus == o.focus && referee == o.referee &&
 				evidence == o.evidence && rebounds == o.rebounds && q == o.q && qref == o.qref && hard == o.hard &&
-				slotId == o.slotId && retired == o.retired && refreshed == o.refreshed && usedFuture == o.usedFuture &&
+				slotId == o.slotId && refSeq == o.refSeq && retired == o.retired && refreshed == o.refreshed && usedFuture == o.usedFuture &&
 				camera == o.camera && grain.v == o.grain.v && structure.v == o.structure.v &&
 				structureOut.v == o.structureOut.v && grainOut.v == o.grainOut.v && base.v == o.base.v &&
 				tau1 == o.tau1 && tau2 == o.tau2 && templateGrain == o.templateGrain && templateSlots == o.templateSlots &&
@@ -387,6 +388,7 @@ namespace TemporalDetail
 			// computed from the local maps (texture deficit, vector / camera confidence, grain level, brightness, I/B phase;
 			// see README "Regionally adaptive gates") fills it; empty or short = 1 (the global tunables).
 			std::vector<float> blockGates;
+			char codedType = 0;   // 'I' / 'P' / 'B' when known (offline measurement only; live VP has none), 0 = unknown
 		};
 
 		// Model-only knobs for measurement and the guard's own test (not user settings, never in the config):
@@ -406,6 +408,16 @@ namespace TemporalDetail
 			double forceDrop = 0.0, forceFreeze = 0.0;
 			int slots = kSlots;                  // reference-store tier: past slots kept (1 .. kSlots; small cards keep fewer)
 			GateTuning gates;                    // the gate thresholds (re-tuned on real B-frames)
+			// Gate ablation (measurement only, test/td-real-vectors): each set bit forces that gate to pass (1). 0 = the
+			// designed model, byte-identical. The grain budget and the output guard keep their own knobs above.
+			enum GateBits : unsigned
+			{
+				kGateCorr = 1u, kGateHighBand = 2u, kGateFocus = 4u, kGateStronger = 8u, kGateHarm = 16u, kGateBase = 32u,
+				kGateUnc = 64u, kGateCoherence = 128u, kGatePixelCap = 256u, kGateEvidence = 512u, kGateHysteresis = 1024u,
+				kGateAge = 2048u, kGateRetire = 4096u
+			};
+			unsigned gatesOff = 0;
+			bool typeAdmission = false;   // admission from FrameIn::codedType (true frame types; measurement only)
 		};
 
 		explicit Model(const Settings& settings) : m_set(settings) {}
@@ -734,6 +746,17 @@ namespace TemporalDetail
 		const double ageFrames = src.future ? static_cast<double>(src.seq) - static_cast<double>(m_prevSeq + 1) : static_cast<double>(m_prevSeq + 1) - static_cast<double>(src.seq);
 		e.ageSeconds = ageFrames / hzv;
 		e.ageGate = Clamp((m_set.maxAgeSeconds - e.ageSeconds) / (m_set.maxAgeSeconds * kAgeFadeShare), 0.0, 1.0);
+		if (const unsigned off = m_tune.gatesOff)
+		{
+			if (off & Tuning::kGateCorr) e.corrGate = 1.0;
+			if (off & Tuning::kGateHighBand) e.hbGate = 1.0;
+			if (off & Tuning::kGateFocus) e.focusGate = 1.0;
+			if (off & Tuning::kGateStronger) e.strongerGate = 1.0;
+			if (off & Tuning::kGateHarm) e.harmGate = 1.0;
+			if (off & Tuning::kGateBase) e.baseGate = 1.0;
+			if (off & Tuning::kGateUnc) e.uncGate = 1.0;
+			if ((off & Tuning::kGateAge) && e.ageSeconds < m_set.maxAgeSeconds * 4.0) e.ageGate = 1.0;
+		}
 		e.hard = e.uncGate * e.baseGate * e.corrGate * e.harmGate * e.hbGate * e.focusGate;
 		e.valid = true;
 		return e;
@@ -1018,6 +1041,7 @@ namespace TemporalDetail
 				}
 				const double hint = (i < in.quality.size()) ? Clamp(in.quality[i], 0.0, 1.0) : 1.0;
 				wk.evidence = (std::max)(Smoothstep(kEvidenceLo, kEvidenceHi, st.rebounds), 1.0 - hint);
+				if (m_tune.gatesOff & Tuning::kGateEvidence) wk.evidence = 1.0;
 				const bool cam = camBlock[i] != 0;
 				Source* ps = st.slot >= 0 ? FindSlot(st.slot) : nullptr;
 				if (st.slot >= 0 && !ps) { st.slot = -1; st.prevSlot = -1; st.xf = 1.0; st.qref = 0.0; }
@@ -1045,7 +1069,7 @@ namespace TemporalDetail
 						if (wk.pastId >= 0)
 						{
 							const double ratio = bestQ / (wk.pe.e1w + kEnergyFloor);
-							wk.referee = Smoothstep(0.8 * kSoftFuture, 1.2 * kSoftFuture, ratio);
+							wk.referee = (m_tune.gatesOff & Tuning::kGateEvidence) ? 1.0 : Smoothstep(0.8 * kSoftFuture, 1.2 * kSoftFuture, ratio);
 						}
 					}
 				}
@@ -1058,6 +1082,14 @@ namespace TemporalDetail
 						const double decay = std::pow(0.5, wk.pe.ageSeconds / m_set.maxAgeSeconds);
 						if (q >= st.qref * decay && wk.pe.hbGate * wk.pe.focusGate >= 0.5) wk.refresh = true;
 					}
+				}
+				// measurement only (Tuning::typeAdmission, test/td-real-vectors): admission from the TRUE coded frame type,
+				// which live VP over HDMI never has: I frames always become the reference, B frames never (while a reference
+				// exists), P frames by the q rule above.
+				if (m_tune.typeAdmission && in.codedType && wk.pastId >= 0 && !st.retired)
+				{
+					if (in.codedType == 'I') wk.refresh = true;
+					else if (in.codedType == 'B') wk.refresh = false;
 				}
 				if (wk.refresh) ++refreshes;
 			}
@@ -1141,6 +1173,7 @@ namespace TemporalDetail
 		d.guardOn.assign(static_cast<size_t>(nb), 0);
 		d.guardTrips = m_diag.guardTrips;
 		d.slotId.assign(static_cast<size_t>(nb), -1);
+		d.refSeq.assign(static_cast<size_t>(nb), -1);
 		d.retired.assign(static_cast<size_t>(nb), 0); d.refreshed.assign(static_cast<size_t>(nb), 0);
 		d.usedFuture.assign(static_cast<size_t>(nb), 0); d.camera.assign(static_cast<size_t>(nb), 0);
 
@@ -1184,7 +1217,7 @@ namespace TemporalDetail
 				else { soft = 0.0; hardTarget = 0.0; st.vetoRun = 0; }
 			}
 			// retire: monotonic softening, or the guard vetoing the reference for Frames(0.2 s)
-			if (!st.retired && wk.pastId >= 0 && (st.softRun >= fRun || st.vetoRun >= fRun))
+			if (!st.retired && wk.pastId >= 0 && !(m_tune.gatesOff & Tuning::kGateRetire) && (st.softRun >= fRun || st.vetoRun >= fRun))
 			{
 				st.retired = true;
 				++d.retires;
@@ -1197,6 +1230,7 @@ namespace TemporalDetail
 			const double tEff = st.on ? t : 0.0;
 			st.wLim += Clamp(tEff - st.wLim, -fall, rise);
 			if (hardTarget < st.hSm) st.hSm = hardTarget; else st.hSm = (std::min)(hardTarget, st.hSm + rise);
+			if (m_tune.gatesOff & Tuning::kGateHysteresis) { st.wLim = t; st.hSm = hardTarget; }
 			const double weight = st.wLim * st.hSm;
 			// a retired reference leaves once its weight has faded
 			if (st.retired && weight < kLeaveWeight * 0.5 && st.wLim <= 0.0)
@@ -1287,12 +1321,13 @@ namespace TemporalDetail
 						st1 += s1 * t1; tt1 += t1 * t1; ss1 += s1 * s1;
 						st2 += s2 * t2; tt2 += t2 * t2; ss2 += s2 * s2;
 					}
-				auto share = [](double sxt, double txt, double sxs, double& lambda)
+				const bool cohOff = (m_tune.gatesOff & Tuning::kGateCoherence) != 0;
+				auto share = [cohOff](double sxt, double txt, double sxs, double& lambda)
 				{
 					lambda = txt > 1e-9 ? Clamp(sxt / txt, 0.0, 1.0) : 1.0;
 					if (!(txt > 1e-9)) return 0.0;
 					const double rho = sxt / std::sqrt(txt * sxs + 1e-12);
-					return (1.0 - lambda) * Smoothstep(kCoherenceLo, kCoherenceHi, rho);
+					return (1.0 - lambda) * (cohOff ? 1.0 : Smoothstep(kCoherenceLo, kCoherenceHi, rho));
 				};
 				c.tau1 = share(st1, tt1, ss1, c.lam1);
 				c.tau2 = share(st2, tt2, ss2, c.lam2);
@@ -1301,7 +1336,7 @@ namespace TemporalDetail
 			const size_t u = static_cast<size_t>(i);
 			d.weight[u] = weight; d.boost[u] = boost; d.target[u] = soft; d.hard[u] = hardTarget;
 			d.rebounds[u] = st.rebounds; d.evidence[u] = wk.evidence; d.q[u] = A.q[u]; d.qref[u] = st.qref;
-			d.slotId[u] = st.slot; d.retired[u] = st.retired ? 1 : 0; d.usedFuture[u] = useFuture ? 1 : 0; d.camera[u] = camBlock[u];
+			d.slotId[u] = st.slot; d.refSeq[u] = (c.w > 0.0 && c.a) ? static_cast<long long>(c.a->seq) : -1; d.retired[u] = st.retired ? 1 : 0; d.usedFuture[u] = useFuture ? 1 : 0; d.camera[u] = camBlock[u];
 			d.tau1[u] = c.tau1; d.tau2[u] = c.tau2; d.templateGrain[u] = c.nT; d.templateSlots[u] = c.nm; d.guard[u] = guard;
 			if (chosen)
 			{
@@ -1371,7 +1406,7 @@ namespace TemporalDetail
 				// Amplitude limit on the grain-free prediction: the current structure's projection P (lambda T) plus the
 				// transfer stays within kPixelCap x max(|P|, |T|). The current pixel's own value (its grain) is never clamped.
 				double dv = beta * raw;
-				if (wpix > 0.0 && dv != 0.0)
+				if (wpix > 0.0 && dv != 0.0 && !(m_tune.gatesOff & Tuning::kGatePixelCap))
 				{
 					const double P = pred / wpix, t = dv / wpix;
 					const double cap = kPixelCap * (std::max)(std::fabs(P), refMax);

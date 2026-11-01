@@ -24,6 +24,7 @@
 
 #include <VP-V/modules/scaling/chroma_upscale/ChromaCfl.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
+#include <VP-V/modules/repair/grain_split/GrainNode.h>
 #include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>
 
 #include <libplacebo/renderer.h>
@@ -46,6 +47,11 @@ namespace ChromaUpscale
 			// active-picture crop with the module's scale and block. Null or not fitting: the module computes its own (status).
 			// Read through the product's one API (RegionEvidence::GrainView: GPU form per plane, Luma / Cb / Cr).
 			RegionEvidence::GrainView grain;
+			// The source frame the shared product must be for (GrainSplit::Gpu::Frame::seq); kAnySeq = not checked. A
+			// product of another frame or of another unit version is STALE: visible fallback, recovery on the next fit.
+			uint64_t grainSeq = GrainSplit::Gpu::kAnySeq;
+			// The governor dropped the shared product (GrainNode::Shed()): the module uses its own split and says so (Shed).
+			bool grainShed = false;
 		};
 
 		class CflModule
@@ -65,6 +71,14 @@ namespace ChromaUpscale
 			const std::string& LastError() const { return m_error; }
 			// off, ok, "4:4:4: nothing to upsample", or the failure reason.
 			const std::string& Status() const { return m_status; }
+			// Where the grain splits of the last frame came from (recomputed every frame, so the module returns to the shared
+			// products the first frame they fit again): Ring = all three planes read the shared products; Missing = at least one
+			// plane had no product (absent / invalid view) and none was misfit; WrongSize = a product exists but does not fit
+			// its plane (size, block, scale, code unit, component). A plane that does not fit uses its own split. Shed is the
+			// node's (never set here). Off / grain guard off: Ring (nothing read, nothing to show).
+			GrainSplit::GrainStatus LastGrainStatus() const { return m_grainStatus; }
+			// The visible fallback ("grain split (chroma-from-luma)"): engaged while any plane runs its own grain split.
+			FallbackCatalog::Decision GrainFallbackDecision() const { return GrainSplit::ReaderFallback("chroma-from-luma", m_grainStatus); }
 			unsigned long long Failures() const { return m_failures; }
 
 			// VRAM of the module's textures for a W x H luma plane and a cw x ch chroma plane (bytes; with the three splits').
@@ -74,6 +88,7 @@ namespace ChromaUpscale
 			struct Impl;
 			Impl* m_impl = nullptr;
 			std::string m_error, m_status = "off";
+			GrainSplit::GrainStatus m_grainStatus = GrainSplit::GrainStatus::Ring;
 			unsigned long long m_failures = 0;
 		};
 	}

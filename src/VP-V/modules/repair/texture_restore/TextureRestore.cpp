@@ -532,6 +532,17 @@ if (p.x < sz.x && p.y < sz.y) {
 			return pl_dispatch_compute(dispatch, &compute);
 		}
 
+		// SA1: opens the arena scope of one Apply / ApplyForeign call; closes it on every exit path.
+		struct ArenaScopeGuard
+		{
+			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* arena;
+			bool opened = false;   // a refused (nested) scope is not ours to close
+			ArenaScopeGuard(VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* a, uint16_t scope) : arena(a) { if (arena) opened = arena->BeginScope(scope); }
+			~ArenaScopeGuard() { if (arena && opened) arena->EndScope(); }
+			ArenaScopeGuard(const ArenaScopeGuard&) = delete;
+			ArenaScopeGuard& operator=(const ArenaScopeGuard&) = delete;
+		};
+
 		bool Ensure(pl_gpu gpu, pl_tex& tex, int w, int h, pl_fmt fmt, bool blitSrc = false)
 		{
 			pl_tex_params tp{};
@@ -543,6 +554,32 @@ if (p.x < sz.x && p.y < sz.y) {
 			tp.blit_src = blitSrc;
 			return fmt && pl_tex_recreate(gpu, &tex, &tp);
 		}
+	}
+
+	std::vector<VpSkeleton::ArenaRequest> ArenaRequests(pl_gpu gpu, int planeW, int planeH, int foreignW, int foreignH)
+	{
+		std::vector<VpSkeleton::ArenaRequest> r;
+		VpSkeleton::TexFormat t1{}, t2{};
+		if (!gpu || planeW <= 0 || planeH <= 0 ||
+			!VpSkeleton::PlTexBackend::FormatOf(FloatFormat(gpu, 1), &t1) || !VpSkeleton::PlTexBackend::FormatOf(FloatFormat(gpu, 2), &t2))
+			return r;
+		auto add = [&](uint16_t scope, const char* owner, int w, int h, VpSkeleton::TexFormat f, uint8_t count) {
+			VpSkeleton::ArenaRequest q;
+			q.scope = scope;
+			q.owner = owner;
+			q.tier = VpSkeleton::Tier::T1;
+			q.shape = VpSkeleton::TexShape{ uint32_t((w + 1) / 2), uint32_t((h + 1) / 2), f };
+			q.count = count;
+			r.push_back(q);
+		};
+		add(kArenaScopeApply, "texture_restore", planeW, planeH, t1, 1);
+		add(kArenaScopeApply, "texture_restore", planeW, planeH, t2, 1);
+		if (foreignW > 0 && foreignH > 0)
+		{
+			add(kArenaScopeForeign, "texture_restore_foreign", foreignW, foreignH, t1, 1);
+			add(kArenaScopeForeign, "texture_restore_foreign", foreignW, foreignH, t2, 2);
+		}
+		return r;
 	}
 
 	struct Module::Impl
@@ -586,6 +623,7 @@ if (p.x < sz.x && p.y < sz.y) {
 	bool Module::ApplyForeign(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& result)
 	{
 		error.clear();
+		scratchShort = false;
 		if (!gpu || !dispatch || source.num_planes <= 0)
 		{
 			error = "nothing to restore";
@@ -614,12 +652,47 @@ if (p.x < sz.x && p.y < sz.y) {
 		const double scale = Scale(params.planeLines > 0.0 ? params.planeLines : h);
 		const int hw = (w + 1) / 2, hh = (h + 1) / 2;
 		const pl_fmt f2 = FloatFormat(gpu, 2), f1 = FloatFormat(gpu, 1);
-		if (!Ensure(gpu, m.fOut, w, h, StorableLike(gpu, luma->params.format), true) || !Ensure(gpu, m.fHalf, hw, hh, f1) ||
-			!Ensure(gpu, m.fTmp, hw, hh, f2) || !Ensure(gpu, m.fLow, hw, hh, f2))
+		ArenaScopeGuard guard(params.arena, kArenaScopeForeign);
+		pl_tex fHalfTex = nullptr, fTmpTex = nullptr, fLowTex = nullptr;
+		if (params.arena)
 		{
-			error = "no float texture for the other geometry";
-			++failures;
-			return false;
+			// The private temporaries of the non-arena path are not used any more: free them.
+			for (pl_tex* t : { &m.fHalf, &m.fTmp, &m.fLow })
+				if (*t) pl_tex_destroy(gpu, t);
+			if (!Ensure(gpu, m.fOut, w, h, StorableLike(gpu, luma->params.format), true))
+			{
+				error = "no float texture for the other geometry";
+				++failures;
+				return false;
+			}
+			VpSkeleton::TexFormat t1{}, t2{};
+			if (VpSkeleton::PlTexBackend::FormatOf(f1, &t1) && VpSkeleton::PlTexBackend::FormatOf(f2, &t2))
+			{
+				const VpSkeleton::TexShape s1{ uint32_t(hw), uint32_t(hh), t1 }, s2{ uint32_t(hw), uint32_t(hh), t2 };
+				fHalfTex = params.arena->Acquire("texture_restore_foreign", s1);
+				fTmpTex = params.arena->Acquire("texture_restore_foreign", s2);
+				fLowTex = params.arena->Acquire("texture_restore_foreign", s2);
+			}
+			if (!fHalfTex || !fTmpTex || !fLowTex)
+			{
+				error = "scratch memory short (texture restore, other geometry)";
+				scratchShort = true;
+				++failures;
+				return false;
+			}
+		}
+		else
+		{
+			if (!Ensure(gpu, m.fOut, w, h, StorableLike(gpu, luma->params.format), true) || !Ensure(gpu, m.fHalf, hw, hh, f1) ||
+				!Ensure(gpu, m.fTmp, hw, hh, f2) || !Ensure(gpu, m.fLow, hw, hh, f2))
+			{
+				error = "no float texture for the other geometry";
+				++failures;
+				return false;
+			}
+			fHalfTex = m.fHalf;
+			fTmpTex = m.fTmp;
+			fLowTex = m.fLow;
 		}
 		const int sampleDepth = source.repr.bits.sample_depth > 0 ? source.repr.bits.sample_depth : luma->params.format->component_depth[0];
 		const double cu = luma->params.format->type == PL_FMT_FLOAT ?
@@ -632,9 +705,9 @@ if (p.x < sz.x && p.y < sz.y) {
 			WeightsGlsl("w3", "R3", HalfRadius(s3), [&](int k) { return HalfWeight(k, s3); });
 		{
 			const int gx = (hw + 15) / 16, gy = (hh + 15) / 16;
-			const pl_shader_desc dh[2] = { Sampled("src", luma), Storage("dst", m.fHalf) };
-			const pl_shader_desc dx[2] = { Sampled("src", m.fHalf), Storage("dst", m.fTmp) };
-			const pl_shader_desc dy[2] = { Sampled("src", m.fTmp), Storage("dst", m.fLow) };
+			const pl_shader_desc dh[2] = { Sampled("src", luma), Storage("dst", fHalfTex) };
+			const pl_shader_desc dx[2] = { Sampled("src", fHalfTex), Storage("dst", fTmpTex) };
+			const pl_shader_desc dy[2] = { Sampled("src", fTmpTex), Storage("dst", fLowTex) };
 			if (!Pass(dispatch, "VideoProcessor texture restore: half (other geometry)", std::string(), HALF_BODY, dh, 2, nullptr, 0, gx, gy, 0) ||
 				!Pass(dispatch, "VideoProcessor texture restore: low bands across (other geometry)", w23, LOWH_BODY, dx, 2, nullptr, 0, gx, gy, 0) ||
 				!Pass(dispatch, "VideoProcessor texture restore: low bands down (other geometry)", w23, LOWV_BODY, dy, 2, nullptr, 0, gx, gy, 0))
@@ -652,7 +725,7 @@ if (p.x < sz.x && p.y < sz.y) {
 				w1 + LOW_AT_GLSL + APPLY_HEADER;
 			const int aw = 18, aa = aw + 2 * r1;
 			const size_t shmem = sizeof(float) * (aa * aa + aa * aw + aw * aw);
-			const pl_shader_desc d[4] = { Sampled("src", luma), Sampled("low", m.fLow), Sampled("gains", m.gains), Storage("dst", m.fOut) };
+			const pl_shader_desc d[4] = { Sampled("src", luma), Sampled("low", fLowTex), Sampled("gains", m.gains), Storage("dst", m.fOut) };
 			const pl_shader_var v[2] = { { pl_var_float("eps"), &eps, true }, { pl_var_vec2("tile_ratio"), ratio, true } };
 			if (!Pass(dispatch, "VideoProcessor texture restore (other geometry)", header, APPLY_BODY, d, 4, v, 2, (w + 15) / 16, (h + 15) / 16, shmem))
 			{
@@ -670,6 +743,7 @@ if (p.x < sz.x && p.y < sz.y) {
 	bool Module::Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& result)
 	{
 		error.clear();
+		scratchShort = false;
 		if (!gpu || !dispatch || source.num_planes <= 0)
 		{
 			error = "nothing to restore";
@@ -715,8 +789,33 @@ if (p.x < sz.x && p.y < sz.y) {
 		};
 		if (!Ensure(gpu, m.out, w, h, StorableLike(gpu, luma->params.format), true))
 			return fail("no storable texture for the luma plane");
-		if (!Ensure(gpu, m.half, hw, hh, f1) || !Ensure(gpu, m.tmp, hw, hh, f2) || !Ensure(gpu, m.low[0], hw, hh, f2) || !Ensure(gpu, m.low[1], hw, hh, f2))
-			return fail("no float texture for the low bands");
+		ArenaScopeGuard guard(params.arena, kArenaScopeApply);
+		pl_tex halfTex = nullptr, tmpTex = nullptr;
+		if (params.arena)
+		{
+			for (pl_tex* t : { &m.half, &m.tmp })   // the private temporaries of the non-arena path: free them
+				if (*t) pl_tex_destroy(gpu, t);
+			if (!Ensure(gpu, m.low[0], hw, hh, f2) || !Ensure(gpu, m.low[1], hw, hh, f2))
+				return fail("no float texture for the low bands");
+			VpSkeleton::TexFormat t1{}, t2{};
+			if (VpSkeleton::PlTexBackend::FormatOf(f1, &t1) && VpSkeleton::PlTexBackend::FormatOf(f2, &t2))
+			{
+				halfTex = params.arena->Acquire("texture_restore", VpSkeleton::TexShape{ uint32_t(hw), uint32_t(hh), t1 });
+				tmpTex = params.arena->Acquire("texture_restore", VpSkeleton::TexShape{ uint32_t(hw), uint32_t(hh), t2 });
+			}
+			if (!halfTex || !tmpTex)
+			{
+				scratchShort = true;
+				return fail("scratch memory short (texture restore)");
+			}
+		}
+		else
+		{
+			if (!Ensure(gpu, m.half, hw, hh, f1) || !Ensure(gpu, m.tmp, hw, hh, f2) || !Ensure(gpu, m.low[0], hw, hh, f2) || !Ensure(gpu, m.low[1], hw, hh, f2))
+				return fail("no float texture for the low bands");
+			halfTex = m.half;
+			tmpTex = m.tmp;
+		}
 		if (!Ensure(gpu, m.statsA, tw, th, f4) || !Ensure(gpu, m.statsB, tw, th, f4) ||
 			!Ensure(gpu, m.grain, tw, th, f4) || !Ensure(gpu, m.ref[0], tw, th, f4) || !Ensure(gpu, m.ref[1], tw, th, f4) ||
 			!Ensure(gpu, m.gains, tw, th, f4) || !Ensure(gpu, m.state[0], 1, 1, f4) || !Ensure(gpu, m.state[1], 1, 1, f4))
@@ -747,9 +846,9 @@ if (p.x < sz.x && p.y < sz.y) {
 		// 1-3: the half-resolution low bands.
 		{
 			const int gx = (hw + 15) / 16, gy = (hh + 15) / 16;
-			const pl_shader_desc dh[2] = { Sampled("src", luma), Storage("dst", m.half) };
-			const pl_shader_desc dx[2] = { Sampled("src", m.half), Storage("dst", m.tmp) };
-			const pl_shader_desc dy[2] = { Sampled("src", m.tmp), Storage("dst", low) };
+			const pl_shader_desc dh[2] = { Sampled("src", luma), Storage("dst", halfTex) };
+			const pl_shader_desc dx[2] = { Sampled("src", halfTex), Storage("dst", tmpTex) };
+			const pl_shader_desc dy[2] = { Sampled("src", tmpTex), Storage("dst", low) };
 			if (!Pass(dispatch, "VideoProcessor texture restore: half", std::string(), HALF_BODY, dh, 2, nullptr, 0, gx, gy, 0) ||
 				!Pass(dispatch, "VideoProcessor texture restore: low bands (across)", w23, LOWH_BODY, dx, 2, nullptr, 0, gx, gy, 0) ||
 				!Pass(dispatch, "VideoProcessor texture restore: low bands (down)", w23, LOWV_BODY, dy, 2, nullptr, 0, gx, gy, 0))

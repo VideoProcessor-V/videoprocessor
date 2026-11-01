@@ -1,11 +1,15 @@
 #pragma once
 
+#include <VP-V/core/ScratchArena.h>
+#include <VP-V/modules/control/gpu_memory/PlTexBackend.h>
+
 #include <libplacebo/renderer.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 // texture_restore: off | statistical (experimental; owner 2026-10-17; docs/VP-detail-restore.md).
 // Repair towards the original: per tile the luma detail is split into grain (unstructured,
@@ -142,7 +146,15 @@ namespace TextureRestore
 		double fieldScale = 1.0;
 		double fieldScaleX = 0.0;
 		uint64_t sequence = 0;
+		VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* arena = nullptr;  // SA1: null = private textures as before
 	};
+
+	// SA1: the scratch arena scopes (one per Apply / ApplyForeign call) and the temporaries they ask for.
+	constexpr uint16_t kArenaScopeApply = 0x0101, kArenaScopeForeign = 0x0102;
+	// Tier T1. Apply: the half-resolution `half` (one float-1 texture) and `tmp` (one float-2 texture).
+	// With foreignW > 0 also ApplyForeign's trio at half of the foreign dims (one float-1, two float-2).
+	// The formats are the ones Apply uses (FloatFormat). Empty when a format does not map.
+	std::vector<VpSkeleton::ArenaRequest> ArenaRequests(pl_gpu gpu, int planeW, int planeH, int foreignW = 0, int foreignH = 0);
 
 	class Module
 	{
@@ -171,6 +183,8 @@ namespace TextureRestore
 		const std::string& LastError() const { return error; }
 		unsigned long long Failures() const { return failures; }
 		unsigned long long Frames() const { return frames; }
+		// True when the LAST Apply / ApplyForeign failed because the scratch arena had no texture.
+		bool ScratchShort() const { return scratchShort; }
 		// The source frame the references last advanced on (0 = none or a restart pending): a
 		// caller may apply this frame's decision to another picture of it (a de-judder extra)
 		// as a repeat, without advancing.
@@ -181,5 +195,6 @@ namespace TextureRestore
 		Impl* impl = nullptr;
 		std::string error;
 		unsigned long long failures = 0, frames = 0;
+		bool scratchShort = false;
 	};
 }

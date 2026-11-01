@@ -153,3 +153,23 @@ Code location: **migrated**. The authoritative list is `live_files` in [MANIFEST
 - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
 
 <!-- vpv-settings-tests:end -->
+
+## Grain split read path (SA2)
+
+The grain guard reads the three shared grain splits (luma, Cb, Cr) ONLY through the one accessor of repair/grain_split
+(GrainSplitGpu.h): `ViewGlsl` / `BindView` per plane, with the names prefixed per plane (gsL_, gsB_, gsR_: the three frames may
+differ in layout, one shader binds several; the prefix is applied locally in ChromaCflGpu.cpp to a copy of the accessor text and
+to the descriptor names). Shaders fetch `gsL_fetch(p)` etc. = (s1, s2, f, base) in codes and form clean = base + s1 + s2; no
+direct texelFetch of a grain texture remains. Full generates the same math as before (output byte-identical).
+
+Fallback rule, per plane: a shared product that fits (size, block, scale, code unit, component) is read; otherwise that plane
+uses its OWN Full split, visibly, and returns to the shared product the first frame it fits again (status recomputed every
+frame). Status keeps "ok; own grain split" / "ok; own grain split (the shared product does not fit)". `LastGrainStatus()` is
+Ring (all planes read the shared products or the guard is off), Missing (a plane had none, none misfit) or WrongSize (a product
+exists but does not fit); Shed is the node's. `GrainFallbackDecision()` is
+GrainSplit::ReaderFallback("chroma-from-luma", status): the catalog entry "grain split (chroma-from-luma)". Tests:
+ChromaCflGpuGrainProduct*, ...FittingFullProduct*, ...CompactProducts*, ...GrainFallbackRecoversAutomatically (WARP).
+
+## Private GPU textures (skeleton rule)
+
+This module still creates its own GPU textures through the `Ensure` wrapper (its persistent state and, when no shared product fits, its own grain split; see the static test src/VP-V/tests/PrivateTextureScanTests.cpp). It migrates in SA6/SA7/SA8/SA12 (doc D:\codex\vp-handover\51-skeleton-adoption-audit.md section 6): kept state moves to skeleton product nodes and per-render temporaries to the shared scratch arena (src/VP-V/core/ScratchArena.h). Its grain reads already go through the one accessor (`gs_fetch` / `gs_blocks`); a shared product that is Missing, Stale (another frame or unit version, `Params::grainSeq`), WrongSize or Shed (`Params::grainShed`) makes it use its own split, visibly (FallbackCatalog "grain split (...)"), and it recovers on the first fitting frame.

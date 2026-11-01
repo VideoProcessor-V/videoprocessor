@@ -240,12 +240,12 @@ if (b.x < TD_BW && b.y < TD_BH) {
     int y1 = min(TD_H, (b.y + 1) * TD_B), x1 = min(TD_W, (b.x + 1) * TD_B);
     for (int yy = b.y * TD_B; yy < y1; yy++)
         for (int xx = b.x * TD_B; xx < x1; xx++) {
-            vec4 c = texelFetch(split, ivec2(xx, yy), 0);
+            vec4 c = gs_fetch(ivec2(xx, yy));
             s1 += c.x * c.x;
             s2 += c.y * c.y;
         }
     float n = float((x1 - b.x * TD_B) * (y1 - b.y * TD_B));
-    float e1 = s1 / n, e2 = s2 / n, e3 = texelFetch(gblocks, b, 0).y;
+    float e1 = s1 / n, e2 = s2 / n, e3 = gs_blocks(b).y;
     imageStore(meas_out, b, vec4(e1, e2, e2 / (e2 + e3 + TD_FLOOR), e1 + TD_FLOOR));
 }
 )GLSL";
@@ -290,7 +290,7 @@ if (live) {
                 vec4 sv;
                 float bwv;
                 td_slot_sample(k, td_position(k, p.x, p.y), sv, bwv);
-                vec4 c = texelFetch(split, p, 0);
+                vec4 c = gs_fetch(p);
                 float sc = c.x + c.y, sw = sv.x + sv.y;
                 a0 += vec4(c.x * c.x, c.y * c.y, sv.x * sv.x, sv.y * sv.y);
                 a1 += vec4(sc * sc, sw * sw, sc * sw, abs(c.w - bwv));
@@ -303,7 +303,7 @@ if (gl_LocalInvocationIndex == 0u) {
     if (live) {
         float n = float((min(TD_W, (b.x + 1) * TD_B) - b.x * TD_B) * (min(TD_H, (b.y + 1) * TD_B) - b.y * TD_B));
         float fl = TD_FLOOR;
-        float N = texelFetch(gblocks, b, 0).x;
+        float N = gs_blocks(b).x;
         float e1c = a0.x / n, e2c = a0.y / n, e1w = a0.z / n, e2w = a0.w / n;
 #ifdef TD_BGATES
         vec4 bgv = td_bgate(texelFetch(bgates, b, 0));   // per-block gate factors: margin, base allowance, uncertainty limit, strength
@@ -526,7 +526,7 @@ int xx = ox + i, yy = oy + j;
 bool inside = admitted && xx >= 0 && yy >= 0 && xx < TD_W && yy < TD_H;
 ivec2 cb = ivec2(clamp((ox + TD_HALF) / TD_B, 0, TD_BW - 1), clamp((oy + TD_HALF) / TD_B, 0, TD_BH - 1));
 float wv = TD_WIN[i] * TD_WIN[j];
-vec4 sp = inside ? texelFetch(split, ivec2(xx, yy), 0) : vec4(0.0);
+vec4 sp = inside ? gs_fetch(ivec2(xx, yy)) : vec4(0.0);
 vec2 sums = td_patch_sum2(inside ? wv * wv * sp.z * sp.z : 0.0, inside ? wv * wv : 0.0);
 float wf2 = sums.x / float(TD_P * TD_P), w2 = sums.y / float(TD_P * TD_P);
 float X1 = td_dct(inside ? wv * sp.x : 0.0, false);
@@ -549,7 +549,7 @@ for (int r = 0; r < TD_K; r++) {
     }
 }
 float crossv = (X1 + X2) * td_dct(xsum, false);
-float N = admitted ? max(0.0, texelFetch(gblocks, cb, 0).x) : 0.0;
+float N = admitted ? max(0.0, gs_blocks(cb).x) : 0.0;
 float hs = TD_HS[j * TD_P + i];
 float X0 = X1 + X2, V0 = N * hs * wf2;
 float W = 1.0;
@@ -577,7 +577,7 @@ if (inside) {
 ivec2 p = ivec2(gl_GlobalInvocationID.xy);
 vec4 fs = texelFetch(tab_new, ivec2(TD_K, 0), 0);
 if (fs.x > 0.5 && p.x < TD_W && p.y < TD_H) {
-    vec4 sp = texelFetch(split, p, 0);
+    vec4 sp = gs_fetch(p);
 #ifdef TD_CLEANED
     vec2 c = texelFetch(acc_in, p, 0).xy;
 #else
@@ -590,7 +590,7 @@ if (fs.x > 0.5 && p.x < TD_W && p.y < TD_H) {
 ivec2 p = ivec2(gl_GlobalInvocationID.xy);
 vec4 fs = texelFetch(tab_new, ivec2(TD_K, 0), 0);
 if (fs.x > 0.5 && p.x < TD_W && p.y < TD_H)
-    td_base_store(int(fs.y), p, vec4(texelFetch(split, p, 0).w * TD_SB_STORE, 0.0, 0.0, 1.0));
+    td_base_store(int(fs.y), p, vec4(gs_fetch(p).w * TD_SB_STORE, 0.0, 0.0, 1.0));
 )GLSL";
 		// The new slot's block maps and zero motion; rho2 = sum W^2 V0 / sum N hs w2 over the patches centred in the block.
 		constexpr const char* kCopyBlkBody = R"GLSL(
@@ -612,7 +612,7 @@ if (fs.x > 0.5 && b.x < TD_BW && b.y < TD_BH) {
     if (rv > 0.0) rho2 = min(1.0, rg / rv);
 #endif
     vec4 m = texelFetch(meas, b, 0);
-    imageStore(slot_blk_out, td_blk(cur, b), vec4(m.z, m.w, texelFetch(gblocks, b, 0).x, rho2));
+    imageStore(slot_blk_out, td_blk(cur, b), vec4(m.z, m.w, gs_blocks(b).x, rho2));
     imageStore(mot_out, td_blk(cur, b), vec4(0.0));
 }
 )GLSL";
@@ -777,7 +777,7 @@ if (act) {
             ivec2 l = lid + ivec2(i, j);
             ivec2 p = b * TD_B + l;
             if (l.x < TD_B && l.y < TD_B && p.x < TD_W && p.y < TD_H) {
-                vec4 sp = texelFetch(split, p, 0);
+                vec4 sp = gs_fetch(p);
                 vec2 t = vec2(0.0);
                 for (int r = 0; r < TD_K; r++) {
                     int k = ord[r];
@@ -831,7 +831,7 @@ if (p.x < TD_W && p.y < TD_H) {
     }
     vec2 res = vec2(0.0);
     if (act) {
-        vec4 sp = texelFetch(split, p, 0);
+        vec4 sp = gs_fetch(p);
         float S = sp.x + sp.y, bs = sp.w, f = sp.z;
         vec2 sk[TD_K];
         for (int k = 0; k < TD_K; k++) sk[k] = need[k] ? td_slot_bands(k, p.x, p.y, bs) : vec2(0.0);
@@ -876,7 +876,7 @@ if (p.x < TD_W && p.y < TD_H) {
                 dv += clamp(S * (1.0 + bEff), -cap, cap) - S;
             }
             float tval = wpix > 0.0 ? tv / wpix : 0.0;
-            bool structural = guard_share > 0.0 && tval * tval > guard_share * texelFetch(gblocks, ivec2(p.x / TD_B, p.y / TD_B), 0).x;
+            bool structural = guard_share > 0.0 && tval * tval > guard_share * gs_blocks(ivec2(p.x / TD_B, p.y / TD_B)).x;
             res = vec2(dv, structural ? dv - dT : dv);
         }
     }
@@ -911,7 +911,7 @@ for (int j = 0; j < TD_B; j += 16)
         ivec2 l = lid + ivec2(i, j);
         ivec2 p = b * TD_B + l;
         if (l.x < TD_B && l.y < TD_B && p.x < TD_W && p.y < TD_H) {
-            vec4 sp = texelFetch(split, p, 0);
+            vec4 sp = gs_fetch(p);
             if (sp.z < TD_GUARD_MAX_SHARE) {
                 float y = texelFetch(src, p, 0).x * TD_INV_CU;
                 float gin = y - (sp.w + sp.x + sp.y);
@@ -1033,7 +1033,7 @@ if (pf.x < TD_FW && pf.y < TD_FH) {
     vec4 o = c;   // outside the active picture: the input, bit-exact
     ivec2 p = pf - ivec2(TD_OX, TD_OY);
     if (p.x >= 0 && p.y >= 0 && p.x < TD_W && p.y < TD_H) {
-        vec4 sp = texelFetch(split, p, 0);
+        vec4 sp = gs_fetch(p);
         vec2 d = texelFetch(delta, p, 0).xy;
         float y = c.x * TD_INV_CU;
         float gin = y - (sp.w + sp.x + sp.y);

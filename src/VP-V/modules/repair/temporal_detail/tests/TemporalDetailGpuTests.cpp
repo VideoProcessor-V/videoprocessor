@@ -37,6 +37,8 @@ namespace TemporalDetailGpuTestsNs
 	constexpr int kW = 128, kH = 96;
 	constexpr double kHz = 23.976;
 	constexpr double kPi = 3.14159265358979323846;
+	// Compact vs Full shared grain product: worst output difference allowed, in codes (WARP-measured value + margin).
+	constexpr double kCompactVsFullMaxCodes = 0.05;
 
 	void LogF(const char* fmt, double a = 0, double b = 0, double c = 0, double d = 0, double e = 0)
 	{
@@ -338,6 +340,117 @@ if (p.x < textureSize(src, 0).x && p.y < textureSize(src, 0).y) imageStore(dst, 
 		rmsRatio = std::sqrt(eOut / eIn);
 		const double scaleN = static_cast<double>(gi.size()) / static_cast<double>(gi.size() - 1);
 		lag1Increase = cOut / eOut * scaleN - cIn / eIn * scaleN;
+	}
+
+	// --- The shared grain product: absent, misfit and Compact (SA2 B3) ---
+	enum class TdShared { Absent, EmptyProduct, Full, Compact, WrongBlock, WrongUnit, WrongComponent, StaleSeq, StaleVersion, Shed };
+
+	struct TdGrainRun
+	{
+		std::vector<Plane> out;
+		std::vector<GrainSplit::GrainStatus> status;
+		std::vector<bool> engaged;
+		std::vector<std::string> text, id;
+	};
+
+	// One module over frames of a panning grainy scene; frame t reads the product kind pick(t) (built on that frame's luma).
+	TdGrainRun RunTdGrain(GpuDevice& dev, const std::vector<Plane>& frames, const std::function<TdShared(size_t)>& pick)
+	{
+		pl_gpu gpu = dev.Gpu();
+		pl_tex bwdTex = UploadPair(gpu, MotionPair::Uniform(kW, kH, 16.0, -0.3, 0.0));
+		Gpu::Module module;
+		GrainSplit::Gpu::Splitter full, compact, wrongBlock, wrongUnit, wrongComp, stale;
+		GrainSplit::Gpu::Frame tampered;
+		const double cu = 64.0 / 65535.0;
+		TdGrainRun r;
+		for (size_t t = 0; t < frames.size(); ++t)
+		{
+			pl_tex tex = UploadLuma(gpu, frames[t]);
+			const TdShared kind = pick(t);
+			RegionEvidence::GrainProduct product;
+			switch (kind)
+			{
+			case TdShared::Full:
+				Assert::IsTrue(full.Compute(gpu, dev.dispatch, tex, 0, cu, 1.0, 16), Wide(full.LastError()).c_str());
+				product.gpu[0] = &full.Out();
+				break;
+			case TdShared::Compact:
+			{
+				GrainSplit::Gpu::Options o;
+				o.storage = GrainSplit::Storage::Compact;
+				Assert::IsTrue(compact.Compute(gpu, dev.dispatch, tex, 0, cu, 1.0, 16, GrainSplit::Params(), o), Wide(compact.LastError()).c_str());
+				product.gpu[0] = &compact.Out();
+				break;
+			}
+			case TdShared::Shed:   // a good Full product that the governor dropped: the module must not read it
+				Assert::IsTrue(full.Compute(gpu, dev.dispatch, tex, 0, cu, 1.0, 16), Wide(full.LastError()).c_str());
+				product.gpu[0] = &full.Out();
+				break;
+			case TdShared::StaleSeq:   // computed for another source frame than the one being presented
+			{
+				GrainSplit::Gpu::Options o;
+				o.seq = t + 100;
+				Assert::IsTrue(stale.Compute(gpu, dev.dispatch, tex, 0, cu, 1.0, 16, GrainSplit::Params(), o), Wide(stale.LastError()).c_str());
+				product.gpu[0] = &stale.Out();
+				break;
+			}
+			case TdShared::StaleVersion:   // made by another version of the grain split unit
+			{
+				GrainSplit::Gpu::Options o;
+				o.seq = t;
+				Assert::IsTrue(stale.Compute(gpu, dev.dispatch, tex, 0, cu, 1.0, 16, GrainSplit::Params(), o), Wide(stale.LastError()).c_str());
+				tampered = stale.Out();
+				tampered.version = GrainSplit::kUnitVersion + 1;
+				product.gpu[0] = &tampered;
+				break;
+			}
+			case TdShared::WrongBlock:
+				Assert::IsTrue(wrongBlock.Compute(gpu, dev.dispatch, tex, 0, cu, 1.0, 32), Wide(wrongBlock.LastError()).c_str());
+				product.gpu[0] = &wrongBlock.Out();
+				break;
+			case TdShared::WrongUnit:
+				Assert::IsTrue(wrongUnit.Compute(gpu, dev.dispatch, tex, 0, cu * 2.0, 1.0, 16), Wide(wrongUnit.LastError()).c_str());
+				product.gpu[0] = &wrongUnit.Out();
+				break;
+			case TdShared::WrongComponent:
+				Assert::IsTrue(wrongComp.Compute(gpu, dev.dispatch, tex, 1, cu, 1.0, 16), Wide(wrongComp.LastError()).c_str());
+				product.gpu[0] = &wrongComp.Out();
+				break;
+			default:
+				break;   // Absent: no view at all; EmptyProduct: a view of a product with neither form (invalid)
+			}
+			Gpu::Params gp;
+			gp.settings = Steady();
+			gp.seq = t;
+			gp.planeLines = 1080.0;
+			gp.backward.tex = bwdTex;
+			if (kind != TdShared::Absent) gp.grain = RegionEvidence::GrainView(&product);
+			if (kind == TdShared::StaleSeq || kind == TdShared::StaleVersion) gp.grainSeq = t;
+			if (kind == TdShared::Shed) gp.grainShed = true;
+			pl_frame o{};
+			Assert::IsTrue(module.Apply(gpu, dev.dispatch, LumaFrame(tex), gp, o), Wide(module.LastError()).c_str());
+			r.out.push_back(DownloadLuma(gpu, o.planes[0].texture));
+			r.status.push_back(module.LastGrainStatus());
+			const FallbackCatalog::Decision d = module.GrainFallbackDecision();
+			r.engaged.push_back(d.engaged);
+			r.id.push_back(d.id);
+			r.text.push_back(module.Status());
+			pl_tex_destroy(gpu, &tex);
+		}
+		module.Release(gpu);
+		for (GrainSplit::Gpu::Splitter* sp : { &full, &compact, &wrongBlock, &wrongUnit, &wrongComp, &stale }) sp->Release(gpu);
+		pl_tex_destroy(gpu, &bwdTex);
+		return r;
+	}
+
+	std::vector<Plane> TdGrainFrames() { return Stream(8, "IBBBPBBB", 0.3, 0.0, 29u, 1.2); }
+
+	double WorstDiff(const std::vector<Plane>& a, const std::vector<Plane>& b)
+	{
+		double worst = 0.0;
+		for (size_t t = 0; t < a.size(); ++t)
+			for (size_t i = 0; i < a[t].v.size(); ++i) worst = (std::max)(worst, std::fabs(a[t].v[i] - b[t].v[i]));
+		return worst;
 	}
 }
 
@@ -660,6 +773,107 @@ namespace VideoProcessorTest
 			pl_tex_destroy(gpu, &bwdTex);
 		}
 
+		TEST_METHOD(TemporalDetailGpuGrainProductAbsentFallsBackVisibly)
+		{
+			// No shared product (no view, or a view of a product with neither form): the module runs its own Full split, says so
+			// (status, LastGrainStatus Missing, the "grain split (temporal detail)" fallback engaged).
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			const std::vector<Plane> frames = TdGrainFrames();
+			for (const TdShared kind : { TdShared::Absent, TdShared::EmptyProduct })
+			{
+				const TdGrainRun r = RunTdGrain(dev, frames, [&](size_t) { return kind; });
+				for (size_t t = 0; t < frames.size(); ++t)
+				{
+					Assert::IsTrue(r.status[t] == GrainSplit::GrainStatus::Missing, L"absent product: Missing");
+					Assert::IsTrue(r.engaged[t] && r.id[t] == "grain split (temporal detail)", L"the fallback is engaged and named");
+					Assert::IsTrue(r.text[t].find("own grain split") != std::string::npos, L"status names the own grain split");
+				}
+			}
+		}
+
+		TEST_METHOD(TemporalDetailGpuGrainProductMisfitFallsBackAsWrongSize)
+		{
+			// A product of another block size, another code unit or another component does not fit: WrongSize, engaged, status
+			// "does not fit"; the output equals the own-split output (the own split is what runs).
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			const std::vector<Plane> frames = TdGrainFrames();
+			const TdGrainRun own = RunTdGrain(dev, frames, [](size_t) { return TdShared::Absent; });
+			for (const TdShared kind : { TdShared::WrongBlock, TdShared::WrongUnit, TdShared::WrongComponent })
+			{
+				const TdGrainRun r = RunTdGrain(dev, frames, [&](size_t) { return kind; });
+				for (size_t t = 0; t < frames.size(); ++t)
+				{
+					Assert::IsTrue(r.status[t] == GrainSplit::GrainStatus::WrongSize, L"misfit product: WrongSize");
+					Assert::IsTrue(r.engaged[t], L"the fallback is engaged");
+					Assert::IsTrue(r.text[t].find("does not fit") != std::string::npos, L"status says the shared product does not fit");
+				}
+				Assert::IsTrue(WorstDiff(own.out, r.out) == 0.0, L"a misfit product is not read: the output is the own-split output");
+			}
+		}
+
+		TEST_METHOD(TemporalDetailGpuFittingFullProductIsReadThroughTheAccessor)
+		{
+			// A fitting Full product: Ring, the fallback released, no "own grain split", output bit-identical to the own split.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			const std::vector<Plane> frames = TdGrainFrames();
+			const TdGrainRun own = RunTdGrain(dev, frames, [](size_t) { return TdShared::Absent; });
+			const TdGrainRun shared = RunTdGrain(dev, frames, [](size_t) { return TdShared::Full; });
+			for (size_t t = 0; t < frames.size(); ++t)
+			{
+				Assert::IsTrue(shared.status[t] == GrainSplit::GrainStatus::Ring, L"fitting product: Ring");
+				Assert::IsTrue(!shared.engaged[t], L"the fallback is released");
+				Assert::IsTrue(shared.text[t].find("own grain split") == std::string::npos, L"the shared product is read");
+			}
+			Assert::IsTrue(WorstDiff(own.out, shared.out) == 0.0, L"bit-identical to the own split");
+		}
+
+		TEST_METHOD(TemporalDetailGpuCompactProductIsReadWithinOneCode)
+		{
+			// A Compact product (rg16f + rg16 unorm) fits and is read through the same accessor: Ring, released, output within
+			// one code of the Full-shared output.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			const std::vector<Plane> frames = TdGrainFrames();
+			const TdGrainRun full = RunTdGrain(dev, frames, [](size_t) { return TdShared::Full; });
+			const TdGrainRun compact = RunTdGrain(dev, frames, [](size_t) { return TdShared::Compact; });
+			for (size_t t = 0; t < frames.size(); ++t)
+			{
+				Assert::IsTrue(compact.status[t] == GrainSplit::GrainStatus::Ring && !compact.engaged[t], L"Compact product: Ring, released");
+				Assert::IsTrue(compact.text[t].find("own grain split") == std::string::npos, L"the Compact product is read");
+			}
+			const double worst = WorstDiff(full.out, compact.out);
+			LogF("temporal detail: Compact vs Full shared product, worst output difference %.5f codes", worst);
+			// Measured on WARP (finisher, 2026-11-01): 0.0156 codes (one fp16 step of s1/s2 at these magnitudes). Bound = measured
+			// plus margin (about 3x), so a real precision regression fails instead of hiding under a one-code bound.
+			Assert::IsTrue(worst <= kCompactVsFullMaxCodes, L"Compact output within the measured bound of Full");
+		}
+
+		TEST_METHOD(TemporalDetailGpuGrainFallbackRecoversAutomatically)
+		{
+			// absent -> fits -> absent -> misfit -> fits, on one module: engaged, released, engaged, engaged, released. The
+			// status is recomputed every frame, and (Full products being bit-identical to the own split) the output never differs.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			const std::vector<Plane> frames = TdGrainFrames();
+			const TdShared seq[] = { TdShared::Absent, TdShared::Full, TdShared::Full, TdShared::Absent, TdShared::WrongBlock, TdShared::Full, TdShared::Compact, TdShared::Absent };
+			const bool engaged[] = { true, false, false, true, true, false, false, true };
+			const TdGrainRun own = RunTdGrain(dev, frames, [](size_t) { return TdShared::Absent; });
+			const TdGrainRun r = RunTdGrain(dev, frames, [&](size_t t) { return seq[t]; });
+			for (size_t t = 0; t < frames.size(); ++t)
+			{
+				Assert::IsTrue(r.engaged[t] == engaged[t], L"engaged exactly while the shared product does not fit");
+				if (seq[t] == TdShared::Absent) Assert::IsTrue(r.status[t] == GrainSplit::GrainStatus::Missing, L"Missing");
+				else if (seq[t] == TdShared::WrongBlock) Assert::IsTrue(r.status[t] == GrainSplit::GrainStatus::WrongSize, L"WrongSize");
+				else Assert::IsTrue(r.status[t] == GrainSplit::GrainStatus::Ring, L"Ring");
+			}
+			for (size_t t = 0; t < 6; ++t)   // frames before the Compact one are exact (Full or own); Compact is within one code
+				Assert::IsTrue(r.out[t].v == own.out[t].v, L"no visible change across the switches");
+			Assert::IsTrue(WorstDiff(own.out, r.out) <= kCompactVsFullMaxCodes, L"a Compact frame in the sequence stays within the measured bound");
+		}
+
 		TEST_METHOD(TemporalDetailGpuKeepsGrain)
 		{
 			// The owner's grain bounds on the GPU output (two-seed grain isolate of the static KeepsGrain scene, textured
@@ -813,6 +1027,54 @@ namespace VideoProcessorTest
 				pl_tex_destroy(gpu, &bwdTex);
 				for (pl_tex& t : texs) pl_tex_destroy(gpu, &t);
 			}
+		}
+
+		TEST_METHOD(TemporalDetailGpuStaleProductFallsBackVisibly)
+		{
+			// A shared product computed for another source frame, or by another version of the grain split unit, is STALE:
+			// the module runs its own split (output equal to the own-split output), the entry is engaged and named, and the
+			// next frame with a fitting product recovers by itself.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			const std::vector<Plane> frames = TdGrainFrames();
+			const TdGrainRun own = RunTdGrain(dev, frames, [](size_t) { return TdShared::Absent; });
+			for (const TdShared kind : { TdShared::StaleSeq, TdShared::StaleVersion })
+			{
+				const TdGrainRun r = RunTdGrain(dev, frames, [&](size_t) { return kind; });
+				for (size_t t = 0; t < frames.size(); ++t)
+				{
+					Assert::IsTrue(r.status[t] == GrainSplit::GrainStatus::Stale, L"stale product: Stale");
+					Assert::IsTrue(r.engaged[t] && r.id[t] == "grain split (temporal detail)", L"engaged and named");
+				}
+				Assert::IsTrue(WorstDiff(own.out, r.out) == 0.0, L"a stale product is not read: the output is the own-split output");
+			}
+			const TdGrainRun rec = RunTdGrain(dev, frames, [](size_t t) { return t < 2 ? TdShared::StaleSeq : t < 5 ? TdShared::Full : TdShared::StaleVersion; });
+			for (size_t t = 0; t < frames.size(); ++t)
+			{
+				const bool stale = t < 2 || t >= 5;
+				Assert::IsTrue(rec.engaged[t] == stale, L"engaged exactly while stale: automatic recovery");
+				Assert::IsTrue(rec.status[t] == (stale ? GrainSplit::GrainStatus::Stale : GrainSplit::GrainStatus::Ring), L"status follows the product");
+			}
+		}
+
+		TEST_METHOD(TemporalDetailGpuShedProductFallsBackVisibly)
+		{
+			// The governor dropped the product (Params::grainShed): even a fitting product is not read, the status is Shed, the
+			// entry is engaged, and the output is the own-split output; recovery when it is back.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			const std::vector<Plane> frames = TdGrainFrames();
+			const TdGrainRun own = RunTdGrain(dev, frames, [](size_t) { return TdShared::Absent; });
+			const TdGrainRun shed = RunTdGrain(dev, frames, [](size_t) { return TdShared::Shed; });
+			for (size_t t = 0; t < frames.size(); ++t)
+			{
+				Assert::IsTrue(shed.status[t] == GrainSplit::GrainStatus::Shed, L"Shed");
+				Assert::IsTrue(shed.engaged[t] && shed.id[t] == "grain split (temporal detail)", L"engaged and named");
+			}
+			Assert::IsTrue(WorstDiff(own.out, shed.out) == 0.0, L"the shed product is not read");
+			const TdGrainRun rec = RunTdGrain(dev, frames, [](size_t t) { return t < 3 ? TdShared::Shed : TdShared::Full; });
+			for (size_t t = 0; t < frames.size(); ++t)
+				Assert::IsTrue(rec.engaged[t] == (t < 3), L"released the frame the product is back");
 		}
 	};
 }

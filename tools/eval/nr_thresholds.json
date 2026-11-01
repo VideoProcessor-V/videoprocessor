@@ -1,0 +1,18 @@
+{
+ "method": "midpoint of top-rung p90 and lowest-rung median per artefact (nr_validate.py); a metric that does not separate the rungs gets the lowest-rung median; relative_drop = halfway between 1 and the median lowest/top-rung ratio of noise and detail",
+ "poor": {
+  "band": 0.0,
+  "block": 0.057923,
+  "ring": 1.244217
+ },
+ "relative_drop": {
+  "detail": 0.9972,
+  "noise": 0.9217
+ },
+ "status": "WEAK: absolute artefact thresholds sit where lowest/top rung medians barely differ (AUC ~0.5); use relative_drop (noise) and per-stream time series, do not gate on 'poor'",
+ "suites": [
+  "streaming_hevc.json",
+  "streaming_hevc_uhd.json",
+  "streaming_av1.json"
+ ]
+}
