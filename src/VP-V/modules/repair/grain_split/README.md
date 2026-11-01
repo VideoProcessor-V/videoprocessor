@@ -103,6 +103,17 @@ Derived bounds: s1, s2 <= 2^-11 relative (0.03 codes at 64, asserted <= 0.05); b
 
 Scratch (arena, shared across scopes, not per slot): Full 16 B/px (bands) + 16 B/block (quiet); Compact 32 B/px (rows, bands) + 16 B/block.
 
+## Host call sites (for the wiring package; renderer-side, not in SA1/SA2)
+
+SA1/SA2 add no renderer code. The wiring package that creates the P10 / P10c nodes adds these generic hook call sites (VP-owned module code behind the M2 hook layer, nothing feature-specific in Bill's files):
+
+| Hook call site | What it does |
+|---|---|
+| node layout (on source-geometry or storage change) | `ChooseNodeLayout(requested, plane format, code unit, desc)`; plan the governor with `GrainRegistryFor(nl.choice.storage)`, allocate `ProductTextures` with (`nl.decl`, `nl.layout`), `SetTargets(..., nl.choice.storage)`, and publish `nl.StorageDecision()` to the FallbackCatalog / Config status (visible while a Compact request runs as Full) |
+| lane thread start | each lane `SplitterFill::Bind()` on the lane thread before its first Fill (its own Splitter, pl_dispatch and arena) |
+| render start (seal) / first consumer | `GrainNode::Seal`, `Acquire` (the single live fill), `ReaderFallback` per consumer, `SplitterFill::FillDecision` |
+| Fill refused "laid out again" | re-run the node layout call site above (the plane's granted storage changed) |
+
 ## One dependency unit, version and stale detection (SA2 audit)
 
 The grain split is ONE unit: the CPU reference (`GrainSplit::Compute`, GrainSplit.h), its GLSL (GrainSplitGpu.cpp) and the storage layouts, versioned by `GrainSplit::kUnitVersion` (bump on ANY change of the law, a pass or a layout, and update the pin in GrainUnitGpuTests). A produced `Gpu::Frame` carries `seq` (the source frame, `Options::seq`), `version` and `storage`; the GLSL embeds the version as `#define GS_UNIT_VERSION` (also in the `ViewGlsl` prelude). `Splitter::Compute` resets `Out()` first (a failed Compute never leaves the previous frame looking valid). Readers call `Gpu::CheckFit(frame, w, h, B, scale, codeUnit, component, expectedSeq)`: another frame or another unit version is `Stale`, another geometry/unit/component `WrongSize`, nothing `Missing`; each falls back visibly to the module's own split (FallbackCatalog "grain split (<consumer>)") and recovers on the first fitting frame. A governor-dropped product is `Shed` (`Params::grainShed`).

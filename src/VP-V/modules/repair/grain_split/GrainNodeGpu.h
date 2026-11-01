@@ -51,6 +51,9 @@ namespace GrainSplit
 			StorageChoice choice;
 			VpSkeleton::ProductTexLayout layout;
 			VpSkeleton::ProductDecl decl;
+			// The node's storage decision for the status/diagnostics (FallbackCatalog "grain split storage"): the host shows
+			// it whenever it lays a node out (engaged while a requested Compact was laid out as Full; never log-only).
+			FallbackCatalog::Decision StorageDecision() const { return StorageFallback(choice); }
 		};
 		inline NodeLayout ChooseNodeLayout(Storage requested, pl_fmt planeFormat, double codeUnit, const GrainDesc& desc)
 		{

@@ -528,6 +528,7 @@ namespace GrainUnitGpuTestsNs
 			const GrainSplit::Gpu::NodeLayout nl = GrainSplit::Gpu::ChooseNodeLayout(Storage::Compact, plane->params.format, cu, desc);
 			Assert::IsTrue(nl.choice.downgraded && nl.choice.storage == Storage::Full, L"Compact refused for a float plane");
 			Assert::IsTrue(GrainSplit::Gpu::StorageFallback(nl.choice).engaged, L"visible");
+			Assert::IsTrue(nl.StorageDecision().engaged && nl.StorageDecision().id == "grain split storage", L"the node layout carries the visible decision");
 			Assert::AreEqual(size_t(2), nl.layout.terms.size(), L"the node is laid out as Full");
 			{
 				// Finisher MUST 2: the declaration follows the GRANTED storage, so the downgraded node still allocates.
