@@ -39,7 +39,7 @@ namespace DitherNeed
 	// Header of the block pass: the region accessor, the light-level fetches, the clamped smoothstep of the law.
 	inline std::string BlockPassHeaderGlsl()
 	{
-		return std::string(RegionEvidence::RegionEvidenceGlsl()) + LightLevel::LightLevelGlsl() + R"GLSL(
+		return std::string(RegionEvidence::RegionEvidenceGlsl()) + LightLevel::LightLevelGlsl() + LightLevel::LightLevelOutGlsl() + R"GLSL(
 float dn_smoothstep(float e0, float e1, float x)
 {
     if (!(e1 > e0))

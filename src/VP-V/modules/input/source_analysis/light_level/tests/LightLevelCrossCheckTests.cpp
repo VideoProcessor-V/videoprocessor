@@ -69,7 +69,7 @@ namespace VideoProcessorTest
 
 				// Tolerances: J absolute 1e-9; L, S and V relative |d| / (1 + |ref|) 1e-7 for S and V (absolute floor 1,
 				// so tiny values are compared absolutely at 1e-7) and 1e-9 for L; sdrCode absolute 1e-9 (codes are 0..1023).
-				double maxJ = 0.0, maxL = 0.0, maxS = 0.0, maxV = 0.0, maxC = 0.0;
+				double maxJ = 0.0, maxL = 0.0, maxS = 0.0, maxV = 0.0, maxC = 0.0, maxO = 0.0;
 				for (int code = 0; code < LightLevel::kLutSize; ++code)
 				{
 					const LightLevel::Entry& e = lut.e[static_cast<std::size_t>(code)];
@@ -79,17 +79,19 @@ namespace VideoProcessorTest
 					maxS = std::max(maxS, std::fabs(e.S - k.S[code]) / (1.0 + std::fabs(k.S[code])));
 					maxV = std::max(maxV, std::fabs(e.V - k.V[code]) / (1.0 + std::fabs(k.V[code])));
 					maxC = std::max(maxC, std::fabs(e.sdrCode - refCode));
+					maxO = std::max(maxO, std::fabs(e.Sout - (k.Sout ? k.Sout[code] : 1.0)));
 				}
 				char message[320];
 				std::snprintf(message, sizeof(message),
-					"light level cross-check %s: max |dJ| %.3e, rel dL %.3e, rel dS %.3e, rel dV %.3e, |dSdrCode| %.3e",
-					k.name, maxJ, maxL, maxS, maxV, maxC);
+					"light level cross-check %s: max |dJ| %.3e, rel dL %.3e, rel dS %.3e, rel dV %.3e, |dSdrCode| %.3e, |dSout| %.3e",
+					k.name, maxJ, maxL, maxS, maxV, maxC, maxO);
 				Logger::WriteMessage(message);
 				Assert::IsTrue(maxJ <= 1e-9, L"J matches the python mirror within 1e-9");
 				Assert::IsTrue(maxL <= 1e-9, L"L matches the python mirror within 1e-9 (relative)");
 				Assert::IsTrue(maxS <= 1e-7, L"S matches the python mirror within 1e-7 (relative, floor 1)");
 				Assert::IsTrue(maxV <= 1e-7, L"V matches the python mirror within 1e-7 (relative, floor 1)");
 				Assert::IsTrue(maxC <= 1e-9, L"sdrCode matches the python mirror within 1e-9");
+				Assert::IsTrue(maxO <= 1e-9, L"Sout matches the python mirror within 1e-9");
 			}
 		}
 	};

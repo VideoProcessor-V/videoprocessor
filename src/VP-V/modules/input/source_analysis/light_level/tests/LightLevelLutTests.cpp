@@ -606,7 +606,8 @@ namespace VideoProcessorTest
 		// (15) The GLSL declares the output sampler and its fetch.
 		TEST_METHOD(LightLevelGlslDeclaresTheOutputFetch)
 		{
-			const std::string glsl = LightLevel::LightLevelGlsl();
+			const std::string glsl = LightLevel::LightLevelOutGlsl();
+			Assert::IsFalse(Contains(LightLevel::LightLevelGlsl(), "light_level_out"), L"LightLevelGlsl() is unchanged");
 			Assert::IsTrue(Contains(glsl, "light_level_out_fetch"));
 			Assert::IsTrue(Contains(glsl, "light_level_out"));
 		}

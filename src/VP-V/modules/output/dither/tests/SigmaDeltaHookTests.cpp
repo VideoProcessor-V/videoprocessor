@@ -4,6 +4,7 @@
 // VP-V GPU hook tests (moved out of Bill's LibplaceboLutParserTests.cpp; test names unchanged).
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
+#include <functional>
 #include <VP-V/modules/output/dither/DitherNeed.h>
 #include <VP-V/modules/output/dither/SigmaDeltaDomain.h>
 #include <VP-V/modules/output/dither/DitherNeedGlsl.h>
@@ -1342,6 +1343,52 @@ namespace VideoProcessorTest
 			Assert::IsTrue(worstMean <= 1e-9, L"meanY");
 			Assert::IsTrue(worstBanding <= 1e-7, L"banding (float in Sample)");
 		}
+
+		// The shared reset / off / missing decision needs no grain or evidence planes (the GPU callers use it alone).
+		TEST_METHOD(StateTrackerDecidesResetOffAndMissingWithoutPlanes)
+		{
+			const RegionEvidence::Grid g = RegionEvidence::MakeGrid(96, 64, 8);
+			DitherNeed::StateTracker t;
+			DitherNeed::FrameArgs a = DnArgs(g, 1.0 / 60, false, "fp");
+			a.needed = true;
+			DitherNeed::Decision d = t.Decide(a);
+			Assert::IsTrue(d.result == DitherNeed::Result::On && d.reset && !d.off, L"first frame resets");
+			Assert::AreEqual(std::string("dither need: on"), d.status);
+			d = t.Decide(a);
+			Assert::IsFalse(d.reset, L"held");
+			DitherNeed::FrameArgs b = a; b.discontinuity = true;
+			Assert::IsTrue(t.Decide(b).reset, L"discontinuity");
+			b = a; b.colorBits = 10;
+			Assert::IsTrue(t.Decide(b).reset, L"colour depth");
+			Assert::IsFalse(t.Decide(b).reset);
+			b.params.aBase = 0.1;
+			Assert::IsTrue(t.Decide(b).reset, L"aBase");
+			b.lutFingerprint = "other";
+			Assert::IsTrue(t.Decide(b).reset, L"LUT fingerprint");
+			b.grid.B = 16;
+			Assert::IsTrue(t.Decide(b).reset, L"grid");
+			// missing: off, named, recovery resets
+			b.missing = DitherNeed::kLutSizeMismatch | DitherNeed::kNoSetTexture | DitherNeed::kPassFailed;
+			d = t.Decide(b);
+			Assert::IsTrue(d.off && d.result == DitherNeed::Result::Unavailable && !t.Valid());
+			Assert::IsTrue(d.status.find("light-level table of the wrong size") != std::string::npos);
+			Assert::IsTrue(d.status.find("libplacebo without set_texture") != std::string::npos);
+			Assert::IsTrue(d.status.find("GPU pass failed") != std::string::npos);
+			b.missing = 0;
+			Assert::IsTrue(t.Decide(b).reset, L"recovery");
+			// not needed / off
+			b.needed = false;
+			d = t.Decide(b);
+			Assert::IsTrue(d.off && d.result == DitherNeed::Result::NotNeeded);
+			Assert::AreEqual(std::string("dither need: not needed (link step invisible)"), d.status);
+			b.needed = true; b.enabled = false;
+			d = t.Decide(b);
+			Assert::IsTrue(d.off && d.result == DitherNeed::Result::Off);
+			Assert::AreEqual(std::string("dither need: off"), d.status);
+			t.Invalidate();
+			b.enabled = true;
+			Assert::IsTrue(t.Decide(b).reset);
+		}
 	};
 
 	// ---- DitherNeed on the GPU (WARP unless VP_TEST_GPU=hardware): the block pass, the quantiser's use of the map -----------------
@@ -1403,10 +1450,9 @@ namespace VideoProcessorTest
 				{ "noise_amplitude", noise } };
 		}
 
-		// One fresh fixture, chain and sigma-delta hook; `frames` refreshes at each grey (the hook's state carries across the
-		// greys, the same way in every run); a bound map (rgba32f, e in .x) needs the fork's set_texture.
-		std::vector<int> DwSigmaCodes(const std::map<std::string, std::string>& params, const std::vector<float>& greys, int frames,
-			bool full, const std::vector<float>& mapData = std::vector<float>(), int mapW = 0, int mapH = 0)
+		// One fresh fixture, chain and sigma-delta hook (the libplacebo log checked clean at the end); body gets both.
+		void DwWithSigma(const std::map<std::string, std::string>& params,
+			const std::function<void(TargetLutGpuFixture&, std::vector<const pl_hook*>&)>& body)
 		{
 			TargetLutGpuFixture fixture;
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
@@ -1435,17 +1481,14 @@ namespace VideoProcessorTest
 			std::vector<const pl_hook*> hooks;
 			chain.Collect(false, hooks);
 			Assert::AreEqual(size_t{ 1 }, hooks.size(), L"libplacebo rejected the sigma-delta (the dither need parameters or texture?)");
-			pl_tex map = nullptr;
-			if (!mapData.empty())
-			{
-#ifdef PL_VP_MPV_USER_SHADER_SET_TEXTURE
-				map = DwRgba32f(fixture.Gpu(), mapW, mapH, mapData.data());
-				Assert::IsTrue(pl_mpv_user_shader_set_texture(hooks[0], "VPDN", map), L"VPDN not accepted");
-#else
-				(void)mapW; (void)mapH;
-				Assert::Fail(L"a bound map needs the libplacebo fork's pl_mpv_user_shader_set_texture");
-#endif
-			}
+			body(fixture, hooks);
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
+		std::vector<int> DwRenderGreys(TargetLutGpuFixture& fixture, std::vector<const pl_hook*>& hooks, const std::vector<float>& greys,
+			int frames, bool full)
+		{
 			const pl_color_levels levels = full ? PL_COLOR_LEVELS_FULL : PL_COLOR_LEVELS_LIMITED;
 			std::vector<int> codes;
 			for (const float grey : greys)
@@ -1453,15 +1496,37 @@ namespace VideoProcessorTest
 				const std::vector<int> c = fixture.RenderTenBitSequence(hooks, levels, grey, frames, nullptr, 10);
 				codes.insert(codes.end(), c.begin(), c.end());
 			}
-#ifdef PL_VP_MPV_USER_SHADER_SET_TEXTURE
-			if (map)
+			return codes;
+		}
+
+		// A fresh hook; `frames` refreshes at each grey (the hook's state carries across the greys, the same way in every run); a
+		// bound map (rgba32f, e in .x) needs the fork's set_texture (the bound-map callers check DwHaveSetTexture first).
+		std::vector<int> DwSigmaCodes(const std::map<std::string, std::string>& params, const std::vector<float>& greys, int frames,
+			bool full, const std::vector<float>& mapData = std::vector<float>(), int mapW = 0, int mapH = 0)
+		{
+			std::vector<int> codes;
+			DwWithSigma(params, [&](TargetLutGpuFixture& fixture, std::vector<const pl_hook*>& hooks)
 			{
-				pl_mpv_user_shader_set_texture(hooks[0], "VPDN", nullptr);
-				pl_tex_destroy(fixture.Gpu(), &map);
-			}
+				pl_tex map = nullptr;
+				if (!mapData.empty())
+				{
+#ifdef PL_VP_MPV_USER_SHADER_SET_TEXTURE
+					map = DwRgba32f(fixture.Gpu(), mapW, mapH, mapData.data());
+					Assert::IsTrue(pl_mpv_user_shader_set_texture(hooks[0], "VPDN", map), L"VPDN not accepted");
+#else
+					(void)mapW; (void)mapH;
+					Assert::Fail(L"a bound map needs the libplacebo fork's pl_mpv_user_shader_set_texture");
 #endif
-			fixture.CaptureLog(nullptr);
-			AssertCleanLibplaceboLog(log);
+				}
+				codes = DwRenderGreys(fixture, hooks, greys, frames, full);
+#ifdef PL_VP_MPV_USER_SHADER_SET_TEXTURE
+				if (map)
+				{
+					pl_mpv_user_shader_set_texture(hooks[0], "VPDN", nullptr);
+					pl_tex_destroy(fixture.Gpu(), &map);
+				}
+#endif
+			});
 			return codes;
 		}
 
@@ -1512,6 +1577,69 @@ namespace VideoProcessorTest
 #else
 			return false;
 #endif
+		}
+
+		// The GPU inputs of one golden frame (grain block texture, six precursors).
+		struct DwFrameTex
+		{
+			pl_tex gs = nullptr, pre[RegionEvidence::kPrecursorTextures] = {};
+			void Make(pl_gpu gpu, const DnFixture& fx)
+			{
+				const size_t n = fx.grid.Count();
+				std::vector<float> g(n * 4, 0.0f);
+				for (size_t i = 0; i < n; ++i) g[i * 4] = static_cast<float>(fx.grain.split.N[i]);
+				gs = DwRgba32f(gpu, fx.grid.gw, fx.grid.gh, g.data());
+				for (int t = 0; t < RegionEvidence::kPrecursorTextures; ++t)
+				{
+					std::vector<float> d(n * 4, 0.0f);
+					for (size_t i = 0; i < n; ++i)
+						for (int c = 0; c < 4; ++c)
+							d[i * 4 + c] = static_cast<float>(fx.pre.data[i * RegionEvidence::kPrecursorChannels + t * 4 + c]);
+					pre[t] = DwRgba32f(gpu, fx.grid.gw, fx.grid.gh, d.data());
+				}
+			}
+			void Destroy(pl_gpu gpu)
+			{
+				pl_tex_destroy(gpu, &gs);
+				for (pl_tex& t : pre) pl_tex_destroy(gpu, &t);
+			}
+		};
+
+		// A pass argument set for frame `fx` with healthy inputs.
+		DitherNeed::Gpu::Args DwArgs(const DwFrameTex& ft, const DnFixture& fx, pl_tex lut, pl_tex lutOut, const DitherNeed::FrameArgs& fa)
+		{
+			DitherNeed::Gpu::Args a;
+			a.gsBlocks = ft.gs;
+			for (int t = 0; t < RegionEvidence::kPrecursorTextures; ++t) a.precursors[t] = ft.pre[t];
+			a.lut = lut; a.lutOut = lutOut;
+			a.gridW = fx.grid.gw; a.gridH = fx.grid.gh; a.blockPx = fx.grid.B;
+			a.derive = RegionEvidence::Uniforms(RegionEvidence::DeriveParams());
+			a.params = fa.params;
+			a.qOut = DitherNeed::QOut(fa.colorBits);
+			a.alpha = DitherNeed::AlphaFor(fa.dtSeconds, fa.params.tauSeconds);
+			return a;
+		}
+
+		std::vector<DitherNeed::BlockInT<float>> DwBlocksF(const DnFixture& fx)
+		{
+			std::vector<DitherNeed::BlockIn> b;
+			Assert::AreEqual(0u, DitherNeed::Gather(fx.Inputs(), fx.grid, b));
+			std::vector<DitherNeed::BlockInT<float>> bf(b.size());
+			for (size_t i = 0; i < b.size(); ++i)
+			{
+				bf[i].N = static_cast<float>(b[i].N); bf[i].meanY = static_cast<float>(b[i].meanY);
+				bf[i].banding = static_cast<float>(b[i].banding); bf[i].V = static_cast<float>(b[i].V);
+				bf[i].Sout = static_cast<float>(b[i].Sout); bf[i].inPicture = b[i].inPicture; bf[i].overlay = b[i].overlay;
+			}
+			return bf;
+		}
+
+		double DwWorstDiff(pl_gpu gpu, pl_tex cur, const std::vector<float>& want)
+		{
+			const std::vector<float> got = DwDownload(gpu, cur);
+			double worst = 0.0;
+			for (size_t i = 0; i < want.size(); ++i) worst = (std::max)(worst, std::fabs(static_cast<double>(got[i * 4]) - want[i]));
+			return worst;
 		}
 	}
 
@@ -1590,6 +1718,7 @@ namespace VideoProcessorTest
 				DitherNeed::FrameArgs fa = DnArgs(in.grid, dt, disc, "golden");
 				fa.colorBits = kColorBits;
 				fa.enabled = !offStep;
+				fa.needed = true;
 				std::vector<DitherNeed::BlockIn> b;
 				Assert::AreEqual(0u, DitherNeed::Gather(in.Inputs(), in.grid, b));
 				std::vector<DitherNeed::BlockInT<float>> bf(b.size());
@@ -1611,10 +1740,21 @@ namespace VideoProcessorTest
 				a.params = fa.params;
 				a.qOut = DitherNeed::QOut(kColorBits);
 				a.alpha = DitherNeed::AlphaFor(dt, fa.params.tauSeconds);
-				a.reset = s == 0 || disc || afterOff;
-				a.off = offStep;
+				// reset / off come from the shared decision (DitherNeed::StateTracker::Decide), not from this test
+				const DitherNeed::Gpu::BlockPass::StepResult st = pass.Step(gpu, dispatch, a, fa);
+				Assert::IsTrue(st.decision.result == res, L"the GPU decision differs from the CPU class");
+				const bool expectReset = s == 0 || disc || afterOff;
 				afterOff = offStep;
-				DwCheck(pass.Run(gpu, dispatch, a), "the block pass failed: " + pass.LastError());
+				if (offStep)
+				{
+					Assert::IsFalse(st.ran);
+					Assert::IsTrue(pass.Current() == nullptr, L"a skipped frame must leave no product to bind");
+					Assert::AreEqual(std::string("dither need: off"), st.decision.status);
+					for (const float v : mirror.Extra()) Assert::AreEqual(0.0f, v);
+					continue;
+				}
+				Assert::AreEqual(expectReset, st.decision.reset, L"reset decision");
+				DwCheck(st.ran, "the block pass failed: " + pass.LastError());
 				const std::vector<float> got = DwDownload(gpu, pass.Current());
 				const std::vector<float>& want = mirror.Extra();
 				Assert::AreEqual(want.size(), in.grid.Count());
@@ -1673,10 +1813,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(placeholder == base, (L"dither_need 1 with the placeholder differs: " + DwCodes(placeholder) + L" vs " + DwCodes(base)).c_str());
 
 			if (!DwHaveSetTexture())
-			{
-				Logger::WriteMessage("DitherNeedWarpOffAndZeroMapAreByteIdentical: no pl_mpv_user_shader_set_texture in this libplacebo; bound-map cases skipped\n");
-				return;
-			}
+				Assert::Inconclusive(L"no pl_mpv_user_shader_set_texture in this libplacebo (standard 7.360 build): the bound-map cases did not run; the placeholder cases above did");
 			const std::vector<int> zero = DwSigmaCodes(withDn(DwSigmaParams(true, "0.15"), "1"), greys, frames, true, DwConstantMap(4, 3, 0.0f), 4, 3);
 			Assert::IsTrue(zero == base, (L"dither_need 1 with an all-zero map differs: " + DwCodes(zero) + L" vs " + DwCodes(base)).c_str());
 			// dither_need 0 with a non-zero map bound: never read.
@@ -1692,10 +1829,7 @@ namespace VideoProcessorTest
 		TEST_METHOD(DitherNeedWarpConstantExtraFollowsTheCpuQuantiserModel)
 		{
 			if (!DwHaveSetTexture())
-			{
-				Logger::WriteMessage("DitherNeedWarpConstantExtraFollowsTheCpuQuantiserModel: no set_texture in this libplacebo; skipped\n");
-				return;
-			}
+				Assert::Inconclusive(L"no pl_mpv_user_shader_set_texture in this libplacebo (standard 7.360 build): needs the beta host");
 			const std::vector<float> greys = DwGreys();
 			const int frames = 16;
 			const float aBase = 0.15f;
@@ -1742,10 +1876,7 @@ namespace VideoProcessorTest
 		TEST_METHOD(DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap)
 		{
 			if (!DwHaveSetTexture())
-			{
-				Logger::WriteMessage("DitherNeedWarpExactCodesStayExactAtTheAmplitudeCap: no set_texture in this libplacebo; skipped\n");
-				return;
-			}
+				Assert::Inconclusive(L"no pl_mpv_user_shader_set_texture in this libplacebo (standard 7.360 build): needs the beta host");
 			const std::vector<float> levels = { 0.0f, 1.0f, 1.05f, -0.04f };   // black, white, WTW, BTB (limited range)
 			const int frames = 16;
 			const std::vector<int> exact = DwSigmaCodes(DwSigmaParams(false, "0"), levels, frames, false);
@@ -1842,6 +1973,209 @@ if (g.y == 0 && g.x < DN_N) {
 			pl_tex_destroy(gpu, &posTex);
 			pl_tex_destroy(gpu, &outTex);
 			pl_dispatch_destroy(&dispatch);
+		}
+		// Resets caused by colour depth, aBase, the LUT fingerprint and the grid are taken by the shared decision (not hand-coded):
+		// the GPU block pass equals the float mirror at every step and the decision says reset exactly there.
+		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpResetsFollowTheSharedDecision)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DitherNeedWarpResetsFollowTheSharedDecision)
+		{
+			using namespace DitherNeedGolden;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			Assert::IsNotNull(dispatch);
+			DnFixture fx; fx.Make(1);
+			DwFrameTex ft; ft.Make(gpu, fx);
+			const LightLevel::Lut lut = DnFixture::GoldenLut();
+			const std::vector<float> lt = LightLevel::PackTexels(lut), ot = LightLevel::PackOutputTexels(lut);
+			pl_tex lutTex = DwRgba32f(gpu, LightLevel::kLutSize, 1, lt.data());
+			pl_tex lutOutTex = DwRgba32f(gpu, LightLevel::kLutSize, 1, ot.data());
+			const std::vector<DitherNeed::BlockInT<float>> bf = DwBlocksF(fx);
+			DitherNeed::Gpu::BlockPass pass;
+			pass.SetHostReadable(true);
+			DitherNeed::MapF mirror;
+			struct Case { const char* what; bool expectReset; int colorBits; double aBase; const char* fp; int gridB; double dt; };
+			// the same frame each step; only the named input changes. dt differs between held steps so a missed reset would show.
+			const Case cases[] = {
+				{ "first frame", true, 8, 0.15, "fpA", fx.grid.B, 1.0 / 60 },
+				{ "same inputs: held", false, 8, 0.15, "fpA", fx.grid.B, 1.0 / 60 },
+				{ "colour depth change", true, 10, 0.15, "fpA", fx.grid.B, 1.0 / 60 },
+				{ "same again", false, 10, 0.15, "fpA", fx.grid.B, 1.0 / 30 },
+				{ "aBase change", true, 10, 0.10, "fpA", fx.grid.B, 1.0 / 60 },
+				{ "same again", false, 10, 0.10, "fpA", fx.grid.B, 1.0 / 30 },
+				{ "LUT fingerprint change", true, 10, 0.10, "fpB", fx.grid.B, 1.0 / 60 },
+				{ "same again", false, 10, 0.10, "fpB", fx.grid.B, 1.0 / 30 },
+				{ "grid change", true, 10, 0.10, "fpB", fx.grid.B * 2, 1.0 / 60 } };
+			double worst = 0.0;
+			for (const Case& c : cases)
+			{
+				DitherNeed::FrameArgs fa = DnArgs(fx.grid, c.dt, false, c.fp);
+				fa.colorBits = c.colorBits; fa.params.aBase = c.aBase; fa.grid.B = c.gridB; fa.needed = true;
+				DitherNeed::Gpu::Args a = DwArgs(ft, fx, lutTex, lutOutTex, fa);
+				a.blockPx = fa.grid.B;
+				Assert::IsTrue(mirror.Update(fa, bf) == DitherNeed::Result::On);
+				const DitherNeed::Gpu::BlockPass::StepResult st = pass.Step(gpu, dispatch, a, fa);
+				DwCheck(st.ran, std::string(c.what) + ": " + pass.LastError());
+				Assert::AreEqual(c.expectReset, st.decision.reset, (L"reset decision: " + DnWide(c.what)).c_str());
+				worst = (std::max)(worst, DwWorstDiff(gpu, pass.Current(), mirror.Extra()));
+			}
+			char msg[100];
+			std::snprintf(msg, sizeof(msg), "DITHER_NEED_RESETS steps=%d worst=%.3e\n", static_cast<int>(sizeof(cases) / sizeof(cases[0])), worst);
+			Logger::WriteMessage(msg);
+			DwCheck(worst <= 1e-5, std::string("the block pass leaves the float mirror after a reset cause: ") + msg);
+			pass.Release(gpu);
+			ft.Destroy(gpu);
+			pl_tex_destroy(gpu, &lutTex);
+			pl_tex_destroy(gpu, &lutOutTex);
+			pl_dispatch_destroy(&dispatch);
+		}
+
+		// Each GPU input absent or mismatched: the frame is skipped (no pass, no product), the status names the input, and the
+		// next healthy frame recovers with a reset (== a fresh mirror).
+		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpEachMissingGpuInputSkipsAndRecovers)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DitherNeedWarpEachMissingGpuInputSkipsAndRecovers)
+		{
+			using namespace DitherNeedGolden;
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			Assert::IsNotNull(dispatch);
+			DnFixture fx; fx.Make(0);
+			DwFrameTex ft; ft.Make(gpu, fx);
+			const LightLevel::Lut lut = DnFixture::GoldenLut();
+			const std::vector<float> lt = LightLevel::PackTexels(lut), ot = LightLevel::PackOutputTexels(lut);
+			pl_tex lutTex = DwRgba32f(gpu, LightLevel::kLutSize, 1, lt.data());
+			pl_tex lutOutTex = DwRgba32f(gpu, LightLevel::kLutSize, 1, ot.data());
+			const std::vector<float> smallData(2 * 2 * 4, 0.0f), shortData(512 * 4, 0.0f);
+			pl_tex wrongGrid = DwRgba32f(gpu, 2, 2, smallData.data());
+			pl_tex shortLut = DwRgba32f(gpu, 512, 1, shortData.data());
+			const std::vector<DitherNeed::BlockInT<float>> bf = DwBlocksF(fx);
+			struct Case { const char* what; unsigned want; };
+			const Case cases[] = { { "no grain texture", DitherNeed::kNoGrain }, { "grain texture on another grid", DitherNeed::kGrainGridMismatch },
+				{ "a precursor texture missing", DitherNeed::kNoPrecursors }, { "a precursor on another grid", DitherNeed::kEvidenceGridMismatch },
+				{ "no light-level table", DitherNeed::kNoLut }, { "light-level table of the wrong width", DitherNeed::kLutSizeMismatch } };
+			for (const Case& c : cases)
+			{
+				DitherNeed::Gpu::BlockPass pass;
+				pass.SetHostReadable(true);
+				DitherNeed::FrameArgs fa = DnArgs(fx.grid, 1.0 / 60, false, "fp");
+				fa.needed = true;
+				DitherNeed::Gpu::Args good = DwArgs(ft, fx, lutTex, lutOutTex, fa);
+				DitherNeed::Gpu::BlockPass::StepResult st = pass.Step(gpu, dispatch, good, fa);
+				DwCheck(st.ran && pass.Current() != nullptr, std::string(c.what) + ": the healthy first frame must run");
+				DitherNeed::Gpu::Args bad = good;
+				switch (c.want)
+				{
+				case DitherNeed::kNoGrain: bad.gsBlocks = nullptr; break;
+				case DitherNeed::kGrainGridMismatch: bad.gsBlocks = wrongGrid; break;
+				case DitherNeed::kNoPrecursors: bad.precursors[3] = nullptr; break;
+				case DitherNeed::kEvidenceGridMismatch: bad.precursors[2] = wrongGrid; break;
+				case DitherNeed::kNoLut: bad.lutOut = nullptr; break;
+				default: bad.lut = shortLut; break;
+				}
+				st = pass.Step(gpu, dispatch, bad, fa);
+				Assert::IsFalse(st.ran, (L"skipped: " + DnWide(c.what)).c_str());
+				Assert::IsTrue((st.missing & c.want) == c.want, (L"missing bit: " + DnWide(c.what)).c_str());
+				Assert::IsTrue(st.decision.result == DitherNeed::Result::Unavailable);
+				Assert::IsTrue(st.decision.status.find(DitherNeed::MissingText(c.want)) != std::string::npos, L"status names the input");
+				Assert::IsTrue(pass.Current() == nullptr, L"a skipped frame leaves no product to bind");
+				// recovery: a reset, equal to a fresh mirror
+				DitherNeed::MapF fresh;
+				Assert::IsTrue(fresh.Update(fa, bf) == DitherNeed::Result::On);
+				st = pass.Step(gpu, dispatch, good, fa);
+				DwCheck(st.ran, std::string(c.what) + ": recovery " + pass.LastError());
+				Assert::IsTrue(st.decision.reset, L"recovery resets");
+				DwCheck(DwWorstDiff(gpu, pass.Current(), fresh.Extra()) <= 1e-5, std::string(c.what) + ": the recovered map differs from a fresh reset");
+				pass.Release(gpu);
+			}
+			ft.Destroy(gpu);
+			pl_tex_destroy(gpu, &lutTex);
+			pl_tex_destroy(gpu, &lutOutTex);
+			pl_tex_destroy(gpu, &wrongGrid);
+			pl_tex_destroy(gpu, &shortLut);
+			pl_dispatch_destroy(&dispatch);
+		}
+
+		// HookGuard: a skipped frame (no product) binds nothing and renders the off path; with the fork call the guard binds the map
+		// and Release() / the destructor restore the hook byte for byte. Without the fork call (standard 7.360 build) Apply returns
+		// false, reports kNoSetTexture, sets nothing, and the bound-map half is Inconclusive (it needs the beta host).
+		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpHookGuardAppliesAndRestores)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DitherNeedWarpHookGuardAppliesAndRestores)
+		{
+			const std::vector<float> greys = DwGreys();
+			const int frames = 16;
+			const std::map<std::string, std::string> params = DwSigmaParams(true, "0.15");
+			const std::vector<int> base = DwSigmaCodes(params, greys, frames, true);
+			DitherNeed::Gpu::Placement place;
+			place.blockPx = 16;
+
+			// skipped frame: no product -> Apply binds nothing
+			bool nullApplied = true;
+			std::vector<int> skipped;
+			DwWithSigma(params, [&](TargetLutGpuFixture& fixture, std::vector<const pl_hook*>& hooks)
+			{
+				DitherNeed::Gpu::HookGuard guard;
+				nullApplied = guard.Apply(hooks.data(), static_cast<int>(hooks.size()), nullptr, place);
+				skipped = DwRenderGreys(fixture, hooks, greys, frames, true);
+			});
+			Assert::IsFalse(nullApplied, L"a null product binds nothing");
+			Assert::IsTrue(skipped == base, (L"a skipped frame must render the off path: " + DwCodes(skipped) + L" vs " + DwCodes(base)).c_str());
+
+			// a real product: applied (rendered with the guard alive) / released before the render / destroyed before the render
+			std::vector<int> bound, released, destroyed;
+			bool applied = false;
+			unsigned missingBit = 0;
+			DwWithSigma(params, [&](TargetLutGpuFixture& fixture, std::vector<const pl_hook*>& hooks)
+			{
+				const std::vector<float> data = DwConstantMap(4, 3, 0.3f);
+				pl_tex map = DwRgba32f(fixture.Gpu(), 4, 3, data.data());
+				DitherNeed::Gpu::HookGuard guard;
+				applied = guard.Apply(hooks.data(), static_cast<int>(hooks.size()), map, place);
+				if (!applied) missingBit = DitherNeed::Gpu::HookGuard::MissingAfterApply();
+				bound = DwRenderGreys(fixture, hooks, greys, frames, true);
+				guard.Release();
+				pl_tex_destroy(fixture.Gpu(), &map);
+			});
+			DwWithSigma(params, [&](TargetLutGpuFixture& fixture, std::vector<const pl_hook*>& hooks)
+			{
+				const std::vector<float> data = DwConstantMap(4, 3, 0.3f);
+				pl_tex map = DwRgba32f(fixture.Gpu(), 4, 3, data.data());
+				DitherNeed::Gpu::HookGuard guard;
+				guard.Apply(hooks.data(), static_cast<int>(hooks.size()), map, place);
+				guard.Release();
+				released = DwRenderGreys(fixture, hooks, greys, frames, true);
+				pl_tex_destroy(fixture.Gpu(), &map);
+			});
+			DwWithSigma(params, [&](TargetLutGpuFixture& fixture, std::vector<const pl_hook*>& hooks)
+			{
+				const std::vector<float> data = DwConstantMap(4, 3, 0.3f);
+				pl_tex map = DwRgba32f(fixture.Gpu(), 4, 3, data.data());
+				{
+					DitherNeed::Gpu::HookGuard guard;
+					guard.Apply(hooks.data(), static_cast<int>(hooks.size()), map, place);
+				}   // destructor
+				destroyed = DwRenderGreys(fixture, hooks, greys, frames, true);
+				pl_tex_destroy(fixture.Gpu(), &map);
+			});
+			Assert::IsTrue(released == base, (L"after Release() the hook must render the off path: " + DwCodes(released)).c_str());
+			Assert::IsTrue(destroyed == base, (L"after the destructor the hook must render the off path: " + DwCodes(destroyed)).c_str());
+			if (!DwHaveSetTexture())
+			{
+				Assert::IsFalse(applied, L"without set_texture Apply must return false");
+				Assert::AreEqual(static_cast<unsigned>(DitherNeed::kNoSetTexture), missingBit);
+				Assert::IsTrue(bound == base, L"without set_texture nothing is bound: the off path");
+				Assert::Inconclusive(L"no pl_mpv_user_shader_set_texture in this libplacebo (standard 7.360 build): the bound half of the guard test needs the beta host");
+			}
+			Assert::IsTrue(applied, L"Apply must bind the product");
+			Assert::IsTrue(bound != base, L"a bound non-zero map must change the codes (the test would be vacuous)");
 		}
 	};
 }

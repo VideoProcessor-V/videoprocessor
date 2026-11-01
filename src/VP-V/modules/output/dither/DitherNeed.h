@@ -171,7 +171,10 @@ namespace DitherNeed
 		kNoPrecursors = 1u << 2,            // no region precursors (block statistics)
 		kNoLut = 1u << 3,                   // no light-level table
 		kUnsupportedDomain = 1u << 4,       // output code domain the sigma-delta cannot serve (float / 16-bit target)
-		kEvidenceGridMismatch = 1u << 5     // precursors on another block grid than the grain product's
+		kEvidenceGridMismatch = 1u << 5,    // precursors on another block grid than the grain product's
+		kLutSizeMismatch = 1u << 6,         // a light-level table that is not 1024 texels wide
+		kNoSetTexture = 1u << 7,            // libplacebo without pl_mpv_user_shader_set_texture: the map cannot be bound
+		kPassFailed = 1u << 8               // the GPU block pass (or the texture bind) failed this frame
 	};
 
 	inline std::string MissingText(unsigned mask)
@@ -182,6 +185,9 @@ namespace DitherNeed
 			{ kNoPrecursors, "no region precursors" },
 			{ kEvidenceGridMismatch, "region precursors on another grid" },
 			{ kNoLut, "no light-level table" },
+			{ kLutSizeMismatch, "light-level table of the wrong size" },
+			{ kNoSetTexture, "libplacebo without set_texture" },
+			{ kPassFailed, "GPU pass failed" },
 			{ kUnsupportedDomain, "output domain not supported" } };
 		std::string s;
 		for (const auto& n : kNames)
@@ -196,6 +202,7 @@ namespace DitherNeed
 		if (missingMask)
 			return "dither need: unavailable (" + MissingText(missingMask) + "); sigma-delta at its base amplitude";
 		if (!needed) return "dither need: not needed (link step invisible)";
+		if (total == 0) return "dither need: on";   // the GPU form does not read the map back
 		return "dither need: on (" + std::to_string(raised) + " of " + std::to_string(total) + " blocks raised)";
 	}
 
@@ -274,6 +281,57 @@ namespace DitherNeed
 		std::string lutFingerprint;
 	};
 
+	// ---- the shared reset / off / missing decision ---------------------------------------------------------------------------
+
+	struct Decision
+	{
+		Result result = Result::Off;
+		bool reset = false;          // e = target for every block (no valid state, discontinuity, grid / LUT / colour depth / aBase change)
+		bool off = true;             // write / bind nothing: Off, Unavailable or NotNeeded (the sigma-delta runs at its base amplitude)
+		unsigned missing = 0;
+		std::string status;
+	};
+
+	// CPU-only; needs NO grain or evidence planes: the grid, the LUT fingerprint, the colour depth, aBase, the caller's
+	// discontinuity flag and whether the inputs are present (FrameArgs::missing) and needed. MapT (CPU) and the GPU callers
+	// (DitherNeedGpu.h BlockPass) take the same decision from the same tracker.
+	class StateTracker
+	{
+	public:
+		Decision Decide(const FrameArgs& a)
+		{
+			Decision d;
+			d.missing = a.enabled ? a.missing : 0u;
+			if (!a.enabled) d.result = Result::Off;
+			else if (d.missing) d.result = Result::Unavailable;
+			else if (!a.needed) d.result = Result::NotNeeded;
+			else d.result = Result::On;
+			d.off = d.result != Result::On;
+			if (d.off)
+			{
+				valid_ = false;   // the next full frame resets e = target
+			}
+			else
+			{
+				d.reset = !valid_ || a.discontinuity || a.grid.gw != gw_ || a.grid.gh != gh_ || a.grid.B != B_ ||
+					a.lutFingerprint != fp_ || a.colorBits != colorBits_ || a.params.aBase != aBase_;
+				valid_ = true;
+			}
+			gw_ = a.grid.gw; gh_ = a.grid.gh; B_ = a.grid.B;
+			fp_ = a.lutFingerprint; colorBits_ = a.colorBits; aBase_ = a.params.aBase;
+			d.status = StatusOf(a.enabled, d.missing, a.needed);
+			return d;
+		}
+		bool Valid() const { return valid_; }
+		void Invalidate() { valid_ = false; }   // a failed pass: the state on the GPU is unknown
+
+	private:
+		int gw_ = 0, gh_ = 0, B_ = 0, colorBits_ = 0;
+		std::string fp_;
+		double aBase_ = 0.0;
+		bool valid_ = false;
+	};
+
 	template <class T>
 	class MapT
 	{
@@ -282,15 +340,13 @@ namespace DitherNeed
 		Result Update(const FrameArgs& a, const std::vector<BlockInT<T>>& blocks)
 		{
 			const size_t n = a.grid.Count();
-			unsigned miss = a.missing;
-			if (a.enabled && miss == 0 && blocks.size() != n) miss |= kGrainGridMismatch;   // defensive: inconsistent caller
-			missing_ = a.enabled ? miss : 0u;
-			if (!a.enabled) return Finish(Result::Off, a, true);
-			if (miss) return Finish(Result::Unavailable, a, true);
-			if (!a.needed) return Finish(Result::NotNeeded, a, true);
+			FrameArgs in = a;
+			if (in.enabled && in.missing == 0 && blocks.size() != n) in.missing |= kGrainGridMismatch;   // defensive: inconsistent caller
+			const Decision dec = tracker_.Decide(in);
+			missing_ = dec.missing;
+			if (dec.off) return Finish(dec.result, a, true);
 
-			const bool reset = !valid_ || a.discontinuity || a.grid.gw != gw_ || a.grid.gh != gh_ || a.grid.B != B_ ||
-				a.lutFingerprint != fp_ || a.colorBits != colorBits_ || a.params.aBase != aBase_ || e_.size() != n;
+			const bool reset = dec.reset || e_.size() != n;
 			const T q = T(QOut(a.colorBits));
 			const T alpha = T(AlphaFor(a.dtSeconds, a.params.tauSeconds));
 			const T dead = T(a.params.deadband);
@@ -304,8 +360,6 @@ namespace DitherNeed
 				if ((diff < T(0) ? -diff : diff) <= dead) continue;   // hysteresis: hold
 				e_[i] += alpha * diff;
 			}
-			Remember(a);
-			valid_ = true;
 			result_ = Result::On;
 			raised_ = 0;
 			for (size_t i = 0; i < n; ++i) if (e_[i] > T(1e-3)) ++raised_;
@@ -323,35 +377,25 @@ namespace DitherNeed
 		Result LastResult() const { return result_; }
 		unsigned LastMissing() const { return missing_; }
 		size_t Raised() const { return raised_; }
-		bool Valid() const { return valid_; }
+		bool Valid() const { return tracker_.Valid(); }
 		std::string Status() const
 		{
 			return StatusOf(result_ != Result::Off, missing_, result_ != Result::NotNeeded, raised_, total_);
 		}
 
 	private:
-		// Every non-On outcome: no extra, no state (the next full frame resets e = target).
+		// Every non-On outcome: no extra, no state (the next full frame resets e = target; the tracker already invalidated).
 		Result Finish(Result r, const FrameArgs& a, bool zero)
 		{
 			if (zero) e_.assign(a.grid.Count(), T(0));
-			Remember(a);
-			valid_ = false;
 			result_ = r;
 			raised_ = 0;
 			total_ = a.grid.Count();
 			return r;
 		}
-		void Remember(const FrameArgs& a)
-		{
-			gw_ = a.grid.gw; gh_ = a.grid.gh; B_ = a.grid.B;
-			fp_ = a.lutFingerprint; colorBits_ = a.colorBits; aBase_ = a.params.aBase;
-		}
 
 		std::vector<T> e_;
-		int gw_ = 0, gh_ = 0, B_ = 0, colorBits_ = 0;
-		std::string fp_;
-		double aBase_ = 0.0;
-		bool valid_ = false;
+		StateTracker tracker_;
 		Result result_ = Result::Off;
 		unsigned missing_ = 0;
 		size_t raised_ = 0, total_ = 0;

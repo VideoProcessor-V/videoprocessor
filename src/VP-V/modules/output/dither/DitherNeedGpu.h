@@ -7,8 +7,10 @@
 //              the grain split's block texture, the region precursors (+ aux) and the two light-level tables, applies the law
 //              and the temporal state, and writes the per-block extra amplitude. It owns two tiny rgba32f block-grid textures
 //              used as ping-pong (previous / new state): THE PRODUCT ITSELF is the newest of them (Current(), e in .x).
-//              The CPU class (DitherNeed::MapT, Gather, NeedCache, AlphaFor) decides the flags: reset (no valid state,
-//              discontinuity, grid / LUT / colour depth / aBase change) and off (missing input, not needed: writes zero).
+//              The flags come from DitherNeed::StateTracker::Decide (the same decision MapT takes; no CPU planes needed): reset
+//              (no valid state, discontinuity, grid / LUT / colour depth / aBase change) and off (missing input, not needed,
+//              setting off). BlockPass::Step does Decide + input validation + the pass; a skipped, missing or failed frame
+//              Invalidate()s the product (Current() is null, the guard binds nothing, the sigma-delta sees no map).
 //   HookGuard  binds the product to the sigma-delta hook(s) of a frame: dither_need = 1, the output-pixel -> block-grid mapping
 //              (dn_scale_x/y, dn_off_x/y, dn_block) and the texture VPDN, through CustomHookChain::SetHookParameter and the
 //              libplacebo fork's pl_mpv_user_shader_set_texture (patch 0004; PL_VP_MPV_USER_SHADER_SET_TEXTURE). Restored
@@ -52,7 +54,7 @@ namespace DitherNeed
 			double qOut = 4.0;                                                 // DitherNeed::QOut(colorBits)
 			double alpha = 1.0;                                                // DitherNeed::AlphaFor(dt, tau)
 			bool reset = true;                                                 // e = target for every block
-			bool off = false;                                                  // write zero
+			bool off = false;                                                  // skipped frame: Run() invalidates and returns
 		};
 
 		class BlockPass
@@ -66,19 +68,86 @@ namespace DitherNeed
 			// Tests read the state back.
 			void SetHostReadable(bool on) { m_hostReadable = on; }
 
-			// One pass. A (re)created state texture forces reset (its contents are undefined). False with LastError on
-			// failure (the previous state is then unchanged and the caller treats the frame as off).
+			// Input validation (the shared textures must fit the block grid; the LUT tables are 1024 wide): the DitherNeed::Missing bits.
+			static unsigned Validate(const Args& a)
+			{
+				unsigned m = 0;
+				auto size = [](pl_tex t, int w, int h) { return t && t->params.w == w && t->params.h == h; };
+				if (!a.gsBlocks) m |= kNoGrain;
+				else if (!size(a.gsBlocks, a.gridW, a.gridH)) m |= kGrainGridMismatch;
+				bool havePre = true, preFit = true;
+				for (pl_tex t : a.precursors)
+				{
+					if (!t) havePre = false;
+					else if (!size(t, a.gridW, a.gridH)) preFit = false;
+				}
+				if (!havePre) m |= kNoPrecursors;
+				else if (!preFit) m |= kEvidenceGridMismatch;
+				if (!a.lut || !a.lutOut) m |= kNoLut;
+				else if (!size(a.lut, LightLevel::kLutSize, 1) || !size(a.lutOut, LightLevel::kLutSize, 1)) m |= kLutSizeMismatch;
+				return m;
+			}
+
+			struct StepResult
+			{
+				Decision decision;       // from the shared StateTracker (status text included)
+				bool ran = false;        // the block pass ran: Current() is the product
+				unsigned missing = 0;    // decision.missing: the caller's bits + the validation + kPassFailed
+			};
+
+			// One frame: Decide (the caller's `fa.missing`, e.g. no LUT / unsupported domain / no set_texture, plus the GPU
+			// input validation), then the pass when On. Every other outcome Invalidate()s the product. The block-grid geometry
+			// of `fa` and `a` must agree (fa.grid.gw/gh = a.gridW/gridH). a.reset / a.off are set from the decision.
+			StepResult Step(pl_gpu gpu, pl_dispatch dispatch, Args a, FrameArgs fa)
+			{
+				StepResult r;
+				if (fa.enabled && fa.needed) fa.missing |= Validate(a);
+				r.decision = m_tracker.Decide(fa);
+				r.missing = r.decision.missing;
+				if (r.decision.off) { Invalidate(); return r; }
+				a.reset = r.decision.reset;
+				a.off = false;
+				if (!Run(gpu, dispatch, a))
+				{
+					m_tracker.Invalidate();
+					Invalidate();
+					fa.missing |= kPassFailed;
+					r.decision.result = Result::Unavailable;
+					r.decision.off = true;
+					r.decision.reset = false;
+					r.decision.missing = fa.missing;
+					r.decision.status = StatusOf(true, fa.missing, true);
+					r.missing = fa.missing;
+					return r;
+				}
+				r.ran = true;
+				return r;
+			}
+
+			// A skipped frame (setting off, not needed, an input missing, a failed pass): nothing is bound, the next pass resets.
+			void Invalidate() { m_valid = false; }
+
+			// One pass. A (re)created state texture forces reset (its contents are undefined) and clears the valid flag; the
+			// flag is set again only by a successful pass; a failed pass invalidates. a.off = Invalidate and return true.
 			bool Run(pl_gpu gpu, pl_dispatch dispatch, const Args& a)
 			{
 				using namespace VpvGpu;
 				m_error.clear();
+				if (a.off) { Invalidate(); return true; }
 				if (!gpu || !dispatch || !a.gsBlocks || !a.lut || !a.lutOut || a.gridW < 1 || a.gridH < 1 || a.blockPx < 1)
 				{
+					Invalidate();
 					m_error = "dither need: invalid input";
 					return false;
 				}
 				for (pl_tex t : a.precursors)
-					if (!t) { m_error = "dither need: missing precursor texture"; return false; }
+					if (!t) { Invalidate(); m_error = "dither need: missing precursor texture"; return false; }
+				if (const unsigned bad = Validate(a))
+				{
+					Invalidate();
+					m_error = "dither need: " + MissingText(bad);
+					return false;
+				}
 				const pl_fmt f4 = FloatFormat(gpu, 4);
 				bool fresh = !m_valid;
 				for (int i = 0; i < 2; ++i)
@@ -86,13 +155,14 @@ namespace DitherNeed
 					pl_tex before = m_tex[i];
 					if (!EnsureState(gpu, m_tex[i], a.gridW, a.gridH, f4))
 					{
+						Invalidate();
 						m_error = "dither need: no rgba32f storage texture";
 						return false;
 					}
-					if (m_tex[i] != before) fresh = true;
+					if (m_tex[i] != before) { fresh = true; m_valid = false; }
 				}
 				const int prev = m_cur, next = 1 - m_cur;
-				const int reset = (a.reset || fresh) ? 1 : 0, off = a.off ? 1 : 0;
+				const int reset = (a.reset || fresh) ? 1 : 0, off = 0;
 				const int grid[2] = { a.gridW, a.gridH };
 				const int block = a.blockPx;
 				const float p0[4] = { static_cast<float>(a.params.aBase), static_cast<float>(a.params.aNeed),
@@ -114,6 +184,7 @@ namespace DitherNeed
 				const int gx = (a.gridW + 15) / 16, gy = (a.gridH + 15) / 16;
 				if (!Pass(dispatch, "VideoProcessor dither need: block pass", header, BlockPassBodyGlsl(), desc, 11, vars, 11, gx, gy, 0))
 				{
+					Invalidate();
 					m_error = "dither need: block pass failed";
 					return false;
 				}
@@ -130,6 +201,7 @@ namespace DitherNeed
 			// 2 x blocks x 16 bytes.
 			size_t VramBytes() const { return m_valid ? static_cast<size_t>(2) * m_w * m_h * 16 : 0; }
 			const std::string& LastError() const { return m_error; }
+			const StateTracker& Tracker() const { return m_tracker; }
 
 			void Release(pl_gpu gpu)
 			{
@@ -140,6 +212,7 @@ namespace DitherNeed
 				m_valid = false;
 				m_cur = 0;
 				m_w = m_h = 0;
+				m_tracker.Invalidate();
 			}
 
 		private:
@@ -159,6 +232,7 @@ namespace DitherNeed
 			int m_cur = 0, m_w = 0, m_h = 0;
 			bool m_valid = false, m_hostReadable = false;
 			std::string m_error;
+			StateTracker m_tracker;
 		};
 
 		// Output pixel -> block grid mapping: src = (pos + 0.5) * scale + off (source pixels), block edge in source pixels
@@ -202,7 +276,8 @@ namespace DitherNeed
 				HookGuard& operator=(const HookGuard&) = delete;
 				~HookGuard() { Release(); }
 
-				// True when any hook took the product. Without the fork call (7.360) nothing is set and false is returned.
+				// True when any hook took the product. Without the fork call (7.360) nothing is set and false is returned
+				// (the caller reports DitherNeed::kNoSetTexture / kPassFailed from MissingAfterApply). A null state binds nothing.
 				bool Apply(const pl_hook* const* hooks, int count, pl_tex state, const Placement& p)
 				{
 					if (!Supported() || !state || !hooks) return false;
@@ -222,6 +297,9 @@ namespace DitherNeed
 					}
 					return !m_applied.empty();
 				}
+
+				// The Missing bit to report when Apply returned false for a non-null state.
+				static unsigned MissingAfterApply() { return Supported() ? kPassFailed : kNoSetTexture; }
 
 				void Release()
 				{
