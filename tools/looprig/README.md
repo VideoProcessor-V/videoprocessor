@@ -45,3 +45,26 @@ Assumptions to confirm when the emitter is final: the injected-kind to ResyncCau
    --log vp.log --expected sched\random_sdr\expected.json --out report`
 
 Exit 0 PASS, 1 FAIL, 3 INCOMPLETE (some row had no data).
+
+## Unattended tier (`run_loop_tier.ps1`, category LoopRig)
+
+    tools\looprig\run_loop_tier.ps1 [-Mode 1080p60|2160p30] [-Only a,b] [-Seconds N] [-OwnerAttended]
+    tools\looprig\run_loop_tier.ps1 -DryRunSynthetic          # no rig: the whole scoring pipeline on synthetic captures
+    tools\looprig\run_loop_tier.ps1 -DryRun <capture folder>  # no rig: score recorded captures
+    tools\run_chain_gate.ps1 -LoopTier                        # chain gate, then the loop tier when a rig is present
+
+What it does: finds the Mini Recorder 4K (`StreamRecorder --list` matching `-Match`; none = writes
+`SKIP-NO-RIG`, exit 0), copies the x64 Release outputs into `D:\codex\looprig-run\<stamp>\vp` (never
+`C:\Videoprocessor`, never E:), sets `VP_DEBUG_OUTPUT_STAMP=1`, `VP_RESYNC_INJECT=1` and (resync scenarios)
+`VP_RESYNC_SCHEDULE`, generates each stamped clip (`make_stamped_clip.py`) and schedule
+(`stress_schedule.py`), plays it through VP, captures with `StreamRecorder --stamps`, stops only the PIDs it
+started, scores with `analyze.py` and writes `summary.md` + `loop-tier.trx` (Passed / Failed / NotExecuted
+per scenario). Holds `D:\codex\GPU-QUIET` for the run, mains only. Scenarios: `loop_tier_plan.json`
+(`optional_rows` lists rows the rig cannot measure yet, currently `latency`; any other NO DATA fails).
+
+Rig requirements for unattended runs: the Mini Recorder 4K is fed from the VP output (loop cable) and is
+the only thing using the card (no other recorder or VP running); the display chain is set to the standard
+mode (1080p60 or 2160p30) and stays awake; VP's input is a file (`-PlayerArgs`, default `/file "{clip}"`,
+to confirm) with a test configuration in the copied folder; the VP host reads `VP_RESYNC_SCHEDULE` (from
+feat/resync-q0-q3); the run is on mains with >= 10 GB free on D:. Manual steps (Apple TV switches, HDMI
+re-plugs) are outside the unattended set: `-OwnerAttended` adds those scenarios and prompts before each.

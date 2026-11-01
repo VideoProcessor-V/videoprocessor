@@ -20,7 +20,10 @@ BEGIN_RE = re.compile(r'\bBEGIN_TEST_METHOD_ATTRIBUTE\s*\(\s*(\w+)\s*\)')
 CAT_RE = re.compile(r'TEST_METHOD_ATTRIBUTE\s*\(\s*L"Category"\s*,\s*L"(\w+)"\s*\)')
 
 # Categories that must not run in the CPU CI (a real device, a screen, a meter, a projector).
-EXCLUDED_FROM_CPU = ['GpuHardware', 'GpuOnScreen', 'MeterHardware', 'ProjectorHardware', 'Slow']
+# LoopRig: needs the DeckLink loop rig; run by tools/looprig/run_loop_tier.ps1 only. Excluded from the CPU
+# run AND from the default --gpu set (GPU_DEFAULT_EXCLUDED); select it with --gpu --categories LoopRig.
+EXCLUDED_FROM_CPU = ['GpuHardware', 'GpuOnScreen', 'MeterHardware', 'ProjectorHardware', 'Slow', 'LoopRig']
+GPU_DEFAULT_EXCLUDED = [c for c in EXCLUDED_FROM_CPU if c != 'LoopRig']
 KNOWN_CATEGORIES = EXCLUDED_FROM_CPU + ['GpuWarp', 'Cpu']
 
 

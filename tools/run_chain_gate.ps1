@@ -13,6 +13,7 @@ real GPU (-GpuWarp here).
   run_chain_gate.ps1 -NoHarness -Names "SigmaDelta"   # GPU tests only
 
   run_chain_gate.ps1 -GpuWarp                         # + every GpuWarp test, on the hardware GPU
+  run_chain_gate.ps1 -LoopTier                        # + the unattended loop tier when the DeckLink rig is present
   run_chain_gate.ps1 -PrintFilter                     # show the generated /TestCaseFilter and stop
 
   run_chain_gate.ps1 -OnScreen                        # + the opt-in on-screen tests, windowed
@@ -40,6 +41,8 @@ param(
     # The pre-skeleton build's renderer DLL for the byte-identity test (skeleton lead 2026-10-24);
     # empty: the test reports SKIP-NO-BASELINE.
     [string]$BaselineRendererDll = "",
+    [switch]$LoopTier,           # after the gate, also run the loop tier (tools/looprig/run_loop_tier.ps1) when a rig is present; no rig = SKIP-NO-RIG, not a failure
+    [string]$LoopTierMode = "1080p60",
     [switch]$LenientDelay        # the delay gate reports instead of failing (VP_DELAY_GATE_STRICT off)
 )
 $ErrorActionPreference = "Stop"
@@ -135,5 +138,10 @@ if ($onScreenRequested) {
     $noTiming | ForEach-Object { "  on-screen run without display timing (inconclusive, fails the gate): $_" }
 }
 if ($results.Count -eq 0 -or $bad.Count -gt 0 -or $noGpu.Count -gt 0 -or $noTiming.Count -gt 0) { "Chain gate: FAILED"; exit 1 }
+if ($LoopTier) {
+    # The loop tier holds D:\codex\GPU-QUIET itself and runs unattended; SKIP-NO-RIG (exit 0) is reported, not failed.
+    & (Join-Path $PSScriptRoot "looprig\run_loop_tier.ps1") -Mode $LoopTierMode -AllowBattery:$AllowBattery -BuildDir (Split-Path -Parent $Dll) | ForEach-Object { "$_" }
+    if ($LASTEXITCODE -ne 0) { "Chain gate: FAILED (loop tier)"; exit 1 }
+}
 "Chain gate: PASSED"
 exit 0
