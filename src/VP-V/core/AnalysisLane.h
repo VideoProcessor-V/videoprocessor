@@ -464,8 +464,10 @@ public:
     // (the era is part of the graph key) on the new one. The first observation after a rebind is not a change.
     void BindIndicator(const std::shared_ptr<VpIndicator::Indicator>& indicator)
     {
-        if (indicator.get() == ind_ && indicator == indHandle_)
+        if (indicator.get() == ind_) {
+            indHandle_ = indicator;   // the same Indicator: only adopt the shared handle, nothing to rebuild
             return;
+        }
         indHandle_ = indicator;
         ind_ = indicator.get();
         observedOnce_ = false;
@@ -996,7 +998,8 @@ public:
         out.push_back(FallbackCatalog::AnalysisLaneDeterminism(st && det_ ? missedBounds_ : 0u));
         out.push_back(FallbackCatalog::SourceStatsWalk(settings_.walk == VpLaneProducts::WalkSource::Lane,
                                                         !P4Available()));
-        out.push_back(FallbackCatalog::ResyncSeal(externalSealMisses_, 0u));
+        if (externalSealMisses_ != 0)   // appended only when engaged: the list keeps its shape otherwise
+            out.push_back(FallbackCatalog::ResyncSeal(externalSealMisses_, 0u));
         return out;
     }
 

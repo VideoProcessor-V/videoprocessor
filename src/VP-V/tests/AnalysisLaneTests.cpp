@@ -1466,9 +1466,8 @@ namespace AnalysisLaneTestsNs
 			Assert::IsTrue(Rig::Res(res, kP4SourceStats).seal.reason == SealReason::Accepted && !Rig::Res(res, kP4SourceStats).liveFilled, L"P4 used");
 		}
 
-		// (b) not published at the seal -> filled live ONCE; a publish after the seal is discarded (the
-		// slot is locked for that frame); a second seal of the same frame changes nothing.
-		TEST_METHOD(UnpublishedAtTheSealIsLiveFilledOnceAndALatePublishIsDiscarded)
+		// (b) not published at the seal -> filled live ONCE; a second seal of the same frame never fills again.
+		TEST_METHOD(UnpublishedAtTheSealIsLiveFilledOnce)
 		{
 			Rig r;
 			r.Configure(LaneSettings::Mode::On, false, 1);
@@ -1484,23 +1483,56 @@ namespace AnalysisLaneTestsNs
 			const std::vector<uint8_t> before = r.Bytes(kP1HalfLuma, 1);
 			const uint64_t fills = LiveFillsOf(r);
 			Assert::IsTrue(fills >= 2);
-			r.Pump();   // the lane now finishes frame 1: too late
+			r.Pump();   // the lane now works on later frames
 			Assert::IsTrue(r.Bytes(kP1HalfLuma, 1) == before, L"the locked slot is not rewritten");
 			Assert::IsTrue(LiveFillsOf(r) == fills, L"no second fill");
-			const std::shared_ptr<LaneState> st = r.lane.State();
-			uint64_t discarded = 0;
-			for (size_t i = 0; i < st->table->Count(); ++i) {
-				const SlotCounters& c = st->table->At(i).Counters();
-				const LaneProductCounters& rc = st->runner->Counters(st->table->NodeAt(i).id);
-				discarded += c.lateDiscards.load() + rc.latePublishes.load() + rc.staleSkips.load() + rc.abandoned.load() + rc.cancelled.load();
-			}
-			Assert::IsTrue(discarded > 0, L"the late result was discarded and counted");
 			r.lane.OnRenderStart(1, 4000);   // a second seal of the same frame
 			Assert::IsTrue(LiveFillsOf(r) == fills, L"a second seal never fills again");
+			const std::shared_ptr<LaneState> st = r.lane.State();
 			uint64_t doubles = 0;
 			for (size_t i = 0; i < st->table->Count(); ++i)
 				doubles += st->table->At(i).Counters().doubleSeals.load();
 			Assert::IsTrue(doubles > 0, L"counted as a double seal");
+		}
+
+		// (b2) the lane is part-way through a frame at the seal: the seal locks the slot (late), the
+		// frame is filled live, and the lane's later publish is DISCARDED and counted.
+		TEST_METHOD(APublishAfterTheSealIsDiscardedAndCounted)
+		{
+			Rig r;
+			r.consumers.clear();
+			r.consumers.push_back(Consumer(1, { kP2VectorPair }));
+			r.Configure(LaneSettings::Mode::On, false, 1);
+			const Handle h = Alias(r.ind);
+			VpSeal::FrameSeal fs;
+			Wire(r, fs);
+			r.lane.OnSourceFrame(r.View(1));
+			r.lane.OnSourceFrame(r.View(2));
+			r.lane.OnSourceFrame(r.View(3));
+			r.lane.StepWorker(Backend::Ofa, 1000);   // the first chunk of the first pair only
+			const std::shared_ptr<LaneState> st = r.lane.State();
+			uint64_t claimed = 0;
+			for (size_t i = 0; i < st->table->Count(); ++i)
+				claimed += st->table->At(i).Counters().claims.load();
+			Assert::IsTrue(claimed > 0, L"the lane is mid-way through a frame");
+			uint64_t liveBefore = r.p2Live.load();
+			for (uint64_t s = 1; s <= 3; ++s) {
+				fs.Seal(h, s);
+				r.lane.OnRenderStart(s, 4000);
+			}
+			const uint64_t fillsAtSeal = LiveFillsOf(r);
+			Assert::IsTrue(fillsAtSeal > 0 && r.p2Live.load() > liveBefore, L"the unfinished frame was filled live at the seal");
+			r.Pump();   // the lane finishes its chunk now: too late
+			Assert::IsTrue(LiveFillsOf(r) == fillsAtSeal, L"no second fill");
+			uint64_t late = 0, discarded = 0;
+			for (size_t i = 0; i < st->table->Count(); ++i) {
+				const SlotCounters& c = st->table->At(i).Counters();
+				const LaneProductCounters& rc = st->runner->Counters(st->table->NodeAt(i).id);
+				late += c.late.load();
+				discarded += c.lateDiscards.load() + rc.latePublishes.load() + rc.staleSkips.load() + rc.abandoned.load() + rc.cancelled.load();
+			}
+			Assert::IsTrue(late > 0, L"counted late at the seal");
+			Assert::IsTrue(discarded > 0, L"and the late result was discarded, not merged");
 		}
 
 		// (c) two consumers of one product: one node, one live fill per frame.
@@ -1535,7 +1567,8 @@ namespace AnalysisLaneTestsNs
 			VpSeal::FrameSeal fs;
 			Wire(r, fs);
 			r.lane.OnSourceFrame(r.View(1));
-			const std::vector<ProductFrameResult> res = SealedFrame(r, fs, h, 1, false);
+			SealedFrame(r, fs, h, 1, false);   // P2 has no previous frame yet
+			const std::vector<ProductFrameResult> res = SealedFrame(r, fs, h, 2, false);   // its inputs exist, no lane result, live fill declines
 			const ProductFrameResult& o = Rig::Res(res, kP2VectorPair);
 			Assert::IsTrue(o.final == SealOutcome::Unavailable, L"unavailable");
 			Assert::IsTrue(r.lane.TotalDeclined() > 0);
