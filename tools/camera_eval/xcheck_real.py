@@ -60,13 +60,16 @@ def load(camdir, seq, src):
     return read_camf(p) if os.path.isfile(p) else None
 
 
-def evaluate(camdir, real_root=DEFAULT_ROOT):
-    """-> (rows, truths): one row (dict) per candidate, and per-clip (trusted pairs, pairs)."""
+def evaluate(camdir, real_root=DEFAULT_ROOT, truth_dir=None):
+    """-> (rows, truths): one row (dict) per candidate, and per-clip (trusted pairs, pairs).
+
+    truth_dir: where the master fits that define the truth are read (default camdir). Pin it to the default-configuration
+    fits when camdir holds another configuration, so the metric is not self-referential."""
     rows, truths = [], {}
     dims = frame_sizes(real_root)
     for clip in CLIPS:
         W, H = dims[clip]
-        md, mn = load(camdir, clip + '_master', 'disref'), load(camdir, clip + '_master', 'nvof')
+        md, mn = load(truth_dir or camdir, clip + '_master', 'disref'), load(truth_dir or camdir, clip + '_master', 'nvof')
         if md is None or mn is None:
             continue
         gw, gh, blk = md[0], md[1], md[2]

@@ -1,14 +1,18 @@
 # Copyright(C) 2026 VP-V contributors
 # SPDX-License-Identifier: GPL-3.0-only
-"""One command: run camera_eval on the synthetic scenarios and the real sequences, new defaults vs phase 1.
+"""One command: run camera_eval on the synthetic scenarios and the real sequences, two configurations side by side.
 
 Usage (python -I):
-  python -I run_eval.py --exe bin/camera_eval.exe --out OUT_DIR [--synth-root DIR] [--real-root D:/codex/td-real-vectors-out]
-                        [--synth-pairs 40] [--real-frames 72] [--match] [--match-count 40] [--match-clips crowd,tos,sol,boat]
+  python -I run_eval.py --exe bin/camera_eval.exe --out OUT_DIR [--vs two-layer|phase1] [--synth-root DIR]
+                        [--real-root D:/codex/td-real-vectors-out] [--synth-pairs 40] [--real-frames 72] [--match]
+                        [--match-count 40] [--match-clips crowd,tos,sol,boat]
 
 Builds nothing (build_camera_eval.bat first). Generates the synthetic fields under --synth-root if missing (default
-OUT_DIR/synth_fields, never inside the repo), fits every scenario and every real sequence/source under both
-configurations ('new' = current Config defaults, 'phase1' = --phase1), scores them, and writes OUT_DIR/summary.md.
+OUT_DIR/synth_fields, never inside the repo), fits every scenario and every real sequence/source under two
+configurations: 'new' (current Config defaults, twoLayer off) and the second one chosen by --vs ('two-layer' = --two-layer,
+the default; 'phase1' = --phase1), scores them, and writes OUT_DIR/summary.md. Real-clip truth is ALWAYS taken from the
+'new' (default-configuration) master DIS + NVOF fits, for both columns, so the metric is not self-referential. The summary
+also reports the fit time (p50 / p95 / max microseconds per Fitter::Fit over all real pairs) per configuration.
 --match also runs the matcher comparison (`camera_eval match`) on the *_1080p_low clips and appends it.
 Only reads --real-root; never writes there.
 """
@@ -27,7 +31,6 @@ import score_synth  # noqa: E402
 import synth_fields  # noqa: E402
 import xcheck_real  # noqa: E402
 
-CONFIGS = [('new', []), ('phase1', ['--phase1'])]
 SYNTH_FPS = 50
 
 
@@ -68,16 +71,25 @@ def f(x, p=2):
     return '-' if x is None else ('%.*f' % (p, x))
 
 
-def run_match(exe, out, real_root, clips, count):
+def fit_times(rd):
+    """All fitUs values (microseconds per Fitter::Fit call) of the real-clip CSVs in rd."""
+    v = []
+    for fn in sorted(os.listdir(rd)):
+        if fn.endswith('.csv'):
+            v += [float(r['fitUs']) for r in csv.DictReader(open(os.path.join(rd, fn))) if r.get('fitUs')]
+    return v
+
+
+def run_match(exe, out, real_root, clips, count, configs):
     cs = cases(real_root)
     res = {}
     for clip in clips:
         c = cs['%s_1080p_low' % clip]
-        for tag, flags in CONFIGS:
+        for tag, flags in configs:
             o = os.path.join(out, tag, 'match_%s_1080p_low.csv' % clip)
             cmd = [exe, 'match', '--yuv', c['coded'].replace('\\', '/'), '--w', str(c['w']), '--h', str(c['h']), '--bitdepth', '10', '--frames', str(c['frames']),
                    '--vec', os.path.join(real_root, 'vec', '%s_1080p_low' % clip, 'nvof'), '--ref', os.path.join(real_root, 'vec', '%s_master' % clip, 'disref'),
-                   '--fps', str(c['fps']), '--count', str(count), '--out', o] + flags
+                   '--fps', str(c['fps']), '--count', str(count), '--out', o] + [x for x in flags if x != '--two-layer']
             os.makedirs(os.path.dirname(o), exist_ok=True)
             print('match', clip, tag, '%.0fs' % run(cmd), flush=True)
             res[(clip, tag)] = summarise_match(o)
@@ -101,14 +113,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--exe', required=True)
     ap.add_argument('--out', required=True)
+    ap.add_argument('--vs', choices=['two-layer', 'phase1'], default='two-layer',
+                    help='second configuration: two-layer (Config::twoLayer on; default) or phase1 (--phase1)')
     ap.add_argument('--synth-root')
     ap.add_argument('--real-root', default='D:/codex/td-real-vectors-out')
     ap.add_argument('--synth-pairs', type=int, default=40)
     ap.add_argument('--real-frames', type=int, default=72)
+    ap.add_argument('--tl-args', default='', help='extra camera_eval flags for the two-layer configuration, e.g. "--tl-floor 0.5 --tl-veto 0.3"')
     ap.add_argument('--match', action='store_true')
     ap.add_argument('--match-count', type=int, default=40)
     ap.add_argument('--match-clips', default='crowd,tos,sol,boat')
     a = ap.parse_args()
+    B, flagsB, L2 = ('phase1', ['--phase1'], 'p1') if a.vs == 'phase1' else ('two', ['--two-layer'] + a.tl_args.split(), 'two')
+    CONFIGS = [('new', []), (B, flagsB)]
     exe = os.path.abspath(a.exe)
     out = os.path.abspath(a.out)
     repo = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
@@ -124,7 +141,7 @@ def main():
     if not os.path.isdir(os.path.join(synth_root, synth_fields.SCENARIOS[-1])):
         synth_fields.generate(synth_root, a.synth_pairs)
 
-    synth, real = {}, {}
+    synth, real, fit_us = {}, {}, {}
     jobs = real_jobs(a.real_root)
     for tag, flags in CONFIGS:
         sd = os.path.join(out, tag, 'synth')
@@ -138,35 +155,40 @@ def main():
         for seq, src, d, w, h, fps in jobs:
             run([exe, 'fit', '--vec', d, '--frames', str(a.real_frames), '--w', str(w), '--h', str(h), '--fps', str(fps),
                  '--out', os.path.join(rd, '%s_%s.camf' % (seq, src)), '--csv', os.path.join(rd, '%s_%s.csv' % (seq, src))] + flags)
-        rows, truths = xcheck_real.evaluate(rd, a.real_root)
-        real[tag] = ({(r['seq'], r['src']): r for r in rows}, truths)
+        fit_us[tag] = fit_times(rd)
         print('fitted', tag, flush=True)
+    for tag, _ in CONFIGS:   # truth pinned to the default-configuration master fits for both columns
+        rows, truths = xcheck_real.evaluate(os.path.join(out, tag, 'real'), a.real_root, truth_dir=os.path.join(out, 'new', 'real'))
+        real[tag] = ({(r['seq'], r['src']): r for r in rows}, truths)
 
-    L = ['# Camera model evaluation: new defaults vs phase 1', '',
+    title = ('# Camera model evaluation: new defaults vs phase 1' if B == 'phase1'
+             else '# Camera model evaluation: twoLayer off (new) vs twoLayer on (two)')
+    L = [title, '',
          'Synthetic: %d pairs per scenario at 1920x1080, %d fps. WRONG = a usable fit (valid, confidence >= 0.5) on a scene with no dominant camera '
          'motion, or with max corner error > max(1 px, 10 %% of the true corner displacement).' % (a.synth_pairs - 1, SYNTH_FPS), '',
          '## Synthetic scenarios', '',
-         '| scenario | dominant | usable new | usable p1 | WRONG new | WRONG p1 | corner err med new | p1 | label prec/rec new | p1 | jitter new | p1 |',
+         '| scenario | dominant | usable new | usable %s | WRONG new | WRONG %s | corner err med new | %s | label prec/rec new | %s | jitter new | %s |' % ((L2,) * 5),
          '|---|---|---|---|---|---|---|---|---|---|---|---|']
-    tot = {t: dict(usable=[], wrong=0) for t, _ in CONFIGS}
+    tot = {t: 0 for t, _ in CONFIGS}
     for n in synth_fields.SCENARIOS:
-        s, p = synth[('new', n)], synth[('phase1', n)]
+        s, p = synth[('new', n)], synth[(B, n)]
         L.append('| %s | %d | %s | %s | %d | %d | %s | %s | %s/%s | %s/%s | %s | %s |' % (
             n, s['dominant'], f(s['usable']), f(p['usable']), s['wrong'], p['wrong'], f(s['err_med']), f(p['err_med']),
             f(s['lab_prec']), f(s['lab_rec']), f(p['lab_prec']), f(p['lab_rec']), f(s['jitter']), f(p['jitter'])))
-        for t in ('new', 'phase1'):
-            tot[t]['wrong'] += synth[(t, n)]['wrong']
-    L += ['', 'Total WRONG-confident pairs: new %d, phase 1 %d.' % (tot['new']['wrong'], tot['phase1']['wrong']), '',
-          '## Real sequences (truth = master DIS/NVOF fits that agree)', '']
+        for t, _ in CONFIGS:
+            tot[t] += synth[(t, n)]['wrong']
+    L += ['', 'Total WRONG-confident synthetic pairs: new %d, %s %d.' % (tot['new'], L2, tot[B]), '',
+          '## Real sequences (truth = default-configuration master DIS/NVOF fits that agree, for both columns)', '']
     for clip, (n, m, k) in real['new'][1].items():
         L.append('- %s: region truth on %d/%d pairs, corner truth on %d' % (clip, k, m, n))
     L += ['', 'Region metric (primary): truth = pairs where master DIS and NVOF fits are valid, share >= 50 camera blocks, p90 block difference <= 0.5 px. '
           'WRONG = confident fit whose p90 block error over the true-camera blocks (or over the fit own camera labels) exceeds max(1 px, 10 % of the p90 truth magnitude). '
           '"Extrapolated corner" columns use the max picture-corner error and include non-camera regions.', '',
-          '| sequence | source | usable new | usable p1 | region judged new/p1 | WRONG@true-cam new | p1 | WRONG@own-labels new | p1 | extrapolated corner err med new | p1 | master-camera-block err med new | p1 | extrapolated corner WRONG new | p1 |',
+          '| sequence | source | usable new | usable %s | region judged new/%s | WRONG@true-cam new | %s | WRONG@own-labels new | %s | extrapolated corner err med new | %s | master-camera-block err med new | %s | extrapolated corner WRONG new | %s |' % ((L2,) * 7),
           '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|']
-    rn, rp = real['new'][0], real['phase1'][0]
-    agg = {t: dict(u=[], w=0, j=0, rj=0, rw=0, ro=0) for t in ('new', 'phase1')}
+    rn, rp = real['new'][0], real[B][0]
+    agg = {t: dict(u=[], w=0, j=0, rj=0, rw=0, ro=0) for t in ('new', B)}
+    clip_agg = {}
     for k in sorted(rn):
         x, y = rn[k], rp.get(k)
         if y is None:
@@ -174,20 +196,42 @@ def main():
         L.append('| %s | %s | %s | %s | %d/%d | %d | %d | %d | %d | %s | %s | %s | %s | %d | %d |' % (k[0], k[1], f(x['usable']), f(y['usable']), x['region_judged'], y['region_judged'],
                  x['region_wrong'], y['region_wrong'], x['region_wrong_own'], y['region_wrong_own'],
                  f(x['err_med']), f(y['err_med']), f(x['cam_err_med']), f(y['cam_err_med']), x['wrong'], y['wrong']))
-        for t, r in (('new', x), ('phase1', y)):
+        clip = k[0].split('_')[0]
+        for t, r in (('new', x), (B, y)):
             agg[t]['u'].append(r['usable'])
             agg[t]['w'] += r['wrong']
             agg[t]['j'] += r['judged']
             agg[t]['rj'] += r['region_judged']
             agg[t]['rw'] += r['region_wrong']
             agg[t]['ro'] += r['region_wrong_own']
-    L += ['', 'Mean usable share over all real candidates: new %s, phase 1 %s. Region metric WRONG-confident (true-camera blocks / own labels): new %d / %d of %d judged, phase 1 %d / %d of %d judged. '
-        'Extrapolated corner WRONG-confident: new %d of %d judged, phase 1 %d of %d judged.' % (
-        f(mean(agg['new']['u'])), f(mean(agg['phase1']['u'])), agg['new']['rw'], agg['new']['ro'], agg['new']['rj'], agg['phase1']['rw'], agg['phase1']['ro'], agg['phase1']['rj'],
-        agg['new']['w'], agg['new']['j'], agg['phase1']['w'], agg['phase1']['j'])]
+            c = clip_agg.setdefault((clip, t), dict(u=[], rj=0, rw=0, ro=0))
+            c['u'].append(r['usable'])
+            c['rj'] += r['region_judged']
+            c['rw'] += r['region_wrong']
+            c['ro'] += r['region_wrong_own']
+    L += ['', 'Mean usable share over all real candidates: new %s, %s %s. Region metric WRONG-confident (true-camera blocks / own labels): new %d / %d of %d judged, %s %d / %d of %d judged. '
+        'Extrapolated corner WRONG-confident: new %d of %d judged, %s %d of %d judged.' % (
+        f(mean(agg['new']['u'])), L2, f(mean(agg[B]['u'])), agg['new']['rw'], agg['new']['ro'], agg['new']['rj'], L2, agg[B]['rw'], agg[B]['ro'], agg[B]['rj'],
+        agg['new']['w'], agg['new']['j'], L2, agg[B]['w'], agg[B]['j']), '',
+        '### Per clip (all tiers and sources)', '',
+        '| clip | usable new | usable %s | WRONG@true-cam new | %s | judged new | %s | WRONG rate new | %s |' % ((L2,) * 4), '|---|---|---|---|---|---|---|---|---|']
+    for clip in xcheck_real.CLIPS:
+        cn, cb = clip_agg.get((clip, 'new')), clip_agg.get((clip, B))
+        if not cn or not cb:
+            continue
+        L.append('| %s | %s | %s | %d | %d | %d | %d | %s | %s |' % (clip, f(mean(cn['u'])), f(mean(cb['u'])), cn['rw'], cb['rw'], cn['rj'], cb['rj'],
+                 f(cn['rw'] / cn['rj'] if cn['rj'] else None, 3), f(cb['rw'] / cb['rj'] if cb['rj'] else None, 3)))
+
+    def pct(v, q):
+        return float(np.percentile(v, q)) if v else None
+
+    L += ['', '### Fit time (microseconds per Fitter::Fit over all real pairs)', '', '| config | pairs | p50 | p95 | max |', '|---|---|---|---|---|']
+    for tag, _ in CONFIGS:
+        v = fit_us[tag]
+        L.append('| %s | %d | %s | %s | %s |' % (tag, len(v), f(pct(v, 50), 0), f(pct(v, 95), 0), f(max(v) if v else None, 0)))
 
     if a.match:
-        res = run_match(exe, out, a.real_root, a.match_clips.split(','), a.match_count)
+        res = run_match(exe, out, a.real_root, a.match_clips.split(','), a.match_count, CONFIGS)
         L += ['', '## Matcher: plan from the previous pair (narrow window + guided candidate) vs full search', '',
               'Fit input = coded NVOF of *_1080p_low, reference = master DIS. EPE in source px vs the block mean of the reference; "camera" = blocks the '
               'reference fit labels camera. evals = guided / full. Means over pairs of the per-pair statistic (gt1 = share of blocks with EPE > 1 px).', '',
