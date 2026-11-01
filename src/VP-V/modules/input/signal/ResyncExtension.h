@@ -76,6 +76,8 @@ namespace Vpv
 
 			// Capture thread only (the pulldown runs in OnVideoFrame before the frame is queued).
 			VpResync::Drive::Cursor pulldownCursor;
+			uint32_t pulldownEra = 0;   // era of the Indicator the cursor latched on (0 = none)
+			std::atomic<unsigned long long> faults{ 0 };   // exceptions the hub contained for this renderer
 
 			// Any thread.
 			VpResync::ResyncInject inject;
@@ -154,6 +156,8 @@ namespace Vpv
 			// Bound hosts (tests / diagnostics) and bindings that found the slot table full.
 			static size_t BoundHosts();
 			static unsigned long long BindOverflows();
+			// Exceptions the hub contained in this module for `host` (shown as a fallback line, never log-only).
+			static unsigned long long ContainedFaults(const void* host);
 		};
 
 		// Adds ResyncExtension to the hub. Start-up only; idempotent. Must run before any other module.

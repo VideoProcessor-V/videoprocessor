@@ -48,6 +48,11 @@ namespace Vpv
 				static std::atomic<unsigned long long> n{ 0 };
 				return n;
 			}
+			std::atomic<unsigned long long>& Faults()
+			{
+				static std::atomic<unsigned long long> n{ 0 };
+				return n;
+			}
 
 			// Render-thread status text, refreshed on an era change and every kStatusEvery seals.
 			constexpr uint64_t kStatusEvery = 32;
@@ -170,7 +175,11 @@ namespace Vpv
 				return nullptr;
 			for (Slot& s : Slots())
 				if (s.key.load(std::memory_order_acquire) == host)
-					return s.state.load(std::memory_order_acquire);
+				{
+					// The slot can be released and re-claimed between the two loads: only the host's own state counts.
+					HostResync* st = s.state.load(std::memory_order_acquire);
+					return st && st->host == host ? st : nullptr;
+				}
 			return nullptr;
 		}
 
@@ -196,6 +205,11 @@ namespace Vpv
 		}
 
 		unsigned long long ResyncExtension::BindOverflows() { return Overflows().load(std::memory_order_relaxed); }
+		unsigned long long ResyncExtension::ContainedFaults(const void* host)
+		{
+			HostResync* h = For(host);
+			return h ? h->faults.load(std::memory_order_relaxed) : Faults().load(std::memory_order_relaxed);
+		}
 
 		// ---- Settings and state (lifecycle) --------------------------------------------------------
 		void ResyncExtension::OnLifecycle(RE::LifecycleFacts& f)
@@ -292,7 +306,7 @@ namespace Vpv
 				h->shadow.ArmQueueGeneration(static_cast<uint64_t>(f.generation), f.text);
 				break;
 			case RE::QueueEvent::Drop:
-				if (f.seq > 0)
+				if (f.seq > 0 && (f.cause == kDropKeptRunHole || f.cause == kDropDriftDrop))   // other codes: not a resync slip (yet)
 					h->shadow.OnLateSlip(f.cause == kDropKeptRunHole ? VpResync::Cause::KeptRunHole : VpResync::Cause::DriftDrop,
 						static_cast<uint64_t>(f.seq), f.frames, SteadySeconds());
 				break;
@@ -318,7 +332,6 @@ namespace Vpv
 				if (request.kind == VpResync::ResyncInject::Kind::Minor && seq != 0)
 				{
 					h->shadow.OnLateSlip(VpResync::Cause::GapOther, seq + 1, static_cast<uint32_t>(request.value), SteadySeconds());
-					h->lastInjectSeq = seq + 1;
 				}
 				else if (request.kind == VpResync::ResyncInject::Kind::Full && seq != 0)
 				{
@@ -372,8 +385,26 @@ namespace Vpv
 		}
 
 		// ---- Status --------------------------------------------------------------------------------
-		void ResyncExtension::OnStatus(const RE::Context& ctx, RE::StatusKind kind, std::vector<std::string>& lines, const char*, const char*)
+		void ResyncExtension::OnStatus(const RE::Context& ctx, RE::StatusKind kind, std::vector<std::string>& lines, const char* worker, const char*)
 		{
+			if (kind == RE::StatusKind::WorkerFault)
+			{
+				if (worker && std::strcmp(worker, Name()) == 0)
+				{
+					HostResync* fh = For(ctx.host);
+					(fh ? fh->faults : Faults()).fetch_add(1, std::memory_order_relaxed);
+				}
+				return;
+			}
+			if (kind == RE::StatusKind::Fallbacks)
+			{
+				// Visible in every mode (no silent fallbacks): contained throws, and a renderer left without state.
+				const unsigned long long faults = ContainedFaults(ctx.host);
+				if (faults != 0)
+					lines.push_back("resync_fault: " + std::to_string(faults) + " resync callback exception(s) contained; resync may be incomplete");
+				if (Overflows().load(std::memory_order_relaxed) != 0 && ctx.host && !For(ctx.host))
+					lines.push_back("resync_host_table: no resync state for this renderer (host table full); resync is off");
+			}
 			HostResync* h = For(ctx.host);
 			if (!h)
 				return;
@@ -438,6 +469,11 @@ namespace Vpv
 				reply = h->inject.Invoke("resync.inject", args);   // "not armed"
 				return true;
 			}
+			if (!h->shadow.Active())
+			{
+				reply = "error: resync_event is off (inject needs shadow or on)";
+				return true;
+			}
 			if (!InjectKindAvailable(args))
 			{
 				// seek/reset/inplace/rebuild need the renderer control hook; the adapter kinds need the capture
@@ -469,6 +505,13 @@ namespace Vpv
 				{
 					if (const std::shared_ptr<VpIndicator::Indicator> indicator = h->shadow.GetIndicator())
 					{
+						// A new era (Configure rebuilt the Indicator) only re-latches, whichever side of the
+						// enqueue the render thread's rebuild lands on: deterministic, no reset from the restart.
+						if (h->pulldownEra != indicator->Era())
+						{
+							h->pulldownCursor.Reset();
+							h->pulldownEra = indicator->Era();
+						}
 						const bool latched = h->pulldownCursor.Has();
 						changed = h->pulldownCursor.Advance(*indicator, cursorSeq);
 						if (!latched)

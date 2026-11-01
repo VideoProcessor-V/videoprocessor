@@ -232,6 +232,13 @@ namespace Tests
 				step = Vpv::Resync::PulldownResyncStep(&r, false);
 				Assert::IsTrue(step.driving);
 				Assert::IsFalse(step.reset, L"entering on only latches");
+				// A ring resize (new era) between two pulldown steps only re-latches: no reset from the restart.
+				RE::QueueFacts q; q.host = &r; q.kind = RE::QueueEvent::Flush; q.generation = 1; q.frames = 64; q.text = "renderer reset";
+				ext.OnQueue(q);
+				Begin(ext, &r, 1);
+				RE::IngressContext c2 = Frame(&r, 2); ext.OnIngress(c2);
+				step = Vpv::Resync::PulldownResyncStep(&r, false);
+				Assert::IsFalse(step.reset, L"an era change is a latch, not a reset");
 			}
 
 			TEST_METHOD(StatusLinesRoundTripIntoTheRendererLines)
@@ -262,6 +269,23 @@ namespace Tests
 				f.code = Vpv::Resync::kRefusalClassify; ext.OnLifecycle(f);   // no states given: ignored
 				RE::LifecycleFacts a; a.host = &r; a.kind = RE::Lifecycle::StateAccepted; a.subject = &r;
 				ext.OnLifecycle(a);
+				Assert::AreEqual(0ull, ResyncExtension::ContainedFaults(&r));
+			}
+
+			TEST_METHOD(ContainedFaultsAreVisible)
+			{
+				ResyncExtension ext;
+				FakeRenderer r;
+				const unsigned long long before = ResyncExtension::ContainedFaults(&r);
+				std::vector<std::string> none;
+				RE::Context c; c.host = &r;
+				ext.OnStatus(c, RE::StatusKind::WorkerFault, none, "resync", "exception");
+				Assert::AreEqual(before + 1, ResyncExtension::ContainedFaults(&r));
+				const std::vector<std::string> fb = StatusLines(ext, &r, RE::StatusKind::Fallbacks);
+				Assert::IsTrue(!fb.empty() && fb[0].compare(0, 13, "resync_fault:") == 0);
+				std::string reply;
+				Apply(ext, &r, "off");
+				Assert::IsTrue(ext.OnCommand(c, "resync", "inject full", reply));
 			}
 		};
 	}

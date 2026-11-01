@@ -30206,8 +30206,7 @@ bool LibplaceboVideoRenderer::OnVideoState(VideoStateComPtr& videoState)
 		}
 	}
 	m_videoState = new VideoState(*videoState);
-	if (materialSourceTransition)
-		RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::StateAccepted, m_impl.get(), nullptr, nullptr, m_videoState.p); // VPV-HOOK
+	if (materialSourceTransition) RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::StateAccepted, m_impl.get(), nullptr, nullptr, m_videoState.p); // VPV-HOOK
 	if (materialSourceTransition)
 	{
 		// Source metadata transitions do not alter the pixels already queued, but
@@ -30385,10 +30384,9 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 	bool filmUpdate = false;
 	if (m_pulldownDetection.load(std::memory_order_relaxed) && frameState->displayMode)
 	{
-		// R3 (resync_event on, Vpv::Resync::PulldownResyncStep): a FULL resets as the renderer's own request does; timing re-latches.
-		const Vpv::Resync::PulldownStep pulldownResync = Vpv::Resync::PulldownResyncStep(m_impl.get(), m_pulldownResetRequested.exchange(false, std::memory_order_acq_rel));
-		m_pulldown.SetTimingRelatch(pulldownResync.driving);
-		if (pulldownResync.reset)
+		const Vpv::Resync::PulldownStep pulldownResync = Vpv::Resync::PulldownResyncStep(m_impl.get(), m_pulldownResetRequested.exchange(false, std::memory_order_acq_rel)); // VPV-HOOK: resync cursor (on: FULL resets, timing re-latches)
+		m_pulldown.SetTimingRelatch(pulldownResync.driving); // VPV-HOOK
+		if (pulldownResync.reset) // VPV-HOOK
 		{
 			m_pulldown.Reset();
 			m_pulldownClock.Reset();
@@ -30451,7 +30449,7 @@ void LibplaceboVideoRenderer::OnVideoFrame(VideoFrame& videoFrame)
 		const int previousCycle = m_pulldown.Cycle(), previousUnique = m_pulldown.Unique();
 		// R3 (resync_event on): an unannounced rate move (timing) re-latches the signal rate; the lock
 		// is dropped only when the cadence class changes (Pulldown::Detector::RelatchSignalHz).
-		if (pulldownResync.relatchTiming && m_pulldown.RelatchSignalHz(signalHz))
+		if (pulldownResync.relatchTiming && m_pulldown.RelatchSignalHz(signalHz)) // VPV-HOOK
 			DebugLog::Log("Pulldown: signal rate moved to %.3f Hz beyond the lock's resolution (resync timing); lock dropped",
 				signalHz);
 		// D4: the counted misses keep the lock (verified over the next cycle).
