@@ -319,6 +319,102 @@ namespace ChromaCflTestsNs
 		return ChromaUpscale::Upsample(s.y, s.cb, s.cr, sx, sy, rect, 10, 0.0);
 	}
 
+	// --- The shared grain products: absent, misfit and Compact (SA2 B3) ---
+	enum class CflShared { Absent, EmptyProduct, Full, Compact, WrongBlock, WrongUnit, WrongComponent, CbMisfitOnly };
+
+	struct CflFrameOut
+	{
+		Plane cb, cr;
+		std::string status, id;
+		GrainSplit::GrainStatus grain = GrainSplit::GrainStatus::Ring;
+		bool engaged = false;
+	};
+
+	// One module, one scene (two-plane layout), one Apply per entry of `seq` with that kind of shared product (built on the input
+	// planes, as the host's node would).
+	std::vector<CflFrameOut> RunCflShared(GpuDevice& dev, const Scene& s, const std::vector<CflShared>& seq)
+	{
+		std::vector<CflFrameOut> res;
+		pl_gpu gpu = dev.Gpu();
+		pl_tex luma = UploadR16(gpu, s.y), chroma = UploadRg16(gpu, s.cb, s.cr);
+		const pl_frame src = Frame2(luma, chroma, -0.5, 0.0);
+		ChromaUpscale::Gpu::CflModule module;
+		GrainSplit::Gpu::Splitter fl, fb, fr, cl, cb, cr, wl, wb, wr;   // Full, Compact, wrong
+		const double cu = 64.0 / 65535.0, lines = s.y.h, linesC = lines / (static_cast<double>(s.y.h) / s.cb.h);
+		const double sL = ChromaUpscale::Scale(lines), sC = ChromaUpscale::Scale(linesC);
+		const int bL = ChromaUpscale::BlockPx(lines), bC = ChromaUpscale::BlockPx(linesC);
+		GrainSplit::Gpu::Options compact;
+		compact.storage = GrainSplit::Storage::Compact;
+		for (const CflShared kind : seq)
+		{
+			RegionEvidence::GrainProduct product;
+			bool made = true;
+			switch (kind)
+			{
+			case CflShared::Full:
+			case CflShared::CbMisfitOnly:
+				made = fl.Compute(gpu, dev.dispatch, luma, 0, cu, sL, bL) && fb.Compute(gpu, dev.dispatch, chroma, 0, cu, sC, bC) &&
+					fr.Compute(gpu, dev.dispatch, chroma, 1, cu, sC, bC);
+				product.gpu[0] = &fl.Out(); product.gpu[1] = &fb.Out(); product.gpu[2] = &fr.Out();
+				if (kind == CflShared::CbMisfitOnly)
+				{
+					made = made && wb.Compute(gpu, dev.dispatch, chroma, 0, cu * 2.0, sC, bC);
+					product.gpu[1] = &wb.Out();
+				}
+				break;
+			case CflShared::Compact:
+				made = cl.Compute(gpu, dev.dispatch, luma, 0, cu, sL, bL, GrainSplit::Params(), compact) &&
+					cb.Compute(gpu, dev.dispatch, chroma, 0, cu, sC, bC, GrainSplit::Params(), compact) &&
+					cr.Compute(gpu, dev.dispatch, chroma, 1, cu, sC, bC, GrainSplit::Params(), compact);
+				product.gpu[0] = &cl.Out(); product.gpu[1] = &cb.Out(); product.gpu[2] = &cr.Out();
+				break;
+			case CflShared::WrongBlock:
+				made = wl.Compute(gpu, dev.dispatch, luma, 0, cu, sL, bL * 2) && wb.Compute(gpu, dev.dispatch, chroma, 0, cu, sC, bC * 2) &&
+					wr.Compute(gpu, dev.dispatch, chroma, 1, cu, sC, bC * 2);
+				product.gpu[0] = &wl.Out(); product.gpu[1] = &wb.Out(); product.gpu[2] = &wr.Out();
+				break;
+			case CflShared::WrongUnit:
+				made = wl.Compute(gpu, dev.dispatch, luma, 0, cu * 2.0, sL, bL) && wb.Compute(gpu, dev.dispatch, chroma, 0, cu * 2.0, sC, bC) &&
+					wr.Compute(gpu, dev.dispatch, chroma, 1, cu * 2.0, sC, bC);
+				product.gpu[0] = &wl.Out(); product.gpu[1] = &wb.Out(); product.gpu[2] = &wr.Out();
+				break;
+			case CflShared::WrongComponent:   // Cb and Cr swapped
+				made = fl.Compute(gpu, dev.dispatch, luma, 0, cu, sL, bL) && wb.Compute(gpu, dev.dispatch, chroma, 1, cu, sC, bC) &&
+					wr.Compute(gpu, dev.dispatch, chroma, 0, cu, sC, bC);
+				product.gpu[0] = &fl.Out(); product.gpu[1] = &wb.Out(); product.gpu[2] = &wr.Out();
+				break;
+			default:
+				break;
+			}
+			Assert::IsTrue(made, L"the shared products are made");
+			ChromaUpscale::Gpu::Params gp;
+			gp.settings.mode = ChromaUpscale::Mode::Cfl;
+			if (kind != CflShared::Absent) gp.grain = RegionEvidence::GrainView(&product);
+			pl_frame out{};
+			Assert::IsTrue(module.Apply(gpu, dev.dispatch, src, gp, out), Wide(module.LastError()).c_str());
+			CflFrameOut o;
+			std::vector<uint16_t> raw;
+			int nc = 0;
+			Assert::IsTrue(DownloadRaw(gpu, out.planes[1].texture, raw, nc), L"the output is readable");
+			o.cb = Plane(out.planes[1].texture->params.w, out.planes[1].texture->params.h);
+			o.cr = o.cb;
+			for (size_t i = 0; i < o.cb.v.size(); ++i) { o.cb.v[i] = raw[i * nc] / 64.0; o.cr.v[i] = raw[i * nc + 1] / 64.0; }
+			o.status = module.Status();
+			o.grain = module.LastGrainStatus();
+			const FallbackCatalog::Decision d = module.GrainFallbackDecision();
+			o.engaged = d.engaged;
+			o.id = d.id;
+			res.push_back(o);
+		}
+		module.Release(gpu);
+		for (GrainSplit::Gpu::Splitter* sp : { &fl, &fb, &fr, &cl, &cb, &cr, &wl, &wb, &wr }) sp->Release(gpu);
+		pl_tex_destroy(gpu, &luma);
+		pl_tex_destroy(gpu, &chroma);
+		return res;
+	}
+
+	double CflWorstDiff(const CflFrameOut& a, const CflFrameOut& b) { return (std::max)(MaxDiff(a.cb, b.cb), MaxDiff(a.cr, b.cr)); }
+
 	// Edge scene: luma step at an odd column, chroma = 0.5 luma + 100 made by the siting's tent. MSE of CfL and of the plain
 	// Catmull-Rom against the full-resolution truth.
 	void EdgeCase(int w, int h, int cw, int ch, double sx, double sy, double& mseCfl, double& msePlain)
@@ -667,6 +763,86 @@ namespace VideoProcessorTest
 			Assert::AreEqual(std::string("ok; own grain split"), own.status);
 			Assert::AreEqual(std::string("ok"), shared.status);
 			Assert::IsTrue(own.cb.v == shared.cb.v && own.cr.v == shared.cr.v, L"bit-identical to the module's own split");
+		}
+
+		TEST_METHOD(ChromaCflGpuGrainProductAbsentFallsBackVisibly)
+		{
+			// No shared product (no view, or a view of a product with neither form): all three planes use the module's own splits;
+			// status names it, LastGrainStatus is Missing and "grain split (chroma-from-luma)" is engaged.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			const Scene sc = MakeScene(128, 96, 64, 48, -0.5, 0.0, 31u, 1.5, 2.0);
+			const std::vector<CflFrameOut> r = RunCflShared(dev, sc, { CflShared::Absent, CflShared::EmptyProduct });
+			for (const CflFrameOut& o : r)
+			{
+				Assert::IsTrue(o.grain == GrainSplit::GrainStatus::Missing, L"absent product: Missing");
+				Assert::IsTrue(o.engaged && o.id == "grain split (chroma-from-luma)", L"the fallback is engaged and named");
+				Assert::AreEqual(std::string("ok; own grain split"), o.status);
+			}
+			Assert::IsTrue(CflWorstDiff(r[0], r[1]) == 0.0, L"the same own-split output");
+		}
+
+		TEST_METHOD(ChromaCflGpuGrainProductMisfitFallsBackAsWrongSize)
+		{
+			// Another block size, code unit or component (or one misfit plane of three) does not fit: WrongSize, engaged, status
+			// "does not fit"; the output equals the own-split output.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			const Scene sc = MakeScene(128, 96, 64, 48, -0.5, 0.0, 31u, 1.5, 2.0);
+			const std::vector<CflShared> kinds = { CflShared::Absent, CflShared::WrongBlock, CflShared::WrongUnit, CflShared::WrongComponent, CflShared::CbMisfitOnly };
+			const std::vector<CflFrameOut> r = RunCflShared(dev, sc, kinds);
+			for (size_t i = 1; i < r.size(); ++i)
+			{
+				Assert::IsTrue(r[i].grain == GrainSplit::GrainStatus::WrongSize, L"misfit product: WrongSize");
+				Assert::IsTrue(r[i].engaged, L"the fallback is engaged");
+				Assert::AreEqual(std::string("ok; own grain split (the shared product does not fit)"), r[i].status);
+				Assert::IsTrue(CflWorstDiff(r[0], r[i]) == 0.0, L"a misfit product is not read: the own-split output");
+			}
+		}
+
+		TEST_METHOD(ChromaCflGpuFittingFullProductIsReadThroughTheAccessor)
+		{
+			// Fitting Full products on all three planes: Ring, released, status "ok", bit-identical to the own splits.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			const Scene sc = MakeScene(128, 96, 64, 48, -0.5, 0.0, 31u, 1.5, 2.0);
+			const std::vector<CflFrameOut> r = RunCflShared(dev, sc, { CflShared::Absent, CflShared::Full });
+			Assert::IsTrue(r[1].grain == GrainSplit::GrainStatus::Ring && !r[1].engaged, L"fitting product: Ring, released");
+			Assert::AreEqual(std::string("ok"), r[1].status);
+			Assert::IsTrue(CflWorstDiff(r[0], r[1]) == 0.0, L"bit-identical to the own splits");
+		}
+
+		TEST_METHOD(ChromaCflGpuCompactProductsAreReadWithinOneCode)
+		{
+			// Compact products on all three planes (three distinct accessors in one shader) fit and are read: Ring, released,
+			// output within one code of the Full-shared output.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			const Scene sc = MakeScene(128, 96, 64, 48, -0.5, 0.0, 31u, 1.5, 2.0);
+			const std::vector<CflFrameOut> r = RunCflShared(dev, sc, { CflShared::Full, CflShared::Compact });
+			Assert::IsTrue(r[1].grain == GrainSplit::GrainStatus::Ring && !r[1].engaged, L"Compact products: Ring, released");
+			Assert::AreEqual(std::string("ok"), r[1].status);
+			const double worst = CflWorstDiff(r[0], r[1]);
+			LogF("chroma upscale: Compact vs Full shared products, worst output difference %.5f codes", worst);
+			Assert::IsTrue(worst <= 1.0, L"Compact output within one code of Full");
+		}
+
+		TEST_METHOD(ChromaCflGpuGrainFallbackRecoversAutomatically)
+		{
+			// absent -> fits -> absent -> misfit -> fits (Compact): engaged, released, engaged, engaged, released.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			const Scene sc = MakeScene(128, 96, 64, 48, -0.5, 0.0, 31u, 1.5, 2.0);
+			const std::vector<CflShared> seq = { CflShared::Absent, CflShared::Full, CflShared::Absent, CflShared::WrongBlock, CflShared::Compact, CflShared::Full };
+			const bool engaged[] = { true, false, true, true, false, false };
+			const std::vector<CflFrameOut> r = RunCflShared(dev, sc, seq);
+			for (size_t i = 0; i < seq.size(); ++i)
+				Assert::IsTrue(r[i].engaged == engaged[i], L"engaged exactly while a shared product does not fit");
+			Assert::IsTrue(r[0].grain == GrainSplit::GrainStatus::Missing && r[3].grain == GrainSplit::GrainStatus::WrongSize &&
+				r[1].grain == GrainSplit::GrainStatus::Ring && r[4].grain == GrainSplit::GrainStatus::Ring, L"statuses follow the products");
+			for (size_t i = 0; i < seq.size(); ++i)
+				Assert::IsTrue(CflWorstDiff(r[0], r[i]) <= 1.0, L"the output does not change visibly across the switches");
+			Assert::IsTrue(CflWorstDiff(r[0], r[1]) == 0.0 && CflWorstDiff(r[0], r[3]) == 0.0 && CflWorstDiff(r[0], r[5]) == 0.0, L"Full and own are exact");
 		}
 
 		TEST_METHOD(ChromaCflGpu444IsNothing)

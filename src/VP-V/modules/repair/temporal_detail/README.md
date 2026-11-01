@@ -262,3 +262,20 @@ current grain untouched), the grain guard against forced damage, the gain decomp
 split's exact add-back, flicker, future referee, irregular patterns, scale and rate, camera-adapter fallback, boost
 fallback, settings parsing, the active picture (letterbox / pillarbox with a pan: bars bit-exact, output independent of the
 bar level and identical to the picture processed alone), the bounded motion source (10,000 frames).
+
+## Grain split read path (SA2)
+
+The GPU module reads the shared grain split ONLY through the one accessor of repair/grain_split (GrainSplitGpu.h): every
+shader fetch is `gs_fetch(p)` (s1, s2, f, base in codes) or `gs_blocks(b)` (N, e3); each grain-reading pass gets
+`GrainSplit::Gpu::ViewGlsl(frame.storage, frame.codeUnit)` in its header and `BindView(frame, descs)` for its descriptors, so the
+shared product may be Full or Compact and the module never touches the `split` / `gblocks` textures directly. Full generates
+the same math as before (Off / Full output byte-identical).
+
+Fallback rule: the shared product is used when `Fits` holds for this plane (size, block, scale, code unit, component, and the
+second texture of a Compact frame); otherwise (absent, invalid view, wrong size or any misfit) the module computes its OWN
+Full split and says so, visibly, every frame, and returns to the shared product the first frame it fits again (nothing is latched).
+Status keeps "own grain split" / "own grain split (the shared product does not fit)". `LastGrainStatus()` is Ring (shared
+product read), Missing (no product) or WrongSize (misfit); Shed is the node's. `GrainFallbackDecision()` is
+GrainSplit::ReaderFallback("temporal detail", status): the catalog entry "grain split (temporal detail)", engaged while the own
+split runs. Off / auto idle read no grain: Ring. Tests: TemporalDetailGpuGrainProduct*, ...FittingFullProduct*,
+...CompactProduct*, ...GrainFallbackRecoversAutomatically (WARP).

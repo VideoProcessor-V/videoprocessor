@@ -12,6 +12,7 @@
 // ledger. A fake backend creates integer handles; CPU only, no GPU.
 
 #include <VP-V/core/ScratchArena.h>
+#include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
 
 #include <algorithm>
 #include <map>
@@ -635,6 +636,35 @@ namespace GpuAllocatorTestsNs
 			Assert::AreEqual(plan.governor.grants.size(), tierLines, L"one tier line per governor grant");
 			Assert::AreEqual(size_t(1), planLines, L"one arena plan line");
 			Assert::AreEqual(size_t(1), transientLines, L"one transient product line");
+		}
+		TEST_METHOD(RegionEvidenceAdoptsTheCoreGrainSplitProduct)
+		{
+			// SA2: with the core P10 in the registry the region-evidence module adds NO second grain.split
+			// declaration: it consumes kP10GrainSplit (same token, one node); standalone (no P10) it still
+			// appends its own as before.
+			std::vector<ProductDecl> decls = SkeletonProducts().All();
+			const size_t before = decls.size();
+			const RegionEvidence::ProductIds ids = RegionEvidence::AppendProducts(decls, MkDims(3840, 2160));
+			Assert::AreEqual(int(kP10GrainSplit), int(ids.grainSplit), L"adopts the core P10");
+			Assert::AreEqual(before + 1, decls.size(), L"only the block statistics are appended");
+			Assert::IsTrue(Registry(decls).Validate(), L"registry validates");
+			size_t tokens = 0;
+			for (const ProductDecl& d : decls)
+				tokens += std::string(d.token) == kTokenGrainSplit ? 1u : 0u;
+			Assert::AreEqual(size_t(1), tokens, L"exactly one grain.split declaration");
+			std::vector<ProductDecl> alone = FirstProducts().All();
+			const RegionEvidence::ProductIds own = RegionEvidence::AppendProducts(alone, MkDims(3840, 2160));
+			Assert::IsTrue(own.grainSplit >= kFirstProductCount && own.grainSplit != kP10GrainSplit, L"standalone appends its own");
+		}
+
+		TEST_METHOD(CompactGrainDeclaresHalfTheBytes)
+		{
+			const Dims d = MkDims(3840, 2160);
+			const uint64_t full = BytesOf(SkeletonProducts(false).Get(kP10GrainSplit).size, d);
+			const uint64_t compact = BytesOf(SkeletonProducts(true).Get(kP10GrainSplit).size, d);
+			Assert::AreEqual(uint64_t(d.width) * d.height * 8 + CellsAt(d, 4) * 8, compact, L"compact = 8 B/px + 8 B/block");
+			Assert::AreEqual(uint64_t(d.width) * d.height * 16 + CellsAt(d, 4) * 16, full, L"full = 16 B/px + 16 B/block");
+			Assert::IsTrue(full == compact * 2, L"half the bytes");
 		}
 	};
 }

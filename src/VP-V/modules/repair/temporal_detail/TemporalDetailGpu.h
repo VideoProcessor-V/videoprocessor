@@ -22,6 +22,7 @@
 #pragma once
 
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
+#include <VP-V/modules/repair/grain_split/GrainNode.h>
 #include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetail.h>
 
@@ -103,6 +104,13 @@ namespace TemporalDetail
 			bool ReadCounters(pl_gpu gpu, Counters& out);
 			// off, ok, reset: <reason>, motion lost; plus "; not on GPU: look-ahead, camera model" when relevant.
 			const std::string& Status() const { return m_status; }
+			// Where the grain split of the last processed frame came from (recomputed every frame, so the module returns to
+			// the shared product the first frame it fits again): Ring = the shared product fit and was read; Missing = no
+			// shared product (absent or invalid view); WrongSize = a product exists but does not fit this plane (size, block,
+			// scale, code unit, component). Shed is the node's (never set here). Off / idle: Ring (nothing read, nothing to show).
+			GrainSplit::GrainStatus LastGrainStatus() const { return m_grainStatus; }
+			// The visible fallback ("grain split (temporal detail)"): engaged while the module runs its own grain split.
+			FallbackCatalog::Decision GrainFallbackDecision() const { return GrainSplit::ReaderFallback("temporal detail", m_grainStatus); }
 			void Forget();                 // a discontinuity: the store restarts at the next frame
 			void Release(pl_gpu gpu);
 			const std::string& LastError() const { return m_error; }
@@ -117,6 +125,7 @@ namespace TemporalDetail
 			struct Impl;
 			Impl* m_impl = nullptr;
 			std::string m_error, m_status = "off";
+			GrainSplit::GrainStatus m_grainStatus = GrainSplit::GrainStatus::Ring;
 			unsigned long long m_failures = 0;
 		};
 	}

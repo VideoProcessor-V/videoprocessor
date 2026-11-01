@@ -483,27 +483,34 @@ inline void AppendCameraProducts(std::vector<ProductDecl>& decls)
 // (rgba32f split plane + rgba32f per 16x16 block, today's layout; the compact layout is an SA2
 // either/or switch declared in GrainNode.h). It reads the source frame only (no lag, no history):
 // it is made once per frame by the lane or, when not published by the seal, by the first consumer.
-inline void AppendGrainSplitProduct(std::vector<ProductDecl>& decls)
+inline void AppendGrainSplitProduct(std::vector<ProductDecl>& decls, bool compact = false)
 {
+    using detail::AddInput;
     using detail::AddTerm;
     using detail::Make;
     using namespace VpIndicator;
     const CounterMask content = Bit(kFull) | Bit(kContinuity);
-    ProductDecl p10 = Make(kP10GrainSplit, "p10_grain_split", "grain split", Backend::GpuCompute, 0, Tier::T1,
-                           content, Bit(kSettingsAnalysis));
+    // Same declaration the region-evidence module made privately (token, name, T0: every regional repair depends
+    // on it, history 1, reads P4 for the picture rect); only the sizes are the real storage layouts.
+    ProductDecl p10 = Make(kP10GrainSplit, kTokenGrainSplit, "grain split (shared)", Backend::GpuCompute, 1,
+                           Tier::T0, content, Bit(kSettingsAnalysis));
     p10.sourceFrame = true;
-    AddTerm(p10, 0, 16);   // split: (s1, s2, f, base) rgba32f per plane pixel
-    AddTerm(p10, 4, 16);   // blocks: (N, e3, 0, 0) rgba32f per 16x16 block
+    AddInput(p10, kP4SourceStats, 0);
+    // Per plane-component. Full: split rgba32f (16 B/px) + blocks rgba32f (16 B per block). Compact: split rg16f +
+    // rg16 (8 B/px) + blocks rg32f (8 B per block). Blocks are declared at the 16 px block edge (shift 4): an upper
+    // bound at 8K, where the edge doubles.
+    AddTerm(p10, 0, compact ? 8 : 16);
+    AddTerm(p10, 4, compact ? 8 : 16);
     p10.refRenderMs = 1.2f;
     decls.push_back(p10);
 }
 
 // The registry the skeleton runs with: the first products, the camera products, then P10, in fixed id order.
-inline Registry SkeletonProducts()
+inline Registry SkeletonProducts(bool compactGrain = false)
 {
     std::vector<ProductDecl> d = FirstProducts().All();
     AppendCameraProducts(d);
-    AppendGrainSplitProduct(d);
+    AppendGrainSplitProduct(d, compactGrain);
     return Registry(std::move(d));
 }
 

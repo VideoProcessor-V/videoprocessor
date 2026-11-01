@@ -5,6 +5,7 @@
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/ProductSlots.h>
 #include <VP-V/core/Products.h>
+#include <VP-V/modules/repair/grain_split/GrainSplit.h>
 
 #include <cstdint>
 #include <string>
@@ -32,11 +33,6 @@
 // Threading: lane methods on the lane thread, render methods on the render thread (the SlotSet protocol).
 namespace GrainSplit
 {
-	// Storage layout of the split product (SA2 either/or switch `grain_split_storage`, default full).
-	enum class Storage : uint8_t { Full, Compact };
-
-	inline const char* Token(Storage s) { return s == Storage::Compact ? "compact" : "full"; }
-
 	// What a node holds: the plane-component's geometry and the code unit it is computed with.
 	struct GrainDesc
 	{

@@ -153,3 +153,19 @@ Code location: **migrated**. The authoritative list is `live_files` in [MANIFEST
 - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
 
 <!-- vpv-settings-tests:end -->
+
+## Grain split read path (SA2)
+
+The grain guard reads the three shared grain splits (luma, Cb, Cr) ONLY through the one accessor of repair/grain_split
+(GrainSplitGpu.h): `ViewGlsl` / `BindView` per plane, with the names prefixed per plane (gsL_, gsB_, gsR_: the three frames may
+differ in layout, one shader binds several; the prefix is applied locally in ChromaCflGpu.cpp to a copy of the accessor text and
+to the descriptor names). Shaders fetch `gsL_fetch(p)` etc. = (s1, s2, f, base) in codes and form clean = base + s1 + s2; no
+direct texelFetch of a grain texture remains. Full generates the same math as before (output byte-identical).
+
+Fallback rule, per plane: a shared product that fits (size, block, scale, code unit, component) is read; otherwise that plane
+uses its OWN Full split, visibly, and returns to the shared product the first frame it fits again (status recomputed every
+frame). Status keeps "ok; own grain split" / "ok; own grain split (the shared product does not fit)". `LastGrainStatus()` is
+Ring (all planes read the shared products or the guard is off), Missing (a plane had none, none misfit) or WrongSize (a product
+exists but does not fit); Shed is the node's. `GrainFallbackDecision()` is
+GrainSplit::ReaderFallback("chroma-from-luma", status): the catalog entry "grain split (chroma-from-luma)". Tests:
+ChromaCflGpuGrainProduct*, ...FittingFullProduct*, ...CompactProducts*, ...GrainFallbackRecoversAutomatically (WARP).

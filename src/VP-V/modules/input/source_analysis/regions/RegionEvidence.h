@@ -850,16 +850,25 @@ namespace RegionEvidence
 		const Cost c = CostAt(frame);
 		ProductIds ids;
 
-		ProductDecl gs = detail::Make(static_cast<ProductId>(decls.size()), kTokenGrainSplit, "grain split (shared)",
-			Backend::GpuCompute, 1, Tier::T0, content, Bit(kSettingsAnalysis));
-		gs.sourceFrame = true;
-		detail::AddInput(gs, kP4SourceStats, 0);
-		detail::AddTerm(gs, 0, 5);
-		detail::AddTerm(gs, 1, 2);
-		gs.size.fixedBytes = static_cast<uint32_t>(c.blocks * 16);
-		gs.refRenderMs = static_cast<float>(c.refMsSplit);
-		ids.grainSplit = gs.id;
-		decls.push_back(gs);
+		// SA2: when the registry already carries the core P10 (SkeletonProducts), that ONE declaration is the grain
+		// split node; the private one below is only the standalone form (a registry built without it).
+		if (decls.size() > VpSkeleton::kP10GrainSplit && std::string(decls[VpSkeleton::kP10GrainSplit].token) == kTokenGrainSplit)
+		{
+			ids.grainSplit = VpSkeleton::kP10GrainSplit;
+		}
+		else
+		{
+			ProductDecl gs = detail::Make(static_cast<ProductId>(decls.size()), kTokenGrainSplit, "grain split (shared)",
+				Backend::GpuCompute, 1, Tier::T0, content, Bit(kSettingsAnalysis));
+			gs.sourceFrame = true;
+			detail::AddInput(gs, kP4SourceStats, 0);
+			detail::AddTerm(gs, 0, 5);
+			detail::AddTerm(gs, 1, 2);
+			gs.size.fixedBytes = static_cast<uint32_t>(c.blocks * 16);
+			gs.refRenderMs = static_cast<float>(c.refMsSplit);
+			ids.grainSplit = gs.id;
+			decls.push_back(gs);
+		}
 
 		ProductDecl bs = detail::Make(static_cast<ProductId>(decls.size()), "region_block_stats", "region block statistics",
 			Backend::GpuCompute, 1, Tier::T0, content, Bit(kSettingsAnalysis) | Bit(kSettingsMotion) | Bit(kSettingsOutput));

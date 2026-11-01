@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -209,6 +210,39 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			}
 
 			int Groups(int n) { return (n + 15) / 16; }
+
+			// One plane's grain accessor under its own names (the luma, Cb and Cr frames may differ in layout, and one shader
+			// binds several). The ONE read accessor (GrainSplit::Gpu::ViewGlsl / BindView) with every name prefixed per plane:
+			// plane 0 "gsL_", 1 "gsB_", 2 "gsR_" (not "gl_": reserved in GLSL). Appends the prelude to `glsl` and the
+			// plane's sampled descriptors to `descs`. The prelude defines gs<P>_fetch(ivec2) -> (s1, s2, f, base) in codes.
+			void AddGrainView(const GrainSplit::Gpu::Frame& f, int plane, std::string& glsl, std::vector<pl_shader_desc>& descs)
+			{
+				static const char* const kNames[3][4] = {
+					{ "gsL_split", "gsL_gblocks", "gsL_a", "gsL_b" },
+					{ "gsB_split", "gsB_gblocks", "gsB_a", "gsB_b" },
+					{ "gsR_split", "gsR_gblocks", "gsR_a", "gsR_b" } };
+				static const char* const kPfx[3] = { "gsL_", "gsB_", "gsR_" };
+				auto replaceAll = [](std::string& t, const std::string& from, const std::string& to) {
+					for (size_t at = t.find(from); at != std::string::npos; at = t.find(from, at + to.size()))
+						t.replace(at, from.size(), to);
+				};
+				std::string v = GrainSplit::Gpu::ViewGlsl(f.storage, f.codeUnit);
+				replaceAll(v, "gs_", kPfx[plane]);                                        // gs_fetch, gs_blocks, gs_a, gs_b, gs_cu
+				replaceAll(v, "texelFetch(split,", std::string("texelFetch(") + kNames[plane][0] + ",");   // Full: the sampler names
+				replaceAll(v, "texelFetch(gblocks,", std::string("texelFetch(") + kNames[plane][1] + ",");
+				glsl += v;
+				std::vector<pl_shader_desc> bound;
+				GrainSplit::Gpu::BindView(f, bound);
+				for (pl_shader_desc& d : bound)
+				{
+					const char* n = d.desc.name;
+					if (!std::strcmp(n, "split")) d.desc.name = kNames[plane][0];
+					else if (!std::strcmp(n, "gblocks")) d.desc.name = kNames[plane][1];
+					else if (!std::strcmp(n, "gs_a")) d.desc.name = kNames[plane][2];
+					else if (!std::strcmp(n, "gs_b")) d.desc.name = kNames[plane][3];
+					descs.push_back(d);
+				}
+			}
 		}
 
 		struct CflModule::Impl
@@ -257,6 +291,7 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			if (params.settings.mode == Mode::Off)
 			{
 				m_status = "off";
+				m_grainStatus = GrainSplit::GrainStatus::Ring;   // not reading the grain: no fallback to show
 				result = source;
 				return true;
 			}
@@ -391,6 +426,7 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			const GrainSplit::Gpu::Frame* gB = nullptr;
 			const GrainSplit::Gpu::Frame* gR = nullptr;
 			bool ownSplit = false, misfit = false;
+			m_grainStatus = GrainSplit::GrainStatus::Ring;   // recomputed every frame: a fitting product is read again at once
 			if (guard)
 			{
 				auto pick = [&](const GrainSplit::Gpu::Frame* shared, GrainSplit::Gpu::Splitter& own, pl_tex tex, int comp, double cu, double ln,
@@ -398,6 +434,7 @@ if (p.x < CFL_W && p.y < CFL_H) {
 					if (GrainSplit::Gpu::Fits(shared, tex->params.w, tex->params.h, BlockPx(ln), Scale(ln), cu, comp)) { outF = shared; return true; }
 					ownSplit = true;
 					if (shared) misfit = true;
+					m_grainStatus = misfit ? GrainSplit::GrainStatus::WrongSize : GrainSplit::GrainStatus::Missing;
 					if (!own.Compute(gpu, dispatch, tex, comp, cu, Scale(ln), BlockPx(ln))) return false;
 					outF = &own.Out();
 					return true;
@@ -421,10 +458,18 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			geo += DefineP("CFL_FX", fx) + DefineP("CFL_FY", fy) + DefineP("CFL_SX", sx) + DefineP("CFL_SY", sy);
 			geo += DefineInt("CFL_R", params.cfl.radius) + DefineInt("CFL_CLAMPR", params.cfl.clampR) + Define("CFL_EPS", eps);
 			geo += Define("CFL_INV_CU_L", 1.0 / cuL) + Define("CFL_INV_CU_C", 1.0 / cuC) + Define("CFL_CU_OUT", cuOut);
+			// With the guard every grain read goes through the accessor of its plane's frame (prelude + BindView, per-plane names).
+			std::string lumaView, chromaView;
+			std::vector<pl_shader_desc> lumaDescs, chromaDescs;
+			if (guard)
+			{
+				AddGrainView(*gL, 0, lumaView, lumaDescs);
+				AddGrainView(*gB, 1, chromaView, chromaDescs);
+				AddGrainView(*gR, 2, chromaView, chromaDescs);
+			}
 			const std::string lumaReader = guard ?
-				"float cfl_yc(ivec2 p)\n{\n    vec4 s = texelFetch(ysrc, p, 0);\n    return s.w + s.x + s.y;\n}\n" :
+				lumaView + "float cfl_yc(ivec2 p)\n{\n    vec4 s = gsL_fetch(p);\n    return s.w + s.x + s.y;\n}\n" :
 				"float cfl_yc(ivec2 p)\n{\n    return texelFetch(ysrc, p, 0).x * CFL_INV_CU_L;\n}\n";
-			const pl_tex ysrc = guard ? gL->split : lumaIn;
 
 			const int cgx = Groups(pcw), cgy = Groups(pch);
 
@@ -432,15 +477,16 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			{
 				std::string hdr = geo + lumaReader + RawReader("cfl_craw", "craw0", "craw1", sameTex, cbComp, crComp);
 				hdr += guard ?
-					"vec2 cfl_cc(ivec2 j)\n{\n    vec4 b = texelFetch(csB, j, 0), r = texelFetch(csR, j, 0);\n    return vec2(b.w + b.x + b.y, r.w + r.x + r.y);\n}\n" :
+					chromaView + "vec2 cfl_cc(ivec2 j)\n{\n    vec4 b = gsB_fetch(j), r = gsR_fetch(j);\n    return vec2(b.w + b.x + b.y, r.w + r.x + r.y);\n}\n" :
 					"vec2 cfl_cc(ivec2 j)\n{\n    return cfl_craw(j);\n}\n";
 				std::vector<pl_shader_desc> d;
-				d.push_back(Sampled("ysrc", ysrc));
 				if (guard)
 				{
-					d.push_back(Sampled("csB", gB->split));
-					d.push_back(Sampled("csR", gR->split));
+					d.insert(d.end(), lumaDescs.begin(), lumaDescs.end());
+					d.insert(d.end(), chromaDescs.begin(), chromaDescs.end());
 				}
+				else
+					d.push_back(Sampled("ysrc", lumaIn));
 				d.push_back(Sampled("craw0", cbIn));
 				if (!sameTex) d.push_back(Sampled("craw1", crIn));
 				d.push_back(Storage("o_lo", m.lo));
@@ -463,7 +509,8 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			{
 				std::string hdr = geo + lumaReader + UP_FUNCS + RawReader("cfl_csrc", "csrc0", "csrc1", sameTex, cbComp, crComp);
 				std::vector<pl_shader_desc> d;
-				d.push_back(Sampled("ysrc", ysrc));
+				if (guard) d.insert(d.end(), lumaDescs.begin(), lumaDescs.end());
+				else d.push_back(Sampled("ysrc", lumaIn));
 				d.push_back(Sampled("t_avg", m.avg));
 				d.push_back(Sampled("t_rho", m.rho));
 				d.push_back(Sampled("t_lohi", m.lohi));

@@ -117,6 +117,38 @@ if (p.x < GS_W && p.y < GS_H) {
 }
 )GLSL";
 
+			// The Compact last pass: the same arithmetic as F_BODY; A = (s1, s2) in codes, B = (f, base x code unit).
+			const char* const F_BODY_COMPACT = R"GLSL(
+ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+if (p.x < GS_W && p.y < GS_H) {
+    float e = 0.0;
+    for (int j = -1; j <= 1; j++)
+        for (int i = -1; i <= 1; i++) {
+            vec4 c = texelFetch(bands, ivec2(clamp(p.x + i, 0, GS_W - 1), clamp(p.y + j, 0, GS_H - 1)), 0);
+            float dv = c.x + c.y;
+            e += dv * dv;
+        }
+    e /= 9.0;
+    float N = texelFetch(blocks, ivec2(p.x / GS_B, p.y / GS_B), 0).x;
+    float f = clamp(1.0 - GS_KAPPA * N / max(e, GS_FLOOR), 0.0, 1.0);
+    vec4 c = texelFetch(bands, p, 0);
+    imageStore(split_a, p, vec4(f * c.x, f * c.y, 0.0, 0.0));
+    imageStore(split_b, p, vec4(f, c.w * GS_CU, 0.0, 0.0));
+}
+)GLSL";
+
+			constexpr const char* kArenaOwner = "grain_split";
+
+			// Opens the arena scope of one Compute and closes it on every exit.
+			struct ScopeGuard
+			{
+				VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* a;
+				explicit ScopeGuard(VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* arena) : a(arena) { if (a) a->BeginScope(kArenaScope); }
+				~ScopeGuard() { if (a) a->EndScope(); }
+				ScopeGuard(const ScopeGuard&) = delete;
+				ScopeGuard& operator=(const ScopeGuard&) = delete;
+			};
+
 			std::string WeightsGlsl(const char* name, const char* radiusName, double sigma)
 			{
 				const int r = GaussRadius(sigma);
@@ -138,15 +170,64 @@ if (p.x < GS_W && p.y < GS_H) {
 		void Splitter::Release(pl_gpu gpu)
 		{
 			if (gpu)
-				for (pl_tex* t : { &m_rows, &m_bands, &m_quiet, &m_blocks })
+				for (pl_tex* t : { &m_rows, &m_bands, &m_quiet, &m_blocks, &m_outA, &m_outB })
 					if (*t) pl_tex_destroy(gpu, t);
 			m_out = Frame();
 		}
 
+		std::string ViewGlsl(GrainSplit::Storage storage, double codeUnit)
+		{
+			if (storage != GrainSplit::Storage::Compact)
+				return "vec4 gs_fetch(ivec2 p) { return texelFetch(split, p, 0); }\n"
+					"vec2 gs_blocks(ivec2 b) { return texelFetch(gblocks, b, 0).xy; }\n";
+			return "const float gs_cu = " + VpvGpu::Num(codeUnit) + ";\n"
+				"vec4 gs_fetch(ivec2 p)\n{\n    vec2 a = texelFetch(gs_a, p, 0).xy;\n    vec2 b = texelFetch(gs_b, p, 0).xy;\n"
+				"    return vec4(a.x, a.y, b.x, b.y / gs_cu);\n}\n"
+				"vec2 gs_blocks(ivec2 b) { return texelFetch(gblocks, b, 0).xy; }\n";
+		}
+
+		void BindView(const Frame& f, std::vector<pl_shader_desc>& out)
+		{
+			if (Compact(&f))
+			{
+				out.push_back(VpvGpu::Sampled("gs_a", f.split));
+				out.push_back(VpvGpu::Sampled("gs_b", f.splitB));
+			}
+			else
+				out.push_back(VpvGpu::Sampled("split", f.split));
+			out.push_back(VpvGpu::Sampled("gblocks", f.blocks));
+		}
+
+		std::vector<VpSkeleton::ArenaRequest> Splitter::ArenaRequests(pl_gpu gpu, int w, int h, int B, GrainSplit::Storage storage)
+		{
+			std::vector<VpSkeleton::ArenaRequest> r;
+			VpSkeleton::TexFormat tf = VpSkeleton::TexFormat::RGBA32F;
+			if (!gpu || w < 1 || h < 1 || B < 1 || !VpSkeleton::PlTexBackend::FormatOf(VpvGpu::FloatFormat(gpu, 4), &tf)) return r;
+			const int bw = (w + B - 1) / B, bh = (h + B - 1) / B;
+			VpSkeleton::ArenaRequest a;
+			a.scope = kArenaScope;
+			a.owner = kArenaOwner;
+			a.tier = VpSkeleton::Tier::T0;
+			a.shape.w = static_cast<uint32_t>(w); a.shape.h = static_cast<uint32_t>(h); a.shape.fmt = tf;
+			a.count = storage == GrainSplit::Storage::Compact ? 2 : 1;   // Compact: rows + bands; Full: bands (rows is the product)
+			r.push_back(a);
+			a.shape.w = static_cast<uint32_t>(bw); a.shape.h = static_cast<uint32_t>(bh);
+			a.count = 1;
+			r.push_back(a);
+			return r;
+		}
+
 		bool Splitter::Compute(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, double scale, int B, const Params& params)
+		{
+			return Compute(gpu, dispatch, plane, component, codeUnit, scale, B, params, Options());
+		}
+
+		bool Splitter::Compute(pl_gpu gpu, pl_dispatch dispatch, pl_tex plane, int component, double codeUnit, double scale, int B, const Params& params,
+			const Options& options)
 		{
 			using namespace VpvGpu;
 			m_error.clear();
+			m_scratchShort = false;
 			if (!gpu || !dispatch || !plane || !plane->params.sampleable || component < 0 || component > 3 || !(codeUnit > 0.0) || B < 1)
 			{
 				m_error = "grain split: invalid input";
@@ -157,13 +238,105 @@ if (p.x < GS_W && p.y < GS_H) {
 				m_error = "grain split: invalid law";
 				return false;
 			}
+			const bool compact = options.storage == GrainSplit::Storage::Compact;
+			const Targets& tg = options.targets;
 			const int w = plane->params.w, h = plane->params.h;
 			const int bw = (w + B - 1) / B, bh = (h + B - 1) / B;
 			const pl_fmt f4 = FloatFormat(gpu, 4);
-			if (!Ensure(gpu, m_rows, w, h, f4) || !Ensure(gpu, m_bands, w, h, f4) || !Ensure(gpu, m_quiet, bw, bh, f4) || !Ensure(gpu, m_blocks, bw, bh, f4))
+			pl_fmt fA = nullptr, fB = nullptr, fBlocks = f4;
+			if (compact)
+			{
+				fA = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RG16F);
+				fB = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RG16);
+				fBlocks = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RG32F);
+				if (!fA || !fB || !fBlocks || !f4)
+				{
+					m_error = "grain split: no compact storage formats (rg16f, rg16, rg32f)";
+					return false;
+				}
+			}
+			if (!f4)
 			{
 				m_error = "grain split: no rgba32f storage texture";
 				return false;
+			}
+			auto usable = [&](pl_tex t, int tw, int th, pl_fmt fmt) { return t && t->params.w == tw && t->params.h == th && t->params.format == fmt && t->params.sampleable && t->params.storable; };
+			if ((tg.split && !usable(tg.split, w, h, compact ? fA : f4)) || (tg.blocks && !usable(tg.blocks, bw, bh, fBlocks)) ||
+				(compact && tg.splitB && !usable(tg.splitB, w, h, fB)))
+			{
+				m_error = "grain split: unusable target texture";
+				return false;
+			}
+
+			// Intermediates: from the arena (fixed order rows, bands, quiet; scope closed on every exit), else private.
+			pl_tex rows = nullptr, bands = nullptr, quiet = nullptr;
+			ScopeGuard scope(options.arena);
+			if (options.arena)
+			{
+				VpSkeleton::TexFormat tf = VpSkeleton::TexFormat::RGBA32F;
+				if (!VpSkeleton::PlTexBackend::FormatOf(f4, &tf))
+				{
+					m_error = "grain split: rgba32f is not an arena format";
+					return false;
+				}
+				VpSkeleton::TexShape full, qshape;
+				full.w = static_cast<uint32_t>(w); full.h = static_cast<uint32_t>(h); full.fmt = tf;
+				qshape.w = static_cast<uint32_t>(bw); qshape.h = static_cast<uint32_t>(bh); qshape.fmt = tf;
+				if (compact) rows = options.arena->Acquire(kArenaOwner, full);
+				bands = options.arena->Acquire(kArenaOwner, full);
+				quiet = options.arena->Acquire(kArenaOwner, qshape);
+				if ((compact && !rows) || !bands || !quiet)
+				{
+					m_scratchShort = true;
+					m_error = std::string("scratch memory short (grain split): ") + ((compact && !rows) ? "rows " : "") + (!bands ? "bands " : "") +
+						(!quiet ? "quiet " : "") + "unavailable";
+					return false;
+				}
+			}
+			else
+			{
+				if (!Ensure(gpu, m_bands, w, h, f4) || !Ensure(gpu, m_quiet, bw, bh, f4) || (compact && !Ensure(gpu, m_rows, w, h, f4)))
+				{
+					m_error = "grain split: no rgba32f storage texture";
+					return false;
+				}
+				bands = m_bands;
+				quiet = m_quiet;
+				if (compact) rows = m_rows;
+			}
+			// Outputs: the caller's targets, else the Splitter's own.
+			pl_tex outA = nullptr, outB = nullptr, blocksTex = tg.blocks;
+			if (compact)
+			{
+				outA = tg.split;
+				outB = tg.splitB;
+				if ((!outA && !Ensure(gpu, m_outA, w, h, fA)) || (!outB && !Ensure(gpu, m_outB, w, h, fB)))
+				{
+					m_error = "grain split: no compact output textures";
+					return false;
+				}
+				if (!outA) outA = m_outA;
+				if (!outB) outB = m_outB;
+			}
+			else
+			{
+				// Full: the final pass writes the split into the rows texture, which therefore outlives the call.
+				rows = tg.split;
+				if (!rows && !Ensure(gpu, m_rows, w, h, f4))
+				{
+					m_error = "grain split: no rgba32f storage texture";
+					return false;
+				}
+				if (!rows) rows = m_rows;
+			}
+			if (!blocksTex)
+			{
+				if (!Ensure(gpu, m_blocks, bw, bh, fBlocks))
+				{
+					m_error = compact ? "grain split: no rg32f block texture" : "grain split: no rgba32f storage texture";
+					return false;
+				}
+				blocksTex = m_blocks;
 			}
 			static const char* const kComp[4] = { "x", "y", "z", "w" };
 			const std::string geo = DefineInt("GS_W", w) + DefineInt("GS_H", h) + DefineInt("GS_B", B) + DefineInt("GS_BW", bw) + DefineInt("GS_BH", bh);
@@ -173,7 +346,7 @@ if (p.x < GS_W && p.y < GS_H) {
 				Num(1.0 / codeUnit) + "; }\n";
 			const int gx = (w + 15) / 16, gy = (h + 15) / 16, bgx = (bw + 15) / 16, bgy = (bh + 15) / 16;
 			{
-				const pl_shader_desc d[2] = { Sampled("src", plane), Storage("rows_out", m_rows) };
+				const pl_shader_desc d[2] = { Sampled("src", plane), VpvGpu::Storage("rows_out", rows) };
 				if (!Pass(dispatch, "VideoProcessor grain split: rows", geo + weights + yread, GH_BODY, d, 2, nullptr, 0, gx, gy, 0))
 				{
 					m_error = "grain split: rows pass failed";
@@ -181,7 +354,7 @@ if (p.x < GS_W && p.y < GS_H) {
 				}
 			}
 			{
-				const pl_shader_desc d[2] = { Sampled("rows", m_rows), Storage("bands_out", m_bands) };
+				const pl_shader_desc d[2] = { Sampled("rows", rows), VpvGpu::Storage("bands_out", bands) };
 				if (!Pass(dispatch, "VideoProcessor grain split: columns", geo + weights, GV_BODY, d, 2, nullptr, 0, gx, gy, 0))
 				{
 					m_error = "grain split: columns pass failed";
@@ -190,7 +363,7 @@ if (p.x < GS_W && p.y < GS_H) {
 			}
 			{
 				const std::string hdr = geo + DefineInt("GS_SUB", params.subBlocks) + DefineInt("GS_QUIET", params.quietSubBlocks) + Define("GS_CAL", params.grainCal);
-				const pl_shader_desc d[2] = { Sampled("bands", m_bands), Storage("quiet_out", m_quiet) };
+				const pl_shader_desc d[2] = { Sampled("bands", bands), VpvGpu::Storage("quiet_out", quiet) };
 				if (!Pass(dispatch, "VideoProcessor grain split: grain level", hdr, QUIET_BODY, d, 2, nullptr, 0, bgx, bgy, 0))
 				{
 					m_error = "grain split: grain level pass failed";
@@ -198,26 +371,41 @@ if (p.x < GS_W && p.y < GS_H) {
 				}
 			}
 			{
-				const pl_shader_desc d[2] = { Sampled("quiet", m_quiet), Storage("blocks_out", m_blocks) };
+				const pl_shader_desc d[2] = { Sampled("quiet", quiet), VpvGpu::Storage("blocks_out", blocksTex) };
 				if (!Pass(dispatch, "VideoProcessor grain split: neighbourhood minimum", geo + DefineInt("GS_NG", params.neighbourhood), NMIN_BODY, d, 2, nullptr, 0, bgx, bgy, 0))
 				{
 					m_error = "grain split: minimum pass failed";
 					return false;
 				}
 			}
+			if (compact)
+			{
+				const std::string hdr = geo + Define("GS_KAPPA", params.kappa) + Define("GS_FLOOR", params.energyFloor) + DefineInt("GS_COMPACT", 1) + Define("GS_CU", codeUnit);
+				const pl_shader_desc d[4] = { Sampled("bands", bands), Sampled("blocks", blocksTex), VpvGpu::Storage("split_a", outA), VpvGpu::Storage("split_b", outB) };
+				if (!Pass(dispatch, "VideoProcessor grain split: Wiener share (compact)", hdr, F_BODY_COMPACT, d, 4, nullptr, 0, gx, gy, 0))
+				{
+					m_error = "grain split: Wiener pass failed";
+					return false;
+				}
+				m_out.split = outA;
+				m_out.splitB = outB;
+			}
+			else
 			{
 				const std::string hdr = geo + Define("GS_KAPPA", params.kappa) + Define("GS_FLOOR", params.energyFloor);
-				const pl_shader_desc d[3] = { Sampled("bands", m_bands), Sampled("blocks", m_blocks), Storage("split_out", m_rows) };
+				const pl_shader_desc d[3] = { Sampled("bands", bands), Sampled("blocks", blocksTex), VpvGpu::Storage("split_out", rows) };
 				if (!Pass(dispatch, "VideoProcessor grain split: Wiener share", hdr, F_BODY, d, 3, nullptr, 0, gx, gy, 0))
 				{
 					m_error = "grain split: Wiener pass failed";
 					return false;
 				}
+				m_out.split = rows;
+				m_out.splitB = nullptr;
 			}
-			m_out.split = m_rows;
-			m_out.blocks = m_blocks;
+			m_out.blocks = blocksTex;
 			m_out.w = w; m_out.h = h; m_out.bw = bw; m_out.bh = bh; m_out.B = B; m_out.scale = scale;
 			m_out.codeUnit = codeUnit; m_out.component = component;
+			m_out.storage = options.storage;
 			return true;
 		}
 	}

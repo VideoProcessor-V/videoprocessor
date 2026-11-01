@@ -32,6 +32,14 @@
 
 namespace GrainSplit
 {
+	// Storage layout of the GPU form of the split product (SA2 either/or switch `grain_split_storage`; default
+	// full until the coordinator's grain gate passes). Full: rgba32f split (s1, s2, f, base) + rgba32f blocks
+	// (N, e3, 0, 0). Compact: texture A rg16f (s1, s2 in codes), texture B rg16 unorm (f, base x codeUnit), blocks
+	// rg32f (N, e3): 8 B/px + 8 B per block instead of 16 + 16. Readers never see the difference: GLSL gs_fetch /
+	// gs_blocks and the C++ view (GrainSplitGpu.h) are the only read path.
+	enum class Storage : uint8_t { Full, Compact };
+	inline const char* Token(Storage s) { return s == Storage::Compact ? "compact" : "full"; }
+
 	struct Plane
 	{
 		int w = 0, h = 0;
