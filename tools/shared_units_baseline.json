@@ -89,13 +89,19 @@
      "pattern": "LowWeightsGlsl",
      "kind": "residual",
      "reason": "Bill-owned low-band law (GrainPreserve::LowWeightsGlsl / gp_w); the consumer calls Bill's function, so the law cannot move into the unit without editing Bill's header or a GPU run proving the emitted shader unchanged; migrate with the SA5 repair package"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/TextureRestore.h",
+     "pattern": "return VpUnit::BandFromBase::HalfSigma",
+     "kind": "false_positive",
+     "reason": "thin forwarder of HalfSigma to the unit; the law lives in BandFromBase"
     }
    ]
   },
   "U3": {
    "name": "half_luma_downsample",
    "blocking": true,
-   "baseline_duplicates": 14,
+   "baseline_duplicates": 18,
    "known_false_positive": [
     {
      "file": "src/VP-V/modules/motion/consumers/DejudderWarp.cpp",
@@ -132,6 +138,24 @@
      "pattern": "HalfLuma8\\(",
      "kind": "false_positive",
      "reason": "declaration of the NVOF producer entry point"
+    },
+    {
+     "file": "src/VP-V/modules/input/source_analysis/SourceResolutionMonitor.cpp",
+     "pattern": "0\\.25 \\* \\(",
+     "kind": "false_positive",
+     "reason": "exponential smoothing factor of a quality/bits statistic, not a 2x2 box"
+    },
+    {
+     "file": "src/VP-V/modules/repair/deband/VpDebander.cpp",
+     "pattern": "0\\.25 \\* \\(texture",
+     "kind": "residual",
+     "reason": "GLSL, no byte-identity proof without GPU: debander 2x2 box average of the low band"
+    },
+    {
+     "file": "src/VP-V/modules/repair/texture_restore/DetailPulse.cpp",
+     "pattern": "0\\.25 \\* \\(",
+     "kind": "residual",
+     "reason": "GLSL, no byte-identity proof without GPU: DetailPulse load_low sbox 2x2 box (line 141) and the 2x2 mean at line 521"
     }
    ]
   },

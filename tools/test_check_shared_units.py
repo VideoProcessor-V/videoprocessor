@@ -79,7 +79,7 @@ class CheckSharedUnitsTest(unittest.TestCase):
     # ---- roles --------------------------------------------------------------------------------
     def test_roles(self):
         _w(self.root, "src/VP-V/modules/repair/c/Cons.h",
-           "VpUnit::BandFromBase::Weight(1, 2.0, 3);  // gaussian_blur\n")
+           "double h = VpUnit::BandFromBase::HalfSigma(s);\n")
         _w(self.root, "src/VP-V/core/ProductCatalog.h", "gaussian_blur(decl);\n")
         _w(self.root, "src/VP-V/modules/repair/c/Cmt.h", "// gaussian_blur is described here\n")
         _w(self.root, "src/VP-V/modules/drive/led_x/Led.cpp", "gaussian_blur(led);\n")
@@ -164,26 +164,80 @@ class CheckSharedUnitsTest(unittest.TestCase):
         d = json.load(open(os.path.join(self.root, "tools", "shared_units_baseline.json")))
         self.assertEqual(d["units"]["U2"]["baseline_duplicates"], 0)
 
+    # ---- review fixes -------------------------------------------------------------------------
+    def test_star_continuation_counts_only_inside_a_block_comment(self):
+        _w(self.root, "src/VP-V/modules/repair/c/Star.h",
+           """double a = 1;
+    * std::exp(-0.5 * x);
+/* note
+ * std::exp(-0.5 * y)
+ */
+// std::exp(-0.5 * z)
+""")
+        r = csu.scan(self.root, baseline={"units": {}})
+        role = {h["line"]: h["role"] for h in _unit(r, "U2")["hits"] if h["file"].endswith("Star.h")}
+        self.assertEqual(role[2], "duplicate")
+        self.assertEqual(role[4], "declaration")
+        self.assertEqual(role[6], "declaration")
+
+    def test_arg_parse_failure_exits_2_under_strict(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(csu.main(["--strict", "--nonsense"]), 2)
+            self.assertEqual(csu.main(["--nonsense"]), 0)
+
+    def test_accessor_plus_private_signature_is_a_duplicate(self):
+        _w(self.root, "src/VP-V/modules/repair/c/Mix.h",
+           """double a = VpUnit::BandFromBase::Weight(1, 2.0, 3);
+double b = VpUnit::BandFromBase::Weight(1, 2.0, 3) + std::exp(-0.5 * k * k);
+""")
+        r = csu.scan(self.root, baseline={"units": {}})
+        role = {h["line"]: h["role"] for h in _unit(r, "U2")["hits"] if h["file"].endswith("Mix.h")}
+        self.assertEqual(role.get(2), "duplicate")
+        self.assertNotIn(1, role)   # line 1 has no private signature left once the accessor is removed (not even a hit)
+
+    def test_build_baseline_missing_value_and_unknown_keys(self):
+        result = csu.scan(self.root, baseline={"units": {}})
+        old = {"schema": 1, "note": "keep me", "units": {"U2": {"blocking": True, "known_false_positive": []}}}
+        with self.assertRaises(ValueError):
+            csu.build_baseline(result, old)   # blocking, no baseline_duplicates -> 0, and U2 has 1 duplicate
+        old["units"]["U2"]["blocking"] = False
+        new = csu.build_baseline(result, old)
+        self.assertEqual(new["note"], "keep me")
+        self.assertEqual(new["units"]["U2"]["baseline_duplicates"], 1)
+
     # ---- the real repository ------------------------------------------------------------------
+    FLOOR = {"U2": 11, "U3": 18}   # frozen floor: blocking units may only shrink from here
+
+    def _reference_baseline(self):
+        for ref in ("integ/batch1",):
+            try:
+                mb = subprocess.run(["git", "-C", ROOT, "merge-base", "HEAD", ref],
+                                    capture_output=True, text=True, timeout=30)
+                if mb.returncode != 0:
+                    continue
+                sh = subprocess.run(["git", "-C", ROOT, "show",
+                                     mb.stdout.strip() + ":tools/shared_units_baseline.json"],
+                                    capture_output=True, text=True, timeout=30)
+                if sh.returncode == 0:
+                    return json.loads(sh.stdout)["units"]
+            except (OSError, subprocess.SubprocessError, ValueError):
+                pass
+        return None
+
     def test_repo_baseline_passes_strict_and_only_shrinks(self):
         rc, out = _run(["--strict", "--root", ROOT])
         self.assertEqual(rc, 0, out[-600:])
         cur = csu.load_baseline(ROOT)["units"]
-        try:
-            head = subprocess.run(
-                ["git", "-C", ROOT, "show", "HEAD:tools/shared_units_baseline.json"],
-                capture_output=True, text=True, timeout=30)
-        except (OSError, subprocess.SubprocessError):
-            return
-        if head.returncode != 0:
-            return   # not committed yet, or no git
-        old = json.loads(head.stdout)["units"]
-        for uid, o in old.items():
-            if uid in cur:
-                self.assertLessEqual(cur[uid]["baseline_duplicates"], o["baseline_duplicates"],
-                                     "baseline of %s rose" % uid)
-                if o.get("blocking"):
+        for uid, floor in self.FLOOR.items():
+            self.assertTrue(cur[uid]["blocking"], "%s lost blocking" % uid)
+            self.assertLessEqual(cur[uid]["baseline_duplicates"], floor, "baseline of %s rose" % uid)
+        old = self._reference_baseline()   # the merge-base with integ/batch1 (absent file: floor table only)
+        if old:
+            for uid, o in old.items():
+                if uid in cur and o.get("blocking"):
                     self.assertTrue(cur[uid]["blocking"], "%s lost blocking" % uid)
+                    self.assertLessEqual(cur[uid]["baseline_duplicates"], o["baseline_duplicates"],
+                                         "baseline of %s rose" % uid)
 
 
 if __name__ == "__main__":

@@ -45,7 +45,7 @@ REGISTRY = [
      "owning_unit": ["src/VP-V/modules/repair/grain_split"],
      "signatures": _c(r"grain[_ ]?(rms|level|estimate|noise)", r"wiener",
                       r"noise[_ ]?(level|sigma|estimate)"),
-     "allow": _c(r"vpu_grain_view", r"GrainSplit::Gpu::ViewGlsl")},
+     "allow": _c(r"vpu_grain_view\w*", r"GrainSplit::Gpu::ViewGlsl")},
     {"id": "U2", "name": "gaussian_band_split",
      "owning_unit": ["src/VP-V/modules/repair/grain_split"],
      "signatures": _c(r"gauss(ian)?[_ ]?(blur|split|sigma|kernel)",
@@ -54,14 +54,15 @@ REGISTRY = [
                       r"GAUSS_", r"HalfSigma", r"\bgp_w\b", r"LowWeightsGlsl",
                       r"GrainPreserve::kSplitSigma", r"separable\s+gauss",
                       r"#\s*include\s*[<\"].*GrainSplit\.h"),
-     "allow": _c(r"VpUnit::BandFromBase::", r"vpu_band_from_base",
+     "allow": _c(r"VpUnit::BandFromBase::\w+", r"vpu_band_from_base\w*",
                  r"BandFromBase\.h")},
     {"id": "U3", "name": "half_luma_downsample",
      "owning_unit": ["src/VP-V/modules/input/source_analysis/lane"],
      "signatures": _c(r"half[_ ]?luma", r"HalfLuma", r"LOW_HALF", r"downsample",
                       r"sum\s*>>\s*4", r"\+\s*2u?\)\s*>>\s*2",
-                      r"2x2\s+box|box\s+average"),
-     "allow": _c(r"VpUnit::HalfLuma::", r"vpu_half_luma", r"vpu_quarter_luma",
+                      r"2x2\s+box|box\s+average",
+                      r"0\.25\s*\*\s*\(", r"\*\s*0\.25"),
+     "allow": _c(r"VpUnit::HalfLuma::\w+", r"vpu_half_luma\w*", r"vpu_quarter_luma\w*",
                  r"shared/HalfLuma\.h")},
     {"id": "U4", "name": "block_statistics",
      "owning_unit": ["src/VP-V/modules/input/source_analysis/regions"],
@@ -135,9 +136,23 @@ def _inside(rel, unit):
     return rel == unit or rel.startswith(unit.rstrip("/") + "/")
 
 
-def _is_comment_only(text):
-    t = text.strip()
-    return t.startswith("//") or t.startswith("*") or t.startswith("/*")
+def _comment_flags(lines):
+    """Per line: True when the line is comment-only. A leading '*' counts only inside a /* ... */ block."""
+    flags, in_block = [], False
+    for line in lines:
+        t = line.strip()
+        if in_block:
+            flags.append(True)
+            if "*/" in t:
+                in_block = False
+        elif t.startswith("//"):
+            flags.append(True)
+        elif t.startswith("/*"):
+            flags.append(True)
+            in_block = "*/" not in t
+        else:
+            flags.append(False)
+    return flags
 
 
 def _is_bill(rel):
@@ -169,12 +184,23 @@ def _kfp_reason(kfps, rel, text):
     return None, None
 
 
-def classify(entry, rel, text, kfps):
+def _strip_allowed(entry, text):
+    """(text with every allow-listed accessor removed, whether any was removed)."""
+    out, hit = text, False
+    for a in entry["allow"]:
+        out, n = a.subn(" ", out)
+        hit = hit or n > 0
+    return out, hit
+
+
+def classify(entry, rel, text, kfps, comment=False):
     if _is_bill(rel):
         return "bill", ""
-    if _is_comment_only(text) or any(p.search(rel) for p in DECLARATION_PATHS):
+    if comment or any(p.search(rel) for p in DECLARATION_PATHS):
         return "declaration", ""
-    if any(a.search(text) for a in entry["allow"]):
+    stripped, used = _strip_allowed(entry, text)
+    # A line that holds an accessor AND a private signature is still a duplicate.
+    if used and not any(sg.search(stripped) for sg in entry["signatures"]):
         return "consumer", ""
     if any(p.search(rel) for p in OUTPUT_DOMAIN_PATHS):
         return "output_domain", ""
@@ -207,6 +233,7 @@ def scan(root, registry=None, baseline=None):
                 lines = f.read().splitlines()
         except OSError:
             continue
+        cflags = _comment_flags(lines)
         for i, line in enumerate(lines, 1):
             for entry, res in zip(registry, out):
                 if not any(s.search(line) for s in entry["signatures"]):
@@ -217,7 +244,7 @@ def scan(root, registry=None, baseline=None):
                     res["inside_owner"] += 1
                     continue
                 kfps = units.get(entry["id"], {}).get("known_false_positive", [])
-                role, reason = classify(entry, rel, line, kfps)
+                role, reason = classify(entry, rel, line, kfps, cflags[i - 1])
                 hit = {"file": rel, "line": i, "text": line.strip()[:200], "role": role}
                 if reason:
                     hit["reason"] = reason
@@ -245,13 +272,17 @@ def strict_violations(result):
 
 def build_baseline(result, old):
     """The new baseline document, or raise ValueError when a blocking baseline would rise."""
-    new = {"schema": 1, "units": {}}
+    new = {k: v for k, v in old.items() if k != "units"}
+    new.setdefault("schema", 1)
+    new["units"] = {}
     old_units = old.get("units", {})
     for c in result["computations"]:
         o = old_units.get(c["id"], {})
         blocking = bool(o.get("blocking", False))
         prev = o.get("baseline_duplicates")
-        if blocking and prev is not None and c["duplicates"] > prev:
+        if blocking and prev is None:
+            prev = 0
+        if blocking and c["duplicates"] > prev:
             raise ValueError("refusing to raise blocking baseline of %s: %d -> %d" % (
                 c["id"], prev, c["duplicates"]))
         new["units"][c["id"]] = {
@@ -303,7 +334,7 @@ def main(argv=None):
     try:
         args = ap.parse_args(argv)
     except SystemExit:
-        return 0
+        return 2 if "--strict" in (argv if argv is not None else sys.argv[1:]) else 0
     try:
         root = os.path.abspath(args.root)
         bpath = args.baseline or os.path.join(root, *BASELINE_REL.split("/"))
