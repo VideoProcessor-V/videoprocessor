@@ -19,7 +19,7 @@
 #include "../../../VideoProcessor-GUI/DialogExtension.h"
 
 #include <cstdio>
-#include <filesystem>
+
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -78,7 +78,9 @@ namespace HookLayerSettingsTest
 			ConfigFile config;
 			explicit TempConfig(const std::string& text)
 			{
-				path = (std::filesystem::temp_directory_path() / "hooklayer-settings-tests.cfg").string();
+				char temp[MAX_PATH + 1] = {};
+				GetTempPathA(MAX_PATH, temp);
+				path = std::string(temp) + "hooklayer-settings-tests.cfg";
 				{ std::ofstream(path, std::ios::trunc) << text; }
 				config.Load(path, ConfigFile::ReadPolicy::Fresh);
 			}
