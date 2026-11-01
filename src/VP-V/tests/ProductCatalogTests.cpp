@@ -218,8 +218,8 @@ namespace ProductCatalogTestsNs
 			Assert::AreEqual(8388608u, kMonitorRingBytes);
 			// P1: half R16 + quarter R16 (the engine-size u8 view joins with SA4).
 			Assert::AreEqual(uint64_t(4147200 + 1036800), BytesOf(reg.Get(kP1HalfLuma).size, d4k));
-			// P4: 16 KB of system RAM.
-			Assert::AreEqual(uint64_t(16384), BytesOf(reg.Get(kP4SourceStats).size, d4k));
+			// P4: 8 KB today (the producer layout) of system RAM.
+			Assert::AreEqual(uint64_t(8192), BytesOf(reg.Get(kP4SourceStats).size, d4k));
 			Assert::IsTrue(reg.Get(kP4SourceStats).residency == Residency::SystemRam);
 			// td.refstore: 4.5 B/px per slot declared (4 B/px + a 0.5 B/px half-size base), history = the slots.
 			Assert::AreEqual(uint64_t(3840ull * 2160 * 4 + 1920ull * 1080 * 2), BytesOf(reg.Get(kTdRefstore).size, d4k));
