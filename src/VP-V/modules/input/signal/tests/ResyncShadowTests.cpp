@@ -349,8 +349,11 @@ namespace Tests
 			Assert::IsTrue(grown != first);
 			Assert::AreEqual(size_t(512), grown->Capacity());
 			Assert::IsTrue(grown->Era() != first->Era());
-			r.Push(2.0);   // restart: a FULL Start again
+			// Shadow never seals, so both events still apply to unsealed frames: carried into the new era.
+			Assert::AreEqual(uint32_t(2), first->CarriedEvents());
 			Assert::AreEqual(uint32_t(1), grown->Total(VpIndicator::kFull));
+			r.Push(2.0);   // restart: a FULL Start again (on top of the carried one)
+			Assert::AreEqual(uint32_t(2), grown->Total(VpIndicator::kFull));
 			Assert::AreEqual(std::string("shadow: FULL 0 s ago (start); minor x0 / 10 min; timing x0"), r.Status(2.0));
 		}
 

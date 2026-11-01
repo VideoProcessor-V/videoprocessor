@@ -100,6 +100,7 @@ if (tile < int(tiles) && g.y < ts) {
 		const std::vector<float>& tileX, const std::vector<float>& tileY, int baseTiles, int tileSize, double blackLevel, uint64_t sequence)
 	{
 		Job j;
+		j.epoch = epoch.load(std::memory_order_acquire);
 		j.sequence = sequence;
 		j.values = tiles;
 		j.tiles = count;
@@ -130,6 +131,7 @@ if (tile < int(tiles) && g.y < ts) {
 		j.tileX = tileX;
 		j.tileY = tileY;
 		j.baseTiles = (std::min)(baseTiles, count);
+		j.epoch = epoch.load(std::memory_order_acquire);
 		Analyse(j);
 	}
 
@@ -145,6 +147,7 @@ if (tile < int(tiles) && g.y < ts) {
 		j.seconds = seconds;
 		j.nativeWidth = nativeWidth;
 		j.nativeHeight = nativeHeight;
+		j.epoch = epoch.load(std::memory_order_acquire);
 		Analyse(j);
 	}
 
@@ -401,6 +404,7 @@ if (tile < int(tiles) && g.y < ts) {
 	{
 		for (int i = 0; i < 2; ++i)
 		{
+			if (busy[i]) FinishSequence(pendingMeta[i].sequence);   // frame-bound: a copy that will never be analysed
 			if (ring[i] && g) pl_buf_destroy(g, &ring[i]);
 			ring[i] = nullptr;
 			busy[i] = false;
@@ -414,7 +418,12 @@ if (tile < int(tiles) && g.y < ts) {
 
 	void Monitor::Discontinuity(const char* cause)
 	{
-		discontinuityCause.store(cause ? cause : "discontinuity", std::memory_order_release);
+		const char* const text = cause ? cause : "discontinuity";
+		discontinuityCause.store(text, std::memory_order_release);
+		// Frame-bound: a new era (results and jobs of the old one are dropped), taking effect at the
+		// render thread's next Frame / AutoFactor.
+		lastRenderCause.store(text, std::memory_order_release);
+		epoch.fetch_add(1, std::memory_order_acq_rel);
 		autoReset.store(true, std::memory_order_release);
 		wake.notify_all();
 	}
@@ -422,7 +431,21 @@ if (tile < int(tiles) && g.y < ts) {
 	Snapshot Monitor::Read() const
 	{
 		std::lock_guard<std::mutex> lock(mutex);
-		return snapshot;
+		if (!frameBound.load(std::memory_order_acquire)) return snapshot;
+		// Frame-bound: the released analysis; the GPU-side status and the counters are live.
+		Snapshot out = visible;
+		out.notRead = snapshot.notRead;
+		out.error = snapshot.error;
+		out.frameBound = true;
+		out.frameLead = frameLead.load(std::memory_order_acquire);
+		out.heldNow = static_cast<unsigned>(heldCount);
+		out.heldDropped = heldDropped.load(std::memory_order_relaxed);
+		out.heldStale = heldStale.load(std::memory_order_relaxed);
+		out.jobsDropped = jobsDropped.load(std::memory_order_relaxed);
+		out.submitSkipped = submitSkipped.load(std::memory_order_relaxed);
+		out.waitsMissed = waitsMissed.load(std::memory_order_relaxed);
+		out.clockStepsBack = clockStepsBack.load(std::memory_order_relaxed);
+		return out;
 	}
 
 	std::string Monitor::NotReadReason(const pl_frame& source)
@@ -437,8 +460,11 @@ if (tile < int(tiles) && g.y < ts) {
 
 	void Monitor::Frame(pl_gpu g, pl_dispatch dispatch, const pl_frame& source, uint64_t sourceSequence, double seconds)
 	{
-		(void)sourceSequence;
 		if (!g || !dispatch) return;
+		const bool bound = frameBound.load(std::memory_order_acquire);
+		// Frame-bound: the monitor's source clock (monotone) and the results this frame may see.
+		const double raw = seconds;   // the frame's own source seconds (the trackers' clock)
+		if (bound) seconds = BeginBoundFrame(sourceSequence, seconds);
 		if (gpu && gpu != g) Release(gpu);
 		gpu = g;
 		if (!nativeTried)
@@ -481,6 +507,7 @@ if (tile < int(tiles) && g.y < ts) {
 			busy[i] = false;
 			if (!ok)
 			{
+				FinishSequence(done.sequence);
 				Fail("the readback failed", seconds);
 				continue;
 			}
@@ -489,6 +516,7 @@ if (tile < int(tiles) && g.y < ts) {
 			if (done.streamKey != streamKey.load(std::memory_order_acquire))
 			{
 				staleJobsDropped.fetch_add(1, std::memory_order_relaxed);
+				FinishSequence(done.sequence);
 				continue;
 			}
 			// Tests only (gate r3 2026-10-18): VP_TEST_SOURCE_MONITOR_DIGEST=1 logs a digest of the
@@ -506,8 +534,22 @@ if (tile < int(tiles) && g.y < ts) {
 			}
 			{
 				std::lock_guard<std::mutex> lock(mutex);
-				job = std::move(done);   // a newer copy replaces one the worker has not started
-				haveJob = true;
+				if (bound)
+				{
+					// Frame-bound: a FIFO (no copy replaces another); overflow drops the oldest, counted.
+					if (jobQueue.size() >= kJobQueueCap)
+					{
+						FinishSequence(jobQueue.front().sequence);
+						jobQueue.pop_front();
+						jobsDropped.fetch_add(1, std::memory_order_relaxed);
+					}
+					jobQueue.push_back(std::move(done));
+				}
+				else
+				{
+					job = std::move(done);   // a newer copy replaces one the worker has not started
+					haveJob = true;
+				}
 			}
 			wake.notify_all();
 		}
@@ -545,7 +587,9 @@ if (tile < int(tiles) && g.y < ts) {
 		// then the dense rows while a lower reading is declared or gathered.
 		int baseTiles = 0;
 		const int tileSize = TileFor(h);
-		const std::vector<SourceResolution::TilePlace> places = SourceResolution::PlaceTiles(x0, y0, w, h, tileSize, denseGrid.load(std::memory_order_acquire), &baseTiles);
+		// Frame-bound: the dense grid as of the released analysis, not as the worker is now.
+		const bool dense = bound ? denseGridApplied.load(std::memory_order_acquire) : denseGrid.load(std::memory_order_acquire);
+		const std::vector<SourceResolution::TilePlace> places = SourceResolution::PlaceTiles(x0, y0, w, h, tileSize, dense, &baseTiles);
 		if (places.empty()) return;
 		float origins[2 * kMaxTiles] = {};
 		const int tiles = (std::min)(kMaxTiles, static_cast<int>(places.size()));
@@ -556,7 +600,13 @@ if (tile < int(tiles) && g.y < ts) {
 		}
 
 		const int slot = nextSlot;
-		if (busy[slot]) return;   // the oldest copy is still on its way: skip, never wait
+		if (busy[slot])
+		{
+			// The oldest copy is still on its way: skip, never wait. Frame-bound: counted and shown
+			// (this frame gets no analysis; GPU timing decided it, so the run is not reproducible).
+			if (bound) submitSkipped.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
 		const size_t bytes = static_cast<size_t>(kMaxTiles) * kPixels * sizeof(float);
 		if (!native && !ring[slot])
 		{
@@ -667,13 +717,15 @@ if (tile < int(tiles) && g.y < ts) {
 		// The signal's black (normalised): full range 0, limited 16 << (bits - 8).
 		meta.blackLevel = source.repr.levels == PL_COLOR_LEVELS_FULL ? 0.0 : 16.0 * (meta.codeMaximum + 1) / 256.0 / meta.codeMaximum;
 		blackLevelSeen = meta.blackLevel;
-		meta.seconds = seconds;
+		meta.seconds = raw;   // the frame's own source seconds (the trackers' clock)
 		meta.sequence = sourceSequence;
+		meta.epoch = epoch.load(std::memory_order_acquire);
 		meta.nativeWidth = luma->params.w;
 		meta.nativeHeight = luma->params.h;
 		busy[slot] = true;
 		nextSlot = (slot + 1) % 2;
 		lastSubmit = seconds;
+		if (bound) NoteSubmitted(sourceSequence);
 	}
 
 	void Monitor::Fail(const char* what, double seconds)
@@ -694,14 +746,24 @@ if (tile < int(tiles) && g.y < ts) {
 			bool have = false;
 			{
 				std::unique_lock<std::mutex> lock(mutex);
-				wake.wait(lock, [this] { return stopping || haveJob || discontinuityCause.load(std::memory_order_acquire); });
+				wake.wait(lock, [this] { return stopping || haveJob || !jobQueue.empty() || discontinuityCause.load(std::memory_order_acquire); });
 				if (stopping) return;
 				cause = discontinuityCause.exchange(nullptr, std::memory_order_acq_rel);
-				have = haveJob;
-				if (have)
+				if (!jobQueue.empty())
 				{
-					current = std::move(job);
-					haveJob = false;
+					// Frame-bound FIFO.
+					have = true;
+					current = std::move(jobQueue.front());
+					jobQueue.pop_front();
+				}
+				else
+				{
+					have = haveJob;
+					if (have)
+					{
+						current = std::move(job);
+						haveJob = false;
+					}
 				}
 			}
 			// Efficiency 2026-10-24: evidenceMutex (then mutex) serialises a reset with an analysis
@@ -717,6 +779,15 @@ if (tile < int(tiles) && g.y < ts) {
 			if (current.streamKey != streamKey.load(std::memory_order_acquire))
 			{
 				staleJobsDropped.fetch_add(1, std::memory_order_relaxed);
+				FinishSequence(current.sequence);
+				continue;
+			}
+			// Frame-bound: a copy taken before a Discontinuity() (its reset ran above) is not evidence
+			// of the new era.
+			if (frameBound.load(std::memory_order_acquire) && current.epoch != epoch.load(std::memory_order_acquire))
+			{
+				heldStale.fetch_add(1, std::memory_order_relaxed);
+				FinishSequence(current.sequence);
 				continue;
 			}
 			Analyse(current);
@@ -755,7 +826,9 @@ if (tile < int(tiles) && g.y < ts) {
 	void Monitor::Analyse(Job& j)
 	{
 		std::lock_guard<std::mutex> evidenceGuard(evidenceMutex);   // efficiency 2026-10-24: order evidenceMutex -> mutex
-		const auto start = std::chrono::steady_clock::now();
+		const auto start = std::chrono::steady_clock::now();   // wall clock: analyseMs, display only
+		const bool bound = frameBound.load(std::memory_order_acquire);
+		bool workerReset = false;   // frame-bound: carried by the held result instead of autoReset
 		std::vector<SourceResolution::Spectrum> spectra(static_cast<size_t>(j.tiles));
 		const int T = j.tileSize > 0 ? j.tileSize : kTile;
 		const int pixels = T * T;
@@ -819,14 +892,16 @@ if (tile < int(tiles) && g.y < ts) {
 				else snprintf(text, sizeof(text), "a gap of %.1f s with no frames", gap);
 				gapReason = text;
 				ResetEvidence(gapReason.c_str());
-				autoReset.store(true, std::memory_order_release);
+				if (bound) workerReset = true;
+				else autoReset.store(true, std::memory_order_release);
 			}
 		}
 		lastAnalysedSeconds = j.seconds;
 		const unsigned long long trackerResets = tracker.Discontinuities();
 		// Cut fixes: what the look-ahead saw between the tracker's analysed frames.
 		const SourceResolution::EvidenceSource look = [this](uint64_t from, uint64_t to) { return LookAheadEvidence(from, to); };
-		const SourceResolution::EvidenceSource* lookAhead = fixes && CutFixes() && j.sequence != 0 ? &look : nullptr;
+		// Frame-bound: no look-ahead evidence (it is analysis of frames after the one decided).
+		const SourceResolution::EvidenceSource* lookAhead = !bound && fixes && CutFixes() && j.sequence != 0 ? &look : nullptr;
 		tracker.Update(frame, j.seconds, false, j.sequence, lookAhead);
 		trackerV.Update(SourceResolution::AxisFrame(frame, true), j.seconds, false, j.sequence, lookAhead);
 		trackerH.Update(SourceResolution::AxisFrame(frame, false), j.seconds, false, j.sequence, lookAhead);
@@ -842,7 +917,8 @@ if (tile < int(tiles) && g.y < ts) {
 			trackerV.Discontinuity(gapReason.c_str());
 			trackerH.Discontinuity(gapReason.c_str());
 			snapshot.lastDiscontinuity = gapReason;
-			autoReset.store(true, std::memory_order_release);
+			if (bound) workerReset = true;
+			else autoReset.store(true, std::memory_order_release);
 		}
 		// The dense grid while any tracker has a lower reading declared or in its window (from the
 		// next copy on); back to the base grid once all are native again.
@@ -1015,6 +1091,12 @@ if (tile < int(tiles) && g.y < ts) {
 			snapshot.confidence, snapshot.bitrateQuality, snapshot.effectiveBits, snapshot.cuts, frame.informativeTiles,
 			frame.tiles, autoAppliedShared.load(std::memory_order_acquire), snapshot.analyseMs);
 		Record(row);
+		if (bound)
+		{
+			PushHeld(j, workerReset);
+			analysedThrough.store(j.sequence, std::memory_order_release);
+			FinishSequence(j.sequence);
+		}
 	}
 
 	void Monitor::SetSelection(const std::string& value)
@@ -1036,8 +1118,18 @@ if (tile < int(tiles) && g.y < ts) {
 	double Monitor::AutoFactor(int nativeHeight, double minimumConfidence, std::string& why, double seconds, uint64_t renderSequence)
 	{
 		why.clear();
-		const double now = seconds >= 0.0 ? seconds :
+		const bool bound = frameBound.load(std::memory_order_acquire);
+		// Frame-bound: source seconds only (never the steady clock), made monotone; and only the
+		// analysis of frames <= renderSequence - D is visible.
+		const double now = bound ? DecisionNow(seconds) : seconds >= 0.0 ? seconds :
 			std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+		bool boundReset = false;
+		if (bound)
+		{
+			const bool released = ReleaseHeldFor(renderSequence);
+			const bool carried = pendingBoundReset.exchange(false, std::memory_order_acq_rel);
+			boundReset = released || carried;
+		}
 		const Snapshot s = Read();
 		const double before = autoApplied;
 		const bool fixes = LatchFixes();
@@ -1048,7 +1140,8 @@ if (tile < int(tiles) && g.y < ts) {
 			if (per > 0.0 && per < 1.0) secondsPerFrame = secondsPerFrame > 0.0 ? secondsPerFrame + 0.1 * (per - secondsPerFrame) : per;
 		}
 		if (renderSequence > clockSequence) { clockSequence = renderSequence; clockSeconds = now; }
-		if (autoReset.exchange(false, std::memory_order_acq_rel))
+		const bool resetFlagged = autoReset.exchange(false, std::memory_order_acq_rel);
+		if (resetFlagged || boundReset)
 		{
 			autoApplied = autoPending = 1.0;
 			disengagePending = false;
@@ -1105,7 +1198,7 @@ if (tile < int(tiles) && g.y < ts) {
 				std::lock_guard<std::mutex> lock(aheadMutex);
 				a = ahead;
 			}
-			const bool aheadDue = renderSequence != 0 && a.eventSequence != 0 && a.ready && renderSequence >= a.eventSequence &&
+			const bool aheadDue = !bound && renderSequence != 0 && a.eventSequence != 0 && a.ready && renderSequence >= a.eventSequence &&
 				std::fabs(wanted - autoPending) <= tolerance;
 			if (std::fabs(wanted - autoPending) > tolerance)
 			{
@@ -1181,7 +1274,7 @@ if (tile < int(tiles) && g.y < ts) {
 		double& factorX, double& factorY, double seconds, uint64_t renderSequence)
 	{
 		const double uniform = AutoFactor(nativeHeight, minimumConfidence, why, seconds, renderSequence);
-		const double now = seconds >= 0.0 ? seconds :
+		const double now = frameBound.load(std::memory_order_acquire) ? DecisionNow(seconds) : seconds >= 0.0 ? seconds :
 			std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 		const Snapshot s = Read();
 		// A discontinuity: the per-axis state back to native too.
@@ -1277,7 +1370,7 @@ if (tile < int(tiles) && g.y < ts) {
 	{
 		// The look-ahead, while it runs, finds the cut on the frame itself: the tracker's (a tile copy
 		// later) is not used then.
-		const bool aheadLive = renderSequence != 0 && aheadLastSequence > renderSequence;
+		const bool aheadLive = !frameBound.load(std::memory_order_acquire) && renderSequence != 0 && aheadLastSequence > renderSequence;
 		const bool newFrame = s.frames != pendingFrames;
 		// A cut found across a lost tile copy happened somewhere in a longer span: switching on it could
 		// land mid-shot, so it waits for the next moment.
@@ -1327,7 +1420,7 @@ if (tile < int(tiles) && g.y < ts) {
 
 	Monitor::Transition Monitor::AutoTransition(double seconds) const
 	{
-		const double now = seconds >= 0.0 ? seconds :
+		const double now = frameBound.load(std::memory_order_acquire) ? DecisionPeek(seconds) : seconds >= 0.0 ? seconds :
 			std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 		Transition t;
 		t.toX = lastFactorX;
@@ -1381,7 +1474,227 @@ if (tile < int(tiles) && g.y < ts) {
 		return out;
 	}
 
-	std::string Describe(const Snapshot& s, double autoRatio, bool autoSelected)
+	// ---- Frame-bound mode ----
+
+	void Monitor::SetFrameBound(bool on, uint32_t leadFramesD)
+	{
+		const uint32_t lead = (std::min)(leadFramesD, static_cast<uint32_t>(1u << 20));
+		const bool was = frameBound.load(std::memory_order_acquire);
+		if (was == on && (!on || frameLead.load(std::memory_order_acquire) == lead)) return;   // off -> off: nothing to do
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			heldHead = heldCount = 0;
+			jobQueue.clear();
+			visible = snapshot;
+		}
+		{
+			std::lock_guard<std::mutex> lock(outMutex);
+			outstanding.clear();
+		}
+		submitClock.Reset();
+		decideClock.Reset();
+		lastSubmit = -1e9;
+		denseGridApplied.store(false, std::memory_order_release);
+		// A fresh era: a reset carried from the previous era is superseded by this one's (autoReset
+		// below), and reproducibility is judged per era (losses of the previous era are not this run's).
+		pendingBoundReset.store(false, std::memory_order_release);
+		jobsDropped.store(0, std::memory_order_relaxed);
+		heldDropped.store(0, std::memory_order_relaxed);
+		submitSkipped.store(0, std::memory_order_relaxed);
+		waitsMissed.store(0, std::memory_order_relaxed);
+		frameLead.store(lead, std::memory_order_release);
+		frameBound.store(on, std::memory_order_release);
+		// A fresh era on the render side (the clocks changed domain): no worker-side reset, so the
+		// analysis already under way is not disturbed; what is visible is reset at the next Frame / AutoFactor.
+		lastRenderCause.store("frame-bound mode changed", std::memory_order_release);
+		epoch.fetch_add(1, std::memory_order_acq_rel);
+		autoReset.store(true, std::memory_order_release);
+	}
+
+	void Monitor::InjectResultForTest(const Snapshot& result, uint64_t sequence)
+	{
+		{
+			std::lock_guard<std::mutex> evidenceGuard(evidenceMutex);
+			std::lock_guard<std::mutex> lock(mutex);
+			const std::string notRead = snapshot.notRead, error = snapshot.error;
+			snapshot = result;
+			snapshot.notRead = notRead;
+			snapshot.error = error;
+			if (!frameBound.load(std::memory_order_acquire)) return;
+			Job j;
+			j.sequence = sequence;
+			j.epoch = epoch.load(std::memory_order_acquire);
+			PushHeld(j, false);
+			analysedThrough.store(sequence, std::memory_order_release);
+		}
+		FinishSequence(sequence);
+	}
+
+	double Monitor::SourceClock::Advance(double raw, std::atomic<unsigned long long>& stepsBack)
+	{
+		if (!have)
+		{
+			have = true;
+			lastRaw = raw;
+			lastMapped = raw;
+			return lastMapped;
+		}
+		if (raw < lastRaw)
+		{
+			// A seek (source time backwards): the mapped time holds, and goes on from here.
+			stepsBack.fetch_add(1, std::memory_order_relaxed);
+			lastRaw = raw;
+			return lastMapped;
+		}
+		lastMapped += raw - lastRaw;
+		lastRaw = raw;
+		return lastMapped;
+	}
+
+	double Monitor::SourceClock::Peek(double raw) const
+	{
+		if (!have) return raw;
+		return raw < lastRaw ? lastMapped : lastMapped + (raw - lastRaw);
+	}
+
+	double Monitor::DecisionNow(double seconds) { return decideClock.Advance(seconds, clockStepsBack); }
+
+	double Monitor::DecisionPeek(double seconds) const { return decideClock.Peek(seconds); }
+
+	void Monitor::SubmitJobForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight,
+		int baseTiles, int tileSize, double blackLevel, uint64_t sequence)
+	{
+		Job j;
+		j.epoch = epoch.load(std::memory_order_acquire);
+		j.streamKey = streamKey.load(std::memory_order_acquire);
+		j.sequence = sequence;
+		j.values = tiles;
+		j.tiles = count;
+		j.codeMaximum = 1023;
+		j.scale = 1023.0;
+		j.seconds = seconds;
+		j.nativeWidth = nativeWidth;
+		j.nativeHeight = nativeHeight;
+		j.baseTiles = (std::min)(baseTiles, count);
+		j.tileSize = tileSize;
+		j.blackLevel = blackLevel;
+		NoteSubmitted(sequence);
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			if (jobQueue.size() >= kJobQueueCap)
+			{
+				FinishSequence(jobQueue.front().sequence);
+				jobQueue.pop_front();
+				jobsDropped.fetch_add(1, std::memory_order_relaxed);
+			}
+			jobQueue.push_back(std::move(j));
+		}
+		wake.notify_all();
+	}
+
+	void Monitor::NoteSubmitted(uint64_t sequence)
+	{
+		std::lock_guard<std::mutex> lock(outMutex);
+		outstanding.push_back(sequence);
+	}
+
+	void Monitor::FinishSequence(uint64_t sequence)
+	{
+		std::lock_guard<std::mutex> lock(outMutex);
+		for (auto it = outstanding.begin(); it != outstanding.end(); ++it)
+			if (*it == sequence) { outstanding.erase(it); return; }
+	}
+
+	bool Monitor::ReadyFor(uint64_t s) const
+	{
+		const uint64_t lead = frameLead.load(std::memory_order_acquire);
+		if (s < lead) return true;   // no frame <= s - D exists
+		const uint64_t through = s - lead;
+		std::lock_guard<std::mutex> lock(outMutex);
+		for (const uint64_t o : outstanding)
+			if (o <= through) return false;
+		return true;
+	}
+
+	void Monitor::PushHeld(const Job& j, bool reset)
+	{
+		if (heldCount == kHeldCap)
+		{
+			heldHead = (heldHead + 1) % kHeldCap;   // the oldest result is dropped, counted
+			--heldCount;
+			heldDropped.fetch_add(1, std::memory_order_relaxed);
+		}
+		Held& h = held[(heldHead + heldCount) % kHeldCap];
+		h.sequence = j.sequence;
+		h.epoch = j.epoch;
+		h.snap = snapshot;
+		h.dense = denseGrid.load(std::memory_order_acquire);
+		h.reset = reset;
+		++heldCount;
+	}
+
+	void Monitor::ResetVisible()
+	{
+		visible.reading = false;
+		visible.liveRatio = visible.declaredRatio = visible.frameRatio = 1.0;
+		visible.confidence = 0.0;
+		visible.axisRatioX = visible.axisRatioY = 1.0;
+		visible.axisConfidence = 0.0;
+		visible.kernel = -1;
+		visible.kernelVotes = visible.kernelAgree = 0;
+		++visible.discontinuities;
+		const char* cause = lastRenderCause.load(std::memory_order_acquire);
+		visible.lastDiscontinuity = cause ? cause : "discontinuity";
+	}
+
+	double Monitor::BeginBoundFrame(uint64_t sourceSequence, double seconds)
+	{
+		const double mapped = submitClock.Advance(seconds, clockStepsBack);
+		// The renderer's order is Discontinuity -> Frame -> AutoFactor(s): a reset this release
+		// consumed (the flagged discontinuity or a held worker reset) is carried to AutoFactor.
+		if (ReleaseHeldFor(sourceSequence))
+			pendingBoundReset.store(true, std::memory_order_release);
+		return mapped;
+	}
+
+	bool Monitor::ReleaseHeldFor(uint64_t sequence)
+	{
+		const uint64_t lead = frameLead.load(std::memory_order_acquire);
+		const uint64_t through = sequence >= lead ? sequence - lead : 0;
+		// A Discontinuity() (render thread, in frame order): a reset of what is visible, ahead of
+		// anything analysed after it.
+		const bool flagged = autoReset.exchange(false, std::memory_order_acq_rel);
+		bool reset = false;
+		std::lock_guard<std::mutex> lock(mutex);
+		if (flagged)
+		{
+			ResetVisible();
+			denseGridApplied.store(false, std::memory_order_release);
+			reset = true;
+		}
+		const uint64_t era = epoch.load(std::memory_order_acquire);
+		while (heldCount > 0)
+		{
+			Held& h = held[heldHead];
+			if (h.epoch != era)
+			{
+				heldStale.fetch_add(1, std::memory_order_relaxed);
+			}
+			else if (h.sequence <= through)
+			{
+				visible = h.snap;
+				denseGridApplied.store(h.dense, std::memory_order_release);
+				if (h.reset) reset = true;
+			}
+			else
+				break;
+			heldHead = (heldHead + 1) % kHeldCap;
+			--heldCount;
+		}
+		return reset;
+	}
+
+	static std::string DescribeBase(const Snapshot& s, double autoRatio, bool autoSelected)
 	{
 		char line[400];
 		if (!s.notRead.empty())
@@ -1410,5 +1723,18 @@ if (tile < int(tiles) && g.y < ts) {
 		snprintf(line, sizeof(line), "Source resolution: %s (declared %s, confidence %.2f); bitrate quality %.2f%s%s",
 			liveText.c_str(), declaredText.c_str(), s.confidence, s.bitrateQuality, bits, autoText);
 		return line;
+	}
+
+	std::string Describe(const Snapshot& s, double autoRatio, bool autoSelected)
+	{
+		const std::string text = DescribeBase(s, autoRatio, autoSelected);
+		if (!s.frameBound) return text;
+		char bound[200];
+		snprintf(bound, sizeof(bound), "; frame-bound D=%u: held %u, dropped %llu, stale %llu, jobs dropped %llu, copies skipped %llu, waits missed %llu, clock steps back %llu",
+			s.frameLead, s.heldNow, s.heldDropped, s.heldStale, s.jobsDropped, s.submitSkipped, s.waitsMissed, s.clockStepsBack);
+		std::string out = text + bound;
+		if (s.heldDropped != 0 || s.jobsDropped != 0 || s.submitSkipped != 0 || s.waitsMissed != 0)
+			out += " (analyses were lost to timing: this run is not reproducible)";
+		return out;
 	}
 }

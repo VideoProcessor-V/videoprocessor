@@ -251,6 +251,31 @@ class ReportTests(unittest.TestCase):
         code, rep, _c = self.go()
         self.assertEqual((rep["overall"], code), ("FAIL", 1))
 
+    def test_settle_absent_passes_with_note(self):
+        self.full_pass_run()
+        _c, _r, c = self.go()
+        self.assertEqual(c["resync_settle"]["verdict"], "PASS")
+        self.assertIn("not evaluated", c["resync_settle"]["detail"])
+
+    def test_settle_statistics_and_failures(self):
+        ev = [(4000, 'VPEV1 t={T} kind=resync level=full cause=in_place_source_change seq=100 mode=on injected=1 readers="render-ahead,timeline"'),
+              (4001, 'VPEV1 t={T} kind=resync level=full cause=file_discontinuity seq=200 mode=on'),
+              (4002, 'VPEV1 t={T} kind=resync_settle seq=100 settle_ms=120.000 settle_frames=7 drops=1 repeats=2 relock=yes relock_frames=5 vectors=valid cause=in_place_source_change'),
+              (4003, 'VPEV1 t={T} kind=resync_settle seq=200 settle_ms=300.000 settle_frames=18 drops=0 repeats=0 relock=na relock_frames=0 vectors=valid cause=file_discontinuity')]
+        self.full_pass_run(events=ev)
+        _c, _r, c = self.go()
+        d = c["resync_settle"]
+        self.assertEqual(d["verdict"], "PASS", d)
+        self.assertIn("2 settled", d["detail"])
+        self.assertIn("injected 1 real 2", d["detail"])
+        self.assertIn("in_place_source_change: n=1 drops=1 repeats=2", d["detail"])
+        bad = ev + [(4004, 'VPEV1 t={T} kind=resync_settle seq=300 settle_ms=9000.000 settle_frames=540 drops=3 repeats=0 relock=no relock_frames=0 vectors=invalid cause=rebuild')]
+        shutil.rmtree(self.out)
+        self.full_pass_run(events=bad)
+        code, _r, c = self.go()
+        self.assertEqual(c["resync_settle"]["verdict"], "FAIL")
+        self.assertEqual(code, 1)
+
     def test_thresholds_override(self):
         self.full_pass_run(pb_mb_per_h=10)
         thp = os.path.join(self.tmp, "th.json")

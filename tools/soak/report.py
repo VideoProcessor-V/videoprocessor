@@ -26,6 +26,8 @@ DEFAULTS = {
     "warmup_min": 30, "min_samples": 3, "private_bytes_mb_per_h": 2, "vram_mb_per_h": 4,
     "handles_per_h": 50, "thread_range": 8, "drops_per_h": 1, "steady_window_s": 10,
     "p99_creep_pct": 10, "min_hours_creep": 2,
+    # resync_settle (item 15): conservative; only evaluated when resync_settle lines exist
+    "settle_p95_ms_max": 5000, "settle_unsettled_max": 0, "settle_relock_fail_max": 0,
 }
 CSV_COLUMNS = ["utc", "elapsed_s", "private_bytes", "working_set", "handles", "threads",
                "gdi_objects", "user_objects", "gpu_dedicated", "gpu_shared"]
@@ -321,6 +323,83 @@ def check_resync(files):
     return _result("resync_causes", PASS, "every full resync has a cause; counts: %s" % listing)
 
 
+def _pct(sorted_vals, q):
+    """Nearest-rank percentile of an ascending list (q in 0..100); None when empty."""
+    if not sorted_vals:
+        return None
+    i = int(-(-q * len(sorted_vals) // 100)) - 1
+    return sorted_vals[min(max(i, 0), len(sorted_vals) - 1)]
+
+
+def check_settle(files, th):
+    """Per-event settle statistics from kind=resync_settle lines (item 15).
+
+    No settle lines (resync event tracking not instrumented in this run): PASS with an explicit
+    note, never a FAIL and never NO DATA, so runs predating the metrics stay green.
+    """
+    if not files:
+        return _result("resync_settle", NODATA, "no collected vp.log")
+    settles = [e for _p, e in _all_events(files) if e.kind == "resync_settle"]
+    if not settles:
+        return _result("resync_settle", PASS,
+                       "no resync_settle lines in this run (per-event metrics not instrumented): not evaluated")
+    injected = {}
+    n_inj = n_real = 0
+    for _p, e in _all_events(files):
+        if e.kind == "resync" and e.fields.get("level") == "full":
+            inj = e.fields.get("injected") == "1"
+            injected[e.fields.get("seq")] = inj
+            if inj:
+                n_inj += 1
+            else:
+                n_real += 1
+    ms, frames = [], []
+    drops = repeats = 0
+    per_cause = {}
+    relock_fail = unsettled = 0
+    for e in settles:
+        f = e.fields
+        v = _num(f.get("settle_ms"))
+        if v is not None:
+            ms.append(v)
+        v = _num(f.get("settle_frames"))
+        if v is not None:
+            frames.append(v)
+        d = int(_num(f.get("drops")) or 0)
+        r = int(_num(f.get("repeats")) or 0)
+        drops += d
+        repeats += r
+        cause = f.get("cause", "") or "unknown"
+        c = per_cause.setdefault(cause, [0, 0, 0])
+        c[0] += 1
+        c[1] += d
+        c[2] += r
+        if f.get("relock") == "no":
+            relock_fail += 1
+        if f.get("vectors") == "invalid":
+            unsettled += 1
+    ms.sort()
+    frames.sort()
+    p95 = _pct(ms, 95)
+    bad = []
+    if p95 is not None and p95 > th["settle_p95_ms_max"]:
+        bad.append("p95 settle %.1f ms > %g" % (p95, th["settle_p95_ms_max"]))
+    if unsettled > th["settle_unsettled_max"]:
+        bad.append("%d event(s) never regained valid vectors (limit %g)" % (unsettled, th["settle_unsettled_max"]))
+    if relock_fail > th["settle_relock_fail_max"]:
+        bad.append("%d pulldown relock failure(s) (limit %g)" % (relock_fail, th["settle_relock_fail_max"]))
+    causes = ", ".join("%s: n=%d drops=%d repeats=%d" % (k, v[0], v[1], v[2])
+                       for k, v in sorted(per_cause.items()))
+    detail = ("%d settled event(s); settle_ms median %.1f p95 %.1f max %.1f; settle_frames median %.0f max %.0f; "
+              "drops %d repeats %d; relock failures %d; unsettled %d; resync full injected %d real %d; per cause: %s"
+              % (len(settles), _pct(ms, 50) or 0.0, p95 or 0.0, ms[-1] if ms else 0.0,
+                 _pct(frames, 50) or 0.0, frames[-1] if frames else 0.0,
+                 drops, repeats, relock_fail, unsettled, n_inj, n_real, causes or "none"))
+    if bad:
+        return _result("resync_settle", FAIL, "; ".join(bad) + ". " + detail)
+    return _result("resync_settle", PASS, detail)
+
+
 def check_fallback(files):
     if not files:
         return _result("fallback_notice", NODATA, "no collected vp.log")
@@ -448,6 +527,7 @@ def run(out, th_path=None, warmup_min=None):
         check_gpu(files),
         check_drops(files, duration_s, warmup_s, th),
         check_resync(files),
+        check_settle(files, th),
         check_fallback(files),
     ]
     creep, stats = check_creep(files, duration_s, th)

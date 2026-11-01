@@ -25,7 +25,9 @@
 //
 // Kinds (closed list) and their fields ([] = optional):
 //   session        build_id [commit]
-//   resync         level cause seq [gap] [detail] mode
+//   resync         level cause seq [gap] [detail] mode [injected] [readers]
+//                  injected = 0|1 (a fault-injection event); readers = comma-joined reader names (the
+//                  value contains ',' so it is quoted: readers="render-ahead,timeline")
 //   fallback       state=engaged|released id [reason]
 //   gate           from to reason
 //   gpu_error      api code [what]
@@ -35,16 +37,20 @@
 //   frame_stats    window_s n p50_ms p99_ms max_ms
 //   flag           source tag
 //   stamp          dir index
+//   resync_settle  seq settle_ms settle_frames drops repeats relock=yes|no|na relock_frames
+//                  vectors=valid|invalid [cause]
+//                  (one line per tracked FULL resync once it settled or was abandoned; additive kind)
 //
 // Header-only, pure C++14, no Windows headers, locale-independent and deterministic. The process-
 // wide sink is null by default: Emit() then costs one atomic load and changes no behaviour.
 namespace VpEvent {
 
 enum class Kind : uint8_t {
-    session, resync, fallback, gate, gpu_error, source_change, cadence, repeat, frame_stats, stamp, flag
+    session, resync, fallback, gate, gpu_error, source_change, cadence, repeat, frame_stats, stamp, flag,
+    resync_settle
 };
 
-constexpr size_t kKindCount = 11;
+constexpr size_t kKindCount = 12;
 constexpr size_t kMaxLineChars = 1000;
 
 inline const char* KindToken(Kind k)
@@ -61,6 +67,7 @@ inline const char* KindToken(Kind k)
     case Kind::frame_stats: return "frame_stats";
     case Kind::stamp: return "stamp";
     case Kind::flag: return "flag";
+    case Kind::resync_settle: return "resync_settle";
     }
     return "flag";
 }

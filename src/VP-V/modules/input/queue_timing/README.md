@@ -19,6 +19,7 @@ Checked against the code at M2 step 18a (2026-10-25). Two forms exist on this br
 - `DelayBudget` helpers (src/VP-V/core/DelayBudgetLadder.h): `Model`, `InputsFor` (the capture transfer is one signal frame), `StandardRates`, `BudgetForFrames` (the 4/3/2 ladder totals), `LevelName`, `TotalMs`. Used by the VP-V Config delay card (src/VP-V/config/VpvSection.cpp), the delay gate and the combination runner.
 - `QueueLatency` (QueueLatency.h): the frame-count form of `target_latency_ms`. `ResolveTargetFrames` (precedence: own latency, own frames, inherited latency, inherited frames), `FramesForLatency` (ceil, capped by `MaxFramesForLatency`), `ClampToCapacity`. Called by the GUI (VideoProcessorDlg.cpp) and the Qt Config preview.
 - `QueueLookahead` (QueueLookahead.h): `ResolveActivePictureLookahead` (explicit value wins; else min(target - 1, queue_size - 1, 8); low-latency path 0), `LockedFilmLookaheadFloor`, `ExplicitZeroLookahead` and its Config notice.
+- `PulldownResync.h` (Q0-A, inert until the renderer call site uses it): `PulldownSignalHz` (windowed rate in `on`), `PulldownResyncPolicy::Decide` (FULL LiveQueueReset absorb, other FULL reset, timing rederive Hz + reset on cadence-class change, on->off edge reset via `ModeEdgeLatch`). Tests: `tests/PulldownResyncTests.cpp` (to be registered by the integrator).
 - `Pulldown` (PulldownDetector.h): `Detector` (finds and locks a repeat cycle, `Decision` per frame, `Settings` switches D3/D4/H1/M1/L3), `FilmClock` (even film time with re-base, robust anchor and late-arrival guard), `FilmToSignalRatio`, `LockedQueueTarget`, `kLockedQueuePairFrames` 3.
 - `VpQueueRules` (VpQueueRules.h): the VP rules listed above, plus VP's own copies of the 83b7ffea stall/stale thresholds.
 - `VpQueueTiming::VpFixedBudgetPolicy` (VpFixedBudgetPolicy.h): implements the four decision points of `IQueueTimingPolicy` (src/VideoProcessor-Lib/vprenderer/QueueTimingPolicy.h): `PlanHold`, `QueueTarget`, `TicksUntilDue`, `EvaluateBacklog`. Its `Options` (Original pathway, `queue_timing_fixes`) are atomics. It also has `Select` / `SelectionName` for the future `queue_policy` switch. `QueueTimingPolicy::BillQueuePolicy` in the same upstream header is upstream's behaviour: a frame-count queue, no hold, a five-argument `ShouldRecoverBacklog`, flush to target.
@@ -150,6 +151,7 @@ Code location: **partly migrated**. The authoritative list is `live_files` in [M
 - `src/VideoProcessor-Lib/TimingClock.cpp`
 - `src/VideoProcessor-Lib/UnifiedProfileRuntime.cpp`
 - `src/VP-V/modules/input/queue_timing/PulldownDetector.h`
+- `src/VP-V/modules/input/queue_timing/PulldownResync.h`
 - `src/VideoProcessor-Lib/vprenderer/AlphaQueuePolicy.h`
 - `src/VideoProcessor-GUI/VideoProcessorDlg.cpp`
 - `src/VP-V/modules/input/queue_timing/VpQueueRules.h`

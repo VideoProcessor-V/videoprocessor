@@ -48,7 +48,10 @@
     "src/VP-V/modules/motion/estimation/global_model/CameraProducts.h",
     "src/VP-V/modules/motion/estimation/global_model/CameraReaders.h",
     "src/VP-V/modules/motion/estimation/global_model/CameraStoreAdapter.h",
-    "src/VP-V/modules/motion/estimation/tests/CameraProductsTests.cpp"
+    "src/VP-V/modules/motion/estimation/tests/CameraProductsTests.cpp",
+    "src/VP-V/modules/motion/estimation/MotionResyncReaders.h",
+    "src/VP-V/modules/motion/estimation/tests/MotionValidityResyncTests.cpp",
+    "src/VP-V/core/FrameAnalysisValidity.h"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/MotionAhead.h",

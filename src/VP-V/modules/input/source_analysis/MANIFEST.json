@@ -27,7 +27,8 @@
     "src/VP-V/modules/input/source_analysis/regions/README.md",
     "src/VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h",
     "src/VP-V/modules/input/source_analysis/lane/LaneGpuJobs.h",
-    "src/VP-V/modules/input/source_analysis/lane/LaneReadback.h"
+    "src/VP-V/modules/input/source_analysis/lane/LaneReadback.h",
+    "src/VideoProcessor-Test/SourceResolutionFrameBoundTests.cpp"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/vprenderer/SourceResolutionMonitor.h"

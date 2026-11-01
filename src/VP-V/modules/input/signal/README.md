@@ -92,9 +92,20 @@ Checked against the code 2026-10-25 (WP-14 / M2 step 14, `feat/m2-dv`).
   (`Detector::OnEnqueue`), the lock-free arm box, the refusal note and the storm window.
 - `ResyncShadow.h` - resync shadow mode (R1): feeds the detector, writes the central Indicator, and summarises
   it as the Ctrl+I "Resync:" line and the Ctrl+Alt+D `resync` / `resync_events` lines; Off costs one atomic load.
+  Q0-A part 1 additions (no sink / Off / Shadow = unchanged behaviour): the B2 enqueue cursor (`NoteEnqueued`,
+  `PulldownCursorSeq`, `ResetCursor`; reset on restart); the G8/D4 storm hold (`StormHold`, `StormSafeSettings`,
+  `StormNotice`: engages on more than 3 counted FULL in 10 s, held until 10 s with no FULL, true ONLY in On; Shadow keeps
+  the "would hold" status text; notice text from `FallbackCatalog::ResyncStorm`, id `resync_storm`); and the unthrottled
+  `SetEventSink` that emits one `VPEV1 t=<ms> kind=resync level=full|minor|timing cause=<token> seq gap mode readers=pending`
+  line per recorded event (readers act at the seal, so `pending`; no sink = no string built). Tests:
+  `tests/ResyncShadowQ0Tests.cpp` (to be registered by the integrator).
 - `ResyncDrive.h` - resync_event `on` (R3): the readers the Indicator drives (render-ahead, timeline, sigma-delta carry,
   scene detector, source-resolution monitor, Dynamic Drive, libplacebo flush, re-base P0) with their per-counter
   policies, sealed and observed at the render loop's dequeue; the capture-thread Cursor for the pulldown detector.
+- `SettingsStamp.h` (Q0-A part 2) - per-domain (motion, rebase, analysis, output) FNV-1a settings hashes; `Configure` records on the first call and Advances only changed domains (`SettingsApply`); `AdvanceGraph` (`GraphRebuild`). `ResyncInject.h` - test-only fault injection (`resync.inject`), armed only by env `VP_RESYNC_INJECT=1`, inert otherwise. Tests: `tests/ResyncQ0Tests.cpp` (to be registered by the integrator). Inert until a call site uses them.
+- `ResyncInject.h` (item 14) also takes `dv_switch tunnel|lldv|hdr10|sdr`, `rpu_loss n`, `rpu_return`, `tunnel_handoff`, `signal_loss ms`, `signal_return`, `minor [n]`, `full`, `overflow n` (adapter accessors `TakeDvSwitch`, `RpuLossFramesToDrop`, `RpuReturnPending`, `TakeTunnelHandoff`, `TakeSignalLossMs`, `SignalReturnPending`, `TakeOverflowFrames`), and a deterministic SCHEDULE: `LoadSchedule(text, error)` (`seed N`, `at <sec>s|#<n>|seq <n> <kind> [arg]`, same parser/caps as Invoke, non-decreasing per clock, <= 100000 entries), `Release(sourceSeconds, seq)` (due entries into the pending queue in file order, `injected = true` and the line number; a full queue counts `ScheduleBlocked`), `ScheduleRemaining`, `ScheduleSeed`. Generator: `tools/soak/resync_schedule.py`. Tests: `tests/ResyncInjectScheduleTests.cpp` (to be registered by the integrator). Inert unarmed.
+- `ResyncEventMetrics.h` (item 15) - `VpResync::EventMetrics`: tracks each FULL resync until it settles (due readers acted, vectors valid again, pulldown relocked) and emits ONE `resync_settle` vp-event line (settle_ms in source ms, settle_frames, drops, repeats, relock, vectors); abandon after 10 s of measured frames (counted `Unsettled`); bounded ring of 64 pending (overflow counted); `StatusText()` for Ctrl+Alt+D. Fed by Shadow's record path (`OnEvent`), the FrameSeal fan-out (`OnSealed`), reader acks, and the renderer's drop/repeat/vectors/relock. Tests: `tests/ResyncEventMetricsTests.cpp` (to be registered). Inert until a call site feeds it.
+- `DvResyncReader.h` / `DvFallbacks.h` (item 16) - the `dv-metadata` reader of the central Indicator (F -> Relatch, M -> Hold, settings[output] -> Relatch; latches on registration, acts once per carrying frame) with generic hooks, plus `MetadataHolder`, an adapter around the real `DvMetadataHold::Tracker` (relatch drops held metadata + tunnel detection, keeps the HDR inference epoch; RPU loss holds then engages the visible `dv_metadata_lost` fallback built by `DvMetadataLost(lost, frames)`). Tests: `tests/DvResyncReaderTests.cpp` (to be registered). Inert until a call site registers it.
 - `ResyncCallSites.h` - the renderer's call-site glue (reader generation key, carry validity, mode from the setting).
 - `DolbyVisionTunnelGate.h`, `DolbyVisionTunnelHandoff.h` - which captured signals the DV tunnel
   formatter may claim (`dv_tunnel_handoff`), and the hand-off of an RGB LLDV signal to the tunnel.
@@ -230,3 +241,9 @@ Code moves into this folder only when this slot is touched (opportunistic until 
 - Combinations: pairwise / high-risk / random lines in `tests/vpv/` that set this slot's unit (`tools/run_combinations.ps1`); matrix: `docs/design/slot-test-matrix.md`.
 
 <!-- vpv-settings-tests:end -->
+
+### Audit-1 additions (resync Q0)
+- `Shadow`: the enqueue cursor is reset by `Configure` when it builds a new Indicator. The storm hold is a decision in `on`; by default it runs on the caller's steady clock, `SetStormSourceTime(true)` + `OnEnqueue/OnLateSlip(..., sourceSeconds)` + `AdvanceStormClock` move it to source time for reproducible runs (events without source time are counted and shown). No `shared_ptr` atomic on the no-sink path of `EmitEventLine`.
+- `Indicator::AnyCauseOtherThanIn` backs the pulldown rule: absorb only when EVERY FULL in the interval was a LiveQueueReset (an interval older than the ring resets).
+- Tests: `ResyncAuditTests.cpp` (Indicator query, pulldown mixed interval, cursor reset, storm on source time, motion readers re-arming on a new era), plus the lane/FrameSeal/stress classes in `src/VP-V/tests/AnalysisLaneTests.cpp` (`AnalysisLaneAuditTests`, `ResyncStressTests`).
+- `VP_RESYNC_SCHEDULE=<path>` (read only when `VP_RESYNC_INJECT=1`): the loop test tier hands the stress schedule (`tools/soak/resync_schedule.py` output) to `ResyncInject`, which loads it at construction (`LoadScheduleFile`); a missing or invalid file is shown in `StatusText` ("NOT loaded"), never silent. Unarmed: the variable is not read.

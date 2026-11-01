@@ -19,7 +19,8 @@
     "src/VP-V/modules/drive/led_compensation/DynamicDriveHost.cpp",
     "src/VP-V/modules/drive/led_compensation/DynamicDriveHost.h",
     "src/VP-V/modules/drive/led_compensation/DynamicDriveFrame.cpp",
-    "src/VP-V/modules/drive/led_compensation/DynamicDriveFrame.h"
+    "src/VP-V/modules/drive/led_compensation/DynamicDriveFrame.h",
+    "src/VP-V/modules/drive/led_compensation/LedResyncPolicy.h"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/led/LedDriveConfig.h"
