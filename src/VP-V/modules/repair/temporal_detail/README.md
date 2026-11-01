@@ -133,21 +133,23 @@ host fills, later from `core/Indicator` (doc 25 §A2). Policies: `full`, `contin
 invalid) and `rebase[H|V]` reset; `settings[repair]` resets only for
 mode/max_age changes (strength/boost change the target); `timing` is ignored. Cuts and fades reset the store.
 
-## Declared products (TemporalDetailProducts.h)
+## Declared products (core/Products.h)
 
-Descriptors mirror doc 25 §B1 (map 1:1 onto `core/Products.h`).
+The module's former private descriptors (TemporalDetailProducts.h) were retired: its products are registered in
+`core/Products.h` (`AppendTemporalDetailProducts`; ids `kTdAnalysis`, `kTdRefstore`, `kTdAdmission`) and listed in
+`docs/design/product-graph.md`. `td.out` (the output luma plane) is a render-scope temporary, not a product.
 
 | Product | Inputs | Backend | History | Size at 4K |
 |---|---|---|---|---|
-| `td.analysis` (S/G split, block maps, rebounds, softening run) | re-based luma, P4 cut/fade, bitrate quality (optional) | GpuCompute | 1 | ~1 MB |
-| `td.refstore` (K past slots in one atlas, per-block state) | analysis, P3/P2 motion, camera model (optional), queue frames (+d) | GpuCompute | K | 83 MB per slot at 4K (RGBA16F raw + cleaned bands, R16 base) |
+| `td.analysis` (block maps, rebounds, softening run) | P10 grain split, P11 block stats, P13 source ring | GpuCompute (T1) | 1 | ~1.5 MB |
+| `td.refstore` (K past slots, per-block state) | td.analysis, P10, P3, P13 | GpuCompute (T1) | K = 5 | declared 4.5 B/px per slot (target); the code allocates 10 B/px = 83 MB per slot today (SA6) |
+| `td.admission` (cleaner / templates on admission frames) | td.analysis, P10, P13 | GpuCompute (T2 gap) | 0 | arena (SA1) |
 
 Cleaner cost (estimate, RTX 3090 at 4K, not dispatched): only on admission frames (a refresh, e.g. 2 of 8 frames in IBBBPBBB):
 ~0.52 M half-step 8 x 8 patches x (2 + M <= 4 forward, 2 inverse) separable DCTs ~ 4 GMAC plus one sample of each aligned
 slot per pixel (the template's own sampling), ~0.5-1 ms per admission frame, ~0.2 ms averaged; nothing on other frames.
 Memory +33 MB per slot (+166 MB for K = 5); folding the gates onto the cleaned bands (raw energy = cleaned + a per-block
 removed-energy grid) would drop the raw bands and make it ~0.
-| `td.out` (luma) | analysis, refstore | RenderOnly | 0 | plane |
 
 ## Settings (declared, not wired)
 

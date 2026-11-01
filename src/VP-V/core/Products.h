@@ -51,6 +51,26 @@ enum : ProductId {
     kCameraProductEnd
 };
 
+// SA0 (skeleton adoption, doc 51 section 3): the shared products after the camera products. Ids and order are FIXED
+// (SA2 defines P10/P10c with exactly these names; SkeletonProducts() is the one assembly point).
+//   P10  grain split          shared grain-free picture + grain layer of the source (GPU, gap)
+//   P10c chroma split         the Cb/Cr extension, read only by the chroma-from-luma grain guard
+//   P11  region block stats   per-block statistics (mean/var/gradient/tensor/Laplacian) + reserved E1/E2/E3 band energies
+//   P12  light level          the 16 KB perceptual LUT + per-block light level (WP2 reserved)
+//   P13  source ring          VIEWS of the unpacked planes of the queued frames (owned by queue/upload): 0 extra bytes
+//   td.refstore / td.analysis / td.admission   TemporalDetail's module-owned history product and its lane products
+enum : ProductId {
+    kP10GrainSplit = kCameraProductEnd,
+    kP10cGrainSplitChroma,
+    kP11RegionBlockStats,
+    kP12LightLevel,
+    kP13SourceRing,
+    kTdAnalysis,
+    kTdRefstore,
+    kTdAdmission,
+    kSkeletonProductEnd
+};
+
 // Frames of look-ahead P9 reads from P7 at film depth (the declared lead; the effective lead is
 // capped by the lane lead of the graph).
 constexpr uint8_t kMaxCameraLead = 2;
@@ -99,7 +119,7 @@ struct SizeTerm {
 struct SizeRule {
     uint32_t fixedBytes = 0;
     uint8_t termCount = 0;
-    std::array<SizeTerm, 2> terms{};
+    std::array<SizeTerm, 3> terms{};
 };
 
 inline uint64_t CellsAt(Dims d, uint8_t shift)
@@ -170,8 +190,23 @@ struct ProductDecl {
     // A declared form for a live fill with an input missing (e.g. no previous frame after a reset).
     // Without it such a fill is refused: the product is unavailable for that frame (visible).
     bool missingInputForm = false;
+    // The SizeRule PLANS for a declared geometry; the runtime path uses the real planes' bytes (P10c chroma).
+    bool planningSize = false;
     float refRenderMs = 0.0f;                 // estimated in-render cost on the reference card, 1080p
 };
+
+// The real tile geometry of the source-resolution monitor (SourceResolutionMonitor.h: kTile, kMaxTiles, ring[2]):
+// kMaxTiles tiles of kTile x kTile f32 samples per readback buffer, two buffers. Fixed, independent of the frame size.
+constexpr uint32_t kMonitorTileEdge = 256;
+constexpr uint32_t kMonitorMaxTiles = 16;
+constexpr uint32_t kMonitorRingBuffers = 2;
+constexpr uint32_t kMonitorBufferBytes = kMonitorMaxTiles * kMonitorTileEdge * kMonitorTileEdge * 4u;   // 4 194 304
+constexpr uint32_t kMonitorRingBytes = kMonitorBufferBytes * kMonitorRingBuffers;                        // 8 388 608 (8.4 MB)
+
+// The reference store's slot figure the plan targets (SA6) and what the code allocates today (TemporalDetailGpu:
+// RGBA16F raw + cleaned bands 8 B/px + R16 base 2 B/px = 10 B/px, 83 MB per 4K slot). The declaration uses the target.
+constexpr uint32_t kRefstoreTargetBytesPerPixelX2 = 9;      // 4.5 B/px (4 B/px at full size + 0.5 B/px half-size base)
+constexpr uint32_t kRefstoreTodayBytesPerPixel = 10;
 
 // Products declared outside FirstProducts by their owning module (dense ids appended at plan time) keep a registered
 // token here so every reader names the same node.
@@ -374,10 +409,13 @@ inline Registry FirstProducts()
     d.push_back(p0);
 
     // P1: half luma plus quarter luma, 16-bit.
+    // Format (doc 51 section 3): half luma R16 + quarter luma R16 + the engine-size 8-bit half-luma view the
+    // optical-flow producer takes (MotionAheadProducer HalfLuma8: 2.1 MB at 4K). 7.2 MB at 4K.
     ProductDecl p1 = Make(kP1HalfLuma, "p1_half_luma", "half luma", Backend::Cpu, 1, Tier::T0, fullOnly, 0);
     p1.sourceFrame = true;
     AddTerm(p1, 1, 2);
     AddTerm(p1, 2, 2);
+    AddTerm(p1, 1, 1);
     p1.refRenderMs = 0.6f;
     d.push_back(p1);
 
@@ -417,10 +455,12 @@ inline Registry FirstProducts()
     d.push_back(p3);
 
     // P4: source stats (cut/fade/flash, rect, histogram, grain); history = the stats window.
+    // Field list (doc 51 section 3), system RAM, 8-16 KB: 1024-bin histogram (4 KB), APL/p1/p50/p99, peak (picture
+    // only), LED 32x18 cells, HDR veto grid, cut/fade/flash event, Bill's active-picture rect, 8x8 grain summary.
     ProductDecl p4 = Make(kP4SourceStats, "p4_source_stats", "source stats", Backend::Cpu, 1, Tier::T0, content,
                           Bit(kSettingsAnalysis));
     AddInput(p4, kP1HalfLuma, 0);
-    p4.size.fixedBytes = 8192;
+    p4.size.fixedBytes = 16384;
     p4.residency = Residency::SystemRam;
     p4.missingInputForm = true;   // stats of a frame need no history to start
     p4.refRenderMs = 0.4f;
@@ -430,7 +470,10 @@ inline Registry FirstProducts()
     ProductDecl p5 = Make(kP5MonitorTiles, "p5_monitor_tiles", "monitor tiles", Backend::GpuCompute, 1, Tier::T1,
                           fullOnly, Bit(kSettingsAnalysis));
     p5.sourceFrame = true;
-    AddTerm(p5, 6, 32);
+    // The REAL tile geometry (doc 51: not 64x64 x 32 B): kMonitorMaxTiles tiles of kMonitorTileEdge^2 f32 per readback
+    // buffer, fixed. One slot = one buffer (4.2 MB); the monitor itself holds kMonitorRingBuffers of them (8.4 MB) and
+    // the graph's ring multiplies this per-buffer figure (an upper bound, not a free-standing 8.4 MB).
+    p5.size.fixedBytes = kMonitorBufferBytes;
     p5.refRenderMs = 0.5f;
     d.push_back(p5);
 
@@ -498,11 +541,151 @@ inline void AppendCameraProducts(std::vector<ProductDecl>& decls)
     decls.push_back(p9);
 }
 
-// The registry the skeleton runs with: the first products plus the camera products, in fixed id order.
-inline Registry SkeletonProducts()
+// P10/P10c (the SA2 declaration, adopted by SA0): the grain split of one plane-component and of the chroma planes.
+// `compact` is the SA2 either/or storage layout; `full` is today's (rgba32f split plane 16 B/px + rgba32f per block).
+// Today's full form is recorded as kGrainSplitFullBytesPerPixel for the VRAM story (doc 51: 32 B/px with the two
+// planes the GPU port stores; the ring of 4 + 3 live made 1.86 GB at 4K).
+constexpr uint32_t kGrainSplitFullBytesPerPixel = 32;
+inline void AppendGrainSplitProducts(std::vector<ProductDecl>& decls, bool compact = false)
+{
+    using detail::AddInput;
+    using detail::AddTerm;
+    using detail::Make;
+    using namespace VpIndicator;
+    const CounterMask content = Bit(kFull) | Bit(kContinuity);
+    ProductDecl p10 = Make(kP10GrainSplit, kTokenGrainSplit, "grain split (shared)", Backend::GpuCompute, 1,
+                           Tier::T0, content, Bit(kSettingsAnalysis));
+    p10.sourceFrame = true;
+    AddInput(p10, kP4SourceStats, 0);
+    AddInput(p10, kP13SourceRing, 0);   // reads the unpacked source planes through the ring views (re-base P0: SA2)
+    // Per plane-component. Full: split rgba32f (16 B/px) + blocks rgba32f (16 B per block). Compact: split rg16f +
+    // rg16 (8 B/px) + blocks rgba32f (N, e3, e1, e2: 16 B per block). Blocks are declared at the 16 px block edge (shift
+    // 4): an upper bound at 8K, where the edge doubles.
+    AddTerm(p10, 0, compact ? 8 : 16);
+    AddTerm(p10, 4, 16);
+    p10.refRenderMs = 1.2f;
+    decls.push_back(p10);
+
+    ProductDecl c = Make(kP10cGrainSplitChroma, "grain.split.chroma", "grain split (chroma planes)", Backend::GpuCompute,
+                         1, Tier::T1, content, Bit(kSettingsAnalysis));
+    c.sourceFrame = true;
+    AddInput(c, kP4SourceStats, 0);
+    AddInput(c, kP13SourceRing, 0);
+    AddTerm(c, 1, compact ? 16 : 32);   // Cb + Cr planes at half size: 2 x (8 | 16) B/px
+    AddTerm(c, 5, 32);                  // block grids at 16 px of those planes: 2 x 16 B per block (both layouts)
+    c.refRenderMs = 0.6f;
+    c.planningSize = true;
+    decls.push_back(c);
+}
+
+// P11 (region block statistics) and P12 (light level), with the reserved E1/E2/E3 band energies and WP2 per-block terms.
+inline void AppendRegionProducts(std::vector<ProductDecl>& decls)
+{
+    using detail::AddInput;
+    using detail::AddTerm;
+    using detail::Make;
+    using namespace VpIndicator;
+    const CounterMask content = Bit(kFull) | Bit(kContinuity);
+
+    // 6 x rgba32f per block (5 stats + aux) = 96 B at the 16 px block edge (an upper bound for the larger blocks of
+    // 4K/8K: 0.8 MB at 4K with B = 32). E1/E2/E3 (band energies per block, SA5) are RESERVED in the same product:
+    // adding them bumps the unit version, not the id.
+    ProductDecl p11 = Make(kP11RegionBlockStats, "region_block_stats", "region block statistics", Backend::GpuCompute, 1,
+                           Tier::T0, content, Bit(kSettingsAnalysis) | Bit(kSettingsMotion) | Bit(kSettingsOutput));
+    p11.sourceFrame = true;
+    AddInput(p11, kP10GrainSplit, 0);
+    AddInput(p11, kP4SourceStats, 0);
+    AddInput(p11, kP13SourceRing, 0);
+    AddTerm(p11, 4, 96);
+    p11.missingInputForm = true;
+    p11.refRenderMs = 0.35f;
+    decls.push_back(p11);
+
+    // P12: the perceptual light-level LUT (16 KB) + a per-block value (rgba16f: J_surround/J_local/V/conf, WP2 reserved).
+    ProductDecl p12 = Make(kP12LightLevel, "p12_light_level", "light level", Backend::GpuCompute, 1, Tier::T1,
+                           content, Bit(kSettingsAnalysis) | Bit(kSettingsOutput));
+    AddInput(p12, kP11RegionBlockStats, 0);
+    p12.size.fixedBytes = 16384;
+    AddTerm(p12, 4, 8);
+    p12.refRenderMs = 0.02f;
+    decls.push_back(p12);
+}
+
+// P13: the source ring. Views of the unpacked planes of the queued frames (owned by the queue / early upload): no copy,
+// no bytes of its own. RenderOnly so the graph gives it no lane. Reference frames known ahead (the queue) are read
+// through it; a LEAD on P13 is added with the K1 seal rule (a lead input is rejected by SlotTable until then).
+inline void AppendSourceRingProduct(std::vector<ProductDecl>& decls)
+{
+    using detail::Make;
+    using namespace VpIndicator;
+    ProductDecl p13 = Make(kP13SourceRing, "p13_source_ring", "source ring (views)", Backend::RenderOnly, 0, Tier::T0,
+                           Bit(kFull) | Bit(kContinuity), 0);
+    p13.sourceFrame = true;
+    p13.size.fixedBytes = 0;
+    decls.push_back(p13);
+}
+
+// TemporalDetail's products (the module's former private descriptors, now registered): td.refstore is a module-owned
+// HISTORY product (history = the slots, kRefSlots), td.analysis a lane product, td.admission a T2 gap product.
+constexpr uint8_t kRefSlots = 5;   // TemporalDetail::kSlots
+inline void AppendTemporalDetailProducts(std::vector<ProductDecl>& decls)
+{
+    using detail::AddInput;
+    using detail::AddTerm;
+    using detail::Make;
+    using namespace VpIndicator;
+    const CounterMask content = Bit(kFull) | Bit(kContinuity);
+
+    // td.analysis: E1/E2/F/q block maps (12 floats per 16 px block = 48 B), rebound counters, softening run. Reads the
+    // shared split, block stats and the source ring at lag 0. The reference frames "known one frame ahead" are a LEAD
+    // on P13 in the plan; until the K1 seal rule exists a lead edge fails closed, so the lag form is declared.
+    ProductDecl an = Make(kTdAnalysis, "td.analysis", "temporal detail analysis", Backend::GpuCompute, 1, Tier::T1,
+                          content | Bit(kRebaseH) | Bit(kRebaseV), Bit(kSettingsRebase) | Bit(kSettingsAnalysis));
+    AddInput(an, kP10GrainSplit, 0);
+    AddInput(an, kP11RegionBlockStats, 0);
+    AddInput(an, kP13SourceRing, 0);
+    AddTerm(an, 4, 48);
+    an.rebasedPlane = true;
+    an.refRenderMs = 1.5f;
+    decls.push_back(an);
+
+    // td.refstore: history = the slots. Target <= 4.5 B/px per slot (4 B/px + 0.5 B/px half-size base); the code
+    // allocates kRefstoreTodayBytesPerPixel (10 B/px, 83 MB/slot at 4K) until SA6 compacts it.
+    ProductDecl rs = Make(kTdRefstore, "td.refstore", "temporal detail reference store", Backend::GpuCompute, kRefSlots,
+                          Tier::T1, content | Bit(kRebaseH) | Bit(kRebaseV), Bit(kSettingsRebase) | Bit(kSettingsAnalysis));
+    AddInput(rs, kTdAnalysis, 0);
+    AddInput(rs, kP10GrainSplit, 0);
+    AddInput(rs, kP3AnalysisField, 0);
+    AddInput(rs, kP13SourceRing, 0);
+    AddTerm(rs, 0, 4);
+    AddTerm(rs, 1, 2);
+    rs.rebasedPlane = true;
+    rs.refRenderMs = 1.0f;
+    decls.push_back(rs);
+
+    // td.admission: the cleaner / template work on admission frames, a T2 gap product. Its residency is the
+    // transient arena (SA1); declared Vram until Residency::Transient exists. Per 16 px block templates: an estimate.
+    ProductDecl ad = Make(kTdAdmission, "td.admission", "temporal detail admission", Backend::GpuCompute, 0, Tier::T2,
+                          content | Bit(kRebaseH) | Bit(kRebaseV), Bit(kSettingsRebase) | Bit(kSettingsAnalysis));
+    AddInput(ad, kTdAnalysis, 0);
+    AddInput(ad, kP10GrainSplit, 0);
+    AddInput(ad, kP13SourceRing, 0);
+    AddTerm(ad, 4, 64);
+    ad.rebasedPlane = true;
+    ad.refRenderMs = 3.0f;
+    decls.push_back(ad);
+}
+
+// The registry the skeleton runs with: the first products, the camera products, then P10..P13 and the TemporalDetail
+// products, in fixed id order. THE one assembly point.
+inline Registry SkeletonProducts(bool compactGrain = false)
 {
     std::vector<ProductDecl> d = FirstProducts().All();
     AppendCameraProducts(d);
+    AppendGrainSplitProducts(d, compactGrain);
+    AppendRegionProducts(d);
+    AppendSourceRingProduct(d);
+    AppendTemporalDetailProducts(d);
     return Registry(std::move(d));
 }
 
@@ -512,7 +695,7 @@ struct ConsumeRef {
     uint8_t lag = 0;
 };
 
-constexpr size_t kMaxConsumes = 4;
+constexpr size_t kMaxConsumes = 6;
 
 struct ConsumerDecl {
     uint16_t id = 0;

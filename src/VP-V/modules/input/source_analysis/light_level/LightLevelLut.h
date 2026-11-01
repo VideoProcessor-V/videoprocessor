@@ -41,6 +41,8 @@
 
 namespace LightLevel
 {
+	constexpr unsigned kUnitVersion = 1;   // P12 light level unit version (core/ProductCatalog.h)
+
 	struct Context
 	{
 		enum Kind { Sdr, HdrPassthrough, HdrToSdr } kind = Sdr;

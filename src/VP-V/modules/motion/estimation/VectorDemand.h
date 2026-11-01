@@ -20,6 +20,7 @@
 namespace VectorDemand
 {
 	constexpr bool kAnalysisUnderSmoothMotion = true;
+	constexpr unsigned kUnitVersion = 1;   // P2/P3 (vector pair, analysis field) unit version (core/ProductCatalog.h)
 
 	enum class Consumer : int
 	{

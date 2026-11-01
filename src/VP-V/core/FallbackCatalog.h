@@ -475,4 +475,56 @@ namespace FallbackCatalog
 			"active-picture walk uses Bill's original walk (lane source stats unavailable)") :
 			Released("source_stats_walk");
 	}
+
+	// ---- product graph (core/ProductCatalog.h) ----------------------------------------------------
+	// Every consumer of a shared product states what it does when the product is missing, stale, shed or its unit
+	// version differs from the one the reader expects. These are the ids the catalog rows name; the GUI's one-time
+	// notice keys on them like any other entry. `text` says what runs instead.
+	struct ProductEntry
+	{
+		const char* id;
+		const char* text;
+	};
+	inline const ProductEntry* ProductEntries(size_t* count)
+	{
+		static const ProductEntry kEntries[] = {
+			{ "product.unit_version", "a shared product was made by another unit version: the reader runs its own reduced form" },
+			{ "product.detail_pulse", "detail pulse measures its own bands and tiles (shared split / block statistics unavailable)" },
+			{ "product.texture_restore", "texture restore measures its own bands and noise (shared split / block statistics unavailable)" },
+			{ "product.debander", "debander uses its own half split and tensor (shared split / block statistics unavailable)" },
+			{ "product.adaptive_downscale", "adaptive downscale computes its own edge, grain and cut terms (shared products unavailable)" },
+			{ "product.sigma_delta", "output dither runs its own vector search (shared analysis field unavailable)" },
+			{ "product.led_lookahead", "LED look-ahead measures the queued frames itself (shared source statistics unavailable)" },
+			{ "product.hdr_inference", "HDR inference reads its own grid (shared source statistics unavailable)" },
+			{ "product.source_resolution", "source-resolution monitor judges its own cuts (shared source statistics unavailable)" },
+			{ "product.source_id", "source identification reads the monitor snapshot only (shared tiles unavailable)" },
+			{ "product.interpolator", "interpolator builds its own grain bands and uses the render-time field (shared products unavailable)" },
+			{ "product.temporal_detail", "temporal detail runs a lower memory tier or its own split (shared split / store unavailable)" },
+			{ "product.chroma_cfl", "chroma upscale runs a lower tier without the grain guard (chroma split unavailable)" },
+			{ "product.entrance", "entrance stages run in the render with no work done ahead (entrance output unavailable)" },
+			{ "product.motion_warp", "motion warp builds its own half-resolution pyramids (shared half luma unavailable)" },
+			{ "product.nvof_producer", "optical-flow producer builds its own 8-bit half luma (shared half luma unavailable)" },
+			{ "product.region_evidence", "regional repairs use their own local statistics (shared split / light level unavailable)" },
+			{ "product.light_level", "light-level users use the global level only (per-block light level unavailable)" },
+			{ "product.vector_demand", "vector consumer runs without vectors (the vector engine product is unavailable)" },
+			{ "product.camera", "camera consumer runs causal / without the camera model (camera products unavailable or short queue)" },
+		};
+		if (count)
+			*count = sizeof(kEntries) / sizeof(kEntries[0]);
+		return kEntries;
+	}
+	inline const ProductEntry* FindProductEntry(const char* id)
+	{
+		size_t n = 0;
+		const ProductEntry* e = ProductEntries(&n);
+		for (size_t i = 0; i < n; ++i)
+			if (std::string(e[i].id) == id)
+				return &e[i];
+		return nullptr;
+	}
+	inline Decision ProductFallback(const char* id, const std::string& why)
+	{
+		const ProductEntry* e = FindProductEntry(id);
+		return Engaged(id, (e ? std::string(e->text) : std::string("reduced form")) + ": " + why);
+	}
 }

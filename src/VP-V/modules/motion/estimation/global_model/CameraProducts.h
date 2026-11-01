@@ -19,6 +19,10 @@
 
 namespace CameraLink
 {
+	// The unit version of the camera products P7-P9 (fit, labels, smoothing): bump on ANY change of their law or layout.
+	// core/ProductCatalog.h holds the expected number; a test compares.
+	constexpr uint32_t kCameraUnitVersion = 1;
+
 	enum class CameraConsumer : int
 	{
 		Diagnostics, GrainMap, ResidualStabilise, TemporalDetail, DetailPulse, TextureRestore,

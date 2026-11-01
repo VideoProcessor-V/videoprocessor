@@ -31,6 +31,7 @@ namespace TemporalDetail
 	constexpr double kWienerKappa = 2.0;        // f = clamp(1 - kappa N / e3x3, 0, 1)
 	constexpr double kEnergyFloor = 1e-3;       // codes^2, added to q and to divisions
 	constexpr int kSlots = 5;                   // K past slots (one more, the future slot, in queued modes)
+	constexpr uint32_t kUnitVersion = 1;        // the td.* products' unit version (core/ProductCatalog.h)
 	constexpr int kMaxFutureFrames = 8;         // future frames the model looks at
 
 	// Guard (README step 3)

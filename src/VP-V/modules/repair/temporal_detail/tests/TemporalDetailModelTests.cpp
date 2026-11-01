@@ -10,7 +10,7 @@
 #include <VP-V/modules/repair/temporal_detail/TemporalDetail.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetailModel.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetailMotion.h>
-#include <VP-V/modules/repair/temporal_detail/TemporalDetailProducts.h>
+#include <VP-V/core/Products.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetailShaders.h>
 
 #include <algorithm>
@@ -1458,7 +1458,13 @@ namespace VideoProcessorTest
 			}
 			// Declared tables are consistent (compile-time data the host will map onto core/Products.h).
 			Assert::IsTrue(PolicyOf(Counter::Full) == ReaderPolicy::Reset && PolicyOf(Counter::Timing) == ReaderPolicy::Ignore, L"reader policies");
-			Assert::AreEqual(3, static_cast<int>(sizeof(kProducts) / sizeof(kProducts[0])), L"three products");
+			{   // TemporalDetail's products are registered in core/Products.h (its private descriptors were retired).
+				const VpSkeleton::Registry reg = VpSkeleton::SkeletonProducts();
+				Assert::IsTrue(reg.Has(VpSkeleton::kTdRefstore) && reg.Has(VpSkeleton::kTdAnalysis) && reg.Has(VpSkeleton::kTdAdmission), L"td products");
+				Assert::AreEqual(std::string("td.refstore"), std::string(reg.Get(VpSkeleton::kTdRefstore).token));
+				Assert::AreEqual(static_cast<int>(kSlots), static_cast<int>(reg.Get(VpSkeleton::kTdRefstore).history), L"history = slots");
+				Assert::AreEqual(static_cast<int>(kSlots), static_cast<int>(VpSkeleton::kRefSlots), L"core slot count matches");
+			}
 			Assert::IsTrue(Shaders::kMeasBody != nullptr && Shaders::kCleanBody != nullptr && Shaders::kWeightBody != nullptr && Shaders::kTransferBody != nullptr, L"shaders declared");
 		}
 
