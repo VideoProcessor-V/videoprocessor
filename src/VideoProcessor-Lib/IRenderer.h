@@ -819,4 +819,10 @@ public:
 		return false;
 	}
 
+	// VPV-HOOK
+	// Host-side extension lookup: an opaque interface pointer for `iid`, or nullptr (the default).
+	// Not part of the plugin ABI; a renderer that offers extensions overrides it.
+	virtual void* QueryExtension(const char* iid) { (void)iid; return nullptr; }
+	// VPV-HOOK-END
+
 };

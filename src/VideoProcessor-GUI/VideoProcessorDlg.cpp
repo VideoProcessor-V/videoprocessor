@@ -50,6 +50,7 @@ static UINT vpUpdateExitMessage = RegisterWindowMessageW(L"VideoProcessor.Update
 #include <AmbientConfig.h>
 #include <IntentInterpreterSupport.h>
 #include <VP-V/gui/VpStatusAdapter.h>   // VP-V: VP's Ctrl+I/crash-state/report lines and shortcuts (WP-11)
+#include "DialogExtension.h"   // VPV-HOOK
 #include <QueueLookahead.h>
 #include <led/LedDriveConfig.h>
 #include <VP-V/modules/drive/projector_control/SerialPort.h>
@@ -18136,6 +18137,7 @@ void CVideoProcessorDlg::OnTimer(UINT_PTR nIDEvent)
 
 
 		++m_timerSeconds;
+		DialogExtension::OnTimer();   // VPV-HOOK
 	}
 
 	CDialog::OnTimer(nIDEvent);
