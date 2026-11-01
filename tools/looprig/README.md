@@ -39,7 +39,7 @@ Assumptions to confirm when the emitter is final: the injected-kind to ResyncCau
 
 1. Generate: `python -I tools/looprig/stress_schedule.py --out D:\codex\looprig\sched --seed 1 --duration 3600 --inputs sdr,dv_tunnel`
 2. Play a stamped clip (`tools/framestamp/make_stamped_clip.py`, writes `sent.csv`) into capture, run VP with
-   `VP_RESYNC_INJECT=1` and `VP_FRAME_STAMP` as the stamp docs say, load `schedule.txt`.
+   `VP_RESYNC_INJECT=1` and `VP_DEBUG_OUTPUT_STAMP=1`, load `schedule.txt`.
 3. Record VP's output with the Mini Recorder (10-bit v210 / Y4M C422p10, standard mode).
 4. `python -I tools/looprig/analyze.py --scenario resync_random --recording rec.y4m --sent sent.csv
    --log vp.log --expected sched\random_sdr\expected.json --out report`
