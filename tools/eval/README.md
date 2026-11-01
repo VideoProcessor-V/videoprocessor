@@ -36,6 +36,23 @@ Files: `eval_io.py` (Frame, readers, resamplers) - `eval_material.py` (discovery
 metrics) - `eval_candidates.py` (contract + built-ins) - `eval_protocols.py` - `eval_synth.py` -
 `eval_report.py` - `eval_harness.py` (CLI) - `cost_ratios.json` - `alignment_g18.json` -
 `material_catalog.json` - `suites/` - `sample/`.
+Round 2 (Python reference, scratch pixels outside the worktree): `artefact_headroom.py` (banding / dark
+blocking / texture headroom per codec x rate in SDR, HDR-PQ and HDR->SDR) - `tonemap_ref.py` (libplacebo
+spline reproduction, contrast recovery, local tone mapping incl. MC) - `ltm_eval.py` - `test_tonemap_ref.py`;
+results in `findings-round2.md`.
+Also `cr_grainsafe_eval.py` (grain-safe contrast recovery), `texture_dither.py` (texture loss vs banding),
+`deband_stack.py` (texture oracle x deband x tone stage; `--projection-only` = deband vs master texture) and
+`ringing_stack.py` (mosquito repair placements in the stack), `adaptive_mosquito.py` (adaptive grain-safe
+ringing repair, standalone + stack) and `ringing_usecases.py` (upscale / sharpen / chroma / credits / low rungs).
+
+**External vectors (camera model).** `vector_source.py` defines the contract: `<dir>/flow_<a>_<b>.npy`, (H,W,2)
+float, channel 0 = dx, 1 = dy, `frame_b(p + F(p)) ~ frame_a(p)`, 6-digit frame indices (a divisor-size field
+is upsampled and scaled). A missing pair raises (no silent fallback). Re-run:
+* MC-LTM: `python -I tools/eval/ltm_eval.py --vectors <dir> --kinds ltm,ltm_mc --scratch ... --hr-scratch ... --out ...`
+  (fields under `<dir>/<clip>/flow_<t>_<t-1>.npy`, window-local indices; amplification windows under
+  `<dir>/amp_<master>_1080p_<encode>/`; add `--skip-amp` without them).
+* chroma_mv / chroma_mv_cfl (harness): set `VP_EVAL_VECTORS=<dir>` (source frame indices, both directions
+  n->t and t->n) before `eval_harness.py run`; `VP_EVAL_VECTORS_STRICT=0` allows a counted DIS fallback.
 
 ## Candidate contract
 
