@@ -1,5 +1,6 @@
 #pragma once
 
+#include <VP-V/modules/repair/stack/RepairStackOrder.h>
 #include <VP-V/modules/repair/temporal_detail/products/TdProductReads.h>
 
 #include <libplacebo/renderer.h>
@@ -116,6 +117,12 @@ namespace VpDebander
 		// of td.maps (validity, stability) and coding_evidence: reset 1 = not requested, the debander decides exactly as today
 		// everywhere; a requested engine with a product absent keeps today's deband everywhere and says so (engaged decision).
 		const TdProducts::ReadResult& TemporalDetailRead() const { return tdRead; }
+		// WP9 (wave S2): the repair stack's order is TD -> deband -> contrast recovery (RepairStack::Order) and this debander is the FALLBACK
+		// layer under temporal detail. The plan follows this frame's temporal-detail read; today (nothing requested) it is {deband, contrast
+		// recovery} with no line. When temporal detail is requested but unusable the line says so and why; the host appends it to the
+		// "VP deband" status line (recovers by itself). Not on the per-frame path: built when the status refreshes.
+		RepairStack::Plan StackPlan() const { return RepairStack::Decide(tdRead.requested, tdRead.usable, tdRead.reason); }
+		std::string StackStatusLine() const { return StackPlan().status; }
 		unsigned long long Failures() const { return failures; }
 		unsigned long long HeldFrames() const { return held; }
 		static constexpr int kSlotLookAhead = 2;

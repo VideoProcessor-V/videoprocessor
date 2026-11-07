@@ -236,6 +236,7 @@ struct SlotCounters {
     std::atomic<uint64_t> leadLaterRejected{ 0 }; // a frame accepted as a lead ancestor was rejected at its own seal later (residual K1 risk)
     std::atomic<uint64_t> chainWaitRejected{ 0 }; // ordered chain: frames whose job waited on a REJECTED predecessor (counted once per frame)
     std::atomic<uint64_t> chainWaitUnsealed{ 0 }; // ordered chain: frames whose job waited because the predecessor was only Published (its seal not done yet; counted once per frame)
+    std::atomic<uint64_t> storeWaitRejected{ 0 }; // single store: frames whose lag-1 (or lag-0) READER job waited on a REJECTED store frame (no live fill exists for a store, so it waits until the frame is released; counted once per reader frame, on the store's set)
     std::atomic<uint64_t> writeWaitPinned{ 0 };   // lane jobs that found their claimed slot still pinned by a late reader of the previous tenant (counted once per job, by the LaneRunner)
 };
 
@@ -940,6 +941,7 @@ public:
         leadMark_.resize(nodes_.size());
         chainWaitSeen_.assign(nodes_.size(), 0u);
         chainWaitUnsealedSeen_.assign(nodes_.size(), 0u);
+        storeWaitSeen_.assign(nodes_.size(), 0u);
         pendingLead_.reserve(kMaxInputs);   // the Check in flight pushes at most one entry per input: no allocation on the render thread
         for (size_t i = 0; i < nodes_.size(); ++i)
             leadMark_[i].assign(size_t(nodes_[i].ring == 0 ? 1 : nodes_[i].ring), 0u);
@@ -1029,6 +1031,17 @@ public:
                             chainWaitUnsealedSeen_[size_t(ni)] = seq + 1u;
                             set->MutableCounters().chainWaitUnsealed.fetch_add(1, std::memory_order_relaxed);
                         }
+                    }
+                }
+                if (!chainSelf && set && haveSeq) {
+                    // A reader of a SINGLE-STORE product whose store frame is Rejected (the seal refused it): a store has no live pool, so the
+                    // frame never gets content and the reader job waits until the frame is released. Counted once per reader frame (not per
+                    // poll) on the store's set, so the wait is visible (status line "single-store reader frames waited ...").
+                    const Node* src = NodeOf(in.product);
+                    const int ni = IndexOfNode(id);
+                    if (src && src->singletonStore && ni >= 0 && set->RejectedAwaitingLive(aseq) && storeWaitSeen_[size_t(ni)] != seq + 1u) {
+                        storeWaitSeen_[size_t(ni)] = seq + 1u;
+                        set->MutableCounters().storeWaitRejected.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
                 pins.Unpin();
@@ -1329,6 +1342,7 @@ private:
     bool pendingChain_ = false;            // the Check in flight accepted a chain carry-forward
     std::vector<std::vector<uint64_t>> leadMark_;   // per node, per slot: frame + 1 accepted as a lead ancestor
     std::vector<uint64_t> chainWaitSeen_;   // per node: frame + 1 last counted in chainWaitRejected (that product's lane thread only)
+    std::vector<uint64_t> storeWaitSeen_;   // per READER node: frame + 1 last counted in storeWaitRejected (that product's lane thread only)
     std::vector<uint64_t> chainWaitUnsealedSeen_;   // per node: frame + 1 last counted in chainWaitUnsealed (that product's lane thread only)
     std::vector<Node> nodes_;
     std::vector<SlotSet*> sets_;

@@ -27,6 +27,7 @@
     "src/VP-V/modules/input/source_analysis/identity/SourceIdPipeline.h",
     "src/VP-V/modules/input/source_analysis/identity/SourceIdProduct.h",
     "src/VP-V/modules/input/source_analysis/identity/SourceQualityView.h",
+    "src/VP-V/modules/input/source_analysis/identity/SourceGeometryProduct.h",
     "src/VP-V/modules/input/source_analysis/regions/RegionEvidence.h",
     "src/VP-V/modules/input/source_analysis/regions/RegionEvidenceGlsl.h",
     "src/VP-V/modules/input/source_analysis/regions/README.md",

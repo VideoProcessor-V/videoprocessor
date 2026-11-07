@@ -86,6 +86,8 @@ enum : ProductId {
     kTdDelta,             // 26 td.delta: lane -> render hand-off of the repair delta
     kTdMaps,              // 27 td.maps: THE consumer-facing per-block map product (U19 TdMapsView)
     kTdTrailSummary,      // 28 td.trail_summary: per-frame CPU summary for source identity / status
+    // Wave S2 (SID lead request, doc 78 section 6): appended after the doc 72 list, never before it.
+    kSourceGeometry,      // 29 source_geometry (P14g): HELD-STATE measured + applied source geometry (SourceGeometry unit v1)
     kSkeletonProductEnd
 };
 
@@ -347,6 +349,19 @@ inline void AddTerm(ProductDecl& d, uint8_t shift, uint16_t bytesPerCell)
 
 } // namespace detail
 
+// A LEAD read of an ORDERED-CHAIN product (a reader of N+k whose target reads itself at lag >= 1). WARNING level, never a reject: the chain
+// target runs at most one frame ahead of its seal (a chain job pins only a render-valid predecessor), so the target of N+k is not Published
+// when the reader of N is sealed; the seal falls to the reader's live fill, i.e. the reader live-fills its reduced form (visible, counted).
+// Registry::Validate reports it through its optional `warning` out, BuildGraph keeps the EFFECTIVE reads in Graph::leadChainReads (a reader
+// that resolved to its short-queue substitute has no lead), and the analysis lane shows both (status line + Fallbacks entry).
+// Design options for the removal (S2 / reset 2) are in core/README.md ("Lead reads of an ordered chain").
+constexpr const char* kLeadChainWarning = "lead read of an ordered chain: reader live-fills its reduced form";
+struct LeadChainRead {
+    ProductId reader = kNoProduct;
+    ProductId chain = kNoProduct;
+    uint8_t lead = 0;   // the largest lead the reader reads the chain at
+};
+
 // The registry: products indexed by their id (dense 0..n-1).
 class Registry {
 public:
@@ -361,8 +376,12 @@ public:
     // Ids dense and in place, inputs and substitutes known, at most one lag-0 path per pair (no
     // lag-0 cycle: the seal runs in topological order over lag-0 edges). Returns false with a
     // plain reason on the first problem.
-    bool Validate(const char** reason = nullptr) const
+    // `warning` (optional): cleared at the start and, when the registry is valid, set to LeadChainWarningText of the declared lead reads of
+    // ordered chains ("" = none). A warning never makes the registry invalid.
+    bool Validate(const char** reason = nullptr, std::string* warning = nullptr) const
     {
+        if (warning)
+            warning->clear();
         auto fail = [reason](const char* why) {
             if (reason)
                 *reason = why;
@@ -494,7 +513,53 @@ public:
             return fail("lag-0 cycle between products");
         if (reason)
             *reason = "";
+        if (warning)
+            *warning = LeadChainWarningText(LeadChainReads());
         return true;
+    }
+
+    // The DECLARED lead reads of ordered chains: one entry per (reader, chain) with the largest lead, in id order. Declaration level (the
+    // lane lead may cap it to 0 at run time: BuildGraph's Graph::leadChainReads is the effective set).
+    std::vector<LeadChainRead> LeadChainReads() const
+    {
+        std::vector<LeadChainRead> out;
+        for (const ProductDecl& d : decls_) {
+            const size_t n = d.inputCount < kMaxInputs ? size_t(d.inputCount) : kMaxInputs;
+            for (size_t k = 0; k < n; ++k) {
+                const InputRef& in = d.inputs[k];
+                if (in.lead == 0 || !Has(in.product) || !decls_[in.product].orderedChain)
+                    continue;
+                bool known = false;
+                for (LeadChainRead& r : out)
+                    if (r.reader == d.id && r.chain == in.product) {
+                        known = true;
+                        if (in.lead > r.lead)
+                            r.lead = in.lead;
+                    }
+                if (!known) {
+                    LeadChainRead r;
+                    r.reader = d.id;
+                    r.chain = in.product;
+                    r.lead = in.lead;
+                    out.push_back(r);
+                }
+            }
+        }
+        return out;
+    }
+
+    // "quality_pattern -> coding_evidence (lead 2): lead read of an ordered chain: reader live-fills its reduced form" (entries joined by
+    // "; "); "" when there are none.
+    std::string LeadChainWarningText(const std::vector<LeadChainRead>& reads) const
+    {
+        std::string text;
+        for (const LeadChainRead& r : reads) {
+            if (!Has(r.reader) || !Has(r.chain))
+                continue;
+            text += (text.empty() ? "" : "; ") + std::string(decls_[r.reader].token) + " -> " + decls_[r.chain].token + " (lead "
+                    + std::to_string(unsigned(r.lead)) + "): " + kLeadChainWarning;
+        }
+        return text;
     }
 
 private:
@@ -839,6 +904,30 @@ inline void AppendSourceIdentityProduct(std::vector<ProductDecl>& decls)
     decls.push_back(p);
 }
 
+// P14g: the source geometry record (doc 78 section 6, SID lead request; id 29, appended after the doc 72 list). Per axis the MEASURED and
+// the APPLIED geometry (state, n, N, ratio, phase, kernel, sharpening, double scale, confidence), the active area, the coded-raster class,
+// the reserved chroma chain, geometryGen / appliedGen. Like P14 it is HELD STATE: the source-resolution side (single writer) publishes it on
+// each evaluation, consumers read the latest sealed record (seq <= N: a lag >= 1 read), there is no live fill, and a record older than
+// its maximum age (SourceGeometry::MaxAgeUs: twice the longest evaluation interval) is stale and every consumer falls back to its
+// delivered-raster / classical form, visibly. Cpu, T0, history 1, fixed little-endian layout of at most kSourceGeometryRecordBytes (the
+// layout itself is the SourceGeometry unit, input/source_analysis/identity/SourceGeometryProduct.h; the SID build fills it). Provisional
+// consumers: quality_pattern, coding_evidence, temporal detail, the adaptive scaler, the chroma stage and status (catalog rows).
+constexpr uint32_t kSourceGeometryRecordBytes = 512;
+inline void AppendSourceGeometryProduct(std::vector<ProductDecl>& decls)
+{
+    using detail::AddInput;
+    using detail::Make;
+    using namespace VpIndicator;
+    ProductDecl p = Make(kSourceGeometry, "source_geometry", "source geometry (held state)", Backend::Cpu, 1, Tier::T0,
+                         Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis));
+    AddInput(p, kP5MonitorTiles, 0);   // like P14: the same monitor evaluation (single writer, the source-resolution side)
+    p.size.fixedBytes = kSourceGeometryRecordBytes;
+    p.residency = Residency::SystemRam;
+    p.rarelyTouched = true;
+    p.refRenderMs = 0.0f;
+    decls.push_back(p);
+}
+
 // p7g_camera_guide (doc 56, K4-1; claimed as id 20 by CameraGuideProduct.h, registered here): the measurement plan for pair N is a
 // pure function of P7(N-d), the CPU field copy of that pair and P4(N), known ahead and declared as a lane product. d is fixed per
 // graph (CameraLink::GuideLagFor); the registry carries the floor d = kGuideDefaultLag and CameraLink::SkeletonProductsWithGuide(d)
@@ -1050,7 +1139,7 @@ inline void AppendTemporalDetailEngineProducts(std::vector<ProductDecl>& decls, 
 }
 
 // The registry the skeleton runs with: the first products, the camera products, then P10..P13, the TemporalDetail
-// products, P14, p7g and the temporal-detail engine products, in fixed id order. THE one assembly point.
+// products, P14, p7g, the temporal-detail engine products and P14g source_geometry, in fixed id order. THE one assembly point.
 // `compactGrain` / `compactChroma`: the GRANTED storage of P10 (luma) and P10c (chroma planes).
 // `sourcePeriodMs`: the measured source frame period (0 = unmeasured), which sets the frame counts of the record histories.
 inline Registry SkeletonProducts(bool compactGrain, bool compactChroma, double sourcePeriodMs = 0.0)
@@ -1064,6 +1153,7 @@ inline Registry SkeletonProducts(bool compactGrain, bool compactChroma, double s
     AppendSourceIdentityProduct(d);
     AppendCameraGuideProduct(d);
     AppendTemporalDetailEngineProducts(d, sourcePeriodMs);
+    AppendSourceGeometryProduct(d);   // wave S2: P14g, appended after the doc 72 list
     return Registry(std::move(d));
 }
 inline Registry SkeletonProducts(bool compactGrain = false) { return SkeletonProducts(compactGrain, compactGrain); }

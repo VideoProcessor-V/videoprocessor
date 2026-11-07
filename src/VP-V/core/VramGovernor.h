@@ -398,7 +398,11 @@ inline TierPlan PlanTiers(const Registry& reg, const Graph& g, const CardProfile
         u.name = reg.Get(n.id).name;
         u.tier = n.tier;
         u.shedOrder = shed[i];
-        u.lossless = true;   // in-render recompute is identical
+        // The lane-drop level keeps the picture only when the product can be RECOMPUTED in the render (identical result). A single-store
+        // product has no live fill: its lane-drop level is "not kept", i.e. its readers lose the store and run their own visible fallback,
+        // a reduced (non-identical) mode, so it must not rank as lossless (S2: it used to be shed before lossy products of its tier by
+        // the lossless-first rule although dropping it changes the picture).
+        u.lossless = !n.singletonStore;
         // Budget-governed history: every depth is a level, sized from the graph's per-depth base (ring and live pool
         // both hold `history` frames). Order: the lossless lane drop first, then history steps (lossy, memory only).
         const bool governed = n.historyMin < n.historyFull;

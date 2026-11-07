@@ -11,7 +11,7 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 
 | Count | Value |
 |---|---|
-| Modules | 43 |
+| Modules | 44 |
 | Documented rows | 5 |
 | VP-V keys in code (outside Bill's schema lists) | 364 |
 | of which documented | 2 |
@@ -42,6 +42,7 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Repair | `repair.texture_restore` | built | [README](../../src/VP-V/modules/repair/texture_restore/README.md) | 0 | 5 | 0/5 |
 | Repair | `repair.temporal_detail.products` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/products/README.md) | 1 | 0 | 0/0 |
 | Repair | `repair.temporal_detail.shared` | draft | [README](../../src/VP-V/modules/repair/temporal_detail/shared/README.md) | 0 | 0 | 0/0 |
+| Repair | `repair.stack` | draft | [README](../../src/VP-V/modules/repair/stack/README.md) | 0 | 0 | 0/0 |
 | Scaling | `scaling.rebase` | built | [README](../../src/VP-V/modules/scaling/rebase/README.md) | 0 | 4 | 0/4 |
 | Scaling | `scaling.route_4k` | placeholder | [README](../../src/VP-V/modules/scaling/route_4k/README.md) | 0 | 1 | 0/1 |
 | Scaling | `scaling.refine` | placeholder | [README](../../src/VP-V/modules/scaling/refine/README.md) | 0 | 1 | 0/1 |
@@ -84,7 +85,7 @@ Modules: `motion.estimation`, `motion.vector_delivery`, `motion.consumers`.
 
 ## Repair
 
-Modules: `repair.encoding`, `repair.deband`, `repair.grain_split`, `repair.grain_split.shared.band_from_base`, `repair.temporal_detail`, `repair.texture_restore`, `repair.temporal_detail.products`, `repair.temporal_detail.shared`.
+Modules: `repair.encoding`, `repair.deband`, `repair.grain_split`, `repair.grain_split.shared.band_from_base`, `repair.temporal_detail`, `repair.texture_restore`, `repair.temporal_detail.products`, `repair.temporal_detail.shared`, `repair.stack`.
 
 | Key | Module | Section | Type | Range / values | Default | Golden default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|---|---|

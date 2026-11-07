@@ -233,6 +233,16 @@ namespace SkeletonGraphTestsNs
 		return Registry(std::move(d));
 	}
 
+	// S2: the lead registry with its BASE made an ordered chain (reads itself at lag 1): lead_reader reads a chain at lead 2.
+	Registry LeadOfChainRegistry()
+	{
+		std::vector<ProductDecl> d = LeadRegistry().All();
+		detail::AddInput(d[kBase], kBase, 1);
+		d[kBase].orderedChain = true;
+		d[kBase].missingInputForm = true;
+		return Registry(std::move(d));
+	}
+
 	// Frames 0..3 through the lane protocol by hand. leads: the product reads its input at lead 1 and 2 (quality_pattern): the render
 	// is simulated sealing the lead target ahead (a real render seals in frame order, see the README note on lead readers of chains).
 	void CatalogChainRuns(const Registry& reg, ProductId product, bool leads)
@@ -1198,6 +1208,152 @@ namespace SkeletonGraphTestsNs
 			const uint32_t rebuilds = lane2.Rebuilds();
 			Assert::AreEqual(uint32_t(0), lane2.Configure(ls, h.reg, h.consumers, h.gs, BigCard(30ull << 20), tier, 0, false));
 			Assert::AreEqual(rebuilds, lane2.Rebuilds());
+		}
+
+		// ---- S2: a lead read of an ordered chain is a visible WARNING, never a reject ----
+
+		TEST_METHOD(ALeadReadOfAnOrderedChainIsAWarningNotAReject)
+		{
+			const char* why = "";
+			std::string warning = "stale";
+			// No chain behind the lead: no warning.
+			Assert::IsTrue(LeadRegistry().Validate(&why, &warning));
+			Assert::IsTrue(warning.empty(), L"the out is cleared and stays empty");
+			Assert::IsTrue(LeadRegistry().LeadChainReads().empty());
+			// The base is an ordered chain: the registry stays VALID and says what happens to the reader.
+			const Registry chain = LeadOfChainRegistry();
+			Assert::IsTrue(chain.Validate(&why, &warning), L"a warning never rejects");
+			Assert::IsTrue(Has(warning, "lead_reader -> base (lead 2): lead read of an ordered chain: reader live-fills its reduced form"));
+			Assert::IsTrue(Has(warning, kLeadChainWarning));
+			Assert::IsTrue(chain.Validate(&why), L"the original one-argument form is unchanged");
+			const std::vector<LeadChainRead> reads = chain.LeadChainReads();
+			Assert::AreEqual(size_t(1), reads.size());
+			Assert::AreEqual(int(kLeadReader), int(reads[0].reader));
+			Assert::AreEqual(int(kBase), int(reads[0].chain));
+			Assert::AreEqual(2, int(reads[0].lead));
+			// The catalog: quality_pattern reads coding_evidence (an ordered chain) at lead 1 and 2 - ONE entry, the largest lead.
+			const Registry cat = SkeletonProducts();
+			std::string catWarning;
+			Assert::IsTrue(cat.Validate(&why, &catWarning));
+			const std::vector<LeadChainRead> catReads = cat.LeadChainReads();
+			Assert::AreEqual(size_t(1), catReads.size(), L"only quality_pattern reads a chain at a lead today");
+			Assert::AreEqual(int(kQualityPattern), int(catReads[0].reader));
+			Assert::AreEqual(int(kCodingEvidence), int(catReads[0].chain));
+			Assert::AreEqual(2, int(catReads[0].lead));
+			Assert::IsTrue(Has(catWarning, "quality_pattern -> coding_evidence (lead 2): lead read of an ordered chain: reader live-fills its reduced form"));
+		}
+
+		TEST_METHOD(TheGraphKeepsTheEffectiveLeadChainReadsAndNothingIsRejected)
+		{
+			const Registry reg = LeadOfChainRegistry();
+			for (uint8_t laneLead : { uint8_t(4), uint8_t(2) }) {
+				const Graph g = BuildGraph(reg, OneConsumer(kLeadReader), Rig::MakeSettings(laneLead));
+				Assert::IsTrue(g.valid, L"never a reject");
+				Assert::AreEqual(size_t(1), g.leadChainReads.size());
+				Assert::AreEqual(int(laneLead == 4 ? 2 : 1), int(g.leadChainReads[0].lead), L"the effective lead (the lane lead caps it)");
+				Assert::IsTrue(Has(g.leadChainWarning, "lead_reader -> base"));
+				Assert::IsTrue(Has(g.leadChainWarning, kLeadChainWarning));
+			}
+			// Lane lead 1: the queue supplies no lead, the reader resolves to its causal substitute: no lead read, no warning.
+			const Graph shortQueue = BuildGraph(reg, OneConsumer(kLeadReader), Rig::MakeSettings(1));
+			Assert::IsTrue(shortQueue.valid);
+			Assert::IsTrue(shortQueue.leadChainReads.empty() && shortQueue.leadChainWarning.empty());
+			// A graph without the reader has none either.
+			const Graph none = BuildGraph(reg, OneConsumer(kBase), Rig::MakeSettings(4));
+			Assert::IsTrue(none.valid && none.leadChainReads.empty() && none.leadChainWarning.empty());
+			// The catalog's own quality_pattern: the warning when the lead is supplied, none through the causal form.
+			const Registry cat = SkeletonProducts();
+			const Graph withLead = BuildGraph(cat, OneConsumer(kQualityPattern), Rig::MakeSettings(4));
+			Assert::IsTrue(withLead.valid);
+			Assert::IsTrue(Has(withLead.leadChainWarning, "quality_pattern -> coding_evidence"));
+			const Graph causal = BuildGraph(cat, OneConsumer(kQualityPattern), Rig::MakeSettings(1));
+			Assert::IsTrue(causal.valid && causal.leadChainWarning.empty());
+		}
+
+		TEST_METHOD(TheAnalysisLaneShowsTheLeadChainWarningOnStatusAndFallbacks)
+		{
+			Indicator ind(9, 256);
+			AnalysisLane lane(&ind, []() { return uint64_t(0); });
+			LaneSettings ls;
+			ls.mode = LaneSettings::Mode::On;
+			TierInput tier;
+			tier.framePeriodMs = 40.0;
+			lane.Configure(ls, LeadOfChainRegistry(), OneConsumer(kLeadReader), Rig::MakeSettings(4), BigCard(1ull << 30), tier, 0, false);
+			Assert::IsTrue(lane.Active(), L"the warning does not stop the lane");
+			bool line = false;
+			for (const std::string& l : lane.StatusLines())
+				line = line || (Has(l, "Analysis warning:") && Has(l, kLeadChainWarning));
+			Assert::IsTrue(line, L"on the status lines (Ctrl+I)");
+			bool entry = false;
+			for (const FallbackCatalog::Decision& d : lane.Fallbacks())
+				entry = entry || (d.id == "skeleton_lead_chain" && d.engaged && Has(d.reason, "lead_reader -> base"));
+			Assert::IsTrue(entry, L"and on the Fallbacks list");
+			// Without a lead read nothing is added to either.
+			AnalysisLane quiet(&ind, []() { return uint64_t(0); });
+			quiet.Configure(ls, LeadOfChainRegistry(), OneConsumer(kBase), Rig::MakeSettings(4), BigCard(1ull << 30), tier, 0, false);
+			Assert::IsTrue(quiet.Active());
+			for (const std::string& l : quiet.StatusLines())
+				Assert::IsFalse(Has(l, "Analysis warning:"));
+			for (const FallbackCatalog::Decision& d : quiet.Fallbacks())
+				Assert::IsFalse(d.id == "skeleton_lead_chain");
+		}
+
+		// ---- S2: a Rejected single-store frame makes its readers wait: counted, once per reader frame, and shown ----
+
+		TEST_METHOD(AReaderWaitingOnARejectedSingleStoreFrameIsCountedOncePerFrame)
+		{
+			Rig r(SingleStoreRegistry(), OneConsumer(kStoreReader), 2);
+			Assert::IsTrue(r.Lane(kStore, 0));
+			// The seal REFUSES store(0): it is Rejected and a store has no live fill, so the frame never gets content.
+			Assert::IsTrue(r.Set(kStore).Seal(0, [](const Header&) { return SealReason::StampMismatch; }).outcome == SealOutcome::NeedsLive);
+			Assert::IsTrue(r.Set(kStore).RejectedAwaitingLive(0));
+			Assert::AreEqual(uint64_t(0), r.Set(kStore).Counters().storeWaitRejected.load());
+			Header scratch;
+			LaneInputs pins;
+			for (int poll = 0; poll < 5; ++poll)
+				Assert::IsFalse(r.table.LaneAncestors(kStoreReader, 1, scratch, pins), L"the lag-1 reader job waits");
+			Assert::AreEqual(size_t(0), pins.count, L"nothing stays pinned");
+			Assert::AreEqual(uint64_t(1), r.Set(kStore).Counters().storeWaitRejected.load(), L"one reader frame waited, not five polls");
+			Assert::AreEqual(uint64_t(0), r.Set(kStore).Counters().chainWaitRejected.load(), L"not a chain wait");
+			// Another reader frame is counted again (frame 2 reads store(1): make store(1) Rejected too).
+			Assert::IsTrue(r.Lane(kStore, 1));
+			Assert::IsTrue(r.Set(kStore).Seal(1, [](const Header&) { return SealReason::StampMismatch; }).outcome == SealOutcome::NeedsLive);
+			Assert::IsFalse(r.table.LaneAncestors(kStoreReader, 2, scratch, pins));
+			Assert::IsFalse(r.table.LaneAncestors(kStoreReader, 2, scratch, pins));
+			Assert::AreEqual(uint64_t(2), r.Set(kStore).Counters().storeWaitRejected.load());
+			// A store frame that was simply never made is not Rejected: the reader waits as before, nothing is counted as a rejection.
+			Rig q(SingleStoreRegistry(), OneConsumer(kStoreReader), 2);
+			Assert::IsFalse(q.table.LaneAncestors(kStoreReader, 1, scratch, pins));
+			Assert::AreEqual(uint64_t(0), q.Set(kStore).Counters().storeWaitRejected.load());
+			// A healthy sealed store frame is pinned, not counted.
+			Rig h(SingleStoreRegistry(), OneConsumer(kStoreReader), 2);
+			Assert::IsTrue(h.Lane(kStore, 0));
+			h.Resolve(0);
+			Assert::IsTrue(h.table.LaneAncestors(kStoreReader, 1, scratch, pins));
+			pins.Unpin();
+			Assert::AreEqual(uint64_t(0), h.Set(kStore).Counters().storeWaitRejected.load());
+		}
+
+		TEST_METHOD(TheStoreReaderWaitIsOnTheAnalysisStatusLines)
+		{
+			Indicator ind(9, 256);
+			AnalysisLane lane(&ind, []() { return uint64_t(0); });
+			LaneSettings ls;
+			ls.mode = LaneSettings::Mode::On;
+			TierInput tier;
+			tier.framePeriodMs = 40.0;
+			lane.Configure(ls, SingleStoreRegistry(), OneConsumer(kStoreReader), Rig::MakeSettings(2), BigCard(1ull << 30), tier, 0, false);
+			Assert::IsTrue(lane.Active());
+			for (const std::string& l : lane.StatusLines())
+				Assert::IsFalse(Has(l, "single-store reader frames"), L"nothing to show yet");
+			const std::shared_ptr<LaneState> st = lane.State();
+			const int store = st->IndexOf(kStore);
+			Assert::IsTrue(store >= 0);
+			st->table->At(size_t(store)).MutableCounters().storeWaitRejected.fetch_add(3, std::memory_order_relaxed);
+			bool shown = false;
+			for (const std::string& l : lane.StatusLines())
+				shown = shown || (Has(l, "3 single-store reader frames waited on a rejected store frame") && Has(l, "no live fill"));
+			Assert::IsTrue(shown, L"shown in plain language");
 		}
 	};
 }

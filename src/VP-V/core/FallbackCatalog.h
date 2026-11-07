@@ -536,6 +536,13 @@ namespace FallbackCatalog
 	{
 		return note.empty() ? Released("skeleton_history") : Engaged("skeleton_history", note);
 	}
+	// A lead read of an ordered-chain product is in THIS graph (WARNING level: nothing is rejected). The reader cannot be sealed ahead,
+	// so it live-fills its reduced form; the note is Graph::leadChainWarning ("quality_pattern -> coding_evidence (lead 2): lead read of an
+	// ordered chain: reader live-fills its reduced form"). Engaged only while such a read is in the graph.
+	inline Decision SkeletonLeadChain(const std::string& note)
+	{
+		return note.empty() ? Released("skeleton_lead_chain") : Engaged("skeleton_lead_chain", note);
+	}
 	// A [vpv.skeleton] key that could not be read (kept at its default).
 	inline Decision SkeletonKeys(const std::string& problems)
 	{
@@ -586,6 +593,10 @@ namespace FallbackCatalog
 			// products (adaptive scaling, dither need, sigma-delta, chroma upscale, debander) keep their OWN entries above for the classical
 			// form; this one is the engine's own: its products are not produced, so repairs run their classical forms.
 			{ "product.td_engine", "temporal-detail engine products are not produced: repairs run their classical forms (engine reserved, not built)" },
+			// Source geometry (P14g, doc 78; input/source_analysis/identity/SourceGeometryProduct.h): the held-state record is absent, stale or of
+			// another unit version, so every reader keeps the delivered raster / its classical form (the grid-free evidence of the frame pattern,
+			// the delivered coded raster of temporal detail, today's scaler and chroma behaviour).
+			{ "product.source_geometry", "source geometry record unavailable, stale or of another unit version: readers use the delivered raster and their classical forms" },
 		};
 		if (count)
 			*count = sizeof(kEntries) / sizeof(kEntries[0]);

@@ -49,12 +49,12 @@ last and sheds them in reverse order, each step visible. Declared totals at 4K: 
 **Inputs beyond what the registry declares.** The framework limit is now 16 inputs per product (`kMaxInputs`) and 10 consumed products per consumer
 (`kMaxConsumes`; W1-SKG landed lead edges, the raised limits, ordered-chain lane jobs and history declarations). The registry still declares only the
 first four inputs of each intended input list (never silently dropping one: `kDeclaredInputsToday` in the tests) and the contract table records the full
-lists (`td.blocks` 16, `coding_evidence` 5, `td.anchor_pass` 5); a test compares prefix and order. **Reset-2 open item:** the declarations catch up to the
+lists (`td.blocks` 17, `coding_evidence` 6, `quality_pattern` 5, `td.anchor_pass` 5; coding_evidence and quality_pattern also record the provisional lag-1 held read of `source_geometry` (P14g, wave S2), the temporal-detail catalog row reads it for td.blocks; the td.blocks list is above `kMaxInputs` = 16 and needs trimming before reset 2 declares it); a test compares prefix and order. **Reset-2 open item:** the declarations catch up to the
 table (short-queue substitutes for the lead edges).
 
 **Repair-stack order (WP9) recorded here: TD -> deband -> contrast recovery** (today's text: deband -> TD -> CR). Deband becomes the fallback layer under
 temporal detail: it reads `td.maps` validity and stability (and `coding_evidence` for its blocking need) so a TD-covered block is not debanded twice; with the
-products absent (reset 1) it debands everywhere exactly as today. The order table itself belongs to WP9 (`repair/stack/RepairStackOrder.h`).
+products absent (reset 1) it debands everywhere exactly as today. The order table is now an explicit, tested declaration: `repair/stack/RepairStackOrder.h` (wave S2; `VpDebander::Module::StackPlan()` / `StackStatusLine()` give the plan and the visible fallback-layer line).
 
 ## Status and fallbacks
 

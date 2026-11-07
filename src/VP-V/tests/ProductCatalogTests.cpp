@@ -14,6 +14,7 @@
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <VP-V/modules/input/source_analysis/light_level/LightLevelLut.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
+#include <VP-V/modules/input/source_analysis/identity/SourceGeometryProduct.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceIdProduct.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
 #include <VP-V/modules/scaling/rebase/RebaseDecision.h>
@@ -187,8 +188,8 @@ namespace ProductCatalogTestsNs
 				{ kTdTrailSummary, "temporal detail" },
 			};
 			const Registry reg = SkeletonProducts();
-			Assert::AreEqual(size_t(kSkeletonProductEnd) - 3u, sizeof(expected) / sizeof(expected[0]),
-				L"every product but the matcher pair, the held-state source identity and the causal quality pattern has an expectation");
+			Assert::AreEqual(size_t(kSkeletonProductEnd) - 4u, sizeof(expected) / sizeof(expected[0]),
+				L"every product but the matcher pair, the two held-state records (source identity, source geometry) and the causal quality pattern has an expectation");
 			// The causal quality pattern is a substitute (read as P15 by its declared id): nobody reads it by its own id.
 			Assert::IsNull(LiveFillOwner(kQualityPatternCausal));
 			for (const Expect& e : expected) {
@@ -206,6 +207,13 @@ namespace ProductCatalogTestsNs
 				for (size_t k = 0; k < c->decl.count; ++k)
 					if (c->decl.consumes[k].product == kSourceIdentity)
 						Assert::IsTrue(c->decl.consumes[k].lag >= 1, L"a held-state read is lag >= 1");
+			// P14g source_geometry is HELD STATE too (wave S2, doc 78 section 6): readers at lag >= 1 only, so no live fill; it has readers.
+			Assert::IsNull(LiveFillOwner(kSourceGeometry), L"no live fill for the held-state source geometry");
+			Assert::IsFalse(ConsumersOf(kSourceGeometry).empty());
+			for (const ConsumerRow& c : ConsumerRows())
+				for (size_t k = 0; k < c.decl.count; ++k)
+					if (c.decl.consumes[k].product == kSourceGeometry)
+						Assert::IsTrue(c.decl.consumes[k].lag >= 1, L"a held-state read is lag >= 1");
 			size_t unread = 0;
 			for (const ProductDecl& d : reg.All())
 				if (ConsumersOf(d.id).empty() && d.backend != Backend::RenderOnly)
@@ -338,6 +346,7 @@ namespace ProductCatalogTestsNs
 				{ kTdAnalysis, TdProducts::kUnitVersion }, { kTdRefstore, TdProducts::kUnitVersion },
 				{ kTdAdmission, TdProducts::kUnitVersion },
 				{ kSourceIdentity, SourceIdentity::kUnitVersion },
+				{ kSourceGeometry, SourceGeometry::kUnitVersion },
 				{ kP10GrainSplit, GrainSplit::kUnitVersion }, { kP10cGrainSplitChroma, GrainSplit::kUnitVersion },
 			};
 			for (const Pair& p : pairs) {

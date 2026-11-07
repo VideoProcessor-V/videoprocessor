@@ -84,7 +84,8 @@ namespace Tests
 				Assert::AreEqual(26, int(kTdDelta));
 				Assert::AreEqual(27, int(kTdMaps));
 				Assert::AreEqual(28, int(kTdTrailSummary));
-				Assert::AreEqual(29, int(kSkeletonProductEnd));
+				Assert::AreEqual(29, int(kSourceGeometry), L"wave S2: P14g source_geometry is appended after the doc 72 list");
+				Assert::AreEqual(30, int(kSkeletonProductEnd));
 				Assert::AreEqual(size_t(kSkeletonProductEnd), reg.Size());
 				// The v1 names are aliases of the v2 ids.
 				Assert::AreEqual(int(kTdBlocks), int(kTdAnalysis));
@@ -177,6 +178,33 @@ namespace Tests
 				Assert::IsTrue(ContractOf(kTdAnchorPass)->intended.size() > kDeclaredInputsToday);
 				Assert::IsNull(ContractOf(kSourceIdentity));
 				Assert::AreEqual(2u, kUnitVersion);
+			}
+
+			TEST_METHOD(CodingEvidenceAndQualityPatternRecordTheProvisionalSourceGeometryRead)
+			{
+				// Wave S2 (doc 78 section 6): P14g source_geometry is a HELD-STATE record read at lag 1 by coding_evidence and quality_pattern
+				// (grid placement, sharpening discount). The contract table records it (the registry still declares the first four inputs).
+				using namespace VpSkeleton;
+				const Registry reg = SkeletonProducts();
+				for (ProductId id : { kCodingEvidence, kQualityPattern })
+				{
+					const Contract* c = ContractOf(id);
+					Assert::IsNotNull(c);
+					bool found = false;
+					for (const Input& in : c->intended)
+						if (in.product == kSourceGeometry)
+						{
+							found = true;
+							Assert::AreEqual(1, int(in.lag), L"a held-state read is lag 1");
+							Assert::AreEqual(0, int(in.lead));
+						}
+					Assert::IsTrue(found, L"recorded in the intended inputs");
+					for (size_t k = 0; k < reg.Get(id).inputCount; ++k)
+						Assert::IsTrue(reg.Get(id).inputs[k].product != kSourceGeometry, L"not (yet) a declared registry input: the catalog row carries the read");
+				}
+				// It is not an engine product: no contract of its own, and the engine's read sets are unchanged.
+				Assert::IsNull(ContractOf(kSourceGeometry));
+				Assert::IsFalse(IsEngineProduct(kSourceGeometry));
 			}
 
 			TEST_METHOD(GovernedStagesAreWholeBuffersFloorFirstAndTheRegistryDeclaresTheFloor)

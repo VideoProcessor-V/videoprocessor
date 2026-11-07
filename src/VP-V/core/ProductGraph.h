@@ -215,6 +215,11 @@ struct Graph {
         ProductId made = kNoProduct;
     };
     std::vector<Reduction> reductions;
+    // WARNING level (never a reject): the EFFECTIVE lead reads of ordered-chain products in this graph (a reader whose lead the queue can
+    // supply, reading a product that reads itself at lag >= 1). Such a reader cannot be sealed ahead and live-fills its reduced form
+    // (Products.h kLeadChainWarning). Empty text = none. Shown on the analysis status lines and the Fallbacks list.
+    std::vector<LeadChainRead> leadChainReads;
+    std::string leadChainWarning;
 
     int IndexOf(ProductId id) const
     {
@@ -533,6 +538,26 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
             maxLead = node.lead;
         g.nodes.push_back(node);
     }
+    for (const Node& nd : g.nodes)
+        for (size_t k = 0; k < nd.inputCount; ++k) {
+            if (nd.inputs[k].lead == 0 || !reg.Get(nd.inputs[k].product).orderedChain)
+                continue;
+            bool known = false;
+            for (LeadChainRead& r : g.leadChainReads)
+                if (r.reader == nd.id && r.chain == nd.inputs[k].product) {
+                    known = true;
+                    if (nd.inputs[k].lead > r.lead)
+                        r.lead = nd.inputs[k].lead;
+                }
+            if (!known) {
+                LeadChainRead r;
+                r.reader = nd.id;
+                r.chain = nd.inputs[k].product;
+                r.lead = nd.inputs[k].lead;
+                g.leadChainReads.push_back(r);
+            }
+        }
+    g.leadChainWarning = reg.LeadChainWarningText(g.leadChainReads);
     g.framesInFlight = size_t(gs.queueDepth) + gs.lookAheadWalk + maxHistory + R + gs.laneLead + 1u
                        + maxLead;
     g.valid = true;
